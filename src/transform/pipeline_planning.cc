@@ -1149,6 +1149,7 @@ private:
     size_t original_stmt_count{0};
     Array<Stmt> scheduled_stmts;
     std::vector<size_t> scheduled_indices;
+    Array<Integer> replayable_bind_mask;
   };
 
   ScheduledStmtAnalysis AnalyzeScheduledStmts(
@@ -1158,10 +1159,13 @@ private:
         CollectPipelineWriteBuffers(stmts, chain_builder);
     ScheduledStmtAnalysis analysis;
     analysis.original_stmt_count = stmts.size();
+    analysis.replayable_bind_mask.reserve(stmts.size());
     for (size_t i = 0; i < stmts.size(); ++i) {
       const Stmt &stmt = stmts[i];
-      if (IsReplayableScalarBindStmt(stmt, pipeline_write_buffers,
-                                     chain_builder)) {
+      bool replayable = IsReplayableScalarBindStmt(stmt, pipeline_write_buffers,
+                                                   chain_builder);
+      analysis.replayable_bind_mask.push_back(Integer(replayable ? 1 : 0));
+      if (replayable) {
         continue;
       }
       analysis.scheduled_indices.push_back(i);
@@ -1369,6 +1373,19 @@ private:
                       filtered_order_array);
       annotations.Set(s_tir::attr::software_pipeline_stage,
                       filtered_stage_array);
+      if (pipeline_stmts.size() == pipeline_body_seq->seq.size()) {
+        bool flatten_preserved_original_order = true;
+        for (size_t i = 0; i < pipeline_stmts.size(); ++i) {
+          if (!pipeline_stmts[i].same_as(pipeline_body_seq->seq[i])) {
+            flatten_preserved_original_order = false;
+            break;
+          }
+        }
+        if (flatten_preserved_original_order) {
+          annotations.Set(kPipelineReplayableScalarBinds,
+                          analysis.replayable_bind_mask);
+        }
+      }
       MaybeAnnotateLegacyAsyncPipelineLoop(
           pipeline_body_root, analysis.scheduled_stmts, filtered_order_array,
           filtered_stage_array, &annotations);
@@ -2265,6 +2282,8 @@ private:
                     Array<Integer>(stages));
     annotations.Set(s_tir::attr::software_pipeline_order,
                     Array<Integer>(orders));
+    annotations.Set(kPipelineReplayableScalarBinds,
+                    analysis.replayable_bind_mask);
 
     // Propagate per-statement TMA eligibility so InjectSoftwarePipeline can
     // rewrite TMA copies to use pipeline-level barrier management.

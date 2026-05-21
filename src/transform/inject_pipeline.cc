@@ -2518,7 +2518,9 @@ private:
             kv.first != s_tir::attr::software_pipeline_async_stages &&
             kv.first != kPipelineAsyncProducers &&
             kv.first != kPipelineAsyncProducerGroups &&
-            kv.first != kPipelineTmaCopies && kv.first != "num_stages") {
+            kv.first != kPipelineTmaCopies &&
+            kv.first != kPipelineReplayableScalarBinds &&
+            kv.first != "num_stages") {
           preserved_annotations.Set(key, kv.second);
         }
       }
@@ -3177,7 +3179,8 @@ private:
           key != s_tir::attr::software_pipeline_async_stages &&
           key != kPipelineAsyncProducers &&
           key != kPipelineAsyncProducerGroups && key != kPipelineTmaCopies &&
-          key != "num_stages" && key != "tl_pipelined_num_stages") {
+          key != kPipelineReplayableScalarBinds && key != "num_stages" &&
+          key != "tl_pipelined_num_stages") {
         preserved_annotations.Set(key, kv.second);
       }
     }
@@ -3423,15 +3426,38 @@ private:
     BufferUsageCollector collector(buffer_data_to_buffer_, allocated_buffers_);
     pipeline_allocs = collector.Collect(SeqStmt(pipeline_body_stmts));
 
-    BufferSet pipeline_write_buffers =
-        CollectPipelineWriteBuffers(original_order);
+    Optional<Array<Integer>> replayable_bind_mask;
+    if (auto replayable_bind_anno =
+            op->annotations.Get(kPipelineReplayableScalarBinds)) {
+      auto mask = Downcast<Array<Integer>>(replayable_bind_anno.value());
+      if (mask.size() == original_order.size()) {
+        bool valid_mask = true;
+        for (size_t i = 0; i < original_order.size(); ++i) {
+          if (mask[i]->value != 0 &&
+              original_order[i]->body.as<BindNode>() == nullptr) {
+            valid_mask = false;
+            break;
+          }
+        }
+        if (valid_mask) {
+          replayable_bind_mask = std::move(mask);
+        }
+      }
+    }
+    BufferSet pipeline_write_buffers;
+    if (!replayable_bind_mask.defined()) {
+      pipeline_write_buffers = CollectPipelineWriteBuffers(original_order);
+    }
     Array<SBlock> scalar_binding_blocks;
     Array<SBlock> scheduled_order;
     std::vector<char> is_replayable_bind;
     is_replayable_bind.reserve(original_order.size());
-    for (const SBlock &block : original_order) {
+    for (size_t i = 0; i < original_order.size(); ++i) {
+      const SBlock &block = original_order[i];
       bool replayable =
-          IsReplayableScalarBindBlock(block, pipeline_write_buffers);
+          replayable_bind_mask.defined()
+              ? replayable_bind_mask.value()[i]->value != 0
+              : IsReplayableScalarBindBlock(block, pipeline_write_buffers);
       is_replayable_bind.push_back(replayable ? 1 : 0);
       if (replayable) {
         scalar_binding_blocks.push_back(block);

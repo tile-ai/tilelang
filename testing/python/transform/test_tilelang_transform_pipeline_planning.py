@@ -257,11 +257,13 @@ def test_pipeline_planning_stages_bind_with_dependent_copy():
     stages = [int(v) for v in annos[0]["software_pipeline_stage"]]
     orders = [int(v) for v in annos[0]["software_pipeline_order"]]
     async_producers = [int(v) for v in annos[0]["software_pipeline_async_producers"]]
+    replayable_binds = [int(v) for v in annos[0]["software_pipeline_replayable_scalar_binds"]]
 
     assert len(stages) == 2, f"Expected copy and consumer stages, got {stages}"
     assert stages == [0, 1]
     assert orders == [0, 1]
     assert async_producers == [1, 0]
+    assert replayable_binds == [1, 0, 0]
 
 
 def test_pipeline_planning_accepts_explicit_bind_free_annotations():
@@ -286,11 +288,13 @@ def test_pipeline_planning_accepts_explicit_bind_free_annotations():
     orders = [int(v) for v in anno["software_pipeline_order"]]
     async_producers = [int(v) for v in anno["software_pipeline_async_producers"]]
     async_groups = [int(v) for v in anno["software_pipeline_async_producer_groups"]]
+    replayable_binds = [int(v) for v in anno["software_pipeline_replayable_scalar_binds"]]
 
     assert stages == [0, 1]
     assert orders == [1, 0]
     assert async_producers == [1, 0]
     assert async_groups == [0, -1]
+    assert replayable_binds == [1, 0, 0]
 
 
 def test_pipeline_planning_keeps_bind_that_reads_pipeline_written_buffer():
@@ -313,9 +317,11 @@ def test_pipeline_planning_keeps_bind_that_reads_pipeline_written_buffer():
     anno = annos[0]
     stages = [int(v) for v in anno["software_pipeline_stage"]]
     orders = [int(v) for v in anno["software_pipeline_order"]]
+    replayable_binds = [int(v) for v in anno["software_pipeline_replayable_scalar_binds"]]
 
     assert stages == [0, 1, 1]
     assert orders == [0, 1, 2]
+    assert replayable_binds == [1, 0, 0, 0]
 
 
 def test_pipeline_planning_binds_commit_to_cp_async_stage():

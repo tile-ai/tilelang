@@ -601,6 +601,7 @@ def test_inject_software_pipeline_replays_readonly_bufferload_bind():
                     "software_pipeline_async_stages": [0],
                     "software_pipeline_async_producers": [1, 0],
                     "software_pipeline_async_producer_groups": [0, -1],
+                    "software_pipeline_replayable_scalar_binds": [1, 0, 0],
                 },
             ):
                 idx: T.int32 = Ids[i] * 16
@@ -639,6 +640,7 @@ def test_inject_software_pipeline_schedules_bind_that_reads_pipeline_buffer():
                     "software_pipeline_async_stages": [0],
                     "software_pipeline_async_producers": [1, 0, 0],
                     "software_pipeline_async_producer_groups": [0, -1, -1],
+                    "software_pipeline_replayable_scalar_binds": [1, 0, 0, 0],
                 },
             ):
                 base: T.int32 = i * 16
