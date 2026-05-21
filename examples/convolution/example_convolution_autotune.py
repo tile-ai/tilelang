@@ -100,16 +100,7 @@ def convolution(
 
         T.clear(out_local)
         for k_iter in T.Pipelined(T.ceildiv(KH * KW * C, block_K), num_stages=num_stages):
-            if is_hopper:
-                T.c2d_im2col(data, data_shared, by, k_iter, KH, S, D, P)
-            else:
-                for i, j in T.Parallel(block_M, block_K):
-                    k = k_iter * block_K + j
-                    m = by * block_M + i
-                    access_h = m % (OH * OW) // OW * S + k // (KW * C) * D - P
-                    access_w = m % OW * S + k // C % KW * D - P
-                    in_bound = (access_h >= 0) and (access_w >= 0) and (access_h < H) and (access_w < W)
-                    data_shared[i, j] = T.if_then_else(in_bound, data[m // (OH * OW), access_h, access_w, k % C], 0)
+            T.im2col(data, data_shared, by, k_iter, KH, S, D, P)
             T.copy(kernel_flat[k_iter * block_K, bx * block_N], kernel_shared)
             T.gemm(data_shared, kernel_shared, out_local)
 

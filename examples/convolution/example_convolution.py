@@ -5,14 +5,6 @@ import tilelang.language as T
 import argparse
 
 
-def check_hopper():
-    if not torch.cuda.is_available():
-        return None
-    props = torch.cuda.get_device_properties(0)
-    compute_capability = props.major, props.minor
-    return compute_capability == (9, 0)
-
-
 def ref_program(stride, padding, dilation):
     def main(A, B):
         A = A.permute(0, 3, 1, 2)  # N, H, W, C -> N, C, H, W
@@ -32,7 +24,6 @@ def convolution(data, kernel, S, D, P, block_M, block_N, block_K, num_stages, th
     OW = (W + 2 * P - D * (K - 1) - 1) // S + 1
     dtype = T.float16
     accum_dtype = T.float32
-    is_hopper = check_hopper()
 
     data: T.Tensor((N, H, W, C), dtype)
     kernel: T.Tensor((KH, KW, C, F), dtype)
@@ -49,16 +40,7 @@ def convolution(data, kernel, S, D, P, block_M, block_N, block_K, num_stages, th
 
         T.clear(out_local)
         for k_iter in T.Pipelined(T.ceildiv(KH * KW * C, block_K), num_stages=num_stages):
-            if is_hopper:
-                T.c2d_im2col(data, data_shared, by, k_iter, KH, S, D, P)
-            else:
-                for i, j in T.Parallel(block_M, block_K):
-                    k = k_iter * block_K + j
-                    m = by * block_M + i
-                    access_h = m % (OH * OW) // OW * S + k // (KW * C) * D - P
-                    access_w = m % OW * S + k // C % KW * D - P
-                    in_bound = (access_h >= 0) and (access_w >= 0) and (access_h < H) and (access_w < W)
-                    data_shared[i, j] = T.if_then_else(in_bound, data[m // (OH * OW), access_h, access_w, k % C], 0)
+            T.im2col(data, data_shared, by, k_iter, KH, S, D, P)
             T.copy(kernel_flat[k_iter * block_K, bx * block_N], kernel_shared)
             T.gemm(data_shared, kernel_shared, out_local)
 
