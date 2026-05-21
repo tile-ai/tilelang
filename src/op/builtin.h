@@ -756,6 +756,22 @@ TVM_DLL const Op &sync_grid();
 TVM_DLL const Op &sync_warp();
 
 /*!
+ * \brief CTA named barrier one-sided arrive (bar.arrive).
+ *
+ * Signals that the calling threads have arrived at the named barrier without
+ * waiting for other participants.  Useful in warp-specialized producer/consumer
+ * pipelines where one side must signal readiness/free-buffer state without
+ * blocking, while the other side waits with bar.sync / T.sync_threads().
+ *
+ * named_barrier_arrive(barrier_id, thread_count)
+ *   barrier_id   – compile-time integer (0–15)
+ *   thread_count – total number of participating threads
+ *
+ * Lowers to: asm volatile("bar.arrive %0, %1;" : : "r"(id), "r"(cnt));
+ */
+TVM_DLL const Op &named_barrier_arrive();
+
+/*!
  * \brief Programmatic dependency trigger.
  *
  * pdl_trigger()

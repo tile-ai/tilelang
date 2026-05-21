@@ -947,6 +947,35 @@ def sync_threads(barrier_id: int = None, arrive_count: int = None):
     return tirx.call_intrin("int32", "tirx.tvm_storage_sync", "shared", *args)
 
 
+def named_barrier_arrive(barrier_id, thread_count):
+    """CTA named barrier one-sided arrive (bar.arrive).
+
+    Signals that the calling threads have arrived at the named barrier without
+    waiting for other participants.  Unlike ``T.sync_threads(barrier_id, n)``
+    which maps to ``bar.sync`` (arrive + wait), this call only *arrives* and
+    returns immediately, allowing the calling warp group to continue working
+    while the other side waits.
+
+    This is useful in warp-specialized producer/consumer pipelines:
+
+    .. code-block:: python
+
+        # Producer warp group: signal readiness, keep going
+        T.named_barrier_arrive(ready_barrier, total_threads)
+
+        # Consumer warp group: block until producer has arrived
+        T.sync_threads(ready_barrier, total_threads)
+
+    Args:
+        barrier_id:   Named barrier index (0–15). May be a variable (PrimExpr).
+        thread_count: Total number of CTA threads participating in the barrier.
+                      May be a variable (PrimExpr).
+
+    Lowers to: ``asm volatile("bar.arrive %0, %1;" : : "r"(id), "r"(cnt));``
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.named_barrier_arrive"), barrier_id, thread_count)
+
+
 def sync_warp(mask: int = None):
     """Synchronize all threads in a warp."""
     if mask is not None:
