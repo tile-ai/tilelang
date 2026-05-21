@@ -7,24 +7,20 @@ thread-level layout) are never seen by LayoutInference.
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 from tvm import tirx as tir
 from tvm import IRModule
 from tvm.ir import Op, PointerType
 from tvm.tirx import SBlock
 from tvm.tirx.transform import prim_func_pass
 
-_GEMM_OPS = None
 
-
+@lru_cache(maxsize=1)
 def _get_gemm_ops():
-    global _GEMM_OPS
-    if _GEMM_OPS is None:
-        _GEMM_OPS = {
-            Op.get("tl.tileop.gemm"),
-            Op.get("tl.tileop.wgmma_gemm"),
-            Op.get("tl.tileop.tcgen05_gemm"),
-        }
-    return _GEMM_OPS
+    return frozenset({
+        Op.get("tl.tileop.gemm"),
+    })
 
 
 def _extract_buffer_var_from_region(region_call):

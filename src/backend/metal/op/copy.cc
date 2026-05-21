@@ -11,10 +11,6 @@
 
 #include <tvm/tirx/builtin.h>
 
-#include <algorithm>
-#include <cmath>
-#include <limits>
-
 namespace tvm {
 namespace tl {
 
@@ -68,28 +64,8 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &T,
 
   constexpr int kMPerWarp = 8;
   constexpr int kNPerWarp = 8;
-  int m_warp = 1, n_warp = num_warps;
-  int max_m = M / kMPerWarp;
-  int max_n = N / kNPerWarp;
-  float ideal = N > 0 ? static_cast<float>(M) / N : 1.f;
-  float best_score = std::numeric_limits<float>::max();
-  for (int m = 1; m <= std::min(num_warps, max_m); ++m) {
-    if (num_warps % m != 0) {
-      continue;
-    }
-    int n = num_warps / m;
-    if (n > max_n) {
-      continue;
-    }
-    float m_per = static_cast<float>(M) / (m * kMPerWarp);
-    float n_per = static_cast<float>(N) / (n * kNPerWarp);
-    float score = std::abs(m_per / n_per - ideal);
-    if (score < best_score) {
-      best_score = score;
-      m_warp = m;
-      n_warp = n;
-    }
-  }
+  auto [m_warp, n_warp] =
+      ComputeSquareWarpPartition(num_warps, M, N, kMPerWarp, kNPerWarp);
 
   TVM_FFI_ICHECK(M >= m_warp * kMPerWarp && N >= n_warp * kNPerWarp)
       << "Cannot partition " << M << "x" << N << " matrix across " << m_warp

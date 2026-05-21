@@ -282,6 +282,10 @@ void CodeGenTileLangMetal::PrintType(DataType t,
 void CodeGenTileLangMetal::PrintStorageSync(const CallNode *op) {
   const std::string &sync = op->args[0].as<StringImmNode>()->value;
   if (sync == "warp") {
+    // Metal has no per-simdgroup barrier; simdgroup_barrier synchronizes
+    // the entire threadgroup (same as threadgroup_barrier).  We emit the
+    // narrower intrinsic so the source documents the intended scope even
+    // though the hardware effect is identical.
     this->PrintIndent();
     this->stream << "simdgroup_barrier(mem_flags::mem_threadgroup);\n";
   } else if (sync == "shared") {

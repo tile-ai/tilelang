@@ -5,12 +5,11 @@
 
 #include "op/gemm.h"
 
+#include "backend/metal/op/utils.h"
 #include "target/utils.h"
 
 #include <tvm/runtime/logging.h>
 
-#include <cmath>
-#include <limits>
 #include <utility>
 
 namespace tvm {
@@ -58,34 +57,8 @@ std::pair<int, int> ComputeMetalWarpPartition(const GemmWarpPolicyNode &policy,
       }
     }
   } else if (policy.isSquare()) {
-    int max_m_warps = M / kMPerWarp;
-    float ideal_ratio = N > 0 ? static_cast<float>(M) / N : 1.0f;
-
-    int best_m = 1;
-    int best_n = 1;
-    float best_balance = std::numeric_limits<float>::max();
-    for (int m = 1; m <= max_m_warps && m <= num_warps; m++) {
-      int n = num_warps / m;
-
-      float m_per_warp = static_cast<float>(M) / (m * kMPerWarp);
-      float n_per_warp = static_cast<float>(N) / (n * kNPerWarp);
-      if (m_per_warp < 1 || n_per_warp < 1) {
-        continue;
-      }
-      if (m * n != num_warps) {
-        continue;
-      }
-
-      float balance = std::abs(m_per_warp / n_per_warp - ideal_ratio);
-      if (balance < best_balance) {
-        best_balance = balance;
-        best_m = m;
-        best_n = n;
-      }
-    }
-
-    m_warp = best_m;
-    n_warp = best_n;
+    std::tie(m_warp, n_warp) =
+        ComputeSquareWarpPartition(num_warps, M, N, kMPerWarp, kNPerWarp);
   } else {
     TVM_FFI_ICHECK(0) << "Unknown GemmWarpPolicy";
   }

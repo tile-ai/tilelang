@@ -54,6 +54,12 @@ class MetalKernelAdapter(BaseKernelAdapter):
     _kernel = None
 
     def get_kernel_source(self, kernel_only: bool = True) -> str:
+        if kernel_only:
+            # Return just the kernel function body, stripping Metal
+            # module-level boilerplate (includes, structs, etc.).
+            idx = self.kernel_global_source.find("kernel void ")
+            if idx >= 0:
+                return self.kernel_global_source[idx:]
         return self.kernel_global_source
 
     def _convert_torch_func(self) -> Callable:
