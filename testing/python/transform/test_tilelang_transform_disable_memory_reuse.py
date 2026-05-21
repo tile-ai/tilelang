@@ -124,14 +124,20 @@ def test_disable_reuse_no_overlap():
     src_no_reuse = kernel_no_reuse.get_kernel_source()
     src_reuse = kernel_reuse.get_kernel_source()
 
-    def extract_smem_element_offsets(src: str) -> list[int]:
-        """Extract element offsets from buf_dyn_shmem[OFFSET] patterns in generated code."""
-        # Matches patterns like: buf_dyn_shmem)[1024]) used in tma_store calls
-        pattern = r"buf_dyn_shmem\)\[(\d+)\]"
-        return sorted(set(int(m) for m in re.findall(pattern, src)))
+    def extract_smem_offsets(src: str) -> list[int]:
+        """Extract merged shared-memory offsets from generated code."""
+        # Alias-preserving lowering emits:
+        #   void* a_shared = ((void*)((char*)buf_dyn_shmem + 0));
+        alias_pattern = r"void\*\s+\w+\s*=\s*\(\(void\*\)\(\(char\*\)buf_dyn_shmem\s*\+\s*(\d+)\)\);"
+        # Direct merged-buffer lowering emits access patterns such as:
+        #   buf_dyn_shmem)[1024])
+        direct_pattern = r"buf_dyn_shmem\)\[(\d+)\]"
+        offsets = {int(m) for m in re.findall(alias_pattern, src)}
+        offsets.update(int(m) for m in re.findall(direct_pattern, src))
+        return sorted(offsets)
 
-    offsets_no_reuse = extract_smem_element_offsets(src_no_reuse)
-    offsets_reuse = extract_smem_element_offsets(src_reuse)
+    offsets_no_reuse = extract_smem_offsets(src_no_reuse)
+    offsets_reuse = extract_smem_offsets(src_reuse)
 
     # With reuse disabled: must have at least 2 distinct offsets (buffers not merged)
     assert len(offsets_no_reuse) >= 2, f"Expected >=2 distinct smem offsets with reuse disabled, got {offsets_no_reuse}"
