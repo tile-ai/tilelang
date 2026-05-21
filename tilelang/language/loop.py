@@ -128,7 +128,49 @@ def Pipelined(
         The maximum value of iteration.
     num_stages : int
         The max number of buffer used between pipeline producers and consumers.
-        if num_stages is 0, pipeline will not be enabled.
+        For compiler-inferred pipelines, if ``num_stages`` is 0, pipeline will
+        not be enabled. For manually scheduled pipelines, prefer specifying
+        ``order`` and ``stage`` without ``num_stages``; the pipeline depth is
+        inferred as ``max(stage) + 1``.
+    order : Optional[List[int]]
+        Optional manual emission order for scheduled statements in the loop
+        body. This list should describe executable pipeline statements such as
+        copies, fills, GEMMs, reductions, stores, waits, or commits.
+    stage : Optional[List[int]]
+        Optional manual pipeline stage for each scheduled statement in the loop
+        body. The list is aligned with ``order`` and follows the same statement
+        counting rule.
+    sync : Optional[List[List[int]]]
+        Optional synchronization metadata for manual pipeline lowering.
+    group : Optional[List[List[int]]]
+        Optional producer grouping metadata for manual pipeline lowering.
+
+    Notes
+    -----
+    Replayable scalar ``Bind`` statements created by local aliases are not
+    scheduled pipeline operations and should not consume entries in ``order``
+    or ``stage``. For example, in the body below only the copy and store need
+    annotation entries; ``base`` is replayed automatically at each use:
+
+    .. code-block:: python
+
+        for i in T.Pipelined(n, order=[1, 0], stage=[0, 1]):
+            base: T.int32 = i * block
+            T.copy(A[base], shared)
+            T.copy(shared, B[base])
+
+    A replayable ``Bind`` may also read a buffer that is not written by the
+    pipeline body, such as ``idx = Ids[i]``. If a ``Bind`` reads a buffer that
+    is written inside the same pipeline body, it is kept as a scheduled
+    statement because the load has a pipeline dependency and cannot be freely
+    replayed.
+
+    Older code that included replayable scalar ``Bind`` entries in
+    ``order``/``stage`` is accepted for compatibility, but those entries are
+    ignored by the pipeline passes. New code should annotate only the scheduled
+    statements. Avoid setting ``num_stages`` together with manual
+    ``order``/``stage`` unless you intentionally need an explicit depth
+    override.
     Returns
     -------
     res : frame.ForFrame

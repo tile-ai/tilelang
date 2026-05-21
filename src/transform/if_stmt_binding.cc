@@ -39,16 +39,35 @@ private:
     ICHECK(then_case.defined()) << "then_case must be defined";
     ICHECK(!else_case.defined()) << "else_case must be undefined";
 
-    auto bind_if_stmt = [](const Optional<Stmt> &body,
-                           const PrimExpr &condition) -> Stmt {
+    auto make_seq = [](Array<Stmt> seq) -> Stmt {
+      ICHECK(!seq.empty());
+      return seq.size() == 1 ? seq[0] : SeqStmt(std::move(seq));
+    };
+
+    auto bind_if_stmt = [&make_seq](const Optional<Stmt> &body,
+                                    const PrimExpr &condition) -> Stmt {
       if (body.defined()) {
         auto stmt = body.value();
         if (auto seq_stmt = stmt.as<SeqStmtNode>()) {
-          Array<Stmt> seq_;
-          for (auto s : seq_stmt->seq) {
-            seq_.push_back(IfThenElse(condition, s, Stmt()));
+          Array<Stmt> seq;
+          const size_t n = seq_stmt->seq.size();
+          size_t i = 0;
+          for (; i < n && !seq_stmt->seq[i].as<BindNode>(); ++i) {
+            seq.push_back(IfThenElse(condition, seq_stmt->seq[i], Stmt()));
           }
-          return SeqStmt(std::move(seq_));
+
+          // A direct Bind is emitted as a C/CUDA declaration. Keep it and the
+          // following statements in one lexical block, matching old LetStmt
+          // scope semantics.
+          if (i < n) {
+            Array<Stmt> bind_scope;
+            for (; i < n; ++i) {
+              bind_scope.push_back(seq_stmt->seq[i]);
+            }
+            seq.push_back(
+                IfThenElse(condition, make_seq(std::move(bind_scope)), Stmt()));
+          }
+          return make_seq(std::move(seq));
         } else {
           return IfThenElse(condition, stmt, Stmt());
         }
