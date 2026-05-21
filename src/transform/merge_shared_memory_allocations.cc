@@ -27,6 +27,7 @@
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/s_tir/stmt.h>
+#include <tvm/target/target.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -47,6 +48,7 @@
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
 #include <tvm/tirx/function.h>
+#include <tvm/tirx/stmt.h>
 
 namespace tvm {
 namespace tl {
@@ -447,11 +449,12 @@ public:
       const std::unordered_map<const VarNode *, const AllocBufferNode *>
           &shmem_allocs,
       bool is_dynamic = true, bool verbose = false, int align_bytes = 0,
-      bool use_static_scope_for_dynamic = false,
+      bool preserve_aliases = true, bool use_static_scope_for_dynamic = false,
       bool preserve_single_allocation = false)
-      : is_dynamic_{is_dynamic}, shmem_allocs_{shmem_allocs}, verbose_{verbose},
-        align_bytes_{align_bytes},
-        preserve_single_allocation_{preserve_single_allocation} {
+      : is_dynamic_{is_dynamic}, verbose_{verbose},
+        preserve_single_allocation_{preserve_single_allocation},
+        align_bytes_{align_bytes}, shmem_allocs_{shmem_allocs},
+        preserve_aliases_{preserve_aliases} {
     ICHECK(!preserve_single_allocation_ || shmem_allocs_.size() == 1);
     std::string scope =
         is_dynamic && !use_static_scope_for_dynamic ? "shared.dyn" : "shared";
@@ -467,18 +470,129 @@ public:
    * \param stmt the statement
    */
   void PlanReuse(const Stmt &stmt, bool is_dynamic = true,
-                 bool enable_aggressive_merge = false, bool verbose = false) {
+                 bool enable_aggressive_merge = false, bool verbose = false,
+                 bool disable_reuse = false) {
     SharedMemLinearAccessPatternFinder finder(is_dynamic,
                                               enable_aggressive_merge, verbose);
     finder(stmt);
     shmem_alignment_map_ = SharedMemoryAlignmentPlanner::Plan(stmt);
-    // First compute liveness over the flattened schedule, then feed it into the
-    // arena packer.
-    this->LivenessAnalysis(finder.linear_seq_, finder.stmt_attrs_);
-    this->PlanMemory(finder.linear_seq_, finder.stmt_attrs_);
+    if (disable_reuse) {
+      this->PlanSequentialLayout();
+    } else {
+      // First compute liveness over the flattened schedule, then feed it into
+      // the arena packer.
+      this->LivenessAnalysis(finder.linear_seq_, finder.stmt_attrs_);
+      this->PlanMemory(finder.linear_seq_, finder.stmt_attrs_);
+    }
   }
 
 private:
+  std::vector<Stmt> MakeAliasBindings() const {
+    struct AliasInfo {
+      const VarNode *var{nullptr};
+      PrimExpr byte_offset;
+    };
+
+    std::vector<AliasInfo> aliases;
+    aliases.reserve(buffer_byte_offsets_.size());
+    for (const auto &pair : buffer_byte_offsets_) {
+      if (shmem_allocs_.count(pair.first) == 0) {
+        continue;
+      }
+      aliases.push_back(AliasInfo{pair.first, pair.second});
+    }
+
+    std::sort(aliases.begin(), aliases.end(),
+              [](const AliasInfo &lhs, const AliasInfo &rhs) {
+                const auto *lhs_offset = lhs.byte_offset.as<IntImmNode>();
+                const auto *rhs_offset = rhs.byte_offset.as<IntImmNode>();
+                if (lhs_offset != nullptr && rhs_offset != nullptr &&
+                    lhs_offset->value != rhs_offset->value) {
+                  return lhs_offset->value < rhs_offset->value;
+                }
+                return lhs.var->name_hint < rhs.var->name_hint;
+              });
+
+    std::vector<Stmt> bindings;
+    bindings.reserve(aliases.size());
+    for (const AliasInfo &alias : aliases) {
+      Var buffer_var = GetRef<Var>(alias.var);
+      PrimExpr alias_ptr =
+          Call(DataType::Handle(), builtin::handle_add_byte_offset(),
+               {merged_buf_var_, alias.byte_offset});
+      bindings.push_back(tirx::Bind(buffer_var, alias_ptr));
+    }
+    return bindings;
+  }
+
+  /*!
+   * \brief Lay out all shared memory buffers sequentially without any reuse.
+   * Each buffer gets its own dedicated region in the merged allocation.
+   */
+  void PlanSequentialLayout() {
+    buffer_byte_offsets_.clear();
+
+    if (shmem_allocs_.empty()) {
+      merged_alloc_size_ = make_const(DataType::Int(64), 0);
+      return;
+    }
+
+    // Sort allocations deterministically by name.
+    std::vector<const VarNode *> sorted_vars;
+    sorted_vars.reserve(shmem_allocs_.size());
+    for (const auto &kv : shmem_allocs_) {
+      sorted_vars.push_back(kv.first);
+    }
+    std::sort(sorted_vars.begin(), sorted_vars.end(),
+              [](const VarNode *a, const VarNode *b) {
+                return a->name_hint < b->name_hint;
+              });
+
+    DataType offset_dtype = DataType::Int(32);
+    PrimExpr cursor = make_const(offset_dtype, 0);
+    PrimExpr total_size = make_const(offset_dtype, 0);
+
+    for (const VarNode *var : sorted_vars) {
+      const AllocBufferNode *alloc = shmem_allocs_.at(var);
+      int64_t bytes_per_elem = static_cast<int64_t>(
+          alloc->buffer->dtype.bytes() * alloc->buffer->dtype.lanes());
+
+      DataType size_dtype = DataType::Int(32);
+      if (!alloc->buffer->shape.empty()) {
+        size_dtype = alloc->buffer->shape[0].dtype();
+      }
+      if (!size_dtype.is_int() && !size_dtype.is_uint()) {
+        size_dtype = DataType::Int(32);
+      }
+
+      PrimExpr size_expr = make_const(size_dtype, bytes_per_elem);
+      for (const PrimExpr &extent : alloc->buffer->shape) {
+        PrimExpr e = extent;
+        if (e.dtype() != size_dtype) {
+          e = cast(size_dtype, e);
+        }
+        size_expr = size_expr * e;
+      }
+
+      int alignment = align_bytes_;
+      auto align_it = shmem_alignment_map_.find(var);
+      if (align_it != shmem_alignment_map_.end()) {
+        alignment = std::max(alignment, align_it->second);
+      }
+
+      cursor = AlignPrimExpr(cursor, alignment);
+      if (size_expr.dtype() != offset_dtype) {
+        size_expr = cast(offset_dtype, size_expr);
+      }
+      buffer_byte_offsets_[var] = cursor;
+      PrimExpr buf_end = cursor + size_expr;
+      total_size = max(total_size, buf_end);
+      cursor = buf_end;
+    }
+
+    merged_alloc_size_ = AlignPrimExpr(total_size, align_bytes_);
+  }
+
   Stmt VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tirx::attr::thread_extent && !allocated_) {
       // Allocate one dynamic shared memory allocation at the beginning of
@@ -525,8 +639,15 @@ private:
       }
       Buffer merged_buf(merged_buf_var_, alloc_dtype, alloc_extents, {},
                         PrimExpr(), merged_buf_var_->name_hint, 0, 0, kDefault);
-      Stmt new_body = SeqStmt(
-          {AllocBuffer(merged_buf), StmtExprMutator::VisitStmt(op->body)});
+      Array<Stmt> seq;
+      seq.push_back(AllocBuffer(merged_buf));
+      if (preserve_aliases_) {
+        for (const Stmt &alias_binding : MakeAliasBindings()) {
+          seq.push_back(alias_binding);
+        }
+      }
+      seq.push_back(StmtExprMutator::VisitStmt(op->body));
+      Stmt new_body = SeqStmt(seq);
       return AttrStmt(op->node, op->attr_key, op->value, new_body, op->span);
     }
     return StmtMutator::VisitStmt_(op);
@@ -544,9 +665,11 @@ private:
 
   Stmt VisitStmt_(const DeclBufferNode *op) final {
     auto node = Downcast<DeclBuffer>(StmtExprMutator::VisitStmt_(op));
-    auto new_buf = GetUpdatedBuffer(node->buffer);
-    if (!new_buf.same_as(node->buffer)) {
-      node.CopyOnWrite()->buffer = new_buf;
+    if (!preserve_aliases_) {
+      auto new_buf = GetUpdatedBuffer(node->buffer);
+      if (!new_buf.same_as(node->buffer)) {
+        node.CopyOnWrite()->buffer = new_buf;
+      }
     }
     return std::move(node);
   }
@@ -567,13 +690,15 @@ private:
           << "MergeSharedMemoryAllocations expects flat memory buffers, "
           << "and is to be run after "
           << "StorageFlatten (TE schedules) or FlattenBuffer (TIR schedules)";
-      Array<PrimExpr> indices = {
-          node->indices[0] +
-          this->GetBufferOffset(node->buffer->data, node->buffer->dtype)};
+      if (!preserve_aliases_) {
+        Array<PrimExpr> indices = {
+            node->indices[0] +
+            this->GetBufferOffset(node->buffer->data, node->buffer->dtype)};
 
-      auto writer = node.CopyOnWrite();
-      writer->buffer = GetUpdatedBuffer(node->buffer);
-      writer->indices = indices;
+        auto writer = node.CopyOnWrite();
+        writer->buffer = GetUpdatedBuffer(node->buffer);
+        writer->indices = indices;
+      }
     }
 
     return node;
@@ -601,6 +726,9 @@ private:
   }
 
   PrimExpr VisitExpr_(const CallNode *op) final {
+    if (preserve_aliases_) {
+      return StmtExprMutator::VisitExpr_(op);
+    }
     if (op->op.same_as(builtin::tvm_access_ptr())) {
       ICHECK_EQ(op->args.size(), 5U);
       DataType dtype = op->args[0].dtype();
@@ -666,9 +794,8 @@ private:
         cp_async_args.push_back(op->args[3]);
       }
       return Call(dtype, op->op, cp_async_args);
-    } else {
-      return StmtExprMutator::VisitExpr_(op);
     }
+    return StmtExprMutator::VisitExpr_(op);
   }
 
   PrimExpr GetBufferOffset(const Var &buffer_var, DataType dtype) {
@@ -1507,11 +1634,17 @@ private:
   std::unordered_map<const Object *, EventEntry> event_map_;
   // The mapping of buffer bytes alignment
   std::unordered_map<const VarNode *, int> shmem_alignment_map_;
+  // Whether to preserve original buffer vars as handle aliases of the merged
+  // allocation. Some backends, such as WebGPU, cannot print handle-valued Bind
+  // nodes and use the direct merged-buffer rewrite path instead.
+  bool preserve_aliases_{true};
 };
 
 Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
                                   bool enable_aggressive_merge,
                                   int align_bytes = 16, bool verbose = false,
+                                  bool preserve_aliases = true,
+                                  bool disable_reuse = false,
                                   bool use_static_scope_for_dynamic = false) {
   AllocateCollector collector;
   collector(stmt);
@@ -1520,15 +1653,20 @@ Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
     bool preserve_single_allocation =
         use_static_scope_for_dynamic && collector.dyn_shmem_allocs_.size() == 1;
     SharedMemoryRewriter rewriter(collector.dyn_shmem_allocs_, true, verbose,
-                                  align_bytes, use_static_scope_for_dynamic,
+                                  align_bytes, preserve_aliases,
+                                  use_static_scope_for_dynamic,
                                   preserve_single_allocation);
-    rewriter.PlanReuse(stmt, true, enable_aggressive_merge);
+    rewriter.PlanReuse(stmt, true,
+                       disable_reuse ? false : enable_aggressive_merge, false,
+                       disable_reuse);
     stmt = rewriter(std::move(stmt));
   }
   if (merge_static_smem && collector.static_shmem_allocs_.size() > 1) {
     SharedMemoryRewriter rewriter(collector.static_shmem_allocs_, false,
-                                  verbose, align_bytes);
-    rewriter.PlanReuse(stmt, false, enable_aggressive_merge);
+                                  verbose, align_bytes, preserve_aliases);
+    rewriter.PlanReuse(stmt, false,
+                       disable_reuse ? false : enable_aggressive_merge, false,
+                       disable_reuse);
     stmt = rewriter(std::move(stmt));
   }
   return stmt;
@@ -1539,8 +1677,9 @@ using namespace tirx::transform;
 namespace transform {
 
 Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
-                                  int align_bytes = 16) {
-  auto pass_func = [enable_aggressive_merge, align_bytes](
+                                  int align_bytes = 16,
+                                  bool disable_reuse = false) {
+  auto pass_func = [enable_aggressive_merge, align_bytes, disable_reuse](
                        PrimFunc f, const IRModule &m, PassContext ctx) {
     bool merge_static_smem =
         ctx->GetConfig<Bool>("tirx.merge_static_smem", Bool(false)).value();
@@ -1548,14 +1687,19 @@ Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
         ctx->GetConfig<Bool>(kDebugMergeSharedMemoryAllocations, Bool(false))
             .value();
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);
-    bool use_static_scope_for_dynamic =
-        target.defined() && TargetIsMetal(target.value());
+    bool preserve_aliases = true;
+    bool use_static_scope_for_dynamic = false;
+    if (target.defined()) {
+      use_static_scope_for_dynamic = TargetIsMetal(target.value());
+      preserve_aliases = target.value()->kind->name != "webgpu" &&
+                         !use_static_scope_for_dynamic;
+    }
     auto run = [&]() {
       auto *n = f.CopyOnWrite();
       n->body = tl::MergeSharedMemoryAllocations(
           std::move(n->body), merge_static_smem, enable_aggressive_merge,
-          align_bytes, debug_merge_shared_memory_allocations,
-          use_static_scope_for_dynamic);
+          align_bytes, debug_merge_shared_memory_allocations, preserve_aliases,
+          disable_reuse, use_static_scope_for_dynamic);
       return f;
     };
     if (target.defined()) {

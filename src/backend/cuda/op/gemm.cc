@@ -54,8 +54,7 @@ bool CheckWgmma(const GemmNode &op) {
     if (op.a_->dtype == DataType::BFloat(16) &&
         op.b_->dtype == DataType::BFloat(16))
       return op.k_ % 16 == 0;
-    if (op.a_->dtype == DataType::Float(32) &&
-        op.b_->dtype == DataType::Float(32))
+    if (op.a_->dtype.is_tfloat32() && op.b_->dtype.is_tfloat32())
       return (!op.transA_) && op.transB_ && op.k_ % 8 == 0;
     if (op.a_->dtype.is_float8() && op.b_->dtype.is_float8())
       return (!op.transA_) && op.transB_ && op.k_ % 32 == 0;
@@ -299,8 +298,7 @@ struct Gemm {
     if (gemm_inst == kCudaWGMMA) {
       return ComputeWgmmaWarpPartition(policy, M, N, num_warps);
     }
-    int k_n_per_warp =
-        (TargetIsVolta(target) || TargetIsTuring(target)) ? 16 : 8;
+    int k_n_per_warp = TargetIsVolta(target) ? 16 : 8;
     return ComputeDefaultWarpPartition(policy, M, N, num_warps, k_n_per_warp);
   }
 

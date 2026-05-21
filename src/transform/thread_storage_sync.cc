@@ -625,8 +625,65 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
   };
   // access scope
   std::vector<std::vector<StmtEntry>> scope_;
+  std::unordered_map<const VarNode *, PrimExpr>
+      shared_memory_alias_byte_offsets_;
   StorageScope GetScope(Var buffer_var) const {
     return StorageScope::Create(GetPtrStorageScope(std::move(buffer_var)));
+  }
+  bool IsSharedDynPointer(const Var &buffer_var) const {
+    return buffer_var->type_annotation.as<PointerTypeNode>() &&
+           GetPtrStorageScope(buffer_var) == "shared.dyn";
+  }
+  PrimExpr AliasElemOffset(Var buffer_var, DataType dtype,
+                           DataType index_dtype) const {
+    auto it = shared_memory_alias_byte_offsets_.find(buffer_var.get());
+    if (it == shared_memory_alias_byte_offsets_.end()) {
+      return make_const(index_dtype, 0);
+    }
+    int elem_bytes = dtype.bytes() * dtype.lanes();
+    ICHECK_GT(elem_bytes, 0);
+    PrimExpr byte_offset = it->second;
+    if (byte_offset.dtype() != index_dtype) {
+      byte_offset = Cast(index_dtype, byte_offset);
+    }
+    return indexdiv(byte_offset, make_const(index_dtype, elem_bytes));
+  }
+  PrimExpr AddAliasElemOffset(Var buffer_var, DataType dtype,
+                              PrimExpr index) const {
+    DataType index_dtype = index.dtype();
+    DataType scalar_index_dtype =
+        index_dtype.is_scalar() ? index_dtype : index_dtype.element_of();
+    PrimExpr elem_offset =
+        AliasElemOffset(std::move(buffer_var), dtype, scalar_index_dtype);
+    if (is_zero(elem_offset)) {
+      return index;
+    }
+    if (!index_dtype.is_scalar()) {
+      elem_offset = Broadcast(elem_offset,
+                              IntImm(DataType::Int(32), index_dtype.lanes()));
+    }
+    return index + elem_offset;
+  }
+  void RecordSharedMemoryAlias(const Var &alias_var, const PrimExpr &value) {
+    const auto *call = value.as<CallNode>();
+    if (call == nullptr ||
+        !call->op.same_as(builtin::handle_add_byte_offset()) ||
+        call->args.size() != 2U) {
+      return;
+    }
+    if (!IsSharedDynPointer(alias_var)) {
+      return;
+    }
+    const auto *base = call->args[0].as<VarNode>();
+    if (base == nullptr) {
+      return;
+    }
+    PrimExpr byte_offset = call->args[1];
+    auto base_it = shared_memory_alias_byte_offsets_.find(base);
+    if (base_it != shared_memory_alias_byte_offsets_.end()) {
+      byte_offset = byte_offset + base_it->second;
+    }
+    shared_memory_alias_byte_offsets_[alias_var.get()] = byte_offset;
   }
   IterVar GetThreadVar(const std::string &tag) const {
     for (const auto &iv : env_threads_) {
@@ -649,10 +706,12 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       e.threads = env_threads();
       e.buffer = buf;
       e.buffer_name = op->buffer;
-      e.buffer_indices = op->indices;
       e.dtype = op->dtype.element_of();
       for (const auto &index : op->indices) {
-        e.touched.push_back(arith::IntSet::Vector(index));
+        PrimExpr physical_index =
+            AddAliasElemOffset(buf, op->buffer->dtype, index);
+        e.buffer_indices.push_back(physical_index);
+        e.touched.push_back(arith::IntSet::Vector(physical_index));
       }
       e.type = kRead;
       e.scope = scope;
@@ -674,10 +733,12 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       e.threads = env_threads();
       e.buffer = buf;
       e.buffer_name = op->buffer;
-      e.buffer_indices = op->indices;
       e.dtype = op->value.dtype().element_of();
       for (const auto &index : op->indices) {
-        e.touched.push_back(arith::IntSet::Vector(index));
+        PrimExpr physical_index =
+            AddAliasElemOffset(buf, op->buffer->dtype, index);
+        e.buffer_indices.push_back(physical_index);
+        e.touched.push_back(arith::IntSet::Vector(physical_index));
       }
       e.type = kWrite;
       e.scope = scope;
@@ -708,6 +769,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     allow_append_ = true;
     ICHECK_EQ(curr_stmt_.access.size(), 0U);
     curr_stmt_.stmt = op;
+    RecordSharedMemoryAlias(op->var, op->value);
     this->VisitExpr(op->value);
     // push to the scope
     scope_.back().push_back(curr_stmt_);
@@ -1009,7 +1071,8 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         // Use buffer shape and indices to compute the buffer_ranges for each
         // dimension.
         for (size_t i = 0; i < buffer->shape.size(); ++i) {
-          PrimExpr min = load->indices[i];
+          PrimExpr min = AddAliasElemOffset(GetRef<Var>(buffer_var),
+                                            buffer->dtype, load->indices[i]);
           PrimExpr extent = make_const(buffer->shape[i].dtype(), 1);
           buffer_ranges.push_back(Range::FromMinExtent(min, extent));
         }
@@ -1022,7 +1085,9 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
           e.buffer_name = buffer;
           e.buffer_ranges = buffer_ranges;
           for (const auto &index : load->indices) {
-            e.touched.push_back(arith::IntSet::Vector(index));
+            PrimExpr physical_index = AddAliasElemOffset(
+                GetRef<Var>(buffer_var), buffer->dtype, index);
+            e.touched.push_back(arith::IntSet::Vector(physical_index));
           }
           e.is_pointer_access = true;
           e.is_atomic = (atomic_dst_ptr_depth_ > 0);
@@ -1038,7 +1103,8 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       ICHECK_EQ(op->args.size(), 5U);
       DataType dtype = op->args[0].dtype();
       const VarNode *buffer_var = op->args[1].as<VarNode>();
-      PrimExpr offset = op->args[2];
+      PrimExpr offset =
+          AddAliasElemOffset(GetRef<Var>(buffer_var), dtype, op->args[2]);
       PrimExpr extent = op->args[3];
       const IntImmNode *flag = op->args[4].as<IntImmNode>();
       StorageScope scope = GetScope(GetRef<Var>(buffer_var));

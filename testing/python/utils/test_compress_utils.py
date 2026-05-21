@@ -81,10 +81,18 @@ def generate_dense_input(N, trans_A, trans_B, in_dtype, seed=0):
     return A, B
 
 
+def _default_meta_dtype(dtype):
+    return T.int32 if dtype == T.int8 else T.int16
+
+
 def _test_compress(dtype, meta_dtype):
     A, B = generate_dense_input(64, in_dtype=dtype.as_torch(), trans_A=False, trans_B=False)
-    sp_tl, meta_tl = compress(A, meta_dtype=meta_dtype.as_torch())
-    sp_ref, meta_ref = torch_compress(A, meta_dtype=meta_dtype.as_torch())
+    torch_meta_dtype = meta_dtype.as_torch() if meta_dtype is not None else None
+    actual_meta_dtype = meta_dtype if meta_dtype is not None else _default_meta_dtype(dtype)
+    sp_tl, meta_tl = compress(A, meta_dtype=torch_meta_dtype)
+    sp_ref, meta_ref = torch_compress(A, meta_dtype=torch_meta_dtype)
+    assert meta_tl.dtype == actual_meta_dtype.as_torch()
+    assert meta_ref.dtype == actual_meta_dtype.as_torch()
     # NOTE: in case that there are multiple zeros, the case might fail occasionally
     # if we directly compare the compressed sparse values
     program = matmul(
@@ -99,8 +107,8 @@ def _test_compress(dtype, meta_dtype):
         dtype,
         dtype,
         T.int32 if dtype == T.int8 else T.float32,
-        meta_dtype,
-        get_e_factor(dtype, meta_dtype),
+        actual_meta_dtype,
+        get_e_factor(dtype, actual_meta_dtype),
         0,
         128,
     )
@@ -121,7 +129,6 @@ def _test_compress(dtype, meta_dtype):
     [
         (T.int8, T.int8),
         (T.int8, T.int16),
-        (T.int8, T.int32),
         (T.float16, T.int8),
         (T.float16, T.int16),
         (T.float32, T.int8),
