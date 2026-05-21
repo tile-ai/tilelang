@@ -258,10 +258,39 @@ def test_pipeline_planning_stages_bind_with_dependent_copy():
     orders = [int(v) for v in annos[0]["software_pipeline_order"]]
     async_producers = [int(v) for v in annos[0]["software_pipeline_async_producers"]]
 
-    assert len(stages) == 3, f"Expected Bind, copy, and consumer stages, got {stages}"
-    assert stages == [0, 0, 1]
-    assert orders[0] < orders[1] < orders[2]
-    assert async_producers == [0, 1, 0]
+    assert len(stages) == 2, f"Expected copy and consumer stages, got {stages}"
+    assert stages == [0, 1]
+    assert orders == [0, 1]
+    assert async_producers == [1, 0]
+
+
+def test_pipeline_planning_accepts_explicit_bind_free_annotations():
+    @T.prim_func
+    def before(
+        A: T.Tensor((64,), T.float16),
+        B: T.Tensor((64,), T.float16),
+        C: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=16):
+            A_shared = T.alloc_shared((16,), T.float16)
+            for i in T.Pipelined(4, num_stages=2, order=[1, 0], stage=[0, 1]):
+                base: T.int32 = i * 16
+                T.copy(A[base], A_shared)
+                T.copy(A_shared, C[base])
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert annos, "Expected at least one loop annotated by PipelinePlanning"
+    anno = annos[0]
+    stages = [int(v) for v in anno["software_pipeline_stage"]]
+    orders = [int(v) for v in anno["software_pipeline_order"]]
+    async_producers = [int(v) for v in anno["software_pipeline_async_producers"]]
+    async_groups = [int(v) for v in anno["software_pipeline_async_producer_groups"]]
+
+    assert stages == [0, 1]
+    assert orders == [1, 0]
+    assert async_producers == [1, 0]
+    assert async_groups == [0, -1]
 
 
 def test_pipeline_planning_binds_commit_to_cp_async_stage():

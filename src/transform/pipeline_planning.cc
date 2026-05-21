@@ -61,6 +61,43 @@ bool MayConflict(const Region &region1, const Region &region2) {
   return true;
 }
 
+bool IsScalarBindStmt(const Stmt &stmt) {
+  return stmt.as<BindNode>() != nullptr;
+}
+
+Array<Stmt> FilterScalarBindStmts(const Array<Stmt> &stmts) {
+  Array<Stmt> scheduled_stmts;
+  for (const Stmt &stmt : stmts) {
+    if (IsScalarBindStmt(stmt)) {
+      continue;
+    }
+    scheduled_stmts.push_back(stmt);
+  }
+  return scheduled_stmts;
+}
+
+Array<Integer> FilterScalarBindAnnotations(const Array<Integer> &annotations,
+                                           const Array<Stmt> &original_stmts,
+                                           const Array<Stmt> &scheduled_stmts) {
+  if (annotations.size() == scheduled_stmts.size()) {
+    return annotations;
+  }
+
+  ICHECK_EQ(annotations.size(), original_stmts.size())
+      << "PipelinePlanning: expected pipeline annotation size to match either "
+         "the scheduled statement count or the original statement count";
+
+  Array<Integer> filtered;
+  for (size_t i = 0; i < original_stmts.size(); ++i) {
+    if (IsScalarBindStmt(original_stmts[i])) {
+      continue;
+    }
+    filtered.push_back(annotations[i]);
+  }
+  ICHECK_EQ(filtered.size(), scheduled_stmts.size());
+  return filtered;
+}
+
 class TmemLoadCollector : public StmtExprVisitor {
 public:
   TmemLoadCollector() {}
@@ -1278,9 +1315,23 @@ private:
       }
       SeqStmt pipeline_body_seq =
           PipelineBodySeqFinder::FindOrFatal(pipeline_body_root);
-      MaybeAnnotateLegacyAsyncPipelineLoop(pipeline_body_root,
-                                           pipeline_body_seq->seq, order_array,
-                                           stage_array, &annotations);
+      Array<Stmt> pipeline_stmts =
+          SeqStmtFlattener::Flatten(pipeline_body_seq->seq);
+      Array<Stmt> scheduled_stmts = FilterScalarBindStmts(pipeline_stmts);
+      ICHECK(!scheduled_stmts.empty())
+          << "PipelinePlanning: explicit pipeline annotations have no "
+             "schedulable statements after removing scalar Bind statements";
+      Array<Integer> filtered_order_array = FilterScalarBindAnnotations(
+          order_array, pipeline_stmts, scheduled_stmts);
+      Array<Integer> filtered_stage_array = FilterScalarBindAnnotations(
+          stage_array, pipeline_stmts, scheduled_stmts);
+      annotations.Set(s_tir::attr::software_pipeline_order,
+                      filtered_order_array);
+      annotations.Set(s_tir::attr::software_pipeline_stage,
+                      filtered_stage_array);
+      MaybeAnnotateLegacyAsyncPipelineLoop(pipeline_body_root, scheduled_stmts,
+                                           filtered_order_array,
+                                           filtered_stage_array, &annotations);
       auto for_node = GetRef<For>(loop);
       for_node.CopyOnWrite()->annotations = annotations;
       return for_node;
@@ -1334,13 +1385,17 @@ private:
     // inside the loop body. Flatten them so pipeline planning can assign
     // individual stages to the produce and wait statements.
     Array<Stmt> flat_stmts = SeqStmtFlattener::Flatten(pipeline_body_seq->seq);
+    Array<Stmt> scheduled_stmts = FilterScalarBindStmts(flat_stmts);
+    ICHECK(!scheduled_stmts.empty())
+        << "PipelinePlanning: loop has no schedulable statements after "
+           "removing scalar Bind statements";
 
     AsyncDependencyChainBuilder chain_builder(buffer_data_to_buffer_);
     chain_builder(pipeline_body_root);
 
     std::vector<PipelineStageInfo> pipeline_stage_infos;
-    for (size_t i = 0; i < flat_stmts.size(); i++) {
-      auto pinfo = MakePipelineStageInfo(flat_stmts[i], i, chain_builder);
+    for (size_t i = 0; i < scheduled_stmts.size(); i++) {
+      auto pinfo = MakePipelineStageInfo(scheduled_stmts[i], i, chain_builder);
       pipeline_stage_infos.push_back(std::move(pinfo));
     }
 
