@@ -72,6 +72,46 @@ def _remap_buffer(buf, var_map):
     )
 
 
+def _remap_buffer(buf, var_map):
+    old_data = buf.data
+    new_data = var_map.get(old_data, None)
+    if new_data is None:
+        return buf
+    return tir.decl_buffer(
+        buf.shape,
+        buf.dtype,
+        buf.name,
+        data=new_data,
+        scope="metal.simdgroup",
+        data_alignment=buf.data_alignment,
+        offset_factor=buf.offset_factor,
+    )
+
+
+def _remap_buffer_region(region, buf_map):
+    """Remap buffer inside a BufferRegion using buf_map."""
+    if region is None:
+        return region
+    new_buf = buf_map.get(region.buffer, None)
+    if new_buf is None:
+        return region
+    return tir.BufferRegion(new_buf, region.region)
+
+
+def _remap_match_buffer(match, buf_map):
+    """Remap buffer inside a MatchBufferRegion using buf_map."""
+    if match is None:
+        return match
+    new_buf = buf_map.get(match.buffer, None)
+    new_src = _remap_buffer_region(match.source, buf_map)
+    if new_buf is None and new_src is match.source:
+        return match
+    return tir.MatchBufferRegion(
+        new_buf if new_buf is not None else match.buffer,
+        new_src,
+    )
+
+
 def _rewrite_scope(body, var_map):
     buf_map = {}
 
@@ -87,20 +127,28 @@ def _rewrite_scope(body, var_map):
                     changed = True
             if changed:
                 new_body = tir.stmt_functor.substitute(stmt.body, var_map)
+                new_reads = [_remap_buffer_region(r, buf_map) for r in (stmt.reads or [])]
+                new_writes = [_remap_buffer_region(w, buf_map) for w in (stmt.writes or [])]
+                new_match_bufs = [_remap_match_buffer(m, buf_map) for m in (stmt.match_buffers or [])]
                 return SBlock(
                     stmt.iter_vars,
-                    stmt.reads,
-                    stmt.writes,
+                    new_reads,
+                    new_writes,
                     stmt.name_hint,
                     new_body,
                     stmt.init,
                     new_alloc_bufs,
-                    stmt.match_buffers,
+                    new_match_bufs,
                     stmt.annotations,
                 )
+        elif isinstance(stmt, tir.AllocBuffer):
+            new_buf = _remap_buffer(stmt.buffer, var_map)
+            if not new_buf.same_as(stmt.buffer):
+                buf_map[stmt.buffer] = new_buf
+                return tir.AllocBuffer(new_buf, stmt.annotations, stmt.span)
         return None
 
-    return tir.stmt_functor.ir_transform(body, _pre_order, None, ["tirx.SBlock"])
+    return tir.stmt_functor.ir_transform(body, _pre_order, None, ["tirx.SBlock", "tirx.AllocBuffer"])
 
 
 def _metal_fragment_to_simdgroup(func: tir.PrimFunc, mod: IRModule, ctx) -> tir.PrimFunc:
