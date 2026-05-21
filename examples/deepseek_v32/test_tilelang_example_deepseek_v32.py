@@ -38,10 +38,8 @@ def test_example_sparse_mla_fwd_pipelined():
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 def test_example_sparse_mla_bwd():
-    sparse_mla_bwd.test_sparse_mla_bwd(S=256, SKV=512, H=64, HKV=1, DQKV=576, DV=512, topk=256, check_correctness=False)
-    sparse_mla_bwd.test_sparse_mla_bwd(
-        S=256, SKV=512, H=128, HKV=1, DQKV=576, DV=512, topk=256, check_correctness=False
-    )  # test for large H
+    sparse_mla_bwd.test_sparse_mla_bwd(S=256, SKV=512, H=64, HKV=1, DQKV=576, DV=512, topk=256, check_correctness=True)
+    sparse_mla_bwd.test_sparse_mla_bwd(S=256, SKV=512, H=128, HKV=1, DQKV=576, DV=512, topk=256, check_correctness=True)  # test for large H
 
 
 if __name__ == "__main__":
