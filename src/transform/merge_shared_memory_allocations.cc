@@ -472,6 +472,44 @@ public:
   }
 
 private:
+  std::vector<Stmt> MakeAliasBindings() const {
+    struct AliasInfo {
+      const VarNode *var{nullptr};
+      PrimExpr byte_offset;
+    };
+
+    std::vector<AliasInfo> aliases;
+    aliases.reserve(buffer_byte_offsets_.size());
+    for (const auto &pair : buffer_byte_offsets_) {
+      if (shmem_allocs_.count(pair.first) == 0) {
+        continue;
+      }
+      aliases.push_back(AliasInfo{pair.first, pair.second});
+    }
+
+    std::sort(aliases.begin(), aliases.end(),
+              [](const AliasInfo &lhs, const AliasInfo &rhs) {
+                const auto *lhs_offset = lhs.byte_offset.as<IntImmNode>();
+                const auto *rhs_offset = rhs.byte_offset.as<IntImmNode>();
+                if (lhs_offset != nullptr && rhs_offset != nullptr &&
+                    lhs_offset->value != rhs_offset->value) {
+                  return lhs_offset->value < rhs_offset->value;
+                }
+                return lhs.var->name_hint < rhs.var->name_hint;
+              });
+
+    std::vector<Stmt> bindings;
+    bindings.reserve(aliases.size());
+    for (const AliasInfo &alias : aliases) {
+      Var buffer_var = GetRef<Var>(alias.var);
+      PrimExpr alias_ptr =
+          Call(DataType::Handle(), builtin::handle_add_byte_offset(),
+               {merged_buf_var_, alias.byte_offset});
+      bindings.push_back(tirx::Bind(buffer_var, alias_ptr));
+    }
+    return bindings;
+  }
+
   Stmt VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tirx::attr::thread_extent && !allocated_) {
       // Allocate one dynamic shared memory allocation at the beginning of
@@ -512,8 +550,13 @@ private:
       Buffer merged_buf(merged_buf_var_, DataType::UInt(8),
                         {merged_alloc_size_}, {}, PrimExpr(),
                         merged_buf_var_->name_hint, 0, 0, kDefault);
-      Stmt new_body = SeqStmt(
-          {AllocBuffer(merged_buf), StmtExprMutator::VisitStmt(op->body)});
+      Array<Stmt> seq;
+      seq.push_back(AllocBuffer(merged_buf));
+      for (const Stmt &alias_binding : MakeAliasBindings()) {
+        seq.push_back(alias_binding);
+      }
+      seq.push_back(StmtExprMutator::VisitStmt(op->body));
+      Stmt new_body = SeqStmt(seq);
       return AttrStmt(op->node, op->attr_key, op->value, new_body, op->span);
     }
     return StmtMutator::VisitStmt_(op);
@@ -530,12 +573,7 @@ private:
   }
 
   Stmt VisitStmt_(const DeclBufferNode *op) final {
-    auto node = Downcast<DeclBuffer>(StmtExprMutator::VisitStmt_(op));
-    auto new_buf = GetUpdatedBuffer(node->buffer);
-    if (!new_buf.same_as(node->buffer)) {
-      node.CopyOnWrite()->buffer = new_buf;
-    }
-    return std::move(node);
+    return StmtExprMutator::VisitStmt_(op);
   }
 
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
@@ -554,124 +592,13 @@ private:
           << "MergeSharedMemoryAllocations expects flat memory buffers, "
           << "and is to be run after "
           << "StorageFlatten (TE schedules) or FlattenBuffer (TIR schedules)";
-      Array<PrimExpr> indices = {
-          node->indices[0] +
-          this->GetBufferOffset(node->buffer->data, node->buffer->dtype)};
-
-      auto writer = node.CopyOnWrite();
-      writer->buffer = GetUpdatedBuffer(node->buffer);
-      writer->indices = indices;
     }
 
     return node;
   }
 
-  Buffer GetUpdatedBuffer(Buffer buffer) {
-    auto key = buffer.get();
-    auto it = buffer_remap_.find(key);
-    if (it != buffer_remap_.end()) {
-      return it->second;
-    }
-
-    if (IsAppropriateSharedMemory(buffer->data)) {
-      ICHECK_EQ(buffer->shape.size(), 1)
-          << "Buffer " << buffer << " has shape " << buffer->shape << ".  "
-          << "MergeSharedMemoryAllocations expects flat memory buffers, "
-          << "and is to be run after "
-          << "StorageFlatten (TE schedules) or FlattenBuffer (TIR schedules)";
-      auto writer = buffer.CopyOnWrite();
-      writer->data = merged_buf_var_;
-    }
-
-    buffer_remap_[key] = buffer;
-    return buffer;
-  }
-
   PrimExpr VisitExpr_(const CallNode *op) final {
-    if (op->op.same_as(builtin::tvm_access_ptr())) {
-      ICHECK_EQ(op->args.size(), 5U);
-      DataType dtype = op->args[0].dtype();
-      Var buffer = Downcast<Var>(op->args[1]);
-      if (!IsAppropriateSharedMemory(buffer)) {
-        return StmtExprMutator::VisitExpr_(op);
-      }
-      if (!IsManagedAllocation(buffer)) {
-        return StmtExprMutator::VisitExpr_(op);
-      }
-      ICHECK(HasBufferOffset(buffer))
-          << "Shared memory allocation " << buffer->name_hint
-          << " was collected for merging but was not assigned an offset.";
-      PrimExpr extra_offset = GetBufferOffset(buffer, dtype);
-
-      PrimExpr offset = this->VisitExpr(op->args[2]);
-      PrimExpr extent = this->VisitExpr(op->args[3]);
-      return Call(op->dtype, op->op,
-                  {op->args[0], merged_buf_var_, extra_offset + offset, extent,
-                   op->args[4]});
-    } else if (op->op.same_as(builtin::ptx_cp_async()) ||
-               op->op.same_as(tl::ptx_cp_async())) {
-      ICHECK(op->args.size() == 3U || op->args.size() == 4U)
-          << "ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
-             "src_access_ptr, count[, predicate])";
-
-      // Extract dst_access_ptr and check if it needs merging
-      Call dst_access_ptr = Downcast<Call>(op->args[0]);
-      ICHECK(dst_access_ptr->op.same_as(builtin::tvm_access_ptr()))
-          << "First argument must be tvm_access_ptr";
-
-      // tvm_access_ptr(ptype, data, offset, extent, rw_mask)
-      Var buffer = Downcast<Var>(dst_access_ptr->args[1]);
-      if (!IsAppropriateSharedMemory(buffer)) {
-        return StmtExprMutator::VisitExpr_(op);
-      }
-      if (!IsManagedAllocation(buffer)) {
-        return StmtExprMutator::VisitExpr_(op);
-      }
-      ICHECK(HasBufferOffset(buffer))
-          << "Shared memory allocation " << buffer->name_hint
-          << " was collected for merging but was not assigned an offset.";
-
-      DataType dtype = op->dtype;
-      DataType ptr_dtype = dst_access_ptr->args[0].dtype();
-      PrimExpr extra_offset = GetBufferOffset(buffer, ptr_dtype);
-      PrimExpr offset = this->VisitExpr(dst_access_ptr->args[2]);
-
-      // Create new dst_access_ptr with merged buffer and adjusted offset
-      auto new_dst_access_ptr =
-          Call(DataType::Handle(), builtin::tvm_access_ptr(),
-               {
-                   dst_access_ptr->args[0], // ptype
-                   merged_buf_var_,         // merged buffer
-                   extra_offset + offset,   // adjusted offset
-                   dst_access_ptr->args[3], // extent
-                   dst_access_ptr->args[4]  // rw_mask
-               });
-
-      Array<PrimExpr> cp_async_args = {new_dst_access_ptr, op->args[1],
-                                       op->args[2]};
-      if (op->args.size() == 4U) {
-        cp_async_args.push_back(op->args[3]);
-      }
-      return Call(dtype, op->op, cp_async_args);
-    } else {
-      return StmtExprMutator::VisitExpr_(op);
-    }
-  }
-
-  PrimExpr GetBufferOffset(const Var &buffer_var, DataType dtype) {
-    auto it = buffer_byte_offsets_.find(buffer_var.get());
-    ICHECK(it != buffer_byte_offsets_.end())
-        << "buffer_var = " << buffer_var->name_hint << ", dtype = " << dtype;
-    return indexdiv(it->second, dtype.bytes() * dtype.lanes());
-  }
-
-  bool HasBufferOffset(const Var &buffer_var) {
-    return buffer_byte_offsets_.find(buffer_var.get()) !=
-           buffer_byte_offsets_.end();
-  }
-
-  bool IsManagedAllocation(const Var &buffer_var) {
-    return shmem_allocs_.find(buffer_var.get()) != shmem_allocs_.end();
+    return StmtExprMutator::VisitExpr_(op);
   }
 
   // Wrapper function to determine if the shared memory allocation for a
@@ -1482,9 +1409,6 @@ private:
   PrimExpr merged_alloc_size_{0};
   // The mapping from the original buffer var to its offset in the merged buffer
   std::unordered_map<const VarNode *, PrimExpr> buffer_byte_offsets_;
-  // The mapping from the original buffer objects to their location in the
-  // merged buffer.
-  std::unordered_map<const BufferNode *, Buffer> buffer_remap_;
   // The flag indicating whether the merged buffer has been allocated
   bool allocated_{false};
   // Locations of free ops.
