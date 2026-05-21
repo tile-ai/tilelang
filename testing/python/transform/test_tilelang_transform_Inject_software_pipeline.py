@@ -512,7 +512,27 @@ def test_inject_software_pipeline_expands_annotated_layout():
     assert layout_map[shared.data].is_equal(layout.expand([2]))
 
 
-def test_inject_software_pipeline_replays_scalar_bind_per_stage_use():
+def _collect_leading_bind_names(mod, block_names):
+    leading_binds = {name: [] for name in block_names}
+
+    def _visit(node):
+        if not isinstance(node, tvm.tirx.SBlock) or str(node.name_hint) not in leading_binds:
+            return
+        body = node.body
+        assert isinstance(body, tvm.tirx.SeqStmt), f"{node.name_hint} body should start with scalar Bind"
+        names = []
+        for stmt in body.seq:
+            if not isinstance(stmt, tvm.tirx.Bind):
+                break
+            names.append(str(stmt.var.name))
+        assert names, f"{node.name_hint} body should start with scalar Bind"
+        leading_binds[str(node.name_hint)].append(names)
+
+    post_order_visit(mod["main"].body, _visit)
+    return leading_binds
+
+
+def test_inject_software_pipeline_replays_scalar_bind_without_annotation_slot():
     @T.prim_func
     def before(A: T.Tensor((128,), T.float32), B: T.Tensor((128,), T.float32)):
         shared = T.alloc_buffer((16,), dtype=T.float32, scope="shared")
@@ -521,7 +541,45 @@ def test_inject_software_pipeline_replays_scalar_bind_per_stage_use():
                 0,
                 4,
                 annotations={
-                    "software_pipeline_stage": [0, 0, 1],
+                    "software_pipeline_stage": [0, 1],
+                    "software_pipeline_order": [1, 0],
+                    "software_pipeline_async_stages": [0],
+                    "software_pipeline_async_producers": [1, 0],
+                    "software_pipeline_async_producer_groups": [0, -1],
+                },
+            ):
+                base: T.int32 = i * 16
+                with T.sblock("copy"):
+                    T.reads(A[base + tx])
+                    T.writes(shared[tx])
+                    shared[tx] = A[base + tx]
+                with T.sblock("store"):
+                    T.reads(shared[tx])
+                    T.writes(B[base + tx])
+                    B[base + tx] = shared[tx]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+
+    leading_binds = _collect_leading_bind_names(mod, {"copy", "store"})
+
+    assert leading_binds["copy"]
+    assert leading_binds["store"]
+    assert all(names[0].startswith("base") for names in leading_binds["copy"])
+    assert all(names[0].startswith("base") for names in leading_binds["store"])
+    assert "base = T.int32()" not in mod["main"].script()
+
+
+def test_inject_software_pipeline_ignores_legacy_scalar_bind_annotation_slot():
+    @T.prim_func
+    def before(A: T.Tensor((128,), T.float32), B: T.Tensor((128,), T.float32)):
+        shared = T.alloc_buffer((16,), dtype=T.float32, scope="shared")
+        for tx in T.thread_binding(0, 16, thread="threadIdx.x"):
+            for i in T.serial(
+                0,
+                4,
+                annotations={
+                    "software_pipeline_stage": [3, 0, 1],
                     "software_pipeline_order": [1, 2, 0],
                     "software_pipeline_async_stages": [0],
                     "software_pipeline_async_producers": [0, 1, 0],
@@ -541,22 +599,53 @@ def test_inject_software_pipeline_replays_scalar_bind_per_stage_use():
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
 
-    leading_bind_blocks = {"copy": 0, "store": 0}
+    leading_binds = _collect_leading_bind_names(mod, {"copy", "store"})
 
-    def _visit(node):
-        if not isinstance(node, tvm.tirx.SBlock) or str(node.name_hint) not in leading_bind_blocks:
-            return
-        body = node.body
-        assert isinstance(body, tvm.tirx.SeqStmt), f"{node.name_hint} body should start with scalar Bind"
-        assert isinstance(body.seq[0], tvm.tirx.Bind), f"{node.name_hint} body should start with scalar Bind"
-        assert str(body.seq[0].var.name).startswith("base")
-        leading_bind_blocks[str(node.name_hint)] += 1
-
-    post_order_visit(mod["main"].body, _visit)
-
-    assert leading_bind_blocks["copy"] > 0
-    assert leading_bind_blocks["store"] > 0
+    assert leading_binds["copy"]
+    assert leading_binds["store"]
+    assert all(names[0].startswith("base") for names in leading_binds["copy"])
+    assert all(names[0].startswith("base") for names in leading_binds["store"])
     assert "base = T.int32()" not in mod["main"].script()
+
+
+def test_inject_software_pipeline_replays_scalar_bind_dependencies():
+    @T.prim_func
+    def before(A: T.Tensor((128,), T.float32), B: T.Tensor((128,), T.float32)):
+        shared = T.alloc_buffer((16,), dtype=T.float32, scope="shared")
+        for tx in T.thread_binding(0, 16, thread="threadIdx.x"):
+            for i in T.serial(
+                0,
+                4,
+                annotations={
+                    "software_pipeline_stage": [0, 1],
+                    "software_pipeline_order": [0, 1],
+                },
+            ):
+                base: T.int32 = i * 16
+                offset: T.int32 = base + tx
+                with T.sblock("copy"):
+                    T.reads(A[offset])
+                    T.writes(shared[tx])
+                    shared[tx] = A[offset]
+                with T.sblock("store"):
+                    T.reads(shared[tx])
+                    T.writes(B[offset])
+                    B[offset] = shared[tx]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+
+    leading_binds = _collect_leading_bind_names(mod, {"copy", "store"})
+
+    assert leading_binds["copy"]
+    assert leading_binds["store"]
+    for names in leading_binds["copy"] + leading_binds["store"]:
+        assert len(names) >= 2
+        assert names[0].startswith("base")
+        assert names[1].startswith("offset")
+    script = mod["main"].script()
+    assert "base = T.int32()" not in script
+    assert "offset = T.int32()" not in script
 
 
 if __name__ == "__main__":
