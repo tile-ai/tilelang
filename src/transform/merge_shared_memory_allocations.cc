@@ -47,6 +47,7 @@
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
 #include <tvm/tirx/function.h>
+#include <tvm/tirx/stmt.h>
 
 namespace tvm {
 namespace tl {
@@ -460,18 +461,91 @@ public:
    * \param stmt the statement
    */
   void PlanReuse(const Stmt &stmt, bool is_dynamic = true,
-                 bool enable_aggressive_merge = false, bool verbose = false) {
+                 bool enable_aggressive_merge = false, bool verbose = false,
+                 bool disable_reuse = false) {
     SharedMemLinearAccessPatternFinder finder(is_dynamic,
                                               enable_aggressive_merge, verbose);
     finder(stmt);
     shmem_alignment_map_ = SharedMemoryAlignmentPlanner::Plan(stmt);
-    // First compute liveness over the flattened schedule, then feed it into the
-    // arena packer.
-    this->LivenessAnalysis(finder.linear_seq_, finder.stmt_attrs_);
-    this->PlanMemory(finder.linear_seq_, finder.stmt_attrs_);
+    if (disable_reuse) {
+      this->PlanSequentialLayout();
+    } else {
+      // First compute liveness over the flattened schedule, then feed it into
+      // the arena packer.
+      this->LivenessAnalysis(finder.linear_seq_, finder.stmt_attrs_);
+      this->PlanMemory(finder.linear_seq_, finder.stmt_attrs_);
+    }
   }
 
 private:
+  /*!
+   * \brief Lay out all shared memory buffers sequentially without any reuse.
+   * Each buffer gets its own dedicated region in the merged allocation.
+   */
+  void PlanSequentialLayout() {
+    buffer_byte_offsets_.clear();
+
+    if (shmem_allocs_.empty()) {
+      merged_alloc_size_ = make_const(DataType::Int(64), 0);
+      return;
+    }
+
+    // Sort allocations deterministically by name.
+    std::vector<const VarNode *> sorted_vars;
+    sorted_vars.reserve(shmem_allocs_.size());
+    for (const auto &kv : shmem_allocs_) {
+      sorted_vars.push_back(kv.first);
+    }
+    std::sort(sorted_vars.begin(), sorted_vars.end(),
+              [](const VarNode *a, const VarNode *b) {
+                return a->name_hint < b->name_hint;
+              });
+
+    DataType offset_dtype = DataType::Int(32);
+    PrimExpr cursor = make_const(offset_dtype, 0);
+    PrimExpr total_size = make_const(offset_dtype, 0);
+
+    for (const VarNode *var : sorted_vars) {
+      const AllocBufferNode *alloc = shmem_allocs_.at(var);
+      int64_t bytes_per_elem = static_cast<int64_t>(
+          alloc->buffer->dtype.bytes() * alloc->buffer->dtype.lanes());
+
+      DataType size_dtype = DataType::Int(32);
+      if (!alloc->buffer->shape.empty()) {
+        size_dtype = alloc->buffer->shape[0].dtype();
+      }
+      if (!size_dtype.is_int() && !size_dtype.is_uint()) {
+        size_dtype = DataType::Int(32);
+      }
+
+      PrimExpr size_expr = make_const(size_dtype, bytes_per_elem);
+      for (const PrimExpr &extent : alloc->buffer->shape) {
+        PrimExpr e = extent;
+        if (e.dtype() != size_dtype) {
+          e = cast(size_dtype, e);
+        }
+        size_expr = size_expr * e;
+      }
+
+      int alignment = align_bytes_;
+      auto align_it = shmem_alignment_map_.find(var);
+      if (align_it != shmem_alignment_map_.end()) {
+        alignment = std::max(alignment, align_it->second);
+      }
+
+      cursor = AlignPrimExpr(cursor, alignment);
+      if (size_expr.dtype() != offset_dtype) {
+        size_expr = cast(offset_dtype, size_expr);
+      }
+      buffer_byte_offsets_[var] = cursor;
+      PrimExpr buf_end = cursor + size_expr;
+      total_size = max(total_size, buf_end);
+      cursor = buf_end;
+    }
+
+    merged_alloc_size_ = AlignPrimExpr(total_size, align_bytes_);
+  }
+
   Stmt VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tirx::attr::thread_extent && !allocated_) {
       // Allocate one dynamic shared memory allocation at the beginning of
@@ -1495,19 +1569,24 @@ private:
 
 Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
                                   bool enable_aggressive_merge,
-                                  int align_bytes = 16, bool verbose = false) {
+                                  int align_bytes = 16, bool verbose = false,
+                                  bool disable_reuse = false) {
   AllocateCollector collector;
   collector(stmt);
   if (collector.dyn_shmem_allocs_.size() > 1) {
     SharedMemoryRewriter rewriter(collector.dyn_shmem_allocs_, true, verbose,
                                   align_bytes);
-    rewriter.PlanReuse(stmt, true, enable_aggressive_merge);
+    rewriter.PlanReuse(stmt, true,
+                       disable_reuse ? false : enable_aggressive_merge, false,
+                       disable_reuse);
     stmt = rewriter(std::move(stmt));
   }
   if (merge_static_smem && collector.static_shmem_allocs_.size() > 1) {
     SharedMemoryRewriter rewriter(collector.static_shmem_allocs_, false,
                                   verbose, align_bytes);
-    rewriter.PlanReuse(stmt, false, enable_aggressive_merge);
+    rewriter.PlanReuse(stmt, false,
+                       disable_reuse ? false : enable_aggressive_merge, false,
+                       disable_reuse);
     stmt = rewriter(std::move(stmt));
   }
   return stmt;
@@ -1518,8 +1597,9 @@ using namespace tirx::transform;
 namespace transform {
 
 Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
-                                  int align_bytes = 16) {
-  auto pass_func = [enable_aggressive_merge, align_bytes](
+                                  int align_bytes = 16,
+                                  bool disable_reuse = false) {
+  auto pass_func = [enable_aggressive_merge, align_bytes, disable_reuse](
                        PrimFunc f, const IRModule &m, PassContext ctx) {
     bool merge_static_smem =
         ctx->GetConfig<Bool>("tirx.merge_static_smem", Bool(false)).value();
@@ -1529,7 +1609,7 @@ Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
     auto *n = f.CopyOnWrite();
     n->body = tl::MergeSharedMemoryAllocations(
         std::move(n->body), merge_static_smem, enable_aggressive_merge,
-        align_bytes, debug_merge_shared_memory_allocations);
+        align_bytes, debug_merge_shared_memory_allocations, disable_reuse);
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.MergeSharedMemoryAllocations",

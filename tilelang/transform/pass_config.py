@@ -152,6 +152,12 @@ class PassConfigKey(str, Enum):
     TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE = "tl.enable_aggressive_shared_memory_merge"
     """Enable aggressive merge of shared memory allocations. Default: False"""
 
+    TL_DISABLE_SHARED_MEMORY_REUSE = "tl.disable_shared_memory_reuse"
+    """Disable shared memory reuse planning in MergeSharedMemoryAllocations.
+    When enabled, shared memory allocations are still merged into a single
+    allocation but each buffer gets its own dedicated region without lifetime-based
+    reuse. Default: False"""
+
     TL_DISABLE_SHUFFLE_ELECT = "tl.disable_shuffle_elect"
     """Disable shuffle election optimization. Default: False"""
 
