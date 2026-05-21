@@ -27,6 +27,7 @@
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/s_tir/stmt.h>
+#include <tvm/target/target.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -446,9 +447,10 @@ public:
   explicit SharedMemoryRewriter(
       const std::unordered_map<const VarNode *, const AllocBufferNode *>
           &shmem_allocs,
-      bool is_dynamic = true, bool verbose = false, int align_bytes = 0)
+      bool is_dynamic = true, bool verbose = false, int align_bytes = 0,
+      bool preserve_aliases = true)
       : is_dynamic_{is_dynamic}, shmem_allocs_{shmem_allocs}, verbose_{verbose},
-        align_bytes_{align_bytes} {
+        align_bytes_{align_bytes}, preserve_aliases_{preserve_aliases} {
     if (!is_dynamic) {
       merged_buf_var_ =
           Var("buf_shmem", PointerType(PrimType(DataType::UInt(8)), "shared"));
@@ -552,8 +554,10 @@ private:
                         merged_buf_var_->name_hint, 0, 0, kDefault);
       Array<Stmt> seq;
       seq.push_back(AllocBuffer(merged_buf));
-      for (const Stmt &alias_binding : MakeAliasBindings()) {
-        seq.push_back(alias_binding);
+      if (preserve_aliases_) {
+        for (const Stmt &alias_binding : MakeAliasBindings()) {
+          seq.push_back(alias_binding);
+        }
       }
       seq.push_back(StmtExprMutator::VisitStmt(op->body));
       Stmt new_body = SeqStmt(seq);
@@ -573,7 +577,14 @@ private:
   }
 
   Stmt VisitStmt_(const DeclBufferNode *op) final {
-    return StmtExprMutator::VisitStmt_(op);
+    auto node = Downcast<DeclBuffer>(StmtExprMutator::VisitStmt_(op));
+    if (!preserve_aliases_) {
+      auto new_buf = GetUpdatedBuffer(node->buffer);
+      if (!new_buf.same_as(node->buffer)) {
+        node.CopyOnWrite()->buffer = new_buf;
+      }
+    }
+    return std::move(node);
   }
 
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
@@ -592,13 +603,128 @@ private:
           << "MergeSharedMemoryAllocations expects flat memory buffers, "
           << "and is to be run after "
           << "StorageFlatten (TE schedules) or FlattenBuffer (TIR schedules)";
+      if (!preserve_aliases_) {
+        Array<PrimExpr> indices = {
+            node->indices[0] +
+            this->GetBufferOffset(node->buffer->data, node->buffer->dtype)};
+
+        auto writer = node.CopyOnWrite();
+        writer->buffer = GetUpdatedBuffer(node->buffer);
+        writer->indices = indices;
+      }
     }
 
     return node;
   }
 
+  Buffer GetUpdatedBuffer(Buffer buffer) {
+    auto key = buffer.get();
+    auto it = buffer_remap_.find(key);
+    if (it != buffer_remap_.end()) {
+      return it->second;
+    }
+
+    if (IsAppropriateSharedMemory(buffer->data)) {
+      ICHECK_EQ(buffer->shape.size(), 1)
+          << "Buffer " << buffer << " has shape " << buffer->shape << ".  "
+          << "MergeSharedMemoryAllocations expects flat memory buffers, "
+          << "and is to be run after "
+          << "StorageFlatten (TE schedules) or FlattenBuffer (TIR schedules)";
+      auto writer = buffer.CopyOnWrite();
+      writer->data = merged_buf_var_;
+    }
+
+    buffer_remap_[key] = buffer;
+    return buffer;
+  }
+
   PrimExpr VisitExpr_(const CallNode *op) final {
+    if (preserve_aliases_) {
+      return StmtExprMutator::VisitExpr_(op);
+    }
+    if (op->op.same_as(builtin::tvm_access_ptr())) {
+      ICHECK_EQ(op->args.size(), 5U);
+      DataType dtype = op->args[0].dtype();
+      Var buffer = Downcast<Var>(op->args[1]);
+      if (!IsAppropriateSharedMemory(buffer)) {
+        return StmtExprMutator::VisitExpr_(op);
+      }
+      if (!IsManagedAllocation(buffer)) {
+        return StmtExprMutator::VisitExpr_(op);
+      }
+      ICHECK(HasBufferOffset(buffer))
+          << "Shared memory allocation " << buffer->name_hint
+          << " was collected for merging but was not assigned an offset.";
+      PrimExpr extra_offset = GetBufferOffset(buffer, dtype);
+
+      PrimExpr offset = this->VisitExpr(op->args[2]);
+      PrimExpr extent = this->VisitExpr(op->args[3]);
+      return Call(op->dtype, op->op,
+                  {op->args[0], merged_buf_var_, extra_offset + offset, extent,
+                   op->args[4]});
+    } else if (op->op.same_as(builtin::ptx_cp_async()) ||
+               op->op.same_as(tl::ptx_cp_async())) {
+      ICHECK(op->args.size() == 3U || op->args.size() == 4U)
+          << "ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
+             "src_access_ptr, count[, predicate])";
+
+      // Extract dst_access_ptr and check if it needs merging
+      Call dst_access_ptr = Downcast<Call>(op->args[0]);
+      ICHECK(dst_access_ptr->op.same_as(builtin::tvm_access_ptr()))
+          << "First argument must be tvm_access_ptr";
+
+      // tvm_access_ptr(ptype, data, offset, extent, rw_mask)
+      Var buffer = Downcast<Var>(dst_access_ptr->args[1]);
+      if (!IsAppropriateSharedMemory(buffer)) {
+        return StmtExprMutator::VisitExpr_(op);
+      }
+      if (!IsManagedAllocation(buffer)) {
+        return StmtExprMutator::VisitExpr_(op);
+      }
+      ICHECK(HasBufferOffset(buffer))
+          << "Shared memory allocation " << buffer->name_hint
+          << " was collected for merging but was not assigned an offset.";
+
+      DataType dtype = op->dtype;
+      DataType ptr_dtype = dst_access_ptr->args[0].dtype();
+      PrimExpr extra_offset = GetBufferOffset(buffer, ptr_dtype);
+      PrimExpr offset = this->VisitExpr(dst_access_ptr->args[2]);
+
+      // Create new dst_access_ptr with merged buffer and adjusted offset
+      auto new_dst_access_ptr =
+          Call(DataType::Handle(), builtin::tvm_access_ptr(),
+               {
+                   dst_access_ptr->args[0], // ptype
+                   merged_buf_var_,         // merged buffer
+                   extra_offset + offset,   // adjusted offset
+                   dst_access_ptr->args[3], // extent
+                   dst_access_ptr->args[4]  // rw_mask
+               });
+
+      Array<PrimExpr> cp_async_args = {new_dst_access_ptr, op->args[1],
+                                       op->args[2]};
+      if (op->args.size() == 4U) {
+        cp_async_args.push_back(op->args[3]);
+      }
+      return Call(dtype, op->op, cp_async_args);
+    }
     return StmtExprMutator::VisitExpr_(op);
+  }
+
+  PrimExpr GetBufferOffset(const Var &buffer_var, DataType dtype) {
+    auto it = buffer_byte_offsets_.find(buffer_var.get());
+    ICHECK(it != buffer_byte_offsets_.end())
+        << "buffer_var = " << buffer_var->name_hint << ", dtype = " << dtype;
+    return indexdiv(it->second, dtype.bytes() * dtype.lanes());
+  }
+
+  bool HasBufferOffset(const Var &buffer_var) {
+    return buffer_byte_offsets_.find(buffer_var.get()) !=
+           buffer_byte_offsets_.end();
+  }
+
+  bool IsManagedAllocation(const Var &buffer_var) {
+    return shmem_allocs_.find(buffer_var.get()) != shmem_allocs_.end();
   }
 
   // Wrapper function to determine if the shared memory allocation for a
@@ -1409,28 +1535,36 @@ private:
   PrimExpr merged_alloc_size_{0};
   // The mapping from the original buffer var to its offset in the merged buffer
   std::unordered_map<const VarNode *, PrimExpr> buffer_byte_offsets_;
+  // The mapping from the original buffer objects to their location in the
+  // merged buffer.
+  std::unordered_map<const BufferNode *, Buffer> buffer_remap_;
   // The flag indicating whether the merged buffer has been allocated
   bool allocated_{false};
   // Locations of free ops.
   std::unordered_map<const Object *, EventEntry> event_map_;
   // The mapping of buffer bytes alignment
   std::unordered_map<const VarNode *, int> shmem_alignment_map_;
+  // Whether to preserve original buffer vars as handle aliases of the merged
+  // allocation. Some backends, such as WebGPU, cannot print handle-valued Bind
+  // nodes and use the direct merged-buffer rewrite path instead.
+  bool preserve_aliases_{true};
 };
 
 Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
                                   bool enable_aggressive_merge,
-                                  int align_bytes = 16, bool verbose = false) {
+                                  int align_bytes = 16, bool verbose = false,
+                                  bool preserve_aliases = true) {
   AllocateCollector collector;
   collector(stmt);
   if (collector.dyn_shmem_allocs_.size() > 1) {
     SharedMemoryRewriter rewriter(collector.dyn_shmem_allocs_, true, verbose,
-                                  align_bytes);
+                                  align_bytes, preserve_aliases);
     rewriter.PlanReuse(stmt, true, enable_aggressive_merge);
     stmt = rewriter(std::move(stmt));
   }
   if (merge_static_smem && collector.static_shmem_allocs_.size() > 1) {
     SharedMemoryRewriter rewriter(collector.static_shmem_allocs_, false,
-                                  verbose, align_bytes);
+                                  verbose, align_bytes, preserve_aliases);
     rewriter.PlanReuse(stmt, false, enable_aggressive_merge);
     stmt = rewriter(std::move(stmt));
   }
@@ -1450,10 +1584,14 @@ Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
     bool debug_merge_shared_memory_allocations =
         ctx->GetConfig<Bool>(kDebugMergeSharedMemoryAllocations, Bool(false))
             .value();
+    bool preserve_aliases = true;
+    if (auto target = f->GetAttr<Target>(tvm::attr::kTarget)) {
+      preserve_aliases = target.value()->kind->name != "webgpu";
+    }
     auto *n = f.CopyOnWrite();
     n->body = tl::MergeSharedMemoryAllocations(
         std::move(n->body), merge_static_smem, enable_aggressive_merge,
-        align_bytes, debug_merge_shared_memory_allocations);
+        align_bytes, debug_merge_shared_memory_allocations, preserve_aliases);
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.MergeSharedMemoryAllocations",

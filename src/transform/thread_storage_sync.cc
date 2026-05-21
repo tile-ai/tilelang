@@ -630,6 +630,10 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
   StorageScope GetScope(Var buffer_var) const {
     return StorageScope::Create(GetPtrStorageScope(std::move(buffer_var)));
   }
+  bool IsSharedDynPointer(const Var &buffer_var) const {
+    return buffer_var->type_annotation.as<PointerTypeNode>() &&
+           GetPtrStorageScope(buffer_var) == "shared.dyn";
+  }
   PrimExpr AliasElemOffset(Var buffer_var, DataType dtype,
                            DataType index_dtype) const {
     auto it = shared_memory_alias_byte_offsets_.find(buffer_var.get());
@@ -661,14 +665,13 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     return index + elem_offset;
   }
   void RecordSharedMemoryAlias(const Var &alias_var, const PrimExpr &value) {
-    StorageScope alias_scope = GetScope(alias_var);
-    if (alias_scope.rank != StorageRank::kShared || alias_scope.tag != ".dyn") {
-      return;
-    }
     const auto *call = value.as<CallNode>();
     if (call == nullptr ||
         !call->op.same_as(builtin::handle_add_byte_offset()) ||
         call->args.size() != 2U) {
+      return;
+    }
+    if (!IsSharedDynPointer(alias_var)) {
       return;
     }
     const auto *base = call->args[0].as<VarNode>();
