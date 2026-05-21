@@ -128,7 +128,10 @@ def Pipelined(
         The maximum value of iteration.
     num_stages : int
         The max number of buffer used between pipeline producers and consumers.
-        if num_stages is 0, pipeline will not be enabled.
+        For compiler-inferred pipelines, if ``num_stages`` is 0, pipeline will
+        not be enabled. For manually scheduled pipelines, prefer specifying
+        ``order`` and ``stage`` without ``num_stages``; the pipeline depth is
+        inferred as ``max(stage) + 1``.
     order : Optional[List[int]]
         Optional manual emission order for scheduled statements in the loop
         body. This list should describe executable pipeline statements such as
@@ -151,14 +154,16 @@ def Pipelined(
 
     .. code-block:: python
 
-        for i in T.Pipelined(n, num_stages=2, order=[1, 0], stage=[0, 1]):
+        for i in T.Pipelined(n, order=[1, 0], stage=[0, 1]):
             base: T.int32 = i * block
             T.copy(A[base], shared)
             T.copy(shared, B[base])
 
     Older code that included scalar ``Bind`` entries in ``order``/``stage`` is
     accepted for compatibility, but those entries are ignored by the pipeline
-    passes. New code should annotate only the scheduled statements.
+    passes. New code should annotate only the scheduled statements. Avoid
+    setting ``num_stages`` together with manual ``order``/``stage`` unless you
+    intentionally need an explicit depth override.
     Returns
     -------
     res : frame.ForFrame

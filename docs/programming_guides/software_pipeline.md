@@ -54,7 +54,6 @@ copy statements in stage 0 and compute statements in stage 1:
 ```python
 for ko in T.Pipelined(
     T.ceildiv(K, BK),
-    num_stages=3,
     stage=[0, 0, 1],
     order=[0, 1, 2],
 ):
@@ -81,9 +80,10 @@ after the consumer. In practice:
 - If they are in different stages, producer stage must be less than or equal to
   consumer stage.
 
-`num_stages` controls the pipeline depth, namely the number of in-flight buffer
-versions retained by the rewritten loop. It is separate from the largest
-`stage` value, although common kernels use small stage numbers such as 0 and 1.
+When `stage` and `order` are provided manually, do not also set `num_stages` in
+normal code. The pipeline depth is inferred from the stage list as
+`max(stage) + 1`. Use `num_stages` by itself for compiler-inferred pipelines,
+and use `stage` / `order` by themselves for manually scheduled pipelines.
 
 ## Annotating a Reordered Pipeline
 
@@ -93,7 +93,6 @@ producer before a current-iteration consumer.
 ```python
 for ko in T.Pipelined(
     num_tiles,
-    num_stages=2,
     stage=[0, 1],
     order=[1, 0],
 ):
@@ -121,7 +120,6 @@ A scalar `Bind` may appear as a statement in the loop body:
 ```python
 for ko in T.Pipelined(
     num_tiles,
-    num_stages=2,
     stage=[0, 1],
     order=[1, 0],
 ):
@@ -143,7 +141,6 @@ For example:
 ```python
 for ko in T.Pipelined(
     num_tiles,
-    num_stages=2,
     stage=[0, 1],
     order=[1, 0],
 ):
@@ -196,7 +193,6 @@ Older code may include scalar `Bind` statements in the annotation arrays:
 ```python
 for ko in T.Pipelined(
     num_tiles,
-    num_stages=2,
     stage=[3, 0, 1],
     order=[1, 2, 0],
 ):
