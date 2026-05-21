@@ -53,6 +53,7 @@
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
 #include <tvm/tirx/function.h>
+#include <tvm/tirx/stmt.h>
 
 namespace tvm {
 namespace tl {
@@ -824,7 +825,8 @@ public:
    * \param stmt the statement
    */
   void PlanReuse(const Stmt &stmt, bool is_dynamic = true,
-                 bool enable_aggressive_merge = false, bool verbose = false) {
+                 bool enable_aggressive_merge = false, bool verbose = false,
+                 bool disable_reuse = false) {
     SharedMemLinearAccessPatternFinder finder(is_dynamic,
                                               enable_aggressive_merge, verbose);
     finder(stmt);
@@ -839,132 +841,205 @@ public:
       layout_collector(stmt);
       layout_sigs_ = std::move(layout_collector.layouts);
     }
-    // First compute liveness over the flattened schedule, then feed it into the
-    // arena packer.
-    this->LivenessAnalysis(finder.linear_seq_, finder.stmt_attrs_);
 
-    // ----- Per-epoch liveness (always-on, drives alias decisions) -----
-    //
-    // Build the EpochGraph and the (buffer, epoch) access map keyed by
-    // VarNode*, then solve the forward+backward liveness fixed point. The
-    // resulting `live_epochs` set per buffer is consumed by `PlanMemory`
-    // via `liveness_epochs_by_var_` to relax conflicts that the per-epoch
-    // dataflow proves safe.
-    liveness_epochs_by_var_.clear();
-    {
-      epoch_graph::EpochGraphBuilder eg_builder;
-      epoch_graph::EpochGraph eg = eg_builder.Build(stmt);
-      struct EpochAccessAgg {
-        bool has_read = false;
-        bool has_write = false;
-      };
-      std::map<int, std::map<const VarNode *, EpochAccessAgg>> agg;
-      for (size_t i = 0; i < finder.linear_seq_.size(); ++i) {
-        const auto &e = finder.linear_seq_[i];
-        int epoch_id = e.stmt ? eg.EpochOf(e.stmt) : -1;
-        if (epoch_id < 0)
-          continue;
-        for (const VarNode *v : e.read_touched)
-          agg[epoch_id][v].has_read = true;
-        for (const VarNode *v : e.write_touched)
-          agg[epoch_id][v].has_write = true;
-      }
-      std::unordered_map<const VarNode *,
-                         std::unordered_map<int, epoch_graph::EpochAccess>>
-          live_input;
-      for (const auto &epoch_kv : agg) {
-        for (const auto &buf_kv : epoch_kv.second) {
-          auto &cell = live_input[buf_kv.first][epoch_kv.first];
-          cell.def = cell.def || buf_kv.second.has_write;
-          cell.use = cell.use || buf_kv.second.has_read;
+    if (disable_reuse) {
+      this->PlanSequentialLayout();
+    } else {
+      // First compute liveness over the flattened schedule, then feed it into
+      // the arena packer.
+      this->LivenessAnalysis(finder.linear_seq_, finder.stmt_attrs_);
+
+      // ----- Per-epoch liveness (always-on, drives alias decisions) -----
+      //
+      // Build the EpochGraph and the (buffer, epoch) access map keyed by
+      // VarNode*, then solve the forward+backward liveness fixed point. The
+      // resulting `live_epochs` set per buffer is consumed by `PlanMemory`
+      // via `liveness_epochs_by_var_` to relax conflicts that the per-epoch
+      // dataflow proves safe.
+      liveness_epochs_by_var_.clear();
+      {
+        epoch_graph::EpochGraphBuilder eg_builder;
+        epoch_graph::EpochGraph eg = eg_builder.Build(stmt);
+        struct EpochAccessAgg {
+          bool has_read = false;
+          bool has_write = false;
+        };
+        std::map<int, std::map<const VarNode *, EpochAccessAgg>> agg;
+        for (size_t i = 0; i < finder.linear_seq_.size(); ++i) {
+          const auto &e = finder.linear_seq_[i];
+          int epoch_id = e.stmt ? eg.EpochOf(e.stmt) : -1;
+          if (epoch_id < 0)
+            continue;
+          for (const VarNode *v : e.read_touched)
+            agg[epoch_id][v].has_read = true;
+          for (const VarNode *v : e.write_touched)
+            agg[epoch_id][v].has_write = true;
         }
-      }
-      auto live_out =
-          epoch_graph::ComputePerEpochLiveness<const VarNode *>(eg, live_input);
-      loop_live_buffers_.clear();
-      for (const auto &kv : live_out) {
-        std::set<int> &dst = liveness_epochs_by_var_[kv.first];
-        for (const auto &p : kv.second) {
-          if (p.second.Live())
-            dst.insert(p.first);
+        std::unordered_map<const VarNode *,
+                           std::unordered_map<int, epoch_graph::EpochAccess>>
+            live_input;
+        for (const auto &epoch_kv : agg) {
+          for (const auto &buf_kv : epoch_kv.second) {
+            auto &cell = live_input[buf_kv.first][epoch_kv.first];
+            cell.def = cell.def || buf_kv.second.has_write;
+            cell.use = cell.use || buf_kv.second.has_read;
+          }
         }
-        // If any live epoch belongs to a ForBody scope, mark the buffer as
-        // loop-live so the per-epoch relaxer is disabled for it.
-        for (int epoch_id : dst) {
-          if (epoch_id >= 0 && epoch_id < static_cast<int>(eg.epochs.size())) {
-            int scope_id = eg.epochs[epoch_id].scope_id;
-            if (scope_id >= 0 &&
-                scope_id < static_cast<int>(eg.scopes.size())) {
-              if (eg.scopes[scope_id].kind ==
-                  epoch_graph::ScopeKind::kForBody) {
-                loop_live_buffers_.insert(kv.first);
-                break;
+        auto live_out =
+            epoch_graph::ComputePerEpochLiveness<const VarNode *>(eg, live_input);
+        loop_live_buffers_.clear();
+        for (const auto &kv : live_out) {
+          std::set<int> &dst = liveness_epochs_by_var_[kv.first];
+          for (const auto &p : kv.second) {
+            if (p.second.Live())
+              dst.insert(p.first);
+          }
+          // If any live epoch belongs to a ForBody scope, mark the buffer as
+          // loop-live so the per-epoch relaxer is disabled for it.
+          for (int epoch_id : dst) {
+            if (epoch_id >= 0 && epoch_id < static_cast<int>(eg.epochs.size())) {
+              int scope_id = eg.epochs[epoch_id].scope_id;
+              if (scope_id >= 0 &&
+                  scope_id < static_cast<int>(eg.scopes.size())) {
+                if (eg.scopes[scope_id].kind ==
+                    epoch_graph::ScopeKind::kForBody) {
+                  loop_live_buffers_.insert(kv.first);
+                  break;
+                }
               }
             }
           }
         }
-      }
 
-      if (verbose_) {
-        this->LogBoundarySummaryDeltas(finder.linear_seq_, finder.stmt_attrs_);
-        // Per-stmt witness dump: print every linear_seq_ index, scope offset,
-        // and the buffers it reads/writes/touches.  Used to map planner indices
-        // back to actual TIR statements (and hence CUDA lines) for the lowbit
-        // kernel investigation.
-        for (size_t i = 0; i < finder.linear_seq_.size(); ++i) {
-          const auto &e = finder.linear_seq_[i];
-          std::stringstream rs, ws, ts;
-          for (const VarNode *v : e.read_touched)
-            rs << v->name_hint << " ";
-          for (const VarNode *v : e.write_touched)
-            ws << v->name_hint << " ";
-          for (const VarNode *v : e.touched)
-            ts << v->name_hint << " ";
-          std::string tk = e.stmt ? std::string(e.stmt->GetTypeKey())
-                                  : std::string("<null>");
-          int epoch_id = e.stmt ? eg.EpochOf(e.stmt) : -1;
-          std::cerr << "[MSMA-SEQ] i=" << i << " kind=" << tk
-                    << " scope_off=" << e.scope_pair_offset
-                    << " sync=" << (e.is_sync ? 1 : 0) << " epoch=" << epoch_id
-                    << " R=[" << rs.str() << "]"
-                    << " W=[" << ws.str() << "]"
-                    << " T=[" << ts.str() << "]\n";
-        }
-        eg.Dump(std::cerr);
-        for (const auto &epoch_kv : agg) {
-          for (const auto &buf_kv : epoch_kv.second) {
-            std::cerr << "[MSMA-EPOCH-ACCESS] epoch=" << epoch_kv.first
-                      << " buf=" << buf_kv.first->name_hint
-                      << " r=" << (buf_kv.second.has_read ? 1 : 0)
-                      << " w=" << (buf_kv.second.has_write ? 1 : 0) << "\n";
+        if (verbose_) {
+          this->LogBoundarySummaryDeltas(finder.linear_seq_, finder.stmt_attrs_);
+          // Per-stmt witness dump: print every linear_seq_ index, scope offset,
+          // and the buffers it reads/writes/touches.  Used to map planner indices
+          // back to actual TIR statements (and hence CUDA lines) for the lowbit
+          // kernel investigation.
+          for (size_t i = 0; i < finder.linear_seq_.size(); ++i) {
+            const auto &e = finder.linear_seq_[i];
+            std::stringstream rs, ws, ts;
+            for (const VarNode *v : e.read_touched)
+              rs << v->name_hint << " ";
+            for (const VarNode *v : e.write_touched)
+              ws << v->name_hint << " ";
+            for (const VarNode *v : e.touched)
+              ts << v->name_hint << " ";
+            std::string tk = e.stmt ? std::string(e.stmt->GetTypeKey())
+                                    : std::string("<null>");
+            int epoch_id = e.stmt ? eg.EpochOf(e.stmt) : -1;
+            std::cerr << "[MSMA-SEQ] i=" << i << " kind=" << tk
+                      << " scope_off=" << e.scope_pair_offset
+                      << " sync=" << (e.is_sync ? 1 : 0) << " epoch=" << epoch_id
+                      << " R=[" << rs.str() << "]"
+                      << " W=[" << ws.str() << "]"
+                      << " T=[" << ts.str() << "]\n";
           }
-        }
-        // Re-render liveness with name_hint for log readability.
-        std::map<int, std::vector<
-                          std::pair<std::string, epoch_graph::EpochLiveness>>>
-            by_epoch;
-        for (const auto &kv : live_out) {
-          for (const auto &p : kv.second) {
-            if (p.second.Live()) {
-              by_epoch[p.first].push_back({kv.first->name_hint, p.second});
+          eg.Dump(std::cerr);
+          for (const auto &epoch_kv : agg) {
+            for (const auto &buf_kv : epoch_kv.second) {
+              std::cerr << "[MSMA-EPOCH-ACCESS] epoch=" << epoch_kv.first
+                        << " buf=" << buf_kv.first->name_hint
+                        << " r=" << (buf_kv.second.has_read ? 1 : 0)
+                        << " w=" << (buf_kv.second.has_write ? 1 : 0) << "\n";
+            }
+          }
+          // Re-render liveness with name_hint for log readability.
+          std::map<int, std::vector<
+                            std::pair<std::string, epoch_graph::EpochLiveness>>>
+              by_epoch;
+          for (const auto &kv : live_out) {
+            for (const auto &p : kv.second) {
+              if (p.second.Live()) {
+                by_epoch[p.first].push_back({kv.first->name_hint, p.second});
+              }
+            }
+          }
+          for (const auto &kv : by_epoch) {
+            for (const auto &p : kv.second) {
+              std::cerr << "[MSMA-EPOCH-LIVE] epoch=" << kv.first
+                        << " buf=" << p.first
+                        << " in=" << (p.second.live_in ? 1 : 0)
+                        << " out=" << (p.second.live_out ? 1 : 0) << "\n";
             }
           }
         }
-        for (const auto &kv : by_epoch) {
-          for (const auto &p : kv.second) {
-            std::cerr << "[MSMA-EPOCH-LIVE] epoch=" << kv.first
-                      << " buf=" << p.first
-                      << " in=" << (p.second.live_in ? 1 : 0)
-                      << " out=" << (p.second.live_out ? 1 : 0) << "\n";
-          }
-        }
       }
-    }
 
-    this->PlanMemory(finder.linear_seq_, finder.stmt_attrs_);
+      this->PlanMemory(finder.linear_seq_, finder.stmt_attrs_);
+    }
   }
 
 private:
+  /*!
+   * \brief Lay out all shared memory buffers sequentially without any reuse.
+   * Each buffer gets its own dedicated region in the merged allocation.
+   */
+  void PlanSequentialLayout() {
+    buffer_byte_offsets_.clear();
+
+    if (shmem_allocs_.empty()) {
+      merged_alloc_size_ = make_const(DataType::Int(64), 0);
+      return;
+    }
+
+    // Sort allocations deterministically by name.
+    std::vector<const VarNode *> sorted_vars;
+    sorted_vars.reserve(shmem_allocs_.size());
+    for (const auto &kv : shmem_allocs_) {
+      sorted_vars.push_back(kv.first);
+    }
+    std::sort(sorted_vars.begin(), sorted_vars.end(),
+              [](const VarNode *a, const VarNode *b) {
+                return a->name_hint < b->name_hint;
+              });
+
+    DataType offset_dtype = DataType::Int(32);
+    PrimExpr cursor = make_const(offset_dtype, 0);
+    PrimExpr total_size = make_const(offset_dtype, 0);
+
+    for (const VarNode *var : sorted_vars) {
+      const AllocBufferNode *alloc = shmem_allocs_.at(var);
+      int64_t bytes_per_elem = static_cast<int64_t>(
+          alloc->buffer->dtype.bytes() * alloc->buffer->dtype.lanes());
+
+      DataType size_dtype = DataType::Int(32);
+      if (!alloc->buffer->shape.empty()) {
+        size_dtype = alloc->buffer->shape[0].dtype();
+      }
+      if (!size_dtype.is_int() && !size_dtype.is_uint()) {
+        size_dtype = DataType::Int(32);
+      }
+
+      PrimExpr size_expr = make_const(size_dtype, bytes_per_elem);
+      for (const PrimExpr &extent : alloc->buffer->shape) {
+        PrimExpr e = extent;
+        if (e.dtype() != size_dtype) {
+          e = cast(size_dtype, e);
+        }
+        size_expr = size_expr * e;
+      }
+
+      int alignment = align_bytes_;
+      auto align_it = shmem_alignment_map_.find(var);
+      if (align_it != shmem_alignment_map_.end()) {
+        alignment = std::max(alignment, align_it->second);
+      }
+
+      cursor = AlignPrimExpr(cursor, alignment);
+      if (size_expr.dtype() != offset_dtype) {
+        size_expr = cast(offset_dtype, size_expr);
+      }
+      buffer_byte_offsets_[var] = cursor;
+      PrimExpr buf_end = cursor + size_expr;
+      total_size = max(total_size, buf_end);
+      cursor = buf_end;
+    }
+
+    merged_alloc_size_ = AlignPrimExpr(total_size, align_bytes_);
+  }
+
   Stmt VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tirx::attr::thread_extent && !allocated_) {
       // Allocate one dynamic shared memory allocation at the beginning of
@@ -5247,19 +5322,24 @@ private:
 
 Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
                                   bool enable_aggressive_merge,
-                                  int align_bytes = 16, bool verbose = false) {
+                                  int align_bytes = 16, bool verbose = false,
+                                  bool disable_reuse = false) {
   AllocateCollector collector;
   collector(stmt);
   if (collector.dyn_shmem_allocs_.size() > 1) {
     SharedMemoryRewriter rewriter(collector.dyn_shmem_allocs_, true, verbose,
                                   align_bytes);
-    rewriter.PlanReuse(stmt, true, enable_aggressive_merge);
+    rewriter.PlanReuse(stmt, true,
+                       disable_reuse ? false : enable_aggressive_merge, false,
+                       disable_reuse);
     stmt = rewriter(std::move(stmt));
   }
   if (merge_static_smem && collector.static_shmem_allocs_.size() > 1) {
     SharedMemoryRewriter rewriter(collector.static_shmem_allocs_, false,
                                   verbose, align_bytes);
-    rewriter.PlanReuse(stmt, false, enable_aggressive_merge);
+    rewriter.PlanReuse(stmt, false,
+                       disable_reuse ? false : enable_aggressive_merge, false,
+                       disable_reuse);
     stmt = rewriter(std::move(stmt));
   }
   return stmt;
@@ -5270,8 +5350,9 @@ using namespace tirx::transform;
 namespace transform {
 
 Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
-                                  int align_bytes = 16) {
-  auto pass_func = [enable_aggressive_merge, align_bytes](
+                                  int align_bytes = 16,
+                                  bool disable_reuse = false) {
+  auto pass_func = [enable_aggressive_merge, align_bytes, disable_reuse](
                        PrimFunc f, const IRModule &m, PassContext ctx) {
     bool merge_static_smem =
         ctx->GetConfig<Bool>("tirx.merge_static_smem", Bool(false)).value();
@@ -5281,7 +5362,7 @@ Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
     auto *n = f.CopyOnWrite();
     n->body = tl::MergeSharedMemoryAllocations(
         std::move(n->body), merge_static_smem, enable_aggressive_merge,
-        align_bytes, debug_merge_shared_memory_allocations);
+        align_bytes, debug_merge_shared_memory_allocations, disable_reuse);
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.MergeSharedMemoryAllocations",
