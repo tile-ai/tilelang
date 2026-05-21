@@ -122,17 +122,15 @@ def test_shared_dyn_buffers_are_coalesced_for_dependency_planning():
 
     @T.prim_func(private=True)
     def func():
-        X = T.allocate([128], "float32", "shared.dyn")
-        Y = T.allocate([128], "float32", "shared.dyn")
+        X = T.alloc_buffer((128,), "float32", scope="shared.dyn")
+        Y = T.alloc_buffer((128,), "float32", scope="shared.dyn")
         result_local = T.alloc_buffer([1], dtype="float32", scope="local")
         bx = T.launch_thread("blockIdx.x", 1)
         tx = T.launch_thread("threadIdx.x", 128)
         ty = T.launch_thread("threadIdx.y", 1)
         tz = T.launch_thread("threadIdx.z", 1)
-        Xb = T.Buffer((128,), "float32", data=X, scope="shared.dyn")
-        Yb = T.Buffer((128,), "float32", data=Y, scope="shared.dyn")
-        Xb[tx] = T.float32(tx)
-        result_local[0] = Yb[(tx + 127) % 128]
+        X[tx] = T.float32(tx)
+        result_local[0] = Y[(tx + 127) % 128]
 
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
@@ -146,18 +144,16 @@ def test_explicit_shared_dyn_sync_is_not_duplicated_after_coalescing():
 
     @T.prim_func(private=True)
     def func():
-        X = T.allocate([128], "float32", "shared.dyn")
-        Y = T.allocate([128], "float32", "shared.dyn")
+        X = T.alloc_buffer((128,), "float32", scope="shared.dyn")
+        Y = T.alloc_buffer((128,), "float32", scope="shared.dyn")
         result_local = T.alloc_buffer([1], dtype="float32", scope="local")
         bx = T.launch_thread("blockIdx.x", 1)
         tx = T.launch_thread("threadIdx.x", 128)
         ty = T.launch_thread("threadIdx.y", 1)
         tz = T.launch_thread("threadIdx.z", 1)
-        Xb = T.Buffer((128,), "float32", data=X, scope="shared.dyn")
-        Yb = T.Buffer((128,), "float32", data=Y, scope="shared.dyn")
-        Xb[tx] = T.float32(tx)
+        X[tx] = T.float32(tx)
         T.tvm_storage_sync("shared.dyn")
-        result_local[0] = Yb[(tx + 127) % 128]
+        result_local[0] = Y[(tx + 127) % 128]
 
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)

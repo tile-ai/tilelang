@@ -31,10 +31,10 @@ import pytest
 from tilelang import tvm as tvm
 import tilelang
 import tilelang.testing
-from tvm.script import tir as T
+from tvm.script import tirx as T
 
 
-def _run_with_dump(func: tvm.tir.PrimFunc, capfd) -> str:
+def _run_with_dump(func: tvm.tirx.PrimFunc, capfd) -> str:
     """Run the merge pass with the debug dump enabled and return stderr."""
     mod = tvm.IRModule({"main": func})
     with tvm.transform.PassContext(
@@ -85,13 +85,11 @@ def test_epoch_graph_sequential_hard_syncs(capfd):
     @T.prim_func(private=True)
     def before(A: T.Buffer((64,), "float16")):
         T.launch_thread("blockIdx.x", 1)
-        X = T.allocate([64], "float16", "shared.dyn")
-        Y = T.allocate([64], "float16", "shared.dyn")
         tx = T.launch_thread("threadIdx.x", 64)
         T.launch_thread("threadIdx.y", 1)
         T.launch_thread("threadIdx.z", 1)
-        Xb = T.Buffer((64,), "float16", data=X, scope="shared.dyn")
-        Yb = T.Buffer((64,), "float16", data=Y, scope="shared.dyn")
+        Xb = T.alloc_buffer((64,), "float16", scope="shared.dyn")
+        Yb = T.alloc_buffer((64,), "float16", scope="shared.dyn")
         Xb[tx] = A[tx]
         T.tvm_storage_sync("shared")
         A[tx] = Xb[tx]
@@ -116,13 +114,11 @@ def test_epoch_graph_cp_async_wait_is_weak_sync(capfd):
     @T.prim_func(private=True)
     def before(A: T.Buffer((64,), "float16")):
         T.launch_thread("blockIdx.x", 1)
-        X = T.allocate([64], "float16", "shared.dyn")
-        Y = T.allocate([64], "float16", "shared.dyn")
         tx = T.launch_thread("threadIdx.x", 64)
         T.launch_thread("threadIdx.y", 1)
         T.launch_thread("threadIdx.z", 1)
-        Xb = T.Buffer((64,), "float16", data=X, scope="shared.dyn")
-        Yb = T.Buffer((64,), "float16", data=Y, scope="shared.dyn")
+        Xb = T.alloc_buffer((64,), "float16", scope="shared.dyn")
+        Yb = T.alloc_buffer((64,), "float16", scope="shared.dyn")
         Xb[tx] = A[tx]
         T.ptx_wait_group(0)
         A[tx] = Xb[tx]
@@ -142,13 +138,11 @@ def test_epoch_graph_for_loop_back_and_exit(capfd):
     @T.prim_func(private=True)
     def before(A: T.Buffer((64, 8), "float16")):
         T.launch_thread("blockIdx.x", 1)
-        X = T.allocate([64], "float16", "shared.dyn")
-        Y = T.allocate([64], "float16", "shared.dyn")
         tx = T.launch_thread("threadIdx.x", 64)
         T.launch_thread("threadIdx.y", 1)
         T.launch_thread("threadIdx.z", 1)
-        Xb = T.Buffer((64,), "float16", data=X, scope="shared.dyn")
-        Yb = T.Buffer((64,), "float16", data=Y, scope="shared.dyn")
+        Xb = T.alloc_buffer((64,), "float16", scope="shared.dyn")
+        Yb = T.alloc_buffer((64,), "float16", scope="shared.dyn")
         for k in range(8):
             Xb[tx] = A[tx, k]
             T.tvm_storage_sync("shared")
@@ -172,13 +166,11 @@ def test_epoch_graph_if_then_else_join(capfd):
     @T.prim_func(private=True)
     def before(A: T.Buffer((64,), "float16"), flag: T.int32):
         T.launch_thread("blockIdx.x", 1)
-        X = T.allocate([64], "float16", "shared.dyn")
-        Y = T.allocate([64], "float16", "shared.dyn")
         tx = T.launch_thread("threadIdx.x", 64)
         T.launch_thread("threadIdx.y", 1)
         T.launch_thread("threadIdx.z", 1)
-        Xb = T.Buffer((64,), "float16", data=X, scope="shared.dyn")
-        Yb = T.Buffer((64,), "float16", data=Y, scope="shared.dyn")
+        Xb = T.alloc_buffer((64,), "float16", scope="shared.dyn")
+        Yb = T.alloc_buffer((64,), "float16", scope="shared.dyn")
         if flag == 0:
             Xb[tx] = A[tx]
             A[tx] = Xb[tx]
@@ -206,13 +198,11 @@ def test_epoch_graph_nested_for(capfd):
     @T.prim_func(private=True)
     def before(A: T.Buffer((64, 4, 4), "float16")):
         T.launch_thread("blockIdx.x", 1)
-        X = T.allocate([64], "float16", "shared.dyn")
-        Y = T.allocate([64], "float16", "shared.dyn")
         tx = T.launch_thread("threadIdx.x", 64)
         T.launch_thread("threadIdx.y", 1)
         T.launch_thread("threadIdx.z", 1)
-        Xb = T.Buffer((64,), "float16", data=X, scope="shared.dyn")
-        Yb = T.Buffer((64,), "float16", data=Y, scope="shared.dyn")
+        Xb = T.alloc_buffer((64,), "float16", scope="shared.dyn")
+        Yb = T.alloc_buffer((64,), "float16", scope="shared.dyn")
         for i in range(4):
             for j in range(4):
                 Xb[tx] = A[tx, i, j]
@@ -252,13 +242,11 @@ def test_epoch_access_buffer_segregation_across_hard_sync(capfd):
     @T.prim_func(private=True)
     def before(A: T.Buffer((64,), "float16")):
         T.launch_thread("blockIdx.x", 1)
-        X = T.allocate([64], "float16", "shared.dyn")
-        Y = T.allocate([64], "float16", "shared.dyn")
         tx = T.launch_thread("threadIdx.x", 64)
         T.launch_thread("threadIdx.y", 1)
         T.launch_thread("threadIdx.z", 1)
-        Xb = T.Buffer((64,), "float16", data=X, scope="shared.dyn")
-        Yb = T.Buffer((64,), "float16", data=Y, scope="shared.dyn")
+        Xb = T.alloc_buffer((64,), "float16", scope="shared.dyn")
+        Yb = T.alloc_buffer((64,), "float16", scope="shared.dyn")
         Xb[tx] = A[tx]
         A[tx] = Xb[tx]
         T.tvm_storage_sync("shared")
@@ -303,13 +291,11 @@ def test_epoch_liveness_propagates_across_skipped_epoch(capfd):
     @T.prim_func(private=True)
     def before(A: T.Buffer((64,), "float16")):
         T.launch_thread("blockIdx.x", 1)
-        X = T.allocate([64], "float16", "shared.dyn")
-        Y = T.allocate([64], "float16", "shared.dyn")
         tx = T.launch_thread("threadIdx.x", 64)
         T.launch_thread("threadIdx.y", 1)
         T.launch_thread("threadIdx.z", 1)
-        Xb = T.Buffer((64,), "float16", data=X, scope="shared.dyn")
-        Yb = T.Buffer((64,), "float16", data=Y, scope="shared.dyn")
+        Xb = T.alloc_buffer((64,), "float16", scope="shared.dyn")
+        Yb = T.alloc_buffer((64,), "float16", scope="shared.dyn")
         Xb[tx] = A[tx]
         T.tvm_storage_sync("shared")
         Yb[tx] = A[tx]
