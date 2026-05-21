@@ -67,7 +67,7 @@ def main(argv=None):
 
     logits = torch.rand((M, N), device="cuda", dtype=torch.float32)
 
-    tl_gates, tl_indices = tl_topk(logits, topk)
+    tl_gates, tl_indices = tl_topk(logits, topk, blk_m=blk_m)
 
     torch_gates, torch_indices = ref_program(logits, topk)
 
