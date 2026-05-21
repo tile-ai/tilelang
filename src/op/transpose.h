@@ -7,11 +7,13 @@
 #define TVM_TL_OP_TRANSPOSE_H_
 
 #include "operator.h"
+#include "support/check.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 /// Node class for transpose operations: dst[j, i] = src[i, j]
 class TransposeNode : public TileOperatorNode {
@@ -23,7 +25,7 @@ public:
                                     TileOperatorNode);
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<TransposeNode>()
         .def_ro("src", &TransposeNode::src)
         .def_ro("dst", &TransposeNode::dst)

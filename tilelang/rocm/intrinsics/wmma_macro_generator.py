@@ -19,10 +19,10 @@ from typing import Literal
 import tilelang.language as T
 from tilelang import _ffi_api
 from tilelang import tvm as tvm
-from tvm import tir
+from tvm import tirx
 from tvm.ir import Range
 from tvm.target import Target
-from tvm.tir import Buffer, BufferLoad, BufferRegion, IndexMap, PrimExpr, Var
+from tvm.tirx import Buffer, BufferLoad, BufferRegion, IndexMap, PrimExpr, Var
 from tvm.runtime import convert
 
 from tilelang.language.utils import get_buffer_region_from_load
@@ -472,7 +472,7 @@ class WMMAIntrinEmitter:
         if isinstance(obj, BufferRegion):
             return obj
         if isinstance(obj, Buffer):
-            mins = [tir.IntImm("int32", 0) for _ in obj.shape]
+            mins = [tirx.IntImm("int32", 0) for _ in obj.shape]
             ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, obj.shape)]
             return BufferRegion(obj, ranges)
         if isinstance(obj, BufferLoad):
@@ -480,7 +480,7 @@ class WMMAIntrinEmitter:
             if region is not None:
                 return region
             mins = list(obj.indices)
-            ones = [tir.IntImm("int32", 1) for _ in obj.indices]
+            ones = [tirx.IntImm("int32", 1) for _ in obj.indices]
             ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
             return BufferRegion(obj.buffer, ranges)
         raise ValueError(f"Unsupported argument type: {type(obj)}")

@@ -5,16 +5,18 @@
  */
 
 #include "runtime.h"
+#include "support/check.h"
+#include <tvm/runtime/logging.h>
 
 #include "backend/cuda/stubs/cuda.h"
 #include <cstdint>
 #include <sstream>
-#include <tvm/ffi/function.h>
-#include <tvm/node/node.h>
 #include <vector>
 
 namespace tvm {
 namespace tl {
+
+using namespace ffi;
 
 #if 1
 // Thread-local storage for restoring the L2 persisting cache limit
@@ -532,7 +534,7 @@ static std::vector<std::string> ValidateTensorMapArgs(const TensorMapArgs &T) {
 
 // set device api
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   // Register using the canonical names defined in runtime.h
   refl::GlobalDef().def_packed(
       tl::tvm_tensormap_create_tiled, [](PackedArgs args, Any *ret) {
@@ -768,7 +770,7 @@ ValidateTensorMapIm2ColArgs(const TensorMapIm2ColArgs &T) {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def_packed(
       tl::tvm_tensormap_create_im2col, [](PackedArgs args, Any *ret) {
         TensorMapIm2ColArgs T = TensorMapIm2ColArgs::Extract(args);
@@ -801,7 +803,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 // Exposed as TVM FFI packed functions similar to TMA initialization.
 //
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   // Set stream access policy window and adjust persisting L2 cache size
   // Args:
   //  [0]: void* base_ptr (required)

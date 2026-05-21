@@ -21,8 +21,8 @@ requirements are coextensive.
 The test has two parts:
 
 1. **Generated TIR check** (host-independent). Lowers the buggy-arena
-   kernel for explicit `cuda -arch=sm_{90,100,120}` targets and asserts
-   every `tl.tma_load` destination `tir.tvm_access_ptr` byte offset is
+   kernel for explicit `{"kind": "cuda", "arch": "sm_{90,100,120}"}` targets and asserts
+   every `tl.tma_load` destination `tirx.tvm_access_ptr` byte offset is
    provably 128-byte aligned. Runs on any host.
 
 2. **Runtime check** on the host GPU. Compiles + executes the same kernel
@@ -110,7 +110,7 @@ def _make_buggy_arena_kernel(M, N, K, BM, BN, BK):
 def _lower_for(arch: str):
     M, N, K = 128, 128, 256
     BM, BN, BK = 64, 64, 32
-    target = tvm.target.Target(f"cuda -arch={arch}")
+    target = tvm.target.Target({"kind": "cuda", "arch": arch})
     tilelang.disable_cache()
     try:
         with target:
@@ -124,7 +124,7 @@ def _lower_for(arch: str):
 
 
 def _is_op_call(node, op_name: str) -> bool:
-    return isinstance(node, tvm.tir.Call) and isinstance(node.op, tvm.ir.Op) and node.op.name == op_name
+    return isinstance(node, tvm.tirx.Call) and isinstance(node.op, tvm.ir.Op) and node.op.name == op_name
 
 
 def _collect_tma_loads(mod):
@@ -135,8 +135,8 @@ def _collect_tma_loads(mod):
             loads.append(node)
 
     for _, func in mod.functions.items():
-        if isinstance(func, tvm.tir.PrimFunc):
-            tvm.tir.stmt_functor.post_order_visit(func.body, _visit)
+        if isinstance(func, tvm.tirx.PrimFunc):
+            tvm.tirx.stmt_functor.post_order_visit(func.body, _visit)
     return loads
 
 
@@ -153,8 +153,8 @@ def _assert_tma_destinations_128_aligned(arch: str, mod):
     for load in loads:
         assert len(load.args) >= 3, f"[{arch}] malformed tl.tma_load call: {load}"
         access_ptr = load.args[2]
-        assert _is_op_call(access_ptr, "tir.tvm_access_ptr"), (
-            f"[{arch}] expected tl.tma_load destination argument to be tir.tvm_access_ptr, got: {access_ptr}"
+        assert _is_op_call(access_ptr, "tirx.tvm_access_ptr"), (
+            f"[{arch}] expected tl.tma_load destination argument to be tirx.tvm_access_ptr, got: {access_ptr}"
         )
         byte_offset = analyzer.simplify(_byte_offset(access_ptr))
         assert analyzer.can_prove(byte_offset % 128 == 0), (

@@ -7,12 +7,15 @@
 #define TVM_TL_OP_REDUCE_H_
 
 #include "operator.h"
+#include "support/check.h"
+#include <tvm/runtime/logging.h>
 
 namespace tvm {
 
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 /// Supported reduction operation types
 enum class ReduceTypeEnum : uint8_t {
@@ -33,7 +36,7 @@ public:
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ReduceType", ReduceTypeNode, Object);
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<ReduceTypeNode>().def_ro("type", &ReduceTypeNode::type);
   }
 
@@ -54,7 +57,7 @@ public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ReduceType, ObjectRef,
                                              ReduceTypeNode);
   TVM_DLL ReduceType(std::string type) {
-    auto node = tvm::ffi::make_object<ReduceTypeNode>();
+    auto node = make_object<ReduceTypeNode>();
     if (type == "sum") {
       node->type = int(ReduceTypeEnum::kSum);
     } else if (type == "abssum") {
@@ -81,7 +84,7 @@ public:
 /// Node class for reduction operations
 class ReduceOpNode : public TileOperatorNode {
 public:
-  tir::Buffer src, dst; ///< Source and destination buffers
+  tirx::Buffer src, dst; ///< Source and destination buffers
   // Optional: keep the original regions used to construct this op
   BufferRegion srcRegion_, dstRegion_;
   int dim;         ///< Dimension to reduce along
@@ -104,7 +107,7 @@ public:
                                     TileOperatorNode);
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<ReduceOpNode>()
         .def_ro("src", &ReduceOpNode::src)
         .def_ro("dst", &ReduceOpNode::dst)
@@ -153,7 +156,7 @@ public:
 /// Node class for cumulative sum operations
 class CumSumOpNode : public TileOperatorNode {
 public:
-  tir::Buffer src, dst; ///< Source and destination buffers
+  tirx::Buffer src, dst; ///< Source and destination buffers
   // Optional: keep the original regions used to construct this op
   BufferRegion srcRegion_, dstRegion_;
   int dim;      ///< Dimension along which to compute cumulative sum
@@ -162,7 +165,7 @@ public:
                                     TileOperatorNode);
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<CumSumOpNode>()
         .def_ro("src", &CumSumOpNode::src)
         .def_ro("dst", &CumSumOpNode::dst)

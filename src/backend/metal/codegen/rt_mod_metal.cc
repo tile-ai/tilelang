@@ -9,7 +9,7 @@
  */
 #include "target/codegen_c_host.h"
 
-#include <tvm/ffi/reflection/registry.h>
+#include "support/check.h"
 
 namespace tvm {
 namespace codegen {

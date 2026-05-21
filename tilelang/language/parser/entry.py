@@ -17,14 +17,14 @@
 # This file is modified from the original version,
 # which is part of the TVM project (https://tvm.apache.org/).
 # ruff: noqa
-"""The entry point of TVM parser for tir."""
+"""The entry point of TVM parser for tirx."""
 
 import inspect
 from typing import Callable, Optional, Union
 
 from tvm.ir.base import deprecated
-from tvm import tir
-from tvm.tir import PrimFunc
+from tvm import tirx
+from tvm.tirx import PrimFunc
 
 from ..ast import buffer, ptr
 from tvm.script.parser._core import parse, scan_macro, utils
@@ -116,7 +116,7 @@ def macro(*args, hygienic: bool = True) -> Callable:
         Example:
         ```
         import tvm
-        from tvm.script import tir as T
+        from tvm.script import tirx as T
 
         x_value = 128
 
@@ -170,7 +170,7 @@ class BufferProxy:
         offset_factor=0,
         buffer_type="",
         axis_separators=None,
-    ) -> tir.Buffer:
+    ) -> tirx.Buffer:
         return buffer(
             shape,
             dtype=dtype,
@@ -185,7 +185,7 @@ class BufferProxy:
         )
 
     @deprecated("T.Tensor[...]", "T.Tensor(...)")
-    def __getitem__(self, keys) -> tir.Buffer:
+    def __getitem__(self, keys) -> tirx.Buffer:
         if not isinstance(keys, tuple):
             return self(keys)
         if len(keys) >= 2 and not isinstance(keys[1], str):
