@@ -18,9 +18,11 @@ from tvm.tirx.transform import prim_func_pass
 
 @lru_cache(maxsize=1)
 def _get_gemm_ops():
-    return frozenset({
-        Op.get("tl.tileop.gemm"),
-    })
+    return frozenset(
+        {
+            Op.get("tl.tileop.gemm"),
+        }
+    )
 
 
 def _extract_buffer_var_from_region(region_call):
