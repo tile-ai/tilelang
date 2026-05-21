@@ -571,7 +571,14 @@ private:
     if (enable_buffer_load_lds_ && !predicated && total_bytes == 16) {
       const std::string dst_scope = store->buffer.scope();
       const bool is_shared = dst_scope == "shared" || dst_scope == "shared.dyn";
-      if (is_shared && IsLdsLaneContiguous(dst_check_index)) {
+      // Emit ptx_cp_async_lds whenever shared + 16B + non-predicated. If
+      // dst_check_index is already lane-contiguous, codegen emits the LDS
+      // template directly. Otherwise the LowerTileOp M9 visitor will see
+      // tl::ptx_cp_async_lds and either (a) rewrite via the swizzle-swap
+      // (subtract SwizzleDelta on LDS, add to global) when the layout is
+      // amenable, or (b) downgrade to tl::ptx_cp_async if the post-swap
+      // index is not lane-contiguous. Both paths produce correct code.
+      if (is_shared) {
         ffi::Array<PrimExpr> lds_args = {dst_access_ptr, src_access_ptr,
                                          PrimExpr(num_elems)};
         return Evaluate(
