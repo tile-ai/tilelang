@@ -80,6 +80,12 @@ def should_enable_prelower_semantic_check(pass_ctx: PassContext | None = None) -
     return enabled
 
 
+def should_disable_shared_memory_reuse(pass_ctx: PassContext | None = None) -> bool:
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+    return bool(pass_ctx.config.get(tilelang.PassConfigKey.TL_DISABLE_SHARED_MEMORY_REUSE, False))
+
+
 def get_layout_visual_formats(pass_ctx: PassContext | None = None) -> list[str]:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
@@ -278,7 +284,8 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # MergeSharedMemoryAllocations must be applied after SplitHostDevice
     # because the merged allocation site is at the beginning of each device function
     enable_aggressive_merge = should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target)
-    mod = tilelang.transform.MergeSharedMemoryAllocations(enable_aggressive_merge=enable_aggressive_merge)(mod)
+    disable_reuse = should_disable_shared_memory_reuse(pass_ctx=pass_ctx)
+    mod = tilelang.transform.MergeSharedMemoryAllocations(enable_aggressive_merge=enable_aggressive_merge, disable_reuse=disable_reuse)(mod)
     # InjectFenceProxy is a no-op on targets that lack the TMA / async-proxy
     # programming model; the pass itself checks the PrimFunc's target.
     mod = tilelang.transform.InjectFenceProxy()(mod)

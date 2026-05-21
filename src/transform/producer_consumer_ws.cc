@@ -2349,12 +2349,18 @@ private:
         return Optional<Stmt>();
       }
 
-      PropagatePreludeLiveness(op, loop_idx);
-      AppendClassifiedPrelude(op, loop_idx, &new_seq);
-
       Optional<Stmt> rewritten_loop = VisitStmt(op->seq[loop_idx]);
       ICHECK(rewritten_loop.defined())
           << "ProducerConsumerWS: failed to replace pipeline loop child";
+
+      // Rewrite the child containing the pipeline loop before classifying this
+      // level's prelude.  The recursive rewrite propagates liveness from
+      // nested post-loop consumers, which outer prelude BindNodes need in
+      // order to stay shared when they feed both pre-loop shared work and the
+      // producer/consumer branches.
+      PropagatePreludeLiveness(op, loop_idx);
+      AppendClassifiedPrelude(op, loop_idx, &new_seq);
+
       new_seq.push_back(rewritten_loop.value());
 
       for (int i = loop_idx + 1; i < static_cast<int>(op->seq.size()); ++i) {

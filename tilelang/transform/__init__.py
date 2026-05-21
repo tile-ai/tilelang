@@ -387,7 +387,7 @@ def FlattenBuffer():
     return _ffi_api.FlattenBuffer()  # type: ignore
 
 
-def MergeSharedMemoryAllocations(enable_aggressive_merge: bool = False, align_bytes: int = 16):
+def MergeSharedMemoryAllocations(enable_aggressive_merge: bool = False, align_bytes: int = 16, disable_reuse: bool = False):
     """MergeSharedMemoryAllocations
 
     Returns
@@ -395,7 +395,7 @@ def MergeSharedMemoryAllocations(enable_aggressive_merge: bool = False, align_by
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.MergeSharedMemoryAllocations(enable_aggressive_merge, align_bytes)  # type: ignore
+    return _ffi_api.MergeSharedMemoryAllocations(enable_aggressive_merge, align_bytes, disable_reuse)  # type: ignore
 
 
 def MarkCudaSyncCalls(have_pdl: bool = False):

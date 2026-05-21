@@ -82,11 +82,12 @@ jobs:
             # Format: [Nightly-]CUDA-<major>.<minor>[.<patch>]. E.g., "CUDA-12.8" or "Nightly-CUDA-13.0".
             # Use "Nightly-" prefix to use torch nightly builds.
             toolkit: CUDA-12.8
-          - tags: [self-hosted, amd, gpu]
-            name: self-hosted-amd
-            # Format: [Nightly-]ROCm-<major>.<minor>[.<patch>]. E.g., "ROCm-6.4" or "Nightly-ROCm-7.0".
-            # Use "Nightly-" prefix to use torch nightly builds.
-            toolkit: Nightly-ROCm-7.2
+          # ROCm CI is temporarily disabled.
+          # - tags: [self-hosted, amd, gpu]
+          #   name: self-hosted-amd
+          #   # Format: [Nightly-]ROCm-<major>.<minor>[.<patch>]. E.g., "ROCm-6.4" or "Nightly-ROCm-7.0".
+          #   # Use "Nightly-" prefix to use torch nightly builds.
+          #   toolkit: Nightly-ROCm-7.2
           - tags: [macos-latest]
             name: macos-latest
             toolkit: Metal # or Nightly-Metal
