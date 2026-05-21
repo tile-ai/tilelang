@@ -2621,8 +2621,7 @@ public:
     static const Op &copy_op = Op::Get("tl.tileop.copy");
     static const Op &tma_copy_op = Op::Get("tl.tileop.tma_copy");
     static const Op &im2col_op = Op::Get("tl.tileop.im2col");
-    static const Op &deprecated_c2d_im2col_op =
-        Op::Get("tl.tileop.c2d_im2col");
+    static const Op &deprecated_c2d_im2col_op = Op::Get("tl.tileop.c2d_im2col");
     Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
     if (call->op.same_as(copy_op)) {
       auto new_annotations = call->annotations;

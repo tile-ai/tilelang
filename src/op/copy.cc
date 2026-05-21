@@ -136,15 +136,15 @@ const Im2ColImpl &ResolveIm2ColImpl(Target target) {
   return *best_impl;
 }
 
-Stmt LowerIm2ColForTarget(const Im2ColOpNode &op,
-                                const LowerArgs &T, arith::Analyzer *analyzer) {
+Stmt LowerIm2ColForTarget(const Im2ColOpNode &op, const LowerArgs &T,
+                          arith::Analyzer *analyzer) {
   return ResolveIm2ColImpl(T.target).lower(op, T, analyzer);
 }
 
 bool MatchAnyIm2ColTarget(Target /*target*/) { return true; }
 
 Stmt LowerIm2ColSIMT(const Im2ColOpNode &op, const LowerArgs &T,
-                           arith::Analyzer *analyzer) {
+                     arith::Analyzer *analyzer) {
   const Buffer &src = op.src_;
   const Buffer &dst = op.dst_;
   const BufferRegion &dst_region = op.dstRegion_;
@@ -165,34 +165,31 @@ Stmt LowerIm2ColSIMT(const Im2ColOpNode &op, const LowerArgs &T,
   PrimExpr h_dim = src->shape[1];
   PrimExpr w_dim = src->shape[2];
   PrimExpr c_dim = src->shape[3];
-  PrimExpr out_h = FloorDiv(h_dim + 2 * op.padding_ -
-                                (op.kernel_ - 1) * op.dilation_ - 1,
-                            op.stride_) +
-                   1;
-  PrimExpr out_w = FloorDiv(w_dim + 2 * op.padding_ -
-                                (op.kernel_ - 1) * op.dilation_ - 1,
-                            op.stride_) +
-                   1;
+  PrimExpr out_h =
+      FloorDiv(h_dim + 2 * op.padding_ - (op.kernel_ - 1) * op.dilation_ - 1,
+               op.stride_) +
+      1;
+  PrimExpr out_w =
+      FloorDiv(w_dim + 2 * op.padding_ - (op.kernel_ - 1) * op.dilation_ - 1,
+               op.stride_) +
+      1;
   PrimExpr out_hw = out_h * out_w;
 
   PrimExpr k = op.c_step_ * block_k + j;
   PrimExpr m = op.nhw_step_ * block_m + i;
-  PrimExpr access_h =
-      FloorDiv(FloorMod(m, out_hw), out_w) * op.stride_ +
-      FloorDiv(k, op.kernel_ * c_dim) * op.dilation_ - op.padding_;
+  PrimExpr access_h = FloorDiv(FloorMod(m, out_hw), out_w) * op.stride_ +
+                      FloorDiv(k, op.kernel_ * c_dim) * op.dilation_ -
+                      op.padding_;
   PrimExpr access_w = FloorMod(m, out_w) * op.stride_ +
-                      FloorMod(FloorDiv(k, c_dim), op.kernel_) *
-                          op.dilation_ -
+                      FloorMod(FloorDiv(k, c_dim), op.kernel_) * op.dilation_ -
                       op.padding_;
 
-  PrimExpr in_bound =
-      And(And(access_h >= make_zero(access_h.dtype()),
-              access_w >= make_zero(access_w.dtype())),
-          And(access_h < h_dim, access_w < w_dim));
+  PrimExpr in_bound = And(And(access_h >= make_zero(access_h.dtype()),
+                              access_w >= make_zero(access_w.dtype())),
+                          And(access_h < h_dim, access_w < w_dim));
 
-  PrimExpr value =
-      BufferLoad(src, {FloorDiv(m, out_hw), access_h, access_w,
-                       FloorMod(k, c_dim)});
+  PrimExpr value = BufferLoad(
+      src, {FloorDiv(m, out_hw), access_h, access_w, FloorMod(k, c_dim)});
   value = if_then_else(in_bound, value, make_zero(dst->dtype));
 
   Array<PrimExpr> dst_indices;
@@ -526,8 +523,7 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 // Constructs an Im2ColOp node from call arguments.
 // args: src, dst, nhw_step, c_step, kernel, stride, dilation, padding,
 // eviction_policy
-Im2ColOp::Im2ColOp(Array<PrimExpr> args,
-                   Map<String, ObjectRef> annotations) {
+Im2ColOp::Im2ColOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<Im2ColOpNode> node = make_object<Im2ColOpNode>();
   auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
   auto dst_access = NormalizeToAccessRegion(args[1], kAccessWrite);
@@ -553,8 +549,7 @@ TileOperator Im2ColOpNode::Clone() const {
   return Im2ColOp(op);
 }
 
-Stmt Im2ColOpNode::Lower(const LowerArgs &T,
-                         arith::Analyzer *analyzer) const {
+Stmt Im2ColOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   return LowerIm2ColForTarget(*this, T, analyzer);
 }
 
@@ -618,11 +613,11 @@ TIR_REGISTER_TL_TILE_OP(Im2ColOp, im2col)
 // scheduled for removal in TileLang 0.14.0.
 TVM_REGISTER_OP("tl.tileop.c2d_im2col")
     .set_attr<TScriptPrinterName>("TScriptPrinterName", "c2d_im2col")
-    .set_attr<OpBuilderFunc>(
-        "TLOpBuilder",
-        [](Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
-          return Im2ColOp(args, annotations);
-        })
+    .set_attr<OpBuilderFunc>("TLOpBuilder",
+                             [](Array<PrimExpr> args,
+                                Map<String, ObjectRef> annotations) {
+                               return Im2ColOp(args, annotations);
+                             })
     .set_num_inputs(9)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));

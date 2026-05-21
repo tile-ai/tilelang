@@ -71,8 +71,6 @@ def ref_program(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 def main(M=8192, N=8192, blk_m=8):
     x = torch.randn(M, N, device="cuda", dtype=torch.float32)
 
-    print(per_token_cast_to_fp8.get_kernel_source(x, blk_m))
-
     x_fp8, x_amax = per_token_cast_to_fp8(x, blk_m)
     x_fp8_ref, x_amax_ref = ref_program(x)
 

@@ -170,8 +170,6 @@ def main(M=8192, N=8192, BG=2, blk_m=8, batch_sizes=None):
     print("batch_sizes:", batch_sizes)
     print("M_max:", M_max)
 
-    print(group_per_split_token_cast_to_fp8.get_kernel_source(x, batch_sizes, M_max, blk_m))
-
     x_fp8, x_amax = group_per_split_token_cast_to_fp8(x, batch_sizes, M_max, blk_m)
     x_fp8_ref, x_amax_ref = ref_program(x, batch_sizes)
 
