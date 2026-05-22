@@ -15,7 +15,7 @@ import torch
 import torch.distributed as dist
 
 import tilelang.testing
-import tilelang.utils.allocator as allocator_mod
+import tilelang.distributed.allocator as allocator_mod
 from testing.python.distributed._utils import distributed_test
 
 
@@ -136,8 +136,8 @@ def test_vmm_handle_export_import():
 
 @distributed_test(require_fabric=True)
 def test_distributed_vmm(local_rank: int, num_ranks: int):
-    from tilelang.distributed.utils import init_dist
-    from tilelang.utils.allocator import BaseAllocator
+    from tilelang.distributed.host import init_dist
+    from tilelang.distributed.allocator import BaseAllocator
 
     _, _, group = init_dist(local_rank, num_ranks)
 
@@ -165,20 +165,34 @@ def test_distributed_vmm(local_rank: int, num_ranks: int):
 
 @distributed_test()
 def test_distributed_ipc_fallback(local_rank: int, num_ranks: int):
-    from tilelang.distributed.utils import create_dist_tensor, create_tensor, init_dist
+    from tilelang.distributed.allocator import BaseAllocator
+    from tilelang.distributed.host import init_dist
 
-    rank, _, group = init_dist(local_rank, num_ranks)
+    _, _, group = init_dist(local_rank, num_ranks)
 
-    data = create_tensor([1024], torch.float32)
-    data.fill_(float(rank + 1))
+    allocator = BaseAllocator(
+        size=1024 * 1024,
+        device="cuda",
+        is_distributed=True,
+        local_rank=local_rank,
+        num_local_ranks=num_ranks,
+        group=group,
+        use_vmm=False,
+    )
 
-    buffer_ptrs = create_dist_tensor(local_rank, num_ranks, data, rank, group, use_vmm=False)
+    assert allocator.initialized()
+    assert not allocator._use_vmm
+    assert allocator._buffer_ptrs is not None
+    assert allocator._buffer_ptrs.shape[0] == num_ranks
 
-    assert buffer_ptrs.shape[0] == num_ranks
     remote_rank = (local_rank + 1) % num_ranks
-    assert buffer_ptrs[remote_rank].item() != 0, f"Remote rank {remote_rank} pointer is zero"
+    assert allocator._buffer_ptrs[remote_rank].item() != 0, f"Remote rank {remote_rank} pointer is zero"
 
-    dist.barrier()
+    t = allocator._allocate_tensor((256,), torch.float32)
+    t.fill_(float(local_rank + 1))
+    torch.cuda.synchronize()
+    dist.barrier(group)
+    allocator.close()
     dist.destroy_process_group()
 
 

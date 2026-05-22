@@ -17,8 +17,9 @@ import torch.multiprocessing
 import tilelang
 import tilelang.language as T
 from tilelang.carver.arch import driver
-from tilelang.distributed import do_bench, init_dist
-from tilelang.utils.allocator import get_allocator
+from tilelang.distributed.bench import do_bench
+from tilelang.distributed.host import init_dist
+from tilelang.distributed.allocator import get_allocator
 
 os.environ.setdefault("NCCL_DEBUG", "ERROR")
 tilelang.enable_cache()

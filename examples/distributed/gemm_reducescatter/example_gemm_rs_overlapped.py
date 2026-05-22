@@ -6,8 +6,8 @@ import argparse
 import torch
 import torch.distributed as dist
 import torch.multiprocessing
-from tilelang.distributed import init_dist
-from tilelang.distributed import do_bench
+from tilelang.distributed.bench import do_bench
+from tilelang.distributed.host import init_dist
 from reduce_scatter_utils import reduce_scatter_2d_op, create_reduce_scater_2d_ctx
 
 

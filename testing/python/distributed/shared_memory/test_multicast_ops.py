@@ -34,8 +34,8 @@ def test_supports_multicast():
 @distributed_test(nprocs=None, require_multicast=True)
 def test_distributed_multicast_allocator(local_rank: int, num_ranks: int):
     """Create multicast buffer via BaseAllocator, verify P2P access through MC VAs."""
-    from tilelang.distributed import init_dist
-    from tilelang.utils.allocator import BaseAllocator
+    from tilelang.distributed.host import init_dist
+    from tilelang.distributed.allocator import BaseAllocator
 
     tilelang.disable_cache()
     _, _, group = init_dist(local_rank, num_ranks)

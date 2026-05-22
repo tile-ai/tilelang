@@ -64,7 +64,7 @@ _KERNELS = [_kernel_get_rank, _kernel_get_num_ranks]
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 @distributed_test()
 def test_basic(local_rank: int, num_local_ranks: int):
-    from tilelang.distributed import init_dist
+    from tilelang.distributed.host import init_dist
 
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
 

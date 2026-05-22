@@ -19,7 +19,7 @@ _M = 1024
 
 @distributed_test()
 def test_return_peers(local_rank: int, num_ranks: int):
-    from tilelang.distributed import init_dist
+    from tilelang.distributed.host import init_dist
 
     rank, num_ranks, group = init_dist(local_rank, num_ranks)
     try:

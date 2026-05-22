@@ -11,7 +11,8 @@ if version.parse(cuda_python_version) >= version.parse("12.8.0"):
 else:
     from cuda import cuda
 import tilelang
-from tilelang.distributed.utils import CUDA_CHECK, has_fullmesh_nvlink
+from tilelang.distributed.host import CUDA_CHECK
+from tilelang.distributed.topology import has_fullmesh_nvlink
 from tilelang.utils.target import target_is_hopper, determine_target
 import torch.distributed as dist
 import tilelang.language as T

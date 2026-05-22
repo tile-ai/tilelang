@@ -3,7 +3,7 @@ import tilelang.language as T
 import torch
 import torch.distributed as dist
 import argparse
-from tilelang.distributed import init_dist
+from tilelang.distributed.host import init_dist
 from testing.python.distributed._utils import distributed_test
 
 

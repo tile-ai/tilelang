@@ -76,14 +76,17 @@ All multimem ops use the same `src`/`dst` signature as `T.copy()` — accepts `B
 
 ## 2. Python Runtime Utilities (`tilelang.distributed`)
 
-### 2.1 Process Initialization
+Distributed host-side helpers are split by responsibility. Import new code from
+the focused modules below instead of using a catch-all utilities module.
+
+### 2.1 Host Runtime (`tilelang.distributed.host`)
 
 #### `init_dist(local_rank, num_local_ranks) -> (rank, world_size, group)`
 
 Initialize NCCL process group and set CUDA device. Reads `MASTER_ADDR`, `MASTER_PORT`, `WORLD_SIZE`, `RANK` from environment.
 
 ```python
-from tilelang.distributed import init_dist
+from tilelang.distributed.host import init_dist
 rank, num_ranks, group = init_dist(local_rank=0, num_local_ranks=8)
 ```
 
@@ -92,26 +95,24 @@ rank, num_ranks, group = init_dist(local_rank=0, num_local_ranks=8)
 | API | Signature | Description |
 |-----|-----------|-------------|
 | `CUDA_CHECK(result)` | `(CUresult) -> None` | Assert CUDA driver call succeeded |
-| `perf_fn(fn, warmup=50, rep=50)` | `-> float (ms)` | Benchmark with L2 flush, returns avg ms |
-| `has_fullmesh_nvlink()` | `-> bool` | Check if all GPU pairs have NVLink |
 | `set_signal(tensor, value, stream)` | Host-side `cuStreamWriteValue32` | |
 | `wait_eq(tensor, value, stream)` | Host-side `cuStreamWaitValue32` | |
-| `dist_print(*args, allowed_ranks=[0])` | Rank-filtered print | |
 | `supports_p2p_native_atomic()` | `-> bool` | Check P2P atomic support between GPU 0 and 1 |
 
-### 2.3 Tensor Creation
+### 2.3 Benchmarking (`tilelang.distributed.bench`)
 
-#### `create_tensor(shape, dtype) -> torch.Tensor`
+| API | Signature | Description |
+|-----|-----------|-------------|
+| `do_bench(fn, warmup=50, rep=50, group=None)` | `-> float (ms)` | Benchmark with CUDA events and optional distributed timing reduction |
+| `perf_fn(fn, warmup=50, rep=50)` | `-> float (ms)` | Backward-compatible alias for `do_bench` |
 
-Allocate via `cudaMalloc` (IPC-compatible).
+### 2.4 Topology (`tilelang.distributed.topology`)
 
-#### `create_dist_tensor(local_rank, num_local_ranks, data, rank, group, use_vmm=None) -> torch.Tensor`
-
-Exchange IPC/VMM handles across ranks, return a `uint64` tensor of peer base pointers.
-
-#### `create_mapped_tensor(shape, dtype) -> (host_tensor, device_tensor)`
-
-Pinned host + CUDA device tensor pair.
+| API | Description |
+|-----|-------------|
+| `has_fullmesh_nvlink()` | Check if all GPU pairs have NVLink |
+| `has_fullmesh_nvlink_pynvml()` | NVML-backed fullmesh check |
+| `NvidiaSmiUtil` | `nvidia-smi` topology helpers |
 
 ---
 
@@ -147,7 +148,7 @@ Create a zero-copy CUDA tensor viewing externally-allocated device memory. Suppo
 
 ---
 
-## 4. Distributed Allocator (`tilelang.utils.allocator`)
+## 4. Distributed Allocator (`tilelang.distributed.allocator`)
 
 ### `BaseAllocator`
 
@@ -182,7 +183,7 @@ allocator = tilelang.get_allocator(
 
 ---
 
-## 5. Distributed Tensor Allocation (`tilelang.tensor`)
+## 5. Distributed Tensor Allocation (`tilelang.distributed.tensor`)
 
 ```python
 # Regular tensor (fallback to torch.empty)
@@ -195,6 +196,9 @@ ag_buffer = tilelang.tensor((M, K), dtype, allocator=allocator, return_peers=Tru
 # Distributed tensor without peer views
 B = tilelang.tensor((K, N), dtype, allocator=allocator)
 ```
+
+`tilelang.tensor` is the public convenience entrypoint for this allocator-backed
+path.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|

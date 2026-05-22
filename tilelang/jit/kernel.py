@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
 
-from tilelang.utils.allocator import BaseAllocator
+from tilelang.distributed.allocator import BaseAllocator
 
 
 class JITKernel(Generic[_P, _T]):

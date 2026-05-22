@@ -37,7 +37,7 @@ def _kernel_remote_st(M: int, block_M: int, threads: int):
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 @distributed_test()
 def test_remote_st(local_rank: int, num_ranks: int):
-    from tilelang.distributed import init_dist
+    from tilelang.distributed.host import init_dist
 
     rank, num_ranks, group = init_dist(local_rank, num_ranks)
     allocator = tilelang.get_allocator(

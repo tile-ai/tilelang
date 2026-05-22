@@ -6,8 +6,8 @@ from itertools import accumulate
 import torch
 import torch.distributed as dist
 import torch.multiprocessing
-from tilelang.distributed import init_dist
-from tilelang.distributed import do_bench
+from tilelang.distributed.bench import do_bench
+from tilelang.distributed.host import init_dist
 from sp_ag_attention_intra_node import (
     create_sp_ag_attention_context_intra_node,
     fused_sp_ag_attn_intra_node,

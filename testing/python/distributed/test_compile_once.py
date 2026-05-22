@@ -35,7 +35,7 @@ def _jit_identity_kernel():
 
 @distributed_test()
 def test_compile_once_root_runs_before_non_root(local_rank: int, num_ranks: int):
-    from tilelang.distributed import init_dist
+    from tilelang.distributed.host import init_dist
 
     _, _, group = init_dist(local_rank, num_ranks)
     tilelang_jit = importlib.import_module("tilelang.jit")
@@ -67,7 +67,7 @@ def test_compile_once_root_runs_before_non_root(local_rank: int, num_ranks: int)
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 @distributed_test()
 def test_compile_once_compile_api(local_rank: int, num_ranks: int):
-    from tilelang.distributed import init_dist
+    from tilelang.distributed.host import init_dist
 
     _, _, group = init_dist(local_rank, num_ranks)
     kernel = tilelang.compile(_identity_kernel(), compile_once=True, compile_group=group)
@@ -84,7 +84,7 @@ def test_compile_once_compile_api(local_rank: int, num_ranks: int):
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 @distributed_test()
 def test_compile_once_jit_api(local_rank: int, num_ranks: int):
-    from tilelang.distributed import init_dist
+    from tilelang.distributed.host import init_dist
 
     _, _, group = init_dist(local_rank, num_ranks)
     _jit_identity_kernel.compile_group = group
@@ -103,7 +103,7 @@ def test_compile_once_jit_api(local_rank: int, num_ranks: int):
 
 @distributed_test()
 def test_compile_once_nonzero_root(local_rank: int, num_ranks: int):
-    from tilelang.distributed import init_dist
+    from tilelang.distributed.host import init_dist
 
     _, _, group = init_dist(local_rank, num_ranks)
     tilelang_jit = importlib.import_module("tilelang.jit")
@@ -139,7 +139,7 @@ def test_compile_once_nonzero_root(local_rank: int, num_ranks: int):
 
 @distributed_test()
 def test_compile_once_root_failure_reaches_all_ranks(local_rank: int, num_ranks: int):
-    from tilelang.distributed import init_dist
+    from tilelang.distributed.host import init_dist
 
     _, _, group = init_dist(local_rank, num_ranks)
     tilelang_jit = importlib.import_module("tilelang.jit")

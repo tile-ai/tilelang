@@ -8,7 +8,8 @@ import torch.multiprocessing
 import tilelang
 import tilelang.language as T
 from tilelang.carver.arch import driver
-from tilelang.distributed import init_dist, do_bench
+from tilelang.distributed.bench import do_bench
+from tilelang.distributed.host import init_dist
 
 os.environ.setdefault("NCCL_DEBUG", "ERROR")
 

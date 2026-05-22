@@ -36,7 +36,7 @@ def _multimem_allreduce_kernel(N: int, block_N: int, threads: int):
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 @distributed_test(nprocs=None, require_multicast=True)
 def test_multimem(local_rank: int, num_ranks: int):
-    from tilelang.distributed import init_dist
+    from tilelang.distributed.host import init_dist
 
     rank, _, group = init_dist(local_rank, num_ranks)
     allocator = tilelang.get_allocator(

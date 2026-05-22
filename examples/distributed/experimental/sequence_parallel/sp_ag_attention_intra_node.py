@@ -4,7 +4,7 @@ import tilelang.language as T
 from typing import List
 from dataclasses import dataclass
 from cuda import cudart
-from tilelang.distributed.utils import CUDA_CHECK
+from tilelang.distributed.host import CUDA_CHECK
 
 
 @tilelang.jit(compile_once=True)

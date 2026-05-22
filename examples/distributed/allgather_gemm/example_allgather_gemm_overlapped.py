@@ -8,8 +8,7 @@ import argparse
 import torch
 import torch.distributed as dist
 import torch.multiprocessing
-from tilelang.distributed import init_dist
-from tilelang.distributed.utils import CUDA_CHECK
+from tilelang.distributed.host import CUDA_CHECK, init_dist
 from tilelang.carver.arch import driver
 import importlib.metadata
 
@@ -20,7 +19,7 @@ if version.parse(cuda_python_version) >= version.parse("12.8.0"):
     from cuda.bindings import driver as cuda
 else:
     from cuda import cuda
-from tilelang.distributed import do_bench
+from tilelang.distributed.bench import do_bench
 
 os.environ.setdefault("NCCL_DEBUG", "ERROR")  # silence NCCL log
 tilelang.set_log_level(logging.WARNING)

@@ -114,7 +114,7 @@ for _fn in _KERNEL_FNS:
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 @distributed_test()
 def test_put_get(local_rank: int, num_ranks: int):
-    from tilelang.distributed import init_dist
+    from tilelang.distributed.host import init_dist
 
     rank, num_ranks, group = init_dist(local_rank, num_ranks)
 
