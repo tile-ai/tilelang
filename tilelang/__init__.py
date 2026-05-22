@@ -212,5 +212,6 @@ if not env.is_light_import():
     from . import cpu as cpu  # noqa: F401
     from . import cuda as cuda  # noqa: F401
     from . import rocm as rocm  # noqa: F401
+    from .backend import metal as metal  # noqa: F401
 
 del _lazy_load_lib

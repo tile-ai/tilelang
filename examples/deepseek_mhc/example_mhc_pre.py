@@ -148,7 +148,7 @@ def mhc_pre_gemm_sqrsum_tilelang(
     assert hc_hidden_size % hidden_block == 0
 
     x: T.Tensor((num_tokens, hc_hidden_size), T.bfloat16)
-    fn: T.Tensor((hc_mult3, hc_hidden_size), T.float32)
+    fn: T.Tensor((hc_mult3, hc_hidden_size), T.tfloat32)
     out: T.Tensor((num_tokens, hc_mult3), T.float32)
     sqrsum: T.Tensor((num_tokens), T.float32)
 
@@ -159,7 +159,7 @@ def mhc_pre_gemm_sqrsum_tilelang(
         T.clear(sqrsum_part)
         for pz in T.Pipelined(hc_hidden_size // hidden_block, num_stages=2):
             x_smem_16 = T.alloc_shared((token_block, hidden_block), T.bfloat16)
-            fn_smem = T.alloc_shared((32, hidden_block), T.float32)
+            fn_smem = T.alloc_shared((32, hidden_block), T.tfloat32)
 
             T.annotate_layout({x_smem_16: tilelang.layout.make_swizzled_layout(x_smem_16)})
 
@@ -168,7 +168,7 @@ def mhc_pre_gemm_sqrsum_tilelang(
 
             x_frag_16 = T.alloc_fragment((token_block, hidden_block), T.bfloat16)
             T.copy(x_smem_16, x_frag_16)
-            x_frag = T.alloc_fragment((token_block, hidden_block), T.float32)
+            x_frag = T.alloc_fragment((token_block, hidden_block), T.tfloat32)
             T.copy(x_frag_16, x_frag)
 
             for jj in T.serial(hidden_block // 4):

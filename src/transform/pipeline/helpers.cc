@@ -284,7 +284,7 @@ private:
   bool IsMbarPhaseConsumer(const Call &call) const {
     auto tile_op = ParseOperator(call);
     return tile_op.defined() && (tile_op.as<CopyNode>() != nullptr ||
-                                 tile_op.as<Conv2DIm2ColOpNode>() != nullptr ||
+                                 tile_op.as<Im2ColOpNode>() != nullptr ||
                                  tile_op.as<GemmNode>() != nullptr);
   }
 

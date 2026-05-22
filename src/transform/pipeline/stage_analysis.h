@@ -185,7 +185,7 @@ public:
         }
         return;
       }
-      if (tile_op.as<CopyNode>() || tile_op.as<Conv2DIm2ColOpNode>()) {
+      if (tile_op.as<CopyNode>() || tile_op.as<Im2ColOpNode>()) {
         saw_copy = true;
       } else {
         saw_non_copy_tile_op = true;
@@ -213,7 +213,7 @@ public:
       if (tile_op.as<RegionOpNode>()) {
         return;
       }
-      if (tile_op.as<CopyNode>() || tile_op.as<Conv2DIm2ColOpNode>()) {
+      if (tile_op.as<CopyNode>() || tile_op.as<Im2ColOpNode>()) {
         if (copy_tile_op.defined()) {
           saw_multiple_copy_ops = true;
           copy_tile_op = Optional<TileOperator>();
@@ -259,7 +259,7 @@ public:
       return;
     }
 
-    if (const auto *im2col = copy_tile_op.value().as<Conv2DIm2ColOpNode>()) {
+    if (const auto *im2col = copy_tile_op.value().as<Im2ColOpNode>()) {
       if (!IsGlobalLikeBuffer(im2col->src_) || !IsSharedBuffer(im2col->dst_)) {
         return;
       }

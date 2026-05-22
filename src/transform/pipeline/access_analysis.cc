@@ -86,8 +86,8 @@ void BufferRegionCollector::HandleTileOp(const TileOperator &tile_op) {
       is_global_copy_pattern_ = true;
     }
   }
-  // Conv2D im2col always uses TMA on Hopper.
-  if (const auto *im2col = tile_op.as<Conv2DIm2ColOpNode>()) {
+  // Im2Col always uses TMA on Hopper.
+  if (const auto *im2col = tile_op.as<Im2ColOpNode>()) {
     if (IsGlobalLikeBuffer(im2col->src_) && IsSharedBuffer(im2col->dst_)) {
       is_global_copy_pattern_ = true;
       if (TargetIsHopper(target_)) {
