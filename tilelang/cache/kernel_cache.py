@@ -92,7 +92,7 @@ class KernelCache:
             pass
 
         if sys.platform == "win32":
-            lib_names = ["tilelang.dll", "libtilelang.dll", "tvm.dll", "tvm_ffi.dll"]
+            lib_names = ["tvm_runtime.dll", "tvm_compiler.dll", "tvm_ffi.dll"]
         elif sys.platform == "darwin":
             lib_names = [
                 "libtilelang.dylib",
