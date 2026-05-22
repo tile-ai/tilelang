@@ -199,9 +199,8 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # On Metal, rewrite local.fragment GEMM accumulators to metal.simdgroup
     # before layout inference. simdgroup matrices are opaque and have no
     # explicit thread-level layout, so layout inference must not see them.
-    from tilelang.transform.metal_fragment_to_simdgroup import MetalFragmentToSimdgroup
 
-    mod = MetalFragmentToSimdgroup(mod)
+    mod = tilelang.transform.metal.MetalFragmentToSimdgroup(mod)
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
     # Visualize the layout
