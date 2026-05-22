@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Literal
 from tvm.target import Target
-from tvm.tir import PrimFunc
+from tvm.tirx import PrimFunc
 from tilelang.jit import JITKernel
 from tilelang import env
 from tilelang.jit.adapter.cutedsl.kernel_cache import CuTeDSLKernelCache
@@ -54,7 +54,7 @@ def cached(
     from tilelang.utils.target import determine_target as _determine_target
     from tilelang.jit.execution_backend import resolve_execution_backend, allowed_backends_for_target
 
-    norm_target = Target(_determine_target(target)) if isinstance(target, str) else target
+    norm_target = _determine_target(target, return_object=True)
     requested_backend = execution_backend
     execution_backend = resolve_execution_backend(requested_backend, norm_target)
     if verbose:

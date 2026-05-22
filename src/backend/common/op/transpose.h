@@ -7,6 +7,7 @@
 #define TVM_TL_BACKEND_COMMON_OP_TRANSPOSE_H_
 
 #include "op/transpose.h"
+#include <tvm/ir/cast.h>
 
 #include "op/utils.h"
 #include "transform/common/loop_fusion_utils.h"
@@ -21,7 +22,7 @@ namespace tvm {
 namespace tl {
 namespace backend {
 
-using namespace tir;
+using namespace tirx;
 
 struct Transpose {
   static Stmt Lower(const TransposeNode &op, const LowerArgs &T,

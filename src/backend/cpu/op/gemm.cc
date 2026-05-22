@@ -4,13 +4,15 @@
  */
 
 #include "op/gemm.h"
+#include "support/check.h"
 
 #include "target/utils.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace cpu {
 

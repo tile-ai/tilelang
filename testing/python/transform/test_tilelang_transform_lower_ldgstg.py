@@ -11,12 +11,12 @@ import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 from tilelang.transform import PassConfigKey
-from tvm import tir
+from tvm import tirx
 
 
 def _apply_passes(mod, enable_non_predicated=False, enable_predicated=False):
     """Apply the LowerLDGSTG pass and related lowering passes."""
-    mod = tvm.tir.transform.BindTarget(tvm.target.Target("cuda"))(mod)
+    mod = tvm.tirx.transform.BindTarget(tvm.target.Target("cuda"))(mod)
     mod = tl.transform.FlattenBuffer()(mod)
     mod = tl.transform.VectorizeLoop()(mod)
     with tvm.transform.PassContext(
@@ -34,10 +34,10 @@ def _check_has_intrinsic(mod, intrinsic_name):
     found = [False]
 
     def visitor(obj):
-        if isinstance(obj, tir.Call) and hasattr(obj.op, "name") and intrinsic_name in obj.op.name:
+        if isinstance(obj, tirx.Call) and hasattr(obj.op, "name") and intrinsic_name in obj.op.name:
             found[0] = True
 
-    tir.stmt_functor.post_order_visit(mod["main"].body, visitor)
+    tirx.stmt_functor.post_order_visit(mod["main"].body, visitor)
     return found[0]
 
 
@@ -247,7 +247,7 @@ def test_non_cuda_target_skip():
     # Use a CPU target
     cpu_target = tvm.target.Target("llvm")
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(cpu_target)(mod)
+    mod = tvm.tirx.transform.BindTarget(cpu_target)(mod)
     mod = tl.transform.FlattenBuffer()(mod)
     mod = tl.transform.VectorizeLoop()(mod)
     with tvm.transform.PassContext(config={PassConfigKey.TL_ENABLE_LOWER_LDGSTG: True}):

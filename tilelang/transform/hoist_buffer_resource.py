@@ -30,17 +30,17 @@ This pass is gfx950-only: on every other target it returns the PrimFunc
 unchanged.
 """
 
-from tvm import tir
-from tvm.tir import AttrStmt, Call, Evaluate, Var, PrimFunc, stmt_functor
-from tvm.tir.transform import prim_func_pass
+from tvm import tirx as tir
+from tvm.tirx import AttrStmt, Call, Evaluate, Var, PrimFunc, stmt_functor
+from tvm.tirx.transform import prim_func_pass
 
 from tilelang.utils.target import target_is_gfx950
 
 _op_ptx_cp_async_lds = tir.op.Op.get("tl.ptx_cp_async_lds")
 _op_ptx_cp_async_lds_rsrc = tir.op.Op.get("tl.ptx_cp_async_lds_rsrc")
-_op_tvm_access_ptr = tir.op.Op.get("tir.tvm_access_ptr")
-_op_ptx_commit_group = tir.op.Op.get("tir.ptx_commit_group")
-_op_ptx_wait_group = tir.op.Op.get("tir.ptx_wait_group")
+_op_tvm_access_ptr = tir.op.Op.get("tirx.tvm_access_ptr")
+_op_ptx_commit_group = tir.op.Op.get("tirx.ptx_commit_group")
+_op_ptx_wait_group = tir.op.Op.get("tirx.ptx_wait_group")
 
 
 def _extract_buffer_var(access_ptr_expr):
@@ -122,8 +122,6 @@ def _count_async_loads(stmt, multiplier=1):
         if stmt.else_case is not None:
             c = max(c, _count_async_loads(stmt.else_case, multiplier))
         return c
-    if isinstance(stmt, tir.LetStmt):
-        return _count_async_loads(stmt.body, multiplier)
     return 0
 
 
@@ -164,7 +162,7 @@ def _fix_amd_wait_counts(body, loads_per_group):
         )
         return Evaluate(new_call)
 
-    return stmt_functor.ir_transform(body, None, _postorder, ["tir.Evaluate"])
+    return stmt_functor.ir_transform(body, None, _postorder, ["tirx.Evaluate"])
 
 
 def _collect_buffer_vars(body):
@@ -210,7 +208,7 @@ def _rewrite_calls(body, buffer_vars):
                 return Evaluate(new_call)
         return None
 
-    return stmt_functor.ir_transform(body, None, _postorder, ["tir.Evaluate"])
+    return stmt_functor.ir_transform(body, None, _postorder, ["tirx.Evaluate"])
 
 
 def HoistBufferResource():

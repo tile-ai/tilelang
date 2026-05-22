@@ -3,10 +3,12 @@
  */
 
 #include "codegen_hip.h"
+#include "support/check.h"
 #include <tvm/arith/analyzer.h>
-#include <tvm/ffi/function.h>
-#include <tvm/tir/index_map.h>
-#include <tvm/tir/op.h>
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/index_map.h>
+#include <tvm/tirx/op.h>
 
 #include <cmath>
 #include <cstdint>
@@ -16,11 +18,12 @@
 #include <vector>
 
 #include "op/builtin.h"
-#include "target/source/ptx.h"
 #include "target/utils.h"
 
 namespace tvm {
 namespace codegen {
+
+using namespace ffi;
 
 namespace {
 
@@ -156,10 +159,10 @@ void CodeGenTileLangHIP::PrintFuncPrefix(std::ostream &os) {
   os << "extern \"C\" __global__ ";
 }
 
-class LaunchConfigExtractor : public tir::StmtVisitor {
+class LaunchConfigExtractor : public tirx::StmtVisitor {
 private:
   void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent) {
+    if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->var->name_hint == "threadIdx.x" ||
           iv->thread_tag == "threadIdx.x") {
@@ -230,8 +233,8 @@ std::string CodeGenTileLangHIP::Finish() {
   return CodeGenC::Finish();
 }
 
-void CodeGenTileLangHIP::VisitStmt_(const tir::ForNode *op) {
-  if (op->kind == tir::ForKind::kUnrolled) {
+void CodeGenTileLangHIP::VisitStmt_(const tirx::ForNode *op) {
+  if (op->kind == tirx::ForKind::kUnrolled) {
     PrintIndent();
     stream << "#pragma unroll\n";
   }
@@ -1362,8 +1365,8 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
                                     "A_ptr, B_ptr, C_ptr>, but got "
                                  << op->args.size();
     auto op_instance = Downcast<StringImm>(op->args[0]);
-    this->PrintCallExtern(GetType(tvm::ffi::GetRef<PrimExpr>(op)),
-                          op_instance->value, op->args, true, os);
+    this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)), op_instance->value,
+                          op->args, true, os);
   } else if (op->op.same_as(tl::tl_gemm_sp())) {
     LOG(FATAL) << "tl_gemm_sp is not supported on HIP";
   } else if (op->op.same_as(tl::loop_break())) {
@@ -1521,7 +1524,7 @@ void CodeGenTileLangHIP::VisitStmt_(const AttrStmtNode *op) {
     std::string func_name;
     int panel_size = 0;
     if (const auto *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(tir::builtin::tvm_tuple()) &&
+      if (call->op.same_as(tirx::builtin::tvm_tuple()) &&
           call->args.size() >= 2) {
         const auto *name_node = call->args[0].as<StringImmNode>();
         const auto *size_node = call->args[1].as<IntImmNode>();
@@ -1542,55 +1545,58 @@ void CodeGenTileLangHIP::VisitStmt_(const AttrStmtNode *op) {
   CodeGenC::VisitStmt_(op);
 }
 
-void CodeGenTileLangHIP::VisitStmt_(const LetStmtNode *op) {
-  // For LetStmt(var = ptx_make_buffer_resource(buf)), emit `auto x = ...;`
+void CodeGenTileLangHIP::VisitStmt_(const BindNode *op) {
+  // For Bind(var = ptx_make_buffer_resource(buf)), emit `auto x = ...;`
   // instead of the C-typed declaration the base class would produce. The
   // return type is int32x4_t and naming it explicitly is brittle across
   // backends, so `auto` keeps the template lookup in make_wave_buffer_resource
-  // responsible for the type.
+  // responsible for the type. The body that follows the bind is handled by
+  // the enclosing SeqStmt visitor.
   if (auto *call = op->value.as<CallNode>()) {
     if (call->op.same_as(tl::ptx_make_buffer_resource())) {
       std::string value = PrintExpr(op->value);
       PrintIndent();
       stream << "auto " << AllocVarID(op->var.get()) << " = " << value << ";\n";
-      PrintStmt(op->body);
       return;
     }
   }
   CodeGenC::VisitStmt_(op);
 }
 
-void CodeGenTileLangHIP::VisitStmt_(const AllocateNode *op) {
-  ICHECK(!is_zero(op->condition));
-  std::string vid = AllocVarID(op->buffer_var.get());
+void CodeGenTileLangHIP::VisitStmt_(const AllocBufferNode *op) {
+  std::string vid = AllocVarID(op->buffer->data.get());
 
   this->PrintIndent();
-  std::string scope = GetPtrStorageScope(op->buffer_var);
+  std::string scope = GetPtrStorageScope(op->buffer->data);
   PrintStorageScope(scope, stream);
-  PrintType(op->dtype, stream);
+  PrintType(op->buffer->dtype, stream);
 
   if (scope == "shared.dyn") {
     stream << ' ' << vid << "[];\n";
   } else {
-    size_t constant_size = op->ConstantAllocationSize();
-    ICHECK_GT(constant_size, 0)
+    auto alloc_ref = GetRef<AllocBuffer>(op);
+    auto opt_size = alloc_ref.ConstantAllocationSize();
+    ICHECK(opt_size.has_value() && opt_size.value() > 0)
         << "Can only handle constant size stack allocation for now";
+    size_t constant_size = static_cast<size_t>(opt_size.value());
 
-    if ((op->dtype == DataType::Int(4) || op->dtype == DataType::UInt(4) ||
-         op->dtype == DataType::Int(1)) &&
+    if ((op->buffer->dtype == DataType::Int(4) ||
+         op->buffer->dtype == DataType::UInt(4) ||
+         op->buffer->dtype == DataType::Int(1)) &&
         scope == "shared") {
-      constant_size = constant_size / (32 / op->dtype.bits());
+      constant_size = constant_size / (32 / op->buffer->dtype.bits());
     }
 
     if (scope == "local.var") {
       // Single-element variable: emit an initializer so the value is defined.
       // Default to 0; respect the user-provided tl.local_var_init annotation.
-      PrimExpr init = tir::make_const(op->dtype, 0);
+      PrimExpr init = tirx::make_const(op->buffer->dtype, 0);
       auto init_it = op->annotations.find(tl::attr::kLocalVarInit);
       if (init_it != op->annotations.end()) {
         PrimExpr user_init = Downcast<PrimExpr>((*init_it).second);
-        if (!user_init.dtype().is_void() && user_init.dtype() != op->dtype) {
-          user_init = tir::Cast(op->dtype, user_init);
+        if (!user_init.dtype().is_void() &&
+            user_init.dtype() != op->buffer->dtype) {
+          user_init = tirx::Cast(op->buffer->dtype, user_init);
         }
         init = user_init;
       }
@@ -1600,13 +1606,13 @@ void CodeGenTileLangHIP::VisitStmt_(const AllocateNode *op) {
     }
   }
 
-  RegisterHandleType(op->buffer_var.get(), op->dtype);
-  this->PrintStmt(op->body);
+  RegisterHandleType(op->buffer->data.get(), op->buffer->dtype);
 }
 
 void CodeGenTileLangHIP::VisitExpr_(const RampNode *op, std::ostream &os) {
   int lanes = static_cast<int>(Downcast<IntImm>(op->lanes)->value);
-  CHECK_LE(lanes, 4) << "ValueError: Ramp of more than 4 lanes is not allowed.";
+  ICHECK_LE(lanes, 4)
+      << "ValueError: Ramp of more than 4 lanes is not allowed.";
   os << "(make_";
   PrintType(op->dtype, os);
   os << "(";
@@ -1939,11 +1945,10 @@ void CodeGenTileLangHIP::AddFunction(const PrimFunc &f) {
   auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
   ICHECK(global_symbol.has_value())
       << "CodeGenC: Expect PrimFunc to have the global_symbol attribute";
-  bool no_alias = f->HasNonzeroAttr(tir::attr::kNoAlias);
+  bool no_alias = f->HasNonzeroAttr(tirx::attr::kNoAlias);
   std::unordered_set<const VarNode *> non_restrict;
-  if (auto opt =
-          f->GetAttr<ffi::Array<tir::Var>>(tl::attr::kNonRestrictParams)) {
-    for (const tir::Var &v : opt.value())
+  if (auto opt = f->GetAttr<Array<tirx::Var>>(tl::attr::kNonRestrictParams)) {
+    for (const tirx::Var &v : opt.value())
       non_restrict.insert(v.get());
   }
 
@@ -1953,7 +1958,7 @@ void CodeGenTileLangHIP::AddFunction(const PrimFunc &f) {
   this->stream << " " << static_cast<std::string>(global_symbol.value()) << "(";
 
   for (size_t i = 0; i < f->params.size(); ++i) {
-    tir::Var v = f->params[i];
+    tirx::Var v = f->params[i];
     std::string vid = AllocVarID(v.get());
     if (i != 0)
       stream << ", ";

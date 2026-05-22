@@ -16,10 +16,10 @@ on:
       - pyproject.toml
       - MANIFEST.in
       - CMakeLists.txt
+      - VERSION
       - version_provider.py
       - .github/workflows/dist.yml
-      # temporarily add to dist check
-      # until we have type checking in ci / move to python 3.10
+      # Type aliases can affect package import/build behavior.
       - tilelang/_typing.py
   release:
     types:
@@ -115,12 +115,11 @@ jobs:
     strategy:
       matrix:
         target:
-          # Build wheels for different Python ABIs.
-          # Windows CUDA 13.0 uses cp310 because PyTorch cu130 does not publish cp39 wheels.
-          - { runner: ubuntu-latest, toolkit: "CUDA-12.8", test_backends: "cu118 cu130", python_version: "3.9" }
-          - { runner: ubuntu-24.04-arm, toolkit: "CUDA-12.8", test_backends: "cu126 cu130", python_version: "3.9" }
+          # Build wheels for the minimum supported Python ABI.
+          - { runner: ubuntu-latest, toolkit: "CUDA-12.8", test_backends: "cu118 cu130", python_version: "3.10" }
+          - { runner: ubuntu-24.04-arm, toolkit: "CUDA-12.8", test_backends: "cu126 cu130", python_version: "3.10" }
           - { runner: windows-latest, toolkit: "CUDA-13.0", test_backends: "cu130", python_version: "3.10" }
-          - { runner: macos-latest, toolkit: "Metal", python_version: "3.9" }
+          - { runner: macos-latest, toolkit: "Metal", python_version: "3.10" }
           # - "3.14t"  # let user to build from source for now
           # TODO: Add cp315-abi3.abi3t after PEP 803
       fail-fast: false
@@ -373,3 +372,40 @@ jobs:
           name: artifacts
           path: dist/*
           if-no-files-found: error
+
+  publish-pypi:
+    name: Publish to PyPI
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+    needs: [list-artifacts]
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/p/tilelang
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Validate release tag matches VERSION
+        run: |
+          VERSION="$(cat VERSION)"
+          TAG="${GITHUB_REF_NAME}"
+          if [ "${TAG}" != "v${VERSION}" ]; then
+            echo "Release tag ${TAG} does not match VERSION v${VERSION}"
+            exit 1
+          fi
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: artifacts
+          path: dist
+
+      - name: List distributions
+        run: ls -lh dist/*
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

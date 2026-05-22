@@ -20,8 +20,8 @@ import tilelang.testing
 import pytest
 import torch
 
-SM100_TARGET = "cuda -arch=sm_100"
-SM80_TARGET = "cuda -arch=sm_80"
+SM100_TARGET = {"kind": "cuda", "arch": "sm_100"}
+SM80_TARGET = {"kind": "cuda", "arch": "sm_80"}
 
 M = 128  # number of threads / element-pairs
 
@@ -92,7 +92,7 @@ def _make_unary_kernel(op_func, dtype_tl):
 # ---------------------------------------------------------------------------
 
 
-def _lower_to_cuda_source(func, target: str = SM80_TARGET) -> str:
+def _lower_to_cuda_source(func, target=SM80_TARGET) -> str:
     with tvm.transform.PassContext(), tvm.target.Target(target):
         artifact = tilelang.lower(func, target=target)
     assert artifact.kernel_source is not None

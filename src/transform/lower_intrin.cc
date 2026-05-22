@@ -21,12 +21,13 @@
  *  Lower intrinsic calls and ops to device specific ir when possible.
  * \file lower_intrin.cc
  */
-#include <tvm/ffi/function.h>
-#include <tvm/ffi/reflection/registry.h>
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/target/target.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/transform.h>
 
 #include <limits>
 #include <unordered_set>
@@ -36,14 +37,14 @@
 
 namespace tvm {
 namespace tl {
-using namespace tir;
+using namespace tirx;
 using namespace ffi;
 
 class IntrinInjecter : public tvm::arith::IRMutatorWithAnalyzer {
 public:
   using IRMutatorWithAnalyzer::VisitExpr_;
   using IRMutatorWithAnalyzer::VisitStmt_;
-  using FLowerGeneral = ffi::TypedFunction<PrimExpr(PrimExpr)>;
+  using FLowerGeneral = TypedFunction<PrimExpr(PrimExpr)>;
 
   IntrinInjecter(arith::Analyzer *analyzer, std::string target,
                  std::string mtriple = "")
@@ -63,7 +64,7 @@ public:
       if (Op::HasAttrMap(pattern)) {
         attr_maps_.push_back(Op::GetAttrMap<FLowerGeneral>(pattern));
         if (fma_ == nullptr) {
-          fma_ = (*attr_maps_.rbegin()).get(Op::Get("tir.fma"), nullptr);
+          fma_ = (*attr_maps_.rbegin()).get(Op::Get("tirx.fma"), nullptr);
         }
       }
   }
@@ -71,9 +72,9 @@ public:
   PrimExpr VisitExpr_(const CallNode *op) final {
     if (auto *ptr_op = op->op.as<OpNode>()) {
       for (const auto &f_attr_map : attr_maps_) {
-        FLowerGeneral f = f_attr_map.get(tvm::ffi::GetRef<Op>(ptr_op), nullptr);
+        FLowerGeneral f = f_attr_map.get(GetRef<Op>(ptr_op), nullptr);
         if (f != nullptr) {
-          PrimExpr e = tvm::ffi::GetRef<PrimExpr>(op);
+          PrimExpr e = GetRef<PrimExpr>(op);
           PrimExpr r = f(e);
           ICHECK(r.defined()) << "intrinsic rule must always return valid Expr";
           if (!r.same_as(e)) {
@@ -100,7 +101,7 @@ public:
   // We use floordiv for integer analysis,
   // but will need to lower them to native truncdiv instructions
   PrimExpr VisitExpr_(const FloorDivNode *op) final {
-    auto e = tvm::ffi::GetRef<PrimExpr>(op);
+    auto e = GetRef<PrimExpr>(op);
     PrimExpr ret = IRMutatorWithAnalyzer::VisitExpr_(op);
     op = ret.as<FloorDivNode>();
     if (op == nullptr)
@@ -184,7 +185,7 @@ public:
         // equivalent to rdiv + (rmod >= 0 ? 0: -1);
         return rdiv + (rmod >> make_const(dtype, dtype.bits() - 1));
       } else {
-        return tir::Select(rmod >= 0, rdiv, rdiv - make_const(dtype, 1));
+        return tirx::Select(rmod >= 0, rdiv, rdiv - make_const(dtype, 1));
       }
 
     } else {
@@ -194,14 +195,14 @@ public:
       } else {
         // uncommon case
         DLOG(INFO) << "LowerFloorDiv: Cannot decide the sign of divisor";
-        auto rmod = tir::Var("rmod", dtype);
-        auto rdiv = tir::Var("rdiv", dtype);
+        auto rmod = tirx::Var("rmod", dtype);
+        auto rdiv = tirx::Var("rdiv", dtype);
         // b >= 0 => (rmod >=0 ? rdiv : rdiv - 1)
         // b < 0  => (rmod <= 0 ? rdiv : rdiv - 1)
-        PrimExpr let_rdiv = tir::Let(
+        PrimExpr let_rdiv = tirx::Let(
             rdiv, truncdiv(op->a, op->b),
-            tir::Select((op->b >= 0 && rmod >= 0) || (op->b < 0 && rmod <= 0),
-                        rdiv, rdiv - make_const(dtype, 1)));
+            tirx::Select((op->b >= 0 && rmod >= 0) || (op->b < 0 && rmod <= 0),
+                         rdiv, rdiv - make_const(dtype, 1)));
         return Let(rmod, truncmod(op->a, op->b), let_rdiv);
       }
     }
@@ -292,7 +293,7 @@ public:
         // -> rmod >= 0 ? 0 : b
         return rmod + (op->b & (rmod >> make_const(dtype, dtype.bits() - 1)));
       } else {
-        return tir::Select(rmod >= 0, rmod, rmod + op->b);
+        return tirx::Select(rmod >= 0, rmod, rmod + op->b);
       }
 
     } else {
@@ -304,7 +305,7 @@ public:
         // uncommon case
         DLOG(INFO)
             << "LowerFloorMod: Cannot decide the sign of divsor and divident";
-        auto rmod = tir::Var("rmod", dtype);
+        auto rmod = tirx::Var("rmod", dtype);
         // b > 0 && rmod >= 0 -> rmod
         // b > 0 && rmod < 0  -> rmod + b
         // b < 0 && rmod < 0 -> rmod
@@ -320,7 +321,7 @@ public:
     using namespace arith;
     PVar<PrimExpr> x, y;
     PVar<IntImm> c;
-    auto e = tvm::ffi::GetRef<PrimExpr>(op);
+    auto e = GetRef<PrimExpr>(op);
     if (max(floordiv(x, y), c).Match(e) && c.Eval()->value >= 0 &&
         analyzer_->CanProveGreaterEqual(y.Eval(), 0)) {
       return max(VisitExpr(truncdiv(x, y).Eval()), c.Eval());
@@ -331,7 +332,7 @@ public:
   PrimExpr VisitExpr_(const EQNode *op) final {
     using namespace arith;
     PVar<PrimExpr> x, y;
-    auto e = tvm::ffi::GetRef<PrimExpr>(op);
+    auto e = GetRef<PrimExpr>(op);
     if ((floormod(x, y) == 0).Match(e)) {
       return VisitExpr((truncmod(x, y) == 0).Eval());
     }
@@ -341,7 +342,7 @@ public:
   PrimExpr VisitExpr_(const NENode *op) final {
     using namespace arith;
     PVar<PrimExpr> x, y;
-    auto e = tvm::ffi::GetRef<PrimExpr>(op);
+    auto e = GetRef<PrimExpr>(op);
     if ((floormod(x, y) != 0).Match(e)) {
       return VisitExpr((truncmod(x, y) != 0).Eval());
     }
@@ -413,8 +414,8 @@ Stmt LowerIntrinStmt(Stmt stmt, const std::string &target) {
 
 namespace transform {
 
-tir::transform::Pass LowerIntrin() {
-  using namespace tir::transform;
+tirx::transform::Pass LowerIntrin() {
+  using namespace tirx::transform;
   auto pass_func = [](PrimFunc f, IRModule m, PassContext ctx) {
     auto *n = f.CopyOnWrite();
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);
@@ -429,7 +430,7 @@ tir::transform::Pass LowerIntrin() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.LowerIntrin", LowerIntrin);
 }
 

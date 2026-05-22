@@ -1,30 +1,31 @@
 import tilelang
 import tilelang.language as T
 from tilelang.autotuner import *
-from tvm import tir
+from tvm import tirx
 import itertools
 import torch
 import argparse
 
 
-def _tir_u8_to_f4_to_f16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, dtype: str):
+def _tir_u8_to_f4_to_f16(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, dtype: str):
     assert nbit == 4
     assert dtype == T.float16
     assert val.dtype == T.uint8
     # e_f4 == 0 -> e_f16 = 0
     # e_f4 != 0 -> e_f16 = e_f4 + ExponentialBias(f16, f4) = e_f4 + (2^4 - 2^1) = e_f4 + 14
     # s1e2m1
-    mask = tir.const((1 << nbit) - 1, T.uint16)
-    f4 = (val >> (pos.astype(T.uint16) * tir.const(nbit, T.uint16))) & mask
-    s = f4 >> tir.const(3, T.uint16)
-    e_f4 = (f4 & tir.const(6, T.uint16)) >> tir.const(1, T.uint16)
-    e_f16 = e_f4 + tir.const(14, T.uint16)
-    m_f4 = f4 & tir.const(1, T.uint16)
+    mask = tirx.const((1 << nbit) - 1, T.uint16)
+    f4 = (val >> (pos.astype(T.uint16) * tirx.const(nbit, T.uint16))) & mask
+    s = f4 >> tirx.const(3, T.uint16)
+    e_f4 = (f4 & tirx.const(6, T.uint16)) >> tirx.const(1, T.uint16)
+    e_f16 = e_f4 + tirx.const(14, T.uint16)
+    m_f4 = f4 & tirx.const(1, T.uint16)
     m_f16 = m_f4
-    val_f16 = tir.reinterpret(
-        T.float16, ((e_f16 | (s << tir.const(5, T.uint16))) << tir.const(10, T.uint16) | m_f16 << tir.const(9, T.uint16)).astype(T.uint16)
+    val_f16 = tirx.reinterpret(
+        T.float16,
+        ((e_f16 | (s << tirx.const(5, T.uint16))) << tirx.const(10, T.uint16) | m_f16 << tirx.const(9, T.uint16)).astype(T.uint16),
     )
-    # return tir.Select(e_f4 == tir.const(0, "uint32"), tir.const(0, T.float16), val_f16)
+    # return tirx.Select(e_f4 == tirx.const(0, "uint32"), tirx.const(0, T.float16), val_f16)
     return val_f16
 
 

@@ -4,6 +4,8 @@
  */
 
 #include "op/transpose.h"
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
 
 #include "op/utils.h"
 #include "target/utils.h"

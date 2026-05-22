@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import torch
 from tilelang import tvm as tvm
-from tvm.tir import Buffer, IntImm, Var, PrimExpr
+from tvm.tirx import Buffer, IntImm, Var, PrimExpr
 import tilelang.language as T
 
 

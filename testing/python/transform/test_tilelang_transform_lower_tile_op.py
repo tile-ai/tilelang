@@ -4,14 +4,14 @@ import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
-from tvm.tir.stmt_functor import post_order_visit
+from tvm.tirx.stmt_functor import post_order_visit
 
 
-def _count_calls(func: tvm.tir.PrimFunc):
+def _count_calls(func: tvm.tirx.PrimFunc):
     counts = {}
 
     def _visit(node):
-        if isinstance(node, tvm.tir.Call) and isinstance(node.op, tvm.ir.Op):
+        if isinstance(node, tvm.tirx.Call) and isinstance(node.op, tvm.ir.Op):
             name = str(node.op.name)
             counts[name] = counts.get(name, 0) + 1
 
@@ -20,7 +20,7 @@ def _count_calls(func: tvm.tir.PrimFunc):
 
 
 def test_lower_tile_op_respects_copy_annotation_for_pipeline_managed_cp_async():
-    target = tvm.target.Target("cuda -arch=sm_80")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
 
     @T.prim_func
     def before(
@@ -44,12 +44,12 @@ def test_lower_tile_op_respects_copy_annotation_for_pipeline_managed_cp_async():
     calls = _count_calls(mod["main"])
 
     assert calls.get("tl.ptx_cp_async", 0) > 0
-    assert calls.get("tir.ptx_commit_group", 0) == 0
-    assert calls.get("tir.ptx_wait_group", 0) == 0
+    assert calls.get("tirx.ptx_commit_group", 0) == 0
+    assert calls.get("tirx.ptx_wait_group", 0) == 0
 
 
 def test_lower_tile_op_respects_copy_annotation_for_explicit_async_copy():
-    target = tvm.target.Target("cuda -arch=sm_80")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
 
     @T.prim_func
     def before(
@@ -73,12 +73,12 @@ def test_lower_tile_op_respects_copy_annotation_for_explicit_async_copy():
     calls = _count_calls(mod["main"])
 
     assert calls.get("tl.ptx_cp_async", 0) > 0
-    assert calls.get("tir.ptx_commit_group", 0) == 0
-    assert calls.get("tir.ptx_wait_group", 0) == 0
+    assert calls.get("tirx.ptx_commit_group", 0) == 0
+    assert calls.get("tirx.ptx_wait_group", 0) == 0
 
 
 def test_lower_tile_op_respects_parallel_loop_async_annotation_without_pipeline_context():
-    target = tvm.target.Target("cuda -arch=sm_80")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
 
     @T.prim_func
     def before(
@@ -103,8 +103,8 @@ def test_lower_tile_op_respects_parallel_loop_async_annotation_without_pipeline_
     calls = _count_calls(mod["main"])
 
     assert calls.get("tl.ptx_cp_async", 0) > 0
-    assert calls.get("tir.ptx_commit_group", 0) == 0
-    assert calls.get("tir.ptx_wait_group", 0) == 0
+    assert calls.get("tirx.ptx_commit_group", 0) == 0
+    assert calls.get("tirx.ptx_wait_group", 0) == 0
 
 
 if __name__ == "__main__":

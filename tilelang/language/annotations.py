@@ -1,11 +1,12 @@
 """Annotation helpers exposed on the TileLang language surface."""
 
-from typing import Callable
+from collections.abc import Callable
 
 from tilelang.layout import Fragment, Layout
 from tilelang.utils.language import is_fragment
-from tvm.script.parser.tir import attr, block_attr
-from tvm.tir import FloatImm, tvm_tuple
+from tvm.tirx.script.parser import attr
+from tvm.tirx.script.builder.ir import sblock_attr
+from tvm.tirx import FloatImm, tvm_tuple
 
 __all__ = [
     "use_swizzle",
@@ -38,7 +39,7 @@ def annotate_layout(layout_map: dict):
         else:
             raise ValueError(f"Invalid layout: {layout}")
 
-    return block_attr({"layout_map": _layout_map})
+    return sblock_attr({"layout_map": _layout_map})
 
 
 def annotate_safe_value(safe_value_map: dict):
@@ -46,7 +47,7 @@ def annotate_safe_value(safe_value_map: dict):
     _safe_value_map = {}
     for buffer, safe_value in safe_value_map.items():
         _safe_value_map[buffer.data] = safe_value
-    return block_attr({"safe_value_map": _safe_value_map})
+    return sblock_attr({"safe_value_map": _safe_value_map})
 
 
 def annotate_l2_hit_ratio(l2_hit_ratio_map: dict):
@@ -55,7 +56,7 @@ def annotate_l2_hit_ratio(l2_hit_ratio_map: dict):
     for buffer, hit_ratio in l2_hit_ratio_map.items():
         assert buffer.scope() == "global", "persistent L2 can only be applied to global buffers"
         _l2_hit_ratio_map[buffer.data] = FloatImm("float32", float(hit_ratio))
-    return block_attr({"l2_hit_ratio_map": _l2_hit_ratio_map})
+    return sblock_attr({"l2_hit_ratio_map": _l2_hit_ratio_map})
 
 
 def annotate_min_blocks_per_sm(n: int):
@@ -105,4 +106,4 @@ def annotate_restrict_buffers(*buffers):
         except Exception as e:
             raise TypeError(f"annotate_restrict_buffers expects Buffer arguments, got {type(buf)}") from e
     # Also return as block attribute (root block exists by default) for readability/tools.
-    return block_attr({"tl.non_restrict_params": data_vars})
+    return sblock_attr({"tl.non_restrict_params": data_vars})

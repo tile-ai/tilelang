@@ -2,7 +2,10 @@
  * \file codegen_py.cc
  */
 #include "codegen_py.h"
+#include "support/check.h"
 #include "target/codegen_utils.h"
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
 
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/name_supply.h>
@@ -11,6 +14,8 @@
 
 namespace tvm {
 namespace codegen {
+
+using namespace ffi;
 
 void CodeGenTileLangPY::AddFunction(const GlobalVar &gvar, const PrimFunc &f) {
   RegisterFunction_(gvar, f);
@@ -36,7 +41,7 @@ std::string CodeGenTileLangPY::Finish() {
   return code.str();
 }
 
-ffi::String CodeGenTileLangPY::GetFunctionName_(const GlobalVar &gvar) {
+String CodeGenTileLangPY::GetFunctionName_(const GlobalVar &gvar) {
   auto it = internal_functions_.find(gvar);
   ICHECK(it != internal_functions_.end())
       << "Attempted to find name of " << gvar
@@ -50,9 +55,8 @@ void CodeGenTileLangPY::RegisterFunction_(const GlobalVar &gvar,
     return;
   }
 
-  auto function_name = [&]() -> ffi::String {
-    if (auto global_symbol =
-            func->GetAttr<ffi::String>(tvm::attr::kGlobalSymbol)) {
+  auto function_name = [&]() -> String {
+    if (auto global_symbol = func->GetAttr<String>(tvm::attr::kGlobalSymbol)) {
       auto name = global_symbol.value();
       ICHECK(!func_name_supply_->ContainsName(name))
           << "Function " << gvar << " must use global symbol " << name
@@ -77,12 +81,12 @@ void CodeGenTileLangPY::InitFuncState_(const PrimFunc &f) {
   ReserveKeywordsAsUnique_();
 }
 
-void CodeGenTileLangPY::PrintFunctionSignature_(
-    const ffi::String &function_name, const PrimFunc &func,
-    std::ostream &os) { // NOLINT(*)
+void CodeGenTileLangPY::PrintFunctionSignature_(const String &function_name,
+                                                const PrimFunc &func,
+                                                std::ostream &os) { // NOLINT(*)
   os << "def " << function_name << "(";
   for (size_t i = 0; i < func->params.size(); ++i) {
-    tir::Var v = func->params[i];
+    tirx::Var v = func->params[i];
     if (i > 0) {
       os << ", ";
     }
@@ -366,11 +370,11 @@ void CodeGenTileLangPY::VisitExpr_(const CallNode *op,
                op->op.same_as(builtin_call_pure_extern_)) {
       ICHECK_GE(op->args.size(), 1U);
       auto func = Downcast<StringImm>(op->args[0]);
-      PrintCallExtern_(GetType(ffi::GetRef<PrimExpr>(op)), func->value,
-                       op->args, true, os);
+      PrintCallExtern_(GetType(GetRef<PrimExpr>(op)), func->value, op->args,
+                       true, os);
     } else if (op_attr_global_symbol_.count(call_op)) {
       // call extern if the op itself have a global symbol.
-      PrintCallExtern_(GetType(ffi::GetRef<PrimExpr>(op)),
+      PrintCallExtern_(GetType(GetRef<PrimExpr>(op)),
                        op_attr_global_symbol_[call_op], op->args, false, os);
     } else if (op->op.same_as(builtin::large_uint_imm())) {
       ICHECK_EQ(op->args.size(), 2U);
@@ -426,7 +430,7 @@ void CodeGenTileLangPY::VisitExpr_(const CallNode *op,
   } else if (auto opt = op->op.as<GlobalVar>()) {
     const auto &gvar = opt.value();
     auto callee_name = GetFunctionName_(gvar);
-    PrintCallExtern_(GetType(ffi::GetRef<PrimExpr>(op)), callee_name, op->args,
+    PrintCallExtern_(GetType(GetRef<PrimExpr>(op)), callee_name, op->args,
                      false, os);
   } else {
     LOG(FATAL)
@@ -473,32 +477,32 @@ void CodeGenTileLangPY::VisitStmt_(const BufferStoreNode *op) {
 }
 
 void CodeGenTileLangPY::VisitStmt_(const DeclBufferNode *op) {
-  PrintStmt_(op->body);
+  // In the flat IR model, DeclBuffer is a leaf statement with no body.
+  // The body is a sibling handled by the SeqStmt printer.
 }
 
-void CodeGenTileLangPY::VisitStmt_(const LetStmtNode *op) {
+void CodeGenTileLangPY::VisitStmt_(const BindNode *op) {
   std::string value = PrintExpr_(op->value);
   PrintIndent();
   stream << AllocVarID(op->var.get()) << " = " << value << "\n";
-  PrintStmt_(op->body);
 }
 
-void CodeGenTileLangPY::VisitStmt_(const AllocateNode *op) {
-  ICHECK(!is_zero(op->condition));
-  std::string vid = AllocVarID(op->buffer_var.get());
+void CodeGenTileLangPY::VisitStmt_(const AllocBufferNode *op) {
+  std::string vid = AllocVarID(op->buffer->data.get());
 
   PrintIndent();
-  size_t constant_size = op->ConstantAllocationSize();
-  ICHECK_GT(constant_size, 0)
+  auto alloc_ref = GetRef<AllocBuffer>(op);
+  auto opt_size = alloc_ref.ConstantAllocationSize();
+  ICHECK(opt_size.has_value())
       << "Can only handle constant size stack allocation for now";
+  size_t constant_size = static_cast<size_t>(opt_size.value());
 
-  auto scope = GetPtrStorageScope(op->buffer_var);
-  alloc_storage_scope_[op->buffer_var.get()] = scope;
+  auto scope = GetPtrStorageScope(op->buffer->data);
+  alloc_storage_scope_[op->buffer->data.get()] = scope;
 
   stream << vid << " = [None] * " << constant_size << "\n";
 
-  RegisterHandleType_(op->buffer_var.get(), op->dtype);
-  PrintStmt_(op->body);
+  RegisterHandleType_(op->buffer->data.get(), op->buffer->dtype);
 }
 
 void CodeGenTileLangPY::VisitStmt_(const AttrStmtNode *op) {
@@ -569,14 +573,17 @@ void CodeGenTileLangPY::VisitStmt_(const EvaluateNode *op) {
 void CodeGenTileLangPY::VisitStmt_(const AssertStmtNode *op) {
   std::string cond = PrintExpr_(op->condition);
   PrintIndent();
-  if (const auto *str = op->message.as<StringImmNode>()) {
+  if (!op->message_parts.empty()) {
+    std::string joined_msg;
+    for (const auto &part : op->message_parts) {
+      joined_msg += part->value;
+    }
     stream << "assert " << cond << ", ";
-    EscapeStringLiteral_(str->value, stream);
+    EscapeStringLiteral_(joined_msg, stream);
     stream << "\n";
   } else {
     stream << "assert " << cond << "\n";
   }
-  PrintStmt_(op->body);
 }
 
 std::string CodeGenTileLangPY::CastFromTo_(const std::string &value,
@@ -621,9 +628,8 @@ void CodeGenTileLangPY::PrintBinaryIntrinsic_(const CallNode *op,
   os << ')';
 }
 
-void CodeGenTileLangPY::PrintCallExtern_(Type ret_type,
-                                         ffi::String global_symbol,
-                                         const ffi::Array<PrimExpr> &args,
+void CodeGenTileLangPY::PrintCallExtern_(Type ret_type, String global_symbol,
+                                         const Array<PrimExpr> &args,
                                          bool skip_first_arg,
                                          std::ostream &os) { // NOLINT(*)
   os << global_symbol << "(";
