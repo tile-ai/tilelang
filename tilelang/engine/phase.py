@@ -191,6 +191,9 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Lower 2SM TCGEN5MMA and related on Blackwell target (must run before
     # LayoutInference so that the use_2cta annotation is visible to infer_layout)
     mod = tilelang.transform.LowerBlackwell2SM()(mod)
+    # Normalize if-without-else wrappers before pipeline planning. This keeps
+    # pipeline body extraction focused on canonical SeqStmt bodies.
+    mod = tilelang.transform.IfStmtBinding()(mod)
     # Run pipeline planning and software-pipeline rewriting before layout
     # inference so inferred layouts see the final pipelined structure directly.
     mod = tilelang.transform.PipelinePlanning()(mod)
@@ -227,8 +230,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     pass_ctx = tilelang.transform.get_pass_context()
     # Lower the shared.tmem into specific initialization slot
     mod = tilelang.transform.LowerSharedTmem()(mod)
-    # which may be introduced by the LegalizeSafeMemoryAccess
-    mod = tilelang.transform.IfStmtBinding()(mod)
     has_tma = module_has_tma(mod)
     # Pipeline barriers are now created at final expanded size by
     # InjectSoftwarePipeline, so no late MVB barrier fixup is needed.
