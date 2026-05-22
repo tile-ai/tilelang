@@ -314,6 +314,83 @@ __tl_cvt_fp8x2_to_float2(const __nv_fp8x2_storage_t x,
 }
 
 // ============================================================================
+// Inline PTX FP8 Conversions with Stochastic Rounding
+// ============================================================================
+//
+// PTX ISA: cvt.rs{.relu}.satfinite.f8x4type.f32 d, {a, b, e, f}, rbits
+//   Output layout: d[31:24]=a, d[23:16]=b, d[15:8]=e, d[7:0]=f
+//   To get little-endian byte order (byte0=elem0), pass elements in reverse.
+
+// --- float4 -> e4m3x4 stochastic rounding ---
+// cvt.rs.satfinite.e4m3x4.f32 d, {a, b, e, f}, rbits
+// Output layout: d[31:24]=a, d[23:16]=b, d[15:8]=e, d[7:0]=f
+// To get little-endian byte order (byte0=elem0), pass elements in reverse.
+
+// Full 4-element version (float4 input)
+TL_DEVICE __nv_fp8x4_storage_t
+__tl_cvt_f32x4_to_e4m3x4_rs_sat(float4 src, unsigned int rbits) {
+  __nv_fp8x4_storage_t result;
+  asm("cvt.rs.satfinite.e4m3x4.f32 %0, {%1, %2, %3, %4}, %5;"
+      : "=r"(result)
+      : "f"(src.w), "f"(src.z), "f"(src.y), "f"(src.x), "r"(rbits));
+  return result;
+}
+
+// 1-element version: pass src as f (lowest position), returns byte0
+TL_DEVICE __nv_fp8_storage_t
+__tl_cvt_f32x1_to_e4m3x1_rs_sat(float src, unsigned int rbits) {
+  __nv_fp8x4_storage_t tmp;
+  asm("cvt.rs.satfinite.e4m3x4.f32 %0, {%1, %2, %3, %4}, %5;"
+      : "=r"(tmp)
+      : "f"(0.0f), "f"(0.0f), "f"(0.0f), "f"(src), "r"(rbits));
+  return static_cast<__nv_fp8_storage_t>(tmp & 0xFF);
+}
+
+// 2-element version: pass src.x as f, src.y as e, returns lower 2 bytes
+TL_DEVICE __nv_fp8x2_storage_t
+__tl_cvt_f32x2_to_e4m3x2_rs_sat(float2 src, unsigned int rbits) {
+  __nv_fp8x4_storage_t tmp;
+  asm("cvt.rs.satfinite.e4m3x4.f32 %0, {%1, %2, %3, %4}, %5;"
+      : "=r"(tmp)
+      : "f"(0.0f), "f"(0.0f), "f"(src.y), "f"(src.x), "r"(rbits));
+  return static_cast<__nv_fp8x2_storage_t>(tmp & 0xFFFF);
+}
+
+// --- float4 -> e5m2x4 stochastic rounding ---
+// cvt.rs.satfinite.e5m2x4.f32 d, {a, b, e, f}, rbits
+
+// Full 4-element version (float4 input)
+TL_DEVICE __nv_fp8x4_storage_t
+__tl_cvt_f32x4_to_e5m2x4_rs_sat(float4 src, unsigned int rbits) {
+  __nv_fp8x4_storage_t result;
+  asm("cvt.rs.satfinite.e5m2x4.f32 %0, {%1, %2, %3, %4}, %5;"
+      : "=r"(result)
+      : "f"(src.w), "f"(src.z), "f"(src.y), "f"(src.x), "r"(rbits));
+  return result;
+}
+
+// 1-element version: pass src as f (lowest position), returns byte0
+TL_DEVICE __nv_fp8_storage_t
+__tl_cvt_f32x1_to_e5m2x1_rs_sat(float src, unsigned int rbits) {
+  __nv_fp8x4_storage_t tmp;
+  asm("cvt.rs.satfinite.e5m2x4.f32 %0, {%1, %2, %3, %4}, %5;"
+      : "=r"(tmp)
+      : "f"(0.0f), "f"(0.0f), "f"(0.0f), "f"(src), "r"(rbits));
+  return static_cast<__nv_fp8_storage_t>(tmp & 0xFF);
+}
+
+// 2-element version: pass src.x as f, src.y as e, returns lower 2 bytes
+TL_DEVICE __nv_fp8x2_storage_t
+__tl_cvt_f32x2_to_e5m2x2_rs_sat(float2 src, unsigned int rbits) {
+  __nv_fp8x4_storage_t tmp;
+  asm("cvt.rs.satfinite.e5m2x4.f32 %0, {%1, %2, %3, %4}, %5;"
+      : "=r"(tmp)
+      : "f"(0.0f), "f"(0.0f), "f"(src.y), "f"(src.x), "r"(rbits));
+  return static_cast<__nv_fp8x2_storage_t>(tmp & 0xFFFF);
+}
+
+
+// ============================================================================
 // FP8 E8M0 Related Conversions
 // ============================================================================
 #if TL_HAS_FP8_E8M0

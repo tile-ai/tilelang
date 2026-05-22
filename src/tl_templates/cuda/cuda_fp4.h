@@ -262,6 +262,46 @@ TL_DEVICE __nv_fp4x2_storage_t __tl_cvt_float2_to_fp4x2(const float2 src) {
 }
 
 // ============================================================================
+// Inline PTX FP4 Conversions with Stochastic Rounding
+// ============================================================================
+//
+// PTX ISA: cvt.rs.satfinite.e2m1x4.f32 d, {a, b, e, f}, rbits
+//   Input:  4 x f32 + 1 x uint32 random bits
+//   Output: __nv_fp4x4_storage_t (uint16_t, 4 x 4-bit = 16 bits)
+//   Layout: d[15:12]=a, d[11:8]=b, d[7:4]=e, d[3:0]=f
+// To get little-endian nibble order (nibble0=elem0), pass elements in reverse.
+
+// Full 4-element version (float4 input)
+TL_DEVICE __nv_fp4x4_storage_t
+__tl_cvt_f32x4_to_e2m1x4_rs_sat(float4 src, unsigned int rbits) {
+  __nv_fp4x4_storage_t result;
+  asm("cvt.rs.satfinite.e2m1x4.f32 %0, {%1, %2, %3, %4}, %5;"
+      : "=h"(result)
+      : "f"(src.w), "f"(src.z), "f"(src.y), "f"(src.x), "r"(rbits));
+  return result;
+}
+
+// 2-element version: pass src.x as f, src.y as e, returns lower byte as fp4x2
+TL_DEVICE __nv_fp4x2_storage_t
+__tl_cvt_f32x2_to_e2m1x2_rs_sat(float2 src, unsigned int rbits) {
+  __nv_fp4x4_storage_t tmp;
+  asm("cvt.rs.satfinite.e2m1x4.f32 %0, {%1, %2, %3, %4}, %5;"
+      : "=h"(tmp)
+      : "f"(0.0f), "f"(0.0f), "f"(src.y), "f"(src.x), "r"(rbits));
+  return static_cast<__nv_fp4x2_storage_t>(tmp & 0xFF);
+}
+
+// 1-element version: pass src as f (lowest position), returns low nibble as fp4
+TL_DEVICE __nv_fp4_storage_t
+__tl_cvt_f32x1_to_e2m1x1_rs_sat(float src, unsigned int rbits) {
+  __nv_fp4x4_storage_t tmp;
+  asm("cvt.rs.satfinite.e2m1x4.f32 %0, {%1, %2, %3, %4}, %5;"
+      : "=h"(tmp)
+      : "f"(0.0f), "f"(0.0f), "f"(0.0f), "f"(src), "r"(rbits));
+  return static_cast<__nv_fp4_storage_t>(tmp & 0x0F);
+}
+
+// ============================================================================
 // FP4 <-> Double Conversions
 // ============================================================================
 
