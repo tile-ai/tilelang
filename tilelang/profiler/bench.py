@@ -60,6 +60,7 @@ class suppress_stdout_stderr:
 IS_CUDA = torch.cuda.is_available()
 device = "cuda:0" if IS_CUDA else "mps:0"
 Event = torch.cuda.Event if IS_CUDA else torch.mps.Event
+_CACHE_ZERO_PROFILE_KEY = "tilelang_cache_zero"
 
 
 def do_bench(
@@ -182,26 +183,38 @@ def _bench_with_cupti(
     with suppress_stdout_stderr():
         schedule = torch.profiler.schedule(wait=1, warmup=0, active=1, repeat=1)
         profiler = torch.profiler.profile(
-            activities=[torch.profiler.ProfilerActivity.CUDA],
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
             schedule=schedule,
         )
 
         with profiler:
             for _ in range(2):
                 for _ in range(n_repeat):
-                    cache.zero_()
+                    with torch.profiler.record_function(_CACHE_ZERO_PROFILE_KEY):
+                        cache.zero_()
                     fn()
                 profiler.step()
 
-    # Calculate average kernel time, excluding cache-clearing overhead
+    # `cache.zero_()` and user code such as `torch.zeros` can share the same
+    # generated kernel name, so exclude only the annotated cache-zero range.
+    def is_cuda_event(event):
+        return getattr(getattr(event, "device_type", None), "name", "") == "CUDA"
+
     total_cuda_time = 0.0
     excluded_time = 0.0
-    excluded_kernels = "at::native::vectorized_elementwise"
 
-    for event in profiler.key_averages():
+    for event in profiler.events():
+        if not is_cuda_event(event):
+            continue
+        if getattr(event, "is_user_annotation", False):
+            if event.key == _CACHE_ZERO_PROFILE_KEY:
+                excluded_time += event.self_device_time_total
+            continue
+
         total_cuda_time += event.self_device_time_total
-        if excluded_kernels in event.key:
-            excluded_time += event.self_device_time_total
 
     kernel_time_us = (total_cuda_time - excluded_time) / n_repeat
     return kernel_time_us * 1e-3  # Convert microseconds to milliseconds
