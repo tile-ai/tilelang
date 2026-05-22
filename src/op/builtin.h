@@ -523,7 +523,13 @@ TVM_DLL const Op &ptx_cp_async();
  * pass in lower_tile_op.cc moves the XOR swizzle from the LDS store side
  * to the global load side to make this safe.
  *
- * ptx_cp_async_lds(dst_access_ptr, src_access_ptr, bytes)
+ * ptx_cp_async_lds(dst_access_ptr, src_access_ptr, num_elems)
+ *
+ * num_elems is the logical element count (NOT byte width). Lowering
+ * derives the {4, 8, 16} byte transfer width from the access-ptr dtype.
+ * Passing this as elements keeps vec-loop folding in vectorize_loop.cc
+ * (which multiplies the count when it widens a loop) consistent with
+ * the plain ptx_cp_async path.
  */
 TVM_DLL const Op &ptx_cp_async_lds();
 
@@ -546,8 +552,11 @@ TVM_DLL const Op &ptx_make_buffer_resource();
  * HoistBufferResource Python pass rewrites ptx_cp_async_lds calls to this
  * form once per kernel.
  *
- * ptx_cp_async_lds_rsrc(dst_access_ptr, src_access_ptr, bytes, rsrc_var,
+ * ptx_cp_async_lds_rsrc(dst_access_ptr, src_access_ptr, num_elems, rsrc_var,
  *                       base_var)
+ *
+ * num_elems uses the same convention as ptx_cp_async_lds -- logical
+ * element count, not bytes; lowering converts via the access-ptr dtype.
  */
 TVM_DLL const Op &ptx_cp_async_lds_rsrc();
 

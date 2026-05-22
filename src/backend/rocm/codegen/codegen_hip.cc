@@ -56,9 +56,12 @@ std::optional<DataType> GetAccessPtrElementType(const PrimExpr &expr) {
 }
 
 int GetTileLangCPAsyncTransferBytes(const CallNode *op) {
-  ICHECK(op->args.size() == 3 || op->args.size() == 4)
-      << "tl::ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
-         "src_access_ptr, num_elems, [predicate])";
+  // Accepts ptx_cp_async / ptx_cp_async_lds (3 or 4 args: dst, src, num_elems,
+  // [predicate]) and ptx_cp_async_lds_rsrc (5 args: dst, src, num_elems,
+  // rsrc_var, base_var) -- only args[0..2] are read here.
+  ICHECK(op->args.size() == 3 || op->args.size() == 4 || op->args.size() == 5)
+      << "tl::ptx_cp_async family expects 3-5 arguments (dst_access_ptr, "
+         "src_access_ptr, num_elems, ...)";
   const auto *num_elems_imm = op->args[2].as<IntImmNode>();
   ICHECK(num_elems_imm) << "tl::ptx_cp_async num_elems must be IntImm, but got "
                         << op->args[2];
@@ -924,28 +927,15 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string ptr = this->PrintExpr(op->args[0]);
     os << "make_wave_buffer_resource((const void*)(" << ptr << "))";
   } else if (op->op.same_as(tl::ptx_cp_async_lds_rsrc())) {
-    // args = [dst, src, bytes, rsrc_var, base_var]
+    // args = [dst, src, num_elems, rsrc_var, base_var]. arg 2 is the logical
+    // element count inherited from the ptx_cp_async_lds call that
+    // HoistBufferResource rewrote into this rsrc form -- the helper does the
+    // src/dst width-equality and {4,8,16} validation that the plain
+    // ptx_cp_async path also relies on.
     ICHECK(op->args.size() == 5) << "ptx_cp_async_lds_rsrc expects 5 arguments";
     std::string dst = this->PrintExpr(op->args[0]);
     std::string src = this->PrintExpr(op->args[1]);
-    // arg 2 carries logical element count (inherited from the
-    // ptx_cp_async_lds call that HoistBufferResource rewrote into this
-    // rsrc form). Convert to bytes the same way the ptx_cp_async / lds
-    // handler does, by inspecting the access-ptr element type.
-    const auto *num_elems_imm = op->args[2].as<IntImmNode>();
-    ICHECK(num_elems_imm)
-        << "ptx_cp_async_lds_rsrc num_elems must be IntImm, but got "
-        << op->args[2];
-    auto dst_elem_type = GetAccessPtrElementType(op->args[0]);
-    ICHECK(dst_elem_type.has_value())
-        << "ptx_cp_async_lds_rsrc dst must be tvm_access_ptr / tl.access_ptr / "
-           "address_of(BufferLoad)";
-    int64_t total_bits = num_elems_imm->value * dst_elem_type.value().bits() *
-                         dst_elem_type.value().lanes();
-    ICHECK_EQ(total_bits % 8, 0)
-        << "ptx_cp_async_lds_rsrc requires byte-aligned transfer, got "
-        << total_bits << " bits";
-    int total_bytes = static_cast<int>(total_bits / 8);
+    int total_bytes = GetTileLangCPAsyncTransferBytes(op);
     std::string size = std::to_string(total_bytes);
     std::string rsrc = this->PrintExpr(op->args[3]);
     std::string base = this->PrintExpr(op->args[4]);

@@ -1077,49 +1077,51 @@ private:
         // some shapes) where the swizzle spreads across multiple output
         // dims, the post-swap LDS index is NOT lane-contiguous and
         // buffer_load_dwordx4...lds would write to wrong addresses.
-        // Detect by sampling each new_dst_indices[d] against a
-        // thread-like var and requiring an affine (constant or
-        // single-stride) dependence. If any dim is non-affine in tx
-        // (typical for bit-extract `(tx & m) >> s` terms), bail out so
-        // the call falls through to the safe ptx_cp_async path.
+        // Detect by sampling each new_dst_indices[d] against the actual
+        // threadIdx.x binding tracked in thread_var_ (set from the
+        // tirx::attr::thread_extent AttrStmt). Substituting concrete
+        // lane values and requiring the dependence to be a single
+        // constant stride catches the case where the LDS index has
+        // bit-extract terms like `(tx & m) >> s` that buffer_load_lds
+        // would scatter. If any dim is non-affine in the lane var, bail
+        // out so the call falls through to the safe ptx_cp_async path.
+        //
+        // Use the real binding rather than a name-based heuristic so a
+        // future rename of the lane var (or any kernel whose lane var
+        // doesn't happen to be called "tx"/"tid"/"thread*") doesn't
+        // silently misclassify the call as affine-OK and emit a
+        // wrong-banks tile.
+        Var lane_var;
+        if (thread_var_.defined() && thread_var_->var.defined() &&
+            thread_block_size_ > 1) {
+          lane_var = thread_var_->var;
+        }
         auto is_affine_in_thread_var = [&](const PrimExpr &e) -> bool {
-          arith::Analyzer post_analyzer;
-          std::unordered_set<const VarNode *> seen;
-          Array<Var> free_vars;
-          tirx::PostOrderVisit(e, [&](const ObjectRef &node) {
-            if (auto *v = node.as<VarNode>()) {
-              if (seen.insert(v).second) {
-                free_vars.push_back(Downcast<Var>(node));
-              }
-            }
-          });
-          for (const auto &var : free_vars) {
-            const std::string name(var->name_hint);
-            if (name.find("thread") == std::string::npos && name != "tx" &&
-                name != "tid") {
-              continue;
-            }
-            PrimExpr f0 = post_analyzer.Simplify(tirx::Substitute(
-                e, Map<Var, PrimExpr>{{var, IntImm(var->dtype, 0)}}));
-            PrimExpr f1 = post_analyzer.Simplify(tirx::Substitute(
-                e, Map<Var, PrimExpr>{{var, IntImm(var->dtype, 1)}}));
-            PrimExpr stride = post_analyzer.Simplify(f1 - f0);
-            const auto *stride_imm = stride.as<IntImmNode>();
-            if (!stride_imm)
-              return false;
-            for (int pt = 2; pt < 64; ++pt) {
-              PrimExpr fk = post_analyzer.Simplify(tirx::Substitute(
-                  e, Map<Var, PrimExpr>{{var, IntImm(var->dtype, pt)}}));
-              PrimExpr actual = post_analyzer.Simplify(fk - f0);
-              PrimExpr expected =
-                  IntImm(DataType::Int(64), stride_imm->value * pt);
-              if (!post_analyzer.CanProveEqual(actual, expected)) {
-                return false;
-              }
-            }
+          if (!lane_var.defined()) {
+            // Serial / no-thread kernel: expression is trivially
+            // constant w.r.t. the lane and any LDS layout works.
             return true;
           }
-          // No thread-like var found: constant w.r.t. tx -> affine OK.
+          arith::Analyzer post_analyzer;
+          PrimExpr f0 = post_analyzer.Simplify(tirx::Substitute(
+              e, Map<Var, PrimExpr>{{lane_var, IntImm(lane_var->dtype, 0)}}));
+          PrimExpr f1 = post_analyzer.Simplify(tirx::Substitute(
+              e, Map<Var, PrimExpr>{{lane_var, IntImm(lane_var->dtype, 1)}}));
+          PrimExpr stride = post_analyzer.Simplify(f1 - f0);
+          const auto *stride_imm = stride.as<IntImmNode>();
+          if (!stride_imm)
+            return false;
+          for (int pt = 2; pt < 64; ++pt) {
+            PrimExpr fk = post_analyzer.Simplify(tirx::Substitute(
+                e,
+                Map<Var, PrimExpr>{{lane_var, IntImm(lane_var->dtype, pt)}}));
+            PrimExpr actual = post_analyzer.Simplify(fk - f0);
+            PrimExpr expected =
+                IntImm(DataType::Int(64), stride_imm->value * pt);
+            if (!post_analyzer.CanProveEqual(actual, expected)) {
+              return false;
+            }
+          }
           return true;
         };
         bool all_dims_affine = true;

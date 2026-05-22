@@ -681,7 +681,8 @@ public:
       return scalar_count * 8;
     }
     ICHECK(op->op.same_as(tl::ptx_cp_async()) ||
-           op->op.same_as(tl::ptx_cp_async_lds()));
+           op->op.same_as(tl::ptx_cp_async_lds()) ||
+           op->op.same_as(tl::ptx_cp_async_lds_rsrc()));
     auto dst_elem_bits = GetAccessPtrElementBits(op->args[0]);
     auto src_elem_bits = GetAccessPtrElementBits(op->args[1]);
     if (!dst_elem_bits.has_value() || !src_elem_bits.has_value()) {
@@ -703,8 +704,11 @@ public:
   PrimExpr MutatePTXCPAsyncExpr_(const CallNode *op) {
     ICHECK(op->op.same_as(builtin::ptx_cp_async()) ||
            op->op.same_as(tl::ptx_cp_async()) ||
-           op->op.same_as(tl::ptx_cp_async_lds()));
-    if (op->args.size() != 3 && op->args.size() != 4) {
+           op->op.same_as(tl::ptx_cp_async_lds()) ||
+           op->op.same_as(tl::ptx_cp_async_lds_rsrc()));
+    // 3 or 4 args: dst, src, count, [predicate] (plain cp_async family).
+    // 5 args: dst, src, count, rsrc_var, base_var (hoisted-resource form).
+    if (op->args.size() != 3 && op->args.size() != 4 && op->args.size() != 5) {
       return GetRef<PrimExpr>(op);
     }
 
@@ -720,13 +724,27 @@ public:
       }
       predicate = pred;
     }
+    // For the rsrc form, args[3..4] are the hoisted (rsrc_var, base_var) and
+    // must be preserved through the rewrite so codegen still sees them.
+    Array<PrimExpr> trailing_rsrc_args;
+    if (op->args.size() == 5) {
+      trailing_rsrc_args.push_back(VisitExpr(op->args[3]));
+      trailing_rsrc_args.push_back(VisitExpr(op->args[4]));
+    }
+
+    auto append_trailing = [&](Array<PrimExpr> &args) {
+      if (predicate.defined()) {
+        args.push_back(predicate.value());
+      }
+      for (const auto &a : trailing_rsrc_args) {
+        args.push_back(a);
+      }
+    };
 
     auto lanes_ptr = as_const_int(var_lanes_);
     if (!lanes_ptr || *lanes_ptr <= 1) {
       Array<PrimExpr> new_args{dst, src, count};
-      if (predicate.defined()) {
-        new_args.push_back(predicate.value());
-      }
+      append_trailing(new_args);
       if (new_args.same_as(op->args)) {
         return GetRef<PrimExpr>(op);
       }
@@ -754,9 +772,7 @@ public:
     int total_count =
         static_cast<int>(Downcast<IntImm>(count)->value) * vector_size;
     Array<PrimExpr> new_args{dst, src, IntImm(count.dtype(), total_count)};
-    if (predicate.defined()) {
-      new_args.push_back(predicate.value());
-    }
+    append_trailing(new_args);
     if (new_args.same_as(op->args)) {
       return GetRef<PrimExpr>(op);
     }
