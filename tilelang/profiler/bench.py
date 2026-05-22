@@ -60,7 +60,7 @@ class suppress_stdout_stderr:
 IS_CUDA = torch.cuda.is_available()
 device = "cuda:0" if IS_CUDA else "mps:0"
 Event = torch.cuda.Event if IS_CUDA else torch.mps.Event
-_CACHE_FLUSH_PROFILE_NAME = "tilelang::cache_flush"
+_CACHE_FLUSH_ID = "tilelang::cache_flush"
 
 
 def do_bench(
@@ -193,7 +193,7 @@ def _bench_with_cupti(
         with profiler:
             for _ in range(2):
                 for _ in range(n_repeat):
-                    with torch.profiler.record_function(_CACHE_FLUSH_PROFILE_NAME):
+                    with torch.profiler.record_function(_CACHE_FLUSH_ID):
                         cache.zero_()
                     fn()
                 profiler.step()
@@ -210,7 +210,7 @@ def _bench_with_cupti(
         if not is_cuda_event(event):
             continue
         if getattr(event, "is_user_annotation", False):
-            if event.key == _CACHE_FLUSH_PROFILE_NAME:
+            if event.key == _CACHE_FLUSH_ID:
                 excluded_time += event.self_device_time_total
             continue
 
