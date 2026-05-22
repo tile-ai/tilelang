@@ -210,11 +210,10 @@ def _bench_with_cupti(
         if not is_cuda_event(event):
             continue
 
-        if event.is_user_annotation:
-            if event.key == _CACHE_FLUSH_ID:
-                excluded_time += event.self_device_time_total
-        else:
+        if not event.is_user_annotation:
             total_cuda_time += event.self_device_time_total
+        elif event.key == _CACHE_FLUSH_ID:
+            excluded_time += event.self_device_time_total
 
     kernel_time_us = (total_cuda_time - excluded_time) / n_repeat
     return kernel_time_us * 1e-3  # Convert microseconds to milliseconds
