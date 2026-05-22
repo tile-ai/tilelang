@@ -124,9 +124,7 @@ public:
           /*dst_base_load=*/BufferLoad(store->buffer, store->indices),
           /*src_base_load=*/BufferLoad(load->buffer, load->indices),
           /*num_elems=*/index_info->per_access_num_elems,
-          /*total_bytes=*/index_info->total_bytes,
-          /*dst_check_index=*/index_info->dst_index, predicated,
-          predicate_value);
+          /*total_bytes=*/index_info->total_bytes, predicated, predicate_value);
     }
 
     Optional<Array<PrimExpr>> src_base_indices =
@@ -147,8 +145,7 @@ public:
         /*dst_base_load=*/BufferLoad(store->buffer, dst_base_indices.value()),
         /*src_base_load=*/BufferLoad(load->buffer, src_base_indices.value()),
         /*num_elems=*/index_info->per_access_num_elems,
-        /*total_bytes=*/index_info->total_bytes,
-        /*dst_check_index=*/index_info->dst_index, predicated, predicate_value);
+        /*total_bytes=*/index_info->total_bytes, predicated, predicate_value);
   }
 
   Stmt VisitStmt_(const SeqStmtNode *op) final {
@@ -431,59 +428,6 @@ private:
     return info;
   }
 
-  // Real lane-contiguity proof for the gfx950 buffer_load...lds routing.
-  // The destination LDS index must be an affine function of the thread-like
-  // variable with a constant per-lane stride. Bit-arithmetic swizzles
-  // (xor2x2 etc. expanded as `((a + b) & 1) * k`) have a constant
-  // f(1)-f(0) but are NOT linear globally; we catch those by sampling at
-  // many points and requiring f(k) - f(0) == k * stride at every point.
-  // Returns false unless we find a recognisable thread-like free var whose
-  // contribution is provably linear.
-  static bool IsLdsLaneContiguous(const PrimExpr &dst_index) {
-    arith::Analyzer analyzer;
-    std::unordered_set<const VarNode *> seen;
-    Array<Var> free_vars;
-    tir::PostOrderVisit(dst_index, [&](const ObjectRef &node) {
-      if (auto *v = node.as<VarNode>()) {
-        if (seen.insert(v).second) {
-          free_vars.push_back(Downcast<Var>(node));
-        }
-      }
-    });
-    // Sample 0, 1, 2, ..., 1023 — covers wave-32/64 boundaries, warp tiles,
-    // bank-swizzle phases (typically powers of two up to 64), and the
-    // wider 256-thread block boundaries the bench uses.
-    constexpr int kNumSamples = 1024;
-    for (const auto &var : free_vars) {
-      const std::string name(var->name_hint);
-      if (name.find("thread") == std::string::npos && name != "tx" &&
-          name != "tid") {
-        continue;
-      }
-      PrimExpr f0 = analyzer.Simplify(Substitute(
-          dst_index, Map<Var, PrimExpr>{{var, IntImm(var->dtype, 0)}}));
-      PrimExpr f1 = analyzer.Simplify(Substitute(
-          dst_index, Map<Var, PrimExpr>{{var, IntImm(var->dtype, 1)}}));
-      PrimExpr expected_stride = analyzer.Simplify(f1 - f0);
-      auto *stride_imm = expected_stride.as<IntImmNode>();
-      if (!stride_imm) {
-        return false;
-      }
-      int64_t stride = stride_imm->value;
-      for (int pt = 2; pt < kNumSamples; ++pt) {
-        PrimExpr fk = analyzer.Simplify(Substitute(
-            dst_index, Map<Var, PrimExpr>{{var, IntImm(var->dtype, pt)}}));
-        PrimExpr actual = analyzer.Simplify(fk - f0);
-        PrimExpr expected = IntImm(DataType::Int(64), stride * pt);
-        if (!analyzer.CanProveEqual(actual, expected)) {
-          return false;
-        }
-      }
-      return true;
-    }
-    return false;
-  }
-
   static PrimExpr ExtractVectorBase(const PrimExpr &index) {
     if (index.dtype().lanes() == 1) {
       return index;
@@ -553,7 +497,6 @@ private:
                                           const BufferLoad &dst_base_load,
                                           const BufferLoad &src_base_load,
                                           int num_elems, int total_bytes,
-                                          const PrimExpr &dst_check_index,
                                           bool predicated,
                                           const PrimExpr &predicate_value) {
     PrimExpr dst_access_ptr =
@@ -562,22 +505,19 @@ private:
         MakeAccessPtrFromLoad(src_base_load, num_elems, /*rw_mask=*/1);
 
     // gfx950 routing: emit tl::ptx_cp_async_lds when the destination is a
-    // 16-byte non-predicated shared-memory write whose LDS index is lane-
-    // contiguous (no XOR swizzle). Arg 2 carries the logical element count
-    // (same convention tl::ptx_cp_async uses) so the existing vec-loop
-    // folding in vectorize_loop.cc widens it correctly when the call sits
-    // inside a T.vectorized(k) loop. The codegen handler converts the
-    // logical count back to bytes via GetTileLangCPAsyncTransferBytes.
+    // 16-byte non-predicated shared-memory write. Arg 2 carries the logical
+    // element count (same convention tl::ptx_cp_async uses) so the existing
+    // vec-loop folding in vectorize_loop.cc widens it correctly when the
+    // call sits inside a T.vectorized(k) loop. The codegen handler converts
+    // the logical count back to bytes via GetTileLangCPAsyncTransferBytes.
+    // If the LDS index carries an XOR swizzle, the swizzle-swap visitor in
+    // LowerTileOp rewrites the call (subtract SwizzleDelta on LDS, add on
+    // global) so the destination becomes lane-contiguous; if the swap
+    // can't produce an affine destination it downgrades back to
+    // tl::ptx_cp_async, so both paths produce correct code.
     if (enable_buffer_load_lds_ && !predicated && total_bytes == 16) {
       const std::string dst_scope = store->buffer.scope();
       const bool is_shared = dst_scope == "shared" || dst_scope == "shared.dyn";
-      // Emit ptx_cp_async_lds whenever shared + 16B + non-predicated. If
-      // dst_check_index is already lane-contiguous, codegen emits the LDS
-      // template directly. Otherwise the LowerTileOp M9 visitor will see
-      // tl::ptx_cp_async_lds and either (a) rewrite via the swizzle-swap
-      // (subtract SwizzleDelta on LDS, add to global) when the layout is
-      // amenable, or (b) downgrade to tl::ptx_cp_async if the post-swap
-      // index is not lane-contiguous. Both paths produce correct code.
       if (is_shared) {
         ffi::Array<PrimExpr> lds_args = {dst_access_ptr, src_access_ptr,
                                          PrimExpr(num_elems)};
