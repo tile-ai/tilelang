@@ -726,18 +726,10 @@ Fragment ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &T) const {
   DLOG(INFO) << "[PlanLoopPartition] root_ = " << root_
              << " ############# vector_size = " << vector_size
              << ", thread_bounds = " << T.thread_bounds << '\n';
-  // Prefer chunk-block aware binding when applicable. The default flatten
-  // policy below would put 16 (or more) lanes on the continuous dim; when a
-  // shared destination has a FullBank swizzle layout with tc > 1, those lanes
-  // straddle the chunk-block boundary, breaking lane-contiguous LDS WRITEs and
-  // any downstream swizzle-swap.
-  if (auto cba_plan =
-          ComputeChunkBlockAwarePlanCandidate(T, vector_size);
-      cba_plan.defined()) {
-    DLOG(INFO) << "[PlanLoopPartition] chunk-block-aware candidate = "
-               << cba_plan->DebugOutput() << '\n';
-    return cba_plan;
-  }
+  // Chunk-block-aware binding is taken by the early hook in
+  // ParallelOp::InferLayout (before source_buffer dispatch). By the time
+  // we reach here loop_layout_ is already set when CBA applies, so no
+  // need to re-try it.
   auto plan = PlanLoopPartition(root_, vector_size, T.thread_bounds);
   DLOG(INFO) << "[PlanLoopPartition] candidate = " << plan->DebugOutput()
              << '\n';
