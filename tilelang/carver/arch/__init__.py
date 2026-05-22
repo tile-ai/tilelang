@@ -56,6 +56,7 @@ __all__ = [
     "is_cdna_arch",
     "is_rdna_arch",
     "is_metal_arch",
+    "is_hexagon_target",
     "CUDA",
     "CDNA",
     "RDNA",

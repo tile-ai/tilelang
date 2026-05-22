@@ -331,6 +331,27 @@ set(TILELANG_HIP_INCLUDE_DIR "" CACHE PATH
     "Path to HIP headers when building with USE_ROCM=ON on a host without a ROCm runtime")
 # Configs end
 
+# --- LLVM Detection for Hexagon/CPU Backend ---
+if(NOT DEFINED USE_LLVM)
+  set(USE_LLVM OFF CACHE STRING "Build with LLVM support (required for Hexagon)")
+endif()
+
+if(USE_LLVM STREQUAL "ON")
+  find_program(LLVM_CONFIG_PATH NAMES llvm-config-18 llvm-config-17 llvm-config)
+  if(LLVM_CONFIG_PATH)
+    set(USE_LLVM ${LLVM_CONFIG_PATH} CACHE STRING "Path to llvm-config" FORCE)
+  else()
+    message(FATAL_ERROR "USE_LLVM is ON but llvm-config was not found in PATH. "
+                        "Install LLVM (llvm-config must be on PATH) or set USE_LLVM=OFF.")
+  endif()
+endif()
+
+# Save user's USE_LLVM before TVM's config.cmake overwrites it.
+# TVM's config.cmake unconditionally sets USE_LLVM to OFF, so we
+# save the value here and restore it after the include.
+set(_TILELANG_USE_LLVM_SAVED "${USE_LLVM}")
+
+# Load TVM sources and base configs
 include(cmake/load_tvm.cmake)
 
 if(EXISTS ${TVM_SOURCE}/cmake/config.cmake)
@@ -338,6 +359,16 @@ if(EXISTS ${TVM_SOURCE}/cmake/config.cmake)
 else()
   message(FATAL_ERROR "Nor tvm provided or submodule checkout-ed.")
 endif()
+
+set(USE_LLVM "${_TILELANG_USE_LLVM_SAVED}" CACHE STRING "LLVM config path" FORCE)
+set(USE_LLVM "${_TILELANG_USE_LLVM_SAVED}")
+
+unset(_TILELANG_USE_LLVM_SAVED)
+
+if(USE_LLVM AND NOT USE_LLVM STREQUAL "OFF")
+  message(STATUS "TileLang Build with LLVM: ${USE_LLVM}")
+endif()
+
 # Re-apply TileLang's preferred backend settings after TVM's config may have
 # overridden the USE_* cache entries.
 foreach(BACKEND IN LISTS TILELANG_BACKENDS)
@@ -359,6 +390,12 @@ set(TILE_LANG_INCLUDES ${TVM_INCLUDES})
 # Add TileLang's own src/ to include path so cross-directory includes
 # can use paths relative to src/ (e.g. "target/utils.h", "op/builtin.h").
 list(INSERT TILE_LANG_INCLUDES 0 "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+# Include TVM public 'include' and private 'src' directories using absolute paths
+list(APPEND TILE_LANG_INCLUDES
+  "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/tvm/include"
+  "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/tvm/src"
+)
 
 # Collect source files
 file(GLOB TILE_LANG_SRCS
@@ -383,6 +420,7 @@ file(GLOB TILE_LANG_SRCS
 # Always include CPU-safe runtime helpers
 list(APPEND TILE_LANG_SRCS
   src/runtime/error_helpers.cc
+  src/runtime/hexagon_runtime.cc
 )
 
 # Metal codegen is pure C++ (no Apple frameworks) and can generate Metal shader
