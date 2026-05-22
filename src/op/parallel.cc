@@ -417,13 +417,12 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     PrimExpr loop_total_size = 1;
     for (Stmt l = root_; l.as<For>().has_value(); l = l.as<For>().value()->body)
       loop_total_size = loop_total_size * l.as<For>().value()->extent;
-    while (!analyzer_.CanProve(floormod(loop_total_size,
-                                        T.thread_bounds->extent *
-                                            vector_size) == 0) &&
-           vector_size > 1)
+    while (
+        !analyzer_.CanProve(floormod(loop_total_size, T.thread_bounds->extent *
+                                                          vector_size) == 0) &&
+        vector_size > 1)
       vector_size /= 2;
-    if (auto cba =
-            ComputeChunkBlockAwarePlanCandidate(T, vector_size);
+    if (auto cba = ComputeChunkBlockAwarePlanCandidate(T, vector_size);
         cba.defined()) {
       loop_layout_ = cba;
     }
@@ -742,8 +741,9 @@ Fragment ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &T) const {
   return plan;
 }
 
-Fragment ParallelOpNode::ComputeChunkBlockAwarePlanCandidate(
-    const LayoutInferArgs &T, int vector_size) const {
+Fragment
+ParallelOpNode::ComputeChunkBlockAwarePlanCandidate(const LayoutInferArgs &T,
+                                                    int vector_size) const {
   // 1. Find a written shared buffer with a swizzle layout whose continuous
   //    (innermost) dim exceeds one CDNA LDS bank cycle (128 bytes). When
   //    that happens FullBank splits the dim into `tc` planes; the default
@@ -809,8 +809,7 @@ Fragment ParallelOpNode::ComputeChunkBlockAwarePlanCandidate(
       }
       if (chosen_axis < 0)
         return;
-      auto *axis_ext_imm =
-          as_const_int(loop_vars_[chosen_axis]->dom->extent);
+      auto *axis_ext_imm = as_const_int(loop_vars_[chosen_axis]->dom->extent);
       if (!axis_ext_imm || *axis_ext_imm != cont)
         return;
     } else {
@@ -857,8 +856,7 @@ Fragment ParallelOpNode::ComputeChunkBlockAwarePlanCandidate(
     PrimExpr modified_total = IntImm(dtype, 1);
     PrimExpr modified_flat = make_zero(dtype);
     for (int i = 0; i < static_cast<int>(loop_vars_.size()); i++) {
-      PrimExpr ext =
-          (i == split_axis) ? inner_pe : loop_vars_[i]->dom->extent;
+      PrimExpr ext = (i == split_axis) ? inner_pe : loop_vars_[i]->dom->extent;
       PrimExpr v = (i == split_axis)
                        ? inner_part
                        : static_cast<PrimExpr>(loop_vars_[i]->var);
@@ -894,8 +892,8 @@ Fragment ParallelOpNode::ComputeChunkBlockAwarePlanCandidate(
   PrimExpr num_thread_pe = IntImm(dtype, *num_thread_imm);
   PrimExpr access_idx = FloorDiv(flat, vec_pe);
   PrimExpr thd = FloorMod(access_idx, num_thread_pe);
-  PrimExpr idx = FloorDiv(access_idx, num_thread_pe) * vec_pe +
-                 FloorMod(flat, vec_pe);
+  PrimExpr idx =
+      FloorDiv(access_idx, num_thread_pe) * vec_pe + FloorMod(flat, vec_pe);
 
   Fragment fragment = Fragment(loop_vars_, /*forward_index=*/{idx},
                                /*forward_thread=*/thd,
