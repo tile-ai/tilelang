@@ -424,7 +424,16 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
       vector_size /= 2;
     if (auto cba = ComputeChunkBlockAwarePlanCandidate(T, vector_size);
         cba.defined()) {
-      loop_layout_ = cba;
+      // Only adopt the CBA layout if it doesn't conflict with a fragment
+      // (e.g. an MMA accumulator like acc_o_l / C_local) that already has
+      // a layout in T.layout_map. Otherwise the unconditional override
+      // would force the loop onto a binding incompatible with the
+      // fragment and ValidateCandidateAgainstFragments would fail later.
+      if (ValidateCandidateAgainstFragments(cba, T, /*throw_on_error=*/false,
+                                            /*check_forward_index=*/false,
+                                            /*source_buffer=*/Buffer{})) {
+        loop_layout_ = cba;
+      }
     }
   }
   if (!loop_layout_.defined() && annotated_layout_unbound_.defined()) {
