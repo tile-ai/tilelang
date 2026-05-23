@@ -408,7 +408,12 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
   // Override here BEFORE source_buffer dispatch so the CBA fragment wins.
   // Fire at ALL levels so the first level that sees the layout map populated
   // wins; subsequent levels short-circuit via loop_layout_inferred_.
-  if (!loop_layout_.defined()) {
+  //
+  // gfx950-only: this hook exists to make buffer_load_dwordx4...lds usable,
+  // and the alternate binding it picks can conflict with MMA fragment
+  // bindings on NVIDIA / older AMD. Skip on every other target so the
+  // existing CUDA / pre-CDNA4 layout inference is untouched.
+  if (!loop_layout_.defined() && TargetIsGfx950(T.target)) {
     // Reuse the same vec_size calculation as ComputePlanCandidate.
     auto maybe_remapped_root =
         IfBufferRemapLoopGenerator::run(root_, T.buffer_remap, T.layout_map);
