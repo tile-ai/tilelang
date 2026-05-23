@@ -7,6 +7,7 @@
 #include <tvm/runtime/logging.h>
 
 #include "backend/metal/op/utils.h"
+#include "op/builtin.h"
 #include "op/utils.h"
 #include "target/utils.h"
 #include "transform/loop_partition.h"
@@ -24,6 +25,36 @@ namespace metal {
 struct Fill {
   static Stmt Lower(const FillNode &op, const LowerArgs &T,
                     arith::Analyzer *analyzer) {
+    if (IsCooperativeTensorBuffer(op.dst)) {
+      int region_elements = 1;
+      for (auto r : op.region) {
+        auto imm = r->extent.as<IntImmNode>();
+        TVM_FFI_ICHECK(imm)
+            << "cooperative_tensor fill region must have constant extents";
+        region_elements *= imm->value;
+      }
+      constexpr int kTileM = 16;
+      constexpr int kTileN = 32;
+      constexpr int kTileElems = kTileM * kTileN;
+      TVM_FFI_ICHECK(region_elements % kTileElems == 0)
+          << "cooperative_tensor buffer size must be multiple of "
+          << kTileElems << ", got " << region_elements;
+      int num_tiles = region_elements / kTileElems;
+      PrimExpr fill_value = Cast(op.dst->dtype, op.value);
+      Array<Stmt> stmts;
+      for (int i = 0; i < num_tiles; i++) {
+        stmts.push_back(Evaluate(
+            Call(DataType::Handle(), cooperative_tensor_fill(),
+                 {op.dst->data, IntImm(DataType::Int(32), i), fill_value,
+                  IntImm(DataType::Int(32), kTileM),
+                  IntImm(DataType::Int(32), kTileN)})));
+      }
+      if (stmts.size() == 1) {
+        return stmts[0];
+      }
+      return SeqStmt(stmts);
+    }
+
     if (IsSIMDGroupBuffer(op.dst)) {
       int region_elements = 1;
       for (auto r : op.region) {
