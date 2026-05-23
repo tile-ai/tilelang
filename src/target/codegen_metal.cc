@@ -23,6 +23,7 @@
 #include "codegen_metal.h"
 
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
 #include <algorithm>
@@ -34,6 +35,7 @@
 
 #include "runtime/metal/metal_module.h"
 #include "runtime/thread_storage_scope.h"
+#include "op/builtin.h"
 #include "target/build_common.h"
 
 namespace tvm {
@@ -41,6 +43,7 @@ namespace codegen {
 
 void CodeGenTileLangMetal::InitFuncState(const PrimFunc &f) {
   CodeGenC::InitFuncState(f);
+  emitted_frag_lane_vars_ = false;
   // analyze the data;
   for (Var arg : f->params) {
     if (arg.dtype().is_handle()) {
@@ -51,6 +54,8 @@ void CodeGenTileLangMetal::InitFuncState(const PrimFunc &f) {
 
 CodeGenTileLangMetal::CodeGenTileLangMetal(Target target) : target_(target) {
   decl_stream << "#include <metal_stdlib>\n";
+  decl_stream
+      << "#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n";
   decl_stream << "using namespace metal;\n\n";
   decl_stream << "union __TVMArgUnion {\n"
               << " int v_int[2];\n"
@@ -173,6 +178,9 @@ void CodeGenTileLangMetal::AddFunction(const GlobalVar &gvar,
     stream << " blockIdx [[threadgroup_position_in_grid]],\n";
     stream << "  ";
     PrintType(DataType::UInt(thread_index_bits_, work_dim), stream);
+    stream << " __gridDim [[threadgroups_per_grid]],\n";
+    stream << "  ";
+    PrintType(DataType::UInt(thread_index_bits_, work_dim), stream);
     stream << " threadIdx [[thread_position_in_threadgroup]]\n";
   }
   thread_work_dim_ = work_dim;
@@ -180,6 +188,17 @@ void CodeGenTileLangMetal::AddFunction(const GlobalVar &gvar,
   // the function scope.
   stream << ") {\n";
   int func_scope = this->BeginScope();
+  if (work_dim > 0) {
+    this->PrintIndent();
+    stream << "const ushort __lane = ((uint)threadIdx.x) % 32;\n";
+    this->PrintIndent();
+    stream << "const ushort __qid = __lane >> 2;\n";
+    this->PrintIndent();
+    stream << "const ushort __base_row = (__qid & 4) | ((__lane >> 1) & 3);\n";
+    this->PrintIndent();
+    stream << "const ushort __base_col = ((__qid & 2) | (__lane & 1)) * 4;\n";
+    emitted_frag_lane_vars_ = true;
+  }
   this->PrintStmt(func->body);
   this->EndScope(func_scope);
   this->PrintIndent();
@@ -331,6 +350,77 @@ void CodeGenTileLangMetal::PrintStorageScope(const std::string &scope,
   }
 }
 
+void CodeGenTileLangMetal::VisitStmt_(const AttrStmtNode *op) {
+  if (op->attr_key == "threadblock_swizzle_pattern") {
+    std::string func_name;
+    int panel_size = 0;
+    if (const auto *call = op->value.as<CallNode>()) {
+      if (call->op.same_as(builtin::tvm_tuple()) && call->args.size() >= 2) {
+        const auto *name_node = call->args[0].as<StringImmNode>();
+        const auto *size_node = call->args[1].as<IntImmNode>();
+        TVM_FFI_ICHECK(name_node && size_node);
+        func_name = name_node->value;
+        panel_size = static_cast<int>(size_node->value);
+      }
+    }
+    TVM_FFI_ICHECK(!func_name.empty() && panel_size > 0);
+
+    this->PrintIndent();
+    stream << "{ ";
+    if (func_name == "rasterization2DRow") {
+      stream << "const uint __bi = blockIdx.x + blockIdx.y * __gridDim.x; "
+                "const uint __gs = __gridDim.x * __gridDim.y; "
+                "const uint __ps = "
+             << panel_size
+             << "u * __gridDim.x; "
+                "const uint __po = __bi % __ps; "
+                "const uint __pi = __bi / __ps; "
+                "const uint __tp = (__gs + __ps - 1u) / __ps; "
+                "const uint __st = __pi + 1u < __tp ? "
+             << panel_size
+             << "u : (__gs - __pi * __ps) / __gridDim.x; "
+                "const uint3 blockIdx = uint3("
+                "(__pi & 1u) ? __gridDim.x - 1u - __po / __st : __po / __st, "
+                "__po % __st + __pi * "
+             << panel_size
+             << "u, "
+                "blockIdx.z);\n";
+    } else {
+      stream << "const uint __bi = blockIdx.x + blockIdx.y * __gridDim.x; "
+                "const uint __gs = __gridDim.x * __gridDim.y; "
+                "const uint __ps = "
+             << panel_size
+             << "u * __gridDim.y; "
+                "const uint __po = __bi % __ps; "
+                "const uint __pi = __bi / __ps; "
+                "const uint __tp = (__gs + __ps - 1u) / __ps; "
+                "const uint __st = __pi + 1u < __tp ? "
+             << panel_size
+             << "u : (__gs - __pi * __ps) / __gridDim.y; "
+                "const uint3 blockIdx = uint3("
+                "__po % __st + __pi * "
+             << panel_size
+             << "u, "
+                "(__pi & 1u) ? __gridDim.y - 1u - __po / __st : __po / __st, "
+                "blockIdx.z);\n";
+    }
+    this->VisitStmt(op->body);
+    this->PrintIndent();
+    stream << "}\n";
+    return;
+  }
+  CodeGenC::VisitStmt_(op);
+}
+
+void CodeGenTileLangMetal::VisitStmt_(const ForNode *op) {
+  auto *ext_imm = op->extent.as<IntImmNode>();
+  if (ext_imm && ext_imm->value > 4) {
+    PrintIndent();
+    stream << "#pragma clang loop unroll(disable)\n";
+  }
+  CodeGenC::VisitStmt_(op);
+}
+
 void CodeGenTileLangMetal::VisitStmt_(const AllocBufferNode *op) {
   TVM_FFI_ICHECK(op->buffer.defined());
   std::string vid = AllocVarID(op->buffer->data.get());
@@ -349,7 +439,50 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocBufferNode *op) {
   DataType dtype = op->buffer->dtype;
   auto scope = GetPtrStorageScope(op->buffer->data);
   alloc_storage_scope_[op->buffer->data.get()] = scope;
-  if (scope == "metal.simdgroup") {
+  if (scope == "metal.cooperative_tensor") {
+    TVM_FFI_ICHECK(dtype == DataType::Float(16) ||
+                   dtype == DataType::Float(32) ||
+                   dtype == DataType::BFloat(16))
+        << "Only float16, float32, and bfloat16 are supported for "
+           "cooperative_tensor, but got "
+        << dtype;
+    TVM_FFI_ICHECK(constant_size % 64 == 0)
+        << "cooperative_tensor buffer size must be multiple of 64, got "
+        << constant_size;
+
+    std::ostringstream dtype_os;
+    PrintType(dtype, dtype_os);
+    std::string dtype_str = dtype_os.str();
+    cooperative_tensor_dtype_[op->buffer->data.get()] = dtype_str;
+    int elems_per_thread = constant_size / 32;
+    stream << "thread " << dtype_str << " " << vid << '[' << elems_per_thread
+           << "];\n";
+    if (dtype_str == "float" && elems_per_thread >= 16 &&
+        elems_per_thread % 16 == 0) {
+      int num_c_tiles = elems_per_thread / 16;
+      ct_c_inlined_.insert(op->buffer->data.get());
+      this->PrintIndent();
+      stream
+          << "constexpr auto __pct_desc = mpp::tensor_ops::matmul2d_descriptor("
+          << "16, 32, 16, false, false, true, "
+          << "mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);"
+             "\n";
+      this->PrintIndent();
+      stream << "mpp::tensor_ops::matmul2d<__pct_desc, "
+                "metal::execution_simdgroup> __pct_op;\n";
+      for (int t = 0; t < num_c_tiles; t++) {
+        this->PrintIndent();
+        stream << "auto __pct_c" << t
+               << " = __pct_op.get_destination_cooperative_tensor<"
+               << "decltype(__pct_op.get_left_input_cooperative_tensor<half, "
+                  "half, float>()), "
+               << "decltype(__pct_op.get_right_input_cooperative_tensor<half, "
+                  "half, float>()), float>(); "
+               << "for (ushort __i = 0; __i < 16; __i++) __pct_c" << t
+               << "[__i] = 0.0f;\n";
+      }
+    }
+  } else if (scope == "metal.simdgroup") {
     TVM_FFI_ICHECK(dtype == DataType::Float(16) ||
                    dtype == DataType::Float(32) ||
                    dtype == DataType::BFloat(16))
@@ -372,6 +505,18 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocBufferNode *op) {
   }
 
   RegisterHandleType(op->buffer->data.get(), dtype);
+}
+
+void CodeGenTileLangMetal::EnsureCooperativeTensorBuffer(const Var &var) {
+  if (cooperative_tensor_dtype_.count(var.get()) != 0) {
+    return;
+  }
+  auto type_it = handle_data_type_.find(var.get());
+  TVM_FFI_ICHECK(type_it != handle_data_type_.end())
+      << "Cannot find variable allocation for cooperative_tensor: " << var;
+  std::ostringstream dtype_os;
+  PrintType(type_it->second, dtype_os);
+  cooperative_tensor_dtype_[var.get()] = dtype_os.str();
 }
 
 void CodeGenTileLangMetal::VisitExpr_(const SelectNode *op,
@@ -402,6 +547,51 @@ void CodeGenTileLangMetal::VisitExpr_(const BroadcastNode *op,
     }
     os << ')';
   }
+}
+
+std::string
+CodeGenTileLangMetal::GetAddrSpaceOf(const PrimExpr &ptr_expr) const {
+  if (auto *call = ptr_expr.as<CallNode>()) {
+    if (call->op.same_as(builtin::address_of())) {
+      if (auto *load = call->args[0].as<BufferLoadNode>()) {
+        auto it = alloc_storage_scope_.find(load->buffer->data.get());
+        if (it != alloc_storage_scope_.end()) {
+          const std::string &scope = it->second;
+          if (scope == "shared" || scope == "shared.dyn") {
+            return "threadgroup";
+          }
+          if (scope == "local" || scope == "metal.cooperative_tensor") {
+            return "thread";
+          }
+          if (scope == "global") {
+            return "device";
+          }
+        }
+      }
+    }
+    for (const auto &arg : call->args) {
+      std::string result = GetAddrSpaceOf(arg);
+      if (!result.empty()) {
+        return result;
+      }
+    }
+  }
+  if (auto *var = ptr_expr.as<VarNode>()) {
+    auto it = alloc_storage_scope_.find(var);
+    if (it != alloc_storage_scope_.end()) {
+      const std::string &scope = it->second;
+      if (scope == "shared" || scope == "shared.dyn") {
+        return "threadgroup";
+      }
+      if (scope == "local" || scope == "metal.cooperative_tensor") {
+        return "thread";
+      }
+      if (scope == "global") {
+        return "device";
+      }
+    }
+  }
+  return "thread";
 }
 
 void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
@@ -453,6 +643,205 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
        << PrintExpr(op->args[2]) << "[" << PrintExpr(op->args[3]) << "], " //
        << PrintExpr(op->args[4]) << "[" << PrintExpr(op->args[5]) << "], " //
        << PrintExpr(op->args[6]) << "[" << PrintExpr(op->args[7]) << "])";
+  } else if (op->op.same_as(tl::cooperative_tensor_fill())) {
+    TVM_FFI_ICHECK_EQ(op->args.size(), 5);
+    std::string var = PrintExpr(op->args[0]);
+    std::string idx = PrintExpr(op->args[1]);
+    std::string val = PrintExpr(op->args[2]);
+    int rows = op->args[3].as<IntImmNode>()->value;
+    int cols = op->args[4].as<IntImmNode>()->value;
+    int elems_per_tile = rows * cols / 32;
+    Var fill_v = Downcast<Var>(op->args[0]);
+    EnsureCooperativeTensorBuffer(fill_v);
+    bool is_inlined = ct_c_inlined_.count(fill_v.get()) > 0;
+    auto *fill_idx_imm = op->args[1].as<IntImmNode>();
+    os << "for (ushort __i = 0; __i < " << elems_per_tile << "; __i++) " << var
+       << "[" << idx << " * " << elems_per_tile << " + __i] = " << val;
+    if (is_inlined && fill_idx_imm) {
+      os << "; for (ushort __i = 0; __i < " << elems_per_tile << "; __i++) "
+         << "__pct_c" << fill_idx_imm->value << "[__i] = " << val;
+    }
+  } else if (op->op.same_as(tl::cooperative_tensor_load())) {
+    TVM_FFI_ICHECK_GE(op->args.size(), 11);
+    std::string var = PrintExpr(op->args[0]);
+    std::string idx = PrintExpr(op->args[1]);
+    std::string src_ptr = PrintExpr(op->args[2]);
+    std::string stride = PrintExpr(op->args[3]);
+    int rows = op->args[4].as<IntImmNode>()->value;
+    int cols = op->args[5].as<IntImmNode>()->value;
+    Var v = Downcast<Var>(op->args[0]);
+    EnsureCooperativeTensorBuffer(v);
+    auto it = cooperative_tensor_dtype_.find(v.get());
+    TVM_FFI_ICHECK(it != cooperative_tensor_dtype_.end());
+    std::string dtype = it->second;
+    std::string addr_space = GetAddrSpaceOf(op->args[2]);
+    int frag_rows = 16, frag_cols = 16;
+    int nfrag_r = rows / frag_rows;
+    int nfrag_c = cols / frag_cols;
+    os << "{ " << addr_space << " " << dtype << "* __src = (" << addr_space
+       << " " << dtype << "*)" << src_ptr << "; ";
+    int elem_offset = 0;
+    for (int fr = 0; fr < nfrag_r; fr++) {
+      for (int fc = 0; fc < nfrag_c; fc++) {
+        int row_off = fr * frag_rows;
+        int col_off = fc * frag_cols;
+        os << "{ "
+           << "ushort __r0 = __base_row + " << row_off << "; "
+           << "ushort __r1 = __r0 + 8; "
+           << "ushort __c0 = __base_col + " << col_off << "; "
+           << "*(thread " << dtype << "4*)(&" << var << "[" << idx << " * "
+           << (nfrag_r * nfrag_c * 8) << " + " << elem_offset << "]) = "
+           << "*(" << addr_space << " " << dtype << "4*)(&__src[__r0 * "
+           << stride << " + __c0]); "
+           << "*(thread " << dtype << "4*)(&" << var << "[" << idx << " * "
+           << (nfrag_r * nfrag_c * 8) << " + " << (elem_offset + 4) << "]) = "
+           << "*(" << addr_space << " " << dtype << "4*)(&__src[__r1 * "
+           << stride << " + __c0]); } ";
+        elem_offset += 8;
+      }
+    }
+    os << "}";
+  } else if (op->op.same_as(tl::cooperative_tensor_store())) {
+    TVM_FFI_ICHECK_GE(op->args.size(), 11);
+    std::string var = PrintExpr(op->args[0]);
+    std::string idx = PrintExpr(op->args[1]);
+    std::string dst_ptr = PrintExpr(op->args[2]);
+    std::string stride = PrintExpr(op->args[3]);
+    int rows = op->args[4].as<IntImmNode>()->value;
+    int cols = op->args[5].as<IntImmNode>()->value;
+    Var v = Downcast<Var>(op->args[0]);
+    EnsureCooperativeTensorBuffer(v);
+    auto it = cooperative_tensor_dtype_.find(v.get());
+    TVM_FFI_ICHECK(it != cooperative_tensor_dtype_.end());
+    std::string dtype = it->second;
+    std::string addr_space = GetAddrSpaceOf(op->args[2]);
+    int frag_rows = 16, frag_cols = 16;
+    int nfrag_r = rows / frag_rows;
+    int nfrag_c = cols / frag_cols;
+    int total_elems = nfrag_r * nfrag_c * 8;
+    bool is_inlined = ct_c_inlined_.count(v.get()) > 0;
+    auto *store_idx_imm = op->args[1].as<IntImmNode>();
+    if (is_inlined && store_idx_imm) {
+      int mma_tiles_per_store = total_elems / 16;
+      int base_pct = store_idx_imm->value * mma_tiles_per_store;
+      for (int t = 0; t < mma_tiles_per_store; t++) {
+        os << "for (ushort __i = 0; __i < 16; __i++) " << var << "[" << idx
+           << " * " << total_elems << " + " << (t * 16) << " + __i] = "
+           << "__pct_c" << (base_pct + t) << "[__i]; ";
+      }
+    }
+    os << "{ " << addr_space << " " << dtype << "* __dst = (" << addr_space
+       << " " << dtype << "*)" << dst_ptr << "; ";
+    int elem_offset = 0;
+    for (int fr = 0; fr < nfrag_r; fr++) {
+      for (int fc = 0; fc < nfrag_c; fc++) {
+        int row_off = fr * frag_rows;
+        int col_off = fc * frag_cols;
+        os << "{ "
+           << "ushort __r0 = __base_row + " << row_off << "; "
+           << "ushort __r1 = __r0 + 8; "
+           << "ushort __c0 = __base_col + " << col_off << "; "
+           << "*(" << addr_space << " " << dtype << "4*)(&__dst[__r0 * "
+           << stride << " + __c0]) = "
+           << "*(thread " << dtype << "4*)(&" << var << "[" << idx << " * "
+           << total_elems << " + " << elem_offset << "]); "
+           << "*(" << addr_space << " " << dtype << "4*)(&__dst[__r1 * "
+           << stride << " + __c0]) = "
+           << "*(thread " << dtype << "4*)(&" << var << "[" << idx << " * "
+           << total_elems << " + " << (elem_offset + 4) << "]); } ";
+        elem_offset += 8;
+      }
+    }
+    os << "}";
+  } else if (op->op.same_as(
+                 tl::cooperative_tensor_multiply_accumulate())) {
+    TVM_FFI_ICHECK_GE(op->args.size(), 13);
+    int M = op->args[8].as<IntImmNode>()->value;
+    int N = op->args[9].as<IntImmNode>()->value;
+    int K = op->args[10].as<IntImmNode>()->value;
+    bool trans_a = op->args[11].as<IntImmNode>()->value != 0;
+    bool trans_b = op->args[12].as<IntImmNode>()->value != 0;
+
+    std::string a_var = PrintExpr(op->args[2]);
+    std::string a_idx = PrintExpr(op->args[3]);
+    std::string b_var = PrintExpr(op->args[4]);
+    std::string b_idx = PrintExpr(op->args[5]);
+    std::string c_var = PrintExpr(op->args[0]);
+    std::string c_idx = PrintExpr(op->args[1]);
+
+    Var a_v = Downcast<Var>(op->args[2]);
+    Var c_v = Downcast<Var>(op->args[0]);
+    EnsureCooperativeTensorBuffer(a_v);
+    EnsureCooperativeTensorBuffer(Downcast<Var>(op->args[4]));
+    EnsureCooperativeTensorBuffer(c_v);
+    auto a_it = cooperative_tensor_dtype_.find(a_v.get());
+    auto c_it = cooperative_tensor_dtype_.find(c_v.get());
+    TVM_FFI_ICHECK(a_it != cooperative_tensor_dtype_.end());
+    TVM_FFI_ICHECK(c_it != cooperative_tensor_dtype_.end());
+    std::string a_dtype = a_it->second;
+    std::string c_dtype = c_it->second;
+
+    int a_elems = M * K / 32;
+    int b_elems = K * N / 32;
+    int c_elems = M * N / 32;
+
+    TVM_FFI_ICHECK(M == 32 || N == 32 || K == 32)
+        << "MPP matmul2d requires at least one of M, N, K to be 32, got " << M
+        << "x" << N << "x" << K;
+
+    bool c_inlined = ct_c_inlined_.count(c_v.get()) > 0;
+    auto *c_idx_imm = op->args[1].as<IntImmNode>();
+    bool c_idx_const = c_inlined && c_idx_imm != nullptr;
+    if (c_idx_const) {
+      os << "{ "
+         << "constexpr auto __desc = mpp::tensor_ops::matmul2d_descriptor("
+         << M << ", " << N << ", " << K << ", "
+         << (trans_a ? "true" : "false") << ", "
+         << (trans_b ? "true" : "false") << ", true, "
+         << "mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate)"
+            "; "
+         << "mpp::tensor_ops::matmul2d<__desc, metal::execution_simdgroup> "
+            "__op; "
+         << "auto __ct_a = __op.get_left_input_cooperative_tensor<" << a_dtype
+         << ", " << a_dtype << ", " << c_dtype << ">(); "
+         << "auto __ct_b = __op.get_right_input_cooperative_tensor<" << a_dtype
+         << ", " << a_dtype << ", " << c_dtype << ">(); "
+         << "for (ushort __i = 0; __i < " << a_elems << "; __i++) "
+         << "__ct_a[__i] = " << a_var << "[" << a_idx << " * " << a_elems
+         << " + __i]; "
+         << "for (ushort __i = 0; __i < " << b_elems << "; __i++) "
+         << "__ct_b[__i] = " << b_var << "[" << b_idx << " * " << b_elems
+         << " + __i]; "
+         << "__op.run(__ct_a, __ct_b, __pct_c" << c_idx_imm->value << "); }";
+    } else {
+      os << "{ "
+         << "constexpr auto __desc = mpp::tensor_ops::matmul2d_descriptor("
+         << M << ", " << N << ", " << K << ", "
+         << (trans_a ? "true" : "false") << ", "
+         << (trans_b ? "true" : "false") << ", true, "
+         << "mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate)"
+            "; "
+         << "mpp::tensor_ops::matmul2d<__desc, metal::execution_simdgroup> "
+            "__op; "
+         << "auto __ct_a = __op.get_left_input_cooperative_tensor<" << a_dtype
+         << ", " << a_dtype << ", " << c_dtype << ">(); "
+         << "auto __ct_b = __op.get_right_input_cooperative_tensor<" << a_dtype
+         << ", " << a_dtype << ", " << c_dtype << ">(); "
+         << "auto __ct_c = __op.get_destination_cooperative_tensor<"
+         << "decltype(__ct_a), decltype(__ct_b), " << c_dtype << ">(); "
+         << "for (ushort __i = 0; __i < " << a_elems << "; __i++) "
+         << "__ct_a[__i] = " << a_var << "[" << a_idx << " * " << a_elems
+         << " + __i]; "
+         << "for (ushort __i = 0; __i < " << b_elems << "; __i++) "
+         << "__ct_b[__i] = " << b_var << "[" << b_idx << " * " << b_elems
+         << " + __i]; "
+         << "for (ushort __i = 0; __i < " << c_elems << "; __i++) "
+         << "__ct_c[__i] = " << c_var << "[" << c_idx << " * " << c_elems
+         << " + __i]; "
+         << "__op.run(__ct_a, __ct_b, __ct_c); "
+         << "for (ushort __i = 0; __i < " << c_elems << "; __i++) " << c_var
+         << "[" << c_idx << " * " << c_elems << " + __i] = __ct_c[__i]; }";
+    }
   } else if (op->op.same_as(builtin::reinterpret())) {
     // generate as_type<TYPE>(ARG)
     os << "(as_type<";
@@ -518,7 +907,8 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
     std::string fsource = cg.Finish();
     source_maker << fsource << "\n";
     if (fmetal_compile) {
-      fsource = (*fmetal_compile)(fsource, target).cast<std::string>();
+      smap.Set(func_name, (*fmetal_compile)(fsource, target).cast<ffi::Bytes>());
+      continue;
     }
     smap.Set(func_name, ffi::Bytes(std::move(fsource)));
   }
@@ -527,9 +917,48 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
                            ffi::String(fmt), ffi::String(source_maker.str()));
 }
 
+ffi::Module BuildTileLangMetalWithoutCompile(IRModule mod, Target target) {
+  bool output_ssa = false;
+  mod = tirx::transform::PointerValueTypeRewrite()(std::move(mod));
+
+  std::ostringstream source_maker;
+  ffi::Map<ffi::String, ffi::Bytes> smap;
+
+  for (auto kv : mod->functions) {
+    TVM_FFI_ICHECK(kv.second->IsInstance<tirx::PrimFuncNode>())
+        << "CodeGenTileLangMetal: Can only take PrimFunc";
+    auto global_symbol =
+        kv.second->GetAttr<ffi::String>(tvm::attr::kGlobalSymbol);
+    TVM_FFI_ICHECK(global_symbol.has_value());
+    std::string func_name = global_symbol.value();
+
+    source_maker << "// Function: " << func_name << "\n";
+    CodeGenTileLangMetal cg(target);
+    cg.Init(output_ssa);
+    auto f = Downcast<tirx::PrimFunc>(kv.second);
+    auto calling_conv = f->GetAttr<Integer>(tvm::attr::kCallingConv);
+    TVM_FFI_ICHECK(calling_conv == CallingConv::kDeviceKernelLaunch)
+        << "CodeGenTileLangMetal: expect calling_conv equals "
+           "CallingConv::kDeviceKernelLaunch";
+
+    cg.AddFunction(kv.first, f);
+
+    std::string fsource = cg.Finish();
+    source_maker << fsource << "\n";
+    smap.Set(func_name, ffi::Bytes(std::move(fsource)));
+  }
+
+  return MetalModuleCreate(std::move(smap), ExtractFuncInfo(mod),
+                           ffi::String("metal"),
+                           ffi::String(source_maker.str()));
+}
+
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("target.build.tilelang_metal", BuildTileLangMetal);
+  refl::GlobalDef()
+      .def("target.build.tilelang_metal", BuildTileLangMetal)
+      .def("target.build.tilelang_metal_without_compile",
+           BuildTileLangMetalWithoutCompile);
 }
 } // namespace codegen
 } // namespace tvm

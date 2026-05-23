@@ -1,5 +1,8 @@
 from __future__ import annotations
 from collections.abc import Callable
+import os
+import subprocess
+import tempfile
 import tvm_ffi
 from tvm.target import Target
 
@@ -50,6 +53,30 @@ def register_metal_postproc(func: Callable[[str, Target], str], override: bool =
         override: Whether to override existing registered function. Defaults to True.
     """
     tvm_ffi.register_global_func("tvm_callback_metal_compile", f=func, override=override)
+
+
+def _compile_metal4(source: str, target: Target):
+    """Compile Metal source to metallib with Metal 4 language support."""
+    del target
+    with tempfile.TemporaryDirectory() as temp_dir:
+        src_path = os.path.join(temp_dir, "tilelang.metal")
+        air_path = os.path.join(temp_dir, "tilelang.air")
+        lib_path = os.path.join(temp_dir, "tilelang.metallib")
+        with open(src_path, "w", encoding="utf-8") as src_file:
+            src_file.write(source)
+        compile_cmd = ["xcrun", "-sdk", "macosx", "metal", "-std=metal4.0", "-O3", "-c", src_path, "-o", air_path]
+        lib_cmd = ["xcrun", "-sdk", "macosx", "metallib", air_path, "-o", lib_path]
+        for cmd in (compile_cmd, lib_cmd):
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=False, check=False)
+            if proc.returncode != 0:
+                output = proc.stdout.decode("utf-8", errors="replace")
+                raise RuntimeError(f"Metal 4 compilation failed: {' '.join(cmd)}\n{output}")
+        with open(lib_path, "rb") as lib_file:
+            return lib_file.read()
+
+
+def register_default_metal_compile_callback(override: bool = False):
+    register_metal_postproc(_compile_metal4, override=override)
 
 
 def register_cuda_postproc_callback(func: Callable | bool = None, override: bool = True):
