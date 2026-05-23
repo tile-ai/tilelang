@@ -94,16 +94,14 @@ bool CanUseCooperativeTensor(const GemmWarpPolicyNode &policy, int M, int N,
     if (M % (m_warp * kMPerWarp) != 0) {
       m_warp = max_m;
     }
-    return m_warp > 0 && num_warps % m_warp == 0 &&
-           num_warps / m_warp <= max_n;
+    return m_warp > 0 && num_warps % m_warp == 0 && num_warps / m_warp <= max_n;
   }
   if (policy.isFullCol()) {
     int n_warp = num_warps;
     if (N % (n_warp * kNPerWarp) != 0) {
       n_warp = max_n;
     }
-    return n_warp > 0 && num_warps % n_warp == 0 &&
-           num_warps / n_warp <= max_m;
+    return n_warp > 0 && num_warps % n_warp == 0 && num_warps / n_warp <= max_m;
   }
   if (policy.isSquare()) {
     for (int m = 1; m <= std::min(num_warps, max_m); ++m) {
@@ -125,7 +123,8 @@ struct Gemm {
                     "Metal target "
                  << target->str();
     }
-    if (op.c_.scope() == "local.fragment" || op.c_.scope() == "metal.simdgroup") {
+    if (op.c_.scope() == "local.fragment" ||
+        op.c_.scope() == "metal.simdgroup") {
       return kMetalSIMDGroup;
     }
     int num_warps = block_size / TargetGetWarpSize(target);

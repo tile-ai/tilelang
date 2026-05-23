@@ -37,17 +37,17 @@ struct Fill {
       constexpr int kTileN = 32;
       constexpr int kTileElems = kTileM * kTileN;
       TVM_FFI_ICHECK(region_elements % kTileElems == 0)
-          << "cooperative_tensor buffer size must be multiple of "
-          << kTileElems << ", got " << region_elements;
+          << "cooperative_tensor buffer size must be multiple of " << kTileElems
+          << ", got " << region_elements;
       int num_tiles = region_elements / kTileElems;
       PrimExpr fill_value = Cast(op.dst->dtype, op.value);
       Array<Stmt> stmts;
       for (int i = 0; i < num_tiles; i++) {
-        stmts.push_back(Evaluate(
-            Call(DataType::Handle(), cooperative_tensor_fill(),
-                 {op.dst->data, IntImm(DataType::Int(32), i), fill_value,
-                  IntImm(DataType::Int(32), kTileM),
-                  IntImm(DataType::Int(32), kTileN)})));
+        stmts.push_back(
+            Evaluate(Call(DataType::Handle(), cooperative_tensor_fill(),
+                          {op.dst->data, IntImm(DataType::Int(32), i),
+                           fill_value, IntImm(DataType::Int(32), kTileM),
+                           IntImm(DataType::Int(32), kTileN)})));
       }
       if (stmts.size() == 1) {
         return stmts[0];

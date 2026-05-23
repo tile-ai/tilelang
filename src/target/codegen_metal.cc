@@ -33,9 +33,9 @@
 #include <unordered_map>
 #include <utility>
 
+#include "op/builtin.h"
 #include "runtime/metal/metal_module.h"
 #include "runtime/thread_storage_scope.h"
-#include "op/builtin.h"
 #include "target/build_common.h"
 
 namespace tvm {
@@ -753,8 +753,7 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
       }
     }
     os << "}";
-  } else if (op->op.same_as(
-                 tl::cooperative_tensor_multiply_accumulate())) {
+  } else if (op->op.same_as(tl::cooperative_tensor_multiply_accumulate())) {
     TVM_FFI_ICHECK_GE(op->args.size(), 13);
     int M = op->args[8].as<IntImmNode>()->value;
     int N = op->args[9].as<IntImmNode>()->value;
@@ -794,10 +793,9 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
     bool c_idx_const = c_inlined && c_idx_imm != nullptr;
     if (c_idx_const) {
       os << "{ "
-         << "constexpr auto __desc = mpp::tensor_ops::matmul2d_descriptor("
-         << M << ", " << N << ", " << K << ", "
-         << (trans_a ? "true" : "false") << ", "
-         << (trans_b ? "true" : "false") << ", true, "
+         << "constexpr auto __desc = mpp::tensor_ops::matmul2d_descriptor(" << M
+         << ", " << N << ", " << K << ", " << (trans_a ? "true" : "false")
+         << ", " << (trans_b ? "true" : "false") << ", true, "
          << "mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate)"
             "; "
          << "mpp::tensor_ops::matmul2d<__desc, metal::execution_simdgroup> "
@@ -815,10 +813,9 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
          << "__op.run(__ct_a, __ct_b, __pct_c" << c_idx_imm->value << "); }";
     } else {
       os << "{ "
-         << "constexpr auto __desc = mpp::tensor_ops::matmul2d_descriptor("
-         << M << ", " << N << ", " << K << ", "
-         << (trans_a ? "true" : "false") << ", "
-         << (trans_b ? "true" : "false") << ", true, "
+         << "constexpr auto __desc = mpp::tensor_ops::matmul2d_descriptor(" << M
+         << ", " << N << ", " << K << ", " << (trans_a ? "true" : "false")
+         << ", " << (trans_b ? "true" : "false") << ", true, "
          << "mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate)"
             "; "
          << "mpp::tensor_ops::matmul2d<__desc, metal::execution_simdgroup> "
@@ -907,7 +904,8 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
     std::string fsource = cg.Finish();
     source_maker << fsource << "\n";
     if (fmetal_compile) {
-      smap.Set(func_name, (*fmetal_compile)(fsource, target).cast<ffi::Bytes>());
+      smap.Set(func_name,
+               (*fmetal_compile)(fsource, target).cast<ffi::Bytes>());
       continue;
     }
     smap.Set(func_name, ffi::Bytes(std::move(fsource)));

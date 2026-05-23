@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from .gemm_base import GemmBase
 from tilelang.layout import Layout
-from tilelang.utils.language import is_shared, is_global, is_full_region, is_metal_cooperative_tensor, is_fragment, is_metal_simdgroup
+from tilelang.utils.language import is_shared, is_global, is_full_region, is_fragment, is_metal_simdgroup
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tvm.ir import Range
@@ -144,18 +144,22 @@ class GemmMetal(GemmBase):
                     m_warp = 1
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
-        return MPSIntrinEmitter(
-            a_dtype=self.in_dtype,
-            b_dtype=self.in_dtype,
-            accum_dtype=self.accum_dtype,
-            a_transposed=self.trans_A,
-            b_transposed=self.trans_B,
-            block_row_warps=m_warp,
-            block_col_warps=n_warp,
-            warp_row_tiles=warp_row_tiles,
-            warp_col_tiles=warp_col_tiles,
-            chunk=self.chunk,
-        ), m_warp, n_warp
+        return (
+            MPSIntrinEmitter(
+                a_dtype=self.in_dtype,
+                b_dtype=self.in_dtype,
+                accum_dtype=self.accum_dtype,
+                a_transposed=self.trans_A,
+                b_transposed=self.trans_B,
+                block_row_warps=m_warp,
+                block_col_warps=n_warp,
+                warp_row_tiles=warp_row_tiles,
+                warp_col_tiles=warp_col_tiles,
+                chunk=self.chunk,
+            ),
+            m_warp,
+            n_warp,
+        )
 
     def infer_layout(self, target: Target, thread_nums: int):
         result = {}
