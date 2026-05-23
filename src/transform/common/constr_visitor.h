@@ -1,19 +1,20 @@
 #ifndef TVM_TL_TRANSFORM_COMMON_CONSTR_VISITOR_H_
 #define TVM_TL_TRANSFORM_COMMON_CONSTR_VISITOR_H_
 
+#include "support/check.h"
 #include "tvm/arith/analyzer.h"
-#include "tvm/ffi/base_details.h"
-#include "tvm/ffi/object.h"
 #include "tvm/ir/expr.h"
-#include "tvm/tir/op.h"
-#include "tvm/tir/stmt.h"
-#include "tvm/tir/var.h"
 #include <ostream>
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/s_tir/stmt.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
+#include <tvm/tirx/var.h>
 
 namespace tvm::tl {
 
@@ -25,15 +26,15 @@ struct Constr {
     kBindRange,
   } kind;
   bool is_assume = false;
-  tir::Var var;
+  tirx::Var var;
   PrimExpr value;
   Range range;
 
   Constr(PrimExpr constr, bool is_assume = false)
       : kind(kConstr), value(constr), is_assume(is_assume) {};
-  Constr(tir::Var var, PrimExpr val)
+  Constr(tirx::Var var, PrimExpr val)
       : kind(kBindValue), var(var), value(val) {};
-  Constr(tir::Var var, Range range)
+  Constr(tirx::Var var, Range range)
       : kind(kBindRange), var(var), range(range) {};
 
   Constr() = default;
@@ -73,13 +74,13 @@ struct Constr {
     case kBindValue:
       return var == value;
     case kBindRange:
-      return tir::And(var >= range->min, var < (range->min + range->extent));
+      return tirx::And(var >= range->min, var < (range->min + range->extent));
     }
     LOG(FATAL) << "Unreachable";
     return PrimExpr();
   }
-  Constr Substitute(ffi::Map<tir::Var, PrimExpr> subs) const {
-    return Constr(tir::Substitute(ToGenericConstr(), subs));
+  Constr Substitute(ffi::Map<tirx::Var, PrimExpr> subs) const {
+    return Constr(tirx::Substitute(ToGenericConstr(), subs));
   }
   void Populate(arith::Analyzer &analyzer) const {
     switch (kind) {
@@ -99,7 +100,7 @@ struct Constr {
 };
 
 struct ConstrSet {
-  ConstrSet Substitute(ffi::Map<tir::Var, PrimExpr> subs) const {
+  ConstrSet Substitute(ffi::Map<tirx::Var, PrimExpr> subs) const {
     ConstrSet new_set;
     for (const auto &c : constrs_) {
       new_set.constrs_.push_back(c.Substitute(subs));
@@ -132,7 +133,7 @@ struct ConstrSet {
       return Bool(true);
     PrimExpr result = constrs_[0].ToGenericConstr();
     for (size_t i = 1; i < constrs_.size(); ++i) {
-      result = tir::And(result, constrs_[i].ToGenericConstr());
+      result = tirx::And(result, constrs_[i].ToGenericConstr());
     }
     return result;
   }
@@ -150,9 +151,9 @@ struct ConstrSet {
   std::vector<Constr> constrs_;
 };
 
-struct ConstrVisitor : public tir::StmtExprVisitor {
+struct ConstrVisitor : public tirx::StmtExprVisitor {
 private:
-  using Base = tir::StmtExprVisitor;
+  using Base = tirx::StmtExprVisitor;
 
   struct Guard {
     std::vector<Constr> &constrs;
@@ -178,58 +179,58 @@ public:
       Base::VisitExpr(true_value);
     }
     {
-      auto guard = MakeGuard(tir::Not(cond));
+      auto guard = MakeGuard(tirx::Not(cond));
       Base::VisitExpr(false_value);
     }
   }
-  void VisitStmt_(const tir::LetStmtNode *op) override {
+  void VisitStmt_(const tirx::BindNode *op) override {
     auto guard = MakeGuard(op->var, op->value);
     Base::VisitStmt_(op);
   }
-  void VisitStmt_(const tir::AttrStmtNode *op) override {
-    if (op->attr_key == tir::attr::tilelang_assume) {
+  void VisitStmt_(const tirx::AttrStmtNode *op) override {
+    if (op->attr_key == tirx::attr::tilelang_assume) {
       auto expr = Downcast<PrimExpr>(op->node);
       auto guard = MakeGuard(expr, true);
       Base::VisitStmt_(op);
-    } else if (op->attr_key == tir::attr::thread_extent ||
-               op->attr_key == tir::attr::virtual_thread) {
-      tir::IterVar iv = Downcast<tir::IterVar>(op->node);
+    } else if (op->attr_key == tirx::attr::thread_extent ||
+               op->attr_key == s_tir::attr::virtual_thread) {
+      tirx::IterVar iv = Downcast<tirx::IterVar>(op->node);
       Range dom =
-          Range::FromMinExtent(tir::make_zero(op->value.dtype()), op->value);
+          Range::FromMinExtent(tirx::make_zero(op->value.dtype()), op->value);
       auto guard = MakeGuard(iv->var, dom);
       Base::VisitStmt_(op);
     } else {
       Base::VisitStmt_(op);
     }
   }
-  void VisitStmt_(const tir::AssertStmtNode *op) override {
+  void VisitStmt_(const tirx::AssertStmtNode *op) override {
     auto guard = MakeGuard(op->condition);
     Base::VisitStmt_(op);
   }
-  void VisitStmt_(const tir::IfThenElseNode *op) override {
+  void VisitStmt_(const tirx::IfThenElseNode *op) override {
     {
       auto guard = MakeGuard(op->condition);
       Base::VisitStmt(op->then_case);
     }
     if (op->else_case) {
-      auto guard = MakeGuard(tir::Not(op->condition));
+      auto guard = MakeGuard(tirx::Not(op->condition));
       Base::VisitStmt(op->else_case.value());
     }
   }
-  void VisitExpr_(const tir::SelectNode *op) override {
+  void VisitExpr_(const tirx::SelectNode *op) override {
     VisitIfThenElseExpr(op->condition, op->true_value, op->false_value);
   }
-  void VisitExpr_(const tir::CallNode *op) override {
-    static auto op_if_then_else = Op::Get("tir.if_then_else");
+  void VisitExpr_(const tirx::CallNode *op) override {
+    static auto op_if_then_else = Op::Get("tirx.if_then_else");
     if (op->op.same_as(op_if_then_else)) {
       VisitIfThenElseExpr(op->args[0], op->args[1], op->args[2]);
     } else {
       Base::VisitExpr_(op);
     }
   }
-  void VisitStmt_(const tir::ForNode *op) override {
-    if (op->kind == tir::ForKind::kParallel ||
-        op->kind == tir::ForKind::kVectorized) {
+  void VisitStmt_(const tirx::ForNode *op) override {
+    if (op->kind == tirx::ForKind::kParallel ||
+        op->kind == tirx::ForKind::kVectorized) {
       auto guard_1 =
           MakeGuard(op->loop_var, Range::FromMinExtent(op->min, op->extent));
       auto guard_2 = MakeGuard(op->extent > 0);
@@ -241,7 +242,7 @@ public:
       Base::VisitStmt_(op);
     }
   }
-  void VisitStmt_(const tir::WhileNode *op) override {
+  void VisitStmt_(const tirx::WhileNode *op) override {
     {
       auto guard = MakeGuard(op->condition);
       Base::VisitStmt(op->body);

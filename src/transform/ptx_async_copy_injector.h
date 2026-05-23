@@ -1,12 +1,12 @@
 #pragma once
 
-#include <tvm/tir/stmt.h>
+#include <tvm/tirx/stmt.h>
 
 namespace tvm {
 namespace tl {
 
 struct PTXAsyncCopyInjectResult {
-  tvm::tir::Stmt stmt;
+  tvm::tirx::Stmt stmt;
   bool injected_ptx_async_copy{false};
 };
 
@@ -17,7 +17,7 @@ struct PTXAsyncCopyInjectResult {
  * (e.g., a lowered parallel loop) rather than the whole PrimFunc.
  */
 PTXAsyncCopyInjectResult
-InjectPTXAsyncCopy(const tvm::tir::Stmt &body, bool enable_auto_async_copy,
+InjectPTXAsyncCopy(const tvm::tirx::Stmt &body, bool enable_auto_async_copy,
                    bool async_without_async_commit_wait = false);
 
 } // namespace tl

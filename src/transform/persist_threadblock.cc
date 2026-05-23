@@ -3,11 +3,11 @@
  * \brief Persist thread blocks with cooperative groups.
  */
 
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include "support/check.h"
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include "op/builtin.h"
 
@@ -19,7 +19,7 @@ namespace attr {
 constexpr const char *kUseCooperativeGroups = "use_cooperative_groups";
 } // namespace attr
 
-using namespace tir;
+using namespace tirx;
 
 class PersistThreadblock : public StmtExprMutator {
 public:
@@ -49,7 +49,7 @@ private:
   bool has_sync_grid_ = false;
 };
 
-using namespace tir::transform;
+using namespace tirx::transform;
 
 tvm::transform::Pass PersistThreadblock() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {

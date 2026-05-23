@@ -22,7 +22,7 @@ class TensorCorePolicy(DefaultPolicy):
     use_async_copy: bool = False
     block_reduction_depth: int | None = None
 
-    def _init_with_prim_func(self, func: tvm.tir.PrimFunc, name: str | None = None):
+    def _init_with_prim_func(self, func: tvm.tirx.PrimFunc, name: str | None = None):
         super()._init_with_prim_func(func, name)
         self._legalize_info()
         return self
@@ -32,7 +32,9 @@ class TensorCorePolicy(DefaultPolicy):
         if pipleline_stage:
             self.pipeline_stage = pipleline_stage
         else:
-            if self.arch.compute_capability in {"sm_80", "sm_90", "sm_90a"}:
+            if is_rdna_arch(self.arch):
+                self.pipeline_stage = self.arch.tuning.pipeline_stage
+            elif self.arch.compute_capability in {"sm_80", "sm_90", "sm_90a"}:
                 self.pipeline_stage = 2
             else:
                 self.pipeline_stage = 1
@@ -89,6 +91,10 @@ class TensorCorePolicy(DefaultPolicy):
         # 512 bytes // type bits
         reduce_input_dtype = node.get_buffer_dtype(node.block_analyzer.get_input_buffers(node.reduction_block)[0])
         basic = (target_transaction * 8) // reduce_input_dtype.bits
+        if is_rdna_arch(self.arch):
+            rdna_basic = self.arch.tuning.reduction_step_for_dtype_bits(reduce_input_dtype.bits)
+            if rdna_basic is not None:
+                basic = rdna_basic
 
         result = {}
         for iter_info in node.raxis:
@@ -103,6 +109,13 @@ class TensorCorePolicy(DefaultPolicy):
         return result
 
     def _expand_reduce_axis(self, td: TileDict):
+        if is_rdna_arch(self.arch):
+            # RDNA WMMA benefits from considering wide output tiles such as
+            # 64x256 that only fit with smaller K tiles.  Start from the RDNA
+            # tuning default and then use the generic expansion pass to grow K
+            # only when shared-memory/occupancy limits allow it.
+            return super()._expand_reduce_axis(td)
+
         # For tensorcore program, if we got a small tilesize, we should consider expand the reduce axis
         # to improve compute efficiency.
         def _check_small_tile(td: TileDict):
@@ -216,8 +229,9 @@ class TensorCorePolicy(DefaultPolicy):
     def score_block_size(self, n):
         base_score = super().score_block_size(n)
         if is_rdna_arch(self.arch):
+            preferred_warps = self.arch.tuning.preferred_warps_per_block
             warps = (n + self.arch.warp_size - 1) // self.arch.warp_size
-            return (0 if warps == 8 else 1, abs(warps - 8), *base_score)
+            return (0 if warps == preferred_warps else 1, abs(warps - preferred_warps), *base_score)
         return base_score
 
     def _can_implement_layout(self, node: PrimFuncNode, td: TileDict):

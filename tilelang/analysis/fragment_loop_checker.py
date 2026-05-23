@@ -1,13 +1,13 @@
 from __future__ import annotations
-from tvm import tir
-from tvm.tir import PyStmtExprVisitor, BufferStore, For, Var, PrimFunc, BufferLoad, IntImm, ForKind
-from tvm.tir.transform import prim_func_pass
-from tvm.tir.stmt_functor import post_order_visit
+from tvm import tirx
+from tvm.tirx import PyStmtExprVisitor, BufferStore, For, Var, PrimFunc, BufferLoad, IntImm, ForKind
+from tvm.tirx.transform import prim_func_pass
+from tvm.tirx.stmt_functor import post_order_visit
 
 from tilelang.utils.language import is_fragment
 
 
-@tir.functor.visitor
+@tirx.functor.visitor
 class _LoopVarUseAnalyzer(PyStmtExprVisitor):
     """Analyze whether a loop variable is used in the given expr."""
 
@@ -44,7 +44,7 @@ def collect_fragment_accesses(statement) -> list[BufferLoad | BufferStore]:
     return buffer_accesses
 
 
-@tir.functor.visitor
+@tirx.functor.visitor
 class _FragmentLoopCheckVisitor(PyStmtExprVisitor):
     """
     Check whether the fragment accesses are valid.

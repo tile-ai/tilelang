@@ -6,12 +6,12 @@
 #ifndef TVM_TL_TRANSFORM_MULTI_VERSION_BUFFER_REWRITER_H_
 #define TVM_TL_TRANSFORM_MULTI_VERSION_BUFFER_REWRITER_H_
 
-#include <tvm/tir/function.h>
+#include <tvm/tirx/function.h>
 
 namespace tvm {
 namespace tl {
 
-tir::PrimFunc ApplyMultiVersionBufferRewriter(tir::PrimFunc f);
+tirx::PrimFunc ApplyMultiVersionBufferRewriter(tirx::PrimFunc f);
 
 } // namespace tl
 } // namespace tvm

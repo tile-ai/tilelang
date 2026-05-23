@@ -5,15 +5,16 @@
 #ifndef TVM_TL_TARGET_CODEGEN_PY_H_
 #define TVM_TL_TARGET_CODEGEN_PY_H_
 
+#include "support/check.h"
 #include <tvm/ir/op.h>
 #include <tvm/target/codegen.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/function.h>
-#include <tvm/tir/op_attr_types.h>
-#include <tvm/tir/stmt.h>
-#include <tvm/tir/stmt_functor.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/function.h>
+#include <tvm/tirx/op_attr_types.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <string>
 #include <unordered_map>
@@ -25,7 +26,8 @@
 namespace tvm {
 namespace codegen {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 /*!
  * \brief A base class to generate simple Python code.
  */
@@ -53,7 +55,7 @@ protected:
    * \param gvar The GlobalVar of the function
    * \returns The string name of the function
    */
-  ffi::String GetFunctionName_(const GlobalVar &gvar);
+  String GetFunctionName_(const GlobalVar &gvar);
 
   /*!
    * \brief Reserve the function name in the generated module.
@@ -75,7 +77,7 @@ protected:
    * \param func The function whose signature should be printed
    * \param os The output stream
    */
-  virtual void PrintFunctionSignature_(const ffi::String &function_name,
+  virtual void PrintFunctionSignature_(const String &function_name,
                                        const PrimFunc &func,
                                        std::ostream &os); // NOLINT(*)
 
@@ -162,8 +164,8 @@ protected:
   // statment
   void VisitStmt_(const BufferStoreNode *op) override;
   void VisitStmt_(const DeclBufferNode *op) override;
-  void VisitStmt_(const LetStmtNode *op) override;
-  void VisitStmt_(const AllocateNode *op) override;
+  void VisitStmt_(const BindNode *op) override;
+  void VisitStmt_(const AllocBufferNode *op) override;
   void VisitStmt_(const AttrStmtNode *op) override;
   void VisitStmt_(const ForNode *op) override;
   void VisitStmt_(const WhileNode *op) override;
@@ -191,8 +193,8 @@ protected:
    * \param skip_first_arg Whether to skip the first arguments.
    * \param os The output stream.
    */
-  virtual void PrintCallExtern_(Type ret_type, ffi::String global_symbol,
-                                const ffi::Array<PrimExpr> &args,
+  virtual void PrintCallExtern_(Type ret_type, String global_symbol,
+                                const Array<PrimExpr> &args,
                                 bool skip_first_arg,
                                 std::ostream &os); // NOLINT(*)
 
@@ -237,7 +239,7 @@ private:
    * functions, this is the name of the function's GlobalVar, possibly
    * altered to prevent duplicate names.
    */
-  std::unordered_map<GlobalVar, ffi::String> internal_functions_;
+  std::unordered_map<GlobalVar, String> internal_functions_;
 
   /* \brief Name supply to generate unique function names */
   NameSupply func_name_supply_;

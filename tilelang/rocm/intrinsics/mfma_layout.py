@@ -1,6 +1,6 @@
 from tvm import DataType
 from tvm.runtime import convert
-from tvm.tir import const
+from tvm.tirx import const
 import tilelang.language as T
 
 

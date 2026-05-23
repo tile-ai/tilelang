@@ -26,9 +26,12 @@ def find_lib_path(name: str, py_ext=False):
     elif sys.platform.startswith("linux") or sys.platform.startswith("freebsd"):
         lib_names = [f"lib{name}.so"]
     elif sys.platform.startswith("win32"):
-        lib_names = [f"{name}.dll"]
         if name == "tilelang":
-            lib_names.append("tvm.dll")
+            # Windows links TileLang native registration objects into
+            # tvm_compiler.dll instead of a separate tilelang.dll.
+            lib_names = ["tvm_compiler.dll"]
+        else:
+            lib_names = [f"{name}.dll"]
     elif sys.platform.startswith("darwin"):
         lib_names = [f"lib{name}.dylib"]
     else:

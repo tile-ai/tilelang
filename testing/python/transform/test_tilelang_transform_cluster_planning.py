@@ -10,12 +10,12 @@ auto_target = tvm.target.Target(determine_target("auto"))
 def _check(original, transformed):
     func = original
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
-    mod = tvm.tir.transform.LowerOpaqueBlock()(mod)
+    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.LowerOpaqueBlock()(mod)
     mod = tl.transform.ClusterPlanning()(mod)
     transformed = tvm.IRModule.from_expr(transformed.with_attr("global_symbol", "main"))
-    transformed = tvm.tir.transform.BindTarget(auto_target)(transformed)
-    transformed = tvm.tir.transform.LowerOpaqueBlock()(transformed)
+    transformed = tvm.tirx.transform.BindTarget(auto_target)(transformed)
+    transformed = tl.transform.LowerOpaqueBlock()(transformed)
 
     tvm.ir.assert_structural_equal(mod["main"], transformed["main"], True)
 

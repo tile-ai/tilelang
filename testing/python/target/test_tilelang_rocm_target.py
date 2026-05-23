@@ -16,6 +16,10 @@ from tilelang.utils.target import (
 )
 
 
+def _hip_target(mcpu: str) -> Target:
+    return Target({"kind": "hip", "mcpu": mcpu})
+
+
 def test_normalize_rocm_arch_strips_feature_suffix():
     assert normalize_rocm_arch("gfx1151:sramecc+:xnack-") == "gfx1151"
     assert normalize_rocm_arch("gfx942") == "gfx942"
@@ -28,20 +32,25 @@ def test_normalize_rocm_arch_strips_feature_suffix():
 
 
 def test_target_mcpu_helpers():
-    target = Target("hip -mcpu=gfx1151:sramecc+:xnack-")
+    target = _hip_target("gfx1151:sramecc+:xnack-")
     assert target_get_mcpu(target) == "gfx1151"
 
 
 def test_determine_target_adds_rdna_thread_warp_size():
-    target = determine_target("hip -mcpu=gfx1151", return_object=True)
+    target = determine_target({"kind": "hip", "mcpu": "gfx1151"}, return_object=True)
     assert target_get_mcpu(target) == "gfx1151"
     assert int(target.attrs["thread_warp_size"]) == 32
 
 
 def test_determine_target_adds_known_gfx12_thread_warp_size():
-    target = determine_target("hip -mcpu=gfx1200", return_object=True)
+    target = determine_target({"kind": "hip", "mcpu": "gfx1200"}, return_object=True)
     assert target_get_mcpu(target) == "gfx1200"
     assert int(target.attrs["thread_warp_size"]) == 32
+
+
+def test_determine_target_rejects_legacy_option_string():
+    with pytest.raises(AssertionError, match="Pass target options as a dict"):
+        determine_target("hip -mcpu=gfx1151", return_object=True)
 
 
 def test_auto_target_prefers_rocm_pytorch_over_cuda_toolkit(monkeypatch):
@@ -57,7 +66,7 @@ def test_auto_target_prefers_rocm_pytorch_over_cuda_toolkit(monkeypatch):
 
 
 def test_rdna_gfx1151_target_classification():
-    target = Target("hip -mcpu=gfx1151")
+    target = _hip_target("gfx1151")
     assert target_is_rdna(target)
     assert not target_is_cdna(target)
     assert target_get_rdna_generation(target) == 11
@@ -78,7 +87,7 @@ def test_carver_routes_rdna_without_instantiating_device(monkeypatch):
         return ("rdna", target)
 
     monkeypatch.setattr(arch_mod, "RDNA", fake_rdna)
-    arch = arch_mod.get_arch(Target("hip -mcpu=gfx1151"))
+    arch = arch_mod.get_arch(_hip_target("gfx1151"))
     assert arch[0] == "rdna"
     assert target_get_mcpu(arch[1]) == "gfx1151"
 
@@ -91,14 +100,14 @@ def test_carver_rejects_unsupported_rdna_generations(monkeypatch):
 
     monkeypatch.setattr(arch_mod, "CDNA", fake_cdna)
     with pytest.raises(ValueError, match="gfx11 targets only"):
-        arch_mod.get_arch(Target("hip -mcpu=gfx1200"))
+        arch_mod.get_arch(_hip_target("gfx1200"))
 
 
 def test_rdna_device_model_rejects_gfx12_before_device_probe():
     from tilelang.carver.arch.rdna import RDNA
 
     with pytest.raises(ValueError, match="gfx11 targets only"):
-        RDNA(Target("hip -mcpu=gfx1200"))
+        RDNA(_hip_target("gfx1200"))
 
 
 def test_rdna_tensor_instruction_lookup_is_generation_aware():
@@ -112,3 +121,17 @@ def test_rdna_tensor_instruction_lookup_is_generation_aware():
     arch.rdna_generation = 12
     with pytest.raises(ValueError, match="Unsupported RDNA generation"):
         arch.get_avaliable_tensorintrin_shapes()
+
+
+def test_rdna_internal_tuning_config_allows_mcpu_overrides():
+    from tilelang.carver.arch.rdna import _get_rdna_tuning_config
+
+    default = _get_rdna_tuning_config("gfx1100")
+    gfx1151 = _get_rdna_tuning_config("gfx1151:sramecc+:xnack-")
+
+    assert default.preferred_warps_per_block == 4
+    assert default.pipeline_stage == 1
+    assert default.reduction_step_for_dtype_bits(16) == 32
+    assert gfx1151.preferred_warps_per_block == 4
+    assert gfx1151.pipeline_stage == 2
+    assert gfx1151.reduction_step_for_dtype_bits(16) == 32

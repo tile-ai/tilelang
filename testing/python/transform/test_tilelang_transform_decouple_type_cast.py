@@ -172,6 +172,58 @@ def test_local_to_memory_with_let_stmt():
     _check(before, after)
 
 
+def test_local_to_memory_with_bind_chain():
+    """Test flat Bind chains are inlined according to sequential dominance."""
+
+    @T.prim_func
+    def before(b: T.Tensor[(16,), T.float8_e4m3fn]):
+        a_frag = T.alloc_local((16,), T.float32)
+        scale = T.alloc_local((16,), T.float32)
+        for i in T.vectorized(16):
+            factor = scale[i]
+            scaled = a_frag[i] * (factor + T.float32(1))
+            b[i] = scaled
+
+    @T.prim_func
+    def after(b: T.Tensor[(16,), T.float8_e4m3fn]):
+        a_frag = T.alloc_local((16,), T.float32)
+        scale = T.alloc_local((16,), T.float32)
+        b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
+        for i in T.vectorized(16):
+            b_local_cast[i] = T.cast(a_frag[i] * (scale[i] + T.float32(1)), T.float8_e4m3fn)
+        for i_copy in T.vectorized(16):
+            b[i_copy] = b_local_cast[i_copy]
+
+    _check(before, after)
+
+
+def test_local_to_memory_with_branch_local_bind():
+    """Test Bind definitions inside an IfThenElse branch do not escape."""
+
+    @T.prim_func
+    def before(b: T.Tensor[(16,), T.float8_e4m3fn]):
+        a_frag = T.alloc_local((16,), T.float32)
+        scale = T.alloc_local((16,), T.float32)
+        for i in T.vectorized(16):
+            if i < 8:
+                factor = scale[i]
+                b[i] = a_frag[i] * factor
+
+    @T.prim_func
+    def after(b: T.Tensor[(16,), T.float8_e4m3fn]):
+        a_frag = T.alloc_local((16,), T.float32)
+        scale = T.alloc_local((16,), T.float32)
+        b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
+        for i in T.vectorized(16):
+            if i < 8:
+                b_local_cast[i] = T.cast(a_frag[i] * scale[i], T.float8_e4m3fn)
+        for i_copy in T.vectorized(16):
+            if i_copy < 8:
+                b[i_copy] = b_local_cast[i_copy]
+
+    _check(before, after)
+
+
 # =============================================================================
 # CUDA Codegen Tests
 # =============================================================================
@@ -467,9 +519,4 @@ def test_e2e_scalar_load_no_cast_buffer():
 
 
 if __name__ == "__main__":
-    test_no_transform_if_then_else_condition()
-    test_e2e_scalar_load_no_cast_buffer()
-    test_e2e_bf16_global_to_frag()
-    test_e2e_bf16_global_shared_frag()
-    test_e2e_fp8_global_to_frag()
-    test_e2e_fp8_manual_decouple()
+    tilelang.testing.main()

@@ -12,13 +12,20 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 namespace cuda {
 
 struct Reduce : backend::ReduceLowerer<Reduce> {
   static bool SupportsFp16Bf16NanReduce(Target target) {
     return TargetIsCuda(target);
+  }
+
+  static int GetPreferedVectorizedSize(DataType dt, Target target) {
+    if (!TargetIsCuda(target)) {
+      return 1;
+    }
+    return backend::reduce::GetPreferedVectorizedSize(dt);
   }
 
   static std::string MakeBatchAllReduce(std::string reducer,

@@ -2,11 +2,11 @@
 
 from functools import partial
 
-from tvm.script.ir_builder import tir as T
+from tvm.script.ir_builder import tirx as T
 from tvm.script.parser._core import dispatch, doc
-from tvm.tir import BufferLoad, Var
+from tvm.tirx import BufferLoad, Var
 
-from tvm.script.parser.tir import parser as tvm_tir_parser
+from tvm.tirx.script.parser import parser as tvm_tir_parser
 
 
 def _get_node_span(node: doc.AST) -> tuple[int, int, int, int]:
@@ -150,6 +150,6 @@ def tilelang_visit_ann_assign(self, node: doc.AnnAssign) -> None:  # pylint: dis
             return
 
     self.eval_assign(target=lhs, source=ann_var, bind_value=tvm_tir_parser.bind_assign_value)
-    frame = T.LetStmt(rhs, var=ann_var)
+    frame = T.Let(rhs, var=ann_var)
     frame.add_callback(partial(frame.__exit__, None, None, None))
     frame.__enter__()

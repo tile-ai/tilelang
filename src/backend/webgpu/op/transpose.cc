@@ -4,6 +4,7 @@
  */
 
 #include "op/transpose.h"
+#include <tvm/ir/cast.h>
 
 #include "op/utils.h"
 #include "transform/common/loop_fusion_utils.h"
