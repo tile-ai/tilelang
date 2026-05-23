@@ -451,7 +451,32 @@ private:
   }
 };
 
+class CooperativeTensorScopeDetector : public StmtExprVisitor {
+public:
+  static bool Detect(const PrimFunc &func) {
+    CooperativeTensorScopeDetector detector;
+    detector(func->body);
+    return detector.found_;
+  }
+
+private:
+  void VisitStmt_(const SBlockNode *op) final {
+    for (const Buffer &buffer : op->alloc_buffers) {
+      if (buffer.scope() == "metal.cooperative_tensor") {
+        found_ = true;
+        return;
+      }
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  bool found_{false};
+};
+
 PrimFunc PlanAndUpdateBufferAllocationLocation(PrimFunc func) {
+  if (CooperativeTensorScopeDetector::Detect(func)) {
+    return func;
+  }
   auto fptr = func.CopyOnWrite();
   BufferAllocationLocator locator(func);
   fptr->body = locator(fptr->body);

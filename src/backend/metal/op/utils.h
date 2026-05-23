@@ -20,8 +20,13 @@ inline bool IsSIMDGroupBuffer(const Buffer &buffer) {
   return buffer.defined() && buffer.scope() == "metal.simdgroup";
 }
 
+inline bool IsCooperativeTensorBuffer(const Buffer &buffer) {
+  return buffer.defined() && buffer.scope() == "metal.cooperative_tensor";
+}
+
 inline bool IsRegisterBuffer(const Buffer &buffer) {
-  return IsFragmentBuffer(buffer) || IsSIMDGroupBuffer(buffer);
+  return IsFragmentBuffer(buffer) || IsSIMDGroupBuffer(buffer) ||
+         IsCooperativeTensorBuffer(buffer);
 }
 
 inline std::pair<int, int> ComputeSquareWarpPartition(int num_warps, int M,

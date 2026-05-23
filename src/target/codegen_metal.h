@@ -28,6 +28,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "target/source/codegen_c.h"
 
@@ -54,6 +55,8 @@ public:
                          const std::string &value) final;
   // overload visitor
   void VisitStmt_(const AllocBufferNode *op) final;                 // NOLINT(*)
+  void VisitStmt_(const AttrStmtNode *op) final;                    // NOLINT(*)
+  void VisitStmt_(const ForNode *op) final;                         // NOLINT(*)
   void VisitExpr_(const SelectNode *op, std::ostream &os) final;    // NOLINT(*)
   void VisitExpr_(const BroadcastNode *op, std::ostream &os) final; // NOLINT(*)
   void VisitExpr_(const CallNode *op, std::ostream &os) final;      // NOLINT(*)
@@ -63,7 +66,13 @@ public:
   using CodeGenC::PrintType;
 
 private:
+  std::string GetAddrSpaceOf(const PrimExpr &ptr_expr) const;
+  void EnsureCooperativeTensorBuffer(const Var &var);
+
   std::unordered_map<const VarNode *, std::string> simdgroup_dtype_;
+  std::unordered_map<const VarNode *, std::string> cooperative_tensor_dtype_;
+  std::unordered_set<const VarNode *> ct_c_inlined_;
+  bool emitted_frag_lane_vars_{false};
   int thread_index_bits_{32};
   int thread_work_dim_{0};
   Target target_;
