@@ -221,6 +221,16 @@ TL_DEVICE half2 __tl_cvt_fp4x2_to_half2(const __nv_fp4x2_storage_t src) {
   return result;
 }
 
+namespace tl {
+
+template <typename T>
+TL_DEVICE T from_uint1(fp4_e2_2_t v) {
+  __half2 result = __tl_cvt_fp4x2_to_half2(v.__x);
+  return *reinterpret_cast<T *>(&result);
+}
+
+} // namespace tl
+
 // half -> fp4_e2m1
 TL_DEVICE __nv_fp4_storage_t __tl_cvt_half_to_fp4(const __half src) {
   __half_raw raw = *reinterpret_cast<const __half_raw *>(&src);

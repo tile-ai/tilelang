@@ -133,6 +133,18 @@ TL_DEVICE fp8_e4_2_t make_fp8_e4_2_t(fp8_e4_t x, fp8_e4_t y) {
   return result;
 }
 
+namespace tl {
+
+template <typename T>
+TL_DEVICE T from_uint1(fp8_e4_2_t v) {
+  __nv_fp8x2_storage_t storage;
+  memcpy(&storage, &v, sizeof(storage));
+  __half2 result = __nv_cvt_fp8x2_to_halfraw2(storage, __NV_E4M3);
+  return *reinterpret_cast<T *>(&result);
+}
+
+} // namespace tl
+
 // Pack four fp8_e4_t values.
 TL_DEVICE fp8_e4_4_t make_fp8_e4_4_t(fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2,
                                      fp8_e4_t x3) {
