@@ -1502,6 +1502,11 @@ def ds_read_tr8_b64(src: BufferLikeType) -> PrimExpr:
     return tirx.call_intrin("uint32x2", tirx.op.Op.get("tl.ds_read_tr8_b64"), ptr)
 
 
+def pack_b16(v0: PrimExpr, v1: PrimExpr) -> PrimExpr:
+    """Pack two b16 values into one uint32 lane."""
+    return tirx.call_intrin("uint32", tirx.op.Op.get("tl.pack_b16"), v0, v1)
+
+
 def ldg32(src: BufferLikeType, pred: PrimExpr = None) -> PrimExpr:
     """Load 32 bits (4 bytes) from global memory using explicit PTX instructions.
 

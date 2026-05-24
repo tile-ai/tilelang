@@ -601,6 +601,10 @@ std::string CodeGenTileLangCUDA::Finish() {
   if (need_mma_instruction_h_) {
     decl_stream << "#include <tl_templates/cuda/instruction/mma.h>\n";
   }
+  if (need_mma_blockscale_instruction_h_) {
+    decl_stream
+        << "#include <tl_templates/cuda/instruction/mma_blockscale.h>\n";
+  }
   if (need_wgmma_instruction_h_) {
     decl_stream << "#include <tl_templates/cuda/instruction/wgmma.h>\n";
   }
@@ -2749,6 +2753,103 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(B_offset)", b_bias);
     replacer.register_rule("(C_ptr)", c_ref);
     replacer.register_rule("(C_offset)", c_bias);
+    this->stream << replacer.rewrite(mma_call);
+  } else if (op->op.same_as(tl::ptx_mma_blockscale())) {
+    // arg 0: shape: mXnXkX
+    // arg 1: A layout: row/col
+    // arg 2: B layout: row/col
+    // arg 3: A precision: e2m1, ...
+    // arg 4: B precision: e2m1, ...
+    // arg 5: C precision: fp32, ...
+    // arg 6: scale vector width
+    // arg 7: A multiplicand
+    // arg 8: A multiplicand index
+    // arg 9: B multiplicand
+    // arg 10: B multiplicand index
+    // arg 11: C accumulator
+    // arg 12: C accumulator index
+    // arg 13: packed A scale vector
+    // arg 14: packed B scale vector
+    // arg 15: A scale selector
+    // arg 16: B scale selector
+    ICHECK_EQ(op->args.size(), 17U)
+        << "ptx_mma_blockscale expects 17 arguments";
+    std::string shape = Downcast<StringImm>(op->args[0])->value;
+    std::string A_layout = Downcast<StringImm>(op->args[1])->value;
+    std::string B_layout = Downcast<StringImm>(op->args[2])->value;
+    std::string A_dtype = Downcast<StringImm>(op->args[3])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[4])->value;
+    std::string C_dtype = Downcast<StringImm>(op->args[5])->value;
+    int scale_vec = Downcast<IntImm>(op->args[6])->value;
+    constexpr int arg_base = 7;
+    std::string a_ref = this->PrintExpr(op->args[arg_base + 0]);
+    PrimExpr a_offset_expr = op->args[arg_base + 1];
+    std::string b_ref = this->PrintExpr(op->args[arg_base + 2]);
+    PrimExpr b_offset_expr = op->args[arg_base + 3];
+    std::string c_ref = this->PrintExpr(op->args[arg_base + 4]);
+    std::string c_offset = this->PrintExpr(op->args[arg_base + 5]);
+    std::string sfa = this->PrintExpr(op->args[arg_base + 6]);
+    std::string sfb = this->PrintExpr(op->args[arg_base + 7]);
+    std::string id_a = this->PrintExpr(op->args[arg_base + 8]);
+    std::string id_b = this->PrintExpr(op->args[arg_base + 9]);
+    auto dtype_a_enum = tl::codegen::ptx::DTypeFromString(A_dtype);
+    auto dtype_b_enum = tl::codegen::ptx::DTypeFromString(B_dtype);
+    auto dtype_c_enum = tl::codegen::ptx::DTypeFromString(C_dtype);
+    // The Python intrinsic accepts logical fp4 element offsets. Pointer
+    // arithmetic below is byte-addressed for packed e2m1 operands.
+    if (dtype_a_enum == tl::codegen::ptx::DataType::kFloat4_e2m1fn) {
+      a_offset_expr = arith::Analyzer().Simplify(truncdiv(a_offset_expr, 2));
+    }
+    if (dtype_b_enum == tl::codegen::ptx::DataType::kFloat4_e2m1fn) {
+      b_offset_expr = arith::Analyzer().Simplify(truncdiv(b_offset_expr, 2));
+    }
+    std::string a_offset = this->PrintExpr(a_offset_expr);
+    std::string b_offset = this->PrintExpr(b_offset_expr);
+    auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(shape);
+    tl::codegen::ptx::GetMMABlockScaleInfo(
+        dtype_a_enum, dtype_b_enum, dtype_c_enum, m, n, k,
+        A_layout == "row" ? false : true, B_layout == "row" ? false : true,
+        scale_vec);
+
+    need_mma_blockscale_instruction_h_ = true;
+    this->PrintIndent();
+    std::string mma_call =
+        "tl::mma_sync_blockscale<(AType), (BType), (CType), (M), (N), (K), "
+        "(TransA), (TransB), (ScaleVec)>("
+        "reinterpret_cast<(CRegType)*>((C_ptr) + (C_offset)), "
+        "reinterpret_cast<const (ARegType)*>((A_ptr) + (A_offset)), "
+        "reinterpret_cast<const (BRegType)*>((B_ptr) + (B_offset)), "
+        "(SFA), (SFB), static_cast<uint16_t>((IdA)), "
+        "static_cast<uint16_t>((IdB)));\n";
+    tl::codegen::Replacer replacer;
+    replacer.register_rule("(AType)",
+                           tl::codegen::ptx::DTypeEnumToString(dtype_a_enum));
+    replacer.register_rule("(BType)",
+                           tl::codegen::ptx::DTypeEnumToString(dtype_b_enum));
+    replacer.register_rule("(CType)",
+                           tl::codegen::ptx::DTypeEnumToString(dtype_c_enum));
+    replacer.register_rule("(M)", std::to_string(m));
+    replacer.register_rule("(N)", std::to_string(n));
+    replacer.register_rule("(K)", std::to_string(k));
+    replacer.register_rule("(TransA)", A_layout == "row" ? "false" : "true");
+    replacer.register_rule("(TransB)", B_layout == "row" ? "false" : "true");
+    replacer.register_rule("(ScaleVec)", std::to_string(scale_vec));
+    replacer.register_rule("(ARegType)",
+                           tl::codegen::GetMMARegisterType(dtype_a_enum));
+    replacer.register_rule("(BRegType)",
+                           tl::codegen::GetMMARegisterType(dtype_b_enum));
+    replacer.register_rule("(CRegType)",
+                           tl::codegen::GetMMARegisterType(dtype_c_enum));
+    replacer.register_rule("(A_ptr)", a_ref);
+    replacer.register_rule("(A_offset)", a_offset);
+    replacer.register_rule("(B_ptr)", b_ref);
+    replacer.register_rule("(B_offset)", b_offset);
+    replacer.register_rule("(C_ptr)", c_ref);
+    replacer.register_rule("(C_offset)", c_offset);
+    replacer.register_rule("(SFA)", sfa);
+    replacer.register_rule("(SFB)", sfb);
+    replacer.register_rule("(IdA)", id_a);
+    replacer.register_rule("(IdB)", id_b);
     this->stream << replacer.rewrite(mma_call);
   } else if (op->op.same_as(tl::tma_store_cluster())) {
     ICHECK_EQ(op->args.size(), 5U) << "tma_store_cluster requires 5 args";
