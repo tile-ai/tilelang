@@ -1,6 +1,7 @@
 #ifndef TVM_TL_TRANSFORM_PIPELINE_BODY_ANALYSIS_H_
 #define TVM_TL_TRANSFORM_PIPELINE_BODY_ANALYSIS_H_
 
+#include "../common/pipeline_utils.h"
 #include "access_analysis.h"
 
 #include "support/check.h"
@@ -65,11 +66,6 @@ public:
     std::vector<size_t> scheduled_stage_indices;
     Array<Integer> replayable_bind_mask;
   };
-
-  bool IsPipelineDeclarationStmt(const Stmt &stmt) const {
-    return stmt.as<AllocBufferNode>() != nullptr ||
-           stmt.as<DeclBufferNode>() != nullptr;
-  }
 
   ScheduledStmtAnalysis AnalyzeScheduledStmts(const Array<Stmt> &stmts) const {
     BufferSet pipeline_write_buffers = CollectPipelineWriteBuffers(stmts);

@@ -5,6 +5,7 @@
  * Provides:
  *  - Pipeline annotation attribute keys
  *  - GetPipelineNumStages()  — extract num_stages from loop annotations
+ *  - IsPipelineDeclarationStmt() — identify non-stage buffer declarations
  *  - ComputeThreadBounds()  — derive thread bounds from an analyzer + IterVar
  */
 #ifndef TVM_TL_TRANSFORM_COMMON_PIPELINE_UTILS_H_
@@ -48,6 +49,17 @@ static constexpr const char *kPipelineAsyncProducerGroups =
 /*! Per-original-statement replayable scalar Bind flag (1 = replayable). */
 static constexpr const char *kPipelineReplayableScalarBinds =
     "software_pipeline_replayable_scalar_binds";
+
+/*! \brief Whether a flat TIRX statement declares pipeline-local buffer storage.
+ *
+ * Flat TIRX represents buffer allocations/declarations as standalone
+ * statements. They must stay in the loop body so later rewrites can preserve
+ * storage, but they are declarations rather than executable pipeline stages.
+ */
+inline bool IsPipelineDeclarationStmt(const Stmt &stmt) {
+  return stmt.as<AllocBufferNode>() != nullptr ||
+         stmt.as<DeclBufferNode>() != nullptr;
+}
 
 // ---------------------------------------------------------------------------
 // GetPipelineNumStages

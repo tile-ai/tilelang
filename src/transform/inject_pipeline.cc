@@ -147,6 +147,83 @@ private:
     return false;
   }
 
+  struct PipelineScheduleUnit {
+    SBlock block;
+    Array<Buffer> nested_local_allocs;
+  };
+
+  struct PipelineSchedule {
+    Array<SBlock> original_order;
+    Array<Buffer> nested_local_allocs;
+  };
+
+  PipelineScheduleUnit MakePipelineScheduleUnit(const Stmt &stmt) {
+    PipelineScheduleUnit unit;
+    if (const auto *realize = stmt.as<SBlockRealizeNode>()) {
+      if (is_one(realize->predicate) &&
+          realize->block->body->IsInstance<SeqStmtNode>()) {
+        const SBlock &nested_block = realize->block;
+        ICHECK(nested_block->match_buffers.empty())
+            << "match_buffer should have been lowered before "
+               "InjectSoftwarePipeline";
+        for (const Buffer &buffer : nested_block->alloc_buffers) {
+          buffer_data_to_buffer_.Set(buffer->data, buffer);
+          allocated_buffers_.insert(buffer);
+          unit.nested_local_allocs.push_back(buffer);
+        }
+      }
+    }
+    unit.block = MakeBlock(stmt, buffer_data_to_buffer_);
+    return unit;
+  }
+
+  PipelineSchedule BuildPipelineSchedule(const Array<Stmt> &stmts) {
+    PipelineSchedule schedule;
+    for (const Stmt &stmt : stmts) {
+      PipelineScheduleUnit unit = MakePipelineScheduleUnit(stmt);
+      schedule.original_order.push_back(unit.block);
+      schedule.nested_local_allocs.insert(schedule.nested_local_allocs.end(),
+                                          unit.nested_local_allocs.begin(),
+                                          unit.nested_local_allocs.end());
+    }
+    return schedule;
+  }
+
+  SeqStmt StripPipelineDeclarationStmts(const SeqStmt &pipeline_body,
+                                        Array<Buffer> *block_local_allocs,
+                                        Array<Buffer> *flat_local_allocs) {
+    ICHECK(block_local_allocs != nullptr);
+    ICHECK(flat_local_allocs != nullptr);
+    Array<Stmt> stage_stmts;
+    bool filtered = false;
+    for (const Stmt &child : pipeline_body->seq) {
+      if (IsPipelineDeclarationStmt(child)) {
+        if (const auto *alloc = child.as<AllocBufferNode>()) {
+          const Buffer &buffer = alloc->buffer;
+          buffer_data_to_buffer_.Set(buffer->data, buffer);
+          allocated_buffers_.insert(buffer);
+          block_local_allocs->push_back(buffer);
+          flat_local_allocs->push_back(buffer);
+        } else {
+          const auto *decl = child.as<DeclBufferNode>();
+          ICHECK(decl != nullptr);
+          const Buffer &buffer = decl->buffer;
+          buffer_data_to_buffer_.Set(buffer->data, buffer);
+        }
+        filtered = true;
+        continue;
+      }
+      stage_stmts.push_back(child);
+    }
+    if (!filtered) {
+      return pipeline_body;
+    }
+    ICHECK(!stage_stmts.empty())
+        << "ValueError: The body of the software pipeline has no stages "
+           "after removing buffer declarations";
+    return SeqStmt(stage_stmts);
+  }
+
   Map<String, Any>
   StripPipelineAnnotations(const Map<String, Any> &annotations) const {
     Map<String, Any> preserved_annotations;
@@ -267,66 +344,19 @@ private:
         << pipeline_body_root->GetTypeKey();
     SeqStmt pipeline_body_seq = Downcast<SeqStmt>(pipeline_body_root);
 
-    // In tirx flat IR, buffer declarations/allocations inside a block are
-    // represented as standalone statements at the beginning of the SeqStmt.
-    // They define storage for later pipeline stages, but are not executable
-    // stages and therefore must not consume entries from pipeline annotations.
-    SeqStmt filtered_pipeline_body;
-    {
-      Array<Stmt> stage_stmts;
-      bool filtered = false;
-      for (const Stmt &child : pipeline_body_seq->seq) {
-        if (const auto *alloc = child.as<AllocBufferNode>()) {
-          const Buffer &buffer = alloc->buffer;
-          buffer_data_to_buffer_.Set(buffer->data, buffer);
-          allocated_buffers_.insert(buffer);
-          block_local_allocs.push_back(buffer);
-          flat_local_allocs.push_back(buffer);
-          filtered = true;
-          continue;
-        }
-        if (const auto *decl = child.as<DeclBufferNode>()) {
-          const Buffer &buffer = decl->buffer;
-          buffer_data_to_buffer_.Set(buffer->data, buffer);
-          filtered = true;
-          continue;
-        }
-        stage_stmts.push_back(child);
-      }
-      if (filtered) {
-        ICHECK(!stage_stmts.empty())
-            << "ValueError: The body of the software pipeline has no stages "
-               "after removing buffer declarations";
-        filtered_pipeline_body = SeqStmt(stage_stmts);
-        pipeline_body_seq = filtered_pipeline_body;
-      }
-    }
-    SeqStmt pipeline_body = pipeline_body_seq;
-    const Array<Stmt> &pipeline_body_stmts = pipeline_body->seq;
+    // PipelinePlanning emits stage/order annotations only for executable
+    // pipeline statements. Flat TIRX keeps loop-local AllocBuffer/DeclBuffer as
+    // standalone statements in the loop body, so strip them from the stage
+    // stream before blockizing and consuming annotations. The declarations are
+    // still registered as local allocations so RewritePipeline can
+    // multi-version and reattach them.
+    pipeline_body_seq = StripPipelineDeclarationStmts(
+        pipeline_body_seq, &block_local_allocs, &flat_local_allocs);
+    const Array<Stmt> &pipeline_body_stmts = pipeline_body_seq->seq;
 
-    // Step 3: Blockize the components of the pipeline. Each child of the
-    // pipelined loop will be converted into a block.
     PipelineInfo pipeline_info;
-    Array<SBlock> original_order; // pipeline body blocks in the original order
-
-    auto f_add_child = [&](const Stmt &child) {
-      original_order.push_back(MakeBlock(child, buffer_data_to_buffer_));
-    };
-    for (size_t i = 0; i < pipeline_body_stmts.size(); i++) {
-      const Stmt &child = pipeline_body_stmts[i];
-      const auto *nested_block_realize = child.as<SBlockRealizeNode>();
-      if (nested_block_realize && is_one(nested_block_realize->predicate) &&
-          nested_block_realize->block->body->IsInstance<SeqStmtNode>()) {
-        const SBlock &nested_pipeline_block = nested_block_realize->block;
-        ICHECK(nested_pipeline_block->match_buffers
-                   .empty()); // match_buffer should have been lowered
-        for (const auto &buffer : nested_pipeline_block->alloc_buffers) {
-          buffer_data_to_buffer_.Set(buffer->data, buffer);
-          allocated_buffers_.insert(buffer);
-        }
-      }
-      f_add_child(child);
-    }
+    PipelineSchedule schedule = BuildPipelineSchedule(pipeline_body_stmts);
+    Array<SBlock> original_order = schedule.original_order;
 
     // Collect all buffers that are actually used in the pipeline loop body.
     // This includes buffers allocated in outer blocks (like logits_smem) that
@@ -621,18 +651,9 @@ private:
     }
 
     Array<Buffer> local_allocs = block_local_allocs;
-    // Add nested block allocs to local_allocs
-    for (size_t i = 0; i < pipeline_body_stmts.size(); i++) {
-      const Stmt &child = pipeline_body_stmts[i];
-      const auto *nested_block_realize = child.as<SBlockRealizeNode>();
-      if (nested_block_realize && is_one(nested_block_realize->predicate) &&
-          nested_block_realize->block->body->IsInstance<SeqStmtNode>()) {
-        const SBlock &nested_pipeline_block = nested_block_realize->block;
-        for (const auto &buffer : nested_pipeline_block->alloc_buffers) {
-          local_allocs.push_back(buffer);
-        }
-      }
-    }
+    local_allocs.insert(local_allocs.end(),
+                        schedule.nested_local_allocs.begin(),
+                        schedule.nested_local_allocs.end());
 
     PipelineRewriteResult rewrite_result = RewritePipeline(
         buffer_data_to_buffer_, pipeline_allocs, local_allocs, for_node,
