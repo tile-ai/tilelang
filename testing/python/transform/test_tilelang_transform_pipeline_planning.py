@@ -176,6 +176,32 @@ def test_pipeline_planning_before_after_loop_local_alloc_plan():
     tl.transform.InjectSoftwarePipeline()(mod)
 
 
+def test_pipeline_planning_schedules_guarded_body_after_replayable_bind_inline():
+    @T.prim_func
+    def before(
+        KV: T.Tensor((4, 4), T.bfloat16),
+        ids: T.Tensor((4,), T.int32),
+        C: T.Tensor((4,), T.bfloat16),
+    ):
+        with T.Kernel(4, threads=1):
+            A = T.alloc_shared((4,), T.bfloat16)
+
+            for i in T.Pipelined(4, num_stages=2):
+                if i > 1:
+                    idx = ids[i]
+                    T.copy(KV[idx, :], A)
+                    T.copy(A, C)
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert len(annos) == 1
+    anno = annos[0]
+    assert [int(v) for v in anno["software_pipeline_stage"]] == [0, 1]
+    assert [int(v) for v in anno["software_pipeline_order"]] == [0, 1]
+    assert "software_pipeline_replayable_scalar_binds" not in anno
+    tl.transform.InjectSoftwarePipeline()(mod)
+
+
 def test_pipeline_planning_before_after_mbarrier_arrive_wait_plan():
     @T.prim_func
     def before(A: T.Tensor((64,), T.float16), C: T.Tensor((64,), T.float16)):

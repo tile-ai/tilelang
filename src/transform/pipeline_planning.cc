@@ -132,14 +132,9 @@ private:
         annotations.Set(s_tir::attr::software_pipeline_async_stages,
                         Array<Integer>{0});
       }
-      Stmt pipeline_body_root = loop->body;
-      ICHECK(pipeline_body_root.as<SeqStmtNode>() != nullptr)
-          << "Pipeline_Planning: expected the pipeline loop body to be a "
-             "SeqStmt after IfStmtBinding, but got "
-          << pipeline_body_root->GetTypeKey();
-      SeqStmt pipeline_body_seq = Downcast<SeqStmt>(pipeline_body_root);
+      Array<Stmt> pipeline_body_stmts = NormalizePipelineBody(loop->body);
       Array<Stmt> pipeline_stmts =
-          SeqStmtFlattener::Flatten(pipeline_body_seq->seq);
+          SeqStmtFlattener::Flatten(pipeline_body_stmts);
       ScheduledStmtAnalysis analysis = AnalyzeScheduledStmts(pipeline_stmts);
       ICHECK(!analysis.scheduled_stmts.empty())
           << "PipelinePlanning: explicit pipeline annotations have no "
@@ -153,10 +148,10 @@ private:
                       filtered_order_array);
       annotations.Set(s_tir::attr::software_pipeline_stage,
                       filtered_stage_array);
-      if (pipeline_stmts.size() == pipeline_body_seq->seq.size()) {
+      if (pipeline_stmts.size() == pipeline_body_stmts.size()) {
         bool flatten_preserved_original_order = true;
         for (size_t i = 0; i < pipeline_stmts.size(); ++i) {
-          if (!pipeline_stmts[i].same_as(pipeline_body_seq->seq[i])) {
+          if (!pipeline_stmts[i].same_as(pipeline_body_stmts[i])) {
             flatten_preserved_original_order = false;
             break;
           }
@@ -173,7 +168,9 @@ private:
                                            filtered_order_array,
                                            filtered_stage_array, &annotations);
       auto for_node = GetRef<For>(loop);
-      for_node.CopyOnWrite()->annotations = annotations;
+      auto *n = for_node.CopyOnWrite();
+      n->annotations = annotations;
+      n->body = MakePipelineBody(pipeline_body_stmts);
       return for_node;
     }
 
@@ -203,19 +200,14 @@ private:
       stripped.CopyOnWrite()->annotations = annotations;
       return StmtExprMutator::VisitStmt_(stripped.get());
     }
-    Stmt pipeline_body_root = loop->body;
-    ICHECK(pipeline_body_root.as<SeqStmtNode>() != nullptr)
-        << "Pipeline_Planning: expected the pipeline loop body to be a "
-           "SeqStmt after IfStmtBinding, but got "
-        << pipeline_body_root->GetTypeKey();
-    SeqStmt pipeline_body_seq = Downcast<SeqStmt>(pipeline_body_root);
+    Array<Stmt> pipeline_body_stmts = NormalizePipelineBody(loop->body);
 
     ICHECK(num_stages >= 1);
     ICHECK(loop->kind == ForKind::kSerial);
 
     // Flatten nested SeqStmts so pipeline planning can assign stages to the
     // normalized top-level statement list.
-    Array<Stmt> flat_stmts = SeqStmtFlattener::Flatten(pipeline_body_seq->seq);
+    Array<Stmt> flat_stmts = SeqStmtFlattener::Flatten(pipeline_body_stmts);
     ScheduledStmtAnalysis analysis = AnalyzeScheduledStmts(flat_stmts);
     ICHECK(!analysis.scheduled_stmts.empty())
         << "PipelinePlanning: loop has no schedulable statements after "
@@ -370,10 +362,10 @@ private:
 
     // Reconstruct the loop body with the flattened SeqStmt so that
     // InjectSoftwarePipeline sees the correct number of pipeline stages.
-    Stmt new_body_seq = SeqStmt(flat_stmts);
+    Stmt new_body = MakePipelineBody(flat_stmts);
 
-    return For(loop->loop_var, loop->min, loop->extent, loop->kind,
-               new_body_seq, loop->thread_binding, annotations);
+    return For(loop->loop_var, loop->min, loop->extent, loop->kind, new_body,
+               loop->thread_binding, annotations);
   }
 
   Stmt VisitStmt_(const SBlockNode *op) final {

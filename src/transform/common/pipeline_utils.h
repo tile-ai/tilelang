@@ -61,6 +61,26 @@ inline bool IsPipelineDeclarationStmt(const Stmt &stmt) {
          stmt.as<DeclBufferNode>() != nullptr;
 }
 
+/*! \brief Return the top-level statement stream for a pipeline loop body.
+ *
+ * IfStmtBinding may preserve an if-body that starts with Bind as a single
+ * IfThenElse, so a valid pipeline body is not necessarily a SeqStmt. Keep the
+ * downstream planning code Array-based and only reconstruct SeqStmt when there
+ * are multiple children.
+ */
+inline ffi::Array<Stmt> NormalizePipelineBody(const Stmt &body) {
+  if (const auto *seq = body.as<SeqStmtNode>()) {
+    return seq->seq;
+  }
+  return ffi::Array<Stmt>{body};
+}
+
+/*! \brief Build a valid TIRX statement from a pipeline statement stream. */
+inline Stmt MakePipelineBody(const ffi::Array<Stmt> &stmts) {
+  ICHECK(!stmts.empty());
+  return stmts.size() == 1 ? stmts[0] : SeqStmt(stmts);
+}
+
 // ---------------------------------------------------------------------------
 // GetPipelineNumStages
 // ---------------------------------------------------------------------------

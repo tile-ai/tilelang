@@ -189,14 +189,14 @@ private:
     return schedule;
   }
 
-  SeqStmt StripPipelineDeclarationStmts(const SeqStmt &pipeline_body,
-                                        Array<Buffer> *block_local_allocs,
-                                        Array<Buffer> *flat_local_allocs) {
+  Array<Stmt> StripPipelineDeclarationStmts(const Array<Stmt> &pipeline_body,
+                                            Array<Buffer> *block_local_allocs,
+                                            Array<Buffer> *flat_local_allocs) {
     ICHECK(block_local_allocs != nullptr);
     ICHECK(flat_local_allocs != nullptr);
     Array<Stmt> stage_stmts;
     bool filtered = false;
-    for (const Stmt &child : pipeline_body->seq) {
+    for (const Stmt &child : pipeline_body) {
       if (IsPipelineDeclarationStmt(child)) {
         if (const auto *alloc = child.as<AllocBufferNode>()) {
           const Buffer &buffer = alloc->buffer;
@@ -221,7 +221,7 @@ private:
     ICHECK(!stage_stmts.empty())
         << "ValueError: The body of the software pipeline has no stages "
            "after removing buffer declarations";
-    return SeqStmt(stage_stmts);
+    return stage_stmts;
   }
 
   Map<String, Any>
@@ -338,11 +338,7 @@ private:
     Array<Buffer> block_local_allocs; // flat allocations inside pipeline body
     Array<Buffer> flat_local_allocs;
 
-    ICHECK(pipeline_body_root.as<SeqStmtNode>() != nullptr)
-        << "InjectSoftwarePipeline: expected the pipeline loop body to be a "
-           "SeqStmt after PipelinePlanning, but got "
-        << pipeline_body_root->GetTypeKey();
-    SeqStmt pipeline_body_seq = Downcast<SeqStmt>(pipeline_body_root);
+    Array<Stmt> pipeline_body_stmts = NormalizePipelineBody(pipeline_body_root);
 
     // PipelinePlanning emits stage/order annotations only for executable
     // pipeline statements. Flat TIRX keeps loop-local AllocBuffer/DeclBuffer as
@@ -350,9 +346,8 @@ private:
     // stream before blockizing and consuming annotations. The declarations are
     // still registered as local allocations so RewritePipeline can
     // multi-version and reattach them.
-    pipeline_body_seq = StripPipelineDeclarationStmts(
-        pipeline_body_seq, &block_local_allocs, &flat_local_allocs);
-    const Array<Stmt> &pipeline_body_stmts = pipeline_body_seq->seq;
+    pipeline_body_stmts = StripPipelineDeclarationStmts(
+        pipeline_body_stmts, &block_local_allocs, &flat_local_allocs);
 
     PipelineInfo pipeline_info;
     PipelineSchedule schedule = BuildPipelineSchedule(pipeline_body_stmts);
@@ -362,7 +357,7 @@ private:
     // This includes buffers allocated in outer blocks (like logits_smem) that
     // are used inside the pipeline loop.
     pipeline_allocs =
-        CollectUsedPipelineBuffers(SeqStmt(pipeline_body_stmts),
+        CollectUsedPipelineBuffers(MakePipelineBody(pipeline_body_stmts),
                                    buffer_data_to_buffer_, allocated_buffers_);
 
     Optional<Array<Integer>> replayable_bind_mask;

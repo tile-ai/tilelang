@@ -46,16 +46,8 @@ public:
   bool
   IsReplayableScalarBindStmt(const Stmt &stmt,
                              const BufferSet &pipeline_write_buffers) const {
-    if (stmt.as<BindNode>() == nullptr) {
-      return false;
-    }
     auto [reads, _] = CollectStmtAccessRegions(stmt);
-    for (const BufferRegion &read : reads) {
-      if (pipeline_write_buffers.count(read->buffer)) {
-        return false;
-      }
-    }
-    return true;
+    return IsReplayableScalarBind(stmt, reads, pipeline_write_buffers);
   }
 
   struct ScheduledStmtAnalysis {

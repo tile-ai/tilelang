@@ -1,5 +1,6 @@
 #include "helpers.h"
 
+#include "access_analysis.h"
 #include "support/check.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/cast.h>
@@ -336,15 +337,8 @@ private:
 
 bool IsReplayableScalarBindBlock(const SBlock &block,
                                  const BufferSet &pipeline_write_buffers) {
-  if (block->body.as<BindNode>() == nullptr) {
-    return false;
-  }
-  for (const BufferRegion &read : block->reads) {
-    if (pipeline_write_buffers.count(read->buffer)) {
-      return false;
-    }
-  }
-  return true;
+  return tl::IsReplayableScalarBind(block->body, block->reads,
+                                    pipeline_write_buffers);
 }
 
 BufferSet CollectPipelineWriteBuffers(const Array<SBlock> &blocks) {

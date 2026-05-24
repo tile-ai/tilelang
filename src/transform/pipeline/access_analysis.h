@@ -19,6 +19,9 @@ using BufferSet = std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>;
 
 bool MayConflict(const Region &region1, const Region &region2);
 
+bool IsReplayableScalarBind(const Stmt &stmt, const Array<BufferRegion> &reads,
+                            const BufferSet &pipeline_write_buffers);
+
 class BufferRegionCollector : public StmtExprVisitor {
 public:
   BufferRegionCollector(Map<Var, Buffer> buffer_data_to_buffer, Target target);
