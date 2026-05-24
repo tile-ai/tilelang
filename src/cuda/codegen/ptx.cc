@@ -139,6 +139,122 @@ inline std::string DTypeToString(DataType dtype) {
   return dtype_str[static_cast<int>(dtype)];
 }
 
+static const DataType valid_mxf8f6f4_blockscale_dtypes[] = {
+    DataType::kFloat4_e2m1fn, DataType::kFloat6_e2m3fn,
+    DataType::kFloat6_e3m2fn, DataType::kFloat8_e4m3, DataType::kFloat8_e5m2};
+
+static bool IsValidMXF8F6F4BlockScaleDType(DataType dtype) {
+  for (DataType valid_dtype : valid_mxf8f6f4_blockscale_dtypes) {
+    if (dtype == valid_dtype) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static std::string DTypeToBlockScaleMMAString(DataType dtype) {
+  ICHECK(IsValidMXF8F6F4BlockScaleDType(dtype))
+      << DTypeToString(dtype) << " is not a block-scaled MMA operand type.";
+  std::string enum_str = enum_to_str[static_cast<int>(dtype)];
+  size_t suffix_pos = enum_str.find('_');
+  ICHECK(suffix_pos != std::string::npos)
+      << enum_str << " is not a block-scaled MMA operand data type.";
+
+  std::string operand = enum_str.substr(suffix_pos + 1);
+  if (operand.size() >= 2 &&
+      operand.compare(operand.size() - 2, 2, "fn") == 0) {
+    operand.resize(operand.size() - 2);
+  }
+  return operand;
+}
+
+static std::string ScaleVecToString(int scale_vec) {
+  return std::to_string(scale_vec) + "X";
+}
+
+struct MMABlockScaleConfig {
+  explicit MMABlockScaleConfig(int m, int n, int k, DataType dtype_a,
+                               DataType dtype_b, DataType dtype_c, bool trans_a,
+                               bool trans_b, int scale_vec, const char *kind,
+                               const char *scale_dtype)
+      : m(m), n(n), k(k), dtype_a(dtype_a), dtype_b(dtype_b), dtype_c(dtype_c),
+        trans_a(trans_a), trans_b(trans_b), scale_vec(scale_vec), kind(kind),
+        scale_dtype(scale_dtype) {}
+
+  bool Matches(DataType other_dtype_a, DataType other_dtype_b,
+               DataType other_dtype_c, int other_m, int other_n, int other_k,
+               bool other_trans_a, bool other_trans_b,
+               int other_scale_vec) const {
+    return m == other_m && n == other_n && k == other_k &&
+           dtype_a == other_dtype_a && dtype_b == other_dtype_b &&
+           dtype_c == other_dtype_c && trans_a == other_trans_a &&
+           trans_b == other_trans_b && scale_vec == other_scale_vec;
+  }
+
+  MMABlockScaleInfo Info() const {
+    return {kind, ScaleVecToString(scale_vec), scale_dtype};
+  }
+
+  std::string ToString() const {
+    return std::string("kind::") + kind +
+           ".block_scale.scale_vec::" + ScaleVecToString(scale_vec) + ".m" +
+           std::to_string(m) + "n" + std::to_string(n) + "k" +
+           std::to_string(k) + "." + (trans_a ? "col" : "row") + "." +
+           (trans_b ? "col" : "row") + ".f32." +
+           DTypeToBlockScaleMMAString(dtype_a) + "." +
+           DTypeToBlockScaleMMAString(dtype_b) + ".f32." + scale_dtype;
+  }
+
+  int m, n, k;
+  DataType dtype_a, dtype_b, dtype_c;
+  bool trans_a, trans_b;
+  int scale_vec;
+  const char *kind;
+  const char *scale_dtype;
+};
+
+static std::vector<MMABlockScaleConfig> MakeValidMMABlockScaleConfigs() {
+  std::vector<MMABlockScaleConfig> configs;
+  configs.reserve(27);
+  for (DataType dtype_a : valid_mxf8f6f4_blockscale_dtypes) {
+    for (DataType dtype_b : valid_mxf8f6f4_blockscale_dtypes) {
+      configs.emplace_back(16, 8, 32, dtype_a, dtype_b, DataType::kFloat32,
+                           false, true, 1, "mxf8f6f4", "ue8m0");
+    }
+  }
+
+  configs.emplace_back(16, 8, 64, DataType::kFloat4_e2m1fn,
+                       DataType::kFloat4_e2m1fn, DataType::kFloat32, false,
+                       true, 2, "mxf4nvf4", "ue8m0");
+  configs.emplace_back(16, 8, 64, DataType::kFloat4_e2m1fn,
+                       DataType::kFloat4_e2m1fn, DataType::kFloat32, false,
+                       true, 4, "mxf4nvf4", "ue4m3");
+  return configs;
+}
+
+static const std::vector<MMABlockScaleConfig> valid_mma_blockscale_configs =
+    MakeValidMMABlockScaleConfigs();
+
+MMABlockScaleInfo GetMMABlockScaleInfo(DataType dtype_a, DataType dtype_b,
+                                       DataType dtype_c, int m, int n, int k,
+                                       bool trans_a, bool trans_b,
+                                       int scale_vec) {
+  for (const MMABlockScaleConfig &valid_config : valid_mma_blockscale_configs) {
+    if (valid_config.Matches(dtype_a, dtype_b, dtype_c, m, n, k, trans_a,
+                             trans_b, scale_vec)) {
+      return valid_config.Info();
+    }
+  }
+
+  LOG(FATAL) << "Unsupported SM120 block-scaled MMA configuration: m" << m
+             << "n" << n << "k" << k << ", dtype_a=" << DTypeToString(dtype_a)
+             << ", dtype_b=" << DTypeToString(dtype_b)
+             << ", dtype_c=" << DTypeToString(dtype_c)
+             << ", layout=" << (trans_a ? "col" : "row") << "."
+             << (trans_b ? "col" : "row") << ", scale_vec=" << scale_vec;
+  return {"", "", ""};
+}
+
 /*!
  * \brief Get the number of bits of given PTX data type.
  */
@@ -1021,6 +1137,52 @@ GetMMAOperands(int m, int n, int k, ptx::DataType dtype_a,
   return std::make_tuple(templates.str(), inputs.str(), outputs.str());
 }
 
+inline std::tuple<std::string, std::string, std::string>
+GetMMABlockScaleOperands() {
+  std::stringstream templates, inputs, outputs;
+
+  int arg_counter = 0;
+  templates << "{%" << arg_counter++ << ", %" << arg_counter++ << ", %"
+            << arg_counter++ << ", %" << arg_counter++ << "}, ";
+  templates << "{%" << arg_counter++ << ", %" << arg_counter++ << ", %"
+            << arg_counter++ << ", %" << arg_counter++ << "}, ";
+  templates << "{%" << arg_counter++ << ", %" << arg_counter++ << "}, ";
+  templates << "{%" << arg_counter++ << ", %" << arg_counter++ << ", %"
+            << arg_counter++ << ", %" << arg_counter++ << "}, ";
+  templates << "{%" << arg_counter++ << "}, {%" << arg_counter++ << ", %"
+            << arg_counter++ << "}, ";
+  templates << "{%" << arg_counter++ << "}, {%" << arg_counter++ << ", %"
+            << arg_counter++ << "}";
+
+  for (int i = 0; i < 4; ++i) {
+    if (i != 0) {
+      outputs << ", ";
+    }
+    outputs << "\"=f\"(((float *)({D}))[" << i << "])";
+  }
+
+  for (int i = 0; i < 4; ++i) {
+    if (i != 0) {
+      inputs << ", ";
+    }
+    inputs << "\"r\"(((unsigned *)({A}))[" << i << "])";
+  }
+  for (int i = 0; i < 2; ++i) {
+    inputs << ", \"r\"(((unsigned *)({B}))[" << i << "])";
+  }
+  for (int i = 0; i < 4; ++i) {
+    inputs << ", \"f\"(((float *)({C}))[" << i << "])";
+  }
+  inputs << ", \"r\"(uint32_t(({SFA})))";
+  inputs << ", \"h\"((short)0)";
+  inputs << ", \"h\"((short)({IdA}))";
+  inputs << ", \"r\"(uint32_t(({SFB})))";
+  inputs << ", \"h\"((short)0)";
+  inputs << ", \"h\"((short)({IdB}))";
+
+  return std::make_tuple(templates.str(), inputs.str(), outputs.str());
+}
+
 inline std::tuple<std::string, std::string, std::string, std::string>
 GetWGMMAOperands(int m, int n, int k, ptx::DataType dtype_a,
                  ptx::DataType dtype_b, ptx::DataType dtype_c, bool sparse,
@@ -1201,6 +1363,64 @@ PrintMMAAssembly(const std::string &shape, const std::string &A_layout,
   replacer.register_rule("F", sparsity_selector);
   asm_code = replacer.rewrite(asm_code);
   return asm_code;
+}
+
+std::string PrintMMABlockScaleAssembly(
+    const std::string &shape, const std::string &A_layout,
+    const std::string &B_layout, const std::string &A_dtype,
+    const std::string &B_dtype, const std::string &C_dtype, int scale_vec,
+    const std::string &a_ptr, const std::string &a_elem_offset,
+    const std::string &b_ptr, const std::string &b_elem_offset,
+    const std::string &c_ptr, const std::string &c_elem_offset,
+    const std::string &sfa, const std::string &sfb, const std::string &id_a,
+    const std::string &id_b) {
+  ptx::DataType dtype_a = ptx::DTypeFromString(A_dtype),
+                dtype_b = ptx::DTypeFromString(B_dtype),
+                dtype_c = ptx::DTypeFromString(C_dtype);
+  ptx::LayoutType layout_a = ptx::LayoutTypeFromString(A_layout),
+                  layout_b = ptx::LayoutTypeFromString(B_layout);
+  auto [m, n, k] = ptx::ParseMMAShape(shape);
+  ptx::MMABlockScaleInfo info = ptx::GetMMABlockScaleInfo(
+      dtype_a, dtype_b, dtype_c, m, n, k,
+      layout_a == ptx::LayoutType::kColumnMajor,
+      layout_b == ptx::LayoutType::kColumnMajor, scale_vec);
+
+  std::string asm_code = R"(
+  {
+    __asm__ __volatile__(
+      "mma.sync.aligned.kind::{kind}.block_scale.scale_vec::{scale_vec}.{shape}.{alayout}.{blayout}{.dtype}{.atype}{.btype}{.ctype}.{scale_dtype} "
+      "{templates};\n"
+      : {outputs}
+      : {inputs});
+  }
+)";
+  auto [templates_str, inputs_str, outputs_str] = GetMMABlockScaleOperands();
+
+  Replacer replacer;
+  replacer.register_rule("{kind}", info.kind);
+  replacer.register_rule("{scale_vec}", info.scale_vec);
+  replacer.register_rule("{shape}", shape);
+  replacer.register_rule("{alayout}", A_layout);
+  replacer.register_rule("{blayout}", B_layout);
+  replacer.register_rule("{.atype}", ptx::DTypeToString(dtype_a));
+  replacer.register_rule("{.btype}", ptx::DTypeToString(dtype_b));
+  replacer.register_rule("{.ctype}", ptx::DTypeToString(dtype_c));
+  replacer.register_rule("{.dtype}", ptx::DTypeToString(dtype_c));
+  replacer.register_rule("{scale_dtype}", info.scale_dtype);
+  replacer.register_rule("{templates}", templates_str);
+  replacer.register_rule("{outputs}", outputs_str);
+  replacer.register_rule("{inputs}", inputs_str);
+  asm_code = replacer.rewrite(asm_code);
+  replacer.empty_rules();
+  replacer.register_rule("{A}", a_ptr + " + " + a_elem_offset);
+  replacer.register_rule("{B}", b_ptr + " + " + b_elem_offset);
+  replacer.register_rule("{C}", c_ptr + " + " + c_elem_offset);
+  replacer.register_rule("{D}", c_ptr + " + " + c_elem_offset);
+  replacer.register_rule("{SFA}", sfa);
+  replacer.register_rule("{SFB}", sfb);
+  replacer.register_rule("{IdA}", id_a);
+  replacer.register_rule("{IdB}", id_b);
+  return replacer.rewrite(asm_code);
 }
 
 std::string

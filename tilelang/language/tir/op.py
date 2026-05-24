@@ -1076,6 +1076,60 @@ def ptx_mma_sp(
     )
 
 
+def ptx_mma_blockscale(
+    C_dtype,
+    shape,
+    A_layout,
+    B_layout,
+    A_dtype,
+    B_dtype,
+    scale_vec,
+    multiplicand_a,
+    a_index,
+    multiplicand_b,
+    b_index,
+    accumulator,
+    c_index,
+    scale_a,
+    scale_b,
+    scale_id_a,
+    scale_id_b,
+):
+    """TileLang intrinsic for PTX block-scaled MMA instructions.
+
+    ``C_dtype`` is the accumulator/result precision, mirroring the
+    ``accumulator`` operand. The intrinsic itself is side-effect only and emits
+    a ``handle``-typed TIR call, like TCGEN05 MMA intrinsics.
+    The CUDA backend maps the shape/layout/dtype tuple to the matching
+    ``tl::mma_sync_blockscale`` dispatcher specialization. On SM120,
+    ``scale_vec=1`` selects ``mxf8f6f4``/``ue8m0`` ``m16n8k32`` variants for
+    e2m1/e3m2/e2m3/e4m3/e5m2 inputs, while ``scale_vec=2`` and ``scale_vec=4``
+    select ``mxf4nvf4`` ``m16n8k64`` e2m1 inputs with ``ue8m0`` and ``ue4m3``
+    scale factors respectively.
+    """
+    return call_intrin(
+        "handle",
+        _tvm_op.Op.get("tl.ptx_mma_blockscale"),
+        shape,
+        A_layout,
+        B_layout,
+        A_dtype,
+        B_dtype,
+        C_dtype,
+        scale_vec,
+        multiplicand_a,
+        a_index,
+        multiplicand_b,
+        b_index,
+        accumulator,
+        c_index,
+        scale_a,
+        scale_b,
+        scale_id_a,
+        scale_id_b,
+    )
+
+
 def ptx_wgmma_ss(
     dtype,
     wgmma_prefix,

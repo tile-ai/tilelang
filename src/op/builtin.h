@@ -492,6 +492,26 @@ TVM_DLL const Op &ptx_deallocate_tensor_memory();
 TVM_DLL const Op &ptx_mma_sm70();
 
 /*!
+ * \brief TileLang intrinsic for PTX block-scaled MMA instructions.
+ *
+ *  SM120 currently supports mxf8f6f4 scale_vec=1, m16n8k32 for all pairs of
+ *  e2m1/e3m2/e2m3/e4m3/e5m2 inputs with ue8m0 scale factors, plus mxf4nvf4
+ *  scale_vec=2/4, m16n8k64 for e2m1 x e2m1 inputs with ue8m0/ue4m3 scale
+ *  factors.
+ *
+ *  void ptx_mma_blockscale(StringImm shape, StringImm A_layout,
+ *                          StringImm B_layout, StringImm A_dtype,
+ *                          StringImm B_dtype, StringImm C_dtype,
+ *                          Integer scale_vec,
+ *                          Var multiplicand_a, Expr a_index,
+ *                          Var multiplicand_b, Expr b_index,
+ *                          Var accumulator, Expr c_index,
+ *                          Expr scale_a, Expr scale_b,
+ *                          Expr scale_id_a, Expr scale_id_b);
+ */
+TVM_DLL const Op &ptx_mma_blockscale();
+
+/*!
  * \brief tvm intrinsics for ldmatrix
  *
  * ptx_ldmatrix(transposed, num, shared_addr, local_addr)
