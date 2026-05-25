@@ -12,6 +12,7 @@
 #define TVM_TL_TRANSFORM_COMMON_PIPELINE_UTILS_H_
 
 #include "support/check.h"
+#include <tvm/arith/analyzer.h>
 #include <tvm/ir/cast.h>
 #include <tvm/s_tir/stmt.h>
 #include <tvm/tirx/stmt.h>

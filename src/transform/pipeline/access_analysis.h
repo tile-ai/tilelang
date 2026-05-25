@@ -5,8 +5,7 @@
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 
-#include <unordered_set>
-
+#include "../common/bind_utils.h"
 #include "op/operator.h"
 
 namespace tvm {
@@ -15,12 +14,7 @@ namespace tl {
 using namespace tirx;
 using namespace ffi;
 
-using BufferSet = std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>;
-
 bool MayConflict(const Region &region1, const Region &region2);
-
-bool IsReplayableScalarBind(const Stmt &stmt, const Array<BufferRegion> &reads,
-                            const BufferSet &pipeline_write_buffers);
 
 class BufferRegionCollector : public StmtExprVisitor {
 public:

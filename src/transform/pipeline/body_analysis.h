@@ -1,6 +1,7 @@
 #ifndef TVM_TL_TRANSFORM_PIPELINE_BODY_ANALYSIS_H_
 #define TVM_TL_TRANSFORM_PIPELINE_BODY_ANALYSIS_H_
 
+#include "../common/bind_utils.h"
 #include "../common/pipeline_utils.h"
 #include "access_analysis.h"
 

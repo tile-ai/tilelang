@@ -1,6 +1,5 @@
 #include "helpers.h"
 
-#include "access_analysis.h"
 #include "support/check.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/cast.h>
@@ -13,6 +12,7 @@
 #include <algorithm>
 #include <utility>
 
+#include "../common/bind_utils.h"
 #include "layout/layout.h"
 #include "op/builtin.h"
 #include "op/copy.h"

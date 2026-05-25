@@ -39,19 +39,6 @@ bool MayConflict(const Region &region1, const Region &region2) {
   return true;
 }
 
-bool IsReplayableScalarBind(const Stmt &stmt, const Array<BufferRegion> &reads,
-                            const BufferSet &pipeline_write_buffers) {
-  if (stmt.as<BindNode>() == nullptr) {
-    return false;
-  }
-  for (const BufferRegion &read : reads) {
-    if (pipeline_write_buffers.count(read->buffer)) {
-      return false;
-    }
-  }
-  return true;
-}
-
 BufferRegionCollector::BufferRegionCollector(
     Map<Var, Buffer> buffer_data_to_buffer, Target target)
     : buffer_data_to_buffer_(buffer_data_to_buffer), target_(target) {}

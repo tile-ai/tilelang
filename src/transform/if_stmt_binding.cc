@@ -4,7 +4,6 @@
  */
 
 #include "support/check.h"
-#include <tvm/target/target.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
@@ -15,7 +14,9 @@
 #include <vector>
 
 #include "../op/builtin.h"
-#include "pipeline/access_analysis.h"
+#include "../op/operator.h"
+#include "../op/parallel.h"
+#include "common/bind_utils.h"
 
 namespace tvm {
 namespace tl {
@@ -26,11 +27,7 @@ using namespace ffi;
 class IfStmtBindingRewriter : public StmtExprMutator {
 public:
   static PrimFunc Substitute(PrimFunc &f, bool inline_replayable_binds) {
-    Target target;
-    if (auto target_attr = f->GetAttr<Target>(tvm::attr::kTarget)) {
-      target = target_attr.value();
-    }
-    auto rewriter = IfStmtBindingRewriter(target, inline_replayable_binds);
+    auto rewriter = IfStmtBindingRewriter(inline_replayable_binds);
     for (const auto &[_, buffer] : f->buffer_map) {
       rewriter.buffer_data_to_buffer_.Set(buffer->data, buffer);
     }
@@ -39,9 +36,78 @@ public:
   }
 
 private:
-  IfStmtBindingRewriter(Target target, bool inline_replayable_binds)
-      : target_(std::move(target)),
-        inline_replayable_binds_(inline_replayable_binds) {}
+  explicit IfStmtBindingRewriter(bool inline_replayable_binds)
+      : inline_replayable_binds_(inline_replayable_binds) {}
+
+  class IfStmtAccessCollector : public StmtExprVisitor {
+  public:
+    explicit IfStmtAccessCollector(Map<Var, Buffer> buffer_data_to_buffer)
+        : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)) {}
+
+    std::pair<Array<BufferRegion>, Array<BufferRegion>>
+    Collect(const Stmt &stmt) {
+      this->VisitStmt(stmt);
+      return {std::move(reads_), std::move(writes_)};
+    }
+
+  private:
+    void AddRead(const Buffer &buffer) {
+      reads_.push_back(BufferRegion::FullRegion(buffer));
+    }
+
+    void AddWrite(const Buffer &buffer) {
+      writes_.push_back(BufferRegion::FullRegion(buffer));
+    }
+
+    void VisitStmt_(const BufferStoreNode *op) final {
+      AddWrite(op->buffer);
+      StmtExprVisitor::VisitStmt_(op);
+    }
+
+    void VisitExpr_(const BufferLoadNode *op) final {
+      AddRead(op->buffer);
+      StmtExprVisitor::VisitExpr_(op);
+    }
+
+    void VisitExpr_(const CallNode *op) final {
+      if (auto tile_op = ParseOperator(GetRef<Call>(op)); tile_op.defined()) {
+        if (const auto *parallel = tile_op.as<ParallelOpNode>()) {
+          this->VisitStmt(parallel->GetRoot());
+        } else {
+          AccessRegions access = tile_op->GetAccessRegions();
+          reads_.insert(reads_.end(), access.reads.begin(), access.reads.end());
+          writes_.insert(writes_.end(), access.writes.begin(),
+                         access.writes.end());
+        }
+        StmtExprVisitor::VisitExpr_(op);
+        return;
+      }
+      if (op->op.same_as(builtin::address_of())) {
+        if (const auto *load = op->args[0].as<BufferLoadNode>()) {
+          AddRead(load->buffer);
+        } else if (const auto *var_node = op->args[0].as<VarNode>()) {
+          auto it = buffer_data_to_buffer_.find(GetRef<Var>(var_node));
+          if (it != buffer_data_to_buffer_.end()) {
+            AddRead((*it).second);
+          }
+        }
+      } else if (op->op.same_as(builtin::tvm_access_ptr())) {
+        if (op->args.size() > 1) {
+          if (const auto *var_node = op->args[1].as<VarNode>()) {
+            auto it = buffer_data_to_buffer_.find(GetRef<Var>(var_node));
+            if (it != buffer_data_to_buffer_.end()) {
+              AddRead((*it).second);
+            }
+          }
+        }
+      }
+      StmtExprVisitor::VisitExpr_(op);
+    }
+
+    Map<Var, Buffer> buffer_data_to_buffer_;
+    Array<BufferRegion> reads_;
+    Array<BufferRegion> writes_;
+  };
 
   static Stmt MakeSeq(Array<Stmt> seq) {
     ICHECK(!seq.empty());
@@ -50,9 +116,8 @@ private:
 
   std::pair<Array<BufferRegion>, Array<BufferRegion>>
   CollectStmtAccessRegions(const Stmt &stmt) const {
-    auto collector = BufferRegionCollector(buffer_data_to_buffer_, target_);
-    collector(stmt);
-    return {collector.GetReads(), collector.GetWrites()};
+    IfStmtAccessCollector collector(buffer_data_to_buffer_);
+    return collector.Collect(stmt);
   }
 
   BufferSet CollectWriteBuffers(const Array<Stmt> &stmts) const {
@@ -238,7 +303,6 @@ private:
   }
 
   Map<Var, Buffer> buffer_data_to_buffer_;
-  Target target_;
   bool inline_replayable_binds_{true};
 };
 
