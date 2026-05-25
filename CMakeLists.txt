@@ -557,7 +557,6 @@ if(WIN32)
   # DLL names without falling back to the old unified tvm.dll.
   target_sources(tvm_compiler PRIVATE $<TARGET_OBJECTS:tilelang_objs>)
 else()
-  set(TILELANG_OUTPUT_TARGETS tvm_runtime tvm_compiler)
   add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
   target_link_libraries(tilelang PUBLIC tvm_compiler)
 

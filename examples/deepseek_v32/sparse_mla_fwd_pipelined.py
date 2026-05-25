@@ -1,3 +1,4 @@
+# ruff: noqa
 import torch
 import tilelang
 from tilelang import language as T
@@ -29,7 +30,7 @@ def sparse_mla_fwd(
 ):
     assert dim == tilelang.math.next_power_of_2(dim), f"haven't check padding correctness yet, dim={dim}"
     assert tail_dim == tilelang.math.next_power_of_2(tail_dim), f"haven't check padding correctness yet, dim={tail_dim}"
-    assert is_causal, "non-casual is not supported"
+    assert is_causal == True, "non-casual is not supported"
     assert topk % block_I == 0, "otherwise will load some index=0 thus causing wrong kv to be loaded"
     if sm_scale is None:
         sm_scale = (1.0 / (dim + tail_dim)) ** 0.5 * 1.44269504  # log2(e)
@@ -48,6 +49,7 @@ def sparse_mla_fwd(
     dtype = T.bfloat16
     accum_dtype = T.float32
 
+    G = kv_group
     H = head_kv
     padded_H = max(tilelang.math.next_power_of_2(head_kv), 16)
     if padded_H != H:

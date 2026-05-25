@@ -34,18 +34,6 @@ def _resolve_artifact_paths(temp, file_name, target_format, kernels_output_dir=N
     return temp_code, temp_target
 
 
-def _resolve_artifact_paths(temp, file_name, target_format, kernels_output_dir=None):
-    if kernels_output_dir is None:
-        return temp.relpath(f"{file_name}.cc"), temp.relpath(f"{file_name}.{target_format}")
-
-    os.makedirs(kernels_output_dir, exist_ok=True)
-    fd, temp_code = tempfile.mkstemp(prefix=f"{file_name}_", suffix=".cc", dir=kernels_output_dir)
-    os.close(fd)
-    file_stem, _ = os.path.splitext(os.path.basename(temp_code))
-    temp_target = os.path.join(kernels_output_dir, f"{file_stem}.{target_format}")
-    return temp_code, temp_target
-
-
 def compile_hip(code, target_format="hsaco", arch=None, options=None, path_target=None, verbose=False):
     """Compile HIP code with hipcc.
 
