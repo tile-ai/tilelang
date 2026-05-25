@@ -1199,6 +1199,18 @@ TVM_DLL const Op &warp_reduce_bitor();
 TVM_DLL const Op &__ldg();
 
 /*!
+ * \brief tilelang intrinsic for CUDA find-first-set bit (__ffs / __ffsll).
+ *
+ *  Returns the one-based position of the least significant set bit, or 0 when
+ *  the input is zero. CUDA codegen emits `__ffs` for 32-bit integer inputs and
+ *  `__ffsll` for 64-bit integer inputs.
+ *
+ *  Usage from TVMScript:
+ *    lane = T.__ffs(mask) - 1
+ */
+TVM_DLL const Op &__ffs();
+
+/*!
  * \brief tilelang intrinsic for global memory load with 32-bit vector width.
  *
  *  This op loads 32 bits (4 bytes) from global memory using explicit
