@@ -79,6 +79,17 @@ def __ldg(load_or_buf: BufferLoad | tirx.Buffer, index: PrimExpr | int | None = 
     raise TypeError("T.__ldg expects a BufferLoad or a Buffer.")
 
 
+def __ffs(value: int | PrimExpr) -> PrimExpr:
+    """Find the position of the least significant set bit.
+
+    Lowers to CUDA ``__ffs`` for 32-bit integer inputs and ``__ffsll`` for
+    64-bit integer inputs. The return value follows CUDA semantics: one-based
+    bit position, or 0 when ``value`` is zero.
+    """
+    value = tirx.convert(value)
+    return tirx.call_intrin("int32", tirx.op.Op.get("tl.__ffs"), value)
+
+
 def access_ptr(
     base: BufferLikeType,
     access_type: str | int = "r",
