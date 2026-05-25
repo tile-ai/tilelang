@@ -660,8 +660,8 @@ Stmt Copy::LowerVoltaFragmentStaging(const CopyNode &op, const LowerArgs &T,
   staging_range.reserve(op.dst_range.size());
   for (const auto &range : op.dst_range) {
     staging_shape.push_back(range->extent);
-    staging_range.push_back(Range::FromMinExtent(
-        make_zero(range->extent.dtype()), range->extent));
+    staging_range.push_back(
+        Range::FromMinExtent(make_zero(range->extent.dtype()), range->extent));
   }
 
   Buffer staging =
