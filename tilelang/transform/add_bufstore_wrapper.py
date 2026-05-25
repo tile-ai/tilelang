@@ -1,6 +1,6 @@
-from tvm.tir import BufferStore, For, AttrStmt, ForKind, Var, PrimFunc, BufferLoad, Buffer, IntImm
-from tvm.tir.stmt_functor import ir_transform, post_order_visit
-from tvm.tir.transform import prim_func_pass
+from tvm.tirx import BufferStore, For, AttrStmt, ForKind, Var, PrimFunc, BufferLoad, Buffer, IntImm
+from tvm.tirx.stmt_functor import ir_transform, post_order_visit
+from tvm.tirx.transform import prim_func_pass
 
 
 def AddWrapperForSingleBufStore():

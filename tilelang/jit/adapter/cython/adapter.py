@@ -10,7 +10,7 @@ from collections.abc import Callable
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tilelang.engine.param import KernelParam
-from tvm import tir
+from tvm import tirx
 from tvm.relax import TensorType
 
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
@@ -32,7 +32,7 @@ def is_symbolic_expr(expr) -> bool:
     """Check if the expression is a symbolic expression.
     A symbolic expression can be a simple tvm.Var, or an tvm.PrimExpr containing tvm.Var.
     """
-    return not isinstance(expr, tir.IntImm) and isinstance(expr, tir.PrimExpr)
+    return not isinstance(expr, tirx.IntImm) and isinstance(expr, tirx.PrimExpr)
 
 
 class CythonKernelAdapter(BaseKernelAdapter):
@@ -54,21 +54,21 @@ class CythonKernelAdapter(BaseKernelAdapter):
     kernel_global_source: str | None = None  # Alias for device_kernel_source for compatibility
     lib: ctypes.CDLL | None = None  # Compiled library handle
     # Maps symbolic variables to their corresponding buffer and shape indices
-    dynamic_symbolic_map: dict[tir.Var, tuple[int, int]] | None = None
+    dynamic_symbolic_map: dict[tirx.Var, tuple[int, int]] | None = None
     # Maps pointer arguments to their corresponding (buffer_index, shape_dimension)
     ptr_map: dict[int, str] | None = None
     # Maps buffer variables to their corresponding dtypes
-    buffer_dtype_map: dict[tir.Var, tuple[int, torch.dtype]] | None = None
+    buffer_dtype_map: dict[tirx.Var, tuple[int, torch.dtype]] | None = None
     # Maps buffer variables to their corresponding static shapes and strides,
     # e.g., {
     #     "A": [(0, 16), (1, 16)] -> represents A.shape/strides = (16, 16)
     # }
-    static_shape_map: dict[tir.Var, tuple[int, list[tuple[int, int]]]] | None = None
-    static_strides_map: dict[tir.Var, tuple[int, list[tuple[int, int]]]] | None = None
+    static_shape_map: dict[tirx.Var, tuple[int, list[tuple[int, int]]]] | None = None
+    static_strides_map: dict[tirx.Var, tuple[int, list[tuple[int, int]]]] | None = None
     # Contains contiguous buffers
-    static_contiguous_list: list[tir.Var] | None = None
+    static_contiguous_list: list[tirx.Var] | None = None
     # Maps buffer variables to their corresponding devices
-    buffer_device_map: dict[tir.Var, tuple[int, torch.device]] | None = None
+    buffer_device_map: dict[tirx.Var, tuple[int, torch.device]] | None = None
     # Pass configs for the compiler
     pass_configs: dict[str, Any] | None = None
 
@@ -77,7 +77,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         params: list[KernelParam],
         result_idx: list[int],
         target: str | Target,
-        func_or_mod: tir.PrimFunc | tvm.IRModule,
+        func_or_mod: tirx.PrimFunc | tvm.IRModule,
         host_mod: tvm.IRModule | None = None,
         device_mod: tvm.IRModule | None = None,
         device_kernel_source: str | None = None,
@@ -99,12 +99,12 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.device_kernel_source = device_kernel_source
         self.kernel_global_source = device_kernel_source  # Set alias for compatibility
 
-        if isinstance(func_or_mod, tir.PrimFunc):
+        if isinstance(func_or_mod, tirx.PrimFunc):
             self.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
         else:
             self.ir_module = func_or_mod
 
-        self.target = Target.canon_target(determine_target(target))
+        self.target = Target(determine_target(target))
 
         self.dynamic_symbolic_map = self._process_dynamic_symbolic()
         self.buffer_dtype_map = self._process_buffer_dtype()
@@ -155,7 +155,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         params: list[TensorType],
         result_idx: list[int],
         target: str,
-        func_or_mod: tir.PrimFunc | tvm.IRModule,
+        func_or_mod: tirx.PrimFunc | tvm.IRModule,
         host_kernel_source: CachedTextSource,
         device_kernel_source: CachedTextSource,
         kernel_lib_path: str,
@@ -171,13 +171,13 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.kernel_global_source = device_kernel_source.text  # Set alias for compatibility
         adapter.pass_configs = pass_configs
 
-        if isinstance(func_or_mod, tir.PrimFunc):
+        if isinstance(func_or_mod, tirx.PrimFunc):
             adapter.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
         else:
             adapter.ir_module = func_or_mod
 
         target = determine_target(target, return_object=True)
-        adapter.target = Target.canon_target(determine_target(target))
+        adapter.target = Target(determine_target(target))
 
         adapter.dynamic_symbolic_map = adapter._process_dynamic_symbolic()
         adapter.buffer_dtype_map = adapter._process_buffer_dtype()
@@ -213,7 +213,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter._post_init()
         return adapter
 
-    def _process_dynamic_symbolic(self) -> dict[tir.Var, tuple[int, int, int, int]]:
+    def _process_dynamic_symbolic(self) -> dict[tirx.Var, tuple[int, int, int, int]]:
         """Extract information about dynamic shapes from the TIR function.
 
         Maps symbolic variables to their corresponding (id, buffer_index, dimension, stride_scale)
@@ -230,7 +230,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 for j, shape in enumerate(buffer.shape):
-                    if isinstance(shape, tir.Var) and (shape not in dynamic_symbolic_map) and (shape not in params):
+                    if isinstance(shape, tirx.Var) and (shape not in dynamic_symbolic_map) and (shape not in params):
                         dynamic_symbolic_map[shape] = (0, i, j, 1)
         for i, param in enumerate(params):
             if param in buffer_map:
@@ -238,11 +238,11 @@ class CythonKernelAdapter(BaseKernelAdapter):
                 element_bits = buffer.dtype.bits * buffer.dtype.lanes
                 stride_scale = 8 // element_bits if element_bits < 8 else 1
                 for j, stride in enumerate(buffer.strides):
-                    if isinstance(stride, tir.Var) and (stride not in dynamic_symbolic_map) and (stride not in params):
+                    if isinstance(stride, tirx.Var) and (stride not in dynamic_symbolic_map) and (stride not in params):
                         dynamic_symbolic_map[stride] = (1, i, j, stride_scale)
         return dynamic_symbolic_map
 
-    def _process_buffer_dtype(self) -> dict[tir.Var, tuple[int, torch.dtype]]:
+    def _process_buffer_dtype(self) -> dict[tirx.Var, tuple[int, torch.dtype]]:
         """Extract information about buffer dtypes from the TIR function.
 
         Maps buffer variables to their corresponding dtypes.
@@ -274,7 +274,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
     def _process_static_buffer_infos(
         self,
-    ) -> tuple[dict[tir.Var, tuple[int, list[tuple[int, int]]]], dict[tir.Var, tuple[int, list[tuple[int, int]]]], list[tuple[tir.Var]]]:
+    ) -> tuple[dict[tirx.Var, tuple[int, list[tuple[int, int]]]], dict[tirx.Var, tuple[int, list[tuple[int, int]]]], list[tuple[tirx.Var]]]:
         """Extract information about static shapes from the TIR function.
 
         Maps buffer variables to their corresponding static shapes.
@@ -290,14 +290,14 @@ class CythonKernelAdapter(BaseKernelAdapter):
                 buffer = buffer_map[param]
                 static_shape, static_strides = [], []
                 for j, s in enumerate(buffer.shape):
-                    if isinstance(s, tir.IntImm):
+                    if isinstance(s, tirx.IntImm):
                         static_shape.append((j, s.value))
                     elif is_symbolic_expr(s):
                         static_shape.append((j, -1))  # -1 for symbolic
                     else:
                         raise ValueError(f"Unsupported shape type: {type(s)}")
                 for j, s in enumerate(buffer.strides):
-                    if isinstance(s, tir.IntImm):
+                    if isinstance(s, tirx.IntImm):
                         static_strides.append((j, s.value))
                 is_contiguous, prod = True, 1
                 for dim, stride in reversed(list(zip(buffer.shape, buffer.strides))):
@@ -309,7 +309,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
                     static_contiguous_list.append((i, buffer.name))
         return static_shape_map, static_strides_map, static_contiguous_list
 
-    def _process_buffer_device(self) -> dict[tir.Var, tuple[int, torch.device]]:
+    def _process_buffer_device(self) -> dict[tirx.Var, tuple[int, torch.device]]:
         """Extract information about buffer devices from the TIR function.
 
         Maps buffer variables to their corresponding devices.
@@ -360,7 +360,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         return lambda_forward
 
     @property
-    def prim_func(self) -> tir.PrimFunc:
+    def prim_func(self) -> tirx.PrimFunc:
         """Returns the primary TIR function from the IR module."""
         return retrieve_func_from_module(self.ir_module)
 

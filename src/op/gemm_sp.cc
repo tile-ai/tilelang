@@ -5,13 +5,17 @@
  */
 
 #include "gemm_sp.h"
+#include "support/check.h"
 #include "utils.h"
 
 #include "builtin.h"
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/function.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/op_attr_types.h>
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/function.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
+#include <tvm/tirx/stmt.h>
 
 #include "../target/utils.h"
 #include "tvm/ffi/string.h"
@@ -21,7 +25,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace {
 
@@ -36,16 +41,16 @@ const GemmSPImpl &ResolveGemmSPImpl(Target target) {
   for (const GemmSPImpl &impl : registry) {
     if (impl.match_target(target)) {
       ICHECK(matched_impl == nullptr)
-          << "tl.gemm found multiple target-specific implementations for "
-          << target->ToDebugString() << ": " << matched_impl->name << " and "
+          << "tl.gemm_sp found multiple target-specific implementations for "
+          << target->str() << ": " << matched_impl->name << " and "
           << impl.name;
       matched_impl = &impl;
     }
   }
   ICHECK(matched_impl != nullptr)
-      << "tl.gemm requires a target-specific implementation, but no gemm "
-         "implementation is registered for "
-      << target->ToDebugString();
+      << "tl.gemm_sp requires a target-specific implementation, but no "
+         "gemm_sp implementation is registered for "
+      << target->str();
   return *matched_impl;
 }
 
@@ -83,8 +88,7 @@ void RegisterGemmSPImpl(GemmSPImpl impl) {
  *      (optional) kPack (Int), (optional) wg_wait (Int)]
  */
 GemmSP::GemmSP(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
-  ObjectPtr<GemmSPNode> node = tvm::ffi::make_object<GemmSPNode>();
-
+  ObjectPtr<GemmSPNode> node = make_object<GemmSPNode>();
   auto a_access = NormalizeToAccessRegion(args[0], kAccessRead);
   auto e_access = NormalizeToAccessRegion(args[1], kAccessRead);
   auto b_access = NormalizeToAccessRegion(args[2], kAccessRead);
@@ -149,7 +153,7 @@ AccessRegions GemmSPNode::GetAccessRegions() const {
 }
 
 TileOperator GemmSPNode::Clone() const {
-  auto op = tvm::ffi::make_object<GemmSPNode>(*this);
+  auto op = make_object<GemmSPNode>(*this);
   return GemmSP(op);
 }
 
@@ -165,39 +169,40 @@ String GemmSPNode::getGemmSPInstructionKind(int block_size,
 }
 
 Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  if (const auto f = ffi::Function::GetGlobal("tl.gemm_sp.lower")) {
+  if (const auto f = Function::GetGlobal("tl.gemm_sp.lower")) {
     auto prim_func =
-        Downcast<PrimFunc>((*f)(tvm::ffi::GetRef<GemmSP>(this), T.target,
-                                T.layout_map, T.thread_bounds, T.thread_var));
+        Downcast<PrimFunc>((*f)(GetRef<GemmSP>(this), T.target, T.layout_map,
+                                T.thread_bounds, T.thread_var));
     ICHECK(prim_func->attrs.defined());
     auto global_symbol = prim_func->attrs.GetAttr<String>("global_symbol");
     ICHECK(global_symbol.has_value());
-    if (prim_func->body.as<BlockRealizeNode>()) {
-      BlockRealize block_realize = Downcast<BlockRealize>(prim_func->body);
+    if (prim_func->body.as<SBlockRealizeNode>()) {
+      SBlockRealize block_realize = Downcast<SBlockRealize>(prim_func->body);
       auto block = block_realize->block;
       {
-        BlockNode *n = block.CopyOnWrite();
+        SBlockNode *n = block.CopyOnWrite();
         n->name_hint = global_symbol.value();
         n->annotations.Set(tl::attr::kLexicalAllocScope,
                            IntImm(DataType::Int(32), 1));
       }
-      return BlockRealize(block_realize->iter_values, block_realize->predicate,
-                          block);
+      return SBlockRealize(block_realize->iter_values, block_realize->predicate,
+                           block);
     }
     // wrap with block realize node
     Map<String, ObjectRef> block_annotations;
     block_annotations.Set(tl::attr::kLexicalAllocScope,
                           IntImm(DataType::Int(32), 1));
-    return BlockRealize(
+    return SBlockRealize(
         /*iter_values=*/Array<PrimExpr>(),
         /*predicate=*/const_true(),
         /*block=*/
-        Block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
-              /*name_hint=*/global_symbol.value(), prim_func->body,
-              /*init=*/Optional<Stmt>(), /*alloc_buffers=*/{},
-              /*match_buffers=*/{}, /*annotations=*/block_annotations));
+        SBlock(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
+               /*name_hint=*/global_symbol.value(), prim_func->body,
+               /*init=*/Optional<Stmt>(), /*alloc_buffers=*/{},
+               /*match_buffers=*/{}, /*annotations=*/block_annotations));
   } else {
     LOG(FATAL) << "No lower function found for gemm_sp";
+    return Stmt();
   }
 }
 
@@ -206,9 +211,9 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
   if (completed_)
     return {};
   LayoutMap results;
-  if (const auto f = ffi::Function::GetGlobal("tl.gemm_sp.infer_layout")) {
+  if (const auto f = Function::GetGlobal("tl.gemm_sp.infer_layout")) {
     auto inferred_layouts = Downcast<LayoutMap>(
-        (*f)(tvm::ffi::GetRef<GemmSP>(this), T.target, T.thread_bounds));
+        (*f)(GetRef<GemmSP>(this), T.target, T.thread_bounds));
     auto block_size = *as_const_int(T.thread_bounds->extent);
     String gemm_inst = getGemmSPInstructionKey(block_size, T.target);
     bool reuse_existing_shared_layout =
@@ -270,7 +275,7 @@ TVM_REGISTER_OP("tl.tileop.tcgen05_gemm_sp")
 TVM_FFI_STATIC_INIT_BLOCK() {
   GemmSPWarpPolicyNode::RegisterReflection();
   GemmSPNode::RegisterReflection();
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.GemmSPWarpPolicyComputeWarpPartition",
                         [](GemmSPWarpPolicy policy, int M, int N,
                            int block_size, Target target, String gemm_inst) {

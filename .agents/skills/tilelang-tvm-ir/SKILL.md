@@ -1,19 +1,19 @@
 ---
 name: tilelang-tvm-ir
-description: Use when editing TileLang C++ passes or TVM TIR code that handles ObjectRef/NodeRef types such as For, Buffer, Var, Block, Stmt, PrimExpr, or their *Node raw node counterparts; especially when choosing function parameters, optional values, identity maps/sets, or equality checks.
+description: Use when editing TileLang C++ passes or TVM TIRX code that handles ObjectRef/NodeRef types such as For, Buffer, Var, SBlock, Stmt, PrimExpr, or their *Node raw node counterparts; especially when choosing function parameters, optional values, identity maps/sets, or equality checks.
 ---
 
 # TileLang TVM IR Handle Conventions
 
 ## Core Rule
 
-In TVM C++, `For`, `Buffer`, `Var`, `Block`, `Stmt`, `PrimExpr`, `SeqStmt`, etc. are `ObjectRef` smart handles. `ForNode`, `BufferNode`, `VarNode`, `BlockNode`, etc. are raw node structs reached through visitor callbacks, `as<TNode>()`, `operator->`, or `.get()`.
+In TVM C++, `For`, `Buffer`, `Var`, `SBlock`, `Stmt`, `PrimExpr`, `SeqStmt`, etc. are `ObjectRef` smart handles. `ForNode`, `BufferNode`, `VarNode`, `SBlockNode`, etc. are raw node structs reached through visitor callbacks, `as<TNode>()`, `operator->`, or `.get()`.
 
 When a value needs to cross a function boundary, be stored, be optional, be used as an identity key, or survive beyond a local inspection branch, prefer the handle type over `const *Node`.
 
 ## Preferred Patterns
 
-- Function parameters and return values: use handles such as `For`, `Buffer`, `Var`, `Block`, `Stmt`, or `SeqStmt`.
+- Function parameters and return values: use handles such as `For`, `Buffer`, `Var`, `SBlock`, `Stmt`, or `SeqStmt`.
 - Nullable AST values: use `Optional<For>`, `Optional<SeqStmt>`, etc., not `const ForNode* = nullptr`.
 - Identity maps and sets: use handle keys with TVM identity hashing:
 
@@ -45,7 +45,7 @@ Keep these raw pointers local to the immediate inspection or mutation site.
 
 ## Avoid
 
-- Passing `const ForNode*`, `const BufferNode*`, `const VarNode*`, or `const Block*` between helper functions when a handle exists.
+- Passing `const ForNode*`, `const BufferNode*`, `const VarNode*`, or `const SBlockNode*` between helper functions when a handle exists.
 - Storing raw node pointers in `std::unordered_map` or `std::unordered_set` for identity tracking.
 - Using `.get()` as a key unless a callee requires a raw TVM node API and the pointer is not retained.
 - Comparing handles through `.get() == other.get()`; prefer `.same_as()`.
@@ -99,7 +99,7 @@ bool uses = UsesVar(expr, [&](const VarNode* vn) {
 When reviewing TileLang TIR passes, search for:
 
 ```bash
-rg -n "std::unordered_(set|map)<const .*Node \\*|const (For|SeqStmt|Block).*Node \\*|\\.get\\(\\) ==|\\.find\\([^\\n]*\\.get\\(\\)|\\.count\\([^\\n]*\\.get\\(\\)|\\.insert\\([^\\n]*\\.get\\(\\)" src/transform
+rg -n "std::unordered_(set|map)<const .*Node \\*|const (For|SeqStmt|SBlock).*Node \\*|\\.get\\(\\) ==|\\.find\\([^\\n]*\\.get\\(\\)|\\.count\\([^\\n]*\\.get\\(\\)|\\.insert\\([^\\n]*\\.get\\(\\)" src/transform
 ```
 
 Do not mechanically remove every raw node pointer. Keep visitor signatures, `as<TNode>()` pattern checks, and `CopyOnWrite()` mutation pointers. Refactor only the places that store, pass, compare, or key identities through raw pointers.

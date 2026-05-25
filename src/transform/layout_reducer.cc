@@ -4,12 +4,15 @@
  * Compute layout for local.reducer buffers and lower them to local.fragment.
  */
 
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include "../layout/layout.h"
 #include "../op/fill.h"
@@ -21,8 +24,9 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
-using namespace tir::transform;
+using namespace tirx;
+using namespace ffi;
+using namespace tirx::transform;
 using arith::IRMutatorWithAnalyzer;
 
 /**
@@ -62,7 +66,7 @@ private:
    * @brief Visit an attribute statement and capture the IterVar for
    * threadIdx.x.
    *
-   * If the attribute key is `tir::attr::thread_extent` and the node is an
+   * If the attribute key is `tirx::attr::thread_extent` and the node is an
    * `IterVar` whose `thread_tag` equals `"threadIdx.x"`, this sets the
    * mutator's `thread_var_` to that IterVar (after asserting the iterator's
    * extent is an `IntImm`). The previous `thread_var_` is preserved and
@@ -77,7 +81,7 @@ private:
    */
   Stmt VisitStmt_(const AttrStmtNode *op) final {
     auto prev_thread_var = thread_var_;
-    if (op->attr_key == tir::attr::thread_extent) {
+    if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->thread_tag == "threadIdx.x") {
         ICHECK(iv->dom->extent.as<IntImmNode>());
@@ -111,7 +115,7 @@ private:
    * @param op The Block node being visited.
    * @return Stmt The potentially modified Block statement (as a Stmt).
    */
-  Stmt VisitStmt_(const BlockNode *op) final {
+  Stmt VisitStmt_(const SBlockNode *op) final {
     // Record annotations
     if (op->annotations.count(attr::kReducerInfo)) {
       auto map = op->annotations.Get(attr::kReducerInfo)
@@ -125,7 +129,7 @@ private:
     for (auto &&buffer : op->alloc_buffers) {
       var_to_buffer_.Set(buffer->data, buffer);
     }
-    auto result = IRMutatorWithAnalyzer::VisitStmt_(op).as<Block>().value();
+    auto result = IRMutatorWithAnalyzer::VisitStmt_(op).as<SBlock>().value();
     // After iterating over the body, set all layout_map to block
     auto p_result = result.CopyOnWrite();
     Map<Var, Layout> layout_map;
@@ -398,7 +402,7 @@ public:
  * layout-reduction substitution.
  */
 tvm::transform::Pass LayoutReducer() {
-  using namespace tir::transform;
+  using namespace tirx::transform;
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
     return ReducerLayoutAnnotator::Substitute(std::move(f));
   };
@@ -406,7 +410,7 @@ tvm::transform::Pass LayoutReducer() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.LayoutReducer", LayoutReducer);
 }
 

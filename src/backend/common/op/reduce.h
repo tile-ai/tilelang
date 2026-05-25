@@ -7,6 +7,9 @@
 #define TVM_TL_BACKEND_COMMON_OP_REDUCE_H_
 
 #include "op/reduce.h"
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
 
 #include "layout/layout.h"
 #include "layout/utils.h"
@@ -16,10 +19,10 @@
 #include "transform/loop_partition.h"
 
 #include <tvm/arith/iter_affine_map.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/op_attr_types.h>
-#include <tvm/tir/stmt_functor.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <cmath>
 #include <cstdint>
@@ -33,7 +36,8 @@ namespace tvm {
 namespace tl {
 namespace backend {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace reduce {
 
@@ -408,7 +412,7 @@ template <typename Impl> struct ReduceLowerer {
             int64_t inner_extent = *ext_int;
             PrimExpr halved_extent = Integer(inner_extent / vsize);
 
-            auto &inner_var = src_var_compressed.back();
+            IterVar inner_var = src_var_compressed.back();
 
             PrimExpr ramp_base =
                 Substitute(src_indice_compressed.back(),
@@ -432,7 +436,7 @@ template <typename Impl> struct ReduceLowerer {
             reduce_local =
                 For(inner_var->var, 0, halved_extent, ForKind::kUnrolled,
                     reduce_local, std::nullopt,
-                    {{tir::attr::pragma_unroll_explicit, Bool(false)}});
+                    {{tirx::attr::pragma_unroll_explicit, Bool(false)}});
 
             for (int i = static_cast<int>(src_layout->OutputDim()) - 2; i >= 0;
                  --i) {
@@ -440,7 +444,7 @@ template <typename Impl> struct ReduceLowerer {
                   For(src_var_compressed[i]->var, 0,
                       src_var_compressed[i]->dom->extent, ForKind::kUnrolled,
                       reduce_local, std::nullopt,
-                      {{tir::attr::pragma_unroll_explicit, Bool(false)}});
+                      {{tirx::attr::pragma_unroll_explicit, Bool(false)}});
             }
             local_body.push_back(reduce_local);
 
@@ -477,7 +481,7 @@ template <typename Impl> struct ReduceLowerer {
           reduce_local = For(
               src_var_compressed[i]->var, 0, src_var_compressed[i]->dom->extent,
               ForKind::kUnrolled, reduce_local, std::nullopt,
-              {{tir::attr::pragma_unroll_explicit, Bool(false)}});
+              {{tirx::attr::pragma_unroll_explicit, Bool(false)}});
         }
         stmts.push_back(reduce_local);
       }
@@ -496,11 +500,11 @@ template <typename Impl> struct ReduceLowerer {
                                   "constant output shape";
           N_total *= *p;
         }
-        CHECK_LE(batch, N_total)
+        ICHECK_LE(batch, N_total)
             << "ReduceOp: batch=" << batch
             << " exceeds per-thread output element count N=" << N_total;
-        CHECK_EQ(N_total % batch, 0) << "ReduceOp: batch=" << batch
-                                     << " must evenly divide N=" << N_total;
+        ICHECK_EQ(N_total % batch, 0) << "ReduceOp: batch=" << batch
+                                      << " must evenly divide N=" << N_total;
       }
 
       bool use_batch = batch > 1;
@@ -722,17 +726,13 @@ template <typename Impl> struct ReduceLowerer {
 
         Stmt body = phases.size() > 1 ? SeqStmt(phases) : phases[0];
         if (need_duplicate) {
-          body = Allocate(clear_buffer->data, clear_buffer->dtype,
-                          clear_buffer->shape, const_true(), body);
+          body = SeqStmt({AllocBuffer(clear_buffer), body});
         }
         if (need_pack_buffer) {
-          body = Allocate(clear_buffer_packed->data, clear_buffer_packed->dtype,
-                          clear_buffer_packed->shape, const_true(), body);
+          body = SeqStmt({AllocBuffer(clear_buffer_packed), body});
         }
         if (need_batch_pack_buffer) {
-          body = Allocate(clear_batch_pack_buffer->data,
-                          clear_batch_pack_buffer->dtype,
-                          clear_batch_pack_buffer->shape, const_true(), body);
+          body = SeqStmt({AllocBuffer(clear_batch_pack_buffer), body});
         }
         return body;
       }
@@ -811,12 +811,10 @@ template <typename Impl> struct ReduceLowerer {
       }
 
       if (need_duplicate) {
-        body = Allocate(clear_buffer->data, clear_buffer->dtype,
-                        clear_buffer->shape, const_true(), body);
+        body = SeqStmt({AllocBuffer(clear_buffer), body});
       }
       if (need_pack_buffer) {
-        body = Allocate(clear_buffer_packed->data, clear_buffer_packed->dtype,
-                        clear_buffer_packed->shape, const_true(), body);
+        body = SeqStmt({AllocBuffer(clear_buffer_packed), body});
       }
       return body;
     }

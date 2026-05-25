@@ -4,11 +4,13 @@
  */
 
 #include "transpose.h"
+#include "support/check.h"
+#include <tvm/ir/cast.h>
 
 #include <dlpack/dlpack.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/op_attr_types.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
 
 #include "utils.h"
 
@@ -17,7 +19,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace {
 
@@ -33,7 +36,7 @@ const TransposeImpl &ResolveTransposeImpl(Target target) {
     if (impl.match_target(target)) {
       ICHECK(matched_impl == nullptr)
           << "tl.transpose found multiple target-specific implementations for "
-          << target->ToDebugString() << ": " << matched_impl->name << " and "
+          << target->str() << ": " << matched_impl->name << " and "
           << impl.name;
       matched_impl = &impl;
     }
@@ -41,7 +44,7 @@ const TransposeImpl &ResolveTransposeImpl(Target target) {
   ICHECK(matched_impl != nullptr)
       << "tl.transpose requires a target-specific implementation, but no "
          "transpose implementation is registered for "
-      << target->ToDebugString();
+      << target->str();
   return *matched_impl;
 }
 
@@ -55,7 +58,7 @@ void RegisterTransposeImpl(TransposeImpl impl) {
 }
 
 Transpose::Transpose(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
-  ObjectPtr<TransposeNode> node = tvm::ffi::make_object<TransposeNode>();
+  ObjectPtr<TransposeNode> node = make_object<TransposeNode>();
   auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
   auto dst_access = NormalizeToAccessRegion(args[1], kAccessWrite);
   node->src = src_access.region->buffer;
@@ -67,7 +70,7 @@ Transpose::Transpose(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
 }
 
 TileOperator TransposeNode::Clone() const {
-  auto op = tvm::ffi::make_object<TransposeNode>(*this);
+  auto op = make_object<TransposeNode>(*this);
   return Transpose(op);
 }
 

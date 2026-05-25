@@ -228,7 +228,7 @@ def test_kernel_cache_frontend_hit_round_trips_real_prim_func(cache_dirs, tmp_pa
 
     assert loaded is sentinel
     assert (cache_path / cache.prim_func_path).exists()
-    assert isinstance(captured["func"], tvm.tir.PrimFunc)
+    assert isinstance(captured["func"], tvm.tirx.PrimFunc)
     assert tvm.ir.structural_equal(captured["func"], kernel)
     assert str(captured["func"].attrs["global_symbol"]) == str(kernel.attrs["global_symbol"])
 

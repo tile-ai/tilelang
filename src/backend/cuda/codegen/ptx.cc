@@ -22,6 +22,9 @@
  */
 
 #include "ptx.h"
+#include <tvm/runtime/logging.h>
+
+#include "support/check.h"
 
 #include <algorithm>
 #include <string>
@@ -99,7 +102,7 @@ DataType DTypeFromString(const std::string str) {
     return DataType::kFloat16x2;
   } else if (str == "float32" || str == "fp32" || str == ".f32") {
     return DataType::kFloat32;
-  } else if (str == "tf32") {
+  } else if (str == "tfloat32" || str == "tf32" || str == "custom[tfloat32]") {
     return DataType::kTensorFloat32;
   } else if (str == "float64" || str == "fp64" || str == ".f64") {
     return DataType::kFloat64;
@@ -154,7 +157,7 @@ inline bool DTypeIsInteger(DataType dtype) {
  */
 std::tuple<int, int, int> ParseMMAShape(const std::string &str) {
   size_t pos_m = str.find('m'), pos_n = str.find('n'), pos_k = str.find('k');
-  CHECK(pos_m != str.npos && pos_n != str.npos && pos_k != str.npos)
+  ICHECK(pos_m != str.npos && pos_n != str.npos && pos_k != str.npos)
       << "Cannot parse MMA shape " << str;
   int m = std::stoi(str.substr(pos_m + 1, pos_n - pos_m - 1)),
       n = std::stoi(str.substr(pos_n + 1, pos_k - pos_n - 1)),
@@ -735,27 +738,27 @@ void CheckMMADTypeCompatible(DataType dtype_a, DataType dtype_b,
   case DataType::kFloat32:
   case DataType::kTensorFloat32:
   case DataType::kFloat64:
-    CHECK(dtype_a == dtype_b) << ab_not_match_err_str;
+    ICHECK(dtype_a == dtype_b) << ab_not_match_err_str;
     break;
   case DataType::kInt4:
   case DataType::kUInt4:
-    CHECK(dtype_b == DataType::kInt4 || dtype_b == DataType::kUInt4)
+    ICHECK(dtype_b == DataType::kInt4 || dtype_b == DataType::kUInt4)
         << ab_not_match_err_str;
     break;
   case DataType::kInt8:
   case DataType::kUInt8:
-    CHECK(dtype_b == DataType::kInt8 || dtype_b == DataType::kUInt8)
+    ICHECK(dtype_b == DataType::kInt8 || dtype_b == DataType::kUInt8)
         << ab_not_match_err_str;
     break;
   case DataType::kFloat8_e4m3:
   case DataType::kFloat8_e5m2:
-    CHECK(dtype_b == DataType::kFloat8_e4m3 ||
-          dtype_b == DataType::kFloat8_e5m2)
+    ICHECK(dtype_b == DataType::kFloat8_e4m3 ||
+           dtype_b == DataType::kFloat8_e5m2)
         << ab_not_match_err_str;
     break;
   default:
-    CHECK(false) << "Invalid multiplicand data types: "
-                 << DTypeToString(dtype_a) << DTypeToString(dtype_b);
+    ICHECK(false) << "Invalid multiplicand data types: "
+                  << DTypeToString(dtype_a) << DTypeToString(dtype_b);
   }
   // check a,b and c
   switch (dtype_a) {
@@ -764,37 +767,37 @@ void CheckMMADTypeCompatible(DataType dtype_a, DataType dtype_b,
   case DataType::kUInt4:
   case DataType::kInt8:
   case DataType::kUInt8:
-    CHECK(dtype_c == DataType::kInt32)
+    ICHECK(dtype_c == DataType::kInt32)
         << "For multiplicand data type " << DTypeToString(dtype_a)
         << DTypeToString(dtype_b) << ", accumulator data type should be s32.";
     break;
   case DataType::kFloat16:
-    CHECK(dtype_c == DataType::kFloat16 || dtype_c == DataType::kFloat32)
+    ICHECK(dtype_c == DataType::kFloat16 || dtype_c == DataType::kFloat32)
         << "For multiplicand data type f16, accumulator data type should be "
            "f16/f32.";
     break;
   case DataType::kBFloat16:
   case DataType::kFloat32:
   case DataType::kTensorFloat32:
-    CHECK(dtype_c == DataType::kFloat32)
+    ICHECK(dtype_c == DataType::kFloat32)
         << "For multiplicand data type bf16/tf32, accumulator data type can "
            "only be f32.";
     break;
   case DataType::kFloat64:
-    CHECK(dtype_c == DataType::kFloat64)
+    ICHECK(dtype_c == DataType::kFloat64)
         << "For multiplicand data type f64, accumulator data type can only be "
            "f64.";
     break;
   case DataType::kFloat8_e4m3:
   case DataType::kFloat8_e5m2:
-    CHECK(dtype_c == DataType::kFloat32)
+    ICHECK(dtype_c == DataType::kFloat32)
         << "For multiplicand data type e4m3/e5m2, accumulator data type can "
            "only be f32.";
     break;
   default:
-    CHECK(false) << "Invalid multiplicand/accumulator data types: "
-                 << DTypeToString(dtype_a) << DTypeToString(dtype_b)
-                 << DTypeToString(dtype_c) << ".";
+    ICHECK(false) << "Invalid multiplicand/accumulator data types: "
+                  << DTypeToString(dtype_a) << DTypeToString(dtype_b)
+                  << DTypeToString(dtype_c) << ".";
   }
 }
 
@@ -817,25 +820,25 @@ void CheckMMAConfigValidity(int m, int n, int k, LayoutType layout_a,
                             DataType dtype_b, DataType dtype_c,
                             const std::string &bit_op, bool sparse,
                             bool saturate) {
-  CHECK(bit_op == "xor" || bit_op == "and" || bit_op.empty())
+  ICHECK(bit_op == "xor" || bit_op == "and" || bit_op.empty())
       << "Unrecognized 1-bit operation " << bit_op << " , can only be xor/and.";
   bool use_bit_op = !bit_op.empty();
   if (use_bit_op) {
-    CHECK(dtype_a == DataType::kBit1)
+    ICHECK(dtype_a == DataType::kBit1)
         << "Bit operator is only compatible with 1-bit multiplicand.";
   }
   CheckMMADTypeCompatible(dtype_a, dtype_b, dtype_c);
   if (saturate) {
-    CHECK(dtype_a == DataType::kInt4 || dtype_a == DataType::kUInt4 ||
-          dtype_a == DataType::kInt8 || dtype_a == DataType::kUInt8)
+    ICHECK(dtype_a == DataType::kInt4 || dtype_a == DataType::kUInt4 ||
+           dtype_a == DataType::kInt8 || dtype_a == DataType::kUInt8)
         << "Output saturation only applicable to multiplicand type "
            "s4/u4/s8/u8.";
   }
 
   if (!(m == 8 && n == 8 && k == 4 && dtype_a == ptx::DataType::kFloat16)) {
     // Only MMA on m8n8k4 for fp16 supports customized layouts.
-    CHECK(layout_a == LayoutType::kRowMajor &&
-          layout_b == LayoutType::kColumnMajor)
+    ICHECK(layout_a == LayoutType::kRowMajor &&
+           layout_b == LayoutType::kColumnMajor)
         << "Invalid layout combination " << LayoutTypeToString(layout_a) << ","
         << LayoutTypeToString(layout_b) << ".";
   }
@@ -848,7 +851,7 @@ void CheckMMAConfigValidity(int m, int n, int k, LayoutType layout_a,
       break;
     }
   }
-  CHECK(match) << "Cannot find matched MMA configurations.";
+  ICHECK(match) << "Cannot find matched MMA configurations.";
 }
 
 void CheckWGMMAConfigValidity(int m, int n, int k, LayoutType layout_a,
@@ -866,11 +869,11 @@ void CheckWGMMAConfigValidity(int m, int n, int k, LayoutType layout_a,
       break;
     }
   }
-  CHECK(match) << "Cannot find matched WGMMA configurations for m " << m
-               << " n " << n << " k " << k << " dtype_a "
-               << DTypeToString(dtype_a) << " dtype_b "
-               << DTypeToString(dtype_b) << " dtype_c "
-               << DTypeToString(dtype_c) << " sparse " << sparse;
+  ICHECK(match) << "Cannot find matched WGMMA configurations for m " << m
+                << " n " << n << " k " << k << " dtype_a "
+                << DTypeToString(dtype_a) << " dtype_b "
+                << DTypeToString(dtype_b) << " dtype_c "
+                << DTypeToString(dtype_c) << " sparse " << sparse;
 }
 /*!
  * \brief Fragment attributes
@@ -1302,10 +1305,10 @@ std::string PrintLoadMatrixAssembly(bool trans, int num,
                                     const std::string &local_elem_offset,
                                     const std::string &smem_ptr,
                                     const std::string &smem_elem_offset) {
-  CHECK(num == 1 || num == 2 || num == 4)
+  ICHECK(num == 1 || num == 2 || num == 4)
       << "ldmatrix only accept loading 1/2/4 matrices.";
   ptx::DataType data_type = ptx::DTypeFromString(type);
-  CHECK(data_type == ptx::DataType::kBit16)
+  ICHECK(data_type == ptx::DataType::kBit16)
       << "ldmatrix only accept matrix with type .b16.";
   std::string asm_code = R"(
   {
@@ -1371,8 +1374,8 @@ std::string PrintPredicatedCpAsyncAssembly(
     const std::string &shared_ptr, const std::string &shared_elem_offset,
     const std::string &global_ptr, const std::string &global_elem_offset,
     const std::string &bytes, const std::string &predicate_value) {
-  CHECK(bytes == "16" || bytes == "12" || bytes == "8" || bytes == "4" ||
-        bytes == "2" || bytes == "1")
+  ICHECK(bytes == "16" || bytes == "12" || bytes == "8" || bytes == "4" ||
+         bytes == "2" || bytes == "1")
       << "Only support 16, 12, 8, 4, 2, 1 bytes for predicated cp.async";
   std::string predicated_asm_code = R"(
   {

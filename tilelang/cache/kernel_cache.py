@@ -17,13 +17,14 @@ from collections.abc import Callable
 
 import cloudpickle
 from tvm.target import Target
-from tvm.tir import PrimFunc
+from tvm.tirx import PrimFunc
 from tvm.runtime import Executable
 from tilelang.engine.param import KernelParam
 from tilelang.utils.language import get_prim_func_name
 from tilelang import env
 from tilelang.jit import JITKernel
 from tilelang.jit.adapter.base import CachedTextSource
+from tilelang.contrib.hip_resource_info import dump_to_file, load_from_file
 from tilelang import __version__
 import platform
 
@@ -49,6 +50,7 @@ class KernelCache:
     kernel_lib_path = "kernel_lib.so"
     params_path = "params.pkl"
     prim_func_path = "prim_func.pkl"
+    resource_usage_path = "resource_usage.json"
     cache_root_dir = "kernels"
     frontend_cache_root_dir = "frontend"
     staging_root_dir = ".staging"
@@ -71,7 +73,7 @@ class KernelCache:
     @staticmethod
     @functools.cache
     def _get_tilelang_lib_stamp() -> str | None:
-        """Return a content-based build-stamp for the TileLang runtime library.
+        """Return a content-based build-stamp for TileLang native libraries.
 
         The kernel cache key historically only depended on `tilelang.__version__`
         and the TIR script. During development, C++ pass changes can change the
@@ -93,21 +95,33 @@ class KernelCache:
             pass
 
         if sys.platform == "win32":
-            lib_names = ["tilelang.dll", "libtilelang.dll", "tvm.dll", "tvm_ffi.dll"]
+            lib_names = ["tvm_runtime.dll", "tvm_compiler.dll", "tvm_ffi.dll"]
         elif sys.platform == "darwin":
-            lib_names = ["libtilelang.dylib", "libtilelang.so"]
+            lib_names = [
+                "libtilelang.dylib",
+                "libtilelang.so",
+                "libtvm_runtime.dylib",
+                "libtvm_compiler.dylib",
+            ]
         else:
-            lib_names = ["libtilelang.so"]
+            lib_names = ["libtilelang.so", "libtvm_runtime.so", "libtvm_compiler.so"]
 
+        stamps: list[str] = []
+        seen_names: set[str] = set()
         for lib_dir in lib_dirs:
             for name in lib_names:
+                if name in seen_names:
+                    continue
                 path = os.path.join(lib_dir, name)
                 if os.path.exists(path):
                     file_hash = sha256()
                     with open(path, "rb") as f:
                         for chunk in iter(lambda: f.read(1 << 20), b""):
                             file_hash.update(chunk)
-                    return f"{name}:{file_hash.hexdigest()}"
+                    stamps.append(f"{name}:{file_hash.hexdigest()}")
+                    seen_names.add(name)
+        if stamps:
+            return "|".join(stamps)
         return None
 
     @staticmethod
@@ -509,6 +523,11 @@ class KernelCache:
                     if verbose:
                         self.logger.exception("Error saving optional PrimFunc cache metadata")
 
+            # Persist HIP kernel-resource-usage remarks
+            usage = getattr(kernel, "_resource_usage", None) or {}
+            if usage:
+                dump_to_file(usage, os.path.join(staging_path, self.resource_usage_path))
+
             missing_files = self._get_missing_complete_cache_files(staging_path)
             if missing_files:
                 missing_names = ", ".join(os.path.basename(path) for path in missing_files)
@@ -600,6 +619,16 @@ class KernelCache:
                 except Exception:
                     if verbose:
                         self.logger.exception("Error upgrading cache entry with PrimFunc")
+
+            # Restore parsed kernel-resource-usage if a previous compile
+            # persisted it; absent file is fine (older caches, non-HIP).
+            ru_path = os.path.join(cache_path, self.resource_usage_path)
+            if os.path.exists(ru_path):
+                try:
+                    kernel._resource_usage = load_from_file(ru_path)
+                except Exception:
+                    self.logger.exception("Error loading kernel resource_usage from disk")
+
             self._tag_kernel_cache_entry(kernel, key, cache_path)
         return kernel
 

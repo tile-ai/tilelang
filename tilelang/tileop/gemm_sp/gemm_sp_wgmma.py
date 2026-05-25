@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from tilelang.tileop.gemm_sp.gemm_sp_base import GemmSPBase
-from tilelang.tileop.gemm.inst import GemmInst
 from tilelang.layout import (
     make_full_bank_swizzled_layout,
     make_half_bank_swizzled_layout,
@@ -12,15 +11,16 @@ from tilelang.layout import (
 from tilelang.cuda.intrinsics.macro.wgmma_sp_macro_generator import WGSparseTensorCoreIntrinEmitter
 from tilelang.utils.language import is_shared, is_fragment
 from tvm.target import Target
-from tvm.ir import Range
-from tvm import tir
+from tvm import tirx
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 from collections.abc import Callable
 
+GEMM_SP_INST_WGMMA_SP = "cuda.wgmma.sp"
+
 
 class GemmSPWGMMA(GemmSPBase):
-    def infer_shared_layout(self, continuity: int) -> Callable[[tir.Buffer], Layout]:
+    def infer_shared_layout(self, continuity: int) -> Callable[[tirx.Buffer], Layout]:
         vectorized_size = 128 // self.in_dtype.bits
         if continuity % (vectorized_size * 8) == 0:
             return make_full_bank_swizzled_layout
@@ -32,7 +32,7 @@ class GemmSPWGMMA(GemmSPBase):
             return make_linear_layout
 
     def infer_layout(self, target: Target, thread_nums: int):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.WGMMA)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_SP_INST_WGMMA_SP)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = WGSparseTensorCoreIntrinEmitter(
@@ -73,11 +73,11 @@ class GemmSPWGMMA(GemmSPBase):
         self,
         layout_map: dict,
         target: Target,
-        thread_nums: Range,
-        thread_var: tir.Var,
-        mbar_phase_expr: tir.PrimExpr | None = None,
+        thread_nums: int,
+        thread_var: tirx.Var,
+        mbar_phase_expr: tirx.PrimExpr | None = None,
     ):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.WGMMA)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_SP_INST_WGMMA_SP)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = WGSparseTensorCoreIntrinEmitter(

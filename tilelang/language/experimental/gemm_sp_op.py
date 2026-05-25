@@ -3,7 +3,7 @@
 from __future__ import annotations
 from tilelang.tileop.base import GemmWarpPolicy
 import tilelang.language as T
-from tvm import tir
+from tvm import tirx
 from tilelang.utils.language import (
     to_buffer_region,
     retrieve_shape,
@@ -19,10 +19,10 @@ from tilelang._typing import BufferLikeType
 
 def _gemm_sp_impl(
     op_key: str,
-    A_sparse: BufferLikeType | tir.Var,
-    E: BufferLikeType | tir.Var,
-    B: BufferLikeType | tir.Var,
-    C: BufferLikeType | tir.Var,
+    A_sparse: BufferLikeType | tirx.Var,
+    E: BufferLikeType | tirx.Var,
+    B: BufferLikeType | tirx.Var,
+    C: BufferLikeType | tirx.Var,
     transpose_A: bool = False,
     transpose_E: bool = False,
     transpose_B: bool = False,
@@ -30,14 +30,14 @@ def _gemm_sp_impl(
     clear_accum: bool = False,
     k_pack: int = 1,
     wg_wait: int = 0,
-) -> tir.Call:
+) -> tirx.Call:
     """Shared sparse GEMM implementation.
 
     Returns a call_intrin handle for the given op key.
     """
 
-    def legalize_arguments(arg: BufferLikeType | tir.Var) -> BufferLikeType:
-        if isinstance(arg, tir.Var) and T.has_let_value(arg):
+    def legalize_arguments(arg: BufferLikeType | tirx.Var) -> BufferLikeType:
+        if isinstance(arg, tirx.Var) and T.has_let_value(arg):
             return T.get_let_value(arg).buffer
         return arg
 
@@ -92,9 +92,9 @@ def _gemm_sp_impl(
     E_arg = buffer_region_to_tile_region(E_region, "r", [r for r in E_shape])
     B_arg = buffer_region_to_tile_region(B_region, "r", [r for r in B_shape])
     C_arg = buffer_region_to_tile_region(C_region, "rw", [r for r in C_shape])
-    return tir.call_intrin(
+    return tirx.call_intrin(
         "handle",
-        tir.op.Op.get(op_key),
+        tirx.op.Op.get(op_key),
         A_arg,
         E_arg,
         B_arg,
@@ -117,10 +117,10 @@ def _gemm_sp_impl(
 
 
 def gemm_sp(
-    A_sparse: BufferLikeType | tir.Var,
-    E: BufferLikeType | tir.Var,
-    B: BufferLikeType | tir.Var,
-    C: BufferLikeType | tir.Var,
+    A_sparse: BufferLikeType | tirx.Var,
+    E: BufferLikeType | tirx.Var,
+    B: BufferLikeType | tirx.Var,
+    C: BufferLikeType | tirx.Var,
     transpose_A: bool = False,
     transpose_E: bool = False,
     transpose_B: bool = False,
@@ -128,7 +128,7 @@ def gemm_sp(
     clear_accum: bool = False,
     k_pack: int = 1,
     wg_wait: int = 0,
-) -> tir.Call:
+) -> tirx.Call:
     """TileLang sparse GEMM operator.
 
     This is the default synchronous sparse GEMM interface. On Hopper, if the
@@ -152,7 +152,7 @@ def gemm_sp(
         wg_wait: Warp group wait count. Defaults to 0.
 
     Returns:
-        tir.Call: A handle to the sparse GEMM operation.
+        tirx.Call: A handle to the sparse GEMM operation.
     """
     return _gemm_sp_impl(
         "tl.tileop.gemm_sp",
@@ -171,16 +171,16 @@ def gemm_sp(
 
 
 def wgmma_gemm_sp(
-    A_sparse: BufferLikeType | tir.Var,
-    E: BufferLikeType | tir.Var,
-    B: BufferLikeType | tir.Var,
-    C: BufferLikeType | tir.Var,
+    A_sparse: BufferLikeType | tirx.Var,
+    E: BufferLikeType | tirx.Var,
+    B: BufferLikeType | tirx.Var,
+    C: BufferLikeType | tirx.Var,
     transpose_A: bool = False,
     transpose_E: bool = False,
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
-) -> tir.Call:
+) -> tirx.Call:
     """Explicit Hopper WGMMA sparse GEMM without an implicit wait.
 
     This is the explicit asynchronous Hopper WGMMA counterpart to the default
@@ -203,7 +203,7 @@ def wgmma_gemm_sp(
         clear_accum: Whether to zero the accumulator before computation. Defaults to False.
 
     Returns:
-        tir.Call: A handle to the sparse GEMM operation.
+        tirx.Call: A handle to the sparse GEMM operation.
     """
     return _gemm_sp_impl(
         "tl.tileop.wgmma_gemm_sp",
@@ -222,16 +222,16 @@ def wgmma_gemm_sp(
 
 
 def tcgen05_gemm_sp(
-    A_sparse: BufferLikeType | tir.Var,
-    E: BufferLikeType | tir.Var,
-    B: BufferLikeType | tir.Var,
-    C: BufferLikeType | tir.Var,
+    A_sparse: BufferLikeType | tirx.Var,
+    E: BufferLikeType | tirx.Var,
+    B: BufferLikeType | tirx.Var,
+    C: BufferLikeType | tirx.Var,
     transpose_A: bool = False,
     transpose_E: bool = False,
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
-) -> tir.Call:
+) -> tirx.Call:
     """Explicit Blackwell TCGEN05 sparse GEMM without an implicit wait.
 
     This is the explicit asynchronous Blackwell TCGEN05 counterpart to the
@@ -256,7 +256,7 @@ def tcgen05_gemm_sp(
         clear_accum: Whether to zero the accumulator before computation. Defaults to False.
 
     Returns:
-        tir.Call: A handle to the sparse GEMM operation.
+        tirx.Call: A handle to the sparse GEMM operation.
     """
     return _gemm_sp_impl(
         "tl.tileop.tcgen05_gemm_sp",

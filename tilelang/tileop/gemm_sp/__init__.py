@@ -1,6 +1,6 @@
 from tilelang import tvm as tvm
 from tilelang.tileop.gemm_sp.registry import resolve_gemm_sp_impl
-from tvm import tir
+from tvm import tirx
 from tvm.target import Target
 from tvm.ir.base import Node
 from tvm.ir import Range
@@ -12,15 +12,15 @@ from tilelang.ir import GemmSPWarpPolicy
 
 @tvm_ffi.register_object("tl.GemmSP")
 class GemmSP(Node, Scriptable):
-    A: tir.Buffer
-    E: tir.Buffer
-    B: tir.Buffer
-    C: tir.Buffer
+    A: tirx.Buffer
+    E: tirx.Buffer
+    B: tirx.Buffer
+    C: tirx.Buffer
 
-    aRegion: tir.BufferRegion
-    eRegion: tir.BufferRegion
-    bRegion: tir.BufferRegion
-    cRegion: tir.BufferRegion
+    aRegion: tirx.BufferRegion
+    eRegion: tirx.BufferRegion
+    bRegion: tirx.BufferRegion
+    cRegion: tirx.BufferRegion
 
     M: int
     N: int
@@ -39,13 +39,17 @@ class GemmSP(Node, Scriptable):
     wg_wait: int
     policy: GemmSPWarpPolicy
 
+    @property
+    def k_pack(self):
+        return self.kPack
+
     @tvm_ffi.register_global_func("tl.gemm_sp.infer_layout")
     def gemm_sp_infer_layout(self, target: Target, thread_bounds: Range):
         thread_nums = thread_bounds.extent
         return self.infer_layout(target, thread_nums)
 
     @tvm_ffi.register_global_func("tl.gemm_sp.lower")
-    def gemm_sp_lower(self, target: Target, layout_map: dict, thread_bounds: Range, thread_var: tir.Var):
+    def gemm_sp_lower(self, target: Target, layout_map: dict, thread_bounds: Range, thread_var: tirx.Var):
         thread_nums = thread_bounds.extent
         stmt = self.lower(target, layout_map, thread_nums, thread_var)
         return stmt
@@ -55,7 +59,7 @@ class GemmSP(Node, Scriptable):
         impl_class = self._get_implementation_class(gemm_inst, target)
         return impl_class(self).infer_layout(target, thread_nums)
 
-    def lower(self, target: Target, layout_map: dict, thread_nums: int, thread_var: tir.Var):
+    def lower(self, target: Target, layout_map: dict, thread_nums: int, thread_var: tirx.Var):
         gemm_inst = self._select_gemm_instruction(thread_nums, target)
         impl_class = self._get_implementation_class(gemm_inst, target)
         return impl_class(self).lower(layout_map, target, thread_nums, thread_var)

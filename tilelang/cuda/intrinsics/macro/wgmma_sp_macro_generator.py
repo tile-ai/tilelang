@@ -3,7 +3,7 @@ from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import SwizzleMode, gc
 from tilelang.cuda.intrinsics.macro.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 import tilelang.language as T
 from tvm import DataType
-from tvm.tir import PrimExpr, Buffer, Var, BufferRegion, IndexMap
+from tvm.tirx import PrimExpr, Buffer, Var, BufferRegion, IndexMap
 from tilelang.utils import is_fragment, is_shared, retrive_ptr_from_buffer_region, is_full_region
 from tilelang.cuda.intrinsics.layout.mma_layout import (
     shared_16x8_to_mma_32x4_layout_sr_a,
@@ -564,7 +564,7 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
 
         Parameters
         ----------
-        local_buf : tir.Buffer
+        local_buf : tirx.Buffer
             The local buffer representing a fragment of a matrix.
 
         Returns

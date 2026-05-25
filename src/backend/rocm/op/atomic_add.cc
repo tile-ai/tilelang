@@ -4,6 +4,9 @@
  */
 
 #include "op/atomic_add.h"
+#include "support/check.h"
+#include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/ir/cast.h>
 
 #include "layout/layout.h"
 #include "op/builtin.h"
@@ -12,16 +15,17 @@
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
 
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/op_attr_types.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
 
 #include <vector>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace rocm {
 
@@ -167,9 +171,9 @@ For MakeSIMTLoop(const AtomicAddNode &op, arith::Analyzer *analyzer) {
   auto annotations = op.annotations;
   annotations.erase("use_tma");
   Call atomicadd_call =
-      tvm::tir::Call(op.dst->dtype, op.GetElemOp(), new_args, annotations);
+      tvm::tirx::Call(op.dst->dtype, op.GetElemOp(), new_args, annotations);
 
-  Stmt body = tvm::tir::Evaluate(atomicadd_call);
+  Stmt body = tvm::tirx::Evaluate(atomicadd_call);
 
   for (int i = loop_vars.size() - 1; i >= 0; i--) {
     Map<String, ObjectRef> loop_annotations;

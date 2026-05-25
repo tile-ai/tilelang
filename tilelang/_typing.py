@@ -6,27 +6,27 @@
 from typing import TypeAlias
 
 from tvm import ir
-from tvm import tir
+from tvm import tirx
 
-from tvm.tir import BufferLoad, BufferRegion
+from tvm.tirx import BufferLoad, BufferRegion
 from tilelang.dtypes import dtype
 
 # Barrier can only be a Buffer, a BufferLoad
-BarrierType: TypeAlias = tir.Buffer | BufferLoad
+BarrierType: TypeAlias = tirx.Buffer | BufferLoad
 
 # BufferLikeType can be a Buffer, a BufferLoad, a BufferRegion
-BufferLikeType: TypeAlias = tir.Buffer | BufferLoad | BufferRegion
+BufferLikeType: TypeAlias = tirx.Buffer | BufferLoad | BufferRegion
 
 # Runtime checks use tuple form for compatibility with isinstance().
-BufferLikeTypeTuple = (tir.Buffer, BufferLoad, BufferRegion)
+BufferLikeTypeTuple = (tirx.Buffer, BufferLoad, BufferRegion)
 
 # Difference between "AnyDType" and "DType":
 # - AnyDType is a union of all possible types that can represent a data type, including torch.dtype
 # - DType is a more specific type alias that represents a data type in the context of TileLang, and must be
 #   adapted to string.
 DType: TypeAlias = dtype | ir.Type | str | type
-ShapeType: TypeAlias = list[tir.PrimExpr | int] | tuple[tir.PrimExpr | int, ...]
+ShapeType: TypeAlias = list[tirx.PrimExpr | int] | tuple[tirx.PrimExpr | int, ...]
 
 # PrimExpr with adaptation to Python basic data types
 # IntImm, FloatImm, Bool: IntImm, Integer: IntImm
-PyPrimExpr: TypeAlias = tir.PrimExpr | int | float | bool
+PyPrimExpr: TypeAlias = tirx.PrimExpr | int | float | bool

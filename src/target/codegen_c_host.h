@@ -24,6 +24,7 @@
 #ifndef TVM_TL_CODEGEN_C_HOST_H_
 #define TVM_TL_CODEGEN_C_HOST_H_
 
+#include "support/check.h"
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -32,10 +33,12 @@
 
 #include "target/source/codegen_c.h"
 #include "tvm/target/codegen.h"
-#include "tvm/tir/expr.h"
+#include <tvm/tirx/expr.h>
 
 namespace tvm {
 namespace tl {
+
+using namespace ffi;
 
 // TileLang copy of TVM's CodeGenCHost, under the tl namespace.
 // Inherits from tvm::codegen::CodeGenC.
@@ -49,8 +52,8 @@ public:
   void InitGlobalContext();
 
   void AddFunction(const tvm::GlobalVar &gvar,
-                   const tvm::tir::PrimFunc &f) override;
-  void AddFunction(const tvm::GlobalVar &gvar, const tvm::tir::PrimFunc &f,
+                   const tvm::tirx::PrimFunc &f) override;
+  void AddFunction(const tvm::GlobalVar &gvar, const tvm::tirx::PrimFunc &f,
                    bool emit_fwd_func_decl);
   /*!
    * \brief Add functions from the (unordered) range to the current module in a
@@ -67,35 +70,32 @@ public:
   void PrintFuncPrefix(std::ostream &os) final;            // NOLINT(*)
 
   // overload visitor functions
-  void VisitExpr_(const tvm::tir::BroadcastNode *op,
+  void VisitExpr_(const tvm::tirx::BroadcastNode *op,
                   std::ostream &os) final; // NOLINT(*)
-  void VisitExpr_(const tvm::tir::CallNode *op,
+  void VisitExpr_(const tvm::tirx::CallNode *op,
                   std::ostream &os) override; // NOLINT(*)
   // overload min and max to use the ternary operator, so we don't rely on the
   // standard library implementations
-  void VisitExpr_(const tvm::tir::MinNode *op,
+  void VisitExpr_(const tvm::tirx::MinNode *op,
                   std::ostream &os) final; // NOLINT(*)
-  void VisitExpr_(const tvm::tir::MaxNode *op,
+  void VisitExpr_(const tvm::tirx::MaxNode *op,
                   std::ostream &os) final; // NOLINT(*)
 
-  void VisitStmt_(const tvm::tir::AssertStmtNode *op) final; // NOLINT(*)
+  void VisitStmt_(const tvm::tirx::AssertStmtNode *op) final; // NOLINT(*)
 
-  void VisitStmt_(const tvm::tir::AttrStmtNode *op) final; // NOLINT(*)
+  void VisitStmt_(const tvm::tirx::AttrStmtNode *op) final; // NOLINT(*)
 
-  void GenerateForwardFunctionDeclarations(
-      tvm::ffi::String global_symbol,
-      const tvm::ffi::Array<tvm::Type> &arg_types,
-      const tvm::Type &ret_type) override;
-  tvm::ffi::Array<tvm::ffi::String> GetFunctionNames() {
-    return function_names_;
-  }
+  void GenerateForwardFunctionDeclarations(String global_symbol,
+                                           const Array<tvm::Type> &arg_types,
+                                           const tvm::Type &ret_type) override;
+  Array<String> GetFunctionNames() { return function_names_; }
 
 private:
   std::string module_name_;
   /* \brief mapping global packed func to the unique name */
   std::unordered_map<std::string, std::string> declared_globals_;
   /* \brief names of the functions declared in this module */
-  tvm::ffi::Array<tvm::ffi::String> function_names_;
+  Array<String> function_names_;
   /*! \brief whether to emit asserts in the resulting C code */
   bool emit_asserts_;
   /*! \brief whether to emit forwared function declarations in the resulting C
@@ -106,10 +106,10 @@ private:
 
   bool is_in_metal_context = false;
 
-  std::string GetPackedName(const tvm::tir::CallNode *op);
+  std::string GetPackedName(const tvm::tirx::CallNode *op);
   void PrintGetFuncFromBackend(const std::string &func_name,
                                const std::string &packed_func_name);
-  void PrintCallPacked(const tvm::tir::CallNode *op);
+  void PrintCallPacked(const tvm::tirx::CallNode *op);
   /*!
    * \brief Print ternary conditional operator implementing binary `op`
    * Forces the operands to be in SSA form.
@@ -131,8 +131,7 @@ private:
  * \brief Build a TileLang C host module for the given IRModule and target.
  * Also handles Metal target through is_in_metal_context flag in IR.
  */
-::tvm::ffi::Module BuildTileLangCHost(::tvm::IRModule mod,
-                                      ::tvm::Target target);
+Module BuildTileLangCHost(::tvm::IRModule mod, ::tvm::Target target);
 
 } // namespace tl
 } // namespace tvm

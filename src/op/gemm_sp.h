@@ -9,12 +9,14 @@
 
 #include "gemm.h"
 #include "operator.h"
+#include "support/check.h"
 
 namespace tvm {
 
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 class GemmSPWarpPolicyNode : public Object {
 public:
@@ -26,7 +28,7 @@ public:
                               Object);
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<GemmSPWarpPolicyNode>()
         .def_ro("policy_type", &GemmSPWarpPolicyNode::policy_type)
         .def_ro("m_warp", &GemmSPWarpPolicyNode::m_warp)
@@ -55,19 +57,19 @@ public:
                                              GemmSPWarpPolicyNode);
 
   explicit GemmSPWarpPolicy(GemmWarpPolicyType policy_type) {
-    auto node = tvm::ffi::make_object<GemmSPWarpPolicyNode>();
+    auto node = make_object<GemmSPWarpPolicyNode>();
     node->policy_type = (int)policy_type;
     data_ = std::move(node);
   }
 
   explicit GemmSPWarpPolicy(int policy_type) {
-    auto node = tvm::ffi::make_object<GemmSPWarpPolicyNode>();
+    auto node = make_object<GemmSPWarpPolicyNode>();
     node->policy_type = policy_type;
     data_ = std::move(node);
   }
 
   explicit GemmSPWarpPolicy(int m_warp, int n_warp) {
-    auto node = tvm::ffi::make_object<GemmSPWarpPolicyNode>();
+    auto node = make_object<GemmSPWarpPolicyNode>();
     node->m_warp = m_warp;
     node->n_warp = n_warp;
     node->policy_type = (int)GemmWarpPolicyType::kFree;
@@ -77,8 +79,7 @@ public:
 
 class GemmSPNode : public TileOperatorNode {
 public:
-  bool CheckWGMMA() const;
-  tir::Buffer A, E, B, C;
+  tirx::Buffer A, E, B, C;
   // pointer to the A, E, B, C
   BufferRegion aRegion_, eRegion_, bRegion_, cRegion_;
   bool trans_A, trans_B, trans_E;
@@ -97,7 +98,7 @@ public:
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.GemmSP", GemmSPNode, TileOperatorNode);
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<GemmSPNode>()
         .def_ro("A", &GemmSPNode::A)
         .def_ro("E", &GemmSPNode::E)

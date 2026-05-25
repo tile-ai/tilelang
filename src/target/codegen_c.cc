@@ -21,6 +21,8 @@
  * \file codegen_c.cc
  */
 #include "codegen_c.h"
+#include "support/check.h"
+#include <tvm/runtime/logging.h>
 
 #include <tvm/runtime/module.h>
 #include <tvm/target/codegen.h>
@@ -30,13 +32,14 @@
 #include <utility>
 
 #include "../op/builtin.h"
-#include "../support/ffi_aliases.h"
 #include "support/str_escape.h"
 #include "target/build_common.h"
 #include "target/source/codegen_params.h"
 
 namespace tvm {
 namespace codegen {
+
+using namespace ffi;
 
 CodeGenTileLangC::CodeGenTileLangC() {
   module_name_ = name_supply_->FreshName("__tvm_ffi_library_ctx");
@@ -55,7 +58,7 @@ void CodeGenTileLangC::Init(bool output_ssa, bool emit_asserts,
 }
 
 void CodeGenTileLangC::InitGlobalContext() {
-  decl_stream << "void* " << ffi::symbol::tvm_ffi_library_ctx << " = NULL;\n";
+  decl_stream << "void* " << symbol::tvm_ffi_library_ctx << " = NULL;\n";
 }
 
 void CodeGenTileLangC::DefineModuleName() {
@@ -256,14 +259,13 @@ void CodeGenTileLangC::AddFunction(const PrimFunc &f) {
   // reserve keywords
   ReserveKeywordsAsUnique();
 
-  auto global_symbol = f->GetAttr<ffi::String>(tvm::attr::kGlobalSymbol);
+  auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
   ICHECK(global_symbol)
       << "CodeGenC: Expect PrimFunc to have the global_symbol attribute";
-  bool no_alias = f->HasNonzeroAttr(tir::attr::kNoAlias);
+  bool no_alias = f->HasNonzeroAttr(tirx::attr::kNoAlias);
   std::unordered_set<const VarNode *> non_restrict;
-  if (auto opt =
-          f->GetAttr<ffi::Array<tir::Var>>(tl::attr::kNonRestrictParams)) {
-    for (const tir::Var &v : opt.value())
+  if (auto opt = f->GetAttr<Array<tirx::Var>>(tl::attr::kNonRestrictParams)) {
+    for (const tirx::Var &v : opt.value())
       non_restrict.insert(v.get());
   }
 
@@ -273,7 +275,7 @@ void CodeGenTileLangC::AddFunction(const PrimFunc &f) {
   this->stream << " " << static_cast<std::string>(global_symbol.value()) << "(";
 
   for (size_t i = 0; i < f->params.size(); ++i) {
-    tir::Var v = f->params[i];
+    tirx::Var v = f->params[i];
     std::string vid = AllocVarID(v.get());
     if (i != 0)
       stream << ", ";
@@ -389,7 +391,7 @@ void CodeGenTileLangC::VisitExpr_(const CallNode *op,
     size_t unit = sizeof(TVMFFIAny);
     size_t size = 0;
     if (type == "shape") {
-      size = (num->value * sizeof(runtime::tvm_index_t) + unit - 1) / unit;
+      size = (num->value * sizeof(int64_t) + unit - 1) / unit;
     } else if (type == "arg_value") {
       size = (num->value * sizeof(TVMFFIAny) + unit - 1) / unit;
     } else if (type == "arg_tcode") {
@@ -431,33 +433,40 @@ void CodeGenTileLangC::VisitStmt_(const AssertStmtNode *op) { // NOLINT(*)
     stream << "if (!(" << cond << ")) {\n";
     int assert_if_scope = this->BeginScope();
     PrintIndent();
-    stream << "TVMAPISetLastError(\"" << op->message.as<StringImmNode>()->value
-           << "\");\n";
+    // Join message_parts into a single string
+    std::string joined_msg;
+    for (const auto &part : op->message_parts) {
+      joined_msg += part->value;
+    }
+    stream << "TVMAPISetLastError(\"" << joined_msg << "\");\n";
     PrintIndent();
     stream << "return -1;\n";
     this->EndScope(assert_if_scope);
     PrintIndent();
     stream << "}\n";
   }
-  this->PrintStmt(op->body);
 }
 
-void CodeGenTileLangC::VisitStmt_(const AllocateNode *op) {
-  ICHECK(!is_zero(op->condition));
-  std::string vid = AllocVarID(op->buffer_var.get());
+void CodeGenTileLangC::VisitStmt_(const AllocBufferNode *op) {
+  std::string vid = AllocVarID(op->buffer->data.get());
 
   this->PrintIndent();
-  std::string scope = GetPtrStorageScope(op->buffer_var);
+  std::string scope = GetPtrStorageScope(op->buffer->data);
 
-  PrintType(op->dtype, stream);
-  size_t constant_size = op->ConstantAllocationSize();
+  PrintType(op->buffer->dtype, stream);
+  const auto &shape = op->buffer->shape;
+  size_t constant_size = 1;
+  for (const auto &dim : shape) {
+    const IntImmNode *dim_imm = dim.as<IntImmNode>();
+    ICHECK(dim_imm) << "Can only handle constant size stack allocation for now";
+    constant_size *= dim_imm->value;
+  }
   ICHECK_GT(constant_size, 0)
       << "Can only handle constant size stack allocation for now";
 
   stream << ' ' << vid << '[' << constant_size << "];\n";
 
-  RegisterHandleType(op->buffer_var.get(), op->dtype);
-  this->PrintStmt(op->body);
+  RegisterHandleType(op->buffer->data.get(), op->buffer->dtype);
 }
 
 void CodeGenTileLangC::VisitExpr_(const MinNode *op,

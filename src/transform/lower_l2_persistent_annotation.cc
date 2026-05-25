@@ -3,11 +3,13 @@
  * \brief Lower L2 persistent annotation
  */
 
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include "op/builtin.h"
 
@@ -20,7 +22,8 @@ constexpr const char *kL2RatioMap = "l2_hit_ratio_map";
 constexpr const char *kL2PersistentMap = "l2_persistent_map";
 } // namespace attr
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 class LowerL2Persistent : public StmtExprMutator {
 public:
@@ -53,7 +56,7 @@ public:
     return f;
   }
 
-  Stmt VisitStmt_(const BlockNode *op) final {
+  Stmt VisitStmt_(const SBlockNode *op) final {
     // Record the mapping from buffer data var to buffer for later lookup
     for (auto buffer : op->alloc_buffers) {
       buffer_map_.insert({buffer->data, buffer});
@@ -74,7 +77,7 @@ public:
         hit_ratio_map_.Set(buffer, hit_ratio);
       }
     }
-    auto block = Downcast<Block>(StmtExprMutator::VisitStmt_(op));
+    auto block = Downcast<SBlock>(StmtExprMutator::VisitStmt_(op));
     auto block_ptr = block.CopyOnWrite();
     block_ptr->annotations.erase(attr::kL2RatioMap);
     return block;
@@ -88,7 +91,7 @@ private:
   LowerL2Persistent() = default;
 };
 
-using namespace tir::transform;
+using namespace tirx::transform;
 
 tvm::transform::Pass LowerL2Persistent() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
@@ -98,7 +101,7 @@ tvm::transform::Pass LowerL2Persistent() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.LowerL2Persistent", LowerL2Persistent);
 }
 
