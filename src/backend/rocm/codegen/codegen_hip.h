@@ -86,8 +86,8 @@ private:
   bool enable_fp8_{false};
   // whether need hip_fp4.h (gfx950 only)
   bool enable_fp4_{false};
-  // Map from FP4 buffer VarNode* to packed buffer variable name (gfx950)
-  std::unordered_map<const tir::VarNode *, std::string> fp4_packed_buffers_;
+  // Map from FP4 buffer Var to packed buffer variable name (gfx950)
+  std::unordered_map<Var, std::string> fp4_packed_buffers_;
   // The size of the barrier array in shared memory
   int barrier_count_ = -1;
   // whether need mma.h
