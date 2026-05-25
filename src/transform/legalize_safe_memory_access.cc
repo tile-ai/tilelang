@@ -432,25 +432,30 @@ private:
       const auto *base_load = ptr_call->args[0].as<BufferLoadNode>();
       ICHECK(base_load) << "tl.access_ptr base must be BufferLoad, but got "
                         << ptr_call->args[0];
-      return AccessPtrInfo{Downcast<BufferLoad>(ptr_call->args[0]),
-                           ptr_call->args[2]};
+      return AccessPtrInfo{
+          Downcast<BufferLoad>(ptr_call->args[0]),
+          ptr_call->args[2],
+      };
     }
 
-    if (!ptr_call->op.same_as(builtin::tvm_access_ptr())) {
-      return std::nullopt;
+    if (ptr_call->op.same_as(builtin::tvm_access_ptr())) {
+      ICHECK_EQ(ptr_call->args.size(), 5U)
+          << "tvm_access_ptr expects 5 arguments, but got " << ptr_call->args;
+      const auto *var = ptr_call->args[1].as<VarNode>();
+      ICHECK(var) << "tvm_access_ptr buffer data must be Var, but got "
+                  << ptr_call->args[1];
+      Var buffer_data = Downcast<Var>(ptr_call->args[1]);
+      ICHECK(buffer_data_to_buffer_.count(buffer_data))
+          << "Buffer data var " << buffer_data
+          << " is not registered in buffer_data_to_buffer_.";
+      Buffer flat = buffer_data_to_buffer_[buffer_data].GetFlattenedBuffer();
+      return AccessPtrInfo{
+          BufferLoad(flat, Array<PrimExpr>{ptr_call->args[2]}),
+          ptr_call->args[4],
+      };
     }
-    ICHECK_EQ(ptr_call->args.size(), 5U)
-        << "tvm_access_ptr expects 5 arguments, but got " << ptr_call->args;
-    const auto *var = ptr_call->args[1].as<VarNode>();
-    ICHECK(var) << "tvm_access_ptr buffer data must be Var, but got "
-                << ptr_call->args[1];
-    Var buffer_data = Downcast<Var>(ptr_call->args[1]);
-    ICHECK(buffer_data_to_buffer_.count(buffer_data))
-        << "Buffer data var " << buffer_data
-        << " is not registered in buffer_data_to_buffer_.";
-    Buffer flat = buffer_data_to_buffer_[buffer_data].GetFlattenedBuffer();
-    return AccessPtrInfo{BufferLoad(flat, Array<PrimExpr>{ptr_call->args[2]}),
-                         ptr_call->args[4]};
+
+    return std::nullopt;
   }
 
   AccessPtrInfo GetRequiredAccessPtrInfo(const PrimExpr &expr,
