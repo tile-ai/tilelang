@@ -80,6 +80,30 @@ def test_issue_2180_full_row_fp16_k1024():
     _check_single_1d_tma(_lower_issue_2180_kernel(K=1024, dtype=T.float16))
 
 
+def _lower_oob_outer_slice_kernel():
+    H_full = 8
+    H_block = 64
+    K = 128
+
+    @T.prim_func
+    def gemm(A: T.Tensor([H_full, K], T.bfloat16)):
+        with T.Kernel(1, threads=128):
+            a_shared = T.alloc_shared((H_block, K), dtype=T.bfloat16)
+            mbar = T.alloc_barrier(128)
+            T.tma_copy(A[0:H_block, 0:K], a_shared, barrier=mbar)
+
+    artifact = tilelang.lower(gemm, target={"kind": "cuda", "arch": "sm_90a"})
+    return artifact.kernel_source
+
+
+def test_oob_outer_slice_falls_back_to_2d():
+    code = _lower_oob_outer_slice_kernel()
+    assert "CUtensorMap" in code, (
+        f"Provably-OOB outer slice must fall back to the 2D descriptor path so the HW clamp "
+        f"applies; got 1D bulk copy instead.\nGenerated source:\n{code}"
+    )
+
+
 def main():
     run_elementwise_add(128, 128)
     run_elementwise_add(256, 128)
@@ -87,6 +111,7 @@ def main():
     test_issue_2180_full_row_fp32_k1024()
     test_issue_2180_full_row_fp32_k512()
     test_issue_2180_full_row_fp16_k1024()
+    test_oob_outer_slice_falls_back_to_2d()
 
 
 if __name__ == "__main__":

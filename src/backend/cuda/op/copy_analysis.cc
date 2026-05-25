@@ -227,6 +227,16 @@ bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
                                   global_range[i]->min == 0,
                               arith::ProofStrength::kSymbolicBound)) {
         global_not_full_dim_encounter = true;
+        bool single_row = analyzer->CanProve(
+            global_range[i]->extent == 1, arith::ProofStrength::kSymbolicBound);
+        bool provably_in_bounds =
+            analyzer->CanProve(global_range[i]->min + global_range[i]->extent <=
+                                   global_tensor->shape[i],
+                               arith::ProofStrength::kSymbolicBound);
+        if (!single_row && !provably_in_bounds) {
+          global_is_contiguous = false;
+          break;
+        }
       }
     } else {
       if (!analyzer->CanProve(global_range[i]->extent == 1,
@@ -493,12 +503,6 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
   const LayoutMap &layout_map =
       ctx.layout_map != nullptr ? *ctx.layout_map : empty_layout_map;
   bool is_cutedsl = TargetIsCuTeDSL(ctx.target);
-  // Issue #2180: only the descriptor-based 2D TMA path needs the OOB gate.
-  // The 1D bulk-copy path emits `cp.async.bulk`, which has the same OOB
-  // semantics as plain T.copy(); gating it on `buffer_oob` causes
-  // InferLayout to fall through to the 2D path for dynamic-outer-shape
-  // tensors and install a swizzle-shaped shared layout, which then forces
-  // Lower() into LowerBulk and triggers the 256-element splitting.
   facts.layout_dependent_tma_available = facts.has_layout_map && !is_cutedsl;
 
   if (facts.layout_dependent_tma_available) {
