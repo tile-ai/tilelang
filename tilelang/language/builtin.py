@@ -967,7 +967,7 @@ def named_barrier_arrive(barrier_id, thread_count):
         T.sync_threads(ready_barrier, total_threads)
 
     Args:
-        barrier_id:   Named barrier index (0–15). May be a variable (PrimExpr).
+        barrier_id:   Named barrier index (0-15). May be a variable (PrimExpr).
         thread_count: Total number of CTA threads participating in the barrier.
                       May be a variable (PrimExpr).
 

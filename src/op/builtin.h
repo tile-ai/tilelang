@@ -714,8 +714,8 @@ TVM_DLL const Op &sync_warp();
  * blocking, while the other side waits with bar.sync / T.sync_threads().
  *
  * named_barrier_arrive(barrier_id, thread_count)
- *   barrier_id   – compile-time integer (0–15)
- *   thread_count – total number of participating threads
+ *   barrier_id   - named barrier index (0-15)
+ *   thread_count - total number of participating threads
  *
  * Lowers to: asm volatile("bar.arrive %0, %1;" : : "r"(id), "r"(cnt));
  */

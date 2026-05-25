@@ -1695,28 +1695,6 @@ private:
       return false;
     }
 
-    // If thread constraints are mutually exclusive (e.g. tx>=128 vs tx<128),
-    // the two accesses belong to disjoint warp groups. Cross-group ordering
-    // is NOT ThreadSyncPlanner's responsibility: __syncthreads() serializes
-    // all threads and destroys pipeline overlap. The correct tool is mbarrier
-    // (T.mbarrier_arrive / T.mbarrier_wait_parity), which the caller is
-    // assumed to have placed. Analogous to is_async_copy: we trust the caller
-    // to manage synchronization between disjoint thread groups explicitly.
-    {
-      PrimExpr prev_constr = prev.cset.ToConjunction();
-      PrimExpr curr_constr = curr.cset.ToConjunction();
-      arith::Analyzer analyzer;
-      for (const auto &iv : prev.threads) {
-        if (iv->dom.defined()) {
-          analyzer.Bind(iv->var, iv->dom);
-        }
-      }
-      if (analyzer.z3_prover.CanProve(
-              tir::Not(tir::And(prev_constr, curr_constr)))) {
-        return false;
-      }
-    }
-
     if (prev.buffer_indices.size() != curr.buffer_indices.size()) {
       // They are not the same indices, should be conflict.
       return true;
