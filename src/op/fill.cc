@@ -5,10 +5,12 @@
  */
 
 #include "fill.h"
+#include "support/check.h"
+#include <tvm/ir/cast.h>
 
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/op_attr_types.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
 
 #include "utils.h"
 
@@ -17,7 +19,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace {
 
@@ -33,7 +36,7 @@ const FillImpl &ResolveFillImpl(Target target) {
     if (impl.match_target(target)) {
       ICHECK(matched_impl == nullptr)
           << "tl.fill found multiple target-specific implementations for "
-          << target->ToDebugString() << ": " << matched_impl->name << " and "
+          << target->str() << ": " << matched_impl->name << " and "
           << impl.name;
       matched_impl = &impl;
     }
@@ -41,7 +44,7 @@ const FillImpl &ResolveFillImpl(Target target) {
   ICHECK(matched_impl != nullptr)
       << "tl.fill requires a target-specific implementation, but no fill "
          "implementation is registered for "
-      << target->ToDebugString();
+      << target->str();
   return *matched_impl;
 }
 
@@ -85,11 +88,11 @@ void RegisterFillImpl(FillImpl impl) {
  *
  * Notes:
  * - The constructor enforces constraints (e.g., stride == 1 ramps, constant
- * lanes) and will terminate (via CHECK/ICHECK) if inputs are unsupported or out
+ * lanes) and will terminate (via ICHECK) if inputs are unsupported or out
  * of bounds.
  */
 Fill::Fill(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
-  ObjectPtr<FillNode> node = tvm::ffi::make_object<FillNode>();
+  ObjectPtr<FillNode> node = make_object<FillNode>();
 
   AccessRegion dst_access = NormalizeToAccessRegion(args[0], kAccessWrite);
   node->dst = dst_access.region->buffer;
@@ -134,7 +137,7 @@ Fill::Fill(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
  * @return TileOperator A TileOperator that owns the copied FillNode.
  */
 TileOperator FillNode::Clone() const {
-  auto op = tvm::ffi::make_object<FillNode>(*this);
+  auto op = make_object<FillNode>(*this);
   return Fill(op);
 }
 

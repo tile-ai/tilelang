@@ -3,11 +3,19 @@
  * \brief Transform annotated loops into pipelined one that parallelize
  * producers and consumers
  */
+#include "support/check.h"
 #include <tvm/arith/analyzer.h>
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/s_tir/analysis.h>
+#include <tvm/s_tir/stmt.h>
 #include <tvm/target/target.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/transform.h>
 
+#include <algorithm>
 #include <functional>
 #include <map>
 #include <unordered_map>
@@ -31,9 +39,19 @@
 
 namespace tvm {
 namespace tl {
-using namespace tir;
+using namespace tirx;
 using namespace ffi;
+using tirx::GetSBlockReadWriteRegion;
 namespace software_pipeline {
+
+using BufferSet = std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>;
+using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
+using BufferMap =
+    std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>;
+using BufferShapeMap =
+    std::unordered_map<Buffer, PrimExpr, ObjectPtrHash, ObjectPtrEqual>;
+using BufferCommitGroupMap =
+    std::unordered_map<Buffer, int, ObjectPtrHash, ObjectPtrEqual>;
 
 namespace {
 
@@ -44,6 +62,29 @@ bool GetBoolAnnotation(const CopyNode &op, const char *key) {
     }
   }
   return false;
+}
+
+bool IsReplayableScalarBindBlock(const SBlock &block,
+                                 const BufferSet &pipeline_write_buffers) {
+  if (block->body.as<BindNode>() == nullptr) {
+    return false;
+  }
+  for (const BufferRegion &read : block->reads) {
+    if (pipeline_write_buffers.count(read->buffer)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+BufferSet CollectPipelineWriteBuffers(const Array<SBlock> &blocks) {
+  BufferSet write_buffers;
+  for (const SBlock &block : blocks) {
+    for (const BufferRegion &write : block->writes) {
+      write_buffers.insert(write->buffer);
+    }
+  }
+  return write_buffers;
 }
 
 bool GetIsTmaCopy(const CopyNode &op) {
@@ -135,10 +176,10 @@ bool UpdateExpandedLayoutMapForRemappedAllocs(
   }
 
   Map<Var, Layout> updated_layout_map = layout_map.value();
-  std::unordered_set<const VarNode *> visited;
+  VarSet visited;
   bool changed = false;
   for (const auto &[old_buffer, new_buffer] : remapped_allocs) {
-    if (!visited.insert(old_buffer->data.get()).second ||
+    if (!visited.insert(old_buffer->data).second ||
         !updated_layout_map.count(old_buffer->data)) {
       continue;
     }
@@ -159,11 +200,6 @@ bool UpdateExpandedLayoutMapForRemappedAllocs(
 }
 
 } // namespace
-
-struct LetWrapper {
-  Var var;
-  PrimExpr value;
-};
 
 struct IfWrapper {
   PrimExpr condition;
@@ -206,8 +242,7 @@ private:
   }
 
   void VisitExpr_(const CallNode *op) final {
-    if (auto tile_op = ParseOperator(tvm::ffi::GetRef<Call>(op));
-        tile_op.defined()) {
+    if (auto tile_op = ParseOperator(GetRef<Call>(op)); tile_op.defined()) {
       AccessRegions access = tile_op->GetAccessRegions();
       for (const auto &region : access.reads) {
         AddBuffer(region->buffer);
@@ -232,7 +267,7 @@ private:
     StmtExprVisitor::VisitExpr_(op);
   }
 
-  void VisitStmt_(const BlockNode *op) final {
+  void VisitStmt_(const SBlockNode *op) final {
     // Also collect buffers allocated in nested blocks within the pipeline body
     for (const auto &buffer : op->alloc_buffers) {
       used_buffers_.insert(buffer);
@@ -261,8 +296,7 @@ public:
 
 private:
   void VisitExpr_(const CallNode *op) final {
-    if (auto tile_op = ParseOperator(tvm::ffi::GetRef<Call>(op));
-        tile_op.defined()) {
+    if (auto tile_op = ParseOperator(GetRef<Call>(op)); tile_op.defined()) {
       AccessRegions access = tile_op->GetAccessRegions();
       reads_.insert(reads_.end(), access.reads.begin(), access.reads.end());
       writes_.insert(writes_.end(), access.writes.begin(), access.writes.end());
@@ -287,25 +321,25 @@ private:
  * \param buffer_data_to_buffer The map from buffer data to buffer.
  * \return The result block.
  */
-Block MakeBlock(const Stmt &body,
-                const Map<Var, Buffer> &buffer_data_to_buffer) {
-  Block block;
-  if (const BlockRealizeNode *block_realize = body.as<BlockRealizeNode>()) {
+SBlock MakeBlock(const Stmt &body,
+                 const Map<Var, Buffer> &buffer_data_to_buffer) {
+  SBlock block;
+  if (const SBlockRealizeNode *block_realize = body.as<SBlockRealizeNode>()) {
     if (is_one(block_realize->predicate)) {
       block = block_realize->block;
     }
   }
   if (!block.defined()) {
-    block = Block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
-                  /*name_hint=*/"", /*body*/ body);
+    block = SBlock(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
+                   /*name_hint=*/"", /*body*/ body);
   }
   Array<Array<BufferRegion>> access =
-      GetBlockReadWriteRegion(block, buffer_data_to_buffer);
+      GetSBlockReadWriteRegion(block, buffer_data_to_buffer);
   TileOpAccessCollector collector;
   collector(block->body);
   Array<BufferRegion> tile_reads = collector.GetReads();
   Array<BufferRegion> tile_writes = collector.GetWrites();
-  BlockNode *n = block.CopyOnWrite();
+  SBlockNode *n = block.CopyOnWrite();
   n->reads = access[0];
   n->reads.insert(n->reads.end(), tile_reads.begin(), tile_reads.end());
   n->writes = access[1];
@@ -321,7 +355,7 @@ struct PipelineAnnotation {
   int async_group_id{-1};
 };
 
-using PipelineInfo = std::unordered_map<Block, PipelineAnnotation,
+using PipelineInfo = std::unordered_map<SBlock, PipelineAnnotation,
                                         ObjectPtrHash, ObjectPtrEqual>;
 
 struct BufferAccessInfo {
@@ -341,10 +375,10 @@ bool ContainsExplicitAsyncIntrinsics(const Stmt &stmt) {
       return;
     }
     if (const auto *attr = obj.as<AttrStmtNode>()) {
-      if (attr->attr_key == tir::attr::async_scope ||
-          attr->attr_key == tir::attr::async_commit_queue_scope ||
-          attr->attr_key == tir::attr::async_wait_queue_scope ||
-          attr->attr_key == tir::attr::async_wait_inflight_count) {
+      if (attr->attr_key == s_tir::attr::async_scope ||
+          attr->attr_key == s_tir::attr::async_commit_queue_scope ||
+          attr->attr_key == s_tir::attr::async_wait_queue_scope ||
+          attr->attr_key == s_tir::attr::async_wait_inflight_count) {
         found = true;
         return;
       }
@@ -454,7 +488,7 @@ public:
 
 private:
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::async_commit_queue_scope) {
+    if (op->attr_key == s_tir::attr::async_commit_queue_scope) {
       Stmt body = VisitStmt(op->body);
       Stmt commit =
           Evaluate(Call(DataType::Handle(), builtin::ptx_commit_group(), {}));
@@ -463,11 +497,11 @@ private:
       }
       return SeqStmt({body, commit});
     }
-    if (op->attr_key == tir::attr::async_wait_queue_scope) {
+    if (op->attr_key == s_tir::attr::async_wait_queue_scope) {
       auto wait_attrs = GetAsyncWaitAttributes(op);
       Stmt body = op->body;
       if (const auto *inner = op->body.as<AttrStmtNode>()) {
-        if (inner->attr_key == tir::attr::async_wait_inflight_count) {
+        if (inner->attr_key == s_tir::attr::async_wait_inflight_count) {
           body = inner->body;
         }
       }
@@ -479,7 +513,7 @@ private:
       }
       return SeqStmt({wait, body});
     }
-    if (op->attr_key == tir::attr::async_wait_inflight_count) {
+    if (op->attr_key == s_tir::attr::async_wait_inflight_count) {
       return VisitStmt(op->body);
     }
     return StmtExprMutator::VisitStmt_(op);
@@ -571,12 +605,12 @@ private:
     return Call(call->dtype, call->op, new_args, call->annotations, call->span);
   }
 
-  Stmt VisitStmt_(const BlockNode *op) final {
+  Stmt VisitStmt_(const SBlockNode *op) final {
     for (const Buffer &alloc_buffer : op->alloc_buffers) {
       buffer_data_to_buffer_.Set(alloc_buffer->data, alloc_buffer);
     }
-    Block block = Downcast<Block>(StmtExprMutator::VisitStmt_(op));
-    BlockNode *n = block.CopyOnWrite();
+    SBlock block = Downcast<SBlock>(StmtExprMutator::VisitStmt_(op));
+    SBlockNode *n = block.CopyOnWrite();
     n->reads.MutateByApply([this](const BufferRegion &buffer_region) {
       return RewritePipelineBufferRegion(buffer_region);
     });
@@ -667,21 +701,23 @@ public:
    * blocks and should not be re-allocated.
    * \param pipeline_loop The original loop to be software pipelined.
    * \param pipeline_info The pipeline annotation information.
-   * \param loop_var_let_wrappers Let wrappers that depend on the loop var.
+   * \param scalar_binding_blocks Replayable scalar Bind statements from the
+   * pipeline body.
    * \param loop_var_if_wrappers If wrappers with conditions that depend on
    * the loop var.
    */
   PipelineRewriter(Map<Var, Buffer> buffer_data_to_buffer,
                    const Array<Buffer> &pipeline_allocs,
                    const Array<Buffer> &local_allocs, const For &pipeline_loop,
-                   const PipelineInfo &pipeline_info, Optional<Target> target,
-                   const std::vector<LetWrapper> &loop_var_let_wrappers,
+                   const PipelineInfo &pipeline_info,
+                   const Array<SBlock> &scalar_binding_blocks,
+                   Optional<Target> target,
                    const std::vector<IfWrapper> &loop_var_if_wrappers)
       : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)),
         pipeline_allocs_(pipeline_allocs), local_allocs_(local_allocs),
         pipeline_loop_(pipeline_loop), pipeline_info_(pipeline_info),
+        scalar_binding_blocks_(scalar_binding_blocks),
         target_(std::move(target)),
-        loop_var_let_wrappers_(loop_var_let_wrappers),
         loop_var_if_wrappers_(loop_var_if_wrappers) {}
 
   Stmt BuildPipeline() {
@@ -700,10 +736,17 @@ public:
         buffer_remap_.Set(buffer, RewriteAllocBuffer(buffer, num_versions));
       }
     }
-    ordered_stmts_.resize(pipeline_info_.size());
+    std::vector<std::pair<int, SBlock>> ordered_blocks;
     for (const auto &[block, anno] : pipeline_info_) {
-      ordered_stmts_.Set(anno.order, block);
+      ordered_blocks.emplace_back(anno.order, block);
     }
+    std::sort(
+        ordered_blocks.begin(), ordered_blocks.end(),
+        [](const auto &lhs, const auto &rhs) { return lhs.first < rhs.first; });
+    for (const auto &[_, block] : ordered_blocks) {
+      ordered_stmts_.push_back(block);
+    }
+    CollectScalarBindings();
 
     // Step 2: Emit the pipeline prologue, body and epilogue.
     Optional<Integer> pipeline_num_stages =
@@ -751,9 +794,9 @@ public:
       stmt = AttrStmt(Integer(0), kPipelineContextNumStages,
                       Downcast<PrimExpr>(pipeline_num_stages.value()), stmt);
     }
-    Block block = MakeBlock(stmt, buffer_data_to_buffer_);
+    SBlock block = MakeBlock(stmt, buffer_data_to_buffer_);
     block.CopyOnWrite()->alloc_buffers = std::move(alloc_buffers);
-    return BlockRealize({}, Bool(true), block);
+    return SBlockRealize({}, Bool(true), block);
   }
 
   /*!
@@ -763,6 +806,127 @@ public:
   const Map<Buffer, Buffer> &GetBufferRemap() const { return buffer_remap_; }
 
 private:
+  struct ScalarBinding {
+    Var var;
+    PrimExpr value;
+    Span span;
+  };
+
+  using ScalarBindingMap =
+      std::unordered_map<Var, size_t, ObjectPtrHash, ObjectPtrEqual>;
+
+  void CollectScalarBindings() {
+    scalar_bindings_.clear();
+    scalar_binding_map_.clear();
+    for (const SBlock &block : scalar_binding_blocks_) {
+      if (const auto *bind = block->body.as<BindNode>()) {
+        if (!scalar_binding_map_.count(bind->var)) {
+          scalar_binding_map_.emplace(bind->var, scalar_bindings_.size());
+          scalar_bindings_.push_back({bind->var, bind->value, bind->span});
+        }
+      }
+    }
+  }
+
+  VarSet FindScalarBindingUses(const Array<Var> &undefined_vars) const {
+    VarSet uses;
+    for (const Var &var : undefined_vars) {
+      if (scalar_binding_map_.count(var)) {
+        uses.insert(var);
+      }
+    }
+    return uses;
+  }
+
+  VarSet FindScalarBindingUses(const Stmt &stmt) const {
+    return FindScalarBindingUses(UndefinedVars(stmt, Array<Var>{}));
+  }
+
+  VarSet FindScalarBindingUses(const PrimExpr &expr) const {
+    return FindScalarBindingUses(UndefinedVars(expr));
+  }
+
+  void AppendScalarBinding(size_t binding_index, VarSet *emitted,
+                           VarSet *visiting,
+                           std::vector<size_t> *binding_indices) const {
+    const ScalarBinding &binding = scalar_bindings_[binding_index];
+    if (emitted->count(binding.var)) {
+      return;
+    }
+    ICHECK(!visiting->count(binding.var))
+        << "InjectSoftwarePipeline: cyclic scalar Bind dependency involving "
+        << binding.var;
+
+    visiting->insert(binding.var);
+    VarSet deps = FindScalarBindingUses(binding.value);
+    for (const ScalarBinding &candidate : scalar_bindings_) {
+      if (!deps.count(candidate.var)) {
+        continue;
+      }
+      auto it = scalar_binding_map_.find(candidate.var);
+      ICHECK(it != scalar_binding_map_.end());
+      AppendScalarBinding(it->second, emitted, visiting, binding_indices);
+    }
+    visiting->erase(binding.var);
+
+    emitted->insert(binding.var);
+    binding_indices->push_back(binding_index);
+  }
+
+  std::vector<size_t> RequiredScalarBindings(const Stmt &stmt) const {
+    std::vector<size_t> binding_indices;
+    if (scalar_bindings_.empty()) {
+      return binding_indices;
+    }
+
+    VarSet uses = FindScalarBindingUses(stmt);
+    if (uses.empty()) {
+      return binding_indices;
+    }
+
+    VarSet emitted;
+    VarSet visiting;
+    for (const ScalarBinding &binding : scalar_bindings_) {
+      if (!uses.count(binding.var)) {
+        continue;
+      }
+      auto it = scalar_binding_map_.find(binding.var);
+      ICHECK(it != scalar_binding_map_.end());
+      AppendScalarBinding(it->second, &emitted, &visiting, &binding_indices);
+    }
+    return binding_indices;
+  }
+
+  Stmt RewriteScalarBindingForAccess(size_t binding_index,
+                                     const PrimExpr &access_index) {
+    const ScalarBinding &binding = scalar_bindings_[binding_index];
+    Stmt bind = Bind(binding.var, binding.value, binding.span);
+    bind = PipelineBodyRewriter(buffer_data_to_buffer_, buffer_remap_,
+                                pipeline_loop_, max_stage_ != 1)(bind);
+    bind = Substitute(bind, {{pipeline_loop_->loop_var, access_index}});
+    return bind;
+  }
+
+  SBlock ReplayScalarBindings(SBlock block, const PrimExpr &access_index) {
+    std::vector<size_t> binding_indices = RequiredScalarBindings(block->body);
+    if (binding_indices.empty()) {
+      return block;
+    }
+
+    Array<Stmt> seq;
+    for (size_t binding_index : binding_indices) {
+      seq.push_back(RewriteScalarBindingForAccess(binding_index, access_index));
+    }
+    for (const Stmt &stmt : FlattenTopLevelSeq(block->body)) {
+      seq.push_back(stmt);
+    }
+
+    SBlockNode *n = block.CopyOnWrite();
+    n->body = SeqStmt(seq);
+    return MakeBlock(SBlockRealize({}, Bool(true), block),
+                     buffer_data_to_buffer_);
+  }
+
   /*!
    * \brief Analyze accesses to the buffers in the software pipeline.
    *
@@ -775,7 +939,7 @@ private:
     std::unordered_map<Buffer, BufferAccessInfo, ObjectPtrHash, ObjectPtrEqual>
         infos;
     for (const auto &pair : pipeline_info_) {
-      const Block &block = pair.first;
+      const SBlock &block = pair.first;
       int stage = pair.second.stage;
       max_stage_ = std::max(max_stage_, stage);
 
@@ -856,7 +1020,7 @@ private:
       // stage(block_j) and the access regions of block_i and block_j overlap.
       bool need_multi_version = false;
       for (const auto &pair1 : pipeline_info_) {
-        const Block &writer_block = pair1.first;
+        const SBlock &writer_block = pair1.first;
         const auto &writer_info = pair1.second;
 
         auto it1 = std::find_if(writer_block->writes.begin(),
@@ -869,7 +1033,7 @@ private:
         }
 
         for (const auto &pair2 : pipeline_info_) {
-          const Block &reader_block = pair2.first;
+          const SBlock &reader_block = pair2.first;
           const auto &reader_info = pair2.second;
           auto it2 = std::find_if(
               reader_block->reads.begin(), reader_block->reads.end(),
@@ -901,8 +1065,7 @@ private:
    * \return The resized buffer.
    */
   Buffer RewriteAllocBuffer(const Buffer &buffer, int num_versions) {
-    ObjectPtr<BufferNode> new_buffer =
-        tvm::ffi::make_object<BufferNode>(*(buffer.get()));
+    ObjectPtr<BufferNode> new_buffer = make_object<BufferNode>(*(buffer.get()));
     new_buffer->shape.insert(new_buffer->shape.begin(), PrimExpr(num_versions));
     if (!new_buffer->strides.empty()) {
       ICHECK(new_buffer->strides.size() + 1 == new_buffer->shape.size());
@@ -913,11 +1076,11 @@ private:
   }
 
   struct AsyncStateGlobal {
-    std::unordered_set<const BufferNode *> dst_buffers;
+    BufferSet dst_buffers;
     Optional<PrimExpr> producer_head{PrimExpr(-1)};
 
     bool writes(const Buffer &buffer) const {
-      return dst_buffers.count(buffer.get()) > 0;
+      return dst_buffers.count(buffer) > 0;
     }
   };
 
@@ -929,7 +1092,7 @@ private:
       bool valid() const { return wait_count.defined(); }
     };
 
-    std::unordered_set<const BufferNode *> seen;
+    BufferSet seen;
     Optional<PrimExpr> producer_head;
     Optional<PrimExpr> predicate;
     std::vector<std::vector<size_t>> commit_groups;
@@ -1020,8 +1183,8 @@ private:
         : rewriter_(rewriter) {}
 
     DeterministicNoWaitCommitEffect Analyze(const Stmt &stmt) const {
-      if (const auto *let = stmt.as<LetStmtNode>()) {
-        return Analyze(let->body);
+      if (stmt.as<BindNode>()) {
+        return DeterministicNoWaitCommitEffect{};
       }
       if (const auto *attr = stmt.as<AttrStmtNode>()) {
         return AnalyzeAttr(attr);
@@ -1036,10 +1199,10 @@ private:
         }
         return effect;
       }
-      if (const auto *block = stmt.as<BlockNode>()) {
+      if (const auto *block = stmt.as<SBlockNode>()) {
         return Analyze(block->body);
       }
-      if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+      if (const auto *realize = stmt.as<SBlockRealizeNode>()) {
         if (!is_one(realize->predicate)) {
           return DeterministicNoWaitCommitEffect::Unknown();
         }
@@ -1116,13 +1279,6 @@ private:
           iw.condition, {{pipeline_loop_->loop_var, normalized_access_index}});
       stmt = IfThenElse(substituted_condition, stmt, Stmt(), iw.span);
     }
-    for (auto it = loop_var_let_wrappers_.rbegin();
-         it != loop_var_let_wrappers_.rend(); ++it) {
-      const auto &lw = *it;
-      PrimExpr substituted = Substitute(
-          lw.value, {{pipeline_loop_->loop_var, normalized_access_index}});
-      stmt = LetStmt(lw.var, substituted, stmt);
-    }
     return stmt;
   }
 
@@ -1162,15 +1318,15 @@ private:
   }
 
   static bool IsAsyncCommitQueueScope(const AttrStmtNode *attr) {
-    return attr && attr->attr_key == tir::attr::async_commit_queue_scope;
+    return attr && attr->attr_key == s_tir::attr::async_commit_queue_scope;
   }
 
   static bool IsAsyncWaitQueueScope(const AttrStmtNode *attr) {
-    return attr && attr->attr_key == tir::attr::async_wait_queue_scope;
+    return attr && attr->attr_key == s_tir::attr::async_wait_queue_scope;
   }
 
   static bool IsAsyncWaitInflightCount(const AttrStmtNode *attr) {
-    return attr && attr->attr_key == tir::attr::async_wait_inflight_count;
+    return attr && attr->attr_key == s_tir::attr::async_wait_inflight_count;
   }
 
   static int
@@ -1231,45 +1387,66 @@ private:
                     attr->span);
   }
 
-  HeadAsyncSyncInfo AnalyzeHeadAsyncSync(const Stmt &stmt,
-                                         HeadSeqMode seq_mode) const {
-    if (const auto *let = stmt.as<LetStmtNode>()) {
-      return AnalyzeHeadAsyncSync(let->body, seq_mode);
+  class HeadAsyncSyncAnalyzer
+      : public StmtFunctor<HeadAsyncSyncInfo(const Stmt &)> {
+  public:
+    static HeadAsyncSyncInfo Analyze(const PipelineRewriter *rewriter,
+                                     const Stmt &stmt, HeadSeqMode seq_mode) {
+      HeadAsyncSyncAnalyzer analyzer(rewriter, seq_mode);
+      return analyzer(stmt);
     }
-    if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      if (IsAsyncWaitQueueScope(attr)) {
-        if (auto wait_n = TryGetStaticAsyncWaitCount(attr)) {
+
+    HeadAsyncSyncAnalyzer(const PipelineRewriter *rewriter,
+                          HeadSeqMode seq_mode)
+        : rewriter_(rewriter), seq_mode_(seq_mode) {}
+
+    HeadAsyncSyncInfo VisitStmt_(const AttrStmtNode *op) final {
+      if (IsAsyncWaitQueueScope(op)) {
+        if (auto wait_n = rewriter_->TryGetStaticAsyncWaitCount(op)) {
           return {HeadAsyncSyncKind::kWaitStatic, *wait_n};
         }
         return {HeadAsyncSyncKind::kWaitDynamic, 0};
       }
-      if (IsAsyncCommitQueueScope(attr)) {
+      if (IsAsyncCommitQueueScope(op)) {
         return {HeadAsyncSyncKind::kCommit, 0};
       }
-      if (IsAsyncWaitInflightCount(attr)) {
+      if (IsAsyncWaitInflightCount(op)) {
         return {HeadAsyncSyncKind::kBlocked, 0};
       }
-      return AnalyzeHeadAsyncSync(attr->body, seq_mode);
+      return VisitStmt(op->body);
     }
-    if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      if (seq->seq.empty()) {
+
+    HeadAsyncSyncInfo VisitStmt_(const SeqStmtNode *op) final {
+      if (op->seq.empty()) {
         return {};
       }
-      if (seq_mode == HeadSeqMode::kSingletonOnly && seq->seq.size() != 1) {
+      if (seq_mode_ == HeadSeqMode::kSingletonOnly && op->seq.size() != 1) {
         return {HeadAsyncSyncKind::kBlocked, 0};
       }
-      return AnalyzeHeadAsyncSync(seq->seq[0], seq_mode);
+      return VisitStmt(op->seq[0]);
     }
-    if (const auto *block = stmt.as<BlockNode>()) {
-      return AnalyzeHeadAsyncSync(block->body, seq_mode);
+
+    HeadAsyncSyncInfo VisitStmt_(const SBlockNode *op) final {
+      return VisitStmt(op->body);
     }
-    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
-      if (is_one(realize->predicate)) {
-        return AnalyzeHeadAsyncSync(realize->block->body, seq_mode);
+
+    HeadAsyncSyncInfo VisitStmt_(const SBlockRealizeNode *op) final {
+      if (is_one(op->predicate)) {
+        return VisitStmt(op->block->body);
       }
       return {HeadAsyncSyncKind::kBlocked, 0};
     }
-    return {};
+
+    HeadAsyncSyncInfo VisitStmtDefault_(const Object *) final { return {}; }
+
+  private:
+    const PipelineRewriter *rewriter_;
+    HeadSeqMode seq_mode_;
+  };
+
+  HeadAsyncSyncInfo AnalyzeHeadAsyncSync(const Stmt &stmt,
+                                         HeadSeqMode seq_mode) const {
+    return HeadAsyncSyncAnalyzer::Analyze(this, stmt, seq_mode);
   }
 
   ClassifiedAsyncSyncStmt ClassifySimpleAsyncSyncStmt(const Stmt &stmt) const {
@@ -1360,69 +1537,81 @@ private:
     return guaranteed_groups;
   }
 
-  Stmt RewriteWaitStaticInSimpleWrapper(const Stmt &stmt, int new_wait_n,
-                                        bool *changed) const {
-    ClassifiedAsyncSyncStmt cls = ClassifySimpleAsyncSyncStmt(stmt);
-    if (cls.kind != AsyncSyncStmtKind::kWaitStatic) {
-      return stmt;
-    }
-    if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      if (IsAsyncWaitQueueScope(attr)) {
-        *changed = true;
-        return MakeStaticAsyncWaitStmtLike(attr, new_wait_n);
+  class WaitStaticInSimpleWrapperRewriter
+      : public StmtFunctor<Optional<Stmt>(const Stmt &)> {
+  public:
+    static Optional<Stmt> Rewrite(const PipelineRewriter *rewriter,
+                                  const Stmt &stmt, int new_wait_n) {
+      if (rewriter->ClassifySimpleAsyncSyncStmt(stmt).kind !=
+          AsyncSyncStmtKind::kWaitStatic) {
+        return Optional<Stmt>();
       }
+      WaitStaticInSimpleWrapperRewriter rewrite(rewriter, new_wait_n);
+      return rewrite(stmt);
     }
-    if (const auto *let = stmt.as<LetStmtNode>()) {
-      Stmt new_body =
-          RewriteWaitStaticInSimpleWrapper(let->body, new_wait_n, changed);
-      if (*changed) {
-        return LetStmt(let->var, let->value, new_body, let->span);
+
+    WaitStaticInSimpleWrapperRewriter(const PipelineRewriter *rewriter,
+                                      int new_wait_n)
+        : rewriter_(rewriter), new_wait_n_(new_wait_n) {}
+
+    Optional<Stmt> VisitStmt_(const AttrStmtNode *op) final {
+      if (IsAsyncWaitQueueScope(op)) {
+        return rewriter_->MakeStaticAsyncWaitStmtLike(op, new_wait_n_);
       }
-      return stmt;
-    }
-    if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      Stmt new_body =
-          RewriteWaitStaticInSimpleWrapper(attr->body, new_wait_n, changed);
-      if (*changed) {
-        return AttrStmt(attr->node, attr->attr_key, attr->value, new_body,
-                        attr->span);
+      Optional<Stmt> body = VisitStmt(op->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      return AttrStmt(op->node, op->attr_key, op->value, body.value(),
+                      op->span);
     }
-    if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      if (seq->seq.size() == 1) {
-        Stmt inner =
-            RewriteWaitStaticInSimpleWrapper(seq->seq[0], new_wait_n, changed);
-        if (*changed) {
-          return SeqStmt({inner});
-        }
+
+    Optional<Stmt> VisitStmt_(const SeqStmtNode *op) final {
+      if (op->seq.size() != 1) {
+        return Optional<Stmt>();
       }
-      return stmt;
-    }
-    if (const auto *block = stmt.as<BlockNode>()) {
-      Stmt inner =
-          RewriteWaitStaticInSimpleWrapper(block->body, new_wait_n, changed);
-      if (*changed) {
-        Block new_block = Downcast<Block>(stmt);
-        new_block.CopyOnWrite()->body = inner;
-        return new_block;
+      Optional<Stmt> inner = VisitStmt(op->seq[0]);
+      if (!inner.defined()) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      return SeqStmt({inner.value()});
     }
-    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
-      if (is_one(realize->predicate)) {
-        Stmt inner = RewriteWaitStaticInSimpleWrapper(realize->block->body,
-                                                      new_wait_n, changed);
-        if (*changed) {
-          Block new_block = realize->block;
-          new_block.CopyOnWrite()->body = inner;
-          return BlockRealize(realize->iter_values, realize->predicate,
-                              new_block, realize->span);
-        }
+
+    Optional<Stmt> VisitStmt_(const SBlockNode *op) final {
+      Optional<Stmt> body = VisitStmt(op->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      SBlock new_block = GetRef<SBlock>(op);
+      new_block.CopyOnWrite()->body = body.value();
+      return new_block;
     }
-    return stmt;
+
+    Optional<Stmt> VisitStmt_(const SBlockRealizeNode *op) final {
+      if (!is_one(op->predicate)) {
+        return Optional<Stmt>();
+      }
+      Optional<Stmt> body = VisitStmt(op->block->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
+      }
+      SBlock new_block = op->block;
+      new_block.CopyOnWrite()->body = body.value();
+      return SBlockRealize(op->iter_values, op->predicate, new_block, op->span);
+    }
+
+    Optional<Stmt> VisitStmtDefault_(const Object *) final {
+      return Optional<Stmt>();
+    }
+
+  private:
+    const PipelineRewriter *rewriter_;
+    int new_wait_n_;
+  };
+
+  Optional<Stmt> RewriteWaitStaticInSimpleWrapper(const Stmt &stmt,
+                                                  int new_wait_n) const {
+    return WaitStaticInSimpleWrapperRewriter::Rewrite(this, stmt, new_wait_n);
   }
 
   std::optional<int> TryGetHeadStaticWaitCount(const Stmt &stmt) const {
@@ -1434,171 +1623,220 @@ private:
     return std::nullopt;
   }
 
-  std::optional<int> TryGetFirstStaticWaitCount(const Stmt &stmt) const {
-    if (const auto *let = stmt.as<LetStmtNode>()) {
-      return TryGetFirstStaticWaitCount(let->body);
+  class FirstStaticWaitCounter
+      : public StmtFunctor<std::optional<int>(const Stmt &)> {
+  public:
+    static std::optional<int> Find(const PipelineRewriter *rewriter,
+                                   const Stmt &stmt) {
+      FirstStaticWaitCounter finder(rewriter);
+      return finder(stmt);
     }
-    if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      HeadAsyncSyncInfo info =
-          AnalyzeHeadAsyncSync(stmt, HeadSeqMode::kTakeFirstElement);
+
+    explicit FirstStaticWaitCounter(const PipelineRewriter *rewriter)
+        : rewriter_(rewriter) {}
+
+    std::optional<int> VisitStmt_(const AttrStmtNode *op) final {
+      HeadAsyncSyncInfo info = rewriter_->AnalyzeHeadAsyncSync(
+          GetRef<Stmt>(op), HeadSeqMode::kTakeFirstElement);
       if (info.kind == HeadAsyncSyncKind::kWaitStatic) {
         return info.wait_n;
       }
       if (info.IsBoundary()) {
         return std::nullopt;
       }
-      return TryGetFirstStaticWaitCount(attr->body);
+      return VisitStmt(op->body);
     }
-    if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      for (const Stmt &elem : seq->seq) {
-        HeadAsyncSyncInfo info =
-            AnalyzeHeadAsyncSync(elem, HeadSeqMode::kTakeFirstElement);
+
+    std::optional<int> VisitStmt_(const SeqStmtNode *op) final {
+      for (const Stmt &elem : op->seq) {
+        HeadAsyncSyncInfo info = rewriter_->AnalyzeHeadAsyncSync(
+            elem, HeadSeqMode::kTakeFirstElement);
         if (info.kind == HeadAsyncSyncKind::kWaitStatic) {
           return info.wait_n;
         }
-        if (info.IsBoundary() || ContainsAsyncSyncScopes(elem)) {
+        if (info.IsBoundary() || rewriter_->ContainsAsyncSyncScopes(elem)) {
           return std::nullopt;
         }
       }
       return std::nullopt;
     }
-    if (const auto *block = stmt.as<BlockNode>()) {
-      return TryGetFirstStaticWaitCount(block->body);
+
+    std::optional<int> VisitStmt_(const SBlockNode *op) final {
+      return VisitStmt(op->body);
     }
-    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
-      if (is_one(realize->predicate)) {
-        return TryGetFirstStaticWaitCount(realize->block->body);
+
+    std::optional<int> VisitStmt_(const SBlockRealizeNode *op) final {
+      if (is_one(op->predicate)) {
+        return VisitStmt(op->block->body);
       }
+      return std::nullopt;
     }
-    return std::nullopt;
+
+    std::optional<int> VisitStmtDefault_(const Object *) final {
+      return std::nullopt;
+    }
+
+  private:
+    const PipelineRewriter *rewriter_;
+  };
+
+  std::optional<int> TryGetFirstStaticWaitCount(const Stmt &stmt) const {
+    return FirstStaticWaitCounter::Find(this, stmt);
   }
 
-  Stmt RewriteHeadStaticWaitInWrapper(const Stmt &stmt, int new_wait_n,
-                                      bool *changed) const {
-    if (const auto *let = stmt.as<LetStmtNode>()) {
-      Stmt new_body =
-          RewriteHeadStaticWaitInWrapper(let->body, new_wait_n, changed);
-      if (*changed) {
-        return LetStmt(let->var, let->value, new_body, let->span);
-      }
-      return stmt;
+  class HeadStaticWaitInWrapperRewriter
+      : public StmtFunctor<Optional<Stmt>(const Stmt &)> {
+  public:
+    static Optional<Stmt> Rewrite(const PipelineRewriter *rewriter,
+                                  const Stmt &stmt, int new_wait_n) {
+      HeadStaticWaitInWrapperRewriter rewrite(rewriter, new_wait_n);
+      return rewrite(stmt);
     }
-    if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      if (IsAsyncWaitQueueScope(attr)) {
-        *changed = true;
-        return MakeStaticAsyncWaitStmtLike(attr, new_wait_n);
+
+    HeadStaticWaitInWrapperRewriter(const PipelineRewriter *rewriter,
+                                    int new_wait_n)
+        : rewriter_(rewriter), new_wait_n_(new_wait_n) {}
+
+    Optional<Stmt> VisitStmt_(const AttrStmtNode *op) final {
+      if (IsAsyncWaitQueueScope(op)) {
+        return rewriter_->MakeStaticAsyncWaitStmtLike(op, new_wait_n_);
       }
-      Stmt new_body =
-          RewriteHeadStaticWaitInWrapper(attr->body, new_wait_n, changed);
-      if (*changed) {
-        return AttrStmt(attr->node, attr->attr_key, attr->value, new_body,
-                        attr->span);
+      Optional<Stmt> body = VisitStmt(op->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      return AttrStmt(op->node, op->attr_key, op->value, body.value(),
+                      op->span);
     }
-    if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      if (seq->seq.empty()) {
-        return stmt;
+
+    Optional<Stmt> VisitStmt_(const SeqStmtNode *op) final {
+      if (op->seq.empty()) {
+        return Optional<Stmt>();
       }
-      Array<Stmt> new_seq = seq->seq;
-      new_seq.Set(
-          0, RewriteHeadStaticWaitInWrapper(seq->seq[0], new_wait_n, changed));
-      if (*changed) {
-        return SeqStmt(new_seq);
+      Optional<Stmt> first = VisitStmt(op->seq[0]);
+      if (!first.defined()) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      Array<Stmt> new_seq = op->seq;
+      new_seq.Set(0, first.value());
+      return SeqStmt(new_seq);
     }
-    if (const auto *block = stmt.as<BlockNode>()) {
-      Stmt new_body =
-          RewriteHeadStaticWaitInWrapper(block->body, new_wait_n, changed);
-      if (*changed) {
-        Block new_block = Downcast<Block>(stmt);
-        new_block.CopyOnWrite()->body = new_body;
-        return new_block;
+
+    Optional<Stmt> VisitStmt_(const SBlockNode *op) final {
+      Optional<Stmt> body = VisitStmt(op->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      SBlock new_block = GetRef<SBlock>(op);
+      new_block.CopyOnWrite()->body = body.value();
+      return new_block;
     }
-    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
-      if (is_one(realize->predicate)) {
-        Stmt new_body = RewriteHeadStaticWaitInWrapper(realize->block->body,
-                                                       new_wait_n, changed);
-        if (*changed) {
-          Block new_block = realize->block;
-          new_block.CopyOnWrite()->body = new_body;
-          return BlockRealize(realize->iter_values, realize->predicate,
-                              new_block, realize->span);
-        }
+
+    Optional<Stmt> VisitStmt_(const SBlockRealizeNode *op) final {
+      if (!is_one(op->predicate)) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      Optional<Stmt> body = VisitStmt(op->block->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
+      }
+      SBlock new_block = op->block;
+      new_block.CopyOnWrite()->body = body.value();
+      return SBlockRealize(op->iter_values, op->predicate, new_block, op->span);
     }
-    return stmt;
+
+    Optional<Stmt> VisitStmtDefault_(const Object *) final {
+      return Optional<Stmt>();
+    }
+
+  private:
+    const PipelineRewriter *rewriter_;
+    int new_wait_n_;
+  };
+
+  Optional<Stmt> RewriteHeadStaticWaitInWrapper(const Stmt &stmt,
+                                                int new_wait_n) const {
+    return HeadStaticWaitInWrapperRewriter::Rewrite(this, stmt, new_wait_n);
   }
 
-  Stmt RewriteFirstStaticWaitInWrapper(const Stmt &stmt, int new_wait_n,
-                                       bool *changed) const {
-    if (const auto *let = stmt.as<LetStmtNode>()) {
-      Stmt new_body =
-          RewriteFirstStaticWaitInWrapper(let->body, new_wait_n, changed);
-      if (*changed) {
-        return LetStmt(let->var, let->value, new_body, let->span);
-      }
-      return stmt;
+  class FirstStaticWaitInWrapperRewriter
+      : public StmtFunctor<Optional<Stmt>(const Stmt &)> {
+  public:
+    static Optional<Stmt> Rewrite(const PipelineRewriter *rewriter,
+                                  const Stmt &stmt, int new_wait_n) {
+      FirstStaticWaitInWrapperRewriter rewrite(rewriter, new_wait_n);
+      return rewrite(stmt);
     }
-    if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      if (IsAsyncWaitQueueScope(attr)) {
-        *changed = true;
-        return MakeStaticAsyncWaitStmtLike(attr, new_wait_n);
+
+    FirstStaticWaitInWrapperRewriter(const PipelineRewriter *rewriter,
+                                     int new_wait_n)
+        : rewriter_(rewriter), new_wait_n_(new_wait_n) {}
+
+    Optional<Stmt> VisitStmt_(const AttrStmtNode *op) final {
+      if (IsAsyncWaitQueueScope(op)) {
+        return rewriter_->MakeStaticAsyncWaitStmtLike(op, new_wait_n_);
       }
-      if (IsAsyncCommitQueueScope(attr) || IsAsyncWaitInflightCount(attr)) {
-        return stmt;
+      if (IsAsyncCommitQueueScope(op) || IsAsyncWaitInflightCount(op)) {
+        return Optional<Stmt>();
       }
-      Stmt new_body =
-          RewriteFirstStaticWaitInWrapper(attr->body, new_wait_n, changed);
-      if (*changed) {
-        return AttrStmt(attr->node, attr->attr_key, attr->value, new_body,
-                        attr->span);
+      Optional<Stmt> body = VisitStmt(op->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      return AttrStmt(op->node, op->attr_key, op->value, body.value(),
+                      op->span);
     }
-    if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      Array<Stmt> new_seq = seq->seq;
+
+    Optional<Stmt> VisitStmt_(const SeqStmtNode *op) final {
+      Array<Stmt> new_seq = op->seq;
       for (int i = 0, n = static_cast<int>(new_seq.size()); i < n; ++i) {
-        Stmt updated =
-            RewriteFirstStaticWaitInWrapper(new_seq[i], new_wait_n, changed);
-        if (*changed) {
-          new_seq.Set(i, updated);
+        Optional<Stmt> updated = VisitStmt(new_seq[i]);
+        if (updated.defined()) {
+          new_seq.Set(i, updated.value());
           return SeqStmt(new_seq);
         }
-        if (ContainsAsyncSyncScopes(new_seq[i])) {
-          return stmt;
+        if (rewriter_->ContainsAsyncSyncScopes(new_seq[i])) {
+          return Optional<Stmt>();
         }
       }
-      return stmt;
+      return Optional<Stmt>();
     }
-    if (const auto *block = stmt.as<BlockNode>()) {
-      Stmt new_body =
-          RewriteFirstStaticWaitInWrapper(block->body, new_wait_n, changed);
-      if (*changed) {
-        Block new_block = Downcast<Block>(stmt);
-        new_block.CopyOnWrite()->body = new_body;
-        return new_block;
+
+    Optional<Stmt> VisitStmt_(const SBlockNode *op) final {
+      Optional<Stmt> body = VisitStmt(op->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      SBlock new_block = GetRef<SBlock>(op);
+      new_block.CopyOnWrite()->body = body.value();
+      return new_block;
     }
-    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
-      if (is_one(realize->predicate)) {
-        Stmt new_body = RewriteFirstStaticWaitInWrapper(realize->block->body,
-                                                        new_wait_n, changed);
-        if (*changed) {
-          Block new_block = realize->block;
-          new_block.CopyOnWrite()->body = new_body;
-          return BlockRealize(realize->iter_values, realize->predicate,
-                              new_block, realize->span);
-        }
+
+    Optional<Stmt> VisitStmt_(const SBlockRealizeNode *op) final {
+      if (!is_one(op->predicate)) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      Optional<Stmt> body = VisitStmt(op->block->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
+      }
+      SBlock new_block = op->block;
+      new_block.CopyOnWrite()->body = body.value();
+      return SBlockRealize(op->iter_values, op->predicate, new_block, op->span);
     }
-    return stmt;
+
+    Optional<Stmt> VisitStmtDefault_(const Object *) final {
+      return Optional<Stmt>();
+    }
+
+  private:
+    const PipelineRewriter *rewriter_;
+    int new_wait_n_;
+  };
+
+  Optional<Stmt> RewriteFirstStaticWaitInWrapper(const Stmt &stmt,
+                                                 int new_wait_n) const {
+    return FirstStaticWaitInWrapperRewriter::Rewrite(this, stmt, new_wait_n);
   }
 
   Stmt MaybeRelaxLoopWaits(const For &loop, int pre_outstanding_lb) const {
@@ -1647,10 +1885,10 @@ private:
               !uses_head_fallback || outstanding_lb >= (candidate_wait_n + 1);
           if (candidate_wait_n > 0 && enough_pre_outstanding &&
               (!uses_head_fallback || groups_after_wait_lb > 0)) {
-            bool changed_wait = false;
-            body.Set(i, RewriteWaitStaticInSimpleWrapper(
-                            body[i], candidate_wait_n, &changed_wait));
-            if (changed_wait) {
+            Optional<Stmt> rewritten_wait =
+                RewriteWaitStaticInSimpleWrapper(body[i], candidate_wait_n);
+            if (rewritten_wait.defined()) {
+              body.Set(i, rewritten_wait.value());
               changed = true;
               effective_wait_n = candidate_wait_n;
             }
@@ -1685,65 +1923,84 @@ private:
     return new_loop;
   }
 
-  Stmt RelaxLoopWaitsInSimpleWrapper(const Stmt &stmt, int pre_outstanding_lb,
-                                     bool *changed) const {
-    if (const auto *loop = stmt.as<ForNode>()) {
-      Stmt relaxed =
-          MaybeRelaxLoopWaits(Downcast<For>(stmt), pre_outstanding_lb);
-      *changed = !relaxed.same_as(stmt);
+  class LoopWaitsInSimpleWrapperRelaxer
+      : public StmtFunctor<Optional<Stmt>(const Stmt &)> {
+  public:
+    static Optional<Stmt> Rewrite(const PipelineRewriter *rewriter,
+                                  const Stmt &stmt, int pre_outstanding_lb) {
+      LoopWaitsInSimpleWrapperRelaxer relaxer(rewriter, pre_outstanding_lb);
+      return relaxer(stmt);
+    }
+
+    LoopWaitsInSimpleWrapperRelaxer(const PipelineRewriter *rewriter,
+                                    int pre_outstanding_lb)
+        : rewriter_(rewriter), pre_outstanding_lb_(pre_outstanding_lb) {}
+
+    Optional<Stmt> VisitStmt_(const ForNode *op) final {
+      For loop = GetRef<For>(op);
+      Stmt relaxed = rewriter_->MaybeRelaxLoopWaits(loop, pre_outstanding_lb_);
+      if (relaxed.same_as(loop)) {
+        return Optional<Stmt>();
+      }
       return relaxed;
     }
-    if (const auto *let = stmt.as<LetStmtNode>()) {
-      Stmt new_body =
-          RelaxLoopWaitsInSimpleWrapper(let->body, pre_outstanding_lb, changed);
-      if (*changed) {
-        return LetStmt(let->var, let->value, new_body, let->span);
+
+    Optional<Stmt> VisitStmt_(const AttrStmtNode *op) final {
+      Optional<Stmt> body = VisitStmt(op->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      return AttrStmt(op->node, op->attr_key, op->value, body.value(),
+                      op->span);
     }
-    if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      Stmt new_body = RelaxLoopWaitsInSimpleWrapper(
-          attr->body, pre_outstanding_lb, changed);
-      if (*changed) {
-        return AttrStmt(attr->node, attr->attr_key, attr->value, new_body,
-                        attr->span);
+
+    Optional<Stmt> VisitStmt_(const SeqStmtNode *op) final {
+      if (op->seq.size() != 1) {
+        return Optional<Stmt>();
       }
-      return stmt;
-    }
-    if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      if (seq->seq.size() == 1) {
-        Stmt inner = RelaxLoopWaitsInSimpleWrapper(seq->seq[0],
-                                                   pre_outstanding_lb, changed);
-        if (*changed) {
-          return SeqStmt({inner});
-        }
+      Optional<Stmt> inner = VisitStmt(op->seq[0]);
+      if (!inner.defined()) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      return SeqStmt({inner.value()});
     }
-    if (const auto *block = stmt.as<BlockNode>()) {
-      Stmt new_body = RelaxLoopWaitsInSimpleWrapper(
-          block->body, pre_outstanding_lb, changed);
-      if (*changed) {
-        Block new_block = Downcast<Block>(stmt);
-        new_block.CopyOnWrite()->body = new_body;
-        return new_block;
+
+    Optional<Stmt> VisitStmt_(const SBlockNode *op) final {
+      Optional<Stmt> body = VisitStmt(op->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      SBlock new_block = GetRef<SBlock>(op);
+      new_block.CopyOnWrite()->body = body.value();
+      return new_block;
     }
-    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
-      if (is_one(realize->predicate)) {
-        Stmt new_body = RelaxLoopWaitsInSimpleWrapper(
-            realize->block->body, pre_outstanding_lb, changed);
-        if (*changed) {
-          Block new_block = realize->block;
-          new_block.CopyOnWrite()->body = new_body;
-          return BlockRealize(realize->iter_values, realize->predicate,
-                              new_block, realize->span);
-        }
+
+    Optional<Stmt> VisitStmt_(const SBlockRealizeNode *op) final {
+      if (!is_one(op->predicate)) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      Optional<Stmt> body = VisitStmt(op->block->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
+      }
+      SBlock new_block = op->block;
+      new_block.CopyOnWrite()->body = body.value();
+      return SBlockRealize(op->iter_values, op->predicate, new_block, op->span);
     }
-    return stmt;
+
+    Optional<Stmt> VisitStmtDefault_(const Object *) final {
+      return Optional<Stmt>();
+    }
+
+  private:
+    const PipelineRewriter *rewriter_;
+    int pre_outstanding_lb_;
+  };
+
+  Optional<Stmt> RelaxLoopWaitsInSimpleWrapper(const Stmt &stmt,
+                                               int pre_outstanding_lb) const {
+    return LoopWaitsInSimpleWrapperRelaxer::Rewrite(this, stmt,
+                                                    pre_outstanding_lb);
   }
 
   class AsyncPipelineLoopWaitRelaxer : public StmtExprMutator {
@@ -1761,10 +2018,10 @@ private:
       int outstanding_lb = 0;
       for (int i = 0, n = static_cast<int>(visited.size()); i < n; ++i) {
         Stmt current = visited[i];
-        bool changed_loop = false;
-        current = rewriter_->RelaxLoopWaitsInSimpleWrapper(
-            current, outstanding_lb, &changed_loop);
-        if (changed_loop) {
+        Optional<Stmt> relaxed =
+            rewriter_->RelaxLoopWaitsInSimpleWrapper(current, outstanding_lb);
+        if (relaxed.defined()) {
+          current = relaxed.value();
           visited.Set(i, current);
         }
         ClassifiedAsyncSyncStmt cls =
@@ -1826,29 +2083,30 @@ private:
       return seq;
     }
     for (size_t pos = 1; pos < suffix_wait_indices.size(); ++pos) {
-      bool changed = false;
       int idx = suffix_wait_indices[pos];
       // Tail consumers drain the final committed groups with no new commits in
       // between. Relax them progressively from the end so the suffix becomes
       // ..., wait<2>, wait<1>, wait<0> instead of rewriting every drain wait to
       // the same retain count.
       int new_wait_n = std::min(retain, static_cast<int>(pos));
-      seq.Set(idx,
-              RewriteFirstStaticWaitInWrapper(seq[idx], new_wait_n, &changed));
+      Optional<Stmt> rewritten =
+          RewriteFirstStaticWaitInWrapper(seq[idx], new_wait_n);
+      if (rewritten.defined()) {
+        seq.Set(idx, rewritten.value());
+      }
     }
     return seq;
   }
 
-  void PopulateWaitCounts(
-      const std::vector<RewrittenStmtInfo> &new_stmts,
-      arith::Analyzer *ana_normalized,
-      const std::unordered_map<const BufferNode *, int> &buffer_to_commit_group,
-      std::map<int, AsyncStateLocal> *async_states_local) {
+  void PopulateWaitCounts(const std::vector<RewrittenStmtInfo> &new_stmts,
+                          arith::Analyzer *ana_normalized,
+                          const BufferCommitGroupMap &buffer_to_commit_group,
+                          std::map<int, AsyncStateLocal> *async_states_local) {
     for (size_t i = 0; i < new_stmts.size(); ++i) {
       if (new_stmts[i].is_async) {
         for (const BufferRegion &write_region : new_stmts[i].writes) {
           (*async_states_local)[new_stmts[i].stage].seen.insert(
-              write_region->buffer.get());
+              write_region->buffer);
         }
         continue;
       }
@@ -1886,13 +2144,12 @@ private:
           if (!async_states_[producer_stage_idx].writes(read_region->buffer)) {
             continue;
           }
-          auto commit_group_id =
-              buffer_to_commit_group.at(read_region->buffer.get());
+          auto commit_group_id = buffer_to_commit_group.at(read_region->buffer);
           if (!need_wait_count[commit_group_id]) {
             continue;
           }
           dependent_commit_groups.push_back(commit_group_id);
-          if (!dep_local_state.seen.count(read_region->buffer.get())) {
+          if (!dep_local_state.seen.count(read_region->buffer)) {
             producer_head_per_commit.push_back(
                 dep_local_state.producer_head.value() - 1);
           } else {
@@ -1946,8 +2203,8 @@ private:
     std::map<int, std::map<int, PrimExpr>> waits_before_stmt;
     auto make_wait_stmt = [](int stage_id, PrimExpr wait_count, Stmt body) {
       auto zero = make_zero(DataType::Int(32));
-      return AttrStmt(zero, tir::attr::async_wait_queue_scope, stage_id,
-                      AttrStmt(zero, tir::attr::async_wait_inflight_count,
+      return AttrStmt(zero, s_tir::attr::async_wait_queue_scope, stage_id,
+                      AttrStmt(zero, s_tir::attr::async_wait_inflight_count,
                                wait_count, body));
     };
     auto merge_wait_before_stmt = [&](int insert_before, int stage_id,
@@ -2035,7 +2292,7 @@ private:
           group_stmts.size() == 1 ? group_stmts[0] : SeqStmt(group_stmts);
       Stmt commit_queue_scope =
           AttrStmt(make_zero(DataType::Int(32)),
-                   tir::attr::async_commit_queue_scope, stage_id, group_body);
+                   s_tir::attr::async_commit_queue_scope, stage_id, group_body);
       if (!is_one(predicate) && !ana_normalized->CanProve(predicate)) {
         PrimExpr simplified_predicate = ana_normalized->Simplify(predicate);
         if (!is_zero(simplified_predicate)) {
@@ -2062,7 +2319,7 @@ private:
     Optional<Integer> pipeline_num_stages =
         GetPipelineNumStages(pipeline_loop_.get());
     auto make_nop = []() {
-      return BlockRealize({}, Bool(true), MakeBlock(Evaluate(0), {}));
+      return SBlockRealize({}, Bool(true), MakeBlock(Evaluate(0), {}));
     };
 
     if (unroll_loop) {
@@ -2124,9 +2381,9 @@ private:
 
     std::vector<RewrittenStmtInfo> new_stmts;
     std::map<int, AsyncStateLocal> async_states_local;
-    std::unordered_map<const BufferNode *, int> buffer_to_commit_group;
+    BufferCommitGroupMap buffer_to_commit_group;
 
-    for (const Block &block : ordered_stmts_) {
+    for (const SBlock &block : ordered_stmts_) {
       const auto &pipeline_anno = pipeline_info_.at(block);
       int stage = pipeline_anno.stage;
       PrimExpr inbound = Bool(true);
@@ -2136,7 +2393,7 @@ private:
             pipeline_loop_->min <= skewed_loop_var,
             (skewed_loop_var < pipeline_loop_->min + pipeline_loop_->extent));
 
-      Block new_block = Downcast<Block>(
+      SBlock new_block = Downcast<SBlock>(
           PipelineBodyRewriter(buffer_data_to_buffer_, buffer_remap_,
                                pipeline_loop_, max_stage_ != 1)(block));
 
@@ -2157,10 +2414,11 @@ private:
       if (is_zero(inbound)) {
         continue;
       }
-      new_block = Downcast<Block>(Substitute(
+      new_block = Downcast<SBlock>(Substitute(
           new_block, {{pipeline_loop_->loop_var, normalized_access_index}}));
+      new_block = ReplayScalarBindings(new_block, normalized_access_index);
 
-      Stmt rewritten_stmt = BlockRealize({}, inbound, new_block);
+      Stmt rewritten_stmt = SBlockRealize({}, inbound, new_block);
       rewritten_stmt = WrapLoopDependentWrappers(std::move(rewritten_stmt),
                                                  normalized_access_index);
       rewritten_stmt = WrapPipelineStageContext(std::move(rewritten_stmt),
@@ -2195,8 +2453,8 @@ private:
         }
 
         for (const BufferRegion &write_region : new_block->writes) {
-          async_states_[stage].dst_buffers.insert(write_region->buffer.get());
-          buffer_to_commit_group[write_region->buffer.get()] = commit_group_id;
+          async_states_[stage].dst_buffers.insert(write_region->buffer);
+          buffer_to_commit_group[write_region->buffer] = commit_group_id;
         }
         async_states_[stage].producer_head = normalized_access_index;
         local_state.producer_head = normalized_access_index;
@@ -2210,7 +2468,7 @@ private:
         rewritten_stmt =
             SimtProducerAnnotator::Annotate(rewritten_stmt, target_);
         rewritten_stmt = AttrStmt(make_zero(DataType::Int(32)),
-                                  tir::attr::async_scope, 1, rewritten_stmt);
+                                  s_tir::attr::async_scope, 1, rewritten_stmt);
       }
       if (pipeline_mbar_phase) {
         rewritten_stmt = TileOpMbarPhaseAnnotator::Annotate(
@@ -2255,12 +2513,14 @@ private:
       Map<String, Any> preserved_annotations;
       for (const auto &kv : pipeline_loop_->annotations) {
         const String &key = kv.first;
-        if (kv.first != tir::attr::software_pipeline_stage &&
-            kv.first != tir::attr::software_pipeline_order &&
-            kv.first != tir::attr::software_pipeline_async_stages &&
+        if (kv.first != s_tir::attr::software_pipeline_stage &&
+            kv.first != s_tir::attr::software_pipeline_order &&
+            kv.first != s_tir::attr::software_pipeline_async_stages &&
             kv.first != kPipelineAsyncProducers &&
             kv.first != kPipelineAsyncProducerGroups &&
-            kv.first != kPipelineTmaCopies && kv.first != "num_stages") {
+            kv.first != kPipelineTmaCopies &&
+            kv.first != kPipelineReplayableScalarBinds &&
+            kv.first != "num_stages") {
           preserved_annotations.Set(key, kv.second);
         }
       }
@@ -2274,8 +2534,8 @@ private:
                      unroll_loop ? ForKind::kUnrolled : pipeline_loop_->kind,
                      std::move(new_loop), std::nullopt, preserved_annotations);
     }
-    Stmt result = BlockRealize({}, Bool(true),
-                               MakeBlock(new_loop, buffer_data_to_buffer_));
+    Stmt result = SBlockRealize({}, Bool(true),
+                                MakeBlock(new_loop, buffer_data_to_buffer_));
     if (pipeline_num_stages) {
       if (pipeline_num_stages.value()->value > 1) {
         result =
@@ -2295,11 +2555,13 @@ private:
   Array<Buffer> local_allocs_;
   For pipeline_loop_;
   PipelineInfo pipeline_info_;
+  Array<SBlock> scalar_binding_blocks_;
   int max_stage_ = -1;
   Map<Buffer, Buffer> buffer_remap_;
   Optional<Target> target_;
-  Array<Block> ordered_stmts_;
-  std::vector<LetWrapper> loop_var_let_wrappers_;
+  Array<SBlock> ordered_stmts_;
+  std::vector<ScalarBinding> scalar_bindings_;
+  ScalarBindingMap scalar_binding_map_;
   std::vector<IfWrapper> loop_var_if_wrappers_;
   std::map<int, AsyncStateGlobal> async_states_;
 };
@@ -2311,19 +2573,20 @@ private:
  * source to the destination. \param[out] dep_dst2src Optional, a map to store
  * dependency edges from the destination to the source.
  */
-void BuildDependencyGraph(const Array<Block> &blocks,
-                          std::unordered_map<Block, Array<Block>, ObjectPtrHash,
-                                             ObjectPtrEqual> *dep_src2dst,
-                          std::unordered_map<Block, Array<Block>, ObjectPtrHash,
-                                             ObjectPtrEqual> *dep_dst2src) {
-  std::unordered_map<Var, Array<Block>, ObjectPtrHash, ObjectPtrEqual>
+void BuildDependencyGraph(
+    const Array<SBlock> &blocks,
+    std::unordered_map<SBlock, Array<SBlock>, ObjectPtrHash, ObjectPtrEqual>
+        *dep_src2dst,
+    std::unordered_map<SBlock, Array<SBlock>, ObjectPtrHash, ObjectPtrEqual>
+        *dep_dst2src) {
+  std::unordered_map<Var, Array<SBlock>, ObjectPtrHash, ObjectPtrEqual>
       buffer_writers;
 
-  for (const Block &block : blocks) {
+  for (const SBlock &block : blocks) {
     for (const BufferRegion &read : block->reads) {
       auto it = buffer_writers.find(read->buffer->data);
       if (it != buffer_writers.end()) {
-        for (const Block &writer : it->second) {
+        for (const SBlock &writer : it->second) {
           if (dep_src2dst != nullptr) {
             (*dep_src2dst)[writer].push_back(block);
           }
@@ -2395,7 +2658,7 @@ private:
 class BarrierBufferCollector : public StmtExprVisitor {
 public:
   static std::vector<Buffer>
-  Collect(const Array<Block> &blocks,
+  Collect(const Array<SBlock> &blocks,
           const Map<Var, Buffer> &buffer_data_to_buffer) {
     BarrierBufferCollector c(buffer_data_to_buffer);
     for (const auto &block : blocks) {
@@ -2411,8 +2674,8 @@ private:
   void VisitExpr_(const BufferLoadNode *op) final {
     if (op->buffer.scope() == "shared.barrier" ||
         op->buffer.scope() == "shared.cluster_barrier") {
-      if (!seen_.count(op->buffer.get())) {
-        seen_.insert(op->buffer.get());
+      if (!seen_.count(op->buffer)) {
+        seen_.insert(op->buffer);
         barriers_.push_back(op->buffer);
       }
     }
@@ -2422,8 +2685,8 @@ private:
   void VisitStmt_(const BufferStoreNode *op) final {
     if (op->buffer.scope() == "shared.barrier" ||
         op->buffer.scope() == "shared.cluster_barrier") {
-      if (!seen_.count(op->buffer.get())) {
-        seen_.insert(op->buffer.get());
+      if (!seen_.count(op->buffer)) {
+        seen_.insert(op->buffer);
         barriers_.push_back(op->buffer);
       }
     }
@@ -2436,8 +2699,8 @@ private:
       if (auto load = val.as<BufferLoadNode>()) {
         if (load->buffer.scope() == "shared.barrier" ||
             load->buffer.scope() == "shared.cluster_barrier") {
-          if (!seen_.count(load->buffer.get())) {
-            seen_.insert(load->buffer.get());
+          if (!seen_.count(load->buffer)) {
+            seen_.insert(load->buffer);
             barriers_.push_back(load->buffer);
           }
         }
@@ -2447,18 +2710,16 @@ private:
   }
 
   const Map<Var, Buffer> &buf_map_;
-  std::unordered_set<const BufferNode *> seen_;
+  BufferSet seen_;
   std::vector<Buffer> barriers_;
 };
 
 /// Rewrite barrier references: expand indices and rewrite parity.
 class BarrierIndexRewriter : public StmtExprMutator {
 public:
-  BarrierIndexRewriter(
-      const std::unordered_map<const BufferNode *, Buffer> &old_to_new,
-      const std::unordered_map<const BufferNode *, PrimExpr> &old_shapes,
-      PrimExpr stage_expr, PrimExpr parity_cycle, Var loop_var,
-      PrimExpr loop_min)
+  BarrierIndexRewriter(const BufferMap &old_to_new,
+                       const BufferShapeMap &old_shapes, PrimExpr stage_expr,
+                       PrimExpr parity_cycle, Var loop_var, PrimExpr loop_min)
       : old_to_new_(old_to_new), old_shapes_(old_shapes),
         stage_expr_(std::move(stage_expr)),
         parity_cycle_(std::move(parity_cycle)), loop_var_(std::move(loop_var)),
@@ -2466,10 +2727,10 @@ public:
 
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
     BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
-    auto it = old_to_new_.find(load->buffer.get());
+    auto it = old_to_new_.find(load->buffer);
     if (it != old_to_new_.end()) {
       auto *n = load.CopyOnWrite();
-      PrimExpr old_size = old_shapes_.at(load->buffer.get());
+      PrimExpr old_size = old_shapes_.at(load->buffer);
       n->buffer = it->second;
       n->indices.Set(0, stage_expr_ * old_size + n->indices[0]);
     }
@@ -2478,10 +2739,10 @@ public:
 
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
-    auto it = old_to_new_.find(store->buffer.get());
+    auto it = old_to_new_.find(store->buffer);
     if (it != old_to_new_.end()) {
       auto *n = store.CopyOnWrite();
-      PrimExpr old_size = old_shapes_.at(store->buffer.get());
+      PrimExpr old_size = old_shapes_.at(store->buffer);
       n->buffer = it->second;
       n->indices.Set(0, stage_expr_ * old_size + n->indices[0]);
     }
@@ -2496,9 +2757,9 @@ public:
     Map<String, ObjectRef> new_annos = call->annotations;
     for (const auto &[key, val] : call->annotations) {
       if (auto load = val.as<BufferLoadNode>()) {
-        auto it = old_to_new_.find(load->buffer.get());
+        auto it = old_to_new_.find(load->buffer);
         if (it != old_to_new_.end()) {
-          PrimExpr old_size = old_shapes_.at(load->buffer.get());
+          PrimExpr old_size = old_shapes_.at(load->buffer);
           auto new_load = BufferLoad(
               it->second, {stage_expr_ * old_size + load->indices[0]});
           new_annos.Set(key, new_load);
@@ -2515,10 +2776,9 @@ public:
       if (auto load = call->args[0].as<BufferLoadNode>()) {
         // Check if the barrier ref (possibly already rewritten above)
         // targets one of our expanded barriers.
-        const BufferNode *target = load->buffer.get();
         bool is_expanded = false;
-        for (const auto &[old_buf, new_buf] : old_to_new_) {
-          if (new_buf.get() == target) {
+        for (const auto &kv : old_to_new_) {
+          if (load->buffer.same_as(kv.second)) {
             is_expanded = true;
             break;
           }
@@ -2528,7 +2788,7 @@ public:
           arith::Analyzer analyzer;
           PrimExpr user_parity = call->args[1];
           PrimExpr user_parity_at_min = analyzer.Simplify(
-              tir::Substitute(user_parity, {{loop_var_, loop_min_}}));
+              tirx::Substitute(user_parity, {{loop_var_, loop_min_}}));
           // New parity = (iteration_block + offset) % 2
           PrimExpr offset = IntImm(DataType::Int(32), 0);
           if (const int64_t *imm = as_const_int(user_parity_at_min)) {
@@ -2546,8 +2806,8 @@ public:
   }
 
 private:
-  const std::unordered_map<const BufferNode *, Buffer> &old_to_new_;
-  const std::unordered_map<const BufferNode *, PrimExpr> &old_shapes_;
+  const BufferMap &old_to_new_;
+  const BufferShapeMap &old_shapes_;
   PrimExpr stage_expr_;
   PrimExpr parity_cycle_;
   Var loop_var_;
@@ -2563,7 +2823,7 @@ private:
 /// Returns a map of old→new barrier buffers for outer block alloc_buffers
 /// update.
 Map<Buffer, Buffer> ExpandPipelineBarriers(
-    Array<Block> &original_order, PipelineInfo &pipeline_info,
+    Array<SBlock> &original_order, PipelineInfo &pipeline_info,
     Map<Var, Buffer> &buffer_data_to_buffer,
     std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>
         &allocated_buffers,
@@ -2579,21 +2839,21 @@ Map<Buffer, Buffer> ExpandPipelineBarriers(
   // arrive barriers) — those should NOT be pipeline-expanded.
   // ISP-created pipeline_mbar is handled specially: it's always in
   // block_local_allocs and was just created, so include it too.
-  std::unordered_set<const BufferNode *> local_barrier_set;
+  BufferSet local_barrier_set;
   for (const Buffer &buf : block_local_allocs) {
     if (buf.scope() == "shared.barrier" ||
         buf.scope() == "shared.cluster_barrier")
-      local_barrier_set.insert(buf.get());
+      local_barrier_set.insert(buf);
   }
 
   // Find barriers that have explicit ptx_arrive_barrier calls.
   class ArriveBarrierDetector : public StmtExprVisitor {
   public:
-    std::unordered_set<const BufferNode *> arrived_;
+    BufferSet arrived_;
     void VisitExpr_(const CallNode *op) final {
       if (op->op.same_as(builtin::ptx_arrive_barrier()) && !op->args.empty()) {
         if (auto load = op->args[0].as<BufferLoadNode>()) {
-          arrived_.insert(load->buffer.get());
+          arrived_.insert(load->buffer);
         }
       }
       StmtExprVisitor::VisitExpr_(op);
@@ -2610,8 +2870,7 @@ Map<Buffer, Buffer> ExpandPipelineBarriers(
   for (const Buffer &buf : all_referenced) {
     // Include if: (a) it's an ISP-created local barrier, OR
     //             (b) it has explicit ptx_arrive_barrier calls.
-    if (local_barrier_set.count(buf.get()) ||
-        arrive_det.arrived_.count(buf.get())) {
+    if (local_barrier_set.count(buf) || arrive_det.arrived_.count(buf)) {
       barriers.push_back(buf);
     }
   }
@@ -2632,15 +2891,14 @@ Map<Buffer, Buffer> ExpandPipelineBarriers(
   };
 
   // Create expanded buffer for each barrier.
-  std::unordered_map<const BufferNode *, Buffer> old_to_new;
-  std::unordered_map<const BufferNode *, PrimExpr> old_shapes;
+  BufferMap old_to_new;
+  BufferShapeMap old_shapes;
   for (const Buffer &buf : barriers) {
-    old_shapes[buf.get()] = buf->shape[0];
-    ObjectPtr<BufferNode> new_node =
-        tvm::ffi::make_object<BufferNode>(*(buf.get()));
+    old_shapes[buf] = buf->shape[0];
+    ObjectPtr<BufferNode> new_node = make_object<BufferNode>(*(buf.get()));
     new_node->shape = {PrimExpr(num_stages) * buf->shape[0]};
     Buffer new_buf(new_node);
-    old_to_new[buf.get()] = new_buf;
+    old_to_new[buf] = new_buf;
 
     // Update all maps and alloc arrays.
     buffer_data_to_buffer.Set(buf->data, new_buf);
@@ -2654,20 +2912,20 @@ Map<Buffer, Buffer> ExpandPipelineBarriers(
   BarrierIndexRewriter rewriter(old_to_new, old_shapes, stage_expr,
                                 parity_cycle, loop_var, loop_min);
   for (size_t i = 0; i < original_order.size(); ++i) {
-    Block old_block = original_order[i];
+    SBlock old_block = original_order[i];
     Stmt new_body = rewriter(old_block->body);
     if (!new_body.same_as(old_block->body)) {
       // Also rewrite alloc_buffers in the block (barriers may be allocated
       // here).
       Array<Buffer> new_allocs;
       for (const Buffer &ab : old_block->alloc_buffers) {
-        auto it = old_to_new.find(ab.get());
+        auto it = old_to_new.find(ab);
         new_allocs.push_back(it != old_to_new.end() ? it->second : ab);
       }
-      Block new_block(old_block->iter_vars, old_block->reads, old_block->writes,
-                      old_block->name_hint, new_body, old_block->init,
-                      new_allocs, old_block->match_buffers,
-                      old_block->annotations);
+      SBlock new_block(old_block->iter_vars, old_block->reads,
+                       old_block->writes, old_block->name_hint, new_body,
+                       old_block->init, new_allocs, old_block->match_buffers,
+                       old_block->annotations);
       PipelineAnnotation anno = pipeline_info.at(old_block);
       pipeline_info.erase(old_block);
       pipeline_info.emplace(new_block, anno);
@@ -2677,13 +2935,8 @@ Map<Buffer, Buffer> ExpandPipelineBarriers(
 
   // Return the old→new mapping for outer block alloc_buffers update.
   Map<Buffer, Buffer> result;
-  for (const auto &[old_ptr, new_buf] : old_to_new) {
-    for (const Buffer &old_buf : barriers) {
-      if (old_buf.get() == old_ptr) {
-        result.Set(old_buf, new_buf);
-        break;
-      }
-    }
+  for (const auto &[old_buf, new_buf] : old_to_new) {
+    result.Set(old_buf, new_buf);
   }
   return result;
 }
@@ -2709,7 +2962,7 @@ Map<Buffer, Buffer> ExpandPipelineBarriers(
  * \return The newly created barrier buffer (undefined if no TMA copies).
  */
 Buffer RewritePipelineTmaBarriers(
-    Array<Block> &original_order, PipelineInfo &pipeline_info,
+    Array<SBlock> &original_order, PipelineInfo &pipeline_info,
     const Array<Integer> &tma_copies, Map<Var, Buffer> &buffer_data_to_buffer,
     std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>
         &allocated_buffers,
@@ -2747,16 +3000,16 @@ Buffer RewritePipelineTmaBarriers(
       continue;
 
     bool is_last = (static_cast<int>(i) == last_tma_idx);
-    Block old_block = original_order[i];
+    SBlock old_block = original_order[i];
     CopyToTmaCopyRewriter rewriter(barrier_buf,
                                    /*barrier_id=*/IntImm(DataType::Int(32), 0),
                                    /*emit_arrive=*/is_last);
     Stmt new_body = rewriter(old_block->body);
 
-    Block new_block(old_block->iter_vars, old_block->reads, old_block->writes,
-                    old_block->name_hint, new_body, old_block->init,
-                    old_block->alloc_buffers, old_block->match_buffers,
-                    old_block->annotations);
+    SBlock new_block(old_block->iter_vars, old_block->reads, old_block->writes,
+                     old_block->name_hint, new_body, old_block->init,
+                     old_block->alloc_buffers, old_block->match_buffers,
+                     old_block->annotations);
 
     PipelineAnnotation anno = pipeline_info.at(old_block);
     pipeline_info.erase(old_block);
@@ -2771,7 +3024,7 @@ Buffer RewritePipelineTmaBarriers(
   for (size_t i = 0; i < original_order.size(); i++) {
     if (waits_inserted)
       break;
-    Block old_block = original_order[i];
+    SBlock old_block = original_order[i];
     int stage = pipeline_info.at(old_block).stage;
     if (stage == 0)
       continue; // still in producer stage
@@ -2790,10 +3043,10 @@ Buffer RewritePipelineTmaBarriers(
     wait_stmts.push_back(old_block->body);
     Stmt new_body = SeqStmt(wait_stmts);
 
-    Block new_block(old_block->iter_vars, old_block->reads, old_block->writes,
-                    old_block->name_hint, new_body, old_block->init,
-                    old_block->alloc_buffers, old_block->match_buffers,
-                    old_block->annotations);
+    SBlock new_block(old_block->iter_vars, old_block->reads, old_block->writes,
+                     old_block->name_hint, new_body, old_block->init,
+                     old_block->alloc_buffers, old_block->match_buffers,
+                     old_block->annotations);
 
     PipelineAnnotation anno = pipeline_info.at(old_block);
     pipeline_info.erase(old_block);
@@ -2832,40 +3085,73 @@ private:
    * stage(B) and order(A) < order(B)
    */
   void ValidatePipelineBody(const PipelineInfo &pipeline_info,
-                            const Array<Block> &original_order) {
+                            const Array<SBlock> &original_order) {
     std::unordered_set<int> used_orders;
-    std::unordered_map<int, int> stage_max_order;
-    std::unordered_map<int, const Block *> order_to_block;
-    std::unordered_map<const Block *, int> block_to_stage;
-    for (const Block &block : original_order) {
+    for (const SBlock &block : original_order) {
       const auto &stmt_info = pipeline_info.at(block);
       int order = stmt_info.order;
-      CHECK(!used_orders.count(order))
+      ICHECK(!used_orders.count(order))
           << "ValueError: Two statements in the software pipeline cannot have "
              "the same order";
       used_orders.insert(order);
     }
 
-    std::unordered_map<Block, Array<Block>, ObjectPtrHash, ObjectPtrEqual>
+    std::unordered_map<SBlock, Array<SBlock>, ObjectPtrHash, ObjectPtrEqual>
         dep_src2dst;
     BuildDependencyGraph(original_order, &dep_src2dst, nullptr);
 
     for (const auto &pair : dep_src2dst) {
-      const Block &src = pair.first;
+      const SBlock &src = pair.first;
       const auto &src_info = pipeline_info.at(src);
-      const Array<Block> &dsts = pair.second;
-      for (const Block &dst : dsts) {
+      const Array<SBlock> &dsts = pair.second;
+      for (const SBlock &dst : dsts) {
         const auto &dst_info = pipeline_info.at(dst);
-        CHECK_LE(src_info.stage, dst_info.stage)
+        ICHECK_LE(src_info.stage, dst_info.stage)
             << "ValueError: statement " << dst << " in stage " << dst_info.stage
             << " cannot depends on statement " << src << " in a later stage "
             << src_info.stage;
         if (src_info.stage == dst_info.stage) {
-          CHECK_LT(src_info.order, dst_info.order)
+          ICHECK_LT(src_info.order, dst_info.order)
               << "ValueError: two statements with buffer "
                  "access dependency in the same stage of the "
                  "software pipeline cannot be reordered";
         }
+      }
+    }
+  }
+
+  void ValidateScheduledBindDependencies(const PipelineInfo &pipeline_info,
+                                         const Array<SBlock> &scheduled_order) {
+    std::unordered_map<Var, SBlock, ObjectPtrHash, ObjectPtrEqual>
+        bind_producers;
+    for (const SBlock &block : scheduled_order) {
+      if (const auto *bind = block->body.as<BindNode>()) {
+        bind_producers.emplace(bind->var, block);
+      }
+    }
+    if (bind_producers.empty()) {
+      return;
+    }
+
+    for (const SBlock &consumer : scheduled_order) {
+      Array<Var> undefined_vars = UndefinedVars(consumer->body, Array<Var>{});
+      for (const Var &var : undefined_vars) {
+        auto it = bind_producers.find(var);
+        if (it == bind_producers.end() || it->second.same_as(consumer)) {
+          continue;
+        }
+
+        const PipelineAnnotation &producer_info = pipeline_info.at(it->second);
+        const PipelineAnnotation &consumer_info = pipeline_info.at(consumer);
+        ICHECK_EQ(producer_info.stage, consumer_info.stage)
+            << "ValueError: scheduled scalar Bind '" << var
+            << "' is used from a different pipeline stage. Scalar Bind "
+               "statements that cannot be replayed must be scheduled in the "
+               "same stage as their consumers.";
+        ICHECK_LT(producer_info.order, consumer_info.order)
+            << "ValueError: scheduled scalar Bind '" << var
+            << "' must be ordered before every consumer in the same pipeline "
+               "stage.";
       }
     }
   }
@@ -2888,16 +3174,101 @@ private:
     Map<String, Any> preserved_annotations;
     for (const auto &kv : annotations) {
       const String &key = kv.first;
-      if (key != tir::attr::software_pipeline_stage &&
-          key != tir::attr::software_pipeline_order &&
-          key != tir::attr::software_pipeline_async_stages &&
+      if (key != s_tir::attr::software_pipeline_stage &&
+          key != s_tir::attr::software_pipeline_order &&
+          key != s_tir::attr::software_pipeline_async_stages &&
           key != kPipelineAsyncProducers &&
           key != kPipelineAsyncProducerGroups && key != kPipelineTmaCopies &&
-          key != "num_stages" && key != "tl_pipelined_num_stages") {
+          key != kPipelineReplayableScalarBinds && key != "num_stages" &&
+          key != "tl_pipelined_num_stages") {
         preserved_annotations.Set(key, kv.second);
       }
     }
     return preserved_annotations;
+  }
+
+  Stmt VisitStmt_(const SeqStmtNode *op) final {
+    struct ScopedAllocation {
+      Buffer buffer;
+      bool existed;
+    };
+
+    Array<Stmt> seq;
+    bool changed = false;
+    std::vector<std::pair<Var, Optional<Buffer>>> old_bindings;
+    std::vector<ScopedAllocation> old_allocated;
+    std::vector<std::pair<size_t, size_t>> flat_alloc_indices;
+
+    auto register_buffer = [&](const Buffer &buffer,
+                               bool is_allocation) -> std::optional<size_t> {
+      old_bindings.emplace_back(buffer->data,
+                                buffer_data_to_buffer_.Get(buffer->data));
+      buffer_data_to_buffer_.Set(buffer->data, buffer);
+      if (is_allocation) {
+        old_allocated.push_back({buffer, allocated_buffers_.count(buffer) > 0});
+        allocated_buffers_.insert(buffer);
+        return old_allocated.size() - 1;
+      }
+      return std::nullopt;
+    };
+
+    auto apply_pending_flat_alloc_remaps = [&]() {
+      for (auto &[stmt_index, alloc_state_index] : flat_alloc_indices) {
+        const Buffer &old_buffer = old_allocated[alloc_state_index].buffer;
+        if (auto remapped = pending_buffer_remap_.Get(old_buffer)) {
+          const auto *alloc = seq[stmt_index].as<AllocBufferNode>();
+          ICHECK(alloc != nullptr);
+          Buffer new_buffer = remapped.value();
+          seq.Set(stmt_index,
+                  AllocBuffer(new_buffer, alloc->annotations, alloc->span));
+          buffer_data_to_buffer_.Set(old_buffer->data, new_buffer);
+          if (!old_allocated[alloc_state_index].existed) {
+            allocated_buffers_.erase(old_buffer);
+            allocated_buffers_.insert(new_buffer);
+          }
+          pending_layout_remapped_allocs_.emplace_back(old_buffer, new_buffer);
+          old_allocated[alloc_state_index].buffer = new_buffer;
+          pending_buffer_remap_.erase(old_buffer);
+          changed = true;
+        }
+      }
+    };
+
+    for (const Stmt &child : op->seq) {
+      Stmt new_child = VisitStmt(child);
+      changed = changed || !new_child.same_as(child);
+      seq.push_back(new_child);
+      apply_pending_flat_alloc_remaps();
+
+      if (const auto *alloc = new_child.as<AllocBufferNode>()) {
+        std::optional<size_t> alloc_state_index =
+            register_buffer(alloc->buffer, true);
+        ICHECK(alloc_state_index.has_value());
+        flat_alloc_indices.emplace_back(seq.size() - 1,
+                                        alloc_state_index.value());
+      } else if (const auto *decl = new_child.as<DeclBufferNode>()) {
+        register_buffer(decl->buffer, false);
+      }
+    }
+    apply_pending_flat_alloc_remaps();
+
+    for (auto it = old_allocated.rbegin(); it != old_allocated.rend(); ++it) {
+      if (!it->existed) {
+        allocated_buffers_.erase(it->buffer);
+      }
+    }
+    for (auto it = old_bindings.rbegin(); it != old_bindings.rend(); ++it) {
+      if (it->second.defined()) {
+        buffer_data_to_buffer_.Set(it->first, it->second.value());
+      } else {
+        buffer_data_to_buffer_.erase(it->first);
+      }
+    }
+
+    if (!changed) {
+      return GetRef<Stmt>(op);
+    }
+    return SeqStmt(seq, op->span);
   }
 
   Stmt VisitStmt_(const ForNode *op) final {
@@ -2907,14 +3278,15 @@ private:
       return for_node;
     }
     // Step 2: Find the body and buffer allocations of the pipeline. The body
-    // can be direct child of the for-loop. If the for-loop has BlockRealize as
+    // can be direct child of the for-loop. If the for-loop has SBlockRealize as
     // its child, the pipeline body will be the child of the block.
     Stmt pipeline_body_root{nullptr};
     bool pipeline_body_from_block = false;
     Array<Buffer> pipeline_allocs;
     Array<Buffer>
         block_local_allocs; // buffers allocated in the pipeline block itself
-    if (const auto *realize = for_node->body.as<BlockRealizeNode>()) {
+    Array<Buffer> flat_local_allocs;
+    if (const auto *realize = for_node->body.as<SBlockRealizeNode>()) {
       const auto &block = realize->block;
       for (const auto &buffer : block->alloc_buffers) {
         ICHECK(buffer->IsInstance<BufferNode>());
@@ -2928,9 +3300,8 @@ private:
       pipeline_body_root = for_node->body;
     }
 
-    const SeqStmtNode *pipeline_body_seq = nullptr;
+    Optional<SeqStmt> pipeline_body_seq;
     std::vector<std::function<Stmt(Stmt)>> rewrap_fns;
-    std::vector<LetWrapper> loop_var_let_wrappers;
     std::vector<IfWrapper> loop_var_if_wrappers;
     auto append_attr_wrapper = [&rewrap_fns](const AttrStmtNode *attr) {
       Any node = attr->node;
@@ -2947,7 +3318,7 @@ private:
       Stmt current = pipeline_body_root;
       while (true) {
         if (const auto *seq_stmt = current.as<SeqStmtNode>()) {
-          pipeline_body_seq = seq_stmt;
+          pipeline_body_seq = GetRef<SeqStmt>(seq_stmt);
           break;
         }
         if (const auto *if_then_else = current.as<IfThenElseNode>()) {
@@ -2955,17 +3326,10 @@ private:
               << "InjectSoftwarePipeline: Can't handle the body of the loop "
                  "because the IfThenElse node has an else branch";
 
-          // Check if the condition depends on the loop variable or any
-          // transitively dependent variables (similar to LetStmt handling)
-          std::unordered_set<const VarNode *> dependent_vars;
-          dependent_vars.insert(op->loop_var.get());
-          for (const auto &lw : loop_var_let_wrappers) {
-            dependent_vars.insert(lw.var.get());
-          }
-          bool condition_depends_on_loop = UsesVar(
-              if_then_else->condition, [&dependent_vars](const VarNode *vn) {
-                return dependent_vars.count(vn) > 0;
-              });
+          const VarNode *loop_var = op->loop_var.get();
+          bool condition_depends_on_loop =
+              UsesVar(if_then_else->condition,
+                      [loop_var](const VarNode *vn) { return vn == loop_var; });
 
           if (condition_depends_on_loop) {
             // If condition depends on loop variable, we need to push it inside
@@ -2984,39 +3348,6 @@ private:
           current = if_then_else->then_case;
           continue;
         }
-        if (const auto *let_stmt = current.as<LetStmtNode>()) {
-          // If this Let value uses the pipeline loop var OR any variable
-          // defined by a previously recorded loop-var-dependent LetStmt,
-          // record it and push inside each rewritten block later so the
-          // loop var can be substituted with the correct per-iteration index.
-          // Otherwise, keep it as a normal wrapper.
-          // This handles transitive dependencies like:
-          //   id = ids[i]      # depends on loop var
-          //   id2 = ids2[id]   # depends on id, so transitively on loop var
-          std::unordered_set<const VarNode *> dependent_vars;
-          dependent_vars.insert(op->loop_var.get());
-          for (const auto &lw : loop_var_let_wrappers) {
-            dependent_vars.insert(lw.var.get());
-          }
-          bool depends_on_loop =
-              UsesVar(let_stmt->value, [&dependent_vars](const VarNode *vn) {
-                return dependent_vars.count(vn) > 0;
-              });
-          if (depends_on_loop) {
-            loop_var_let_wrappers.push_back({let_stmt->var, let_stmt->value});
-          } else {
-            Var var = let_stmt->var;
-            PrimExpr value = let_stmt->value;
-            Span span = let_stmt->span;
-            rewrap_fns.emplace_back([var = std::move(var),
-                                     value = std::move(value),
-                                     span](Stmt body) -> Stmt {
-              return LetStmt(var, value, body, span);
-            });
-          }
-          current = let_stmt->body;
-          continue;
-        }
         if (const auto *attr = current.as<AttrStmtNode>()) {
           append_attr_wrapper(attr);
           current = attr->body;
@@ -3026,22 +3357,59 @@ private:
                    << "SeqStmt, got " << current->GetTypeKey();
       }
     }
-    ICHECK(pipeline_body_seq != nullptr);
+    ICHECK(pipeline_body_seq.defined());
+
+    // In tirx flat IR, buffer declarations/allocations inside a block are
+    // represented as standalone statements at the beginning of the SeqStmt.
+    // They define storage for later pipeline stages, but are not executable
+    // stages and therefore must not consume entries from pipeline annotations.
+    SeqStmt filtered_pipeline_body;
+    {
+      Array<Stmt> stage_stmts;
+      bool filtered = false;
+      for (const Stmt &child : pipeline_body_seq.value()->seq) {
+        if (const auto *alloc = child.as<AllocBufferNode>()) {
+          const Buffer &buffer = alloc->buffer;
+          buffer_data_to_buffer_.Set(buffer->data, buffer);
+          allocated_buffers_.insert(buffer);
+          block_local_allocs.push_back(buffer);
+          flat_local_allocs.push_back(buffer);
+          filtered = true;
+          continue;
+        }
+        if (const auto *decl = child.as<DeclBufferNode>()) {
+          const Buffer &buffer = decl->buffer;
+          buffer_data_to_buffer_.Set(buffer->data, buffer);
+          filtered = true;
+          continue;
+        }
+        stage_stmts.push_back(child);
+      }
+      if (filtered) {
+        ICHECK(!stage_stmts.empty())
+            << "ValueError: The body of the software pipeline has no stages "
+               "after removing buffer declarations";
+        filtered_pipeline_body = SeqStmt(stage_stmts);
+        pipeline_body_seq = filtered_pipeline_body;
+      }
+    }
+    SeqStmt pipeline_body = pipeline_body_seq.value();
+    const Array<Stmt> &pipeline_body_stmts = pipeline_body->seq;
 
     // Step 3: Blockize the components of the pipeline. Each child of the
     // pipelined loop will be converted into a block.
     PipelineInfo pipeline_info;
-    Array<Block> original_order; // pipeline body blocks in the original order
+    Array<SBlock> original_order; // pipeline body blocks in the original order
 
     auto f_add_child = [&](const Stmt &child) {
       original_order.push_back(MakeBlock(child, buffer_data_to_buffer_));
     };
-    for (size_t i = 0; i < pipeline_body_seq->seq.size(); i++) {
-      const Stmt &child = pipeline_body_seq->seq[i];
-      const auto *nested_block_realize = child.as<BlockRealizeNode>();
+    for (size_t i = 0; i < pipeline_body_stmts.size(); i++) {
+      const Stmt &child = pipeline_body_stmts[i];
+      const auto *nested_block_realize = child.as<SBlockRealizeNode>();
       if (nested_block_realize && is_one(nested_block_realize->predicate) &&
           nested_block_realize->block->body->IsInstance<SeqStmtNode>()) {
-        const Block &nested_pipeline_block = nested_block_realize->block;
+        const SBlock &nested_pipeline_block = nested_block_realize->block;
         ICHECK(nested_pipeline_block->match_buffers
                    .empty()); // match_buffer should have been lowered
         for (const auto &buffer : nested_pipeline_block->alloc_buffers) {
@@ -3056,28 +3424,104 @@ private:
     // This includes buffers allocated in outer blocks (like logits_smem) that
     // are used inside the pipeline loop.
     BufferUsageCollector collector(buffer_data_to_buffer_, allocated_buffers_);
-    pipeline_allocs = collector.Collect(SeqStmt(pipeline_body_seq->seq));
+    pipeline_allocs = collector.Collect(SeqStmt(pipeline_body_stmts));
+
+    Optional<Array<Integer>> replayable_bind_mask;
+    if (auto replayable_bind_anno =
+            op->annotations.Get(kPipelineReplayableScalarBinds)) {
+      auto mask = Downcast<Array<Integer>>(replayable_bind_anno.value());
+      if (mask.size() == original_order.size()) {
+        bool valid_mask = true;
+        for (size_t i = 0; i < original_order.size(); ++i) {
+          if (mask[i]->value != 0 &&
+              original_order[i]->body.as<BindNode>() == nullptr) {
+            valid_mask = false;
+            break;
+          }
+        }
+        if (valid_mask) {
+          replayable_bind_mask = std::move(mask);
+        }
+      }
+    }
+    BufferSet pipeline_write_buffers;
+    if (!replayable_bind_mask.defined()) {
+      pipeline_write_buffers = CollectPipelineWriteBuffers(original_order);
+    }
+    Array<SBlock> scalar_binding_blocks;
+    Array<SBlock> scheduled_order;
+    std::vector<char> is_replayable_bind;
+    is_replayable_bind.reserve(original_order.size());
+    for (size_t i = 0; i < original_order.size(); ++i) {
+      const SBlock &block = original_order[i];
+      bool replayable =
+          replayable_bind_mask.defined()
+              ? replayable_bind_mask.value()[i]->value != 0
+              : IsReplayableScalarBindBlock(block, pipeline_write_buffers);
+      is_replayable_bind.push_back(replayable ? 1 : 0);
+      if (replayable) {
+        scalar_binding_blocks.push_back(block);
+      } else {
+        scheduled_order.push_back(block);
+      }
+    }
+    ICHECK(!scheduled_order.empty())
+        << "ValueError: The body of the software pipeline has no schedulable "
+           "statements after removing replayable scalar Bind statements";
 
     auto pipeline_stages = Downcast<Array<Integer>>(
-        op->annotations.at(tir::attr::software_pipeline_stage));
+        op->annotations.at(s_tir::attr::software_pipeline_stage));
     auto pipeline_orders = Downcast<Array<Integer>>(
-        op->annotations.at(tir::attr::software_pipeline_order));
-    CHECK_EQ(pipeline_stages.size(), original_order.size())
-        << "PrimFunc " << global_symbol_ << " has original order "
-        << original_order.Map(
-               [](const auto &block) { return block->name_hint; })
-        << ", but pipeline annotation is " << pipeline_stages
-        << " with different size";
-    CHECK_EQ(pipeline_orders.size(), original_order.size())
-        << "PrimFunc " << global_symbol_ << " has original order "
-        << original_order.Map(
-               [](const auto &block) { return block->name_hint; })
-        << ", but pipeline annotation is " << pipeline_orders
-        << " with different size";
+        op->annotations.at(s_tir::attr::software_pipeline_order));
+    ICHECK_EQ(pipeline_stages.size(), pipeline_orders.size())
+        << "PrimFunc " << global_symbol_
+        << " has software_pipeline_stage annotation " << pipeline_stages
+        << " and software_pipeline_order annotation " << pipeline_orders
+        << " with different sizes";
+
+    bool annotations_include_replayable_binds = false;
+    if (pipeline_stages.size() == scheduled_order.size()) {
+      annotations_include_replayable_binds = false;
+    } else if (pipeline_stages.size() == original_order.size()) {
+      annotations_include_replayable_binds = true;
+    } else {
+      LOG(FATAL) << "PrimFunc " << global_symbol_
+                 << " has schedulable pipeline order "
+                 << scheduled_order.Map(
+                        [](const auto &block) { return block->name_hint; })
+                 << " and original order "
+                 << original_order.Map(
+                        [](const auto &block) { return block->name_hint; })
+                 << ", but pipeline annotation is " << pipeline_stages
+                 << " with different size";
+    }
+
+    std::vector<size_t> scheduled_annotation_indices;
+    scheduled_annotation_indices.reserve(scheduled_order.size());
+    if (annotations_include_replayable_binds) {
+      size_t scheduled_index = 0;
+      for (size_t i = 0; i < original_order.size(); ++i) {
+        if (is_replayable_bind[i]) {
+          continue;
+        }
+        ICHECK(scheduled_index < scheduled_order.size());
+        ICHECK(scheduled_order[scheduled_index].same_as(original_order[i]));
+        scheduled_annotation_indices.push_back(i);
+        ++scheduled_index;
+      }
+    } else {
+      for (size_t i = 0; i < scheduled_order.size(); ++i) {
+        scheduled_annotation_indices.push_back(i);
+      }
+    }
+
+    auto expected_annotation_size = annotations_include_replayable_binds
+                                        ? original_order.size()
+                                        : scheduled_order.size();
 
     std::unordered_set<int> pipeline_async_stages;
     if (auto async_annot =
-            op->annotations.Get(tir::attr::software_pipeline_async_stages)) {
+            op->annotations.Get(s_tir::attr::software_pipeline_async_stages)) {
       for (const Integer &stage :
            Downcast<Array<Integer>>(async_annot.value())) {
         pipeline_async_stages.insert(static_cast<int>(stage->value));
@@ -3087,9 +3531,9 @@ private:
     if (auto async_producers_anno =
             op->annotations.Get(kPipelineAsyncProducers)) {
       auto async_flags = Downcast<Array<Integer>>(async_producers_anno.value());
-      CHECK_EQ(async_flags.size(), original_order.size())
-          << "PrimFunc " << global_symbol_ << " has original order "
-          << original_order.Map(
+      ICHECK_EQ(async_flags.size(), expected_annotation_size)
+          << "PrimFunc " << global_symbol_ << " has schedulable order "
+          << scheduled_order.Map(
                  [](const auto &block) { return block->name_hint; })
           << ", but async producer annotation is " << async_flags
           << " with different size";
@@ -3100,48 +3544,94 @@ private:
             op->annotations.Get(kPipelineAsyncProducerGroups)) {
       auto async_group_ids =
           Downcast<Array<Integer>>(async_groups_anno.value());
-      CHECK_EQ(async_group_ids.size(), original_order.size())
-          << "PrimFunc " << global_symbol_ << " has original order "
-          << original_order.Map(
+      ICHECK_EQ(async_group_ids.size(), expected_annotation_size)
+          << "PrimFunc " << global_symbol_ << " has schedulable order "
+          << scheduled_order.Map(
                  [](const auto &block) { return block->name_hint; })
           << ", but async producer group annotation is " << async_group_ids
           << " with different size";
       pipeline_async_producer_groups = async_group_ids;
     }
 
-    for (size_t i = 0; i < pipeline_stages.size(); i++) {
-      int stage = static_cast<int>(pipeline_stages[i]->value);
+    for (size_t i = 0; i < scheduled_order.size(); i++) {
+      size_t annotation_index = scheduled_annotation_indices[i];
+      int stage = static_cast<int>(pipeline_stages[annotation_index]->value);
       bool is_async_candidate =
           pipeline_async_producers
-              ? (pipeline_async_producers.value()[i]->value != 0)
+              ? (pipeline_async_producers.value()[annotation_index]->value != 0)
               : (pipeline_async_stages.count(stage) > 0);
       // Stages that already spell out async behavior themselves keep that
       // ownership. The pipeline pass only injects async producer semantics for
       // "plain" producer stages that do not already contain cp.async / async
       // queue operations.
-      bool is_async = is_async_candidate &&
-                      !ContainsExplicitAsyncIntrinsics(original_order[i]->body);
+      bool is_async = is_async_candidate && !ContainsExplicitAsyncIntrinsics(
+                                                scheduled_order[i]->body);
       PipelineAnnotation stage_order{
           stage,
-          /*order=*/static_cast<int>(pipeline_orders[i]->value),
+          /*order=*/static_cast<int>(pipeline_orders[annotation_index]->value),
           /*async=*/is_async,
           /*async_group_id=*/
           pipeline_async_producer_groups
               ? static_cast<int>(
-                    pipeline_async_producer_groups.value()[i]->value)
+                    pipeline_async_producer_groups.value()[annotation_index]
+                        ->value)
               : -1};
-      pipeline_info.emplace(original_order[i], stage_order);
+      pipeline_info.emplace(scheduled_order[i], stage_order);
     }
 
-    ValidatePipelineBody(pipeline_info, original_order);
+    if (annotations_include_replayable_binds) {
+      for (const SBlock &binding_block : scalar_binding_blocks) {
+        const auto *bind = binding_block->body.as<BindNode>();
+        ICHECK(bind != nullptr);
+        bool seen_consumer = false;
+        bool multiple_consumers = false;
+        PipelineAnnotation first_consumer;
+        for (const SBlock &consumer : scheduled_order) {
+          Array<Var> undefined_vars =
+              UndefinedVars(consumer->body, Array<Var>{});
+          bool uses_binding = false;
+          for (const Var &var : undefined_vars) {
+            if (var.same_as(bind->var)) {
+              uses_binding = true;
+              break;
+            }
+          }
+          if (!uses_binding) {
+            continue;
+          }
+          const PipelineAnnotation &anno = pipeline_info.at(consumer);
+          if (!seen_consumer) {
+            first_consumer = anno;
+            seen_consumer = true;
+          } else if (first_consumer.stage != anno.stage ||
+                     first_consumer.order != anno.order) {
+            multiple_consumers = true;
+            break;
+          }
+        }
+        if (multiple_consumers) {
+          LOG(WARNING)
+              << "Scalar Bind '" << bind->var
+              << "' is used by multiple pipeline stages; its annotation is "
+                 "ignored and the bind is replayed at each use.";
+        }
+      }
+    }
+
+    ValidateScheduledBindDependencies(pipeline_info, scheduled_order);
+    ValidatePipelineBody(pipeline_info, scheduled_order);
 
     if (!HasOverlappableStages(pipeline_info)) {
-      if (const auto *realize = op->body.as<BlockRealizeNode>()) {
+      if (const auto *realize = for_node->body.as<SBlockRealizeNode>()) {
         const auto &block = realize->block;
         for (const auto &buffer : block->alloc_buffers) {
           buffer_data_to_buffer_.erase(buffer->data);
           allocated_buffers_.erase(buffer);
         }
+      }
+      for (const auto &buffer : flat_local_allocs) {
+        buffer_data_to_buffer_.erase(buffer->data);
+        allocated_buffers_.erase(buffer);
       }
       return For(for_node->loop_var, for_node->min, for_node->extent,
                  for_node->kind, for_node->body, for_node->thread_binding,
@@ -3175,17 +3665,27 @@ private:
       pipeline_depth = std::max(pipeline_depth, 1);
       if (max_stage > 0) {
         if (auto tma_copies_anno = op->annotations.Get(kPipelineTmaCopies)) {
-          auto tma_copies = Downcast<Array<Integer>>(tma_copies_anno.value());
-          if (tma_copies.size() == original_order.size()) {
-            for (const auto &tc : tma_copies) {
+          auto raw_tma_copies =
+              Downcast<Array<Integer>>(tma_copies_anno.value());
+          Array<Integer> tma_copies;
+          if (raw_tma_copies.size() == scheduled_order.size()) {
+            tma_copies = raw_tma_copies;
+          } else if (raw_tma_copies.size() == original_order.size()) {
+            for (size_t annotation_index : scheduled_annotation_indices) {
+              tma_copies.push_back(raw_tma_copies[annotation_index]);
+            }
+          }
+          if (tma_copies.size() == scheduled_order.size()) {
+            for (const Integer &tc : tma_copies) {
               if (tc->value != 0)
                 num_pipeline_tma_copies++;
             }
             if (num_pipeline_tma_copies > 0) {
               pipeline_barrier_buf = RewritePipelineTmaBarriers(
-                  original_order, pipeline_info, tma_copies,
+                  scheduled_order, pipeline_info, tma_copies,
                   buffer_data_to_buffer_, allocated_buffers_,
-                  block_local_allocs, op->loop_var, op->min, pipeline_depth);
+                  block_local_allocs, for_node->loop_var, for_node->min,
+                  pipeline_depth);
             }
           }
         }
@@ -3211,9 +3711,9 @@ private:
                 ->value);
       }
       Map<Buffer, Buffer> barrier_remap = ExpandPipelineBarriers(
-          original_order, pipeline_info, buffer_data_to_buffer_,
-          allocated_buffers_, block_local_allocs, pipeline_allocs, op->loop_var,
-          op->min, barrier_depth);
+          scheduled_order, pipeline_info, buffer_data_to_buffer_,
+          allocated_buffers_, block_local_allocs, pipeline_allocs,
+          for_node->loop_var, for_node->min, barrier_depth);
       // Register expanded barriers for outer block alloc_buffers update.
       for (const auto &[old_buf, new_buf] : barrier_remap) {
         pending_buffer_remap_.Set(old_buf, new_buf);
@@ -3222,22 +3722,21 @@ private:
 
     Array<Buffer> local_allocs = block_local_allocs;
     // Add nested block allocs to local_allocs
-    for (size_t i = 0; i < pipeline_body_seq->seq.size(); i++) {
-      const Stmt &child = pipeline_body_seq->seq[i];
-      const auto *nested_block_realize = child.as<BlockRealizeNode>();
+    for (size_t i = 0; i < pipeline_body_stmts.size(); i++) {
+      const Stmt &child = pipeline_body_stmts[i];
+      const auto *nested_block_realize = child.as<SBlockRealizeNode>();
       if (nested_block_realize && is_one(nested_block_realize->predicate) &&
           nested_block_realize->block->body->IsInstance<SeqStmtNode>()) {
-        const Block &nested_pipeline_block = nested_block_realize->block;
+        const SBlock &nested_pipeline_block = nested_block_realize->block;
         for (const auto &buffer : nested_pipeline_block->alloc_buffers) {
           local_allocs.push_back(buffer);
         }
       }
     }
 
-    PipelineRewriter rewriter(buffer_data_to_buffer_, pipeline_allocs,
-                              local_allocs, tvm::ffi::GetRef<For>(op),
-                              pipeline_info, target_, loop_var_let_wrappers,
-                              loop_var_if_wrappers);
+    PipelineRewriter rewriter(
+        buffer_data_to_buffer_, pipeline_allocs, local_allocs, for_node,
+        pipeline_info, scalar_binding_blocks, target_, loop_var_if_wrappers);
     Stmt pipeline = rewriter.BuildPipeline();
     subtree_modified_ = true;
 
@@ -3264,9 +3763,9 @@ private:
     // counts across the expanded slots.
     {
       auto [outer_attrs, inner_stmt] = unwrap_outer_attrs(pipeline);
-      BlockRealize br = Downcast<BlockRealize>(inner_stmt);
-      Block block = br->block;
-      BlockNode *bn = block.CopyOnWrite();
+      SBlockRealize br = Downcast<SBlockRealize>(inner_stmt);
+      SBlock block = br->block;
+      SBlockNode *bn = block.CopyOnWrite();
 
       Map<Var, Array<PrimExpr>> barrier_init_map;
       if (bn->annotations.count("barrier_init")) {
@@ -3316,7 +3815,7 @@ private:
       if (changed) {
         bn->annotations.Set("barrier_init", updated_init);
         pipeline = rewrap_outer_attrs(
-            BlockRealize(br->iter_values, br->predicate, block, br->span),
+            SBlockRealize(br->iter_values, br->predicate, block, br->span),
             outer_attrs);
       }
     }
@@ -3334,16 +3833,16 @@ private:
     if (!rewrap_fns.empty()) {
       if (pipeline_body_from_block) {
         auto [outer_attrs, inner_stmt] = unwrap_outer_attrs(pipeline);
-        BlockRealize pipeline_realize = Downcast<BlockRealize>(inner_stmt);
-        Block pipeline_block = pipeline_realize->block;
+        SBlockRealize pipeline_realize = Downcast<SBlockRealize>(inner_stmt);
+        SBlock pipeline_block = pipeline_realize->block;
         {
-          BlockNode *block_node = pipeline_block.CopyOnWrite();
+          SBlockNode *block_node = pipeline_block.CopyOnWrite();
           block_node->body = apply_wrappers(block_node->body);
         }
         pipeline = rewrap_outer_attrs(
-            BlockRealize(pipeline_realize->iter_values,
-                         pipeline_realize->predicate, pipeline_block,
-                         pipeline_realize->span),
+            SBlockRealize(pipeline_realize->iter_values,
+                          pipeline_realize->predicate, pipeline_block,
+                          pipeline_realize->span),
             outer_attrs);
       } else {
         pipeline = apply_wrappers(pipeline);
@@ -3352,7 +3851,7 @@ private:
 
     pipeline = AsyncCommitWaitAttrLowerer::Lower(pipeline);
 
-    if (const auto *realize = op->body.as<BlockRealizeNode>()) {
+    if (const auto *realize = for_node->body.as<SBlockRealizeNode>()) {
       const auto &block = realize->block;
       for (const auto &buffer : block->alloc_buffers) {
         buffer_data_to_buffer_.erase(buffer->data);
@@ -3362,15 +3861,16 @@ private:
     return pipeline;
   }
 
-  Stmt VisitStmt_(const BlockNode *op) final {
+  Stmt VisitStmt_(const SBlockNode *op) final {
     for (const auto &buffer : op->alloc_buffers) {
       buffer_data_to_buffer_.Set(buffer->data, buffer);
       allocated_buffers_.insert(buffer);
     }
 
     bool outer_flag = subtree_modified_;
+    size_t layout_remap_mark = pending_layout_remapped_allocs_.size();
     subtree_modified_ = false;
-    Block block = Downcast<Block>(StmtExprMutator::VisitStmt_(op));
+    SBlock block = Downcast<SBlock>(StmtExprMutator::VisitStmt_(op));
     bool children_modified = subtree_modified_;
     // Propagate to parent: if this subtree was modified, parent should know.
     subtree_modified_ = outer_flag || children_modified;
@@ -3397,6 +3897,20 @@ private:
       auto ann = block->annotations;
       if (UpdateExpandedLayoutMapForRemappedAllocs(remapped_allocs, &ann)) {
         block.CopyOnWrite()->annotations = std::move(ann);
+        layout_changed = true;
+      }
+    }
+    if (pending_layout_remapped_allocs_.size() > layout_remap_mark) {
+      std::vector<std::pair<Buffer, Buffer>> flat_remapped_allocs(
+          pending_layout_remapped_allocs_.begin() + layout_remap_mark,
+          pending_layout_remapped_allocs_.end());
+      auto ann = block->annotations;
+      if (UpdateExpandedLayoutMapForRemappedAllocs(flat_remapped_allocs,
+                                                   &ann)) {
+        block.CopyOnWrite()->annotations = std::move(ann);
+        pending_layout_remapped_allocs_.erase(
+            pending_layout_remapped_allocs_.begin() + layout_remap_mark,
+            pending_layout_remapped_allocs_.end());
         layout_changed = true;
       }
     }
@@ -3434,7 +3948,7 @@ private:
         new_init.Set(var, counts);
       }
       if (init_changed) {
-        BlockNode *bn = block.CopyOnWrite();
+        SBlockNode *bn = block.CopyOnWrite();
         bn->annotations.Set("barrier_init", new_init);
         bn->alloc_buffers = new_alloc_buffers;
         allocs_changed = false; // already applied
@@ -3457,17 +3971,17 @@ private:
       //    in this block or any nested block. This prevents
       //    downstream LCA analysis from seeing those vars at the
       //    outer scope and promoting them to kernel parameters.
-      std::unordered_set<const BufferNode *> local_bufs;
-      std::unordered_set<const VarNode *> local_data_vars;
+      BufferSet local_bufs;
+      VarSet local_data_vars;
       for (const auto &buf : block->alloc_buffers) {
-        local_bufs.insert(buf.get());
-        local_data_vars.insert(buf->data.get());
+        local_bufs.insert(buf);
+        local_data_vars.insert(buf->data);
       }
       // Also collect data vars from all nested blocks.
       PostOrderVisit(block->body, [&](const ObjectRef &obj) {
-        if (auto *inner = obj.as<BlockNode>()) {
+        if (auto *inner = obj.as<SBlockNode>()) {
           for (const auto &buf : inner->alloc_buffers) {
-            local_data_vars.insert(buf->data.get());
+            local_data_vars.insert(buf->data);
           }
         }
       });
@@ -3478,12 +3992,12 @@ private:
             if (found)
               return;
             if (auto *load = obj.as<BufferLoadNode>()) {
-              if (local_data_vars.count(load->buffer->data.get())) {
+              if (local_data_vars.count(load->buffer->data)) {
                 found = true;
               }
             }
             if (auto *var = obj.as<VarNode>()) {
-              if (local_data_vars.count(var)) {
+              if (local_data_vars.count(GetRef<Var>(var))) {
                 found = true;
               }
             }
@@ -3494,12 +4008,12 @@ private:
             if (found)
               return;
             if (auto *load = obj.as<BufferLoadNode>()) {
-              if (local_data_vars.count(load->buffer->data.get())) {
+              if (local_data_vars.count(load->buffer->data)) {
                 found = true;
               }
             }
             if (auto *var = obj.as<VarNode>()) {
-              if (local_data_vars.count(var)) {
+              if (local_data_vars.count(GetRef<Var>(var))) {
                 found = true;
               }
             }
@@ -3510,11 +4024,11 @@ private:
         return false;
       };
       Array<Array<BufferRegion>> access =
-          GetBlockReadWriteRegion(block, buffer_data_to_buffer_);
+          GetSBlockReadWriteRegion(block, buffer_data_to_buffer_);
       auto sanitize = [&](const Array<BufferRegion> &regions) {
         Array<BufferRegion> out;
         for (const auto &br : regions) {
-          if (local_bufs.count(br->buffer.get())) {
+          if (local_bufs.count(br->buffer)) {
             continue; // drop block-local buffer
           }
           if (region_uses_local_var(br)) {
@@ -3525,7 +4039,7 @@ private:
         }
         return out;
       };
-      BlockNode *n = block.CopyOnWrite();
+      SBlockNode *n = block.CopyOnWrite();
       n->reads = sanitize(access[0]);
       n->writes = sanitize(access[1]);
       n->alloc_buffers = std::move(new_alloc_buffers);
@@ -3539,8 +4053,8 @@ private:
   }
 
   bool HasPipelineAnnotation(const ForNode *op) const {
-    auto it1 = op->annotations.find(tir::attr::software_pipeline_stage);
-    auto it2 = op->annotations.find(tir::attr::software_pipeline_order);
+    auto it1 = op->annotations.find(s_tir::attr::software_pipeline_stage);
+    auto it2 = op->annotations.find(s_tir::attr::software_pipeline_order);
     bool has_stage = it1 != op->annotations.end();
     bool has_order = it2 != op->annotations.end();
     if (has_stage && has_order) {
@@ -3560,6 +4074,7 @@ private:
   Map<Var, Buffer> buffer_data_to_buffer_;
   std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual> allocated_buffers_;
   Map<Buffer, Buffer> pending_buffer_remap_;
+  std::vector<std::pair<Buffer, Buffer>> pending_layout_remapped_allocs_;
   Optional<Target> target_;
   // Buffers from outer blocks that have been used in a pipeline loop.
   // Used to detect if the same buffer is used in multiple pipeline loops.
@@ -3577,8 +4092,8 @@ private:
  * \brief Transform annotated loops into pipelined one that parallelize
  * producers and consumers. \return The IR transform pass.
  */
-tir::transform::Pass InjectSoftwarePipeline() {
-  using namespace tir::transform;
+tirx::transform::Pass InjectSoftwarePipeline() {
+  using namespace tirx::transform;
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     auto *fptr = f.CopyOnWrite();
     fptr->body = software_pipeline::PipelineInjector::Inject(f);
@@ -3589,7 +4104,7 @@ tir::transform::Pass InjectSoftwarePipeline() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.InjectSoftwarePipeline",
                         InjectSoftwarePipeline);
 }

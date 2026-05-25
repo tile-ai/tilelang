@@ -21,22 +21,22 @@
  * \file annotate_device_regions.cc
  * \brief Split device function from host.
  */
+#include "common/attr.h"
+#include "support/check.h"
 #include "tir/transforms/ir_utils.h"
-#include <tvm/ffi/function.h>
-#include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/transform.h>
 #include <tvm/target/target.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <utility>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 class DeviceRegionAnnotater : public StmtMutator {
 public:
@@ -47,9 +47,9 @@ public:
     if (op->attr_key == tvm::attr::kTarget) {
       // If a target attribute already exists, use it as-is.
       return tvm::ffi::GetRef<Stmt>(op);
-    } else if (op->attr_key == tir::attr::thread_extent ||
-               op->attr_key == tir::attr::pipeline_exec_scope ||
-               op->attr_key == tir::attr::device_scope) {
+    } else if (op->attr_key == tirx::attr::thread_extent ||
+               op->attr_key == tl::attr::pipeline_exec_scope ||
+               op->attr_key == tirx::attr::device_scope) {
       // These attributes are only allowed in device-side code, so
       // they should be annotated with the function's default target.
       Stmt body = tvm::ffi::GetRef<Stmt>(op);
@@ -65,7 +65,7 @@ private:
 };
 
 tvm::transform::Pass AnnotateDeviceRegions() {
-  using namespace tir::transform;
+  using namespace tirx::transform;
   auto pass_func = [](PrimFunc func, const IRModule &mod,
                       const tvm::transform::PassContext &ctx) -> PrimFunc {
     auto opt_target = func->GetAttr<Target>(tvm::attr::kTarget);

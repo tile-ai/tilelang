@@ -2,15 +2,15 @@ from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
-from tvm.tir.stmt_functor import ir_transform, post_order_visit
+from tvm.tirx.stmt_functor import ir_transform, post_order_visit
 
 
 def _strip_block_reads_writes(stmt):
     """Strip reads and writes from all blocks, replacing them with empty lists."""
 
     def _postorder(op):
-        if isinstance(op, tvm.tir.Block):
-            return tvm.tir.Block(
+        if isinstance(op, tvm.tirx.SBlock):
+            return tvm.tirx.SBlock(
                 op.iter_vars,
                 [],
                 [],
@@ -22,7 +22,7 @@ def _strip_block_reads_writes(stmt):
                 op.annotations,
             )
 
-    return ir_transform(stmt, None, _postorder, ["tir.Block"])
+    return ir_transform(stmt, None, _postorder)
 
 
 def _collect_call_nodes(stmt, op_names):
@@ -33,7 +33,7 @@ def _collect_call_nodes(stmt, op_names):
     calls = []
 
     def _visit(node):
-        if isinstance(node, tvm.tir.Call) and isinstance(node.op, tvm.ir.Op) and str(node.op.name) in op_names:
+        if isinstance(node, tvm.tirx.Call) and isinstance(node.op, tvm.ir.Op) and str(node.op.name) in op_names:
             calls.append(node)
 
     post_order_visit(stmt, _visit)
@@ -45,7 +45,7 @@ def _count_if_then_else(stmt):
 
     def _visit(node):
         nonlocal count
-        if isinstance(node, tvm.tir.IfThenElse):
+        if isinstance(node, tvm.tirx.IfThenElse):
             count += 1
 
     post_order_visit(stmt, _visit)
@@ -73,7 +73,6 @@ def vectorize_access_legalize(M: int = 64, N: int = 64, M_offset: int = 2, N_off
             A_shared = T.alloc_shared((M, N), dtype=dtype)
             tid = T.get_thread_binding()
 
-            T.reads(A[tid + M_offset, N_offset : N + N_offset])
             for j in T.serial(N):
                 A_shared[tid, j] = T.if_then_else(
                     j + N_offset < N, T.if_then_else(tid + M_offset < M, A[tid + M_offset, j + N_offset], T.float32(0)), T.float32(0)
@@ -115,7 +114,6 @@ def vectorize_access_with_atmoic_add_legalize(M: int = 64, N: int = 64, M_offset
             A_shared = T.alloc_shared((M, N), dtype=dtype)
             tid = T.get_thread_binding()
 
-            T.reads(A[tid + M_offset, N_offset : N + N_offset])
             for j in T.serial(N):
                 A_shared[tid, j] = T.if_then_else(
                     j + N_offset < N, T.if_then_else(tid + M_offset < M, A[tid + M_offset, j + N_offset], T.float32(0)), T.float32(0)
@@ -158,7 +156,6 @@ def oob_store_legalize(M: int = 64, N: int = 64, M_offset: int = 2, N_offset: in
     ):
         with T.Kernel(1, 1, threads=M) as (bx, by):
             tid = T.get_thread_binding()
-            T.writes(A[tid + M_offset, N_offset : N + N_offset])
             for j in T.serial(N):
                 if j + N_offset < N:  # noqa: SIM102
                     if tid + M_offset < M:
@@ -217,7 +214,7 @@ def assert_cp_async_access_ptr_legalize(N: int = 16):
     mod = tvm.IRModule({func.attrs["global_symbol"]: func})
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     body = transformed["main"].body
-    cp_async_calls = _collect_call_nodes(body, {"tir.ptx_cp_async", "tl.ptx_cp_async"})
+    cp_async_calls = _collect_call_nodes(body, {"tirx.ptx_cp_async", "tl.ptx_cp_async"})
     assert len(cp_async_calls) > 0
     assert all(len(call.args) == 4 for call in cp_async_calls)
 
@@ -229,11 +226,11 @@ def cp_async_access_ptr_nonzero_safe_value_legalize(N: int = 16, offset: int = 1
     def main(
         A: T.Tensor((N,), dtype=dtype),
     ):
-        with T.block("root"):
+        with T.sblock("root"):
             T.reads()
             T.writes()
-            T.block_attr({"safe_value_map": {A.data: T.float16(pad_value)}})
-            A_shared = T.alloc_buffer((N,), dtype=dtype, scope="shared")
+            T.sblock_attr({"safe_value_map": {A.data: T.float16(pad_value)}})
+            A_shared = T.sblock_alloc_buffer((N,), dtype=dtype, scope="shared")
             for i in T.serial(4):
                 T.ptx_cp_async(
                     T.access_ptr(A_shared[i * 4], "w", 4),
@@ -247,11 +244,11 @@ def cp_async_access_ptr_nonzero_safe_value_legalize(N: int = 16, offset: int = 1
     def expected(
         A: T.Tensor((N,), dtype=dtype),
     ):
-        with T.block("root"):
+        with T.sblock("root"):
             T.reads()
             T.writes()
-            T.block_attr({"safe_value_map": {A.data: T.float16(pad_value)}})
-            A_shared = T.alloc_buffer((N,), dtype=dtype, scope="shared")
+            T.sblock_attr({"safe_value_map": {A.data: T.float16(pad_value)}})
+            A_shared = T.sblock_alloc_buffer((N,), dtype=dtype, scope="shared")
             for i in T.serial(4):
                 if i * 4 + offset < N:
                     T.ptx_cp_async(
@@ -270,7 +267,7 @@ def assert_cp_async_access_ptr_nonzero_safe_value_legalize(N: int = 16):
     mod = tvm.IRModule({func.attrs["global_symbol"]: func})
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     body = transformed["main"].body
-    cp_async_calls = _collect_call_nodes(body, {"tir.ptx_cp_async", "tl.ptx_cp_async"})
+    cp_async_calls = _collect_call_nodes(body, {"tirx.ptx_cp_async", "tl.ptx_cp_async"})
     assert len(cp_async_calls) > 0
     assert all(len(call.args) == 3 for call in cp_async_calls)
     assert _count_if_then_else(body) > 0

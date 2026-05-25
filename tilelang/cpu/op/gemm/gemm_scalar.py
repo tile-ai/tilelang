@@ -4,7 +4,7 @@ from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang import language as T
 from tvm.target import Target
 from tvm.ir import Range
-from tvm import tir
+from tvm import tirx
 
 
 GEMM_INST_SCALAR = "cpu.scalar"
@@ -21,8 +21,8 @@ class GemmScalar(GemmBase):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_var: tir.Var,
-        mbar_phase_expr: tir.PrimExpr | None = None,
+        thread_var: tirx.Var,
+        mbar_phase_expr: tirx.PrimExpr | None = None,
     ):
         M, N, K = self.M, self.N, self.K
         A_buf = self.ARegion.buffer

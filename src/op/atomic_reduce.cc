@@ -5,10 +5,12 @@
  */
 
 #include "./atomic_reduce.h"
+#include "support/check.h"
 #include "utils.h"
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/op_attr_types.h>
+#include <tvm/ir/cast.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
 
 #include "../layout/layout.h"
 
@@ -19,7 +21,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace {
 
@@ -36,7 +39,7 @@ const AtomicReduceImpl &ResolveAtomicReduceImpl(Target target) {
       ICHECK(matched_impl == nullptr)
           << "tl.atomic_reduce found multiple target-specific "
              "implementations for "
-          << target->ToDebugString() << ": " << matched_impl->name << " and "
+          << target->str() << ": " << matched_impl->name << " and "
           << impl.name;
       matched_impl = &impl;
     }
@@ -44,7 +47,7 @@ const AtomicReduceImpl &ResolveAtomicReduceImpl(Target target) {
   ICHECK(matched_impl != nullptr)
       << "tl.atomic_reduce requires a target-specific implementation, but no "
          "atomic_reduce implementation is registered for "
-      << target->ToDebugString();
+      << target->str();
   return *matched_impl;
 }
 
@@ -66,7 +69,7 @@ AtomicMax::AtomicMax(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ICHECK(args.size() >= 2)
       << "AtomicMax expects at least 2 arguments (src, dst), got "
       << args.size();
-  ObjectPtr<AtomicMaxNode> node = tvm::ffi::make_object<AtomicMaxNode>();
+  ObjectPtr<AtomicMaxNode> node = make_object<AtomicMaxNode>();
   std::vector<AccessRegion> access_regions;
 
   if (IsBufferLikeExpr(args[0])) {
@@ -90,7 +93,7 @@ AtomicMax::AtomicMax(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
 }
 
 TileOperator AtomicMaxNode::Clone() const {
-  auto op = tvm::ffi::make_object<AtomicMaxNode>(*this);
+  auto op = make_object<AtomicMaxNode>(*this);
   if (par_op_.defined()) {
     op->par_op_ = Downcast<ParallelOp>(par_op_->Clone());
   }
@@ -107,7 +110,7 @@ AtomicMin::AtomicMin(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ICHECK(args.size() >= 2)
       << "AtomicMin expects at least 2 arguments (src, dst), got "
       << args.size();
-  ObjectPtr<AtomicMinNode> node = tvm::ffi::make_object<AtomicMinNode>();
+  ObjectPtr<AtomicMinNode> node = make_object<AtomicMinNode>();
   std::vector<AccessRegion> access_regions;
 
   if (IsBufferLikeExpr(args[0])) {
@@ -131,7 +134,7 @@ AtomicMin::AtomicMin(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
 }
 
 TileOperator AtomicMinNode::Clone() const {
-  auto op = tvm::ffi::make_object<AtomicMinNode>(*this);
+  auto op = make_object<AtomicMinNode>(*this);
   if (par_op_.defined()) {
     op->par_op_ = Downcast<ParallelOp>(par_op_->Clone());
   }

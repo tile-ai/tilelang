@@ -20,7 +20,7 @@ import re
 import torch
 import tilelang
 from tilelang import tvm as tvm
-from tvm.script import tir as T
+from tvm.script import tirx as T
 
 
 def _kernel_arena_bytes(artifact) -> int:
@@ -54,15 +54,12 @@ def branch_kernel_downstream(
     branch-alternative analysis collapses all three into one slot.
     """
     T.launch_thread("blockIdx.x", 1)
-    buf_A = T.allocate([32], "float16", "shared.dyn")
-    buf_B = T.allocate([32], "float16", "shared.dyn")
-    buf_C = T.allocate([32], "float16", "shared.dyn")
     T.launch_thread("threadIdx.x", 1)
     T.launch_thread("threadIdx.y", 1)
     T.launch_thread("threadIdx.z", 1)
-    Ab = T.Buffer((32,), "float16", data=buf_A, scope="shared.dyn")
-    Bb = T.Buffer((32,), "float16", data=buf_B, scope="shared.dyn")
-    Cb = T.Buffer((32,), "float16", data=buf_C, scope="shared.dyn")
+    Ab = T.alloc_buffer((32,), "float16", scope="shared.dyn")
+    Bb = T.alloc_buffer((32,), "float16", scope="shared.dyn")
+    Cb = T.alloc_buffer((32,), "float16", scope="shared.dyn")
     if cond == 0:
         Ab[0] = data[0]
         out[0] = Ab[0]

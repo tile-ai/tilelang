@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import re
-from typing import Literal, Callable, Any
+from typing import Literal, Any
+from collections.abc import Callable
 from tilelang import tvm as tvm
-from tvm import IRModule, tir
+from tvm import IRModule, tirx
 from tvm.target import Target
 from tilelang.engine.lower import (
     get_device_call,
@@ -116,7 +117,7 @@ def is_cutedsl_target(target: Target) -> bool:
 
 
 def get_annotated_mod(
-    func_or_mod: tir.PrimFunc | tvm.IRModule,
+    func_or_mod: tirx.PrimFunc | tvm.IRModule,
     target: str | Target = "auto",
     target_host: str | Target | None = None,
     model_type: Literal["device", "host", "all"] = "all",
@@ -127,13 +128,13 @@ def get_annotated_mod(
 
     # Convert PrimFunc to IRModule if needed
     mod = func_or_mod
-    if isinstance(func_or_mod, tir.PrimFunc):
+    if isinstance(func_or_mod, tirx.PrimFunc):
         mod = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
 
     # Handle target and target_host
     if isinstance(target, str):
         target = determine_target(target)
-    target_host = tvm.target.Target.canon_target(canon_target_host(target, target_host))
+    target_host = tvm.target.Target(canon_target_host(target, target_host))
     target = tvm.target.Target(target, target_host)
 
     _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))
@@ -145,16 +146,16 @@ def get_annotated_mod(
 
     # Define dispatch dictionary for different model types
     dispatch = {
-        "device": lambda m: tir.transform.Filter(_is_device_call)(m),
-        "host": lambda m: tir.transform.Filter(_is_host_call)(m),
-        "all": lambda m: (tir.transform.Filter(_is_device_call)(m), tir.transform.Filter(_is_host_call)(m)),
+        "device": lambda m: tirx.transform.Filter(_is_device_call)(m),
+        "host": lambda m: tirx.transform.Filter(_is_host_call)(m),
+        "all": lambda m: (tirx.transform.Filter(_is_device_call)(m), tirx.transform.Filter(_is_host_call)(m)),
     }
 
     return dispatch[model_type](mod)
 
 
 def pythonic_expr(
-    expr: tvm.tir.PrimExpr, dtype_map: dict[str, str] | None = None, ignore_cast: bool = False, floor_div_op: str = "/"
+    expr: tvm.tirx.PrimExpr, dtype_map: dict[str, str] | None = None, ignore_cast: bool = False, floor_div_op: str = "/"
 ) -> str:
     """
     Converts a TVM PrimExpr into a Python-style string, correctly handling operator precedence.
@@ -163,35 +164,35 @@ def pythonic_expr(
         expr: The TVM PrimExpr to convert.
         dtype_map: A dictionary mapping data types to their string representations.
         ignore_cast: Whether to ignore the cast operator and return the string representation of the value without the cast.
-        floor_div_op: Operator to use for tvm.tir.FloorDiv. Default '/' preserves prior
+        floor_div_op: Operator to use for tvm.tirx.FloorDiv. Default '/' preserves prior
                       behavior (suitable for generating C/C++ expressions). For generating
                       Python code where integer division is required (e.g. grid/block),
                       pass '//' explicitly.
     Returns:
         A string representation of the expression.
     """
-    if not isinstance(expr, tvm.tir.PrimExpr):
+    if not isinstance(expr, tvm.tirx.PrimExpr):
         return str(expr)
 
     # 1. Define operator precedence (higher value means higher precedence)
     # Based on Python's operator precedence
     PRECEDENCE = {
-        tvm.tir.Call: 20,  # Includes min, max
-        tvm.tir.Cast: 20,  # Treated like a function call
-        tvm.tir.Mul: 13,
-        tvm.tir.FloorDiv: 13,
-        tvm.tir.Div: 13,  # For tvm.tir.Div if it appears
-        tvm.tir.FloorMod: 13,
-        tvm.tir.Add: 12,
-        tvm.tir.Sub: 12,
-        tvm.tir.LT: 10,
-        tvm.tir.LE: 10,
-        tvm.tir.GT: 10,
-        tvm.tir.GE: 10,
-        tvm.tir.EQ: 10,
-        tvm.tir.NE: 10,
-        tvm.tir.And: 5,
-        tvm.tir.Or: 4,
+        tvm.tirx.Call: 20,  # Includes min, max
+        tvm.tirx.Cast: 20,  # Treated like a function call
+        tvm.tirx.Mul: 13,
+        tvm.tirx.FloorDiv: 13,
+        tvm.tirx.Div: 13,  # For tvm.tirx.Div if it appears
+        tvm.tirx.FloorMod: 13,
+        tvm.tirx.Add: 12,
+        tvm.tirx.Sub: 12,
+        tvm.tirx.LT: 10,
+        tvm.tirx.LE: 10,
+        tvm.tirx.GT: 10,
+        tvm.tirx.GE: 10,
+        tvm.tirx.EQ: 10,
+        tvm.tirx.NE: 10,
+        tvm.tirx.And: 5,
+        tvm.tirx.Or: 4,
         # Atoms (Var, IntImm) have the highest precedence implicitly
     }
     # By default, atomic expressions (variables, constants) have the highest precedence
@@ -204,11 +205,11 @@ def pythonic_expr(
         if node in node_to_result_map:
             return
 
-        if isinstance(node, tvm.tir.Var):
+        if isinstance(node, tvm.tirx.Var):
             s, p = node.name, ATOMIC_PRECEDENCE
-        elif isinstance(node, (tvm.tir.IntImm, tvm.tir.FloatImm)):
+        elif isinstance(node, (tvm.tirx.IntImm, tvm.tirx.FloatImm)):
             s, p = str(node.value), ATOMIC_PRECEDENCE
-        elif isinstance(node, tvm.tir.Cast):
+        elif isinstance(node, tvm.tirx.Cast):
             # C-style cast has high precedence
             value_str, _ = node_to_result_map[node.value]
             if ignore_cast:
@@ -220,35 +221,35 @@ def pythonic_expr(
         elif isinstance(
             node,
             (
-                tvm.tir.Mul,
-                tvm.tir.FloorDiv,
-                tvm.tir.Add,
-                tvm.tir.Sub,
-                tvm.tir.FloorMod,
-                tvm.tir.LT,
-                tvm.tir.LE,
-                tvm.tir.GT,
-                tvm.tir.GE,
-                tvm.tir.EQ,
-                tvm.tir.NE,
-                tvm.tir.And,
-                tvm.tir.Or,
+                tvm.tirx.Mul,
+                tvm.tirx.FloorDiv,
+                tvm.tirx.Add,
+                tvm.tirx.Sub,
+                tvm.tirx.FloorMod,
+                tvm.tirx.LT,
+                tvm.tirx.LE,
+                tvm.tirx.GT,
+                tvm.tirx.GE,
+                tvm.tirx.EQ,
+                tvm.tirx.NE,
+                tvm.tirx.And,
+                tvm.tirx.Or,
             ),
         ):
             op_map = {
-                tvm.tir.Mul: "*",
-                tvm.tir.FloorDiv: floor_div_op,
-                tvm.tir.Add: "+",
-                tvm.tir.Sub: "-",
-                tvm.tir.FloorMod: "%",
-                tvm.tir.LT: "<",
-                tvm.tir.LE: "<=",
-                tvm.tir.GT: ">",
-                tvm.tir.GE: ">=",
-                tvm.tir.EQ: "==",
-                tvm.tir.NE: "!=",
-                tvm.tir.And: "and",
-                tvm.tir.Or: "or",
+                tvm.tirx.Mul: "*",
+                tvm.tirx.FloorDiv: floor_div_op,
+                tvm.tirx.Add: "+",
+                tvm.tirx.Sub: "-",
+                tvm.tirx.FloorMod: "%",
+                tvm.tirx.LT: "<",
+                tvm.tirx.LE: "<=",
+                tvm.tirx.GT: ">",
+                tvm.tirx.GE: ">=",
+                tvm.tirx.EQ: "==",
+                tvm.tirx.NE: "!=",
+                tvm.tirx.And: "and",
+                tvm.tirx.Or: "or",
             }
             op_str = f" {op_map[type(node)]} "
             my_precedence = PRECEDENCE[type(node)]
@@ -267,13 +268,13 @@ def pythonic_expr(
 
             s = f"{a_str}{op_str}{b_str}"
             p = my_precedence
-        elif isinstance(node, (tvm.tir.Min, tvm.tir.Max)):
-            op_name = "min" if isinstance(node, tvm.tir.Min) else "max"
+        elif isinstance(node, (tvm.tirx.Min, tvm.tirx.Max)):
+            op_name = "min" if isinstance(node, tvm.tirx.Min) else "max"
             a_str, _ = node_to_result_map[node.a]
             b_str, _ = node_to_result_map[node.b]
             s = f"{op_name}({a_str}, {b_str})"
             # Function calls have high precedence
-            p = PRECEDENCE.get(tvm.tir.Call, ATOMIC_PRECEDENCE)
+            p = PRECEDENCE.get(tvm.tirx.Call, ATOMIC_PRECEDENCE)
         else:
             # Fallback for unhandled expression types
             s, p = str(node), 0
@@ -281,7 +282,7 @@ def pythonic_expr(
         node_to_result_map[node] = (s, p)
 
     # Perform post-order traversal
-    tvm.tir.stmt_functor.post_order_visit(expr, _visitor)
+    tvm.tirx.stmt_functor.post_order_visit(expr, _visitor)
 
     return next(iter(node_to_result_map[expr]), "")
 
@@ -317,7 +318,7 @@ def parse_function_call_args(
     function_args: list[dict[str, str]],
     function_params: list[Any],
     desc_name_map: dict[str, str] | None = None,
-    desc_name_var_map: dict[str, tvm.tir.Var] | None = None,
+    desc_name_var_map: dict[str, tvm.tirx.Var] | None = None,
     transform_arg: Callable[[str, str], Any] | None = None,
 ) -> list[Any]:
     """
@@ -387,9 +388,9 @@ class TMADescriptorParams:
 
 
 def parse_tma_descriptor_args(
-    tma_descriptor_args: dict[tvm.tir.Var, list[Any]],
+    tma_descriptor_args: dict[tvm.tirx.Var, list[Any]],
     desc_name_map: dict[str, str],
-    desc_name_var_map: dict[str, tvm.tir.Var],
+    desc_name_var_map: dict[str, tvm.tirx.Var],
     pythonic_expr_func: Callable[[Any], str],
 ) -> list[TMADescriptorParams]:
     """

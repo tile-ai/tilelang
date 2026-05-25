@@ -7,10 +7,12 @@
 #define TVM_TL_BACKEND_COMMON_OP_CUMSUM_H_
 
 #include "op/reduce.h"
+#include "support/check.h"
+#include <tvm/runtime/logging.h>
 
 #include "op/utils.h"
 
-#include <tvm/tir/builtin.h>
+#include <tvm/tirx/builtin.h>
 
 #include <sstream>
 
@@ -18,7 +20,8 @@ namespace tvm {
 namespace tl {
 namespace backend {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 struct CumSum {
   static Stmt Lower(const CumSumOpNode &op, const LowerArgs &T,

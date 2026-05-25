@@ -29,12 +29,14 @@
 #define TVM_TL_OP_REGION_H_
 
 #include "./operator.h"
-#include <tvm/tir/buffer.h>
+#include "support/check.h"
+#include <tvm/tirx/buffer.h>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 class RegionOpNode : public TileOperatorNode {
 public:
@@ -63,7 +65,7 @@ public:
   TileOperator Clone() const override;
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<RegionOpNode>()
         .def_ro("buffer", &RegionOpNode::buffer_)
         .def_ro("ranges", &RegionOpNode::ranges_)

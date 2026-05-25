@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tvm.ir import Range
-from tvm import tir
+from tvm import tirx
 from tilelang import language as T
 from tilelang.utils.language import is_shared, is_fragment, is_tensor_memory
 from tilelang.tileop.base import GemmWarpPolicy
@@ -31,8 +31,8 @@ class GemmBase:
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_var: tir.Var,
-        mbar_phase_expr: tir.PrimExpr | None = None,
+        thread_var: tirx.Var,
+        mbar_phase_expr: tirx.PrimExpr | None = None,
     ):
         raise NotImplementedError("lower is not implemented")
 
@@ -97,15 +97,15 @@ class GemmBase:
         return self.A.shape[-2] if self.trans_A else self.A.shape[-1]
 
     @property
-    def A(self) -> tir.Buffer:
+    def A(self) -> tirx.Buffer:
         return getattr(self.gemm_node, "a", None)
 
     @property
-    def B(self) -> tir.Buffer:
+    def B(self) -> tirx.Buffer:
         return getattr(self.gemm_node, "b", None)
 
     @property
-    def C(self) -> tir.Buffer:
+    def C(self) -> tirx.Buffer:
         return getattr(self.gemm_node, "c", None)
 
     @property
@@ -158,17 +158,17 @@ class GemmBase:
 
     @property
     def mbarptr(self) -> PrimExpr:
-        return getattr(self.gemm_node, "mbarPtr", tvm.tir.const(0, T.uint32))
+        return getattr(self.gemm_node, "mbarPtr", tvm.tirx.const(0, T.uint32))
 
     @property
-    def mbar(self) -> tir.BufferLoad | None:
+    def mbar(self) -> tirx.BufferLoad | None:
         return getattr(self.gemm_node, "mbar", None)
 
     @property
     def C_coords(self):
         coords = getattr(self.gemm_node, "cCoords", None)
         if coords is None or len(coords) == 0:
-            zero = tvm.tir.const(0, T.int32)
+            zero = tvm.tirx.const(0, T.int32)
             return [zero, zero]
         return [coords[i] for i in range(len(coords))]
 
@@ -182,11 +182,11 @@ class GemmBase:
 
     @property
     def sf_a_id(self) -> PrimExpr:
-        return getattr(self.gemm_node, "sfAId", tvm.tir.const(0, T.int32))
+        return getattr(self.gemm_node, "sfAId", tvm.tirx.const(0, T.int32))
 
     @property
     def sf_b_id(self) -> PrimExpr:
-        return getattr(self.gemm_node, "sfBId", tvm.tir.const(0, T.int32))
+        return getattr(self.gemm_node, "sfBId", tvm.tirx.const(0, T.int32))
 
     @property
     def is_blockscaled(self) -> bool:

@@ -22,13 +22,13 @@
  * \file unroll_loop.cc
  */
 // Unrolls the loop as in Halide pipeline.
+#include "support/check.h"
 #include <tvm/arith/analyzer.h>
-#include <tvm/ffi/function.h>
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/ir/cast.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <unordered_set>
 
@@ -38,7 +38,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 struct UnrollLoopConfigNode
     : public AttrsNodeReflAdapter<UnrollLoopConfigNode> {
@@ -49,7 +50,7 @@ struct UnrollLoopConfigNode
   int unroll_local_access;
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<UnrollLoopConfigNode>()
         .def_ro("auto_max_step", &UnrollLoopConfigNode::auto_max_step,
                 "Threshold of number of steps in the loop to be automatically "
@@ -90,7 +91,7 @@ public:
       : var_touched_local_(var_touched_local) {}
 
   void VisitExpr_(const VarNode *op) final {
-    var_touched_local_->insert(ffi::GetRef<Var>(op));
+    var_touched_local_->insert(GetRef<Var>(op));
   }
 
 private:
@@ -190,7 +191,7 @@ public:
         }
       }
     }
-    return ffi::GetRef<PrimExpr>(op);
+    return GetRef<PrimExpr>(op);
   }
 
   Stmt VisitStmt_(const BufferStoreNode *op) final {
@@ -238,8 +239,8 @@ public:
     if (value == 0)
       return Evaluate(0);
     Stmt body = op->body;
-    ffi::Map<Var, PrimExpr> vmap;
-    ffi::Array<Stmt> unrolled;
+    Map<Var, PrimExpr> vmap;
+    Array<Stmt> unrolled;
     for (int i = 0; i < value; ++i) {
       vmap.Set(op->loop_var, op->min + make_const(op->loop_var.dtype(), i));
       Stmt step = Substitute(body, vmap);
@@ -298,7 +299,7 @@ Stmt UnrollLoop(Stmt stmt, UnrollLoopConfig cfg) {
 
 namespace transform {
 
-using namespace tir::transform;
+using namespace tirx::transform;
 
 Pass UnrollLoop() {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
@@ -314,7 +315,7 @@ Pass UnrollLoop() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.UnrollLoop", UnrollLoop);
 }
 
