@@ -113,8 +113,8 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
+        host_kernel_source = adapter._set_cached_text_source("host_func", "_host_kernel_source_path", host_kernel_source)
         adapter.host_kernel_source = host_kernel_source.text
-        adapter._set_cached_text_source("host_func", "_host_kernel_source_path", host_kernel_source)
         adapter._set_cached_text_source("device_kernel_source", "_device_kernel_source_path", device_kernel_source)
 
         if isinstance(func_or_mod, tirx.PrimFunc):

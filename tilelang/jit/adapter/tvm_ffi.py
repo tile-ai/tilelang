@@ -276,8 +276,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
-        adapter._set_cached_text_source("host_kernel_source", "_host_kernel_source_path", host_kernel_source)
-        adapter._set_cached_text_source("device_kernel_source", "_device_kernel_source_path", device_kernel_source)
+        host_kernel_source = adapter._set_cached_text_source("host_kernel_source", "_host_kernel_source_path", host_kernel_source)
+        device_kernel_source = adapter._set_cached_text_source("device_kernel_source", "_device_kernel_source_path", device_kernel_source)
         adapter.wrapped_source = (
             device_kernel_source.text + "\n\n" + host_kernel_source.text
             if device_kernel_source.text is not None and host_kernel_source.text is not None
