@@ -88,8 +88,7 @@ def test_cast_default_unchanged():
     kernel = default_cast_kernel(M)
     code = kernel.get_kernel_source()
     assert "__nv_cvt_float2_to_fp8x2" in code, (
-        "Default cast should use __nv_cvt_float2_to_fp8x2 for backward compatibility.\n"
-        f"Generated code:\n{code}"
+        f"Default cast should use __nv_cvt_float2_to_fp8x2 for backward compatibility.\nGenerated code:\n{code}"
     )
 
 
@@ -113,9 +112,7 @@ def test_cast_rs_codegen():
                 T.copy(A, A_local)
                 rbits[0] = T.cast(T.int32(0x12345678), "int32")
                 for i in T.Parallel(M_val):
-                    B_local[i] = T.cast(A_local[i], "float8_e4m3fn",
-                                        round="rs",
-                                        rbits=rbits[0])
+                    B_local[i] = T.cast(A_local[i], "float8_e4m3fn", round="rs", rbits=rbits[0])
                 T.copy(B_local, B)
 
         return main
@@ -123,10 +120,8 @@ def test_cast_rs_codegen():
     kernel = cast_rs_kernel(M)
     code = kernel.get_kernel_source()
     # lanes=2 after vectorization -> uses x2 variant with zero-padding
-    assert "__tl_cvt_f32x2_to_e4m3x2_rs_sat" in code or \
-           "__tl_cvt_f32x4_to_e4m3x4_rs_sat" in code, (
-        "Expected stochastic rounding helper in generated code.\n"
-        f"Generated code:\n{code}"
+    assert "__tl_cvt_f32x2_to_e4m3x2_rs_sat" in code or "__tl_cvt_f32x4_to_e4m3x4_rs_sat" in code, (
+        f"Expected stochastic rounding helper in generated code.\nGenerated code:\n{code}"
     )
 
 
@@ -149,9 +144,7 @@ def _make_rs_kernel(M: int, num_threads: int, target_dtype: str):
             T.copy(A, A_local)
             rbits[0] = T.cast(T.int32(0x12345678), "int32")
             for i in T.Parallel(M):
-                B_local[i] = T.cast(A_local[i], target_dtype,
-                                    round="rs",
-                                    rbits=rbits[0])
+                B_local[i] = T.cast(A_local[i], target_dtype, round="rs", rbits=rbits[0])
             T.copy(B_local, B)
 
     return main
@@ -159,38 +152,38 @@ def _make_rs_kernel(M: int, num_threads: int, target_dtype: str):
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(8, 9)
-@pytest.mark.parametrize("M,threads,expected", [
-    (128, 128, "__tl_cvt_f32x1_to_e4m3x1_rs_sat"),
-    (256, 128, "__tl_cvt_f32x2_to_e4m3x2_rs_sat"),
-    (512, 128, "__tl_cvt_f32x4_to_e4m3x4_rs_sat"),
-    (1024, 128, "__tl_cvt_f32x4_to_e4m3x4_rs_sat"),
-])
+@pytest.mark.parametrize(
+    "M,threads,expected",
+    [
+        (128, 128, "__tl_cvt_f32x1_to_e4m3x1_rs_sat"),
+        (256, 128, "__tl_cvt_f32x2_to_e4m3x2_rs_sat"),
+        (512, 128, "__tl_cvt_f32x4_to_e4m3x4_rs_sat"),
+        (1024, 128, "__tl_cvt_f32x4_to_e4m3x4_rs_sat"),
+    ],
+)
 def test_cast_rs_fp8_lanes(M, threads, expected):
     """Test FP8 rs codegen across lanes=1,2,4,8."""
     kernel = _make_rs_kernel(M, threads, "float8_e4m3fn")
     code = kernel.get_kernel_source()
-    assert expected in code, (
-        f"Expected '{expected}' in generated code for M={M}, threads={threads}.\n"
-        f"Generated code:\n{code}"
-    )
+    assert expected in code, f"Expected '{expected}' in generated code for M={M}, threads={threads}.\nGenerated code:\n{code}"
 
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(8, 9)
-@pytest.mark.parametrize("M,threads,expected", [
-    (128, 128, "__tl_cvt_f32x1_to_e2m1x1_rs_sat"),
-    (256, 128, "__tl_cvt_f32x2_to_e2m1x2_rs_sat"),
-    (512, 128, "__tl_cvt_f32x4_to_e2m1x4_rs_sat"),
-    (1024, 128, "__tl_cvt_f32x4_to_e2m1x4_rs_sat"),
-])
+@pytest.mark.parametrize(
+    "M,threads,expected",
+    [
+        (128, 128, "__tl_cvt_f32x1_to_e2m1x1_rs_sat"),
+        (256, 128, "__tl_cvt_f32x2_to_e2m1x2_rs_sat"),
+        (512, 128, "__tl_cvt_f32x4_to_e2m1x4_rs_sat"),
+        (1024, 128, "__tl_cvt_f32x4_to_e2m1x4_rs_sat"),
+    ],
+)
 def test_cast_rs_fp4_lanes(M, threads, expected):
     """Test FP4 rs codegen across lanes=1,2,4,8."""
     kernel = _make_rs_kernel(M, threads, "float4_e2m1fn")
     code = kernel.get_kernel_source()
-    assert expected in code, (
-        f"Expected '{expected}' in generated code for M={M}, threads={threads}.\n"
-        f"Generated code:\n{code}"
-    )
+    assert expected in code, f"Expected '{expected}' in generated code for M={M}, threads={threads}.\nGenerated code:\n{code}"
 
 
 if __name__ == "__main__":

@@ -1488,24 +1488,28 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   // `op->annotations` (see CastNode docstring for the convention).
   auto get_str_anno = [&](const char *key) -> std::string {
     auto it = op->annotations.find(key);
-    if (it == op->annotations.end()) return "";
+    if (it == op->annotations.end())
+      return "";
     return Downcast<StringImm>((*it).second)->value;
   };
   auto get_bool_anno = [&](const char *key, bool dflt) -> bool {
     auto it = op->annotations.find(key);
-    if (it == op->annotations.end()) return dflt;
+    if (it == op->annotations.end())
+      return dflt;
     return Downcast<IntImm>((*it).second)->value != 0;
   };
   auto get_expr_anno = [&](const char *key) -> Optional<PrimExpr> {
     auto it = op->annotations.find(key);
-    if (it == op->annotations.end()) return std::nullopt;
+    if (it == op->annotations.end())
+      return std::nullopt;
     return Downcast<PrimExpr>((*it).second);
   };
   std::string cast_round = get_str_anno("round");
   bool cast_sat = get_bool_anno("sat", true);
   Optional<PrimExpr> cast_rbits = get_expr_anno("rbits");
 
-  // Emit simple C-style type conversion for scalar casts without custom rounding.
+  // Emit simple C-style type conversion for scalar casts without custom
+  // rounding.
   if (from_ty.is_scalar() && cast_round.empty())
     return CodeGenC::VisitExpr_(op, os);
 
@@ -1598,7 +1602,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     if (cast_round == "rs" && has_rbits) {
       // PTX: cvt.rs.satfinite.{e4m3x4,e5m2x4}.f32 d, {a,b,e,f}, rbits
       // We provide x1 (scalar), x2 (zero-padded), and x4 (full) variants.
-      ICHECK(cast_sat) << "sat=false is not supported for stochastic rounding f32 -> fp8";
+      ICHECK(cast_sat)
+          << "sat=false is not supported for stochastic rounding f32 -> fp8";
       std::string fp8_type_x4 = target_type_is_e4m3 ? "e4m3x4" : "e5m2x4";
       std::string fp8_type_x2 = target_type_is_e4m3 ? "e4m3x2" : "e5m2x2";
       std::string fp8_type_x1 = target_type_is_e4m3 ? "e4m3x1" : "e5m2x1";
@@ -1608,9 +1613,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
         // Use x1 variant: pads 3 zeros, extracts lowest byte
         std::string func_name = "__tl_cvt_f32x1_to_" + fp8_type_x1 + "_rs_sat";
         PrintIndent();
-        stream << "*reinterpret_cast<__nv_fp8_storage_t*>(&" << sret << ") = "
-               << func_name << "(" << src << ", "
-               << rbits_str << ");\n";
+        stream << "*reinterpret_cast<__nv_fp8_storage_t*>(&" << sret
+               << ") = " << func_name << "(" << src << ", " << rbits_str
+               << ");\n";
         os << sret;
         return;
       }
@@ -1621,9 +1626,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
         std::string src_cast = "(float2*)";
         std::string dst_cast = "reinterpret_cast<__nv_fp8x2_storage_t*>";
         PrintIndent();
-        stream << "(" << dst_cast << "(&" << sret << "))[0] = "
-               << func_name << "((" << src_cast << "(&" << src << "))[0], "
-               << rbits_str << ");\n";
+        stream << "(" << dst_cast << "(&" << sret << "))[0] = " << func_name
+               << "((" << src_cast << "(&" << src << "))[0], " << rbits_str
+               << ");\n";
         os << sret;
         return;
       }
@@ -1742,15 +1747,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     if (cast_round == "rs" && has_rbits) {
       // PTX: cvt.rs.satfinite.e2m1x4.f32 d, {a, b, e, f}, rbits
       // We provide x1 (scalar), x2 (zero-padded), and x4 (full) variants.
-      ICHECK(cast_sat) << "sat=false is not supported for stochastic rounding f32 -> fp4";
+      ICHECK(cast_sat)
+          << "sat=false is not supported for stochastic rounding f32 -> fp4";
       std::string rbits_str = PrintExpr(cast_rbits.value());
 
       if (lanes == 1) {
         // Use x1 variant: pads 3 zeros, extracts low nibble
         PrintIndent();
         stream << "*reinterpret_cast<__nv_fp4_storage_t*>(&" << sret << ") = "
-               << "__tl_cvt_f32x1_to_e2m1x1_rs_sat(" << src << ", "
-               << rbits_str << ");\n";
+               << "__tl_cvt_f32x1_to_e2m1x1_rs_sat(" << src << ", " << rbits_str
+               << ");\n";
         os << sret;
         return;
       }
@@ -1759,8 +1765,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
         // Use x2 variant: pads 2 zeros, extracts low byte
         PrintIndent();
         stream << "*reinterpret_cast<__nv_fp4x2_storage_t*>(&" << sret << ") = "
-               << "__tl_cvt_f32x2_to_e2m1x2_rs_sat(((float2*)(&" << src << "))[0], "
-               << rbits_str << ");\n";
+               << "__tl_cvt_f32x2_to_e2m1x2_rs_sat(((float2*)(&" << src
+               << "))[0], " << rbits_str << ");\n";
         os << sret;
         return;
       }
@@ -1772,8 +1778,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
           PrintIndent();
           stream << "reinterpret_cast<__nv_fp4x4_storage_t*>(&" << sret << ")["
                  << i << "] = __tl_cvt_f32x4_to_e2m1x4_rs_sat("
-                 << "((float4*)(&" << src << "))[" << i << "], "
-                 << rbits_str << ");\n";
+                 << "((float4*)(&" << src << "))[" << i << "], " << rbits_str
+                 << ");\n";
         }
         os << sret;
         return;
@@ -1861,10 +1867,11 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     }
   }
 
-  // Guard: rounding hint should have been handled above for supported type pairs
+  // Guard: rounding hint should have been handled above for supported type
+  // pairs
   if (!cast_round.empty()) {
-    LOG(FATAL) << "round '" << cast_round
-               << "' is not supported for cast from " << from_ty << " to " << target_ty
+    LOG(FATAL) << "round '" << cast_round << "' is not supported for cast from "
+               << from_ty << " to " << target_ty
                << " (only f32 -> fp8/fp4 supported)";
   }
 

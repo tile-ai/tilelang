@@ -352,15 +352,9 @@ def cast(value, dtype, round: str = "", sat: bool = True, rbits=None, span=None)
         The cast expression.
     """
     if round not in _VALID_CAST_ROUNDING_MODES:
-        raise ValueError(
-            f"Invalid round '{round}'. "
-            f"Must be one of: {sorted(_VALID_CAST_ROUNDING_MODES)}"
-        )
+        raise ValueError(f"Invalid round '{round}'. Must be one of: {sorted(_VALID_CAST_ROUNDING_MODES)}")
     if not isinstance(sat, bool):
-        raise ValueError(
-            f"Invalid sat '{sat}'. Must be a bool "
-            f"(True for satfinite, False for no saturation)"
-        )
+        raise ValueError(f"Invalid sat '{sat}'. Must be a bool (True for satfinite, False for no saturation)")
     if round == "rs" and rbits is None:
         raise ValueError("rbits is required when round='rs' (stochastic rounding)")
     if round != "rs" and rbits is not None:

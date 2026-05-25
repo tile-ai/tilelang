@@ -455,7 +455,8 @@ public:
       if (auto opt = kv.second.as<PrimExpr>()) {
         PrimExpr new_val = this->VisitExpr(opt.value());
         new_annotations.Set(kv.first, new_val);
-        if (!new_val.same_as(opt.value())) annotations_changed = true;
+        if (!new_val.same_as(opt.value()))
+          annotations_changed = true;
       } else {
         new_annotations.Set(kv.first, kv.second);
       }
@@ -464,8 +465,9 @@ public:
       return tvm::ffi::GetRef<PrimExpr>(op);
     }
     DataType new_dtype = value.dtype().is_scalable_vector()
-        ? op->dtype.with_scalable_vscale_factor(value.dtype().vscale_factor())
-        : op->dtype.with_lanes(value.dtype().lanes());
+                             ? op->dtype.with_scalable_vscale_factor(
+                                   value.dtype().vscale_factor())
+                             : op->dtype.with_lanes(value.dtype().lanes());
     if (op->annotations.empty()) {
       return Cast(new_dtype, value);
     }

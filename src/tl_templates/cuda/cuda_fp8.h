@@ -389,7 +389,6 @@ __tl_cvt_f32x2_to_e5m2x2_rs_sat(float2 src, unsigned int rbits) {
   return static_cast<__nv_fp8x2_storage_t>(tmp & 0xFFFF);
 }
 
-
 // ============================================================================
 // FP8 E8M0 Related Conversions
 // ============================================================================
