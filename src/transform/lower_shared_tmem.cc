@@ -169,15 +169,38 @@ private:
 
     Array<Buffer> tmem_buffers;
 
-    for (const auto &[data, buffer] : buffer_map_) {
+    // Collect TMEM buffers from both alloc_buffers and match_buffers.
+    auto check_and_add = [&](const Buffer &buffer) {
       const auto *ptr_type =
           buffer->data->type_annotation.as<PointerTypeNode>();
+      if (!ptr_type) return;
       auto storage_scope = ptr_type->storage_scope;
-      ICHECK(ptr_type) << "Buffer Var's type annotation must be of PointerType";
       if (storage_scope == "shared.tmem") {
         tmem_buffers.push_back(buffer);
       }
+    };
+    for (auto buffer : alloc_buffers) {
+      check_and_add(buffer);
     }
+    for (auto match_buffer : op->match_buffers) {
+      check_and_add(match_buffer->buffer);
+    }
+    // Sort for deterministic allocation order matching avo layout convention:
+    // S (scores) buffers before O (output) buffers, then by numeric suffix.
+    // This gives physical layout: S0=0, S1=128, O0=256, O1=384.
+    std::vector<Buffer> sorted_tmem(tmem_buffers.begin(), tmem_buffers.end());
+    std::sort(sorted_tmem.begin(), sorted_tmem.end(),
+              [](const Buffer &a, const Buffer &b) {
+                auto priority = [](const std::string &name) -> int {
+                  if (name.find("S0") != std::string::npos) return 0;
+                  if (name.find("S1") != std::string::npos) return 1;
+                  if (name.find("O0") != std::string::npos) return 2;
+                  if (name.find("O1") != std::string::npos) return 3;
+                  return 4; // unknown buffers go last
+                };
+                return priority(a->name) < priority(b->name);
+              });
+    tmem_buffers = Array<Buffer>(sorted_tmem.begin(), sorted_tmem.end());
 
     if (tmem_buffers.empty()) {
       return StmtExprMutator::VisitStmt_(op);

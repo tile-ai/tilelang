@@ -98,9 +98,13 @@ bool IsTcgen05OrTmemCall(const CallNode *call) {
   return call->op.same_as(ptx_tcgen05_mma_ss()) ||
          call->op.same_as(ptx_tcgen05_mma_ts()) ||
          call->op.same_as(tcgen05_ld()) || call->op.same_as(tcgen05_st()) ||
+         call->op.same_as(tcgen05_ld_x16()) || call->op.same_as(tcgen05_st_x16()) ||
          call->op.same_as(tcgen05_mma_arrive()) ||
+         call->op.same_as(tcgen05_wait_st()) ||
          call->op.same_as(ptx_init_tensor_memory()) ||
-         call->op.same_as(ptx_deallocate_tensor_memory());
+         call->op.same_as(ptx_deallocate_tensor_memory()) ||
+         call->op.same_as(tcgen05_pv_gemm_128x64()) ||
+         call->op.same_as(tcgen05_commit_1sm_op());
 }
 
 bool StmtUsesTcgen05OrTmem(const Stmt &stmt) {

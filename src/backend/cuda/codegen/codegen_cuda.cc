@@ -10,6 +10,7 @@
 #include <tvm/tir/index_map.h>
 #include <tvm/tir/op.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <optional>
@@ -790,6 +791,20 @@ void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
           outlined_fns_stream_ << ",\n    " << kp.type_str << "& "
                                << kp.var_name;
         }
+        BufferVarTouchCollector touched;
+        touched(branch.body);
+        for (const auto &alloc : local_allocs_) {
+          if (!alloc.outline_persistent) {
+            continue;
+          }
+          if (alloc.buffer_var && !touched.touched.count(alloc.buffer_var)) {
+            continue;
+          }
+          std::ostringstream type_os;
+          PrintType(alloc.dtype, type_os);
+          outlined_fns_stream_ << ",\n    " << type_os.str() << "* "
+                               << alloc.var_name;
+        }
         outlined_fns_stream_ << "\n) {\n";
 
         // extern shared
@@ -800,10 +815,11 @@ void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
         // Re-declare local allocations (zero-initialized for safety),
         // filtered to those this branch actually touches — see comment in
         // EmitOutlinedDeviceFunction.
-        BufferVarTouchCollector touched;
-        touched(branch.body);
         for (const auto &alloc : local_allocs_) {
           if (alloc.buffer_var && !touched.touched.count(alloc.buffer_var)) {
+            continue;
+          }
+          if (alloc.outline_persistent) {
             continue;
           }
           outlined_fns_stream_ << "  ";
@@ -824,6 +840,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
         in_outlined_fn_ = true;
         current_loop_var_name_ = vid;
         PrintStmt(branch.body);
+        FlushPendingTmemAllocs();
         current_loop_var_name_ = "";
         in_outlined_fn_ = false;
         outlined_fns_stream_ << stream.str();
@@ -861,6 +878,17 @@ void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
         for (const auto &kp : kernel_param_infos_) {
           stream << ", " << kp.var_name;
         }
+        BufferVarTouchCollector touched;
+        touched(branches[i].body);
+        for (const auto &alloc : local_allocs_) {
+          if (!alloc.outline_persistent) {
+            continue;
+          }
+          if (alloc.buffer_var && !touched.touched.count(alloc.buffer_var)) {
+            continue;
+          }
+          stream << ", " << alloc.var_name;
+        }
         stream << ");\n";
         EndScope(call_scope);
       }
@@ -893,6 +921,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
   std::string saved_loop_var = current_loop_var_name_;
   current_loop_var_name_ = vid;
   PrintStmt(op->body);
+  FlushPendingTmemAllocs();
   current_loop_var_name_ = saved_loop_var;
   this->EndScope(for_scope);
   PrintIndent();
@@ -2251,6 +2280,29 @@ void CodeGenTileLangCUDA::PrintVecStore(const BufferNode *buffer, DataType t,
  *            expects an expression result (some paths write directly to the
  *            member stream instead).
  */
+void CodeGenTileLangCUDA::FlushPendingTmemAllocs() {
+  if (pending_tmem_allocs_.empty()) {
+    return;
+  }
+
+  std::stable_sort(pending_tmem_allocs_.begin(), pending_tmem_allocs_.end(),
+                   [](const auto &a, const auto &b) {
+                     auto pri = [](const std::string &s) -> int {
+                       if (s.find("S0") != std::string::npos) return 0;
+                       if (s.find("S1") != std::string::npos) return 1;
+                       if (s.find("O0") != std::string::npos) return 2;
+                       if (s.find("O1") != std::string::npos) return 3;
+                       return 4;
+                     };
+                     return pri(a.first) < pri(b.first);
+                   });
+  for (const auto &entry : pending_tmem_allocs_) {
+    this->PrintIndent();
+    this->stream << entry.second;
+  }
+  pending_tmem_allocs_.clear();
+}
+
 void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   auto print_extern_call_stmt = [&](std::string name, size_t start = 0,
                                     size_t end = 0) {
@@ -2269,6 +2321,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << ss.str();
     this->stream << ");\n";
   };
+
   if (op->op.same_as(tl::max_nan()) || op->op.same_as(tl::min_nan())) {
     ICHECK_EQ(op->args.size(), 2);
     const bool is_max = op->op.same_as(tl::max_nan());
@@ -2354,7 +2407,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     ICHECK_EQ(op->args.size(), 1);
     this->PrintIndent();
     auto mbarrier_obj = this->PrintExpr(op->args[0]);
-    this->stream << mbarrier_obj << ".arrive();\n";
+    // Emit avo-exact release.cta arrive instead of CUTLASS .arrive()
+    this->stream << "{\n";
+    this->PrintIndent();
+    this->stream << "  unsigned int barrier_addr_int = cast_smem_ptr_to_int(&"
+                 << mbarrier_obj << ");\n";
+    this->PrintIndent();
+    this->stream << "  asm volatile(\"mbarrier.arrive.release.cta.shared::cta.b64 "
+                    "_, [%0];\" :: \"r\"(barrier_addr_int) : \"memory\");\n";
+    this->PrintIndent();
+    this->stream << "}\n";
   } else if (op->op.same_as(tl::ptx_arrive_cluster_barrier())) {
     ICHECK_EQ(op->args.size(), 2);
     this->PrintIndent();
@@ -2375,8 +2437,19 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->PrintIndent();
       auto mbarrier_obj = this->PrintExpr(op->args[0]);
       auto transaction_bytes = this->PrintExpr(op->args[1]);
-      this->stream << mbarrier_obj << ".arrive_and_expect_tx("
-                   << transaction_bytes << ");\n";
+      // Emit avo-exact release.cta arrive_expect_tx
+      this->stream << "{\n";
+      this->PrintIndent();
+      this->stream << "  unsigned int __tx_bar = cast_smem_ptr_to_int(&"
+                   << mbarrier_obj << ");\n";
+      this->PrintIndent();
+      this->stream << "  asm volatile(\"mbarrier.arrive.expect_tx.release.cta"
+                      ".shared::cta.b64 _, [%0], %1;\"\n";
+      this->PrintIndent();
+      this->stream << "    :: \"r\"(__tx_bar), \"r\"((int)("
+                   << transaction_bytes << ")) : \"memory\");\n";
+      this->PrintIndent();
+      this->stream << "}\n";
     } else if (op->args.size() == 4) {
       this->PrintIndent();
       auto mbarrier_obj = this->PrintExpr(op->args[0]);
@@ -2408,15 +2481,43 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     auto mbarrier_obj = this->PrintExpr(op->args[0]);
     auto phase = this->PrintExpr(op->args[1]);
-    this->stream << mbarrier_obj << ".wait(" << phase << ");\n";
+    // Emit avo-exact acquire.cta wait instead of CUTLASS .wait()
+    this->stream << "{\n";
+    this->PrintIndent();
+    this->stream << "  unsigned int __mbar_addr = cast_smem_ptr_to_int(&"
+                 << mbarrier_obj << ");\n";
+    this->PrintIndent();
+    this->stream << "  unsigned int __mbar_phase = (unsigned int)(" << phase << ");\n";
+    this->PrintIndent();
+    this->stream << "  unsigned int __mbar_ticks = 10000000u;\n";
+    this->PrintIndent();
+    this->stream << "  asm volatile(\n";
+    this->PrintIndent();
+    this->stream << "    \"{ .reg .pred P; WAIT%=:\"\n";
+    this->PrintIndent();
+    this->stream << "    \"mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P, [%0], %1, %2;\"\n";
+    this->PrintIndent();
+    this->stream << "    \"@P bra.uni DONE%=; bra.uni WAIT%=; DONE%=: }\"\n";
+    this->PrintIndent();
+    this->stream << "    :: \"r\"(__mbar_addr), \"r\"(__mbar_phase), \"r\"(__mbar_ticks) : \"memory\");\n";
+    this->PrintIndent();
+    this->stream << "}\n";
   } else if (op->op.same_as(tl::ptx_init_tensor_memory())) {
+    // Buffer the tmem_allocate call for sorted emission.
     std::ostringstream ss;
     ss << "tl::tmem_allocate";
     if (op->annotations.find("use_2cta") != op->annotations.end() &&
         Downcast<Bool>(op->annotations["use_2cta"])->value) {
       ss << "<true>";
     }
-    print_extern_call_stmt(ss.str());
+    std::ostringstream args_ss;
+    for (size_t i = 0; i < op->args.size(); i++) {
+      if (i > 0) args_ss << ", ";
+      args_ss << this->PrintExpr(op->args[i]);
+    }
+    std::string call_str = ss.str() + "(" + args_ss.str() + ");\n";
+    std::string args_text = args_ss.str();
+    pending_tmem_allocs_.push_back({args_text, call_str});
   } else if (op->op.same_as(tl::ptx_deallocate_tensor_memory())) {
     std::ostringstream ss;
     ss << "tl::tmem_deallocate";
@@ -3221,6 +3322,34 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << ", " << (unpack16 ? "true" : "false") << ">("
                  << tmem_start_col << ", " << col_offset << ", " << src_ptr
                  << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_ld_x16())) {
+    ICHECK_EQ(op->args.size(), 6U) << "tcgen05_ld_x16 expects 6 arguments";
+    need_tcgen05_common_h_ = true;
+    int inst_bits = Downcast<IntImm>(op->args[0])->value;
+    int chunks = Downcast<IntImm>(op->args[1])->value;
+    bool pack16 = Downcast<Bool>(op->args[2])->value;
+    std::string tmem_start_col = this->PrintExpr(op->args[3]);
+    std::string col_offset = this->PrintExpr(op->args[4]);
+    std::string dst_ptr = this->PrintExpr(op->args[5]);
+    this->PrintIndent();
+    this->stream << "tl::tcgen05_ld_32dp" << inst_bits << "bNx_x16<" << chunks
+                 << ", " << (pack16 ? "true" : "false") << ">("
+                 << tmem_start_col << ", " << col_offset << ", " << dst_ptr
+                 << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_st_x16())) {
+    ICHECK_EQ(op->args.size(), 6U) << "tcgen05_st_x16 expects 6 arguments";
+    need_tcgen05_common_h_ = true;
+    int inst_bits = Downcast<IntImm>(op->args[0])->value;
+    int chunks = Downcast<IntImm>(op->args[1])->value;
+    bool unpack16 = Downcast<Bool>(op->args[2])->value;
+    std::string tmem_start_col = this->PrintExpr(op->args[3]);
+    std::string col_offset = this->PrintExpr(op->args[4]);
+    std::string src_ptr = this->PrintExpr(op->args[5]);
+    this->PrintIndent();
+    this->stream << "tl::tcgen05_st_32dp" << inst_bits << "bNx_x16<" << chunks
+                 << ", " << (unpack16 ? "true" : "false") << ">("
+                 << tmem_start_col << ", " << col_offset << ", " << src_ptr
+                 << ");\n";
   } else if (op->op.same_as(tl::tcgen05_mma_arrive())) {
     ICHECK_EQ(op->args.size(), 1U) << "tcgen05_mma_arrive expects 1 argument";
     need_tcgen05_common_h_ = true;
@@ -3241,6 +3370,66 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         << "tcgen05_after_thread_sync expects no arguments";
     need_tcgen05_common_h_ = true;
     print_extern_call_stmt("tl::tcgen05_after_thread_sync");
+  } else if (op->op.same_as(tl::tcgen05_wait_st())) {
+    ICHECK_EQ(op->args.size(), 0U)
+        << "tcgen05_wait_st expects no arguments";
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::fence_view_async_tmem_store();\n";
+  } else if (op->op.same_as(tl::tcgen05_correction_x16())) {
+    ICHECK_EQ(op->args.size(), 4U)
+        << "tcgen05_correction_x16 expects 4 args: tmem_buf, scale, wg_offset, head_dim";
+    this->PrintIndent();
+    auto tmem_addr = this->PrintExpr(op->args[0]);
+    auto scale_val = this->PrintExpr(op->args[1]);
+    auto wg_offset = this->PrintExpr(op->args[2]);
+    auto head_dim = Downcast<IntImm>(op->args[3])->value;
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::tmem_correction_x16<" << head_dim << ">("
+                 << tmem_addr << ", " << scale_val << ", " << wg_offset << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_pv_gemm_128x64())) {
+    ICHECK_EQ(op->args.size(), 5U)
+        << "tcgen05_pv_gemm_128x64 expects 5 args: V_lo_ptr, V_hi_ptr, P_tmem, O_tmem, accum";
+    this->PrintIndent();
+    auto v_lo = this->PrintExpr(op->args[0]);
+    auto v_hi = this->PrintExpr(op->args[1]);
+    auto p_addr = this->PrintExpr(op->args[2]);
+    auto o_addr = this->PrintExpr(op->args[3]);
+    auto accum = this->PrintExpr(op->args[4]);
+    need_tcgen05_common_h_ = true;
+    // Warp-12 guard (all 32 lanes converged); the MMA helper uses elect_one internally
+    this->stream << "if ((((int)threadIdx.x) >> 5) == 12) {\n";
+    this->PrintIndent();
+    this->stream << "  tl::tcgen05_pv_mma_128x64_avo((void const*)(" << v_lo
+                 << "), (void const*)(" << v_hi << "), " << p_addr << ", "
+                 << o_addr << ", " << accum << ");\n";
+    this->PrintIndent();
+    this->stream << "}\n";
+  } else if (op->op.same_as(tl::tcgen05_commit_1sm_op())) {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "tcgen05_commit_1sm_op expects 1 arg: mbar_ptr";
+    this->PrintIndent();
+    auto mbar = this->PrintExpr(op->args[0]);
+    need_tcgen05_common_h_ = true;
+    // Warp-12 guard; commit has elect_one internally
+    this->stream << "if ((((int)threadIdx.x) >> 5) == 12) {\n";
+    this->PrintIndent();
+    this->stream << "  tl::tcgen05_commit_1sm((void const*)(&"
+                 << mbar << "));\n";
+    this->PrintIndent();
+    this->stream << "}\n";
+  } else if (op->op.same_as(tl::outline_persistent())) {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "outline_persistent expects 1 buffer handle";
+    if (const auto *var = op->args[0].as<VarNode>()) {
+      outline_persistent_vars_.insert(var);
+      for (auto &alloc : local_allocs_) {
+        if (alloc.buffer_var == var) {
+          alloc.outline_persistent = true;
+        }
+      }
+    } else {
+      LOG(FATAL) << "outline_persistent expects a direct buffer handle Var";
+    }
   } else if (op->op.same_as(builtin::ptx_ldmatrix())) {
     // arg 0: whether the matrix is loaded in column major format or not.
     // arg 1: number of matrices to load.
@@ -4435,9 +4624,11 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
         }
       }
       if (outline_warp_spec_enabled_ && !in_outlined_fn_) {
+        bool outline_persistent =
+            outline_persistent_vars_.count(op->buffer_var.get()) != 0;
         local_allocs_.push_back({vid, op->dtype,
                                  static_cast<int64_t>(constant_size),
-                                 op->buffer_var.get()});
+                                 outline_persistent, op->buffer_var.get()});
       }
     } else if (scope == "local.var") {
       PrimExpr init = tir::make_const(op->dtype, 0);
@@ -4463,6 +4654,24 @@ void CodeGenTileLangCUDA::VisitStmt_(const EvaluateNode *op) {
   if (is_const_int(op->value))
     return;
   const CallNode *call = op->value.as<CallNode>();
+  if (call && !call->op.same_as(tl::ptx_init_tensor_memory())) {
+    FlushPendingTmemAllocs();
+  }
+  if (call && call->op.same_as(tl::outline_persistent())) {
+    ICHECK_EQ(call->args.size(), 1U)
+        << "outline_persistent expects 1 buffer handle";
+    if (const auto *var = call->args[0].as<VarNode>()) {
+      outline_persistent_vars_.insert(var);
+      for (auto &alloc : local_allocs_) {
+        if (alloc.buffer_var == var) {
+          alloc.outline_persistent = true;
+        }
+      }
+    } else {
+      LOG(FATAL) << "outline_persistent expects a direct buffer handle Var";
+    }
+    return;
+  }
   if (call && call->op.same_as(builtin::tvm_global_barrier_kinit())) {
     PrintIndent();
     stream << "__shared__ unsigned " << vid_global_barrier_expect_ << ";\n";
@@ -4609,6 +4818,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
 }
 
 void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
+  FlushPendingTmemAllocs();
   ICHECK_EQ(op->indices.size(), 1) << "Store to non-flat memory not supported.";
   ICHECK(!op->predicate.defined())
       << "Predicated buffer store is not supported.";
@@ -5438,6 +5648,7 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
   this->PreFunctionBody(f);
   int func_scope = this->BeginScope();
   this->PrintStmt(f->body);
+  FlushPendingTmemAllocs();
   this->EndScope(func_scope);
   this->PrintIndent();
   this->stream << "}\n\n";
@@ -5516,6 +5727,20 @@ std::string CodeGenTileLangCUDA::EmitOutlinedDeviceFunction(const Stmt &body) {
     emit_sep();
     outlined_fns_stream_ << kp.type_str << "& " << kp.var_name;
   }
+  BufferVarTouchCollector touched;
+  touched(body);
+  for (const auto &alloc : local_allocs_) {
+    if (!alloc.outline_persistent) {
+      continue;
+    }
+    if (alloc.buffer_var && !touched.touched.count(alloc.buffer_var)) {
+      continue;
+    }
+    emit_sep();
+    std::ostringstream type_os;
+    PrintType(alloc.dtype, type_os);
+    outlined_fns_stream_ << type_os.str() << "* " << alloc.var_name;
+  }
   outlined_fns_stream_ << "\n) {\n";
 
   // extern shared for buf_dyn_shmem access
@@ -5526,13 +5751,13 @@ std::string CodeGenTileLangCUDA::EmitOutlinedDeviceFunction(const Stmt &body) {
   // the rest as `= {}` would force ptxas to keep dead initializers alive,
   // inflating register pressure (the unused ones can add 300+ regs/thread
   // for FA-style kernels with many per-warp fragments).
-  BufferVarTouchCollector touched;
-  touched(body);
-
   // Re-declare local allocations (each device fn gets its own register set)
   for (const auto &alloc : local_allocs_) {
     if (alloc.buffer_var && !touched.touched.count(alloc.buffer_var)) {
       continue;  // not used by this branch
+    }
+    if (alloc.outline_persistent) {
+      continue;  // forwarded from the caller to preserve cross-call state
     }
     outlined_fns_stream_ << "  ";
     std::ostringstream type_os;
@@ -5550,6 +5775,7 @@ std::string CodeGenTileLangCUDA::EmitOutlinedDeviceFunction(const Stmt &body) {
   // Emit at base indent level (one level inside the function)
   // PrintStmt will manage its own sub-scopes
   PrintStmt(body);
+  FlushPendingTmemAllocs();
   in_outlined_fn_ = false;
 
   // Capture the emitted body and restore
@@ -5622,6 +5848,18 @@ void CodeGenTileLangCUDA::VisitStmt_(const IfThenElseNode *op) {
       for (const auto &kp : kernel_param_infos_) {
         sep();
         stream << kp.var_name;
+      }
+      BufferVarTouchCollector touched;
+      touched(branches[i].body);
+      for (const auto &alloc : local_allocs_) {
+        if (!alloc.outline_persistent) {
+          continue;
+        }
+        if (alloc.buffer_var && !touched.touched.count(alloc.buffer_var)) {
+          continue;
+        }
+        sep();
+        stream << alloc.var_name;
       }
       stream << ");\n";
       EndScope(call_scope);

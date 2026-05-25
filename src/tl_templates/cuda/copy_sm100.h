@@ -206,6 +206,18 @@ tcgen05_ld_32dp32bNx(uint32_t const &tmem_start_col,
   tl::fence_view_async_tmem_load();
 }
 
+// x16-max variant: splits loads into x16 instructions for cross-WG visibility.
+// Adds explicit per-warp row offset for correct cross-WG TMEM addressing.
+template <int N, bool pack16, typename dst_t>
+__device__ __forceinline__ void
+tcgen05_ld_32dp32bNx_x16(uint32_t const &tmem_start_col,
+                          uint32_t const &tmem_col_offset, dst_t *dst_ptr) {
+  uint32_t row_off = (uint32_t)(((threadIdx.x / 32) % 4) * 32) << 16;
+  tcgen05_ld_core<tl::tmem_ld_32dp32bNx<pack16>, 4, N>(
+      tmem_start_col + tmem_col_offset + row_off, dst_ptr);
+  tl::fence_view_async_tmem_load();
+}
+
 template <int N, bool pack16, typename dst_t>
 __device__ __forceinline__ void
 tcgen05_ld_32dp64bNx(uint32_t const &tmem_start_col,
@@ -260,6 +272,145 @@ tcgen05_st_32dp32bNx(uint32_t const &tmem_start_col,
   tcgen05_st_core<tl::tmem_st_32dp32bNx<unpack16>, 7, N>(
       tmem_start_col + tmem_col_offset, src_ptr);
   tl::fence_view_async_tmem_store();
+}
+
+// x16-max variant: splits stores into x16 instructions for cross-WG visibility.
+// Does NOT emit per-store wait_st — caller is responsible for calling
+// fence_view_async_tmem_store() once after all batched stores complete.
+// Adds explicit per-warp row offset for correct cross-WG TMEM addressing.
+template <int N, bool unpack16, typename src_t>
+__device__ __forceinline__ void
+tcgen05_st_32dp32bNx_x16(uint32_t const &tmem_start_col,
+                          uint32_t const &tmem_col_offset, src_t const *src_ptr) {
+  uint32_t row_off = (uint32_t)(((threadIdx.x / 32) % 4) * 32) << 16;
+  tcgen05_st_core<tl::tmem_st_32dp32bNx<unpack16>, 4, N>(
+      tmem_start_col + tmem_col_offset + row_off, src_ptr);
+}
+
+// Per-warp O correction with explicit row offsets (avo-style).
+// Each warp in the correction WG handles 32 rows independently.
+// tmem_base: base TMEM address for this O tile (e.g., O0_tmem[0])
+// scale: per-thread rescale factor (one float per row per thread)
+// warp_group_offset: threadIdx.x offset for the correction WG (e.g., 256)
+template <int HeadDim>
+__device__ __forceinline__ void
+tmem_correction_x16(uint32_t tmem_base, float scale, int warp_group_offset) {
+  int warp_in_group = ((threadIdx.x - warp_group_offset) / 32) % 4;
+  uint32_t tr = (uint32_t)((warp_in_group * 32) << 16);
+  uint32_t O_base = tmem_base + tr;
+  constexpr int kChunks = HeadDim / 16;
+  float buf[2][16];
+  int cur = 0;
+
+  // Software-pipelined x16 ld/mul/st matching avo's correction_warp_fn
+  tl::tmem_ld_32dp32bNx<false>::copy<16>(O_base, (uint32_t *)buf[0]);
+  for (int g = 0; g < kChunks; g++) {
+    tl::fence_view_async_tmem_load();
+    int nxt = cur ^ 1;
+    if (g + 1 < kChunks)
+      tl::tmem_ld_32dp32bNx<false>::copy<16>(O_base + (g + 1) * 16,
+                                              (uint32_t *)buf[nxt]);
+    #pragma unroll
+    for (int i = 0; i < 16; i += 2) {
+      float a0 = buf[cur][i] * scale;
+      float a1 = buf[cur][i + 1] * scale;
+      buf[cur][i] = a0;
+      buf[cur][i + 1] = a1;
+    }
+    tl::tmem_st_32dp32bNx<false>::copy<16>(O_base + g * 16,
+                                            (uint32_t const *)buf[cur]);
+    cur = nxt;
+  }
+  tl::fence_view_async_tmem_store();
+}
+
+// Non-template wrapper for HeadDim=128 (callable as extern)
+__device__ __forceinline__ void
+tmem_correction_x16_d128(uint32_t tmem_base, float scale, int warp_group_offset) {
+  tl::tmem_correction_x16<128>(tmem_base, scale, warp_group_offset);
+}
+
+// ====================================================================
+// Avo-exact PV MMA helpers (copied from avo/kernels/fmha_2cta_raw.cuh)
+// ====================================================================
+
+// 128×64 BMN TS-MMA: C[128×64] += A_tmem[128×K] @ B_smem[64×K]^T
+// A in TMEM (K-major), B in SMEM (MN-major = transposed), C in TMEM (F32)
+__device__ __forceinline__ void
+tcgen05_mma_1sm_ts_128x64_bmn(uint32_t tmem_c, uint32_t tmem_a,
+                               uint64_t desc_b, uint32_t accumulate) {
+  uint32_t idesc = (1U << 4)               // c_format = F32
+                 | (1U << 7)               // a_format = BF16
+                 | (1U << 10)              // b_format = BF16
+                 | (0U << 15)              // a_major = K-major
+                 | (1U << 16)              // b_major = MN-major
+                 | ((64U / 8) << 17)       // n_dim = 8 (N=64)
+                 | ((128U / 16) << 24);    // m_dim = 8 (M=128)
+  asm volatile("{                                                            \n"
+               ".reg .pred p0;                                               \n"
+               "setp.ne.b32 p0, %4, 0;                                       \n"
+               "tcgen05.mma.cta_group::1.kind::f16 [%0], [%1], %2, %3, p0;   \n"
+               "}"
+               : : "r"(tmem_c), "r"(tmem_a), "l"(desc_b), "r"(idesc),
+                   "r"(accumulate));
+}
+
+// Avo-exact commit: NO shared:: qualifier (just .b64 [%0])
+// This is different from TileLang's shared::cluster variant!
+__device__ __forceinline__ void
+tcgen05_commit_1sm(void const *smem_mbar_ptr) {
+  uint32_t p = static_cast<uint32_t>(__cvta_generic_to_shared(
+      const_cast<void *>(smem_mbar_ptr)));
+  if (cute::elect_one_sync()) {
+    asm volatile(
+        "tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64 [%0];"
+        : : "r"(p));
+  }
+}
+
+// Full PV MMA for one qs: avo-exact 128×64 BMN, high D first, low D second.
+// V_lo_ptr: pointer to V low-D buffer (bf16, [128, 64], row stride=128B)
+// V_hi_ptr: pointer to V high-D buffer (bf16, [128, 64], row stride=128B)
+// P_tmem_addr: P tile TMEM base address
+// O_tmem_addr: O tile TMEM base address
+// accumulate: 0 for k==0 (clear), 1 for k>0 (accumulate into existing O)
+// NOTE: Must be called from warp 12 only (codegen adds the guard).
+// Uses elect_one_sync internally — only lane 0 of warp 12 issues MMA.
+__device__ __forceinline__ void
+tcgen05_pv_mma_128x64_avo(void const *V_lo_ptr, void const *V_hi_ptr,
+                           uint32_t P_tmem_addr,
+                           uint32_t O_tmem_addr, uint32_t accumulate) {
+  if (!cute::elect_one_sync()) return;
+  constexpr int kBlockN = 128;   // K-rows (seq block)
+  constexpr int kTileCols = 64;  // descriptor tile width
+
+  auto *v_lo = (bfloat16_t *)const_cast<void *>(V_lo_ptr);
+  auto *v_hi = (bfloat16_t *)const_cast<void *>(V_hi_ptr);
+  tl::Tcgen05SMemDescriptor desc_lo, desc_hi;
+  tl::initialize_tcgen05_descriptor(
+      desc_lo, v_lo, 0, 64, 0, 0, 2);
+  tl::initialize_tcgen05_descriptor(
+      desc_hi, v_hi, 0, 64, 0, 0, 2);
+
+  constexpr int kStride = 2048;  // bytes per 16 K-rows: 16 * 64 * 2
+
+  // D-tile 1 (HIGH, dim 64-127) FIRST — avo processes high D before low D
+  tl::fence_proxy_async();
+  #pragma unroll
+  for (int j = 0; j < kBlockN / 16; j++) {
+    tl::tcgen05_mma_1sm_ts_128x64_bmn(
+        O_tmem_addr + 64, P_tmem_addr + j * 8,
+        uint64_t(desc_hi + j * kStride),
+        (j == 0) ? accumulate : 1u);
+  }
+  // D-tile 0 (LOW, dim 0-63) SECOND
+  #pragma unroll
+  for (int j = 0; j < kBlockN / 16; j++) {
+    tl::tcgen05_mma_1sm_ts_128x64_bmn(
+        O_tmem_addr, P_tmem_addr + j * 8,
+        uint64_t(desc_lo + j * kStride),
+        (j == 0) ? accumulate : 1u);
+  }
 }
 
 template <int N, bool unpack16, typename src_t>

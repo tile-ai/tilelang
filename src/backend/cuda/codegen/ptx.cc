@@ -1508,7 +1508,7 @@ std::string PrintArriveBarrierAsm(const std::string &barrier) {
   {
     unsigned int barrier_addr_int = cast_smem_ptr_to_int({barrier});
     __asm__ __volatile__(
-      "{ .reg .b64 state; mbarrier.arrive.shared.b64 state, [%0]; }"
+      "mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];"
       :: "r"(barrier_addr_int)
     );
   }
@@ -1539,20 +1539,13 @@ std::string PrintArriveBarrierAsm(const std::string &barrier) {
 std::string PrintArriveBarrierLane0Asm(const std::string &barrier) {
   std::string predicated_asm_code = R"(
   {
-    __syncwarp();
-    __threadfence_block();
     unsigned int barrier_addr_int = cast_smem_ptr_to_int({barrier});
-    __asm__ __volatile__(
-      "{                                                  \n\t"
-      "  .reg .pred  p;                                   \n\t"
-      "  .reg .b32   lane;                                \n\t"
-      "  .reg .b64   state;                               \n\t"
-      "  mov.u32     lane, %%laneid;                      \n\t"
-      "  setp.eq.u32 p, lane, 0;                          \n\t"
-      "  @p mbarrier.arrive.shared.b64 state, [%0];       \n\t"
-      "}"
-      :: "r"(barrier_addr_int)
-    );
+    if (cute::elect_one_sync()) {
+      __asm__ __volatile__(
+        "mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];"
+        :: "r"(barrier_addr_int)
+      );
+    }
   }
 )";
 
@@ -1569,7 +1562,7 @@ std::string PrintArriveBarrierExpectTxAsm(const std::string &barrier,
     unsigned int barrier_addr_int = cast_smem_ptr_to_int({barrier});
     int byte_count = {byte_count};
     __asm__ __volatile__(
-      "mbarrier.arrive.expect_tx.shared.b64 _, [%0], %1;"
+      "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%0], %1;"
       :: "r"(barrier_addr_int), "r"(byte_count)
     );
   }
@@ -1588,7 +1581,7 @@ std::string PrintWaitBarrierAsm(const std::string &barrier) {
     unsigned int barrier_addr_int = cast_smem_ptr_to_int({barrier});
     constexpr int phase_bit = 0;
     __asm__ __volatile__(
-      "{ .reg .pred P; WAIT: mbarrier.try_wait.parity.shared.b64 P, [%0], %1; @P bra.uni DONE; bra.uni WAIT; DONE: }"
+      "{ .reg .pred P; WAIT: mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P, [%0], %1; @P bra.uni DONE; bra.uni WAIT; DONE: }"
       :: "r"(barrier_addr_int), "r"(phase_bit)
     );
   }

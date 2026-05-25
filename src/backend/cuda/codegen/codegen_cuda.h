@@ -81,6 +81,7 @@ private:
   void HandleVolatileLoads(const std::string &value, const BufferLoadNode *op,
                            std::ostream &os) final;
   bool HandleLateIntrinsicCall(const CallNode *op, std::ostream &os);
+  void FlushPendingTmemAllocs();
 
   // Whether scope such as "__shared__" or "__constant__"  is part of type.
   bool IsScopePartOfType() const final { return false; }
@@ -149,6 +150,9 @@ private:
   const std::string mbarrier_name_ = "mbarrier";
   // The type name of the mbarrier array
   const std::string mbarrier_dtype_ = "Barrier";
+  // Buffered TMEM allocations for sorted emission (avo layout parity).
+  // Each entry: {sort_key (buffer arg text), full call string}.
+  std::vector<std::pair<std::string, std::string>> pending_tmem_allocs_;
   // The alignment of the barrier array in shared memory
   // Set to 16 to maintain minimum alignment requirements for async bulk copy
   const int barrier_alignment_bytes_ = 16;
@@ -183,6 +187,7 @@ private:
     std::string var_name;
     DataType dtype;
     int64_t size;
+    bool outline_persistent{false};
     // Buffer variable handle so we can check which branches touch this alloc
     // during outlining. Without this we conservatively re-declare every kernel-
     // scope local in every outlined fn, forcing ptxas to keep dead `= {}`
@@ -203,6 +208,7 @@ private:
     bool is_grid_constant{false};
   };
   std::vector<KernelParamInfo> kernel_param_infos_;
+  std::unordered_set<const VarNode *> outline_persistent_vars_;
 
   // Helper: check if condition involves threadIdx.x comparison
   bool IsThreadXComparison(const PrimExpr &cond) const;

@@ -794,7 +794,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
     # -- Arrive --
 
     def tcgen05_atom_arrive(self, mbar):
-        """Emit ``tcgen05_mma_arrive(mbar)``."""
+        """Emit ``tcgen05_mma_arrive(mbar)``. No-op when mbar is None."""
+        if mbar is None:
+            return
         _, _, _, _, enable_2cta = self.tcgen05_meta_unpacked
 
         @T.macro
@@ -885,6 +887,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         B_byte_offset = B_elem_offset * b_elems_in_bytes
         tmem_col_step = atom_n // (128 // atom_m_per_cta)
         C_offset = (inst_m_idx * n_dim + inst_n_idx * tmem_col_step) * accum_dtype_in_bits // 32
+        C_offset += getattr(self, '_c_col_start_u32', 0)
 
         @T.macro
         def _ss_atom(desc_a, desc_b, C_local_buf):
@@ -981,6 +984,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         tmem_col_step = atom_n // (128 // atom_m_per_cta)
         C_offset = (inst_m_idx * n_dim + inst_n_idx * tmem_col_step) * accum_dtype_in_bits // 32
+        C_offset += getattr(self, '_c_col_start_u32', 0)
 
         @T.macro
         def _ts_atom(a_data, desc_b, C_local_buf):
@@ -1077,6 +1081,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         B_byte_offset = B_elem_offset * b_elems_in_bytes
         tmem_col_step = atom_n // (128 // atom_m_per_cta)
         C_offset = (inst_m_idx * n_dim + inst_n_idx * tmem_col_step) * accum_dtype_in_bits // 32
+        C_offset += getattr(self, '_c_col_start_u32', 0)
 
         @T.macro
         def _bs_atom(desc_a, desc_b, C_local_buf, sfa_data, sfb_data):

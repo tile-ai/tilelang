@@ -242,7 +242,7 @@ def tcgen05_gemm(
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
     *,
-    mbar: BarrierType,
+    mbar: BarrierType = None,
     use_2cta: bool = False,
 ) -> tir.PrimExpr:
     """Explicit Blackwell TCGEN05 GEMM without an implicit wait.

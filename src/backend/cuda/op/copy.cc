@@ -859,6 +859,8 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
               ? PrimExpr(0)
               : relative_wg_idx * (effective_chunks * meta.width);
       have_succeeded = true;
+      bool use_x16 = op.annotations.count("use_x16") &&
+                     Downcast<Bool>(op.annotations.Get("use_x16").value())->value;
       Array<PrimExpr> args;
       Stmt call;
       if (is_ld) {
@@ -871,7 +873,8 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
         args.push_back(reg_buf.access_ptr(/*access_mask=*/2, DataType::Handle(),
                                           /*content_lanes=*/1, /*offset=*/0,
                                           PrimExpr(tmem_phy_col_extent)));
-        call = Evaluate(Call(DataType::Handle(), tcgen05_ld(), args));
+        call = Evaluate(Call(DataType::Handle(),
+                             use_x16 ? tcgen05_ld_x16() : tcgen05_ld(), args));
       } else {
         args.push_back(IntImm(DataType::Int(32), meta.width * 32));
         args.push_back(IntImm(DataType::Int(32), effective_chunks));
@@ -882,7 +885,8 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
         args.push_back(reg_buf.access_ptr(/*access_mask=*/1, DataType::Handle(),
                                           /*content_lanes=*/1, /*offset=*/0,
                                           PrimExpr(tmem_phy_col_extent)));
-        call = Evaluate(Call(DataType::Handle(), tcgen05_st(), args));
+        call = Evaluate(Call(DataType::Handle(),
+                             use_x16 ? tcgen05_st_x16() : tcgen05_st(), args));
       }
       if (num_useful_threads != num_threads) {
         body =
@@ -907,6 +911,15 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
     try_tcgen05_instruction(getTcgen05MetaSt_32dp256b());
   }
 
+  if (!have_succeeded) {
+    LOG(WARNING) << "tcgen05." << (is_ld ? "ld" : "st")
+                 << " instruction selection failed."
+                 << " tmem_phy_row=[" << tmem_phy_row_min << ", " << tmem_phy_row_max << "]"
+                 << " tmem_phy_col=[" << tmem_phy_col_min << ", " << tmem_phy_col_max << "]"
+                 << " col_extent=" << tmem_phy_col_extent
+                 << " num_threads=" << num_threads
+                 << " thread_bounds=" << T.thread_bounds;
+  }
   ICHECK(have_succeeded) << "Failed to find a suitable instruction for tcgen05."
                          << (is_ld ? "ld" : "st") << ". Check your layout.";
 

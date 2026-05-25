@@ -1257,6 +1257,67 @@ def tcgen05_after_thread_sync():
     return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_after_thread_sync"))
 
 
+def tcgen05_wait_st():
+    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_wait_st"))
+
+
+def tcgen05_correction_x16(tmem_buf, scale_frag, warp_group_offset: int = 256, head_dim: int = 128):
+    """Per-warp O correction using avo-style x16 ld/mul/st sequence.
+
+    Emits tl::tmem_correction_x16<HeadDim>(tmem_base, scale, wg_offset).
+    Each warp in the correction WG handles 32 rows independently with
+    explicit row offset, software-pipelined x16 load/store, and a single
+    tcgen05.wait::st at the end.
+
+    Args:
+        tmem_buf: TMEM buffer (the O_tmem allocation). Pass O_tmem[0, 0] for base addr.
+        scale_frag: Scale fragment value. Pass corr_scale[0] for the per-thread value.
+        warp_group_offset: threadIdx.x start of the correction WG (default 256).
+        head_dim: Number of columns to correct (default 128).
+    """
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_correction_x16"),
+        tmem_buf,
+        scale_frag,
+        tir.IntImm("int32", warp_group_offset),
+        tir.IntImm("int32", head_dim),
+    )
+
+
+def tcgen05_pv_gemm_128x64(v_lo_ptr, v_hi_ptr, p_tmem_addr, o_tmem_addr, accumulate):
+    """Avo-exact PV MMA: 128x64 BMN, high D first then low D, 16 MMA calls total.
+    v_lo_ptr: SMEM pointer to V low-D buffer [128, 64] with 128B row stride.
+    v_hi_ptr: SMEM pointer to V high-D buffer [128, 64] with 128B row stride.
+    """
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_pv_gemm_128x64"),
+        v_lo_ptr,
+        v_hi_ptr,
+        p_tmem_addr,
+        o_tmem_addr,
+        accumulate,
+    )
+
+
+def tcgen05_commit_1sm(mbar):
+    """Avo-exact commit: tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64"""
+    mbar = _mbar_to_buffer_load(mbar)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_commit_1sm_op"),
+        mbar,
+    )
+
+
+def outline_persistent(buffer):
+    """Mark a local fragment as persistent across warp-spec outlined calls."""
+    if isinstance(buffer, tir.Buffer):
+        buffer = buffer.data
+    return tir.call_intrin("void", tir.op.Op.get("tl.outline_persistent"), buffer)
+
+
 def _tcgen05_num_smem_chunks(smem_src, chunk_elems: int):
     if isinstance(smem_src, tir.Buffer):
         shape = list(smem_src.shape)

@@ -1006,12 +1006,22 @@ TVM_DLL const Op &tcgen05_mma_arrive();
 TVM_DLL const Op &tcgen05_ld();
 
 /*!
+ * \brief x16-max variant of tcgen05_ld for cross-WG TMEM visibility.
+ */
+TVM_DLL const Op &tcgen05_ld_x16();
+
+/*!
  * \brief tilelang intrinsic for lowered TCGEN05 tensor-memory store.
  *
  *  Internal lowering op used by LowerTmemCopy to represent
  *  `tl::tcgen05_st_*` calls without routing through `call_extern`.
  */
 TVM_DLL const Op &tcgen05_st();
+
+/*!
+ * \brief x16-max variant of tcgen05_st for cross-WG TMEM visibility.
+ */
+TVM_DLL const Op &tcgen05_st_x16();
 
 /*!
  * \brief TCGEN05 fence before a thread-block-wide sync (__syncthreads /
@@ -1025,6 +1035,50 @@ TVM_DLL const Op &tcgen05_before_thread_sync();
  * tcgen05.fence::after_thread_sync.
  */
 TVM_DLL const Op &tcgen05_after_thread_sync();
+
+/*!
+ * \brief Fence to wait for async TMEM store visibility.
+ *
+ * tcgen05_wait_st()
+ *
+ */
+TVM_DLL const Op &tcgen05_wait_st();
+
+/*!
+ * \brief Per-warp O correction using avo-style x16 ld/mul/st sequence.
+ *
+ * tcgen05_correction_x16(tmem_base, scale, warp_group_offset, head_dim)
+ *
+ * Emits a call to tl::tmem_correction_x16<HeadDim>() which performs:
+ *   - Per-warp row offset computation: ((threadIdx.x - wg_off) / 32 & 3) * 32 << 16
+ *   - Software-pipelined x16 load/multiply/store loop
+ *   - Single tcgen05.wait::st at the end (no per-store waits)
+ *
+ * Args: tmem_buffer[0,0], scale_fragment[0], warp_group_offset(int), head_dim(int)
+ */
+TVM_DLL const Op &tcgen05_correction_x16();
+
+/*!
+ * \brief Avo-exact PV MMA: 128x64 BMN, high D first, low D second.
+ * Args: V_shared_ptr, P_tmem_addr, O_tmem_addr, accumulate(int)
+ */
+TVM_DLL const Op &tcgen05_pv_gemm_128x64();
+
+/*!
+ * \brief Avo-exact commit: tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64
+ * Uses .b64 (no shared::cluster), matching avo's tcgen05_commit_1sm.
+ * Args: mbar_ptr
+ */
+TVM_DLL const Op &tcgen05_commit_1sm_op();
+
+/*!
+ * \brief Mark a local allocation as persistent across CUDA warp-specialized
+ * outlined function calls. The intrinsic is codegen-only and has no runtime
+ * effect.
+ *
+ * void outline_persistent(buffer_handle)
+ */
+TVM_DLL const Op &outline_persistent();
 
 /*!
  * \brief tilelang intrinsic for setting the start address of a descriptor
