@@ -40,11 +40,6 @@ std::vector<ReduceImpl> &ReduceImplRegistry() {
   return registry;
 }
 
-std::vector<CumSumImpl> &CumSumImplRegistry() {
-  static std::vector<CumSumImpl> registry;
-  return registry;
-}
-
 const ReduceImpl &ResolveReduceImpl(Target target) {
   const auto &registry = ReduceImplRegistry();
   const ReduceImpl *matched_impl = nullptr;
@@ -64,25 +59,6 @@ const ReduceImpl &ResolveReduceImpl(Target target) {
   return *matched_impl;
 }
 
-const CumSumImpl &ResolveCumSumImpl(Target target) {
-  const auto &registry = CumSumImplRegistry();
-  const CumSumImpl *matched_impl = nullptr;
-  for (const CumSumImpl &impl : registry) {
-    if (impl.match_target(target)) {
-      ICHECK(matched_impl == nullptr)
-          << "tl.cumsum found multiple target-specific implementations for "
-          << target->str() << ": " << matched_impl->name << " and "
-          << impl.name;
-      matched_impl = &impl;
-    }
-  }
-  ICHECK(matched_impl != nullptr)
-      << "tl.cumsum requires a target-specific implementation, but no cumsum "
-         "implementation is registered for "
-      << target->str();
-  return *matched_impl;
-}
-
 } // namespace
 
 void RegisterReduceImpl(ReduceImpl impl) {
@@ -91,17 +67,6 @@ void RegisterReduceImpl(ReduceImpl impl) {
   ICHECK(impl.lower != nullptr);
   ReduceImplRegistry().push_back(impl);
 }
-
-void RegisterCumSumImpl(CumSumImpl impl) {
-  ICHECK(impl.name != nullptr);
-  ICHECK(impl.match_target != nullptr);
-  ICHECK(impl.lower != nullptr);
-  CumSumImplRegistry().push_back(impl);
-}
-
-// NormalizeToBufferRegion moved to src/op/utils.{h,cc}
-
-// MakeAccessPtrFromRegion moved to src/op/utils.{h,cc}
 
 ReduceOp::ReduceOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<ReduceOpNode> node = make_object<ReduceOpNode>();
@@ -150,11 +115,6 @@ AccessRegions ReduceOpNode::GetAccessRegions() const {
 TileOperator ReduceOpNode::Clone() const {
   auto op = make_object<ReduceOpNode>(*this);
   return ReduceOp(op);
-}
-
-TileOperator CumSumOpNode::Clone() const {
-  auto op = make_object<CumSumOpNode>(*this);
-  return CumSumOp(op);
 }
 
 static Array<PrimExpr> InputPlaceholders(size_t n) {
@@ -274,90 +234,8 @@ TIR_REGISTER_TL_TILE_OP(ReduceOp, reduce)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-// Normalize "Buffer" to BufferRegion. Use the shape of the buffer as the
-// ranges.
-static BufferRegion ConvertBufferToBufferRegion(const Buffer &buf) {
-  Array<Range> ranges;
-  for (PrimExpr extent : buf->shape) {
-    ranges.push_back(Range(IntImm(extent->dtype, 0), extent));
-  }
-  return BufferRegion(buf, ranges);
-}
-
-CumSumOp::CumSumOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
-  /// CumSum constructor arguments:
-  /// - src: input buffer
-  /// - dst: output buffer
-  /// - dim: dimension to cumsum
-  /// - reverse: whether to cumsum in reverse order
-  ICHECK_EQ(args.size(), 4);
-  ObjectPtr<CumSumOpNode> node = make_object<CumSumOpNode>();
-  // node->src = vmap[GetVarFromAccessPtr(args[0])];
-  // node->dst = vmap[GetVarFromAccessPtr(args[1])];
-  auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
-  auto dst_access = NormalizeToAccessRegion(args[1], kAccessWrite);
-  node->srcRegion_ = src_access.region;
-  node->dstRegion_ = dst_access.region;
-  node->SetAccessRegions({src_access, dst_access});
-  node->src = node->srcRegion_->buffer;
-  node->dst = node->dstRegion_->buffer;
-  node->dim = args[2].as<IntImm>().value()->value;
-  node->reverse = args[3].as<Bool>().value();
-  ICHECK_LT(node->dim, static_cast<int>(node->src->shape.size()))
-      << "The dim of cumsum should be less than the number of dimensions. Got "
-         "dim="
-      << node->dim << ", but src has " << node->src->shape.size() << " dims.";
-
-  data_ = std::move(node);
-}
-
-Stmt CumSumOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  return ResolveCumSumImpl(T.target).lower(*this, T, analyzer);
-}
-
-LayoutMap CumSumOpNode::InferLayout(const LayoutInferArgs &T,
-                                    InferLevel level) const {
-  // Only infer layout in strict mode
-  if (level != InferLevel::kStrict) {
-    return {};
-  }
-
-  LayoutMap result_map;
-
-  auto make_linear_layout = [](const Buffer &buf) -> Layout {
-    return makeLinearLayout(buf->shape);
-  };
-
-  auto check_or_set_linear_layout = [&](const Buffer &buf) {
-    if (!IsSharedBuffer(buf))
-      return;
-
-    Layout linear_layout = make_linear_layout(buf);
-    if (T.layout_map.count(buf)) {
-      // Check if existing layout is linear
-      Layout existing = T.layout_map.Get(buf).value().as<Layout>().value();
-      ICHECK(StructuralEqual()(existing, linear_layout))
-          << "CumSum requires linear layout for shared buffer " << buf->name
-          << ", but got non-linear layout.";
-    } else {
-      result_map.Set(buf, linear_layout);
-    }
-  };
-
-  check_or_set_linear_layout(src);
-  check_or_set_linear_layout(dst);
-
-  return result_map;
-}
-
-TIR_REGISTER_TL_TILE_OP(CumSumOp, cumsum)
-    .set_num_inputs(4)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
 TVM_FFI_STATIC_INIT_BLOCK() {
   ReduceOpNode::RegisterReflection();
-  CumSumOpNode::RegisterReflection();
   ReduceTypeNode::RegisterReflection();
 }
 
