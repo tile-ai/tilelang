@@ -192,6 +192,10 @@ std::string DTypeToString(DataType t) {
     if (bits == 16 || bits == 32 || bits == 64) {
       elem_type = "Float" + std::to_string(bits);
     }
+  } else if (t.is_tfloat32()) {
+    // CuTeDSL TF32 scalar arithmetic is only valid in MMA paths; use FP32 for
+    // storage and elementwise arithmetic since TF32 has the same memory layout.
+    elem_type = "Float32";
   } else if (t.is_bfloat16()) {
     elem_type = "BFloat16";
   } else if (t.is_float8()) {
