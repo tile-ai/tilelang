@@ -50,6 +50,26 @@ def has_mma_support(arch: TileDevice) -> bool:
     return all(conditions)
 
 
+def _get_target_attr(target: Target, name: str) -> int | None:
+    value = getattr(target, name, None)
+    if value is None:
+        value = target.attrs.get(name, None)
+    return int(value) if value is not None else None
+
+
+def _get_l2_cache_size_bytes(target: Target) -> int:
+    target_value = _get_target_attr(target, "l2_cache_size_bytes")
+    if target_value is not None:
+        return target_value
+
+    prop = cuda_driver.get_cuda_device_properties()
+    if prop is not None and hasattr(prop, "L2_cache_size"):
+        return int(prop.L2_cache_size)
+
+    persisting_l2 = cuda_driver.get_persisting_l2_cache_max_size()
+    return int(persisting_l2) if persisting_l2 is not None else 0
+
+
 volta_tensorcore_supported = [
     ("float16", "float32"),
     ("float16", "float16"),
@@ -104,9 +124,11 @@ class TensorInstruction:
 class CUDA(TileDevice):
     def __init__(self, target: Target | str):
         if isinstance(target, str):
-            target = tvm.target.Target(target)
+            from tilelang.utils.target import determine_target
+
+            target = determine_target(target, return_object=True)
         self.target = target
-        self.sm_version = check_sm_version(self.target.arch)
+        self.sm_version = check_sm_version(self.target.attrs["arch"])
         device = tvm.runtime.cuda(0)
         if not device.exist:
             raise RuntimeError("Cannot find cuda device 0.")
@@ -121,7 +143,7 @@ class CUDA(TileDevice):
         self.reg_cap: int = 65536
         self.max_smem_usage: int = 2 * self.smem_cap
         self.sm_partition: int = 4
-        self.l2_cache_size_bytes: int = target.l2_cache_size_bytes
+        self.l2_cache_size_bytes: int = _get_l2_cache_size_bytes(target)
         # the number of transaction size in bytes
         self.transaction_size: list[int] = [32, 128]  # in bytes
         # bandwidth in MB/s, will be used for recommend basic tile size

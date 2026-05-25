@@ -50,7 +50,16 @@ def check_non_fastmath_usage(source, mathop_name):
     check_fastmath_usage(source, mathop_name, expect_fastmath=False)
 
 
-def run_single_arg_mathop_test(mathop_name, mathop_func, M=128, N=128, block_M=32, block_N=32, dtype=T.float32):
+def run_single_arg_mathop_test(
+    mathop_name,
+    mathop_func,
+    M=128,
+    N=128,
+    block_M=32,
+    block_N=32,
+    dtype=T.float32,
+    cuda_mathop_name=None,
+):
     """
     Test single-argument mathops.
     T.exp should generate expf (non-fastmath), T.__exp should generate __expf (fastmath)
@@ -79,9 +88,9 @@ def run_single_arg_mathop_test(mathop_name, mathop_func, M=128, N=128, block_M=3
 
     print(f"\n=== Testing {mathop_name} ===")
     print("FAST_MATH=False:")
-
     # Our tl.* intrinsics actually generate fastmath versions (e.g., __expf)
-    check_fastmath_usage(source_no_fastmath, mathop_name, expect_fastmath=False)
+    cuda_mathop_name = cuda_mathop_name or mathop_name
+    check_fastmath_usage(source_no_fastmath, cuda_mathop_name, expect_fastmath=False)
 
     print(f"✓ {mathop_name} compilation and execution test passed")
 
@@ -265,7 +274,6 @@ def run_fastmath_mathop_test(mathop_name, mathop_func, M=128, N=128, block_M=32,
         ("floor", T.floor),
         ("ceil", T.ceil),
         ("trunc", T.trunc),
-        ("round", T.round),
         ("nearbyint", T.nearbyint),
     ],
 )
@@ -274,6 +282,16 @@ def test_mathops_generate_no_fastmath(name, func):
     """Test that our tl.* mathops generate fastmath CUDA code (__expf etc.)"""
     run_single_arg_mathop_test(name, func, dtype=T.float32)
     print(f"✓ {name} test passed")
+
+
+@tilelang.testing.requires_cuda
+def test_round_ties_away_from_zero_uses_roundf():
+    run_single_arg_mathop_test(
+        "round",
+        lambda x: T.round(x, "ties-away-from-zero"),
+        dtype=T.float32,
+        cuda_mathop_name="round",
+    )
 
 
 @pytest.mark.parametrize(

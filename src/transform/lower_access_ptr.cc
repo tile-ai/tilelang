@@ -4,18 +4,21 @@
  * `tir.builtin.tvm_access_ptr`.
  */
 
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include "../op/builtin.h"
+#include "common/access_ptr_utils.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace {
 
@@ -77,22 +80,24 @@ PrimExpr LinearOffsetFromLoad(const BufferLoad &load) {
 class AccessPtrLowerer : public StmtExprMutator {
 public:
   PrimExpr VisitExpr_(const CallNode *op) final {
-    Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
-    if (!call->op.same_as(tl::access_ptr())) {
-      return std::move(call);
+    if (!op->op.same_as(tl::access_ptr())) {
+      return StmtExprMutator::VisitExpr_(op);
     }
 
-    ICHECK_EQ(call->args.size(), 3U)
+    ICHECK_EQ(op->args.size(), 3U)
         << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
 
-    BufferLoad base_load = Downcast<BufferLoad>(call->args[0]);
+    auto visit_expr = [this](const PrimExpr &expr) {
+      return this->VisitExpr(expr);
+    };
+    BufferLoad base_load = detail::VisitAccessPtrBase(op->args[0], visit_expr);
     Buffer buffer = base_load->buffer;
     ICHECK(buffer.defined());
 
-    PrimExpr extent = call->args[1];
-    PrimExpr rw_mask = call->args[2];
+    PrimExpr extent = VisitExpr(op->args[1]);
+    PrimExpr rw_mask = VisitExpr(op->args[2]);
 
-    PrimExpr ptype = tir::TypeAnnotation(buffer->dtype);
+    PrimExpr ptype = tirx::TypeAnnotation(buffer->dtype);
     PrimExpr data = buffer->data;
     PrimExpr offset = LinearOffsetFromLoad(base_load);
 
@@ -120,12 +125,12 @@ tvm::transform::Pass LowerAccessPtr() {
                       const tvm::transform::PassContext &ctx) {
     return LowerAccessPtrPrimFunc(std::move(f));
   };
-  return tvm::tir::transform::CreatePrimFuncPass(pass_func, 0,
-                                                 "tl.LowerAccessPtr", {});
+  return tvm::tirx::transform::CreatePrimFuncPass(pass_func, 0,
+                                                  "tl.LowerAccessPtr", {});
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.LowerAccessPtr", LowerAccessPtr);
 }
 

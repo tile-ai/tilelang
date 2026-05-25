@@ -29,7 +29,6 @@
 
 using cutlass::bfloat16_t;
 using cutlass::half_t;
-using cutlass::tfloat32_t;
 
 using cute::cast_smem_ptr_to_uint;
 
@@ -659,6 +658,19 @@ struct float_e5m2_t : public cute::float_e5m2_t {
       : cute::float_e5m2_t(*reinterpret_cast<cute::float_e5m2_t *>(&x)) {}
 };
 
+struct tfloat32_t : public cute::tfloat32_t {
+  using cute::tfloat32_t::tfloat32_t;
+  CUTLASS_HOST_DEVICE
+  tfloat32_t() = default;
+
+  CUTLASS_HOST_DEVICE
+  explicit tfloat32_t(__nv_bfloat16 x) : tfloat32_t(static_cast<float>(x)) {}
+
+  CUTLASS_HOST_DEVICE
+  tfloat32_t(cutlass::tfloat32_t x)
+      : cute::tfloat32_t(*reinterpret_cast<cute::tfloat32_t *>(&x)) {}
+};
+
 template <typename T> struct to_cute_type {
   using type = T;
 };
@@ -667,6 +679,9 @@ template <> struct to_cute_type<tl::float_e4m3_t> {
 };
 template <> struct to_cute_type<tl::float_e5m2_t> {
   using type = cute::float_e5m2_t;
+};
+template <> struct to_cute_type<tl::tfloat32_t> {
+  using type = cute::tfloat32_t;
 };
 
 // =========================================================================
@@ -697,6 +712,13 @@ template <typename T> TL_DEVICE uint1 to_uint1(T v) {
   uint1 r;
   memcpy(&r, &v, sizeof(uint1));
   return r;
+}
+
+// Pack two half_t into a uint1.
+TL_DEVICE uint1 pack_half2(half_t a, half_t b) {
+  unsigned packed =
+      __pack_half2(static_cast<__half>(a), static_cast<__half>(b));
+  return uint1{packed};
 }
 
 // --- add2 ----------------------------------------------------------------
@@ -858,6 +880,42 @@ TL_DEVICE __half2 min2(__half2 a, __half2 b) {
 #endif
 }
 
+// --- max2_nan ------------------------------------------------------------
+
+TL_DEVICE __nv_bfloat162 max2_nan(__nv_bfloat162 a, __nv_bfloat162 b) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  return __hmax2_nan(a, b);
+#else
+  return __nv_bfloat162{__hmax_nan(a.x, b.x), __hmax_nan(a.y, b.y)};
+#endif
+}
+
+TL_DEVICE __half2 max2_nan(__half2 a, __half2 b) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 530)
+  return __hmax2_nan(a, b);
+#else
+  return __half2{__hmax_nan(a.x, b.x), __hmax_nan(a.y, b.y)};
+#endif
+}
+
+// --- min2_nan ------------------------------------------------------------
+
+TL_DEVICE __nv_bfloat162 min2_nan(__nv_bfloat162 a, __nv_bfloat162 b) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  return __hmin2_nan(a, b);
+#else
+  return __nv_bfloat162{__hmin_nan(a.x, b.x), __hmin_nan(a.y, b.y)};
+#endif
+}
+
+TL_DEVICE __half2 min2_nan(__half2 a, __half2 b) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 530)
+  return __hmin2_nan(a, b);
+#else
+  return __half2{__hmin_nan(a.x, b.x), __hmin_nan(a.y, b.y)};
+#endif
+}
+
 // --- abs2 ----------------------------------------------------------------
 
 TL_DEVICE float2 abs2(float2 a) { return make_float2(fabsf(a.x), fabsf(a.y)); }
@@ -879,6 +937,8 @@ TL_DEVICE __half2 abs2(__half2 a) {
 }
 
 } // namespace tl
+
+using tl::tfloat32_t;
 
 namespace cutlass {
 TL_DEVICE
@@ -984,6 +1044,28 @@ TL_DEVICE bfloat16_t shfl_sync(unsigned mask, bfloat16_t val, int srcLane) {
   uint32_t ret32 = __shfl_sync(mask, raw32, srcLane);
   uint16_t ret16 = static_cast<uint16_t>(ret32);
   return reinterpret_cast<bfloat16_t &>(ret16);
+}
+
+// Specializations for uint1 (packed bfloat16x2 / float16x2).
+// uint1 is a 32-bit struct { unsigned x; } used to represent packed pairs.
+// __shfl_xor_sync operates on native 32-bit types, so we pass the raw unsigned.
+
+template <>
+TL_DEVICE uint1 shfl_xor_sync(unsigned mask, uint1 val, int laneMask) {
+  return uint1{__shfl_xor_sync(mask, val.x, laneMask)};
+}
+
+template <>
+TL_DEVICE uint1 shfl_down_sync(unsigned mask, uint1 val, int delta) {
+  return uint1{__shfl_down_sync(mask, val.x, delta)};
+}
+
+template <> TL_DEVICE uint1 shfl_up_sync(unsigned mask, uint1 val, int delta) {
+  return uint1{__shfl_up_sync(mask, val.x, delta)};
+}
+
+template <> TL_DEVICE uint1 shfl_sync(unsigned mask, uint1 val, int srcLane) {
+  return uint1{__shfl_sync(mask, val.x, srcLane)};
 }
 
 } // namespace tl

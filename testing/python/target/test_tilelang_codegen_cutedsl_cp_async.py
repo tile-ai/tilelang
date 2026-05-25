@@ -1,11 +1,39 @@
 import pytest
+import torch
 
 import tilelang
 import tilelang.testing
 import tilelang.language as T
 from tilelang import tvm
 from tilelang.engine.lower import lower
-from tvm.target import Target
+from tilelang.utils.target import determine_target, normalize_cutedsl_target
+
+
+def test_cutedsl_dict_target_normalizes_to_cuda_marker(monkeypatch):
+    from tilelang.jit.adapter.cutedsl import checks
+
+    monkeypatch.setattr(checks, "check_cutedsl_available", lambda: None)
+    target = determine_target({"kind": "cutedsl", "arch": "sm_80"}, return_object=True)
+
+    assert target.kind.name == "cuda"
+    assert target.attrs["arch"] == "sm_80"
+    assert {"cuda", "gpu", "cutedsl"}.issubset(set(target.keys))
+
+
+def test_cutedsl_string_target_uses_detected_cuda_arch(monkeypatch):
+    """Verify bare CuTeDSL targets use TileLang's CUDA arch normalization."""
+
+    from tilelang.jit.adapter.cutedsl import checks
+
+    monkeypatch.setattr(checks, "check_cutedsl_available", lambda: None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _: (9, 0))
+
+    target = determine_target("cutedsl", return_object=True)
+
+    assert target.kind.name == "cuda"
+    assert target.attrs["arch"] == "sm_90a"
+    assert {"cuda", "gpu", "cutedsl"}.issubset(set(target.keys))
 
 
 def test_cutedsl_codegen_supports_tl_ptx_cp_async():
@@ -16,7 +44,8 @@ def test_cutedsl_codegen_supports_tl_ptx_cp_async():
     if build_cutedsl is None:
         pytest.skip("TileLang CuTeDSL backend is not enabled in this build.")
 
-    target = Target({"kind": "cuda", "arch": "sm_80", "keys": ["cuda", "gpu", "cutedsl"]})
+    target = normalize_cutedsl_target({"kind": "cutedsl", "arch": "sm_80"})
+    assert target is not None
 
     @T.prim_func
     def prog(A: T.Tensor((16,), "uint8"), B: T.Tensor((16,), "uint8")):

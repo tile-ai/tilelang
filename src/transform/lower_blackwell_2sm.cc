@@ -9,13 +9,15 @@
 
 // todo: consider mixture of 1cta/2cta tcgen5mma in the same kernel
 
-#include <tvm/ffi/reflection/registry.h>
+#include "support/check.h"
 #include <tvm/ir/expr.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include "../op/gemm.h"
 #include "../op/operator.h"
@@ -24,7 +26,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace attr {
 constexpr const char *kUse2Cta = "use_2cta";
@@ -39,7 +42,7 @@ static bool HasValidClusterDimsFor2Cta(const Stmt &body) {
   PostOrderVisit(body, [&](const ObjectRef &node) {
     if (found)
       return;
-    if (const auto *block = node.as<BlockNode>()) {
+    if (const auto *block = node.as<SBlockNode>()) {
       if (block->annotations.count("cluster_dims")) {
         if (auto arr = block->annotations.Get("cluster_dims")
                            ->try_cast<Array<Integer>>()) {
@@ -71,7 +74,7 @@ public:
 private:
   Stmt VisitStmt_(const EvaluateNode *op) final {
     if (const CallNode *call = op->value.as<CallNode>()) {
-      TileOperator tile_op = ParseOperator(ffi::GetRef<Stmt>(op));
+      TileOperator tile_op = ParseOperator(GetRef<Stmt>(op));
       if (tile_op.defined() && tile_op.as<Gemm>()) {
         // Check if the user explicitly requested 2CTA via the use_2cta
         // annotation on the Call node (set by T.tcgen05_gemm(use_2cta=True)).
@@ -102,26 +105,26 @@ public:
   explicit Tcgen5_2SmAnnotator() {}
 
 private:
-  Stmt VisitStmt_(const BlockRealizeNode *op) final {
+  Stmt VisitStmt_(const SBlockRealizeNode *op) final {
     Stmt new_realize = StmtExprMutator::VisitStmt_(op);
     if (root_block_annotated_)
       return new_realize;
-    const auto *realize = new_realize.as<BlockRealizeNode>();
+    const auto *realize = new_realize.as<SBlockRealizeNode>();
     ICHECK(realize);
-    Block block = realize->block;
-    BlockNode *n = block.CopyOnWrite();
+    SBlock block = realize->block;
+    SBlockNode *n = block.CopyOnWrite();
     // Set block attr: {use_2cta: 1}
     // lower_shared_tmem.cc will depend on this to allocate/deallocate tmem with
     // 2cta.
     n->annotations.Set(attr::kUse2Cta, IntImm(DataType::Int(32), 1));
     root_block_annotated_ = true;
-    return BlockRealize(realize->iter_values, realize->predicate, block);
+    return SBlockRealize(realize->iter_values, realize->predicate, block);
   }
 
   bool root_block_annotated_ = false;
 };
 
-using namespace tir::transform;
+using namespace tirx::transform;
 
 tvm::transform::Pass LowerBlackwell2SM() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
@@ -144,7 +147,7 @@ tvm::transform::Pass LowerBlackwell2SM() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.LowerBlackwell2SM", LowerBlackwell2SM);
 }
 

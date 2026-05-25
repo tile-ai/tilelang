@@ -11,6 +11,7 @@
 
 #include "../transform/layout_reducer.h"
 #include "./operator.h"
+#include "support/check.h"
 
 /**
  * Get the Op singleton for the public FinalizeReducerOp handle.
@@ -20,11 +21,11 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 class FinalizeReducerOpNode : public TileOperatorNode {
 public:
-  tir::Buffer reducer;
+  tirx::Buffer reducer;
   ReducerOpType op;
   // Batch size for batched AllReduce (1 = scalar path, same as T.reduce
   // default).
@@ -64,9 +65,9 @@ class FinalizeReducerOp : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(FinalizeReducerOp, TileOperator,
                                              FinalizeReducerOpNode);
-  TVM_DLL FinalizeReducerOp(
-      Array<PrimExpr> args,
-      Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
+  TVM_DLL FinalizeReducerOp(ffi::Array<PrimExpr> args,
+                            ffi::Map<ffi::String, ffi::ObjectRef> annotations =
+                                ffi::Map<ffi::String, ffi::ObjectRef>());
   static const Op &Get();
 };
 

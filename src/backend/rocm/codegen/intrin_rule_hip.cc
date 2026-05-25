@@ -2,17 +2,18 @@
  * \file intrin_rule_hip.cc
  * \brief HIP intrinsic rules.
  */
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op_attr_types.h>
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op_attr_types.h>
 
-#include "support/ffi_aliases.h"
 #include "target/intrin_rule.h"
 
 namespace tvm {
 namespace codegen {
 namespace intrin {
 // Add float suffix to the intrinsics, HIP fast math.
-using tir::FLowerIntrinsic;
+using tirx::FLowerIntrinsic;
 
 struct HIPMath {
   std::string operator()(DataType t, std::string name) const {
@@ -104,12 +105,12 @@ struct HIPPopcount {
 struct HIPWarpIntrinsic {
   const Op operator()(DataType t, const Op &orig_op) const {
     if (orig_op.same_as(builtin::tvm_warp_shuffle())) {
-      return Op::Get("tir.hip.__shfl_sync");
+      return Op::Get("tirx.hip.__shfl_sync");
     } else if (orig_op.same_as(builtin::tvm_warp_shuffle_up())) {
-      return Op::Get("tir.hip.__shfl_up_sync");
+      return Op::Get("tirx.hip.__shfl_up_sync");
     } else {
       ICHECK(orig_op.same_as(builtin::tvm_warp_shuffle_down()));
-      return Op::Get("tir.hip.__shfl_down_sync");
+      return Op::Get("tirx.hip.__shfl_down_sync");
     }
   }
 };
@@ -117,7 +118,7 @@ struct HIPWarpIntrinsic {
 static PrimExpr DispatchHIPWarpActiveMask(const PrimExpr &e) {
   const CallNode *call = e.as<CallNode>();
   ICHECK(call != nullptr);
-  return Call(call->dtype, Op::Get("tir.hip.__activemask"), {});
+  return Call(call->dtype, Op::Get("tirx.hip.__activemask"), {});
 }
 
 template <typename T> static PrimExpr DispatchHIPShuffle(const PrimExpr &e) {
@@ -125,7 +126,7 @@ template <typename T> static PrimExpr DispatchHIPShuffle(const PrimExpr &e) {
   const CallNode *call = e.as<CallNode>();
   ICHECK(call != nullptr);
   ICHECK_EQ(call->args.size(), 5); // mask, value, warp_id, width, warp_size
-  Array<PrimExpr> hip_args{
+  ffi::Array<PrimExpr> hip_args{
       {call->args[0], call->args[1], call->args[2], call->args[3]}};
   return Call(call->dtype, T()(call->dtype, Downcast<Op>(call->op)), hip_args);
   // NOLINTEND(clang-analyzer-cplusplus.InnerPointer)

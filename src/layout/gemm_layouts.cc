@@ -4,8 +4,11 @@
  *
  */
 
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
+#include "support/check.h"
+#include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <cmath>
 
@@ -21,6 +24,8 @@
 
 namespace tvm {
 namespace tl {
+
+using namespace ffi;
 
 IterVar make_itervar(std::string name, PrimExpr dom) {
   Var var = Var(name, dom->dtype);
@@ -439,7 +444,10 @@ static Layout MakeQuarterBankSwizzleLayout2D(int stride, int continuous,
   Var i = InputPlaceholder(0);
   Var j = InputPlaceholder(1);
   int vector_size = 128 / element_size;
-  ICHECK(stride % 8 == 0) << "stride=" << stride;
+  // stride==4 is a truncated 4-row period used by tile::gather4/scatter4
+  // (s=i%8 ∈ [0,4) is a valid subset of the 8-row XOR pattern, matching
+  // what TMA applies per-row in hardware).
+  ICHECK(stride == 4 || stride % 8 == 0) << "stride=" << stride;
   ICHECK(continuous % (vector_size * 2) == 0)
       << "continuous=" << continuous << ", vector_size=" << vector_size;
   PrimExpr ts = FloorDiv(i, 8);
@@ -467,7 +475,8 @@ static Layout MakeHalfBankSwizzleLayout2D(int stride, int continuous,
   Var i = InputPlaceholder(0);
   Var j = InputPlaceholder(1);
   int vector_size = 128 / element_size;
-  ICHECK(stride % 8 == 0) << "stride=" << stride;
+  // See MakeQuarterBankSwizzleLayout2D for stride==4 rationale.
+  ICHECK(stride == 4 || stride % 8 == 0) << "stride=" << stride;
   ICHECK(continuous % (vector_size * 4) == 0)
       << "continuous=" << continuous << ", vector_size=" << vector_size;
   PrimExpr ts = FloorDiv(i, 8);
@@ -495,7 +504,8 @@ static Layout MakeFullBankSwizzleLayout2D(int stride, int continuous,
   Var i = InputPlaceholder(0);
   Var j = InputPlaceholder(1);
   int vector_size = 128 / element_size;
-  ICHECK(stride % 8 == 0) << "stride=" << stride;
+  // See MakeQuarterBankSwizzleLayout2D for stride==4 rationale.
+  ICHECK(stride == 4 || stride % 8 == 0) << "stride=" << stride;
   ICHECK(continuous % (vector_size * 8) == 0)
       << "continuous=" << continuous << ", vector_size=" << vector_size;
   PrimExpr ts = FloorDiv(i, 8);
@@ -827,6 +837,9 @@ Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
   else if (mat_continuous % (vector_size * 4) == 0)
     return MakeHalfBankSwizzleLayout2D(mat_stride, mat_continuous,
                                        element_size);
+  else if (mat_continuous % (vector_size * 2) == 0)
+    return MakeQuarterBankSwizzleLayout2D(mat_stride, mat_continuous,
+                                          element_size);
   else {
     return makeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
   }
@@ -957,20 +970,23 @@ SwizzleMode DetectSwizzleMode(const Layout &layout, const Buffer &buffer) {
   int vector_size = 128 / info.element_size;
 
   // Check from smallest to largest granularity
-  // Need to verify stride and continuous constraints before comparing
-  if (info.stride % 8 == 0 &&
+  // Need to verify stride and continuous constraints before comparing.
+  // stride==4 is the truncated 4-row period used by tile::gather4/scatter4
+  // (see Make{Quarter,Half,Full}BankSwizzleLayout2D).
+  bool stride_ok = info.stride == 4 || info.stride % 8 == 0;
+  if (stride_ok &&
       info.continuous % (static_cast<int64_t>(vector_size) * 2) == 0) {
     if (StructuralEqual()(layout, makeQuarterBankSwizzleLayout(buffer))) {
       return SwizzleMode::kQuarter;
     }
   }
-  if (info.stride % 8 == 0 &&
+  if (stride_ok &&
       info.continuous % (static_cast<int64_t>(vector_size) * 4) == 0) {
     if (StructuralEqual()(layout, makeHalfBankSwizzleLayout(buffer))) {
       return SwizzleMode::kHalf;
     }
   }
-  if (info.stride % 8 == 0 &&
+  if (stride_ok &&
       info.continuous % (static_cast<int64_t>(vector_size) * 8) == 0) {
     if (StructuralEqual()(layout, makeFullBankSwizzleLayout(buffer))) {
       return SwizzleMode::kFull;

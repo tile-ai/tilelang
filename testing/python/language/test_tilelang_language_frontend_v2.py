@@ -5,8 +5,8 @@ import tilelang.testing
 import tvm
 import pytest
 from tvm.script.ir_builder.base import IRBuilderFrame
-from tvm.tir.expr import IntImm, Var, Not, Or
-from tvm.tir import all as tir_all
+from tvm.tirx.expr import IntImm, Var, Not, Or
+from tvm import tirx
 from tilelang.language.dtypes import _all_dtypes
 
 ALL_DTYPE_NAMES = tuple(_all_dtypes)
@@ -447,7 +447,7 @@ def test_boolop():
     d = Var("d", T.int32)
 
     def cond():
-        return Or(Not(tir_all(a < b, b < c, a * d < b * d)), b * d < c * d)
+        return Or(Not(tirx.all(a < b, b < c, a * d < b * d)), b * d < c * d)
 
     cond()
 

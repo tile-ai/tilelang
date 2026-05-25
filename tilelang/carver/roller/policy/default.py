@@ -23,7 +23,7 @@ class DefaultPolicy:
     minimize memory traffic and maximize parallelism.for BitBLAS Schedule.
     """
 
-    func: tvm.tir.PrimFunc
+    func: tvm.tirx.PrimFunc
     nodes: list[PrimFuncNode] = []
     arch: TileDevice
     tags: dict
@@ -37,15 +37,15 @@ class DefaultPolicy:
         self.rasterization = NoRasterization()
 
     @classmethod
-    def from_prim_func(cls, func: tvm.tir.PrimFunc, arch: TileDevice, tags: dict | None = None, name: str = "PrimFuncNode"):
+    def from_prim_func(cls, func: tvm.tirx.PrimFunc, arch: TileDevice, tags: dict | None = None, name: str = "PrimFuncNode"):
         return cls(arch, tags)._init_with_prim_func(func, name)
 
     @classmethod
     def from_output_nodes(cls, nodes: list[OutputNode], arch: TileDevice, tags: dict | None = None):
         return cls(arch, tags)._init_with_output_nodes(nodes)
 
-    def _init_with_prim_func(self, func: tvm.tir.PrimFunc, name: str = "PrimFuncNode") -> DefaultPolicy:
-        if func is not None and isinstance(func, tvm.tir.PrimFunc):
+    def _init_with_prim_func(self, func: tvm.tirx.PrimFunc, name: str = "PrimFuncNode") -> DefaultPolicy:
+        if func is not None and isinstance(func, tvm.tirx.PrimFunc):
             self.func = func
             self.prim_func_node = PrimFuncNode(self.func, tags=self.tags, name=name)
         else:

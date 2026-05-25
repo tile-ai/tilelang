@@ -5,10 +5,11 @@
 #ifndef TVM_TL_TARGET_CODEGEN_HIP_H_
 #define TVM_TL_TARGET_CODEGEN_HIP_H_
 
+#include "support/check.h"
 #include <tvm/target/codegen.h>
 #include <tvm/target/target.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/op.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op.h>
 
 #include <string>
 #include <unordered_map>
@@ -50,8 +51,9 @@ public:
   void VisitExpr_(const CallNode *op, std::ostream &os) final;
   void VisitExpr_(const CastNode *op, std::ostream &os) final;
   void VisitExpr_(const ShuffleNode *op, std::ostream &os) final; // NOLINT(*)
-  void VisitStmt_(const AllocateNode *op) final;
+  void VisitStmt_(const AllocBufferNode *op) final;
   void VisitStmt_(const AttrStmtNode *op) final;
+  void VisitStmt_(const BufferStoreNode *op) final;
 
   // Override this as a work around for __grid_constant__ parameter
   void AddFunction(const PrimFunc &f);
@@ -82,6 +84,10 @@ private:
   bool need_wmma_h_{false};
   // whether need fp8.h
   bool enable_fp8_{false};
+  // whether need hip_fp4.h (gfx950 only)
+  bool enable_fp4_{false};
+  // Map from FP4 buffer Var to packed buffer variable name (gfx950)
+  std::unordered_map<Var, std::string> fp4_packed_buffers_;
   // The size of the barrier array in shared memory
   int barrier_count_ = -1;
   // whether need mma.h

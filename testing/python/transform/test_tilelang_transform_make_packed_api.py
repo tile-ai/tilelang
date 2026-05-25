@@ -22,29 +22,31 @@ import tilelang
 from tilelang import tvm as tvm
 import tvm
 import tilelang.testing
-from tvm import tir
-from tvm.script import tir as T, ir as I
+from tvm import tirx
+from tvm.script import tirx as T, ir as I
 
 
 def _find_assignment(stmt, var_name):
-    while not isinstance(stmt, tvm.tir.LetStmt):
-        stmt = stmt.body
+    result = None
 
-    if stmt.var.name != var_name:
-        return _find_assignment(stmt.body, var_name)
+    def _visitor(node):
+        nonlocal result
+        if isinstance(node, tvm.tirx.Bind) and node.var.name == var_name:
+            result = node
 
-    return stmt
+    tvm.tirx.stmt_functor.post_order_visit(stmt, _visitor)
+    return result
 
 
 def _find_compute_scope(func):
     result = None
 
     def _visitor(stmt):
-        if isinstance(stmt, tir.AttrStmt) and stmt.attr_key == "compute_scope":
+        if isinstance(stmt, tirx.AttrStmt) and stmt.attr_key == "compute_scope":
             nonlocal result
             result = stmt
 
-    tir.stmt_functor.post_order_visit(func.body, _visitor)
+    tirx.stmt_functor.post_order_visit(func.body, _visitor)
 
     return result
 
@@ -152,8 +154,8 @@ def test_subroutine_call_to_externally_visible_subroutine():
     assert subroutine_compute_scope is not None
 
     subroutine_call_op = main_compute_scope.body.value.op
-    assert isinstance(subroutine_call_op, tvm.ir.Op) and subroutine_call_op.name == "tir.tvm_call_cpacked", (
-        f"The main function's CallNode should be lowered to the builtin 'tir.tvm_call_cpacked', "
+    assert isinstance(subroutine_call_op, tvm.ir.Op) and subroutine_call_op.name == "tirx.tvm_call_cpacked", (
+        f"The main function's CallNode should be lowered to the builtin 'tirx.tvm_call_cpacked', "
         f"but instead has an operation of type {subroutine_call_op}"
     )
 
