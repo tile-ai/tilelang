@@ -12,6 +12,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "codegen_py.h"
@@ -24,6 +25,7 @@ public:
   CodeGenTileLangCuTeDSL();
 
 protected:
+  void InitFuncState_(const PrimFunc &f) override;
   void PrintFuncDecorator_(std::ostream &os) override; // NOLINT(*)
   void PreFunctionBody_(const PrimFunc &f) override;
 
@@ -45,6 +47,7 @@ protected:
                   std::ostream &os) override; // NOLINT(*)
 
   void VisitStmt_(const BufferStoreNode *op) override;
+  void VisitStmt_(const BindNode *op) override;
   void VisitStmt_(const AllocBufferNode *op) override;
   void VisitStmt_(const AttrStmtNode *op) override;
   void VisitStmt_(const ForNode *op) override;
@@ -76,6 +79,9 @@ protected:
   std::string GetBufferRef_(DataType t, const BufferNode *buffer,
                             PrimExpr index) override;
 
+  // Get a byte-addressed pointer expression for handle byte-offset arithmetic.
+  std::string GetHandleBytePtr_(const PrimExpr &expr);
+
   // Get pointer string from a Var expression (local buffer -> vid.iterator)
   std::string GetVarPtr_(const PrimExpr &expr);
 
@@ -101,6 +107,11 @@ private:
 
   // Fastmath configuration (read from PassContext)
   bool enable_fastmath_ = false;
+
+  // Vars bound to handle-valued expressions are raw CuTeDSL pointers, not
+  // tensors. Later buffer accesses must use the var directly instead of
+  // appending ".iterator".
+  std::unordered_set<const VarNode *> raw_pointer_vars_;
 
   // Loop-break guard transformation state
   // When a for-loop contains loop_break(), we replace `break` with a guard

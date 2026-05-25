@@ -58,5 +58,41 @@ def test_cutedsl_codegen_supports_tl_ptx_cp_async():
     assert "tl.cp_async_gs(" in artifact.kernel_source
 
 
+def test_cutedsl_codegen_supports_shared_alias_byte_offset():
+    if not tvm.runtime.enabled("cuda"):
+        pytest.skip("TileLang CuTeDSL codegen requires TVM built with CUDA support.")
+
+    build_cutedsl = tvm.ffi.get_global_func("target.build.tilelang_cutedsl_without_compile", allow_missing=True)
+    if build_cutedsl is None:
+        pytest.skip("TileLang CuTeDSL backend is not enabled in this build.")
+
+    target = normalize_cutedsl_target({"kind": "cutedsl", "arch": "sm_90"})
+    assert target is not None
+
+    @T.prim_func
+    def prog(
+        A: T.Tensor((32,), "float16"),
+        B: T.Tensor((32,), "float16"),
+        C: T.Tensor((32,), "float16"),
+    ):
+        with T.Kernel(1, threads=32):
+            A_shared = T.alloc_shared((32,), "float16")
+            B_shared = T.alloc_shared((32,), "float16")
+            A_shared[0] = A[0]
+            B_shared[0] = B[0]
+            T.tvm_storage_sync("shared")
+            C[0] = A_shared[0] + B_shared[0]
+
+    artifact = lower(prog.with_attr("global_symbol", "main"), target=target)
+    source = artifact.kernel_source
+
+    assert "handle_add_byte_offset" not in source
+    assert "tl.recast_ptr(buf_dyn_shmem.iterator, dtype=cutlass.Uint8)" in source
+    assert "tl.recast_ptr(A_shared.iterator" not in source
+    assert "tl.recast_ptr(B_shared.iterator" not in source
+    assert "tl.recast_ptr(A_shared, dtype=cutlass.Float16)" in source
+    assert "tl.recast_ptr(B_shared, dtype=cutlass.Float16)" in source
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

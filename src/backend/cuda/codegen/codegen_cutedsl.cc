@@ -144,6 +144,11 @@ CodeGenTileLangCuTeDSL::CodeGenTileLangCuTeDSL() {
       pass_ctx->GetConfig<Bool>(tl::kEnableFastMath, Bool(false)).value();
 }
 
+void CodeGenTileLangCuTeDSL::InitFuncState_(const PrimFunc &f) {
+  CodeGenTileLangPY::InitFuncState_(f);
+  raw_pointer_vars_.clear();
+}
+
 std::string CodeGenTileLangCuTeDSL::CanonicalizeFastmathFunctionName_(
     const std::string &func_name) const {
   static const std::unordered_map<std::string, std::string> kFastMathMap = {
@@ -1218,6 +1223,10 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     ICHECK_EQ(load->indices.size(), 1)
         << "CodeGenTileLangCuTeDSL only supports flat memory";
     os << GetBufferPtr_(load->buffer.get(), load->indices[0]);
+  } else if (op->op.same_as(builtin::handle_add_byte_offset())) {
+    ICHECK_EQ(op->args.size(), 2U);
+    os << "(" << GetHandleBytePtr_(op->args[0]) << " + "
+       << PrintExpr_(op->args[1]) << ")";
   } else if (op->op.same_as(tl::atomic_add_elem_op())) {
     // atomic_add_elem_op(dst_ptr, src_value[, memory_order])
     std::string dst_ptr = PrintExpr_(op->args[0]);
@@ -1725,6 +1734,14 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
   }
 }
 
+void CodeGenTileLangCuTeDSL::VisitStmt_(const BindNode *op) {
+  if (op->var.dtype().is_handle() && op->value.dtype().is_handle() &&
+      op->var->type_annotation.as<PointerTypeNode>()) {
+    raw_pointer_vars_.insert(op->var.get());
+  }
+  CodeGenTileLangPY::VisitStmt_(op);
+}
+
 void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocBufferNode *op) {
   DataType alloc_dtype = op->buffer->dtype;
   std::string vid = AllocVarID(op->buffer->data.get());
@@ -2217,6 +2234,7 @@ std::string CodeGenTileLangCuTeDSL::GetBufferPtr_(const BufferNode *buffer,
                                                   PrimExpr index) {
   const VarNode *buffer_var = buffer->data.get();
   const std::string vid = GetVarID(buffer_var);
+  const bool is_raw_pointer = raw_pointer_vars_.count(buffer_var) != 0;
 
   DataType buffer_element_dtype = buffer->dtype;
   // CuTeDSL only supports i1 (Boolean) in rmem; use Uint8 for gmem pointers.
@@ -2243,7 +2261,14 @@ std::string CodeGenTileLangCuTeDSL::GetBufferPtr_(const BufferNode *buffer,
     scope = GetPtrStorageScope(buffer->data);
 
   std::string ptr_str;
-  if (scope == "shared.barrier" || scope == "shared.cluster_barrier") {
+  if (is_raw_pointer) {
+    if (effective_dtype == DataType::UInt(8)) {
+      ptr_str = vid;
+    } else {
+      ptr_str = "tl.recast_ptr(" + vid +
+                ", dtype=" + DTypeToString(effective_dtype) + ")";
+    }
+  } else if (scope == "shared.barrier" || scope == "shared.cluster_barrier") {
     ptr_str = vid;
   } else {
     bool is_handle_type_match = HandleTypeMatch_(buffer_var, effective_dtype);
@@ -2259,10 +2284,43 @@ std::string CodeGenTileLangCuTeDSL::GetBufferPtr_(const BufferNode *buffer,
   return "(" + ptr_str + " + " + index_str + ")";
 }
 
+std::string CodeGenTileLangCuTeDSL::GetHandleBytePtr_(const PrimExpr &expr) {
+  std::string ptr_str;
+  if (const VarNode *var = expr.as<VarNode>()) {
+    const std::string vid = GetVarID(var);
+    if (raw_pointer_vars_.count(var) != 0) {
+      ptr_str = vid;
+    } else {
+      std::string scope;
+      const bool is_typed_pointer =
+          var->type_annotation.as<PointerTypeNode>() != nullptr;
+      if (is_typed_pointer && alloc_storage_scope_.count(var)) {
+        scope = alloc_storage_scope_.at(var);
+      }
+      if (is_typed_pointer && scope.empty()) {
+        scope = GetPtrStorageScope(GetRef<Var>(var));
+      }
+      if (!is_typed_pointer || scope == "shared.barrier" ||
+          scope == "shared.cluster_barrier") {
+        ptr_str = vid;
+      } else {
+        ptr_str = vid + ".iterator";
+      }
+    }
+  } else {
+    ptr_str = PrintExpr_(expr);
+  }
+  return "tl.recast_ptr(" + ptr_str +
+         ", dtype=" + DTypeToString(DataType::UInt(8)) + ")";
+}
+
 std::string CodeGenTileLangCuTeDSL::GetVarPtr_(const PrimExpr &expr) {
   // For local buffers (rmem tensors), we need to use .iterator to get the
   // pointer since local buffers in CuTeDSL are tensors, not raw pointers
   if (const VarNode *var = expr.as<VarNode>()) {
+    if (raw_pointer_vars_.count(var) != 0) {
+      return GetVarID(var);
+    }
     return GetVarID(var) + ".iterator";
   }
   return PrintExpr_(expr);
@@ -2292,6 +2350,7 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
   if (scope == "local.var" || scope.find("local.descriptor") == 0) {
     return vid;
   }
+  const bool is_raw_pointer = raw_pointer_vars_.count(buffer_var) != 0;
 
   DataType buffer_element_dtype = buffer->dtype;
   // CuTeDSL only supports i1 (Boolean) in rmem. For gmem/shared bool buffers,
@@ -2303,7 +2362,14 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
   }
   bool is_handle_type_match = HandleTypeMatch_(buffer_var, effective_dtype);
   std::string ptr_str;
-  if (is_handle_type_match) {
+  if (is_raw_pointer) {
+    if (effective_dtype == DataType::UInt(8)) {
+      ptr_str = vid;
+    } else {
+      ptr_str = "tl.recast_ptr(" + vid +
+                ", dtype=" + DTypeToString(effective_dtype) + ")";
+    }
+  } else if (is_handle_type_match) {
     ptr_str = vid + ".iterator";
   } else {
     ptr_str = "tl.recast_ptr(" + vid +

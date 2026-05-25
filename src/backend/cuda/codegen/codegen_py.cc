@@ -418,6 +418,13 @@ void CodeGenTileLangPY::VisitExpr_(const CallNode *op,
       os << "(";
       PrintExpr_(op->args[0], os);
       os << " is None)";
+    } else if (op->op.same_as(builtin::handle_add_byte_offset())) {
+      ICHECK_EQ(op->args.size(), 2U);
+      os << "(";
+      PrintExpr_(op->args[0], os);
+      os << " + ";
+      PrintExpr_(op->args[1], os);
+      os << ")";
     } else if (op->op.same_as(builtin::isnan())) {
       os << "(";
       PrintExpr_(op->args[0], os);
