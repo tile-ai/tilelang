@@ -879,7 +879,7 @@ public:
             agg[epoch_id][v].has_write = true;
         }
         std::unordered_map<const VarNode *,
-                          std::unordered_map<int, epoch_graph::EpochAccess>>
+                           std::unordered_map<int, epoch_graph::EpochAccess>>
             live_input;
         for (const auto &epoch_kv : agg) {
           for (const auto &buf_kv : epoch_kv.second) {
@@ -888,8 +888,8 @@ public:
             cell.use = cell.use || buf_kv.second.has_read;
           }
         }
-        auto live_out =
-            epoch_graph::ComputePerEpochLiveness<const VarNode *>(eg, live_input);
+        auto live_out = epoch_graph::ComputePerEpochLiveness<const VarNode *>(
+            eg, live_input);
         loop_live_buffers_.clear();
         for (const auto &kv : live_out) {
           std::set<int> &dst = liveness_epochs_by_var_[kv.first];
@@ -900,7 +900,8 @@ public:
           // If any live epoch belongs to a ForBody scope, mark the buffer as
           // loop-live so the per-epoch relaxer is disabled for it.
           for (int epoch_id : dst) {
-            if (epoch_id >= 0 && epoch_id < static_cast<int>(eg.epochs.size())) {
+            if (epoch_id >= 0 &&
+                epoch_id < static_cast<int>(eg.epochs.size())) {
               int scope_id = eg.epochs[epoch_id].scope_id;
               if (scope_id >= 0 &&
                   scope_id < static_cast<int>(eg.scopes.size())) {
@@ -915,11 +916,12 @@ public:
         }
 
         if (verbose_) {
-          this->LogBoundarySummaryDeltas(finder.linear_seq_, finder.stmt_attrs_);
+          this->LogBoundarySummaryDeltas(finder.linear_seq_,
+                                         finder.stmt_attrs_);
           // Per-stmt witness dump: print every linear_seq_ index, scope offset,
-          // and the buffers it reads/writes/touches.  Used to map planner indices
-          // back to actual TIR statements (and hence CUDA lines) for the lowbit
-          // kernel investigation.
+          // and the buffers it reads/writes/touches.  Used to map planner
+          // indices back to actual TIR statements (and hence CUDA lines) for
+          // the lowbit kernel investigation.
           for (size_t i = 0; i < finder.linear_seq_.size(); ++i) {
             const auto &e = finder.linear_seq_[i];
             std::stringstream rs, ws, ts;
@@ -934,8 +936,8 @@ public:
             int epoch_id = e.stmt ? eg.EpochOf(e.stmt) : -1;
             std::cerr << "[MSMA-SEQ] i=" << i << " kind=" << tk
                       << " scope_off=" << e.scope_pair_offset
-                      << " sync=" << (e.is_sync ? 1 : 0) << " epoch=" << epoch_id
-                      << " R=[" << rs.str() << "]"
+                      << " sync=" << (e.is_sync ? 1 : 0)
+                      << " epoch=" << epoch_id << " R=[" << rs.str() << "]"
                       << " W=[" << ws.str() << "]"
                       << " T=[" << ts.str() << "]\n";
           }

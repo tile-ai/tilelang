@@ -207,9 +207,9 @@ inline bool FindConflict(const AccessEntry &prev, const AccessEntry &curr,
         curr_sub.Set(old_curr_var, shared_var);
       } else {
         tirx::Var prev_var(std::string(thread_names[idx]) + "1",
-                          old_prev_var.dtype());
+                           old_prev_var.dtype());
         tirx::Var curr_var(std::string(thread_names[idx]) + "2",
-                          old_curr_var.dtype());
+                           old_curr_var.dtype());
         thread_condition =
             tirx::Or(thread_condition, tirx::NE(prev_var, curr_var));
         prev_sub.Set(old_prev_var, prev_var);
