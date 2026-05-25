@@ -284,6 +284,16 @@ TL_DEVICE void call_fma_sm70(typename MmaSm70ImplTraits<Impl>::DReg *d,
       std::make_index_sequence<MmaSm70ImplTraits<Impl>::kCRegs>{});
 }
 
+TL_DEVICE unsigned bf16x2_to_f16x2_sm70(unsigned packed_bf16) {
+  union PackedBf16 {
+    unsigned u;
+    bfloat16_t v[2];
+  } in;
+  in.u = packed_bf16;
+  return __pack_half2(half_t(static_cast<float>(in.v[0])),
+                      half_t(static_cast<float>(in.v[1])));
+}
+
 // Define dispatchers for all supported SM70 configurations
 // Note: m8n8k4 instruction computes m16n16k4 at warp level
 #define TL_DEFINE_MMA_SM70_DISPATCHER(ATypeEnum, BTypeEnum, CTypeEnum,         \
@@ -321,11 +331,50 @@ TL_DEFINE_MMA_SM70_DISPATCHER(kFloat16, kFloat16, kFloat32, false, false)
 
 #undef TL_DEFINE_MMA_SM70_DISPATCHER
 
+// Volta has no native BF16 tensor-core MMA. Keep the public TileLang BF16
+// contract compileable by value-converting BF16 fragment registers to FP16
+// inputs and reusing the FP16 MMA path. Accumulation remains FP32.
+#define TL_DEFINE_MMA_SM70_BF16_FALLBACK_DISPATCHER(TransAValue, TransBValue)  \
+  template <>                                                                  \
+  struct MmaSm70Dispatcher<DataType::kBFloat16, DataType::kBFloat16,           \
+                           DataType::kFloat32, 16, 16, 4, TransAValue,         \
+                           TransBValue> {                                      \
+    using Impl = MmaSm70Impl<DataType::kFloat16, DataType::kFloat16,           \
+                             DataType::kFloat32, TransAValue, TransBValue>;    \
+    using Traits = MmaSm70ImplTraits<Impl>;                                    \
+    using CRegType = typename Traits::DReg;                                    \
+    using ARegType = unsigned;                                                 \
+    using BRegType = unsigned;                                                 \
+    static_assert(                                                             \
+        std::is_same_v<typename Traits::DReg, typename Traits::CReg>,          \
+        "tl::mma_sync_sm70 requires matching accumulator/output regs");        \
+    static TL_DEVICE void exec(CRegType *d, const ARegType *a,                 \
+                               const BRegType *b, const CRegType *c) {         \
+      unsigned a_fp16[Traits::kARegs];                                         \
+      unsigned b_fp16[Traits::kBRegs];                                         \
+      for (int i = 0; i < Traits::kARegs; ++i) {                               \
+        a_fp16[i] = bf16x2_to_f16x2_sm70(a[i]);                                \
+      }                                                                        \
+      for (int i = 0; i < Traits::kBRegs; ++i) {                               \
+        b_fp16[i] = bf16x2_to_f16x2_sm70(b[i]);                                \
+      }                                                                        \
+      call_fma_sm70<Impl>(d, a_fp16, b_fp16, c);                               \
+    }                                                                          \
+  };
+
+TL_DEFINE_MMA_SM70_BF16_FALLBACK_DISPATCHER(true, true)
+TL_DEFINE_MMA_SM70_BF16_FALLBACK_DISPATCHER(true, false)
+TL_DEFINE_MMA_SM70_BF16_FALLBACK_DISPATCHER(false, true)
+TL_DEFINE_MMA_SM70_BF16_FALLBACK_DISPATCHER(false, false)
+
+#undef TL_DEFINE_MMA_SM70_BF16_FALLBACK_DISPATCHER
+
 } // namespace detail
 
 /// SM70 MMA synchronous instruction wrapper
-/// Supports m16n16k4 shape (m8n8k4 instruction at warp level) with FP16 inputs
-/// and FP16/FP32 accumulation
+/// Supports m16n16k4 shape (m8n8k4 instruction at warp level). Native SM70
+/// tensor cores use FP16 inputs with FP16/FP32 accumulation; BF16 inputs fall
+/// back to FP16 MMA inputs with FP32 accumulation.
 ///
 /// @tparam AType Input A data type (kFloat16)
 /// @tparam BType Input B data type (kFloat16)
