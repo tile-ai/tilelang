@@ -13,10 +13,34 @@ def is_pow_of_2(n):
     return isinstance(n, int) and n > 0 and (n & (n - 1)) == 0
 
 
-@tilelang.jit(out_idx=[1])
-def hadamard(b, n, dtype):
+@T.macro
+def warp_shfl(local, buf, thread_elem, warp_size, round):
+    tx = T.get_thread_binding(0)
+    for i in T.serial(round):
+        tx_stride = 1 << i
+        another_tx = tx ^ tx_stride
+        sign = (tx >> i) & 1  # get i-th lowest bit of tx, which determines the operation type for shared[tx, :]
+        for j in T.Pipelined(thread_elem, num_stages=1):
+            buf[j] = T.tvm_warp_shuffle(
+                0xFFFFFFFF,  # mask of all threads
+                local[j],
+                another_tx % warp_size,
+                warp_size,
+                warp_size,
+            )
+            local[j] = T.if_then_else(sign == 0, local[j] + buf[j], buf[j] - local[j])
+
+
+@tilelang.jit
+def hadamard(A, n, dtype):
+    b = T.const("b")
+
+    A: T.Tensor((b, n), dtype)
+    B = T.empty((b, n), dtype)
+
     assert is_pow_of_2(n), "n must be a power of 2"
     assert 2 <= n <= 32768, "n must be in [2, 32768]"
+
     elem_size = {T.float32: 4, T.float16: 2, T.bfloat16: 2}[dtype]
 
     logN = int(math.log2(n))
@@ -33,94 +57,68 @@ def hadamard(b, n, dtype):
     exchange_round = n * elem_size // 32768 if n * elem_size > 32768 else 1  # Suppose we use 32KB shared memory at most
     thread_elem_in_smem = thread_elem // exchange_round if exchange_round > 1 else thread_elem
 
-    # debug log
-    # print(f'{threads=}, {thread_round=}')
-    # print(f'{warps=}, {warp_round=}, {warp_size=}')
-    # print(f'{block_round=}')
-    # print(f'{exchange_round=}')
-
-    @T.macro
-    def warp_shfl(local: T.Tensor((thread_elem,), dtype), buf: T.Tensor((thread_elem,), dtype), round: int):
+    with T.Kernel(b, threads=threads) as bx:
+        local = T.alloc_local((thread_elem,), dtype)
+        shared = T.alloc_shared((threads, thread_elem_in_smem), dtype)
+        T.annotate_layout({shared: make_mma_swizzle_layout(shared)})
         tx = T.get_thread_binding(0)
-        for i in T.serial(round):
-            tx_stride = 1 << i
-            another_tx = tx ^ tx_stride
-            sign = (tx >> i) & 1  # get i-th lowest bit of tx, which determines the operation type for shared[tx, :]
 
-            for j in T.Pipelined(thread_elem, num_stages=1):
-                buf[j] = T.tvm_warp_shuffle(
-                    0xFFFFFFFF,  # mask of all threads
-                    local[j],
-                    another_tx % warp_size,
-                    warp_size,
-                    warp_size,
-                )
-                local[j] = T.if_then_else(sign == 0, local[j] + buf[j], buf[j] - local[j])
+        # 1. Load from HBM to register
+        for i in T.vectorized(thread_elem):
+            local[i] = A[bx, tx * thread_elem + i]
 
-    @T.prim_func
-    def main(A: T.Tensor((b, n), dtype), B: T.Tensor((b, n), dtype)):
-        with T.Kernel(b, threads=threads) as bx:
-            local = T.alloc_local((thread_elem,), dtype)
-            shared = T.alloc_shared((threads, thread_elem_in_smem), dtype)
-            T.annotate_layout({shared: make_mma_swizzle_layout(shared)})
-            tx = T.get_thread_binding(0)
+        # 2. Hadamard inside thread, n<=8
+        for i in T.serial(thread_round):
+            chunksize = 1 << (i + 1)
+            chunknum = thread_elem // chunksize
+            for j in T.serial(chunknum):
+                chunkbase = j * chunksize
+                for k in T.serial(chunksize // 2):
+                    local[chunkbase + k] = local[chunkbase + k] + local[chunkbase + k + chunksize // 2]
+                    local[chunkbase + k + chunksize // 2] = local[chunkbase + k] - 2 * local[chunkbase + k + chunksize // 2]
 
-            # 1. Load from HBM to register
-            for i in T.vectorized(thread_elem):
-                local[i] = A[bx, tx * thread_elem + i]
+        # 3. Hadamard inside warp, n<=512
+        # In warp level, we rely on warp shuffle to exchange data inside each warp, without using shared memory
+        another_val = T.alloc_local((thread_elem,), dtype)
 
-            # 2. Hadamard inside thread, n<=8
-            for i in T.serial(thread_round):
-                chunksize = 1 << (i + 1)
-                chunknum = thread_elem // chunksize
-                for j in T.serial(chunknum):
-                    chunkbase = j * chunksize
-                    for k in T.serial(chunksize // 2):
-                        local[chunkbase + k] = local[chunkbase + k] + local[chunkbase + k + chunksize // 2]
-                        local[chunkbase + k + chunksize // 2] = local[chunkbase + k] - 2 * local[chunkbase + k + chunksize // 2]
+        warp_shfl(local, another_val, thread_elem, warp_size, warp_round)
 
-            # 3. Hadamard inside warp, n<=512
-            # In warp level, we rely on warp shuffle to exchange data inside each warp, without using shared memory
-            another_val = T.alloc_local((thread_elem,), dtype)
+        # 4. Hadamard inside block, n<=32768
+        # Only exchange once for n<=8192, since shared mem can hold all elems
+        if block_round > 0:
+            warp_id = tx // warp_size
+            lane_id = tx % warp_size
+            src_tx = warp_id * warp_size + lane_id
+            tgt_warp_id = tx % warps
+            tgt_lane_id = tx // warps
+            tgt_tx = tgt_warp_id * warp_size + tgt_lane_id
 
-            warp_shfl(local, another_val, warp_round)
+            # 4.1 Write to smem, swap, read from smem
+            for cur_round in T.serial(exchange_round):
+                exchange_base = thread_elem_in_smem * cur_round
+                for j in T.vectorized(thread_elem_in_smem):
+                    shared[src_tx, j] = local[exchange_base + j]
 
-            # 4. Hadamard inside block, n<=32768
-            # Only exchange once for n<=8192, since shared mem can hold all elems
-            if block_round > 0:
-                warp_id = tx // warp_size
-                lane_id = tx % warp_size
-                src_tx = warp_id * warp_size + lane_id
-                tgt_warp_id = tx % warps
-                tgt_lane_id = tx // warps
-                tgt_tx = tgt_warp_id * warp_size + tgt_lane_id
+                for j in T.vectorized(thread_elem_in_smem):
+                    local[exchange_base + j] = shared[tgt_tx, j]
 
-                # 4.1 Write to smem, swap, read from smem
-                for cur_round in T.serial(exchange_round):
-                    exchange_base = thread_elem_in_smem * cur_round
-                    for j in T.vectorized(thread_elem_in_smem):
-                        shared[src_tx, j] = local[exchange_base + j]
+            # 4.2 Warp shuffle
+            warp_shfl(local, another_val, thread_elem, warp_size, block_round)
 
-                    for j in T.vectorized(thread_elem_in_smem):
-                        local[exchange_base + j] = shared[tgt_tx, j]
+            # 4.3 Write to smem, swap, read from smem
+            for cur_round in T.serial(exchange_round):
+                exchange_base = thread_elem_in_smem * cur_round
+                for j in T.vectorized(thread_elem_in_smem):
+                    shared[tgt_tx, j] = local[exchange_base + j]
 
-                # 4.2 Warp shuffle
-                warp_shfl(local, another_val, block_round)
+                for j in T.vectorized(thread_elem_in_smem):
+                    local[exchange_base + j] = shared[src_tx, j]
 
-                # 4.3 Write to smem, swap, read from smem
-                for cur_round in T.serial(exchange_round):
-                    exchange_base = thread_elem_in_smem * cur_round
-                    for j in T.vectorized(thread_elem_in_smem):
-                        shared[tgt_tx, j] = local[exchange_base + j]
+        # 5. Write back to HBM
+        for i in T.vectorized(thread_elem):
+            B[bx, tx * thread_elem + i] = local[i]
 
-                    for j in T.vectorized(thread_elem_in_smem):
-                        local[exchange_base + j] = shared[src_tx, j]
-
-            # 5. Write back to HBM
-            for i in T.vectorized(thread_elem):
-                B[bx, tx * thread_elem + i] = local[i]
-
-    return main
+    return B
 
 
 def ref_program(x: torch.Tensor):
@@ -138,14 +136,14 @@ def main():
 
     B, D = args.batch, args.dim
     x = torch.randn((B, D), device="cuda")
-    kernel = hadamard(B, D, T.float32)
-    y = kernel(x)
+    y = hadamard(x, D, T.float32)
     y_ref = ref_program(x)
     torch.testing.assert_close(y, y_ref, atol=1e-2, rtol=1e-2)
     print("All tests passed.")
 
-    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
-    latency = profiler.do_bench(warmup=100)
+    from tilelang.profiler import do_bench
+
+    latency = do_bench(lambda: hadamard(x, D, T.float32))
     print("Tile-lang: {:.2f} ms".format(latency))
 
 

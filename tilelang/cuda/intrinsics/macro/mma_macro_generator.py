@@ -60,6 +60,7 @@ class TensorCoreIntrinEmitter:
         "float6_e2m3fn": "e2m3",
         "float6_e3m2fn": "e3m2",
         "float4_e2m1fn": "e2m1",
+        "custom[tfloat32]": "tf32",
     }
 
     # Represent the thread binding in the form of (tx, warp_n, warp_m)

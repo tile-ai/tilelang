@@ -385,6 +385,12 @@ list(APPEND TILE_LANG_SRCS
   src/runtime/error_helpers.cc
 )
 
+# Metal codegen is pure C++ (no Apple frameworks) and can generate Metal shader
+# source on any platform.  Always compile it so that "target.build.tilelang_metal"
+# is available for cross-compilation on Linux/Windows.
+list(APPEND TILE_LANG_SRCS
+  src/target/codegen_metal.cc
+)
 # Track if the user explicitly selected a backend via cache options.
 set(TILELANG_BACKEND_USER_SELECTED OFF)
 foreach(BACKEND IN LISTS TILELANG_BACKENDS)
@@ -489,6 +495,20 @@ if(MSVC)
       endif()
     endif()
   endforeach()
+
+  # TVM links against tvm_ffi_shared on Windows. Do not also export tvm-ffi
+  # inline class members from TileLang-built TVM DLLs, or lld-link reports
+  # duplicate symbols for tvm::ffi types already exported by tvm_ffi.dll.
+  foreach(_tilelang_tvm_obj_tgt IN ITEMS tvm_objs tvm_runtime_objs)
+    if(TARGET ${_tilelang_tvm_obj_tgt})
+      get_target_property(_tilelang_tvm_defs ${_tilelang_tvm_obj_tgt} COMPILE_DEFINITIONS)
+      if(_tilelang_tvm_defs)
+        list(REMOVE_ITEM _tilelang_tvm_defs TVM_FFI_EXPORTS -DTVM_FFI_EXPORTS)
+        set_target_properties(${_tilelang_tvm_obj_tgt}
+          PROPERTIES COMPILE_DEFINITIONS "${_tilelang_tvm_defs}")
+      endif()
+    endif()
+  endforeach()
 endif()
 
 # Provide the custom LogMessageImpl / LogFatalImpl implementation to TVM,
@@ -527,32 +547,16 @@ if(TILELANG_RELEASE_BUILD)
   target_compile_definitions(tilelang_objs PRIVATE TILELANG_RELEASE_BUILD=1)
 endif()
 
+set(TILELANG_OUTPUT_TARGETS tvm_runtime tvm_compiler)
 if(WIN32)
-  set(TILELANG_OUTPUT_TARGETS tvm)
-  # On Windows, TileLang subclasses a large number of non-exported TVM C++
-  # classes. Building those objects into tvm.dll avoids an otherwise fragile
-  # cross-DLL ABI boundary while keeping Python-side registration semantics.
-  #
-  # MSVC can still discard translation-unit-local static init triggers from
-  # object-library inputs when those TUs are otherwise only referenced for
-  # side effects (for example TVM_FFI_STATIC_INIT_BLOCK() registrations).
-  # Archive the TileLang objects first, then force-include that archive into
-  # tvm.dll so tl.* object/global registrations survive the final link.
-  add_library(tilelang_archive STATIC $<TARGET_OBJECTS:tilelang_objs>)
-  set_target_properties(tilelang_archive PROPERTIES
-    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-    LINKER_LANGUAGE CXX
-  )
-  target_link_libraries(tvm PRIVATE tilelang_archive)
-  target_link_options(tvm PRIVATE
-    "/WHOLEARCHIVE:$<TARGET_FILE:tilelang_archive>"
-  )
-  # TVM is added with EXCLUDE_FROM_ALL above, but on Windows we install
-  # tvm.dll as the only native artifact that ships TileLang symbols, so make
-  # sure `ninja` (and `cmake --build`) actually builds it by default.
-  set_property(TARGET tvm PROPERTY EXCLUDE_FROM_ALL FALSE)
+  # Windows ships tvm_runtime.dll and tvm_compiler.dll. The compiler DLL also
+  # carries TileLang's native registration/object code: TileLang uses TVM
+  # compiler-side C++ internals that are not consistently exported from a
+  # separate tilelang.dll, while exporting every TVM compiler object would exceed
+  # Windows' 65535-symbol DLL limit. This keeps Windows on explicit split TVM
+  # DLL names without falling back to the old unified tvm.dll.
+  target_sources(tvm_compiler PRIVATE $<TARGET_OBJECTS:tilelang_objs>)
 else()
-  set(TILELANG_OUTPUT_TARGETS tvm_runtime tvm_compiler)
   add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
   target_link_libraries(tilelang PUBLIC tvm_compiler)
 
@@ -563,6 +567,15 @@ else()
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
   )
   list(PREPEND TILELANG_OUTPUT_TARGETS tilelang)
+endif()
+
+if(WIN32)
+  # TVM is added with EXCLUDE_FROM_ALL above. The split Windows build ships the
+  # same native target set as POSIX, so make sure default builds materialize all
+  # DLLs needed by Python import and wheel installation.
+  foreach(_tilelang_win_target IN LISTS TILELANG_OUTPUT_TARGETS)
+    set_property(TARGET ${_tilelang_win_target} PROPERTY EXCLUDE_FROM_ALL FALSE)
+  endforeach()
 endif()
 # Build cython extension
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT})

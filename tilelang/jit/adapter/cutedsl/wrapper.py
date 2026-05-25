@@ -793,6 +793,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         host_mod: IRModule | None = None,
         pass_configs: dict[str, Any] | None = None,
     ):
+        """Initialize CuTeDSL wrapper state and generated launcher code."""
         super().__init__(scheduled_ir_module, source, target, device_mod, host_mod, pass_configs)
 
     # =========================================================================
@@ -830,7 +831,66 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
 
     @staticmethod
     def _cxx_cast(ctype: str, expr_str: str) -> str:
+        """Render a C++ static_cast expression."""
         return f"static_cast<{ctype}>({expr_str})"
+
+    @staticmethod
+    def _call_packed_name(arg: Any) -> str | None:
+        """Return the packed function name when a TIR argument names one."""
+        if isinstance(arg, str):
+            return arg
+        if isinstance(arg, tvm.tirx.StringImm):
+            return arg.value
+        return None
+
+    def _host_entry_func(self) -> tvm.tirx.PrimFunc:
+        """Return the lowered host entry PrimFunc, not the generated Python wrapper."""
+        return TLCUDASourceWrapper.host_func.fget(self)
+
+    def _collect_host_kernel_call_sites(self) -> list[dict[str, Any]]:
+        """Collect CuTeDSL kernel calls from the lowered host entry in order."""
+        if self.host_mod is None:
+            raise AssertionError("host_mod is required for CuTeDSL host codegen")
+        if self.device_mod is None:
+            raise AssertionError("device_mod is required for CuTeDSL host codegen")
+
+        device_function_names = set(self.function_names or [])
+        kernel_call_sites: list[dict[str, Any]] = []
+
+        def visitor(node):
+            """Record CuTeDSL kernel calls from one host TIR node."""
+            if not isinstance(node, tvm.tirx.Call):
+                return
+            if not (hasattr(node, "op") and node.op == tvm.ir.Op.get("tirx.tvm_call_packed")):
+                return
+            args = node.args
+            if not args:
+                return
+
+            function_name = self._call_packed_name(args[0])
+            if function_name not in device_function_names:
+                return
+            if function_name not in self.device_mod:
+                raise AssertionError(f"Function {function_name} not found in device module")
+
+            device_func = self.device_mod[function_name]
+            kernel_params_cnt = len(device_func.params)
+            if len(args) < 1 + kernel_params_cnt:
+                raise AssertionError("tvm_call_packed should have at least 1 argument and match device function parameters")
+
+            kernel_call_sites.append(
+                {
+                    "function_name": function_name,
+                    "function_params": args[1 : 1 + kernel_params_cnt],
+                }
+            )
+
+        post_order_visit(self._host_entry_func().body, visitor)
+
+        if not kernel_call_sites:
+            raise AssertionError("No CuTeDSL kernel call sites found in host entry function")
+
+        return kernel_call_sites
 
     def _collect_function_args(self) -> tuple[list[dict], list[str]]:
         """Collect all function arguments from primary function.
@@ -872,6 +932,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         """Extract function call arguments from Python function declaration."""
 
         def maybe_desc(name: str | tuple[str, str], param_names: list[str], i: int):
+            """Record descriptor aliases while matching declaration parameters."""
             name_str = name if isinstance(name, str) else name[0]
             param = param_names[i]
             if not (param == name_str + "_desc" or param.startswith(name_str + "_desc_")):
@@ -1439,6 +1500,18 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         """Create dispatch function - always use C++ launcher."""
         return self.create_dispatch_func_cpp_launcher(code, function_informations)
 
+    @staticmethod
+    def _normalize_function_informations(function_informations) -> list[dict]:
+        """Normalize legacy function metadata maps into ordered call-site metadata."""
+        if isinstance(function_informations, dict):
+            ordered_infos = []
+            for function_name, function_info in function_informations.items():
+                info = dict(function_info)
+                info.setdefault("function_name", function_name)
+                ordered_infos.append(info)
+            return ordered_infos
+        return list(function_informations)
+
     def create_dispatch_func_cpp_launcher(self, code, function_informations):
         """Create dispatch function using C++ launcher."""
         function_args, buffer_args = self._collect_function_args()
@@ -1447,8 +1520,10 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         kernel_metadata = []
         all_desc_names_union = []
         all_tma_tensors_union = []
+        function_information_list = self._normalize_function_informations(function_informations)
 
-        for function_name, function_info in function_informations.items():
+        for function_info in function_information_list:
+            function_name = function_info["function_name"]
             declaration = extract_python_func_declaration(code, function_name)
             desc_name_map: dict[str, str] = {}
             desc_name_var_map: dict[str, tvm.tirx.Var] = {}
@@ -1523,38 +1598,33 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         """Update the library code with the given code string."""
         self.lib_code = code
 
-        function_informations = {}
-        for function_name in self.function_names:
-            if (function_name not in self.block_info) or (function_name not in self.grid_info):
-                continue
+        function_informations = []
+        for call_site in self._collect_host_kernel_call_sites():
+            function_name = call_site["function_name"]
+            missing_metadata = [
+                metadata_name
+                for metadata_name, metadata in (
+                    ("block_info", self.block_info),
+                    ("grid_info", self.grid_info),
+                    ("dynamic_smem_buf", self.dynamic_smem_buf),
+                )
+                if not isinstance(metadata, dict) or function_name not in metadata
+            ]
+            if missing_metadata:
+                raise AssertionError(f"Missing CuTeDSL launch metadata for host call site {function_name}: {', '.join(missing_metadata)}")
 
-            assert function_name in self.device_mod, f"Function {function_name} not found in device module"
-            device_func = self.device_mod[function_name]
-            kernel_params_cnt = len(device_func.params)
-            function_params: list[str] = None
+            function_informations.append(
+                {
+                    "function_name": function_name,
+                    "block_info": self.block_info[function_name],
+                    "grid_info": self.grid_info[function_name],
+                    "dynamic_smem_buf": self.dynamic_smem_buf[function_name],
+                    "function_params": call_site["function_params"],
+                }
+            )
 
-            def visitor(node, fn=function_name, param_cnt=kernel_params_cnt):
-                nonlocal function_params
-                if isinstance(node, tvm.tirx.Call):
-                    if not (hasattr(node, "op") and node.op == tvm.ir.Op.get("tirx.tvm_call_packed")):
-                        return
-                    args = node.args
-                    if not args or args[0] != fn:
-                        return
-                    if len(args) < 1 + param_cnt:
-                        raise AssertionError("tvm_call_packed should have at least 1 argument and match device function parameters")
-                    function_params = args[1 : 1 + param_cnt]
-
-            post_order_visit(self.host_func.body, visitor)
-            assert function_params is not None, "function_params should not be None"
-
-            function_informations[function_name] = {
-                "function_name": function_name,
-                "block_info": self.block_info[function_name],
-                "grid_info": self.grid_info[function_name],
-                "dynamic_smem_buf": self.dynamic_smem_buf[function_name],
-                "function_params": function_params,
-            }
+        if not function_informations:
+            raise AssertionError("No CuTeDSL kernel call sites have launch metadata")
 
         self.host_func = self.create_dispatch_func(code, function_informations)
         return self.lib_code

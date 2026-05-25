@@ -333,26 +333,40 @@ private:
   bool reads_shared_local_{false};
 };
 
-static const CallNode *GetEvaluateCallInSimpleWrapper(const Stmt &stmt) {
-  if (const auto *eval = stmt.as<EvaluateNode>()) {
-    return eval->value.as<CallNode>();
+class EvaluateCallInSimpleWrapperExtractor
+    : public StmtFunctor<Optional<Call>(const Stmt &)> {
+public:
+  Optional<Call> VisitStmt_(const EvaluateNode *op) final {
+    return op->value.as<Call>();
   }
-  if (const auto *if_stmt = stmt.as<IfThenElseNode>()) {
-    if (!if_stmt->else_case.defined()) {
-      return GetEvaluateCallInSimpleWrapper(if_stmt->then_case);
+
+  Optional<Call> VisitStmt_(const IfThenElseNode *op) final {
+    if (op->else_case.defined()) {
+      return Optional<Call>();
     }
-    return nullptr;
+    return VisitStmt(op->then_case);
   }
-  if (const auto *attr = stmt.as<AttrStmtNode>()) {
-    return GetEvaluateCallInSimpleWrapper(attr->body);
+
+  Optional<Call> VisitStmt_(const AttrStmtNode *op) final {
+    return VisitStmt(op->body);
   }
-  if (const auto *block = stmt.as<SBlockNode>()) {
-    return GetEvaluateCallInSimpleWrapper(block->body);
+
+  Optional<Call> VisitStmt_(const SBlockNode *op) final {
+    return VisitStmt(op->body);
   }
-  if (const auto *realize = stmt.as<SBlockRealizeNode>()) {
-    return GetEvaluateCallInSimpleWrapper(realize->block->body);
+
+  Optional<Call> VisitStmt_(const SBlockRealizeNode *op) final {
+    return VisitStmt(op->block->body);
   }
-  return nullptr;
+
+  Optional<Call> VisitStmtDefault_(const Object *) final {
+    return Optional<Call>();
+  }
+};
+
+static Optional<Call> GetEvaluateCallInSimpleWrapper(const Stmt &stmt) {
+  EvaluateCallInSimpleWrapperExtractor extractor;
+  return extractor(stmt);
 }
 
 class BufferDataToBufferCollector : public StmtExprVisitor {
@@ -575,13 +589,14 @@ static bool ContainsPtxCpAsync(const Stmt &stmt) {
 }
 
 static bool IsPtxCommitGroup(const Stmt &stmt) {
-  const auto *call = GetEvaluateCallInSimpleWrapper(stmt);
-  return call && call->op.same_as(builtin::ptx_commit_group());
+  Optional<Call> call = GetEvaluateCallInSimpleWrapper(stmt);
+  return call.defined() &&
+         call.value()->op.same_as(builtin::ptx_commit_group());
 }
 
 static bool IsPtxWaitGroup(const Stmt &stmt) {
-  const auto *call = GetEvaluateCallInSimpleWrapper(stmt);
-  return call && call->op.same_as(builtin::ptx_wait_group());
+  Optional<Call> call = GetEvaluateCallInSimpleWrapper(stmt);
+  return call.defined() && call.value()->op.same_as(builtin::ptx_wait_group());
 }
 
 static bool IsBarrierOrTmaControlCall(const CallNode *call) {
@@ -621,11 +636,11 @@ static bool CheckPipelineManagedCPAsyncCopy(const CopyNode *copy,
 }
 
 static bool IsSyncGlobalToSharedCopyLikeStmt(const Stmt &stmt, Target target) {
-  const auto *call = GetEvaluateCallInSimpleWrapper(stmt);
-  if (!call) {
+  Optional<Call> call = GetEvaluateCallInSimpleWrapper(stmt);
+  if (!call.defined()) {
     return false;
   }
-  auto tile_op = ParseOperator(GetRef<Call>(call));
+  auto tile_op = ParseOperator(call.value());
   if (!tile_op.defined()) {
     return false;
   }
@@ -715,9 +730,9 @@ TileStmtKind ClassifyStmt(const Stmt &stmt, Target target) {
         if (auto *copy = tile_op.as<CopyNode>()) {
           return ClassifyCopy(copy, target);
         }
-        // Conv2D im2col lowers to tma_load_im2col on Hopper — treat as TMA
+        // Im2Col lowers to tma_load_im2col on Hopper — treat as TMA
         // producer so it goes to the producer warp group.
-        if (tile_op.as<Conv2DIm2ColOpNode>()) {
+        if (tile_op.as<Im2ColOpNode>()) {
           if (TargetIsHopper(target)) {
             return TileStmtKind::kTmaProducer;
           }
@@ -856,14 +871,14 @@ private:
   bool IsMbarPhaseConsumer(const Call &call) const {
     auto tile_op = ParseOperator(call);
     return tile_op.defined() && (tile_op.as<CopyNode>() != nullptr ||
-                                 tile_op.as<Conv2DIm2ColOpNode>() != nullptr ||
+                                 tile_op.as<Im2ColOpNode>() != nullptr ||
                                  tile_op.as<GemmNode>() != nullptr);
   }
 
   PrimExpr phase_expr_;
 };
 
-/// Annotate a tile-op Call (e.g., c2d_im2col) with a barrier reference.
+/// Annotate a tile-op Call (e.g., im2col) with a barrier reference.
 /// The tile-op's Lower() is expected to check for the "barrier" annotation
 /// and use it instead of allocating its own mbarrier.
 static PrimExpr AnnotateTileOpBarrier(const Call &tile_call,
@@ -967,66 +982,83 @@ AnalyzeBufferDataAccess(const Stmt &stmt, const Var &buffer_data,
   return detector.Result();
 }
 
-static bool CollectPreludeStmtsToPipelineLoop(const Stmt &stmt,
-                                              const For &pipeline_loop,
-                                              Array<Stmt> *prelude_stmts) {
-  if (stmt.same_as(pipeline_loop)) {
-    return true;
+class PreludeStmtsToPipelineLoopCollector
+    : public StmtFunctor<Optional<Array<Stmt>>(const Stmt &)> {
+public:
+  using Base = StmtFunctor<Optional<Array<Stmt>>(const Stmt &)>;
+
+  explicit PreludeStmtsToPipelineLoopCollector(For pipeline_loop)
+      : pipeline_loop_(std::move(pipeline_loop)) {}
+
+  Optional<Array<Stmt>> VisitStmt(const Stmt &stmt) final {
+    if (stmt.same_as(pipeline_loop_)) {
+      return Array<Stmt>();
+    }
+    return Base::VisitStmt(stmt);
   }
-  if (const auto *seq = stmt.as<SeqStmtNode>()) {
-    for (int i = 0; i < static_cast<int>(seq->seq.size()); ++i) {
-      Array<Stmt> nested_prelude;
-      if (CollectPreludeStmtsToPipelineLoop(seq->seq[i], pipeline_loop,
-                                            &nested_prelude)) {
-        for (int j = 0; j < i; ++j) {
-          prelude_stmts->push_back(seq->seq[j]);
-        }
-        prelude_stmts->insert(prelude_stmts->end(), nested_prelude.begin(),
-                              nested_prelude.end());
-        return true;
+
+  Optional<Array<Stmt>> VisitStmt_(const SeqStmtNode *op) final {
+    for (int i = 0; i < static_cast<int>(op->seq.size()); ++i) {
+      Optional<Array<Stmt>> nested_prelude = VisitStmt(op->seq[i]);
+      if (!nested_prelude.defined()) {
+        continue;
       }
-    }
-    return false;
-  }
-  if (const auto *realize = stmt.as<SBlockRealizeNode>()) {
-    return CollectPreludeStmtsToPipelineLoop(realize->block->body,
-                                             pipeline_loop, prelude_stmts);
-  }
-  if (const auto *block = stmt.as<SBlockNode>()) {
-    return CollectPreludeStmtsToPipelineLoop(block->body, pipeline_loop,
-                                             prelude_stmts);
-  }
-  if (const auto *attr = stmt.as<AttrStmtNode>()) {
-    return CollectPreludeStmtsToPipelineLoop(attr->body, pipeline_loop,
-                                             prelude_stmts);
-  }
-  if (const auto *if_stmt = stmt.as<IfThenElseNode>()) {
-    Array<Stmt> nested_prelude;
-    if (CollectPreludeStmtsToPipelineLoop(if_stmt->then_case, pipeline_loop,
-                                          &nested_prelude)) {
-      prelude_stmts->insert(prelude_stmts->end(), nested_prelude.begin(),
-                            nested_prelude.end());
-      return true;
-    }
-    if (if_stmt->else_case.defined()) {
-      nested_prelude.clear();
-      if (CollectPreludeStmtsToPipelineLoop(if_stmt->else_case.value(),
-                                            pipeline_loop, &nested_prelude)) {
-        prelude_stmts->insert(prelude_stmts->end(), nested_prelude.begin(),
-                              nested_prelude.end());
-        return true;
+
+      Array<Stmt> prelude_stmts;
+      for (int j = 0; j < i; ++j) {
+        prelude_stmts.push_back(op->seq[j]);
       }
+      prelude_stmts.insert(prelude_stmts.end(), nested_prelude.value().begin(),
+                           nested_prelude.value().end());
+      return prelude_stmts;
     }
+    return Optional<Array<Stmt>>();
   }
-  return false;
+
+  Optional<Array<Stmt>> VisitStmt_(const SBlockRealizeNode *op) final {
+    return VisitStmt(op->block->body);
+  }
+
+  Optional<Array<Stmt>> VisitStmt_(const SBlockNode *op) final {
+    return VisitStmt(op->body);
+  }
+
+  Optional<Array<Stmt>> VisitStmt_(const AttrStmtNode *op) final {
+    return VisitStmt(op->body);
+  }
+
+  Optional<Array<Stmt>> VisitStmt_(const IfThenElseNode *op) final {
+    Optional<Array<Stmt>> then_prelude = VisitStmt(op->then_case);
+    if (then_prelude.defined()) {
+      return then_prelude;
+    }
+    if (op->else_case.defined()) {
+      return VisitStmt(op->else_case.value());
+    }
+    return Optional<Array<Stmt>>();
+  }
+
+  Optional<Array<Stmt>> VisitStmtDefault_(const Object *) final {
+    return Optional<Array<Stmt>>();
+  }
+
+private:
+  For pipeline_loop_;
+};
+
+static Array<Stmt> CollectPreludeStmtsToPipelineLoop(const Stmt &stmt,
+                                                     const For &pipeline_loop) {
+  PreludeStmtsToPipelineLoopCollector collector(pipeline_loop);
+  Optional<Array<Stmt>> prelude_stmts = collector(stmt);
+  return prelude_stmts.defined() ? prelude_stmts.value() : Array<Stmt>();
 }
 
 static Optional<Var> ExtractProducerWriteBufferData(const Stmt &stmt) {
-  const auto *call = GetEvaluateCallInSimpleWrapper(stmt);
-  if (!call) {
+  Optional<Call> call = GetEvaluateCallInSimpleWrapper(stmt);
+  if (!call.defined()) {
     return Optional<Var>();
   }
-  auto tile_op = ParseOperator(GetRef<Call>(call));
+  auto tile_op = ParseOperator(call.value());
   if (!tile_op.defined()) {
     return Optional<Var>();
   }
@@ -1035,7 +1067,7 @@ static Optional<Var> ExtractProducerWriteBufferData(const Stmt &stmt) {
       return copy->dst->data;
     }
   }
-  if (const auto *im2col = tile_op.as<Conv2DIm2ColOpNode>()) {
+  if (const auto *im2col = tile_op.as<Im2ColOpNode>()) {
     if (IsSharedBuffer(im2col->dst_)) {
       return im2col->dst_->data;
     }
@@ -1128,7 +1160,7 @@ static Stmt RewritePreludeTmaProducerStmt(const Stmt &stmt,
       PrimExpr rewritten_call;
       if (tile_op.as<CopyNode>()) {
         rewritten_call = RewriteCopyToTmaCopy(call, barrier_buf_, barrier_id_);
-      } else if (tile_op.as<Conv2DIm2ColOpNode>()) {
+      } else if (tile_op.as<Im2ColOpNode>()) {
         rewritten_call = AnnotateTileOpBarrier(call, barrier_buf_, barrier_id_);
       } else {
         return call;
@@ -1369,9 +1401,8 @@ private:
       }
     }
 
-    Array<Stmt> prelude_stmts;
-    CollectPreludeStmtsToPipelineLoop(orig_block->body, pipeline_loop,
-                                      &prelude_stmts);
+    Array<Stmt> prelude_stmts =
+        CollectPreludeStmtsToPipelineLoop(orig_block->body, pipeline_loop);
     std::vector<PreludeTmaLoadPlan> prelude_tma_plans;
     for (const Stmt &stmt : prelude_stmts) {
       if (ClassifyStmt(stmt, target_) != TileStmtKind::kTmaProducer) {
@@ -1684,7 +1715,7 @@ private:
           producer_stmts.push_back(stmt);
         }
         // Convert copy → tma_copy with barrier, or annotate non-copy
-        // TMA tile-ops (e.g. c2d_im2col) with barrier reference.
+        // TMA tile-ops (e.g. im2col) with barrier reference.
         const auto *eval = flat_stmts[i].as<EvaluateNode>();
         ICHECK(eval);
         Call tile_call = Downcast<Call>(eval->value);
@@ -1701,7 +1732,7 @@ private:
         if (tile_op.defined() && tile_op.as<CopyNode>()) {
           tma_call = RewriteCopyToTmaCopy(tile_call, barrier_buf, fwd_id);
         } else {
-          // Non-copy TMA producer (e.g. Conv2DIm2ColOp): annotate with
+          // Non-copy TMA producer (e.g. Im2ColOp): annotate with
           // barrier so Lower() uses the WS barrier instead of its own.
           tma_call = AnnotateTileOpBarrier(tile_call, barrier_buf, fwd_id);
         }
@@ -1905,8 +1936,11 @@ private:
                                dummy_producer, dummy_consumer);
     dummy_ws =
         AttrStmt(ws_partition, attr::kWarpSpecializationScope, 0, dummy_ws);
-    ReplaceResult replaced = ReplacePipelineLoopInStmt(
+    Optional<Stmt> replaced = ReplacePipelineLoopInStmt(
         orig_block->body, pipeline_loop, dummy_ws, consumer_extent);
+    ICHECK(replaced.defined())
+        << "ProducerConsumerWS: failed to replace pipeline loop";
+    Stmt replaced_stmt = replaced.value();
 
     // Producer and consumer partitions cannot safely share the same block-level
     // local/fragment buffers after tiled WS is introduced before
@@ -2009,12 +2043,10 @@ private:
         Stmt old_, new_;
       };
       SubstWsBody subst(dummy_ws, ws_body);
-      replaced.stmt = subst(replaced.stmt);
+      replaced_stmt = subst(replaced_stmt);
     }
-    ICHECK(replaced.found)
-        << "ProducerConsumerWS: failed to replace pipeline loop";
     Stmt new_block_body = SinkGuardedConsumerPostlude::Rewrite(
-        replaced.stmt, thread_iv_->var, consumer_extent);
+        replaced_stmt, thread_iv_->var, consumer_extent);
 
     // --- Update block ---
     SBlock new_block = orig_block;
@@ -2052,7 +2084,7 @@ private:
     return new_realize;
   }
 
-  class PipelineLoopFinder : public StmtExprVisitor {
+  class PipelineLoopFinder : public StmtVisitor {
   public:
     static Optional<For> Find(const Stmt &stmt) {
       PipelineLoopFinder finder;
@@ -2061,15 +2093,19 @@ private:
     }
 
   private:
-    void VisitStmt_(const ForNode *op) final {
+    void VisitStmt(const Stmt &stmt) final {
       if (pipeline_loop_.defined()) {
         return;
       }
+      StmtVisitor::VisitStmt(stmt);
+    }
+
+    void VisitStmt_(const ForNode *op) final {
       if (op->annotations.Get("num_stages")) {
         pipeline_loop_ = ffi::GetRef<For>(op);
         return;
       }
-      StmtExprVisitor::VisitStmt_(op);
+      StmtVisitor::VisitStmt_(op);
     }
 
     Optional<For> pipeline_loop_;
@@ -2078,11 +2114,6 @@ private:
   Optional<For> FindPipelineLoop(const Stmt &stmt) {
     return PipelineLoopFinder::Find(stmt);
   }
-
-  struct ReplaceResult {
-    Stmt stmt;
-    bool found{false};
-  };
 
   class SinkGuardedConsumerPostlude : public StmtExprMutator {
   public:
@@ -2233,177 +2264,260 @@ private:
     PrimExpr consumer_extent_;
   };
 
-  Stmt GuardConsumerOnly(const Stmt &stmt, PrimExpr consumer_extent) {
-    return IfThenElse(LT(thread_iv_->var, consumer_extent), stmt);
-  }
+  class PipelineLoopContainmentChecker
+      : public StmtFunctor<bool(const Stmt &)> {
+  public:
+    using Base = StmtFunctor<bool(const Stmt &)>;
 
-  ReplaceResult ReplacePipelineLoopInStmt(const Stmt &stmt,
-                                          const For &pipeline_loop,
-                                          const Stmt &ws_body,
-                                          PrimExpr consumer_extent) {
-    if (stmt.same_as(pipeline_loop)) {
-      return {ws_body, true};
+    static bool Contains(const Stmt &stmt, const For &pipeline_loop) {
+      PipelineLoopContainmentChecker checker(pipeline_loop);
+      return checker(stmt);
     }
-    if (auto *seq = stmt.as<SeqStmtNode>()) {
+
+    explicit PipelineLoopContainmentChecker(For pipeline_loop)
+        : pipeline_loop_(std::move(pipeline_loop)) {}
+
+    bool VisitStmt(const Stmt &stmt) final {
+      if (stmt.same_as(pipeline_loop_)) {
+        return true;
+      }
+      return Base::VisitStmt(stmt);
+    }
+
+    bool VisitStmt_(const SeqStmtNode *op) final {
+      for (const Stmt &stmt : op->seq) {
+        if (VisitStmt(stmt)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    bool VisitStmt_(const SBlockRealizeNode *op) final {
+      return VisitStmt(op->block->body);
+    }
+
+    bool VisitStmt_(const SBlockNode *op) final { return VisitStmt(op->body); }
+
+    bool VisitStmt_(const AttrStmtNode *op) final {
+      return VisitStmt(op->body);
+    }
+
+    bool VisitStmt_(const IfThenElseNode *op) final {
+      if (VisitStmt(op->then_case)) {
+        return true;
+      }
+      return op->else_case.defined() && VisitStmt(op->else_case.value());
+    }
+
+    bool VisitStmtDefault_(const Object *) final { return false; }
+
+  private:
+    For pipeline_loop_;
+  };
+
+  class PipelineLoopInStmtReplacer
+      : public StmtFunctor<Optional<Stmt>(const Stmt &)> {
+  public:
+    using Base = StmtFunctor<Optional<Stmt>(const Stmt &)>;
+
+    PipelineLoopInStmtReplacer(ProducerConsumerWSRewriter *rewriter,
+                               For pipeline_loop, Stmt ws_body,
+                               PrimExpr consumer_extent)
+        : rewriter_(rewriter), pipeline_loop_(std::move(pipeline_loop)),
+          ws_body_(std::move(ws_body)),
+          consumer_extent_(std::move(consumer_extent)) {}
+
+    Optional<Stmt> VisitStmt(const Stmt &stmt) final {
+      if (stmt.same_as(pipeline_loop_)) {
+        return ws_body_;
+      }
+      return Base::VisitStmt(stmt);
+    }
+
+    Optional<Stmt> VisitStmt_(const SeqStmtNode *op) final {
       Array<Stmt> new_seq;
-      bool found = false;
-      // First pass: find which child contains the pipeline loop.
       int loop_idx = -1;
-      for (int i = 0; i < static_cast<int>(seq->seq.size()); ++i) {
-        ReplaceResult probe = ReplacePipelineLoopInStmt(
-            seq->seq[i], pipeline_loop, ws_body, consumer_extent);
-        if (probe.found) {
+      for (int i = 0; i < static_cast<int>(op->seq.size()); ++i) {
+        if (PipelineLoopContainmentChecker::Contains(op->seq[i],
+                                                     pipeline_loop_)) {
           loop_idx = i;
           break;
         }
       }
       if (loop_idx < 0) {
-        return {stmt, false};
+        return Optional<Stmt>();
       }
-      // Propagate liveness backwards through prelude statements so that
-      // transitive dependencies are captured.  For example, if consumer
-      // needs `m_start` and `m_start` is defined by a prelude statement
-      // that reads `cur_batch_idx`, the loop defining `cur_batch_idx`
-      // must also be visible to the consumer.
-      //
-      // The same rule applies to common prelude statements that stay before
-      // the WS branch.  A pre-loop TMA copy can read a scalar BindNode that is
-      // also used by the consumer.  Without tracking common-prelude uses, that
-      // binding may be sunk into the consumer branch and leave the common TMA
-      // copy with a free var.
-      {
-        LocalLiveSet shared_live = shared_prelude_live_seed_;
-        LocalLiveSet producer_live = producer_prelude_live_seed_;
-        LocalLiveSet consumer_live = consumer_prelude_live_seed_;
-        for (int i = loop_idx + 1; i < static_cast<int>(seq->seq.size()); ++i) {
-          // Post-loop siblings are later sunk into the consumer branch by
-          // SinkGuardedConsumerPostlude.  Keep scalar/index dependencies in
-          // the enclosing prelude so existing shared-prelude index math stays
-          // common, but treat branch-private buffer uses as consumer-only so
-          // their local/fragment initialization does not leak into producer.
-          LocalAccessSummary summary = LocalAccessCollector::Collect(
-              seq->seq[i], buffer_data_to_buffer_);
-          shared_live.vars.insert(summary.read_vars.begin(),
-                                  summary.read_vars.end());
-          consumer_live.buffers.insert(summary.read_buffers.begin(),
-                                       summary.read_buffers.end());
-        }
-        for (int i = loop_idx - 1; i >= 0; --i) {
-          LocalAccessSummary summary = LocalAccessCollector::Collect(
-              seq->seq[i], buffer_data_to_buffer_);
-          if (!summary.HasTrackedDefs()) {
-            shared_live.AddUses(summary);
-            continue;
-          }
-          bool shared_needs = shared_live.NeedsAnyDef(summary);
-          bool producer_needs = producer_live.NeedsAnyDef(summary);
-          bool consumer_needs = consumer_live.NeedsAnyDef(summary);
-          if (shared_needs || (!producer_needs && !consumer_needs)) {
-            shared_live.AddUses(summary);
-          }
-          if (producer_needs) {
-            producer_live.AddUses(summary);
-          }
-          if (consumer_needs) {
-            consumer_live.AddUses(summary);
-          }
-        }
-        shared_prelude_live_seed_ = shared_live;
-        producer_prelude_live_seed_ = producer_live;
-        consumer_prelude_live_seed_ = consumer_live;
+
+      Optional<Stmt> rewritten_loop = VisitStmt(op->seq[loop_idx]);
+      ICHECK(rewritten_loop.defined())
+          << "ProducerConsumerWS: failed to replace pipeline loop child";
+
+      // Rewrite the child containing the pipeline loop before classifying this
+      // level's prelude.  The recursive rewrite propagates liveness from
+      // nested post-loop consumers, which outer prelude BindNodes need in
+      // order to stay shared when they feed both pre-loop shared work and the
+      // producer/consumer branches.
+      PropagatePreludeLiveness(op, loop_idx);
+      AppendClassifiedPrelude(op, loop_idx, &new_seq);
+
+      new_seq.push_back(rewritten_loop.value());
+
+      for (int i = loop_idx + 1; i < static_cast<int>(op->seq.size()); ++i) {
+        new_seq.push_back(GuardConsumerOnly(op->seq[i]));
       }
+      return new_seq.size() == 1 ? new_seq[0] : SeqStmt(new_seq);
+    }
+
+    Optional<Stmt> VisitStmt_(const SBlockRealizeNode *op) final {
+      Optional<Stmt> body = VisitStmt(op->block->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
+      }
+      SBlock block = op->block;
+      block.CopyOnWrite()->body = body.value();
+      SBlockRealize new_realize = GetRef<SBlockRealize>(op);
+      new_realize.CopyOnWrite()->block = block;
+      return new_realize;
+    }
+
+    Optional<Stmt> VisitStmt_(const SBlockNode *op) final {
+      Optional<Stmt> body = VisitStmt(op->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
+      }
+      SBlock new_block = GetRef<SBlock>(op);
+      new_block.CopyOnWrite()->body = body.value();
+      return new_block;
+    }
+
+    Optional<Stmt> VisitStmt_(const AttrStmtNode *op) final {
+      Optional<Stmt> body = VisitStmt(op->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
+      }
+      AttrStmt new_attr = GetRef<AttrStmt>(op);
+      new_attr.CopyOnWrite()->body = body.value();
+      return new_attr;
+    }
+
+    Optional<Stmt> VisitStmt_(const IfThenElseNode *op) final {
+      Optional<Stmt> then_result = VisitStmt(op->then_case);
+      Optional<Stmt> new_else = op->else_case;
+      bool found = then_result.defined();
+      if (!found && op->else_case.defined()) {
+        Optional<Stmt> else_result = VisitStmt(op->else_case.value());
+        if (else_result.defined()) {
+          new_else = else_result.value();
+          found = true;
+        }
+      }
+      if (!found) {
+        return Optional<Stmt>();
+      }
+      Stmt new_then =
+          then_result.defined() ? then_result.value() : op->then_case;
+      return IfThenElse(op->condition, new_then, new_else, op->span);
+    }
+
+    Optional<Stmt> VisitStmtDefault_(const Object *) final {
+      return Optional<Stmt>();
+    }
+
+  private:
+    Stmt GuardConsumerOnly(const Stmt &stmt) const {
+      return IfThenElse(LT(rewriter_->thread_iv_->var, consumer_extent_), stmt);
+    }
+
+    void PropagatePreludeLiveness(const SeqStmtNode *op, int loop_idx) {
+      LocalLiveSet shared_live = rewriter_->shared_prelude_live_seed_;
+      LocalLiveSet producer_live = rewriter_->producer_prelude_live_seed_;
+      LocalLiveSet consumer_live = rewriter_->consumer_prelude_live_seed_;
+      for (int i = loop_idx + 1; i < static_cast<int>(op->seq.size()); ++i) {
+        // Post-loop siblings are later sunk into the consumer branch by
+        // SinkGuardedConsumerPostlude.  Keep scalar/index dependencies in
+        // the enclosing prelude so existing shared-prelude index math stays
+        // common, but treat branch-private buffer uses as consumer-only so
+        // their local/fragment initialization does not leak into producer.
+        LocalAccessSummary summary = LocalAccessCollector::Collect(
+            op->seq[i], rewriter_->buffer_data_to_buffer_);
+        shared_live.vars.insert(summary.read_vars.begin(),
+                                summary.read_vars.end());
+        consumer_live.buffers.insert(summary.read_buffers.begin(),
+                                     summary.read_buffers.end());
+      }
+      for (int i = loop_idx - 1; i >= 0; --i) {
+        LocalAccessSummary summary = LocalAccessCollector::Collect(
+            op->seq[i], rewriter_->buffer_data_to_buffer_);
+        if (!summary.HasTrackedDefs()) {
+          shared_live.AddUses(summary);
+          continue;
+        }
+        bool shared_needs = shared_live.NeedsAnyDef(summary);
+        bool producer_needs = producer_live.NeedsAnyDef(summary);
+        bool consumer_needs = consumer_live.NeedsAnyDef(summary);
+        if (shared_needs || (!producer_needs && !consumer_needs)) {
+          shared_live.AddUses(summary);
+        }
+        if (producer_needs) {
+          producer_live.AddUses(summary);
+        }
+        if (consumer_needs) {
+          consumer_live.AddUses(summary);
+        }
+      }
+      rewriter_->shared_prelude_live_seed_ = shared_live;
+      rewriter_->producer_prelude_live_seed_ = producer_live;
+      rewriter_->consumer_prelude_live_seed_ = consumer_live;
+    }
+
+    void AppendClassifiedPrelude(const SeqStmtNode *op, int loop_idx,
+                                 Array<Stmt> *new_seq) {
       // Classify pre-loop statements using branch-private def/use sets.
       // Shared-prelude statements stay in place; branch-private definitions
       // move next to the branch that consumes them, or are duplicated when
       // both producer and consumer need the same definition.
       for (int i = 0; i < loop_idx; ++i) {
-        switch (ClassifyPreludeStmt(
-            seq->seq[i], buffer_data_to_buffer_, shared_prelude_live_seed_,
-            producer_prelude_live_seed_, consumer_prelude_live_seed_)) {
+        switch (ClassifyPreludeStmt(op->seq[i],
+                                    rewriter_->buffer_data_to_buffer_,
+                                    rewriter_->shared_prelude_live_seed_,
+                                    rewriter_->producer_prelude_live_seed_,
+                                    rewriter_->consumer_prelude_live_seed_)) {
         case PreludeStmtPlacement::kProducerOnly:
-          extracted_producer_init_.push_back(seq->seq[i]);
+          rewriter_->extracted_producer_init_.push_back(op->seq[i]);
           break;
         case PreludeStmtPlacement::kConsumerOnly:
-          extracted_consumer_init_.push_back(seq->seq[i]);
+          rewriter_->extracted_consumer_init_.push_back(op->seq[i]);
           break;
         case PreludeStmtPlacement::kDuplicateToBoth:
-          extracted_producer_init_.push_back(seq->seq[i]);
-          extracted_consumer_init_.push_back(seq->seq[i]);
+          rewriter_->extracted_producer_init_.push_back(op->seq[i]);
+          rewriter_->extracted_consumer_init_.push_back(op->seq[i]);
           break;
         case PreludeStmtPlacement::kKeepSharedPrelude:
-          if (auto it = common_prelude_rewrites_.find(seq->seq[i]);
-              it != common_prelude_rewrites_.end()) {
-            new_seq.push_back(it->second);
+          if (auto it = rewriter_->common_prelude_rewrites_.find(op->seq[i]);
+              it != rewriter_->common_prelude_rewrites_.end()) {
+            new_seq->push_back(it->second);
           } else {
-            new_seq.push_back(seq->seq[i]);
+            new_seq->push_back(op->seq[i]);
           }
           break;
         }
       }
-      // Replace the pipeline loop itself.
-      ReplaceResult result = ReplacePipelineLoopInStmt(
-          seq->seq[loop_idx], pipeline_loop, ws_body, consumer_extent);
-      new_seq.push_back(result.stmt);
-      // Guard post-loop siblings.
-      for (int i = loop_idx + 1; i < static_cast<int>(seq->seq.size()); ++i) {
-        new_seq.push_back(GuardConsumerOnly(seq->seq[i], consumer_extent));
-      }
-      return {new_seq.size() == 1 ? new_seq[0] : SeqStmt(new_seq), true};
     }
-    if (auto *realize = stmt.as<SBlockRealizeNode>()) {
-      ReplaceResult result = ReplacePipelineLoopInStmt(
-          realize->block->body, pipeline_loop, ws_body, consumer_extent);
-      if (!result.found) {
-        return {stmt, false};
-      }
-      SBlock block = realize->block;
-      block.CopyOnWrite()->body = result.stmt;
-      SBlockRealize new_realize = GetRef<SBlockRealize>(realize);
-      new_realize.CopyOnWrite()->block = block;
-      return {new_realize, true};
-    }
-    if (auto *block = stmt.as<SBlockNode>()) {
-      ReplaceResult result = ReplacePipelineLoopInStmt(
-          block->body, pipeline_loop, ws_body, consumer_extent);
-      if (!result.found) {
-        return {stmt, false};
-      }
-      SBlock new_block = GetRef<SBlock>(block);
-      new_block.CopyOnWrite()->body = result.stmt;
-      return {new_block, true};
-    }
-    if (auto *attr = stmt.as<AttrStmtNode>()) {
-      ReplaceResult result = ReplacePipelineLoopInStmt(
-          attr->body, pipeline_loop, ws_body, consumer_extent);
-      if (!result.found) {
-        return {stmt, false};
-      }
-      AttrStmt new_attr = GetRef<AttrStmt>(attr);
-      new_attr.CopyOnWrite()->body = result.stmt;
-      return {new_attr, true};
-    }
-    if (auto *if_stmt = stmt.as<IfThenElseNode>()) {
-      ReplaceResult then_result = ReplacePipelineLoopInStmt(
-          if_stmt->then_case, pipeline_loop, ws_body, consumer_extent);
-      Optional<Stmt> new_else = if_stmt->else_case;
-      bool found = then_result.found;
-      if (!found && if_stmt->else_case.defined()) {
-        ReplaceResult else_result =
-            ReplacePipelineLoopInStmt(if_stmt->else_case.value(), pipeline_loop,
-                                      ws_body, consumer_extent);
-        if (else_result.found) {
-          new_else = else_result.stmt;
-          found = true;
-        }
-      }
-      if (!found) {
-        return {stmt, false};
-      }
-      Stmt new_then = then_result.found ? then_result.stmt : if_stmt->then_case;
-      return {IfThenElse(if_stmt->condition, new_then, new_else, if_stmt->span),
-              true};
-    }
-    return {stmt, false};
+
+    ProducerConsumerWSRewriter *rewriter_;
+    For pipeline_loop_;
+    Stmt ws_body_;
+    PrimExpr consumer_extent_;
+  };
+
+  Optional<Stmt> ReplacePipelineLoopInStmt(const Stmt &stmt,
+                                           const For &pipeline_loop,
+                                           const Stmt &ws_body,
+                                           PrimExpr consumer_extent) {
+    PipelineLoopInStmtReplacer replacer(this, pipeline_loop, ws_body,
+                                        consumer_extent);
+    return replacer(stmt);
   }
 
   // --- PCThreadIdxRewriter (simplified for tile-op level) ---

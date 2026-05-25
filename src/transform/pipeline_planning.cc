@@ -16,7 +16,6 @@
 #include "../op/utils.h"
 #include "common/pipeline_utils.h"
 #include <algorithm>
-#include <functional>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -33,10 +32,6 @@ namespace tl {
 
 using namespace tirx;
 using namespace ffi;
-
-using BufferSet = std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>;
-using BufferRegionMap = std::unordered_map<Buffer, Array<BufferRegion>,
-                                           ObjectPtrHash, ObjectPtrEqual>;
 
 using BufferSet = std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>;
 using BufferRegionMap = std::unordered_map<Buffer, Array<BufferRegion>,
@@ -295,8 +290,8 @@ private:
         is_global_copy_pattern_ = true;
       }
     }
-    // Conv2D im2col always uses TMA on Hopper.
-    if (const auto *im2col = tile_op.as<Conv2DIm2ColOpNode>()) {
+    // Im2Col always uses TMA on Hopper.
+    if (const auto *im2col = tile_op.as<Im2ColOpNode>()) {
       if (IsGlobalLikeBuffer(im2col->src_) && IsSharedBuffer(im2col->dst_)) {
         is_global_copy_pattern_ = true;
         if (TargetIsHopper(target_)) {
@@ -729,7 +724,7 @@ private:
         }
         return;
       }
-      if (tile_op.as<CopyNode>() || tile_op.as<Conv2DIm2ColOpNode>()) {
+      if (tile_op.as<CopyNode>() || tile_op.as<Im2ColOpNode>()) {
         saw_copy = true;
       } else {
         saw_non_copy_tile_op = true;
@@ -757,7 +752,7 @@ private:
       if (tile_op.as<RegionOpNode>()) {
         return;
       }
-      if (tile_op.as<CopyNode>() || tile_op.as<Conv2DIm2ColOpNode>()) {
+      if (tile_op.as<CopyNode>() || tile_op.as<Im2ColOpNode>()) {
         if (copy_tile_op.defined()) {
           saw_multiple_copy_ops = true;
           copy_tile_op = Optional<TileOperator>();
@@ -810,7 +805,7 @@ private:
       return;
     }
 
-    if (const auto *im2col = copy_tile_op.value().as<Conv2DIm2ColOpNode>()) {
+    if (const auto *im2col = copy_tile_op.value().as<Im2ColOpNode>()) {
       if (!IsGlobalLikeBuffer(im2col->src_) || !IsSharedBuffer(im2col->dst_)) {
         return;
       }
@@ -942,11 +937,12 @@ private:
           continue;
         }
         const auto &producer = pipeline_stage_infos[it->second];
-        ICHECK_LE(producer.stage, consumer.stage)
+        ICHECK_EQ(producer.stage, consumer.stage)
             << "Pipeline planning error: scalar dependency from statement "
             << producer.original_stmt_index << " to statement "
             << consumer.original_stmt_index
-            << " crosses from a later stage to an earlier stage.";
+            << " crosses pipeline stages. Scheduled scalar Bind statements "
+               "must stay in the same stage as their consumers.";
         if (producer.stage == consumer.stage) {
           ICHECK_LT(producer.order, consumer.order)
               << "Pipeline planning error: scalar dependency from statement "
@@ -1107,8 +1103,202 @@ private:
     pinfo.cp_async_wait_min_inflight = async_info.cp_async_wait_min_inflight;
     pinfo.cp_async_wait_has_dynamic = async_info.cp_async_wait_has_dynamic;
     ClassifyCopyLikeStage(block->body, &pinfo);
-    return std::move(pinfo);
+    return pinfo;
   }
+
+  std::pair<Array<BufferRegion>, Array<BufferRegion>> CollectStmtAccessRegions(
+      const Stmt &stmt,
+      const AsyncDependencyChainBuilder &chain_builder) const {
+    SBlock block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
+                 /*name_hint=*/"", /*body*/ stmt);
+    auto collector =
+        BufferRegionCollector(buffer_data_to_buffer_, chain_builder, target_);
+    collector(block);
+    return {collector.GetReads(), collector.GetWrites()};
+  }
+
+  BufferSet CollectPipelineWriteBuffers(
+      const Array<Stmt> &stmts,
+      const AsyncDependencyChainBuilder &chain_builder) const {
+    BufferSet write_buffers;
+    for (const Stmt &stmt : stmts) {
+      auto [_, writes] = CollectStmtAccessRegions(stmt, chain_builder);
+      for (const BufferRegion &write : writes) {
+        write_buffers.insert(write->buffer);
+      }
+    }
+    return write_buffers;
+  }
+
+  bool IsReplayableScalarBindStmt(
+      const Stmt &stmt, const BufferSet &pipeline_write_buffers,
+      const AsyncDependencyChainBuilder &chain_builder) const {
+    if (stmt.as<BindNode>() == nullptr) {
+      return false;
+    }
+    auto [reads, _] = CollectStmtAccessRegions(stmt, chain_builder);
+    for (const BufferRegion &read : reads) {
+      if (pipeline_write_buffers.count(read->buffer)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  struct ScheduledStmtAnalysis {
+    size_t original_stmt_count{0};
+    Array<Stmt> scheduled_stmts;
+    std::vector<size_t> scheduled_indices;
+    Array<Integer> replayable_bind_mask;
+  };
+
+  ScheduledStmtAnalysis AnalyzeScheduledStmts(
+      const Array<Stmt> &stmts,
+      const AsyncDependencyChainBuilder &chain_builder) const {
+    BufferSet pipeline_write_buffers =
+        CollectPipelineWriteBuffers(stmts, chain_builder);
+    ScheduledStmtAnalysis analysis;
+    analysis.original_stmt_count = stmts.size();
+    analysis.replayable_bind_mask.reserve(stmts.size());
+    for (size_t i = 0; i < stmts.size(); ++i) {
+      const Stmt &stmt = stmts[i];
+      bool replayable = IsReplayableScalarBindStmt(stmt, pipeline_write_buffers,
+                                                   chain_builder);
+      analysis.replayable_bind_mask.push_back(Integer(replayable ? 1 : 0));
+      if (replayable) {
+        continue;
+      }
+      analysis.scheduled_indices.push_back(i);
+      analysis.scheduled_stmts.push_back(stmt);
+    }
+    return analysis;
+  }
+
+  Array<Integer> FilterAnnotationsForScheduledStmts(
+      const Array<Integer> &annotations,
+      const ScheduledStmtAnalysis &analysis) const {
+    if (annotations.size() == analysis.scheduled_stmts.size()) {
+      return annotations;
+    }
+
+    ICHECK_EQ(annotations.size(), analysis.original_stmt_count)
+        << "PipelinePlanning: expected pipeline annotation size to match "
+           "either the scheduled statement count or the original statement "
+           "count";
+
+    Array<Integer> filtered;
+    for (size_t index : analysis.scheduled_indices) {
+      filtered.push_back(annotations[index]);
+    }
+    ICHECK_EQ(filtered.size(), analysis.scheduled_stmts.size());
+    return filtered;
+  }
+
+  class PipelineBodySeqFinder
+      : public StmtFunctor<Optional<SeqStmt>(const Stmt &)> {
+  public:
+    static SeqStmt FindOrFatal(const Stmt &stmt) {
+      PipelineBodySeqFinder finder;
+      Optional<SeqStmt> seq = finder(stmt);
+      ICHECK(seq.defined());
+      return seq.value();
+    }
+
+    Optional<SeqStmt> VisitStmt_(const SeqStmtNode *op) final {
+      return GetRef<SeqStmt>(op);
+    }
+
+    Optional<SeqStmt> VisitStmt_(const IfThenElseNode *op) final {
+      ICHECK(!op->else_case.defined())
+          << "Pipeline_Planning: Can't handle the body of the loop because "
+             "the IfThenElse node has an else branch";
+      return VisitStmt(op->then_case);
+    }
+
+    Optional<SeqStmt> VisitStmtDefault_(const Object *op) final {
+      LOG(FATAL) << "Pipeline_Planning: Can't handle the body of the loop "
+                 << "because it is not a SeqStmt, IfThenElse without else, "
+                 << "but got " << op->GetTypeKey();
+      return Optional<SeqStmt>();
+    }
+  };
+
+  class SeqStmtFlattener : public StmtFunctor<Array<Stmt>(const Stmt &)> {
+  public:
+    using Base = StmtFunctor<Array<Stmt>(const Stmt &)>;
+
+    static Array<Stmt> Flatten(const Array<Stmt> &stmts) {
+      SeqStmtFlattener flattener;
+      Array<Stmt> flattened;
+      for (const Stmt &stmt : stmts) {
+        Array<Stmt> nested = flattener(stmt);
+        flattened.insert(flattened.end(), nested.begin(), nested.end());
+      }
+      return flattened;
+    }
+
+    Array<Stmt> VisitStmt(const Stmt &stmt) final {
+      if (!stmt.as<SeqStmtNode>()) {
+        return Array<Stmt>{stmt};
+      }
+      return Base::VisitStmt(stmt);
+    }
+
+    Array<Stmt> VisitStmt_(const SeqStmtNode *op) final {
+      Array<Stmt> flattened;
+      for (const Stmt &stmt : op->seq) {
+        Array<Stmt> nested = VisitStmt(stmt);
+        flattened.insert(flattened.end(), nested.begin(), nested.end());
+      }
+      return flattened;
+    }
+
+    Array<Stmt> VisitStmtDefault_(const Object *) final {
+      return Array<Stmt>();
+    }
+  };
+
+  class BodyWrapperRebuilder
+      : public StmtFunctor<Optional<Stmt>(const Stmt &)> {
+  public:
+    using Base = StmtFunctor<Optional<Stmt>(const Stmt &)>;
+
+    static Stmt ReplaceOrFatal(const Stmt &stmt, SeqStmt old_seq,
+                               Stmt new_seq) {
+      BodyWrapperRebuilder rebuilder(std::move(old_seq), std::move(new_seq));
+      Optional<Stmt> rebuilt = rebuilder(stmt);
+      ICHECK(rebuilt.defined());
+      return rebuilt.value();
+    }
+
+    BodyWrapperRebuilder(SeqStmt old_seq, Stmt new_seq)
+        : old_seq_(std::move(old_seq)), new_seq_(std::move(new_seq)) {}
+
+    Optional<Stmt> VisitStmt(const Stmt &stmt) final {
+      if (stmt.same_as(old_seq_)) {
+        return new_seq_;
+      }
+      return Base::VisitStmt(stmt);
+    }
+
+    Optional<Stmt> VisitStmt_(const IfThenElseNode *op) final {
+      Optional<Stmt> then_case = VisitStmt(op->then_case);
+      if (!then_case.defined()) {
+        return Optional<Stmt>();
+      }
+      return IfThenElse(op->condition, then_case.value(), op->else_case);
+    }
+
+    Optional<Stmt> VisitStmtDefault_(const Object *op) final {
+      LOG(FATAL) << "BodyWrapperRebuilder: unexpected node type "
+                 << op->GetTypeKey();
+      return Optional<Stmt>();
+    }
+
+  private:
+    SeqStmt old_seq_;
+    Stmt new_seq_;
+  };
 
   Stmt VisitStmt_(const ForNode *loop) final {
     auto order_anno = loop->annotations.Get("tl_pipeline_order");
@@ -1141,18 +1331,10 @@ private:
 
       Map<String, Any> annotations;
       for (const auto &[key, value] : loop->annotations) {
-        if (key != "tl_pipeline_order") {
+        if (key != "tl_pipeline_order" && key != "tl_pipeline_stage") {
           annotations.Set(key, value);
         }
       }
-      annotations.Set(s_tir::attr::software_pipeline_order, order_anno.value());
-
-      for (const auto &[key, value] : loop->annotations) {
-        if (key != "tl_pipeline_stage") {
-          annotations.Set(key, value);
-        }
-      }
-      annotations.Set(s_tir::attr::software_pipeline_stage, stage_anno.value());
       if (TargetHasAsyncCopy(target_) && use_async_copy_) {
         // Legacy explicit stage/order annotations do not carry per-statement
         // async producer metadata yet, so keep the previous stage-level
@@ -1161,7 +1343,6 @@ private:
                         Array<Integer>{0});
       }
       Stmt pipeline_body_root{nullptr};
-      Optional<SeqStmt> pipeline_body_seq;
       if (const auto *realize = loop->body.as<SBlockRealizeNode>()) {
         const auto &block = realize->block;
         for (const auto &buffer : block->alloc_buffers) {
@@ -1172,29 +1353,42 @@ private:
       } else {
         pipeline_body_root = loop->body;
       }
-      {
-        Stmt current = pipeline_body_root;
-        while (true) {
-          if (const auto *seq_stmt = current.as<SeqStmtNode>()) {
-            pipeline_body_seq = tvm::ffi::GetRef<SeqStmt>(seq_stmt);
+      SeqStmt pipeline_body_seq =
+          PipelineBodySeqFinder::FindOrFatal(pipeline_body_root);
+      Array<Stmt> pipeline_stmts =
+          SeqStmtFlattener::Flatten(pipeline_body_seq->seq);
+      AsyncDependencyChainBuilder chain_builder(buffer_data_to_buffer_);
+      chain_builder(pipeline_body_root);
+      ScheduledStmtAnalysis analysis =
+          AnalyzeScheduledStmts(pipeline_stmts, chain_builder);
+      ICHECK(!analysis.scheduled_stmts.empty())
+          << "PipelinePlanning: explicit pipeline annotations have no "
+             "schedulable statements after removing replayable scalar Bind "
+             "statements";
+      Array<Integer> filtered_order_array =
+          FilterAnnotationsForScheduledStmts(order_array, analysis);
+      Array<Integer> filtered_stage_array =
+          FilterAnnotationsForScheduledStmts(stage_array, analysis);
+      annotations.Set(s_tir::attr::software_pipeline_order,
+                      filtered_order_array);
+      annotations.Set(s_tir::attr::software_pipeline_stage,
+                      filtered_stage_array);
+      if (pipeline_stmts.size() == pipeline_body_seq->seq.size()) {
+        bool flatten_preserved_original_order = true;
+        for (size_t i = 0; i < pipeline_stmts.size(); ++i) {
+          if (!pipeline_stmts[i].same_as(pipeline_body_seq->seq[i])) {
+            flatten_preserved_original_order = false;
             break;
           }
-          if (const auto *if_then_else = current.as<IfThenElseNode>()) {
-            ICHECK(!if_then_else->else_case.defined())
-                << "Pipeline_Planning: Can't handle the body of the loop "
-                   "because the IfThenElse node has an else branch";
-            current = if_then_else->then_case;
-            continue;
-          }
-          LOG(FATAL) << "Pipeline_Planning: Can't handle the body of the loop "
-                     << "because it is not a SeqStmt, IfThenElse without else, "
-                     << "but got " << current->GetTypeKey();
+        }
+        if (flatten_preserved_original_order) {
+          annotations.Set(kPipelineReplayableScalarBinds,
+                          analysis.replayable_bind_mask);
         }
       }
-      ICHECK(pipeline_body_seq.defined());
       MaybeAnnotateLegacyAsyncPipelineLoop(
-          pipeline_body_root, pipeline_body_seq.value()->seq, order_array,
-          stage_array, &annotations);
+          pipeline_body_root, analysis.scheduled_stmts, filtered_order_array,
+          filtered_stage_array, &annotations);
       auto for_node = GetRef<For>(loop);
       for_node.CopyOnWrite()->annotations = annotations;
       return for_node;
@@ -1237,27 +1431,8 @@ private:
     } else {
       pipeline_body_root = loop->body;
     }
-    Optional<SeqStmt> pipeline_body_seq;
-    {
-      Stmt current = pipeline_body_root;
-      while (true) {
-        if (const auto *seq_stmt = current.as<SeqStmtNode>()) {
-          pipeline_body_seq = tvm::ffi::GetRef<SeqStmt>(seq_stmt);
-          break;
-        }
-        if (const auto *if_then_else = current.as<IfThenElseNode>()) {
-          ICHECK(!if_then_else->else_case.defined())
-              << "Pipeline_Planning: Can't handle the body of the loop because "
-                 "the IfThenElse node has an else branch";
-          current = if_then_else->then_case;
-          continue;
-        }
-        LOG(FATAL) << "Pipeline_Planning: Can't handle the body of the loop "
-                   << "because it is not a SeqStmt, IfThenElse without else, "
-                   << "but got " << current->GetTypeKey();
-      }
-    }
-    ICHECK(pipeline_body_seq.defined());
+    SeqStmt pipeline_body_seq =
+        PipelineBodySeqFinder::FindOrFatal(pipeline_body_root);
 
     ICHECK(num_stages >= 1);
     ICHECK(loop->kind == ForKind::kSerial);
@@ -1266,26 +1441,19 @@ private:
     // SeqStmt({produce, wait}) which creates nested SeqStmts when placed
     // inside the loop body. Flatten them so pipeline planning can assign
     // individual stages to the produce and wait statements.
-    Array<Stmt> flat_stmts;
-    std::function<void(const Stmt &)> flatten_seq = [&](const Stmt &s) {
-      if (auto *seq = s.as<SeqStmtNode>()) {
-        for (const auto &sub : seq->seq) {
-          flatten_seq(sub);
-        }
-      } else {
-        flat_stmts.push_back(s);
-      }
-    };
-    for (size_t i = 0; i < pipeline_body_seq.value()->size(); i++) {
-      flatten_seq(pipeline_body_seq.value()->seq[i]);
-    }
-
+    Array<Stmt> flat_stmts = SeqStmtFlattener::Flatten(pipeline_body_seq->seq);
     AsyncDependencyChainBuilder chain_builder(buffer_data_to_buffer_);
     chain_builder(pipeline_body_root);
+    ScheduledStmtAnalysis analysis =
+        AnalyzeScheduledStmts(flat_stmts, chain_builder);
+    ICHECK(!analysis.scheduled_stmts.empty())
+        << "PipelinePlanning: loop has no schedulable statements after "
+           "removing replayable scalar Bind statements";
 
     std::vector<PipelineStageInfo> pipeline_stage_infos;
-    for (size_t i = 0; i < flat_stmts.size(); i++) {
-      auto pinfo = MakePipelineStageInfo(flat_stmts[i], i, chain_builder);
+    for (size_t i = 0; i < analysis.scheduled_stmts.size(); i++) {
+      auto pinfo =
+          MakePipelineStageInfo(analysis.scheduled_stmts[i], i, chain_builder);
       pipeline_stage_infos.push_back(std::move(pinfo));
     }
 
@@ -2114,6 +2282,8 @@ private:
                     Array<Integer>(stages));
     annotations.Set(s_tir::attr::software_pipeline_order,
                     Array<Integer>(orders));
+    annotations.Set(kPipelineReplayableScalarBinds,
+                    analysis.replayable_bind_mask);
 
     // Propagate per-statement TMA eligibility so InjectSoftwarePipeline can
     // rewrite TMA copies to use pipeline-level barrier management.
@@ -2212,8 +2382,8 @@ private:
       const auto &block = realize->block;
       // Rebuild: body_root → ... → new_body_seq
       // We need to reconstruct the chain from block->body to the SeqStmt.
-      Stmt rebuilt_inner = RebuildBodyWrapper(
-          block->body, pipeline_body_seq.value(), new_body_seq);
+      Stmt rebuilt_inner = BodyWrapperRebuilder::ReplaceOrFatal(
+          block->body, pipeline_body_seq, new_body_seq);
       SBlock new_block(block->iter_vars, block->reads, block->writes,
                        block->name_hint, rebuilt_inner, block->init,
                        block->alloc_buffers, block->match_buffers,
@@ -2221,8 +2391,8 @@ private:
       new_loop_body =
           SBlockRealize(realize->iter_values, realize->predicate, new_block);
     } else {
-      new_loop_body = RebuildBodyWrapper(loop->body, pipeline_body_seq.value(),
-                                         new_body_seq);
+      new_loop_body = BodyWrapperRebuilder::ReplaceOrFatal(
+          loop->body, pipeline_body_seq, new_body_seq);
     }
 
     return For(loop->loop_var, loop->min, loop->extent, loop->kind,
@@ -2237,28 +2407,7 @@ private:
     for (const auto &buffer : op->alloc_buffers) {
       buffer_data_to_buffer_.erase(buffer->data);
     }
-    return std::move(block);
-  }
-
-  /*!
-   * \brief Rebuild the chain of wrapper statements (IfThenElse)
-   *        between the loop body root and the inner SeqStmt, replacing
-   *        the old SeqStmt with the new (flattened) one.
-   */
-  Stmt RebuildBodyWrapper(const Stmt &current, const SeqStmt &old_seq,
-                          const Stmt &new_seq) {
-    if (current.same_as(old_seq)) {
-      return new_seq;
-    }
-    if (const auto *if_node = current.as<IfThenElseNode>()) {
-      return IfThenElse(
-          if_node->condition,
-          RebuildBodyWrapper(if_node->then_case, old_seq, new_seq),
-          if_node->else_case);
-    }
-    LOG(FATAL) << "RebuildBodyWrapper: unexpected node type "
-               << current->GetTypeKey();
-    return current;
+    return block;
   }
 
   Map<Var, Buffer> buffer_data_to_buffer_;
