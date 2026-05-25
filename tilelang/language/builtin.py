@@ -973,7 +973,7 @@ def named_barrier_arrive(barrier_id, thread_count):
 
     Lowers to: ``asm volatile("bar.arrive %0, %1;" : : "r"(id), "r"(cnt));``
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.named_barrier_arrive"), barrier_id, thread_count)
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.named_barrier_arrive"), barrier_id, thread_count)
 
 
 def sync_warp(mask: int = None):
