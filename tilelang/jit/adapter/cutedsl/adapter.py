@@ -14,7 +14,7 @@ from tilelang.jit.adapter.wrapper import TLPyWrapper
 from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
 from tilelang.jit.adapter.cutedsl.libgen import CuTeDSLLibraryGenerator
 from tilelang.utils.language import retrieve_func_from_module
-from tilelang.utils.target import determine_target
+from tilelang.utils.target import determine_target, normalize_cutedsl_target
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 
 logger = logging.getLogger(__name__)
@@ -123,8 +123,8 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
-        adapter._set_cached_text_source("host_kernel_source", "_host_kernel_source_path", host_kernel_source)
-        adapter._set_cached_text_source("device_kernel_source", "_device_kernel_source_path", device_kernel_source)
+        host_kernel_source = adapter._set_cached_text_source("host_kernel_source", "_host_kernel_source_path", host_kernel_source)
+        device_kernel_source = adapter._set_cached_text_source("device_kernel_source", "_device_kernel_source_path", device_kernel_source)
         adapter.host_func = host_kernel_source.text
         adapter.generated_module_source = None
 
@@ -153,7 +153,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
 
         adapter.dynamic_symbolic_map, adapter.dynamic_symbolic_order = adapter._process_dynamic_symbolic()
 
-        adapter.target = Target(determine_target(target))
+        adapter.target = normalize_cutedsl_target(target) or Target(determine_target(target))
         adapter.verbose = verbose
         adapter.lib_generator = CuTeDSLLibraryGenerator(adapter.target, adapter.verbose)
         adapter.lib_generator.assign_compile_flags(compile_flags)

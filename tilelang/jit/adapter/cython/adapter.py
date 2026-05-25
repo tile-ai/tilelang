@@ -167,7 +167,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
         adapter._set_cached_text_source("host_kernel_source", "_host_kernel_source_path", host_kernel_source)
-        adapter._set_cached_text_source("device_kernel_source", "_device_kernel_source_path", device_kernel_source)
+        device_kernel_source = adapter._set_cached_text_source("device_kernel_source", "_device_kernel_source_path", device_kernel_source)
         adapter.kernel_global_source = device_kernel_source.text  # Set alias for compatibility
         adapter.pass_configs = pass_configs
 
