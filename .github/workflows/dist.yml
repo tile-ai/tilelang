@@ -80,7 +80,7 @@ jobs:
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1
         with:
-          max-size: "200MB"
+          max-size: ${{ runner.os == 'Windows' && '1GB' || '200MB' }}
           create-symlink: ${{ runner.os != 'Windows' }}
           evict-old-files: "7d"
           append-timestamp: false
