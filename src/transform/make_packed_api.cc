@@ -40,10 +40,10 @@
 #include <vector>
 
 #include "../op/builtin.h"
-#include "arg_binder.h"
 #include "common/attr.h"
 #include "merge_if_stmt.h"
 #include "tir/transforms/ir_utils.h"
+#include "tvm_ffi_binder.h"
 
 namespace tvm {
 namespace tl {
@@ -268,7 +268,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   // seq_check gives sequence of later checks after init
   std::vector<Stmt> seq_init, seq_check, arg_buffer_declarations;
   std::unordered_map<const VarNode *, PrimExpr> vmap;
-  ArgBinder binder(&vmap);
+  TVMFFIABIBuilder binder(&vmap);
 
   // ---------------------------
   // local function definitions
@@ -405,8 +405,8 @@ PrimFunc MakePackedAPI(PrimFunc func) {
       }
     }
     // NOTE: With the new nullable shape binding logic in
-    // ArgBinder::BindDLTensors, we no longer need to force one carrier to be
-    // non-NULL. The binder will:
+    // TVMFFIABIBuilder::BindDLTensors, we no longer need to force one carrier
+    // to be non-NULL. The binder will:
     // 1. Assert that at least one carrier is non-NULL at runtime
     // 2. Use cascaded if_then_else to read from the first non-NULL carrier
     // So we can allow all carriers to be nullable.

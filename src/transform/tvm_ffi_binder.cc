@@ -1,8 +1,8 @@
 /*!
- * \file arg_binder.cc
- * \brief Helper utility to match and bind arguments.
+ * \file tvm_ffi_binder.cc
+ * \brief Helper utility to match and bind packed function arguments.
  */
-#include "arg_binder.h"
+#include "tvm_ffi_binder.h"
 #include "support/check.h"
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
@@ -16,7 +16,6 @@
 #include <sstream>
 #include <unordered_set>
 
-#include "../runtime/error_helpers.h"
 #include "tir/transforms/ir_utils.h"
 #include "tvm/arith/int_solver.h"
 #include <tvm/tirx/stmt.h>
@@ -28,6 +27,32 @@ namespace tl {
 using namespace tirx;
 using namespace ffi;
 
+std::string ConstraintMessage(const std::string &arg_name) {
+  std::string kernel = arg_name;
+  std::string buf_and_field = arg_name;
+  size_t dot_pos = arg_name.find('.');
+  if (dot_pos != std::string::npos) {
+    kernel = arg_name.substr(0, dot_pos);
+    buf_and_field = arg_name.substr(dot_pos + 1);
+  }
+
+  std::string buffer = buf_and_field;
+  std::string field;
+  size_t dot2 = buf_and_field.find('.');
+  if (dot2 != std::string::npos) {
+    buffer = buf_and_field.substr(0, dot2);
+    field = buf_and_field.substr(dot2 + 1);
+  }
+
+  std::ostringstream os;
+  os << "kernel " << kernel << " input " << buffer;
+  if (!field.empty()) {
+    os << " " << field;
+  }
+  os << " violates packed ABI constraint";
+  return os.str();
+}
+
 void BinderAddAssert(arith::Analyzer *ana, PrimExpr cond,
                      const std::string &arg_name, std::vector<Stmt> *asserts,
                      PrimExpr nullable_guard = PrimExpr()) {
@@ -38,63 +63,20 @@ void BinderAddAssert(arith::Analyzer *ana, PrimExpr cond,
   }
 
   if (!is_one(scond)) {
-    // Extract kernel/buffer/field from arg_name (e.g., "main.A.shape[0]")
-    std::string kernel = arg_name;
-    std::string buf_and_field = arg_name;
-    size_t dot_pos = arg_name.find('.');
-    if (dot_pos != std::string::npos) {
-      kernel = arg_name.substr(0, dot_pos);
-      buf_and_field = arg_name.substr(dot_pos + 1);
+    PrimExpr assert_cond = scond;
+    if (nullable_guard.defined()) {
+      assert_cond = ana->Simplify(Or(nullable_guard, scond));
     }
-    std::string buffer = buf_and_field;
-    std::string field;
-    size_t dot2 = buf_and_field.find('.');
-    if (dot2 != std::string::npos) {
-      buffer = buf_and_field.substr(0, dot2);
-      field = buf_and_field.substr(dot2 + 1);
-    }
-
-    // If cond is an equality, prefer structured packed error with expect/got
-    if (const auto *eq = scond.as<tvm::tirx::EQNode>()) {
-      PrimExpr lhs = eq->a;
-      PrimExpr rhs = eq->b;
-      // Choose rhs as expected and lhs as got for better semantics in most
-      // binding cases
-      Array<PrimExpr> pargs;
-      pargs.push_back(StringImm(tvm_error_expect_eq));
-      pargs.push_back(StringImm(kernel));
-      pargs.push_back(StringImm(buffer));
-      pargs.push_back(StringImm(field.empty() ? std::string("value") : field));
-      pargs.push_back(cast(DataType::Int(64), rhs)); // expected
-      pargs.push_back(cast(DataType::Int(64), lhs)); // got
-
-      Stmt call_err =
-          Evaluate(Call(DataType::Int(32), builtin::tvm_call_packed(), pargs));
-      // Only emit at runtime when the equality fails
-      Stmt inner = IfThenElse(Not(scond), call_err);
-      if (nullable_guard.defined()) {
-        inner = IfThenElse(Not(nullable_guard), inner);
-      }
-      asserts->emplace_back(SeqStmt({inner, Evaluate(0)}));
-    } else {
-      // Fallback: packed generic constraint violation without dumping cond
-      Array<PrimExpr> pargs;
-      pargs.push_back(StringImm(tvm_error_constraint_violation));
-      pargs.push_back(StringImm(kernel));
-      pargs.push_back(StringImm(buffer));
-      pargs.push_back(StringImm(field.empty() ? std::string("value") : field));
-      Stmt call_err =
-          Evaluate(Call(DataType::Int(32), builtin::tvm_call_packed(), pargs));
-      Stmt inner = IfThenElse(Not(scond), call_err);
-      if (nullable_guard.defined()) {
-        inner = IfThenElse(Not(nullable_guard), inner);
-      }
-      asserts->emplace_back(SeqStmt({inner, Evaluate(0)}));
+    if (!is_one(assert_cond)) {
+      asserts->emplace_back(AssertStmt(
+          assert_cond, StringImm("RuntimeError"),
+          Array<StringImm>({StringImm(ConstraintMessage(arg_name))})));
     }
   }
 }
 
-std::vector<Var> ArgBinder::getUndefVars(const std::vector<PrimExpr> &args) {
+std::vector<Var>
+TVMFFIABIBuilder::getUndefVars(const std::vector<PrimExpr> &args) {
   std::unordered_set<const VarNode *> visit;
   std::vector<Var> res;
   for (const auto &arg : args) {
@@ -114,15 +96,9 @@ std::vector<Var> ArgBinder::getUndefVars(const std::vector<PrimExpr> &args) {
   return res;
 }
 
-bool ArgBinder::BindNullable(const PrimExpr &arg, const PrimExpr &value,
-                             const std::string &arg_name, bool with_lets,
-                             const PrimExpr &nullable_guard) {
-  // Currently only used in BindDLTensor, nullable_guard is already a defined
-  // bool, so use it directly.
-  auto MakeGuarded = [&](PrimExpr basic) -> PrimExpr {
-    // is_null || basic
-    return Or(nullable_guard, basic);
-  };
+bool TVMFFIABIBuilder::BindNullable(const PrimExpr &arg, const PrimExpr &value,
+                                    const std::string &arg_name, bool with_lets,
+                                    const PrimExpr &nullable_guard) {
   ICHECK_EQ(arg.dtype(), value.dtype()) << "arg " << arg << " value " << value;
   auto BindVar = [&](const VarNode *v, PrimExpr value) {
     auto v_arg = GetRef<Var>(v);
@@ -182,8 +158,8 @@ bool ArgBinder::BindNullable(const PrimExpr &arg, const PrimExpr &value,
   return false;
 }
 
-bool ArgBinder::Bind_(const PrimExpr &arg, const PrimExpr &value,
-                      const std::string &arg_name, bool with_lets) {
+bool TVMFFIABIBuilder::Bind_(const PrimExpr &arg, const PrimExpr &value,
+                             const std::string &arg_name, bool with_lets) {
   ICHECK_EQ(arg.dtype(), value.dtype()) << "arg " << arg << " value " << value;
   if (const VarNode *v = arg.as<VarNode>()) {
     auto it = def_map_->find(v);
@@ -207,14 +183,14 @@ bool ArgBinder::Bind_(const PrimExpr &arg, const PrimExpr &value,
   return false;
 }
 
-void ArgBinder::Bind(const PrimExpr &arg, const PrimExpr &value,
-                     const std::string &arg_name, bool with_let) {
+void TVMFFIABIBuilder::Bind(const PrimExpr &arg, const PrimExpr &value,
+                            const std::string &arg_name, bool with_let) {
   Bind_(arg, value, arg_name, with_let);
 }
 
-void ArgBinder::BindArray(const Array<PrimExpr> &arg,
-                          const Array<PrimExpr> &value,
-                          const std::string &arg_name) {
+void TVMFFIABIBuilder::BindArray(const Array<PrimExpr> &arg,
+                                 const Array<PrimExpr> &value,
+                                 const std::string &arg_name) {
   ICHECK_EQ(arg.size(), value.size())
       << "Argument " << arg_name << " array size mismatch";
   for (size_t i = 0; i < arg.size(); ++i) {
@@ -224,8 +200,9 @@ void ArgBinder::BindArray(const Array<PrimExpr> &arg,
   }
 }
 
-void ArgBinder::BindBuffer(const Buffer &arg, const Buffer &value,
-                           const std::string &arg_name, bool fuzzy_match) {
+void TVMFFIABIBuilder::BindBuffer(const Buffer &arg, const Buffer &value,
+                                  const std::string &arg_name,
+                                  bool fuzzy_match) {
   ICHECK_EQ(arg.scope(), value.scope())
       << "Argument " << arg_name << " Buffer bind scope mismatch";
   // Relax dtype check to allow FP8 E4M3 variants to bind together.
@@ -314,11 +291,10 @@ inline PrimExpr TVMArrayGet(DataType t, Var arr,
   return TVMStructGet(t, arr, 0, kind);
 }
 
-void ArgBinder::RelaxedStrideCheck(const int dim_idx, const PrimExpr &stride,
-                                   const PrimExpr &logical_stride_val,
-                                   const PrimExpr &dim_shape,
-                                   const PrimExpr &is_null,
-                                   const std::string &stride_element_name) {
+void TVMFFIABIBuilder::RelaxedStrideCheck(
+    const int dim_idx, const PrimExpr &stride,
+    const PrimExpr &logical_stride_val, const PrimExpr &dim_shape,
+    const PrimExpr &is_null, const std::string &stride_element_name) {
   if (const VarNode *v = stride.as<VarNode>()) {
     auto it = def_map_->find(v);
     if (it != def_map_->end()) {
@@ -351,7 +327,7 @@ void ArgBinder::RelaxedStrideCheck(const int dim_idx, const PrimExpr &stride,
   }
 }
 
-void ArgBinder::BindDLTensors(
+void TVMFFIABIBuilder::BindDLTensors(
     const std::vector<std::pair<Var, Buffer>> &buffer_def,
     const PrimExpr &device_type, const PrimExpr &device_id,
     const std::string &func_name,
@@ -482,20 +458,13 @@ void ArgBinder::BindDLTensors(
       kernel_nm = arg_name.substr(0, dot_pos);
       buf_nm = arg_name.substr(dot_pos + 1);
     }
-    // Only check ndim when handle is non-NULL: use packed error helper
     PrimExpr ndim_ok = (a_ndim == v_ndim);
-    Array<PrimExpr> ndim_args;
-    ndim_args.push_back(StringImm(tvm_error_ndim_mismatch));
-    ndim_args.push_back(StringImm(kernel_nm));
-    ndim_args.push_back(StringImm(buf_nm));
-    ndim_args.push_back(cast(DataType::Int(64), a_ndim));
-    ndim_args.push_back(cast(DataType::Int(64), v_ndim));
-    Stmt ndim_call = Evaluate(
-        Call(DataType::Int(32), builtin::tvm_call_packed(), ndim_args));
+    std::ostringstream ndim_msg;
+    ndim_msg << "kernel " << kernel_nm << " input " << buf_nm
+             << " ndim mismatch, expected " << buffer->shape.size();
     init_nest_.emplace_back(
-        SeqStmt({IfThenElse(Not(is_null), IfThenElse(Not(ndim_ok), ndim_call),
-                            Evaluate(0)),
-                 nop}));
+        AssertStmt(Or(is_null, ndim_ok), StringImm("RuntimeError"),
+                   Array<StringImm>({StringImm(ndim_msg.str())})));
     // type checks
     // Guard all dtype field loads by `is_null` using if_then_else
     PrimExpr v_type_code = tvm::if_then_else(
@@ -607,36 +576,12 @@ void ArgBinder::BindDLTensors(
                       &asserts_, is_null);
     }
     if (!data_is_subtype) {
-      // Build FFI packed call to __tvm_error_dtype_mismatch when mismatch
-      // occurs. Only issue the call when handle is non-NULL and cond is false.
-      Array<PrimExpr> packed_args;
-      packed_args.push_back(StringImm(tvm_error_dtype_mismatch));
-      // Split arg_name of the form "<kernel>.<buffer>" into parts for clearer
-      // diagnostics
-      std::string kernel_name = arg_name;
-      std::string buffer_name = arg_name;
-      size_t dot_pos = arg_name.find('.');
-      if (dot_pos != std::string::npos) {
-        kernel_name = arg_name.substr(0, dot_pos);
-        buffer_name = arg_name.substr(dot_pos + 1);
-      }
-      packed_args.push_back(StringImm(kernel_name));
-      packed_args.push_back(StringImm(buffer_name));
-
-      auto i64 = DataType::Int(64);
-      // Cast to int64 for FFI function signature
-      packed_args.push_back(cast(i64, v_type_code));  // actual_code
-      packed_args.push_back(cast(i64, v_type_bits));  // actual_bits
-      packed_args.push_back(cast(i64, v_type_lanes)); // actual_lanes
-      packed_args.push_back(cast(i64, expect_code));  // expect_code
-      packed_args.push_back(cast(i64, expect_bits));  // expect_bits
-      packed_args.push_back(cast(i64, expect_lanes)); // expect_lanes
-
-      Stmt call_err = Evaluate(
-          Call(DataType::Int(32), builtin::tvm_call_packed(), packed_args));
-      // Guard the call: only when handle is not null and cond fails
-      Stmt guarded = IfThenElse(Not(is_null) && Not(cond), call_err);
-      asserts_.emplace_back(SeqStmt({guarded, nop}));
+      std::ostringstream dtype_msg;
+      dtype_msg << "kernel " << kernel_nm << " input " << buf_nm
+                << " dtype mismatch, expected " << buffer->dtype;
+      asserts_.emplace_back(
+          AssertStmt(Or(is_null, cond), StringImm("RuntimeError"),
+                     Array<StringImm>({StringImm(dtype_msg.str())})));
     }
 
     // Get the pre-created shape buffer
@@ -940,26 +885,10 @@ void ArgBinder::BindDLTensors(
               foldl([](PrimExpr a, PrimExpr b,
                        Span span) { return logical_and(a, b, span); },
                     const_true(1), conds);
-          // Packed generic violation for non-compact strides
-          std::string kernel_nm3 = arg_name;
-          std::string buf_nm3 = arg_name;
-          size_t dot_pos3 = arg_name.find('.');
-          if (dot_pos3 != std::string::npos) {
-            kernel_nm3 = arg_name.substr(0, dot_pos3);
-            buf_nm3 = arg_name.substr(dot_pos3 + 1);
-          }
-          Array<PrimExpr> pargs4;
-          pargs4.push_back(StringImm(tvm_error_constraint_violation));
-          pargs4.push_back(StringImm(kernel_nm3));
-          pargs4.push_back(StringImm(buf_nm3));
-          pargs4.push_back(StringImm("strides"));
-          Stmt call_err4 = Evaluate(
-              Call(DataType::Int(32), builtin::tvm_call_packed(), pargs4));
-          // Only check when strides array is present and condition fails
-          Stmt check =
-              IfThenElse(Not(v_strides_is_null),
-                         IfThenElse(Not(all_ok), call_err4), Evaluate(0));
-          asserts_.emplace_back(SeqStmt({check, Evaluate(0)}));
+          // Only check compactness when an explicit strides array is present.
+          asserts_.emplace_back(AssertStmt(
+              Or(v_strides_is_null, all_ok), StringImm("RuntimeError"),
+              Array<StringImm>({StringImm(stride_err_msg.str())})));
         }
       } else if (buffer->buffer_type == kAutoBroadcast) {
         PrimExpr stride_from_shape = 1;
@@ -1018,17 +947,8 @@ void ArgBinder::BindDLTensors(
       PrimExpr expect_byte_offset =
           make_const(DataType::UInt(64), const_offset->value * data_bytes);
       PrimExpr ok = (expect_byte_offset == actual_byte_offset);
-      Array<PrimExpr> pargs;
-      pargs.push_back(StringImm(tvm_error_byte_offset_mismatch));
-      pargs.push_back(StringImm(kernel_nm));
-      pargs.push_back(StringImm(buf_nm));
-      pargs.push_back(cast(DataType::Int(64), expect_byte_offset));
-      pargs.push_back(cast(DataType::Int(64), actual_byte_offset));
-      Stmt call_err =
-          Evaluate(Call(DataType::Int(32), builtin::tvm_call_packed(), pargs));
-      asserts_.emplace_back(SeqStmt(
-          {IfThenElse(Not(is_null), IfThenElse(Not(ok), call_err), Evaluate(0)),
-           nop}));
+      BinderAddAssert(&analyzer_, ok, arg_name + ".byte_offset", &asserts_,
+                      is_null);
     } else {
       PrimExpr actual_byte_offset = tvm::if_then_else(
           Not(is_null),
@@ -1068,18 +988,17 @@ void ArgBinder::BindDLTensors(
     // by binding above)
     {
       PrimExpr ok = (device_type == actual_dev_type);
-      Array<PrimExpr> pargs2;
-      pargs2.push_back(StringImm(tvm_error_device_type_mismatch));
-      pargs2.push_back(StringImm(kernel_nm));
-      pargs2.push_back(StringImm(buf_nm));
-      pargs2.push_back(cast(DataType::Int(64), device_type));
-      pargs2.push_back(cast(DataType::Int(64), actual_dev_type));
-      Stmt call_err2 =
-          Evaluate(Call(DataType::Int(32), builtin::tvm_call_packed(), pargs2));
+      std::ostringstream device_msg;
+      device_msg << "kernel " << kernel_nm << " input " << buf_nm
+                 << " device_type mismatch";
+      if (const auto *const_device_type = device_type.as<IntImmNode>()) {
+        device_msg << ", expected "
+                   << runtime::DLDeviceType2Str(
+                          static_cast<int>(const_device_type->value));
+      }
       asserts_.emplace_back(
-          SeqStmt({IfThenElse(Not(is_null), IfThenElse(Not(ok), call_err2),
-                              Evaluate(0)),
-                   Evaluate(0)}));
+          AssertStmt(Or(is_null, ok), StringImm("RuntimeError"),
+                     Array<StringImm>({StringImm(device_msg.str())})));
     }
 
     // Data field.  Because the validation of the data field may depend
@@ -1108,23 +1027,15 @@ void ArgBinder::BindDLTensors(
         kernel_nm2 = arg_name.substr(0, dot_pos2);
         buf_nm2 = arg_name.substr(dot_pos2 + 1);
       }
-      // expand combined condition via nested IfThenElse for portability
-      Array<PrimExpr> pargs3;
-      pargs3.push_back(StringImm(tvm_error_null_ptr));
-      pargs3.push_back(StringImm(kernel_nm2));
-      pargs3.push_back(StringImm(buf_nm2));
-      pargs3.push_back(StringImm("data pointer"));
-      Stmt call_err3 =
-          Evaluate(Call(DataType::Int(32), builtin::tvm_call_packed(), pargs3));
-      asserts_.emplace_back(SeqStmt(
-          {IfThenElse(Not(is_null),
-                      IfThenElse(Not(alloc_size == 0),
-                                 IfThenElse(Call(DataType::Bool(),
-                                                 builtin::isnullptr(), {vptr}),
-                                            call_err3),
-                                 Evaluate(0)),
-                      Evaluate(0)),
-           nop}));
+      std::ostringstream data_msg;
+      data_msg << "kernel " << kernel_nm2 << " input " << buf_nm2
+               << " data pointer is NULL";
+      PrimExpr data_ptr_ok =
+          Or(is_null, Or(alloc_size == 0, !Call(DataType::Bool(),
+                                                builtin::isnullptr(), {vptr})));
+      asserts_.emplace_back(
+          AssertStmt(data_ptr_ok, StringImm("RuntimeError"),
+                     Array<StringImm>({StringImm(data_msg.str())})));
 
       // mark alignment of external bufs
       init_nest_.emplace_back(
