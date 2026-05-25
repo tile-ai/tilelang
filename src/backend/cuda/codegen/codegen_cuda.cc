@@ -646,6 +646,7 @@ std::string CodeGenTileLangCUDA::Finish() {
   }
   decl_stream << "#include <tl_templates/cuda/copy.h>\n";
   decl_stream << "#include <tl_templates/cuda/reduce.h>\n";
+  decl_stream << "#include <tl_templates/cuda/scan.h>\n";
   decl_stream << "#include <tl_templates/cuda/ldsm.h>\n";
   decl_stream << "#include <tl_templates/cuda/threadblock_swizzle.h>\n";
   decl_stream << "#include <tl_templates/cuda/debug.h>\n";

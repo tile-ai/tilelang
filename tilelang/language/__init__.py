@@ -91,7 +91,6 @@ from .reduce_op import (
     reduce_bitand,  # noqa: F401
     reduce_bitor,  # noqa: F401
     reduce_bitxor,  # noqa: F401
-    cumsum,  # noqa: F401
     finalize_reducer,  # noqa: F401
     warp_reduce_sum,  # noqa: F401
     warp_reduce_max,  # noqa: F401
@@ -99,6 +98,7 @@ from .reduce_op import (
     warp_reduce_bitand,  # noqa: F401
     warp_reduce_bitor,  # noqa: F401
 )
+from .scan_op import cumsum, cummax  # noqa: F401
 from .print_op import print, device_assert  # noqa: F401
 from .customize import (
     atomic_max,  # noqa: F401
