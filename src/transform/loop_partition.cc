@@ -23,8 +23,10 @@
  */
 
 #include "loop_partition.h"
+#include "support/check.h"
+#include <tvm/ir/cast.h>
 
-#include <tvm/tir/stmt_functor.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <utility>
 
@@ -34,7 +36,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 class BufferIndiceSimplify : public StmtExprMutator {
 public:
@@ -175,9 +178,9 @@ private:
       if (as_const_int(analyzer->Simplify(node->extent)) == nullptr) {
         return StmtExprMutator::VisitStmt_(node);
       }
-      For new_for = tvm::ffi::GetRef<For>(node);
+      For new_for = GetRef<For>(node);
       auto for_ptr = new_for.CopyOnWrite();
-      for_ptr->annotations.Set(tir::attr::pragma_unroll_explicit, Bool(false));
+      for_ptr->annotations.Set(tirx::attr::pragma_unroll_explicit, Bool(false));
       for_ptr->kind = ForKind::kUnrolled;
       return new_for;
     }

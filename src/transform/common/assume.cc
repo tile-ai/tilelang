@@ -5,13 +5,13 @@
  */
 
 #include "assume.h"
-#include "tvm/tir/builtin.h"
-#include "tvm/tir/expr.h"
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/expr.h>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 std::optional<PrimExpr> GetAssumeExprInEvaluateForm(Stmt stmt) {
   auto eval = stmt.as<EvaluateNode>();

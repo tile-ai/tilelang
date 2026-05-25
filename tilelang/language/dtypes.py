@@ -1,9 +1,9 @@
 from tilelang import tvm
 from tvm import ir
 import torch
-from typing import Generic, TypeVar, Union, TYPE_CHECKING
-from tvm import tir
-import tvm.script.ir_builder.tir._ffi_api as tb_ffi
+from typing import Generic, TypeVar, TYPE_CHECKING
+from tvm import tirx
+import tvm.tirx.script.builder._ffi_api as tb_ffi
 import numpy as np
 from tilelang import logger
 
@@ -20,13 +20,13 @@ if TYPE_CHECKING:
 else:
     dtype = tvm.DataType
 
-# Python 3.9 compatibility: avoid PEP 604 unions at runtime
-AnyDType = Union[ir.Type, str, type, torch.dtype, dtype]
+# Keep a typing alias separate from the tuple used by runtime checks.
+AnyDType = ir.Type | str | type | torch.dtype | dtype
 
 
 def _is_any_dtype(obj: object) -> bool:
     """Check if obj is a dtype-like value. Use instead of isinstance(obj, AnyDType)
-    because Union types cannot be used with isinstance in Python 3.9."""
+    to keep the runtime check explicit."""
     return isinstance(obj, (ir.Type, str, type, torch.dtype, dtype))
 
 
@@ -134,19 +134,20 @@ _STR_TO_TVM_DTYPE_CALL = {
     "float8_e5m2": "Float8E5M2",
     "float8_e5m2fnuz": "Float8E5M2FNUZ",
     "float8_e8m0fnu": "Float8E8M0FNU",
+    "tfloat32": "TensorFloat32",
 }
 
 int_ = int
 
 
-def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tir.Var:
+def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tirx.Var:
     # When called with multiple args, pack the scalars into a vector via Shuffle.
-    # e.g. T.bfloat16x2(a, b) -> tir.Shuffle([a, b], [0, 1]) : bfloat16x2
+    # e.g. T.bfloat16x2(a, b) -> tirx.Shuffle([a, b], [0, 1]) : bfloat16x2
     if len(args) > 1:
-        return tir.Shuffle(list(args), list(range(len(args))))
+        return tirx.Shuffle(list(args), list(range(len(args))))
     expr = args[0] if args else None
     if isinstance(expr, int_):
-        return tvm.tir.const(expr, dtype=self)
+        return tvm.tirx.const(expr, dtype=self)
     if self in _STR_TO_TVM_DTYPE_CALL:
         attr = _STR_TO_TVM_DTYPE_CALL[self]
         call = getattr(tb_ffi, attr, None)
@@ -160,6 +161,8 @@ def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tir.Var:
         val = "Float" + self[5:]
     elif self.startswith("bfloat"):
         val = "BFloat" + self[6:]
+    elif self.startswith("tfloat"):
+        val = "TensorFloat" + self[6:]
     else:
         raise TypeError(f"Invalid type {self}")
     if "_" in val:
@@ -167,9 +170,7 @@ def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tir.Var:
         val = first + second.upper()
     call = getattr(tb_ffi, val, None)
     if call is None:
-        raise TypeError(
-            f"Convert to datatype `{self}` is not supported by tvm\ncalling failed on `tvm.script.ir_builder.tir._ffi_api.{val}`"
-        )
+        raise TypeError(f"Convert to datatype `{self}` is not supported by tvm\ncalling failed on `tvm.tirx.script.builder._ffi_api.{val}`")
     return call(expr, is_size_var)
 
 
@@ -212,6 +213,8 @@ def __dtype_as_torch__(self: dtype) -> torch.dtype:
     elif dtype_str == "float4_e2m1fn":
         logger.info("torch doesn't support float4_e2m1fn, using float4_e2m1fnx2 as storage dtype.")
         return torch.float4_e2m1fn_x2 if hasattr(torch, "float4_e2m1fn_x2") else torch.int8
+    elif dtype_str == "custom[tfloat32]":
+        return torch.float32
     elif dtype_str == "int4":
         logger.info("torch doesn't support int4, using int8 as storage dtype.")
         return torch.int8
@@ -422,6 +425,13 @@ if TYPE_CHECKING:
     class float4_e2m1fnx64(dtype): ...
     class bfloat16(dtype): ...
     class bfloat16x2(dtype): ...
+    class tfloat32(dtype): ...
+    class tfloat32x2(dtype): ...
+    class tfloat32x4(dtype): ...
+    class tfloat32x8(dtype): ...
+    class tfloat32x16(dtype): ...
+    class tfloat32x32(dtype): ...
+    class tfloat32x64(dtype): ...
 
     # yapf: enable
 
@@ -591,6 +601,13 @@ else:
     float4_e2m1fnx64 = dtype("float4_e2m1fnx64")
     bfloat16 = dtype("bfloat16")
     bfloat16x2 = dtype("bfloat16x2")
+    tfloat32 = dtype("custom[tfloat32]")
+    tfloat32x2 = dtype("custom[tfloat32]x2")
+    tfloat32x4 = dtype("custom[tfloat32]x4")
+    tfloat32x8 = dtype("custom[tfloat32]x8")
+    tfloat32x16 = dtype("custom[tfloat32]x16")
+    tfloat32x32 = dtype("custom[tfloat32]x32")
+    tfloat32x64 = dtype("custom[tfloat32]x64")
 
 _all_dtypes = [
     "bool",
@@ -758,6 +775,13 @@ _all_dtypes = [
     "float4_e2m1fnx64",
     "bfloat16",
     "bfloat16x2",
+    "tfloat32",
+    "tfloat32x2",
+    "tfloat32x4",
+    "tfloat32x8",
+    "tfloat32x16",
+    "tfloat32x32",
+    "tfloat32x64",
 ]
 
 __all__ = list(_all_dtypes) + [

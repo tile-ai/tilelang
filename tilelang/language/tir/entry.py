@@ -1,9 +1,9 @@
 from __future__ import annotations
 import inspect
-from typing import Callable
+from collections.abc import Callable
 
-import tvm.script.parser.tir.entry as _tir_entry
-from tvm.tir.function import PrimFunc
+import tvm.tirx.script.parser.entry as _tir_entry
+from tvm.tirx.function import PrimFunc
 from tvm.script.parser._core import parse, scan_macro, utils
 
 
@@ -75,7 +75,7 @@ def macro(*args, hygienic: bool = True) -> Callable:
         Example:
         ```
         import tvm
-        from tvm.script import tir as T
+        from tvm.script import tirx as T
 
         x_value = 128
 

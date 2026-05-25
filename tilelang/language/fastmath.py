@@ -1,7 +1,7 @@
 """Fast math operations exposed on the TileLang language surface."""
 
-from tvm import tir
-from tvm.tir import PrimExpr
+from tvm import tirx
+from tvm.tirx import PrimExpr
 
 
 def __log(x: PrimExpr) -> PrimExpr:
@@ -17,8 +17,8 @@ def __log(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__log"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__log"), x)
 
 
 def __log2(x: PrimExpr) -> PrimExpr:
@@ -34,8 +34,8 @@ def __log2(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__log2"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__log2"), x)
 
 
 def __log10(x: PrimExpr) -> PrimExpr:
@@ -51,8 +51,8 @@ def __log10(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__log10"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__log10"), x)
 
 
 def __tan(x: PrimExpr) -> PrimExpr:
@@ -68,8 +68,8 @@ def __tan(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__tan"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__tan"), x)
 
 
 def __cos(x: PrimExpr) -> PrimExpr:
@@ -85,8 +85,8 @@ def __cos(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__cos"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__cos"), x)
 
 
 def __sin(x: PrimExpr) -> PrimExpr:
@@ -102,8 +102,8 @@ def __sin(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__sin"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__sin"), x)
 
 
 def __exp10(x: PrimExpr) -> PrimExpr:
@@ -119,8 +119,8 @@ def __exp10(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__exp10"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__exp10"), x)
 
 
 def __exp(x: PrimExpr) -> PrimExpr:
@@ -136,8 +136,8 @@ def __exp(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__exp"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__exp"), x)
 
 
 __all__ = [

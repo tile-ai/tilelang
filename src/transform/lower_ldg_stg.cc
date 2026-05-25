@@ -20,13 +20,14 @@
  * (default: OFF)
  */
 
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include "support/check.h"
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include "../op/builtin.h"
 #include "../op/utils.h"
@@ -36,7 +37,7 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 class LowerLDGSTGRewriter : public StmtExprMutator {
 public:
@@ -291,7 +292,7 @@ public:
 private:
   bool enable_non_predicated_{false};
   bool enable_predicated_{true};
-  Optional<PrimExpr>
+  ffi::Optional<PrimExpr>
       current_predicate_; // Track predicate context for nested loads
 
   // Create access pointer for the buffer at given base offset
@@ -418,7 +419,7 @@ private:
     PrimExpr ptr = CreateAccessPtr(store->buffer, base, 2);
 
     // Set predicate context so that nested loads also use predicated version
-    Optional<PrimExpr> old_predicate = current_predicate_;
+    ffi::Optional<PrimExpr> old_predicate = current_predicate_;
     current_predicate_ = predicate;
 
     // Get the value to store (loads inside will use predicated version)
@@ -462,7 +463,7 @@ private:
   }
 };
 
-using namespace tir::transform;
+using namespace tirx::transform;
 
 tvm::transform::Pass LowerLDGSTG() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {

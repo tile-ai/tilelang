@@ -3,12 +3,13 @@
  * \brief Annotate warp group reg alloc for warp specialization
  */
 
-#include <tvm/ffi/cast.h>
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include "../op/builtin.h"
 #include "runtime/thread_storage_scope.h"
@@ -20,7 +21,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace {
 
@@ -33,7 +35,7 @@ Stmt RewriteWarpSpecializationBody(const Stmt &stmt, F &&rewrite_if,
 
   if (const auto *if_node = stmt.as<IfThenElseNode>()) {
     *rewrote = true;
-    return rewrite_if(ffi::GetRef<IfThenElse>(if_node));
+    return rewrite_if(GetRef<IfThenElse>(if_node));
   }
 
   if (const auto *seq = stmt.as<SeqStmtNode>()) {
@@ -60,38 +62,33 @@ Stmt RewriteWarpSpecializationBody(const Stmt &stmt, F &&rewrite_if,
     return AttrStmt(attr->node, attr->attr_key, attr->value, new_body);
   }
 
-  if (const auto *let_node = stmt.as<LetStmtNode>()) {
-    Stmt new_body =
-        RewriteWarpSpecializationBody(let_node->body, rewrite_if, rewrote);
-    if (new_body.same_as(let_node->body)) {
-      return stmt;
-    }
-    return LetStmt(let_node->var, let_node->value, new_body);
+  if (stmt.as<BindNode>()) {
+    return stmt;
   }
 
-  if (const auto *realize = stmt.as<BlockRealizeNode>()) {
-    const Block &block = realize->block;
+  if (const auto *realize = stmt.as<SBlockRealizeNode>()) {
+    const SBlock &block = realize->block;
     Stmt new_body =
         RewriteWarpSpecializationBody(block->body, rewrite_if, rewrote);
     if (new_body.same_as(block->body)) {
       return stmt;
     }
-    Block new_block(block->iter_vars, block->reads, block->writes,
-                    block->name_hint, new_body, block->init,
-                    block->alloc_buffers, block->match_buffers,
-                    block->annotations);
-    return BlockRealize(realize->iter_values, realize->predicate, new_block);
+    SBlock new_block(block->iter_vars, block->reads, block->writes,
+                     block->name_hint, new_body, block->init,
+                     block->alloc_buffers, block->match_buffers,
+                     block->annotations);
+    return SBlockRealize(realize->iter_values, realize->predicate, new_block);
   }
 
-  if (const auto *block = stmt.as<BlockNode>()) {
+  if (const auto *block = stmt.as<SBlockNode>()) {
     Stmt new_body =
         RewriteWarpSpecializationBody(block->body, rewrite_if, rewrote);
     if (new_body.same_as(block->body)) {
       return stmt;
     }
-    return Block(block->iter_vars, block->reads, block->writes,
-                 block->name_hint, new_body, block->init, block->alloc_buffers,
-                 block->match_buffers, block->annotations);
+    return SBlock(block->iter_vars, block->reads, block->writes,
+                  block->name_hint, new_body, block->init, block->alloc_buffers,
+                  block->match_buffers, block->annotations);
   }
 
   return stmt;
@@ -217,7 +214,7 @@ private:
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent &&
+    if (op->attr_key == tirx::attr::thread_extent &&
         Downcast<IterVar>(op->node)->thread_tag == "threadIdx.x") {
       thread_iv_ = Downcast<IterVar>(op->node);
       need_update_thread_extent_ = false;
@@ -299,7 +296,7 @@ private:
   bool need_update_thread_extent_ = false;
 };
 
-using namespace tir::transform;
+using namespace tirx::transform;
 
 tvm::transform::Pass AnnotateWarpGroupRegAlloc() {
   auto pass_func = [](PrimFunc f, const IRModule &m,
@@ -310,7 +307,7 @@ tvm::transform::Pass AnnotateWarpGroupRegAlloc() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.AnnotateWarpGroupRegAlloc",
                         AnnotateWarpGroupRegAlloc);
 }

@@ -186,6 +186,82 @@ def test_buffer_load_vector_index_negative_ramp():
     _check(before, after)
 
 
+def test_buffer_load_vector_index_mixed_sign_ramp():
+    """
+    Test vectorized ramp indices that mix Python-negative and non-negative
+    lanes.
+    """
+
+    @T.prim_func
+    def before(A: T.Tensor((1024,), T.float32)):
+        vec = T.Ramp(-2, 1, 4)  # indices: [-2, -1, 0, 1]
+        value = A[vec]
+        B = T.alloc_buffer((4,), T.float32)
+        B[T.Ramp(0, 1, 4)] = value
+
+    @T.prim_func
+    def after(A: T.Tensor((1024,), T.float32)):
+        vec = T.Ramp(-2, 1, 4)  # noqa: F841
+        value = A[T.Shuffle([1022, 1023, 0, 1], [0, 1, 2, 3])]
+        B = T.alloc_buffer((4,), T.float32)
+        B[T.Ramp(0, 1, 4)] = value
+
+    _check(before, after)
+
+
+def test_buffer_load_vector_index_mixed_sign_ramp_preserves_int64_extent():
+    """
+    Test mixed-sign ramp legalization preserves the buffer extent dtype.
+    """
+
+    @T.prim_func
+    def before(A: T.Tensor((T.int64(3000000000),), T.float32)):
+        vec = T.Ramp(T.int32(-2), T.int32(1), 4)
+        value = A[vec]
+        B = T.alloc_buffer((4,), T.float32)
+        B[T.Ramp(0, 1, 4)] = value
+
+    @T.prim_func
+    def after(A: T.Tensor((T.int64(3000000000),), T.float32)):
+        vec = T.Ramp(T.int32(-2), T.int32(1), 4)  # noqa: F841
+        value = A[
+            T.Shuffle(
+                [
+                    T.int64(2999999998),
+                    T.int64(2999999999),
+                    T.int64(0),
+                    T.int64(1),
+                ],
+                [0, 1, 2, 3],
+            )
+        ]
+        B = T.alloc_buffer((4,), T.float32)
+        B[T.Ramp(0, 1, 4)] = value
+
+    _check(before, after)
+
+
+def test_buffer_load_vector_index_mixed_sign_ramp_in_kernel():
+    """
+    Test a sliding-window KV-cache style vector load that crosses a ring-buffer
+    boundary inside a kernel body.
+    """
+
+    @T.prim_func
+    def before(A: T.Tensor((1024,), T.float32), B: T.Tensor((4,), T.float32)):
+        with T.Kernel(1, threads=1) as _:
+            vec = T.Ramp(-2, 1, 4)  # indices: [-2, -1, 0, 1]
+            B[T.Ramp(0, 1, 4)] = A[vec]
+
+    @T.prim_func
+    def after(A: T.Tensor((1024,), T.float32), B: T.Tensor((4,), T.float32)):
+        with T.Kernel(1, threads=1) as _:
+            vec = T.Ramp(-2, 1, 4)  # noqa: F841
+            B[T.Ramp(0, 1, 4)] = A[T.Shuffle([1022, 1023, 0, 1], [0, 1, 2, 3])]
+
+    _check(before, after)
+
+
 def test_buffer_load_nested_buffer_loads():
     """
     Test legalization with nested buffer load expressions.
@@ -312,6 +388,27 @@ def test_buffer_store_vector_index_negative_ramp():
         vec = T.Ramp(-4, 1, 4)  # noqa: F841
         values = T.Ramp(0.0, 1.0, 4)
         A[T.Ramp(1020, 1, 4)] = values
+
+    _check(before, after)
+
+
+def test_buffer_store_vector_index_mixed_sign_ramp():
+    """
+    Test vectorized store ramp indices that mix Python-negative and
+    non-negative lanes.
+    """
+
+    @T.prim_func
+    def before(A: T.Tensor((1024,), T.float32)):
+        vec = T.Ramp(-2, 1, 4)  # indices: [-2, -1, 0, 1]
+        values = T.Ramp(0.0, 1.0, 4)
+        A[vec] = values
+
+    @T.prim_func
+    def after(A: T.Tensor((1024,), T.float32)):
+        vec = T.Ramp(-2, 1, 4)  # noqa: F841
+        values = T.Ramp(0.0, 1.0, 4)
+        A[T.Shuffle([1022, 1023, 0, 1], [0, 1, 2, 3])] = values
 
     _check(before, after)
 
