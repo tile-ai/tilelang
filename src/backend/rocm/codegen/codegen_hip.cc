@@ -1074,12 +1074,13 @@ void CodeGenTileLangHIP::PrintCallExtern(Type ret_type, String global_symbol,
 std::string CodeGenTileLangHIP::GetBufferRef(DataType t,
                                              const BufferNode *buffer,
                                              PrimExpr index) {
-  const VarNode *buffer_var = buffer->data.get();
+  Var buffer_var = buffer->data;
+  const VarNode *buffer_var_node = buffer_var.get();
   std::ostringstream os;
-  std::string vid = GetVarID(buffer_var);
+  std::string vid = GetVarID(buffer_var_node);
   std::string scope;
-  if (alloc_storage_scope_.count(buffer_var)) {
-    scope = alloc_storage_scope_.at(buffer_var);
+  if (alloc_storage_scope_.count(buffer_var_node)) {
+    scope = alloc_storage_scope_.at(buffer_var_node);
   }
 
   // FP4 scalar access on gfx950: redirect to tl_fp4_packed_load helper.
@@ -1120,7 +1121,7 @@ std::string CodeGenTileLangHIP::GetBufferRef(DataType t,
   DataType buffer_element_dtype = buffer->dtype;
 
   std::string buffer_str = vid;
-  if (!HandleTypeMatch(buffer_var, buffer_element_dtype) || is_vol) {
+  if (!HandleTypeMatch(buffer_var_node, buffer_element_dtype) || is_vol) {
     std::stringstream temp;
     temp << "(" << ptr_cast(buffer_element_dtype) << vid << ")";
     buffer_str = temp.str();
@@ -1767,7 +1768,7 @@ void CodeGenTileLangHIP::VisitStmt_(const AllocBufferNode *op) {
       auto vid_packed = vid + "_packed";
       stream << "fp4_e2_2_t " << vid_packed << '[' << (constant_size + 1) / 2
              << "];\n";
-      fp4_packed_buffers_[op->buffer->data.get()] = vid_packed;
+      fp4_packed_buffers_[op->buffer->data] = vid_packed;
     } else if (scope == "local.var") {
       // Single-element variable: emit an initializer so the value is defined.
       // Default to 0; respect the user-provided tl.local_var_init annotation.
@@ -1806,7 +1807,7 @@ void CodeGenTileLangHIP::VisitStmt_(const BufferStoreNode *op) {
     std::string idx_str = PrintExpr(op->indices[0]);
     std::string value = this->PrintExpr(op->value);
     this->PrintIndent();
-    auto packed_it = fp4_packed_buffers_.find(buffer_var.get());
+    auto packed_it = fp4_packed_buffers_.find(buffer_var);
     if (packed_it != fp4_packed_buffers_.end()) {
       stream << "tl_fp4_packed_store(" << packed_it->second << ", " << idx_str
              << ", " << value << ");\n";
