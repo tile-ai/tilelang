@@ -23,6 +23,7 @@ from tilelang.engine.param import KernelParam
 from tilelang.utils.language import get_prim_func_name
 from tilelang import env
 from tilelang.jit import JITKernel
+from tilelang.contrib.hip_resource_info import dump_to_file, load_from_file
 from tilelang import __version__
 import platform
 
@@ -47,6 +48,7 @@ class KernelCache:
     host_kernel_path = "host_kernel.cu"
     kernel_lib_path = "kernel_lib.so"
     params_path = "params.pkl"
+    resource_usage_path = "resource_usage.json"
     cache_root_dir = "kernels"
     staging_root_dir = ".staging"
 
@@ -90,7 +92,7 @@ class KernelCache:
             pass
 
         if sys.platform == "win32":
-            lib_names = ["tilelang.dll", "libtilelang.dll", "tvm.dll", "tvm_ffi.dll"]
+            lib_names = ["tvm_runtime.dll", "tvm_compiler.dll", "tvm_ffi.dll"]
         elif sys.platform == "darwin":
             lib_names = [
                 "libtilelang.dylib",
@@ -472,6 +474,11 @@ class KernelCache:
                 self.logger.debug(f"Saving kernel parameters to disk: {params_path}")
             KernelCache._safe_write_file(params_path, "wb", lambda file: cloudpickle.dump(kernel.params, file))
 
+            # Persist HIP kernel-resource-usage remarks
+            usage = getattr(kernel, "_resource_usage", None) or {}
+            if usage:
+                dump_to_file(usage, os.path.join(staging_path, self.resource_usage_path))
+
             missing_files = self._get_missing_complete_cache_files(staging_path)
             if missing_files:
                 missing_names = ", ".join(os.path.basename(path) for path in missing_files)
@@ -544,7 +551,7 @@ class KernelCache:
         except Exception:
             self.logger.exception("Error loading kernel parameters from disk")
 
-        return self._build_kernel(
+        kernel = self._build_kernel(
             func=func,
             host_kernel_source=host_kernel_source,
             device_kernel_source=device_kernel_source,
@@ -557,6 +564,17 @@ class KernelCache:
             pass_configs=pass_configs,
             compile_flags=compile_flags,
         )
+
+        # Restore parsed kernel-resource-usage if a previous compile
+        # persisted it; absent file is fine (older caches, non-HIP).
+        ru_path = os.path.join(cache_path, self.resource_usage_path)
+        if kernel is not None and os.path.exists(ru_path):
+            try:
+                kernel._resource_usage = load_from_file(ru_path)
+            except Exception:
+                self.logger.exception("Error loading kernel resource_usage from disk")
+
+        return kernel
 
     def _clear_disk_cache(self):
         """

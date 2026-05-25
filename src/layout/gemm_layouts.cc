@@ -837,6 +837,9 @@ Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
   else if (mat_continuous % (vector_size * 4) == 0)
     return MakeHalfBankSwizzleLayout2D(mat_stride, mat_continuous,
                                        element_size);
+  else if (mat_continuous % (vector_size * 2) == 0)
+    return MakeQuarterBankSwizzleLayout2D(mat_stride, mat_continuous,
+                                          element_size);
   else {
     return makeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
   }

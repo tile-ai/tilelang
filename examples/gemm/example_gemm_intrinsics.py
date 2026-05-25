@@ -23,11 +23,10 @@ def make_swizzle_layout(shared_buf):
     return T.Layout(shape, transform_func)
 
 
-@tilelang.jit(out_idx=[2])
+@tilelang.jit
 def tl_matmul(
-    M,
-    N,
-    K,
+    A,
+    B,
     in_dtype,
     out_dtype,
     accum_dtype,
@@ -63,6 +62,7 @@ def tl_matmul(
     block_N = block_col_warps * warp_col_tiles
     block_K = chunk
 
+    M, N, K = T.const("M, N, K")
     A_shape = (M, K)
     B_shape = (N, K)
     A_shared_shape = (block_M, block_K)
@@ -73,6 +73,10 @@ def tl_matmul(
         micro_size_x,
         micro_size_y,
     )
+
+    A: T.Tensor(A_shape, in_dtype)
+    B: T.Tensor(B_shape, in_dtype)
+    C = T.empty((M, N), out_dtype)
 
     warp_size = 32
     threads = warp_size * (block_row_warps * block_col_warps)
@@ -96,64 +100,58 @@ def tl_matmul(
         chunk=chunk,
     )
 
-    @T.prim_func
-    def gemm_intrinsics(
-        A: T.Tensor(A_shape, in_dtype),
-        B: T.Tensor(B_shape, in_dtype),
-        C: T.Tensor((M, N), out_dtype),
-    ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-            A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
-            B_shared = T.alloc_shared(B_shared_shape, in_dtype, scope=shared_scope)
-            C_shared = T.alloc_shared(C_shared_shape, out_dtype, scope=shared_scope)
-            A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
-            B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
-            C_local = T.alloc_local((warp_rows * warp_cols * local_size_c), accum_dtype)
+    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
+        A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
+        B_shared = T.alloc_shared(B_shared_shape, in_dtype, scope=shared_scope)
+        C_shared = T.alloc_shared(C_shared_shape, out_dtype, scope=shared_scope)
+        A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
+        B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
+        C_local = T.alloc_local((warp_rows * warp_cols * local_size_c), accum_dtype)
 
-            T.annotate_layout(
-                {
-                    A_shared: make_swizzle_layout(A_shared),
-                    B_shared: make_swizzle_layout(B_shared),
-                }
-            )
+        T.annotate_layout(
+            {
+                A_shared: make_swizzle_layout(A_shared),
+                B_shared: make_swizzle_layout(B_shared),
+            }
+        )
 
-            # Improve L2 Cache
-            T.use_swizzle(panel_size=10)
+        # Improve L2 Cache
+        T.use_swizzle(panel_size=10)
 
-            T.clear(C_local)
+        T.clear(C_local)
 
-            for ko in T.Pipelined((K // block_K), num_stages=stage):
-                # Load A into shared memory
-                for i, k in T.Parallel(block_M, block_K):
-                    A_shared[i, k] = A[by * block_M + i, ko * block_K + k]
+        for ko in T.Pipelined((K // block_K), num_stages=stage):
+            # Load A into shared memory
+            for i, k in T.Parallel(block_M, block_K):
+                A_shared[i, k] = A[by * block_M + i, ko * block_K + k]
 
-                # Load B into shared memory
-                for j, k in T.Parallel(block_N, block_K):
-                    B_shared[j, k] = B[bx * block_N + j, ko * block_K + k]
+            # Load B into shared memory
+            for j, k in T.Parallel(block_N, block_K):
+                B_shared[j, k] = B[bx * block_N + j, ko * block_K + k]
 
-                for ki in T.serial(0, (block_K // micro_size_k)):
-                    # Load A into fragment
-                    mma_emitter.ldmatrix_a(A_local, A_shared, ki)
+            for ki in T.serial(0, (block_K // micro_size_k)):
+                # Load A into fragment
+                mma_emitter.ldmatrix_a(A_local, A_shared, ki)
 
-                    # Load B into fragment
-                    mma_emitter.ldmatrix_b(B_local, B_shared, ki)
+                # Load B into fragment
+                mma_emitter.ldmatrix_b(B_local, B_shared, ki)
 
-                    # Perform Matrix Multiplication
-                    mma_emitter.mma(A_local, B_local, C_local)
+                # Perform Matrix Multiplication
+                mma_emitter.mma(A_local, B_local, C_local)
 
-            # Perform STMatrix
-            mma_emitter.stmatrix(C_local, C_shared)
+        # Perform STMatrix
+        mma_emitter.stmatrix(C_local, C_shared)
 
-            # Store shared into global
-            for i, j in T.Parallel(block_M, block_N):
-                C[by * block_M + i, bx * block_N + j] = C_shared[
-                    i // micro_size_x,
-                    j // micro_size_y,
-                    i % micro_size_x,
-                    j % micro_size_y,
-                ]
+        # Store shared into global
+        for i, j in T.Parallel(block_M, block_N):
+            C[by * block_M + i, bx * block_N + j] = C_shared[
+                i // micro_size_x,
+                j // micro_size_y,
+                i % micro_size_x,
+                j % micro_size_y,
+            ]
 
-    return gemm_intrinsics
+    return C
 
 
 def ref_program(A, B):
@@ -162,7 +160,7 @@ def ref_program(A, B):
 
 def main(M=4096, N=4096, K=4096):
     in_dtype, out_dtype, accum_dtype = T.float16, T.float16, T.float32
-    kernel = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
+    kernel = tl_matmul.compile(M=M, N=N, K=K, in_dtype=in_dtype, out_dtype=out_dtype, accum_dtype=accum_dtype)
     src_code = kernel.get_kernel_source()
     # src_code is the generated cuda source
     assert src_code is not None
@@ -181,7 +179,7 @@ def main(M=4096, N=4096, K=4096):
 
 def run_regression_perf(M=4096, N=4096, K=4096):
     in_dtype, out_dtype, accum_dtype = "float16", "float16", "float32"
-    kernel = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
+    kernel = tl_matmul.compile(M=M, N=N, K=K, in_dtype=in_dtype, out_dtype=out_dtype, accum_dtype=accum_dtype)
     profiler = kernel.get_profiler()
     return profiler.do_bench(backend="cupti")
 

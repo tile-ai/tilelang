@@ -22,16 +22,27 @@ def test_cutedsl_save_creates_kernel_py(tmp_path):
         (src_dir / "kernel.cubin").write_bytes(b"fake_cubin")
 
         class FakeLibGen:
+            """Minimal CuTeDSL library generator stub for cache-save tests."""
+
             launcher_libpath = None
 
         class FakeAdapter:
+            """Minimal CuTeDSL adapter stub exposing source accessors."""
+
             libpath = str(src_dir / "kernel.py")
             lib_generator = FakeLibGen()
 
             def get_kernel_source(self, kernel_only=True):
-                return "# src"
+                """Return a fake device source."""
+                return "# device src"
+
+            def get_host_source(self):
+                """Return a fake host wrapper source."""
+                return "# host src"
 
         class FakeKernel:
+            """Minimal JITKernel stub for CuTeDSL autotune cache saving."""
+
             execution_backend = "cutedsl"
             adapter = FakeAdapter()
             kernel_source = "# src"
@@ -49,26 +60,30 @@ def test_cutedsl_save_creates_kernel_py(tmp_path):
 
 
 def _is_cutedsl_available():
+    """Return whether the CuTeDSL stack is usable in the current environment."""
     try:
         from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
 
         check_cutedsl_available()
         return True
-    except (ImportError, AssertionError):
+    except (ImportError, ModuleNotFoundError, RuntimeError, AssertionError):
         return False
 
 
 # Define autotune kernel at module level so closures don't capture module objects
 def _make_vec_add_autotuned():
+    """Create a tiny CuTeDSL autotuned vector-add kernel."""
     from tilelang.autotuner import autotune
 
     @autotune(configs=[{"threads": t} for t in (128, 256)], warmup=3, rep=5)
     @tilelang.jit(out_idx=[-1], target="cutedsl")
     def vec_add(n: int, dtype: str = "float32", threads: int = 128):
+        """Build one vector-add candidate for the autotuner."""
         num_blocks = n // threads
 
         @T.prim_func
         def kernel(a: T.Tensor((n,), dtype), b: T.Tensor((n,), dtype), c: T.Tensor((n,), dtype)):
+            """Add two vectors using one TileLang kernel."""
             with T.Kernel(num_blocks, threads=threads) as bx:
                 for i in T.Parallel(threads):
                     c[bx * threads + i] = a[bx * threads + i] + b[bx * threads + i]

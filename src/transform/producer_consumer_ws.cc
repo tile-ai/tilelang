@@ -730,9 +730,9 @@ TileStmtKind ClassifyStmt(const Stmt &stmt, Target target) {
         if (auto *copy = tile_op.as<CopyNode>()) {
           return ClassifyCopy(copy, target);
         }
-        // Conv2D im2col lowers to tma_load_im2col on Hopper — treat as TMA
+        // Im2Col lowers to tma_load_im2col on Hopper — treat as TMA
         // producer so it goes to the producer warp group.
-        if (tile_op.as<Conv2DIm2ColOpNode>()) {
+        if (tile_op.as<Im2ColOpNode>()) {
           if (TargetIsHopper(target)) {
             return TileStmtKind::kTmaProducer;
           }
@@ -871,14 +871,14 @@ private:
   bool IsMbarPhaseConsumer(const Call &call) const {
     auto tile_op = ParseOperator(call);
     return tile_op.defined() && (tile_op.as<CopyNode>() != nullptr ||
-                                 tile_op.as<Conv2DIm2ColOpNode>() != nullptr ||
+                                 tile_op.as<Im2ColOpNode>() != nullptr ||
                                  tile_op.as<GemmNode>() != nullptr);
   }
 
   PrimExpr phase_expr_;
 };
 
-/// Annotate a tile-op Call (e.g., c2d_im2col) with a barrier reference.
+/// Annotate a tile-op Call (e.g., im2col) with a barrier reference.
 /// The tile-op's Lower() is expected to check for the "barrier" annotation
 /// and use it instead of allocating its own mbarrier.
 static PrimExpr AnnotateTileOpBarrier(const Call &tile_call,
@@ -1067,7 +1067,7 @@ static Optional<Var> ExtractProducerWriteBufferData(const Stmt &stmt) {
       return copy->dst->data;
     }
   }
-  if (const auto *im2col = tile_op.as<Conv2DIm2ColOpNode>()) {
+  if (const auto *im2col = tile_op.as<Im2ColOpNode>()) {
     if (IsSharedBuffer(im2col->dst_)) {
       return im2col->dst_->data;
     }
@@ -1160,7 +1160,7 @@ static Stmt RewritePreludeTmaProducerStmt(const Stmt &stmt,
       PrimExpr rewritten_call;
       if (tile_op.as<CopyNode>()) {
         rewritten_call = RewriteCopyToTmaCopy(call, barrier_buf_, barrier_id_);
-      } else if (tile_op.as<Conv2DIm2ColOpNode>()) {
+      } else if (tile_op.as<Im2ColOpNode>()) {
         rewritten_call = AnnotateTileOpBarrier(call, barrier_buf_, barrier_id_);
       } else {
         return call;
@@ -1715,7 +1715,7 @@ private:
           producer_stmts.push_back(stmt);
         }
         // Convert copy → tma_copy with barrier, or annotate non-copy
-        // TMA tile-ops (e.g. c2d_im2col) with barrier reference.
+        // TMA tile-ops (e.g. im2col) with barrier reference.
         const auto *eval = flat_stmts[i].as<EvaluateNode>();
         ICHECK(eval);
         Call tile_call = Downcast<Call>(eval->value);
@@ -1732,7 +1732,7 @@ private:
         if (tile_op.defined() && tile_op.as<CopyNode>()) {
           tma_call = RewriteCopyToTmaCopy(tile_call, barrier_buf, fwd_id);
         } else {
-          // Non-copy TMA producer (e.g. Conv2DIm2ColOp): annotate with
+          // Non-copy TMA producer (e.g. Im2ColOp): annotate with
           // barrier so Lower() uses the WS barrier instead of its own.
           tma_call = AnnotateTileOpBarrier(tile_call, barrier_buf, fwd_id);
         }
