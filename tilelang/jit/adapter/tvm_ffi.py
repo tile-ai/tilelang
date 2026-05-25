@@ -18,7 +18,7 @@ from tvm import runtime, tirx
 from tvm.target import Target
 from tvm.relax import TensorType
 from tilelang.utils.target import determine_target
-from tilelang.jit.adapter.base import BaseKernelAdapter
+from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.engine.param import KernelParam
 from tilelang.language.dtypes import dtype
@@ -266,8 +266,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         result_idx: list[int],
         target: str,
         func_or_mod: tirx.PrimFunc | tvm.IRModule,
-        host_kernel_source: str,
-        device_kernel_source: str,
+        host_kernel_source: CachedTextSource,
+        device_kernel_source: CachedTextSource,
         kernel_lib_path: str,
         verbose: bool = False,
         pass_configs: dict[str, Any] | None = None,
@@ -276,9 +276,13 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
-        adapter.host_kernel_source = host_kernel_source
-        adapter.device_kernel_source = device_kernel_source
-        adapter.wrapped_source = device_kernel_source + "\n\n" + host_kernel_source
+        adapter._set_cached_text_source("host_kernel_source", "_host_kernel_source_path", host_kernel_source)
+        adapter._set_cached_text_source("device_kernel_source", "_device_kernel_source_path", device_kernel_source)
+        adapter.wrapped_source = (
+            device_kernel_source.text + "\n\n" + host_kernel_source.text
+            if device_kernel_source.text is not None and host_kernel_source.text is not None
+            else None
+        )
         adapter.pass_configs = pass_configs
 
         if isinstance(func_or_mod, tirx.PrimFunc):
@@ -291,29 +295,43 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
 
         adapter.verbose = verbose
         adapter.libpath = kernel_lib_path
-        adapter.kernel_global_source = device_kernel_source
+        adapter.kernel_global_source = device_kernel_source.text
+        adapter.rt_mod = None
         adapter.executable = runtime.load_module(kernel_lib_path)
         adapter._post_init()
         return adapter
 
-    def get_host_source(self):
+    def get_host_source(self) -> str | None:
         """Returns the source code of the host module."""
-        if self.host_kernel_source is not None:
-            return self.host_kernel_source
-        return self.rt_mod.inspect_source()
+        source = self._load_cached_text_source("host_kernel_source", "_host_kernel_source_path")
+        if source is not None:
+            return source
+        rt_mod = getattr(self, "rt_mod", None)
+        if rt_mod is None:
+            return None
+        return rt_mod.inspect_source()
 
-    def get_device_source(self):
+    def get_device_source(self) -> str | None:
         """Returns the source code of the device module."""
-        if self.device_kernel_source is not None:
-            return self.device_kernel_source
-        return self.rt_mod.imports[0].inspect_source()
+        source = self._load_cached_text_source("device_kernel_source", "_device_kernel_source_path")
+        if source is not None:
+            self.kernel_global_source = source
+            return source
+        rt_mod = getattr(self, "rt_mod", None)
+        if rt_mod is None:
+            return None
+        return rt_mod.imports[0].inspect_source()
 
     def get_kernel_source(self, kernel_only: bool = False):
         """Returns the source code of the compiled kernel."""
+        device_source = self.get_device_source() or ""
         if kernel_only:
-            return self.get_device_source()
-        else:
-            return self.get_device_source() + "\n\n" + self.get_host_source()
+            return device_source
+
+        host_source = self.get_host_source() or ""
+        if device_source and host_source:
+            return device_source + "\n\n" + host_source
+        return device_source or host_source
 
     @property
     def prim_func(self) -> tirx.PrimFunc:

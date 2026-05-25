@@ -13,7 +13,7 @@ from tilelang.engine.param import KernelParam
 from tvm import tirx
 from tvm.relax import TensorType
 
-from tilelang.jit.adapter.base import BaseKernelAdapter
+from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.jit.adapter.utils import is_cuda_target, is_hip_target, is_cpu_target, is_metal_target
@@ -156,8 +156,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
         result_idx: list[int],
         target: str,
         func_or_mod: tirx.PrimFunc | tvm.IRModule,
-        host_kernel_source: str,
-        device_kernel_source: str,
+        host_kernel_source: CachedTextSource,
+        device_kernel_source: CachedTextSource,
         kernel_lib_path: str,
         verbose: bool = False,
         pass_configs: dict[str, Any] | None = None,
@@ -166,9 +166,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
-        adapter.host_kernel_source = host_kernel_source
-        adapter.device_kernel_source = device_kernel_source
-        adapter.kernel_global_source = device_kernel_source  # Set alias for compatibility
+        adapter._set_cached_text_source("host_kernel_source", "_host_kernel_source_path", host_kernel_source)
+        adapter._set_cached_text_source("device_kernel_source", "_device_kernel_source_path", device_kernel_source)
+        adapter.kernel_global_source = device_kernel_source.text  # Set alias for compatibility
         adapter.pass_configs = pass_configs
 
         if isinstance(func_or_mod, tirx.PrimFunc):
@@ -387,12 +387,16 @@ class CythonKernelAdapter(BaseKernelAdapter):
     def get_kernel_source(self, kernel_only: bool = False):
         """Returns the source code of the compiled kernel."""
         if kernel_only:
-            return self.device_kernel_source
+            source = self._load_cached_text_source("device_kernel_source", "_device_kernel_source_path")
+            if source is not None:
+                self.kernel_global_source = source
+            return source
         else:
             # Wrapper only has host kernel source
-            assert self.host_kernel_source is not None, "Wrapped source is not available"
-            return self.host_kernel_source
+            source = self._load_cached_text_source("host_kernel_source", "_host_kernel_source_path")
+            assert source is not None, "Wrapped source is not available"
+            return source
 
     def get_host_source(self):
         """Returns the source code of the host function."""
-        return self.host_kernel_source
+        return self._load_cached_text_source("host_kernel_source", "_host_kernel_source_path")
