@@ -139,6 +139,21 @@ bool GetNoImplicitAsyncCommitWait(const CopyNode &op) {
   return GetBoolAnnotation(op, attr::kAsyncCopyNoImplicitCommitWait);
 }
 
+PrimExpr GetLeaderScopeThreads(const CopyNode &op, const LowerArgs &T) {
+  if (auto val = op.annotations.Get("leader_scope_threads")) {
+    auto int_val = val->as<IntImmNode>();
+    ICHECK(int_val) << "T.tma_copy leader_scope_threads annotation must be an "
+                       "integer constant.";
+    ICHECK_GT(int_val->value, 0)
+        << "T.tma_copy leader_scope_threads must be positive.";
+    ICHECK_EQ(int_val->value % 32, 0)
+        << "T.tma_copy leader_scope_threads must be a multiple of warp size "
+           "(32).";
+    return IntImm(DataType::Int(32), int_val->value);
+  }
+  return T.thread_bounds->extent;
+}
+
 bool IsContiguousRegion(const Buffer &buf, const Array<Range> &ranges,
                         arith::Analyzer *analyzer) {
   ICHECK_EQ(buf->shape.size(), ranges.size())
@@ -1736,8 +1751,9 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
       producer_seq.push_back(barrier_after_tma_stmt.value());
     }
 
-    Stmt producer = IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
-                               SeqStmt(producer_seq));
+    Stmt producer =
+        IfThenElse(MakeTmaLeaderCondition(GetLeaderScopeThreads(op, T)),
+                   SeqStmt(producer_seq));
 
     if (GetIsTmaCopy(op)) {
       return producer;
@@ -1750,8 +1766,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     return SeqStmt({producer, wait_stmt});
   }
 
-  tma_copy =
-      IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent), tma_copy);
+  tma_copy = IfThenElse(MakeTmaLeaderCondition(GetLeaderScopeThreads(op, T)),
+                        tma_copy);
 
   return tma_copy;
 }
@@ -2040,8 +2056,9 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
       producer_seq.push_back(barrier_after_tma_stmt.value());
     }
 
-    Stmt producer = IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
-                               SeqStmt(producer_seq));
+    Stmt producer =
+        IfThenElse(MakeTmaLeaderCondition(GetLeaderScopeThreads(op, T)),
+                   SeqStmt(producer_seq));
 
     if (GetIsTmaCopy(op)) {
       return producer;
@@ -2054,8 +2071,8 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
     return SeqStmt({producer, wait_stmt});
   }
 
-  tma_copy =
-      IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent), tma_copy);
+  tma_copy = IfThenElse(MakeTmaLeaderCondition(GetLeaderScopeThreads(op, T)),
+                        tma_copy);
   return tma_copy;
 }
 

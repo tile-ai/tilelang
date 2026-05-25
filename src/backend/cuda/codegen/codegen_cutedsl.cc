@@ -1218,6 +1218,10 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     ICHECK_EQ(load->indices.size(), 1)
         << "CodeGenTileLangCuTeDSL only supports flat memory";
     os << GetBufferPtr_(load->buffer.get(), load->indices[0]);
+  } else if (op->op.same_as(builtin::handle_add_byte_offset())) {
+    ICHECK_EQ(op->args.size(), 2U);
+    os << "tl.handle_add_byte_offset(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ")";
   } else if (op->op.same_as(tl::atomic_add_elem_op())) {
     // atomic_add_elem_op(dst_ptr, src_value[, memory_order])
     std::string dst_ptr = PrintExpr_(op->args[0]);

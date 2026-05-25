@@ -20,6 +20,7 @@ __all__ = [
     "bitcast",
     "make_filled_tensor",
     "make_tensor_at_offset",
+    "handle_add_byte_offset",
     "shuffle_elect",
     "sync_thread_partial",
     "pack_half2",
@@ -110,6 +111,12 @@ def make_tensor_at_offset(ptr: cute.Pointer, offset, shape, div_by=1):
     if div_by != 1:
         offset = cute.assume(cutlass.as_numeric(offset), divby=div_by)
     return cute.make_tensor(ptr + offset, shape)
+
+
+def handle_add_byte_offset(handle, byte_offset):
+    ptr = handle.iterator if hasattr(handle, "iterator") else handle
+    byte_ptr = cute.recast_ptr(ptr, dtype=cutlass.Uint8)
+    return make_tensor_at_offset(byte_ptr, byte_offset, (1,))
 
 
 def shuffle_elect(thread_extent):

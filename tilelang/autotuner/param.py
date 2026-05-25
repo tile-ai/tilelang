@@ -13,6 +13,7 @@ from pathlib import Path
 import errno
 
 from tilelang.jit import JITKernel
+from tilelang.jit.adapter.base import CachedTextSource
 import cloudpickle
 import os
 import shutil
@@ -367,8 +368,8 @@ class AutotuneResult:
         if host_kernel_source and device_kernel_source and kernel_params:
             return JITKernel.from_database(
                 func=func,
-                host_kernel_source=host_kernel_source,
-                device_kernel_source=device_kernel_source,
+                host_kernel_source=CachedTextSource(text=host_kernel_source),
+                device_kernel_source=CachedTextSource(text=device_kernel_source),
                 kernel_lib_path=kernel_lib_path,
                 params=kernel_params,
                 target=target,

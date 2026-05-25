@@ -254,6 +254,7 @@ std::string CodeGenTileLangHIP::Finish() {
   decl_stream << "#include <tl_templates/hip/gemm.h>\n";
   decl_stream << "#include <tl_templates/hip/copy.h>\n";
   decl_stream << "#include <tl_templates/hip/reduce.h>\n";
+  decl_stream << "#include <tl_templates/hip/scan.h>\n";
   decl_stream << "#include <tl_templates/hip/ldsm.h>\n";
   decl_stream << "#include <tl_templates/hip/threadblock_swizzle.h>\n";
   decl_stream << "#include <tl_templates/hip/debug.h>\n";

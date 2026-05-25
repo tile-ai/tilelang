@@ -60,7 +60,7 @@ if(MSVC)
   #     flags injected by CMake/TVM (e.g. /FS, /Zc:preprocessor, /MP).
   #   * -fdelayed-template-parsing: TVM headers declare std::vector<T>
   #     members where T is only forward-declared at that point (e.g.
-  #     std::vector<tvm::tir::Stmt> in src/transform/arg_binder.h). cl.exe
+  #     std::vector<tvm::tir::Stmt> in src/transform/tvm_ffi_binder.h). cl.exe
   #     defers template parsing by default so the late stmt.h include in
   #     the .cc file resolves T before instantiation; modern clang parses
   #     templates eagerly and emits "incomplete type" errors. Re-enabling
