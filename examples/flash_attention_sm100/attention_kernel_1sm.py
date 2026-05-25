@@ -1146,6 +1146,7 @@ def attention_kernel_1sm(
                 batch,
                 threads=kq2_threads,
             ) as (bx, by, bz):
+                T.annotate_min_blocks_per_sm(0)
                 Q0_shared = T.alloc_shared([kq2_block_M, dim], dtype)
                 Q1_shared = T.alloc_shared([kq2_block_M, dim], dtype)
                 K_shared_0 = T.alloc_shared([block_N, dim], dtype)
@@ -1246,7 +1247,19 @@ def attention_kernel_1sm(
                     else T.ceildiv(seq_len, block_N)
                 )
 
-                # No setmaxnreg yet — first get correctness.
+                # Avo-style register donation for the 4-role split:
+                #   warps 0-7   softmax    184 regs
+                #   warps 8-11  correction  64 regs
+                #   warps 12-15 mma/prod/epi/idle 80 regs
+                # The `tl.min_blocks_per_sm=0` annotation above emits
+                # __launch_bounds__(512, 0), allowing ptxas to size around the
+                # per-role setmaxnreg requests instead of the 64K/512 average.
+                if tid < 256:
+                    T.set_max_nreg(184, 1)
+                elif tid < 384:
+                    T.set_max_nreg(64, 0)
+                else:
+                    T.set_max_nreg(80, 0)
 
                 for k in T.serial(loop_range):
                     # ============================================================
@@ -1352,24 +1365,13 @@ def attention_kernel_1sm(
                         if k == 0:
                             T.mbarrier_wait_parity(mbar_q0_load, 0)
                             T.mbarrier_wait_parity(mbar_q1_load, 0)
-
-                        T.mbarrier_wait_parity(mbar_k_load[stage], (k >> 1) & 1)
-                        if stage == 0:
+                            T.mbarrier_wait_parity(mbar_k_load[0], 0)
                             T.tcgen05_gemm(
                                 Q0_shared, K_shared_0, S0_tmem,
                                 transpose_B=True, mbar=mbar_s0, clear_accum=True,
                             )
                             T.tcgen05_gemm(
                                 Q1_shared, K_shared_0, S1_tmem,
-                                transpose_B=True, mbar=mbar_s1, clear_accum=True,
-                            )
-                        else:
-                            T.tcgen05_gemm(
-                                Q0_shared, K_shared_1, S0_tmem,
-                                transpose_B=True, mbar=mbar_s0, clear_accum=True,
-                            )
-                            T.tcgen05_gemm(
-                                Q1_shared, K_shared_1, S1_tmem,
                                 transpose_B=True, mbar=mbar_s1, clear_accum=True,
                             )
 
@@ -1415,6 +1417,31 @@ def attention_kernel_1sm(
                                 T.if_then_else(k == 0, 0, 1),
                             )
                         T.tcgen05_commit_1sm(mbar_pv)
+
+                        if k + 1 < loop_range:
+                            next_stage = (k + 1) & 1
+                            T.mbarrier_wait_parity(
+                                mbar_k_load[next_stage],
+                                ((k + 1) >> 1) & 1,
+                            )
+                            if next_stage == 0:
+                                T.tcgen05_gemm(
+                                    Q0_shared, K_shared_0, S0_tmem,
+                                    transpose_B=True, mbar=mbar_s0, clear_accum=True,
+                                )
+                                T.tcgen05_gemm(
+                                    Q1_shared, K_shared_0, S1_tmem,
+                                    transpose_B=True, mbar=mbar_s1, clear_accum=True,
+                                )
+                            else:
+                                T.tcgen05_gemm(
+                                    Q0_shared, K_shared_1, S0_tmem,
+                                    transpose_B=True, mbar=mbar_s0, clear_accum=True,
+                                )
+                                T.tcgen05_gemm(
+                                    Q1_shared, K_shared_1, S1_tmem,
+                                    transpose_B=True, mbar=mbar_s1, clear_accum=True,
+                                )
 
                     # ============================================================
                     # Correction WG  --  tid in [256, 384)
@@ -1842,6 +1869,7 @@ def main():
         "--split_correction", action="store_true",
         help="4-role variant of kq_stages=2 (correction WG separate from mma_load).",
     )
+    ap.add_argument("--print_source", action="store_true")
     args = ap.parse_args()
 
     torch.manual_seed(0)
@@ -1863,7 +1891,8 @@ def main():
         kq_stages=args.kq_stages,
         split_correction=args.split_correction,
     )
-    print(fn.get_kernel_source())
+    if args.print_source:
+        print(fn.get_kernel_source())
     
     O = fn(Q, K, V)
     O_ref = reference_attention(Q, K, V, is_causal=args.causal)
