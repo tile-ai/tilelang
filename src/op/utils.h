@@ -114,6 +114,31 @@ inline bool IsLocalVarBuffer(const Buffer &buffer) {
   return buffer.defined() && buffer.scope() == "local.var";
 }
 
+// True when global packed FP4 is copied into f8f6f4/mxf8f6f4 unpacked FP4 SMEM.
+inline bool IsFP4PackedToUnpackedStorageCopy(DataType global_dtype,
+                                             DataType shared_dtype) {
+  return global_dtype.is_float4_e2m1fn() &&
+         shared_dtype.is_float4_e2m1_unpacked();
+}
+
+// Valid dtype pairs for TMA global<->shared copies.
+inline bool IsValidTMACopyDtypePair(DataType global_dtype,
+                                    DataType shared_dtype) {
+  if (global_dtype == shared_dtype) {
+    return true;
+  }
+  return IsFP4PackedToUnpackedStorageCopy(global_dtype, shared_dtype);
+}
+
+// True for packed<->unpacked FP4 storage transitions (either direction).
+inline bool IsFP4StorageCrossCopy(DataType src_dtype, DataType dst_dtype) {
+  if (src_dtype == dst_dtype) {
+    return false;
+  }
+  return IsFP4PackedToUnpackedStorageCopy(src_dtype, dst_dtype) ||
+         IsFP4PackedToUnpackedStorageCopy(dst_dtype, src_dtype);
+}
+
 } // namespace tl
 } // namespace tvm
 

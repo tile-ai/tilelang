@@ -76,13 +76,11 @@ int64_t TMABytesFromElements(int64_t elements, DataType dtype) {
 }
 
 PrimExpr TMATransactionBytesFromElements(PrimExpr elements, DataType dtype) {
-  return TMABytesFromElements(elements, dtype,
-                              TMATransactionElementBits(dtype));
+  return TMABytesFromElements(elements, dtype, TMATransactionElementBits(dtype));
 }
 
 int64_t TMATransactionBytesFromElements(int64_t elements, DataType dtype) {
-  return TMABytesFromElements(elements, dtype,
-                              TMATransactionElementBits(dtype));
+  return TMABytesFromElements(elements, dtype, TMATransactionElementBits(dtype));
 }
 
 int64_t TMAElementsForBytes(int64_t bytes, DataType dtype) {
@@ -136,6 +134,18 @@ bool GetDisableTMA(const CopyNode &op) {
 
 bool GetIsTmaCopy(const CopyNode &op) {
   return GetBoolAnnotation(op, "is_tma_copy");
+}
+
+int TensorMapDataTypeForTMA(DataType global_dtype, DataType shared_dtype) {
+  // 16U4_ALIGN16B: f8f6f4 / mxf8f6f4 unpacked FP4 SMEM (float_e2m1_unpacksmem_t).
+  // 16U4_ALIGN8B: packed FP4 for mxf4 / mxf4nvf4 (float_e2m1_t).
+  constexpr int kTensorMapDataType16U4Align16B = 14;
+  if (shared_dtype.is_float4_e2m1_unpacked()) {
+    ICHECK(global_dtype.is_float4_e2m1fn())
+        << "FP4 packed global tensor required for unpacked shared TMA copy";
+    return kTensorMapDataType16U4Align16B;
+  }
+  return to_CUtensorMapDataType(global_dtype);
 }
 
 int GetEvictionPolicy(const CopyNode &op) {
@@ -1405,12 +1415,12 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   desc.rank = global_tensor->shape.size();
   ICHECK(desc.rank >= 1 && desc.rank <= 5) << desc.rank;
 
-  ICHECK(global_tensor->dtype == shared_tensor->dtype)
+  ICHECK(IsValidTMACopyDtypePair(global_tensor->dtype, shared_tensor->dtype))
       << "Copy between buffer " << global_tensor->name << " and "
-      << shared_tensor->name << " with different data type "
+      << shared_tensor->name << " with incompatible data type "
       << global_tensor->dtype << " and " << shared_tensor->dtype;
 
-  desc.data_type = to_CUtensorMapDataType(global_tensor->dtype);
+  desc.data_type = TensorMapDataTypeForTMA(global_tensor->dtype, shared_tensor->dtype);
   desc.global_addr = global_tensor->data;
   desc.global_shape = ReverseArray(global_tensor->shape);
   Array<PrimExpr> global_coords =
@@ -1526,10 +1536,11 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     return fallback_to_normal("non-constant inner box dimension");
   }
   int instruction_dim = *inner_box_dim;
+  DataType smem_elem_dtype = shared_tensor->dtype;
   if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
-    instruction_dim = TMAElementsForBytes(64, src->dtype);
+    instruction_dim = TMAElementsForBytes(64, smem_elem_dtype);
   } else if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B)) {
-    instruction_dim = TMAElementsForBytes(128, src->dtype);
+    instruction_dim = TMAElementsForBytes(128, smem_elem_dtype);
   }
   if (instruction_dim > 256) {
     ICHECK((*inner_box_dim) % 256 == 0)
@@ -1708,8 +1719,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     PrimExpr total_bytes;
     if ((*inner_box_dim) != instruction_dim) {
       int loop_extent = (*inner_box_dim) / instruction_dim;
-      total_bytes = TMATransactionBytesFromElements(
-          total_elements * loop_extent, shared_tensor->dtype);
+      total_bytes = TMATransactionBytesFromElements(total_elements * loop_extent,
+                                                    shared_tensor->dtype);
     } else {
       total_bytes =
           TMATransactionBytesFromElements(total_elements, shared_tensor->dtype);

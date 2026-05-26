@@ -261,7 +261,7 @@ def tma_copy(
             The TMA load will arrive at this barrier with expected byte count.
             The user must wait on the same barrier via T.mbarrier_wait_parity().
         leader_scope_threads: Number of threads in each TMA leader-election scope
-            (e.g., 32 for per-warp). Defaults to the full block size if not specified.
+            (e.g., 32 for per-warp). Defaults to the thread extend in the current context if not specified.
         eviction_policy: Cache eviction policy. Defaults to None.
         annotations: Additional annotations dict. Values in annotations take
             precedence over individual arguments.

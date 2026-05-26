@@ -204,9 +204,9 @@ bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
     return false;
   }
 
-  if (op.src->dtype != op.dst->dtype) {
+  if (!IsValidTMACopyDtypePair(op.src->dtype, op.dst->dtype)) {
     if (emit_diagnostics) {
-      DLOG(WARNING) << "src and dst must have the same dtype for tma load "
+      DLOG(WARNING) << "src and dst must have compatible dtypes for tma load "
                     << op.src->name << " vs. " << op.dst->name << " dtype "
                     << op.src->dtype << " vs. " << op.dst->dtype
                     << " will be fallback to normal copy";
@@ -242,9 +242,9 @@ bool CheckBulkStore(const CopyNode &op, Target target,
     }
     return false;
   }
-  if (op.src->dtype != op.dst->dtype) {
+  if (!IsValidTMACopyDtypePair(op.dst->dtype, op.src->dtype)) {
     if (emit_diagnostics) {
-      DLOG(WARNING) << "src and dst must have the same dtype for tma store "
+      DLOG(WARNING) << "src and dst must have compatible dtypes for tma store "
                     << op.src->name << " vs. " << op.dst->name << " dtype "
                     << op.src->dtype << " vs. " << op.dst->dtype
                     << " will be fallback to normal copy";
