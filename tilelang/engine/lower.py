@@ -15,6 +15,7 @@ from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, CUTLASS_INCLUDE_DIR, TIL
 from tilelang.transform import PassConfigKey
 from tilelang.transform.metal import MarkHostMetalContext
 from tilelang.engine.param import KernelParam, CompiledArtifact
+from tilelang.engine.pass_pipeline import PreLowerSemanticCheck
 from tilelang.utils.target import determine_target, target_get_mcpu
 from tilelang.backend.pipeline import resolve_pipeline
 
@@ -293,17 +294,11 @@ def lower_to_host_device_ir(
     _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))
     _is_device_call = get_device_call(is_device_c=is_cpu_device_backend(target))
 
-    # Resolve the compilation pipeline for the target backend
+    # Run backend-independent semantic checks before target-specific lowering.
+    PreLowerSemanticCheck(mod)
+
     pipeline = resolve_pipeline(target)
-
-    # Before lowering, do semantic check
-    pipeline.pre_lower_semantic_check(mod)
-
-    # Phase 1: Lower and legalize the IR
-    mod = pipeline.lower_and_legalize(mod, target)
-
-    # Phase 2: Optimize the IR for the target
-    mod = pipeline.optimize_for_target(mod, target)
+    mod = pipeline.lower(mod, target)
 
     host_mod = tirx.transform.Filter(_is_host_call)(mod)
     device_mod = tirx.transform.Filter(_is_device_call)(mod)

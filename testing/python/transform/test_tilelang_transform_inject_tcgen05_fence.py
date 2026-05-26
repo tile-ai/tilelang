@@ -2,7 +2,7 @@
 from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
-from tilelang.engine.phase import LowerAndLegalize
+from testing.python.transform._transform_testing_pipeline import lower_cuda_until_tileop
 from tvm import tirx
 
 
@@ -118,7 +118,7 @@ def test_lower_tmem_copy_uses_tcgen05_ld_intrin():
 
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     with sm100_target:
-        mod = LowerAndLegalize(mod, sm100_target)
+        mod = lower_cuda_until_tileop(mod, sm100_target)
         mod = tl.transform.LowerSharedTmem()(mod)
 
     body = mod["main"].body
@@ -166,7 +166,7 @@ def test_lower_tmem_copy_uses_tcgen05_st_intrin():
 
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     with sm100_target:
-        mod = LowerAndLegalize(mod, sm100_target)
+        mod = lower_cuda_until_tileop(mod, sm100_target)
         mod = tl.transform.LowerSharedTmem()(mod)
 
     body = mod["main"].body
