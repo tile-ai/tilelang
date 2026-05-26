@@ -7,6 +7,7 @@ T.all_sync          – __all_sync  / __all  (HIP)
 T.ballot_sync       – __ballot_sync→uint64 (CUDA, zero-ext) / __ballot uint64 (HIP, all lanes)
 T.ballot            – full-warp ballot_sync / __ballot uint64 (HIP, all lanes)
 T.activemask        – __activemask→uint64 (CUDA, zero-ext) / __ballot(1) uint64 (HIP, all lanes)
+T.__ffs             – __ffs / __ffsll (CUDA)
 T.syncthreads_count – __syncthreads_count
 T.syncthreads_and   – __syncthreads_and
 T.syncthreads_or    – __syncthreads_or
@@ -147,6 +148,38 @@ def test_ballot():
     # upper 32 bits are 0 on CUDA (32-wide warp).
     assert (int(b[0]) & 0xFFFFFFFF) == 0xFFFFFFFF, f"Expected lower 32 bits all set, got {int(b[0]):#018x}"
     assert (int(b[0]) >> 32) == 0, f"Expected upper 32 bits zero on CUDA, got {int(b[0]):#018x}"
+
+
+# ---------------------------------------------------------------------------
+# __ffs
+# ---------------------------------------------------------------------------
+
+
+@tilelang.jit
+def kernel_ffs_ballot_sync():
+    """Find the first lane whose ballot predicate is true."""
+
+    @T.prim_func
+    def main(
+        B: T.Tensor((32,), "int32"),
+    ):
+        with T.Kernel(1, threads=32):
+            tx = T.get_thread_binding()
+            mask = T.ballot_sync(tx >= 7)
+            B[tx] = T.__ffs(mask) - 1
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+def test_ffs_ballot_sync():
+    b = torch.zeros((32,), device="cuda", dtype=torch.int32)
+    kernel = kernel_ffs_ballot_sync()
+    src = kernel.get_kernel_source()
+    assert "__ballot_sync" in src, f"Expected __ballot_sync in source:\n{src}"
+    assert "__ffsll" in src, f"Expected __ffsll for uint64 ballot mask in source:\n{src}"
+    kernel(b)
+    assert torch.all(b == 7), f"Expected all lanes to find lane 7, got {b}"
 
 
 # ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@ level, how they map to hardware concepts, and how to use them correctly.
 ## Quick Categories
 - Data movement: `T.copy`, `T.async_copy`, `T.tma_copy`, `T.c2d_im2col`, staging Global ↔ Shared ↔ Fragment
 - Compute primitives: `T.gemm`/`T.gemm_sp`, elementwise math (`T.exp`, `T.max`),
-  reductions (`T.reduce_sum`, `T.cumsum`, warp reducers)
+  reductions and scans (`T.reduce_sum`, `T.cumsum`, `T.cummax`, warp reducers)
 - Control helpers: `T.clear`/`T.fill`, `T.reshape`/`T.view`
 - Diagnostics: `T.print`, `T.device_assert`
 - Advanced: atomics, memory barriers, warp‑group ops
@@ -89,7 +89,7 @@ GEMM and sparse GEMM
 - `T.gemm_sp(...)`: 2:4 sparse tensor core variant (see examples and README).
 
 Reductions and scans
-- `T.reduce_sum`, `T.reduce_max`, `T.reduce_min`, `T.cumsum`, plus warp
+- `T.reduce_sum`, `T.reduce_max`, `T.reduce_min`, `T.cumsum`, `T.cummax`, plus warp
   reducers (`T.warp_reduce_sum`, etc.).
 - Allocate and initialize accumulators via `T.alloc_fragment` + `T.clear` or
   `T.fill`.
@@ -166,7 +166,7 @@ Compute primitives
 - `T.gemm(A_s, B_s, C_f)`: Tile GEMM into fragment accumulator.
 - `T.gemm_sp(...)`: Sparse (2:4) tensor core GEMM.
 - Reductions: `T.reduce_sum/max/min/abssum/absmax`, bitwise `and/or/xor`.
-- Scans: `T.cumsum`, finalize: `T.finalize_reducer`.
+- Scans: `T.cumsum`, `T.cummax`, finalize: `T.finalize_reducer`.
 - Warp reducers: `T.warp_reduce_sum/max/min/bitand/bitor`.
 - Elementwise math: TIR ops (`T.exp`, `T.log`, `T.max`, `T.min`, `T.rsqrt`, ...).
 - Fast math: `T.__log/__log2/__log10/__exp/__exp2/__exp10/__sin/__cos/__tan`.
