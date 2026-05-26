@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tvm import IRModule, tir
+from tvm import IRModule, s_tir, tirx
 from tvm.target import Target
 
 import tilelang
@@ -16,7 +16,7 @@ from tilelang.engine.pass_pipeline import (
 
 
 def lower_amd(mod: IRModule, target: Target) -> IRModule:
-    mod = tir.transform.BindTarget(target)(mod)
+    mod = tirx.transform.BindTarget(target)(mod)
 
     if should_force_let_inline():
         mod = tilelang.transform.LetInline()(mod)
@@ -49,21 +49,21 @@ def lower_amd(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.HoistGlobalBufferAllocations()(mod)
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tilelang.transform.Simplify()(mod)
-    mod = tir.transform.NarrowDataType(32)(mod)
+    mod = tirx.transform.NarrowDataType(32)(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
     mod = tilelang.transform.ConfigIndexBitwidth()(mod)
-    mod = tir.transform.Simplify()(mod)
+    mod = tirx.transform.Simplify()(mod)
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
     mod = tilelang.transform.StorageRewrite()(mod)
     mod = tilelang.transform.LoopUnswitching()(mod)
     mod = tilelang.transform.UnrollLoop()(mod)
-    mod = tir.transform.RenormalizeSplitPattern()(mod)
-    mod = tir.transform.Simplify()(mod)
-    mod = tir.transform.RemoveNoOp()(mod)
-    mod = tir.transform.HoistIfThenElse()(mod)
-    mod = tir.transform.VerifyMemory()(mod)
-    mod = tir.transform.AnnotateEntryFunc()(mod)
-    mod = tir.transform.InferFragment()(mod)
+    mod = s_tir.transform.RenormalizeSplitPattern()(mod)
+    mod = tirx.transform.Simplify()(mod)
+    mod = tirx.transform.RemoveNoOp()(mod)
+    mod = s_tir.transform.HoistIfThenElse()(mod)
+    mod = tirx.transform.VerifyMemory()(mod)
+    mod = tirx.transform.AnnotateEntryFunc()(mod)
+    mod = s_tir.transform.InferFragment()(mod)
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
     mod = tilelang.transform.LowerLDGSTG()(mod)
     if allow_global_thread_synchronization():

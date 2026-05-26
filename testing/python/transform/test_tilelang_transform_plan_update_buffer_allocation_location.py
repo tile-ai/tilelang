@@ -2,7 +2,7 @@ import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
-from testing.python.transform._transform_testing_pipeline import lower_cuda_until_tileop
+from testing.python.transform._transform_testing_utils import lower_cuda_until_tileop
 
 
 def _apply_plan_update(func: tvm.tirx.PrimFunc) -> tvm.IRModule:

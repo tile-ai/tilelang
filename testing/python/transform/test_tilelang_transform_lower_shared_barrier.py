@@ -4,7 +4,7 @@ import tilelang as tl
 from tilelang.utils.target import determine_target
 import tilelang.language as T
 import tilelang.testing
-from testing.python.transform._transform_testing_pipeline import lower_cuda_until_tileop
+from testing.python.transform._transform_testing_utils import lower_cuda_until_tileop
 from tvm import tirx
 
 auto_target = tvm.target.Target(determine_target("auto"))

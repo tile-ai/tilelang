@@ -2,7 +2,7 @@
 from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
-from testing.python.transform._transform_testing_pipeline import lower_cuda_until_tileop
+from testing.python.transform._transform_testing_utils import lower_cuda_until_tileop
 from tvm import tirx
 
 

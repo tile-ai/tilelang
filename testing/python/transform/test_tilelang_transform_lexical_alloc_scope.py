@@ -12,7 +12,7 @@ Verifies that:
 import tilelang as tl
 import tilelang.language as T
 from tilelang import tvm
-from testing.python.transform._transform_testing_pipeline import lower_cuda_until_tileop
+from testing.python.transform._transform_testing_utils import lower_cuda_until_tileop
 from tvm.tirx.stmt_functor import post_order_visit
 import tilelang.testing
 
