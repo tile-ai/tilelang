@@ -22,7 +22,6 @@
  */
 #include "../op/builtin.h"
 #include "./common/constr_visitor.h"
-#include "./common/shared_access_analysis.h"
 #include "./common/thread_sync_types.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "common/attr.h"
@@ -566,22 +565,64 @@ private:
 
 struct TileLangThreadSyncPlanner : public ConstrVisitor {
   explicit TileLangThreadSyncPlanner(StorageScope sync_scope,
-                                     int warp_size = 32,
-                                     bool debug_summary = false)
-      : sync_scope_(std::move(sync_scope)), warp_size_(warp_size),
-        debug_summary_(debug_summary) {
+                                     int warp_size = 32)
+      : sync_scope_(std::move(sync_scope)), warp_size_(warp_size) {
     scope_.push_back(std::vector<StmtEntry>());
   }
 
-  using AccessEntry = shared_access_analysis::AccessEntry;
-  using AccessType = shared_access_analysis::AccessType;
-  static constexpr AccessType kRead = shared_access_analysis::kRead;
-  static constexpr AccessType kWrite = shared_access_analysis::kWrite;
-  static constexpr AccessType kSync = shared_access_analysis::kSync;
-  static constexpr AccessType kAlloc = shared_access_analysis::kAlloc;
-  static constexpr AccessType kReadAcquire =
-      shared_access_analysis::kReadAcquire;
-  using StmtEntry = shared_access_analysis::StmtEntry;
+  /*! \brief Storage access type */
+  enum AccessType : uint8_t {
+    kRead,
+    kWrite,
+    kSync,
+    kAlloc,
+    // acquired version of read, only need to handle WAR dep.
+    kReadAcquire
+  };
+  /*! \brief An access entry */
+  struct AccessEntry {
+    /*! \brief The thread index that access this entry */
+    Array<IterVar> threads;
+    /*! \brief The buffer variable, if any */
+    Array<PrimExpr> buffer_indices;
+    ConstrSet cset;
+    /*! \brief The buffer ranges for pointer access */
+    Array<Range> buffer_ranges;
+    Var buffer = NullValue<Var>();
+    Buffer buffer_name;
+    /*! \brief The access data type */
+    DataType dtype;
+    /*! \brief The touched access range
+     *
+     * Has one IntSet for each index in the buffer being accessed.
+     */
+    Array<arith::IntSet> touched;
+    /*! \brief The type of access */
+    AccessType type;
+    /*! \brief The storage scope */
+    StorageScope scope;
+    /*! \brief Whether the access is pointer access */
+    bool is_pointer_access = false;
+    /*! \brief Whether this access originates from an async copy context
+     *         (e.g., inside a TMA load) and therefore multiple writes
+     *         among themselves should not force barriers between them. */
+    bool is_async_copy = false;
+    /*! \brief Whether this access is part of an atomic RMW (e.g., atomic_add).
+     *
+     * If both sides of a dependency are atomic, we should not insert a thread
+     * barrier between them. A barrier would artificially serialize atomics
+     * across threads (and can even change observable results for atomics with
+     * return values).
+     */
+    bool is_atomic = false;
+  };
+  /*! \brief Access pattern about a single statement */
+  struct StmtEntry {
+    /*! \brief The statement */
+    const Object *stmt{};
+    /*! \brief access patterns in the statement */
+    std::vector<AccessEntry> access;
+  };
   // access scope
   std::vector<std::vector<StmtEntry>> scope_;
   std::unordered_map<const VarNode *, PrimExpr>
@@ -1155,27 +1196,189 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
 
   std::vector<AccessEntry> Summarize(std::vector<StmtEntry> seq,
                                      const ForNode *loop) {
-    std::vector<StmtEntry> debug_seq;
-    shared_access_analysis::SequenceSummaryResult debug_result;
-    if (debug_summary_) {
-      debug_seq = seq;
-      debug_result = shared_access_analysis::SummarizeAccessSequence(
-          debug_seq, loop, sync_scope_, this->env_threads(),
-          ConstrSet{.constrs_ = constr_stack_}, syncs_inserted_,
-          /*coalesce_dynamic_shared_buffers=*/false);
+    // Redirect all "shared.dyn" buffer access to the same buffer var
+    // so that the accesses can be planned together.
+    Var shared_dyn_buf;
+    for (StmtEntry &entry : seq) {
+      for (AccessEntry &access : entry.access) {
+        if (access.scope.rank == StorageRank::kShared &&
+            access.scope.tag == ".dyn" && access.buffer.defined()) {
+          if (!shared_dyn_buf.defined()) {
+            shared_dyn_buf = access.buffer;
+          } else {
+            access.buffer = shared_dyn_buf;
+          }
+        }
+      }
     }
 
-    auto result = shared_access_analysis::SummarizeAccessSequence(
-        std::move(seq), loop, sync_scope_, this->env_threads(),
-        ConstrSet{.constrs_ = constr_stack_}, syncs_inserted_,
-        /*coalesce_dynamic_shared_buffers=*/true);
-    if (debug_summary_) {
-      LogSummary(debug_seq, debug_result, result, loop);
+    // Unsynced reads and writes
+    std::vector<AccessEntry> reads;
+    std::vector<AccessEntry> writes;
+    // if it is a loop, rotate two times to consider effect of loop.
+    // simulation based approach to find dependencies
+    for (size_t i = 0; i < seq.size(); ++i) {
+      const StmtEntry &s = seq[i];
+      // check if sync before statement is needed.
+      bool sync_before_stmt = (syncs_inserted_.count(s.stmt) != 0);
+      // Apply the syncs added already.
+
+      if (sync_before_stmt) {
+        reads.clear();
+        writes.clear();
+      }
+
+      for (const AccessEntry &acc : s.access) {
+        if (acc.type == kRead) {
+          // Same-iteration conflict: loop=nullptr
+          if (FindConflict(writes, acc, nullptr)) {
+            sync_before_stmt = true;
+            break;
+          }
+        } else if (acc.type == kWrite) {
+          // Same-iteration conflict: loop=nullptr
+          if (FindConflict(reads, acc, nullptr) ||
+              FindConflict(writes, acc, nullptr)) {
+            sync_before_stmt = true;
+            break;
+          }
+        } else if (acc.type == kSync) {
+          reads.clear();
+          writes.clear();
+        }
+      }
+      // If sync is inserted. remove the irrelevant things.
+      if (sync_before_stmt) {
+        reads.clear();
+        writes.clear();
+      }
+      // Add the read/write of current statement
+      for (const AccessEntry &acc : s.access) {
+        if (acc.type == kRead) {
+          reads.push_back(acc);
+        } else if (acc.type == kWrite) {
+          writes.push_back(acc);
+        } else if (acc.type == kSync) {
+          reads.clear();
+          writes.clear();
+        }
+      }
+
+      if (sync_before_stmt) {
+        insert_syncs(s.stmt);
+      }
     }
-    for (const Object *stmt : result.sync_before_stmts) {
-      insert_syncs(stmt);
+    if (loop != nullptr) {
+      // Check if the loop body contains any reads in the same sync scope.
+      // If there are reads, we conservatively keep the sync within the loop
+      // body to preserve per-iteration ordering when needed. If there are no
+      // reads (e.g., only writes to shared.dyn), we can safely hoist the sync
+      // to before the loop to avoid redundant barriers.
+      bool has_read_in_scope = false;
+      for (const StmtEntry &s : seq) {
+        for (const AccessEntry &acc : s.access) {
+          if (acc.type == kRead && acc.scope == sync_scope_) {
+            has_read_in_scope = true;
+            break;
+          }
+        }
+        if (has_read_in_scope)
+          break;
+      }
+      // Loop-carried dependency analysis using symbolic iteration shift.
+      // We compare accesses at iteration i (end of loop, stored in
+      // reads/writes) with accesses at iteration i+1 (beginning of next
+      // iteration). By substituting loop_var -> loop_var + step in the "next
+      // iteration" indices, we can precisely determine if there's a true
+      // dependency.
+      //
+      // Examples:
+      // - A[i] write, A[i] read: No loop-carry (same iteration access)
+      // - A[i] write, A[i+1] read: After shift, comparing A[i] vs A[i+1],
+      // disjoint
+      // - A[i] write, A[i-1] read: After shift, comparing A[i] vs A[i],
+      // conflict!
+      // - A[i%2] write, A[i%2] read: After shift, comparing A[i%2] vs
+      // A[(i+1)%2],
+      //   which are disjoint for modulo buffering
+      for (size_t i = 0; i < seq.size(); ++i) {
+        const StmtEntry &s = seq[i];
+        if (syncs_inserted_.count(s.stmt) != 0)
+          break;
+        if (reads.empty() && writes.empty())
+          break;
+        bool need_loop_sync = false;
+        for (const AccessEntry &acc : s.access) {
+          if (acc.type == kRead) {
+            // Loop-carry conflict: pass loop for iteration shift analysis
+            if (FindConflict(writes, acc, loop)) {
+              need_loop_sync = true;
+              break;
+            }
+          } else if (acc.type == kWrite) {
+            // Loop-carry conflict: pass loop for iteration shift analysis
+            if (FindConflict(reads, acc, loop) ||
+                FindConflict(writes, acc, loop)) {
+              need_loop_sync = true;
+              break;
+            }
+          } else if (acc.type == kSync) {
+            reads.clear();
+            writes.clear();
+          }
+        }
+        if (need_loop_sync) {
+          if (!has_read_in_scope) {
+            // Mark the loop itself to receive a sync before it, instead of
+            // inserting inside the loop body. This ensures a single sync is
+            // emitted outside the loop and avoids per-iteration overhead.
+            insert_syncs(loop);
+          } else {
+            // Fall back to inserting before the first conflicting statement
+            // inside the loop to maintain correctness when reads are present.
+            insert_syncs(s.stmt);
+          }
+          break;
+        }
+      }
     }
-    return std::move(result.exposed_accesses);
+    // return the exposed entries, remove unnecessary ones.
+    int sync_count = 0;
+    // head are before first sync, tail are after last sync
+    std::vector<AccessEntry> head, tail;
+    AccessEntry esync{.cset = {constr_stack_}};
+    esync.threads = this->env_threads();
+    esync.type = kSync;
+    esync.scope = sync_scope_;
+
+    for (const StmtEntry &s : seq) {
+      if (syncs_inserted_.count(s.stmt)) {
+        if (sync_count != 0) {
+          tail.clear();
+        } else {
+          head.push_back(esync);
+        }
+        ++sync_count;
+      }
+      for (const AccessEntry &acc : s.access) {
+        if (acc.type == kSync) {
+          if (sync_count != 0) {
+            tail.clear();
+          } else {
+            head.push_back(esync);
+          }
+          ++sync_count;
+        } else {
+          if (sync_count != 0) {
+            tail.push_back(acc);
+          } else {
+            head.push_back(acc);
+          }
+        }
+      }
+    }
+    head.insert(head.end(), tail.begin(), tail.end());
+    return head;
   }
   // The syncs inserted before each statement
   std::unordered_set<const Object *> syncs_inserted_;
@@ -1223,12 +1426,57 @@ private:
   StorageScope sync_scope_;
   // warp size from target
   int warp_size_;
-  bool debug_summary_{false};
 
   void insert_syncs(const Object *obj) {
     if (syncs_inserted_.count(obj))
       return;
     syncs_inserted_.insert(obj);
+  }
+  bool PointerAccessIsDisjoint(const AccessEntry &lhs, const AccessEntry &rhs) {
+    if (lhs.touched.size() != 1 || rhs.touched.size() != 1) {
+      return false;
+    }
+    ConstrSet prev_cset{lhs.cset};
+    ConstrSet curr_cset{rhs.cset};
+    arith::Analyzer analyzer;
+
+    struct ThreadVarInfo {
+      const char *name_prev;
+      const char *name_curr;
+    } thread_vars[] = {
+        {"tx1", "tx2"},
+        {"ty1", "ty2"},
+        {"tz1", "tz2"},
+    };
+    PrimExpr lhs_min = analyzer.Simplify(lhs.touched[0].min());
+    PrimExpr lhs_max = analyzer.Simplify(lhs.touched[0].max());
+    PrimExpr rhs_min = analyzer.Simplify(rhs.touched[0].min());
+    PrimExpr rhs_max = analyzer.Simplify(rhs.touched[0].max());
+    for (unsigned idx = 0; idx != 3; ++idx) {
+      auto &info = thread_vars[idx];
+      Var old_prev_var = lhs.threads[lhs.threads.size() + idx - 3]->var;
+      Var old_curr_var = rhs.threads[rhs.threads.size() + idx - 3]->var;
+      Var prev_var(info.name_prev, old_prev_var.dtype());
+      Var curr_var(info.name_curr, old_curr_var.dtype());
+      lhs_min = Substitute(lhs_min, {{old_prev_var, prev_var}});
+      lhs_max = Substitute(lhs_max, {{old_prev_var, prev_var}});
+      prev_cset = prev_cset.Substitute({{old_prev_var, prev_var}});
+      rhs_min = Substitute(rhs_min, {{old_curr_var, curr_var}});
+      rhs_max = Substitute(rhs_max, {{old_curr_var, curr_var}});
+      curr_cset = curr_cset.Substitute({{old_curr_var, curr_var}});
+    }
+    prev_cset.Populate(analyzer);
+    curr_cset.Populate(analyzer);
+
+    if (analyzer.CanProve(lhs_max < rhs_min,
+                          arith::ProofStrength::kSymbolicBound)) {
+      return true;
+    }
+    if (analyzer.CanProve(rhs_max < lhs_min,
+                          arith::ProofStrength::kSymbolicBound)) {
+      return true;
+    }
+    return false;
   }
   void print_access_tentry(const AccessEntry &access,
                            bool print_constr = false) {
@@ -1599,113 +1847,16 @@ private:
 
   bool FindConflict(const std::vector<AccessEntry> &prev,
                     const AccessEntry &curr, const ForNode *loop) {
-    return shared_access_analysis::FindConflict(prev, curr, loop);
-  }
-
-  std::string AccessToString(const AccessEntry &access) const {
-    std::ostringstream os;
-    switch (access.type) {
-    case kRead:
-      os << "R:";
-      break;
-    case kWrite:
-      os << "W:";
-      break;
-    case kSync:
-      os << "SYNC:";
-      break;
-    case kAlloc:
-      os << "ALLOC:";
-      break;
-    case kReadAcquire:
-      os << "RA:";
-      break;
-    }
-    if (access.type == kSync) {
-      os << access.scope.to_string();
-      return os.str();
-    }
-    if (access.buffer_name.defined()) {
-      os << access.buffer_name->name;
-    } else if (access.buffer.defined()) {
-      os << access.buffer->name_hint;
-    } else {
-      os << "<anon>";
-    }
-    if (access.is_pointer_access) {
-      os << "[ptr]";
-    }
-    if (access.is_async_copy) {
-      os << "[async]";
-    }
-    if (access.is_atomic) {
-      os << "[atomic]";
-    }
-    return os.str();
-  }
-
-  std::string
-  AccessVecToString(const std::vector<AccessEntry> &accesses) const {
-    if (accesses.empty()) {
-      return "<empty>";
-    }
-    std::ostringstream os;
-    for (size_t i = 0; i < accesses.size(); ++i) {
-      if (i != 0) {
-        os << ", ";
-      }
-      os << AccessToString(accesses[i]);
-    }
-    return os.str();
-  }
-
-  void LogSummary(
-      const std::vector<StmtEntry> &seq,
-      const shared_access_analysis::SequenceSummaryResult &raw_result,
-      const shared_access_analysis::SequenceSummaryResult &coalesced_result,
-      const ForNode *loop) const {
-    bool has_stmt_access = false;
-    for (const StmtEntry &entry : seq) {
-      if (!entry.access.empty()) {
-        has_stmt_access = true;
-        break;
+    for (const AccessEntry &x : prev) {
+      if (FindConflict(x, curr, loop)) {
+        return true;
       }
     }
-    if (!has_stmt_access && raw_result.exposed_accesses.empty() &&
-        coalesced_result.exposed_accesses.empty() &&
-        coalesced_result.sync_before_stmts.empty()) {
-      return;
-    }
-
-    std::ostringstream os;
-    os << "[ThreadSyncSummary] scope=" << sync_scope_.to_string();
-    if (loop != nullptr) {
-      os << " loop=" << loop->loop_var->name_hint;
-    } else {
-      os << " loop=<none>";
-    }
-    os << " seq_len=" << seq.size() << "\n";
-    for (size_t i = 0; i < seq.size(); ++i) {
-      os << "  stmt[" << i << "] " << seq[i].stmt->GetTypeKey() << ": "
-         << AccessVecToString(seq[i].access) << "\n";
-    }
-    os << "  raw_exposed: " << AccessVecToString(raw_result.exposed_accesses)
-       << "\n";
-    os << "  coalesced_exposed: "
-       << AccessVecToString(coalesced_result.exposed_accesses) << "\n";
-    if (!coalesced_result.sync_before_stmts.empty()) {
-      os << "  inserted_syncs:";
-      for (const Object *stmt : coalesced_result.sync_before_stmts) {
-        os << ' ' << stmt->GetTypeKey();
-      }
-      os << "\n";
-    }
-    LOG(INFO) << os.str();
+    return false;
   }
 };
 
-PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope,
-                            bool debug_summary = false) {
+PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope) {
   StorageScope sync_scope = StorageScope::Create(storage_scope);
   if (sync_scope.rank == StorageRank::kGlobal) {
     return func;
@@ -1723,7 +1874,7 @@ PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope,
                     .value()
                     .IntValue();
   }
-  TileLangThreadSyncPlanner planner(sync_scope, warp_size, debug_summary);
+  TileLangThreadSyncPlanner planner(sync_scope, warp_size);
   for (const auto &[_, buffer] : func->buffer_map) {
     planner.SetBufferDataToBuffer(buffer->data, buffer);
   }
@@ -1748,11 +1899,8 @@ tvm::transform::Pass ThreadSync(const String &storage_scope) {
     if (disable_syncthreads) {
       return f;
     }
-    bool debug_summary =
-        ctx->GetConfig(::tvm::tl::kDebugThreadStorageSyncSummary, Bool(false))
-            .value()
-            ->value;
-    return tl::TileLangThreadSync(std::move(f), storage_scope, debug_summary);
+    return tl::TileLangThreadSync(std::move(f), storage_scope);
+    ;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.ThreadSync", {});
 }
