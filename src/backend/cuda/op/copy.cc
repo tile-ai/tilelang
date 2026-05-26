@@ -42,9 +42,17 @@ PrimExpr MakeTmaLeaderCondition(PrimExpr thread_extent) {
   return Call(DataType::Bool(), tl_shuffle_elect(), {std::move(thread_extent)});
 }
 
-PrimExpr TMABytesFromElements(PrimExpr elements, DataType dtype) {
+int TMATransactionElementBits(DataType dtype) {
+  // float4_e2m1_unpacked stores one logical FP4 value per 8-bit SMEM slot,
+  // but TMA/mbarrier transaction counts reflect the moved FP4 payload (4b).
+  if (dtype.is_float4_e2m1_unpacked()) {
+    return 4;
+  }
+  return dtype.bits();
+}
+
+PrimExpr TMABytesFromElements(PrimExpr elements, DataType dtype, int bits) {
   PrimExpr elements_i64 = cast(DataType::Int(64), elements);
-  int bits = dtype.bits();
   if (bits % 8 == 0) {
     return elements_i64 * IntImm(DataType::Int(64), bits / 8);
   }
@@ -53,8 +61,26 @@ PrimExpr TMABytesFromElements(PrimExpr elements, DataType dtype) {
                   IntImm(DataType::Int(64), 8));
 }
 
+int64_t TMABytesFromElements(int64_t elements, DataType dtype, int bits) {
+  return (elements * bits + 7) / 8;
+}
+
+PrimExpr TMABytesFromElements(PrimExpr elements, DataType dtype) {
+  return TMABytesFromElements(elements, dtype, dtype.bits());
+}
+
 int64_t TMABytesFromElements(int64_t elements, DataType dtype) {
-  return (elements * dtype.bits() + 7) / 8;
+  return TMABytesFromElements(elements, dtype, dtype.bits());
+}
+
+PrimExpr TMATransactionBytesFromElements(PrimExpr elements, DataType dtype) {
+  return TMABytesFromElements(elements, dtype,
+                              TMATransactionElementBits(dtype));
+}
+
+int64_t TMATransactionBytesFromElements(int64_t elements, DataType dtype) {
+  return TMABytesFromElements(elements, dtype,
+                              TMATransactionElementBits(dtype));
 }
 
 int64_t TMAElementsForBytes(int64_t bytes, DataType dtype) {
@@ -1656,10 +1682,11 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     PrimExpr total_bytes;
     if ((*inner_box_dim) != instruction_dim) {
       int loop_extent = (*inner_box_dim) / instruction_dim;
-      total_bytes = TMABytesFromElements(total_elements * loop_extent,
-                                         shared_tensor->dtype);
+      total_bytes = TMATransactionBytesFromElements(total_elements * loop_extent,
+                                                    shared_tensor->dtype);
     } else {
-      total_bytes = TMABytesFromElements(total_elements, shared_tensor->dtype);
+      total_bytes =
+          TMATransactionBytesFromElements(total_elements, shared_tensor->dtype);
     }
 
     Stmt barrier_before_tma_stmt;
@@ -1959,7 +1986,8 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
   }
 
   Stmt tma_copy;
-  PrimExpr total_bytes = TMABytesFromElements(elements, shared_tensor->dtype);
+  PrimExpr total_bytes =
+      TMATransactionBytesFromElements(elements, shared_tensor->dtype);
   if (is_load) {
     PrimExpr mbar_arg = barrier_base_id >= 0 ? mbar_handle : PrimExpr(0);
     tma_copy = Evaluate(Call(DataType::Handle(), tma_load(),

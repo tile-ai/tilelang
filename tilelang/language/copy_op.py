@@ -402,8 +402,12 @@ def tma_gather4_bytes(K_box, dtype: str) -> int:
     """
     if dtype not in _TMA_SUPPORTED_DTYPES:
         raise ValueError(f"Unsupported dtype: {dtype}")
-    elem_bytes = tvm.DataType(dtype).bits // 8
-    return 4 * K_box * elem_bytes
+    dt = tvm.DataType(dtype)
+    if dt.is_float4_e2m1_unpacked():
+        elem_bits = 4
+    else:
+        elem_bits = dt.bits
+    return (4 * K_box * elem_bits + 7) // 8
 
 
 def tma_scatter4(
