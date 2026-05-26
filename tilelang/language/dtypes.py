@@ -166,6 +166,10 @@ def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tirx.Var:
         val = "BFloat" + self[6:]
     elif self.startswith("tfloat"):
         val = "TensorFloat" + self[6:]
+    elif self.is_float4_e2m1_unpacked():
+        val = "Float4E2M1Unpacked"
+        if self.lanes > 1:
+            val += f"x{self.lanes}"
     else:
         raise TypeError(f"Invalid type {self}")
     if "_" in val:
