@@ -2082,7 +2082,8 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
        << " + " << index_str << ")";
   } else if (t == buffer_element_dtype) {
     int div_factor = 1;
-    if (buffer_element_dtype.is_float4_e2m1fn() && buffer_element_dtype.lanes() == 1) {
+    if (buffer_element_dtype.is_float4_e2m1fn() &&
+        buffer_element_dtype.lanes() == 1) {
       div_factor = 2;
     }
     index_str =
@@ -2092,7 +2093,8 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
     // Fix fp4 pointer arithmetic: fp4 elements are 4-bit packed 2 per byte.
     // fp4* + n incorrectly advances n bytes (skipping 2n elements).
     int div_factor = 1;
-    if (buffer_element_dtype.is_float4_e2m1fn() && buffer_element_dtype.lanes() == 1) {
+    if (buffer_element_dtype.is_float4_e2m1fn() &&
+        buffer_element_dtype.lanes() == 1) {
       div_factor = 2;
     }
     index_str =
@@ -4512,8 +4514,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
   } else if (scope == "local.descriptor.tcgen05_instr") {
     stream << "tl::Tcgen05InstrDescriptor " << vid << ";\n";
   } else {
-    bool is_fp4_scalar_local =
-        alloc_dtype.is_float4_e2m1fn() && alloc_dtype.is_scalar() && scope == "local";
+    bool is_fp4_scalar_local = alloc_dtype.is_float4_e2m1fn() &&
+                               alloc_dtype.is_scalar() && scope == "local";
     bool is_int4_scalar_local =
         (alloc_dtype == DataType::Int(4) || alloc_dtype == DataType::UInt(4)) &&
         alloc_dtype.is_scalar() && scope == "local";

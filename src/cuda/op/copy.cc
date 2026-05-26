@@ -76,11 +76,13 @@ int64_t TMABytesFromElements(int64_t elements, DataType dtype) {
 }
 
 PrimExpr TMATransactionBytesFromElements(PrimExpr elements, DataType dtype) {
-  return TMABytesFromElements(elements, dtype, TMATransactionElementBits(dtype));
+  return TMABytesFromElements(elements, dtype,
+                              TMATransactionElementBits(dtype));
 }
 
 int64_t TMATransactionBytesFromElements(int64_t elements, DataType dtype) {
-  return TMABytesFromElements(elements, dtype, TMATransactionElementBits(dtype));
+  return TMABytesFromElements(elements, dtype,
+                              TMATransactionElementBits(dtype));
 }
 
 int64_t TMAElementsForBytes(int64_t bytes, DataType dtype) {
@@ -137,8 +139,9 @@ bool GetIsTmaCopy(const CopyNode &op) {
 }
 
 int TensorMapDataTypeForTMA(DataType global_dtype, DataType shared_dtype) {
-  // 16U4_ALIGN16B: f8f6f4 / mxf8f6f4 unpacked FP4 SMEM (float_e2m1_unpacksmem_t).
-  // 16U4_ALIGN8B: packed FP4 for mxf4 / mxf4nvf4 (float_e2m1_t).
+  // 16U4_ALIGN16B: f8f6f4 / mxf8f6f4 unpacked FP4 SMEM
+  // (float_e2m1_unpacksmem_t). 16U4_ALIGN8B: packed FP4 for mxf4 / mxf4nvf4
+  // (float_e2m1_t).
   constexpr int kTensorMapDataType16U4Align16B = 14;
   if (shared_dtype.is_float4_e2m1_unpacked()) {
     ICHECK(global_dtype.is_float4_e2m1fn())
@@ -1420,7 +1423,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
       << shared_tensor->name << " with incompatible data type "
       << global_tensor->dtype << " and " << shared_tensor->dtype;
 
-  desc.data_type = TensorMapDataTypeForTMA(global_tensor->dtype, shared_tensor->dtype);
+  desc.data_type =
+      TensorMapDataTypeForTMA(global_tensor->dtype, shared_tensor->dtype);
   desc.global_addr = global_tensor->data;
   desc.global_shape = ReverseArray(global_tensor->shape);
   Array<PrimExpr> global_coords =
@@ -1719,8 +1723,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     PrimExpr total_bytes;
     if ((*inner_box_dim) != instruction_dim) {
       int loop_extent = (*inner_box_dim) / instruction_dim;
-      total_bytes = TMATransactionBytesFromElements(total_elements * loop_extent,
-                                                    shared_tensor->dtype);
+      total_bytes = TMATransactionBytesFromElements(
+          total_elements * loop_extent, shared_tensor->dtype);
     } else {
       total_bytes =
           TMATransactionBytesFromElements(total_elements, shared_tensor->dtype);

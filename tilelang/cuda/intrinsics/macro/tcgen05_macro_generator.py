@@ -359,13 +359,13 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
 
         a_swizzle_atom_elems = (
-            atom_m_per_cta
-            if a_swizzle_mode.is_none()
-            else _bytes_to_elements(a_swizzle_mode.swizzle_byte_size(), a_elem_bits)
+            atom_m_per_cta if a_swizzle_mode.is_none() else _bytes_to_elements(a_swizzle_mode.swizzle_byte_size(), a_elem_bits)
         )
 
         # Block-scaled A LBO/SBO differ from regular SS (uses atom_m_per_cta instead of m_dim)
-        a_leading_byte_offset = _elements_to_bytes(8 * 8, a_elem_bits) if a_is_k_major else _elements_to_bytes(8 * atom_m_per_cta, a_elem_bits)
+        a_leading_byte_offset = (
+            _elements_to_bytes(8 * 8, a_elem_bits) if a_is_k_major else _elements_to_bytes(8 * atom_m_per_cta, a_elem_bits)
+        )
         a_stride_byte_offset = _elements_to_bytes(8 * k_dim, a_elem_bits) if a_is_k_major else _elements_to_bytes(8 * 8, a_elem_bits)
         if not a_swizzle_mode.is_none():
             if a_is_k_major:
@@ -681,10 +681,16 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         b_is_k_major = self.b_transposed
 
         b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
-        b_swizzle_atom_elems = n_dim_per_cta if b_swizzle_mode.is_none() else _bytes_to_elements(b_swizzle_mode.swizzle_byte_size(), elem_bits)
+        b_swizzle_atom_elems = (
+            n_dim_per_cta if b_swizzle_mode.is_none() else _bytes_to_elements(b_swizzle_mode.swizzle_byte_size(), elem_bits)
+        )
 
         b_leading_byte_offset = _elements_to_bytes(8 * 8, elem_bits) if b_is_k_major else _elements_to_bytes(8 * n_dim_per_cta, elem_bits)
-        b_stride_byte_offset = _elements_to_bytes(8 * k_dim, elem_bits) if b_is_k_major else (0 if n_dim_per_cta == 8 else _elements_to_bytes(8 * 8, elem_bits))
+        b_stride_byte_offset = (
+            _elements_to_bytes(8 * k_dim, elem_bits)
+            if b_is_k_major
+            else (0 if n_dim_per_cta == 8 else _elements_to_bytes(8 * 8, elem_bits))
+        )
         if not b_swizzle_mode.is_none():
             if b_is_k_major:
                 b_leading_byte_offset = 16
@@ -727,11 +733,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         a_is_k_major = not self.a_transposed
 
         a_swizzle_mode = self._determinate_swizzle_mode(A_buf, self.a_shared_layout)
-        a_swizzle_atom_elems = (
-            m_dim
-            if a_swizzle_mode.is_none()
-            else _bytes_to_elements(a_swizzle_mode.swizzle_byte_size(), elem_bits)
-        )
+        a_swizzle_atom_elems = m_dim if a_swizzle_mode.is_none() else _bytes_to_elements(a_swizzle_mode.swizzle_byte_size(), elem_bits)
 
         a_leading_byte_offset = _elements_to_bytes(8 * 8, elem_bits) if a_is_k_major else _elements_to_bytes(8 * m_dim, elem_bits)
         a_stride_byte_offset = _elements_to_bytes(8 * k_dim, elem_bits) if a_is_k_major else _elements_to_bytes(8 * 8, elem_bits)

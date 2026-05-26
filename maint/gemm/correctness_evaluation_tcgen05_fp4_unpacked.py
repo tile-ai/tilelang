@@ -5,6 +5,7 @@ Cases:
   1. fp4 (packed global, unpacked SMEM) x fp8 tcgen05 GEMM
   2. mxfp4 (unpacked SMEM) x mxfp8 block-scaled tcgen05 GEMM
 """
+
 import sys
 import tilelang
 import tilelang.language as T
@@ -150,12 +151,7 @@ def _quantize_mxfp8_with_packed_ue8m0(x, gran_k: int = 128):
     else:
         sf_u8_padded = sf_u8
     words = sf_u8_padded.to(torch.int64)
-    packed = (
-        words[:, 0::4]
-        | (words[:, 1::4] << 8)
-        | (words[:, 2::4] << 16)
-        | (words[:, 3::4] << 24)
-    ).to(torch.uint32)
+    packed = (words[:, 0::4] | (words[:, 1::4] << 8) | (words[:, 2::4] << 16) | (words[:, 3::4] << 24)).to(torch.uint32)
     sf_packed_u32 = packed.T.contiguous().reshape(-1)
     return x_fp8, sf_packed_u32
 
@@ -252,12 +248,7 @@ def _quantize_mxfp4_with_packed_ue8m0(x, gran_k: int = 128):
     else:
         sf_u8_padded = sf_u8
     words = sf_u8_padded.to(torch.int64)
-    packed = (
-        words[:, 0::4]
-        | (words[:, 1::4] << 8)
-        | (words[:, 2::4] << 16)
-        | (words[:, 3::4] << 24)
-    ).to(torch.uint32)
+    packed = (words[:, 0::4] | (words[:, 1::4] << 8) | (words[:, 2::4] << 16) | (words[:, 3::4] << 24)).to(torch.uint32)
     sf_packed_u32 = packed.T.contiguous().reshape(-1)
     return x_fp4, sf_packed_u32
 

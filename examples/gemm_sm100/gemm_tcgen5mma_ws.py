@@ -1,4 +1,3 @@
-
 # Non-persistent
 
 import torch

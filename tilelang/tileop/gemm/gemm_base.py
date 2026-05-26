@@ -25,9 +25,7 @@ class GemmBase:
     gemm_node: Node
 
     def __post_init__(self) -> None:
-        validate_gemm_ab_dtypes(
-            self.A.dtype, self.B.dtype, a_in_tmem=is_tensor_memory(self.A)
-        )
+        validate_gemm_ab_dtypes(self.A.dtype, self.B.dtype, a_in_tmem=is_tensor_memory(self.A))
 
     def infer_layout(self, target: Target, thread_nums: int):
         raise NotImplementedError("infer_layout is not implemented")

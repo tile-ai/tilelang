@@ -298,7 +298,6 @@ def fp4_tma_copy_unpacked_smem_load(M=128, N=256, block_M=64, block_N=128):
 
 
 def _fp4_tma_descriptor_init_block(host_source, desc_name):
-    import re
 
     marker = f"[0].v_ptr) = {desc_name};"
     start = host_source.find(marker)

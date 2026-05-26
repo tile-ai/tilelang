@@ -94,11 +94,7 @@ def test_tcgen05_instr_desc_fp4_unpacked_x_fp8():
 def test_tcgen05_blockscaled_instr_desc_mxfp4_unpacked_x_mxfp8():
     fp4 = DataType("custom[float4_e2m1_unpacked]8")
     fp8 = DataType("float8_e4m3fn")
-    desc = int(
-        _ffi_api.get_tcgen5_blockscaled_instr_desc(
-            128, 128, fp4, fp8, True, True, 1, 1, 0, 0
-        )
-    )
+    desc = int(_ffi_api.get_tcgen5_blockscaled_instr_desc(128, 128, fp4, fp8, True, True, 1, 1, 0, 0))
     a_format, b_format = _decode_tcgen05_formats(desc)
     assert a_format == 5
     assert b_format == 0

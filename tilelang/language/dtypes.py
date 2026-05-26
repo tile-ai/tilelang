@@ -307,14 +307,10 @@ def is_f8f6f4_family(value: AnyDType) -> bool:
     if dt.is_float4():
         return True
     name = str(dt)
-    return (dt.bits == 8 and name.startswith("float8")) or (
-        dt.bits == 6 and name.startswith("float6")
-    )
+    return (dt.bits == 8 and name.startswith("float8")) or (dt.bits == 6 and name.startswith("float6"))
 
 
-def validate_gemm_ab_dtypes(
-    a_dtype: AnyDType, b_dtype: AnyDType, *, a_in_tmem: bool = False
-) -> None:
+def validate_gemm_ab_dtypes(a_dtype: AnyDType, b_dtype: AnyDType, *, a_in_tmem: bool = False) -> None:
     """Validate mixed A/B dtypes for GEMM tile ops.
 
     TS variants (A in TMEM) skip validation because A/B dtypes may legitimately
@@ -322,13 +318,8 @@ def validate_gemm_ab_dtypes(
     """
     if a_in_tmem:
         return
-    if a_dtype != b_dtype and not (
-        is_f8f6f4_family(a_dtype) and is_f8f6f4_family(b_dtype)
-    ):
-        raise ValueError(
-            f"Mixed-dtype GEMM only supports f8f6f4 family operands currently, "
-            f"got A={a_dtype}, B={b_dtype}"
-        )
+    if a_dtype != b_dtype and not (is_f8f6f4_family(a_dtype) and is_f8f6f4_family(b_dtype)):
+        raise ValueError(f"Mixed-dtype GEMM only supports f8f6f4 family operands currently, got A={a_dtype}, B={b_dtype}")
 
 
 dtype.__call__ = __dtype_call__

@@ -347,11 +347,11 @@ const bool cuda_gemm_registered = RegisterCudaGemm();
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
   refl::GlobalDef().def(
-      "tl.get_tcgen5_mma_meta", [](int M, int N, int K, DataType ab_dtype,
-                                   DataType c_dtype, bool disable_2cta,
-                                   bool disable_ws = false) {
-        auto [success, meta] = GetTCGEN5MMAMeta(
-            M, N, K, ab_dtype, c_dtype, disable_2cta, disable_ws);
+      "tl.get_tcgen5_mma_meta",
+      [](int M, int N, int K, DataType ab_dtype, DataType c_dtype,
+         bool disable_2cta, bool disable_ws = false) {
+        auto [success, meta] = GetTCGEN5MMAMeta(M, N, K, ab_dtype, c_dtype,
+                                                disable_2cta, disable_ws);
         Array<Integer> result;
         if (success) {
           result.push_back(Integer(meta.atom_m));
@@ -367,22 +367,21 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       [](int atom_m, int atom_n, int atom_k, DataType a_dtype, DataType b_dtype,
          DataType c_dtype, bool a_is_k_major, bool b_is_k_major, int scale_in_a,
          int scale_in_b) {
-        uint32_t desc = GetTCGEN5InstrDesc(atom_m, atom_n, atom_k, a_dtype, b_dtype,
-                                           c_dtype, a_is_k_major, b_is_k_major,
-                                           scale_in_a, scale_in_b);
+        uint32_t desc = GetTCGEN5InstrDesc(
+            atom_m, atom_n, atom_k, a_dtype, b_dtype, c_dtype, a_is_k_major,
+            b_is_k_major, scale_in_a, scale_in_b);
         return Integer(static_cast<int64_t>(desc));
       });
-  refl::GlobalDef().def("tl.get_tcgen5_blockscaled_instr_desc",
-                        [](int atom_m, int atom_n, DataType a_dtype,
-                           DataType b_dtype, bool a_is_k_major,
-                           bool b_is_k_major, int scale_in_a, int scale_in_b,
-                           int a_sf_id, int b_sf_id) {
-                          uint32_t desc = GetTCGEN5BlockScaledInstrDesc(
-                              atom_m, atom_n, a_dtype, b_dtype, a_is_k_major,
-                              b_is_k_major, scale_in_a, scale_in_b, a_sf_id,
-                              b_sf_id);
-                          return Integer(static_cast<int64_t>(desc));
-                        });
+  refl::GlobalDef().def(
+      "tl.get_tcgen5_blockscaled_instr_desc",
+      [](int atom_m, int atom_n, DataType a_dtype, DataType b_dtype,
+         bool a_is_k_major, bool b_is_k_major, int scale_in_a, int scale_in_b,
+         int a_sf_id, int b_sf_id) {
+        uint32_t desc = GetTCGEN5BlockScaledInstrDesc(
+            atom_m, atom_n, a_dtype, b_dtype, a_is_k_major, b_is_k_major,
+            scale_in_a, scale_in_b, a_sf_id, b_sf_id);
+        return Integer(static_cast<int64_t>(desc));
+      });
 }
 
 } // namespace tl

@@ -95,9 +95,7 @@ class GemmTCGEN5(GemmBase):
         annotations = getattr(self.gemm_node, "annotations", {})
         use_2cta = bool(annotations.get("use_2cta", 0))
         k = int(self.chunk)
-        mma_emitter.get_tcgen5_mma_meta(
-            int(self.M), int(self.N), k, disable_2cta=not use_2cta, disable_ws=self.is_blockscaled
-        )
+        mma_emitter.get_tcgen5_mma_meta(int(self.M), int(self.N), k, disable_2cta=not use_2cta, disable_ws=self.is_blockscaled)
 
         if self.is_blockscaled or self.is_gemm_ss():
             a_continuity = _shared_layout_continuity(self.A, a_is_k_major, self.K, self.M)

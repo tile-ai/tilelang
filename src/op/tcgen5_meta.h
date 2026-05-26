@@ -24,7 +24,7 @@ GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype,
                  bool disable_2cta = false, bool disable_ws = false) {
 // TODO (lei) Currently not all shapes / dtypes are supported for TCGEN5MMA.
 // TODO (wt): Add more 2cta-preferred shapes
-// NOTE: 
+// NOTE:
 // 1. In case that other tcgen5mma in the same kernel must use 1-cta,
 //    we should disable 2cta for the current tcgen5mma.
 // 2. For blockscaled gemm, we should disable ws for the current tcgen5mma.
@@ -270,13 +270,11 @@ inline uint32_t GetTCGEN5InstrDesc(int atom_m, int atom_n, int atom_k,
 // Build block-scaled instruction descriptor for mxf8f6f4.block_scale
 // Bit layout: InstrDescriptorBlockScaled (see CUTLASS mma_sm100_desc.hpp)
 // TODO: Support nv-style block-scaled descriptor.
-inline uint32_t GetTCGEN5BlockScaledInstrDesc(int atom_m, int atom_n,
-                                              DataType a_dtype,
-                                              DataType b_dtype,
-                                              bool a_is_k_major,
-                                              bool b_is_k_major, int scale_in_a,
-                                              int scale_in_b, int a_sf_id,
-                                              int b_sf_id) {
+inline uint32_t
+GetTCGEN5BlockScaledInstrDesc(int atom_m, int atom_n, DataType a_dtype,
+                              DataType b_dtype, bool a_is_k_major,
+                              bool b_is_k_major, int scale_in_a, int scale_in_b,
+                              int a_sf_id, int b_sf_id) {
   ICHECK(atom_m % 16 == 0) << "atom_m must be divisible by 16";
   ICHECK(atom_n % 8 == 0) << "atom_n must be divisible by 8";
   ICHECK(scale_in_a == 1 || scale_in_a == -1);
