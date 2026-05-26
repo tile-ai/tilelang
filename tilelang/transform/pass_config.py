@@ -149,6 +149,9 @@ class PassConfigKey(str, Enum):
     TL_DEBUG_MERGE_SHARED_MEMORY_ALLOCATIONS = "tl.debug_merge_shared_memory_allocations"
     """Enable debug information for merge shared memory allocations. Default: False"""
 
+    TL_DEBUG_THREAD_STORAGE_SYNC_SUMMARY = "tl.debug_thread_storage_sync_summary"
+    """Enable debug summary logging for ThreadSync shared/shared.dyn analysis. Default: False"""
+
     TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE = "tl.enable_aggressive_shared_memory_merge"
     """Enable aggressive merge of shared memory allocations. Default: False"""
 
@@ -168,6 +171,17 @@ class PassConfigKey(str, Enum):
     """Allow loop unswitching even when the else-version of the loop body has side effects.
 
     This is more aggressive and may increase code size. Default: False.
+    """
+
+    TL_IF_STMT_BINDING_INLINE_REPLAYABLE_BINDS = "tl.if_stmt_binding_inline_replayable_binds"
+    """Inline replayable scalar Bind statements while distributing if conditions.
+
+    When True (default), IfStmtBinding may rewrite a guarded sequence such as
+    ``if cond: idx = ids[i]; copy(idx); gemm()`` into separately guarded
+    statements with ``idx`` substituted at each use, provided the Bind does not
+    read a buffer written inside the same guarded body. This exposes copy and
+    compute statements to pipeline planning while preserving non-replayable
+    Bind scopes.
     """
 
     TL_DISABLE_THREAD_STORAGE_SYNC = "tl.disable_thread_storage_sync"

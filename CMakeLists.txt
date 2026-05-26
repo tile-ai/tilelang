@@ -366,6 +366,7 @@ file(GLOB TILE_LANG_SRCS
   src/layout/*.cc
   src/transform/*.cc
   src/transform/common/*.cc
+  src/transform/pipeline/*.cc
   src/op/*.cc
   src/backend/cpu/op/*.cc
   src/backend/cuda/op/copy_analysis.cc
