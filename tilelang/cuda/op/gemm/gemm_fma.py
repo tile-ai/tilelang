@@ -1,3 +1,11 @@
+"""CUDA scalar FMA fallback GEMM.
+
+Used when a tensor-core MMA path is unavailable for the requested dtype, layout,
+or shape combination (e.g. BF16 on SM70 Volta, or shapes that do not satisfy the
+SM70 MMA tile constraints). Each thread computes a strided subset of the output
+tile using ordinary CUDA-core fused multiply-add instructions.
+"""
+
 from __future__ import annotations
 
 from tilelang.tileop.gemm.gemm_base import GemmBase
@@ -13,6 +21,14 @@ GEMM_INST_FMA = "cuda.fma"
 
 
 def _linear_fragment(local_buf, thread_nums: int) -> T.Fragment:
+    """Round-robin a multi-dim fragment across threads.
+
+    The buffer is flattened in row-major order and each element ``flat`` is
+    mapped to ``(flat % thread_nums, flat // thread_nums)`` — i.e. thread id
+    and per-thread local index. This is the simplest layout that gives every
+    thread an equal share of the tile and is sufficient for the FMA fallback
+    where throughput is bound by scalar CUDA-core FFMA, not by layout choice.
+    """
     shape = list(local_buf.shape)
     strides = [1 for _ in shape]
     for idx in range(len(shape) - 2, -1, -1):
@@ -31,6 +47,7 @@ class GemmFMA(GemmBase):
     """CUDA scalar FMA fallback for GEMM combinations without tensor-core MMA."""
 
     def infer_layout(self, target: Target, thread_nums: int):
+        """Assign the linear fragment layout to any fragment operand."""
         layouts = {}
         if is_fragment(self.A):
             layouts[self.A] = _linear_fragment(self.A, thread_nums)
@@ -48,6 +65,15 @@ class GemmFMA(GemmBase):
         thread_var: tirx.Var,
         mbar_phase_expr: tirx.PrimExpr | None = None,
     ):
+        """Emit the FMA-fallback GEMM prim_func.
+
+        Stages ``A`` and ``B`` into shared memory cooperatively, then has each
+        thread accumulate its assigned output elements with a scalar
+        ``C[i, j] += cast(A[..]) * cast(B[..])`` loop over ``K`` — nvcc lowers
+        the cast/multiply/add chain to ``FFMA``. Casts widen the operands to
+        ``accum_dtype`` before multiplication so the path stays numerically
+        sound for narrow input dtypes (e.g. BF16 → FP32 accumulation on Volta).
+        """
         M, N, K = self.M, self.N, self.K
         A_region = self.ARegion
         B_region = self.BRegion
@@ -87,10 +113,10 @@ class GemmFMA(GemmBase):
 
         @T.prim_func
         def _gemm_fma() -> None:
+            """Stage A/B into shared memory, then accumulate C via scalar FMA."""
             A_stage = T.alloc_shared((a_rows, a_cols), in_dtype)
             B_stage = T.alloc_shared((b_rows, b_cols), in_dtype)
 
-            T.sync_threads()
             for a_flat in T.serial(thread_var, a_rows * a_cols, thread_nums):
                 ai = a_flat // a_cols
                 aj = a_flat % a_cols
