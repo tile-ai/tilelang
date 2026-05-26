@@ -115,6 +115,8 @@ static constexpr const char *kDisableLoopUnswitching =
 // non-trivial (has side effects). Default: false (conservative).
 static constexpr const char *kLoopUnswitchingAllowNonTrivialElse =
     "tl.loop_unswitching_allow_non_trivial_else";
+static constexpr const char *kIfStmtBindingInlineReplayableBinds =
+    "tl.if_stmt_binding_inline_replayable_binds";
 
 /*!
  * \brief Enable lowering non-predicated global load/store to ldg/stg intrinsics

@@ -52,8 +52,8 @@ def matmul_tma_copy(
                 T.barrier_arrive(mbar_A)
                 T.tma_copy(B[k * block_K, bx * block_N], B_shared, barrier=mbar_B)
                 T.barrier_arrive(mbar_B)
-                T.mbarrier_wait_parity(mbar_A, k % 2)
-                T.mbarrier_wait_parity(mbar_B, k % 2)
+                T.barrier_wait(mbar_A, k % 2)
+                T.barrier_wait(mbar_B, k % 2)
                 T.gemm(A_shared, B_shared, C_local)
             T.copy(C_local, C[by * block_M, bx * block_N])
 
