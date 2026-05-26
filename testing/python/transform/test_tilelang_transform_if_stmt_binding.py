@@ -69,6 +69,26 @@ def test_if_stmt_binding_inlines_replayable_bind_by_default():
     tvm.ir.assert_structural_equal(after.body, expected.body, True)
 
 
+def test_if_stmt_binding_does_not_inline_pointer_bind():
+    @T.prim_func(check_well_formed=False)
+    def before(A: T.Buffer((4,), "float32"), C: T.Buffer((4,), "float32")):
+        if A[0] >= T.float32(0):
+            idx = T.bind(T.int32(1))
+            ptr = T.bind(A.data, type_annotation=A.data)
+            B = T.Buffer((4,), "float32", data=ptr)
+            C[0] = B[idx]
+
+    @T.prim_func(check_well_formed=False)
+    def expected(A: T.Buffer((4,), "float32"), C: T.Buffer((4,), "float32")):
+        if A[0] >= T.float32(0):
+            ptr = T.bind(A.data, type_annotation=A.data)
+            B = T.Buffer((4,), "float32", data=ptr)
+            C[0] = B[T.int32(1)]
+
+    after = _run_if_stmt_binding(before)
+    tvm.ir.assert_structural_equal(after.body, expected.body, True)
+
+
 def test_if_stmt_binding_can_disable_replayable_bind_inline():
     @T.prim_func
     def before(A: T.Buffer((4,), "float32"), B: T.Buffer((4,), "float32")):

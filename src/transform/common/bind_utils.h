@@ -5,6 +5,7 @@
 #ifndef TVM_TL_TRANSFORM_COMMON_BIND_UTILS_H_
 #define TVM_TL_TRANSFORM_COMMON_BIND_UTILS_H_
 
+#include <tvm/ir/type.h>
 #include <tvm/tirx/stmt.h>
 
 #include <unordered_set>
@@ -20,7 +21,15 @@ using BufferSet =
 inline bool IsReplayableScalarBind(const Stmt &stmt,
                                    const ffi::Array<BufferRegion> &reads,
                                    const BufferSet &write_buffers) {
-  if (stmt.as<BindNode>() == nullptr) {
+  const auto *bind = stmt.as<BindNode>();
+  if (bind == nullptr) {
+    return false;
+  }
+  if (!bind->var.dtype().is_scalar() || bind->var.dtype().is_handle() ||
+      bind->var->type_annotation.as<PointerTypeNode>()) {
+    return false;
+  }
+  if (!bind->value.dtype().is_scalar() || bind->value.dtype().is_handle()) {
     return false;
   }
   for (const BufferRegion &read : reads) {
