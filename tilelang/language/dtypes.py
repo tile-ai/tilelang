@@ -301,6 +301,36 @@ def is_float4(value: AnyDType) -> bool:
     return get_tvm_dtype(value).is_float4()
 
 
+def is_f8f6f4_family(value: AnyDType) -> bool:
+    """Whether *value* is a tcgen05 ``kind::f8f6f4`` / ``mxf8f6f4`` operand dtype."""
+    dt = get_tvm_dtype(value)
+    if dt.is_float4():
+        return True
+    name = str(dt)
+    return (dt.bits == 8 and name.startswith("float8")) or (
+        dt.bits == 6 and name.startswith("float6")
+    )
+
+
+def validate_gemm_ab_dtypes(
+    a_dtype: AnyDType, b_dtype: AnyDType, *, a_in_tmem: bool = False
+) -> None:
+    """Validate mixed A/B dtypes for GEMM tile ops.
+
+    TS variants (A in TMEM) skip validation because A/B dtypes may legitimately
+    differ. For SS/RS/SR, only f8f6f4-family mixed dtypes are allowed.
+    """
+    if a_in_tmem:
+        return
+    if a_dtype != b_dtype and not (
+        is_f8f6f4_family(a_dtype) and is_f8f6f4_family(b_dtype)
+    ):
+        raise ValueError(
+            f"Mixed-dtype GEMM only supports f8f6f4 family operands currently, "
+            f"got A={a_dtype}, B={b_dtype}"
+        )
+
+
 dtype.__call__ = __dtype_call__
 dtype.__new__ = __dtype_new__
 dtype.as_torch = __dtype_as_torch__
@@ -867,4 +897,6 @@ __all__ = list(_all_dtypes) + [
     "is_float4_e2m1fn",
     "is_float4_e2m1_unpacked",
     "is_float4",
+    "is_f8f6f4_family",
+    "validate_gemm_ab_dtypes",
 ]
