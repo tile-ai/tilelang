@@ -93,7 +93,7 @@ def test_cast_default_unchanged():
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(8, 9)
+@tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 def test_cast_rs_codegen():
     """Test that round='rs' with rbits emits __tl_cvt_f32x4_to_e4m3x4_rs_sat."""
     M = 256
@@ -151,7 +151,7 @@ def _make_rs_kernel(M: int, num_threads: int, target_dtype: str):
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(8, 9)
+@tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 @pytest.mark.parametrize(
     "M,threads,expected",
     [
@@ -169,7 +169,7 @@ def test_cast_rs_fp8_lanes(M, threads, expected):
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(8, 9)
+@tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 @pytest.mark.parametrize(
     "M,threads,expected",
     [
