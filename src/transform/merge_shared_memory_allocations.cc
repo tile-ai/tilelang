@@ -468,9 +468,6 @@ public:
   }
 
   void VisitExpr_(const CallNode *op) final {
-    TrackDescriptorInitialization(op);
-    RecordDescriptorBackedSharedReads(op);
-
     if (op->op.same_as(tl::access_ptr())) {
       ICHECK_EQ(op->args.size(), 3U);
       const auto *base_load = op->args[0].as<BufferLoadNode>();
@@ -546,96 +543,6 @@ public:
       }
     }
     ConstrVisitor::VisitExpr_(op);
-  }
-
-  void TrackDescriptorInitialization(const CallNode *op) {
-    if (!op->op.same_as(tl::initialize_wgmma_descriptor()) &&
-        !op->op.same_as(tl::initialize_tcgen05_descriptor())) {
-      return;
-    }
-    if (op->args.empty()) {
-      return;
-    }
-    const auto *descriptor = op->args[0].as<VarNode>();
-    if (descriptor == nullptr) {
-      return;
-    }
-
-    std::vector<const VarNode *> shared_vars;
-    auto collect_shared_var = [&](const VarNode *var) {
-      if (var == nullptr || var == descriptor) {
-        return;
-      }
-      auto it = alloc_info_.find(var);
-      if (it == alloc_info_.end() || !it->second.alloc) {
-        return;
-      }
-      if (!IsAppropriateSharedMemory(GetRef<Var>(var))) {
-        return;
-      }
-      if (std::find(shared_vars.begin(), shared_vars.end(), var) ==
-          shared_vars.end()) {
-        shared_vars.push_back(var);
-      }
-    };
-
-    for (size_t i = 1; i < op->args.size(); ++i) {
-      PostOrderVisit(op->args[i], [&](const ObjectRef &node) {
-        if (const auto *var = node.as<VarNode>()) {
-          collect_shared_var(var);
-        } else if (const auto *load = node.as<BufferLoadNode>()) {
-          collect_shared_var(load->buffer->data.get());
-        }
-      });
-    }
-    if (!shared_vars.empty()) {
-      auto &descriptor_vars = descriptor_shared_vars_[descriptor];
-      for (const VarNode *shared_var : shared_vars) {
-        PushUnique(&descriptor_vars, shared_var);
-      }
-    }
-  }
-
-  void RecordDescriptorBackedSharedReads(const CallNode *op) {
-    if (descriptor_shared_vars_.empty()) {
-      return;
-    }
-
-    std::vector<const VarNode *> shared_vars;
-    auto collect_descriptor = [&](const VarNode *var) {
-      auto it = descriptor_shared_vars_.find(var);
-      if (it == descriptor_shared_vars_.end()) {
-        return;
-      }
-      for (const VarNode *shared_var : it->second) {
-        if (std::find(shared_vars.begin(), shared_vars.end(), shared_var) ==
-            shared_vars.end()) {
-          shared_vars.push_back(shared_var);
-        }
-      }
-    };
-
-    for (const PrimExpr &arg : op->args) {
-      PostOrderVisit(arg, [&](const ObjectRef &node) {
-        if (const auto *var = node.as<VarNode>()) {
-          collect_descriptor(var);
-        }
-      });
-    }
-
-    for (const VarNode *shared_var : shared_vars) {
-      auto it = alloc_info_.find(shared_var);
-      if (it == alloc_info_.end() || !it->second.alloc) {
-        continue;
-      }
-      size_t access_level = enable_aggressive_merge_ || if_scope_depth_ > 0
-                                ? scope_.size() - 1
-                                : std::min(it->second.level, scope_.size() - 1);
-      RecordAccess(access_level, shared_var, false, op);
-      RecordPreciseAccess(
-          access_level,
-          MakePointerAccess(shared_var, shared_access_analysis::kRead), op);
-    }
   }
 
   template <typename T> void VisitNewScope(const T *op) {
@@ -779,10 +686,6 @@ private:
   ffi::Map<Var, Buffer> buffer_data_to_buffer_;
   // The scope stack.
   std::vector<StmtEntry> scope_;
-  // WGMMA/TCGEN descriptors capture shared-memory base pointers and later
-  // intrinsic calls read through the descriptor rather than the buffer Var.
-  std::unordered_map<const VarNode *, std::vector<const VarNode *>>
-      descriptor_shared_vars_;
   // The size of the scope.
   size_t scope_level_{0};
   // Whether we are currently traversing an if/else region.
@@ -3101,9 +3004,7 @@ private:
     const int seq_len = static_cast<int>(seq.size());
     for (const BufferLocalSegment &segment : segments) {
       int begin = std::max(0, segment.start_stmt);
-      int end = segment.end_kind == "tail"
-                    ? seq_len
-                    : std::min(segment.end_stmt, seq_len);
+      int end = std::min(segment.end_stmt, seq_len);
       int first_touch = -1;
       int last_touch = -1;
       for (int i = begin; i < end; ++i) {
