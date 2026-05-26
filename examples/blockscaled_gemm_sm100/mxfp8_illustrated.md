@@ -104,7 +104,9 @@ SFA_tmem: [128 lanes, 4 columns]
 SFB_tmem: [128 lanes, 8 columns]  # two 128-column N chunks
 ```
 
-During MMA issue, `sf_a_id = k % 4` and `sf_b_id = k % 4` select the active
+During MMA issue, the kernel passes `k_start = k * block_K` plus
+`sf_a_granularity_k = sf_b_granularity_k = 128`. The lowering derives the PTX
+scale-factor IDs as `(k_start / sf_granularity_k) % 4`, selecting the active
 byte sub-column from the packed `uint32` cell. This is why one SF TMA load
 serves four adjacent `block_K=128` MMA iterations.
 

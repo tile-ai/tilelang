@@ -121,7 +121,7 @@ public:
   mutable GemmWarpPolicy policy_;
   Map<String, ObjectRef> annotations_;
   BufferRegion sfaRegion_, sfbRegion_;
-  PrimExpr sfAId_, sfBId_;
+  PrimExpr sfKStart_;
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Gemm", GemmNode, TileOperatorNode);
 
@@ -154,8 +154,7 @@ public:
         .def_ro("annotations", &GemmNode::annotations_)
         .def_ro("sfaRegion", &GemmNode::sfaRegion_)
         .def_ro("sfbRegion", &GemmNode::sfbRegion_)
-        .def_ro("sfAId", &GemmNode::sfAId_)
-        .def_ro("sfBId", &GemmNode::sfBId_);
+        .def_ro("sfKStart", &GemmNode::sfKStart_);
   }
 
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;

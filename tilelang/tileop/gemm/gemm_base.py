@@ -8,6 +8,7 @@ from tvm import tirx
 from tilelang import language as T
 from tilelang.utils.language import is_shared, is_fragment, is_tensor_memory
 from tilelang.tileop.base import GemmWarpPolicy
+from tilelang.language.dtypes import validate_gemm_ab_dtypes
 from tvm.ir.base import Node
 from tvm.ir import PrimExpr
 
@@ -22,6 +23,11 @@ class GemmBase:
     """
 
     gemm_node: Node
+
+    def __post_init__(self) -> None:
+        validate_gemm_ab_dtypes(
+            self.A.dtype, self.B.dtype, a_in_tmem=is_tensor_memory(self.A)
+        )
 
     def infer_layout(self, target: Target, thread_nums: int):
         raise NotImplementedError("infer_layout is not implemented")
@@ -77,16 +83,14 @@ class GemmBase:
         return getattr(self.gemm_node, "transB", None)
 
     @property
-    def in_dtype(self) -> str:
-        """Input data type for the multiplication.
-
-        For the TS variant, A resides in TMEM with the accumulator dtype, so
-        the actual input dtype is derived from B.
-        """
-        if is_tensor_memory(self.A):
-            return self.B.dtype
-        assert self.A.dtype == self.B.dtype, "A and B must have the same dtype"
+    def a_dtype(self):
+        """A operand dtype."""
         return self.A.dtype
+
+    @property
+    def b_dtype(self):
+        """B operand dtype."""
+        return self.B.dtype
 
     @property
     def accum_dtype(self) -> str:
@@ -181,12 +185,8 @@ class GemmBase:
         return getattr(self.gemm_node, "sfbRegion", None)
 
     @property
-    def sf_a_id(self) -> PrimExpr:
-        return getattr(self.gemm_node, "sfAId", tvm.tirx.const(0, T.int32))
-
-    @property
-    def sf_b_id(self) -> PrimExpr:
-        return getattr(self.gemm_node, "sfBId", tvm.tirx.const(0, T.int32))
+    def sf_k_start(self) -> PrimExpr:
+        return getattr(self.gemm_node, "sfKStart", tvm.tirx.const(0, T.int32))
 
     @property
     def is_blockscaled(self) -> bool:
