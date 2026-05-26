@@ -2,6 +2,7 @@ import re
 
 from tilelang import tvm as tvm
 import tilelang
+import tilelang.language as TL
 import tilelang.testing
 from tvm.script import tirx as T
 
@@ -22,16 +23,6 @@ def _load_prim_func_from_source(source: str, file_name: str, func_name: str = "b
     return ns[func_name]
 
 
-def _buffer_plus_offsets_in_script(script: str, buffer_name: str) -> set[int]:
-    pattern = rf"{re.escape(buffer_name)}\[[^\]\n]*\+\s*(\d+)\]"
-    return {int(match.group(1)) for match in re.finditer(pattern, script)}
-
-
-def _buffer_constant_offsets_in_script(script: str, buffer_name: str) -> set[int]:
-    pattern = rf"{re.escape(buffer_name)}\[(\d+)\]"
-    return {int(match.group(1)) for match in re.finditer(pattern, script)}
-
-
 def _tvm_access_ptr_offsets(script: str) -> list[int]:
     pattern = r'T\.tvm_access_ptr\(T\.type_annotation\("[^"]+"\), [^,]+, (\d+), \d+, [123]\)'
     return [int(match.group(1)) for match in re.finditer(pattern, script)]
@@ -40,6 +31,14 @@ def _tvm_access_ptr_offsets(script: str) -> list[int]:
 def _access_ptr_offsets(script: str, buffer_name: str) -> list[int]:
     pattern = rf"T\.access_ptr\({re.escape(buffer_name)}\[(\d+)\], \d+, [12]\)"
     return [int(match.group(1)) for match in re.finditer(pattern, script)]
+
+
+def _handle_alias_offsets_in_script(script: str, buffer_name: str) -> list[int]:
+    pattern = (
+        rf"{re.escape(buffer_name)}: T\.handle\(\"[^\"]+\", \"shared(?:\.dyn)?\"\) = "
+        r"T\.handle_add_byte_offset\(buf_dyn_shmem\.data, (?:T\.int64\((\d+)\)|(\d+))\)"
+    )
+    return [int(match.group(1) or match.group(2)) for match in re.finditer(pattern, script)]
 
 
 @tilelang.testing.requires_cuda
@@ -82,7 +81,11 @@ def test_merge_dynamic_shared_reuses_non_overlapping_buffers():
     # Arena should contain all 3 buffers (128 * 2 * 3 = 768 bytes of float16 data, aligned to 512)
     assert "T.alloc_buffer((512,)" in after_s, after_s
     # All buffers should use the same buf_dyn_shmem
-    assert after_s.count("data=buf_dyn_shmem") >= 3 or after_s.count("data=buf_dyn_shmem.data") >= 3, after_s
+    assert (
+        after_s.count("T.handle_add_byte_offset(buf_dyn_shmem.data") >= 3
+        or after_s.count("data=buf_dyn_shmem") >= 3
+        or after_s.count("data=buf_dyn_shmem.data") >= 3
+    ), after_s
 
 
 @tilelang.testing.requires_cuda
@@ -149,9 +152,76 @@ def before(A: T.Tensor((16,), T.uint8), B: T.Tensor((16,), T.uint8)):
     after_s = after.script()
 
     assert 'buf_dyn_shmem = T.alloc_buffer((32,), "uint8", scope="shared.dyn")' in after_s
-    assert "T.ptx_cp_async(T.access_ptr(S0b[0], 16, 2), T.access_ptr(A_1[0], 16, 1), 16)" in after_s
-    assert "S1b[v_1 // 2 + 16] = S0b[v_1 // 2]" in after_s
-    assert "B_1[v_1 // 2] = S1b[v_1 // 2 + 16]" in after_s
+    assert 'S0b: T.handle("uint8", "shared.dyn") = T.handle_add_byte_offset(buf_dyn_shmem.data, 0)' in after_s
+    assert 'S1b: T.handle("uint8", "shared.dyn") = T.handle_add_byte_offset(buf_dyn_shmem.data, 16)' in after_s
+    assert "T.ptx_cp_async(T.access_ptr(S0b_1[0], 16, 2), T.access_ptr(A_1[0], 16, 1), 16)" in after_s
+    assert "S1b_1[v_1 // 2] = S0b_1[v_1 // 2]" in after_s
+    assert "B_1[v_1 // 2] = S1b_1[v_1 // 2]" in after_s
+
+
+@tilelang.testing.requires_cuda
+def test_merge_dynamic_shared_keeps_descriptor_sources_disjoint():
+    @TL.prim_func
+    def before(
+        A: TL.Tensor((2048,), TL.float16),
+        B: TL.Tensor((2048,), TL.float16),
+        C: TL.Tensor((32,), TL.float16),
+    ):
+        TL.launch_thread("blockIdx.x", 1)
+        tx = TL.launch_thread("threadIdx.x", 128)
+        TL.launch_thread("threadIdx.y", 1)
+        TL.launch_thread("threadIdx.z", 1)
+        A_shared = TL.alloc_buffer((2048,), "float16", scope="shared.dyn")
+        B_shared = TL.alloc_buffer((2048,), "float16", scope="shared.dyn")
+        desc_a = TL.decl_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        desc_b = TL.decl_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        C_local = TL.decl_buffer((32,), "float16", scope="local")
+        for i in TL.serial(0, 2048):
+            A_shared[i] = A[i]
+        for i in TL.serial(0, 2048):
+            B_shared[i] = B[i]
+        TL.initialize_wgmma_descriptor(
+            desc_a,
+            TL.tvm_access_ptr(TL.type_annotation("float16"), A_shared.data, 0, 4096, 1),
+            2,
+            1,
+            32,
+        )
+        TL.initialize_wgmma_descriptor(
+            desc_b,
+            TL.tvm_access_ptr(TL.type_annotation("float16"), B_shared.data, 0, 4096, 1),
+            2,
+            1,
+            32,
+        )
+        TL.ptx_wgmma_ss(
+            TL.float16,
+            "m64n64k16",
+            TL.bool(True),
+            TL.bool(True),
+            "fp16",
+            "fp16",
+            "fp16",
+            desc_a.data,
+            TL.int32(0),
+            desc_b.data,
+            TL.int32(0),
+            C_local.data,
+            TL.int32(0),
+            TL.bool(True),
+            1,
+            1,
+        )
+        C[tx // 4] = C_local[tx // 4]
+
+    mod = tvm.IRModule({"main": before.with_attr("global_symbol", "main")})
+    with tvm.target.Target("cuda"):
+        after = tilelang.transform.MergeSharedMemoryAllocations()(mod)["main"]
+    after_s = after.script()
+
+    assert 'buf_dyn_shmem = T.alloc_buffer((8192,), "uint8", scope="shared.dyn")' in after_s
+    assert _handle_alias_offsets_in_script(after_s, "A_shared") == [0]
+    assert _handle_alias_offsets_in_script(after_s, "B_shared") == [4096]
 
 
 @tilelang.testing.requires_cuda
@@ -178,10 +248,14 @@ def test_merge_dynamic_shared_lowbit_style_scratch_and_long_buffer_do_not_reuse_
     aggressive_s = aggressive.script()
 
     assert 'T.alloc_buffer((49152,), "uint8", scope="shared.dyn")' in baseline_s
-    assert "LongB[tx + 16384 + 16384] = ScratchB[tx]" in baseline_s
-    assert "MetaB[tx] = T.uint8(0)" in baseline_s
+    assert _handle_alias_offsets_in_script(baseline_s, "ScratchB") == [0]
+    assert _handle_alias_offsets_in_script(baseline_s, "LongB") == [32768]
+    assert "LongB_1[tx + 16384] = ScratchB_1[tx]" in baseline_s
+    assert "MetaB_1[tx] = T.uint8(0)" in baseline_s
     assert 'T.alloc_buffer((49152,), "uint8", scope="shared.dyn")' in aggressive_s
-    assert "LongB[tx + 16384 + 16384] = ScratchB[tx]" in aggressive_s
+    assert _handle_alias_offsets_in_script(aggressive_s, "ScratchB") == [0]
+    assert _handle_alias_offsets_in_script(aggressive_s, "LongB") == [32768]
+    assert "LongB_1[tx + 16384] = ScratchB_1[tx]" in aggressive_s
 
 
 @tilelang.testing.requires_cuda
@@ -212,8 +286,10 @@ def test_branch_exclusive_dynamic_buffers_only_shrink_under_aggressive_merge():
 
     assert 'T.alloc_buffer((32768,), "uint8", scope="shared.dyn")' in baseline_s
     assert 'T.alloc_buffer((32768,), "uint8", scope="shared.dyn")' in aggressive_s
-    assert "Yb[tx] = A[tx]" in baseline_s
-    assert "Yb[tx] = A[tx]" in aggressive_s
+    assert _handle_alias_offsets_in_script(baseline_s, "Yb") == [0]
+    assert "Yb_1[tx] = A[tx]" in baseline_s
+    assert _handle_alias_offsets_in_script(aggressive_s, "Yb") == [0]
+    assert "Yb_1[tx] = A[tx]" in aggressive_s
 
 
 @tilelang.testing.requires_cuda
@@ -245,7 +321,8 @@ def test_phase_boundary_sync_allows_dynamic_buffer_reuse():
     assert "T.ptx_commit_group()" in after_s
     assert "T.ptx_wait_group(0)" in after_s
     assert 'T.tvm_storage_sync("shared.dyn")' in after_s
-    assert "Yb[0] = A[1]" in after_s
+    assert _handle_alias_offsets_in_script(after_s, "Yb") == [0]
+    assert "Yb_1[0] = A[1]" in after_s
 
 
 @tilelang.testing.requires_cuda
@@ -285,10 +362,14 @@ def test_lowbit_like_staged_kv_phases_share_single_dynamic_arena():
     after_s = after.script()
 
     assert 'T.alloc_buffer((32,), "uint8", scope="shared.dyn")' in after_s
-    assert "KMetaB[0] = T.uint8(1)" in after_s
-    assert "KDataB[0] = A[0]" in after_s
-    assert "VMetaB[0] = T.uint8(2)" in after_s
-    assert "VDataB[0] = C[0]" in after_s
+    assert _handle_alias_offsets_in_script(after_s, "KMetaB") == [0]
+    assert _handle_alias_offsets_in_script(after_s, "KDataB") == [0]
+    assert _handle_alias_offsets_in_script(after_s, "VMetaB") == [0]
+    assert _handle_alias_offsets_in_script(after_s, "VDataB") == [0]
+    assert "KMetaB_1[0] = T.uint8(1)" in after_s
+    assert "KDataB_1[0] = A[0]" in after_s
+    assert "VMetaB_1[0] = T.uint8(2)" in after_s
+    assert "VDataB_1[0] = C[0]" in after_s
     assert after_s.count("T.ptx_wait_group(0)") == 3
     assert after_s.count('T.tvm_storage_sync("shared.dyn")') == 3
 
@@ -325,8 +406,9 @@ def test_repeated_phase_with_explicit_sync_is_not_yet_split_for_reuse():
     after_s = after.script()
 
     assert 'T.alloc_buffer((64,), "uint8", scope="shared.dyn")' in after_s
-    assert "Yb[16] = A[1]" in after_s
-    assert "C[0] = Yb[16]" in after_s
+    assert _handle_alias_offsets_in_script(after_s, "Yb") == [32]
+    assert "Yb_1[0] = A[1]" in after_s
+    assert "C[0] = Yb_1[0]" in after_s
     assert after_s.count("T.ptx_wait_group(0)") == 2
     assert after_s.count('T.tvm_storage_sync("shared.dyn")') == 2
 
@@ -361,8 +443,9 @@ def test_repeated_phased_dynamic_buffers_can_eventually_share_one_slot():
     aggressive_s = aggressive.script()
 
     assert 'T.alloc_buffer((64,), "uint8", scope="shared.dyn")' in aggressive_s
-    assert "C[i] = Yb[16]" in aggressive_s or "C[i] = Yb[0]" in aggressive_s
-    assert "D[i] = Yb[16]" in aggressive_s or "D[i] = Yb[0]" in aggressive_s
+    assert _handle_alias_offsets_in_script(aggressive_s, "Yb") == [32]
+    assert "C[i] = Yb_1[0]" in aggressive_s
+    assert "D[i] = Yb_1[0]" in aggressive_s
 
 
 @tilelang.testing.requires_cuda
@@ -399,8 +482,8 @@ def test_branch_alternative_write_and_zero_fill_keep_single_dynamic_offset():
     after = _run_merge_pass(before, aggressive=True)
     after_s = after.script()
 
-    norm_offsets = _buffer_plus_offsets_in_script(after_s, "NormB")
-    alt_offsets = _buffer_plus_offsets_in_script(after_s, "AltB")
+    norm_offsets = set(_handle_alias_offsets_in_script(after_s, "NormB"))
+    alt_offsets = set(_handle_alias_offsets_in_script(after_s, "AltB"))
 
     assert 'T.alloc_buffer((96,), "uint8", scope="shared.dyn")' in after_s
     assert len(norm_offsets) == 1
@@ -448,8 +531,8 @@ def test_nested_branch_alternatives_keep_single_offset_for_postdominating_read()
     after = _run_merge_pass(before, aggressive=True)
     after_s = after.script()
 
-    norm_offsets = _buffer_plus_offsets_in_script(after_s, "NormB")
-    alt_offsets = _buffer_plus_offsets_in_script(after_s, "AltB")
+    norm_offsets = set(_handle_alias_offsets_in_script(after_s, "NormB"))
+    alt_offsets = set(_handle_alias_offsets_in_script(after_s, "AltB"))
 
     assert 'T.alloc_buffer((96,), "uint8", scope="shared.dyn")' in after_s
     assert len(norm_offsets) == 1
@@ -497,9 +580,9 @@ def test_branch_alternative_fix_still_allows_later_slot_reuse():
     after = _run_merge_pass(before, aggressive=True)
     after_s = after.script()
 
-    norm_offsets = _buffer_plus_offsets_in_script(after_s, "NormB")
-    alt_offsets = _buffer_plus_offsets_in_script(after_s, "AltB")
-    tail_offsets = _buffer_plus_offsets_in_script(after_s, "TailB")
+    norm_offsets = set(_handle_alias_offsets_in_script(after_s, "NormB"))
+    alt_offsets = set(_handle_alias_offsets_in_script(after_s, "AltB"))
+    tail_offsets = set(_handle_alias_offsets_in_script(after_s, "TailB"))
 
     assert 'T.alloc_buffer((96,), "uint8", scope="shared.dyn")' in after_s
     assert len(norm_offsets) == 1
@@ -542,10 +625,12 @@ def before(A: T.Buffer((16,), "float16"), B: T.Buffer((16,), "float16")):
     after_s = after.script()
 
     assert 'buf_dyn_shmem = T.alloc_buffer((128,), "uint8", scope="shared.dyn")' in after_s
-    assert "T.writes(S0b[v + 32])" in after_s
-    assert "T.reads(S0b[v + 32])" in after_s
-    assert "T.writes(S1b[v + 48], B[v])" in after_s
-    assert "S1b[v + 48] = S0b[v + 32]" in after_s
+    assert _handle_alias_offsets_in_script(after_s, "S0b") == [64]
+    assert _handle_alias_offsets_in_script(after_s, "S1b") == [96]
+    assert "T.writes(S0b_1[v + 32])" in after_s
+    assert "T.reads(S0b_1[v + 32])" in after_s
+    assert "T.writes(S1b_1[v + 48], B[v])" in after_s
+    assert "S1b_2[v] = S0b_2[v]" in after_s
 
 
 @tilelang.testing.requires_cuda
@@ -582,12 +667,16 @@ def test_loop_carried_buffer_stays_disjoint_from_repeated_synced_stages():
 
     assert 'T.alloc_buffer((96,), "uint8", scope="shared.dyn")' in baseline_s
     assert 'T.alloc_buffer((96,), "uint8", scope="shared.dyn")' in aggressive_s
-    assert "Stage0B[16] = B[i]" in baseline_s
-    assert "Stage1B[32] = Stage0B[16]" in baseline_s
-    assert "D[0] = CarryB[0]" in baseline_s
-    assert "Stage0B[16] = B[i]" in aggressive_s
-    assert "Stage1B[32] = Stage0B[16]" in aggressive_s
-    assert "D[0] = CarryB[0]" in aggressive_s
+    assert _handle_alias_offsets_in_script(baseline_s, "Stage0B") == [32]
+    assert _handle_alias_offsets_in_script(baseline_s, "Stage1B") == [64]
+    assert "Stage0B_1[0] = B[i]" in baseline_s
+    assert "Stage1B_1[0] = Stage0B_1[0]" in baseline_s
+    assert "D[0] = CarryB_1[0]" in baseline_s
+    assert _handle_alias_offsets_in_script(aggressive_s, "Stage0B") == [32]
+    assert _handle_alias_offsets_in_script(aggressive_s, "Stage1B") == [64]
+    assert "Stage0B_1[0] = B[i]" in aggressive_s
+    assert "Stage1B_1[0] = Stage0B_1[0]" in aggressive_s
+    assert "D[0] = CarryB_1[0]" in aggressive_s
 
 
 @tilelang.testing.requires_cuda
@@ -616,11 +705,13 @@ def test_partial_subregion_live_ranges_do_not_overmerge_whole_buffers():
     aggressive_s = aggressive.script()
 
     assert 'T.alloc_buffer((128,), "uint8", scope="shared.dyn")' in baseline_s
-    assert "Yb[i + 32] = A[i]" in baseline_s
-    assert "B[i] = Yb[i + 32]" in baseline_s
+    assert _handle_alias_offsets_in_script(baseline_s, "Yb") == [64]
+    assert "Yb_1[i] = A[i]" in baseline_s
+    assert "B[i] = Yb_1[i]" in baseline_s
     assert 'T.alloc_buffer((128,), "uint8", scope="shared.dyn")' in aggressive_s
-    assert "Yb[i + 32] = A[i]" in aggressive_s
-    assert "B[i] = Yb[i + 32]" in aggressive_s
+    assert _handle_alias_offsets_in_script(aggressive_s, "Yb") == [64]
+    assert "Yb_1[i] = A[i]" in aggressive_s
+    assert "B[i] = Yb_1[i]" in aggressive_s
 
 
 @tilelang.testing.requires_cuda
@@ -650,8 +741,10 @@ def before(A: T.Buffer((16,), "float16"), B: T.Buffer((16,), "float16")):
     ptr_offsets = _tvm_access_ptr_offsets(after_s)
 
     assert 'buf_dyn_shmem = T.alloc_buffer((96,), "uint8", scope="shared.dyn")' in after_s
-    assert ptr_offsets == [32, 32, 32]
-    assert "B[0] = BaseB[0]" in after_s
+    assert _handle_alias_offsets_in_script(after_s, "S0b") == [64]
+    assert _handle_alias_offsets_in_script(after_s, "S1b") == [64]
+    assert ptr_offsets == [0, 0, 0]
+    assert "B[0] = BaseB_1[0]" in after_s
 
 
 @tilelang.testing.requires_cuda
@@ -690,9 +783,12 @@ def before(A: T.Tensor((32,), T.uint8), B: T.Tensor((32,), T.uint8), C: T.Tensor
     cp_offsets = _access_ptr_offsets(after_s, "S0b")
 
     assert 'buf_dyn_shmem = T.alloc_buffer((48,), "uint8", scope="shared.dyn")' in after_s
-    assert cp_offsets == [16, 16]
-    assert "S1b[32] = S0b[16]" in after_s
-    assert "C_1[2] = BaseB[0]" in after_s
+    assert _handle_alias_offsets_in_script(after_s, "S0b") == [16]
+    assert _handle_alias_offsets_in_script(after_s, "S1b") == [32]
+    assert cp_offsets == []
+    assert after_s.count("T.access_ptr(S0b_1[0], 16, 2)") == 2
+    assert "S1b_1[0] = S0b_1[0]" in after_s
+    assert "C_1[2] = BaseB_1[0]" in after_s
 
 
 @tilelang.testing.requires_cuda
@@ -729,17 +825,17 @@ def before(A: T.Buffer((8,), "float16"), B: T.Buffer((8,), "float16"), C: T.Buff
     func = _load_prim_func_from_source(src, "/tmp/merge_nested_loop_if_mix_case.py").with_attr("global_symbol", "main")
     after = _run_merge_pass(func, aggressive=True)
     after_s = after.script()
-    phase_offsets = _buffer_constant_offsets_in_script(after_s, "PhaseB")
-    tmp_offsets = _buffer_constant_offsets_in_script(after_s, "TmpB")
+    phase_offsets = set(_handle_alias_offsets_in_script(after_s, "PhaseB"))
+    tmp_offsets = set(_handle_alias_offsets_in_script(after_s, "TmpB"))
 
     assert 'T.alloc_buffer((96,), "uint8", scope="shared.dyn")' in after_s
-    assert phase_offsets == {16}
-    assert tmp_offsets == {32}
-    assert "PhaseB[16] = A[i]" in after_s
-    assert "PhaseB[16] = B[i]" in after_s
-    assert "PhaseB[16] = T.float16(0.0)" in after_s
-    assert "TmpB[32] = PhaseB[16]" in after_s
-    assert "D[0] = CarryB[0]" in after_s
+    assert phase_offsets == {32}
+    assert tmp_offsets == {64}
+    assert "PhaseB_1[0] = A[i]" in after_s
+    assert "PhaseB_1[0] = B[i]" in after_s
+    assert "PhaseB_1[0] = T.float16(0.0)" in after_s
+    assert "TmpB_1[0] = PhaseB_1[0]" in after_s
+    assert "D[0] = CarryB_1[0]" in after_s
 
 
 @tilelang.testing.requires_cuda
@@ -787,10 +883,10 @@ def test_merge_dynamic_shared_grows_arena_from_tail_when_freed_block_too_small()
     # X). The legacy free-list implementation produced 96 fp16 elements
     # (= 192 bytes) for Z (= bump past the freed Y slot), yielding a
     # 384-byte arena and a "+ 96" expression in the rewritten script.
-    y_offsets = _buffer_plus_offsets_in_script(after_s, "Yb")
-    z_offsets = _buffer_plus_offsets_in_script(after_s, "Zb")
-    assert y_offsets == {64}, after_s
-    assert z_offsets == {64}, after_s
+    y_offsets = set(_handle_alias_offsets_in_script(after_s, "Yb"))
+    z_offsets = set(_handle_alias_offsets_in_script(after_s, "Zb"))
+    assert y_offsets == {128}, after_s
+    assert z_offsets == {128}, after_s
     assert "+ 96" not in after_s, after_s
 
 
@@ -923,13 +1019,11 @@ def test_dynamic_size_buffer_fallback_does_not_incorrectly_alias():
     # Both buffers should be mapped onto the same buf_dyn_shmem (they are
     # sync-separated, so aliasing is safe even with dynamic size).
     assert after_s.count("buf_dyn_shmem") >= 3, after_s
-    # D starts at offset 0 (no D[x + N]) — it uses the base of buf_dyn_shmem.
-    assert "D[T.int64(16)]" in after_s
-    # F starts at offset 0 as well (shared slot).
-    assert "F[0]" in after_s
+    assert _handle_alias_offsets_in_script(after_s, "F") == [0]
+    assert _handle_alias_offsets_in_script(after_s, "D") == [32]
     # Sync separates the two live ranges; arena should contain both.
-    assert "D[T.int64(16)] = A[0]" in after_s
-    assert "F[0] = A[1]" in after_s
+    assert "D_1[0] = A[0]" in after_s
+    assert "F_1[0] = A[1]" in after_s
 
 
 @tilelang.testing.requires_cuda
@@ -974,7 +1068,6 @@ def test_general_cond_branch_alternatives_share_offset_with_postdom_buffer():
     # Arena = max(A, B, C) = 32 fp16 elems = 64 bytes (vs 128 on upstream).
     assert 'T.alloc_buffer((64,), "uint8", scope="shared.dyn")' in after_s, after_s
     # All three buffers must start at offset 0 (no '+ N' indices).
-    assert "Ab[0]" in after_s
-    assert "Bb[0]" in after_s
-    assert "Cb[0]" in after_s
-    assert "Bb[32]" not in after_s, after_s
+    assert _handle_alias_offsets_in_script(after_s, "Ab") == [0]
+    assert _handle_alias_offsets_in_script(after_s, "Bb") == [0]
+    assert _handle_alias_offsets_in_script(after_s, "Cb") == [0]
