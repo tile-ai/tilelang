@@ -58,9 +58,14 @@ class GemmSPBase:
         return self.E.dtype
 
     @property
-    def in_dtype(self) -> str:
+    def a_dtype(self):
         assert self.A.dtype == self.B.dtype, "A and B must have the same dtype"
         return self.A.dtype
+
+    @property
+    def b_dtype(self):
+        assert self.A.dtype == self.B.dtype, "A and B must have the same dtype"
+        return self.B.dtype
 
     @property
     def accum_dtype(self) -> str:
