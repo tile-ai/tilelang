@@ -15,7 +15,7 @@ from tilelang.engine.pass_pipeline import (
 )
 
 
-def lower_amd(mod: IRModule, target: Target) -> IRModule:
+def ROCMPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.BindTarget(target)(mod)
 
     if should_force_let_inline():
@@ -82,6 +82,6 @@ def lower_amd(mod: IRModule, target: Target) -> IRModule:
     return mod
 
 
-rocm_pipeline = Pipeline("hip", lower_amd)
+rocm_pipeline = Pipeline("hip", ROCMPassPipelineBody)
 
 register_pipeline(rocm_pipeline)
