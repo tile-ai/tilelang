@@ -1682,8 +1682,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     PrimExpr total_bytes;
     if ((*inner_box_dim) != instruction_dim) {
       int loop_extent = (*inner_box_dim) / instruction_dim;
-      total_bytes = TMATransactionBytesFromElements(total_elements * loop_extent,
-                                                    shared_tensor->dtype);
+      total_bytes = TMATransactionBytesFromElements(
+          total_elements * loop_extent, shared_tensor->dtype);
     } else {
       total_bytes =
           TMATransactionBytesFromElements(total_elements, shared_tensor->dtype);
