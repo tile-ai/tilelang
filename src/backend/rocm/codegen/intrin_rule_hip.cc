@@ -16,9 +16,9 @@ namespace intrin {
 using tirx::FLowerIntrinsic;
 using tirx::Shuffle;
 
-// HIP has no vectorized fp32 math builtins: exp2f et al. are scalar
+// HIP has no vectorized fp32 math builtins: exp2f etc. are scalar
 // (float exp2f(float)), with no exp2(float4)/float2 overload (only half2
-// has packed intrinsics like h2exp2). HIPMath/FloatSuffix therefore return
+// has packed intrinsics like h2exp2). HIPMath/FloatSuffix, therefore return
 // no name for non-scalar dtypes, leaving the op unlowered. Scalarize: lower
 // each lane to the scalar extern and re-pack with a shuffle; scalars fall
 // through to DispatchPureExtern unchanged. (CUDA does the equivalent in
