@@ -150,7 +150,4 @@ def test_fragment_layout_replicates_active_partition_to_full_block():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_loop_tail_split(64, 64, 32, 128, 8, T.float16)
-    test_copy_layout_uses_active_threads_for_ragged_thread_count()
-    test_fragment_layout_replicates_active_partition_to_full_block()
+    tilelang.testing.main()
