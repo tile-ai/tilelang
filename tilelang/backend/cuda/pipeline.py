@@ -40,9 +40,9 @@ def module_has_tma(mod: IRModule) -> bool:
 
 
 def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
-    mod = tirx.transform.BindTarget(target)(mod)
     pass_ctx = tilelang.transform.get_pass_context()
 
+    mod = tirx.transform.BindTarget(target)(mod)
     if should_force_let_inline():
         # Force-let inline whenever the pass config requests it.
         mod = tilelang.transform.LetInline()(mod)
