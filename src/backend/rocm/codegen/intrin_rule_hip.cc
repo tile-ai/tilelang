@@ -16,9 +16,12 @@ namespace intrin {
 using tirx::FLowerIntrinsic;
 using tirx::Shuffle;
 
-// HIP has no vector math builtins (exp2(float4) etc.), so a vectorized
-// math intrinsic must be scalarized: lower each lane to the scalar extern
-// and re-pack with a shuffle. Falls back to DispatchPureExtern for scalars.
+// HIP has no vectorized math builtins (no exp2(float4) etc.; the hip
+// templates only provide packed float2 arithmetic), and HIPMath/FloatSuffix
+// return no name for non-scalar dtypes, leaving the op unlowered. Scalarize:
+// lower each lane to the scalar extern and re-pack with a shuffle. Scalars
+// fall through to DispatchPureExtern unchanged. (CUDA does the equivalent in
+// codegen's PrintCallExtern; doing it in the lowering rule keeps HIP simple.)
 template <typename T, bool dtype_from_arg = false>
 inline PrimExpr DispatchPureExternScalarized(const PrimExpr &e) {
   const CallNode *call = e.as<CallNode>();
