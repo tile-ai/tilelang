@@ -1145,8 +1145,9 @@ def attention_kernel_1sm(
                 heads,
                 batch,
                 threads=kq2_threads,
+                cluster_dims=1,
             ) as (bx, by, bz):
-                T.annotate_min_blocks_per_sm(0)
+                T.annotate_min_blocks_per_sm(1)
                 Q0_shared = T.alloc_shared([kq2_block_M, dim], dtype)
                 Q1_shared = T.alloc_shared([kq2_block_M, dim], dtype)
                 K_shared_0 = T.alloc_shared([block_N, dim], dtype)
@@ -1256,9 +1257,9 @@ def attention_kernel_1sm(
                 #   warps 0-7   softmax    184 regs
                 #   warps 8-11  correction  64 regs
                 #   warps 12-15 mma/prod/epi/idle 80 regs
-                # The `tl.min_blocks_per_sm=0` annotation above emits
-                # __launch_bounds__(512, 0), allowing ptxas to size around the
-                # per-role setmaxnreg requests instead of the 64K/512 average.
+                # Avo uses __launch_bounds__(512, 1). Empirically this still
+                # preserves the per-role setmaxnreg donation while giving ptxas
+                # a slightly better scheduling target than minBlocks=0.
                 if tid < 256:
                     T.set_max_nreg(184, 1)
                 elif tid < 384:
