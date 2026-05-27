@@ -79,6 +79,17 @@ def __ldg(load_or_buf: BufferLoad | tirx.Buffer, index: PrimExpr | int | None = 
     raise TypeError("T.__ldg expects a BufferLoad or a Buffer.")
 
 
+def __ffs(value: int | PrimExpr) -> PrimExpr:
+    """Find the position of the least significant set bit.
+
+    Lowers to CUDA ``__ffs`` for 32-bit integer inputs and ``__ffsll`` for
+    64-bit integer inputs. The return value follows CUDA semantics: one-based
+    bit position, or 0 when ``value`` is zero.
+    """
+    value = tirx.convert(value)
+    return tirx.call_intrin("int32", tirx.op.Op.get("tl.__ffs"), value)
+
+
 def access_ptr(
     base: BufferLikeType,
     access_type: str | int = "r",
@@ -945,6 +956,35 @@ def sync_threads(barrier_id: int = None, arrive_count: int = None):
     if arrive_count is not None:
         args.append(arrive_count)
     return tirx.call_intrin("int32", "tirx.tvm_storage_sync", "shared", *args)
+
+
+def named_barrier_arrive(barrier_id, thread_count):
+    """CTA named barrier one-sided arrive (bar.arrive).
+
+    Signals that the calling threads have arrived at the named barrier without
+    waiting for other participants.  Unlike ``T.sync_threads(barrier_id, n)``
+    which maps to ``bar.sync`` (arrive + wait), this call only *arrives* and
+    returns immediately, allowing the calling warp group to continue working
+    while the other side waits.
+
+    This is useful in warp-specialized producer/consumer pipelines:
+
+    .. code-block:: python
+
+        # Producer warp group: signal readiness, keep going
+        T.named_barrier_arrive(ready_barrier, total_threads)
+
+        # Consumer warp group: block until producer has arrived
+        T.sync_threads(ready_barrier, total_threads)
+
+    Args:
+        barrier_id:   Named barrier index (0-15). May be a variable (PrimExpr).
+        thread_count: Total number of CTA threads participating in the barrier.
+                      May be a variable (PrimExpr).
+
+    Lowers to: ``asm volatile("bar.arrive %0, %1;" : : "r"(id), "r"(cnt));``
+    """
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.named_barrier_arrive"), barrier_id, thread_count)
 
 
 def sync_warp(mask: int = None):

@@ -56,13 +56,8 @@ def grouped_gemm_fwd(
 
 class _GroupedGEMM(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, a, b, batch_sizes):
-        block_M = 64
-        block_N = 64
-        block_K = 64
+    def forward(ctx, a, b, batch_sizes, block_M, block_N, block_K, num_stages, threads):
         padding_M = block_M
-        num_stages = 2
-        threads = 128
         batch_sum = a.shape[0]
         batch_count = b.shape[0]
         K = a.shape[1]
@@ -85,15 +80,20 @@ class _GroupedGEMM(torch.autograd.Function):
         ctx.batch_sum = batch_sum
         ctx.batch_count = batch_count
         ctx.K = K
+        ctx.block_M = block_M
+        ctx.block_N = block_N
+        ctx.block_K = block_K
+        ctx.num_stages = num_stages
+        ctx.threads = threads
         return o
 
     @staticmethod
     def backward(ctx, grad_output):
-        block_M = 64
-        block_N = 64
-        block_K = 64
-        num_stages = 2
-        threads = 128
+        block_M = ctx.block_M
+        block_N = ctx.block_N
+        block_K = ctx.block_K
+        num_stages = ctx.num_stages
+        threads = ctx.threads
 
         A, B, batch_sizes, batch_offsets = ctx.saved_tensors
 
@@ -105,7 +105,7 @@ class _GroupedGEMM(torch.autograd.Function):
         A, B, batch_sizes = [maybe_contiguous(x) for x in (A, B, batch_sizes)]
 
         dB = grouped_gemm_bwd(A, grad_output, batch_sizes, batch_offsets, block_M, block_N, block_K, num_stages, threads)
-        return None, dB, None
+        return None, dB, None, None, None, None, None, None
 
 
 def ref_program(a, b, batch_sizes):
@@ -182,7 +182,21 @@ def grouped_gemm_bwd(A, B, batch_sizes, batch_offsets, block_M, block_N, block_K
     return C
 
 
-def run_tilelang_grouped_gemm(batch_sizes_list, K, M, block_M):
+def run_tilelang_grouped_gemm(
+    batch_sizes_list,
+    K,
+    M,
+    block_M,
+    block_N,
+    block_K,
+    trans_b=False,
+    num_stages=2,
+    threads=128,
+    profile=False,
+):
+    if trans_b:
+        raise NotImplementedError("grouped GEMM backward example does not support transposed B")
+
     padding_M = block_M
     device = torch.device("cuda")
     dtype = torch.float16
@@ -198,7 +212,7 @@ def run_tilelang_grouped_gemm(batch_sizes_list, K, M, block_M):
     dB_ref, B.grad = B.grad.clone(), None
 
     GroupedGEMM = _GroupedGEMM.apply
-    O = GroupedGEMM(A, B, batch_sizes)
+    O = GroupedGEMM(A, B, batch_sizes, block_M, block_N, block_K, num_stages, threads)
     O.backward(dO, retain_graph=True)
     dB, B.grad = B.grad.clone(), None
 
@@ -206,6 +220,12 @@ def run_tilelang_grouped_gemm(batch_sizes_list, K, M, block_M):
         print("✅ Tilelang and Torch match")
     else:
         print("❌ Tilelang and Torch mismatch")
+
+    if profile:
+        from tilelang.profiler import do_bench
+
+        latency = do_bench(lambda: GroupedGEMM(A, B, batch_sizes, block_M, block_N, block_K, num_stages, threads))
+        print(f"Latency: {latency} ms")
 
 
 if __name__ == "__main__":
@@ -219,5 +239,9 @@ if __name__ == "__main__":
     K, M = args.K, args.M
 
     block_M = 64
+    block_N = 128
+    block_K = 64
+    num_stages = 2
+    threads = 256
 
-    run_tilelang_grouped_gemm(batch_sizes_list, K, M, block_M)
+    run_tilelang_grouped_gemm(batch_sizes_list, K, M, block_M, block_N, block_K, False, num_stages, threads)

@@ -12,6 +12,7 @@ from tilelang import env
 from tilelang.engine.param import CompiledArtifact, KernelParam
 from tilelang.jit.adapter import (
     BaseKernelAdapter,
+    CachedTextSource,
     CythonKernelAdapter,
     CuTeDSLKernelAdapter,
     TVMFFIKernelAdapter,
@@ -144,8 +145,8 @@ class JITKernel(Generic[_P, _T]):
     def from_database(
         cls,
         func: PrimFunc,
-        host_kernel_source: str,
-        device_kernel_source: str,
+        host_kernel_source: CachedTextSource,
+        device_kernel_source: CachedTextSource,
         kernel_lib_path: str,
         params: list[KernelParam],
         target: str | Target,
@@ -343,8 +344,8 @@ class JITKernel(Generic[_P, _T]):
         result_idx: list[int] | int,
         target: str | Target,
         func_or_mod: PrimFunc | tvm.runtime.Module,
-        host_kernel_source: str,
-        device_kernel_source: str,
+        host_kernel_source: CachedTextSource,
+        device_kernel_source: CachedTextSource,
         kernel_lib_path: str,
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
@@ -623,11 +624,21 @@ class JITKernel(Generic[_P, _T]):
 
     @property
     def kernel_source(self) -> str:
-        return self.artifact.kernel_source if self.artifact else self.adapter.kernel_global_source
+        if self.artifact:
+            return self.artifact.kernel_source
+        source = getattr(self.adapter, "kernel_global_source", None)
+        if source is not None:
+            return source
+        return self.adapter.get_kernel_source(kernel_only=True) or ""
 
     @property
     def host_source(self) -> str:
-        return str(self.artifact.host_mod) if self.artifact else ""
+        if self.artifact:
+            return str(self.artifact.host_mod)
+        get_host_source = getattr(self.adapter, "get_host_source", None)
+        if get_host_source is None:
+            return ""
+        return get_host_source() or ""
 
     @property
     def resource_usage(self) -> dict[str, Any]:

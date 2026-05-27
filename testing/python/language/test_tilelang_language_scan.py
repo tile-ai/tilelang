@@ -5,6 +5,12 @@ import torch
 import tilelang.language as T
 
 
+def _torch_cummax(chunk, dim, reverse):
+    if reverse:
+        return torch.flip(torch.flip(chunk, dims=[dim]).cummax(dim=dim).values, dims=[dim])
+    return chunk.cummax(dim=dim).values
+
+
 def cumsum_smem_test(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32):
     @T.prim_func
     def cumsum(
@@ -147,6 +153,8 @@ def test_cumsum_smem():
     run_cumsum(256, 256, 64, 64)
     run_cumsum(256, 256, 64, 64, dim=1)
     run_cumsum(256, 256, 64, 64, dim=1, reverse=True)
+    run_cumsum(192, 160, 64, 32, dim=0)
+    run_cumsum(192, 160, 64, 32, dim=0, reverse=True)
 
     # Test different dtypes
     run_cumsum(128, 128, 64, 64, dtype=T.float32)
@@ -302,6 +310,173 @@ def test_cumsum_region_2d():
     run_cumsum_region_2d(192, 192, 64, 64, dim=1, reverse=True)
     # Tail coverage (non-divisible size)
     run_cumsum_region_2d(250, 250, 64, 64, dim=1)
+
+
+def cummax_smem_test(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32):
+    @T.prim_func
+    def cummax(
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M, N), dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=256) as (bx, by):
+            A_shared = T.alloc_shared((block_M, block_N), dtype)
+
+            T.copy(A[by * block_M, bx * block_N], A_shared)
+            T.cummax(src=A_shared, dim=dim, reverse=reverse)
+            T.copy(A_shared, B[by * block_M, bx * block_N])
+
+    return cummax
+
+
+def cummax_fragment_test(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32):
+    @T.prim_func
+    def cummax(
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M, N), dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=256) as (bx, by):
+            A_shared = T.alloc_shared((block_M, block_N), dtype)
+            A_fragment = T.alloc_fragment((block_M, block_N), dtype)
+
+            T.copy(A[by * block_M, bx * block_N], A_shared)
+            T.copy(A_shared, A_fragment)
+            T.cummax(src=A_fragment, dim=dim, reverse=reverse)
+            T.copy(A_fragment, B[by * block_M, bx * block_N])
+
+    return cummax
+
+
+def cummax_smem_out_test(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32):
+    @T.prim_func
+    def cummax(
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M, N), dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=256) as (bx, by):
+            A_shared = T.alloc_shared((block_M, block_N), dtype)
+            B_shared = T.alloc_shared((block_M, block_N), dtype)
+
+            T.copy(A[by * block_M, bx * block_N], A_shared)
+            T.cummax(src=A_shared, dst=B_shared, dim=dim, reverse=reverse)
+            T.copy(B_shared, B[by * block_M, bx * block_N])
+
+    return cummax
+
+
+def run_cummax(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32, scope="smem"):
+    if scope == "smem":
+        program = cummax_smem_test(M, N, block_M, block_N, dim, reverse, dtype)
+    elif scope == "fragment":
+        program = cummax_fragment_test(M, N, block_M, block_N, dim, reverse, dtype)
+    elif scope == "smem_out":
+        program = cummax_smem_out_test(M, N, block_M, block_N, dim, reverse, dtype)
+    else:
+        raise ValueError(f"Unknown scope {scope}")
+    jit_kernel = tl.compile(program, out_idx=-1)
+
+    A = torch.randn(M, N, dtype=getattr(torch, dtype)).cuda()
+
+    def ref_program(A):
+        ref_b = torch.empty_like(A)
+        for i in range((M + block_M - 1) // block_M):
+            for j in range((N + block_N - 1) // block_N):
+                start_m = i * block_M
+                end_m = min(start_m + block_M, M)
+                start_n = j * block_N
+                end_n = min(start_n + block_N, N)
+                ref_b[start_m:end_m, start_n:end_n] = _torch_cummax(A[start_m:end_m, start_n:end_n], dim, reverse)
+        return ref_b
+
+    tilelang_res = jit_kernel(A)
+    ref_res = ref_program(A)
+    torch.testing.assert_close(tilelang_res, ref_res, atol=1e-3, rtol=1e-3)
+
+
+def cummax_smem_test_1d(N, block_N, reverse=False, dtype=T.float32):
+    @T.prim_func
+    def cummax(
+        A: T.Tensor((N,), dtype),
+        B: T.Tensor((N,), dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
+            A_shared = T.alloc_shared((block_N,), dtype)
+
+            T.copy(A[bx * block_N], A_shared)
+            T.cummax(src=A_shared, dim=0, reverse=reverse)
+            T.copy(A_shared, B[bx * block_N])
+
+    return cummax
+
+
+def cummax_fragment_test_1d(N, block_N, reverse=False, dtype=T.float32):
+    @T.prim_func
+    def cummax(
+        A: T.Tensor((N,), dtype),
+        B: T.Tensor((N,), dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
+            A_shared = T.alloc_shared((block_N,), dtype)
+            A_fragment = T.alloc_fragment((block_N,), dtype)
+
+            T.copy(A[bx * block_N], A_shared)
+            T.copy(A_shared, A_fragment)
+            T.cummax(src=A_fragment, dim=0, reverse=reverse)
+            T.copy(A_fragment, B[bx * block_N])
+
+    return cummax
+
+
+def run_cummax_1d(N, block_N, reverse=False, dtype=T.float32, scope="smem"):
+    if scope == "smem":
+        program = cummax_smem_test_1d(N, block_N, reverse, dtype)
+    elif scope == "fragment":
+        program = cummax_fragment_test_1d(N, block_N, reverse, dtype)
+    else:
+        raise ValueError(f"Unknown scope {scope}")
+
+    jit_kernel = tl.compile(program, out_idx=-1)
+    A = torch.randn(N, dtype=getattr(torch, dtype)).cuda()
+
+    def ref_program(A):
+        ref_b = torch.empty_like(A)
+        num_blocks = (N + block_N - 1) // block_N
+        for j in range(num_blocks):
+            start = j * block_N
+            end = min(start + block_N, N)
+            ref_b[start:end] = _torch_cummax(A[start:end], 0, reverse)
+        return ref_b
+
+    tilelang_res = jit_kernel(A)
+    ref_res = ref_program(A)
+    torch.testing.assert_close(tilelang_res, ref_res, atol=1e-3, rtol=1e-3)
+
+
+def test_cummax_smem():
+    run_cummax(256, 256, 64, 64)
+    run_cummax(256, 256, 64, 64, dim=1)
+    run_cummax(256, 256, 64, 64, dim=1, reverse=True)
+    run_cummax(192, 160, 64, 32, dim=0)
+    run_cummax(192, 160, 64, 32, dim=0, reverse=True)
+
+
+def test_cummax_fragment():
+    run_cummax(256, 256, 64, 64, scope="fragment")
+    run_cummax(256, 256, 64, 64, dim=1, scope="fragment")
+    run_cummax(256, 256, 64, 64, dim=1, reverse=True, scope="fragment")
+
+
+def test_cummax_out_of_place():
+    run_cummax(128, 128, 64, 64, dim=1, scope="smem_out")
+
+
+def test_cummax_smem_1d():
+    run_cummax_1d(512, 64)
+    run_cummax_1d(512, 64, reverse=True)
+
+
+def test_cummax_fragment_1d():
+    run_cummax_1d(512, 64, scope="fragment")
+    run_cummax_1d(512, 64, reverse=True, scope="fragment")
 
 
 if __name__ == "__main__":

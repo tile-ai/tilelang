@@ -52,8 +52,8 @@ def matmul_tma_copy(
                 T.barrier_arrive(mbar_A)
                 T.tma_copy(B[k * block_K, bx * block_N], B_shared, barrier=mbar_B)
                 T.barrier_arrive(mbar_B)
-                T.mbarrier_wait_parity(mbar_A, k % 2)
-                T.mbarrier_wait_parity(mbar_B, k % 2)
+                T.barrier_wait(mbar_A, k % 2)
+                T.barrier_wait(mbar_B, k % 2)
                 T.gemm(A_shared, B_shared, C_local)
             T.copy(C_local, C[by * block_M, bx * block_N])
 
@@ -108,6 +108,71 @@ def test_tma_copy_pipeline_2_stages():
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_tma_copy_pipeline_3_stages():
     run_gemm_tma_copy(num_stages=3)
+
+
+def per_warp_tma_copy_kernel():
+    M = 32
+    K = 1024
+    num_threads = 256
+    warp_size = 32
+    num_warps = num_threads // warp_size
+
+    @T.prim_func
+    def main(A: T.Tensor((M, K), T.float32), B: T.Tensor((M,), T.float32)):
+        with T.Kernel(T.ceildiv(M, num_warps), threads=num_threads) as pid:
+            tid = T.get_thread_binding()
+            warp_idx = tid // warp_size
+            row = pid * num_warps + warp_idx
+            a_shared = T.alloc_shared((num_warps, K), dtype=T.float32)
+            mbars = T.alloc_barrier([warp_size] * num_warps)
+            T.tma_copy(
+                A[row, 0:K],
+                a_shared[warp_idx, 0:K],
+                barrier=mbars[warp_idx],
+                leader_scope_threads=warp_size,
+            )
+            T.mbarrier_arrive(mbarrier=mbars[warp_idx])
+            T.mbarrier_wait_parity(mbarrier=mbars[warp_idx], parity=0)
+            if tid % warp_size == 0:
+                B[row] = a_shared[warp_idx, 0]
+
+    return main
+
+
+def block_tma_copy_kernel():
+    M = 256
+    K = 1024
+    num_threads = 256
+
+    @T.prim_func
+    def main(A: T.Tensor((M, K), T.float32), B: T.Tensor((1,), T.float32)):
+        with T.Kernel(T.ceildiv(M, num_threads), threads=num_threads) as pid:
+            tid = T.get_thread_binding()
+            a_shared = T.alloc_shared((1, K), dtype=T.float32)
+            mbar = T.alloc_barrier([num_threads])
+            T.tma_copy(A[pid, 0:K], a_shared[0, 0:K], barrier=mbar)
+            T.mbarrier_arrive(mbarrier=mbar)
+            T.mbarrier_wait_parity(mbarrier=mbar, parity=0)
+            if tid == 0:
+                B[pid] = a_shared[0, 0]
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tma_copy_per_warp_leader_scope_codegen():
+    kernel = tilelang.compile(per_warp_tma_copy_kernel(), out_idx=[1])
+    source = kernel.get_kernel_source()
+    assert "tl_shuffle_elect<32>()" in source, "Expected per-warp elect<32>"
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tma_copy_default_block_leader_scope_codegen():
+    kernel = tilelang.compile(block_tma_copy_kernel(), out_idx=[1])
+    source = kernel.get_kernel_source()
+    assert "tl_shuffle_elect<256>()" in source, "Expected block-wide elect<256>"
 
 
 def matmul_tma_copy_store(

@@ -5,12 +5,14 @@
  * Provides:
  *  - Pipeline annotation attribute keys
  *  - GetPipelineNumStages()  — extract num_stages from loop annotations
+ *  - IsPipelineDeclarationStmt() — identify non-stage buffer declarations
  *  - ComputeThreadBounds()  — derive thread bounds from an analyzer + IterVar
  */
 #ifndef TVM_TL_TRANSFORM_COMMON_PIPELINE_UTILS_H_
 #define TVM_TL_TRANSFORM_COMMON_PIPELINE_UTILS_H_
 
 #include "support/check.h"
+#include <tvm/arith/analyzer.h>
 #include <tvm/ir/cast.h>
 #include <tvm/s_tir/stmt.h>
 #include <tvm/tirx/stmt.h>
@@ -48,6 +50,37 @@ static constexpr const char *kPipelineAsyncProducerGroups =
 /*! Per-original-statement replayable scalar Bind flag (1 = replayable). */
 static constexpr const char *kPipelineReplayableScalarBinds =
     "software_pipeline_replayable_scalar_binds";
+
+/*! \brief Whether a flat TIRX statement declares pipeline-local buffer storage.
+ *
+ * Flat TIRX represents buffer allocations/declarations as standalone
+ * statements. They must stay in the loop body so later rewrites can preserve
+ * storage, but they are declarations rather than executable pipeline stages.
+ */
+inline bool IsPipelineDeclarationStmt(const Stmt &stmt) {
+  return stmt.as<AllocBufferNode>() != nullptr ||
+         stmt.as<DeclBufferNode>() != nullptr;
+}
+
+/*! \brief Return the top-level statement stream for a pipeline loop body.
+ *
+ * IfStmtBinding may preserve an if-body that starts with Bind as a single
+ * IfThenElse, so a valid pipeline body is not necessarily a SeqStmt. Keep the
+ * downstream planning code Array-based and only reconstruct SeqStmt when there
+ * are multiple children.
+ */
+inline ffi::Array<Stmt> NormalizePipelineBody(const Stmt &body) {
+  if (const auto *seq = body.as<SeqStmtNode>()) {
+    return seq->seq;
+  }
+  return ffi::Array<Stmt>{body};
+}
+
+/*! \brief Build a valid TIRX statement from a pipeline statement stream. */
+inline Stmt MakePipelineBody(const ffi::Array<Stmt> &stmts) {
+  ICHECK(!stmts.empty());
+  return stmts.size() == 1 ? stmts[0] : SeqStmt(stmts);
+}
 
 // ---------------------------------------------------------------------------
 // GetPipelineNumStages

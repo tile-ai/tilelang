@@ -23,6 +23,7 @@
 #include "codegen_metal.h"
 
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/tirx/transform.h>
 
 #include <algorithm>
@@ -32,9 +33,9 @@
 #include <unordered_map>
 #include <utility>
 
-#include "runtime/metal/metal_module.h"
 #include "runtime/thread_storage_scope.h"
 #include "target/build_common.h"
+#include "target/metal/metal_fallback_module.h"
 
 namespace tvm {
 namespace codegen {
@@ -523,8 +524,11 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
     smap.Set(func_name, ffi::Bytes(std::move(fsource)));
   }
 
-  return MetalModuleCreate(std::move(smap), ExtractFuncInfo(mod),
-                           ffi::String(fmt), ffi::String(source_maker.str()));
+  ffi::Map<ffi::String, ffi::String> source;
+  source.Set("metal", source_maker.str());
+  return tvm::target::MetalModuleCreateWithFallback(
+      std::move(smap), ffi::String(fmt), ExtractFuncInfo(mod),
+      std::move(source));
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
