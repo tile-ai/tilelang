@@ -16,11 +16,12 @@ namespace intrin {
 using tirx::FLowerIntrinsic;
 using tirx::Shuffle;
 
-// HIP has no vectorized math builtins (no exp2(float4) etc.; the hip
-// templates only provide packed float2 arithmetic), and HIPMath/FloatSuffix
-// return no name for non-scalar dtypes, leaving the op unlowered. Scalarize:
-// lower each lane to the scalar extern and re-pack with a shuffle. Scalars
-// fall through to DispatchPureExtern unchanged. (CUDA does the equivalent in
+// HIP has no vectorized fp32 math builtins: exp2f et al. are scalar
+// (float exp2f(float)), with no exp2(float4)/float2 overload (only half2
+// has packed intrinsics like h2exp2). HIPMath/FloatSuffix therefore return
+// no name for non-scalar dtypes, leaving the op unlowered. Scalarize: lower
+// each lane to the scalar extern and re-pack with a shuffle; scalars fall
+// through to DispatchPureExtern unchanged. (CUDA does the equivalent in
 // codegen's PrintCallExtern; doing it in the lowering rule keeps HIP simple.)
 template <typename T, bool dtype_from_arg = false>
 inline PrimExpr DispatchPureExternScalarized(const PrimExpr &e) {
