@@ -29,6 +29,8 @@
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
 
+#include <cstdint>
+
 #include "../layout/layout.h"
 #include "../op/operator.h"
 
@@ -43,8 +45,14 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
 Fragment PlanLoopPartition(const For &op, size_t num_thread,
                            int vectorize_size);
 
+int64_t SelectActiveThreadExtent(const For &op, int64_t max_num_thread,
+                                 int vectorize_size, arith::Analyzer *analyzer,
+                                 bool require_full_thread_replication = false);
+
 Fragment PlanLoopPartition(const For &op, int vectorize_size,
-                           const Range &thread_range);
+                           const Range &thread_range,
+                           arith::Analyzer *analyzer = nullptr,
+                           bool require_full_thread_replication = false);
 
 For PragmaUnrollLoop(For stmt);
 

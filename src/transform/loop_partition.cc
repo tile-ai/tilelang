@@ -25,6 +25,7 @@
 #include "loop_partition.h"
 #include "support/check.h"
 #include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
 
 #include <tvm/tirx/stmt_functor.h>
 
@@ -192,8 +193,12 @@ class LoopPartitioner : public StmtExprVisitor {
 public:
   LoopPartitioner() = default;
 
-  Fragment Partition(const For &op, int num_thread, int vectorize_size) {
+  Fragment Partition(const For &op, int num_thread, int vectorize_size,
+                     int replicate_num_thread = -1) {
     this->VisitStmt(op);
+    if (replicate_num_thread < 0) {
+      replicate_num_thread = num_thread;
+    }
     DataType dtype = DataType::Int(32);
     if (!loop_vars_.empty()) {
       dtype = loop_vars_.back()->var.dtype();
@@ -212,9 +217,14 @@ public:
 
     auto fragment = Fragment(loop_vars_, {idx}, {thd}, {});
     if (has_fragment_) {
-      // for fragment buffer, we don't need to replicate the loop layout
+      // Fragment loops need a layout for the whole block. Build the base
+      // partition with active threads, then replicate it across the full block
+      // when the active width is a factor of the block size.
       auto thread_extent = *as_const_int(fragment->ThreadExtent());
-      auto num_thread_fragment = num_thread / thread_extent;
+      ICHECK_EQ(replicate_num_thread % thread_extent, 0)
+          << "Cannot replicate fragment loop layout with thread extent "
+          << thread_extent << " across " << replicate_num_thread << " threads";
+      auto num_thread_fragment = replicate_num_thread / thread_extent;
       fragment = fragment->Replicate(num_thread_fragment);
     }
     return fragment;
@@ -251,6 +261,63 @@ private:
   Array<IterVar> loop_vars_;
 };
 
+class LoopPartitionFragmentAccessDetector : public StmtExprVisitor {
+public:
+  bool HasFragmentAccess(const For &op) {
+    VisitStmt(op);
+    return has_fragment_;
+  }
+
+private:
+  void VisitExpr_(const BufferLoadNode *op) final {
+    if (IsFragmentBuffer(op->buffer)) {
+      has_fragment_ = true;
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitStmt_(const BufferStoreNode *op) final {
+    if (IsFragmentBuffer(op->buffer)) {
+      has_fragment_ = true;
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  bool has_fragment_ = false;
+};
+
+static PrimExpr ComputeLoopTotalSize(const For &op) {
+  PrimExpr loop_total_size = 1;
+  for (Stmt l = op; l.as<For>().has_value(); l = l.as<For>().value()->body) {
+    loop_total_size = loop_total_size * l.as<For>().value()->extent;
+  }
+  return loop_total_size;
+}
+
+int64_t SelectActiveThreadExtent(const For &op, int64_t max_num_thread,
+                                 int vectorize_size, arith::Analyzer *analyzer,
+                                 bool require_full_thread_replication) {
+  ICHECK_GT(max_num_thread, 0);
+  ICHECK_GT(vectorize_size, 0);
+
+  arith::Analyzer local_analyzer;
+  arith::Analyzer *az = analyzer != nullptr ? analyzer : &local_analyzer;
+  PrimExpr loop_total_size = ComputeLoopTotalSize(op);
+
+  for (int64_t active_threads = max_num_thread; active_threads >= 1;
+       --active_threads) {
+    if (require_full_thread_replication &&
+        max_num_thread % active_threads != 0) {
+      continue;
+    }
+    PrimExpr partition_width = Integer(active_threads * vectorize_size);
+    if (az->CanProve(floormod(loop_total_size, partition_width) == 0)) {
+      return active_threads;
+    }
+  }
+  return 0;
+}
+
 Fragment PlanLoopPartition(const For &op, size_t num_thread,
                            int vectorize_size) {
   LoopPartitioner partitioner;
@@ -258,10 +325,38 @@ Fragment PlanLoopPartition(const For &op, size_t num_thread,
 }
 
 Fragment PlanLoopPartition(const For &op, int vectorize_size,
-                           const Range &thread_range) {
-  size_t num_thread = *as_const_int(thread_range->extent);
+                           const Range &thread_range, arith::Analyzer *analyzer,
+                           bool require_full_thread_replication) {
+  const int64_t *num_thread_ptr = as_const_int(thread_range->extent);
+  ICHECK(num_thread_ptr != nullptr)
+      << "PlanLoopPartition requires constant thread extent, got "
+      << thread_range;
+  int64_t num_thread = *num_thread_ptr;
+  bool needs_full_thread_replication =
+      require_full_thread_replication ||
+      LoopPartitionFragmentAccessDetector().HasFragmentAccess(op);
+  int64_t active_threads = SelectActiveThreadExtent(
+      op, num_thread, vectorize_size, analyzer, needs_full_thread_replication);
+  ICHECK_NE(active_threads, 0)
+      << "Cannot find an active thread extent <= " << num_thread
+      << " that evenly partitions loop_total_size=" << ComputeLoopTotalSize(op)
+      << " with vector_size=" << vectorize_size;
+  if (active_threads != num_thread) {
+    if (needs_full_thread_replication) {
+      DLOG(INFO) << "[PlanLoopPartition] using " << active_threads
+                 << "-thread fragment partition replicated across "
+                 << num_thread << " block threads.";
+    } else {
+      DLOG(INFO) << "[PlanLoopPartition] using " << active_threads
+                 << " active threads out of " << num_thread
+                 << " to avoid a ragged loop layout.";
+    }
+  }
   LoopPartitioner partitioner;
-  Fragment fragment = partitioner.Partition(op, num_thread, vectorize_size);
+  Fragment fragment = partitioner.Partition(
+      op, static_cast<int>(active_threads), vectorize_size,
+      needs_full_thread_replication ? static_cast<int>(num_thread)
+                                    : static_cast<int>(active_threads));
   return fragment->BindThreadRange(thread_range);
 }
 

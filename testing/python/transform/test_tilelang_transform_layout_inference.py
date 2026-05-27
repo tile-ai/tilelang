@@ -100,6 +100,54 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
         # tvm.ir.assert_structural_equal(mod, ref_mod)
 
 
+def test_copy_layout_uses_active_threads_for_ragged_thread_count():
+    block_M = 256
+    block_N = 128
+    threads = 384
+    dtype = T.bfloat16
+
+    @T.prim_func
+    def main(
+        Bias: T.Tensor((block_M, block_N), dtype),
+        C: T.Tensor((block_M, block_N), dtype),
+    ):
+        with T.Kernel(1, 1, threads=threads) as (bx, by):
+            Bias_shared = T.alloc_shared((block_M, block_N), dtype)
+            T.copy(Bias[0:block_M, 0:block_N], Bias_shared)
+            T.copy(Bias_shared, C[0:block_M, 0:block_N])
+
+    with tvm.target.Target(auto_target):
+        mod = tvm.IRModule({"main": main})
+        mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+        tl.transform.LayoutInference()(mod)
+
+
+def test_fragment_layout_replicates_active_partition_to_full_block():
+    threads = 96
+    hc_mult3 = 24
+    dtype = T.float32
+
+    @T.prim_func
+    def main(
+        Gemm: T.Tensor((hc_mult3,), dtype),
+        Out: T.Tensor((hc_mult3,), dtype),
+    ):
+        with T.Kernel(1, threads=threads) as _:
+            rms = T.alloc_fragment(1, dtype)
+            mixes = T.alloc_fragment(hc_mult3, dtype)
+            T.clear(mixes)
+            rms[0] = 0
+            for j in T.Parallel(hc_mult3):
+                mixes[j] = Gemm[j] + rms[0]
+            mixes_shared = T.alloc_shared(hc_mult3, dtype)
+            T.copy(mixes, mixes_shared)
+            T.copy(mixes_shared, Out[0:hc_mult3])
+
+    with tvm.target.Target(auto_target):
+        mod = tvm.IRModule({"main": main})
+        mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+        tl.transform.LayoutInference()(mod)
+
+
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_loop_tail_split(64, 64, 32, 128, 8, T.float16)
+    tilelang.testing.main()
