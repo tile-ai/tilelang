@@ -39,9 +39,7 @@ def module_has_tma(mod: IRModule) -> bool:
     return any(func.attrs and func.attrs.get("tl.has_tma", False) for _, func in mod.functions.items())
 
 
-def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
-    pass_ctx = tilelang.transform.get_pass_context()
-
+def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.BindTarget(target)(mod)
     if should_force_let_inline():
         # Force-let inline whenever the pass config requests it.
@@ -117,6 +115,13 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.Simplify()(mod)
     # Hoist any root-block annotations to PrimFunc attrs if pass is available
     mod = tilelang.transform.HoistNonRestrictParams()(mod)
+    return mod
+
+
+def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
+    pass_ctx = tilelang.transform.get_pass_context()
+
+    mod = CUDAPassPipelineBodyPrologue(mod, target)
 
     # @CUDA-specific
     # Lower the shared.tmem into specific initialization slot

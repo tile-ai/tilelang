@@ -4,7 +4,7 @@ import tilelang.language as T
 from tilelang import tvm
 from tvm import tirx
 from tvm.tirx import op
-from tilelang.engine.phase import LowerAndLegalize
+from tilelang.backend.cuda.pipeline import CUDAPassPipelineBodyPrologue
 from tilelang.transform import LowerAccessPtr
 
 
@@ -65,7 +65,7 @@ def test_issue_2123_atomic_load_lower_access_ptr_pipeline():
     func = issue_2123_atomic_load_repro(4).with_attr("global_symbol", "main")
     mod = tvm.IRModule.from_expr(func)
 
-    lowered = LowerAndLegalize(mod, target)
+    lowered = CUDAPassPipelineBodyPrologue(mod, target)
 
     _assert_access_ptr_lowered(lowered)
 

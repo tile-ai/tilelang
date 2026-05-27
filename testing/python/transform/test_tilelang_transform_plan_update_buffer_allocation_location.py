@@ -2,14 +2,14 @@ import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
-from testing.python.transform._transform_testing_utils import lower_cuda_until_tileop
+from tilelang.backend.cuda.pipeline import CUDAPassPipelineBodyPrologue
 
 
 def _apply_plan_update(func: tvm.tirx.PrimFunc) -> tvm.IRModule:
     target = tvm.target.Target("cuda")
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     with target:
-        mod = lower_cuda_until_tileop(mod, target)
+        mod = CUDAPassPipelineBodyPrologue(mod, target)
         mod = tl.transform.LowerSharedTmem()(mod)
         mod = tl.transform.IfStmtBinding()(mod)
         mod = tl.transform.PlanAndUpdateBufferAllocationLocation()(mod)

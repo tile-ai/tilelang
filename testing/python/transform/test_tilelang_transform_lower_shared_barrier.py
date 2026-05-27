@@ -4,7 +4,7 @@ import tilelang as tl
 from tilelang.utils.target import determine_target
 import tilelang.language as T
 import tilelang.testing
-from testing.python.transform._transform_testing_utils import lower_cuda_until_tileop
+from tilelang.backend.cuda.pipeline import CUDAPassPipelineBodyPrologue
 from tvm import tirx
 
 auto_target = tvm.target.Target(determine_target("auto"))
@@ -158,7 +158,7 @@ def test_plan_update_keeps_barrier_init_with_tcgen05_no_tma():
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
     with tvm.transform.PassContext(config=pass_configs), target:
         mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-        mod = lower_cuda_until_tileop(mod, target)
+        mod = CUDAPassPipelineBodyPrologue(mod, target)
         mod = tl.transform.LowerSharedTmem()(mod)
         mod = tl.transform.IfStmtBinding()(mod)
         mod = tl.transform.PlanAndUpdateBufferAllocationLocation()(mod)
