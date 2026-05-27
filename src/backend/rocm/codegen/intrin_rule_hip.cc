@@ -14,35 +14,36 @@ namespace codegen {
 namespace intrin {
 // Add float suffix to the intrinsics, HIP fast math.
 using tirx::FLowerIntrinsic;
-using tirx::Shuffle;
 
 // HIP has no vectorized fp32 math builtins: exp2f etc. are scalar
-// (float exp2f(float)), with no exp2(float4)/float2 overload (only half2
-// has packed intrinsics like h2exp2). HIPMath/FloatSuffix, therefore return
-// no name for non-scalar dtypes, leaving the op unlowered. Scalarize: lower
-// each lane to the scalar extern and re-pack with a shuffle; scalars fall
-// through to DispatchPureExtern unchanged. (CUDA does the equivalent in
-// codegen's PrintCallExtern; doing it in the lowering rule keeps HIP simple.)
+// (float exp2f(float)), with no exp2(float4)/float2 overload (only half2 has
+// packed intrinsics like h2exp2). So HIPMath/FloatSuffix return no name for a
+// vector dtype and DispatchPureExtern leaves the op unlowered, which the HIP
+// source codegen then can't print. Resolve the extern name from the *element*
+// type instead and emit a vector call_pure_extern; CodeGenTileLangHIP::
+// PrintCallExtern lowers it to one scalar call per lane and stores via
+// PrintVecElemStore, which is correct for HIP's packed carrier types
+// (float32x8 -> ulonglong4, float16x4 -> uint2, etc.). Scalars are unchanged.
 template <typename T, bool dtype_from_arg = false>
 inline PrimExpr DispatchPureExternScalarized(const PrimExpr &e) {
   const CallNode *call = e.as<CallNode>();
   ICHECK(call != nullptr);
-  int lanes = call->dtype.lanes();
-  if (lanes <= 1) {
+  DataType dtype = dtype_from_arg ? call->args[0].dtype() : call->dtype;
+  if (!dtype.is_vector()) {
     return DispatchPureExtern<T, dtype_from_arg>(e);
   }
-  ffi::Array<PrimExpr> lane_vals;
-  ffi::Array<PrimExpr> indices;
-  for (int i = 0; i < lanes; ++i) {
-    ffi::Array<PrimExpr> args;
-    for (auto arg : call->args) {
-      args.push_back(Shuffle::ExtractElement(arg, i));
-    }
-    Call scalar(call->dtype.element_of(), call->op, args);
-    lane_vals.push_back(DispatchPureExtern<T, dtype_from_arg>(scalar));
-    indices.push_back(IntImm(DataType::Int(32), i));
+  const OpNode *op = call->op.as<OpNode>();
+  ICHECK(op != nullptr);
+  std::string name = T()(dtype.element_of(), op->name.substr(5));
+  if (name.empty()) {
+    return e;
   }
-  return Shuffle(lane_vals, indices);
+  ffi::Array<PrimExpr> new_args = {StringImm(name)};
+  for (const auto &arg : call->args) {
+    new_args.push_back(arg);
+  }
+  return Call(call->dtype, builtin::call_pure_extern(), new_args,
+              call->annotations);
 }
 
 struct HIPMath {
