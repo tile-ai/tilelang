@@ -154,6 +154,7 @@ cp_async_gs_lds_with_rsrc(void *lds_base_ptr, void const *global_base_ptr,
     uint32_t voffset = my_lo - rsrc_base_lo;
     uint32_t lds_cur = __builtin_amdgcn_readfirstlane(
         static_cast<uint32_t>(reinterpret_cast<uintptr_t>(lds_base_ptr)));
+    // TODO(benenzhu): here use inline asm is a little bit tricky.
     asm volatile("s_mov_b32 m0, %0; \n\t"
                  "buffer_load_dwordx4 %1, %2, 0 offen lds;\n\t"
                  :
