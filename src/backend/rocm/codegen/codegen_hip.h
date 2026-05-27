@@ -53,6 +53,7 @@ public:
   void VisitExpr_(const ShuffleNode *op, std::ostream &os) final; // NOLINT(*)
   void VisitStmt_(const AllocBufferNode *op) final;
   void VisitStmt_(const AttrStmtNode *op) final;
+  void VisitStmt_(const BindNode *op) final;
   void VisitStmt_(const BufferStoreNode *op) final;
 
   // Override this as a work around for __grid_constant__ parameter

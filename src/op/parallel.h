@@ -151,6 +151,17 @@ private:
   // Compute plan-based loop layout candidate using vectorization and thread
   // bounds.
   Fragment ComputePlanCandidate(const LayoutInferArgs &T) const;
+  // Compute a "chunk-block aware" plan candidate. When a written shared buffer
+  // has a swizzled layout whose outer (tc) dim has extent > 1 (FullBank with
+  // continuous-bytes > one LDS bank cycle), the default flatten-and-partition
+  // policy makes one wavefront's lanes straddle the chunk-block boundary,
+  // which breaks the lane-contiguous LDS WRITE constraint and prevents any
+  // downstream swizzle-swap. This candidate splits the continuous loop var
+  // (n = n_outer * inner + n_inner) and reorders to [n_outer, ..., n_inner]
+  // before flattening, so consecutive lanes stay inside one tc plane.
+  // Returns an undefined Fragment if no eligible buffer is found.
+  Fragment ComputeChunkBlockAwarePlanCandidate(const LayoutInferArgs &T,
+                                               int vector_size) const;
   // Add replication guard predicates when needed for cross-thread stores.
   void BuildReplicationGuardsIfNeeded(
       const LayoutInferArgs &T,

@@ -1001,6 +1001,160 @@ private:
       return call;
     }
 
+    // gfx950 swizzle-swap for buffer_load_dwordx4 ... lds. On this branch
+    // the BufferStores that feed A_shared/B_shared are consumed by
+    // InjectPTXAsyncCopy inside rocm::Copy::Lower before they reach the
+    // BufferStore visitor, so the swap has to happen on the resulting
+    // tl::ptx_cp_async_lds Call. We rewrite the dst access_ptr to use
+    // (Forward(idx) - delta) on the last dim against the remapped shared
+    // buffer (lane-contiguous LDS writes) and shift the global src
+    // access_ptr by +delta on the last dim (XOR is self-inverse, so net
+    // data movement is unchanged). Returning the rewritten Call directly
+    // prevents the default visitor from re-applying the swizzled layout.
+    if (op->op.same_as(tl::ptx_cp_async_lds()) && TargetIsRocm(target_) &&
+        op->args.size() == 3) {
+      auto resolve_load = [&](const PrimExpr &arg) -> const BufferLoadNode * {
+        const auto *call = arg.as<CallNode>();
+        if (!call || !call->op.same_as(tl::access_ptr()))
+          return nullptr;
+        const auto *direct = call->args[0].as<BufferLoadNode>();
+        if (direct)
+          return direct;
+        if (const auto *var = call->args[0].as<VarNode>()) {
+          auto it = let_bindings_.find(Downcast<Var>(call->args[0]));
+          if (it != let_bindings_.end()) {
+            return it->second.as<BufferLoadNode>();
+          }
+          (void)var;
+        }
+        return nullptr;
+      };
+      const auto *dst_ap = op->args[0].as<CallNode>();
+      const auto *src_ap = op->args[1].as<CallNode>();
+      const BufferLoadNode *dst_load = resolve_load(op->args[0]);
+      const BufferLoadNode *src_load = resolve_load(op->args[1]);
+      // Candidate gate: do we have everything we need to even attempt
+      // the swap? If not, fall through to "downgrade" below — we must
+      // NOT leave the call as ptx_cp_async_lds, because codegen would
+      // then emit the LDS template against the unmodified (swizzled)
+      // dst index and produce wrong addresses.
+      bool m9_candidate = dst_ap && src_ap && dst_load && src_load &&
+                          IsSharedBuffer(dst_load->buffer) &&
+                          IsGlobalBuffer(src_load->buffer) &&
+                          buffer_remap_.count(dst_load->buffer) &&
+                          layout_map_.count(dst_load->buffer) &&
+                          layout_map_[dst_load->buffer]->HasSwizzle() &&
+                          dst_load->indices.size() > 0 &&
+                          src_load->indices.size() > 0;
+      if (!m9_candidate) {
+        // Can't do the swap. Downgrade so codegen uses the safe
+        // synchronous cp_async_gs<N> path instead of buffer_load_lds.
+        Call downgraded(op->dtype, tl::ptx_cp_async(), op->args);
+        return IRMutatorWithAnalyzer::VisitExpr(downgraded);
+      }
+      {
+        Buffer new_dst_buf = buffer_remap_[dst_load->buffer];
+        layout_remap_.Set(new_dst_buf, layout_map_[dst_load->buffer]);
+        auto layout = layout_map_[dst_load->buffer];
+        auto swizzled = layout->Forward(dst_load->indices);
+        PrimExpr delta =
+            analyzer_->Simplify(layout->SwizzleDelta(dst_load->indices));
+
+        Array<PrimExpr> new_dst_indices(swizzled.begin(), swizzled.end());
+        int last_dst = static_cast<int>(new_dst_indices.size()) - 1;
+        new_dst_indices.Set(
+            last_dst, analyzer_->Simplify(new_dst_indices[last_dst] - delta));
+
+        Array<PrimExpr> new_src_indices(src_load->indices.begin(),
+                                        src_load->indices.end());
+        int last_src = static_cast<int>(new_src_indices.size()) - 1;
+        new_src_indices.Set(
+            last_src, analyzer_->Simplify(new_src_indices[last_src] + delta));
+
+        // Post-swap linearity guard: the single-dim subtract-delta swap
+        // only cancels the XOR when the layout's swizzle is confined to
+        // the last output dim. For layouts (e.g. B's matmul layout in
+        // some shapes) where the swizzle spreads across multiple output
+        // dims, the post-swap LDS index is NOT lane-contiguous and
+        // buffer_load_dwordx4...lds would write to wrong addresses.
+        // Detect by sampling each new_dst_indices[d] against the actual
+        // threadIdx.x binding tracked in thread_var_ (set from the
+        // tirx::attr::thread_extent AttrStmt). Substituting concrete
+        // lane values and requiring the dependence to be a single
+        // constant stride catches the case where the LDS index has
+        // bit-extract terms like `(tx & m) >> s` that buffer_load_lds
+        // would scatter. If any dim is non-affine in the lane var, bail
+        // out so the call falls through to the safe ptx_cp_async path.
+        //
+        // Use the real binding rather than a name-based heuristic so a
+        // future rename of the lane var (or any kernel whose lane var
+        // doesn't happen to be called "tx"/"tid"/"thread*") doesn't
+        // silently misclassify the call as affine-OK and emit a
+        // wrong-banks tile.
+        Var lane_var;
+        if (thread_var_.defined() && thread_var_->var.defined() &&
+            thread_block_size_ > 1) {
+          lane_var = thread_var_->var;
+        }
+        auto is_affine_in_thread_var = [&](const PrimExpr &e) -> bool {
+          if (!lane_var.defined()) {
+            // Serial / no-thread kernel: expression is trivially
+            // constant w.r.t. the lane and any LDS layout works.
+            return true;
+          }
+          arith::Analyzer post_analyzer;
+          PrimExpr f0 = post_analyzer.Simplify(tirx::Substitute(
+              e, Map<Var, PrimExpr>{{lane_var, IntImm(lane_var->dtype, 0)}}));
+          PrimExpr f1 = post_analyzer.Simplify(tirx::Substitute(
+              e, Map<Var, PrimExpr>{{lane_var, IntImm(lane_var->dtype, 1)}}));
+          PrimExpr stride = post_analyzer.Simplify(f1 - f0);
+          const auto *stride_imm = stride.as<IntImmNode>();
+          if (!stride_imm)
+            return false;
+          for (int pt = 2; pt < 64; ++pt) {
+            PrimExpr fk = post_analyzer.Simplify(tirx::Substitute(
+                e,
+                Map<Var, PrimExpr>{{lane_var, IntImm(lane_var->dtype, pt)}}));
+            PrimExpr actual = post_analyzer.Simplify(fk - f0);
+            PrimExpr expected =
+                IntImm(DataType::Int(64), stride_imm->value * pt);
+            if (!post_analyzer.CanProveEqual(actual, expected)) {
+              return false;
+            }
+          }
+          return true;
+        };
+        bool all_dims_affine = true;
+        for (const auto &idx : new_dst_indices) {
+          if (!is_affine_in_thread_var(idx)) {
+            all_dims_affine = false;
+            break;
+          }
+        }
+        if (!all_dims_affine) {
+          // The swap can't produce a lane-contiguous LDS dst for this
+          // layout. Downgrade the op from tl::ptx_cp_async_lds to
+          // tl::ptx_cp_async (same arg shape) so codegen emits the safe
+          // synchronous cp_async_gs<N> path rather than buffer_load_lds
+          // with a non-contiguous LDS index. Let the default visitor
+          // recurse from there so the access_ptr children still get the
+          // ordinary swizzled-layout treatment.
+          Call downgraded(op->dtype, tl::ptx_cp_async(), op->args);
+          return IRMutatorWithAnalyzer::VisitExpr(downgraded);
+        } else {
+          BufferLoad new_dst_load(new_dst_buf, new_dst_indices);
+          BufferLoad new_src_load(src_load->buffer, new_src_indices);
+          PrimExpr new_dst_ap =
+              Call(dst_ap->dtype, tl::access_ptr(),
+                   {new_dst_load, dst_ap->args[1], dst_ap->args[2]});
+          PrimExpr new_src_ap =
+              Call(src_ap->dtype, tl::access_ptr(),
+                   {new_src_load, src_ap->args[1], src_ap->args[2]});
+          return Call(op->dtype, op->op, {new_dst_ap, new_src_ap, op->args[2]});
+        }
+      }
+    }
+
     // Default: visit normally
     auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
     return call;
@@ -1031,9 +1185,58 @@ private:
     auto store = Downcast<BufferStore>(IRMutatorWithAnalyzer::VisitStmt_(op));
     auto buffer = store->buffer;
     if (buffer_remap_.count(buffer)) {
-      auto new_indices = layout_map_[buffer]->Forward(store->indices);
       auto new_buffer = buffer_remap_[store->buffer];
       layout_remap_.Set(new_buffer, layout_map_[store->buffer]);
+
+      // gfx950 buffer_load_dwordx4 ... lds requires LDS destinations be
+      // lane-contiguous (no XOR). When the shared-buffer layout carries
+      // an XOR swizzle, move the XOR off the LDS store side and onto
+      // the global load side (XOR is self-inverse, so the net data
+      // movement is unchanged). Gated on: ROCm target, non-PTX path,
+      // shared destination, layout has a swizzle delta, and the store
+      // value is a direct global BufferLoad (the g2s shape the cp.async
+      // injector recognises).
+      if (TargetIsRocm(target_) && !is_ptx_ && IsSharedBuffer(buffer) &&
+          layout_map_[buffer]->HasSwizzle()) {
+        const BufferLoadNode *load_node = nullptr;
+        if (auto *load = store->value.as<BufferLoadNode>()) {
+          if (IsGlobalBuffer(load->buffer)) {
+            load_node = load;
+          }
+        }
+        if (load_node && is_one(layout_map_[buffer]->OutputShape()[0]) &&
+            load_node->indices.size() == store->indices.size()) {
+          auto swizzled_store = layout_map_[buffer]->Forward(store->indices);
+          PrimExpr delta = analyzer_->Simplify(
+              layout_map_[buffer]->SwizzleDelta(store->indices));
+
+          Array<PrimExpr> sequential_store(swizzled_store.begin(),
+                                           swizzled_store.end());
+          int last_out = static_cast<int>(sequential_store.size()) - 1;
+          sequential_store.Set(
+              last_out,
+              analyzer_->Simplify(sequential_store[last_out] - delta));
+
+          Array<PrimExpr> reflected(store->indices.begin(),
+                                    store->indices.end());
+          int last_in = static_cast<int>(reflected.size()) - 1;
+          reflected.Set(last_in,
+                        analyzer_->Simplify(reflected[last_in] + delta));
+
+          Array<PrimExpr> new_load_indices;
+          for (size_t k = 0; k < load_node->indices.size(); ++k) {
+            PrimExpr base =
+                analyzer_->Simplify(load_node->indices[k] - store->indices[k]);
+            new_load_indices.push_back(
+                analyzer_->Simplify(base + reflected[k]));
+          }
+
+          BufferLoad rewritten_load(load_node->buffer, new_load_indices);
+          return BufferStore(new_buffer, rewritten_load, sequential_store);
+        }
+      }
+
+      auto new_indices = layout_map_[buffer]->Forward(store->indices);
       return BufferStore(new_buffer, store->value, new_indices);
     } else if (var_remap_.count(buffer->data)) {
       auto new_buffer = Buffer(

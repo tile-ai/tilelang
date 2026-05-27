@@ -457,7 +457,10 @@ static Layout MakeQuarterBankSwizzleLayout2D(int stride, int continuous,
   PrimExpr vec = FloorMod(j, vector_size);
   PrimExpr c_swizzle = xor2x2(c, FloorDiv(s, 4));
   PrimExpr index = vec + (c_swizzle + s * 2) * vector_size;
-  return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
+  PrimExpr swizzle_delta = (c_swizzle - c) * vector_size;
+  Layout result(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
+  const_cast<LayoutNode *>(result.get())->SetSwizzleDelta(swizzle_delta);
+  return result;
 }
 
 Layout makeQuarterBankSwizzleLayout(const Buffer &buffer) {
@@ -486,7 +489,10 @@ static Layout MakeHalfBankSwizzleLayout2D(int stride, int continuous,
   PrimExpr vec = FloorMod(j, vector_size);
   PrimExpr c_swizzle = xor4x4(c, FloorDiv(s, 2));
   PrimExpr index = vec + (c_swizzle + s * 4) * vector_size;
-  return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
+  PrimExpr swizzle_delta = (c_swizzle - c) * vector_size;
+  Layout result(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
+  const_cast<LayoutNode *>(result.get())->SetSwizzleDelta(swizzle_delta);
+  return result;
 }
 
 Layout makeHalfBankSwizzleLayout(const Buffer &buffer) {
@@ -515,7 +521,10 @@ static Layout MakeFullBankSwizzleLayout2D(int stride, int continuous,
   PrimExpr vec = FloorMod(j, vector_size);
   PrimExpr c_swizzle = xor8x8(c, s);
   PrimExpr index = vec + (c_swizzle + s * 8) * vector_size;
-  return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
+  PrimExpr swizzle_delta = (c_swizzle - c) * vector_size;
+  Layout result(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
+  const_cast<LayoutNode *>(result.get())->SetSwizzleDelta(swizzle_delta);
+  return result;
 }
 
 Layout makeFullBankSwizzleLayout(const Buffer &buffer) {

@@ -35,9 +35,11 @@ using namespace ffi;
 class PTXAsyncCopyInjector : public StmtMutator {
 public:
   explicit PTXAsyncCopyInjector(bool enable_auto_async_copy,
-                                bool async_without_async_commit_wait)
+                                bool async_without_async_commit_wait,
+                                bool enable_buffer_load_lds = false)
       : enable_auto_async_copy_(enable_auto_async_copy),
-        async_without_async_commit_wait_(async_without_async_commit_wait) {}
+        async_without_async_commit_wait_(async_without_async_commit_wait),
+        enable_buffer_load_lds_(enable_buffer_load_lds) {}
 
   bool InjectedPTXAsyncCopy() const { return injected_ptx_async_copy_; }
 
@@ -124,8 +126,8 @@ public:
           store,
           /*dst_base_load=*/BufferLoad(store->buffer, store->indices),
           /*src_base_load=*/BufferLoad(load->buffer, load->indices),
-          /*num_elems=*/index_info->per_access_num_elems, predicated,
-          predicate_value);
+          /*num_elems=*/index_info->per_access_num_elems,
+          /*total_bytes=*/index_info->total_bytes, predicated, predicate_value);
     }
 
     Optional<Array<PrimExpr>> src_base_indices =
@@ -145,8 +147,8 @@ public:
         store,
         /*dst_base_load=*/BufferLoad(store->buffer, dst_base_indices.value()),
         /*src_base_load=*/BufferLoad(load->buffer, src_base_indices.value()),
-        /*num_elems=*/index_info->per_access_num_elems, predicated,
-        predicate_value);
+        /*num_elems=*/index_info->per_access_num_elems,
+        /*total_bytes=*/index_info->total_bytes, predicated, predicate_value);
   }
 
   Stmt VisitStmt_(const SeqStmtNode *op) final {
@@ -301,6 +303,10 @@ private:
     PrimExpr dst_index;
     int index_lanes{1};
     int per_access_num_elems{0};
+    // Byte width of one vectorized transfer at the final PTX emission point.
+    // Already factors in `current_vectorized_lanes_`. Used by the gfx950
+    // buffer_load...lds routing to confirm the 16-byte gate.
+    int total_bytes{0};
   };
 
   // Synchronization state for injected cp.async runs carried across statements.
@@ -420,6 +426,7 @@ private:
     info.dst_index = dst_index;
     info.index_lanes = index_lanes;
     info.per_access_num_elems = effective_lanes;
+    info.total_bytes = total_bytes;
     return info;
   }
 
@@ -488,15 +495,38 @@ private:
                  IntImm(DataType::Int(32), rw_mask)});
   }
 
-  static Optional<Stmt>
-  MakeCPAsyncStmtFromLoads(const BufferStoreNode *store,
-                           const BufferLoad &dst_base_load,
-                           const BufferLoad &src_base_load, int num_elems,
-                           bool predicated, const PrimExpr &predicate_value) {
+  Optional<Stmt> MakeCPAsyncStmtFromLoads(const BufferStoreNode *store,
+                                          const BufferLoad &dst_base_load,
+                                          const BufferLoad &src_base_load,
+                                          int num_elems, int total_bytes,
+                                          bool predicated,
+                                          const PrimExpr &predicate_value) {
     PrimExpr dst_access_ptr =
         MakeAccessPtrFromLoad(dst_base_load, num_elems, /*rw_mask=*/2);
     PrimExpr src_access_ptr =
         MakeAccessPtrFromLoad(src_base_load, num_elems, /*rw_mask=*/1);
+
+    // gfx950 routing: emit tl::ptx_cp_async_lds when the destination is a
+    // 16-byte non-predicated shared-memory write. Arg 2 carries the logical
+    // element count (same convention tl::ptx_cp_async uses) so the existing
+    // vec-loop folding in vectorize_loop.cc widens it correctly when the
+    // call sits inside a T.vectorized(k) loop. The codegen handler converts
+    // the logical count back to bytes via GetTileLangCPAsyncTransferBytes.
+    // If the LDS index carries an XOR swizzle, the swizzle-swap visitor in
+    // LowerTileOp rewrites the call (subtract SwizzleDelta on LDS, add on
+    // global) so the destination becomes lane-contiguous; if the swap
+    // can't produce an affine destination it downgrades back to
+    // tl::ptx_cp_async, so both paths produce correct code.
+    if (enable_buffer_load_lds_ && !predicated && total_bytes == 16) {
+      const std::string dst_scope = store->buffer.scope();
+      const bool is_shared = dst_scope == "shared" || dst_scope == "shared.dyn";
+      if (is_shared) {
+        Array<PrimExpr> lds_args = {dst_access_ptr, src_access_ptr,
+                                    PrimExpr(num_elems)};
+        return Evaluate(
+            Call(store->buffer->dtype, tvm::tl::ptx_cp_async_lds(), lds_args));
+      }
+    }
 
     Array<PrimExpr> cp_async_args;
     if (predicated) {
@@ -616,7 +646,9 @@ private:
         return out;
       }
       if (call->op.same_as(builtin::ptx_cp_async()) ||
-          call->op.same_as(tl::ptx_cp_async())) {
+          call->op.same_as(tl::ptx_cp_async()) ||
+          call->op.same_as(tl::ptx_cp_async_lds()) ||
+          call->op.same_as(tl::ptx_cp_async_lds_rsrc())) {
         return out;
       }
       if (call->op.same_as(builtin::ptx_commit_group())) {
@@ -691,6 +723,7 @@ private:
 
   bool enable_auto_async_copy_{true};
   bool async_without_async_commit_wait_{false};
+  bool enable_buffer_load_lds_{false};
   int explicit_async_scope_depth_{0};
   int current_vectorized_lanes_{1};
   std::vector<ActiveVectorizedLoop> active_vectorized_loops_;
@@ -704,9 +737,11 @@ using namespace tirx::transform;
 
 PTXAsyncCopyInjectResult
 InjectPTXAsyncCopy(const Stmt &body, bool enable_auto_async_copy,
-                   bool async_without_async_commit_wait) {
+                   bool async_without_async_commit_wait,
+                   bool enable_buffer_load_lds) {
   PTXAsyncCopyInjector injector(enable_auto_async_copy,
-                                async_without_async_commit_wait);
+                                async_without_async_commit_wait,
+                                enable_buffer_load_lds);
   Stmt injected = injector(body);
   return {injector.Finalize(injected), injector.InjectedPTXAsyncCopy()};
 }

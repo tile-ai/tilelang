@@ -401,6 +401,46 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
   // 3. Non-replicated read buffer
   // 4. Fully replicated write buffer (backup, may cause issues)
   // 5. Free inference mode (no source buffer)
+  // Early chunk-block-aware override: if a written shared buffer has a
+  // FullBank-style swizzled layout with tc > 1, the default flatten policy
+  // produces a binding whose wavefront lanes straddle the chunk-block
+  // boundary, which breaks lane-contiguous LDS WRITEs (buffer_load ... lds).
+  // Override here BEFORE source_buffer dispatch so the CBA fragment wins.
+  // Fire at ALL levels so the first level that sees the layout map populated
+  // wins; subsequent levels short-circuit via loop_layout_inferred_.
+  //
+  // gfx950-only: this hook exists to make buffer_load_dwordx4...lds usable,
+  // and the alternate binding it picks can conflict with MMA fragment
+  // bindings on NVIDIA / older AMD. Skip on every other target so the
+  // existing CUDA / pre-CDNA4 layout inference is untouched.
+  if (!loop_layout_.defined() && TargetIsGfx950(T.target)) {
+    // Reuse the same vec_size calculation as ComputePlanCandidate.
+    auto maybe_remapped_root =
+        IfBufferRemapLoopGenerator::run(root_, T.buffer_remap, T.layout_map);
+    int vector_size =
+        GetVectorizeSize(maybe_remapped_root, T.analyzer, T.layout_map);
+    PrimExpr loop_total_size = 1;
+    for (Stmt l = root_; l.as<For>().has_value(); l = l.as<For>().value()->body)
+      loop_total_size = loop_total_size * l.as<For>().value()->extent;
+    while (
+        !analyzer_.CanProve(floormod(loop_total_size, T.thread_bounds->extent *
+                                                          vector_size) == 0) &&
+        vector_size > 1)
+      vector_size /= 2;
+    if (auto cba = ComputeChunkBlockAwarePlanCandidate(T, vector_size);
+        cba.defined()) {
+      // Only adopt the CBA layout if it doesn't conflict with a fragment
+      // (e.g. an MMA accumulator like acc_o_l / C_local) that already has
+      // a layout in T.layout_map. Otherwise the unconditional override
+      // would force the loop onto a binding incompatible with the
+      // fragment and ValidateCandidateAgainstFragments would fail later.
+      if (ValidateCandidateAgainstFragments(cba, T, /*throw_on_error=*/false,
+                                            /*check_forward_index=*/false,
+                                            /*source_buffer=*/Buffer{})) {
+        loop_layout_ = cba;
+      }
+    }
+  }
   if (!loop_layout_.defined() && annotated_layout_unbound_.defined()) {
     loop_layout_ =
         annotated_layout_unbound_.value()->BindThreadRange(T.thread_bounds);
@@ -705,10 +745,174 @@ Fragment ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &T) const {
   DLOG(INFO) << "[PlanLoopPartition] root_ = " << root_
              << " ############# vector_size = " << vector_size
              << ", thread_bounds = " << T.thread_bounds << '\n';
+  // Chunk-block-aware binding is taken by the early hook in
+  // ParallelOp::InferLayout (before source_buffer dispatch). By the time
+  // we reach here loop_layout_ is already set when CBA applies, so no
+  // need to re-try it.
   auto plan = PlanLoopPartition(root_, vector_size, T.thread_bounds);
   DLOG(INFO) << "[PlanLoopPartition] candidate = " << plan->DebugOutput()
              << '\n';
   return plan;
+}
+
+Fragment
+ParallelOpNode::ComputeChunkBlockAwarePlanCandidate(const LayoutInferArgs &T,
+                                                    int vector_size) const {
+  // 1. Find a written shared buffer with a swizzle layout whose continuous
+  //    (innermost) dim exceeds one CDNA LDS bank cycle (128 bytes). When
+  //    that happens FullBank splits the dim into `tc` planes; the default
+  //    flatten policy puts too many lanes on the continuous dim and one
+  //    wavefront ends up straddling the tc boundary. We compute tc from the
+  //    buffer's last-dim extent + element size to avoid having to interpret
+  //    the layout's output-dim structure (which can vary with pipelining).
+  Buffer target;
+  // Continuous (innermost) buffer dim extent. When the parallel loop is
+  // fused, this comes from buffer->shape.back(); when unfused, it equals
+  // the extent of the matching loop var.
+  int64_t cont_ext = 0;
+  int64_t inner_extent = 1;
+  // Index into loop_vars_ for the loop var that drives the continuous dim,
+  // or -1 if the access is `fused_var % cont_ext` (1D fused case).
+  int split_axis = -1;
+  constexpr int kBankCycleBytes = 128;
+  PostOrderVisit(root_, [&](const ObjectRef &obj) {
+    if (target.defined())
+      return;
+    const auto *store = obj.as<BufferStoreNode>();
+    if (!store)
+      return;
+    const Buffer &buffer = store->buffer;
+    if (!IsSharedBuffer(buffer))
+      return;
+    if (!T.layout_map.count(buffer))
+      return;
+    Layout layout = T.layout_map[buffer];
+    if (layout.as<Fragment>())
+      return;
+    if (store->indices.empty())
+      return;
+    if (buffer->shape.empty())
+      return;
+    auto *last_dim_imm = as_const_int(buffer->shape.back());
+    if (!last_dim_imm)
+      return;
+    int64_t cont = *last_dim_imm;
+    int element_bytes = buffer->dtype.bytes();
+    if (element_bytes <= 0)
+      return;
+    int64_t bank_cycle_elems = kBankCycleBytes / element_bytes;
+    if (bank_cycle_elems <= 0)
+      return;
+    if (cont * element_bytes <= kBankCycleBytes)
+      return;
+    if (cont % bank_cycle_elems != 0)
+      return;
+    if ((cont / bank_cycle_elems) <= 1)
+      return;
+
+    // Identify the loop var(s) driving the continuous dim.
+    PrimExpr last_idx = analyzer_.Simplify(store->indices.back());
+    int chosen_axis = -1;
+    if (auto var_opt = last_idx.as<Var>()) {
+      // Unfused N-D case: bare loop var on the cont dim.
+      for (int i = 0; i < static_cast<int>(loop_vars_.size()); i++) {
+        if (loop_vars_[i]->var.same_as(var_opt.value())) {
+          chosen_axis = i;
+          break;
+        }
+      }
+      if (chosen_axis < 0)
+        return;
+      auto *axis_ext_imm = as_const_int(loop_vars_[chosen_axis]->dom->extent);
+      if (!axis_ext_imm || *axis_ext_imm != cont)
+        return;
+    } else {
+      // Fused 1D case: index is `fused_var % cont_ext` (after pipelining
+      // multi-dim accesses get flattened). Require exactly one loop var of
+      // extent that is a multiple of cont.
+      if (loop_vars_.size() != 1)
+        return;
+      auto *total_ext_imm = as_const_int(loop_vars_[0]->dom->extent);
+      if (!total_ext_imm || *total_ext_imm % cont != 0)
+        return;
+      // Match `fused_var % cont` (with cont equal to the buffer's last dim).
+      const auto *mod = last_idx.as<FloorModNode>();
+      if (!mod)
+        return;
+      auto *mod_imm = as_const_int(mod->b);
+      if (!mod_imm || *mod_imm != cont)
+        return;
+      if (!mod->a.same_as(loop_vars_[0]->var))
+        return;
+    }
+
+    target = buffer;
+    split_axis = chosen_axis;
+    cont_ext = cont;
+    inner_extent = bank_cycle_elems;
+  });
+  if (!target.defined())
+    return Fragment();
+
+  // 2. Build flatten expressed purely in the existing loop vars so the
+  //    resulting Fragment matches root_'s loop_vars and downstream
+  //    PartitionLoop / LowerParallelLoop are unaffected.
+  ICHECK(!loop_vars_.empty());
+  DataType dtype = loop_vars_[0]->var.dtype();
+  PrimExpr inner_pe = IntImm(dtype, inner_extent);
+  PrimExpr flat;
+  if (split_axis >= 0) {
+    // Unfused N-D: split the chosen loop var into outer/inner and reorder
+    // to [outer, ..., inner] before row-major flatten.
+    PrimExpr split_var = loop_vars_[split_axis]->var;
+    PrimExpr outer_part = FloorDiv(split_var, inner_pe);
+    PrimExpr inner_part = FloorMod(split_var, inner_pe);
+    PrimExpr modified_total = IntImm(dtype, 1);
+    PrimExpr modified_flat = make_zero(dtype);
+    for (int i = 0; i < static_cast<int>(loop_vars_.size()); i++) {
+      PrimExpr ext = (i == split_axis) ? inner_pe : loop_vars_[i]->dom->extent;
+      PrimExpr v = (i == split_axis)
+                       ? inner_part
+                       : static_cast<PrimExpr>(loop_vars_[i]->var);
+      modified_total = modified_total * ext;
+      modified_flat = modified_flat * ext + v;
+    }
+    flat = outer_part * modified_total + modified_flat;
+  } else {
+    // Fused 1D: decompose fused_var into (rest, cont_inner_part, c_inner)
+    // where cont_inner_part = (fused_var % cont)/inner. New flat puts
+    // n_outer (= cont_inner_part) outermost.
+    PrimExpr fused = loop_vars_[0]->var;
+    auto *total_ext_imm = as_const_int(loop_vars_[0]->dom->extent);
+    ICHECK(total_ext_imm);
+    int64_t total = *total_ext_imm;
+    int64_t rest = total / cont_ext;
+    PrimExpr cont_pe = IntImm(dtype, cont_ext);
+    PrimExpr c = FloorMod(fused, cont_pe);
+    PrimExpr rest_part = FloorDiv(fused, cont_pe);
+    PrimExpr n_outer = FloorDiv(c, inner_pe);
+    PrimExpr c_inner = FloorMod(c, inner_pe);
+    PrimExpr rest_pe = IntImm(dtype, rest);
+    flat = n_outer * (rest_pe * inner_pe) + rest_part * inner_pe + c_inner;
+  }
+
+  // 3. Apply the same coalesce policy as LoopPartitioner::Partition:
+  //    access_idx = flat / vec_size, thd = access_idx % num_thread,
+  //    idx = (access_idx / num_thread) * vec_size + flat % vec_size.
+  auto *num_thread_imm = as_const_int(T.thread_bounds->extent);
+  if (!num_thread_imm)
+    return Fragment(); // Symbolic thread bounds: fall back to default plan.
+  PrimExpr vec_pe = IntImm(dtype, vector_size);
+  PrimExpr num_thread_pe = IntImm(dtype, *num_thread_imm);
+  PrimExpr access_idx = FloorDiv(flat, vec_pe);
+  PrimExpr thd = FloorMod(access_idx, num_thread_pe);
+  PrimExpr idx =
+      FloorDiv(access_idx, num_thread_pe) * vec_pe + FloorMod(flat, vec_pe);
+
+  Fragment fragment = Fragment(loop_vars_, /*forward_index=*/{idx},
+                               /*forward_thread=*/thd,
+                               /*thread_replicate=*/IterVar());
+  return fragment->BindThreadRange(T.thread_bounds);
 }
 
 void ParallelOpNode::BuildReplicationGuardsIfNeeded(

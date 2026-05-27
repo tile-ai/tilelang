@@ -504,7 +504,33 @@ Layout LayoutNode::Expand(const Array<PrimExpr> &leading_shape) const {
     new_forward_index.push_back(Substitute(e, vmap));
   }
 
-  return Layout(new_input_size, new_forward_index);
+  Layout result(new_input_size, new_forward_index);
+  // Propagate swizzle_delta_ through Expand: substitute placeholder
+  // indices so the delta keeps referring to the same physical input
+  // dimension after the leading-shape prefix is added.
+  if (swizzle_delta_.defined()) {
+    const_cast<LayoutNode *>(result.get())
+        ->SetSwizzleDelta(Substitute(swizzle_delta_.value(), vmap));
+  }
+  return result;
+}
+
+PrimExpr LayoutNode::SwizzleDelta(const Array<PrimExpr> &input_indices) const {
+  if (!swizzle_delta_.defined()) {
+    return IntImm(DataType::Int(32), 0);
+  }
+  // Substitute the last InputDim() entries of input_indices into
+  // swizzle_delta_, matching the convention Forward() uses.
+  ICHECK_GE(input_indices.size(), InputDim())
+      << "SwizzleDelta requires at least " << InputDim() << " indices, but got "
+      << input_indices.size();
+  PrimExpr delta = swizzle_delta_.value();
+  size_t offset = input_indices.size() - InputDim();
+  for (size_t i = 0; i < InputDim(); ++i) {
+    delta =
+        Substitute(delta, {{InputPlaceholder(i), input_indices[offset + i]}});
+  }
+  return delta;
 }
 
 Fragment FragmentNode::Repeat(const Array<PrimExpr> &repeats,

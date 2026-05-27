@@ -517,6 +517,58 @@ TVM_DLL const Op &ptx_cp_async_barrier_noinc();
 TVM_DLL const Op &ptx_cp_async();
 
 /*!
+ * \brief Marker for an eligible async G2S copy on gfx950+.
+ *
+ * Emitted by LowerPTXAsyncCopy in place of ptx_cp_async for 16-byte
+ * non-predicated shared-memory writes whose LDS index is (post
+ * swizzle-swap, see lower_tile_op.cc) lane-contiguous. The
+ * HoistBufferResource pass then rewrites each call to
+ * ptx_cp_async_lds_rsrc with a pre-computed buffer resource
+ * descriptor + base address; that rsrc form is what codegen emits as
+ * the buffer_load_dwordx4 ... lds fast path.
+ *
+ * If a call survives the rewrite (e.g. an access_ptr the hoister
+ * can't pattern-match), codegen falls back to the synchronous
+ * tl::cp_async_gs<N> path -- correct, but no buffer_load_lds win.
+ *
+ * ptx_cp_async_lds(dst_access_ptr, src_access_ptr, num_elems)
+ *
+ * num_elems is the logical element count (NOT byte width). Lowering
+ * derives the {4, 8, 16} byte transfer width from the access-ptr dtype.
+ * Passing this as elements keeps vec-loop folding in vectorize_loop.cc
+ * (which multiplies the count when it widens a loop) consistent with
+ * the plain ptx_cp_async path.
+ */
+TVM_DLL const Op &ptx_cp_async_lds();
+
+/*!
+ * \brief Create a buffer resource descriptor for async G2S LDS copy (gfx950+).
+ *
+ * ptx_make_buffer_resource(global_ptr)
+ *
+ * Returns an int32x4_t buffer resource descriptor via
+ * make_wave_buffer_resource (defined in src/tl_templates/hip/copy.h).
+ */
+TVM_DLL const Op &ptx_make_buffer_resource();
+
+/*!
+ * \brief Truly async G2S copy with pre-computed buffer resource (gfx950+).
+ *
+ * Same as ptx_cp_async_lds but takes a pre-hoisted buffer resource
+ * descriptor + base address to avoid redundant readfirstlane /
+ * make_wave_buffer_resource calls inside unrolled loops. The
+ * HoistBufferResource Python pass rewrites ptx_cp_async_lds calls to this
+ * form once per kernel.
+ *
+ * ptx_cp_async_lds_rsrc(dst_access_ptr, src_access_ptr, num_elems, rsrc_var,
+ *                       base_var)
+ *
+ * num_elems uses the same convention as ptx_cp_async_lds -- logical
+ * element count, not bytes; lowering converts via the access-ptr dtype.
+ */
+TVM_DLL const Op &ptx_cp_async_lds_rsrc();
+
+/*!
  * \brief Pack two b16 value into a b32 value
  *
  * int32 pack_b16(b16_value, b16_value)

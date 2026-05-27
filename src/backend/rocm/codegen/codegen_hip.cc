@@ -56,9 +56,12 @@ std::optional<DataType> GetAccessPtrElementType(const PrimExpr &expr) {
 }
 
 int GetTileLangCPAsyncTransferBytes(const CallNode *op) {
-  ICHECK(op->args.size() == 3 || op->args.size() == 4)
-      << "tl::ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
-         "src_access_ptr, num_elems, [predicate])";
+  // Accepts ptx_cp_async / ptx_cp_async_lds (3 or 4 args: dst, src, num_elems,
+  // [predicate]) and ptx_cp_async_lds_rsrc (5 args: dst, src, num_elems,
+  // rsrc_var, base_var) -- only args[0..2] are read here.
+  ICHECK(op->args.size() == 3 || op->args.size() == 4 || op->args.size() == 5)
+      << "tl::ptx_cp_async family expects 3-5 arguments (dst_access_ptr, "
+         "src_access_ptr, num_elems, ...)";
   const auto *num_elems_imm = op->args[2].as<IntImmNode>();
   ICHECK(num_elems_imm) << "tl::ptx_cp_async num_elems must be IntImm, but got "
                         << op->args[2];
@@ -1169,9 +1172,31 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     this->stream << ");\n";
   };
-  if (op->op.same_as(builtin::ptx_cp_async())) {
-    // args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
-    // args[3] = predicate (optional)
+  if (op->op.same_as(tl::ptx_make_buffer_resource())) {
+    // Expression form: emits make_wave_buffer_resource((const void*)(ptr)).
+    // The enclosing LetStmt visitor recognises this Call and emits `auto x =`.
+    ICHECK(op->args.size() == 1)
+        << "ptx_make_buffer_resource expects 1 argument (global_ptr)";
+    std::string ptr = this->PrintExpr(op->args[0]);
+    os << "make_wave_buffer_resource((const void*)(" << ptr << "))";
+  } else if (op->op.same_as(tl::ptx_cp_async_lds_rsrc())) {
+    // args = [dst, src, num_elems, rsrc_var, base_var]. arg 2 is the logical
+    // element count inherited from the ptx_cp_async_lds call that
+    // HoistBufferResource rewrote into this rsrc form -- the helper does the
+    // src/dst width-equality and {4,8,16} validation that the plain
+    // ptx_cp_async path also relies on.
+    ICHECK(op->args.size() == 5) << "ptx_cp_async_lds_rsrc expects 5 arguments";
+    std::string dst = this->PrintExpr(op->args[0]);
+    std::string src = this->PrintExpr(op->args[1]);
+    int total_bytes = GetTileLangCPAsyncTransferBytes(op);
+    std::string size = std::to_string(total_bytes);
+    std::string rsrc = this->PrintExpr(op->args[3]);
+    std::string base = this->PrintExpr(op->args[4]);
+    this->PrintIndent();
+    this->stream << "tl::cp_async_gs_lds_with_rsrc<" << size << ">(" << dst
+                 << ", " << src << ", " << rsrc << ", " << base << ");\n";
+  } else if (op->op.same_as(builtin::ptx_cp_async())) {
+    // builtin::ptx_cp_async stores byte width directly in arg 2.
     ICHECK(op->args.size() == 3 || op->args.size() == 4)
         << "ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
            "src_access_ptr, bytes, [predicate])";
@@ -1189,7 +1214,18 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->stream << "tl::cp_async_gs_conditional<" << size << ">(" << dst
                    << ", " << src << ", " << condition << ");\n";
     }
-  } else if (op->op.same_as(tl::ptx_cp_async())) {
+  } else if (op->op.same_as(tl::ptx_cp_async()) ||
+             op->op.same_as(tl::ptx_cp_async_lds())) {
+    // Both store logical element count in arg 2; convert to bytes via
+    // GetTileLangCPAsyncTransferBytes.
+    //
+    // tl::ptx_cp_async_lds is normally rewritten to ptx_cp_async_lds_rsrc
+    // by the HoistBufferResource pass. If a call survives the rewrite
+    // (e.g. an access_ptr shape _extract_buffer_var can't pattern-match,
+    // or the pass found nothing to hoist), fall back to the synchronous
+    // tl::cp_async_gs<bytes> path here -- correctness is preserved at
+    // the cost of giving up the buffer_load_dwordx4...lds fast path for
+    // that particular call. Treat both ops identically in codegen.
     int total_bytes = GetTileLangCPAsyncTransferBytes(op);
     std::string dst = this->PrintExpr(op->args[0]);
     std::string src = this->PrintExpr(op->args[1]);
@@ -1207,6 +1243,10 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt("tl::cp_async_commit");
   } else if (op->op.same_as(builtin::ptx_wait_group())) {
     int n = Downcast<IntImm>(op->args[0])->value;
+    // AMDGPU s_waitcnt vmcnt field is 6-bit (max 63); clamp to keep the
+    // "n"(cnt) immediate constraint in tl::cp_async_wait valid.
+    if (n > 63)
+      n = 63;
     std::string func_name = "tl::cp_async_wait<" + std::to_string(n) + ">";
     print_extern_call_stmt(func_name, 1);
   } else if (op->op.same_as(builtin::create_barriers())) {
@@ -1693,7 +1733,33 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
 }
 
 void CodeGenTileLangHIP::VisitStmt_(const AttrStmtNode *op) {
-  if (op->attr_key == tl::attr::kLexicalAllocScope) {
+  if (op->attr_key == "buffer_resource_var") {
+    // Hoisted resource descriptor from the HoistBufferResource Python pass.
+    // Emits: auto {rsrc_var} = make_wave_buffer_resource((const
+    // void*)({buf_var}));
+    auto rsrc_var = Downcast<Var>(op->node);
+    std::string rsrc_vid = AllocVarID(rsrc_var.get());
+    std::string buf_ptr = PrintExpr(op->value);
+    this->PrintIndent();
+    this->stream << "auto " << rsrc_vid
+                 << " = make_wave_buffer_resource((const void*)(" << buf_ptr
+                 << "));\n";
+    this->VisitStmt(op->body);
+    return;
+  } else if (op->attr_key == "buffer_base_var") {
+    // Hoisted readfirstlane base address from the HoistBufferResource pass.
+    // Emits: uint32_t {base_var} = __builtin_amdgcn_readfirstlane(
+    //            (uint32_t)(uintptr_t)({buf_var}));
+    auto base_var = Downcast<Var>(op->node);
+    std::string base_vid = AllocVarID(base_var.get());
+    std::string buf_ptr = PrintExpr(op->value);
+    this->PrintIndent();
+    this->stream << "uint32_t " << base_vid
+                 << " = __builtin_amdgcn_readfirstlane("
+                 << "(uint32_t)(uintptr_t)(" << buf_ptr << "));\n";
+    this->VisitStmt(op->body);
+    return;
+  } else if (op->attr_key == tl::attr::kLexicalAllocScope) {
     PrintIndent();
     stream << "{\n";
     int scope = BeginScope();
@@ -1724,6 +1790,24 @@ void CodeGenTileLangHIP::VisitStmt_(const AttrStmtNode *op) {
                  << panel_size << ">();\n";
     this->VisitStmt(op->body);
     return;
+  }
+  CodeGenC::VisitStmt_(op);
+}
+
+void CodeGenTileLangHIP::VisitStmt_(const BindNode *op) {
+  // For Bind(var = ptx_make_buffer_resource(buf)), emit `auto x = ...;`
+  // instead of the C-typed declaration the base class would produce. The
+  // return type is int32x4_t and naming it explicitly is brittle across
+  // backends, so `auto` keeps the template lookup in make_wave_buffer_resource
+  // responsible for the type. The body that follows the bind is handled by
+  // the enclosing SeqStmt visitor.
+  if (auto *call = op->value.as<CallNode>()) {
+    if (call->op.same_as(tl::ptx_make_buffer_resource())) {
+      std::string value = PrintExpr(op->value);
+      PrintIndent();
+      stream << "auto " << AllocVarID(op->var.get()) << " = " << value << ";\n";
+      return;
+    }
   }
   CodeGenC::VisitStmt_(op);
 }

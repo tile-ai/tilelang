@@ -1015,7 +1015,9 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       if (auto opt = op->op.as<Op>()) {
         const Op &call_op = opt.value();
         return call_op.same_as(builtin::ptx_cp_async()) ||
-               call_op.same_as(tl::ptx_cp_async());
+               call_op.same_as(tl::ptx_cp_async()) ||
+               call_op.same_as(tl::ptx_cp_async_lds()) ||
+               call_op.same_as(tl::ptx_cp_async_lds_rsrc());
       }
       return false;
     }();

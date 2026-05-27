@@ -138,4 +138,31 @@ TL_DEVICE void cp_async_gs_conditional(void *lds_base_ptr,
   }
 }
 
+// Variant with pre-hoisted buffer resource descriptor and base address.
+// rsrc and rsrc_base_lo are computed once at kernel entry (see the
+// HoistBufferResource Python pass) so per-call readfirstlane overhead is
+// amortised across the many cp_async_gs_lds_with_rsrc calls in an unrolled
+// loop. rsrc_base_lo must equal readfirstlane((uint32_t)(uintptr_t)A) for
+// the same A passed to make_wave_buffer_resource that produced rsrc.
+template <int N>
+TL_DEVICE void
+cp_async_gs_lds_with_rsrc(void *lds_base_ptr, void const *global_base_ptr,
+                          int32x4_t rsrc, uint32_t rsrc_base_lo) {
+  if constexpr (N == 16) {
+    uint32_t my_lo =
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(global_base_ptr));
+    uint32_t voffset = my_lo - rsrc_base_lo;
+    uint32_t lds_cur = __builtin_amdgcn_readfirstlane(
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(lds_base_ptr)));
+    // TODO(benenzhu): here use inline asm is a little bit tricky.
+    asm volatile("s_mov_b32 m0, %0; \n\t"
+                 "buffer_load_dwordx4 %1, %2, 0 offen lds;\n\t"
+                 :
+                 : "s"(lds_cur), "v"(voffset), "s"(rsrc)
+                 : "memory");
+  } else {
+    cp_async_gs<N>(lds_base_ptr, global_base_ptr);
+  }
+}
+
 } // namespace tl
