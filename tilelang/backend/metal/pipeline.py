@@ -13,9 +13,10 @@ from tilelang.backend.pipeline_utils import (
     should_enable_race_check,
     should_force_let_inline,
 )
+from tilelang.transform.metal import MetalFragmentToSimdgroup
 
 
-def ROCMPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
+def MetalPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.BindTarget(target)(mod)
     pass_ctx = tilelang.transform.get_pass_context()
 
@@ -33,6 +34,7 @@ def ROCMPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.PipelinePlanning()(mod)
     mod = tilelang.transform.InjectSoftwarePipeline()(mod)
     mod = tilelang.transform.Simplify()(mod)
+    mod = MetalFragmentToSimdgroup(mod)
 
     mod = tilelang.transform.LayoutInference()(mod)
     LayoutVisual(mod)
@@ -84,6 +86,6 @@ def ROCMPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     return mod
 
 
-rocm_pipeline = Pipeline("hip", ROCMPassPipelineBody)
+metal_pipeline = Pipeline("metal", MetalPassPipelineBody)
 
-register_pipeline(rocm_pipeline)
+register_pipeline(metal_pipeline)

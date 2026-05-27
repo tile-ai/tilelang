@@ -5,7 +5,7 @@ import tilelang as tl
 from tvm.target import Target
 
 from tilelang.backend.cuda.pipeline import allow_warp_specialized
-from tilelang.engine.pass_pipeline import (
+from tilelang.backend.pipeline_utils import (
     LayoutVisual,
     should_enable_race_check,
     should_force_let_inline,

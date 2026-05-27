@@ -15,7 +15,7 @@ from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, CUTLASS_INCLUDE_DIR, TIL
 from tilelang.transform import PassConfigKey
 from tilelang.transform.metal import MarkHostMetalContext
 from tilelang.engine.param import KernelParam, CompiledArtifact
-from tilelang.engine.pass_pipeline import PreLowerSemanticCheck
+from tilelang.engine.semantic_check import PreLowerSemanticCheck
 from tilelang.utils.target import determine_target, target_get_mcpu
 from tilelang.backend.pipeline import resolve_pipeline
 

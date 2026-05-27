@@ -14,7 +14,7 @@ from tilelang.engine.lower import (
     is_cpu_device_backend,
 )
 from tilelang.backend.pipeline import resolve_pipeline
-from tilelang.engine.pass_pipeline import PreLowerSemanticCheck
+from tilelang.engine.semantic_check import PreLowerSemanticCheck
 
 
 def match_global_kernel(source: str, annotation: str = "__global__") -> int:

@@ -15,7 +15,7 @@ from tilelang.backend.pipeline_utils import (
 )
 
 
-def ROCMPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
+def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.BindTarget(target)(mod)
     pass_ctx = tilelang.transform.get_pass_context()
 
@@ -84,6 +84,5 @@ def ROCMPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     return mod
 
 
-rocm_pipeline = Pipeline("hip", ROCMPassPipelineBody)
-
-register_pipeline(rocm_pipeline)
+for _kind in ("c", "llvm"):
+    register_pipeline(Pipeline(_kind, CPUPassPipelineBody))
