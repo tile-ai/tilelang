@@ -742,8 +742,8 @@ private:
     }
     if (const auto *var_node = expr.as<VarNode>()) {
       Var var = GetRef<Var>(var_node);
-      auto it = let_bindings_.find(var);
-      if (it != let_bindings_.end()) {
+      auto it = bind_var_to_expr_.find(var);
+      if (it != bind_var_to_expr_.end()) {
         return it->second;
       }
     }
@@ -1059,7 +1059,7 @@ private:
     PrimExpr value = this->VisitExpr(op->value);
     bool recorded = false;
     if (value->IsInstance<BufferLoadNode>()) {
-      let_bindings_[op->var] = value;
+      bind_var_to_expr_[op->var] = value;
       recorded = true;
     }
     if (SideEffect(value) <= CallEffectKind::kPure) {
@@ -1155,10 +1155,10 @@ private:
 
     Range thread_bounds = CurrentThreadBounds();
 
-    // Convert let_bindings_ to Map<Var, PrimExpr> for LowerArgs
-    Map<Var, PrimExpr> let_var_to_expr;
-    for (const auto &[var, expr] : let_bindings_) {
-      let_var_to_expr.Set(var, expr);
+    // Convert Bind values to Map<Var, PrimExpr> for LowerArgs
+    Map<Var, PrimExpr> bind_var_to_expr;
+    for (const auto &[var, expr] : bind_var_to_expr_) {
+      bind_var_to_expr.Set(var, expr);
     }
 
     AllocMBarrierCallback mbarrier_callback = [this](int arrive_count) -> int {
@@ -1178,7 +1178,7 @@ private:
     auto lowered = tile_op->Lower(
         LowerArgs{target_, thread_bounds, thread_var_->var, callback,
                   mbarrier_callback, barrier_arrive_callback, layout_map_,
-                  buffer_remap_, let_var_to_expr,
+                  buffer_remap_, bind_var_to_expr,
                   loop_mbar_phase_stack_.empty()
                       ? PrimExpr(IntImm(DataType::Int(32), 0))
                       : loop_mbar_phase_stack_.back(),
@@ -1485,7 +1485,7 @@ private:
   // By access CallNode instead of BufferLoad Node.
   bool is_ptx_{false};
   std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual>
-      let_bindings_;
+      bind_var_to_expr_;
   // Mapping from data Var of a Buffer to Buffer, for lookup
   std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
   Map<Var, Var> var_remap_;
