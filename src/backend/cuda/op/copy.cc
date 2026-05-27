@@ -75,6 +75,11 @@ bool GetBoolAnnotation(const CopyNode &op, const char *key) {
   return false;
 }
 
+Stmt MakeSeqOrSingle(Array<Stmt> seq) {
+  ICHECK(!seq.empty());
+  return seq.size() == 1 ? seq[0] : SeqStmt(std::move(seq));
+}
+
 bool GetDisableTMA(const CopyNode &op) {
   return GetBoolAnnotation(op, "disable_tma");
 }
@@ -1243,11 +1248,20 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     } else {
       total_bytes = TMABytesFromElements(total_elements, shared_tensor->dtype);
     }
+    if (auto expect_tx_bytes = annotations.Get("expect_tx_bytes")) {
+      total_bytes = Downcast<PrimExpr>(expect_tx_bytes.value());
+    }
 
-    Stmt barrier_before_tma_stmt;
+    Optional<Stmt> barrier_before_tma_stmt = std::nullopt;
     Optional<Stmt> barrier_after_tma_stmt = std::nullopt;
+    bool skip_expect_tx = false;
+    if (auto skip_expect_val = annotations.Get("skip_expect_tx")) {
+      skip_expect_tx = Downcast<IntImm>(skip_expect_val.value())->value != 0;
+    }
     if (GetIsTmaCopy(op)) {
-      if (is_cluster_barrier) {
+      if (skip_expect_tx) {
+        barrier_before_tma_stmt = std::nullopt;
+      } else if (is_cluster_barrier) {
         PrimExpr cluster_total_bytes =
             total_bytes * IntImm(DataType::Int(32), T.cluster_size);
         Stmt expect_stmt =
@@ -1276,13 +1290,17 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
           DataType::Handle(), builtin::ptx_arrive_barrier(), {mbar_handle}));
     }
 
-    Array<Stmt> producer_seq{barrier_before_tma_stmt, tma_copy};
+    Array<Stmt> producer_seq;
+    if (barrier_before_tma_stmt.defined()) {
+      producer_seq.push_back(barrier_before_tma_stmt.value());
+    }
+    producer_seq.push_back(tma_copy);
     if (barrier_after_tma_stmt.defined()) {
       producer_seq.push_back(barrier_after_tma_stmt.value());
     }
 
     Stmt producer = IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
-                               SeqStmt(producer_seq));
+                               MakeSeqOrSingle(producer_seq));
 
     if (GetIsTmaCopy(op)) {
       return producer;
@@ -1406,12 +1424,34 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
   }
 
   if (is_load && barrier_base_id >= 0) {
-    Stmt barrier_before_tma_stmt;
+    if (auto expect_tx_bytes = annotations.Get("expect_tx_bytes")) {
+      total_bytes = Downcast<PrimExpr>(expect_tx_bytes.value());
+    }
+    Optional<Stmt> barrier_before_tma_stmt = std::nullopt;
     Optional<Stmt> barrier_after_tma_stmt = std::nullopt;
+    bool skip_expect_tx = false;
+    if (auto skip_expect_val = annotations.Get("skip_expect_tx")) {
+      skip_expect_tx = Downcast<IntImm>(skip_expect_val.value())->value != 0;
+    }
     if (GetIsTmaCopy(op)) {
-      barrier_before_tma_stmt =
-          Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
-                        {mbar_handle, total_bytes}));
+      if (skip_expect_tx) {
+        barrier_before_tma_stmt = std::nullopt;
+      } else if (auto emit_arrive_val = annotations.Get("emit_arrive")) {
+        if (Downcast<IntImm>(emit_arrive_val.value())->value != 0) {
+          barrier_before_tma_stmt =
+              Evaluate(Call(DataType::Handle(),
+                            builtin::ptx_arrive_barrier_expect_tx(),
+                            {mbar_handle, total_bytes}));
+        } else {
+          barrier_before_tma_stmt =
+              Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
+                            {mbar_handle, total_bytes}));
+        }
+      } else {
+        barrier_before_tma_stmt =
+            Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
+                          {mbar_handle, total_bytes}));
+      }
     } else {
       barrier_before_tma_stmt =
           Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
@@ -1420,13 +1460,17 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
           DataType::Handle(), builtin::ptx_arrive_barrier(), {mbar_handle}));
     }
 
-    Array<Stmt> producer_seq{barrier_before_tma_stmt, tma_copy};
+    Array<Stmt> producer_seq;
+    if (barrier_before_tma_stmt.defined()) {
+      producer_seq.push_back(barrier_before_tma_stmt.value());
+    }
+    producer_seq.push_back(tma_copy);
     if (barrier_after_tma_stmt.defined()) {
       producer_seq.push_back(barrier_after_tma_stmt.value());
     }
 
     Stmt producer = IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
-                               SeqStmt(producer_seq));
+                               MakeSeqOrSingle(producer_seq));
 
     if (GetIsTmaCopy(op)) {
       return producer;

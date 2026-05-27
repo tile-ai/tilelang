@@ -373,21 +373,32 @@ private:
     auto warp_size = TargetGetWarpSize(target_);
     auto thread_var_div_warp_size =
         FloorDiv(thread_var_->var, IntImm(thread_var_->var->dtype, warp_size));
-    new_body.push_back(IfThenElse(EQ(thread_var_div_warp_size, 0),
+    PrimExpr tmem_guard = EQ(thread_var_div_warp_size, 0);
+    bool use_2cta_tmem = tmem_call_ann.find("use_2cta") != tmem_call_ann.end();
+    if (use_2cta_tmem) {
+      tmem_guard = EQ(thread_var_div_warp_size,
+                      IntImm(thread_var_->var->dtype, 12));
+    }
+    new_body.push_back(IfThenElse(tmem_guard,
                                   init_mtmem_calls_.size() > 1
                                       ? SeqStmt(init_mtmem_calls_)
                                       : init_mtmem_calls_.back(),
                                   Stmt()));
-    new_body.push_back(
-        Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
-                      {StringImm("shared")})));
+    if (use_2cta_tmem) {
+      new_body.push_back(
+          Evaluate(Call(DataType::Handle(), tl::cluster_sync(), {})));
+    } else {
+      new_body.push_back(
+          Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
+                        {StringImm("shared")})));
+    }
     new_body.push_back(block->body);
     if (!dealloc_tmem_calls_.empty()) {
-      if (tmem_call_ann.find("use_2cta") != tmem_call_ann.end()) {
+      if (use_2cta_tmem) {
         new_body.push_back(
             Evaluate(Call(DataType::Handle(), tl::cluster_sync(), {})));
       }
-      new_body.push_back(IfThenElse(EQ(thread_var_div_warp_size, 0),
+      new_body.push_back(IfThenElse(tmem_guard,
                                     dealloc_tmem_calls_.size() > 1
                                         ? SeqStmt(dealloc_tmem_calls_)
                                         : dealloc_tmem_calls_.back(),
@@ -435,9 +446,9 @@ private:
       return BufferLoad(new_buffer, {0}) + GetTmemOffset(buffer, indices);
     } else if (var_remap_.count(buffer->data)) {
       auto new_buffer = Buffer(
-          var_remap_[buffer->data], tmem_dtype_, buffer->shape, buffer->strides,
-          buffer->elem_offset, buffer->name, buffer->data_alignment,
-          buffer->offset_factor, buffer->buffer_type);
+          var_remap_[buffer->data], tmem_dtype_, Array<PrimExpr>({1}),
+          Array<PrimExpr>({1}), PrimExpr(0), buffer->name,
+          buffer->data_alignment, buffer->offset_factor, buffer->buffer_type);
       return BufferLoad(new_buffer, {0}) + GetTmemOffset(buffer, indices);
     }
     return load;

@@ -422,6 +422,15 @@ def exp2_poly(x: PrimExpr) -> PrimExpr:
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.exp2_poly"), x)
 
 
+def exp2_approx(x: PrimExpr) -> PrimExpr:
+    """Approximate base-2 exponent using SM100 `ex2.approx.ftz.f32`.
+
+    This matches the FA4/avo softmax path more closely than CUDA's `exp2f`.
+    """
+    x = tir.convert(x)
+    return tir.call_pure_extern(x.dtype, "tl::tcgen05_exp2f_approx", x)
+
+
 def abs2(x: PrimExpr) -> PrimExpr:
     """Packed element-wise absolute value."""
     x = tir.convert(x)
@@ -455,4 +464,5 @@ __all__ = [
     "abs2",  # noqa: F401
     "max3",  # noqa: F401
     "exp2_poly",  # noqa: F401
+    "exp2_approx",  # noqa: F401
 ]

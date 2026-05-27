@@ -126,7 +126,7 @@ def _normalize_cluster_dims(
     else:
         raise ValueError("cluster_dims must be a list or tuple of integers")
 
-    return None if cluster_dims == [1, 1, 1] else cluster_dims
+    return cluster_dims
 
 
 @register_object("tl.KernelLaunchFrame")

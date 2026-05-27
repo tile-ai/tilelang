@@ -9,6 +9,7 @@ from tvm.tir import FloatImm, tvm_tuple
 
 __all__ = [
     "use_swizzle",
+    "use_2cta_tmem",
     "annotate_layout",
     "annotate_safe_value",
     "annotate_l2_hit_ratio",
@@ -23,6 +24,13 @@ def use_swizzle(panel_size: int, order: str = "row", enable: bool = True):
     if not enable:
         return None
     return attr(None, "threadblock_swizzle_pattern", tvm_tuple(device_func, panel_size))
+
+
+def use_2cta_tmem(enable: bool = True):
+    """Request cta_group::2 tensor-memory alloc/dealloc for helper-only kernels."""
+    if not enable:
+        return None
+    return block_attr({"use_2cta": 1, "mbarrier_init_thread": 416})
 
 
 def annotate_layout(layout_map: dict):

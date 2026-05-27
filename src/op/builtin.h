@@ -354,6 +354,17 @@ TVM_DLL const Op &ptx_arrive_cluster_barrier();
 TVM_DLL const Op &mbarrier_wait_parity();
 
 /*!
+ * \brief mbarrier wait with parity bit, executed only by lane 0 of the
+ * current warp. This matches AVO's producer/MMA/epilogue control-warp
+ * convention (`if (threadIdx.x % 32 != 0) return`) without forcing the whole
+ * outlined role into a raw CUDA helper.
+ *
+ * mbarrier_wait_parity_lane0(mbarrier, parity)
+ *
+ */
+TVM_DLL const Op &mbarrier_wait_parity_lane0();
+
+/*!
  * \brief tvm intrinsics for mbarrier expect tx
  *
  * mbarrier_expect_tx(mbarrier, transaction_bytes)
@@ -1059,10 +1070,121 @@ TVM_DLL const Op &tcgen05_wait_st();
 TVM_DLL const Op &tcgen05_correction_x16();
 
 /*!
+ * \brief Per-warp O correction with avo's ballot-before-wait fast path.
+ *
+ * tcgen05_correction_x16_skip(tmem_base, scale, mbar_pv, pv_phase,
+ *                             warp_group_offset, head_dim)
+ *
+ * If all lanes have scale >= 1.0, returns without waiting on the PV barrier or
+ * touching TMEM.  Otherwise waits for the previous PV completion and performs
+ * the same x16 correction as tcgen05_correction_x16.
+ */
+TVM_DLL const Op &tcgen05_correction_x16_skip();
+
+/*!
+ * \brief Per-warp final O normalization and shared-memory epilogue staging.
+ *
+ * tcgen05_epilogue_store_x16(tmem_base, smem_ptr, logsum, warp_group_offset, head_dim)
+ *
+ * Reads one O row from TMEM using the correction warpgroup row mapping,
+ * normalizes by an approximate reciprocal of logsum, converts to bf16, and writes into the swizzled shared layout
+ * consumed by TileLang's TMA store lowering.
+ */
+TVM_DLL const Op &tcgen05_epilogue_store_x16();
+
+/*!
+ * \brief Avo-style full correction + epilogue staging warpgroup helper for
+ * FA4 1SM split attention.
+ */
+TVM_DLL const Op &tcgen05_correction_epilogue_warp_1sm_skv();
+
+/*!
+ * \brief Avo-style one-iteration S->P online softmax for FA4 1SM attention.
+ *
+ * Args:
+ *   S_tmem_addr, P_tmem_addr,
+ *   scale_smem_ptr, logsum_smem_ptr,
+ *   rmax_state_ptr, rsum_state_ptr,
+ *   mbar_scale, mbar_p,
+ *   k, loop_extent, softmax_scale_log2,
+ *   seq_len, q_row_base, kv_col_base, is_causal, warp_group_offset
+ */
+TVM_DLL const Op &tcgen05_softmax_128x128();
+
+/*!
+ * \brief Avo-exact QK MMA for one Q stage and one shared K/V stage.
+ * Args: Q_stage_ptr, KV_stage_ptr, S_tmem_addr, mbar
+ *
+ * Emits the raw mk_fast descriptor loop used by avo's 1SM attention kernel and
+ * commits S readiness with the plain .b64 tcgen05 commit.
+ */
+TVM_DLL const Op &tcgen05_qk_gemm_128x128_skv();
+
+/*!
+ * \brief Avo-style full softmax warp loop for FA4 1SM split attention.
+ *
+ * Keeps rmax/rsum in registers for the whole KV loop and emits both the
+ * partial-P and full-P mbarrier arrivals.
+ */
+TVM_DLL const Op &tcgen05_softmax_warp_1sm();
+
+/*!
+ * \brief Avo-exact QK MMA for one Q stage and one shared K/V stage, without
+ * an emitted warp-12 guard. Caller must already restrict execution to the MMA
+ * warp.
+ * Args: Q_stage_ptr, KV_stage_ptr, S_tmem_addr, mbar
+ */
+TVM_DLL const Op &tcgen05_qk_gemm_128x128_skv_noguard();
+
+/*!
  * \brief Avo-exact PV MMA: 128x64 BMN, high D first, low D second.
  * Args: V_shared_ptr, P_tmem_addr, O_tmem_addr, accumulate(int)
  */
 TVM_DLL const Op &tcgen05_pv_gemm_128x64();
+
+/*!
+ * \brief Avo-exact PV MMA for a single shared K/V stage.
+ * Args: V_stage_ptr, P_tmem_addr, O_tmem_addr, accumulate(int)
+ *
+ * The stage is laid out as low-D [128,64] followed by high-D [128,64],
+ * matching avo's sKV storage.
+ */
+TVM_DLL const Op &tcgen05_pv_gemm_128x64_skv();
+
+/*!
+ * \brief Avo-exact PV MMA for a single shared K/V stage, without an emitted
+ * warp-12 guard. Caller must already restrict execution to the MMA warp.
+ * Args: V_stage_ptr, P_tmem_addr, O_tmem_addr, accumulate(int)
+ */
+TVM_DLL const Op &tcgen05_pv_gemm_128x64_skv_noguard();
+
+/*!
+ * \brief Avo-style full MMA warp loop for FA4 1SM split attention.
+ *
+ * This primitive keeps the MMA role as a compact device helper instead of
+ * expanding stage selection and QK/PV issue logic into TileLang's outlined
+ * warp function.  The generated structure matches avo's mma_warp_fn much more
+ * closely and avoids ptxas spilling in the MMA role.
+ */
+TVM_DLL const Op &tcgen05_mma_warp_1sm_skv();
+
+/*!
+ * \brief Avo-style full producer warp loop for FA4 1SM split attention.
+ *
+ * The CUDA lowering wires this primitive to the kernel's Q_desc/K_desc/V_desc
+ * TMA descriptors and emits one compact device-helper call, matching avo's
+ * producer_warp_fn shape more closely than expanded T.tma_copy branches.
+ */
+TVM_DLL const Op &tcgen05_producer_warp_1sm_skv();
+
+/*!
+ * \brief Avo-style epilogue TMA-store warp for FA4 1SM split attention.
+ *
+ * The CUDA lowering wires this primitive to the kernel's Output TMA descriptor
+ * and emits a compact noinline epilogue_warp_fn-shaped helper instead of
+ * expanding the TMA store branch in the main kernel.
+ */
+TVM_DLL const Op &tcgen05_epilogue_warp_1sm_skv();
 
 /*!
  * \brief Avo-exact commit: tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64
@@ -1070,6 +1192,26 @@ TVM_DLL const Op &tcgen05_pv_gemm_128x64();
  * Args: mbar_ptr
  */
 TVM_DLL const Op &tcgen05_commit_1sm_op();
+
+/*!
+ * \brief Avo-style 2CTA softmax warp role for FA4 attention.
+ */
+TVM_DLL const Op &tcgen05_softmax_warp_2cta();
+
+/*!
+ * \brief Avo-style 2CTA correction warpgroup role for FA4 attention.
+ */
+TVM_DLL const Op &tcgen05_correction_warp_2cta();
+
+/*!
+ * \brief Avo-style 2CTA MMA consumer warp role for FA4 attention.
+ */
+TVM_DLL const Op &tcgen05_mma_warp_2cta();
+
+/*!
+ * \brief Avo-style 2CTA producer warp role for FA4 attention.
+ */
+TVM_DLL const Op &tcgen05_producer_warp_2cta();
 
 /*!
  * \brief Mark a local allocation as persistent across CUDA warp-specialized

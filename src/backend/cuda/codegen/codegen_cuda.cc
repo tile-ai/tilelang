@@ -586,6 +586,15 @@ public:
 };
 
 void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
+  if (auto cluster_attr = f->GetAttr<Array<PrimExpr>>("cluster_dims")) {
+    auto cluster_dims = cluster_attr.value();
+    ICHECK_EQ(cluster_dims.size(), 3U);
+    int64_t cluster_x = cluster_dims[0].as<IntImmNode>()->value;
+    int64_t cluster_y = cluster_dims[1].as<IntImmNode>()->value;
+    int64_t cluster_z = cluster_dims[2].as<IntImmNode>()->value;
+    stream << " __cluster_dims__(" << cluster_x << ", " << cluster_y << ", "
+           << cluster_z << ") ";
+  }
   LaunchConfigExtractor extractor;
   extractor(f->body);
   arith::Analyzer analyzer;
@@ -751,6 +760,102 @@ public:
     touched.insert(op);
   }
 };
+
+bool IsSetMaxNRegOnlyStmt(const tir::Stmt &stmt) {
+  if (const auto *eval = stmt.as<tir::EvaluateNode>()) {
+    if (const auto *call = eval->value.as<tir::CallNode>()) {
+      return call->op.same_as(tl::set_max_nreg()) ||
+             call->op.same_as(tl::no_set_max_nreg());
+    }
+    return is_const_int(eval->value, 0);
+  }
+  if (const auto *seq = stmt.as<tir::SeqStmtNode>()) {
+    for (const auto &sub_stmt : seq->seq) {
+      if (!IsSetMaxNRegOnlyStmt(sub_stmt)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  if (const auto *if_stmt = stmt.as<tir::IfThenElseNode>()) {
+    if (!IsSetMaxNRegOnlyStmt(if_stmt->then_case)) {
+      return false;
+    }
+    if (if_stmt->else_case.defined() &&
+        !IsSetMaxNRegOnlyStmt(if_stmt->else_case.value())) {
+      return false;
+    }
+    return true;
+  }
+  if (const auto *attr = stmt.as<tir::AttrStmtNode>()) {
+    return IsSetMaxNRegOnlyStmt(attr->body);
+  }
+  if (const auto *let = stmt.as<tir::LetStmtNode>()) {
+    return IsSetMaxNRegOnlyStmt(let->body);
+  }
+  if (const auto *block = stmt.as<tir::BlockNode>()) {
+    return IsSetMaxNRegOnlyStmt(block->body);
+  }
+  if (const auto *realize = stmt.as<tir::BlockRealizeNode>()) {
+    return IsSetMaxNRegOnlyStmt(realize->block->body);
+  }
+  return false;
+}
+
+bool IsNoOpEvaluate(const tir::Stmt &stmt) {
+  if (const auto *eval = stmt.as<tir::EvaluateNode>()) {
+    return is_const_int(eval->value, 0);
+  }
+  return false;
+}
+
+bool IsSetMaxNRegStmt(const tir::Stmt &stmt) {
+  const auto *eval = stmt.as<tir::EvaluateNode>();
+  if (!eval) {
+    return false;
+  }
+  const auto *call = eval->value.as<tir::CallNode>();
+  return call && (call->op.same_as(tl::set_max_nreg()) ||
+                  call->op.same_as(tl::no_set_max_nreg()));
+}
+
+tir::Stmt MakeSeqOrNoOp(std::vector<tir::Stmt> stmts) {
+  if (stmts.empty()) {
+    return tir::Evaluate(IntImm(DataType::Int(32), 0));
+  }
+  if (stmts.size() == 1) {
+    return stmts[0];
+  }
+  return tir::SeqStmt(stmts);
+}
+
+tir::Stmt ExtractLeadingSetMaxNReg(const tir::Stmt &body,
+                                   std::vector<tir::Stmt> *prologue) {
+  if (IsSetMaxNRegStmt(body)) {
+    prologue->push_back(body);
+    return tir::Evaluate(IntImm(DataType::Int(32), 0));
+  }
+
+  const auto *seq = body.as<tir::SeqStmtNode>();
+  if (!seq) {
+    return body;
+  }
+
+  bool still_leading = true;
+  std::vector<tir::Stmt> rest;
+  for (const auto &stmt : seq->seq) {
+    if (still_leading && IsNoOpEvaluate(stmt)) {
+      continue;
+    }
+    if (still_leading && IsSetMaxNRegStmt(stmt)) {
+      prologue->push_back(stmt);
+      continue;
+    }
+    still_leading = false;
+    rest.push_back(stmt);
+  }
+  return MakeSeqOrNoOp(std::move(rest));
+}
 }  // namespace
 
 void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
@@ -769,18 +874,32 @@ void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
           PrintExpr(arith::Analyzer().Simplify(op->extent + op->min));
       std::string start = PrintExpr(op->min);
       std::string vid = AllocVarID(op->loop_var.get());
+      std::vector<ActiveLoopVarInfo> forwarded_loops = active_loop_vars_;
 
       // For each branch: emit a device function containing the FULL for-loop
       std::vector<std::string> fn_names;
+      std::vector<std::vector<tir::Stmt>> branch_prologues;
+      std::vector<tir::Stmt> outlined_bodies;
       for (const auto &branch : branches) {
         std::string fn_name =
             "__outlined_warp_fn_" + std::to_string(outlined_fn_count_);
         outlined_fn_count_++;
         fn_names.push_back(fn_name);
+        std::vector<tir::Stmt> prologue;
+        tir::Stmt outlined_body =
+            ExtractLeadingSetMaxNReg(branch.body, &prologue);
+        branch_prologues.push_back(std::move(prologue));
+        outlined_bodies.push_back(outlined_body);
 
         // Function signature
         outlined_fns_stream_ << "static __device__ __noinline__ void "
                              << fn_name << "(\n    int __loop_extent";
+        for (const auto &loop : forwarded_loops) {
+          std::ostringstream type_os;
+          PrintType(loop.dtype, type_os);
+          outlined_fns_stream_ << ",\n    " << type_os.str() << " "
+                               << loop.name;
+        }
         for (const auto &bar : barrier_var_names_) {
           outlined_fns_stream_ << ",\n    " << mbarrier_dtype_ << "* " << bar;
         }
@@ -788,11 +907,14 @@ void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
           outlined_fns_stream_ << ",\n    uint* " << tm;
         }
         for (const auto &kp : kernel_param_infos_) {
-          outlined_fns_stream_ << ",\n    " << kp.type_str << "& "
-                               << kp.var_name;
+          outlined_fns_stream_ << ",\n    " << kp.type_str;
+          if (kp.is_grid_constant) {
+            outlined_fns_stream_ << "&";
+          }
+          outlined_fns_stream_ << " " << kp.var_name;
         }
         BufferVarTouchCollector touched;
-        touched(branch.body);
+        touched(outlined_body);
         for (const auto &alloc : local_allocs_) {
           if (!alloc.outline_persistent) {
             continue;
@@ -838,10 +960,15 @@ void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
         std::ostringstream saved_stream;
         saved_stream.swap(stream);
         in_outlined_fn_ = true;
+        auto saved_var_idmap = var_idmap_;
+        for (const auto &loop : forwarded_loops) {
+          var_idmap_[loop.var] = loop.name;
+        }
         current_loop_var_name_ = vid;
-        PrintStmt(branch.body);
+        PrintStmt(outlined_body);
         FlushPendingTmemAllocs();
         current_loop_var_name_ = "";
+        var_idmap_ = saved_var_idmap;
         in_outlined_fn_ = false;
         outlined_fns_stream_ << stream.str();
         stream.str("");
@@ -867,8 +994,14 @@ void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
           stream << "} else {\n";
         }
         int call_scope = BeginScope();
+        for (const auto &stmt : branch_prologues[i]) {
+          PrintStmt(stmt);
+        }
         PrintIndent();
         stream << fn_names[i] << "(" << extent;
+        for (const auto &loop : forwarded_loops) {
+          stream << ", " << loop.name;
+        }
         for (const auto &bar : barrier_var_names_) {
           stream << ", " << bar;
         }
@@ -879,7 +1012,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
           stream << ", " << kp.var_name;
         }
         BufferVarTouchCollector touched;
-        touched(branches[i].body);
+        touched(outlined_bodies[i]);
         for (const auto &alloc : local_allocs_) {
           if (!alloc.outline_persistent) {
             continue;
@@ -920,8 +1053,10 @@ void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
   int for_scope = BeginScope();
   std::string saved_loop_var = current_loop_var_name_;
   current_loop_var_name_ = vid;
+  active_loop_vars_.push_back({op->loop_var.get(), vid, op->loop_var.dtype()});
   PrintStmt(op->body);
   FlushPendingTmemAllocs();
+  active_loop_vars_.pop_back();
   current_loop_var_name_ = saved_loop_var;
   this->EndScope(for_scope);
   PrintIndent();
@@ -2502,6 +2637,31 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << "    :: \"r\"(__mbar_addr), \"r\"(__mbar_phase), \"r\"(__mbar_ticks) : \"memory\");\n";
     this->PrintIndent();
     this->stream << "}\n";
+  } else if (op->op.same_as(tl::mbarrier_wait_parity_lane0())) {
+    ICHECK_EQ(op->args.size(), 2);
+    this->PrintIndent();
+    auto mbarrier_obj = this->PrintExpr(op->args[0]);
+    auto phase = this->PrintExpr(op->args[1]);
+    this->stream << "if ((((int)threadIdx.x) & 31) == 0) {\n";
+    this->PrintIndent();
+    this->stream << "  unsigned int __mbar_addr = cast_smem_ptr_to_int(&"
+                 << mbarrier_obj << ");\n";
+    this->PrintIndent();
+    this->stream << "  unsigned int __mbar_phase = (unsigned int)(" << phase << ");\n";
+    this->PrintIndent();
+    this->stream << "  unsigned int __mbar_ticks = 10000000u;\n";
+    this->PrintIndent();
+    this->stream << "  asm volatile(\n";
+    this->PrintIndent();
+    this->stream << "    \"{ .reg .pred P; WAIT%=:\"\n";
+    this->PrintIndent();
+    this->stream << "    \"mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P, [%0], %1, %2;\"\n";
+    this->PrintIndent();
+    this->stream << "    \"@P bra.uni DONE%=; bra.uni WAIT%=; DONE%=: }\"\n";
+    this->PrintIndent();
+    this->stream << "    :: \"r\"(__mbar_addr), \"r\"(__mbar_phase), \"r\"(__mbar_ticks) : \"memory\");\n";
+    this->PrintIndent();
+    this->stream << "}\n";
   } else if (op->op.same_as(tl::ptx_init_tensor_memory())) {
     // Buffer the tmem_allocate call for sorted emission.
     std::ostringstream ss;
@@ -3386,6 +3546,153 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     need_tcgen05_common_h_ = true;
     this->stream << "tl::tmem_correction_x16<" << head_dim << ">("
                  << tmem_addr << ", " << scale_val << ", " << wg_offset << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_correction_x16_skip())) {
+    ICHECK_EQ(op->args.size(), 6U)
+        << "tcgen05_correction_x16_skip expects 6 args";
+    this->PrintIndent();
+    auto tmem_addr = this->PrintExpr(op->args[0]);
+    auto scale_val = this->PrintExpr(op->args[1]);
+    auto mbar_pv = this->PrintExpr(op->args[2]);
+    auto pv_phase = this->PrintExpr(op->args[3]);
+    auto wg_offset = this->PrintExpr(op->args[4]);
+    auto head_dim = Downcast<IntImm>(op->args[5])->value;
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::tmem_correction_x16_skip<" << head_dim << ">("
+                 << tmem_addr << ", " << scale_val << ", (void const*)(&"
+                 << mbar_pv << "), " << pv_phase << ", " << wg_offset
+                 << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_epilogue_store_x16())) {
+    ICHECK_EQ(op->args.size(), 5U)
+        << "tcgen05_epilogue_store_x16 expects 5 args: tmem_buf, smem_ptr, logsum, wg_offset, head_dim";
+    this->PrintIndent();
+    auto tmem_addr = this->PrintExpr(op->args[0]);
+    auto smem_ptr = this->PrintExpr(op->args[1]);
+    auto logsum = this->PrintExpr(op->args[2]);
+    auto wg_offset = this->PrintExpr(op->args[3]);
+    auto head_dim = Downcast<IntImm>(op->args[4])->value;
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::tmem_epilogue_store_x16<" << head_dim << ">("
+                 << tmem_addr << ", " << smem_ptr << ", " << logsum
+                 << ", " << wg_offset << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_correction_epilogue_warp_1sm_skv())) {
+    ICHECK_EQ(op->args.size(), 16U)
+        << "tcgen05_correction_epilogue_warp_1sm_skv expects 16 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    auto ptr_expr = [this](const PrimExpr &expr) {
+      return this->PrintExpr(expr);
+    };
+    auto mbar_ptr = [this](const PrimExpr &expr) {
+      return "(void const*)(&" + this->PrintExpr(expr) + ")";
+    };
+    this->stream << "tl::tcgen05_correction_epilogue_warp_1sm_skv("
+                 << this->PrintExpr(op->args[0]) << ", "
+                 << this->PrintExpr(op->args[1]) << ", "
+                 << "(void*)(" << ptr_expr(op->args[2]) << "), "
+                 << "(float const*)(" << ptr_expr(op->args[3]) << "), "
+                 << "(float const*)(" << ptr_expr(op->args[4]) << "), "
+                 << "(float const*)(" << ptr_expr(op->args[5]) << "), "
+                 << "(float const*)(" << ptr_expr(op->args[6]) << "), "
+                 << mbar_ptr(op->args[7]) << ", " << mbar_ptr(op->args[8])
+                 << ", " << mbar_ptr(op->args[9]) << ", "
+                 << mbar_ptr(op->args[10]) << ", "
+                 << mbar_ptr(op->args[11]) << ", "
+                 << mbar_ptr(op->args[12]) << ", "
+                 << mbar_ptr(op->args[13]) << ", "
+                 << this->PrintExpr(op->args[14]) << ", "
+                 << this->PrintExpr(op->args[15]) << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_softmax_128x128())) {
+    ICHECK_EQ(op->args.size(), 17U)
+        << "tcgen05_softmax_128x128 expects 17 args";
+    this->PrintIndent();
+    auto s_addr = this->PrintExpr(op->args[0]);
+    auto p_addr = this->PrintExpr(op->args[1]);
+    auto scale_smem_ref = this->PrintExpr(op->args[2]);
+    auto logsum_smem_ref = this->PrintExpr(op->args[3]);
+    auto rmax_state_ref = this->PrintExpr(op->args[4]);
+    auto rsum_state_ref = this->PrintExpr(op->args[5]);
+    auto mbar_scale = this->PrintExpr(op->args[6]);
+    auto mbar_p2 = this->PrintExpr(op->args[7]);
+    auto mbar_p = this->PrintExpr(op->args[8]);
+    auto k = this->PrintExpr(op->args[9]);
+    auto loop_extent = this->PrintExpr(op->args[10]);
+    auto scale = this->PrintExpr(op->args[11]);
+    auto seq_len = this->PrintExpr(op->args[12]);
+    auto q_row_base = this->PrintExpr(op->args[13]);
+    auto kv_col_base = this->PrintExpr(op->args[14]);
+    auto is_causal = this->PrintExpr(op->args[15]);
+    auto wg_offset = this->PrintExpr(op->args[16]);
+    need_tcgen05_common_h_ = true;
+    auto ptr_of = [](const std::string &ref) {
+      return "(&(" + ref + "))";
+    };
+    this->stream << "tl::tcgen05_softmax_128x128(" << s_addr << ", "
+                 << p_addr << ", " << ptr_of(scale_smem_ref) << ", "
+                 << ptr_of(logsum_smem_ref) << ", " << ptr_of(rmax_state_ref)
+                 << ", " << ptr_of(rsum_state_ref)
+                 << ", (void const*)(&" << mbar_scale << "), "
+                 << "(void const*)(&" << mbar_p2 << "), "
+                 << "(void const*)(&" << mbar_p << "), " << k << ", "
+                 << loop_extent << ", " << scale << ", " << seq_len << ", "
+                 << q_row_base << ", " << kv_col_base << ", " << is_causal
+                 << ", " << wg_offset << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_qk_gemm_128x128_skv())) {
+    ICHECK_EQ(op->args.size(), 4U)
+        << "tcgen05_qk_gemm_128x128_skv expects 4 args: Q_stage_ptr, KV_stage_ptr, S_tmem, mbar";
+    this->PrintIndent();
+    auto q_stage = this->PrintExpr(op->args[0]);
+    auto kv_stage = this->PrintExpr(op->args[1]);
+    auto s_addr = this->PrintExpr(op->args[2]);
+    auto mbar = this->PrintExpr(op->args[3]);
+    need_tcgen05_common_h_ = true;
+    this->stream << "if ((((int)threadIdx.x) >> 5) == 12) {\n";
+    this->PrintIndent();
+    this->stream << "  tl::tcgen05_qk_mma_128x128_skv((void const*)("
+                 << q_stage << "), (void const*)(" << kv_stage << "), "
+                 << s_addr << ", (void const*)(&" << mbar << "));\n";
+    this->PrintIndent();
+    this->stream << "}\n";
+  } else if (op->op.same_as(tl::tcgen05_softmax_warp_1sm())) {
+    ICHECK_EQ(op->args.size(), 15U)
+        << "tcgen05_softmax_warp_1sm expects 15 args";
+    this->PrintIndent();
+    auto s_addr = this->PrintExpr(op->args[0]);
+    auto p_addr = this->PrintExpr(op->args[1]);
+    auto scale_smem = this->PrintExpr(op->args[2]);
+    auto logsum_smem = this->PrintExpr(op->args[3]);
+    auto mbar_s = this->PrintExpr(op->args[4]);
+    auto mbar_scale0 = this->PrintExpr(op->args[5]);
+    auto mbar_p2 = this->PrintExpr(op->args[6]);
+    auto mbar_p = this->PrintExpr(op->args[7]);
+    auto loop_extent = this->PrintExpr(op->args[8]);
+    auto tile_k_base = this->PrintExpr(op->args[9]);
+    auto scale = this->PrintExpr(op->args[10]);
+    auto seq_len = this->PrintExpr(op->args[11]);
+    auto q_row_base = this->PrintExpr(op->args[12]);
+    auto is_causal = this->PrintExpr(op->args[13]);
+    auto wg_offset = this->PrintExpr(op->args[14]);
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::tcgen05_softmax_warp_1sm(" << s_addr << ", "
+                 << p_addr << ", " << scale_smem << ", " << logsum_smem
+                 << ", (void const*)(&" << mbar_s << "), "
+                 << "(void const*)(&" << mbar_scale0 << "), "
+                 << "(void const*)(&" << mbar_p2 << "), "
+                 << "(void const*)(&" << mbar_p << "), "
+                 << loop_extent << ", " << tile_k_base << ", " << scale
+                 << ", " << seq_len << ", " << q_row_base << ", "
+                 << is_causal << ", " << wg_offset << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_qk_gemm_128x128_skv_noguard())) {
+    ICHECK_EQ(op->args.size(), 4U)
+        << "tcgen05_qk_gemm_128x128_skv_noguard expects 4 args: Q_stage_ptr, KV_stage_ptr, S_tmem, mbar";
+    this->PrintIndent();
+    auto q_stage = this->PrintExpr(op->args[0]);
+    auto kv_stage = this->PrintExpr(op->args[1]);
+    auto s_addr = this->PrintExpr(op->args[2]);
+    auto mbar = this->PrintExpr(op->args[3]);
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::tcgen05_qk_mma_128x128_skv((void const*)("
+                 << q_stage << "), (void const*)(" << kv_stage << "), "
+                 << s_addr << ", (void const*)(&" << mbar << "));\n";
   } else if (op->op.same_as(tl::tcgen05_pv_gemm_128x64())) {
     ICHECK_EQ(op->args.size(), 5U)
         << "tcgen05_pv_gemm_128x64 expects 5 args: V_lo_ptr, V_hi_ptr, P_tmem, O_tmem, accum";
@@ -3404,6 +3711,125 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << o_addr << ", " << accum << ");\n";
     this->PrintIndent();
     this->stream << "}\n";
+  } else if (op->op.same_as(tl::tcgen05_pv_gemm_128x64_skv())) {
+    ICHECK_EQ(op->args.size(), 4U)
+        << "tcgen05_pv_gemm_128x64_skv expects 4 args: V_stage_ptr, P_tmem, O_tmem, accum";
+    this->PrintIndent();
+    auto v_stage = this->PrintExpr(op->args[0]);
+    auto p_addr = this->PrintExpr(op->args[1]);
+    auto o_addr = this->PrintExpr(op->args[2]);
+    auto accum = this->PrintExpr(op->args[3]);
+    need_tcgen05_common_h_ = true;
+    // Warp-12 guard (all 32 lanes converged); the MMA helper uses elect_one internally
+    this->stream << "if ((((int)threadIdx.x) >> 5) == 12) {\n";
+    this->PrintIndent();
+    this->stream << "  tl::tcgen05_pv_mma_128x64_skv((void const*)(" << v_stage
+                 << "), " << p_addr << ", " << o_addr << ", " << accum
+                 << ");\n";
+    this->PrintIndent();
+    this->stream << "}\n";
+  } else if (op->op.same_as(tl::tcgen05_pv_gemm_128x64_skv_noguard())) {
+    ICHECK_EQ(op->args.size(), 4U)
+        << "tcgen05_pv_gemm_128x64_skv_noguard expects 4 args: V_stage_ptr, P_tmem, O_tmem, accum";
+    this->PrintIndent();
+    auto v_stage = this->PrintExpr(op->args[0]);
+    auto p_addr = this->PrintExpr(op->args[1]);
+    auto o_addr = this->PrintExpr(op->args[2]);
+    auto accum = this->PrintExpr(op->args[3]);
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::tcgen05_pv_mma_128x64_skv((void const*)(" << v_stage
+                 << "), " << p_addr << ", " << o_addr << ", " << accum
+                 << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_mma_warp_1sm_skv())) {
+    ICHECK_EQ(op->args.size(), 32U)
+        << "tcgen05_mma_warp_1sm_skv expects 32 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    auto ptr_expr = [this](const PrimExpr &expr) {
+      return this->PrintExpr(expr);
+    };
+    auto mbar_ptr = [this](const PrimExpr &expr) {
+      return "(void const*)(&" + this->PrintExpr(expr) + ")";
+    };
+    this->stream << "tl::tcgen05_mma_warp_1sm_skv_fast("
+                 << "(void const*)(" << ptr_expr(op->args[0]) << "), "
+                 << "(void const*)(" << ptr_expr(op->args[2]) << "), "
+                 << mbar_ptr(op->args[5]) << ", " << mbar_ptr(op->args[6])
+                 << ", " << mbar_ptr(op->args[7]) << ", "
+                 << mbar_ptr(op->args[10]) << ", "
+                 << mbar_ptr(op->args[20]) << ", "
+                 << mbar_ptr(op->args[21]) << ", "
+                 << mbar_ptr(op->args[13]) << ", "
+                 << mbar_ptr(op->args[14]) << ", "
+                 << mbar_ptr(op->args[15]) << ", "
+                 << mbar_ptr(op->args[16]) << ", "
+                 << mbar_ptr(op->args[17]) << ", "
+                 << mbar_ptr(op->args[18]) << ", "
+                 << mbar_ptr(op->args[19]) << ", "
+                 << this->PrintExpr(op->args[22]) << ", "
+                 << this->PrintExpr(op->args[23]) << ", "
+                 << this->PrintExpr(op->args[24]) << ", "
+                 << this->PrintExpr(op->args[25]) << ", "
+                 << this->PrintExpr(op->args[26]) << ", "
+                 << this->PrintExpr(op->args[27]) << ", "
+                 << this->PrintExpr(op->args[28]) << ", "
+                 << this->PrintExpr(op->args[29]) << ", "
+                 << this->PrintExpr(op->args[31]) << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_producer_warp_1sm_skv())) {
+    ICHECK_EQ(op->args.size(), 17U)
+        << "tcgen05_producer_warp_1sm_skv expects 17 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    auto ptr_expr = [this](const PrimExpr &expr) {
+      return this->PrintExpr(expr);
+    };
+    auto mbar_ptr = [this](const PrimExpr &expr) {
+      return "(void const*)(&" + this->PrintExpr(expr) + ")";
+    };
+    this->stream << "tl::tcgen05_producer_warp_1sm_skv("
+                 << this->PrintExpr(op->args[0]) << ", "
+                 << this->PrintExpr(op->args[1]) << ", "
+                 << this->PrintExpr(op->args[2]) << ", "
+                 << "(void*)(" << ptr_expr(op->args[3]) << "), "
+                 << "(void*)(" << ptr_expr(op->args[4]) << "), "
+                 << mbar_ptr(op->args[5]) << ", "
+                 << mbar_ptr(op->args[6]) << ", "
+                 << mbar_ptr(op->args[7]) << ", "
+                 << mbar_ptr(op->args[8]) << ", "
+                 << mbar_ptr(op->args[9]) << ", "
+                 << mbar_ptr(op->args[10]) << ", "
+                 << this->PrintExpr(op->args[11]) << ", "
+                 << this->PrintExpr(op->args[12]) << ", "
+                 << this->PrintExpr(op->args[13]) << ", "
+                 << this->PrintExpr(op->args[14]) << ", "
+                 << this->PrintExpr(op->args[15]) << ", "
+                 << this->PrintExpr(op->args[16]) << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_epilogue_warp_1sm_skv())) {
+    ICHECK_EQ(op->args.size(), 8U)
+        << "tcgen05_epilogue_warp_1sm_skv expects 8 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    auto desc_expr = [this](const PrimExpr &expr) -> std::string {
+      if (const auto *str = expr.as<StringImmNode>()) {
+        return std::string(str->value);
+      }
+      return this->PrintExpr(expr);
+    };
+    auto ptr_expr = [this](const PrimExpr &expr) {
+      return this->PrintExpr(expr);
+    };
+    auto mbar_ptr = [this](const PrimExpr &expr) {
+      return "(void const*)(&" + this->PrintExpr(expr) + ")";
+    };
+    this->stream << "tl::tcgen05_epilogue_warp_1sm_skv("
+                 << desc_expr(op->args[0]) << ", "
+                 << "(void const*)(" << ptr_expr(op->args[1]) << "), "
+                 << mbar_ptr(op->args[2]) << ", "
+                 << mbar_ptr(op->args[3]) << ", "
+                 << this->PrintExpr(op->args[4]) << ", "
+                 << this->PrintExpr(op->args[5]) << ", "
+                 << this->PrintExpr(op->args[6]) << ", "
+                 << this->PrintExpr(op->args[7]) << ");\n";
   } else if (op->op.same_as(tl::tcgen05_commit_1sm_op())) {
     ICHECK_EQ(op->args.size(), 1U)
         << "tcgen05_commit_1sm_op expects 1 arg: mbar_ptr";
@@ -3417,6 +3843,122 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << mbar << "));\n";
     this->PrintIndent();
     this->stream << "}\n";
+  } else if (op->op.same_as(tl::tcgen05_softmax_warp_2cta())) {
+    ICHECK_EQ(op->args.size(), 16U)
+        << "tcgen05_softmax_warp_2cta expects 16 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    auto ptr_expr = [this](const PrimExpr &expr) {
+      return this->PrintExpr(expr);
+    };
+    auto mbar_ptr = [this](const PrimExpr &expr) {
+      return "(void const*)(&" + this->PrintExpr(expr) + ")";
+    };
+    this->stream << "tl::tcgen05_softmax_warp_2cta("
+                 << this->PrintExpr(op->args[0]) << ", "
+                 << this->PrintExpr(op->args[1]) << ", "
+                 << "(void const*)(" << ptr_expr(op->args[2]) << "), "
+                 << "(void*)(" << ptr_expr(op->args[3]) << "), "
+                 << "(float*)(" << ptr_expr(op->args[4]) << "), "
+                 << mbar_ptr(op->args[5]) << ", "
+                 << mbar_ptr(op->args[6]) << ", "
+                 << mbar_ptr(op->args[7]) << ", "
+                 << mbar_ptr(op->args[8]) << ", "
+                 << mbar_ptr(op->args[9]) << ", "
+                 << this->PrintExpr(op->args[10]) << ", "
+                 << this->PrintExpr(op->args[11]) << ", "
+                 << this->PrintExpr(op->args[12]) << ", "
+                 << this->PrintExpr(op->args[13]) << ", "
+                 << this->PrintExpr(op->args[14]) << ", "
+                 << this->PrintExpr(op->args[15]) << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_correction_warp_2cta())) {
+    ICHECK_EQ(op->args.size(), 8U)
+        << "tcgen05_correction_warp_2cta expects 8 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    auto ptr_expr = [this](const PrimExpr &expr) {
+      return this->PrintExpr(expr);
+    };
+    auto mbar_ptr = [this](const PrimExpr &expr) {
+      return "(void const*)(&" + this->PrintExpr(expr) + ")";
+    };
+    this->stream << "tl::tcgen05_correction_warp_2cta("
+                 << "(float*)(" << ptr_expr(op->args[0]) << "), "
+                 << mbar_ptr(op->args[1]) << ", "
+                 << mbar_ptr(op->args[2]) << ", "
+                 << mbar_ptr(op->args[3]) << ", "
+                 << this->PrintExpr(op->args[4]) << ", "
+                 << this->PrintExpr(op->args[5]) << ", "
+                 << this->PrintExpr(op->args[6]) << ", "
+                 << this->PrintExpr(op->args[7]) << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_mma_warp_2cta())) {
+    ICHECK_EQ(op->args.size(), 22U)
+        << "tcgen05_mma_warp_2cta expects 22 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    auto ptr_expr = [this](const PrimExpr &expr) {
+      return this->PrintExpr(expr);
+    };
+    auto mbar_ptr = [this](const PrimExpr &expr) {
+      return "(void const*)(&" + this->PrintExpr(expr) + ")";
+    };
+    this->stream << "tl::tcgen05_mma_warp_2cta("
+                 << "(void const*)(" << ptr_expr(op->args[0]) << "), "
+                 << "(void const*)(" << ptr_expr(op->args[1]) << "), "
+                 << "(void const*)(" << ptr_expr(op->args[2]) << "), "
+                 << mbar_ptr(op->args[3]) << ", "
+                 << mbar_ptr(op->args[4]) << ", "
+                 << mbar_ptr(op->args[5]) << ", "
+                 << mbar_ptr(op->args[6]) << ", "
+                 << mbar_ptr(op->args[7]) << ", "
+                 << mbar_ptr(op->args[8]) << ", "
+                 << mbar_ptr(op->args[9]) << ", "
+                 << mbar_ptr(op->args[10]) << ", "
+                 << mbar_ptr(op->args[11]) << ", "
+                 << mbar_ptr(op->args[12]) << ", "
+                 << this->PrintExpr(op->args[13]) << ", "
+                 << this->PrintExpr(op->args[14]) << ", "
+                 << this->PrintExpr(op->args[15]) << ", "
+                 << this->PrintExpr(op->args[16]) << ", "
+                 << this->PrintExpr(op->args[17]) << ", "
+                 << this->PrintExpr(op->args[18]) << ", "
+                 << this->PrintExpr(op->args[19]) << ", "
+                 << this->PrintExpr(op->args[20]) << ", "
+                 << this->PrintExpr(op->args[21]) << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_producer_warp_2cta())) {
+    ICHECK_EQ(op->args.size(), 22U)
+        << "tcgen05_producer_warp_2cta expects 22 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    auto ptr_expr = [this](const PrimExpr &expr) {
+      return this->PrintExpr(expr);
+    };
+    auto mbar_ptr = [this](const PrimExpr &expr) {
+      return "(void const*)(&" + this->PrintExpr(expr) + ")";
+    };
+    this->stream << "tl::tcgen05_producer_warp_2cta("
+                 << "&" << this->PrintExpr(op->args[0]) << ", "
+                 << "&" << this->PrintExpr(op->args[1]) << ", "
+                 << "&" << this->PrintExpr(op->args[2]) << ", "
+                 << "(void*)(" << ptr_expr(op->args[3]) << "), "
+                 << "(void*)(" << ptr_expr(op->args[4]) << "), "
+                 << "(void*)(" << ptr_expr(op->args[5]) << "), "
+                 << mbar_ptr(op->args[6]) << ", "
+                 << mbar_ptr(op->args[7]) << ", "
+                 << mbar_ptr(op->args[8]) << ", "
+                 << mbar_ptr(op->args[9]) << ", "
+                 << mbar_ptr(op->args[10]) << ", "
+                 << this->PrintExpr(op->args[11]) << ", "
+                 << this->PrintExpr(op->args[12]) << ", "
+                 << this->PrintExpr(op->args[13]) << ", "
+                 << this->PrintExpr(op->args[14]) << ", "
+                 << this->PrintExpr(op->args[15]) << ", "
+                 << this->PrintExpr(op->args[16]) << ", "
+                 << this->PrintExpr(op->args[17]) << ", "
+                 << this->PrintExpr(op->args[18]) << ", "
+                 << this->PrintExpr(op->args[19]) << ", "
+                 << this->PrintExpr(op->args[20]) << ", "
+                 << this->PrintExpr(op->args[21]) << ");\n";
   } else if (op->op.same_as(tl::outline_persistent())) {
     ICHECK_EQ(op->args.size(), 1U)
         << "outline_persistent expects 1 buffer handle";
@@ -5635,6 +6177,14 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
           RegisterHandleType(v.get(), prim->dtype);
         }
       }
+      if (outline_warp_spec_enabled_) {
+        std::ostringstream type_os;
+        if (ro_param_indices.count(static_cast<int>(i))) {
+          type_os << "const ";
+        }
+        CodeGenC::PrintType(GetType(v), type_os);
+        kernel_param_infos_.push_back({vid, type_os.str(), false});
+      }
 
       if (!has_cuda_pdl_sync && no_alias && !non_restrict.count(v.get())) {
         PrintRestrict(v, stream);
@@ -5698,6 +6248,11 @@ std::string CodeGenTileLangCUDA::EmitOutlinedDeviceFunction(const Stmt &body) {
   // (no enclosing for-loop), there is no loop var to forward; the for-loop
   // lives inside the branch body itself.
   bool has_loop_var = !current_loop_var_name_.empty();
+  std::vector<ActiveLoopVarInfo> forwarded_loops = active_loop_vars_;
+  if (has_loop_var && !forwarded_loops.empty() &&
+      forwarded_loops.back().name == current_loop_var_name_) {
+    forwarded_loops.pop_back();
+  }
 
   // Build function signature
   outlined_fns_stream_ << "static __device__ __noinline__ void " << fn_name
@@ -5715,6 +6270,12 @@ std::string CodeGenTileLangCUDA::EmitOutlinedDeviceFunction(const Stmt &body) {
     emit_sep();
     outlined_fns_stream_ << "int " << current_loop_var_name_;
   }
+  for (const auto &loop : forwarded_loops) {
+    emit_sep();
+    std::ostringstream type_os;
+    PrintType(loop.dtype, type_os);
+    outlined_fns_stream_ << type_os.str() << " " << loop.name;
+  }
   for (const auto &bar : barrier_var_names_) {
     emit_sep();
     outlined_fns_stream_ << mbarrier_dtype_ << "* " << bar;
@@ -5725,7 +6286,11 @@ std::string CodeGenTileLangCUDA::EmitOutlinedDeviceFunction(const Stmt &body) {
   }
   for (const auto &kp : kernel_param_infos_) {
     emit_sep();
-    outlined_fns_stream_ << kp.type_str << "& " << kp.var_name;
+    outlined_fns_stream_ << kp.type_str;
+    if (kp.is_grid_constant) {
+      outlined_fns_stream_ << "&";
+    }
+    outlined_fns_stream_ << " " << kp.var_name;
   }
   BufferVarTouchCollector touched;
   touched(body);
@@ -5774,8 +6339,13 @@ std::string CodeGenTileLangCUDA::EmitOutlinedDeviceFunction(const Stmt &body) {
   in_outlined_fn_ = true;
   // Emit at base indent level (one level inside the function)
   // PrintStmt will manage its own sub-scopes
+  auto saved_var_idmap = var_idmap_;
+  for (const auto &loop : forwarded_loops) {
+    var_idmap_[loop.var] = loop.name;
+  }
   PrintStmt(body);
   FlushPendingTmemAllocs();
+  var_idmap_ = saved_var_idmap;
   in_outlined_fn_ = false;
 
   // Capture the emitted body and restore
@@ -5800,15 +6370,71 @@ void CodeGenTileLangCUDA::VisitStmt_(const IfThenElseNode *op) {
   if (outline_warp_spec_enabled_ && !in_outlined_fn_ &&
       IsThreadXComparison(op->condition)) {
     bool has_loop_var = !current_loop_var_name_.empty();
+    std::vector<ActiveLoopVarInfo> forwarded_loops = active_loop_vars_;
+    if (has_loop_var && !forwarded_loops.empty() &&
+        forwarded_loops.back().name == current_loop_var_name_) {
+      forwarded_loops.pop_back();
+    }
 
     // Flatten nested if-else into branches
     std::vector<WarpBranch> branches;
     FlattenWarpBranches(op, &branches);
 
-    // Emit each branch as a separate device function
-    std::vector<std::string> fn_names;
+    bool all_branches_setmax_only = true;
     for (const auto &branch : branches) {
-      fn_names.push_back(EmitOutlinedDeviceFunction(branch.body));
+      if (!IsSetMaxNRegOnlyStmt(branch.body)) {
+        all_branches_setmax_only = false;
+        break;
+      }
+    }
+    if (all_branches_setmax_only) {
+      std::string cond = PrintExpr(op->condition);
+      PrintIndent();
+      stream << "if (" << cond << ") {\n";
+      int then_scope = BeginScope();
+      PrintStmt(op->then_case);
+      EndScope(then_scope);
+      if (op->else_case.defined()) {
+        PrintIndent();
+        stream << "} else {\n";
+        int else_scope = BeginScope();
+        PrintStmt(op->else_case.value());
+        EndScope(else_scope);
+      }
+      PrintIndent();
+      stream << "}\n";
+      return;
+    }
+
+    auto can_emit_directly = [&](const tir::Stmt &body) {
+      BufferVarTouchCollector touched;
+      touched(body);
+      for (const auto &alloc : local_allocs_) {
+        if (alloc.buffer_var && touched.touched.count(alloc.buffer_var)) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    // Emit helper-only branches directly in the kernel. These branches already
+    // call noinline role helpers (softmax/MMA/producer/correction/epilogue);
+    // wrapping them in an extra __outlined_warp_fn adds a second call layer that
+    // is not present in the AVO reference kernel.
+    std::vector<std::string> fn_names;
+    std::vector<std::vector<tir::Stmt>> branch_prologues;
+    std::vector<tir::Stmt> outlined_bodies;
+    std::vector<bool> emit_direct;
+    for (const auto &branch : branches) {
+      std::vector<tir::Stmt> prologue;
+      tir::Stmt outlined_body =
+          ExtractLeadingSetMaxNReg(branch.body, &prologue);
+      bool direct = can_emit_directly(outlined_body);
+      emit_direct.push_back(direct);
+      fn_names.push_back(direct ? std::string()
+                                : EmitOutlinedDeviceFunction(outlined_body));
+      branch_prologues.push_back(std::move(prologue));
+      outlined_bodies.push_back(outlined_body);
     }
 
     // Emit dispatch in kernel stream
@@ -5826,7 +6452,16 @@ void CodeGenTileLangCUDA::VisitStmt_(const IfThenElseNode *op) {
         stream << "} else {\n";
       }
       int call_scope = BeginScope();
+      for (const auto &stmt : branch_prologues[i]) {
+        PrintStmt(stmt);
+      }
       PrintIndent();
+      if (emit_direct[i]) {
+        PrintStmt(outlined_bodies[i]);
+        FlushPendingTmemAllocs();
+        EndScope(call_scope);
+        continue;
+      }
       stream << fn_names[i] << "(";
       bool first_arg = true;
       auto sep = [&]() {
@@ -5836,6 +6471,10 @@ void CodeGenTileLangCUDA::VisitStmt_(const IfThenElseNode *op) {
       if (has_loop_var) {
         sep();
         stream << current_loop_var_name_;
+      }
+      for (const auto &loop : forwarded_loops) {
+        sep();
+        stream << loop.name;
       }
       for (const auto &bar : barrier_var_names_) {
         sep();
@@ -5850,7 +6489,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const IfThenElseNode *op) {
         stream << kp.var_name;
       }
       BufferVarTouchCollector touched;
-      touched(branches[i].body);
+      touched(outlined_bodies[i]);
       for (const auto &alloc : local_allocs_) {
         if (!alloc.outline_persistent) {
           continue;

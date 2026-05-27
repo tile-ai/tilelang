@@ -21,7 +21,7 @@ TL_DEVICE void cluster_arrive_relaxed() {
 
 TL_DEVICE void cluster_arrive() {
 #if defined(TILELANG_CLUSTER_ENABLED)
-  asm volatile("barrier.cluster.arrive.aligned;\n" : :);
+  asm volatile("barrier.cluster.arrive.release.aligned;\n" : : : "memory");
 #else
   TILELANG_UNREACHABLE("TILELANG_CLUSTER_ENABLED is not defined");
 #endif
@@ -29,7 +29,7 @@ TL_DEVICE void cluster_arrive() {
 
 TL_DEVICE void cluster_wait() {
 #if defined(TILELANG_CLUSTER_ENABLED)
-  asm volatile("barrier.cluster.wait.aligned;\n" : :);
+  asm volatile("barrier.cluster.wait.acquire.aligned;\n" : : : "memory");
 #else
   TILELANG_UNREACHABLE("TILELANG_CLUSTER_ENABLED is not defined");
 #endif

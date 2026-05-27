@@ -130,7 +130,11 @@ private:
 
     Array<Stmt> new_body;
     PrimExpr condition;
-    if (!disable_shuffle_elect_) {
+    if (op->annotations.count("mbarrier_init_thread")) {
+      PrimExpr init_thread =
+          Downcast<PrimExpr>(op->annotations.at("mbarrier_init_thread"));
+      condition = EQ(thread_var_->var, init_thread);
+    } else if (!disable_shuffle_elect_) {
       condition = Call(DataType::Bool(), tl_shuffle_elect(), {0});
     } else {
       condition = EQ(thread_var_->var, 0);

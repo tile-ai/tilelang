@@ -126,6 +126,7 @@ from .utils import index_to_coordinates  # noqa: F401
 from .symbolics import dynamic, symbolic  # noqa: F401
 from .annotations import (  # noqa: F401
     use_swizzle,
+    use_2cta_tmem,
     annotate_layout,
     annotate_safe_value,
     annotate_l2_hit_ratio,

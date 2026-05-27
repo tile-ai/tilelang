@@ -431,7 +431,7 @@ def ptx_arrive_cluster_barrier(mbarrier: BarrierType, cta_id: int | Var):
     return tir.call_intrin("handle", tir.op.Op.get("tl.ptx_arrive_cluster_barrier"), mbarrier, cta_id)
 
 
-def mbarrier_wait_parity(mbarrier: BarrierType, parity: int | Var):
+def mbarrier_wait_parity(mbarrier: BarrierType, parity: int | Var, *, lane0: bool = False):
     """Wait for memory barrier parity condition.
 
     Args:
@@ -469,7 +469,8 @@ def mbarrier_wait_parity(mbarrier: BarrierType, parity: int | Var):
         tir.Call: A handle to the barrier wait operation
     """
     mbarrier = _mbar_to_buffer_load(mbarrier)
-    return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_wait_parity"), mbarrier, parity)
+    op_name = "tl.mbarrier_wait_parity_lane0" if lane0 else "tl.mbarrier_wait_parity"
+    return tir.call_intrin("handle", tir.op.Op.get(op_name), mbarrier, parity)
 
 
 def mbarrier_arrive(mbarrier: BarrierType, cta_id: int | Var | None = None, *, lane0: bool = False):
@@ -1285,6 +1286,220 @@ def tcgen05_correction_x16(tmem_buf, scale_frag, warp_group_offset: int = 256, h
     )
 
 
+def tcgen05_correction_x16_skip(
+    tmem_buf,
+    scale_frag,
+    mbar_pv,
+    pv_phase,
+    warp_group_offset: int = 256,
+    head_dim: int = 128,
+):
+    """Avo-style correction with ballot skip before waiting on PV."""
+    mbar_pv = _mbar_to_buffer_load(mbar_pv)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_correction_x16_skip"),
+        tmem_buf,
+        scale_frag,
+        mbar_pv,
+        pv_phase,
+        tir.IntImm("int32", warp_group_offset),
+        tir.IntImm("int32", head_dim),
+    )
+
+
+def tcgen05_epilogue_store_x16(
+    tmem_buf,
+    smem_ptr,
+    logsum,
+    warp_group_offset: int = 256,
+    head_dim: int = 128,
+):
+    """Per-warp final O normalization and epilogue staging.
+
+    Reads one row from O TMEM using the correction WG row mapping
+    (`threadIdx.x - warp_group_offset`), normalizes by an approximate reciprocal
+    of `logsum`, converts to bf16, and writes into the shared-memory layout
+    expected by TileLang's TMA store lowering for a [128, 128] bf16 tile.
+    """
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_epilogue_store_x16"),
+        tmem_buf,
+        smem_ptr,
+        logsum,
+        tir.IntImm("int32", warp_group_offset),
+        tir.IntImm("int32", head_dim),
+    )
+
+
+def tcgen05_correction_epilogue_warp_1sm_skv(
+    o0_tmem_addr,
+    o1_tmem_addr,
+    q_stage_ptr,
+    scale0_smem_ptr,
+    scale1_smem_ptr,
+    logsum0_smem_ptr,
+    logsum1_smem_ptr,
+    mbar_scale0,
+    mbar_scale1,
+    mbar_pv,
+    mbar_corr0,
+    mbar_corr1,
+    mbar_epi0,
+    mbar_epi1,
+    loop_extent,
+    tile_k_base,
+):
+    """Avo-style correction + epilogue staging helper for FA4 1SM split path."""
+    mbar_scale0 = _mbar_to_buffer_load(mbar_scale0)
+    mbar_scale1 = _mbar_to_buffer_load(mbar_scale1)
+    mbar_pv = _mbar_to_buffer_load(mbar_pv)
+    mbar_corr0 = _mbar_to_buffer_load(mbar_corr0)
+    mbar_corr1 = _mbar_to_buffer_load(mbar_corr1)
+    mbar_epi0 = _mbar_to_buffer_load(mbar_epi0)
+    mbar_epi1 = _mbar_to_buffer_load(mbar_epi1)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_correction_epilogue_warp_1sm_skv"),
+        o0_tmem_addr,
+        o1_tmem_addr,
+        q_stage_ptr,
+        scale0_smem_ptr,
+        scale1_smem_ptr,
+        logsum0_smem_ptr,
+        logsum1_smem_ptr,
+        mbar_scale0,
+        mbar_scale1,
+        mbar_pv,
+        mbar_corr0,
+        mbar_corr1,
+        mbar_epi0,
+        mbar_epi1,
+        loop_extent,
+        tile_k_base,
+    )
+
+
+def tcgen05_softmax_128x128(
+    s_tmem_addr,
+    p_tmem_addr,
+    scale_smem_ptr,
+    logsum_smem_ptr,
+    rmax_state_ptr,
+    rsum_state_ptr,
+    mbar_scale,
+    mbar_p2,
+    mbar_p,
+    k,
+    loop_extent,
+    softmax_scale_log2,
+    seq_len,
+    q_row_base,
+    kv_col_base,
+    is_causal,
+    warp_group_offset: int = 0,
+):
+    """Avo-style one-iteration S->P online softmax for FA4 1SM attention."""
+    mbar_scale = _mbar_to_buffer_load(mbar_scale)
+    mbar_p2 = _mbar_to_buffer_load(mbar_p2)
+    mbar_p = _mbar_to_buffer_load(mbar_p)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_softmax_128x128"),
+        s_tmem_addr,
+        p_tmem_addr,
+        scale_smem_ptr,
+        logsum_smem_ptr,
+        rmax_state_ptr,
+        rsum_state_ptr,
+        mbar_scale,
+        mbar_p2,
+        mbar_p,
+        k,
+        loop_extent,
+        softmax_scale_log2,
+        seq_len,
+        q_row_base,
+        kv_col_base,
+        is_causal,
+        tir.IntImm("int32", warp_group_offset),
+    )
+
+
+def tcgen05_qk_gemm_128x128_skv(q_stage_ptr, kv_stage_ptr, s_tmem_addr, mbar):
+    """Avo-exact QK MMA for one Q stage and one shared K/V stage.
+
+    Emits the raw mk_fast descriptor loop used by avo's 1SM attention kernel
+    and commits the S-ready mbarrier with the plain .b64 tcgen05 commit.
+    """
+    mbar = _mbar_to_buffer_load(mbar)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_qk_gemm_128x128_skv"),
+        q_stage_ptr,
+        kv_stage_ptr,
+        s_tmem_addr,
+        mbar,
+    )
+
+
+def tcgen05_softmax_warp_1sm(
+    s_tmem_addr,
+    p_tmem_addr,
+    scale_smem_ptr,
+    logsum_smem_ptr,
+    mbar_s,
+    mbar_scale0,
+    mbar_p2,
+    mbar_p,
+    loop_extent,
+    tile_k_base,
+    softmax_scale_log2,
+    seq_len,
+    q_row_base,
+    is_causal,
+    warp_group_offset: int = 0,
+):
+    """Avo-style full softmax warp loop for FA4 1SM attention."""
+    mbar_s = _mbar_to_buffer_load(mbar_s)
+    mbar_scale0 = _mbar_to_buffer_load(mbar_scale0)
+    mbar_p2 = _mbar_to_buffer_load(mbar_p2)
+    mbar_p = _mbar_to_buffer_load(mbar_p)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_softmax_warp_1sm"),
+        s_tmem_addr,
+        p_tmem_addr,
+        scale_smem_ptr,
+        logsum_smem_ptr,
+        mbar_s,
+        mbar_scale0,
+        mbar_p2,
+        mbar_p,
+        loop_extent,
+        tile_k_base,
+        softmax_scale_log2,
+        seq_len,
+        q_row_base,
+        is_causal,
+        tir.IntImm("int32", warp_group_offset),
+    )
+
+
+def tcgen05_qk_gemm_128x128_skv_noguard(q_stage_ptr, kv_stage_ptr, s_tmem_addr, mbar):
+    """Avo-exact QK MMA for the FA4 MMA warp; caller already guards warp 12."""
+    mbar = _mbar_to_buffer_load(mbar)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_qk_gemm_128x128_skv_noguard"),
+        q_stage_ptr,
+        kv_stage_ptr,
+        s_tmem_addr,
+        mbar,
+    )
+
+
 def tcgen05_pv_gemm_128x64(v_lo_ptr, v_hi_ptr, p_tmem_addr, o_tmem_addr, accumulate):
     """Avo-exact PV MMA: 128x64 BMN, high D first then low D, 16 MMA calls total.
     v_lo_ptr: SMEM pointer to V low-D buffer [128, 64] with 128B row stride.
@@ -1301,6 +1516,207 @@ def tcgen05_pv_gemm_128x64(v_lo_ptr, v_hi_ptr, p_tmem_addr, o_tmem_addr, accumul
     )
 
 
+def tcgen05_pv_gemm_128x64_skv(v_stage_ptr, p_tmem_addr, o_tmem_addr, accumulate):
+    """Avo-exact PV MMA for one shared K/V stage.
+
+    The stage is laid out as low-D [128,64] followed by high-D [128,64],
+    matching avo's sKV storage.
+    """
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_pv_gemm_128x64_skv"),
+        v_stage_ptr,
+        p_tmem_addr,
+        o_tmem_addr,
+        accumulate,
+    )
+
+
+def tcgen05_pv_gemm_128x64_skv_noguard(v_stage_ptr, p_tmem_addr, o_tmem_addr, accumulate):
+    """Avo-exact PV MMA for the FA4 MMA warp; caller already guards warp 12."""
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_pv_gemm_128x64_skv_noguard"),
+        v_stage_ptr,
+        p_tmem_addr,
+        o_tmem_addr,
+        accumulate,
+    )
+
+
+def tcgen05_mma_warp_1sm_skv(
+    q0_stage_ptr,
+    q1_stage_ptr,
+    kv0_stage_ptr,
+    kv1_stage_ptr,
+    kv2_stage_ptr,
+    mbar_q0_load,
+    mbar_q1_load,
+    mbar_k0,
+    mbar_k1,
+    mbar_k2,
+    mbar_v0,
+    mbar_v1,
+    mbar_v2,
+    mbar_p2_0,
+    mbar_p2_1,
+    mbar_p0,
+    mbar_p1,
+    mbar_corr0,
+    mbar_corr1,
+    mbar_pv,
+    mbar_s0,
+    mbar_s1,
+    s0_tmem_addr,
+    s1_tmem_addr,
+    p0_tmem_addr,
+    p1_tmem_addr,
+    o0_tmem_addr,
+    o1_tmem_addr,
+    loop_extent,
+    tile_k_base,
+    tile_corr_base,
+    tile_iter,
+):
+    """Avo-style full MMA warp loop for the FA4 1SM split path."""
+    mbar_q0_load = _mbar_to_buffer_load(mbar_q0_load)
+    mbar_q1_load = _mbar_to_buffer_load(mbar_q1_load)
+    mbar_k0 = _mbar_to_buffer_load(mbar_k0)
+    mbar_k1 = _mbar_to_buffer_load(mbar_k1)
+    mbar_k2 = _mbar_to_buffer_load(mbar_k2)
+    mbar_v0 = _mbar_to_buffer_load(mbar_v0)
+    mbar_v1 = _mbar_to_buffer_load(mbar_v1)
+    mbar_v2 = _mbar_to_buffer_load(mbar_v2)
+    mbar_p2_0 = _mbar_to_buffer_load(mbar_p2_0)
+    mbar_p2_1 = _mbar_to_buffer_load(mbar_p2_1)
+    mbar_p0 = _mbar_to_buffer_load(mbar_p0)
+    mbar_p1 = _mbar_to_buffer_load(mbar_p1)
+    mbar_corr0 = _mbar_to_buffer_load(mbar_corr0)
+    mbar_corr1 = _mbar_to_buffer_load(mbar_corr1)
+    mbar_pv = _mbar_to_buffer_load(mbar_pv)
+    mbar_s0 = _mbar_to_buffer_load(mbar_s0)
+    mbar_s1 = _mbar_to_buffer_load(mbar_s1)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_mma_warp_1sm_skv"),
+        q0_stage_ptr,
+        q1_stage_ptr,
+        kv0_stage_ptr,
+        kv1_stage_ptr,
+        kv2_stage_ptr,
+        mbar_q0_load,
+        mbar_q1_load,
+        mbar_k0,
+        mbar_k1,
+        mbar_k2,
+        mbar_v0,
+        mbar_v1,
+        mbar_v2,
+        mbar_p2_0,
+        mbar_p2_1,
+        mbar_p0,
+        mbar_p1,
+        mbar_corr0,
+        mbar_corr1,
+        mbar_pv,
+        mbar_s0,
+        mbar_s1,
+        s0_tmem_addr,
+        s1_tmem_addr,
+        p0_tmem_addr,
+        p1_tmem_addr,
+        o0_tmem_addr,
+        o1_tmem_addr,
+        loop_extent,
+        tile_k_base,
+        tile_corr_base,
+        tile_iter,
+    )
+
+
+def tcgen05_producer_warp_1sm_skv(
+    q_desc,
+    k_desc,
+    v_desc,
+    q_stage_ptr,
+    kv_stage_ptr,
+    mbar_q0_load,
+    mbar_q1_load,
+    mbar_k0,
+    mbar_v0,
+    mbar_s1,
+    mbar_pv,
+    loop_extent,
+    tile_k_base,
+    q_row_base,
+    q_head,
+    kv_head,
+    batch,
+):
+    """Avo-style full producer warp loop for the FA4 1SM split path.
+
+    This specialized primitive uses the kernel's Q/K/V TMA descriptors in CUDA
+    codegen and keeps the producer role as a compact helper instead of
+    expanding every prefetch stage in the outlined warp function.
+    """
+    mbar_q0_load = _mbar_to_buffer_load(mbar_q0_load)
+    mbar_q1_load = _mbar_to_buffer_load(mbar_q1_load)
+    mbar_k0 = _mbar_to_buffer_load(mbar_k0)
+    mbar_v0 = _mbar_to_buffer_load(mbar_v0)
+    mbar_s1 = _mbar_to_buffer_load(mbar_s1)
+    mbar_pv = _mbar_to_buffer_load(mbar_pv)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_producer_warp_1sm_skv"),
+        q_desc,
+        k_desc,
+        v_desc,
+        q_stage_ptr,
+        kv_stage_ptr,
+        mbar_q0_load,
+        mbar_q1_load,
+        mbar_k0,
+        mbar_v0,
+        mbar_s1,
+        mbar_pv,
+        loop_extent,
+        tile_k_base,
+        q_row_base,
+        q_head,
+        kv_head,
+        batch,
+    )
+
+
+def tcgen05_epilogue_warp_1sm_skv(
+    output_desc,
+    q_stage_ptr,
+    mbar_epi0,
+    mbar_epi1,
+    tile_iter,
+    q_row_base,
+    q_head,
+    batch,
+):
+    """Avo-style epilogue TMA-store warp for the FA4 1SM split path."""
+    if isinstance(output_desc, str):
+        output_desc = tir.StringImm(output_desc)
+    mbar_epi0 = _mbar_to_buffer_load(mbar_epi0)
+    mbar_epi1 = _mbar_to_buffer_load(mbar_epi1)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_epilogue_warp_1sm_skv"),
+        output_desc,
+        q_stage_ptr,
+        mbar_epi0,
+        mbar_epi1,
+        tile_iter,
+        q_row_base,
+        q_head,
+        batch,
+    )
+
+
 def tcgen05_commit_1sm(mbar):
     """Avo-exact commit: tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64"""
     mbar = _mbar_to_buffer_load(mbar)
@@ -1308,6 +1724,197 @@ def tcgen05_commit_1sm(mbar):
         "void",
         tir.op.Op.get("tl.tcgen05_commit_1sm_op"),
         mbar,
+    )
+
+
+def tcgen05_softmax_warp_2cta(
+    s_tmem_addr,
+    p_tmem_addr,
+    q_stage_ptr,
+    output_ptr,
+    rs_smem,
+    mbar_s,
+    mbar_p,
+    mbar_p2,
+    mbar_pv_base,
+    mbar_rs,
+    loop_extent,
+    tile_k_base,
+    scale,
+    seq_len,
+    q_row_base,
+    output_offset,
+):
+    mbar_s = _mbar_to_buffer_load(mbar_s)
+    mbar_p = _mbar_to_buffer_load(mbar_p)
+    mbar_p2 = _mbar_to_buffer_load(mbar_p2)
+    mbar_pv_base = _mbar_to_buffer_load(mbar_pv_base)
+    mbar_rs = _mbar_to_buffer_load(mbar_rs)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_softmax_warp_2cta"),
+        s_tmem_addr,
+        p_tmem_addr,
+        q_stage_ptr,
+        output_ptr,
+        rs_smem,
+        mbar_s,
+        mbar_p,
+        mbar_p2,
+        mbar_pv_base,
+        mbar_rs,
+        loop_extent,
+        tile_k_base,
+        scale,
+        seq_len,
+        q_row_base,
+        output_offset,
+    )
+
+
+def tcgen05_correction_warp_2cta(
+    rs_smem,
+    mbar_rs_base,
+    mbar_corr_base,
+    mbar_pv_base,
+    o0_tmem_addr,
+    loop_extent,
+    tile_k_base,
+    cta_rank,
+):
+    mbar_rs_base = _mbar_to_buffer_load(mbar_rs_base)
+    mbar_corr_base = _mbar_to_buffer_load(mbar_corr_base)
+    mbar_pv_base = _mbar_to_buffer_load(mbar_pv_base)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_correction_warp_2cta"),
+        rs_smem,
+        mbar_rs_base,
+        mbar_corr_base,
+        mbar_pv_base,
+        o0_tmem_addr,
+        loop_extent,
+        tile_k_base,
+        cta_rank,
+    )
+
+
+def tcgen05_mma_warp_2cta(
+    q_stage_ptr,
+    k_stage_ptr,
+    v_stage_ptr,
+    mbar_q_base,
+    mbar_k_base,
+    mbar_s_base,
+    mbar_p_base,
+    mbar_p2_base,
+    mbar_v_base,
+    mbar_pv_base,
+    mbar_corr_base,
+    mbar_k_rel_base,
+    mbar_v_rel_base,
+    s0_tmem_addr,
+    loop_extent,
+    q_phase,
+    tile_k_base,
+    cta_rank,
+    q_stage_bytes,
+    k_stage_bytes,
+    v_stage_bytes,
+    k_stage_elems,
+):
+    mbar_q_base = _mbar_to_buffer_load(mbar_q_base)
+    mbar_k_base = _mbar_to_buffer_load(mbar_k_base)
+    mbar_s_base = _mbar_to_buffer_load(mbar_s_base)
+    mbar_p_base = _mbar_to_buffer_load(mbar_p_base)
+    mbar_p2_base = _mbar_to_buffer_load(mbar_p2_base)
+    mbar_v_base = _mbar_to_buffer_load(mbar_v_base)
+    mbar_pv_base = _mbar_to_buffer_load(mbar_pv_base)
+    mbar_corr_base = _mbar_to_buffer_load(mbar_corr_base)
+    mbar_k_rel_base = _mbar_to_buffer_load(mbar_k_rel_base)
+    mbar_v_rel_base = _mbar_to_buffer_load(mbar_v_rel_base)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_mma_warp_2cta"),
+        q_stage_ptr,
+        k_stage_ptr,
+        v_stage_ptr,
+        mbar_q_base,
+        mbar_k_base,
+        mbar_s_base,
+        mbar_p_base,
+        mbar_p2_base,
+        mbar_v_base,
+        mbar_pv_base,
+        mbar_corr_base,
+        mbar_k_rel_base,
+        mbar_v_rel_base,
+        s0_tmem_addr,
+        loop_extent,
+        q_phase,
+        tile_k_base,
+        cta_rank,
+        q_stage_bytes,
+        k_stage_bytes,
+        v_stage_bytes,
+        k_stage_elems,
+    )
+
+
+def tcgen05_producer_warp_2cta(
+    q_desc,
+    k_desc,
+    v_desc,
+    q_stage_ptr,
+    k_stage_ptr,
+    v_stage_ptr,
+    mbar_q_base,
+    mbar_k_base,
+    mbar_v_base,
+    mbar_k_rel_base,
+    mbar_v_rel_base,
+    loop_extent,
+    tile_k_base,
+    q_row_base,
+    kv_row_base,
+    cta_rank,
+    q_stage_bytes,
+    kv_tile_bytes,
+    q_stage_elems,
+    k_stage_elems,
+    v_stage_elems,
+    q_phase,
+):
+    mbar_q_base = _mbar_to_buffer_load(mbar_q_base)
+    mbar_k_base = _mbar_to_buffer_load(mbar_k_base)
+    mbar_v_base = _mbar_to_buffer_load(mbar_v_base)
+    mbar_k_rel_base = _mbar_to_buffer_load(mbar_k_rel_base)
+    mbar_v_rel_base = _mbar_to_buffer_load(mbar_v_rel_base)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_producer_warp_2cta"),
+        q_desc,
+        k_desc,
+        v_desc,
+        q_stage_ptr,
+        k_stage_ptr,
+        v_stage_ptr,
+        mbar_q_base,
+        mbar_k_base,
+        mbar_v_base,
+        mbar_k_rel_base,
+        mbar_v_rel_base,
+        loop_extent,
+        tile_k_base,
+        q_row_base,
+        kv_row_base,
+        cta_rank,
+        q_stage_bytes,
+        kv_tile_bytes,
+        q_stage_elems,
+        k_stage_elems,
+        v_stage_elems,
+        q_phase,
     )
 
 

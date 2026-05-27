@@ -80,8 +80,7 @@ TL_DEVICE void tcgen05_mma_arrive(void const *smem_ptr,
     }
   } else {
     if (cute::elect_one_sync()) {
-      asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::"
-                   "cluster.b64 [%0];"
+      asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64 [%0];"
                    :
                    : "r"(bar_intptr));
     }

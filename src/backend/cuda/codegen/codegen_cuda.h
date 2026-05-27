@@ -182,6 +182,12 @@ private:
   bool outline_warp_spec_enabled_{false};
   // Innermost for-loop variable name (for passing to device functions)
   std::string current_loop_var_name_;
+  struct ActiveLoopVarInfo {
+    const VarNode *var{nullptr};
+    std::string name;
+    DataType dtype;
+  };
+  std::vector<ActiveLoopVarInfo> active_loop_vars_;
 
   struct LocalAllocInfo {
     std::string var_name;

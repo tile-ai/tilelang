@@ -1185,6 +1185,10 @@ def attention_kernel_1sm(
                     O1_tmem: pv_o_layout,
                     P0_tmem: pv_p_layout,
                     P1_tmem: pv_p_layout,
+                    Q0_shared: tilelang.layout.make_full_bank_swizzled_layout(Q0_shared),
+                    Q1_shared: tilelang.layout.make_full_bank_swizzled_layout(Q1_shared),
+                    K_shared_0: tilelang.layout.make_full_bank_swizzled_layout(K_shared_0),
+                    K_shared_1: tilelang.layout.make_full_bank_swizzled_layout(K_shared_1),
                     V_shared_0_lo: tilelang.layout.make_full_bank_swizzled_layout(V_shared_0_lo),
                     V_shared_0_hi: tilelang.layout.make_full_bank_swizzled_layout(V_shared_0_hi),
                     V_shared_1_lo: tilelang.layout.make_full_bank_swizzled_layout(V_shared_1_lo),
@@ -1193,15 +1197,22 @@ def attention_kernel_1sm(
 
                 mbar_s0 = T.alloc_barrier(1)
                 mbar_s1 = T.alloc_barrier(1)
-                mbar_p0 = T.alloc_barrier(128)
-                mbar_p1 = T.alloc_barrier(128)
+                # Full-P ready signal. Match avo's mb_p: one arrive per
+                # softmax warp, issued by lane 0 after P TMEM stores finish.
+                mbar_p0 = T.alloc_barrier(4)
+                mbar_p1 = T.alloc_barrier(4)
                 mbar_pv = T.alloc_barrier(1)
-                mbar_scale0 = T.alloc_barrier([128, 128])
-                mbar_scale1 = T.alloc_barrier([128, 128])
+                # Softmax -> correction scale handoff. Match avo's mb_rs:
+                # each of the 4 softmax warps arrives once via lane 0 after
+                # writing its 32 row scale values.
+                mbar_scale0 = T.alloc_barrier([4, 4])
+                mbar_scale1 = T.alloc_barrier([4, 4])
                 # Correction -> mma WG. Match avo: one arrive per correction
                 # warp, issued by lane 0, after the per-warp x16 TMEM stores.
                 mbar_corr0 = T.alloc_barrier(4)
                 mbar_corr1 = T.alloc_barrier(4)
+                mbar_epi0 = T.alloc_barrier(4)
+                mbar_epi1 = T.alloc_barrier(4)
                 mbar_q0_load = T.alloc_barrier(1)
                 mbar_q1_load = T.alloc_barrier(1)
                 mbar_k_load = T.alloc_barrier([1, 1])
@@ -1232,10 +1243,8 @@ def attention_kernel_1sm(
                 T.outline_persistent(scores_max1)
                 T.outline_persistent(logsum1)
 
-                # mma+epi WG fragments (epilogue normalize uses this).
+                # mma+epi WG fragments (epilogue zero-init uses this).
                 O_chunk_e = T.alloc_fragment([kq2_block_M, 32], accum_dtype)
-                mma_logsum0 = T.alloc_fragment([kq2_block_M], accum_dtype)
-                mma_logsum1 = T.alloc_fragment([kq2_block_M], accum_dtype)
 
                 tid = T.get_thread_binding()
                 loop_range = (
@@ -1285,7 +1294,7 @@ def attention_kernel_1sm(
                     # Producer warp 13  --  tid in [416, 448)
                     # ============================================================
                     if tid >= 416 and tid < 448:
-                        next_stage = (k + 1) & 1
+                        prod_next_stage = (k + 1) & 1
 
                         if k == 0:
                             T.tma_copy(
@@ -1319,7 +1328,7 @@ def attention_kernel_1sm(
                         if k + 1 < loop_range:
                             if k > 0:
                                 T.mbarrier_wait_parity(mbar_pv, (k - 1) & 1)
-                            if next_stage == 0:
+                            if prod_next_stage == 0:
                                 T.tma_copy(
                                     K[bz, (k + 1) * block_N : (k + 2) * block_N, by // groups, :],
                                     K_shared_0, barrier=mbar_k_load[0],
@@ -1375,18 +1384,14 @@ def attention_kernel_1sm(
                                 transpose_B=True, mbar=mbar_s1, clear_accum=True,
                             )
 
-                        T.mbarrier_wait_parity(mbar_p0, k & 1)
-                        T.mbarrier_wait_parity(mbar_p1, k & 1)
-                        # Correction's first arrives are at iter k=1
-                        # (since correction skips at k=0), so phase 0
-                        # of mb_corr completes at iter 1 → mma at iter 1
-                        # waits parity (k-1) & 1 = 0.
-                        if k > 0:
-                            T.mbarrier_wait_parity(mbar_corr0, (k - 1) & 1)
-                            T.mbarrier_wait_parity(mbar_corr1, (k - 1) & 1)
                         T.mbarrier_wait_parity(mbar_v_lo_load[stage], (k >> 1) & 1)
                         T.mbarrier_wait_parity(mbar_v_hi_load[stage], (k >> 1) & 1)
                         if stage == 0:
+                            # Avo consumes each Q stage independently: wait for
+                            # correction (if needed), then full P, then issue PV.
+                            if k > 0:
+                                T.mbarrier_wait_parity(mbar_corr0, (k - 1) & 1)
+                            T.mbarrier_wait_parity(mbar_p0, k & 1)
                             T.tcgen05_pv_gemm_128x64(
                                 T.access_ptr(V_shared_0_lo, "r"),
                                 T.access_ptr(V_shared_0_hi, "r"),
@@ -1394,6 +1399,9 @@ def attention_kernel_1sm(
                                 O0_tmem[0, 0],
                                 T.if_then_else(k == 0, 0, 1),
                             )
+                            if k > 0:
+                                T.mbarrier_wait_parity(mbar_corr1, (k - 1) & 1)
+                            T.mbarrier_wait_parity(mbar_p1, k & 1)
                             T.tcgen05_pv_gemm_128x64(
                                 T.access_ptr(V_shared_0_lo, "r"),
                                 T.access_ptr(V_shared_0_hi, "r"),
@@ -1402,6 +1410,9 @@ def attention_kernel_1sm(
                                 T.if_then_else(k == 0, 0, 1),
                             )
                         else:
+                            if k > 0:
+                                T.mbarrier_wait_parity(mbar_corr0, (k - 1) & 1)
+                            T.mbarrier_wait_parity(mbar_p0, k & 1)
                             T.tcgen05_pv_gemm_128x64(
                                 T.access_ptr(V_shared_1_lo, "r"),
                                 T.access_ptr(V_shared_1_hi, "r"),
@@ -1409,6 +1420,9 @@ def attention_kernel_1sm(
                                 O0_tmem[0, 0],
                                 T.if_then_else(k == 0, 0, 1),
                             )
+                            if k > 0:
+                                T.mbarrier_wait_parity(mbar_corr1, (k - 1) & 1)
+                            T.mbarrier_wait_parity(mbar_p1, k & 1)
                             T.tcgen05_pv_gemm_128x64(
                                 T.access_ptr(V_shared_1_lo, "r"),
                                 T.access_ptr(V_shared_1_hi, "r"),
@@ -1419,12 +1433,12 @@ def attention_kernel_1sm(
                         T.tcgen05_commit_1sm(mbar_pv)
 
                         if k + 1 < loop_range:
-                            next_stage = (k + 1) & 1
+                            mma_next_stage = (k + 1) & 1
                             T.mbarrier_wait_parity(
-                                mbar_k_load[next_stage],
+                                mbar_k_load[mma_next_stage],
                                 ((k + 1) >> 1) & 1,
                             )
-                            if next_stage == 0:
+                            if mma_next_stage == 0:
                                 T.tcgen05_gemm(
                                     Q0_shared, K_shared_0, S0_tmem,
                                     transpose_B=True, mbar=mbar_s0, clear_accum=True,
@@ -1449,11 +1463,11 @@ def attention_kernel_1sm(
                     elif tid >= 256 and tid < 384:
                         if k > 0:
                             T.mbarrier_wait_parity(mbar_scale0[k & 1], (k >> 1) & 1)
-                            T.mbarrier_wait_parity(mbar_pv, (k - 1) & 1)
-                            T.tcgen05_after_thread_sync()
-                            T.tcgen05_correction_x16(
+                            T.tcgen05_correction_x16_skip(
                                 O0_tmem[0, 0],
                                 scores_scale0_shared[k & 1, tid - 256],
+                                mbar_pv,
+                                (k - 1) & 1,
                                 warp_group_offset=256,
                                 head_dim=dim,
                             )
@@ -1461,11 +1475,11 @@ def attention_kernel_1sm(
                             T.mbarrier_arrive(mbar_corr0, lane0=True)
 
                             T.mbarrier_wait_parity(mbar_scale1[k & 1], (k >> 1) & 1)
-                            T.mbarrier_wait_parity(mbar_pv, (k - 1) & 1)
-                            T.tcgen05_after_thread_sync()
-                            T.tcgen05_correction_x16(
+                            T.tcgen05_correction_x16_skip(
                                 O1_tmem[0, 0],
                                 scores_scale1_shared[k & 1, tid - 256],
+                                mbar_pv,
+                                (k - 1) & 1,
                                 warp_group_offset=256,
                                 head_dim=dim,
                             )
@@ -1540,7 +1554,7 @@ def attention_kernel_1sm(
                                 scores_max_prev0[i] * scale - scores_max0[i] * scale
                             )
                         T.copy(scores_scale0, scores_scale0_shared[k & 1, :])
-                        T.mbarrier_arrive(mbar_scale0[k & 1])
+                        T.mbarrier_arrive(mbar_scale0[k & 1], lane0=True)
 
                         T.fill(scores_sum0, 0)
                         T.copy(S0_tmem[:, 96:128], S0_chunk)
@@ -1622,7 +1636,7 @@ def attention_kernel_1sm(
                         if k == loop_range - 1:
                             T.copy(logsum0, logsum0_shared)
 
-                        T.mbarrier_arrive(mbar_p0)
+                        T.mbarrier_arrive(mbar_p0, lane0=True)
 
                     # ============================================================
                     # Math WG 1  --  tid in [128, 256)
@@ -1692,7 +1706,7 @@ def attention_kernel_1sm(
                                 scores_max_prev1[i] * scale - scores_max1[i] * scale
                             )
                         T.copy(scores_scale1, scores_scale1_shared[k & 1, :])
-                        T.mbarrier_arrive(mbar_scale1[k & 1])
+                        T.mbarrier_arrive(mbar_scale1[k & 1], lane0=True)
 
                         T.fill(scores_sum1, 0)
                         T.copy(S1_tmem[:, 96:128], S1_chunk)
@@ -1774,60 +1788,56 @@ def attention_kernel_1sm(
                         if k == loop_range - 1:
                             T.copy(logsum1, logsum1_shared)
 
-                        T.mbarrier_arrive(mbar_p1)
+                        T.mbarrier_arrive(mbar_p1, lane0=True)
                     else:
                         T.evaluate(0)
 
-                # ---- mma+epi WG epilogue (outside the for-loop) ----
-                T.sync_threads()
-                if tid >= 384:
+                # ---- Avo-style split epilogue (outside the for-loop) ----
+                if tid >= 256 and tid < 384:
                     T.mbarrier_wait_parity(mbar_pv, (loop_range - 1) & 1)
                     T.mbarrier_wait_parity(mbar_p0, (loop_range - 1) & 1)
-                    T.copy(logsum0_shared, mma_logsum0)
-                    T.copy(O0_tmem[:, 0:32], O_chunk_e)
-                    for i, j in T.Parallel(kq2_block_M, 32):
-                        O_chunk_e[i, j] /= mma_logsum0[i]
-                    T.copy(O_chunk_e, O0_shared[:, 0:32])
-                    T.copy(O0_tmem[:, 32:64], O_chunk_e)
-                    for i, j in T.Parallel(kq2_block_M, 32):
-                        O_chunk_e[i, j] /= mma_logsum0[i]
-                    T.copy(O_chunk_e, O0_shared[:, 32:64])
-                    T.copy(O0_tmem[:, 64:96], O_chunk_e)
-                    for i, j in T.Parallel(kq2_block_M, 32):
-                        O_chunk_e[i, j] /= mma_logsum0[i]
-                    T.copy(O_chunk_e, O0_shared[:, 64:96])
-                    T.copy(O0_tmem[:, 96:128], O_chunk_e)
-                    for i, j in T.Parallel(kq2_block_M, 32):
-                        O_chunk_e[i, j] /= mma_logsum0[i]
-                    T.copy(O_chunk_e, O0_shared[:, 96:128])
-                    T.sync_threads(15, 128)
-                    T.copy(
-                        O0_shared,
-                        Output[bz, bx * kq2_total_M : bx * kq2_total_M + kq2_block_M, by, :],
+                    T.tcgen05_after_thread_sync()
+                    T.tcgen05_epilogue_store_x16(
+                        O0_tmem[0, 0],
+                        T.access_ptr(O0_shared, "w"),
+                        logsum0_shared[tid - 256],
+                        warp_group_offset=256,
+                        head_dim=dim,
                     )
+                    T.sync_threads(15, 128)
+                    T.fence_proxy_async()
+                    T.mbarrier_arrive(mbar_epi0, lane0=True)
 
                     T.mbarrier_wait_parity(mbar_p1, (loop_range - 1) & 1)
-                    T.copy(logsum1_shared, mma_logsum1)
-                    T.copy(O1_tmem[:, 0:32], O_chunk_e)
-                    for i, j in T.Parallel(kq2_block_M, 32):
-                        O_chunk_e[i, j] /= mma_logsum1[i]
-                    T.copy(O_chunk_e, O1_shared[:, 0:32])
-                    T.copy(O1_tmem[:, 32:64], O_chunk_e)
-                    for i, j in T.Parallel(kq2_block_M, 32):
-                        O_chunk_e[i, j] /= mma_logsum1[i]
-                    T.copy(O_chunk_e, O1_shared[:, 32:64])
-                    T.copy(O1_tmem[:, 64:96], O_chunk_e)
-                    for i, j in T.Parallel(kq2_block_M, 32):
-                        O_chunk_e[i, j] /= mma_logsum1[i]
-                    T.copy(O_chunk_e, O1_shared[:, 64:96])
-                    T.copy(O1_tmem[:, 96:128], O_chunk_e)
-                    for i, j in T.Parallel(kq2_block_M, 32):
-                        O_chunk_e[i, j] /= mma_logsum1[i]
-                    T.copy(O_chunk_e, O1_shared[:, 96:128])
+                    T.tcgen05_after_thread_sync()
+                    T.tcgen05_epilogue_store_x16(
+                        O1_tmem[0, 0],
+                        T.access_ptr(O1_shared, "w"),
+                        logsum1_shared[tid - 256],
+                        warp_group_offset=256,
+                        head_dim=dim,
+                    )
                     T.sync_threads(15, 128)
-                    T.copy(
-                        O1_shared,
-                        Output[bz, bx * kq2_total_M + kq2_block_M : (bx + 1) * kq2_total_M, by, :],
+                    T.fence_proxy_async()
+                    T.mbarrier_arrive(mbar_epi1, lane0=True)
+                elif tid >= 448 and tid < 480:
+                    output_desc = T.create_tma_descriptor(
+                        9, 4, T.access_ptr(Output, "w"),
+                        dim, heads, seq_len, batch,
+                        2, dim * 2, heads * dim * 2, seq_len * heads * dim * 2,
+                        64, 1, 32, 1,
+                        1, 1, 1, 1,
+                        0, 3, 2, 0,
+                    )
+                    T.tcgen05_epilogue_warp_1sm_skv(
+                        output_desc,
+                        T.access_ptr(O0_shared, "r"),
+                        mbar_epi0,
+                        mbar_epi1,
+                        0,
+                        bx * kq2_total_M,
+                        by,
+                        bz,
                     )
 
         return main_kq2_split
