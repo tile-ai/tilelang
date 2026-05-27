@@ -1205,9 +1205,11 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string size = this->PrintExpr(op->args[2]);
     this->PrintIndent();
     if (op->args.size() == 3) {
+      // Non-predicated version
       this->stream << "tl::cp_async_gs<" << size << ">(" << dst << ", " << src
                    << ");\n";
     } else {
+      // Predicated version
       std::string condition = this->PrintExpr(op->args[3]);
       this->stream << "tl::cp_async_gs_conditional<" << size << ">(" << dst
                    << ", " << src << ", " << condition << ");\n";
@@ -1215,19 +1217,23 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::ptx_cp_async()) ||
              op->op.same_as(tl::ptx_cp_async_lds())) {
     // Both store logical element count in arg 2; convert to bytes via
-    // GetTileLangCPAsyncTransferBytes. ptx_cp_async_lds routes the
-    // non-predicated path to tl::cp_async_gs_lds<bytes> instead of
-    // tl::cp_async_gs<bytes>; predicated copies always fall back to the
-    // generic cp_async_gs_conditional template.
+    // GetTileLangCPAsyncTransferBytes.
+    //
+    // tl::ptx_cp_async_lds is normally rewritten to ptx_cp_async_lds_rsrc
+    // by the HoistBufferResource pass. If a call survives the rewrite
+    // (e.g. an access_ptr shape _extract_buffer_var can't pattern-match,
+    // or the pass found nothing to hoist), fall back to the synchronous
+    // tl::cp_async_gs<bytes> path here -- correctness is preserved at
+    // the cost of giving up the buffer_load_dwordx4...lds fast path for
+    // that particular call. Treat both ops identically in codegen.
     int total_bytes = GetTileLangCPAsyncTransferBytes(op);
     std::string dst = this->PrintExpr(op->args[0]);
     std::string src = this->PrintExpr(op->args[1]);
     std::string size = std::to_string(total_bytes);
     this->PrintIndent();
     if (op->args.size() == 3) {
-      bool use_lds = op->op.same_as(tl::ptx_cp_async_lds());
-      this->stream << (use_lds ? "tl::cp_async_gs_lds<" : "tl::cp_async_gs<")
-                   << size << ">(" << dst << ", " << src << ");\n";
+      this->stream << "tl::cp_async_gs<" << size << ">(" << dst << ", " << src
+                   << ");\n";
     } else {
       std::string condition = this->PrintExpr(op->args[3]);
       this->stream << "tl::cp_async_gs_conditional<" << size << ">(" << dst

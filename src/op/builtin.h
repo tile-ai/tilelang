@@ -517,13 +517,19 @@ TVM_DLL const Op &ptx_cp_async_barrier_noinc();
 TVM_DLL const Op &ptx_cp_async();
 
 /*!
- * \brief Truly async G2S copy via buffer_load_dwordx4 ... lds (gfx950+).
+ * \brief Marker for an eligible async G2S copy on gfx950+.
  *
- * Same signature as ptx_cp_async but lowers to cp_async_gs_lds<N> which
- * uses the hardware buffer_load ... lds instruction (bypasses VGPRs).
- * Only valid when LDS addresses are lane-contiguous; the swizzle-swap
- * pass in lower_tile_op.cc moves the XOR swizzle from the LDS store side
- * to the global load side to make this safe.
+ * Emitted by LowerPTXAsyncCopy in place of ptx_cp_async for 16-byte
+ * non-predicated shared-memory writes whose LDS index is (post
+ * swizzle-swap, see lower_tile_op.cc) lane-contiguous. The
+ * HoistBufferResource pass then rewrites each call to
+ * ptx_cp_async_lds_rsrc with a pre-computed buffer resource
+ * descriptor + base address; that rsrc form is what codegen emits as
+ * the buffer_load_dwordx4 ... lds fast path.
+ *
+ * If a call survives the rewrite (e.g. an access_ptr the hoister
+ * can't pattern-match), codegen falls back to the synchronous
+ * tl::cp_async_gs<N> path -- correct, but no buffer_load_lds win.
  *
  * ptx_cp_async_lds(dst_access_ptr, src_access_ptr, num_elems)
  *
