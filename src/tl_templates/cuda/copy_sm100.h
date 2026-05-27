@@ -880,25 +880,25 @@ tcgen05_correction_epilogue_warp_1sm_skv(
     uint32_t scale_idx = uint32_t(tk & 1);
     uint32_t scale_phase = uint32_t((tk >> 1) & 1);
 
-    tl::tcgen05_wait_barrier((void const *)&mb_scale0[scale_idx],
-                             scale_phase);
     if (k > 0) {
+      tl::tcgen05_wait_barrier((void const *)&mb_scale0[scale_idx],
+                               scale_phase);
       float scale = scale0_base[scale_idx * kBlockMCTA + row];
       tl::tmem_correction_x16_skip<kHeadDim>(
           O0_tmem_addr, scale, mbar_pv, uint32_t((tk - 1) & 1), 256);
       tl::tcgen05_before_thread_sync();
+      tl::tcgen05_mbarrier_arrive_lane0(mbar_corr0);
     }
-    tl::tcgen05_mbarrier_arrive_lane0(mbar_corr0);
 
-    tl::tcgen05_wait_barrier((void const *)&mb_scale1[scale_idx],
-                             scale_phase);
     if (k > 0) {
+      tl::tcgen05_wait_barrier((void const *)&mb_scale1[scale_idx],
+                               scale_phase);
       float scale = scale1_base[scale_idx * kBlockMCTA + row];
       tl::tmem_correction_x16_skip<kHeadDim>(
           O1_tmem_addr, scale, mbar_pv, uint32_t((tk - 1) & 1), 256);
       tl::tcgen05_before_thread_sync();
+      tl::tcgen05_mbarrier_arrive_lane0(mbar_corr1);
     }
-    tl::tcgen05_mbarrier_arrive_lane0(mbar_corr1);
   }
 
   uint32_t final_phase = uint32_t((tile_k_base + loop_extent - 1) & 1);
@@ -1665,6 +1665,216 @@ tcgen05_mma_warp_1sm_skv(
       int next_stage = ntk % 3;
       tl::tcgen05_qk_mma_128x128_skv_lane0(Q1_stage_ptr, kv_ptrs[next_stage],
                                            S1_tmem_addr, mbar_s1);
+    }
+  }
+}
+
+// 3-stage K/V reuse helpers for the current TileLang 1SM split layout.
+// This keeps the existing split-path shared memory allocation but uses three
+// logical K/V stages:
+//   stage0 -> K0 buffer, stage1 -> K1 buffer, stage2 -> V0_lo/V0_hi area.
+// The positive A/B result is that this recovers part of avo's long-sequence
+// pipeline benefit without requiring a wholesale source replacement.
+__device__ __forceinline__ bfloat16_t *
+tcgen05_reuse3_stage_ptr(void *k0_ptr, void *k1_ptr, void *stage2_ptr,
+                         int stage) {
+  if (stage == 0) return reinterpret_cast<bfloat16_t *>(k0_ptr);
+  if (stage == 1) return reinterpret_cast<bfloat16_t *>(k1_ptr);
+  return reinterpret_cast<bfloat16_t *>(stage2_ptr);
+}
+
+__device__ __forceinline__ void const *
+tcgen05_reuse3_kbar(void const *mbar_k0, void const *mbar_k1,
+                    void const *mbar_k2, int stage) {
+  if (stage == 0) return mbar_k0;
+  if (stage == 1) return mbar_k1;
+  return mbar_k2;
+}
+
+__device__ __forceinline__ void const *
+tcgen05_reuse3_vbar(void const *mbar_v0, void const *mbar_v1,
+                    void const *mbar_v2, int stage) {
+  if (stage == 0) return mbar_v0;
+  if (stage == 1) return mbar_v1;
+  return mbar_v2;
+}
+
+__device__ __forceinline__ void
+tcgen05_reuse3_load_k(const CUtensorMap &K_desc, void *k0_ptr, void *k1_ptr,
+                      void *stage2_ptr, void const *mbar_k0,
+                      void const *mbar_k1, void const *mbar_k2, int k,
+                      int kv_head, int batch) {
+  constexpr int kBlockN = 128;
+  constexpr int kTileCols = 64;
+  constexpr int kBytes = kBlockN * 128 * 2;
+  int stage = k % 3;
+  auto *dst = tcgen05_reuse3_stage_ptr(k0_ptr, k1_ptr, stage2_ptr, stage);
+  auto *bar = reinterpret_cast<Barrier *>(
+      const_cast<void *>(tcgen05_reuse3_kbar(mbar_k0, mbar_k1, mbar_k2, stage)));
+  tl::tcgen05_arrive_expect_tx((void const *)bar, kBytes);
+  tl::tma_load(K_desc, *bar, dst, 0, kv_head, k * kBlockN, batch);
+  tl::tma_load(K_desc, *bar, dst + kBlockN * kTileCols, 64, kv_head,
+               k * kBlockN, batch);
+}
+
+__device__ __forceinline__ void
+tcgen05_reuse3_load_v(const CUtensorMap &V_desc, void *k0_ptr, void *k1_ptr,
+                      void *stage2_ptr, void const *mbar_v0,
+                      void const *mbar_v1, void const *mbar_v2, int k,
+                      int kv_head, int batch) {
+  constexpr int kBlockN = 128;
+  constexpr int kTileCols = 64;
+  constexpr int kBytes = kBlockN * 128 * 2;
+  int stage = k % 3;
+  auto *dst = tcgen05_reuse3_stage_ptr(k0_ptr, k1_ptr, stage2_ptr, stage);
+  auto *bar = reinterpret_cast<Barrier *>(
+      const_cast<void *>(tcgen05_reuse3_vbar(mbar_v0, mbar_v1, mbar_v2, stage)));
+  tl::tcgen05_arrive_expect_tx((void const *)bar, kBytes);
+  tl::tma_load(V_desc, *bar, dst, 0, kv_head, k * kBlockN, batch);
+  tl::tma_load(V_desc, *bar, dst + kBlockN * kTileCols, 64, kv_head,
+               k * kBlockN, batch);
+}
+
+__device__ __noinline__ void
+tcgen05_producer_warp_1sm_reuse3(
+    const CUtensorMap &Q_desc, const CUtensorMap &K_desc,
+    const CUtensorMap &V_desc, void *Q0_stage_ptr, void *Q1_stage_ptr,
+    void *K0_stage_ptr, void *K1_stage_ptr, void *KV2_stage_ptr,
+    void const *mbar_q0, void const *mbar_q1, void const *mbar_k0,
+    void const *mbar_k1, void const *mbar_k2, void const *mbar_v0,
+    void const *mbar_v1, void const *mbar_v2, void const *mbar_s1,
+    void const *mbar_pv, int loop_extent, int q_row_base, int q_head,
+    int kv_head, int batch) {
+  if (threadIdx.x % 32 != 0) return;
+
+  constexpr int kBlockM = 128;
+  constexpr int kBlockN = 128;
+  constexpr int kTileCols = 64;
+  constexpr int kQBytes = kBlockM * 128 * 2;
+
+  auto *q0 = reinterpret_cast<bfloat16_t *>(Q0_stage_ptr);
+  auto *q1 = reinterpret_cast<bfloat16_t *>(Q1_stage_ptr);
+
+  auto *mb_q0 = reinterpret_cast<Barrier *>(const_cast<void *>(mbar_q0));
+  auto *mb_q1 = reinterpret_cast<Barrier *>(const_cast<void *>(mbar_q1));
+  tl::tcgen05_arrive_expect_tx(mbar_q0, kQBytes);
+  tl::fence_proxy_async();
+  tl::tma_load(Q_desc, *mb_q0, q0, 0, q_head, q_row_base, batch);
+  tl::tma_load(Q_desc, *mb_q0, q0 + kBlockM * kTileCols, 64, q_head,
+               q_row_base, batch);
+
+  tl::tcgen05_arrive_expect_tx(mbar_q1, kQBytes);
+  tl::tma_load(Q_desc, *mb_q1, q1, 0, q_head, q_row_base + kBlockM, batch);
+  tl::tma_load(Q_desc, *mb_q1, q1 + kBlockM * kTileCols, 64, q_head,
+               q_row_base + kBlockM, batch);
+
+  if (loop_extent > 0) {
+    tl::tcgen05_reuse3_load_k(K_desc, K0_stage_ptr, K1_stage_ptr,
+                              KV2_stage_ptr, mbar_k0, mbar_k1, mbar_k2, 0,
+                              kv_head, batch);
+  }
+  if (loop_extent > 1) {
+    tl::tcgen05_reuse3_load_k(K_desc, K0_stage_ptr, K1_stage_ptr,
+                              KV2_stage_ptr, mbar_k0, mbar_k1, mbar_k2, 1,
+                              kv_head, batch);
+  }
+  if (loop_extent > 2) {
+    tl::tcgen05_reuse3_load_k(K_desc, K0_stage_ptr, K1_stage_ptr,
+                              KV2_stage_ptr, mbar_k0, mbar_k1, mbar_k2, 2,
+                              kv_head, batch);
+  }
+
+  #pragma unroll 1
+  for (int k = 0; k < loop_extent; ++k) {
+    tl::tcgen05_wait_barrier(mbar_s1, uint32_t(k & 1));
+    tl::tcgen05_after_thread_sync();
+    tl::tcgen05_reuse3_load_v(V_desc, K0_stage_ptr, K1_stage_ptr,
+                              KV2_stage_ptr, mbar_v0, mbar_v1, mbar_v2, k,
+                              kv_head, batch);
+    if (k + 3 < loop_extent) {
+      tl::tcgen05_wait_barrier(mbar_pv, uint32_t(k & 1));
+      tl::tcgen05_after_thread_sync();
+      tl::tcgen05_reuse3_load_k(K_desc, K0_stage_ptr, K1_stage_ptr,
+                                KV2_stage_ptr, mbar_k0, mbar_k1, mbar_k2,
+                                k + 3, kv_head, batch);
+    }
+  }
+}
+
+__device__ __noinline__ void
+tcgen05_mma_warp_1sm_reuse3(
+    void const *Q0_stage_ptr, void const *Q1_stage_ptr,
+    void *K0_stage_ptr, void *K1_stage_ptr, void *KV2_stage_ptr,
+    void const *mbar_q0, void const *mbar_q1, void const *mbar_k0,
+    void const *mbar_k1, void const *mbar_k2, void const *mbar_v0,
+    void const *mbar_v1, void const *mbar_v2, void const *mbar_s0,
+    void const *mbar_s1, void const *mbar_p0, void const *mbar_p1,
+    void const *mbar_corr0, void const *mbar_corr1, void const *mbar_pv,
+    uint32_t S0_tmem_addr, uint32_t S1_tmem_addr, uint32_t P0_tmem_addr,
+    uint32_t P1_tmem_addr, uint32_t O0_tmem_addr, uint32_t O1_tmem_addr,
+    int loop_extent) {
+  if (threadIdx.x % 32 != 0) return;
+
+  tl::tcgen05_wait_barrier(mbar_q0, 0);
+  tl::tcgen05_wait_barrier(mbar_q1, 0);
+  tl::tcgen05_after_thread_sync();
+
+  if (loop_extent <= 0) return;
+  {
+    void const *kbar = tl::tcgen05_reuse3_kbar(mbar_k0, mbar_k1, mbar_k2, 0);
+    tl::tcgen05_wait_barrier(kbar, 0);
+    tl::tcgen05_after_thread_sync();
+    auto *kptr =
+        tl::tcgen05_reuse3_stage_ptr(K0_stage_ptr, K1_stage_ptr, KV2_stage_ptr, 0);
+    tl::tcgen05_qk_mma_128x128_skv_lane0(Q0_stage_ptr, kptr, S0_tmem_addr,
+                                         mbar_s0);
+    tl::tcgen05_qk_mma_128x128_skv_lane0(Q1_stage_ptr, kptr, S1_tmem_addr,
+                                         mbar_s1);
+  }
+
+  #pragma unroll 1
+  for (int k = 0; k < loop_extent; ++k) {
+    int stage = k % 3;
+    int stage_phase = (k / 3) & 1;
+    uint32_t pv_phase = uint32_t(k & 1);
+    uint32_t accum = (k == 0) ? 0u : 1u;
+
+    void const *vbar =
+        tl::tcgen05_reuse3_vbar(mbar_v0, mbar_v1, mbar_v2, stage);
+    tl::tcgen05_wait_barrier(vbar, uint32_t(stage_phase));
+    if (k > 0) {
+      tl::tcgen05_wait_barrier(mbar_corr0, uint32_t((k - 1) & 1));
+    }
+    tl::tcgen05_wait_barrier(mbar_p0, pv_phase);
+    tl::tcgen05_after_thread_sync();
+    auto *vptr = tl::tcgen05_reuse3_stage_ptr(K0_stage_ptr, K1_stage_ptr,
+                                              KV2_stage_ptr, stage);
+    tl::tcgen05_pv_mma_128x64_avo(vptr, vptr + 128 * 64, P0_tmem_addr,
+                                  O0_tmem_addr, accum);
+
+    if (k > 0) {
+      tl::tcgen05_wait_barrier(mbar_corr1, uint32_t((k - 1) & 1));
+    }
+    tl::tcgen05_wait_barrier(mbar_p1, pv_phase);
+    tl::tcgen05_after_thread_sync();
+    tl::tcgen05_pv_mma_128x64_avo(vptr, vptr + 128 * 64, P1_tmem_addr,
+                                  O1_tmem_addr, accum);
+    tl::tcgen05_commit_1sm(mbar_pv);
+
+    if (k + 1 < loop_extent) {
+      int nk = k + 1;
+      int nstage = nk % 3;
+      int nphase = (nk / 3) & 1;
+      void const *kbar =
+          tl::tcgen05_reuse3_kbar(mbar_k0, mbar_k1, mbar_k2, nstage);
+      tl::tcgen05_wait_barrier(kbar, uint32_t(nphase));
+      tl::tcgen05_after_thread_sync();
+      auto *kptr = tl::tcgen05_reuse3_stage_ptr(
+          K0_stage_ptr, K1_stage_ptr, KV2_stage_ptr, nstage);
+      tl::tcgen05_qk_mma_128x128_skv_lane0(Q0_stage_ptr, kptr, S0_tmem_addr,
+                                           mbar_s0);
+      tl::tcgen05_qk_mma_128x128_skv_lane0(Q1_stage_ptr, kptr, S1_tmem_addr,
+                                           mbar_s1);
     }
   }
 }

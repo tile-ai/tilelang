@@ -3804,6 +3804,80 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << this->PrintExpr(op->args[14]) << ", "
                  << this->PrintExpr(op->args[15]) << ", "
                  << this->PrintExpr(op->args[16]) << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_producer_warp_1sm_reuse3())) {
+    ICHECK_EQ(op->args.size(), 23U)
+        << "tcgen05_producer_warp_1sm_reuse3 expects 23 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    auto ptr_expr = [this](const PrimExpr &expr) {
+      return this->PrintExpr(expr);
+    };
+    auto mbar_ptr = [this](const PrimExpr &expr) {
+      return "(void const*)(&" + this->PrintExpr(expr) + ")";
+    };
+    this->stream << "tl::tcgen05_producer_warp_1sm_reuse3("
+                 << this->PrintExpr(op->args[0]) << ", "
+                 << this->PrintExpr(op->args[1]) << ", "
+                 << this->PrintExpr(op->args[2]) << ", "
+                 << "(void*)(" << ptr_expr(op->args[3]) << "), "
+                 << "(void*)(" << ptr_expr(op->args[4]) << "), "
+                 << "(void*)(" << ptr_expr(op->args[5]) << "), "
+                 << "(void*)(" << ptr_expr(op->args[6]) << "), "
+                 << "(void*)(" << ptr_expr(op->args[7]) << "), "
+                 << mbar_ptr(op->args[8]) << ", "
+                 << mbar_ptr(op->args[9]) << ", "
+                 << mbar_ptr(op->args[10]) << ", "
+                 << mbar_ptr(op->args[11]) << ", "
+                 << mbar_ptr(op->args[12]) << ", "
+                 << mbar_ptr(op->args[13]) << ", "
+                 << mbar_ptr(op->args[14]) << ", "
+                 << mbar_ptr(op->args[15]) << ", "
+                 << mbar_ptr(op->args[16]) << ", "
+                 << mbar_ptr(op->args[17]) << ", "
+                 << this->PrintExpr(op->args[18]) << ", "
+                 << this->PrintExpr(op->args[19]) << ", "
+                 << this->PrintExpr(op->args[20]) << ", "
+                 << this->PrintExpr(op->args[21]) << ", "
+                 << this->PrintExpr(op->args[22]) << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_mma_warp_1sm_reuse3())) {
+    ICHECK_EQ(op->args.size(), 27U)
+        << "tcgen05_mma_warp_1sm_reuse3 expects 27 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    auto ptr_expr = [this](const PrimExpr &expr) {
+      return this->PrintExpr(expr);
+    };
+    auto mbar_ptr = [this](const PrimExpr &expr) {
+      return "(void const*)(&" + this->PrintExpr(expr) + ")";
+    };
+    this->stream << "tl::tcgen05_mma_warp_1sm_reuse3("
+                 << "(void const*)(" << ptr_expr(op->args[0]) << "), "
+                 << "(void const*)(" << ptr_expr(op->args[1]) << "), "
+                 << "(void*)(" << ptr_expr(op->args[2]) << "), "
+                 << "(void*)(" << ptr_expr(op->args[3]) << "), "
+                 << "(void*)(" << ptr_expr(op->args[4]) << "), "
+                 << mbar_ptr(op->args[5]) << ", "
+                 << mbar_ptr(op->args[6]) << ", "
+                 << mbar_ptr(op->args[7]) << ", "
+                 << mbar_ptr(op->args[8]) << ", "
+                 << mbar_ptr(op->args[9]) << ", "
+                 << mbar_ptr(op->args[10]) << ", "
+                 << mbar_ptr(op->args[11]) << ", "
+                 << mbar_ptr(op->args[12]) << ", "
+                 << mbar_ptr(op->args[13]) << ", "
+                 << mbar_ptr(op->args[14]) << ", "
+                 << mbar_ptr(op->args[15]) << ", "
+                 << mbar_ptr(op->args[16]) << ", "
+                 << mbar_ptr(op->args[17]) << ", "
+                 << mbar_ptr(op->args[18]) << ", "
+                 << mbar_ptr(op->args[19]) << ", "
+                 << this->PrintExpr(op->args[20]) << ", "
+                 << this->PrintExpr(op->args[21]) << ", "
+                 << this->PrintExpr(op->args[22]) << ", "
+                 << this->PrintExpr(op->args[23]) << ", "
+                 << this->PrintExpr(op->args[24]) << ", "
+                 << this->PrintExpr(op->args[25]) << ", "
+                 << this->PrintExpr(op->args[26]) << ");\n";
   } else if (op->op.same_as(tl::tcgen05_epilogue_warp_1sm_skv())) {
     ICHECK_EQ(op->args.size(), 8U)
         << "tcgen05_epilogue_warp_1sm_skv expects 8 args";

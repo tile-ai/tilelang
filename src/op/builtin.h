@@ -1178,6 +1178,22 @@ TVM_DLL const Op &tcgen05_mma_warp_1sm_skv();
 TVM_DLL const Op &tcgen05_producer_warp_1sm_skv();
 
 /*!
+ * \brief 3-stage K/V reuse producer warp for the current 1SM split layout.
+ *
+ * Keeps the existing split-path shared buffers but treats K0, K1, and the
+ * V0_lo/V0_hi area as three logical K/V stages.
+ */
+TVM_DLL const Op &tcgen05_producer_warp_1sm_reuse3();
+
+/*!
+ * \brief 3-stage K/V reuse MMA warp for the current 1SM split layout.
+ *
+ * Pairs with tcgen05_producer_warp_1sm_reuse3 and preserves the normal
+ * softmax/correction/epilogue roles.
+ */
+TVM_DLL const Op &tcgen05_mma_warp_1sm_reuse3();
+
+/*!
  * \brief Avo-style epilogue TMA-store warp for FA4 1SM split attention.
  *
  * The CUDA lowering wires this primitive to the kernel's Output TMA descriptor

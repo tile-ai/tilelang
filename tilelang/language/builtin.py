@@ -1688,6 +1688,149 @@ def tcgen05_producer_warp_1sm_skv(
     )
 
 
+def tcgen05_producer_warp_1sm_reuse3(
+    q_desc,
+    k_desc,
+    v_desc,
+    q0_stage_ptr,
+    q1_stage_ptr,
+    k0_stage_ptr,
+    k1_stage_ptr,
+    kv2_stage_ptr,
+    mbar_q0_load,
+    mbar_q1_load,
+    mbar_k0,
+    mbar_k1,
+    mbar_k2,
+    mbar_v0,
+    mbar_v1,
+    mbar_v2,
+    mbar_s1,
+    mbar_pv,
+    loop_extent,
+    q_row_base,
+    q_head,
+    kv_head,
+    batch,
+):
+    """3-stage K/V reuse producer for the current 1SM split layout."""
+    mbar_q0_load = _mbar_to_buffer_load(mbar_q0_load)
+    mbar_q1_load = _mbar_to_buffer_load(mbar_q1_load)
+    mbar_k0 = _mbar_to_buffer_load(mbar_k0)
+    mbar_k1 = _mbar_to_buffer_load(mbar_k1)
+    mbar_k2 = _mbar_to_buffer_load(mbar_k2)
+    mbar_v0 = _mbar_to_buffer_load(mbar_v0)
+    mbar_v1 = _mbar_to_buffer_load(mbar_v1)
+    mbar_v2 = _mbar_to_buffer_load(mbar_v2)
+    mbar_s1 = _mbar_to_buffer_load(mbar_s1)
+    mbar_pv = _mbar_to_buffer_load(mbar_pv)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_producer_warp_1sm_reuse3"),
+        q_desc,
+        k_desc,
+        v_desc,
+        q0_stage_ptr,
+        q1_stage_ptr,
+        k0_stage_ptr,
+        k1_stage_ptr,
+        kv2_stage_ptr,
+        mbar_q0_load,
+        mbar_q1_load,
+        mbar_k0,
+        mbar_k1,
+        mbar_k2,
+        mbar_v0,
+        mbar_v1,
+        mbar_v2,
+        mbar_s1,
+        mbar_pv,
+        loop_extent,
+        q_row_base,
+        q_head,
+        kv_head,
+        batch,
+    )
+
+
+def tcgen05_mma_warp_1sm_reuse3(
+    q0_stage_ptr,
+    q1_stage_ptr,
+    k0_stage_ptr,
+    k1_stage_ptr,
+    kv2_stage_ptr,
+    mbar_q0_load,
+    mbar_q1_load,
+    mbar_k0,
+    mbar_k1,
+    mbar_k2,
+    mbar_v0,
+    mbar_v1,
+    mbar_v2,
+    mbar_s0,
+    mbar_s1,
+    mbar_p0,
+    mbar_p1,
+    mbar_corr0,
+    mbar_corr1,
+    mbar_pv,
+    s0_tmem_addr,
+    s1_tmem_addr,
+    p0_tmem_addr,
+    p1_tmem_addr,
+    o0_tmem_addr,
+    o1_tmem_addr,
+    loop_extent,
+):
+    """3-stage K/V reuse MMA loop for the current 1SM split layout."""
+    mbar_q0_load = _mbar_to_buffer_load(mbar_q0_load)
+    mbar_q1_load = _mbar_to_buffer_load(mbar_q1_load)
+    mbar_k0 = _mbar_to_buffer_load(mbar_k0)
+    mbar_k1 = _mbar_to_buffer_load(mbar_k1)
+    mbar_k2 = _mbar_to_buffer_load(mbar_k2)
+    mbar_v0 = _mbar_to_buffer_load(mbar_v0)
+    mbar_v1 = _mbar_to_buffer_load(mbar_v1)
+    mbar_v2 = _mbar_to_buffer_load(mbar_v2)
+    mbar_s0 = _mbar_to_buffer_load(mbar_s0)
+    mbar_s1 = _mbar_to_buffer_load(mbar_s1)
+    mbar_p0 = _mbar_to_buffer_load(mbar_p0)
+    mbar_p1 = _mbar_to_buffer_load(mbar_p1)
+    mbar_corr0 = _mbar_to_buffer_load(mbar_corr0)
+    mbar_corr1 = _mbar_to_buffer_load(mbar_corr1)
+    mbar_pv = _mbar_to_buffer_load(mbar_pv)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_mma_warp_1sm_reuse3"),
+        q0_stage_ptr,
+        q1_stage_ptr,
+        k0_stage_ptr,
+        k1_stage_ptr,
+        kv2_stage_ptr,
+        mbar_q0_load,
+        mbar_q1_load,
+        mbar_k0,
+        mbar_k1,
+        mbar_k2,
+        mbar_v0,
+        mbar_v1,
+        mbar_v2,
+        mbar_s0,
+        mbar_s1,
+        mbar_p0,
+        mbar_p1,
+        mbar_corr0,
+        mbar_corr1,
+        mbar_pv,
+        s0_tmem_addr,
+        s1_tmem_addr,
+        p0_tmem_addr,
+        p1_tmem_addr,
+        o0_tmem_addr,
+        o1_tmem_addr,
+        loop_extent,
+    )
+
+
 def tcgen05_epilogue_warp_1sm_skv(
     output_desc,
     q_stage_ptr,
