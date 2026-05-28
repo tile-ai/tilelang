@@ -79,6 +79,7 @@ class GemmMMASm70(GemmBase):
         )
 
         a_dtype = self.a_dtype
+        b_dtype = self.b_dtype
         warp_rows = mma_emitter.warp_rows
         warp_cols = mma_emitter.warp_cols
         local_size_a = mma_emitter.local_size_a
@@ -109,7 +110,7 @@ class GemmMMASm70(GemmBase):
                 accumulating into C_local.
                 """
                 A_local = T.alloc_local((warp_rows * local_size_a), a_dtype)
-                B_local = T.alloc_local((warp_cols * local_size_b), a_dtype)
+                B_local = T.alloc_local((warp_cols * local_size_b), b_dtype)
 
                 if clear_accum:
                     T.clear(C_buf)
@@ -145,7 +146,7 @@ class GemmMMASm70(GemmBase):
                 B_shared into local fragments, then issues Tensor Core mma ops,
                 accumulating into C_local.
                 """
-                B_local = T.alloc_local((warp_cols * local_size_b), a_dtype)
+                B_local = T.alloc_local((warp_cols * local_size_b), b_dtype)
 
                 if clear_accum:
                     T.clear(C_buf)

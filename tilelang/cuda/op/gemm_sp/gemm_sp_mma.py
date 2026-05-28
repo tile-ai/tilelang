@@ -79,6 +79,7 @@ class GemmSPMMA(GemmSPBase):
         )
 
         a_dtype = self.a_dtype
+        b_dtype = self.b_dtype
         warp_rows = mma_emitter.warp_rows
         warp_cols = mma_emitter.warp_cols
         local_size_a = mma_emitter.local_size_a
@@ -102,7 +103,7 @@ class GemmSPMMA(GemmSPBase):
                 """
                 A_local = T.alloc_local((warp_rows * local_size_a), a_dtype)
                 E_local = T.alloc_local((warp_rows * local_size_e), self.e_dtype)
-                B_local = T.alloc_local((warp_cols * local_size_b), a_dtype)
+                B_local = T.alloc_local((warp_cols * local_size_b), b_dtype)
 
                 if clear_accum:
                     T.clear(C_local)
@@ -185,7 +186,7 @@ class GemmSPMMA(GemmSPBase):
                 accumulating into C_local.
                 """
                 E_local = T.alloc_local((warp_rows * local_size_e), self.e_dtype)
-                B_local = T.alloc_local((warp_cols * local_size_b), a_dtype)
+                B_local = T.alloc_local((warp_cols * local_size_b), b_dtype)
 
                 if clear_accum:
                     T.clear(C_local)

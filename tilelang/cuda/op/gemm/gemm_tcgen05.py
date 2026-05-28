@@ -50,6 +50,10 @@ class GemmTCGEN5(GemmBase):
     of operands A and B.
     """
 
+    @property
+    def allow_f8f6f4_mixed_dtypes(self) -> bool:
+        return True
+
     def infer_shared_layout(self, buffer: tirx.Buffer, continuity: int) -> Callable[[tirx.Buffer], Layout]:
         """Infer a standard shared-memory swizzle layout for TCGEN05 operands."""
         elem_bits = buffer.dtype.bits
