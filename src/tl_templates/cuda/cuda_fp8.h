@@ -317,14 +317,11 @@ __tl_cvt_fp8x2_to_float2(const __nv_fp8x2_storage_t x,
 // Inline PTX FP8 Conversions with Stochastic Rounding
 // ============================================================================
 //
-// PTX ISA: cvt.rs{.relu}.satfinite.f8x4type.f32 d, {a, b, e, f}, rbits
+// PTX ISA: cvt.rs.satfinite.f8x4type.f32 d, {a, b, e, f}, rbits
 //   Output layout: d[31:24]=a, d[23:16]=b, d[15:8]=e, d[7:0]=f
 //   To get little-endian byte order (byte0=elem0), pass elements in reverse.
 
 // --- float4 -> e4m3x4 stochastic rounding ---
-// cvt.rs.satfinite.e4m3x4.f32 d, {a, b, e, f}, rbits
-// Output layout: d[31:24]=a, d[23:16]=b, d[15:8]=e, d[7:0]=f
-// To get little-endian byte order (byte0=elem0), pass elements in reverse.
 
 // Full 4-element version (float4 input)
 TL_DEVICE __nv_fp8x4_storage_t
@@ -357,7 +354,6 @@ __tl_cvt_f32x2_to_e4m3x2_rs_sat(float2 src, unsigned int rbits) {
 }
 
 // --- float4 -> e5m2x4 stochastic rounding ---
-// cvt.rs.satfinite.e5m2x4.f32 d, {a, b, e, f}, rbits
 
 // Full 4-element version (float4 input)
 TL_DEVICE __nv_fp8x4_storage_t

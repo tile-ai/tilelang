@@ -1597,12 +1597,11 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
         target_ty.is_float8_e4m3() || target_ty.is_float8_e4m3fn();
     std::string type_suffix = target_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2";
 
-    // Check for custom rounding mode / saturation via CastNode annotations
     bool has_rbits = cast_rbits.defined();
 
     if (cast_round == "rs" && has_rbits) {
       // PTX: cvt.rs.satfinite.{e4m3x4,e5m2x4}.f32 d, {a,b,e,f}, rbits
-      // We provide x1 (scalar), x2 (zero-padded), and x4 (full) variants.
+      // x4 is the native PTX width; x1/x2 zero-pad the unused lanes.
       ICHECK(cast_sat)
           << "sat=false is not supported for stochastic rounding f32 -> fp8";
       std::string fp8_type_x4 = target_type_is_e4m3 ? "e4m3x4" : "e5m2x4";
@@ -1611,7 +1610,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
       std::string rbits_str = PrintExpr(cast_rbits.value());
 
       if (lanes == 1) {
-        // Use x1 variant: pads 3 zeros, extracts lowest byte
+        // x1: pad 3 zeros, take byte 0
         std::string func_name = "__tl_cvt_f32x1_to_" + fp8_type_x1 + "_rs_sat";
         PrintIndent();
         stream << "*reinterpret_cast<__nv_fp8_storage_t*>(&" << sret
@@ -1622,7 +1621,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
       }
 
       if (lanes == 2) {
-        // Use x2 variant: pads 2 zeros, extracts lower 2 bytes
+        // x2: pad 2 zeros, take low 2 bytes
         std::string func_name = "__tl_cvt_f32x2_to_" + fp8_type_x2 + "_rs_sat";
         std::string src_cast = "(float2*)";
         std::string dst_cast = "reinterpret_cast<__nv_fp8x2_storage_t*>";
@@ -1635,7 +1634,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
       }
 
       if (lanes == 4 || lanes == 8) {
-        // Use x4 variant: process 4 floats at a time via float4
+        // x4: native; chunk lanes==8 into two float4s
         std::string func_name = "__tl_cvt_f32x4_to_" + fp8_type_x4 + "_rs_sat";
         int num_chunks = lanes / 4;
         std::string src_cast = "(float4*)";
@@ -1742,18 +1741,17 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   // Handle conversion from float32 to float4 (E2M1)
   if (from_ty.is_float() && from_ty.bits() == 32 &&
       target_ty.is_float4_e2m1fn()) {
-    // Check for custom rounding mode / saturation via CastNode annotations
     bool has_rbits = cast_rbits.defined();
 
     if (cast_round == "rs" && has_rbits) {
       // PTX: cvt.rs.satfinite.e2m1x4.f32 d, {a, b, e, f}, rbits
-      // We provide x1 (scalar), x2 (zero-padded), and x4 (full) variants.
+      // x4 is the native PTX width; x1/x2 zero-pad the unused lanes.
       ICHECK(cast_sat)
           << "sat=false is not supported for stochastic rounding f32 -> fp4";
       std::string rbits_str = PrintExpr(cast_rbits.value());
 
       if (lanes == 1) {
-        // Use x1 variant: pads 3 zeros, extracts low nibble
+        // x1: pad 3 zeros, take low nibble
         PrintIndent();
         stream << "*reinterpret_cast<__nv_fp4_storage_t*>(&" << sret << ") = "
                << "__tl_cvt_f32x1_to_e2m1x1_rs_sat(" << src << ", " << rbits_str
@@ -1763,7 +1761,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
       }
 
       if (lanes == 2) {
-        // Use x2 variant: pads 2 zeros, extracts low byte
+        // x2: pad 2 zeros, take low byte
         PrintIndent();
         stream << "*reinterpret_cast<__nv_fp4x2_storage_t*>(&" << sret << ") = "
                << "__tl_cvt_f32x2_to_e2m1x2_rs_sat(((float2*)(&" << src
@@ -1773,7 +1771,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
       }
 
       if (lanes == 4 || lanes == 8) {
-        // Use x4 variant: process 4 floats at a time via float4
+        // x4: native; chunk lanes==8 into two float4s
         int num_chunks = lanes / 4;
         for (int i = 0; i < num_chunks; i++) {
           PrintIndent();
@@ -1868,8 +1866,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     }
   }
 
-  // Guard: rounding hint should have been handled above for supported type
-  // pairs
+  // Reaching here with a non-empty `round` means this dtype pair has no
+  // PTX `cvt.<round>` lowering; fail loudly instead of silently dropping it.
   if (!cast_round.empty()) {
     LOG(FATAL) << "round '" << cast_round << "' is not supported for cast from "
                << from_ty << " to " << target_ty

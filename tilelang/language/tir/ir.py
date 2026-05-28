@@ -1,6 +1,7 @@
 import tvm.tirx.script.builder.ir as _ir
 from tvm.tirx.script.builder import frame
-from tvm.tirx import PrimExpr
+from tvm.tirx import PrimExpr, IntImm, StringImm
+from tvm.tirx import _ffi_api as _tir_ffi
 from typing import Any
 import tilelang.language.tir.op as _tir_op
 import functools
@@ -338,7 +339,9 @@ def cast(value, dtype, round: str = "", sat: bool = True, rbits=None, span=None)
         The target data type.
     round : str, optional
         PTX rounding modifier (e.g. ``"rn"``, ``"rz"``, ``"rp"``, ``"rm"``,
-        ``"rs"``). Empty string means use the backend default.
+        ``"rs"``). Empty string means use the backend default. Currently
+        only ``""`` and ``"rs"`` are lowered by the CUDA backend; the other
+        modifiers are reserved.
     sat : bool, optional
         Saturate to finite (``True`` = PTX ``.satfinite``, default).
     rbits : PrimExpr, optional
@@ -359,11 +362,6 @@ def cast(value, dtype, round: str = "", sat: bool = True, rbits=None, span=None)
         raise ValueError("rbits is required when round='rs' (stochastic rounding)")
     if round != "rs" and rbits is not None:
         raise ValueError("rbits is only valid with round='rs' (stochastic rounding)")
-
-    # Local imports to avoid pulling tvm.tirx at module load time when this
-    # file is imported during tilelang package initialization.
-    from tvm.tirx import IntImm, StringImm
-    from tvm.tirx import _ffi_api as _tir_ffi
 
     annotations: dict = {}
     if round:

@@ -745,8 +745,8 @@ private:
     // For casts that carry a "rbits" annotation (stochastic rounding), the
     // rbits operand must be invariant within the vectorized boundary so the
     // same value can be shared across the lanes of each PTX cvt.rs.*
-    // instruction. Find the largest vector size where this holds (binary
-    // halving), mirroring the call-node fallback above.
+    // instruction. Halve the vector size until invariance holds, mirroring
+    // the call-node fallback above.
     if (inner_for_) {
       auto it = node->annotations.find("rbits");
       if (it != node->annotations.end()) {
