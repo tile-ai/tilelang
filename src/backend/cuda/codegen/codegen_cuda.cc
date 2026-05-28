@@ -3480,9 +3480,11 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     this->stream << "tl::tcgen05_sf_warp_transpose(reinterpret_cast<uint32_t*>("
                  << smem_ptr << "));\n";
-  } else if (op->op.same_as(tl::tcgen05_ld())) {
+  } else if (op->op.same_as(tl::tcgen05_ld()) ||
+             op->op.same_as(tl::tcgen05_ld_nofence())) {
     ICHECK_EQ(op->args.size(), 6U) << "tcgen05_ld expects 6 arguments";
     need_tcgen05_common_h_ = true;
+    bool emit_fence = op->op.same_as(tl::tcgen05_ld());
     int inst_bits = Downcast<IntImm>(op->args[0])->value;
     int chunks = Downcast<IntImm>(op->args[1])->value;
     bool pack16 = Downcast<Bool>(op->args[2])->value;
@@ -3490,10 +3492,17 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string col_offset = this->PrintExpr(op->args[4]);
     std::string dst_ptr = this->PrintExpr(op->args[5]);
     this->PrintIndent();
-    this->stream << "tl::tcgen05_ld_32dp" << inst_bits << "bNx<" << chunks
-                 << ", " << (pack16 ? "true" : "false") << ">("
-                 << tmem_start_col << ", " << col_offset << ", " << dst_ptr
-                 << ");\n";
+    if (emit_fence) {
+      this->stream << "tl::tcgen05_ld_32dp" << inst_bits << "bNx<" << chunks
+                   << ", " << (pack16 ? "true" : "false") << ">("
+                   << tmem_start_col << ", " << col_offset << ", " << dst_ptr
+                   << ");\n";
+    } else {
+      this->stream << "tl::tmem_ld_32dp" << inst_bits << "bNx<"
+                   << (pack16 ? "true" : "false") << ">::copy<" << chunks
+                   << ">(" << tmem_start_col << " + " << col_offset << ", "
+                   << "(uint32_t *)(" << dst_ptr << "));\n";
+    }
   } else if (op->op.same_as(tl::tcgen05_st())) {
     ICHECK_EQ(op->args.size(), 6U) << "tcgen05_st expects 6 arguments";
     int inst_bits = Downcast<IntImm>(op->args[0])->value;
@@ -3521,21 +3530,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << ", " << (pack16 ? "true" : "false") << ">("
                  << tmem_start_col << ", " << col_offset << ", " << dst_ptr
                  << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_ld_nofence())) {
-    ICHECK_EQ(op->args.size(), 6U)
-        << "tcgen05_ld_nofence expects 6 arguments";
-    need_tcgen05_common_h_ = true;
-    int inst_bits = Downcast<IntImm>(op->args[0])->value;
-    int chunks = Downcast<IntImm>(op->args[1])->value;
-    bool pack16 = Downcast<Bool>(op->args[2])->value;
-    std::string tmem_start_col = this->PrintExpr(op->args[3]);
-    std::string col_offset = this->PrintExpr(op->args[4]);
-    std::string dst_ptr = this->PrintExpr(op->args[5]);
-    this->PrintIndent();
-    this->stream << "tl::tmem_ld_32dp" << inst_bits << "bNx<"
-                 << (pack16 ? "true" : "false") << ">::copy<" << chunks
-                 << ">(" << tmem_start_col << " + " << col_offset << ", "
-                 << "(uint32_t *)(" << dst_ptr << "));\n";
   } else if (op->op.same_as(tl::tcgen05_st_x16())) {
     ICHECK_EQ(op->args.size(), 6U) << "tcgen05_st_x16 expects 6 arguments";
     need_tcgen05_common_h_ = true;
@@ -3585,32 +3579,32 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         << "tcgen05_fence_tmem_store expects no arguments";
     need_tcgen05_common_h_ = true;
     this->stream << "tl::fence_view_async_tmem_store();\n";
-  } else if (op->op.same_as(tl::tcgen05_correction_x16())) {
-    ICHECK_EQ(op->args.size(), 4U)
-        << "tcgen05_correction_x16 expects 4 args: tmem_buf, scale, wg_offset, head_dim";
+  } else if (op->op.same_as(tl::tcgen05_correction_x16()) ||
+             op->op.same_as(tl::tcgen05_correction_x16_skip())) {
     this->PrintIndent();
     auto tmem_addr = this->PrintExpr(op->args[0]);
     auto scale_val = this->PrintExpr(op->args[1]);
-    auto wg_offset = this->PrintExpr(op->args[2]);
-    auto head_dim = Downcast<IntImm>(op->args[3])->value;
     need_tcgen05_common_h_ = true;
-    this->stream << "tl::tmem_correction_x16<" << head_dim << ">("
-                 << tmem_addr << ", " << scale_val << ", " << wg_offset << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_correction_x16_skip())) {
-    ICHECK_EQ(op->args.size(), 6U)
-        << "tcgen05_correction_x16_skip expects 6 args";
-    this->PrintIndent();
-    auto tmem_addr = this->PrintExpr(op->args[0]);
-    auto scale_val = this->PrintExpr(op->args[1]);
-    auto mbar_pv = this->PrintExpr(op->args[2]);
-    auto pv_phase = this->PrintExpr(op->args[3]);
-    auto wg_offset = this->PrintExpr(op->args[4]);
-    auto head_dim = Downcast<IntImm>(op->args[5])->value;
-    need_tcgen05_common_h_ = true;
-    this->stream << "tl::tmem_correction_x16_skip<" << head_dim << ">("
-                 << tmem_addr << ", " << scale_val << ", (void const*)(&"
-                 << mbar_pv << "), " << pv_phase << ", " << wg_offset
-                 << ");\n";
+    if (op->op.same_as(tl::tcgen05_correction_x16())) {
+      ICHECK_EQ(op->args.size(), 4U)
+          << "tcgen05_correction_x16 expects 4 args: tmem_buf, scale, wg_offset, head_dim";
+      auto wg_offset = this->PrintExpr(op->args[2]);
+      auto head_dim = Downcast<IntImm>(op->args[3])->value;
+      this->stream << "tl::tmem_correction_x16<" << head_dim << ">("
+                   << tmem_addr << ", " << scale_val << ", " << wg_offset
+                   << ");\n";
+    } else {
+      ICHECK_EQ(op->args.size(), 6U)
+          << "tcgen05_correction_x16_skip expects 6 args";
+      auto mbar_pv = this->PrintExpr(op->args[2]);
+      auto pv_phase = this->PrintExpr(op->args[3]);
+      auto wg_offset = this->PrintExpr(op->args[4]);
+      auto head_dim = Downcast<IntImm>(op->args[5])->value;
+      this->stream << "tl::tmem_correction_x16_skip<" << head_dim << ">("
+                   << tmem_addr << ", " << scale_val << ", (void const*)(&"
+                   << mbar_pv << "), " << pv_phase << ", " << wg_offset
+                   << ");\n";
+    }
   } else if (op->op.same_as(tl::tcgen05_epilogue_store_x16())) {
     ICHECK_EQ(op->args.size(), 5U)
         << "tcgen05_epilogue_store_x16 expects 5 args: tmem_buf, smem_ptr, logsum, wg_offset, head_dim";
@@ -3753,22 +3747,29 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << loop_extent << ", " << scale << ", " << seq_len << ", "
                  << q_row_base << ", " << kv_col_base << ", " << is_causal
                  << ", " << wg_offset << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_qk_gemm_128x128_skv())) {
+  } else if (op->op.same_as(tl::tcgen05_qk_gemm_128x128_skv()) ||
+             op->op.same_as(tl::tcgen05_qk_gemm_128x128_skv_noguard())) {
     ICHECK_EQ(op->args.size(), 4U)
         << "tcgen05_qk_gemm_128x128_skv expects 4 args: Q_stage_ptr, KV_stage_ptr, S_tmem, mbar";
     this->PrintIndent();
+    bool guard_warp12 = op->op.same_as(tl::tcgen05_qk_gemm_128x128_skv());
     auto q_stage = this->PrintExpr(op->args[0]);
     auto kv_stage = this->PrintExpr(op->args[1]);
     auto s_addr = this->PrintExpr(op->args[2]);
     auto mbar = this->PrintExpr(op->args[3]);
     need_tcgen05_common_h_ = true;
-    this->stream << "if ((((int)threadIdx.x) >> 5) == 12) {\n";
-    this->PrintIndent();
-    this->stream << "  tl::tcgen05_qk_mma_128x128_skv((void const*)("
+    if (guard_warp12) {
+      this->stream << "if ((((int)threadIdx.x) >> 5) == 12) {\n";
+      this->PrintIndent();
+      this->stream << "  ";
+    }
+    this->stream << "tl::tcgen05_qk_mma_128x128_skv((void const*)("
                  << q_stage << "), (void const*)(" << kv_stage << "), "
                  << s_addr << ", (void const*)(&" << mbar << "));\n";
-    this->PrintIndent();
-    this->stream << "}\n";
+    if (guard_warp12) {
+      this->PrintIndent();
+      this->stream << "}\n";
+    }
   } else if (op->op.same_as(tl::tcgen05_softmax_warp_1sm())) {
     ICHECK_EQ(op->args.size(), 15U)
         << "tcgen05_softmax_warp_1sm expects 15 args";
@@ -3798,18 +3799,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << loop_extent << ", " << tile_k_base << ", " << scale
                  << ", " << seq_len << ", " << q_row_base << ", "
                  << is_causal << ", " << wg_offset << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_qk_gemm_128x128_skv_noguard())) {
-    ICHECK_EQ(op->args.size(), 4U)
-        << "tcgen05_qk_gemm_128x128_skv_noguard expects 4 args: Q_stage_ptr, KV_stage_ptr, S_tmem, mbar";
-    this->PrintIndent();
-    auto q_stage = this->PrintExpr(op->args[0]);
-    auto kv_stage = this->PrintExpr(op->args[1]);
-    auto s_addr = this->PrintExpr(op->args[2]);
-    auto mbar = this->PrintExpr(op->args[3]);
-    need_tcgen05_common_h_ = true;
-    this->stream << "tl::tcgen05_qk_mma_128x128_skv((void const*)("
-                 << q_stage << "), (void const*)(" << kv_stage << "), "
-                 << s_addr << ", (void const*)(&" << mbar << "));\n";
   } else if (op->op.same_as(tl::tcgen05_pv_gemm_128x64())) {
     ICHECK_EQ(op->args.size(), 5U)
         << "tcgen05_pv_gemm_128x64 expects 5 args: V_lo_ptr, V_hi_ptr, P_tmem, O_tmem, accum";
@@ -3828,35 +3817,30 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << o_addr << ", " << accum << ");\n";
     this->PrintIndent();
     this->stream << "}\n";
-  } else if (op->op.same_as(tl::tcgen05_pv_gemm_128x64_skv())) {
+  } else if (op->op.same_as(tl::tcgen05_pv_gemm_128x64_skv()) ||
+             op->op.same_as(tl::tcgen05_pv_gemm_128x64_skv_noguard())) {
     ICHECK_EQ(op->args.size(), 4U)
         << "tcgen05_pv_gemm_128x64_skv expects 4 args: V_stage_ptr, P_tmem, O_tmem, accum";
     this->PrintIndent();
+    bool guard_warp12 = op->op.same_as(tl::tcgen05_pv_gemm_128x64_skv());
     auto v_stage = this->PrintExpr(op->args[0]);
     auto p_addr = this->PrintExpr(op->args[1]);
     auto o_addr = this->PrintExpr(op->args[2]);
     auto accum = this->PrintExpr(op->args[3]);
     need_tcgen05_common_h_ = true;
-    // Warp-12 guard (all 32 lanes converged); the MMA helper uses elect_one internally
-    this->stream << "if ((((int)threadIdx.x) >> 5) == 12) {\n";
-    this->PrintIndent();
-    this->stream << "  tl::tcgen05_pv_mma_128x64_skv((void const*)(" << v_stage
-                 << "), " << p_addr << ", " << o_addr << ", " << accum
-                 << ");\n";
-    this->PrintIndent();
-    this->stream << "}\n";
-  } else if (op->op.same_as(tl::tcgen05_pv_gemm_128x64_skv_noguard())) {
-    ICHECK_EQ(op->args.size(), 4U)
-        << "tcgen05_pv_gemm_128x64_skv_noguard expects 4 args: V_stage_ptr, P_tmem, O_tmem, accum";
-    this->PrintIndent();
-    auto v_stage = this->PrintExpr(op->args[0]);
-    auto p_addr = this->PrintExpr(op->args[1]);
-    auto o_addr = this->PrintExpr(op->args[2]);
-    auto accum = this->PrintExpr(op->args[3]);
-    need_tcgen05_common_h_ = true;
+    if (guard_warp12) {
+      // Warp-12 guard (all 32 lanes converged); the MMA helper uses elect_one internally
+      this->stream << "if ((((int)threadIdx.x) >> 5) == 12) {\n";
+      this->PrintIndent();
+      this->stream << "  ";
+    }
     this->stream << "tl::tcgen05_pv_mma_128x64_skv((void const*)(" << v_stage
                  << "), " << p_addr << ", " << o_addr << ", " << accum
                  << ");\n";
+    if (guard_warp12) {
+      this->PrintIndent();
+      this->stream << "}\n";
+    }
   } else if (op->op.same_as(tl::tcgen05_mma_warp_1sm_skv())) {
     ICHECK_EQ(op->args.size(), 32U)
         << "tcgen05_mma_warp_1sm_skv expects 32 args";

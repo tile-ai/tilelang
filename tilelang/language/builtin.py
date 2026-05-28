@@ -106,6 +106,8 @@ def access_ptr(
 
     The returned `tl.access_ptr` is expected to be lowered to
     `tir.builtin.tvm_access_ptr` later in the TileLang compilation pipeline.
+    Non-zero `offset` is a linear element offset added after N-D index
+    linearization.
 
     Parameters
     ----------
@@ -203,23 +205,64 @@ def access_ptr(
         upto = max(0, len(mins) - ignore_last_ndim)
         mins = list(mins[:upto]) + [tir.IntImm(idx_dtype, 0) for _ in range(len(mins) - upto)]
 
-    # Support non-zero `offset` only for 1D buffers in the frontend meta-op.
+    has_explicit_strides = (
+        buf.strides is not None
+        and len(buf.strides) == len(buf.shape)
+    )
+
+    def _row_major_strides() -> list[PrimExpr]:
+        strides = []
+        for i in range(len(buf.shape)):
+            stride = tir.IntImm(idx_dtype, 1)
+            for dim in buf.shape[i + 1:]:
+                stride = stride * convert(dim)
+            strides.append(stride)
+        return strides
+
+    def _linearize_indices(indices: list[PrimExpr]) -> PrimExpr:
+        if len(indices) == 0:
+            return tir.IntImm(idx_dtype, 0)
+        if has_explicit_strides:
+            strides = list(buf.strides)
+        else:
+            strides = _row_major_strides()
+        linear = tir.IntImm(idx_dtype, 0)
+        for idx, stride in zip(indices, strides):
+            linear = linear + convert(idx) * convert(stride)
+        return linear
+
+    def _indices_from_linear_offset(linear: PrimExpr) -> list[PrimExpr]:
+        if len(buf.shape) == 0:
+            return []
+        if len(buf.shape) == 1:
+            return [linear]
+        if has_explicit_strides:
+            last_stride = buf.strides[-1]
+            if not (isinstance(last_stride, tir.IntImm) and int(last_stride.value) == 1):
+                raise ValueError(
+                    "T.access_ptr(offset!=0) for N-D buffers with explicit strides "
+                    "requires the last stride to be 1."
+                )
+            return [tir.IntImm(idx_dtype, 0) for _ in buf.shape[:-1]] + [linear]
+
+        indices: list[PrimExpr] = []
+        rem = linear
+        strides = _row_major_strides()
+        for stride in strides[:-1]:
+            idx = rem // stride
+            indices.append(idx)
+            rem = rem - idx * stride
+        indices.append(rem)
+        return indices
+
     if isinstance(offset, int):
         if offset != 0:
-            if len(mins) != 1:
-                raise ValueError(
-                    "T.access_ptr(offset!=0) is only supported for 1D buffers when emitting tl.access_ptr. "
-                    "Use explicit indexing (e.g. A[i + off]) for N-D buffers."
-                )
-            mins = [mins[0] + tir.IntImm(idx_dtype, offset)]
+            linear = _linearize_indices(mins) + tir.IntImm(idx_dtype, offset)
+            mins = _indices_from_linear_offset(linear)
     elif isinstance(offset, PrimExpr):
         if not (isinstance(offset, tir.IntImm) and int(offset.value) == 0):
-            if len(mins) != 1:
-                raise ValueError(
-                    "T.access_ptr(offset!=0) is only supported for 1D buffers when emitting tl.access_ptr. "
-                    "Use explicit indexing (e.g. A[i + off]) for N-D buffers."
-                )
-            mins = [mins[0] + offset]
+            linear = _linearize_indices(mins) + offset
+            mins = _indices_from_linear_offset(linear)
     else:
         raise TypeError(f"T.access_ptr offset must be int or PrimExpr, but got {type(offset)}.")
 
@@ -1293,14 +1336,18 @@ def tcgen05_ld(
     tmem_start_col,
     col_offset,
     dst_ptr,
+    *,
+    emit_fence: bool = True,
 ):
     """Load from TMEM into a local pointer with `tl::tcgen05_ld_32dp*bNx`.
 
     `dst_ptr` should normally be produced by `T.access_ptr(local_buf[i], "w", chunks)`.
+    Set `emit_fence=False` when issuing several loads and calling
+    `T.tcgen05_fence_tmem_load()` manually once afterwards.
     """
     return tir.call_intrin(
         "void",
-        tir.op.Op.get("tl.tcgen05_ld"),
+        tir.op.Op.get("tl.tcgen05_ld" if emit_fence else "tl.tcgen05_ld_nofence"),
         tir.IntImm("int32", int(inst_bits)),
         tir.IntImm("int32", int(chunks)),
         _as_bool_imm(pack16),
@@ -1360,20 +1407,19 @@ def tcgen05_ld_nofence(
     col_offset,
     dst_ptr,
 ):
-    """Raw TMEM load without an implicit `fence_view_async_tmem_load`.
+    """Compatibility wrapper for `tcgen05_ld(..., emit_fence=False)`.
 
     This is intended for DSL code that issues several `tcgen05` TMEM loads and
     then calls `T.tcgen05_fence_tmem_load()` once, matching FA4 softmax.
     """
-    return tir.call_intrin(
-        "void",
-        tir.op.Op.get("tl.tcgen05_ld_nofence"),
-        tir.IntImm("int32", int(inst_bits)),
-        tir.IntImm("int32", int(chunks)),
-        _as_bool_imm(pack16),
+    return tcgen05_ld(
+        inst_bits,
+        chunks,
+        pack16,
         tmem_start_col,
         col_offset,
         dst_ptr,
+        emit_fence=False,
     )
 
 
@@ -1398,10 +1444,20 @@ def tcgen05_st_x16(
     )
 
 
-def tcgen05_correction_x16(tmem_buf, scale_frag, warp_group_offset: int = 256, head_dim: int = 128):
+def tcgen05_correction_x16(
+    tmem_buf,
+    scale_frag,
+    mbar_pv=None,
+    pv_phase=None,
+    warp_group_offset: int = 256,
+    head_dim: int = 128,
+):
     """Per-warp O correction using avo-style x16 ld/mul/st sequence.
 
-    Emits tl::tmem_correction_x16<HeadDim>(tmem_base, scale, wg_offset).
+    Emits `tl::tmem_correction_x16<HeadDim>(...)` by default. If `mbar_pv`
+    and `pv_phase` are provided, emits the avo-style skip/wait variant that
+    bypasses correction when all lanes have scale >= 1.0.
+
     Each warp in the correction WG handles 32 rows independently with
     explicit row offset, software-pipelined x16 load/store, and a single
     tcgen05.wait::st at the end.
@@ -1409,9 +1465,25 @@ def tcgen05_correction_x16(tmem_buf, scale_frag, warp_group_offset: int = 256, h
     Args:
         tmem_buf: TMEM buffer (the O_tmem allocation). Pass O_tmem[0, 0] for base addr.
         scale_frag: Scale fragment value. Pass corr_scale[0] for the per-thread value.
+        mbar_pv: Optional PV completion mbarrier for the skip/wait variant.
+        pv_phase: Optional PV mbarrier parity for the skip/wait variant.
         warp_group_offset: threadIdx.x start of the correction WG (default 256).
         head_dim: Number of columns to correct (default 128).
     """
+    if mbar_pv is not None or pv_phase is not None:
+        if mbar_pv is None or pv_phase is None:
+            raise ValueError("tcgen05_correction_x16 requires both mbar_pv and pv_phase for skip/wait mode")
+        mbar_pv = _mbar_to_buffer_load(mbar_pv)
+        return tir.call_intrin(
+            "void",
+            tir.op.Op.get("tl.tcgen05_correction_x16_skip"),
+            tmem_buf,
+            scale_frag,
+            mbar_pv,
+            pv_phase,
+            tir.IntImm("int32", warp_group_offset),
+            tir.IntImm("int32", head_dim),
+        )
     return tir.call_intrin(
         "void",
         tir.op.Op.get("tl.tcgen05_correction_x16"),
@@ -1430,17 +1502,14 @@ def tcgen05_correction_x16_skip(
     warp_group_offset: int = 256,
     head_dim: int = 128,
 ):
-    """Avo-style correction with ballot skip before waiting on PV."""
-    mbar_pv = _mbar_to_buffer_load(mbar_pv)
-    return tir.call_intrin(
-        "void",
-        tir.op.Op.get("tl.tcgen05_correction_x16_skip"),
+    """Compatibility wrapper for `tcgen05_correction_x16(..., mbar_pv=..., pv_phase=...)`."""
+    return tcgen05_correction_x16(
         tmem_buf,
         scale_frag,
-        mbar_pv,
-        pv_phase,
-        tir.IntImm("int32", warp_group_offset),
-        tir.IntImm("int32", head_dim),
+        mbar_pv=mbar_pv,
+        pv_phase=pv_phase,
+        warp_group_offset=warp_group_offset,
+        head_dim=head_dim,
     )
 
 
@@ -1651,16 +1720,22 @@ def tcgen05_softmax_128x128(
     )
 
 
-def tcgen05_qk_gemm_128x128_skv(q_stage_ptr, kv_stage_ptr, s_tmem_addr, mbar):
+def tcgen05_qk_gemm_128x128_skv(q_stage_ptr, kv_stage_ptr, s_tmem_addr, mbar, *, guard_warp12: bool = True):
     """Avo-exact QK MMA for one Q stage and one shared K/V stage.
 
     Emits the raw mk_fast descriptor loop used by avo's 1SM attention kernel
     and commits the S-ready mbarrier with the plain .b64 tcgen05 commit.
+    Set `guard_warp12=False` when the caller already restricts execution to
+    the MMA warp.
     """
     mbar = _mbar_to_buffer_load(mbar)
     return tir.call_intrin(
         "void",
-        tir.op.Op.get("tl.tcgen05_qk_gemm_128x128_skv"),
+        tir.op.Op.get(
+            "tl.tcgen05_qk_gemm_128x128_skv"
+            if guard_warp12
+            else "tl.tcgen05_qk_gemm_128x128_skv_noguard"
+        ),
         q_stage_ptr,
         kv_stage_ptr,
         s_tmem_addr,
@@ -1712,15 +1787,13 @@ def tcgen05_softmax_warp_1sm(
 
 
 def tcgen05_qk_gemm_128x128_skv_noguard(q_stage_ptr, kv_stage_ptr, s_tmem_addr, mbar):
-    """Avo-exact QK MMA for the FA4 MMA warp; caller already guards warp 12."""
-    mbar = _mbar_to_buffer_load(mbar)
-    return tir.call_intrin(
-        "void",
-        tir.op.Op.get("tl.tcgen05_qk_gemm_128x128_skv_noguard"),
+    """Compatibility wrapper for `tcgen05_qk_gemm_128x128_skv(..., guard_warp12=False)`."""
+    return tcgen05_qk_gemm_128x128_skv(
         q_stage_ptr,
         kv_stage_ptr,
         s_tmem_addr,
         mbar,
+        guard_warp12=False,
     )
 
 
@@ -1740,15 +1813,27 @@ def tcgen05_pv_gemm_128x64(v_lo_ptr, v_hi_ptr, p_tmem_addr, o_tmem_addr, accumul
     )
 
 
-def tcgen05_pv_gemm_128x64_skv(v_stage_ptr, p_tmem_addr, o_tmem_addr, accumulate):
+def tcgen05_pv_gemm_128x64_skv(
+    v_stage_ptr,
+    p_tmem_addr,
+    o_tmem_addr,
+    accumulate,
+    *,
+    guard_warp12: bool = True,
+):
     """Avo-exact PV MMA for one shared K/V stage.
 
     The stage is laid out as low-D [128,64] followed by high-D [128,64],
-    matching avo's sKV storage.
+    matching avo's sKV storage. Set `guard_warp12=False` when the caller
+    already restricts execution to the MMA warp.
     """
     return tir.call_intrin(
         "void",
-        tir.op.Op.get("tl.tcgen05_pv_gemm_128x64_skv"),
+        tir.op.Op.get(
+            "tl.tcgen05_pv_gemm_128x64_skv"
+            if guard_warp12
+            else "tl.tcgen05_pv_gemm_128x64_skv_noguard"
+        ),
         v_stage_ptr,
         p_tmem_addr,
         o_tmem_addr,
@@ -1757,14 +1842,13 @@ def tcgen05_pv_gemm_128x64_skv(v_stage_ptr, p_tmem_addr, o_tmem_addr, accumulate
 
 
 def tcgen05_pv_gemm_128x64_skv_noguard(v_stage_ptr, p_tmem_addr, o_tmem_addr, accumulate):
-    """Avo-exact PV MMA for the FA4 MMA warp; caller already guards warp 12."""
-    return tir.call_intrin(
-        "void",
-        tir.op.Op.get("tl.tcgen05_pv_gemm_128x64_skv_noguard"),
+    """Compatibility wrapper for `tcgen05_pv_gemm_128x64_skv(..., guard_warp12=False)`."""
+    return tcgen05_pv_gemm_128x64_skv(
         v_stage_ptr,
         p_tmem_addr,
         o_tmem_addr,
         accumulate,
+        guard_warp12=False,
     )
 
 

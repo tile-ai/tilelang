@@ -1160,13 +1160,14 @@ def attention_kernel_1sm(
 
                 nm = rmax_local
                 for cc in T.unroll(0, 128, 16):
-                    T.tcgen05_ld_nofence(
+                    T.tcgen05_ld(
                         32,
                         16,
                         False,
                         S_tmem[0, 0],
                         warp_row_base + cc,
                         T.access_ptr(sv[cc], "w", 16),
+                        emit_fence=False,
                     )
                 T.tcgen05_fence_tmem_load()
 
@@ -1241,6 +1242,84 @@ def attention_kernel_1sm(
 
                 T.tcgen05_fence_tmem_store()
                 T.mbarrier_arrive(mbar_p, lane0=True)
+
+
+        @T.macro
+        def correction_epilogue_warp_dsl(
+            O0_tmem: T.Buffer,
+            O1_tmem: T.Buffer,
+            O0_shared: T.SharedBuffer([kq2_block_M, dim], dtype),
+            scores_scale0_shared: T.SharedBuffer([2, kq2_block_M], accum_dtype),
+            scores_scale1_shared: T.SharedBuffer([2, kq2_block_M], accum_dtype),
+            logsum0_shared: T.SharedBuffer([kq2_block_M], accum_dtype),
+            logsum1_shared: T.SharedBuffer([kq2_block_M], accum_dtype),
+            mbar_scale0: T.Buffer,
+            mbar_scale1: T.Buffer,
+            mbar_pv: T.Buffer,
+            mbar_corr0: T.Buffer,
+            mbar_corr1: T.Buffer,
+            mbar_epi0: T.Buffer,
+            mbar_epi1: T.Buffer,
+            loop_extent: T.int32,
+        ):
+            row = T.get_thread_binding() - 256
+            for k_corr in T.unroll(loop_extent, explicit=False, unroll_factor=1):
+                if k_corr > 0:
+                    scale_idx = k_corr & 1
+                    scale_phase = (k_corr >> 1) & 1
+                    pv_phase = (k_corr - 1) & 1
+
+                    T.mbarrier_wait_parity(T.mbarrier_at(mbar_scale0, scale_idx), scale_phase)
+                    T.tcgen05_correction_x16(
+                        O0_tmem[0, 0],
+                        scores_scale0_shared[scale_idx, row],
+                        mbar_pv=mbar_pv,
+                        pv_phase=pv_phase,
+                        warp_group_offset=256,
+                        head_dim=dim,
+                    )
+                    T.tcgen05_before_thread_sync()
+                    T.mbarrier_arrive(mbar_corr0, lane0=True)
+
+                    T.mbarrier_wait_parity(T.mbarrier_at(mbar_scale1, scale_idx), scale_phase)
+                    T.tcgen05_correction_x16(
+                        O1_tmem[0, 0],
+                        scores_scale1_shared[scale_idx, row],
+                        mbar_pv=mbar_pv,
+                        pv_phase=pv_phase,
+                        warp_group_offset=256,
+                        head_dim=dim,
+                    )
+                    T.tcgen05_before_thread_sync()
+                    T.mbarrier_arrive(mbar_corr1, lane0=True)
+
+            final_phase = (loop_extent - 1) & 1
+            T.mbarrier_wait_parity(mbar_pv, final_phase)
+            T.tcgen05_after_thread_sync()
+            T.tcgen05_epilogue_store_x16(
+                O0_tmem[0, 0],
+                T.access_ptr(O0_shared, "w"),
+                logsum0_shared[row],
+                warp_group_offset=256,
+                head_dim=dim,
+            )
+            T.tcgen05_before_thread_sync()
+            T.sync_warp()
+            T.fence_proxy_async()
+            T.mbarrier_arrive(mbar_epi0, lane0=True)
+
+            T.tcgen05_after_thread_sync()
+            T.tcgen05_epilogue_store_x16(
+                O1_tmem[0, 0],
+                T.access_ptr(O0_shared, "w", offset=kq2_block_M * dim),
+                logsum1_shared[row],
+                warp_group_offset=256,
+                head_dim=dim,
+            )
+            T.tcgen05_before_thread_sync()
+            T.sync_warp()
+            T.fence_proxy_async()
+            T.mbarrier_arrive(mbar_epi1, lane0=True)
 
 
         @T.prim_func
@@ -1488,23 +1567,22 @@ def attention_kernel_1sm(
                     # ============================================================
                     elif tid >= 256 and tid < 384:
                         if k == 0:
-                            T.tcgen05_correction_epilogue_warp_1sm_skv(
-                                O0_tmem[0, 0],
-                                O1_tmem[0, 0],
-                                T.access_ptr(O0_shared, "w"),
-                                T.access_ptr(scores_scale0_shared, "r"),
-                                T.access_ptr(scores_scale1_shared, "r"),
-                                T.access_ptr(logsum0_shared, "r"),
-                                T.access_ptr(logsum1_shared, "r"),
-                                mbar_scale0[0],
-                                mbar_scale1[0],
+                            correction_epilogue_warp_dsl(
+                                O0_tmem,
+                                O1_tmem,
+                                O0_shared,
+                                scores_scale0_shared,
+                                scores_scale1_shared,
+                                logsum0_shared,
+                                logsum1_shared,
+                                mbar_scale0,
+                                mbar_scale1,
                                 mbar_pv,
                                 mbar_corr0,
                                 mbar_corr1,
                                 mbar_epi0,
                                 mbar_epi1,
                                 loop_range,
-                                0,
                             )
 
                     else:
