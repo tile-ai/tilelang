@@ -219,7 +219,8 @@ tvm::transform::Pass LowerSharedBarrier() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.LowerSharedBarrier", LowerSharedBarrier);
+  refl::GlobalDef().def("tl.cuda.transform.LowerSharedBarrier",
+                        LowerSharedBarrier);
 }
 
 } // namespace transform

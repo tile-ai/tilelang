@@ -185,7 +185,7 @@ tvm::transform::Pass FuseMBarrierArriveExpectTx() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.FuseMBarrierArriveExpectTx",
+  refl::GlobalDef().def("tl.cuda.transform.FuseMBarrierArriveExpectTx",
                         FuseMBarrierArriveExpectTx);
 }
 

@@ -308,7 +308,7 @@ tvm::transform::Pass AnnotateWarpGroupRegAlloc() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.AnnotateWarpGroupRegAlloc",
+  refl::GlobalDef().def("tl.cuda.transform.AnnotateWarpGroupRegAlloc",
                         AnnotateWarpGroupRegAlloc);
 }
 

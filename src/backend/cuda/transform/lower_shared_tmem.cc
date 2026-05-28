@@ -460,7 +460,7 @@ tvm::transform::Pass LowerSharedTmem() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.LowerSharedTmem", LowerSharedTmem);
+  refl::GlobalDef().def("tl.cuda.transform.LowerSharedTmem", LowerSharedTmem);
 }
 
 } // namespace transform

@@ -13,7 +13,7 @@ auto_target = tvm.target.Target(determine_target("auto"))
 def _apply(func):
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.LowerSharedBarrier()(mod)
+    mod = tl.cuda.transform.LowerSharedBarrier()(mod)
     return mod
 
 
@@ -159,7 +159,7 @@ def test_plan_update_keeps_barrier_init_with_tcgen05_no_tma():
     with tvm.transform.PassContext(config=pass_configs), target:
         mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
         mod = CUDAPassPipelineBodyPrologue(mod, target)
-        mod = tl.transform.LowerSharedTmem()(mod)
+        mod = tl.cuda.transform.LowerSharedTmem()(mod)
         mod = tl.transform.IfStmtBinding()(mod)
         mod = tl.transform.PlanAndUpdateBufferAllocationLocation()(mod)
 
@@ -167,7 +167,7 @@ def test_plan_update_keeps_barrier_init_with_tcgen05_no_tma():
         assert len(barrier_blocks) == 1
         assert "barrier_init" in barrier_blocks[0].annotations
 
-        mod = tl.transform.LowerSharedBarrier()(mod)
+        mod = tl.cuda.transform.LowerSharedBarrier()(mod)
 
     body = mod["main"].body
     assert len(_collect_init_barrier_calls(body)) == 1

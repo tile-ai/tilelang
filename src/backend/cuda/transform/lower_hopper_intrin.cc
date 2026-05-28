@@ -283,7 +283,8 @@ tvm::transform::Pass LowerHopperIntrin() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.LowerHopperIntrin", LowerHopperIntrin);
+  refl::GlobalDef().def("tl.cuda.transform.LowerHopperIntrin",
+                        LowerHopperIntrin);
 }
 #endif // (CUDA_MAJOR_VERSION >= 12)
 

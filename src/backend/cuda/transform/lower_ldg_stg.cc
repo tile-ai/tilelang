@@ -531,7 +531,7 @@ tvm::transform::Pass LowerLDGSTG() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.LowerLDGSTG", LowerLDGSTG);
+  refl::GlobalDef().def("tl.cuda.transform.LowerLDGSTG", LowerLDGSTG);
 }
 
 } // namespace tl

@@ -33,7 +33,7 @@
 #include <tvm/tirx/transform.h>
 
 #include "backend/cuda/op/copy.h"
-#include "backend/cuda/transform/multi_version_buffer_rewriter.h"
+#include "multi_version_buffer_rewriter.h"
 #include "op/builtin.h"
 #include "op/copy.h"
 #include "op/fill.h"
@@ -2769,10 +2769,11 @@ tvm::transform::Pass ProducerConsumerWarpSpecialized() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.ProducerConsumerWarpSpecialized",
+  refl::GlobalDef().def("tl.cuda.transform.ProducerConsumerWarpSpecialized",
                         ProducerConsumerWarpSpecialized);
-  refl::GlobalDef().def("tl.transform.ProducerConsumerWarpSpecializedTiled",
-                        ProducerConsumerWarpSpecialized);
+  refl::GlobalDef().def(
+      "tl.cuda.transform.ProducerConsumerWarpSpecializedTiled",
+      ProducerConsumerWarpSpecialized);
 }
 
 } // namespace tl

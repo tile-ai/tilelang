@@ -170,94 +170,6 @@ def LoopUnswitching():
     return _ffi_api.LoopUnswitching()  # type: ignore
 
 
-def ProducerConsumerWarpSpecialized():
-    """Producer-consumer warp specialization at the tile-op level.
-
-    This pass runs before LayoutInference and LowerTileOp. It rewrites
-    eligible pipelined tile-op loops into warp-specialized producer and
-    consumer branches with explicit barrier synchronization.
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    from tilelang.cuda import transform as cuda_transform
-
-    return cuda_transform.ProducerConsumerWarpSpecialized()
-
-
-def ProducerConsumerWarpSpecializedTiled():
-    """Compatibility alias for ``ProducerConsumerWarpSpecialized``.
-
-    The tiled tile-op implementation is now the canonical
-    ``ProducerConsumerWarpSpecialized`` pass.
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return ProducerConsumerWarpSpecialized()
-
-
-def AnnotateWarpGroupRegAlloc():
-    """Inject set_max_nreg calls into warp-specialized functions.
-
-    This pass analyzes the function to collect register hints from set_max_nreg
-    and no_set_max_nreg calls, then injects appropriate set_max_nreg calls into
-    producer and consumer branches of warp-specialized code.
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    from tilelang.cuda import transform as cuda_transform
-
-    return cuda_transform.AnnotateWarpGroupRegAlloc()
-
-
-def FuseMBarrierArriveExpectTx():
-    """Fuse simple expect_tx -> TMA issue -> arrive back into arrive_and_expect_tx."""
-    from tilelang.cuda import transform as cuda_transform
-
-    return cuda_transform.FuseMBarrierArriveExpectTx()
-
-
-def InjectFenceProxy():
-    """InjectFenceProxy
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    from tilelang.cuda import transform as cuda_transform
-
-    return cuda_transform.InjectFenceProxy()
-
-
-def InjectTcgen05Fence():
-    """Inject tcgen05.fence::before_thread_sync / after_thread_sync at
-    conservative TCGEN05/TMEM synchronization boundaries on Blackwell
-    (SM100+) targets.
-
-    The current pass wraps CTA-wide shared-memory syncs and also inserts
-    fences around linear mbarrier wait/use and use/arrive handoff patterns.
-    It is intentionally conservative and does not try to infer arbitrary
-    barrier protocols.
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    from tilelang.cuda import transform as cuda_transform
-
-    return cuda_transform.InjectTcgen05Fence()
-
-
 def LegalizeVectorizedLoop():
     """LegalizeLoopVectorize
 
@@ -408,20 +320,6 @@ def MergeSharedMemoryAllocations(enable_aggressive_merge: bool = False, align_by
     return _ffi_api.MergeSharedMemoryAllocations(enable_aggressive_merge, align_bytes, disable_reuse)  # type: ignore
 
 
-def MarkCudaSyncCalls(have_pdl: bool = False):
-    """MarkCudaSyncCalls"""
-    from tilelang.cuda import transform as cuda_transform
-
-    return cuda_transform.MarkCudaSyncCalls(have_pdl)
-
-
-def LowerSharedBarrier():
-    """LowerSharedBarrier"""
-    from tilelang.cuda import transform as cuda_transform
-
-    return cuda_transform.LowerSharedBarrier()
-
-
 def PlanAndUpdateBufferAllocationLocation():
     """Plan and update buffer allocation locations within PrimFuncs.
 
@@ -487,13 +385,6 @@ def LowerDeviceKernelLaunch():
     return _ffi_api.LowerDeviceKernelLaunch()  # type: ignore
 
 
-def LowerSharedTmem():
-    """LowerSharedTmem"""
-    from tilelang.cuda import transform as cuda_transform
-
-    return cuda_transform.LowerSharedTmem()
-
-
 def LayoutReducer():
     """
     Return a TVM transform pass that performs layout reduction/normalization.
@@ -522,39 +413,3 @@ def UnrollLoop():
         The result pass
     """
     return _ffi_api.UnrollLoop()  # type: ignore
-
-
-def LowerLDGSTG():
-    """Lower Ramp-based global memory load/store to ldg/stg intrinsics.
-
-    This pass transforms vectorized global memory loads and stores (using Ramp indices)
-    into explicit ldg32/64/128/256 and stg32/64/128/256 intrinsics for better codegen.
-
-    Key behaviors:
-    - Converts Ramp-based global BufferLoad to ldg intrinsics
-    - Converts Ramp-based global BufferStore to stg intrinsics
-    - Supports predicated loads (if_then_else with else=0)
-    - Supports predicated stores (if in then case)
-    - Skips loads in async scope (will be lowered to cp.async)
-    - Only enabled for CUDA targets
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    from tilelang.cuda import transform as cuda_transform
-
-    return cuda_transform.LowerLDGSTG()
-
-
-def LowerBlackwell2SM():
-    """Lower 2SM TCGEN5MMA and related on Blackwell target
-
-    Returns:
-        fpass : tvm.transform.Pass
-            The result pass
-    """
-    from tilelang.cuda import transform as cuda_transform
-
-    return cuda_transform.LowerBlackwell2SM()

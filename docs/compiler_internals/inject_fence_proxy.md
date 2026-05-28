@@ -40,7 +40,7 @@ from tvm import IRModule
 
 mod = IRModule({"main": prim_func})
 with tvm.transform.PassContext():
-    mod = tl.transform.InjectFenceProxy()(mod)
+    mod = tl.cuda.transform.InjectFenceProxy()(mod)
 ```
 
 ## End-to-End Example
@@ -75,7 +75,7 @@ def kernel():
         )
 ```
 
-After `tl.transform.InjectFenceProxy`:
+After `tl.cuda.transform.InjectFenceProxy`:
 
 ```python
 @T.prim_func

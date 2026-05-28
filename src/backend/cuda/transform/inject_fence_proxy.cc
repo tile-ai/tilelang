@@ -556,7 +556,7 @@ tvm::transform::Pass InjectFenceProxy() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.InjectFenceProxy", InjectFenceProxy);
+  refl::GlobalDef().def("tl.cuda.transform.InjectFenceProxy", InjectFenceProxy);
 }
 
 } // namespace tl

@@ -60,7 +60,8 @@ tvm::transform::Pass PersistThreadblock() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.PersistThreadblock", PersistThreadblock);
+  refl::GlobalDef().def("tl.cuda.transform.PersistThreadblock",
+                        PersistThreadblock);
 }
 
 } // namespace tl

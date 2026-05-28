@@ -18,8 +18,8 @@
 #include <utility>
 #include <vector>
 
-#include "backend/cuda/transform/multi_version_buffer_rewriter.h"
 #include "layout/layout.h"
+#include "multi_version_buffer_rewriter.h"
 #include "op/builtin.h"
 #include "op/operator.h"
 #include "op/region.h"

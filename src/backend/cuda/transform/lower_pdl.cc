@@ -84,7 +84,7 @@ tvm::transform::Pass MarkCudaSyncCallsPass(bool support_pdl) {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.MarkCudaSyncCalls",
+  refl::GlobalDef().def("tl.cuda.transform.MarkCudaSyncCalls",
                         MarkCudaSyncCallsPass);
 }
 

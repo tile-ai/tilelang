@@ -1,6 +1,6 @@
 """CUDA-specific transformation frontends."""
 
-from tilelang.transform import _ffi_api
+from . import _ffi_api
 
 
 def ProducerConsumerWarpSpecialized():

@@ -311,7 +311,8 @@ tvm::transform::Pass InjectTcgen05Fence() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.InjectTcgen05Fence", InjectTcgen05Fence);
+  refl::GlobalDef().def("tl.cuda.transform.InjectTcgen05Fence",
+                        InjectTcgen05Fence);
 }
 
 } // namespace tl

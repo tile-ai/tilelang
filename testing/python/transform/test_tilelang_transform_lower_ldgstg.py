@@ -25,7 +25,7 @@ def _apply_passes(mod, enable_non_predicated=False, enable_predicated=False):
             PassConfigKey.TL_ENABLE_LOWER_LDGSTG_PREDICATED: enable_predicated,
         }
     ):
-        mod = tl.transform.LowerLDGSTG()(mod)
+        mod = tl.cuda.transform.LowerLDGSTG()(mod)
     return mod
 
 
@@ -278,7 +278,7 @@ def test_non_cuda_target_skip():
     mod = tl.transform.FlattenBuffer()(mod)
     mod = tl.transform.VectorizeLoop()(mod)
     with tvm.transform.PassContext(config={PassConfigKey.TL_ENABLE_LOWER_LDGSTG: True}):
-        mod = tl.transform.LowerLDGSTG()(mod)
+        mod = tl.cuda.transform.LowerLDGSTG()(mod)
     print("=== test_non_cuda_target_skip ===")
     print(mod)
     # The load should NOT be lowered to ldg because target is not CUDA

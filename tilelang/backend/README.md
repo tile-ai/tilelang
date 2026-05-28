@@ -76,9 +76,9 @@ for that backend.
 ```text
 tilelang/cuda/
   pipeline.py
+  transform.py
   op/
   intrinsics/
-  transform/
 
 tilelang/rocm/
   pipeline.py
@@ -91,9 +91,9 @@ tilelang/cpu/
 
 tilelang/metal/
   pipeline.py
+  transform.py
   op/
   intrinsics/
-  transform/
 ```
 
 The `pipeline.py` file should expose one complete backend pass sequence after
@@ -106,7 +106,7 @@ The `op/` and `intrinsics/` folders contain Python implementation and helper
 code used by tile-op lowering. For example, CUDA owns MMA/WGMMA/TCGEN05
 intrinsic emitters, while ROCm owns MFMA/WMMA emitters. Backend-local
 transform passes, such as Metal's simdgroup lowering and host-context marking,
-should live under that backend's `transform/` folder.
+should live in that backend's `transform.py` module.
 
 ## Native Backend Layout
 

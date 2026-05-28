@@ -148,7 +148,8 @@ tvm::transform::Pass LowerBlackwell2SM() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.LowerBlackwell2SM", LowerBlackwell2SM);
+  refl::GlobalDef().def("tl.cuda.transform.LowerBlackwell2SM",
+                        LowerBlackwell2SM);
 }
 
 } // namespace tl

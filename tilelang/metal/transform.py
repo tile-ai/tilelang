@@ -1,19 +1,51 @@
-"""Rewrite local.fragment → metal.simdgroup for GEMM accumulator buffers on Metal.
-
-This pass runs after pipelining and before LayoutInference, so that
-simdgroup matrices (which are hardware-opaque and have no explicit
-thread-level layout) are never seen by LayoutInference.
-"""
+"""Metal-specific transformation frontends."""
 
 from __future__ import annotations
 
 from functools import lru_cache
 
-from tvm import tirx as tir
 from tvm import IRModule
+from tvm import tirx as tir
 from tvm.ir import Op, PointerType
-from tvm.tirx import SBlock
+from tvm.tirx import AttrStmt, Evaluate, PyStmtExprMutator, SBlock, functor
 from tvm.tirx.transform import prim_func_pass
+
+
+_tvm_call_packed_lowered = Op.get("tirx.tvm_call_packed_lowered")
+
+
+@functor.mutator
+class _MarkHostMetalContextMutator(PyStmtExprMutator):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.is_in_compute_scope = False
+
+    def visit_attr_stmt_(self, stmt):
+        switch = stmt.attr_key == "compute_scope"
+        old_value = False
+        if switch:
+            assert not self.is_in_compute_scope
+            old_value, self.is_in_compute_scope = self.is_in_compute_scope, True
+        s = self.visit_stmt(stmt.body)
+        if switch:
+            self.is_in_compute_scope = old_value
+        return s
+
+    def visit_evaluate_(self, op: Evaluate):
+        if self.is_in_compute_scope and isinstance(op.value, tir.Call) and op.value.op.same_as(_tvm_call_packed_lowered):
+            return AttrStmt(0, "metal_context", "", op)
+        return op
+
+
+def MarkHostMetalContext():
+    """Mark host-side Metal kernel calls for MPS synchronization."""
+
+    def pass_fn(func, mod, ctx):
+        mutator = _MarkHostMetalContextMutator()
+        new_body = mutator.visit_stmt(func.body)
+        return func.with_body(new_body)
+
+    return prim_func_pass(pass_fn, opt_level=0)
 
 
 @lru_cache(maxsize=1)
@@ -159,4 +191,14 @@ def _metal_fragment_to_simdgroup(func: tir.PrimFunc, mod: IRModule, ctx) -> tir.
     return func.with_body(new_body)
 
 
-MetalFragmentToSimdgroup = prim_func_pass(_metal_fragment_to_simdgroup, opt_level=0, name="tl.MetalFragmentToSimdgroup")
+MetalFragmentToSimdgroup = prim_func_pass(
+    _metal_fragment_to_simdgroup,
+    opt_level=0,
+    name="tl.MetalFragmentToSimdgroup",
+)
+
+
+__all__ = [
+    "MarkHostMetalContext",
+    "MetalFragmentToSimdgroup",
+]

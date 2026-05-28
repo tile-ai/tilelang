@@ -102,7 +102,8 @@ tvm::transform::Pass LowerL2Persistent() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.LowerL2Persistent", LowerL2Persistent);
+  refl::GlobalDef().def("tl.cuda.transform.LowerL2Persistent",
+                        LowerL2Persistent);
 }
 
 } // namespace tl
