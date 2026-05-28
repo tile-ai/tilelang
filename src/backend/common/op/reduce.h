@@ -247,6 +247,34 @@ inline std::optional<std::string> MakeCodegenReducer(const ReduceOpNode &op,
   return std::nullopt;
 }
 
+inline bool CanUsePackedRamp(const PrimExpr &index, const Var &var, int vsize,
+                             arith::Analyzer *analyzer) {
+  ICHECK_GT(vsize, 1);
+
+  PrimExpr vector_size = make_const(var.dtype(), vsize);
+  PrimExpr packed_var = var * vector_size;
+  PrimExpr ramp_base =
+      analyzer->Simplify(Substitute(index, {{var, packed_var}}));
+
+  PrimExpr index_mod = FloorMod(ramp_base, make_const(index.dtype(), vsize));
+  if (!analyzer->CanProveEqual(index_mod, make_zero(index.dtype()))) {
+    return false;
+  }
+
+  for (int lane = 1; lane < vsize; ++lane) {
+    PrimExpr lane_value = make_const(var.dtype(), lane);
+    PrimExpr lane_index =
+        analyzer->Simplify(Substitute(index, {{var, packed_var + lane_value}}));
+    PrimExpr expected =
+        analyzer->Simplify(ramp_base + make_const(index.dtype(), lane));
+    if (!analyzer->CanProveEqual(lane_index, expected)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 inline PrimExpr MakeUpdate(const ReduceOpNode &op, PrimExpr dst_val,
                            PrimExpr src_val) {
   if (op.type->isSum() || op.type->isAbsSum()) {
@@ -391,7 +419,10 @@ template <typename Impl> struct ReduceLowerer {
         if (vsize > 1 && !src_var_compressed.empty()) {
           auto *ext = src_var_compressed.back()->dom->extent.as<IntImmNode>();
           if (ext && ext->value >= vsize && ext->value % vsize == 0 &&
-              reduce::MakeCodegenReducer(op, vsize).has_value()) {
+              reduce::MakeCodegenReducer(op, vsize).has_value() &&
+              reduce::CanUsePackedRamp(src_indice_compressed.back(),
+                                       src_var_compressed.back()->var, vsize,
+                                       analyzer)) {
             can_pack = true;
             DataType vec_dtype = clear_buffer->dtype.with_lanes(vsize);
             clear_buffer_packed =
