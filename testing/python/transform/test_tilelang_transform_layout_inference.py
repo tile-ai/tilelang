@@ -149,5 +149,43 @@ def test_fragment_layout_replicates_active_partition_to_full_block():
         tl.transform.LayoutInference()(mod)
 
 
+def test_full_thread_partition_preferred_before_active_fallback():
+    n = tvm.te.var("n")
+    m = tvm.te.var("m")
+    d = 512
+    threads = 256
+    buf_m = 8
+    bm = 32
+    dtype = T.int8
+    index_dtype = T.int32
+
+    @T.prim_func
+    def main(
+        X: T.Tensor((n, d), dtype),
+        INDEX: T.Tensor((m,), index_dtype),
+        Y: T.Tensor((m, d), dtype),
+    ):
+        with T.Kernel(T.ceildiv(m, bm), threads=threads) as bx:
+            index = T.alloc_fragment((buf_m,), index_dtype)
+            values = T.alloc_fragment((buf_m, d), dtype)
+
+            for m_buf_i in T.serial(bm // buf_m):
+                for m_i in T.Parallel(buf_m):
+                    index[m_i] = INDEX[bx * bm + m_buf_i * buf_m + m_i]
+                for m_i, d_i in T.Parallel(buf_m, d):
+                    if index[m_i] >= 0 and index[m_i] < n:
+                        values[m_i, d_i] = X[index[m_i], d_i]
+                    else:
+                        values[m_i, d_i] = T.int8(0)
+                T.copy(values, Y[bx * bm + m_buf_i * buf_m : bx * bm + (m_buf_i + 1) * buf_m, 0:d])
+
+    with tvm.target.Target(auto_target):
+        artifact = tilelang.lower(main, target=auto_target, enable_device_compile=False)
+    kernel_source = str(artifact.kernel_source)
+    assert "signed char values[16]" in kernel_source
+    assert "signed char values[32]" not in kernel_source
+    assert "make_longlong4(" not in kernel_source
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
