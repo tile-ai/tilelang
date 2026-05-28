@@ -124,5 +124,4 @@ def test_static_ragged_copy_uses_full_block_predicate():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_loop_tail_split(64, 64, 32, 128, 8, T.float16)
+    tilelang.testing.main()
