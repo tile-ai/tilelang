@@ -126,9 +126,11 @@ private:
                           level);
     }
     auto loop_layout = par_op->GetLoopLayout();
-    Stmt lowered_loop = LowerParallelLoop(par_op->GetRoot(), loop_layout,
-                                          T.thread_var, analyzer, T.layout_map,
-                                          par_op->GetPredicate(T.thread_var));
+    Stmt lowered_loop = LowerParallelLoop(
+        par_op->GetRoot(), loop_layout, T.thread_var, analyzer, T.layout_map,
+        par_op->GetPredicate(T.thread_var),
+        /*parallel_loop=*/true,
+        /*should_vectorize=*/true, par_op->LoopLayoutRequiresPaddingGuard());
 
     auto inject_result =
         InjectPTXAsyncCopy(lowered_loop, /*enable_auto_async_copy=*/true,

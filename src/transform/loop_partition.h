@@ -29,8 +29,6 @@
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
 
-#include <cstdint>
-
 #include "../layout/layout.h"
 #include "../op/operator.h"
 
@@ -40,19 +38,14 @@ namespace tl {
 using namespace tirx;
 
 For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
-                  const Fragment &loop_layout);
+                  const Fragment &loop_layout,
+                  bool require_padding_guard = false);
 
 Fragment PlanLoopPartition(const For &op, size_t num_thread,
                            int vectorize_size);
 
-int64_t SelectActiveThreadExtent(const For &op, int64_t max_num_thread,
-                                 int vectorize_size, arith::Analyzer *analyzer,
-                                 bool require_full_thread_replication = false);
-
 Fragment PlanLoopPartition(const For &op, int vectorize_size,
-                           const Range &thread_range,
-                           arith::Analyzer *analyzer = nullptr,
-                           bool require_full_thread_replication = false);
+                           const Range &thread_range);
 
 For PragmaUnrollLoop(For stmt);
 
@@ -80,7 +73,8 @@ Stmt LowerParallelLoop(
     For loop, const Fragment &loop_layout, Var thread_var,
     arith::Analyzer *analyzer, const LayoutMap &layout_map = {},
     ffi::Optional<PrimExpr> predicate = ffi::Optional<PrimExpr>(),
-    bool parallel_loop = true, bool should_vectorize = true);
+    bool parallel_loop = true, bool should_vectorize = true,
+    bool require_padding_guard = false);
 
 } // namespace tl
 } // namespace tvm

@@ -100,91 +100,27 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
         # tvm.ir.assert_structural_equal(mod, ref_mod)
 
 
-def test_copy_layout_uses_active_threads_for_ragged_thread_count():
-    block_M = 256
-    block_N = 128
-    threads = 384
-    dtype = T.bfloat16
+def test_static_ragged_copy_uses_full_block_predicate():
+    n = 514
+    threads = 128
 
     @T.prim_func
     def main(
-        Bias: T.Tensor((block_M, block_N), dtype),
-        C: T.Tensor((block_M, block_N), dtype),
+        A: T.Tensor((n,), T.float32),
+        B: T.Tensor((n,), T.float32),
     ):
-        with T.Kernel(1, 1, threads=threads) as (bx, by):
-            Bias_shared = T.alloc_shared((block_M, block_N), dtype)
-            T.copy(Bias[0:block_M, 0:block_N], Bias_shared)
-            T.copy(Bias_shared, C[0:block_M, 0:block_N])
+        with T.Kernel(1, threads=threads):
+            T.copy(A, B)
 
     with tvm.target.Target(auto_target):
-        mod = tvm.IRModule({"main": main})
-        mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
-        tl.transform.LayoutInference()(mod)
+        artifact = tl.lower(main, target=auto_target, enable_device_compile=False)
 
-
-def test_fragment_layout_replicates_active_partition_to_full_block():
-    threads = 96
-    hc_mult3 = 24
-    dtype = T.float32
-
-    @T.prim_func
-    def main(
-        Gemm: T.Tensor((hc_mult3,), dtype),
-        Out: T.Tensor((hc_mult3,), dtype),
-    ):
-        with T.Kernel(1, threads=threads) as _:
-            rms = T.alloc_fragment(1, dtype)
-            mixes = T.alloc_fragment(hc_mult3, dtype)
-            T.clear(mixes)
-            rms[0] = 0
-            for j in T.Parallel(hc_mult3):
-                mixes[j] = Gemm[j] + rms[0]
-            mixes_shared = T.alloc_shared(hc_mult3, dtype)
-            T.copy(mixes, mixes_shared)
-            T.copy(mixes_shared, Out[0:hc_mult3])
-
-    with tvm.target.Target(auto_target):
-        mod = tvm.IRModule({"main": main})
-        mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
-        tl.transform.LayoutInference()(mod)
-
-
-def test_full_thread_partition_preferred_before_active_fallback():
-    n = tvm.te.var("n")
-    m = tvm.te.var("m")
-    d = 512
-    threads = 256
-    buf_m = 8
-    bm = 32
-    dtype = T.int8
-    index_dtype = T.int32
-
-    @T.prim_func
-    def main(
-        X: T.Tensor((n, d), dtype),
-        INDEX: T.Tensor((m,), index_dtype),
-        Y: T.Tensor((m, d), dtype),
-    ):
-        with T.Kernel(T.ceildiv(m, bm), threads=threads) as bx:
-            index = T.alloc_fragment((buf_m,), index_dtype)
-            values = T.alloc_fragment((buf_m, d), dtype)
-
-            for m_buf_i in T.serial(bm // buf_m):
-                for m_i in T.Parallel(buf_m):
-                    index[m_i] = INDEX[bx * bm + m_buf_i * buf_m + m_i]
-                for m_i, d_i in T.Parallel(buf_m, d):
-                    if index[m_i] >= 0 and index[m_i] < n:
-                        values[m_i, d_i] = X[index[m_i], d_i]
-                    else:
-                        values[m_i, d_i] = T.int8(0)
-                T.copy(values, Y[bx * bm + m_buf_i * buf_m : bx * bm + (m_buf_i + 1) * buf_m, 0:d])
-
-    with tvm.target.Target(auto_target):
-        artifact = tilelang.lower(main, target=auto_target, enable_device_compile=False)
     kernel_source = str(artifact.kernel_source)
-    assert "signed char values[16]" in kernel_source
-    assert "signed char values[32]" not in kernel_source
-    assert "make_longlong4(" not in kernel_source
+    assert "__launch_bounds__(128, 1)" in kernel_source
+    assert "for (int i = 0; i < 3; ++i)" in kernel_source
+    assert "threadIdx.x)) < 257" in kernel_source
+    assert "float2" in kernel_source
+    assert "threadIdx.x) < 1" not in kernel_source
 
 
 if __name__ == "__main__":

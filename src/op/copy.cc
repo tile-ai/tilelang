@@ -77,7 +77,9 @@ Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &T,
   auto loop_layout = par_op->GetLoopLayout();
   return LowerParallelLoop(par_op->GetRoot(), loop_layout, T.thread_var,
                            analyzer, T.layout_map,
-                           par_op->GetPredicate(T.thread_var));
+                           par_op->GetPredicate(T.thread_var),
+                           /*parallel_loop=*/true, /*should_vectorize=*/true,
+                           par_op->LoopLayoutRequiresPaddingGuard());
 }
 
 namespace {
@@ -226,7 +228,9 @@ Stmt LowerIm2ColSIMT(const Im2ColOpNode &op, const LowerArgs &T,
   auto loop_layout = par_op->GetLoopLayout();
   return LowerParallelLoop(par_op->GetRoot(), loop_layout, T.thread_var,
                            analyzer, T.layout_map,
-                           par_op->GetPredicate(T.thread_var));
+                           par_op->GetPredicate(T.thread_var),
+                           /*parallel_loop=*/true, /*should_vectorize=*/true,
+                           par_op->LoopLayoutRequiresPaddingGuard());
 }
 
 bool RegisterDefaultIm2Col() {

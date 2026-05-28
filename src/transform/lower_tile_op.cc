@@ -1155,7 +1155,7 @@ private:
 
     Range thread_bounds = CurrentThreadBounds();
 
-    // Convert Bind values to Map<Var, PrimExpr> for LowerArgs
+    // Convert bind_var_to_expr_ to Map<Var, PrimExpr> for LowerArgs
     Map<Var, PrimExpr> bind_var_to_expr;
     for (const auto &[var, expr] : bind_var_to_expr_) {
       bind_var_to_expr.Set(var, expr);

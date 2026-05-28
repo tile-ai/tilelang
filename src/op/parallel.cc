@@ -261,6 +261,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
                                       InferLevel level) const {
   if (loop_layout_inferred_)
     return {};
+  loop_layout_requires_padding_guard_ = false;
 
   // Expand Bind values to find fragment buffer accesses
   if (!T.bind_var_to_expr.empty()) {
@@ -418,6 +419,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     // over-replicate) 2) PlanLoopPartition (often smaller replication)
     Fragment candidate_from_buffer;
     Fragment candidate_from_plan;
+    bool selected_plan_candidate = false;
 
     if (read_source_buffer.defined() && allow_layout_propgate) {
       candidate_from_buffer =
@@ -435,20 +437,26 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
           ChooseBestCandidate(candidate_from_buffer, candidate_from_plan, T);
     } else if (candidate_from_plan.defined()) {
       loop_layout_ = candidate_from_plan;
+      selected_plan_candidate = true;
       DLOG(INFO) << "[FreeInfer] only PlanLoopPartition available, choose it.";
     } else if (candidate_from_buffer.defined()) {
       loop_layout_ = candidate_from_buffer;
       DLOG(INFO)
           << "[FreeInfer] only compute_from_buffer available, choose it.";
     }
+    loop_layout_requires_padding_guard_ =
+        selected_plan_candidate && indice_map_.empty();
   } else if (!loop_layout_.defined()) {
     // In non-free mode without a source buffer, if we don't have any layout
     // yet (e.g., no annotation), we have nothing to infer here.
     return {};
   }
 
-  // check loop_layout_ is injective
-  auto injective_res = loop_layout_->DetectInjective();
+  // Non-fragment SIMT loops may deliberately over-cover a ragged iteration
+  // space; PartitionLoop emits guards for the padded points. Fragment/reducer
+  // loops stay strict because padding would change per-thread ownership.
+  auto injective_res =
+      loop_layout_->DetectInjective(loop_layout_requires_padding_guard_);
   if (!injective_res->errors.empty()) {
     std::ostringstream oss;
     oss << "Loop layout is not injective: " << loop_layout_->DebugOutput()
@@ -672,51 +680,26 @@ Fragment ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &T) const {
   // As the pass will do post processing to the layout
   auto maybe_remapped_root_ =
       IfBufferRemapLoopGenerator::run(root_, T.buffer_remap, T.layout_map);
-  int initial_vector_size =
+  int vector_size =
       GetVectorizeSize(maybe_remapped_root_, T.analyzer, T.layout_map);
-  DLOG(INFO) << "[PlanLoopPartition] vector_size = " << initial_vector_size
-             << '\n';
+  DLOG(INFO) << "[PlanLoopPartition] vector_size = " << vector_size << '\n';
 
   PrimExpr loop_total_size = 1;
   for (Stmt l = root_; l.as<For>().has_value(); l = l.as<For>().value()->body)
     loop_total_size = loop_total_size * l.as<For>().value()->extent;
   DLOG(INFO) << "[PlanLoopPartition] loop_total_size = " << loop_total_size
              << '\n';
-  const int64_t *thread_extent = as_const_int(T.thread_bounds->extent);
-  ICHECK(thread_extent != nullptr)
-      << "PlanLoopPartition requires constant thread extent, got "
-      << T.thread_bounds;
-  bool require_full_thread_replication = !indice_map_.empty();
-  auto has_full_thread_partition = [&](int candidate_vector_size) {
-    PrimExpr partition_width =
-        T.thread_bounds->extent *
-        make_const(T.thread_bounds->extent.dtype(), candidate_vector_size);
-    return analyzer_.CanProve(floormod(loop_total_size, partition_width) == 0);
-  };
-  auto has_active_thread_partition = [&](int candidate_vector_size) {
-    return SelectActiveThreadExtent(root_, *thread_extent,
-                                    candidate_vector_size, &analyzer_,
-                                    require_full_thread_replication) > 0;
-  };
-
-  // Preserve the original layout strategy when possible: lower the vector
-  // width first so all block threads participate.  Active-thread partitioning
-  // is a fallback for genuinely ragged thread counts, because fragment layouts
-  // may replicate active partitions across the full block and duplicate work.
-  int vector_size = initial_vector_size;
-  bool use_active_thread_fallback = false;
-  while (!has_full_thread_partition(vector_size) && vector_size > 1)
-    vector_size /= 2;
-  if (!has_full_thread_partition(vector_size)) {
-    use_active_thread_fallback = true;
-    vector_size = initial_vector_size;
-    while (!has_active_thread_partition(vector_size) && vector_size > 1)
+  bool has_fragment_access = !indice_map_.empty();
+  if (has_fragment_access) {
+    while (
+        !analyzer_.CanProve(floormod(loop_total_size, T.thread_bounds->extent *
+                                                          vector_size) == 0) &&
+        vector_size > 1) {
       vector_size /= 2;
+    }
   }
   DLOG(INFO) << "[PlanLoopPartition] after adjust: vector_size = "
-             << vector_size
-             << ", fallback_active_threads=" << use_active_thread_fallback
-             << '\n';
+             << vector_size << '\n';
 
   // Check if coalesced_width is defined
   if (auto coalesced_width = root_->annotations.Get(attr::kCoalescedWidth)) {
@@ -732,23 +715,10 @@ Fragment ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &T) const {
       LOG(FATAL) << "coalesced_width should be an IntImmNode.";
     }
   }
-  if (!use_active_thread_fallback && !has_full_thread_partition(vector_size)) {
-    use_active_thread_fallback = true;
-  }
-  ICHECK(use_active_thread_fallback ? has_active_thread_partition(vector_size)
-                                    : has_full_thread_partition(vector_size))
-      << "Cannot find "
-      << (use_active_thread_fallback ? "an active" : "a full-block")
-      << " thread extent <= " << *thread_extent
-      << " that evenly partitions loop_total_size=" << loop_total_size
-      << " with vector_size=" << vector_size;
   DLOG(INFO) << "[PlanLoopPartition] root_ = " << root_
              << " ############# vector_size = " << vector_size
-             << ", thread_bounds = " << T.thread_bounds
-             << ", fallback_active_threads=" << use_active_thread_fallback
-             << '\n';
-  auto plan = PlanLoopPartition(root_, vector_size, T.thread_bounds, &analyzer_,
-                                require_full_thread_replication);
+             << ", thread_bounds = " << T.thread_bounds << '\n';
+  auto plan = PlanLoopPartition(root_, vector_size, T.thread_bounds);
   DLOG(INFO) << "[PlanLoopPartition] candidate = " << plan->DebugOutput()
              << '\n';
   return plan;

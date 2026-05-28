@@ -812,7 +812,7 @@ private:
   }
 
   // Helper: recursively collect fragment buffers from an expression,
-  // following Bind values chain.
+  // following Bind value chains.
   void CollectFragmentBuffersFromExpr(const PrimExpr &expr) {
     PostOrderVisit(expr, [this](const ObjectRef &node) {
       if (auto bl = node.as<BufferLoadNode>()) {
