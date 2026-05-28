@@ -101,6 +101,51 @@ private:
 // The Visitor is used to check whether var is used as write index in a local
 // memory If a loop var is used as indices to a local memory, it must be
 // unrolled so the local memory access can be turned into register access.
+class UnrolledBodyDefFreshener : public StmtExprMutator {
+public:
+  PrimExpr VisitExpr_(const VarNode *op) final {
+    Var var = GetRef<Var>(op);
+    auto it = var_remap_.find(var);
+    if (it != var_remap_.end()) {
+      return (*it).second;
+    }
+    return var;
+  }
+
+  Buffer VisitBufferDef(const Buffer &buffer, bool alloc_data) final {
+    Var data;
+    if (alloc_data) {
+      data = FreshVar(buffer->data);
+    } else {
+      PrimExpr remapped_data = VisitExpr(buffer->data);
+      ICHECK(remapped_data.as<VarNode>())
+          << "Buffer data must remain a Var after freshening definitions";
+      data = Downcast<Var>(remapped_data);
+    }
+
+    auto visit_expr = [this](const PrimExpr &expr) {
+      return this->VisitExpr(expr);
+    };
+    Buffer new_buffer = buffer;
+    auto writer = new_buffer.CopyOnWrite();
+    writer->data = std::move(data);
+    writer->shape = buffer->shape.Map(visit_expr);
+    writer->strides = buffer->strides.Map(visit_expr);
+    writer->elem_offset = visit_expr(buffer->elem_offset);
+    buffer_remap_.Set(buffer, new_buffer);
+    return new_buffer;
+  }
+
+private:
+  Var FreshVar(const Var &var) {
+    Var new_var = Var(make_object<VarNode>(*var.get()));
+    var_remap_.Set(var, new_var);
+    return new_var;
+  }
+
+  Map<Var, Var> var_remap_;
+};
+
 class LoopUnroller : public StmtExprMutator {
 public:
   explicit LoopUnroller(int auto_max_step, int auto_max_depth,
@@ -244,6 +289,7 @@ public:
     for (int i = 0; i < value; ++i) {
       vmap.Set(op->loop_var, op->min + make_const(op->loop_var.dtype(), i));
       Stmt step = Substitute(body, vmap);
+      step = UnrolledBodyDefFreshener()(std::move(step));
       unrolled.push_back(step);
     }
     return SeqStmt::Flatten(unrolled);
