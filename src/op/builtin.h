@@ -1025,6 +1025,14 @@ TVM_DLL const Op &tcgen05_ld();
 TVM_DLL const Op &tcgen05_ld_x16();
 
 /*!
+ * \brief Raw TCGEN05 tensor-memory load without an implicit TMEM load fence.
+ *
+ * Intended for hand-scheduled DSL code that issues several TMEM loads and
+ * then calls tcgen05_fence_tmem_load() once, matching FA4/avo softmax.
+ */
+TVM_DLL const Op &tcgen05_ld_nofence();
+
+/*!
  * \brief tilelang intrinsic for lowered TCGEN05 tensor-memory store.
  *
  *  Internal lowering op used by LowerTmemCopy to represent
@@ -1064,6 +1072,15 @@ TVM_DLL const Op &tcgen05_wait_st();
  * Emits \c tl::fence_view_async_tmem_load().
  */
 TVM_DLL const Op &tcgen05_fence_tmem_load();
+
+/*!
+ * \brief Raw fence to wait for async TMEM store visibility.
+ *
+ * Unlike \c tcgen05_wait_st(), this op is intentionally not classified as a
+ * TCGEN05 sync boundary by InjectTcgen05Fence. It is for hand-scheduled paths
+ * that will immediately signal a warp-local mbarrier, matching FA4 softmax.
+ */
+TVM_DLL const Op &tcgen05_fence_tmem_store();
 
 /*!
  * \brief Per-warp O correction using avo-style x16 ld/mul/st sequence.
@@ -1131,6 +1148,28 @@ TVM_DLL const Op &tcgen05_exp2_poly_2();
  * softmax_scale_log2.
  */
 TVM_DLL const Op &tcgen05_softmax_rescale_update();
+
+/*!
+ * \brief Pack two FP32 values through BF16 conversion into one B32 word.
+ *
+ * Args: a, b. Returns uint32. Used by DSL softmax P TMEM stores.
+ */
+TVM_DLL const Op &pack_bf16_pair();
+
+/*!
+ * \brief Store four packed B32 words into TMEM with
+ * tcgen05.st.sync.aligned.32x32b.x4.b32.
+ *
+ * Args: tmem_base, offset, v0, v1, v2, v3.
+ */
+TVM_DLL const Op &tcgen05_st_32x32b_x4();
+
+/*!
+ * \brief FA4 softmax inner 8-element exp2/BF16-pack/TMEM-store primitive.
+ *
+ * Args: p_tmem_base, offset, sv_ptr, psa0, psa1, psa2, psa3, elem_base.
+ */
+TVM_DLL const Op &tcgen05_softmax_store_8();
 
 /*!
  * \brief Avo-style one-iteration S->P online softmax for FA4 1SM attention.

@@ -50,6 +50,16 @@ def _mbar_to_buffer_load(mbar: BarrierType) -> BufferLoad:
         raise TypeError(f"mbarrier must be an tir.BufferLoad or a tir.Buffer, but got {type(mbar)}")
 
 
+def mbarrier_at(mbar: BarrierType, index: PrimExpr | int) -> BufferLoad:
+    """Return a dynamic mbarrier element as a BufferLoad."""
+    if isinstance(mbar, tir.BufferLoad):
+        return tir.BufferLoad(mbar.buffer, [index])
+    if isinstance(mbar, tir.Buffer):
+        assert len(mbar.shape) == 1, f"mbarrier must be a 1D buffer, but got {mbar.shape}"
+        return tir.BufferLoad(mbar, [index])
+    raise TypeError(f"mbarrier must be an tir.BufferLoad or a tir.Buffer, but got {type(mbar)}")
+
+
 def __ldg(load_or_buf: BufferLoad | tir.Buffer, index: PrimExpr | int | None = None) -> PrimExpr:
     """Explicitly load via CUDA read-only data cache.
 
@@ -1267,6 +1277,11 @@ def tcgen05_fence_tmem_load():
     return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_fence_tmem_load"))
 
 
+def tcgen05_fence_tmem_store():
+    """Wait for pending asynchronous TMEM stores to become visible."""
+    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_fence_tmem_store"))
+
+
 def _as_bool_imm(value: bool):
     return tir.const(bool(value), "bool")
 
@@ -1328,6 +1343,31 @@ def tcgen05_ld_x16(
     return tir.call_intrin(
         "void",
         tir.op.Op.get("tl.tcgen05_ld_x16"),
+        tir.IntImm("int32", int(inst_bits)),
+        tir.IntImm("int32", int(chunks)),
+        _as_bool_imm(pack16),
+        tmem_start_col,
+        col_offset,
+        dst_ptr,
+    )
+
+
+def tcgen05_ld_nofence(
+    inst_bits: int,
+    chunks: int,
+    pack16: bool,
+    tmem_start_col,
+    col_offset,
+    dst_ptr,
+):
+    """Raw TMEM load without an implicit `fence_view_async_tmem_load`.
+
+    This is intended for DSL code that issues several `tcgen05` TMEM loads and
+    then calls `T.tcgen05_fence_tmem_load()` once, matching FA4 softmax.
+    """
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_ld_nofence"),
         tir.IntImm("int32", int(inst_bits)),
         tir.IntImm("int32", int(chunks)),
         _as_bool_imm(pack16),
@@ -1523,6 +1563,45 @@ def tcgen05_softmax_rescale_update(scale_out, rmax_state, rsum_state, nm, softma
         rsum_state,
         nm,
         softmax_scale_log2,
+    )
+
+
+def pack_bf16_pair(a, b):
+    """Pack two FP32 values after BF16 conversion into one uint32 word."""
+    return tir.call_intrin("uint32", tir.op.Op.get("tl.pack_bf16_pair"), a, b)
+
+
+def tcgen05_st_32x32b_x4(tmem_base, offset, v0, v1, v2, v3):
+    """Store four packed uint32 words to TMEM with `tcgen05.st ... x4.b32`."""
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_st_32x32b_x4"),
+        tmem_base,
+        offset,
+        v0,
+        v1,
+        v2,
+        v3,
+    )
+
+
+def tcgen05_softmax_store_8(p_tmem_base, offset, sv_ptr, psa0, psa1, psa2, psa3, elem_base):
+    """Store one 8-element FA4 softmax micro-tile to P TMEM.
+
+    This keeps the scheduling-sensitive exp2/poly/BF16-pack/store sequence in a
+    small template while the surrounding online-softmax loop remains DSL.
+    """
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_softmax_store_8"),
+        p_tmem_base,
+        offset,
+        sv_ptr,
+        psa0,
+        psa1,
+        psa2,
+        psa3,
+        elem_base,
     )
 
 

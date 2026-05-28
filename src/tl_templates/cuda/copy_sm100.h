@@ -606,6 +606,49 @@ tcgen05_softmax_128x128(uint32_t S_tmem_addr, uint32_t P_tmem_addr,
   }
 }
 
+__device__ __forceinline__ void
+tcgen05_softmax_store_8(uint32_t P_tmem_addr, float const *sv,
+                        float &psa0, float &psa1, float &psa2, float &psa3,
+                        int elem_base) {
+  constexpr int kBlockN = 128;
+  constexpr int kEx2EmuFreq = 10;
+  constexpr int kEx2EmuRes = 4;
+  constexpr int kEx2EmuStartFrg = 1;
+  constexpr int kEx2FragSize = 32;
+
+  bfloat16_t h[8];
+  #pragma unroll
+  for (int i = 0; i < 8; i += 2) {
+    int elem = elem_base + i;
+    float p0, p1;
+    int frag = elem / kEx2FragSize;
+    int k_in_frag = elem % kEx2FragSize;
+    if (kEx2EmuFreq > 0 && frag >= kEx2EmuStartFrg &&
+        frag < (kBlockN / kEx2FragSize - 1) &&
+        (k_in_frag % kEx2EmuFreq) >= (kEx2EmuFreq - kEx2EmuRes)) {
+      tl::tcgen05_exp2_poly_2(p0, p1, sv[i], sv[i + 1]);
+    } else {
+      p0 = tl::tcgen05_exp2f_approx(sv[i]);
+      p1 = tl::tcgen05_exp2f_approx(sv[i + 1]);
+    }
+    if (i == 0) {
+      psa0 += p0 + p1;
+    } else if (i == 2) {
+      psa1 += p0 + p1;
+    } else if (i == 4) {
+      psa2 += p0 + p1;
+    } else {
+      psa3 += p0 + p1;
+    }
+    h[i] = bfloat16_t(p0);
+    h[i + 1] = bfloat16_t(p1);
+  }
+  tl::tcgen05_st_32x32b_x4(P_tmem_addr, *reinterpret_cast<uint32_t *>(&h[0]),
+                           *reinterpret_cast<uint32_t *>(&h[2]),
+                           *reinterpret_cast<uint32_t *>(&h[4]),
+                           *reinterpret_cast<uint32_t *>(&h[6]));
+}
+
 // Avo-shaped full softmax warp loop.  Unlike tcgen05_softmax_128x128, this
 // keeps rmax/rsum in registers for the whole KV loop, matching avo's
 // softmax_warp_fn and avoiding per-iteration pointer state traffic.

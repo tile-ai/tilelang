@@ -194,6 +194,8 @@ private:
     DataType dtype;
     int64_t size;
     bool outline_persistent{false};
+    bool is_scalar_var{false};
+    PrimExpr init;
     // Buffer variable handle so we can check which branches touch this alloc
     // during outlining. Without this we conservatively re-declare every kernel-
     // scope local in every outlined fn, forcing ptxas to keep dead `= {}`
@@ -203,15 +205,21 @@ private:
     const VarNode *buffer_var{nullptr};
   };
   std::vector<LocalAllocInfo> local_allocs_;
-  // Barrier variable names declared as __shared__ (e.g., "mbar_s0")
-  std::vector<std::string> barrier_var_names_;
-  // TMEM handle variable names declared as __shared__ (e.g., "S0_tmem")
-  std::vector<std::string> tmem_var_names_;
+  struct OutlinedStateInfo {
+    std::string var_name;
+    std::string type_str;
+    const VarNode *buffer_var{nullptr};
+  };
+  // Barrier variables declared as __shared__ (e.g., "mbar_s0")
+  std::vector<OutlinedStateInfo> barrier_var_infos_;
+  // TMEM handle variables declared as __shared__ (e.g., "S0_tmem")
+  std::vector<OutlinedStateInfo> tmem_var_infos_;
   // Kernel function parameters (name, type_string) for device fn forwarding
   struct KernelParamInfo {
     std::string var_name;
     std::string type_str;  // e.g. "const CUtensorMap"
     bool is_grid_constant{false};
+    const VarNode *param_var{nullptr};
   };
   std::vector<KernelParamInfo> kernel_param_infos_;
   std::unordered_set<const VarNode *> outline_persistent_vars_;

@@ -1124,6 +1124,125 @@ def attention_kernel_1sm(
         # The mma -> correction handshake uses an avo-style PV commit barrier:
         # the MMA WG commits once after both O0/O1 PV MMAs, and correction waits
         # on that single completion before reading O TMEM.
+        @T.macro
+        def softmax_warp_dsl(
+            S_tmem: T.Buffer,
+            P_tmem: T.Buffer,
+            scores_scale_shared: T.SharedBuffer([2, kq2_block_M], accum_dtype),
+            logsum_shared: T.SharedBuffer([kq2_block_M], accum_dtype),
+            mbar_s: T.Buffer,
+            mbar_scale: T.Buffer,
+            mbar_p2: T.Buffer,
+            mbar_p: T.Buffer,
+            loop_extent: T.int32,
+            q_row_base: T.int32,
+            warp_group_offset: T.int32,
+            tid_arg: T.int32,
+        ):
+            row = tid_arg - warp_group_offset
+            warp_row_base = (((row >> 5) & 3) * 32) << 16
+            sv = T.alloc_local((128,), accum_dtype)
+            psa = T.alloc_local((4,), accum_dtype)
+            rmax_local = T.alloc_var(accum_dtype, -T.infinity(accum_dtype))
+            rsum_local = T.alloc_var(accum_dtype, 0.0)
+            nm = T.alloc_var(accum_dtype)
+            rs = T.alloc_var(accum_dtype)
+            neg_max_scaled = T.alloc_var(accum_dtype)
+            m0 = T.alloc_var(accum_dtype)
+            m1 = T.alloc_var(accum_dtype)
+            m2 = T.alloc_var(accum_dtype)
+
+            for k_soft in T.unroll(loop_extent, explicit=False, unroll_factor=1):
+                phase = k_soft & 1
+                kv_col_base = k_soft * block_N
+                T.mbarrier_wait_parity(mbar_s, phase)
+                T.tcgen05_after_thread_sync()
+
+                nm = rmax_local
+                for cc in T.unroll(0, 128, 16):
+                    T.tcgen05_ld_nofence(
+                        32,
+                        16,
+                        False,
+                        S_tmem[0, 0],
+                        warp_row_base + cc,
+                        T.access_ptr(sv[cc], "w", 16),
+                    )
+                T.tcgen05_fence_tmem_load()
+
+                if is_causal:
+                    for i in T.unroll(128):
+                        sv[i] = T.if_then_else(
+                            (kv_col_base + i < seq_len) & (kv_col_base + i <= q_row_base + row),
+                            sv[i],
+                            -T.infinity(accum_dtype),
+                        )
+                else:
+                    remaining = seq_len - kv_col_base
+                    if remaining < block_N:
+                        for i in T.unroll(128):
+                            if i >= remaining:
+                                sv[i] = -T.infinity(accum_dtype)
+
+                m0 = T.max3(nm, sv[0], sv[1])
+                m1 = T.max3(sv[2], sv[3], sv[4])
+                m2 = T.max3(sv[5], sv[6], sv[7])
+                for i in T.unroll(8, 128, 8):
+                    m0 = T.max3(m0, sv[i + 0], sv[i + 1])
+                    m1 = T.max3(m1, sv[i + 2], sv[i + 3])
+                    m2 = T.max3(m2, sv[i + 4], sv[i + 5])
+                    nm = T.max3(nm, sv[i + 6], sv[i + 7])
+                nm = T.max3(T.fmax2_ftz(m0, m1), m2, nm)
+
+                T.tcgen05_softmax_rescale_update(rs, rmax_local, rsum_local, nm, scale)
+                scores_scale_shared[phase, row] = rs
+                T.sync_warp()
+                T.mbarrier_arrive(T.mbarrier_at(mbar_scale, phase), lane0=True)
+
+                neg_max_scaled = -(rmax_local * scale)
+                for cc in T.unroll(0, 128, 16):
+                    for i in T.unroll(0, 16, 2):
+                        T.tcgen05_fma_f32x2(
+                            sv[cc + i],
+                            sv[cc + i + 1],
+                            sv[cc + i],
+                            sv[cc + i + 1],
+                            scale,
+                            scale,
+                            neg_max_scaled,
+                            neg_max_scaled,
+                        )
+
+                for i in T.unroll(4):
+                    psa[i] = 0.0
+
+                for chunk in T.unroll(8):
+                    cc = 112 - chunk * 16
+                    for g_iter in T.unroll(2):
+                        g = 8 - g_iter * 8
+                        elem_base = cc + g
+                        T.tcgen05_softmax_store_8(
+                            P_tmem[0, 0],
+                            warp_row_base + elem_base // 2,
+                            T.access_ptr(sv[elem_base], "r", 8),
+                            psa[0],
+                            psa[1],
+                            psa[2],
+                            psa[3],
+                            elem_base,
+                        )
+                    if cc == 32:
+                        T.tcgen05_fence_tmem_store()
+                        T.mbarrier_arrive(mbar_p2, lane0=True)
+
+                rsum_local += (psa[0] + psa[1]) + (psa[2] + psa[3])
+                if k_soft == loop_extent - 1:
+                    logsum_shared[row] = rsum_local
+
+                T.tcgen05_fence_tmem_store()
+                T.mbarrier_arrive(mbar_p, lane0=True)
+
+
         @T.prim_func
         def main_kq2_split(
             Q: T.Tensor(q_shape, dtype),
@@ -1237,45 +1356,38 @@ def attention_kernel_1sm(
                 else:
                     T.set_max_nreg(80, 0)
 
-                # The softmax helpers own the full KV loop internally, like
-                # avo's softmax_warp_fn. Keep them at top-level role scope so
-                # the generated CUDA calls the noinline helper directly instead
-                # of wrapping it in an outlined per-k loop.
+                # The DSL softmax body owns the full KV loop internally, like
+                # avo's softmax_warp_fn, but exposes the readable loop/max/
+                # rescale/store structure instead of hiding it in one helper.
                 if tid < 128:
-                    T.tcgen05_softmax_warp_1sm(
-                        S0_tmem[0, 0],
-                        P0_tmem[0, 0],
-                        T.access_ptr(scores_scale0_shared, "w"),
-                        T.access_ptr(logsum0_shared, "w"),
+                    softmax_warp_dsl(
+                        S0_tmem,
+                        P0_tmem,
+                        scores_scale0_shared,
+                        logsum0_shared,
                         mbar_s0,
-                        mbar_scale0[0],
+                        mbar_scale0,
                         mbar_p2_0,
                         mbar_p0,
                         loop_range,
-                        0,
-                        scale,
-                        seq_len,
                         bx * kq2_total_M,
-                        is_causal,
                         0,
+                        tid,
                     )
                 elif tid < 256:
-                    T.tcgen05_softmax_warp_1sm(
-                        S1_tmem[0, 0],
-                        P1_tmem[0, 0],
-                        T.access_ptr(scores_scale1_shared, "w"),
-                        T.access_ptr(logsum1_shared, "w"),
+                    softmax_warp_dsl(
+                        S1_tmem,
+                        P1_tmem,
+                        scores_scale1_shared,
+                        logsum1_shared,
                         mbar_s1,
-                        mbar_scale1[0],
+                        mbar_scale1,
                         mbar_p2_1,
                         mbar_p1,
                         loop_range,
-                        0,
-                        scale,
-                        seq_len,
                         bx * kq2_total_M + kq2_block_M,
-                        is_causal,
                         128,
+                        tid,
                     )
 
                 for k in T.serial(loop_range):
