@@ -307,6 +307,38 @@ def test_finalize_reducer_invalid_batch(batch, exc_type, match):
         tl.compile(k, out_idx=-1, pass_configs=_COMPILE_FLAGS)
 
 
+@tilelang.testing.requires_cuda
+def test_reduce_absmax_bf16_noncontiguous_packed_layout_regression():
+    num_tokens = 64
+    hidden = 2560
+    num_threads = 128
+    num_vectorize = 4
+
+    def x_layout_fn(i, j):
+        idx = i * hidden + j
+        return (
+            idx // num_vectorize % num_threads,
+            idx // (num_vectorize * num_threads) * num_vectorize + idx % num_vectorize,
+        )
+
+    @T.prim_func
+    def kernel(A: T.Tensor((num_tokens, hidden), T.bfloat16), B: T.Tensor((num_tokens,), T.float32)):
+        with T.Kernel(num_tokens, threads=num_threads) as (pid,):
+            src = T.alloc_fragment((1, hidden), T.bfloat16)
+            dst = T.alloc_fragment((1, 1), T.bfloat16)
+            T.annotate_layout({src: T.Fragment((1, hidden), forward_fn=x_layout_fn)})
+            T.copy(A[pid, 0], src, disable_tma=True)
+            src_reshaped = T.reshape(src, (1, 1, hidden))
+            T.reduce_absmax(src_reshaped, dst, dim=2)
+            B[pid] = T.cast(dst[0, 0], T.float32)
+
+    A = torch.zeros((num_tokens, hidden), dtype=torch.bfloat16, device="cuda")
+    A[:, 512] = -10
+    B = _compile(kernel)(A)
+    ref = A.abs().amax(dim=1).float()
+    torch.testing.assert_close(B, ref, atol=0, rtol=0)
+
+
 # ---------------------------------------------------------------------------
 # nan_propagate tests – packed (vsize=2) path for bf16/fp16
 # ---------------------------------------------------------------------------
