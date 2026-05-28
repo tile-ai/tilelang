@@ -65,7 +65,7 @@ private:
 
 // Rewrite the parallel loop into a common loop, which is mapped to threads
 For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
-                  const Fragment &loop_layout) {
+                  const Fragment &loop_layout, bool require_padding_guard) {
   ICHECK(loop_layout.defined());
   ICHECK(thread_var.defined());
   int old_loop_depth = loop_layout->InputDim();
@@ -84,7 +84,7 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
   Stmt body = std::move(op);
   Array<PrimExpr> loop_mins;
   Array<PrimExpr> loop_extents;
-  auto inverse_info = loop_layout->InverseWithLevel();
+  auto inverse_info = loop_layout->InverseWithLevel(require_padding_guard);
   auto inv_loop = inverse_info.first;
   auto indices = inv_loop->Forward(Array<PrimExpr>(vars.begin(), vars.end()));
   // Normalize thread var once so we can reuse the same substitution later.
@@ -274,7 +274,7 @@ For PragmaUnrollLoop(For stmt) {
 Stmt LowerParallelLoop(For loop, const Fragment &loop_layout, Var thread_var,
                        arith::Analyzer *analyzer, const LayoutMap &layout_map,
                        Optional<PrimExpr> predicate, bool parallel_loop,
-                       bool should_vectorize) {
+                       bool should_vectorize, bool require_padding_guard) {
   // Save analyzer state to prevent conflicted bindings during vectorization
   auto saved_analyzer = analyzer->Clone();
 
@@ -290,7 +290,8 @@ Stmt LowerParallelLoop(For loop, const Fragment &loop_layout, Var thread_var,
 
   // Step 1: Partition the loop based on the layout (if this is a parallel loop)
   if (parallel_loop) {
-    result_loop = PartitionLoop(result_loop, thread_var, analyzer, loop_layout);
+    result_loop = PartitionLoop(result_loop, thread_var, analyzer, loop_layout,
+                                require_padding_guard);
   }
 
   // Step 2: Vectorize the loop (if requested)

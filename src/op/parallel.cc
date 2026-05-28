@@ -261,6 +261,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
                                       InferLevel level) const {
   if (loop_layout_inferred_)
     return {};
+  loop_layout_requires_padding_guard_ = false;
 
   // Expand let bindings to find fragment buffer accesses
   if (!T.let_var_to_expr.empty()) {
@@ -418,6 +419,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     // over-replicate) 2) PlanLoopPartition (often smaller replication)
     Fragment candidate_from_buffer;
     Fragment candidate_from_plan;
+    bool selected_plan_candidate = false;
 
     if (read_source_buffer.defined() && allow_layout_propgate) {
       candidate_from_buffer =
@@ -435,20 +437,26 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
           ChooseBestCandidate(candidate_from_buffer, candidate_from_plan, T);
     } else if (candidate_from_plan.defined()) {
       loop_layout_ = candidate_from_plan;
+      selected_plan_candidate = true;
       DLOG(INFO) << "[FreeInfer] only PlanLoopPartition available, choose it.";
     } else if (candidate_from_buffer.defined()) {
       loop_layout_ = candidate_from_buffer;
       DLOG(INFO)
           << "[FreeInfer] only compute_from_buffer available, choose it.";
     }
+    loop_layout_requires_padding_guard_ =
+        selected_plan_candidate && indice_map_.empty();
   } else if (!loop_layout_.defined()) {
     // In non-free mode without a source buffer, if we don't have any layout
     // yet (e.g., no annotation), we have nothing to infer here.
     return {};
   }
 
-  // check loop_layout_ is injective
-  auto injective_res = loop_layout_->DetectInjective();
+  // Non-fragment SIMT loops may deliberately over-cover a ragged iteration
+  // space; PartitionLoop emits guards for the padded points. Fragment/reducer
+  // loops stay strict because padding would change per-thread ownership.
+  auto injective_res =
+      loop_layout_->DetectInjective(loop_layout_requires_padding_guard_);
   if (!injective_res->errors.empty()) {
     std::ostringstream oss;
     oss << "Loop layout is not injective: " << loop_layout_->DebugOutput()
@@ -681,10 +689,15 @@ Fragment ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &T) const {
     loop_total_size = loop_total_size * l.as<For>().value()->extent;
   DLOG(INFO) << "[PlanLoopPartition] loop_total_size = " << loop_total_size
              << '\n';
-  while (!analyzer_.CanProve(floormod(loop_total_size, T.thread_bounds->extent *
-                                                           vector_size) == 0) &&
-         vector_size > 1)
-    vector_size /= 2;
+  bool has_fragment_access = !indice_map_.empty();
+  if (has_fragment_access) {
+    while (
+        !analyzer_.CanProve(floormod(loop_total_size, T.thread_bounds->extent *
+                                                          vector_size) == 0) &&
+        vector_size > 1) {
+      vector_size /= 2;
+    }
+  }
   DLOG(INFO) << "[PlanLoopPartition] after adjust: vector_size = "
              << vector_size << '\n';
 

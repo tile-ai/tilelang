@@ -594,7 +594,8 @@ Fragment FragmentNode::BindThreadRange(Range thread_range) const {
   return Fragment(n);
 }
 
-std::pair<Layout, arith::IterMapLevel> LayoutNode::InverseWithLevel() const {
+std::pair<Layout, arith::IterMapLevel>
+LayoutNode::InverseWithLevel(bool require_padding_guard) const {
   arith::Analyzer analyzer;
   auto collect_symbolic = [&](const Array<PrimExpr> &shape) {
     Array<PrimExpr> symbolic_dims;
@@ -611,8 +612,9 @@ std::pair<Layout, arith::IterMapLevel> LayoutNode::InverseWithLevel() const {
                        output_shape.end());
   symbolic_dims = collect_symbolic(symbolic_dims);
   bool is_static_shape = symbolic_dims.empty();
-  auto level = is_static_shape ? arith::IterMapLevel::Bijective
-                               : arith::IterMapLevel::NoCheck;
+  auto level = (is_static_shape && !require_padding_guard)
+                   ? arith::IterMapLevel::Bijective
+                   : arith::IterMapLevel::NoCheck;
   if (!is_static_shape) {
     // Runtime guards keep dynamic tails safe, so we allow NoCheck here and
     // warn.
@@ -853,10 +855,12 @@ bool FragmentNode::IsCompletedReplicated() const {
                          ReplicationPlaceholder());
 }
 
-arith::IterMapResult FragmentNode::DetectInjective() const {
-  // lei:To perform injective check, we need to reverse the layout
-  // and use surjective check, now we use bijective check for convenience
-  // can be relaxed in future
+arith::IterMapResult
+FragmentNode::DetectInjective(bool require_padding_guard) const {
+  // To check that the forward map is injective, reverse it and verify that the
+  // recovered coordinates remain independent. require_padding_guard is only
+  // used by generated full-block loop partitions whose mapping is known
+  // injective but whose padded domain is rejected by stricter iter-map checks.
   arith::Analyzer analyzer;
   // Build a flat indices array: [forward_thread_, forward_index_[...]]
   Array<PrimExpr> indices;
@@ -888,8 +892,9 @@ arith::IterMapResult FragmentNode::DetectInjective() const {
   symbolic_dims = collect_symbolic(symbolic_dims);
 
   bool is_static_shape = symbolic_dims.empty();
-  auto level = is_static_shape ? arith::IterMapLevel::Bijective
-                               : arith::IterMapLevel::NoCheck;
+  auto level = (is_static_shape && !require_padding_guard)
+                   ? arith::IterMapLevel::Bijective
+                   : arith::IterMapLevel::NoCheck;
   if (!is_static_shape) {
     DLOG(WARNING)
         << "Fragment::DetectInjective on symbolic layout, falling back to "
@@ -936,7 +941,8 @@ Layout FragmentNode::Inverse() const {
   return std::move(result.first);
 }
 
-std::pair<Layout, arith::IterMapLevel> FragmentNode::InverseWithLevel() const {
+std::pair<Layout, arith::IterMapLevel>
+FragmentNode::InverseWithLevel(bool require_padding_guard) const {
   auto input_size_copy = input_size_;
   input_size_copy.push_back(ReplicateExtent());
   auto forward_index_copy = forward_index_;
@@ -944,7 +950,7 @@ std::pair<Layout, arith::IterMapLevel> FragmentNode::InverseWithLevel() const {
       Substitute(forward_thread_,
                  {{ReplicationPlaceholder(), InputPlaceholder(InputDim())}}));
   auto fwd = Layout(input_size_copy, forward_index_copy);
-  return fwd->InverseWithLevel();
+  return fwd->InverseWithLevel(require_padding_guard);
 }
 
 Fragment FragmentNode::CondenseReplicateVar() const {

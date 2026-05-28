@@ -65,6 +65,9 @@ public:
   // annotations). When true, subsequent InferLayout calls can early-exit
   // without re-emitting buffer layout updates.
   mutable bool loop_layout_inferred_ = false;
+  // Whether the inferred loop layout intentionally over-covers a ragged
+  // non-fragment iteration space and therefore needs guarded inverse lowering.
+  mutable bool loop_layout_requires_padding_guard_ = false;
   // The predicate expression for the loop, if any, mutable for lazy
   // construction.
   mutable Optional<PrimExpr> predicate_;
@@ -101,12 +104,17 @@ public:
     loop_layout_ = other.loop_layout_;
     predicate_ = other.predicate_;
     loop_layout_inferred_ = other.loop_layout_inferred_;
+    loop_layout_requires_padding_guard_ =
+        other.loop_layout_requires_padding_guard_;
     annotated_layout_unbound_ = other.annotated_layout_unbound_;
     annotated_predicate_ = other.annotated_predicate_;
   }
 
   // Get the inferred loop layout.
   Fragment GetLoopLayout() const { return loop_layout_; }
+  bool LoopLayoutRequiresPaddingGuard() const {
+    return loop_layout_requires_padding_guard_;
+  }
   // Get the root For loop.
   For GetRoot() const { return root_; }
   // Get the mapping from buffer to access indices + access type.
