@@ -361,7 +361,7 @@ private:
   static Layout ComputeLinearLayout(const Buffer &shared_tensor);
 
   static void CollectFragmentLayouts(const PrimExpr &expr,
-                                     const Map<Var, PrimExpr> &bind_var_to_expr,
+                                     const Map<Var, PrimExpr> &let_var_to_expr,
                                      const LayoutMap &existing_layouts,
                                      PrimExpr thread_extent,
                                      Range thread_bounds,
@@ -427,7 +427,7 @@ Layout Copy::ComputeLinearLayout(const Buffer &shared_tensor) {
 }
 
 void Copy::CollectFragmentLayouts(const PrimExpr &expr,
-                                  const Map<Var, PrimExpr> &bind_var_to_expr,
+                                  const Map<Var, PrimExpr> &let_var_to_expr,
                                   const LayoutMap &existing_layouts,
                                   PrimExpr thread_extent, Range thread_bounds,
                                   Map<Buffer, Layout> &result_map) {
@@ -440,8 +440,8 @@ void Copy::CollectFragmentLayouts(const PrimExpr &expr,
       }
     } else if (auto var_node = node.as<VarNode>()) {
       auto var = GetRef<Var>(var_node);
-      if (bind_var_to_expr.count(var)) {
-        CollectFragmentLayouts(bind_var_to_expr[var], bind_var_to_expr,
+      if (let_var_to_expr.count(var)) {
+        CollectFragmentLayouts(let_var_to_expr[var], let_var_to_expr,
                                existing_layouts, thread_extent, thread_bounds,
                                result_map);
       }
@@ -571,15 +571,15 @@ LayoutMap Copy::InferBulkLayout(const CopyNode &op, const LayoutInferArgs &T,
   // Fragment buffers used as TMA indices should be replicated on all threads.
   PrimExpr thread_extent = T.thread_bounds->extent;
   for (const auto &range : op.src_range) {
-    CollectFragmentLayouts(range->min, T.bind_var_to_expr, T.layout_map,
+    CollectFragmentLayouts(range->min, T.let_var_to_expr, T.layout_map,
                            thread_extent, T.thread_bounds, result_map);
-    CollectFragmentLayouts(range->extent, T.bind_var_to_expr, T.layout_map,
+    CollectFragmentLayouts(range->extent, T.let_var_to_expr, T.layout_map,
                            thread_extent, T.thread_bounds, result_map);
   }
   for (const auto &range : op.dst_range) {
-    CollectFragmentLayouts(range->min, T.bind_var_to_expr, T.layout_map,
+    CollectFragmentLayouts(range->min, T.let_var_to_expr, T.layout_map,
                            thread_extent, T.thread_bounds, result_map);
-    CollectFragmentLayouts(range->extent, T.bind_var_to_expr, T.layout_map,
+    CollectFragmentLayouts(range->extent, T.let_var_to_expr, T.layout_map,
                            thread_extent, T.thread_bounds, result_map);
   }
 
