@@ -1771,6 +1771,8 @@ def tcgen05_mma_warp_1sm_reuse3(
     mbar_s1,
     mbar_p0,
     mbar_p1,
+    mbar_p2_0,
+    mbar_p2_1,
     mbar_corr0,
     mbar_corr1,
     mbar_pv,
@@ -1795,6 +1797,8 @@ def tcgen05_mma_warp_1sm_reuse3(
     mbar_s1 = _mbar_to_buffer_load(mbar_s1)
     mbar_p0 = _mbar_to_buffer_load(mbar_p0)
     mbar_p1 = _mbar_to_buffer_load(mbar_p1)
+    mbar_p2_0 = _mbar_to_buffer_load(mbar_p2_0)
+    mbar_p2_1 = _mbar_to_buffer_load(mbar_p2_1)
     mbar_corr0 = _mbar_to_buffer_load(mbar_corr0)
     mbar_corr1 = _mbar_to_buffer_load(mbar_corr1)
     mbar_pv = _mbar_to_buffer_load(mbar_pv)
@@ -1818,6 +1822,8 @@ def tcgen05_mma_warp_1sm_reuse3(
         mbar_s1,
         mbar_p0,
         mbar_p1,
+        mbar_p2_0,
+        mbar_p2_1,
         mbar_corr0,
         mbar_corr1,
         mbar_pv,

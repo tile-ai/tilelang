@@ -634,8 +634,8 @@ tcgen05_softmax_warp_1sm(uint32_t S_tmem_addr, uint32_t P_tmem_addr,
     float nm = rmax_local;
 
     #pragma unroll
-    for (int cc = 0; cc < kBlockN; cc += 32) {
-      tl::tmem_ld_32dp32bNx<false>::copy<32>(S_tmem_addr + tr + cc,
+    for (int cc = 0; cc < kBlockN; cc += 16) {
+      tl::tmem_ld_32dp32bNx<false>::copy<16>(S_tmem_addr + tr + cc,
                                               (uint32_t *)&sv[cc]);
     }
     tl::fence_view_async_tmem_load();
@@ -1809,6 +1809,7 @@ tcgen05_mma_warp_1sm_reuse3(
     void const *mbar_k1, void const *mbar_k2, void const *mbar_v0,
     void const *mbar_v1, void const *mbar_v2, void const *mbar_s0,
     void const *mbar_s1, void const *mbar_p0, void const *mbar_p1,
+    void const *mbar_p2_0, void const *mbar_p2_1,
     void const *mbar_corr0, void const *mbar_corr1, void const *mbar_pv,
     uint32_t S0_tmem_addr, uint32_t S1_tmem_addr, uint32_t P0_tmem_addr,
     uint32_t P1_tmem_addr, uint32_t O0_tmem_addr, uint32_t O1_tmem_addr,
@@ -1839,6 +1840,7 @@ tcgen05_mma_warp_1sm_reuse3(
     uint32_t pv_phase = uint32_t(k & 1);
     uint32_t accum = (k == 0) ? 0u : 1u;
 
+    tl::tcgen05_wait_barrier(mbar_p2_0, pv_phase);
     void const *vbar =
         tl::tcgen05_reuse3_vbar(mbar_v0, mbar_v1, mbar_v2, stage);
     tl::tcgen05_wait_barrier(vbar, uint32_t(stage_phase));
@@ -1852,6 +1854,7 @@ tcgen05_mma_warp_1sm_reuse3(
     tl::tcgen05_pv_mma_128x64_avo(vptr, vptr + 128 * 64, P0_tmem_addr,
                                   O0_tmem_addr, accum);
 
+    tl::tcgen05_wait_barrier(mbar_p2_1, pv_phase);
     if (k > 0) {
       tl::tcgen05_wait_barrier(mbar_corr1, uint32_t((k - 1) & 1));
     }

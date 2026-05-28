@@ -1108,15 +1108,6 @@ def attention_kernel_1sm(
         # ============================================================
         # 4-role split: correction WG2 separate from mma+TMA+epi WG3.
         # ============================================================
-        # WIP. The kernel compiles and runs but produces wrong output
-        # (max_abs ~0.66 at seq=4096 vs target <0.01). Adding mb_corr
-        # before QK in the mma WG deadlocks (circular: mma→math→
-        # correction→mma). The fence injection for cross-WG TMEM
-        # handoff IS being emitted (verified in /tmp dumps), so the
-        # remaining bug is suspected to be either a SMEM scale race
-        # (math overwriting before correction reads) or a TMEM layout
-        # mismatch between the WG that mma writes from and the WG
-        # that correction reads from. Needs more investigation.
         # Same TMEM / SMEM layout as main_kq2, but redistributes work:
         #   tid [  0, 128): math WG 0 — softmax
         #   tid [128, 256): math WG 1 — softmax
@@ -1194,10 +1185,13 @@ def attention_kernel_1sm(
 
                 mbar_s0 = T.alloc_barrier(1)
                 mbar_s1 = T.alloc_barrier(1)
-                # Full-P ready signal. Match avo's mb_p: one arrive per
-                # softmax warp, issued by lane 0 after P TMEM stores finish.
+                # Full-P and partial-P ready signals. Match avo's mb_p/mb_p2:
+                # one arrive per softmax warp, issued by lane 0 after P TMEM
+                # stores finish and after the halfway point respectively.
                 mbar_p0 = T.alloc_barrier(4)
                 mbar_p1 = T.alloc_barrier(4)
+                mbar_p2_0 = T.alloc_barrier(4)
+                mbar_p2_1 = T.alloc_barrier(4)
                 mbar_pv = T.alloc_barrier(1)
                 # Softmax -> correction scale handoff. Match avo's mb_rs:
                 # each of the 4 softmax warps arrives once via lane 0 after
@@ -1218,30 +1212,6 @@ def attention_kernel_1sm(
 
                 scores_scale0_shared = T.alloc_shared([2, kq2_block_M], accum_dtype)
                 scores_scale1_shared = T.alloc_shared([2, kq2_block_M], accum_dtype)
-
-                # Math fragments (per WG).
-                S0_chunk = T.alloc_fragment([kq2_block_M, 32], accum_dtype)
-                P0_chunk = T.alloc_fragment([kq2_block_M, 32], dtype)
-                scores_max0 = T.alloc_fragment([kq2_block_M], accum_dtype)
-                scores_max_prev0 = T.alloc_fragment([kq2_block_M], accum_dtype)
-                scores_scale0 = T.alloc_fragment([kq2_block_M], accum_dtype)
-                scores_sum0 = T.alloc_fragment([kq2_block_M], accum_dtype)
-                logsum0 = T.alloc_fragment([kq2_block_M], accum_dtype)
-
-                S1_chunk = T.alloc_fragment([kq2_block_M, 32], accum_dtype)
-                P1_chunk = T.alloc_fragment([kq2_block_M, 32], dtype)
-                scores_max1 = T.alloc_fragment([kq2_block_M], accum_dtype)
-                scores_max_prev1 = T.alloc_fragment([kq2_block_M], accum_dtype)
-                scores_scale1 = T.alloc_fragment([kq2_block_M], accum_dtype)
-                scores_sum1 = T.alloc_fragment([kq2_block_M], accum_dtype)
-                logsum1 = T.alloc_fragment([kq2_block_M], accum_dtype)
-                T.outline_persistent(scores_max0)
-                T.outline_persistent(logsum0)
-                T.outline_persistent(scores_max1)
-                T.outline_persistent(logsum1)
-
-                # mma+epi WG fragments (epilogue zero-init uses this).
-                O_chunk_e = T.alloc_fragment([kq2_block_M, 32], accum_dtype)
 
                 tid = T.get_thread_binding()
                 loop_range = (
@@ -1267,27 +1237,48 @@ def attention_kernel_1sm(
                 else:
                     T.set_max_nreg(80, 0)
 
-                for k in T.serial(loop_range):
-                    # ============================================================
-                    # Shared 128-thread O init for the high roles. TMEM stores
-                    # require a full warpgroup; the actual MMA/producer work
-                    # below is split into warp12/warp13.
-                    # ============================================================
-                    if tid >= 384 and k == 0:
-                        # Zero-init both O TMEM tiles (chunked, 32 cols at a
-                        # time, low reg footprint). Keep k==0 in the call-site
-                        # predicate so the outliner does not call this helper
-                        # on every KV iteration.
-                        T.fill(O_chunk_e, 0)
-                        T.copy(O_chunk_e, O0_tmem[:, 0:32])
-                        T.copy(O_chunk_e, O0_tmem[:, 32:64])
-                        T.copy(O_chunk_e, O0_tmem[:, 64:96])
-                        T.copy(O_chunk_e, O0_tmem[:, 96:128])
-                        T.copy(O_chunk_e, O1_tmem[:, 0:32])
-                        T.copy(O_chunk_e, O1_tmem[:, 32:64])
-                        T.copy(O_chunk_e, O1_tmem[:, 64:96])
-                        T.copy(O_chunk_e, O1_tmem[:, 96:128])
+                # The softmax helpers own the full KV loop internally, like
+                # avo's softmax_warp_fn. Keep them at top-level role scope so
+                # the generated CUDA calls the noinline helper directly instead
+                # of wrapping it in an outlined per-k loop.
+                if tid < 128:
+                    T.tcgen05_softmax_warp_1sm(
+                        S0_tmem[0, 0],
+                        P0_tmem[0, 0],
+                        T.access_ptr(scores_scale0_shared, "w"),
+                        T.access_ptr(logsum0_shared, "w"),
+                        mbar_s0,
+                        mbar_scale0[0],
+                        mbar_p2_0,
+                        mbar_p0,
+                        loop_range,
+                        0,
+                        scale,
+                        seq_len,
+                        bx * kq2_total_M,
+                        is_causal,
+                        0,
+                    )
+                elif tid < 256:
+                    T.tcgen05_softmax_warp_1sm(
+                        S1_tmem[0, 0],
+                        P1_tmem[0, 0],
+                        T.access_ptr(scores_scale1_shared, "w"),
+                        T.access_ptr(logsum1_shared, "w"),
+                        mbar_s1,
+                        mbar_scale1[0],
+                        mbar_p2_1,
+                        mbar_p1,
+                        loop_range,
+                        0,
+                        scale,
+                        seq_len,
+                        bx * kq2_total_M + kq2_block_M,
+                        is_causal,
+                        128,
+                    )
 
+                for k in T.serial(loop_range):
                     # ============================================================
                     # Producer warp 13  --  tid in [416, 448)
                     # ============================================================
@@ -1366,6 +1357,8 @@ def attention_kernel_1sm(
                                 mbar_s1,
                                 mbar_p0,
                                 mbar_p1,
+                                mbar_p2_0,
+                                mbar_p2_1,
                                 mbar_corr0,
                                 mbar_corr1,
                                 mbar_pv,
@@ -1402,309 +1395,6 @@ def attention_kernel_1sm(
                                 0,
                             )
 
-                    # ============================================================
-                    # Math WG 0  --  tid in [0, 128)
-                    # ============================================================
-                    elif tid < 128:
-                        if k == 0:
-                            T.fill(scores_max0, -T.infinity(accum_dtype))
-                            T.fill(logsum0, 0)
-
-                        T.mbarrier_wait_parity(mbar_s0, k & 1)
-
-                        T.copy(scores_max0, scores_max_prev0)
-                        T.fill(scores_max0, -T.infinity(accum_dtype))
-                        T.copy(S0_tmem[:, 0:32], S0_chunk)
-                        if is_causal:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S0_chunk[i, j] = T.if_then_else(
-                                    bx * kq2_total_M + i >= k * block_N + j,
-                                    S0_chunk[i, j], -T.infinity(accum_dtype))
-                        else:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S0_chunk[i, j] = T.if_then_else(
-                                    k * block_N + j >= seq_len,
-                                    -T.infinity(accum_dtype), S0_chunk[i, j])
-                        T.reduce_max(S0_chunk, scores_max0, dim=1, clear=False)
-                        T.copy(S0_tmem[:, 32:64], S0_chunk)
-                        if is_causal:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S0_chunk[i, j] = T.if_then_else(
-                                    bx * kq2_total_M + i >= k * block_N + 32 + j,
-                                    S0_chunk[i, j], -T.infinity(accum_dtype))
-                        else:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S0_chunk[i, j] = T.if_then_else(
-                                    k * block_N + 32 + j >= seq_len,
-                                    -T.infinity(accum_dtype), S0_chunk[i, j])
-                        T.reduce_max(S0_chunk, scores_max0, dim=1, clear=False)
-                        T.copy(S0_tmem[:, 64:96], S0_chunk)
-                        if is_causal:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S0_chunk[i, j] = T.if_then_else(
-                                    bx * kq2_total_M + i >= k * block_N + 64 + j,
-                                    S0_chunk[i, j], -T.infinity(accum_dtype))
-                        else:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S0_chunk[i, j] = T.if_then_else(
-                                    k * block_N + 64 + j >= seq_len,
-                                    -T.infinity(accum_dtype), S0_chunk[i, j])
-                        T.reduce_max(S0_chunk, scores_max0, dim=1, clear=False)
-                        T.copy(S0_tmem[:, 96:128], S0_chunk)
-                        if is_causal:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S0_chunk[i, j] = T.if_then_else(
-                                    bx * kq2_total_M + i >= k * block_N + 96 + j,
-                                    S0_chunk[i, j], -T.infinity(accum_dtype))
-                        else:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S0_chunk[i, j] = T.if_then_else(
-                                    k * block_N + 96 + j >= seq_len,
-                                    -T.infinity(accum_dtype), S0_chunk[i, j])
-                        T.reduce_max(S0_chunk, scores_max0, dim=1, clear=False)
-
-                        for i in T.Parallel(kq2_block_M):
-                            scores_max0[i] = T.max(scores_max0[i], scores_max_prev0[i])
-                        for i in T.Parallel(kq2_block_M):
-                            scores_scale0[i] = T.exp2_approx(
-                                scores_max_prev0[i] * scale - scores_max0[i] * scale
-                            )
-                        T.copy(scores_scale0, scores_scale0_shared[k & 1, :])
-                        T.mbarrier_arrive(mbar_scale0[k & 1], lane0=True)
-
-                        T.fill(scores_sum0, 0)
-                        T.copy(S0_tmem[:, 96:128], S0_chunk)
-                        if is_causal:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S0_chunk[i, j] = T.if_then_else(
-                                    bx * kq2_total_M + i >= k * block_N + 96 + j,
-                                    S0_chunk[i, j], -T.infinity(accum_dtype))
-                        else:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S0_chunk[i, j] = T.if_then_else(
-                                    k * block_N + 96 + j >= seq_len,
-                                    -T.infinity(accum_dtype), S0_chunk[i, j])
-                        for i, j in T.Parallel(kq2_block_M, 32):
-                            S0_chunk[i, j] = T.exp2_approx(
-                                S0_chunk[i, j] * scale - scores_max0[i] * scale)
-                        T.reduce_sum(S0_chunk, scores_sum0, dim=1, clear=False)
-                        for i, j in T.Parallel(kq2_block_M, 32):
-                            P0_chunk[i, j] = T.cast(S0_chunk[i, j], dtype)
-                        T.copy(P0_chunk, P0_tmem[:, 96:128])
-                        T.copy(S0_tmem[:, 64:96], S0_chunk)
-                        if is_causal:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S0_chunk[i, j] = T.if_then_else(
-                                    bx * kq2_total_M + i >= k * block_N + 64 + j,
-                                    S0_chunk[i, j], -T.infinity(accum_dtype))
-                        else:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S0_chunk[i, j] = T.if_then_else(
-                                    k * block_N + 64 + j >= seq_len,
-                                    -T.infinity(accum_dtype), S0_chunk[i, j])
-                        for i, j in T.Parallel(kq2_block_M, 32):
-                            S0_chunk[i, j] = T.exp2_approx(
-                                S0_chunk[i, j] * scale - scores_max0[i] * scale)
-                        T.reduce_sum(S0_chunk, scores_sum0, dim=1, clear=False)
-                        for i, j in T.Parallel(kq2_block_M, 32):
-                            P0_chunk[i, j] = T.cast(S0_chunk[i, j], dtype)
-                        T.copy(P0_chunk, P0_tmem[:, 64:96])
-                        T.copy(S0_tmem[:, 32:64], S0_chunk)
-                        if is_causal:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S0_chunk[i, j] = T.if_then_else(
-                                    bx * kq2_total_M + i >= k * block_N + 32 + j,
-                                    S0_chunk[i, j], -T.infinity(accum_dtype))
-                        else:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S0_chunk[i, j] = T.if_then_else(
-                                    k * block_N + 32 + j >= seq_len,
-                                    -T.infinity(accum_dtype), S0_chunk[i, j])
-                        for i, j in T.Parallel(kq2_block_M, 32):
-                            S0_chunk[i, j] = T.exp2_approx(
-                                S0_chunk[i, j] * scale - scores_max0[i] * scale)
-                        T.reduce_sum(S0_chunk, scores_sum0, dim=1, clear=False)
-                        for i, j in T.Parallel(kq2_block_M, 32):
-                            P0_chunk[i, j] = T.cast(S0_chunk[i, j], dtype)
-                        T.copy(P0_chunk, P0_tmem[:, 32:64])
-                        T.copy(S0_tmem[:, 0:32], S0_chunk)
-                        if is_causal:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S0_chunk[i, j] = T.if_then_else(
-                                    bx * kq2_total_M + i >= k * block_N + j,
-                                    S0_chunk[i, j], -T.infinity(accum_dtype))
-                        else:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S0_chunk[i, j] = T.if_then_else(
-                                    k * block_N + j >= seq_len,
-                                    -T.infinity(accum_dtype), S0_chunk[i, j])
-                        for i, j in T.Parallel(kq2_block_M, 32):
-                            S0_chunk[i, j] = T.exp2_approx(
-                                S0_chunk[i, j] * scale - scores_max0[i] * scale)
-                        T.reduce_sum(S0_chunk, scores_sum0, dim=1, clear=False)
-                        for i, j in T.Parallel(kq2_block_M, 32):
-                            P0_chunk[i, j] = T.cast(S0_chunk[i, j], dtype)
-                        T.copy(P0_chunk, P0_tmem[:, 0:32])
-
-                        for i in T.Parallel(kq2_block_M):
-                            logsum0[i] = logsum0[i] * scores_scale0[i] + scores_sum0[i]
-
-                        if k == loop_range - 1:
-                            T.copy(logsum0, logsum0_shared)
-
-                        T.mbarrier_arrive(mbar_p0, lane0=True)
-
-                    # ============================================================
-                    # Math WG 1  --  tid in [128, 256)
-                    # ============================================================
-                    elif tid < 256:
-                        if k == 0:
-                            T.fill(scores_max1, -T.infinity(accum_dtype))
-                            T.fill(logsum1, 0)
-
-                        T.mbarrier_wait_parity(mbar_s1, k & 1)
-
-                        T.copy(scores_max1, scores_max_prev1)
-                        T.fill(scores_max1, -T.infinity(accum_dtype))
-                        T.copy(S1_tmem[:, 0:32], S1_chunk)
-                        if is_causal:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S1_chunk[i, j] = T.if_then_else(
-                                    bx * kq2_total_M + kq2_block_M + i >= k * block_N + j,
-                                    S1_chunk[i, j], -T.infinity(accum_dtype))
-                        else:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S1_chunk[i, j] = T.if_then_else(
-                                    k * block_N + j >= seq_len,
-                                    -T.infinity(accum_dtype), S1_chunk[i, j])
-                        T.reduce_max(S1_chunk, scores_max1, dim=1, clear=False)
-                        T.copy(S1_tmem[:, 32:64], S1_chunk)
-                        if is_causal:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S1_chunk[i, j] = T.if_then_else(
-                                    bx * kq2_total_M + kq2_block_M + i >= k * block_N + 32 + j,
-                                    S1_chunk[i, j], -T.infinity(accum_dtype))
-                        else:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S1_chunk[i, j] = T.if_then_else(
-                                    k * block_N + 32 + j >= seq_len,
-                                    -T.infinity(accum_dtype), S1_chunk[i, j])
-                        T.reduce_max(S1_chunk, scores_max1, dim=1, clear=False)
-                        T.copy(S1_tmem[:, 64:96], S1_chunk)
-                        if is_causal:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S1_chunk[i, j] = T.if_then_else(
-                                    bx * kq2_total_M + kq2_block_M + i >= k * block_N + 64 + j,
-                                    S1_chunk[i, j], -T.infinity(accum_dtype))
-                        else:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S1_chunk[i, j] = T.if_then_else(
-                                    k * block_N + 64 + j >= seq_len,
-                                    -T.infinity(accum_dtype), S1_chunk[i, j])
-                        T.reduce_max(S1_chunk, scores_max1, dim=1, clear=False)
-                        T.copy(S1_tmem[:, 96:128], S1_chunk)
-                        if is_causal:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S1_chunk[i, j] = T.if_then_else(
-                                    bx * kq2_total_M + kq2_block_M + i >= k * block_N + 96 + j,
-                                    S1_chunk[i, j], -T.infinity(accum_dtype))
-                        else:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S1_chunk[i, j] = T.if_then_else(
-                                    k * block_N + 96 + j >= seq_len,
-                                    -T.infinity(accum_dtype), S1_chunk[i, j])
-                        T.reduce_max(S1_chunk, scores_max1, dim=1, clear=False)
-
-                        for i in T.Parallel(kq2_block_M):
-                            scores_max1[i] = T.max(scores_max1[i], scores_max_prev1[i])
-                        for i in T.Parallel(kq2_block_M):
-                            scores_scale1[i] = T.exp2_approx(
-                                scores_max_prev1[i] * scale - scores_max1[i] * scale
-                            )
-                        T.copy(scores_scale1, scores_scale1_shared[k & 1, :])
-                        T.mbarrier_arrive(mbar_scale1[k & 1], lane0=True)
-
-                        T.fill(scores_sum1, 0)
-                        T.copy(S1_tmem[:, 96:128], S1_chunk)
-                        if is_causal:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S1_chunk[i, j] = T.if_then_else(
-                                    bx * kq2_total_M + kq2_block_M + i >= k * block_N + 96 + j,
-                                    S1_chunk[i, j], -T.infinity(accum_dtype))
-                        else:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S1_chunk[i, j] = T.if_then_else(
-                                    k * block_N + 96 + j >= seq_len,
-                                    -T.infinity(accum_dtype), S1_chunk[i, j])
-                        for i, j in T.Parallel(kq2_block_M, 32):
-                            S1_chunk[i, j] = T.exp2_approx(
-                                S1_chunk[i, j] * scale - scores_max1[i] * scale)
-                        T.reduce_sum(S1_chunk, scores_sum1, dim=1, clear=False)
-                        for i, j in T.Parallel(kq2_block_M, 32):
-                            P1_chunk[i, j] = T.cast(S1_chunk[i, j], dtype)
-                        T.copy(P1_chunk, P1_tmem[:, 96:128])
-                        T.copy(S1_tmem[:, 64:96], S1_chunk)
-                        if is_causal:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S1_chunk[i, j] = T.if_then_else(
-                                    bx * kq2_total_M + kq2_block_M + i >= k * block_N + 64 + j,
-                                    S1_chunk[i, j], -T.infinity(accum_dtype))
-                        else:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S1_chunk[i, j] = T.if_then_else(
-                                    k * block_N + 64 + j >= seq_len,
-                                    -T.infinity(accum_dtype), S1_chunk[i, j])
-                        for i, j in T.Parallel(kq2_block_M, 32):
-                            S1_chunk[i, j] = T.exp2_approx(
-                                S1_chunk[i, j] * scale - scores_max1[i] * scale)
-                        T.reduce_sum(S1_chunk, scores_sum1, dim=1, clear=False)
-                        for i, j in T.Parallel(kq2_block_M, 32):
-                            P1_chunk[i, j] = T.cast(S1_chunk[i, j], dtype)
-                        T.copy(P1_chunk, P1_tmem[:, 64:96])
-                        T.copy(S1_tmem[:, 32:64], S1_chunk)
-                        if is_causal:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S1_chunk[i, j] = T.if_then_else(
-                                    bx * kq2_total_M + kq2_block_M + i >= k * block_N + 32 + j,
-                                    S1_chunk[i, j], -T.infinity(accum_dtype))
-                        else:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S1_chunk[i, j] = T.if_then_else(
-                                    k * block_N + 32 + j >= seq_len,
-                                    -T.infinity(accum_dtype), S1_chunk[i, j])
-                        for i, j in T.Parallel(kq2_block_M, 32):
-                            S1_chunk[i, j] = T.exp2_approx(
-                                S1_chunk[i, j] * scale - scores_max1[i] * scale)
-                        T.reduce_sum(S1_chunk, scores_sum1, dim=1, clear=False)
-                        for i, j in T.Parallel(kq2_block_M, 32):
-                            P1_chunk[i, j] = T.cast(S1_chunk[i, j], dtype)
-                        T.copy(P1_chunk, P1_tmem[:, 32:64])
-                        T.copy(S1_tmem[:, 0:32], S1_chunk)
-                        if is_causal:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S1_chunk[i, j] = T.if_then_else(
-                                    bx * kq2_total_M + kq2_block_M + i >= k * block_N + j,
-                                    S1_chunk[i, j], -T.infinity(accum_dtype))
-                        else:
-                            for i, j in T.Parallel(kq2_block_M, 32):
-                                S1_chunk[i, j] = T.if_then_else(
-                                    k * block_N + j >= seq_len,
-                                    -T.infinity(accum_dtype), S1_chunk[i, j])
-                        for i, j in T.Parallel(kq2_block_M, 32):
-                            S1_chunk[i, j] = T.exp2_approx(
-                                S1_chunk[i, j] * scale - scores_max1[i] * scale)
-                        T.reduce_sum(S1_chunk, scores_sum1, dim=1, clear=False)
-                        for i, j in T.Parallel(kq2_block_M, 32):
-                            P1_chunk[i, j] = T.cast(S1_chunk[i, j], dtype)
-                        T.copy(P1_chunk, P1_tmem[:, 0:32])
-
-                        for i in T.Parallel(kq2_block_M):
-                            logsum1[i] = logsum1[i] * scores_scale1[i] + scores_sum1[i]
-
-                        if k == loop_range - 1:
-                            T.copy(logsum1, logsum1_shared)
-
-                        T.mbarrier_arrive(mbar_p1, lane0=True)
                     else:
                         T.evaluate(0)
 

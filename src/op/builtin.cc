@@ -375,7 +375,7 @@ TIR_DEFINE_TL_BUILTIN(tcgen05_producer_warp_1sm_reuse3)
                                Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_TL_BUILTIN(tcgen05_mma_warp_1sm_reuse3)
-    .set_num_inputs(27)
+    .set_num_inputs(29)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

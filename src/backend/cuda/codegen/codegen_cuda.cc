@@ -3840,8 +3840,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << this->PrintExpr(op->args[21]) << ", "
                  << this->PrintExpr(op->args[22]) << ");\n";
   } else if (op->op.same_as(tl::tcgen05_mma_warp_1sm_reuse3())) {
-    ICHECK_EQ(op->args.size(), 27U)
-        << "tcgen05_mma_warp_1sm_reuse3 expects 27 args";
+    ICHECK_EQ(op->args.size(), 29U)
+        << "tcgen05_mma_warp_1sm_reuse3 expects 29 args";
     this->PrintIndent();
     need_tcgen05_common_h_ = true;
     auto ptr_expr = [this](const PrimExpr &expr) {
@@ -3871,13 +3871,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << mbar_ptr(op->args[17]) << ", "
                  << mbar_ptr(op->args[18]) << ", "
                  << mbar_ptr(op->args[19]) << ", "
-                 << this->PrintExpr(op->args[20]) << ", "
-                 << this->PrintExpr(op->args[21]) << ", "
+                 << mbar_ptr(op->args[20]) << ", "
+                 << mbar_ptr(op->args[21]) << ", "
                  << this->PrintExpr(op->args[22]) << ", "
                  << this->PrintExpr(op->args[23]) << ", "
                  << this->PrintExpr(op->args[24]) << ", "
                  << this->PrintExpr(op->args[25]) << ", "
-                 << this->PrintExpr(op->args[26]) << ");\n";
+                 << this->PrintExpr(op->args[26]) << ", "
+                 << this->PrintExpr(op->args[27]) << ", "
+                 << this->PrintExpr(op->args[28]) << ");\n";
   } else if (op->op.same_as(tl::tcgen05_epilogue_warp_1sm_skv())) {
     ICHECK_EQ(op->args.size(), 8U)
         << "tcgen05_epilogue_warp_1sm_skv expects 8 args";
