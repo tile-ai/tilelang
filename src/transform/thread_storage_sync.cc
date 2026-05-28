@@ -1652,7 +1652,12 @@ private:
       }
     }
 
-    if (has_same_index) {
+    // When shared-memory allocation reuse aliases buffers with different
+    // element sizes, equal logical indices do not imply equal byte addresses
+    // (e.g. float32 index i aliases fp8 index 4*i). Fall through to byte-range
+    // analysis in that case so cross-thread WAR/RAW hazards are not missed.
+    bool same_index_means_same_byte = prev.dtype.bytes() == curr.dtype.bytes();
+    if (has_same_index && same_index_means_same_byte) {
       // Use Z3 to check if prev and curr constraints are equivalent.
       // If equivalent, the same set of threads execute both accesses, so no
       // sync is needed.
