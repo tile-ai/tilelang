@@ -81,7 +81,7 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
             parsed = [str(f).strip() for f in formats if str(f).strip()]
         self.formats_list = [f for f in parsed if f != "txt"]
 
-    def visit_block_(self, op: tirx.SBlock) -> None:
+    def visit_sblock_(self, op: tirx.SBlock) -> None:
         if "layout_map" in op.annotations:
             layout_map = op.annotations["layout_map"]
 
