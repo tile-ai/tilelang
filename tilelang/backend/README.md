@@ -91,8 +91,9 @@ tilelang/cpu/
 
 tilelang/metal/
   pipeline.py
+  op/
+  intrinsics/
   transform/
-  gemm.py
 ```
 
 The `pipeline.py` file should expose one complete backend pass sequence after

@@ -83,12 +83,6 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectSoftwarePipeline()(mod)
     mod = tilelang.transform.Simplify()(mod)
 
-    # @Metal specific
-    # On Metal, rewrite local.fragment GEMM accumulators to metal.simdgroup
-    # before layout inference. simdgroup matrices are opaque and have no
-    # explicit thread-level layout, so layout inference must not see them.
-    # mod = tilelang.metal.transform.MetalFragmentToSimdgroup(mod)
-
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
     # Visualize the layout

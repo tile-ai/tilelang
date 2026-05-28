@@ -34,6 +34,11 @@ def MetalPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.PipelinePlanning()(mod)
     mod = tilelang.transform.InjectSoftwarePipeline()(mod)
     mod = tilelang.transform.Simplify()(mod)
+
+    # @Metal specific
+    # On Metal, rewrite local.fragment GEMM accumulators to metal.simdgroup
+    # before layout inference. simdgroup matrices are opaque and have no
+    # explicit thread-level layout, so layout inference must not see them.
     mod = MetalFragmentToSimdgroup(mod)
 
     mod = tilelang.transform.LayoutInference()(mod)

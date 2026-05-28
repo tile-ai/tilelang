@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .gemm_base import GemmBase
+from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang.utils.language import is_shared, is_full_region, is_fragment, is_metal_simdgroup
 from tilelang import tvm as tvm
 from tvm.target import Target
@@ -28,7 +28,7 @@ class GemmMetal(GemmBase):
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
 
-        from tilelang.intrinsics.metal_macro_generator import MPSIntrinEmitter
+        from tilelang.metal.intrinsics.metal_macro_generator import MPSIntrinEmitter
 
         mps_emitter = MPSIntrinEmitter(
             a_dtype=self.in_dtype,
