@@ -36,6 +36,13 @@ bool IsValidCPAsyncTransferBytes(int64_t bytes) {
   return bytes == 4 || bytes == 8 || bytes == 16;
 }
 
+bool GetBoolImm(const PrimExpr &expr, const char *name) {
+  const auto *imm = expr.as<IntImmNode>();
+  ICHECK(imm != nullptr && imm->dtype.is_bool())
+      << name << " must be a bool immediate.";
+  return imm->value != 0;
+}
+
 std::optional<DataType> GetAccessPtrElementType(const PrimExpr &expr) {
   const auto *ptr_call = expr.as<CallNode>();
   if (ptr_call == nullptr) {
@@ -1422,7 +1429,7 @@ void CodeGenTileLangCUDA::PrintStorageSync(const CallNode *op) {
           << args[1].dtype();
       this->stream << "tl::__sync_thread_partial(" << PrintExpr(args[1])
                    << ");\n";
-    } else if (args.size() == 3) {
+    } else if (args.size() == 3 || args.size() == 4) {
       ICHECK(args[1].dtype().is_int())
           << "storage_sync barrier_id must be integer type, got "
           << args[1].dtype();
@@ -1430,7 +1437,13 @@ void CodeGenTileLangCUDA::PrintStorageSync(const CallNode *op) {
           << "storage_sync thread_count must be integer type, got "
           << args[2].dtype();
       this->stream << "tl::__sync_thread_partial(" << PrintExpr(args[1]) << ", "
-                   << PrintExpr(args[2]) << ");\n";
+                   << PrintExpr(args[2]);
+      if (args.size() == 4) {
+        this->stream << ", "
+                     << (GetBoolImm(args[3], "storage_sync aligned") ? "true"
+                                                                     : "false");
+      }
+      this->stream << ");\n";
     } else {
       LOG(FATAL) << "Invalid number of arguments for storage sync: "
                  << args.size();
@@ -2541,11 +2554,20 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     this->stream << ");\n";
   } else if (op->op.same_as(tl::named_barrier_arrive())) {
-    ICHECK_EQ(op->args.size(), 2U)
-        << "tl.named_barrier_arrive expects <barrier_id, thread_count>.";
+    ICHECK(op->args.size() == 2U || op->args.size() == 3U)
+        << "tl.named_barrier_arrive expects <barrier_id, thread_count[, "
+           "aligned]>.";
     this->PrintIndent();
-    this->stream << "tl::__named_barrier_arrive("
-                 << this->PrintExpr(op->args[0]) << ", "
+    this->stream << "tl::__named_barrier_arrive";
+    if (op->args.size() == 3U) {
+      this->stream << "<"
+                   << (GetBoolImm(op->args[2],
+                                  "tl.named_barrier_arrive aligned")
+                           ? "true"
+                           : "false")
+                   << ">";
+    }
+    this->stream << "(" << this->PrintExpr(op->args[0]) << ", "
                  << this->PrintExpr(op->args[1]) << ");\n";
   } else if (op->op.same_as(tl::pdl_trigger())) {
     this->PrintIndent();

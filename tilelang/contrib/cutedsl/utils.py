@@ -129,10 +129,10 @@ def shuffle_elect(thread_extent):
         return (warp_idx % (thread_extent // 32)) == 0
 
 
-def sync_thread_partial(barrier_id=None, thread_count=None):
+def sync_thread_partial(barrier_id=None, thread_count=None, aligned=True):
     from .reduce import bar_sync_ptx
 
-    bar_sync_ptx(barrier_id, thread_count)
+    bar_sync_ptx(barrier_id, thread_count, aligned=aligned)
 
 
 def pack_half2(x, y):

@@ -951,17 +951,25 @@ def shfl_up(
     return tirx.call_intrin(value.dtype, tirx.op.Op.get("tl.shfl_up_sync"), _as_uint32_mask(mask), value, delta, width)
 
 
-def sync_threads(barrier_id: int = None, arrive_count: int = None):
+def sync_threads(barrier_id: int = None, arrive_count: int = None, aligned: bool = True):
     """Synchronize all threads in a block."""
     args = []
-    if barrier_id is not None:
+    if not isinstance(aligned, bool):
+        raise TypeError(f"Expect aligned to be bool, but got {type(aligned)}.")
+    if barrier_id is not None or not aligned:
+        if barrier_id is None:
+            barrier_id = 0
         args.append(barrier_id)
-    if arrive_count is not None:
+    if arrive_count is not None or not aligned:
+        if arrive_count is None:
+            arrive_count = 0
         args.append(arrive_count)
+    if not aligned:
+        args.append(tirx.IntImm("bool", False))
     return tirx.call_intrin("int32", "tirx.tvm_storage_sync", "shared", *args)
 
 
-def named_barrier_arrive(barrier_id, thread_count):
+def named_barrier_arrive(barrier_id, thread_count, *, aligned: bool = True):
     """CTA named barrier one-sided arrive (bar.arrive).
 
     Signals that the calling threads have arrived at the named barrier without
@@ -986,8 +994,15 @@ def named_barrier_arrive(barrier_id, thread_count):
                       May be a variable (PrimExpr).
 
     Lowers to: ``asm volatile("bar.arrive %0, %1;" : : "r"(id), "r"(cnt));``
+    by default. Set ``aligned=False`` to emit the unaligned ``barrier.arrive``
+    PTX form.
     """
-    return tirx.call_intrin("handle", tirx.op.Op.get("tl.named_barrier_arrive"), barrier_id, thread_count)
+    if not isinstance(aligned, bool):
+        raise TypeError(f"Expect aligned to be bool, but got {type(aligned)}.")
+    args = [barrier_id, thread_count]
+    if not aligned:
+        args.append(tirx.IntImm("bool", False))
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.named_barrier_arrive"), *args)
 
 
 def sync_warp(mask: int = None):
