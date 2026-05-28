@@ -351,10 +351,7 @@ def test_cast_rs_rbits_invariance(rbits_mode, dtype):
     n = _RBITS_EXPECTED_LANES[rbits_mode]
     tag = _DTYPE_HELPER_TAG[dtype]
     expected = f"__tl_cvt_f32x{n}_to_{tag}x{n}_rs_sat"
-    assert expected in code, (
-        f"Expected '{expected}' for rbits_mode={rbits_mode}, dtype={dtype}.\n"
-        f"Generated code:\n{code}"
-    )
+    assert expected in code, f"Expected '{expected}' for rbits_mode={rbits_mode}, dtype={dtype}.\nGenerated code:\n{code}"
 
 
 if __name__ == "__main__":
