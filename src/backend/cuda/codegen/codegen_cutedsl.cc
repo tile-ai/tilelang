@@ -144,16 +144,37 @@ CodeGenTileLangCuTeDSL::CodeGenTileLangCuTeDSL() {
       pass_ctx->GetConfig<Bool>(tl::kEnableFastMath, Bool(false)).value();
 }
 
+void CodeGenTileLangCuTeDSL::InitFuncState_(const PrimFunc &f) {
+  raw_pointer_vars_.clear();
+  CodeGenTileLangPY::InitFuncState_(f);
+}
+
 std::string CodeGenTileLangCuTeDSL::CanonicalizeFastmathFunctionName_(
     const std::string &func_name) const {
   static const std::unordered_map<std::string, std::string> kFastMathMap = {
-      {"divf", "tl.divf"},    {"exp", "tl.exp"},    {"expf", "tl.exp"},
-      {"exp2", "tl.exp2"},    {"exp2f", "tl.exp2"}, {"log", "tl.log"},
-      {"logf", "tl.log"},     {"log2", "tl.log2"},  {"log2f", "tl.log2"},
-      {"log10", "tl.log10"},  {"tan", "tl.tan"},    {"cos", "tl.cos"},
-      {"sin", "tl.sin"},      {"sqrt", "tl.sqrt"},  {"sqrtf", "tl.sqrt"},
-      {"tanh", "tl.tanh"},    {"tanhf", "tl.tanh"}, {"rsqrt", "tl.rsqrt"},
-      {"rsqrtf", "tl.rsqrt"}, {"fabs", "tl.fabsf"}, {"fabsf", "tl.fabsf"},
+      {"divf", "tl.divf"},
+      {"exp", "tl.exp"},
+      {"expf", "tl.exp"},
+      {"exp2", "tl.exp2"},
+      {"exp2f", "tl.exp2"},
+      {"log", "tl.log"},
+      {"logf", "tl.log"},
+      {"log2", "tl.log2"},
+      {"log2f", "tl.log2"},
+      {"log10", "tl.log10"},
+      {"tan", "tl.tan"},
+      {"cos", "tl.cos"},
+      {"sin", "tl.sin"},
+      {"sqrt", "tl.sqrt"},
+      {"sqrtf", "tl.sqrt"},
+      {"tanh", "tl.tanh"},
+      {"tanhf", "tl.tanh"},
+      {"rsqrt", "tl.rsqrt"},
+      {"rsqrtf", "tl.rsqrt"},
+      {"fabs", "tl.fabsf"},
+      {"fabsf", "tl.fabsf"},
+      {"copysign", "tl.copysignf"},
+      {"copysignf", "tl.copysignf"},
   };
 
   auto it = kFastMathMap.find(func_name);
@@ -1733,6 +1754,38 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
   }
 }
 
+void CodeGenTileLangCuTeDSL::VisitStmt_(const BindNode *op) {
+  if (auto *ptr_type = op->var->type_annotation.as<PointerTypeNode>()) {
+    if (auto *prim_type = ptr_type->element_type.as<PrimTypeNode>()) {
+      if (const CallNode *call = op->value.as<CallNode>();
+          call && call->op.same_as(builtin::reinterpret()) &&
+          call->args.size() == 1U && op->value.dtype().is_handle()) {
+        RegisterHandleType_(op->var.get(), prim_type->dtype);
+        raw_pointer_vars_.insert(op->var.get());
+
+        std::string address_space = "tl.cute.AddressSpace.generic";
+        const std::string scope = ptr_type->storage_scope;
+        if (scope == "global" || scope.empty()) {
+          address_space = "tl.cute.AddressSpace.gmem";
+        } else if (scope == "shared" || scope.rfind("shared.", 0) == 0) {
+          address_space = "tl.cute.AddressSpace.smem";
+        } else if (scope == "local" || scope.rfind("local.", 0) == 0) {
+          address_space = "tl.cute.AddressSpace.rmem";
+        }
+
+        PrintIndent();
+        stream << AllocVarID(op->var.get()) << " = tl.cute.make_ptr(";
+        PrintType(prim_type->dtype, stream);
+        stream << ", " << PrintExpr_(call->args[0]) << ", " << address_space
+               << ")\n";
+        return;
+      }
+    }
+  }
+
+  CodeGenTileLangPY::VisitStmt_(op);
+}
+
 void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocBufferNode *op) {
   DataType alloc_dtype = op->buffer->dtype;
   std::string vid = AllocVarID(op->buffer->data.get());
@@ -2251,7 +2304,15 @@ std::string CodeGenTileLangCuTeDSL::GetBufferPtr_(const BufferNode *buffer,
     scope = GetPtrStorageScope(buffer->data);
 
   std::string ptr_str;
-  if (scope == "shared.barrier" || scope == "shared.cluster_barrier") {
+  if (raw_pointer_vars_.count(buffer_var)) {
+    bool is_handle_type_match = HandleTypeMatch_(buffer_var, effective_dtype);
+    if (is_handle_type_match) {
+      ptr_str = vid;
+    } else {
+      ptr_str = "tl.recast_ptr(" + vid +
+                ", dtype=" + DTypeToString(effective_dtype) + ")";
+    }
+  } else if (scope == "shared.barrier" || scope == "shared.cluster_barrier") {
     ptr_str = vid;
   } else {
     bool is_handle_type_match = HandleTypeMatch_(buffer_var, effective_dtype);
@@ -2271,6 +2332,9 @@ std::string CodeGenTileLangCuTeDSL::GetVarPtr_(const PrimExpr &expr) {
   // For local buffers (rmem tensors), we need to use .iterator to get the
   // pointer since local buffers in CuTeDSL are tensors, not raw pointers
   if (const VarNode *var = expr.as<VarNode>()) {
+    if (raw_pointer_vars_.count(var)) {
+      return GetVarID(var);
+    }
     return GetVarID(var) + ".iterator";
   }
   return PrintExpr_(expr);
@@ -2311,7 +2375,14 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
   }
   bool is_handle_type_match = HandleTypeMatch_(buffer_var, effective_dtype);
   std::string ptr_str;
-  if (is_handle_type_match) {
+  if (raw_pointer_vars_.count(buffer_var)) {
+    if (is_handle_type_match) {
+      ptr_str = vid;
+    } else {
+      ptr_str = "tl.recast_ptr(" + vid +
+                ", dtype=" + DTypeToString(effective_dtype) + ")";
+    }
+  } else if (is_handle_type_match) {
     ptr_str = vid + ".iterator";
   } else {
     ptr_str = "tl.recast_ptr(" + vid +
