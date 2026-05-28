@@ -264,6 +264,9 @@ TVM_DLL const Op &max2();
 TVM_DLL const Op &min2();
 TVM_DLL const Op &abs2();
 
+// Scalar 2-input max with FTZ (SM_100+ PTX `max.ftz.f32 d, a, b`).
+TVM_DLL const Op &fmax2_ftz();
+
 // Scalar 3-input max with FTZ (SM_100+ PTX `max.ftz.f32 d, a, b, c`).
 // One-cycle instruction vs 2 cycles for nested binary max — used by the FA4
 // reference's softmax reduce. Falls back to `fmax(a, fmax(b, c))` on targets
@@ -1056,6 +1059,13 @@ TVM_DLL const Op &tcgen05_after_thread_sync();
 TVM_DLL const Op &tcgen05_wait_st();
 
 /*!
+ * \brief Fence to wait for async TMEM load visibility.
+ *
+ * Emits \c tl::fence_view_async_tmem_load().
+ */
+TVM_DLL const Op &tcgen05_fence_tmem_load();
+
+/*!
  * \brief Per-warp O correction using avo-style x16 ld/mul/st sequence.
  *
  * tcgen05_correction_x16(tmem_base, scale, warp_group_offset, head_dim)
@@ -1097,6 +1107,30 @@ TVM_DLL const Op &tcgen05_epilogue_store_x16();
  * FA4 1SM split attention.
  */
 TVM_DLL const Op &tcgen05_correction_epilogue_warp_1sm_skv();
+
+/*!
+ * \brief Packed scalar-pair FMA used by SM100 FA4-style softmax.
+ *
+ * Updates two scalar FP32 lvalues with one `fma.rn.ftz.f32x2` instruction.
+ * Args: r0, r1, a0, a1, b0, b1, c0, c1.
+ */
+TVM_DLL const Op &tcgen05_fma_f32x2();
+
+/*!
+ * \brief Pair polynomial exp2 approximation used by SM100 FA4-style softmax.
+ *
+ * Updates two scalar FP32 lvalues. Args: r0, r1, in0, in1.
+ */
+TVM_DLL const Op &tcgen05_exp2_poly_2();
+
+/*!
+ * \brief Branchless online-softmax rescale update.
+ *
+ * Updates scale_out, rmax_state, and rsum_state with the FA4/avo `selp`
+ * threshold pattern. Args: scale_out, rmax_state, rsum_state, nm,
+ * softmax_scale_log2.
+ */
+TVM_DLL const Op &tcgen05_softmax_rescale_update();
 
 /*!
  * \brief Avo-style one-iteration S->P online softmax for FA4 1SM attention.

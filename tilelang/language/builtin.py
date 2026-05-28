@@ -1262,6 +1262,102 @@ def tcgen05_wait_st():
     return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_wait_st"))
 
 
+def tcgen05_fence_tmem_load():
+    """Wait for pending asynchronous TMEM loads to become visible."""
+    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_fence_tmem_load"))
+
+
+def _as_bool_imm(value: bool):
+    return tir.const(bool(value), "bool")
+
+
+def tcgen05_ld(
+    inst_bits: int,
+    chunks: int,
+    pack16: bool,
+    tmem_start_col,
+    col_offset,
+    dst_ptr,
+):
+    """Load from TMEM into a local pointer with `tl::tcgen05_ld_32dp*bNx`.
+
+    `dst_ptr` should normally be produced by `T.access_ptr(local_buf[i], "w", chunks)`.
+    """
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_ld"),
+        tir.IntImm("int32", int(inst_bits)),
+        tir.IntImm("int32", int(chunks)),
+        _as_bool_imm(pack16),
+        tmem_start_col,
+        col_offset,
+        dst_ptr,
+    )
+
+
+def tcgen05_st(
+    inst_bits: int,
+    chunks: int,
+    unpack16: bool,
+    tmem_start_col,
+    col_offset,
+    src_ptr,
+):
+    """Store a local pointer into TMEM with `tl::tcgen05_st_32dp*bNx`."""
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_st"),
+        tir.IntImm("int32", int(inst_bits)),
+        tir.IntImm("int32", int(chunks)),
+        _as_bool_imm(unpack16),
+        tmem_start_col,
+        col_offset,
+        src_ptr,
+    )
+
+
+def tcgen05_ld_x16(
+    inst_bits: int,
+    chunks: int,
+    pack16: bool,
+    tmem_start_col,
+    col_offset,
+    dst_ptr,
+):
+    """x16 TMEM load variant for cross-warpgroup visibility sensitive paths."""
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_ld_x16"),
+        tir.IntImm("int32", int(inst_bits)),
+        tir.IntImm("int32", int(chunks)),
+        _as_bool_imm(pack16),
+        tmem_start_col,
+        col_offset,
+        dst_ptr,
+    )
+
+
+def tcgen05_st_x16(
+    inst_bits: int,
+    chunks: int,
+    unpack16: bool,
+    tmem_start_col,
+    col_offset,
+    src_ptr,
+):
+    """x16 TMEM store variant for cross-warpgroup visibility sensitive paths."""
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_st_x16"),
+        tir.IntImm("int32", int(inst_bits)),
+        tir.IntImm("int32", int(chunks)),
+        _as_bool_imm(unpack16),
+        tmem_start_col,
+        col_offset,
+        src_ptr,
+    )
+
+
 def tcgen05_correction_x16(tmem_buf, scale_frag, warp_group_offset: int = 256, head_dim: int = 128):
     """Per-warp O correction using avo-style x16 ld/mul/st sequence.
 
@@ -1378,6 +1474,55 @@ def tcgen05_correction_epilogue_warp_1sm_skv(
         mbar_epi1,
         loop_extent,
         tile_k_base,
+    )
+
+
+def tcgen05_fma_f32x2(r0, r1, a0, a1, b0, b1, c0, c1):
+    """Update two FP32 scalar lvalues with one SM100 `fma.rn.ftz.f32x2`.
+
+    This is a statement-level primitive intended for FA4-style softmax DSL
+    bodies where two adjacent scalar fragment slots must be updated in place.
+    """
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_fma_f32x2"),
+        r0,
+        r1,
+        a0,
+        a1,
+        b0,
+        b1,
+        c0,
+        c1,
+    )
+
+
+def tcgen05_exp2_poly_2(r0, r1, in0, in1):
+    """Update two FP32 scalar lvalues with the FA4 polynomial exp2 pair path."""
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_exp2_poly_2"),
+        r0,
+        r1,
+        in0,
+        in1,
+    )
+
+
+def tcgen05_softmax_rescale_update(scale_out, rmax_state, rsum_state, nm, softmax_scale_log2):
+    """Branchless FA4 online-softmax rescale update.
+
+    Updates `scale_out`, `rmax_state`, and `rsum_state` using the same `selp`
+    threshold pattern as avo's softmax warp.
+    """
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_softmax_rescale_update"),
+        scale_out,
+        rmax_state,
+        rsum_state,
+        nm,
+        softmax_scale_log2,
     )
 
 

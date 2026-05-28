@@ -354,6 +354,25 @@ __device__ __forceinline__ float tcgen05_fmax2(float a, float b) {
   return r;
 }
 
+__device__ __forceinline__ void
+tcgen05_softmax_rescale_update(float &scale_out, float &rmax_local,
+                               float &rsum_local, float nm,
+                               float softmax_scale_log2) {
+  float rs_diff = (rmax_local - nm) * softmax_scale_log2;
+  float rs_exp = tl::tcgen05_exp2f_approx(rs_diff);
+  float rs;
+  asm("{                                                  \n"
+      ".reg .pred p_skip;                                 \n"
+      "setp.ge.ftz.f32 p_skip, %2, 0fC1800000;            \n"
+      "selp.f32 %0, 0f3F800000, %3, p_skip;               \n"
+      "selp.f32 %1, %1, %4, p_skip;                       \n"
+      "}"
+      : "=f"(rs), "+f"(rmax_local)
+      : "f"(rs_diff), "f"(rs_exp), "f"(nm));
+  rsum_local *= rs;
+  scale_out = rs;
+}
+
 __device__ __forceinline__ void tcgen05_fma_f32x2(
     float &r0, float &r1, float a0, float a1, float b0, float b1,
     float c0, float c1) {
@@ -372,8 +391,8 @@ __device__ __forceinline__ void tcgen05_fma_f32x2(
   r1 = o1;
 }
 
-__device__ __forceinline__ void tcgen05_exp2_poly_2(float in0, float in1,
-                                                     float &r0, float &r1) {
+__device__ __forceinline__ void tcgen05_exp2_poly_2(float &r0, float &r1,
+                                                     float in0, float in1) {
   float x0 = fmaxf(in0, -127.0f);
   float x1 = fmaxf(in1, -127.0f);
   float xr0, xr1;
@@ -501,18 +520,9 @@ tcgen05_softmax_128x128(uint32_t S_tmem_addr, uint32_t P_tmem_addr,
   }
   nm = tl::tcgen05_fmax3(tl::tcgen05_fmax2(m0, m1), m2, nm);
 
-  float rs_diff = (rmax_local - nm) * softmax_scale_log2;
-  float rs_exp = tl::tcgen05_exp2f_approx(rs_diff);
   float rs;
-  asm("{                                                  \n"
-      ".reg .pred p_skip;                                 \n"
-      "setp.ge.ftz.f32 p_skip, %2, 0fC1800000;            \n"
-      "selp.f32 %0, 0f3F800000, %3, p_skip;               \n"
-      "selp.f32 %1, %1, %4, p_skip;                       \n"
-      "}"
-      : "=f"(rs), "+f"(rmax_local)
-      : "f"(rs_diff), "f"(rs_exp), "f"(nm));
-  rsum_local *= rs;
+  tl::tcgen05_softmax_rescale_update(rs, rmax_local, rsum_local, nm,
+                                     softmax_scale_log2);
   scale_smem[row] = rs;
   __syncwarp();
   if ((threadIdx.x & 31) == 0) {
@@ -550,8 +560,8 @@ tcgen05_softmax_128x128(uint32_t S_tmem_addr, uint32_t P_tmem_addr,
         if (kEx2EmuFreq > 0 && frag >= kEx2EmuStartFrg &&
             frag < (kBlockN / kEx2FragSize - 1) &&
             (k_in_frag % kEx2EmuFreq) >= (kEx2EmuFreq - kEx2EmuRes)) {
-          tl::tcgen05_exp2_poly_2(sv[elem], sv[elem + 1], pval[i],
-                                  pval[i + 1]);
+          tl::tcgen05_exp2_poly_2(pval[i], pval[i + 1], sv[elem],
+                                  sv[elem + 1]);
         } else {
           pval[i] = tl::tcgen05_exp2f_approx(sv[elem]);
           pval[i + 1] = tl::tcgen05_exp2f_approx(sv[elem + 1]);
@@ -662,18 +672,9 @@ tcgen05_softmax_warp_1sm(uint32_t S_tmem_addr, uint32_t P_tmem_addr,
     }
     nm = tl::tcgen05_fmax3(tl::tcgen05_fmax2(m0, m1), m2, nm);
 
-    float rs_diff = (rmax_local - nm) * softmax_scale_log2;
-    float rs_exp = tl::tcgen05_exp2f_approx(rs_diff);
     float rs;
-    asm("{                                                  \n"
-        ".reg .pred p_skip;                                 \n"
-        "setp.ge.ftz.f32 p_skip, %2, 0fC1800000;            \n"
-        "selp.f32 %0, 0f3F800000, %3, p_skip;               \n"
-        "selp.f32 %1, %1, %4, p_skip;                       \n"
-        "}"
-        : "=f"(rs), "+f"(rmax_local)
-        : "f"(rs_diff), "f"(rs_exp), "f"(nm));
-    rsum_local *= rs;
+    tl::tcgen05_softmax_rescale_update(rs, rmax_local, rsum_local, nm,
+                                       softmax_scale_log2);
     scale_smem[phase * kBlockN + row] = rs;
     __syncwarp();
     if ((threadIdx.x & 31) == 0) {
@@ -712,7 +713,7 @@ tcgen05_softmax_warp_1sm(uint32_t S_tmem_addr, uint32_t P_tmem_addr,
           if (kEx2EmuFreq > 0 && frag >= kEx2EmuStartFrg &&
               frag < (kBlockN / kEx2FragSize - 1) &&
               (k_in_frag % kEx2EmuFreq) >= (kEx2EmuFreq - kEx2EmuRes)) {
-            tl::tcgen05_exp2_poly_2(sv[elem], sv[elem + 1], p0, p1);
+            tl::tcgen05_exp2_poly_2(p0, p1, sv[elem], sv[elem + 1]);
           } else {
             p0 = tl::tcgen05_exp2f_approx(sv[elem]);
             p1 = tl::tcgen05_exp2f_approx(sv[elem + 1]);
@@ -2061,7 +2062,7 @@ tcgen05_softmax_warp_2cta(uint32_t S_tmem_addr, uint32_t P_tmem_addr,
           if (kEx2EmuFreq > 0 && frag >= kEx2EmuStartFrg &&
               frag < (kBlockN / kEx2FragSize - 1) &&
               (k_in_frag % kEx2EmuFreq) >= (kEx2EmuFreq - kEx2EmuRes)) {
-            tl::tcgen05_exp2_poly_2(sv[elem], sv[elem + 1], p0, p1);
+            tl::tcgen05_exp2_poly_2(p0, p1, sv[elem], sv[elem + 1]);
           } else {
             p0 = tl::tcgen05_exp2f_approx(sv[elem]);
             p1 = tl::tcgen05_exp2f_approx(sv[elem + 1]);

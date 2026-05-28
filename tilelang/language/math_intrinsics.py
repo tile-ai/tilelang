@@ -414,6 +414,13 @@ def max3(a: PrimExpr, b: PrimExpr, c: PrimExpr) -> PrimExpr:
     return tir.call_intrin(a.dtype, tir.op.Op.get("tl.max3"), a, b, c)
 
 
+def fmax2_ftz(a: PrimExpr, b: PrimExpr) -> PrimExpr:
+    """2-input scalar max with FTZ. Emits `max.ftz.f32 d, a, b` for fp32."""
+    a = tir.convert(a)
+    b = tir.convert(b)
+    return tir.call_intrin(a.dtype, tir.op.Op.get("tl.fmax2_ftz"), a, b)
+
+
 def exp2_poly(x: PrimExpr) -> PrimExpr:
     """Polynomial exp2 approximation using FMA units (degree-3 minimax).
     Higher throughput than SFU exp2f when exp2 is the bottleneck on SM100+.
@@ -462,6 +469,7 @@ __all__ = [
     "max2",  # noqa: F401
     "min2",  # noqa: F401
     "abs2",  # noqa: F401
+    "fmax2_ftz",  # noqa: F401
     "max3",  # noqa: F401
     "exp2_poly",  # noqa: F401
     "exp2_approx",  # noqa: F401

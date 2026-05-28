@@ -3535,6 +3535,11 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         << "tcgen05_wait_st expects no arguments";
     need_tcgen05_common_h_ = true;
     this->stream << "tl::fence_view_async_tmem_store();\n";
+  } else if (op->op.same_as(tl::tcgen05_fence_tmem_load())) {
+    ICHECK_EQ(op->args.size(), 0U)
+        << "tcgen05_fence_tmem_load expects no arguments";
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::fence_view_async_tmem_load();\n";
   } else if (op->op.same_as(tl::tcgen05_correction_x16())) {
     ICHECK_EQ(op->args.size(), 4U)
         << "tcgen05_correction_x16 expects 4 args: tmem_buf, scale, wg_offset, head_dim";
@@ -3601,6 +3606,45 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << mbar_ptr(op->args[13]) << ", "
                  << this->PrintExpr(op->args[14]) << ", "
                  << this->PrintExpr(op->args[15]) << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_fma_f32x2())) {
+    ICHECK_EQ(op->args.size(), 8U) << "tcgen05_fma_f32x2 expects 8 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    auto ref_of = [this](const PrimExpr &expr) {
+      return "(&(" + this->PrintExpr(expr) + "))";
+    };
+    this->stream << "tl::tcgen05_fma_f32x2(*" << ref_of(op->args[0])
+                 << ", *" << ref_of(op->args[1]) << ", "
+                 << this->PrintExpr(op->args[2]) << ", "
+                 << this->PrintExpr(op->args[3]) << ", "
+                 << this->PrintExpr(op->args[4]) << ", "
+                 << this->PrintExpr(op->args[5]) << ", "
+                 << this->PrintExpr(op->args[6]) << ", "
+                 << this->PrintExpr(op->args[7]) << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_exp2_poly_2())) {
+    ICHECK_EQ(op->args.size(), 4U) << "tcgen05_exp2_poly_2 expects 4 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    auto ref_of = [this](const PrimExpr &expr) {
+      return "(&(" + this->PrintExpr(expr) + "))";
+    };
+    this->stream << "tl::tcgen05_exp2_poly_2(*" << ref_of(op->args[0])
+                 << ", *" << ref_of(op->args[1]) << ", "
+                 << this->PrintExpr(op->args[2]) << ", "
+                 << this->PrintExpr(op->args[3]) << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_softmax_rescale_update())) {
+    ICHECK_EQ(op->args.size(), 5U)
+        << "tcgen05_softmax_rescale_update expects 5 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    auto ref_of = [this](const PrimExpr &expr) {
+      return "(&(" + this->PrintExpr(expr) + "))";
+    };
+    this->stream << "tl::tcgen05_softmax_rescale_update(*"
+                 << ref_of(op->args[0]) << ", *" << ref_of(op->args[1])
+                 << ", *" << ref_of(op->args[2]) << ", "
+                 << this->PrintExpr(op->args[3]) << ", "
+                 << this->PrintExpr(op->args[4]) << ");\n";
   } else if (op->op.same_as(tl::tcgen05_softmax_128x128())) {
     ICHECK_EQ(op->args.size(), 17U)
         << "tcgen05_softmax_128x128 expects 17 args";
@@ -4808,6 +4852,20 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
     std::string func_name = math_func(op->dtype, "fdiv", rounding_mode);
     os << func_name << "(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ")";
+    return true;
+  } else if (op->op.same_as(tl::fmax2_ftz())) {
+    // Inline PTX `max.ftz.f32 d, a, b` for fp32.
+    if (op->dtype.is_float() && op->dtype.bits() == 32 &&
+        op->dtype.lanes() == 1) {
+      std::string a = PrintExpr(op->args[0]);
+      std::string b = PrintExpr(op->args[1]);
+      os << "([&]{float _r; asm(\"max.ftz.f32 %0, %1, %2;\" : "
+         << "\"=f\"(_r) : \"f\"(" << a << "), \"f\"(" << b
+         << ")); return _r;}())";
+    } else {
+      os << "fmax(" << PrintExpr(op->args[0]) << ", "
+         << PrintExpr(op->args[1]) << ")";
+    }
     return true;
   } else if (op->op.same_as(tl::max3())) {
     // Inline PTX `max.ftz.f32 d, a, b, c` for fp32 (one cycle on SM_100+).
