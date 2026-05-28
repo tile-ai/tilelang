@@ -2082,8 +2082,7 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
        << " + " << index_str << ")";
   } else if (t == buffer_element_dtype) {
     int div_factor = 1;
-    if (buffer_element_dtype.is_float4_e2m1fn() &&
-        buffer_element_dtype.lanes() == 1) {
+    if (buffer_element_dtype.bits() == 4 && buffer_element_dtype.lanes() == 1) {
       div_factor = 2;
     }
     index_str =

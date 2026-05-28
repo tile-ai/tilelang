@@ -5,8 +5,6 @@ import tilelang
 import tilelang.testing
 import tilelang.language as T
 
-tilelang.disable_cache()
-
 
 def matmul_2cta(
     M,
@@ -79,8 +77,6 @@ def matmul_2cta(
 
 def _compile_and_check(program, out_dtype):
     kernel = tilelang.compile(program, out_idx=[2])
-
-    print(kernel.get_kernel_source())
 
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
 
