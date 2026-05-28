@@ -287,6 +287,8 @@ Stmt LowerParallelLoop(For loop, const Fragment &loop_layout, Var thread_var,
   // Note: Map::erase(key) is a no-op if key doesn't exist.
   result_loop.CopyOnWrite()->annotations.erase(attr::kParallelLoopLayout);
   result_loop.CopyOnWrite()->annotations.erase(attr::kParallelLoopPredicate);
+  result_loop.CopyOnWrite()->annotations.erase(
+      attr::kParallelLoopRequiresPaddingGuard);
 
   // Step 1: Partition the loop based on the layout (if this is a parallel loop)
   if (parallel_loop) {

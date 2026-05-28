@@ -103,6 +103,7 @@ struct LayoutInferenceResult {
   Map<Buffer, Layout> layout_map;
   Map<For, Fragment> for_map;
   Map<For, PrimExpr> predicate_map;
+  Map<For, Bool> padding_guard_map;
 };
 
 class BufferUseDefCollector : public IRVisitorWithAnalyzer {
@@ -449,6 +450,7 @@ public:
     // Collect layout info for For nodes
     Map<For, Fragment> for_map;
     Map<For, PrimExpr> predicate_map;
+    Map<For, Bool> padding_guard_map;
     ICHECK(infer_list_.size() == thread_var_vec_.size())
         << "infer_list_ and thread_var_vec_ size mismatch";
     for (int i = 0; i < infer_list_.size(); i++) {
@@ -464,6 +466,9 @@ public:
             << "The Layout for Parallel for cannot be inferred correctly:\n"
             << for_infer->GetRoot();
         for_map.Set(for_infer->GetRoot(), for_infer->GetLoopLayout());
+        if (for_infer->LoopLayoutRequiresPaddingGuard()) {
+          padding_guard_map.Set(for_infer->GetRoot(), Bool(true));
+        }
         // thread_var_ should be defined if we rely on it
         ICHECK(thread_var.defined())
             << "thread_var is not defined. Cannot retrieve predicate.";
@@ -474,7 +479,7 @@ public:
       }
     }
 
-    return {layout_map, for_map, predicate_map};
+    return {layout_map, for_map, predicate_map, padding_guard_map};
   }
 
   void Collect(const PrimFunc &f) {
@@ -1244,6 +1249,8 @@ private:
    * The stored annotations are:
    * - attr::kParallelLoopLayout: The Fragment layout for the parallel loop
    * - attr::kParallelLoopPredicate: The predicate expression (if any)
+   * - attr::kParallelLoopRequiresPaddingGuard: Whether inverse lowering must
+   *   allow and guard padded points from a ragged SIMT partition
    *
    * @return The For statement with layout annotations attached
    */
@@ -1260,6 +1267,10 @@ private:
     // Store the loop layout as an annotation on the For node (outermost)
     auto for_ptr = for_node.CopyOnWrite();
     for_ptr->annotations.Set(attr::kParallelLoopLayout, loop_layout);
+    if (result_.padding_guard_map.count(root)) {
+      for_ptr->annotations.Set(attr::kParallelLoopRequiresPaddingGuard,
+                               result_.padding_guard_map[root]);
+    }
 
     // Store the predicate as an annotation if it exists and is not trivially
     // true

@@ -76,6 +76,7 @@ public:
   // lets InferLayout adopt them cleanly without re-parsing annotations.
   mutable Optional<Fragment> annotated_layout_unbound_;
   mutable Optional<PrimExpr> annotated_predicate_;
+  mutable bool annotated_requires_padding_guard_ = false;
 
   // Type key for TVM object system.
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ParallelOp", ParallelOpNode,
@@ -108,6 +109,7 @@ public:
         other.loop_layout_requires_padding_guard_;
     annotated_layout_unbound_ = other.annotated_layout_unbound_;
     annotated_predicate_ = other.annotated_predicate_;
+    annotated_requires_padding_guard_ = other.annotated_requires_padding_guard_;
   }
 
   // Get the inferred loop layout.
