@@ -19,9 +19,9 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include "../op/gemm.h"
-#include "../op/operator.h"
-#include "../target/utils.h"
+#include "op/gemm.h"
+#include "op/operator.h"
+#include "target/utils.h"
 
 namespace tvm {
 namespace tl {

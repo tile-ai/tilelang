@@ -2,7 +2,7 @@
  *  \file lower_shared_barrier.cc
  *  \brief Convert shared.barrier buffers to plain shared + ptx init.
  */
-#include "../op/builtin.h"
+#include "op/builtin.h"
 #include "support/check.h"
 #include "tvm/ir/type.h"
 #include <tvm/arith/analyzer.h>

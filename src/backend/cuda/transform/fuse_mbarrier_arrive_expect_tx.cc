@@ -11,8 +11,8 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include "../op/builtin.h"
-#include "merge_if_stmt.h"
+#include "op/builtin.h"
+#include "transform/merge_if_stmt.h"
 
 namespace tvm {
 namespace tl {

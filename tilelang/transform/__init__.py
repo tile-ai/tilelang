@@ -182,7 +182,9 @@ def ProducerConsumerWarpSpecialized():
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.ProducerConsumerWarpSpecialized()  # type: ignore
+    from tilelang.cuda import transform as cuda_transform
+
+    return cuda_transform.ProducerConsumerWarpSpecialized()
 
 
 def ProducerConsumerWarpSpecializedTiled():
@@ -211,12 +213,16 @@ def AnnotateWarpGroupRegAlloc():
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.AnnotateWarpGroupRegAlloc()  # type: ignore
+    from tilelang.cuda import transform as cuda_transform
+
+    return cuda_transform.AnnotateWarpGroupRegAlloc()
 
 
 def FuseMBarrierArriveExpectTx():
     """Fuse simple expect_tx -> TMA issue -> arrive back into arrive_and_expect_tx."""
-    return _ffi_api.FuseMBarrierArriveExpectTx()  # type: ignore
+    from tilelang.cuda import transform as cuda_transform
+
+    return cuda_transform.FuseMBarrierArriveExpectTx()
 
 
 def InjectFenceProxy():
@@ -227,7 +233,9 @@ def InjectFenceProxy():
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.InjectFenceProxy()  # type: ignore
+    from tilelang.cuda import transform as cuda_transform
+
+    return cuda_transform.InjectFenceProxy()
 
 
 def InjectTcgen05Fence():
@@ -245,7 +253,9 @@ def InjectTcgen05Fence():
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.InjectTcgen05Fence()  # type: ignore
+    from tilelang.cuda import transform as cuda_transform
+
+    return cuda_transform.InjectTcgen05Fence()
 
 
 def LegalizeVectorizedLoop():
@@ -400,12 +410,16 @@ def MergeSharedMemoryAllocations(enable_aggressive_merge: bool = False, align_by
 
 def MarkCudaSyncCalls(have_pdl: bool = False):
     """MarkCudaSyncCalls"""
-    return _ffi_api.MarkCudaSyncCalls(have_pdl)  # type: ignore
+    from tilelang.cuda import transform as cuda_transform
+
+    return cuda_transform.MarkCudaSyncCalls(have_pdl)
 
 
 def LowerSharedBarrier():
     """LowerSharedBarrier"""
-    return _ffi_api.LowerSharedBarrier()  # type: ignore
+    from tilelang.cuda import transform as cuda_transform
+
+    return cuda_transform.LowerSharedBarrier()
 
 
 def PlanAndUpdateBufferAllocationLocation():
@@ -475,7 +489,9 @@ def LowerDeviceKernelLaunch():
 
 def LowerSharedTmem():
     """LowerSharedTmem"""
-    return _ffi_api.LowerSharedTmem()  # type: ignore
+    from tilelang.cuda import transform as cuda_transform
+
+    return cuda_transform.LowerSharedTmem()
 
 
 def LayoutReducer():
@@ -527,7 +543,9 @@ def LowerLDGSTG():
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.LowerLDGSTG()  # type: ignore
+    from tilelang.cuda import transform as cuda_transform
+
+    return cuda_transform.LowerLDGSTG()
 
 
 def LowerBlackwell2SM():
@@ -537,4 +555,6 @@ def LowerBlackwell2SM():
         fpass : tvm.transform.Pass
             The result pass
     """
-    return _ffi_api.LowerBlackwell2SM()  # type: ignore
+    from tilelang.cuda import transform as cuda_transform
+
+    return cuda_transform.LowerBlackwell2SM()

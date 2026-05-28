@@ -3,9 +3,9 @@
  *  \brief Convert shared.tmem buffers to plain shared + ptx init, and do
  *         coordinate translation (from logical address to physical address)
  */
-#include "../op/builtin.h"
-#include "../target/utils.h"
+#include "op/builtin.h"
 #include "support/check.h"
+#include "target/utils.h"
 #include "tvm/ir/type.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/cast.h>

@@ -29,9 +29,9 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include "../op/builtin.h"
-#include "../op/utils.h"
-#include "../target/utils.h"
+#include "op/builtin.h"
+#include "op/utils.h"
+#include "target/utils.h"
 #include "tir/ir/buffer_common.h"
 
 namespace tvm {

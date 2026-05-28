@@ -3,10 +3,10 @@
  * \brief Mark Device PrimFunc with attributes if CUDA PDL functions are called
  */
 
-#include "../op/builtin.h"
-#include "../target/utils.h"
-#include "common/attr.h"
+#include "op/builtin.h"
 #include "support/check.h"
+#include "target/utils.h"
+#include "transform/common/attr.h"
 #include "tvm/ir/type.h"
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/analysis.h>

@@ -66,12 +66,12 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     # internally only for functions where the WS transformation actually
     # applies.
     if allow_warp_specialized(target=target):
-        mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
+        mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
 
     # @CUDA / Blackwell specific
     # Lower 2SM TCGEN5MMA and related on Blackwell target (must run before
     # LayoutInference so that the use_2cta annotation is visible to infer_layout)
-    mod = tilelang.transform.LowerBlackwell2SM()(mod)
+    mod = tilelang.cuda.transform.LowerBlackwell2SM()(mod)
 
     # Normalize if-without-else wrappers before pipeline planning. This keeps
     # pipeline body extraction focused on canonical SeqStmt bodies.
@@ -119,19 +119,19 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
 
     # @CUDA-specific
     # Lower the shared.tmem into specific initialization slot
-    mod = tilelang.transform.LowerSharedTmem()(mod)
+    mod = tilelang.cuda.transform.LowerSharedTmem()(mod)
 
     # Pipeline barriers are now created at final expanded size by
     # InjectSoftwarePipeline, so no late MVB barrier fixup is needed.
     # Buffer allocation placement is handled uniformly for both paths.
     mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
     # @CUDA-specific
-    mod = tilelang.transform.LowerSharedBarrier()(mod)
+    mod = tilelang.cuda.transform.LowerSharedBarrier()(mod)
 
     # @CUDA-specific
     has_tma = module_has_tma(mod)
     if has_tma:
-        mod = tilelang.transform.FuseMBarrierArriveExpectTx()(mod)
+        mod = tilelang.cuda.transform.FuseMBarrierArriveExpectTx()(mod)
 
     mod = tilelang.transform.HoistGlobalBufferAllocations()(mod)
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
@@ -166,7 +166,7 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
 
     # @CUDA-specific
-    mod = tilelang.transform.LowerLDGSTG()(mod)
+    mod = tilelang.cuda.transform.LowerLDGSTG()(mod)
     mod = tilelang.cuda.transform.LowerHopperIntrin()(mod)
 
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
@@ -174,7 +174,7 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
 
     # @CUDA-specific
     # Mark the function contains pdl_sync or pdl_trigger
-    mod = tilelang.transform.MarkCudaSyncCalls(have_pdl(target))(mod)
+    mod = tilelang.cuda.transform.MarkCudaSyncCalls(have_pdl(target))(mod)
     mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
 
     # MergeSharedMemoryAllocations must be applied after SplitHostDevice
@@ -186,7 +186,7 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     # @CUDA-specific
     # InjectFenceProxy is a no-op on targets that lack the TMA / async-proxy
     # programming model; the pass itself checks the PrimFunc's target.
-    mod = tilelang.transform.InjectFenceProxy()(mod)
+    mod = tilelang.cuda.transform.InjectFenceProxy()(mod)
 
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
@@ -196,14 +196,14 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     # Must run after ThreadSync so that tvm_storage_sync calls are present.
     # The pass handles shared syncs and simple linear wait/use, use/arrive
     # handoffs, and is a no-op on non-SM100 targets or functions without TMEM.
-    mod = tilelang.transform.InjectTcgen05Fence()(mod)
+    mod = tilelang.cuda.transform.InjectTcgen05Fence()(mod)
 
     mod = tilelang.transform.MergeIfStmt()(mod)
 
     # @CUDA-specific
     # NOTE: LowerPTXAsyncCopy is applied earlier (before PipelinePlanning).
     if allow_warp_specialized(pass_ctx=pass_ctx, target=target):
-        mod = tilelang.transform.AnnotateWarpGroupRegAlloc()(mod)
+        mod = tilelang.cuda.transform.AnnotateWarpGroupRegAlloc()(mod)
 
     mod = tilelang.transform.MakePackedAPI()(mod)
     mod = tilelang.transform.Simplify()(mod)

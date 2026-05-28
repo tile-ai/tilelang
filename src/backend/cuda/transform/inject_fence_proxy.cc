@@ -20,8 +20,8 @@
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
 
-#include "../op/builtin.h"
-#include "../target/utils.h"
+#include "op/builtin.h"
+#include "target/utils.h"
 
 namespace tvm {
 namespace tl {

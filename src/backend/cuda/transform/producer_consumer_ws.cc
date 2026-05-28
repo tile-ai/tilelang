@@ -32,17 +32,17 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include "../backend/cuda/op/copy.h"
-#include "../op/builtin.h"
-#include "../op/copy.h"
-#include "../op/fill.h"
-#include "../op/gemm.h"
-#include "../op/operator.h"
-#include "../op/region.h"
-#include "../op/utils.h"
-#include "../target/utils.h"
-#include "common/mbarrier.h"
-#include "multi_version_buffer_rewriter.h"
+#include "backend/cuda/op/copy.h"
+#include "backend/cuda/transform/multi_version_buffer_rewriter.h"
+#include "op/builtin.h"
+#include "op/copy.h"
+#include "op/fill.h"
+#include "op/gemm.h"
+#include "op/operator.h"
+#include "op/region.h"
+#include "op/utils.h"
+#include "target/utils.h"
+#include "transform/common/mbarrier.h"
 
 namespace tvm {
 namespace tl {

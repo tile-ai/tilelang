@@ -18,13 +18,13 @@
 #include <utility>
 #include <vector>
 
-#include "../layout/layout.h"
-#include "../op/builtin.h"
-#include "../op/operator.h"
-#include "../op/region.h"
-#include "../op/utils.h"
-#include "common/pipeline_utils.h"
-#include "multi_version_buffer_rewriter.h"
+#include "backend/cuda/transform/multi_version_buffer_rewriter.h"
+#include "layout/layout.h"
+#include "op/builtin.h"
+#include "op/operator.h"
+#include "op/region.h"
+#include "op/utils.h"
+#include "transform/common/pipeline_utils.h"
 
 namespace tvm {
 namespace tl {

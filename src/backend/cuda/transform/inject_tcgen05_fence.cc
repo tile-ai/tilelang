@@ -38,8 +38,8 @@
 
 #include <utility>
 
-#include "../op/builtin.h"
-#include "../target/utils.h"
+#include "op/builtin.h"
+#include "target/utils.h"
 
 namespace tvm {
 namespace tl {
