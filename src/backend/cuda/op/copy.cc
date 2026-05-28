@@ -42,9 +42,17 @@ PrimExpr MakeTmaLeaderCondition(PrimExpr thread_extent) {
   return Call(DataType::Bool(), tl_shuffle_elect(), {std::move(thread_extent)});
 }
 
-PrimExpr TMABytesFromElements(PrimExpr elements, DataType dtype) {
+int TMATransactionElementBits(DataType dtype) {
+  // float4_e2m1_unpacked stores one logical FP4 value per 8-bit SMEM slot,
+  // but TMA/mbarrier transaction counts reflect the moved FP4 payload (4b).
+  if (dtype.is_float4_e2m1_unpacked()) {
+    return 4;
+  }
+  return dtype.bits();
+}
+
+PrimExpr TMABytesFromElements(PrimExpr elements, DataType dtype, int bits) {
   PrimExpr elements_i64 = cast(DataType::Int(64), elements);
-  int bits = dtype.bits();
   if (bits % 8 == 0) {
     return elements_i64 * IntImm(DataType::Int(64), bits / 8);
   }
@@ -53,8 +61,26 @@ PrimExpr TMABytesFromElements(PrimExpr elements, DataType dtype) {
                   IntImm(DataType::Int(64), 8));
 }
 
+int64_t TMABytesFromElements(int64_t elements, DataType dtype, int bits) {
+  return (elements * bits + 7) / 8;
+}
+
+PrimExpr TMABytesFromElements(PrimExpr elements, DataType dtype) {
+  return TMABytesFromElements(elements, dtype, dtype.bits());
+}
+
 int64_t TMABytesFromElements(int64_t elements, DataType dtype) {
-  return (elements * dtype.bits() + 7) / 8;
+  return TMABytesFromElements(elements, dtype, dtype.bits());
+}
+
+PrimExpr TMATransactionBytesFromElements(PrimExpr elements, DataType dtype) {
+  return TMABytesFromElements(elements, dtype,
+                              TMATransactionElementBits(dtype));
+}
+
+int64_t TMATransactionBytesFromElements(int64_t elements, DataType dtype) {
+  return TMABytesFromElements(elements, dtype,
+                              TMATransactionElementBits(dtype));
 }
 
 int64_t TMAElementsForBytes(int64_t bytes, DataType dtype) {
@@ -335,7 +361,7 @@ private:
   static Layout ComputeLinearLayout(const Buffer &shared_tensor);
 
   static void CollectFragmentLayouts(const PrimExpr &expr,
-                                     const Map<Var, PrimExpr> &let_var_to_expr,
+                                     const Map<Var, PrimExpr> &bind_var_to_expr,
                                      const LayoutMap &existing_layouts,
                                      PrimExpr thread_extent,
                                      Range thread_bounds,
@@ -401,7 +427,7 @@ Layout Copy::ComputeLinearLayout(const Buffer &shared_tensor) {
 }
 
 void Copy::CollectFragmentLayouts(const PrimExpr &expr,
-                                  const Map<Var, PrimExpr> &let_var_to_expr,
+                                  const Map<Var, PrimExpr> &bind_var_to_expr,
                                   const LayoutMap &existing_layouts,
                                   PrimExpr thread_extent, Range thread_bounds,
                                   Map<Buffer, Layout> &result_map) {
@@ -414,8 +440,8 @@ void Copy::CollectFragmentLayouts(const PrimExpr &expr,
       }
     } else if (auto var_node = node.as<VarNode>()) {
       auto var = GetRef<Var>(var_node);
-      if (let_var_to_expr.count(var)) {
-        CollectFragmentLayouts(let_var_to_expr[var], let_var_to_expr,
+      if (bind_var_to_expr.count(var)) {
+        CollectFragmentLayouts(bind_var_to_expr[var], bind_var_to_expr,
                                existing_layouts, thread_extent, thread_bounds,
                                result_map);
       }
@@ -545,15 +571,15 @@ LayoutMap Copy::InferBulkLayout(const CopyNode &op, const LayoutInferArgs &T,
   // Fragment buffers used as TMA indices should be replicated on all threads.
   PrimExpr thread_extent = T.thread_bounds->extent;
   for (const auto &range : op.src_range) {
-    CollectFragmentLayouts(range->min, T.let_var_to_expr, T.layout_map,
+    CollectFragmentLayouts(range->min, T.bind_var_to_expr, T.layout_map,
                            thread_extent, T.thread_bounds, result_map);
-    CollectFragmentLayouts(range->extent, T.let_var_to_expr, T.layout_map,
+    CollectFragmentLayouts(range->extent, T.bind_var_to_expr, T.layout_map,
                            thread_extent, T.thread_bounds, result_map);
   }
   for (const auto &range : op.dst_range) {
-    CollectFragmentLayouts(range->min, T.let_var_to_expr, T.layout_map,
+    CollectFragmentLayouts(range->min, T.bind_var_to_expr, T.layout_map,
                            thread_extent, T.thread_bounds, result_map);
-    CollectFragmentLayouts(range->extent, T.let_var_to_expr, T.layout_map,
+    CollectFragmentLayouts(range->extent, T.bind_var_to_expr, T.layout_map,
                            thread_extent, T.thread_bounds, result_map);
   }
 
@@ -1656,10 +1682,11 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     PrimExpr total_bytes;
     if ((*inner_box_dim) != instruction_dim) {
       int loop_extent = (*inner_box_dim) / instruction_dim;
-      total_bytes = TMABytesFromElements(total_elements * loop_extent,
-                                         shared_tensor->dtype);
+      total_bytes = TMATransactionBytesFromElements(
+          total_elements * loop_extent, shared_tensor->dtype);
     } else {
-      total_bytes = TMABytesFromElements(total_elements, shared_tensor->dtype);
+      total_bytes =
+          TMATransactionBytesFromElements(total_elements, shared_tensor->dtype);
     }
 
     Stmt barrier_before_tma_stmt;
@@ -1959,7 +1986,8 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
   }
 
   Stmt tma_copy;
-  PrimExpr total_bytes = TMABytesFromElements(elements, shared_tensor->dtype);
+  PrimExpr total_bytes =
+      TMATransactionBytesFromElements(elements, shared_tensor->dtype);
   if (is_load) {
     PrimExpr mbar_arg = barrier_base_id >= 0 ? mbar_handle : PrimExpr(0);
     tma_copy = Evaluate(Call(DataType::Handle(), tma_load(),

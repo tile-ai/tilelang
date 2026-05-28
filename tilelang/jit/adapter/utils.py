@@ -13,10 +13,8 @@ from tilelang.engine.lower import (
     canon_target_host,
     is_cpu_device_backend,
 )
-from tilelang.engine.phase import (
-    LowerAndLegalize,
-    OptimizeForTarget,
-)
+from tilelang.backend.pipeline import resolve_pipeline
+from tilelang.engine.semantic_check import PreLowerSemanticCheck
 
 
 def match_global_kernel(source: str, annotation: str = "__global__") -> int:
@@ -141,8 +139,8 @@ def get_annotated_mod(
     _is_device_call = get_device_call(is_device_c=is_cpu_device_backend(target))
 
     # Apply transformations
-    mod = LowerAndLegalize(mod, target)
-    mod = OptimizeForTarget(mod, target)
+    PreLowerSemanticCheck(mod)
+    mod = resolve_pipeline(target).lower(mod, target)
 
     # Define dispatch dictionary for different model types
     dispatch = {

@@ -330,6 +330,36 @@ def _make_nan_reduce_kernel(reduce_fn, M, N, dtype, threads, *, nan_propagate):
 
 
 @tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8, 9)
+def test_reduce_packed_fp8_to_float16_absmax_runtime():
+    if not hasattr(torch, "float8_e4m3fn"):
+        pytest.skip("torch.float8_e4m3fn is not available")
+
+    @T.prim_func
+    def kernel(A: T.Tensor((4, 32), T.float8_e4m3fn), B: T.Tensor((4,), T.float16)):
+        with T.Kernel(1, threads=32):
+            src = T.alloc_fragment((4, 32), T.float8_e4m3fn)
+            dst = T.alloc_fragment((4,), T.float16)
+            T.copy(A, src)
+            T.reduce_absmax(src, dst, dim=1)
+            T.copy(dst, B)
+
+    k = _compile(kernel)
+    source = k.get_kernel_source()
+    assert "from_uint1<__half2>(*(fp8" not in source
+
+    base = torch.linspace(-2.0, 2.0, 128, device="cuda", dtype=torch.float16).reshape(4, 32)
+    base[0, 3] = -7.0
+    base[1, 17] = 5.5
+    base[2, 31] = -3.25
+    base[3, 0] = 4.0
+    A = base.to(torch.float8_e4m3fn)
+    B = k(A)
+    ref = A.to(torch.float16).abs().amax(dim=1)
+    torch.testing.assert_close(B, ref, atol=0, rtol=0)
+
+
+@tilelang.testing.requires_cuda
 def test_reduce_packed_max_nan_propagate_uses_nan_intrinsics():
     k = _compile(_make_nan_reduce_kernel(T.reduce_max, 128, 128, T.float16, threads=256, nan_propagate=True))
     src = k.get_kernel_source()

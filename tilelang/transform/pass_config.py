@@ -170,6 +170,17 @@ class PassConfigKey(str, Enum):
     This is more aggressive and may increase code size. Default: False.
     """
 
+    TL_IF_STMT_BINDING_INLINE_REPLAYABLE_BINDS = "tl.if_stmt_binding_inline_replayable_binds"
+    """Inline replayable scalar Bind statements while distributing if conditions.
+
+    When True (default), IfStmtBinding may rewrite a guarded sequence such as
+    ``if cond: idx = ids[i]; copy(idx); gemm()`` into separately guarded
+    statements with ``idx`` substituted at each use, provided the Bind does not
+    read a buffer written inside the same guarded body. This exposes copy and
+    compute statements to pipeline planning while preserving non-replayable
+    Bind scopes.
+    """
+
     TL_DISABLE_THREAD_STORAGE_SYNC = "tl.disable_thread_storage_sync"
     """Disable thread storage synchronization pass. When enabled, disables the
     automatic insertion of thread synchronization barriers (e.g., __syncthreads())

@@ -146,12 +146,12 @@ TileOperator ParallelOpNode::Clone() const {
   return ParallelOp(op);
 }
 
-void ParallelOpNode::ExpandLetBindings(
-    const Map<Var, PrimExpr> &let_var_to_expr) {
-  if (let_var_to_expr.empty())
+void ParallelOpNode::ExpandBindValues(
+    const Map<Var, PrimExpr> &bind_var_to_expr) {
+  if (bind_var_to_expr.empty())
     return;
 
-  // Helper function to recursively find BufferLoads through let bindings
+  // Helper function to recursively find BufferLoads through Bind values
   std::function<void(const PrimExpr &)> expand = [&](const PrimExpr &expr) {
     PostOrderVisit(expr, [&](const ObjectRef &node) {
       if (auto bl = node.as<BufferLoadNode>()) {
@@ -160,14 +160,14 @@ void ParallelOpNode::ExpandLetBindings(
         }
       } else if (auto var_node = node.as<VarNode>()) {
         auto var = GetRef<Var>(var_node);
-        if (let_var_to_expr.count(var)) {
-          expand(let_var_to_expr[var]);
+        if (bind_var_to_expr.count(var)) {
+          expand(bind_var_to_expr[var]);
         }
       }
     });
   };
 
-  // Only expand let bindings that are used in root_
+  // Only expand Bind values that are used in root_
   // First, collect all vars used in root_
   std::unordered_set<const VarNode *> used_vars;
   PostOrderVisit(root_, [&](const ObjectRef &node) {
@@ -176,8 +176,8 @@ void ParallelOpNode::ExpandLetBindings(
     }
   });
 
-  // Only expand let bindings for vars that are actually used in root_
-  for (const auto &[var, expr] : let_var_to_expr) {
+  // Only expand Bind values for vars that are actually used in root_
+  for (const auto &[var, expr] : bind_var_to_expr) {
     if (used_vars.count(var.get())) {
       expand(expr);
     }
@@ -262,9 +262,9 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
   if (loop_layout_inferred_)
     return {};
 
-  // Expand let bindings to find fragment buffer accesses
-  if (!T.let_var_to_expr.empty()) {
-    const_cast<ParallelOpNode *>(this)->ExpandLetBindings(T.let_var_to_expr);
+  // Expand Bind values to find fragment buffer accesses
+  if (!T.bind_var_to_expr.empty()) {
+    const_cast<ParallelOpNode *>(this)->ExpandBindValues(T.bind_var_to_expr);
   }
 
   if (level == InferLevel::kStrict) {
@@ -672,21 +672,51 @@ Fragment ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &T) const {
   // As the pass will do post processing to the layout
   auto maybe_remapped_root_ =
       IfBufferRemapLoopGenerator::run(root_, T.buffer_remap, T.layout_map);
-  int vector_size =
+  int initial_vector_size =
       GetVectorizeSize(maybe_remapped_root_, T.analyzer, T.layout_map);
-  DLOG(INFO) << "[PlanLoopPartition] vector_size = " << vector_size << '\n';
+  DLOG(INFO) << "[PlanLoopPartition] vector_size = " << initial_vector_size
+             << '\n';
 
   PrimExpr loop_total_size = 1;
   for (Stmt l = root_; l.as<For>().has_value(); l = l.as<For>().value()->body)
     loop_total_size = loop_total_size * l.as<For>().value()->extent;
   DLOG(INFO) << "[PlanLoopPartition] loop_total_size = " << loop_total_size
              << '\n';
-  while (!analyzer_.CanProve(floormod(loop_total_size, T.thread_bounds->extent *
-                                                           vector_size) == 0) &&
-         vector_size > 1)
+  const int64_t *thread_extent = as_const_int(T.thread_bounds->extent);
+  ICHECK(thread_extent != nullptr)
+      << "PlanLoopPartition requires constant thread extent, got "
+      << T.thread_bounds;
+  bool require_full_thread_replication = !indice_map_.empty();
+  auto has_full_thread_partition = [&](int candidate_vector_size) {
+    PrimExpr partition_width =
+        T.thread_bounds->extent *
+        make_const(T.thread_bounds->extent.dtype(), candidate_vector_size);
+    return analyzer_.CanProve(floormod(loop_total_size, partition_width) == 0);
+  };
+  auto has_active_thread_partition = [&](int candidate_vector_size) {
+    return SelectActiveThreadExtent(root_, *thread_extent,
+                                    candidate_vector_size, &analyzer_,
+                                    require_full_thread_replication) > 0;
+  };
+
+  // Preserve the original layout strategy when possible: lower the vector
+  // width first so all block threads participate.  Active-thread partitioning
+  // is a fallback for genuinely ragged thread counts, because fragment layouts
+  // may replicate active partitions across the full block and duplicate work.
+  int vector_size = initial_vector_size;
+  bool use_active_thread_fallback = false;
+  while (!has_full_thread_partition(vector_size) && vector_size > 1)
     vector_size /= 2;
+  if (!has_full_thread_partition(vector_size)) {
+    use_active_thread_fallback = true;
+    vector_size = initial_vector_size;
+    while (!has_active_thread_partition(vector_size) && vector_size > 1)
+      vector_size /= 2;
+  }
   DLOG(INFO) << "[PlanLoopPartition] after adjust: vector_size = "
-             << vector_size << '\n';
+             << vector_size
+             << ", fallback_active_threads=" << use_active_thread_fallback
+             << '\n';
 
   // Check if coalesced_width is defined
   if (auto coalesced_width = root_->annotations.Get(attr::kCoalescedWidth)) {
@@ -702,10 +732,23 @@ Fragment ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &T) const {
       LOG(FATAL) << "coalesced_width should be an IntImmNode.";
     }
   }
+  if (!use_active_thread_fallback && !has_full_thread_partition(vector_size)) {
+    use_active_thread_fallback = true;
+  }
+  ICHECK(use_active_thread_fallback ? has_active_thread_partition(vector_size)
+                                    : has_full_thread_partition(vector_size))
+      << "Cannot find "
+      << (use_active_thread_fallback ? "an active" : "a full-block")
+      << " thread extent <= " << *thread_extent
+      << " that evenly partitions loop_total_size=" << loop_total_size
+      << " with vector_size=" << vector_size;
   DLOG(INFO) << "[PlanLoopPartition] root_ = " << root_
              << " ############# vector_size = " << vector_size
-             << ", thread_bounds = " << T.thread_bounds << '\n';
-  auto plan = PlanLoopPartition(root_, vector_size, T.thread_bounds);
+             << ", thread_bounds = " << T.thread_bounds
+             << ", fallback_active_threads=" << use_active_thread_fallback
+             << '\n';
+  auto plan = PlanLoopPartition(root_, vector_size, T.thread_bounds, &analyzer_,
+                                require_full_thread_replication);
   DLOG(INFO) << "[PlanLoopPartition] candidate = " << plan->DebugOutput()
              << '\n';
   return plan;

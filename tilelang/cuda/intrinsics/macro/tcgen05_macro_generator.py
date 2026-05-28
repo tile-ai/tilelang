@@ -977,6 +977,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 mask_zero,
                 mask_zero,
                 mask_zero,
+                enable_2cta,
             )
 
         return _ts_atom(a_tmem_data, desc_b, C_local_buf)
