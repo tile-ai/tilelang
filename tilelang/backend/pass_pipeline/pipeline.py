@@ -8,8 +8,8 @@ from tvm.target import Target
 LowerFunc = Callable[[IRModule, Target], IRModule]
 
 
-class Pipeline:
-    """Lowering pipeline for a specific backend.
+class PassPipeline:
+    """Lowering pass pipeline for a specific backend.
 
     Each backend should register its own Pipeline so that the compiler can
     resolve the correct pass sequence from the target at runtime.
@@ -23,10 +23,10 @@ class Pipeline:
         return self._lower(mod, target)
 
 
-_PIPELINES: dict[str, Pipeline] = {}
+_PIPELINES: dict[str, PassPipeline] = {}
 
 
-def register_pipeline(pipeline: Pipeline) -> Pipeline:
+def register_pipeline(pipeline: PassPipeline) -> PassPipeline:
     """Register a lowering pipeline for a backend.
 
     The pipeline name should match ``target.kind.name`` (e.g. ``"cuda"``,
@@ -36,13 +36,13 @@ def register_pipeline(pipeline: Pipeline) -> Pipeline:
     return pipeline
 
 
-def get_pipeline(name: str) -> Pipeline:
+def get_pipeline(name: str) -> PassPipeline:
     """Return the registered Pipeline for *name*."""
     if name not in _PIPELINES:
         raise ValueError(f"No pipeline registered for backend '{name}'. Available backends: {list(_PIPELINES.keys())}")
     return _PIPELINES[name]
 
 
-def resolve_pipeline(target: Target) -> Pipeline:
+def resolve_pipeline(target: Target) -> PassPipeline:
     """Resolve the lowering pipeline from a TVM target."""
     return get_pipeline(target.kind.name)

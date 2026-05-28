@@ -4,8 +4,8 @@ from tvm import IRModule, s_tir, tirx
 from tvm.target import Target
 
 import tilelang
-from tilelang.backend.pipeline import Pipeline, register_pipeline
-from tilelang.backend.pipeline_utils import (
+from tilelang.backend.pass_pipeline import PassPipeline, register_pipeline
+from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
     allow_vectorize,
     should_disable_shared_memory_reuse,
@@ -85,4 +85,4 @@ def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
 
 
 for _kind in ("c", "llvm"):
-    register_pipeline(Pipeline(_kind, CPUPassPipelineBody))
+    register_pipeline(PassPipeline(_kind, CPUPassPipelineBody))

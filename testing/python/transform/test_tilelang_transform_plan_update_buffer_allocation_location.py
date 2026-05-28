@@ -2,7 +2,7 @@ import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
-from tilelang.backend.cuda.pipeline import CUDAPassPipelineBodyPrologue
+from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
 
 
 def _apply_plan_update(func: tvm.tirx.PrimFunc) -> tvm.IRModule:

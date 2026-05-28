@@ -4,7 +4,7 @@ import tilelang as tl
 from tilelang.utils.target import determine_target
 import tilelang.language as T
 import tilelang.testing
-from tilelang.backend.cuda.pipeline import CUDAPassPipelineBodyPrologue
+from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
 from tvm import tirx
 
 auto_target = tvm.target.Target(determine_target("auto"))

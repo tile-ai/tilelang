@@ -4,8 +4,8 @@ from tvm import IRModule, s_tir, tirx
 from tvm.target import Target
 
 import tilelang
-from tilelang.backend.pipeline import Pipeline, register_pipeline
-from tilelang.backend.pipeline_utils import (
+from tilelang.backend.pass_pipeline import PassPipeline, register_pipeline
+from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
     allow_vectorize,
     should_disable_shared_memory_reuse,
@@ -84,6 +84,6 @@ def ROCMPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     return mod
 
 
-rocm_pipeline = Pipeline("hip", ROCMPassPipelineBody)
+rocm_pipeline = PassPipeline("hip", ROCMPassPipelineBody)
 
 register_pipeline(rocm_pipeline)

@@ -2,7 +2,7 @@
 from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
-from tilelang.backend.cuda.pipeline import CUDAPassPipelineBodyPrologue
+from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
 from tvm import tirx
 
 

@@ -12,7 +12,7 @@ Verifies that:
 import tilelang as tl
 import tilelang.language as T
 from tilelang import tvm
-from tilelang.backend.cuda.pipeline import CUDAPassPipelineBodyPrologue
+from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
 from tvm.tirx.stmt_functor import post_order_visit
 import tilelang.testing
 

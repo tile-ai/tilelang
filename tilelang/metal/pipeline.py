@@ -4,8 +4,8 @@ from tvm import IRModule, s_tir, tirx
 from tvm.target import Target
 
 import tilelang
-from tilelang.backend.pipeline import Pipeline, register_pipeline
-from tilelang.backend.pipeline_utils import (
+from tilelang.backend.pass_pipeline.pipeline import PassPipeline, register_pipeline
+from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
     allow_vectorize,
     should_disable_shared_memory_reuse,
@@ -13,7 +13,7 @@ from tilelang.backend.pipeline_utils import (
     should_enable_race_check,
     should_force_let_inline,
 )
-from tilelang.transform.metal import MetalFragmentToSimdgroup
+from tilelang.metal.transform import MetalFragmentToSimdgroup
 
 
 def MetalPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
@@ -86,6 +86,6 @@ def MetalPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     return mod
 
 
-metal_pipeline = Pipeline("metal", MetalPassPipelineBody)
+metal_pipeline = PassPipeline("metal", MetalPassPipelineBody)
 
 register_pipeline(metal_pipeline)
