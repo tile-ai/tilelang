@@ -13,11 +13,10 @@ from tvm.target import Target
 from tilelang.contrib import hipcc, nvcc
 from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
 from tilelang.transform import PassConfigKey
-from tilelang.transform.metal import MarkHostMetalContext
 from tilelang.engine.param import KernelParam, CompiledArtifact
 from tilelang.engine.semantic_check import PreLowerSemanticCheck
 from tilelang.utils.target import determine_target, target_get_mcpu
-from tilelang.backend.pipeline import resolve_pipeline
+from tilelang.backend.pass_pipeline import resolve_pipeline
 
 
 def is_cpu_device_backend(target: Target):
@@ -216,6 +215,8 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target, target: Target | N
     if combine_context_call is not None:
         host_mod = combine_context_call()(host_mod)
     if target is not None and target.kind.name == "metal":
+        from tilelang.metal.transform import MarkHostMetalContext
+
         host_mod = MarkHostMetalContext()(host_mod)
     if target_host.kind.name == "llvm":
         host_mod = tvm.ffi.get_global_func("target.build.llvm")(host_mod, target_host)

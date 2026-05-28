@@ -4,7 +4,7 @@ import tilelang.language as T
 from tilelang import tvm
 from tvm import tirx
 from tvm.tirx import op
-from tilelang.backend.cuda.pipeline import CUDAPassPipelineBodyPrologue
+from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
 from tilelang.transform import LowerAccessPtr
 
 

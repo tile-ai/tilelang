@@ -13,7 +13,7 @@ from tilelang.engine.lower import (
     canon_target_host,
     is_cpu_device_backend,
 )
-from tilelang.backend.pipeline import resolve_pipeline
+from tilelang.backend.pass_pipeline.pipeline import resolve_pipeline
 from tilelang.engine.semantic_check import PreLowerSemanticCheck
 
 
