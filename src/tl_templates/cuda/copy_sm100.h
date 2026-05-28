@@ -1802,7 +1802,6 @@ tcgen05_producer_warp_1sm_reuse3(
   auto *mb_q0 = reinterpret_cast<Barrier *>(const_cast<void *>(mbar_q0));
   auto *mb_q1 = reinterpret_cast<Barrier *>(const_cast<void *>(mbar_q1));
   tl::tcgen05_arrive_expect_tx(mbar_q0, kQBytes);
-  tl::fence_proxy_async();
   tl::tma_load(Q_desc, *mb_q0, q0, 0, q_head, q_row_base, batch);
   tl::tma_load(Q_desc, *mb_q0, q0 + kBlockM * kTileCols, 64, q_head,
                q_row_base, batch);
