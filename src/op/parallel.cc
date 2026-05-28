@@ -146,12 +146,12 @@ TileOperator ParallelOpNode::Clone() const {
   return ParallelOp(op);
 }
 
-void ParallelOpNode::ExpandLetBindings(
-    const Map<Var, PrimExpr> &let_var_to_expr) {
-  if (let_var_to_expr.empty())
+void ParallelOpNode::ExpandBindValues(
+    const Map<Var, PrimExpr> &bind_var_to_expr) {
+  if (bind_var_to_expr.empty())
     return;
 
-  // Helper function to recursively find BufferLoads through let bindings
+  // Helper function to recursively find BufferLoads through Bind values
   std::function<void(const PrimExpr &)> expand = [&](const PrimExpr &expr) {
     PostOrderVisit(expr, [&](const ObjectRef &node) {
       if (auto bl = node.as<BufferLoadNode>()) {
@@ -160,14 +160,14 @@ void ParallelOpNode::ExpandLetBindings(
         }
       } else if (auto var_node = node.as<VarNode>()) {
         auto var = GetRef<Var>(var_node);
-        if (let_var_to_expr.count(var)) {
-          expand(let_var_to_expr[var]);
+        if (bind_var_to_expr.count(var)) {
+          expand(bind_var_to_expr[var]);
         }
       }
     });
   };
 
-  // Only expand let bindings that are used in root_
+  // Only expand Bind values that are used in root_
   // First, collect all vars used in root_
   std::unordered_set<const VarNode *> used_vars;
   PostOrderVisit(root_, [&](const ObjectRef &node) {
@@ -176,8 +176,8 @@ void ParallelOpNode::ExpandLetBindings(
     }
   });
 
-  // Only expand let bindings for vars that are actually used in root_
-  for (const auto &[var, expr] : let_var_to_expr) {
+  // Only expand Bind values for vars that are actually used in root_
+  for (const auto &[var, expr] : bind_var_to_expr) {
     if (used_vars.count(var.get())) {
       expand(expr);
     }
@@ -263,9 +263,9 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     return {};
   loop_layout_requires_padding_guard_ = false;
 
-  // Expand let bindings to find fragment buffer accesses
-  if (!T.let_var_to_expr.empty()) {
-    const_cast<ParallelOpNode *>(this)->ExpandLetBindings(T.let_var_to_expr);
+  // Expand Bind values to find fragment buffer accesses
+  if (!T.bind_var_to_expr.empty()) {
+    const_cast<ParallelOpNode *>(this)->ExpandBindValues(T.bind_var_to_expr);
   }
 
   if (level == InferLevel::kStrict) {
