@@ -10,6 +10,7 @@ from tvm.tir import FloatImm, tvm_tuple
 __all__ = [
     "use_swizzle",
     "use_2cta_tmem",
+    "device_func",
     "annotate_layout",
     "annotate_safe_value",
     "annotate_l2_hit_ratio",
@@ -31,6 +32,18 @@ def use_2cta_tmem(enable: bool = True):
     if not enable:
         return None
     return block_attr({"use_2cta": 1, "mbarrier_init_thread": 416})
+
+
+def device_func(enable: bool = True):
+    """Outline the following statement subtree as a CUDA device function.
+
+    This is intentionally a codegen-only control surface. It preserves the DSL
+    body but emits it as a separate `static __device__ __noinline__` helper so
+    ptxas can allocate registers independently from the caller.
+    """
+    if not enable:
+        return None
+    return attr(None, "tl.device_func", 1)
 
 
 def annotate_layout(layout_map: dict):

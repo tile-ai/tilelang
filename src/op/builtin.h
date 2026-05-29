@@ -62,6 +62,9 @@ static constexpr const char *kMinBlocksPerSM = "tl.min_blocks_per_sm";
 // giving the underlying compiler accurate variable lifetime information for
 // register allocation.
 static constexpr const char *kLexicalAllocScope = "lexical_alloc_scope";
+// Codegen-only marker: outline the annotated statement subtree into a
+// `static __device__ __noinline__` helper and emit a call at the original site.
+static constexpr const char *kDeviceFuncScope = "tl.device_func";
 } // namespace attr
 
 inline Optional<PrimExpr>
@@ -1210,6 +1213,13 @@ TVM_DLL const Op &tcgen05_softmax_warp_1sm();
 TVM_DLL const Op &tcgen05_qk_gemm_128x128_skv_noguard();
 
 /*!
+ * \brief Avo-exact QK MMA for one Q stage and one shared K/V stage. Caller
+ * must already restrict execution to lane 0 of the MMA warp.
+ * Args: Q_stage_ptr, KV_stage_ptr, S_tmem_addr, mbar
+ */
+TVM_DLL const Op &tcgen05_qk_gemm_128x128_skv_lane0();
+
+/*!
  * \brief Avo-exact PV MMA: 128x64 BMN, high D first, low D second.
  * Args: V_shared_ptr, P_tmem_addr, O_tmem_addr, accumulate(int)
  */
@@ -1230,6 +1240,13 @@ TVM_DLL const Op &tcgen05_pv_gemm_128x64_skv();
  * Args: V_stage_ptr, P_tmem_addr, O_tmem_addr, accumulate(int)
  */
 TVM_DLL const Op &tcgen05_pv_gemm_128x64_skv_noguard();
+
+/*!
+ * \brief Avo-exact PV MMA for one shared K/V stage. Caller must already
+ * restrict execution to lane 0 of the MMA warp.
+ * Args: V_stage_ptr, P_tmem_addr, O_tmem_addr, accumulate(int)
+ */
+TVM_DLL const Op &tcgen05_pv_gemm_128x64_skv_lane0();
 
 /*!
  * \brief Avo-style full MMA warp loop for FA4 1SM split attention.
@@ -1267,6 +1284,31 @@ TVM_DLL const Op &tcgen05_producer_warp_1sm_reuse3();
 TVM_DLL const Op &tcgen05_mma_warp_1sm_reuse3();
 
 /*!
+ * \brief Return the selected reuse3 K/V shared-memory stage pointer.
+ * Args: stage0_ptr, stage1_ptr, stage2_ptr, stage(int)
+ */
+TVM_DLL const Op &tcgen05_reuse3_stage_ptr();
+
+/*!
+ * \brief Return the selected reuse3 barrier pointer.
+ * Args: mbar0, mbar1, mbar2, stage(int)
+ */
+TVM_DLL const Op &tcgen05_reuse3_barrier_ptr();
+
+/*!
+ * \brief Wait on a raw mbarrier pointer returned by
+ * tcgen05_reuse3_barrier_ptr.
+ * Args: mbar_ptr, phase
+ */
+TVM_DLL const Op &tcgen05_wait_barrier_ptr();
+
+/*!
+ * \brief Wait on an mbarrier using the compact SM100 helper call.
+ * Args: mbar, phase
+ */
+TVM_DLL const Op &tcgen05_wait_barrier_op();
+
+/*!
  * \brief Avo-style epilogue TMA-store warp for FA4 1SM split attention.
  *
  * The CUDA lowering wires this primitive to the kernel's Output TMA descriptor
@@ -1281,6 +1323,13 @@ TVM_DLL const Op &tcgen05_epilogue_warp_1sm_skv();
  * Args: mbar_ptr
  */
 TVM_DLL const Op &tcgen05_commit_1sm_op();
+
+/*!
+ * \brief Avo-exact 1SM tcgen05 commit. Caller must already restrict execution
+ * to lane 0 of the MMA warp.
+ * Args: mbar_ptr
+ */
+TVM_DLL const Op &tcgen05_commit_1sm_lane0_op();
 
 /*!
  * \brief Avo-style 2CTA softmax warp role for FA4 attention.

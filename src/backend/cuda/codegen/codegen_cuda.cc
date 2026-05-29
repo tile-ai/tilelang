@@ -856,6 +856,53 @@ tir::Stmt ExtractLeadingSetMaxNReg(const tir::Stmt &body,
   }
   return MakeSeqOrNoOp(std::move(rest));
 }
+
+bool IsLoopVarEqualZero(const PrimExpr &cond, const VarNode *loop_var) {
+  const auto *eq = cond.as<EQNode>();
+  if (!eq) {
+    return false;
+  }
+  auto is_loop_var = [loop_var](const PrimExpr &expr) {
+    const auto *var = expr.as<VarNode>();
+    return var && var == loop_var;
+  };
+  return (is_loop_var(eq->a) && is_const_int(eq->b, 0)) ||
+         (is_loop_var(eq->b) && is_const_int(eq->a, 0));
+}
+
+Optional<tir::Stmt> MatchOneShotDeviceFunc(const tir::Stmt &body,
+                                           const VarNode *loop_var) {
+  if (const auto *seq = body.as<tir::SeqStmtNode>()) {
+    Optional<tir::Stmt> matched;
+    for (const auto &stmt : seq->seq) {
+      if (IsNoOpEvaluate(stmt)) {
+        continue;
+      }
+      if (matched.defined()) {
+        return Optional<tir::Stmt>();
+      }
+      matched = MatchOneShotDeviceFunc(stmt, loop_var);
+      if (!matched.defined()) {
+        return Optional<tir::Stmt>();
+      }
+    }
+    return matched;
+  }
+
+  const auto *if_stmt = body.as<tir::IfThenElseNode>();
+  if (!if_stmt || !IsLoopVarEqualZero(if_stmt->condition, loop_var)) {
+    return Optional<tir::Stmt>();
+  }
+  if (if_stmt->else_case.defined() &&
+      !IsNoOpEvaluate(if_stmt->else_case.value())) {
+    return Optional<tir::Stmt>();
+  }
+  const auto *attr = if_stmt->then_case.as<tir::AttrStmtNode>();
+  if (!attr || attr->attr_key != tl::attr::kDeviceFuncScope) {
+    return Optional<tir::Stmt>();
+  }
+  return attr->body;
+}
 }  // namespace
 
 void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
@@ -880,16 +927,33 @@ void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
       std::vector<std::string> fn_names;
       std::vector<std::vector<tir::Stmt>> branch_prologues;
       std::vector<tir::Stmt> outlined_bodies;
+      std::vector<bool> one_shot_device_func;
       for (const auto &branch : branches) {
-        std::string fn_name =
-            "__outlined_warp_fn_" + std::to_string(outlined_fn_count_);
-        outlined_fn_count_++;
-        fn_names.push_back(fn_name);
         std::vector<tir::Stmt> prologue;
         tir::Stmt outlined_body =
             ExtractLeadingSetMaxNReg(branch.body, &prologue);
         branch_prologues.push_back(std::move(prologue));
+
+        // A role branch of the form `if (k == 0) { with T.device_func(): ... }`
+        // should become a single DSL-authored device function call. Emitting the
+        // usual wrapper would leave an extra outer `for k` + `if (k == 0)` around
+        // the real helper, which changes ptxas register allocation.
+        Optional<tir::Stmt> one_shot_body =
+            MatchOneShotDeviceFunc(outlined_body, op->loop_var.get());
+        if (one_shot_body.defined()) {
+          one_shot_device_func.push_back(true);
+          outlined_bodies.push_back(one_shot_body.value());
+          fn_names.push_back(EmitOutlinedDeviceFunction(one_shot_body.value()));
+          continue;
+        }
+
+        one_shot_device_func.push_back(false);
         outlined_bodies.push_back(outlined_body);
+
+        std::string fn_name =
+            "__outlined_warp_fn_" + std::to_string(outlined_fn_count_);
+        outlined_fn_count_++;
+        fn_names.push_back(fn_name);
 
         // Function signature
         outlined_fns_stream_ << "static __device__ __noinline__ void "
@@ -1014,9 +1078,22 @@ void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
           PrintStmt(stmt);
         }
         PrintIndent();
-        stream << fn_names[i] << "(" << extent;
+        stream << fn_names[i] << "(";
+        bool first_arg = true;
+        auto sep = [&]() {
+          if (first_arg) {
+            first_arg = false;
+          } else {
+            stream << ", ";
+          }
+        };
+        if (!one_shot_device_func[i]) {
+          sep();
+          stream << extent;
+        }
         for (const auto &loop : forwarded_loops) {
-          stream << ", " << loop.name;
+          sep();
+          stream << loop.name;
         }
         BufferVarTouchCollector touched;
         touched(outlined_bodies[i]);
@@ -1024,19 +1101,22 @@ void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
           if (bar.buffer_var && !touched.touched.count(bar.buffer_var)) {
             continue;
           }
-          stream << ", " << bar.var_name;
+          sep();
+          stream << bar.var_name;
         }
         for (const auto &tm : tmem_var_infos_) {
           if (tm.buffer_var && !touched.touched.count(tm.buffer_var)) {
             continue;
           }
-          stream << ", " << tm.var_name;
+          sep();
+          stream << tm.var_name;
         }
         for (const auto &kp : kernel_param_infos_) {
           if (kp.param_var && !touched.touched.count(kp.param_var)) {
             continue;
           }
-          stream << ", " << kp.var_name;
+          sep();
+          stream << kp.var_name;
         }
         for (const auto &alloc : local_allocs_) {
           if (!alloc.outline_persistent) {
@@ -1045,7 +1125,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
           if (alloc.buffer_var && !touched.touched.count(alloc.buffer_var)) {
             continue;
           }
-          stream << ", " << alloc.var_name;
+          sep();
+          stream << alloc.var_name;
         }
         stream << ");\n";
         EndScope(call_scope);
@@ -2505,6 +2586,28 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
        << PrintExpr(op->args[1]) << ")";
     return;
   }
+  if (op->op.same_as(tl::tcgen05_reuse3_stage_ptr())) {
+    ICHECK_EQ(op->args.size(), 4U)
+        << "tcgen05_reuse3_stage_ptr expects 4 args";
+    need_tcgen05_common_h_ = true;
+    os << "tl::tcgen05_reuse3_stage_ptr((void*)("
+       << this->PrintExpr(op->args[0]) << "), (void*)("
+       << this->PrintExpr(op->args[1]) << "), (void*)("
+       << this->PrintExpr(op->args[2]) << "), "
+       << this->PrintExpr(op->args[3]) << ")";
+    return;
+  }
+  if (op->op.same_as(tl::tcgen05_reuse3_barrier_ptr())) {
+    ICHECK_EQ(op->args.size(), 4U)
+        << "tcgen05_reuse3_barrier_ptr expects 4 args";
+    need_tcgen05_common_h_ = true;
+    os << "(void*)tl::tcgen05_reuse3_kbar((void const*)(&"
+       << this->PrintExpr(op->args[0]) << "), (void const*)(&"
+       << this->PrintExpr(op->args[1]) << "), (void const*)(&"
+       << this->PrintExpr(op->args[2]) << "), "
+       << this->PrintExpr(op->args[3]) << ")";
+    return;
+  }
   if (op->op.same_as(builtin::ptx_cp_async())) {
     // args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
     // args[3] = predicate (optional)
@@ -3748,11 +3851,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << q_row_base << ", " << kv_col_base << ", " << is_causal
                  << ", " << wg_offset << ");\n";
   } else if (op->op.same_as(tl::tcgen05_qk_gemm_128x128_skv()) ||
-             op->op.same_as(tl::tcgen05_qk_gemm_128x128_skv_noguard())) {
+             op->op.same_as(tl::tcgen05_qk_gemm_128x128_skv_noguard()) ||
+             op->op.same_as(tl::tcgen05_qk_gemm_128x128_skv_lane0())) {
     ICHECK_EQ(op->args.size(), 4U)
         << "tcgen05_qk_gemm_128x128_skv expects 4 args: Q_stage_ptr, KV_stage_ptr, S_tmem, mbar";
     this->PrintIndent();
     bool guard_warp12 = op->op.same_as(tl::tcgen05_qk_gemm_128x128_skv());
+    bool lane0_only = op->op.same_as(tl::tcgen05_qk_gemm_128x128_skv_lane0());
     auto q_stage = this->PrintExpr(op->args[0]);
     auto kv_stage = this->PrintExpr(op->args[1]);
     auto s_addr = this->PrintExpr(op->args[2]);
@@ -3763,7 +3868,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->PrintIndent();
       this->stream << "  ";
     }
-    this->stream << "tl::tcgen05_qk_mma_128x128_skv((void const*)("
+    this->stream << (lane0_only ? "tl::tcgen05_qk_mma_128x128_skv_lane0"
+                                : "tl::tcgen05_qk_mma_128x128_skv")
+                 << "((void const*)("
                  << q_stage << "), (void const*)(" << kv_stage << "), "
                  << s_addr << ", (void const*)(&" << mbar << "));\n";
     if (guard_warp12) {
@@ -3818,11 +3925,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     this->stream << "}\n";
   } else if (op->op.same_as(tl::tcgen05_pv_gemm_128x64_skv()) ||
-             op->op.same_as(tl::tcgen05_pv_gemm_128x64_skv_noguard())) {
+             op->op.same_as(tl::tcgen05_pv_gemm_128x64_skv_noguard()) ||
+             op->op.same_as(tl::tcgen05_pv_gemm_128x64_skv_lane0())) {
     ICHECK_EQ(op->args.size(), 4U)
         << "tcgen05_pv_gemm_128x64_skv expects 4 args: V_stage_ptr, P_tmem, O_tmem, accum";
     this->PrintIndent();
     bool guard_warp12 = op->op.same_as(tl::tcgen05_pv_gemm_128x64_skv());
+    bool lane0_only = op->op.same_as(tl::tcgen05_pv_gemm_128x64_skv_lane0());
     auto v_stage = this->PrintExpr(op->args[0]);
     auto p_addr = this->PrintExpr(op->args[1]);
     auto o_addr = this->PrintExpr(op->args[2]);
@@ -3834,9 +3943,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->PrintIndent();
       this->stream << "  ";
     }
-    this->stream << "tl::tcgen05_pv_mma_128x64_skv((void const*)(" << v_stage
-                 << "), " << p_addr << ", " << o_addr << ", " << accum
-                 << ");\n";
+    if (lane0_only) {
+      this->stream << "tl::tcgen05_pv_mma_128x64_avo((void const*)("
+                   << v_stage << "), (void const*)(((bfloat16_t*)(" << v_stage
+                   << ")) + 128 * 64), " << p_addr << ", " << o_addr << ", "
+                   << accum << ");\n";
+    } else {
+      this->stream << "tl::tcgen05_pv_mma_128x64_skv((void const*)("
+                   << v_stage << "), " << p_addr << ", " << o_addr << ", "
+                   << accum << ");\n";
+    }
     if (guard_warp12) {
       this->PrintIndent();
       this->stream << "}\n";
@@ -3981,6 +4097,22 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << this->PrintExpr(op->args[26]) << ", "
                  << this->PrintExpr(op->args[27]) << ", "
                  << this->PrintExpr(op->args[28]) << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_wait_barrier_ptr())) {
+    ICHECK_EQ(op->args.size(), 2U)
+        << "tcgen05_wait_barrier_ptr expects 2 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::tcgen05_wait_barrier((void const*)("
+                 << this->PrintExpr(op->args[0]) << "), uint32_t("
+                 << this->PrintExpr(op->args[1]) << "));\n";
+  } else if (op->op.same_as(tl::tcgen05_wait_barrier_op())) {
+    ICHECK_EQ(op->args.size(), 2U)
+        << "tcgen05_wait_barrier_op expects 2 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::tcgen05_wait_barrier((void const*)(&"
+                 << this->PrintExpr(op->args[0]) << "), uint32_t("
+                 << this->PrintExpr(op->args[1]) << "));\n";
   } else if (op->op.same_as(tl::tcgen05_epilogue_warp_1sm_skv())) {
     ICHECK_EQ(op->args.size(), 8U)
         << "tcgen05_epilogue_warp_1sm_skv expects 8 args";
@@ -4020,6 +4152,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << mbar << "));\n";
     this->PrintIndent();
     this->stream << "}\n";
+  } else if (op->op.same_as(tl::tcgen05_commit_1sm_lane0_op())) {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "tcgen05_commit_1sm_lane0_op expects 1 arg: mbar_ptr";
+    this->PrintIndent();
+    auto mbar = this->PrintExpr(op->args[0]);
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::tcgen05_commit_1sm_lane0((void const*)(&"
+                 << mbar << "));\n";
   } else if (op->op.same_as(tl::tcgen05_softmax_warp_2cta())) {
     ICHECK_EQ(op->args.size(), 16U)
         << "tcgen05_softmax_warp_2cta expects 16 args";
@@ -5246,6 +5386,72 @@ void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
     const IntImmNode *factor = op->value.as<IntImmNode>();
     ICHECK(factor);
     unroll_factor[op->node.as<VarNode>()] = Downcast<IntImm>(factor);
+  } else if (op->attr_key == tl::attr::kDeviceFuncScope) {
+    if (outline_warp_spec_enabled_ && !in_outlined_fn_) {
+      std::string fn_name = EmitOutlinedDeviceFunction(op->body);
+      bool has_loop_var = !current_loop_var_name_.empty();
+      std::vector<ActiveLoopVarInfo> forwarded_loops = active_loop_vars_;
+      if (has_loop_var && !forwarded_loops.empty() &&
+          forwarded_loops.back().name == current_loop_var_name_) {
+        forwarded_loops.pop_back();
+      }
+
+      PrintIndent();
+      stream << fn_name << "(";
+      bool first_arg = true;
+      auto sep = [&]() {
+        if (first_arg) {
+          first_arg = false;
+        } else {
+          stream << ", ";
+        }
+      };
+      if (has_loop_var) {
+        sep();
+        stream << current_loop_var_name_;
+      }
+      for (const auto &loop : forwarded_loops) {
+        sep();
+        stream << loop.name;
+      }
+      BufferVarTouchCollector touched;
+      touched(op->body);
+      for (const auto &bar : barrier_var_infos_) {
+        if (bar.buffer_var && !touched.touched.count(bar.buffer_var)) {
+          continue;
+        }
+        sep();
+        stream << bar.var_name;
+      }
+      for (const auto &tm : tmem_var_infos_) {
+        if (tm.buffer_var && !touched.touched.count(tm.buffer_var)) {
+          continue;
+        }
+        sep();
+        stream << tm.var_name;
+      }
+      for (const auto &kp : kernel_param_infos_) {
+        if (kp.param_var && !touched.touched.count(kp.param_var)) {
+          continue;
+        }
+        sep();
+        stream << kp.var_name;
+      }
+      for (const auto &alloc : local_allocs_) {
+        if (!alloc.outline_persistent) {
+          continue;
+        }
+        if (alloc.buffer_var && !touched.touched.count(alloc.buffer_var)) {
+          continue;
+        }
+        sep();
+        stream << alloc.var_name;
+      }
+      stream << ");\n";
+    } else {
+      PrintStmt(op->body);
+    }
+    return;
   } else if (op->attr_key == tl::attr::kWarpSpecializationScope) {
     const auto *if_node = op->body.as<IfThenElseNode>();
     if (if_node) {

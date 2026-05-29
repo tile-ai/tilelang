@@ -41,6 +41,10 @@ def _mbar_to_buffer_load(mbar: BarrierType) -> BufferLoad:
     Returns:
         tir.BufferLoad: A buffer load of the memory barrier
     """
+    from tilelang.language.frame import has_let_value, get_let_value
+
+    if isinstance(mbar, tir.Var) and has_let_value(mbar):
+        mbar = get_let_value(mbar)
     if isinstance(mbar, tir.BufferLoad):
         return mbar
     elif isinstance(mbar, tir.Buffer):
@@ -1797,6 +1801,19 @@ def tcgen05_qk_gemm_128x128_skv_noguard(q_stage_ptr, kv_stage_ptr, s_tmem_addr, 
     )
 
 
+def tcgen05_qk_gemm_128x128_skv_lane0(q_stage_ptr, kv_stage_ptr, s_tmem_addr, mbar):
+    """Avo-exact QK MMA. Caller must already restrict execution to lane 0."""
+    mbar = _mbar_to_buffer_load(mbar)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_qk_gemm_128x128_skv_lane0"),
+        q_stage_ptr,
+        kv_stage_ptr,
+        s_tmem_addr,
+        mbar,
+    )
+
+
 def tcgen05_pv_gemm_128x64(v_lo_ptr, v_hi_ptr, p_tmem_addr, o_tmem_addr, accumulate):
     """Avo-exact PV MMA: 128x64 BMN, high D first then low D, 16 MMA calls total.
     v_lo_ptr: SMEM pointer to V low-D buffer [128, 64] with 128B row stride.
@@ -1849,6 +1866,18 @@ def tcgen05_pv_gemm_128x64_skv_noguard(v_stage_ptr, p_tmem_addr, o_tmem_addr, ac
         o_tmem_addr,
         accumulate,
         guard_warp12=False,
+    )
+
+
+def tcgen05_pv_gemm_128x64_skv_lane0(v_stage_ptr, p_tmem_addr, o_tmem_addr, accumulate):
+    """Avo-exact PV MMA. Caller must already restrict execution to lane 0."""
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_pv_gemm_128x64_skv_lane0"),
+        v_stage_ptr,
+        p_tmem_addr,
+        o_tmem_addr,
+        accumulate,
     )
 
 
@@ -2145,6 +2174,54 @@ def tcgen05_mma_warp_1sm_reuse3(
     )
 
 
+def tcgen05_reuse3_stage_ptr(stage0_ptr, stage1_ptr, stage2_ptr, stage):
+    """Return the selected reuse3 K/V shared-memory stage pointer."""
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.tcgen05_reuse3_stage_ptr"),
+        stage0_ptr,
+        stage1_ptr,
+        stage2_ptr,
+        stage,
+    )
+
+
+def tcgen05_reuse3_barrier_ptr(mbar0, mbar1, mbar2, stage):
+    """Return the selected reuse3 barrier pointer."""
+    mbar0 = _mbar_to_buffer_load(mbar0)
+    mbar1 = _mbar_to_buffer_load(mbar1)
+    mbar2 = _mbar_to_buffer_load(mbar2)
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.tcgen05_reuse3_barrier_ptr"),
+        mbar0,
+        mbar1,
+        mbar2,
+        stage,
+    )
+
+
+def tcgen05_wait_barrier_ptr(mbar_ptr, phase):
+    """Wait on a raw mbarrier pointer."""
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_wait_barrier_ptr"),
+        mbar_ptr,
+        phase,
+    )
+
+
+def tcgen05_wait_barrier(mbar, phase):
+    """Wait on an mbarrier using the compact SM100 helper call."""
+    mbar = _mbar_to_buffer_load(mbar)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_wait_barrier_op"),
+        mbar,
+        phase,
+    )
+
+
 def tcgen05_epilogue_warp_1sm_skv(
     output_desc,
     q_stage_ptr,
@@ -2180,6 +2257,16 @@ def tcgen05_commit_1sm(mbar):
     return tir.call_intrin(
         "void",
         tir.op.Op.get("tl.tcgen05_commit_1sm_op"),
+        mbar,
+    )
+
+
+def tcgen05_commit_1sm_lane0(mbar):
+    """Avo-exact commit. Caller must already restrict execution to lane 0."""
+    mbar = _mbar_to_buffer_load(mbar)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_commit_1sm_lane0_op"),
         mbar,
     )
 
