@@ -747,5 +747,54 @@ def test_pipelined_multi_stage_fp16_gemm(num_stages):
     torch.testing.assert_close(C, A.float() @ B.float(), atol=1.0, rtol=5e-2)
 
 
+# ---------------------------------------------------------------------------
+# Fix 7 — src/backend/rocm/codegen/intrin_rule_hip.cc
+#   Scalarize vector math intrinsics on HIP
+#
+# Symptom: A vectorized math op (e.g. tirx.exp2 on float32x4 from a 2D
+#   fragment + T.Parallel) was left unlowered.  HIPMath/FloatSuffix return
+#   "" for non-scalar dtypes, so DispatchPureExtern returned the op
+#   unchanged and CodeGenTileLangHIP -> CodeGenC then threw
+#       tvm.error.InternalError: Unresolved call ir.Op(name="tirx.exp2")
+#   at codegen_c.cc:771.
+#
+# Fix: DispatchPureExternScalarized resolves the extern name from the
+#   *element* dtype and emits a vector call_pure_extern; the existing
+#   CodeGenTileLangHIP::PrintCallExtern then lowers it to one scalar call
+#   per lane via PrintVecElemLoad / PrintVecElemStore, which is carrier-
+#   aware (handles float32x8 -> ulonglong4, float16x4 -> uint2, etc.).
+# ---------------------------------------------------------------------------
+
+
+def _kernel_vector_exp2_codegen():
+    """T.vectorized(VEC) makes T.exp2 lower as tirx.exp2 on float32xVEC."""
+    N, VEC = 256, 4
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((N,), "float32"),
+        B: T.Tensor((N,), "float32"),
+    ):
+        with T.Kernel(N // VEC, threads=1) as bx:
+            for v in T.vectorized(VEC):
+                B[bx * VEC + v] = T.exp2(A[bx * VEC + v])
+
+    return main
+
+
+@tilelang.testing.requires_rocm
+def test_vector_math_scalarized_in_hip_source():
+    """Vectorized T.exp2 must lower to one scalar exp2f per lane on HIP."""
+    src = _kernel_vector_exp2_codegen().get_kernel_source()
+    assert "tirx.exp2" not in src, (
+        "Vectorized tirx.exp2 was left unlowered (would emit 'Unresolved call' from CodeGenC). Generated HIP source:\n" + src
+    )
+    assert src.count("exp2f") >= 4, (
+        "Expected one 'exp2f' per lane (>=4) in HIP source for vectorized "
+        f"T.exp2 over float32x4, got {src.count('exp2f')}. "
+        "Generated HIP source:\n" + src
+    )
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
