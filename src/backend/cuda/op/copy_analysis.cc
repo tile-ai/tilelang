@@ -14,6 +14,7 @@
 
 #include <tvm/tirx/transform.h>
 
+#include <optional>
 #include <sstream>
 #include <utility>
 
@@ -77,6 +78,53 @@ bool GetIsAsyncCopy(const CopyNode &op) {
 
 bool GetNoImplicitAsyncCommitWait(const CopyNode &op) {
   return GetBoolAnnotation(op, attr::kAsyncCopyNoImplicitCommitWait);
+}
+
+enum class PreferredCopyInstruction {
+  kAuto,
+  kTMA,
+  kCPAsync,
+  kSync,
+};
+
+constexpr const char *kPreferInstruction = "prefer_instruction";
+
+constexpr std::pair<const char *, PreferredCopyInstruction>
+    kPreferredCopyInstructions[] = {
+        {"tma", PreferredCopyInstruction::kTMA},
+        {"cp_async", PreferredCopyInstruction::kCPAsync},
+        {"sync", PreferredCopyInstruction::kSync},
+};
+
+std::optional<std::string> GetStringAnnotation(const CopyNode &op,
+                                               const char *key) {
+  auto val = op.annotations.Get(key);
+  if (!val) {
+    return std::nullopt;
+  }
+  auto str = val->as<StringImmNode>();
+  ICHECK(str) << "T.copy " << key << " annotation must be a string, but got "
+              << val.value().GetTypeKey();
+  return str->value;
+}
+
+PreferredCopyInstruction
+ParsePreferredCopyInstruction(const std::string &prefer) {
+  for (const auto &[name, inst] : kPreferredCopyInstructions) {
+    if (prefer == name) {
+      return inst;
+    }
+  }
+  LOG(FATAL) << "Unsupported T.copy prefer_instruction=\"" << prefer
+             << "\". Expected one of: \"tma\", \"cp_async\", \"sync\".";
+  return PreferredCopyInstruction::kAuto;
+}
+
+PreferredCopyInstruction GetPreferredInstruction(const CopyNode &op) {
+  if (auto prefer = GetStringAnnotation(op, kPreferInstruction)) {
+    return ParsePreferredCopyInstruction(prefer.value());
+  }
+  return PreferredCopyInstruction::kAuto;
 }
 
 bool CheckGlobalStrides(const Buffer &buffer, arith::Analyzer *analyzer,
@@ -360,6 +408,7 @@ struct CopyFacts {
   bool explicit_tma = false;
   bool explicit_cp_async = false;
   bool no_implicit_async_commit_wait = false;
+  PreferredCopyInstruction prefer_instruction = PreferredCopyInstruction::kAuto;
   bool disable_tma = false;
   int64_t cluster_mask = 0;
   bool can_bulk_load_1d = false;
@@ -473,6 +522,7 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
   facts.explicit_tma = GetIsTmaCopy(op);
   facts.explicit_cp_async = GetIsAsyncCopy(op);
   facts.no_implicit_async_commit_wait = GetNoImplicitAsyncCommitWait(op);
+  facts.prefer_instruction = GetPreferredInstruction(op);
   facts.disable_tma = GetDisableTMA(op);
   facts.cluster_mask = GetClusterMask(op);
   facts.tma_unavailable_reason = MakeTmaUnavailableReason(op);
@@ -581,6 +631,42 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
   if (facts.explicit_cp_async || facts.no_implicit_async_commit_wait) {
     return facts.can_cp_async ? Supported(CopyInst::kCPAsync)
                               : Unsupported(facts.async_unavailable_reason);
+  }
+
+  if (facts.prefer_instruction == PreferredCopyInstruction::kTMA) {
+    if (facts.disable_tma) {
+      return Unsupported("T.copy prefer_instruction=\"tma\" conflicts with "
+                         "disable_tma=true.");
+    }
+    if (facts.pass_context_disables_tma) {
+      return Unsupported("T.copy prefer_instruction=\"tma\" conflicts with "
+                         "pass config tl.disable_tma_lower=true.");
+    }
+    CopyInst inst =
+        SelectTmaInst(facts, /*allow_load=*/true, /*allow_store=*/true,
+                      /*check_last_dim=*/true);
+    return inst == CopyInst::kInvalid
+               ? Unsupported("T.copy prefer_instruction=\"tma\" could not be "
+                             "honored: " +
+                             facts.tma_unavailable_reason)
+               : Supported(inst);
+  }
+
+  if (facts.prefer_instruction == PreferredCopyInstruction::kCPAsync) {
+    if (!IsAutoAsyncCopyEnabled(/*default_enabled=*/true)) {
+      return Unsupported(
+          "T.copy prefer_instruction=\"cp_async\" conflicts with "
+          "pass config tl.enable_async_copy=false.");
+    }
+    return facts.can_cp_async
+               ? Supported(CopyInst::kCPAsync)
+               : Unsupported("T.copy prefer_instruction="
+                             "\"cp_async\" could not be honored: " +
+                             facts.async_unavailable_reason);
+  }
+
+  if (facts.prefer_instruction == PreferredCopyInstruction::kSync) {
+    return Supported(SelectSyncLikeInst(facts));
   }
 
   if (!facts.disable_tma && !facts.pass_context_disables_tma) {

@@ -4,6 +4,7 @@
  */
 
 #include "support/check.h"
+#include <optional>
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/s_tir/utils.h>
@@ -1161,9 +1162,11 @@ private:
       bind_var_to_expr.Set(var, expr);
     }
 
-    AllocMBarrierCallback mbarrier_callback = [this](int arrive_count) -> int {
+    AllocMBarrierCallback mbarrier_callback =
+        [this](int arrive_count, std::optional<std::string> name) -> int {
       if (!mbarrier_buffer_.defined()) {
-        mbarrier_buffer_ = CreateMBarrierBuffer(injected_mbarrier_name_, 1);
+        mbarrier_buffer_ =
+            CreateMBarrierBuffer(name.value_or(injected_mbarrier_name_), 1);
       }
       int id = mbarrier_count_++;
       mbarrier_arrive_counts_.push_back(arrive_count);

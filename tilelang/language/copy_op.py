@@ -58,6 +58,7 @@ def copy(
     coalesced_width: int | None = None,
     disable_tma: bool = False,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+    prefer_instruction: str | None = None,
     annotations: dict | None = None,
     loop_layout: Any | None = None,
 ) -> tirx.PrimExpr | tirx.Stmt:
@@ -69,8 +70,14 @@ def copy(
         coalesced_width (Optional[int], keyword-only): Width for coalesced memory access. Defaults to None.
         disable_tma (bool, keyword-only): Whether to disable TMA acceleration. Defaults to False.
         eviction_policy (Optional[str], keyword-only): Cache eviction policy. Defaults to None.
+        prefer_instruction (Optional[str], keyword-only): Backend-specific preferred lowering
+            instruction category. For CUDA, recognized values include "tma", "cp_async", and
+            "sync". For "tma", T.copy keeps synchronous copy semantics; global -> shared copies
+            lower through TMA with an automatically allocated barrier and wait when constraints
+            are satisfied.
         annotations (Optional[dict], keyword-only): Additional annotations dict. If provided,
-            coalesced_width, disable_tma, and eviction_policy can also be specified here.
+            coalesced_width, disable_tma, eviction_policy, and prefer_instruction can also
+            be specified here.
             Values in annotations take precedence over individual arguments.
         loop_layout (Optional[Fragment], keyword-only): A parallel loop layout hint for the SIMT copy
             (only valid for normal SIMT copy; incompatible with TMA/LDSM/STSM/TMem). When provided,
@@ -115,6 +122,10 @@ def copy(
     if "eviction_policy" not in ann and eviction_policy is not None:
         eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
         ann["eviction_policy"] = eviction_policy_map[eviction_policy]
+    if "prefer_instruction" not in ann and prefer_instruction is not None:
+        ann["prefer_instruction"] = prefer_instruction
+    if isinstance(ann.get("prefer_instruction"), str):
+        ann["prefer_instruction"] = tirx.StringImm(ann["prefer_instruction"])
 
     # Parallel loop layout hint (Fragment). Mirrors T.Parallel(loop_layout=...)
     if loop_layout is not None and "parallel_loop_layout" not in ann:

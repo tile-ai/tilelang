@@ -10,6 +10,9 @@
 // Dependencies for operators
 #include "support/check.h"
 #include <array>
+#include <functional>
+#include <optional>
+#include <string>
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/op.h>
 #include <tvm/target/target.h>
@@ -29,7 +32,11 @@ using namespace tirx;
 using namespace ffi;
 
 using AddWorkspaceCallback = std::function<PrimExpr(int, DataType)>;
-using AllocMBarrierCallback = std::function<int(int arrive_count)>;
+// Allocate a compiler-generated shared mbarrier slot. The optional hint names
+// the backing barrier buffer when the first slot is created; later slots share
+// the same buffer and may ignore the hint.
+using AllocMBarrierCallback =
+    std::function<int(int arrive_count, std::optional<std::string> name)>;
 using UpdateBarrierArriveCallback = std::function<void(Var, PrimExpr)>;
 using LayoutMap = Map<Buffer, Layout>;
 using BufferMap = Map<Var, Buffer>;
