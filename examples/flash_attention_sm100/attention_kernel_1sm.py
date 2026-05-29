@@ -124,6 +124,10 @@ def attention_kernel_1sm(
         m0 = T.alloc_var(accum_dtype)
         m1 = T.alloc_var(accum_dtype)
         m2 = T.alloc_var(accum_dtype)
+        h0 = T.alloc_var(T.uint32)
+        h1 = T.alloc_var(T.uint32)
+        h2 = T.alloc_var(T.uint32)
+        h3 = T.alloc_var(T.uint32)
 
         for k_soft in T.unroll(loop_extent, explicit=False, unroll_factor=1):
             phase = k_soft & 1
@@ -195,15 +199,29 @@ def attention_kernel_1sm(
                 for g_iter in T.unroll(2):
                     g = 8 - g_iter * 8
                     elem_base = cc + g
-                    T.tcgen05_softmax_store_8(
-                        P_tmem[0, 0],
-                        warp_row_base + elem_base // 2,
-                        T.access_ptr(sv[elem_base], "r", 8),
+                    T.tcgen05_softmax_pack_4(
+                        h0,
+                        h1,
+                        T.access_ptr(sv[elem_base], "r", 4),
                         psa[0],
                         psa[1],
+                        elem_base,
+                    )
+                    T.tcgen05_softmax_pack_4(
+                        h2,
+                        h3,
+                        T.access_ptr(sv[elem_base + 4], "r", 4),
                         psa[2],
                         psa[3],
-                        elem_base,
+                        elem_base + 4,
+                    )
+                    T.tcgen05_st_32x32b_x4(
+                        P_tmem[0, 0],
+                        warp_row_base + (cc + g) // 2,
+                        h0,
+                        h1,
+                        h2,
+                        h3,
                     )
                 if cc == 32:
                     T.tcgen05_fence_tmem_store()
@@ -215,414 +233,6 @@ def attention_kernel_1sm(
 
             T.tcgen05_fence_tmem_store()
             T.mbarrier_arrive(mbar_p, lane0=True)
-
-
-    @T.macro
-    def correction_epilogue_warp_dsl(
-        O0_tmem: T.Buffer,
-        O1_tmem: T.Buffer,
-        O0_shared: T.SharedBuffer([kq2_block_M, dim], dtype),
-        scores_scale0_shared: T.SharedBuffer([2, kq2_block_M], accum_dtype),
-        scores_scale1_shared: T.SharedBuffer([2, kq2_block_M], accum_dtype),
-        logsum0_shared: T.SharedBuffer([kq2_block_M], accum_dtype),
-        logsum1_shared: T.SharedBuffer([kq2_block_M], accum_dtype),
-        mbar_scale0: T.Buffer,
-        mbar_scale1: T.Buffer,
-        mbar_pv: T.Buffer,
-        mbar_corr0: T.Buffer,
-        mbar_corr1: T.Buffer,
-        mbar_epi0: T.Buffer,
-        mbar_epi1: T.Buffer,
-        loop_extent: T.int32,
-    ):
-        row = T.get_thread_binding() - 256
-        for k_corr in T.unroll(loop_extent, explicit=False, unroll_factor=1):
-            if k_corr > 0:
-                scale_idx = k_corr & 1
-                scale_phase = (k_corr >> 1) & 1
-                pv_phase = (k_corr - 1) & 1
-
-                T.mbarrier_wait_parity(T.mbarrier_at(mbar_scale0, scale_idx), scale_phase)
-                T.tcgen05_correction_x16(
-                    O0_tmem[0, 0],
-                    scores_scale0_shared[scale_idx, row],
-                    mbar_pv=mbar_pv,
-                    pv_phase=pv_phase,
-                    warp_group_offset=256,
-                    head_dim=dim,
-                )
-                T.tcgen05_before_thread_sync()
-                T.mbarrier_arrive(mbar_corr0, lane0=True)
-
-                T.mbarrier_wait_parity(T.mbarrier_at(mbar_scale1, scale_idx), scale_phase)
-                T.tcgen05_correction_x16(
-                    O1_tmem[0, 0],
-                    scores_scale1_shared[scale_idx, row],
-                    mbar_pv=mbar_pv,
-                    pv_phase=pv_phase,
-                    warp_group_offset=256,
-                    head_dim=dim,
-                )
-                T.tcgen05_before_thread_sync()
-                T.mbarrier_arrive(mbar_corr1, lane0=True)
-
-        final_phase = (loop_extent - 1) & 1
-        T.mbarrier_wait_parity(mbar_pv, final_phase)
-        T.tcgen05_after_thread_sync()
-        T.tcgen05_epilogue_store_x16(
-            O0_tmem[0, 0],
-            T.access_ptr(O0_shared, "w"),
-            logsum0_shared[row],
-            warp_group_offset=256,
-            head_dim=dim,
-        )
-        T.tcgen05_before_thread_sync()
-        T.sync_warp()
-        T.fence_proxy_async()
-        T.mbarrier_arrive(mbar_epi0, lane0=True)
-
-        T.tcgen05_after_thread_sync()
-        T.tcgen05_epilogue_store_x16(
-            O1_tmem[0, 0],
-            T.access_ptr(O0_shared, "w", offset=kq2_block_M * dim),
-            logsum1_shared[row],
-            warp_group_offset=256,
-            head_dim=dim,
-        )
-        T.tcgen05_before_thread_sync()
-        T.sync_warp()
-        T.fence_proxy_async()
-        T.mbarrier_arrive(mbar_epi1, lane0=True)
-
-
-    @T.macro
-    def mma_qk_stage_dsl(
-        Q0_stage: T.SharedBuffer([kq2_block_M, dim], dtype),
-        Q1_stage: T.SharedBuffer([kq2_block_M, dim], dtype),
-        K_stage: T.SharedBuffer([block_N, dim], dtype),
-        mbar_k: T.Buffer,
-        mbar_s0: T.Buffer,
-        mbar_s1: T.Buffer,
-        S0_tmem: T.Buffer,
-        S1_tmem: T.Buffer,
-        phase: T.int32,
-    ):
-        T.mbarrier_wait_parity(mbar_k, phase)
-        T.tcgen05_after_thread_sync()
-        T.tcgen05_qk_gemm_128x128_skv_lane0(
-            T.access_ptr(Q0_stage, "r"),
-            T.access_ptr(K_stage, "r"),
-            S0_tmem[0, 0],
-            mbar_s0,
-        )
-        T.tcgen05_qk_gemm_128x128_skv_lane0(
-            T.access_ptr(Q1_stage, "r"),
-            T.access_ptr(K_stage, "r"),
-            S1_tmem[0, 0],
-            mbar_s1,
-        )
-
-
-    @T.macro
-    def mma_pv_stage_dsl(
-        V_stage: T.SharedBuffer([block_N, dim], dtype),
-        mbar_v: T.Buffer,
-        mbar_p2: T.Buffer,
-        mbar_p: T.Buffer,
-        mbar_corr: T.Buffer,
-        P_tmem: T.Buffer,
-        O_tmem: T.Buffer,
-        phase: T.int32,
-        pv_phase: T.int32,
-        corr_phase: T.int32,
-        accum: T.int32,
-        needs_corr: T.int32,
-    ):
-        T.mbarrier_wait_parity(mbar_p2, pv_phase)
-        T.mbarrier_wait_parity(mbar_v, phase)
-        if needs_corr != 0:
-            T.mbarrier_wait_parity(mbar_corr, corr_phase)
-        T.mbarrier_wait_parity(mbar_p, pv_phase)
-        T.tcgen05_after_thread_sync()
-        T.tcgen05_pv_gemm_128x64_skv_lane0(
-            T.access_ptr(V_stage, "r"),
-            P_tmem[0, 0],
-            O_tmem[0, 0],
-            accum,
-        )
-
-
-    @T.macro
-    def mma_warp_reuse3_dsl(
-        Q0_stage: T.SharedBuffer([kq2_block_M, dim], dtype),
-        Q1_stage: T.SharedBuffer([kq2_block_M, dim], dtype),
-        K0_stage: T.SharedBuffer([block_N, dim], dtype),
-        K1_stage: T.SharedBuffer([block_N, dim], dtype),
-        KV2_stage: T.SharedBuffer([block_N, dim], dtype),
-        mbar_q0: T.Buffer,
-        mbar_q1: T.Buffer,
-        mbar_k0: T.Buffer,
-        mbar_k1: T.Buffer,
-        mbar_k2: T.Buffer,
-        mbar_v0: T.Buffer,
-        mbar_v1: T.Buffer,
-        mbar_v2: T.Buffer,
-        mbar_s0: T.Buffer,
-        mbar_s1: T.Buffer,
-        mbar_p0: T.Buffer,
-        mbar_p1: T.Buffer,
-        mbar_p2_0: T.Buffer,
-        mbar_p2_1: T.Buffer,
-        mbar_corr0: T.Buffer,
-        mbar_corr1: T.Buffer,
-        mbar_pv: T.Buffer,
-        S0_tmem: T.Buffer,
-        S1_tmem: T.Buffer,
-        P0_tmem: T.Buffer,
-        P1_tmem: T.Buffer,
-        O0_tmem: T.Buffer,
-        O1_tmem: T.Buffer,
-        loop_extent: T.int32,
-    ):
-        tid_mma = T.get_thread_binding()
-        if (tid_mma & 31) == 0:
-            q0_ptr = T.access_ptr(Q0_stage, "r")
-            q1_ptr = T.access_ptr(Q1_stage, "r")
-            k0_ptr = T.access_ptr(K0_stage, "r")
-            k1_ptr = T.access_ptr(K1_stage, "r")
-            kv2_ptr = T.access_ptr(KV2_stage, "r")
-
-            T.tcgen05_wait_barrier(mbar_q0, 0)
-            T.tcgen05_wait_barrier(mbar_q1, 0)
-            T.tcgen05_after_thread_sync()
-
-            T.tcgen05_wait_barrier(mbar_k0, 0)
-            T.tcgen05_after_thread_sync()
-            T.tcgen05_qk_gemm_128x128_skv_lane0(
-                q0_ptr,
-                k0_ptr,
-                S0_tmem[0, 0],
-                mbar_s0,
-            )
-            T.tcgen05_qk_gemm_128x128_skv_lane0(
-                q1_ptr,
-                k0_ptr,
-                S1_tmem[0, 0],
-                mbar_s1,
-            )
-
-            for k_mma in T.unroll(loop_extent, explicit=False, unroll_factor=1):
-                stage = k_mma % 3
-                phase = (k_mma // 3) & 1
-                pv_phase = k_mma & 1
-                corr_phase = (k_mma - 1) & 1
-                accum = T.Select(k_mma == 0, T.uint32(0), T.uint32(1))
-                vbar = T.tcgen05_reuse3_barrier_ptr(mbar_v0, mbar_v1, mbar_v2, stage)
-
-                T.tcgen05_wait_barrier(mbar_p2_0, pv_phase)
-                T.tcgen05_wait_barrier_ptr(vbar, phase)
-                if k_mma > 0:
-                    T.tcgen05_wait_barrier(mbar_corr0, corr_phase)
-                T.tcgen05_wait_barrier(mbar_p0, pv_phase)
-                T.tcgen05_after_thread_sync()
-                vptr = T.tcgen05_reuse3_stage_ptr(k0_ptr, k1_ptr, kv2_ptr, stage)
-                T.tcgen05_pv_gemm_128x64_skv_lane0(
-                    vptr,
-                    P0_tmem[0, 0],
-                    O0_tmem[0, 0],
-                    accum,
-                )
-
-                T.tcgen05_wait_barrier(mbar_p2_1, pv_phase)
-                if k_mma > 0:
-                    T.tcgen05_wait_barrier(mbar_corr1, corr_phase)
-                T.tcgen05_wait_barrier(mbar_p1, pv_phase)
-                T.tcgen05_after_thread_sync()
-                T.tcgen05_pv_gemm_128x64_skv_lane0(
-                    vptr,
-                    P1_tmem[0, 0],
-                    O1_tmem[0, 0],
-                    accum,
-                )
-                T.tcgen05_commit_1sm_lane0(mbar_pv)
-
-                if k_mma + 1 < loop_extent:
-                    next_stage = (k_mma + 1) % 3
-                    next_phase = ((k_mma + 1) // 3) & 1
-                    kbar = T.tcgen05_reuse3_barrier_ptr(mbar_k0, mbar_k1, mbar_k2, next_stage)
-                    T.tcgen05_wait_barrier_ptr(kbar, next_phase)
-                    T.tcgen05_after_thread_sync()
-                    kptr = T.tcgen05_reuse3_stage_ptr(k0_ptr, k1_ptr, kv2_ptr, next_stage)
-                    T.tcgen05_qk_gemm_128x128_skv_lane0(
-                        q0_ptr,
-                        kptr,
-                        S0_tmem[0, 0],
-                        mbar_s0,
-                    )
-                    T.tcgen05_qk_gemm_128x128_skv_lane0(
-                        q1_ptr,
-                        kptr,
-                        S1_tmem[0, 0],
-                        mbar_s1,
-                        )
-
-
-    @T.macro
-    def producer_warp_reuse3_dsl(
-        q_desc: T.handle,
-        k_desc: T.handle,
-        v_desc: T.handle,
-        Q0_stage: T.SharedBuffer([kq2_block_M, dim], dtype),
-        Q1_stage: T.SharedBuffer([kq2_block_M, dim], dtype),
-        K0_stage: T.SharedBuffer([block_N, dim], dtype),
-        K1_stage: T.SharedBuffer([block_N, dim], dtype),
-        KV2_stage: T.SharedBuffer([block_N, dim], dtype),
-        mbar_q0: T.Buffer,
-        mbar_q1: T.Buffer,
-        mbar_k0: T.Buffer,
-        mbar_k1: T.Buffer,
-        mbar_k2: T.Buffer,
-        mbar_v0: T.Buffer,
-        mbar_v1: T.Buffer,
-        mbar_v2: T.Buffer,
-        mbar_s1: T.Buffer,
-        mbar_pv: T.Buffer,
-        loop_extent: T.int32,
-        q_row_base: T.int32,
-        q_head: T.int32,
-        kv_head: T.int32,
-        batch_idx: T.int32,
-    ):
-        if (T.get_thread_binding() & 31) == 0:
-            k_stage0 = T.access_ptr(K0_stage, "w")
-            k_stage1 = T.access_ptr(K1_stage, "w")
-            kv_stage2 = T.access_ptr(KV2_stage, "w")
-
-            T.tcgen05_q_stage_load(
-                q_desc,
-                T.access_ptr(Q0_stage, "w"),
-                mbar_q0,
-                q_row_base,
-                q_head,
-                batch_idx,
-            )
-            T.tcgen05_q_stage_load(
-                q_desc,
-                T.access_ptr(Q1_stage, "w"),
-                mbar_q1,
-                q_row_base + block_M,
-                q_head,
-                batch_idx,
-            )
-
-            if loop_extent > 0:
-                T.tcgen05_reuse3_load(
-                    k_desc,
-                    k_stage0,
-                    k_stage1,
-                    kv_stage2,
-                    mbar_k0,
-                    mbar_k1,
-                    mbar_k2,
-                    0,
-                    kv_head,
-                    batch_idx,
-                )
-            if loop_extent > 1:
-                T.tcgen05_reuse3_load(
-                    k_desc,
-                    k_stage0,
-                    k_stage1,
-                    kv_stage2,
-                    mbar_k0,
-                    mbar_k1,
-                    mbar_k2,
-                    1,
-                    kv_head,
-                    batch_idx,
-                )
-            if loop_extent > 2:
-                T.tcgen05_reuse3_load(
-                    k_desc,
-                    k_stage0,
-                    k_stage1,
-                    kv_stage2,
-                    mbar_k0,
-                    mbar_k1,
-                    mbar_k2,
-                    2,
-                    kv_head,
-                    batch_idx,
-                )
-
-            for k_prod in T.unroll(loop_extent, explicit=False, unroll_factor=1):
-                T.tcgen05_wait_barrier(mbar_s1, k_prod & 1)
-                T.tcgen05_after_thread_sync()
-                T.tcgen05_reuse3_load(
-                    v_desc,
-                    k_stage0,
-                    k_stage1,
-                    kv_stage2,
-                    mbar_v0,
-                    mbar_v1,
-                    mbar_v2,
-                    k_prod,
-                    kv_head,
-                    batch_idx,
-                )
-                if k_prod + 3 < loop_extent:
-                    T.tcgen05_wait_barrier(mbar_pv, k_prod & 1)
-                    T.tcgen05_after_thread_sync()
-                    T.tcgen05_reuse3_load(
-                        k_desc,
-                        k_stage0,
-                        k_stage1,
-                        kv_stage2,
-                        mbar_k0,
-                        mbar_k1,
-                        mbar_k2,
-                        k_prod + 3,
-                        kv_head,
-                        batch_idx,
-                    )
-
-
-    @T.macro
-    def epilogue_warp_dsl(
-        output_desc: T.handle,
-        O0_stage: T.SharedBuffer([kq2_block_M, dim], dtype),
-        O1_stage: T.SharedBuffer([kq2_block_M, dim], dtype),
-        mbar_epi0: T.Buffer,
-        mbar_epi1: T.Buffer,
-        q_row_base: T.int32,
-        q_head: T.int32,
-        batch_idx: T.int32,
-    ):
-        if (T.get_thread_binding() & 31) == 0:
-            T.tcgen05_wait_barrier(mbar_epi0, 0)
-            T.fence_proxy_async()
-            for cw in T.unroll(4):
-                T.tcgen05_epilogue_tma_store_32x128(
-                    output_desc,
-                    T.access_ptr(O0_stage, "r", offset=cw * 32 * dim),
-                    q_row_base + cw * 32,
-                    q_head,
-                    batch_idx,
-                )
-            T.tma_store_arrive()
-
-            T.tcgen05_wait_barrier(mbar_epi1, 0)
-            T.fence_proxy_async()
-            for cw in T.unroll(4):
-                T.tcgen05_epilogue_tma_store_32x128(
-                    output_desc,
-                    T.access_ptr(O1_stage, "r", offset=cw * 32 * dim),
-                    q_row_base + kq2_block_M + cw * 32,
-                    q_head,
-                    batch_idx,
-                )
-            T.tma_store_arrive()
-            T.tma_store_wait(0)
 
 
     @T.prim_func
@@ -772,128 +382,276 @@ def attention_kernel_1sm(
                     tid,
                 )
 
-            for k in T.serial(loop_range):
-                # ============================================================
-                # Producer warp 13  --  tid in [416, 448)
-                # ============================================================
-                if tid >= 416 and tid < 448:
-                    if k == 0:
-                        q_desc = T.create_tma_descriptor(
-                            9, 4, T.access_ptr(Q, "r"),
-                            dim, heads, seq_len, batch,
-                            2, dim * 2, heads * dim * 2, seq_len * heads * dim * 2,
-                            64, 1, 128, 1,
-                            1, 1, 1, 1,
-                            0, 3, 2, 0,
+            # ================================================================
+            # Producer warp 13  --  tid in [416, 448)
+            # ================================================================
+            if tid >= 416 and tid < 448:
+                k_desc = T.create_tma_descriptor(
+                    9, 4, T.access_ptr(K, "r"),
+                    dim, num_kv_heads, seq_len, batch,
+                    2, dim * 2, num_kv_heads * dim * 2,
+                    seq_len * num_kv_heads * dim * 2,
+                    64, 1, 128, 1,
+                    1, 1, 1, 1,
+                    0, 3, 2, 0,
+                )
+                v_desc = T.create_tma_descriptor(
+                    9, 4, T.access_ptr(V, "r"),
+                    dim, num_kv_heads, seq_len, batch,
+                    2, dim * 2, num_kv_heads * dim * 2,
+                    seq_len * num_kv_heads * dim * 2,
+                    64, 1, 128, 1,
+                    1, 1, 1, 1,
+                    0, 3, 2, 0,
+                )
+                with T.device_func():
+                    if (T.get_thread_binding() & 31) == 0:
+                        k_stage0 = T.access_ptr(K_shared_0, "w")
+                        k_stage1 = T.access_ptr(K_shared_1, "w")
+                        kv_stage2 = T.access_ptr(KV_shared_2, "w")
+
+                        T.tma_copy(
+                            Q[
+                                bz,
+                                bx * kq2_total_M : bx * kq2_total_M + kq2_block_M,
+                                by,
+                                :,
+                            ],
+                            Q0_shared,
+                            barrier=mbar_q0_load,
+                            annotations={"emit_arrive": 1},
                         )
-                        k_desc = T.create_tma_descriptor(
-                            9, 4, T.access_ptr(K, "r"),
-                            dim, num_kv_heads, seq_len, batch,
-                            2, dim * 2, num_kv_heads * dim * 2,
-                            seq_len * num_kv_heads * dim * 2,
-                            64, 1, 128, 1,
-                            1, 1, 1, 1,
-                            0, 3, 2, 0,
+                        T.tma_copy(
+                            Q[
+                                bz,
+                                bx * kq2_total_M + kq2_block_M : (bx + 1) * kq2_total_M,
+                                by,
+                                :,
+                            ],
+                            Q1_shared,
+                            barrier=mbar_q1_load,
+                            annotations={"emit_arrive": 1},
                         )
-                        v_desc = T.create_tma_descriptor(
-                            9, 4, T.access_ptr(V, "r"),
-                            dim, num_kv_heads, seq_len, batch,
-                            2, dim * 2, num_kv_heads * dim * 2,
-                            seq_len * num_kv_heads * dim * 2,
-                            64, 1, 128, 1,
-                            1, 1, 1, 1,
-                            0, 3, 2, 0,
-                        )
-                        with T.device_func():
-                            producer_warp_reuse3_dsl(
-                                q_desc,
-                                k_desc,
+
+                        for k_prefetch in T.unroll(3):
+                            if k_prefetch < loop_range:
+                                T.tcgen05_reuse3_load(
+                                    k_desc,
+                                    k_stage0,
+                                    k_stage1,
+                                    kv_stage2,
+                                    mbar_k_load[0],
+                                    mbar_k_load[1],
+                                    mbar_v_hi_load[0],
+                                    k_prefetch,
+                                    by // groups,
+                                    bz,
+                                )
+
+                        for k_prod in T.unroll(loop_range, explicit=False, unroll_factor=1):
+                            T.tcgen05_wait_barrier(mbar_s1, k_prod & 1)
+                            T.tcgen05_after_thread_sync()
+                            T.tcgen05_reuse3_load(
                                 v_desc,
-                                Q0_shared,
-                                Q1_shared,
-                                K_shared_0,
-                                K_shared_1,
-                                KV_shared_2,
-                                mbar_q0_load,
-                                mbar_q1_load,
-                                mbar_k_load[0],
-                                mbar_k_load[1],
-                                mbar_v_hi_load[0],
+                                k_stage0,
+                                k_stage1,
+                                kv_stage2,
                                 mbar_v_lo_load[0],
                                 mbar_v_lo_load[1],
                                 mbar_v_hi_load[1],
-                                mbar_s1,
-                                mbar_pv,
-                                loop_range,
-                                bx * kq2_total_M,
-                                by,
+                                k_prod,
                                 by // groups,
                                 bz,
                             )
+                            if k_prod + 3 < loop_range:
+                                T.tcgen05_wait_barrier(mbar_pv, k_prod & 1)
+                                T.tcgen05_after_thread_sync()
+                                T.tcgen05_reuse3_load(
+                                    k_desc,
+                                    k_stage0,
+                                    k_stage1,
+                                    kv_stage2,
+                                    mbar_k_load[0],
+                                    mbar_k_load[1],
+                                    mbar_v_hi_load[0],
+                                    k_prod + 3,
+                                    by // groups,
+                                    bz,
+                                )
 
-                # ============================================================
-                # MMA warp 12  --  tid in [384, 416)
-                # ============================================================
-                elif tid >= 384 and tid < 416:
-                    if k == 0:
-                        with T.device_func():
-                            mma_warp_reuse3_dsl(
-                                Q0_shared,
-                                Q1_shared,
-                                K_shared_0,
-                                K_shared_1,
-                                KV_shared_2,
-                                mbar_q0_load,
-                                mbar_q1_load,
-                                mbar_k_load[0],
-                                mbar_k_load[1],
-                                mbar_v_hi_load[0],
+            # ================================================================
+            # MMA warp 12  --  tid in [384, 416)
+            # ================================================================
+            elif tid >= 384 and tid < 416:
+                with T.device_func():
+                    tid_mma = T.get_thread_binding()
+                    if (tid_mma & 31) == 0:
+                        q0_ptr = T.access_ptr(Q0_shared, "r")
+                        q1_ptr = T.access_ptr(Q1_shared, "r")
+                        k0_ptr = T.access_ptr(K_shared_0, "r")
+                        k1_ptr = T.access_ptr(K_shared_1, "r")
+                        kv2_ptr = T.access_ptr(KV_shared_2, "r")
+
+                        T.tcgen05_wait_barrier(mbar_q0_load, 0)
+                        T.tcgen05_wait_barrier(mbar_q1_load, 0)
+                        T.tcgen05_after_thread_sync()
+
+                        T.tcgen05_wait_barrier(mbar_k_load[0], 0)
+                        T.tcgen05_after_thread_sync()
+                        T.tcgen05_qk_gemm_128x128_skv_lane0(
+                            q0_ptr,
+                            k0_ptr,
+                            S0_tmem[0, 0],
+                            mbar_s0,
+                        )
+                        T.tcgen05_qk_gemm_128x128_skv_lane0(
+                            q1_ptr,
+                            k0_ptr,
+                            S1_tmem[0, 0],
+                            mbar_s1,
+                        )
+
+                        for k_mma in T.unroll(loop_range, explicit=False, unroll_factor=1):
+                            stage = k_mma % 3
+                            phase = (k_mma // 3) & 1
+                            pv_phase = k_mma & 1
+                            corr_phase = (k_mma - 1) & 1
+                            accum = T.Select(k_mma == 0, T.uint32(0), T.uint32(1))
+                            vbar = T.tcgen05_reuse3_barrier_ptr(
                                 mbar_v_lo_load[0],
                                 mbar_v_lo_load[1],
                                 mbar_v_hi_load[1],
-                                mbar_s0,
-                                mbar_s1,
-                                mbar_p0,
-                                mbar_p1,
-                                mbar_p2_0,
-                                mbar_p2_1,
-                                mbar_corr0,
-                                mbar_corr1,
-                                mbar_pv,
-                                S0_tmem,
-                                S1_tmem,
-                                P0_tmem,
-                                P1_tmem,
-                                O0_tmem,
-                                O1_tmem,
-                                loop_range,
+                                stage,
                             )
 
-                # ============================================================
-                # Correction WG  --  tid in [256, 384)
-                # ============================================================
-                elif tid >= 256 and tid < 384:
-                    if k == 0:
-                        correction_epilogue_warp_dsl(
-                            O0_tmem,
-                            O1_tmem,
-                            O0_shared,
-                            scores_scale0_shared,
-                            scores_scale1_shared,
-                            logsum0_shared,
-                            logsum1_shared,
-                            mbar_scale0,
-                            mbar_scale1,
-                            mbar_pv,
-                            mbar_corr0,
-                            mbar_corr1,
-                            mbar_epi0,
-                            mbar_epi1,
-                            loop_range,
-                        )
+                            T.tcgen05_wait_barrier(mbar_p2_0, pv_phase)
+                            T.tcgen05_wait_barrier_ptr(vbar, phase)
+                            if k_mma > 0:
+                                T.tcgen05_wait_barrier(mbar_corr0, corr_phase)
+                            T.tcgen05_wait_barrier(mbar_p0, pv_phase)
+                            T.tcgen05_after_thread_sync()
+                            vptr = T.tcgen05_reuse3_stage_ptr(k0_ptr, k1_ptr, kv2_ptr, stage)
+                            T.tcgen05_pv_gemm_128x64_skv_lane0(
+                                vptr,
+                                P0_tmem[0, 0],
+                                O0_tmem[0, 0],
+                                accum,
+                            )
 
-                else:
-                    T.evaluate(0)
+                            T.tcgen05_wait_barrier(mbar_p2_1, pv_phase)
+                            if k_mma > 0:
+                                T.tcgen05_wait_barrier(mbar_corr1, corr_phase)
+                            T.tcgen05_wait_barrier(mbar_p1, pv_phase)
+                            T.tcgen05_after_thread_sync()
+                            T.tcgen05_pv_gemm_128x64_skv_lane0(
+                                vptr,
+                                P1_tmem[0, 0],
+                                O1_tmem[0, 0],
+                                accum,
+                            )
+                            T.tcgen05_commit_1sm_lane0(mbar_pv)
+
+                            if k_mma + 1 < loop_range:
+                                next_stage = (k_mma + 1) % 3
+                                next_phase = ((k_mma + 1) // 3) & 1
+                                kbar = T.tcgen05_reuse3_barrier_ptr(
+                                    mbar_k_load[0],
+                                    mbar_k_load[1],
+                                    mbar_v_hi_load[0],
+                                    next_stage,
+                                )
+                                T.tcgen05_wait_barrier_ptr(kbar, next_phase)
+                                T.tcgen05_after_thread_sync()
+                                kptr = T.tcgen05_reuse3_stage_ptr(
+                                    k0_ptr,
+                                    k1_ptr,
+                                    kv2_ptr,
+                                    next_stage,
+                                )
+                                T.tcgen05_qk_gemm_128x128_skv_lane0(
+                                    q0_ptr,
+                                    kptr,
+                                    S0_tmem[0, 0],
+                                    mbar_s0,
+                                )
+                                T.tcgen05_qk_gemm_128x128_skv_lane0(
+                                    q1_ptr,
+                                    kptr,
+                                    S1_tmem[0, 0],
+                                    mbar_s1,
+                                )
+
+            # ================================================================
+            # Correction WG  --  tid in [256, 384)
+            # ================================================================
+            elif tid >= 256 and tid < 384:
+                row_corr = T.get_thread_binding() - 256
+                for k_corr in T.unroll(loop_range, explicit=False, unroll_factor=1):
+                    if k_corr > 0:
+                        scale_idx = k_corr & 1
+                        scale_phase = (k_corr >> 1) & 1
+                        pv_phase = (k_corr - 1) & 1
+
+                        T.mbarrier_wait_parity(
+                            T.mbarrier_at(mbar_scale0, scale_idx),
+                            scale_phase,
+                        )
+                        T.tcgen05_correction_x16(
+                            O0_tmem[0, 0],
+                            scores_scale0_shared[scale_idx, row_corr],
+                            mbar_pv=mbar_pv,
+                            pv_phase=pv_phase,
+                            warp_group_offset=256,
+                            head_dim=dim,
+                        )
+                        T.tcgen05_before_thread_sync()
+                        T.mbarrier_arrive(mbar_corr0, lane0=True)
+
+                        T.mbarrier_wait_parity(
+                            T.mbarrier_at(mbar_scale1, scale_idx),
+                            scale_phase,
+                        )
+                        T.tcgen05_correction_x16(
+                            O1_tmem[0, 0],
+                            scores_scale1_shared[scale_idx, row_corr],
+                            mbar_pv=mbar_pv,
+                            pv_phase=pv_phase,
+                            warp_group_offset=256,
+                            head_dim=dim,
+                        )
+                        T.tcgen05_before_thread_sync()
+                        T.mbarrier_arrive(mbar_corr1, lane0=True)
+
+                final_phase = (loop_range - 1) & 1
+                T.mbarrier_wait_parity(mbar_pv, final_phase)
+                T.tcgen05_after_thread_sync()
+                T.tcgen05_epilogue_store_x16(
+                    O0_tmem[0, 0],
+                    T.access_ptr(O0_shared, "w"),
+                    logsum0_shared[row_corr],
+                    warp_group_offset=256,
+                    head_dim=dim,
+                )
+                T.tcgen05_before_thread_sync()
+                T.sync_warp()
+                T.fence_proxy_async()
+                T.mbarrier_arrive(mbar_epi0, lane0=True)
+
+                T.tcgen05_after_thread_sync()
+                T.tcgen05_epilogue_store_x16(
+                    O1_tmem[0, 0],
+                    T.access_ptr(O0_shared, "w", offset=kq2_block_M * dim),
+                    logsum1_shared[row_corr],
+                    warp_group_offset=256,
+                    head_dim=dim,
+                )
+                T.tcgen05_before_thread_sync()
+                T.sync_warp()
+                T.fence_proxy_async()
+                T.mbarrier_arrive(mbar_epi1, lane0=True)
+
+            else:
+                T.evaluate(0)
 
             # ---- Avo-style split epilogue TMA store ----
             if tid >= 448 and tid < 480:
@@ -906,16 +664,31 @@ def attention_kernel_1sm(
                     0, 3, 2, 0,
                 )
                 with T.device_func():
-                    epilogue_warp_dsl(
-                        output_desc,
-                        O0_shared,
-                        O1_shared,
-                        mbar_epi0,
-                        mbar_epi1,
-                        bx * kq2_total_M,
-                        by,
-                        bz,
-                    )
+                    if (T.get_thread_binding() & 31) == 0:
+                        T.tcgen05_wait_barrier(mbar_epi0, 0)
+                        T.fence_proxy_async()
+                        for cw in T.unroll(4):
+                            T.tcgen05_epilogue_tma_store_32x128(
+                                output_desc,
+                                T.access_ptr(O0_shared, "r", offset=cw * 32 * dim),
+                                bx * kq2_total_M + cw * 32,
+                                by,
+                                bz,
+                            )
+                        T.tma_store_arrive()
+
+                        T.tcgen05_wait_barrier(mbar_epi1, 0)
+                        T.fence_proxy_async()
+                        for cw in T.unroll(4):
+                            T.tcgen05_epilogue_tma_store_32x128(
+                                output_desc,
+                                T.access_ptr(O1_shared, "r", offset=cw * 32 * dim),
+                                bx * kq2_total_M + kq2_block_M + cw * 32,
+                                by,
+                                bz,
+                            )
+                        T.tma_store_arrive()
+                        T.tma_store_wait(0)
 
     return main_kq2_split
 

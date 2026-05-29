@@ -1270,17 +1270,21 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
         PrimExpr rank = Call(DataType::Int(32), block_rank_in_cluster(), {});
         barrier_before_tma_stmt =
             IfThenElse(EQ(rank, IntImm(DataType::Int(32), 0)), expect_stmt);
+      } else if (auto emit_arrive_val = annotations.Get("emit_arrive")) {
+        if (Downcast<IntImm>(emit_arrive_val.value())->value != 0) {
+          barrier_before_tma_stmt =
+              Evaluate(Call(DataType::Handle(),
+                            builtin::ptx_arrive_barrier_expect_tx(),
+                            {mbar_handle, total_bytes}));
+        } else {
+          barrier_before_tma_stmt =
+              Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
+                            {mbar_handle, total_bytes}));
+        }
       } else {
         barrier_before_tma_stmt =
             Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
                           {mbar_handle, total_bytes}));
-      }
-      if (auto emit_arrive_val = annotations.Get("emit_arrive")) {
-        if (Downcast<IntImm>(emit_arrive_val.value())->value != 0) {
-          barrier_after_tma_stmt =
-              Evaluate(Call(DataType::Handle(), builtin::ptx_arrive_barrier(),
-                            {mbar_handle}));
-        }
       }
     } else {
       barrier_before_tma_stmt =

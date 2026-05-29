@@ -1064,7 +1064,9 @@ TVM_DLL const Op &tcgen05_after_thread_sync();
 /*!
  * \brief Fence to wait for async TMEM store visibility.
  *
- * tcgen05_wait_st()
+ * Compatibility spelling for \c tcgen05_fence_tmem_store() with the
+ * "tcgen05_use" annotation set, so InjectTcgen05Fence still treats it as a
+ * TCGEN05/TMEM use.
  *
  */
 TVM_DLL const Op &tcgen05_wait_st();
@@ -1079,9 +1081,10 @@ TVM_DLL const Op &tcgen05_fence_tmem_load();
 /*!
  * \brief Raw fence to wait for async TMEM store visibility.
  *
- * Unlike \c tcgen05_wait_st(), this op is intentionally not classified as a
- * TCGEN05 sync boundary by InjectTcgen05Fence. It is for hand-scheduled paths
- * that will immediately signal a warp-local mbarrier, matching FA4 softmax.
+ * Emits \c tl::fence_view_async_tmem_store(). By default this op is not
+ * classified as a TCGEN05/TMEM use by InjectTcgen05Fence. Use the
+ * "tcgen05_use" call annotation only for the old \c tcgen05_wait_st marker
+ * semantics.
  */
 TVM_DLL const Op &tcgen05_fence_tmem_store();
 
@@ -1168,11 +1171,11 @@ TVM_DLL const Op &pack_bf16_pair();
 TVM_DLL const Op &tcgen05_st_32x32b_x4();
 
 /*!
- * \brief FA4 softmax inner 8-element exp2/BF16-pack/TMEM-store primitive.
+ * \brief FA4 softmax 4-element exp2/BF16-pack primitive.
  *
- * Args: p_tmem_base, offset, sv_ptr, psa0, psa1, psa2, psa3, elem_base.
+ * Args: h0, h1, sv_ptr, psa0, psa1, elem_base.
  */
-TVM_DLL const Op &tcgen05_softmax_store_8();
+TVM_DLL const Op &tcgen05_softmax_pack_4();
 
 /*!
  * \brief Avo-style one-iteration S->P online softmax for FA4 1SM attention.
@@ -1294,12 +1297,6 @@ TVM_DLL const Op &tcgen05_reuse3_stage_ptr();
  * Args: mbar0, mbar1, mbar2, stage(int)
  */
 TVM_DLL const Op &tcgen05_reuse3_barrier_ptr();
-
-/*!
- * \brief Issue the two 64-column TMA loads for one Q stage.
- * Args: Q_desc, q_stage_ptr, mbar, q_row_base, q_head, batch
- */
-TVM_DLL const Op &tcgen05_q_stage_load();
 
 /*!
  * \brief Issue the two 64-column TMA loads for one reuse3 K/V stage.

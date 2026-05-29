@@ -1316,7 +1316,8 @@ def tcgen05_after_thread_sync():
 
 
 def tcgen05_wait_st():
-    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_wait_st"))
+    """Compatibility alias for a TMEM store fence that participates in fence analysis."""
+    return tcgen05_fence_tmem_store(classify_as_tmem_use=True)
 
 
 def tcgen05_fence_tmem_load():
@@ -1324,9 +1325,20 @@ def tcgen05_fence_tmem_load():
     return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_fence_tmem_load"))
 
 
-def tcgen05_fence_tmem_store():
-    """Wait for pending asynchronous TMEM stores to become visible."""
-    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_fence_tmem_store"))
+def tcgen05_fence_tmem_store(classify_as_tmem_use: bool = False):
+    """Wait for pending asynchronous TMEM stores to become visible.
+
+    By default this is a raw store-view fence and is not treated as a
+    tcgen05/TMEM use by the automatic before/after-thread-sync fence pass.
+    Set ``classify_as_tmem_use`` only for compatibility with the old
+    ``tcgen05_wait_st`` marker semantics.
+    """
+    ann = {"tcgen05_use": 1} if classify_as_tmem_use else {}
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_fence_tmem_store"),
+        annotations=ann,
+    )
 
 
 def _as_bool_imm(value: bool):
@@ -1658,22 +1670,16 @@ def tcgen05_st_32x32b_x4(tmem_base, offset, v0, v1, v2, v3):
     )
 
 
-def tcgen05_softmax_store_8(p_tmem_base, offset, sv_ptr, psa0, psa1, psa2, psa3, elem_base):
-    """Store one 8-element FA4 softmax micro-tile to P TMEM.
-
-    This keeps the scheduling-sensitive exp2/poly/BF16-pack/store sequence in a
-    small template while the surrounding online-softmax loop remains DSL.
-    """
+def tcgen05_softmax_pack_4(h0, h1, sv_ptr, psa0, psa1, elem_base):
+    """Compute one 4-element FA4 softmax micro-tile and pack two BF16 pairs."""
     return tir.call_intrin(
         "void",
-        tir.op.Op.get("tl.tcgen05_softmax_store_8"),
-        p_tmem_base,
-        offset,
+        tir.op.Op.get("tl.tcgen05_softmax_pack_4"),
+        h0,
+        h1,
         sv_ptr,
         psa0,
         psa1,
-        psa2,
-        psa3,
         elem_base,
     )
 
@@ -2198,21 +2204,6 @@ def tcgen05_reuse3_barrier_ptr(mbar0, mbar1, mbar2, stage):
         mbar1,
         mbar2,
         stage,
-    )
-
-
-def tcgen05_q_stage_load(desc, q_stage_ptr, mbar, q_row_base, q_head, batch):
-    """Issue the two 64-column TMA loads for one Q stage."""
-    mbar = _mbar_to_buffer_load(mbar)
-    return tir.call_intrin(
-        "void",
-        tir.op.Op.get("tl.tcgen05_q_stage_load"),
-        desc,
-        q_stage_ptr,
-        mbar,
-        q_row_base,
-        q_head,
-        batch,
     )
 
 

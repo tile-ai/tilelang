@@ -83,6 +83,14 @@ bool IsAfterFenceCall(const CallNode *call) {
   return call && call->op.same_as(tcgen05_after_thread_sync());
 }
 
+bool StoreFenceMarksTcgen05Use(const CallNode *call) {
+  if (!call || !call->op.same_as(tcgen05_fence_tmem_store())) {
+    return false;
+  }
+  auto it = call->annotations.find("tcgen05_use");
+  return it != call->annotations.end() && Downcast<Bool>((*it).second)->value;
+}
+
 const CallNode *GetEvaluateCall(const Stmt &stmt) {
   if (const auto *eval = stmt.as<EvaluateNode>()) {
     return eval->value.as<CallNode>();
@@ -103,6 +111,7 @@ bool IsTcgen05OrTmemCall(const CallNode *call) {
          call->op.same_as(tcgen05_ld_x16()) || call->op.same_as(tcgen05_st_x16()) ||
          call->op.same_as(tcgen05_mma_arrive()) ||
          call->op.same_as(tcgen05_wait_st()) ||
+         StoreFenceMarksTcgen05Use(call) ||
          call->op.same_as(ptx_init_tensor_memory()) ||
          call->op.same_as(ptx_deallocate_tensor_memory()) ||
          call->op.same_as(tcgen05_pv_gemm_128x64()) ||

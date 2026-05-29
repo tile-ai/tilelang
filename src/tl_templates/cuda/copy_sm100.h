@@ -607,18 +607,16 @@ tcgen05_softmax_128x128(uint32_t S_tmem_addr, uint32_t P_tmem_addr,
 }
 
 __device__ __forceinline__ void
-tcgen05_softmax_store_8(uint32_t P_tmem_addr, float const *sv,
-                        float &psa0, float &psa1, float &psa2, float &psa3,
-                        int elem_base) {
+tcgen05_softmax_pack_4(uint32_t &h0, uint32_t &h1, float const *sv,
+                       float &psa0, float &psa1, int elem_base) {
   constexpr int kBlockN = 128;
   constexpr int kEx2EmuFreq = 10;
   constexpr int kEx2EmuRes = 4;
   constexpr int kEx2EmuStartFrg = 1;
   constexpr int kEx2FragSize = 32;
-
-  bfloat16_t h[8];
+  bfloat16_t h[4];
   #pragma unroll
-  for (int i = 0; i < 8; i += 2) {
+  for (int i = 0; i < 4; i += 2) {
     int elem = elem_base + i;
     float p0, p1;
     int frag = elem / kEx2FragSize;
@@ -633,20 +631,14 @@ tcgen05_softmax_store_8(uint32_t P_tmem_addr, float const *sv,
     }
     if (i == 0) {
       psa0 += p0 + p1;
-    } else if (i == 2) {
-      psa1 += p0 + p1;
-    } else if (i == 4) {
-      psa2 += p0 + p1;
     } else {
-      psa3 += p0 + p1;
+      psa1 += p0 + p1;
     }
     h[i] = bfloat16_t(p0);
     h[i + 1] = bfloat16_t(p1);
   }
-  tl::tcgen05_st_32x32b_x4(P_tmem_addr, *reinterpret_cast<uint32_t *>(&h[0]),
-                           *reinterpret_cast<uint32_t *>(&h[2]),
-                           *reinterpret_cast<uint32_t *>(&h[4]),
-                           *reinterpret_cast<uint32_t *>(&h[6]));
+  h0 = *reinterpret_cast<uint32_t *>(&h[0]);
+  h1 = *reinterpret_cast<uint32_t *>(&h[2]);
 }
 
 // Avo-shaped full softmax warp loop.  Unlike tcgen05_softmax_128x128, this
@@ -1758,21 +1750,6 @@ tcgen05_reuse3_vbar(void const *mbar_v0, void const *mbar_v1,
   if (stage == 0) return mbar_v0;
   if (stage == 1) return mbar_v1;
   return mbar_v2;
-}
-
-__device__ __forceinline__ void
-tcgen05_q_stage_load(const CUtensorMap &Q_desc, void *q_stage_ptr,
-                     void const *mbar_q, int q_row_base, int q_head,
-                     int batch) {
-  constexpr int kBlockM = 128;
-  constexpr int kTileCols = 64;
-  constexpr int kBytes = kBlockM * 128 * 2;
-  auto *dst = reinterpret_cast<bfloat16_t *>(q_stage_ptr);
-  auto *bar = reinterpret_cast<Barrier *>(const_cast<void *>(mbar_q));
-  tl::tcgen05_arrive_expect_tx(mbar_q, kBytes);
-  tl::tma_load(Q_desc, *bar, dst, 0, q_head, q_row_base, batch);
-  tl::tma_load(Q_desc, *bar, dst + kBlockM * kTileCols, 64, q_head,
-               q_row_base, batch);
 }
 
 __device__ __forceinline__ void

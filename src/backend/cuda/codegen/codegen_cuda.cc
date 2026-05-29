@@ -3667,9 +3667,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         << "tcgen05_after_thread_sync expects no arguments";
     need_tcgen05_common_h_ = true;
     print_extern_call_stmt("tl::tcgen05_after_thread_sync");
-  } else if (op->op.same_as(tl::tcgen05_wait_st())) {
+  } else if (op->op.same_as(tl::tcgen05_wait_st()) ||
+             op->op.same_as(tl::tcgen05_fence_tmem_store())) {
     ICHECK_EQ(op->args.size(), 0U)
-        << "tcgen05_wait_st expects no arguments";
+        << "tcgen05 TMEM store fence expects no arguments";
     need_tcgen05_common_h_ = true;
     this->stream << "tl::fence_view_async_tmem_store();\n";
   } else if (op->op.same_as(tl::tcgen05_fence_tmem_load())) {
@@ -3677,11 +3678,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         << "tcgen05_fence_tmem_load expects no arguments";
     need_tcgen05_common_h_ = true;
     this->stream << "tl::fence_view_async_tmem_load();\n";
-  } else if (op->op.same_as(tl::tcgen05_fence_tmem_store())) {
-    ICHECK_EQ(op->args.size(), 0U)
-        << "tcgen05_fence_tmem_store expects no arguments";
-    need_tcgen05_common_h_ = true;
-    this->stream << "tl::fence_view_async_tmem_store();\n";
   } else if (op->op.same_as(tl::tcgen05_correction_x16()) ||
              op->op.same_as(tl::tcgen05_correction_x16_skip())) {
     this->PrintIndent();
@@ -3799,22 +3795,20 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << this->PrintExpr(op->args[3]) << ", "
                  << this->PrintExpr(op->args[4]) << ", "
                  << this->PrintExpr(op->args[5]) << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_softmax_store_8())) {
-    ICHECK_EQ(op->args.size(), 8U)
-        << "tcgen05_softmax_store_8 expects 8 args";
+  } else if (op->op.same_as(tl::tcgen05_softmax_pack_4())) {
+    ICHECK_EQ(op->args.size(), 6U)
+        << "tcgen05_softmax_pack_4 expects 6 args";
     this->PrintIndent();
     need_tcgen05_common_h_ = true;
     auto ref_of = [this](const PrimExpr &expr) {
       return "(&(" + this->PrintExpr(expr) + "))";
     };
-    this->stream << "tl::tcgen05_softmax_store_8("
-                 << this->PrintExpr(op->args[0]) << " + "
-                 << this->PrintExpr(op->args[1]) << ", "
-                 << "(float const *)(" << this->PrintExpr(op->args[2]) << "), "
-                 << "*" << ref_of(op->args[3]) << ", *" << ref_of(op->args[4])
-                 << ", *" << ref_of(op->args[5]) << ", *"
-                 << ref_of(op->args[6]) << ", "
-                 << this->PrintExpr(op->args[7]) << ");\n";
+    this->stream << "tl::tcgen05_softmax_pack_4(*"
+                 << ref_of(op->args[0]) << ", *" << ref_of(op->args[1])
+                 << ", " << "(float const *)(" << this->PrintExpr(op->args[2])
+                 << "), *" << ref_of(op->args[3]) << ", *"
+                 << ref_of(op->args[4]) << ", "
+                 << this->PrintExpr(op->args[5]) << ");\n";
   } else if (op->op.same_as(tl::tcgen05_softmax_128x128())) {
     ICHECK_EQ(op->args.size(), 17U)
         << "tcgen05_softmax_128x128 expects 17 args";
@@ -4056,24 +4050,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << this->PrintExpr(op->args[20]) << ", "
                  << this->PrintExpr(op->args[21]) << ", "
                  << this->PrintExpr(op->args[22]) << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_q_stage_load())) {
-    ICHECK_EQ(op->args.size(), 6U)
-        << "tcgen05_q_stage_load expects 6 args";
-    this->PrintIndent();
-    need_tcgen05_common_h_ = true;
-    auto ptr_expr = [this](const PrimExpr &expr) {
-      return this->PrintExpr(expr);
-    };
-    auto mbar_ptr = [this](const PrimExpr &expr) {
-      return "(void const*)(&" + this->PrintExpr(expr) + ")";
-    };
-    this->stream << "tl::tcgen05_q_stage_load("
-                 << this->PrintExpr(op->args[0]) << ", "
-                 << "(void*)(" << ptr_expr(op->args[1]) << "), "
-                 << mbar_ptr(op->args[2]) << ", "
-                 << this->PrintExpr(op->args[3]) << ", "
-                 << this->PrintExpr(op->args[4]) << ", "
-                 << this->PrintExpr(op->args[5]) << ");\n";
   } else if (op->op.same_as(tl::tcgen05_reuse3_load()) ||
              op->op.same_as(tl::tcgen05_reuse3_load_k()) ||
              op->op.same_as(tl::tcgen05_reuse3_load_v())) {
