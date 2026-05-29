@@ -1299,25 +1299,10 @@ TVM_DLL const Op &tcgen05_reuse3_stage_ptr();
 TVM_DLL const Op &tcgen05_reuse3_barrier_ptr();
 
 /*!
- * \brief Issue the two 64-column TMA loads for one reuse3 K/V stage.
- * Args: desc, stage0_ptr, stage1_ptr, stage2_ptr, mbar0, mbar1, mbar2,
- *       k_iter, kv_head, batch
+ * \brief Issue a 128x128 BF16 TMA load as two 64-column transfers.
+ * Args: desc, stage_ptr, mbar_ptr, k_iter, kv_head, batch
  */
-TVM_DLL const Op &tcgen05_reuse3_load();
-
-/*!
- * \brief Compatibility wrapper for tcgen05_reuse3_load on K.
- * Args: K_desc, stage0_ptr, stage1_ptr, stage2_ptr, mbar0, mbar1, mbar2,
- *       k_iter, kv_head, batch
- */
-TVM_DLL const Op &tcgen05_reuse3_load_k();
-
-/*!
- * \brief Compatibility wrapper for tcgen05_reuse3_load on V.
- * Args: V_desc, stage0_ptr, stage1_ptr, stage2_ptr, mbar0, mbar1, mbar2,
- *       k_iter, kv_head, batch
- */
-TVM_DLL const Op &tcgen05_reuse3_load_v();
+TVM_DLL const Op &tcgen05_tma_load_128x128();
 
 /*!
  * \brief Wait on a raw mbarrier pointer returned by

@@ -1753,39 +1753,18 @@ tcgen05_reuse3_vbar(void const *mbar_v0, void const *mbar_v1,
 }
 
 __device__ __forceinline__ void
-tcgen05_reuse3_load(const CUtensorMap &desc, void *k0_ptr, void *k1_ptr,
-                    void *stage2_ptr, void const *mbar0,
-                    void const *mbar1, void const *mbar2, int k,
-                    int kv_head, int batch) {
+tcgen05_tma_load_128x128(const CUtensorMap &desc, void *stage_ptr,
+                         void const *mbar_ptr, int k, int kv_head,
+                         int batch) {
   constexpr int kBlockN = 128;
   constexpr int kTileCols = 64;
   constexpr int kBytes = kBlockN * 128 * 2;
-  int stage = k % 3;
-  auto *dst = tcgen05_reuse3_stage_ptr(k0_ptr, k1_ptr, stage2_ptr, stage);
-  auto *bar = reinterpret_cast<Barrier *>(
-      const_cast<void *>(tcgen05_reuse3_kbar(mbar0, mbar1, mbar2, stage)));
+  auto *dst = reinterpret_cast<bfloat16_t *>(stage_ptr);
+  auto *bar = reinterpret_cast<Barrier *>(const_cast<void *>(mbar_ptr));
   tl::tcgen05_arrive_expect_tx((void const *)bar, kBytes);
   tl::tma_load(desc, *bar, dst, 0, kv_head, k * kBlockN, batch);
   tl::tma_load(desc, *bar, dst + kBlockN * kTileCols, 64, kv_head,
                k * kBlockN, batch);
-}
-
-__device__ __forceinline__ void
-tcgen05_reuse3_load_k(const CUtensorMap &K_desc, void *k0_ptr, void *k1_ptr,
-                      void *stage2_ptr, void const *mbar_k0,
-                      void const *mbar_k1, void const *mbar_k2, int k,
-                      int kv_head, int batch) {
-  tl::tcgen05_reuse3_load(K_desc, k0_ptr, k1_ptr, stage2_ptr, mbar_k0, mbar_k1,
-                          mbar_k2, k, kv_head, batch);
-}
-
-__device__ __forceinline__ void
-tcgen05_reuse3_load_v(const CUtensorMap &V_desc, void *k0_ptr, void *k1_ptr,
-                      void *stage2_ptr, void const *mbar_v0,
-                      void const *mbar_v1, void const *mbar_v2, int k,
-                      int kv_head, int batch) {
-  tl::tcgen05_reuse3_load(V_desc, k0_ptr, k1_ptr, stage2_ptr, mbar_v0, mbar_v1,
-                          mbar_v2, k, kv_head, batch);
 }
 
 __device__ __noinline__ void
@@ -1821,34 +1800,47 @@ tcgen05_producer_warp_1sm_reuse3(
                q_row_base + kBlockM, batch);
 
   if (loop_extent > 0) {
-    tl::tcgen05_reuse3_load_k(K_desc, K0_stage_ptr, K1_stage_ptr,
-                              KV2_stage_ptr, mbar_k0, mbar_k1, mbar_k2, 0,
-                              kv_head, batch);
+    tl::tcgen05_tma_load_128x128(
+        K_desc, tl::tcgen05_reuse3_stage_ptr(K0_stage_ptr, K1_stage_ptr,
+                                             KV2_stage_ptr, 0),
+        tl::tcgen05_reuse3_kbar(mbar_k0, mbar_k1, mbar_k2, 0), 0, kv_head,
+        batch);
   }
   if (loop_extent > 1) {
-    tl::tcgen05_reuse3_load_k(K_desc, K0_stage_ptr, K1_stage_ptr,
-                              KV2_stage_ptr, mbar_k0, mbar_k1, mbar_k2, 1,
-                              kv_head, batch);
+    tl::tcgen05_tma_load_128x128(
+        K_desc, tl::tcgen05_reuse3_stage_ptr(K0_stage_ptr, K1_stage_ptr,
+                                             KV2_stage_ptr, 1),
+        tl::tcgen05_reuse3_kbar(mbar_k0, mbar_k1, mbar_k2, 1), 1, kv_head,
+        batch);
   }
   if (loop_extent > 2) {
-    tl::tcgen05_reuse3_load_k(K_desc, K0_stage_ptr, K1_stage_ptr,
-                              KV2_stage_ptr, mbar_k0, mbar_k1, mbar_k2, 2,
-                              kv_head, batch);
+    tl::tcgen05_tma_load_128x128(
+        K_desc, tl::tcgen05_reuse3_stage_ptr(K0_stage_ptr, K1_stage_ptr,
+                                             KV2_stage_ptr, 2),
+        tl::tcgen05_reuse3_kbar(mbar_k0, mbar_k1, mbar_k2, 2), 2, kv_head,
+        batch);
   }
 
   #pragma unroll 1
   for (int k = 0; k < loop_extent; ++k) {
     tl::tcgen05_wait_barrier(mbar_s1, uint32_t(k & 1));
     tl::tcgen05_after_thread_sync();
-    tl::tcgen05_reuse3_load_v(V_desc, K0_stage_ptr, K1_stage_ptr,
-                              KV2_stage_ptr, mbar_v0, mbar_v1, mbar_v2, k,
-                              kv_head, batch);
+    int stage = k % 3;
+    tl::tcgen05_tma_load_128x128(
+        V_desc, tl::tcgen05_reuse3_stage_ptr(K0_stage_ptr, K1_stage_ptr,
+                                             KV2_stage_ptr, stage),
+        tl::tcgen05_reuse3_kbar(mbar_v0, mbar_v1, mbar_v2, stage), k,
+        kv_head, batch);
     if (k + 3 < loop_extent) {
       tl::tcgen05_wait_barrier(mbar_pv, uint32_t(k & 1));
       tl::tcgen05_after_thread_sync();
-      tl::tcgen05_reuse3_load_k(K_desc, K0_stage_ptr, K1_stage_ptr,
-                                KV2_stage_ptr, mbar_k0, mbar_k1, mbar_k2,
-                                k + 3, kv_head, batch);
+      int next_k = k + 3;
+      int next_stage = next_k % 3;
+      tl::tcgen05_tma_load_128x128(
+          K_desc, tl::tcgen05_reuse3_stage_ptr(K0_stage_ptr, K1_stage_ptr,
+                                               KV2_stage_ptr, next_stage),
+          tl::tcgen05_reuse3_kbar(mbar_k0, mbar_k1, mbar_k2, next_stage),
+          next_k, kv_head, batch);
     }
   }
 }

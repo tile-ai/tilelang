@@ -4050,30 +4050,18 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << this->PrintExpr(op->args[20]) << ", "
                  << this->PrintExpr(op->args[21]) << ", "
                  << this->PrintExpr(op->args[22]) << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_reuse3_load()) ||
-             op->op.same_as(tl::tcgen05_reuse3_load_k()) ||
-             op->op.same_as(tl::tcgen05_reuse3_load_v())) {
-    ICHECK_EQ(op->args.size(), 10U)
-        << "tcgen05_reuse3_load expects 10 args";
+  } else if (op->op.same_as(tl::tcgen05_tma_load_128x128())) {
+    ICHECK_EQ(op->args.size(), 6U)
+        << "tcgen05_tma_load_128x128 expects 6 args";
     this->PrintIndent();
     need_tcgen05_common_h_ = true;
-    auto ptr_expr = [this](const PrimExpr &expr) {
-      return this->PrintExpr(expr);
-    };
-    auto mbar_ptr = [this](const PrimExpr &expr) {
-      return "(void const*)(&" + this->PrintExpr(expr) + ")";
-    };
-    this->stream << "tl::tcgen05_reuse3_load("
+    this->stream << "tl::tcgen05_tma_load_128x128("
                  << this->PrintExpr(op->args[0]) << ", "
-                 << "(void*)(" << ptr_expr(op->args[1]) << "), "
-                 << "(void*)(" << ptr_expr(op->args[2]) << "), "
-                 << "(void*)(" << ptr_expr(op->args[3]) << "), "
-                 << mbar_ptr(op->args[4]) << ", "
-                 << mbar_ptr(op->args[5]) << ", "
-                 << mbar_ptr(op->args[6]) << ", "
-                 << this->PrintExpr(op->args[7]) << ", "
-                 << this->PrintExpr(op->args[8]) << ", "
-                 << this->PrintExpr(op->args[9]) << ");\n";
+                 << "(void*)(" << this->PrintExpr(op->args[1]) << "), "
+                 << "(void const*)(" << this->PrintExpr(op->args[2]) << "), "
+                 << this->PrintExpr(op->args[3]) << ", "
+                 << this->PrintExpr(op->args[4]) << ", "
+                 << this->PrintExpr(op->args[5]) << ");\n";
   } else if (op->op.same_as(tl::tcgen05_mma_warp_1sm_reuse3())) {
     ICHECK_EQ(op->args.size(), 29U)
         << "tcgen05_mma_warp_1sm_reuse3 expects 29 args";

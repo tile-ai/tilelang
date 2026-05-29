@@ -2207,53 +2207,14 @@ def tcgen05_reuse3_barrier_ptr(mbar0, mbar1, mbar2, stage):
     )
 
 
-def tcgen05_reuse3_load(desc, stage0_ptr, stage1_ptr, stage2_ptr, mbar0, mbar1, mbar2, k_iter, kv_head, batch):
-    """Issue the two 64-column TMA loads for one reuse3 K/V stage."""
-    mbar0 = _mbar_to_buffer_load(mbar0)
-    mbar1 = _mbar_to_buffer_load(mbar1)
-    mbar2 = _mbar_to_buffer_load(mbar2)
+def tcgen05_tma_load_128x128(desc, stage_ptr, mbar_ptr, k_iter, kv_head, batch):
+    """Issue a 128x128 BF16 TMA load as two 64-column transfers."""
     return tir.call_intrin(
         "void",
-        tir.op.Op.get("tl.tcgen05_reuse3_load"),
+        tir.op.Op.get("tl.tcgen05_tma_load_128x128"),
         desc,
-        stage0_ptr,
-        stage1_ptr,
-        stage2_ptr,
-        mbar0,
-        mbar1,
-        mbar2,
-        k_iter,
-        kv_head,
-        batch,
-    )
-
-
-def tcgen05_reuse3_load_k(desc, stage0_ptr, stage1_ptr, stage2_ptr, mbar0, mbar1, mbar2, k_iter, kv_head, batch):
-    """Compatibility wrapper for `tcgen05_reuse3_load` on K."""
-    return tcgen05_reuse3_load(
-        desc,
-        stage0_ptr,
-        stage1_ptr,
-        stage2_ptr,
-        mbar0,
-        mbar1,
-        mbar2,
-        k_iter,
-        kv_head,
-        batch,
-    )
-
-
-def tcgen05_reuse3_load_v(desc, stage0_ptr, stage1_ptr, stage2_ptr, mbar0, mbar1, mbar2, k_iter, kv_head, batch):
-    """Compatibility wrapper for `tcgen05_reuse3_load` on V."""
-    return tcgen05_reuse3_load(
-        desc,
-        stage0_ptr,
-        stage1_ptr,
-        stage2_ptr,
-        mbar0,
-        mbar1,
-        mbar2,
+        stage_ptr,
+        mbar_ptr,
         k_iter,
         kv_head,
         batch,

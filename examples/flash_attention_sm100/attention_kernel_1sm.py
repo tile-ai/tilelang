@@ -435,14 +435,21 @@ def attention_kernel_1sm(
 
                         for k_prefetch in T.unroll(3):
                             if k_prefetch < loop_range:
-                                T.tcgen05_reuse3_load(
+                                prefetch_stage = k_prefetch % 3
+                                T.tcgen05_tma_load_128x128(
                                     k_desc,
-                                    k_stage0,
-                                    k_stage1,
-                                    kv_stage2,
-                                    mbar_k_load[0],
-                                    mbar_k_load[1],
-                                    mbar_v_hi_load[0],
+                                    T.tcgen05_reuse3_stage_ptr(
+                                        k_stage0,
+                                        k_stage1,
+                                        kv_stage2,
+                                        prefetch_stage,
+                                    ),
+                                    T.tcgen05_reuse3_barrier_ptr(
+                                        mbar_k_load[0],
+                                        mbar_k_load[1],
+                                        mbar_v_hi_load[0],
+                                        prefetch_stage,
+                                    ),
                                     k_prefetch,
                                     by // groups,
                                     bz,
@@ -451,14 +458,21 @@ def attention_kernel_1sm(
                         for k_prod in T.unroll(loop_range, explicit=False, unroll_factor=1):
                             T.tcgen05_wait_barrier(mbar_s1, k_prod & 1)
                             T.tcgen05_after_thread_sync()
-                            T.tcgen05_reuse3_load(
+                            prod_stage = k_prod % 3
+                            T.tcgen05_tma_load_128x128(
                                 v_desc,
-                                k_stage0,
-                                k_stage1,
-                                kv_stage2,
-                                mbar_v_lo_load[0],
-                                mbar_v_lo_load[1],
-                                mbar_v_hi_load[1],
+                                T.tcgen05_reuse3_stage_ptr(
+                                    k_stage0,
+                                    k_stage1,
+                                    kv_stage2,
+                                    prod_stage,
+                                ),
+                                T.tcgen05_reuse3_barrier_ptr(
+                                    mbar_v_lo_load[0],
+                                    mbar_v_lo_load[1],
+                                    mbar_v_hi_load[1],
+                                    prod_stage,
+                                ),
                                 k_prod,
                                 by // groups,
                                 bz,
@@ -466,15 +480,23 @@ def attention_kernel_1sm(
                             if k_prod + 3 < loop_range:
                                 T.tcgen05_wait_barrier(mbar_pv, k_prod & 1)
                                 T.tcgen05_after_thread_sync()
-                                T.tcgen05_reuse3_load(
+                                next_k = k_prod + 3
+                                next_stage = next_k % 3
+                                T.tcgen05_tma_load_128x128(
                                     k_desc,
-                                    k_stage0,
-                                    k_stage1,
-                                    kv_stage2,
-                                    mbar_k_load[0],
-                                    mbar_k_load[1],
-                                    mbar_v_hi_load[0],
-                                    k_prod + 3,
+                                    T.tcgen05_reuse3_stage_ptr(
+                                        k_stage0,
+                                        k_stage1,
+                                        kv_stage2,
+                                        next_stage,
+                                    ),
+                                    T.tcgen05_reuse3_barrier_ptr(
+                                        mbar_k_load[0],
+                                        mbar_k_load[1],
+                                        mbar_v_hi_load[0],
+                                        next_stage,
+                                    ),
+                                    next_k,
                                     by // groups,
                                     bz,
                                 )
