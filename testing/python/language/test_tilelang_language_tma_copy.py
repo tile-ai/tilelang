@@ -338,6 +338,28 @@ def run_fp4_tma_copy_roundtrip():
     assert torch.equal(b.view(torch.int8), a)
 
 
+def test_copy_prefer_tma_lowers_as_synchronous_tma_load():
+    @T.prim_func
+    def main(x: T.Tensor((128, 32), T.float32)):
+        with T.Kernel(threads=128):
+            x_shared = T.alloc_shared((128, 32), T.float32)
+            T.copy(x, x_shared, annotations={"prefer_instruction": "tma"})
+
+    target = {"kind": "cuda", "arch": "sm_90"}
+    artifact = tilelang.lower(
+        main,
+        target=target,
+        enable_device_compile=False,
+    )
+
+    device_source = str(artifact.kernel_source)
+    assert "tl::tma_load" in device_source
+    assert "x_to_x_shared_mbarrier_mem" in device_source
+    assert "x_to_x_shared_mbarrier[0]" in device_source
+    assert "arrive_and_expect_tx" in device_source
+    assert ".wait(0)" in device_source
+
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 def test_fp4_tma_copy_roundtrip():

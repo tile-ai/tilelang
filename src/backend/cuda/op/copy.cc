@@ -25,8 +25,10 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include <cctype>
 #include <cstdint>
 #include <sstream>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -96,6 +98,27 @@ PrimExpr GetCopyMbarPhaseExpr(const Map<String, ObjectRef> &annotations,
     phase = explicit_phase.value();
   }
   return phase;
+}
+
+std::string SanitizeIdentifierPart(const std::string &name) {
+  std::string sanitized;
+  sanitized.reserve(name.size());
+  for (unsigned char ch : name) {
+    sanitized.push_back(std::isalnum(ch) || ch == '_' ? static_cast<char>(ch)
+                                                      : '_');
+  }
+  if (sanitized.empty()) {
+    sanitized = "buffer";
+  }
+  if (std::isdigit(static_cast<unsigned char>(sanitized.front()))) {
+    sanitized.insert(sanitized.begin(), '_');
+  }
+  return sanitized;
+}
+
+std::string MakeCopyMBarrierName(const Buffer &src, const Buffer &dst) {
+  return SanitizeIdentifierPart(src->name) + "_to_" +
+         SanitizeIdentifierPart(dst->name) + "_mbarrier";
 }
 
 bool GetBoolAnnotation(const CopyNode &op, const char *key) {
@@ -1560,7 +1583,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
       LOG(FATAL) << "T.tma_copy() requires a barrier argument. "
                  << "Use T.tma_copy(src, dst, barrier=mbar[idx]).";
     } else if (T.AllocMBarrier) {
-      barrier_base_id = T.AllocMBarrier(1);
+      barrier_base_id =
+          T.AllocMBarrier(1, MakeCopyMBarrierName(op.src, op.dst));
       PrimExpr mbar_idx = IntImm(DataType::Int(32), barrier_base_id);
       mbar_handle = BufferLoad(T.mbarrier_buffer->value(), {mbar_idx});
     }
@@ -1981,7 +2005,8 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
       LOG(FATAL) << "T.tma_copy() requires a barrier argument. "
                  << "Use T.tma_copy(src, dst, barrier=mbar[idx]).";
     } else if (T.AllocMBarrier) {
-      barrier_base_id = T.AllocMBarrier(1);
+      barrier_base_id =
+          T.AllocMBarrier(1, MakeCopyMBarrierName(op.src, op.dst));
       PrimExpr mbar_idx = IntImm(DataType::Int(32), barrier_base_id);
       mbar_handle = BufferLoad(T.mbarrier_buffer->value(), {mbar_idx});
     }
@@ -2163,7 +2188,8 @@ Stmt Im2Col::Lower(const Im2ColOpNode &op, const LowerArgs &T,
     mbar_handle = Downcast<PrimExpr>(user_barrier.value());
     barrier_base_id = 0;
   } else if (T.AllocMBarrier) {
-    barrier_base_id = T.AllocMBarrier(1);
+    barrier_base_id =
+        T.AllocMBarrier(1, MakeCopyMBarrierName(op.src_, op.dst_));
     PrimExpr mbar_idx = IntImm(DataType::Int(32), barrier_base_id);
     mbar_handle = BufferLoad(T.mbarrier_buffer->value(), {mbar_idx});
   }
