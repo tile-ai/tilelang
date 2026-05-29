@@ -1329,13 +1329,15 @@ TVM_DLL const Op &tcgen05_wait_barrier_ptr();
 TVM_DLL const Op &tcgen05_wait_barrier_op();
 
 /*!
- * \brief Avo-style epilogue TMA-store warp for FA4 1SM split attention.
- *
- * The CUDA lowering wires this primitive to the kernel's Output TMA descriptor
- * and emits a compact noinline epilogue_warp_fn-shaped helper instead of
- * expanding the TMA store branch in the main kernel.
+ * \brief Legacy Avo-style epilogue TMA-store warp for FA4 1SM split attention.
  */
 TVM_DLL const Op &tcgen05_epilogue_warp_1sm_skv();
+
+/*!
+ * \brief Issue the two 64-column TMA stores for one 32-row epilogue chunk.
+ * Args: Output_desc, epi_ptr, q_row, q_head, batch
+ */
+TVM_DLL const Op &tcgen05_epilogue_tma_store_32x128();
 
 /*!
  * \brief Avo-exact commit: tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64

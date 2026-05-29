@@ -472,6 +472,11 @@ TIR_DEFINE_TL_BUILTIN(tcgen05_epilogue_warp_1sm_skv)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(tcgen05_epilogue_tma_store_32x128)
+    .set_num_inputs(5)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TIR_DEFINE_TL_BUILTIN(tcgen05_commit_1sm_op)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",

@@ -1467,9 +1467,10 @@ tcgen05_producer_warp_1sm_skv(
 }
 
 // Avo-shaped epilogue warp: wait for correction-staged SMEM tiles, issue the
-// two 64-column TMA stores for both Q stages, then wait for completion.  Keeping
-// this in a noinline helper removes the long TMA-store branch from the main
-// kernel and matches avo's epilogue_warp_fn structure more closely.
+// two 64-column TMA stores for both Q stages, then wait for completion.  This
+// legacy helper is still available for archived variants, but the primary 1SM
+// DSL path expresses this schedule directly and only calls the chunk primitive
+// below for the raw TMA store pair.
 __device__ __noinline__ void
 tcgen05_epilogue_warp_1sm_skv(
     const CUtensorMap &Output_desc, void const *Q_base_ptr,
@@ -1512,6 +1513,22 @@ tcgen05_epilogue_warp_1sm_skv(
   tl::tma_store_arrive();
 
   tl::tma_store_wait<0>();
+}
+
+// Store one 32-row epilogue chunk.  The caller owns the surrounding barrier
+// waits, proxy fences, arrive groups, and final wait so the epilogue schedule
+// can be expressed in TileLang DSL while preserving raw staging-buffer offsets.
+__device__ __forceinline__ void
+tcgen05_epilogue_tma_store_32x128(const CUtensorMap &Output_desc,
+                                  void const *epi_ptr, int q_row,
+                                  int q_head, int batch) {
+  constexpr int kTileCols = 64;
+  constexpr int kEpiRows = 32;
+  constexpr int kEpiBlockElems = kEpiRows * kTileCols;
+  auto *epi_base = reinterpret_cast<bfloat16_t const *>(epi_ptr);
+  tl::tma_store(Output_desc, epi_base, 0, q_head, q_row, batch);
+  tl::tma_store(Output_desc, epi_base + kEpiBlockElems, 64, q_head, q_row,
+                batch);
 }
 
 // Avo-shaped MMA warp loop for the current 1SM split FA4 TileLang layout:

@@ -2289,7 +2289,7 @@ def tcgen05_epilogue_warp_1sm_skv(
     q_head,
     batch,
 ):
-    """Avo-style epilogue TMA-store warp for the FA4 1SM split path."""
+    """Legacy Avo-style epilogue TMA-store warp for the FA4 1SM split path."""
     if isinstance(output_desc, str):
         output_desc = tir.StringImm(output_desc)
     mbar_epi0 = _mbar_to_buffer_load(mbar_epi0)
@@ -2303,6 +2303,21 @@ def tcgen05_epilogue_warp_1sm_skv(
         mbar_epi1,
         tile_iter,
         q_row_base,
+        q_head,
+        batch,
+    )
+
+
+def tcgen05_epilogue_tma_store_32x128(output_desc, epi_ptr, q_row, q_head, batch):
+    """Issue the two 64-column TMA stores for one 32-row epilogue chunk."""
+    if isinstance(output_desc, str):
+        output_desc = tir.StringImm(output_desc)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_epilogue_tma_store_32x128"),
+        output_desc,
+        epi_ptr,
+        q_row,
         q_head,
         batch,
     )

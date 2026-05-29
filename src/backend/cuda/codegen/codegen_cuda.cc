@@ -4183,6 +4183,26 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << this->PrintExpr(op->args[5]) << ", "
                  << this->PrintExpr(op->args[6]) << ", "
                  << this->PrintExpr(op->args[7]) << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_epilogue_tma_store_32x128())) {
+    ICHECK_EQ(op->args.size(), 5U)
+        << "tcgen05_epilogue_tma_store_32x128 expects 5 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    auto desc_expr = [this](const PrimExpr &expr) -> std::string {
+      if (const auto *str = expr.as<StringImmNode>()) {
+        return std::string(str->value);
+      }
+      return this->PrintExpr(expr);
+    };
+    auto ptr_expr = [this](const PrimExpr &expr) {
+      return this->PrintExpr(expr);
+    };
+    this->stream << "tl::tcgen05_epilogue_tma_store_32x128("
+                 << desc_expr(op->args[0]) << ", "
+                 << "(void const*)(" << ptr_expr(op->args[1]) << "), "
+                 << this->PrintExpr(op->args[2]) << ", "
+                 << this->PrintExpr(op->args[3]) << ", "
+                 << this->PrintExpr(op->args[4]) << ");\n";
   } else if (op->op.same_as(tl::tcgen05_commit_1sm_op())) {
     ICHECK_EQ(op->args.size(), 1U)
         << "tcgen05_commit_1sm_op expects 1 arg: mbar_ptr";

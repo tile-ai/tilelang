@@ -587,6 +587,44 @@ def attention_kernel_1sm(
                     )
 
 
+    @T.macro
+    def epilogue_warp_dsl(
+        output_desc: T.handle,
+        O0_stage: T.SharedBuffer([kq2_block_M, dim], dtype),
+        O1_stage: T.SharedBuffer([kq2_block_M, dim], dtype),
+        mbar_epi0: T.Buffer,
+        mbar_epi1: T.Buffer,
+        q_row_base: T.int32,
+        q_head: T.int32,
+        batch_idx: T.int32,
+    ):
+        if (T.get_thread_binding() & 31) == 0:
+            T.tcgen05_wait_barrier(mbar_epi0, 0)
+            T.fence_proxy_async()
+            for cw in T.unroll(4):
+                T.tcgen05_epilogue_tma_store_32x128(
+                    output_desc,
+                    T.access_ptr(O0_stage, "r", offset=cw * 32 * dim),
+                    q_row_base + cw * 32,
+                    q_head,
+                    batch_idx,
+                )
+            T.tma_store_arrive()
+
+            T.tcgen05_wait_barrier(mbar_epi1, 0)
+            T.fence_proxy_async()
+            for cw in T.unroll(4):
+                T.tcgen05_epilogue_tma_store_32x128(
+                    output_desc,
+                    T.access_ptr(O1_stage, "r", offset=cw * 32 * dim),
+                    q_row_base + kq2_block_M + cw * 32,
+                    q_head,
+                    batch_idx,
+                )
+            T.tma_store_arrive()
+            T.tma_store_wait(0)
+
+
     @T.prim_func
     def main_kq2_split(
         Q: T.Tensor(q_shape, dtype),
@@ -867,16 +905,17 @@ def attention_kernel_1sm(
                     1, 1, 1, 1,
                     0, 3, 2, 0,
                 )
-                T.tcgen05_epilogue_warp_1sm_skv(
-                    output_desc,
-                    T.access_ptr(O0_shared, "r"),
-                    mbar_epi0,
-                    mbar_epi1,
-                    0,
-                    bx * kq2_total_M,
-                    by,
-                    bz,
-                )
+                with T.device_func():
+                    epilogue_warp_dsl(
+                        output_desc,
+                        O0_shared,
+                        O1_shared,
+                        mbar_epi0,
+                        mbar_epi1,
+                        bx * kq2_total_M,
+                        by,
+                        bz,
+                    )
 
     return main_kq2_split
 
