@@ -123,6 +123,20 @@ ParallelOpNode::ParallelOpNode(For root) : root_(root), V(this) {
     annotated_predicate_ = Downcast<PrimExpr>(
         root_->annotations.Get(kParallelLoopPredicate).value());
   }
+  if (auto padding_guard_anno =
+          root_->annotations.Get(kParallelLoopRequiresPaddingGuard)) {
+    if (auto padding_guard_bool = padding_guard_anno.value().try_cast<Bool>()) {
+      annotated_requires_padding_guard_ = padding_guard_bool.value()->value;
+    } else if (auto padding_guard_int =
+                   padding_guard_anno.value().as<IntImmNode>()) {
+      annotated_requires_padding_guard_ = padding_guard_int->value != 0;
+    } else {
+      LOG(WARNING) << "Loop annotation `" << kParallelLoopRequiresPaddingGuard
+                   << "` expects Bool value (True/False), but got "
+                   << padding_guard_anno.value().GetTypeKey()
+                   << ". Ignore override.";
+    }
+  }
   // Collect cross-thread access info and buffer store info.
   PostOrderVisit(root_, [&](const ObjectRef &obj) {
     if (const auto *store = obj.as<BufferStoreNode>()) {
@@ -405,6 +419,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
   if (!loop_layout_.defined() && annotated_layout_unbound_.defined()) {
     loop_layout_ =
         annotated_layout_unbound_.value()->BindThreadRange(T.thread_bounds);
+    loop_layout_requires_padding_guard_ = annotated_requires_padding_guard_;
     if (annotated_predicate_.defined()) {
       predicate_ = annotated_predicate_.value();
     }

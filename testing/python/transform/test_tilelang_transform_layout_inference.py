@@ -123,5 +123,28 @@ def test_static_ragged_copy_uses_full_block_predicate():
     assert "threadIdx.x) < 1" not in kernel_source
 
 
+def test_static_ragged_copy_allows_1024_elements_384_threads():
+    n = 1024
+    threads = 384
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((n,), T.float32),
+        B: T.Tensor((n,), T.float32),
+    ):
+        with T.Kernel(1, threads=threads):
+            T.copy(A, B, coalesced_width=1)
+
+    with tvm.target.Target(auto_target):
+        artifact = tl.lower(main, target=auto_target, enable_device_compile=False)
+
+    kernel_source = str(artifact.kernel_source)
+    assert "__launch_bounds__(384, 1)" in kernel_source
+    assert "for (int i = 0; i < 3; ++i)" in kernel_source
+    assert "B[((i * 384) + ((int)threadIdx.x))]" in kernel_source
+    assert "(((int)threadIdx.x) >> 7)) < 8" in kernel_source
+    assert "threadIdx.x) < 128" not in kernel_source
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

@@ -1286,6 +1286,23 @@ private:
       predicate = Downcast<PrimExpr>(
           op->annotations.Get(attr::kParallelLoopPredicate).value());
     }
+    bool require_padding_guard = false;
+    if (auto padding_guard_anno =
+            op->annotations.Get(attr::kParallelLoopRequiresPaddingGuard)) {
+      if (auto padding_guard_bool =
+              padding_guard_anno.value().try_cast<Bool>()) {
+        require_padding_guard = padding_guard_bool.value()->value;
+      } else if (auto padding_guard_int =
+                     padding_guard_anno.value().as<IntImmNode>()) {
+        require_padding_guard = padding_guard_int->value != 0;
+      } else {
+        LOG(WARNING) << "Loop annotation `"
+                     << attr::kParallelLoopRequiresPaddingGuard
+                     << "` expects Bool value (True/False), but got "
+                     << padding_guard_anno.value().GetTypeKey()
+                     << ". Ignore override.";
+      }
+    }
     bool parallel_prefer_async = false;
     if (auto prefer_async_anno = op->annotations.Get(attr::kLoopPreferAsync)) {
       if (auto prefer_async_bool = prefer_async_anno.value().try_cast<Bool>()) {
@@ -1432,9 +1449,9 @@ private:
     bool should_vectorize =
         (has_non_local || has_cast_operations) && !has_reducer;
     // Lower the parallel loop using the common function
-    Stmt lowered = LowerParallelLoop(for_node, loop_layout, thread_var_->var,
-                                     analyzer_, layout_map_, predicate,
-                                     parallel_loop, should_vectorize);
+    Stmt lowered = LowerParallelLoop(
+        for_node, loop_layout, thread_var_->var, analyzer_, layout_map_,
+        predicate, parallel_loop, should_vectorize, require_padding_guard);
 
     // Only parallel-loop lowering needs PTX cp.async injection. Thread-level
     // lowering does not require converting eligible global->shared copies to
