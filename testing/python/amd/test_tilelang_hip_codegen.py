@@ -766,6 +766,7 @@ def test_pipelined_multi_stage_fp16_gemm(num_stages):
 # ---------------------------------------------------------------------------
 
 
+@tilelang.jit
 def _kernel_vector_exp2_codegen():
     """T.vectorized(VEC) makes T.exp2 lower as tirx.exp2 on float32xVEC."""
     N, VEC = 256, 4
