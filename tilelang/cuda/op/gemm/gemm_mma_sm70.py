@@ -61,6 +61,7 @@ class GemmMMASm70(GemmBase):
         mbar_phase_expr: tirx.PrimExpr | None = None,
     ):
         thread_nums = thread_bounds.extent
+        local_thread_var = thread_var - thread_bounds.min
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
@@ -75,7 +76,7 @@ class GemmMMASm70(GemmBase):
             warp_row_tiles=warp_row_tiles,
             warp_col_tiles=warp_col_tiles,
             chunk=self.chunk,
-            thread_var=thread_var,
+            thread_var=local_thread_var,
         )
 
         in_dtype = self.in_dtype

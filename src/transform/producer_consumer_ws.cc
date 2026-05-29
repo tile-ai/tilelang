@@ -11,7 +11,7 @@
  * The output IR is equivalent to a hand-written warp-specialized kernel:
  *   - TMA-annotated copies become `tl.tileop.tma_copy` with barrier refs
  *   - Barriers (`mbarrier_wait_parity`, `ptx_arrive_barrier`) are inserted
- *   - The loop body is wrapped in `if (threadIdx.x >= consumer_extent)`
+ *   - The loop body is wrapped in `if (threadIdx.x < producer_extent)`
  *
  * Limitations (v1):
  *   - Pure TMA pipelines only (no mixed TMA + cp.async)
@@ -1903,13 +1903,16 @@ private:
           consumer_phase_counter.value().WrapLoopWithAlloc(consumer_loop);
     }
 
-    // --- Rewrite threadIdx.x for producer partition ---
-    // Producer: threadIdx.x - consumer_extent (maps to [0, producer_extent))
-    Stmt rewritten_producer = PCThreadIdxRewriter::Rewrite(
-        final_producer_loop, thread_iv_->var, thread_iv_->var - consumer_extent,
-        producer_extent, false);
-    // Consumer: threadIdx.x stays, but extent is consumer_extent
-    Stmt rewritten_consumer = final_consumer_loop;
+    // --- Rewrite threadIdx.x for producer/consumer partitions ---
+    // Physical layout: producer first, consumer second.
+    // Producer: threadIdx.x already maps to [0, producer_extent)
+    Stmt rewritten_producer =
+        PCThreadIdxRewriter::Rewrite(final_producer_loop, thread_iv_->var,
+                                     thread_iv_->var, producer_extent, false);
+    // Consumer: threadIdx.x - producer_extent maps to [0, consumer_extent)
+    Stmt rewritten_consumer = PCThreadIdxRewriter::Rewrite(
+        final_consumer_loop, thread_iv_->var, thread_iv_->var - producer_extent,
+        consumer_extent, false);
 
     shared_prelude_live_seed_ = {};
     producer_prelude_live_seed_ = {};
@@ -1932,12 +1935,13 @@ private:
     // by doing a dry replacement that populates extracted_consumer_init_.
     Stmt dummy_producer = rewritten_producer;
     const Stmt &dummy_consumer = rewritten_consumer;
-    Stmt dummy_ws = IfThenElse(GE(thread_iv_->var, consumer_extent),
+    Stmt dummy_ws = IfThenElse(LT(thread_iv_->var, producer_extent),
                                dummy_producer, dummy_consumer);
     dummy_ws =
         AttrStmt(ws_partition, attr::kWarpSpecializationScope, 0, dummy_ws);
-    Optional<Stmt> replaced = ReplacePipelineLoopInStmt(
-        orig_block->body, pipeline_loop, dummy_ws, consumer_extent);
+    Optional<Stmt> replaced =
+        ReplacePipelineLoopInStmt(orig_block->body, pipeline_loop, dummy_ws,
+                                  producer_extent, consumer_extent);
     ICHECK(replaced.defined())
         << "ProducerConsumerWS: failed to replace pipeline loop";
     Stmt replaced_stmt = replaced.value();
@@ -2000,8 +2004,7 @@ private:
         Array<Stmt> producer_parts;
         for (const auto &s : extracted_producer_init_) {
           producer_parts.push_back(PCThreadIdxRewriter::Rewrite(
-              s, thread_iv_->var, thread_iv_->var - consumer_extent,
-              producer_extent, false));
+              s, thread_iv_->var, thread_iv_->var, producer_extent, false));
         }
         producer_parts.push_back(rewritten_producer);
         enriched_producer = producer_parts.size() == 1
@@ -2010,7 +2013,9 @@ private:
       }
       Array<Stmt> consumer_parts;
       for (const auto &s : extracted_consumer_init_) {
-        consumer_parts.push_back(s);
+        consumer_parts.push_back(PCThreadIdxRewriter::Rewrite(
+            s, thread_iv_->var, thread_iv_->var - producer_extent,
+            consumer_extent, false));
       }
       consumer_parts.push_back(rewritten_consumer);
       Stmt enriched_consumer = consumer_parts.size() == 1
@@ -2018,7 +2023,7 @@ private:
                                    : SeqStmt(consumer_parts);
       Stmt scoped_producer = enriched_producer;
       const Stmt &scoped_consumer = enriched_consumer;
-      Stmt ws_body = IfThenElse(GE(thread_iv_->var, consumer_extent),
+      Stmt ws_body = IfThenElse(LT(thread_iv_->var, producer_extent),
                                 scoped_producer, scoped_consumer);
       ws_body =
           AttrStmt(ws_partition, attr::kWarpSpecializationScope, 0, ws_body);
@@ -2046,7 +2051,7 @@ private:
       replaced_stmt = subst(replaced_stmt);
     }
     Stmt new_block_body = SinkGuardedConsumerPostlude::Rewrite(
-        replaced_stmt, thread_iv_->var, consumer_extent);
+        replaced_stmt, thread_iv_->var, producer_extent);
 
     // --- Update block ---
     SBlock new_block = orig_block;
@@ -2118,16 +2123,16 @@ private:
   class SinkGuardedConsumerPostlude : public StmtExprMutator {
   public:
     static Stmt Rewrite(const Stmt &stmt, Var thread_var,
-                        PrimExpr consumer_extent) {
+                        PrimExpr producer_extent) {
       SinkGuardedConsumerPostlude sinker(std::move(thread_var),
-                                         std::move(consumer_extent));
+                                         std::move(producer_extent));
       return sinker.VisitStmt(stmt);
     }
 
   private:
-    SinkGuardedConsumerPostlude(Var thread_var, PrimExpr consumer_extent)
+    SinkGuardedConsumerPostlude(Var thread_var, PrimExpr producer_extent)
         : thread_var_(std::move(thread_var)),
-          consumer_extent_(std::move(consumer_extent)) {}
+          producer_extent_(std::move(producer_extent)) {}
 
     static bool SameExpr(const PrimExpr &lhs, const PrimExpr &rhs) {
       return ExprDeepEqual()(lhs, rhs);
@@ -2138,15 +2143,15 @@ private:
       if (!if_node || !if_node->else_case.defined()) {
         return false;
       }
-      const auto *ge = if_node->condition.as<GENode>();
-      if (!ge) {
+      const auto *lt = if_node->condition.as<LTNode>();
+      if (!lt) {
         return false;
       }
-      const auto *lhs = ge->a.as<VarNode>();
+      const auto *lhs = lt->a.as<VarNode>();
       if (!lhs || !ffi::GetRef<Var>(lhs).same_as(thread_var_)) {
         return false;
       }
-      if (!SameExpr(ge->b, consumer_extent_)) {
+      if (!SameExpr(lt->b, producer_extent_)) {
         return false;
       }
       *branch = GetRef<IfThenElse>(if_node);
@@ -2175,15 +2180,15 @@ private:
       if (!if_node || if_node->else_case.defined()) {
         return false;
       }
-      const auto *lt = if_node->condition.as<LTNode>();
-      if (!lt) {
+      const auto *ge = if_node->condition.as<GENode>();
+      if (!ge) {
         return false;
       }
-      const auto *lhs = lt->a.as<VarNode>();
+      const auto *lhs = ge->a.as<VarNode>();
       if (!lhs || !ffi::GetRef<Var>(lhs).same_as(thread_var_)) {
         return false;
       }
-      if (!SameExpr(lt->b, consumer_extent_)) {
+      if (!SameExpr(ge->b, producer_extent_)) {
         return false;
       }
       *body = if_node->then_case;
@@ -2261,7 +2266,7 @@ private:
     }
 
     Var thread_var_;
-    PrimExpr consumer_extent_;
+    PrimExpr producer_extent_;
   };
 
   class PipelineLoopContainmentChecker
@@ -2323,9 +2328,11 @@ private:
 
     PipelineLoopInStmtReplacer(ProducerConsumerWSRewriter *rewriter,
                                For pipeline_loop, Stmt ws_body,
+                               PrimExpr producer_extent,
                                PrimExpr consumer_extent)
         : rewriter_(rewriter), pipeline_loop_(std::move(pipeline_loop)),
           ws_body_(std::move(ws_body)),
+          producer_extent_(std::move(producer_extent)),
           consumer_extent_(std::move(consumer_extent)) {}
 
     Optional<Stmt> VisitStmt(const Stmt &stmt) final {
@@ -2426,7 +2433,12 @@ private:
 
   private:
     Stmt GuardConsumerOnly(const Stmt &stmt) const {
-      return IfThenElse(LT(rewriter_->thread_iv_->var, consumer_extent_), stmt);
+      Stmt consumer_stmt = PCThreadIdxRewriter::Rewrite(
+          stmt, rewriter_->thread_iv_->var,
+          rewriter_->thread_iv_->var - producer_extent_, consumer_extent_,
+          false);
+      return IfThenElse(GE(rewriter_->thread_iv_->var, producer_extent_),
+                        consumer_stmt);
     }
 
     void PropagatePreludeLiveness(const SeqStmtNode *op, int loop_idx) {
@@ -2508,15 +2520,18 @@ private:
     ProducerConsumerWSRewriter *rewriter_;
     For pipeline_loop_;
     Stmt ws_body_;
+    PrimExpr producer_extent_;
     PrimExpr consumer_extent_;
   };
 
   Optional<Stmt> ReplacePipelineLoopInStmt(const Stmt &stmt,
                                            const For &pipeline_loop,
                                            const Stmt &ws_body,
+                                           PrimExpr producer_extent,
                                            PrimExpr consumer_extent) {
     PipelineLoopInStmtReplacer replacer(this, pipeline_loop, ws_body,
-                                        consumer_extent);
+                                        std::move(producer_extent),
+                                        std::move(consumer_extent));
     return replacer(stmt);
   }
 

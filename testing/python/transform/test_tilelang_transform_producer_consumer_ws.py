@@ -514,7 +514,7 @@ def test_tiled_ws_sinks_preloop_tma_waits_into_consumer():
 
     k_load = src.find("tl::tma_load(K_in_desc")
     v_load = src.find("tl::tma_load(V_in_desc")
-    branch = src.find("if (128 <= ((int)threadIdx.x))")
+    branch = src.find("if (((int)threadIdx.x) < 128)")
     first_wait = src.find(".wait(0)")
 
     assert min(k_load, v_load, branch, first_wait) >= 0
@@ -543,6 +543,25 @@ def test_tiled_ws_explicit_cp_async_wait_precedes_first_consumer_read():
     assert wait < cp_async_read < tma_read
 
 
+def test_tiled_ws_auto_producer_uses_low_thread_partition():
+    """Auto WS should place producer in the low physical thread range."""
+
+    func = matmul_pipelined(128, 128, 128, 64, 32, 64, num_stages=2).with_attr("global_symbol", "main")
+    mod = tvm.IRModule.from_expr(func)
+    target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
+    script = mod["main"].script()
+
+    branch = _find_after(script, 'T.attr([128, 128], "kWarpSpecializationScope", 0)')
+    producer_guard = _find_after(script, "if tx < 128:", branch)
+    consumer_branch = _find_after(script, "else:", producer_guard)
+    producer_tma = _find_after(script, "T.tma_copy", producer_guard)
+    consumer_gemm = _find_after(script, "T.gemm", consumer_branch)
+
+    assert producer_guard < producer_tma < consumer_branch < consumer_gemm
+
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_tiled_ws_keeps_preloop_tma_scalar_bind_shared():
@@ -554,7 +573,7 @@ def test_tiled_ws_keeps_preloop_tma_scalar_bind_shared():
 
     start_bind = _find_after(src, "int start =")
     k_load = _find_after(src, "tl::tma_load(K_in_desc")
-    branch = _find_after(src, "if (128 <= ((int)threadIdx.x))")
+    branch = _find_after(src, "if (((int)threadIdx.x) < 128)")
 
     assert start_bind < k_load < branch
 
@@ -586,7 +605,7 @@ def test_tiled_ws_keeps_shared_prelude_local_vars_for_grouped_gemm():
     kernel, batch_sizes = _compile_grouped_gemm_ws()
     src = kernel.get_kernel_source()
 
-    branch = _find_after(src, "if (256 <= ((int)threadIdx.x))")
+    branch = _find_after(src, "if (((int)threadIdx.x) < 128)")
     cur_batch_idx_loop = _find_after(src, "for (int i = 0; i < 2; ++i)")
     m_start = _find_after(src, "int m_start =")
     actual_rows = _find_after(src, "int actual_rows =")
