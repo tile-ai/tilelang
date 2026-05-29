@@ -100,7 +100,7 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
         # tvm.ir.assert_structural_equal(mod, ref_mod)
 
 
-def test_static_ragged_copy_uses_full_block_predicate():
+def test_static_ragged_copy_minimizes_full_thread_padding():
     n = 514
     threads = 128
 
@@ -117,10 +117,32 @@ def test_static_ragged_copy_uses_full_block_predicate():
 
     kernel_source = str(artifact.kernel_source)
     assert "__launch_bounds__(128, 1)" in kernel_source
-    assert "for (int i = 0; i < 3; ++i)" in kernel_source
-    assert "threadIdx.x)) < 257" in kernel_source
-    assert "float2" in kernel_source
+    assert "for (int i = 0; i < 5; ++i)" in kernel_source
+    assert "threadIdx.x) >> 1)) < 257" in kernel_source
+    assert "float2" not in kernel_source
     assert "threadIdx.x) < 1" not in kernel_source
+
+
+def test_static_ragged_fp8_copy_minimizes_full_thread_padding():
+    n = 3072
+    threads = 128
+
+    @T.prim_func
+    def main(
+        B: T.Tensor((n,), T.float8_e4m3),
+    ):
+        with T.Kernel(1, threads=threads):
+            S = T.alloc_shared((n,), T.float8_e4m3)
+            T.copy(S, B, disable_tma=True)
+
+    with tvm.target.Target(auto_target):
+        artifact = tl.lower(main, target=auto_target, enable_device_compile=False)
+
+    kernel_source = str(artifact.kernel_source)
+    assert "__launch_bounds__(128, 1)" in kernel_source
+    assert "for (int i = 0; i < 3; ++i)" in kernel_source
+    assert "fp8_e4_8_t" in kernel_source
+    assert "fp8_e4_16_t" not in kernel_source
 
 
 def test_static_ragged_copy_allows_1024_elements_384_threads():

@@ -119,6 +119,17 @@ public:
       if (auto store = if_stmt->then_case.as<BufferStoreNode>()) {
         // Only handle global memory stores
         if (IsGlobalBuffer(store->buffer)) {
+          // Lowering `if (pred) { store(value); }` to
+          // `store_conditional(value, pred)` evaluates `value` before the
+          // predicate is applied by the intrinsic. This is only safe when the
+          // value can be evaluated unconditionally. Global loads are handled by
+          // this pass using predicated ldg intrinsics below; shared/local loads
+          // do not have an equivalent guard here and must remain inside the
+          // explicit IfThenElse.
+          if (!CanEvaluateStoreValueOutsidePredicate(store->value)) {
+            return StmtExprMutator::VisitStmt_(if_stmt);
+          }
+
           // Assume buffer has been flattened by FlattenBuffer pass
           ICHECK(store->indices.size() == 1)
               << "Expected flattened buffer with single index, but got "
@@ -294,6 +305,19 @@ private:
   bool enable_predicated_{true};
   ffi::Optional<PrimExpr>
       current_predicate_; // Track predicate context for nested loads
+
+  bool CanEvaluateStoreValueOutsidePredicate(const PrimExpr &value) {
+    bool safe = true;
+    PostOrderVisit(value, [&](const ObjectRef &node) {
+      if (!safe) {
+        return;
+      }
+      if (const auto *load = node.as<BufferLoadNode>()) {
+        safe = IsGlobalBuffer(load->buffer);
+      }
+    });
+    return safe;
+  }
 
   // Create access pointer for the buffer at given base offset
   PrimExpr CreateAccessPtr(const Buffer &buffer, const PrimExpr &base,
