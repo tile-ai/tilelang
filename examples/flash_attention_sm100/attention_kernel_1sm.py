@@ -516,7 +516,7 @@ def attention_kernel_1sm(
             )
 
             if loop_extent > 0:
-                T.tcgen05_reuse3_load_k(
+                T.tcgen05_reuse3_load(
                     k_desc,
                     k_stage0,
                     k_stage1,
@@ -529,7 +529,7 @@ def attention_kernel_1sm(
                     batch_idx,
                 )
             if loop_extent > 1:
-                T.tcgen05_reuse3_load_k(
+                T.tcgen05_reuse3_load(
                     k_desc,
                     k_stage0,
                     k_stage1,
@@ -542,7 +542,7 @@ def attention_kernel_1sm(
                     batch_idx,
                 )
             if loop_extent > 2:
-                T.tcgen05_reuse3_load_k(
+                T.tcgen05_reuse3_load(
                     k_desc,
                     k_stage0,
                     k_stage1,
@@ -558,7 +558,7 @@ def attention_kernel_1sm(
             for k_prod in T.unroll(loop_extent, explicit=False, unroll_factor=1):
                 T.tcgen05_wait_barrier(mbar_s1, k_prod & 1)
                 T.tcgen05_after_thread_sync()
-                T.tcgen05_reuse3_load_v(
+                T.tcgen05_reuse3_load(
                     v_desc,
                     k_stage0,
                     k_stage1,
@@ -573,7 +573,7 @@ def attention_kernel_1sm(
                 if k_prod + 3 < loop_extent:
                     T.tcgen05_wait_barrier(mbar_pv, k_prod & 1)
                     T.tcgen05_after_thread_sync()
-                    T.tcgen05_reuse3_load_k(
+                    T.tcgen05_reuse3_load(
                         k_desc,
                         k_stage0,
                         k_stage1,

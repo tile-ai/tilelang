@@ -457,6 +457,11 @@ TIR_DEFINE_TL_BUILTIN(tcgen05_reuse3_load_v)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(tcgen05_reuse3_load)
+    .set_num_inputs(10)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TIR_DEFINE_TL_BUILTIN(tcgen05_wait_barrier_ptr)
     .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",

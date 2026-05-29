@@ -4074,10 +4074,11 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << this->PrintExpr(op->args[3]) << ", "
                  << this->PrintExpr(op->args[4]) << ", "
                  << this->PrintExpr(op->args[5]) << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_reuse3_load_k()) ||
+  } else if (op->op.same_as(tl::tcgen05_reuse3_load()) ||
+             op->op.same_as(tl::tcgen05_reuse3_load_k()) ||
              op->op.same_as(tl::tcgen05_reuse3_load_v())) {
     ICHECK_EQ(op->args.size(), 10U)
-        << "tcgen05_reuse3_load_k/v expects 10 args";
+        << "tcgen05_reuse3_load expects 10 args";
     this->PrintIndent();
     need_tcgen05_common_h_ = true;
     auto ptr_expr = [this](const PrimExpr &expr) {
@@ -4086,10 +4087,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto mbar_ptr = [this](const PrimExpr &expr) {
       return "(void const*)(&" + this->PrintExpr(expr) + ")";
     };
-    const char *helper = op->op.same_as(tl::tcgen05_reuse3_load_k())
-                             ? "tl::tcgen05_reuse3_load_k"
-                             : "tl::tcgen05_reuse3_load_v";
-    this->stream << helper << "("
+    this->stream << "tl::tcgen05_reuse3_load("
                  << this->PrintExpr(op->args[0]) << ", "
                  << "(void*)(" << ptr_expr(op->args[1]) << "), "
                  << "(void*)(" << ptr_expr(op->args[2]) << "), "

@@ -1776,21 +1776,30 @@ tcgen05_q_stage_load(const CUtensorMap &Q_desc, void *q_stage_ptr,
 }
 
 __device__ __forceinline__ void
-tcgen05_reuse3_load_k(const CUtensorMap &K_desc, void *k0_ptr, void *k1_ptr,
-                      void *stage2_ptr, void const *mbar_k0,
-                      void const *mbar_k1, void const *mbar_k2, int k,
-                      int kv_head, int batch) {
+tcgen05_reuse3_load(const CUtensorMap &desc, void *k0_ptr, void *k1_ptr,
+                    void *stage2_ptr, void const *mbar0,
+                    void const *mbar1, void const *mbar2, int k,
+                    int kv_head, int batch) {
   constexpr int kBlockN = 128;
   constexpr int kTileCols = 64;
   constexpr int kBytes = kBlockN * 128 * 2;
   int stage = k % 3;
   auto *dst = tcgen05_reuse3_stage_ptr(k0_ptr, k1_ptr, stage2_ptr, stage);
   auto *bar = reinterpret_cast<Barrier *>(
-      const_cast<void *>(tcgen05_reuse3_kbar(mbar_k0, mbar_k1, mbar_k2, stage)));
+      const_cast<void *>(tcgen05_reuse3_kbar(mbar0, mbar1, mbar2, stage)));
   tl::tcgen05_arrive_expect_tx((void const *)bar, kBytes);
-  tl::tma_load(K_desc, *bar, dst, 0, kv_head, k * kBlockN, batch);
-  tl::tma_load(K_desc, *bar, dst + kBlockN * kTileCols, 64, kv_head,
+  tl::tma_load(desc, *bar, dst, 0, kv_head, k * kBlockN, batch);
+  tl::tma_load(desc, *bar, dst + kBlockN * kTileCols, 64, kv_head,
                k * kBlockN, batch);
+}
+
+__device__ __forceinline__ void
+tcgen05_reuse3_load_k(const CUtensorMap &K_desc, void *k0_ptr, void *k1_ptr,
+                      void *stage2_ptr, void const *mbar_k0,
+                      void const *mbar_k1, void const *mbar_k2, int k,
+                      int kv_head, int batch) {
+  tl::tcgen05_reuse3_load(K_desc, k0_ptr, k1_ptr, stage2_ptr, mbar_k0, mbar_k1,
+                          mbar_k2, k, kv_head, batch);
 }
 
 __device__ __forceinline__ void
@@ -1798,17 +1807,8 @@ tcgen05_reuse3_load_v(const CUtensorMap &V_desc, void *k0_ptr, void *k1_ptr,
                       void *stage2_ptr, void const *mbar_v0,
                       void const *mbar_v1, void const *mbar_v2, int k,
                       int kv_head, int batch) {
-  constexpr int kBlockN = 128;
-  constexpr int kTileCols = 64;
-  constexpr int kBytes = kBlockN * 128 * 2;
-  int stage = k % 3;
-  auto *dst = tcgen05_reuse3_stage_ptr(k0_ptr, k1_ptr, stage2_ptr, stage);
-  auto *bar = reinterpret_cast<Barrier *>(
-      const_cast<void *>(tcgen05_reuse3_vbar(mbar_v0, mbar_v1, mbar_v2, stage)));
-  tl::tcgen05_arrive_expect_tx((void const *)bar, kBytes);
-  tl::tma_load(V_desc, *bar, dst, 0, kv_head, k * kBlockN, batch);
-  tl::tma_load(V_desc, *bar, dst + kBlockN * kTileCols, 64, kv_head,
-               k * kBlockN, batch);
+  tl::tcgen05_reuse3_load(V_desc, k0_ptr, k1_ptr, stage2_ptr, mbar_v0, mbar_v1,
+                          mbar_v2, k, kv_head, batch);
 }
 
 __device__ __noinline__ void

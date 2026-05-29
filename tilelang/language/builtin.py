@@ -2216,14 +2216,30 @@ def tcgen05_q_stage_load(desc, q_stage_ptr, mbar, q_row_base, q_head, batch):
     )
 
 
-def tcgen05_reuse3_load_k(desc, stage0_ptr, stage1_ptr, stage2_ptr, mbar0, mbar1, mbar2, k_iter, kv_head, batch):
-    """Issue the two 64-column TMA loads for one reuse3 K stage."""
+def tcgen05_reuse3_load(desc, stage0_ptr, stage1_ptr, stage2_ptr, mbar0, mbar1, mbar2, k_iter, kv_head, batch):
+    """Issue the two 64-column TMA loads for one reuse3 K/V stage."""
     mbar0 = _mbar_to_buffer_load(mbar0)
     mbar1 = _mbar_to_buffer_load(mbar1)
     mbar2 = _mbar_to_buffer_load(mbar2)
     return tir.call_intrin(
         "void",
-        tir.op.Op.get("tl.tcgen05_reuse3_load_k"),
+        tir.op.Op.get("tl.tcgen05_reuse3_load"),
+        desc,
+        stage0_ptr,
+        stage1_ptr,
+        stage2_ptr,
+        mbar0,
+        mbar1,
+        mbar2,
+        k_iter,
+        kv_head,
+        batch,
+    )
+
+
+def tcgen05_reuse3_load_k(desc, stage0_ptr, stage1_ptr, stage2_ptr, mbar0, mbar1, mbar2, k_iter, kv_head, batch):
+    """Compatibility wrapper for `tcgen05_reuse3_load` on K."""
+    return tcgen05_reuse3_load(
         desc,
         stage0_ptr,
         stage1_ptr,
@@ -2238,13 +2254,8 @@ def tcgen05_reuse3_load_k(desc, stage0_ptr, stage1_ptr, stage2_ptr, mbar0, mbar1
 
 
 def tcgen05_reuse3_load_v(desc, stage0_ptr, stage1_ptr, stage2_ptr, mbar0, mbar1, mbar2, k_iter, kv_head, batch):
-    """Issue the two 64-column TMA loads for one reuse3 V stage."""
-    mbar0 = _mbar_to_buffer_load(mbar0)
-    mbar1 = _mbar_to_buffer_load(mbar1)
-    mbar2 = _mbar_to_buffer_load(mbar2)
-    return tir.call_intrin(
-        "void",
-        tir.op.Op.get("tl.tcgen05_reuse3_load_v"),
+    """Compatibility wrapper for `tcgen05_reuse3_load` on V."""
+    return tcgen05_reuse3_load(
         desc,
         stage0_ptr,
         stage1_ptr,
