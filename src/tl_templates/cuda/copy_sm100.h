@@ -1744,6 +1744,21 @@ tcgen05_reuse3_vbar(void const *mbar_v0, void const *mbar_v1,
 }
 
 __device__ __forceinline__ void
+tcgen05_q_stage_load(const CUtensorMap &Q_desc, void *q_stage_ptr,
+                     void const *mbar_q, int q_row_base, int q_head,
+                     int batch) {
+  constexpr int kBlockM = 128;
+  constexpr int kTileCols = 64;
+  constexpr int kBytes = kBlockM * 128 * 2;
+  auto *dst = reinterpret_cast<bfloat16_t *>(q_stage_ptr);
+  auto *bar = reinterpret_cast<Barrier *>(const_cast<void *>(mbar_q));
+  tl::tcgen05_arrive_expect_tx(mbar_q, kBytes);
+  tl::tma_load(Q_desc, *bar, dst, 0, q_head, q_row_base, batch);
+  tl::tma_load(Q_desc, *bar, dst + kBlockM * kTileCols, 64, q_head,
+               q_row_base, batch);
+}
+
+__device__ __forceinline__ void
 tcgen05_reuse3_load_k(const CUtensorMap &K_desc, void *k0_ptr, void *k1_ptr,
                       void *stage2_ptr, void const *mbar_k0,
                       void const *mbar_k1, void const *mbar_k2, int k,

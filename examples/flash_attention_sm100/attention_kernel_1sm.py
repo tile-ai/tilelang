@@ -464,6 +464,126 @@ def attention_kernel_1sm(
                         kptr,
                         S1_tmem[0, 0],
                         mbar_s1,
+                        )
+
+
+    @T.macro
+    def producer_warp_reuse3_dsl(
+        q_desc: T.handle,
+        k_desc: T.handle,
+        v_desc: T.handle,
+        Q0_stage: T.SharedBuffer([kq2_block_M, dim], dtype),
+        Q1_stage: T.SharedBuffer([kq2_block_M, dim], dtype),
+        K0_stage: T.SharedBuffer([block_N, dim], dtype),
+        K1_stage: T.SharedBuffer([block_N, dim], dtype),
+        KV2_stage: T.SharedBuffer([block_N, dim], dtype),
+        mbar_q0: T.Buffer,
+        mbar_q1: T.Buffer,
+        mbar_k0: T.Buffer,
+        mbar_k1: T.Buffer,
+        mbar_k2: T.Buffer,
+        mbar_v0: T.Buffer,
+        mbar_v1: T.Buffer,
+        mbar_v2: T.Buffer,
+        mbar_s1: T.Buffer,
+        mbar_pv: T.Buffer,
+        loop_extent: T.int32,
+        q_row_base: T.int32,
+        q_head: T.int32,
+        kv_head: T.int32,
+        batch_idx: T.int32,
+    ):
+        if (T.get_thread_binding() & 31) == 0:
+            k_stage0 = T.access_ptr(K0_stage, "w")
+            k_stage1 = T.access_ptr(K1_stage, "w")
+            kv_stage2 = T.access_ptr(KV2_stage, "w")
+
+            T.tcgen05_q_stage_load(
+                q_desc,
+                T.access_ptr(Q0_stage, "w"),
+                mbar_q0,
+                q_row_base,
+                q_head,
+                batch_idx,
+            )
+            T.tcgen05_q_stage_load(
+                q_desc,
+                T.access_ptr(Q1_stage, "w"),
+                mbar_q1,
+                q_row_base + block_M,
+                q_head,
+                batch_idx,
+            )
+
+            if loop_extent > 0:
+                T.tcgen05_reuse3_load_k(
+                    k_desc,
+                    k_stage0,
+                    k_stage1,
+                    kv_stage2,
+                    mbar_k0,
+                    mbar_k1,
+                    mbar_k2,
+                    0,
+                    kv_head,
+                    batch_idx,
+                )
+            if loop_extent > 1:
+                T.tcgen05_reuse3_load_k(
+                    k_desc,
+                    k_stage0,
+                    k_stage1,
+                    kv_stage2,
+                    mbar_k0,
+                    mbar_k1,
+                    mbar_k2,
+                    1,
+                    kv_head,
+                    batch_idx,
+                )
+            if loop_extent > 2:
+                T.tcgen05_reuse3_load_k(
+                    k_desc,
+                    k_stage0,
+                    k_stage1,
+                    kv_stage2,
+                    mbar_k0,
+                    mbar_k1,
+                    mbar_k2,
+                    2,
+                    kv_head,
+                    batch_idx,
+                )
+
+            for k_prod in T.unroll(loop_extent, explicit=False, unroll_factor=1):
+                T.tcgen05_wait_barrier(mbar_s1, k_prod & 1)
+                T.tcgen05_after_thread_sync()
+                T.tcgen05_reuse3_load_v(
+                    v_desc,
+                    k_stage0,
+                    k_stage1,
+                    kv_stage2,
+                    mbar_v0,
+                    mbar_v1,
+                    mbar_v2,
+                    k_prod,
+                    kv_head,
+                    batch_idx,
+                )
+                if k_prod + 3 < loop_extent:
+                    T.tcgen05_wait_barrier(mbar_pv, k_prod & 1)
+                    T.tcgen05_after_thread_sync()
+                    T.tcgen05_reuse3_load_k(
+                        k_desc,
+                        k_stage0,
+                        k_stage1,
+                        kv_stage2,
+                        mbar_k0,
+                        mbar_k1,
+                        mbar_k2,
+                        k_prod + 3,
+                        kv_head,
+                        batch_idx,
                     )
 
 
@@ -646,29 +766,32 @@ def attention_kernel_1sm(
                             1, 1, 1, 1,
                             0, 3, 2, 0,
                         )
-                        T.tcgen05_producer_warp_1sm_reuse3(
-                            q_desc, k_desc, v_desc,
-                            T.access_ptr(Q0_shared, "w"),
-                            T.access_ptr(Q1_shared, "w"),
-                            T.access_ptr(K_shared_0, "w"),
-                            T.access_ptr(K_shared_1, "w"),
-                            T.access_ptr(KV_shared_2, "w"),
-                            mbar_q0_load,
-                            mbar_q1_load,
-                            mbar_k_load[0],
-                            mbar_k_load[1],
-                            mbar_v_hi_load[0],
-                            mbar_v_lo_load[0],
-                            mbar_v_lo_load[1],
-                            mbar_v_hi_load[1],
-                            mbar_s1,
-                            mbar_pv,
-                            loop_range,
-                            bx * kq2_total_M,
-                            by,
-                            by // groups,
-                            bz,
-                        )
+                        with T.device_func():
+                            producer_warp_reuse3_dsl(
+                                q_desc,
+                                k_desc,
+                                v_desc,
+                                Q0_shared,
+                                Q1_shared,
+                                K_shared_0,
+                                K_shared_1,
+                                KV_shared_2,
+                                mbar_q0_load,
+                                mbar_q1_load,
+                                mbar_k_load[0],
+                                mbar_k_load[1],
+                                mbar_v_hi_load[0],
+                                mbar_v_lo_load[0],
+                                mbar_v_lo_load[1],
+                                mbar_v_hi_load[1],
+                                mbar_s1,
+                                mbar_pv,
+                                loop_range,
+                                bx * kq2_total_M,
+                                by,
+                                by // groups,
+                                bz,
+                            )
 
                 # ============================================================
                 # MMA warp 12  --  tid in [384, 416)

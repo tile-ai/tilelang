@@ -2201,6 +2201,63 @@ def tcgen05_reuse3_barrier_ptr(mbar0, mbar1, mbar2, stage):
     )
 
 
+def tcgen05_q_stage_load(desc, q_stage_ptr, mbar, q_row_base, q_head, batch):
+    """Issue the two 64-column TMA loads for one Q stage."""
+    mbar = _mbar_to_buffer_load(mbar)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_q_stage_load"),
+        desc,
+        q_stage_ptr,
+        mbar,
+        q_row_base,
+        q_head,
+        batch,
+    )
+
+
+def tcgen05_reuse3_load_k(desc, stage0_ptr, stage1_ptr, stage2_ptr, mbar0, mbar1, mbar2, k_iter, kv_head, batch):
+    """Issue the two 64-column TMA loads for one reuse3 K stage."""
+    mbar0 = _mbar_to_buffer_load(mbar0)
+    mbar1 = _mbar_to_buffer_load(mbar1)
+    mbar2 = _mbar_to_buffer_load(mbar2)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_reuse3_load_k"),
+        desc,
+        stage0_ptr,
+        stage1_ptr,
+        stage2_ptr,
+        mbar0,
+        mbar1,
+        mbar2,
+        k_iter,
+        kv_head,
+        batch,
+    )
+
+
+def tcgen05_reuse3_load_v(desc, stage0_ptr, stage1_ptr, stage2_ptr, mbar0, mbar1, mbar2, k_iter, kv_head, batch):
+    """Issue the two 64-column TMA loads for one reuse3 V stage."""
+    mbar0 = _mbar_to_buffer_load(mbar0)
+    mbar1 = _mbar_to_buffer_load(mbar1)
+    mbar2 = _mbar_to_buffer_load(mbar2)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_reuse3_load_v"),
+        desc,
+        stage0_ptr,
+        stage1_ptr,
+        stage2_ptr,
+        mbar0,
+        mbar1,
+        mbar2,
+        k_iter,
+        kv_head,
+        batch,
+    )
+
+
 def tcgen05_wait_barrier_ptr(mbar_ptr, phase):
     """Wait on a raw mbarrier pointer."""
     return tir.call_intrin(
