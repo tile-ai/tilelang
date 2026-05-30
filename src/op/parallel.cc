@@ -46,7 +46,10 @@ private:
     auto load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
 
     if (buffer_remap_.count(load->buffer)) {
-      auto new_indices = layout_map_[load->buffer]->Forward(load->indices);
+      Array<PrimExpr> new_indices = load->indices;
+      if (layout_map_.count(load->buffer)) {
+        new_indices = layout_map_[load->buffer]->Forward(load->indices);
+      }
       auto new_buffer = buffer_remap_[load->buffer];
 
       return BufferLoad(new_buffer, new_indices);
@@ -57,9 +60,14 @@ private:
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     auto store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
     if (buffer_remap_.count(store->buffer)) {
-      auto new_indices = layout_map_[store->buffer]->Forward(store->indices);
+      Array<PrimExpr> new_indices = store->indices;
+      if (layout_map_.count(store->buffer)) {
+        new_indices = layout_map_[store->buffer]->Forward(store->indices);
+      }
       auto new_buffer = buffer_remap_[store->buffer];
-      return BufferStore(new_buffer, store->value, new_indices);
+      return BufferStore(new_buffer,
+                         CastFp4StorageValue(store->value, new_buffer->dtype),
+                         new_indices);
     }
     return store;
   }

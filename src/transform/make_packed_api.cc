@@ -40,6 +40,7 @@
 #include <vector>
 
 #include "../op/builtin.h"
+#include "../target/utils.h"
 #include "common/attr.h"
 #include "merge_if_stmt.h"
 #include "tir/transforms/ir_utils.h"
@@ -268,7 +269,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   // seq_check gives sequence of later checks after init
   std::vector<Stmt> seq_init, seq_check, arg_buffer_declarations;
   std::unordered_map<const VarNode *, PrimExpr> vmap;
-  TVMFFIABIBuilder binder(&vmap);
+  TVMFFIABIBuilder binder(&vmap, TargetIsSM120(target));
 
   // ---------------------------
   // local function definitions

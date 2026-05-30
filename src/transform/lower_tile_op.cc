@@ -38,14 +38,39 @@ namespace tl {
 using namespace tirx;
 using namespace ffi;
 
+static DataType GetLayoutStorageDType(const Buffer &buffer,
+                                      const Target &target) {
+  if (TargetIsSM120(target) && IsSharedBuffer(buffer) &&
+      buffer->dtype.is_float4_e2m1fn() && buffer->dtype.is_scalar()) {
+    return DataType::Float4E2M1Unpacked(buffer->dtype.lanes());
+  }
+  return buffer->dtype;
+}
+
+static bool UseSM120Fp4UnpackedCarrier(const Buffer &buffer,
+                                       const Target &target) {
+  return TargetIsSM120(target) && IsGlobalBuffer(buffer) &&
+         buffer->dtype.is_float4_e2m1fn() && buffer->dtype.is_scalar();
+}
+
+static Buffer makeBufferWithDType(const Buffer &buffer, DataType dtype) {
+  return Buffer(buffer->data, dtype, buffer->shape, buffer->strides,
+                buffer->elem_offset, buffer->name, buffer->data_alignment,
+                buffer->offset_factor, buffer->buffer_type);
+}
+
 static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
-                                   Map<Var, Var> &var_remap) {
+                                   Map<Var, Var> &var_remap,
+                                   const Target &target) {
   const auto *ptr_type =
       TVM_TYPE_AS(buffer->data->type_annotation, PointerTypeNode);
+  DataType storage_dtype = GetLayoutStorageDType(buffer, target);
   Type new_type;
   // convert fragments to normal local buffer
   if (IsFragmentBuffer(buffer)) {
-    new_type = PointerType(ptr_type->element_type, "local");
+    new_type = PointerType(PrimType(storage_dtype), "local");
+  } else if (storage_dtype != buffer->dtype) {
+    new_type = PointerType(PrimType(storage_dtype), ptr_type->storage_scope);
   } else {
     new_type = buffer->data->type_annotation;
   }
@@ -82,7 +107,7 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
       output_shape.insert(output_shape.begin(), replicate_extent);
     }
   }
-  return Buffer(new_var, buffer->dtype, output_shape, {}, buffer->elem_offset,
+  return Buffer(new_var, storage_dtype, output_shape, {}, buffer->elem_offset,
                 buffer->name, buffer->data_alignment, buffer->offset_factor,
                 buffer->buffer_type);
 }
@@ -237,6 +262,13 @@ public:
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);
     ICHECK(target.defined()) << "LowerTileOpPass: Require the target attribute";
     substituter.target_ = target.value();
+    for (const auto &[_, buffer] : f->buffer_map) {
+      if (UseSM120Fp4UnpackedCarrier(buffer, substituter.target_)) {
+        substituter.buffer_remap_.Set(
+            buffer,
+            makeBufferWithDType(buffer, DataType::Float4E2M1Unpacked()));
+      }
+    }
     PrimFuncNode *fptr = f.CopyOnWrite();
     fptr->body = substituter.VisitStmt(f->body);
     fptr->body =
@@ -341,8 +373,8 @@ private:
                             .as<Map<Buffer, Layout>>()
                             .value();
       for (auto [buffer, layout] : layout_map) {
-        buffer_remap_.Set(buffer,
-                          makeBufferWithLayout(buffer, layout, var_remap_));
+        buffer_remap_.Set(
+            buffer, makeBufferWithLayout(buffer, layout, var_remap_, target_));
         layout_map_.Set(buffer, layout);
       }
     }
@@ -1014,9 +1046,14 @@ private:
     }
     auto buffer = load->buffer;
     if (buffer_remap_.count(buffer)) {
-      auto new_indices = layout_map_[buffer]->Forward(load->indices);
+      Array<PrimExpr> new_indices = load->indices;
+      if (layout_map_.count(buffer)) {
+        new_indices = layout_map_[buffer]->Forward(load->indices);
+      }
       auto new_buffer = buffer_remap_[load->buffer];
-      layout_remap_.Set(new_buffer, layout_map_[load->buffer]);
+      if (layout_map_.count(load->buffer)) {
+        layout_remap_.Set(new_buffer, layout_map_[load->buffer]);
+      }
       return BufferLoad(new_buffer, new_indices);
     } else if (var_remap_.count(buffer->data)) {
       auto new_buffer = Buffer(
@@ -1032,10 +1069,17 @@ private:
     auto store = Downcast<BufferStore>(IRMutatorWithAnalyzer::VisitStmt_(op));
     auto buffer = store->buffer;
     if (buffer_remap_.count(buffer)) {
-      auto new_indices = layout_map_[buffer]->Forward(store->indices);
+      Array<PrimExpr> new_indices = store->indices;
+      if (layout_map_.count(buffer)) {
+        new_indices = layout_map_[buffer]->Forward(store->indices);
+      }
       auto new_buffer = buffer_remap_[store->buffer];
-      layout_remap_.Set(new_buffer, layout_map_[store->buffer]);
-      return BufferStore(new_buffer, store->value, new_indices);
+      if (layout_map_.count(store->buffer)) {
+        layout_remap_.Set(new_buffer, layout_map_[store->buffer]);
+      }
+      return BufferStore(new_buffer,
+                         CastFp4StorageValue(store->value, new_buffer->dtype),
+                         new_indices);
     } else if (var_remap_.count(buffer->data)) {
       auto new_buffer = Buffer(
           var_remap_[buffer->data], buffer->dtype, buffer->shape,

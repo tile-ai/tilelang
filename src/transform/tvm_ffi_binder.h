@@ -80,8 +80,9 @@ public:
    * definitions.
    */
   explicit TVMFFIABIBuilder(
-      std::unordered_map<const VarNode *, PrimExpr> *def_map)
-      : def_map_(def_map) {}
+      std::unordered_map<const VarNode *, PrimExpr> *def_map,
+      bool sm120_fp4_unpacked_abi = false)
+      : def_map_(def_map), sm120_fp4_unpacked_abi_(sm120_fp4_unpacked_abi) {}
   /*!
    * \brief Try to bind arg to value, generate constraint if necessary.
    * \param arg The argument to be binded.
@@ -188,8 +189,10 @@ private:
   // Internal bind function
   bool Bind_(const PrimExpr &arg, const PrimExpr &value,
              const std::string &arg_name, bool with_lets);
+  bool UseFp4UnpackedABI(const Buffer &buffer) const;
   /*! \brief The definition map, can be uses to substitute */
   std::unordered_map<const VarNode *, PrimExpr> *def_map_;
+  bool sm120_fp4_unpacked_abi_{false};
   /*! \brief defs generated in the current binder */
   std::vector<Var> defs_;
   /*! \brief Initialize nest */

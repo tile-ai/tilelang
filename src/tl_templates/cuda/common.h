@@ -34,6 +34,8 @@ using cute::cast_smem_ptr_to_uint;
 
 using int4_t = int4;
 
+struct fp4_e2_t;
+
 #define hexp cutlass::fast_exp
 #define hlog cutlass::fast_log
 #define hsqrt cutlass::fast_sqrt
@@ -682,6 +684,9 @@ template <> struct to_cute_type<tl::float_e5m2_t> {
 };
 template <> struct to_cute_type<tl::tfloat32_t> {
   using type = cute::tfloat32_t;
+};
+template <> struct to_cute_type<::fp4_e2_t> {
+  using type = cute::float_e2m1_t;
 };
 
 // =========================================================================

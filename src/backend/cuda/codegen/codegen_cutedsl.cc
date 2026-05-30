@@ -247,6 +247,8 @@ std::string DTypeToString(DataType t) {
   } else if (t.is_float4()) {
     if (t.is_float4_e2m1fn()) {
       elem_type = "Float4E2M1FN";
+    } else if (t.is_float4_e2m1_unpacked()) {
+      elem_type = "Uint8";
     }
   } else if (t.is_bool()) {
     elem_type = "Boolean";
@@ -1778,6 +1780,25 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BindNode *op) {
         PrintType(prim_type->dtype, stream);
         stream << ", " << PrintExpr_(call->args[0]) << ", " << address_space
                << ")\n";
+        return;
+      }
+
+      if (const CallNode *call = op->value.as<CallNode>();
+          call && call->op.same_as(builtin::handle_add_byte_offset()) &&
+          call->args.size() == 2U) {
+        const auto *base_var = call->args[0].as<VarNode>();
+        ICHECK(base_var == nullptr ||
+               HandleTypeMatch_(base_var, DataType::UInt(8)))
+            << "CuTeDSL byte-offset aliases must be based on a uint8 arena";
+
+        PrintIndent();
+        stream << AllocVarID(op->var.get())
+               << " = tl.make_tensor(tl.recast_ptr("
+               << GetVarPtr_(call->args[0]) << " + "
+               << PrintExpr_(call->args[1]) << ", dtype=";
+        PrintType(prim_type->dtype, stream);
+        stream << "), (1,))\n";
+        RegisterHandleType_(op->var.get(), prim_type->dtype);
         return;
       }
     }

@@ -288,7 +288,7 @@ std::string GetTileLangFP4Type(DataType type) {
   }
 
   std::string suffix;
-  if (type.code() == DataType::kFloat4_e2m1fn) {
+  if (type.is_float4_e2m1fn() || type.is_float4_e2m1_unpacked()) {
     suffix = "_e2";
   } else {
     LOG(FATAL) << "Unsupported FP4 type in CUDA codegen";
@@ -1261,7 +1261,7 @@ void CodeGenTileLangCUDA::PrintVecElemLoad(const std::string &vec, DataType t,
       os << "." << access[(i % 8) / 4];
     // fp8_e5_4_t or fp8_e5_2_t
     os << "." << access[i % 4];
-  } else if (t.is_float4_e2m1fn()) {
+  } else if (t.is_float4()) {
     os << vec;
     // fp4_e2_64_t
     if (t.lanes() >= 64)
@@ -1383,7 +1383,7 @@ void CodeGenTileLangCUDA::PrintVecElemStore(const std::string &vec, DataType t,
     ICHECK(!type_name.empty());
     stream << "((" << type_name << "2*)(&(" << vec << "." << access[i / 2]
            << ")))->" << access[i % 2] << " = " << value << ";\n";
-  } else if (t.is_float4_e2m1fn()) {
+  } else if (t.is_float4()) {
     stream << vec;
     // fp4_e2_64_t
     if (t.lanes() >= 64)
@@ -2015,15 +2015,10 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
   const VarNode *buffer_var = buffer->data.get();
   std::ostringstream os;
   std::string vid = GetVarID(buffer_var);
-  // For fp4 packed buffers, use the packed buffer name for vector accesses
-  auto it = fp4_packed_buffers_.find(buffer_var);
-  if (it != fp4_packed_buffers_.end() && !t.is_scalar()) {
-    vid = it->second;
-  }
-  std::string scope;
-  if (alloc_storage_scope_.count(buffer_var)) {
-    scope = alloc_storage_scope_.at(buffer_var);
-  }
+  // FP4 storage is selected by scope, not by renaming the buffer. Pre-SM120
+  // shared scopes use packed byte addresses, while local fragments keep the
+  // declared name so generated MMA operands match the fragment allocation.
+  std::string scope = GetBufferStorageScope(buffer_var);
   // bool is_vol = IsVolatile(buffer_var);
   // always false for tl cutlass backend.
   bool is_vol = false;
@@ -2073,17 +2068,21 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
        << " + " << index_str << ")";
   } else if (t == buffer_element_dtype) {
     int div_factor = 1;
-    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1) {
+    if (IsFp4PackedStorage(buffer_var, buffer_element_dtype)) {
+      // Packed FP4 buffers are byte-addressed. Dividing by two maps two
+      // neighboring logical FP4 elements to one backing byte; scalar helpers
+      // still receive the original logical index for nibble selection.
       div_factor = 2;
     }
     index_str =
         PrintExpr(arith::Analyzer().Simplify(truncdiv(index, div_factor)));
     os << buffer_str << "[" << index_str << "]";
   } else {
-    // Fix fp4 pointer arithmetic: fp4 elements are 4-bit packed 2 per byte.
-    // fp4* + n incorrectly advances n bytes (skipping 2n elements).
     int div_factor = 1;
-    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1) {
+    if (IsFp4PackedStorage(buffer_var, buffer_element_dtype)) {
+      // Reinterpreted FP4 references start from the backing byte offset. C
+      // pointer arithmetic on fp4_e2_t would advance by whole storage objects
+      // and skip the neighboring nibble.
       div_factor = 2;
     }
     index_str =
@@ -2098,10 +2097,45 @@ std::string CodeGenTileLangCUDA::GetVecLoad(DataType t,
                                             const BufferNode *buffer,
                                             PrimExpr base) {
   const VarNode *buffer_var = buffer->data.get();
-  std::string scope;
-  if (alloc_storage_scope_.count(buffer_var)) {
-    scope = alloc_storage_scope_.at(buffer_var);
+  auto make_fp4_vec = [&](const auto &lane) {
+    std::ostringstream os;
+    os << "make_fp4_e2_" << t.lanes() << "_t(";
+    for (int i = 0; i < t.lanes(); ++i) {
+      if (i != 0)
+        os << ", ";
+      os << lane(i);
+    }
+    os << ")";
+    return os.str();
+  };
+  if (IsFp4SemanticLocalStorage(buffer_var, buffer->dtype) &&
+      t.is_float4_e2m1fn() && t.lanes() > 1) {
+    // Local FP4 vectors are logical element arrays, not packed byte arrays.
+    return make_fp4_vec([&](int i) {
+      PrimExpr index = arith::Analyzer().Simplify(
+          base + IntImm(base.dtype(), static_cast<int64_t>(i)));
+      return GetBufferRef(t.element_of(), buffer, index);
+    });
   }
+
+  if (IsFp4PackedStorage(buffer_var, buffer->dtype) && t.is_float4_e2m1fn() &&
+      t.lanes() > 1) {
+    arith::Analyzer analyzer;
+    bool base_aligned = is_zero(analyzer.Simplify(truncmod(base, 2)));
+    if (!base_aligned) {
+      // Packed FP4 vector reinterpret is only nibble-aligned for even logical
+      // bases. Odd or symbolic bases need per-lane nibble selection.
+      std::string vid = GetVarID(buffer_var);
+      return make_fp4_vec([&](int i) {
+        PrimExpr index = analyzer.Simplify(
+            base + IntImm(base.dtype(), static_cast<int64_t>(i)));
+        return "tl_fp4_packed_load((fp4_e2_2_t*)" + vid + ", " +
+               PrintExpr(index) + ")";
+      });
+    }
+  }
+
+  std::string scope = GetBufferStorageScope(buffer_var);
   if (scope.empty()) {
     scope = GetPtrStorageScope(buffer->data);
   }
@@ -2121,10 +2155,48 @@ void CodeGenTileLangCUDA::PrintVecStore(const BufferNode *buffer, DataType t,
                                         PrimExpr base,
                                         const std::string &value) {
   const VarNode *buffer_var = buffer->data.get();
-  std::string scope;
-  if (alloc_storage_scope_.count(buffer_var)) {
-    scope = alloc_storage_scope_.at(buffer_var);
+  auto emit_fp4_vec_scope = [&](const auto &emit_lane) {
+    std::ostringstream vec_type;
+    PrintType(t, vec_type);
+    this->PrintIndent();
+    this->stream << "{ " << vec_type.str() << " __tl_fp4_vec = " << value
+                 << "; ";
+    for (int i = 0; i < t.lanes(); ++i) {
+      std::ostringstream elem;
+      PrintVecElemLoad("__tl_fp4_vec", t, i, elem);
+      emit_lane(i, elem.str());
+    }
+    this->stream << "}\n";
+  };
+  if (IsFp4SemanticLocalStorage(buffer_var, buffer->dtype) &&
+      t.is_float4_e2m1fn() && t.lanes() > 1) {
+    // Store each FP4 lane so vector casts fill every semantic local element.
+    std::string vid = GetVarID(buffer_var);
+    emit_fp4_vec_scope([&](int i, const std::string &elem) {
+      PrimExpr index = arith::Analyzer().Simplify(
+          base + IntImm(base.dtype(), static_cast<int64_t>(i)));
+      this->stream << vid << "[" << PrintExpr(index) << "] = " << elem << "; ";
+    });
+    return;
   }
+
+  if (IsFp4PackedStorage(buffer_var, buffer->dtype) && t.is_float4_e2m1fn() &&
+      t.lanes() > 1) {
+    arith::Analyzer analyzer;
+    bool base_aligned = is_zero(analyzer.Simplify(truncmod(base, 2)));
+    if (!base_aligned) {
+      std::string vid = GetVarID(buffer_var);
+      emit_fp4_vec_scope([&](int i, const std::string &elem) {
+        PrimExpr index = analyzer.Simplify(
+            base + IntImm(base.dtype(), static_cast<int64_t>(i)));
+        this->stream << "tl_fp4_packed_store((fp4_e2_2_t*)" << vid << ", "
+                     << PrintExpr(index) << ", " << elem << "); ";
+      });
+      return;
+    }
+  }
+
+  std::string scope = GetBufferStorageScope(buffer_var);
   if (scope.empty()) {
     scope = GetPtrStorageScope(buffer->data);
   }
@@ -2139,6 +2211,58 @@ void CodeGenTileLangCUDA::PrintVecStore(const BufferNode *buffer, DataType t,
   this->PrintIndent();
   this->stream << "tl::store_global_256(&(" << buffer_ref << "), " << value
                << ");\n";
+}
+
+// FP4 storage follows the buffer role:
+// - Pre-SM120 global/shared paths use packed bytes.
+// - SM120 semantic FP4 buffers are lowered through hidden unpacked carriers.
+// - Local/local.fragment buffers use semantic FP4 elements for MMA operands.
+std::string
+CodeGenTileLangCUDA::GetBufferStorageScope(const VarNode *buffer_var) const {
+  auto it = alloc_storage_scope_.find(buffer_var);
+  if (it != alloc_storage_scope_.end())
+    return it->second;
+  if (const auto *ptr = buffer_var->type_annotation.as<PointerTypeNode>())
+    return ptr->storage_scope;
+  return "";
+}
+
+bool CodeGenTileLangCUDA::IsFp4PackedStorage(const VarNode *buffer_var,
+                                             DataType element_dtype) const {
+  if (!element_dtype.is_float4_e2m1fn() || !element_dtype.is_scalar()) {
+    return false;
+  }
+
+  Target cur_target = Target::Current(/*allow_not_defined=*/true);
+  std::string scope = GetBufferStorageScope(buffer_var);
+  if (scope.empty()) {
+    if (cur_target.defined() && tl::TargetHasSMVersionGE(cur_target, 120)) {
+      return false;
+    }
+    return true;
+  }
+  if (scope == "global") {
+    if (cur_target.defined() && tl::TargetHasSMVersionGE(cur_target, 120)) {
+      return false;
+    }
+    return true;
+  }
+  if (scope == "shared" || scope == "shared.dyn") {
+    // Pre-SM120 shared FP4 keeps the packed-byte convention.
+    return cur_target.defined() && tl::TargetHasSMVersionGE(cur_target, 100) &&
+           !tl::TargetHasSMVersionGE(cur_target, 120);
+  }
+  return scope != "local" && scope != "local.var" && scope != "local.fragment";
+}
+
+bool CodeGenTileLangCUDA::IsFp4SemanticLocalStorage(
+    const VarNode *buffer_var, DataType element_dtype) const {
+  if (!element_dtype.is_float4_e2m1fn() || !element_dtype.is_scalar()) {
+    return false;
+  }
+
+  std::string scope = GetBufferStorageScope(buffer_var);
+  return scope == "local" || scope == "local.fragment";
 }
 
 /**
@@ -2214,6 +2338,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
        << PrintExpr(op->args[1]) << ")";
     return;
   }
+
   if (op->op.same_as(builtin::ptx_cp_async())) {
     // args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
     // args[3] = predicate (optional)
@@ -2241,8 +2366,28 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     // args[2] = num_elems, args[3] = predicate (optional)
     int total_bytes = GetTileLangCPAsyncTransferBytes(op);
 
-    std::string dst = this->PrintExpr(op->args[0]);
-    std::string src = this->PrintExpr(op->args[1]);
+    auto print_access_ptr = [&](const PrimExpr &access_ptr) {
+      auto elem_type = GetAccessPtrElementType(access_ptr);
+      const auto *ptr_call = access_ptr.as<CallNode>();
+      if (elem_type.has_value() && elem_type->is_float4_e2m1fn() &&
+          ptr_call != nullptr &&
+          ptr_call->op.same_as(builtin::tvm_access_ptr())) {
+        ICHECK_GE(ptr_call->args.size(), 5U);
+        std::string base = this->PrintExpr(ptr_call->args[1]);
+        PrimExpr offset_expr = ptr_call->args[2];
+        if (const auto *base_var = ptr_call->args[1].as<VarNode>()) {
+          if (IsFp4PackedStorage(base_var, elem_type.value())) {
+            // Generic FP4 cp.async operands keep packed-byte addressing.
+            offset_expr = arith::Analyzer().Simplify(truncdiv(offset_expr, 2));
+          }
+        }
+        return base + " + " + this->PrintExpr(offset_expr);
+      }
+      return this->PrintExpr(access_ptr);
+    };
+
+    std::string dst = print_access_ptr(op->args[0]);
+    std::string src = print_access_ptr(op->args[1]);
     std::string size = std::to_string(total_bytes);
 
     this->PrintIndent();
@@ -4505,13 +4650,21 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
   } else if (scope == "local.descriptor.tcgen05_instr") {
     stream << "tl::Tcgen05InstrDescriptor " << vid << ";\n";
   } else {
-    bool is_fp4_scalar_local =
-        alloc_dtype.is_float4() && alloc_dtype.is_scalar() && scope == "local";
+    // Only int4 scalar locals use compact backing in this allocation path.
+    // FP4 locals are declared as semantic fp4_e2_t elements so local.fragment
+    // buffers and generated MMA operands share the same variable name.
     bool is_int4_scalar_local =
         (alloc_dtype == DataType::Int(4) || alloc_dtype == DataType::UInt(4)) &&
-        alloc_dtype.is_scalar() && scope == "local";
-    if (!is_fp4_scalar_local && !is_int4_scalar_local) {
+        alloc_dtype.is_scalar() &&
+        (scope == "local" || scope == "local.fragment");
+    if (!is_int4_scalar_local) {
       PrintStorageScope(scope, stream);
+      if (alloc_dtype.is_float4_e2m1fn() && alloc_dtype.is_scalar() &&
+          (scope == "local" || scope == "local.fragment")) {
+        // Vectorized FP4 fragments reinterpret groups such as fp4_e2_16_t and
+        // fp4_e2_32_t from this local backing.
+        stream << "alignas(16) ";
+      }
       PrintType(alloc_dtype, stream);
     }
   }
@@ -4542,20 +4695,16 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
       PrintIndent();
       stream << "auto " << vid << " = reinterpret_cast<" << mbarrier_dtype_
              << "*>(" << v_id_mem << ");\n";
-    } else if (scope == "local") {
+    } else if (scope == "local" || scope == "local.fragment") {
       if (alloc_dtype == DataType::Int(4) || alloc_dtype == DataType::UInt(4)) {
         stream << "alignas(16) ";
         PrintType(alloc_dtype, stream);
         stream << ' ' << vid << '[' << (constant_size + 1) / 2 << "];\n";
       } else {
-        if (alloc_dtype.is_float4() && alloc_dtype.is_scalar()) {
-          auto vid_packed = vid + "_packed";
-          stream << "fp4_e2_2_t " << vid_packed << '['
-                 << (constant_size + 1) / 2 << "];\n";
-          fp4_packed_buffers_[op->buffer->data.get()] = vid_packed;
-        } else {
-          stream << ' ' << vid << '[' << constant_size << "];\n";
-        }
+        // Local FP4 is not byte-packed. Global/shared scopes own packing
+        // through GetBufferRef and the packed helpers; local arrays model the
+        // fragment elements consumed by ldmatrix and MMA.
+        stream << ' ' << vid << '[' << constant_size << "];\n";
       }
     } else if (scope == "local.var") {
       PrimExpr init = tirx::make_const(alloc_dtype, 0);
@@ -4644,22 +4793,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
     return;
   }
 
-  // Check if this is a fp4 packed buffer access
-  auto packed_it = fp4_packed_buffers_.find(buffer_var.get());
-  if (packed_it != fp4_packed_buffers_.end() && value_dtype.is_scalar()) {
-    std::string idx_str = PrintExpr(index);
-    os << "tl_fp4_packed_load(" << packed_it->second << ", " << idx_str << ")";
-    return;
-  }
   int lanes = op->dtype.lanes();
   // declare type.
   if (value_dtype.lanes() == element_dtype.lanes()) {
-    // For scalar fp4 loads from non-packed buffers, use tl_fp4_packed_load
-    // to correctly extract the nibble at the given index (the /2 in
-    // GetBufferRef maps two consecutive fp4 elements to the same byte, but
-    // reading that byte only returns the low nibble — the odd-indexed element
-    // is lost).
-    if (element_dtype.is_float4() && element_dtype.lanes() == 1) {
+    // Scalar FP4 packed buffers need nibble selection even when the backing
+    // storage is byte-indexed. Without the helper, two logical FP4 elements
+    // map to one byte and odd-indexed loads would read the low nibble.
+    if (IsFp4PackedStorage(buffer_var.get(), element_dtype)) {
       std::string idx_str = PrintExpr(index);
       std::string vid = GetVarID(buffer_var.get());
       os << "tl_fp4_packed_load((fp4_e2_2_t*)" << vid << ", " << idx_str << ")";
@@ -4743,22 +4883,11 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
     return;
   }
 
-  // Check if this is a fp4 packed buffer access
-  auto packed_it = fp4_packed_buffers_.find(buffer_var.get());
-  if (packed_it != fp4_packed_buffers_.end() && value_dtype.is_scalar()) {
-    std::string idx_str = PrintExpr(index_expr);
-    std::string value = this->PrintExpr(op->value);
-    this->PrintIndent();
-    stream << "tl_fp4_packed_store(" << packed_it->second << ", " << idx_str
-           << ", " << value << ");\n";
-    return;
-  }
   if (value_dtype.lanes() == element_dtype.lanes()) {
-    // For scalar fp4 stores to non-packed buffers, use tl_fp4_packed_store
-    // to correctly handle nibble-level writes. The /2 in GetBufferRef maps two
-    // consecutive fp4 elements to the same byte, and a plain assignment
-    // overwrites the entire byte — destroying the neighboring nibble.
-    if (element_dtype.is_float4() && element_dtype.lanes() == 1) {
+    // Scalar FP4 packed stores update one nibble at the logical index.
+    // A plain assignment to the backing byte would overwrite the neighboring
+    // element.
+    if (IsFp4PackedStorage(buffer_var.get(), element_dtype)) {
       std::string idx_str = PrintExpr(index_expr);
       std::string value = this->PrintExpr(op->value);
       std::string vid = GetVarID(buffer_var.get());
