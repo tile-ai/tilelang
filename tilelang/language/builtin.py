@@ -358,20 +358,23 @@ def tma_store_arrive():
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.tma_store_arrive"))
 
 
-def tma_store_wait(count: int = 0):
+def tma_store_wait(count: int = 0, read: bool = True):
     """Wait for completion of TMA store operations.
 
     Waits until the number of outstanding TMA store groups is at most ``count``.
-    Maps to the PTX instruction ``cp.async.bulk.wait_group.read <count>``.
+    Maps to ``cp.async.bulk.wait_group.read <count>`` by default, or
+    ``cp.async.bulk.wait_group <count>`` when ``read`` is false.
 
     Args:
         count (int): The maximum number of outstanding store groups allowed
             to remain in flight. Defaults to 0 (wait for all stores to complete).
+        read (bool): Whether to use the PTX ``.read`` modifier, which only
+            waits for the source reads to complete. Defaults to True.
 
     Returns:
         tirx.Call: A handle to the store wait operation
     """
-    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tma_store_wait"), count)
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tma_store_wait"), count, read)
 
 
 def set_max_nreg(reg_count: int, is_inc: int):
