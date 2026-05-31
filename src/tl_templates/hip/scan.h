@@ -104,7 +104,8 @@ struct InclusiveScan1D {
     if (wavefront_size == 32) {
       run<T, 32>(src, dst, N);
     } else {
-      assert(wavefront_size == 64 && "Unsupported wavefront size in InclusiveScan1D");
+      assert(wavefront_size == 64 &&
+             "Unsupported wavefront size in InclusiveScan1D");
       run<T, 64>(src, dst, N);
     }
   }
@@ -150,7 +151,8 @@ struct InclusiveScan2D {
     if (wavefront_size == 32) {
       run<T, 32>(src, dst, H, W);
     } else {
-      assert(wavefront_size == 64 && "Unsupported wavefront size in InclusiveScan2D");
+      assert(wavefront_size == 64 &&
+             "Unsupported wavefront size in InclusiveScan2D");
       run<T, 64>(src, dst, H, W);
     }
   }
