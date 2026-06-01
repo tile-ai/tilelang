@@ -17,7 +17,7 @@
 #include <tvm/tirx/op_attr_types.h>
 #include <tvm/tirx/stmt.h>
 
-#include "../target/utils.h"
+#include "backend/common/target_utils.h"
 #include "tvm/ffi/string.h"
 
 #include <vector>

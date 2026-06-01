@@ -6,12 +6,12 @@
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
 
+#include "backend/common/target_utils.h"
 #include "op/builtin.h"
 #include "op/copy.h"
 #include "op/parallel.h"
 #include "op/region.h"
 #include "op/utils.h"
-#include "target/utils.h"
 
 namespace tvm {
 namespace tl {

@@ -21,7 +21,7 @@
 
 #include "../op/builtin.h"
 #include "../op/utils.h"
-#include "../target/utils.h"
+#include "backend/common/target_utils.h"
 #include "ptx_async_copy_injector.h"
 #include "tir/ir/buffer_common.h"
 #include <tvm/tirx/stmt.h>

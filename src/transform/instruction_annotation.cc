@@ -33,13 +33,13 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include "../backend/cuda/op/copy.h"
 #include "../op/builtin.h"
 #include "../op/copy.h"
 #include "../op/gemm.h"
 #include "../op/operator.h"
 #include "../op/utils.h"
-#include "../target/utils.h"
+#include "backend/common/target_utils.h"
+#include "cuda/op/copy.h"
 
 namespace tvm {
 namespace tl {
