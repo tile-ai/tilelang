@@ -50,8 +50,8 @@ def get_ldmatrix_offset(
             new_row_idx, new_col_idx = transform_func(row_idx, col_idx)
             return new_row_idx, new_col_idx
     elif is_fp4_e2m1fn or dtype_bits <= 8:
-        # SM120 FP4 shared operands use one unpacked carrier byte per logical
-        # value, so they keep the 8-bit ldmatrix coordinates. Packed int4/uint4
+        # FP4 shared operands use one unpacked carrier byte per logical value,
+        # so they keep the 8-bit ldmatrix coordinates. Packed int4/uint4
         # still scale those coordinates to byte offsets.
         if matrix == "B" and transposed:
             transform_func = ldmatrix_32x16_to_shared_16x32_layout_b

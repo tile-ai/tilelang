@@ -355,7 +355,7 @@ bool CheckLDSMCopy(const CopyNode &op, Target target) {
   if (!uses_fp4) {
     return true;
   }
-  if (!TargetIsSM120(target)) {
+  if (!TargetSupportsFp4Ldmatrix(target)) {
     return false;
   }
   return op.src->dtype == op.dst->dtype ||
@@ -438,6 +438,10 @@ bool CopyInstIsTMA(CopyInst inst) {
 }
 
 bool CopyInstIsCPAsync(CopyInst inst) { return inst == CopyInst::kCPAsync; }
+
+bool TargetSupportsFp4Ldmatrix(Target target) {
+  return TargetHasSMVersionGE(target, 120);
+}
 
 namespace {
 

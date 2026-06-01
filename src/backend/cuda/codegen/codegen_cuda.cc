@@ -2011,9 +2011,9 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
   const VarNode *buffer_var = buffer->data.get();
   std::ostringstream os;
   std::string vid = GetVarID(buffer_var);
-  // FP4 storage is selected by scope, not by renaming the buffer. Pre-SM120
-  // shared scopes use packed byte addresses, while local fragments keep the
-  // declared name so generated MMA operands match the fragment allocation.
+  // FP4 storage is selected by scope, not by renaming the buffer. Shared
+  // scopes use packed byte addresses, while local fragments keep the declared
+  // name so generated MMA operands match the fragment allocation.
   std::string scope = GetBufferStorageScope(buffer_var);
   // bool is_vol = IsVolatile(buffer_var);
   // always false for tl cutlass backend.
@@ -2211,7 +2211,7 @@ void CodeGenTileLangCUDA::PrintVecStore(const BufferNode *buffer, DataType t,
 
 // FP4 storage follows the buffer role:
 // - Global FP4 storage keeps the public packed ABI.
-// - Shared FP4 storage may be lowered through hidden unpacked carriers.
+// - Shared FP4 storage may be lowered through remapped unpacked carriers.
 // - Local/local.fragment buffers use semantic FP4 elements for MMA operands.
 std::string
 CodeGenTileLangCUDA::GetBufferStorageScope(const VarNode *buffer_var) const {

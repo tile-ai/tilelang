@@ -40,7 +40,6 @@
 #include <vector>
 
 #include "../op/builtin.h"
-#include "../target/utils.h"
 #include "common/attr.h"
 #include "merge_if_stmt.h"
 #include "tir/transforms/ir_utils.h"

@@ -39,6 +39,7 @@ enum class CopyInst : uint8_t {
 const char *CopyInstToString(CopyInst inst);
 bool CopyInstIsTMA(CopyInst inst);
 bool CopyInstIsCPAsync(CopyInst inst);
+bool TargetSupportsFp4Ldmatrix(Target target);
 
 struct TMADesc {
   size_t rank;

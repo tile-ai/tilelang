@@ -6,8 +6,8 @@ from tilelang import tvm as tvm
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(12, 0)
-def test_semantic_fp4_gemm_uses_hidden_unpacked_fragments():
-    def assert_hidden_unpacked_shared(tir, name):
+def test_semantic_fp4_gemm_uses_unpacked_carrier_fragments():
+    def assert_unpacked_shared_carrier(tir, name):
         assert f'{name}: T.handle("custom[float4_e2m1_unpacked]", "shared.dyn")' in tir
 
     cases = [
@@ -42,11 +42,11 @@ def test_semantic_fp4_gemm_uses_hidden_unpacked_fragments():
         tir, src = lower_gemm(a_dtype, b_dtype)
         if a_carrier:
             assert 'A: T.handle("float4_e2m1fn", "global")' in tir
-            assert_hidden_unpacked_shared(tir, "A_shared")
+            assert_unpacked_shared_carrier(tir, "A_shared")
             assert 'A_local = T.alloc_buffer((64,), "custom[float4_e2m1_unpacked]", scope="local")' in tir
         if b_carrier:
             assert 'B: T.handle("float4_e2m1fn", "global")' in tir
-            assert_hidden_unpacked_shared(tir, "B_shared")
+            assert_unpacked_shared_carrier(tir, "B_shared")
             assert 'B_local = T.alloc_buffer((64,), "custom[float4_e2m1_unpacked]", scope="local")' in tir
         assert f'T.ptx_mma("float32", "m16n8k32", "row", "col", "{a_mma}", "{b_mma}", "fp32"' in tir
         assert "tl::ptx_ldmatrix_x4" in src

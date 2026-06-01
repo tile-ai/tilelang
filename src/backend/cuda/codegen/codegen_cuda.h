@@ -81,7 +81,7 @@ private:
   void HandleVolatileLoads(const std::string &value, const BufferLoadNode *op,
                            std::ostream &os) final;
   bool HandleLateIntrinsicCall(const CallNode *op, std::ostream &os);
-  // FP4 address helpers preserve public packed storage while allowing hidden
+  // FP4 address helpers preserve public packed storage while allowing internal
   // unpacked carrier buffers for shared-memory lowering.
   std::string GetBufferStorageScope(const VarNode *buffer_var) const;
   bool IsFp4PackedStorage(const VarNode *buffer_var,

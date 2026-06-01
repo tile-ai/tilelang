@@ -7,10 +7,10 @@
 
 #if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 1200)) ||           \
     (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1200))
-#define TL_HAS_SM120_MMA_DISPATCHER 1
+#define TL_HAS_F8F6F4_MMA_DISPATCHER 1
 #include <cute/arch/mma_sm120.hpp>
 #else
-#define TL_HAS_SM120_MMA_DISPATCHER 0
+#define TL_HAS_F8F6F4_MMA_DISPATCHER 0
 #endif
 
 #ifndef __CUDACC_RTC__
@@ -113,8 +113,8 @@ struct SM75_8x8x32_S32U4U4S32_TN {
   }
 };
 
-#if TL_HAS_SM120_MMA_DISPATCHER
-template <class Impl, bool ShiftA, bool ShiftB> struct SM120_16x8x32_F8F6F4_TN {
+#if TL_HAS_F8F6F4_MMA_DISPATCHER
+template <class Impl, bool ShiftA, bool ShiftB> struct F8F6F4_16x8x32_TN {
   using DRegisters = typename Impl::DRegisters;
   using ARegisters = typename Impl::ARegisters;
   using BRegisters = typename Impl::BRegisters;
@@ -135,7 +135,7 @@ template <class Impl, bool ShiftA, bool ShiftB> struct SM120_16x8x32_F8F6F4_TN {
                                    uint32_t const &b0, uint32_t const &b1,
                                    float const &c0, float const &c1,
                                    float const &c2, float const &c3) {
-    // SM120 FP4 MMA consumes the e2m1 payload from bits 2..5 of each
+    // F8F6F4 MMA consumes the e2m1 payload from bits 2..5 of each
     // byte-carrier lane, so FP4 operands are shifted immediately before fma.
     Impl::fma(
         d0, d1, d2, d3, shift_fp4_mma_operand<ShiftA>(a0),
@@ -145,13 +145,13 @@ template <class Impl, bool ShiftA, bool ShiftB> struct SM120_16x8x32_F8F6F4_TN {
   }
 };
 
-using SM120_FP4_FP4_F32_TN = SM120_16x8x32_F8F6F4_TN<
+using F8F6F4_FP4_FP4_F32_TN = F8F6F4_16x8x32_TN<
     cute::SM120_16x8x32_TN<cute::float_e2m1_t, cute::float_e2m1_t, float>, true,
     true>;
-using SM120_FP8_FP4_F32_TN = SM120_16x8x32_F8F6F4_TN<
+using F8F6F4_FP8_FP4_F32_TN = F8F6F4_16x8x32_TN<
     cute::SM120_16x8x32_TN<cute::float_e4m3_t, cute::float_e2m1_t, float>,
     false, true>;
-using SM120_FP4_FP8_F32_TN = SM120_16x8x32_F8F6F4_TN<
+using F8F6F4_FP4_FP8_F32_TN = F8F6F4_16x8x32_TN<
     cute::SM120_16x8x32_TN<cute::float_e2m1_t, cute::float_e4m3_t, float>, true,
     false>;
 #endif
@@ -229,14 +229,14 @@ TL_DEFINE_MMA_DISPATCHER(kUInt4, kUInt4, kInt32, 16, 8, 32, false, true, false,
 TL_DEFINE_MMA_DISPATCHER(kUInt4, kUInt4, kInt32, 16, 8, 64, false, true, false,
                          cute::SM80_16x8x64_S32U4U4S32_TN)
 
-#if TL_HAS_SM120_MMA_DISPATCHER
-// FP4/F8F6F4 inputs (k32) for SM120
+#if TL_HAS_F8F6F4_MMA_DISPATCHER
+// FP4/F8F6F4 inputs (k32)
 TL_DEFINE_MMA_DISPATCHER(kFloat4_e2m1fn, kFloat4_e2m1fn, kFloat32, 16, 8, 32,
-                         false, true, false, tl::detail::SM120_FP4_FP4_F32_TN)
+                         false, true, false, tl::detail::F8F6F4_FP4_FP4_F32_TN)
 TL_DEFINE_MMA_DISPATCHER(kFloat8_e4m3, kFloat4_e2m1fn, kFloat32, 16, 8, 32,
-                         false, true, false, tl::detail::SM120_FP8_FP4_F32_TN)
+                         false, true, false, tl::detail::F8F6F4_FP8_FP4_F32_TN)
 TL_DEFINE_MMA_DISPATCHER(kFloat4_e2m1fn, kFloat8_e4m3, kFloat32, 16, 8, 32,
-                         false, true, false, tl::detail::SM120_FP4_FP8_F32_TN)
+                         false, true, false, tl::detail::F8F6F4_FP4_FP8_F32_TN)
 #endif
 
 // FP8 inputs (k32)
@@ -271,7 +271,7 @@ TL_DEFINE_MMA_DISPATCHER(kFloat64, kFloat64, kFloat64, 8, 8, 4, false, true,
                          false, cute::SM80_8x8x4_F64F64F64F64_TN)
 
 #undef TL_DEFINE_MMA_DISPATCHER
-#undef TL_HAS_SM120_MMA_DISPATCHER
+#undef TL_HAS_F8F6F4_MMA_DISPATCHER
 
 } // namespace detail
 

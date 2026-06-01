@@ -15,7 +15,6 @@
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/op_attr_types.h>
 
-#include "../target/utils.h"
 #include "utils.h"
 
 #include <vector>
@@ -247,11 +246,11 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
     for (auto kv : inferred_layouts) {
       const Buffer &buf = kv.first;
       const Layout &layout = kv.second;
-      bool replace_sm120_fp4_layout = TargetIsSM120(T.target) &&
-                                      IsSharedBuffer(buf) &&
-                                      buf->dtype.is_float4_e2m1fn();
-      if (reuse_existing_shared_layout && IsSharedBuffer(buf) &&
-          T.layout_map.count(buf) && !replace_sm120_fp4_layout) {
+      bool is_shared_buffer = IsSharedBuffer(buf);
+      bool replace_fp4_shared_layout =
+          is_shared_buffer && buf->dtype.is_float4_e2m1fn();
+      if (reuse_existing_shared_layout && is_shared_buffer &&
+          T.layout_map.count(buf) && !replace_fp4_shared_layout) {
         continue;
       }
       if (auto frag = layout.as<Fragment>()) {

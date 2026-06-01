@@ -1002,11 +1002,10 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &T,
 
   Buffer shared_tensor = is_ldmatrix ? src : dst;
   Buffer local_tensor = is_ldmatrix ? dst : src;
-  bool is_fp4_unpacked_ldmatrix =
-      is_ldmatrix && shared_tensor->dtype.is_float4_e2m1_unpacked() &&
-      local_tensor->dtype.is_float4_e2m1_unpacked();
-  bool is_fp4_ldmatrix = is_fp4_unpacked_ldmatrix;
-  if (is_fp4_ldmatrix && !TargetIsSM120(T.target)) {
+  bool is_fp4_ldmatrix = is_ldmatrix &&
+                         shared_tensor->dtype.is_float4_e2m1_unpacked() &&
+                         local_tensor->dtype.is_float4_e2m1_unpacked();
+  if (is_fp4_ldmatrix && !TargetSupportsFp4Ldmatrix(T.target)) {
     return LowerNormal(op, T, analyzer);
   }
   Array<Range> local_region = is_ldmatrix ? src_range : dst_range;

@@ -12,7 +12,6 @@ from tvm.ir import Range
 from tvm import tirx
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
-from tilelang.utils.target import target_is_sm120
 
 
 GEMM_INST_MMA = "cuda.mma"
@@ -86,9 +85,9 @@ class GemmMMA(GemmBase):
 
     def infer_layout(self, target: Target, thread_nums: int):
         mma_emitter = self._make_mma_emitter(target, thread_nums)
-        use_unpacked_layout = target_is_sm120(target)
-        A_layout_buf = self._layout_carrier_buffer(self.A) if use_unpacked_layout else self.A
-        B_layout_buf = self._layout_carrier_buffer(self.B) if use_unpacked_layout else self.B
+        use_fp4_unpacked_layout = self._is_fp4_e2m1(self.A.dtype) or self._is_fp4_e2m1(self.B.dtype)
+        A_layout_buf = self._layout_carrier_buffer(self.A) if use_fp4_unpacked_layout else self.A
+        B_layout_buf = self._layout_carrier_buffer(self.B) if use_fp4_unpacked_layout else self.B
         if self.is_gemm_ss():
             return {
                 self.A: make_swizzled_layout(A_layout_buf),
