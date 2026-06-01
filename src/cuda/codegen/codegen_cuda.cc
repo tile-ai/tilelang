@@ -265,6 +265,11 @@ std::string GetTileLangFP6Type(DataType type) {
 }
 
 std::string GetTileLangFP4Type(DataType type) {
+  if (type.is_float4_e2m1_unpacked()) {
+    LOG(FATAL) << "float4_e2m1_unpacked is a SMEM/TMA storage tag and has no "
+                  "CUDA register type";
+  }
+
   std::stringstream stream;
   int32_t lanes = type.lanes();
   std::string vec;
@@ -288,7 +293,7 @@ std::string GetTileLangFP4Type(DataType type) {
   }
 
   std::string suffix;
-  if (type.code() == DataType::kFloat4_e2m1fn) {
+  if (type.is_float4_e2m1fn()) {
     suffix = "_e2";
   } else {
     LOG(FATAL) << "Unsupported FP4 type in CUDA codegen";
@@ -796,13 +801,8 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     }
     fail = true;
   } else if (t.is_float4_e2m1_unpacked()) {
-    if (t.is_scalar()) {
-      os << "uint8_t";
-    } else if (t.lanes() <= 4) {
-      os << "uint8_t";
-    } else {
-      os << "uint8_t";
-    }
+    LOG(FATAL) << "float4_e2m1_unpacked is a SMEM/TMA storage tag and must be "
+                  "lowered through shared-memory allocation";
     return;
   } else if (t.is_float4_e2m1fn()) {
     enable_fp4_ = true;
@@ -2033,6 +2033,9 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
   if (alloc_storage_scope_.count(buffer_var)) {
     scope = alloc_storage_scope_.at(buffer_var);
   }
+  if (scope.empty()) {
+    scope = GetPtrStorageScope(buffer->data);
+  }
   // bool is_vol = IsVolatile(buffer_var);
   // always false for tl cutlass backend.
   bool is_vol = false;
@@ -2046,7 +2049,12 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
     if (!scope.empty() && IsScopePartOfType()) {
       PrintStorageScope(scope, ptr_os);
     }
-    PrintType(pointed_to, ptr_os);
+    if (pointed_to.is_float4_e2m1_unpacked() &&
+        (scope == "shared" || scope == "shared.dyn")) {
+      ptr_os << "uint8_t";
+    } else {
+      PrintType(pointed_to, ptr_os);
+    }
     ptr_os << "*)";
     return ptr_os.str();
   };
@@ -2058,9 +2066,6 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
     std::stringstream temp;
     temp << "(" << ptr_cast(buffer_element_dtype) << vid << ")";
     buffer_str = temp.str();
-  }
-  if (scope.empty()) {
-    scope = GetPtrStorageScope(buffer->data);
   }
   if (scope == "local.var" || scope.find("local.descriptor") == 0) {
     os << vid;
@@ -2082,7 +2087,8 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
        << " + " << index_str << ")";
   } else if (t == buffer_element_dtype) {
     int div_factor = 1;
-    if (buffer_element_dtype.bits() == 4 && buffer_element_dtype.lanes() == 1) {
+    if (buffer_element_dtype.is_float4_e2m1fn() &&
+        buffer_element_dtype.lanes() == 1) {
       div_factor = 2;
     }
     index_str =
@@ -3811,7 +3817,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     DataType src_dtype = op->args[0]->dtype;
     PrimExpr value = op->args[0];
 
-    // Handle float4_e2m1fn reinterpret
+    // Handle packed float4_e2m1fn reinterpret. The unpacked SMEM dtype is not a
+    // general register conversion dtype.
     if (!src_dtype.is_float4_e2m1fn() && !tgt_dtype.is_float4_e2m1fn()) {
       ICHECK_EQ(tgt_dtype.lanes() * tgt_dtype.bits(),
                 src_dtype.lanes() * src_dtype.bits())
@@ -4513,6 +4520,9 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
   } else if (scope == "local.descriptor.tcgen05_instr") {
     stream << "tl::Tcgen05InstrDescriptor " << vid << ";\n";
   } else {
+    bool is_float4_unpacked_shared =
+        alloc_dtype.is_float4_e2m1_unpacked() &&
+        (scope == "shared" || scope == "shared.dyn");
     bool is_fp4_scalar_local = alloc_dtype.is_float4_e2m1fn() &&
                                alloc_dtype.is_scalar() && scope == "local";
     bool is_int4_scalar_local =
@@ -4520,7 +4530,11 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
         alloc_dtype.is_scalar() && scope == "local";
     if (!is_fp4_scalar_local && !is_int4_scalar_local) {
       PrintStorageScope(scope, stream);
-      PrintType(alloc_dtype, stream);
+      if (is_float4_unpacked_shared) {
+        stream << "uint8_t";
+      } else {
+        PrintType(alloc_dtype, stream);
+      }
     }
   }
 

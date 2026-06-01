@@ -27,9 +27,15 @@ using namespace ffi;
 
 namespace {
 
-PrimExpr TMABytesFromElements(PrimExpr elements, DataType dtype) {
+int TMAPayloadElementBits(DataType dtype) {
+  if (dtype.is_float4_e2m1_unpacked()) {
+    return 4;
+  }
+  return dtype.bits();
+}
+
+PrimExpr TMABytesFromElements(PrimExpr elements, int bits) {
   PrimExpr elements_i64 = cast(DataType::Int(64), elements);
-  int bits = dtype.bits();
   if (bits % 8 == 0) {
     return elements_i64 * IntImm(DataType::Int(64), bits / 8);
   }
@@ -38,9 +44,13 @@ PrimExpr TMABytesFromElements(PrimExpr elements, DataType dtype) {
                   IntImm(DataType::Int(64), 8));
 }
 
-PrimExpr TMABitsFromElements(PrimExpr elements, DataType dtype) {
+PrimExpr TMAGlobalBytesFromElements(PrimExpr elements, DataType dtype) {
+  return TMABytesFromElements(elements, TMAPayloadElementBits(dtype));
+}
+
+PrimExpr TMAGlobalBitsFromElements(PrimExpr elements, DataType dtype) {
   return cast(DataType::Int(64), elements) *
-         IntImm(DataType::Int(64), dtype.bits());
+         IntImm(DataType::Int(64), TMAPayloadElementBits(dtype));
 }
 
 bool GetBoolAnnotation(const CopyNode &op, const char *key) {
@@ -152,7 +162,8 @@ bool CheckGlobalStrides(const Buffer &buffer, arith::Analyzer *analyzer,
   }
 
   for (size_t i = 0; i + 1 < strides.size(); ++i) {
-    PrimExpr stride_bytes = TMABytesFromElements(strides[i], buffer->dtype);
+    PrimExpr stride_bytes =
+        TMAGlobalBytesFromElements(strides[i], buffer->dtype);
     if (analyzer->CanProve(
             FloorMod(stride_bytes, IntImm(DataType::Int(64), 16)) != 0,
             arith::ProofStrength::kSymbolicBound)) {
@@ -190,8 +201,8 @@ bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
   if (check_last_dim &&
       analyzer->CanProve(
           FloorMod(
-              TMABitsFromElements(op.src_range[op.src_range.size() - 1]->extent,
-                                  op.src->dtype),
+              TMAGlobalBitsFromElements(
+                  op.src_range[op.src_range.size() - 1]->extent, op.src->dtype),
               IntImm(DataType::Int(64), 128)) != 0,
           arith::ProofStrength::kSymbolicBound)) {
     if (emit_diagnostics) {
@@ -204,7 +215,7 @@ bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
     return false;
   }
 
-  if (!IsValidTMACopyDtypePair(op.src->dtype, op.dst->dtype)) {
+  if (!IsValidTMALoadDtypePair(op.src->dtype, op.dst->dtype)) {
     if (emit_diagnostics) {
       DLOG(WARNING) << "src and dst must have compatible dtypes for tma load "
                     << op.src->name << " vs. " << op.dst->name << " dtype "
@@ -229,8 +240,8 @@ bool CheckBulkStore(const CopyNode &op, Target target,
   if (check_last_dim &&
       analyzer->CanProve(
           FloorMod(
-              TMABitsFromElements(op.dst_range[op.dst_range.size() - 1]->extent,
-                                  op.dst->dtype),
+              TMAGlobalBitsFromElements(
+                  op.dst_range[op.dst_range.size() - 1]->extent, op.dst->dtype),
               IntImm(DataType::Int(64), 128)) != 0,
           arith::ProofStrength::kSymbolicBound)) {
     if (emit_diagnostics) {
@@ -242,7 +253,7 @@ bool CheckBulkStore(const CopyNode &op, Target target,
     }
     return false;
   }
-  if (!IsValidTMACopyDtypePair(op.dst->dtype, op.src->dtype)) {
+  if (!IsValidTMAStoreDtypePair(op.dst->dtype, op.src->dtype)) {
     if (emit_diagnostics) {
       DLOG(WARNING) << "src and dst must have compatible dtypes for tma store "
                     << op.src->name << " vs. " << op.dst->name << " dtype "

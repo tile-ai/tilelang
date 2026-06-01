@@ -270,13 +270,13 @@ def __dtype_is_float4_e2m1fn__(self: dtype) -> bool:
 
 
 def __dtype_is_float4_e2m1_unpacked__(self: dtype) -> bool:
-    """8-bit FP4 E2M1 unpacked storage (CUTLASS float_e2m1_unpacksmem_t).
+    """8-bit FP4 E2M1 unpacked shared-memory storage.
 
     Only for tcgen05 ``kind::f8f6f4`` and block-scaled ``kind::mxf8f6f4``
-    mixed-precision paths where sub-byte types share 16-byte SMEM/TMEM padding
-    (one byte per FP4 element). Not for mxf4 / mxf4nvf4 packed FP4 kernels.
-    Pair with ``T.tma_copy`` from packed global FP4; TMA:
-    ``CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B``.
+    mixed-precision paths. It models the SMEM-side unpacked layout, one FP4
+    value per byte slot, and pairs with TMA
+    ``CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B``. Not for mxf4 / mxf4nvf4 packed
+    FP4 kernels or general SIMT copy/cast paths.
     """
     return self.bits == _FLOAT4_E2M1_UNPACKED_BITS and int(self.type_code) == _FLOAT4_E2M1_UNPACKED_TYPE_CODE
 
@@ -292,7 +292,7 @@ def is_float4_e2m1fn(value: AnyDType) -> bool:
 
 
 def is_float4_e2m1_unpacked(value: AnyDType) -> bool:
-    """Whether *value* is the 8-bit FP4 E2M1 unpacked shared-memory storage variant."""
+    """Whether *value* is the 8-bit FP4 E2M1 unpacked shared-memory variant."""
     return get_tvm_dtype(value).is_float4_e2m1_unpacked()
 
 
@@ -512,11 +512,6 @@ if TYPE_CHECKING:
     class float4_e2m1fnx32(dtype): ...
     class float4_e2m1fnx64(dtype): ...
     class float4_e2m1_unpacked(dtype): ...
-    class float4_e2m1_unpackedx2(dtype): ...
-    class float4_e2m1_unpackedx4(dtype): ...
-    class float4_e2m1_unpackedx8(dtype): ...
-    class float4_e2m1_unpackedx16(dtype): ...
-    class float4_e2m1_unpackedx32(dtype): ...
     class bfloat16(dtype): ...
     class bfloat16x2(dtype): ...
     class tfloat32(dtype): ...
@@ -693,12 +688,8 @@ else:
     float4_e2m1fnx16 = dtype("float4_e2m1fnx16")
     float4_e2m1fnx32 = dtype("float4_e2m1fnx32")
     float4_e2m1fnx64 = dtype("float4_e2m1fnx64")
+    # SMEM/TMA-only layout type; do not expose vectorized register/cast variants.
     float4_e2m1_unpacked = dtype("custom[float4_e2m1_unpacked]8")
-    float4_e2m1_unpackedx2 = dtype("custom[float4_e2m1_unpacked]8x2")
-    float4_e2m1_unpackedx4 = dtype("custom[float4_e2m1_unpacked]8x4")
-    float4_e2m1_unpackedx8 = dtype("custom[float4_e2m1_unpacked]8x8")
-    float4_e2m1_unpackedx16 = dtype("custom[float4_e2m1_unpacked]8x16")
-    float4_e2m1_unpackedx32 = dtype("custom[float4_e2m1_unpacked]8x32")
     bfloat16 = dtype("bfloat16")
     bfloat16x2 = dtype("bfloat16x2")
     tfloat32 = dtype("custom[tfloat32]")
@@ -874,11 +865,6 @@ _all_dtypes = [
     "float4_e2m1fnx32",
     "float4_e2m1fnx64",
     "float4_e2m1_unpacked",
-    "float4_e2m1_unpackedx2",
-    "float4_e2m1_unpackedx4",
-    "float4_e2m1_unpackedx8",
-    "float4_e2m1_unpackedx16",
-    "float4_e2m1_unpackedx32",
     "bfloat16",
     "bfloat16x2",
     "tfloat32",

@@ -121,13 +121,36 @@ inline bool IsFP4PackedToUnpackedStorageCopy(DataType global_dtype,
          shared_dtype.is_float4_e2m1_unpacked();
 }
 
-// Valid dtype pairs for TMA global<->shared copies.
-inline bool IsValidTMACopyDtypePair(DataType global_dtype,
+inline bool IsValidTMALoadDtypePair(DataType global_dtype,
                                     DataType shared_dtype) {
+  if (global_dtype.is_float4_e2m1_unpacked() ||
+      shared_dtype.is_float4_e2m1_unpacked()) {
+    return IsFP4PackedToUnpackedStorageCopy(global_dtype, shared_dtype);
+  }
   if (global_dtype == shared_dtype) {
     return true;
   }
-  return IsFP4PackedToUnpackedStorageCopy(global_dtype, shared_dtype);
+  return false;
+}
+
+inline bool IsValidTMAStoreDtypePair(DataType global_dtype,
+                                     DataType shared_dtype) {
+  return global_dtype == shared_dtype &&
+         !shared_dtype.is_float4_e2m1_unpacked();
+}
+
+inline bool IsValidTMADtypePair(bool is_load, DataType global_dtype,
+                                DataType shared_dtype) {
+  if (is_load) {
+    return IsValidTMALoadDtypePair(global_dtype, shared_dtype);
+  }
+  return IsValidTMAStoreDtypePair(global_dtype, shared_dtype);
+}
+
+// Valid dtype pairs for TMA global->shared copies.
+inline bool IsValidTMACopyDtypePair(DataType global_dtype,
+                                    DataType shared_dtype) {
+  return IsValidTMALoadDtypePair(global_dtype, shared_dtype);
 }
 
 // True for packed<->unpacked FP4 storage transitions (either direction).

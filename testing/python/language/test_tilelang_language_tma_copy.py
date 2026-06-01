@@ -260,14 +260,19 @@ def run_gemm_tma_copy_store(num_stages):
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
 
-def fp4_tma_copy_roundtrip(M=128, N=256, block_M=64, block_N=128, smem_dtype=T.float4_e2m1fn):
+def fp4_tma_copy_roundtrip(
+    M=128,
+    N=256,
+    block_M=64,
+    block_N=128,
+):
     @T.prim_func
     def main(
         A: T.Tensor((M, N), T.float4_e2m1fn),
         B: T.Tensor((M, N), T.float4_e2m1fn),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
-            A_shared = T.alloc_shared((block_M, block_N), smem_dtype)
+            A_shared = T.alloc_shared((block_M, block_N), T.float4_e2m1fn)
             mbar = T.alloc_barrier(128)
             T.tma_copy(A[by * block_M, bx * block_N], A_shared, barrier=mbar)
             T.barrier_arrive(mbar)
@@ -345,15 +350,14 @@ def _assert_fp4_unpacked_tma_descriptor(host_source, desc_name, *, expect_swizzl
         assert _fp4_tma_stack_int(block, 13) == expect_swizzle
 
 
-def run_fp4_tma_copy_roundtrip(smem_dtype=T.float4_e2m1fn):
+def run_fp4_tma_copy_roundtrip():
     import torch
 
     M, N = 128, 256
-    program = fp4_tma_copy_roundtrip(M=M, N=N, smem_dtype=smem_dtype)
+    program = fp4_tma_copy_roundtrip(M=M, N=N)
     kernel = tilelang.compile(
         program,
         out_idx=[1],
-        target="cuda",
         pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     device_source = kernel.get_kernel_source()
@@ -362,17 +366,27 @@ def run_fp4_tma_copy_roundtrip(smem_dtype=T.float4_e2m1fn):
     assert "tl::tma_load" in device_source
     assert "tl::tma_store" in device_source
     assert host_source.count("__tvm_tensormap_create_tiled") >= 2
-
-    if smem_dtype == T.float4_e2m1fn:
-        for desc_name in ("A_desc", "B_desc"):
-            _assert_fp4_packed_tma_descriptor(host_source, desc_name)
-    else:
-        _assert_fp4_unpacked_tma_descriptor(host_source, "A_desc")
-        _assert_fp4_unpacked_tma_descriptor(host_source, "B_desc")
+    for desc_name in ("A_desc", "B_desc"):
+        _assert_fp4_packed_tma_descriptor(host_source, desc_name)
 
     a = torch.randint(-128, 128, (M, N // 2), device="cuda", dtype=torch.int8)
     b = kernel(a)
     assert torch.equal(b.view(torch.int8), a)
+
+
+def test_fp4_unpacksmem_tma_descriptor_uses_align16b():
+    program = fp4_tma_copy_unpacked_smem_load()
+    artifact = tilelang.lower(
+        program,
+        target={"kind": "cuda", "arch": "sm_100"},
+        enable_device_compile=False,
+    )
+    host_ir = str(artifact.host_mod)
+    device_ir = str(artifact.device_mod)
+    assert 'T.handle("float4_e2m1fn", "global")' in host_ir
+    assert 'A_shared = T.alloc_buffer((8192,), "custom[float4_e2m1_unpacked]"' in device_ir
+    assert '["__tvm_tensormap_create_tiled", A_desc, 14,' in host_ir
+    assert 'T.call_packed("__tvm_tensormap_create_tiled", A_desc, 14,' in host_ir
 
 
 def test_copy_prefer_tma_lowers_as_synchronous_tma_load():
@@ -415,13 +429,7 @@ def run_fp4_tma_copy_unpacked_smem_load():
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 def test_fp4_tma_copy_roundtrip_packed_smem():
-    run_fp4_tma_copy_roundtrip(smem_dtype=T.float4_e2m1fn)
-
-
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(10, 0)
-def test_fp4_tma_copy_roundtrip_unpacked_smem():
-    run_fp4_tma_copy_roundtrip(smem_dtype=T.float4_e2m1_unpacked)
+    run_fp4_tma_copy_roundtrip()
 
 
 @tilelang.testing.requires_cuda

@@ -44,16 +44,16 @@ PrimExpr MakeTmaLeaderCondition(PrimExpr thread_extent) {
   return Call(DataType::Bool(), tl_shuffle_elect(), {std::move(thread_extent)});
 }
 
-int TMATransactionElementBits(DataType dtype) {
-  // float4_e2m1_unpacked stores one logical FP4 value per 8-bit SMEM slot,
-  // but TMA/mbarrier transaction counts reflect the moved FP4 payload (4b).
+int TMAPayloadElementBits(DataType dtype) {
+  // IR elements are 8-bit unpacked SMEM slots, but TMA/mbarrier transactions
+  // count the packed FP4 payload moved from/to global memory.
   if (dtype.is_float4_e2m1_unpacked()) {
     return 4;
   }
   return dtype.bits();
 }
 
-PrimExpr TMABytesFromElements(PrimExpr elements, DataType dtype, int bits) {
+PrimExpr TMABytesFromElements(PrimExpr elements, int bits) {
   PrimExpr elements_i64 = cast(DataType::Int(64), elements);
   if (bits % 8 == 0) {
     return elements_i64 * IntImm(DataType::Int(64), bits / 8);
@@ -63,26 +63,32 @@ PrimExpr TMABytesFromElements(PrimExpr elements, DataType dtype, int bits) {
                   IntImm(DataType::Int(64), 8));
 }
 
-int64_t TMABytesFromElements(int64_t elements, DataType dtype, int bits) {
+int64_t TMABytesFromElements(int64_t elements, int bits) {
   return (elements * bits + 7) / 8;
 }
 
 PrimExpr TMABytesFromElements(PrimExpr elements, DataType dtype) {
-  return TMABytesFromElements(elements, dtype, dtype.bits());
+  return TMABytesFromElements(elements, dtype.bits());
 }
 
 int64_t TMABytesFromElements(int64_t elements, DataType dtype) {
-  return TMABytesFromElements(elements, dtype, dtype.bits());
+  return TMABytesFromElements(elements, dtype.bits());
+}
+
+PrimExpr TMAGlobalBytesFromElements(PrimExpr elements, DataType dtype) {
+  return TMABytesFromElements(elements, TMAPayloadElementBits(dtype));
+}
+
+int64_t TMAGlobalBytesFromElements(int64_t elements, DataType dtype) {
+  return TMABytesFromElements(elements, TMAPayloadElementBits(dtype));
 }
 
 PrimExpr TMATransactionBytesFromElements(PrimExpr elements, DataType dtype) {
-  return TMABytesFromElements(elements, dtype,
-                              TMATransactionElementBits(dtype));
+  return TMABytesFromElements(elements, TMAPayloadElementBits(dtype));
 }
 
 int64_t TMATransactionBytesFromElements(int64_t elements, DataType dtype) {
-  return TMABytesFromElements(elements, dtype,
-                              TMATransactionElementBits(dtype));
+  return TMABytesFromElements(elements, TMAPayloadElementBits(dtype));
 }
 
 int64_t TMAElementsForBytes(int64_t bytes, DataType dtype) {
@@ -1418,7 +1424,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   desc.rank = global_tensor->shape.size();
   ICHECK(desc.rank >= 1 && desc.rank <= 5) << desc.rank;
 
-  ICHECK(IsValidTMACopyDtypePair(global_tensor->dtype, shared_tensor->dtype))
+  ICHECK(
+      IsValidTMADtypePair(is_load, global_tensor->dtype, shared_tensor->dtype))
       << "Copy between buffer " << global_tensor->name << " and "
       << shared_tensor->name << " with incompatible data type "
       << global_tensor->dtype << " and " << shared_tensor->dtype;
@@ -1441,7 +1448,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   }
   ICHECK(is_one(desc.global_stride[0])) << desc.global_stride;
   desc.global_stride = desc.global_stride.Map([&](PrimExpr e) {
-    return TMABytesFromElements(e, global_tensor->dtype);
+    return TMAGlobalBytesFromElements(e, global_tensor->dtype);
   });
   for (size_t i{1}; i < desc.global_stride.size(); i++) {
     auto stride = desc.global_stride[i].as<IntImmNode>();
@@ -1849,7 +1856,7 @@ Stmt Copy::LowerBulkGather4(const CopyNode &op, const LowerArgs &T,
       << "tma_gather4/scatter4 requires unit innermost global stride, got "
       << desc.global_stride;
   desc.global_stride = desc.global_stride.Map([&](PrimExpr e) {
-    return TMABytesFromElements(e, global_tensor->dtype);
+    return TMAGlobalBytesFromElements(e, global_tensor->dtype);
   });
   for (size_t i = 1; i < desc.global_stride.size(); ++i) {
     if (auto stride = desc.global_stride[i].as<IntImmNode>()) {
@@ -2130,7 +2137,7 @@ Stmt Im2Col::Lower(const Im2ColOpNode &op, const LowerArgs &T,
   }
   ICHECK(is_one(desc.global_stride[0])) << desc.global_stride;
   desc.global_stride = desc.global_stride.Map(
-      [&](PrimExpr e) { return TMABytesFromElements(e, src->dtype); });
+      [&](PrimExpr e) { return TMAGlobalBytesFromElements(e, src->dtype); });
   desc.elem_stride = {1, op.stride_, op.stride_, 1};
   desc.lower_corner = {-op.padding_, -op.padding_};
   desc.upper_corner = {-op.padding_, -op.padding_};

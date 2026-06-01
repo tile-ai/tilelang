@@ -1,4 +1,4 @@
-"""Tests for float4_e2m1_unpacked (CUTLASS float_e2m1_unpacksmem_t)."""
+"""Tests for the FP4 E2M1 unpacked shared-memory dtype."""
 
 import pytest
 
@@ -18,18 +18,12 @@ def test_float4_e2m1_unpacked_dtype_properties():
     assert dt.lanes == 1
 
 
-def test_float4_e2m1_unpacked_vector_lanes():
-    dt2 = T.float4_e2m1_unpackedx2
-    assert dt2.bits == 8
-    assert int(dt2.type_code) == 131
-    assert dt2.lanes == 2
-
-
-def test_float4_e2m1_unpacked_tir_cast():
+def test_float4_e2m1_unpacked_tir_dtype_tag():
     from tilelang import language as T_lang
 
     @T_lang.prim_func
     def main():
+        # IR-level tag only; runtime numeric conversion is intentionally absent.
         T_lang.evaluate(T_lang.float4_e2m1_unpacked(0.0))
 
     assert main.body.value.dtype.is_float4_e2m1_unpacked()
@@ -55,7 +49,7 @@ def test_float4_e2m1_unpacked_dtype_helpers():
     assert not unpacked.is_float4_e2m1fn()
     assert unpacked.is_float4()
     assert T.float4_e2m1fnx2.is_float4()
-    assert T.float4_e2m1_unpackedx4.is_float4()
+    assert not hasattr(T, "float4_e2m1_unpackedx2")
     assert is_float4_e2m1fn(packed)
     assert is_float4_e2m1_unpacked(unpacked)
     assert is_float4("float4_e2m1fn")
@@ -103,8 +97,7 @@ def test_tcgen05_blockscaled_instr_desc_mxfp4_unpacked_x_mxfp8():
 
 if __name__ == "__main__":
     test_float4_e2m1_unpacked_dtype_properties()
-    test_float4_e2m1_unpacked_vector_lanes()
-    test_float4_e2m1_unpacked_tir_cast()
+    test_float4_e2m1_unpacked_tir_dtype_tag()
     test_float4_e2m1_unpacked_distinct_from_packed()
     test_float4_e2m1_unpacked_dtype_helpers()
     print("ok")
