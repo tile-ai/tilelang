@@ -51,7 +51,7 @@ def gather_scatter_program(N: int, K: int, K_box: int, in_dtype: str = "float16"
             if T.shuffle_elect(128):
                 T.tma_scatter4(smem, Dst, 0, [r0, r1, r2, r3])
                 T.tma_store_arrive()
-            T.tma_store_wait(0)
+            T.tma_store_wait(0, read=False)
 
     return main
 
@@ -140,7 +140,7 @@ def gather_scatter_swizzled_program(N: int, K: int, K_box: int, swizzle_kind: st
             if T.shuffle_elect(128):
                 T.tma_scatter4(smem, Dst, 0, [r0, r1, r2, r3])
                 T.tma_store_arrive()
-            T.tma_store_wait(0)
+            T.tma_store_wait(0, read=False)
 
     return main
 

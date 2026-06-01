@@ -1699,7 +1699,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
     if (!GetIsTmaCopy(op)) {
       seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(),
-                                  {IntImm(DataType::Int(32), 0)})));
+                                  {IntImm(DataType::Int(32), 0), Bool(true)})));
     }
     tma_copy = SeqStmt(std::move(seq));
   }
@@ -2034,7 +2034,7 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
     if (!GetIsTmaCopy(op)) {
       seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(),
-                                  {IntImm(DataType::Int(32), 0)})));
+                                  {IntImm(DataType::Int(32), 0), Bool(true)})));
     }
     tma_copy = SeqStmt(std::move(seq));
   }
