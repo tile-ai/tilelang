@@ -30,6 +30,13 @@ namespace codegen {
 using namespace ffi;
 namespace {
 
+bool GetBoolImm(const PrimExpr &expr, const char *name) {
+  const auto *imm = expr.as<IntImmNode>();
+  ICHECK(imm != nullptr && imm->dtype.is_bool())
+      << name << " must be a bool immediate.";
+  return imm->value != 0;
+}
+
 // Helper to check if a statement subtree contains loop break ops
 // (either tl::loop_break() or builtin::break_loop())
 class LoopBreakDetector : public tirx::StmtExprVisitor {
@@ -2478,7 +2485,7 @@ void CodeGenTileLangCuTeDSL::PrintStorageSync_(const CallNode *op) {
           << "storage_sync barrier_id must be integer type, got "
           << args[1].dtype();
       stream << "tl.sync_thread_partial(" << PrintExpr_(args[1]) << ")\n";
-    } else if (args.size() == 3) {
+    } else if (args.size() == 3 || args.size() == 4) {
       ICHECK(args[1].dtype().is_int())
           << "storage_sync barrier_id must be integer type, got "
           << args[1].dtype();
@@ -2486,7 +2493,13 @@ void CodeGenTileLangCuTeDSL::PrintStorageSync_(const CallNode *op) {
           << "storage_sync thread_count must be integer type, got "
           << args[2].dtype();
       stream << "tl.sync_thread_partial(" << PrintExpr_(args[1]) << ", "
-             << PrintExpr_(args[2]) << ")\n";
+             << PrintExpr_(args[2]);
+      if (args.size() == 4) {
+        stream << ", aligned="
+               << (GetBoolImm(args[3], "storage_sync aligned") ? "True"
+                                                               : "False");
+      }
+      stream << ")\n";
     } else {
       LOG(FATAL) << "Invalid number of arguments for storage sync: "
                  << args.size();

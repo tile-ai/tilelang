@@ -185,13 +185,14 @@ def bar_sync(barrier_id, number_of_threads):
     cute.arch.barrier(barrier_id=barrier_id, number_of_threads=number_of_threads)
 
 
-def bar_sync_ptx(barrier_id, number_of_threads):
+def bar_sync_ptx(barrier_id, number_of_threads, aligned=True):
     from cutlass._mlir.dialects import llvm
 
+    instruction = "bar.sync" if aligned else "barrier.sync"
     llvm.inline_asm(
         None,
         [Int32(barrier_id).ir_value(), Int32(number_of_threads).ir_value()],
-        "bar.sync $0, $1;",
+        f"{instruction} $0, $1;",
         "r,r",
         has_side_effects=True,
         is_align_stack=False,
