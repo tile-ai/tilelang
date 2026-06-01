@@ -109,27 +109,19 @@ def _imax(a, b, *, loc=None, ip=None):
 
 
 def min(a, b, c=None):
-    """Type-aware min: uses arith.minsi for integers, nvvm.fmin for floats.
-    Falls back to integer path if float conversion fails (signless int types)."""
-    if _is_int_type(a) and _is_int_type(b):
-        return _imin(a, b)
-    try:
-        return _fmin(a, b, c)
-    except Exception:
-        # Float32 conversion may fail for signless integer types
-        return _imin(a, b)
+    """Type-preserving min for scalar CuTeDSL values."""
+    result = cutlass.min(a, b)
+    if c is not None:
+        result = cutlass.min(result, c)
+    return result
 
 
 def max(a, b, c=None):
-    """Type-aware max: uses arith.maxsi for integers, nvvm.fmax for floats.
-    Falls back to integer path if float conversion fails (signless int types)."""
-    if _is_int_type(a) and _is_int_type(b):
-        return _imax(a, b)
-    try:
-        return _fmax(a, b, c)
-    except Exception:
-        # Float32 conversion may fail for signless integer types
-        return _imax(a, b)
+    """Type-preserving max for scalar CuTeDSL values."""
+    result = cutlass.max(a, b)
+    if c is not None:
+        result = cutlass.max(result, c)
+    return result
 
 
 class SumOp:
@@ -306,7 +298,7 @@ class CumSum1D:
         dst_tensor = cute.make_tensor(dst, (N,))
 
         # Load value (0 if out of bounds)
-        val = Float32(0.0)
+        val = src_tensor.element_type(0)
         if tidx < N:
             val = src_tensor[tidx]
 
@@ -371,7 +363,7 @@ class CumSum2D:
             idx = row * W + col
 
             # Load value (0 if out of bounds)
-            val = Float32(0.0)
+            val = src_tensor.element_type(0)
             if row < H and col < W:
                 val = src_tensor[idx]
 
@@ -395,7 +387,7 @@ class CumSum2D:
             idx = row_in_col * W + col
 
             # Load value (0 if out of bounds)
-            val = Float32(0.0)
+            val = src_tensor.element_type(0)
             if row_in_col < H and col < W:
                 val = src_tensor[idx]
 
@@ -468,7 +460,7 @@ class CumMax2D:
             col = lane
             idx = row * W + col
 
-            val = Float32(0.0)
+            val = src_tensor.element_type(0)
             if row < H:
                 val = src_tensor[row * W]
             if row < H and col < W:
@@ -489,7 +481,7 @@ class CumMax2D:
             row_in_col = lane
             idx = row_in_col * W + col
 
-            val = Float32(0.0)
+            val = src_tensor.element_type(0)
             if col < W:
                 val = src_tensor[col]
             if row_in_col < H and col < W:

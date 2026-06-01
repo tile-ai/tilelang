@@ -1,4 +1,5 @@
 __all__ = [
+    "abs2",
     "exp",
     "exp2",
     "exp10",
@@ -11,10 +12,15 @@ __all__ = [
     "sqrt",
     "rsqrt",
     "fabsf",
+    "max2",
+    "min2",
     "copysignf",
     "divf",
     "tanh",
 ]
+
+import cutlass
+import cutlass.cute as cute
 
 from cutlass.cute.typing import Union, Numeric
 from cutlass.cute.tensor import TensorSSA
@@ -127,6 +133,22 @@ def exp10(x: Union[TensorSSA, Numeric], fastmath: bool = False) -> Union[TensorS
 
 def fabsf(x: Union[TensorSSA, Numeric], fastmath: bool = False) -> Union[TensorSSA, Numeric]:
     return _tl_math_op(math.absf, fastmath, x)
+
+
+def abs2(x: Union[TensorSSA, Numeric]) -> Union[TensorSSA, Numeric]:
+    return fabsf(x)
+
+
+def max2(x: Union[TensorSSA, Numeric], y: Union[TensorSSA, Numeric]) -> Union[TensorSSA, Numeric]:
+    if any(isinstance(arg, TensorSSA) for arg in (x, y)):
+        return cute.where(x > y, x, y)
+    return cutlass.max(x, y)
+
+
+def min2(x: Union[TensorSSA, Numeric], y: Union[TensorSSA, Numeric]) -> Union[TensorSSA, Numeric]:
+    if any(isinstance(arg, TensorSSA) for arg in (x, y)):
+        return cute.where(x < y, x, y)
+    return cutlass.min(x, y)
 
 
 def copysignf(x: Union[TensorSSA, Numeric], y: Union[TensorSSA, Numeric], fastmath: bool = False) -> Union[TensorSSA, Numeric]:
