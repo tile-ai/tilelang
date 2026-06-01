@@ -4,17 +4,41 @@ from .. import _ffi_api
 
 
 def ProducerConsumerWarpSpecialized():
-    """Producer-consumer warp specialization at the tile-op level."""
+    """Producer-consumer warp specialization at the tile-op level.
+
+    This pass runs before LayoutInference and LowerTileOp. It rewrites
+    eligible pipelined tile-op loops into warp-specialized producer and
+    consumer branches with explicit barrier synchronization.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
     return _ffi_api.ProducerConsumerWarpSpecialized()  # type: ignore
 
 
 def ProducerConsumerWarpSpecializedTiled():
-    """Compatibility alias for ProducerConsumerWarpSpecialized."""
+    """Compatibility alias for ``ProducerConsumerWarpSpecialized``.
+
+    The tiled tile-op implementation is now the canonical
+    ``ProducerConsumerWarpSpecialized`` pass.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
     return ProducerConsumerWarpSpecialized()
 
 
 def LowerBlackwell2SM():
-    """Lower Blackwell 2-SM TCGEN05 annotations."""
+    """Lower 2SM TCGEN5MMA and related on Blackwell target
+
+    Returns:
+        fpass : tvm.transform.Pass
+            The result pass
+    """
     return _ffi_api.LowerBlackwell2SM()  # type: ignore
 
 
@@ -31,42 +55,88 @@ def LowerL2Persistent():
 
 
 def LowerSharedTmem():
-    """Lower CUDA shared.tmem buffers."""
+    """LowerSharedTmem"""
     return _ffi_api.LowerSharedTmem()  # type: ignore
 
 
 def LowerSharedBarrier():
-    """Lower CUDA shared.barrier buffers."""
+    """LowerSharedBarrier"""
     return _ffi_api.LowerSharedBarrier()  # type: ignore
 
 
 def FuseMBarrierArriveExpectTx():
-    """Fuse CUDA mbarrier expect_tx/TMA/arrive sequences."""
+    """Fuse simple expect_tx -> TMA issue -> arrive back into arrive_and_expect_tx."""
     return _ffi_api.FuseMBarrierArriveExpectTx()  # type: ignore
 
 
 def LowerLDGSTG():
-    """Lower CUDA global vector loads/stores to ldg/stg intrinsics."""
+    """Lower Ramp-based global memory load/store to ldg/stg intrinsics.
+
+    This pass transforms vectorized global memory loads and stores (using Ramp indices)
+    into explicit ldg32/64/128/256 and stg32/64/128/256 intrinsics for better codegen.
+
+    Key behaviors:
+    - Converts Ramp-based global BufferLoad to ldg intrinsics
+    - Converts Ramp-based global BufferStore to stg intrinsics
+    - Supports predicated loads (if_then_else with else=0)
+    - Supports predicated stores (if in then case)
+    - Skips loads in async scope (will be lowered to cp.async)
+    - Only enabled for CUDA targets
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
     return _ffi_api.LowerLDGSTG()  # type: ignore
 
 
 def MarkCudaSyncCalls(have_pdl: bool = False):
-    """Mark CUDA PDL synchronization calls."""
+    """MarkCudaSyncCalls"""
     return _ffi_api.MarkCudaSyncCalls(have_pdl)  # type: ignore
 
 
 def InjectFenceProxy():
-    """Inject CUDA async/generic proxy fences."""
+    """InjectFenceProxy
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
     return _ffi_api.InjectFenceProxy()  # type: ignore
 
 
 def InjectTcgen05Fence():
-    """Inject CUDA TCGEN05/TMEM synchronization fences."""
+    """Inject tcgen05.fence::before_thread_sync / after_thread_sync at
+    conservative TCGEN05/TMEM synchronization boundaries on Blackwell
+    (SM100+) targets.
+
+    The current pass wraps CTA-wide shared-memory syncs and also inserts
+    fences around linear mbarrier wait/use and use/arrive handoff patterns.
+    It is intentionally conservative and does not try to infer arbitrary
+    barrier protocols.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
     return _ffi_api.InjectTcgen05Fence()  # type: ignore
 
 
 def AnnotateWarpGroupRegAlloc():
-    """Annotate CUDA warp-group register allocation."""
+    """Inject set_max_nreg calls into warp-specialized functions.
+
+    This pass analyzes the function to collect register hints from set_max_nreg
+    and no_set_max_nreg calls, then injects appropriate set_max_nreg calls into
+    producer and consumer branches of warp-specialized code.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
     return _ffi_api.AnnotateWarpGroupRegAlloc()  # type: ignore
 
 

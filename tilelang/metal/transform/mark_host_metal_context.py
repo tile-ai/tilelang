@@ -6,6 +6,21 @@ from tvm.tirx import AttrStmt, Evaluate, PyStmtExprMutator, functor
 from tvm.tirx.transform import prim_func_pass
 
 
+"""
+Transformation pass to mark host-side kernel calls for Metal/MPS synchronization.
+
+To execute TVM-generated Metal kernels within a PyTorch environment, the TVM runtime
+must utilize PyTorch's active Metal command buffer (MPS). This ensures correct
+execution ordering and memory consistency between PyTorch operators and TVM kernels.
+
+This pass identifies calls to `tir.tvm_call_packed_lowered` occurring within a
+`compute_scope` and wraps them with a `metal_context` attribute. This attribute
+signals the downstream host C codegen to inject specific runtime logic that:
+1. Retrieves the current command buffer from `torch::mps`.
+2. Passes this stream to the TVM runtime before the kernel executes.
+"""
+
+
 _tvm_call_packed_lowered = Op.get("tirx.tvm_call_packed_lowered")
 
 
