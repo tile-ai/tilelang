@@ -15,6 +15,37 @@ namespace intrin {
 // Add float suffix to the intrinsics, HIP fast math.
 using tirx::FLowerIntrinsic;
 
+// HIP has no vectorized fp32 math builtins: exp2f etc. are scalar
+// (float exp2f(float)), with no exp2(float4)/float2 overload (only half2 has
+// packed intrinsics like h2exp2). So HIPMath/FloatSuffix return no name for a
+// vector dtype and DispatchPureExtern leaves the op unlowered, which the HIP
+// source codegen then can't print. Resolve the extern name from the *element*
+// type instead and emit a vector call_pure_extern; CodeGenTileLangHIP::
+// PrintCallExtern lowers it to one scalar call per lane and stores via
+// PrintVecElemStore, which is correct for HIP's packed carrier types
+// (float32x8 -> ulonglong4, float16x4 -> uint2, etc.). Scalars are unchanged.
+template <typename T, bool dtype_from_arg = false>
+inline PrimExpr DispatchPureExternScalarized(const PrimExpr &e) {
+  const CallNode *call = e.as<CallNode>();
+  ICHECK(call != nullptr);
+  DataType dtype = dtype_from_arg ? call->args[0].dtype() : call->dtype;
+  if (!dtype.is_vector()) {
+    return DispatchPureExtern<T, dtype_from_arg>(e);
+  }
+  const OpNode *op = call->op.as<OpNode>();
+  ICHECK(op != nullptr);
+  std::string name = T()(dtype.element_of(), op->name.substr(5));
+  if (name.empty()) {
+    return e;
+  }
+  ffi::Array<PrimExpr> new_args = {StringImm(name)};
+  for (const auto &arg : call->args) {
+    new_args.push_back(arg);
+  }
+  return Call(call->dtype, builtin::call_pure_extern(), new_args,
+              call->annotations);
+}
+
 struct HIPMath {
   std::string operator()(DataType t, std::string name) const {
     if (t.is_float()) {
@@ -139,91 +170,91 @@ TVM_REGISTER_OP("tirx.clz")
 
 TVM_REGISTER_OP("tirx.floor")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExtern<HIPMath>);
+                               DispatchPureExternScalarized<HIPMath>);
 
 TVM_REGISTER_OP("tirx.ceil")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExtern<HIPMath>);
+                               DispatchPureExternScalarized<HIPMath>);
 
 TVM_REGISTER_OP("tirx.trunc")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExtern<HIPMath>);
+                               DispatchPureExternScalarized<HIPMath>);
 
 TVM_REGISTER_OP("tirx.fabs")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExtern<HIPMath>);
+                               DispatchPureExternScalarized<HIPMath>);
 
 TVM_REGISTER_OP("tirx.round")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExtern<HIPMath>);
+                               DispatchPureExternScalarized<HIPMath>);
 
 TVM_REGISTER_OP("tirx.nearbyint")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExtern<HIPMath>);
+                               DispatchPureExternScalarized<HIPMath>);
 
 TVM_REGISTER_OP("tirx.exp")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExtern<HIPFastMath>);
+                               DispatchPureExternScalarized<HIPFastMath>);
 
 TVM_REGISTER_OP("tirx.exp2")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExtern<HIPMath>);
+                               DispatchPureExternScalarized<HIPMath>);
 
 TVM_REGISTER_OP("tirx.exp10")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExtern<HIPFastMath>);
+                               DispatchPureExternScalarized<HIPFastMath>);
 
 TVM_REGISTER_OP("tirx.erf")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExtern<HIPMath>);
+                               DispatchPureExternScalarized<HIPMath>);
 
 TVM_REGISTER_OP("tirx.log")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExtern<HIPFastMath>);
+                               DispatchPureExternScalarized<HIPFastMath>);
 
 TVM_REGISTER_OP("tirx.log2")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExtern<HIPFastMath>);
+                               DispatchPureExternScalarized<HIPFastMath>);
 
 TVM_REGISTER_OP("tirx.log10")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExtern<HIPFastMath>);
+                               DispatchPureExternScalarized<HIPFastMath>);
 
 TVM_REGISTER_OP("tirx.tan")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExtern<HIPFastMathTan>);
+                               DispatchPureExternScalarized<HIPFastMathTan>);
 
 TVM_REGISTER_OP("tirx.cos")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExtern<HIPFastMath>);
+                               DispatchPureExternScalarized<HIPFastMath>);
 
 TVM_REGISTER_OP("tirx.cosh")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExtern<HIPMath>);
+                               DispatchPureExternScalarized<HIPMath>);
 
 TVM_REGISTER_OP("tirx.sin")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExtern<HIPFastMath>);
+                               DispatchPureExternScalarized<HIPFastMath>);
 
 TVM_REGISTER_OP("tirx.sinh")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExtern<HIPMath>);
+                               DispatchPureExternScalarized<HIPMath>);
 
 TVM_REGISTER_OP("tirx.atan")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExtern<HIPMath>);
+                               DispatchPureExternScalarized<HIPMath>);
 
 TVM_REGISTER_OP("tirx.tanh")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExtern<HIPMath>);
+                               DispatchPureExternScalarized<HIPMath>);
 
 TVM_REGISTER_OP("tirx.sqrt")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExtern<HIPMath>);
+                               DispatchPureExternScalarized<HIPMath>);
 
 TVM_REGISTER_OP("tirx.pow")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExtern<HIPMath>);
+                               DispatchPureExternScalarized<HIPMath>);
 
 TVM_REGISTER_OP("tirx.popcount")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
@@ -247,7 +278,7 @@ TVM_REGISTER_OP("tirx.tvm_warp_activemask")
 
 TVM_REGISTER_OP("tirx.fmod")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExtern<HIPMath>);
+                               DispatchPureExternScalarized<HIPMath>);
 
 // Register low-level builtin ops.
 TVM_REGISTER_OP("tirx.hip.__shfl_sync")
