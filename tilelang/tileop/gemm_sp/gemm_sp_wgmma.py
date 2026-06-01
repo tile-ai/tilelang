@@ -11,6 +11,7 @@ from tilelang.layout import (
 from tilelang.cuda.intrinsics.macro.wgmma_sp_macro_generator import WGSparseTensorCoreIntrinEmitter
 from tilelang.utils.language import is_shared, is_fragment
 from tvm.target import Target
+from tvm.ir import Range
 from tvm import tirx
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
@@ -73,10 +74,12 @@ class GemmSPWGMMA(GemmSPBase):
         self,
         layout_map: dict,
         target: Target,
-        thread_nums: int,
+        thread_bounds: Range,
         thread_var: tirx.Var,
         mbar_phase_expr: tirx.PrimExpr | None = None,
     ):
+        thread_nums = thread_bounds.extent
+        emitter_thread_var = thread_var - thread_bounds.min
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_SP_INST_WGMMA_SP)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
@@ -93,7 +96,7 @@ class GemmSPWGMMA(GemmSPBase):
             warp_row_tiles=warp_row_tiles,
             warp_col_tiles=warp_col_tiles,
             warp_k=self.K,
-            thread_var=thread_var,
+            thread_var=emitter_thread_var,
         )
 
         if self.A in layout_map:

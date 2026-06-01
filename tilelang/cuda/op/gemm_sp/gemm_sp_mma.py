@@ -4,6 +4,7 @@ from tilelang.cuda.intrinsics.macro.mma_sp_macro_generator import SparseTensorCo
 from tilelang.utils.language import is_shared, is_fragment
 from tilelang import tvm as tvm
 from tvm.target import Target
+from tvm.ir import Range
 from tvm import tirx
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
@@ -58,7 +59,9 @@ class GemmSPMMA(GemmSPBase):
         else:
             raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
 
-    def lower(self, layout_map: dict, target: Target, thread_nums: int, thread_var: tirx.Var):
+    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tirx.Var):
+        thread_nums = thread_bounds.extent
+        emitter_thread_var = thread_var - thread_bounds.min
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_SP_INST_MMA_SP)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
@@ -75,7 +78,7 @@ class GemmSPMMA(GemmSPBase):
             warp_row_tiles=warp_row_tiles,
             warp_col_tiles=warp_col_tiles,
             warp_k=self.K,
-            thread_var=thread_var,
+            thread_var=emitter_thread_var,
         )
 
         in_dtype = self.in_dtype

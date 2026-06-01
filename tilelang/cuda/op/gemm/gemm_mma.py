@@ -77,7 +77,8 @@ class GemmMMA(GemmBase):
         mbar_phase_expr: tirx.PrimExpr | None = None,
     ):
         thread_nums = thread_bounds.extent
-        mma_emitter = self._make_mma_emitter(target, thread_nums, thread_var=thread_var)
+        emitter_thread_var = thread_var - thread_bounds.min
+        mma_emitter = self._make_mma_emitter(target, thread_nums, thread_var=emitter_thread_var)
 
         in_dtype = self.in_dtype
         warp_rows = mma_emitter.warp_rows
