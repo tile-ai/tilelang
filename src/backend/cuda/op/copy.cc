@@ -1558,7 +1558,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   desc.smem_box.Set(0, PrimExpr(instruction_dim));
 
   int inner_box_dim_ =
-      TMABytesFromElements(instruction_dim, shared_tensor->dtype);
+      TMABytesFromElements(instruction_dim, shared_tensor_unmapped->dtype);
 
   struct SwizzleCheck {
     int swizzle;

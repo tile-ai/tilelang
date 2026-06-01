@@ -81,8 +81,8 @@ private:
   void HandleVolatileLoads(const std::string &value, const BufferLoadNode *op,
                            std::ostream &os) final;
   bool HandleLateIntrinsicCall(const CallNode *op, std::ostream &os);
-  // FP4 address helpers keep packed storage scoped to the pre-SM120 buffers
-  // that still use it. SM120 FP4 uses hidden unpacked byte buffers.
+  // FP4 address helpers preserve public packed storage while allowing hidden
+  // unpacked carrier buffers for shared-memory lowering.
   std::string GetBufferStorageScope(const VarNode *buffer_var) const;
   bool IsFp4PackedStorage(const VarNode *buffer_var,
                           DataType element_dtype) const;

@@ -269,7 +269,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   // seq_check gives sequence of later checks after init
   std::vector<Stmt> seq_init, seq_check, arg_buffer_declarations;
   std::unordered_map<const VarNode *, PrimExpr> vmap;
-  TVMFFIABIBuilder binder(&vmap, TargetIsSM120(target));
+  TVMFFIABIBuilder binder(&vmap);
 
   // ---------------------------
   // local function definitions

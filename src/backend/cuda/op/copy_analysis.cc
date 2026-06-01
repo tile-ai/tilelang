@@ -131,10 +131,7 @@ bool IsFp4E2M1CarrierDType(DataType dtype) {
   return dtype.is_float4_e2m1fn() || dtype.is_float4_e2m1_unpacked();
 }
 
-bool IsSM120Fp4HiddenCarrierCopy(const CopyNode &op, Target target) {
-  if (!TargetIsSM120(target)) {
-    return false;
-  }
+bool IsGlobalSharedFp4CarrierCopy(const CopyNode &op) {
   bool global_shared = (IsGlobalBuffer(op.src) && IsSharedBuffer(op.dst)) ||
                        (IsSharedBuffer(op.src) && IsGlobalBuffer(op.dst));
   return global_shared && IsFp4E2M1CarrierDType(op.src->dtype) &&
@@ -201,11 +198,11 @@ bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
       (op.dst.scope() != "shared.dyn" && op.dst.scope() != "shared")) {
     return false;
   }
-  if (IsSM120Fp4HiddenCarrierCopy(op, target)) {
+  if (!GetIsTmaCopy(op) && IsGlobalSharedFp4CarrierCopy(op)) {
     if (emit_diagnostics) {
       DLOG(WARNING)
-          << "TMA bulk load is disabled for SM120 FP4 hidden unpacked "
-             "carrier copies, fallback to normal copy.";
+          << "TMA bulk load is disabled for implicit FP4 carrier copies, "
+             "fallback to normal copy.";
     }
     return false;
   }
@@ -248,11 +245,11 @@ bool CheckBulkStore(const CopyNode &op, Target target,
       op.dst.scope() != "global") {
     return false;
   }
-  if (IsSM120Fp4HiddenCarrierCopy(op, target)) {
+  if (!GetIsTmaCopy(op) && IsGlobalSharedFp4CarrierCopy(op)) {
     if (emit_diagnostics) {
       DLOG(WARNING)
-          << "TMA bulk store is disabled for SM120 FP4 hidden unpacked "
-             "carrier copies, fallback to normal copy.";
+          << "TMA bulk store is disabled for implicit FP4 carrier copies, "
+             "fallback to normal copy.";
     }
     return false;
   }

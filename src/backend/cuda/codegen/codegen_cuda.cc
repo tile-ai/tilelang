@@ -1363,6 +1363,25 @@ void CodeGenTileLangCUDA::PrintVecElemStore(const std::string &vec, DataType t,
       stream << "." << access[(i % 8) / 4];
     // fp8_e5_4_t or fp8_e5_2_t
     stream << "." << access[i % 4] << " = " << value << ";\n";
+  } else if (t.is_float4()) {
+    stream << vec;
+    // fp4_e2_64_t
+    if (t.lanes() >= 64)
+      stream << "." << access[i / 32];
+    // fp4_e2_32_t
+    if (t.lanes() >= 32)
+      stream << "." << access[(i % 32) / 16];
+    // fp4_e2_16_t
+    if (t.lanes() >= 16)
+      stream << "." << access[(i % 16) / 8];
+    // fp4_e2_8_t
+    if (t.lanes() >= 8)
+      stream << "." << access[(i % 8) / 4];
+    // fp4_e2_4_t -> fp4_e2_2_t member
+    if (t.lanes() >= 4)
+      stream << "." << access[(i % 4) / 2];
+    // fp4_e2_2_t -> set_x() or set_y()
+    stream << ".set_" << access[i % 2] << "(" << value << ");\n";
   } else if (t.lanes() > 4 && t.lanes() <= 8) {
     std::string type_name;
     if (t.bits() == 16) {
@@ -1383,25 +1402,6 @@ void CodeGenTileLangCUDA::PrintVecElemStore(const std::string &vec, DataType t,
     ICHECK(!type_name.empty());
     stream << "((" << type_name << "2*)(&(" << vec << "." << access[i / 2]
            << ")))->" << access[i % 2] << " = " << value << ";\n";
-  } else if (t.is_float4()) {
-    stream << vec;
-    // fp4_e2_64_t
-    if (t.lanes() >= 64)
-      stream << "." << access[i / 32];
-    // fp4_e2_32_t
-    if (t.lanes() >= 32)
-      stream << "." << access[(i % 32) / 16];
-    // fp4_e2_16_t
-    if (t.lanes() >= 16)
-      stream << "." << access[(i % 16) / 8];
-    // fp4_e2_8_t
-    if (t.lanes() >= 8)
-      stream << "." << access[(i % 8) / 4];
-    // fp4_e2_4_t -> fp4_e2_2_t member
-    if (t.lanes() >= 4)
-      stream << "." << access[(i % 4) / 2];
-    // fp4_e2_2_t -> set_x() or set_y()
-    stream << ".set_" << access[i % 2] << "(" << value << ");\n";
   } else {
     stream << vec << "." << access[i] << " = " << value << ";\n";
   }
@@ -1729,7 +1729,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   }
 
   // Handle conversion from float16 to float4 (E2M1)
-  if (from_ty.is_float16() && target_ty.is_float4_e2m1fn()) {
+  if (from_ty.is_float16() && target_ty.is_float4()) {
     // Use __tl_cvt_half2_to_fp4x2 for vectorized conversion (half2 -> fp4x2)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
       PrintVectorizedCast("__tl_cvt_half2_to_fp4x2", "half2", "uint8_t", "",
@@ -1739,8 +1739,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   }
 
   // Handle conversion from float32 to float4 (E2M1)
-  if (from_ty.is_float() && from_ty.bits() == 32 &&
-      target_ty.is_float4_e2m1fn()) {
+  if (from_ty.is_float() && from_ty.bits() == 32 && target_ty.is_float4()) {
     bool has_rbits = cast_rbits.defined();
 
     if (cast_round == "rs" && has_rbits) {
@@ -1800,7 +1799,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   }
 
   // Handle conversion from float4 (E2M1) to float16
-  if (from_ty.is_float4_e2m1fn() && target_ty.is_float16()) {
+  if (from_ty.is_float4() && target_ty.is_float16()) {
     // Use __tl_cvt_fp4x2_to_half2 for vectorized conversion (fp4x2 -> half2)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
       PrintVectorizedCast("__tl_cvt_fp4x2_to_half2", "uint8_t", "half2", "",
@@ -1810,8 +1809,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   }
 
   // Handle conversion from float4 (E2M1) to float32
-  if (from_ty.is_float4_e2m1fn() && target_ty.is_float() &&
-      target_ty.bits() == 32) {
+  if (from_ty.is_float4() && target_ty.is_float() && target_ty.bits() == 32) {
     // Use __tl_cvt_fp4x2_to_float2 for vectorized conversion (fp4x2 -> float2)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
       PrintVectorizedCast("__tl_cvt_fp4x2_to_float2", "uint8_t", "float2", "",
@@ -1821,8 +1819,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   }
 
   // Handle conversion from double to float4 (E2M1)
-  if (from_ty.is_float() && from_ty.bits() == 64 &&
-      target_ty.is_float4_e2m1fn()) {
+  if (from_ty.is_float() && from_ty.bits() == 64 && target_ty.is_float4()) {
     // Use __tl_cvt_double2_to_fp4x2 for vectorized conversion (double2 ->
     // fp4x2)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
@@ -1833,8 +1830,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   }
 
   // Handle conversion from float4 (E2M1) to double
-  if (from_ty.is_float4_e2m1fn() && target_ty.is_float() &&
-      target_ty.bits() == 64) {
+  if (from_ty.is_float4() && target_ty.is_float() && target_ty.bits() == 64) {
     // Use __tl_cvt_fp4x2_to_double2 for vectorized conversion (fp4x2 ->
     // double2)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
@@ -1845,7 +1841,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   }
 
   // Handle conversion from bfloat16 to float4 (E2M1)
-  if (from_ty.is_bfloat16() && target_ty.is_float4_e2m1fn()) {
+  if (from_ty.is_bfloat16() && target_ty.is_float4()) {
     // Use __tl_cvt_bfloat162_to_fp4x2 for vectorized conversion (bfloat162 ->
     // fp4x2)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
@@ -1856,7 +1852,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   }
 
   // Handle conversion from float4 (E2M1) to bfloat16
-  if (from_ty.is_float4_e2m1fn() && target_ty.is_bfloat16()) {
+  if (from_ty.is_float4() && target_ty.is_bfloat16()) {
     // Use __tl_cvt_fp4x2_to_bfloat162 for vectorized conversion (fp4x2 ->
     // bfloat162)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
@@ -2214,8 +2210,8 @@ void CodeGenTileLangCUDA::PrintVecStore(const BufferNode *buffer, DataType t,
 }
 
 // FP4 storage follows the buffer role:
-// - Pre-SM120 global/shared paths use packed bytes.
-// - SM120 semantic FP4 buffers are lowered through hidden unpacked carriers.
+// - Global FP4 storage keeps the public packed ABI.
+// - Shared FP4 storage may be lowered through hidden unpacked carriers.
 // - Local/local.fragment buffers use semantic FP4 elements for MMA operands.
 std::string
 CodeGenTileLangCUDA::GetBufferStorageScope(const VarNode *buffer_var) const {
@@ -2236,19 +2232,14 @@ bool CodeGenTileLangCUDA::IsFp4PackedStorage(const VarNode *buffer_var,
   Target cur_target = Target::Current(/*allow_not_defined=*/true);
   std::string scope = GetBufferStorageScope(buffer_var);
   if (scope.empty()) {
-    if (cur_target.defined() && tl::TargetHasSMVersionGE(cur_target, 120)) {
-      return false;
-    }
     return true;
   }
   if (scope == "global") {
-    if (cur_target.defined() && tl::TargetHasSMVersionGE(cur_target, 120)) {
-      return false;
-    }
     return true;
   }
   if (scope == "shared" || scope == "shared.dyn") {
-    // Pre-SM120 shared FP4 keeps the packed-byte convention.
+    // Shared FP4 keeps the packed-byte convention when it is not lowered
+    // through an unpacked carrier buffer.
     return cur_target.defined() && tl::TargetHasSMVersionGE(cur_target, 100) &&
            !tl::TargetHasSMVersionGE(cur_target, 120);
   }

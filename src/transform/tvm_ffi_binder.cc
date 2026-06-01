@@ -97,8 +97,7 @@ TVMFFIABIBuilder::getUndefVars(const std::vector<PrimExpr> &args) {
 }
 
 bool TVMFFIABIBuilder::UseFp4UnpackedABI(const Buffer &buffer) const {
-  return sm120_fp4_unpacked_abi_ && buffer->dtype.is_float4_e2m1fn() &&
-         buffer->dtype.is_scalar();
+  return buffer->dtype.is_float4_e2m1_unpacked() && buffer->dtype.is_scalar();
 }
 
 bool TVMFFIABIBuilder::BindNullable(const PrimExpr &arg, const PrimExpr &value,

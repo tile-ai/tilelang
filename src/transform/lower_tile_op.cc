@@ -19,6 +19,7 @@
 #include "../layout/layout.h"
 #include "../layout/utils.h"
 #include "../op/builtin.h"
+#include "../op/copy.h"
 #include "../op/gemm.h"
 #include "../op/gemm_sp.h"
 #include "../op/operator.h"
@@ -38,19 +39,19 @@ namespace tl {
 using namespace tirx;
 using namespace ffi;
 
-static DataType GetLayoutStorageDType(const Buffer &buffer,
-                                      const Target &target) {
-  if (TargetIsSM120(target) && IsSharedBuffer(buffer) &&
-      buffer->dtype.is_float4_e2m1fn() && buffer->dtype.is_scalar()) {
+static bool IsScalarFp4E2M1(const Buffer &buffer) {
+  return buffer->dtype.is_float4_e2m1fn() && buffer->dtype.is_scalar();
+}
+
+static bool IsScalarUnpackedFp4E2M1(const Buffer &buffer) {
+  return buffer->dtype.is_float4_e2m1_unpacked() && buffer->dtype.is_scalar();
+}
+
+static DataType GetLayoutStorageDType(const Buffer &buffer) {
+  if (IsSharedBuffer(buffer) && IsScalarFp4E2M1(buffer)) {
     return DataType::Float4E2M1Unpacked(buffer->dtype.lanes());
   }
   return buffer->dtype;
-}
-
-static bool UseSM120Fp4UnpackedCarrier(const Buffer &buffer,
-                                       const Target &target) {
-  return TargetIsSM120(target) && IsGlobalBuffer(buffer) &&
-         buffer->dtype.is_float4_e2m1fn() && buffer->dtype.is_scalar();
 }
 
 static Buffer makeBufferWithDType(const Buffer &buffer, DataType dtype) {
@@ -60,11 +61,10 @@ static Buffer makeBufferWithDType(const Buffer &buffer, DataType dtype) {
 }
 
 static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
-                                   Map<Var, Var> &var_remap,
-                                   const Target &target) {
+                                   Map<Var, Var> &var_remap) {
   const auto *ptr_type =
       TVM_TYPE_AS(buffer->data->type_annotation, PointerTypeNode);
-  DataType storage_dtype = GetLayoutStorageDType(buffer, target);
+  DataType storage_dtype = GetLayoutStorageDType(buffer);
   Type new_type;
   // convert fragments to normal local buffer
   if (IsFragmentBuffer(buffer)) {
@@ -262,13 +262,6 @@ public:
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);
     ICHECK(target.defined()) << "LowerTileOpPass: Require the target attribute";
     substituter.target_ = target.value();
-    for (const auto &[_, buffer] : f->buffer_map) {
-      if (UseSM120Fp4UnpackedCarrier(buffer, substituter.target_)) {
-        substituter.buffer_remap_.Set(
-            buffer,
-            makeBufferWithDType(buffer, DataType::Float4E2M1Unpacked()));
-      }
-    }
     PrimFuncNode *fptr = f.CopyOnWrite();
     fptr->body = substituter.VisitStmt(f->body);
     fptr->body =
@@ -356,6 +349,22 @@ public:
 private:
   using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
 
+  void MaybeRemapFp4CopySource(const CopyNode *copy) {
+    if (!IsGlobalBuffer(copy->src) || !IsScalarFp4E2M1(copy->src) ||
+        !IsSharedBuffer(copy->dst) || !buffer_remap_.count(copy->dst)) {
+      return;
+    }
+    Buffer remapped_dst = buffer_remap_[copy->dst];
+    if (!IsScalarUnpackedFp4E2M1(remapped_dst)) {
+      return;
+    }
+    if (!buffer_remap_.count(copy->src)) {
+      buffer_remap_.Set(
+          copy->src,
+          makeBufferWithDType(copy->src, DataType::Float4E2M1Unpacked()));
+    }
+  }
+
   Stmt VisitStmt_(const SBlockNode *op) final {
     // Record the mapping from buffer data var to buffer for later lookup
     for (auto buffer : op->alloc_buffers) {
@@ -373,8 +382,8 @@ private:
                             .as<Map<Buffer, Layout>>()
                             .value();
       for (auto [buffer, layout] : layout_map) {
-        buffer_remap_.Set(
-            buffer, makeBufferWithLayout(buffer, layout, var_remap_, target_));
+        buffer_remap_.Set(buffer,
+                          makeBufferWithLayout(buffer, layout, var_remap_));
         layout_map_.Set(buffer, layout);
       }
     }
@@ -1183,6 +1192,9 @@ private:
     auto tile_op = ParseOperator(GetRef<Stmt>(op));
     if (!tile_op.defined())
       return IRMutatorWithAnalyzer::VisitStmt_(op);
+    if (auto *copy = tile_op.as<CopyNode>()) {
+      MaybeRemapFp4CopySource(copy);
+    }
     AddWorkspaceCallback callback = [this](int num_elem, DataType dtype) {
       auto workspace =
           decl_buffer({PrimExpr(num_elem)}, dtype, "workspace", "shared.dyn");
