@@ -1325,8 +1325,9 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
         scope = GetPtrStorageScope(load->buffer->data);
       }
       if (scope == "local.var") {
-        std::string expr_str =
-            GetBufferRef_(src_dtype, load->buffer.get(), load->indices[0]);
+        std::string expr_str = GetBufferRef_(
+            src_dtype, load->buffer.get(),
+            LinearizeBufferIndices_(load->buffer.get(), load->indices));
         os << "tl.bitcast(" << expr_str << ", ";
         PrintType(tgt_dtype.element_of(), os);
         os << ")";
@@ -1334,15 +1335,18 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
       }
 
       // Path 1: BufferLoad - use recast_ptr for memory access
-      ICHECK_EQ(load->indices.size(), 1)
-          << "CodeGenTileLangCuTeDSL only supports flat memory";
-
-      PrimExpr index = load->indices[0];
+      PrimExpr index =
+          LinearizeBufferIndices_(load->buffer.get(), load->indices);
       if (const RampNode *node = index.as<RampNode>(); node) {
         auto *p_stride = as_const_int(node->stride);
         ICHECK(p_stride);
         ICHECK_EQ(*p_stride, 1) << "reinterpret expects contiguous elements";
         index = node->base;
+      } else {
+        arith::PVar<PrimExpr> ramp_base;
+        if (arith::ramp(ramp_base, 1, tgt_dtype.lanes()).Match(index)) {
+          index = ramp_base.Eval();
+        }
       }
 
       auto ptr_str = GetBufferPtr_(load->buffer.get(), index);
@@ -1397,6 +1401,11 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     os << "tl.__shfl_up_sync(" << PrintExpr_(op->args[0]) << ", "
        << PrintExpr_(op->args[1]) << ", " << PrintExpr_(op->args[2]) << ", "
        << PrintExpr_(op->args[3]) << ")";
+  } else if (op->op.same_as(tl::match_any_sync())) {
+    ICHECK_EQ(op->args.size(), 2U)
+        << "tl.match_any_sync expects <mask, value>.";
+    os << "tl.__match_any_sync(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ")";
   } else if (op->op.same_as(tl::get_lane_idx())) {
     // get_lane_idx(warp_size?) -> threadIdx.x % warp_size
     ICHECK_LE(op->args.size(), 1U)
@@ -1548,9 +1557,9 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(builtin::address_of())) {
     const BufferLoadNode *load = op->args[0].as<BufferLoadNode>();
     ICHECK(op->args.size() == 1 && load);
-    ICHECK_EQ(load->indices.size(), 1)
-        << "CodeGenTileLangCuTeDSL only supports flat memory";
-    os << GetBufferPtr_(load->buffer.get(), load->indices[0]);
+    os << GetBufferPtr_(
+        load->buffer.get(),
+        LinearizeBufferIndices_(load->buffer.get(), load->indices));
   } else if (op->op.same_as(builtin::handle_add_byte_offset())) {
     ICHECK_EQ(op->args.size(), 2U);
     os << "tl.handle_add_byte_offset(" << PrintExpr_(op->args[0]) << ", "
@@ -1739,13 +1748,13 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const ShuffleNode *op,
 
 void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
                                         std::ostream &os) { // NOLINT(*)
-  ICHECK_EQ(op->indices.size(), 1)
-      << "Load from non-flat memory not supported.";
+  ICHECK_GE(op->indices.size(), 1U)
+      << "Buffer load must have at least one index.";
   ICHECK(!op->predicate.defined())
       << "Predicated buffer load is not supported.";
 
   DataType value_dtype = op->dtype;
-  PrimExpr index = op->indices[0];
+  PrimExpr index = LinearizeBufferIndices_(op->buffer.get(), op->indices);
   Var buffer_var = op->buffer->data;
   DataType element_dtype = op->buffer->dtype;
 
@@ -1946,13 +1955,14 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
 }
 
 void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
-  ICHECK_EQ(op->indices.size(), 1) << "Store to non-flat memory not supported.";
+  ICHECK_GE(op->indices.size(), 1U)
+      << "Buffer store must have at least one index.";
   ICHECK(!op->predicate.defined())
       << "Predicated buffer store is not supported.";
 
   DataType value_dtype = op->value.dtype();
   DataType element_dtype = op->buffer->dtype;
-  PrimExpr index_expr = op->indices[0];
+  PrimExpr index_expr = LinearizeBufferIndices_(op->buffer.get(), op->indices);
   Var buffer_var = op->buffer->data;
 
   // Pre-compute Select/if_then_else as tl.where() at statement level.
@@ -2579,7 +2589,9 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocBufferNode *op) {
 void CodeGenTileLangCuTeDSL::VisitStmt_(const AttrStmtNode *op) {
   if (op->attr_key == tirx::attr::thread_extent) {
     IterVar iv = Downcast<IterVar>(op->node);
-    if (!iv->thread_tag.empty()) {
+    const std::string thread_tag =
+        !iv->thread_tag.empty() ? iv->thread_tag : iv->var->name_hint;
+    if (!thread_tag.empty()) {
       if (!var_idmap_.count(iv->var.get())) {
         BindThreadIndex_(iv);
       }
@@ -2977,9 +2989,9 @@ void CodeGenTileLangCuTeDSL::PrintCallExtern_(Type ret_type,
     global_symbol_str = "tl." + global_symbol_str;
     // Convert first argument (Buffer) to pointer for atomic operations
     if (const BufferLoadNode *load = args[arg_begin].as<BufferLoadNode>()) {
-      ICHECK_EQ(load->indices.size(), 1)
-          << "CodeGenTileLangCuTeDSL only supports flat memory";
-      sargs[0] = GetBufferPtr_(load->buffer.get(), load->indices[0]);
+      sargs[0] = GetBufferPtr_(
+          load->buffer.get(),
+          LinearizeBufferIndices_(load->buffer.get(), load->indices));
     }
   }
   // Quantization Functions (decode_i4u_to_f16, decode_i4s_to_f16, etc.)
@@ -3054,6 +3066,43 @@ void CodeGenTileLangCuTeDSL::PrintCallExtern_(Type ret_type,
     }
     os << ")";
   }
+}
+
+PrimExpr CodeGenTileLangCuTeDSL::LinearizeBufferIndices_(
+    const BufferNode *buffer, const ffi::Array<PrimExpr> &indices) {
+  ICHECK_GE(indices.size(), 1U)
+      << "Buffer access must have at least one index.";
+  if (indices.size() == 1) {
+    return indices[0];
+  }
+
+  ICHECK_EQ(indices.size(), buffer->shape.size())
+      << "Buffer access rank " << indices.size()
+      << " does not match buffer rank " << buffer->shape.size() << " for "
+      << buffer->name;
+
+  DataType index_dtype = buffer->DefaultIndexType();
+  auto cast_index = [index_dtype](const PrimExpr &expr) -> PrimExpr {
+    return expr.dtype() == index_dtype ? expr : tirx::Cast(index_dtype, expr);
+  };
+
+  PrimExpr offset = tirx::make_const(index_dtype, 0);
+  if (!buffer->strides.empty()) {
+    ICHECK_EQ(buffer->strides.size(), indices.size())
+        << "Buffer stride rank " << buffer->strides.size()
+        << " does not match index rank " << indices.size() << " for "
+        << buffer->name;
+    for (size_t i = 0; i < indices.size(); ++i) {
+      offset = offset + cast_index(indices[i]) * cast_index(buffer->strides[i]);
+    }
+  } else {
+    PrimExpr stride = tirx::make_const(index_dtype, 1);
+    for (int i = static_cast<int>(indices.size()) - 1; i >= 0; --i) {
+      offset = offset + cast_index(indices[i]) * stride;
+      stride = stride * cast_index(buffer->shape[i]);
+    }
+  }
+  return arith::Analyzer().Simplify(offset);
 }
 
 std::string CodeGenTileLangCuTeDSL::GetBufferPtr_(const BufferNode *buffer,
@@ -3264,7 +3313,8 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
 void CodeGenTileLangCuTeDSL::BindThreadIndex_(const IterVar &iv) {
   ICHECK(!var_idmap_.count(iv->var.get()));
 
-  auto &thread_tag = iv->thread_tag;
+  const std::string thread_tag =
+      !iv->thread_tag.empty() ? iv->thread_tag : iv->var->name_hint;
   ICHECK(thread_tag == "threadIdx.x" || thread_tag == "threadIdx.y" ||
          thread_tag == "threadIdx.z" || thread_tag == "blockIdx.x" ||
          thread_tag == "blockIdx.y" || thread_tag == "blockIdx.z");
