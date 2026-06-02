@@ -82,6 +82,8 @@ protected:
   std::string GetBufferPtr_(const BufferNode *buffer, PrimExpr index);
   std::string GetBufferRef_(DataType t, const BufferNode *buffer,
                             PrimExpr index) override;
+  PrimExpr LinearizeBufferIndices_(const BufferNode *buffer,
+                                   const ffi::Array<PrimExpr> &indices);
 
   // Get pointer string from a Var expression (local buffer -> vid.iterator)
   std::string GetVarPtr_(const PrimExpr &expr);
