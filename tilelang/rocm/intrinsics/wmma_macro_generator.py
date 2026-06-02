@@ -204,7 +204,9 @@ class WMMAIntrinEmitter:
                             rk * chunk + ki * (k_pack * micro_size_k) + k_tile * micro_size_k,
                             warp_m * warp_row_tiles + i * micro_size_x,
                         )
-                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[tuple(A_other) + (A_base0 + row_off + row, A_base1 + col_off + col)]
+                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[
+                            tuple(A_other) + (A_base0 + row_off + row, A_base1 + col_off + col)
+                        ]
             else:
                 for i in T.serial(warp_rows):
                     for local_id in T.vectorized(k_pack * local_size_a):
@@ -214,7 +216,9 @@ class WMMAIntrinEmitter:
                             warp_m * warp_row_tiles + i * micro_size_x,
                             rk * chunk + ki * (k_pack * micro_size_k) + k_tile * micro_size_k,
                         )
-                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[tuple(A_other) + (A_base0 + row_off + row, A_base1 + col_off + col)]
+                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[
+                            tuple(A_other) + (A_base0 + row_off + row, A_base1 + col_off + col)
+                        ]
 
         return _warp_ldmatrix_a(A_local_buf, A_shared_buf, ki, thread_binding, rk)
 
@@ -254,7 +258,9 @@ class WMMAIntrinEmitter:
                             warp_n * warp_col_tiles + j * micro_size_y,
                             rk * chunk + ki * (k_pack * micro_size_k) + k_tile * micro_size_k,
                         )
-                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[tuple(B_other) + (B_base0 + row_off + row, B_base1 + col_off + col)]
+                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[
+                            tuple(B_other) + (B_base0 + row_off + row, B_base1 + col_off + col)
+                        ]
             else:
                 for j in T.serial(warp_cols):
                     for local_id in T.vectorized(k_pack * local_size_b):
@@ -264,7 +270,9 @@ class WMMAIntrinEmitter:
                             rk * chunk + ki * (k_pack * micro_size_k) + k_tile * micro_size_k,
                             warp_n * warp_col_tiles + j * micro_size_y,
                         )
-                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[tuple(B_other) + (B_base0 + row_off + row, B_base1 + col_off + col)]
+                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[
+                            tuple(B_other) + (B_base0 + row_off + row, B_base1 + col_off + col)
+                        ]
 
         return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
 
