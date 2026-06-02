@@ -249,7 +249,13 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             return self._dynamic_symbolic_name_candidates_map[v.name]
         raise KeyError(f"Dynamic symbolic variable '{v.name}' not found in symbolic map")
 
-    def _resolve_dynamic_symbolic_value(self, v: tirx.Var, param_values: list[Any]) -> int:
+    def _resolve_dynamic_symbolic_value(
+        self,
+        v: tirx.Var,
+        param_values: list[Any],
+        *,
+        require_live_shape: bool = True,
+    ) -> int:
         """Resolve a dynamic shape/stride variable from the first live tensor source."""
         candidates = self._lookup_dynamic_symbolic_candidates(v)
         non_tensor_values: list[tuple[int, Any]] = []
@@ -272,11 +278,14 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             if ref_id == 1:
                 return ref_val.stride()[dim_idx]
 
-        # Optional strided tensors can be absent from a lowered kernel variant
-        # while their dynamic stride remains in the host wrapper ABI. Shape
-        # symbols still require a live tensor source because they determine
-        # output allocation and launch dimensions.
+        # Optional tensors can be absent from a lowered kernel variant while
+        # their dynamic shape/stride remains in the host wrapper ABI. Output
+        # allocation still calls this helper in the default strict mode, so a
+        # live tensor remains required for any shape symbol that materializes a
+        # result tensor.
         if has_stride_candidate and not has_shape_candidate:
+            return 0
+        if has_shape_candidate and not require_live_shape:
             return 0
 
         details = ", ".join(f"param {buffer_idx}: {type(ref_val).__name__}" for buffer_idx, ref_val in non_tensor_values)
@@ -423,7 +432,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
 
         # dynamic symbolics
         for sym in self.dynamic_symbolic_order:
-            args.append(self._resolve_dynamic_symbolic_value(sym, param_values))
+            args.append(self._resolve_dynamic_symbolic_value(sym, param_values, require_live_shape=False))
 
         # if stream is not None, we need to pass the stream to the library
         if stream is None:
