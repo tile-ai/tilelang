@@ -63,18 +63,33 @@ static bool IsThreadReturnEvaluate(const Stmt &stmt) {
   return call != nullptr && call->op.same_as(builtin::thread_return());
 }
 
-std::optional<PrimExpr> GetConditionalThreadReturnCondition(const Stmt &stmt) {
+struct ConditionalThreadReturn {
+  PrimExpr condition;
+  std::optional<Stmt> pre_return;
+};
+
+std::optional<ConditionalThreadReturn>
+GetConditionalThreadReturn(const Stmt &stmt) {
   const auto *if_node = stmt.as<IfThenElseNode>();
   if (if_node == nullptr || if_node->else_case) {
     return std::nullopt;
   }
   if (IsThreadReturnEvaluate(if_node->then_case)) {
-    return if_node->condition;
+    return ConditionalThreadReturn{if_node->condition, std::nullopt};
   }
   if (const auto *seq = if_node->then_case.as<SeqStmtNode>();
-      seq != nullptr && seq->seq.size() == 1 &&
-      IsThreadReturnEvaluate(seq->seq[0])) {
-    return if_node->condition;
+      seq != nullptr && !seq->seq.empty() &&
+      IsThreadReturnEvaluate(seq->seq[seq->seq.size() - 1])) {
+    if (seq->seq.size() == 1) {
+      return ConditionalThreadReturn{if_node->condition, std::nullopt};
+    }
+    Array<Stmt> pre_return;
+    for (size_t i = 0; i + 1 < seq->seq.size(); ++i) {
+      pre_return.push_back(seq->seq[i]);
+    }
+    Stmt pre_return_stmt =
+        pre_return.size() == 1 ? pre_return[0] : SeqStmt(pre_return);
+    return ConditionalThreadReturn{if_node->condition, pre_return_stmt};
   }
   return std::nullopt;
 }
@@ -2723,11 +2738,22 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const SeqStmtNode *op) {
   // don't execute in the same iteration after the break.
   int guard_scope = -1;
   for (size_t i = 0; i < op->seq.size(); ++i) {
-    if (auto condition = GetConditionalThreadReturnCondition(op->seq[i])) {
+    if (auto guarded_return = GetConditionalThreadReturn(op->seq[i])) {
+      if (guarded_return->pre_return) {
+        PrintIndent();
+        stream << "if "
+               << RemoveOutermostParentheses(
+                      PrintExpr_(guarded_return->condition))
+               << ":\n";
+        int pre_return_scope = BeginScope();
+        PrintStmt_(guarded_return->pre_return.value());
+        EndScope(pre_return_scope);
+      }
       if (i + 1 < op->seq.size()) {
         PrintIndent();
         stream << "if not ("
-               << RemoveOutermostParentheses(PrintExpr_(condition.value()))
+               << RemoveOutermostParentheses(
+                      PrintExpr_(guarded_return->condition))
                << "):\n";
         thread_return_guard_scopes.push_back(BeginScope());
       }
@@ -2873,8 +2899,12 @@ void CodeGenTileLangCuTeDSL::PrintVecBinaryOp_(const std::string &opstr,
   PrintType(dtype.element_of(), stream);
   stream << ")\n";
 
-  std::string vlhs = SSAGetID(PrintExpr_(lhs), lhs.dtype());
-  std::string vrhs = SSAGetID(PrintExpr_(rhs), rhs.dtype());
+  auto print_operand = [this](const PrimExpr &expr) {
+    std::string value = PrintExpr_(expr);
+    return ContainsBufferLoad(expr) ? value : SSAGetID(value, expr.dtype());
+  };
+  std::string vlhs = print_operand(lhs);
+  std::string vrhs = print_operand(rhs);
 
   const std::string one_char_op{"+-*%<>^|&"};
   const std::string two_char_op{"// == != <= >="};

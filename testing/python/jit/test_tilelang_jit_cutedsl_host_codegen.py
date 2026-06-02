@@ -73,11 +73,7 @@ def repeated_dynamic_shape_program():
         source: T.Tensor((N,), T.float32),
         out: T.Tensor((N,), T.float32),
     ):
-        with T.Kernel(T.ceildiv(N, 64), threads=64) as (bx,):
-            for i in T.Parallel(64):
-                idx = bx * 64 + i
-                if idx < N:
-                    out[idx] = source[idx]
+        T.evaluate(0)
 
     return main
 
@@ -94,11 +90,25 @@ def optional_stride_symbol_program():
         optional: T.StridedTensor[(N,), (stride,), T.float32],
         out: T.Tensor((N,), T.float32),
     ):
-        with T.Kernel(T.ceildiv(N, 64), threads=64) as (bx,):
-            for i in T.Parallel(64):
-                idx = bx * 64 + i
-                if idx < N:
-                    out[idx] = source[idx]
+        T.evaluate(0)
+
+    return main
+
+
+def optional_shape_symbol_program():
+    """Create a program with shape symbols that only belong to optional inputs."""
+
+    N = T.dynamic("N")
+    M = T.dynamic("M")
+
+    @T.prim_func
+    def main(
+        source: T.Tensor((N,), T.float32),
+        optional_a: T.Tensor((M,), T.float32),
+        optional_b: T.Tensor((M,), T.float32),
+        out: T.Tensor((N,), T.float32),
+    ):
+        T.evaluate(0)
 
     return main
 
@@ -255,6 +265,8 @@ def test_cutedsl_adapter_exposes_device_and_host_sources():
 def test_cutedsl_adapter_resolves_dynamic_symbol_from_live_tensor_candidate():
     """Dynamic shape resolution should skip optional None tensor params."""
 
+    _require_cutedsl()
+
     from tilelang.jit.adapter.cutedsl.adapter import CuTeDSLKernelAdapter
 
     program = repeated_dynamic_shape_program()
@@ -272,6 +284,8 @@ def test_cutedsl_adapter_resolves_dynamic_symbol_from_live_tensor_candidate():
 def test_cutedsl_adapter_allows_optional_stride_symbol_without_live_tensor():
     """Dynamic stride-only symbols may be absent for optional tensor params."""
 
+    _require_cutedsl()
+
     from tilelang.jit.adapter.cutedsl.adapter import CuTeDSLKernelAdapter
 
     program = optional_stride_symbol_program()
@@ -284,6 +298,27 @@ def test_cutedsl_adapter_allows_optional_stride_symbol_without_live_tensor():
 
     assert adapter._resolve_dynamic_symbolic_value(dynamic_symbols["N"], param_values) == 7
     assert adapter._resolve_dynamic_symbolic_value(dynamic_symbols["stride"], param_values) == 0
+
+
+def test_cutedsl_adapter_allows_optional_abi_shape_symbol_without_live_tensor():
+    """Dynamic shape symbols may be absent when only needed as dead ABI args."""
+
+    _require_cutedsl()
+
+    from tilelang.jit.adapter.cutedsl.adapter import CuTeDSLKernelAdapter
+
+    program = optional_shape_symbol_program()
+    adapter = CuTeDSLKernelAdapter.__new__(CuTeDSLKernelAdapter)
+    adapter.ir_module = tilelang.tvm.IRModule({program.attrs["global_symbol"]: program})
+    adapter.dynamic_symbolic_map, adapter.dynamic_symbolic_order = adapter._process_dynamic_symbolic()
+
+    dynamic_symbols = {sym.name: sym for sym in adapter.dynamic_symbolic_order}
+    param_values = [torch.empty(7), None, None, torch.empty(7)]
+
+    assert adapter._resolve_dynamic_symbolic_value(dynamic_symbols["N"], param_values) == 7
+    with pytest.raises(TypeError, match="no live tensor source"):
+        adapter._resolve_dynamic_symbolic_value(dynamic_symbols["M"], param_values)
+    assert adapter._resolve_dynamic_symbolic_value(dynamic_symbols["M"], param_values, require_live_shape=False) == 0
 
 
 def test_cutedsl_cache_restore_does_not_fallback_to_host_source(monkeypatch, tmp_path):
