@@ -13,7 +13,7 @@ from tilelang.engine.lower import (
     canon_target_host,
     is_cpu_device_backend,
 )
-from tilelang.backend.pass_pipeline.pipeline import resolve_pipeline
+from tilelang.backend import resolve_backend
 from tilelang.engine.semantic_check import PreLowerSemanticCheck
 
 
@@ -140,7 +140,7 @@ def get_annotated_mod(
 
     # Apply transformations
     PreLowerSemanticCheck(mod)
-    mod = resolve_pipeline(target).lower(mod, target)
+    mod = resolve_backend(target).lower(mod, target)
 
     # Define dispatch dictionary for different model types
     dispatch = {

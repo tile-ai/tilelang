@@ -2,21 +2,16 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 import tilelang.transform
 from tilelang import tvm as tvm
 from tvm import tirx
-import tvm_ffi
 from tvm.ir import CallingConv
 from tvm.target import Target
-from tilelang.contrib import hipcc, nvcc
-from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
-from tilelang.transform import PassConfigKey
 from tilelang.engine.param import KernelParam, CompiledArtifact
 from tilelang.engine.semantic_check import PreLowerSemanticCheck
-from tilelang.utils.target import determine_target, target_get_mcpu
-from tilelang.backend.pass_pipeline import resolve_pipeline
+from tilelang.utils.target import determine_target
+from tilelang.backend import resolve_backend
 
 
 def is_cpu_device_backend(target: Target):
@@ -50,128 +45,6 @@ def get_device_call(is_device_c: bool = False) -> Callable[[tirx.PrimFunc], bool
 
 def get_host_call(is_device_c: bool = False) -> Callable[[tirx.PrimFunc], bool]:
     return lambda func: not get_device_call(is_device_c)(func)
-
-
-_CUDA_GLOBAL_KERNEL_PATTERN = re.compile(r'(?:extern\s+"C"\s+)?__global__\s+void\s+(?:__launch_bounds__\([^\)]*\)\s+)?(\w+)')
-
-
-def _collect_external_cuda_kernel_names(source: str) -> list[str]:
-    kernel_names: list[str] = []
-    seen_names: set[str] = set()
-    for match in _CUDA_GLOBAL_KERNEL_PATTERN.finditer(source):
-        kernel_name = match.group(1)
-        if kernel_name not in seen_names:
-            kernel_names.append(kernel_name)
-            seen_names.add(kernel_name)
-    return kernel_names
-
-
-@tvm_ffi.register_global_func("tilelang_callback_cuda_validate", override=True)
-def tilelang_callback_cuda_validate(device_mod):
-    for _, base_func in device_mod.functions.items():
-        if not isinstance(base_func, tirx.PrimFunc) or not base_func.attrs:
-            continue
-
-        code_block_source = base_func.attrs.get("code_block_source")
-        if code_block_source is None:
-            continue
-
-        global_symbol = base_func.attrs.get("global_symbol")
-        if global_symbol is None:
-            raise ValueError("CodeGenTileLangCUDA expects source-kernel PrimFunc to have the global_symbol attribute")
-
-        expected_name = str(global_symbol)
-        code_block_entry_name = base_func.attrs.get("code_block_entry_name")
-        if code_block_entry_name is not None and str(code_block_entry_name) != expected_name:
-            raise ValueError("T.CUDASourceCodeKernel expects the lowered device global_symbol to match entry_name")
-
-        kernel_names = _collect_external_cuda_kernel_names(str(code_block_source))
-        if not kernel_names:
-            raise ValueError("T.CUDASourceCodeKernel expects external CUDA source to declare at least one __global__ kernel")
-        if expected_name not in kernel_names:
-            raise ValueError(
-                "T.CUDASourceCodeKernel expected device global_symbol "
-                f"`{expected_name}` to match a __global__ kernel in the provided CUDA source. "
-                f"Available entries: {', '.join(kernel_names)}"
-            )
-
-
-@tvm_ffi.register_global_func("tilelang_callback_cuda_compile", override=True)
-def tilelang_callback_cuda_compile(code, target, pass_config=None):
-    target_arch = nvcc.get_target_arch(nvcc.get_target_compute_version(target))
-
-    arch = [f"-arch=sm_{target_arch}"]
-    compile_format = "cubin"
-
-    # Read pass-config keys (string-valued) like in jit.adapter.libgen.compile_lib
-    cfg = pass_config or {}
-    enable_fast_math = bool(cfg.get(PassConfigKey.TL_ENABLE_FAST_MATH, False))
-
-    ptxas_usage_level = cfg.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None)
-    if ptxas_usage_level is not None:
-        ptxas_usage_level = int(ptxas_usage_level)
-    verbose_ptxas_output = bool(cfg.get(PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False))
-
-    options = [
-        # tl_templates/cuda/reduce.h uses explicit lambda template parameters
-        # (`[&]<typename T>(T) { ... }`) which require C++20.
-        "-std=c++20",
-        "-I" + TILELANG_TEMPLATE_PATH,
-        "-I" + CUTLASS_INCLUDE_DIR,
-    ]
-    # Merge extra device compiler flags from pass config, if provided
-    extra_flags = cfg.get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS, None)
-    if extra_flags:
-        import shlex
-
-        if isinstance(extra_flags, str):
-            tokens = shlex.split(extra_flags)
-        else:
-            tokens = []
-            for flag in extra_flags:
-                if isinstance(flag, str):
-                    tokens.extend(shlex.split(flag))
-                else:
-                    tokens.append(str(flag))
-        options += tokens
-
-    verbose = False
-    if enable_fast_math:
-        options.append("--use_fast_math")
-    if ptxas_usage_level is not None:
-        options.append(f"--ptxas-options=--register-usage-level={ptxas_usage_level}")
-    if verbose_ptxas_output:
-        options.append("--ptxas-options=--verbose")
-        options.append("-w")  # Suppress warnings to make ptxas output more readable
-        verbose = True
-
-    ptx = nvcc.compile_cuda(
-        code,
-        compile_format,
-        arch,
-        options=options,
-        verbose=verbose,
-    )
-
-    return ptx
-
-
-@tvm_ffi.register_global_func("tilelang_callback_hip_compile", override=True)
-def tilelang_callback_hip_compile(code, target):
-    arch = target_get_mcpu(target)
-    hsaco = hipcc.compile_hip(
-        code,
-        target_format="hsaco",
-        arch=arch,
-        options=[
-            "-std=c++17",
-            "-I" + TILELANG_TEMPLATE_PATH,
-            "-I" + COMPOSABLE_KERNEL_INCLUDE_DIR,
-        ],
-        verbose=False,
-    )
-
-    return hsaco
 
 
 def extrac_params(func: tirx.PrimFunc) -> list[KernelParam]:
@@ -214,10 +87,8 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target, target: Target | N
     combine_context_call = getattr(tirx.transform, "CombineContextCall", None)
     if combine_context_call is not None:
         host_mod = combine_context_call()(host_mod)
-    if target is not None and target.kind.name == "metal":
-        from tilelang.metal.transform import MarkHostMetalContext
-
-        host_mod = MarkHostMetalContext()(host_mod)
+    if target is not None:
+        host_mod = resolve_backend(target).preprocess_host_codegen(host_mod, target)
     if target_host.kind.name == "llvm":
         host_mod = tvm.ffi.get_global_func("target.build.llvm")(host_mod, target_host)
     elif target_host.kind.name == "c":
@@ -228,45 +99,11 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target, target: Target | N
 
 
 def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
-    device_mod = tilelang.transform.LowerIntrin()(device_mod)
-    device_mod = tirx.transform.Simplify()(device_mod)
-    device_mod = tilelang.transform.HoistBroadcastValues()(device_mod)
-
-    if target.kind.name == "cuda":
-        global_func = "target.build.tilelang_" + ("cutedsl" if "cutedsl" in target.keys else "cuda")
-        device_mod = tvm.ffi.get_global_func(global_func)(device_mod, target)
-    elif target.kind.name == "hip":
-        device_mod = tvm.ffi.get_global_func("target.build.tilelang_hip")(device_mod, target)
-    elif target.kind.name == "metal":
-        device_mod = tvm.ffi.get_global_func("target.build.tilelang_metal")(device_mod, target)
-    else:
-        raise ValueError(f"Target {target.kind.name} is not supported")
-
-    return device_mod
+    return resolve_backend(target).codegen(device_mod, target, compile=True)
 
 
 def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
-    device_mod = tilelang.transform.LowerIntrin()(device_mod)
-    device_mod = tirx.transform.Simplify()(device_mod)
-    device_mod = tilelang.transform.HoistBroadcastValues()(device_mod)
-
-    if target.kind.name == "cuda":
-        global_func = "target.build.tilelang_" + ("cutedsl" if "cutedsl" in target.keys else "cuda") + "_without_compile"
-        device_mod = tvm.ffi.get_global_func(global_func)(device_mod, target)
-    elif target.kind.name == "hip":
-        device_mod = tvm.ffi.get_global_func("target.build.tilelang_hip_without_compile")(device_mod, target)
-    elif target.kind.name == "c":
-        device_mod = tvm.ffi.get_global_func("target.build.tilelang_c")(device_mod, target)
-    elif target.kind.name == "llvm":
-        device_mod = tvm.ffi.get_global_func("target.build.llvm")(device_mod, target)
-    elif target.kind.name == "webgpu":
-        device_mod = tvm.ffi.get_global_func("target.build.webgpu")(device_mod, target)
-    elif target.kind.name == "metal":
-        device_mod = tvm.ffi.get_global_func("target.build.tilelang_metal")(device_mod, target)
-    else:
-        raise ValueError(f"Target {target.kind.name} is not supported")
-
-    return device_mod
+    return resolve_backend(target).codegen(device_mod, target, compile=False)
 
 
 def lower_to_host_device_ir(
@@ -298,8 +135,8 @@ def lower_to_host_device_ir(
     # Run backend-independent semantic checks before target-specific lowering.
     PreLowerSemanticCheck(mod)
 
-    pipeline = resolve_pipeline(target)
-    mod = pipeline.lower(mod, target)
+    backend = resolve_backend(target)
+    mod = backend.lower(mod, target)
 
     host_mod = tirx.transform.Filter(_is_host_call)(mod)
     device_mod = tirx.transform.Filter(_is_device_call)(mod)
