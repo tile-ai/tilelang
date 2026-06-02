@@ -39,7 +39,7 @@ def test_lower_shared_barrier():
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.LowerSharedBarrier()(mod)
+    mod = cuda_transform.LowerSharedBarrier()(mod)
     mod = tl.transform.LowerOpaqueBlock()(mod)
 
     main_func = mod["main"]

@@ -24,7 +24,7 @@
 #include "../op/gemm_sp.h"
 #include "../op/operator.h"
 #include "../op/utils.h"
-#include "../target/utils.h"
+#include "backend/common/target_utils.h"
 #include "ptx_async_copy_injector.h"
 
 #include "arith/ir_mutator_with_analyzer.h"

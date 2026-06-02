@@ -16,9 +16,9 @@
 #include "arith/int_operator.h"
 
 #include "../layout/utils.h"
-#include "../target/utils.h"
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
+#include "backend/common/target_utils.h"
 #include "utils.h"
 
 namespace tvm {

@@ -71,7 +71,7 @@ def main(Q: T.Tensor(shape_q, dtype)):
 The TileLang lower process might yield an error such as:
 
 ```text
-File "/root/TileLang/src/target/codegen_cuda.cc", line 1257
+File "/root/TileLang/src/cuda/codegen/codegen_cuda.cc", line 1257
 ValueError: Check failed: lanes <= 4 (8 vs. 4) : Ramp of more than 4 lanes is not allowed.
 ```
 
@@ -91,7 +91,7 @@ Sometimes, the kernel compiles and runs but produces incorrect results. In such 
 
 ### Post-Processing Callbacks for Generated Source
 
-After code generation (in the codegen pass), TileLang calls a callback function (if registered) to allow post-processing of the generated source code. In `src/target/rt_mod_cuda.cc`:
+After code generation (in the codegen pass), TileLang calls a callback function (if registered) to allow post-processing of the generated source code. In `src/cuda/codegen/rt_mod_cuda.cc`:
 
 ```cpp
 std::string code = cg.Finish();

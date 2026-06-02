@@ -11,8 +11,8 @@
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/op_attr_types.h>
 
-#include "backend/cuda/stubs/cuda.h"
-#include "target/utils.h"
+#include "backend/common/target_utils.h"
+#include "cuda/stubs/cuda.h"
 
 namespace tvm {
 namespace tl {
@@ -327,7 +327,7 @@ TIR_DEFINE_TL_BUILTIN(tma_store_arrive)
                                Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_TL_BUILTIN(tma_store_wait)
-    .set_num_inputs(1)
+    .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 TIR_DEFINE_TL_BUILTIN(set_max_nreg)

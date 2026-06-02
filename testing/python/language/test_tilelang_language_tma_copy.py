@@ -217,7 +217,7 @@ def matmul_tma_copy_store(
             # Store result: fragment -> shared -> global via T.tma_copy (no barrier needed)
             T.copy(C_local, C_shared)
             T.tma_copy(C_shared, C[by * block_M, bx * block_N])
-            T.tma_store_wait()
+            T.tma_store_wait(read=False)
 
     return main
 
@@ -273,7 +273,7 @@ def fp4_tma_copy_roundtrip(M=128, N=256, block_M=64, block_N=128):
             T.barrier_arrive(mbar)
             T.mbarrier_wait_parity(mbar, 0)
             T.tma_copy(A_shared, B[by * block_M, bx * block_N])
-            T.tma_store_wait()
+            T.tma_store_wait(read=False)
 
     return main
 

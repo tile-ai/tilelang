@@ -1,11 +1,10 @@
+"""Mark host-side Metal kernel calls for MPS synchronization."""
+
+from tvm import tirx as tir
 from tvm.ir import Op
-from tvm.tirx import (
-    PyStmtExprMutator,
-    functor,
-    Evaluate,
-    AttrStmt,
-)
+from tvm.tirx import AttrStmt, Evaluate, PyStmtExprMutator, functor
 from tvm.tirx.transform import prim_func_pass
+
 
 """
 Transformation pass to mark host-side kernel calls for Metal/MPS synchronization.
@@ -22,11 +21,11 @@ signals the downstream host C codegen to inject specific runtime logic that:
 """
 
 
-tvm_call_packed_lowered = Op.get("tirx.tvm_call_packed_lowered")
+_tvm_call_packed_lowered = Op.get("tirx.tvm_call_packed_lowered")
 
 
 @functor.mutator
-class MarkHostMetalContextMutator(PyStmtExprMutator):
+class _MarkHostMetalContextMutator(PyStmtExprMutator):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.is_in_compute_scope = False
@@ -43,15 +42,18 @@ class MarkHostMetalContextMutator(PyStmtExprMutator):
         return s
 
     def visit_evaluate_(self, op: Evaluate):
-        if self.is_in_compute_scope and op.value.op.same_as(tvm_call_packed_lowered):
+        if self.is_in_compute_scope and isinstance(op.value, tir.Call) and op.value.op.same_as(_tvm_call_packed_lowered):
             return AttrStmt(0, "metal_context", "", op)
         return op
 
 
 def MarkHostMetalContext():
     def pass_fn(func, mod, ctx):
-        mutator = MarkHostMetalContextMutator()
+        mutator = _MarkHostMetalContextMutator()
         new_body = mutator.visit_stmt(func.body)
         return func.with_body(new_body)
 
     return prim_func_pass(pass_fn, opt_level=0)
+
+
+__all__ = ["MarkHostMetalContext"]
