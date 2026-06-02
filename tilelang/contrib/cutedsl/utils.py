@@ -11,6 +11,7 @@ import cutlass.cute as cute
 from cutlass.base_dsl._mlir_helpers import arith as arith_helper
 from cutlass.base_dsl.typing import (
     BFloat16,
+    Float,
     Float16,
     Float32,
     Float4E2M1FN,
@@ -34,6 +35,8 @@ __all__ = [
     "type_map",
     "bitcast",
     "cast_tensor",
+    "as_tensor_ssa",
+    "as_rmem_tensor",
     "make_filled_tensor",
     "make_tensor_at_offset",
     "handle_add_byte_offset",
@@ -233,7 +236,12 @@ def cast_tensor(value, dtype):
             if value.dtype is not Float32:
                 value = value.to(Float32)
             return _float32_to_f4e2m1_tensor(value)
-        if dtype is Float16 and getattr(value.dtype, "width", 0) < Float16.width:
+        if (
+            dtype is Float16
+            and isinstance(value.dtype, type)
+            and issubclass(value.dtype, Float)
+            and getattr(value.dtype, "width", 0) < Float16.width
+        ):
             return _narrow_to_float16_tensor(value)
         elem_type = getattr(value.type, "element_type", None)
         if elem_type is None:
@@ -246,6 +254,20 @@ def cast_tensor(value, dtype):
             return value
         return value.to(dtype)
     return dtype(value)
+
+
+def as_tensor_ssa(value):
+    if isinstance(value, TensorSSA):
+        return value
+    return value.load()
+
+
+def as_rmem_tensor(value, shape, dtype):
+    if not isinstance(value, TensorSSA):
+        return value
+    tensor = cute.make_rmem_tensor(shape, dtype)
+    tensor.store(value)
+    return tensor
 
 
 def make_filled_tensor(shape, value, dtype=None):
