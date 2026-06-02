@@ -1,5 +1,5 @@
-// AVO Kernel - 2CTA + TMA + tcgen05 Flash Attention Forward
-// 2-Q-stage interleaved pipeline (FA4-style)
+// 2CTA + TMA + tcgen05 Flash Attention Forward
+// 2-Q-stage interleaved pipeline
 //
 // Architecture:
 //   - Cluster of 2 CTAs (2SM), 512 threads each (16 warps)
@@ -13,7 +13,7 @@
 //
 // Register budget: 8×176 + 4×88 + 4×72 = 2048 regs/thread → 2048×32 = 65536/SM ✓
 //
-// TMEM layout (FA4):
+// TMEM layout:
 //   S0: 0-127, P0: 64-127 (overlap), S1: 128-255, P1: 192-255 (overlap)
 //   O0: 256-383, O1: 384-511
 
@@ -67,7 +67,7 @@ constexpr int kTileCols=64;
 constexpr uint32_t kSBO=1024;
 constexpr int kQStages=2;
 
-// 512 threads (16 warps) — FA4 warp layout with register donation via setmaxnreg
+// 512 threads (16 warps) with register donation via setmaxnreg.
 constexpr int kThreads=512;
 constexpr int kTidProd = 416;  // Warp 13, lane 0 (producer init thread)
 constexpr int kWarpMMA=12;
@@ -75,30 +75,28 @@ constexpr int kWarpProd=13;
 constexpr int kWarpEpilogue=14;
 constexpr int kBarSoftmaxStatsBase=0;
 
-// Register budgets (multiples of 8). User tuned this for our specific kernel;
-// 168/96/80 outperforms FA4's 176/88/72 default by ~1.5% mean here (the extra 8
-// regs to correction help the rescale/finalize loops where ptxas was spilling).
+// Register budgets (multiples of 8). The extra correction registers help the
+// rescale/finalize loops avoid ptxas spills.
 constexpr int kRegsSoftmax=176;
 constexpr int kRegsCorrection=88;
 constexpr int kRegsOther=72;
 
-// SMEM layout — full FA4 alignment: separate sQ (64KB) + sO (64KB) + sK + sV.
-// kv_stage=3 matches FA4's effective 3K+3V pipeline depth (FA4 uses 6 logical
-// stages with K/V sharing same 96KB region; we use 3+3 separate which is the
-// same memory footprint and the same in-flight tensor count).
+// SMEM layout: separate sQ (64KB) + sO (64KB) + sK + sV.
+// kv_stage=3 gives a 3K+3V pipeline depth with the same in-flight tensor count
+// as a six-logical-stage K/V ring.
 //   sQ + sO + sK + sV + scratch = 64+64+48+48+3 = 227 KiB (at the cap).
 // The separate sO unblocks producer's next-Q reload from epilogue's TMA store
 // — see correction_finalize_o_fn / epilogue_warp_fn.
 constexpr int kKVStages=3;
 constexpr int kPerStageKV=kBPerCTA*kHeadDim;
 constexpr int kSmemQ=kQStages*kBlockMCTA*kHeadDim*2;
-constexpr int kSmemO=kQStages*kBlockMCTA*kHeadDim*2;  // separate epilogue staging buffer (FA4-aligned)
+constexpr int kSmemO=kQStages*kBlockMCTA*kHeadDim*2;  // separate epilogue staging buffer
 constexpr int kSmemK=kKVStages*kPerStageKV*2;
 constexpr int kSmemV=kKVStages*kPerStageKV*2;
 constexpr int kSmemKV=kSmemK+kSmemV;
 constexpr int kQStageHalfs=kBlockMCTA*kHeadDim;
 
-// exp2 interleaving (FA4 tuning: 2CTA noncausal hdim=128 SM100)
+// exp2 interleaving for the 2CTA noncausal hdim=128 SM100 path.
 constexpr int kEx2EmuFreq = 10;
 constexpr int kEx2EmuRes = 4;
 constexpr int kEx2EmuStartFrg = 1;
@@ -176,7 +174,7 @@ __device__ __forceinline__ float2 e2e_asm2(float x, float y) {
 
 // ========= Warp-role device functions (noinline for separate register allocation) =========
 
-// Softmax warp role: FA4-style 3-pass softmax + SFU / packed poly exp2 interleaving
+// Softmax warp role: 3-pass softmax + SFU / packed poly exp2 interleaving.
 __device__ __noinline__ void softmax_warp_fn(
     int qs,
     int tid,
@@ -424,7 +422,7 @@ __device__ __noinline__ void correction_warp_fn(
     if (rsum > 0.f) inv = 1.0f / rsum;
 
     uint32_t O_base = (tbase + 256 + qs * 128) + tr;
-    // Write finalized O into the dedicated sO staging buffer (FA4-aligned).
+    // Write finalized O into the dedicated sO staging buffer.
     // Decoupling from sQ lets producer reload Q for the next persistent tile
     // while epilogue's TMA store for the current tile is still in flight.
     char *epi_base = reinterpret_cast<char *>(sO + qs * kQStageHalfs + warp_in_corr * 32 * kHeadDim);
@@ -471,7 +469,7 @@ __device__ __noinline__ void epilogue_warp_fn(
   mb_o_rel->arrive_local();
 }
 
-// MMA: FA4-style ownership handoff.
+// MMA role ownership handoff.
 // `mb_p` is the early partial-P + prior-O-rescaled acquire point; `mb_p2` is full-P ready.
 // K and V use separate SMEM; consumer release via tcgen05_commit (cluster-wide)
 __device__ __noinline__ void mma_warp_fn(int cr, half *sQ, half *sK, half *sV,
@@ -697,7 +695,7 @@ __device__ __noinline__ void producer_warp_fn(
     int kv_col_base=kvh*kHeadDim;
     int v_col=kv_col_base+cr*kBPerCTA;
 
-    // Pre-load K[0],V[0],K[1],V[1],... (FA4-style: producer issues K and V interleaved).
+    // Pre-load K[0],V[0],K[1],V[1],... by issuing K and V interleaved.
     // The TMA engine processes them in parallel; this slightly shortens the time to
     // first-V-ready relative to issuing all K's then all V's.
     for(int s=0;s<min(nkb,kKVStages);s++){
@@ -769,8 +767,8 @@ void fmha_fa4_kernel(
     const __grid_constant__ CUtensorMap tmap_VT,
     const __grid_constant__ CUtensorMap tmap_O)
 {
-    static_assert(kHeadDimParam == kHeadDim, "fa4_uma currently supports only kHeadDim");
-    static_assert(kIsCausal == 0, "causal attention is not implemented in fa4_uma");
+    static_assert(kHeadDimParam == kHeadDim, "this kernel currently supports only kHeadDim");
+    static_assert(kIsCausal == 0, "causal attention is not implemented in this kernel");
     constexpr int kNumMBlocks = (kSeqLen + kQStages * kBlockM - 1) / (kQStages * kBlockM);
     constexpr float kSoftmaxScale = 0.08838834764831845f;  // 1 / sqrt(128)
 
@@ -928,8 +926,8 @@ void flash_attention_forward(
     const void* Q, const void* K, const void* V, void* O,
     cudaStream_t stream
 ) {
-    static_assert(kHeadDimParam == kHeadDim, "fa4_uma currently supports only kHeadDim");
-    static_assert(kIsCausal == 0, "causal attention is not implemented in fa4_uma");
+    static_assert(kHeadDimParam == kHeadDim, "this kernel currently supports only kHeadDim");
+    static_assert(kIsCausal == 0, "causal attention is not implemented in this kernel");
     const __nv_bfloat16 *bf16_Q = (const __nv_bfloat16*)Q;
     const __nv_bfloat16 *bf16_K = (const __nv_bfloat16*)K;
     const __nv_bfloat16 *bf16_V = (const __nv_bfloat16*)V;

@@ -1,6 +1,6 @@
 """Archived 1SM split path using a monolithic MMA helper.
 
-The maintained 1SM FA4 parity target is ``attention_kernel_1sm.py``.  This
+The maintained 1SM SM100 target is ``attention_kernel_1sm.py``.  This
 legacy file used whole-role helper primitives that have been removed from the
 public TileLang DSL surface.
 """

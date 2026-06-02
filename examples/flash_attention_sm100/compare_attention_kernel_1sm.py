@@ -1,7 +1,7 @@
 """Bit-compare tilelang attention_kernel_1sm against the reference .so.
 
-Loads ~/avo/kernels/attention_kernel_1sm.so via ctypes and runs it side-by-side
-with the tilelang port on the same Q/K/V. Reports the abs/rel diff.
+Loads a local reference shared library via ctypes and runs it side-by-side with
+the TileLang port on the same Q/K/V. Reports the abs/rel diff.
 
 This is a structural sanity check, not a correctness proof — both kernels are
 bf16 and the .so does a more aggressive numeric schedule (packed exp2 poly,
@@ -17,13 +17,21 @@ import torch
 
 from attention_kernel_1sm import attention_kernel_1sm
 
-LIB = Path("~/avo/kernels/attention_kernel_1sm.so").expanduser()
+DEFAULT_REFERENCE_LIB = os.environ.get("TL_REFERENCE_ATTENTION_1SM_SO")
 
 
-def load_lib():
-    if not LIB.exists():
-        raise FileNotFoundError(f"missing {LIB} — build it via the avo Makefile")
-    lib = ctypes.CDLL(str(LIB))
+def load_lib(path):
+    if path is None:
+        raise FileNotFoundError(
+            "missing reference library path; pass --reference-lib or set "
+            "TL_REFERENCE_ATTENTION_1SM_SO"
+        )
+    lib_path = Path(path).expanduser()
+    if not lib_path.exists():
+        raise FileNotFoundError(
+            f"missing {lib_path} — build the reference shared library first"
+        )
+    lib = ctypes.CDLL(str(lib_path))
     # void flash_attention_forward(const void* Q, K, V, void* O,
     #     int batch, seq, num_q, num_kv, dim, is_causal, cudaStream_t stream)
     lib.flash_attention_forward.argtypes = [
@@ -68,6 +76,7 @@ def main():
     ap.add_argument("--dim", type=int, default=128)
     ap.add_argument("--causal", action="store_true")
     ap.add_argument("--bench", action="store_true")
+    ap.add_argument("--reference-lib", default=DEFAULT_REFERENCE_LIB)
     args = ap.parse_args()
 
     if args.dim != 128:
@@ -85,7 +94,7 @@ def main():
     V = torch.randn(args.batch, args.seq, kv_h, args.dim,
                     dtype=torch.bfloat16, device="cuda")
 
-    lib = load_lib()
+    lib = load_lib(args.reference_lib)
 
     # --- Run reference .so ---
     O_ref = run_so(lib, Q, K, V, args.causal)

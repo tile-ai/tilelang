@@ -1,7 +1,7 @@
 """Archived 1SM non-split experiment.
 
-The maintained 1SM FA4 parity target is ``attention_kernel_1sm.py``.  This
-legacy file used monolithic FA4 role helpers that are no longer public TileLang
+The maintained 1SM SM100 target is ``attention_kernel_1sm.py``.  This
+legacy file used monolithic role helpers that are no longer public TileLang
 primitives.
 """
 

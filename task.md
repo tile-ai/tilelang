@@ -12,7 +12,7 @@ Reference binaries (measured 2026-05-18 on B200):
   - attention_kernel.so (2-CTA): 1371 TFLOPS (b=1 s=16384 h=16 d=128)
 
 Reference source:
-  /home/yu.cheng/workspace/avo/kernels/attention_kernel_1sm.cu (826 lines)
+  external attention_kernel_1sm.cu (826 lines)
 Our TileLang kernel:
   tilelang/examples/flash_attention_sm100/attention_kernel_1sm.py
 TileLang repo to modify:
@@ -27,7 +27,7 @@ implemented but not complete.
 
 Performance table (BF16, non-causal, b=1, d=128):
   ┌──────────────────┬──────────┬─────────┬────────┐
-  │ Shape (s × h)    │  Mine    │  Avo    │ % avo  │
+  │ Shape (s × h)    │ TileLang │  Ref    │ % ref  │
   ├──────────────────┼──────────┼─────────┼────────┤
   │ 4096  × 8        │ 584      │ 744     │ 78%    │
   │ 8192  × 16       │ 651      │ 779     │ 84%    │
@@ -58,12 +58,12 @@ Additionally, the O0 commit (tcgen05_mma_arrive after O0's PV gemm)
 interferes with O1's TMEM visibility. When O0's correction stores use
 x16 AND the commit fires, O1 becomes correct — but then O0 breaks.
 
-The "no intermediate commit" pattern (matching avo's single commit
+The "no intermediate commit" pattern (matching the reference single commit
 after both tiles) also doesn't work in TileLang because the single-
 wait pattern loses fence coverage for both tiles regardless of manual
 fence placement.
 
-The avo reference avoids all these issues by:
+The reference schedule avoids all these issues by:
 1. Using per-warp tcgen05_ld_16/st_16 (x16) with explicit row offsets
 2. Single commit after both O0+O1 PV gemms (no intermediate commit)
 3. Software-pipelined stores: all x16 stores issued, then one wait_st
@@ -104,22 +104,22 @@ Option A: Fix the tcgen05.st cross-WG visibility at the instruction level
     O tiles in a column range where ONE instruction width works for both.
   - The codegen reorders allocations, so DSL order doesn't control
     physical columns. Need to investigate copy.cc/allocator logic.
-  - Or: implement avo's exact pattern — per-warp stores with explicit
+  - Or: implement the exact reference pattern — per-warp stores with explicit
     row offsets, async pipeline (all stores then one wait_st, no per-
     store wait). This requires bypassing TileLang's copy_sm100.h template
     which has per-store fence_view_async_tmem_store() built in.
 
 Option B: Fix the single-commit + single-wait pattern
-  - avo uses ONE commit after both tiles, ONE mb_pv wait in correction.
+  - The reference uses ONE commit after both tiles, ONE mb_pv wait in correction.
   - Our version fails (0.55) because tcgen05_after_thread_sync() fence
     doesn't provide sufficient coverage when O0+O1 ops are sequential.
-  - Need to understand WHY the same pattern works in avo's CUDA but not
+  - Need to understand WHY the same pattern works in the reference CUDA but not
     in TileLang's generated CUDA (identical instructions but different behavior).
-  - Likely cause: avo's per-warp load pattern (x16 with explicit row offset
+  - Likely cause: the reference per-warp load pattern (x16 with explicit row offset
     + separate wait_ld before use) establishes different HW state vs our
     full-WG x32 load with built-in wait_ld.
 
-Option C: Implement avo's correction_warp_fn as inline code
+Option C: Implement the reference correction warp function as inline code
   - Write the correction WG logic as raw CUDA (inline PTX) directly in
     the generated code, bypassing TileLang's copy lowering entirely.
   - We proved that calling a __device__ function via T.call_extern breaks
@@ -140,10 +140,10 @@ Purpose: Target kernel (Python)
 Path: examples/flash_attention_sm100/attention_kernel_1sm.py
 ────────────────────────────────────────
 Purpose: Reference C++ kernel (1SM)
-Path: /home/yu.cheng/workspace/avo/kernels/attention_kernel_1sm.cu
+Path: external attention_kernel_1sm.cu
 ────────────────────────────────────────
 Purpose: Reference C++ kernel (2CTA)
-Path: /home/yu.cheng/workspace/avo/kernels/attention_kernel.cu
+Path: external attention_kernel.cu
 ────────────────────────────────────────
 Purpose: TileLang TMEM copy lowering
 Path: src/backend/cuda/op/copy.cc

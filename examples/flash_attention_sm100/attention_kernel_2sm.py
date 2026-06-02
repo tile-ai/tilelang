@@ -1,9 +1,9 @@
-"""TileLang 2SM FlashAttention kernels matching TileScale fa4_uma*.cu.
+"""TileLang 2SM FlashAttention kernels for SM100.
 
 This is the second CUDA-parity target.  The TileLang DSL owns the launch,
 persistent cluster tile loop, memory/barrier topology, role dispatch, and role
 schedules.  Small TCGEN05/TMA primitives cover the instruction forms that the
-reference kernel uses directly.
+kernel needs directly.
 """
 
 import argparse
@@ -812,8 +812,8 @@ def attention_kernel_2sm_d128(
             cluster_dims=2,
             prelude=ATTENTION_2SM_EXTERN_SOURCE,
         ) as block_id:
-            # Match fa4_uma.cu launch bounds while relying on runtime
-            # setmaxnreg.inc/dec for role-specific register donation.
+            # Use one block per SM while relying on runtime setmaxnreg.inc/dec
+            # for role-specific register donation.
             T.annotate_min_blocks_per_sm(1)
             T.use_2cta_tmem(mbarrier_init_thread=416, compact_shared_state=True)
 
@@ -821,8 +821,8 @@ def attention_kernel_2sm_d128(
             O_shared = T.alloc_shared([q_stages, block_m_cta, dim], dtype)
             K_shared = T.alloc_shared([kv_stages, b_per_cta, dim], dtype)
             V_shared = T.alloc_shared([kv_stages, b_per_cta, dim], dtype)
-            # fa4_uma overlaps sum_smem with the front of rs_smem after the
-            # per-kb rescale loop to stay under the SM100 shared-memory cap.
+            # Reuse the front of rs_smem for sum_smem after the per-kb rescale
+            # loop to stay under the SM100 shared-memory cap.
             rs_shared = T.alloc_shared([2, q_stages, block_m_cta], accum_dtype)
 
             Base_tmem = T.alloc_tmem([block_m_cta, 512], accum_dtype)
@@ -1847,12 +1847,12 @@ def attention_kernel_2sm_d256(
             cluster_dims=2,
             prelude=ATTENTION_2SM_D256_EXTERN_SOURCE,
         ) as block_id:
-            # Match fa4_uma_d256.cu launch bounds while relying on runtime
-            # setmaxnreg.inc/dec for role-specific register donation.
+            # Use one block per SM while relying on runtime setmaxnreg.inc/dec
+            # for role-specific register donation.
             T.annotate_min_blocks_per_sm(1)
             T.use_2cta_tmem(mbarrier_init_thread=416, compact_shared_state=True)
 
-            # fa4_uma_d256 aliases sO with sQ and uses one merged K/V ring.
+            # Alias the epilogue staging buffer with Q and use one merged K/V ring.
             QO_shared = T.alloc_shared([block_m_cta, dim], dtype)
             KV_shared = T.alloc_shared([kv_stages, b_per_cta, dim], dtype)
             rs_shared = T.alloc_shared([2, block_m_cta], accum_dtype)

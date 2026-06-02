@@ -4,8 +4,9 @@ Runs the configs requested for GLM-5, Llama-4-Maverick, Qwen3.5, DeepSeek-V3.2-E
 MiniMax-M2.5 across seqlen 4096/8192/16384. Picks GQA vs MHA kernel automatically
 from heads/kv_heads. Tries variants ss / ts / wasp / fa4; reports best.
 
-Note: fa4 lives only in gqa_fwd_bshd.py; for MHA configs (heads == kv_heads) we
-dispatch to the GQA fa4 kernel with groups=1, which is equivalent.
+Note: the fa4 variant is implemented in gqa_fwd_bshd.py; for MHA configs
+(heads == kv_heads) we dispatch to the GQA kernel with groups=1, which is
+equivalent.
 
 Correctness check is intentionally skipped (CPU softmax is too slow at these sizes).
 """
@@ -78,7 +79,7 @@ def build_kernel(use_gqa, batch, heads, seqlen, dim, causal, groups, variant,
         return mod.flashattn(batch, heads, seqlen, dim, causal,
                              block_M=block_M, block_N=block_N, variant=variant)
     if variant == "fa4":
-        # fa4 is only implemented in gqa_fwd_bshd; for MHA we pass groups=1.
+        # This variant is implemented in gqa_fwd_bshd; for MHA we pass groups=1.
         return gqa_mod.flashattn_fa4(batch, heads, seqlen, dim, causal,
                                      groups=groups, block_M=block_M, block_N=block_N)
     # wasp

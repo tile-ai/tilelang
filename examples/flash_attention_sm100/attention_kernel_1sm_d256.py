@@ -1,17 +1,14 @@
-"""Tilelang port of avo/kernels/attention_kernel_1sm_d256.cu (Slice 1 baseline).
+"""TileLang 1SM D256 wrapper for the SM100 FlashAttention kernel.
 
 The actual kernel builder lives in attention_kernel_1sm.py — that file is
 parameterized on `dim`, and was modeled to support both d=128 and d=256 (the
 existing flashattn_simple_ws example in this directory is benchmarked for both
 GLM-5 d=256 and Llama-4-Maverick d=128, so the same shape works).
 
-This wrapper exists to mirror the two-file layout of the reference .cu sources
-(attention_kernel_1sm.cu vs attention_kernel_1sm_d256.cu). The reference d=256
-kernel uses a smaller pipeline (kQStages=1, kKVStages=1) because the bigger
-SMEM/TMEM footprint of head_dim=256 doesn't leave room for deeper pipelining
-in the .cu. In this Slice 1 baseline we already use kQStages=1 in both files
-(see the Slice 1 caveats in attention_kernel_1sm.py), so the only actual diff
-here is the default head_dim and a tighter kv_stages default to match the .cu.
+The D256 shape uses a smaller pipeline (kQStages=1, kKVStages=1) because the
+larger SMEM/TMEM footprint leaves less room for deeper pipelining. In this
+baseline we already use kQStages=1 in both files, so the main difference here
+is the default head_dim and a tighter kv_stages default.
 
 Slice 4 (TMEM aliasing) will let the d=128 variant grow back to kQStages=2.
 Slice 3 (TMEM column-slice for chunked O rescale) lets the d=256 variant
@@ -26,10 +23,9 @@ import torch
 from attention_kernel_1sm import attention_kernel_1sm, reference_attention
 
 
-# ``kv_stages=1`` mirrors attention_kernel_1sm_d256.cu, which drops the K/V
-# pipeline depth from 3 (in d=128) to 1 (in d=256) because the per-stage SMEM
-# footprint is twice as large. The user can override via kwargs if they have
-# enough SMEM headroom.
+# ``kv_stages=1`` drops the K/V pipeline depth from 3 (in d=128) to 1 (in
+# d=256) because the per-stage SMEM footprint is twice as large. The user can
+# override via kwargs if they have enough SMEM headroom.
 def attention_kernel_1sm_d256(
     batch: int,
     heads: int,
@@ -40,9 +36,8 @@ def attention_kernel_1sm_d256(
     block_N: int = 128,
     kv_stages: int = 1,
     # KNOWN LIMITATION: d=256 currently exceeds B200's 228KB dynamic SMEM
-    # cap. The Slice 4b fa4 pattern (paired K/V SMEM buffers) actually makes
-    # this WORSE — for block_M=128 d=256 it needs ~360KB. The reference
-    # attention_kernel_1sm_d256.cu fits in 192KB by:
+    # cap. Paired K/V SMEM buffers make this worse; for block_M=128 d=256
+    # they need ~360KB. A compact D256 schedule fits in 192KB by:
     #   (a) single-buffered K/V (kKVStages=1, no pairing), and
     #   (b) aliasing the Q SMEM buffer as the O-epilogue staging buffer
     #       once Q is no longer live.

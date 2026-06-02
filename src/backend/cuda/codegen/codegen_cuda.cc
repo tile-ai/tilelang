@@ -6878,8 +6878,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const IfThenElseNode *op) {
 
     // Emit helper-only branches directly in the kernel. These branches already
     // call noinline role helpers (softmax/MMA/producer/correction/epilogue);
-    // wrapping them in an extra __outlined_warp_fn adds a second call layer that
-    // is not present in the AVO reference kernel.
+    // wrapping them in an extra __outlined_warp_fn adds an unnecessary second
+    // call layer.
     std::vector<std::string> fn_names;
     std::vector<std::vector<tir::Stmt>> branch_prologues;
     std::vector<tir::Stmt> outlined_bodies;

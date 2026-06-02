@@ -1,6 +1,6 @@
-"""TileLang DSL 4-role split implementation of avo/kernels/attention_kernel_1sm.cu.
+"""TileLang DSL 4-role split implementation for SM100 FlashAttention.
 
-This file is the primary 1SM parity target. It always builds the split
+This file is the primary 1SM SM100 target. It always builds the split
 correction path with the MMA role expressed in DSL and outlined as a
 __device__ __noinline__ helper; legacy non-split and monolithic-helper
 variants live in sibling files.
@@ -257,7 +257,7 @@ def attention_kernel_1sm(
             f"dim={dim}, block_N={block_N}"
         )
 
-    # Avo 1SM split path covers two 128-row Q tiles per CTA.
+    # The 1SM split path covers two 128-row Q tiles per CTA.
     kq2_threads = 512
     kq2_block_M = block_M
     kq2_total_M = 2 * kq2_block_M
@@ -278,7 +278,7 @@ def attention_kernel_1sm(
     #                           mma signal: O is rescaled, safe to
     #                           accumulate next PV into it.
     #
-    # The mma -> correction handshake uses an avo-style PV commit barrier:
+    # The mma -> correction handshake uses a single PV commit barrier:
     # the MMA WG commits once after both O0/O1 PV MMAs, and correction waits
     # on that single completion before reading O TMEM.
     @T.macro
@@ -565,21 +565,21 @@ def attention_kernel_1sm(
 
             mbar_s0 = T.alloc_barrier(1)
             mbar_s1 = T.alloc_barrier(1)
-            # Full-P and partial-P ready signals. Match avo's mb_p/mb_p2:
-            # one arrive per softmax warp, issued by lane 0 after P TMEM
-            # stores finish and after the halfway point respectively.
+            # Full-P and partial-P ready signals: one arrive per softmax
+            # warp, issued by lane 0 after P TMEM stores finish and after
+            # the halfway point respectively.
             mbar_p0 = T.alloc_barrier(4)
             mbar_p1 = T.alloc_barrier(4)
             mbar_p2_0 = T.alloc_barrier(4)
             mbar_p2_1 = T.alloc_barrier(4)
             mbar_pv = T.alloc_barrier(1)
-            # Softmax -> correction scale handoff. Match avo's mb_rs:
-            # each of the 4 softmax warps arrives once via lane 0 after
-            # writing its 32 row scale values.
+            # Softmax -> correction scale handoff: each of the 4 softmax
+            # warps arrives once via lane 0 after writing its 32 row scale
+            # values.
             mbar_scale0 = T.alloc_barrier([4, 4])
             mbar_scale1 = T.alloc_barrier([4, 4])
-            # Correction -> mma WG. Match avo: one arrive per correction
-            # warp, issued by lane 0, after the per-warp x16 TMEM stores.
+            # Correction -> mma WG: one arrive per correction warp, issued by
+            # lane 0 after the per-warp x16 TMEM stores.
             mbar_corr0 = T.alloc_barrier(4)
             mbar_corr1 = T.alloc_barrier(4)
             mbar_epi0 = T.alloc_barrier(4)
@@ -603,13 +603,13 @@ def attention_kernel_1sm(
                 else T.ceildiv(seq_len, block_N)
             )
 
-            # Avo-style register donation for the 4-role split:
+            # Register donation for the 4-role split:
             #   warps 0-7   softmax    184 regs
             #   warps 8-11  correction  64 regs
             #   warps 12-15 mma/prod/epi/idle 80 regs
-            # Avo uses __launch_bounds__(512, 1). Empirically this still
-            # preserves the per-role setmaxnreg donation while giving ptxas
-            # a slightly better scheduling target than minBlocks=0.
+            # __launch_bounds__(512, 1) preserves per-role setmaxnreg
+            # donation while giving ptxas a better scheduling target than
+            # minBlocks=0.
             if tid < 256:
                 T.set_max_nreg(184, 1)
             elif tid < 384:
@@ -617,9 +617,8 @@ def attention_kernel_1sm(
             else:
                 T.set_max_nreg(80, 0)
 
-            # The DSL softmax body owns the full KV loop internally, like
-            # avo's softmax_warp_fn, but exposes the readable loop/max/
-            # rescale/store structure instead of hiding it in one helper.
+            # The DSL softmax body owns the full KV loop internally while
+            # keeping the loop/max/rescale/store structure visible in DSL.
             if tid < 128:
                 softmax_warp_dsl(
                     S0_tmem,
@@ -1005,7 +1004,7 @@ def attention_kernel_1sm(
             else:
                 T.evaluate(0)
 
-            # ---- Avo-style split epilogue TMA store ----
+            # ---- Split epilogue TMA store ----
             if tid >= 448 and tid < 480:
                 output_desc = T.create_tma_descriptor(
                     9, 4, T.access_ptr(Output, "w"),

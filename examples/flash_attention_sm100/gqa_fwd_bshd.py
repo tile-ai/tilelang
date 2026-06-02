@@ -342,20 +342,14 @@ def flashattn_fa4_pipe(
     block_M=128,
     block_N=128,
 ):
-    """FA4 written in tilelang's natural style.
+    """FlashAttention variant written in TileLang's natural style.
 
-    See ``fa4_uma.cu`` in this directory for the full hand-tuned FA4 reference:
-    a 2-CTA cluster of 16 warps split into 6 roles (producer / MMA /
-    softmax×2 / correction / epilogue), with 2-Q-stage interleaving, hand-
-    tuned exp2 polynomials, and CTA-pool register donation via setmaxnreg.
+    This version uses high-level TileLang primitives with one math warp-group,
+    one TMEM accumulator, and ``T.Pipelined`` so the kernel reads top-to-bottom
+    like a compact FA schedule.  It trades peak hand-scheduled performance for
+    a smaller, easier-to-read implementation.
 
-    This version translates the FA4 *algorithm* into tilelang's high-level
-    primitives — sticking to one math warp-group, one TMEM accumulator, and
-    ``T.Pipelined`` so the kernel reads top-to-bottom like an FA pseudocode
-    sketch.  We trade hand-tuned perf for code that fits on a screen.
-
-    Kept from FA4 (tilelang has clean expressions for these)
-    --------------------------------------------------------
+    Implemented directly in DSL:
       • Online softmax with deferred normalization (logsum + divide at epilogue).
       • ``tcgen05.mma`` for both Q@K^T and P@V via ``T.tcgen05_gemm``.
       • Hot loop wrapped in ``T.Pipelined`` so the scheduler can overlap the
@@ -364,8 +358,7 @@ def flashattn_fa4_pipe(
         iter) — same pattern as the ``ts`` baseline.  In-place TMEM accum
         (``ts_v2`` style) currently has a correctness bug in tilelang.
 
-    Dropped vs FA4 (tilelang gaps; would need manual mbarrier / cluster work)
-    ------------------------------------------------------------------------
+    Not implemented in this compact path:
       • 2-CTA cluster MMA (``cta_group::2``) — no clean cluster handle on
         ``T.tcgen05_gemm`` yet.
       • 2-Q-stage interleaving — would need a second Q tile in flight plus
@@ -379,8 +372,8 @@ def flashattn_fa4_pipe(
       • Persistent kernel with cross-tile producer/epilogue overlap.
 
     Expected perf: in the ``ts_v2`` ballpark (single math WG, single TMEM
-    accumulator).  Won't catch ``fa4_uma.cu`` without the dropped features,
-    but the code reads cleanly and lives in ~80 lines of body.
+    accumulator). Peak-performance variants need the lower-level cluster and
+    role-specialized machinery listed above.
     """
     if groups <= 0 or heads % groups != 0:
         raise ValueError("groups must be a positive divisor of heads")
@@ -467,7 +460,7 @@ def flashattn_fa4_pipe(
                             S_reg[i, j],
                         )
 
-                # ---- online softmax (FA4-style 3 passes condensed) ----
+                # ---- online softmax, condensed into three passes ----
                 T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(accum_dtype))
                 T.reduce_max(S_reg, scores_max, dim=1, clear=False)
@@ -481,7 +474,7 @@ def flashattn_fa4_pipe(
                 for i in T.Parallel(block_M):
                     logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
 
-                # FA4 correction: rescale running O by exp(m_prev - m_new).
+                # Correction: rescale running O by exp(m_prev - m_new).
                 for i, j in T.Parallel(block_M, dim):
                     O_reg[i, j] *= scores_scale[i]
 
@@ -523,7 +516,7 @@ def flashattn_fa4_ws(
     block_N=128,
     num_stages=3,
 ):
-    """FA4 with simple warp specialization, mirroring the GEMM ws_persistent
+    """Simple warp-specialized FlashAttention, mirroring the GEMM ws_persistent
     template in ``examples/gemm_sm100/gemm_tcgen5mma_ws_persistent.py``.
 
     Layout (threads=256, 8 warps):
@@ -542,7 +535,7 @@ def flashattn_fa4_ws(
     WG holds the same fragments as ``ts`` / ``fa4_pipe`` and the producer/MMA
     warps are tiny.  ptxas picks a single static reg count that fits everyone.
 
-    Captures FA4's two biggest unlocks that tilelang *does* support cleanly:
+    Uses two SM100 scheduling features that TileLang supports cleanly:
       1. Multi-stage K/V pipeline via ``T.alloc_shared((num_stages, ...))`` and
          per-stage ``mbar_k_loaded``/``mbar_k_consumed`` arrays.  TMA load for
          iter k+2 runs while the math WG is doing iter k softmax.
@@ -550,8 +543,7 @@ def flashattn_fa4_ws(
          its own warp, so the MMA pipeline doesn't have to wait for softmax FMA
          to retire before issuing the next ``tcgen05.mma``.
 
-    Still skipped vs ``fa4_uma.cu`` (those need 2-CTA cluster work or hand-tuned
-    asm):
+    Still skipped in this compact path:
       • 2-CTA cluster MMA (``use_2cta=True`` + ``cluster_dims=2``).
       • 2-Q-stage interleaving / dim-split correction.
       • Hand-tuned exp2 polynomial.
@@ -1055,7 +1047,7 @@ def flashattn_fa4(
     block_M=128,
     block_N=128,
 ):
-    """FA4-aligned: 256 threads, separated softmax/correction warps.
+    """256-thread split path with separated softmax/correction warps.
 
     Thread partition:
       0-127:   Softmax (read S, exp2, write P) — never touches O
@@ -1388,8 +1380,8 @@ if __name__ == "__main__":
         choices=["ss", "ts", "ts2", "fa4", "fa4_pipe", "fa4_ws", "wasp"],
         default="ss",
         help=("ss: pipeline (default); ts: 256 threads; ts2: improved ts; "
-              "fa4: FA4-aligned 2-WG warp-spec; fa4_pipe: ts2 + num_stages=3 "
-              "K/V multi-stage (tilelang-friendly FA4-lite); wasp: warp-specialized"),
+              "fa4: 2-WG warp-spec; fa4_pipe: ts2 + num_stages=3 "
+              "K/V multi-stage; wasp: warp-specialized"),
     )
     args = parser.parse_args()
     main(
