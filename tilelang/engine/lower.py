@@ -15,7 +15,7 @@ from tilelang.backend import resolve_backend
 
 
 def is_cpu_device_backend(target: Target):
-    return target.kind.name == "c"
+    return target.kind.name in {"c", "llvm"}
 
 
 def has_device_kernel_launch(attrs) -> bool:
@@ -28,8 +28,8 @@ def is_device_call_c_device(func: tirx.PrimFunc):
     calling_conv = attrs.get("calling_conv", CallingConv.DEFAULT)
     is_cpacked = calling_conv == CallingConv.C_PACKED_FUNC
 
-    # Check if it's a C target
-    if "target" in attrs and attrs["target"].kind.name == "c" and not is_cpacked:
+    # CPU targets keep callable PrimFuncs in the device module for source/codegen.
+    if "target" in attrs and attrs["target"].kind.name in {"c", "llvm"} and not is_cpacked:
         return True
 
     return has_device_kernel_launch(attrs)

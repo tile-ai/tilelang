@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 from tvm import IRModule
 from tvm.target import Target
@@ -61,7 +62,7 @@ class Backend:
     supports_target: TargetPredicate | None = None
     normalize_target: TargetNormalizer | None = None
     is_available: AvailabilityCheck = _always_available
-    features: Mapping[str, FeatureQuery] = field(default_factory=dict)
+    features: Mapping[str, FeatureQuery] = field(default_factory=lambda: MappingProxyType({}))
 
     device_codegen: CodegenFunc | None = None
     device_codegen_without_compile: CodegenFunc | None = None
@@ -81,10 +82,11 @@ class Backend:
         if not self.target_kinds:
             raise ValueError(f"Backend {self.name!r} must register at least one target kind")
         object.__setattr__(self, "target_kinds", tuple(self.target_kinds))
+        object.__setattr__(self, "features", MappingProxyType(dict(self.features)))
         execution_backends = dict(self.execution_backends)
         if not execution_backends and self.jit_execution_backends:
             execution_backends = {name: ExecutionBackendSpec(name=name, adapter=name) for name in tuple(self.jit_execution_backends)}
-        object.__setattr__(self, "execution_backends", execution_backends)
+        object.__setattr__(self, "execution_backends", MappingProxyType(execution_backends))
         object.__setattr__(self, "jit_execution_backends", tuple(execution_backends))
         object.__setattr__(self, "language_modules", tuple(self.language_modules))
 
