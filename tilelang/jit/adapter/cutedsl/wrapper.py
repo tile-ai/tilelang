@@ -564,7 +564,12 @@ CUBIN_KERNEL_LAUNCH_TEMPLATE = """\
 
 # Fake tensor creation template
 CUBIN_FAKE_TENSOR_TEMPLATE = """\
-  __fake_{arg_name}__ = make_fake_compact_tensor({dtype_expr}, {arg_name}.shape, stride_order={arg_name}.dim_order()[::-1], assumed_align=16)"""
+  __fake_{arg_name}__ = make_fake_compact_tensor(
+      {dtype_expr},
+      _positive_fake_shape({arg_name}.shape),
+      stride_order={arg_name}.dim_order()[::-1],
+      assumed_align=16,
+  )"""
 
 # Complete cubin generation code template
 # {lib_code} contains the @cute.kernel definitions and is embedded here
@@ -661,6 +666,9 @@ def _generate_cubin_if_needed({cubin_gen_params}):
       "torch.int16": cutlass.Int16,
       "torch.uint16": cutlass.Uint16,
       "torch.uchar": cutlass.Uint8}}
+
+  def _positive_fake_shape(shape):
+    return tuple(max(int(dim), 1) for dim in tuple(shape))
 
 {cubin_gen_code}
 
