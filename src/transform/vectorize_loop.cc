@@ -42,8 +42,8 @@
 
 #include "../op/builtin.h"
 #include "../op/utils.h"
-#include "../target/utils.h"
 #include "arith/scalable_expression.h"
+#include "backend/common/target_utils.h"
 #include "tir/analysis/check_contains.h"
 
 namespace tvm {

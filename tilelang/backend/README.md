@@ -13,8 +13,9 @@ The Python backend layer is split into two parts:
 - `tilelang/<backend>/`: backend-owned Python implementation files, such as
   pass pipelines, tile-op implementation registration, and backend intrinsics.
 
-The native side mirrors this split under `src/backend/<backend>/`, where C++
-op lowering, codegen, runtime modules, stubs, and backend-local CMake files live.
+The native side mirrors this split under `src/<backend>/`, where C++ op
+lowering, codegen, runtime modules, stubs, and backend-local CMake files live.
+`src/backend/` is reserved for shared native backend helpers.
 
 ## Lowering Entry
 
@@ -76,9 +77,9 @@ for that backend.
 ```text
 tilelang/cuda/
   pipeline.py
+  transform/
   op/
   intrinsics/
-  transform/
 
 tilelang/rocm/
   pipeline.py
@@ -91,9 +92,9 @@ tilelang/cpu/
 
 tilelang/metal/
   pipeline.py
+  transform/
   op/
   intrinsics/
-  transform/
 ```
 
 The `pipeline.py` file should expose one complete backend pass sequence after
@@ -106,20 +107,21 @@ The `op/` and `intrinsics/` folders contain Python implementation and helper
 code used by tile-op lowering. For example, CUDA owns MMA/WGMMA/TCGEN05
 intrinsic emitters, while ROCm owns MFMA/WMMA emitters. Backend-local
 transform passes, such as Metal's simdgroup lowering and host-context marking,
-should live under that backend's `transform/` folder.
+should live under that backend's `transform/` package.
 
 ## Native Backend Layout
 
-The native implementation lives under `src/backend`:
+Backend-specific native implementation lives directly under `src/<backend>`:
 
 ```text
-src/backend/
-  common/
+src/
   cpu/
   cuda/
   metal/
   rocm/
   webgpu/
+src/backend/
+  common/
 ```
 
 Typical backend-local subdirectories are:

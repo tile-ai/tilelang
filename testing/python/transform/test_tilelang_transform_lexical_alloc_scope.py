@@ -52,10 +52,10 @@ def _apply_lower_opaque_pipeline(func, target, pass_configs=None):
     pass_configs = pass_configs or {}
     with target, tvm.transform.PassContext(config=pass_configs):
         mod = CUDAPassPipelineBodyPrologue(mod, target)
-        mod = tl.transform.LowerSharedTmem()(mod)
+        mod = tl.cuda.transform.LowerSharedTmem()(mod)
         mod = tl.transform.IfStmtBinding()(mod)
         mod = tl.transform.PlanAndUpdateBufferAllocationLocation()(mod)
-        mod = tl.transform.LowerSharedBarrier()(mod)
+        mod = tl.cuda.transform.LowerSharedBarrier()(mod)
         mod = tl.transform.HoistGlobalBufferAllocations()(mod)
         mod = tl.transform.LowerOpaqueBlock()(mod)
     return mod
