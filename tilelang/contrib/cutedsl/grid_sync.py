@@ -9,9 +9,9 @@ counter declared via llvm.mlir.global. Requires cooperative kernel launch
 
 The barrier:
 1. __syncthreads() within each block
-2. Thread 0 atomically increments global counter, spin-waits until all blocks arrive
-3. Thread 0 resets counter
-4. __syncthreads() within each block
+2. All threads execute a device-scope fence for prior global writes
+3. Thread 0 atomically increments global counter and spin-waits until release
+4. All threads wait for thread 0 and execute a device-scope fence before return
 """
 
 __all__ = ["sync_grid"]
@@ -109,7 +109,9 @@ def _grid_sync_barrier(*, loc=None, ip=None) -> None:
 
     Declares a module-level global counter via llvm.mlir.global, then uses
     inline PTX for the barrier protocol (atomic increment + spin-wait + reset).
-    Only thread 0 per block participates.
+    Only thread 0 per block updates the global barrier state. All threads
+    participate in device-scope fences around the thread-0 publish/wait path so
+    global memory protected by the grid barrier is ordered for the whole block.
     """
     _ensure_global_counter(loc=loc)
 
@@ -151,8 +153,11 @@ def _grid_sync_barrier(*, loc=None, ip=None) -> None:
 
     // Check if this is thread 0
     mov.u32 %r_tid, %tid.x;
+    // Order prior global writes from every thread before thread 0 publishes
+    // this block's arrival.
+    membar.gl;
     setp.ne.s32 %p_is_thread0, %r_tid, 0;
-    @%p_is_thread0 bra GRID_SYNC_DONE;
+    @%p_is_thread0 bra GRID_SYNC_BLOCK_WAIT;
 
     // Compute total number of blocks
     mov.u32 %r_nctaid_x, %nctaid.x;
@@ -176,12 +181,19 @@ def _grid_sync_barrier(*, loc=None, ip=None) -> None:
     st.release.gpu.global.s32 [$0], 0;
     add.s32 %r_new_generation, %r_generation, 1;
     st.release.gpu.global.s32 [$1], %r_new_generation;
-    bra GRID_SYNC_DONE;
+    bra GRID_SYNC_BLOCK_WAIT;
 
 GRID_SYNC_SPIN:
     ld.acquire.gpu.global.s32 %r_new_generation, [$1];
     setp.ne.s32 %p_done, %r_new_generation, %r_generation;
     @!%p_done bra GRID_SYNC_SPIN;
+
+GRID_SYNC_BLOCK_WAIT:
+    // Keep non-zero threads in the block from returning before thread 0 has
+    // observed the grid release, then acquire global writes before user code
+    // resumes after sync_grid().
+    bar.sync 0;
+    membar.gl;
 
 GRID_SYNC_DONE:
 }
