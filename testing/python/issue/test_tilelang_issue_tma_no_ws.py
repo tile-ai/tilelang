@@ -3,8 +3,9 @@ import re
 import tilelang
 import tilelang.testing
 from tilelang import language as T
-from tilelang.layout import make_cutlass_metadata_layout
 import torch
+
+from tilelang.utils.sparse import get_e_factor
 
 
 def _compile_tvm_ffi(func, pass_configs, **kwargs):
@@ -107,6 +108,53 @@ def test_num_stages_one_pure_tma_keeps_auto_warp_specialize():
 
     x = torch.randn((M, K), device="cuda", dtype=torch.float16)
     y = kernel(x)
+    torch.testing.assert_close(y, x)
+    torch.cuda.synchronize()
+
+
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_guarded_pure_tma_pipeline_keeps_auto_warp_specialize():
+    """A pipeline loop nested under a runtime guard should still auto-WS."""
+
+    M, K = 8, 256
+    block_m, block_k = 4, 128
+    threads = 32
+
+    @T.prim_func
+    def guarded_copy_loop(
+        x: T.Tensor((M, K), T.float16),
+        y: T.Tensor((M, K), T.float16),
+        valid_m: T.int32,
+    ):
+        with T.Kernel(T.ceildiv(M, block_m), threads=threads) as pid_m:
+            x_shared = T.alloc_shared((block_m, block_k), dtype=T.float16)
+            if pid_m * block_m < valid_m:
+                for ko in T.Pipelined(T.ceildiv(K, block_k), num_stages=1):
+                    T.copy(
+                        x[
+                            pid_m * block_m : (pid_m + 1) * block_m,
+                            ko * block_k : (ko + 1) * block_k,
+                        ],
+                        x_shared,
+                    )
+                    T.copy(
+                        x_shared,
+                        y[
+                            pid_m * block_m : (pid_m + 1) * block_m,
+                            ko * block_k : (ko + 1) * block_k,
+                        ],
+                    )
+
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
+    kernel = _compile_tvm_ffi(guarded_copy_loop, pass_configs, out_idx=[1])
+
+    src = kernel.get_kernel_source()
+    assert "tl::tma_load" in src
+    assert "__launch_bounds__(160, 1)" in src
+    assert "if (32 <= ((int)threadIdx.x))" in src
+
+    x = torch.randn((M, K), device="cuda", dtype=torch.float16)
+    y = kernel(x, M)
     torch.testing.assert_close(y, x)
     torch.cuda.synchronize()
 
@@ -319,32 +367,27 @@ def test_sparse_ws_regular_metadata_copy_stays_in_producer():
     num_stages = 2
     threads = 128
 
+    e_factor = get_e_factor(T.float16, T.uint8)
+
     @T.prim_func
     def sparse_tensorcore_metadata_copy(
         A_sparse: T.Tensor((M, K // 2), T.float16),
-        E: T.Tensor((M, K // 8), "uint8"),
+        E: T.Tensor((M, K // e_factor), T.uint8),
         B: T.Tensor((K, N), T.float16),
         C: T.Tensor((M, N), T.float16),
     ):
         with T.Kernel(T.ceildiv(N, block_n), T.ceildiv(M, block_m), threads=threads) as (bx, by):
             A_shared = T.alloc_shared((block_m, block_k // 2), T.float16)
             B_shared = T.alloc_shared((block_k, block_n), T.float16)
-            E_shared = T.alloc_shared((block_m, block_k // 8), "uint8")
+            E_shared = T.alloc_shared((block_m, block_k // e_factor), T.uint8)
             C_local = T.alloc_fragment((block_m, block_n), T.float32)
-
-            T.annotate_layout(
-                {
-                    E: make_cutlass_metadata_layout(E, mma_dtype=T.float16, arch="9.0", block_k=block_k),
-                    E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=T.float16, arch="9.0", block_k=block_k),
-                }
-            )
 
             T.clear(C_local)
             for k in T.Pipelined(T.ceildiv(K, block_k), num_stages=num_stages):
-                T.copy(E[by * block_m, k * block_k // 8], E_shared)
+                T.copy(E[by * block_m, k * block_k // e_factor], E_shared)
                 T.copy(A_sparse[by * block_m, k * block_k // 2], A_shared)
                 T.copy(B[k * block_k, bx * block_n], B_shared)
-                T.gemm_sp(A_shared, E_shared, B_shared, C_local, False, False)
+                T.gemm_sp(A_shared, E_shared, B_shared, C_local, transpose_A=False, transpose_E=False, transpose_B=False)
 
             T.copy(C_local, C[by * block_m, bx * block_n])
 
@@ -354,12 +397,10 @@ def test_sparse_ws_regular_metadata_copy_stays_in_producer():
     src = kernel.get_kernel_source()
     producer_idx = src.index("if (128 <= ((int)threadIdx.x)) {")
     consumer_idx = src.index("} else {", producer_idx)
-    metadata_copy_idx = src.index("*(uchar2*)(E +")
-    gemm_idx = src.index("tl::gemm_sp_ss<")
+    metadata_copy_idx = src.index("tl::tma_load(E_desc")
 
     assert producer_idx < metadata_copy_idx < consumer_idx
-    assert consumer_idx < gemm_idx
-    assert "*(uchar2*)(E +" not in src[consumer_idx:]
+    assert "tl::tma_load(E_desc" not in src[consumer_idx:]
 
 
 @tilelang.testing.requires_cuda_compute_version(9, 0)

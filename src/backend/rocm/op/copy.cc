@@ -4,6 +4,9 @@
  */
 
 #include "op/copy.h"
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
 
 #include "op/builtin.h"
 #include "op/utils.h"
@@ -12,8 +15,8 @@
 #include "transform/loop_partition.h"
 #include "transform/ptx_async_copy_injector.h"
 
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/transform.h>
 
 #include <cstdint>
 #include <vector>
@@ -21,7 +24,7 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 namespace rocm {
 
@@ -123,9 +126,11 @@ private:
                           level);
     }
     auto loop_layout = par_op->GetLoopLayout();
-    Stmt lowered_loop = LowerParallelLoop(par_op->GetRoot(), loop_layout,
-                                          T.thread_var, analyzer, T.layout_map,
-                                          par_op->GetPredicate(T.thread_var));
+    Stmt lowered_loop = LowerParallelLoop(
+        par_op->GetRoot(), loop_layout, T.thread_var, analyzer, T.layout_map,
+        par_op->GetPredicate(T.thread_var),
+        /*parallel_loop=*/true,
+        /*should_vectorize=*/true, par_op->LoopLayoutRequiresPaddingGuard());
 
     auto inject_result =
         InjectPTXAsyncCopy(lowered_loop, /*enable_auto_async_copy=*/true,

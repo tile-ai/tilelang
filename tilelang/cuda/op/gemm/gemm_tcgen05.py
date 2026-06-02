@@ -15,11 +15,11 @@ from tilelang.cuda.intrinsics.macro.tcgen05_macro_generator import (
 from tilelang import language as T
 from tilelang.utils.language import retrieve_ptr
 from tilelang.transform.simplify import _Simplify
-from tvm import DataType, tir
+from tvm import DataType, tirx
 from tvm.target import Target
 from tvm.ir import Range
 from tvm.arith import Analyzer
-from typing import Callable
+from collections.abc import Callable
 
 
 _FLOAT8_DTYPES = {
@@ -44,7 +44,7 @@ class GemmTCGEN5(GemmBase):
     of operands A and B.
     """
 
-    def infer_shared_layout(self, dtype, continuity: int, k_major: bool) -> Callable[[tir.Buffer], Layout]:
+    def infer_shared_layout(self, dtype, continuity: int, k_major: bool) -> Callable[[tirx.Buffer], Layout]:
         """Infer the shared-memory layout for TCGEN05 operands.
 
         Sub-byte inputs (e.g. FP4) must use the TCGEN05-specific layout helper so
@@ -134,8 +134,8 @@ class GemmTCGEN5(GemmBase):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_var: tir.Var,
-        mbar_phase_expr: tir.PrimExpr | None = None,
+        thread_var: tirx.Var,
+        mbar_phase_expr: tirx.PrimExpr | None = None,
     ):
         """Lower the GEMM tile-op into a TIR prim_func containing TCGEN5MMA calls."""
         thread_nums = thread_bounds.extent
@@ -234,7 +234,7 @@ class GemmTCGEN5(GemmBase):
             else _Simplify(_gemm_ss_cond, inline_let=True)
         )
 
-    def _lower_blockscaled(self, mma_emitter, thread_bounds, thread_var, mbar_phase_expr: tir.PrimExpr | None = None):
+    def _lower_blockscaled(self, mma_emitter, thread_bounds, thread_var, mbar_phase_expr: tirx.PrimExpr | None = None):
         """Lower block-scaled MXFP8 GEMM to TIR.
 
         Block-scaled GEMM follows explicit-async TCGEN5MMA semantics: the MMA

@@ -4,13 +4,17 @@
  */
 
 #include "backend/cuda/op/copy.h"
+#include "support/check.h"
+#include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/runtime/logging.h>
 
 #include "op/builtin.h"
 #include "op/utils.h"
 #include "target/utils.h"
 
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/transform.h>
 
+#include <optional>
 #include <sstream>
 #include <utility>
 
@@ -18,7 +22,8 @@ namespace tvm {
 namespace tl {
 namespace cuda {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace {
 
@@ -55,6 +60,15 @@ bool GetIsTmaCopy(const CopyNode &op) {
   return GetBoolAnnotation(op, "is_tma_copy");
 }
 
+int64_t GetClusterMask(const CopyNode &op) {
+  if (auto val = op.annotations.Get("cluster_mask")) {
+    if (auto int_val = val->as<IntImmNode>()) {
+      return int_val->value;
+    }
+  }
+  return 0;
+}
+
 bool GetIsAsyncCopy(const CopyNode &op) {
   if (GetBoolAnnotation(op, "is_async_copy")) {
     return true;
@@ -64,6 +78,53 @@ bool GetIsAsyncCopy(const CopyNode &op) {
 
 bool GetNoImplicitAsyncCommitWait(const CopyNode &op) {
   return GetBoolAnnotation(op, attr::kAsyncCopyNoImplicitCommitWait);
+}
+
+enum class PreferredCopyInstruction {
+  kAuto,
+  kTMA,
+  kCPAsync,
+  kSync,
+};
+
+constexpr const char *kPreferInstruction = "prefer_instruction";
+
+constexpr std::pair<const char *, PreferredCopyInstruction>
+    kPreferredCopyInstructions[] = {
+        {"tma", PreferredCopyInstruction::kTMA},
+        {"cp_async", PreferredCopyInstruction::kCPAsync},
+        {"sync", PreferredCopyInstruction::kSync},
+};
+
+std::optional<std::string> GetStringAnnotation(const CopyNode &op,
+                                               const char *key) {
+  auto val = op.annotations.Get(key);
+  if (!val) {
+    return std::nullopt;
+  }
+  auto str = val->as<StringImmNode>();
+  ICHECK(str) << "T.copy " << key << " annotation must be a string, but got "
+              << val.value().GetTypeKey();
+  return str->value;
+}
+
+PreferredCopyInstruction
+ParsePreferredCopyInstruction(const std::string &prefer) {
+  for (const auto &[name, inst] : kPreferredCopyInstructions) {
+    if (prefer == name) {
+      return inst;
+    }
+  }
+  LOG(FATAL) << "Unsupported T.copy prefer_instruction=\"" << prefer
+             << "\". Expected one of: \"tma\", \"cp_async\", \"sync\".";
+  return PreferredCopyInstruction::kAuto;
+}
+
+PreferredCopyInstruction GetPreferredInstruction(const CopyNode &op) {
+  if (auto prefer = GetStringAnnotation(op, kPreferInstruction)) {
+    return ParsePreferredCopyInstruction(prefer.value());
+  }
+  return PreferredCopyInstruction::kAuto;
 }
 
 bool CheckGlobalStrides(const Buffer &buffer, arith::Analyzer *analyzer,
@@ -319,6 +380,10 @@ const char *CopyInstToString(CopyInst inst) {
     return "TMemLoad";
   case CopyInst::kTMemStore:
     return "TMemStore";
+  case CopyInst::kBulkLoadGather4:
+    return "BulkLoadGather4";
+  case CopyInst::kBulkStoreScatter4:
+    return "BulkStoreScatter4";
   case CopyInst::kInvalid:
     return "Invalid";
   default:
@@ -343,7 +408,9 @@ struct CopyFacts {
   bool explicit_tma = false;
   bool explicit_cp_async = false;
   bool no_implicit_async_commit_wait = false;
+  PreferredCopyInstruction prefer_instruction = PreferredCopyInstruction::kAuto;
   bool disable_tma = false;
+  int64_t cluster_mask = 0;
   bool can_bulk_load_1d = false;
   bool can_bulk_store_1d = false;
   bool can_bulk_load = false;
@@ -455,7 +522,9 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
   facts.explicit_tma = GetIsTmaCopy(op);
   facts.explicit_cp_async = GetIsAsyncCopy(op);
   facts.no_implicit_async_commit_wait = GetNoImplicitAsyncCommitWait(op);
+  facts.prefer_instruction = GetPreferredInstruction(op);
   facts.disable_tma = GetDisableTMA(op);
+  facts.cluster_mask = GetClusterMask(op);
   facts.tma_unavailable_reason = MakeTmaUnavailableReason(op);
   facts.async_unavailable_reason = MakeAsyncUnavailableReason(op, ctx.target);
   facts.pass_context_disables_tma =
@@ -488,6 +557,9 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
 
   if (facts.can_bulk_load_1d) {
     facts.can_bulk_load_ignore_last_dim = true;
+    facts.can_bulk_load =
+        CheckBulkLoad(op, ctx.target, analyzer, /*check_last_dim=*/true,
+                      ctx.emit_diagnostics);
   } else {
     facts.can_bulk_load_ignore_last_dim =
         CheckBulkLoad(op, ctx.target, analyzer, /*check_last_dim=*/false,
@@ -499,6 +571,9 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
 
   if (facts.can_bulk_store_1d) {
     facts.can_bulk_store_ignore_last_dim = true;
+    facts.can_bulk_store =
+        CheckBulkStore(op, ctx.target, analyzer, /*check_last_dim=*/true,
+                       ctx.emit_diagnostics);
   } else {
     facts.can_bulk_store_ignore_last_dim =
         CheckBulkStore(op, ctx.target, analyzer, /*check_last_dim=*/false,
@@ -520,7 +595,30 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
 
 CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
                                             const CopyAnalysisContext &ctx) {
+  // tile::gather4 / scatter4 markers take precedence over generic TMA paths.
+  // The IR carries explicit row indices via annotations and must always be
+  // lowered through LowerBulkCopyGather4 (no fallback path makes sense).
+  if (GetBoolAnnotation(op, "is_gather4")) {
+    return Supported(CopyInst::kBulkLoadGather4);
+  }
+  if (GetBoolAnnotation(op, "is_scatter4")) {
+    return Supported(CopyInst::kBulkStoreScatter4);
+  }
+
   CopyFacts facts = AnalyzeCopyFacts(op, ctx);
+  if (facts.cluster_mask != 0) {
+    if (facts.can_bulk_load) {
+      return Supported(CopyInst::kBulkLoad);
+    }
+    std::ostringstream oss;
+    oss << "cluster_mask=0x" << std::hex << facts.cluster_mask
+        << " requires descriptor-based TMA (kBulkLoad), but the copy does not "
+           "meet TMA bulk-load constraints. src="
+        << op.src->name << " (scope=" << op.src.scope()
+        << "), dst=" << op.dst->name << " (scope=" << op.dst.scope() << ").";
+    return Unsupported(oss.str());
+  }
+
   if (facts.explicit_tma) {
     CopyInst inst =
         SelectTmaInst(facts, /*allow_load=*/true, /*allow_store=*/true,
@@ -533,6 +631,42 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
   if (facts.explicit_cp_async || facts.no_implicit_async_commit_wait) {
     return facts.can_cp_async ? Supported(CopyInst::kCPAsync)
                               : Unsupported(facts.async_unavailable_reason);
+  }
+
+  if (facts.prefer_instruction == PreferredCopyInstruction::kTMA) {
+    if (facts.disable_tma) {
+      return Unsupported("T.copy prefer_instruction=\"tma\" conflicts with "
+                         "disable_tma=true.");
+    }
+    if (facts.pass_context_disables_tma) {
+      return Unsupported("T.copy prefer_instruction=\"tma\" conflicts with "
+                         "pass config tl.disable_tma_lower=true.");
+    }
+    CopyInst inst =
+        SelectTmaInst(facts, /*allow_load=*/true, /*allow_store=*/true,
+                      /*check_last_dim=*/true);
+    return inst == CopyInst::kInvalid
+               ? Unsupported("T.copy prefer_instruction=\"tma\" could not be "
+                             "honored: " +
+                             facts.tma_unavailable_reason)
+               : Supported(inst);
+  }
+
+  if (facts.prefer_instruction == PreferredCopyInstruction::kCPAsync) {
+    if (!IsAutoAsyncCopyEnabled(/*default_enabled=*/true)) {
+      return Unsupported(
+          "T.copy prefer_instruction=\"cp_async\" conflicts with "
+          "pass config tl.enable_async_copy=false.");
+    }
+    return facts.can_cp_async
+               ? Supported(CopyInst::kCPAsync)
+               : Unsupported("T.copy prefer_instruction="
+                             "\"cp_async\" could not be honored: " +
+                             facts.async_unavailable_reason);
+  }
+
+  if (facts.prefer_instruction == PreferredCopyInstruction::kSync) {
+    return Supported(SelectSyncLikeInst(facts));
   }
 
   if (!facts.disable_tma && !facts.pass_context_disables_tma) {
@@ -555,6 +689,10 @@ std::string ClassifyCopyForInstructionAnnotation(const CopyNode &op,
   CopyFacts facts = AnalyzeCopyFacts(op, ctx);
   if (!facts.cuda_like_target) {
     return "sync";
+  }
+
+  if (facts.cluster_mask != 0) {
+    return facts.can_bulk_load ? "tma" : "sync";
   }
 
   if (facts.explicit_tma) {
@@ -583,6 +721,11 @@ CopyInstSelection ClassifyWarpSpecializedProducerCopy(const CopyNode &op,
   CopyFacts facts = AnalyzeCopyFacts(op, ctx);
   if (!facts.cuda_like_target) {
     return Supported(CopyInst::kNormal);
+  }
+
+  if (facts.cluster_mask != 0) {
+    return facts.can_bulk_load ? Supported(CopyInst::kBulkLoad)
+                               : Unsupported(facts.tma_unavailable_reason);
   }
 
   if (facts.explicit_tma) {

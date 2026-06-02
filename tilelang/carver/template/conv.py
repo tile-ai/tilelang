@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from .base import BaseTemplate
-from tvm import te, tir
+from tvm import te, tirx
 from ..roller import Hint
 from ..utils import get_roller_hints_from_func
 
@@ -130,7 +130,7 @@ class ConvTemplate(BaseTemplate):
                 te.if_then_else(
                     te.all(h_in >= 0, h_in < H, w_in >= 0, w_in < W),
                     A[n, h_in, w_in, c].astype(accum_dtype) * B[kh, kw, c, f].astype(accum_dtype),
-                    tir.const(0, accum_dtype),
+                    tirx.const(0, accum_dtype),
                 ),
                 axis=[kh, kw, c],
             )

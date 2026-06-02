@@ -403,8 +403,8 @@ def get_target_compute_version(target=None):
     # 1. input target object
     # 2. Target.current()
     target = target or Target.current()
-    if target and target.arch:
-        arch = target.arch.split("_")[1].rstrip("af")
+    if target and "arch" in target.attrs:
+        arch = str(target.attrs["arch"]).split("_")[1].rstrip("af")
         if len(arch) == 2:
             major, minor = arch
             # Handle old format like sm_89
@@ -420,7 +420,9 @@ def get_target_compute_version(target=None):
     if tvm.cuda(0).exist:
         return tvm.cuda(0).compute_version
 
-    raise ValueError("No CUDA architecture was specified or GPU detected.Try specifying it by adding '-arch=sm_xx' to your target.")
+    raise ValueError(
+        "No CUDA architecture was specified or GPU detected. Specify it with a target config such as {'kind': 'cuda', 'arch': 'sm_90'}."
+    )
 
 
 def parse_compute_version(compute_version) -> tuple[int, int]:
@@ -506,8 +508,8 @@ def have_tensorcore(compute_version=None, target=None):
         else:
             if target is None or "arch" not in target.attrs:
                 warnings.warn(
-                    "Tensorcore will be disabled due to no CUDA architecture specified."
-                    "Try specifying it by adding '-arch=sm_xx' to your target.",
+                    "Tensorcore will be disabled due to no CUDA architecture specified. "
+                    "Specify it with a target config such as {'kind': 'cuda', 'arch': 'sm_90'}.",
                     stacklevel=2,
                 )
                 return False

@@ -2,8 +2,8 @@ import tilelang.testing
 import tilelang.language as T
 from tvm.arith import Analyzer
 from tvm.ir.expr import Range
-from tvm.tir.expr import Not, Or
-from tvm.tir import all as tir_all
+from tvm.tirx.expr import Not, Or
+from tvm import tirx
 
 
 def implies(x, y):
@@ -24,23 +24,23 @@ def test_hard_prove():
             raise AssertionError(f"Failed to prove: {expr}\nSMT-LIB2:\n{smtlib2}")
 
     def complex_expr_1():
-        return implies(tir_all(a > 0, b > 0, c > 0), ((b - a) // c) * c + a <= b)
+        return implies(tirx.all(a > 0, b > 0, c > 0), ((b - a) // c) * c + a <= b)
 
     check_expr(complex_expr_1())
 
     def complex_expr_2():
-        return implies(tir_all(a < b, b < c, a * d < b * d), b * d < c * d)
+        return implies(tirx.all(a < b, b < c, a * d < b * d), b * d < c * d)
 
     check_expr(complex_expr_2())
 
     def complex_expr_3():
-        return implies(tir_all(a >= 0, a < 128), a // 128 == (a // 64 * 32 + a % 32 // 16 * 8) // 64)
+        return implies(tirx.all(a >= 0, a < 128), a // 128 == (a // 64 * 32 + a % 32 // 16 * 8) // 64)
 
     check_expr(complex_expr_3())
 
     def complex_expr_4():
         return implies(
-            tir_all(a >= 0, a < 128),
+            tirx.all(a >= 0, a < 128),
             (a % 16 * 64 + a // 64 * 32 + a % 8 // 4 * 32 + (a % 32 // 16 + a % 2) % 2 * 8 + 16 - (a // 64 + a % 8 // 4) // 2 * 64) // 512
             == (a % 16 * 64 + a // 64 * 32 + a % 8 // 4 * 32 + (a % 32 // 16 + a % 2) % 2 * 8 - (a // 64 + a % 8 // 4) // 2 * 64) // 512,
         )
@@ -56,7 +56,7 @@ def test_smtlib2():
     c = T.Var("c", T.int32)
 
     def complex_expr_1():
-        return implies(tir_all(a > 0, b > 0, c > 0), ((b - a) // c) * c + a <= b)
+        return implies(tirx.all(a > 0, b > 0, c > 0), ((b - a) // c) * c + a <= b)
 
     e = complex_expr_1()
     analyzer = Analyzer()

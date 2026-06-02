@@ -16,4 +16,4 @@ if docker buildx version >/dev/null 2>&1; then
   export CIBW_ARCHS='x86_64 aarch64'
 fi
 
-NO_VERSION_LABEL=ON CIBW_BUILD='cp39-*' cibuildwheel . 2>&1 | tee cibuildwheel.log
+NO_VERSION_LABEL=ON CIBW_BUILD='cp310-*' cibuildwheel . 2>&1 | tee cibuildwheel.log

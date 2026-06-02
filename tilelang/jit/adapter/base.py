@@ -3,9 +3,22 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Callable
-from tilelang.engine.param import KernelParam
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+
 import torch
+
+from tilelang.engine.param import KernelParam
+
+
+@dataclass(frozen=True)
+class CachedTextSource:
+    text: str | None = None
+    path: str | None = None
+
+
+CachedTextSourceLike = CachedTextSource | str | None
 
 
 class BaseKernelAdapter(ABC):
@@ -94,3 +107,34 @@ class BaseKernelAdapter(ABC):
 
     def _post_init(self):
         self.func = self._convert_torch_func()
+
+    @staticmethod
+    def _normalize_cached_text_source(source: CachedTextSourceLike) -> CachedTextSource:
+        if isinstance(source, CachedTextSource):
+            return source
+        if source is None:
+            return CachedTextSource()
+        return CachedTextSource(text=source)
+
+    def _set_cached_text_source(self, source_attr: str, path_attr: str, source: CachedTextSourceLike) -> CachedTextSource:
+        source = self._normalize_cached_text_source(source)
+        setattr(self, source_attr, source.text)
+        setattr(self, path_attr, source.path)
+        return source
+
+    def _load_cached_text_source(self, source_attr: str, path_attr: str) -> str | None:
+        source = getattr(self, source_attr, None)
+        if source is not None:
+            return source
+
+        path = getattr(self, path_attr, None)
+        if path is None:
+            return None
+
+        try:
+            with open(path, encoding="utf-8") as file:
+                source = file.read()
+        except OSError:
+            return None
+        setattr(self, source_attr, source)
+        return source

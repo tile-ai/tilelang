@@ -22,27 +22,28 @@
  * \file hoist_global_buffer_allocations.cc
  */
 
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
-#include <tvm/tir/var.h>
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
+#include <tvm/tirx/var.h>
 
 #include "../op/utils.h"
 #include "common/attr.h"
 #include "tir/transforms/ir_utils.h"
-#include "tvm/tir/stmt.h"
+#include <tvm/tirx/stmt.h>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
-using namespace tir::transform;
+using namespace tirx;
+using namespace tirx::transform;
 
 class GlobalBufferAllocationsHoister : public StmtMutator {
 public:
-  Stmt VisitStmt_(const BlockNode *op) final {
-    auto node = Downcast<Block>(StmtMutator::VisitStmt_(op));
+  Stmt VisitStmt_(const SBlockNode *op) final {
+    auto node = Downcast<SBlock>(StmtMutator::VisitStmt_(op));
 
     if (IsHostMainBlock(op)) {
       for (const auto &buf : global_buffers_) {

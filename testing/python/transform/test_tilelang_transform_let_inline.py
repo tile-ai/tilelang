@@ -16,7 +16,7 @@ def test_let_binding():
     def before(A: T.Tensor((128, 128), T.float32), B: T.Tensor((128, 128), T.float32)):
         for i in range(128):
             for j in range(128):
-                with T.block("compute"):
+                with T.sblock("compute"):
                     factor = T.float32(2.0)
                     value = A[i, j] * factor
                     B[i, j] = value
@@ -25,7 +25,7 @@ def test_let_binding():
     def expected(A: T.Tensor((128, 128), T.float32), B: T.Tensor((128, 128), T.float32)):
         for i in range(128):
             for j in range(128):
-                with T.block("compute"):
+                with T.sblock("compute"):
                     B[i, j] = A[i, j] * T.float32(2.0)
 
     _check(before, expected)
@@ -35,14 +35,14 @@ def test_parallel_scope():
     @T.prim_func
     def before(A: T.Tensor((128,), T.float32)):
         for i in T.Parallel(128):
-            with T.block("parallel"):
+            with T.sblock("parallel"):
                 value = T.float32(1.0)
                 A[i] = value
 
     @T.prim_func
     def expected(A: T.Tensor((128,), T.float32)):
         for i in T.Parallel(128):
-            with T.block("parallel"):
+            with T.sblock("parallel"):
                 A[i] = T.float32(1.0)
 
     _check(before, expected)

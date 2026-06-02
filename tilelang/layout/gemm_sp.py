@@ -18,7 +18,7 @@ def decompose_col_major(index_1d: int, basis: list[int]) -> list[int]:
     return res
 
 
-def make_cutlass_metadata_layout_sm90(buffer: tvm.tir.Buffer, mma_dtype: str, block_k: int):
+def make_cutlass_metadata_layout_sm90(buffer: tvm.tirx.Buffer, mma_dtype: str, block_k: int):
     """Make a layout of metadata that is compatible with cutlass sm90 compression kernel. Note that layout atom is the same for smem and gmem.
 
     Args:
@@ -118,7 +118,7 @@ def make_cutlass_metadata_layout_sm90(buffer: tvm.tir.Buffer, mma_dtype: str, bl
     return T.Layout(shape, transform)
 
 
-def make_cutlass_metadata_layout_sm8x(buffer: tvm.tir.Buffer, mma_dtype: str):
+def make_cutlass_metadata_layout_sm8x(buffer: tvm.tirx.Buffer, mma_dtype: str):
     """Make a layout of metadata that is compatible with cutlass sm8x compression kernel. Note that layout atom is the same for smem and gmem.
         ref: https://github.com/pytorch/pytorch/blob/d0c24b392cbb7b213d22e42c52c6c2d1ac2da1bd/torch/sparse/_semi_structured_conversions.py#L5
     Args:
@@ -147,7 +147,7 @@ def make_cutlass_metadata_layout_sm8x(buffer: tvm.tir.Buffer, mma_dtype: str):
     return T.Layout(buffer.shape, ColumnMajorInterleaved)
 
 
-def make_cutlass_metadata_layout(buffer: tvm.tir.Buffer, mma_dtype: str = T.float16, arch: str | None = None, **extra_args):
+def make_cutlass_metadata_layout(buffer: tvm.tirx.Buffer, mma_dtype: str = T.float16, arch: str | None = None, **extra_args):
     if arch is None:
         arch = nvcc.get_target_compute_version()
 

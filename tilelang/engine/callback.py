@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Callable
+from collections.abc import Callable
 import tvm_ffi
 from tvm.target import Target
 

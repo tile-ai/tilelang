@@ -20,13 +20,14 @@
  * (default: OFF)
  */
 
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include "support/check.h"
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include "../op/builtin.h"
 #include "../op/utils.h"
@@ -36,7 +37,7 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 class LowerLDGSTGRewriter : public StmtExprMutator {
 public:
@@ -118,6 +119,17 @@ public:
       if (auto store = if_stmt->then_case.as<BufferStoreNode>()) {
         // Only handle global memory stores
         if (IsGlobalBuffer(store->buffer)) {
+          // Lowering `if (pred) { store(value); }` to
+          // `store_conditional(value, pred)` evaluates `value` before the
+          // predicate is applied by the intrinsic. This is only safe when the
+          // value can be evaluated unconditionally. Global loads are handled by
+          // this pass using predicated ldg intrinsics below; shared/local loads
+          // do not have an equivalent guard here and must remain inside the
+          // explicit IfThenElse.
+          if (!CanEvaluateStoreValueOutsidePredicate(store->value)) {
+            return StmtExprMutator::VisitStmt_(if_stmt);
+          }
+
           // Assume buffer has been flattened by FlattenBuffer pass
           ICHECK(store->indices.size() == 1)
               << "Expected flattened buffer with single index, but got "
@@ -291,8 +303,21 @@ public:
 private:
   bool enable_non_predicated_{false};
   bool enable_predicated_{true};
-  Optional<PrimExpr>
+  ffi::Optional<PrimExpr>
       current_predicate_; // Track predicate context for nested loads
+
+  bool CanEvaluateStoreValueOutsidePredicate(const PrimExpr &value) {
+    bool safe = true;
+    PostOrderVisit(value, [&](const ObjectRef &node) {
+      if (!safe) {
+        return;
+      }
+      if (const auto *load = node.as<BufferLoadNode>()) {
+        safe = IsGlobalBuffer(load->buffer);
+      }
+    });
+    return safe;
+  }
 
   // Create access pointer for the buffer at given base offset
   PrimExpr CreateAccessPtr(const Buffer &buffer, const PrimExpr &base,
@@ -418,7 +443,7 @@ private:
     PrimExpr ptr = CreateAccessPtr(store->buffer, base, 2);
 
     // Set predicate context so that nested loads also use predicated version
-    Optional<PrimExpr> old_predicate = current_predicate_;
+    ffi::Optional<PrimExpr> old_predicate = current_predicate_;
     current_predicate_ = predicate;
 
     // Get the value to store (loads inside will use predicated version)
@@ -462,7 +487,7 @@ private:
   }
 };
 
-using namespace tir::transform;
+using namespace tirx::transform;
 
 tvm::transform::Pass LowerLDGSTG() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {

@@ -5,12 +5,14 @@
 #ifndef TVM_TL_TARGET_CODEGEN_CUTEDSL_H_
 #define TVM_TL_TARGET_CODEGEN_CUTEDSL_H_
 
+#include "support/check.h"
 #include <tvm/target/codegen.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/op.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op.h>
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "codegen_py.h"
@@ -23,6 +25,8 @@ public:
   CodeGenTileLangCuTeDSL();
 
 protected:
+  void InitFuncState_(const PrimFunc &f) override;
+
   void PrintFuncDecorator_(std::ostream &os) override; // NOLINT(*)
   void PreFunctionBody_(const PrimFunc &f) override;
 
@@ -44,7 +48,8 @@ protected:
                   std::ostream &os) override; // NOLINT(*)
 
   void VisitStmt_(const BufferStoreNode *op) override;
-  void VisitStmt_(const AllocateNode *op) override;
+  void VisitStmt_(const BindNode *op) override;
+  void VisitStmt_(const AllocBufferNode *op) override;
   void VisitStmt_(const AttrStmtNode *op) override;
   void VisitStmt_(const ForNode *op) override;
   void VisitStmt_(const IfThenElseNode *op) override;
@@ -94,6 +99,8 @@ private:
   const std::string mbarrier_name_ = "mbarrier";
 
   std::unordered_map<const VarNode *, IntImm> unroll_factor_;
+
+  std::unordered_set<const VarNode *> raw_pointer_vars_;
 
   std::vector<std::string> eviction_policy_names_ = {
       "EVICT_NORMAL", "EVICT_FIRST", "EVICT_LAST"};

@@ -4,6 +4,10 @@
  */
 
 #include "op/atomic_add.h"
+#include "support/check.h"
+#include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
 
 #include "backend/cuda/op/copy.h"
 #include "layout/layout.h"
@@ -13,16 +17,17 @@
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
 
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/op_attr_types.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
 
 #include <vector>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace cuda {
 
@@ -184,9 +189,9 @@ For MakeSIMTLoop(const AtomicAddNode &op, arith::Analyzer *analyzer) {
   auto annotations = op.annotations;
   annotations.erase("use_tma");
   Call atomicadd_call =
-      tvm::tir::Call(op.dst->dtype, op.GetElemOp(), new_args, annotations);
+      tvm::tirx::Call(op.dst->dtype, op.GetElemOp(), new_args, annotations);
 
-  Stmt body = tvm::tir::Evaluate(atomicadd_call);
+  Stmt body = tvm::tirx::Evaluate(atomicadd_call);
 
   for (int i = loop_vars.size() - 1; i >= 0; i--) {
     Map<String, ObjectRef> loop_annotations;
@@ -241,7 +246,9 @@ struct AtomicAdd {
     }
     auto loop_layout = par_op->GetLoopLayout();
     return LowerParallelLoop(fused_loop, loop_layout, T.thread_var, analyzer,
-                             T.layout_map, par_op->GetPredicate(T.thread_var));
+                             T.layout_map, par_op->GetPredicate(T.thread_var),
+                             /*parallel_loop=*/true, /*should_vectorize=*/true,
+                             par_op->LoopLayoutRequiresPaddingGuard());
   }
 
   static LayoutMap InferLayout(const AtomicAddNode &op,
@@ -484,7 +491,7 @@ struct AtomicAdd {
     seq.push_back(tma_reduce);
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(),
-                                {IntImm(DataType::Int(32), 0)})));
+                                {IntImm(DataType::Int(32), 0), Bool(true)})));
     return IfThenElse(EQ(T.thread_var, T.thread_bounds->min),
                       SeqStmt(std::move(seq)));
   }

@@ -9,7 +9,9 @@ The minimized code clearly shows the root cause of the bug:
 - This causes a dimension mismatch in T.gemm()
 """
 
+import tilelang
 import tilelang.language as T
+import torch
 
 
 class MatmulConfig:
@@ -22,20 +24,24 @@ class MatmulConfig:
         self.block_K = 1
 
 
-def buggy_matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32, *args, **kwargs):
-    @T.prim_func
-    def matmul_kernel():
-        with T.Kernel():
-            A_shared = T.alloc_shared((block_M, block_K), dtype)
-            B_shared = T.alloc_shared((block_M, block_N), dtype)  # Bug: should be (block_K, block_N)
-            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-            T.gemm(A_shared, B_shared, C_local)
+@tilelang.jit
+def buggy_matmul(A, B, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
+    M, N, K = T.const("M, N, K")
+    A: T.Tensor((M, K))
+    B: T.Tensor((N,))
+    with T.Kernel():
+        A_shared = T.alloc_shared((block_M, block_K), dtype)
+        B_shared = T.alloc_shared((block_M, block_N), dtype)  # Bug: should be (block_K, block_N)
+        C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+        T.gemm(A_shared, B_shared, C_local)
 
 
 def run_kernel(config, *args, **kwargs):
     M, N, K = (config.M, config.N, config.K)
     block_M, block_N, block_K = (config.block_M, config.block_N, config.block_K)
-    buggy_matmul(M, N, K, block_M, block_N, block_K)
+    a = torch.randn(M, K)
+    b = torch.randn(N)
+    buggy_matmul(a, b, block_M, block_N, block_K)
 
 
 def main(*args, **kwargs):
@@ -44,6 +50,10 @@ def main(*args, **kwargs):
         run_kernel(config)
     except Exception as e:
         print(f"{e}")
+    else:
+        pass
+    finally:
+        pass
 
 
 main()

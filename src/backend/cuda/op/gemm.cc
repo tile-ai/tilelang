@@ -4,14 +4,15 @@
  */
 
 #include "op/gemm.h"
+#include "support/check.h"
+#include <tvm/runtime/logging.h>
 
 #include "op/builtin.h"
 #include "op/tcgen5_meta.h"
 #include "op/utils.h"
 #include "target/utils.h"
 
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/transform.h>
 
 #include <algorithm>
 #include <cmath>
@@ -22,7 +23,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace cuda {
 
@@ -52,8 +54,7 @@ bool CheckWgmma(const GemmNode &op) {
     if (op.a_->dtype == DataType::BFloat(16) &&
         op.b_->dtype == DataType::BFloat(16))
       return op.k_ % 16 == 0;
-    if (op.a_->dtype == DataType::Float(32) &&
-        op.b_->dtype == DataType::Float(32))
+    if (op.a_->dtype.is_tfloat32() && op.b_->dtype.is_tfloat32())
       return (!op.transA_) && op.transB_ && op.k_ % 8 == 0;
     if (op.a_->dtype.is_float8() && op.b_->dtype.is_float8())
       return (!op.transA_) && op.transB_ && op.k_ % 32 == 0;
@@ -297,8 +298,7 @@ struct Gemm {
     if (gemm_inst == kCudaWGMMA) {
       return ComputeWgmmaWarpPartition(policy, M, N, num_warps);
     }
-    int k_n_per_warp =
-        (TargetIsVolta(target) || TargetIsTuring(target)) ? 16 : 8;
+    int k_n_per_warp = TargetIsVolta(target) ? 16 : 8;
     return ComputeDefaultWarpPartition(policy, M, N, num_warps, k_n_per_warp);
   }
 
@@ -345,7 +345,7 @@ const bool cuda_gemm_registered = RegisterCudaGemm();
 } // namespace
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def(
       "tl.get_tcgen5_mma_meta", [](int M, int N, int K, DataType ab_dtype,
                                    DataType c_dtype, bool disable_2cta) {

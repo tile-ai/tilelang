@@ -7,6 +7,7 @@
 #define TVM_TL_BACKEND_COMMON_OP_TRANSPOSE_H_
 
 #include "op/transpose.h"
+#include <tvm/ir/cast.h>
 
 #include "op/utils.h"
 #include "transform/common/loop_fusion_utils.h"
@@ -21,7 +22,7 @@ namespace tvm {
 namespace tl {
 namespace backend {
 
-using namespace tir;
+using namespace tirx;
 
 struct Transpose {
   static Stmt Lower(const TransposeNode &op, const LowerArgs &T,
@@ -50,7 +51,9 @@ struct Transpose {
     auto loop_layout = par_op->GetLoopLayout();
     return LowerParallelLoop(par_op->GetRoot(), loop_layout, T.thread_var,
                              analyzer, T.layout_map,
-                             par_op->GetPredicate(T.thread_var));
+                             par_op->GetPredicate(T.thread_var),
+                             /*parallel_loop=*/true, /*should_vectorize=*/true,
+                             par_op->LoopLayoutRequiresPaddingGuard());
   }
 };
 

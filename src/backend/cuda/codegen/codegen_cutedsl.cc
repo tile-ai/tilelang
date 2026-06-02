@@ -4,13 +4,15 @@
 
 #include "codegen_cutedsl.h"
 #include "backend/cuda/codegen/ptx.h"
+#include "support/check.h"
 #include "target/codegen_utils.h"
 #include <tvm/arith/analyzer.h>
-#include <tvm/ffi/function.h>
+#include <tvm/ir/cast.h>
 #include <tvm/ir/transform.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/index_map.h>
-#include <tvm/tir/op.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/index_map.h>
+#include <tvm/tirx/op.h>
 
 #include <cmath>
 #include <cstdint>
@@ -24,11 +26,13 @@
 
 namespace tvm {
 namespace codegen {
+
+using namespace ffi;
 namespace {
 
 // Helper to check if a statement subtree contains loop break ops
 // (either tl::loop_break() or builtin::break_loop())
-class LoopBreakDetector : public tir::StmtExprVisitor {
+class LoopBreakDetector : public tirx::StmtExprVisitor {
 public:
   bool found = false;
   void VisitExpr_(const CallNode *op) override {
@@ -140,16 +144,37 @@ CodeGenTileLangCuTeDSL::CodeGenTileLangCuTeDSL() {
       pass_ctx->GetConfig<Bool>(tl::kEnableFastMath, Bool(false)).value();
 }
 
+void CodeGenTileLangCuTeDSL::InitFuncState_(const PrimFunc &f) {
+  raw_pointer_vars_.clear();
+  CodeGenTileLangPY::InitFuncState_(f);
+}
+
 std::string CodeGenTileLangCuTeDSL::CanonicalizeFastmathFunctionName_(
     const std::string &func_name) const {
   static const std::unordered_map<std::string, std::string> kFastMathMap = {
-      {"divf", "tl.divf"},    {"exp", "tl.exp"},    {"expf", "tl.exp"},
-      {"exp2", "tl.exp2"},    {"exp2f", "tl.exp2"}, {"log", "tl.log"},
-      {"logf", "tl.log"},     {"log2", "tl.log2"},  {"log2f", "tl.log2"},
-      {"log10", "tl.log10"},  {"tan", "tl.tan"},    {"cos", "tl.cos"},
-      {"sin", "tl.sin"},      {"sqrt", "tl.sqrt"},  {"sqrtf", "tl.sqrt"},
-      {"tanh", "tl.tanh"},    {"tanhf", "tl.tanh"}, {"rsqrt", "tl.rsqrt"},
-      {"rsqrtf", "tl.rsqrt"}, {"fabs", "tl.fabsf"}, {"fabsf", "tl.fabsf"},
+      {"divf", "tl.divf"},
+      {"exp", "tl.exp"},
+      {"expf", "tl.exp"},
+      {"exp2", "tl.exp2"},
+      {"exp2f", "tl.exp2"},
+      {"log", "tl.log"},
+      {"logf", "tl.log"},
+      {"log2", "tl.log2"},
+      {"log2f", "tl.log2"},
+      {"log10", "tl.log10"},
+      {"tan", "tl.tan"},
+      {"cos", "tl.cos"},
+      {"sin", "tl.sin"},
+      {"sqrt", "tl.sqrt"},
+      {"sqrtf", "tl.sqrt"},
+      {"tanh", "tl.tanh"},
+      {"tanhf", "tl.tanh"},
+      {"rsqrt", "tl.rsqrt"},
+      {"rsqrtf", "tl.rsqrt"},
+      {"fabs", "tl.fabsf"},
+      {"fabsf", "tl.fabsf"},
+      {"copysign", "tl.copysignf"},
+      {"copysignf", "tl.copysignf"},
   };
 
   auto it = kFastMathMap.find(func_name);
@@ -188,6 +213,10 @@ std::string DTypeToString(DataType t) {
     if (bits == 16 || bits == 32 || bits == 64) {
       elem_type = "Float" + std::to_string(bits);
     }
+  } else if (t.is_tfloat32()) {
+    // CuTeDSL TF32 scalar arithmetic is only valid in MMA paths; use FP32 for
+    // storage and elementwise arithmetic since TF32 has the same memory layout.
+    elem_type = "Float32";
   } else if (t.is_bfloat16()) {
     elem_type = "BFloat16";
   } else if (t.is_float8()) {
@@ -242,8 +271,8 @@ std::string DTypeToString(DataType t) {
 
 void CodeGenTileLangCuTeDSL::PrintType(DataType t,
                                        std::ostream &os) { // NOLINT(*)
-  CHECK(t.is_scalar()) << "Should not print a non-scalar type in CuTeDSL: "
-                       << t;
+  ICHECK(t.is_scalar()) << "Should not print a non-scalar type in CuTeDSL: "
+                        << t;
   os << DTypeToString(t);
 }
 
@@ -437,7 +466,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const MaxNode *op,
  * - Emits to `os` and the internal codegen output stream.
  * - May set internal feature flags (e.g., need_cooperative_groups_).
  * - May open/close SSA scopes and mutate internal variable mappings.
- * - May call LOG(FATAL) / CHECK / ICHECK on invalid or unsupported argument
+ * - May call LOG(FATAL) / ICHECK on invalid or unsupported argument
  *   patterns.
  *
  * @param op The call node to generate code for; the function inspects op->op
@@ -702,8 +731,11 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     print_extern_call_stmt("tl.tma_store_arrive");
   } else if (op->op.same_as(tl::tma_store_wait())) {
     int count = Downcast<IntImm>(op->args[0])->value;
+    bool read =
+        op->args.size() == 1 || Downcast<IntImm>(op->args[1])->value != 0;
     PrintIndent();
-    stream << "tl.tma_store_wait(" << count << ")\n";
+    stream << "tl.tma_store_wait(" << count
+           << ", read=" << (read ? "True" : "False") << ")\n";
   } else if (op->op.same_as(tl::warpgroup_arrive())) {
     PrintIndent();
     stream << "tl.warpgroup_arrive()\n";
@@ -736,6 +768,12 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::sync_grid())) {
     PrintIndent();
     stream << "tl.sync_grid()\n";
+  } else if (op->op.same_as(tl::pdl_trigger())) {
+    PrintIndent();
+    stream << "tl.griddepcontrol_launch_dependents()\n";
+  } else if (op->op.same_as(tl::pdl_sync())) {
+    PrintIndent();
+    stream << "tl.griddepcontrol_wait()\n";
   } else if (op->op.same_as(tl::loop_break()) ||
              op->op.same_as(builtin::break_loop())) {
     if (in_break_loop_) {
@@ -1053,7 +1091,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
       PrimExpr index = load->indices[0];
       if (const RampNode *node = index.as<RampNode>(); node) {
         auto *p_stride = as_const_int(node->stride);
-        CHECK(p_stride);
+        ICHECK(p_stride);
         ICHECK_EQ(*p_stride, 1) << "reinterpret expects contiguous elements";
         index = node->base;
       }
@@ -1077,8 +1115,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
                                  << op->args.size();
 
     auto op_instance = Downcast<StringImm>(op->args[0]);
-    PrintCallExtern_(GetType(tvm::ffi::GetRef<PrimExpr>(op)),
-                     op_instance->value, op->args, true, os);
+    PrintCallExtern_(GetType(GetRef<PrimExpr>(op)), op_instance->value,
+                     op->args, true, os);
   } else if (op->op.same_as(tl::tl_gemm_sp())) {
     LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(tl::get_lane_idx())) {
@@ -1208,6 +1246,10 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     ICHECK_EQ(load->indices.size(), 1)
         << "CodeGenTileLangCuTeDSL only supports flat memory";
     os << GetBufferPtr_(load->buffer.get(), load->indices[0]);
+  } else if (op->op.same_as(builtin::handle_add_byte_offset())) {
+    ICHECK_EQ(op->args.size(), 2U);
+    os << "tl.handle_add_byte_offset(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ")";
   } else if (op->op.same_as(tl::atomic_add_elem_op())) {
     // atomic_add_elem_op(dst_ptr, src_value[, memory_order])
     std::string dst_ptr = PrintExpr_(op->args[0]);
@@ -1475,7 +1517,7 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
       true_expr = sel->true_value;
       false_expr = sel->false_value;
     } else if (auto call = expr.as<CallNode>();
-               call && call->op.same_as(tir::builtin::if_then_else())) {
+               call && call->op.same_as(tirx::builtin::if_then_else())) {
       value_is_conditional = true;
       cond_expr = call->args[0];
       true_expr = call->args[1];
@@ -1715,12 +1757,44 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
   }
 }
 
-void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocateNode *op) {
-  ICHECK(!is_zero(op->condition));
-  std::string vid = AllocVarID(op->buffer_var.get());
+void CodeGenTileLangCuTeDSL::VisitStmt_(const BindNode *op) {
+  if (auto *ptr_type = op->var->type_annotation.as<PointerTypeNode>()) {
+    if (auto *prim_type = ptr_type->element_type.as<PrimTypeNode>()) {
+      if (const CallNode *call = op->value.as<CallNode>();
+          call && call->op.same_as(builtin::reinterpret()) &&
+          call->args.size() == 1U && op->value.dtype().is_handle()) {
+        RegisterHandleType_(op->var.get(), prim_type->dtype);
+        raw_pointer_vars_.insert(op->var.get());
+
+        std::string address_space = "tl.cute.AddressSpace.generic";
+        const std::string scope = ptr_type->storage_scope;
+        if (scope == "global" || scope.empty()) {
+          address_space = "tl.cute.AddressSpace.gmem";
+        } else if (scope == "shared" || scope.rfind("shared.", 0) == 0) {
+          address_space = "tl.cute.AddressSpace.smem";
+        } else if (scope == "local" || scope.rfind("local.", 0) == 0) {
+          address_space = "tl.cute.AddressSpace.rmem";
+        }
+
+        PrintIndent();
+        stream << AllocVarID(op->var.get()) << " = tl.cute.make_ptr(";
+        PrintType(prim_type->dtype, stream);
+        stream << ", " << PrintExpr_(call->args[0]) << ", " << address_space
+               << ")\n";
+        return;
+      }
+    }
+  }
+
+  CodeGenTileLangPY::VisitStmt_(op);
+}
+
+void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocBufferNode *op) {
+  DataType alloc_dtype = op->buffer->dtype;
+  std::string vid = AllocVarID(op->buffer->data.get());
   PrintIndent();
-  std::string scope = GetPtrStorageScope(op->buffer_var);
-  alloc_storage_scope_[op->buffer_var.get()] = scope;
+  std::string scope = GetPtrStorageScope(op->buffer->data);
+  alloc_storage_scope_[op->buffer->data.get()] = scope;
 
   if (scope == "local.descriptor.wgmma") {
     stream << vid << " = tl.GmmaDescriptor()\n";
@@ -1730,33 +1804,36 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocateNode *op) {
     stream << vid << " = 0\n";
   } else if (scope == "shared.dyn") {
     stream << vid << " = tl.make_tensor(tl.get_dyn_smem(";
-    PrintType(op->dtype, stream);
+    PrintType(alloc_dtype, stream);
     // there is no bound check for Tensor access, so just set shape to 1
     stream << ", alignment=1024), (1,))\n";
   } else {
-    size_t constant_size = op->ConstantAllocationSize();
-    ICHECK_GT(constant_size, 0)
+    std::optional<int64_t> opt_size =
+        GetRef<AllocBuffer>(op).ConstantAllocationSize();
+    ICHECK(opt_size.has_value() && opt_size.value() > 0)
         << "Can only handle constant size stack allocation for now, but get "
-        << constant_size << " for " << op->buffer_var->name_hint;
+        << (opt_size.has_value() ? opt_size.value() : 0) << " for "
+        << op->buffer->data->name_hint;
+    size_t constant_size = static_cast<size_t>(opt_size.value());
 
     if (scope == "shared") {
       stream << vid << " = tl.make_tensor(tl.alloc_smem(";
-      PrintType(op->dtype, stream);
+      PrintType(alloc_dtype, stream);
       stream << ", " << constant_size << "), (" << constant_size << ",))\n";
     } else if (scope == "shared.barrier" || scope == "shared.cluster_barrier") {
       stream << vid << " = tl.alloc_smem(cutlass.Uint64, size_in_elems="
              << constant_size << ")\n";
     } else if (scope == "local") {
       stream << vid << " = tl.make_rmem_tensor((" << constant_size << "),";
-      PrintType(op->dtype, stream);
+      PrintType(alloc_dtype, stream);
       stream << ")\n";
     } else if (scope == "local.var") {
-      PrimExpr init = tir::make_const(op->dtype, 0);
+      PrimExpr init = tirx::make_const(alloc_dtype, 0);
       auto init_it = op->annotations.find(tl::attr::kLocalVarInit);
       if (init_it != op->annotations.end()) {
         PrimExpr user_init = Downcast<PrimExpr>((*init_it).second);
-        if (!user_init.dtype().is_void() && user_init.dtype() != op->dtype) {
-          user_init = tir::Cast(op->dtype, user_init);
+        if (!user_init.dtype().is_void() && user_init.dtype() != alloc_dtype) {
+          user_init = tirx::Cast(alloc_dtype, user_init);
         }
         init = user_init;
       }
@@ -1766,12 +1843,11 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocateNode *op) {
     }
   }
 
-  RegisterHandleType_(op->buffer_var.get(), op->dtype);
-  PrintStmt_(op->body);
+  RegisterHandleType_(op->buffer->data.get(), alloc_dtype);
 }
 
 void CodeGenTileLangCuTeDSL::VisitStmt_(const AttrStmtNode *op) {
-  if (op->attr_key == tir::attr::thread_extent) {
+  if (op->attr_key == tirx::attr::thread_extent) {
     IterVar iv = Downcast<IterVar>(op->node);
     if (!iv->thread_tag.empty()) {
       if (!var_idmap_.count(iv->var.get())) {
@@ -1784,7 +1860,7 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AttrStmtNode *op) {
     std::string func_name;
     int panel_size = 0;
     if (const auto *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(tir::builtin::tvm_tuple()) &&
+      if (call->op.same_as(tirx::builtin::tvm_tuple()) &&
           call->args.size() >= 2) {
         const auto *name_node = call->args[0].as<StringImmNode>();
         const auto *size_node = call->args[1].as<IntImmNode>();
@@ -1855,7 +1931,7 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const ForNode *op) {
     return;
   }
 
-  if (op->kind != tir::ForKind::kUnrolled) {
+  if (op->kind != tirx::ForKind::kUnrolled) {
     CodeGenTileLangPY::VisitStmt_(op);
     return;
   }
@@ -1950,9 +2026,6 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const EvaluateNode *op) {
   if (is_const_int(op->value))
     return;
   const CallNode *call = op->value.as<CallNode>();
-  if (call && call->op.same_as(builtin::tvm_global_barrier_kinit())) {
-    LOG(FATAL) << "Currently unsupported op: " << call->op;
-  }
   if (call && (call->op.same_as(tvm::tl::device_assert()))) {
     std::string cond = RemoveOutermostParentheses(PrintExpr_(call->args[0]));
     PrintIndent();
@@ -2061,8 +2134,8 @@ void CodeGenTileLangCuTeDSL::PrintBinaryIntrinsic_(
 }
 
 void CodeGenTileLangCuTeDSL::PrintCallExtern_(Type ret_type,
-                                              ffi::String global_symbol,
-                                              const ffi::Array<PrimExpr> &args,
+                                              String global_symbol,
+                                              const Array<PrimExpr> &args,
                                               bool skip_first_arg,
                                               std::ostream &os) { // NOLINT(*)
   DataType ret_dtype = GetRuntimeDataType(ret_type);
@@ -2234,7 +2307,15 @@ std::string CodeGenTileLangCuTeDSL::GetBufferPtr_(const BufferNode *buffer,
     scope = GetPtrStorageScope(buffer->data);
 
   std::string ptr_str;
-  if (scope == "shared.barrier" || scope == "shared.cluster_barrier") {
+  if (raw_pointer_vars_.count(buffer_var)) {
+    bool is_handle_type_match = HandleTypeMatch_(buffer_var, effective_dtype);
+    if (is_handle_type_match) {
+      ptr_str = vid;
+    } else {
+      ptr_str = "tl.recast_ptr(" + vid +
+                ", dtype=" + DTypeToString(effective_dtype) + ")";
+    }
+  } else if (scope == "shared.barrier" || scope == "shared.cluster_barrier") {
     ptr_str = vid;
   } else {
     bool is_handle_type_match = HandleTypeMatch_(buffer_var, effective_dtype);
@@ -2254,6 +2335,9 @@ std::string CodeGenTileLangCuTeDSL::GetVarPtr_(const PrimExpr &expr) {
   // For local buffers (rmem tensors), we need to use .iterator to get the
   // pointer since local buffers in CuTeDSL are tensors, not raw pointers
   if (const VarNode *var = expr.as<VarNode>()) {
+    if (raw_pointer_vars_.count(var)) {
+      return GetVarID(var);
+    }
     return GetVarID(var) + ".iterator";
   }
   return PrintExpr_(expr);
@@ -2294,7 +2378,14 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
   }
   bool is_handle_type_match = HandleTypeMatch_(buffer_var, effective_dtype);
   std::string ptr_str;
-  if (is_handle_type_match) {
+  if (raw_pointer_vars_.count(buffer_var)) {
+    if (is_handle_type_match) {
+      ptr_str = vid;
+    } else {
+      ptr_str = "tl.recast_ptr(" + vid +
+                ", dtype=" + DTypeToString(effective_dtype) + ")";
+    }
+  } else if (is_handle_type_match) {
     ptr_str = vid + ".iterator";
   } else {
     ptr_str = "tl.recast_ptr(" + vid +
@@ -2383,25 +2474,19 @@ void CodeGenTileLangCuTeDSL::PrintStorageSync_(const CallNode *op) {
     if (args.size() == 1) {
       stream << "tl.sync_threads()\n";
     } else if (args.size() == 2) {
-      auto barrier_id_ptr = args[1].as<IntImmNode>();
-      ICHECK(barrier_id_ptr)
-          << "storage_sync barrier_id (args[1]) must be IntImm, got "
-          << args[1]->GetTypeKey();
-      auto barrier_id = barrier_id_ptr->value;
-      stream << "tl.sync_thread_partial(" << barrier_id << ")\n";
+      ICHECK(args[1].dtype().is_int())
+          << "storage_sync barrier_id must be integer type, got "
+          << args[1].dtype();
+      stream << "tl.sync_thread_partial(" << PrintExpr_(args[1]) << ")\n";
     } else if (args.size() == 3) {
-      auto barrier_id_ptr = args[1].as<IntImmNode>();
-      ICHECK(barrier_id_ptr)
-          << "storage_sync barrier_id (args[1]) must be IntImm, got "
-          << args[1]->GetTypeKey();
-      auto thread_count_ptr = args[2].as<IntImmNode>();
-      ICHECK(thread_count_ptr)
-          << "storage_sync thread_count (args[2]) must be IntImm, got "
-          << args[2]->GetTypeKey();
-      auto barrier_id = barrier_id_ptr->value;
-      auto thread_count = thread_count_ptr->value;
-      stream << "tl.sync_thread_partial(" << barrier_id << ", " << thread_count
-             << ")\n";
+      ICHECK(args[1].dtype().is_int())
+          << "storage_sync barrier_id must be integer type, got "
+          << args[1].dtype();
+      ICHECK(args[2].dtype().is_int())
+          << "storage_sync thread_count must be integer type, got "
+          << args[2].dtype();
+      stream << "tl.sync_thread_partial(" << PrintExpr_(args[1]) << ", "
+             << PrintExpr_(args[2]) << ")\n";
     } else {
       LOG(FATAL) << "Invalid number of arguments for storage sync: "
                  << args.size();

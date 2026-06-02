@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import tilelang.language as T
-from typing import Literal, Callable
-from tvm import DataType, tir
-from tvm.tir import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
+from typing import Literal
+from collections.abc import Callable
+from tvm import DataType, tirx
+from tvm.tirx import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
 from tvm.ir import Range
 from tvm.runtime import convert
 from ..layout.utils import (
@@ -11,6 +12,7 @@ from ..layout.utils import (
     get_ldmatrix_offset,
 )
 from tilelang.utils import is_fragment, get_buffer_region_from_load
+from tilelang.utils.sparse import get_e_factor, get_e_replicate_factor
 
 from tilelang.cuda.intrinsics.layout.mma_sp_layout import (
     shared_16x16_to_mma_sp_layout_sr_a,
@@ -29,7 +31,7 @@ from tilelang.cuda.intrinsics.layout.mma_sp_layout import (
     metadata_16bit_load_32x2_to_shared_16x2_layout_32bit,
     metadata_8bit_load_32x4_to_shared_16x4_layout_16bit,
     metadata_16bit_load_32x2_to_shared_16x2_layout_16bit,
-    metadata_8bit_load_32x4_to_shared_16x4_layout_8bit,
+    metadata_8bit_load_32x4_to_shared_16x8_layout_8bit,
     metadata_16bit_load_32x2_to_shared_16x4_layout_8bit,
     metadata_32bit_load_32x1_to_shared_16x2_layout_8bit,
     get_ldmatrix_offset_b,
@@ -58,27 +60,6 @@ class SparseTensorCoreIntrinEmitter:
         "int32": "int32",
         "float8_e4m3": "e4m3",
         "float8_e5m2": "e5m2",
-    }
-
-    E_FACTOR_MAP = {  # e_kdim = mma_kdim // e_factor
-        "float": {"int16": 8, "uint16": 8},
-        "float32": {"int16": 8, "uint16": 8},
-        "float16": {"int8": 8, "uint8": 8, "int16": 16, "uint16": 16, "int32": 32, "uint32": 32},
-        "bfloat16": {"int8": 8, "uint8": 8, "int16": 16, "uint16": 16, "int32": 32, "uint32": 32},
-        "int8": {"int8": 8, "uint8": 8, "int16": 16, "uint16": 16, "int32": 32, "uint32": 32},
-        "uint8": {"int8": 8, "uint8": 8, "int16": 16, "uint16": 16, "int32": 32, "uint32": 32},
-        "float8_e4m3": {"int8": 8, "uint8": 8, "int16": 16, "uint16": 16, "int32": 32, "uint32": 32},
-        "float8_e5m2": {"int8": 8, "uint8": 8, "int16": 16, "uint16": 16, "int32": 32, "uint32": 32},
-    }
-
-    E_REPLICATE_FACTOR = {  # metadata replicate every 4 consecutive threads
-        "float32": 2,
-        "float16": 2,  # 2 of 4 consecutive threads provides
-        "bfloat16": 2,
-        "int8": 1,  # 4 of 4 consecutive threads provides
-        "uint8": 1,
-        "float8_e4m3": 1,
-        "float8_e5m2": 1,
     }
 
     # Represent the thread binding in the form of (tx, warp_n, warp_m)
@@ -116,7 +97,7 @@ class SparseTensorCoreIntrinEmitter:
         self.warp_row_tiles = warp_row_tiles
         self.warp_col_tiles = warp_col_tiles
         self.warp_k = warp_k
-        self.e_factor = self.E_FACTOR_MAP[self.a_dtype][self.e_dtype]
+        self.e_factor = get_e_factor(self.a_dtype, self.e_dtype)
         self._initialize_k_dim(a_dtype)
         self._initialize_abbrev(a_dtype, b_dtype, accum_dtype)
         self._initialize_micro_size(self.M_DIM, self.k_dim)
@@ -143,9 +124,13 @@ class SparseTensorCoreIntrinEmitter:
 
     def _initialize_local_size(self, m_dim=16, n_dim=16, k_dim=16, warp_size=32):
         self.local_size_a = (m_dim * k_dim) // warp_size // self.SPARSE_FACTOR
-        self.local_size_e = (m_dim * k_dim) // self.e_factor // warp_size * self.E_REPLICATE_FACTOR[self.a_dtype]
+        self.local_size_e = (m_dim * k_dim) // self.e_factor * get_e_replicate_factor(self.a_dtype) // warp_size
         self.local_size_b = (n_dim * k_dim) // warp_size
         self.local_size_out = (m_dim * n_dim) // warp_size
+        assert self.local_size_a > 0, f"local_size_a must be greater than 0, got {self.local_size_a}"
+        assert self.local_size_e > 0, f"local_size_e must be greater than 0, got {self.local_size_e}"
+        assert self.local_size_b > 0, f"local_size_b must be greater than 0, got {self.local_size_b}"
+        assert self.local_size_out > 0, f"local_size_out must be greater than 0, got {self.local_size_out}"
 
     def _initialize_abbrev(self, a_dtype, b_dtype, accum_dtype):
         self.a_dtype_abbrv = self.dtype_abbrv[a_dtype]
@@ -331,7 +316,7 @@ class SparseTensorCoreIntrinEmitter:
         if not ldmatrix_available:
             if DataType(e_dtype).bits == 8:
                 if DataType(a_dtype).bits == 8:
-                    mma_load_layout = metadata_8bit_load_32x4_to_shared_16x4_layout_8bit
+                    mma_load_layout = metadata_8bit_load_32x4_to_shared_16x8_layout_8bit
                 elif DataType(a_dtype).bits == 16:
                     mma_load_layout = metadata_8bit_load_32x4_to_shared_16x4_layout_16bit
                 elif DataType(a_dtype).bits == 32:
@@ -497,7 +482,7 @@ class SparseTensorCoreIntrinEmitter:
         if isinstance(obj, BufferRegion):
             return obj
         if isinstance(obj, Buffer):
-            mins = [tir.IntImm("int32", 0) for _ in obj.shape]
+            mins = [tirx.IntImm("int32", 0) for _ in obj.shape]
             ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, obj.shape)]
             return BufferRegion(obj, ranges)
         if isinstance(obj, BufferLoad):
@@ -505,7 +490,7 @@ class SparseTensorCoreIntrinEmitter:
             if region is not None:
                 return region
             mins = [idx for idx in obj.indices]
-            ones = [tir.IntImm("int32", 1) for _ in obj.indices]
+            ones = [tirx.IntImm("int32", 1) for _ in obj.indices]
             ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
             return BufferRegion(obj.buffer, ranges)
         raise ValueError(f"Unsupported argument type for BufferRegion: {type(obj)}")
@@ -641,7 +626,7 @@ class SparseTensorCoreIntrinEmitter:
 
         Parameters
         ----------
-        local_buf : tir.Buffer
+        local_buf : tirx.Buffer
             The local buffer representing a fragment of a matrix.
 
         Returns
@@ -770,7 +755,7 @@ class SparseTensorCoreIntrinEmitter:
 
         Parameters
         ----------
-        local_buf : tir.Buffer
+        local_buf : tirx.Buffer
             The local buffer representing a fragment of a matrix.
 
         Returns

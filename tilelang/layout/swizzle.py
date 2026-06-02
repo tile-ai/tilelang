@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import warnings
 import tvm
-from tvm import tir
+from tvm import tirx
 from tilelang import _ffi_api
 from tilelang._typing import BufferLikeType, BufferLikeTypeTuple
 
@@ -13,7 +13,7 @@ from tilelang._typing import BufferLikeType, BufferLikeTypeTuple
 _WARNED_LEGACY_TCGEN05_LAYOUT_FFI = False
 
 
-def _get_buffer_info(buffer_or_load_or_region: BufferLikeType) -> tuple[tir.Buffer, list[int], str]:
+def _get_buffer_info(buffer_or_load_or_region: BufferLikeType) -> tuple[tirx.Buffer, list[int], str]:
     """
     Extract buffer, shape, and dtype from BufferLikeType.
 
@@ -23,7 +23,7 @@ def _get_buffer_info(buffer_or_load_or_region: BufferLikeType) -> tuple[tir.Buff
     Returns:
         tuple: (buffer, shape, dtype)
     """
-    if isinstance(buffer_or_load_or_region, tir.Buffer):
+    if isinstance(buffer_or_load_or_region, tirx.Buffer):
         return buffer_or_load_or_region, buffer_or_load_or_region.shape, buffer_or_load_or_region.dtype
     elif isinstance(buffer_or_load_or_region, BufferLikeTypeTuple):
         buf = buffer_or_load_or_region.buffer
