@@ -21,7 +21,7 @@
 #include <utility>
 #include <vector>
 
-#include "../target/utils.h"
+#include "backend/common/target_utils.h"
 #include "tvm/ir/expr.h"
 
 namespace tvm {

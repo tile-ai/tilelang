@@ -26,9 +26,9 @@
 #include "../config.h"
 #include "../op/builtin.h"
 #include "../op/utils.h"
-#include "../target/utils.h"
 #include "arith/int_operator.h"
 #include "arith/ir_visitor_with_analyzer.h"
+#include "backend/common/target_utils.h"
 #include "common/loop_vectorization_utils.h"
 #include "support/check.h"
 #include <iostream>

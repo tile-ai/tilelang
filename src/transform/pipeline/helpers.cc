@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "../common/bind_utils.h"
+#include "backend/common/target_utils.h"
 #include "layout/layout.h"
 #include "op/builtin.h"
 #include "op/copy.h"
@@ -21,7 +22,6 @@
 #include "op/region.h"
 #include "op/utils.h"
 #include "support/utils.h"
-#include "target/utils.h"
 #include "tir/transforms/ir_utils.h"
 
 namespace tvm {
