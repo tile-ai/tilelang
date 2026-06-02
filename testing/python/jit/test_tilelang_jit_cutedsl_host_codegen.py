@@ -1,6 +1,7 @@
 """Tests for CuTeDSL host codegen integration."""
 
 import pytest
+import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
@@ -57,6 +58,26 @@ def single_kernel_program(N, block_size=64, dtype=T.float32):
                 idx = bx * block_size + i
                 if idx < N:
                     B[idx] = A[idx] + 1.0
+
+    return main
+
+
+def repeated_dynamic_shape_program():
+    """Create a program where one dynamic symbol appears in multiple params."""
+
+    N = T.dynamic("N")
+
+    @T.prim_func
+    def main(
+        optional: T.Tensor((N,), T.float32),
+        source: T.Tensor((N,), T.float32),
+        out: T.Tensor((N,), T.float32),
+    ):
+        with T.Kernel(T.ceildiv(N, 64), threads=64) as (bx,):
+            for i in T.Parallel(64):
+                idx = bx * 64 + i
+                if idx < N:
+                    out[idx] = source[idx]
 
     return main
 
@@ -208,6 +229,21 @@ def test_cutedsl_adapter_exposes_device_and_host_sources():
     assert "_generate_cubin_if_needed" in host_source
     assert device_source in combined_source
     assert host_source in combined_source
+
+
+def test_cutedsl_adapter_resolves_dynamic_symbol_from_live_tensor_candidate():
+    """Dynamic shape resolution should skip optional None tensor params."""
+
+    from tilelang.jit.adapter.cutedsl.adapter import CuTeDSLKernelAdapter
+
+    program = repeated_dynamic_shape_program()
+    adapter = CuTeDSLKernelAdapter.__new__(CuTeDSLKernelAdapter)
+    adapter.ir_module = tilelang.tvm.IRModule({program.attrs["global_symbol"]: program})
+    adapter.dynamic_symbolic_map, adapter.dynamic_symbolic_order = adapter._process_dynamic_symbolic()
+
+    assert len(adapter.dynamic_symbolic_order) == 1
+    dynamic_symbol = adapter.dynamic_symbolic_order[0]
+    assert adapter._resolve_dynamic_symbolic_value(dynamic_symbol, [None, torch.empty(7), torch.empty(7)]) == 7
 
 
 def test_cutedsl_cache_restore_does_not_fallback_to_host_source(monkeypatch, tmp_path):
