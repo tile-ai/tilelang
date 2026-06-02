@@ -9,6 +9,7 @@ from .backend import Backend
 _BACKENDS: dict[str, Backend] = {}
 _TARGET_INDEX: dict[str, list[str]] = {}
 _LAZY_IMPORTS: dict[str, str] = {}
+_CALLBACKS_REGISTERED: set[str] = set()
 
 
 def register_backend(backend: Backend, *, override: bool = False) -> Backend:
@@ -23,6 +24,9 @@ def register_backend(backend: Backend, *, override: bool = False) -> Backend:
             names = _TARGET_INDEX.get(kind, [])
             if old.name in names:
                 names.remove(old.name)
+            if not names:
+                _TARGET_INDEX.pop(kind, None)
+        _CALLBACKS_REGISTERED.discard(backend.name)
 
     _BACKENDS[backend.name] = backend
     for kind in backend.target_kinds:
@@ -47,7 +51,7 @@ def list_backends() -> dict[str, Backend]:
 
 
 def _ensure_loaded_for_kind(target_kind: str) -> None:
-    if target_kind in _TARGET_INDEX:
+    if _TARGET_INDEX.get(target_kind):
         return
     import_path = _LAZY_IMPORTS.get(target_kind)
     if import_path is not None:
@@ -73,5 +77,7 @@ def resolve_backend(target: Target) -> Backend:
     backend = candidates[0]
     if not backend.is_available():
         raise ValueError(f"TileLang backend {backend.name!r} is registered but unavailable")
-    backend.ensure_callbacks_registered()
+    if backend.name not in _CALLBACKS_REGISTERED:
+        backend.ensure_callbacks_registered()
+        _CALLBACKS_REGISTERED.add(backend.name)
     return backend

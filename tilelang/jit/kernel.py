@@ -471,7 +471,8 @@ class JITKernel(Generic[_P, _T]):
         str
             The source code of the compiled kernel function.
         """
-        if self.execution_backend in {"cython", "nvrtc", "tvm_ffi", "cutedsl"}:
+        adapter_name = self.execution_backend_spec.adapter
+        if adapter_name in {"cython", "nvrtc", "tvm_ffi", "cutedsl"}:
             return self.adapter.get_kernel_source(kernel_only=kernel_only)
         return self.artifact.kernel_source
 
@@ -479,7 +480,8 @@ class JITKernel(Generic[_P, _T]):
         """
         Returns the source code of the host function.
         """
-        if self.execution_backend in {"cython", "nvrtc", "tvm_ffi", "cutedsl"}:
+        adapter_name = self.execution_backend_spec.adapter
+        if adapter_name in {"cython", "nvrtc", "tvm_ffi", "cutedsl"}:
             return self.adapter.get_host_source()
         assert self.artifact.host_mod is not None, "host_mod is not available"
         return str(self.artifact.host_mod)

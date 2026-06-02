@@ -6,7 +6,6 @@ from tvm.target import Target
 from tilelang import tvm
 from tilelang.backend import Backend, ExecutionBackendSpec, register_backend
 from tilelang.backend.codegen import build_device_with_global_func
-from tilelang.contrib import hipcc
 from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
 from tilelang.rocm.pipeline import rocm_pipeline
 from tilelang.rocm.target import target_get_mcpu, target_get_warp_size
@@ -15,6 +14,8 @@ _CALLBACKS_REGISTERED = False
 
 
 def _tilelang_callback_hip_compile(code, target):
+    from tilelang.contrib import hipcc
+
     arch = target_get_mcpu(target)
     return hipcc.compile_hip(
         code,

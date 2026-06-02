@@ -35,9 +35,12 @@ def target_get_warp_size(target: Target) -> int:
 
 
 def _is_nvrtc_available() -> bool:
-    from tilelang.jit.adapter.nvrtc import is_nvrtc_available
+    try:
+        from tilelang.jit.adapter.nvrtc import is_nvrtc_available
+    except ImportError:
+        return False
 
-    return bool(is_nvrtc_available)
+    return bool(is_nvrtc_available() if callable(is_nvrtc_available) else is_nvrtc_available)
 
 
 def _is_cutedsl_available() -> bool:
@@ -153,12 +156,12 @@ def register_cuda_callbacks() -> None:
 
 
 def cuda_device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
-    global_func = "target.build.tilelang_" + ("cutedsl" if "cutedsl" in target.keys else "cuda")
+    global_func = "target.build.tilelang_" + ("cutedsl" if _is_cutedsl_target(target) else "cuda")
     return build_device_with_global_func(device_mod, target, global_func)
 
 
 def cuda_device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
-    global_func = "target.build.tilelang_" + ("cutedsl" if "cutedsl" in target.keys else "cuda") + "_without_compile"
+    global_func = "target.build.tilelang_" + ("cutedsl" if _is_cutedsl_target(target) else "cuda") + "_without_compile"
     return build_device_with_global_func(device_mod, target, global_func)
 
 
