@@ -82,6 +82,27 @@ def repeated_dynamic_shape_program():
     return main
 
 
+def optional_stride_symbol_program():
+    """Create a program with an optional strided tensor stride symbol."""
+
+    N = T.dynamic("N")
+    stride = T.dynamic("stride")
+
+    @T.prim_func
+    def main(
+        source: T.Tensor((N,), T.float32),
+        optional: T.StridedTensor[(N,), (stride,), T.float32],
+        out: T.Tensor((N,), T.float32),
+    ):
+        with T.Kernel(T.ceildiv(N, 64), threads=64) as (bx,):
+            for i in T.Parallel(64):
+                idx = bx * 64 + i
+                if idx < N:
+                    out[idx] = source[idx]
+
+    return main
+
+
 def two_kernel_program(N, block_size=64, dtype=T.float32):
     """Create a program with two lowered host kernel call sites."""
 
@@ -244,6 +265,25 @@ def test_cutedsl_adapter_resolves_dynamic_symbol_from_live_tensor_candidate():
     assert len(adapter.dynamic_symbolic_order) == 1
     dynamic_symbol = adapter.dynamic_symbolic_order[0]
     assert adapter._resolve_dynamic_symbolic_value(dynamic_symbol, [None, torch.empty(7), torch.empty(7)]) == 7
+    with pytest.raises(TypeError, match="no live tensor source"):
+        adapter._resolve_dynamic_symbolic_value(dynamic_symbol, [None, None, None])
+
+
+def test_cutedsl_adapter_allows_optional_stride_symbol_without_live_tensor():
+    """Dynamic stride-only symbols may be absent for optional tensor params."""
+
+    from tilelang.jit.adapter.cutedsl.adapter import CuTeDSLKernelAdapter
+
+    program = optional_stride_symbol_program()
+    adapter = CuTeDSLKernelAdapter.__new__(CuTeDSLKernelAdapter)
+    adapter.ir_module = tilelang.tvm.IRModule({program.attrs["global_symbol"]: program})
+    adapter.dynamic_symbolic_map, adapter.dynamic_symbolic_order = adapter._process_dynamic_symbolic()
+
+    dynamic_symbols = {sym.name: sym for sym in adapter.dynamic_symbolic_order}
+    param_values = [torch.empty(7), None, torch.empty(7)]
+
+    assert adapter._resolve_dynamic_symbolic_value(dynamic_symbols["N"], param_values) == 7
+    assert adapter._resolve_dynamic_symbolic_value(dynamic_symbols["stride"], param_values) == 0
 
 
 def test_cutedsl_cache_restore_does_not_fallback_to_host_source(monkeypatch, tmp_path):
