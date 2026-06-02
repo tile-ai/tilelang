@@ -139,17 +139,24 @@ private:
     } else {
       condition = EQ(thread_var_->var, 0);
     }
+    init_mbarrier_calls_.push_back(
+        Evaluate(Call(DataType::Handle(), ptx_fence_barrier_init(), {})));
     new_body.push_back(IfThenElse(condition,
                                   init_mbarrier_calls_.size() == 1
                                       ? init_mbarrier_calls_.back()
                                       : SeqStmt(init_mbarrier_calls_),
                                   Stmt()));
-
-    new_body.push_back(
-        Evaluate(Call(DataType::Handle(), ptx_fence_barrier_init(), {})));
-    new_body.push_back(Evaluate(
-        Call(DataType::Handle(), builtin::tvm_storage_sync(),
-             {StringImm(has_cluster_barrier_ ? "cluster" : "shared")})));
+    // 2CTA TMEM lowering inserts a cluster sync immediately after tcgen05.alloc.
+    // In that path the allocation sync is the first point where any role can
+    // observe the initialized barriers, so a separate pre-allocation cluster
+    // sync only adds launch prologue overhead and diverges from the FA4 UMA
+    // reference schedule.
+    bool use_2cta_tmem = op->annotations.count("use_2cta");
+    if (!has_cluster_barrier_ || !use_2cta_tmem) {
+      new_body.push_back(Evaluate(
+          Call(DataType::Handle(), builtin::tvm_storage_sync(),
+               {StringImm(has_cluster_barrier_ ? "cluster" : "shared")})));
+    }
     new_body.push_back(block->body);
 
     block.CopyOnWrite()->body = SeqStmt(new_body);

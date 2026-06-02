@@ -31,7 +31,11 @@ def use_2cta_tmem(enable: bool = True):
     """Request cta_group::2 tensor-memory alloc/dealloc for helper-only kernels."""
     if not enable:
         return None
-    return block_attr({"use_2cta": 1, "mbarrier_init_thread": 416})
+    return block_attr({
+        "use_2cta": 1,
+        "mbarrier_init_thread": 416,
+        "pragma_tl_compact_shared_state": 1,
+    })
 
 
 def device_func(enable: bool = True):

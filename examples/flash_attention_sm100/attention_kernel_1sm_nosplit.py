@@ -1337,13 +1337,13 @@ def attention_kernel_1sm(
         ):
             T.mbarrier_wait_parity(mbar_k, phase)
             T.tcgen05_after_thread_sync()
-            T.tcgen05_qk_gemm_128x128_skv_lane0(
+            T.tcgen05_mma_1sm_ss_128x128_commit_lane0(
                 T.access_ptr(Q0_stage, "r"),
                 T.access_ptr(K_stage, "r"),
                 S0_tmem[0, 0],
                 mbar_s0,
             )
-            T.tcgen05_qk_gemm_128x128_skv_lane0(
+            T.tcgen05_mma_1sm_ss_128x128_commit_lane0(
                 T.access_ptr(Q1_stage, "r"),
                 T.access_ptr(K_stage, "r"),
                 S1_tmem[0, 0],
@@ -1372,7 +1372,7 @@ def attention_kernel_1sm(
                 T.mbarrier_wait_parity(mbar_corr, corr_phase)
             T.mbarrier_wait_parity(mbar_p, pv_phase)
             T.tcgen05_after_thread_sync()
-            T.tcgen05_pv_gemm_128x64_skv_lane0(
+            T.tcgen05_mma_1sm_ts_128x64_bmn_x2_contig_lane0(
                 T.access_ptr(V_stage, "r"),
                 P_tmem[0, 0],
                 O_tmem[0, 0],
@@ -1426,13 +1426,13 @@ def attention_kernel_1sm(
 
                 T.tcgen05_wait_barrier(mbar_k0, 0)
                 T.tcgen05_after_thread_sync()
-                T.tcgen05_qk_gemm_128x128_skv_lane0(
+                T.tcgen05_mma_1sm_ss_128x128_commit_lane0(
                     q0_ptr,
                     k0_ptr,
                     S0_tmem[0, 0],
                     mbar_s0,
                 )
-                T.tcgen05_qk_gemm_128x128_skv_lane0(
+                T.tcgen05_mma_1sm_ss_128x128_commit_lane0(
                     q1_ptr,
                     k0_ptr,
                     S1_tmem[0, 0],
@@ -1454,7 +1454,7 @@ def attention_kernel_1sm(
                     T.tcgen05_wait_barrier(mbar_p0, pv_phase)
                     T.tcgen05_after_thread_sync()
                     vptr = T.tcgen05_reuse3_stage_ptr(k0_ptr, k1_ptr, kv2_ptr, stage)
-                    T.tcgen05_pv_gemm_128x64_skv_lane0(
+                    T.tcgen05_mma_1sm_ts_128x64_bmn_x2_contig_lane0(
                         vptr,
                         P0_tmem[0, 0],
                         O0_tmem[0, 0],
@@ -1466,7 +1466,7 @@ def attention_kernel_1sm(
                         T.tcgen05_wait_barrier(mbar_corr1, corr_phase)
                     T.tcgen05_wait_barrier(mbar_p1, pv_phase)
                     T.tcgen05_after_thread_sync()
-                    T.tcgen05_pv_gemm_128x64_skv_lane0(
+                    T.tcgen05_mma_1sm_ts_128x64_bmn_x2_contig_lane0(
                         vptr,
                         P1_tmem[0, 0],
                         O1_tmem[0, 0],
@@ -1481,13 +1481,13 @@ def attention_kernel_1sm(
                         T.tcgen05_wait_barrier_ptr(kbar, next_phase)
                         T.tcgen05_after_thread_sync()
                         kptr = T.tcgen05_reuse3_stage_ptr(k0_ptr, k1_ptr, kv2_ptr, next_stage)
-                        T.tcgen05_qk_gemm_128x128_skv_lane0(
+                        T.tcgen05_mma_1sm_ss_128x128_commit_lane0(
                             q0_ptr,
                             kptr,
                             S0_tmem[0, 0],
                             mbar_s0,
                         )
-                        T.tcgen05_qk_gemm_128x128_skv_lane0(
+                        T.tcgen05_mma_1sm_ss_128x128_commit_lane0(
                             q1_ptr,
                             kptr,
                             S1_tmem[0, 0],

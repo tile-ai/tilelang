@@ -11,6 +11,7 @@
 #include "tcgen_05.h"
 #include "tcgen_05_ld.h"
 #include "tcgen_05_st.h"
+#include "instruction/tcgen05mma.h"
 
 namespace tl {
 
@@ -393,42 +394,40 @@ __device__ __forceinline__ void tcgen05_fma_f32x2(
 
 __device__ __forceinline__ void tcgen05_exp2_poly_2(float &r0, float &r1,
                                                      float in0, float in1) {
-  float x0 = fmaxf(in0, -127.0f);
-  float x1 = fmaxf(in1, -127.0f);
-  float xr0, xr1;
-  asm("{                                                \n"
-      ".reg .b64 _xp, _mp, _rp;                        \n"
-      "mov.b64 _xp, {%2, %3};                          \n"
-      "mov.b64 _mp, {%4, %5};                          \n"
-      "add.rm.ftz.f32x2 _rp, _xp, _mp;                 \n"
-      "mov.b64 {%0, %1}, _rp;                          \n"
-      "}"
-      : "=f"(xr0), "=f"(xr1)
-      : "f"(x0), "f"(x1), "f"(12582912.0f), "f"(12582912.0f));
-  float f0 = x0 - (xr0 - 12582912.0f);
-  float f1 = x1 - (xr1 - 12582912.0f);
-  float h0 = 0.077119089663028717041015625f;
-  float h1 = 0.077119089663028717041015625f;
-  tl::tcgen05_fma_f32x2(h0, h1, h0, h1, f0, f1,
-                        0.227564394474029541015625f,
-                        0.227564394474029541015625f);
-  tl::tcgen05_fma_f32x2(h0, h1, h0, h1, f0, f1,
-                        0.695146143436431884765625f,
-                        0.695146143436431884765625f);
-  tl::tcgen05_fma_f32x2(h0, h1, h0, h1, f0, f1, 1.0f, 1.0f);
-
-  int xi0, pi0, ri0, xi1, pi1, ri1;
-  asm("mov.b32 %0, %1;" : "=r"(xi0) : "f"(xr0));
-  asm("mov.b32 %0, %1;" : "=r"(pi0) : "f"(h0));
-  asm("shl.b32 %0, %1, 23;" : "=r"(xi0) : "r"(xi0));
-  asm("add.s32 %0, %1, %2;" : "=r"(ri0) : "r"(xi0), "r"(pi0));
-  asm("mov.b32 %0, %1;" : "=f"(r0) : "r"(ri0));
-
-  asm("mov.b32 %0, %1;" : "=r"(xi1) : "f"(xr1));
-  asm("mov.b32 %0, %1;" : "=r"(pi1) : "f"(h1));
-  asm("shl.b32 %0, %1, 23;" : "=r"(xi1) : "r"(xi1));
-  asm("add.s32 %0, %1, %2;" : "=r"(ri1) : "r"(xi1), "r"(pi1));
-  asm("mov.b32 %0, %1;" : "=f"(r1) : "r"(ri1));
+  asm("{\n\t"
+      ".reg .f32 f1, f2, f3, f4, f5, f6, f7;\n\t"
+      ".reg .b64 l1, l2, l3, l4, l5, l6, l7, l8, l9, l10;\n\t"
+      ".reg .s32 r1, r2, r3, r4, r5, r6, r7, r8;\n\t"
+      "max.ftz.f32 f1, %2, 0fC2FE0000;\n\t"
+      "max.ftz.f32 f2, %3, 0fC2FE0000;\n\t"
+      "mov.b64 l1, {f1, f2};\n\t"
+      "mov.f32 f3, 0f4B400000;\n\t"
+      "mov.b64 l2, {f3, f3};\n\t"
+      "add.rm.ftz.f32x2 l7, l1, l2;\n\t"
+      "sub.rn.ftz.f32x2 l8, l7, l2;\n\t"
+      "sub.rn.ftz.f32x2 l9, l1, l8;\n\t"
+      "mov.f32 f7, 0f3D9DF09D;\n\t"
+      "mov.b64 l6, {f7, f7};\n\t"
+      "mov.f32 f6, 0f3E6906A4;\n\t"
+      "mov.b64 l5, {f6, f6};\n\t"
+      "mov.f32 f5, 0f3F31F519;\n\t"
+      "mov.b64 l4, {f5, f5};\n\t"
+      "mov.f32 f4, 0f3F800000;\n\t"
+      "mov.b64 l3, {f4, f4};\n\t"
+      "fma.rn.ftz.f32x2 l10, l9, l6, l5;\n\t"
+      "fma.rn.ftz.f32x2 l10, l10, l9, l4;\n\t"
+      "fma.rn.ftz.f32x2 l10, l10, l9, l3;\n\t"
+      "mov.b64 {r1, r2}, l7;\n\t"
+      "mov.b64 {r3, r4}, l10;\n\t"
+      "shl.b32 r5, r1, 23;\n\t"
+      "add.s32 r7, r5, r3;\n\t"
+      "shl.b32 r6, r2, 23;\n\t"
+      "add.s32 r8, r6, r4;\n\t"
+      "mov.b32 %0, r7;\n\t"
+      "mov.b32 %1, r8;\n\t"
+      "}\n"
+      : "=f"(r0), "=f"(r1)
+      : "f"(in0), "f"(in1));
 }
 
 __device__ __forceinline__ void
@@ -445,6 +444,15 @@ pack_bf16_pair(float a, float b) {
   bfloat16_t ha(a);
   bfloat16_t hb(b);
   return __pack_nv_bfloat162(ha, hb);
+}
+
+template <int N>
+__device__ __forceinline__ void
+tcgen05_float22bfloat162_xN(__nv_bfloat162 *result, const float *inputs) {
+  #pragma unroll
+  for (int i = 0; i < N; ++i) {
+    result[i] = __float22bfloat162_rn({inputs[i * 2], inputs[i * 2 + 1]});
+  }
 }
 
 __device__ __forceinline__ void
@@ -971,6 +979,9 @@ tcgen05_mk_fast_desc(uint32_t base_lo, uint32_t byte_off) {
   return (uint64_t(kTcgen05Fa4DescHi) << 32) | lo;
 }
 
+__device__ __forceinline__ void
+tcgen05_commit_2cta(void const *smem_mbar_ptr);
+
 // 1SM SS-MMA: C[128x128] = A[128xK] @ B[128xK]^T.
 // This is the avo instruction form used for QK, with raw descriptors.
 __device__ __forceinline__ void
@@ -981,13 +992,8 @@ tcgen05_mma_1sm_128x128(uint32_t tmem_c, uint64_t desc_a,
                  | (1U << 10)              // b_format = BF16
                  | ((128U / 8) << 17)      // n_dim = 16
                  | ((128U / 16) << 24);    // m_dim = 8
-  asm volatile("{                                                        \n"
-               ".reg .pred p0;                                           \n"
-               "setp.ne.b32 p0, %4, 0;                                   \n"
-               "tcgen05.mma.cta_group::1.kind::f16 [%0], %1, %2, %3, p0; \n"
-               "}"
-               : : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(idesc),
-		                   "r"(accumulate));
+  tl::tcgen05mma_ss_nomask<DataType::kFloat16, false, false>(
+      desc_a, desc_b, tmem_c, accumulate, idesc);
 }
 
 // 2CTA SS-MMA: C[256x128] = A[256xK] @ B[128xK]^T.  Each CTA contributes
@@ -1000,34 +1006,53 @@ tcgen05_mma_2cta_256x128(uint32_t tmem_c, uint64_t desc_a,
                  | (1U << 10)              // b_format = BF16
                  | ((128U / 8) << 17)      // n_dim = 16
                  | ((256U / 16) << 24);    // m_dim = 16
-  asm volatile("{                                                        \n"
-               ".reg .pred p0;                                           \n"
-               "setp.ne.b32 p0, %4, 0;                                   \n"
-               "tcgen05.mma.cta_group::2.kind::f16 [%0], %1, %2, %3, p0; \n"
-               "}"
-               : : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(idesc),
-                   "r"(accumulate));
+  tl::tcgen05mma_ss_nomask<DataType::kFloat16, true, false>(
+      desc_a, desc_b, tmem_c, accumulate, idesc);
 }
 
-// Full QK MMA for one Q stage and one K/V stage. Matches avo's qk loop:
-// two 64-wide descriptor tiles, four 16-wide MMA issues per tile, then a
-// plain .b64 tcgen05 commit to the S-ready mbarrier.
 __device__ __forceinline__ void
-tcgen05_qk_mma_128x128_skv(void const *Q_stage_ptr,
-                            void const *KV_stage_ptr,
-                            uint32_t S_tmem_addr,
-                            void const *smem_mbar_ptr) {
+tcgen05_fa4_uma_qk_mma_2cta(uint32_t sQ_lo, uint32_t sK_lo,
+                            uint32_t q_off_base, uint32_t k_off_base,
+                            uint32_t S_tmem_addr, void const *mbar_s) {
+  constexpr int kBlockMCTA = 128;
+  constexpr int kBPerCTA = 64;
+  constexpr int kTileCols = 64;
+  int first = 1;
+  #pragma unroll
+  for (int t = 0; t < 2; ++t) {
+    uint32_t q_off = q_off_base + t * kBlockMCTA * kTileCols * 2;
+    uint32_t k_off = k_off_base + t * kBPerCTA * kTileCols * 2;
+    #pragma unroll
+    for (int j = 0; j < kTileCols; j += 16) {
+      tl::tcgen05_mma_2cta_256x128(
+          S_tmem_addr,
+          tl::tcgen05_mk_fast_desc(sQ_lo, q_off + j * 2),
+          tl::tcgen05_mk_fast_desc(sK_lo, k_off + j * 2),
+          first ? 0u : 1u);
+      first = 0;
+    }
+  }
+  tl::tcgen05_commit_2cta(mbar_s);
+}
+
+// Shared/shared 128x128 MMA sequence: two 64-wide descriptor tiles, four
+// 16-wide MMA issues per tile, then a plain .b64 tcgen05 commit.
+__device__ __forceinline__ void
+tcgen05_mma_1sm_ss_128x128_commit(void const *A_smem_ptr,
+                                  void const *B_smem_ptr,
+                                  uint32_t C_tmem_addr,
+                                  void const *smem_mbar_ptr) {
   if (!cute::elect_one_sync()) return;
   constexpr int kBlockMCTA = 128;
   constexpr int kBlockN = 128;
   constexpr int kTileCols = 64;
 
-  uint32_t q_lo = (uint32_t)((__cvta_generic_to_shared(
-                                  const_cast<void *>(Q_stage_ptr)) &
+  uint32_t a_lo = (uint32_t)((__cvta_generic_to_shared(
+                                  const_cast<void *>(A_smem_ptr)) &
                               0x3FFFF) >>
                              4);
-  uint32_t kv_lo = (uint32_t)((__cvta_generic_to_shared(
-                                   const_cast<void *>(KV_stage_ptr)) &
+  uint32_t b_lo = (uint32_t)((__cvta_generic_to_shared(
+                                   const_cast<void *>(B_smem_ptr)) &
                                0x3FFFF) >>
                               4);
 
@@ -1039,9 +1064,9 @@ tcgen05_qk_mma_128x128_skv(void const *Q_stage_ptr,
     #pragma unroll
     for (int j = 0; j < kTileCols; j += 16) {
       tl::tcgen05_mma_1sm_128x128(
-          S_tmem_addr,
-          tl::tcgen05_mk_fast_desc(q_lo, q_off + j * 2),
-          tl::tcgen05_mk_fast_desc(kv_lo, k_off + j * 2),
+          C_tmem_addr,
+          tl::tcgen05_mk_fast_desc(a_lo, q_off + j * 2),
+          tl::tcgen05_mk_fast_desc(b_lo, k_off + j * 2),
           first ? 0u : 1u);
       first = 0;
     }
@@ -1066,13 +1091,8 @@ tcgen05_mma_1sm_ts_128x64_bmn(uint32_t tmem_c, uint32_t tmem_a,
                  | (1U << 16)              // b_major = MN-major
                  | ((64U / 8) << 17)       // n_dim = 8 (N=64)
                  | ((128U / 16) << 24);    // m_dim = 8 (M=128)
-  asm volatile("{                                                            \n"
-               ".reg .pred p0;                                               \n"
-               "setp.ne.b32 p0, %4, 0;                                       \n"
-               "tcgen05.mma.cta_group::1.kind::f16 [%0], [%1], %2, %3, p0;   \n"
-               "}"
-               : : "r"(tmem_c), "r"(tmem_a), "l"(desc_b), "r"(idesc),
-	                   "r"(accumulate));
+  tl::tcgen05mma_ts_nomask<DataType::kFloat16, false, false>(
+      tmem_a, desc_b, tmem_c, accumulate, idesc);
 }
 
 // 2CTA TS-MMA: C[256x128] += A_tmem[256xK] @ B_smem[128xK]^T.
@@ -1085,13 +1105,8 @@ tcgen05_mma_2cta_ts_256x128_bmn(uint32_t tmem_c, uint32_t tmem_a,
                  | (1U << 16)              // b_major = MN-major
                  | ((128U / 8) << 17)      // n_dim = 16
                  | ((256U / 16) << 24);    // m_dim = 16
-  asm volatile("{                                                            \n"
-               ".reg .pred p0;                                               \n"
-               "setp.ne.b32 p0, %4, 0;                                       \n"
-               "tcgen05.mma.cta_group::2.kind::f16 [%0], [%1], %2, %3, p0;   \n"
-               "}"
-               : : "r"(tmem_c), "r"(tmem_a), "l"(desc_b), "r"(idesc),
-                   "r"(accumulate));
+  tl::tcgen05mma_ts_nomask<DataType::kFloat16, true, false>(
+      tmem_a, desc_b, tmem_c, accumulate, idesc);
 }
 
 // Avo-exact commit: NO shared:: qualifier (just .b64 [%0])
@@ -1143,29 +1158,29 @@ tcgen05_mbarrier_arrive_expect_tx_cluster_lane0(void const *mbar_ptr,
                "}" : : "r"(p), "r"(bytes) : "memory");
 }
 
-// Full PV MMA for one qs: avo-exact 128×64 BMN, high D first, low D second.
-// V_lo_ptr: pointer to V low-D buffer (bf16, [128, 64], row stride=128B)
-// V_hi_ptr: pointer to V high-D buffer (bf16, [128, 64], row stride=128B)
-// P_tmem_addr: P tile TMEM base address
-// O_tmem_addr: O tile TMEM base address
+// Two 128x64 BMN TS-MMA sequences. B_hi is issued before B_lo to match the
+// target output-column order used by the caller.
+// B_lo_smem_ptr/B_hi_smem_ptr: BF16 [128,64] shared tiles, row stride=128B.
+// A_tmem_addr/C_tmem_addr: TMEM base addresses.
 // accumulate: 0 for k==0 (clear), 1 for k>0 (accumulate into existing O)
-// NOTE: Must be called from warp 12 only (codegen adds the guard).
-// Uses elect_one_sync internally — only lane 0 of warp 12 issues MMA.
+// Uses elect_one_sync internally so only one lane issues the MMA sequence.
 __device__ __forceinline__ void
-tcgen05_pv_mma_128x64_avo(void const *V_lo_ptr, void const *V_hi_ptr,
-                           uint32_t P_tmem_addr,
-                           uint32_t O_tmem_addr, uint32_t accumulate) {
+tcgen05_mma_1sm_ts_128x64_bmn_x2(void const *B_lo_smem_ptr,
+                                 void const *B_hi_smem_ptr,
+                                 uint32_t A_tmem_addr,
+                                 uint32_t C_tmem_addr,
+                                 uint32_t accumulate) {
   if (!cute::elect_one_sync()) return;
   constexpr int kBlockN = 128;   // K-rows (seq block)
   constexpr int kTileCols = 64;  // descriptor tile width
 
-  auto *v_lo = (bfloat16_t *)const_cast<void *>(V_lo_ptr);
-  auto *v_hi = (bfloat16_t *)const_cast<void *>(V_hi_ptr);
+  auto *b_lo = (bfloat16_t *)const_cast<void *>(B_lo_smem_ptr);
+  auto *b_hi = (bfloat16_t *)const_cast<void *>(B_hi_smem_ptr);
   tl::Tcgen05SMemDescriptor desc_lo, desc_hi;
   tl::initialize_tcgen05_descriptor(
-      desc_lo, v_lo, 0, 64, 0, 0, 2);
+      desc_lo, b_lo, 0, 64, 0, 0, 2);
   tl::initialize_tcgen05_descriptor(
-      desc_hi, v_hi, 0, 64, 0, 0, 2);
+      desc_hi, b_hi, 0, 64, 0, 0, 2);
 
   constexpr int kStride = 2048;  // bytes per 16 K-rows: 16 * 64 * 2
 
@@ -1174,7 +1189,7 @@ tcgen05_pv_mma_128x64_avo(void const *V_lo_ptr, void const *V_hi_ptr,
   #pragma unroll
   for (int j = 0; j < kBlockN / 16; j++) {
     tl::tcgen05_mma_1sm_ts_128x64_bmn(
-        O_tmem_addr + 64, P_tmem_addr + j * 8,
+        C_tmem_addr + 64, A_tmem_addr + j * 8,
         uint64_t(desc_hi + j * kStride),
         (j == 0) ? accumulate : 1u);
   }
@@ -1182,40 +1197,41 @@ tcgen05_pv_mma_128x64_avo(void const *V_lo_ptr, void const *V_hi_ptr,
   #pragma unroll
   for (int j = 0; j < kBlockN / 16; j++) {
     tl::tcgen05_mma_1sm_ts_128x64_bmn(
-        O_tmem_addr, P_tmem_addr + j * 8,
+        C_tmem_addr, A_tmem_addr + j * 8,
         uint64_t(desc_lo + j * kStride),
         (j == 0) ? accumulate : 1u);
   }
 }
 
-// Variant for avo's shared K/V stage layout. One stage is physically laid out as
-// two 128x64 bf16 tiles: low-D at base and high-D at base + 128*64 elements.
+// Variant for a contiguous B layout: low tile at base and high tile at
+// base + 128*64 elements.
 __device__ __forceinline__ void
-tcgen05_pv_mma_128x64_skv(void const *V_stage_ptr,
-                           uint32_t P_tmem_addr,
-                           uint32_t O_tmem_addr, uint32_t accumulate) {
-  auto *v_base = (bfloat16_t *)const_cast<void *>(V_stage_ptr);
-  tl::tcgen05_pv_mma_128x64_avo(
-      (void const *)v_base,
-      (void const *)(v_base + 128 * 64),
-      P_tmem_addr, O_tmem_addr, accumulate);
+tcgen05_mma_1sm_ts_128x64_bmn_x2_contig(void const *B_smem_ptr,
+                                        uint32_t A_tmem_addr,
+                                        uint32_t C_tmem_addr,
+                                        uint32_t accumulate) {
+  auto *b_base = (bfloat16_t *)const_cast<void *>(B_smem_ptr);
+  tl::tcgen05_mma_1sm_ts_128x64_bmn_x2(
+      (void const *)b_base,
+      (void const *)(b_base + 128 * 64),
+      A_tmem_addr, C_tmem_addr, accumulate);
 }
 
 __device__ __forceinline__ void
-tcgen05_qk_mma_128x128_skv_lane0(void const *Q_stage_ptr,
-                                  void const *KV_stage_ptr,
-                                  uint32_t S_tmem_addr,
-                                  void const *smem_mbar_ptr) {
+tcgen05_mma_1sm_ss_128x128_commit_lane0(void const *A_smem_ptr,
+                                        void const *B_smem_ptr,
+                                        uint32_t C_tmem_addr,
+                                        void const *smem_mbar_ptr) {
   constexpr int kBlockMCTA = 128;
   constexpr int kBlockN = 128;
   constexpr int kTileCols = 64;
 
-  uint32_t q_lo = (uint32_t)((__cvta_generic_to_shared(
-                                  const_cast<void *>(Q_stage_ptr)) &
+  uint32_t a_lo = (uint32_t)((__cvta_generic_to_shared(
+                                  const_cast<void *>(A_smem_ptr)) &
                               0x3FFFF) >>
                              4);
-  uint32_t kv_lo = (uint32_t)((__cvta_generic_to_shared(
-                                   const_cast<void *>(KV_stage_ptr)) &
+  uint32_t b_lo = (uint32_t)((__cvta_generic_to_shared(
+                                   const_cast<void *>(B_smem_ptr)) &
                                0x3FFFF) >>
                               4);
 
@@ -1227,9 +1243,9 @@ tcgen05_qk_mma_128x128_skv_lane0(void const *Q_stage_ptr,
     #pragma unroll
     for (int j = 0; j < kTileCols; j += 16) {
       tl::tcgen05_mma_1sm_128x128(
-          S_tmem_addr,
-          tl::tcgen05_mk_fast_desc(q_lo, q_off + j * 2),
-          tl::tcgen05_mk_fast_desc(kv_lo, k_off + j * 2),
+          C_tmem_addr,
+          tl::tcgen05_mk_fast_desc(a_lo, q_off + j * 2),
+          tl::tcgen05_mk_fast_desc(b_lo, k_off + j * 2),
           first ? 0u : 1u);
       first = 0;
     }
@@ -1243,10 +1259,10 @@ tcgen05_qk_mma_128x128_skv_lane0(void const *Q_stage_ptr,
 }
 
 __device__ __forceinline__ void
-tcgen05_qk_mma_128x128_skv_fast(uint32_t sQ_lo, uint32_t sKV_lo,
+tcgen05_mma_1sm_ss_128x128_commit_fast(uint32_t sA_lo, uint32_t sB_lo,
                                  uint32_t q_off_base,
                                  uint32_t kv_off_base,
-                                 uint32_t S_tmem_addr,
+                                 uint32_t C_tmem_addr,
                                  void const *smem_mbar_ptr) {
   constexpr int kBlockMCTA = 128;
   constexpr int kBlockN = 128;
@@ -1260,9 +1276,9 @@ tcgen05_qk_mma_128x128_skv_fast(uint32_t sQ_lo, uint32_t sKV_lo,
     #pragma unroll
     for (int j = 0; j < kTileCols; j += 16) {
       tl::tcgen05_mma_1sm_128x128(
-          S_tmem_addr,
-          tl::tcgen05_mk_fast_desc(sQ_lo, q_off + j * 2),
-          tl::tcgen05_mk_fast_desc(sKV_lo, k_off + j * 2),
+          C_tmem_addr,
+          tl::tcgen05_mk_fast_desc(sA_lo, q_off + j * 2),
+          tl::tcgen05_mk_fast_desc(sB_lo, k_off + j * 2),
           first ? 0u : 1u);
       first = 0;
     }
@@ -1276,27 +1292,28 @@ tcgen05_qk_mma_128x128_skv_fast(uint32_t sQ_lo, uint32_t sKV_lo,
 }
 
 __device__ __forceinline__ void
-tcgen05_pv_mma_128x64_skv_lane0(void const *V_stage_ptr,
-                                 uint32_t P_tmem_addr,
-                                 uint32_t O_tmem_addr, uint32_t accumulate) {
+tcgen05_mma_1sm_ts_128x64_bmn_x2_contig_lane0(void const *B_smem_ptr,
+                                              uint32_t A_tmem_addr,
+                                              uint32_t C_tmem_addr,
+                                              uint32_t accumulate) {
   constexpr int kBlockN = 128;
-  auto *v_base = (bfloat16_t *)const_cast<void *>(V_stage_ptr);
+  auto *b_base = (bfloat16_t *)const_cast<void *>(B_smem_ptr);
   tl::Tcgen05SMemDescriptor desc_lo, desc_hi;
-  tl::initialize_tcgen05_descriptor(desc_lo, v_base, 0, 64, 0, 0, 2);
-  tl::initialize_tcgen05_descriptor(desc_hi, v_base + 128 * 64, 0, 64, 0, 0, 2);
+  tl::initialize_tcgen05_descriptor(desc_lo, b_base, 0, 64, 0, 0, 2);
+  tl::initialize_tcgen05_descriptor(desc_hi, b_base + 128 * 64, 0, 64, 0, 0, 2);
 
   constexpr int kStride = 2048;
   #pragma unroll
   for (int j = 0; j < kBlockN / 16; j++) {
     tl::tcgen05_mma_1sm_ts_128x64_bmn(
-        O_tmem_addr + 64, P_tmem_addr + j * 8,
+        C_tmem_addr + 64, A_tmem_addr + j * 8,
         uint64_t(desc_hi + j * kStride),
         (j == 0) ? accumulate : 1u);
   }
   #pragma unroll
   for (int j = 0; j < kBlockN / 16; j++) {
     tl::tcgen05_mma_1sm_ts_128x64_bmn(
-        O_tmem_addr, P_tmem_addr + j * 8,
+        C_tmem_addr, A_tmem_addr + j * 8,
         uint64_t(desc_lo + j * kStride),
         (j == 0) ? accumulate : 1u);
   }
@@ -1312,26 +1329,26 @@ tcgen05_commit_1sm_lane0(void const *smem_mbar_ptr) {
 }
 
 __device__ __forceinline__ void
-tcgen05_pv_mma_128x64_skv_fast(uint32_t sKV_lo, uint32_t kv_off_base,
-                                uint32_t P_tmem_addr,
-                                uint32_t O_tmem_addr,
+tcgen05_mma_1sm_ts_128x64_bmn_x2_contig_fast(uint32_t sB_lo, uint32_t b_off_base,
+                                uint32_t A_tmem_addr,
+                                uint32_t C_tmem_addr,
                                 uint32_t accumulate) {
   constexpr int kBlockN = 128;
   constexpr int kTileCols = 64;
-  uint32_t v_hi = kv_off_base + kBlockN * kTileCols * 2;
+  uint32_t b_hi = b_off_base + kBlockN * kTileCols * 2;
 
   #pragma unroll
   for (int j = 0; j < kBlockN; j += 16) {
     tl::tcgen05_mma_1sm_ts_128x64_bmn(
-        O_tmem_addr + 64, P_tmem_addr + j / 2,
-        tl::tcgen05_mk_fast_desc(sKV_lo, v_hi + j * kTileCols * 2),
+        C_tmem_addr + 64, A_tmem_addr + j / 2,
+        tl::tcgen05_mk_fast_desc(sB_lo, b_hi + j * kTileCols * 2),
         (j == 0) ? accumulate : 1u);
   }
   #pragma unroll
   for (int j = 0; j < kBlockN; j += 16) {
     tl::tcgen05_mma_1sm_ts_128x64_bmn(
-        O_tmem_addr, P_tmem_addr + j / 2,
-        tl::tcgen05_mk_fast_desc(sKV_lo, kv_off_base + j * kTileCols * 2),
+        C_tmem_addr, A_tmem_addr + j / 2,
+        tl::tcgen05_mk_fast_desc(sB_lo, b_off_base + j * kTileCols * 2),
         (j == 0) ? accumulate : 1u);
   }
 }
@@ -1574,7 +1591,7 @@ tcgen05_mma_warp_1sm_skv_fast(
   tl::tcgen05_after_thread_sync();
   #pragma unroll
   for (int qs = 0; qs < 2; ++qs) {
-    tl::tcgen05_qk_mma_128x128_skv_fast(
+    tl::tcgen05_mma_1sm_ss_128x128_commit_fast(
         sQ_lo, sKV_lo, uint32_t(qs * kQStageBytes), kv0_off,
         qs == 0 ? S0_tmem_addr : S1_tmem_addr, qs == 0 ? mbar_s0 : mbar_s1);
   }
@@ -1603,7 +1620,7 @@ tcgen05_mma_warp_1sm_skv_fast(
       tl::tcgen05_wait_barrier(qs == 0 ? mbar_p0 : mbar_p1, pv_phase);
       tl::tcgen05_after_thread_sync();
 
-      tl::tcgen05_pv_mma_128x64_skv_fast(
+      tl::tcgen05_mma_1sm_ts_128x64_bmn_x2_contig_fast(
           sKV_lo, kv_off, qs == 0 ? P0_tmem_addr : P1_tmem_addr,
           qs == 0 ? O0_tmem_addr : O1_tmem_addr, pv_acc);
 
@@ -1621,7 +1638,7 @@ tcgen05_mma_warp_1sm_skv_fast(
           tl::tcgen05_after_thread_sync();
         }
         uint32_t next_off = uint32_t(next_stage * kKVStageBytes);
-        tl::tcgen05_qk_mma_128x128_skv_fast(
+        tl::tcgen05_mma_1sm_ss_128x128_commit_fast(
             sQ_lo, sKV_lo, uint32_t(qs * kQStageBytes), next_off,
             qs == 0 ? S0_tmem_addr : S1_tmem_addr,
             qs == 0 ? mbar_s0 : mbar_s1);
@@ -1664,9 +1681,9 @@ tcgen05_mma_warp_1sm_skv(
   int first_phase = (tile_k_base / 3) & 1;
   tl::tcgen05_wait_barrier(mbar_k[first_stage], uint32_t(first_phase));
   tl::tcgen05_after_thread_sync();
-  tl::tcgen05_qk_mma_128x128_skv_lane0(Q0_stage_ptr, kv_ptrs[first_stage],
+  tl::tcgen05_mma_1sm_ss_128x128_commit_lane0(Q0_stage_ptr, kv_ptrs[first_stage],
                                        S0_tmem_addr, mbar_s0);
-  tl::tcgen05_qk_mma_128x128_skv_lane0(Q1_stage_ptr, kv_ptrs[first_stage],
+  tl::tcgen05_mma_1sm_ss_128x128_commit_lane0(Q1_stage_ptr, kv_ptrs[first_stage],
                                        S1_tmem_addr, mbar_s1);
 
   #pragma unroll 1
@@ -1687,7 +1704,7 @@ tcgen05_mma_warp_1sm_skv(
     tl::tcgen05_wait_barrier(mbar_p0, pv_phase);
     tl::tcgen05_after_thread_sync();
 
-    tl::tcgen05_pv_mma_128x64_skv_lane0(kv_ptrs[stage], P0_tmem_addr,
+    tl::tcgen05_mma_1sm_ts_128x64_bmn_x2_contig_lane0(kv_ptrs[stage], P0_tmem_addr,
                                         O0_tmem_addr, accum);
 
     if (k + 1 < loop_extent) {
@@ -1696,7 +1713,7 @@ tcgen05_mma_warp_1sm_skv(
       int next_phase = (ntk / 3) & 1;
       tl::tcgen05_wait_barrier(mbar_k[next_stage], uint32_t(next_phase));
       tl::tcgen05_after_thread_sync();
-      tl::tcgen05_qk_mma_128x128_skv_lane0(Q0_stage_ptr, kv_ptrs[next_stage],
+      tl::tcgen05_mma_1sm_ss_128x128_commit_lane0(Q0_stage_ptr, kv_ptrs[next_stage],
                                            S0_tmem_addr, mbar_s0);
     }
 
@@ -1709,14 +1726,14 @@ tcgen05_mma_warp_1sm_skv(
     }
     tl::tcgen05_wait_barrier(mbar_p1, pv_phase);
     tl::tcgen05_after_thread_sync();
-    tl::tcgen05_pv_mma_128x64_skv_lane0(kv_ptrs[stage], P1_tmem_addr,
+    tl::tcgen05_mma_1sm_ts_128x64_bmn_x2_contig_lane0(kv_ptrs[stage], P1_tmem_addr,
                                         O1_tmem_addr, accum);
     tl::tcgen05_commit_1sm_lane0(mbar_pv);
 
     if (k + 1 < loop_extent) {
       int ntk = tk + 1;
       int next_stage = ntk % 3;
-      tl::tcgen05_qk_mma_128x128_skv_lane0(Q1_stage_ptr, kv_ptrs[next_stage],
+      tl::tcgen05_mma_1sm_ss_128x128_commit_lane0(Q1_stage_ptr, kv_ptrs[next_stage],
                                            S1_tmem_addr, mbar_s1);
     }
   }
@@ -1734,6 +1751,19 @@ tcgen05_reuse3_stage_ptr(void *k0_ptr, void *k1_ptr, void *stage2_ptr,
   if (stage == 0) return reinterpret_cast<bfloat16_t *>(k0_ptr);
   if (stage == 1) return reinterpret_cast<bfloat16_t *>(k1_ptr);
   return reinterpret_cast<bfloat16_t *>(stage2_ptr);
+}
+
+__device__ __forceinline__ Barrier &
+tcgen05_reuse3_barrier_ref(Barrier &mbar0, Barrier &mbar1, Barrier &mbar2,
+                           int stage) {
+  if (stage == 0) return mbar0;
+  if (stage == 1) return mbar1;
+  return mbar2;
+}
+
+__device__ __forceinline__ bfloat16_t *
+tcgen05_smem_ptr_add_bf16(void *ptr, int offset) {
+  return reinterpret_cast<bfloat16_t *>(ptr) + offset;
 }
 
 __device__ __forceinline__ void const *
@@ -1754,17 +1784,24 @@ tcgen05_reuse3_vbar(void const *mbar_v0, void const *mbar_v1,
 
 __device__ __forceinline__ void
 tcgen05_tma_load_128x128(const CUtensorMap &desc, void *stage_ptr,
-                         void const *mbar_ptr, int k, int kv_head,
+                         Barrier &bar, int k, int kv_head,
                          int batch) {
   constexpr int kBlockN = 128;
   constexpr int kTileCols = 64;
   constexpr int kBytes = kBlockN * 128 * 2;
   auto *dst = reinterpret_cast<bfloat16_t *>(stage_ptr);
-  auto *bar = reinterpret_cast<Barrier *>(const_cast<void *>(mbar_ptr));
-  tl::tcgen05_arrive_expect_tx((void const *)bar, kBytes);
-  tl::tma_load(desc, *bar, dst, 0, kv_head, k * kBlockN, batch);
-  tl::tma_load(desc, *bar, dst + kBlockN * kTileCols, 64, kv_head,
+  tl::tcgen05_arrive_expect_tx((void const *)&bar, kBytes);
+  tl::tma_load(desc, bar, dst, 0, kv_head, k * kBlockN, batch);
+  tl::tma_load(desc, bar, dst + kBlockN * kTileCols, 64, kv_head,
                k * kBlockN, batch);
+}
+
+__device__ __forceinline__ void
+tcgen05_tma_load_128x128(const CUtensorMap &desc, void *stage_ptr,
+                         void const *mbar_ptr, int k, int kv_head,
+                         int batch) {
+  auto &bar = *reinterpret_cast<Barrier *>(const_cast<void *>(mbar_ptr));
+  tl::tcgen05_tma_load_128x128(desc, stage_ptr, bar, k, kv_head, batch);
 }
 
 __device__ __noinline__ void
@@ -1871,9 +1908,9 @@ tcgen05_mma_warp_1sm_reuse3(
     tl::tcgen05_after_thread_sync();
     auto *kptr =
         tl::tcgen05_reuse3_stage_ptr(K0_stage_ptr, K1_stage_ptr, KV2_stage_ptr, 0);
-    tl::tcgen05_qk_mma_128x128_skv_lane0(Q0_stage_ptr, kptr, S0_tmem_addr,
+    tl::tcgen05_mma_1sm_ss_128x128_commit_lane0(Q0_stage_ptr, kptr, S0_tmem_addr,
                                          mbar_s0);
-    tl::tcgen05_qk_mma_128x128_skv_lane0(Q1_stage_ptr, kptr, S1_tmem_addr,
+    tl::tcgen05_mma_1sm_ss_128x128_commit_lane0(Q1_stage_ptr, kptr, S1_tmem_addr,
                                          mbar_s1);
   }
 
@@ -1895,7 +1932,7 @@ tcgen05_mma_warp_1sm_reuse3(
     tl::tcgen05_after_thread_sync();
     auto *vptr = tl::tcgen05_reuse3_stage_ptr(K0_stage_ptr, K1_stage_ptr,
                                               KV2_stage_ptr, stage);
-    tl::tcgen05_pv_mma_128x64_avo(vptr, vptr + 128 * 64, P0_tmem_addr,
+    tl::tcgen05_mma_1sm_ts_128x64_bmn_x2(vptr, vptr + 128 * 64, P0_tmem_addr,
                                   O0_tmem_addr, accum);
 
     tl::tcgen05_wait_barrier(mbar_p2_1, pv_phase);
@@ -1904,7 +1941,7 @@ tcgen05_mma_warp_1sm_reuse3(
     }
     tl::tcgen05_wait_barrier(mbar_p1, pv_phase);
     tl::tcgen05_after_thread_sync();
-    tl::tcgen05_pv_mma_128x64_avo(vptr, vptr + 128 * 64, P1_tmem_addr,
+    tl::tcgen05_mma_1sm_ts_128x64_bmn_x2(vptr, vptr + 128 * 64, P1_tmem_addr,
                                   O1_tmem_addr, accum);
     tl::tcgen05_commit_1sm(mbar_pv);
 
@@ -1918,9 +1955,9 @@ tcgen05_mma_warp_1sm_reuse3(
       tl::tcgen05_after_thread_sync();
       auto *kptr = tl::tcgen05_reuse3_stage_ptr(
           K0_stage_ptr, K1_stage_ptr, KV2_stage_ptr, nstage);
-      tl::tcgen05_qk_mma_128x128_skv_lane0(Q0_stage_ptr, kptr, S0_tmem_addr,
+      tl::tcgen05_mma_1sm_ss_128x128_commit_lane0(Q0_stage_ptr, kptr, S0_tmem_addr,
                                            mbar_s0);
-      tl::tcgen05_qk_mma_128x128_skv_lane0(Q1_stage_ptr, kptr, S1_tmem_addr,
+      tl::tcgen05_mma_1sm_ss_128x128_commit_lane0(Q1_stage_ptr, kptr, S1_tmem_addr,
                                            mbar_s1);
     }
   }
@@ -1990,6 +2027,20 @@ tma_load_2sm_avo(const CUtensorMap *descriptor, void const *const smem_ptr,
                :
                : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
                  "r"(crd0), "r"(crd1)
+               : "memory");
+}
+
+__device__ __forceinline__ void
+tma_store_2d_avo(const CUtensorMap *descriptor, void const *const smem_ptr,
+                 int32_t const &crd0, int32_t const &crd1) {
+  uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(descriptor);
+  uint32_t smem_int_ptr =
+      static_cast<uint32_t>(__cvta_generic_to_shared(const_cast<void *>(smem_ptr)));
+  asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group "
+               "[%0, {%1, %2}], [%3];"
+               :
+               : "l"(gmem_int_desc), "r"(crd0), "r"(crd1),
+                 "r"(smem_int_ptr)
                : "memory");
 }
 
@@ -2509,6 +2560,736 @@ tcgen05_producer_warp_2cta(
           v_row + t * kBPerCTA + c * kPageRows);
     }
   }
+}
+
+// ====================================================================
+// TileScale fa4_uma 2CTA helpers. These mirror the role functions in
+// tilescale-artifact/single_gpu/flashattention/tilescale/fa4_uma.cu while the
+// TileLang DSL owns the kernel launch, persistent tile loop, shared/tmem
+// allocation, and role dispatch.
+// ====================================================================
+
+__device__ __forceinline__ void
+tcgen05_mbarrier_arrive_cluster_all(void const *mbar_ptr) {
+  uint32_t p = static_cast<uint32_t>(
+      __cvta_generic_to_shared(const_cast<void *>(mbar_ptr))) & 0xFEFFFFFFu;
+  asm volatile("mbarrier.arrive.release.cta.shared::cluster.b64 _, [%0];"
+               : : "r"(p) : "memory");
+}
+
+__device__ __forceinline__ void
+tcgen05_mbarrier_arrive_local_all(void const *mbar_ptr) {
+  uint32_t p = static_cast<uint32_t>(
+      __cvta_generic_to_shared(const_cast<void *>(mbar_ptr)));
+  asm volatile("mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];"
+               : : "r"(p) : "memory");
+}
+
+__device__ __forceinline__ void tcgen05_bar_arrive(int bar, int count) {
+  asm volatile("bar.arrive %0, %1;" : : "r"(bar), "r"(count));
+}
+
+__device__ __forceinline__ void tcgen05_bar_sync(int bar, int count) {
+  asm volatile("bar.sync %0, %1;" : : "r"(bar), "r"(count));
+}
+
+__device__ __noinline__ void
+tcgen05_fa4_uma_softmax_warp_2cta(uint32_t S_tmem_addr,
+                                  uint32_t P_tmem_addr, float *rs_smem,
+                                  float *sum_smem, void const *mbar_s_ptr,
+                                  void const *mbar_p_ptr,
+                                  void const *mbar_p2_ptr, int loop_extent,
+                                  int seq_len, int kb_base,
+                                  float softmax_scale_log2) {
+  constexpr int kBlockN = 128;
+  constexpr int kQStages = 2;
+  constexpr int kBlockMCTA = 128;
+  constexpr int kEx2EmuFreq = 10;
+  constexpr int kEx2EmuRes = 4;
+  constexpr int kEx2EmuStartFrg = 1;
+  constexpr int kEx2FragSize = 32;
+  constexpr int kSplitReadyCc = 80;
+  constexpr float kRescaleThreshold = 8.0f;
+
+  int cr = tl::block_rank_in_cluster();
+  int w = int(threadIdx.x) >> 5;
+  int tid = int(threadIdx.x);
+  int qs = w >> 2;
+  int sm_tid = tid - (qs == 1 ? 128 : 0);
+  int sm_bar = qs * 4 + (w & 3);
+  uint32_t tr = uint32_t(((cr * kBlockMCTA + (w & 3) * 32) << 16));
+  float rmax_local = -CUDART_INF_F;
+  float rsum_local = 0.0f;
+
+  #pragma unroll 1
+  for (int kb = 0; kb < loop_extent; ++kb) {
+    int tkb = kb_base + kb;
+    tl::tcgen05_wait_barrier(mbar_s_ptr, uint32_t(tkb & 1));
+    tl::tcgen05_after_thread_sync();
+
+    float sv[kBlockN];
+    #pragma unroll
+    for (int cc = 0; cc < kBlockN; cc += 32) {
+      tl::tmem_ld_32dp32bNx<false>::copy<32>(S_tmem_addr + tr + cc,
+                                              (uint32_t *)&sv[cc]);
+    }
+    tl::fence_view_async_tmem_load();
+
+    int remaining = seq_len - kb * kBlockN;
+    if (remaining < kBlockN) {
+      #pragma unroll
+      for (int i = 0; i < kBlockN; ++i) {
+        if (i >= remaining) sv[i] = -CUDART_INF_F;
+      }
+    }
+
+    float m0 = tl::tcgen05_fmax3(sv[0], sv[1], sv[2]);
+    float m1 = tl::tcgen05_fmax3(sv[3], sv[4], sv[5]);
+    float m2 = tl::tcgen05_fmax3(sv[6], sv[7], sv[8]);
+    float m3 = sv[9];
+    #pragma unroll
+    for (int i = 10; i < kBlockN; i += 8) {
+      m0 = tl::tcgen05_fmax3(m0, sv[i + 0], sv[i + 1]);
+      m1 = tl::tcgen05_fmax3(m1, sv[i + 2], sv[i + 3]);
+      m2 = tl::tcgen05_fmax3(m2, sv[i + 4], sv[i + 5]);
+      m3 = tl::tcgen05_fmax3(m3, sv[i + 6], sv[i + 7]);
+    }
+    float block_max = tl::tcgen05_fmax2(tl::tcgen05_fmax2(m0, m1),
+                                        tl::tcgen05_fmax2(m2, m3));
+    float new_max = tl::tcgen05_fmax2(rmax_local, block_max);
+    if (new_max == -CUDART_INF_F) new_max = 0.0f;
+    float rs = 1.0f;
+    if (kb == 0) {
+      rmax_local = new_max;
+    } else {
+      float acc_scale_log2 = (rmax_local - new_max) * softmax_scale_log2;
+      if (acc_scale_log2 < -kRescaleThreshold) {
+        rs = tl::tcgen05_exp2f_approx(acc_scale_log2);
+        rmax_local = new_max;
+      }
+    }
+    rsum_local *= rs;
+
+    rs_smem[(tkb & 1) * kQStages * kBlockMCTA + qs * kBlockMCTA + sm_tid] = rs;
+    tl::tcgen05_bar_arrive(sm_bar, 64);
+
+    float neg_max_scaled = -(rmax_local * softmax_scale_log2);
+    #pragma unroll
+    for (int cc = 0; cc < kBlockN; cc += 16) {
+      #pragma unroll
+      for (int i = 0; i < 16; i += 2) {
+        tl::tcgen05_fma_f32x2(sv[cc + i], sv[cc + i + 1],
+                              sv[cc + i], sv[cc + i + 1],
+                              softmax_scale_log2, softmax_scale_log2,
+                              neg_max_scaled, neg_max_scaled);
+      }
+    }
+
+    float psa[4] = {0.f, 0.f, 0.f, 0.f};
+    #pragma unroll
+    for (int cc = 0; cc < kBlockN; cc += 16) {
+      #pragma unroll
+      for (int g = 0; g <= 8; g += 8) {
+        __nv_bfloat162 h4[4];
+        float f8[8];
+        #pragma unroll
+        for (int i = 0; i < 8; i += 2) {
+          int elem = cc + g + i;
+          float p0, p1;
+          int frag = elem / kEx2FragSize;
+          int k_in_frag = elem % kEx2FragSize;
+          if (kEx2EmuFreq > 0 && frag >= kEx2EmuStartFrg &&
+              frag < (kBlockN / kEx2FragSize - 1) &&
+              (k_in_frag % kEx2EmuFreq) >= (kEx2EmuFreq - kEx2EmuRes)) {
+            tl::tcgen05_exp2_poly_2(p0, p1, sv[elem], sv[elem + 1]);
+          } else {
+            p0 = tl::tcgen05_exp2f_approx(sv[elem]);
+            p1 = tl::tcgen05_exp2f_approx(sv[elem + 1]);
+          }
+          psa[i >> 1] += p0 + p1;
+          f8[i] = p0;
+          f8[i + 1] = p1;
+        }
+        tl::tcgen05_float22bfloat162_xN<4>(h4, f8);
+        tl::tcgen05_st_32x32b_x4(
+            P_tmem_addr + tr + (cc + g) / 2,
+            *reinterpret_cast<uint32_t *>(&h4[0]),
+            *reinterpret_cast<uint32_t *>(&h4[1]),
+            *reinterpret_cast<uint32_t *>(&h4[2]),
+            *reinterpret_cast<uint32_t *>(&h4[3]));
+      }
+      if (cc == kSplitReadyCc) {
+        tl::fence_view_async_tmem_store();
+        tl::tcgen05_mbarrier_arrive_cluster_all(mbar_p_ptr);
+      }
+    }
+    tl::fence_view_async_tmem_store();
+    tl::tcgen05_mbarrier_arrive_cluster_all(mbar_p2_ptr);
+    rsum_local += (psa[0] + psa[1]) + (psa[2] + psa[3]);
+  }
+
+  sum_smem[qs * kBlockMCTA + sm_tid] = rsum_local;
+  tl::tcgen05_bar_arrive(sm_bar, 64);
+}
+
+__device__ __forceinline__ void
+tcgen05_fa4_uma_correction_rescale_o(uint32_t O_base, float rs) {
+  constexpr int kHeadDim = 128;
+  float buf[2][16];
+  int cur = 0;
+  tl::tmem_ld_32dp32bNx<false>::copy<16>(O_base, (uint32_t *)buf[cur]);
+  #pragma unroll
+  for (int g = 0; g < kHeadDim / 16; ++g) {
+    tl::fence_view_async_tmem_load();
+    int nxt = cur ^ 1;
+    if (g + 1 < kHeadDim / 16) {
+      tl::tmem_ld_32dp32bNx<false>::copy<16>(O_base + (g + 1) * 16,
+                                              (uint32_t *)buf[nxt]);
+    }
+    #pragma unroll
+    for (int i = 0; i < 16; i += 2) {
+      tl::tcgen05_fma_f32x2(buf[cur][i], buf[cur][i + 1],
+                            buf[cur][i], buf[cur][i + 1], rs, rs, 0.0f,
+                            0.0f);
+    }
+    tl::tmem_st_32dp32bNx<false>::copy<16>(O_base + g * 16,
+                                            (uint32_t *)buf[cur]);
+    cur = nxt;
+  }
+  tl::fence_view_async_tmem_store();
+}
+
+__device__ __forceinline__ void
+tcgen05_fa4_uma_correction_finalize_o(bfloat16_t *epi_stage,
+                                      uint32_t O_base, int lane, float inv) {
+  constexpr int kHeadDim = 128;
+  constexpr int kEpiBlockCols = 64;
+  constexpr int kEpiBlockBytes = kEpiBlockCols * 2;
+  constexpr int kEpiBlockElems = 32 * kEpiBlockCols;
+  char *epi_base = reinterpret_cast<char *>(epi_stage);
+  char *epi_blk0 = epi_base;
+  char *epi_blk1 = epi_base + kEpiBlockElems * 2;
+  int row_off = lane * kEpiBlockBytes;
+  int swiz = (lane & 7) << 4;
+
+  #pragma unroll
+  for (int d = 0; d < kHeadDim; d += 16) {
+    float t[16];
+    tl::tmem_ld_32dp32bNx<false>::copy<16>(O_base + d, (uint32_t *)t);
+    tl::fence_view_async_tmem_load();
+    #pragma unroll
+    for (int i = 0; i < 16; i += 2) {
+      tl::tcgen05_fma_f32x2(t[i], t[i + 1], t[i], t[i + 1], inv, inv, 0.0f,
+                            0.0f);
+    }
+    bfloat16_t b[16];
+    #pragma unroll
+    for (int i = 0; i < 16; ++i) b[i] = bfloat16_t(t[i]);
+    int d_in_blk = d % kEpiBlockCols;
+    char *blk = d < kEpiBlockCols ? epi_blk0 : epi_blk1;
+    int col0 = d_in_blk * 2;
+    int col1 = (d_in_blk + 8) * 2;
+    *reinterpret_cast<uint4 *>(blk + row_off + (col0 ^ swiz)) =
+        *reinterpret_cast<uint4 *>(&b[0]);
+    *reinterpret_cast<uint4 *>(blk + row_off + (col1 ^ swiz)) =
+        *reinterpret_cast<uint4 *>(&b[8]);
+  }
+}
+
+__device__ __noinline__ void
+tcgen05_fa4_uma_correction_warp_2cta(
+    void *O_stage_ptr, float *rs_smem, float *sum_smem,
+    void const *mbar_corr_base, void const *mbar_pv_base,
+    void const *mbar_epi_base, void const *mbar_o_rel,
+    void const *mbar_o_tmem_rel, uint32_t O0_tmem_addr, int loop_extent,
+    int kb_base, int tile_phase) {
+  constexpr int kQStages = 2;
+  constexpr int kBlockMCTA = 128;
+  constexpr int kKVStages = 3;
+  constexpr int kHeadDim = 128;
+  int cr = tl::block_rank_in_cluster();
+  int w = int(threadIdx.x) >> 5;
+  int tid = int(threadIdx.x);
+  int corr_tid = tid - 256;
+  int lane = tid & 31;
+  int warp_in_corr = w & 3;
+  int sm_bar_base = w & 3;
+  auto *mb_corr = reinterpret_cast<Barrier const *>(mbar_corr_base);
+  auto *mb_pv = reinterpret_cast<Barrier const *>(mbar_pv_base);
+  auto *mb_epi = reinterpret_cast<Barrier const *>(mbar_epi_base);
+  auto *o_stage = reinterpret_cast<bfloat16_t *>(O_stage_ptr);
+  uint32_t tr = uint32_t(((cr * kBlockMCTA + (w & 3) * 32) << 16));
+
+  #pragma unroll 1
+  for (int kb = 0; kb < loop_extent; ++kb) {
+    int tkb = kb_base + kb;
+    #pragma unroll
+    for (int qs = 0; qs < kQStages; ++qs) {
+      tl::tcgen05_bar_sync(sm_bar_base + qs * 4, 64);
+      float rs = rs_smem[(tkb & 1) * kQStages * kBlockMCTA +
+                         qs * kBlockMCTA + corr_tid];
+      if (kb > 0) {
+        unsigned int needs_rescale = __ballot_sync(0xFFFFFFFFu, rs < 1.0f);
+        if (needs_rescale) {
+          int prev = tkb - 1;
+          int pv_stage = prev % kKVStages;
+          int pv_phase = (prev / kKVStages) & 1;
+          tl::tcgen05_wait_barrier((void const *)&mb_pv[pv_stage],
+                                   uint32_t(pv_phase));
+          tl::tcgen05_after_thread_sync();
+          tcgen05_fa4_uma_correction_rescale_o(
+              (O0_tmem_addr + qs * 128) + tr, rs);
+        }
+      }
+      tl::tcgen05_mbarrier_arrive_cluster_all((void const *)&mb_corr[qs]);
+    }
+  }
+
+  int last_tkb = kb_base + loop_extent - 1;
+  int last_v_stage = last_tkb % kKVStages;
+  int last_v_phase = (last_tkb / kKVStages) & 1;
+  if (kb_base > 0) {
+    tl::tcgen05_wait_barrier(mbar_o_rel, uint32_t(tile_phase ^ 1));
+  }
+
+  #pragma unroll
+  for (int qs = 0; qs < kQStages; ++qs) {
+    tl::tcgen05_wait_barrier((void const *)&mb_pv[last_v_stage],
+                             uint32_t(last_v_phase));
+    tl::tcgen05_after_thread_sync();
+    tl::tcgen05_bar_sync(sm_bar_base + qs * 4, 64);
+    float rsum = sum_smem[qs * kBlockMCTA + corr_tid];
+    float inv = 0.0f;
+    if (rsum > 0.0f) {
+      asm("rcp.approx.ftz.f32 %0, %1;" : "=f"(inv) : "f"(rsum));
+    }
+    bfloat16_t *epi_stage =
+        o_stage + qs * kBlockMCTA * kHeadDim +
+        warp_in_corr * 32 * kHeadDim;
+    tcgen05_fa4_uma_correction_finalize_o(
+        epi_stage, (O0_tmem_addr + qs * 128) + tr, lane, inv);
+    tl::fence_proxy_async();
+    tl::tcgen05_mbarrier_arrive_local_all((void const *)&mb_epi[qs]);
+  }
+  tl::tcgen05_mbarrier_arrive_cluster_all(mbar_o_tmem_rel);
+}
+
+__device__ __noinline__ void
+tcgen05_fa4_uma_mma_warp_2cta(
+    int cr, bfloat16_t const *Q_base_ptr, bfloat16_t const *K_base_ptr,
+    bfloat16_t const *V_base_ptr, Barrier const *mb_q, Barrier const *mb_k,
+    Barrier const *mb_s, Barrier const *mb_p, Barrier const *mb_p2,
+    Barrier const *mb_v, Barrier const *mb_pv, Barrier const *mb_corr,
+    Barrier const *mb_k_rel, Barrier const *mb_v_rel, Barrier const *mb_q_rel,
+    Barrier const *mb_o_tmem_rel,
+    uint32_t S0_tmem_addr, int loop_extent, int tile_k_base,
+    int q_phase) {
+  if (cr != 0 || cute::elect_one_sync() == 0) return;
+  constexpr int kQStages = 2;
+  constexpr int kKVStages = 3;
+  constexpr int kBlockMCTA = 128;
+  constexpr int kBPerCTA = 64;
+  constexpr int kTileCols = 64;
+  constexpr int kHeadDim = 128;
+  constexpr int kQStageElems = kBlockMCTA * kHeadDim;
+  constexpr int kPerStageKV = kBPerCTA * kHeadDim;
+  constexpr int kQStageBytes = kQStageElems * 2;
+  constexpr int kKVStageBytes = kPerStageKV * 2;
+
+  uint32_t sQ_lo = uint32_t((__cvta_generic_to_shared(
+                                 const_cast<bfloat16_t *>(Q_base_ptr)) & 0x3FFFF) >> 4);
+  uint32_t sK_lo = uint32_t((__cvta_generic_to_shared(
+                                 const_cast<bfloat16_t *>(K_base_ptr)) & 0x3FFFF) >> 4);
+  uint32_t sV_lo = uint32_t((__cvta_generic_to_shared(
+                                 const_cast<bfloat16_t *>(V_base_ptr)) & 0x3FFFF) >> 4);
+
+  #pragma unroll
+  for (int qs = 0; qs < kQStages; ++qs) {
+    tl::tcgen05_wait_barrier((void const *)&mb_q[qs], uint32_t(q_phase));
+  }
+  tl::tcgen05_after_thread_sync();
+
+  int kv0_stage = tile_k_base % kKVStages;
+  int kv0_phase = (tile_k_base / kKVStages) & 1;
+  tl::tcgen05_wait_barrier((void const *)&mb_k[kv0_stage],
+                           uint32_t(kv0_phase));
+  tl::tcgen05_after_thread_sync();
+  #pragma unroll
+  for (int qs = 0; qs < kQStages; ++qs) {
+    tcgen05_fa4_uma_qk_mma_2cta(
+        sQ_lo, sK_lo, uint32_t(qs * kQStageBytes),
+        uint32_t(kv0_stage * kKVStageBytes), S0_tmem_addr + qs * 128,
+        (void const *)&mb_s[qs]);
+  }
+  tl::tcgen05_commit_2cta((void const *)&mb_k_rel[kv0_stage]);
+
+  if (loop_extent > 0) {
+    if (tile_k_base > 0) {
+      tl::tcgen05_wait_barrier(mb_o_tmem_rel, uint32_t(q_phase ^ 1));
+      tl::tcgen05_after_thread_sync();
+    }
+    int tkb = tile_k_base;
+    int v_stage = tkb % kKVStages;
+    int v_phase = (tkb / kKVStages) & 1;
+    #pragma unroll
+    for (int qs = 0; qs < kQStages; ++qs) {
+      uint32_t O_addr = S0_tmem_addr + 256 + qs * 128;
+      uint32_t P_base = S0_tmem_addr + 64 + qs * 128;
+      uint32_t v_base = uint32_t(v_stage * kKVStageBytes);
+      tl::tcgen05_wait_barrier((void const *)&mb_p[qs], uint32_t(tkb & 1));
+      tl::tcgen05_wait_barrier((void const *)&mb_v[v_stage],
+                               uint32_t(v_phase));
+      tl::tcgen05_after_thread_sync();
+      uint32_t v_hi = v_base + kBPerCTA * kTileCols * 2;
+      tl::tcgen05_mma_2cta_ts_256x128_bmn(
+          O_addr, P_base + 0,
+          tl::tcgen05_mk_fast_desc(sV_lo, v_base + 0 * kTileCols * 2), 0u);
+      tl::tcgen05_mma_2cta_ts_256x128_bmn(
+          O_addr, P_base + 8,
+          tl::tcgen05_mk_fast_desc(sV_lo, v_base + 16 * kTileCols * 2), 1u);
+      tl::tcgen05_mma_2cta_ts_256x128_bmn(
+          O_addr, P_base + 16,
+          tl::tcgen05_mk_fast_desc(sV_lo, v_base + 32 * kTileCols * 2), 1u);
+      tl::tcgen05_mma_2cta_ts_256x128_bmn(
+          O_addr, P_base + 24,
+          tl::tcgen05_mk_fast_desc(sV_lo, v_base + 48 * kTileCols * 2), 1u);
+      tl::tcgen05_mma_2cta_ts_256x128_bmn(
+          O_addr, P_base + 32,
+          tl::tcgen05_mk_fast_desc(sV_lo, v_hi + 0 * kTileCols * 2), 1u);
+      tl::tcgen05_mma_2cta_ts_256x128_bmn(
+          O_addr, P_base + 40,
+          tl::tcgen05_mk_fast_desc(sV_lo, v_hi + 16 * kTileCols * 2), 1u);
+      tl::tcgen05_wait_barrier((void const *)&mb_p2[qs], uint32_t(tkb & 1));
+      tl::tcgen05_after_thread_sync();
+      tl::tcgen05_mma_2cta_ts_256x128_bmn(
+          O_addr, P_base + 48,
+          tl::tcgen05_mk_fast_desc(sV_lo, v_hi + 32 * kTileCols * 2), 1u);
+      tl::tcgen05_mma_2cta_ts_256x128_bmn(
+          O_addr, P_base + 56,
+          tl::tcgen05_mk_fast_desc(sV_lo, v_hi + 48 * kTileCols * 2), 1u);
+      if (qs == kQStages - 1) {
+        tl::tcgen05_commit_2cta((void const *)&mb_pv[v_stage]);
+        tl::tcgen05_commit_2cta((void const *)&mb_v_rel[v_stage]);
+      }
+      if (1 < loop_extent) {
+        int next_stage = (tkb + 1) % kKVStages;
+        int next_phase = ((tkb + 1) / kKVStages) & 1;
+        if (qs == 0) {
+          tl::tcgen05_wait_barrier((void const *)&mb_k[next_stage],
+                                   uint32_t(next_phase));
+          tl::tcgen05_after_thread_sync();
+        }
+        tcgen05_fa4_uma_qk_mma_2cta(
+            sQ_lo, sK_lo, uint32_t(qs * kQStageBytes),
+            uint32_t(next_stage * kKVStageBytes), S0_tmem_addr + qs * 128,
+            (void const *)&mb_s[qs]);
+        if (qs == kQStages - 1) {
+          tl::tcgen05_commit_2cta((void const *)&mb_k_rel[next_stage]);
+        }
+      }
+    }
+  }
+
+  #pragma unroll 1
+  for (int kb = 1; kb < loop_extent; ++kb) {
+    int tkb = tile_k_base + kb;
+    int v_stage = tkb % kKVStages;
+    int v_phase = (tkb / kKVStages) & 1;
+    #pragma unroll
+    for (int qs = 0; qs < kQStages; ++qs) {
+      uint32_t O_addr = S0_tmem_addr + 256 + qs * 128;
+      uint32_t P_base = S0_tmem_addr + 64 + qs * 128;
+      uint32_t v_base = uint32_t(v_stage * kKVStageBytes);
+      tl::tcgen05_wait_barrier((void const *)&mb_p[qs], uint32_t(tkb & 1));
+      tl::tcgen05_wait_barrier((void const *)&mb_v[v_stage],
+                               uint32_t(v_phase));
+      tl::tcgen05_wait_barrier((void const *)&mb_corr[qs],
+                               uint32_t(tkb & 1));
+      tl::tcgen05_after_thread_sync();
+      uint32_t v_hi = v_base + kBPerCTA * kTileCols * 2;
+      tl::tcgen05_mma_2cta_ts_256x128_bmn(
+          O_addr, P_base + 0,
+          tl::tcgen05_mk_fast_desc(sV_lo, v_base + 0 * kTileCols * 2), 1u);
+      tl::tcgen05_mma_2cta_ts_256x128_bmn(
+          O_addr, P_base + 8,
+          tl::tcgen05_mk_fast_desc(sV_lo, v_base + 16 * kTileCols * 2), 1u);
+      tl::tcgen05_mma_2cta_ts_256x128_bmn(
+          O_addr, P_base + 16,
+          tl::tcgen05_mk_fast_desc(sV_lo, v_base + 32 * kTileCols * 2), 1u);
+      tl::tcgen05_mma_2cta_ts_256x128_bmn(
+          O_addr, P_base + 24,
+          tl::tcgen05_mk_fast_desc(sV_lo, v_base + 48 * kTileCols * 2), 1u);
+      tl::tcgen05_mma_2cta_ts_256x128_bmn(
+          O_addr, P_base + 32,
+          tl::tcgen05_mk_fast_desc(sV_lo, v_hi + 0 * kTileCols * 2), 1u);
+      tl::tcgen05_mma_2cta_ts_256x128_bmn(
+          O_addr, P_base + 40,
+          tl::tcgen05_mk_fast_desc(sV_lo, v_hi + 16 * kTileCols * 2), 1u);
+      tl::tcgen05_wait_barrier((void const *)&mb_p2[qs], uint32_t(tkb & 1));
+      tl::tcgen05_after_thread_sync();
+      tl::tcgen05_mma_2cta_ts_256x128_bmn(
+          O_addr, P_base + 48,
+          tl::tcgen05_mk_fast_desc(sV_lo, v_hi + 32 * kTileCols * 2), 1u);
+      tl::tcgen05_mma_2cta_ts_256x128_bmn(
+          O_addr, P_base + 56,
+          tl::tcgen05_mk_fast_desc(sV_lo, v_hi + 48 * kTileCols * 2), 1u);
+      if (qs == kQStages - 1) {
+        tl::tcgen05_commit_2cta((void const *)&mb_pv[v_stage]);
+        tl::tcgen05_commit_2cta((void const *)&mb_v_rel[v_stage]);
+      }
+      if (kb + 1 < loop_extent) {
+        int ntk = tkb + 1;
+        int next_stage = ntk % kKVStages;
+        int next_phase = (ntk / kKVStages) & 1;
+        if (qs == 0) {
+          tl::tcgen05_wait_barrier((void const *)&mb_k[next_stage],
+                                   uint32_t(next_phase));
+          tl::tcgen05_after_thread_sync();
+        }
+        tcgen05_fa4_uma_qk_mma_2cta(
+            sQ_lo, sK_lo, uint32_t(qs * kQStageBytes),
+            uint32_t(next_stage * kKVStageBytes), S0_tmem_addr + qs * 128,
+            (void const *)&mb_s[qs]);
+        if (qs == kQStages - 1) {
+          tl::tcgen05_commit_2cta((void const *)&mb_k_rel[next_stage]);
+        }
+      }
+    }
+  }
+  tl::tcgen05_commit_2cta(mb_q_rel);
+}
+
+__device__ __noinline__ void
+tcgen05_fa4_uma_producer_warp_2cta(
+    const CUtensorMap *Q_desc, const CUtensorMap *K_desc,
+    const CUtensorMap *V_desc, void *Q_base_ptr, void *K_base_ptr,
+    void *V_base_ptr, void const *mbar_q_base, void const *mbar_k_base,
+    void const *mbar_v_base, void const *mbar_k_rel_base,
+    void const *mbar_v_rel_base, void const *mbar_q_rel, int loop_extent,
+    int tile_k_base, int q_row_base, int kv_row_base, int q_col_base,
+    int kv_col_base, int v_col_base, int tile_phase) {
+  if (cute::elect_one_sync() == 0) return;
+  constexpr int kQStages = 2;
+  constexpr int kKVStages = 3;
+  constexpr int kBlockM = 256;
+  constexpr int kBlockMCTA = 128;
+  constexpr int kBlockN = 128;
+  constexpr int kBPerCTA = 64;
+  constexpr int kHeadDim = 128;
+  constexpr int kTileCols = 64;
+  constexpr int kQStageElems = kBlockMCTA * kHeadDim;
+  constexpr int kPerStageKV = kBPerCTA * kHeadDim;
+  constexpr int kQBytes = 2 * kBlockMCTA * kTileCols * 2;
+  constexpr int kKVBytes = 2 * kBPerCTA * kTileCols * 2;
+
+  auto *q_base = reinterpret_cast<bfloat16_t *>(Q_base_ptr);
+  auto *k_base = reinterpret_cast<bfloat16_t *>(K_base_ptr);
+  auto *v_base = reinterpret_cast<bfloat16_t *>(V_base_ptr);
+  auto *mb_q = reinterpret_cast<Barrier const *>(mbar_q_base);
+  auto *mb_k = reinterpret_cast<Barrier const *>(mbar_k_base);
+  auto *mb_v = reinterpret_cast<Barrier const *>(mbar_v_base);
+  auto *mb_k_rel = reinterpret_cast<Barrier const *>(mbar_k_rel_base);
+  auto *mb_v_rel = reinterpret_cast<Barrier const *>(mbar_v_rel_base);
+  int cr = tl::block_rank_in_cluster();
+
+  if (tile_k_base > 0) {
+    tl::tcgen05_wait_barrier(mbar_q_rel, uint32_t(tile_phase ^ 1));
+  }
+  #pragma unroll
+  for (int qs = 0; qs < kQStages; ++qs) {
+    tl::tcgen05_mbarrier_arrive_expect_tx_cluster_lane0(
+        (void const *)&mb_q[qs], kQBytes);
+    int q_row = q_row_base + qs * kBlockM;
+    tl::tma_load_2sm_avo(Q_desc, q_base + qs * kQStageElems,
+                         (void const *)&mb_q[qs], q_col_base, q_row);
+    tl::tma_load_2sm_avo(Q_desc, q_base + qs * kQStageElems +
+                                     kBlockMCTA * kTileCols,
+                         (void const *)&mb_q[qs], q_col_base + kTileCols,
+                         q_row);
+  }
+
+  #pragma unroll
+  for (int s = 0; s < kKVStages; ++s) {
+    if (s < loop_extent) {
+      int tkb = tile_k_base + s;
+      int stage = tkb % kKVStages;
+      if (tkb >= kKVStages) {
+        int prev_phase = ((tkb - kKVStages) / kKVStages) & 1;
+        tl::tcgen05_wait_barrier((void const *)&mb_k_rel[stage],
+                                 uint32_t(prev_phase));
+        tl::tcgen05_wait_barrier((void const *)&mb_v_rel[stage],
+                                 uint32_t(prev_phase));
+      }
+      int k_row = kv_row_base + s * kBlockN + cr * kBPerCTA;
+      tl::tcgen05_mbarrier_arrive_expect_tx_cluster_lane0(
+          (void const *)&mb_k[stage], kKVBytes);
+      #pragma unroll
+      for (int t = 0; t < 2; ++t) {
+        tl::tma_load_2sm_avo(K_desc,
+                             k_base + stage * kPerStageKV +
+                                 t * kBPerCTA * kTileCols,
+                             (void const *)&mb_k[stage],
+                             kv_col_base + t * kTileCols, k_row);
+      }
+
+      int v_row = kv_row_base + s * kBlockN;
+      tl::tcgen05_mbarrier_arrive_expect_tx_cluster_lane0(
+          (void const *)&mb_v[stage], kKVBytes);
+      #pragma unroll
+      for (int t = 0; t < 2; ++t) {
+        tl::tma_load_2sm_avo(V_desc,
+                             v_base + stage * kPerStageKV +
+                                 t * kBPerCTA * kTileCols,
+                             (void const *)&mb_v[stage], v_col_base,
+                             v_row + t * kBPerCTA);
+      }
+    }
+  }
+
+  #pragma unroll 1
+  for (int kb = 0; kb < loop_extent; ++kb) {
+    int tkb = tile_k_base + kb;
+    int stage = tkb % kKVStages;
+    int phase = (tkb / kKVStages) & 1;
+    if (kb + kKVStages < loop_extent) {
+      tl::tcgen05_wait_barrier((void const *)&mb_k_rel[stage],
+                               uint32_t(phase));
+      int next = kb + kKVStages;
+      int next_tkb = tile_k_base + next;
+      int next_stage = next_tkb % kKVStages;
+      int k_row = kv_row_base + next * kBlockN + cr * kBPerCTA;
+      tl::tcgen05_mbarrier_arrive_expect_tx_cluster_lane0(
+          (void const *)&mb_k[next_stage], kKVBytes);
+      #pragma unroll
+      for (int t = 0; t < 2; ++t) {
+        tl::tma_load_2sm_avo(K_desc,
+                             k_base + next_stage * kPerStageKV +
+                                 t * kBPerCTA * kTileCols,
+                             (void const *)&mb_k[next_stage],
+                             kv_col_base + t * kTileCols, k_row);
+      }
+    }
+    if (kb + kKVStages < loop_extent) {
+      tl::tcgen05_wait_barrier((void const *)&mb_v_rel[stage],
+                               uint32_t(phase));
+      int next = kb + kKVStages;
+      int next_tkb = tile_k_base + next;
+      int next_stage = next_tkb % kKVStages;
+      int v_row = kv_row_base + next * kBlockN;
+      tl::tcgen05_mbarrier_arrive_expect_tx_cluster_lane0(
+          (void const *)&mb_v[next_stage], kKVBytes);
+      #pragma unroll
+      for (int t = 0; t < 2; ++t) {
+        tl::tma_load_2sm_avo(V_desc,
+                             v_base + next_stage * kPerStageKV +
+                                 t * kBPerCTA * kTileCols,
+                             (void const *)&mb_v[next_stage], v_col_base,
+                             v_row + t * kBPerCTA);
+      }
+    }
+  }
+}
+
+__device__ __forceinline__ int
+tcgen05_fa4_uma_tile_id(int tile_iter, int grid_clusters) {
+  int cluster_id;
+  asm volatile("mov.u32 %0, %%clusterid.x;" : "=r"(cluster_id));
+  return tile_iter * grid_clusters + cluster_id;
+}
+
+__device__ __forceinline__ void
+tcgen05_fa4_uma_producer_warp_2cta_schedule(
+    const CUtensorMap *Q_desc, const CUtensorMap *K_desc,
+    const CUtensorMap *V_desc, void *Q_base_ptr, void *K_base_ptr,
+    void *V_base_ptr, void const *mbar_q_base, void const *mbar_k_base,
+    void const *mbar_v_base, void const *mbar_k_rel_base,
+    void const *mbar_v_rel_base, void const *mbar_q_rel, int loop_extent,
+    int tile_iter, int grid_clusters, int seq_len, int num_q_heads,
+    int num_kv_heads, int tile_phase) {
+  constexpr int kQStages = 2;
+  constexpr int kBlockM = 256;
+  constexpr int kBlockMCTA = 128;
+  constexpr int kHeadDim = 128;
+  constexpr int kBPerCTA = 64;
+  int tile_id = tcgen05_fa4_uma_tile_id(tile_iter, grid_clusters);
+  int q_tiles = (seq_len + kQStages * kBlockM - 1) / (kQStages * kBlockM);
+  int mb_idx = tile_id % q_tiles;
+  int head = (tile_id / q_tiles) % num_q_heads;
+  int batch = tile_id / (q_tiles * num_q_heads);
+  int kv_head = head * num_kv_heads / num_q_heads;
+  int cr = tl::block_rank_in_cluster();
+  int q_row_base = batch * seq_len + mb_idx * kQStages * kBlockM +
+                   cr * kBlockMCTA;
+  int kv_row_base = batch * seq_len;
+  int q_col_base = head * kHeadDim;
+  int kv_col_base = kv_head * kHeadDim;
+  int v_col_base = kv_col_base + cr * kBPerCTA;
+  tcgen05_fa4_uma_producer_warp_2cta(
+      Q_desc, K_desc, V_desc, Q_base_ptr, K_base_ptr, V_base_ptr,
+      mbar_q_base, mbar_k_base, mbar_v_base, mbar_k_rel_base,
+      mbar_v_rel_base, mbar_q_rel, loop_extent, tile_iter * loop_extent,
+      q_row_base, kv_row_base, q_col_base, kv_col_base, v_col_base,
+      tile_phase);
+}
+
+__device__ __noinline__ void
+tcgen05_fa4_uma_epilogue_warp_2cta(
+    void const *O_stage_ptr, const CUtensorMap *Output_desc,
+    void const *mbar_epi_base, void const *mbar_o_rel, int q_seq_base,
+    int batch, int q_col_base, int tile_phase, int seq_len) {
+  if (!cute::elect_one_sync()) return;
+  constexpr int kQStages = 2;
+  constexpr int kBlockM = 256;
+  constexpr int kBlockMCTA = 128;
+  constexpr int kHeadDim = 128;
+  constexpr int kTileCols = 64;
+  constexpr int kEpiRows = 32;
+  constexpr int kEpiBlockElems = kEpiRows * kTileCols;
+  auto *mb_epi = reinterpret_cast<Barrier const *>(mbar_epi_base);
+  auto *o_stage = reinterpret_cast<bfloat16_t const *>(O_stage_ptr);
+
+  #pragma unroll
+  for (int qs = 0; qs < kQStages; ++qs) {
+    tl::tcgen05_wait_barrier((void const *)&mb_epi[qs],
+                             uint32_t(tile_phase));
+    #pragma unroll
+    for (int cw = 0; cw < 4; ++cw) {
+      int row_seq = q_seq_base + qs * kBlockM + cw * kEpiRows;
+      if (row_seq >= seq_len) break;
+      int row = batch * seq_len + row_seq;
+      bfloat16_t const *epi_base =
+          o_stage + qs * kBlockMCTA * kHeadDim +
+          cw * kEpiRows * kHeadDim;
+      tl::tma_store_2d_avo(Output_desc, epi_base, q_col_base, row);
+      tl::tma_store_2d_avo(Output_desc, epi_base + kEpiBlockElems,
+                           q_col_base + kTileCols, row);
+    }
+    tl::tma_store_arrive();
+  }
+  tl::tma_store_wait<0>();
+  tl::tcgen05_mbarrier_arrive_local_all(mbar_o_rel);
+}
+
+__device__ __forceinline__ void
+tcgen05_fa4_uma_epilogue_warp_2cta_schedule(
+    void const *O_stage_ptr, const CUtensorMap *Output_desc,
+    void const *mbar_epi_base, void const *mbar_o_rel, int tile_iter,
+    int grid_clusters, int seq_len, int num_q_heads, int tile_phase) {
+  constexpr int kQStages = 2;
+  constexpr int kBlockM = 256;
+  constexpr int kBlockMCTA = 128;
+  constexpr int kHeadDim = 128;
+  int tile_id = tcgen05_fa4_uma_tile_id(tile_iter, grid_clusters);
+  int q_tiles = (seq_len + kQStages * kBlockM - 1) / (kQStages * kBlockM);
+  int mb_idx = tile_id % q_tiles;
+  int head = (tile_id / q_tiles) % num_q_heads;
+  int batch = tile_id / (q_tiles * num_q_heads);
+  int cr = tl::block_rank_in_cluster();
+  int q_seq_base = mb_idx * kQStages * kBlockM + cr * kBlockMCTA;
+  int q_col_base = head * kHeadDim;
+  tcgen05_fa4_uma_epilogue_warp_2cta(
+      O_stage_ptr, Output_desc, mbar_epi_base, mbar_o_rel, q_seq_base, batch,
+      q_col_base, tile_phase, seq_len);
 }
 
 template <int N, bool unpack16, typename src_t>

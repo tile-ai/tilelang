@@ -98,6 +98,78 @@ def attention_kernel_1sm(
     # the MMA WG commits once after both O0/O1 PV MMAs, and correction waits
     # on that single completion before reading O TMEM.
     @T.macro
+    def pv_mma_128x64_dsl(
+        b_smem_ptr,
+        a_tmem_addr,
+        c_tmem_addr,
+        accumulate,
+    ):
+        b_base = T.tcgen05_smem_base_16b(b_smem_ptr)
+        idesc = (
+            T.uint32(1 << 4)
+            | T.uint32(1 << 7)
+            | T.uint32(1 << 10)
+            | T.uint32(1 << 16)
+            | T.uint32((64 // 8) << 17)
+            | T.uint32((128 // 16) << 24)
+        )
+        b_hi = block_N * 64 * 2
+        T.fence_proxy_async()
+        for j in T.unroll(0, 128, 16):
+            T.tcgen05_mma_ts(
+                a_tmem_addr + j // 2,
+                T.tcgen05_mk_fast_desc(b_base, b_hi + j * 64 * 2),
+                c_tmem_addr + 64,
+                idesc,
+                T.Select(j == 0, accumulate, T.uint32(1)),
+                use_mask=False,
+                elect_one=False,
+            )
+        for j in T.unroll(0, 128, 16):
+            T.tcgen05_mma_ts(
+                a_tmem_addr + j // 2,
+                T.tcgen05_mk_fast_desc(b_base, j * 64 * 2),
+                c_tmem_addr,
+                idesc,
+                T.Select(j == 0, accumulate, T.uint32(1)),
+                use_mask=False,
+                elect_one=False,
+            )
+
+    @T.macro
+    def qk_mma_128x128_dsl(
+        a_smem_ptr,
+        b_smem_ptr,
+        c_tmem_addr,
+        mbar,
+    ):
+        a_base = T.tcgen05_smem_base_16b(a_smem_ptr)
+        b_base = T.tcgen05_smem_base_16b(b_smem_ptr)
+        idesc = (
+            T.uint32(1 << 4)
+            | T.uint32(1 << 7)
+            | T.uint32(1 << 10)
+            | T.uint32((128 // 8) << 17)
+            | T.uint32((128 // 16) << 24)
+        )
+        first = T.alloc_var(T.uint32, 1)
+        for t in T.unroll(2):
+            q_off = t * block_M * 64 * 2
+            k_off = t * block_N * 64 * 2
+            for j in T.unroll(0, 64, 16):
+                T.tcgen05_mma_ss(
+                    T.tcgen05_mk_fast_desc(a_base, q_off + j * 2),
+                    T.tcgen05_mk_fast_desc(b_base, k_off + j * 2),
+                    c_tmem_addr,
+                    idesc,
+                    T.Select(first == 1, T.uint32(0), T.uint32(1)),
+                    use_mask=False,
+                    elect_one=False,
+                )
+                first = 0
+        T.tcgen05_commit_1sm(mbar, lane0=True)
+
+    @T.macro
     def softmax_warp_dsl(
         S_tmem: T.Buffer,
         P_tmem: T.Buffer,
@@ -436,69 +508,123 @@ def attention_kernel_1sm(
                         for k_prefetch in T.unroll(3):
                             if k_prefetch < loop_range:
                                 prefetch_stage = k_prefetch % 3
-                                T.tcgen05_tma_load_128x128(
+                                stage_ptr = T.tcgen05_reuse3_stage_ptr(
+                                    k_stage0,
+                                    k_stage1,
+                                    kv_stage2,
+                                    prefetch_stage,
+                                )
+                                mbar = T.tcgen05_reuse3_barrier_ref(
+                                    mbar_k_load[0],
+                                    mbar_k_load[1],
+                                    mbar_v_hi_load[0],
+                                    prefetch_stage,
+                                )
+                                T.tcgen05_mbarrier_arrive_expect_tx_ref(
+                                    mbar,
+                                    block_N * dim * 2,
+                                )
+                                T.tma_load(
                                     k_desc,
-                                    T.tcgen05_reuse3_stage_ptr(
-                                        k_stage0,
-                                        k_stage1,
-                                        kv_stage2,
-                                        prefetch_stage,
-                                    ),
-                                    T.tcgen05_reuse3_barrier_ptr(
-                                        mbar_k_load[0],
-                                        mbar_k_load[1],
-                                        mbar_v_hi_load[0],
-                                        prefetch_stage,
-                                    ),
-                                    k_prefetch,
+                                    mbar,
+                                    stage_ptr,
+                                    0,
                                     by // groups,
+                                    k_prefetch * block_N,
                                     bz,
+                                    0,
+                                )
+                                T.tma_load(
+                                    k_desc,
+                                    mbar,
+                                    T.tcgen05_smem_ptr_add_bf16(stage_ptr, block_N * 64),
+                                    64,
+                                    by // groups,
+                                    k_prefetch * block_N,
+                                    bz,
+                                    0,
                                 )
 
                         for k_prod in T.unroll(loop_range, explicit=False, unroll_factor=1):
                             T.tcgen05_wait_barrier(mbar_s1, k_prod & 1)
                             T.tcgen05_after_thread_sync()
                             prod_stage = k_prod % 3
-                            T.tcgen05_tma_load_128x128(
+                            v_stage_ptr = T.tcgen05_reuse3_stage_ptr(
+                                k_stage0,
+                                k_stage1,
+                                kv_stage2,
+                                prod_stage,
+                            )
+                            v_mbar = T.tcgen05_reuse3_barrier_ref(
+                                mbar_v_lo_load[0],
+                                mbar_v_lo_load[1],
+                                mbar_v_hi_load[1],
+                                prod_stage,
+                            )
+                            T.tcgen05_mbarrier_arrive_expect_tx_ref(
+                                v_mbar,
+                                block_N * dim * 2,
+                            )
+                            T.tma_load(
                                 v_desc,
-                                T.tcgen05_reuse3_stage_ptr(
-                                    k_stage0,
-                                    k_stage1,
-                                    kv_stage2,
-                                    prod_stage,
-                                ),
-                                T.tcgen05_reuse3_barrier_ptr(
-                                    mbar_v_lo_load[0],
-                                    mbar_v_lo_load[1],
-                                    mbar_v_hi_load[1],
-                                    prod_stage,
-                                ),
-                                k_prod,
+                                v_mbar,
+                                v_stage_ptr,
+                                0,
                                 by // groups,
+                                k_prod * block_N,
                                 bz,
+                                0,
+                            )
+                            T.tma_load(
+                                v_desc,
+                                v_mbar,
+                                T.tcgen05_smem_ptr_add_bf16(v_stage_ptr, block_N * 64),
+                                64,
+                                by // groups,
+                                k_prod * block_N,
+                                bz,
+                                0,
                             )
                             if k_prod + 3 < loop_range:
                                 T.tcgen05_wait_barrier(mbar_pv, k_prod & 1)
                                 T.tcgen05_after_thread_sync()
                                 next_k = k_prod + 3
                                 next_stage = next_k % 3
-                                T.tcgen05_tma_load_128x128(
+                                next_stage_ptr = T.tcgen05_reuse3_stage_ptr(
+                                    k_stage0,
+                                    k_stage1,
+                                    kv_stage2,
+                                    next_stage,
+                                )
+                                next_mbar = T.tcgen05_reuse3_barrier_ref(
+                                    mbar_k_load[0],
+                                    mbar_k_load[1],
+                                    mbar_v_hi_load[0],
+                                    next_stage,
+                                )
+                                T.tcgen05_mbarrier_arrive_expect_tx_ref(
+                                    next_mbar,
+                                    block_N * dim * 2,
+                                )
+                                T.tma_load(
                                     k_desc,
-                                    T.tcgen05_reuse3_stage_ptr(
-                                        k_stage0,
-                                        k_stage1,
-                                        kv_stage2,
-                                        next_stage,
-                                    ),
-                                    T.tcgen05_reuse3_barrier_ptr(
-                                        mbar_k_load[0],
-                                        mbar_k_load[1],
-                                        mbar_v_hi_load[0],
-                                        next_stage,
-                                    ),
-                                    next_k,
+                                    next_mbar,
+                                    next_stage_ptr,
+                                    0,
                                     by // groups,
+                                    next_k * block_N,
                                     bz,
+                                    0,
+                                )
+                                T.tma_load(
+                                    k_desc,
+                                    next_mbar,
+                                    T.tcgen05_smem_ptr_add_bf16(next_stage_ptr, block_N * 64),
+                                    64,
+                                    by // groups,
+                                    next_k * block_N,
+                                    bz,
+                                    0,
                                 )
 
             # ================================================================
@@ -520,13 +646,13 @@ def attention_kernel_1sm(
 
                         T.tcgen05_wait_barrier(mbar_k_load[0], 0)
                         T.tcgen05_after_thread_sync()
-                        T.tcgen05_qk_gemm_128x128_skv_lane0(
+                        qk_mma_128x128_dsl(
                             q0_ptr,
                             k0_ptr,
                             S0_tmem[0, 0],
                             mbar_s0,
                         )
-                        T.tcgen05_qk_gemm_128x128_skv_lane0(
+                        qk_mma_128x128_dsl(
                             q1_ptr,
                             k0_ptr,
                             S1_tmem[0, 0],
@@ -539,21 +665,22 @@ def attention_kernel_1sm(
                             pv_phase = k_mma & 1
                             corr_phase = (k_mma - 1) & 1
                             accum = T.Select(k_mma == 0, T.uint32(0), T.uint32(1))
-                            vbar = T.tcgen05_reuse3_barrier_ptr(
-                                mbar_v_lo_load[0],
-                                mbar_v_lo_load[1],
-                                mbar_v_hi_load[1],
-                                stage,
-                            )
-
                             T.tcgen05_wait_barrier(mbar_p2_0, pv_phase)
-                            T.tcgen05_wait_barrier_ptr(vbar, phase)
+                            T.tcgen05_wait_barrier_ref(
+                                T.tcgen05_reuse3_barrier_ref(
+                                    mbar_v_lo_load[0],
+                                    mbar_v_lo_load[1],
+                                    mbar_v_hi_load[1],
+                                    stage,
+                                ),
+                                phase,
+                            )
                             if k_mma > 0:
                                 T.tcgen05_wait_barrier(mbar_corr0, corr_phase)
                             T.tcgen05_wait_barrier(mbar_p0, pv_phase)
                             T.tcgen05_after_thread_sync()
                             vptr = T.tcgen05_reuse3_stage_ptr(k0_ptr, k1_ptr, kv2_ptr, stage)
-                            T.tcgen05_pv_gemm_128x64_skv_lane0(
+                            pv_mma_128x64_dsl(
                                 vptr,
                                 P0_tmem[0, 0],
                                 O0_tmem[0, 0],
@@ -565,24 +692,26 @@ def attention_kernel_1sm(
                                 T.tcgen05_wait_barrier(mbar_corr1, corr_phase)
                             T.tcgen05_wait_barrier(mbar_p1, pv_phase)
                             T.tcgen05_after_thread_sync()
-                            T.tcgen05_pv_gemm_128x64_skv_lane0(
+                            pv_mma_128x64_dsl(
                                 vptr,
                                 P1_tmem[0, 0],
                                 O1_tmem[0, 0],
                                 accum,
                             )
-                            T.tcgen05_commit_1sm_lane0(mbar_pv)
+                            T.tcgen05_commit_1sm(mbar_pv, lane0=True)
 
                             if k_mma + 1 < loop_range:
                                 next_stage = (k_mma + 1) % 3
                                 next_phase = ((k_mma + 1) // 3) & 1
-                                kbar = T.tcgen05_reuse3_barrier_ptr(
-                                    mbar_k_load[0],
-                                    mbar_k_load[1],
-                                    mbar_v_hi_load[0],
-                                    next_stage,
+                                T.tcgen05_wait_barrier_ref(
+                                    T.tcgen05_reuse3_barrier_ref(
+                                        mbar_k_load[0],
+                                        mbar_k_load[1],
+                                        mbar_v_hi_load[0],
+                                        next_stage,
+                                    ),
+                                    next_phase,
                                 )
-                                T.tcgen05_wait_barrier_ptr(kbar, next_phase)
                                 T.tcgen05_after_thread_sync()
                                 kptr = T.tcgen05_reuse3_stage_ptr(
                                     k0_ptr,
@@ -590,13 +719,13 @@ def attention_kernel_1sm(
                                     kv2_ptr,
                                     next_stage,
                                 )
-                                T.tcgen05_qk_gemm_128x128_skv_lane0(
+                                qk_mma_128x128_dsl(
                                     q0_ptr,
                                     kptr,
                                     S0_tmem[0, 0],
                                     mbar_s0,
                                 )
-                                T.tcgen05_qk_gemm_128x128_skv_lane0(
+                                qk_mma_128x128_dsl(
                                     q1_ptr,
                                     kptr,
                                     S1_tmem[0, 0],

@@ -5,6 +5,7 @@ from __future__ import annotations
 import tvm.script.parser.tir as T
 from tilelang._typing import BufferLikeType, BufferLikeTypeTuple, BarrierType, DType
 from tilelang import tvm as tvm
+from tilelang.language.tir import op as tir_op
 from tilelang.language import ptx_arrive_barrier, evaluate
 from tilelang.language.eager.builder import macro
 from tilelang.language.kernel import get_thread_bindings, get_block_extents
@@ -1257,6 +1258,96 @@ def initialize_tcgen05_descriptor(
     )
 
 
+def tcgen05_smem_base_16b(ptr):
+    """Return the shared-memory pointer base in 16-byte units."""
+    return tir.call_intrin(
+        "uint32",
+        tir.op.Op.get("tl.tcgen05_smem_base_16b"),
+        ptr,
+    )
+
+
+def tcgen05_mk_fast_desc(smem_base_16b, byte_offset):
+    """Construct the FA4 fast TCGEN05 SMEM descriptor from a 16-byte base."""
+    return tir.call_intrin(
+        "uint64",
+        tir.op.Op.get("tl.tcgen05_mk_fast_desc"),
+        smem_base_16b,
+        byte_offset,
+    )
+
+
+def tcgen05_mma_ss(
+    desc_a,
+    desc_b,
+    c_tmem_addr,
+    idesc,
+    accumulate,
+    *,
+    dtype="float16",
+    cta_group=1,
+    use_mask=False,
+    elect_one=False,
+):
+    """Issue a shared/shared TCGEN05 MMA using raw descriptor operands."""
+    mask_zero = tir.IntImm("int32", 0)
+    return tir_op.ptx_tcgen05_mma_ss(
+        dtype,
+        desc_a,
+        0,
+        desc_b,
+        0,
+        c_tmem_addr,
+        0,
+        idesc,
+        accumulate,
+        mask_zero,
+        mask_zero,
+        mask_zero,
+        mask_zero,
+        enable_2cta=(cta_group == 2),
+        use_mask=use_mask,
+        elect_one=elect_one,
+        c_is_tmem_addr=True,
+    )
+
+
+def tcgen05_mma_ts(
+    a_tmem_addr,
+    desc_b,
+    c_tmem_addr,
+    idesc,
+    accumulate,
+    *,
+    dtype="float16",
+    cta_group=1,
+    use_mask=False,
+    elect_one=False,
+):
+    """Issue a TMEM/shared TCGEN05 MMA using raw descriptor operands."""
+    mask_zero = tir.IntImm("int32", 0)
+    return tir_op.ptx_tcgen05_mma_ts(
+        dtype,
+        a_tmem_addr,
+        0,
+        desc_b,
+        0,
+        c_tmem_addr,
+        0,
+        idesc,
+        accumulate,
+        mask_zero,
+        mask_zero,
+        mask_zero,
+        mask_zero,
+        enable_2cta=(cta_group == 2),
+        use_mask=use_mask,
+        elect_one=elect_one,
+        a_is_tmem_addr=True,
+        c_is_tmem_addr=True,
+    )
+
+
 def increase_descriptor_offset(descriptor: PrimExpr, offset: PrimExpr) -> PrimExpr:
     """
     Increase the offset of a memory descriptor.
@@ -1730,26 +1821,35 @@ def tcgen05_softmax_128x128(
     )
 
 
-def tcgen05_qk_gemm_128x128_skv(q_stage_ptr, kv_stage_ptr, s_tmem_addr, mbar, *, guard_warp12: bool = True):
-    """Avo-exact QK MMA for one Q stage and one shared K/V stage.
+def tcgen05_mma_1sm_ss_128x128_commit(
+    a_smem_ptr,
+    b_smem_ptr,
+    c_tmem_addr,
+    mbar,
+    *,
+    guard_warp12: bool = True,
+    lane0: bool = False,
+):
+    """Issue a 1SM 128x128 shared/shared tcgen05 MMA sequence and commit.
 
-    Emits the raw mk_fast descriptor loop used by avo's 1SM attention kernel
-    and commits the S-ready mbarrier with the plain .b64 tcgen05 commit.
+    Emits two 64-column descriptor tiles, four 16-column MMA issues per tile,
+    then commits the completion mbarrier with plain .b64 tcgen05 commit.
     Set `guard_warp12=False` when the caller already restricts execution to
-    the MMA warp.
+    the MMA warp. Set `lane0=True` when execution is already restricted to
+    lane 0, so the generated helper omits its internal elect.
     """
     mbar = _mbar_to_buffer_load(mbar)
+    ann = {} if guard_warp12 else {"guard_warp12": False}
+    if lane0:
+        ann["lane0_only"] = True
     return tir.call_intrin(
         "void",
-        tir.op.Op.get(
-            "tl.tcgen05_qk_gemm_128x128_skv"
-            if guard_warp12
-            else "tl.tcgen05_qk_gemm_128x128_skv_noguard"
-        ),
-        q_stage_ptr,
-        kv_stage_ptr,
-        s_tmem_addr,
+        tir.op.Op.get("tl.tcgen05_mma_1sm_ss_128x128_commit"),
+        a_smem_ptr,
+        b_smem_ptr,
+        c_tmem_addr,
         mbar,
+        annotations=ann,
     )
 
 
@@ -1796,94 +1896,102 @@ def tcgen05_softmax_warp_1sm(
     )
 
 
-def tcgen05_qk_gemm_128x128_skv_noguard(q_stage_ptr, kv_stage_ptr, s_tmem_addr, mbar):
-    """Compatibility wrapper for `tcgen05_qk_gemm_128x128_skv(..., guard_warp12=False)`."""
-    return tcgen05_qk_gemm_128x128_skv(
-        q_stage_ptr,
-        kv_stage_ptr,
-        s_tmem_addr,
+def tcgen05_mma_1sm_ss_128x128_commit_noguard(a_smem_ptr, b_smem_ptr, c_tmem_addr, mbar):
+    """Compatibility wrapper for `tcgen05_mma_1sm_ss_128x128_commit(..., guard_warp12=False)`."""
+    return tcgen05_mma_1sm_ss_128x128_commit(
+        a_smem_ptr,
+        b_smem_ptr,
+        c_tmem_addr,
         mbar,
         guard_warp12=False,
     )
 
 
-def tcgen05_qk_gemm_128x128_skv_lane0(q_stage_ptr, kv_stage_ptr, s_tmem_addr, mbar):
-    """Avo-exact QK MMA. Caller must already restrict execution to lane 0."""
-    mbar = _mbar_to_buffer_load(mbar)
-    return tir.call_intrin(
-        "void",
-        tir.op.Op.get("tl.tcgen05_qk_gemm_128x128_skv_lane0"),
-        q_stage_ptr,
-        kv_stage_ptr,
-        s_tmem_addr,
+def tcgen05_mma_1sm_ss_128x128_commit_lane0(a_smem_ptr, b_smem_ptr, c_tmem_addr, mbar):
+    """Issue the 1SM shared/shared MMA+commit sequence from lane 0."""
+    return tcgen05_mma_1sm_ss_128x128_commit(
+        a_smem_ptr,
+        b_smem_ptr,
+        c_tmem_addr,
         mbar,
+        guard_warp12=False,
+        lane0=True,
     )
 
 
-def tcgen05_pv_gemm_128x64(v_lo_ptr, v_hi_ptr, p_tmem_addr, o_tmem_addr, accumulate):
-    """Avo-exact PV MMA: 128x64 BMN, high D first then low D, 16 MMA calls total.
-    v_lo_ptr: SMEM pointer to V low-D buffer [128, 64] with 128B row stride.
-    v_hi_ptr: SMEM pointer to V high-D buffer [128, 64] with 128B row stride.
+def tcgen05_mma_1sm_ts_128x64_bmn_x2(
+    b_lo_smem_ptr,
+    b_hi_smem_ptr,
+    a_tmem_addr,
+    c_tmem_addr,
+    accumulate,
+):
+    """Issue two 1SM 128x64 BMN tmem/shared MMA sequences.
+
+    `b_lo_smem_ptr` and `b_hi_smem_ptr` point to the low/high 64-column
+    shared-memory B tiles. The helper emits high tile first, then low tile.
     """
     return tir.call_intrin(
         "void",
-        tir.op.Op.get("tl.tcgen05_pv_gemm_128x64"),
-        v_lo_ptr,
-        v_hi_ptr,
-        p_tmem_addr,
-        o_tmem_addr,
+        tir.op.Op.get("tl.tcgen05_mma_1sm_ts_128x64_bmn_x2"),
+        b_lo_smem_ptr,
+        b_hi_smem_ptr,
+        a_tmem_addr,
+        c_tmem_addr,
         accumulate,
     )
 
 
-def tcgen05_pv_gemm_128x64_skv(
-    v_stage_ptr,
-    p_tmem_addr,
-    o_tmem_addr,
+def tcgen05_mma_1sm_ts_128x64_bmn_x2_contig(
+    b_smem_ptr,
+    a_tmem_addr,
+    c_tmem_addr,
     accumulate,
     *,
     guard_warp12: bool = True,
+    lane0: bool = False,
 ):
-    """Avo-exact PV MMA for one shared K/V stage.
+    """Issue two 1SM 128x64 BMN tmem/shared MMA sequences.
 
-    The stage is laid out as low-D [128,64] followed by high-D [128,64],
-    matching avo's sKV storage. Set `guard_warp12=False` when the caller
-    already restricts execution to the MMA warp.
+    The shared-memory B operand is stored as two contiguous [128,64] BF16
+    tiles: low tile at base and high tile at base + 128*64 elements.
+    Set `guard_warp12=False` when the caller already restricts execution to
+    the MMA warp. Set `lane0=True` when execution is already lane 0 only.
     """
+    ann = {} if guard_warp12 else {"guard_warp12": False}
+    if lane0:
+        ann["lane0_only"] = True
     return tir.call_intrin(
         "void",
-        tir.op.Op.get(
-            "tl.tcgen05_pv_gemm_128x64_skv"
-            if guard_warp12
-            else "tl.tcgen05_pv_gemm_128x64_skv_noguard"
-        ),
-        v_stage_ptr,
-        p_tmem_addr,
-        o_tmem_addr,
+        tir.op.Op.get("tl.tcgen05_mma_1sm_ts_128x64_bmn_x2_contig"),
+        b_smem_ptr,
+        a_tmem_addr,
+        c_tmem_addr,
         accumulate,
+        annotations=ann,
     )
 
 
-def tcgen05_pv_gemm_128x64_skv_noguard(v_stage_ptr, p_tmem_addr, o_tmem_addr, accumulate):
-    """Compatibility wrapper for `tcgen05_pv_gemm_128x64_skv(..., guard_warp12=False)`."""
-    return tcgen05_pv_gemm_128x64_skv(
-        v_stage_ptr,
-        p_tmem_addr,
-        o_tmem_addr,
+def tcgen05_mma_1sm_ts_128x64_bmn_x2_contig_noguard(b_smem_ptr, a_tmem_addr, c_tmem_addr, accumulate):
+    """Compatibility wrapper for `tcgen05_mma_1sm_ts_128x64_bmn_x2_contig(..., guard_warp12=False)`."""
+    return tcgen05_mma_1sm_ts_128x64_bmn_x2_contig(
+        b_smem_ptr,
+        a_tmem_addr,
+        c_tmem_addr,
         accumulate,
         guard_warp12=False,
     )
 
 
-def tcgen05_pv_gemm_128x64_skv_lane0(v_stage_ptr, p_tmem_addr, o_tmem_addr, accumulate):
-    """Avo-exact PV MMA. Caller must already restrict execution to lane 0."""
-    return tir.call_intrin(
-        "void",
-        tir.op.Op.get("tl.tcgen05_pv_gemm_128x64_skv_lane0"),
-        v_stage_ptr,
-        p_tmem_addr,
-        o_tmem_addr,
+def tcgen05_mma_1sm_ts_128x64_bmn_x2_contig_lane0(b_smem_ptr, a_tmem_addr, c_tmem_addr, accumulate):
+    """Issue the contiguous-B 1SM tmem/shared MMA pair from lane 0."""
+    return tcgen05_mma_1sm_ts_128x64_bmn_x2_contig(
+        b_smem_ptr,
+        a_tmem_addr,
+        c_tmem_addr,
         accumulate,
+        guard_warp12=False,
+        lane0=True,
     )
 
 
@@ -2192,14 +2300,14 @@ def tcgen05_reuse3_stage_ptr(stage0_ptr, stage1_ptr, stage2_ptr, stage):
     )
 
 
-def tcgen05_reuse3_barrier_ptr(mbar0, mbar1, mbar2, stage):
-    """Return the selected reuse3 barrier pointer."""
+def tcgen05_reuse3_barrier_ref(mbar0, mbar1, mbar2, stage):
+    """Return the selected reuse3 barrier as a CUDA Barrier& expression."""
     mbar0 = _mbar_to_buffer_load(mbar0)
     mbar1 = _mbar_to_buffer_load(mbar1)
     mbar2 = _mbar_to_buffer_load(mbar2)
     return tir.call_intrin(
         "handle",
-        tir.op.Op.get("tl.tcgen05_reuse3_barrier_ptr"),
+        tir.op.Op.get("tl.tcgen05_reuse3_barrier_ref"),
         mbar0,
         mbar1,
         mbar2,
@@ -2207,28 +2315,58 @@ def tcgen05_reuse3_barrier_ptr(mbar0, mbar1, mbar2, stage):
     )
 
 
-def tcgen05_tma_load_128x128(desc, stage_ptr, mbar_ptr, k_iter, kv_head, batch):
+def tcgen05_reuse3_barrier_ptr(mbar0, mbar1, mbar2, stage):
+    """Compatibility alias for the selected reuse3 barrier expression."""
+    return tcgen05_reuse3_barrier_ref(mbar0, mbar1, mbar2, stage)
+
+
+def tcgen05_smem_ptr_add_bf16(ptr, offset):
+    """Return ``ptr + offset`` for a BF16 shared-memory pointer expression."""
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.tcgen05_smem_ptr_add_bf16"),
+        ptr,
+        offset,
+    )
+
+
+def tcgen05_mbarrier_arrive_expect_tx_ref(mbar, tx):
+    """Arrive+expect on a dynamic reuse3 barrier reference."""
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_mbarrier_arrive_expect_tx_ref"),
+        mbar,
+        tx,
+    )
+
+
+def tcgen05_tma_load_128x128(desc, stage_ptr, mbar, k_iter, kv_head, batch):
     """Issue a 128x128 BF16 TMA load as two 64-column transfers."""
     return tir.call_intrin(
         "void",
         tir.op.Op.get("tl.tcgen05_tma_load_128x128"),
         desc,
         stage_ptr,
-        mbar_ptr,
+        mbar,
         k_iter,
         kv_head,
         batch,
     )
 
 
-def tcgen05_wait_barrier_ptr(mbar_ptr, phase):
-    """Wait on a raw mbarrier pointer."""
+def tcgen05_wait_barrier_ref(mbar, phase):
+    """Wait on a dynamic reuse3 barrier reference."""
     return tir.call_intrin(
         "void",
-        tir.op.Op.get("tl.tcgen05_wait_barrier_ptr"),
-        mbar_ptr,
+        tir.op.Op.get("tl.tcgen05_wait_barrier_ref"),
+        mbar,
         phase,
     )
+
+
+def tcgen05_wait_barrier_ptr(mbar, phase):
+    """Compatibility alias for waiting on a dynamic reuse3 barrier."""
+    return tcgen05_wait_barrier_ref(mbar, phase)
 
 
 def tcgen05_wait_barrier(mbar, phase):
@@ -2286,24 +2424,21 @@ def tcgen05_epilogue_tma_store_32x128(output_desc, epi_ptr, q_row, q_head, batch
     )
 
 
-def tcgen05_commit_1sm(mbar):
+def tcgen05_commit_1sm(mbar, *, lane0: bool = False):
     """Avo-exact commit: tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64"""
     mbar = _mbar_to_buffer_load(mbar)
+    ann = {"lane0_only": True} if lane0 else {}
     return tir.call_intrin(
         "void",
         tir.op.Op.get("tl.tcgen05_commit_1sm_op"),
         mbar,
+        annotations=ann,
     )
 
 
 def tcgen05_commit_1sm_lane0(mbar):
     """Avo-exact commit. Caller must already restrict execution to lane 0."""
-    mbar = _mbar_to_buffer_load(mbar)
-    return tir.call_intrin(
-        "void",
-        tir.op.Op.get("tl.tcgen05_commit_1sm_lane0_op"),
-        mbar,
-    )
+    return tcgen05_commit_1sm(mbar, lane0=True)
 
 
 def tcgen05_softmax_warp_2cta(
@@ -2497,11 +2632,338 @@ def tcgen05_producer_warp_2cta(
     )
 
 
+def tcgen05_fa4_uma_softmax_warp_2cta(
+    s_tmem_addr,
+    p_tmem_addr,
+    rs_smem,
+    sum_smem,
+    mbar_s,
+    mbar_p,
+    mbar_p2,
+    loop_extent,
+    seq_len,
+    kb_base,
+    softmax_scale,
+):
+    mbar_s = _mbar_to_buffer_load(mbar_s)
+    mbar_p = _mbar_to_buffer_load(mbar_p)
+    mbar_p2 = _mbar_to_buffer_load(mbar_p2)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_fa4_uma_softmax_warp_2cta"),
+        s_tmem_addr,
+        p_tmem_addr,
+        rs_smem,
+        sum_smem,
+        mbar_s,
+        mbar_p,
+        mbar_p2,
+        loop_extent,
+        seq_len,
+        kb_base,
+        softmax_scale,
+    )
+
+
+def tcgen05_fa4_uma_correction_warp_2cta(
+    o_smem_ptr,
+    rs_smem,
+    sum_smem,
+    mbar_corr_base,
+    mbar_pv_base,
+    mbar_epi_base,
+    mbar_o_rel,
+    mbar_o_tmem_rel,
+    o0_tmem_addr,
+    loop_extent,
+    kb_base,
+    tile_phase,
+):
+    mbar_corr_base = _mbar_to_buffer_load(mbar_corr_base)
+    mbar_pv_base = _mbar_to_buffer_load(mbar_pv_base)
+    mbar_epi_base = _mbar_to_buffer_load(mbar_epi_base)
+    mbar_o_rel = _mbar_to_buffer_load(mbar_o_rel)
+    mbar_o_tmem_rel = _mbar_to_buffer_load(mbar_o_tmem_rel)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_fa4_uma_correction_warp_2cta"),
+        o_smem_ptr,
+        rs_smem,
+        sum_smem,
+        mbar_corr_base,
+        mbar_pv_base,
+        mbar_epi_base,
+        mbar_o_rel,
+        mbar_o_tmem_rel,
+        o0_tmem_addr,
+        loop_extent,
+        kb_base,
+        tile_phase,
+    )
+
+
+def tcgen05_fa4_uma_mma_warp_2cta(
+    cta_rank,
+    q_stage_ptr,
+    k_stage_ptr,
+    v_stage_ptr,
+    mbar_q_base,
+    mbar_k_base,
+    mbar_s_base,
+    mbar_p_base,
+    mbar_p2_base,
+    mbar_v_base,
+    mbar_pv_base,
+    mbar_corr_base,
+    mbar_k_rel_base,
+    mbar_v_rel_base,
+    mbar_q_rel,
+    mbar_o_tmem_rel,
+    s0_tmem_addr,
+    loop_extent,
+    tile_k_base,
+    tile_phase,
+):
+    mbar_q_base = _mbar_to_buffer_load(mbar_q_base)
+    mbar_k_base = _mbar_to_buffer_load(mbar_k_base)
+    mbar_s_base = _mbar_to_buffer_load(mbar_s_base)
+    mbar_p_base = _mbar_to_buffer_load(mbar_p_base)
+    mbar_p2_base = _mbar_to_buffer_load(mbar_p2_base)
+    mbar_v_base = _mbar_to_buffer_load(mbar_v_base)
+    mbar_pv_base = _mbar_to_buffer_load(mbar_pv_base)
+    mbar_corr_base = _mbar_to_buffer_load(mbar_corr_base)
+    mbar_k_rel_base = _mbar_to_buffer_load(mbar_k_rel_base)
+    mbar_v_rel_base = _mbar_to_buffer_load(mbar_v_rel_base)
+    mbar_q_rel = _mbar_to_buffer_load(mbar_q_rel)
+    mbar_o_tmem_rel = _mbar_to_buffer_load(mbar_o_tmem_rel)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_fa4_uma_mma_warp_2cta"),
+        cta_rank,
+        q_stage_ptr,
+        k_stage_ptr,
+        v_stage_ptr,
+        mbar_q_base,
+        mbar_k_base,
+        mbar_s_base,
+        mbar_p_base,
+        mbar_p2_base,
+        mbar_v_base,
+        mbar_pv_base,
+        mbar_corr_base,
+        mbar_k_rel_base,
+        mbar_v_rel_base,
+        mbar_q_rel,
+        mbar_o_tmem_rel,
+        s0_tmem_addr,
+        loop_extent,
+        tile_k_base,
+        tile_phase,
+    )
+
+
+def tcgen05_fa4_uma_producer_warp_2cta(
+    q_desc,
+    k_desc,
+    v_desc,
+    q_stage_ptr,
+    k_stage_ptr,
+    v_stage_ptr,
+    mbar_q_base,
+    mbar_k_base,
+    mbar_v_base,
+    mbar_k_rel_base,
+    mbar_v_rel_base,
+    mbar_q_rel,
+    loop_extent,
+    tile_k_base,
+    q_row_base,
+    kv_row_base,
+    q_col_base,
+    kv_col_base,
+    v_col_base,
+    tile_phase,
+):
+    mbar_q_base = _mbar_to_buffer_load(mbar_q_base)
+    mbar_k_base = _mbar_to_buffer_load(mbar_k_base)
+    mbar_v_base = _mbar_to_buffer_load(mbar_v_base)
+    mbar_k_rel_base = _mbar_to_buffer_load(mbar_k_rel_base)
+    mbar_v_rel_base = _mbar_to_buffer_load(mbar_v_rel_base)
+    mbar_q_rel = _mbar_to_buffer_load(mbar_q_rel)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_fa4_uma_producer_warp_2cta"),
+        q_desc,
+        k_desc,
+        v_desc,
+        q_stage_ptr,
+        k_stage_ptr,
+        v_stage_ptr,
+        mbar_q_base,
+        mbar_k_base,
+        mbar_v_base,
+        mbar_k_rel_base,
+        mbar_v_rel_base,
+        mbar_q_rel,
+        loop_extent,
+        tile_k_base,
+        q_row_base,
+        kv_row_base,
+        q_col_base,
+        kv_col_base,
+        v_col_base,
+        tile_phase,
+    )
+
+
+def tcgen05_fa4_uma_producer_warp_2cta_schedule(
+    q_desc,
+    k_desc,
+    v_desc,
+    q_stage_ptr,
+    k_stage_ptr,
+    v_stage_ptr,
+    mbar_q_base,
+    mbar_k_base,
+    mbar_v_base,
+    mbar_k_rel_base,
+    mbar_v_rel_base,
+    mbar_q_rel,
+    loop_extent,
+    tile_iter,
+    grid_clusters,
+    seq_len,
+    num_q_heads,
+    num_kv_heads,
+    tile_phase,
+):
+    mbar_q_base = _mbar_to_buffer_load(mbar_q_base)
+    mbar_k_base = _mbar_to_buffer_load(mbar_k_base)
+    mbar_v_base = _mbar_to_buffer_load(mbar_v_base)
+    mbar_k_rel_base = _mbar_to_buffer_load(mbar_k_rel_base)
+    mbar_v_rel_base = _mbar_to_buffer_load(mbar_v_rel_base)
+    mbar_q_rel = _mbar_to_buffer_load(mbar_q_rel)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_fa4_uma_producer_warp_2cta_schedule"),
+        q_desc,
+        k_desc,
+        v_desc,
+        q_stage_ptr,
+        k_stage_ptr,
+        v_stage_ptr,
+        mbar_q_base,
+        mbar_k_base,
+        mbar_v_base,
+        mbar_k_rel_base,
+        mbar_v_rel_base,
+        mbar_q_rel,
+        loop_extent,
+        tile_iter,
+        grid_clusters,
+        seq_len,
+        num_q_heads,
+        num_kv_heads,
+        tile_phase,
+    )
+
+
+def tcgen05_fa4_uma_epilogue_warp_2cta(
+    o_smem_ptr,
+    output_desc,
+    mbar_epi_base,
+    mbar_o_rel,
+    q_row_base,
+    batch,
+    q_col_base,
+    tile_phase,
+    seq_len,
+):
+    if isinstance(output_desc, str):
+        output_desc = tir.StringImm(output_desc)
+    mbar_epi_base = _mbar_to_buffer_load(mbar_epi_base)
+    mbar_o_rel = _mbar_to_buffer_load(mbar_o_rel)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_fa4_uma_epilogue_warp_2cta"),
+        o_smem_ptr,
+        output_desc,
+        mbar_epi_base,
+        mbar_o_rel,
+        q_row_base,
+        batch,
+        q_col_base,
+        tile_phase,
+        seq_len,
+    )
+
+
+def tcgen05_fa4_uma_epilogue_warp_2cta_schedule(
+    o_smem_ptr,
+    output_desc,
+    mbar_epi_base,
+    mbar_o_rel,
+    tile_iter,
+    grid_clusters,
+    seq_len,
+    num_q_heads,
+    tile_phase,
+):
+    if isinstance(output_desc, str):
+        output_desc = tir.StringImm(output_desc)
+    mbar_epi_base = _mbar_to_buffer_load(mbar_epi_base)
+    mbar_o_rel = _mbar_to_buffer_load(mbar_o_rel)
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.tcgen05_fa4_uma_epilogue_warp_2cta_schedule"),
+        o_smem_ptr,
+        output_desc,
+        mbar_epi_base,
+        mbar_o_rel,
+        tile_iter,
+        grid_clusters,
+        seq_len,
+        num_q_heads,
+        tile_phase,
+    )
+
+
+def tcgen05_fa4_uma_tile_valid(tile_iter, grid_clusters, total_tiles):
+    """Return whether the current physical cluster has a valid persistent tile."""
+    return tir.call_intrin(
+        "bool",
+        tir.op.Op.get("tl.tcgen05_fa4_uma_tile_valid"),
+        tile_iter,
+        grid_clusters,
+        total_tiles,
+    )
+
+
+def tcgen05_fa4_uma_tile_id(tile_iter, grid_clusters):
+    """Return the physical-cluster persistent tile id for TileScale fa4_uma."""
+    return tir.call_intrin(
+        "int32",
+        tir.op.Op.get("tl.tcgen05_fa4_uma_tile_id"),
+        tile_iter,
+        grid_clusters,
+    )
+
+
 def outline_persistent(buffer):
     """Mark a local fragment as persistent across warp-spec outlined calls."""
     if isinstance(buffer, tir.Buffer):
         buffer = buffer.data
     return tir.call_intrin("void", tir.op.Op.get("tl.outline_persistent"), buffer)
+
+
+def cuda_block_idx_x():
+    """Return the physical CUDA blockIdx.x value."""
+    return tir.call_intrin("int32", tir.op.Op.get("tl.cuda_block_idx_x"))
+
+
+def cluster_id_x():
+    """Return the X dimension cluster rank in the CUDA cluster grid."""
+    return tir.call_intrin("int32", tir.op.Op.get("tl.cluster_id_x"))
 
 
 def _tcgen05_num_smem_chunks(smem_src, chunk_elems: int):

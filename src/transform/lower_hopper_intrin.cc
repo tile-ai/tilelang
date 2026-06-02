@@ -178,7 +178,9 @@ public:
         } else {
           auto stmts = prefetch_calls_;
           Array<Stmt> stmt_seq;
-          stmt_seq.push_back(stmts.size() > 1 ? SeqStmt(stmts) : stmts[0]);
+          Stmt prefetch_seq = stmts.size() > 1 ? SeqStmt(stmts) : stmts[0];
+          PrimExpr thread0 = iv->var == IntImm(iv->var.dtype(), 0);
+          stmt_seq.push_back(IfThenElse(thread0, prefetch_seq));
           stmt_seq.push_back(body);
           Stmt result = SeqStmt(stmt_seq);
           prefetch_calls_.clear();

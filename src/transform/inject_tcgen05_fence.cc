@@ -110,11 +110,11 @@ bool IsTcgen05OrTmemCall(const CallNode *call) {
          call->op.same_as(tcgen05_st()) ||
          call->op.same_as(tcgen05_ld_x16()) || call->op.same_as(tcgen05_st_x16()) ||
          call->op.same_as(tcgen05_mma_arrive()) ||
-         call->op.same_as(tcgen05_wait_st()) ||
          StoreFenceMarksTcgen05Use(call) ||
          call->op.same_as(ptx_init_tensor_memory()) ||
          call->op.same_as(ptx_deallocate_tensor_memory()) ||
-         call->op.same_as(tcgen05_pv_gemm_128x64()) ||
+         call->op.same_as(tcgen05_mma_1sm_ts_128x64_bmn_x2()) ||
+         call->op.same_as(tcgen05_mma_1sm_ts_128x64_bmn_x2_contig()) ||
          call->op.same_as(tcgen05_commit_1sm_op());
 }
 

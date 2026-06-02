@@ -681,6 +681,27 @@ TVM_DLL const Op &cluster_sync();
 TVM_DLL const Op &block_rank_in_cluster();
 
 /*!
+ * \brief Return the X dimension cluster rank in the grid.
+ *
+ * int cluster_id_x()
+ *
+ */
+TVM_DLL const Op &cluster_id_x();
+
+/*!
+ * \brief Return the physical CUDA blockIdx.x value.
+ *
+ * This is intentionally lower-level than the TileLang Kernel block binding,
+ * which may be transformed for cluster launches.  Persistent clustered kernels
+ * that need to match handwritten CUDA scheduling can derive cluster id and CTA
+ * rank explicitly from this value and block_rank_in_cluster().
+ *
+ * int cuda_block_idx_x()
+ *
+ */
+TVM_DLL const Op &cuda_block_idx_x();
+
+/*!
  * \brief Issue a Blackwell cluster launch control query that writes a 16-byte
  * response into shared memory and signals completion on the given mbarrier.
  *
@@ -1006,6 +1027,12 @@ TVM_DLL const Op &initialize_wgmma_descriptor();
  */
 TVM_DLL const Op &initialize_tcgen05_descriptor();
 
+/*! \brief Return the shared-memory pointer base in 16-byte units. */
+TVM_DLL const Op &tcgen05_smem_base_16b();
+
+/*! \brief Build the FA4 fast TCGEN05 shared-memory descriptor. */
+TVM_DLL const Op &tcgen05_mk_fast_desc();
+
 /*!
  * \brief tilelang intrinsic for committing UMMA (TCGEN05) barrier arrive.
  *
@@ -1060,16 +1087,6 @@ TVM_DLL const Op &tcgen05_before_thread_sync();
  * tcgen05.fence::after_thread_sync.
  */
 TVM_DLL const Op &tcgen05_after_thread_sync();
-
-/*!
- * \brief Fence to wait for async TMEM store visibility.
- *
- * Compatibility spelling for \c tcgen05_fence_tmem_store() with the
- * "tcgen05_use" annotation set, so InjectTcgen05Fence still treats it as a
- * TCGEN05/TMEM use.
- *
- */
-TVM_DLL const Op &tcgen05_wait_st();
 
 /*!
  * \brief Fence to wait for async TMEM load visibility.
@@ -1190,14 +1207,8 @@ TVM_DLL const Op &tcgen05_softmax_pack_4();
  */
 TVM_DLL const Op &tcgen05_softmax_128x128();
 
-/*!
- * \brief Avo-exact QK MMA for one Q stage and one shared K/V stage.
- * Args: Q_stage_ptr, KV_stage_ptr, S_tmem_addr, mbar
- *
- * Emits the raw mk_fast descriptor loop used by avo's 1SM attention kernel and
- * commits S readiness with the plain .b64 tcgen05 commit.
- */
-TVM_DLL const Op &tcgen05_qk_gemm_128x128_skv();
+/*! \brief 1SM shared/shared 128x128 tcgen05 MMA sequence plus mbarrier commit. */
+TVM_DLL const Op &tcgen05_mma_1sm_ss_128x128_commit();
 
 /*!
  * \brief Avo-style full softmax warp loop for FA4 1SM split attention.
@@ -1207,55 +1218,17 @@ TVM_DLL const Op &tcgen05_qk_gemm_128x128_skv();
  */
 TVM_DLL const Op &tcgen05_softmax_warp_1sm();
 
-/*!
- * \brief Avo-exact QK MMA for one Q stage and one shared K/V stage, without
- * an emitted warp-12 guard. Caller must already restrict execution to the MMA
- * warp.
- * Args: Q_stage_ptr, KV_stage_ptr, S_tmem_addr, mbar
- */
-TVM_DLL const Op &tcgen05_qk_gemm_128x128_skv_noguard();
+/*! \brief Two 1SM tmem/shared 128x64 BMN tcgen05 MMA sequences. */
+TVM_DLL const Op &tcgen05_mma_1sm_ts_128x64_bmn_x2();
 
-/*!
- * \brief Avo-exact QK MMA for one Q stage and one shared K/V stage. Caller
- * must already restrict execution to lane 0 of the MMA warp.
- * Args: Q_stage_ptr, KV_stage_ptr, S_tmem_addr, mbar
- */
-TVM_DLL const Op &tcgen05_qk_gemm_128x128_skv_lane0();
-
-/*!
- * \brief Avo-exact PV MMA: 128x64 BMN, high D first, low D second.
- * Args: V_shared_ptr, P_tmem_addr, O_tmem_addr, accumulate(int)
- */
-TVM_DLL const Op &tcgen05_pv_gemm_128x64();
-
-/*!
- * \brief Avo-exact PV MMA for a single shared K/V stage.
- * Args: V_stage_ptr, P_tmem_addr, O_tmem_addr, accumulate(int)
- *
- * The stage is laid out as low-D [128,64] followed by high-D [128,64],
- * matching avo's sKV storage.
- */
-TVM_DLL const Op &tcgen05_pv_gemm_128x64_skv();
-
-/*!
- * \brief Avo-exact PV MMA for a single shared K/V stage, without an emitted
- * warp-12 guard. Caller must already restrict execution to the MMA warp.
- * Args: V_stage_ptr, P_tmem_addr, O_tmem_addr, accumulate(int)
- */
-TVM_DLL const Op &tcgen05_pv_gemm_128x64_skv_noguard();
-
-/*!
- * \brief Avo-exact PV MMA for one shared K/V stage. Caller must already
- * restrict execution to lane 0 of the MMA warp.
- * Args: V_stage_ptr, P_tmem_addr, O_tmem_addr, accumulate(int)
- */
-TVM_DLL const Op &tcgen05_pv_gemm_128x64_skv_lane0();
+/*! \brief Two 1SM tmem/shared 128x64 BMN MMAs with contiguous B tiles. */
+TVM_DLL const Op &tcgen05_mma_1sm_ts_128x64_bmn_x2_contig();
 
 /*!
  * \brief Avo-style full MMA warp loop for FA4 1SM split attention.
  *
  * This primitive keeps the MMA role as a compact device helper instead of
- * expanding stage selection and QK/PV issue logic into TileLang's outlined
+ * expanding stage selection and MMA issue logic into TileLang's outlined
  * warp function.  The generated structure matches avo's mma_warp_fn much more
  * closely and avoids ptxas spilling in the MMA role.
  */
@@ -1293,10 +1266,22 @@ TVM_DLL const Op &tcgen05_mma_warp_1sm_reuse3();
 TVM_DLL const Op &tcgen05_reuse3_stage_ptr();
 
 /*!
- * \brief Return the selected reuse3 barrier pointer.
+ * \brief Return the selected reuse3 barrier as a CUDA Barrier& expression.
  * Args: mbar0, mbar1, mbar2, stage(int)
  */
-TVM_DLL const Op &tcgen05_reuse3_barrier_ptr();
+TVM_DLL const Op &tcgen05_reuse3_barrier_ref();
+
+/*!
+ * \brief Add a BF16 element offset to a shared-memory pointer expression.
+ * Args: ptr, offset(int elements)
+ */
+TVM_DLL const Op &tcgen05_smem_ptr_add_bf16();
+
+/*!
+ * \brief Arrive+expect on a dynamic reuse3 barrier reference.
+ * Args: mbar_ref, transaction_bytes
+ */
+TVM_DLL const Op &tcgen05_mbarrier_arrive_expect_tx_ref();
 
 /*!
  * \brief Issue a 128x128 BF16 TMA load as two 64-column transfers.
@@ -1305,11 +1290,10 @@ TVM_DLL const Op &tcgen05_reuse3_barrier_ptr();
 TVM_DLL const Op &tcgen05_tma_load_128x128();
 
 /*!
- * \brief Wait on a raw mbarrier pointer returned by
- * tcgen05_reuse3_barrier_ptr.
- * Args: mbar_ptr, phase
+ * \brief Wait on a dynamic reuse3 barrier reference.
+ * Args: mbar_ref, phase
  */
-TVM_DLL const Op &tcgen05_wait_barrier_ptr();
+TVM_DLL const Op &tcgen05_wait_barrier_ref();
 
 /*!
  * \brief Wait on an mbarrier using the compact SM100 helper call.
@@ -1336,13 +1320,6 @@ TVM_DLL const Op &tcgen05_epilogue_tma_store_32x128();
 TVM_DLL const Op &tcgen05_commit_1sm_op();
 
 /*!
- * \brief Avo-exact 1SM tcgen05 commit. Caller must already restrict execution
- * to lane 0 of the MMA warp.
- * Args: mbar_ptr
- */
-TVM_DLL const Op &tcgen05_commit_1sm_lane0_op();
-
-/*!
  * \brief Avo-style 2CTA softmax warp role for FA4 attention.
  */
 TVM_DLL const Op &tcgen05_softmax_warp_2cta();
@@ -1361,6 +1338,33 @@ TVM_DLL const Op &tcgen05_mma_warp_2cta();
  * \brief Avo-style 2CTA producer warp role for FA4 attention.
  */
 TVM_DLL const Op &tcgen05_producer_warp_2cta();
+
+/*! \brief TileScale fa4_uma 2CTA softmax role. */
+TVM_DLL const Op &tcgen05_fa4_uma_softmax_warp_2cta();
+
+/*! \brief TileScale fa4_uma 2CTA correction/finalize role. */
+TVM_DLL const Op &tcgen05_fa4_uma_correction_warp_2cta();
+
+/*! \brief TileScale fa4_uma 2CTA MMA consumer role. */
+TVM_DLL const Op &tcgen05_fa4_uma_mma_warp_2cta();
+
+/*! \brief TileScale fa4_uma 2CTA producer/TMA role. */
+TVM_DLL const Op &tcgen05_fa4_uma_producer_warp_2cta();
+
+/*! \brief TileScale fa4_uma 2CTA producer role with physical-CTA schedule. */
+TVM_DLL const Op &tcgen05_fa4_uma_producer_warp_2cta_schedule();
+
+/*! \brief TileScale fa4_uma 2CTA epilogue TMA-store role. */
+TVM_DLL const Op &tcgen05_fa4_uma_epilogue_warp_2cta();
+
+/*! \brief TileScale fa4_uma 2CTA epilogue role with physical-CTA schedule. */
+TVM_DLL const Op &tcgen05_fa4_uma_epilogue_warp_2cta_schedule();
+
+/*! \brief TileScale fa4_uma physical-cluster persistent tile id. */
+TVM_DLL const Op &tcgen05_fa4_uma_tile_id();
+
+/*! \brief TileScale fa4_uma physical-cluster tile validity predicate. */
+TVM_DLL const Op &tcgen05_fa4_uma_tile_valid();
 
 /*!
  * \brief Mark a local allocation as persistent across CUDA warp-specialized

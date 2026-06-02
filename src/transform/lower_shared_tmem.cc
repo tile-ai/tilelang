@@ -230,12 +230,18 @@ private:
           T.ptx_init_tensor_memory(tmem_buf0[0], 128)
           T.ptx_init_tensor_memory(tmem_buf1[0], 128)
     */
-    // 1. create new data vars
+    // 1. create new data vars. Aliased buffers reuse the parent's address slot
+    // and are represented as `parent_addr + col_offset`, so they do not need a
+    // separate shared-memory slot.
     Array<Var> new_data_vars;
     for (auto buffer : tmem_buffers) {
       auto data = buffer->data;
       if (var_remap_.count(data))
         continue;
+      if (tmem_alias_parent_name_.find(buffer->name) !=
+          tmem_alias_parent_name_.end()) {
+        continue;
+      }
       auto new_data =
           Var(data->name_hint, PointerType(PrimType(tmem_dtype_), "shared"));
       var_remap_.Set(data, new_data);
@@ -246,6 +252,10 @@ private:
     Array<Buffer> new_buffers;
     for (auto buffer : tmem_buffers) {
       auto data = buffer->data;
+      if (tmem_alias_parent_name_.find(buffer->name) !=
+          tmem_alias_parent_name_.end()) {
+        continue;
+      }
       ICHECK(var_remap_.find(data) != var_remap_.end())
           << "data not found in var_remap_";
       auto new_data = var_remap_.at(data);
@@ -284,19 +294,14 @@ private:
       }
     }
 
-    // 3. create init & dealloc calls for new buffers
-    // Aliased buffers (alloc_tmem(alias=...)) get their base address copied
-    // from the parent's address slot + col_offset — no tcgen05.alloc is
-    // issued for them. The post-init `alias_buf[0] = parent_buf[0] +
-    // col_offset` stores are emitted into ``alias_addr_stores`` so they run
-    // after the parent's init (still under the warp-0 guard).
+    // 3. create init & dealloc calls for new buffers. Aliased buffers
+    // (alloc_tmem(alias=...)) are pure address expressions and get no
+    // tcgen05.alloc or shared address slot.
     std::vector<Stmt> init_mtmem_calls_;
     std::vector<Stmt> dealloc_tmem_calls_;
-    std::vector<Stmt> alias_addr_stores;
     for (auto buffer : tmem_buffers) {
       auto data = buffer->data;
       auto old_buffer = buffer_data_to_buffer_.at(data);
-      auto new_buffer = buffer_remap_.at(old_buffer);
       int num_cols_allocated = GetNumColsAllocated(old_buffer);
 
       // Check that the number of rows doesn't exceed the tmem limit
@@ -316,29 +321,11 @@ private:
 
       auto alias_it = tmem_alias_parent_name_.find(old_buffer->name);
       if (alias_it != tmem_alias_parent_name_.end()) {
-        // Aliased: skip alloc/dealloc, store the parent's base addr + col
-        // offset into this buffer's address slot. Find the parent by NAME
-        // (since Buffer pointer identity isn't preserved across passes).
-        const std::string &parent_name = alias_it->second;
-        Buffer parent_new;
-        bool found = false;
-        for (const auto &kv : buffer_remap_) {
-          if (kv.first->name == parent_name) {
-            parent_new = kv.second;
-            found = true;
-            break;
-          }
-        }
-        ICHECK(found) << "tmem_alias parent '" << parent_name
-                       << "' not found among tmem buffers";
-        int col_off = tmem_alias_col_offset_by_name_.at(old_buffer->name);
-        // new_buffer[0] = parent_new[0] + col_offset
-        PrimExpr parent_addr = BufferLoad(parent_new, {IntImm(DataType::Int(32), 0)});
-        PrimExpr aliased_addr = parent_addr + IntImm(parent_new->dtype, col_off);
-        alias_addr_stores.push_back(
-            BufferStore(new_buffer, aliased_addr, {IntImm(DataType::Int(32), 0)}));
+        // Aliased: skip alloc/dealloc. Uses are rewritten to the parent's
+        // address plus a constant column offset in VisitExpr_(BufferLoadNode).
         continue;
       }
+      auto new_buffer = buffer_remap_.at(old_buffer);
 
       auto new_buffer_access = new_buffer.access_ptr(1, DataType::Handle(), 1,
                                                      PrimExpr(0), PrimExpr(1));
@@ -362,11 +349,6 @@ private:
     };
     std::sort(init_mtmem_calls_.begin(), init_mtmem_calls_.end(),
               compare_by_buffer_name);
-    // Alias-base-address copies come AFTER the genuine tcgen05.alloc inits
-    // so the parent's address slot is already populated.
-    for (auto &s : alias_addr_stores) {
-      init_mtmem_calls_.push_back(s);
-    }
 
     Array<Stmt> new_body;
     ICHECK(target_.defined()) << "LowerSharedTmem requires a bound target";
@@ -440,6 +422,25 @@ private:
     auto load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
     auto buffer = load->buffer;
     auto indices = load->indices;
+
+    auto alias_it = tmem_alias_parent_name_.find(buffer->name);
+    if (alias_it != tmem_alias_parent_name_.end()) {
+      const std::string &parent_name = alias_it->second;
+      Buffer parent_new;
+      bool found = false;
+      for (const auto &kv : buffer_remap_) {
+        if (kv.first->name == parent_name) {
+          parent_new = kv.second;
+          found = true;
+          break;
+        }
+      }
+      ICHECK(found) << "tmem_alias parent '" << parent_name
+                    << "' not found among tmem buffers";
+      int col_off = tmem_alias_col_offset_by_name_.at(buffer->name);
+      return BufferLoad(parent_new, {0}) + IntImm(parent_new->dtype, col_off) +
+             GetTmemOffset(buffer, indices);
+    }
 
     if (buffer_remap_.count(buffer)) {
       auto new_buffer = buffer_remap_[load->buffer];

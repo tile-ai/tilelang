@@ -57,8 +57,11 @@ public:
   void VisitExpr_(const MinNode *op, std::ostream &os) final;
   void VisitExpr_(const MaxNode *op, std::ostream &os) final;
   void VisitStmt_(const EvaluateNode *op) final;
+  void VisitStmt_(const LetStmtNode *op) final;
   void VisitStmt_(const AllocateNode *op) final;
   void VisitStmt_(const AttrStmtNode *op) final;
+  void VisitStmt_(const BlockNode *op) final;
+  void VisitStmt_(const BlockRealizeNode *op) final;
   void VisitStmt_(const IfThenElseNode *op) final;
   void VisitExpr_(const BufferLoadNode *op, std::ostream &os) final;
   void VisitStmt_(const BufferStoreNode *op) final;
@@ -82,6 +85,7 @@ private:
                            std::ostream &os) final;
   bool HandleLateIntrinsicCall(const CallNode *op, std::ostream &os);
   void FlushPendingTmemAllocs();
+  void EmitCompactSharedStateIfNeeded();
 
   // Whether scope such as "__shared__" or "__constant__"  is part of type.
   bool IsScopePartOfType() const final { return false; }
@@ -153,6 +157,22 @@ private:
   // Buffered TMEM allocations for sorted emission (avo layout parity).
   // Each entry: {sort_key (buffer arg text), full call string}.
   std::vector<std::pair<std::string, std::string>> pending_tmem_allocs_;
+  struct CompactSharedStateInfo {
+    const VarNode *buffer_var{nullptr};
+    std::string var_name;
+    std::string type_str;
+    int64_t bytes{0};
+    int64_t align{1};
+  };
+  std::vector<CompactSharedStateInfo> compact_shared_state_infos_;
+  bool compact_shared_state_enabled_{false};
+  bool compact_shared_state_decl_emitted_{false};
+  int64_t compact_shared_state_bytes_{0};
+  const VarNode *compact_tmem_base_var_{nullptr};
+  std::string compact_tmem_base_name_;
+  bool compact_tmem_base_alias_emitted_{false};
+  bool suppress_compact_tmem_base_alias_{false};
+  void EmitCompactTmemBaseAliasIfNeeded();
   // The alignment of the barrier array in shared memory
   // Set to 16 to maintain minimum alignment requirements for async bulk copy
   const int barrier_alignment_bytes_ = 16;
