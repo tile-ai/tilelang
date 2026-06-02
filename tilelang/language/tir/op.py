@@ -960,6 +960,54 @@ def ptx_mma(
     )
 
 
+def ptx_mma_blockscaled(
+    dtype,
+    shape,
+    A_layout,
+    B_layout,
+    A_dtype,
+    B_dtype,
+    C_dtype,
+    SF_dtype,
+    scale_vec_size,
+    multiplicand_a,
+    a_index,
+    multiplicand_b,
+    b_index,
+    accumulator,
+    c_index,
+    scale_factor_a,
+    scale_factor_b,
+):
+    """TileLang intrinsic for SM120 block-scaled MMA.
+
+    This minimal frontend covers NVFP4 on SM120:
+    ``mma.sync.aligned.kind::mxf4nvf4.block_scale`` with FP4 A/B,
+    FP32 accumulators, and UE4M3 scale factors.
+    """
+    return call_intrin(
+        "handle",
+        _tvm_op.Op.get("tl.ptx_mma_blockscaled"),
+        dtype,
+        shape,
+        A_layout,
+        B_layout,
+        A_dtype,
+        B_dtype,
+        C_dtype,
+        SF_dtype,
+        scale_vec_size,
+        multiplicand_a,
+        a_index,
+        multiplicand_b,
+        b_index,
+        accumulator,
+        c_index,
+        scale_factor_a,
+        scale_factor_b,
+    )
+
+
 def ptx_mma_sp(
     dtype,
     shape,
