@@ -148,6 +148,7 @@ static constexpr const char *kLayoutVisualizationEnable =
     "tl.layout_visualization_enable";
 static constexpr const char *kLayoutVisualizationFormats =
     "tl.layout_visualization_formats";
+static constexpr const char *kTileSightEnable = "tl.tilesight_enable";
 static constexpr const char *kDeviceCompileFlags = "tl.device_compile_flags";
 static constexpr const char *kDisableDataRaceCheck =
     "tl.disable_data_race_check";

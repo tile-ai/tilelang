@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from tvm import IRModule, s_tir, tirx
 from tvm.target import Target
 
@@ -15,6 +18,43 @@ from tilelang.backend.pass_pipeline.pipeline_utils import (
 )
 from tilelang.contrib.nvcc import have_pdl, have_tma
 from tilelang.transform import PassContext
+
+
+def run_tilesight_cost_model(mod: IRModule, target: Target) -> IRModule:
+    """Run TileSight on the planned high-level TileLang IR.
+
+    The chosen point is after ``PipelinePlanning`` and before
+    ``InjectSoftwarePipeline``. At this stage pipeline loop annotations have
+    been normalized, while high-level tile ops such as ``T.copy`` and
+    ``T.gemm`` are still easy to recover as a structured graph.
+    """
+
+    pass_ctx = tilelang.transform.get_pass_context()
+    pass_config_enabled = pass_ctx.config.get(tilelang.PassConfigKey.TL_TILESIGHT_ENABLE, False)
+    env_enabled = os.environ.get("TILELANG_TILESIGHT", "").lower() in ("1", "true", "yes", "on")
+    if not (pass_config_enabled or env_enabled):
+        return mod
+
+    try:
+        from tilelang.tilesight import analyze_module
+    except Exception:
+        return mod
+
+    try:
+        graph, result = analyze_module(mod, target)
+    except Exception:
+        return mod
+
+    if not graph.has_tile_ops():
+        return mod
+
+    output_dir = os.environ.get("TILELANG_TILESIGHT_OUTPUT_DIR")
+    if output_dir:
+        path = Path(output_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "graph.json").write_text(graph.to_json(indent=2), encoding="utf-8")
+        (path / "cost_model.json").write_text(result.to_json(indent=2), encoding="utf-8")
+    return mod
 
 
 def allow_warp_specialized(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
@@ -80,6 +120,7 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     # Run pipeline planning and software-pipeline rewriting before layout
     # inference so inferred layouts see the final pipelined structure directly.
     mod = tilelang.transform.PipelinePlanning()(mod)
+    mod = run_tilesight_cost_model(mod, target)
     mod = tilelang.transform.InjectSoftwarePipeline()(mod)
     mod = tilelang.transform.Simplify()(mod)
 
