@@ -121,7 +121,7 @@ expandTcgen05Layout(const Tcgen05Meta &meta, int tmem_phy_col_extent,
   // O_tmem[:, 32:64] (col_dom = [32, 64)) computes FloorDiv(iter_col, 32)
   // = 1, shifting the thread mapping to warpgroup #1 — which doesn't exist
   // when we only have one warpgroup. That breaks chunked-rescale patterns
-  // like the FA4 reference's correction_warp_fn.
+  // that operate on a subrange of TMEM columns.
   PrimExpr rel_col = iter_col - col_dom->min;
   PrimExpr thread_idx =
       meta.frag->ForwardThread({iter_row, FloorMod(rel_col, meta.width)},

@@ -24,7 +24,7 @@ tcgen05mma_ss(uint64_t const & /*desc_a*/, uint64_t const & /*desc_b*/,
 }
 
 // Shared/shared tcgen05.mma without lane masks. This is the raw descriptor
-// instruction form used by hand-written FA4 kernels.
+// instruction form used by hand-written SM100 kernels.
 template <DataType C_type, bool use_2cta = false, bool elect_one = true>
 TL_DEVICE void
 tcgen05mma_ss_nomask(uint64_t const &desc_a, uint64_t const &desc_b,

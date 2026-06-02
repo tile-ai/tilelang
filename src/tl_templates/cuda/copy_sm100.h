@@ -213,10 +213,10 @@ tcgen05_ld_32dp32bNx(uint32_t const &tmem_start_col,
 template <int N, bool pack16, typename dst_t>
 __device__ __forceinline__ void
 tcgen05_ld_32dp32bNx_x16(uint32_t const &tmem_start_col,
-                          uint32_t const &tmem_col_offset, dst_t *dst_ptr) {
-  uint32_t row_off = (uint32_t)(((threadIdx.x / 32) % 4) * 32) << 16;
+                         uint32_t const &tmem_col_offset,
+                         uint32_t const &tmem_row_offset, dst_t *dst_ptr) {
   tcgen05_ld_core<tl::tmem_ld_32dp32bNx<pack16>, 4, N>(
-      tmem_start_col + tmem_col_offset + row_off, dst_ptr);
+      tmem_start_col + tmem_col_offset + (tmem_row_offset << 16), dst_ptr);
   tl::fence_view_async_tmem_load();
 }
 
@@ -283,57 +283,15 @@ tcgen05_st_32dp32bNx(uint32_t const &tmem_start_col,
 template <int N, bool unpack16, typename src_t>
 __device__ __forceinline__ void
 tcgen05_st_32dp32bNx_x16(uint32_t const &tmem_start_col,
-                          uint32_t const &tmem_col_offset, src_t const *src_ptr) {
-  uint32_t row_off = (uint32_t)(((threadIdx.x / 32) % 4) * 32) << 16;
+                         uint32_t const &tmem_col_offset,
+                         uint32_t const &tmem_row_offset,
+                         src_t const *src_ptr) {
   tcgen05_st_core<tl::tmem_st_32dp32bNx<unpack16>, 4, N>(
-      tmem_start_col + tmem_col_offset + row_off, src_ptr);
-}
-
-// Per-warp O correction with explicit row offsets (avo-style).
-// Each warp in the correction WG handles 32 rows independently.
-// tmem_base: base TMEM address for this O tile (e.g., O0_tmem[0])
-// scale: per-thread rescale factor (one float per row per thread)
-// warp_group_offset: threadIdx.x offset for the correction WG (e.g., 256)
-template <int HeadDim>
-__device__ __forceinline__ void
-tmem_correction_x16(uint32_t tmem_base, float scale, int warp_group_offset) {
-  int warp_in_group = ((threadIdx.x - warp_group_offset) / 32) % 4;
-  uint32_t tr = (uint32_t)((warp_in_group * 32) << 16);
-  uint32_t O_base = tmem_base + tr;
-  constexpr int kChunks = HeadDim / 16;
-  float buf[2][16];
-  int cur = 0;
-
-  // Software-pipelined x16 ld/mul/st matching avo's correction_warp_fn
-  tl::tmem_ld_32dp32bNx<false>::copy<16>(O_base, (uint32_t *)buf[0]);
-  for (int g = 0; g < kChunks; g++) {
-    tl::fence_view_async_tmem_load();
-    int nxt = cur ^ 1;
-    if (g + 1 < kChunks)
-      tl::tmem_ld_32dp32bNx<false>::copy<16>(O_base + (g + 1) * 16,
-                                              (uint32_t *)buf[nxt]);
-    #pragma unroll
-    for (int i = 0; i < 16; i += 2) {
-      float a0 = buf[cur][i] * scale;
-      float a1 = buf[cur][i + 1] * scale;
-      buf[cur][i] = a0;
-      buf[cur][i + 1] = a1;
-    }
-    tl::tmem_st_32dp32bNx<false>::copy<16>(O_base + g * 16,
-                                            (uint32_t const *)buf[cur]);
-    cur = nxt;
-  }
-  tl::fence_view_async_tmem_store();
-}
-
-// Non-template wrapper for HeadDim=128 (callable as extern)
-__device__ __forceinline__ void
-tmem_correction_x16_d128(uint32_t tmem_base, float scale, int warp_group_offset) {
-  tl::tmem_correction_x16<128>(tmem_base, scale, warp_group_offset);
+      tmem_start_col + tmem_col_offset + (tmem_row_offset << 16), src_ptr);
 }
 
 // ====================================================================
-// Avo-style softmax helpers for FA4 1SM attention
+// SM100 scalar math and TMEM helper instructions.
 // ====================================================================
 
 __device__ __forceinline__ float tcgen05_exp2f_approx(float x) {
@@ -359,25 +317,6 @@ __device__ __forceinline__ float tcgen05_fmax2(float a, float b) {
   float r;
   asm("max.ftz.f32 %0, %1, %2;" : "=f"(r) : "f"(a), "f"(b));
   return r;
-}
-
-__device__ __forceinline__ void
-tcgen05_softmax_rescale_update(float &scale_out, float &rmax_local,
-                               float &rsum_local, float nm,
-                               float softmax_scale_log2) {
-  float rs_diff = (rmax_local - nm) * softmax_scale_log2;
-  float rs_exp = tl::tcgen05_exp2f_approx(rs_diff);
-  float rs;
-  asm("{                                                  \n"
-      ".reg .pred p_skip;                                 \n"
-      "setp.ge.ftz.f32 p_skip, %2, 0fC1800000;            \n"
-      "selp.f32 %0, 0f3F800000, %3, p_skip;               \n"
-      "selp.f32 %1, %1, %4, p_skip;                       \n"
-      "}"
-      : "=f"(rs), "+f"(rmax_local)
-      : "f"(rs_diff), "f"(rs_exp), "f"(nm));
-  rsum_local *= rs;
-  scale_out = rs;
 }
 
 __device__ __forceinline__ void tcgen05_fma_f32x2(
@@ -464,396 +403,6 @@ tcgen05_float22bfloat162_xN(__nv_bfloat162 *result, const float *inputs) {
 __device__ __forceinline__ void
 tcgen05_wait_barrier(void const *smem_mbar_ptr, uint32_t phase);
 
-// Avo-style one-iteration S->P online softmax for a 128-row Q stage.
-// The caller has already waited on S readiness and issued
-// tcgen05.fence::after_thread_sync. One thread owns one row; four warps cover
-// the 128 rows. `rmax_state` and `rsum_state` persist across KV blocks.
-__device__ __forceinline__ void
-tcgen05_softmax_128x128(uint32_t S_tmem_addr, uint32_t P_tmem_addr,
-                        float *scale_smem, float *logsum_smem,
-                        float *rmax_state, float *rsum_state,
-                        void const *mbar_scale_ptr, void const *mbar_p2_ptr,
-                        void const *mbar_p_ptr,
-                        int k, int loop_extent, float softmax_scale_log2,
-                        int seq_len, int q_row_base, int kv_col_base,
-                        int is_causal, int warp_group_offset) {
-  constexpr int kBlockN = 128;
-  constexpr int kEx2EmuFreq = 10;
-  constexpr int kEx2EmuRes = 4;
-  constexpr int kEx2EmuStartFrg = 1;
-  constexpr int kEx2FragSize = 32;
-
-  int row = int(threadIdx.x) - warp_group_offset;
-  uint32_t tr = uint32_t((((row >> 5) & 3) * 32) << 16);
-  float sv[128];
-  float rmax_local = *rmax_state;
-  float rsum_local = *rsum_state;
-  if (k == 0) {
-    rmax_local = -CUDART_INF_F;
-    rsum_local = 0.0f;
-  }
-  float nm = rmax_local;
-
-  #pragma unroll
-  for (int cc = 0; cc < kBlockN; cc += 16) {
-    tl::tmem_ld_32dp32bNx<false>::copy<16>(S_tmem_addr + tr + cc,
-                                            (uint32_t *)&sv[cc]);
-  }
-  tl::fence_view_async_tmem_load();
-
-  if (is_causal) {
-    #pragma unroll
-    for (int i = 0; i < kBlockN; i++) {
-      bool valid = (kv_col_base + i) < seq_len &&
-                   (kv_col_base + i) <= (q_row_base + row);
-      if (!valid) {
-        sv[i] = -CUDART_INF_F;
-      }
-    }
-  } else {
-    int remaining = seq_len - kv_col_base;
-    if (remaining < kBlockN) {
-      #pragma unroll
-      for (int i = 0; i < kBlockN; i++) {
-        if (i >= remaining) {
-          sv[i] = -CUDART_INF_F;
-        }
-      }
-    }
-  }
-
-  float m0 = tl::tcgen05_fmax3(nm, sv[0], sv[1]);
-  float m1 = tl::tcgen05_fmax3(sv[2], sv[3], sv[4]);
-  float m2 = tl::tcgen05_fmax3(sv[5], sv[6], sv[7]);
-  #pragma unroll
-  for (int i = 8; i < kBlockN; i += 8) {
-    m0 = tl::tcgen05_fmax3(m0, sv[i + 0], sv[i + 1]);
-    m1 = tl::tcgen05_fmax3(m1, sv[i + 2], sv[i + 3]);
-    m2 = tl::tcgen05_fmax3(m2, sv[i + 4], sv[i + 5]);
-    nm = tl::tcgen05_fmax3(nm, sv[i + 6], sv[i + 7]);
-  }
-  nm = tl::tcgen05_fmax3(tl::tcgen05_fmax2(m0, m1), m2, nm);
-
-  float rs;
-  tl::tcgen05_softmax_rescale_update(rs, rmax_local, rsum_local, nm,
-                                     softmax_scale_log2);
-  scale_smem[row] = rs;
-  __syncwarp();
-  if ((threadIdx.x & 31) == 0) {
-    uint32_t p = static_cast<uint32_t>(
-        __cvta_generic_to_shared(const_cast<void *>(mbar_scale_ptr)));
-    asm volatile("mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];"
-                 :
-                 : "r"(p)
-                 : "memory");
-  }
-
-  float neg_max_scaled = -(rmax_local * softmax_scale_log2);
-  #pragma unroll
-  for (int cc = 0; cc < kBlockN; cc += 16) {
-    #pragma unroll
-    for (int i = 0; i < 16; i += 2) {
-      tl::tcgen05_fma_f32x2(sv[cc + i], sv[cc + i + 1],
-                            sv[cc + i], sv[cc + i + 1],
-                            softmax_scale_log2, softmax_scale_log2,
-                            neg_max_scaled, neg_max_scaled);
-    }
-  }
-
-  float psa[4] = {0.f, 0.f, 0.f, 0.f};
-  #pragma unroll
-  for (int cc = kBlockN - 16; cc >= 0; cc -= 16) {
-    #pragma unroll
-    for (int g = 8; g >= 0; g -= 8) {
-      float pval[8];
-      #pragma unroll
-      for (int i = 0; i < 8; i += 2) {
-        int elem = cc + g + i;
-        int frag = elem / kEx2FragSize;
-        int k_in_frag = elem % kEx2FragSize;
-        if (kEx2EmuFreq > 0 && frag >= kEx2EmuStartFrg &&
-            frag < (kBlockN / kEx2FragSize - 1) &&
-            (k_in_frag % kEx2EmuFreq) >= (kEx2EmuFreq - kEx2EmuRes)) {
-          tl::tcgen05_exp2_poly_2(pval[i], pval[i + 1], sv[elem],
-                                  sv[elem + 1]);
-        } else {
-          pval[i] = tl::tcgen05_exp2f_approx(sv[elem]);
-          pval[i + 1] = tl::tcgen05_exp2f_approx(sv[elem + 1]);
-        }
-        psa[i >> 1] += pval[i] + pval[i + 1];
-      }
-      tl::tcgen05_st_32x32b_x4(
-          P_tmem_addr + tr + (cc + g) / 2,
-          tl::pack_bf16_pair(pval[0], pval[1]),
-          tl::pack_bf16_pair(pval[2], pval[3]),
-          tl::pack_bf16_pair(pval[4], pval[5]),
-          tl::pack_bf16_pair(pval[6], pval[7]));
-    }
-    if (cc == 32) {
-      tl::fence_view_async_tmem_store();
-      if ((threadIdx.x & 31) == 0) {
-        uint32_t p = static_cast<uint32_t>(
-            __cvta_generic_to_shared(const_cast<void *>(mbar_p2_ptr)));
-        asm volatile("mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];"
-                     :
-                     : "r"(p)
-                     : "memory");
-      }
-    }
-  }
-  tl::fence_view_async_tmem_store();
-
-  rsum_local += (psa[0] + psa[1]) + (psa[2] + psa[3]);
-  *rmax_state = rmax_local;
-  *rsum_state = rsum_local;
-  if (k == loop_extent - 1) {
-    logsum_smem[row] = rsum_local;
-  }
-
-  if ((threadIdx.x & 31) == 0) {
-    uint32_t p = static_cast<uint32_t>(
-        __cvta_generic_to_shared(const_cast<void *>(mbar_p_ptr)));
-    asm volatile("mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];"
-                 :
-                 : "r"(p)
-                 : "memory");
-  }
-}
-
-// Avo-shaped full softmax warp loop.  Unlike tcgen05_softmax_128x128, this
-// keeps rmax/rsum in registers for the whole KV loop, matching avo's
-// softmax_warp_fn and avoiding per-iteration pointer state traffic.
-__device__ __noinline__ void
-tcgen05_softmax_warp_1sm(uint32_t S_tmem_addr, uint32_t P_tmem_addr,
-                         float *scale_smem, float *logsum_smem,
-                         void const *mbar_s_ptr,
-                         void const *mbar_scale_base_ptr,
-                         void const *mbar_p2_ptr, void const *mbar_p_ptr,
-                         int loop_extent, int tile_k_base,
-                         float softmax_scale_log2, int seq_len,
-                         int q_row_base, int is_causal,
-                         int warp_group_offset) {
-  constexpr int kBlockN = 128;
-  constexpr int kEx2EmuFreq = 10;
-  constexpr int kEx2EmuRes = 4;
-  constexpr int kEx2EmuStartFrg = 1;
-  constexpr int kEx2FragSize = 32;
-
-  auto *mb_scale = reinterpret_cast<Barrier const *>(mbar_scale_base_ptr);
-  int row = int(threadIdx.x) - warp_group_offset;
-  uint32_t tr = uint32_t((((row >> 5) & 3) * 32) << 16);
-  float rmax_local = -CUDART_INF_F;
-  float rsum_local = 0.0f;
-
-  #pragma unroll 1
-  for (int k = 0; k < loop_extent; ++k) {
-    int tk = tile_k_base + k;
-    uint32_t phase = uint32_t(tk & 1);
-    int kv_col_base = k * kBlockN;
-
-    tl::tcgen05_wait_barrier(mbar_s_ptr, phase);
-    tl::tcgen05_after_thread_sync();
-
-    float sv[128];
-    float nm = rmax_local;
-
-    #pragma unroll
-    for (int cc = 0; cc < kBlockN; cc += 16) {
-      tl::tmem_ld_32dp32bNx<false>::copy<16>(S_tmem_addr + tr + cc,
-                                              (uint32_t *)&sv[cc]);
-    }
-    tl::fence_view_async_tmem_load();
-
-    int remaining = seq_len - kv_col_base;
-    if (remaining < kBlockN) {
-      #pragma unroll
-      for (int i = 0; i < kBlockN; i++) {
-        if (i >= remaining) {
-          sv[i] = -CUDART_INF_F;
-        }
-      }
-    }
-
-    float m0 = tl::tcgen05_fmax3(nm, sv[0], sv[1]);
-    float m1 = tl::tcgen05_fmax3(sv[2], sv[3], sv[4]);
-    float m2 = tl::tcgen05_fmax3(sv[5], sv[6], sv[7]);
-    #pragma unroll
-    for (int i = 8; i < kBlockN; i += 8) {
-      m0 = tl::tcgen05_fmax3(m0, sv[i + 0], sv[i + 1]);
-      m1 = tl::tcgen05_fmax3(m1, sv[i + 2], sv[i + 3]);
-      m2 = tl::tcgen05_fmax3(m2, sv[i + 4], sv[i + 5]);
-      nm = tl::tcgen05_fmax3(nm, sv[i + 6], sv[i + 7]);
-    }
-    nm = tl::tcgen05_fmax3(tl::tcgen05_fmax2(m0, m1), m2, nm);
-
-    float rs;
-    tl::tcgen05_softmax_rescale_update(rs, rmax_local, rsum_local, nm,
-                                       softmax_scale_log2);
-    scale_smem[phase * kBlockN + row] = rs;
-    __syncwarp();
-    if ((threadIdx.x & 31) == 0) {
-      uint32_t p = static_cast<uint32_t>(
-          __cvta_generic_to_shared(const_cast<Barrier *>(&mb_scale[phase])));
-      asm volatile("mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];"
-                   :
-                   : "r"(p)
-                   : "memory");
-    }
-
-    float neg_max_scaled = -(rmax_local * softmax_scale_log2);
-    #pragma unroll
-    for (int cc = 0; cc < kBlockN; cc += 16) {
-      #pragma unroll
-      for (int i = 0; i < 16; i += 2) {
-        tl::tcgen05_fma_f32x2(sv[cc + i], sv[cc + i + 1],
-                              sv[cc + i], sv[cc + i + 1],
-                              softmax_scale_log2, softmax_scale_log2,
-                              neg_max_scaled, neg_max_scaled);
-      }
-    }
-
-    float psa[4] = {0.f, 0.f, 0.f, 0.f};
-    #pragma unroll
-    for (int cc = kBlockN - 16; cc >= 0; cc -= 16) {
-      #pragma unroll
-      for (int g = 8; g >= 0; g -= 8) {
-        bfloat16_t h[8];
-        #pragma unroll
-        for (int i = 0; i < 8; i += 2) {
-          int elem = cc + g + i;
-          float p0, p1;
-          int frag = elem / kEx2FragSize;
-          int k_in_frag = elem % kEx2FragSize;
-          if (kEx2EmuFreq > 0 && frag >= kEx2EmuStartFrg &&
-              frag < (kBlockN / kEx2FragSize - 1) &&
-              (k_in_frag % kEx2EmuFreq) >= (kEx2EmuFreq - kEx2EmuRes)) {
-            tl::tcgen05_exp2_poly_2(p0, p1, sv[elem], sv[elem + 1]);
-          } else {
-            p0 = tl::tcgen05_exp2f_approx(sv[elem]);
-            p1 = tl::tcgen05_exp2f_approx(sv[elem + 1]);
-          }
-          psa[i >> 1] += p0 + p1;
-          h[i] = bfloat16_t(p0);
-          h[i + 1] = bfloat16_t(p1);
-        }
-        tl::tcgen05_st_32x32b_x4(
-            P_tmem_addr + tr + (cc + g) / 2,
-            *reinterpret_cast<uint32_t *>(&h[0]),
-            *reinterpret_cast<uint32_t *>(&h[2]),
-            *reinterpret_cast<uint32_t *>(&h[4]),
-            *reinterpret_cast<uint32_t *>(&h[6]));
-      }
-      if (cc == 32) {
-        tl::fence_view_async_tmem_store();
-        if ((threadIdx.x & 31) == 0) {
-          uint32_t p = static_cast<uint32_t>(
-              __cvta_generic_to_shared(const_cast<void *>(mbar_p2_ptr)));
-          asm volatile("mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];"
-                       :
-                       : "r"(p)
-                       : "memory");
-        }
-      }
-    }
-    rsum_local += (psa[0] + psa[1]) + (psa[2] + psa[3]);
-    if (k == loop_extent - 1) {
-      logsum_smem[row] = rsum_local;
-    }
-
-    tl::fence_view_async_tmem_store();
-    if ((threadIdx.x & 31) == 0) {
-      uint32_t p = static_cast<uint32_t>(
-          __cvta_generic_to_shared(const_cast<void *>(mbar_p_ptr)));
-      asm volatile("mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];"
-                   :
-                   : "r"(p)
-                   : "memory");
-    }
-  }
-}
-
-// Per-warp final epilogue for FA4-style split attention.
-//
-// Correction warps (usually tid 256..383) own rows 0..127 via tid-wg_offset.
-// This helper reads one row from O TMEM, multiplies by the row inverse logsum,
-// converts to bf16, and writes into the same swizzled SMEM layout that TileLang's
-// TMA store lowering expects for a [128, 128] bf16 shared tile. It lets the
-// correction warpgroup produce the epilogue staging buffer while a separate
-// warp issues the TMA store, matching avo's role split.
-template <int HeadDim>
-__device__ __forceinline__ void
-tmem_epilogue_store_x16(uint32_t tmem_base, bfloat16_t *smem_base,
-                        float rsum, int warp_group_offset) {
-  int row = threadIdx.x - warp_group_offset;
-  uint32_t O_base = tmem_base + ((uint32_t)row << 16);
-  constexpr int kChunks = HeadDim / 16;
-  float inv_logsum;
-  if (rsum > 0.0f) {
-    asm("rcp.approx.ftz.f32 %0, %1;" : "=f"(inv_logsum) : "f"(rsum));
-  } else {
-    inv_logsum = 0.0f;
-  }
-
-  int lane = threadIdx.x & 31;
-  int warp_in_corr = (row >> 5) & 3;
-  constexpr int kEpiBlockCols = 64;
-  constexpr int kEpiBlockBytes = kEpiBlockCols * 2;
-  constexpr int kEpiBlockElems = 32 * kEpiBlockCols;
-  char *epi_base =
-      reinterpret_cast<char *>(smem_base + warp_in_corr * 32 * HeadDim);
-  char *epi_blk0 = epi_base;
-  char *epi_blk1 = epi_base + kEpiBlockElems * 2;
-  int swiz = (lane & 7) << 4;
-  int row_off = lane * kEpiBlockBytes;
-
-  #pragma unroll
-  for (int g = 0; g < kChunks; g++) {
-    float buf[16];
-    tl::tmem_ld_32dp32bNx<false>::copy<16>(O_base + g * 16,
-                                            (uint32_t *)buf);
-    tl::fence_view_async_tmem_load();
-    #pragma unroll
-    for (int i = 0; i < 16; i += 2) {
-      tl::tcgen05_fma_f32x2(buf[i], buf[i + 1], buf[i], buf[i + 1],
-                            inv_logsum, inv_logsum, 0.0f, 0.0f);
-    }
-    bfloat16_t b[16];
-    #pragma unroll
-    for (int i = 0; i < 16; i++) {
-      b[i] = bfloat16_t(buf[i]);
-    }
-
-    int d = g * 16;
-    int d_in_blk = d % kEpiBlockCols;
-    char *blk = (d < kEpiBlockCols) ? epi_blk0 : epi_blk1;
-    int col0 = d_in_blk * 2;
-    int col1 = (d_in_blk + 8) * 2;
-    *reinterpret_cast<uint4 *>(blk + row_off + (col0 ^ swiz)) =
-        *reinterpret_cast<uint4 *>(&b[0]);
-    *reinterpret_cast<uint4 *>(blk + row_off + (col1 ^ swiz)) =
-        *reinterpret_cast<uint4 *>(&b[8]);
-  }
-}
-
-template <int HeadDim>
-__device__ __forceinline__ void
-tmem_correction_x16_skip(uint32_t tmem_base, float scale,
-                         void const *mbar_pv_ptr, uint32_t pv_phase,
-                         int warp_group_offset) {
-  unsigned int needs_rescale = __ballot_sync(0xFFFFFFFFu, scale < 1.0f);
-  if (needs_rescale == 0) {
-    return;
-  }
-  uint32_t p = static_cast<uint32_t>(__cvta_generic_to_shared(
-      const_cast<void *>(mbar_pv_ptr)));
-  asm volatile(
-      "{ .reg .pred P; WAIT%=:"
-      "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P, [%0], %1, %2;"
-      "@P bra.uni DONE%=; bra.uni WAIT%=; DONE%=: }"
-      : : "r"(p), "r"(pv_phase), "r"(10000000u) : "memory");
-  tl::tcgen05_after_thread_sync();
-  tl::tmem_correction_x16<HeadDim>(tmem_base, scale, warp_group_offset);
-}
 
 __device__ __forceinline__ void
 tcgen05_mbarrier_arrive_lane0(void const *mbar_ptr) {
@@ -867,94 +416,26 @@ tcgen05_mbarrier_arrive_lane0(void const *mbar_ptr) {
   }
 }
 
-// Avo-shaped correction + epilogue-staging role for the 1SM split FA4 path.
-// This keeps the large correction loop out of the main kernel while preserving
-// the same per-warp x16 TMEM correction and 32-row epilogue staging protocol.
-__device__ __noinline__ void
-tcgen05_correction_epilogue_warp_1sm_skv(
-    uint32_t O0_tmem_addr, uint32_t O1_tmem_addr, void *Q_base_ptr,
-    float const *scale0_base, float const *scale1_base,
-    float const *logsum0_base, float const *logsum1_base,
-    void const *mbar_scale0_base, void const *mbar_scale1_base,
-    void const *mbar_pv,
-    void const *mbar_corr0, void const *mbar_corr1,
-    void const *mbar_epi0, void const *mbar_epi1,
-    int loop_extent, int tile_k_base) {
-  constexpr int kBlockMCTA = 128;
-  constexpr int kHeadDim = 128;
-  constexpr int kQStageElems = kBlockMCTA * kHeadDim;
-
-  int row = int(threadIdx.x) - 256;
-  auto *q_base = reinterpret_cast<bfloat16_t *>(Q_base_ptr);
-  auto *mb_scale0 = reinterpret_cast<Barrier const *>(mbar_scale0_base);
-  auto *mb_scale1 = reinterpret_cast<Barrier const *>(mbar_scale1_base);
-
-  #pragma unroll 1
-  for (int k = 0; k < loop_extent; ++k) {
-    int tk = tile_k_base + k;
-    uint32_t scale_idx = uint32_t(tk & 1);
-    uint32_t scale_phase = uint32_t((tk >> 1) & 1);
-
-    if (k > 0) {
-      tl::tcgen05_wait_barrier((void const *)&mb_scale0[scale_idx],
-                               scale_phase);
-      float scale = scale0_base[scale_idx * kBlockMCTA + row];
-      tl::tmem_correction_x16_skip<kHeadDim>(
-          O0_tmem_addr, scale, mbar_pv, uint32_t((tk - 1) & 1), 256);
-      tl::tcgen05_before_thread_sync();
-      tl::tcgen05_mbarrier_arrive_lane0(mbar_corr0);
-    }
-
-    if (k > 0) {
-      tl::tcgen05_wait_barrier((void const *)&mb_scale1[scale_idx],
-                               scale_phase);
-      float scale = scale1_base[scale_idx * kBlockMCTA + row];
-      tl::tmem_correction_x16_skip<kHeadDim>(
-          O1_tmem_addr, scale, mbar_pv, uint32_t((tk - 1) & 1), 256);
-      tl::tcgen05_before_thread_sync();
-      tl::tcgen05_mbarrier_arrive_lane0(mbar_corr1);
-    }
-  }
-
-  uint32_t final_phase = uint32_t((tile_k_base + loop_extent - 1) & 1);
-  tl::tcgen05_wait_barrier(mbar_pv, final_phase);
-  tl::tcgen05_after_thread_sync();
-  tl::tmem_epilogue_store_x16<kHeadDim>(O0_tmem_addr, q_base,
-                                        logsum0_base[row], 256);
-  tl::tcgen05_before_thread_sync();
-  __syncwarp();
-  tl::fence_proxy_async();
-  tl::tcgen05_mbarrier_arrive_lane0(mbar_epi0);
-
-  tl::tcgen05_after_thread_sync();
-  tl::tmem_epilogue_store_x16<kHeadDim>(O1_tmem_addr,
-                                        q_base + kQStageElems,
-                                        logsum1_base[row], 256);
-  tl::tcgen05_before_thread_sync();
-  __syncwarp();
-  tl::fence_proxy_async();
-  tl::tcgen05_mbarrier_arrive_lane0(mbar_epi1);
-}
 
 // ====================================================================
-// Avo-exact PV MMA helpers (copied from avo/kernels/fmha_2cta_raw.cuh)
+// SM100 TCGEN05 descriptor, MMA, and mbarrier helpers.
 // ====================================================================
 
-constexpr uint32_t kTcgen05Fa4SBO = 1024;
-constexpr uint32_t kTcgen05Fa4DescHi =
-    ((kTcgen05Fa4SBO >> 4) & 0x3FFF) | (1u << 14) | (2u << 29);
+constexpr uint32_t kTcgen05FastDescSBO = 1024;
+constexpr uint32_t kTcgen05FastDescHi =
+    ((kTcgen05FastDescSBO >> 4) & 0x3FFF) | (1u << 14) | (2u << 29);
 
 __device__ __forceinline__ uint64_t
 tcgen05_mk_fast_desc(uint32_t base_lo, uint32_t byte_off) {
   uint32_t lo = base_lo + (byte_off >> 4);
-  return (uint64_t(kTcgen05Fa4DescHi) << 32) | lo;
+  return (uint64_t(kTcgen05FastDescHi) << 32) | lo;
 }
 
 __device__ __forceinline__ void
 tcgen05_commit_2cta(void const *smem_mbar_ptr);
 
 // 1SM SS-MMA: C[128x128] = A[128xK] @ B[128xK]^T.
-// This is the avo instruction form used for QK, with raw descriptors.
+// Shared/shared 128x128 tcgen05 MMA with raw descriptors.
 __device__ __forceinline__ void
 tcgen05_mma_1sm_128x128(uint32_t tmem_c, uint64_t desc_a,
                          uint64_t desc_b, uint32_t accumulate) {
@@ -1055,8 +536,7 @@ tcgen05_mma_2cta_ts_256x128_bmn(uint32_t tmem_c, uint32_t tmem_a,
       tmem_a, desc_b, tmem_c, accumulate, idesc);
 }
 
-// Avo-exact commit: NO shared:: qualifier (just .b64 [%0])
-// This is different from TileLang's shared::cluster variant!
+// 1SM tcgen05 commit using the plain .b64 mbarrier address form.
 __device__ __forceinline__ void
 tcgen05_commit_1sm(void const *smem_mbar_ptr) {
   uint32_t p = static_cast<uint32_t>(__cvta_generic_to_shared(
@@ -1130,7 +610,7 @@ tcgen05_mma_1sm_ts_128x64_bmn_x2(void const *B_lo_smem_ptr,
 
   constexpr int kStride = 2048;  // bytes per 16 K-rows: 16 * 64 * 2
 
-  // D-tile 1 (HIGH, dim 64-127) FIRST — avo processes high D before low D
+  // D-tile 1 (HIGH, dim 64-127) first.
   tl::fence_proxy_async();
   #pragma unroll
   for (int j = 0; j < kBlockN / 16; j++) {
@@ -1319,389 +799,17 @@ tcgen05_arrive_expect_tx(void const *smem_mbar_ptr, uint32_t tx_bytes) {
       : : "r"(p), "r"(tx_bytes) : "memory");
 }
 
-// Avo-shaped producer warp loop for TileLang's 4D TMA tensor maps.  The caller
-// passes Q0 and KV0 SMEM bases; Q1/KV1/KV2 are addressed by fixed stage offsets
-// because the split kernel allocates them contiguously to mirror avo's sQ/sKV.
-__device__ __noinline__ void
-tcgen05_producer_warp_1sm_skv(
-    const CUtensorMap &Q_desc, const CUtensorMap &K_desc,
-    const CUtensorMap &V_desc, void *Q_base_ptr, void *KV_base_ptr,
-    void const *mbar_q0, void const *mbar_q1,
-    void const *mbar_k_base, void const *mbar_v_base,
-    void const *mbar_s1, void const *mbar_pv,
-    int loop_extent, int tile_k_base, int q_row_base,
-    int q_head, int kv_head, int batch) {
-  if (threadIdx.x % 32 != 0) return;
-
-  constexpr int kBlockMCTA = 128;
-  constexpr int kBlockN = 128;
-  constexpr int kBPerCTA = 64;
-  constexpr int kHeadDim = 128;
-  constexpr int kTileCols = 64;
-  constexpr int kKVStages = 3;
-  constexpr int kQStageElems = kBlockMCTA * kHeadDim;
-  constexpr int kKVStageElems = kBlockN * kHeadDim;
-  constexpr int kQStageBytes = 2 * kBlockMCTA * kTileCols * 2;
-  constexpr int kKVTileBytes = kBPerCTA * kTileCols * 2;
-  constexpr int kKVStageBytes = 4 * kKVTileBytes;
-
-  auto *q_base = reinterpret_cast<bfloat16_t *>(Q_base_ptr);
-  auto *kv_base = reinterpret_cast<bfloat16_t *>(KV_base_ptr);
-  auto *mb_k = reinterpret_cast<Barrier const *>(mbar_k_base);
-  auto *mb_v = reinterpret_cast<Barrier const *>(mbar_v_base);
-
-  tl::tcgen05_arrive_expect_tx(mbar_q0, kQStageBytes);
-  tl::tma_load(Q_desc, *const_cast<Barrier *>(reinterpret_cast<Barrier const *>(mbar_q0)),
-               q_base, 0, q_head, q_row_base, batch);
-  tl::tma_load(Q_desc, *const_cast<Barrier *>(reinterpret_cast<Barrier const *>(mbar_q0)),
-               q_base + kBlockMCTA * kTileCols, 64, q_head, q_row_base, batch);
-
-  tl::tcgen05_arrive_expect_tx(mbar_q1, kQStageBytes);
-  tl::tma_load(Q_desc, *const_cast<Barrier *>(reinterpret_cast<Barrier const *>(mbar_q1)),
-               q_base + kQStageElems, 0, q_head, q_row_base + kBlockMCTA,
-               batch);
-  tl::tma_load(Q_desc, *const_cast<Barrier *>(reinterpret_cast<Barrier const *>(mbar_q1)),
-               q_base + kQStageElems + kBlockMCTA * kTileCols, 64, q_head,
-               q_row_base + kBlockMCTA, batch);
-
-  #pragma unroll
-  for (int s = 0; s < kKVStages; ++s) {
-    if (s < loop_extent) {
-      int tk = tile_k_base + s;
-      int stage = tk % kKVStages;
-      auto *bar = &mb_k[stage];
-      bfloat16_t *dst = kv_base + stage * kKVStageElems;
-      int row = s * kBlockN;
-      tl::tcgen05_arrive_expect_tx((void const *)bar, kKVStageBytes);
-      #pragma unroll
-      for (int r = 0; r < 2; ++r) {
-        #pragma unroll
-        for (int t = 0; t < 2; ++t) {
-          tl::tma_load(K_desc, *const_cast<Barrier *>(bar),
-                       dst + t * kBlockN * kTileCols + r * kBPerCTA * kTileCols,
-                       t * kTileCols, kv_head, row + r * kBPerCTA, batch);
-        }
-      }
-    }
-  }
-
-  #pragma unroll 1
-  for (int k = 0; k < loop_extent; ++k) {
-    int tk = tile_k_base + k;
-    int stage = tk % kKVStages;
-    bfloat16_t *dst = kv_base + stage * kKVStageElems;
-
-    tl::tcgen05_wait_barrier(mbar_s1, uint32_t(tk & 1));
-    tl::tcgen05_arrive_expect_tx((void const *)&mb_v[stage], kKVStageBytes);
-    #pragma unroll
-    for (int r = 0; r < 2; ++r) {
-      #pragma unroll
-      for (int t = 0; t < 2; ++t) {
-        tl::tma_load(V_desc, *const_cast<Barrier *>(&mb_v[stage]),
-                     dst + r * kBlockN * kTileCols + t * kBPerCTA * kTileCols,
-                     r * kBPerCTA, kv_head, k * kBlockN + t * kBPerCTA, batch);
-      }
-    }
-
-    if (k + kKVStages < loop_extent) {
-      tl::tcgen05_wait_barrier(mbar_pv, uint32_t(tk & 1));
-      int next_k = k + kKVStages;
-      tl::tcgen05_arrive_expect_tx((void const *)&mb_k[stage], kKVStageBytes);
-      #pragma unroll
-      for (int r = 0; r < 2; ++r) {
-        #pragma unroll
-        for (int t = 0; t < 2; ++t) {
-          tl::tma_load(K_desc, *const_cast<Barrier *>(&mb_k[stage]),
-                       dst + t * kBlockN * kTileCols + r * kBPerCTA * kTileCols,
-                       t * kTileCols, kv_head, next_k * kBlockN + r * kBPerCTA,
-                       batch);
-        }
-      }
-    }
-  }
-}
-
-// Avo-shaped epilogue warp: wait for correction-staged SMEM tiles, issue the
-// two 64-column TMA stores for both Q stages, then wait for completion.  This
-// legacy helper is still available for archived variants, but the primary 1SM
-// DSL path expresses this schedule directly and only calls the chunk primitive
-// below for the raw TMA store pair.
-__device__ __noinline__ void
-tcgen05_epilogue_warp_1sm_skv(
-    const CUtensorMap &Output_desc, void const *Q_base_ptr,
-    void const *mbar_epi0, void const *mbar_epi1,
-    int tile_iter, int q_row_base, int q_head, int batch) {
-  if (threadIdx.x % 32 != 0) return;
-
-  constexpr int kBlockMCTA = 128;
-  constexpr int kHeadDim = 128;
-  constexpr int kTileCols = 64;
-  constexpr int kEpiRows = 32;
-  constexpr int kQStageElems = kBlockMCTA * kHeadDim;
-  constexpr int kEpiBlockElems = kEpiRows * kTileCols;
-  auto *q_base = reinterpret_cast<bfloat16_t const *>(Q_base_ptr);
-  uint32_t phase = uint32_t(tile_iter & 1);
-
-  tl::tcgen05_wait_barrier(mbar_epi0, phase);
-  tl::fence_proxy_async();
-  #pragma unroll
-  for (int cw = 0; cw < 4; ++cw) {
-    bfloat16_t const *epi_base = q_base + cw * kEpiRows * kHeadDim;
-    int row = q_row_base + cw * kEpiRows;
-    tl::tma_store(Output_desc, epi_base, 0, q_head, row, batch);
-    tl::tma_store(Output_desc, epi_base + kEpiBlockElems, 64, q_head, row,
-                  batch);
-  }
-  tl::tma_store_arrive();
-
-  tl::tcgen05_wait_barrier(mbar_epi1, phase);
-  tl::fence_proxy_async();
-  bfloat16_t const *q1_base = q_base + kQStageElems;
-  #pragma unroll
-  for (int cw = 0; cw < 4; ++cw) {
-    bfloat16_t const *epi_base = q1_base + cw * kEpiRows * kHeadDim;
-    int row = q_row_base + kBlockMCTA + cw * kEpiRows;
-    tl::tma_store(Output_desc, epi_base, 0, q_head, row, batch);
-    tl::tma_store(Output_desc, epi_base + kEpiBlockElems, 64, q_head, row,
-                  batch);
-  }
-  tl::tma_store_arrive();
-
-  tl::tma_store_wait<0>();
-}
-
-// Store one 32-row epilogue chunk.  The caller owns the surrounding barrier
-// waits, proxy fences, arrive groups, and final wait so the epilogue schedule
-// can be expressed in TileLang DSL while preserving raw staging-buffer offsets.
-__device__ __forceinline__ void
-tcgen05_epilogue_tma_store_32x128(const CUtensorMap &Output_desc,
-                                  void const *epi_ptr, int q_row,
-                                  int q_head, int batch) {
-  constexpr int kTileCols = 64;
-  constexpr int kEpiRows = 32;
-  constexpr int kEpiBlockElems = kEpiRows * kTileCols;
-  auto *epi_base = reinterpret_cast<bfloat16_t const *>(epi_ptr);
-  tl::tma_store(Output_desc, epi_base, 0, q_head, q_row, batch);
-  tl::tma_store(Output_desc, epi_base + kEpiBlockElems, 64, q_head, q_row,
-                batch);
-}
-
-// Avo-shaped MMA warp loop for the current 1SM split FA4 TileLang layout:
-// Q0/Q1 are contiguous [128,128] bf16 stages, and KV0/KV1/KV2 are contiguous
-// [128,128] bf16 stages reused first for K and then V.  Keeping descriptor base
-// computation and stage selection inside this single helper prevents the
-// TileLang outlined MMA role from expanding into three branch copies per stage.
-__device__ __noinline__ void
-tcgen05_mma_warp_1sm_skv_fast(
-    void const *Q_base_ptr, void const *KV_base_ptr,
-    void const *mbar_q0, void const *mbar_q1,
-    void const *mbar_k_base, void const *mbar_v_base,
-    void const *mbar_s0, void const *mbar_s1,
-    void const *mbar_p2_0, void const *mbar_p2_1,
-    void const *mbar_p0, void const *mbar_p1,
-    void const *mbar_corr0, void const *mbar_corr1,
-    void const *mbar_pv,
-    uint32_t S0_tmem_addr, uint32_t S1_tmem_addr,
-    uint32_t P0_tmem_addr, uint32_t P1_tmem_addr,
-    uint32_t O0_tmem_addr, uint32_t O1_tmem_addr,
-    int loop_extent, int tile_k_base, int tile_iter) {
-  if (threadIdx.x % 32 != 0) return;
-
-  constexpr int kBlockMCTA = 128;
-  constexpr int kBlockN = 128;
-  constexpr int kHeadDim = 128;
-  constexpr int kKVStages = 3;
-  constexpr int kQStageBytes = kBlockMCTA * kHeadDim * 2;
-  constexpr int kKVStageBytes = kBlockN * kHeadDim * 2;
-
-  auto *mb_k = reinterpret_cast<Barrier const *>(mbar_k_base);
-  auto *mb_v = reinterpret_cast<Barrier const *>(mbar_v_base);
-
-  uint32_t sQ_lo = (uint32_t)((__cvta_generic_to_shared(
-                                  const_cast<void *>(Q_base_ptr)) &
-                              0x3FFFF) >>
-                             4);
-  uint32_t sKV_lo = (uint32_t)((__cvta_generic_to_shared(
-                                   const_cast<void *>(KV_base_ptr)) &
-                               0x3FFFF) >>
-                              4);
-
-  tl::tcgen05_wait_barrier(mbar_q0, uint32_t(tile_iter & 1));
-  tl::tcgen05_wait_barrier(mbar_q1, uint32_t(tile_iter & 1));
-  tl::tcgen05_after_thread_sync();
-
-  int kv0 = tile_k_base % kKVStages;
-  int kv0_phase = (tile_k_base / kKVStages) & 1;
-  uint32_t kv0_off = uint32_t(kv0 * kKVStageBytes);
-  tl::tcgen05_wait_barrier((void const *)&mb_k[kv0], uint32_t(kv0_phase));
-  tl::tcgen05_after_thread_sync();
-  #pragma unroll
-  for (int qs = 0; qs < 2; ++qs) {
-    tl::tcgen05_mma_1sm_ss_128x128_commit_fast(
-        sQ_lo, sKV_lo, uint32_t(qs * kQStageBytes), kv0_off,
-        qs == 0 ? S0_tmem_addr : S1_tmem_addr, qs == 0 ? mbar_s0 : mbar_s1);
-  }
-
-  int O_should_accumulate = 0;
-  #pragma unroll 1
-  for (int k = 0; k < loop_extent; ++k) {
-    int tk = tile_k_base + k;
-    int kv_stage = tk % kKVStages;
-    int kv_phase = (tk / kKVStages) & 1;
-    uint32_t kv_off = uint32_t(kv_stage * kKVStageBytes);
-    uint32_t pv_phase = uint32_t(tk & 1);
-    uint32_t pv_acc = O_should_accumulate ? 1u : 0u;
-
-    #pragma unroll
-    for (int qs = 0; qs < 2; ++qs) {
-      tl::tcgen05_wait_barrier(qs == 0 ? mbar_p2_0 : mbar_p2_1,
-                               pv_phase);
-      tl::tcgen05_wait_barrier((void const *)&mb_v[kv_stage],
-                               uint32_t(kv_phase));
-      if (O_should_accumulate) {
-        tl::tcgen05_wait_barrier(qs == 0 ? mbar_corr0 : mbar_corr1,
-                                 pv_phase);
-      }
-      tl::tcgen05_after_thread_sync();
-      tl::tcgen05_wait_barrier(qs == 0 ? mbar_p0 : mbar_p1, pv_phase);
-      tl::tcgen05_after_thread_sync();
-
-      tl::tcgen05_mma_1sm_ts_128x64_bmn_x2_contig_fast(
-          sKV_lo, kv_off, qs == 0 ? P0_tmem_addr : P1_tmem_addr,
-          qs == 0 ? O0_tmem_addr : O1_tmem_addr, pv_acc);
-
-      if (qs == 1) {
-        tl::tcgen05_commit_1sm_lane0(mbar_pv);
-      }
-
-      if (k + 1 < loop_extent) {
-        int ntk = tk + 1;
-        int next_stage = ntk % kKVStages;
-        if (qs == 0) {
-          int next_phase = (ntk / kKVStages) & 1;
-          tl::tcgen05_wait_barrier((void const *)&mb_k[next_stage],
-                                   uint32_t(next_phase));
-          tl::tcgen05_after_thread_sync();
-        }
-        uint32_t next_off = uint32_t(next_stage * kKVStageBytes);
-        tl::tcgen05_mma_1sm_ss_128x128_commit_fast(
-            sQ_lo, sKV_lo, uint32_t(qs * kQStageBytes), next_off,
-            qs == 0 ? S0_tmem_addr : S1_tmem_addr,
-            qs == 0 ? mbar_s0 : mbar_s1);
-      }
-    }
-    O_should_accumulate = 1;
-  }
-}
-
-// Avo-style full MMA warp loop for the 1SM split FA4 path.  Keeping this loop
-// in a single helper prevents TileLang's outlined MMA role from expanding into
-// many stage-specific branches, which otherwise makes ptxas spill heavily.
-__device__ __noinline__ void
-tcgen05_mma_warp_1sm_skv(
-    void const *Q0_stage_ptr, void const *Q1_stage_ptr,
-    void const *KV0_stage_ptr, void const *KV1_stage_ptr,
-    void const *KV2_stage_ptr,
-    void const *mbar_q0, void const *mbar_q1,
-    void const *mbar_k0, void const *mbar_k1, void const *mbar_k2,
-    void const *mbar_v0, void const *mbar_v1, void const *mbar_v2,
-    void const *mbar_p2_0, void const *mbar_p2_1,
-    void const *mbar_p0, void const *mbar_p1,
-    void const *mbar_corr0, void const *mbar_corr1,
-    void const *mbar_pv, void const *mbar_s0, void const *mbar_s1,
-    uint32_t S0_tmem_addr, uint32_t S1_tmem_addr,
-    uint32_t P0_tmem_addr, uint32_t P1_tmem_addr,
-    uint32_t O0_tmem_addr, uint32_t O1_tmem_addr,
-    int loop_extent, int tile_k_base, int tile_corr_base, int tile_iter) {
-  if (threadIdx.x % 32 != 0) return;
-
-  void const *kv_ptrs[3] = {KV0_stage_ptr, KV1_stage_ptr, KV2_stage_ptr};
-  void const *mbar_k[3] = {mbar_k0, mbar_k1, mbar_k2};
-  void const *mbar_v[3] = {mbar_v0, mbar_v1, mbar_v2};
-
-  tl::tcgen05_wait_barrier(mbar_q0, uint32_t(tile_iter & 1));
-  tl::tcgen05_wait_barrier(mbar_q1, uint32_t(tile_iter & 1));
-  tl::tcgen05_after_thread_sync();
-
-  int first_stage = tile_k_base % 3;
-  int first_phase = (tile_k_base / 3) & 1;
-  tl::tcgen05_wait_barrier(mbar_k[first_stage], uint32_t(first_phase));
-  tl::tcgen05_after_thread_sync();
-  tl::tcgen05_mma_1sm_ss_128x128_commit_lane0(Q0_stage_ptr, kv_ptrs[first_stage],
-                                       S0_tmem_addr, mbar_s0);
-  tl::tcgen05_mma_1sm_ss_128x128_commit_lane0(Q1_stage_ptr, kv_ptrs[first_stage],
-                                       S1_tmem_addr, mbar_s1);
-
-  #pragma unroll 1
-  for (int k = 0; k < loop_extent; ++k) {
-    int tk = tile_k_base + k;
-    int stage = tk % 3;
-    int phase = (tk / 3) & 1;
-    uint32_t pv_phase = uint32_t(tk & 1);
-    uint32_t accum = (k == 0) ? 0u : 1u;
-
-    tl::tcgen05_wait_barrier(mbar_p2_0, pv_phase);
-    tl::tcgen05_wait_barrier(mbar_v[stage], uint32_t(phase));
-    if (k > 0) {
-      uint32_t corr_phase = uint32_t((tile_corr_base + k - 1) & 1);
-      tl::tcgen05_wait_barrier(mbar_corr0, corr_phase);
-      tl::tcgen05_after_thread_sync();
-    }
-    tl::tcgen05_wait_barrier(mbar_p0, pv_phase);
-    tl::tcgen05_after_thread_sync();
-
-    tl::tcgen05_mma_1sm_ts_128x64_bmn_x2_contig_lane0(kv_ptrs[stage], P0_tmem_addr,
-                                        O0_tmem_addr, accum);
-
-    if (k + 1 < loop_extent) {
-      int ntk = tk + 1;
-      int next_stage = ntk % 3;
-      int next_phase = (ntk / 3) & 1;
-      tl::tcgen05_wait_barrier(mbar_k[next_stage], uint32_t(next_phase));
-      tl::tcgen05_after_thread_sync();
-      tl::tcgen05_mma_1sm_ss_128x128_commit_lane0(Q0_stage_ptr, kv_ptrs[next_stage],
-                                           S0_tmem_addr, mbar_s0);
-    }
-
-    tl::tcgen05_wait_barrier(mbar_p2_1, pv_phase);
-    tl::tcgen05_wait_barrier(mbar_v[stage], uint32_t(phase));
-    if (k > 0) {
-      uint32_t corr_phase = uint32_t((tile_corr_base + k - 1) & 1);
-      tl::tcgen05_wait_barrier(mbar_corr1, corr_phase);
-      tl::tcgen05_after_thread_sync();
-    }
-    tl::tcgen05_wait_barrier(mbar_p1, pv_phase);
-    tl::tcgen05_after_thread_sync();
-    tl::tcgen05_mma_1sm_ts_128x64_bmn_x2_contig_lane0(kv_ptrs[stage], P1_tmem_addr,
-                                        O1_tmem_addr, accum);
-    tl::tcgen05_commit_1sm_lane0(mbar_pv);
-
-    if (k + 1 < loop_extent) {
-      int ntk = tk + 1;
-      int next_stage = ntk % 3;
-      tl::tcgen05_mma_1sm_ss_128x128_commit_lane0(Q1_stage_ptr, kv_ptrs[next_stage],
-                                           S1_tmem_addr, mbar_s1);
-    }
-  }
-}
-
-// 3-stage K/V reuse helpers for the current TileLang 1SM split layout.
-// This keeps the existing split-path shared memory allocation but uses three
-// logical K/V stages:
-//   stage0 -> K0 buffer, stage1 -> K1 buffer, stage2 -> V0_lo/V0_hi area.
-// The positive A/B result is that this recovers part of avo's long-sequence
-// pipeline benefit without requiring a wholesale source replacement.
+// Generic three-way selectors for hand-scheduled staged pipelines.
 __device__ __forceinline__ bfloat16_t *
-tcgen05_reuse3_stage_ptr(void *k0_ptr, void *k1_ptr, void *stage2_ptr,
-                         int stage) {
-  if (stage == 0) return reinterpret_cast<bfloat16_t *>(k0_ptr);
-  if (stage == 1) return reinterpret_cast<bfloat16_t *>(k1_ptr);
-  return reinterpret_cast<bfloat16_t *>(stage2_ptr);
+select_stage_ptr(void *ptr0, void *ptr1, void *ptr2, int stage) {
+  if (stage == 0) return reinterpret_cast<bfloat16_t *>(ptr0);
+  if (stage == 1) return reinterpret_cast<bfloat16_t *>(ptr1);
+  return reinterpret_cast<bfloat16_t *>(ptr2);
 }
 
 __device__ __forceinline__ Barrier &
-tcgen05_reuse3_barrier_ref(Barrier &mbar0, Barrier &mbar1, Barrier &mbar2,
-                           int stage) {
+select_barrier_ref(Barrier &mbar0, Barrier &mbar1, Barrier &mbar2,
+                   int stage) {
   if (stage == 0) return mbar0;
   if (stage == 1) return mbar1;
   return mbar2;
@@ -1712,207 +820,8 @@ tcgen05_smem_ptr_add_bf16(void *ptr, int offset) {
   return reinterpret_cast<bfloat16_t *>(ptr) + offset;
 }
 
-__device__ __forceinline__ void const *
-tcgen05_reuse3_kbar(void const *mbar_k0, void const *mbar_k1,
-                    void const *mbar_k2, int stage) {
-  if (stage == 0) return mbar_k0;
-  if (stage == 1) return mbar_k1;
-  return mbar_k2;
-}
-
-__device__ __forceinline__ void const *
-tcgen05_reuse3_vbar(void const *mbar_v0, void const *mbar_v1,
-                    void const *mbar_v2, int stage) {
-  if (stage == 0) return mbar_v0;
-  if (stage == 1) return mbar_v1;
-  return mbar_v2;
-}
-
-__device__ __forceinline__ void
-tcgen05_tma_load_128x128(const CUtensorMap &desc, void *stage_ptr,
-                         Barrier &bar, int k, int kv_head,
-                         int batch) {
-  constexpr int kBlockN = 128;
-  constexpr int kTileCols = 64;
-  constexpr int kBytes = kBlockN * 128 * 2;
-  auto *dst = reinterpret_cast<bfloat16_t *>(stage_ptr);
-  tl::tcgen05_arrive_expect_tx((void const *)&bar, kBytes);
-  tl::tma_load(desc, bar, dst, 0, kv_head, k * kBlockN, batch);
-  tl::tma_load(desc, bar, dst + kBlockN * kTileCols, 64, kv_head,
-               k * kBlockN, batch);
-}
-
-__device__ __forceinline__ void
-tcgen05_tma_load_128x128(const CUtensorMap &desc, void *stage_ptr,
-                         void const *mbar_ptr, int k, int kv_head,
-                         int batch) {
-  auto &bar = *reinterpret_cast<Barrier *>(const_cast<void *>(mbar_ptr));
-  tl::tcgen05_tma_load_128x128(desc, stage_ptr, bar, k, kv_head, batch);
-}
-
-__device__ __noinline__ void
-tcgen05_producer_warp_1sm_reuse3(
-    const CUtensorMap &Q_desc, const CUtensorMap &K_desc,
-    const CUtensorMap &V_desc, void *Q0_stage_ptr, void *Q1_stage_ptr,
-    void *K0_stage_ptr, void *K1_stage_ptr, void *KV2_stage_ptr,
-    void const *mbar_q0, void const *mbar_q1, void const *mbar_k0,
-    void const *mbar_k1, void const *mbar_k2, void const *mbar_v0,
-    void const *mbar_v1, void const *mbar_v2, void const *mbar_s1,
-    void const *mbar_pv, int loop_extent, int q_row_base, int q_head,
-    int kv_head, int batch) {
-  if (threadIdx.x % 32 != 0) return;
-
-  constexpr int kBlockM = 128;
-  constexpr int kBlockN = 128;
-  constexpr int kTileCols = 64;
-  constexpr int kQBytes = kBlockM * 128 * 2;
-
-  auto *q0 = reinterpret_cast<bfloat16_t *>(Q0_stage_ptr);
-  auto *q1 = reinterpret_cast<bfloat16_t *>(Q1_stage_ptr);
-
-  auto *mb_q0 = reinterpret_cast<Barrier *>(const_cast<void *>(mbar_q0));
-  auto *mb_q1 = reinterpret_cast<Barrier *>(const_cast<void *>(mbar_q1));
-  tl::tcgen05_arrive_expect_tx(mbar_q0, kQBytes);
-  tl::tma_load(Q_desc, *mb_q0, q0, 0, q_head, q_row_base, batch);
-  tl::tma_load(Q_desc, *mb_q0, q0 + kBlockM * kTileCols, 64, q_head,
-               q_row_base, batch);
-
-  tl::tcgen05_arrive_expect_tx(mbar_q1, kQBytes);
-  tl::tma_load(Q_desc, *mb_q1, q1, 0, q_head, q_row_base + kBlockM, batch);
-  tl::tma_load(Q_desc, *mb_q1, q1 + kBlockM * kTileCols, 64, q_head,
-               q_row_base + kBlockM, batch);
-
-  if (loop_extent > 0) {
-    tl::tcgen05_tma_load_128x128(
-        K_desc, tl::tcgen05_reuse3_stage_ptr(K0_stage_ptr, K1_stage_ptr,
-                                             KV2_stage_ptr, 0),
-        tl::tcgen05_reuse3_kbar(mbar_k0, mbar_k1, mbar_k2, 0), 0, kv_head,
-        batch);
-  }
-  if (loop_extent > 1) {
-    tl::tcgen05_tma_load_128x128(
-        K_desc, tl::tcgen05_reuse3_stage_ptr(K0_stage_ptr, K1_stage_ptr,
-                                             KV2_stage_ptr, 1),
-        tl::tcgen05_reuse3_kbar(mbar_k0, mbar_k1, mbar_k2, 1), 1, kv_head,
-        batch);
-  }
-  if (loop_extent > 2) {
-    tl::tcgen05_tma_load_128x128(
-        K_desc, tl::tcgen05_reuse3_stage_ptr(K0_stage_ptr, K1_stage_ptr,
-                                             KV2_stage_ptr, 2),
-        tl::tcgen05_reuse3_kbar(mbar_k0, mbar_k1, mbar_k2, 2), 2, kv_head,
-        batch);
-  }
-
-  #pragma unroll 1
-  for (int k = 0; k < loop_extent; ++k) {
-    tl::tcgen05_wait_barrier(mbar_s1, uint32_t(k & 1));
-    tl::tcgen05_after_thread_sync();
-    int stage = k % 3;
-    tl::tcgen05_tma_load_128x128(
-        V_desc, tl::tcgen05_reuse3_stage_ptr(K0_stage_ptr, K1_stage_ptr,
-                                             KV2_stage_ptr, stage),
-        tl::tcgen05_reuse3_kbar(mbar_v0, mbar_v1, mbar_v2, stage), k,
-        kv_head, batch);
-    if (k + 3 < loop_extent) {
-      tl::tcgen05_wait_barrier(mbar_pv, uint32_t(k & 1));
-      tl::tcgen05_after_thread_sync();
-      int next_k = k + 3;
-      int next_stage = next_k % 3;
-      tl::tcgen05_tma_load_128x128(
-          K_desc, tl::tcgen05_reuse3_stage_ptr(K0_stage_ptr, K1_stage_ptr,
-                                               KV2_stage_ptr, next_stage),
-          tl::tcgen05_reuse3_kbar(mbar_k0, mbar_k1, mbar_k2, next_stage),
-          next_k, kv_head, batch);
-    }
-  }
-}
-
-__device__ __noinline__ void
-tcgen05_mma_warp_1sm_reuse3(
-    void const *Q0_stage_ptr, void const *Q1_stage_ptr,
-    void *K0_stage_ptr, void *K1_stage_ptr, void *KV2_stage_ptr,
-    void const *mbar_q0, void const *mbar_q1, void const *mbar_k0,
-    void const *mbar_k1, void const *mbar_k2, void const *mbar_v0,
-    void const *mbar_v1, void const *mbar_v2, void const *mbar_s0,
-    void const *mbar_s1, void const *mbar_p0, void const *mbar_p1,
-    void const *mbar_p2_0, void const *mbar_p2_1,
-    void const *mbar_corr0, void const *mbar_corr1, void const *mbar_pv,
-    uint32_t S0_tmem_addr, uint32_t S1_tmem_addr, uint32_t P0_tmem_addr,
-    uint32_t P1_tmem_addr, uint32_t O0_tmem_addr, uint32_t O1_tmem_addr,
-    int loop_extent) {
-  if (threadIdx.x % 32 != 0) return;
-
-  tl::tcgen05_wait_barrier(mbar_q0, 0);
-  tl::tcgen05_wait_barrier(mbar_q1, 0);
-  tl::tcgen05_after_thread_sync();
-
-  if (loop_extent <= 0) return;
-  {
-    void const *kbar = tl::tcgen05_reuse3_kbar(mbar_k0, mbar_k1, mbar_k2, 0);
-    tl::tcgen05_wait_barrier(kbar, 0);
-    tl::tcgen05_after_thread_sync();
-    auto *kptr =
-        tl::tcgen05_reuse3_stage_ptr(K0_stage_ptr, K1_stage_ptr, KV2_stage_ptr, 0);
-    tl::tcgen05_mma_1sm_ss_128x128_commit_lane0(Q0_stage_ptr, kptr, S0_tmem_addr,
-                                         mbar_s0);
-    tl::tcgen05_mma_1sm_ss_128x128_commit_lane0(Q1_stage_ptr, kptr, S1_tmem_addr,
-                                         mbar_s1);
-  }
-
-  #pragma unroll 1
-  for (int k = 0; k < loop_extent; ++k) {
-    int stage = k % 3;
-    int stage_phase = (k / 3) & 1;
-    uint32_t pv_phase = uint32_t(k & 1);
-    uint32_t accum = (k == 0) ? 0u : 1u;
-
-    tl::tcgen05_wait_barrier(mbar_p2_0, pv_phase);
-    void const *vbar =
-        tl::tcgen05_reuse3_vbar(mbar_v0, mbar_v1, mbar_v2, stage);
-    tl::tcgen05_wait_barrier(vbar, uint32_t(stage_phase));
-    if (k > 0) {
-      tl::tcgen05_wait_barrier(mbar_corr0, uint32_t((k - 1) & 1));
-    }
-    tl::tcgen05_wait_barrier(mbar_p0, pv_phase);
-    tl::tcgen05_after_thread_sync();
-    auto *vptr = tl::tcgen05_reuse3_stage_ptr(K0_stage_ptr, K1_stage_ptr,
-                                              KV2_stage_ptr, stage);
-    tl::tcgen05_mma_1sm_ts_128x64_bmn_x2(vptr, vptr + 128 * 64, P0_tmem_addr,
-                                  O0_tmem_addr, accum);
-
-    tl::tcgen05_wait_barrier(mbar_p2_1, pv_phase);
-    if (k > 0) {
-      tl::tcgen05_wait_barrier(mbar_corr1, uint32_t((k - 1) & 1));
-    }
-    tl::tcgen05_wait_barrier(mbar_p1, pv_phase);
-    tl::tcgen05_after_thread_sync();
-    tl::tcgen05_mma_1sm_ts_128x64_bmn_x2(vptr, vptr + 128 * 64, P1_tmem_addr,
-                                  O1_tmem_addr, accum);
-    tl::tcgen05_commit_1sm(mbar_pv);
-
-    if (k + 1 < loop_extent) {
-      int nk = k + 1;
-      int nstage = nk % 3;
-      int nphase = (nk / 3) & 1;
-      void const *kbar =
-          tl::tcgen05_reuse3_kbar(mbar_k0, mbar_k1, mbar_k2, nstage);
-      tl::tcgen05_wait_barrier(kbar, uint32_t(nphase));
-      tl::tcgen05_after_thread_sync();
-      auto *kptr = tl::tcgen05_reuse3_stage_ptr(
-          K0_stage_ptr, K1_stage_ptr, KV2_stage_ptr, nstage);
-      tl::tcgen05_mma_1sm_ss_128x128_commit_lane0(Q0_stage_ptr, kptr, S0_tmem_addr,
-                                           mbar_s0);
-      tl::tcgen05_mma_1sm_ss_128x128_commit_lane0(Q1_stage_ptr, kptr, S1_tmem_addr,
-                                           mbar_s1);
-    }
-  }
-}
-
 // ====================================================================
-// Avo-shaped 2CTA FA4 helpers. These are the performance path for
-// attention_kernel.cu parity: 512 threads, cluster_dims=2, cta_group::2 MMA,
-// separate K/V SMEM, and four-stage K/V pipeline.
+// SM100 2CTA cluster TMA helpers.
 // ====================================================================
 
 enum class CacheHintSm100 : uint64_t {
@@ -1958,7 +867,7 @@ TL_DEVICE void tma_load_2sm(const CUtensorMap &descriptor,
                             int32_t const &crd4);
 
 __device__ __forceinline__ void
-tma_load_2sm_avo(const CUtensorMap *descriptor, void const *const smem_ptr,
+tma_load_2sm_raw(const CUtensorMap *descriptor, void const *const smem_ptr,
                  void const *mbar_ptr, int32_t const &crd0,
                  int32_t const &crd1) {
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(descriptor);
@@ -1977,7 +886,7 @@ tma_load_2sm_avo(const CUtensorMap *descriptor, void const *const smem_ptr,
 }
 
 __device__ __forceinline__ void
-tma_store_2d_avo(const CUtensorMap *descriptor, void const *const smem_ptr,
+tma_store_2d_raw(const CUtensorMap *descriptor, void const *const smem_ptr,
                  int32_t const &crd0, int32_t const &crd1) {
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(descriptor);
   uint32_t smem_int_ptr =

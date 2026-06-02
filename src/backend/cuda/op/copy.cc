@@ -819,9 +819,14 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
 
   bool have_succeeded = false;
   Stmt body;
+  bool use_x16 = op.annotations.count("use_x16") &&
+                 Downcast<Bool>(op.annotations.Get("use_x16").value())->value;
 
   auto try_tcgen05_instruction = [&](Tcgen05Meta meta) {
     if (have_succeeded) {
+      return;
+    }
+    if (use_x16 && meta.width != 1) {
       return;
     }
     if (tmem_phy_row_min != 0 || tmem_phy_row_max != 127) {
@@ -863,9 +868,11 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
           num_useful_threads == WARPGROUP_SIZE
               ? PrimExpr(0)
               : relative_wg_idx * (effective_chunks * meta.width);
+      PrimExpr relative_warp_idx =
+          FloorMod(FloorDiv(Sub(T.thread_var, T.thread_bounds->min), WARP_SIZE),
+                   WARPGROUP_SIZE / WARP_SIZE);
+      PrimExpr row_offset = relative_warp_idx * WARP_SIZE;
       have_succeeded = true;
-      bool use_x16 = op.annotations.count("use_x16") &&
-                     Downcast<Bool>(op.annotations.Get("use_x16").value())->value;
       Array<PrimExpr> args;
       Stmt call;
       if (is_ld) {
@@ -875,9 +882,12 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
         args.push_back(
             BufferLoad(tmem_buf, {(int)logical_row_min, (int)logical_col_min}));
         args.push_back(col_offset);
-        args.push_back(reg_buf.access_ptr(/*access_mask=*/2, DataType::Handle(),
-                                          /*content_lanes=*/1, /*offset=*/0,
-                                          PrimExpr(tmem_phy_col_extent)));
+        if (use_x16) {
+          args.push_back(row_offset);
+        }
+        args.push_back(reg_buf.access_ptr(
+            /*access_mask=*/2, DataType::Handle(), /*content_lanes=*/1,
+            /*offset=*/0, PrimExpr(tmem_phy_col_extent)));
         call = Evaluate(Call(DataType::Handle(),
                              use_x16 ? tcgen05_ld_x16() : tcgen05_ld(), args));
       } else {
@@ -887,9 +897,12 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
         args.push_back(
             BufferLoad(tmem_buf, {(int)logical_row_min, (int)logical_col_min}));
         args.push_back(col_offset);
-        args.push_back(reg_buf.access_ptr(/*access_mask=*/1, DataType::Handle(),
-                                          /*content_lanes=*/1, /*offset=*/0,
-                                          PrimExpr(tmem_phy_col_extent)));
+        if (use_x16) {
+          args.push_back(row_offset);
+        }
+        args.push_back(reg_buf.access_ptr(
+            /*access_mask=*/1, DataType::Handle(), /*content_lanes=*/1,
+            /*offset=*/0, PrimExpr(tmem_phy_col_extent)));
         call = Evaluate(Call(DataType::Handle(),
                              use_x16 ? tcgen05_st_x16() : tcgen05_st(), args));
       }

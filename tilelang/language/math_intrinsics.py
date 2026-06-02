@@ -432,7 +432,8 @@ def exp2_poly(x: PrimExpr) -> PrimExpr:
 def exp2_approx(x: PrimExpr) -> PrimExpr:
     """Approximate base-2 exponent using SM100 `ex2.approx.ftz.f32`.
 
-    This matches the FA4/avo softmax path more closely than CUDA's `exp2f`.
+    This exposes the hardware approximate exponent path instead of CUDA's
+    libdevice `exp2f`.
     """
     x = tir.convert(x)
     return tir.call_pure_extern(x.dtype, "tl::tcgen05_exp2f_approx", x)

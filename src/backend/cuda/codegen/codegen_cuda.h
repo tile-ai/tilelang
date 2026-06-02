@@ -154,7 +154,7 @@ private:
   const std::string mbarrier_name_ = "mbarrier";
   // The type name of the mbarrier array
   const std::string mbarrier_dtype_ = "Barrier";
-  // Buffered TMEM allocations for sorted emission (avo layout parity).
+  // Buffered TMEM allocations for deterministic sorted emission.
   // Each entry: {sort_key (buffer arg text), full call string}.
   std::vector<std::pair<std::string, std::string>> pending_tmem_allocs_;
   struct CompactSharedStateInfo {

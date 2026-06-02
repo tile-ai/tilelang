@@ -37,6 +37,147 @@ ATTENTION_1SM_EXTERN_SOURCE = r"""
 namespace tl {
 
 __device__ __forceinline__ void
+attention_1sm_epilogue_store_x16_d128(uint32_t tmem_base,
+                                      bfloat16_t *smem_base, float rsum,
+                                      int warp_group_offset) {
+  int row = threadIdx.x - warp_group_offset;
+  uint32_t O_base = tmem_base + ((uint32_t)row << 16);
+  float inv_logsum;
+  if (rsum > 0.0f) {
+    asm("rcp.approx.ftz.f32 %0, %1;" : "=f"(inv_logsum) : "f"(rsum));
+  } else {
+    inv_logsum = 0.0f;
+  }
+
+  int lane = threadIdx.x & 31;
+  int warp_in_corr = (row >> 5) & 3;
+  constexpr int kHeadDim = 128;
+  constexpr int kChunks = kHeadDim / 16;
+  constexpr int kEpiBlockCols = 64;
+  constexpr int kEpiBlockBytes = kEpiBlockCols * 2;
+  constexpr int kEpiBlockElems = 32 * kEpiBlockCols;
+  char *epi_base =
+      reinterpret_cast<char *>(smem_base + warp_in_corr * 32 * kHeadDim);
+  char *epi_blk0 = epi_base;
+  char *epi_blk1 = epi_base + kEpiBlockElems * 2;
+  int swiz = (lane & 7) << 4;
+  int row_off = lane * kEpiBlockBytes;
+
+  #pragma unroll
+  for (int g = 0; g < kChunks; g++) {
+    float buf[16];
+    tl::tmem_ld_32dp32bNx<false>::copy<16>(O_base + g * 16,
+                                            (uint32_t *)buf);
+    tl::fence_view_async_tmem_load();
+    #pragma unroll
+    for (int i = 0; i < 16; i += 2) {
+      tl::tcgen05_fma_f32x2(buf[i], buf[i + 1], buf[i], buf[i + 1],
+                            inv_logsum, inv_logsum, 0.0f, 0.0f);
+    }
+    bfloat16_t b[16];
+    #pragma unroll
+    for (int i = 0; i < 16; i++) {
+      b[i] = bfloat16_t(buf[i]);
+    }
+
+    int d = g * 16;
+    int d_in_blk = d % kEpiBlockCols;
+    char *blk = (d < kEpiBlockCols) ? epi_blk0 : epi_blk1;
+    int col0 = d_in_blk * 2;
+    int col1 = (d_in_blk + 8) * 2;
+    *reinterpret_cast<uint4 *>(blk + row_off + (col0 ^ swiz)) =
+        *reinterpret_cast<uint4 *>(&b[0]);
+    *reinterpret_cast<uint4 *>(blk + row_off + (col1 ^ swiz)) =
+        *reinterpret_cast<uint4 *>(&b[8]);
+  }
+}
+
+__device__ __forceinline__ void
+attention_1sm_epilogue_tma_store_32x128(const CUtensorMap &Output_desc,
+                                        void const *epi_ptr, int q_row,
+                                        int q_head, int batch) {
+  constexpr int kTileCols = 64;
+  constexpr int kEpiRows = 32;
+  constexpr int kEpiBlockElems = kEpiRows * kTileCols;
+  auto *epi_base = reinterpret_cast<bfloat16_t const *>(epi_ptr);
+  tl::tma_store(Output_desc, epi_base, 0, q_head, q_row, batch);
+  tl::tma_store(Output_desc, epi_base + kEpiBlockElems, 64, q_head, q_row,
+                batch);
+}
+
+__device__ __forceinline__ void
+attention_1sm_tmem_correction_x16_d128(uint32_t tmem_base, float scale,
+                                       int warp_group_offset) {
+  int warp_in_group = ((threadIdx.x - warp_group_offset) / 32) & 3;
+  uint32_t O_base = tmem_base + (uint32_t(warp_in_group * 32) << 16);
+  constexpr int kChunks = 128 / 16;
+  float buf[2][16];
+  int cur = 0;
+
+  tl::tmem_ld_32dp32bNx<false>::copy<16>(O_base, (uint32_t *)buf[0]);
+  #pragma unroll
+  for (int g = 0; g < kChunks; g++) {
+    tl::fence_view_async_tmem_load();
+    int nxt = cur ^ 1;
+    if (g + 1 < kChunks) {
+      tl::tmem_ld_32dp32bNx<false>::copy<16>(O_base + (g + 1) * 16,
+                                              (uint32_t *)buf[nxt]);
+    }
+    #pragma unroll
+    for (int i = 0; i < 16; i += 2) {
+      float a0 = buf[cur][i] * scale;
+      float a1 = buf[cur][i + 1] * scale;
+      buf[cur][i] = a0;
+      buf[cur][i + 1] = a1;
+    }
+    tl::tmem_st_32dp32bNx<false>::copy<16>(O_base + g * 16,
+                                            (uint32_t const *)buf[cur]);
+    cur = nxt;
+  }
+  tl::fence_view_async_tmem_store();
+}
+
+__device__ __forceinline__ void
+attention_1sm_tmem_correction_x16_skip_d128(uint32_t tmem_base, float scale,
+                                            void const *mbar_pv_ptr,
+                                            uint32_t pv_phase,
+                                            int warp_group_offset) {
+  unsigned int needs_rescale = __ballot_sync(0xFFFFFFFFu, scale < 1.0f);
+  if (needs_rescale == 0) {
+    return;
+  }
+  uint32_t p = static_cast<uint32_t>(__cvta_generic_to_shared(
+      const_cast<void *>(mbar_pv_ptr)));
+  asm volatile(
+      "{ .reg .pred P; WAIT%=:"
+      "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P, [%0], %1, %2;"
+      "@P bra.uni DONE%=; bra.uni WAIT%=; DONE%=: }"
+      : : "r"(p), "r"(pv_phase), "r"(10000000u) : "memory");
+  tl::tcgen05_after_thread_sync();
+  tl::attention_1sm_tmem_correction_x16_d128(tmem_base, scale,
+                                             warp_group_offset);
+}
+
+__device__ __forceinline__ void
+attention_1sm_softmax_rescale_update(float &scale_out, float &rmax_local,
+                                     float &rsum_local, float nm,
+                                     float softmax_scale_log2) {
+  float rs_diff = (rmax_local - nm) * softmax_scale_log2;
+  float rs_exp = tl::tcgen05_exp2f_approx(rs_diff);
+  float rs;
+  asm("{                                                  \n"
+      ".reg .pred p_skip;                                 \n"
+      "setp.ge.ftz.f32 p_skip, %2, 0fC1800000;            \n"
+      "selp.f32 %0, 0f3F800000, %3, p_skip;               \n"
+      "selp.f32 %1, %1, %4, p_skip;                       \n"
+      "}"
+      : "=f"(rs), "+f"(rmax_local)
+      : "f"(rs_diff), "f"(rs_exp), "f"(nm));
+  rsum_local *= rs;
+  scale_out = rs;
+}
+
+__device__ __forceinline__ void
 tcgen05_softmax_pack_4(uint32_t &h0, uint32_t &h1, float const *sv,
                        float &psa0, float &psa1, int elem_base) {
   constexpr int kBlockN = 128;
@@ -287,7 +428,15 @@ def attention_kernel_1sm(
                 nm = T.max3(nm, sv[i + 6], sv[i + 7])
             nm = T.max3(T.fmax2_ftz(m0, m1), m2, nm)
 
-            T.tcgen05_softmax_rescale_update(rs, rmax_local, rsum_local, nm, scale)
+            T.call_extern(
+                "void",
+                "tl::attention_1sm_softmax_rescale_update",
+                rs,
+                rmax_local,
+                rsum_local,
+                nm,
+                scale,
+            )
             scores_scale_shared[phase, row] = rs
             T.sync_warp()
             T.mbarrier_arrive(T.mbarrier_at(mbar_scale, phase), lane0=True)
@@ -556,13 +705,13 @@ def attention_kernel_1sm(
                         for k_prefetch in T.unroll(3):
                             if k_prefetch < loop_range:
                                 prefetch_stage = k_prefetch % 3
-                                stage_ptr = T.tcgen05_reuse3_stage_ptr(
+                                stage_ptr = T.select_stage_ptr(
                                     k_stage0,
                                     k_stage1,
                                     kv_stage2,
                                     prefetch_stage,
                                 )
-                                mbar = T.tcgen05_reuse3_barrier_ref(
+                                mbar = T.select_barrier_ref(
                                     mbar_k_load[0],
                                     mbar_k_load[1],
                                     mbar_v_hi_load[0],
@@ -597,13 +746,13 @@ def attention_kernel_1sm(
                             T.tcgen05_wait_barrier(mbar_s1, k_prod & 1)
                             T.tcgen05_after_thread_sync()
                             prod_stage = k_prod % 3
-                            v_stage_ptr = T.tcgen05_reuse3_stage_ptr(
+                            v_stage_ptr = T.select_stage_ptr(
                                 k_stage0,
                                 k_stage1,
                                 kv_stage2,
                                 prod_stage,
                             )
-                            v_mbar = T.tcgen05_reuse3_barrier_ref(
+                            v_mbar = T.select_barrier_ref(
                                 mbar_v_lo_load[0],
                                 mbar_v_lo_load[1],
                                 mbar_v_hi_load[1],
@@ -638,13 +787,13 @@ def attention_kernel_1sm(
                                 T.tcgen05_after_thread_sync()
                                 next_k = k_prod + 3
                                 next_stage = next_k % 3
-                                next_stage_ptr = T.tcgen05_reuse3_stage_ptr(
+                                next_stage_ptr = T.select_stage_ptr(
                                     k_stage0,
                                     k_stage1,
                                     kv_stage2,
                                     next_stage,
                                 )
-                                next_mbar = T.tcgen05_reuse3_barrier_ref(
+                                next_mbar = T.select_barrier_ref(
                                     mbar_k_load[0],
                                     mbar_k_load[1],
                                     mbar_v_hi_load[0],
@@ -715,7 +864,7 @@ def attention_kernel_1sm(
                             accum = T.Select(k_mma == 0, T.uint32(0), T.uint32(1))
                             T.tcgen05_wait_barrier(mbar_p2_0, pv_phase)
                             T.tcgen05_wait_barrier_ref(
-                                T.tcgen05_reuse3_barrier_ref(
+                                T.select_barrier_ref(
                                     mbar_v_lo_load[0],
                                     mbar_v_lo_load[1],
                                     mbar_v_hi_load[1],
@@ -727,7 +876,7 @@ def attention_kernel_1sm(
                                 T.tcgen05_wait_barrier(mbar_corr0, corr_phase)
                             T.tcgen05_wait_barrier(mbar_p0, pv_phase)
                             T.tcgen05_after_thread_sync()
-                            vptr = T.tcgen05_reuse3_stage_ptr(k0_ptr, k1_ptr, kv2_ptr, stage)
+                            vptr = T.select_stage_ptr(k0_ptr, k1_ptr, kv2_ptr, stage)
                             pv_mma_128x64_dsl(
                                 vptr,
                                 P0_tmem[0, 0],
@@ -752,7 +901,7 @@ def attention_kernel_1sm(
                                 next_stage = (k_mma + 1) % 3
                                 next_phase = ((k_mma + 1) // 3) & 1
                                 T.tcgen05_wait_barrier_ref(
-                                    T.tcgen05_reuse3_barrier_ref(
+                                    T.select_barrier_ref(
                                         mbar_k_load[0],
                                         mbar_k_load[1],
                                         mbar_v_hi_load[0],
@@ -761,7 +910,7 @@ def attention_kernel_1sm(
                                     next_phase,
                                 )
                                 T.tcgen05_after_thread_sync()
-                                kptr = T.tcgen05_reuse3_stage_ptr(
+                                kptr = T.select_stage_ptr(
                                     k0_ptr,
                                     k1_ptr,
                                     kv2_ptr,
@@ -795,13 +944,14 @@ def attention_kernel_1sm(
                             T.mbarrier_at(mbar_scale0, scale_idx),
                             scale_phase,
                         )
-                        T.tcgen05_correction_x16(
+                        T.call_extern(
+                            "void",
+                            "tl::attention_1sm_tmem_correction_x16_skip_d128",
                             O0_tmem[0, 0],
                             scores_scale0_shared[scale_idx, row_corr],
-                            mbar_pv=mbar_pv,
-                            pv_phase=pv_phase,
-                            warp_group_offset=256,
-                            head_dim=dim,
+                            T.address_of(mbar_pv[0]),
+                            pv_phase,
+                            256,
                         )
                         T.tcgen05_before_thread_sync()
                         T.mbarrier_arrive(mbar_corr0, lane0=True)
@@ -810,13 +960,14 @@ def attention_kernel_1sm(
                             T.mbarrier_at(mbar_scale1, scale_idx),
                             scale_phase,
                         )
-                        T.tcgen05_correction_x16(
+                        T.call_extern(
+                            "void",
+                            "tl::attention_1sm_tmem_correction_x16_skip_d128",
                             O1_tmem[0, 0],
                             scores_scale1_shared[scale_idx, row_corr],
-                            mbar_pv=mbar_pv,
-                            pv_phase=pv_phase,
-                            warp_group_offset=256,
-                            head_dim=dim,
+                            T.address_of(mbar_pv[0]),
+                            pv_phase,
+                            256,
                         )
                         T.tcgen05_before_thread_sync()
                         T.mbarrier_arrive(mbar_corr1, lane0=True)
@@ -824,12 +975,13 @@ def attention_kernel_1sm(
                 final_phase = (loop_range - 1) & 1
                 T.mbarrier_wait_parity(mbar_pv, final_phase)
                 T.tcgen05_after_thread_sync()
-                T.tcgen05_epilogue_store_x16(
+                T.call_extern(
+                    "void",
+                    "tl::attention_1sm_epilogue_store_x16_d128",
                     O0_tmem[0, 0],
                     T.access_ptr(O0_shared, "w"),
                     logsum0_shared[row_corr],
-                    warp_group_offset=256,
-                    head_dim=dim,
+                    256,
                 )
                 T.tcgen05_before_thread_sync()
                 T.sync_warp()
@@ -837,12 +989,13 @@ def attention_kernel_1sm(
                 T.mbarrier_arrive(mbar_epi0, lane0=True)
 
                 T.tcgen05_after_thread_sync()
-                T.tcgen05_epilogue_store_x16(
+                T.call_extern(
+                    "void",
+                    "tl::attention_1sm_epilogue_store_x16_d128",
                     O1_tmem[0, 0],
                     T.access_ptr(O0_shared, "w", offset=kq2_block_M * dim),
                     logsum1_shared[row_corr],
-                    warp_group_offset=256,
-                    head_dim=dim,
+                    256,
                 )
                 T.tcgen05_before_thread_sync()
                 T.sync_warp()
@@ -867,7 +1020,9 @@ def attention_kernel_1sm(
                         T.tcgen05_wait_barrier(mbar_epi0, 0)
                         T.fence_proxy_async()
                         for cw in T.unroll(4):
-                            T.tcgen05_epilogue_tma_store_32x128(
+                            T.call_extern(
+                                "void",
+                                "tl::attention_1sm_epilogue_tma_store_32x128",
                                 output_desc,
                                 T.access_ptr(O0_shared, "r", offset=cw * 32 * dim),
                                 bx * kq2_total_M + cw * 32,
@@ -879,7 +1034,9 @@ def attention_kernel_1sm(
                         T.tcgen05_wait_barrier(mbar_epi1, 0)
                         T.fence_proxy_async()
                         for cw in T.unroll(4):
-                            T.tcgen05_epilogue_tma_store_32x128(
+                            T.call_extern(
+                                "void",
+                                "tl::attention_1sm_epilogue_tma_store_32x128",
                                 output_desc,
                                 T.access_ptr(O1_shared, "r", offset=cw * 32 * dim),
                                 bx * kq2_total_M + kq2_block_M + cw * 32,

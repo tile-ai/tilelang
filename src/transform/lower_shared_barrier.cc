@@ -149,8 +149,8 @@ private:
     // 2CTA TMEM lowering inserts a cluster sync immediately after tcgen05.alloc.
     // In that path the allocation sync is the first point where any role can
     // observe the initialized barriers, so a separate pre-allocation cluster
-    // sync only adds launch prologue overhead and diverges from the FA4 UMA
-    // reference schedule.
+    // sync only adds launch prologue overhead and diverges from the intended
+    // producer/consumer startup order.
     bool use_2cta_tmem = op->annotations.count("use_2cta");
     if (!has_cluster_barrier_ || !use_2cta_tmem) {
       new_body.push_back(Evaluate(

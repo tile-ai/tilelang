@@ -9,7 +9,7 @@
 struct Barrier : public cutlass::arch::ClusterTransactionBarrier {
   using Base = cutlass::arch::ClusterTransactionBarrier;
 
-  // Local arrive with release.cta ordering (matches avo)
+  // Local arrive with release.cta ordering.
   CUTLASS_DEVICE
   void arrive() const {
     uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&this->barrier_);
@@ -19,7 +19,7 @@ struct Barrier : public cutlass::arch::ClusterTransactionBarrier {
         : "r"(smem_addr));
   }
 
-  // Parity wait with acquire.cta ordering (matches avo)
+  // Parity wait with acquire.cta ordering.
   CUTLASS_DEVICE
   void wait(uint32_t phase) const {
     uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&this->barrier_);

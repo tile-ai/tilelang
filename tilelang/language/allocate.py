@@ -245,9 +245,9 @@ def alloc_tmem(
         shape: 2-D logical shape (M, N).
         dtype: Element dtype.
         alias: When supplied, the new buffer SHARES physical TMEM columns with
-            ``alias`` — no extra ``tcgen05.alloc`` is issued. Useful for the
-            FA4 trick where S (fp32) and P (bf16) overlap because S is dead
-            by the time P is written. The caller owns the lifetime contract;
+            ``alias`` — no extra ``tcgen05.alloc`` is issued. Useful when two
+            logical TMEM views have non-overlapping lifetimes and can share
+            physical columns. The caller owns the lifetime contract;
             tilelang does not verify it.
         col_offset: TMEM column offset from the alias parent's base address.
             Only meaningful with ``alias=...``. Must be a non-negative int.

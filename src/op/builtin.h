@@ -271,9 +271,8 @@ TVM_DLL const Op &abs2();
 TVM_DLL const Op &fmax2_ftz();
 
 // Scalar 3-input max with FTZ (SM_100+ PTX `max.ftz.f32 d, a, b, c`).
-// One-cycle instruction vs 2 cycles for nested binary max — used by the FA4
-// reference's softmax reduce. Falls back to `fmax(a, fmax(b, c))` on targets
-// that don't support the 3-input form.
+// One-cycle instruction vs 2 cycles for nested binary max. Falls back to
+// `fmax(a, fmax(b, c))` on targets that don't support the 3-input form.
 TVM_DLL const Op &max3();
 
 // Polynomial exp2 approximation (degree-3 minimax on [0,1) + bit manipulation
@@ -361,9 +360,8 @@ TVM_DLL const Op &mbarrier_wait_parity();
 
 /*!
  * \brief mbarrier wait with parity bit, executed only by lane 0 of the
- * current warp. This matches AVO's producer/MMA/epilogue control-warp
- * convention (`if (threadIdx.x % 32 != 0) return`) without forcing the whole
- * outlined role into a raw CUDA helper.
+ * current warp (`if (threadIdx.x % 32 != 0) return`) without forcing the
+ * whole outlined role into a raw CUDA helper.
  *
  * mbarrier_wait_parity_lane0(mbarrier, parity)
  *
@@ -1030,7 +1028,7 @@ TVM_DLL const Op &initialize_tcgen05_descriptor();
 /*! \brief Return the shared-memory pointer base in 16-byte units. */
 TVM_DLL const Op &tcgen05_smem_base_16b();
 
-/*! \brief Build the FA4 fast TCGEN05 shared-memory descriptor. */
+/*! \brief Build an SM100 fast TCGEN05 shared-memory descriptor. */
 TVM_DLL const Op &tcgen05_mk_fast_desc();
 
 /*!
@@ -1051,6 +1049,8 @@ TVM_DLL const Op &tcgen05_ld();
 
 /*!
  * \brief x16-max variant of tcgen05_ld for cross-WG TMEM visibility.
+ *
+ * The row_offset argument is in TMEM rows. Callers must pass it explicitly.
  */
 TVM_DLL const Op &tcgen05_ld_x16();
 
@@ -1058,7 +1058,7 @@ TVM_DLL const Op &tcgen05_ld_x16();
  * \brief Raw TCGEN05 tensor-memory load without an implicit TMEM load fence.
  *
  * Intended for hand-scheduled DSL code that issues several TMEM loads and
- * then calls tcgen05_fence_tmem_load() once, matching FA4/avo softmax.
+ * then calls tcgen05_fence_tmem_load() once.
  */
 TVM_DLL const Op &tcgen05_ld_nofence();
 
@@ -1072,6 +1072,8 @@ TVM_DLL const Op &tcgen05_st();
 
 /*!
  * \brief x16-max variant of tcgen05_st for cross-WG TMEM visibility.
+ *
+ * The row_offset argument is in TMEM rows. Callers must pass it explicitly.
  */
 TVM_DLL const Op &tcgen05_st_x16();
 
@@ -1113,50 +1115,7 @@ TVM_DLL const Op &tcgen05_bar_arrive();
 TVM_DLL const Op &tcgen05_bar_sync();
 
 /*!
- * \brief Per-warp O correction using avo-style x16 ld/mul/st sequence.
- *
- * tcgen05_correction_x16(tmem_base, scale, warp_group_offset, head_dim)
- *
- * Emits a call to tl::tmem_correction_x16<HeadDim>() which performs:
- *   - Per-warp row offset computation: ((threadIdx.x - wg_off) / 32 & 3) * 32 << 16
- *   - Software-pipelined x16 load/multiply/store loop
- *   - Single tcgen05.wait::st at the end (no per-store waits)
- *
- * Args: tmem_buffer[0,0], scale_fragment[0], warp_group_offset(int), head_dim(int)
- */
-TVM_DLL const Op &tcgen05_correction_x16();
-
-/*!
- * \brief Per-warp O correction with avo's ballot-before-wait fast path.
- *
- * tcgen05_correction_x16_skip(tmem_base, scale, mbar_pv, pv_phase,
- *                             warp_group_offset, head_dim)
- *
- * If all lanes have scale >= 1.0, returns without waiting on the PV barrier or
- * touching TMEM.  Otherwise waits for the previous PV completion and performs
- * the same x16 correction as tcgen05_correction_x16.
- */
-TVM_DLL const Op &tcgen05_correction_x16_skip();
-
-/*!
- * \brief Per-warp final O normalization and shared-memory epilogue staging.
- *
- * tcgen05_epilogue_store_x16(tmem_base, smem_ptr, logsum, warp_group_offset, head_dim)
- *
- * Reads one O row from TMEM using the correction warpgroup row mapping,
- * normalizes by an approximate reciprocal of logsum, converts to bf16, and writes into the swizzled shared layout
- * consumed by TileLang's TMA store lowering.
- */
-TVM_DLL const Op &tcgen05_epilogue_store_x16();
-
-/*!
- * \brief Avo-style full correction + epilogue staging warpgroup helper for
- * FA4 1SM split attention.
- */
-TVM_DLL const Op &tcgen05_correction_epilogue_warp_1sm_skv();
-
-/*!
- * \brief Packed scalar-pair FMA used by SM100 FA4-style softmax.
+ * \brief Packed scalar-pair FMA using SM100 fma.rn.ftz.f32x2.
  *
  * Updates two scalar FP32 lvalues with one `fma.rn.ftz.f32x2` instruction.
  * Args: r0, r1, a0, a1, b0, b1, c0, c1.
@@ -1166,29 +1125,20 @@ TVM_DLL const Op &tcgen05_fma_f32x2();
 /*! \brief Approximate FTZ FP32 reciprocal. Args: x. Returns float32. */
 TVM_DLL const Op &tcgen05_rcp_approx_ftz();
 
-/*! \brief Approximate FP32 exp2 using the SM100 FA4 helper. Args: x. */
+/*! \brief Approximate FP32 exp2 using ex2.approx.ftz.f32. Args: x. */
 TVM_DLL const Op &tcgen05_exp2f_approx();
 
 /*!
- * \brief Pair polynomial exp2 approximation used by SM100 FA4-style softmax.
+ * \brief Pair polynomial exp2 approximation using packed FP32x2 arithmetic.
  *
  * Updates two scalar FP32 lvalues. Args: r0, r1, in0, in1.
  */
 TVM_DLL const Op &tcgen05_exp2_poly_2();
 
 /*!
- * \brief Branchless online-softmax rescale update.
- *
- * Updates scale_out, rmax_state, and rsum_state with the FA4/avo `selp`
- * threshold pattern. Args: scale_out, rmax_state, rsum_state, nm,
- * softmax_scale_log2.
- */
-TVM_DLL const Op &tcgen05_softmax_rescale_update();
-
-/*!
  * \brief Pack two FP32 values through BF16 conversion into one B32 word.
  *
- * Args: a, b. Returns uint32. Used by DSL softmax P TMEM stores.
+ * Args: a, b. Returns uint32.
  */
 TVM_DLL const Op &pack_bf16_pair();
 
@@ -1200,29 +1150,8 @@ TVM_DLL const Op &pack_bf16_pair();
  */
 TVM_DLL const Op &tcgen05_st_32x32b_x4();
 
-/*!
- * \brief Avo-style one-iteration S->P online softmax for FA4 1SM attention.
- *
- * Args:
- *   S_tmem_addr, P_tmem_addr,
- *   scale_smem_ptr, logsum_smem_ptr,
- *   rmax_state_ptr, rsum_state_ptr,
- *   mbar_scale, mbar_p,
- *   k, loop_extent, softmax_scale_log2,
- *   seq_len, q_row_base, kv_col_base, is_causal, warp_group_offset
- */
-TVM_DLL const Op &tcgen05_softmax_128x128();
-
 /*! \brief 1SM shared/shared 128x128 tcgen05 MMA sequence plus mbarrier commit. */
 TVM_DLL const Op &tcgen05_mma_1sm_ss_128x128_commit();
-
-/*!
- * \brief Avo-style full softmax warp loop for FA4 1SM split attention.
- *
- * Keeps rmax/rsum in registers for the whole KV loop and emits both the
- * partial-P and full-P mbarrier arrivals.
- */
-TVM_DLL const Op &tcgen05_softmax_warp_1sm();
 
 /*! \brief Two 1SM tmem/shared 128x64 BMN tcgen05 MMA sequences. */
 TVM_DLL const Op &tcgen05_mma_1sm_ts_128x64_bmn_x2();
@@ -1231,51 +1160,16 @@ TVM_DLL const Op &tcgen05_mma_1sm_ts_128x64_bmn_x2();
 TVM_DLL const Op &tcgen05_mma_1sm_ts_128x64_bmn_x2_contig();
 
 /*!
- * \brief Avo-style full MMA warp loop for FA4 1SM split attention.
- *
- * This primitive keeps the MMA role as a compact device helper instead of
- * expanding stage selection and MMA issue logic into TileLang's outlined
- * warp function.  The generated structure matches avo's mma_warp_fn much more
- * closely and avoids ptxas spilling in the MMA role.
+ * \brief Return one of three pointer expressions selected by stage.
+ * Args: ptr0, ptr1, ptr2, stage(int)
  */
-TVM_DLL const Op &tcgen05_mma_warp_1sm_skv();
+TVM_DLL const Op &select_stage_ptr();
 
 /*!
- * \brief Avo-style full producer warp loop for FA4 1SM split attention.
- *
- * The CUDA lowering wires this primitive to the kernel's Q_desc/K_desc/V_desc
- * TMA descriptors and emits one compact device-helper call, matching avo's
- * producer_warp_fn shape more closely than expanded T.tma_copy branches.
- */
-TVM_DLL const Op &tcgen05_producer_warp_1sm_skv();
-
-/*!
- * \brief 3-stage K/V reuse producer warp for the current 1SM split layout.
- *
- * Keeps the existing split-path shared buffers but treats K0, K1, and the
- * V0_lo/V0_hi area as three logical K/V stages.
- */
-TVM_DLL const Op &tcgen05_producer_warp_1sm_reuse3();
-
-/*!
- * \brief 3-stage K/V reuse MMA warp for the current 1SM split layout.
- *
- * Pairs with tcgen05_producer_warp_1sm_reuse3 and preserves the normal
- * softmax/correction/epilogue roles.
- */
-TVM_DLL const Op &tcgen05_mma_warp_1sm_reuse3();
-
-/*!
- * \brief Return the selected reuse3 K/V shared-memory stage pointer.
- * Args: stage0_ptr, stage1_ptr, stage2_ptr, stage(int)
- */
-TVM_DLL const Op &tcgen05_reuse3_stage_ptr();
-
-/*!
- * \brief Return the selected reuse3 barrier as a CUDA Barrier& expression.
+ * \brief Return one of three mbarriers as a CUDA Barrier& expression.
  * Args: mbar0, mbar1, mbar2, stage(int)
  */
-TVM_DLL const Op &tcgen05_reuse3_barrier_ref();
+TVM_DLL const Op &select_barrier_ref();
 
 /*!
  * \brief Add a BF16 element offset to a shared-memory pointer expression.
@@ -1284,16 +1178,16 @@ TVM_DLL const Op &tcgen05_reuse3_barrier_ref();
 TVM_DLL const Op &tcgen05_smem_ptr_add_bf16();
 
 /*!
- * \brief Arrive+expect on a dynamic reuse3 barrier reference.
+ * \brief Arrive+expect on a dynamic mbarrier reference.
  * Args: mbar_ref, transaction_bytes
  */
 TVM_DLL const Op &tcgen05_mbarrier_arrive_expect_tx_ref();
 
 /*!
- * \brief Cluster arrive+expect on a dynamic mbarrier reference.
+ * \brief Cluster arrive+expect from lane 0 on a dynamic mbarrier reference.
  * Args: mbar_ref, transaction_bytes
  */
-TVM_DLL const Op &tcgen05_mbarrier_arrive_expect_tx_cluster_ref();
+TVM_DLL const Op &tcgen05_mbarrier_arrive_expect_tx_cluster_lane0_ref();
 
 /*!
  * \brief Cluster-scope mbarrier arrive from all active lanes.
@@ -1320,13 +1214,7 @@ TVM_DLL const Op &tma_store_2d();
 TVM_DLL const Op &tcgen05_mbarrier_arrive_local_all_ref();
 
 /*!
- * \brief Issue a 128x128 BF16 TMA load as two 64-column transfers.
- * Args: desc, stage_ptr, mbar_ptr, k_iter, kv_head, batch
- */
-TVM_DLL const Op &tcgen05_tma_load_128x128();
-
-/*!
- * \brief Wait on a dynamic reuse3 barrier reference.
+ * \brief Wait on a dynamic mbarrier reference.
  * Args: mbar_ref, phase
  */
 TVM_DLL const Op &tcgen05_wait_barrier_ref();
@@ -1338,19 +1226,7 @@ TVM_DLL const Op &tcgen05_wait_barrier_ref();
 TVM_DLL const Op &tcgen05_wait_barrier_op();
 
 /*!
- * \brief Legacy Avo-style epilogue TMA-store warp for FA4 1SM split attention.
- */
-TVM_DLL const Op &tcgen05_epilogue_warp_1sm_skv();
-
-/*!
- * \brief Issue the two 64-column TMA stores for one 32-row epilogue chunk.
- * Args: Output_desc, epi_ptr, q_row, q_head, batch
- */
-TVM_DLL const Op &tcgen05_epilogue_tma_store_32x128();
-
-/*!
- * \brief Avo-exact commit: tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64
- * Uses .b64 (no shared::cluster), matching avo's tcgen05_commit_1sm.
+ * \brief Commit a 1SM TCGEN05 MMA to an mbarrier using the plain .b64 form.
  * Args: mbar_ptr
  */
 TVM_DLL const Op &tcgen05_commit_1sm_op();

@@ -7,8 +7,9 @@
 # when pip CUDA is used.
 #
 # Detection order:
-#   1. Try find_package(CUDAToolkit QUIET) — succeeds if a host CUDA
-#      installation is available; skip pip detection.
+#   1. Try locating host nvcc without calling find_package(CUDAToolkit). This
+#      module runs before project(), and CMake's FindCUDAToolkit may load helper
+#      modules that require C/CXX languages to already be enabled.
 #   2. If env var WITH_PIP_CUDA_TOOLCHAIN is set to a path (e.g., .../cu13),
 #      use that directory directly as the CUDA toolkit root.
 #   3. Otherwise, try auto-detecting from the current Python environment's
@@ -467,10 +468,38 @@ endfunction()
 _tilelang_activate_ninja()
 
 # --- Try host CUDA first ---
-find_package(CUDAToolkit QUIET)
-if(CUDAToolkit_FOUND)
+set(_TILELANG_HOST_CUDA_HINTS "")
+foreach(_cuda_root_var IN ITEMS CUDAToolkit_ROOT CUDA_TOOLKIT_ROOT_DIR CUDA_HOME CUDA_PATH)
+  if(DEFINED ${_cuda_root_var} AND NOT "${${_cuda_root_var}}" STREQUAL "")
+    list(APPEND _TILELANG_HOST_CUDA_HINTS "${${_cuda_root_var}}")
+  endif()
+  if(DEFINED ENV{${_cuda_root_var}} AND NOT "$ENV{${_cuda_root_var}}" STREQUAL "")
+    list(APPEND _TILELANG_HOST_CUDA_HINTS "$ENV{${_cuda_root_var}}")
+  endif()
+endforeach()
+if(UNIX)
+  list(APPEND _TILELANG_HOST_CUDA_HINTS "/usr/local/cuda")
+  file(GLOB _tilelang_cuda_roots "/usr/local/cuda-*")
+  if(_tilelang_cuda_roots)
+    list(APPEND _TILELANG_HOST_CUDA_HINTS ${_tilelang_cuda_roots})
+  endif()
+endif()
+list(REMOVE_DUPLICATES _TILELANG_HOST_CUDA_HINTS)
+
+find_program(_TILELANG_HOST_NVCC
+  NAMES nvcc nvcc.exe
+  HINTS ${_TILELANG_HOST_CUDA_HINTS}
+  PATH_SUFFIXES bin bin/x86_64)
+
+if(_TILELANG_HOST_NVCC)
+  cmake_path(GET _TILELANG_HOST_NVCC PARENT_PATH _TILELANG_HOST_CUDA_BIN)
+  cmake_path(GET _TILELANG_HOST_CUDA_BIN PARENT_PATH _TILELANG_HOST_CUDA_ROOT)
+  set(CMAKE_CUDA_COMPILER "${_TILELANG_HOST_NVCC}" CACHE FILEPATH "CUDA compiler" FORCE)
+  set(CUDAToolkit_ROOT "${_TILELANG_HOST_CUDA_ROOT}" CACHE PATH "CUDA toolkit root" FORCE)
+  set(CUDAToolkit_BIN_DIR "${_TILELANG_HOST_CUDA_BIN}" CACHE PATH "CUDA toolkit bin directory" FORCE)
   set(TILELANG_CUDA_TOOLKIT_AVAILABLE ON CACHE INTERNAL "Whether a CUDA toolkit is available" FORCE)
   set(TILELANG_CUDA_TOOLKIT_SOURCE "host" CACHE INTERNAL "How TileLang discovered CUDA" FORCE)
+  message(STATUS "FindPipCUDAToolkit: using host CUDA toolkit at ${_TILELANG_HOST_CUDA_ROOT}")
   return()
 endif()
 

@@ -185,9 +185,9 @@ private:
     for (auto match_buffer : op->match_buffers) {
       check_and_add(match_buffer->buffer);
     }
-    // Sort for deterministic allocation order matching avo layout convention:
-    // S (scores) buffers before O (output) buffers, then by numeric suffix.
-    // This gives physical layout: S0=0, S1=128, O0=256, O1=384.
+    // Sort for deterministic allocation order when buffer names encode a
+    // double-buffered S/O layout: S buffers before O buffers, then by numeric
+    // suffix. Other names keep lexicographic fallback ordering.
     std::vector<Buffer> sorted_tmem(tmem_buffers.begin(), tmem_buffers.end());
     std::sort(sorted_tmem.begin(), sorted_tmem.end(),
               [](const Buffer &a, const Buffer &b) {

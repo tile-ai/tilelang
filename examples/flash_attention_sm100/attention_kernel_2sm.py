@@ -191,7 +191,7 @@ def attention_kernel_2sm_d128(
     ):
         q_bytes = 2 * block_m_cta * tile_cols * 2
         for qs in T.unroll(q_stages):
-            T.tcgen05_mbarrier_arrive_expect_tx_cluster_ref(
+            T.tcgen05_mbarrier_arrive_expect_tx_cluster_lane0_ref(
                 T.mbarrier_at(mbar_q, qs),
                 q_bytes,
             )
@@ -252,7 +252,7 @@ def attention_kernel_2sm_d128(
                 )
 
             k_row = tile_kv_row_base + prefetch * block_n + cta_rank * b_per_cta
-            T.tcgen05_mbarrier_arrive_expect_tx_cluster_ref(
+            T.tcgen05_mbarrier_arrive_expect_tx_cluster_lane0_ref(
                 T.mbarrier_at(mbar_k, stage),
                 kv_bytes,
             )
@@ -272,7 +272,7 @@ def attention_kernel_2sm_d128(
                 )
 
             v_row = tile_kv_row_base + prefetch * block_n
-            T.tcgen05_mbarrier_arrive_expect_tx_cluster_ref(
+            T.tcgen05_mbarrier_arrive_expect_tx_cluster_lane0_ref(
                 T.mbarrier_at(mbar_v, stage),
                 kv_bytes,
             )
@@ -322,7 +322,7 @@ def attention_kernel_2sm_d128(
                 phase,
             )
             k_row = tile_kv_row_base + next_idx * block_n + cta_rank * b_per_cta
-            T.tcgen05_mbarrier_arrive_expect_tx_cluster_ref(
+            T.tcgen05_mbarrier_arrive_expect_tx_cluster_lane0_ref(
                 T.mbarrier_at(mbar_k, next_stage),
                 kv_bytes,
             )
@@ -350,7 +350,7 @@ def attention_kernel_2sm_d128(
                 phase,
             )
             v_row = tile_kv_row_base + next_idx * block_n
-            T.tcgen05_mbarrier_arrive_expect_tx_cluster_ref(
+            T.tcgen05_mbarrier_arrive_expect_tx_cluster_lane0_ref(
                 T.mbarrier_at(mbar_v, next_stage),
                 kv_bytes,
             )
@@ -815,7 +815,7 @@ def attention_kernel_2sm_d128(
             # Match fa4_uma.cu launch bounds while relying on runtime
             # setmaxnreg.inc/dec for role-specific register donation.
             T.annotate_min_blocks_per_sm(1)
-            T.use_2cta_tmem()
+            T.use_2cta_tmem(mbarrier_init_thread=416, compact_shared_state=True)
 
             Q_shared = T.alloc_shared([q_stages, block_m_cta, dim], dtype)
             O_shared = T.alloc_shared([q_stages, block_m_cta, dim], dtype)
@@ -1328,7 +1328,7 @@ def attention_kernel_2sm_d256(
         tile_q_row_base,
     ):
         q_bytes = 4 * block_m_cta * tile_cols * 2
-        T.tcgen05_mbarrier_arrive_expect_tx_cluster_ref(
+        T.tcgen05_mbarrier_arrive_expect_tx_cluster_lane0_ref(
             T.mbarrier_at(mbar_q, 0),
             q_bytes,
         )
@@ -1364,7 +1364,7 @@ def attention_kernel_2sm_d256(
             T.tcgen05_wait_barrier(T.mbarrier_at(mbar_kv_rel, stage), prev_phase)
         kv_bytes = 4 * b_per_cta * tile_cols * 2
         stage_base = stage * kv_stage_elems
-        T.tcgen05_mbarrier_arrive_expect_tx_cluster_ref(
+        T.tcgen05_mbarrier_arrive_expect_tx_cluster_lane0_ref(
             T.mbarrier_at(mbar_kv, stage),
             kv_bytes,
         )
@@ -1850,7 +1850,7 @@ def attention_kernel_2sm_d256(
             # Match fa4_uma_d256.cu launch bounds while relying on runtime
             # setmaxnreg.inc/dec for role-specific register donation.
             T.annotate_min_blocks_per_sm(1)
-            T.use_2cta_tmem()
+            T.use_2cta_tmem(mbarrier_init_thread=416, compact_shared_state=True)
 
             # fa4_uma_d256 aliases sO with sQ and uses one merged K/V ring.
             QO_shared = T.alloc_shared([block_m_cta, dim], dtype)

@@ -27,15 +27,25 @@ def use_swizzle(panel_size: int, order: str = "row", enable: bool = True):
     return attr(None, "threadblock_swizzle_pattern", tvm_tuple(device_func, panel_size))
 
 
-def use_2cta_tmem(enable: bool = True):
-    """Request cta_group::2 tensor-memory alloc/dealloc for helper-only kernels."""
+def use_2cta_tmem(
+    enable: bool = True,
+    *,
+    mbarrier_init_thread: int | None = None,
+    compact_shared_state: bool = False,
+):
+    """Request cta_group::2 tensor-memory alloc/dealloc.
+
+    The caller owns schedule-specific policy such as which thread initializes
+    barriers and whether shared-state compaction is safe for the kernel layout.
+    """
     if not enable:
         return None
-    return block_attr({
-        "use_2cta": 1,
-        "mbarrier_init_thread": 416,
-        "pragma_tl_compact_shared_state": 1,
-    })
+    attrs = {"use_2cta": 1}
+    if mbarrier_init_thread is not None:
+        attrs["mbarrier_init_thread"] = mbarrier_init_thread
+    if compact_shared_state:
+        attrs["pragma_tl_compact_shared_state"] = 1
+    return block_attr(attrs)
 
 
 def device_func(enable: bool = True):

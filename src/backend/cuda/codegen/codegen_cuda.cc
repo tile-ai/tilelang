@@ -544,8 +544,8 @@ public:
 // __global__ declaration. Without that attribute the host launch's
 // `cudaFuncAttributeMaxRegistersPerThread` setting (added in wrapper.py)
 // has no effect because ptxas already chose a tighter per-thread reg limit
-// at compile time. The two settings must agree for FA4-style warp-spec
-// register donation to actually grow math warps' register pools.
+// at compile time. The two settings must agree for warp-specialized
+// register donation to actually grow high-register warps' pools.
 class MaxNRegExtractor : public tir::StmtExprVisitor {
 public:
   static int64_t Extract(const Stmt &body) {
@@ -623,12 +623,12 @@ void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
   //     per thread, the standard uniform-occupancy path.
   //
   //   * set_max_nreg in the body AND total threads > one warpgroup: still
-  //     emit `__launch_bounds__(N, M)`. The FA4 register-donation idiom needs
-  //     per-warpgroup register counts that vary at runtime (math 184, mma
-  //     80, donor 80 …). ptxas reads the setmaxnreg.inc/dec instructions
-  //     directly and sizes each warpgroup's reg slice accordingly — but only
-  //     when the kernel has launch_bounds, NOT __maxnreg__ (which is a
-  //     uniform per-thread cap and mutually exclusive with launch_bounds).
+  //     emit `__launch_bounds__(N, M)`. Warp-specialized kernels may request
+  //     per-warpgroup register counts that vary at runtime. ptxas reads the
+  //     setmaxnreg.inc/dec instructions directly and sizes each warpgroup's
+  //     reg slice accordingly — but only when the kernel has launch_bounds,
+  //     NOT __maxnreg__ (which is a uniform per-thread cap and mutually
+  //     exclusive with launch_bounds).
   //     Setting `tl.min_blocks_per_sm = 0` emits `__launch_bounds__(N, 0)`,
   //     which tells ptxas "no minBlocks preference" so it can size around
   //     the per-warp setmaxnreg requests instead of the 64K/N average.
@@ -643,9 +643,9 @@ void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
       // return
       return;
     }
-    // Always emit __launch_bounds__ for multi-thread launches. The FA4
-    // register-donation idiom uses runtime setmaxnreg.inc/dec to give
-    // different warpgroups different register counts whose sum fits the
+    // Always emit __launch_bounds__ for multi-thread launches. Runtime
+    // setmaxnreg.inc/dec can give different warpgroups different register
+    // counts whose sum fits the
     // 64K register file — ptxas reads those instructions and sizes each
     // warpgroup's allocation accordingly, only when launch_bounds (not
     // __maxnreg__) is in effect. __maxnreg__ caps every thread uniformly,
@@ -1197,7 +1197,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const LetStmtNode *op) {
   EmitCompactSharedStateIfNeeded();
   if (op->var.dtype() == DataType::Handle()) {
     if (const auto *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(tl::tcgen05_reuse3_barrier_ref())) {
+      if (call->op.same_as(tl::select_barrier_ref())) {
         std::string value = PrintExpr(op->value);
         PrintIndent();
         stream << "auto& " << AllocVarID(op->var.get()) << " = " << value
@@ -2780,22 +2780,22 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
        << PrintExpr(op->args[1]) << ")";
     return;
   }
-  if (op->op.same_as(tl::tcgen05_reuse3_stage_ptr())) {
+  if (op->op.same_as(tl::select_stage_ptr())) {
     ICHECK_EQ(op->args.size(), 4U)
-        << "tcgen05_reuse3_stage_ptr expects 4 args";
+        << "select_stage_ptr expects 4 args";
     need_tcgen05_common_h_ = true;
-    os << "tl::tcgen05_reuse3_stage_ptr((void*)("
+    os << "tl::select_stage_ptr((void*)("
        << this->PrintExpr(op->args[0]) << "), (void*)("
        << this->PrintExpr(op->args[1]) << "), (void*)("
        << this->PrintExpr(op->args[2]) << "), "
        << this->PrintExpr(op->args[3]) << ")";
     return;
   }
-  if (op->op.same_as(tl::tcgen05_reuse3_barrier_ref())) {
+  if (op->op.same_as(tl::select_barrier_ref())) {
     ICHECK_EQ(op->args.size(), 4U)
-        << "tcgen05_reuse3_barrier_ref expects 4 args";
+        << "select_barrier_ref expects 4 args";
     need_tcgen05_common_h_ = true;
-    os << "tl::tcgen05_reuse3_barrier_ref("
+    os << "tl::select_barrier_ref("
        << this->PrintExpr(op->args[0]) << ", "
        << this->PrintExpr(op->args[1]) << ", "
        << this->PrintExpr(op->args[2]) << ", "
@@ -2902,7 +2902,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     ICHECK_EQ(op->args.size(), 1);
     this->PrintIndent();
     auto mbarrier_obj = this->PrintExpr(op->args[0]);
-    // Emit avo-exact release.cta arrive instead of CUTLASS .arrive()
+    // Emit explicit release.cta ordering instead of CUTLASS's default arrive.
     this->stream << "{\n";
     this->PrintIndent();
     this->stream << "  unsigned int barrier_addr_int = cast_smem_ptr_to_int(&"
@@ -2932,7 +2932,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->PrintIndent();
       auto mbarrier_obj = this->PrintExpr(op->args[0]);
       auto transaction_bytes = this->PrintExpr(op->args[1]);
-      // Emit avo-exact release.cta arrive_expect_tx
+      // Emit explicit release.cta ordering for arrive_expect_tx.
       this->stream << "{\n";
       this->PrintIndent();
       this->stream << "  unsigned int __tx_bar = cast_smem_ptr_to_int(&"
@@ -2976,7 +2976,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     auto mbarrier_obj = this->PrintExpr(op->args[0]);
     auto phase = this->PrintExpr(op->args[1]);
-    // Emit avo-exact acquire.cta wait instead of CUTLASS .wait()
+    // Emit explicit acquire.cta ordering instead of CUTLASS's default wait.
     this->stream << "{\n";
     this->PrintIndent();
     this->stream << "  unsigned int __mbar_addr = cast_smem_ptr_to_int(&"
@@ -3899,33 +3899,35 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << tmem_start_col << ", " << col_offset << ", " << src_ptr
                  << ");\n";
   } else if (op->op.same_as(tl::tcgen05_ld_x16())) {
-    ICHECK_EQ(op->args.size(), 6U) << "tcgen05_ld_x16 expects 6 arguments";
+    ICHECK_EQ(op->args.size(), 7U) << "tcgen05_ld_x16 expects 7 arguments";
     need_tcgen05_common_h_ = true;
     int inst_bits = Downcast<IntImm>(op->args[0])->value;
     int chunks = Downcast<IntImm>(op->args[1])->value;
     bool pack16 = Downcast<Bool>(op->args[2])->value;
     std::string tmem_start_col = this->PrintExpr(op->args[3]);
     std::string col_offset = this->PrintExpr(op->args[4]);
-    std::string dst_ptr = this->PrintExpr(op->args[5]);
+    std::string row_offset = this->PrintExpr(op->args[5]);
+    std::string dst_ptr = this->PrintExpr(op->args[6]);
     this->PrintIndent();
     this->stream << "tl::tcgen05_ld_32dp" << inst_bits << "bNx_x16<" << chunks
                  << ", " << (pack16 ? "true" : "false") << ">("
-                 << tmem_start_col << ", " << col_offset << ", " << dst_ptr
-                 << ");\n";
+                 << tmem_start_col << ", " << col_offset << ", "
+                 << row_offset << ", " << dst_ptr << ");\n";
   } else if (op->op.same_as(tl::tcgen05_st_x16())) {
-    ICHECK_EQ(op->args.size(), 6U) << "tcgen05_st_x16 expects 6 arguments";
+    ICHECK_EQ(op->args.size(), 7U) << "tcgen05_st_x16 expects 7 arguments";
     need_tcgen05_common_h_ = true;
     int inst_bits = Downcast<IntImm>(op->args[0])->value;
     int chunks = Downcast<IntImm>(op->args[1])->value;
     bool unpack16 = Downcast<Bool>(op->args[2])->value;
     std::string tmem_start_col = this->PrintExpr(op->args[3]);
     std::string col_offset = this->PrintExpr(op->args[4]);
-    std::string src_ptr = this->PrintExpr(op->args[5]);
+    std::string row_offset = this->PrintExpr(op->args[5]);
+    std::string src_ptr = this->PrintExpr(op->args[6]);
     this->PrintIndent();
     this->stream << "tl::tcgen05_st_32dp" << inst_bits << "bNx_x16<" << chunks
                  << ", " << (unpack16 ? "true" : "false") << ">("
-                 << tmem_start_col << ", " << col_offset << ", " << src_ptr
-                 << ");\n";
+                 << tmem_start_col << ", " << col_offset << ", "
+                 << row_offset << ", " << src_ptr << ");\n";
   } else if (op->op.same_as(tl::tcgen05_mma_arrive())) {
     ICHECK_EQ(op->args.size(), 1U) << "tcgen05_mma_arrive expects 1 argument";
     need_tcgen05_common_h_ = true;
@@ -3969,72 +3971,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     need_tcgen05_common_h_ = true;
     this->stream << "tl::tcgen05_bar_sync(" << this->PrintExpr(op->args[0])
                  << ", " << this->PrintExpr(op->args[1]) << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_correction_x16()) ||
-             op->op.same_as(tl::tcgen05_correction_x16_skip())) {
-    this->PrintIndent();
-    auto tmem_addr = this->PrintExpr(op->args[0]);
-    auto scale_val = this->PrintExpr(op->args[1]);
-    need_tcgen05_common_h_ = true;
-    if (op->op.same_as(tl::tcgen05_correction_x16())) {
-      ICHECK_EQ(op->args.size(), 4U)
-          << "tcgen05_correction_x16 expects 4 args: tmem_buf, scale, wg_offset, head_dim";
-      auto wg_offset = this->PrintExpr(op->args[2]);
-      auto head_dim = Downcast<IntImm>(op->args[3])->value;
-      this->stream << "tl::tmem_correction_x16<" << head_dim << ">("
-                   << tmem_addr << ", " << scale_val << ", " << wg_offset
-                   << ");\n";
-    } else {
-      ICHECK_EQ(op->args.size(), 6U)
-          << "tcgen05_correction_x16_skip expects 6 args";
-      auto mbar_pv = this->PrintExpr(op->args[2]);
-      auto pv_phase = this->PrintExpr(op->args[3]);
-      auto wg_offset = this->PrintExpr(op->args[4]);
-      auto head_dim = Downcast<IntImm>(op->args[5])->value;
-      this->stream << "tl::tmem_correction_x16_skip<" << head_dim << ">("
-                   << tmem_addr << ", " << scale_val << ", (void const*)(&"
-                   << mbar_pv << "), " << pv_phase << ", " << wg_offset
-                   << ");\n";
-    }
-  } else if (op->op.same_as(tl::tcgen05_epilogue_store_x16())) {
-    ICHECK_EQ(op->args.size(), 5U)
-        << "tcgen05_epilogue_store_x16 expects 5 args: tmem_buf, smem_ptr, logsum, wg_offset, head_dim";
-    this->PrintIndent();
-    auto tmem_addr = this->PrintExpr(op->args[0]);
-    auto smem_ptr = this->PrintExpr(op->args[1]);
-    auto logsum = this->PrintExpr(op->args[2]);
-    auto wg_offset = this->PrintExpr(op->args[3]);
-    auto head_dim = Downcast<IntImm>(op->args[4])->value;
-    need_tcgen05_common_h_ = true;
-    this->stream << "tl::tmem_epilogue_store_x16<" << head_dim << ">("
-                 << tmem_addr << ", " << smem_ptr << ", " << logsum
-                 << ", " << wg_offset << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_correction_epilogue_warp_1sm_skv())) {
-    ICHECK_EQ(op->args.size(), 16U)
-        << "tcgen05_correction_epilogue_warp_1sm_skv expects 16 args";
-    this->PrintIndent();
-    need_tcgen05_common_h_ = true;
-    auto ptr_expr = [this](const PrimExpr &expr) {
-      return this->PrintExpr(expr);
-    };
-    auto mbar_ptr = [this](const PrimExpr &expr) {
-      return "(void const*)(&" + this->PrintExpr(expr) + ")";
-    };
-    this->stream << "tl::tcgen05_correction_epilogue_warp_1sm_skv("
-                 << this->PrintExpr(op->args[0]) << ", "
-                 << this->PrintExpr(op->args[1]) << ", "
-                 << "(void*)(" << ptr_expr(op->args[2]) << "), "
-                 << "(float const*)(" << ptr_expr(op->args[3]) << "), "
-                 << "(float const*)(" << ptr_expr(op->args[4]) << "), "
-                 << "(float const*)(" << ptr_expr(op->args[5]) << "), "
-                 << "(float const*)(" << ptr_expr(op->args[6]) << "), "
-                 << mbar_ptr(op->args[7]) << ", " << mbar_ptr(op->args[8])
-                 << ", " << mbar_ptr(op->args[9]) << ", "
-                 << mbar_ptr(op->args[10]) << ", "
-                 << mbar_ptr(op->args[11]) << ", "
-                 << mbar_ptr(op->args[12]) << ", "
-                 << mbar_ptr(op->args[13]) << ", "
-                 << this->PrintExpr(op->args[14]) << ", "
-                 << this->PrintExpr(op->args[15]) << ");\n";
   } else if (op->op.same_as(tl::tcgen05_fma_f32x2())) {
     ICHECK_EQ(op->args.size(), 8U) << "tcgen05_fma_f32x2 expects 8 args";
     this->PrintIndent();
@@ -4061,19 +3997,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << ", *" << ref_of(op->args[1]) << ", "
                  << this->PrintExpr(op->args[2]) << ", "
                  << this->PrintExpr(op->args[3]) << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_softmax_rescale_update())) {
-    ICHECK_EQ(op->args.size(), 5U)
-        << "tcgen05_softmax_rescale_update expects 5 args";
-    this->PrintIndent();
-    need_tcgen05_common_h_ = true;
-    auto ref_of = [this](const PrimExpr &expr) {
-      return "(&(" + this->PrintExpr(expr) + "))";
-    };
-    this->stream << "tl::tcgen05_softmax_rescale_update(*"
-                 << ref_of(op->args[0]) << ", *" << ref_of(op->args[1])
-                 << ", *" << ref_of(op->args[2]) << ", "
-                 << this->PrintExpr(op->args[3]) << ", "
-                 << this->PrintExpr(op->args[4]) << ");\n";
   } else if (op->op.same_as(tl::tcgen05_st_32x32b_x4())) {
     ICHECK_EQ(op->args.size(), 6U)
         << "tcgen05_st_32x32b_x4 expects 6 args";
@@ -4086,83 +4009,31 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << this->PrintExpr(op->args[3]) << ", "
                  << this->PrintExpr(op->args[4]) << ", "
                  << this->PrintExpr(op->args[5]) << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_softmax_128x128())) {
-    ICHECK_EQ(op->args.size(), 17U)
-        << "tcgen05_softmax_128x128 expects 17 args";
-    this->PrintIndent();
-    auto s_addr = this->PrintExpr(op->args[0]);
-    auto p_addr = this->PrintExpr(op->args[1]);
-    auto scale_smem_ref = this->PrintExpr(op->args[2]);
-    auto logsum_smem_ref = this->PrintExpr(op->args[3]);
-    auto rmax_state_ref = this->PrintExpr(op->args[4]);
-    auto rsum_state_ref = this->PrintExpr(op->args[5]);
-    auto mbar_scale = this->PrintExpr(op->args[6]);
-    auto mbar_p2 = this->PrintExpr(op->args[7]);
-    auto mbar_p = this->PrintExpr(op->args[8]);
-    auto k = this->PrintExpr(op->args[9]);
-    auto loop_extent = this->PrintExpr(op->args[10]);
-    auto scale = this->PrintExpr(op->args[11]);
-    auto seq_len = this->PrintExpr(op->args[12]);
-    auto q_row_base = this->PrintExpr(op->args[13]);
-    auto kv_col_base = this->PrintExpr(op->args[14]);
-    auto is_causal = this->PrintExpr(op->args[15]);
-    auto wg_offset = this->PrintExpr(op->args[16]);
-    need_tcgen05_common_h_ = true;
-    auto ptr_of = [](const std::string &ref) {
-      return "(&(" + ref + "))";
-    };
-    this->stream << "tl::tcgen05_softmax_128x128(" << s_addr << ", "
-                 << p_addr << ", " << ptr_of(scale_smem_ref) << ", "
-                 << ptr_of(logsum_smem_ref) << ", " << ptr_of(rmax_state_ref)
-                 << ", " << ptr_of(rsum_state_ref)
-                 << ", (void const*)(&" << mbar_scale << "), "
-                 << "(void const*)(&" << mbar_p2 << "), "
-                 << "(void const*)(&" << mbar_p << "), " << k << ", "
-                 << loop_extent << ", " << scale << ", " << seq_len << ", "
-                 << q_row_base << ", " << kv_col_base << ", " << is_causal
-                 << ", " << wg_offset << ");\n";
   } else if (op->op.same_as(tl::tcgen05_mma_1sm_ss_128x128_commit())) {
     ICHECK_EQ(op->args.size(), 4U)
         << "tcgen05_mma_1sm_ss_128x128_commit expects 4 args: A_smem_ptr, B_smem_ptr, C_tmem, mbar";
     this->PrintIndent();
-    bool guard_warp12 = GetBoolAnnotation(op, "guard_warp12", true);
     bool lane0_only = GetBoolAnnotation(op, "lane0_only", false);
     auto a_smem = this->PrintExpr(op->args[0]);
     auto b_smem = this->PrintExpr(op->args[1]);
     auto c_tmem = this->PrintExpr(op->args[2]);
     auto mbar = this->PrintExpr(op->args[3]);
     need_tcgen05_common_h_ = true;
-    if (guard_warp12) {
-      this->stream << "if ((((int)threadIdx.x) >> 5) == 12) {\n";
-      this->PrintIndent();
-      this->stream << "  ";
-    }
     this->stream << (lane0_only ? "tl::tcgen05_mma_1sm_ss_128x128_commit_lane0"
                                 : "tl::tcgen05_mma_1sm_ss_128x128_commit")
                  << "((void const*)("
                  << a_smem << "), (void const*)(" << b_smem << "), "
                  << c_tmem << ", (void const*)(&" << mbar << "));\n";
-    if (guard_warp12) {
-      this->PrintIndent();
-      this->stream << "}\n";
-    }
   } else if (op->op.same_as(tl::tcgen05_mma_1sm_ts_128x64_bmn_x2_contig())) {
     ICHECK_EQ(op->args.size(), 4U)
         << "tcgen05_mma_1sm_ts_128x64_bmn_x2_contig expects 4 args: B_smem_ptr, A_tmem, C_tmem, accum";
     this->PrintIndent();
-    bool guard_warp12 = GetBoolAnnotation(op, "guard_warp12", true);
     bool lane0_only = GetBoolAnnotation(op, "lane0_only", false);
     auto b_smem = this->PrintExpr(op->args[0]);
     auto a_tmem = this->PrintExpr(op->args[1]);
     auto c_tmem = this->PrintExpr(op->args[2]);
     auto accum = this->PrintExpr(op->args[3]);
     need_tcgen05_common_h_ = true;
-    if (guard_warp12) {
-      // Warp-12 guard (all 32 lanes converged); the MMA helper uses elect_one internally
-      this->stream << "if ((((int)threadIdx.x) >> 5) == 12) {\n";
-      this->PrintIndent();
-      this->stream << "  ";
-    }
     if (lane0_only) {
       this->stream << "tl::tcgen05_mma_1sm_ts_128x64_bmn_x2((void const*)("
                    << b_smem << "), (void const*)(((bfloat16_t*)(" << b_smem
@@ -4173,39 +4044,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                    << b_smem << "), " << a_tmem << ", " << c_tmem << ", "
                    << accum << ");\n";
     }
-    if (guard_warp12) {
-      this->PrintIndent();
-      this->stream << "}\n";
-    }
-  } else if (op->op.same_as(tl::tcgen05_softmax_warp_1sm())) {
-    ICHECK_EQ(op->args.size(), 15U)
-        << "tcgen05_softmax_warp_1sm expects 15 args";
-    this->PrintIndent();
-    auto s_addr = this->PrintExpr(op->args[0]);
-    auto p_addr = this->PrintExpr(op->args[1]);
-    auto scale_smem = this->PrintExpr(op->args[2]);
-    auto logsum_smem = this->PrintExpr(op->args[3]);
-    auto mbar_s = this->PrintExpr(op->args[4]);
-    auto mbar_scale0 = this->PrintExpr(op->args[5]);
-    auto mbar_p2 = this->PrintExpr(op->args[6]);
-    auto mbar_p = this->PrintExpr(op->args[7]);
-    auto loop_extent = this->PrintExpr(op->args[8]);
-    auto tile_k_base = this->PrintExpr(op->args[9]);
-    auto scale = this->PrintExpr(op->args[10]);
-    auto seq_len = this->PrintExpr(op->args[11]);
-    auto q_row_base = this->PrintExpr(op->args[12]);
-    auto is_causal = this->PrintExpr(op->args[13]);
-    auto wg_offset = this->PrintExpr(op->args[14]);
-    need_tcgen05_common_h_ = true;
-    this->stream << "tl::tcgen05_softmax_warp_1sm(" << s_addr << ", "
-                 << p_addr << ", " << scale_smem << ", " << logsum_smem
-                 << ", (void const*)(&" << mbar_s << "), "
-                 << "(void const*)(&" << mbar_scale0 << "), "
-                 << "(void const*)(&" << mbar_p2 << "), "
-                 << "(void const*)(&" << mbar_p << "), "
-                 << loop_extent << ", " << tile_k_base << ", " << scale
-                 << ", " << seq_len << ", " << q_row_base << ", "
-                 << is_causal << ", " << wg_offset << ");\n";
   } else if (op->op.same_as(tl::tcgen05_mma_1sm_ts_128x64_bmn_x2())) {
     ICHECK_EQ(op->args.size(), 5U)
         << "tcgen05_mma_1sm_ts_128x64_bmn_x2 expects 5 args: B_lo_smem, B_hi_smem, A_tmem, C_tmem, accum";
@@ -4216,125 +4054,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto c_tmem = this->PrintExpr(op->args[3]);
     auto accum = this->PrintExpr(op->args[4]);
     need_tcgen05_common_h_ = true;
-    // Warp-12 guard (all 32 lanes converged); the MMA helper uses elect_one internally
-    this->stream << "if ((((int)threadIdx.x) >> 5) == 12) {\n";
-    this->PrintIndent();
-    this->stream << "  tl::tcgen05_mma_1sm_ts_128x64_bmn_x2((void const*)(" << b_lo
+    this->stream << "tl::tcgen05_mma_1sm_ts_128x64_bmn_x2((void const*)(" << b_lo
                  << "), (void const*)(" << b_hi << "), " << a_tmem << ", "
                  << c_tmem << ", " << accum << ");\n";
-    this->PrintIndent();
-    this->stream << "}\n";
-  } else if (op->op.same_as(tl::tcgen05_mma_warp_1sm_skv())) {
-    ICHECK_EQ(op->args.size(), 32U)
-        << "tcgen05_mma_warp_1sm_skv expects 32 args";
-    this->PrintIndent();
-    need_tcgen05_common_h_ = true;
-    auto ptr_expr = [this](const PrimExpr &expr) {
-      return this->PrintExpr(expr);
-    };
-    auto mbar_ptr = [this](const PrimExpr &expr) {
-      return "(void const*)(&" + this->PrintExpr(expr) + ")";
-    };
-    this->stream << "tl::tcgen05_mma_warp_1sm_skv_fast("
-                 << "(void const*)(" << ptr_expr(op->args[0]) << "), "
-                 << "(void const*)(" << ptr_expr(op->args[2]) << "), "
-                 << mbar_ptr(op->args[5]) << ", " << mbar_ptr(op->args[6])
-                 << ", " << mbar_ptr(op->args[7]) << ", "
-                 << mbar_ptr(op->args[10]) << ", "
-                 << mbar_ptr(op->args[20]) << ", "
-                 << mbar_ptr(op->args[21]) << ", "
-                 << mbar_ptr(op->args[13]) << ", "
-                 << mbar_ptr(op->args[14]) << ", "
-                 << mbar_ptr(op->args[15]) << ", "
-                 << mbar_ptr(op->args[16]) << ", "
-                 << mbar_ptr(op->args[17]) << ", "
-                 << mbar_ptr(op->args[18]) << ", "
-                 << mbar_ptr(op->args[19]) << ", "
-                 << this->PrintExpr(op->args[22]) << ", "
-                 << this->PrintExpr(op->args[23]) << ", "
-                 << this->PrintExpr(op->args[24]) << ", "
-                 << this->PrintExpr(op->args[25]) << ", "
-                 << this->PrintExpr(op->args[26]) << ", "
-                 << this->PrintExpr(op->args[27]) << ", "
-                 << this->PrintExpr(op->args[28]) << ", "
-                 << this->PrintExpr(op->args[29]) << ", "
-                 << this->PrintExpr(op->args[31]) << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_producer_warp_1sm_skv())) {
-    ICHECK_EQ(op->args.size(), 17U)
-        << "tcgen05_producer_warp_1sm_skv expects 17 args";
-    this->PrintIndent();
-    need_tcgen05_common_h_ = true;
-    auto ptr_expr = [this](const PrimExpr &expr) {
-      return this->PrintExpr(expr);
-    };
-    auto mbar_ptr = [this](const PrimExpr &expr) {
-      return "(void const*)(&" + this->PrintExpr(expr) + ")";
-    };
-    this->stream << "tl::tcgen05_producer_warp_1sm_skv("
-                 << this->PrintExpr(op->args[0]) << ", "
-                 << this->PrintExpr(op->args[1]) << ", "
-                 << this->PrintExpr(op->args[2]) << ", "
-                 << "(void*)(" << ptr_expr(op->args[3]) << "), "
-                 << "(void*)(" << ptr_expr(op->args[4]) << "), "
-                 << mbar_ptr(op->args[5]) << ", "
-                 << mbar_ptr(op->args[6]) << ", "
-                 << mbar_ptr(op->args[7]) << ", "
-                 << mbar_ptr(op->args[8]) << ", "
-                 << mbar_ptr(op->args[9]) << ", "
-                 << mbar_ptr(op->args[10]) << ", "
-                 << this->PrintExpr(op->args[11]) << ", "
-                 << this->PrintExpr(op->args[12]) << ", "
-                 << this->PrintExpr(op->args[13]) << ", "
-                 << this->PrintExpr(op->args[14]) << ", "
-                 << this->PrintExpr(op->args[15]) << ", "
-                 << this->PrintExpr(op->args[16]) << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_producer_warp_1sm_reuse3())) {
-    ICHECK_EQ(op->args.size(), 23U)
-        << "tcgen05_producer_warp_1sm_reuse3 expects 23 args";
-    this->PrintIndent();
-    need_tcgen05_common_h_ = true;
-    auto ptr_expr = [this](const PrimExpr &expr) {
-      return this->PrintExpr(expr);
-    };
-    auto mbar_ptr = [this](const PrimExpr &expr) {
-      return "(void const*)(&" + this->PrintExpr(expr) + ")";
-    };
-    this->stream << "tl::tcgen05_producer_warp_1sm_reuse3("
-                 << this->PrintExpr(op->args[0]) << ", "
-                 << this->PrintExpr(op->args[1]) << ", "
-                 << this->PrintExpr(op->args[2]) << ", "
-                 << "(void*)(" << ptr_expr(op->args[3]) << "), "
-                 << "(void*)(" << ptr_expr(op->args[4]) << "), "
-                 << "(void*)(" << ptr_expr(op->args[5]) << "), "
-                 << "(void*)(" << ptr_expr(op->args[6]) << "), "
-                 << "(void*)(" << ptr_expr(op->args[7]) << "), "
-                 << mbar_ptr(op->args[8]) << ", "
-                 << mbar_ptr(op->args[9]) << ", "
-                 << mbar_ptr(op->args[10]) << ", "
-                 << mbar_ptr(op->args[11]) << ", "
-                 << mbar_ptr(op->args[12]) << ", "
-                 << mbar_ptr(op->args[13]) << ", "
-                 << mbar_ptr(op->args[14]) << ", "
-                 << mbar_ptr(op->args[15]) << ", "
-                 << mbar_ptr(op->args[16]) << ", "
-                 << mbar_ptr(op->args[17]) << ", "
-                 << this->PrintExpr(op->args[18]) << ", "
-                 << this->PrintExpr(op->args[19]) << ", "
-                 << this->PrintExpr(op->args[20]) << ", "
-                 << this->PrintExpr(op->args[21]) << ", "
-                 << this->PrintExpr(op->args[22]) << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_tma_load_128x128())) {
-    ICHECK_EQ(op->args.size(), 6U)
-        << "tcgen05_tma_load_128x128 expects 6 args";
-    this->PrintIndent();
-    need_tcgen05_common_h_ = true;
-    this->stream << "tl::tcgen05_tma_load_128x128("
-                 << this->PrintExpr(op->args[0]) << ", "
-                 << "(void*)(" << this->PrintExpr(op->args[1]) << "), "
-                 << this->PrintExpr(op->args[2]) << ", "
-                 << this->PrintExpr(op->args[3]) << ", "
-                 << this->PrintExpr(op->args[4]) << ", "
-                 << this->PrintExpr(op->args[5]) << ");\n";
   } else if (op->op.same_as(tl::tcgen05_mbarrier_arrive_expect_tx_ref())) {
     ICHECK_EQ(op->args.size(), 2U)
         << "tcgen05_mbarrier_arrive_expect_tx_ref expects 2 args";
@@ -4343,9 +4065,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << "tl::tcgen05_arrive_expect_tx((void const*)(&("
                  << this->PrintExpr(op->args[0]) << ")), uint32_t("
                  << this->PrintExpr(op->args[1]) << "));\n";
-  } else if (op->op.same_as(tl::tcgen05_mbarrier_arrive_expect_tx_cluster_ref())) {
+  } else if (op->op.same_as(tl::tcgen05_mbarrier_arrive_expect_tx_cluster_lane0_ref())) {
     ICHECK_EQ(op->args.size(), 2U)
-        << "tcgen05_mbarrier_arrive_expect_tx_cluster_ref expects 2 args";
+        << "tcgen05_mbarrier_arrive_expect_tx_cluster_lane0_ref expects 2 args";
     this->PrintIndent();
     need_tcgen05_common_h_ = true;
     this->stream
@@ -4363,7 +4085,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     ICHECK_EQ(op->args.size(), 5U) << "tma_load_2cta_2d expects 5 args";
     this->PrintIndent();
     need_tcgen05_common_h_ = true;
-    this->stream << "tl::tma_load_2sm_avo(&" << this->PrintExpr(op->args[0])
+    this->stream << "tl::tma_load_2sm_raw(&" << this->PrintExpr(op->args[0])
                  << ", (void const*)(" << this->PrintExpr(op->args[1])
                  << "), (void const*)(&(" << this->PrintExpr(op->args[2])
                  << ")), " << this->PrintExpr(op->args[3]) << ", "
@@ -4386,7 +4108,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       predicate_scope = this->BeginScope();
     }
     this->PrintIndent();
-    this->stream << "tl::tma_store_2d_avo(&" << this->PrintExpr(op->args[0])
+    this->stream << "tl::tma_store_2d_raw(&" << this->PrintExpr(op->args[0])
                  << ", (void const*)(" << this->PrintExpr(op->args[1])
                  << "), " << this->PrintExpr(op->args[2]) << ", "
                  << this->PrintExpr(op->args[3]) << ");\n";
@@ -4402,47 +4124,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     need_tcgen05_common_h_ = true;
     this->stream << "tl::tcgen05_mbarrier_arrive_local_all((void const*)(&("
                  << this->PrintExpr(op->args[0]) << ")));\n";
-  } else if (op->op.same_as(tl::tcgen05_mma_warp_1sm_reuse3())) {
-    ICHECK_EQ(op->args.size(), 29U)
-        << "tcgen05_mma_warp_1sm_reuse3 expects 29 args";
-    this->PrintIndent();
-    need_tcgen05_common_h_ = true;
-    auto ptr_expr = [this](const PrimExpr &expr) {
-      return this->PrintExpr(expr);
-    };
-    auto mbar_ptr = [this](const PrimExpr &expr) {
-      return "(void const*)(&" + this->PrintExpr(expr) + ")";
-    };
-    this->stream << "tl::tcgen05_mma_warp_1sm_reuse3("
-                 << "(void const*)(" << ptr_expr(op->args[0]) << "), "
-                 << "(void const*)(" << ptr_expr(op->args[1]) << "), "
-                 << "(void*)(" << ptr_expr(op->args[2]) << "), "
-                 << "(void*)(" << ptr_expr(op->args[3]) << "), "
-                 << "(void*)(" << ptr_expr(op->args[4]) << "), "
-                 << mbar_ptr(op->args[5]) << ", "
-                 << mbar_ptr(op->args[6]) << ", "
-                 << mbar_ptr(op->args[7]) << ", "
-                 << mbar_ptr(op->args[8]) << ", "
-                 << mbar_ptr(op->args[9]) << ", "
-                 << mbar_ptr(op->args[10]) << ", "
-                 << mbar_ptr(op->args[11]) << ", "
-                 << mbar_ptr(op->args[12]) << ", "
-                 << mbar_ptr(op->args[13]) << ", "
-                 << mbar_ptr(op->args[14]) << ", "
-                 << mbar_ptr(op->args[15]) << ", "
-                 << mbar_ptr(op->args[16]) << ", "
-                 << mbar_ptr(op->args[17]) << ", "
-                 << mbar_ptr(op->args[18]) << ", "
-                 << mbar_ptr(op->args[19]) << ", "
-                 << mbar_ptr(op->args[20]) << ", "
-                 << mbar_ptr(op->args[21]) << ", "
-                 << this->PrintExpr(op->args[22]) << ", "
-                 << this->PrintExpr(op->args[23]) << ", "
-                 << this->PrintExpr(op->args[24]) << ", "
-                 << this->PrintExpr(op->args[25]) << ", "
-                 << this->PrintExpr(op->args[26]) << ", "
-                 << this->PrintExpr(op->args[27]) << ", "
-                 << this->PrintExpr(op->args[28]) << ");\n";
   } else if (op->op.same_as(tl::tcgen05_wait_barrier_ref())) {
     ICHECK_EQ(op->args.size(), 2U)
         << "tcgen05_wait_barrier_ref expects 2 args";
@@ -4459,52 +4140,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << "tl::tcgen05_wait_barrier((void const*)(&"
                  << this->PrintExpr(op->args[0]) << "), uint32_t("
                  << this->PrintExpr(op->args[1]) << "));\n";
-  } else if (op->op.same_as(tl::tcgen05_epilogue_warp_1sm_skv())) {
-    ICHECK_EQ(op->args.size(), 8U)
-        << "tcgen05_epilogue_warp_1sm_skv expects 8 args";
-    this->PrintIndent();
-    need_tcgen05_common_h_ = true;
-    auto desc_expr = [this](const PrimExpr &expr) -> std::string {
-      if (const auto *str = expr.as<StringImmNode>()) {
-        return std::string(str->value);
-      }
-      return this->PrintExpr(expr);
-    };
-    auto ptr_expr = [this](const PrimExpr &expr) {
-      return this->PrintExpr(expr);
-    };
-    auto mbar_ptr = [this](const PrimExpr &expr) {
-      return "(void const*)(&" + this->PrintExpr(expr) + ")";
-    };
-    this->stream << "tl::tcgen05_epilogue_warp_1sm_skv("
-                 << desc_expr(op->args[0]) << ", "
-                 << "(void const*)(" << ptr_expr(op->args[1]) << "), "
-                 << mbar_ptr(op->args[2]) << ", "
-                 << mbar_ptr(op->args[3]) << ", "
-                 << this->PrintExpr(op->args[4]) << ", "
-                 << this->PrintExpr(op->args[5]) << ", "
-                 << this->PrintExpr(op->args[6]) << ", "
-                 << this->PrintExpr(op->args[7]) << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_epilogue_tma_store_32x128())) {
-    ICHECK_EQ(op->args.size(), 5U)
-        << "tcgen05_epilogue_tma_store_32x128 expects 5 args";
-    this->PrintIndent();
-    need_tcgen05_common_h_ = true;
-    auto desc_expr = [this](const PrimExpr &expr) -> std::string {
-      if (const auto *str = expr.as<StringImmNode>()) {
-        return std::string(str->value);
-      }
-      return this->PrintExpr(expr);
-    };
-    auto ptr_expr = [this](const PrimExpr &expr) {
-      return this->PrintExpr(expr);
-    };
-    this->stream << "tl::tcgen05_epilogue_tma_store_32x128("
-                 << desc_expr(op->args[0]) << ", "
-                 << "(void const*)(" << ptr_expr(op->args[1]) << "), "
-                 << this->PrintExpr(op->args[2]) << ", "
-                 << this->PrintExpr(op->args[3]) << ", "
-                 << this->PrintExpr(op->args[4]) << ");\n";
   } else if (op->op.same_as(tl::tcgen05_commit_1sm_op())) {
     ICHECK_EQ(op->args.size(), 1U)
         << "tcgen05_commit_1sm_op expects 1 arg: mbar_ptr";
@@ -4516,13 +4151,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->stream << "tl::tcgen05_commit_1sm_lane0((void const*)(&"
                    << mbar << "));\n";
     } else {
-      // Warp-12 guard; commit has elect_one internally
-      this->stream << "if ((((int)threadIdx.x) >> 5) == 12) {\n";
-      this->PrintIndent();
-      this->stream << "  tl::tcgen05_commit_1sm((void const*)(&"
+      this->stream << "tl::tcgen05_commit_1sm((void const*)(&"
                    << mbar << "));\n";
-      this->PrintIndent();
-      this->stream << "}\n";
     }
   } else if (op->op.same_as(tl::tcgen05_commit_2cta_op())) {
     ICHECK_EQ(op->args.size(), 1U)
@@ -5338,7 +4968,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
     }
     return true;
   } else if (op->op.same_as(tl::exp2_poly())) {
-    // Degree-3 minimax polynomial exp2 on CUDA cores (FA4 EXP2_POLY pattern).
+    // Degree-3 minimax polynomial exp2 on CUDA cores.
     // Uses FMA units instead of SFU for higher throughput when exp2 is the
     // bottleneck. Accurate to ~20 bits on [-127, 127].
     if (op->dtype.is_float() && op->dtype.bits() == 32 &&
