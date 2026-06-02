@@ -255,7 +255,16 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         """Resolve a dynamic shape/stride variable from the first live tensor source."""
         candidates = self._lookup_dynamic_symbolic_candidates(v)
         non_tensor_values: list[tuple[int, Any]] = []
+        has_shape_candidate = False
+        has_stride_candidate = False
         for ref_id, buffer_idx, dim_idx in candidates:
+            if ref_id == 0:
+                has_shape_candidate = True
+            elif ref_id == 1:
+                has_stride_candidate = True
+            else:
+                raise ValueError(f"Unknown dynamic symbol ref id: {ref_id}")
+
             ref_val = param_values[buffer_idx]
             if not isinstance(ref_val, torch.Tensor):
                 non_tensor_values.append((buffer_idx, ref_val))
@@ -264,7 +273,13 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
                 return ref_val.shape[dim_idx]
             if ref_id == 1:
                 return ref_val.stride()[dim_idx]
-            raise ValueError(f"Unknown dynamic symbol ref id: {ref_id}")
+
+        # Optional strided tensors can be absent from a lowered kernel variant
+        # while their dynamic stride remains in the host wrapper ABI. Shape
+        # symbols still require a live tensor source because they determine
+        # output allocation and launch dimensions.
+        if has_stride_candidate and not has_shape_candidate:
+            return 0
 
         details = ", ".join(f"param {buffer_idx}: {type(ref_val).__name__}" for buffer_idx, ref_val in non_tensor_values)
         raise TypeError(f"Dynamic symbolic var {v} has no live tensor source among candidates ({details})")
