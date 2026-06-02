@@ -8,7 +8,6 @@ from tvm.tirx import PrimFunc
 import tilelang
 from tilelang import tvm
 from tilelang import env
-from tilelang.backend.execution_backend import resolve_execution_backend_spec
 from tvm.target import Target
 from tilelang.engine.param import CompiledArtifact, KernelParam
 from tilelang.jit.adapter import (
@@ -19,6 +18,7 @@ from tilelang.jit.adapter import (
     TVMFFIKernelAdapter,
     MetalKernelAdapter,
 )
+from tilelang.jit.execution_backend import resolve_execution_backend_spec
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.backend.target import determine_target
 from tilelang.contrib import nvcc as tl_nvcc
@@ -106,11 +106,10 @@ class JITKernel(Generic[_P, _T]):
 
         # The wrapper is normalized here because lower/codegen still consume TVM Target.
         self.target = determine_target(target, return_object=True)
-
         self.execution_backend_spec = resolve_execution_backend_spec(execution_backend, self.target)
         self.execution_backend = self.execution_backend_spec.name
 
-        if self.execution_backend == "cython":
+        if self.execution_backend_spec.adapter == "cython":
             from tilelang.contrib.cc import get_cplus_compiler
 
             assert get_cplus_compiler() is not None, "Cython backend requires a C++ compiler, please install or use other backends."
@@ -219,6 +218,7 @@ class JITKernel(Generic[_P, _T]):
         target_host = self.target_host
 
         execution_backend = self.execution_backend
+        execution_backend_spec = self.execution_backend_spec
         pass_configs = dict(self.pass_configs) if self.pass_configs else {}
 
         compile_flags = self.compile_flags
@@ -228,9 +228,9 @@ class JITKernel(Generic[_P, _T]):
                 compile_flags_cfg + compile_flags if compile_flags_cfg is not None else compile_flags
             )
 
-        # Compile the function with TVM, optimizing with shared memory lowering.
-        enable_host_codegen = self.execution_backend_spec.enable_host_codegen
-        enable_device_compile = self.execution_backend_spec.enable_device_compile
+        # The compiler backend owns how each execution backend should request codegen.
+        enable_host_codegen = execution_backend_spec.enable_host_codegen
+        enable_device_compile = execution_backend_spec.enable_device_compile
 
         # Additional pass instruments
         pass_instruments = []
@@ -268,8 +268,9 @@ class JITKernel(Generic[_P, _T]):
             with jit_phase("adapter", verbose=verbose, **phase_context):
                 return adapter_cls(**kwargs)
 
-        # Create an adapter based on the specified execution backend.
-        if execution_backend == "tvm_ffi":
+        # Create an adapter based on the backend-resolved adapter key.
+        adapter_name = execution_backend_spec.adapter
+        if adapter_name == "tvm_ffi":
             # Use TVMFFIKernelAdapter for interoperability with PyTorch via DLPack.
             # But we need to ensure that the runtime is enabled and the runtime module is not None.
             assert artifact.rt_mod is not None, "tvm_ffi backend requires a runtime module."
@@ -287,7 +288,7 @@ class JITKernel(Generic[_P, _T]):
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
             )
-        elif execution_backend == "cython":
+        elif adapter_name == "cython":
             adapter = create_adapter(
                 CythonKernelAdapter,
                 params=artifact.params,
@@ -301,7 +302,7 @@ class JITKernel(Generic[_P, _T]):
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
             )
-        elif execution_backend == "nvrtc":
+        elif adapter_name == "nvrtc":
             from tilelang.jit.adapter import NVRTCKernelAdapter
 
             adapter = create_adapter(
@@ -317,7 +318,7 @@ class JITKernel(Generic[_P, _T]):
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
             )
-        elif execution_backend == "torch":
+        elif adapter_name == "torch":
             assert is_metal_target(target)
             adapter = create_adapter(
                 MetalKernelAdapter,
@@ -332,7 +333,7 @@ class JITKernel(Generic[_P, _T]):
                 # pass_configs=pass_configs,
                 # compile_flags=compile_flags,
             )
-        elif execution_backend == "cutedsl":
+        elif adapter_name == "cutedsl":
             assert is_cutedsl_target(target)
             adapter = create_adapter(
                 CuTeDSLKernelAdapter,
@@ -348,8 +349,7 @@ class JITKernel(Generic[_P, _T]):
                 compile_flags=compile_flags,
             )
         else:
-            # Handle invalid backend.
-            raise ValueError(f"Invalid execution backend: {execution_backend}")
+            raise ValueError(f"Execution backend {execution_backend!r} resolved unknown JIT adapter {adapter_name!r}")
 
         if capture_resources:
             self._resource_usage = pop_recorded()
@@ -370,9 +370,10 @@ class JITKernel(Generic[_P, _T]):
     ) -> BaseKernelAdapter:
         target = self.target
         execution_backend = self.execution_backend
+        adapter_name = self.execution_backend_spec.adapter
 
-        # Create an adapter based on the specified execution backend.
-        if execution_backend == "tvm_ffi":
+        # Create an adapter based on the backend-resolved adapter key.
+        if adapter_name == "tvm_ffi":
             adapter = TVMFFIKernelAdapter.from_database(
                 params=params,
                 result_idx=result_idx,
@@ -384,7 +385,7 @@ class JITKernel(Generic[_P, _T]):
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
             )
-        elif execution_backend == "cython":
+        elif adapter_name == "cython":
             adapter = CythonKernelAdapter.from_database(
                 params=params,
                 result_idx=result_idx,
@@ -395,7 +396,7 @@ class JITKernel(Generic[_P, _T]):
                 kernel_lib_path=kernel_lib_path,
                 pass_configs=pass_configs,
             )
-        elif execution_backend == "nvrtc":
+        elif adapter_name == "nvrtc":
             from tilelang.jit.adapter import NVRTCKernelAdapter
 
             adapter = NVRTCKernelAdapter.from_database(
@@ -409,7 +410,7 @@ class JITKernel(Generic[_P, _T]):
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
             )
-        elif execution_backend == "cutedsl":
+        elif adapter_name == "cutedsl":
             adapter = CuTeDSLKernelAdapter.from_database(
                 params=params,
                 result_idx=result_idx,
@@ -422,8 +423,7 @@ class JITKernel(Generic[_P, _T]):
                 compile_flags=compile_flags,
             )
         else:
-            # Handle invalid backend.
-            raise ValueError(f"Invalid execution backend: {execution_backend}")
+            raise ValueError(f"Execution backend {execution_backend!r} resolved unknown or uncached JIT adapter {adapter_name!r}")
 
         return adapter
 
