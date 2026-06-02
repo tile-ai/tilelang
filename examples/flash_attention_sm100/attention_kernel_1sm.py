@@ -31,6 +31,49 @@ PASS_CFG = {
     "tl.outline_warp_spec_branches": True,
 }
 
+ATTENTION_1SM_EXTERN_SOURCE = r"""
+#include <tl_templates/cuda/copy.h>
+
+namespace tl {
+
+__device__ __forceinline__ void
+tcgen05_softmax_pack_4(uint32_t &h0, uint32_t &h1, float const *sv,
+                       float &psa0, float &psa1, int elem_base) {
+  constexpr int kBlockN = 128;
+  constexpr int kEx2EmuFreq = 10;
+  constexpr int kEx2EmuRes = 4;
+  constexpr int kEx2EmuStartFrg = 1;
+  constexpr int kEx2FragSize = 32;
+  bfloat16_t h[4];
+  #pragma unroll
+  for (int i = 0; i < 4; i += 2) {
+    int elem = elem_base + i;
+    float p0, p1;
+    int frag = elem / kEx2FragSize;
+    int k_in_frag = elem % kEx2FragSize;
+    if (kEx2EmuFreq > 0 && frag >= kEx2EmuStartFrg &&
+        frag < (kBlockN / kEx2FragSize - 1) &&
+        (k_in_frag % kEx2EmuFreq) >= (kEx2EmuFreq - kEx2EmuRes)) {
+      tl::tcgen05_exp2_poly_2(p0, p1, sv[i], sv[i + 1]);
+    } else {
+      p0 = tl::tcgen05_exp2f_approx(sv[i]);
+      p1 = tl::tcgen05_exp2f_approx(sv[i + 1]);
+    }
+    if (i == 0) {
+      psa0 += p0 + p1;
+    } else {
+      psa1 += p0 + p1;
+    }
+    h[i] = bfloat16_t(p0);
+    h[i + 1] = bfloat16_t(p1);
+  }
+  h0 = *reinterpret_cast<uint32_t *>(&h[0]);
+  h1 = *reinterpret_cast<uint32_t *>(&h[2]);
+}
+
+}  // namespace tl
+"""
+
 
 @tilelang.jit(out_idx=[3], pass_configs=PASS_CFG, target="cuda -arch=sm_100")
 def attention_kernel_1sm(
@@ -271,7 +314,9 @@ def attention_kernel_1sm(
                 for g_iter in T.unroll(2):
                     g = 8 - g_iter * 8
                     elem_base = cc + g
-                    T.tcgen05_softmax_pack_4(
+                    T.call_extern(
+                        "void",
+                        "tl::tcgen05_softmax_pack_4",
                         h0,
                         h1,
                         T.access_ptr(sv[elem_base], "r", 4),
@@ -279,7 +324,9 @@ def attention_kernel_1sm(
                         psa[1],
                         elem_base,
                     )
-                    T.tcgen05_softmax_pack_4(
+                    T.call_extern(
+                        "void",
+                        "tl::tcgen05_softmax_pack_4",
                         h2,
                         h3,
                         T.access_ptr(sv[elem_base + 4], "r", 4),
@@ -320,6 +367,7 @@ def attention_kernel_1sm(
             batch,
             threads=kq2_threads,
             cluster_dims=1,
+            prelude=ATTENTION_1SM_EXTERN_SOURCE,
         ) as (bx, by, bz):
             T.annotate_min_blocks_per_sm(1)
             Q0_shared = T.alloc_shared([kq2_block_M, dim], dtype)

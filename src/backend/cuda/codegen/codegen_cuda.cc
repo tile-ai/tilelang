@@ -1207,7 +1207,28 @@ void CodeGenTileLangCUDA::VisitStmt_(const LetStmtNode *op) {
       }
     }
   }
-  CodeGenC::VisitStmt_(op);
+  std::string value = PrintExpr(op->value);
+  if (print_ssa_form_) {
+    ICHECK(!var_idmap_.count(op->var.get()));
+    var_idmap_[op->var.get()] = value;
+  } else {
+    PrintIndent();
+    if (op->var.dtype() == DataType::Handle() &&
+        handle_data_type_.count(op->var.get())) {
+      PrintType(handle_data_type_.at(op->var.get()), stream);
+      stream << "* " << AllocVarID(op->var.get()) << " = (";
+      PrintType(handle_data_type_.at(op->var.get()), stream);
+      stream << "*)" << value << ";\n";
+    } else {
+      PrintType(op->var.dtype(), this->stream);
+      stream << ' ' << AllocVarID(op->var.get()) << " = " << value << ";\n";
+      if (outline_warp_spec_enabled_ && !in_outlined_fn_) {
+        scalar_var_infos_.push_back(
+            {op->var.get(), GetVarID(op->var.get()), op->var.dtype()});
+      }
+    }
+  }
+  PrintStmt(op->body);
 }
 
 void CodeGenTileLangCUDA::VisitStmt_(const BlockNode *op) {
@@ -2803,20 +2824,19 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
        << this->PrintExpr(op->args[1]) << ")";
     return;
   }
-  if (op->op.same_as(tl::tcgen05_fa4_uma_tile_valid())) {
-    ICHECK_EQ(op->args.size(), 3U)
-        << "tcgen05_fa4_uma_tile_valid expects 3 args";
-    os << "tl::tcgen05_fa4_uma_tile_id(" << this->PrintExpr(op->args[0])
-       << ", " << this->PrintExpr(op->args[1]) << ") < "
-       << this->PrintExpr(op->args[2]);
+  if (op->op.same_as(tl::tcgen05_rcp_approx_ftz())) {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "tcgen05_rcp_approx_ftz expects 1 arg";
+    os << "tl::tcgen05_rcp_approx_ftz(" << this->PrintExpr(op->args[0])
+       << ")";
     need_tcgen05_common_h_ = true;
     return;
   }
-  if (op->op.same_as(tl::tcgen05_fa4_uma_tile_id())) {
-    ICHECK_EQ(op->args.size(), 2U)
-        << "tcgen05_fa4_uma_tile_id expects 2 args";
-    os << "tl::tcgen05_fa4_uma_tile_id(" << this->PrintExpr(op->args[0])
-       << ", " << this->PrintExpr(op->args[1]) << ")";
+  if (op->op.same_as(tl::tcgen05_exp2f_approx())) {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "tcgen05_exp2f_approx expects 1 arg";
+    os << "tl::tcgen05_exp2f_approx(" << this->PrintExpr(op->args[0])
+       << ")";
     need_tcgen05_common_h_ = true;
     return;
   }
@@ -3936,6 +3956,19 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         << "tcgen05_fence_tmem_load expects no arguments";
     need_tcgen05_common_h_ = true;
     this->stream << "tl::fence_view_async_tmem_load();\n";
+  } else if (op->op.same_as(tl::tcgen05_bar_arrive())) {
+    ICHECK_EQ(op->args.size(), 2U) << "tcgen05_bar_arrive expects 2 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::tcgen05_bar_arrive("
+                 << this->PrintExpr(op->args[0]) << ", "
+                 << this->PrintExpr(op->args[1]) << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_bar_sync())) {
+    ICHECK_EQ(op->args.size(), 2U) << "tcgen05_bar_sync expects 2 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::tcgen05_bar_sync(" << this->PrintExpr(op->args[0])
+                 << ", " << this->PrintExpr(op->args[1]) << ");\n";
   } else if (op->op.same_as(tl::tcgen05_correction_x16()) ||
              op->op.same_as(tl::tcgen05_correction_x16_skip())) {
     this->PrintIndent();
@@ -4052,20 +4085,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << this->PrintExpr(op->args[2]) << ", "
                  << this->PrintExpr(op->args[3]) << ", "
                  << this->PrintExpr(op->args[4]) << ", "
-                 << this->PrintExpr(op->args[5]) << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_softmax_pack_4())) {
-    ICHECK_EQ(op->args.size(), 6U)
-        << "tcgen05_softmax_pack_4 expects 6 args";
-    this->PrintIndent();
-    need_tcgen05_common_h_ = true;
-    auto ref_of = [this](const PrimExpr &expr) {
-      return "(&(" + this->PrintExpr(expr) + "))";
-    };
-    this->stream << "tl::tcgen05_softmax_pack_4(*"
-                 << ref_of(op->args[0]) << ", *" << ref_of(op->args[1])
-                 << ", " << "(float const *)(" << this->PrintExpr(op->args[2])
-                 << "), *" << ref_of(op->args[3]) << ", *"
-                 << ref_of(op->args[4]) << ", "
                  << this->PrintExpr(op->args[5]) << ");\n";
   } else if (op->op.same_as(tl::tcgen05_softmax_128x128())) {
     ICHECK_EQ(op->args.size(), 17U)
@@ -4324,6 +4343,65 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << "tl::tcgen05_arrive_expect_tx((void const*)(&("
                  << this->PrintExpr(op->args[0]) << ")), uint32_t("
                  << this->PrintExpr(op->args[1]) << "));\n";
+  } else if (op->op.same_as(tl::tcgen05_mbarrier_arrive_expect_tx_cluster_ref())) {
+    ICHECK_EQ(op->args.size(), 2U)
+        << "tcgen05_mbarrier_arrive_expect_tx_cluster_ref expects 2 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    this->stream
+        << "tl::tcgen05_mbarrier_arrive_expect_tx_cluster_lane0((void const*)(&("
+        << this->PrintExpr(op->args[0]) << ")), uint32_t("
+        << this->PrintExpr(op->args[1]) << "));\n";
+  } else if (op->op.same_as(tl::tcgen05_mbarrier_arrive_cluster_all_ref())) {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "tcgen05_mbarrier_arrive_cluster_all_ref expects 1 arg";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::tcgen05_mbarrier_arrive_cluster_all((void const*)(&("
+                 << this->PrintExpr(op->args[0]) << ")));\n";
+  } else if (op->op.same_as(tl::tma_load_2cta_2d())) {
+    ICHECK_EQ(op->args.size(), 5U) << "tma_load_2cta_2d expects 5 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::tma_load_2sm_avo(&" << this->PrintExpr(op->args[0])
+                 << ", (void const*)(" << this->PrintExpr(op->args[1])
+                 << "), (void const*)(&(" << this->PrintExpr(op->args[2])
+                 << ")), " << this->PrintExpr(op->args[3]) << ", "
+                 << this->PrintExpr(op->args[4]) << ");\n";
+  } else if (op->op.same_as(tl::tma_store_2d())) {
+    ICHECK(op->args.size() == 4U || op->args.size() == 5U)
+        << "tma_store_2d expects 4 args plus an optional predicate";
+    need_tcgen05_common_h_ = true;
+    bool has_predicate = op->args.size() == 5U;
+    PrimExpr predicate;
+    if (has_predicate) {
+      predicate = arith::Analyzer().Simplify(op->args[4]);
+      if (is_zero(predicate)) return;
+      has_predicate = !is_one(predicate);
+    }
+    int predicate_scope = 0;
+    if (has_predicate) {
+      this->PrintIndent();
+      this->stream << "if (" << this->PrintExpr(predicate) << ") {\n";
+      predicate_scope = this->BeginScope();
+    }
+    this->PrintIndent();
+    this->stream << "tl::tma_store_2d_avo(&" << this->PrintExpr(op->args[0])
+                 << ", (void const*)(" << this->PrintExpr(op->args[1])
+                 << "), " << this->PrintExpr(op->args[2]) << ", "
+                 << this->PrintExpr(op->args[3]) << ");\n";
+    if (has_predicate) {
+      this->EndScope(predicate_scope);
+      this->PrintIndent();
+      this->stream << "}\n";
+    }
+  } else if (op->op.same_as(tl::tcgen05_mbarrier_arrive_local_all_ref())) {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "tcgen05_mbarrier_arrive_local_all_ref expects 1 arg";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::tcgen05_mbarrier_arrive_local_all((void const*)(&("
+                 << this->PrintExpr(op->args[0]) << ")));\n";
   } else if (op->op.same_as(tl::tcgen05_mma_warp_1sm_reuse3())) {
     ICHECK_EQ(op->args.size(), 29U)
         << "tcgen05_mma_warp_1sm_reuse3 expects 29 args";
@@ -4446,363 +4524,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->PrintIndent();
       this->stream << "}\n";
     }
-  } else if (op->op.same_as(tl::tcgen05_softmax_warp_2cta())) {
-    ICHECK_EQ(op->args.size(), 16U)
-        << "tcgen05_softmax_warp_2cta expects 16 args";
+  } else if (op->op.same_as(tl::tcgen05_commit_2cta_op())) {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "tcgen05_commit_2cta_op expects 1 arg: mbar_ptr";
     this->PrintIndent();
+    auto mbar = this->PrintExpr(op->args[0]);
     need_tcgen05_common_h_ = true;
-    auto ptr_expr = [this](const PrimExpr &expr) {
-      return this->PrintExpr(expr);
-    };
-    auto mbar_ptr = [this](const PrimExpr &expr) {
-      return "(void const*)(&" + this->PrintExpr(expr) + ")";
-    };
-    this->stream << "tl::tcgen05_softmax_warp_2cta("
-                 << this->PrintExpr(op->args[0]) << ", "
-                 << this->PrintExpr(op->args[1]) << ", "
-                 << "(void const*)(" << ptr_expr(op->args[2]) << "), "
-                 << "(void*)(" << ptr_expr(op->args[3]) << "), "
-                 << "(float*)(" << ptr_expr(op->args[4]) << "), "
-                 << mbar_ptr(op->args[5]) << ", "
-                 << mbar_ptr(op->args[6]) << ", "
-                 << mbar_ptr(op->args[7]) << ", "
-                 << mbar_ptr(op->args[8]) << ", "
-                 << mbar_ptr(op->args[9]) << ", "
-                 << this->PrintExpr(op->args[10]) << ", "
-                 << this->PrintExpr(op->args[11]) << ", "
-                 << this->PrintExpr(op->args[12]) << ", "
-                 << this->PrintExpr(op->args[13]) << ", "
-                 << this->PrintExpr(op->args[14]) << ", "
-                 << this->PrintExpr(op->args[15]) << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_correction_warp_2cta())) {
-    ICHECK_EQ(op->args.size(), 8U)
-        << "tcgen05_correction_warp_2cta expects 8 args";
-    this->PrintIndent();
-    need_tcgen05_common_h_ = true;
-    auto ptr_expr = [this](const PrimExpr &expr) {
-      return this->PrintExpr(expr);
-    };
-    auto mbar_ptr = [this](const PrimExpr &expr) {
-      return "(void const*)(&" + this->PrintExpr(expr) + ")";
-    };
-    this->stream << "tl::tcgen05_correction_warp_2cta("
-                 << "(float*)(" << ptr_expr(op->args[0]) << "), "
-                 << mbar_ptr(op->args[1]) << ", "
-                 << mbar_ptr(op->args[2]) << ", "
-                 << mbar_ptr(op->args[3]) << ", "
-                 << this->PrintExpr(op->args[4]) << ", "
-                 << this->PrintExpr(op->args[5]) << ", "
-                 << this->PrintExpr(op->args[6]) << ", "
-                 << this->PrintExpr(op->args[7]) << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_mma_warp_2cta())) {
-    ICHECK_EQ(op->args.size(), 22U)
-        << "tcgen05_mma_warp_2cta expects 22 args";
-    this->PrintIndent();
-    need_tcgen05_common_h_ = true;
-    auto ptr_expr = [this](const PrimExpr &expr) {
-      return this->PrintExpr(expr);
-    };
-    auto mbar_ptr = [this](const PrimExpr &expr) {
-      return "(void const*)(&" + this->PrintExpr(expr) + ")";
-    };
-    this->stream << "tl::tcgen05_mma_warp_2cta("
-                 << "(void const*)(" << ptr_expr(op->args[0]) << "), "
-                 << "(void const*)(" << ptr_expr(op->args[1]) << "), "
-                 << "(void const*)(" << ptr_expr(op->args[2]) << "), "
-                 << mbar_ptr(op->args[3]) << ", "
-                 << mbar_ptr(op->args[4]) << ", "
-                 << mbar_ptr(op->args[5]) << ", "
-                 << mbar_ptr(op->args[6]) << ", "
-                 << mbar_ptr(op->args[7]) << ", "
-                 << mbar_ptr(op->args[8]) << ", "
-                 << mbar_ptr(op->args[9]) << ", "
-                 << mbar_ptr(op->args[10]) << ", "
-                 << mbar_ptr(op->args[11]) << ", "
-                 << mbar_ptr(op->args[12]) << ", "
-                 << this->PrintExpr(op->args[13]) << ", "
-                 << this->PrintExpr(op->args[14]) << ", "
-                 << this->PrintExpr(op->args[15]) << ", "
-                 << this->PrintExpr(op->args[16]) << ", "
-                 << this->PrintExpr(op->args[17]) << ", "
-                 << this->PrintExpr(op->args[18]) << ", "
-                 << this->PrintExpr(op->args[19]) << ", "
-                 << this->PrintExpr(op->args[20]) << ", "
-                 << this->PrintExpr(op->args[21]) << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_producer_warp_2cta())) {
-    ICHECK_EQ(op->args.size(), 22U)
-        << "tcgen05_producer_warp_2cta expects 22 args";
-    this->PrintIndent();
-    need_tcgen05_common_h_ = true;
-    auto ptr_expr = [this](const PrimExpr &expr) {
-      return this->PrintExpr(expr);
-    };
-    auto mbar_ptr = [this](const PrimExpr &expr) {
-      return "(void const*)(&" + this->PrintExpr(expr) + ")";
-    };
-    this->stream << "tl::tcgen05_producer_warp_2cta("
-                 << "&" << this->PrintExpr(op->args[0]) << ", "
-                 << "&" << this->PrintExpr(op->args[1]) << ", "
-                 << "&" << this->PrintExpr(op->args[2]) << ", "
-                 << "(void*)(" << ptr_expr(op->args[3]) << "), "
-                 << "(void*)(" << ptr_expr(op->args[4]) << "), "
-                 << "(void*)(" << ptr_expr(op->args[5]) << "), "
-                 << mbar_ptr(op->args[6]) << ", "
-                 << mbar_ptr(op->args[7]) << ", "
-                 << mbar_ptr(op->args[8]) << ", "
-                 << mbar_ptr(op->args[9]) << ", "
-                 << mbar_ptr(op->args[10]) << ", "
-                 << this->PrintExpr(op->args[11]) << ", "
-                 << this->PrintExpr(op->args[12]) << ", "
-                 << this->PrintExpr(op->args[13]) << ", "
-                 << this->PrintExpr(op->args[14]) << ", "
-                 << this->PrintExpr(op->args[15]) << ", "
-                 << this->PrintExpr(op->args[16]) << ", "
-                 << this->PrintExpr(op->args[17]) << ", "
-                 << this->PrintExpr(op->args[18]) << ", "
-                 << this->PrintExpr(op->args[19]) << ", "
-                 << this->PrintExpr(op->args[20]) << ", "
-                 << this->PrintExpr(op->args[21]) << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_fa4_uma_softmax_warp_2cta())) {
-    ICHECK_EQ(op->args.size(), 11U)
-        << "tcgen05_fa4_uma_softmax_warp_2cta expects 11 args";
-    this->PrintIndent();
-    need_tcgen05_common_h_ = true;
-    auto ptr_expr = [this](const PrimExpr &expr) {
-      return this->PrintExpr(expr);
-    };
-    auto mbar_ptr = [this](const PrimExpr &expr) {
-      return "(void const*)(&" + this->PrintExpr(expr) + ")";
-    };
-    this->stream << "tl::tcgen05_fa4_uma_softmax_warp_2cta("
-                 << this->PrintExpr(op->args[0]) << ", "
-                 << this->PrintExpr(op->args[1]) << ", "
-                 << "(float*)(" << ptr_expr(op->args[2]) << "), "
-                 << "(float*)(" << ptr_expr(op->args[3]) << "), "
-                 << mbar_ptr(op->args[4]) << ", "
-                 << mbar_ptr(op->args[5]) << ", "
-                 << mbar_ptr(op->args[6]) << ", "
-                 << this->PrintExpr(op->args[7]) << ", "
-                 << this->PrintExpr(op->args[8]) << ", "
-                 << this->PrintExpr(op->args[9]) << ", "
-                 << this->PrintExpr(op->args[10]) << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_fa4_uma_correction_warp_2cta())) {
-    ICHECK_EQ(op->args.size(), 12U)
-        << "tcgen05_fa4_uma_correction_warp_2cta expects 12 args";
-    this->PrintIndent();
-    need_tcgen05_common_h_ = true;
-    auto ptr_expr = [this](const PrimExpr &expr) {
-      return this->PrintExpr(expr);
-    };
-    auto mbar_ptr = [this](const PrimExpr &expr) {
-      return "(void const*)(&" + this->PrintExpr(expr) + ")";
-    };
-    this->stream << "tl::tcgen05_fa4_uma_correction_warp_2cta("
-                 << "(void*)(" << ptr_expr(op->args[0]) << "), "
-                 << "(float*)(" << ptr_expr(op->args[1]) << "), "
-                 << "(float*)(" << ptr_expr(op->args[2]) << "), "
-                 << mbar_ptr(op->args[3]) << ", "
-                 << mbar_ptr(op->args[4]) << ", "
-                 << mbar_ptr(op->args[5]) << ", "
-                 << mbar_ptr(op->args[6]) << ", "
-                 << mbar_ptr(op->args[7]) << ", "
-                 << this->PrintExpr(op->args[8]) << ", "
-                 << this->PrintExpr(op->args[9]) << ", "
-                 << this->PrintExpr(op->args[10]) << ", "
-                 << this->PrintExpr(op->args[11]) << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_fa4_uma_mma_warp_2cta())) {
-    ICHECK_EQ(op->args.size(), 20U)
-        << "tcgen05_fa4_uma_mma_warp_2cta expects 20 args";
-    this->PrintIndent();
-    need_tcgen05_common_h_ = true;
-    auto ptr_expr = [this](const PrimExpr &expr) {
-      return this->PrintExpr(expr);
-    };
-    auto mbar_ref = [this](const PrimExpr &expr) {
-      return "(&" + this->PrintExpr(expr) + ")";
-    };
-    this->stream << "tl::tcgen05_fa4_uma_mma_warp_2cta("
-                 << this->PrintExpr(op->args[0]) << ", "
-                 << "(bfloat16_t const*)(" << ptr_expr(op->args[1]) << "), "
-                 << "(bfloat16_t const*)(" << ptr_expr(op->args[2]) << "), "
-                 << "(bfloat16_t const*)(" << ptr_expr(op->args[3]) << "), "
-                 << mbar_ref(op->args[4]) << ", "
-                 << mbar_ref(op->args[5]) << ", "
-                 << mbar_ref(op->args[6]) << ", "
-                 << mbar_ref(op->args[7]) << ", "
-                 << mbar_ref(op->args[8]) << ", "
-                 << mbar_ref(op->args[9]) << ", "
-                 << mbar_ref(op->args[10]) << ", "
-                 << mbar_ref(op->args[11]) << ", "
-                 << mbar_ref(op->args[12]) << ", "
-                 << mbar_ref(op->args[13]) << ", "
-                 << mbar_ref(op->args[14]) << ", "
-                 << mbar_ref(op->args[15]) << ", "
-                 << this->PrintExpr(op->args[16]) << ", "
-                 << this->PrintExpr(op->args[17]) << ", "
-                 << this->PrintExpr(op->args[18]) << ", "
-                 << this->PrintExpr(op->args[19]) << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_fa4_uma_producer_warp_2cta())) {
-    ICHECK_EQ(op->args.size(), 20U)
-        << "tcgen05_fa4_uma_producer_warp_2cta expects 20 args";
-    this->PrintIndent();
-    need_tcgen05_common_h_ = true;
-    auto ptr_expr = [this](const PrimExpr &expr) {
-      return this->PrintExpr(expr);
-    };
-    auto mbar_ptr = [this](const PrimExpr &expr) {
-      return "(void const*)(&" + this->PrintExpr(expr) + ")";
-    };
-    if (const auto *str = op->args[19].as<StringImmNode>()) {
-      ICHECK_EQ(std::string(str->value), "fa4_uma_schedule")
-          << "unknown fa4_uma producer schedule mode: " << str->value;
-      std::string tile_iter = this->PrintExpr(op->args[13]);
-      std::string grid_clusters = this->PrintExpr(op->args[14]);
-      std::string seq_len = this->PrintExpr(op->args[15]);
-      std::string heads = this->PrintExpr(op->args[16]);
-      std::string kv_heads = this->PrintExpr(op->args[17]);
-      std::string tile_phase = this->PrintExpr(op->args[18]);
-      this->stream
-          << "tl::tcgen05_fa4_uma_producer_warp_2cta_schedule("
-          << "&" << this->PrintExpr(op->args[0]) << ", "
-          << "&" << this->PrintExpr(op->args[1]) << ", "
-          << "&" << this->PrintExpr(op->args[2]) << ", "
-          << "(void*)(" << ptr_expr(op->args[3]) << "), "
-          << "(void*)(" << ptr_expr(op->args[4]) << "), "
-          << "(void*)(" << ptr_expr(op->args[5]) << "), "
-          << mbar_ptr(op->args[6]) << ", "
-          << mbar_ptr(op->args[7]) << ", "
-          << mbar_ptr(op->args[8]) << ", "
-          << mbar_ptr(op->args[9]) << ", "
-          << mbar_ptr(op->args[10]) << ", "
-          << mbar_ptr(op->args[11]) << ", "
-          << this->PrintExpr(op->args[12]) << ", "
-          << tile_iter << ", " << grid_clusters << ", " << seq_len << ", "
-          << heads << ", " << kv_heads << ", " << tile_phase << ");\n";
-    } else {
-      this->stream << "tl::tcgen05_fa4_uma_producer_warp_2cta("
-                   << "&" << this->PrintExpr(op->args[0]) << ", "
-                   << "&" << this->PrintExpr(op->args[1]) << ", "
-                   << "&" << this->PrintExpr(op->args[2]) << ", "
-                   << "(void*)(" << ptr_expr(op->args[3]) << "), "
-                   << "(void*)(" << ptr_expr(op->args[4]) << "), "
-                   << "(void*)(" << ptr_expr(op->args[5]) << "), "
-                   << mbar_ptr(op->args[6]) << ", "
-                   << mbar_ptr(op->args[7]) << ", "
-                   << mbar_ptr(op->args[8]) << ", "
-                   << mbar_ptr(op->args[9]) << ", "
-                   << mbar_ptr(op->args[10]) << ", "
-                   << mbar_ptr(op->args[11]) << ", "
-                   << this->PrintExpr(op->args[12]) << ", "
-                   << this->PrintExpr(op->args[13]) << ", "
-                   << this->PrintExpr(op->args[14]) << ", "
-                   << this->PrintExpr(op->args[15]) << ", "
-                   << this->PrintExpr(op->args[16]) << ", "
-                   << this->PrintExpr(op->args[17]) << ", "
-                   << this->PrintExpr(op->args[18]) << ", "
-                   << this->PrintExpr(op->args[19]) << ");\n";
-    }
-  } else if (op->op.same_as(tl::tcgen05_fa4_uma_producer_warp_2cta_schedule())) {
-    ICHECK_EQ(op->args.size(), 19U)
-        << "tcgen05_fa4_uma_producer_warp_2cta_schedule expects 19 args";
-    this->PrintIndent();
-    need_tcgen05_common_h_ = true;
-    auto ptr_expr = [this](const PrimExpr &expr) {
-      return this->PrintExpr(expr);
-    };
-    auto mbar_ptr = [this](const PrimExpr &expr) {
-      return "(void const*)(&" + this->PrintExpr(expr) + ")";
-    };
-    this->stream
-        << "tl::tcgen05_fa4_uma_producer_warp_2cta_schedule("
-        << "&" << this->PrintExpr(op->args[0]) << ", "
-        << "&" << this->PrintExpr(op->args[1]) << ", "
-        << "&" << this->PrintExpr(op->args[2]) << ", "
-        << "(void*)(" << ptr_expr(op->args[3]) << "), "
-        << "(void*)(" << ptr_expr(op->args[4]) << "), "
-        << "(void*)(" << ptr_expr(op->args[5]) << "), "
-        << mbar_ptr(op->args[6]) << ", "
-        << mbar_ptr(op->args[7]) << ", "
-        << mbar_ptr(op->args[8]) << ", "
-        << mbar_ptr(op->args[9]) << ", "
-        << mbar_ptr(op->args[10]) << ", "
-        << mbar_ptr(op->args[11]) << ", "
-        << this->PrintExpr(op->args[12]) << ", "
-        << this->PrintExpr(op->args[13]) << ", "
-        << this->PrintExpr(op->args[14]) << ", "
-        << this->PrintExpr(op->args[15]) << ", "
-        << this->PrintExpr(op->args[16]) << ", "
-        << this->PrintExpr(op->args[17]) << ", "
-        << this->PrintExpr(op->args[18]) << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_fa4_uma_epilogue_warp_2cta())) {
-    ICHECK_EQ(op->args.size(), 9U)
-        << "tcgen05_fa4_uma_epilogue_warp_2cta expects 9 args";
-    this->PrintIndent();
-    need_tcgen05_common_h_ = true;
-    auto desc_expr = [this](const PrimExpr &expr) -> std::string {
-      if (const auto *str = expr.as<StringImmNode>()) {
-        return std::string(str->value);
-      }
-      return this->PrintExpr(expr);
-    };
-    auto ptr_expr = [this](const PrimExpr &expr) {
-      return this->PrintExpr(expr);
-    };
-    auto mbar_ptr = [this](const PrimExpr &expr) {
-      return "(void const*)(&" + this->PrintExpr(expr) + ")";
-    };
-    if (const auto *str = op->args[7].as<StringImmNode>()) {
-      ICHECK_EQ(std::string(str->value), "fa4_uma_schedule")
-          << "unknown fa4_uma epilogue schedule mode: " << str->value;
-      std::string tile_iter = this->PrintExpr(op->args[4]);
-      std::string grid_clusters = this->PrintExpr(op->args[5]);
-      std::string seq_len = this->PrintExpr(op->args[6]);
-      this->stream
-          << "tl::tcgen05_fa4_uma_epilogue_warp_2cta_schedule("
-          << "(void const*)(" << ptr_expr(op->args[0]) << "), "
-          << "&" << desc_expr(op->args[1]) << ", "
-          << mbar_ptr(op->args[2]) << ", "
-          << mbar_ptr(op->args[3]) << ", "
-          << tile_iter << ", " << grid_clusters << ", " << seq_len
-          << ");\n";
-    } else {
-      this->stream << "tl::tcgen05_fa4_uma_epilogue_warp_2cta("
-                   << "(void const*)(" << ptr_expr(op->args[0]) << "), "
-                   << "&" << desc_expr(op->args[1]) << ", "
-                   << mbar_ptr(op->args[2]) << ", "
-                   << mbar_ptr(op->args[3]) << ", "
-                   << this->PrintExpr(op->args[4]) << ", "
-                   << this->PrintExpr(op->args[5]) << ", "
-                   << this->PrintExpr(op->args[6]) << ", "
-                   << this->PrintExpr(op->args[7]) << ", "
-                   << this->PrintExpr(op->args[8]) << ");\n";
-    }
-  } else if (op->op.same_as(tl::tcgen05_fa4_uma_epilogue_warp_2cta_schedule())) {
-    ICHECK_EQ(op->args.size(), 9U)
-        << "tcgen05_fa4_uma_epilogue_warp_2cta_schedule expects 9 args";
-    this->PrintIndent();
-    need_tcgen05_common_h_ = true;
-    auto desc_expr = [this](const PrimExpr &expr) -> std::string {
-      if (const auto *str = expr.as<StringImmNode>()) {
-        return std::string(str->value);
-      }
-      return this->PrintExpr(expr);
-    };
-    auto ptr_expr = [this](const PrimExpr &expr) {
-      return this->PrintExpr(expr);
-    };
-    auto mbar_ptr = [this](const PrimExpr &expr) {
-      return "(void const*)(&" + this->PrintExpr(expr) + ")";
-    };
-    this->stream << "tl::tcgen05_fa4_uma_epilogue_warp_2cta_schedule("
-                 << "(void const*)(" << ptr_expr(op->args[0]) << "), "
-                 << "&" << desc_expr(op->args[1]) << ", "
-                 << mbar_ptr(op->args[2]) << ", "
-                 << mbar_ptr(op->args[3]) << ", "
-                 << this->PrintExpr(op->args[4]) << ", "
-                 << this->PrintExpr(op->args[5]) << ", "
-                 << this->PrintExpr(op->args[6]) << ", "
-                 << this->PrintExpr(op->args[7]) << ", "
-                 << this->PrintExpr(op->args[8]) << ");\n";
+    this->stream << "tl::tcgen05_commit_2cta((void const*)(&" << mbar
+                 << "));\n";
   } else if (op->op.same_as(tl::outline_persistent())) {
     ICHECK_EQ(op->args.size(), 1U)
         << "outline_persistent expects 1 buffer handle";
@@ -5930,7 +5659,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
     unroll_factor[op->node.as<VarNode>()] = Downcast<IntImm>(factor);
   } else if (op->attr_key == tl::attr::kDeviceFuncScope) {
     if (outline_warp_spec_enabled_ && !in_outlined_fn_) {
-      std::string fn_name = EmitOutlinedDeviceFunction(op->body);
+      std::string fn_name =
+          EmitOutlinedDeviceFunction(op->body, /*forward_captured_scalars=*/true);
       bool has_loop_var = !current_loop_var_name_.empty();
       std::vector<ActiveLoopVarInfo> forwarded_loops = active_loop_vars_;
       if (has_loop_var && !forwarded_loops.empty() &&
@@ -5958,6 +5688,18 @@ void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
       }
       BufferVarTouchCollector touched;
       touched(op->body);
+      for (const auto &scalar : scalar_var_infos_) {
+        if (scalar.var && touched.touched.count(scalar.var)) {
+          sep();
+          stream << scalar.var_name;
+        }
+      }
+      for (const auto &scalar : local_scalar_var_infos_) {
+        if (scalar.var && touched.touched.count(scalar.var)) {
+          sep();
+          stream << scalar.var_name;
+        }
+      }
       for (const auto &bar : barrier_var_infos_) {
         if (bar.buffer_var && !touched.touched.count(bar.buffer_var)) {
           continue;
@@ -6167,6 +5909,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
                                  true,
                                  init,
                                  op->buffer_var.get()});
+        local_scalar_var_infos_.push_back(
+            {op->buffer_var.get(), vid, op->dtype});
       }
     } else if (scope.find("local.descriptor") != 0) {
       ICHECK(false) << "Unsupported scope: " << scope;
@@ -7243,7 +6987,8 @@ void CodeGenTileLangCUDA::FlattenWarpBranches(
   }
 }
 
-std::string CodeGenTileLangCUDA::EmitOutlinedDeviceFunction(const Stmt &body) {
+std::string CodeGenTileLangCUDA::EmitOutlinedDeviceFunction(
+    const Stmt &body, bool forward_captured_scalars) {
   std::string fn_name =
       "__outlined_warp_fn_" + std::to_string(outlined_fn_count_);
   outlined_fn_count_++;
@@ -7282,6 +7027,24 @@ std::string CodeGenTileLangCUDA::EmitOutlinedDeviceFunction(const Stmt &body) {
   }
   BufferVarTouchCollector touched;
   touched(body);
+  if (forward_captured_scalars) {
+    for (const auto &scalar : scalar_var_infos_) {
+      if (scalar.var && touched.touched.count(scalar.var)) {
+        emit_sep();
+        std::ostringstream type_os;
+        PrintType(scalar.dtype, type_os);
+        outlined_fns_stream_ << type_os.str() << " " << scalar.var_name;
+      }
+    }
+    for (const auto &scalar : local_scalar_var_infos_) {
+      if (scalar.var && touched.touched.count(scalar.var)) {
+        emit_sep();
+        std::ostringstream type_os;
+        PrintType(scalar.dtype, type_os);
+        outlined_fns_stream_ << type_os.str() << " " << scalar.var_name;
+      }
+    }
+  }
   for (const auto &bar : barrier_var_infos_) {
     if (bar.buffer_var && !touched.touched.count(bar.buffer_var)) {
       continue;
@@ -7334,6 +7097,9 @@ std::string CodeGenTileLangCUDA::EmitOutlinedDeviceFunction(const Stmt &body) {
     if (alloc.buffer_var && !touched.touched.count(alloc.buffer_var)) {
       continue;  // not used by this branch
     }
+    if (forward_captured_scalars && alloc.is_scalar_var) {
+      continue;  // captured by value as a function parameter
+    }
     if (alloc.outline_persistent) {
       continue;  // forwarded from the caller to preserve cross-call state
     }
@@ -7360,6 +7126,18 @@ std::string CodeGenTileLangCUDA::EmitOutlinedDeviceFunction(const Stmt &body) {
   auto saved_var_idmap = var_idmap_;
   for (const auto &loop : forwarded_loops) {
     var_idmap_[loop.var] = loop.name;
+  }
+  if (forward_captured_scalars) {
+    for (const auto &scalar : scalar_var_infos_) {
+      if (scalar.var && touched.touched.count(scalar.var)) {
+        var_idmap_[scalar.var] = scalar.var_name;
+      }
+    }
+    for (const auto &scalar : local_scalar_var_infos_) {
+      if (scalar.var && touched.touched.count(scalar.var)) {
+        var_idmap_[scalar.var] = scalar.var_name;
+      }
+    }
   }
   PrintStmt(body);
   FlushPendingTmemAllocs();

@@ -312,6 +312,16 @@ TIR_DEFINE_TL_BUILTIN(tcgen05_fence_tmem_store)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(tcgen05_bar_arrive)
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(tcgen05_bar_sync)
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TIR_DEFINE_TL_BUILTIN(tcgen05_correction_x16)
     .set_num_inputs(4)
     .set_attr<TCallEffectKind>("TCallEffectKind",
@@ -342,6 +352,16 @@ TIR_DEFINE_TL_BUILTIN(tcgen05_fma_f32x2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(tcgen05_rcp_approx_ftz)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(tcgen05_exp2f_approx)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
 TIR_DEFINE_TL_BUILTIN(tcgen05_exp2_poly_2)
     .set_num_inputs(4)
     .set_attr<TCallEffectKind>("TCallEffectKind",
@@ -358,11 +378,6 @@ TIR_DEFINE_TL_BUILTIN(pack_bf16_pair)
                                Integer(CallEffectKind::kPure));
 
 TIR_DEFINE_TL_BUILTIN(tcgen05_st_32x32b_x4)
-    .set_num_inputs(6)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
-TIR_DEFINE_TL_BUILTIN(tcgen05_softmax_pack_4)
     .set_num_inputs(6)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
@@ -427,6 +442,31 @@ TIR_DEFINE_TL_BUILTIN(tcgen05_mbarrier_arrive_expect_tx_ref)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(tcgen05_mbarrier_arrive_expect_tx_cluster_ref)
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(tcgen05_mbarrier_arrive_cluster_all_ref)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(tma_load_2cta_2d)
+    .set_num_inputs(5)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(tma_store_2d)
+    .set_num_inputs(-1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(tcgen05_mbarrier_arrive_local_all_ref)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TIR_DEFINE_TL_BUILTIN(tcgen05_tma_load_128x128)
     .set_num_inputs(6)
     .set_attr<TCallEffectKind>("TCallEffectKind",
@@ -457,70 +497,10 @@ TIR_DEFINE_TL_BUILTIN(tcgen05_commit_1sm_op)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(tcgen05_softmax_warp_2cta)
-    .set_num_inputs(16)
+TIR_DEFINE_TL_BUILTIN(tcgen05_commit_2cta_op)
+    .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
-
-TIR_DEFINE_TL_BUILTIN(tcgen05_correction_warp_2cta)
-    .set_num_inputs(8)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
-TIR_DEFINE_TL_BUILTIN(tcgen05_mma_warp_2cta)
-    .set_num_inputs(22)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
-TIR_DEFINE_TL_BUILTIN(tcgen05_producer_warp_2cta)
-    .set_num_inputs(22)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
-TIR_DEFINE_TL_BUILTIN(tcgen05_fa4_uma_softmax_warp_2cta)
-    .set_num_inputs(11)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
-TIR_DEFINE_TL_BUILTIN(tcgen05_fa4_uma_correction_warp_2cta)
-    .set_num_inputs(12)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
-TIR_DEFINE_TL_BUILTIN(tcgen05_fa4_uma_mma_warp_2cta)
-    .set_num_inputs(20)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
-TIR_DEFINE_TL_BUILTIN(tcgen05_fa4_uma_producer_warp_2cta)
-    .set_num_inputs(20)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
-TIR_DEFINE_TL_BUILTIN(tcgen05_fa4_uma_producer_warp_2cta_schedule)
-    .set_num_inputs(19)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
-TIR_DEFINE_TL_BUILTIN(tcgen05_fa4_uma_epilogue_warp_2cta)
-    .set_num_inputs(9)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
-TIR_DEFINE_TL_BUILTIN(tcgen05_fa4_uma_epilogue_warp_2cta_schedule)
-    .set_num_inputs(9)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
-TIR_DEFINE_TL_BUILTIN(tcgen05_fa4_uma_tile_id)
-    .set_num_inputs(2)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kPure));
-
-TIR_DEFINE_TL_BUILTIN(tcgen05_fa4_uma_tile_valid)
-    .set_num_inputs(3)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kPure));
 
 TIR_DEFINE_TL_BUILTIN(outline_persistent)
     .set_num_inputs(1)

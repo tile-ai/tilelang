@@ -208,6 +208,14 @@ private:
     DataType dtype;
   };
   std::vector<ActiveLoopVarInfo> active_loop_vars_;
+  // Kernel-scope LetStmt scalar bindings that device-function outlining may
+  // need to forward when a `with T.device_func()` body captures outer values.
+  struct ScalarVarInfo {
+    const VarNode *var{nullptr};
+    std::string var_name;
+    DataType dtype;
+  };
+  std::vector<ScalarVarInfo> scalar_var_infos_;
 
   struct LocalAllocInfo {
     std::string var_name;
@@ -225,6 +233,10 @@ private:
     const VarNode *buffer_var{nullptr};
   };
   std::vector<LocalAllocInfo> local_allocs_;
+  // Kernel-scope scalar local.var allocations. Explicit `T.device_func()`
+  // bodies can capture these by value to keep precomputed schedule scalars out
+  // of the outlined helper body.
+  std::vector<ScalarVarInfo> local_scalar_var_infos_;
   struct OutlinedStateInfo {
     std::string var_name;
     std::string type_str;
@@ -247,7 +259,8 @@ private:
   // Helper: check if condition involves threadIdx.x comparison
   bool IsThreadXComparison(const PrimExpr &cond) const;
   // Helper: emit one outlined device function, returns the function name
-  std::string EmitOutlinedDeviceFunction(const Stmt &body);
+  std::string EmitOutlinedDeviceFunction(
+      const Stmt &body, bool forward_captured_scalars = false);
   // Helper: flatten nested if-else on threadIdx.x into branches
   struct WarpBranch {
     PrimExpr condition;

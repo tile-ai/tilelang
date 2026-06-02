@@ -1106,6 +1106,13 @@ TVM_DLL const Op &tcgen05_fence_tmem_load();
 TVM_DLL const Op &tcgen05_fence_tmem_store();
 
 /*!
+ * \brief CTA bar.arrive/bar.sync wrappers used by SM100 warp-role handoff code.
+ * Args: barrier_id, thread_count
+ */
+TVM_DLL const Op &tcgen05_bar_arrive();
+TVM_DLL const Op &tcgen05_bar_sync();
+
+/*!
  * \brief Per-warp O correction using avo-style x16 ld/mul/st sequence.
  *
  * tcgen05_correction_x16(tmem_base, scale, warp_group_offset, head_dim)
@@ -1156,6 +1163,12 @@ TVM_DLL const Op &tcgen05_correction_epilogue_warp_1sm_skv();
  */
 TVM_DLL const Op &tcgen05_fma_f32x2();
 
+/*! \brief Approximate FTZ FP32 reciprocal. Args: x. Returns float32. */
+TVM_DLL const Op &tcgen05_rcp_approx_ftz();
+
+/*! \brief Approximate FP32 exp2 using the SM100 FA4 helper. Args: x. */
+TVM_DLL const Op &tcgen05_exp2f_approx();
+
 /*!
  * \brief Pair polynomial exp2 approximation used by SM100 FA4-style softmax.
  *
@@ -1186,13 +1199,6 @@ TVM_DLL const Op &pack_bf16_pair();
  * Args: tmem_base, offset, v0, v1, v2, v3.
  */
 TVM_DLL const Op &tcgen05_st_32x32b_x4();
-
-/*!
- * \brief FA4 softmax 4-element exp2/BF16-pack primitive.
- *
- * Args: h0, h1, sv_ptr, psa0, psa1, elem_base.
- */
-TVM_DLL const Op &tcgen05_softmax_pack_4();
 
 /*!
  * \brief Avo-style one-iteration S->P online softmax for FA4 1SM attention.
@@ -1284,6 +1290,36 @@ TVM_DLL const Op &tcgen05_smem_ptr_add_bf16();
 TVM_DLL const Op &tcgen05_mbarrier_arrive_expect_tx_ref();
 
 /*!
+ * \brief Cluster arrive+expect on a dynamic mbarrier reference.
+ * Args: mbar_ref, transaction_bytes
+ */
+TVM_DLL const Op &tcgen05_mbarrier_arrive_expect_tx_cluster_ref();
+
+/*!
+ * \brief Cluster-scope mbarrier arrive from all active lanes.
+ * Args: mbar_ref
+ */
+TVM_DLL const Op &tcgen05_mbarrier_arrive_cluster_all_ref();
+
+/*!
+ * \brief 2CTA 2D TMA load using shared::cta.global encoding.
+ * Args: tensor_map, smem_ptr, mbar_ref, coord0, coord1
+ */
+TVM_DLL const Op &tma_load_2cta_2d();
+
+/*!
+ * \brief 2D TMA store using global.shared::cta.bulk_group encoding.
+ * Args: tensor_map, smem_ptr, coord0, coord1, optional predicate
+ */
+TVM_DLL const Op &tma_store_2d();
+
+/*!
+ * \brief Warp-wide local CTA mbarrier arrive using the SM100 release helper.
+ * Args: mbar_ref
+ */
+TVM_DLL const Op &tcgen05_mbarrier_arrive_local_all_ref();
+
+/*!
  * \brief Issue a 128x128 BF16 TMA load as two 64-column transfers.
  * Args: desc, stage_ptr, mbar_ptr, k_iter, kv_head, batch
  */
@@ -1320,51 +1356,10 @@ TVM_DLL const Op &tcgen05_epilogue_tma_store_32x128();
 TVM_DLL const Op &tcgen05_commit_1sm_op();
 
 /*!
- * \brief Avo-style 2CTA softmax warp role for FA4 attention.
+ * \brief Commit a 2CTA TCGEN05 MMA to an mbarrier.
+ * Args: mbar_ptr
  */
-TVM_DLL const Op &tcgen05_softmax_warp_2cta();
-
-/*!
- * \brief Avo-style 2CTA correction warpgroup role for FA4 attention.
- */
-TVM_DLL const Op &tcgen05_correction_warp_2cta();
-
-/*!
- * \brief Avo-style 2CTA MMA consumer warp role for FA4 attention.
- */
-TVM_DLL const Op &tcgen05_mma_warp_2cta();
-
-/*!
- * \brief Avo-style 2CTA producer warp role for FA4 attention.
- */
-TVM_DLL const Op &tcgen05_producer_warp_2cta();
-
-/*! \brief TileScale fa4_uma 2CTA softmax role. */
-TVM_DLL const Op &tcgen05_fa4_uma_softmax_warp_2cta();
-
-/*! \brief TileScale fa4_uma 2CTA correction/finalize role. */
-TVM_DLL const Op &tcgen05_fa4_uma_correction_warp_2cta();
-
-/*! \brief TileScale fa4_uma 2CTA MMA consumer role. */
-TVM_DLL const Op &tcgen05_fa4_uma_mma_warp_2cta();
-
-/*! \brief TileScale fa4_uma 2CTA producer/TMA role. */
-TVM_DLL const Op &tcgen05_fa4_uma_producer_warp_2cta();
-
-/*! \brief TileScale fa4_uma 2CTA producer role with physical-CTA schedule. */
-TVM_DLL const Op &tcgen05_fa4_uma_producer_warp_2cta_schedule();
-
-/*! \brief TileScale fa4_uma 2CTA epilogue TMA-store role. */
-TVM_DLL const Op &tcgen05_fa4_uma_epilogue_warp_2cta();
-
-/*! \brief TileScale fa4_uma 2CTA epilogue role with physical-CTA schedule. */
-TVM_DLL const Op &tcgen05_fa4_uma_epilogue_warp_2cta_schedule();
-
-/*! \brief TileScale fa4_uma physical-cluster persistent tile id. */
-TVM_DLL const Op &tcgen05_fa4_uma_tile_id();
-
-/*! \brief TileScale fa4_uma physical-cluster tile validity predicate. */
-TVM_DLL const Op &tcgen05_fa4_uma_tile_valid();
+TVM_DLL const Op &tcgen05_commit_2cta_op();
 
 /*!
  * \brief Mark a local allocation as persistent across CUDA warp-specialized
