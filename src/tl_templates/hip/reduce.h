@@ -49,9 +49,8 @@ struct SharedReduceWarp {
     if (total_dest <= 0 || reduce_extent <= 0)
       return;
     const int kWarpSize = __builtin_amdgcn_wavefrontsize();
-    assert(
-        Threads % kWarpSize == 0 &&
-        "SharedReduceWarp: blockDim.x must be a multiple of wavefront size.");
+    if (Threads % kWarpSize != 0)
+      return;
     const int tid = threadIdx.x;
     const int warp_id = tid / kWarpSize;
     const int lane = tid % kWarpSize;

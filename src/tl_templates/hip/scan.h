@@ -101,11 +101,9 @@ struct InclusiveScan1D {
   static TL_DEVICE void run_auto(const T *__restrict__ src, T *__restrict__ dst,
                                  int N) {
     const int wavefront_size = __builtin_amdgcn_wavefrontsize();
-    if (wavefront_size == 32) {
+    if (wavefront_size == 32 && threads >= 32) {
       run<T, 32>(src, dst, N);
-    } else {
-      assert(wavefront_size == 64 &&
-             "Unsupported wavefront size in InclusiveScan1D");
+    } else if (threads >= 64) {
       run<T, 64>(src, dst, N);
     }
   }
@@ -148,11 +146,9 @@ struct InclusiveScan2D {
   static TL_DEVICE void run_auto(const T *__restrict__ src, T *__restrict__ dst,
                                  int H, int W) {
     const int wavefront_size = __builtin_amdgcn_wavefrontsize();
-    if (wavefront_size == 32) {
+    if (wavefront_size == 32 && threads >= 32) {
       run<T, 32>(src, dst, H, W);
-    } else {
-      assert(wavefront_size == 64 &&
-             "Unsupported wavefront size in InclusiveScan2D");
+    } else if (threads >= 64) {
       run<T, 64>(src, dst, H, W);
     }
   }
