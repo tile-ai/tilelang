@@ -159,7 +159,7 @@ class TestLayoutFragmentEdgeCases:
 
     def test_constant_layout_equal(self):
         """Layouts mapping to constant should be equal."""
-        from tvm.tir import const
+        from tvm.tirx import const
 
         layout1 = Layout([32, 4], lambda i, j: const(0, "int32"))
         layout2 = Layout([32, 4], lambda i, j: const(0, "int32"))
@@ -167,7 +167,7 @@ class TestLayoutFragmentEdgeCases:
 
     def test_constant_vs_variable_layout_not_equal(self):
         """Layout mapping to constant vs variable should not be equal."""
-        from tvm.tir import const
+        from tvm.tirx import const
 
         layout1 = Layout([32, 4], lambda i, j: const(0, "int32"))
         layout2 = Layout([32, 4], lambda i, j: i)

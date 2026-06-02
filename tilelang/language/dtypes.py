@@ -1,9 +1,9 @@
 from tilelang import tvm
 from tvm import ir
 import torch
-from typing import Generic, TypeVar, Union, TYPE_CHECKING
-from tvm import tir
-import tvm.script.ir_builder.tir._ffi_api as tb_ffi
+from typing import Generic, TypeVar, TYPE_CHECKING
+from tvm import tirx
+import tvm.tirx.script.builder._ffi_api as tb_ffi
 import numpy as np
 from tilelang import logger
 
@@ -17,16 +17,19 @@ if TYPE_CHECKING:
         @property
         def bytes(self) -> int: ...
         def as_torch(self) -> torch.dtype: ...
+        def is_float4_e2m1fn(self) -> bool: ...
+        def is_float4_e2m1_unpacked(self) -> bool: ...
+        def is_float4(self) -> bool: ...
 else:
     dtype = tvm.DataType
 
-# Python 3.9 compatibility: avoid PEP 604 unions at runtime
-AnyDType = Union[ir.Type, str, type, torch.dtype, dtype]
+# Keep a typing alias separate from the tuple used by runtime checks.
+AnyDType = ir.Type | str | type | torch.dtype | dtype
 
 
 def _is_any_dtype(obj: object) -> bool:
     """Check if obj is a dtype-like value. Use instead of isinstance(obj, AnyDType)
-    because Union types cannot be used with isinstance in Python 3.9."""
+    to keep the runtime check explicit."""
     return isinstance(obj, (ir.Type, str, type, torch.dtype, dtype))
 
 
@@ -134,19 +137,20 @@ _STR_TO_TVM_DTYPE_CALL = {
     "float8_e5m2": "Float8E5M2",
     "float8_e5m2fnuz": "Float8E5M2FNUZ",
     "float8_e8m0fnu": "Float8E8M0FNU",
+    "tfloat32": "TensorFloat32",
 }
 
 int_ = int
 
 
-def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tir.Var:
+def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tirx.Var:
     # When called with multiple args, pack the scalars into a vector via Shuffle.
-    # e.g. T.bfloat16x2(a, b) -> tir.Shuffle([a, b], [0, 1]) : bfloat16x2
+    # e.g. T.bfloat16x2(a, b) -> tirx.Shuffle([a, b], [0, 1]) : bfloat16x2
     if len(args) > 1:
-        return tir.Shuffle(list(args), list(range(len(args))))
+        return tirx.Shuffle(list(args), list(range(len(args))))
     expr = args[0] if args else None
     if isinstance(expr, int_):
-        return tvm.tir.const(expr, dtype=self)
+        return tvm.tirx.const(expr, dtype=self)
     if self in _STR_TO_TVM_DTYPE_CALL:
         attr = _STR_TO_TVM_DTYPE_CALL[self]
         call = getattr(tb_ffi, attr, None)
@@ -160,6 +164,12 @@ def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tir.Var:
         val = "Float" + self[5:]
     elif self.startswith("bfloat"):
         val = "BFloat" + self[6:]
+    elif self.startswith("tfloat"):
+        val = "TensorFloat" + self[6:]
+    elif self.is_float4_e2m1_unpacked():
+        val = "Float4E2M1Unpacked"
+        if self.lanes > 1:
+            val += f"x{self.lanes}"
     else:
         raise TypeError(f"Invalid type {self}")
     if "_" in val:
@@ -167,9 +177,7 @@ def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tir.Var:
         val = first + second.upper()
     call = getattr(tb_ffi, val, None)
     if call is None:
-        raise TypeError(
-            f"Convert to datatype `{self}` is not supported by tvm\ncalling failed on `tvm.script.ir_builder.tir._ffi_api.{val}`"
-        )
+        raise TypeError(f"Convert to datatype `{self}` is not supported by tvm\ncalling failed on `tvm.tirx.script.builder._ffi_api.{val}`")
     return call(expr, is_size_var)
 
 
@@ -212,6 +220,8 @@ def __dtype_as_torch__(self: dtype) -> torch.dtype:
     elif dtype_str == "float4_e2m1fn":
         logger.info("torch doesn't support float4_e2m1fn, using float4_e2m1fnx2 as storage dtype.")
         return torch.float4_e2m1fn_x2 if hasattr(torch, "float4_e2m1fn_x2") else torch.int8
+    elif dtype_str == "custom[tfloat32]":
+        return torch.float32
     elif dtype_str == "int4":
         logger.info("torch doesn't support int4, using int8 as storage dtype.")
         return torch.int8
@@ -243,10 +253,61 @@ def __dtype_bytes__(self: dtype) -> int:
     return self.itemsize
 
 
+_FLOAT4_E2M1FN_BITS = 4
+_FLOAT4_E2M1FN_TYPE_CODE = 17
+_FLOAT4_E2M1_UNPACKED_BITS = 8
+_FLOAT4_E2M1_UNPACKED_TYPE_CODE = 131
+
+
+def __dtype_is_float4_e2m1fn__(self: dtype) -> bool:
+    """Packed 4-bit FP4 E2M1 (CUTLASS float_e2m1_t).
+
+    Use for pure FP4 workloads on tcgen05 mxf4 / mxf4nvf4 (packed SMEM, half
+    the footprint). Global tensors and packed SMEM roundtrips use this dtype.
+    TMA: ``CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B``.
+    """
+    return self.bits == _FLOAT4_E2M1FN_BITS and int(self.type_code) == _FLOAT4_E2M1FN_TYPE_CODE
+
+
+def __dtype_is_float4_e2m1_unpacked__(self: dtype) -> bool:
+    """8-bit FP4 E2M1 unpacked storage (CUTLASS float_e2m1_unpacksmem_t).
+
+    Only for tcgen05 ``kind::f8f6f4`` and block-scaled ``kind::mxf8f6f4``
+    mixed-precision paths where sub-byte types share 16-byte SMEM/TMEM padding
+    (one byte per FP4 element). Not for mxf4 / mxf4nvf4 packed FP4 kernels.
+    Pair with ``T.tma_copy`` from packed global FP4; TMA:
+    ``CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B``.
+    """
+    return self.bits == _FLOAT4_E2M1_UNPACKED_BITS and int(self.type_code) == _FLOAT4_E2M1_UNPACKED_TYPE_CODE
+
+
+def __dtype_is_float4__(self: dtype) -> bool:
+    """Whether this is any FP4 E2M1 logical variant (packed or unpacked storage)."""
+    return __dtype_is_float4_e2m1fn__(self) or __dtype_is_float4_e2m1_unpacked__(self)
+
+
+def is_float4_e2m1fn(value: AnyDType) -> bool:
+    """Whether *value* is the packed 4-bit FP4 E2M1 variant."""
+    return get_tvm_dtype(value).is_float4_e2m1fn()
+
+
+def is_float4_e2m1_unpacked(value: AnyDType) -> bool:
+    """Whether *value* is the 8-bit FP4 E2M1 unpacked shared-memory storage variant."""
+    return get_tvm_dtype(value).is_float4_e2m1_unpacked()
+
+
+def is_float4(value: AnyDType) -> bool:
+    """Whether *value* is any FP4 E2M1 logical variant (packed or unpacked)."""
+    return get_tvm_dtype(value).is_float4()
+
+
 dtype.__call__ = __dtype_call__
 dtype.__new__ = __dtype_new__
 dtype.as_torch = __dtype_as_torch__
 dtype.bytes = property(__dtype_bytes__)
+dtype.is_float4_e2m1fn = __dtype_is_float4_e2m1fn__
+dtype.is_float4_e2m1_unpacked = __dtype_is_float4_e2m1_unpacked__
+dtype.is_float4 = __dtype_is_float4__
 
 
 def get_tvm_dtype(value: AnyDType) -> dtype:
@@ -420,8 +481,21 @@ if TYPE_CHECKING:
     class float4_e2m1fnx16(dtype): ...
     class float4_e2m1fnx32(dtype): ...
     class float4_e2m1fnx64(dtype): ...
+    class float4_e2m1_unpacked(dtype): ...
+    class float4_e2m1_unpackedx2(dtype): ...
+    class float4_e2m1_unpackedx4(dtype): ...
+    class float4_e2m1_unpackedx8(dtype): ...
+    class float4_e2m1_unpackedx16(dtype): ...
+    class float4_e2m1_unpackedx32(dtype): ...
     class bfloat16(dtype): ...
     class bfloat16x2(dtype): ...
+    class tfloat32(dtype): ...
+    class tfloat32x2(dtype): ...
+    class tfloat32x4(dtype): ...
+    class tfloat32x8(dtype): ...
+    class tfloat32x16(dtype): ...
+    class tfloat32x32(dtype): ...
+    class tfloat32x64(dtype): ...
 
     # yapf: enable
 
@@ -589,8 +663,21 @@ else:
     float4_e2m1fnx16 = dtype("float4_e2m1fnx16")
     float4_e2m1fnx32 = dtype("float4_e2m1fnx32")
     float4_e2m1fnx64 = dtype("float4_e2m1fnx64")
+    float4_e2m1_unpacked = dtype("custom[float4_e2m1_unpacked]8")
+    float4_e2m1_unpackedx2 = dtype("custom[float4_e2m1_unpacked]8x2")
+    float4_e2m1_unpackedx4 = dtype("custom[float4_e2m1_unpacked]8x4")
+    float4_e2m1_unpackedx8 = dtype("custom[float4_e2m1_unpacked]8x8")
+    float4_e2m1_unpackedx16 = dtype("custom[float4_e2m1_unpacked]8x16")
+    float4_e2m1_unpackedx32 = dtype("custom[float4_e2m1_unpacked]8x32")
     bfloat16 = dtype("bfloat16")
     bfloat16x2 = dtype("bfloat16x2")
+    tfloat32 = dtype("custom[tfloat32]")
+    tfloat32x2 = dtype("custom[tfloat32]x2")
+    tfloat32x4 = dtype("custom[tfloat32]x4")
+    tfloat32x8 = dtype("custom[tfloat32]x8")
+    tfloat32x16 = dtype("custom[tfloat32]x16")
+    tfloat32x32 = dtype("custom[tfloat32]x32")
+    tfloat32x64 = dtype("custom[tfloat32]x64")
 
 _all_dtypes = [
     "bool",
@@ -756,12 +843,28 @@ _all_dtypes = [
     "float4_e2m1fnx16",
     "float4_e2m1fnx32",
     "float4_e2m1fnx64",
+    "float4_e2m1_unpacked",
+    "float4_e2m1_unpackedx2",
+    "float4_e2m1_unpackedx4",
+    "float4_e2m1_unpackedx8",
+    "float4_e2m1_unpackedx16",
+    "float4_e2m1_unpackedx32",
     "bfloat16",
     "bfloat16x2",
+    "tfloat32",
+    "tfloat32x2",
+    "tfloat32x4",
+    "tfloat32x8",
+    "tfloat32x16",
+    "tfloat32x32",
+    "tfloat32x64",
 ]
 
 __all__ = list(_all_dtypes) + [
     "dtype",
     "AnyDType",
     "get_tvm_dtype",
+    "is_float4_e2m1fn",
+    "is_float4_e2m1_unpacked",
+    "is_float4",
 ]

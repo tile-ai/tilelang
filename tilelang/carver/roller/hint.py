@@ -125,7 +125,11 @@ class IntrinInfo:
         self.weight_transform_kind = weight_transform_kind
 
     def __repr__(self) -> str:
-        return f"<IntrinInfo, {self.in_dtype}, {self.out_dtype}, {self.trans_b}, {self.propagate_b}>"
+        return (
+            f"<IntrinInfo, in_dtype={self.in_dtype}, out_dtype={self.out_dtype}, "
+            f"trans_b={self.trans_b}, input_transform_kind={self.input_transform_kind}, "
+            f"weight_transform_kind={self.weight_transform_kind}>"
+        )
 
     def is_input_8bit(self) -> bool:
         return DataType(self.in_dtype).bits == 8
@@ -254,5 +258,5 @@ class Hint:
         # Always merge dynamic shared memory
         if self.shared_scope == "shared.dyn":
             merge_static_smem = True
-        self.pass_context = {"tir.merge_static_smem": merge_static_smem}
+        self.pass_context = {"tirx.merge_static_smem": merge_static_smem}
         return self

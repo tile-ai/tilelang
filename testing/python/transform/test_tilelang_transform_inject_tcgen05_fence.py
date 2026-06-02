@@ -2,27 +2,27 @@
 from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
-from tilelang.engine.phase import LowerAndLegalize
-from tvm import tir
+from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
+from tvm import tirx
 
 
-sm100_target = tvm.target.Target("cuda -arch=sm_100")
-sm90_target = tvm.target.Target("cuda -arch=sm_90a")
+sm100_target = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
+sm90_target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
 
 
 def _apply(func, target=sm100_target):
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(target)(mod)
-    mod = tl.transform.InjectTcgen05Fence()(mod)
-    mod = tir.transform.LowerOpaqueBlock()(mod)
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tl.cuda.transform.InjectTcgen05Fence()(mod)
+    mod = tl.transform.LowerOpaqueBlock()(mod)
     return mod
 
 
 def _check(original, expected, target=sm100_target):
     mod = _apply(original, target)
     expected_mod = tvm.IRModule.from_expr(expected.with_attr("global_symbol", "main"))
-    expected_mod = tvm.tir.transform.BindTarget(target)(expected_mod)
-    expected_mod = tir.transform.LowerOpaqueBlock()(expected_mod)
+    expected_mod = tvm.tirx.transform.BindTarget(target)(expected_mod)
+    expected_mod = tl.transform.LowerOpaqueBlock()(expected_mod)
     tvm.ir.assert_structural_equal(mod["main"], expected_mod["main"], True)
 
 
@@ -31,10 +31,10 @@ def _count_calls(stmt, op_name: str):
 
     def visitor(node):
         nonlocal count
-        if isinstance(node, tir.Call) and hasattr(node, "op") and hasattr(node.op, "name") and node.op.name == op_name:
+        if isinstance(node, tirx.Call) and hasattr(node, "op") and hasattr(node.op, "name") and node.op.name == op_name:
             count += 1
 
-    tir.stmt_functor.post_order_visit(stmt, visitor)
+    tirx.stmt_functor.post_order_visit(stmt, visitor)
     return count
 
 
@@ -43,25 +43,25 @@ def _count_extern_calls_with_prefix(stmt, prefix: str):
 
     def visitor(node):
         nonlocal count
-        if not isinstance(node, tir.Call):
+        if not isinstance(node, tirx.Call):
             return
         op = getattr(node, "op", None)
-        if getattr(op, "name", None) != "tir.call_extern":
+        if getattr(op, "name", None) != "tirx.call_extern":
             return
         if not node.args:
             return
         name = node.args[0]
-        if isinstance(name, tir.StringImm) and name.value.startswith(prefix):
+        if isinstance(name, tirx.StringImm) and name.value.startswith(prefix):
             count += 1
 
-    tir.stmt_functor.post_order_visit(stmt, visitor)
+    tirx.stmt_functor.post_order_visit(stmt, visitor)
     return count
 
 
 def _tcgen05_ld_call(tmem_ref, local_buf):
     return T.call_intrin(
         "handle",
-        tir.op.Op.get("tl.tcgen05_ld"),
+        tirx.op.Op.get("tl.tcgen05_ld"),
         32,
         128,
         False,
@@ -118,8 +118,8 @@ def test_lower_tmem_copy_uses_tcgen05_ld_intrin():
 
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     with sm100_target:
-        mod = LowerAndLegalize(mod, sm100_target)
-        mod = tl.transform.LowerSharedTmem()(mod)
+        mod = CUDAPassPipelineBodyPrologue(mod, sm100_target)
+        mod = tl.cuda.transform.LowerSharedTmem()(mod)
 
     body = mod["main"].body
     assert _count_calls(body, "tl.tcgen05_ld") == 1
@@ -166,8 +166,8 @@ def test_lower_tmem_copy_uses_tcgen05_st_intrin():
 
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     with sm100_target:
-        mod = LowerAndLegalize(mod, sm100_target)
-        mod = tl.transform.LowerSharedTmem()(mod)
+        mod = CUDAPassPipelineBodyPrologue(mod, sm100_target)
+        mod = tl.cuda.transform.LowerSharedTmem()(mod)
 
     body = mod["main"].body
     assert _count_calls(body, "tl.tcgen05_st") == 1

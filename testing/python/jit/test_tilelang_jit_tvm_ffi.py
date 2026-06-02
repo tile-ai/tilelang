@@ -338,7 +338,7 @@ def convolution_im2col(N, C, H, W, F, K, S, D, P, block_M, block_N, block_K, num
 
             T.clear(out_local)
             for k_iter in T.Pipelined(T.ceildiv(KH * KW * C, block_K), num_stages=num_stages):
-                T.c2d_im2col(data, data_shared, by, k_iter, KH, S, D, P)
+                T.im2col(data, data_shared, by, k_iter, KH, S, D, P)
                 T.copy(kernel_flat[k_iter * block_K, bx * block_N], kernel_shared)
                 T.gemm(data_shared, kernel_shared, out_local)
 

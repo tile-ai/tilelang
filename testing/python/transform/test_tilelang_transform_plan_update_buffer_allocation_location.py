@@ -2,40 +2,40 @@ import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
-from tilelang.engine.phase import LowerAndLegalize
+from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
 
 
-def _apply_plan_update(func: tvm.tir.PrimFunc) -> tvm.IRModule:
+def _apply_plan_update(func: tvm.tirx.PrimFunc) -> tvm.IRModule:
     target = tvm.target.Target("cuda")
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     with target:
-        mod = LowerAndLegalize(mod, target)
-        mod = tl.transform.LowerSharedTmem()(mod)
+        mod = CUDAPassPipelineBodyPrologue(mod, target)
+        mod = tl.cuda.transform.LowerSharedTmem()(mod)
         mod = tl.transform.IfStmtBinding()(mod)
         mod = tl.transform.PlanAndUpdateBufferAllocationLocation()(mod)
     return mod
 
 
-def _find_block(stmt: tvm.tir.Stmt, name_hint: str) -> tvm.tir.Block:
+def _find_block(stmt: tvm.tirx.Stmt, name_hint: str) -> tvm.tirx.SBlock:
     blocks = []
 
     def _visit(node):
-        if isinstance(node, tvm.tir.Block) and str(node.name_hint) == name_hint:
+        if isinstance(node, tvm.tirx.SBlock) and str(node.name_hint) == name_hint:
             blocks.append(node)
 
-    tvm.tir.stmt_functor.post_order_visit(stmt, _visit)
+    tvm.tirx.stmt_functor.post_order_visit(stmt, _visit)
     assert len(blocks) == 1, f"Expected exactly one block named {name_hint}, got {len(blocks)}"
     return blocks[0]
 
 
-def _find_first_for(stmt: tvm.tir.Stmt) -> tvm.tir.For:
+def _find_first_for(stmt: tvm.tirx.Stmt) -> tvm.tirx.For:
     loops = []
 
     def _visit(node):
-        if isinstance(node, tvm.tir.For):
+        if isinstance(node, tvm.tirx.For):
             loops.append(node)
 
-    tvm.tir.stmt_functor.post_order_visit(stmt, _visit)
+    tvm.tirx.stmt_functor.post_order_visit(stmt, _visit)
     assert loops, "Expected at least one loop"
     return loops[0]
 
@@ -58,12 +58,12 @@ def test_plan_update_keeps_loop_header_local_var_outside_loop_body():
     loop_body_local_vars = set()
 
     def _visit_loop_body(node):
-        if isinstance(node, tvm.tir.Block):
+        if isinstance(node, tvm.tirx.SBlock):
             for buf in node.alloc_buffers:
                 if buf.scope() == "local.var":
                     loop_body_local_vars.add(buf.name)
 
-    tvm.tir.stmt_functor.post_order_visit(loop.body, _visit_loop_body)
+    tvm.tirx.stmt_functor.post_order_visit(loop.body, _visit_loop_body)
     assert "b" not in loop_body_local_vars
 
 

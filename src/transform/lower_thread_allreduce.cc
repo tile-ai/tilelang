@@ -21,13 +21,16 @@
  *  Lower allreduce to device implementable ir.
  * \file lower_thread_allreduce.cc
  */
+#include "support/check.h"
 #include <tvm/arith/analyzer.h>
-#include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/cast.h>
+#include <tvm/s_tir/stmt.h>
 #include <tvm/target/target.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <unordered_set>
 #include <utility>
@@ -38,7 +41,7 @@
 
 namespace tvm {
 namespace tl {
-using namespace tir;
+using namespace tirx;
 using namespace ffi;
 
 using runtime::StorageRank;
@@ -65,18 +68,19 @@ private:
   }
 
 public:
-  void VisitStmt_(const AllocateNode *op) final {
-    if (IsDynamicSharedMemory(op->buffer_var)) {
-      dyn_shmem_allocs_[op->buffer_var.get()] = op;
-    } else if (IsStaticSharedMemory(op->buffer_var)) {
-      static_shmem_allocs_[op->buffer_var.get()] = op;
+  void VisitStmt_(const AllocBufferNode *op) final {
+    if (IsDynamicSharedMemory(op->buffer->data)) {
+      dyn_shmem_allocs_[op->buffer->data.get()] = op;
+    } else if (IsStaticSharedMemory(op->buffer->data)) {
+      static_shmem_allocs_[op->buffer->data.get()] = op;
     }
     StmtExprVisitor::VisitStmt_(op);
   }
   // The dynamic mapping from the original buffer var to its allocate
-  std::unordered_map<const VarNode *, const AllocateNode *> dyn_shmem_allocs_;
+  std::unordered_map<const VarNode *, const AllocBufferNode *>
+      dyn_shmem_allocs_;
   // The static mapping from the original buffer var to its allocate
-  std::unordered_map<const VarNode *, const AllocateNode *>
+  std::unordered_map<const VarNode *, const AllocBufferNode *>
       static_shmem_allocs_;
 };
 
@@ -96,12 +100,12 @@ public:
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent) {
+    if (op->attr_key == tirx::attr::thread_extent) {
       thread_extents_.push_back(op);
       Stmt ret = StmtExprMutator::VisitStmt_(op);
       thread_extents_.pop_back();
       return ret;
-    } else if (op->attr_key == tir::attr::reduce_scope) {
+    } else if (op->attr_key == s_tir::attr::reduce_scope) {
       const CommReducerNode *combiner = op->node.as<CommReducerNode>();
       ICHECK(combiner);
       reduce_combiner_.push_back(combiner);
@@ -122,23 +126,18 @@ public:
       return stmt;
     }
   }
-  Stmt VisitStmt_(const AllocateNode *op) final {
-    auto node = Downcast<Allocate>(StmtExprMutator::VisitStmt_(op));
+  Stmt VisitStmt_(const AllocBufferNode *op) final {
+    auto node = Downcast<AllocBuffer>(StmtExprMutator::VisitStmt_(op));
 
-    if (auto it = alloc_remap_.find(node->buffer_var.get());
+    if (auto it = alloc_remap_.find(node->buffer->data.get());
         it != alloc_remap_.end()) {
       Buffer buf = Downcast<Buffer>(it->second);
       auto write_ptr = node.CopyOnWrite();
-      write_ptr->buffer_var = buf->data;
-      write_ptr->dtype = buf->dtype;
-      write_ptr->extents = buf->shape;
-      write_ptr->condition = const_true(buf->dtype.lanes());
+      write_ptr->buffer = buf;
 
-      if (buf.scope() == shared_scope) {
-        // Use volatile access to shared buffer.
-        write_ptr->body =
-            AttrStmt(buf->data, tir::attr::volatile_scope, 1, write_ptr->body);
-      }
+      // Use volatile access to shared buffer.
+      // In the flat model, we emit an AttrStmt separately after this node
+      // rather than wrapping a body.
     }
     return std::move(node);
   }
@@ -347,6 +346,17 @@ private:
 
     std::vector<Stmt> seq;
     std::vector<Buffer> new_alloc_bufs;
+    std::unordered_set<const BufferNode *> new_alloc_buf_set;
+    auto push_alloc_buf = [&](const Buffer &buf) {
+      if (new_alloc_buf_set.insert(buf.get()).second) {
+        new_alloc_bufs.push_back(buf);
+      }
+    };
+    auto append_alloc_bufs = [&](const std::vector<Buffer> &bufs) {
+      for (const Buffer &buf : bufs) {
+        push_alloc_buf(buf);
+      }
+    };
     //
     // This is an optimization. For small reduction sizes, it may be beneficial
     // for a single warp to performance the entire reduction. No trips to shared
@@ -415,22 +425,20 @@ private:
               /*dtype=*/buffers[i]->dtype, /*name=*/"red_buf_staging",
               /*storage_scope=*/shared_scope);
           staging_shared_bufs.push_back(staging_shared_buf);
-          new_alloc_bufs.push_back(staging_shared_buf);
+          push_alloc_buf(staging_shared_buf);
         }
 
         // 2. First round of allreduce.
         std::tie(reduce_results, local_bufs) =
             MakeWarpAllreduce(values, types, combiner, reduce_index, warp_size_,
                               group_index, mask, std::nullopt, &seq);
-        new_alloc_bufs.insert(new_alloc_bufs.end(), local_bufs.begin(),
-                              local_bufs.end());
+        append_alloc_bufs(local_bufs);
 
         // 3. Write allreduce results to staging buffer.
         std::vector<Stmt> write_staging_buf;
         write_staging_buf.reserve(size);
         for (size_t i = 0; i < size; ++i) {
-          new_alloc_bufs.push_back(
-              Downcast<BufferLoad>(reduce_results[i])->buffer);
+          push_alloc_buf(Downcast<BufferLoad>(reduce_results[i])->buffer);
           write_staging_buf.push_back(BufferStore(
               /*buffer=*/staging_shared_bufs[i],
               /*value=*/reduce_results[i],
@@ -453,20 +461,19 @@ private:
             /*predicate=*/reduce_index <
                 make_const(reduce_index->dtype, n_warps),
             &seq);
-        new_alloc_bufs.insert(new_alloc_bufs.end(), local_bufs.begin(),
-                              local_bufs.end());
+        append_alloc_bufs(local_bufs);
 
         // 5. Create shared memory buffer(s) of `group_extent` elements, storing
         // the allreduce results so each thread can access.
         std::vector<Stmt> write_result;
         write_result.reserve(size);
         for (size_t i = 0; i < size; ++i) {
-          new_alloc_bufs.push_back(
-              Downcast<BufferLoad>(reduce_results[i])->buffer);
+          push_alloc_buf(Downcast<BufferLoad>(reduce_results[i])->buffer);
           Buffer broadcast_shared_buf = decl_buffer(
               /*shape=*/{make_const(reduce_index->dtype, group_extent)},
               /*dtype=*/buffers[i]->dtype, /*name=*/"red_result",
               /*storage_scope=*/shared_scope);
+          push_alloc_buf(broadcast_shared_buf);
           write_result.push_back(BufferStore(broadcast_shared_buf,
                                              reduce_results[i], {group_index}));
           // Update `reduce_results`, pointing to the value loaded from the
@@ -481,13 +488,10 @@ private:
       // Write back allreduce results and update existing allocations.
       for (size_t i = 0; i < size; ++i) {
         ICHECK(!load_remap_.count(buffers[i]->data.get()));
-        PrimExpr pred = const_true(types[i].lanes());
         Buffer buf = Downcast<BufferLoad>(reduce_results[i])->buffer;
         ICHECK_EQ(reduce_results[i]->dtype, types[i]);
         load_remap_[buffers[i]->data.get()] = reduce_results[i];
 
-        auto node =
-            Allocate(buf->data, types[i], buf->shape, pred, Evaluate(0));
         alloc_remap_[buffers[i]->data.get()] = buf;
         var_remap_[buffers[i]->data.get()] = buf->data;
         buf_remap_[buffers[i].get()] = buf;
@@ -510,6 +514,7 @@ private:
         shared_bufs[idx] = decl_buffer(
             {IntImm(group_index->dtype, group_extent * reduce_extent)},
             types[idx], "red_buf" + std::to_string(idx), shared_scope);
+        push_alloc_buf(shared_bufs[idx]);
         seq.emplace_back(
             BufferStore(shared_bufs[idx], values[idx],
                         {BufIndex(reduce_index, group_index, reduce_extent)}));
@@ -520,7 +525,6 @@ private:
           reduce_extent, group_extent, contiguous_reduce_extent));
       for (size_t idx = 0; idx < size; ++idx) {
         ICHECK(!load_remap_.count(buffers[idx]->data.get()));
-        PrimExpr pred = const_true(types[idx].lanes());
         BufferLoad load(shared_bufs[idx],
                         {BufIndex(make_zero(reduce_index.dtype()), group_index,
                                   reduce_extent)});
@@ -534,11 +538,12 @@ private:
 
     // Fix all local allocations as all statements are built.
     Stmt body = SeqStmt::Flatten(seq);
+    std::vector<Stmt> alloc_stmts;
     for (const Buffer &buf : new_alloc_bufs) {
-      body = DeclBuffer(buf, body);
-      body = Allocate(buf->data, buf->dtype, buf->shape,
-                      const_true(buf->dtype.lanes()), body);
+      alloc_stmts.push_back(AllocBuffer(buf));
     }
+    alloc_stmts.push_back(body);
+    body = SeqStmt::Flatten(alloc_stmts);
 
     return body;
   }
@@ -666,7 +671,11 @@ private:
       reduce_results.push_back(BufferLoad(shared_bufs[i], zero_indices));
     }
 
-    return {reduce_results, local_bufs};
+    std::vector<Buffer> alloc_bufs;
+    alloc_bufs.reserve(shared_bufs.size() + local_bufs.size());
+    alloc_bufs.insert(alloc_bufs.end(), shared_bufs.begin(), shared_bufs.end());
+    alloc_bufs.insert(alloc_bufs.end(), local_bufs.begin(), local_bufs.end());
+    return {reduce_results, alloc_bufs};
   }
 
   // make allreduce.
@@ -770,7 +779,7 @@ private:
 
         Stmt body = SeqStmt::Flatten(in_let_statement);
         for (size_t i = 0; i < size; i++) {
-          body = LetStmt(in_warp_local_vars[i], loads[i], body);
+          body = SeqStmt({tirx::Bind(in_warp_local_vars[i], loads[i]), body});
         }
         in_warp_seq.push_back(body);
       }
@@ -925,7 +934,7 @@ private:
 };
 
 namespace transform {
-using namespace tir::transform;
+using namespace tirx::transform;
 
 tvm::transform::Pass LowerThreadAllreduce() {
   auto pass_func = [](PrimFunc f, const IRModule &m, const PassContext &ctx) {
@@ -946,7 +955,7 @@ tvm::transform::Pass LowerThreadAllreduce() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.LowerThreadAllreduce",
                         LowerThreadAllreduce);
 }

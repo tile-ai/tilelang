@@ -40,7 +40,7 @@ from tvm import IRModule
 
 mod = IRModule({"main": prim_func})
 with tvm.transform.PassContext():
-    mod = tl.transform.InjectFenceProxy()(mod)
+    mod = tl.cuda.transform.InjectFenceProxy()(mod)
 ```
 
 ## End-to-End Example
@@ -75,7 +75,7 @@ def kernel():
         )
 ```
 
-After `tl.transform.InjectFenceProxy`:
+After `tl.cuda.transform.InjectFenceProxy`:
 
 ```python
 @T.prim_func
@@ -110,7 +110,7 @@ The only change is the `fence_proxy_async` between the generic descriptor setup 
 
 ## Extending the Pass
 
-If you introduce a new intrinsic that behaves like an async proxy, add it to `IsAsyncIntrinsic` in `src/transform/inject_fence_proxy.cc`. Likewise, extend `IsKnownGeneric` for additional generic operations.
+If you introduce a new intrinsic that behaves like an async proxy, add it to `IsAsyncIntrinsic` in `src/cuda/transform/inject_fence_proxy.cc`. Likewise, extend `IsKnownGeneric` for additional generic operations.
 
 Most calls default to `"none"` (no proxy-state effect). `IsNonProxyIntrinsic` exists for well-known synchronization / scheduling helpers and to document intent, but it is not required for correctness if an op is neither generic nor async.
 For custom/opaque ops, you must lower them into known intrinsics (or manually insert `fence_proxy_async`) if they participate in proxy switching.

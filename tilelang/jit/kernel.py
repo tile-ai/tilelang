@@ -1,15 +1,10 @@
 from __future__ import annotations
-from typing import Any, Callable, Generic, Literal, TypeVar
+from typing import Any, Generic, Literal, ParamSpec, TypeVar
+from collections.abc import Callable
 
-# Python 3.9 compatibility for ParamSpec
-try:
-    from typing import ParamSpec
-except ImportError:  # Python < 3.10
-    from typing_extensions import ParamSpec
-
-from tilelang.jit.adapter.utils import is_cutedsl_target, is_metal_target, is_cuda_target
+from tilelang.jit.adapter.utils import is_cutedsl_target, is_metal_target, is_cuda_target, is_hip_target
 from tvm.target import Target
-from tvm.tir import PrimFunc
+from tvm.tirx import PrimFunc
 
 import tilelang
 from tilelang import tvm
@@ -17,6 +12,7 @@ from tilelang import env
 from tilelang.engine.param import CompiledArtifact, KernelParam
 from tilelang.jit.adapter import (
     BaseKernelAdapter,
+    CachedTextSource,
     CythonKernelAdapter,
     CuTeDSLKernelAdapter,
     TVMFFIKernelAdapter,
@@ -25,6 +21,7 @@ from tilelang.jit.adapter import (
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.utils.target import determine_target
 from tilelang.contrib import nvcc as tl_nvcc
+from tilelang.contrib.hip_resource_info import pop_recorded, reset_recorder
 from tilelang.transform import PassConfigKey
 from tilelang.transform.pass_config import normalize_pass_configs
 import logging
@@ -77,7 +74,7 @@ class JITKernel(Generic[_P, _T]):
 
         Parameters
         ----------
-        func : tvm.tir.PrimFunc, optional
+        func : tvm.tirx.PrimFunc, optional
             The TileLang TIR function to compile and wrap.
         out_idx : Union[List[int], int], optional
             Index(es) of the output tensors to return (default: None).
@@ -148,8 +145,8 @@ class JITKernel(Generic[_P, _T]):
     def from_database(
         cls,
         func: PrimFunc,
-        host_kernel_source: str,
-        device_kernel_source: str,
+        host_kernel_source: CachedTextSource,
+        device_kernel_source: CachedTextSource,
         kernel_lib_path: str,
         params: list[KernelParam],
         target: str | Target,
@@ -211,7 +208,7 @@ class JITKernel(Generic[_P, _T]):
 
         Parameters
         ----------
-        tilelang_func : tvm.tir.PrimFunc
+        tilelang_func : tvm.tirx.PrimFunc
             The TileLang (TVM TIR) function to compile.
 
         Returns
@@ -243,6 +240,10 @@ class JITKernel(Generic[_P, _T]):
             dump_ir_path = pass_configs.get(PassConfigKey.TL_DUMP_IR_DIR, "./dump_ir")  # Default dump path
             pass_instruments.append(tvm.ir.instrument.DumpIR(dump_dir=dump_ir_path))
 
+        # open a recorder window for kernel-resource-usage remarks
+        capture_resources = is_hip_target(target)
+        if capture_resources:
+            reset_recorder()
         with tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=pass_instruments), self.target:
             artifact = tilelang.lower(
                 tilelang_func,
@@ -332,6 +333,9 @@ class JITKernel(Generic[_P, _T]):
             # Handle invalid backend.
             raise ValueError(f"Invalid execution backend: {execution_backend}")
 
+        if capture_resources:
+            self._resource_usage = pop_recorded()
+
         return adapter
 
     def _create_adapter_from_database(
@@ -340,8 +344,8 @@ class JITKernel(Generic[_P, _T]):
         result_idx: list[int] | int,
         target: str | Target,
         func_or_mod: PrimFunc | tvm.runtime.Module,
-        host_kernel_source: str,
-        device_kernel_source: str,
+        host_kernel_source: CachedTextSource,
+        device_kernel_source: CachedTextSource,
         kernel_lib_path: str,
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
@@ -412,7 +416,7 @@ class JITKernel(Generic[_P, _T]):
 
         Parameters
         ----------
-        tilelang_func : tvm.tir.PrimFunc
+        tilelang_func : tvm.tirx.PrimFunc
             The TileLang (TVM TIR) function to compile.
         **kwargs : dict
             Additional keyword arguments to pass to the constructor.
@@ -620,11 +624,52 @@ class JITKernel(Generic[_P, _T]):
 
     @property
     def kernel_source(self) -> str:
-        return self.artifact.kernel_source if self.artifact else self.adapter.kernel_global_source
+        if self.artifact:
+            return self.artifact.kernel_source
+        source = getattr(self.adapter, "kernel_global_source", None)
+        if source is not None:
+            return source
+        return self.adapter.get_kernel_source(kernel_only=True) or ""
 
     @property
     def host_source(self) -> str:
-        return str(self.artifact.host_mod) if self.artifact else ""
+        if self.artifact:
+            return str(self.artifact.host_mod)
+        get_host_source = getattr(self.adapter, "get_host_source", None)
+        if get_host_source is None:
+            return ""
+        return get_host_source() or ""
+
+    @property
+    def resource_usage(self) -> dict[str, Any]:
+        """HIP only now"""
+        return getattr(self, "_resource_usage", {}) or {}
+
+    def _primary_resource_usage(self):
+        usage = self.resource_usage
+        if not usage:
+            return None
+        gsym = None
+        if self.prim_func is not None and self.prim_func.attrs is not None:
+            gsym = self.prim_func.attrs.get("global_symbol")
+        if gsym is not None and str(gsym) in usage:
+            return usage[str(gsym)]
+        return next(iter(usage.values()))
+
+    @property
+    def n_regs(self) -> int | None:
+        info = self._primary_resource_usage()
+        return info.n_regs if info is not None else None
+
+    @property
+    def n_spills(self) -> int | None:
+        info = self._primary_resource_usage()
+        return info.n_spills if info is not None else None
+
+    @property
+    def n_max_threads(self) -> int | None:
+        info = self._primary_resource_usage()
+        return info.n_max_threads if info is not None else None
 
     def export_library(self, kernel_file: str) -> None:
         """

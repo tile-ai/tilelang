@@ -2,16 +2,11 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Generic, Any, Literal, TypeVar
+from typing import Generic, Any, Literal, ParamSpec, TypeVar
+from collections.abc import Callable
 from contextlib import AbstractContextManager
 from collections.abc import Iterable
 
-
-# Python 3.9 compatibility for ParamSpec
-try:
-    from typing import ParamSpec
-except ImportError:  # Python < 3.10
-    from typing_extensions import ParamSpec
 import inspect
 
 # from .utils import get_ast, get_compiled_object

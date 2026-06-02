@@ -1,13 +1,14 @@
 from __future__ import annotations
 from tilelang._typing import BufferLikeType
-from tvm.tir import Buffer, BufferLoad, BufferRegion, PrimExpr
+from tvm.tirx import Buffer, BufferLoad, BufferRegion, PrimExpr
 from tilelang.language.utils import region as _make_region_call
+from tilelang.language.utils import buffer_region_to_tile_region
 from tilelang.language.utils import get_buffer_region_from_load
 from functools import reduce
 from tvm import IRModule, DataType
-from tvm.tir import PrimFunc
-from tvm import ir, tir
-from tvm.tir.expr import CallEffectKind
+from tvm.tirx import PrimFunc
+from tvm import ir, tirx
+from tvm.tirx.expr import CallEffectKind
 # Scope Checkers for TVM Buffers
 # These utility functions check the memory scope of a given TVM buffer.
 
@@ -24,7 +25,7 @@ def _get_buffer(buffer_or_load_or_region: BufferLikeType) -> Buffer:
     """
     if isinstance(buffer_or_load_or_region, Buffer):
         return buffer_or_load_or_region
-    elif isinstance(buffer_or_load_or_region, (tir.BufferLoad, tir.BufferRegion)):
+    elif isinstance(buffer_or_load_or_region, (tirx.BufferLoad, tirx.BufferRegion)):
         return buffer_or_load_or_region.buffer
     else:
         raise TypeError(f"Expected Buffer, BufferLoad, or BufferRegion, got {type(buffer_or_load_or_region)}")
@@ -118,6 +119,20 @@ def is_fragment(buffer: BufferLikeType) -> bool:
     return buffer.scope().startswith("local.fragment")
 
 
+def is_metal_simdgroup(buffer: BufferLikeType) -> bool:
+    """
+    Check if the buffer is in the Metal simdgroup scope.
+
+    Args:
+        buffer: The TVM buffer, BufferLoad, or BufferRegion to check.
+
+    Returns:
+        bool: True if the buffer is in metal.simdgroup scope, False otherwise.
+    """
+    buffer = _get_buffer(buffer)
+    return buffer.scope() == "metal.simdgroup"
+
+
 def is_local_var(buffer: BufferLikeType) -> bool:
     """
     Check if the buffer is in the local.var memory scope.
@@ -176,46 +191,57 @@ def retrieve_func_from_module(ir_module: IRModule) -> PrimFunc:
 
 def to_buffer_region(obj: BufferLikeType, access_type: str = "rw", extents: list[PrimExpr] | None = None) -> PrimExpr | BufferRegion:
     """
-    Convert to/from the tl.region representation.
+    Normalize a buffer-like object to BufferRegion, or encode a tl.region call.
 
-    - Buffer/BufferLoad/BufferRegion -> returns a tl.region call (PrimExpr)
+    - Buffer/BufferLoad/BufferRegion -> returns BufferRegion when extents is None
+    - Buffer/BufferLoad/BufferRegion -> returns a tl.region call when extents is provided
     - tl.region Call -> returns the decoded BufferRegion for analysis
     """
     from tilelang.language.frame import has_let_value, get_let_value
 
-    if isinstance(obj, tir.Var) and has_let_value(obj):
+    if isinstance(obj, tirx.Var) and has_let_value(obj):
         obj = get_let_value(obj)
     # Encode into tl.region call (when extents is provided), otherwise return BufferRegion for analysis
-    if isinstance(obj, tir.BufferRegion):
+    if isinstance(obj, tirx.BufferRegion):
         if extents is None:
             return obj
         mins = [r.min for r in obj.region]
         exts = [r.extent for r in obj.region]
         assert len(extents) == len(exts)
-        exts = [tir.min(exts[i], extents[i]) for i in range(len(exts))]
-        return _make_region_call(tir.BufferLoad(obj.buffer, mins), access_type, *exts)
-    if isinstance(obj, tir.Buffer):
-        mins = [tir.IntImm("int32", 0) for _ in obj.shape]
+        exts = [tirx.min(exts[i], extents[i]) for i in range(len(exts))]
+        return _make_region_call(tirx.BufferLoad(obj.buffer, mins), access_type, *exts)
+    if isinstance(obj, tirx.Buffer):
+        mins = [tirx.IntImm("int32", 0) for _ in obj.shape]
         if extents is None:
             ranges = [ir.Range.from_min_extent(m, e) for m, e in zip(mins, obj.shape)]
-            return tir.BufferRegion(obj, ranges)
+            return tirx.BufferRegion(obj, ranges)
         exts = list(extents)
-        return _make_region_call(tir.BufferLoad(obj, mins), access_type, *exts)
-    if isinstance(obj, tir.BufferLoad):
+        return _make_region_call(tirx.BufferLoad(obj, mins), access_type, *exts)
+    if isinstance(obj, tirx.BufferLoad):
         if extents is None:
             region = get_buffer_region_from_load(obj)
             if region is not None:
                 return region
             mins = [idx for idx in obj.indices]
-            ones = [tir.IntImm("int32", 1) for _ in obj.indices]
+            ones = [tirx.IntImm("int32", 1) for _ in obj.indices]
             ranges = [ir.Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
-            return tir.BufferRegion(obj.buffer, ranges)
+            return tirx.BufferRegion(obj.buffer, ranges)
         exts = list(extents)
         if len(obj.indices) > len(exts):
-            exts = [tir.IntImm("int32", 1) for _ in range(len(obj.indices) - len(exts))] + exts
+            exts = [tirx.IntImm("int32", 1) for _ in range(len(obj.indices) - len(exts))] + exts
         assert len(obj.indices) == len(exts)
         return _make_region_call(obj, access_type, *exts)
     raise ValueError(f"Unsupported argument type for to_buffer_region: {type(obj)}")
+
+
+def to_tile_region(obj: BufferLikeType, access_type: str = "rw", extents: list[PrimExpr] | None = None) -> PrimExpr:
+    """Encode a buffer-like object as a tl.region call for tile-op arguments."""
+    buffer_region = to_buffer_region(obj)
+    if not isinstance(buffer_region, tirx.BufferRegion):
+        raise ValueError(f"Expected BufferRegion from to_buffer_region, got {type(buffer_region)}")
+    if extents is None:
+        extents = [r.extent for r in buffer_region.region]
+    return buffer_region_to_tile_region(buffer_region, access_type, extents)
 
 
 def retrieve_shape(obj: BufferLikeType) -> list:
@@ -226,11 +252,11 @@ def retrieve_shape(obj: BufferLikeType) -> list:
     - BufferRegion -> list of each range's `extent`
     - BufferLoad -> extents from `get_buffer_region_from_load(obj)`
     """
-    if isinstance(obj, tir.Buffer):
+    if isinstance(obj, tirx.Buffer):
         return obj.shape
-    if isinstance(obj, tir.BufferRegion):
+    if isinstance(obj, tirx.BufferRegion):
         return [r.extent for r in obj.region]
-    if isinstance(obj, tir.BufferLoad):
+    if isinstance(obj, tirx.BufferLoad):
         region = get_buffer_region_from_load(obj)
         if region is None:
             raise ValueError("Cannot retrieve shape from scalar BufferLoad without region")
@@ -244,9 +270,9 @@ def retrieve_stride(obj: BufferLikeType) -> list:
 
     For BufferRegion and BufferLoad, uses the underlying buffer's `shape`.
     """
-    if isinstance(obj, tir.Buffer):
+    if isinstance(obj, tirx.Buffer):
         shape = obj.shape
-    elif isinstance(obj, (tir.BufferRegion, tir.BufferLoad)):
+    elif isinstance(obj, (tirx.BufferRegion, tirx.BufferLoad)):
         shape = obj.buffer.shape
     else:
         raise ValueError(f"Unsupported retrieve_stride argument type: {type(obj)} for object {obj}")
@@ -268,9 +294,9 @@ def retrive_ptr_from_buffer_region(buffer_or_load_or_region: BufferLikeType, acc
         buffer = buffer_load.buffer
         for i, shape in enumerate(reversed(buffer.shape)):
             indice = buffer_load.indices[len(buffer_load.indices) - i - 1]
-            if isinstance(indice, (tir.IntImm, tir.PrimExpr)):
+            if isinstance(indice, (tirx.IntImm, tirx.PrimExpr)):
                 offset += indice * stride
-            elif isinstance(indice, tir.Ramp):
+            elif isinstance(indice, tirx.Ramp):
                 offset += indice.base * stride
             else:
                 raise ValueError(f"Unsupported index type: {type(indice)}")
@@ -305,10 +331,10 @@ def retrieve_ptr(
         access_type: TVM Buffer access mask, e.g. "r", "w", "rw"
         ignore_last_ndim: do not offset the last N dimensions
     """
-    if isinstance(obj, tir.Buffer):
+    if isinstance(obj, tirx.Buffer):
         return obj.access_ptr(access_type)
 
-    if isinstance(obj, tir.BufferRegion):
+    if isinstance(obj, tirx.BufferRegion):
         buffer, region = obj.buffer, obj.region
         strides = retrieve_stride(obj)
         # offset only over the leading dims, optionally ignoring the tail dims
@@ -318,7 +344,7 @@ def retrieve_ptr(
             offset += region[i].min * strides[i]
         return buffer.access_ptr(access_type, offset=offset)
 
-    if isinstance(obj, tir.BufferLoad):
+    if isinstance(obj, tirx.BufferLoad):
         buffer = obj.buffer
         region = get_buffer_region_from_load(obj)
         if region is not None:
@@ -346,10 +372,10 @@ def retrieve_buffer_and_offset(obj: BufferLikeType) -> tuple[Buffer, PrimExpr | 
     This is useful when callers need to build custom access patterns from a
     common buffer base rather than materializing a full `access_ptr` directly.
     """
-    if isinstance(obj, tir.Buffer):
+    if isinstance(obj, tirx.Buffer):
         return obj, 0
 
-    if isinstance(obj, tir.BufferRegion):
+    if isinstance(obj, tirx.BufferRegion):
         buffer, region = obj.buffer, obj.region
         strides = retrieve_stride(obj)
         offset = 0
@@ -357,7 +383,7 @@ def retrieve_buffer_and_offset(obj: BufferLikeType) -> tuple[Buffer, PrimExpr | 
             offset += r.min * strides[i]
         return buffer, offset
 
-    if isinstance(obj, tir.BufferLoad):
+    if isinstance(obj, tirx.BufferLoad):
         region = get_buffer_region_from_load(obj)
         if region is not None:
             return retrieve_buffer_and_offset(region)
@@ -380,11 +406,11 @@ def retrieve_offset(obj: BufferLikeType) -> list:
     - BufferRegion -> [r.min for r in region]
     - BufferLoad -> indices (or derived region minima)
     """
-    if isinstance(obj, tir.Buffer):
+    if isinstance(obj, tirx.Buffer):
         return [0] * len(obj.shape)
-    if isinstance(obj, tir.BufferRegion):
+    if isinstance(obj, tirx.BufferRegion):
         return [r.min for r in obj.region]
-    if isinstance(obj, tir.BufferLoad):
+    if isinstance(obj, tirx.BufferLoad):
         region = get_buffer_region_from_load(obj)
         if region is not None:
             return [r.min for r in region.region]
@@ -400,21 +426,21 @@ def retrieve_dtype(obj: BufferLikeType) -> str:
     - BufferRegion -> convert to BufferLoad with Ramp indices, then use load.dtype
     - BufferLoad -> load.dtype
     """
-    if isinstance(obj, tir.Buffer):
+    if isinstance(obj, tirx.Buffer):
         return obj.dtype
-    if isinstance(obj, tir.BufferRegion):
+    if isinstance(obj, tirx.BufferRegion):
         # Convert region ranges to indices, using Ramp for vector access
         indices = []
         for r in obj.region:
             extent = r.extent
-            if isinstance(extent, tir.IntImm) and extent.value == 1:
+            if isinstance(extent, tirx.IntImm) and extent.value == 1:
                 indices.append(r.min)
             else:
                 # Use Ramp for vector access: Ramp(base, stride=1, lanes=extent)
-                indices.append(tir.Ramp(r.min, 1, extent))
-        load = tir.BufferLoad(obj.buffer, indices)
+                indices.append(tirx.Ramp(r.min, 1, extent))
+        load = tirx.BufferLoad(obj.buffer, indices)
         return load.dtype
-    if isinstance(obj, tir.BufferLoad):
+    if isinstance(obj, tirx.BufferLoad):
         return obj.dtype
     raise ValueError(f"Unsupported retrieve_dtype argument type: {type(obj)} for object {obj}")
 
@@ -428,7 +454,7 @@ def bits_product(shape: list[PrimExpr], dtype: str) -> PrimExpr:
     that the total bit count is correct.
     """
     if len(shape) == 0:
-        return tir.IntImm("int32", 1)
+        return tirx.IntImm("int32", 1)
     result = shape[0]
     for i in range(1, len(shape)):
         result = result * shape[i]
@@ -446,12 +472,12 @@ def prim_expr_equal(lhs, rhs) -> bool:
     if isinstance(lhs, int) and isinstance(rhs, int):
         return lhs == rhs
     if isinstance(lhs, int):
-        lhs = tir.IntImm("int32", lhs)
+        lhs = tirx.IntImm("int32", lhs)
     if isinstance(rhs, int):
-        rhs = tir.IntImm("int32", rhs)
+        rhs = tirx.IntImm("int32", rhs)
     if ir.structural_equal(lhs, rhs):
         return True
-    return tir.analysis.expr_deep_equal(lhs, rhs)
+    return tirx.analysis.expr_deep_equal(lhs, rhs)
 
 
 def legalize_pairwise_extents(src_extents: list, dst_extents: list) -> tuple[list, list]:
@@ -468,7 +494,7 @@ def legalize_pairwise_extents(src_extents: list, dst_extents: list) -> tuple[lis
       - if x == y: keep both
       - elif x == 1: set x = y
       - elif y == 1: set y = x
-      - else: promote both to tir.max(x, y) to handle dynamic-vs-static safely
+      - else: promote both to tirx.max(x, y) to handle dynamic-vs-static safely
 
     Leading unmatched dimensions are kept as-is.
 
@@ -494,7 +520,7 @@ def legalize_pairwise_extents(src_extents: list, dst_extents: list) -> tuple[lis
             b[-i] = x
         else:
             # Dynamic mismatch: promote to max so downstream clamping/predicates remain safe
-            m = tir.max(x, y)
+            m = tirx.max(x, y)
             a[-i] = m
             b[-i] = m
     return a, b
@@ -513,7 +539,7 @@ def is_full_region(buffer_region: BufferRegion) -> bool:
     Returns:
         bool: True if the region is full; otherwise False.
     """
-    if not isinstance(buffer_region, tir.BufferRegion):
+    if not isinstance(buffer_region, tirx.BufferRegion):
         raise TypeError(f"Expected BufferRegion, got {type(buffer_region)}")
 
     buf = buffer_region.buffer
@@ -522,7 +548,7 @@ def is_full_region(buffer_region: BufferRegion) -> bool:
     if len(buf.shape) != len(ranges):
         return False
 
-    expr_equal = tir.analysis.expr_deep_equal
+    expr_equal = tirx.analysis.expr_deep_equal
     for dim, r in zip(buf.shape, ranges):
         # start == 0 and extent == shape
         if not expr_equal(r.min, 0):

@@ -1,9 +1,9 @@
 from __future__ import annotations
 from functools import wraps
-from typing import Callable
+from collections.abc import Callable
 
 import torch
-from tvm import tir
+from tvm import tirx
 
 from tilelang import tvm as tvm
 
@@ -17,7 +17,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
         params: list[KernelParam],
         result_idx: list[int],
         #  target: Union[str, Target],
-        func_or_mod: tir.PrimFunc | tvm.IRModule,
+        func_or_mod: tirx.PrimFunc | tvm.IRModule,
         #  host_mod: Optional[tvm.IRModule] = None,
         device_mod: tvm.IRModule | None = None,
         kernel_global_source: str | None = None,
@@ -26,7 +26,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
         #  compile_flags: Optional[List[str]] = None
     ):
         self.kernel_global_source = kernel_global_source
-        if isinstance(func_or_mod, tir.PrimFunc):
+        if isinstance(func_or_mod, tirx.PrimFunc):
             func_name = func_or_mod.attrs["global_symbol"]
         else:
             func_name = func_or_mod.__name__
@@ -52,6 +52,15 @@ class MetalKernelAdapter(BaseKernelAdapter):
         super().__init__(func_or_mod, result_idx=result_idx, params=params)
 
     _kernel = None
+
+    def get_kernel_source(self, kernel_only: bool = True) -> str:
+        if kernel_only:
+            # Return just the kernel function body, stripping Metal
+            # module-level boilerplate (includes, structs, etc.).
+            idx = self.kernel_global_source.find("kernel void ")
+            if idx >= 0:
+                return self.kernel_global_source[idx:]
+        return self.kernel_global_source
 
     def _convert_torch_func(self) -> Callable:
         if self._kernel is None:

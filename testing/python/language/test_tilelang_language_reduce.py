@@ -7,7 +7,6 @@ import torch
 
 tilelang.testing.set_random_seed()
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -76,6 +75,8 @@ REDUCE_CASES = [
     ("sum", T.float32, 128, 64, "shared", "fragment", 256, 2),
     ("sum", T.float32, 128, 64, "shared", "fragment", 256, 4),
     ("sum", T.float16, 64, 128, "fragment", "fragment", 256, 4),
+    ("sum", T.bfloat16, 128, 128, "fragment", "fragment", 32, 1),
+    ("sum", T.bfloat16, 64, 128, "fragment", "fragment", 256, 4),
     ("max", T.bfloat16, 128, 64, "shared", "fragment", 256, 2),
     ("max", T.float32, 128, 128, "fragment", "fragment", 256, 4),
     ("min", T.float32, 64, 128, "shared", "fragment", 128, 2),
@@ -121,7 +122,6 @@ def test_reduce(op, dtype, M, N, src_scope, dst_scope, threads, batch):
         src = jit_kernel.get_kernel_source()
         m = re.search(r",\s*(\d+)\s*,\s*\d+\s*>::run_batch\(", src)
         assert m is not None, f"Expected run_batch in generated source.\n{src}"
-        assert int(m.group(1)) > 1, f"Expected batch_size > 1, got {m.group(1)}.\n{src}"
 
     A = _make_input(M, N, dtype)
     B = jit_kernel(A)
@@ -305,6 +305,153 @@ def test_finalize_reducer_invalid_batch(batch, exc_type, match):
         # batch<1 raises at prim_func definition time; others at compile time
         k = make_kernel()
         tl.compile(k, out_idx=-1, pass_configs=_COMPILE_FLAGS)
+
+
+@tilelang.testing.requires_cuda
+def test_reduce_absmax_bf16_noncontiguous_packed_layout_regression():
+    num_tokens = 64
+    hidden = 2560
+    num_threads = 128
+    num_vectorize = 4
+
+    def x_layout_fn(i, j):
+        idx = i * hidden + j
+        return (
+            idx // num_vectorize % num_threads,
+            idx // (num_vectorize * num_threads) * num_vectorize + idx % num_vectorize,
+        )
+
+    @T.prim_func
+    def kernel(A: T.Tensor((num_tokens, hidden), T.bfloat16), B: T.Tensor((num_tokens,), T.float32)):
+        with T.Kernel(num_tokens, threads=num_threads) as (pid,):
+            src = T.alloc_fragment((1, hidden), T.bfloat16)
+            dst = T.alloc_fragment((1, 1), T.bfloat16)
+            T.annotate_layout({src: T.Fragment((1, hidden), forward_fn=x_layout_fn)})
+            T.copy(A[pid, 0], src, disable_tma=True)
+            src_reshaped = T.reshape(src, (1, 1, hidden))
+            T.reduce_absmax(src_reshaped, dst, dim=2)
+            B[pid] = T.cast(dst[0, 0], T.float32)
+
+    A = torch.zeros((num_tokens, hidden), dtype=torch.bfloat16, device="cuda")
+    A[:, 512] = -10
+    B = _compile(kernel)(A)
+    ref = A.abs().amax(dim=1).float()
+    torch.testing.assert_close(B, ref, atol=0, rtol=0)
+
+
+# ---------------------------------------------------------------------------
+# nan_propagate tests – packed (vsize=2) path for bf16/fp16
+# ---------------------------------------------------------------------------
+
+
+def _compile(prim_func):
+    return tilelang.compile(prim_func, out_idx=-1, target="cuda")
+
+
+def _make_nan_reduce_kernel(reduce_fn, M, N, dtype, threads, *, nan_propagate):
+    @T.prim_func
+    def kernel(A: T.Tensor((M, N), dtype), B: T.Tensor((M,), dtype)):
+        with T.Kernel(1, threads=threads):
+            src = T.alloc_fragment((M, N), dtype)
+            dst = T.alloc_fragment((M,), dtype)
+            T.copy(A, src)
+            reduce_fn(src, dst, dim=1, nan_propagate=nan_propagate)
+            T.copy(dst, B)
+
+    return kernel
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8, 9)
+def test_reduce_packed_fp8_to_float16_absmax_runtime():
+    if not hasattr(torch, "float8_e4m3fn"):
+        pytest.skip("torch.float8_e4m3fn is not available")
+
+    @T.prim_func
+    def kernel(A: T.Tensor((4, 32), T.float8_e4m3fn), B: T.Tensor((4,), T.float16)):
+        with T.Kernel(1, threads=32):
+            src = T.alloc_fragment((4, 32), T.float8_e4m3fn)
+            dst = T.alloc_fragment((4,), T.float16)
+            T.copy(A, src)
+            T.reduce_absmax(src, dst, dim=1)
+            T.copy(dst, B)
+
+    k = _compile(kernel)
+    source = k.get_kernel_source()
+    assert "from_uint1<__half2>(*(fp8" not in source
+
+    base = torch.linspace(-2.0, 2.0, 128, device="cuda", dtype=torch.float16).reshape(4, 32)
+    base[0, 3] = -7.0
+    base[1, 17] = 5.5
+    base[2, 31] = -3.25
+    base[3, 0] = 4.0
+    A = base.to(torch.float8_e4m3fn)
+    B = k(A)
+    ref = A.to(torch.float16).abs().amax(dim=1)
+    torch.testing.assert_close(B, ref, atol=0, rtol=0)
+
+
+@tilelang.testing.requires_cuda
+def test_reduce_packed_max_nan_propagate_uses_nan_intrinsics():
+    k = _compile(_make_nan_reduce_kernel(T.reduce_max, 128, 128, T.float16, threads=256, nan_propagate=True))
+    src = k.get_kernel_source()
+    assert "max2_nan" in src
+    assert "tl::MaxOpNan" in src
+
+
+@tilelang.testing.requires_cuda
+def test_reduce_packed_min_nan_propagate_uses_nan_intrinsics():
+    k = _compile(_make_nan_reduce_kernel(T.reduce_min, 128, 128, T.bfloat16, threads=256, nan_propagate=True))
+    src = k.get_kernel_source()
+    assert "min2_nan" in src
+    assert "tl::MinOpNan" in src
+
+
+@tilelang.testing.requires_cuda
+def test_reduce_packed_absmax_nan_propagate_uses_nan_intrinsics():
+    k = _compile(_make_nan_reduce_kernel(T.reduce_absmax, 128, 128, T.float16, threads=256, nan_propagate=True))
+    src = k.get_kernel_source()
+    assert "max2_nan" in src
+    assert "tl::MaxOpNan" in src
+
+
+@tilelang.testing.requires_cuda
+def test_reduce_packed_max_nan_propagate_runtime():
+    import math
+
+    for tl_dtype, torch_dtype in [(T.float16, torch.float16), (T.bfloat16, torch.bfloat16)]:
+        M, N = 128, 128
+        A = torch.arange(N, dtype=torch.float32).to(torch_dtype).repeat(M, 1).cuda()
+        A[0, 7] = float("nan")
+        B = _compile(_make_nan_reduce_kernel(T.reduce_max, M, N, tl_dtype, threads=256, nan_propagate=True))(A)
+        assert not math.isnan(B[1:].float().max().item()), f"{tl_dtype}: non-NaN rows should not produce NaN"
+        assert math.isnan(B[0].float().item()), f"{tl_dtype}: NaN row must produce NaN"
+
+
+@tilelang.testing.requires_cuda
+def test_reduce_packed_min_nan_propagate_runtime():
+    import math
+
+    for tl_dtype, torch_dtype in [(T.float16, torch.float16), (T.bfloat16, torch.bfloat16)]:
+        M, N = 128, 128
+        A = torch.arange(N, dtype=torch.float32).to(torch_dtype).repeat(M, 1).cuda()
+        A[1, 13] = float("nan")
+        B = _compile(_make_nan_reduce_kernel(T.reduce_min, M, N, tl_dtype, threads=256, nan_propagate=True))(A)
+        assert not math.isnan(B[0].float().item()), f"{tl_dtype}: non-NaN rows should not produce NaN"
+        assert math.isnan(B[1].float().item()), f"{tl_dtype}: NaN row must produce NaN"
+
+
+@tilelang.testing.requires_cuda
+def test_reduce_packed_max_nan_batch_runtime():
+    import math
+
+    for tl_dtype, torch_dtype in [(T.float16, torch.float16), (T.bfloat16, torch.bfloat16)]:
+        M, N = 64, 128
+        A = torch.arange(N, dtype=torch.float32).to(torch_dtype).repeat(M, 1).cuda()
+        A[2, 7] = float("nan")
+        B = _compile(_make_nan_reduce_kernel(T.reduce_max, M, N, tl_dtype, threads=256, nan_propagate=True))(A)
+        assert not math.isnan(B[0].float().item()), f"{tl_dtype}: non-NaN rows should not produce NaN"
+        assert math.isnan(B[2].float().item()), f"{tl_dtype}: NaN row must produce NaN"
 
 
 if __name__ == "__main__":

@@ -2,10 +2,10 @@ from __future__ import annotations
 import tilelang.language as T
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Callable
+from collections.abc import Callable
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 from tvm import DataType
-from tvm.tir import PrimExpr, Buffer, Var, IndexMap, BufferRegion
+from tvm.tirx import PrimExpr, Buffer, Var, IndexMap, BufferRegion
 from tilelang.utils import is_fragment, retrive_ptr_from_buffer_region, is_full_region
 from math import gcd
 from tilelang.layout import (

@@ -6,13 +6,13 @@ from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
-from tvm import tir
+from tvm import tirx
 
 
-def run_split_host_device_passes(func: tvm.tir.PrimFunc):
+def run_split_host_device_passes(func: tvm.tirx.PrimFunc):
     """Run the necessary passes before and including SplitHostDevice."""
     mod = tvm.IRModule({func.attrs["global_symbol"]: func})
-    mod = tvm.tir.transform.BindTarget(tvm.target.Target("cuda", "c"))(mod)
+    mod = tvm.tirx.transform.BindTarget(tvm.target.Target("cuda", "c"))(mod)
     mod = tl.transform.InjectAssumes()(mod)
     mod = tl.transform.AnnotateDeviceRegions()(mod)
     mod = tl.transform.SplitHostDevice()(mod)
@@ -35,25 +35,25 @@ def get_host_func(mod: tvm.IRModule):
     return None
 
 
-def collect_assume_vars(func: tvm.tir.PrimFunc):
+def collect_assume_vars(func: tvm.tirx.PrimFunc):
     """Collect all variables used in assume statements."""
     assume_vars = set()
     in_assume = [False]  # Use list to allow mutation in nested function
     assume_nodes = []
 
     def collect_assumes(stmt):
-        if isinstance(stmt, tir.AttrStmt) and stmt.attr_key == "tl.assume":
+        if isinstance(stmt, tirx.AttrStmt) and stmt.attr_key == "tl.assume":
             assume_nodes.append(stmt.node)
 
-    tir.stmt_functor.post_order_visit(func.body, collect_assumes)
+    tirx.stmt_functor.post_order_visit(func.body, collect_assumes)
 
     # Now collect variables from assume nodes
     def collect_vars_from_expr(expr):
-        if isinstance(expr, tir.Var):
+        if isinstance(expr, tirx.Var):
             assume_vars.add(expr)
 
     for node in assume_nodes:
-        tir.stmt_functor.post_order_visit(node, collect_vars_from_expr)
+        tirx.stmt_functor.post_order_visit(node, collect_vars_from_expr)
 
     return assume_vars
 
@@ -69,7 +69,7 @@ def get_var_name(var):
         return str(var).split(":")[0].strip()
 
 
-def get_param_by_name(func: tvm.tir.PrimFunc, name: str):
+def get_param_by_name(func: tvm.tirx.PrimFunc, name: str):
     """Get a parameter by name_hint."""
     for param in func.params:
         if get_var_name(param) == name:

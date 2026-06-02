@@ -18,10 +18,10 @@
 # which is part of the TVM project (https://tvm.apache.org/).
 """The tir expression operation registration"""
 
-from tvm import tir
+from tvm import tirx
 from tvm.ffi.runtime_ctypes import DataType, DataTypeCode
-from tvm.tir import IntImm
-from tvm.tir.expr import FloatImm
+from tvm.tirx import IntImm
+from tvm.tirx.expr import FloatImm
 
 from tvm.script.parser._core import OpMethod, doc, register_op
 
@@ -37,7 +37,7 @@ def _register_expr_op(ty: type):  # pylint: disable=invalid-name
         if DataType(a.dtype).lanes > 1 or DataType(b.dtype).lanes > 1:
             return a & b
         else:
-            return tir.And(a, b)
+            return tirx.And(a, b)
 
     def _or(a, b):
         if isinstance(a, bool):
@@ -47,7 +47,7 @@ def _register_expr_op(ty: type):  # pylint: disable=invalid-name
         if DataType(a.dtype).lanes > 1 or DataType(b.dtype).lanes > 1:
             return a | b
         else:
-            return tir.Or(a, b)
+            return tirx.Or(a, b)
 
     def _get_type_str(dtype: str):
         if DataType(dtype).lanes == 1:
@@ -72,7 +72,7 @@ def _register_expr_op(ty: type):  # pylint: disable=invalid-name
             else:
                 a = FloatImm("float32", a)
 
-        assert isinstance(a, tir.PrimExpr), "Operand should be a PrimExpr."
+        assert isinstance(a, tirx.PrimExpr), "Operand should be a PrimExpr."
         if isinstance(b, int):
             if DataType(a.dtype).type_code == DataTypeCode.INT or DataType(a.dtype).type_code == DataTypeCode.UINT:
                 b = IntImm(_get_type_str(a.dtype), b)
@@ -84,31 +84,31 @@ def _register_expr_op(ty: type):  # pylint: disable=invalid-name
         if DataType(a.dtype).lanes == DataType(b.dtype).lanes:
             return op(a, b)
         elif DataType(a.dtype).lanes == 1 and DataType(a.dtype).lanes != DataType(b.dtype).lanes:
-            broadcast_a = tir.Broadcast(a, DataType(b.dtype).lanes)
+            broadcast_a = tirx.Broadcast(a, DataType(b.dtype).lanes)
             return op(broadcast_a, b)
         elif DataType(b.dtype).lanes == 1 and DataType(a.dtype).lanes != DataType(b.dtype).lanes:
-            broadcast_b = tir.Broadcast(b, DataType(a.dtype).lanes)
+            broadcast_b = tirx.Broadcast(b, DataType(a.dtype).lanes)
             return op(a, broadcast_b)
         else:
             raise TypeError("do not know how to deal with it.")
 
     def _eq(a, b):
-        return _auto_broadcast(a, b, tir.EQ)
+        return _auto_broadcast(a, b, tirx.EQ)
 
     def _ne(a, b):
-        return _auto_broadcast(a, b, tir.NE)
+        return _auto_broadcast(a, b, tirx.NE)
 
     def _lt(a, b):
-        return _auto_broadcast(a, b, tir.LT)
+        return _auto_broadcast(a, b, tirx.LT)
 
     def _le(a, b):
-        return _auto_broadcast(a, b, tir.LE)
+        return _auto_broadcast(a, b, tirx.LE)
 
     def _gt(a, b):
-        return _auto_broadcast(a, b, tir.GT)
+        return _auto_broadcast(a, b, tirx.GT)
 
     def _ge(a, b):
-        return _auto_broadcast(a, b, tir.GE)
+        return _auto_broadcast(a, b, tirx.GE)
 
     def r(op: type, i: int, m: OpMethod):  # pylint: disable=invalid-name
         register_op(ty, op, i)(m)
@@ -145,10 +145,10 @@ def _register_expr_op(ty: type):  # pylint: disable=invalid-name
     for i in [0]:
         #  Case 4. unaryop
         # doc.Invert <-- is overloaded
-        r(doc.Not, i, tir.Not)
+        r(doc.Not, i, tirx.Not)
         # doc.UAdd <-- is overloaded
         # doc.USub <-- is overloaded
 
 
-_register_expr_op(tir.PrimExpr)
-_register_expr_op(tir.IterVar)
+_register_expr_op(tirx.PrimExpr)
+_register_expr_op(tirx.IterVar)
