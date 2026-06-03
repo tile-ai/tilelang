@@ -17,7 +17,9 @@
 *.swp
 *.swo
 
-debug/
+debug/*
+!debug/multi_backend/
+!debug/multi_backend/*.md
 build/
 *dist/
 dist*/

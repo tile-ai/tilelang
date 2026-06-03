@@ -239,7 +239,7 @@ def determine_target(target: TargetLike | Literal["auto"] = "auto", return_objec
     return_var: str | TargetConfig | Target = target
 
     if getattr(target, "_tilelang_target_marker", False):
-        resolved_target = target.to_tvm_target()
+        resolved_target = target.to_legacy_tvm_target()
         return resolved_target if return_object else resolved_target
 
     if target == "auto":
@@ -249,7 +249,7 @@ def determine_target(target: TargetLike | Literal["auto"] = "auto", return_objec
         try:
             from tilelang.backend import Target as TileLangTarget
 
-            return_var = TileLangTarget("auto").to_tvm_target()
+            return_var = TileLangTarget("auto").to_legacy_tvm_target()
         except ValueError as err:
             raise ValueError("No CUDA or HIP or MPS available on this system.") from err
 

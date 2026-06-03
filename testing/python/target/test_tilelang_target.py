@@ -9,6 +9,7 @@ import tilelang.backend.target as target_registry
 from tilelang.backend import (
     Target,
     TargetKind,
+    target_option,
     list_target_kinds,
     list_target_presets,
     register_target_kind,
@@ -34,9 +35,10 @@ def test_tilelang_exports_target():
 def test_target_owns_basic_target_parsing():
     target = Target("cuda", arch="sm_90", execution_backend="dlpack")
 
-    tvm_target_input, execution_backend = resolve_target_execution_backend(target, None)
+    resolved_target, execution_backend = resolve_target_execution_backend(target, None)
 
-    assert tvm_target_input == {"kind": "cuda", "arch": "sm_90"}
+    assert isinstance(resolved_target, Target)
+    assert resolved_target.export() == {"kind": "cuda", "arch": "sm_90"}
     assert execution_backend == "tvm_ffi"
 
     parsed = Target("cuda -arch=sm_90 -keys=cuda,gpu", host="llvm")
@@ -55,14 +57,16 @@ def test_backend_owned_target_kinds_and_presets_normalize_to_tvm_target_input():
     assert "h100" in list_target_presets()
     assert "mi300x" in list_target_presets()
 
-    assert Target("h100").to_tvm_target_input() == {"kind": "cuda", "arch": "sm_90a"}
-    assert Target("mi300x").to_tvm_target_input() == {"kind": "hip", "mcpu": "gfx942"}
-    assert Target("cpu").to_tvm_target_input() == {"kind": "llvm"}
+    assert Target("h100").export() == {"kind": "cuda", "arch": "sm_90a"}
+    assert Target("mi300x").export() == {"kind": "hip", "mcpu": "gfx942"}
+    assert Target("cpu").export() == {"kind": "cpu"}
+    assert Target("cpu").to_legacy_tvm_target_input() == {"kind": "llvm"}
 
 
 def test_cutedsl_is_cuda_owned_target_kind_variant():
-    assert Target("cutedsl").to_tvm_target_input() == {"kind": "cuda", "keys": ["cutedsl"]}
-    assert Target("cutedsl", arch="sm_90").to_tvm_target_input() == {
+    assert Target("cutedsl").export() == {"kind": "cutedsl"}
+    assert Target("cutedsl").to_legacy_tvm_target_input() == {"kind": "cuda", "keys": ["cutedsl"]}
+    assert Target("cutedsl", arch="sm_90").to_legacy_tvm_target_input() == {
         "kind": "cuda",
         "arch": "sm_90",
         "keys": ["cutedsl"],
@@ -80,8 +84,9 @@ def test_target_kind_registration_does_not_require_tvm_target_kind():
         register_target_kind(TargetKind(name, normalize=normalize), override=True)
 
         target = Target(name, mcpu="native")
-        assert target.to_tvm_target_input() == {"kind": "llvm", "keys": [name], "mcpu": "native"}
-        assert target.to_tvm_target().kind.name == "llvm"
+        assert target.export() == {"kind": name, "mcpu": "native"}
+        assert target.to_legacy_tvm_target_input() == {"kind": "llvm", "keys": [name], "mcpu": "native"}
+        assert target.to_legacy_tvm_target().kind.name == "llvm"
     finally:
         if old_kind is None:
             target_registry._TARGET_KINDS.pop(name, None)
@@ -118,7 +123,8 @@ def test_auto_target_uses_registered_driver_detectors():
     try:
         register_target_kind(name, tvm_kind="llvm", detect=detect, priority=10000, override=True)
 
-        assert Target("auto").to_tvm_target_input() == {"kind": "llvm", "mcpu": "native"}
+        assert Target("auto").export() == {"kind": name, "mcpu": "native"}
+        assert Target("auto").to_legacy_tvm_target_input() == {"kind": "llvm", "mcpu": "native"}
     finally:
         if old_kind is None:
             target_registry._TARGET_KINDS.pop(name, None)
@@ -136,7 +142,47 @@ def test_target_execution_backend_conflict_reports_both_sources():
 def test_explicit_compile_execution_backend_overrides_target_auto():
     target = Target("llvm", execution_backend="auto")
 
-    tvm_target_input, execution_backend = resolve_target_execution_backend(target, "tvm_ffi")
+    resolved_target, execution_backend = resolve_target_execution_backend(target, "tvm_ffi")
 
-    assert tvm_target_input == "llvm"
+    assert isinstance(resolved_target, Target)
+    assert resolved_target.export() == {"kind": "llvm"}
     assert execution_backend == "tvm_ffi"
+
+
+def test_target_kind_schema_validates_and_canonicalizes_without_tvm_target_kind():
+    name = "unit-schema-accelerator"
+
+    def canonicalize(config):
+        config["feature.unit"] = True
+        if config.get("arch") == "native":
+            config["arch"] = "unit-v1"
+        return config
+
+    old_kind = target_registry._TARGET_KINDS.get(name)
+    try:
+        register_target_kind(
+            name,
+            default_keys=("unit", "gpu"),
+            options={
+                "arch": target_option(str, default="native"),
+                "threads": target_option(int, default=256),
+            },
+            canonicalizer=canonicalize,
+            override=True,
+        )
+
+        target = Target(name, threads="128")
+        assert target.export() == {
+            "kind": name,
+            "keys": ["unit", "gpu"],
+            "arch": "unit-v1",
+            "threads": 128,
+            "feature.unit": True,
+        }
+        with pytest.raises(ValueError, match="Unknown target option"):
+            Target(name, unknown=True).export()
+    finally:
+        if old_kind is None:
+            target_registry._TARGET_KINDS.pop(name, None)
+        else:
+            target_registry._TARGET_KINDS[name] = old_kind
