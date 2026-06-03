@@ -61,7 +61,8 @@ class GemmSPMMA(GemmSPBase):
 
     def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tirx.Var):
         thread_nums = thread_bounds.extent
-        emitter_thread_var = thread_var - thread_bounds.min
+        # Emitter lane/warp math uses zero-based ids within the current thread bounds.
+        local_thread_var = thread_var - thread_bounds.min
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_SP_INST_MMA_SP)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
@@ -78,7 +79,7 @@ class GemmSPMMA(GemmSPBase):
             warp_row_tiles=warp_row_tiles,
             warp_col_tiles=warp_col_tiles,
             warp_k=self.K,
-            thread_var=emitter_thread_var,
+            thread_var=local_thread_var,
         )
 
         in_dtype = self.in_dtype
