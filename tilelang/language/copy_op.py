@@ -252,6 +252,9 @@ def tma_copy(
     Unlike T.copy() which emits tma_store + tma_store_arrive + tma_store_wait,
     T.tma_copy() omits the wait so the user can batch multiple stores before
     calling T.tma_store_wait() explicitly. ``barrier`` is not needed for stores.
+    FP4 unpacked shared-memory storage is load-only for TMA: packed global
+    ``float4_e2m1fn`` may be loaded into unpacked shared
+    ``float4_e2m1_unpacked``, but the reverse TMA store is not supported.
 
     Args:
         src: Source memory region (global or shared)

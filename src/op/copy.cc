@@ -448,10 +448,10 @@ PrimExpr CopyNode::MakePredicate(arith::Analyzer *analyzer,
 
 // Constructs a SIMT-style nested loop that implements the copy.
 For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
-  if (IsFP4StorageCrossCopy(src->dtype, dst->dtype)) {
-    LOG(FATAL) << "SIMT copy between float4_e2m1fn and float4_e2m1_unpacked is "
-               << "not supported; use T.tma_copy() for packed global <-> "
-               << "unpacked shared FP4 transfers (src=" << src->name
+  if (IsFP4UnpackLoad(src, dst)) {
+    LOG(FATAL) << "SIMT copy from packed global float4_e2m1fn to unpacked "
+               << "shared float4_e2m1_unpacked is not supported; use "
+               << "T.tma_copy() for FP4 unpack loads (src=" << src->name
                << ", dst=" << dst->name << ").";
   }
 

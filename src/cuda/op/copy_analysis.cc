@@ -451,6 +451,17 @@ CopyInstSelection Unsupported(std::string reason) {
 
 std::string MakeTmaUnavailableReason(const CopyNode &op) {
   std::ostringstream oss;
+  if (op.src->dtype.is_float4_e2m1_unpacked() ||
+      op.dst->dtype.is_float4_e2m1_unpacked()) {
+    oss << "T.tma_copy() only supports float4_e2m1_unpacked as an FP4 unpack "
+           "load from packed global float4_e2m1fn to unpacked shared memory. "
+           "The reverse unpacked shared -> packed global TMA store is not "
+           "supported. Got src="
+        << op.src->name << " (scope=" << op.src.scope()
+        << ", dtype=" << op.src->dtype << "), dst=" << op.dst->name
+        << " (scope=" << op.dst.scope() << ", dtype=" << op.dst->dtype << ").";
+    return oss.str();
+  }
   oss << "T.tma_copy() requires TMA-capable target and global<->shared copy "
          "pattern, but TMA is not available for src="
       << op.src->name << ", dst=" << op.dst->name;

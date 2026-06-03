@@ -153,13 +153,11 @@ inline bool IsValidTMACopyDtypePair(DataType global_dtype,
   return IsValidTMALoadDtypePair(global_dtype, shared_dtype);
 }
 
-// True for packed<->unpacked FP4 storage transitions (either direction).
-inline bool IsFP4StorageCrossCopy(DataType src_dtype, DataType dst_dtype) {
-  if (src_dtype == dst_dtype) {
-    return false;
-  }
-  return IsFP4PackedToUnpackedStorageCopy(src_dtype, dst_dtype) ||
-         IsFP4PackedToUnpackedStorageCopy(dst_dtype, src_dtype);
+// True only for the supported TMA load transition from packed global FP4 to
+// unpacked shared FP4. The reverse store direction is not a valid TMA path.
+inline bool IsFP4UnpackLoad(const Buffer &src, const Buffer &dst) {
+  return IsGlobalBuffer(src) && IsSharedBuffer(dst) &&
+         IsFP4PackedToUnpackedStorageCopy(src->dtype, dst->dtype);
 }
 
 } // namespace tl

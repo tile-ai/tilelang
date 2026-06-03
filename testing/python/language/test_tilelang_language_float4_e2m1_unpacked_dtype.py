@@ -67,7 +67,7 @@ def test_float4_simt_copy_bans_packed_to_unpacked():
             A_shared = T.alloc_shared((32, 64), T.float4_e2m1_unpacked)
             T.copy(A[by * 32, bx * 64], A_shared)
 
-    with pytest.raises(tvm.TVMError, match="SIMT copy between float4_e2m1fn"):
+    with pytest.raises(tvm.TVMError, match="SIMT copy from packed global float4_e2m1fn"):
         tilelang.compile(main, target="cuda")
 
 

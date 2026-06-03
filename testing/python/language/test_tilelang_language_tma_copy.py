@@ -12,6 +12,8 @@ For TMA stores (shared -> global):
   No barrier argument is needed for stores.
 """
 
+import pytest
+
 from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang.language as T
@@ -302,6 +304,27 @@ def fp4_tma_copy_unpacked_smem_load(M=128, N=256, block_M=64, block_N=128):
     return main
 
 
+def fp4_tma_copy_unpacked_smem_store(M=128, N=256, block_M=64, block_N=128):
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, N), T.float4_e2m1fn),
+        B: T.Tensor((M, N), T.float4_e2m1fn),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+            A_shared = T.alloc_shared((block_M, block_N), T.float4_e2m1_unpacked)
+            mbar = T.alloc_barrier(128)
+            T.tma_copy(
+                A[by * block_M, bx * block_N],
+                A_shared,
+                barrier=mbar,
+            )
+            T.barrier_arrive(mbar)
+            T.mbarrier_wait_parity(mbar, 0)
+            T.tma_copy(A_shared, B[by * block_M, bx * block_N])
+
+    return main
+
+
 def _fp4_tma_descriptor_init_block(host_source, desc_name):
 
     marker = f"[0].v_ptr) = {desc_name};"
@@ -387,6 +410,16 @@ def test_fp4_unpacksmem_tma_descriptor_uses_align16b():
     assert 'A_shared = T.alloc_buffer((8192,), "custom[float4_e2m1_unpacked]"' in device_ir
     assert '["__tvm_tensormap_create_tiled", A_desc, 14,' in host_ir
     assert 'T.call_packed("__tvm_tensormap_create_tiled", A_desc, 14,' in host_ir
+
+
+def test_fp4_unpacksmem_tma_store_is_rejected():
+    program = fp4_tma_copy_unpacked_smem_store()
+    with pytest.raises(tvm.TVMError, match="only supports float4_e2m1_unpacked as an FP4 unpack load"):
+        tilelang.lower(
+            program,
+            target={"kind": "cuda", "arch": "sm_100"},
+            enable_device_compile=False,
+        )
 
 
 def test_copy_prefer_tma_lowers_as_synchronous_tma_load():

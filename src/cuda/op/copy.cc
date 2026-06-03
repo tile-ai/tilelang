@@ -46,7 +46,7 @@ PrimExpr MakeTmaLeaderCondition(PrimExpr thread_extent) {
 
 int TMAPayloadElementBits(DataType dtype) {
   // IR elements are 8-bit unpacked SMEM slots, but TMA/mbarrier transactions
-  // count the packed FP4 payload moved from/to global memory.
+  // count the packed FP4 payload loaded from global memory.
   if (dtype.is_float4_e2m1_unpacked()) {
     return 4;
   }
