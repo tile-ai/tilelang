@@ -1517,6 +1517,11 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
       return fallback_to_normal("unsupported shared swizzle layout");
     }
   }
+  bool is_align16b_subbyte_layout =
+      shared_layout.defined() && shared_tensor_unmapped->dtype.bits() < 8 &&
+      shared_tensor_unmapped->dtype.lanes() == 1 &&
+      StructuralEqual()(shared_layout,
+                        makeAlign16BSwizzleLayout(shared_tensor_unmapped));
 
   auto inner_box_dim = as_const_int(desc.smem_box[0]);
   if (inner_box_dim == nullptr) {
@@ -1526,7 +1531,12 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     return fallback_to_normal("non-constant inner box dimension");
   }
   int instruction_dim = *inner_box_dim;
-  if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
+  if (is_align16b_subbyte_layout) {
+    // 16U4_ALIGN16B uses one 8-bit SMEM container per logical FP4. Keep the
+    // logical box dimension instead of expanding a 128B swizzle span as if the
+    // data were densely packed.
+    instruction_dim = *inner_box_dim;
+  } else if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
     instruction_dim = TMAElementsForBytes(64, src->dtype);
   } else if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B)) {
     instruction_dim = TMAElementsForBytes(128, src->dtype);
@@ -1542,7 +1552,9 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   desc.smem_box.Set(0, PrimExpr(instruction_dim));
 
   int inner_box_dim_ =
-      TMABytesFromElements(instruction_dim, shared_tensor->dtype);
+      is_align16b_subbyte_layout
+          ? instruction_dim * shared_tensor->dtype.bytes()
+          : TMABytesFromElements(instruction_dim, shared_tensor->dtype);
 
   struct SwizzleCheck {
     int swizzle;
@@ -1706,7 +1718,15 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
 
   if (is_load && barrier_base_id >= 0) {
     PrimExpr total_bytes;
-    if ((*inner_box_dim) != instruction_dim) {
+    if (is_align16b_subbyte_layout) {
+      int loop_extent = ((*inner_box_dim) != instruction_dim)
+                            ? ((*inner_box_dim) / instruction_dim)
+                            : 1;
+      // mbarrier transaction bytes track the FP4 payload moved by TMA, not the
+      // byte-container shared-memory footprint introduced by 16U4_ALIGN16B.
+      total_bytes = TMABytesFromElements(total_elements * loop_extent,
+                                         shared_tensor->dtype);
+    } else if ((*inner_box_dim) != instruction_dim) {
       int loop_extent = (*inner_box_dim) / instruction_dim;
       total_bytes = TMATransactionBytesFromElements(
           total_elements * loop_extent, shared_tensor->dtype);

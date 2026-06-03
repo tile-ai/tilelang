@@ -204,6 +204,346 @@ struct MMA_Traits<SM100_MMA_F8F6F4_WS_SS, a_type, b_type, c_type, cute::C<M>,
   }
 };
 
+// MMA_Traits specialization for FP4 (float_e2m1_t) with SM100_MMA_F8F6F4_SS.
+// CUTLASS's to_UMMAFormat<float_e2m1_t> returns MXF4Format::E2M1(=1), but
+// kind::f8f6f4 requires MXF8F6F4Format::E2M1(=5). This more-specialized
+// partial specialization provides the correct descriptor encoding.
+template <class c_type, int M, int N, UMMA::Major a_major, UMMA::Major b_major,
+          UMMA::ScaleIn a_neg, UMMA::ScaleIn b_neg>
+struct MMA_Traits<SM100_MMA_F8F6F4_SS, cute::float_e2m1_t, cute::float_e2m1_t,
+                  c_type, cute::C<M>, cute::C<N>,
+                  cute::integral_constant<UMMA::Major, a_major>,
+                  cute::integral_constant<UMMA::Major, b_major>,
+                  cute::integral_constant<UMMA::ScaleIn, a_neg>,
+                  cute::integral_constant<UMMA::ScaleIn, b_neg>> {
+  using ValTypeD = c_type;
+  using ValTypeA = cute::float_e2m1_t;
+  using ValTypeB = cute::float_e2m1_t;
+  using ValTypeC = c_type;
+
+  using FrgTypeA = UMMA::smem_desc<a_major>;
+  using FrgTypeB = UMMA::smem_desc<b_major>;
+  using FrgTypeC = UMMA::tmem_frg_1sm<c_type>;
+
+  constexpr static int K = 32;
+
+  using Shape_MNK = Shape<Int<M>, Int<N>, Int<K>>;
+  using ThrID = Layout<_1>;
+  using ALayout =
+      Layout<Shape<_1, Shape<Int<M>, Int<K>>>, Stride<_0, Stride<_1, Int<M>>>>;
+  using BLayout =
+      Layout<Shape<_1, Shape<Int<N>, Int<K>>>, Stride<_0, Stride<_1, Int<N>>>>;
+  using CLayout =
+      Layout<Shape<_1, Shape<Int<M>, Int<N>>>, Stride<_0, Stride<_1, Int<M>>>>;
+
+  static constexpr UMMA::InstrDescriptor make_fp4_desc() {
+    UMMA::InstrDescriptor d = {};
+    d.c_format_ = uint8_t(UMMA::to_CFormat<c_type>());
+    d.a_format_ = 5; // MXF8F6F4Format::E2M1
+    d.b_format_ = 5;
+    d.a_negate_ = uint8_t(a_neg);
+    d.b_negate_ = uint8_t(b_neg);
+    d.a_major_ = uint8_t(a_major);
+    d.b_major_ = uint8_t(b_major);
+    d.n_dim_ = N >> 3;
+    d.m_dim_ = M >> 4;
+    return d;
+  }
+
+  UMMA::InstrDescriptor idesc_ = make_fp4_desc();
+  UMMA::ScaleOut accumulate_ = UMMA::ScaleOut::One;
+
+  template <class TD, class DLayout, class TA, class ALayout, class TB,
+            class BLayout, class TC, class CLayout>
+  CUTE_HOST_DEVICE constexpr friend void
+  mma_unpack(MMA_Traits const &traits, Tensor<TD, DLayout> &D,
+             Tensor<TA, ALayout> const &A, Tensor<TB, BLayout> const &B,
+             Tensor<TC, CLayout> const &C) {
+    static_assert(is_tmem<TD>::value, "Expected tmem");
+    static_assert(is_rmem<TA>::value, "Expected desc registers");
+    static_assert(is_rmem<TB>::value, "Expected desc registers");
+    static_assert(is_tmem<TC>::value, "Expected tmem");
+
+    uint64_t desc_a = A[0];
+    uint64_t desc_b = B[0];
+    uint32_t tmem_c = raw_pointer_cast(D.data());
+    uint64_t idesc = UMMA::make_runtime_instr_desc<>(traits.idesc_);
+    SM100_MMA_F8F6F4_SS::fma(desc_a, desc_b, tmem_c,
+                             uint32_t(traits.accumulate_), idesc);
+  }
+};
+
+// Same fix for SM100_MMA_F8F6F4_WS_SS (weight-stationary .ws variant).
+template <class c_type, int M, int N, UMMA::Major a_major, UMMA::Major b_major,
+          UMMA::ScaleIn a_neg, UMMA::ScaleIn b_neg>
+struct MMA_Traits<SM100_MMA_F8F6F4_WS_SS, cute::float_e2m1_t,
+                  cute::float_e2m1_t, c_type, cute::C<M>, cute::C<N>,
+                  cute::integral_constant<UMMA::Major, a_major>,
+                  cute::integral_constant<UMMA::Major, b_major>,
+                  cute::integral_constant<UMMA::ScaleIn, a_neg>,
+                  cute::integral_constant<UMMA::ScaleIn, b_neg>> {
+  using ValTypeD = c_type;
+  using ValTypeA = cute::float_e2m1_t;
+  using ValTypeB = cute::float_e2m1_t;
+  using ValTypeC = c_type;
+
+  using FrgTypeA = UMMA::smem_desc<a_major>;
+  using FrgTypeB = UMMA::smem_desc<b_major>;
+  using FrgTypeC = UMMA::tmem_frg_ws_1sm<c_type>;
+
+  constexpr static int K = 32;
+
+  using Shape_MNK = Shape<Int<M>, Int<N>, Int<K>>;
+  using ThrID = Layout<_1>;
+  using ALayout =
+      Layout<Shape<_1, Shape<Int<M>, Int<K>>>, Stride<_0, Stride<_1, Int<M>>>>;
+  using BLayout =
+      Layout<Shape<_1, Shape<Int<N>, Int<K>>>, Stride<_0, Stride<_1, Int<N>>>>;
+  using CLayout =
+      Layout<Shape<_1, Shape<Int<M>, Int<N>>>, Stride<_0, Stride<_1, Int<M>>>>;
+
+  static constexpr UMMA::InstrDescriptor make_fp4_desc() {
+    UMMA::InstrDescriptor d = {};
+    d.c_format_ = uint8_t(UMMA::to_CFormat<c_type>());
+    d.a_format_ = 5; // MXF8F6F4Format::E2M1
+    d.b_format_ = 5;
+    d.a_negate_ = uint8_t(a_neg);
+    d.b_negate_ = uint8_t(b_neg);
+    d.a_major_ = uint8_t(a_major);
+    d.b_major_ = uint8_t(b_major);
+    d.n_dim_ = N >> 3;
+    d.m_dim_ = M >> 4;
+    return d;
+  }
+
+  UMMA::InstrDescriptor idesc_ = make_fp4_desc();
+  UMMA::ScaleOut accumulate_ = UMMA::ScaleOut::One;
+
+  template <class TD, class DLayout, class TA, class ALayout, class TB,
+            class BLayout, class TC, class CLayout>
+  CUTE_HOST_DEVICE constexpr friend void
+  mma_unpack(MMA_Traits const &traits, Tensor<TD, DLayout> &D,
+             Tensor<TA, ALayout> const &A, Tensor<TB, BLayout> const &B,
+             Tensor<TC, CLayout> const &C) {
+    static_assert(is_tmem<TD>::value, "Expected tmem");
+    static_assert(is_rmem<TA>::value, "Expected desc registers");
+    static_assert(is_rmem<TB>::value, "Expected desc registers");
+    static_assert(is_tmem<TC>::value, "Expected tmem");
+
+    uint64_t desc_a = A[0];
+    uint64_t desc_b = B[0];
+    uint32_t tmem_c = raw_pointer_cast(D.data());
+    uint64_t idesc = UMMA::make_runtime_instr_desc<>(traits.idesc_);
+    SM100_MMA_F8F6F4_WS_SS::fma(desc_a, desc_b, tmem_c,
+                                uint32_t(traits.accumulate_), idesc);
+  }
+};
+
+// MMA_Traits specialization for FP4 (float_e2m1_t) with SM100_MMA_F8F6F4_TS.
+// A operand comes from TMEM, B from SMEM. Same descriptor encoding fix as SS.
+// This partial specialization is selected automatically for TS atoms whose
+// operands are FP4. It keeps the runtime descriptor encoding in the f8f6f4
+// domain, where E2M1 is encoded as MXF8F6F4Format::E2M1 (=5).
+template <class c_type, int M, int N, UMMA::Major a_major, UMMA::Major b_major,
+          UMMA::ScaleIn a_neg, UMMA::ScaleIn b_neg, UMMA::Saturate c_sat>
+struct MMA_Traits<
+    SM100_MMA_F8F6F4_TS<cute::float_e2m1_t, cute::float_e2m1_t, c_type, M, N,
+                        a_major, b_major, a_neg, b_neg, c_sat>> {
+  using ValTypeD = c_type;
+  using ValTypeA = cute::float_e2m1_t;
+  using ValTypeB = cute::float_e2m1_t;
+  using ValTypeC = c_type;
+
+  using FrgTypeA = UMMA::tmem_frg_1sm<cute::float_e2m1_t, cute::float_e2m1_t,
+                                      UMMA::TmemAllocMode::NonInterleaved>;
+  using FrgTypeB = UMMA::smem_desc<b_major>;
+  using FrgTypeC =
+      UMMA::tmem_frg_1sm<c_type, int32_t, UMMA::TmemAllocMode::NonInterleaved>;
+
+  constexpr static int K = 32;
+
+  using Shape_MNK = Shape<Int<M>, Int<N>, Int<K>>;
+  using ThrID = Layout<_1>;
+  using ALayout =
+      Layout<Shape<_1, Shape<Int<M>, Int<K>>>, Stride<_0, Stride<_1, Int<M>>>>;
+  using BLayout =
+      Layout<Shape<_1, Shape<Int<N>, Int<K>>>, Stride<_0, Stride<_1, Int<N>>>>;
+  using CLayout =
+      Layout<Shape<_1, Shape<Int<M>, Int<N>>>, Stride<_0, Stride<_1, Int<M>>>>;
+
+  static constexpr UMMA::InstrDescriptor make_fp4_desc() {
+    UMMA::InstrDescriptor d = {};
+    d.c_format_ = uint8_t(UMMA::to_CFormat<c_type>());
+    d.a_format_ = 5; // MXF8F6F4Format::E2M1
+    d.b_format_ = 5;
+    d.a_negate_ = uint8_t(a_neg);
+    d.b_negate_ = uint8_t(b_neg);
+    d.a_major_ = uint8_t(a_major);
+    d.b_major_ = uint8_t(b_major);
+    d.n_dim_ = N >> 3;
+    d.m_dim_ = M >> 4;
+    return d;
+  }
+
+  UMMA::InstrDescriptor idesc_ = make_fp4_desc();
+  UMMA::ScaleOut accumulate_ = UMMA::ScaleOut::One;
+
+  template <class TD, class DLayout, class TA, class ALayout, class TB,
+            class BLayout, class TC, class CLayout>
+  CUTE_HOST_DEVICE constexpr friend void
+  mma_unpack(MMA_Traits const &traits, Tensor<TD, DLayout> &D,
+             Tensor<TA, ALayout> const &A, Tensor<TB, BLayout> const &B,
+             Tensor<TC, CLayout> const &C) {
+    static_assert(is_tmem<TD>::value, "Expected tmem");
+    static_assert(is_tmem<TA>::value, "Expected tmem");
+    static_assert(is_rmem<TB>::value, "Expected desc registers");
+    static_assert(is_tmem<TC>::value, "Expected tmem");
+
+    uint64_t tmem_a = raw_pointer_cast(A.data());
+    uint64_t desc_b = B[0];
+    uint32_t tmem_c = raw_pointer_cast(D.data());
+    uint64_t idesc = UMMA::make_runtime_instr_desc<>(traits.idesc_);
+    SM100_MMA_F8F6F4_TS<cute::float_e2m1_t, cute::float_e2m1_t, c_type, M, N,
+                        a_major, b_major, a_neg, b_neg,
+                        c_sat>::fma(tmem_a, desc_b, tmem_c,
+                                    uint32_t(traits.accumulate_), idesc);
+  }
+};
+
+// Mixed-precision MMA_Traits: A = float_e4m3_t (FP8), B = float_e2m1_t (FP4).
+// Descriptor: a_format = 0 (MXF8F6F4Format::E4M3), b_format = 5
+// (MXF8F6F4Format::E2M1). SS variant (both operands from shared memory).
+template <class c_type, int M, int N, UMMA::Major a_major, UMMA::Major b_major,
+          UMMA::ScaleIn a_neg, UMMA::ScaleIn b_neg>
+struct MMA_Traits<SM100_MMA_F8F6F4_SS, cute::float_e4m3_t, cute::float_e2m1_t,
+                  c_type, cute::C<M>, cute::C<N>,
+                  cute::integral_constant<UMMA::Major, a_major>,
+                  cute::integral_constant<UMMA::Major, b_major>,
+                  cute::integral_constant<UMMA::ScaleIn, a_neg>,
+                  cute::integral_constant<UMMA::ScaleIn, b_neg>> {
+  using ValTypeD = c_type;
+  using ValTypeA = cute::float_e4m3_t;
+  using ValTypeB = cute::float_e2m1_t;
+  using ValTypeC = c_type;
+
+  using FrgTypeA = UMMA::smem_desc<a_major>;
+  using FrgTypeB = UMMA::smem_desc<b_major>;
+  using FrgTypeC = UMMA::tmem_frg_1sm<c_type>;
+
+  constexpr static int K = 32;
+
+  using Shape_MNK = Shape<Int<M>, Int<N>, Int<K>>;
+  using ThrID = Layout<_1>;
+  using ALayout =
+      Layout<Shape<_1, Shape<Int<M>, Int<K>>>, Stride<_0, Stride<_1, Int<M>>>>;
+  using BLayout =
+      Layout<Shape<_1, Shape<Int<N>, Int<K>>>, Stride<_0, Stride<_1, Int<N>>>>;
+  using CLayout =
+      Layout<Shape<_1, Shape<Int<M>, Int<N>>>, Stride<_0, Stride<_1, Int<M>>>>;
+
+  static constexpr UMMA::InstrDescriptor make_a8w4_desc() {
+    UMMA::InstrDescriptor d = {};
+    d.c_format_ = uint8_t(UMMA::to_CFormat<c_type>());
+    d.a_format_ = 0; // MXF8F6F4Format::E4M3
+    d.b_format_ = 5; // MXF8F6F4Format::E2M1
+    d.a_negate_ = uint8_t(a_neg);
+    d.b_negate_ = uint8_t(b_neg);
+    d.a_major_ = uint8_t(a_major);
+    d.b_major_ = uint8_t(b_major);
+    d.n_dim_ = N >> 3;
+    d.m_dim_ = M >> 4;
+    return d;
+  }
+
+  UMMA::InstrDescriptor idesc_ = make_a8w4_desc();
+  UMMA::ScaleOut accumulate_ = UMMA::ScaleOut::One;
+
+  template <class TD, class DLayout, class TA, class ALayout, class TB,
+            class BLayout, class TC, class CLayout>
+  CUTE_HOST_DEVICE constexpr friend void
+  mma_unpack(MMA_Traits const &traits, Tensor<TD, DLayout> &D,
+             Tensor<TA, ALayout> const &A, Tensor<TB, BLayout> const &B,
+             Tensor<TC, CLayout> const &C) {
+    static_assert(is_tmem<TD>::value, "Expected tmem");
+    static_assert(is_rmem<TA>::value, "Expected desc registers");
+    static_assert(is_rmem<TB>::value, "Expected desc registers");
+    static_assert(is_tmem<TC>::value, "Expected tmem");
+
+    uint64_t desc_a = A[0];
+    uint64_t desc_b = B[0];
+    uint32_t tmem_c = raw_pointer_cast(D.data());
+    uint64_t idesc = UMMA::make_runtime_instr_desc<>(traits.idesc_);
+    SM100_MMA_F8F6F4_SS::fma(desc_a, desc_b, tmem_c,
+                             uint32_t(traits.accumulate_), idesc);
+  }
+};
+
+// Mixed A8W4 — WS_SS variant (weight-stationary, M=64 or M=32).
+template <class c_type, int M, int N, UMMA::Major a_major, UMMA::Major b_major,
+          UMMA::ScaleIn a_neg, UMMA::ScaleIn b_neg>
+struct MMA_Traits<SM100_MMA_F8F6F4_WS_SS, cute::float_e4m3_t,
+                  cute::float_e2m1_t, c_type, cute::C<M>, cute::C<N>,
+                  cute::integral_constant<UMMA::Major, a_major>,
+                  cute::integral_constant<UMMA::Major, b_major>,
+                  cute::integral_constant<UMMA::ScaleIn, a_neg>,
+                  cute::integral_constant<UMMA::ScaleIn, b_neg>> {
+  using ValTypeD = c_type;
+  using ValTypeA = cute::float_e4m3_t;
+  using ValTypeB = cute::float_e2m1_t;
+  using ValTypeC = c_type;
+
+  using FrgTypeA = UMMA::smem_desc<a_major>;
+  using FrgTypeB = UMMA::smem_desc<b_major>;
+  using FrgTypeC = UMMA::tmem_frg_ws_1sm<c_type>;
+
+  constexpr static int K = 32;
+
+  using Shape_MNK = Shape<Int<M>, Int<N>, Int<K>>;
+  using ThrID = Layout<_1>;
+  using ALayout =
+      Layout<Shape<_1, Shape<Int<M>, Int<K>>>, Stride<_0, Stride<_1, Int<M>>>>;
+  using BLayout =
+      Layout<Shape<_1, Shape<Int<N>, Int<K>>>, Stride<_0, Stride<_1, Int<N>>>>;
+  using CLayout =
+      Layout<Shape<_1, Shape<Int<M>, Int<N>>>, Stride<_0, Stride<_1, Int<M>>>>;
+
+  static constexpr UMMA::InstrDescriptor make_a8w4_desc() {
+    UMMA::InstrDescriptor d = {};
+    d.c_format_ = uint8_t(UMMA::to_CFormat<c_type>());
+    d.a_format_ = 0; // MXF8F6F4Format::E4M3
+    d.b_format_ = 5; // MXF8F6F4Format::E2M1
+    d.a_negate_ = uint8_t(a_neg);
+    d.b_negate_ = uint8_t(b_neg);
+    d.a_major_ = uint8_t(a_major);
+    d.b_major_ = uint8_t(b_major);
+    d.n_dim_ = N >> 3;
+    d.m_dim_ = M >> 4;
+    return d;
+  }
+
+  UMMA::InstrDescriptor idesc_ = make_a8w4_desc();
+  UMMA::ScaleOut accumulate_ = UMMA::ScaleOut::One;
+
+  template <class TD, class DLayout, class TA, class ALayout, class TB,
+            class BLayout, class TC, class CLayout>
+  CUTE_HOST_DEVICE constexpr friend void
+  mma_unpack(MMA_Traits const &traits, Tensor<TD, DLayout> &D,
+             Tensor<TA, ALayout> const &A, Tensor<TB, BLayout> const &B,
+             Tensor<TC, CLayout> const &C) {
+    static_assert(is_tmem<TD>::value, "Expected tmem");
+    static_assert(is_rmem<TA>::value, "Expected desc registers");
+    static_assert(is_rmem<TB>::value, "Expected desc registers");
+    static_assert(is_tmem<TC>::value, "Expected tmem");
+
+    uint64_t desc_a = A[0];
+    uint64_t desc_b = B[0];
+    uint32_t tmem_c = raw_pointer_cast(D.data());
+    uint64_t idesc = UMMA::make_runtime_instr_desc<>(traits.idesc_);
+    SM100_MMA_F8F6F4_WS_SS::fma(desc_a, desc_b, tmem_c,
+                                uint32_t(traits.accumulate_), idesc);
+  }
+};
+
 namespace tl_tcgen5mma {
 
 using cutlass::gemm::collective::detail::sm100_smem_selector;
@@ -330,6 +670,104 @@ struct DispatchInstruction<cute::float_e5m2_t, cute::float_e5m2_t, half_t, M, N,
                            std::enable_if_t<(M == 64 || M == 32) && K == 32>> {
   using MMA = MMA_Traits<SM100_MMA_F8F6F4_WS_SS, cute::float_e5m2_t,
                          cute::float_e5m2_t, half_t, Int<M>, Int<N>,
+                         integral_constant<UMMA::Major, a_major>,
+                         integral_constant<UMMA::Major, b_major>,
+                         integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>,
+                         integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>>;
+};
+
+// FP4 (float_e2m1_t) — C = float
+template <int M, int N, int K, UMMA::Major a_major, UMMA::Major b_major>
+struct DispatchInstruction<cute::float_e2m1_t, cute::float_e2m1_t, float, M, N,
+                           K, a_major, b_major,
+                           std::enable_if_t<M == 128 && K == 32>> {
+  using MMA =
+      MMA_Traits<SM100_MMA_F8F6F4_SS, cute::float_e2m1_t, cute::float_e2m1_t,
+                 float, Int<M>, Int<N>, integral_constant<UMMA::Major, a_major>,
+                 integral_constant<UMMA::Major, b_major>,
+                 integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>,
+                 integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>>;
+};
+
+template <int M, int N, int K, UMMA::Major a_major, UMMA::Major b_major>
+struct DispatchInstruction<cute::float_e2m1_t, cute::float_e2m1_t, float, M, N,
+                           K, a_major, b_major,
+                           std::enable_if_t<(M == 64 || M == 32) && K == 32>> {
+  using MMA =
+      MMA_Traits<SM100_MMA_F8F6F4_WS_SS, cute::float_e2m1_t, cute::float_e2m1_t,
+                 float, Int<M>, Int<N>, integral_constant<UMMA::Major, a_major>,
+                 integral_constant<UMMA::Major, b_major>,
+                 integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>,
+                 integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>>;
+};
+
+// FP4 (float_e2m1_t) — C = half_t
+template <int M, int N, int K, UMMA::Major a_major, UMMA::Major b_major>
+struct DispatchInstruction<cute::float_e2m1_t, cute::float_e2m1_t, half_t, M, N,
+                           K, a_major, b_major,
+                           std::enable_if_t<M == 128 && K == 32>> {
+  using MMA = MMA_Traits<SM100_MMA_F8F6F4_SS, cute::float_e2m1_t,
+                         cute::float_e2m1_t, half_t, Int<M>, Int<N>,
+                         integral_constant<UMMA::Major, a_major>,
+                         integral_constant<UMMA::Major, b_major>,
+                         integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>,
+                         integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>>;
+};
+template <int M, int N, int K, UMMA::Major a_major, UMMA::Major b_major>
+struct DispatchInstruction<cute::float_e2m1_t, cute::float_e2m1_t, half_t, M, N,
+                           K, a_major, b_major,
+                           std::enable_if_t<(M == 64 || M == 32) && K == 32>> {
+  using MMA = MMA_Traits<SM100_MMA_F8F6F4_WS_SS, cute::float_e2m1_t,
+                         cute::float_e2m1_t, half_t, Int<M>, Int<N>,
+                         integral_constant<UMMA::Major, a_major>,
+                         integral_constant<UMMA::Major, b_major>,
+                         integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>,
+                         integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>>;
+};
+
+// Mixed A8W4 (float_e4m3_t x float_e2m1_t) — C = float
+template <int M, int N, int K, UMMA::Major a_major, UMMA::Major b_major>
+struct DispatchInstruction<cute::float_e4m3_t, cute::float_e2m1_t, float, M, N,
+                           K, a_major, b_major,
+                           std::enable_if_t<M == 128 && K == 32>> {
+  using MMA =
+      MMA_Traits<SM100_MMA_F8F6F4_SS, cute::float_e4m3_t, cute::float_e2m1_t,
+                 float, Int<M>, Int<N>, integral_constant<UMMA::Major, a_major>,
+                 integral_constant<UMMA::Major, b_major>,
+                 integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>,
+                 integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>>;
+};
+
+template <int M, int N, int K, UMMA::Major a_major, UMMA::Major b_major>
+struct DispatchInstruction<cute::float_e4m3_t, cute::float_e2m1_t, float, M, N,
+                           K, a_major, b_major,
+                           std::enable_if_t<(M == 64 || M == 32) && K == 32>> {
+  using MMA =
+      MMA_Traits<SM100_MMA_F8F6F4_WS_SS, cute::float_e4m3_t, cute::float_e2m1_t,
+                 float, Int<M>, Int<N>, integral_constant<UMMA::Major, a_major>,
+                 integral_constant<UMMA::Major, b_major>,
+                 integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>,
+                 integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>>;
+};
+
+// Mixed A8W4 (float_e4m3_t x float_e2m1_t) — C = half_t
+template <int M, int N, int K, UMMA::Major a_major, UMMA::Major b_major>
+struct DispatchInstruction<cute::float_e4m3_t, cute::float_e2m1_t, half_t, M, N,
+                           K, a_major, b_major,
+                           std::enable_if_t<M == 128 && K == 32>> {
+  using MMA = MMA_Traits<SM100_MMA_F8F6F4_SS, cute::float_e4m3_t,
+                         cute::float_e2m1_t, half_t, Int<M>, Int<N>,
+                         integral_constant<UMMA::Major, a_major>,
+                         integral_constant<UMMA::Major, b_major>,
+                         integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>,
+                         integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>>;
+};
+template <int M, int N, int K, UMMA::Major a_major, UMMA::Major b_major>
+struct DispatchInstruction<cute::float_e4m3_t, cute::float_e2m1_t, half_t, M, N,
+                           K, a_major, b_major,
+                           std::enable_if_t<(M == 64 || M == 32) && K == 32>> {
+  using MMA = MMA_Traits<SM100_MMA_F8F6F4_WS_SS, cute::float_e4m3_t,
+                         cute::float_e2m1_t, half_t, Int<M>, Int<N>,
                          integral_constant<UMMA::Major, a_major>,
                          integral_constant<UMMA::Major, b_major>,
                          integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>,

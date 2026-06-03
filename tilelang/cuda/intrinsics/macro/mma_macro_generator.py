@@ -84,10 +84,16 @@ class TensorCoreIntrinEmitter:
         num_elems_per_byte: int = 1,
         is_m_first: bool | None = False,
         thread_var: Var | None = None,
+        is_blockscaled: bool = False,
+        scale_dtype: str = T.float8_e4m3,
+        scale_vec_size: int = 16,
     ):
         self.a_dtype = a_dtype
         self.b_dtype = b_dtype
         self.accum_dtype = accum_dtype
+        self.is_blockscaled = is_blockscaled
+        self.scale_dtype = scale_dtype
+        self.scale_vec_size = scale_vec_size
         self.a_transposed = a_transposed
         self.b_transposed = b_transposed
         # Hint Information
@@ -117,7 +123,19 @@ class TensorCoreIntrinEmitter:
     def _initialize_k_dim(self, a_dtype=T.float16):
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
-        self.k_dim = min(256 // a_dtype.bits, self.chunk)
+        if self.is_blockscaled:
+            if str(a_dtype) != "float4_e2m1fn" or self.chunk < 64:
+                raise ValueError("SM120 block-scaled NVFP4 MMA requires FP4 inputs and chunk >= 64")
+            self.k_dim = 64
+            return
+        # SM120 f8f6f4 FP4 MMA is m16n8k32.  Although 256 / 4 would allow a
+        # k64 fragment by bit count, there is no k64 dispatcher for FP4.
+        if str(a_dtype) == "float4_e2m1fn":
+            if self.chunk < 32:
+                raise ValueError("FP4 MMA requires chunk to be a multiple of 32 (m16n8k32)")
+            self.k_dim = min(32, self.chunk)
+        else:
+            self.k_dim = min(256 // a_dtype.bits, self.chunk)
 
     def _initialize_m_dim(self, a_dtype=T.float16):
         if isinstance(a_dtype, str):
@@ -506,6 +524,36 @@ class TensorCoreIntrinEmitter:
 
         return _warp_mma(A_local_buf, B_local_buf, C_local_buf)
 
+    def mma_blockscaled(
+        self,
+        A_local_buf: Buffer,
+        B_local_buf: Buffer,
+        C_local_buf: Buffer,
+        SFA_local_buf: Buffer,
+        SFB_local_buf: Buffer,
+        k_inner: PrimExpr | None = 0,
+    ):
+        if self.n_dim != 8:
+            raise ValueError("SM120 block-scaled MMA emitter currently supports one m16n8k64 atom at a time")
+        warp_rows = self.warp_rows
+        warp_cols = self.warp_cols
+
+        @T.macro
+        def _warp_mma_blockscaled(A_local_buf, B_local_buf, C_local_buf, SFA_local_buf, SFB_local_buf):
+            for i, j in T.grid(warp_rows, warp_cols):
+                self.mma_blockscaled_atom(
+                    A_local_buf,
+                    B_local_buf,
+                    C_local_buf,
+                    SFA_local_buf,
+                    SFB_local_buf,
+                    i,
+                    j,
+                    k_inner,
+                )
+
+        return _warp_mma_blockscaled(A_local_buf, B_local_buf, C_local_buf, SFA_local_buf, SFB_local_buf)
+
     # ---- Atom-level interface ----
 
     @property
@@ -606,6 +654,59 @@ class TensorCoreIntrinEmitter:
                 )
 
         return _atom_mma(A_local_buf, B_local_buf, C_local_buf)
+
+    def mma_blockscaled_atom(
+        self,
+        A_local_buf: Buffer,
+        B_local_buf: Buffer,
+        C_local_buf: Buffer,
+        SFA_local_buf: Buffer,
+        SFB_local_buf: Buffer,
+        inst_m_idx: PrimExpr | int,
+        inst_n_idx: PrimExpr | int,
+        k_inner: PrimExpr | int = 0,
+    ):
+        local_size_a = self.local_size_a
+        local_size_b = self.local_size_b
+        local_size_out = self.local_size_out
+        a_dtype_abbrv = self.a_dtype_abbrv
+        b_dtype_abbrv = self.b_dtype_abbrv
+        accum_dtype = self.accum_dtype
+        accum_dtype_abbrv = self.accum_dtype_abbrv
+        mma_prefix = self.mma_prefix
+
+        a_is_fragment = is_fragment(A_local_buf)
+        b_is_fragment = is_fragment(B_local_buf)
+        a_local_stride: PrimExpr = k_inner * self.warp_rows * local_size_a if a_is_fragment else 0
+        b_local_stride: PrimExpr = k_inner * self.warp_cols * local_size_b if b_is_fragment else 0
+
+        A_offset = a_local_stride + inst_m_idx * local_size_a
+        B_offset = b_local_stride + inst_n_idx * local_size_b
+        C_offset = inst_m_idx * self.warp_cols * local_size_out + inst_n_idx * local_size_out
+
+        @T.macro
+        def _atom_mma_blockscaled(A_local_buf, B_local_buf, C_local_buf, SFA_local_buf, SFB_local_buf):
+            T.ptx_mma_blockscaled(
+                accum_dtype,
+                mma_prefix,
+                "row",
+                "col",
+                a_dtype_abbrv,
+                b_dtype_abbrv,
+                accum_dtype_abbrv,
+                self.scale_dtype,
+                self.scale_vec_size,
+                A_local_buf.data,
+                A_offset,
+                B_local_buf.data,
+                B_offset,
+                C_local_buf.data,
+                C_offset,
+                SFA_local_buf.data,
+                SFB_local_buf.data,
+            )
+
+        return _atom_mma_blockscaled(A_local_buf, B_local_buf, C_local_buf, SFA_local_buf, SFB_local_buf)
 
     def stmatrix(self, C_local_buf, C_buf, pid_m=None, pid_n=None):
         block_row_warps = self.block_row_warps

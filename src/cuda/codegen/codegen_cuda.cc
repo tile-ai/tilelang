@@ -2073,17 +2073,19 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
        << " + " << index_str << ")";
   } else if (t == buffer_element_dtype) {
     int div_factor = 1;
-    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1) {
+    bool is_packed_scope = scope.empty() || scope == "global";
+    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1 &&
+        is_packed_scope) {
       div_factor = 2;
     }
     index_str =
         PrintExpr(arith::Analyzer().Simplify(truncdiv(index, div_factor)));
     os << buffer_str << "[" << index_str << "]";
   } else {
-    // Fix fp4 pointer arithmetic: fp4 elements are 4-bit packed 2 per byte.
-    // fp4* + n incorrectly advances n bytes (skipping 2n elements).
     int div_factor = 1;
-    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1) {
+    bool is_packed_scope = scope.empty() || scope == "global";
+    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1 &&
+        is_packed_scope) {
       div_factor = 2;
     }
     index_str =
@@ -2832,6 +2834,92 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(B_offset)", b_bias);
     replacer.register_rule("(C_ptr)", c_ref);
     replacer.register_rule("(C_offset)", c_bias);
+    this->stream << replacer.rewrite(mma_call);
+  } else if (op->op.same_as(tl::ptx_mma_blockscaled())) {
+    ICHECK_EQ(op->args.size(), 17U);
+    std::string dtype = Downcast<StringImm>(op->args[0])->value;
+    std::string shape = Downcast<StringImm>(op->args[1])->value;
+    std::string A_layout = Downcast<StringImm>(op->args[2])->value;
+    std::string B_layout = Downcast<StringImm>(op->args[3])->value;
+    std::string A_dtype = Downcast<StringImm>(op->args[4])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[5])->value;
+    std::string C_dtype = Downcast<StringImm>(op->args[6])->value;
+    std::string SF_dtype = Downcast<StringImm>(op->args[7])->value;
+    int scale_vec_size = Downcast<Integer>(op->args[8])->value;
+    std::string a_ref = this->PrintExpr(op->args[9]);
+    std::string a_bias = this->PrintExpr(op->args[10]);
+    std::string b_ref = this->PrintExpr(op->args[11]);
+    std::string b_bias = this->PrintExpr(op->args[12]);
+    std::string c_ref = this->PrintExpr(op->args[13]);
+    std::string c_bias = this->PrintExpr(op->args[14]);
+    std::string sfa_ref = this->PrintExpr(op->args[15]);
+    std::string sfb_ref = this->PrintExpr(op->args[16]);
+
+    auto dtype_a_enum = tl::codegen::ptx::DTypeFromString(A_dtype);
+    auto dtype_b_enum = tl::codegen::ptx::DTypeFromString(B_dtype);
+    auto dtype_enum = tl::codegen::ptx::DTypeFromString(dtype);
+    auto dtype_c_enum = tl::codegen::ptx::DTypeFromString(C_dtype);
+    auto dtype_sf_enum = tl::codegen::ptx::DTypeFromString(SF_dtype);
+    ICHECK(dtype_enum == dtype_c_enum)
+        << "ptx_mma_blockscaled dtype must match C_dtype";
+    auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(shape);
+
+    need_mma_instruction_h_ = true;
+    this->PrintIndent();
+    std::string mma_call =
+        "tl::mma_sync_blockscaled<(AType), (BType), (CType), (SFType), (M), "
+        "(N), (K), (TransA), (TransB), (VS)>("
+        "reinterpret_cast<(CRegType)*>((C_ptr) + (C_offset)), "
+        "reinterpret_cast<const (ARegType)*>((A_ptr) + (A_offset)), "
+        "reinterpret_cast<const (BRegType)*>((B_ptr) + (B_offset)), "
+        "reinterpret_cast<const (SFRegType)*>((SFA_ptr)), "
+        "reinterpret_cast<const (SFRegType)*>((SFB_ptr)));\n";
+    tl::codegen::Replacer replacer;
+    replacer.register_rule("(AType)",
+                           tl::codegen::ptx::DTypeEnumToString(dtype_a_enum));
+    replacer.register_rule("(BType)",
+                           tl::codegen::ptx::DTypeEnumToString(dtype_b_enum));
+    replacer.register_rule("(CType)",
+                           tl::codegen::ptx::DTypeEnumToString(dtype_c_enum));
+    replacer.register_rule("(SFType)",
+                           tl::codegen::ptx::DTypeEnumToString(dtype_sf_enum));
+    replacer.register_rule("(M)", std::to_string(m));
+    replacer.register_rule("(N)", std::to_string(n));
+    replacer.register_rule("(K)", std::to_string(k));
+    replacer.register_rule("(TransA)", A_layout == "row" ? "false" : "true");
+    replacer.register_rule("(TransB)", B_layout == "row" ? "false" : "true");
+    replacer.register_rule("(VS)", std::to_string(scale_vec_size));
+    replacer.register_rule("(CRegType)",
+                           tl::codegen::GetMMARegisterType(dtype_c_enum));
+    replacer.register_rule("(ARegType)", "uint32_t");
+    replacer.register_rule("(BRegType)", "uint32_t");
+    replacer.register_rule("(SFRegType)",
+                           "typename tl::detail::BlockScaledMmaDispatcher<" +
+                               tl::codegen::ptx::DTypeEnumToString(
+                                   dtype_a_enum) +
+                               ", " +
+                               tl::codegen::ptx::DTypeEnumToString(
+                                   dtype_b_enum) +
+                               ", " +
+                               tl::codegen::ptx::DTypeEnumToString(
+                                   dtype_c_enum) +
+                               ", " +
+                               tl::codegen::ptx::DTypeEnumToString(
+                                   dtype_sf_enum) +
+                               ", " + std::to_string(m) + ", " +
+                               std::to_string(n) + ", " + std::to_string(k) +
+                               ", " + (A_layout == "row" ? "false" : "true") +
+                               ", " + (B_layout == "row" ? "false" : "true") +
+                               ", " + std::to_string(scale_vec_size) +
+                               ">::SFRegType");
+    replacer.register_rule("(A_ptr)", a_ref);
+    replacer.register_rule("(A_offset)", a_bias);
+    replacer.register_rule("(B_ptr)", b_ref);
+    replacer.register_rule("(B_offset)", b_bias);
+    replacer.register_rule("(C_ptr)", c_ref);
+    replacer.register_rule("(C_offset)", c_bias);
+    replacer.register_rule("(SFA_ptr)", sfa_ref);
+    replacer.register_rule("(SFB_ptr)", sfb_ref);
     this->stream << replacer.rewrite(mma_call);
   } else if (op->op.same_as(builtin::ptx_mma_sp())) {
     // arg 0: shape: mXnXkX
@@ -4508,12 +4596,14 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
   } else if (scope == "local.descriptor.tcgen05_instr") {
     stream << "tl::Tcgen05InstrDescriptor " << vid << ";\n";
   } else {
-    bool is_fp4_scalar_local =
-        alloc_dtype.is_float4() && alloc_dtype.is_scalar() && scope == "local";
+    // For int4 scalar local buffers, we use packed storage type, so skip type
+    // declaration here (handled in the local scope section below). Keep FP4 as
+    // a normal scalar dtype so SM100 FP4 lowering does not inherit packed-local
+    // semantics from the SM120 experiment.
     bool is_int4_scalar_local =
         (alloc_dtype == DataType::Int(4) || alloc_dtype == DataType::UInt(4)) &&
         alloc_dtype.is_scalar() && scope == "local";
-    if (!is_fp4_scalar_local && !is_int4_scalar_local) {
+    if (!is_int4_scalar_local) {
       PrintStorageScope(scope, stream);
       PrintType(alloc_dtype, stream);
     }
@@ -4537,6 +4627,9 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
     } else if (alloc_dtype == DataType::Int(1) && scope == "shared") {
       constant_size = constant_size / 32;
     }
+    // SM100 (TCGEN05MMA): FP4 shared memory keeps full allocation (N elements
+    // of fp4_e2_t = N byte containers).  With 16U4_ALIGN16B TMA, each logical
+    // FP4 occupies one 8-bit SMEM container consumed by tcgen05.mma.
     if (scope == "shared") {
       stream << ' ' << vid << '[' << constant_size << "];\n";
     } else if (scope == "shared.barrier" || scope == "shared.cluster_barrier") {
@@ -4551,14 +4644,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
         PrintType(alloc_dtype, stream);
         stream << ' ' << vid << '[' << (constant_size + 1) / 2 << "];\n";
       } else {
-        if (alloc_dtype.is_float4() && alloc_dtype.is_scalar()) {
-          auto vid_packed = vid + "_packed";
-          stream << "fp4_e2_2_t " << vid_packed << '['
-                 << (constant_size + 1) / 2 << "];\n";
-          fp4_packed_buffers_[op->buffer->data.get()] = vid_packed;
-        } else {
-          stream << ' ' << vid << '[' << constant_size << "];\n";
-        }
+        stream << ' ' << vid << '[' << constant_size << "];\n";
       }
     } else if (scope == "local.var") {
       PrimExpr init = tirx::make_const(alloc_dtype, 0);
@@ -4657,12 +4743,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
   int lanes = op->dtype.lanes();
   // declare type.
   if (value_dtype.lanes() == element_dtype.lanes()) {
-    // For scalar fp4 loads from non-packed buffers, use tl_fp4_packed_load
-    // to correctly extract the nibble at the given index (the /2 in
-    // GetBufferRef maps two consecutive fp4 elements to the same byte, but
-    // reading that byte only returns the low nibble — the odd-indexed element
-    // is lost).
-    if (element_dtype.is_float4() && element_dtype.lanes() == 1) {
+    // Scalar global FP4 is packed (two logical values per byte).  Shared FP4 on
+    // SM100 unpacksmem is byte-container based and must use normal buffer refs.
+    std::string scope = GetPtrStorageScope(buffer_var);
+    bool is_packed_fp4_scope = scope.empty() || scope == "global";
+    if (element_dtype.is_float4() && element_dtype.lanes() == 1 &&
+        is_packed_fp4_scope) {
       std::string idx_str = PrintExpr(index);
       std::string vid = GetVarID(buffer_var.get());
       os << "tl_fp4_packed_load((fp4_e2_2_t*)" << vid << ", " << idx_str << ")";
@@ -4757,11 +4843,12 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
     return;
   }
   if (value_dtype.lanes() == element_dtype.lanes()) {
-    // For scalar fp4 stores to non-packed buffers, use tl_fp4_packed_store
-    // to correctly handle nibble-level writes. The /2 in GetBufferRef maps two
-    // consecutive fp4 elements to the same byte, and a plain assignment
-    // overwrites the entire byte — destroying the neighboring nibble.
-    if (element_dtype.is_float4() && element_dtype.lanes() == 1) {
+    // Scalar global FP4 is packed (two logical values per byte).  Shared FP4 on
+    // SM100 unpacksmem is byte-container based and must use normal buffer refs.
+    std::string scope = GetPtrStorageScope(buffer_var);
+    bool is_packed_fp4_scope = scope.empty() || scope == "global";
+    if (element_dtype.is_float4() && element_dtype.lanes() == 1 &&
+        is_packed_fp4_scope) {
       std::string idx_str = PrintExpr(index_expr);
       std::string value = this->PrintExpr(op->value);
       std::string vid = GetVarID(buffer_var.get());

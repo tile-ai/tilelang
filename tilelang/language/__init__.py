@@ -70,6 +70,7 @@ from .copy_op import (  # noqa: F401
 from tilelang.tileop.base import GemmWarpPolicy  # noqa: F401
 from .gemm_op import (  # noqa: F401
     gemm,
+    nvfp4_gemm,
     wgmma_gemm,
     tcgen05_gemm,
     tcgen05_gemm_blockscaled,

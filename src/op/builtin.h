@@ -484,6 +484,16 @@ TVM_DLL const Op &ptx_deallocate_tensor_memory();
 TVM_DLL const Op &ptx_mma_sm70();
 
 /*!
+ * \brief TileLang intrinsic for SM120 block-scaled MMA.
+ *
+ * ptx_mma_blockscaled(dtype, shape, A_layout, B_layout, A_dtype, B_dtype,
+ *                     C_dtype, SF_dtype, scale_vec_size,
+ *                     A_ptr, A_offset, B_ptr, B_offset, C_ptr, C_offset,
+ *                     SFA_ptr, SFB_ptr)
+ */
+TVM_DLL const Op &ptx_mma_blockscaled();
+
+/*!
  * \brief tvm intrinsics for ldmatrix
  *
  * ptx_ldmatrix(transposed, num, shared_addr, local_addr)
