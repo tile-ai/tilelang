@@ -48,10 +48,9 @@ struct SharedReduceWarp {
                             T init_value) {
     if (total_dest <= 0 || reduce_extent <= 0)
       return;
-    constexpr int kWarpSize = 64;
-    static_assert(Threads % kWarpSize == 0,
-                  "SharedReduceWarp expects blockDim.x to be a multiple of "
-                  "wave size on HIP.");
+    const int kWarpSize = __builtin_amdgcn_wavefrontsize();
+    if (Threads % kWarpSize != 0)
+      return;
     const int tid = threadIdx.x;
     const int warp_id = tid / kWarpSize;
     const int lane = tid % kWarpSize;
@@ -66,7 +65,7 @@ struct SharedReduceWarp {
       T partial = init_value;
       for (int rv = lane; rv < reduce_extent; rv += kWarpSize) {
         T val = src[src_base + rv * tail];
-        if constexpr (UseAbs) {
+        if (UseAbs) {
           val = val < T(0) ? -val : val;
         }
         partial = Reducer()(partial, val);
@@ -78,7 +77,7 @@ struct SharedReduceWarp {
       }
 
       if (lane == 0) {
-        if constexpr (NeedAccumulate) {
+        if (NeedAccumulate) {
           partial = Reducer()(dst[dst_index], partial);
         }
         dst[dst_index] = partial;
@@ -98,9 +97,9 @@ struct AllReduce {
   // Scalar interface (backward-compatible).
   template <typename T> static __device__ T run(T x, T *red_buf = nullptr) {
     constexpr int offset = threads / 2;
-    constexpr int warpSize = 64;
+    const int warpSize = __builtin_amdgcn_wavefrontsize();
 
-    if constexpr (offset >= warpSize) {
+    if (offset >= warpSize) {
       __syncthreads();
       red_buf[threadIdx.x] = x;
       __syncthreads();
@@ -120,9 +119,9 @@ struct AllReduce {
   template <typename T>
   static __device__ void run_batch(T *x, T *red_buf = nullptr) {
     constexpr int offset = threads / 2;
-    constexpr int warpSize = 64;
+    const int warpSize = __builtin_amdgcn_wavefrontsize();
 
-    if constexpr (offset >= warpSize) {
+    if (offset >= warpSize) {
       __syncthreads();
 #pragma unroll
       for (int i = 0; i < batch_size; i++)
