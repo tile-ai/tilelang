@@ -1,9 +1,10 @@
 import pytest
 
 from tilelang import tvm as tvm
+import tilelang.backend.target as tl_target_registry
+from tilelang.backend import Target as TileLangTarget
 from tvm.target import Target
 
-import tilelang.utils.target as target_utils
 from tilelang.utils.target import (
     determine_target,
     normalize_rocm_arch,
@@ -53,16 +54,38 @@ def test_determine_target_rejects_legacy_option_string():
         determine_target("hip -mcpu=gfx1151", return_object=True)
 
 
-def test_auto_target_prefers_rocm_pytorch_over_cuda_toolkit(monkeypatch):
-    monkeypatch.setattr(target_utils.torch.version, "hip", "test", raising=False)
-    monkeypatch.setattr(target_utils, "check_hip_availability", lambda: True)
-    monkeypatch.setattr(target_utils, "check_cuda_availability", lambda: True)
-    monkeypatch.setattr(target_utils, "_detect_torch_rocm_arch", lambda: "gfx1151")
+def test_auto_target_prefers_rocm_pytorch_over_cuda_toolkit():
+    old_cuda_kind = tl_target_registry._TARGET_KINDS.get("cuda")
+    old_hip_kind = tl_target_registry._TARGET_KINDS.get("hip")
+    try:
+        tl_target_registry.register_target_kind(
+            "cuda",
+            tvm_kind="cuda",
+            detect=lambda: TileLangTarget("cuda", arch="sm_90"),
+            priority=100,
+            override=True,
+        )
+        tl_target_registry.register_target_kind(
+            "hip",
+            tvm_kind="hip",
+            detect=lambda: TileLangTarget("hip", mcpu="gfx1151"),
+            priority=200,
+            override=True,
+        )
 
-    target = determine_target("auto", return_object=True)
-    assert target.kind.name == "hip"
-    assert target_get_mcpu(target) == "gfx1151"
-    assert int(target.attrs["thread_warp_size"]) == 32
+        target = determine_target("auto", return_object=True)
+        assert target.kind.name == "hip"
+        assert target_get_mcpu(target) == "gfx1151"
+        assert int(target.attrs["thread_warp_size"]) == 32
+    finally:
+        if old_cuda_kind is None:
+            tl_target_registry._TARGET_KINDS.pop("cuda", None)
+        else:
+            tl_target_registry._TARGET_KINDS["cuda"] = old_cuda_kind
+        if old_hip_kind is None:
+            tl_target_registry._TARGET_KINDS.pop("hip", None)
+        else:
+            tl_target_registry._TARGET_KINDS["hip"] = old_hip_kind
 
 
 def test_rdna_gfx1151_target_classification():

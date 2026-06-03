@@ -44,6 +44,9 @@ def _resolve_cache_dispatch(
     execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None,
     verbose: bool | None,
 ):
+    from tilelang.backend import resolve_target_execution_backend
+
+    target, execution_backend = resolve_target_execution_backend(target, execution_backend)
     if target is None:
         target = env.get_default_target()
     if execution_backend is None:

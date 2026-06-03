@@ -184,6 +184,7 @@ if not env.is_light_import():
             _LIB, _LIB_PATH = _load_tile_lang_lib()
 
     from .jit import jit, JITKernel, compile, par_compile  # noqa: F401
+    from .backend import Target  # noqa: F401
     from .profiler import Profiler  # noqa: F401
     from .cache import clear_cache  # noqa: F401
     from .utils import (

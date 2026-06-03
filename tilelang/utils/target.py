@@ -238,29 +238,20 @@ def determine_target(target: TargetLike | Literal["auto"] = "auto", return_objec
 
     return_var: str | TargetConfig | Target = target
 
+    if getattr(target, "_tilelang_target_marker", False):
+        resolved_target = target.to_tvm_target()
+        return resolved_target if return_object else resolved_target
+
     if target == "auto":
         target = tvm.target.Target.current(allow_none=True)
         if target is not None:
             return with_rocm_target_attrs(target)
-        # ROCm PyTorch exposes devices through torch.cuda. If CUDA tooling is
-        # also present, prefer HIP so APUs such as gfx1151 are not misread as
-        # CUDA architectures like sm_115a.
-        if torch.version.hip is not None and check_hip_availability():
-            return_var = _rocm_target_from_arch(_detect_torch_rocm_arch())
-        else:
-            # Check for CUDA and HIP availability
-            is_cuda_available = check_cuda_availability()
-            is_hip_available = check_hip_availability()
+        try:
+            from tilelang.backend import Target as TileLangTarget
 
-            # Determine the target based on availability
-            if is_cuda_available:
-                return_var = _cuda_target_from_arch(_detect_torch_cuda_arch())
-            elif is_hip_available:
-                return_var = _rocm_target_from_arch(_detect_torch_rocm_arch())
-            elif check_metal_availability():
-                return_var = "metal"
-            else:
-                raise ValueError("No CUDA or HIP or MPS available on this system.")
+            return_var = TileLangTarget("auto").to_tvm_target()
+        except ValueError as err:
+            raise ValueError("No CUDA or HIP or MPS available on this system.") from err
 
     else:
         possible_cutedsl_target = normalize_cutedsl_target(target)
