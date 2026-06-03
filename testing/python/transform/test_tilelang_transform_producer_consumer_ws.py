@@ -548,7 +548,7 @@ def test_tiled_ws_explicit_cp_async_wait_precedes_first_consumer_read():
     mod = tvm.IRModule.from_expr(func)
     target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
     mod = tvm.tirx.transform.BindTarget(target)(mod)
-    mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
+    mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
     script = mod["main"].script()
 
     assert "tl_tiled_ws_applied" in script
@@ -586,7 +586,7 @@ def test_tiled_ws_propagates_nested_postloop_liveness_to_outer_prelude():
     mod = tvm.IRModule.from_expr(func)
     target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
     mod = tvm.tirx.transform.BindTarget(target)(mod)
-    mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
+    mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
     script = mod["main"].script()
 
     assert "tl_tiled_ws_applied" in script

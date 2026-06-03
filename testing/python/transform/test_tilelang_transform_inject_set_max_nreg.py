@@ -88,7 +88,7 @@ def test_inject_set_max_nreg():
     # Apply the InjectSetMaxNReg pass
     func = before
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = tl.transform.AnnotateWarpGroupRegAlloc()(mod)
+    mod = tl.cuda.transform.AnnotateWarpGroupRegAlloc()(mod)
     mod = tl.transform.LowerOpaqueBlock()(mod)
 
     _find_if_with_set_max_nreg(mod["main"], (24, 0), (240, 1))
@@ -117,7 +117,7 @@ def test_raw_set_max_nreg_keeps_legacy_behavior_with_simt_copy():
                 B[bx * 64, v] = A_shared[v]
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tl.transform.AnnotateWarpGroupRegAlloc()(mod)
+    mod = tl.cuda.transform.AnnotateWarpGroupRegAlloc()(mod)
     mod = tl.transform.LowerOpaqueBlock()(mod)
 
     calls = _collect_set_max_nreg(mod["main"].body)
@@ -154,7 +154,7 @@ def test_inject_set_max_nreg_no_set_max_nreg():
     # Apply the InjectSetMaxNReg pass
     func = before_no_set_max_nreg
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = tl.transform.AnnotateWarpGroupRegAlloc()(mod)
+    mod = tl.cuda.transform.AnnotateWarpGroupRegAlloc()(mod)
     mod = tl.transform.LowerOpaqueBlock()(mod)
 
     assert not _collect_set_max_nreg(mod["main"].body)

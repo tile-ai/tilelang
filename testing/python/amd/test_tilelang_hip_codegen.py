@@ -159,7 +159,7 @@ def test_warp_reduce_with_64_threads_two_groups():
 
 
 # ---------------------------------------------------------------------------
-# Fix 2 — src/target/codegen_hip.cc (VisitExpr_ ShuffleNode)
+# Fix 2 — src/rocm/codegen/codegen_hip.cc (VisitExpr_ ShuffleNode)
 #         src/tl_templates/hip/common.h (uint1 bfloat16x2 math overloads)
 #
 # Symptom: Packing two bfloat16 scalars into a bfloat16x2 ShuffleNode caused
@@ -252,7 +252,7 @@ def test_float16_shuffle_correctness():
 
 
 # ---------------------------------------------------------------------------
-# Fix 3 — tilelang/language/allocate.py + src/target/codegen_hip.cc
+# Fix 3 — tilelang/language/allocate.py + src/rocm/codegen/codegen_hip.cc
 #   T.alloc_var(init=<literal>) initialisation on HIP;
 #   local.var scalar declaration and GetBufferRef bare-name return
 #
@@ -530,7 +530,7 @@ def test_local_var_float_init_readable():
 
 
 # ---------------------------------------------------------------------------
-# Fix 4 — src/target/codegen_hip.cc
+# Fix 4 — src/rocm/codegen/codegen_hip.cc
 #   T.sync_warp() → no-op on HIP
 #
 # Symptom: tl::sync_warp() had no handler → codegen assertion failure or
@@ -611,10 +611,10 @@ def test_sync_warp_inside_conditional():
 
 
 # ---------------------------------------------------------------------------
-# Fix 5 — src/backend/rocm/codegen/codegen_hip.cc,
-#          src/backend/rocm/codegen/rt_mod_hip.cc,
-#          src/backend/rocm/stubs/hip.cc,
-#          src/backend/rocm/stubs/hip.h
+# Fix 5 — src/rocm/codegen/codegen_hip.cc,
+#          src/rocm/codegen/rt_mod_hip.cc,
+#          src/rocm/stubs/hip.cc,
+#          src/rocm/stubs/hip.h
 #   T.sync_grid() → cooperative_groups::this_grid().sync()
 #
 # Symptom: tl::sync_grid() had no handler → same assertion / link failure.

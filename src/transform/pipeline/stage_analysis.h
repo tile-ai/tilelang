@@ -19,12 +19,12 @@
 #include <vector>
 
 #include "../common/pipeline_utils.h"
+#include "backend/common/target_utils.h"
 #include "op/builtin.h"
 #include "op/copy.h"
 #include "op/parallel.h"
 #include "op/region.h"
 #include "op/utils.h"
-#include "target/utils.h"
 
 namespace tvm {
 namespace tl {
