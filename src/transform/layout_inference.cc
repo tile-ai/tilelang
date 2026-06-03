@@ -377,7 +377,8 @@ public:
       if (layout_map.count(buffer))
         continue;
       auto frag =
-          Fragment::FullyReplicated(buffer->shape, thread_bounds->extent);
+          Fragment::FullyReplicated(buffer->shape, thread_bounds->extent)
+              ->BindThreadRange(thread_bounds);
       layout_map.Set(buffer, frag);
     }
 

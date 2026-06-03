@@ -516,5 +516,64 @@ def test_pure_tma_consumer_local_init_does_not_leak_into_producer():
     assert "*(float2*)(logsum + 0) = make_float2" in consumer_src
 
 
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_pure_tma_fragment_mask_copy_initializes_consumer_branch():
+    """A pre-loop fragment mask copy must be duplicated into both WS branches."""
+
+    batch = heads = 1
+    seq_q = block_m = block_n = dim = 64
+    downsample_len = 4
+    seq_kv = downsample_len * block_n
+    threads = 128
+
+    q_shape = [batch, heads, seq_q, dim]
+    kv_shape = [batch, heads, seq_kv, dim]
+    block_mask_shape = [batch, heads, 1, downsample_len]
+    dtype = T.float16
+    accum_dtype = T.float32
+
+    @T.prim_func
+    def sparse_attention_mask_copy(
+        Q: T.Tensor(q_shape, dtype),
+        K: T.Tensor(kv_shape, dtype),
+        BlockSparseMask: T.Tensor(block_mask_shape, "int8"),
+        Output: T.Tensor((batch, heads, seq_q, block_n), accum_dtype),
+    ):
+        with T.Kernel(T.ceildiv(seq_q, block_m), heads, batch, threads=threads) as (
+            bx,
+            by,
+            bz,
+        ):
+            Q_shared = T.alloc_shared([block_m, dim], dtype)
+            K_shared = T.alloc_shared([block_n, dim], dtype)
+            acc_s = T.alloc_fragment([block_m, block_n], accum_dtype)
+            block_mask = T.alloc_fragment([downsample_len], "int8")
+
+            T.copy(Q[bz, by, bx * block_m : (bx + 1) * block_m, :], Q_shared)
+            T.copy(BlockSparseMask[bz, by, bx, :], block_mask)
+
+            for k in T.Pipelined(downsample_len, num_stages=1):
+                if block_mask[k] != 0:
+                    T.copy(K[bz, by, k * block_n : (k + 1) * block_n, :], K_shared)
+                    T.clear(acc_s)
+                    T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+
+            T.copy(acc_s, Output[bz, by, bx * block_m : (bx + 1) * block_m, :])
+
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
+    kernel = _compile_tvm_ffi(sparse_attention_mask_copy, pass_configs, out_idx=[3])
+
+    src = kernel.get_kernel_source()
+    producer_idx = src.index("if (((int)threadIdx.x) < 128)")
+    consumer_idx = src.index("} else {", producer_idx)
+    producer_src = src[producer_idx:consumer_idx]
+    consumer_src = src[consumer_idx:]
+
+    assert "BlockSparseMask" in producer_src
+    assert "BlockSparseMask" in consumer_src
+    assert "block_mask_producer_ws" in producer_src
+    assert "block_mask" in consumer_src
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

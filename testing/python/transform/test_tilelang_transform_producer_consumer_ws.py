@@ -314,7 +314,7 @@ def test_tiled_ws_places_producer_in_first_warp_group():
     mod = tvm.IRModule.from_expr(func)
     target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
     mod = tvm.tirx.transform.BindTarget(target)(mod)
-    mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
+    mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
     script = mod["main"].script()
 
     assert "tl_tiled_ws_applied" in script
