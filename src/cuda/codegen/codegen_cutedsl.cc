@@ -477,6 +477,30 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
   const bool from_is_fp8_narrowing_source = from_ty == DataType::Float(16) ||
                                             from_ty == DataType::Float(32) ||
                                             from_ty.is_bfloat16();
+  if (from_ty.is_scalar() && target_ty.is_scalar() &&
+      (from_ty.is_int() || from_ty.is_uint()) &&
+      (target_ty.is_int() || target_ty.is_uint()) &&
+      target_ty.bits() > from_ty.bits()) {
+    if (const CallNode *call = op->value.as<CallNode>();
+        call && (call->op.same_as(builtin::shift_left()) ||
+                 call->op.same_as(builtin::shift_right()))) {
+      ICHECK_EQ(call->args.size(), 2U);
+      const DataType lhs_ty = call->args[0].dtype();
+      if ((lhs_ty.is_int() || lhs_ty.is_uint()) &&
+          lhs_ty.bits() < target_ty.bits()) {
+        const std::string lhs = PrintExpr_(call->args[0]);
+        const std::string rhs = PrintExpr_(call->args[1]);
+        PrintType(target_ty, os);
+        os << "((";
+        PrintType(target_ty, os);
+        os << "(" << lhs << ") "
+           << (call->op.same_as(builtin::shift_left()) ? "<<" : ">>") << " "
+           << rhs << "))";
+        return;
+      }
+    }
+  }
+
   if (from_ty.is_scalar() && from_is_cutedsl_fp8 && target_is_fp8_widening) {
     // CuTeDSL/NVGPU widens FP8 through nvgpu.cvt_fpext, whose operand must be
     // a 32-bit aligned vector.  Pack the scalar into a four-lane FP8 vector,
