@@ -161,6 +161,11 @@ template <int threads, bool reverse = false> struct CumSum1D {
     InclusiveScan1D<ScanSumOp, threads, reverse>::template run<T, SEG>(src, dst,
                                                                        N);
   }
+  template <typename T>
+  static TL_DEVICE void run_auto(const T *__restrict__ src, T *__restrict__ dst,
+                                 int N) {
+    InclusiveScan1D<ScanSumOp, threads, reverse>::run_auto(src, dst, N);
+  }
 };
 
 template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
@@ -169,6 +174,11 @@ template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
                             int H, int W) {
     InclusiveScan2D<ScanSumOp, threads, Axis, reverse>::template run<T, SEG>(
         src, dst, H, W);
+  }
+  template <typename T>
+  static TL_DEVICE void run_auto(const T *__restrict__ src, T *__restrict__ dst,
+                                 int H, int W) {
+    InclusiveScan2D<ScanSumOp, threads, Axis, reverse>::run_auto(src, dst, H, W);
   }
 };
 
@@ -179,6 +189,11 @@ template <int threads, bool reverse = false> struct CumMax1D {
     InclusiveScan1D<ScanMaxOp, threads, reverse>::template run<T, SEG>(src, dst,
                                                                        N);
   }
+  template <typename T>
+  static TL_DEVICE void run_auto(const T *__restrict__ src, T *__restrict__ dst,
+                                 int N) {
+    InclusiveScan1D<ScanMaxOp, threads, reverse>::run_auto(src, dst, N);
+  }
 };
 
 template <int threads, int Axis = 0, bool reverse = false> struct CumMax2D {
@@ -187,6 +202,11 @@ template <int threads, int Axis = 0, bool reverse = false> struct CumMax2D {
                             int H, int W) {
     InclusiveScan2D<ScanMaxOp, threads, Axis, reverse>::template run<T, SEG>(
         src, dst, H, W);
+  }
+  template <typename T>
+  static TL_DEVICE void run_auto(const T *__restrict__ src, T *__restrict__ dst,
+                                 int H, int W) {
+    InclusiveScan2D<ScanMaxOp, threads, Axis, reverse>::run_auto(src, dst, H, W);
   }
 };
 

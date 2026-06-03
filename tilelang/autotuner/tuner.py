@@ -915,6 +915,11 @@ class AutoTuner:
 
         key = self.generate_cache_key(parameters, extra_parameters)
 
+        # Validate scalar input requirements before checking cache so that
+        # cache hits do not bypass the error when set_autotune_inputs is absent.
+        if hasattr(self, "_prim_func_for_validation"):
+            self._validate_input_supply_requirements(self._prim_func_for_validation, self.compile_args.out_idx)
+
         with self._lock:
             if env.is_cache_enabled() and not env.is_autotune_cache_disabled():
                 # First check in-memory cache
@@ -995,11 +1000,6 @@ class AutoTuner:
                 autotuner_result = AutotuneResult(libcode=jit_kernel.get_kernel_source(), func=jit_kernel.prim_func, kernel=jit_kernel)
                 self._memory_cache[key] = autotuner_result
                 return autotuner_result
-
-        # After confirming tuning will actually run, validate that scalar
-        # inputs can be supplied (either via supply_prog or set_autotune_inputs).
-        if hasattr(self, "_prim_func_for_validation"):
-            self._validate_input_supply_requirements(self._prim_func_for_validation, self.compile_args.out_idx)
 
         # Launch compile tasks
         pool, futures, future_to_unit, compile_desc = self._prepare_compile_execution(

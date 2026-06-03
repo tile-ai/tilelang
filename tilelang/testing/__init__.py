@@ -5,9 +5,7 @@ import random
 import torch
 import numpy as np
 from tilelang.contrib import nvcc
-from tilelang.backend.target import determine_target
-from tilelang.cuda.target import target_is_cuda
-from tilelang.rocm.target import target_is_cdna, target_is_gfx950
+from tilelang.utils.target import determine_target, target_is_cdna, target_is_cuda, target_is_gfx950, target_is_rdna
 from tvm.testing.utils import requires_cuda, requires_package, requires_llvm, requires_metal, requires_rocm, _compose
 
 from tilelang.utils.tensor import torch_assert_close as torch_assert_close
@@ -22,6 +20,7 @@ __all__ = [
     "requires_cdna",
     "requires_cuda_or_cdna",
     "requires_gfx950",
+    "requires_rdna",
     "main",
     "requires_cuda_compute_version",
     "process_func",
@@ -85,6 +84,27 @@ def requires_gfx950(func):
         pytest.mark.skipif(
             not is_gfx950,
             reason="Requires gfx950 (CDNA4/MI350)",
+        ),
+        *requires_rocm.marks(),
+    ]
+    return _compose([func], marks)
+
+
+def _check_is_rdna() -> bool:
+    try:
+        target = determine_target("auto", return_object=True)
+        return target_is_rdna(target)
+    except (ValueError, RuntimeError):
+        return False
+
+
+def requires_rdna(func):
+    """Skip the test unless the ROCm device is an RDNA GPU (gfx11/gfx12)."""
+    is_rdna = _check_is_rdna()
+    marks = [
+        pytest.mark.skipif(
+            not is_rdna,
+            reason="Requires RDNA ROCm target (gfx11/gfx12)",
         ),
         *requires_rocm.marks(),
     ]
