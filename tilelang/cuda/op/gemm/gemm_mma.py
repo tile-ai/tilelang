@@ -17,13 +17,22 @@ from tilelang.transform.simplify import _Simplify
 GEMM_INST_MMA = "cuda.mma"
 
 
+def _annotation_value(annotations: dict, key: str, default):
+    value = annotations.get(key, default)
+    return getattr(value, "value", value)
+
+
 class GemmMMA(GemmBase):
     intrin_emitter_cls = TensorCoreIntrinEmitter
 
     def _make_mma_emitter(self, target: Target, thread_nums: int, thread_var: tirx.Var | None = None):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_MMA)
+        if self.is_blockscaled:
+            m_warp, n_warp = 1, 1
+        else:
+            m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
+        annotations = getattr(self.gemm_node, "annotations", {})
         emitter = self.intrin_emitter_cls(
             a_dtype=self.in_dtype,
             b_dtype=self.in_dtype_b,
@@ -36,6 +45,9 @@ class GemmMMA(GemmBase):
             warp_col_tiles=warp_col_tiles,
             chunk=self.chunk,
             thread_var=thread_var,
+            is_blockscaled=self.is_blockscaled,
+            scale_dtype=str(_annotation_value(annotations, "scale_dtype", "float8_e4m3")),
+            scale_vec_size=int(_annotation_value(annotations, "scale_vec_size", 16)),
         )
         return emitter
 
@@ -102,6 +114,25 @@ class GemmMMA(GemmBase):
         assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
 
         assert is_full_region(C_region), "Fragment output C must be a full region"
+
+        if self.is_blockscaled:
+            if not self.is_gemm_ss():
+                raise ValueError("SM120 NVFP4 block-scaled MMA currently supports shared/shared tiles only")
+
+            @T.prim_func
+            def _gemm_blockscaled_ssr() -> None:
+                A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
+                B_local = T.alloc_local((warp_cols * local_size_b), in_dtype_b)
+                SFA_buf = self.SFARegion.buffer
+                SFB_buf = self.SFBRegion.buffer
+                if clear_accum:
+                    T.clear(C_buf)
+                for ki in T.serial(0, (block_K // micro_size_k)):
+                    mma_emitter.ldmatrix_a(A_local, A_region, ki)
+                    mma_emitter.ldmatrix_b(B_local, B_region, ki)
+                    mma_emitter.mma_blockscaled(A_local, B_local, C_buf, SFA_buf, SFB_buf, ki)
+
+            return _Simplify(_gemm_blockscaled_ssr, inline_let=True)
 
         if self.is_gemm_ss():
 

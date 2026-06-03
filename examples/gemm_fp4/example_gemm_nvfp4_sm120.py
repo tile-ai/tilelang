@@ -1,15 +1,24 @@
 """Minimal NVFP4 GEMM on SM120 using block-scaled MMA.
 
-This example exercises ``mma.sync.aligned.kind::mxf4nvf4.block_scale`` for
-FP4 E2M1 inputs with UE4M3 scale factors.  It intentionally starts with a
-single SM120 MMA shape (m16n8k64) before wiring NVFP4 into the generic GEMM API.
+FlashInfer/TRT-LLM use "NVFP4" as packed FP4 E2M1 data plus FP8 E4M3/UE4M3
+scale factors with ``sf_vec_size=16``.  The corresponding SM120 Tensor Core
+instruction is ``mma.sync.aligned.kind::mxf4nvf4.block_scale``: both MMA
+operands are FP4, the scale factors are FP8 E4M3, and accumulation is FP32.
+
+That is distinct from the non-scaled A8W4 examples, which use FP8 x FP4
+``kind::f8f6f4`` MMA.  FP16/BF16 usually appear around NVFP4 as source/output
+types for quantization or epilogues, not as the direct mxf4nvf4 MMA operands.
+
+This example intentionally starts with one SM120 MMA atom (m16n8k64) and a
+uniform scale register before wiring NVFP4 into the generic GEMM API.
 """
 
 import os
+import time
+
 import torch
 import tilelang
 import tilelang.language as T
-from tilelang.cuda.intrinsics.macro.mma_macro_generator import TensorCoreIntrinEmitter
 from tilelang.layout import make_swizzled_layout
 
 
@@ -32,12 +41,9 @@ FP4_E2M1_TO_FLOAT = [
     -6.0,
 ]
 
-# UE4M3 encoding for scale 1.0, packed four times into one uint32 register.
-UE4M3_ONE_X4 = 0x38383838
-
 
 def unpack_fp4_to_uint8(packed_int8: torch.Tensor, M: int, K: int) -> torch.Tensor:
-    """Unpack (M, K//2) int8 -> (M, K) uint8, one FP4 value per byte."""
+    """Unpack (M, K//2) uint8 -> (M, K) uint8 FP4 codes for the reference."""
     flat = packed_int8.to(torch.uint8).reshape(M, K // 2)
     lo = flat & 0x0F
     hi = (flat >> 4) & 0x0F
@@ -51,45 +57,35 @@ def unpack_fp4_to_float(packed_int8: torch.Tensor, M: int, K: int) -> torch.Tens
     return lut[unpacked]
 
 
+def pack_e4m3x4_to_u32(values: tuple[float, float, float, float]) -> int:
+    """Pack four FP8 E4M3 scale values into the uint32 register used by MMA.SF."""
+    raw = torch.tensor(values, dtype=torch.float32).to(torch.float8_e4m3fn).view(torch.uint8)
+    return sum(int(byte) << (8 * i) for i, byte in enumerate(raw.tolist()))
+
+
+UE4M3_ONE_X4 = pack_e4m3x4_to_u32((1.0, 1.0, 1.0, 1.0))
+UE4M3_HALF_X4 = pack_e4m3x4_to_u32((0.5, 0.5, 0.5, 0.5))
+UE4M3_TWO_X4 = pack_e4m3x4_to_u32((2.0, 2.0, 2.0, 2.0))
+
+
 def matmul_nvfp4_sm120(M=16, N=8, K=64, out_dtype=T.float32, accum_dtype=T.float32):
     block_M, block_N, block_K = 16, 8, 64
     threads = 32
-
-    emitter = TensorCoreIntrinEmitter(
-        a_dtype=T.float4_e2m1fn,
-        b_dtype=T.float4_e2m1fn,
-        accum_dtype=accum_dtype,
-        a_transposed=False,
-        b_transposed=True,
-        block_row_warps=1,
-        block_col_warps=1,
-        warp_row_tiles=block_M,
-        warp_col_tiles=block_N,
-        chunk=block_K,
-        is_blockscaled=True,
-        scale_dtype=T.float8_e4m3,
-        scale_vec_size=16,
-    )
-
-    local_size_a = emitter.local_size_a
-    local_size_b = emitter.local_size_b
-    local_size_c = emitter.local_size_out
+    packed_K = K // 2
+    packed_block_K = block_K // 2
 
     @T.prim_func
     def main(
-        A: T.Tensor((M, K), "uint8"),
-        B: T.Tensor((N, K), "uint8"),
+        A: T.Tensor((M, packed_K), "uint8"),
+        B: T.Tensor((N, packed_K), "uint8"),
         SFA: T.Tensor((T.ceildiv(M, block_M), T.ceildiv(K, block_K)), "uint32"),
         SFB: T.Tensor((T.ceildiv(N, block_N), T.ceildiv(K, block_K)), "uint32"),
         C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-            A_shared = T.alloc_shared((block_M, block_K), "uint8")
-            B_shared = T.alloc_shared((block_N, block_K), "uint8")
-            C_shared = T.alloc_shared((1, 1, block_M, block_N), out_dtype)
-            A_local = T.alloc_local((local_size_a,), T.float4_e2m1fn)
-            B_local = T.alloc_local((local_size_b,), T.float4_e2m1fn)
-            C_local = T.alloc_local((local_size_c,), accum_dtype)
+            A_shared = T.alloc_shared((block_M, packed_block_K), "uint8")
+            B_shared = T.alloc_shared((block_N, packed_block_K), "uint8")
+            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             SFA_local = T.alloc_local((1,), "uint32")
             SFB_local = T.alloc_local((1,), "uint32")
 
@@ -102,23 +98,19 @@ def matmul_nvfp4_sm120(M=16, N=8, K=64, out_dtype=T.float32, accum_dtype=T.float
 
             T.clear(C_local)
             for ko in T.serial(T.ceildiv(K, block_K)):
-                T.copy(A[by * block_M, ko * block_K], A_shared)
-                T.copy(B[bx * block_N, ko * block_K], B_shared)
+                T.copy(A[by * block_M, ko * packed_block_K], A_shared)
+                T.copy(B[bx * block_N, ko * packed_block_K], B_shared)
                 SFA_local[0] = SFA[by, ko]
                 SFB_local[0] = SFB[bx, ko]
-                emitter.ldmatrix_a(A_local, A_shared, 0)
-                emitter.ldmatrix_b(B_local, B_shared, 0)
-                emitter.mma_blockscaled(A_local, B_local, C_local, SFA_local, SFB_local)
+                T.nvfp4_gemm(A_shared, B_shared, SFA_local, SFB_local, C_local, transpose_B=True, clear_accum=(ko == 0))
 
-            emitter.stmatrix(C_local, C_shared)
-            for i, j in T.Parallel(block_M, block_N):
-                C[by * block_M + i, bx * block_N + j] = C_shared[0, 0, i, j]
+            T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main
 
 
 if __name__ == "__main__":
-    M, N, K = 16, 8, 64
+    M, N, K = 1024, 1024, 256
     print(f"Running NVFP4 SM120 block-scaled MMA: M={M}, N={N}, K={K}")
 
     kernel = tilelang.compile(
@@ -137,25 +129,47 @@ if __name__ == "__main__":
             f.write(kernel.get_kernel_source())
 
     torch.manual_seed(0)
-    a_packed = torch.randint(0, 256, (M, K // 2), device="cuda", dtype=torch.uint8).to(torch.int8)
-    b_packed = torch.randint(0, 256, (N, K // 2), device="cuda", dtype=torch.uint8).to(torch.int8)
-    a_unpacked = unpack_fp4_to_uint8(a_packed, M, K)
-    b_unpacked = unpack_fp4_to_uint8(b_packed, N, K)
+    a_packed = torch.randint(0, 256, (M, K // 2), device="cuda", dtype=torch.uint8)
+    b_packed = torch.randint(0, 256, (N, K // 2), device="cuda", dtype=torch.uint8)
+    
+    # To fit for mma.m16n8k64, we need to pad the scale factors to the nearest multiples accordingly.
+    scale_shape_a = ((M + 15) // 16, (K + 63) // 64)
+    scale_shape_b = ((N + 7) // 8, (K + 63) // 64)
+    sfa = torch.full(scale_shape_a, UE4M3_ONE_X4, device="cuda", dtype=torch.uint32)
+    sfb = torch.full(scale_shape_b, UE4M3_ONE_X4, device="cuda", dtype=torch.uint32)
 
-    sfa = torch.full((1, 1), UE4M3_ONE_X4, device="cuda", dtype=torch.uint32)
-    sfb = torch.full((1, 1), UE4M3_ONE_X4, device="cuda", dtype=torch.uint32)
-
-    a_zero = torch.zeros((M, K), device="cuda", dtype=torch.uint8)
-    b_zero = torch.zeros((N, K), device="cuda", dtype=torch.uint8)
+    a_zero = torch.zeros((M, K // 2), device="cuda", dtype=torch.uint8)
+    b_zero = torch.zeros((N, K // 2), device="cuda", dtype=torch.uint8)
     c_zero = kernel(a_zero, b_zero, sfa, sfb)
     print(f"[ZERO] max_abs={c_zero.abs().max().item():.4f}")
 
-    a_one = torch.full((M, K), 2, device="cuda", dtype=torch.uint8)
-    b_one = torch.full((N, K), 2, device="cuda", dtype=torch.uint8)
+    one_pair = (2 | (2 << 4))  # two FP4 E2M1 1.0 values packed in one byte
+    a_one = torch.full((M, K // 2), one_pair, device="cuda", dtype=torch.uint8)
+    b_one = torch.full((N, K // 2), one_pair, device="cuda", dtype=torch.uint8)
     c_one = kernel(a_one, b_one, sfa, sfb)
     print(f"[ONE] first={c_one[0, 0].item():.4f}, expected={float(K):.4f}")
 
-    c = kernel(a_unpacked, b_unpacked, sfa, sfb)
+    # Exercise the scale path explicitly.  SFA=0.5 and SFB=2.0 should preserve
+    # the effective product for all-one FP4 inputs.
+    sfa_half = torch.full(scale_shape_a, UE4M3_HALF_X4, device="cuda", dtype=torch.uint32)
+    sfb_two = torch.full(scale_shape_b, UE4M3_TWO_X4, device="cuda", dtype=torch.uint32)
+    c_scaled = kernel(a_one, b_one, sfa_half, sfb_two)
+    print(f"[SCALE] first={c_scaled[0, 0].item():.4f}, expected={float(K):.4f}")
+
+    c = kernel(a_packed, b_packed, sfa, sfb)
     ref = unpack_fp4_to_float(a_packed, M, K) @ unpack_fp4_to_float(b_packed, N, K).T
     diff = (c.float() - ref).abs()
     print(f"[NUMERICAL] max_abs_diff={diff.max().item():.4f}, rel_err={diff.sum().item() / (ref.abs().sum().item() + 1e-10):.6f}")
+
+    warmup = int(os.environ.get("TL_NVFP4_WARMUP", "20"))
+    iters = int(os.environ.get("TL_NVFP4_ITERS", "100"))
+    for _ in range(warmup):
+        kernel(a_packed, b_packed, sfa, sfb)
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        kernel(a_packed, b_packed, sfa, sfb)
+    torch.cuda.synchronize()
+    elapsed_ms = (time.perf_counter() - start) * 1000 / iters
+    tflops = 2 * M * N * K / (elapsed_ms / 1e3) / 1e12
+    print(f"[BENCH] latency={elapsed_ms:.4f} ms, TFLOPS={tflops:.2f}, iters={iters}")

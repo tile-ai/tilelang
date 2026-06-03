@@ -1000,18 +1000,21 @@ def ptx_mma_blockscaled(
     ``mma.sync.aligned.kind::mxf4nvf4.block_scale`` with FP4 A/B,
     FP32 accumulators, and UE4M3 scale factors.
     """
+    def _string_imm(value):
+        return tvm.tirx.StringImm(str(value))
+
     return call_intrin(
         "handle",
         _tvm_op.Op.get("tl.ptx_mma_blockscaled"),
-        dtype,
-        shape,
-        A_layout,
-        B_layout,
-        A_dtype,
-        B_dtype,
-        C_dtype,
-        SF_dtype,
-        scale_vec_size,
+        _string_imm(dtype),
+        _string_imm(shape),
+        _string_imm(A_layout),
+        _string_imm(B_layout),
+        _string_imm(A_dtype),
+        _string_imm(B_dtype),
+        _string_imm(C_dtype),
+        _string_imm(SF_dtype),
+        IntImm("int32", scale_vec_size),
         multiplicand_a,
         a_index,
         multiplicand_b,

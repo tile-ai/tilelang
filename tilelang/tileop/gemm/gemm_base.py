@@ -113,6 +113,8 @@ class GemmBase:
 
     @property
     def chunk(self) -> int:
+        if self.is_blockscaled:
+            return self.K
         return self.A.shape[-2] if self.trans_A else self.A.shape[-1]
 
     @property
