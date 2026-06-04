@@ -16,6 +16,7 @@
 #include <optional>
 #include <utility>
 
+#include "arith/const_fold.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "tir/analysis/control_flow_graph.h"
 #include "tir/analysis/var_use_def_analysis.h"
@@ -285,6 +286,38 @@ public:
   }
 
 private:
+  // TileLang-local post-simplification: TVM's rewrite simplifier can prove
+  // singleton bounds for floor-div expressions, but does not always rewrite the
+  // expression to that singleton constant.  Keep this scoped to tl.Simplify so
+  // internal lowering passes are not affected by a global arithmetic rewrite.
+  class ContextSingletonFloorDivFolder : public StmtExprMutator {
+  public:
+    explicit ContextSingletonFloorDivFolder(Analyzer *analyzer)
+        : analyzer_(analyzer) {}
+
+    PrimExpr Fold(const PrimExpr &expr) { return VisitExpr(expr); }
+
+  private:
+    using StmtExprMutator::VisitExpr_;
+
+    PrimExpr VisitExpr_(const FloorDivNode *op) final {
+      PrimExpr expr = StmtExprMutator::VisitExpr_(op);
+      expr = analyzer_->Simplify(expr);
+      if (const auto *div = expr.as<FloorDivNode>();
+          div && IsIndexType(div->dtype)) {
+        // Example: under thread_extent tx in [0, 256) and else(tx < 128),
+        // const_int_bound(tx // 128) is [1, 1], so the div is constant.
+        ConstIntBound bound = analyzer_->const_int_bound(expr);
+        if (bound.defined() && bound->min_value == bound->max_value) {
+          return make_const(div->dtype, bound->min_value);
+        }
+      }
+      return expr;
+    }
+
+    Analyzer *analyzer_;
+  };
+
   explicit StmtSimplifier(
       Analyzer *analyzer, SimplifyConfig config,
       std::optional<ControlFlowGraph> touch_pattern,
@@ -299,12 +332,22 @@ private:
   using Parent::VisitStmt_;
 
   PrimExpr VisitExpr(const PrimExpr &expr) final {
+    PrimExpr simplified;
     if (config_->propagate_knowns_to_simplify_expressions) {
-      return touch_pattern_->SimplifyInContext(expr, current_stmt_.value(),
-                                               analyzer_);
+      simplified = touch_pattern_->SimplifyInContext(
+          expr, current_stmt_.value(), analyzer_);
     } else {
-      return analyzer_->Simplify(expr);
+      simplified = analyzer_->Simplify(expr);
     }
+
+    ContextSingletonFloorDivFolder folder(analyzer_);
+    PrimExpr folded = folder.Fold(simplified);
+    if (!folded.same_as(simplified)) {
+      // Clean up arithmetic exposed by singleton folding, e.g.
+      // 1 * 64 + i - 64 -> i.
+      return analyzer_->Simplify(folded);
+    }
+    return simplified;
   }
 
   Stmt Simplify(Stmt stmt) { return operator()(std::move(stmt)); }
