@@ -158,8 +158,9 @@ def grouped_mxfp8_blockscaled_gemm_2cta(
                     transpose_B=transpose_B,
                     mbar=consumed[stage],
                     clear_accum=k == 0,
-                    sf_a_id=k % sf_load_period,
-                    sf_b_id=k % sf_load_period,
+                    k_start=k * block_K,
+                    sf_a_granularity_k=sf_granularity_k,
+                    sf_b_granularity_k=sf_granularity_k,
                     use_2cta=True,
                 )
             T.tcgen05_mma_arrive(tmem_full, arrive_2cta=True)
@@ -364,8 +365,9 @@ def grouped_mxfp8_blockscaled_gemm_2cta_persistent(
                             transpose_B=transpose_B,
                             mbar=consumed[stage],
                             clear_accum=k == 0,
-                            sf_a_id=k % sf_load_period,
-                            sf_b_id=k % sf_load_period,
+                            k_start=k * block_K,
+                            sf_a_granularity_k=sf_granularity_k,
+                            sf_b_granularity_k=sf_granularity_k,
                             use_2cta=True,
                         )
                     T.tcgen05_mma_arrive(tmem_full, arrive_2cta=True)

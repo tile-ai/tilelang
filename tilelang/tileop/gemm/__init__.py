@@ -115,12 +115,8 @@ class Gemm(Node, Scriptable):
         return getattr(self, "isTcgen05", False)
 
     @property
-    def sf_a_id(self):
-        return self.sfAId
-
-    @property
-    def sf_b_id(self):
-        return self.sfBId
+    def sf_k_start(self):
+        return self.sfKStart
 
     def infer_layout(self, target: Target, thread_nums: int):
         """Infer the layout for the GEMM operation based on target architecture."""

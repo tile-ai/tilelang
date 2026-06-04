@@ -19,9 +19,9 @@ class GemmSPMMA(GemmSPBase):
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = SparseTensorCoreIntrinEmitter(
-            a_dtype=self.in_dtype,
+            a_dtype=self.a_dtype,
             e_dtype=self.e_dtype,
-            b_dtype=self.in_dtype,
+            b_dtype=self.b_dtype,
             accum_dtype=self.accum_dtype,
             a_transposed=self.trans_A,
             b_transposed=self.trans_B,
@@ -67,8 +67,8 @@ class GemmSPMMA(GemmSPBase):
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = SparseTensorCoreIntrinEmitter(
-            a_dtype=self.in_dtype,
-            b_dtype=self.in_dtype,
+            a_dtype=self.a_dtype,
+            b_dtype=self.b_dtype,
             e_dtype=self.e_dtype,
             accum_dtype=self.accum_dtype,
             a_transposed=self.trans_A,
@@ -82,7 +82,8 @@ class GemmSPMMA(GemmSPBase):
             thread_var=local_thread_var,
         )
 
-        in_dtype = self.in_dtype
+        a_dtype = self.a_dtype
+        b_dtype = self.b_dtype
         warp_rows = mma_emitter.warp_rows
         warp_cols = mma_emitter.warp_cols
         local_size_a = mma_emitter.local_size_a
@@ -104,9 +105,9 @@ class GemmSPMMA(GemmSPBase):
                 B_shared into local fragments, then issues Tensor Core mma ops,
                 accumulating into C_local.
                 """
-                A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
+                A_local = T.alloc_local((warp_rows * local_size_a), a_dtype)
                 E_local = T.alloc_local((warp_rows * local_size_e), self.e_dtype)
-                B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
+                B_local = T.alloc_local((warp_cols * local_size_b), b_dtype)
 
                 if clear_accum:
                     T.clear(C_local)
@@ -149,7 +150,7 @@ class GemmSPMMA(GemmSPBase):
                 B_shared into local fragments, then issues Tensor Core mma ops,
                 accumulating into C_local.
                 """
-                A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
+                A_local = T.alloc_local((warp_rows * local_size_a), a_dtype)
                 E_local = T.alloc_local((warp_rows * local_size_e), self.e_dtype)
 
                 if clear_accum:
@@ -189,7 +190,7 @@ class GemmSPMMA(GemmSPBase):
                 accumulating into C_local.
                 """
                 E_local = T.alloc_local((warp_rows * local_size_e), self.e_dtype)
-                B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
+                B_local = T.alloc_local((warp_cols * local_size_b), b_dtype)
 
                 if clear_accum:
                     T.clear(C_local)
