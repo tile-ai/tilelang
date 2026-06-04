@@ -34,21 +34,26 @@ class GemmScalar(GemmBase):
         accum_dtype = self.accum_dtype
 
         # Region offsets for strided gemm (e.g. T.gemm(A[0:64, :], B, C))
-        a0 = self.ARegion.region[0].min
-        a1 = self.ARegion.region[1].min
-        b0 = self.BRegion.region[0].min
-        b1 = self.BRegion.region[1].min
-        c0 = self.CRegion.region[0].min
-        c1 = self.CRegion.region[1].min
+        # Use negative indexing to correctly handle pipeline-expanded buffers
+        # (e.g. 2D -> 3D after InjectSoftwarePipeline prepends a version axis).
+        a_extra = tuple(r.min for r in self.ARegion.region[:-2])
+        a0 = self.ARegion.region[-2].min
+        a1 = self.ARegion.region[-1].min
+        b_extra = tuple(r.min for r in self.BRegion.region[:-2])
+        b0 = self.BRegion.region[-2].min
+        b1 = self.BRegion.region[-1].min
+        c_extra = tuple(r.min for r in self.CRegion.region[:-2])
+        c0 = self.CRegion.region[-2].min
+        c1 = self.CRegion.region[-1].min
 
         @T.prim_func
         def _gemm_scalar() -> None:
             if clear_accum:
                 T.clear(C_buf)
             for i, j, k in T.grid(M, N, K):
-                C_buf[c0 + i, c1 + j] += T.cast(
-                    A_buf[a0 + (k if trans_A else i), a1 + (i if trans_A else k)]
-                    * B_buf[b0 + (j if trans_B else k), b1 + (k if trans_B else j)],
+                C_buf[c_extra + (c0 + i, c1 + j)] += T.cast(
+                    A_buf[a_extra + (a0 + (k if trans_A else i), a1 + (i if trans_A else k))]
+                    * B_buf[b_extra + (b0 + (j if trans_B else k), b1 + (k if trans_B else j))],
                     accum_dtype,
                 )
 
