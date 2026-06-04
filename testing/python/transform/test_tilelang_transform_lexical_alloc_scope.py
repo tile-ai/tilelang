@@ -12,8 +12,8 @@ Verifies that:
 import tilelang as tl
 import tilelang.language as T
 from tilelang import tvm
-from tilelang.engine.phase import LowerAndLegalize
-from tvm.tir.stmt_functor import post_order_visit
+from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
+from tvm.tirx.stmt_functor import post_order_visit
 import tilelang.testing
 
 
@@ -22,7 +22,7 @@ def _count_attrs(func, attr_key):
     count = [0]
 
     def _visit(node):
-        if isinstance(node, tvm.tir.AttrStmt) and str(node.attr_key) == attr_key:
+        if isinstance(node, tvm.tirx.AttrStmt) and str(node.attr_key) == attr_key:
             count[0] += 1
 
     post_order_visit(func.body, _visit)
@@ -30,17 +30,17 @@ def _count_attrs(func, attr_key):
 
 
 def _count_allocate_inside_attr(func, attr_key):
-    """Count Allocate nodes that are (transitively) nested inside the given AttrStmt."""
+    """Count flat AllocBuffer nodes nested inside the given AttrStmt."""
     count = [0]
     inside = [False]
 
     def _visit(node):
-        if isinstance(node, tvm.tir.AttrStmt) and str(node.attr_key) == attr_key:
+        if isinstance(node, tvm.tirx.AttrStmt) and str(node.attr_key) == attr_key:
             old = inside[0]
             inside[0] = True
             post_order_visit(node.body, _visit)
             inside[0] = old
-        elif isinstance(node, tvm.tir.Allocate) and inside[0]:
+        elif isinstance(node, tvm.tirx.AllocBuffer) and inside[0]:
             count[0] += 1
 
     post_order_visit(func.body, _visit)
@@ -51,11 +51,11 @@ def _apply_lower_opaque_pipeline(func, target, pass_configs=None):
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     pass_configs = pass_configs or {}
     with target, tvm.transform.PassContext(config=pass_configs):
-        mod = LowerAndLegalize(mod, target)
-        mod = tl.transform.LowerSharedTmem()(mod)
+        mod = CUDAPassPipelineBodyPrologue(mod, target)
+        mod = tl.cuda.transform.LowerSharedTmem()(mod)
         mod = tl.transform.IfStmtBinding()(mod)
         mod = tl.transform.PlanAndUpdateBufferAllocationLocation()(mod)
-        mod = tl.transform.LowerSharedBarrier()(mod)
+        mod = tl.cuda.transform.LowerSharedBarrier()(mod)
         mod = tl.transform.HoistGlobalBufferAllocations()(mod)
         mod = tl.transform.LowerOpaqueBlock()(mod)
     return mod
@@ -67,7 +67,7 @@ def _apply_lower_opaque_pipeline(func, target, pass_configs=None):
 # ---------------------------------------------------------------------------
 def test_lower_opaque_block_inserts_lexical_alloc_scope_for_explicit_block():
     """An explicitly annotated block should produce a lexical_alloc_scope."""
-    target = tvm.target.Target("cuda -arch=sm_80")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
 
     @T.prim_func
     def func(
@@ -78,8 +78,8 @@ def test_lower_opaque_block_inserts_lexical_alloc_scope_for_explicit_block():
         T.launch_thread("blockIdx.x", 1)
         tx = T.launch_thread("threadIdx.x", 128)
         for _ in T.serial(4):
-            with T.block():
-                T.block_attr({"lexical_alloc_scope": 1})
+            with T.sblock():
+                T.sblock_attr({"lexical_alloc_scope": 1})
                 S = T.alloc_buffer((128,), dtype=T.float32, scope="local")
                 S[tx] = A[tx]
                 B[tx] = S[tx]
@@ -101,7 +101,7 @@ def test_lower_opaque_block_inserts_lexical_alloc_scope_for_explicit_block():
 # ---------------------------------------------------------------------------
 def test_lower_opaque_block_skips_unmarked_local_alloc():
     """An unmarked local-alloc block should not produce a lexical_alloc_scope."""
-    target = tvm.target.Target("cuda -arch=sm_80")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
 
     @T.prim_func
     def func(
@@ -112,7 +112,7 @@ def test_lower_opaque_block_skips_unmarked_local_alloc():
         T.launch_thread("blockIdx.x", 1)
         tx = T.launch_thread("threadIdx.x", 128)
         for _ in T.serial(4):
-            with T.block():
+            with T.sblock():
                 S = T.alloc_buffer((128,), dtype=T.float32, scope="local")
                 S[tx] = A[tx]
                 B[tx] = S[tx]
@@ -130,7 +130,7 @@ def test_lower_opaque_block_skips_unmarked_local_alloc():
 # ---------------------------------------------------------------------------
 def test_lower_opaque_block_skips_empty_alloc():
     """A block without alloc_buffers should not produce a lexical_alloc_scope."""
-    target = tvm.target.Target("cuda -arch=sm_80")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
 
     @T.prim_func
     def func(
@@ -141,7 +141,7 @@ def test_lower_opaque_block_skips_empty_alloc():
         T.launch_thread("blockIdx.x", 1)
         tx = T.launch_thread("threadIdx.x", 128)
         for _ in T.serial(4):
-            with T.block():
+            with T.sblock():
                 B[tx] = A[tx]
 
     mod = tvm.IRModule.from_expr(func)
@@ -157,7 +157,7 @@ def test_lower_opaque_block_skips_empty_alloc():
 # ---------------------------------------------------------------------------
 def test_lower_opaque_block_inserts_scope_for_gemm_descriptor_alloc():
     """Lowered WGMMA descriptor buffers inside a loop should trigger lexical_alloc_scope."""
-    target = tvm.target.Target("cuda -arch=sm_90a")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
 
     @T.prim_func
     def func(
@@ -188,7 +188,7 @@ def test_lower_opaque_block_inserts_scope_for_gemm_descriptor_alloc():
 # ---------------------------------------------------------------------------
 def test_lower_opaque_block_skips_local_var_only_alloc():
     """A block that allocates only local.var should not get lexical_alloc_scope."""
-    target = tvm.target.Target("cuda -arch=sm_80")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
 
     @T.prim_func
     def func(
@@ -199,7 +199,7 @@ def test_lower_opaque_block_skips_local_var_only_alloc():
         T.launch_thread("blockIdx.x", 1)
         tx = T.launch_thread("threadIdx.x", 128)
         for _ in T.serial(4):
-            with T.block():
+            with T.sblock():
                 idx = T.alloc_var(T.int32)
                 idx = tx
                 B[tx] = A[idx]
@@ -217,7 +217,7 @@ def test_lower_opaque_block_skips_local_var_only_alloc():
 # ---------------------------------------------------------------------------
 def test_lower_opaque_block_marks_explicit_top_level_local_alloc():
     """A top-level explicitly annotated local alloc should get lexical_alloc_scope."""
-    target = tvm.target.Target("cuda -arch=sm_80")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
 
     @T.prim_func
     def func(
@@ -227,8 +227,8 @@ def test_lower_opaque_block_marks_explicit_top_level_local_alloc():
         T.func_attr({"global_symbol": "main", "target": target})
         T.launch_thread("blockIdx.x", 1)
         tx = T.launch_thread("threadIdx.x", 128)
-        with T.block():
-            T.block_attr({"lexical_alloc_scope": 1})
+        with T.sblock():
+            T.sblock_attr({"lexical_alloc_scope": 1})
             S = T.alloc_buffer((128,), dtype=T.float32, scope="local")
             S[tx] = A[tx]
             B[tx] = S[tx]
@@ -246,7 +246,7 @@ def test_lower_opaque_block_marks_explicit_top_level_local_alloc():
 # ---------------------------------------------------------------------------
 def test_lower_opaque_block_skips_fragment_alloc():
     """A fragment alloc should not force lexical_alloc_scope by itself."""
-    target = tvm.target.Target("cuda -arch=sm_80")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
 
     @T.prim_func
     def func(
@@ -256,7 +256,7 @@ def test_lower_opaque_block_skips_fragment_alloc():
         T.func_attr({"global_symbol": "main", "target": target})
         T.launch_thread("blockIdx.x", 1)
         tx = T.launch_thread("threadIdx.x", 128)
-        with T.block():
+        with T.sblock():
             S = T.alloc_buffer((128,), dtype=T.float32, scope="local.fragment")
             S[tx] = A[tx]
             B[tx] = S[tx]
@@ -274,7 +274,7 @@ def test_lower_opaque_block_skips_fragment_alloc():
 # ---------------------------------------------------------------------------
 def test_lower_opaque_block_skips_fragment_root_in_disable_ws_pipeline():
     """A fragment root block should not force lexical_alloc_scope in disable-ws pipeline."""
-    target = tvm.target.Target("cuda -arch=sm_90a")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
     pass_configs = {tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED.value: True}
 
     @T.prim_func
@@ -311,7 +311,7 @@ def test_lower_opaque_block_skips_fragment_root_in_disable_ws_pipeline():
 # ---------------------------------------------------------------------------
 def test_storage_rewrite_preserves_scope():
     """lexical_alloc_scope should survive StorageRewrite without crashing."""
-    target = tvm.target.Target("cuda -arch=sm_80")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
 
     @T.prim_func
     def func(
@@ -322,8 +322,8 @@ def test_storage_rewrite_preserves_scope():
         T.launch_thread("blockIdx.x", 1)
         tx = T.launch_thread("threadIdx.x", 128)
         for _ in T.serial(4):
-            with T.block():
-                T.block_attr({"lexical_alloc_scope": 1})
+            with T.sblock():
+                T.sblock_attr({"lexical_alloc_scope": 1})
                 S = T.alloc_buffer((128,), dtype=T.float32, scope="local")
                 S[tx] = A[tx]
                 B[tx] = S[tx]
@@ -355,8 +355,8 @@ def test_codegen_emits_braces():
     ):
         with T.Kernel(1, threads=128):
             for k in T.serial(4):
-                with T.block():
-                    T.block_attr({"lexical_alloc_scope": 1})
+                with T.sblock():
+                    T.sblock_attr({"lexical_alloc_scope": 1})
                     S = T.alloc_buffer((128,), dtype=T.float32, scope="local")
                     S[T.get_thread_binding()] = A[T.get_thread_binding(), k]
                     B[T.get_thread_binding(), k] = S[T.get_thread_binding()]
@@ -384,8 +384,8 @@ def test_codegen_skips_redundant_top_level_braces():
             C = T.alloc_fragment((128,), T.float32)
             T.clear(C)
             for k in T.serial(4):
-                with T.block():
-                    T.block_attr({"lexical_alloc_scope": 1})
+                with T.sblock():
+                    T.sblock_attr({"lexical_alloc_scope": 1})
                     S = T.alloc_buffer((128,), dtype=T.float32, scope="local")
                     S[T.get_thread_binding()] = A[T.get_thread_binding(), k]
                     C[T.get_thread_binding()] = S[T.get_thread_binding()]

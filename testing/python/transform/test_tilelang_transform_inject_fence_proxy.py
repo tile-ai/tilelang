@@ -4,7 +4,7 @@ import tilelang as tl
 from tilelang.utils.target import determine_target
 import tilelang.language as T
 import tilelang.testing
-from tvm import tir
+from tvm import tirx
 
 auto_target = tvm.target.Target(determine_target("auto"))
 
@@ -12,12 +12,12 @@ auto_target = tvm.target.Target(determine_target("auto"))
 def _check(original, transformed):
     func = original
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.InjectFenceProxy()(mod)
-    mod = tir.transform.LowerOpaqueBlock()(mod)
+    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tl.cuda.transform.InjectFenceProxy()(mod)
+    mod = tl.transform.LowerOpaqueBlock()(mod)
     transformed = tvm.IRModule.from_expr(transformed.with_attr("global_symbol", "main"))
-    transformed = tvm.tir.transform.BindTarget(auto_target)(transformed)
-    transformed = tir.transform.LowerOpaqueBlock()(transformed)
+    transformed = tvm.tirx.transform.BindTarget(auto_target)(transformed)
+    transformed = tl.transform.LowerOpaqueBlock()(transformed)
 
     tvm.ir.assert_structural_equal(mod["main"], transformed["main"], True)
 
@@ -37,7 +37,7 @@ def test_lower_fence_proxy():
             A_shared[0, 0, 0] = T.float16(0)
             T.call_intrin(
                 "handle",
-                tir.op.Op.get("tl.tl_gemm"),
+                tirx.op.Op.get("tl.tl_gemm"),
                 "tl::gemm_ss<128, 128, 32, 4, 1, 0, 0, 0, 32, 128, 0, 0, true>",
                 T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, 0, 2048, 1),
                 T.tvm_access_ptr(T.type_annotation(T.float16), B_shared.data, 0, 2048, 1),
@@ -56,7 +56,7 @@ def test_lower_fence_proxy():
             T.fence_proxy_async()
             T.call_intrin(
                 "handle",
-                tir.op.Op.get("tl.tl_gemm"),
+                tirx.op.Op.get("tl.tl_gemm"),
                 "tl::gemm_ss<128, 128, 32, 4, 1, 0, 0, 0, 32, 128, 0, 0, true>",
                 T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, 0, 2048, 1),
                 T.tvm_access_ptr(T.type_annotation(T.float16), B_shared.data, 0, 2048, 1),
@@ -82,23 +82,23 @@ def test_async_to_generic_no_double_fence():
             T.call_extern("handle", "generic_op")
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.InjectFenceProxy()(mod)
+    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tl.cuda.transform.InjectFenceProxy()(mod)
 
     def _count_fences(stmt):
         count = 0
 
         def visit(node):
             nonlocal count
-            if isinstance(node, tir.Evaluate):
+            if isinstance(node, tirx.Evaluate):
                 call = node.value
-                if isinstance(call, tir.Call):
+                if isinstance(call, tirx.Call):
                     op = call.op
                     name = getattr(op, "name", None)
                     if name == "tl.fence_proxy_async":
                         count += 1
 
-        tir.stmt_functor.post_order_visit(stmt, visit)
+        tirx.stmt_functor.post_order_visit(stmt, visit)
         return count
 
     assert _count_fences(mod["main"].body) == 1
@@ -188,22 +188,22 @@ def test_unknown_extern_default_is_none():
             T.evaluate(T.call_extern("handle", "custom_op"))
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.InjectFenceProxy()(mod)
+    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tl.cuda.transform.InjectFenceProxy()(mod)
 
     def _count_fences(stmt):
         count = 0
 
         def visit(node):
             nonlocal count
-            if isinstance(node, tir.Evaluate):
+            if isinstance(node, tirx.Evaluate):
                 call = node.value
-                if isinstance(call, tir.Call):
+                if isinstance(call, tirx.Call):
                     name = getattr(call.op, "name", None)
                     if name == "tl.fence_proxy_async":
                         count += 1
 
-        tir.stmt_functor.post_order_visit(stmt, visit)
+        tirx.stmt_functor.post_order_visit(stmt, visit)
         return count
 
     assert _count_fences(mod["main"].body) == 0
@@ -353,27 +353,27 @@ def test_inject_fence_proxy_does_not_inject_tma_store_sync():
     def before():
         with T.Kernel(8):
             A_global = T.decl_buffer((128,), T.float16, scope="global")
-            T.evaluate(T.call_intrin("handle", tir.op.Op.get("tl.tma_store"), A_global.data))
+            T.evaluate(T.call_intrin("handle", tirx.op.Op.get("tl.tma_store"), A_global.data))
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.InjectFenceProxy()(mod)
+    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tl.cuda.transform.InjectFenceProxy()(mod)
 
     arrives = 0
     waits = 0
 
     def visit(node):
         nonlocal arrives, waits
-        if isinstance(node, tir.Evaluate):
+        if isinstance(node, tirx.Evaluate):
             call = node.value
-            if isinstance(call, tir.Call):
+            if isinstance(call, tirx.Call):
                 name = getattr(call.op, "name", None)
                 if name == "tl.tma_store_arrive":
                     arrives += 1
                 elif name in ("tl.tma_store_wait", "tl.tma_store_wait<0>"):
                     waits += 1
 
-    tir.stmt_functor.post_order_visit(mod["main"].body, visit)
+    tirx.stmt_functor.post_order_visit(mod["main"].body, visit)
     assert arrives == 0
     assert waits == 0
 
@@ -409,17 +409,17 @@ def test_wgmma_marked_async():
             )
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.InjectFenceProxy()(mod)
+    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tl.cuda.transform.InjectFenceProxy()(mod)
     order = []
 
     def visit(node):
-        if isinstance(node, tir.Evaluate):
+        if isinstance(node, tirx.Evaluate):
             call = node.value
-            if isinstance(call, tir.Call):
+            if isinstance(call, tirx.Call):
                 order.append(getattr(call.op, "name", ""))
 
-    tir.stmt_functor.post_order_visit(mod["main"].body, visit)
+    tirx.stmt_functor.post_order_visit(mod["main"].body, visit)
 
     assert "tl.ptx_wgmma_ss" in order
     assert "tl.fence_proxy_async" in order
@@ -566,18 +566,18 @@ def test_regression_0219_fence_no_fence_inserted():
                         "thread_warp_size": 32,
                     }
                 ),
-                "tir.is_global_func": True,
-                "tir.noalias": True,
+                "tirx.is_global_func": True,
+                "tirx.noalias": True,
                 "tl.non_restrict_params": [],
                 "tl.readonly_param_indices": [0, 1],
             }
         )
         bx = T.launch_thread("blockIdx.x", 8)
-        buf_dyn_shmem = T.allocate([49152], "uint8", "shared.dyn")
-        C_local = T.allocate([128], "float32", "local")
-        desc_a = T.allocate([1], "uint64", "local.descriptor.wgmma")
-        desc_b = T.allocate([1], "uint64", "local.descriptor.wgmma")
-        C_local_cast = T.allocate([2], "float16", "local")
+        buf_dyn_shmem = T.alloc_buffer((49152,), "uint8", scope="shared.dyn")
+        C_local = T.alloc_buffer((128,), "float32", scope="local")
+        desc_a = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        desc_b = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        C_local_cast = T.alloc_buffer((2,), "float16", scope="local")
         by = T.launch_thread("blockIdx.y", 8)
         tx = T.launch_thread("threadIdx.x", 256)
         mbarrier = T.decl_buffer((6,), "uint64", scope="shared.barrier")
@@ -603,7 +603,7 @@ def test_regression_0219_fence_no_fence_inserted():
                     T.tma_load(
                         A_desc,
                         mbarrier[ko % 3],
-                        T.tvm_access_ptr(T.type_annotation("float16"), buf_dyn_shmem, ko % 3 * 4096, 4096, 2),
+                        T.tvm_access_ptr(T.type_annotation("float16"), buf_dyn_shmem.data, ko % 3 * 4096, 4096, 2),
                         ko * 32,
                         by * 128,
                         0,
@@ -613,7 +613,13 @@ def test_regression_0219_fence_no_fence_inserted():
                     T.tma_load(
                         B_desc,
                         mbarrier[ko % 3],
-                        T.tvm_access_ptr(T.type_annotation("float16"), buf_dyn_shmem, 12288 + ko % 3 * 4096, 2048, 2),
+                        T.tvm_access_ptr(
+                            T.type_annotation("float16"),
+                            buf_dyn_shmem.data,
+                            12288 + ko % 3 * 4096,
+                            2048,
+                            2,
+                        ),
                         bx * 128,
                         ko * 32,
                         0,
@@ -623,7 +629,7 @@ def test_regression_0219_fence_no_fence_inserted():
                         mbarrier[ko % 3],
                         T.tvm_access_ptr(
                             T.type_annotation("float16"),
-                            buf_dyn_shmem,
+                            buf_dyn_shmem.data,
                             12288 + (ko % 3 * 4096 + 2048),
                             2048,
                             2,
@@ -634,28 +640,28 @@ def test_regression_0219_fence_no_fence_inserted():
                     )
                 T.ptx_arrive_barrier(mbarrier[ko % 3])
         else:
-            C_local_2 = T.Buffer((128,), data=C_local, scope="local")
+            C_local_2 = T.decl_buffer((128,), data=C_local.data, scope="local")
             for i in T.unroll(32):
                 C_local_2[i * 4 : i * 4 + 4] = T.Broadcast(T.float32(0.0), 4)
             for ko in range(32):
                 T.mbarrier_wait_parity(mbarrier[ko % 3], ko % 6 // 3)
-                desc_a_2 = T.Buffer((1,), "uint64", data=desc_a, scope="local.descriptor.wgmma")
+                desc_a_2 = T.decl_buffer((1,), "uint64", data=desc_a.data, scope="local.descriptor.wgmma")
                 T.initialize_wgmma_descriptor(
                     desc_a_2[0],
-                    T.tvm_access_ptr(T.type_annotation("float16"), buf_dyn_shmem, ko % 3 * 4096, 4096, 1),
+                    T.tvm_access_ptr(T.type_annotation("float16"), buf_dyn_shmem.data, ko % 3 * 4096, 4096, 1),
                     2,
                     1,
                     32,
                 )
-                desc_b_2 = T.Buffer((1,), "uint64", data=desc_b, scope="local.descriptor.wgmma")
+                desc_b_2 = T.decl_buffer((1,), "uint64", data=desc_b.data, scope="local.descriptor.wgmma")
                 T.initialize_wgmma_descriptor(
                     desc_b_2[0],
-                    T.tvm_access_ptr(T.type_annotation("float16"), buf_dyn_shmem, 12288 + ko % 3 * 4096, 4096, 1),
+                    T.tvm_access_ptr(T.type_annotation("float16"), buf_dyn_shmem.data, 12288 + ko % 3 * 4096, 4096, 1),
                     1,
                     256,
                     64,
                 )
-                T.warpgroup_fence_operand("float32", C_local, 0, 128)
+                T.warpgroup_fence_operand(C_local, num_regs=128)
                 T.warpgroup_arrive()
                 for i in T.unroll(2):
                     for ki in T.unroll(2):
@@ -667,11 +673,11 @@ def test_regression_0219_fence_no_fence_inserted():
                             "fp16",
                             "fp16",
                             "fp32",
-                            desc_a,
+                            desc_a.data,
                             T.shift_right(i * 4096 + ki * 32, 4),
-                            desc_b,
+                            desc_b.data,
                             T.shift_right(ki * 2048, 4),
-                            C_local,
+                            C_local.data,
                             i * 64,
                             1,
                             1,
@@ -679,14 +685,14 @@ def test_regression_0219_fence_no_fence_inserted():
                         )
                 T.warpgroup_commit_batch()
                 T.warpgroup_wait(0)
-                T.warpgroup_fence_operand("float32", C_local, 0, 128)
+                T.warpgroup_fence_operand(C_local, num_regs=128)
                 T.ptx_arrive_barrier(mbarrier[ko % 3 + 3])
             for i in T.unroll(128):
                 C_local_2[i] = T.max(C_local_2[i], T.float32(0.0))
             for i in T.unroll(64):
-                C_local_cast_2 = T.Buffer((2,), "float16", data=C_local_cast, scope="local")
+                C_local_cast_2 = T.decl_buffer((2,), "float16", data=C_local_cast.data, scope="local")
                 C_local_cast_2[0:2] = T.Cast("float16x2", C_local_2[i * 2 : i * 2 + 2])
-                C_2 = T.Buffer((1048576,), "float16", data=C)
+                C_2 = T.decl_buffer((1048576,), "float16", data=C)
                 C_2[
                     by * 131072
                     + i // 32 * 65536
@@ -724,18 +730,18 @@ def test_regression_0219_fence_no_fence_inserted():
                         "thread_warp_size": 32,
                     }
                 ),
-                "tir.is_global_func": True,
-                "tir.noalias": True,
+                "tirx.is_global_func": True,
+                "tirx.noalias": True,
                 "tl.non_restrict_params": [],
                 "tl.readonly_param_indices": [0, 1],
             }
         )
         bx = T.launch_thread("blockIdx.x", 8)
-        buf_dyn_shmem = T.allocate([49152], "uint8", "shared.dyn")
-        C_local = T.allocate([128], "float32", "local")
-        desc_a = T.allocate([1], "uint64", "local.descriptor.wgmma")
-        desc_b = T.allocate([1], "uint64", "local.descriptor.wgmma")
-        C_local_cast = T.allocate([2], "float16", "local")
+        buf_dyn_shmem = T.alloc_buffer((49152,), "uint8", scope="shared.dyn")
+        C_local = T.alloc_buffer((128,), "float32", scope="local")
+        desc_a = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        desc_b = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        C_local_cast = T.alloc_buffer((2,), "float16", scope="local")
         by = T.launch_thread("blockIdx.y", 8)
         tx = T.launch_thread("threadIdx.x", 256)
         mbarrier = T.decl_buffer((6,), "uint64", scope="shared.barrier")
@@ -761,7 +767,7 @@ def test_regression_0219_fence_no_fence_inserted():
                     T.tma_load(
                         A_desc,
                         mbarrier[ko % 3],
-                        T.tvm_access_ptr(T.type_annotation("float16"), buf_dyn_shmem, ko % 3 * 4096, 4096, 2),
+                        T.tvm_access_ptr(T.type_annotation("float16"), buf_dyn_shmem.data, ko % 3 * 4096, 4096, 2),
                         ko * 32,
                         by * 128,
                         0,
@@ -771,7 +777,13 @@ def test_regression_0219_fence_no_fence_inserted():
                     T.tma_load(
                         B_desc,
                         mbarrier[ko % 3],
-                        T.tvm_access_ptr(T.type_annotation("float16"), buf_dyn_shmem, 12288 + ko % 3 * 4096, 2048, 2),
+                        T.tvm_access_ptr(
+                            T.type_annotation("float16"),
+                            buf_dyn_shmem.data,
+                            12288 + ko % 3 * 4096,
+                            2048,
+                            2,
+                        ),
                         bx * 128,
                         ko * 32,
                         0,
@@ -781,7 +793,7 @@ def test_regression_0219_fence_no_fence_inserted():
                         mbarrier[ko % 3],
                         T.tvm_access_ptr(
                             T.type_annotation("float16"),
-                            buf_dyn_shmem,
+                            buf_dyn_shmem.data,
                             12288 + (ko % 3 * 4096 + 2048),
                             2048,
                             2,
@@ -792,28 +804,28 @@ def test_regression_0219_fence_no_fence_inserted():
                     )
                 T.ptx_arrive_barrier(mbarrier[ko % 3])
         else:
-            C_local_2 = T.Buffer((128,), data=C_local, scope="local")
+            C_local_2 = T.decl_buffer((128,), data=C_local.data, scope="local")
             for i in T.unroll(32):
                 C_local_2[i * 4 : i * 4 + 4] = T.Broadcast(T.float32(0.0), 4)
             for ko in range(32):
                 T.mbarrier_wait_parity(mbarrier[ko % 3], ko % 6 // 3)
-                desc_a_2 = T.Buffer((1,), "uint64", data=desc_a, scope="local.descriptor.wgmma")
+                desc_a_2 = T.decl_buffer((1,), "uint64", data=desc_a.data, scope="local.descriptor.wgmma")
                 T.initialize_wgmma_descriptor(
                     desc_a_2[0],
-                    T.tvm_access_ptr(T.type_annotation("float16"), buf_dyn_shmem, ko % 3 * 4096, 4096, 1),
+                    T.tvm_access_ptr(T.type_annotation("float16"), buf_dyn_shmem.data, ko % 3 * 4096, 4096, 1),
                     2,
                     1,
                     32,
                 )
-                desc_b_2 = T.Buffer((1,), "uint64", data=desc_b, scope="local.descriptor.wgmma")
+                desc_b_2 = T.decl_buffer((1,), "uint64", data=desc_b.data, scope="local.descriptor.wgmma")
                 T.initialize_wgmma_descriptor(
                     desc_b_2[0],
-                    T.tvm_access_ptr(T.type_annotation("float16"), buf_dyn_shmem, 12288 + ko % 3 * 4096, 4096, 1),
+                    T.tvm_access_ptr(T.type_annotation("float16"), buf_dyn_shmem.data, 12288 + ko % 3 * 4096, 4096, 1),
                     1,
                     256,
                     64,
                 )
-                T.warpgroup_fence_operand("float32", C_local, 0, 128)
+                T.warpgroup_fence_operand(C_local, num_regs=128)
                 T.warpgroup_arrive()
                 for i in T.unroll(2):
                     for ki in T.unroll(2):
@@ -825,11 +837,11 @@ def test_regression_0219_fence_no_fence_inserted():
                             "fp16",
                             "fp16",
                             "fp32",
-                            desc_a,
+                            desc_a.data,
                             T.shift_right(i * 4096 + ki * 32, 4),
-                            desc_b,
+                            desc_b.data,
                             T.shift_right(ki * 2048, 4),
-                            C_local,
+                            C_local.data,
                             i * 64,
                             1,
                             1,
@@ -837,14 +849,14 @@ def test_regression_0219_fence_no_fence_inserted():
                         )
                 T.warpgroup_commit_batch()
                 T.warpgroup_wait(0)
-                T.warpgroup_fence_operand("float32", C_local, 0, 128)
+                T.warpgroup_fence_operand(C_local, num_regs=128)
                 T.ptx_arrive_barrier(mbarrier[ko % 3 + 3])
             for i in T.unroll(128):
                 C_local_2[i] = T.max(C_local_2[i], T.float32(0.0))
             for i in T.unroll(64):
-                C_local_cast_2 = T.Buffer((2,), "float16", data=C_local_cast, scope="local")
+                C_local_cast_2 = T.decl_buffer((2,), "float16", data=C_local_cast.data, scope="local")
                 C_local_cast_2[0:2] = T.Cast("float16x2", C_local_2[i * 2 : i * 2 + 2])
-                C_2 = T.Buffer((1048576,), "float16", data=C)
+                C_2 = T.decl_buffer((1048576,), "float16", data=C)
                 C_2[
                     by * 131072
                     + i // 32 * 65536
@@ -881,7 +893,7 @@ def test_ldmatrix_then_wgmma_does_not_inject_fence_proxy():
             C_local = T.decl_buffer((32,), T.float16, scope="local")
             T.call_intrin(
                 "handle",
-                tir.op.Op.get("tl.ptx_ldmatrix"),
+                tirx.op.Op.get("tl.ptx_ldmatrix"),
                 T.int32(0),
                 1,
                 T.tvm_access_ptr(T.type_annotation(T.float16), smem.data, 0, 16, 1),
@@ -921,7 +933,7 @@ def test_stmatrix_then_wgmma_injects_fence_proxy():
             C_local = T.decl_buffer((32,), T.float16, scope="local")
             T.call_intrin(
                 "handle",
-                tir.op.Op.get("tl.ptx_stmatrix"),
+                tirx.op.Op.get("tl.ptx_stmatrix"),
                 T.int32(0),
                 1,
                 T.tvm_access_ptr(T.type_annotation(T.float16), smem.data, 0, 16, 2),
@@ -956,7 +968,7 @@ def test_stmatrix_then_wgmma_injects_fence_proxy():
             C_local = T.decl_buffer((32,), T.float16, scope="local")
             T.call_intrin(
                 "handle",
-                tir.op.Op.get("tl.ptx_stmatrix"),
+                tirx.op.Op.get("tl.ptx_stmatrix"),
                 T.int32(0),
                 1,
                 T.tvm_access_ptr(T.type_annotation(T.float16), smem.data, 0, 16, 2),

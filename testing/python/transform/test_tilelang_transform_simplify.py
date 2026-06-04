@@ -8,6 +8,17 @@ from tilelang.transform import PassConfigKey
 from tvm import te
 
 
+def bind_then(var, value, body):
+    return tvm.tirx.SeqStmt([tvm.tirx.Bind(var, value), body])
+
+
+def buffer_pair(shape=(16,)):
+    return (
+        tvm.tirx.decl_buffer(shape, "float32", name="A"),
+        tvm.tirx.decl_buffer(shape, "float32", name="C"),
+    )
+
+
 def simplify_and_compare(before, expected, config=None):
     """Helper function to run simplify pass and compare results."""
     if config is None:
@@ -26,53 +37,108 @@ def simplify_and_compare(before, expected, config=None):
 
 
 def test_stmt_simplify():
-    ib = tvm.tir.ir_builder.create()
-    A = ib.pointer("float32", name="A")
-    C = ib.pointer("float32", name="C")
+    A, C = buffer_pair()
     n = te.size_var("n")
-    with ib.for_range(0, n, name="i") as i, ib.if_scope(i < 12):
-        A[i] = C[i]
+    i = tvm.tirx.Var("i", "int32")
 
-    body = tvm.tir.LetStmt(n, 10, ib.get())
-    mod = tvm.IRModule.from_expr(tvm.tir.PrimFunc([A, C, n], body))
+    store = tvm.tirx.BufferStore(A, tvm.tirx.BufferLoad(C, [i]), [i])
+    loop = tvm.tirx.For(i, 0, n, tvm.tirx.ForKind.SERIAL, tvm.tirx.IfThenElse(i < 12, store, None))
+    mod = tvm.IRModule.from_expr(tvm.tirx.PrimFunc([A, C], bind_then(n, 10, loop)))
     body = tl.transform.Simplify()(mod)["main"].body
-    assert isinstance(body.body, tvm.tir.BufferStore)
+    assert isinstance(body.body, tvm.tirx.BufferStore)
 
 
 def test_thread_extent_simplify():
-    ib = tvm.tir.ir_builder.create()
-    A = ib.pointer("float32", name="A")
-    C = ib.pointer("float32", name="C")
+    A, C = buffer_pair()
     n = te.size_var("n")
     tx = te.thread_axis("threadIdx.x")
     ty = te.thread_axis("threadIdx.y")
-    ib.scope_attr(tx, "thread_extent", n)
-    ib.scope_attr(tx, "thread_extent", n)
-    ib.scope_attr(ty, "thread_extent", 1)
-    with ib.if_scope(tx + ty < 12):
-        A[tx] = C[tx + ty]
-    body = tvm.tir.LetStmt(n, 10, ib.get())
-    mod = tvm.IRModule.from_expr(tvm.tir.PrimFunc([A, C, n], body))
+
+    store = tvm.tirx.BufferStore(A, tvm.tirx.BufferLoad(C, [tx.var + ty.var]), [tx.var])
+    stmt = tvm.tirx.IfThenElse(tx.var + ty.var < 12, store, None)
+    stmt = tvm.tirx.AttrStmt(ty, "thread_extent", 1, stmt)
+    stmt = tvm.tirx.AttrStmt(tx, "thread_extent", n, stmt)
+    stmt = tvm.tirx.AttrStmt(tx, "thread_extent", n, stmt)
+    mod = tvm.IRModule.from_expr(tvm.tirx.PrimFunc([A, C], bind_then(n, 10, stmt)))
     body = tl.transform.Simplify()(mod)["main"].body
-    assert isinstance(body.body.body.body, tvm.tir.BufferStore)
+    assert isinstance(body.body.body.body, tvm.tirx.BufferStore)
+
+
+def test_context_singleton_floordiv_index():
+    A, C = buffer_pair((128,))
+    tx = te.thread_axis("threadIdx.x")
+    i = tvm.tirx.Var("i", "int32")
+    vec = tvm.tirx.Var("vec", "int32")
+
+    before_index = tx.var // 128 * 64 + i * 4 + vec - 64
+    expected_index = i * 4 + vec
+    before_accum_index = (tx.var - 128) // 128 * 64 + i
+    expected_accum_index = i
+    before_store = tvm.tirx.BufferStore(A, tvm.tirx.const(0, "float32"), [before_index])
+    expected_store = tvm.tirx.BufferStore(A, tvm.tirx.const(0, "float32"), [expected_index])
+    before_accum_store = tvm.tirx.BufferStore(C, tvm.tirx.const(0, "float32"), [before_accum_index])
+    expected_accum_store = tvm.tirx.BufferStore(C, tvm.tirx.const(0, "float32"), [expected_accum_index])
+
+    before_body = tvm.tirx.For(
+        i,
+        0,
+        32,
+        tvm.tirx.ForKind.SERIAL,
+        tvm.tirx.For(
+            vec,
+            0,
+            4,
+            tvm.tirx.ForKind.SERIAL,
+            tvm.tirx.SeqStmt([before_store, before_accum_store]),
+        ),
+    )
+    expected_body = tvm.tirx.For(
+        i,
+        0,
+        32,
+        tvm.tirx.ForKind.SERIAL,
+        tvm.tirx.For(
+            vec,
+            0,
+            4,
+            tvm.tirx.ForKind.SERIAL,
+            tvm.tirx.SeqStmt([expected_store, expected_accum_store]),
+        ),
+    )
+    before_stmt = tvm.tirx.AttrStmt(
+        tx,
+        "thread_extent",
+        256,
+        tvm.tirx.IfThenElse(tx.var < 128, tvm.tirx.Evaluate(0), before_body),
+    )
+    expected_stmt = tvm.tirx.AttrStmt(
+        tx,
+        "thread_extent",
+        256,
+        tvm.tirx.IfThenElse(tx.var < 128, tvm.tirx.Evaluate(0), expected_body),
+    )
+
+    mod_before = tvm.IRModule.from_expr(tvm.tirx.PrimFunc([A, C], before_stmt))
+    mod_expected = tvm.IRModule.from_expr(tvm.tirx.PrimFunc([A, C], expected_stmt))
+    simplify_and_compare(mod_before, mod_expected)
 
 
 def test_if_likely():
-    ib = tvm.tir.ir_builder.create()
-    A = ib.pointer("float32", name="A")
-    C = ib.pointer("float32", name="C")
+    A, C = buffer_pair((1024,))
     n = te.size_var("n")
     tx = te.thread_axis("threadIdx.x")
     ty = te.thread_axis("threadIdx.y")
-    ib.scope_attr(tx, "thread_extent", 32)
-    ib.scope_attr(ty, "thread_extent", 32)
-    with ib.if_scope(ib.likely(tx * 32 + ty < n)), ib.if_scope(ib.likely(tx * 32 + ty < n)):
-        A[tx] = C[tx * 32 + ty]
-    body = ib.get()
-    mod = tvm.IRModule.from_expr(tvm.tir.PrimFunc([A, C, n], body))
+
+    idx = tx.var * 32 + ty.var
+    store = tvm.tirx.BufferStore(A, tvm.tirx.BufferLoad(C, [idx]), [tx.var])
+    cond = tvm.tirx.likely(idx < n)
+    stmt = tvm.tirx.IfThenElse(cond, tvm.tirx.IfThenElse(cond, store, None), None)
+    stmt = tvm.tirx.AttrStmt(ty, "thread_extent", 32, stmt)
+    stmt = tvm.tirx.AttrStmt(tx, "thread_extent", 32, stmt)
+    mod = tvm.IRModule.from_expr(tvm.tirx.PrimFunc([A, C, n], stmt))
     body = tl.transform.Simplify()(mod)["main"].body
-    assert isinstance(body.body.body, tvm.tir.IfThenElse)
-    assert not isinstance(body.body.body.then_case, tvm.tir.IfThenElse)
+    assert isinstance(body.body.body, tvm.tirx.IfThenElse)
+    assert not isinstance(body.body.body.then_case, tvm.tirx.IfThenElse)
 
 
 def test_load_store_noop():

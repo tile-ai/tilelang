@@ -118,7 +118,7 @@ def test_nonws_im2col_tma_num_stages_3_uses_pipeline_barrier():
             out_flat = T.Tensor((N * OH * OW, F), T.float16, out.data)
             T.clear(out_local)
             for k_iter in T.Pipelined(T.ceildiv(KH * KW * C, block_K), num_stages=num_stages):
-                T.c2d_im2col(data, data_shared, by, k_iter, KH, S, D, P)
+                T.im2col(data, data_shared, by, k_iter, KH, S, D, P)
                 T.copy(kernel_flat[k_iter * block_K, bx * block_N], weight_shared)
                 T.gemm(data_shared, weight_shared, out_local)
             T.copy(out_local, out_shared)

@@ -1,6 +1,7 @@
-import tvm.script.ir_builder.tir.ir as _ir
-from tvm.script.ir_builder.tir import frame
-from tvm.tir import PrimExpr
+import tvm.tirx.script.builder.ir as _ir
+from tvm.tirx.script.builder import frame
+from tvm.tirx import PrimExpr, IntImm, StringImm
+from tvm.tirx import _ffi_api as _tir_ffi
 from typing import Any
 import tilelang.language.tir.op as _tir_op
 import functools
@@ -290,6 +291,8 @@ ptx_mma = _dtype_forward(_tir_op.ptx_mma)
 ptx_mma_sp = _dtype_forward(_tir_op.ptx_mma_sp)
 ptx_wgmma_ss = _dtype_forward(_tir_op.ptx_wgmma_ss)
 ptx_wgmma_rs = _dtype_forward(_tir_op.ptx_wgmma_rs)
+ptx_wgmma_sp_ss = _dtype_forward(_tir_op.ptx_wgmma_sp_ss)
+ptx_wgmma_sp_rs = _dtype_forward(_tir_op.ptx_wgmma_sp_rs)
 ptx_tcgen05_mma_ss = _dtype_forward(_tir_op.ptx_tcgen05_mma_ss)
 ptx_tcgen05_mma_ts = _dtype_forward(_tir_op.ptx_tcgen05_mma_ts)
 ptx_tcgen05_mma_blockscaled_ss = _dtype_forward(_tir_op.ptx_tcgen05_mma_blockscaled_ss)
@@ -305,3 +308,70 @@ tvm_mfma = _dtype_forward(_tir_op.tvm_mfma)
 tvm_mfma_store = _dtype_forward(_tir_op.tvm_mfma_store)
 tvm_rdna_wmma = _dtype_forward(_tir_op.tvm_rdna_wmma)
 tvm_rdna_wmma_store = _dtype_forward(_tir_op.tvm_rdna_wmma_store)
+
+
+# ---------------------------------------------------------------------------
+# Cast with optional CUDA/PTX rounding hints.
+#
+# Upstream ``tvm.tir.generic.cast`` only takes a generic ``annotations`` map
+# on the resulting CastNode (it is backend-agnostic). The tilelang wrapper
+# below exposes a friendly keyword API (``round`` / ``sat`` / ``rbits``) that
+# maps onto the PTX ``cvt`` instruction family used by the CUDA backend, and
+# translates the kwargs into entries on the CastNode annotations map:
+#
+#   round=<str>  -> "round" (StringImm)
+#   sat=False    -> "sat"   (IntImm bool 0; sat=True is the default and
+#                            emits no annotation)
+#   rbits=<expr> -> "rbits" (PrimExpr; required when round="rs")
+# ---------------------------------------------------------------------------
+
+_VALID_CAST_ROUNDING_MODES = {"", "rn", "rz", "rp", "rm", "rs"}
+
+
+def cast(value, dtype, round: str = "", sat: bool = True, rbits=None, span=None):
+    """Cast ``value`` to ``dtype`` with optional PTX-style rounding hints.
+
+    Parameters
+    ----------
+    value : object
+        The source operand.
+    dtype : str
+        The target data type.
+    round : str, optional
+        PTX rounding modifier (e.g. ``"rn"``, ``"rz"``, ``"rp"``, ``"rm"``,
+        ``"rs"``). Empty string means use the backend default. Currently
+        only ``""`` and ``"rs"`` are lowered by the CUDA backend; the other
+        modifiers are reserved.
+    sat : bool, optional
+        Saturate to finite (``True`` = PTX ``.satfinite``, default).
+    rbits : PrimExpr, optional
+        Random bits operand for stochastic rounding (``round="rs"``).
+    span : Optional[Span]
+        The location of this operator in the source.
+
+    Returns
+    -------
+    op : tvm.tir.PrimExpr
+        The cast expression.
+    """
+    if round not in _VALID_CAST_ROUNDING_MODES:
+        raise ValueError(f"Invalid round '{round}'. Must be one of: {sorted(_VALID_CAST_ROUNDING_MODES)}")
+    if not isinstance(sat, bool):
+        raise ValueError(f"Invalid sat '{sat}'. Must be a bool (True for satfinite, False for no saturation)")
+    if round == "rs" and rbits is None:
+        raise ValueError("rbits is required when round='rs' (stochastic rounding)")
+    if round != "rs" and rbits is not None:
+        raise ValueError("rbits is only valid with round='rs' (stochastic rounding)")
+
+    annotations: dict = {}
+    if round:
+        annotations["round"] = StringImm(round)
+    if not sat:
+        annotations["sat"] = IntImm("bool", 0)
+    if rbits is not None:
+        annotations["rbits"] = rbits
+
+    # Go through the TIR FFI directly: ``tvm.tir.generic.cast`` is overridden
+    # by ``topi.math.cast`` (a 2/3-arg signature) via TVM's GenericFunc
+    # dispatch, so calling it would lose the ``annotations`` argument.
+    return _tir_ffi._cast(dtype, value, annotations or None, span)

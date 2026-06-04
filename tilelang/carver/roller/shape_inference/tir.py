@@ -1,11 +1,11 @@
 from collections.abc import Mapping
-from tvm.tir.schedule.schedule import BlockRV
+from tvm.s_tir.schedule import SBlockRV
 from tvm.ir import structural_equal
-from tvm import arith, tir
+from tvm import arith, tirx
 
 
 class Statement:
-    def __init__(self, block_analyzer, block: BlockRV):
+    def __init__(self, block_analyzer, block: SBlockRV):
         self.block_analyzer = block_analyzer
         self.block = block
         # assume one tir block only has one output buffer
@@ -14,7 +14,7 @@ class Statement:
 
         self.reverse_bound_inference = {}
 
-    def make_reverse(self, input_name: str, input_iter: list[tir.PrimExpr]):
+    def make_reverse(self, input_name: str, input_iter: list[tirx.PrimExpr]):
         if len(self.block_analyzer.get_reduce_axis(self.block)) > 0:
             return None
         if len(self.dependent_region[input_name]) != 1:
@@ -36,7 +36,7 @@ class Statement:
                 output_indices.append(results[_iter.var])
             else:
                 # not Bijective mapping case
-                output_indices.append(tir.Var("undefined", dtype="int32") % int(_iter.dom.extent))
+                output_indices.append(tirx.Var("undefined", dtype="int32") % int(_iter.dom.extent))
         return output_indices
 
 
@@ -115,7 +115,7 @@ class DependencyAnalysis:
                 input_node = self.traverse_dependencies(input_buffer)
                 input_node.add_next(node)
                 node.add_prev(input_node)
-        elif isinstance(compute, tir.Buffer):
+        elif isinstance(compute, tirx.Buffer):
             node = self.get_or_create_node(compute.name)
         return node
 
@@ -210,8 +210,8 @@ class InputShapeInference:
                     mapping[input_name] = []
                 for indices in indices_list:
                     for region in regions:
-                        vmap = {k: (tir.Cast(k.dtype, v) if v.dtype != k.dtype else v) for k, v in zip(ax_vars, indices)}
-                        region = [ana.simplify(tir.stmt_functor.substitute(ax, vmap)) for ax in region]
+                        vmap = {k: (tirx.Cast(k.dtype, v) if v.dtype != k.dtype else v) for k, v in zip(ax_vars, indices)}
+                        region = [ana.simplify(tirx.stmt_functor.substitute(ax, vmap)) for ax in region]
                         if not region_exist_in_list(region, mapping[input_name]):
                             mapping[input_name].append(region)
         buffers = []
@@ -286,19 +286,19 @@ class InputShapeInference:
         for vars, exprs in zip(input_vars, output_exprs.values()):
             for var, expr in zip(vars, exprs):
                 if expr.dtype != var.dtype:
-                    expr = tir.Cast(var.dtype, expr)
+                    expr = tirx.Cast(var.dtype, expr)
                 vmap[var] = expr
         result = {}
 
         for name, regions in mapping.items():
             region = regions[0]
-            result[name] = [ana.simplify(tir.stmt_functor.substitute(index, vmap)) for index in region]
+            result[name] = [ana.simplify(tirx.stmt_functor.substitute(index, vmap)) for index in region]
         return result
 
 
 def region_exist_in_list(a, list) -> bool:
     def expr_is_same(a, b) -> bool:
-        if isinstance(a, tir.IntImm) and isinstance(b, tir.IntImm):
+        if isinstance(a, tirx.IntImm) and isinstance(b, tirx.IntImm):
             return a.value == b.value
         return structural_equal(a, b)
 
@@ -309,34 +309,34 @@ def region_exist_in_list(a, list) -> bool:
 
 
 def walk_indice(expr):
-    if isinstance(expr, tir.expr.BinaryOpExpr):
+    if isinstance(expr, tirx.expr.BinaryOpExpr):
         a = walk_indice(expr.a)
         b = walk_indice(expr.b)
         if a is not None and b is not None:
             return expr
         else:
             return None
-    elif isinstance(expr, (tir.Var, tir.expr.ConstExpr)):
+    elif isinstance(expr, (tirx.Var, tirx.expr.ConstExpr)):
         return expr
-    elif isinstance(expr, tir.ProducerLoad):
+    elif isinstance(expr, tirx.ProducerLoad):
         return None
-    elif isinstance(expr, tir.Cast):
+    elif isinstance(expr, tirx.Cast):
         a = walk_indice(expr.value)
         if a is not None:
             return expr
         return None
-    elif isinstance(expr, tir.Call):
+    elif isinstance(expr, tirx.Call):
         return None
     else:
         raise Exception(f"Unhandled node type in walk_indice(): {expr}")
 
 
-def _extract_dependent_region(block_analyzer, block: BlockRV) -> dict[str, list[tir.PrimExpr]]:
+def _extract_dependent_region(block_analyzer, block: SBlockRV) -> dict[str, list[tirx.PrimExpr]]:
     input_buffers = block_analyzer.get_input_buffers(block)
     dependent_region = {buffer.name: [] for buffer in input_buffers}
 
     def fvisit(x):
-        if not isinstance(x, tir.BufferLoad):
+        if not isinstance(x, tirx.BufferLoad):
             return
         if x.buffer.name not in dependent_region:
             return
@@ -344,8 +344,8 @@ def _extract_dependent_region(block_analyzer, block: BlockRV) -> dict[str, list[
         for indice, shape_limit in zip(x.indices, x.buffer.shape):
             expr = walk_indice(indice)
             if expr is None:
-                expr = tir.Var("undefined", dtype="int8") % shape_limit
-            if isinstance(expr, tir.IntImm) and expr.value == 0:
+                expr = tirx.Var("undefined", dtype="int8") % shape_limit
+            if isinstance(expr, tirx.IntImm) and expr.value == 0:
                 """for tensor ir zero dim smplification case.
                 for ax0, ax1, ax2 in T.grid(T.int64(1024), T.int64(1024), T.int64(1024)):
                     with T.block("T_dense"):
@@ -363,7 +363,7 @@ def _extract_dependent_region(block_analyzer, block: BlockRV) -> dict[str, list[
             dependent_region[x.buffer.name].append(index)
 
     stmt = block_analyzer.sch.get(block)
-    tir.stmt_functor.post_order_visit(stmt, fvisit=fvisit)
+    tirx.stmt_functor.post_order_visit(stmt, fvisit=fvisit)
     return dependent_region
 
 

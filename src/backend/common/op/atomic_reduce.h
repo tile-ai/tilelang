@@ -7,16 +7,15 @@
 #define TVM_TL_BACKEND_COMMON_OP_ATOMIC_REDUCE_H_
 
 #include "op/atomic_reduce.h"
+#include "support/check.h"
+#include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/ir/cast.h>
 
 #include "layout/layout.h"
 #include "op/builtin.h"
 #include "op/utils.h"
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
-
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/op_attr_types.h>
 
 #include <cstddef>
 #include <optional>
@@ -27,7 +26,8 @@ namespace tvm {
 namespace tl {
 namespace backend {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace atomic_reduce {
 
@@ -119,9 +119,9 @@ inline For MakeSIMTLoop(const AtomicOpBaseNode &op, arith::Analyzer *analyzer) {
   new_args.push_back(op.GetMemoryOrder());
 
   Call atomic_call =
-      tvm::tir::Call(op.dst->dtype, op.GetElemOp(), new_args, op.annotations);
+      tvm::tirx::Call(op.dst->dtype, op.GetElemOp(), new_args, op.annotations);
 
-  Stmt body = tvm::tir::Evaluate(atomic_call);
+  Stmt body = tvm::tirx::Evaluate(atomic_call);
 
   for (int i = loop_vars.size() - 1; i >= 0; i--) {
     Map<String, ObjectRef> loop_annotations;
@@ -182,7 +182,9 @@ struct AtomicReduce {
     }
     auto loop_layout = par_op->GetLoopLayout();
     return LowerParallelLoop(fused_loop, loop_layout, T.thread_var, analyzer,
-                             T.layout_map, par_op->GetPredicate(T.thread_var));
+                             T.layout_map, par_op->GetPredicate(T.thread_var),
+                             /*parallel_loop=*/true, /*should_vectorize=*/true,
+                             par_op->LoopLayoutRequiresPaddingGuard());
   }
 };
 

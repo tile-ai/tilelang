@@ -4,18 +4,18 @@ from tilelang.cuda.intrinsics.macro.mma_sp_macro_generator import SparseTensorCo
 from tilelang.utils.language import is_shared, is_fragment
 from tilelang import tvm as tvm
 from tvm.target import Target
-from tvm import tir
+from tvm.ir import Range
+from tvm import tirx
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 
 
-GEMM_SP_INST_MMA = "cuda.mma"
+GEMM_SP_INST_MMA_SP = "cuda.mma.sp"
 
 
 class GemmSPMMA(GemmSPBase):
     def infer_layout(self, target: Target, thread_nums: int):
-        # NOTE(wt): Actually gemm_sp v2 currently use GemmWarpPolicy
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_SP_INST_MMA)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_SP_INST_MMA_SP)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = SparseTensorCoreIntrinEmitter(
@@ -59,9 +59,11 @@ class GemmSPMMA(GemmSPBase):
         else:
             raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
 
-    def lower(self, target: Target, thread_nums: int, thread_var: tir.Var):
-        # NOTE(wt): Actually gemm_sp v2 currently use GemmWarpPolicy
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_SP_INST_MMA)
+    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tirx.Var):
+        thread_nums = thread_bounds.extent
+        # Emitter lane/warp math uses zero-based ids within the current thread bounds.
+        local_thread_var = thread_var - thread_bounds.min
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_SP_INST_MMA_SP)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = SparseTensorCoreIntrinEmitter(
@@ -77,7 +79,7 @@ class GemmSPMMA(GemmSPBase):
             warp_row_tiles=warp_row_tiles,
             warp_col_tiles=warp_col_tiles,
             warp_k=self.K,
-            thread_var=thread_var,
+            thread_var=local_thread_var,
         )
 
         in_dtype = self.in_dtype

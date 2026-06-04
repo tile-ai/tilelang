@@ -3,24 +3,20 @@
 from __future__ import annotations
 
 import re
-from typing import Callable
+from collections.abc import Callable
 import tilelang.transform
 from tilelang import tvm as tvm
-from tvm import tir
+from tvm import tirx
 import tvm_ffi
 from tvm.ir import CallingConv
 from tvm.target import Target
 from tilelang.contrib import hipcc, nvcc
 from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
 from tilelang.transform import PassConfigKey
-from tilelang.transform.metal import MarkHostMetalContext
 from tilelang.engine.param import KernelParam, CompiledArtifact
-from tilelang.utils.target import determine_target
-from tilelang.engine.phase import (
-    PreLowerSemanticCheck,
-    LowerAndLegalize,
-    OptimizeForTarget,
-)
+from tilelang.engine.semantic_check import PreLowerSemanticCheck
+from tilelang.utils.target import determine_target, target_get_mcpu
+from tilelang.backend.pass_pipeline import resolve_pipeline
 
 
 def is_cpu_device_backend(target: Target):
@@ -32,7 +28,7 @@ def has_device_kernel_launch(attrs) -> bool:
     return bool(attrs and "calling_conv" in attrs and attrs["calling_conv"] == CallingConv.DEVICE_KERNEL_LAUNCH)
 
 
-def is_device_call_c_device(func: tir.PrimFunc):
+def is_device_call_c_device(func: tirx.PrimFunc):
     attrs = func.attrs
     calling_conv = attrs.get("calling_conv", CallingConv.DEFAULT)
     is_cpacked = calling_conv == CallingConv.C_PACKED_FUNC
@@ -44,15 +40,15 @@ def is_device_call_c_device(func: tir.PrimFunc):
     return has_device_kernel_launch(attrs)
 
 
-def is_device_call(func: tir.PrimFunc):
+def is_device_call(func: tirx.PrimFunc):
     return has_device_kernel_launch(func.attrs)
 
 
-def get_device_call(is_device_c: bool = False) -> Callable[[tir.PrimFunc], bool]:
+def get_device_call(is_device_c: bool = False) -> Callable[[tirx.PrimFunc], bool]:
     return is_device_call_c_device if is_device_c else is_device_call
 
 
-def get_host_call(is_device_c: bool = False) -> Callable[[tir.PrimFunc], bool]:
+def get_host_call(is_device_c: bool = False) -> Callable[[tirx.PrimFunc], bool]:
     return lambda func: not get_device_call(is_device_c)(func)
 
 
@@ -73,7 +69,7 @@ def _collect_external_cuda_kernel_names(source: str) -> list[str]:
 @tvm_ffi.register_global_func("tilelang_callback_cuda_validate", override=True)
 def tilelang_callback_cuda_validate(device_mod):
     for _, base_func in device_mod.functions.items():
-        if not isinstance(base_func, tir.PrimFunc) or not base_func.attrs:
+        if not isinstance(base_func, tirx.PrimFunc) or not base_func.attrs:
             continue
 
         code_block_source = base_func.attrs.get("code_block_source")
@@ -162,9 +158,11 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
 
 @tvm_ffi.register_global_func("tilelang_callback_hip_compile", override=True)
 def tilelang_callback_hip_compile(code, target):
+    arch = target_get_mcpu(target)
     hsaco = hipcc.compile_hip(
         code,
         target_format="hsaco",
+        arch=arch,
         options=[
             "-std=c++17",
             "-I" + TILELANG_TEMPLATE_PATH,
@@ -176,7 +174,7 @@ def tilelang_callback_hip_compile(code, target):
     return hsaco
 
 
-def extrac_params(func: tir.PrimFunc) -> list[KernelParam]:
+def extrac_params(func: tirx.PrimFunc) -> list[KernelParam]:
     tensor_types = []
     for var in func.params:
         if var in func.buffer_map:
@@ -207,15 +205,18 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target, target: Target | N
         MarkHostMetalContext is applied so that the generated host code
         contains the Metal/MPS synchronisation logic.
     """
-    host_mod = tir.transform.BindTarget(target_host)(host_mod)
-    host_mod = tir.transform.FP8StorageLegalize()(host_mod)
-    host_mod = tir.transform.BF16StorageLegalize()(host_mod)
-    host_mod = tir.transform.LowerTVMBuiltin()(host_mod)
-    host_mod = tir.transform.LowerCustomDatatypes()(host_mod)
+    host_mod = tirx.transform.BindTarget(target_host)(host_mod)
+    host_mod = tirx.transform.FP8StorageLegalize()(host_mod)
+    host_mod = tirx.transform.BF16StorageLegalize()(host_mod)
+    host_mod = tirx.transform.LowerTVMBuiltin()(host_mod)
+    host_mod = tirx.transform.LowerCustomDatatypes()(host_mod)
     host_mod = tilelang.transform.LowerIntrin()(host_mod)
-    host_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(host_mod)
-    host_mod = tir.transform.CombineContextCall()(host_mod)
+    combine_context_call = getattr(tirx.transform, "CombineContextCall", None)
+    if combine_context_call is not None:
+        host_mod = combine_context_call()(host_mod)
     if target is not None and target.kind.name == "metal":
+        from tilelang.metal.transform import MarkHostMetalContext
+
         host_mod = MarkHostMetalContext()(host_mod)
     if target_host.kind.name == "llvm":
         host_mod = tvm.ffi.get_global_func("target.build.llvm")(host_mod, target_host)
@@ -227,9 +228,8 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target, target: Target | N
 
 
 def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
-    device_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(device_mod)
     device_mod = tilelang.transform.LowerIntrin()(device_mod)
-    device_mod = tir.transform.Simplify()(device_mod)
+    device_mod = tirx.transform.Simplify()(device_mod)
     device_mod = tilelang.transform.HoistBroadcastValues()(device_mod)
 
     if target.kind.name == "cuda":
@@ -238,7 +238,7 @@ def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
     elif target.kind.name == "hip":
         device_mod = tvm.ffi.get_global_func("target.build.tilelang_hip")(device_mod, target)
     elif target.kind.name == "metal":
-        device_mod = tvm.ffi.get_global_func("target.build.metal")(device_mod, target)
+        device_mod = tvm.ffi.get_global_func("target.build.tilelang_metal")(device_mod, target)
     else:
         raise ValueError(f"Target {target.kind.name} is not supported")
 
@@ -246,9 +246,8 @@ def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
 
 
 def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
-    device_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(device_mod)
     device_mod = tilelang.transform.LowerIntrin()(device_mod)
-    device_mod = tir.transform.Simplify()(device_mod)
+    device_mod = tirx.transform.Simplify()(device_mod)
     device_mod = tilelang.transform.HoistBroadcastValues()(device_mod)
 
     if target.kind.name == "cuda":
@@ -263,15 +262,53 @@ def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> 
     elif target.kind.name == "webgpu":
         device_mod = tvm.ffi.get_global_func("target.build.webgpu")(device_mod, target)
     elif target.kind.name == "metal":
-        device_mod = tvm.ffi.get_global_func("target.build.metal")(device_mod, target)
+        device_mod = tvm.ffi.get_global_func("target.build.tilelang_metal")(device_mod, target)
     else:
         raise ValueError(f"Target {target.kind.name} is not supported")
 
     return device_mod
 
 
+def lower_to_host_device_ir(
+    func_or_mod: tirx.PrimFunc | tvm.IRModule,
+    target: str | Target = "auto",
+    target_host: str | Target | None = None,
+    runtime_only: bool = False,
+) -> tuple[tvm.IRModule, tvm.IRModule, list[KernelParam] | None, Target, Target]:
+    """Lower input TIR to split host/device IRModules without backend codegen."""
+
+    mod = func_or_mod
+    params = None
+    if isinstance(func_or_mod, tirx.PrimFunc):
+        func = func_or_mod
+        params = extrac_params(func) if not runtime_only else None
+        mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+
+    if isinstance(target, str):
+        target = determine_target(target)
+
+    target_host = canon_target_host(target, target_host)
+
+    target_host = tvm.target.Target(target_host)
+    target = tvm.target.Target(target, target_host)
+
+    _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))
+    _is_device_call = get_device_call(is_device_c=is_cpu_device_backend(target))
+
+    # Run backend-independent semantic checks before target-specific lowering.
+    PreLowerSemanticCheck(mod)
+
+    pipeline = resolve_pipeline(target)
+    mod = pipeline.lower(mod, target)
+
+    host_mod = tirx.transform.Filter(_is_host_call)(mod)
+    device_mod = tirx.transform.Filter(_is_device_call)(mod)
+
+    return host_mod, device_mod, params, target, target_host
+
+
 def lower(
-    func_or_mod: tir.PrimFunc | tvm.IRModule,
+    func_or_mod: tirx.PrimFunc | tvm.IRModule,
     target: str | Target = "auto",
     target_host: str | Target | None = None,
     runtime_only=False,
@@ -285,35 +322,13 @@ def lower(
     own device codegen implementation in jit.
     """
 
-    mod = func_or_mod
-    params = None
-    if isinstance(func_or_mod, tir.PrimFunc):
-        func = func_or_mod
-        params = extrac_params(func) if not runtime_only else None
-        mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+    host_mod, device_mod, params, target, target_host = lower_to_host_device_ir(
+        func_or_mod=func_or_mod,
+        target=target,
+        target_host=target_host,
+        runtime_only=runtime_only,
+    )
 
-    if isinstance(target, str):
-        target = determine_target(target)
-
-    target_host = canon_target_host(target, target_host)
-
-    target_host = tvm.target.Target.canon_target(target_host)
-    target = tvm.target.Target(target, target_host)
-
-    _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))
-    _is_device_call = get_device_call(is_device_c=is_cpu_device_backend(target))
-
-    # Before lowering, do semantic check
-    PreLowerSemanticCheck(mod)
-
-    # Phase 1: Lower and legalize the IR
-    mod = LowerAndLegalize(mod, target)
-
-    # Phase 2: Optimize the IR for the target
-    mod = OptimizeForTarget(mod, target)
-
-    host_mod = tir.transform.Filter(_is_host_call)(mod)
-    device_mod = tir.transform.Filter(_is_device_call)(mod)
     codegen_mod = device_codegen(device_mod, target) if enable_device_compile else device_codegen_without_compile(device_mod, target)
     kernel_source = codegen_mod.inspect_source()
 

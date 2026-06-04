@@ -13,41 +13,44 @@ A performance analysis toolkit for TVM IR modules, Provides hardware-aware perfo
 ## Quick Start
 ### GEMM Analysis Example
 ```python
+import tilelang
 import tilelang.language as T
 from tilelang.tools import Analyzer
 from tilelang.carver.arch import CUDA
 
 M = N = K = 1024
 
-def kernel(block_M=128, block_N=128, block_K=32, num_stages=3, thread_num=128):
-    @T.prim_func
-    def main(A: T.Tensor((M, K), T.float16),
-             B: T.Tensor((N, K), T.float16),
-             C: T.Tensor((M, N), T.float)):
-        # ... (kernel definition)
-    return main
+@tilelang.jit
+def kernel(A, B, block_M=128, block_N=128, block_K=32, num_stages=3, thread_num=128):
+    A: T.Tensor((M, K), T.float16)
+    B: T.Tensor((N, K), T.float16)
+    C = T.empty((M, N), T.float)
+    # ... (kernel definition)
+    return C
 
 cuda_device = CUDA("cuda")
-result = Analyzer.analysis(kernel(), cuda_device)
+result = Analyzer.analysis(kernel.get_tir(), cuda_device)
 print(result)
 ```
 
 ### Convolution Analysis Example
 ```python
+import tilelang
 import tilelang.language as T
 from tilelang.tools import Analyzer
 from tilelang.carver.arch import CUDA
 
-def kernel(N=64, C=256, H=512, W=512, F=512, K=3, block_M=64, block_N=128):
-    @T.prim_func
-    def main(data: T.Tensor((N, H, W, C), T.float16),
-             kernel: T.Tensor((K, K, C, F), T.float16),
-             out: T.Tensor((N, (H-K+1), (W-K+1), F), T.float)):
-        # ... (convolution kernel definition)
-    return main
+@tilelang.jit
+def kernel(data, kernel, block_M=64, block_N=128):
+    N, C, H, W, F, K = T.const("N, C, H, W, F, K")
+    data: T.Tensor((N, H, W, C), T.float16)
+    kernel: T.Tensor((K, K, C, F), T.float16)
+    out = T.empty((N, (H-K+1), (W-K+1), F), T.float)
+    # ... (convolution kernel definition)
+    return out
 
 cuda_device = CUDA("cuda")
-result = Analyzer.analysis(kernel(), cuda_device)
+result = Analyzer.analysis(kernel.get_tir(N=64, C=256, H=512, W=512, F=512, K=3), cuda_device)
 print(result)
 ```
 

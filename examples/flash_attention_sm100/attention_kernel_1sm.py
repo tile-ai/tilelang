@@ -25,6 +25,7 @@ PASS_CFG = {
     tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
     "tl.disable_thread_storage_sync": True,
+    "tl.enable_aggressive_shared_memory_merge": True,
     # Outline each warp-role branch into a separate __device__ __noinline__
     # function. Each device fn gets its own register-allocation budget from
     # ptxas; this is required for the 4-role split DSL path to stay spill-free.
@@ -216,7 +217,7 @@ tcgen05_softmax_pack_4(uint32_t &h0, uint32_t &h1, float const *sv,
 """
 
 
-@tilelang.jit(out_idx=[3], pass_configs=PASS_CFG, target="cuda -arch=sm_100")
+@tilelang.jit(out_idx=[3], pass_configs=PASS_CFG, target={"kind": "cuda", "arch": "sm_100"})
 def attention_kernel_1sm(
     batch: int,
     heads: int,
@@ -992,7 +993,7 @@ def attention_kernel_1sm(
                     "void",
                     "tl::attention_1sm_epilogue_store_x16_d128",
                     O1_tmem[0, 0],
-                    T.access_ptr(O0_shared, "w", offset=kq2_block_M * dim),
+                    T.access_ptr(O1_shared, "w"),
                     logsum1_shared[row_corr],
                     256,
                 )
@@ -1023,7 +1024,7 @@ def attention_kernel_1sm(
                                 "void",
                                 "tl::attention_1sm_epilogue_tma_store_32x128",
                                 output_desc,
-                                T.access_ptr(O0_shared, "r", offset=cw * 32 * dim),
+                                T.access_ptr(O0_shared[cw * 32, 0], "r"),
                                 bx * kq2_total_M + cw * 32,
                                 by,
                                 bz,
@@ -1037,7 +1038,7 @@ def attention_kernel_1sm(
                                 "void",
                                 "tl::attention_1sm_epilogue_tma_store_32x128",
                                 output_desc,
-                                T.access_ptr(O1_shared, "r", offset=cw * 32 * dim),
+                                T.access_ptr(O1_shared[cw * 32, 0], "r"),
                                 bx * kq2_total_M + kq2_block_M + cw * 32,
                                 by,
                                 bz,

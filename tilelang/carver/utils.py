@@ -1,6 +1,6 @@
 from __future__ import annotations
-from tvm import tir, IRModule
-from tvm.tir import PrimFunc
+from tvm import tirx, IRModule
+from tvm.tirx import PrimFunc
 from .arch import TileDevice
 from .roller.policy import TensorCorePolicy, DefaultPolicy
 from .roller.hint import Hint
@@ -27,10 +27,10 @@ def get_rasterization_code(pannel_width: int = 8) -> str:
 
 
 def get_roller_hints_from_func(
-    func_or_module: tir.PrimFunc | IRModule, arch: TileDevice, topk: int = 10, tensorcore_only: bool = False, allow_gemv: bool = False
+    func_or_module: tirx.PrimFunc | IRModule, arch: TileDevice, topk: int = 10, tensorcore_only: bool = False, allow_gemv: bool = False
 ) -> list[Hint] | None:
     func = None
-    if isinstance(func_or_module, tir.PrimFunc):
+    if isinstance(func_or_module, tirx.PrimFunc):
         func = func_or_module
     elif isinstance(func_or_module, IRModule):
         func = retrieve_func_from_module(func_or_module)

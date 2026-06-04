@@ -137,7 +137,7 @@ tcgen05_tmem_normalize_store_row_bf16_x16_addr(bfloat16_t *epi_stage,
 """
 
 
-@tilelang.jit(out_idx=[3], pass_configs=PASS_CFG, target="cuda -arch=sm_100")
+@tilelang.jit(out_idx=[3], pass_configs=PASS_CFG, target={"kind": "cuda", "arch": "sm_100"})
 def attention_kernel_2sm_d128(
     batch: int,
     heads: int,
@@ -1264,7 +1264,7 @@ tcgen05_tmem_normalize_store_row_bf16_x16_d256_addr(
 """
 
 
-@tilelang.jit(out_idx=[3], pass_configs=PASS_CFG, target="cuda -arch=sm_100")
+@tilelang.jit(out_idx=[3], pass_configs=PASS_CFG, target={"kind": "cuda", "arch": "sm_100"})
 def attention_kernel_2sm_d256(
     batch: int,
     heads: int,

@@ -2,7 +2,37 @@ from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
-from tvm import tir
+
+
+def _collect_set_max_nreg(stmt):
+    calls = []
+
+    def _visit(node):
+        if not isinstance(node, tvm.tirx.Call):
+            return
+        op = getattr(node, "op", None)
+        if getattr(op, "name", None) != "tl.set_max_nreg":
+            return
+        calls.append(tuple(int(arg.value) for arg in node.args))
+
+    tvm.tirx.stmt_functor.post_order_visit(stmt, _visit)
+    return calls
+
+
+def _find_if_with_set_max_nreg(func, then_call, else_call):
+    matches = []
+
+    def _visit(node):
+        if not isinstance(node, tvm.tirx.IfThenElse) or node.else_case is None:
+            return
+        then_calls = _collect_set_max_nreg(node.then_case)
+        else_calls = _collect_set_max_nreg(node.else_case)
+        if then_call in then_calls and else_call in else_calls:
+            matches.append(node)
+
+    tvm.tirx.stmt_functor.post_order_visit(func.body, _visit)
+    assert matches, f"Expected branch with then {then_call} and else {else_call}"
+    return matches[0]
 
 
 def test_inject_set_max_nreg():
@@ -14,7 +44,7 @@ def test_inject_set_max_nreg():
         by = T.launch_thread("blockIdx.y", 8)
         v = T.launch_thread("threadIdx.x", 128)
 
-        with T.block(""):
+        with T.sblock(""):
             T.reads(A[by * 64, 0:512], B[0:512, bx * 64])
             T.writes()
 
@@ -41,7 +71,7 @@ def test_inject_set_max_nreg():
                             k * 32,
                             by * 64,
                         )
-                    T.evaluate(tir.Call("handle", "tir.ptx_arrive_barrier", [mbars[k % 3]]))
+                    T.ptx_arrive_barrier(mbars[k % 3])
             else:
                 # Consumer branch - should have set_max_nreg(240, 1)
                 for k in range(16):
@@ -53,24 +83,15 @@ def test_inject_set_max_nreg():
                         T.tvm_access_ptr(T.type_annotation(T.float16), B_shared.data, k % 3 * 2048, 2048, 1),
                         T.tvm_access_ptr(T.type_annotation(T.float32), C_local.data, 0, 32, 3),
                     )
-                    T.evaluate(tir.Call("handle", "tir.ptx_arrive_barrier", [mbars[k % 3 + 3]]))
+                    T.ptx_arrive_barrier(mbars[k % 3 + 3])
 
     # Apply the InjectSetMaxNReg pass
     func = before
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = tl.transform.AnnotateWarpGroupRegAlloc()(mod)
-    mod = tir.transform.LowerOpaqueBlock()(mod)
+    mod = tl.cuda.transform.AnnotateWarpGroupRegAlloc()(mod)
+    mod = tl.transform.LowerOpaqueBlock()(mod)
 
-    script = mod.script()
-    producer_branch = script.index("if v_2 >= 128:")
-    consumer_branch = script.index("else:", producer_branch)
-    reg_dealloc = script.index("T.set_max_nreg(24, 0)")
-    reg_alloc = script.index("T.set_max_nreg(240, 1)")
-
-    assert producer_branch < reg_dealloc < consumer_branch
-    assert consumer_branch < reg_alloc
-
-    print("InjectSetMaxNReg test passed!")
+    _find_if_with_set_max_nreg(mod["main"], (24, 0), (240, 1))
 
 
 def test_raw_set_max_nreg_keeps_legacy_behavior_with_simt_copy():
@@ -81,7 +102,7 @@ def test_raw_set_max_nreg_keeps_legacy_behavior_with_simt_copy():
         bx = T.launch_thread("blockIdx.x", 8)
         v = T.launch_thread("threadIdx.x", 256)
 
-        with T.block(""):
+        with T.sblock(""):
             T.reads(A[bx * 64, 0:64])
             T.writes(B[bx * 64, 0:64])
 
@@ -96,13 +117,13 @@ def test_raw_set_max_nreg_keeps_legacy_behavior_with_simt_copy():
                 B[bx * 64, v] = A_shared[v]
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tl.transform.AnnotateWarpGroupRegAlloc()(mod)
-    mod = tir.transform.LowerOpaqueBlock()(mod)
+    mod = tl.cuda.transform.AnnotateWarpGroupRegAlloc()(mod)
+    mod = tl.transform.LowerOpaqueBlock()(mod)
 
-    script = mod.script()
-    assert script.count("T.set_max_nreg(80, 0)") == 1
-    assert script.count("T.set_max_nreg(240, 1)") == 1
-    assert script.count("T.set_max_nreg(") == 2
+    calls = _collect_set_max_nreg(mod["main"].body)
+    assert calls.count((80, 0)) == 1
+    assert calls.count((240, 1)) == 1
+    assert len(calls) == 2
 
 
 def test_inject_set_max_nreg_no_set_max_nreg():
@@ -113,7 +134,7 @@ def test_inject_set_max_nreg_no_set_max_nreg():
         bx = T.launch_thread("blockIdx.x", 8)
         v = T.launch_thread("threadIdx.x", 128)
 
-        with T.block(""):
+        with T.sblock(""):
             T.reads(A[bx * 64, 0:64])
             T.writes()
 
@@ -133,13 +154,10 @@ def test_inject_set_max_nreg_no_set_max_nreg():
     # Apply the InjectSetMaxNReg pass
     func = before_no_set_max_nreg
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = tl.transform.AnnotateWarpGroupRegAlloc()(mod)
-    mod = tir.transform.LowerOpaqueBlock()(mod)
+    mod = tl.cuda.transform.AnnotateWarpGroupRegAlloc()(mod)
+    mod = tl.transform.LowerOpaqueBlock()(mod)
 
-    script = mod.script()
-    assert "T.set_max_nreg(" not in script
-
-    print("InjectSetMaxNReg with no_set_max_nreg test passed!")
+    assert not _collect_set_max_nreg(mod["main"].body)
 
 
 @tilelang.testing.requires_cuda_compute_version(9, 0)
@@ -183,7 +201,7 @@ def test_auto_ws_reg_hints_lower_into_matching_role_scopes():
     finally:
         tl.enable_cache()
 
-    producer_branch = src.index("if (128 <= ((int)threadIdx.x)) {")
+    producer_branch = src.index("if (((int)threadIdx.x) < 128) {")
     consumer_branch = src.index("} else {", producer_branch)
     reg_dealloc = src.index("tl::warpgroup_reg_dealloc<40>();")
     reg_alloc = src.index("tl::warpgroup_reg_alloc<232>();")
@@ -195,5 +213,4 @@ def test_auto_ws_reg_hints_lower_into_matching_role_scopes():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_inject_set_max_nreg()
+    tilelang.testing.main()

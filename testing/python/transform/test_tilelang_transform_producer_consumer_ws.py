@@ -114,6 +114,96 @@ def prelude_tma_wait_sink(block=64, iters=2, dtype="float16", threads=128):
     return main
 
 
+def prelude_tma_bound_index(block=64, iters=2, dtype="float16", threads=128):
+    """Pre-loop TMA load uses a scalar bind that is also consumed in the WS branch."""
+
+    @T.prim_func
+    def main(
+        Q: T.Buffer((iters * block, block), dtype),
+        K_in: T.Buffer((iters * block, block), dtype),
+        idx: T.Buffer((1,), "int32"),
+        O: T.Buffer((block, block), dtype),
+    ):
+        with T.Kernel(1, threads=threads) as _:
+            K_shared = T.alloc_shared((block, block), dtype)
+            q = T.alloc_shared((block, block), dtype)
+            acc = T.alloc_fragment((block, block), "float32")
+            out = T.alloc_fragment((block, block), "float32")
+
+            start = idx[0]
+            T.copy(K_in[start, 0], K_shared)
+            T.clear(out)
+            for ko in T.Pipelined(iters, num_stages=2):
+                T.copy(Q[ko * block, 0], q)
+                T.clear(acc)
+                T.gemm(K_shared, q, acc, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                for i, j in T.Parallel(block, block):
+                    out[i, j] += acc[i, j] + T.cast(start, "float32")
+
+            T.copy(out, O[0, 0])
+
+    return main
+
+
+def guarded_prelude_tma_postloop_scalar(block=64, iters=2, dtype="float16", threads=128):
+    """Nested guarded pipeline whose post-loop consumer uses a prelude scalar."""
+
+    @T.prim_func
+    def main(
+        Q: T.Buffer((iters * block * 2, block), dtype),
+        K: T.Buffer((iters * block * 2, block), dtype),
+        LSE: T.Buffer((block * 2, block), dtype),
+        idx: T.Buffer((1,), "int32"),
+        O: T.Buffer((block, block), dtype),
+    ):
+        with T.Kernel(1, threads=threads) as _:
+            Q_shared = T.alloc_shared((block, block), dtype)
+            K_shared = T.alloc_shared((block, block), dtype)
+            LSE_shared = T.alloc_shared((block, block), dtype)
+            acc = T.alloc_fragment((block, block), "float32")
+
+            base = idx[0]
+            T.clear(acc)
+            if base < block:
+                T.copy(LSE[base, 0], LSE_shared)
+                for ko in T.Pipelined(iters, num_stages=2):
+                    T.copy(Q[ko * block + base, 0], Q_shared)
+                    T.copy(K[ko * block + base, 0], K_shared)
+                    T.gemm(Q_shared, K_shared, acc, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                for i, j in T.Parallel(block, block):
+                    O[i, j] = acc[i, j] + LSE_shared[i, j] + T.cast(base, "float32")
+
+    return main
+
+
+def explicit_cp_async_wait_position(iters=4, block=16, cp_elems=8, dtype="float16", threads=128):
+    """A mixed TMA + explicit cp.async pipeline with cp.async consumed first."""
+
+    @T.prim_func
+    def main(
+        A: T.Buffer((iters, block), dtype),
+        B: T.Buffer((iters, cp_elems), dtype),
+        B_out: T.Buffer((iters,), dtype),
+        A_out: T.Buffer((iters, block), dtype),
+    ):
+        with T.Kernel(1, threads=threads) as _:
+            A_shared = T.alloc_shared((block,), dtype)
+            B_shared = T.alloc_shared((cp_elems,), dtype)
+
+            for ko in T.Pipelined(iters, num_stages=2):
+                T.ptx_cp_async(
+                    T.access_ptr(B_shared[0], "w", cp_elems),
+                    T.access_ptr(B[ko, 0], "r", cp_elems),
+                    cp_elems,
+                )
+                T.copy(A[ko, 0], A_shared)
+                B_out[ko] = B_shared[0]
+                for i in T.Parallel(block):
+                    A_out[ko, i] = A_shared[i]
+
+    return main
+
+
 def grouped_gemm_padded_pipelined(
     batch_sizes,
     K,
@@ -215,6 +305,26 @@ def _compile_grouped_gemm_ws(batch_sizes=(63, 77), K=128, N=128, block_M=64, blo
     func = grouped_gemm_padded_pipelined(batch_sizes, K, N, block_M, block_N, block_K)
     kernel = _compile_tvm_ffi(func, pass_configs, out_idx=[2])
     return kernel, batch_sizes
+
+
+def test_tiled_ws_places_producer_in_first_warp_group():
+    """Auto-WS should put the producer in the low threadIdx.x partition."""
+
+    func = matmul_pipelined(64, 64, 64, 64, 32, 64, num_stages=2).with_attr("global_symbol", "main")
+    mod = tvm.IRModule.from_expr(func)
+    target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
+    script = mod["main"].script()
+
+    assert "tl_tiled_ws_applied" in script
+    branch = _find_after(script, "if tx < 128:")
+    producer_tma = _find_after(script, "T.tma_copy", branch)
+    consumer_branch = _find_after(script, "else:", producer_tma)
+    consumer_gemm = _find_after(script, "T.gemm", consumer_branch)
+
+    assert branch < producer_tma < consumer_branch < consumer_gemm
+    assert "if 128 <= tx:" not in script
 
 
 def _run_grouped_gemm_ws(kernel, batch_sizes, K=128, N=128, block_M=64, dtype="float16"):
@@ -424,11 +534,69 @@ def test_tiled_ws_sinks_preloop_tma_waits_into_consumer():
 
     k_load = src.find("tl::tma_load(K_in_desc")
     v_load = src.find("tl::tma_load(V_in_desc")
-    branch = src.find("if (128 <= ((int)threadIdx.x))")
+    branch = src.find("if (((int)threadIdx.x) < 128)")
     first_wait = src.find(".wait(0)")
 
     assert min(k_load, v_load, branch, first_wait) >= 0
     assert k_load < v_load < branch < first_wait
+
+
+def test_tiled_ws_explicit_cp_async_wait_precedes_first_consumer_read():
+    """Explicit cp.async destinations must pull the consumer wait earlier."""
+
+    func = explicit_cp_async_wait_position().with_attr("global_symbol", "main")
+    mod = tvm.IRModule.from_expr(func)
+    target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
+    script = mod["main"].script()
+
+    assert "tl_tiled_ws_applied" in script
+    assert "T.ptx_cp_async" in script
+    assert "T.tma_copy" in script
+
+    consumer_branch = _find_after(script, "else:")
+    wait = _find_after(script, "T.mbarrier_wait_parity", consumer_branch)
+    cp_async_read = _find_after(script, "B_out[ko] = B_shared[0]", consumer_branch)
+    tma_read = _find_after(script, "A_out[ko, i] = A_shared", consumer_branch)
+
+    assert wait < cp_async_read < tma_read
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_keeps_preloop_tma_scalar_bind_shared():
+    """Scalar binds used by common pre-loop TMA copies must stay before WS."""
+
+    pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
+    kernel = _compile_tvm_ffi(prelude_tma_bound_index(), pass_configs, out_idx=[3])
+    src = kernel.get_kernel_source()
+
+    start_bind = _find_after(src, "int start =")
+    k_load = _find_after(src, "tl::tma_load(K_in_desc")
+    branch = _find_after(src, "if (((int)threadIdx.x) < 128)")
+
+    assert start_bind < k_load < branch
+
+
+def test_tiled_ws_propagates_nested_postloop_liveness_to_outer_prelude():
+    """Outer scalar binds used by nested post-loop consumers must stay shared."""
+
+    func = guarded_prelude_tma_postloop_scalar().with_attr("global_symbol", "main")
+    mod = tvm.IRModule.from_expr(func)
+    target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
+    script = mod["main"].script()
+
+    assert "tl_tiled_ws_applied" in script
+    shared_base = _find_after(script, "base: T.int32 = idx[0]")
+    guard = _find_after(script, "if base < 64:")
+    branch = _find_after(script, 'T.attr([128, 128], "kWarpSpecializationScope", 0)')
+    producer_base = script.find("base = idx[0]", branch)
+
+    assert shared_base < guard < branch
+    assert producer_base < 0
 
 
 @tilelang.testing.requires_cuda
@@ -438,7 +606,7 @@ def test_tiled_ws_keeps_shared_prelude_local_vars_for_grouped_gemm():
     kernel, batch_sizes = _compile_grouped_gemm_ws()
     src = kernel.get_kernel_source()
 
-    branch = _find_after(src, "if (256 <= ((int)threadIdx.x))")
+    branch = _find_after(src, "if (((int)threadIdx.x) < 128)")
     cur_batch_idx_loop = _find_after(src, "for (int i = 0; i < 2; ++i)")
     m_start = _find_after(src, "int m_start =")
     actual_rows = _find_after(src, "int actual_rows =")
@@ -462,11 +630,13 @@ def test_tiled_ws_does_not_clone_local_var_into_producer_branch():
 
 
 if __name__ == "__main__":
+    test_tiled_ws_places_producer_in_first_warp_group()
     test_tiled_ws_stage1_dynamic_loop_start()
     test_tiled_ws_correctness()
     test_tiled_ws_stage3()
     test_tiled_ws_swizzled_layout_allows_ws()
     test_tiled_ws_incompatible_layout_blocks_ws()
     test_tiled_ws_sinks_preloop_tma_waits_into_consumer()
+    test_tiled_ws_explicit_cp_async_wait_precedes_first_consumer_read()
     test_tiled_ws_keeps_shared_prelude_local_vars_for_grouped_gemm()
     test_tiled_ws_does_not_clone_local_var_into_producer_branch()

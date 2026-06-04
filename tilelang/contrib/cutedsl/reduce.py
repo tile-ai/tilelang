@@ -18,6 +18,8 @@ __all__ = [
     "bar_sync_ptx",
     "CumSum1D",
     "CumSum2D",
+    "CumMax1D",
+    "CumMax2D",
     "NamedBarrier",
     "AllReduce",
 ]
@@ -240,10 +242,41 @@ def _warp_prefix_sum_reverse(val, lane, MASK=0xFFFFFFFF):
     return val
 
 
+def _warp_prefix_max_forward(val, lane, MASK=0xFFFFFFFF):
+    """Warp-level inclusive prefix max (forward)."""
+    n = __shfl_up_sync(MASK, val, 1)
+    val = cutlass.select_(lane >= 1, max(val, n), val)
+    n = __shfl_up_sync(MASK, val, 2)
+    val = cutlass.select_(lane >= 2, max(val, n), val)
+    n = __shfl_up_sync(MASK, val, 4)
+    val = cutlass.select_(lane >= 4, max(val, n), val)
+    n = __shfl_up_sync(MASK, val, 8)
+    val = cutlass.select_(lane >= 8, max(val, n), val)
+    n = __shfl_up_sync(MASK, val, 16)
+    val = cutlass.select_(lane >= 16, max(val, n), val)
+    return val
+
+
+def _warp_prefix_max_reverse(val, lane, MASK=0xFFFFFFFF):
+    """Warp-level inclusive prefix max (reverse)."""
+    SEG = 32
+    n = __shfl_down_sync(MASK, val, 1)
+    val = cutlass.select_(lane < SEG - 1, max(val, n), val)
+    n = __shfl_down_sync(MASK, val, 2)
+    val = cutlass.select_(lane < SEG - 2, max(val, n), val)
+    n = __shfl_down_sync(MASK, val, 4)
+    val = cutlass.select_(lane < SEG - 4, max(val, n), val)
+    n = __shfl_down_sync(MASK, val, 8)
+    val = cutlass.select_(lane < SEG - 8, max(val, n), val)
+    n = __shfl_down_sync(MASK, val, 16)
+    val = cutlass.select_(lane < SEG - 16, max(val, n), val)
+    return val
+
+
 class CumSum1D:
     """
     1D cumulative sum operation.
-    Based on tl::CumSum1D from reduce.h
+    Based on tl::CumSum1D from scan.h
 
     Template params:
         threads: Number of threads
@@ -291,7 +324,7 @@ class CumSum1D:
 class CumSum2D:
     """
     2D cumulative sum operation.
-    Based on tl::CumSum2D from reduce.h
+    Based on tl::CumSum2D from scan.h
 
     Template params:
         threads: Number of threads (must be power of 2, 32-1024)
@@ -372,6 +405,101 @@ class CumSum2D:
                 val = _warp_prefix_sum_forward(val, lane, MASK)
 
             # Store result - only valid threads write
+            if row_in_col < H and col < W:
+                dst_tensor[idx] = val
+
+
+class CumMax1D:
+    """
+    1D cumulative maximum operation.
+    Based on tl::CumMax1D from scan.h
+    """
+
+    def __init__(self, threads: cutlass.Constexpr[int], reverse: cutlass.Constexpr[bool]):
+        self.threads = threads
+        self.reverse = reverse
+        self.SEG = 32
+
+    @cute.jit
+    def run(self, src: cute.Pointer, dst: cute.Pointer, N):
+        MASK = 0xFFFFFFFF
+        tidx, _, _ = cute.arch.thread_idx()
+        lane = tidx % self.SEG
+
+        src_tensor = cute.make_tensor(src, (N,))
+        dst_tensor = cute.make_tensor(dst, (N,))
+
+        val = src_tensor[0]
+        if tidx < N:
+            val = src_tensor[tidx]
+
+        if self.reverse:
+            val = _warp_prefix_max_reverse(val, lane, MASK)
+        else:
+            val = _warp_prefix_max_forward(val, lane, MASK)
+
+        if tidx < N:
+            dst_tensor[tidx] = val
+
+
+class CumMax2D:
+    """
+    2D cumulative maximum operation.
+    Based on tl::CumMax2D from scan.h
+    """
+
+    def __init__(self, threads: cutlass.Constexpr[int], dim: cutlass.Constexpr[int], reverse: cutlass.Constexpr[bool]):
+        self.threads = threads
+        self.dim = dim
+        self.reverse = reverse
+        self.SEG = 32
+
+    @cute.jit
+    def run(self, src: cute.Pointer, dst: cute.Pointer, H, W):
+        MASK = 0xFFFFFFFF
+        tidx, _, _ = cute.arch.thread_idx()
+        lane = tidx % self.SEG
+        row = tidx // self.SEG
+
+        src_tensor = cute.make_tensor(src, (H * W,))
+        dst_tensor = cute.make_tensor(dst, (H * W,))
+
+        if self.dim == 1:
+            col = lane
+            idx = row * W + col
+
+            val = Float32(0.0)
+            if row < H:
+                val = src_tensor[row * W]
+            if row < H and col < W:
+                val = src_tensor[idx]
+
+            if self.reverse:
+                val = _warp_prefix_max_reverse(val, lane, MASK)
+            else:
+                val = _warp_prefix_max_forward(val, lane, MASK)
+
+            if row < H and col < W:
+                dst_tensor[idx] = val
+        else:
+            assert H <= 32, (
+                f"CumMax2D dim=0 only supports H <= 32 (got H={H}). Use dim=1 for row-wise cummax or implement multi-warp column iteration."
+            )
+            col = row
+            row_in_col = lane
+            idx = row_in_col * W + col
+
+            val = Float32(0.0)
+            if col < W:
+                val = src_tensor[col]
+            if row_in_col < H and col < W:
+                val = src_tensor[idx]
+
+            if self.reverse:
+                val = _warp_prefix_max_reverse(val, lane, MASK)
+            else:
+                val = _warp_prefix_max_forward(val, lane, MASK)
+
             if row_in_col < H and col < W:
                 dst_tensor[idx] = val
 

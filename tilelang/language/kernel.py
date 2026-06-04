@@ -3,10 +3,11 @@
 from __future__ import annotations
 from collections import deque
 import os
-from tvm import tir
-from tvm.tir import Var
-from tvm.script.ir_builder.tir import evaluate as T_evaluate
-from tvm.script.ir_builder.tir.frame import TIRFrame, BlockFrame
+from tvm import tirx
+from tvm.tirx import Var
+from tvm.tirx.script.builder import evaluate as T_evaluate
+from tvm.tirx.script.builder.frame import TIRFrame
+from tvm.tirx.script.builder.frame import SBlockFrame
 from tvm.ffi import register_object
 from tilelang import _ffi_api
 from tilelang.jit.exceptions import JITNoBuilderError
@@ -146,7 +147,7 @@ class KernelLaunchFrame(TIRFrame):
         _get_current_stack().push(self)
 
         last_block_frame = self.frames[-1]
-        assert isinstance(last_block_frame, BlockFrame), f"Last frame must be a block frame, got {last_block_frame}"
+        assert isinstance(last_block_frame, SBlockFrame), f"Last frame must be a block frame, got {last_block_frame}"
 
         maybe_cpu = last_block_frame.annotations.get("tilelang.is_cpu_kernel_frame", False)
 
@@ -264,7 +265,7 @@ class KernelLaunchFrame(TIRFrame):
 
 
 def Kernel(
-    *blocks: int | tir.PrimExpr,
+    *blocks: int | tirx.PrimExpr,
     threads: int | list[int] | tuple | None = None,
     cluster_dims: int | tuple[int, int, int] | list[int] | None = None,
     is_cpu: bool = False,
@@ -369,7 +370,7 @@ def _load_cuda_source(source_code_or_path: str | os.PathLike[str]) -> str:
 
 
 def CUDASourceCodeKernel(
-    *blocks: int | tir.PrimExpr,
+    *blocks: int | tirx.PrimExpr,
     threads: int | list[int] | tuple | None = None,
     source_code_or_path: str | os.PathLike[str],
     entry_name: str = "main_kernel",
@@ -432,7 +433,7 @@ def CUDASourceCodeKernel(
     with _ffi_api.KernelLaunch(blocks, threads, attrs):
         # Keep the launch frame alive until SplitHostDevice can lift the
         # external CUDA source pragma onto the device PrimFunc.
-        T_evaluate(tir.call_extern("int32", entry_name))
+        T_evaluate(tirx.call_extern("int32", entry_name))
 
 
 def get_thread_binding(dim: int = 0) -> Var:

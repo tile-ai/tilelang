@@ -29,7 +29,7 @@ PASS_CFG = {
 }
 
 
-@tilelang.jit(out_idx=[0], pass_configs=PASS_CFG, target="cuda -arch=sm_100")
+@tilelang.jit(out_idx=[0], pass_configs=PASS_CFG, target={"kind": "cuda", "arch": "sm_100"})
 def cross_wg_tmem_kernel(M: int = 64, N: int = 128, K: int = 64):
     accum_dtype = T.float32
     dtype = T.bfloat16
