@@ -165,6 +165,7 @@ struct CUDARuntimeAPI {
   decltype(&::cudaGetDeviceCount) cudaGetDeviceCount_{nullptr};
   decltype(&::cudaDeviceGetAttribute) cudaDeviceGetAttribute_{nullptr};
   decltype(&::cudaGetDeviceProperties) cudaGetDeviceProperties_{nullptr};
+  decltype(&::cudaDeviceReset) cudaDeviceReset_{nullptr};
 
   decltype(&::cudaMemGetInfo) cudaMemGetInfo_{nullptr};
   decltype(&::cudaMalloc) cudaMalloc_{nullptr};
@@ -249,6 +250,7 @@ CUDARuntimeAPI CreateCUDARuntimeAPI() {
   LOOKUP_REQUIRED(cudaGetDeviceCount)
   LOOKUP_REQUIRED(cudaDeviceGetAttribute)
   LOOKUP_REQUIRED(cudaGetDeviceProperties)
+  LOOKUP_REQUIRED(cudaDeviceReset)
   LOOKUP_REQUIRED(cudaMemGetInfo)
   LOOKUP_REQUIRED(cudaMalloc)
   LOOKUP_REQUIRED(cudaFree)
@@ -609,6 +611,14 @@ TILELANG_CUDART_STUB_API cudaError_t cudaDeviceSynchronize(void) {
     return MissingLibraryError();
   }
   return api->cudaDeviceSynchronize_();
+}
+
+TILELANG_CUDART_STUB_API cudaError_t cudaDeviceReset(void) {
+  auto *api = GetCUDARuntimeAPI();
+  if (api->cudaDeviceReset_ == nullptr) {
+    return MissingLibraryError();
+  }
+  return api->cudaDeviceReset_();
 }
 
 TILELANG_CUDART_STUB_API cudaError_t

@@ -69,6 +69,13 @@ if(TILELANG_USE_CUDA_STUBS)
     WINDOWS_EXPORT_ALL_SYMBOLS ON
   )
 
+  # Make TVM link against our CUDA Driver stub instead of the real libcuda.
+  # TVM's FindCUDA helper stores its driver-library probe in
+  # `_CUDA_CUDA_LIBRARY` before copying it to `CUDA_CUDA_LIBRARY`, so seed both
+  # variables before TVM is configured.
+  set(_CUDA_CUDA_LIBRARY cuda_stub CACHE STRING "CUDA driver library to link against" FORCE)
+  set(CUDA_CUDA_LIBRARY cuda_stub CACHE STRING "CUDA driver library to link against" FORCE)
+
   # ============================================================================
   # CUDA Runtime Stub Library (libcudart_stub.so / cudart_stub.dll)
   # ============================================================================
