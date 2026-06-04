@@ -90,6 +90,12 @@ def make_tcgen05mma_swizzled_layout(buffer: BufferLikeType, continuity: int = No
     return _ffi_api.make_tcgen05mma_swizzled_layout(buf, continuity, k_major)
 
 
+def make_sm120_fp4_smem_layout(buffer: BufferLikeType):
+    """Return the CUTLASS-compatible SM120 FP4 K-major shared layout."""
+    buf, _, _ = _get_buffer_info(buffer)
+    return _ffi_api.make_sm120_fp4_smem_layout(buf)
+
+
 # swizzle 128B
 def make_full_bank_swizzled_layout(buffer: BufferLikeType):
     """
