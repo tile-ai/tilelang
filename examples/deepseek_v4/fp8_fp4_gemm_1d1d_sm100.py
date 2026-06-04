@@ -2,7 +2,6 @@
 
 import argparse
 from typing import Tuple
-from functools import lru_cache
 import torch
 import tilelang
 import tilelang.language as T
@@ -14,19 +13,21 @@ def _ceil_div(x: int, y: int) -> int:
     return (x + y - 1) // y
 
 
-def _make_fp8_fp4_gemm_1d1d_prim_func(
+@tilelang.jit(out_idx=[4])
+def fp8_fp4_gemm_1d1d_persistent(
     M: int,
     N: int,
     K: int,
-    block_M: int,
-    block_N: int,
-    block_K: int,
     out_dtype,
-    accum_dtype,
-    num_stages: int,
-    sf_granularity_k: int = 128,
-    store_block_N: int = 64,
 ):
+    block_M = 128
+    block_N = 256
+    block_K = 128
+    accum_dtype = T.float32
+    num_stages = 6
+    sf_granularity_k = 128
+    store_block_N = 64
+
     assert block_M == 128
     assert block_N == 256
     assert block_K == 128
@@ -57,6 +58,8 @@ def _make_fp8_fp4_gemm_1d1d_prim_func(
             cta_id = T.block_rank_in_cluster()
             T.assume(cta_id < 2)
 
+            # Use T.float4_e2m1_unpacked for A_shared, rather than T.float4_e2m1fn as a hint
+            # for TileLang to use desired layout for blockscaled tcgen5mma.
             A_shared = T.alloc_shared((num_stages, block_M, block_K), T.float4_e2m1_unpacked)
             B_shared = T.alloc_shared((num_stages, half_N, block_K), T.float8_e4m3fn)
             SFA_shared = T.alloc_shared((num_stages, block_M), "uint32")
@@ -142,7 +145,7 @@ def _make_fp8_fp4_gemm_1d1d_prim_func(
                                 transpose_B=True,
                                 mbar=consumed[stage],
                                 clear_accum=k == 0,
-                                k_start=k * block_K,
+                                k_start=k * block_K,  # global K offset (to help compiler infer sf_id)
                                 sf_a_granularity_k=sf_granularity_k,
                                 sf_b_granularity_k=sf_granularity_k,
                                 use_2cta=True,
@@ -184,32 +187,6 @@ def _make_fp8_fp4_gemm_1d1d_prim_func(
                             T.copy(C_shared, D[bx * block_M, by * block_N + i * store_block_N])
 
     return main
-
-
-@lru_cache(maxsize=None)
-def _compile_fp8_fp4_gemm_1d1d(
-    M: int,
-    N: int,
-    K: int,
-    out_dtype,
-):
-    program = _make_fp8_fp4_gemm_1d1d_prim_func(
-        M,
-        N,
-        K,
-        128,
-        256,
-        128,
-        out_dtype,
-        T.float32,
-        6,
-        128,
-    )
-    # NOTE(wt): Work around the @tilelang.jit wrapper's current packed-FP4 ABI check:
-    # T.float4_e2m1fn logical [M, K] inputs are passed as int8 [M, K / 2].
-    # See https://github.com/tile-ai/tilelang/issues/2292.
-
-    return tilelang.compile(program, out_idx=[4])
 
 
 def _align_up(x: int, y: int) -> int:
@@ -373,7 +350,7 @@ def run_fp8_fp4_gemm_1d1d(
     assert m % (2 * block_M) == 0, f"M={m} must be divisible by {2 * block_M}"
     assert n % (32 * block_N) == 0, f"N={n} must be divisible by {32 * block_N}"
     assert k % (2 * block_K) == 0, f"K={k} must be divisible by {2 * block_K}"
-    kernel = _compile_fp8_fp4_gemm_1d1d(m, n, k, out_dtype)
+    kernel = fp8_fp4_gemm_1d1d_persistent(m, n, k, out_dtype)
     return kernel(a_fp4, b_fp8, sfa, sfb)
 
 
@@ -408,7 +385,7 @@ def benchmark(M=512, N=8192, K=8192, seed=0, warmup=25, rep=100):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--M", type=int, default=1024)
+    parser.add_argument("--M", type=int, default=8192)
     parser.add_argument("--N", type=int, default=8192)
     parser.add_argument("--K", type=int, default=8192)
     parser.add_argument("--seed", type=int, default=0)

@@ -1042,18 +1042,31 @@ class TirTemplate(Generic[_P, _T]):
         if self.matcher is None:
             return ()
         result = []
+        buffers = {param.name: buffer for param, buffer in self.prim_func.buffer_map.items()}
         for k, ty, i, name in self.matcher.values():
             if name in kwargs:
                 result.append(kwargs.get(name))
             elif k in kwargs:
                 if ty == "shape":
-                    result.append(kwargs[k].shape[i])
+                    value = kwargs[k]
+                    shape = value.shape[i]
+                    buffer = buffers[k]
+                    if not isinstance(value, Buffer) and i == len(buffer.shape) - 1 and buffer.dtype.bits * buffer.dtype.lanes < 8:
+                        # Runtime tensors store sub-byte dtypes packed; constexprs need the logical extent.
+                        runtime_dtype = dt.dtype(value.dtype)
+                        shape = shape * runtime_dtype.bits * runtime_dtype.lanes // (buffer.dtype.bits * buffer.dtype.lanes)
+                    result.append(shape)
                 elif ty == "stride":
                     v = kwargs[k]
                     if isinstance(v, Buffer):
                         result.append(v.strides[i])
                     else:
-                        result.append(kwargs[k].stride()[i])
+                        stride = v.stride()[i]
+                        buffer = buffers[k]
+                        if i != len(buffer.strides) - 1 and buffer.dtype.bits * buffer.dtype.lanes < 8:
+                            runtime_dtype = dt.dtype(v.dtype)
+                            stride = stride * runtime_dtype.bits * runtime_dtype.lanes // (buffer.dtype.bits * buffer.dtype.lanes)
+                        result.append(stride)
             else:
                 raise ValueError(
                     f"Cannot find value for constexpr variable `{name}`\n"
