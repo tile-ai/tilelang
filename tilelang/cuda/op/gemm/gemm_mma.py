@@ -20,6 +20,12 @@ GEMM_INST_MMA = "cuda.mma"
 class GemmMMA(GemmBase):
     intrin_emitter_cls = TensorCoreIntrinEmitter
 
+    @property
+    def allow_f8f6f4_mixed_dtypes(self) -> bool:
+        # Let the MMA implementation accept its A8W4 FP8/FP4 path while keeping
+        # the exact supported pairs checked in _validate_mma_dtypes().
+        return True
+
     @staticmethod
     def _is_fp8_e4m3(dtype: str) -> bool:
         return str(dtype) in {"float8_e4m3", "float8_e4m3fn", "float8_e4m3fnuz"}
@@ -64,8 +70,8 @@ class GemmMMA(GemmBase):
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         emitter = self.intrin_emitter_cls(
-            a_dtype=self.A.dtype,
-            b_dtype=self.B.dtype,
+            a_dtype=self.a_dtype,
+            b_dtype=self.b_dtype,
             accum_dtype=self.accum_dtype,
             a_transposed=self.trans_A,
             b_transposed=self.trans_B,
@@ -124,10 +130,12 @@ class GemmMMA(GemmBase):
         mbar_phase_expr: tirx.PrimExpr | None = None,
     ):
         thread_nums = thread_bounds.extent
-        mma_emitter = self._make_mma_emitter(target, thread_nums, thread_var=thread_var)
+        # Emitter lane/warp math uses zero-based ids within the current thread bounds.
+        local_thread_var = thread_var - thread_bounds.min
+        mma_emitter = self._make_mma_emitter(target, thread_nums, thread_var=local_thread_var)
 
-        a_dtype = self.A.dtype
-        b_dtype = self.B.dtype
+        a_dtype = self.a_dtype
+        b_dtype = self.b_dtype
         a_fragment_dtype = self._fragment_carrier_dtype(a_dtype)
         b_fragment_dtype = self._fragment_carrier_dtype(b_dtype)
         warp_rows = mma_emitter.warp_rows

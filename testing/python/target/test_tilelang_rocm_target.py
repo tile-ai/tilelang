@@ -1,5 +1,7 @@
 import pytest
 
+
+import tilelang.testing
 from tilelang import tvm as tvm
 from tvm.target import Target
 
@@ -92,6 +94,7 @@ def test_carver_routes_rdna_without_instantiating_device(monkeypatch):
     assert target_get_mcpu(arch[1]) == "gfx1151"
 
 
+@tilelang.testing.requires_rocm
 def test_carver_rejects_unsupported_rdna_generations(monkeypatch):
     import tilelang.carver.arch as arch_mod
 
@@ -103,6 +106,7 @@ def test_carver_rejects_unsupported_rdna_generations(monkeypatch):
         arch_mod.get_arch(_hip_target("gfx1200"))
 
 
+@tilelang.testing.requires_rocm
 def test_rdna_device_model_rejects_gfx12_before_device_probe():
     from tilelang.carver.arch.rdna import RDNA
 
@@ -110,6 +114,7 @@ def test_rdna_device_model_rejects_gfx12_before_device_probe():
         RDNA(_hip_target("gfx1200"))
 
 
+@tilelang.testing.requires_rocm
 def test_rdna_tensor_instruction_lookup_is_generation_aware():
     from tilelang.carver.arch.rdna import RDNA
 
@@ -135,3 +140,7 @@ def test_rdna_internal_tuning_config_allows_mcpu_overrides():
     assert gfx1151.preferred_warps_per_block == 4
     assert gfx1151.pipeline_stage == 2
     assert gfx1151.reduction_step_for_dtype_bits(16) == 32
+
+
+if __name__ == "__main__":
+    tilelang.testing.main()

@@ -45,6 +45,14 @@ struct fp4_e2_t {
   TL_DEVICE operator __half() const { return __half(float(*this)); }
 };
 
+// Tag for tcgen05 unpacked FP4 shared-memory layout. The hardware atom carries
+// 16 4-bit payload values in the low 64 bits of a 128-bit aligned region.
+// See:
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#tcgen05-packing-formats-mxf8f6f4-smem
+struct float4_e2m1_unpacked_t {
+  uint8_t __x;
+};
+
 class fp4_e2_2_t {
 public:
   __nv_fp4x2_storage_t __x;

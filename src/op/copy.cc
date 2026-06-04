@@ -448,6 +448,13 @@ PrimExpr CopyNode::MakePredicate(arith::Analyzer *analyzer,
 
 // Constructs a SIMT-style nested loop that implements the copy.
 For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
+  if (IsFP4UnpackLoad(src, dst)) {
+    LOG(FATAL) << "SIMT copy from packed global float4_e2m1fn to unpacked "
+               << "shared float4_e2m1_unpacked is not supported; use "
+               << "T.tma_copy() for FP4 unpack loads (src=" << src->name
+               << ", dst=" << dst->name << ").";
+  }
+
   Array<IterVar> loop_vars = MakeIterVars();
   bool is_scalar = loop_vars.empty();
 

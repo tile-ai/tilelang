@@ -136,10 +136,7 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
     node->sfbRegion_ = NormalizeToBufferRegion(args[20]);
   }
   if (args.size() > 21) {
-    node->sfAId_ = args[21].as<PrimExpr>().value();
-  }
-  if (args.size() > 22) {
-    node->sfBId_ = args[22].as<PrimExpr>().value();
+    node->sfKStart_ = args[21].as<PrimExpr>().value();
   }
   node->annotations_ = annotations;
   data_ = std::move(node);

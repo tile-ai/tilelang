@@ -89,7 +89,7 @@ static TL_DEVICE void InclusiveScanLine(const T *__restrict__ src,
 template <class Reducer, int threads, bool reverse = false>
 struct InclusiveScan1D {
   static_assert(threads == 1024 or threads == 512 or threads == 256 or
-                threads == 128 or threads == 64);
+                threads == 128 or threads == 64 or threads == 32);
   template <typename T, int SEG = 64>
   static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
                             int N) {
@@ -97,12 +97,22 @@ struct InclusiveScan1D {
       return;
     InclusiveScanLine<Reducer, reverse, T, SEG>(src, dst, N, 1);
   }
+  template <typename T>
+  static TL_DEVICE void run_auto(const T *__restrict__ src, T *__restrict__ dst,
+                                 int N) {
+    const int wavefront_size = __builtin_amdgcn_wavefrontsize();
+    if (wavefront_size == 32 && threads >= 32) {
+      run<T, 32>(src, dst, N);
+    } else if (threads >= 64) {
+      run<T, 64>(src, dst, N);
+    }
+  }
 };
 
 template <class Reducer, int threads, int Axis = 0, bool reverse = false>
 struct InclusiveScan2D {
   static_assert(threads == 1024 or threads == 512 or threads == 256 or
-                threads == 128 or threads == 64);
+                threads == 128 or threads == 64 or threads == 32);
   static_assert(Axis == 0 or Axis == 1);
   template <typename T, int SEG = 64>
   static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
@@ -130,6 +140,16 @@ struct InclusiveScan2D {
           return;
         InclusiveScanLine<Reducer, reverse, T, SEG>(src + col, dst + col, H, W);
       }
+    }
+  }
+  template <typename T>
+  static TL_DEVICE void run_auto(const T *__restrict__ src, T *__restrict__ dst,
+                                 int H, int W) {
+    const int wavefront_size = __builtin_amdgcn_wavefrontsize();
+    if (wavefront_size == 32 && threads >= 32) {
+      run<T, 32>(src, dst, H, W);
+    } else if (threads >= 64) {
+      run<T, 64>(src, dst, H, W);
     }
   }
 };

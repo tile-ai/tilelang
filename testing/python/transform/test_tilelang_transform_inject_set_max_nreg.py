@@ -201,7 +201,7 @@ def test_auto_ws_reg_hints_lower_into_matching_role_scopes():
     finally:
         tl.enable_cache()
 
-    producer_branch = src.index("if (128 <= ((int)threadIdx.x)) {")
+    producer_branch = src.index("if (((int)threadIdx.x) < 128) {")
     consumer_branch = src.index("} else {", producer_branch)
     reg_dealloc = src.index("tl::warpgroup_reg_dealloc<40>();")
     reg_alloc = src.index("tl::warpgroup_reg_alloc<232>();")
