@@ -283,6 +283,7 @@ Layout makeWgmmaSwizzledLayout(const Buffer &buffer, int continuity = -1,
                                bool k_inner = true);
 Layout makeTcgen05mmaSwizzledLayout(const Buffer &buffer, int continuity = -1,
                                     bool k_inner = true);
+Layout makeSm120Fp4SmemLayout(const Buffer &buffer);
 Layout makeFullBankSwizzleLayout(const Buffer &buffer);
 Layout makeHalfBankSwizzleLayout(const Buffer &buffer);
 Layout makeQuarterBankSwizzleLayout(const Buffer &buffer);

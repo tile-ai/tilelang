@@ -122,6 +122,7 @@ from .builtin import ds_read_tr16_b64 as ds_read_tr16_b64  # noqa: F401
 from .builtin import ds_read_tr8_b64 as ds_read_tr8_b64  # noqa: F401
 from .builtin import pack_b16 as pack_b16  # noqa: F401
 from .builtin import ldg32 as ldg32  # noqa: F401
+from .builtin import lds32 as lds32  # noqa: F401
 from .builtin import ldg64 as ldg64  # noqa: F401
 from .builtin import ldg128 as ldg128  # noqa: F401
 from .builtin import ldg256 as ldg256  # noqa: F401
@@ -144,6 +145,7 @@ from .symbolics import dynamic, symbolic  # noqa: F401
 from .annotations import (  # noqa: F401
     use_swizzle,
     annotate_layout,
+    annotate_layout_view,
     annotate_safe_value,
     annotate_l2_hit_ratio,
     annotate_restrict_buffers,

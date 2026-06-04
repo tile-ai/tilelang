@@ -724,6 +724,11 @@ TIR_DEFINE_TL_BUILTIN(__ffs).set_num_inputs(1).set_attr<TCallEffectKind>(
 TIR_DEFINE_TL_BUILTIN(ldg32).set_num_inputs(-1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 
+// lds32(address, predicate(optional)) -> 32-bit value
+// Shared memory load with 32-bit vector width.
+TIR_DEFINE_TL_BUILTIN(lds32).set_num_inputs(-1).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
 // ldg64(address, predicate(optional)) -> 64-bit value
 // Global memory load with 64-bit vector width
 TIR_DEFINE_TL_BUILTIN(ldg64).set_num_inputs(-1).set_attr<TCallEffectKind>(

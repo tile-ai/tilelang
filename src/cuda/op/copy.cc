@@ -5,6 +5,7 @@
 
 #include "op/copy.h"
 #include "support/check.h"
+#include <tvm/ffi/dtype.h>
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
@@ -51,6 +52,148 @@ int TMAPayloadElementBits(DataType dtype) {
     return 4;
   }
   return dtype.bits();
+}
+
+int TMATransactionElementBits(DataType dtype) {
+  return TMAPayloadElementBits(dtype);
+}
+
+PrimExpr BufferBaseAddressWithElemOffset(const Buffer &buffer) {
+  PrimExpr base = buffer->data;
+  if (buffer->elem_offset.defined() && !is_zero(buffer->elem_offset)) {
+    PrimExpr byte_offset =
+        buffer->elem_offset *
+        IntImm(buffer->elem_offset.dtype(), buffer->dtype.bytes());
+    base = Call(DataType::Handle(), builtin::handle_add_byte_offset(),
+                {base, byte_offset});
+  }
+  return base;
+}
+
+PrimExpr RowMajorOffset(const Array<PrimExpr> &indices,
+                        const Array<PrimExpr> &shape) {
+  ICHECK_EQ(indices.size(), shape.size())
+      << "indices/shape rank mismatch: " << indices.size() << " vs. "
+      << shape.size();
+  PrimExpr offset = Integer(0);
+  PrimExpr stride = Integer(1);
+  for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i) {
+    offset += indices[i] * stride;
+    stride *= shape[i];
+  }
+  return offset;
+}
+
+PrimExpr AddByteOffset(PrimExpr base, PrimExpr byte_offset) {
+  if (is_zero(byte_offset)) {
+    return base;
+  }
+  return Call(DataType::Handle(), builtin::handle_add_byte_offset(),
+              {std::move(base), std::move(byte_offset)});
+}
+
+PrimExpr SharedTmaAccessPtr(const Buffer &buffer, int access_mask,
+                            PrimExpr elem_offset, PrimExpr extent) {
+  if (buffer->dtype.is_float4_e2m1_unpacked()) {
+    // float4_e2m1_unpacked is backed by one byte per FP4 element in SMEM.
+    // Buffer::access_ptr would use the logical FP4 pointer type and halve the
+    // element offset, which points later TMA stages at the wrong byte address.
+    PrimExpr byte_offset = cast(DataType::Int(64), elem_offset);
+    return AddByteOffset(BufferBaseAddressWithElemOffset(buffer), byte_offset);
+  }
+  return buffer.access_ptr(access_mask, DataType::Handle(), 1, elem_offset,
+                           extent);
+}
+
+std::vector<PrimExpr> BufferStridesInOriginalOrder(const Buffer &buffer) {
+  std::vector<PrimExpr> strides;
+  strides.reserve(buffer->shape.size());
+  if (!buffer->strides.empty()) {
+    for (const PrimExpr &stride : buffer->strides) {
+      strides.push_back(stride);
+    }
+    return strides;
+  }
+
+  PrimExpr stride = Integer(1);
+  for (int i = static_cast<int>(buffer->shape.size()) - 1; i >= 0; --i) {
+    strides.insert(strides.begin(), stride);
+    stride *= buffer->shape[i];
+  }
+  return strides;
+}
+
+struct ProjectedTmaGlobalView {
+  Array<PrimExpr> shape;
+  Array<PrimExpr> stride;
+  Array<PrimExpr> coords;
+  Array<PrimExpr> box;
+  PrimExpr base_elem_offset;
+  std::vector<int> original_axes;
+};
+
+ProjectedTmaGlobalView
+ProjectGlobalTmaView(const Buffer &buffer, const Array<Range> &ranges,
+                     const std::vector<PrimExpr> &strides,
+                     arith::Analyzer *analyzer) {
+  ICHECK_EQ(buffer->shape.size(), ranges.size())
+      << "ProjectGlobalTmaView: buffer/range rank mismatch for "
+      << buffer->name;
+  ICHECK_EQ(buffer->shape.size(), strides.size())
+      << "ProjectGlobalTmaView: buffer/stride rank mismatch for "
+      << buffer->name;
+
+  const int ndim = static_cast<int>(ranges.size());
+  ICHECK_GT(ndim, 0);
+  std::vector<bool> keep(ndim, false);
+  bool has_non_unit_extent = false;
+  for (int i = 0; i < ndim; ++i) {
+    if (!analyzer->CanProveEqual(ranges[i]->extent, 1)) {
+      keep[i] = true;
+      has_non_unit_extent = true;
+    }
+  }
+  if (!has_non_unit_extent) {
+    keep[ndim - 1] = true;
+  }
+
+  // TMA's innermost descriptor dimension has implicit unit stride. If all
+  // non-unit axes are outside a fixed innermost axis, keep the fixed inner axes
+  // in the descriptor instead of folding them away.
+  int fastest_kept = -1;
+  for (int i = ndim - 1; i >= 0; --i) {
+    if (keep[i]) {
+      fastest_kept = i;
+      break;
+    }
+  }
+  ICHECK_GE(fastest_kept, 0);
+  if (!analyzer->CanProveEqual(strides[fastest_kept], 1)) {
+    for (int i = fastest_kept + 1; i < ndim; ++i) {
+      keep[i] = true;
+    }
+  }
+
+  ProjectedTmaGlobalView view;
+  view.base_elem_offset = Integer(0);
+  for (int i = 0; i < ndim; ++i) {
+    // The tensor-map descriptor is created outside the device loop nest. Only
+    // compile-time fixed coordinates can be folded into its base address;
+    // dynamic fixed coordinates must stay as descriptor coordinates.
+    bool can_fold_fixed_axis = ranges[i]->min.as<IntImmNode>() != nullptr;
+    if (keep[i] || !can_fold_fixed_axis) {
+      view.shape.push_back(buffer->shape[i]);
+      view.stride.push_back(strides[i]);
+      view.coords.push_back(ranges[i]->min);
+      view.box.push_back(ranges[i]->extent);
+      view.original_axes.push_back(i);
+    } else {
+      view.base_elem_offset += ranges[i]->min * strides[i];
+    }
+  }
+  ICHECK_GE(view.shape.size(), 1);
+  ICHECK_LE(view.shape.size(), 5);
+  return view;
 }
 
 PrimExpr TMABytesFromElements(PrimExpr elements, int bits) {
@@ -205,6 +348,42 @@ bool GetIsAsyncCopy(const CopyNode &op) {
 
 bool GetNoImplicitAsyncCommitWait(const CopyNode &op) {
   return GetBoolAnnotation(op, attr::kAsyncCopyNoImplicitCommitWait);
+}
+
+bool HasPreferInstruction(const CopyNode &op, const char *instruction) {
+  if (auto val = op.annotations.Get("prefer_instruction")) {
+    auto str = val->as<StringImmNode>();
+    ICHECK(str)
+        << "T.copy prefer_instruction annotation must be a string, but got "
+        << val.value().GetTypeKey();
+    return str->value == instruction;
+  }
+  return false;
+}
+
+DataType ParseTmaElementDType(std::string dtype) {
+  // Reuse TVM's dtype parser so TMA annotations accept the same spelling as
+  // Buffer dtypes. Keep the previous non-standard alias for compatibility.
+  if (dtype == "float8_e5m2fn") {
+    dtype = "float8_e5m2";
+  }
+  DataType parsed(ffi::StringToDLDataType(dtype));
+  ICHECK(parsed.is_scalar())
+      << "T.tma_copy tma_element_dtype must be scalar, but got " << parsed;
+  return parsed;
+}
+
+DataType GetTmaElementDType(const CopyNode &op, DataType default_dtype) {
+  if (auto val = op.annotations.Get("tma_element_dtype")) {
+    auto str = val->as<StringImmNode>();
+    ICHECK(str) << "T.tma_copy tma_element_dtype annotation must be a string, "
+                   "but got "
+                << val.value().GetTypeKey();
+    DataType dtype = ParseTmaElementDType(str->value);
+    to_CUtensorMapDataType(dtype);
+    return dtype;
+  }
+  return default_dtype;
 }
 
 PrimExpr GetLeaderScopeThreads(const CopyNode &op, const LowerArgs &T) {
@@ -502,7 +681,9 @@ LayoutMap Copy::InferLayout(const CopyNode &op, const LayoutInferArgs &T,
   }
   if (copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore ||
       copy_inst == CopyInst::kBulkLoad1D ||
-      copy_inst == CopyInst::kBulkStore1D) {
+      copy_inst == CopyInst::kBulkStore1D ||
+      copy_inst == CopyInst::kBulkLoadGather4 ||
+      copy_inst == CopyInst::kBulkStoreScatter4) {
     return InferBulkLayout(op, T, level, copy_inst);
   }
 
@@ -597,10 +778,14 @@ LayoutMap Copy::InferBulkLayout(const CopyNode &op, const LayoutInferArgs &T,
 
   bool is_tma_1d =
       copy_inst == CopyInst::kBulkLoad1D || copy_inst == CopyInst::kBulkStore1D;
-  bool is_load =
-      copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkLoad1D;
-  bool is_store =
-      copy_inst == CopyInst::kBulkStore || copy_inst == CopyInst::kBulkStore1D;
+  bool is_gather_scatter = copy_inst == CopyInst::kBulkLoadGather4 ||
+                           copy_inst == CopyInst::kBulkStoreScatter4;
+  bool is_load = copy_inst == CopyInst::kBulkLoad ||
+                 copy_inst == CopyInst::kBulkLoad1D ||
+                 copy_inst == CopyInst::kBulkLoadGather4;
+  bool is_store = copy_inst == CopyInst::kBulkStore ||
+                  copy_inst == CopyInst::kBulkStore1D ||
+                  copy_inst == CopyInst::kBulkStoreScatter4;
   Buffer shared_tensor = is_load ? op.dst : op.src;
   Array<Range> shared_range = is_load ? op.dst_range : op.src_range;
 
@@ -623,6 +808,11 @@ LayoutMap Copy::InferBulkLayout(const CopyNode &op, const LayoutInferArgs &T,
                            thread_extent, T.thread_bounds, result_map);
     CollectFragmentLayouts(range->extent, T.bind_var_to_expr, T.layout_map,
                            thread_extent, T.thread_bounds, result_map);
+  }
+
+  if (is_gather_scatter &&
+      IsFP4PackedToUnpackedStorageCopy(op.src->dtype, op.dst->dtype)) {
+    return result_map;
   }
 
   if (is_tma_1d) {
@@ -1006,17 +1196,24 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &T,
   ICHECK(copy_inst == CopyInst::kLDSM || copy_inst == CopyInst::kSTSM)
       << "Invalid copy inst " << static_cast<int>(copy_inst);
   bool is_ldmatrix = copy_inst == CopyInst::kLDSM;
+  const char *instruction = is_ldmatrix ? "ldsm" : "stsm";
+  bool strict_matrix_copy = HasPreferInstruction(op, instruction);
+  auto fallback = [&](const std::string &reason) -> Stmt {
+    ICHECK(!strict_matrix_copy) << "T.copy prefer_instruction=\"" << instruction
+                                << "\" could not be honored: " << reason;
+    return LowerNormal(op, T, analyzer);
+  };
 
   Array<IterVar> loop_vars = op.MakeIterVars();
   if (loop_vars.size() < 2) {
-    return LowerNormal(op, T, analyzer);
+    return fallback("matrix copy lowering requires at least two copy axes.");
   }
   for (const auto &iv : loop_vars)
     analyzer->Bind(iv->var, iv->dom);
   PrimExpr src_predicate = op.MakePredicate(analyzer, loop_vars, src->shape, 0);
   PrimExpr dst_predicate = op.MakePredicate(analyzer, loop_vars, dst->shape, 1);
   if (src_predicate.defined() || dst_predicate.defined()) {
-    return LowerNormal(op, T, analyzer);
+    return fallback("matrix copy lowering does not support predicates.");
   }
 
   Buffer shared_tensor = is_ldmatrix ? src : dst;
@@ -1031,7 +1228,7 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &T,
     }
   }
   if (!is_full_range) {
-    return LowerNormal(op, T, analyzer);
+    return fallback("local fragment copy region is not a full-range copy.");
   }
 
   Array<PrimExpr> local_indices =
@@ -1041,7 +1238,7 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &T,
       local_layout->Forward(local_indices);
   local_tensor = T.buffer_remap[local_tensor];
   if (local_layout->OutputDim() != 1) {
-    return LowerNormal(op, T, analyzer);
+    return fallback("local fragment layout is not one-dimensional.");
   }
 
   Array<PrimExpr> shared_indices =
@@ -1068,21 +1265,23 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &T,
                                  row_var->dom->extent, 2, analyzer)) {
     is_transposed = true;
   } else {
-    return LowerNormal(op, T, analyzer);
+    return fallback(
+        "local fragment layout is incompatible with 8x8 matrix copy.");
   }
   if (shared_tensor->dtype.bytes() != 2) {
-    return LowerNormal(op, T, analyzer);
+    return fallback("shared tensor dtype is not 16-bit.");
   }
   PrimExpr flattened_indice = shared_tensor.OffsetOf(shared_indices).back();
   if (!IndicesCanVectorize(flattened_indice, loop_vars.back()->var,
                            loop_vars.back()->dom->extent, 8, analyzer)) {
-    return LowerNormal(op, T, analyzer);
+    return fallback(
+        "shared tensor address is not vectorizable for matrix copy.");
   }
 
   for (size_t i = 0; i < dst_range.size(); i++) {
     if (!is_zero(dst_range[i]->min) ||
         !analyzer->CanProveEqual(dst_range[i]->extent, dst->shape[i]))
-      return LowerNormal(op, T, analyzer);
+      return fallback("destination range is not a full tensor range.");
   }
 
   PrimExpr extent = local_tensor->shape[0];
@@ -1124,7 +1323,7 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &T,
 
   if (is_ldmatrix) {
     if (local_tensor->dtype != shared_tensor->dtype) {
-      return LowerNormal(op, T, analyzer);
+      return fallback("ldmatrix requires matching shared and fragment dtypes.");
     }
     PrimExpr local_addr =
         Call(DataType::Handle(), tl::access_ptr(),
@@ -1388,41 +1587,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   Array<PrimExpr> shared_indices;
   for (auto r : shared_range)
     shared_indices.push_back(r->min);
-  std::vector<PrimExpr> shared_strides;
-  PrimExpr shared_stride = 1;
-  for (size_t i = 0; i < shared_tensor->shape.size(); i++) {
-    auto s = shared_tensor->shape[shared_tensor->shape.size() - i - 1];
-    shared_strides.insert(shared_strides.begin(), shared_stride);
-    shared_stride *= s;
-  }
-
-  Array<PrimExpr> global_indices;
-  for (auto r : global_range) {
-    global_indices.push_back(r->min);
-  }
-  std::vector<PrimExpr> global_strides;
-  PrimExpr global_stride = 1;
-  for (size_t i = 0; i < global_tensor->shape.size(); i++) {
-    auto s = global_tensor->shape[global_tensor->shape.size() - i - 1];
-    global_strides.insert(global_strides.begin(), global_stride);
-    global_stride *= s;
-  }
-
-  ICHECK(shared_strides.size() == shared_indices.size())
-      << "shared_strides.size() != shared_indices.size()"
-      << shared_strides.size() << " " << shared_indices.size();
-  PrimExpr shared_offset = 0;
-  for (size_t i = 0; i < shared_indices.size(); i++) {
-    shared_offset += shared_indices[i] * shared_strides[i];
-  }
-  PrimExpr global_offset = 0;
-  for (size_t i = 0; i < global_indices.size(); i++) {
-    global_offset += global_indices[i] * global_strides[i];
-  }
-
-  TMADesc desc;
-  desc.rank = global_tensor->shape.size();
-  ICHECK(desc.rank >= 1 && desc.rank <= 5) << desc.rank;
+  PrimExpr shared_offset = RowMajorOffset(shared_indices, shared_tensor->shape);
 
   ICHECK(
       IsValidTMADtypePair(is_load, global_tensor->dtype, shared_tensor->dtype))
@@ -1430,26 +1595,29 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
       << shared_tensor->name << " with incompatible data type "
       << global_tensor->dtype << " and " << shared_tensor->dtype;
 
+  DataType tma_element_dtype = GetTmaElementDType(op, global_tensor->dtype);
+  const bool fp4_packed_to_byte_smem =
+      is_load &&
+      IsFP4PackedToByteStorageCopy(tma_element_dtype, shared_tensor->dtype);
+  std::vector<PrimExpr> global_strides =
+      BufferStridesInOriginalOrder(global_tensor);
+  ProjectedTmaGlobalView global_view = ProjectGlobalTmaView(
+      global_tensor, global_range, global_strides, analyzer);
+
+  TMADesc desc;
+  desc.rank = global_view.shape.size();
+  ICHECK(desc.rank >= 1 && desc.rank <= 5) << desc.rank;
   desc.data_type =
-      TensorMapDataTypeForTMA(global_tensor->dtype, shared_tensor->dtype);
-  desc.global_addr = global_tensor->data;
-  desc.global_shape = ReverseArray(global_tensor->shape);
-  Array<PrimExpr> global_coords =
-      ReverseArray(global_range.Map([](Range r) { return r->min; }));
-  if (!global_tensor->strides.empty()) {
-    desc.global_stride = ReverseArray(global_tensor->strides);
-  } else {
-    PrimExpr stride = 1;
-    desc.global_stride.reserve(desc.rank);
-    for (size_t i = 0; i < desc.rank; i++) {
-      desc.global_stride.push_back(stride);
-      stride *= desc.global_shape[i];
-    }
-  }
+      TensorMapDataTypeForTMA(tma_element_dtype, shared_tensor->dtype);
+  desc.global_addr = AddByteOffset(
+      BufferBaseAddressWithElemOffset(global_tensor),
+      TMABytesFromElements(global_view.base_elem_offset, tma_element_dtype));
+  desc.global_shape = ReverseArray(global_view.shape);
+  Array<PrimExpr> global_coords = ReverseArray(global_view.coords);
+  desc.global_stride = ReverseArray(global_view.stride);
   ICHECK(is_one(desc.global_stride[0])) << desc.global_stride;
-  desc.global_stride = desc.global_stride.Map([&](PrimExpr e) {
-    return TMAGlobalBytesFromElements(e, global_tensor->dtype);
-  });
+  desc.global_stride = desc.global_stride.Map(
+      [&](PrimExpr e) { return TMABytesFromElements(e, tma_element_dtype); });
   for (size_t i{1}; i < desc.global_stride.size(); i++) {
     auto stride = desc.global_stride[i].as<IntImmNode>();
     if (stride != nullptr) {
@@ -1461,31 +1629,41 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     }
   }
 
-  auto s_range_idx = 0;
-  for (size_t i = 0; i < global_range.size(); i++) {
-    auto g_range = global_range[i];
-    if (is_one(g_range->extent)) {
+  size_t s_range_idx = 0;
+  for (size_t i = 0; i < global_view.box.size(); ++i) {
+    PrimExpr g_extent = global_view.box[i];
+    if (analyzer->CanProveEqual(g_extent, 1)) {
       continue;
     }
-    while (is_one(shared_range[s_range_idx]->extent) &&
-           s_range_idx < shared_range.size()) {
+    while (s_range_idx < shared_range.size() &&
+           analyzer->CanProveEqual(shared_range[s_range_idx]->extent, 1)) {
       s_range_idx++;
     }
     if (s_range_idx >= shared_range.size()) {
-      LOG(FATAL) << "TMA bulk copy cannot support a global range of "
-                 << global_range << ", shared_range " << shared_range;
+      LOG(FATAL) << "TMA bulk copy cannot support projected global box "
+                 << global_view.box << ", shared_range " << shared_range;
     }
     auto s_range = shared_range[s_range_idx];
     s_range_idx++;
 
-    ICHECK(StructuralEqual()(g_range->extent, s_range->extent))
-        << global_tensor->name << "[" << i << "] is illegal, "
-        << global_tensor->name << "[" << i << "] = " << g_range->extent << ", "
-        << shared_tensor->name << "[" << s_range_idx
-        << "] = " << s_range->extent;
+    bool extent_match = StructuralEqual()(g_extent, s_range->extent);
+    if (!extent_match && fp4_packed_to_byte_smem &&
+        global_view.original_axes[i] + 1 ==
+            static_cast<int>(global_tensor->shape.size())) {
+      PrimExpr global_bytes = TMABytesFromElements(g_extent, tma_element_dtype);
+      PrimExpr shared_bytes =
+          TMABytesFromElements(s_range->extent, shared_tensor->dtype);
+      extent_match = analyzer->CanProveEqual(global_bytes, shared_bytes);
+    }
+
+    ICHECK(extent_match) << "Projected TMA extent from " << global_tensor->name
+                         << "[" << global_view.original_axes[i]
+                         << "] is illegal, " << global_tensor->name << "["
+                         << global_view.original_axes[i] << "] = " << g_extent
+                         << ", " << shared_tensor->name << "["
+                         << (s_range_idx - 1) << "] = " << s_range->extent;
   }
-  desc.smem_box =
-      ReverseArray(global_range.Map([](Range r) { return r->extent; }));
+  desc.smem_box = ReverseArray(global_view.box);
 
   desc.smem_stride = Array<PrimExpr>(desc.rank, PrimExpr(1));
   desc.l2_promotion = static_cast<int>(CU_TENSOR_MAP_L2_PROMOTION_L2_128B);
@@ -1499,6 +1677,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
         << "shared_tensor: " << shared_tensor->name
         << " not found in buffer_remap";
     shared_tensor = T.buffer_remap.at(shared_tensor);
+    shared_offset = RowMajorOffset(shared_layout->Forward(shared_indices),
+                                   shared_tensor->shape);
   }
   if (!shared_layout.defined()) {
     desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
@@ -1547,11 +1727,18 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     return fallback_to_normal("non-constant inner box dimension");
   }
   int instruction_dim = *inner_box_dim;
-  DataType smem_elem_dtype = shared_tensor->dtype;
-  if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
-    instruction_dim = TMAElementsForBytes(64, smem_elem_dtype);
+  if (shared_tensor->dtype.is_float4_e2m1_unpacked()) {
+    // CUDA encodes unpacked FP4 SMEM TMA as 16U4_ALIGN16B.  For this
+    // descriptor format the inner box dimension is specified in logical FP4
+    // elements and must remain 128 even when the shared-memory swizzle span is
+    // 128B.  Deriving the dimension from the swizzle byte span would produce
+    // 256 elements for CU_TENSOR_MAP_SWIZZLE_128B and incorrectly reject the
+    // same descriptor shape used by CuTe/CUTLASS.
+    instruction_dim = 128;
+  } else if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
+    instruction_dim = TMAElementsForBytes(64, tma_element_dtype);
   } else if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B)) {
-    instruction_dim = TMAElementsForBytes(128, smem_elem_dtype);
+    instruction_dim = TMAElementsForBytes(128, tma_element_dtype);
   }
   if (instruction_dim > 256) {
     ICHECK((*inner_box_dim) % 256 == 0)
@@ -1563,8 +1750,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
       << " is not divisible by instruction_dim: " << instruction_dim;
   desc.smem_box.Set(0, PrimExpr(instruction_dim));
 
-  int inner_box_dim_ =
-      TMABytesFromElements(instruction_dim, shared_tensor->dtype);
+  int inner_box_dim_ = TMABytesFromElements(instruction_dim, tma_element_dtype);
 
   struct SwizzleCheck {
     int swizzle;
@@ -1623,6 +1809,10 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   PrimExpr total_elements = 1;
   for (auto e : desc.smem_box)
     total_elements *= e;
+  PrimExpr shared_access_elements =
+      fp4_packed_to_byte_smem
+          ? TMABytesFromElements(total_elements, tma_element_dtype)
+          : total_elements;
 
   auto build_multicast_args = [&](const Array<PrimExpr> &regular_args) {
     Array<PrimExpr> mc_args;
@@ -1641,9 +1831,10 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     Var loop_var("i");
     int loop_extent = (*inner_box_dim) / instruction_dim;
 
-    PrimExpr shared_addr = shared_tensor.access_ptr(
-        is_load ? 2 : 1, DataType::Handle(), 1,
-        shared_offset + total_elements * loop_var, total_elements);
+    PrimExpr shared_addr =
+        SharedTmaAccessPtr(shared_tensor, is_load ? 2 : 1,
+                           shared_offset + shared_access_elements * loop_var,
+                           shared_access_elements);
     args.push_back(shared_addr);
     global_coords.Set(0, global_coords[0] + instruction_dim * loop_var);
     for (auto coord : global_coords)
@@ -1678,8 +1869,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
                      multicast_copy, regular_or_noop);
     }
   } else {
-    PrimExpr shared_addr = shared_tensor.access_ptr(
-        is_load ? 2 : 1, DataType::Handle(), 1, shared_offset, total_elements);
+    PrimExpr shared_addr = SharedTmaAccessPtr(
+        shared_tensor, is_load ? 2 : 1, shared_offset, shared_access_elements);
     args.push_back(shared_addr);
     for (auto coord : global_coords)
       args.push_back(coord);
@@ -1731,10 +1922,10 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     if ((*inner_box_dim) != instruction_dim) {
       int loop_extent = (*inner_box_dim) / instruction_dim;
       total_bytes = TMATransactionBytesFromElements(
-          total_elements * loop_extent, shared_tensor->dtype);
+          total_elements * loop_extent, tma_element_dtype);
     } else {
       total_bytes =
-          TMATransactionBytesFromElements(total_elements, shared_tensor->dtype);
+          TMATransactionBytesFromElements(total_elements, tma_element_dtype);
     }
 
     Stmt barrier_before_tma_stmt;
@@ -1829,7 +2020,11 @@ Stmt Copy::LowerBulkGather4(const CopyNode &op, const LowerArgs &T,
   ICHECK(shared_lead != nullptr && *shared_lead == 4)
       << "tma_gather4/scatter4 shared tile leading dim must be 4, got "
       << shared_tensor->shape[0];
-  ICHECK_EQ(global_tensor->dtype, shared_tensor->dtype);
+  ICHECK(
+      IsValidTMADtypePair(is_load, global_tensor->dtype, shared_tensor->dtype))
+      << "tma_gather4/scatter4 between buffer " << global_tensor->name
+      << " and " << shared_tensor->name << " has incompatible data type "
+      << global_tensor->dtype << " and " << shared_tensor->dtype;
 
   Array<PrimExpr> rows = GetGather4Rows(op);
   PrimExpr col = GetGather4Col(op);
@@ -1838,8 +2033,10 @@ Stmt Copy::LowerBulkGather4(const CopyNode &op, const LowerArgs &T,
 
   TMADesc desc;
   desc.rank = 2;
-  desc.data_type = to_CUtensorMapDataType(global_tensor->dtype);
-  desc.global_addr = global_tensor->data;
+  DataType tma_element_dtype = GetTmaElementDType(op, global_tensor->dtype);
+  desc.data_type =
+      TensorMapDataTypeForTMA(tma_element_dtype, shared_tensor->dtype);
+  desc.global_addr = BufferBaseAddressWithElemOffset(global_tensor);
   desc.global_shape = ReverseArray(global_tensor->shape);
 
   if (!global_tensor->strides.empty()) {
@@ -1856,7 +2053,7 @@ Stmt Copy::LowerBulkGather4(const CopyNode &op, const LowerArgs &T,
       << "tma_gather4/scatter4 requires unit innermost global stride, got "
       << desc.global_stride;
   desc.global_stride = desc.global_stride.Map([&](PrimExpr e) {
-    return TMAGlobalBytesFromElements(e, global_tensor->dtype);
+    return TMAGlobalBytesFromElements(e, tma_element_dtype);
   });
   for (size_t i = 1; i < desc.global_stride.size(); ++i) {
     if (auto stride = desc.global_stride[i].as<IntImmNode>()) {
@@ -1924,8 +2121,8 @@ Stmt Copy::LowerBulkGather4(const CopyNode &op, const LowerArgs &T,
 
   PrimExpr total_elements = 4 * K_box;
   PrimExpr smem_addr =
-      shared_tensor.access_ptr(is_load ? 2 : 1, DataType::Handle(), 1,
-                               IntImm(DataType::Int(32), 0), total_elements);
+      SharedTmaAccessPtr(shared_tensor, is_load ? 2 : 1,
+                         IntImm(DataType::Int(32), 0), total_elements);
 
   Array<PrimExpr> args;
   args.push_back(create_descriptor);
@@ -2012,10 +2209,18 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
   }
 
   PrimExpr elements = analyzer->Simplify(shared_elements);
-  PrimExpr shared_addr = shared_tensor.access_ptr(
-      is_load ? 2 : 1, DataType::Handle(), 1, shared_offset, elements);
+  PrimExpr shared_addr = SharedTmaAccessPtr(shared_tensor, is_load ? 2 : 1,
+                                            shared_offset, elements);
   PrimExpr global_addr = global_tensor.access_ptr(
       is_load ? 1 : 2, DataType::Handle(), 1, global_offset, elements);
+  DataType tma_element_dtype = GetTmaElementDType(op, global_tensor->dtype);
+  if (op.annotations.Get("tma_element_dtype")) {
+    ICHECK_EQ(TMATransactionElementBits(tma_element_dtype),
+              TMATransactionElementBits(global_tensor->dtype))
+        << "T.tma_copy tma_element_dtype changes the transaction width in "
+           "the 1D TMA path, which has no tensor-map descriptor. Use a buffer "
+           "with matching logical dtype or a multi-dimensional TMA copy.";
+  }
 
   int barrier_base_id = -1;
   PrimExpr mbar_handle;
@@ -2036,7 +2241,7 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
 
   Stmt tma_copy;
   PrimExpr total_bytes =
-      TMATransactionBytesFromElements(elements, shared_tensor->dtype);
+      TMATransactionBytesFromElements(elements, tma_element_dtype);
   if (is_load) {
     PrimExpr mbar_arg = barrier_base_id >= 0 ? mbar_handle : PrimExpr(0);
     tma_copy = Evaluate(Call(DataType::Handle(), tma_load(),
@@ -2122,7 +2327,7 @@ Stmt Im2Col::Lower(const Im2ColOpNode &op, const LowerArgs &T,
   TMAIm2ColDesc desc;
   desc.rank = src->shape.size();
   desc.data_type = to_CUtensorMapDataType(src->dtype);
-  desc.global_addr = src->data;
+  desc.global_addr = BufferBaseAddressWithElemOffset(src);
   desc.global_shape = ReverseArray(src->shape);
 
   if (!src->strides.empty()) {

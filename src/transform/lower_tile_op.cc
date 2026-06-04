@@ -737,6 +737,39 @@ private:
     return result;
   }
 
+  Call RewriteAccessPtrArg(Call call, int arg_index) {
+    PrimExpr access_ptr = call->args[arg_index];
+    Call access_ptr_call = Downcast<Call>(access_ptr);
+
+    if (access_ptr_call->op.same_as(builtin::address_of())) {
+      Optional<PrimExpr> resolved = ResolveBufferLoad(access_ptr_call->args[0]);
+      ICHECK(resolved.defined())
+          << "Invalid address_of argument for permuted layout: "
+          << access_ptr_call->args[0];
+      PrimExpr load_expr = resolved.value();
+      if (!load_expr.same_as(access_ptr_call->args[0])) {
+        auto call_node = call.CopyOnWrite();
+        call_node->args.Set(arg_index,
+                            Call(access_ptr_call->dtype, access_ptr_call->op,
+                                 {load_expr}, access_ptr_call->annotations,
+                                 access_ptr_call->span));
+        access_ptr_call = Downcast<Call>(call->args[arg_index]);
+        access_ptr = call->args[arg_index];
+      }
+    } else if (!access_ptr_call->op.same_as(builtin::tvm_access_ptr()) &&
+               !access_ptr_call->op.same_as(tl::access_ptr())) {
+      LOG(FATAL) << "Invalid access ptr for permuted layout: " << access_ptr;
+    }
+
+    auto new_access_ptr =
+        HandleAccessPtrAndOffset(access_ptr, std::nullopt, call->dtype);
+    if (new_access_ptr.rewritten) {
+      auto new_call = call.CopyOnWrite();
+      new_call->args.Set(arg_index, new_access_ptr.expr);
+    }
+    return call;
+  }
+
   Optional<PrimExpr> ResolveBufferLoad(const PrimExpr &expr) const {
     if (expr->IsInstance<BufferLoadNode>()) {
       return expr;

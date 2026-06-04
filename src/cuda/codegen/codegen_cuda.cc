@@ -32,6 +32,22 @@ using namespace ffi;
 
 namespace {
 
+constexpr const char *kPragmaUnrollFactor = "pragma_unroll_factor";
+
+IntImm GetPragmaUnrollFactorValue(const Any &value) {
+  IntImm factor = Downcast<IntImm>(value);
+  ICHECK_GT(factor->value, 0) << kPragmaUnrollFactor << " must be positive";
+  return factor;
+}
+
+Optional<IntImm>
+GetPragmaUnrollFactor(const ffi::Map<ffi::String, ffi::Any> &annotations) {
+  if (auto factor = annotations.Get(kPragmaUnrollFactor)) {
+    return GetPragmaUnrollFactorValue(factor.value());
+  }
+  return std::nullopt;
+}
+
 bool IsValidCPAsyncTransferBytes(int64_t bytes) {
   return bytes == 4 || bytes == 8 || bytes == 16;
 }
@@ -668,11 +684,16 @@ std::string CodeGenTileLangCUDA::Finish() {
 }
 
 void CodeGenTileLangCUDA::VisitStmt_(const tirx::ForNode *op) {
-  if (op->kind == tirx::ForKind::kUnrolled) {
+  Optional<IntImm> pragma_factor = GetPragmaUnrollFactor(op->annotations);
+  auto mapped_factor = unroll_factor.find(op->loop_var.get());
+  if (mapped_factor != unroll_factor.end()) {
+    pragma_factor = mapped_factor->second;
+  }
+
+  if (op->kind == tirx::ForKind::kUnrolled || pragma_factor.defined()) {
     PrintIndent();
-    if (unroll_factor.count(op->loop_var.get())) {
-      stream << "#pragma unroll "
-             << PrintExpr(unroll_factor[op->loop_var.get()]) << "\n";
+    if (pragma_factor.defined()) {
+      stream << "#pragma unroll " << PrintExpr(pragma_factor.value()) << "\n";
     } else {
       stream << "#pragma unroll\n";
     }
@@ -2211,6 +2232,26 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << ss.str();
     this->stream << ");\n";
   };
+  if (op->op.same_as(builtin::address_of())) {
+    ICHECK_EQ(op->args.size(), 1U);
+    const BufferLoadNode *load = op->args[0].as<BufferLoadNode>();
+    if (load && load->dtype.is_float4() && load->dtype.is_scalar()) {
+      ICHECK_EQ(load->indices.size(), 1U)
+          << "CodeGenTileLangCUDA only supports flat fp4 address_of.";
+      enable_fp4_ = true;
+      const VarNode *buffer_var = load->buffer->data.get();
+      std::string vid = GetVarID(buffer_var);
+      auto packed_it = fp4_packed_buffers_.find(buffer_var);
+      if (packed_it != fp4_packed_buffers_.end()) {
+        vid = packed_it->second;
+      }
+      PrimExpr packed_offset =
+          arith::Analyzer().Simplify(truncdiv(load->indices[0], 2));
+      os << "(&(((fp4_e2_2_t*)" << vid << ")[" << PrintExpr(packed_offset)
+         << "]))";
+      return;
+    }
+  }
   if (op->op.same_as(tl::max_nan()) || op->op.same_as(tl::min_nan())) {
     ICHECK_EQ(op->args.size(), 2);
     const bool is_max = op->op.same_as(tl::max_nan());
@@ -3795,6 +3836,21 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->PrintExpr(op->args[0], os);
     }
     os << ")";
+  } else if (op->op.same_as(tl::lds32())) {
+    // Explicit 32-bit shared memory load: load_shared_32(ptr) or
+    // load_shared_32_conditional(ptr, pred)
+    ICHECK(!op->args.empty())
+        << "T.lds32 expects a shared-memory pointer argument.";
+    if (op->args.size() > 1) {
+      os << "tl::load_shared_32_conditional(";
+      this->PrintExpr(op->args[0], os);
+      os << ", ";
+      this->PrintExpr(op->args[1], os);
+    } else {
+      os << "tl::load_shared_32(";
+      this->PrintExpr(op->args[0], os);
+    }
+    os << ")";
   } else if (op->op.same_as(tl::ldg64())) {
     // Explicit 64-bit global memory load: load_global_64(ptr) or
     // load_global_64_conditional(ptr, pred)
@@ -4582,10 +4638,22 @@ void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
     }
     this->VisitStmt(op->body);
     return;
-  } else if (op->attr_key == "pragma_unroll_factor") {
-    const IntImmNode *factor = op->value.as<IntImmNode>();
-    ICHECK(factor);
-    unroll_factor[op->node.as<VarNode>()] = Downcast<IntImm>(factor);
+  } else if (op->attr_key == kPragmaUnrollFactor) {
+    const auto *var = op->node.as<VarNode>();
+    ICHECK(var) << kPragmaUnrollFactor << " must annotate a loop var";
+    IntImm factor = GetPragmaUnrollFactorValue(op->value);
+    Optional<IntImm> previous = std::nullopt;
+    if (auto it = unroll_factor.find(var); it != unroll_factor.end()) {
+      previous = it->second;
+    }
+    unroll_factor[var] = factor;
+    this->VisitStmt(op->body);
+    if (previous.defined()) {
+      unroll_factor[var] = previous.value();
+    } else {
+      unroll_factor.erase(var);
+    }
+    return;
   }
 
   CodeGenC::VisitStmt_(op);
@@ -4630,6 +4698,10 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
         (alloc_dtype == DataType::Int(4) || alloc_dtype == DataType::UInt(4)) &&
         alloc_dtype.is_scalar() && scope == "local";
     if (!is_fp4_scalar_local && !is_int4_scalar_local) {
+      int bits_per_elem = alloc_dtype.bits() * alloc_dtype.lanes();
+      if (scope == "local" && bits_per_elem > 0 && bits_per_elem < 32) {
+        stream << "alignas(4) ";
+      }
       PrintStorageScope(scope, stream);
       if (is_float4_unpacked_shared) {
         stream << "uint8_t";
@@ -4673,7 +4745,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
       } else {
         if (alloc_dtype.is_float4_e2m1fn() && alloc_dtype.is_scalar()) {
           auto vid_packed = vid + "_packed";
-          stream << "fp4_e2_2_t " << vid_packed << '['
+          stream << "alignas(4) fp4_e2_2_t " << vid_packed << '['
                  << (constant_size + 1) / 2 << "];\n";
           fp4_packed_buffers_[op->buffer->data.get()] = vid_packed;
         } else {

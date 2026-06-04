@@ -536,6 +536,7 @@ private:
 
   PrimExpr VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(builtin::tvm_access_ptr()) ||
+        op->op.same_as(tl::access_ptr()) ||
         op->op.same_as(builtin::address_of())) {
       current_.depends_on_runtime = true;
       // Do not mark local-scope tvm_access_ptr loads as non-block-uniform
@@ -592,6 +593,9 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     Buffer buffer_name;
     /*! \brief The access data type */
     DataType dtype;
+    /*! \brief Lower bound of the allocation alias in bytes, if known. */
+    bool has_alias_byte_lower_bound = false;
+    PrimExpr alias_byte_lower_bound;
     /*! \brief The touched access range
      *
      * Has one IntSet for each index in the buffer being accessed.
@@ -607,6 +611,14 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
      *         (e.g., inside a TMA load) and therefore multiple writes
      *         among themselves should not force barriers between them. */
     bool is_async_copy = false;
+    /*! \brief Whether this access is part of a TMA load/store operation.
+     *
+     * TMA load completion is governed by mbarrier waits, while TMA store
+     * completion is governed by tma_store_wait. A TMA store still needs prior
+     * normal shared-memory writes from other threads to be CTA-synchronized
+     * before the leader issues the async read.
+     */
+    bool is_tma_access = false;
     /*! \brief Whether this access is part of an atomic RMW (e.g., atomic_add).
      *
      * If both sides of a dependency are atomic, we should not insert a thread
@@ -634,18 +646,22 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     return buffer_var->type_annotation.as<PointerTypeNode>() &&
            GetPtrStorageScope(buffer_var) == "shared.dyn";
   }
-  PrimExpr AliasElemOffset(Var buffer_var, DataType dtype,
-                           DataType index_dtype) const {
+  PrimExpr AliasByteOffset(Var buffer_var, DataType index_dtype) const {
     auto it = shared_memory_alias_byte_offsets_.find(buffer_var.get());
     if (it == shared_memory_alias_byte_offsets_.end()) {
       return make_const(index_dtype, 0);
     }
-    int elem_bytes = dtype.bytes() * dtype.lanes();
-    ICHECK_GT(elem_bytes, 0);
     PrimExpr byte_offset = it->second;
     if (byte_offset.dtype() != index_dtype) {
       byte_offset = Cast(index_dtype, byte_offset);
     }
+    return byte_offset;
+  }
+  PrimExpr AliasElemOffset(Var buffer_var, DataType dtype,
+                           DataType index_dtype) const {
+    int elem_bytes = dtype.bytes() * dtype.lanes();
+    ICHECK_GT(elem_bytes, 0);
+    PrimExpr byte_offset = AliasByteOffset(std::move(buffer_var), index_dtype);
     return indexdiv(byte_offset, make_const(index_dtype, elem_bytes));
   }
   PrimExpr AddAliasElemOffset(Var buffer_var, DataType dtype,
@@ -663,6 +679,72 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
                               IntImm(DataType::Int(32), index_dtype.lanes()));
     }
     return index + elem_offset;
+  }
+  DataType AccessPtrElementDType(const CallNode *op) const {
+    ICHECK(!op->args.empty());
+    const auto *type_annotation = op->args[0].as<CallNode>();
+    ICHECK(type_annotation != nullptr)
+        << "Expected tvm_access_ptr dtype argument to be a type annotation, "
+        << "but got " << op->args[0];
+    static const Op &type_annotation_op = Op::Get("tirx.type_annotation");
+    ICHECK(type_annotation->op.same_as(type_annotation_op))
+        << "Expected tvm_access_ptr dtype argument to be tirx.type_annotation, "
+        << "but got " << type_annotation->op;
+    DataType dtype = type_annotation->dtype;
+    ICHECK(!dtype.is_handle())
+        << "Expected tvm_access_ptr element dtype, but got handle";
+    return dtype;
+  }
+  void AppendAccessPtrBufferLoad(const BufferLoadNode *load,
+                                 PrimExpr elem_extent, int64_t flag) {
+    Buffer buffer = load->buffer;
+    Var buf = buffer->data;
+    buffer_data_to_buffer_.Set(GetRef<Var>(buf.get()), buffer);
+    StorageScope scope = GetScope(buf);
+    if (!Enabled(buf.get(), scope)) {
+      return;
+    }
+    ICHECK(allow_append_);
+
+    AccessEntry e{.cset = {constr_stack_}};
+    e.threads = env_threads();
+    e.dtype = load->dtype.element_of();
+    e.buffer = buf;
+    e.buffer_name = buffer;
+    e.has_alias_byte_lower_bound = true;
+    e.alias_byte_lower_bound = AliasByteOffset(buf, DataType::Int(64));
+    e.is_pointer_access = true;
+    e.is_async_copy = (tma_depth_ > 0 || cp_async_depth_ > 0);
+    e.is_tma_access = (tma_depth_ > 0);
+    e.is_atomic = (atomic_dst_ptr_depth_ > 0);
+    e.scope = scope;
+
+    ICHECK_EQ(buffer->shape.size(), load->indices.size());
+    for (size_t i = 0; i < buffer->shape.size(); ++i) {
+      PrimExpr min = AddAliasElemOffset(buf, buffer->dtype, load->indices[i]);
+      e.buffer_ranges.push_back(
+          Range::FromMinExtent(min, make_const(buffer->shape[i].dtype(), 1)));
+    }
+
+    PrimExpr linear_offset = make_const(DataType::Int(64), 0);
+    if (!load->indices.empty()) {
+      linear_offset = buffer.OffsetOf(load->indices).back();
+      linear_offset = AddAliasElemOffset(buf, buffer->dtype, linear_offset);
+    }
+    if (elem_extent.dtype() != linear_offset.dtype()) {
+      elem_extent = Cast(linear_offset.dtype(), elem_extent);
+    }
+    e.touched = {arith::IntSet::FromRange(
+        Range::FromMinExtent(linear_offset, elem_extent))};
+
+    if (flag & 1) {
+      e.type = kRead;
+      curr_stmt_.access.emplace_back(e);
+    }
+    if (flag & 2) {
+      e.type = kWrite;
+      curr_stmt_.access.emplace_back(e);
+    }
   }
   void RecordSharedMemoryAlias(const Var &alias_var, const PrimExpr &value) {
     const auto *call = value.as<CallNode>();
@@ -707,6 +789,8 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       e.buffer = buf;
       e.buffer_name = op->buffer;
       e.dtype = op->dtype.element_of();
+      e.has_alias_byte_lower_bound = true;
+      e.alias_byte_lower_bound = AliasByteOffset(buf, DataType::Int(64));
       for (const auto &index : op->indices) {
         PrimExpr physical_index =
             AddAliasElemOffset(buf, op->buffer->dtype, index);
@@ -734,6 +818,8 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       e.buffer = buf;
       e.buffer_name = op->buffer;
       e.dtype = op->value.dtype().element_of();
+      e.has_alias_byte_lower_bound = true;
+      e.alias_byte_lower_bound = AliasByteOffset(buf, DataType::Int(64));
       for (const auto &index : op->indices) {
         PrimExpr physical_index =
             AddAliasElemOffset(buf, op->buffer->dtype, index);
@@ -836,6 +922,12 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
             new_touched.push_back(arith::EvalSet(touched, relax_map));
           }
           e.touched = std::move(new_touched);
+          if (e.is_pointer_access) {
+            // buffer_ranges describe the single access_ptr statement. After
+            // loop relaxation, touched is the loop-wide byte range; keeping the
+            // per-iteration range can make disjointness proofs unsound.
+            e.buffer_ranges.clear();
+          }
         }
       }
     }
@@ -988,18 +1080,22 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
   }
 
   void VisitExpr_(const CallNode *op) final {
-    // Mark async TMA load context so that tvm_access_ptr within the call
-    // can be tagged accordingly.
-    auto is_tma_load = [&]() {
+    // Mark async TMA context so that tvm_access_ptr within the call can be
+    // tagged accordingly. TMA load/store ordering is represented by mbarrier
+    // waits and tma_store_wait, not by storage_sync.
+    auto is_tma_access = [&]() {
       if (auto opt = op->op.as<Op>()) {
         const Op &call_op = opt.value();
         return call_op.same_as(tl::tma_load()) ||
                call_op.same_as(tl::tma_load_im2col()) ||
-               call_op.same_as(tl::tma_load_multicast());
+               call_op.same_as(tl::tma_load_multicast()) ||
+               call_op.same_as(tl::tma_store()) ||
+               call_op.same_as(tl::tma_load_gather4()) ||
+               call_op.same_as(tl::tma_store_scatter4());
       }
       return false;
     }();
-    if (is_tma_load) {
+    if (is_tma_access) {
       tma_depth_++;
       for (const auto &a : op->args) {
         this->VisitExpr(a);
@@ -1084,12 +1180,17 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
           e.buffer = Downcast<Var>(buffer->data);
           e.buffer_name = buffer;
           e.buffer_ranges = buffer_ranges;
+          e.has_alias_byte_lower_bound = true;
+          e.alias_byte_lower_bound =
+              AliasByteOffset(GetRef<Var>(buffer_var), DataType::Int(64));
           for (const auto &index : load->indices) {
             PrimExpr physical_index = AddAliasElemOffset(
                 GetRef<Var>(buffer_var), buffer->dtype, index);
             e.touched.push_back(arith::IntSet::Vector(physical_index));
           }
           e.is_pointer_access = true;
+          e.is_async_copy = (tma_depth_ > 0 || cp_async_depth_ > 0);
+          e.is_tma_access = (tma_depth_ > 0);
           e.is_atomic = (atomic_dst_ptr_depth_ > 0);
           e.type = kRead;
           e.scope = scope;
@@ -1099,9 +1200,20 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       } else {
         ConstrVisitor::VisitExpr_(op);
       }
+    } else if (op->op.same_as(tl::access_ptr())) {
+      ICHECK_EQ(op->args.size(), 3U);
+      const auto *load = op->args[0].as<BufferLoadNode>();
+      const auto *flag = op->args[2].as<IntImmNode>();
+      ICHECK(load) << "tl.access_ptr base must be a BufferLoad, but got "
+                   << op->args[0];
+      ICHECK(flag) << "tl.access_ptr rw_mask must be an IntImm, but got "
+                   << op->args[2];
+      AppendAccessPtrBufferLoad(load, op->args[1], flag->value);
+      ConstrVisitor::VisitExpr_(load);
+      this->VisitExpr(op->args[1]);
     } else if (op->op.same_as(builtin::tvm_access_ptr())) {
       ICHECK_EQ(op->args.size(), 5U);
-      DataType dtype = op->args[0].dtype();
+      DataType dtype = AccessPtrElementDType(op);
       const VarNode *buffer_var = op->args[1].as<VarNode>();
       PrimExpr offset =
           AddAliasElemOffset(GetRef<Var>(buffer_var), dtype, op->args[2]);
@@ -1157,6 +1269,9 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         e.dtype = dtype;
         e.buffer = GetRef<Var>(buffer_var);
         e.buffer_ranges = buffer_ranges;
+        e.has_alias_byte_lower_bound = true;
+        e.alias_byte_lower_bound =
+            AliasByteOffset(GetRef<Var>(buffer_var), DataType::Int(64));
         e.is_pointer_access = true;
         e.is_atomic = (atomic_dst_ptr_depth_ > 0);
         e.touched = {
@@ -1165,11 +1280,13 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         if (flag->value & 1) {
           e.type = kRead;
           e.is_async_copy = (tma_depth_ > 0 || cp_async_depth_ > 0);
+          e.is_tma_access = (tma_depth_ > 0);
           curr_stmt_.access.emplace_back(e);
         }
         if (flag->value & 2) {
           e.type = kWrite;
           e.is_async_copy = (tma_depth_ > 0 || cp_async_depth_ > 0);
+          e.is_tma_access = (tma_depth_ > 0);
           curr_stmt_.access.emplace_back(e);
         }
       }
@@ -1432,49 +1549,125 @@ private:
       return;
     syncs_inserted_.insert(obj);
   }
-  bool PointerAccessIsDisjoint(const AccessEntry &lhs, const AccessEntry &rhs) {
-    if (lhs.touched.size() != 1 || rhs.touched.size() != 1) {
+  bool AccessByteRangeIsDisjoint(const AccessEntry &lhs, const AccessEntry &rhs,
+                                 const ForNode *loop) {
+    auto is_integer_index = [](DataType dtype) {
+      return dtype.is_int() || dtype.is_uint();
+    };
+    auto element_bytes = [](DataType dtype) {
+      int bytes = dtype.bytes() * dtype.lanes();
+      ICHECK_GT(bytes, 0) << "Expected concrete element dtype, but got "
+                          << dtype;
+      return bytes;
+    };
+    auto to_i64 = [](PrimExpr expr) {
+      DataType dtype = expr.dtype();
+      if (dtype != DataType::Int(64)) {
+        expr = Cast(DataType::Int(64), expr);
+      }
+      return expr;
+    };
+    auto byte_range = [&](PrimExpr elem_min, PrimExpr elem_extent,
+                          DataType dtype) {
+      PrimExpr bytes = make_const(DataType::Int(64), element_bytes(dtype));
+      PrimExpr min = to_i64(elem_min) * bytes;
+      PrimExpr max = (to_i64(elem_min + elem_extent) * bytes) -
+                     make_const(DataType::Int(64), 1);
+      return std::pair<PrimExpr, PrimExpr>{min, max};
+    };
+    auto collect_ranges = [&](const AccessEntry &access) {
+      std::vector<std::pair<PrimExpr, PrimExpr>> ranges;
+      if (access.buffer_ranges.size() == 1) {
+        const Range &range = access.buffer_ranges[0];
+        if (is_integer_index(range->min.dtype()) &&
+            is_integer_index(range->extent.dtype())) {
+          ranges.push_back(byte_range(range->min, range->extent, access.dtype));
+        }
+      }
+      if (access.touched.size() == 1) {
+        PrimExpr min = access.touched[0].min();
+        PrimExpr max = access.touched[0].max();
+        if (is_integer_index(min.dtype()) && is_integer_index(max.dtype())) {
+          PrimExpr extent = max - min + make_const(min.dtype(), 1);
+          ranges.push_back(byte_range(min, extent, access.dtype));
+        }
+      }
+      if (access.buffer_name.defined() && access.buffer_name->data.defined()) {
+        PrimExpr elems = make_const(DataType::Int(64), 1);
+        for (const PrimExpr &dim : access.buffer_name->shape) {
+          elems = elems * to_i64(dim);
+        }
+        Var data = Downcast<Var>(access.buffer_name->data);
+        PrimExpr min = AliasByteOffset(data, DataType::Int(64));
+        PrimExpr max = min +
+                       elems * make_const(DataType::Int(64),
+                                          access.buffer_name->dtype.bytes()) -
+                       make_const(DataType::Int(64), 1);
+        ranges.push_back({min, max});
+      }
+      return ranges;
+    };
+    auto lhs_ranges = collect_ranges(lhs);
+    auto rhs_ranges = collect_ranges(rhs);
+    if (lhs_ranges.empty() || rhs_ranges.empty()) {
       return false;
     }
-    ConstrSet prev_cset{lhs.cset};
-    ConstrSet curr_cset{rhs.cset};
-    arith::Analyzer analyzer;
 
-    struct ThreadVarInfo {
-      const char *name_prev;
-      const char *name_curr;
-    } thread_vars[] = {
-        {"tx1", "tx2"},
-        {"ty1", "ty2"},
-        {"tz1", "tz2"},
+    auto prove_disjoint = [&](PrimExpr lhs_min, PrimExpr lhs_max,
+                              PrimExpr rhs_min, PrimExpr rhs_max) {
+      ConstrSet prev_cset{lhs.cset};
+      ConstrSet curr_cset{rhs.cset};
+      arith::Analyzer analyzer;
+
+      if (loop != nullptr) {
+        PrimExpr step = make_const(loop->loop_var.dtype(), 1);
+        Map<Var, PrimExpr> loop_shift_sub = {
+            {loop->loop_var, loop->loop_var + step}};
+        rhs_min = Substitute(rhs_min, loop_shift_sub);
+        rhs_max = Substitute(rhs_max, loop_shift_sub);
+        curr_cset = curr_cset.Substitute(loop_shift_sub);
+      }
+
+      struct ThreadVarInfo {
+        const char *name_prev;
+        const char *name_curr;
+      } thread_vars[] = {
+          {"tx1", "tx2"},
+          {"ty1", "ty2"},
+          {"tz1", "tz2"},
+      };
+      for (unsigned idx = 0; idx != 3; ++idx) {
+        auto &info = thread_vars[idx];
+        Var old_prev_var = lhs.threads[lhs.threads.size() + idx - 3]->var;
+        Var old_curr_var = rhs.threads[rhs.threads.size() + idx - 3]->var;
+        Var prev_var(info.name_prev, old_prev_var.dtype());
+        Var curr_var(info.name_curr, old_curr_var.dtype());
+        lhs_min = Substitute(lhs_min, {{old_prev_var, prev_var}});
+        lhs_max = Substitute(lhs_max, {{old_prev_var, prev_var}});
+        prev_cset = prev_cset.Substitute({{old_prev_var, prev_var}});
+        rhs_min = Substitute(rhs_min, {{old_curr_var, curr_var}});
+        rhs_max = Substitute(rhs_max, {{old_curr_var, curr_var}});
+        curr_cset = curr_cset.Substitute({{old_curr_var, curr_var}});
+      }
+      prev_cset.Populate(analyzer);
+      curr_cset.Populate(analyzer);
+      lhs_min = analyzer.Simplify(lhs_min);
+      lhs_max = analyzer.Simplify(lhs_max);
+      rhs_min = analyzer.Simplify(rhs_min);
+      rhs_max = analyzer.Simplify(rhs_max);
+
+      return analyzer.CanProve(lhs_max < rhs_min,
+                               arith::ProofStrength::kSymbolicBound) ||
+             analyzer.CanProve(rhs_max < lhs_min,
+                               arith::ProofStrength::kSymbolicBound);
     };
-    PrimExpr lhs_min = analyzer.Simplify(lhs.touched[0].min());
-    PrimExpr lhs_max = analyzer.Simplify(lhs.touched[0].max());
-    PrimExpr rhs_min = analyzer.Simplify(rhs.touched[0].min());
-    PrimExpr rhs_max = analyzer.Simplify(rhs.touched[0].max());
-    for (unsigned idx = 0; idx != 3; ++idx) {
-      auto &info = thread_vars[idx];
-      Var old_prev_var = lhs.threads[lhs.threads.size() + idx - 3]->var;
-      Var old_curr_var = rhs.threads[rhs.threads.size() + idx - 3]->var;
-      Var prev_var(info.name_prev, old_prev_var.dtype());
-      Var curr_var(info.name_curr, old_curr_var.dtype());
-      lhs_min = Substitute(lhs_min, {{old_prev_var, prev_var}});
-      lhs_max = Substitute(lhs_max, {{old_prev_var, prev_var}});
-      prev_cset = prev_cset.Substitute({{old_prev_var, prev_var}});
-      rhs_min = Substitute(rhs_min, {{old_curr_var, curr_var}});
-      rhs_max = Substitute(rhs_max, {{old_curr_var, curr_var}});
-      curr_cset = curr_cset.Substitute({{old_curr_var, curr_var}});
-    }
-    prev_cset.Populate(analyzer);
-    curr_cset.Populate(analyzer);
-
-    if (analyzer.CanProve(lhs_max < rhs_min,
-                          arith::ProofStrength::kSymbolicBound)) {
-      return true;
-    }
-    if (analyzer.CanProve(rhs_max < lhs_min,
-                          arith::ProofStrength::kSymbolicBound)) {
-      return true;
+    for (const auto &lhs_range : lhs_ranges) {
+      for (const auto &rhs_range : rhs_ranges) {
+        if (prove_disjoint(lhs_range.first, lhs_range.second, rhs_range.first,
+                           rhs_range.second)) {
+          return true;
+        }
+      }
     }
     return false;
   }
@@ -1486,6 +1679,10 @@ private:
     output << "  Buffer: " << access.buffer << "\n";
     output << "  Buffer Name: " << access.buffer_name << "\n";
     output << "  Data Type: " << access.dtype << "\n";
+    if (access.has_alias_byte_lower_bound) {
+      output << "  Alias Byte Lower Bound: " << access.alias_byte_lower_bound
+             << "\n";
+    }
 
     std::string type_str;
     switch (access.type) {
@@ -1561,6 +1758,7 @@ private:
     output << "is_pointer_access="
            << (access.is_pointer_access ? "true" : "false");
     output << ", is_async_copy=" << (access.is_async_copy ? "true" : "false");
+    output << ", is_tma_access=" << (access.is_tma_access ? "true" : "false");
 
     LOG(WARNING) << output.str();
   }
@@ -1585,10 +1783,29 @@ private:
    */
   bool FindConflict(const AccessEntry &prev, const AccessEntry &curr,
                     const ForNode *loop) {
-    // Special case: ignore conflicts between async-copy writes (e.g., TMA
-    // loads into shared memory). Multiple async writes do not require
-    // interspersed barriers among themselves. We still respect conflicts with
-    // reads to ensure visibility before consumption.
+    // TMA load visibility is governed by the associated mbarrier wait, and TMA
+    // store completion is governed by tma_store_wait. The important exceptions
+    // are normal shared-memory writes before a TMA store reads from shared
+    // memory, and normal writes after that TMA read. The first barrier makes
+    // all producer writes visible before the leader issues the async store; the
+    // second makes all threads wait until the leader-side tma_store_wait has
+    // completed before any thread reuses the source region.
+    if (prev.is_tma_access || curr.is_tma_access) {
+      bool normal_write_before_tma_read =
+          curr.is_tma_access && curr.type == kRead && !prev.is_tma_access &&
+          prev.type == kWrite;
+      bool tma_read_before_normal_write =
+          prev.is_tma_access && prev.type == kRead && !curr.is_tma_access &&
+          curr.type == kWrite;
+      if (normal_write_before_tma_read || tma_read_before_normal_write) {
+        // Fall through to regular conflict checks below.
+      } else {
+        return false;
+      }
+    }
+
+    // Special case: ignore conflicts between async-copy writes. Multiple async
+    // writes do not require interspersed barriers among themselves.
     if (prev.type == kWrite && curr.type == kWrite && prev.is_async_copy &&
         curr.is_async_copy) {
       return false;
@@ -1605,6 +1822,41 @@ private:
       return false;
     }
 
+    auto allocation_before_alias = [&](const AccessEntry &allocation,
+                                       const AccessEntry &alias) {
+      if (!allocation.buffer_name.defined() ||
+          !allocation.buffer_name->data.defined() ||
+          !alias.has_alias_byte_lower_bound) {
+        return false;
+      }
+      auto to_i64 = [](PrimExpr expr) {
+        if (expr.dtype() != DataType::Int(64)) {
+          expr = Cast(DataType::Int(64), expr);
+        }
+        return expr;
+      };
+      PrimExpr elems = make_const(DataType::Int(64), 1);
+      for (const PrimExpr &dim : allocation.buffer_name->shape) {
+        elems = elems * to_i64(dim);
+      }
+      Var data = Downcast<Var>(allocation.buffer_name->data);
+      PrimExpr byte_min = AliasByteOffset(data, DataType::Int(64));
+      PrimExpr byte_max =
+          byte_min +
+          elems * make_const(DataType::Int(64),
+                             allocation.buffer_name->dtype.bytes()) -
+          make_const(DataType::Int(64), 1);
+      arith::Analyzer analyzer;
+      ConstrSet cset{allocation.cset};
+      cset.Populate(analyzer);
+      return analyzer.CanProve(byte_max < alias.alias_byte_lower_bound,
+                               arith::ProofStrength::kSymbolicBound);
+    };
+    if (allocation_before_alias(prev, curr) ||
+        allocation_before_alias(curr, prev)) {
+      return false;
+    }
+
     if (prev.buffer_indices.size() != curr.buffer_indices.size()) {
       // They are not the same indices, should be conflict.
       return true;
@@ -1612,10 +1864,11 @@ private:
 
     if (prev.is_pointer_access || curr.is_pointer_access) {
       // For accesses created via tvm_access_ptr we may still be able to prove
-      // disjointness using their byte ranges. If both sides expose a touched
-      // interval and we can show they don't overlap, skip the conflict.
-      if (prev.is_pointer_access && curr.is_pointer_access &&
-          PointerAccessIsDisjoint(prev, curr)) {
+      // disjointness using their byte ranges.  This also matters when the
+      // other side is a normal BufferLoad/BufferStore: shared.dyn allocation
+      // merging keeps byte offsets in touched ranges, so pointer-vs-buffer
+      // comparisons should not be treated as unconditional aliases.
+      if (AccessByteRangeIsDisjoint(prev, curr, loop)) {
         return false;
       }
       // Otherwise fall back to the conservative answer: treat them as

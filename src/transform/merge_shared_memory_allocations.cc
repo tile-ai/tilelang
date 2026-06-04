@@ -73,6 +73,68 @@ static bool IsStaticSharedMemory(Var buffer_var) {
          storage_scope.tag.empty();
 }
 
+static int64_t StorageBitsPerElement(DataType dtype) {
+  int64_t bits = static_cast<int64_t>(dtype.bits()) * dtype.lanes();
+  ICHECK_GT(bits, 0) << "Invalid shared-memory dtype: " << dtype;
+  return bits;
+}
+
+static DataType StorageIndexDType(DataType dtype) {
+  return (dtype.is_int() || dtype.is_uint()) ? dtype : DataType::Int(32);
+}
+
+static PrimExpr StorageElementsForShape(const Array<PrimExpr> &shape) {
+  DataType size_dtype =
+      shape.empty() ? DataType::Int(32) : StorageIndexDType(shape[0].dtype());
+  PrimExpr elements = make_const(size_dtype, 1);
+  for (const PrimExpr &extent : shape) {
+    PrimExpr e = extent;
+    if (e.dtype() != size_dtype) {
+      e = cast(size_dtype, e);
+    }
+    elements = elements * e;
+  }
+  return elements;
+}
+
+static PrimExpr StorageBytesForElements(PrimExpr elements, DataType dtype) {
+  int64_t bits_per_element = StorageBitsPerElement(dtype);
+  DataType size_dtype = StorageIndexDType(elements.dtype());
+  if (elements.dtype() != size_dtype) {
+    elements = cast(size_dtype, elements);
+  }
+  PrimExpr bits = elements * make_const(size_dtype, bits_per_element);
+  if (bits_per_element % 8 == 0) {
+    return indexdiv(bits, make_const(size_dtype, 8));
+  }
+  return indexdiv(bits + make_const(size_dtype, 7), make_const(size_dtype, 8));
+}
+
+static PrimExpr StorageBytesForBuffer(const Buffer &buffer) {
+  return StorageBytesForElements(StorageElementsForShape(buffer->shape),
+                                 buffer->dtype);
+}
+
+static int64_t StorageBytesForConstantElements(int64_t elements,
+                                               DataType dtype) {
+  ICHECK_GE(elements, 0);
+  int64_t bits = elements * StorageBitsPerElement(dtype);
+  return (bits + 7) / 8;
+}
+
+static PrimExpr ByteOffsetToElementOffset(PrimExpr byte_offset,
+                                          DataType dtype) {
+  int64_t bits_per_element = StorageBitsPerElement(dtype);
+  if (bits_per_element % 8 == 0) {
+    return indexdiv(byte_offset, bits_per_element / 8);
+  }
+  ICHECK_EQ(8 % bits_per_element, 0)
+      << "Cannot represent byte offset as an element offset for dtype "
+      << dtype;
+  DataType offset_dtype = byte_offset.dtype();
+  return byte_offset * make_const(offset_dtype, 8 / bits_per_element);
+}
+
 /*!
  * \brief collect the mapping from the buffer var to its allocate
  */
@@ -547,25 +609,7 @@ private:
 
     for (const VarNode *var : sorted_vars) {
       const AllocBufferNode *alloc = shmem_allocs_.at(var);
-      int64_t bytes_per_elem = static_cast<int64_t>(
-          alloc->buffer->dtype.bytes() * alloc->buffer->dtype.lanes());
-
-      DataType size_dtype = DataType::Int(32);
-      if (!alloc->buffer->shape.empty()) {
-        size_dtype = alloc->buffer->shape[0].dtype();
-      }
-      if (!size_dtype.is_int() && !size_dtype.is_uint()) {
-        size_dtype = DataType::Int(32);
-      }
-
-      PrimExpr size_expr = make_const(size_dtype, bytes_per_elem);
-      for (const PrimExpr &extent : alloc->buffer->shape) {
-        PrimExpr e = extent;
-        if (e.dtype() != size_dtype) {
-          e = cast(size_dtype, e);
-        }
-        size_expr = size_expr * e;
-      }
+      PrimExpr size_expr = StorageBytesForBuffer(alloc->buffer);
 
       int alignment = align_bytes_;
       auto align_it = shmem_alignment_map_.find(var);
@@ -604,9 +648,7 @@ private:
           auto alloc_it = shmem_allocs_.find(buffer_var_node);
           if (alloc_it != shmem_allocs_.end()) {
             const AllocBufferNode *alloc = alloc_it->second;
-            PrimExpr buffer_size_bytes = alloc->buffer->shape[0] *
-                                         alloc->buffer->dtype.bytes() *
-                                         alloc->buffer->dtype.lanes();
+            PrimExpr buffer_size_bytes = StorageBytesForBuffer(alloc->buffer);
             LOG(DEBUG) << "    Buffer: " << buffer_var_node->name_hint
                        << " (Type: " << alloc->buffer->dtype << ")"
                        << ", Start Offset: " << byte_offset
@@ -789,7 +831,7 @@ private:
     auto it = buffer_byte_offsets_.find(buffer_var.get());
     ICHECK(it != buffer_byte_offsets_.end())
         << "buffer_var = " << buffer_var->name_hint << ", dtype = " << dtype;
-    return indexdiv(it->second, dtype.bytes() * dtype.lanes());
+    return ByteOffsetToElementOffset(it->second, dtype);
   }
 
   bool HasBufferOffset(const Var &buffer_var) {
@@ -1395,30 +1437,14 @@ private:
       }
 
       const AllocBufferNode *alloc = shmem_allocs_.at(var);
-      int64_t bytes_per_elem = static_cast<int64_t>(
-          alloc->buffer->dtype.bytes() * alloc->buffer->dtype.lanes());
-      DataType size_dtype = DataType::Int(32);
-      if (!alloc->buffer->shape.empty()) {
-        size_dtype = alloc->buffer->shape[0].dtype();
-      }
-      if (!size_dtype.is_int() && !size_dtype.is_uint()) {
-        size_dtype = DataType::Int(32);
-      }
-
-      PrimExpr size_expr = make_const(size_dtype, bytes_per_elem);
-      for (const PrimExpr &extent : alloc->buffer->shape) {
-        PrimExpr e = extent;
-        if (e.dtype() != size_dtype) {
-          e = cast(size_dtype, e);
-        }
-        size_expr = size_expr * e;
-      }
-      info.size_dtype = size_dtype;
-      info.size_expr = size_expr;
+      PrimExpr elements = StorageElementsForShape(alloc->buffer->shape);
+      info.size_dtype = elements.dtype();
+      info.size_expr = StorageBytesForElements(elements, alloc->buffer->dtype);
 
       auto const_size = GetRef<AllocBuffer>(alloc).ConstantAllocationSize();
       if (const_size.has_value()) {
-        info.const_size_bytes = const_size.value() * bytes_per_elem;
+        info.const_size_bytes = StorageBytesForConstantElements(
+            const_size.value(), alloc->buffer->dtype);
       }
 
       buf_infos.push_back(std::move(info));
