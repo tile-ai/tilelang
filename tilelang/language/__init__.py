@@ -175,17 +175,6 @@ from .cluster import (
 )
 
 
-for _name in (
-    "float4_e2m1_unpackedx2",
-    "float4_e2m1_unpackedx4",
-    "float4_e2m1_unpackedx8",
-    "float4_e2m1_unpackedx16",
-    "float4_e2m1_unpackedx32",
-    "float4_e2m1_unpackedx64",
-):
-    globals().pop(_name, None)
-
-
 def import_source(source: str | None = None):
     # source is the source code to be imported
     from tvm.tirx.script.builder.ir import sblock_attr
