@@ -158,6 +158,33 @@ def test_ldg32_predicated_codegen():
 
 
 @tilelang.testing.requires_cuda
+def test_lds32_predicated_codegen():
+    """Test that lds32 with predicate generates tl::load_shared_32_conditional(ptr, pred)."""
+
+    @tilelang.jit
+    def lds32_pred_kernel(Y):
+        Y: T.Tensor[[32], T.uint32]
+
+        with T.Kernel(1, threads=32):
+            tx = T.get_thread_binding()
+            scratch = T.alloc_shared((32,), T.uint32)
+            scratch[tx] = T.Cast(T.uint32, tx + 1)
+            Y[tx] = T.lds32(scratch[tx], pred=tx < 16)
+
+    Y = torch.empty(32, dtype=torch.uint32, device="cuda")
+
+    lds32_pred_kernel(Y)
+    src = lds32_pred_kernel.get_kernel_source()
+    print("=== lds32 predicated codegen ===")
+    print(src)
+    assert "load_shared_32_conditional" in src, "Expected load_shared_32_conditional call in generated CUDA source"
+
+    expected = torch.arange(1, 33, dtype=torch.int64)
+    expected[16:] = 0
+    torch.testing.assert_close(Y.cpu().to(torch.int64), expected)
+
+
+@tilelang.testing.requires_cuda
 def test_ldg64_predicated_codegen():
     """Test that ldg64 with predicate generates tl::load_global_64_conditional(ptr, pred) in CUDA source."""
 

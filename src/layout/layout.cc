@@ -109,6 +109,13 @@ PrimExpr RestoreInputPlaceholders(const PrimExpr &expr,
   return restored;
 }
 
+bool NeedsExplicitPackLane(int64_t elem_bits) {
+  // Byte and sub-byte typed aliases need an explicit lane when they are packed
+  // inside a wider storage element.  Without it, e.g. uint16 -> uint8 maps both
+  // byte lanes back to the same physical layout coordinate.
+  return elem_bits <= 8;
+}
+
 Layout TryPackedSubtypeReshape(const LayoutNode *layout_node,
                                const Array<PrimExpr> &shape,
                                arith::Analyzer *analyzer,
@@ -125,12 +132,12 @@ Layout TryPackedSubtypeReshape(const LayoutNode *layout_node,
 
   const Array<PrimExpr> &input_shape = layout_node->InputShape();
 
-  // Narrower target element, e.g. uint8 -> fp4.
+  // Narrower target element, e.g. uint16 -> uint8 or uint8 -> fp4.
   // One old logical element now contains `pack_factor` new logical elements.
   // The generic flat-index reshape would lose this packed-storage structure, so
   // we materialize it as an extra trailing output dimension ("pack lane").
   if (*old_elem_bits > *new_elem_bits && *old_elem_bits % *new_elem_bits == 0 &&
-      *new_elem_bits < 8) {
+      NeedsExplicitPackLane(*new_elem_bits)) {
     int64_t pack_factor = *old_elem_bits / *new_elem_bits;
     Array<Var> new_vars = CreateReshapeVars(shape, analyzer);
     PrimExpr flat_index = ComputeFlatIndex(shape, new_vars);
@@ -147,12 +154,12 @@ Layout TryPackedSubtypeReshape(const LayoutNode *layout_node,
     return Layout(shape, new_forward_index);
   }
 
-  // Wider target element, e.g. fp4 -> uint8.
+  // Wider target element, e.g. uint8 -> uint16 or fp4 -> uint8.
   // This is only valid if the current layout already exposes the packed
   // sub-elements as its last output dimension.  We collapse that trailing pack
   // lane back into the logical element index of the wider dtype.
   if (*old_elem_bits < *new_elem_bits && *new_elem_bits % *old_elem_bits == 0 &&
-      *old_elem_bits < 8) {
+      NeedsExplicitPackLane(*old_elem_bits)) {
     int64_t pack_factor = *new_elem_bits / *old_elem_bits;
     Array<PrimExpr> output_shape = layout_node->OutputShape();
     if (output_shape.empty() ||
@@ -198,11 +205,11 @@ Fragment TryPackedSubtypeReshape(const FragmentNode *fragment_node,
 
   const Array<PrimExpr> &input_shape = fragment_node->InputShape();
 
-  // Same idea as Layout::Reshape above: preserve packed sub-byte storage by
-  // making the pack lane explicit in the fragment mapping instead of silently
-  // flattening it away.
+  // Same idea as Layout::Reshape above: preserve packed byte/sub-byte storage
+  // by making the pack lane explicit in the fragment mapping instead of
+  // silently flattening it away.
   if (*old_elem_bits > *new_elem_bits && *old_elem_bits % *new_elem_bits == 0 &&
-      *new_elem_bits < 8) {
+      NeedsExplicitPackLane(*new_elem_bits)) {
     int64_t pack_factor = *old_elem_bits / *new_elem_bits;
     Array<Var> new_vars = CreateReshapeVars(shape, analyzer);
     PrimExpr flat_index = ComputeFlatIndex(shape, new_vars);
@@ -231,7 +238,7 @@ Fragment TryPackedSubtypeReshape(const FragmentNode *fragment_node,
   }
 
   if (*old_elem_bits < *new_elem_bits && *new_elem_bits % *old_elem_bits == 0 &&
-      *old_elem_bits < 8) {
+      NeedsExplicitPackLane(*old_elem_bits)) {
     int64_t pack_factor = *new_elem_bits / *old_elem_bits;
     Array<PrimExpr> output_shape = fragment_node->OutputShape();
     if (output_shape.empty() ||
@@ -1147,6 +1154,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](const Buffer &buffer, int continuity, bool k_inner) {
              return makeTcgen05mmaSwizzledLayout(buffer, continuity, k_inner);
            })
+      .def("tl.make_sm120_fp4_smem_layout",
+           [](const Buffer &buffer) { return makeSm120Fp4SmemLayout(buffer); })
       .def("tl.make_full_bank_swizzled_layout",
            [](const Buffer &buffer) {
              return makeFullBankSwizzleLayout(buffer);
