@@ -235,7 +235,10 @@ Barriers, TMA, warp‑group
 - Parity ops: `T.mbarrier_wait_parity(barrier, parity)`, `T.mbarrier_arrive(barrier)`.
 - Expect tx: `T.mbarrier_expect_tx(...)`; sugar: `T.barrier_wait(id, parity=None)`.
 - TMA: `T.create_tma_descriptor(...)`, `T.tma_load(...)`,
-  `T.tma_store_arrive(...)`, `T.tma_store_wait(...)`.
+  `T.tma_store_arrive(...)`, `T.tma_store_wait(count=0, read=True)`.
+  `read=True` emits `cp.async.bulk.wait_group.read`; use `read=False` for
+  `cp.async.bulk.wait_group` when the wait must include destination writes
+  becoming visible.
 - Proxy/fences: `T.fence_proxy_async(...)`, `T.warpgroup_fence_operand(...)`.
 - Warp‑group: `T.warpgroup_arrive()`, `T.warpgroup_commit_batch()`,
   `T.warpgroup_wait(num_mma)`, `T.wait_wgmma(id)`.

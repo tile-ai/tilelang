@@ -1,4 +1,4 @@
-"""Rewrite local.fragment → metal.simdgroup for GEMM accumulator buffers on Metal.
+"""Rewrite local.fragment to metal.simdgroup for GEMM accumulator buffers on Metal.
 
 This pass runs after pipelining and before LayoutInference, so that
 simdgroup matrices (which are hardware-opaque and have no explicit
@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from tvm import tirx as tir
 from tvm import IRModule
+from tvm import tirx as tir
 from tvm.ir import Op, PointerType
 from tvm.tirx import SBlock
 from tvm.tirx.transform import prim_func_pass
@@ -159,4 +159,10 @@ def _metal_fragment_to_simdgroup(func: tir.PrimFunc, mod: IRModule, ctx) -> tir.
     return func.with_body(new_body)
 
 
-MetalFragmentToSimdgroup = prim_func_pass(_metal_fragment_to_simdgroup, opt_level=0, name="tl.MetalFragmentToSimdgroup")
+MetalFragmentToSimdgroup = prim_func_pass(
+    _metal_fragment_to_simdgroup,
+    opt_level=0,
+    name="tl.MetalFragmentToSimdgroup",
+)
+
+__all__ = ["MetalFragmentToSimdgroup"]

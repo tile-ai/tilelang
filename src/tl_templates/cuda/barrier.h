@@ -142,8 +142,12 @@ TL_DEVICE void tma_store_arrive() {
   asm volatile("cp.async.bulk.commit_group;");
 }
 
-template <int Count> TL_DEVICE void tma_store_wait() {
-  asm volatile("cp.async.bulk.wait_group.read %0;" : : "n"(Count) : "memory");
+template <int Count, bool Read = true> TL_DEVICE void tma_store_wait() {
+  if constexpr (Read) {
+    asm volatile("cp.async.bulk.wait_group.read %0;" : : "n"(Count) : "memory");
+  } else {
+    asm volatile("cp.async.bulk.wait_group %0;" : : "n"(Count) : "memory");
+  }
 }
 
 TL_DEVICE void syncthreads_partial(uint64_t &smem_barrier) {

@@ -159,7 +159,7 @@ def test_warp_reduce_with_64_threads_two_groups():
 
 
 # ---------------------------------------------------------------------------
-# Fix 2 — src/target/codegen_hip.cc (VisitExpr_ ShuffleNode)
+# Fix 2 — src/rocm/codegen/codegen_hip.cc (VisitExpr_ ShuffleNode)
 #         src/tl_templates/hip/common.h (uint1 bfloat16x2 math overloads)
 #
 # Symptom: Packing two bfloat16 scalars into a bfloat16x2 ShuffleNode caused
@@ -252,7 +252,7 @@ def test_float16_shuffle_correctness():
 
 
 # ---------------------------------------------------------------------------
-# Fix 3 — tilelang/language/allocate.py + src/target/codegen_hip.cc
+# Fix 3 — tilelang/language/allocate.py + src/rocm/codegen/codegen_hip.cc
 #   T.alloc_var(init=<literal>) initialisation on HIP;
 #   local.var scalar declaration and GetBufferRef bare-name return
 #
@@ -530,7 +530,7 @@ def test_local_var_float_init_readable():
 
 
 # ---------------------------------------------------------------------------
-# Fix 4 — src/target/codegen_hip.cc
+# Fix 4 — src/rocm/codegen/codegen_hip.cc
 #   T.sync_warp() → no-op on HIP
 #
 # Symptom: tl::sync_warp() had no handler → codegen assertion failure or
@@ -611,10 +611,10 @@ def test_sync_warp_inside_conditional():
 
 
 # ---------------------------------------------------------------------------
-# Fix 5 — src/backend/rocm/codegen/codegen_hip.cc,
-#          src/backend/rocm/codegen/rt_mod_hip.cc,
-#          src/backend/rocm/stubs/hip.cc,
-#          src/backend/rocm/stubs/hip.h
+# Fix 5 — src/rocm/codegen/codegen_hip.cc,
+#          src/rocm/codegen/rt_mod_hip.cc,
+#          src/rocm/stubs/hip.cc,
+#          src/rocm/stubs/hip.h
 #   T.sync_grid() → cooperative_groups::this_grid().sync()
 #
 # Symptom: tl::sync_grid() had no handler → same assertion / link failure.
@@ -745,6 +745,56 @@ def test_pipelined_multi_stage_fp16_gemm(num_stages):
     kernel(A, B, C)
     torch.cuda.synchronize()
     torch.testing.assert_close(C, A.float() @ B.float(), atol=1.0, rtol=5e-2)
+
+
+# ---------------------------------------------------------------------------
+# Fix 7 — src/backend/rocm/codegen/intrin_rule_hip.cc
+#   Scalarize vector math intrinsics on HIP
+#
+# Symptom: A vectorized math op (e.g. tirx.exp2 on float32x4 from a 2D
+#   fragment + T.Parallel) was left unlowered.  HIPMath/FloatSuffix return
+#   "" for non-scalar dtypes, so DispatchPureExtern returned the op
+#   unchanged and CodeGenTileLangHIP -> CodeGenC then threw
+#       tvm.error.InternalError: Unresolved call ir.Op(name="tirx.exp2")
+#   at codegen_c.cc:771.
+#
+# Fix: DispatchPureExternScalarized resolves the extern name from the
+#   *element* dtype and emits a vector call_pure_extern; the existing
+#   CodeGenTileLangHIP::PrintCallExtern then lowers it to one scalar call
+#   per lane via PrintVecElemLoad / PrintVecElemStore, which is carrier-
+#   aware (handles float32x8 -> ulonglong4, float16x4 -> uint2, etc.).
+# ---------------------------------------------------------------------------
+
+
+@tilelang.jit
+def _kernel_vector_exp2_codegen():
+    """T.vectorized(VEC) makes T.exp2 lower as tirx.exp2 on float32xVEC."""
+    N, VEC = 256, 4
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((N,), "float32"),
+        B: T.Tensor((N,), "float32"),
+    ):
+        with T.Kernel(N // VEC, threads=1) as bx:
+            for v in T.vectorized(VEC):
+                B[bx * VEC + v] = T.exp2(A[bx * VEC + v])
+
+    return main
+
+
+@tilelang.testing.requires_rocm
+def test_vector_math_scalarized_in_hip_source():
+    """Vectorized T.exp2 must lower to one scalar exp2f per lane on HIP."""
+    src = _kernel_vector_exp2_codegen().get_kernel_source()
+    assert "tirx.exp2" not in src, (
+        "Vectorized tirx.exp2 was left unlowered (would emit 'Unresolved call' from CodeGenC). Generated HIP source:\n" + src
+    )
+    assert src.count("exp2f") >= 4, (
+        "Expected one 'exp2f' per lane (>=4) in HIP source for vectorized "
+        f"T.exp2 over float32x4, got {src.count('exp2f')}. "
+        "Generated HIP source:\n" + src
+    )
 
 
 if __name__ == "__main__":

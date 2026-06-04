@@ -238,10 +238,12 @@ def tma_store_arrive(*, loc=None, ip=None) -> None:
 def tma_store_wait(count: int, *, read=None, loc=None, ip=None) -> None:
     """
     Wait for TMA_STORE operations to complete.
-    Corresponds to PTX instruction: cp.async.bulk.wait_group.read <count>;
+    Corresponds to PTX instruction: cp.async.bulk.wait_group{.read} <count>;
 
     :param count: The number of outstanding bulk async groups to wait for
     :type count: Int
+    :param read: Whether to use the PTX .read modifier
+    :type read: Optional[bool]
     """
     nvvm.cp_async_bulk_wait_group(group=count, read=read, loc=loc, ip=ip)
 
