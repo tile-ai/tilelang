@@ -48,6 +48,11 @@ static constexpr const char *kAsyncCopyNoImplicitCommitWait =
 static constexpr const char *kPipelineMbarPhaseExpr =
     "tl.pipeline_mbar_phase_expr";
 static constexpr const char *kLocalVarInit = "tl.local_var_init";
+// Allocation annotation requesting StorageRewrite to keep the allocation at
+// the lexical statement where it was emitted.  This is intended for manual
+// warp-specialized code where branch-local register arrays must not be hoisted
+// ahead of setmaxnreg or out of a producer/consumer role branch.
+static constexpr const char *kRoleScopedAlloc = "tl.role_scoped_alloc";
 // A PrimFunc-level attribute carrying a list of handle Vars
 // that must NOT be marked with the restrict qualifier in codegen.
 // Type: ffi::Array<tirx::Var>
@@ -1274,6 +1279,19 @@ TVM_DLL const Op &__ffs();
  *    y[i] = T.ldg32(x, i)
  */
 TVM_DLL const Op &ldg32();
+
+/*!
+ * \brief tilelang intrinsic for shared memory load with 32-bit vector width.
+ *
+ *  This op loads 32 bits (4 bytes) from shared memory using an explicit
+ *  PTX ld.shared.u32 instruction. The source pointer must be 4-byte aligned.
+ *  An optional predicate skips the load and returns zero when false.
+ *
+ *  Usage from TVMScript:
+ *    y = T.lds32(smem_u8[i])
+ *    y = T.lds32(smem_u8[i], pred=i < N)
+ */
+TVM_DLL const Op &lds32();
 
 /*!
  * \brief tilelang intrinsic for global memory load with 64-bit vector width.

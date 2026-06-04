@@ -304,6 +304,94 @@ def fp4_tma_copy_unpacked_smem_load(M=128, N=256, block_M=64, block_N=128):
     return main
 
 
+def fp4_tma_copy_unpacked_smem_full_swizzle_load(M=128, N=256, block_M=64, block_N=128):
+    from tilelang.layout import make_full_bank_swizzled_layout
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, N), T.float4_e2m1fn),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+            A_shared = T.alloc_shared((block_M, block_N), T.float4_e2m1_unpacked)
+            T.annotate_layout({A_shared: make_full_bank_swizzled_layout(A_shared)})
+            mbar = T.alloc_barrier(128)
+            T.tma_copy(
+                A[by * block_M, bx * block_N],
+                A_shared,
+                barrier=mbar,
+            )
+            T.barrier_arrive(mbar)
+            T.mbarrier_wait_parity(mbar, 0)
+
+    return main
+
+
+def fp4_tma_copy_packed_smem_sm120_fp4_layout(M=128, N=256, block_M=64, block_N=128):
+    from tilelang.layout import make_sm120_fp4_smem_layout
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, N), T.float4_e2m1fn),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+            A_shared = T.alloc_shared((block_M, block_N), T.float4_e2m1fn)
+            T.annotate_layout({A_shared: make_sm120_fp4_smem_layout(A_shared)})
+            mbar = T.alloc_barrier(128)
+            T.tma_copy(
+                A[by * block_M, bx * block_N],
+                A_shared,
+                barrier=mbar,
+            )
+            T.barrier_arrive(mbar)
+            T.mbarrier_wait_parity(mbar, 0)
+
+    return main
+
+
+def fp4_tma_copy_packed_global_to_uint8_smem_sm120_fp4_layout(M=128, N=256, block_M=64, block_N=128):
+    from tilelang.layout import make_sm120_fp4_smem_layout
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, N), T.float4_e2m1fn),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+            A_shared = T.alloc_shared((block_M, block_N // 2), "uint8")
+            T.annotate_layout({A_shared: make_sm120_fp4_smem_layout(A_shared)})
+            mbar = T.alloc_barrier(128)
+            T.tma_copy(
+                A[by * block_M : (by + 1) * block_M, bx * block_N : (bx + 1) * block_N],
+                A_shared,
+                barrier=mbar,
+            )
+            T.barrier_arrive(mbar)
+            T.mbarrier_wait_parity(mbar, 0)
+
+    return main
+
+
+def fp4_tma_copy_unpacked_smem_sm120_fp4_layout(M=128, N=256, block_M=64, block_N=128):
+    from tilelang.layout import make_sm120_fp4_smem_layout
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, N), T.float4_e2m1fn),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+            A_shared = T.alloc_shared((block_M, block_N), T.float4_e2m1_unpacked)
+            T.annotate_layout({A_shared: make_sm120_fp4_smem_layout(A_shared)})
+            mbar = T.alloc_barrier(128)
+            T.tma_copy(
+                A[by * block_M, bx * block_N],
+                A_shared,
+                barrier=mbar,
+            )
+            T.barrier_arrive(mbar)
+            T.mbarrier_wait_parity(mbar, 0)
+
+    return main
+
+
 def fp4_tma_copy_unpacked_smem_store(M=128, N=256, block_M=64, block_N=128):
     @T.prim_func
     def main(
@@ -326,13 +414,23 @@ def fp4_tma_copy_unpacked_smem_store(M=128, N=256, block_M=64, block_N=128):
 
 
 def _fp4_tma_descriptor_init_block(host_source, desc_name):
-
     marker = f"[0].v_ptr) = {desc_name};"
     start = host_source.find(marker)
-    assert start >= 0, f"Missing {desc_name} TensorMap initialization"
+    assert start >= 0, f"Missing {desc_name} TensorMap initialization; available descriptors: {_fp4_tma_descriptor_names(host_source)}"
     end = host_source.find("TVMFFIFunctionCall(__tvm_tensormap_create_tiled_packed", start)
     assert end >= 0, f"Missing {desc_name} TensorMap creation call"
     return host_source[start:end]
+
+
+def _fp4_tma_descriptor_names(host_source):
+    import re
+
+    names = []
+    for match in re.finditer(r"\[0\]\.v_ptr\)\s*=\s*(\w+_desc);", host_source):
+        name = match.group(1)
+        if name not in names:
+            names.append(name)
+    return names
 
 
 def _fp4_tma_stack_int(block, index):
@@ -343,7 +441,7 @@ def _fp4_tma_stack_int(block, index):
     return int(match.group(1))
 
 
-def _assert_fp4_packed_tma_descriptor(host_source, desc_name):
+def _assert_fp4_packed_tma_descriptor(host_source, desc_name, *, expect_swizzle=0):
     expected_tma_args = {
         1: 13,  # CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B
         2: 2,
@@ -356,7 +454,7 @@ def _assert_fp4_packed_tma_descriptor(host_source, desc_name):
         10: 1,
         11: 1,
         12: 0,
-        13: 2,  # CU_TENSOR_MAP_SWIZZLE_64B
+        13: expect_swizzle,
         14: 2,
         15: 0,
     }
@@ -389,7 +487,9 @@ def run_fp4_tma_copy_roundtrip():
     assert "tl::tma_load" in device_source
     assert "tl::tma_store" in device_source
     assert host_source.count("__tvm_tensormap_create_tiled") >= 2
-    for desc_name in ("A_desc", "B_desc"):
+    desc_names = _fp4_tma_descriptor_names(host_source)
+    assert len(desc_names) == 2, f"Expected two TMA descriptors, got {desc_names}"
+    for desc_name in desc_names:
         _assert_fp4_packed_tma_descriptor(host_source, desc_name)
 
     a = torch.randint(-128, 128, (M, N // 2), device="cuda", dtype=torch.int8)
@@ -398,6 +498,8 @@ def run_fp4_tma_copy_roundtrip():
 
 
 def test_fp4_unpacksmem_tma_descriptor_uses_align16b():
+    import re
+
     program = fp4_tma_copy_unpacked_smem_load()
     artifact = tilelang.lower(
         program,
@@ -408,8 +510,70 @@ def test_fp4_unpacksmem_tma_descriptor_uses_align16b():
     device_ir = str(artifact.device_mod)
     assert 'T.handle("float4_e2m1fn", "global")' in host_ir
     assert 'A_shared = T.alloc_buffer((8192,), "custom[float4_e2m1_unpacked]"' in device_ir
-    assert '["__tvm_tensormap_create_tiled", A_desc, 14,' in host_ir
-    assert 'T.call_packed("__tvm_tensormap_create_tiled", A_desc, 14,' in host_ir
+    assert re.search(r'\["__tvm_tensormap_create_tiled", \w+, 14,', host_ir)
+    assert re.search(r'T\.call_packed\("__tvm_tensormap_create_tiled", \w+, 14,', host_ir)
+
+
+def test_fp4_unpacksmem_full_swizzle_tma_descriptor_uses_align16b_128b_swizzle():
+    program = fp4_tma_copy_unpacked_smem_full_swizzle_load()
+    artifact = tilelang.lower(
+        program,
+        target={"kind": "cuda", "arch": "sm_100"},
+        enable_device_compile=False,
+    )
+    host_ir = str(artifact.host_mod)
+    device_ir = str(artifact.device_mod)
+    assert 'A_shared = T.alloc_buffer((8192,), "custom[float4_e2m1_unpacked]"' in device_ir
+    assert "T.tma_load(tma_offset_0_desc" in device_ir
+    assert (
+        '"__tvm_tensormap_create_tiled", tma_offset_0_desc, 14, 2, '
+        "T.handle_add_byte_offset(A, 0), 256, 128, 1, 128, 128, 64, 1, 1, 0, 3, 2, 0"
+    ) in host_ir
+
+
+def test_sm120_fp4_smem_layout_selects_packed_sw64_for_k128():
+    program = fp4_tma_copy_packed_smem_sm120_fp4_layout()
+    artifact = tilelang.lower(
+        program,
+        target={"kind": "cuda", "arch": "sm_100"},
+        enable_device_compile=False,
+    )
+    host_ir = str(artifact.host_mod)
+    assert (
+        '"__tvm_tensormap_create_tiled", tma_offset_0_desc, 13, 2, '
+        "T.handle_add_byte_offset(A, 0), 256, 128, 1, 128, 128, 64, 1, 1, 0, 2, 2, 0"
+    ) in host_ir
+
+
+def test_fp4_packed_global_to_uint8_smem_tma_uses_packed_descriptor_sw64_for_k128():
+    program = fp4_tma_copy_packed_global_to_uint8_smem_sm120_fp4_layout()
+    artifact = tilelang.lower(
+        program,
+        target={"kind": "cuda", "arch": "sm_100"},
+        enable_device_compile=False,
+    )
+    host_ir = str(artifact.host_mod)
+    device_ir = str(artifact.device_mod)
+    assert 'A_shared = T.alloc_buffer((4096,), "uint8"' in device_ir
+    assert "T.tma_load(tma_offset_0_desc" in device_ir
+    assert (
+        '"__tvm_tensormap_create_tiled", tma_offset_0_desc, 13, 2, '
+        "T.handle_add_byte_offset(A, 0), 256, 128, 1, 128, 128, 64, 1, 1, 0, 2, 2, 0"
+    ) in host_ir
+
+
+def test_sm120_fp4_smem_layout_selects_unpacksmem_sw128_for_k128():
+    program = fp4_tma_copy_unpacked_smem_sm120_fp4_layout()
+    artifact = tilelang.lower(
+        program,
+        target={"kind": "cuda", "arch": "sm_100"},
+        enable_device_compile=False,
+    )
+    host_ir = str(artifact.host_mod)
+    assert (
+        '"__tvm_tensormap_create_tiled", tma_offset_0_desc, 14, 2, '
+        "T.handle_add_byte_offset(A, 0), 256, 128, 1, 128, 128, 64, 1, 1, 0, 3, 2, 0"
+    ) in host_ir
 
 
 def test_fp4_unpacksmem_tma_store_is_rejected():
@@ -420,6 +584,68 @@ def test_fp4_unpacksmem_tma_store_is_rejected():
             target={"kind": "cuda", "arch": "sm_100"},
             enable_device_compile=False,
         )
+
+
+def tma_copy_projected_global_view_kernel():
+    @T.prim_func
+    def main(
+        A: T.Tensor((1, 4, 128, 128), T.float16),
+        B: T.Tensor((4,), T.float16),
+    ):
+        with T.Kernel(4, threads=128) as head:
+            A_shared = T.alloc_shared((128, 64), T.float16)
+            mbar = T.alloc_barrier(128)
+            T.tma_copy(A[0, head, 0:128, 0:64], A_shared, barrier=mbar)
+            T.barrier_arrive(mbar)
+            T.mbarrier_wait_parity(mbar, 0)
+            if T.get_thread_binding() == 0:
+                B[head] = A_shared[0, 0]
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tma_copy_projects_static_axes_but_keeps_dynamic_unit_axes():
+    import re
+
+    kernel = tilelang.compile(
+        tma_copy_projected_global_view_kernel(),
+        out_idx=[1],
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+    device_source = kernel.get_kernel_source()
+    host_source = kernel.get_host_source()
+
+    marker = "[0].v_ptr) = A_desc;"
+    start = host_source.find(marker)
+    assert start >= 0, "Missing A_desc TensorMap initialization"
+    end = host_source.find("TVMFFIFunctionCall(__tvm_tensormap_create_tiled_packed", start)
+    assert end >= 0, "Missing A_desc TensorMap creation call"
+    block = host_source[start:end]
+
+    def stack_int(index):
+        match = re.search(rf"\[{index}\]\.v_int64\)\s*=\s*\(\(int64_t\)(-?\d+)\);", block)
+        assert match, f"Missing stack[{index}] integer assignment in:\n{block}"
+        return int(match.group(1))
+
+    expected_tma_args = {
+        1: 6,  # CU_TENSOR_MAP_DATA_TYPE_FLOAT16
+        2: 3,  # dynamic head plus the two non-unit tile axes
+        4: 128,  # global_shape[0], reversed innermost dimension
+        5: 128,  # global_shape[1]
+        6: 4,  # global_shape[2], dynamic head dimension kept in descriptor
+        7: 2,  # raw innermost stride, ignored by CUDA encode
+        8: 256,  # row stride in bytes: 128 fp16 elements
+        9: 32768,  # head stride in bytes: 128 * 128 fp16 elements
+        10: 64,  # smem_box[0]
+        11: 128,  # smem_box[1]
+        12: 1,  # smem_box[2], dynamic unit axis
+    }
+    for index, expected in expected_tma_args.items():
+        assert stack_int(index) == expected
+
+    assert "tl::tma_load" in device_source
 
 
 def test_copy_prefer_tma_lowers_as_synchronous_tma_load():
@@ -454,7 +680,9 @@ def run_fp4_tma_copy_unpacked_smem_load():
     device_source = kernel.get_kernel_source()
     host_source = kernel.get_host_source()
     assert "CUtensorMap" in device_source
-    _assert_fp4_unpacked_tma_descriptor(host_source, "A_desc")
+    desc_names = _fp4_tma_descriptor_names(host_source)
+    assert len(desc_names) == 1, f"Expected one TMA descriptor, got {desc_names}"
+    _assert_fp4_unpacked_tma_descriptor(host_source, desc_names[0])
     # 64 x 128 logical FP4 elems -> 4096 transaction bytes (4b/elem), not 8192.
     assert "expect_transaction(4096)" in device_source
 

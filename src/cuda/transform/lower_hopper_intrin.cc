@@ -13,6 +13,7 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -141,8 +142,8 @@ public:
       return;
     }
     for (auto &desc_init : desc_inits_) {
-      if (!desc_init.emitted &&
-          desc_init.base_var == alloc->buffer->data.get()) {
+      if (!desc_init.emitted && desc_init.base_var.defined() &&
+          desc_init.base_var.value().same_as(alloc->buffer->data)) {
         result->push_back(desc_init.stmt);
         desc_init.emitted = true;
       }
@@ -186,15 +187,22 @@ public:
       if (iter != desc_map_.end()) {
         var = iter->second;
       } else {
-        String name = call->args[2].as<Var>().value()->name_hint;
+        Optional<Var> base_var;
+        std::string name;
+        if (const auto *base_var_node = call->args[2].as<VarNode>()) {
+          base_var = GetRef<Var>(base_var_node);
+          name = base_var.value()->name_hint;
+        } else {
+          name = "tma_offset_" + std::to_string(desc_counter_++);
+        }
         var = Var(name + "_desc",
                   PointerType(PrimType(cuTensorMapType()), "grid_constant"));
         Call call_ref = GetRef<Call>(call);
         desc_map_[call_ref] = var;
         Array<PrimExpr> init_desc_args = MakeInitDescArgs(call_ref, var);
         init_desc_arg_map_.Set(var, init_desc_args);
-        desc_inits_.push_back({call->args[2].as<Var>().value().get(),
-                               MakeInitDescStmt(var, init_desc_args), false});
+        desc_inits_.push_back(
+            {base_var, MakeInitDescStmt(var, init_desc_args), false});
         prefetch_calls_.push_back(
             Evaluate(Call(DataType::Handle(), builtin::call_extern(),
                           {StringImm("tl::prefetch_tma_descriptor"), var})));
@@ -231,7 +239,7 @@ public:
 
 private:
   struct DescInit {
-    const VarNode *base_var;
+    Optional<Var> base_var;
     Stmt stmt;
     bool emitted;
   };
@@ -265,6 +273,7 @@ private:
   std::unordered_map<Call, Var, StructuralHash, ExprDeepEqual> desc_map_;
   std::vector<DescInit> desc_inits_;
   Map<Var, Array<PrimExpr>> init_desc_arg_map_;
+  int desc_counter_{0};
   LowerHopperIntrin(bool disable_shuffle_elect)
       : disable_shuffle_elect_(disable_shuffle_elect) {}
   bool disable_shuffle_elect_;

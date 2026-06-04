@@ -11,6 +11,7 @@ from tvm.tirx import FloatImm, tvm_tuple
 __all__ = [
     "use_swizzle",
     "annotate_layout",
+    "annotate_layout_view",
     "annotate_safe_value",
     "annotate_l2_hit_ratio",
     "annotate_restrict_buffers",
@@ -40,6 +41,22 @@ def annotate_layout(layout_map: dict):
             raise ValueError(f"Invalid layout: {layout}")
 
     return sblock_attr({"layout_map": _layout_map})
+
+
+def annotate_layout_view(layout_map: dict):
+    """Annotate layouts for exact Buffer views without data-var broadcasting."""
+    _layout_map = {}
+    for buffer, layout in layout_map.items():
+        if is_fragment(buffer):
+            assert isinstance(layout, Fragment), f"for Fragment {buffer}, layout must be a Fragment, but got {type(layout)}"
+        if isinstance(layout, Layout):
+            _layout_map[buffer] = layout
+        elif isinstance(layout, Callable):
+            _layout_map[buffer] = Layout(buffer.shape, layout)
+        else:
+            raise ValueError(f"Invalid layout: {layout}")
+
+    return sblock_attr({"layout_view_map": _layout_map})
 
 
 def annotate_safe_value(safe_value_map: dict):

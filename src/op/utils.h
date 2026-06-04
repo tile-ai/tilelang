@@ -121,8 +121,19 @@ inline bool IsFP4PackedToUnpackedStorageCopy(DataType global_dtype,
          shared_dtype.is_float4_e2m1_unpacked();
 }
 
+// True when global packed FP4 is copied into byte-addressable packed FP4 SMEM.
+// The TensorMap descriptor still uses the packed FP4 element type; the uint8
+// shared buffer is only the physical byte storage viewed later by LDSM helpers.
+inline bool IsFP4PackedToByteStorageCopy(DataType global_dtype,
+                                         DataType shared_dtype) {
+  return global_dtype.is_float4_e2m1fn() && shared_dtype == DataType::UInt(8);
+}
+
 inline bool IsValidTMALoadDtypePair(DataType global_dtype,
                                     DataType shared_dtype) {
+  if (IsFP4PackedToByteStorageCopy(global_dtype, shared_dtype)) {
+    return true;
+  }
   if (global_dtype.is_float4_e2m1_unpacked() ||
       shared_dtype.is_float4_e2m1_unpacked()) {
     return IsFP4PackedToUnpackedStorageCopy(global_dtype, shared_dtype);

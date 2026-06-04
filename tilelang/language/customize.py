@@ -57,20 +57,30 @@ def reshape(src: Buffer, shape: ShapeType) -> Buffer:
     assert prim_expr_equal(bits_product(shape, src.dtype), bits_product(src.shape, src.dtype)), (
         f"T.reshape/view shape check failed. src {src} src.shape: {src.shape}, src.dtype: {src.dtype}, target shape: {shape}, target dtype: {src.dtype}"
     )
-    return T.Tensor(shape, src.dtype, src.data)
+    return T.Tensor(shape, src.dtype, data=src.data, scope=src.scope())
 
 
-def view(src: Buffer, shape: ShapeType | None = None, dtype: DType | None = None) -> Buffer:
+def view(
+    src: Buffer,
+    shape: ShapeType | None = None,
+    dtype: DType | None = None,
+    strides: tuple[PrimExpr, ...] | None = None,
+    elem_offset: PrimExpr | None = None,
+) -> Buffer:
     """Return a Tensor view of the input buffer with an optional new shape and dtype.
 
-    If `shape` is None the source buffer's shape is used; if `dtype` is None the source buffer's dtype is used. The returned buffer shares the same underlying data as `src` (no copy).
+    If `shape` is None the source buffer's shape is used; if `dtype` is None the source buffer's dtype is used. The returned buffer shares the same underlying data as `src` (no copy). Explicit `strides` and `elem_offset` may be supplied to describe a non-row-major logical view.
     """
     if shape is None:
         shape = src.shape
     if dtype is None:
         dtype = src.dtype
+    if strides is not None and len(shape) != len(strides):
+        raise ValueError("Invalid shape/strides' dimensions")
     assert prim_expr_equal(bits_product(shape, dtype), bits_product(src.shape, src.dtype)), "T.reshape/view shape check failed."
-    return T.Tensor(shape, dtype, src.data)
+    if elem_offset is None:
+        elem_offset = src.elem_offset
+    return T.Tensor(shape, dtype, data=src.data, scope=src.scope(), strides=strides, elem_offset=elem_offset)
 
 
 def loop_break() -> PrimExpr:

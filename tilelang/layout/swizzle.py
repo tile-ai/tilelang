@@ -90,6 +90,17 @@ def make_tcgen05mma_swizzled_layout(buffer: BufferLikeType, continuity: int = No
     return _ffi_api.make_tcgen05mma_swizzled_layout(buf, continuity, k_major)
 
 
+def make_sm120_fp4_smem_layout(buffer: BufferLikeType):
+    """CUTLASS-compatible SM120 FP4 K-major shared-memory layout.
+
+    Mirrors CUTLASS ``sm120_rr_smem_selector`` for FP4 operands. With a
+    128-element K dimension, packed FP4 selects 64B swizzle while byte-slot
+    unpacked FP4 selects 128B swizzle.
+    """
+    buf, _, _ = _get_buffer_info(buffer)
+    return _ffi_api.make_sm120_fp4_smem_layout(buf)
+
+
 # swizzle 128B
 def make_full_bank_swizzled_layout(buffer: BufferLikeType):
     """

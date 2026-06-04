@@ -912,6 +912,36 @@ Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
   TILELANG_COMPILER_UNREACHABLE(); // to prevent compiler warning
 }
 
+static Layout makeSm120RrSmemSelectorLayout(int mat_stride, int major_size,
+                                            int element_size) {
+  ICHECK(element_size <= 8)
+      << "SM120 RR shared-memory selector supports <=8-bit elements, got "
+      << element_size;
+  int vector_size = 128 / element_size;
+
+  // Mirror CUTLASS detail::sm120_rr_smem_selector:
+  //   Layout_K_SW128_Atom -> Layout_K_SW64_Atom ->
+  //   Layout_K_SW32_Atom  -> Layout_K_INTER_Atom.
+  if (mat_stride % 8 == 0) {
+    if (major_size % (vector_size * 8) == 0)
+      return MakeFullBankSwizzleLayout2D(mat_stride, major_size, element_size);
+    if (major_size % (vector_size * 4) == 0)
+      return MakeHalfBankSwizzleLayout2D(mat_stride, major_size, element_size);
+    if (major_size % (vector_size * 2) == 0)
+      return MakeQuarterBankSwizzleLayout2D(mat_stride, major_size,
+                                            element_size);
+  }
+
+  if (major_size % vector_size == 0)
+    return makeLinearLayout(
+        Array<PrimExpr>{Integer(mat_stride), Integer(major_size)});
+
+  ICHECK(0) << "Unsupported SM120 RR shared-memory layout with stride="
+            << mat_stride << ", major_size=" << major_size
+            << ", element_size=" << element_size;
+  TILELANG_COMPILER_UNREACHABLE();
+}
+
 Layout makeGemmABLayoutCDNA(int stride, int continuous, int element_size,
                             int kPack) {
   return makeMatrixCoreSwizzleLayout(stride, continuous, element_size, kPack);
@@ -959,6 +989,14 @@ Layout makeTcgen05mmaSwizzledLayout(const Buffer &buffer, int continuity,
   auto base = makeGemmABLayoutSm100(static_cast<int>(info.stride),
                                     static_cast<int>(info.continuous),
                                     continuity, info.element_size, k_inner);
+  return ExpandLayout2D(base, buffer);
+}
+
+Layout makeSm120Fp4SmemLayout(const Buffer &buffer) {
+  auto info = GetSwizzleShapeInfoChecked(buffer);
+  auto base = makeSm120RrSmemSelectorLayout(static_cast<int>(info.stride),
+                                            static_cast<int>(info.continuous),
+                                            info.element_size);
   return ExpandLayout2D(base, buffer);
 }
 
