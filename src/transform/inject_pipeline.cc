@@ -360,6 +360,44 @@ private:
         CollectUsedPipelineBuffers(MakePipelineBody(pipeline_body_stmts),
                                    buffer_data_to_buffer_, allocated_buffers_);
 
+    // Filter out buffers that have already been expanded by a previous
+    // sibling pipeline.  When two T.Pipelined loops share the same
+    // alloc_shared buffer but request different num_stages, the first
+    // pipeline expands the buffer (e.g. (64,32) → (2,64,32)).  The
+    // second pipeline would then try to expand the already-3D buffer
+    // again, producing a 4D buffer and crashing LayoutInference.
+    //
+    // Fix: skip re-expansion for already-expanded buffers.  The second
+    // pipeline will still add version indexing via buffer_remap_, but
+    // using the existing shape[0] (the first pipeline's num_stages).
+    {
+      // Build reverse map: expanded → original for all pending remaps.
+      std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>
+          expanded_to_original;
+      for (const auto &[orig, expanded] : pending_buffer_remap_) {
+        expanded_to_original[expanded] = orig;
+      }
+      Array<Buffer> filtered_allocs;
+      for (const auto &buf : pipeline_allocs) {
+        auto it = expanded_to_original.find(buf);
+        if (it != expanded_to_original.end()) {
+          // Buffer was already expanded by a previous pipeline.
+          // Add an identity remap so the second pipeline's version
+          // indexing is still applied (using the existing shape[0]).
+          already_expanded_buffer_remaps_.Set(buf, buf);
+          LOG(WARNING) << "Buffer " << buf->name
+                       << " is shared across sibling Pipelined loops with "
+                          "different num_stages.  The second loop will reuse "
+                          "the existing pipeline expansion ("
+                       << buf->shape[0]
+                       << " versions) instead of re-expanding.";
+        } else {
+          filtered_allocs.push_back(buf);
+        }
+      }
+      pipeline_allocs = std::move(filtered_allocs);
+    }
+
     Optional<Array<Integer>> replayable_bind_mask;
     if (auto replayable_bind_anno =
             op->annotations.Get(kPipelineReplayableScalarBinds)) {
@@ -653,6 +691,14 @@ private:
     PipelineRewriteResult rewrite_result = RewritePipeline(
         buffer_data_to_buffer_, pipeline_allocs, local_allocs, for_node,
         pipeline_info, scalar_binding_blocks, target_);
+
+    // Merge identity remaps for already-expanded buffers so the second
+    // pipeline's version indexing is applied to the existing buffer.
+    for (const auto &[buf, _] : already_expanded_buffer_remaps_) {
+      rewrite_result.buffer_remap.Set(buf, buf);
+    }
+    already_expanded_buffer_remaps_.clear();
+
     Stmt pipeline = rewrite_result.pipeline;
     subtree_modified_ = true;
 
@@ -957,6 +1003,7 @@ private:
   Map<Var, Buffer> buffer_data_to_buffer_;
   std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual> allocated_buffers_;
   Map<Buffer, Buffer> pending_buffer_remap_;
+  Map<Buffer, Buffer> already_expanded_buffer_remaps_;
   std::vector<std::pair<Buffer, Buffer>> pending_layout_remapped_allocs_;
   Optional<Target> target_;
   Optional<String> global_symbol_;
