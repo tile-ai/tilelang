@@ -54,6 +54,27 @@ def _make_bf16_ss_and_rs_gemm():
     return main
 
 
+def _make_fp16_transposed_a_ss_gemm():
+    @T.prim_func
+    def main(
+        A: T.Tensor((16, 64), T.float16),
+        B: T.Tensor((16, 16), T.float16),
+        C: T.Tensor((64, 16), T.float32),
+    ):
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared((16, 64), T.float16)
+            B_shared = T.alloc_shared((16, 16), T.float16)
+            C_local = T.alloc_fragment((64, 16), T.float32)
+
+            T.copy(A, A_shared)
+            T.copy(B, B_shared)
+            T.clear(C_local)
+            T.gemm(A_shared, B_shared, C_local, transpose_A=True, policy=T.GemmWarpPolicy.FullRow)
+            T.copy(C_local, C)
+
+    return main
+
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_eq(7, 0)
 def test_sm70_bf16_ss_gemm_uses_fma_fallback():
@@ -83,6 +104,21 @@ def test_sm70_bf16_rs_gemm_uses_fma_fallback():
     ref = p.float() @ b.float()
 
     tilelang.testing.torch_assert_close(c, ref, rtol=2e-2, atol=2e-2, max_mismatched_ratio=0.01)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(7, 0)
+def test_sm70_fp16_transposed_a_uses_fma_fallback():
+    kernel = tilelang.compile(_make_fp16_transposed_a_ss_gemm(), target="cuda", out_idx=[2])
+    source = kernel.get_kernel_source()
+    assert "mma_sync_sm70" not in source
+
+    a = torch.randn((16, 64), device="cuda", dtype=torch.float16) * 0.25
+    b = torch.randn((16, 16), device="cuda", dtype=torch.float16) * 0.25
+    c = kernel(a, b)
+    ref = a.t().float() @ b.float()
+
+    tilelang.testing.torch_assert_close(c, ref, rtol=1e-2, atol=1e-2, max_mismatched_ratio=0.01)
 
 
 if __name__ == "__main__":

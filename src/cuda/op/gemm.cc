@@ -101,6 +101,9 @@ bool AllowVoltaMma(const GemmNode &op) {
   if (!scope_ok) {
     return false;
   }
+  if (op.transA_) {
+    return false;
+  }
   if (op.a_->dtype != DataType::Float(16) ||
       op.b_->dtype != DataType::Float(16)) {
     return false;
