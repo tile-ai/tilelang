@@ -195,12 +195,14 @@ def gemm_persistent_2cta(
                             A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K],
                             A_shared[phase % num_stages, :, :],
                             barrier=loaded[phase % num_stages],
+                            barrier_rank=0,
                         )
 
                         T.tma_copy(
                             B[k * block_K : (k + 1) * block_K, (by * 2 + cta_id) * block_N // 2 : (by * 2 + cta_id + 1) * block_N // 2],
                             B_shared[phase % num_stages, :, :],
                             barrier=loaded[phase % num_stages],
+                            barrier_rank=0,
                         )
                         T.mbarrier_arrive(loaded[phase % num_stages], 0)
 

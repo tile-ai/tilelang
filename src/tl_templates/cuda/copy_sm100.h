@@ -6,6 +6,7 @@
 
 #include "barrier.h"
 #include "common.h"
+#include "copy_sm90.h"
 #include "cuda_fp8.h"
 #include "tcgen_05.h"
 #include "tcgen_05_ld.h"
@@ -289,24 +290,16 @@ tcgen05_st_32dp256bNx(uint32_t const &tmem_start_col,
   tl::fence_view_async_tmem_store();
 }
 
-/*q SM100 TMA 2SM load (cta_group::2) */
-
-enum class CacheHintSm100 : uint64_t {
-  EVICT_NORMAL = 0x1000000000000000,
-  EVICT_FIRST = 0x12F0000000000000,
-  EVICT_LAST = 0x14F0000000000000,
-};
+/* SM100 TMA 2SM load (cta_group::2). Uses CacheHintSm90 from copy_sm90.h. */
 
 constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
 
-template <CacheHintSm100 cache_hint = CacheHintSm100::EVICT_NORMAL,
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL,
           typename BarrierType = uint64_t>
 TL_DEVICE void tma_load_2sm(const CUtensorMap &descriptor,
                             BarrierType &smem_mbar, void const *const smem_ptr,
                             int32_t const &crd0) {
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
-  // Executed by both CTAs. Set peer bit to 0 so that the
-  // transaction bytes will update CTA0's barrier.
   uint32_t smem_int_mbar;
   if constexpr (std::is_pointer_v<BarrierType>) {
     smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(smem_mbar));
@@ -324,14 +317,12 @@ TL_DEVICE void tma_load_2sm(const CUtensorMap &descriptor,
                : "memory");
 }
 
-template <CacheHintSm100 cache_hint = CacheHintSm100::EVICT_NORMAL,
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL,
           typename BarrierType = uint64_t>
 TL_DEVICE void tma_load_2sm(const CUtensorMap &descriptor,
                             BarrierType &smem_mbar, void const *const smem_ptr,
                             int32_t const &crd0, int32_t const &crd1) {
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
-  // Executed by both CTAs. Set peer bit to 0 so that the
-  // transaction bytes will update CTA0's barrier.
   uint32_t smem_int_mbar;
   if constexpr (std::is_pointer_v<BarrierType>) {
     smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(smem_mbar));
@@ -349,15 +340,13 @@ TL_DEVICE void tma_load_2sm(const CUtensorMap &descriptor,
                : "memory");
 }
 
-template <CacheHintSm100 cache_hint = CacheHintSm100::EVICT_NORMAL,
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL,
           typename BarrierType = uint64_t>
 TL_DEVICE void tma_load_2sm(const CUtensorMap &descriptor,
                             BarrierType &smem_mbar, void const *const smem_ptr,
                             int32_t const &crd0, int32_t const &crd1,
                             int32_t const &crd2) {
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
-  // Executed by both CTAs. Set peer bit to 0 so that the
-  // transaction bytes will update CTA0's barrier.
   uint32_t smem_int_mbar;
   if constexpr (std::is_pointer_v<BarrierType>) {
     smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(smem_mbar));
@@ -375,15 +364,13 @@ TL_DEVICE void tma_load_2sm(const CUtensorMap &descriptor,
                : "memory");
 }
 
-template <CacheHintSm100 cache_hint = CacheHintSm100::EVICT_NORMAL,
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL,
           typename BarrierType = uint64_t>
 TL_DEVICE void tma_load_2sm(const CUtensorMap &descriptor,
                             BarrierType &smem_mbar, void const *const smem_ptr,
                             int32_t const &crd0, int32_t const &crd1,
                             int32_t const &crd2, int32_t const &crd3) {
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
-  // Executed by both CTAs. Set peer bit to 0 so that the
-  // transaction bytes will update CTA0's barrier.
   uint32_t smem_int_mbar;
   if constexpr (std::is_pointer_v<BarrierType>) {
     smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(smem_mbar));
@@ -401,7 +388,7 @@ TL_DEVICE void tma_load_2sm(const CUtensorMap &descriptor,
                : "memory");
 }
 
-template <CacheHintSm100 cache_hint = CacheHintSm100::EVICT_NORMAL,
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL,
           typename BarrierType = uint64_t>
 TL_DEVICE void tma_load_2sm(const CUtensorMap &descriptor,
                             BarrierType &smem_mbar, void const *const smem_ptr,
@@ -409,8 +396,6 @@ TL_DEVICE void tma_load_2sm(const CUtensorMap &descriptor,
                             int32_t const &crd2, int32_t const &crd3,
                             int32_t const &crd4) {
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
-  // Executed by both CTAs. Set peer bit to 0 so that the
-  // transaction bytes will update CTA0's barrier.
   uint32_t smem_int_mbar;
   if constexpr (std::is_pointer_v<BarrierType>) {
     smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(smem_mbar));
@@ -451,6 +436,31 @@ TL_DEVICE void tma_load_gather4(const CUtensorMap &descriptor,
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile("cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4."
                "mbarrier::complete_tx::bytes.L2::cache_hint"
+               " [%0], [%1, {%3, %4, %5, %6, %7}], [%2], %8;"
+               :
+               : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
+                 "r"(col), "r"(r0), "r"(r1), "r"(r2), "r"(r3), "l"(cache_hint)
+               : "memory");
+}
+
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL,
+          typename BarrierType = uint64_t>
+TL_DEVICE void
+tma_load_gather4_2sm(const CUtensorMap &descriptor, BarrierType &smem_mbar,
+                     void const *const smem_ptr, int32_t const &col,
+                     int32_t const &r0, int32_t const &r1, int32_t const &r2,
+                     int32_t const &r3) {
+  uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
+  uint32_t smem_int_mbar;
+  if constexpr (std::is_pointer_v<BarrierType>) {
+    smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(smem_mbar));
+  } else {
+    smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(&smem_mbar));
+  }
+  smem_int_mbar &= Sm100MmaPeerBitMask;
+  uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
+  asm volatile("cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4."
+               "mbarrier::complete_tx::bytes.L2::cache_hint.cta_group::2"
                " [%0], [%1, {%3, %4, %5, %6, %7}], [%2], %8;"
                :
                : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),

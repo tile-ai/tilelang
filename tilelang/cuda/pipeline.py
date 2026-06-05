@@ -68,11 +68,6 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     if allow_warp_specialized(target=target):
         mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
 
-    # @CUDA / Blackwell specific
-    # Lower 2SM TCGEN5MMA and related on Blackwell target (must run before
-    # LayoutInference so that the use_2cta annotation is visible to infer_layout)
-    mod = tilelang.cuda.transform.LowerBlackwell2SM()(mod)
-
     # Normalize if-without-else wrappers before pipeline planning. This keeps
     # pipeline body extraction focused on canonical SeqStmt bodies.
     mod = tilelang.transform.IfStmtBinding()(mod)

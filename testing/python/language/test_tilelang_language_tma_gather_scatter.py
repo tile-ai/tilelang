@@ -8,20 +8,6 @@ import tilelang.language as T
 import tilelang
 
 
-def _has_sm100():
-    try:
-        import torch
-    except ImportError:
-        return False
-    if not torch.cuda.is_available():
-        return False
-    major, _ = torch.cuda.get_device_capability(0)
-    return major >= 10
-
-
-requires_sm100 = pytest.mark.skipif(not _has_sm100(), reason="tile::gather4/scatter4 require sm_100a (Blackwell)")
-
-
 def gather_scatter_program(N: int, K: int, K_box: int, in_dtype: str = "float16"):
 
     @T.prim_func
@@ -31,9 +17,6 @@ def gather_scatter_program(N: int, K: int, K_box: int, in_dtype: str = "float16"
         Dst: T.Tensor((N, K), in_dtype),
     ):
         with T.Kernel(1, 1, threads=128) as (bx, by):
-            T.reads(Src[0:N, 0:K], Idx[0:4])
-            T.writes(Dst[0:N, 0:K])
-
             smem = T.alloc_shared((4, K_box), in_dtype)
             mbar = T.alloc_barrier(1)
 
@@ -87,7 +70,7 @@ def run_gather_scatter(N=64, K=64, K_box=64):
     torch.testing.assert_close(Dst, expected)
 
 
-@requires_sm100
+@tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 def test_gather_scatter_basic():
     run_gather_scatter(N=64, K=64, K_box=64)
 
@@ -118,9 +101,6 @@ def gather_scatter_swizzled_program(N: int, K: int, K_box: int, swizzle_kind: st
         Dst: T.Tensor((N, K), in_dtype),
     ):
         with T.Kernel(1, 1, threads=128) as (bx, by):
-            T.reads(Src[0:N, 0:K], Idx[0:4])
-            T.writes(Dst[0:N, 0:K])
-
             smem = T.alloc_shared((4, K_box), in_dtype)
             T.annotate_layout({smem: make_layout(smem)})
 
@@ -175,7 +155,34 @@ def run_gather_scatter_swizzled(N, K, K_box, swizzle_kind):
     torch.testing.assert_close(Dst, expected)
 
 
-@requires_sm100
+@tilelang.testing.requires_cuda_compute_version_ge(10, 0)
+def test_gather4_2sm_codegen():
+    """Compile-time check for 2-CTA gather4 lowering (no GPU run)."""
+
+    @T.prim_func
+    def main(
+        Src: T.Tensor((64, 64), "float16"),
+        Idx: T.Tensor((4,), "int32"),
+    ):
+        with T.Kernel(2, 1, 1, threads=128) as _:
+            smem = T.alloc_shared((4, 64), "float16")
+            mbar = T.alloc_cluster_barrier(1)
+            r0, r1, r2, r3 = Idx[0], Idx[1], Idx[2], Idx[3]
+            if T.shuffle_elect(128):
+                T.tma_gather4(Src, smem, 0, [r0, r1, r2, r3], barrier=mbar, barrier_rank=0)
+
+    kernel = tilelang.compile(
+        main,
+        target="cuda",
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        },
+    )
+    src = kernel.get_kernel_source()
+    assert "tma_load_gather4_2sm" in src
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 @pytest.mark.parametrize(
     "K_box, swizzle_kind",
     [

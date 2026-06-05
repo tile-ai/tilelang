@@ -2371,12 +2371,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto eviction_policy =
         this->eviction_policy_names_
             [op->args[op->args.size() - 1].as<IntImmNode>()->value];
+    std::optional<int> barrier_rank;
+    if (auto ann = op->annotations.Get("barrier_rank")) {
+      barrier_rank = static_cast<int>(Downcast<IntImm>(ann.value())->value);
+    }
     // Simplify the code by using the default eviction policy
-    if (op->annotations.find("use_2cta") != op->annotations.end() &&
-        Downcast<Bool>(op->annotations["use_2cta"])->value) {
+    if (barrier_rank.has_value()) {
+      ICHECK_EQ(barrier_rank.value(), 0)
+          << "tl::tma_load barrier_rank must be 0 (leader CTA)";
       if (eviction_policy != "EVICT_NORMAL") {
-        ss << "tl::tma_load_2sm<tl::CacheHintSm100::" << eviction_policy
-           << ">(";
+        ss << "tl::tma_load_2sm<tl::CacheHintSm90::" << eviction_policy << ">(";
       } else {
         ss << "tl::tma_load_2sm(";
       }
@@ -2455,7 +2459,20 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto eviction_policy =
         this->eviction_policy_names_
             [op->args[op->args.size() - 1].as<IntImmNode>()->value];
-    if (eviction_policy != "EVICT_NORMAL") {
+    std::optional<int> barrier_rank;
+    if (auto ann = op->annotations.Get("barrier_rank")) {
+      barrier_rank = static_cast<int>(Downcast<IntImm>(ann.value())->value);
+    }
+    if (barrier_rank.has_value()) {
+      ICHECK_EQ(barrier_rank.value(), 0)
+          << "tl::tma_load_gather4 barrier_rank must be 0 (leader CTA)";
+      if (eviction_policy != "EVICT_NORMAL") {
+        ss << "tl::tma_load_gather4_2sm<tl::CacheHintSm90::" << eviction_policy
+           << ">";
+      } else {
+        ss << "tl::tma_load_gather4_2sm";
+      }
+    } else if (eviction_policy != "EVICT_NORMAL") {
       ss << "tl::tma_load_gather4<tl::CacheHintSm90::" << eviction_policy
          << ">";
     } else {
