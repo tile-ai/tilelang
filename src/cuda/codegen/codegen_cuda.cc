@@ -1420,6 +1420,15 @@ void CodeGenTileLangCUDA::PrintVecElemStore(const std::string &vec, DataType t,
   }
 }
 
+void CodeGenTileLangCUDA::PrintVecConstructor(DataType t, std::ostream &os) {
+  int lanes = t.lanes();
+  if (t.is_float() && t.bits() == 32 && lanes >= 2 && lanes <= 4) {
+    os << "make_float" << lanes;
+    return;
+  }
+  CodeGenC::PrintVecConstructor(t, os);
+}
+
 void CodeGenTileLangCUDA::PrintStorageSync(const CallNode *op) {
   auto args = op->args;
   const std::string &sync = args[0].as<StringImmNode>()->value;
