@@ -48,6 +48,39 @@ def unwrap_expr(expr) -> PrimExpr | int | float:
     return expr
 
 
+def _dtype_total_bits(dtype: dt.dtype) -> int:
+    return dtype.bits * dtype.lanes
+
+
+def _packed_storage_factor(buffer: Buffer, value) -> int:
+    if isinstance(value, Buffer):
+        return 1
+
+    logical_bits = _dtype_total_bits(buffer.dtype)
+    if logical_bits >= 8:
+        return 1
+
+    storage_dtype = dt.dtype(value.dtype)
+    return _dtype_total_bits(storage_dtype) // logical_bits
+
+
+def _logical_shape_value(value, buffer: Buffer, dim: int):
+    shape = value.shape[dim]
+    if dim == len(buffer.shape) - 1:
+        shape *= _packed_storage_factor(buffer, value)
+    return shape
+
+
+def _logical_stride_value(value, buffer: Buffer, dim: int):
+    if isinstance(value, Buffer):
+        return value.strides[dim]
+
+    stride = value.stride()[dim]
+    if dim != len(buffer.strides) - 1:
+        stride *= _packed_storage_factor(buffer, value)
+    return stride
+
+
 def unwrap_cond(expr):
     """
     unwrap expr and convert to bool condition
@@ -1042,18 +1075,17 @@ class TirTemplate(Generic[_P, _T]):
         if self.matcher is None:
             return ()
         result = []
+        buffers = {param.name: buffer for param, buffer in self.prim_func.buffer_map.items()}
         for k, ty, i, name in self.matcher.values():
             if name in kwargs:
                 result.append(kwargs.get(name))
             elif k in kwargs:
+                value = kwargs[k]
+                buffer = buffers[k]
                 if ty == "shape":
-                    result.append(kwargs[k].shape[i])
+                    result.append(_logical_shape_value(value, buffer, i))
                 elif ty == "stride":
-                    v = kwargs[k]
-                    if isinstance(v, Buffer):
-                        result.append(v.strides[i])
-                    else:
-                        result.append(kwargs[k].stride()[i])
+                    result.append(_logical_stride_value(value, buffer, i))
             else:
                 raise ValueError(
                     f"Cannot find value for constexpr variable `{name}`\n"
