@@ -1,5 +1,6 @@
 import tilelang
 import tilelang.testing
+import pytest
 from tilelang import language as T
 
 
@@ -30,6 +31,33 @@ def test_tilelang_issue_layout_free_inference_choose_smallest_replication():
     assert "float S_frag[4];" in source, "S_frag is not in the source"
     assert "float B_frag[4];" in source, "B_frag is not in the source"
     assert "float A_frag[4];" in source, "A_frag is not in the source"
+
+
+@tilelang.jit
+def _invalid_fragment_write_owner_layout():
+    def token_loop_layout_fn(i, j, rep):
+        return i * 4 + rep % 4 + (rep // 4) * 32, j
+
+    def scalar_buffer_layout_fn(i, j, rep):
+        return i * 4 + j + rep * 32, 0
+
+    loop_layout = T.Fragment((8, 4), forward_fn=token_loop_layout_fn, replicate=8)
+    buffer_layout = T.Fragment((8, 4), forward_fn=scalar_buffer_layout_fn, replicate=2)
+
+    @T.prim_func
+    def main():
+        with T.Kernel(1, threads=64):
+            frag = T.alloc_fragment((8, 4), T.float32)
+            T.annotate_layout({frag: buffer_layout})
+            for i, j in T.Parallel(8, 4, loop_layout=loop_layout):
+                frag[i, j] = T.float32(1.0)
+
+    return main
+
+
+def test_reject_fragment_write_from_non_owner_threads():
+    with pytest.raises(Exception, match="Layout infer conflict"):
+        _invalid_fragment_write_owner_layout()
 
 
 if __name__ == "__main__":

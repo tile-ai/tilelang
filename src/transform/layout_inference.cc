@@ -668,7 +668,7 @@ private:
   void VisitStmt_(const ForNode *op) final {
     if (op->kind == ForKind::kParallel) {
       auto infer = ParallelOp(GetRef<For>(op));
-      for (const auto &[buffer, _] : infer->GetIndiceMap()) {
+      for (const auto &buffer : infer->GetAccessOrder()) {
         addToUseList(buffer);
       }
 
