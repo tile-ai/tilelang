@@ -665,9 +665,14 @@ bool ParallelOpNode::ValidateCandidateAgainstFragments(
       }
       success = false;
     }
+    // Fragment writes need exact owner-thread compatibility. Coverage alone
+    // allows extra loop threads to write local slots that belong to different
+    // logical fragment elements under the buffer layout.
     if (access.is_write &&
-        !ProveFragmentContains(fragment, candidate, access.indices, vars,
-                               analyzer_, check_forward_index)) {
+        (!ProveFragmentContains(fragment, candidate, access.indices, vars,
+                                analyzer_, check_forward_index) ||
+         !ProveFragmentContains(candidate, fragment, vars, access.indices,
+                                analyzer_, check_forward_index))) {
       if (throw_on_error) {
         oss << "Layout infer conflict between " << buffer << " and "
             << source_buffer << " in T.Parallel loop:" << '\n'
