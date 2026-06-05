@@ -595,6 +595,19 @@ def have_pdl(target):
     return major >= 9
 
 
+def have_mbarrier(target):
+    """Whether hardware mbarrier support (the cutlass Barrier type,
+    tl_shuffle_elect, fence_barrier_init) is available on the target.
+
+    Available on Hopper (sm_90) and later architectures.
+    """
+    if target.kind.name != "cuda":
+        return False
+    compute_version = get_target_compute_version(target)
+    major, minor = parse_compute_version(compute_version)
+    return major >= 9
+
+
 def get_nvcc_compiler() -> str:
     """Get the path to the nvcc compiler"""
     return os.path.join(find_cuda_path(), "bin", "nvcc")
