@@ -48,6 +48,39 @@ def unwrap_expr(expr) -> PrimExpr | int | float:
     return expr
 
 
+def _dtype_total_bits(dtype: dt.dtype) -> int:
+    return dtype.bits * dtype.lanes
+
+
+def _packed_storage_factor(buffer: Buffer, value) -> int:
+    if isinstance(value, Buffer):
+        return 1
+
+    logical_bits = _dtype_total_bits(buffer.dtype)
+    if logical_bits >= 8:
+        return 1
+
+    storage_dtype = dt.dtype(value.dtype)
+    return _dtype_total_bits(storage_dtype) // logical_bits
+
+
+def _logical_shape_value(value, buffer: Buffer, dim: int):
+    shape = value.shape[dim]
+    if dim == len(buffer.shape) - 1:
+        shape *= _packed_storage_factor(buffer, value)
+    return shape
+
+
+def _logical_stride_value(value, buffer: Buffer, dim: int):
+    if isinstance(value, Buffer):
+        return value.strides[dim]
+
+    stride = value.stride()[dim]
+    if dim != len(buffer.strides) - 1:
+        stride *= _packed_storage_factor(buffer, value)
+    return stride
+
+
 def unwrap_cond(expr):
     """
     unwrap expr and convert to bool condition
@@ -1047,26 +1080,12 @@ class TirTemplate(Generic[_P, _T]):
             if name in kwargs:
                 result.append(kwargs.get(name))
             elif k in kwargs:
+                value = kwargs[k]
+                buffer = buffers[k]
                 if ty == "shape":
-                    value = kwargs[k]
-                    shape = value.shape[i]
-                    buffer = buffers[k]
-                    if not isinstance(value, Buffer) and i == len(buffer.shape) - 1 and buffer.dtype.bits * buffer.dtype.lanes < 8:
-                        # Runtime tensors store sub-byte dtypes packed; constexprs need the logical extent.
-                        runtime_dtype = dt.dtype(value.dtype)
-                        shape = shape * runtime_dtype.bits * runtime_dtype.lanes // (buffer.dtype.bits * buffer.dtype.lanes)
-                    result.append(shape)
+                    result.append(_logical_shape_value(value, buffer, i))
                 elif ty == "stride":
-                    v = kwargs[k]
-                    if isinstance(v, Buffer):
-                        result.append(v.strides[i])
-                    else:
-                        stride = v.stride()[i]
-                        buffer = buffers[k]
-                        if i != len(buffer.strides) - 1 and buffer.dtype.bits * buffer.dtype.lanes < 8:
-                            runtime_dtype = dt.dtype(v.dtype)
-                            stride = stride * runtime_dtype.bits * runtime_dtype.lanes // (buffer.dtype.bits * buffer.dtype.lanes)
-                        result.append(stride)
+                    result.append(_logical_stride_value(value, buffer, i))
             else:
                 raise ValueError(
                     f"Cannot find value for constexpr variable `{name}`\n"
