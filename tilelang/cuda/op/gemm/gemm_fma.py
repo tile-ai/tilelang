@@ -24,10 +24,10 @@ def _linear_fragment(local_buf, thread_nums: int) -> T.Fragment:
     """Round-robin a multi-dim fragment across threads.
 
     The buffer is flattened in row-major order and each element ``flat`` is
-    mapped to ``(flat % thread_nums, flat // thread_nums)`` — i.e. thread id
+    mapped to ``(flat % thread_nums, flat // thread_nums)``: thread id
     and per-thread local index. This is the simplest layout that gives every
-    thread an equal share of the tile and is sufficient for the FMA fallback
-    where throughput is bound by scalar CUDA-core FFMA, not by layout choice.
+    thread an equal share of the tile. The FMA path is a correctness fallback,
+    not a performance-tuned replacement for tensor-core MMA.
     """
     shape = list(local_buf.shape)
     strides = [1 for _ in shape]
@@ -67,12 +67,12 @@ class GemmFMA(GemmBase):
     ):
         """Emit the FMA-fallback GEMM prim_func.
 
-        Stages ``A`` and ``B`` into shared memory cooperatively, then has each
-        thread accumulate its assigned output elements with a scalar
-        ``C[i, j] += cast(A[..]) * cast(B[..])`` loop over ``K`` — nvcc lowers
-        the cast/multiply/add chain to ``FFMA``. Casts widen the operands to
-        ``accum_dtype`` before multiplication so the path stays numerically
-        sound for narrow input dtypes (e.g. BF16 → FP32 accumulation on Volta).
+        Stages ``A`` and ``B`` into shared memory cooperatively, then lets each
+        thread accumulate its assigned output elements with a scalar loop over
+        ``K``. Casts widen operands to ``accum_dtype`` before multiplication so
+        narrow input dtypes stay numerically sound (e.g. BF16 to FP32
+        accumulation on Volta). This path favors correctness and coverage over
+        peak throughput.
         """
         M, N, K = self.M, self.N, self.K
         A_region = self.ARegion
@@ -86,6 +86,10 @@ class GemmFMA(GemmBase):
         assert len(A_region.region) >= 2, "FMA GEMM requires at least 2D A"
         assert len(B_region.region) >= 2, "FMA GEMM requires at least 2D B"
         assert len(C_region.region) >= 2, "FMA GEMM requires at least 2D C"
+        if is_fragment(self.A):
+            assert is_full_region(A_region), "Fragment input A must be a full region"
+        if is_fragment(self.B):
+            assert is_full_region(B_region), "Fragment input B must be a full region"
         if is_fragment(self.C):
             assert is_full_region(C_region), "Fragment output C must be a full region"
 
@@ -116,6 +120,7 @@ class GemmFMA(GemmBase):
             """Stage A/B into shared memory, then accumulate C via scalar FMA."""
             A_stage = T.alloc_shared((a_rows, a_cols), in_dtype)
             B_stage = T.alloc_shared((b_rows, b_cols), in_dtype)
+            accum = T.alloc_local((1,), accum_dtype)
 
             for a_flat in T.serial(thread_var, a_rows * a_cols, thread_nums):
                 ai = a_flat // a_cols
@@ -131,12 +136,13 @@ class GemmFMA(GemmBase):
                 i = c_flat // N
                 j = c_flat % N
                 if clear_accum:
-                    C_buf[tuple(C_other) + (c0 + i, c1 + j)] = T.cast(0, accum_dtype)
+                    accum[0] = T.cast(0, accum_dtype)
+                else:
+                    accum[0] = T.cast(C_buf[tuple(C_other) + (c0 + i, c1 + j)], accum_dtype)
                 for k in T.serial(K):
-                    C_buf[tuple(C_other) + (c0 + i, c1 + j)] += T.cast(
-                        T.cast(A_stage[k if trans_A else i, i if trans_A else k], accum_dtype)
-                        * T.cast(B_stage[j if trans_B else k, k if trans_B else j], accum_dtype),
-                        accum_dtype,
+                    accum[0] += T.cast(A_stage[k if trans_A else i, i if trans_A else k], accum_dtype) * T.cast(
+                        B_stage[j if trans_B else k, k if trans_B else j], accum_dtype
                     )
+                C_buf[tuple(C_other) + (c0 + i, c1 + j)] = accum[0]
 
         return _Simplify(_gemm_fma, inline_let=True)

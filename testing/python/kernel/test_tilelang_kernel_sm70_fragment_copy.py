@@ -37,6 +37,8 @@ def _make_fragment_cast_into_rs_gemm():
 @tilelang.testing.requires_cuda_compute_version_eq(7, 0)
 def test_sm70_fragment_cast_copy_feeds_rs_gemm():
     kernel = tilelang.compile(_make_fragment_cast_into_rs_gemm(), target="cuda", out_idx=[2])
+    source = kernel.get_kernel_source()
+    assert "tl_frag_copy" not in source
 
     a = torch.randn((64, 16), device="cuda", dtype=torch.float16)
     b = torch.randn((16, 16), device="cuda", dtype=torch.float16)
