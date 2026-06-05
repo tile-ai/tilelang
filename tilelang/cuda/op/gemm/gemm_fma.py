@@ -111,15 +111,16 @@ class GemmFMA(GemmBase):
         trans_A = self.trans_A
         trans_B = self.trans_B
         clear_accum = self.clear_accum
-        in_dtype = self.in_dtype
+        a_dtype = self.a_dtype
+        b_dtype = self.b_dtype
         accum_dtype = self.accum_dtype
         thread_nums = thread_bounds.extent
 
         @T.prim_func
         def _gemm_fma() -> None:
             """Stage A/B into shared memory, then accumulate C via scalar FMA."""
-            A_stage = T.alloc_shared((a_rows, a_cols), in_dtype)
-            B_stage = T.alloc_shared((b_rows, b_cols), in_dtype)
+            A_stage = T.alloc_shared((a_rows, a_cols), a_dtype)
+            B_stage = T.alloc_shared((b_rows, b_cols), b_dtype)
             accum = T.alloc_local((1,), accum_dtype)
 
             for a_flat in T.serial(thread_var, a_rows * a_cols, thread_nums):
