@@ -35,6 +35,11 @@ _FLOAT8_DTYPES = {
 GEMM_INST_TCGEN05 = "cuda.tcgen05"
 
 
+def _annotation_bool(annotations: dict, key: str) -> bool:
+    value = annotations.get(key, 0)
+    return bool(getattr(value, "value", value))
+
+
 class GemmTCGEN5(GemmBase):
     """GEMM operator for Blackwell (SM100) TCGEN5MMA instructions.
 
@@ -107,7 +112,7 @@ class GemmTCGEN5(GemmBase):
         b_is_k_major = self.trans_B
 
         annotations = getattr(self.gemm_node, "annotations", {})
-        use_2cta = bool(annotations.get("use_2cta", 0))
+        use_2cta = _annotation_bool(annotations, "use_2cta")
         mma_emitter.get_tcgen5_mma_meta(self.M, self.N, self.K, disable_2cta=not use_2cta)
 
         if self.is_blockscaled or self.is_gemm_ss():
@@ -171,7 +176,7 @@ class GemmTCGEN5(GemmBase):
             raise ValueError(f"TCGEN5MMA supports gemm_ss and gemm_ts, got A scope {self.A.scope()}, B scope {self.B.scope()}")
 
         annotations = getattr(self.gemm_node, "annotations", {})
-        use_2cta = bool(annotations.get("use_2cta", 0))
+        use_2cta = _annotation_bool(annotations, "use_2cta")
         mma_emitter.get_tcgen5_mma_meta(self.M, self.N, self.K, disable_2cta=not use_2cta)
         atom_m, atom_n, atom_k, enable_ws, enable_2cta = mma_emitter.meta
 
@@ -266,7 +271,8 @@ class GemmTCGEN5(GemmBase):
         del mbar_phase_expr
 
         annotations = getattr(self.gemm_node, "annotations", {})
-        use_2cta = bool(annotations.get("use_2cta", 0))
+        use_2cta = _annotation_bool(annotations, "use_2cta")
+        is_nvfp4 = _annotation_bool(annotations, "is_nvfp4")
         mma_emitter.get_tcgen5_mma_meta(self.M, self.N, self.K, disable_2cta=not use_2cta)
         _atom_m, _atom_n, _atom_k, _enable_ws, enable_2cta = (int(x) for x in mma_emitter.meta)
 
@@ -280,32 +286,54 @@ class GemmTCGEN5(GemmBase):
         @T.prim_func
         def _gemm_blockscaled_cond() -> None:
             if cluster_cond and thread_var // 32 == thread_bounds.min // warp_size:
-                mma_emitter.tcgen05mma_blockscaled(
-                    A_shared,
-                    B_shared,
-                    C_local,
-                    SFA_tmem,
-                    SFB_tmem,
-                    mbarptr,
-                    clear_accum,
-                    sf_a_id,
-                    sf_b_id,
-                )
+                if is_nvfp4:
+                    mma_emitter.tcgen05mma_mxf4nvf4_blockscaled(
+                        A_shared,
+                        B_shared,
+                        C_local,
+                        SFA_tmem,
+                        SFB_tmem,
+                        mbarptr,
+                        clear_accum,
+                    )
+                else:
+                    mma_emitter.tcgen05mma_blockscaled(
+                        A_shared,
+                        B_shared,
+                        C_local,
+                        SFA_tmem,
+                        SFB_tmem,
+                        mbarptr,
+                        clear_accum,
+                        sf_a_id,
+                        sf_b_id,
+                    )
 
         @T.prim_func
         def _gemm_blockscaled() -> None:
             if cluster_cond:
-                mma_emitter.tcgen05mma_blockscaled(
-                    A_shared,
-                    B_shared,
-                    C_local,
-                    SFA_tmem,
-                    SFB_tmem,
-                    mbarptr,
-                    clear_accum,
-                    sf_a_id,
-                    sf_b_id,
-                )
+                if is_nvfp4:
+                    mma_emitter.tcgen05mma_mxf4nvf4_blockscaled(
+                        A_shared,
+                        B_shared,
+                        C_local,
+                        SFA_tmem,
+                        SFB_tmem,
+                        mbarptr,
+                        clear_accum,
+                    )
+                else:
+                    mma_emitter.tcgen05mma_blockscaled(
+                        A_shared,
+                        B_shared,
+                        C_local,
+                        SFA_tmem,
+                        SFB_tmem,
+                        mbarptr,
+                        clear_accum,
+                        sf_a_id,
+                        sf_b_id,
+                    )
 
         return (
             _Simplify(_gemm_blockscaled, inline_let=True)

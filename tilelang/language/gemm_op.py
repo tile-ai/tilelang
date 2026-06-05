@@ -395,6 +395,7 @@ def tcgen05_gemm_blockscaled(
     sf_b_id: int = 0,
     *,
     use_2cta: bool = False,
+    is_nvfp4: bool = False,
 ) -> tirx.PrimExpr:
     """Explicit Blackwell TCGEN05 block-scaled GEMM without an implicit wait.
 
@@ -428,7 +429,11 @@ def tcgen05_gemm_blockscaled(
         use_2cta: Whether to request true ``cta_group::2`` lowering.
     """
 
-    ann = {"use_2cta": int(use_2cta)} if use_2cta else None
+    ann = {}
+    if use_2cta:
+        ann["use_2cta"] = int(use_2cta)
+    if is_nvfp4:
+        ann["is_nvfp4"] = 1
 
     # Re-read normalized regions below after let legalization.
 
@@ -464,6 +469,7 @@ def tcgen05_gemm_blockscaled(
     K = A_shape[-2] if transpose_A else A_shape[-1]
     K_B = B_shape[-1] if transpose_B else B_shape[-2]
     assert prim_expr_equal(K, K_B), f"T.tcgen05_gemm_blockscaled K shape check failed: K_A = {K}, K_B = {K_B}"
+    logical_K = K * 2 if is_nvfp4 and str(A_region.buffer.dtype) == "uint8" and str(B_region.buffer.dtype) == "uint8" else K
     if use_2cta:
         assert prim_expr_equal(M_A, M) and prim_expr_equal(N_B * 2, N), (
             f"T.tcgen05_gemm_blockscaled 2CTA shape check failed: M_A = {M_A}, expected M_C = {M}; N_B = {N_B}, expected N_C / 2 = {N} / 2"
@@ -517,7 +523,7 @@ def tcgen05_gemm_blockscaled(
         transpose_B,
         M,
         N,
-        K,
+        logical_K,
         policy,
         clear_accum,
         stride_a,
