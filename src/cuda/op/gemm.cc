@@ -381,6 +381,13 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                               b_sf_id);
                           return Integer(static_cast<int64_t>(desc));
                         });
+  refl::GlobalDef().def("tl.get_tcgen5_mxf4nvf4_blockscaled_instr_desc",
+                        [](int atom_m, int atom_n, DataType ab_dtype,
+                           int scale_in_a, int scale_in_b, bool is_mxfp4) {
+                          uint32_t desc = GetTCGEN5MXF4NVF4BlockScaledInstrDesc(
+                              atom_m, atom_n, ab_dtype, scale_in_a, scale_in_b, is_mxfp4);
+                          return Integer(static_cast<int64_t>(desc));
+                        });
 }
 
 } // namespace tl

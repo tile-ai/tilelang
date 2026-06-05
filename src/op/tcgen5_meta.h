@@ -313,6 +313,56 @@ inline uint32_t GetTCGEN5BlockScaledInstrDesc(int atom_m, int atom_n,
   return desc;
 }
 
+// Build block-scaled instruction descriptor for mxf4nvf4.block_scale
+// Bit layout: InstrDescriptorBlockScaled (see CUTLASS mma_sm100_desc.hpp)
+inline uint32_t GetTCGEN5MXF4NVF4BlockScaledInstrDesc(int atom_m, int atom_n,
+                                                      DataType ab_dtype,
+                                                      int scale_in_a,
+                                                      int scale_in_b,
+                                                      bool is_mxfp4) {
+
+ICHECK(atom_m % 16 == 0) << "atom_m must be divisible by 16";
+ICHECK(atom_n % 8 == 0) << "atom_n must be divisible by 8";
+ICHECK(scale_in_a == 1 || scale_in_a == -1);
+ICHECK(scale_in_b == 1 || scale_in_b == -1);
+ICHECK(ab_dtype.is_float4_e2m1fn()) << "ab_dtype must be float4_e2m1fn for mxf4nvf4";
+
+
+auto set_bits = [](uint32_t value, int start, int width) -> uint32_t {
+uint32_t mask = (width == 32) ? 0xFFFFFFFFu : ((1u << width) - 1);
+return (value & mask) << start;
+};
+
+
+uint32_t a_neg = (scale_in_a == -1) ? 1u : 0u;
+uint32_t b_neg = (scale_in_b == -1) ? 1u : 0u;
+uint32_t n_dim = static_cast<uint32_t>(atom_n >> 3);
+uint32_t m_dim = static_cast<uint32_t>(atom_m >> 7);
+
+uint32_t desc = 0;
+// bit 0-1 reserved
+desc |= set_bits(0, 2, 1); // sparse_flag
+// bit 3 reserved
+// bit 4-5: b_sf_id, enforce to be 0 for scale_vec::4X, see here https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-b-layout-4x
+// bit 6 reserved
+desc |= set_bits(1, 7, 3);  // a_format, enforce to be 1 for e2m1 format
+desc |= set_bits(1, 10, 2); // b_format, enforce to be 1 for e2m1 format
+// bit 12 reserved
+desc |= set_bits(a_neg, 13, 1);    // a_negate
+desc |= set_bits(b_neg, 14, 1);    // b_negate
+// bit 15-16, enforce to be 0 as AB is fixed non-transposed
+desc |= set_bits(n_dim, 17, 6);    // n_dim
+desc |= set_bits(is_mxfp4 ? 1 : 0, 23, 1);    // scale_format = 1 (E8M0) for mxfp4, 0 (E4M3) for nvf4
+// bit 24-26 reserved
+desc |= set_bits(m_dim, 27, 2);    // m_dim
+// bit 29-30: a_sf_id, enforce to be 0 for scale_vec::4X, 
+desc |= set_bits(static_cast<uint32_t>(a_sf_id), 29, 2); // a_sf_id
+// bit 31 reserved
+
+return desc;
+}
+
+
 } // namespace tl
 } // namespace tvm
 

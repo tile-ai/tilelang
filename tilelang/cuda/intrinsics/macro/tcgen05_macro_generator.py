@@ -445,6 +445,150 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         )
         return lift(desc)
 
+    def tcgen05mma_mxf4nvf4_blockscaled(
+        self,
+        A_buf: Buffer,
+        B_buf: Buffer,
+        C_local_buf: Buffer,
+        SFA_tmem,
+        SFB_tmem,
+        mbar,
+        clear_accum: PrimExpr = False,
+    ):
+        """Emit a mxf4nvf4 block-scaled TCGEN5MMA (SS variant with TMEM scale factors).
+
+        Uses ``tcgen05.mma.cta_group::1|2.kind::mxf4nvf4.block_scale`` PTX instruction.
+        Scale factors must already reside in tensor memory.
+        """
+        m_dim = self.block_row_warps * self.warp_row_tiles
+        micro_size_k = self.micro_size_k
+        k_dim, n_dim = self.chunk, self.block_col_warps * self.warp_col_tiles
+
+        assert k_dim >= micro_size_k
+        assert (not self.a_transposed) and (not self.b_transposed), "A and B must be non-transposed/K-major for mxf4nvf4 block-scaled"
+
+        a_swizzle_mode = self._determinate_swizzle_mode(A_buf, self.a_shared_layout)
+
+        a_elems_in_bytes = (DataType(self.a_dtype).bits + 7) // 8
+
+        if len(self.meta) != 5:
+            self.get_tcgen5_mma_meta(m_dim, n_dim, k_dim, disable_2cta=False)
+        if len(self.meta) != 5:
+            raise ValueError(
+                f"Unsupported TCGEN5MMA configuration for block-scaled: M={m_dim}, N={n_dim}, "
+                f"K={k_dim}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
+            )
+        atom_m, atom_n, _, _, enable_2cta = self.tcgen05_meta_unpacked
+        atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
+
+        a_swizzle_atom_elems = atom_m_per_cta if a_swizzle_mode.is_none() else (a_swizzle_mode.swizzle_byte_size() * 8) // DataType(self.a_dtype).bits
+        # Block-scaled A LBO/SBO differ from regular SS (uses atom_m_per_cta instead of m_dim)
+
+        # Below computation assumes A is K-major
+        if a_swizzle_mode.is_none():
+            a_leading_byte_offset = 16 // 2  # per 8x2 tile, each has 8 bytes
+            a_stride_byte_offset = 8 * k_dim // 2  # the offset from the first 8 rows to the next 8 rows.
+        else:
+            a_leading_byte_offset = 1  # not used, fixed to 1
+            a_stride_byte_offset = 8 * k_dim // 2  # the offset from the first 8 rows to the next 8 rows.
+
+        a_params = TCGEN05DescriptorParams(
+            swizzle_mode=int(a_swizzle_mode),
+            leading_byte_offset=int(a_leading_byte_offset >> 4),
+            stride_byte_offset=int(a_stride_byte_offset >> 4),
+            swizzle_atom_elems=a_swizzle_atom_elems,
+            k_atom_size=max(a_swizzle_atom_elems // micro_size_k, 1),
+            elems_in_bytes=a_elems_in_bytes,
+            is_k_major=True,
+        )
+
+        # Below computation assumes B is K-major
+        b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
+        b_elems_in_bytes = (DataType(self.b_dtype).bits + 7) // 8
+        n_dim_per_cta = n_dim // 2 if enable_2cta else n_dim
+        b_swizzle_atom_elems = (
+            n_dim_per_cta
+            if b_swizzle_mode.is_none()
+            else (b_swizzle_mode.swizzle_byte_size() * 8) // DataType(self.b_dtype).bits
+        )
+
+        if b_swizzle_mode.is_none():
+            b_leading_byte_offset = 16 // 2  # per 8x2 tile, each has 8 bytes
+            b_stride_byte_offset = 8 * k_dim // 2  # the offset from the first 8 rows to the next 8 rows.
+        else:
+            b_leading_byte_offset = 1  # not used, fixed to 1
+            b_stride_byte_offset = 8 * k_dim // 2  # the offset from the first 8 rows to the next 8 rows.
+        b_params = TCGEN05DescriptorParams(
+            swizzle_mode=int(b_swizzle_mode),
+            leading_byte_offset=int(b_leading_byte_offset >> 4),
+            stride_byte_offset=int(b_stride_byte_offset >> 4),
+            swizzle_atom_elems=b_swizzle_atom_elems,
+            k_atom_size=max(b_swizzle_atom_elems // micro_size_k, 1),
+            elems_in_bytes=b_elems_in_bytes,
+            is_k_major=True,
+        )
+
+        sf_dtype = DataType(SFA_tmem.dtype)
+        is_mxfp4 = sf_dtype == DataType("float8_e8m0fnu") or sf_dtype == DataType("uint8")  # UE8M0 storage
+
+        inst_desc = _ffi_api.get_tcgen5_mxf4nvf4_blockscaled_instr_desc(
+            atom_m,
+            atom_n,
+            DataType(self.a_dtype),
+            1,
+            1,
+            is_mxfp4,
+        )
+        instr_desc = lift(inst_desc)
+
+        if isinstance(SFA_tmem, BufferRegion):
+            sfa_data = SFA_tmem.buffer.data
+        elif isinstance(SFA_tmem, Buffer):
+            sfa_data = SFA_tmem.data
+        else:
+            raise ValueError(f"Unsupported SFA_tmem type: {type(SFA_tmem)}")
+
+        if isinstance(SFB_tmem, BufferRegion):
+            sfb_data = SFB_tmem.buffer.data
+        elif isinstance(SFB_tmem, Buffer):
+            sfb_data = SFB_tmem.data
+        else:
+            raise ValueError(f"Unsupported SFB_tmem type: {type(SFB_tmem)}")
+
+        desc_a = T.alloc_tcgen05_smem_desc()
+        desc_b = T.alloc_tcgen05_smem_desc()
+        self.init_tcgen05_a_desc(desc_a, A_buf, a_params)
+        self.init_tcgen05_b_desc(desc_b, B_buf, b_params)
+
+        num_inst_m = m_dim // atom_m_per_cta
+        num_inst_n = n_dim // atom_n
+        num_k_atoms = self.tcgen05_num_k_atoms
+
+        @T.macro
+        def _warp_mma_mxf4nvf4_blockscaled(desc_a, desc_b, C_local_buf, sfa_data, sfb_data, mbar):
+            for j in T.unroll(num_inst_n):
+                for i in T.unroll(num_inst_m):
+                    for ki in T.unroll(0, num_k_atoms):
+                        self.tcgen05_blockscaled_atom(
+                            desc_a,
+                            desc_b,
+                            C_local_buf,
+                            sfa_data,
+                            sfb_data,
+                            i,
+                            j,
+                            ki,
+                            a_params,
+                            b_params,
+                            instr_desc,
+                            clear_accum,
+                            use_mxf4nvf4=True,
+                        )
+            self.tcgen05_atom_arrive(mbar)
+
+        return _warp_mma_mxf4nvf4_blockscaled(desc_a, desc_b, C_local_buf, sfa_data, sfb_data, mbar)
+
+
     def make_mma_load_layout(self, local_buf: Buffer, matrix: str = "A") -> T.Fragment:
         raise NotImplementedError
 
@@ -1042,6 +1186,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         b_params: TCGEN05DescriptorParams,
         instr_desc: PrimExpr,
         clear_accum: PrimExpr = False,
+        use_mxf4nvf4: bool = False,
     ):
         """Emit a single TCGEN05MMA block-scaled SS instruction.
 
@@ -1120,7 +1265,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 0,
                 sfb_data,
                 0,
-                0,
+                1 if use_mxf4nvf4 else 0,
                 0,
                 enable_ws,
                 enable_2cta,
