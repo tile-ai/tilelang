@@ -1592,19 +1592,6 @@ private:
           ranges.push_back(byte_range(min, extent, access.dtype));
         }
       }
-      if (access.buffer_name.defined() && access.buffer_name->data.defined()) {
-        PrimExpr elems = make_const(DataType::Int(64), 1);
-        for (const PrimExpr &dim : access.buffer_name->shape) {
-          elems = elems * to_i64(dim);
-        }
-        Var data = Downcast<Var>(access.buffer_name->data);
-        PrimExpr min = AliasByteOffset(data, DataType::Int(64));
-        PrimExpr max = min +
-                       elems * make_const(DataType::Int(64),
-                                          access.buffer_name->dtype.bytes()) -
-                       make_const(DataType::Int(64), 1);
-        ranges.push_back({min, max});
-      }
       return ranges;
     };
     auto lhs_ranges = collect_ranges(lhs);

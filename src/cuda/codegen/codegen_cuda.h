@@ -39,6 +39,7 @@ public:
                         std::ostream &os) final; // NOLINT(*)
   void PrintVecElemStore(const std::string &vec, DataType t, int i,
                          const std::string &value) final;
+  void PrintVecConstructor(DataType t, std::ostream &os) final;
   std::string GetVecLoad(DataType t, const BufferNode *buffer,
                          PrimExpr base) final;
   void PrintVecStore(const BufferNode *buffer, DataType t, PrimExpr base,

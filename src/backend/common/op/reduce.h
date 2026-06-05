@@ -24,6 +24,7 @@
 #include <tvm/tirx/op_attr_types.h>
 #include <tvm/tirx/stmt_functor.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -100,43 +101,44 @@ inline int GetPreferedVectorizedSize(DataType dt) {
   return 1;
 }
 
-inline PrimExpr MakeInitValue(const ReduceOpNode &op, int vsize = 1) {
-  auto dst_dtype = op.dst->dtype;
+inline PrimExpr MakeInitValue(const ReduceOpNode &op, DataType dtype,
+                              int vsize = 1) {
+  auto dst_dtype = dtype;
   auto is_int = dst_dtype.is_int();
   bool is_uint = dst_dtype.is_uint();
   auto bits = dst_dtype.bits();
 
   PrimExpr scalar;
   if (op.type->isSum() || op.type->isAbsSum()) {
-    scalar = make_zero(op.dst->dtype);
+    scalar = make_zero(dst_dtype);
   } else if (op.type->isMax()) {
     if (is_int) {
-      scalar = make_const(op.dst->dtype, SignedMin(bits));
+      scalar = make_const(dst_dtype, SignedMin(bits));
     } else if (is_uint) {
-      scalar = make_const(op.dst->dtype, 0);
+      scalar = make_const(dst_dtype, 0);
     } else {
-      scalar = make_const(op.dst->dtype, -INFINITY);
+      scalar = make_const(dst_dtype, -INFINITY);
     }
   } else if (op.type->isMin()) {
     if (is_int) {
-      scalar = make_const(op.dst->dtype, SignedMax(bits));
+      scalar = make_const(dst_dtype, SignedMax(bits));
     } else if (is_uint) {
-      scalar = make_const(op.dst->dtype, UnsignedMax(bits));
+      scalar = make_const(dst_dtype, UnsignedMax(bits));
     } else {
-      scalar = make_const(op.dst->dtype, INFINITY);
+      scalar = make_const(dst_dtype, INFINITY);
     }
   } else if (op.type->isAbsMax()) {
-    scalar = make_const(op.dst->dtype, 0);
+    scalar = make_const(dst_dtype, 0);
   } else if (op.type->isBitAnd()) {
     if (is_int) {
-      scalar = make_const(op.dst->dtype, -1);
+      scalar = make_const(dst_dtype, -1);
     } else if (is_uint) {
-      scalar = make_const(op.dst->dtype, UnsignedMax(bits));
+      scalar = make_const(dst_dtype, UnsignedMax(bits));
     } else {
-      scalar = make_const(op.dst->dtype, -INFINITY);
+      scalar = make_const(dst_dtype, -INFINITY);
     }
   } else if (op.type->isBitOr() || op.type->isBitXor()) {
-    scalar = make_zero(op.dst->dtype);
+    scalar = make_zero(dst_dtype);
   } else {
     LOG(FATAL) << "Unsupported reduce type: " << op.type->type;
     scalar = PrimExpr();
@@ -145,6 +147,10 @@ inline PrimExpr MakeInitValue(const ReduceOpNode &op, int vsize = 1) {
   if (vsize <= 1)
     return scalar;
   return Broadcast(scalar, vsize);
+}
+
+inline PrimExpr MakeInitValue(const ReduceOpNode &op, int vsize = 1) {
+  return MakeInitValue(op, op.dst->dtype, vsize);
 }
 
 inline PrimExpr MakeReduce(const ReduceOpNode &op, int vsize,
@@ -245,6 +251,26 @@ inline std::optional<std::string> MakeCodegenReducer(const ReduceOpNode &op,
       return base + "_fp16x2";
   }
   return std::nullopt;
+}
+
+inline bool CanUsePackedReducer(const ReduceOpNode &op, DataType dtype,
+                                int vsize) {
+  if (vsize <= 1) {
+    return false;
+  }
+  if (!MakeCodegenReducer(op, vsize).has_value()) {
+    return false;
+  }
+  if ((dtype.is_bfloat16() || dtype.is_float16()) &&
+      (op.type->isSum() || op.type->isAbsSum())) {
+    return false;
+  }
+  return true;
+}
+
+inline bool UseFloatAccumulator(const ReduceOpNode &op, DataType dtype) {
+  return (dtype.is_bfloat16() || dtype.is_float16()) &&
+         (op.type->isSum() || op.type->isAbsSum());
 }
 
 inline bool CanUsePackedRamp(const PrimExpr &index, const Var &var, int vsize,
@@ -368,6 +394,8 @@ template <typename Impl> struct ReduceLowerer {
       auto clear_buffer = dst_buffer;
       auto need_duplicate = false;
       auto need_update = false;
+      bool use_float_accumulator =
+          reduce::UseFloatAccumulator(op, dst_buffer->dtype);
       if ((op.type->isSum() || op.type->isAbsSum()) && !op.clear) {
         need_duplicate = true;
         need_update = true;
@@ -388,16 +416,37 @@ template <typename Impl> struct ReduceLowerer {
                               red_layout->ReplicateExtent())) {
         need_duplicate = true;
       }
+      if (use_float_accumulator) {
+        need_duplicate = true;
+      }
       ICHECK(!analyzer->CanProve(dst_layout->ReplicateExtent() >
                                  red_layout->ReplicateExtent()))
           << "Inconsistent layouts between src and dst in ReduceOp: "
           << "dst_layout=" << dst_layout << "red_layout=" << red_layout;
 
       if (need_duplicate) {
-        clear_buffer = decl_buffer(red_layout->OutputShape(), dst_buffer->dtype,
+        DataType clear_dtype =
+            use_float_accumulator ? DataType::Float(32) : dst_buffer->dtype;
+        clear_buffer = decl_buffer(red_layout->OutputShape(), clear_dtype,
                                    dst_buffer->name + "_clear",
                                    GetPtrStorageScope(dst_buffer->data));
       }
+
+      auto make_dst_update = [&](const Array<PrimExpr> &dst_idx,
+                                 const Array<PrimExpr> &red_idx) -> PrimExpr {
+        PrimExpr value = BufferLoad(clear_buffer, red_idx);
+        if (need_update) {
+          PrimExpr dst_value = BufferLoad(dst_buffer, dst_idx);
+          if (dst_value->dtype != value->dtype) {
+            dst_value = Cast(value->dtype, dst_value);
+          }
+          value = reduce::MakeUpdate(op, dst_value, value);
+        }
+        if (value->dtype != dst_buffer->dtype) {
+          value = Cast(dst_buffer->dtype, value);
+        }
+        return value;
+      };
 
       Array<PrimExpr> src_indice_compressed;
       Array<IterVar> src_var_compressed;
@@ -419,7 +468,7 @@ template <typename Impl> struct ReduceLowerer {
         if (vsize > 1 && !src_var_compressed.empty()) {
           auto *ext = src_var_compressed.back()->dom->extent.as<IntImmNode>();
           if (ext && ext->value >= vsize && ext->value % vsize == 0 &&
-              reduce::MakeCodegenReducer(op, vsize).has_value() &&
+              reduce::CanUsePackedReducer(op, clear_buffer->dtype, vsize) &&
               reduce::CanUsePackedRamp(src_indice_compressed.back(),
                                        src_var_compressed.back()->var, vsize,
                                        analyzer)) {
@@ -436,9 +485,10 @@ template <typename Impl> struct ReduceLowerer {
             if (require_init ||
                 (need_duplicate && (op.type->isMax() || op.type->isMin() ||
                                     op.type->isAbsMax()))) {
-              local_body.push_back(BufferStore(clear_buffer_packed,
-                                               reduce::MakeInitValue(op, vsize),
-                                               red_indices));
+              local_body.push_back(BufferStore(
+                  clear_buffer_packed,
+                  reduce::MakeInitValue(op, clear_buffer->dtype, vsize),
+                  red_indices));
             }
 
             const auto *ext_int =
@@ -497,8 +547,9 @@ template <typename Impl> struct ReduceLowerer {
         if (require_init ||
             (need_duplicate &&
              (op.type->isMax() || op.type->isMin() || op.type->isAbsMax()))) {
-          stmts.push_back(BufferStore(clear_buffer, reduce::MakeInitValue(op),
-                                      red_indices));
+          stmts.push_back(BufferStore(
+              clear_buffer, reduce::MakeInitValue(op, clear_buffer->dtype),
+              red_indices));
         }
 
         Stmt reduce_local = BufferStore(
@@ -522,20 +573,22 @@ template <typename Impl> struct ReduceLowerer {
       auto iter_sum =
           arith::NormalizeToIterSum(src_thread, ToVMap(src_vars), analyzer);
 
-      const int batch = op.batch;
+      int batch = op.batch;
+      int64_t physical_output_elems = 1;
+      for (const auto &s : clear_buffer->shape) {
+        const int64_t *p = as_const_int(s);
+        ICHECK(p != nullptr) << "ReduceOp: batch > 1 requires compile-time "
+                                "constant output shape";
+        physical_output_elems *= *p;
+      }
       if (batch > 1) {
-        int64_t N_total = 1;
-        for (const auto &s : clear_buffer->shape) {
-          const int64_t *p = as_const_int(s);
-          ICHECK(p != nullptr) << "ReduceOp: batch > 1 requires compile-time "
-                                  "constant output shape";
-          N_total *= *p;
-        }
-        ICHECK_LE(batch, N_total)
+        ICHECK_GT(physical_output_elems, 0);
+        batch =
+            static_cast<int>(std::min<int64_t>(batch, physical_output_elems));
+        ICHECK_EQ(physical_output_elems % batch, 0)
             << "ReduceOp: batch=" << batch
-            << " exceeds per-thread output element count N=" << N_total;
-        ICHECK_EQ(N_total % batch, 0) << "ReduceOp: batch=" << batch
-                                      << " must evenly divide N=" << N_total;
+            << " must evenly divide per-thread output element count N="
+            << physical_output_elems;
       }
 
       bool use_batch = batch > 1;
@@ -595,7 +648,7 @@ template <typename Impl> struct ReduceLowerer {
               Impl::GetPreferedVectorizedSize(clear_buffer->dtype, T.target);
           bool can_batch_pack =
               vsize > 1 && batch >= vsize && batch % vsize == 0 &&
-              reduce::MakeCodegenReducer(op, vsize).has_value();
+              reduce::CanUsePackedReducer(op, clear_buffer->dtype, vsize);
           int eff_batch = can_batch_pack ? (batch / vsize) : batch;
           std::string reducer =
               reduce::MakeCodegenReducer(op, can_batch_pack ? vsize : 1)
@@ -740,11 +793,7 @@ template <typename Impl> struct ReduceLowerer {
             predicate = analyzer->Simplify(predicate);
           }
 
-          PrimExpr update =
-              need_update
-                  ? reduce::MakeUpdate(op, BufferLoad(dst_buffer, post_dst_idx),
-                                       BufferLoad(clear_buffer, post_red_idx))
-                  : BufferLoad(clear_buffer, post_red_idx);
+          PrimExpr update = make_dst_update(post_dst_idx, post_red_idx);
           auto store = BufferStore(dst_buffer, update, post_dst_idx);
           Stmt post_body;
           if (analyzer->CanProve(predicate)) {
@@ -813,11 +862,7 @@ template <typename Impl> struct ReduceLowerer {
         predicate = analyzer->Simplify(predicate);
       }
       if (need_duplicate) {
-        PrimExpr update =
-            need_update
-                ? reduce::MakeUpdate(op, BufferLoad(dst_buffer, dst_indices),
-                                     BufferLoad(clear_buffer, red_indices))
-                : BufferLoad(clear_buffer, red_indices);
+        PrimExpr update = make_dst_update(dst_indices, red_indices);
         auto store = BufferStore(dst_buffer, update, dst_indices);
         if (analyzer->CanProve(predicate)) {
           stmts.push_back(store);
