@@ -22,7 +22,13 @@ from tvm.tirx.stmt_functor import post_order_visit
 
 from tilelang import tvm as tvm
 from tilelang.jit.adapter.wrapper import TLCUDASourceWrapper
-from tilelang.jit.adapter.utils import match_declare_kernel, pythonic_expr, parse_function_call_args, parse_tma_descriptor_args
+from tilelang.jit.adapter.utils import (
+    is_handle_add_byte_offset_call,
+    match_declare_kernel,
+    pythonic_expr,
+    parse_function_call_args,
+    parse_tma_descriptor_args,
+)
 
 PREDEF_HOST_FUNC_PY = """
 from cuda.bindings.driver import (
@@ -49,6 +55,9 @@ import ctypes
 
 _function_names = {}
 
+def _tl_device_ptr(tensor, byte_offset=0):
+    return tensor.data_ptr() + byte_offset
+
 def call({}):
     {}
 """
@@ -56,7 +65,7 @@ def call({}):
 TMA_DESC_INIT_FUNC_PY = """
     {0}_type = CUtensorMapDataType({1})
     {0}_tensorRank = {2}
-    {0}_globalAddress = {3}.data_ptr()
+    {0}_globalAddress = {3}
     {0}_globalDim = [{4}]
     {0}_globalStride = [{5}][1:]
     {0}_boxDim = [{6}]
@@ -87,7 +96,7 @@ TMA_DESC_INIT_FUNC_PY = """
 TMA_IM2COL_DESC_INIT_FUNC_PY = """
     {0}_type = CUtensorMapDataType({1})
     {0}_tensorRank = {2}
-    {0}_globalAddress = {3}.data_ptr()
+    {0}_globalAddress = {3}
     {0}_globalDim = [{4}]
     {0}_globalStride = [{5}][1:]
     {0}_elementStrides = [{6}]
@@ -287,6 +296,21 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         Casts are noise in generated Python code - Python is dynamically typed.
         """
         return pythonic_expr(expr, self._TYPE_MAP, ignore_cast=True, floor_div_op="//")
+
+    def _pythonic_handle_expr(self, expr: tvm.tirx.PrimExpr) -> str:
+        """Convert a TIR handle expression to a Python device pointer expression."""
+        if isinstance(expr, tvm.tirx.Var):
+            return f"_tl_device_ptr({expr.name})"
+        if isinstance(expr, tvm.tirx.Cast):
+            return self._pythonic_handle_expr(expr.value)
+        if is_handle_add_byte_offset_call(expr):
+            if len(expr.args) != 2:
+                raise ValueError(f"handle_add_byte_offset expects 2 arguments, got {len(expr.args)}")
+            base, byte_offset = expr.args
+            if isinstance(base, tvm.tirx.Var):
+                return f"_tl_device_ptr({base.name}, {self._pythonic_expr(byte_offset)})"
+            return f"{self._pythonic_handle_expr(base)} + {self._pythonic_expr(byte_offset)}"
+        raise ValueError(f"Unsupported TMA global address expression: {expr}")
 
     def create_dispatch_func(self, code, function_informations):
         """Generate Python dispatch function that launches multiple CUDA kernels.
@@ -501,7 +525,13 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             return tma_descriptor_init
 
         # Parse TMA descriptor arguments using the common utility
-        parsed_params = parse_tma_descriptor_args(self.tma_descriptor_args, desc_name_map, desc_name_var_map, self._pythonic_expr)
+        parsed_params = parse_tma_descriptor_args(
+            self.tma_descriptor_args,
+            desc_name_map,
+            desc_name_var_map,
+            self._pythonic_expr,
+            self._pythonic_handle_expr,
+        )
 
         # Generate Python code from parsed parameters
         for params in parsed_params:
