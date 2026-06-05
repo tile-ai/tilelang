@@ -1335,8 +1335,9 @@ private:
 
     auto root = GetRef<For>(op);
 
-    // Check if the loop writes to any non-local buffer.
-    // Thread partitioning is unnecessary when all stores target local buffers.
+    // Check if the loop writes to any non-local buffer or touches a fragment.
+    // Thread partitioning is unnecessary when all stores target local buffers
+    // and there are no fragment accesses.
     // For example:
     //   for i in T.Parallel(1024):
     //     A_local[i] = A_global[i]
@@ -1351,8 +1352,16 @@ private:
     // Element-level intrinsics (e.g. atomic_add) pass non-local buffer
     // pointers via tvm_access_ptr / tl::access_ptr inside CallNodes.
     bool has_non_local_store = false;
+    bool has_fragment_access = false;
     PostOrderVisit(root, [&](const ObjectRef &obj) {
-      if (const auto *store = obj.as<BufferStoreNode>()) {
+      if (const auto *load = obj.as<BufferLoadNode>()) {
+        if (IsFragmentBuffer(load->buffer)) {
+          has_fragment_access = true;
+        }
+      } else if (const auto *store = obj.as<BufferStoreNode>()) {
+        if (IsFragmentBuffer(store->buffer)) {
+          has_fragment_access = true;
+        }
         if (!IsLocalBuffer(store->buffer)) {
           has_non_local_store = true;
         }
@@ -1363,13 +1372,21 @@ private:
           if (buffer_var) {
             Var var = GetRef<Var>(buffer_var);
             auto it = buffer_map_.find(var);
-            if (it != buffer_map_.end() && !IsLocalBuffer(it->second)) {
-              has_non_local_store = true;
+            if (it != buffer_map_.end()) {
+              if (IsFragmentBuffer(it->second)) {
+                has_fragment_access = true;
+              }
+              if (!IsLocalBuffer(it->second)) {
+                has_non_local_store = true;
+              }
             }
           }
         } else if (call->op.same_as(tl::access_ptr())) {
           // tl::access_ptr format: (BufferLoad, extent, rw_mask)
           if (const auto *load = call->args[0].as<BufferLoadNode>()) {
+            if (IsFragmentBuffer(load->buffer)) {
+              has_fragment_access = true;
+            }
             if (!IsLocalBuffer(load->buffer)) {
               has_non_local_store = true;
             }
@@ -1378,6 +1395,9 @@ private:
           // call_extern may pass address_of(non-local-buffer) pointers, and
           // PostOrderVisit reaches the address_of call directly.
           if (const auto *load = call->args[0].as<BufferLoadNode>()) {
+            if (IsFragmentBuffer(load->buffer)) {
+              has_fragment_access = true;
+            }
             if (!IsLocalBuffer(load->buffer)) {
               has_non_local_store = true;
             }
@@ -1386,10 +1406,11 @@ private:
       }
     });
 
-    // Determine if this is a true parallel loop requiring thread
-    // partitioning: parallel_loop = True if we need to partition the loop.
-    // Skip partitioning for loops that only have local stores.
-    bool parallel_loop = has_non_local_store;
+    // Determine if this loop requires thread partitioning. Fragment accesses
+    // must be partitioned together with their layout rewrite: once a logical
+    // fragment index is lowered to a physical per-thread slot, the logical loop
+    // iteration has to be owned by the corresponding thread.
+    bool parallel_loop = has_non_local_store || has_fragment_access;
 
     // Check if there are non-local buffer accesses (for vectorization decision)
     bool has_non_local = false;
