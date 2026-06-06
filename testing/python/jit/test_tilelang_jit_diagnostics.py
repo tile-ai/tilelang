@@ -83,9 +83,8 @@ def test_jit_phase_logs_failure_and_preserves_exception(caplog, capture_tilelang
 
     caplog.set_level(logging.INFO, logger="tilelang.jit.diagnostics")
 
-    with pytest.raises(ValueError, match="boom"):
-        with jit_phase("unit.failure", enabled=True, backend="tvm_ffi"):
-            raise ValueError("boom")
+    with pytest.raises(ValueError, match="boom"), jit_phase("unit.failure", enabled=True, backend="tvm_ffi"):
+        raise ValueError("boom")
 
     messages = [record.getMessage() for record in caplog.records]
     assert any("TileLang JIT phase failed: unit.failure" in message for message in messages)

@@ -22,9 +22,7 @@ def _format_context(context: dict[str, object]) -> str:
 
 
 @contextmanager
-def jit_phase(
-    name: str, *, enabled: bool | None = None, verbose: bool = False, **context: object
-) -> Iterator[None]:
+def jit_phase(name: str, *, enabled: bool | None = None, verbose: bool = False, **context: object) -> Iterator[None]:
     if enabled is None:
         enabled = diagnostics_enabled(verbose=verbose)
     if not enabled:

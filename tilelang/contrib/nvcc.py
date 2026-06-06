@@ -41,13 +41,9 @@ def _get_compile_timeout_seconds() -> float | None:
     try:
         timeout = float(value)
     except ValueError as exc:
-        raise ValueError(
-            "TILELANG_COMPILE_TIMEOUT_SECONDS must be empty or a non-negative number"
-        ) from exc
+        raise ValueError("TILELANG_COMPILE_TIMEOUT_SECONDS must be empty or a non-negative number") from exc
     if not math.isfinite(timeout) or timeout < 0:
-        raise ValueError(
-            "TILELANG_COMPILE_TIMEOUT_SECONDS must be empty or a non-negative number"
-        )
+        raise ValueError("TILELANG_COMPILE_TIMEOUT_SECONDS must be empty or a non-negative number")
     return timeout if timeout > 0 else None
 
 
@@ -156,12 +152,7 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
         except Exception:
             out = exc.output or b""
         captured = py_str(out or b"")
-        msg = (
-            f"NVCC compilation timed out after {timeout} seconds.\n"
-            f"Command: {' '.join(cmd)}\n"
-            f"Source: {temp_code}\n"
-            f"Target: {file_target}\n"
-        )
+        msg = f"NVCC compilation timed out after {timeout} seconds.\nCommand: {' '.join(cmd)}\nSource: {temp_code}\nTarget: {file_target}\n"
         if captured:
             msg += f"Output:\n{captured}\n"
         raise RuntimeError(msg) from exc

@@ -252,9 +252,11 @@ class JITKernel(Generic[_P, _T]):
             "target_host": str(target_host) if target_host is not None else None,
             "backend": execution_backend,
         }
-        with jit_phase("lower", verbose=verbose, **phase_context), tvm.transform.PassContext(
-            opt_level=3, config=pass_configs, instruments=pass_instruments
-        ), self.target:
+        with (
+            jit_phase("lower", verbose=verbose, **phase_context),
+            tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=pass_instruments),
+            self.target,
+        ):
             artifact = tilelang.lower(
                 tilelang_func,
                 target=target,
