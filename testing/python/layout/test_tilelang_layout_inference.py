@@ -60,5 +60,28 @@ def test_reject_fragment_write_from_non_owner_threads():
         _invalid_fragment_write_owner_layout()
 
 
+@tilelang.jit
+def _scalar_reduce_accumulator_owner_layout():
+    @T.prim_func
+    def main(out: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=128):
+            acc = T.alloc_fragment((128,), T.float32)
+            total = T.alloc_fragment((1,), T.float32)
+            total[0] = T.float32(0.0)
+            for k in T.Parallel(128):
+                acc[k] = T.float32(1.0)
+            T.reduce_sum(acc, total, clear=False)
+            if T.get_thread_binding() == 0:
+                out[0] = total[0]
+
+    return main
+
+
+def test_scalar_reduce_accumulator_owner_layout():
+    kernel = _scalar_reduce_accumulator_owner_layout()
+    source = kernel.get_kernel_source()
+    assert "AllReduce" in source
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
