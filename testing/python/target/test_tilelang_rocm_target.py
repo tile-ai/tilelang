@@ -3,8 +3,8 @@ import pytest
 from tilelang import tvm as tvm
 from tvm.target import Target
 
-from tilelang.backend.target import (
-    determine_target,
+from tilelang.backend.target import determine_target
+from tilelang.rocm.target import (
     normalize_rocm_arch,
     rocm_warp_size_for_arch,
     target_get_mcpu,

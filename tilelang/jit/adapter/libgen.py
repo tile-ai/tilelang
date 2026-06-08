@@ -19,7 +19,6 @@ from tilelang.contrib.nvcc import (
 )
 from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
 from tilelang.env import TILELANG_TEMPLATE_PATH
-from tilelang.backend.target import target_get_mcpu
 from tilelang.contrib.hip_resource_info import filter_and_record
 
 from .utils import is_cpu_target, is_cuda_target, is_hip_target
@@ -114,6 +113,8 @@ class LibraryGenerator:
             ]
 
         elif is_hip_target(target):
+            from tilelang.rocm.target import target_get_mcpu
+
             from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, TILELANG_HIP_SAVE_TEMP_FILES
 
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115

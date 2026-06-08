@@ -1,7 +1,7 @@
 import torch
 import tilelang
 import tilelang.language as T
-from tilelang.backend.target import determine_fp8_type
+from tilelang.language.fp8 import determine_fp8_type
 
 
 def calc_diff(x, y):

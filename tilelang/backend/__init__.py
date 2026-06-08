@@ -8,7 +8,14 @@ from .execution_backend import (  # noqa: F401
     resolve_execution_backend,
     resolve_execution_backend_spec,
 )
-from .target import auto_detect_target, list_target_detectors, register_lazy_target_detector, register_target_detector  # noqa: F401
+from .target import (  # noqa: F401
+    auto_detect_target,
+    list_target_detectors,
+    register_lazy_target_detector,
+    register_supported_target,
+    register_target_detector,
+    register_target_normalizer,
+)
 
 register_lazy_target_detector("cuda", "tilelang.cuda.target")
 register_lazy_target_detector("hip", "tilelang.rocm.target")

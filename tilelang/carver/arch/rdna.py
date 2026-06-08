@@ -4,7 +4,7 @@ import tvm
 from tvm.target import Target
 from .arch_base import TileDevice
 from .cuda import TensorInstruction
-from tilelang.backend.target import target_get_mcpu, target_get_rdna_generation
+from tilelang.rocm.target import target_get_mcpu, target_get_rdna_generation
 
 _RDNA_DEFAULT_LDS_SIZE = 64 * 1024
 _RDNA_TENSOR_INSTRUCTIONS = {
