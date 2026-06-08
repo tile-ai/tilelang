@@ -6,9 +6,9 @@ from tilelang.cpu.pipeline import CPUPassPipelineBody
 
 
 register_pipeline(PassPipeline("webgpu", CPUPassPipelineBody))
-register_execution_backend("webgpu", ExecutionBackendSpec("cython", priority=100), override=True)
+register_execution_backend("webgpu", ExecutionBackendSpec("cython"), override=True)
 register_execution_backend(
     "webgpu",
-    ExecutionBackendSpec("tvm_ffi", priority=10, enable_host_codegen=True, enable_device_compile=True),
+    ExecutionBackendSpec("tvm_ffi", enable_host_codegen=True, enable_device_compile=True),
     override=True,
 )

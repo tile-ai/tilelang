@@ -78,8 +78,8 @@ def test_execution_backend_registry_resolves_target_policy():
     try:
         backend_registry._EXECUTION_BACKENDS[target_kind] = []
         backend_registry._LOADED_EXECUTION_BACKENDS.add(target_kind)
-        register_execution_backend(target_kind, ExecutionBackendSpec("slow", priority=1), override=True)
-        register_execution_backend(target_kind, ExecutionBackendSpec("fast", priority=10), override=True)
+        register_execution_backend(target_kind, ExecutionBackendSpec("fast"), override=True)
+        register_execution_backend(target_kind, ExecutionBackendSpec("slow"), override=True)
 
         assert allowed_backends_for_target(target) == ["fast", "slow"]
         assert resolve_execution_backend("auto", target) == "fast"

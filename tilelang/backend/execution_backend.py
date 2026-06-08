@@ -30,7 +30,6 @@ class ExecutionBackendSpec:
     name: str
     is_available: AvailabilityCheck = _always_available
     supports_target: TargetPredicate | None = None
-    priority: int = 0
     enable_host_codegen: bool = False
     enable_device_compile: bool = False
 
@@ -77,7 +76,6 @@ def _matching_specs(target: Target, *, include_unavailable: bool) -> list[Execut
     specs = [spec for spec in _EXECUTION_BACKENDS.get(target_kind, ()) if spec.matches(target)]
     if not include_unavailable:
         specs = [spec for spec in specs if spec.is_available()]
-    specs.sort(key=lambda spec: spec.priority, reverse=True)
     return specs
 
 

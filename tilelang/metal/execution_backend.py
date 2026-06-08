@@ -5,7 +5,7 @@ from tilelang.backend.execution_backend import ExecutionBackendSpec, register_ex
 
 register_execution_backend(
     "metal",
-    ExecutionBackendSpec("tvm_ffi", priority=100, enable_host_codegen=True, enable_device_compile=True),
+    ExecutionBackendSpec("tvm_ffi", enable_host_codegen=True, enable_device_compile=True),
     override=True,
 )
-register_execution_backend("metal", ExecutionBackendSpec("torch", priority=10), override=True)
+register_execution_backend("metal", ExecutionBackendSpec("torch"), override=True)

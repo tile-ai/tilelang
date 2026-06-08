@@ -4,9 +4,9 @@ from tilelang.backend.execution_backend import ExecutionBackendSpec, register_ex
 
 
 for _target_kind in ("c", "llvm"):
-    register_execution_backend(_target_kind, ExecutionBackendSpec("cython", priority=100), override=True)
+    register_execution_backend(_target_kind, ExecutionBackendSpec("cython"), override=True)
     register_execution_backend(
         _target_kind,
-        ExecutionBackendSpec("tvm_ffi", priority=10, enable_host_codegen=True, enable_device_compile=True),
+        ExecutionBackendSpec("tvm_ffi", enable_host_codegen=True, enable_device_compile=True),
         override=True,
     )

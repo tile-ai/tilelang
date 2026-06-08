@@ -36,7 +36,6 @@ register_execution_backend(
     ExecutionBackendSpec(
         "tvm_ffi",
         supports_target=_is_plain_cuda_target,
-        priority=100,
         enable_host_codegen=True,
         enable_device_compile=True,
     ),
@@ -44,16 +43,16 @@ register_execution_backend(
 )
 register_execution_backend(
     "cuda",
-    ExecutionBackendSpec("nvrtc", is_available=_is_nvrtc_available, supports_target=_is_plain_cuda_target, priority=50),
+    ExecutionBackendSpec("nvrtc", is_available=_is_nvrtc_available, supports_target=_is_plain_cuda_target),
     override=True,
 )
 register_execution_backend(
     "cuda",
-    ExecutionBackendSpec("cython", supports_target=_is_plain_cuda_target, priority=10),
+    ExecutionBackendSpec("cython", supports_target=_is_plain_cuda_target),
     override=True,
 )
 register_execution_backend(
     "cuda",
-    ExecutionBackendSpec("cutedsl", is_available=_is_cutedsl_available, supports_target=_is_cutedsl_target, priority=100),
+    ExecutionBackendSpec("cutedsl", is_available=_is_cutedsl_available, supports_target=_is_cutedsl_target),
     override=True,
 )
