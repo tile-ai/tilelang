@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import os
-import math
 import subprocess
 import warnings
 import contextlib
@@ -35,16 +34,7 @@ def get_nvcc_subprocess_env() -> dict[str, str] | None:
 
 
 def _get_compile_timeout_seconds() -> float | None:
-    value = os.environ.get("TILELANG_COMPILE_TIMEOUT_SECONDS", "").strip()
-    if not value:
-        return None
-    try:
-        timeout = float(value)
-    except ValueError as exc:
-        raise ValueError("TILELANG_COMPILE_TIMEOUT_SECONDS must be empty or a non-negative number") from exc
-    if not math.isfinite(timeout) or timeout < 0:
-        raise ValueError("TILELANG_COMPILE_TIMEOUT_SECONDS must be empty or a non-negative number")
-    return timeout if timeout > 0 else None
+    return env.get_compile_timeout_seconds()
 
 
 def _resolve_artifact_paths(temp, file_name, target_format, kernels_output_dir=None):

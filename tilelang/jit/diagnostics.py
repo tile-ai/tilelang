@@ -3,15 +3,15 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 import logging
-import os
 import time
+
+from tilelang.env import env
 
 logger = logging.getLogger("tilelang.jit.diagnostics")
 
 
 def diagnostics_enabled(*, verbose: bool = False) -> bool:
-    value = os.environ.get("TILELANG_JIT_DIAGNOSTICS", "0")
-    return bool(verbose) or value.lower() in ("1", "true", "yes", "on")
+    return bool(verbose) or env.is_jit_diagnostics_enabled()
 
 
 def _format_context(context: dict[str, object]) -> str:
