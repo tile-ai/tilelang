@@ -401,16 +401,6 @@ TVM_DLL const Op &ptx_arrive_cluster_barrier();
 TVM_DLL const Op &mbarrier_wait_parity();
 
 /*!
- * \brief mbarrier wait with parity bit, executed only by lane 0 of the
- * current warp (`if (threadIdx.x % 32 != 0) return`) without forcing the
- * whole outlined role into a raw CUDA helper.
- *
- * mbarrier_wait_parity_lane0(mbarrier, parity)
- *
- */
-TVM_DLL const Op &mbarrier_wait_parity_lane0();
-
-/*!
  * \brief tvm intrinsics for mbarrier expect tx
  *
  * mbarrier_expect_tx(mbarrier, transaction_bytes)
@@ -608,15 +598,6 @@ TVM_DLL const Op &annotate_consumer_reg_alloc();
  *
  */
 TVM_DLL const Op &no_set_max_nreg();
-
-/*!
- * \brief Lane-0 only mbarrier arrive — gates the PTX inline-asm in a
- *        ``if ((threadIdx.x & 31) == 0)`` so each warp contributes exactly
- *        one decrement regardless of warp width. The arrive_count of the
- *        target barrier should be set to ``num_warps`` accordingly. Argument
- *        is the mbarrier buffer load (matches ``ptx_arrive_barrier``).
- */
-TVM_DLL const Op &ptx_arrive_barrier_lane0();
 
 /*!
  * \brief Arrive at a warpgroup fence for WGMMA sequences
@@ -1193,13 +1174,6 @@ TVM_DLL const Op &tcgen05_exp2f_approx();
 TVM_DLL const Op &tcgen05_exp2_poly_2();
 
 /*!
- * \brief Pack two FP32 values through BF16 conversion into one B32 word.
- *
- * Args: a, b. Returns uint32.
- */
-TVM_DLL const Op &pack_bf16_pair();
-
-/*!
  * \brief Store four packed B32 words into TMEM with
  * tcgen05.st.sync.aligned.32x32b.x4.b32.
  *
@@ -1245,12 +1219,6 @@ TVM_DLL const Op &tcgen05_mbarrier_arrive_expect_tx_cluster_lane0_ref();
  * Args: mbar_ref
  */
 TVM_DLL const Op &tcgen05_mbarrier_arrive_cluster_all_ref();
-
-/*!
- * \brief 2CTA 2D TMA load using shared::cta.global encoding.
- * Args: tensor_map, smem_ptr, mbar_ref, coord0, coord1
- */
-TVM_DLL const Op &tma_load_2cta_2d();
 
 /*!
  * \brief 2D TMA store using global.shared::cta.bulk_group encoding.

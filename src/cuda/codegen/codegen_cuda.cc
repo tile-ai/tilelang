@@ -2815,16 +2815,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto mbarrier_obj = this->PrintExpr(op->args[0]);
     auto phase = this->PrintExpr(op->args[1]);
     this->stream << mbarrier_obj << ".wait((uint32_t)(" << phase << "));\n";
-  } else if (op->op.same_as(tl::mbarrier_wait_parity_lane0())) {
-    ICHECK_EQ(op->args.size(), 2);
-    this->PrintIndent();
-    auto mbarrier_obj = this->PrintExpr(op->args[0]);
-    auto phase = this->PrintExpr(op->args[1]);
-    this->stream << "if ((((int)threadIdx.x) & 31) == 0) {\n";
-    this->PrintIndent();
-    this->stream << "  " << mbarrier_obj << ".wait((uint32_t)(" << phase << "));\n";
-    this->PrintIndent();
-    this->stream << "}\n";
   } else if (op->op.same_as(tl::ptx_init_tensor_memory())) {
     std::ostringstream ss;
     ss << "tl::tmem_allocate";
@@ -4091,15 +4081,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     need_tcgen05_common_h_ = true;
     this->stream << "tl::tcgen05_mbarrier_arrive_cluster_all((void const*)(&("
                  << this->PrintExpr(op->args[0]) << ")));\n";
-  } else if (op->op.same_as(tl::tma_load_2cta_2d())) {
-    ICHECK_EQ(op->args.size(), 5U) << "tma_load_2cta_2d expects 5 args";
-    this->PrintIndent();
-    need_tcgen05_common_h_ = true;
-    this->stream << "tl::tma_load_2sm_raw(&" << this->PrintExpr(op->args[0])
-                 << ", (void const*)(" << this->PrintExpr(op->args[1])
-                 << "), (void const*)(&(" << this->PrintExpr(op->args[2])
-                 << ")), " << this->PrintExpr(op->args[3]) << ", "
-                 << this->PrintExpr(op->args[4]) << ");\n";
   } else if (op->op.same_as(tl::tma_store_2d())) {
     ICHECK(op->args.size() == 4U || op->args.size() == 5U)
         << "tma_store_2d expects 4 args plus an optional predicate";
@@ -4935,12 +4916,6 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
     std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
     std::string func_name = math_func(op->dtype, "fdiv", rounding_mode);
     os << func_name << "(" << PrintExpr(op->args[0]) << ", "
-       << PrintExpr(op->args[1]) << ")";
-    return true;
-  } else if (op->op.same_as(tl::pack_bf16_pair())) {
-    ICHECK_EQ(op->args.size(), 2U) << "pack_bf16_pair expects 2 args";
-    need_tcgen05_common_h_ = true;
-    os << "tl::pack_bf16_pair(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ")";
     return true;
   } else if (op->op.same_as(tl::fmax2_ftz())) {

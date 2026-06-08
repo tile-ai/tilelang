@@ -1142,14 +1142,20 @@ private:
     AddWorkspaceCallback callback = [this](int num_elem, DataType dtype) {
       auto workspace =
           decl_buffer({PrimExpr(num_elem)}, dtype, "workspace", "shared.dyn");
-      // Place workspace at the outermost block scope so that its lifetime
-      // spans the entire kernel.  Under warp specialization the merge pass
-      // uses sequential liveness and cannot see that TMA concurrently
-      // writes shared buffers while math WGs use the workspace.  A narrow
-      // (innermost-scope) lifetime lets the merge pass alias workspace with
-      // live V/K buffers, causing corruption on large shapes.
       if (!workspace_stack_.empty()) {
-        workspace_stack_.front().push_back(workspace);
+        // Warp-specialized kernels: place workspace at outermost scope so that
+        // the aggressive shared memory merge pass does not alias it with
+        // concurrently TMA-written buffers (the merge pass uses sequential
+        // liveness and cannot model cross-WG concurrent access).
+        // Non-WS kernels: innermost scope is fine (no concurrent access issue).
+        tvm::transform::PassContext ctx = tvm::transform::PassContext::Current();
+        bool ws_enabled =
+            !ctx->GetConfig<Bool>(kDisableWarpSpecialized, Bool(false)).value();
+        if (ws_enabled) {
+          workspace_stack_.front().push_back(workspace);
+        } else {
+          workspace_stack_.back().push_back(workspace);
+        }
       } else {
         workspace_stack_.emplace_back(Array<Buffer>{workspace});
       }
