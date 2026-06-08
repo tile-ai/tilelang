@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from importlib import import_module
 from typing import Literal
 
 from tvm.target import Target
@@ -28,8 +27,6 @@ class TargetNormalizerSpec:
 
 _TARGET_DETECTORS: dict[str, TargetDetectorSpec] = {}
 _TARGET_NORMALIZERS: dict[str, TargetNormalizerSpec] = {}
-_LAZY_TARGET_DETECTORS: dict[str, str] = {}
-_LOADED_TARGET_DETECTORS: set[str] = set()
 
 
 def register_target_detector(
@@ -58,26 +55,7 @@ def register_target_normalizer(
     return spec
 
 
-def register_lazy_target_detector(name: str, import_path: str) -> None:
-    _LAZY_TARGET_DETECTORS[name] = import_path
-
-
-def _ensure_target_modules_loaded() -> list[str]:
-    errors: list[str] = []
-    for name, import_path in tuple(_LAZY_TARGET_DETECTORS.items()):
-        if name in _LOADED_TARGET_DETECTORS:
-            continue
-        try:
-            import_module(import_path)
-        except Exception as err:
-            errors.append(f"{name}: {err}")
-        finally:
-            _LOADED_TARGET_DETECTORS.add(name)
-    return errors
-
-
 def _normalize_registered_target(target: TargetLike) -> TargetInput | None:
-    _ensure_target_modules_loaded()
     for spec in _TARGET_NORMALIZERS.values():
         normalized = spec.normalize(target)
         if normalized is not None:
@@ -86,7 +64,7 @@ def _normalize_registered_target(target: TargetLike) -> TargetInput | None:
 
 
 def auto_detect_target() -> TargetInput:
-    errors = _ensure_target_modules_loaded()
+    errors: list[str] = []
     for spec in _TARGET_DETECTORS.values():
         try:
             detected = spec.detect()
@@ -101,7 +79,6 @@ def auto_detect_target() -> TargetInput:
 
 
 def list_target_detectors() -> tuple[str, ...]:
-    _ensure_target_modules_loaded()
     return tuple(_TARGET_DETECTORS)
 
 

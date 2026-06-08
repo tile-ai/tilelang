@@ -56,12 +56,8 @@ def test_auto_target_uses_registered_detector_order_for_rocm():
     import tilelang.backend.target as target_registry
 
     old_detectors = dict(target_registry._TARGET_DETECTORS)
-    old_lazy_detectors = dict(target_registry._LAZY_TARGET_DETECTORS)
-    old_loaded_detectors = set(target_registry._LOADED_TARGET_DETECTORS)
     try:
         target_registry._TARGET_DETECTORS.clear()
-        target_registry._LAZY_TARGET_DETECTORS.clear()
-        target_registry._LOADED_TARGET_DETECTORS.clear()
         target_registry.register_target_detector(
             "unit-hip",
             lambda: Target({"kind": "hip", "mcpu": "gfx1151"}),
@@ -80,10 +76,6 @@ def test_auto_target_uses_registered_detector_order_for_rocm():
     finally:
         target_registry._TARGET_DETECTORS.clear()
         target_registry._TARGET_DETECTORS.update(old_detectors)
-        target_registry._LAZY_TARGET_DETECTORS.clear()
-        target_registry._LAZY_TARGET_DETECTORS.update(old_lazy_detectors)
-        target_registry._LOADED_TARGET_DETECTORS.clear()
-        target_registry._LOADED_TARGET_DETECTORS.update(old_loaded_detectors)
 
 
 def test_rdna_gfx1151_target_classification():

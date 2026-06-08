@@ -21,12 +21,8 @@ def test_tilelang_does_not_export_target_wrapper():
 def test_auto_target_uses_registered_detectors():
     name = "unit-auto-target"
     old_detectors = dict(target_registry._TARGET_DETECTORS)
-    old_lazy_detectors = dict(target_registry._LAZY_TARGET_DETECTORS)
-    old_loaded_detectors = set(target_registry._LOADED_TARGET_DETECTORS)
     try:
         target_registry._TARGET_DETECTORS.clear()
-        target_registry._LAZY_TARGET_DETECTORS.clear()
-        target_registry._LOADED_TARGET_DETECTORS.clear()
         register_target_detector(name, lambda: Target({"kind": "llvm", "mcpu": "native"}), override=True)
 
         target = auto_detect_target()
@@ -38,22 +34,14 @@ def test_auto_target_uses_registered_detectors():
     finally:
         target_registry._TARGET_DETECTORS.clear()
         target_registry._TARGET_DETECTORS.update(old_detectors)
-        target_registry._LAZY_TARGET_DETECTORS.clear()
-        target_registry._LAZY_TARGET_DETECTORS.update(old_lazy_detectors)
-        target_registry._LOADED_TARGET_DETECTORS.clear()
-        target_registry._LOADED_TARGET_DETECTORS.update(old_loaded_detectors)
 
 
 def test_auto_target_detector_falls_through_none_result():
     first_name = "unit-auto-none"
     second_name = "unit-auto-fallback"
     old_detectors = dict(target_registry._TARGET_DETECTORS)
-    old_lazy_detectors = dict(target_registry._LAZY_TARGET_DETECTORS)
-    old_loaded_detectors = set(target_registry._LOADED_TARGET_DETECTORS)
     try:
         target_registry._TARGET_DETECTORS.clear()
-        target_registry._LAZY_TARGET_DETECTORS.clear()
-        target_registry._LOADED_TARGET_DETECTORS.clear()
         register_target_detector(first_name, lambda: None, override=True)
         register_target_detector(second_name, lambda: "llvm", override=True)
 
@@ -62,10 +50,6 @@ def test_auto_target_detector_falls_through_none_result():
     finally:
         target_registry._TARGET_DETECTORS.clear()
         target_registry._TARGET_DETECTORS.update(old_detectors)
-        target_registry._LAZY_TARGET_DETECTORS.clear()
-        target_registry._LAZY_TARGET_DETECTORS.update(old_lazy_detectors)
-        target_registry._LOADED_TARGET_DETECTORS.clear()
-        target_registry._LOADED_TARGET_DETECTORS.update(old_loaded_detectors)
 
 
 def test_execution_backend_registry_resolves_target_policy():
