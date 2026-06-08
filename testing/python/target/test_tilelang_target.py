@@ -1,188 +1,90 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 import tilelang
+from tvm.target import Target
 import tilelang.backend.target as target_registry
-from tilelang.backend import (
-    Target,
-    TargetKind,
-    target_option,
-    list_target_kinds,
-    list_target_presets,
-    register_target_kind,
-    register_target_preset,
-    resolve_target_execution_backend,
+from tilelang.backend.execution_backend import (
+    ExecutionBackendSpec,
+    allowed_backends_for_target,
+    register_execution_backend,
+    resolve_execution_backend,
 )
+from tilelang.backend.target import auto_detect_target, list_target_detectors, register_target_detector
 
 
-def test_backend_package_does_not_own_backend_specific_target_presets():
-    backend_init = Path(target_registry.__file__).with_name("__init__.py").read_text()
-
-    assert "cuda" not in backend_init
-    assert "hip" not in backend_init
-    assert "h100" not in backend_init
-    assert "mi300x" not in backend_init
-    assert "cutedsl" not in backend_init
+def test_tilelang_does_not_export_target_wrapper():
+    assert not hasattr(tilelang, "Target")
 
 
-def test_tilelang_exports_target():
-    assert tilelang.Target is Target
-
-
-def test_target_owns_basic_target_parsing():
-    target = Target("cuda", arch="sm_90", execution_backend="dlpack")
-
-    resolved_target, execution_backend = resolve_target_execution_backend(target, None)
-
-    assert isinstance(resolved_target, Target)
-    assert resolved_target.export() == {"kind": "cuda", "arch": "sm_90"}
-    assert execution_backend == "tvm_ffi"
-
-    parsed = Target("cuda -arch=sm_90 -keys=cuda,gpu", host="llvm")
-    assert parsed.to_config() == {
-        "kind": "cuda",
-        "arch": "sm_90",
-        "keys": ["cuda", "gpu"],
-        "host": "llvm",
-    }
-
-
-def test_backend_owned_target_kinds_and_presets_normalize_to_tvm_target_input():
-    assert "cuda" in list_target_kinds()
-    assert "hip" in list_target_kinds()
-    assert "cpu" in list_target_kinds()
-    assert "h100" in list_target_presets()
-    assert "mi300x" in list_target_presets()
-
-    assert Target("h100").export() == {"kind": "cuda", "arch": "sm_90a"}
-    assert Target("mi300x").export() == {"kind": "hip", "mcpu": "gfx942"}
-    assert Target("cpu").export() == {"kind": "cpu"}
-    assert Target("cpu").to_legacy_tvm_target_input() == {"kind": "llvm"}
-
-
-def test_cutedsl_is_cuda_owned_target_kind_variant():
-    assert Target("cutedsl").export() == {"kind": "cutedsl"}
-    assert Target("cutedsl").to_legacy_tvm_target_input() == {"kind": "cuda", "keys": ["cutedsl"]}
-    assert Target("cutedsl", arch="sm_90").to_legacy_tvm_target_input() == {
-        "kind": "cuda",
-        "arch": "sm_90",
-        "keys": ["cutedsl"],
-    }
-
-
-def test_target_kind_registration_does_not_require_tvm_target_kind():
-    name = "unit-accelerator"
-
-    def normalize(spec):
-        return {"kind": "llvm", "keys": [spec.kind], **dict(spec.attrs)}
-
-    old_kind = target_registry._TARGET_KINDS.get(name)
-    try:
-        register_target_kind(TargetKind(name, normalize=normalize), override=True)
-
-        target = Target(name, mcpu="native")
-        assert target.export() == {"kind": name, "mcpu": "native"}
-        assert target.to_legacy_tvm_target_input() == {"kind": "llvm", "keys": [name], "mcpu": "native"}
-        assert target.to_legacy_tvm_target().kind.name == "llvm"
-    finally:
-        if old_kind is None:
-            target_registry._TARGET_KINDS.pop(name, None)
-        else:
-            target_registry._TARGET_KINDS[name] = old_kind
-
-
-def test_target_preset_registration_is_extensible():
-    name = "unit-lite-target"
-
-    def resolve(spec):
-        attrs = dict(spec.attrs)
-        return {"kind": "llvm", **attrs}
-
-    old_preset = target_registry._TARGET_PRESETS.get(name)
-    try:
-        register_target_preset(name, resolve, override=True)
-
-        assert Target(name, mcpu="native").to_tvm_target_input() == {"kind": "llvm", "mcpu": "native"}
-    finally:
-        if old_preset is None:
-            target_registry._TARGET_PRESETS.pop(name, None)
-        else:
-            target_registry._TARGET_PRESETS[name] = old_preset
-
-
-def test_auto_target_uses_registered_driver_detectors():
+def test_auto_target_uses_registered_detectors():
     name = "unit-auto-target"
-
-    def detect():
-        return Target(name, mcpu="native")
-
-    old_kind = target_registry._TARGET_KINDS.get(name)
+    old_detector = target_registry._TARGET_DETECTORS.get(name)
     try:
-        register_target_kind(name, tvm_kind="llvm", detect=detect, priority=10000, override=True)
+        register_target_detector(name, lambda: Target({"kind": "llvm", "mcpu": "native"}), priority=10000, override=True)
 
-        assert Target("auto").export() == {"kind": name, "mcpu": "native"}
-        assert Target("auto").to_legacy_tvm_target_input() == {"kind": "llvm", "mcpu": "native"}
+        target = auto_detect_target()
+
+        assert isinstance(target, Target)
+        assert target.kind.name == "llvm"
+        assert str(target.attrs["mcpu"]) == "native"
+        assert name in list_target_detectors()
     finally:
-        if old_kind is None:
-            target_registry._TARGET_KINDS.pop(name, None)
+        if old_detector is None:
+            target_registry._TARGET_DETECTORS.pop(name, None)
         else:
-            target_registry._TARGET_KINDS[name] = old_kind
+            target_registry._TARGET_DETECTORS[name] = old_detector
 
 
-def test_target_execution_backend_conflict_reports_both_sources():
-    target = Target("llvm", execution_backend="cython")
-
-    with pytest.raises(ValueError, match="Conflicting execution backend"):
-        resolve_target_execution_backend(target, "tvm_ffi")
-
-
-def test_explicit_compile_execution_backend_overrides_target_auto():
-    target = Target("llvm", execution_backend="auto")
-
-    resolved_target, execution_backend = resolve_target_execution_backend(target, "tvm_ffi")
-
-    assert isinstance(resolved_target, Target)
-    assert resolved_target.export() == {"kind": "llvm"}
-    assert execution_backend == "tvm_ffi"
-
-
-def test_target_kind_schema_validates_and_canonicalizes_without_tvm_target_kind():
-    name = "unit-schema-accelerator"
-
-    def canonicalize(config):
-        config["feature.unit"] = True
-        if config.get("arch") == "native":
-            config["arch"] = "unit-v1"
-        return config
-
-    old_kind = target_registry._TARGET_KINDS.get(name)
+def test_auto_target_detector_falls_through_none_result():
+    low_name = "unit-auto-none"
+    high_name = "unit-auto-fallback"
+    old_low = target_registry._TARGET_DETECTORS.get(low_name)
+    old_high = target_registry._TARGET_DETECTORS.get(high_name)
     try:
-        register_target_kind(
-            name,
-            default_keys=("unit", "gpu"),
-            options={
-                "arch": target_option(str, default="native"),
-                "threads": target_option(int, default=256),
-            },
-            canonicalizer=canonicalize,
-            override=True,
-        )
+        register_target_detector(low_name, lambda: None, priority=20000, override=True)
+        register_target_detector(high_name, lambda: "llvm", priority=10000, override=True)
 
-        target = Target(name, threads="128")
-        assert target.export() == {
-            "kind": name,
-            "keys": ["unit", "gpu"],
-            "arch": "unit-v1",
-            "threads": 128,
-            "feature.unit": True,
-        }
-        with pytest.raises(ValueError, match="Unknown target option"):
-            Target(name, unknown=True).export()
+        assert auto_detect_target() == "llvm"
     finally:
-        if old_kind is None:
-            target_registry._TARGET_KINDS.pop(name, None)
+        if old_low is None:
+            target_registry._TARGET_DETECTORS.pop(low_name, None)
         else:
-            target_registry._TARGET_KINDS[name] = old_kind
+            target_registry._TARGET_DETECTORS[low_name] = old_low
+        if old_high is None:
+            target_registry._TARGET_DETECTORS.pop(high_name, None)
+        else:
+            target_registry._TARGET_DETECTORS[high_name] = old_high
+
+
+def test_execution_backend_registry_resolves_target_policy():
+    target_kind = "llvm"
+    target = Target({"kind": target_kind})
+    from tilelang.backend import execution_backend as backend_registry
+
+    old_execution_specs = backend_registry._EXECUTION_BACKENDS.get(target_kind)
+    was_loaded = target_kind in backend_registry._LOADED_EXECUTION_BACKENDS
+    try:
+        backend_registry._EXECUTION_BACKENDS[target_kind] = []
+        backend_registry._LOADED_EXECUTION_BACKENDS.add(target_kind)
+        register_execution_backend(target_kind, ExecutionBackendSpec("slow", priority=1), override=True)
+        register_execution_backend(target_kind, ExecutionBackendSpec("fast", priority=10), override=True)
+
+        assert allowed_backends_for_target(target) == ["fast", "slow"]
+        assert resolve_execution_backend("auto", target) == "fast"
+        assert resolve_execution_backend("slow", target) == "slow"
+    finally:
+        if old_execution_specs is None:
+            backend_registry._EXECUTION_BACKENDS.pop(target_kind, None)
+        else:
+            backend_registry._EXECUTION_BACKENDS[target_kind] = old_execution_specs
+        if not was_loaded:
+            backend_registry._LOADED_EXECUTION_BACKENDS.discard(target_kind)
+
+
+def test_execution_backend_registry_rejects_invalid_backend():
+    target = Target("llvm")
+
+    with pytest.raises(ValueError, match="Invalid execution backend"):
+        resolve_execution_backend("nvrtc", target)

@@ -38,14 +38,15 @@ _P = ParamSpec("_P")
 _KP = ParamSpec("_KP")
 _T = TypeVar("_T")
 _Ret = TypeVar("_Ret")
+TargetLike = str | Target
 
 
 def compile(
     func: PrimFunc[_KP, _T] = None,
     out_idx: list[int] | int | None = None,
     execution_backend: Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
-    target: str | Target | None = None,
-    target_host: str | Target | None = None,
+    target: TargetLike | None = None,
+    target_host: TargetLike | None = None,
     verbose: bool | None = None,
     pass_configs: dict[str, Any] | None = None,
     compile_flags: list[str] | str | None = None,
@@ -62,10 +63,10 @@ def compile(
     execution_backend : Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"], optional
         Execution backend to use for kernel execution. If None, reads from
         TILELANG_EXECUTION_BACKEND environment variable (defaults to "auto").
-    target : Union[str, Target], optional
-        Compilation target, either as a string or a TVM Target object. If None, reads from
-        TILELANG_TARGET environment variable (defaults to "auto").
-    target_host : Union[str, Target], optional
+    target : str or tvm.target.Target, optional
+        Compilation target. If None, reads from TILELANG_TARGET environment
+        variable (defaults to "auto").
+    target_host : str or tvm.target.Target, optional
         Target host for cross-compilation (default: None).
     verbose : bool, optional
         Whether to enable verbose output. If None, reads from
@@ -124,8 +125,8 @@ def par_compile(
     funcs: Iterable[PrimFunc[_KP, _T]],
     out_idx: list[int] | int | None = None,
     execution_backend: Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
-    target: str | Target | None = None,
-    target_host: str | Target | None = None,
+    target: TargetLike | None = None,
+    target_host: TargetLike | None = None,
     verbose: bool | None = None,
     pass_configs: dict[str, Any] | None = None,
     compile_flags: list[str] | str | None = None,
@@ -144,10 +145,10 @@ def par_compile(
     execution_backend : Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"], optional
         Execution backend to use for kernel execution. If None, reads from
         TILELANG_EXECUTION_BACKEND environment variable (defaults to "auto").
-    target : Union[str, Target], optional
-        Compilation target, either as a string or a TVM Target object. If None, reads from
-        TILELANG_TARGET environment variable (defaults to "auto").
-    target_host : Union[str, Target], optional
+    target : str or tvm.target.Target, optional
+        Compilation target. If None, reads from TILELANG_TARGET environment
+        variable (defaults to "auto").
+    target_host : str or tvm.target.Target, optional
         Target host for cross-compilation (default: None).
     verbose : bool, optional
         Whether to enable verbose output. If None, reads from
@@ -254,9 +255,9 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         Index(es) of output tensor(s) to return (lazy mode only).
     execution_backend : str | None
         Backend for kernel execution ("auto", "dlpack", "tvm_ffi", etc.).
-    target : str | Target | None
+    target : str | tvm.target.Target | None
         TVM compilation target (e.g., "cuda", "llvm", "auto").
-    target_host : str | Target | None
+    target_host : str | tvm.target.Target | None
         Host target for cross-compilation.
     verbose : bool | None
         Enable verbose compilation output.
@@ -278,8 +279,8 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
 
     out_idx: list[int] | int | None
     execution_backend: Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None
-    target: str | Target | None
-    target_host: str | Target | None
+    target: TargetLike | None
+    target_host: TargetLike | None
     verbose: bool | None
     pass_configs: dict[str, Any] | None
     debug_root_path: str | None
@@ -529,8 +530,8 @@ def jit(func: Callable[_KP, _T]) -> JITImpl[_KP, _KP, _T, _T]: ...
 def jit(
     *,
     out_idx: Any = None,
-    target: str | Target | None = None,
-    target_host: str | Target | None = None,
+    target: TargetLike | None = None,
+    target_host: TargetLike | None = None,
     execution_backend: ExecutionBackend | None = None,
     verbose: bool | None = None,
     pass_configs: dict[str, Any] | None = None,
@@ -543,8 +544,8 @@ def jit(
     func: Callable[_P, _T] | PrimFunc | None = None,
     *,  # Indicates subsequent arguments are keyword-only
     out_idx: list[int] | int | None = None,
-    target: str | Target | None = None,
-    target_host: str | Target | None = None,
+    target: TargetLike | None = None,
+    target_host: TargetLike | None = None,
     execution_backend: ExecutionBackend | None = None,
     verbose: bool | None = None,
     pass_configs: dict[str, Any] | None = None,
@@ -562,9 +563,9 @@ def jit(
     ----------
     out_idx : list[int] | int | None
         Output tensor index(es). Only supported in lazy mode.
-    target : str | Target | None
-        TVM compilation target (e.g., "cuda", "llvm", "auto").
-    target_host : str | Target | None
+    target : str | tvm.target.Target | None
+        Compilation target (e.g., "cuda", "llvm", "auto").
+    target_host : str | tvm.target.Target | None
         Host target for cross-compilation.
     execution_backend : ExecutionBackend | None
         Backend for kernel execution.

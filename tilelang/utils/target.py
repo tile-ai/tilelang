@@ -238,20 +238,13 @@ def determine_target(target: TargetLike | Literal["auto"] = "auto", return_objec
 
     return_var: str | TargetConfig | Target = target
 
-    if getattr(target, "_tilelang_target_marker", False):
-        resolved_target = target.to_legacy_tvm_target()
-        return resolved_target if return_object else resolved_target
-
     if target == "auto":
         target = tvm.target.Target.current(allow_none=True)
         if target is not None:
             return with_rocm_target_attrs(target)
-        try:
-            from tilelang.backend import Target as TileLangTarget
+        from tilelang.backend.target import auto_detect_target
 
-            return_var = TileLangTarget("auto").to_legacy_tvm_target()
-        except ValueError as err:
-            raise ValueError("No CUDA or HIP or MPS available on this system.") from err
+        return_var = auto_detect_target()
 
     else:
         possible_cutedsl_target = normalize_cutedsl_target(target)
@@ -299,7 +292,7 @@ def determine_target(target: TargetLike | Literal["auto"] = "auto", return_objec
                 raise AssertionError(f"Target {target} is not supported")
 
     if isinstance(return_var, Target):
-        return return_var
+        return with_rocm_target_attrs(return_var)
     if return_object:
         if isinstance(return_var, Target):
             return return_var

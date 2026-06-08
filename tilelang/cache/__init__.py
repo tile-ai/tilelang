@@ -6,7 +6,7 @@ import logging
 import json
 from hashlib import sha256
 from typing import TYPE_CHECKING, Literal
-from tvm.target import Target
+from tvm.target import Target as TVMTarget
 from tvm.tirx import PrimFunc
 from tilelang.jit import JITKernel
 from tilelang import env
@@ -18,6 +18,8 @@ from tilelang.jit.adapter.kernel_cache import TVMFFIKernelCache
 
 if TYPE_CHECKING:
     from .kernel_cache import KernelCache
+
+TargetLike = str | TVMTarget
 
 # Create a map of singleton instance of KernelCaches
 _dispatch_map: dict[str, KernelCache] = {
@@ -40,13 +42,10 @@ def _normalize_for_json(value):
 
 
 def _resolve_cache_dispatch(
-    target: str | Target | None,
+    target: TargetLike | None,
     execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None,
     verbose: bool | None,
 ):
-    from tilelang.backend import resolve_target_execution_backend
-
-    target, execution_backend = resolve_target_execution_backend(target, execution_backend)
     if target is None:
         target = env.get_default_target()
     if execution_backend is None:
@@ -55,7 +54,7 @@ def _resolve_cache_dispatch(
         verbose = env.get_default_verbose()
 
     from tilelang.utils.target import determine_target as _determine_target
-    from tilelang.jit.execution_backend import resolve_execution_backend, allowed_backends_for_target
+    from tilelang.backend.execution_backend import resolve_execution_backend, allowed_backends_for_target
 
     norm_target = _determine_target(target, return_object=True)
     requested_backend = execution_backend
@@ -80,8 +79,8 @@ def _resolve_cache_dispatch(
 def _make_frontend_cache_key(
     frontend_key_data: dict,
     *,
-    target: Target,
-    target_host: str | Target | None,
+    target: TVMTarget,
+    target_host: TargetLike | None,
     execution_backend: str,
     out_idx: list[int] | int | None,
     pass_configs: dict | None,
@@ -104,8 +103,8 @@ def cached(
     func: PrimFunc = None,
     out_idx: list[int] = None,
     *args,
-    target: str | Target | None = None,
-    target_host: str | Target | None = None,
+    target: TargetLike | None = None,
+    target_host: TargetLike | None = None,
     execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
     verbose: bool | None = None,
     pass_configs: dict | None = None,
@@ -132,8 +131,8 @@ def load_frontend_cached(
     frontend_key_data: dict,
     *,
     out_idx: list[int] | int | None = None,
-    target: str | Target | None = None,
-    target_host: str | Target | None = None,
+    target: TargetLike | None = None,
+    target_host: TargetLike | None = None,
     execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
     verbose: bool | None = None,
     pass_configs: dict | None = None,
@@ -166,8 +165,8 @@ def store_frontend_cache(
     kernel_key: str,
     *,
     out_idx: list[int] | int | None = None,
-    target: str | Target | None = None,
-    target_host: str | Target | None = None,
+    target: TargetLike | None = None,
+    target_host: TargetLike | None = None,
     execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
     verbose: bool | None = None,
     pass_configs: dict | None = None,
