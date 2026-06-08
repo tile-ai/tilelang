@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from tvm.target import Target
 
-from tilelang.backend.target import TargetLike, register_supported_target, register_target_detector, register_target_normalizer
+from tilelang.backend.target import TargetLike, register_target_detector, register_target_normalizer
 
 
 def _target_ffi_api():
@@ -151,5 +151,3 @@ def target_has_bulk_copy(target: Target) -> bool:
 
 register_target_detector("cuda", _detect_cuda_target, override=True)
 register_target_normalizer("cutedsl", _normalize_cutedsl_target_for_resolve, override=True)
-register_supported_target("cuda", "CUDA GPU target. Use dict options such as {'kind': 'cuda', 'arch': 'sm_90'}.", override=True)
-register_supported_target("cutedsl", "CuTe DSL GPU target. Use dict options such as {'kind': 'cutedsl', 'arch': 'sm_90'}.", override=True)

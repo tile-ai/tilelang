@@ -4,7 +4,7 @@ from platform import mac_ver
 
 from tvm.target import Target
 
-from tilelang.backend.target import register_supported_target, register_target_detector
+from tilelang.backend.target import register_target_detector
 
 
 def _target_ffi_api():
@@ -32,4 +32,3 @@ def target_is_metal(target: Target) -> bool:
 
 
 register_target_detector("metal", _detect_metal_target, override=True)
-register_supported_target("metal", "Apple Metal target for arm64 Macs.", override=True)

@@ -12,7 +12,6 @@ from .target import (  # noqa: F401
     auto_detect_target,
     list_target_detectors,
     register_lazy_target_detector,
-    register_supported_target,
     register_target_detector,
     register_target_normalizer,
 )

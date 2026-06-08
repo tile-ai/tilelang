@@ -13,10 +13,6 @@ TargetLike = str | TargetConfig | Target
 TargetDetector = Callable[[], TargetInput | None]
 TargetNormalizer = Callable[[TargetLike], TargetInput | None]
 
-_SUPPORTED_TARGETS: dict[str, str] = {
-    "auto": "Auto-detect using registered target detectors.",
-}
-
 
 @dataclass(frozen=True, slots=True)
 class TargetDetectorSpec:
@@ -34,12 +30,6 @@ _TARGET_DETECTORS: dict[str, TargetDetectorSpec] = {}
 _TARGET_NORMALIZERS: dict[str, TargetNormalizerSpec] = {}
 _LAZY_TARGET_DETECTORS: dict[str, str] = {}
 _LOADED_TARGET_DETECTORS: set[str] = set()
-
-
-def register_supported_target(name: str, description: str, *, override: bool = False) -> None:
-    if name in _SUPPORTED_TARGETS and not override:
-        raise ValueError(f"Target description {name!r} is already registered")
-    _SUPPORTED_TARGETS[name] = description
 
 
 def register_target_detector(
@@ -115,14 +105,6 @@ def list_target_detectors() -> tuple[str, ...]:
     return tuple(_TARGET_DETECTORS)
 
 
-def describe_supported_targets() -> dict[str, str]:
-    """
-    Return a mapping of supported target names to usage descriptions.
-    """
-    _ensure_target_modules_loaded()
-    return dict(_SUPPORTED_TARGETS)
-
-
 def _validate_manual_target(target: TargetLike) -> TargetInput:
     normalized = _normalize_registered_target(target)
     if normalized is not None:
@@ -143,10 +125,8 @@ def _validate_manual_target(target: TargetLike) -> TargetInput:
         try:
             Target(normalized_target)
         except Exception as err:
-            examples = ", ".join(f"`{name}`" for name in describe_supported_targets())
             raise AssertionError(
-                f"Target {target} is not supported. Supported targets include: {examples}. "
-                "Pass target options as a dict when the target needs attributes."
+                f"Target {target} is not supported. Pass target options as a dict when the target needs attributes."
             ) from err
         return normalized_target
     raise AssertionError(f"Target {target} is not supported")

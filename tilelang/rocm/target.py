@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from tvm.target import Target
 
-from tilelang.backend.target import TargetLike, register_supported_target, register_target_detector, register_target_normalizer
+from tilelang.backend.target import TargetLike, register_target_detector, register_target_normalizer
 
 ROCM_MTRIPLE = "amdgcn-amd-amdhsa-hcc"
 
@@ -148,4 +148,3 @@ def target_get_rdna_generation(target: Target) -> int:
 
 register_target_detector("hip", _detect_rocm_target, override=True)
 register_target_normalizer("hip", normalize_rocm_target, override=True)
-register_supported_target("hip", "ROCm HIP target. Use dict options such as {'kind': 'hip', 'mcpu': 'gfx942'}.", override=True)

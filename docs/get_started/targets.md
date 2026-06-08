@@ -93,19 +93,6 @@ target = target.with_host(Target({"kind": "llvm", "mcpu": "skylake"}))
 TileLang accepts bare target strings, target config dictionaries, and `Target` inputs. For targets with options,
 prefer config dictionaries over CLI-style strings.
 
-## Discovering supported targets in code
-
-Looking for a quick reminder of the built-in base names and their descriptions? Use:
-
-```python
-from tilelang.backend.target import describe_supported_targets
-
-for name, doc in describe_supported_targets().items():
-    print(f"{name:>6}: {doc}")
-```
-
-This helper mirrors the table above and is safe to call at runtime (for example when validating CLI arguments).
-
 ## Troubleshooting tips
 
 - If you see `Target {'kind': 'cuda', 'arch': 'sm_80'} is not supported`, double-check the spellings and that the option is valid for
