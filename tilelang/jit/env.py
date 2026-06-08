@@ -32,7 +32,7 @@ from tilelang.env import (
 def _get_workspace_dir_name() -> pathlib.Path:
     try:
         from tilelang.contrib import nvcc
-        from tilelang.utils.target import determine_target
+        from tilelang.backend.target import determine_target
 
         target = determine_target(return_object=True)
         # create tmp source file for torch cpp extension

@@ -7,7 +7,7 @@ import tilelang.language as T
 from tilelang.rocm.intrinsics import make_mfma_swizzle_layout as make_swizzle_layout
 from tilelang.rocm.intrinsics.mfma_macro_generator import MatrixCorePreshuffleIntrinEmitter
 from tilelang.transform import simplify_prim_func
-from tilelang.utils import determine_fp8_type
+from tilelang.language.fp8 import determine_fp8_type
 
 tilelang.testing.set_random_seed(0)
 

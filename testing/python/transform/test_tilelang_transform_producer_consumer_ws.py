@@ -5,7 +5,7 @@ import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm as tvm
 from tilelang.layout import make_swizzled_layout
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 
 
 def matmul_pipelined(M, N, K, block_M, block_K, block_N, num_stages, dtype="float16", threads=128):

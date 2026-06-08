@@ -124,7 +124,7 @@ class TensorInstruction:
 class CUDA(TileDevice):
     def __init__(self, target: Target | str):
         if isinstance(target, str):
-            from tilelang.utils.target import determine_target
+            from tilelang.backend.target import determine_target
 
             target = determine_target(target, return_object=True)
         self.target = target
