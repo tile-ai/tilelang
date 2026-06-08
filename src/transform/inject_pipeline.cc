@@ -44,28 +44,24 @@ namespace software_pipeline {
  */
 class BufferReplacer : public StmtExprMutator {
 public:
-  /*! \brief Construct a replacer that maps old Buffer objects to new ones. */
   explicit BufferReplacer(const Map<Buffer, Buffer> &replacements)
       : replacements_(replacements) {}
 
 private:
-  /*! \brief Replace buffer in BufferLoad nodes. */
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    if (auto new_buf = replacements_.Get(op->buffer)) {
-      return BufferLoad(new_buf.value(), op->indices, Optional<PrimExpr>(),
-                        op->span);
+    auto node = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
+    if (auto new_buf = replacements_.Get(node->buffer)) {
+      node.CopyOnWrite()->buffer = new_buf.value();
     }
-    return StmtExprMutator::VisitExpr_(op);
+    return node;
   }
-  /*! \brief Replace buffer in BufferStore nodes. */
   Stmt VisitStmt_(const BufferStoreNode *op) final {
-    if (auto new_buf = replacements_.Get(op->buffer)) {
-      return BufferStore(new_buf.value(), VisitExpr(op->value), op->indices,
-                         Optional<PrimExpr>(), op->span);
+    auto node = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
+    if (auto new_buf = replacements_.Get(node->buffer)) {
+      node.CopyOnWrite()->buffer = new_buf.value();
     }
-    return StmtExprMutator::VisitStmt_(op);
+    return node;
   }
-  /*! \brief Replace buffer in DeclBuffer nodes. */
   Stmt VisitStmt_(const DeclBufferNode *op) final {
     if (auto new_buf = replacements_.Get(op->buffer)) {
       ObjectPtr<DeclBufferNode> n = make_object<DeclBufferNode>(*op);
@@ -74,7 +70,6 @@ private:
     }
     return StmtExprMutator::VisitStmt_(op);
   }
-  /*! \brief Replace buffer in AllocBuffer nodes. */
   Stmt VisitStmt_(const AllocBufferNode *op) final {
     if (auto new_buf = replacements_.Get(op->buffer)) {
       ObjectPtr<AllocBufferNode> n = make_object<AllocBufferNode>(*op);
@@ -83,7 +78,44 @@ private:
     }
     return StmtExprMutator::VisitStmt_(op);
   }
-  /*! \brief The buffer replacement map. */
+  Stmt VisitStmt_(const SBlockNode *op) final {
+    SBlock block = Downcast<SBlock>(StmtExprMutator::VisitStmt_(op));
+    bool changed = false;
+    Array<Buffer> alloc_buffers;
+    for (const auto &buf : block->alloc_buffers) {
+      if (auto new_buf = replacements_.Get(buf)) {
+        alloc_buffers.push_back(new_buf.value());
+        changed = true;
+      } else {
+        alloc_buffers.push_back(buf);
+      }
+    }
+    Array<BufferRegion> reads;
+    for (const auto &region : block->reads) {
+      if (auto new_buf = replacements_.Get(region->buffer)) {
+        reads.push_back(BufferRegion(new_buf.value(), region->region));
+        changed = true;
+      } else {
+        reads.push_back(region);
+      }
+    }
+    Array<BufferRegion> writes;
+    for (const auto &region : block->writes) {
+      if (auto new_buf = replacements_.Get(region->buffer)) {
+        writes.push_back(BufferRegion(new_buf.value(), region->region));
+        changed = true;
+      } else {
+        writes.push_back(region);
+      }
+    }
+    if (changed) {
+      SBlockNode *bn = block.CopyOnWrite();
+      bn->alloc_buffers = std::move(alloc_buffers);
+      bn->reads = std::move(reads);
+      bn->writes = std::move(writes);
+    }
+    return block;
+  }
   Map<Buffer, Buffer> replacements_;
 };
 
@@ -882,7 +914,21 @@ private:
     // a new one (e.g. (5,64,32)).  We must replace all references to the old
     // buffer in the entire block body with the new one so LayoutInference
     // sees a single consistent buffer object per Var.
+    //
+    // Compose replacement chains to handle 3+ sibling pipelines sharing the
+    // same buffer.  Without composition, A->B followed by B->C would leave
+    // references to B in the IR, creating mixed buffer objects for the same
+    // data Var.
     if (!old_expanded_to_new_.empty()) {
+      Map<Buffer, Buffer> composed;
+      for (const auto &[key, val] : old_expanded_to_new_) {
+        Buffer resolved = val;
+        while (auto next = old_expanded_to_new_.Get(resolved)) {
+          resolved = next.value();
+        }
+        composed.Set(key, resolved);
+      }
+      old_expanded_to_new_ = std::move(composed);
       block = Downcast<SBlock>(
           BufferReplacer(old_expanded_to_new_)(std::move(block)));
       children_modified = true;
