@@ -815,7 +815,11 @@ def attention_kernel_2sm_d128(
             # Use one block per SM while relying on runtime setmaxnreg.inc/dec
             # for role-specific register donation.
             T.annotate_min_blocks_per_sm(1)
-            T.use_2cta_tmem(mbarrier_init_thread=416, compact_shared_state=True)
+            T.use_2cta_tmem(
+                mbarrier_init_thread=416,
+                tmem_alloc_warp=12,
+                compact_shared_state=True,
+            )
 
             Q_shared = T.alloc_shared([q_stages, block_m_cta, dim], dtype)
             O_shared = T.alloc_shared([q_stages, block_m_cta, dim], dtype)
@@ -1850,7 +1854,11 @@ def attention_kernel_2sm_d256(
             # Use one block per SM while relying on runtime setmaxnreg.inc/dec
             # for role-specific register donation.
             T.annotate_min_blocks_per_sm(1)
-            T.use_2cta_tmem(mbarrier_init_thread=416, compact_shared_state=True)
+            T.use_2cta_tmem(
+                mbarrier_init_thread=416,
+                tmem_alloc_warp=12,
+                compact_shared_state=True,
+            )
 
             # Alias the epilogue staging buffer with Q and use one merged K/V ring.
             QO_shared = T.alloc_shared([block_m_cta, dim], dtype)

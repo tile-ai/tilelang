@@ -286,6 +286,7 @@ private:
     // If block has use_2cta attr, add use_2cta: 1 to tmem alloc/dealloc call
     // annotations.
     Map<String, ObjectRef> tmem_call_ann;
+    int64_t tmem_alloc_warp = 0;
     if (op->annotations.count("use_2cta")) {
       PrimExpr val = Downcast<PrimExpr>(op->annotations["use_2cta"]);
       // Bool in TVM is a subclass of IntImm, so only check IntImm.
@@ -294,6 +295,13 @@ private:
           tmem_call_ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
         }
       }
+    }
+    if (op->annotations.count("tmem_alloc_warp")) {
+      PrimExpr val = Downcast<PrimExpr>(op->annotations["tmem_alloc_warp"]);
+      const auto *i = val.as<IntImmNode>();
+      ICHECK(i) << "tmem_alloc_warp must be an integer constant";
+      ICHECK_GE(i->value, 0) << "tmem_alloc_warp must be non-negative";
+      tmem_alloc_warp = i->value;
     }
 
     // 3. create init & dealloc calls for new buffers. Aliased buffers
@@ -361,7 +369,7 @@ private:
     bool use_2cta_tmem = tmem_call_ann.find("use_2cta") != tmem_call_ann.end();
     if (use_2cta_tmem) {
       tmem_guard = EQ(thread_var_div_warp_size,
-                      IntImm(thread_var_->var->dtype, 12));
+                      IntImm(thread_var_->var->dtype, tmem_alloc_warp));
     }
     new_body.push_back(IfThenElse(tmem_guard,
                                   init_mtmem_calls_.size() > 1
