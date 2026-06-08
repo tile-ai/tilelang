@@ -20,9 +20,14 @@ def test_tilelang_does_not_export_target_wrapper():
 
 def test_auto_target_uses_registered_detectors():
     name = "unit-auto-target"
-    old_detector = target_registry._TARGET_DETECTORS.get(name)
+    old_detectors = dict(target_registry._TARGET_DETECTORS)
+    old_lazy_detectors = dict(target_registry._LAZY_TARGET_DETECTORS)
+    old_loaded_detectors = set(target_registry._LOADED_TARGET_DETECTORS)
     try:
-        register_target_detector(name, lambda: Target({"kind": "llvm", "mcpu": "native"}), priority=10000, override=True)
+        target_registry._TARGET_DETECTORS.clear()
+        target_registry._LAZY_TARGET_DETECTORS.clear()
+        target_registry._LOADED_TARGET_DETECTORS.clear()
+        register_target_detector(name, lambda: Target({"kind": "llvm", "mcpu": "native"}), override=True)
 
         target = auto_detect_target()
 
@@ -31,31 +36,36 @@ def test_auto_target_uses_registered_detectors():
         assert str(target.attrs["mcpu"]) == "native"
         assert name in list_target_detectors()
     finally:
-        if old_detector is None:
-            target_registry._TARGET_DETECTORS.pop(name, None)
-        else:
-            target_registry._TARGET_DETECTORS[name] = old_detector
+        target_registry._TARGET_DETECTORS.clear()
+        target_registry._TARGET_DETECTORS.update(old_detectors)
+        target_registry._LAZY_TARGET_DETECTORS.clear()
+        target_registry._LAZY_TARGET_DETECTORS.update(old_lazy_detectors)
+        target_registry._LOADED_TARGET_DETECTORS.clear()
+        target_registry._LOADED_TARGET_DETECTORS.update(old_loaded_detectors)
 
 
 def test_auto_target_detector_falls_through_none_result():
-    low_name = "unit-auto-none"
-    high_name = "unit-auto-fallback"
-    old_low = target_registry._TARGET_DETECTORS.get(low_name)
-    old_high = target_registry._TARGET_DETECTORS.get(high_name)
+    first_name = "unit-auto-none"
+    second_name = "unit-auto-fallback"
+    old_detectors = dict(target_registry._TARGET_DETECTORS)
+    old_lazy_detectors = dict(target_registry._LAZY_TARGET_DETECTORS)
+    old_loaded_detectors = set(target_registry._LOADED_TARGET_DETECTORS)
     try:
-        register_target_detector(low_name, lambda: None, priority=20000, override=True)
-        register_target_detector(high_name, lambda: "llvm", priority=10000, override=True)
+        target_registry._TARGET_DETECTORS.clear()
+        target_registry._LAZY_TARGET_DETECTORS.clear()
+        target_registry._LOADED_TARGET_DETECTORS.clear()
+        register_target_detector(first_name, lambda: None, override=True)
+        register_target_detector(second_name, lambda: "llvm", override=True)
 
         assert auto_detect_target() == "llvm"
+        assert list_target_detectors() == (first_name, second_name)
     finally:
-        if old_low is None:
-            target_registry._TARGET_DETECTORS.pop(low_name, None)
-        else:
-            target_registry._TARGET_DETECTORS[low_name] = old_low
-        if old_high is None:
-            target_registry._TARGET_DETECTORS.pop(high_name, None)
-        else:
-            target_registry._TARGET_DETECTORS[high_name] = old_high
+        target_registry._TARGET_DETECTORS.clear()
+        target_registry._TARGET_DETECTORS.update(old_detectors)
+        target_registry._LAZY_TARGET_DETECTORS.clear()
+        target_registry._LAZY_TARGET_DETECTORS.update(old_lazy_detectors)
+        target_registry._LOADED_TARGET_DETECTORS.clear()
+        target_registry._LOADED_TARGET_DETECTORS.update(old_loaded_detectors)
 
 
 def test_execution_backend_registry_resolves_target_policy():

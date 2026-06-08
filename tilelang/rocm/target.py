@@ -42,4 +42,4 @@ def _detect_rocm_target() -> Target | str | None:
     return _target_from_arch(_detect_rocm_arch())
 
 
-register_target_detector("hip", _detect_rocm_target, priority=80, override=True)
+register_target_detector("hip", _detect_rocm_target, override=True)

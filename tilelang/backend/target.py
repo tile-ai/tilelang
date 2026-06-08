@@ -34,7 +34,6 @@ ROCM_MTRIPLE = "amdgcn-amd-amdhsa-hcc"
 class TargetDetectorSpec:
     name: str
     detect: TargetDetector
-    priority: int = 0
 
 
 _TARGET_DETECTORS: dict[str, TargetDetectorSpec] = {}
@@ -46,12 +45,11 @@ def register_target_detector(
     name: str,
     detect: TargetDetector,
     *,
-    priority: int = 0,
     override: bool = False,
 ) -> TargetDetectorSpec:
     if name in _TARGET_DETECTORS and not override:
         raise ValueError(f"Target detector {name!r} is already registered")
-    spec = TargetDetectorSpec(name=name, detect=detect, priority=priority)
+    spec = TargetDetectorSpec(name=name, detect=detect)
     _TARGET_DETECTORS[name] = spec
     return spec
 
@@ -76,8 +74,7 @@ def _ensure_target_detectors_loaded() -> list[str]:
 
 def auto_detect_target() -> TargetInput:
     errors = _ensure_target_detectors_loaded()
-    detectors = sorted(_TARGET_DETECTORS.values(), key=lambda spec: spec.priority, reverse=True)
-    for spec in detectors:
+    for spec in _TARGET_DETECTORS.values():
         try:
             detected = spec.detect()
         except Exception as err:
@@ -92,7 +89,7 @@ def auto_detect_target() -> TargetInput:
 
 def list_target_detectors() -> tuple[str, ...]:
     _ensure_target_detectors_loaded()
-    return tuple(sorted(_TARGET_DETECTORS))
+    return tuple(_TARGET_DETECTORS)
 
 
 def normalize_rocm_arch(arch: str | None) -> str | None:

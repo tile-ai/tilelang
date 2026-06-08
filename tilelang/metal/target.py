@@ -12,4 +12,4 @@ def _detect_metal_target() -> str | None:
     return None
 
 
-register_target_detector("metal", _detect_metal_target, priority=10, override=True)
+register_target_detector("metal", _detect_metal_target, override=True)

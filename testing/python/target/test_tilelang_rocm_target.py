@@ -52,22 +52,24 @@ def test_determine_target_rejects_legacy_option_string():
         determine_target("hip -mcpu=gfx1151", return_object=True)
 
 
-def test_auto_target_prefers_rocm_pytorch_over_cuda_toolkit(monkeypatch):
+def test_auto_target_uses_registered_detector_order_for_rocm():
     import tilelang.backend.target as target_registry
 
-    old_cuda_detector = target_registry._TARGET_DETECTORS.get("unit-cuda")
-    old_hip_detector = target_registry._TARGET_DETECTORS.get("unit-hip")
+    old_detectors = dict(target_registry._TARGET_DETECTORS)
+    old_lazy_detectors = dict(target_registry._LAZY_TARGET_DETECTORS)
+    old_loaded_detectors = set(target_registry._LOADED_TARGET_DETECTORS)
     try:
-        target_registry.register_target_detector(
-            "unit-cuda",
-            lambda: Target({"kind": "cuda", "arch": "sm_90"}),
-            priority=100,
-            override=True,
-        )
+        target_registry._TARGET_DETECTORS.clear()
+        target_registry._LAZY_TARGET_DETECTORS.clear()
+        target_registry._LOADED_TARGET_DETECTORS.clear()
         target_registry.register_target_detector(
             "unit-hip",
             lambda: Target({"kind": "hip", "mcpu": "gfx1151"}),
-            priority=200,
+            override=True,
+        )
+        target_registry.register_target_detector(
+            "unit-cuda",
+            lambda: Target({"kind": "cuda", "arch": "sm_90"}),
             override=True,
         )
 
@@ -76,14 +78,12 @@ def test_auto_target_prefers_rocm_pytorch_over_cuda_toolkit(monkeypatch):
         assert target_get_mcpu(target) == "gfx1151"
         assert int(target.attrs["thread_warp_size"]) == 32
     finally:
-        if old_cuda_detector is None:
-            target_registry._TARGET_DETECTORS.pop("unit-cuda", None)
-        else:
-            target_registry._TARGET_DETECTORS["unit-cuda"] = old_cuda_detector
-        if old_hip_detector is None:
-            target_registry._TARGET_DETECTORS.pop("unit-hip", None)
-        else:
-            target_registry._TARGET_DETECTORS["unit-hip"] = old_hip_detector
+        target_registry._TARGET_DETECTORS.clear()
+        target_registry._TARGET_DETECTORS.update(old_detectors)
+        target_registry._LAZY_TARGET_DETECTORS.clear()
+        target_registry._LAZY_TARGET_DETECTORS.update(old_lazy_detectors)
+        target_registry._LOADED_TARGET_DETECTORS.clear()
+        target_registry._LOADED_TARGET_DETECTORS.update(old_loaded_detectors)
 
 
 def test_rdna_gfx1151_target_classification():

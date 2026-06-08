@@ -25,4 +25,4 @@ def _detect_cuda_target() -> Target | str | None:
     return Target({"kind": "cuda", "arch": f"sm_{nvcc.get_target_arch(cap)}"})
 
 
-register_target_detector("cuda", _detect_cuda_target, priority=100, override=True)
+register_target_detector("cuda", _detect_cuda_target, override=True)
