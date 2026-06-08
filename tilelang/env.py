@@ -336,7 +336,7 @@ class Environment:
         to ensure PyTorch extensions are built for the proper GPU arch.
         """
         from tilelang.contrib import nvcc
-        from tilelang.utils.target import determine_target
+        from tilelang.backend.target import determine_target
 
         target = determine_target(return_object=True)  # get target GPU
         compute_version = nvcc.get_target_compute_version(target)  # e.g. "8.6"

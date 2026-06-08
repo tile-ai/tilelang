@@ -20,7 +20,7 @@ from tilelang.jit.adapter import (
     MetalKernelAdapter,
 )
 from tilelang.profiler import Profiler, TensorSupplyType
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 from tilelang.contrib import nvcc as tl_nvcc
 from tilelang.contrib.hip_resource_info import pop_recorded, reset_recorder
 from tilelang.transform import PassConfigKey

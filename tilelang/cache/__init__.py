@@ -53,7 +53,7 @@ def _resolve_cache_dispatch(
     if verbose is None:
         verbose = env.get_default_verbose()
 
-    from tilelang.utils.target import determine_target as _determine_target
+    from tilelang.backend.target import determine_target as _determine_target
     from tilelang.backend.execution_backend import resolve_execution_backend, allowed_backends_for_target
 
     norm_target = _determine_target(target, return_object=True)

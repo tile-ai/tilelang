@@ -36,7 +36,7 @@ from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
 from tilelang.autotuner.grouped_compile import compile_grouped_unit_tvm_ffi
 from tilelang.utils.language import get_prim_func_name
 from tilelang.autotuner.capture import get_autotune_inputs
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 from tilelang import __version__
 
 

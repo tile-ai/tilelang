@@ -71,11 +71,11 @@ Refer to NVIDIA’s [CUDA GPUs](https://developer.nvidia.com/cuda-gpus) page or 
 
 ## Creating targets programmatically
 
-TileLang exposes the helper `tilelang.utils.target.determine_target` (returns a canonical target string or config
+TileLang exposes the helper `tilelang.backend.target.determine_target` (returns a canonical target string or config
 by default, or the `Target` object when `return_object=True`):
 
 ```python
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 
 tvm_target = determine_target({"kind": "cuda", "arch": "sm_80"}, return_object=True)
 kernel = tilelang.compile(func, target=tvm_target)
@@ -98,7 +98,7 @@ prefer config dictionaries over CLI-style strings.
 Looking for a quick reminder of the built-in base names and their descriptions? Use:
 
 ```python
-from tilelang.utils.target import describe_supported_targets
+from tilelang.backend.target import describe_supported_targets
 
 for name, doc in describe_supported_targets().items():
     print(f"{name:>6}: {doc}")

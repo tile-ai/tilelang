@@ -123,7 +123,7 @@ def print_local_buffer_with_condition(condition: tirx.PrimExpr, buffer: tirx.Buf
             tirx.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
 
 
-from tilelang.utils.target import check_cuda_availability
+from tilelang.backend.target import check_cuda_availability
 import warnings
 
 _IS_CUDA_AVAILABLE = check_cuda_availability()

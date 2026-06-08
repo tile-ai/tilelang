@@ -19,7 +19,7 @@ from tvm.target.target import Target
 from tvm.tirx.stmt_functor import pre_order_visit
 from .arch import get_arch, is_tensorcore_supported_precision
 from .arch.rdna import _get_rdna_tuning_config
-from tilelang.utils.target import target_get_mcpu, target_is_rdna
+from tilelang.backend.target import target_get_mcpu, target_is_rdna
 import logging
 
 logger = logging.getLogger(__name__)

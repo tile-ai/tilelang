@@ -15,7 +15,7 @@ import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang.utils.target import target_is_gfx950, determine_target
+from tilelang.backend.target import target_is_gfx950, determine_target
 
 
 def requires_gfx950():

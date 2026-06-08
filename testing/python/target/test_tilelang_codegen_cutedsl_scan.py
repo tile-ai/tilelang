@@ -4,7 +4,7 @@ import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
 from tilelang.engine.lower import lower
-from tilelang.utils.target import normalize_cutedsl_target
+from tilelang.backend.target import normalize_cutedsl_target
 
 
 def _lower_cutedsl_scan(op_name):

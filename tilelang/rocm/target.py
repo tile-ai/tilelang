@@ -3,7 +3,7 @@ from __future__ import annotations
 from tvm.target import Target
 
 from tilelang.backend.target import register_target_detector
-from tilelang.utils.target import ROCM_MTRIPLE, normalize_rocm_arch, rocm_warp_size_for_arch
+from tilelang.backend.target import ROCM_MTRIPLE, normalize_rocm_arch, rocm_warp_size_for_arch
 
 
 def _detect_rocm_arch() -> str | None:

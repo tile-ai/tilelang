@@ -14,7 +14,7 @@ from tilelang.jit.adapter.wrapper import TLPyWrapper
 from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
 from tilelang.jit.adapter.cutedsl.libgen import CuTeDSLLibraryGenerator
 from tilelang.utils.language import retrieve_func_from_module
-from tilelang.utils.target import determine_target, normalize_cutedsl_target
+from tilelang.backend.target import determine_target, normalize_cutedsl_target
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 
 logger = logging.getLogger(__name__)

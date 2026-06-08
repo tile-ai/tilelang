@@ -12,7 +12,7 @@ from typing import Literal
 from collections.abc import Callable
 import warnings
 
-from tilelang.utils.target import target_is_gfx950, determine_target
+from tilelang.backend.target import target_is_gfx950, determine_target
 from tilelang.utils import is_fragment
 from tilelang.language.utils import get_buffer_region_from_load
 from .mfma_layout import (

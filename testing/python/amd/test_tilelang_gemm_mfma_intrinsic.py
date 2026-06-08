@@ -8,7 +8,7 @@ from tilelang.rocm.intrinsics.mfma_macro_generator import (
     MatrixCoreIntrinEmitter,
 )
 from tilelang.transform import simplify_prim_func
-from tilelang.utils import determine_fp8_type, determine_target
+from tilelang.backend.target import determine_fp8_type, determine_target
 
 tilelang.testing.set_random_seed(0)
 
