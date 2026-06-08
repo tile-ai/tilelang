@@ -535,30 +535,6 @@ public:
   int64_t min_blocks_per_sm = 1; // default to 1
 };
 
-// Walks the prim_func body and returns the maximum register count requested
-// via any `T.set_max_nreg(N, ...)` call. Returns 0 if no such call exists.
-class MaxNRegExtractor : public tirx::StmtExprVisitor {
-public:
-  static int64_t Extract(const Stmt &body) {
-    MaxNRegExtractor v;
-    v(body);
-    return v.max_nreg_;
-  }
-
-private:
-  void VisitExpr_(const CallNode *op) final {
-    if (op->op.same_as(tl::set_max_nreg()) && op->args.size() >= 1) {
-      if (const IntImmNode *n = op->args[0].as<IntImmNode>()) {
-        if (n->value > max_nreg_) {
-          max_nreg_ = n->value;
-        }
-      }
-    }
-    StmtExprVisitor::VisitExpr_(op);
-  }
-
-  int64_t max_nreg_ = 0;
-};
 
 class ClusterInfoExtractor : public tirx::StmtVisitor {
 private:
@@ -593,60 +569,19 @@ public:
 };
 
 void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
-  if (auto cluster_attr = f->GetAttr<Array<PrimExpr>>("cluster_dims")) {
-    auto cluster_dims = cluster_attr.value();
-    ICHECK_EQ(cluster_dims.size(), 3U);
-    int64_t cluster_x = cluster_dims[0].as<IntImmNode>()->value;
-    int64_t cluster_y = cluster_dims[1].as<IntImmNode>()->value;
-    int64_t cluster_z = cluster_dims[2].as<IntImmNode>()->value;
-    stream << " __cluster_dims__(" << cluster_x << ", " << cluster_y << ", "
-           << cluster_z << ") ";
-  }
   LaunchConfigExtractor extractor;
   extractor(f->body);
   arith::Analyzer analyzer;
   PrimExpr threadIdx_ext =
       analyzer.Simplify(extractor.threadIdx_x_ext * extractor.threadIdx_y_ext *
                         extractor.threadIdx_z_ext);
-  // Register allocation strategy:
-  //
-  //   * No set_max_nreg in the body: emit `__launch_bounds__(N, M)` where M
-  //     is tl.min_blocks_per_sm (default 1). ptxas allocates 64K/(N*M) regs
-  //     per thread, the standard uniform-occupancy path.
-  //
-  //   * set_max_nreg in the body AND total threads > one warpgroup: still
-  //     emit `__launch_bounds__(N, M)`. Warp-specialized kernels may request
-  //     per-warpgroup register counts that vary at runtime. ptxas reads the
-  //     setmaxnreg.inc/dec instructions directly and sizes each warpgroup's
-  //     reg slice accordingly — but only when the kernel has launch_bounds,
-  //     NOT __maxnreg__ (which is a uniform per-thread cap and mutually
-  //     exclusive with launch_bounds).
-  //     Setting `tl.min_blocks_per_sm = 0` emits `__launch_bounds__(N, 0)`,
-  //     which tells ptxas "no minBlocks preference" so it can size around
-  //     the per-warp setmaxnreg requests instead of the 64K/N average.
-  //
-  //   * Degenerate single-thread launch: fall back to the legacy __maxnreg__
-  //     path (only useful when we can't recover thread extent statically).
-  int64_t max_nreg = MaxNRegExtractor::Extract(f->body);
   if (const IntImmNode *const threadIdx_ext_int =
           threadIdx_ext.as<IntImmNode>()) {
     if (threadIdx_ext_int->value == 1) {
-      // unable to extract the number of threads per block, hence directly
-      // return
       return;
     }
-    // Always emit __launch_bounds__ for multi-thread launches. Runtime
-    // setmaxnreg.inc/dec can give different warpgroups different register
-    // counts whose sum fits the
-    // 64K register file — ptxas reads those instructions and sizes each
-    // warpgroup's allocation accordingly, only when launch_bounds (not
-    // __maxnreg__) is in effect. __maxnreg__ caps every thread uniformly,
-    // so __maxnreg__(176) at 512 threads asks ptxas for 512*176=90K regs
-    // and is rejected.
     stream << " __launch_bounds__(" << threadIdx_ext_int->value << ", "
            << extractor.min_blocks_per_sm << ")";
-  } else if (max_nreg > 0) {
-    stream << " __maxnreg__(" << max_nreg << ")";
   }
 }
 
