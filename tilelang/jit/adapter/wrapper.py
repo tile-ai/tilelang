@@ -31,20 +31,6 @@ PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY = """
     }}
 """
 
-# Companion to the __maxnreg__(N) attribute emitted in codegen for the kernel.
-# Both sides must agree: __maxnreg__ tells ptxas the max per-thread reg count
-# to reserve at compile time; this runtime call activates that ceiling for the
-# specific function. Without this call ptxas still caps each thread at the
-# default budget (65536/threads), and any runtime setmaxnreg.inc in math warps
-# is silently clamped — register donation looks like a no-op.
-PREDEF_ATTRIBUTE_SET_MAX_NREG = """
-    cudaError_t nreg_result_{0} = cudaFuncSetAttribute({0}, cudaFuncAttributeMaxRegistersPerThread, {1});
-    if (nreg_result_{0} != cudaSuccess) {{
-        snprintf(error_buf, ERROR_BUF_SIZE, "Failed to set MaxRegistersPerThread to %d for kernel {0}: %s", {1}, cudaGetErrorString(nreg_result_{0}));
-        return -1;
-    }}
-"""
-
 PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY_HIP = """
     int device_{0} = 0;
     hipError_t dev_res_{0} = hipGetDevice(&device_{0});
@@ -264,8 +250,6 @@ class TLCUDASourceWrapper:
         self.host_mod = host_mod
         self.function_names: str | None = None
         self.dynamic_smem_buf: int | None = None
-        # function_name -> max N from T.set_max_nreg(N, *); None if absent.
-        self.max_nreg_map: dict[str, int | None] = {}
         self.block_info: list[int] | dict = [1, 1, 1]
         self.grid_info: list[int] | dict = [1, 1, 1]
         self.tma_descriptor_args: dict | None = None
@@ -506,29 +490,6 @@ class TLCUDASourceWrapper:
             if "has_cuda_pdl_sync" in attrs:
                 self.pdl_sync_map[function_name] = 0
 
-            # Scan the device function body for T.set_max_nreg(N, *) calls.
-            # If found, the max N tells the host launch wrapper to invoke
-            # cudaFuncSetAttribute(MaxRegistersPerThread, N) so the
-            # corresponding __maxnreg__(N) attribute emitted by codegen
-            # actually takes effect at launch time.
-            max_nreg = 0
-            try:
-                set_max_nreg_op = tvm.ir.Op.get("tl.set_max_nreg")
-            except Exception:
-                set_max_nreg_op = None
-
-            def _nreg_visitor(node, _op=set_max_nreg_op):
-                nonlocal max_nreg
-                if _op is None:
-                    return
-                if isinstance(node, tvm.tir.Call) and node.op == _op and node.args:
-                    arg0 = node.args[0]
-                    if isinstance(arg0, tvm.tir.IntImm) and int(arg0.value) > max_nreg:
-                        max_nreg = int(arg0.value)
-
-            post_order_visit(func.body, _nreg_visitor)
-            self.max_nreg_map[function_name] = max_nreg if max_nreg > 0 else None
-
             # Map the extracted configurations to each function
             block_info_map[function_name] = block_info
             grid_info_map[function_name] = grid_info
@@ -604,10 +565,6 @@ class TLCUDASourceWrapper:
             if dynamic_smem_buf is not None:
                 # Format the cudaFuncSetAttribute call for dynamic shared memory
                 call_str += PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY.format(function_name, dynamic_smem_buf)
-        # If the kernel uses T.set_max_nreg, also raise the per-thread reg cap.
-        for function_name, max_nreg in self.max_nreg_map.items():
-            if max_nreg is not None and max_nreg > 0:
-                call_str += PREDEF_ATTRIBUTE_SET_MAX_NREG.format(function_name, max_nreg)
         # Format the initialization function using the call_str
         init_funcs = PREDEF_INIT_FUNC.format(call_str)
         return init_funcs
