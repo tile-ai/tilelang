@@ -99,9 +99,10 @@ static std::pair<VarSet, bool> CollectFallthroughDeallocs(const Stmt &stmt) {
 
 class SharedTmemRewriter : public StmtExprMutator {
 public:
-  static Stmt Rewrite(Stmt body, Target target) {
+  static Stmt Rewrite(Stmt body, Target target, bool use_2cta) {
     SharedTmemRewriter rewriter;
     rewriter.target_ = std::move(target);
+    rewriter.use_2cta_ = use_2cta;
     return rewriter(body);
   }
 
@@ -283,18 +284,12 @@ private:
       return StmtExprMutator::VisitStmt_(op);
     }
 
-    // If block has use_2cta attr, add use_2cta: 1 to tmem alloc/dealloc call
-    // annotations.
+    // Propagate use_2cta (inferred from cluster_dims) to tmem alloc/dealloc
+    // call annotations so codegen emits cta_group::2.
     Map<String, ObjectRef> tmem_call_ann;
     int64_t tmem_alloc_warp = 0;
-    if (op->annotations.count("use_2cta")) {
-      PrimExpr val = Downcast<PrimExpr>(op->annotations["use_2cta"]);
-      // Bool in TVM is a subclass of IntImm, so only check IntImm.
-      if (const auto *i = val.as<IntImmNode>()) {
-        if (i->value != 0) {
-          tmem_call_ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
-        }
-      }
+    if (use_2cta_) {
+      tmem_call_ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
     }
     if (op->annotations.count("tmem_alloc_warp")) {
       PrimExpr val = Downcast<PrimExpr>(op->annotations["tmem_alloc_warp"]);
@@ -537,6 +532,7 @@ private:
   // we need to define a thread_var for the serial loop.
   IterVar thread_var_;
   Target target_;
+  bool use_2cta_ = false;
   Map<Var, Var> var_remap_;
   Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Buffer, Buffer> buffer_remap_;
@@ -562,7 +558,17 @@ private:
 PrimFunc LowerSharedTmem(PrimFunc f) {
   auto target = f->GetAttr<Target>(tvm::attr::kTarget);
   ICHECK(target.defined()) << "LowerSharedTmem: Require the target attribute";
-  f.CopyOnWrite()->body = SharedTmemRewriter::Rewrite(f->body, target.value());
+  bool use_2cta = false;
+  if (auto cluster_attr = f->GetAttr<Array<PrimExpr>>("cluster_dims")) {
+    auto dims = cluster_attr.value();
+    int64_t product = 1;
+    for (auto d : dims) {
+      if (auto *imm = d.as<IntImmNode>()) product *= imm->value;
+    }
+    use_2cta = product > 1;
+  }
+  f.CopyOnWrite()->body =
+      SharedTmemRewriter::Rewrite(f->body, target.value(), use_2cta);
   return f;
 }
 

@@ -1390,34 +1390,12 @@ def cp_async_barrier_noinc(barrier: BarrierType):
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.ptx_cp_async_barrier_noinc"), barrier)
 
 
-def tcgen05_mma_arrive(mbar: tirx.Buffer | BufferLoad | PrimExpr, arrive_2cta: bool = False):
-    """Signal UMMA (TCGEN05) barrier arrival for a shared-memory mbarrier pointer.
-
-    Parameters
-    ----------
-    mbar: tirx.Buffer | BufferLoad | PrimExpr
-        The mbarrier object in shared memory (e.g., Barrier*) or its address.
-    arrive_2cta: bool
-        Whether to also arrive at the peer CTA's barrier.
-        If set, will be lowered to umma_arrive_multicast_2x1SM.
-    """
-    if isinstance(mbar, (tirx.Buffer, BufferLoad)):
-        mbar = retrieve_ptr(mbar, access_type="rw")
-    ann = {"use_2cta": 1} if arrive_2cta else {}
-    return tirx.call_intrin("void", tirx.op.Op.get("tl.tcgen05_mma_arrive"), mbar, annotations=ann)
-
-
 def tcgen05_before_thread_sync():
     return tirx.call_intrin("void", tirx.op.Op.get("tl.tcgen05_before_thread_sync"))
 
 
 def tcgen05_after_thread_sync():
     return tirx.call_intrin("void", tirx.op.Op.get("tl.tcgen05_after_thread_sync"))
-
-
-def tcgen05_wait_st():
-    """Compatibility alias for a TMEM store fence that participates in fence analysis."""
-    return tcgen05_fence_tmem_store(classify_as_tmem_use=True)
 
 
 def tcgen05_fence_tmem_load():
@@ -1562,11 +1540,6 @@ def tcgen05_exp2_poly_2(r0, r1, in0, in1):
     )
 
 
-def pack_bf16_pair(a, b):
-    """Pack two FP32 values after BF16 conversion into one uint32 word."""
-    return tirx.call_intrin("uint32", tirx.op.Op.get("tl.pack_bf16_pair"), a, b)
-
-
 def tcgen05_st_32x32b_x4(tmem_base, offset, v0, v1, v2, v3):
     """Store four packed uint32 words to TMEM with `tcgen05.st ... x4.b32`."""
     return tirx.call_intrin(
@@ -1578,48 +1551,6 @@ def tcgen05_st_32x32b_x4(tmem_base, offset, v0, v1, v2, v3):
         v1,
         v2,
         v3,
-    )
-
-
-def tcgen05_mma_1sm_ss_128x128_commit(
-    a_smem_ptr,
-    b_smem_ptr,
-    c_tmem_addr,
-    mbar,
-    *,
-    lane0: bool = False,
-):
-    """Issue a 1SM 128x128 shared/shared tcgen05 MMA sequence and commit.
-
-    Emits two 64-column descriptor tiles, four 16-column MMA issues per tile,
-    then commits the completion mbarrier with plain .b64 tcgen05 commit.
-    The caller owns the warp predicate. Set `lane0=True` when execution is
-    already restricted to lane 0, so the
-    generated helper omits its internal elect.
-    """
-    mbar = _mbar_to_buffer_load(mbar)
-    ann = {}
-    if lane0:
-        ann["lane0_only"] = True
-    return tirx.call_intrin(
-        "void",
-        tirx.op.Op.get("tl.tcgen05_mma_1sm_ss_128x128_commit"),
-        a_smem_ptr,
-        b_smem_ptr,
-        c_tmem_addr,
-        mbar,
-        annotations=ann if ann else None,
-    )
-
-
-def tcgen05_mma_1sm_ss_128x128_commit_lane0(a_smem_ptr, b_smem_ptr, c_tmem_addr, mbar):
-    """Issue the 1SM shared/shared MMA+commit sequence from lane 0."""
-    return tcgen05_mma_1sm_ss_128x128_commit(
-        a_smem_ptr,
-        b_smem_ptr,
-        c_tmem_addr,
-        mbar,
-        lane0=True,
     )
 
 
@@ -1690,19 +1621,6 @@ def tcgen05_mbarrier_arrive_cluster_all_ref(mbar):
     )
 
 
-def tma_load_2cta_2d(desc, stage_ptr, mbar, coord0, coord1):
-    """Issue one 2CTA 2D TMA load."""
-    return tirx.call_intrin(
-        "void",
-        tirx.op.Op.get("tl.tma_load_2cta_2d"),
-        desc,
-        stage_ptr,
-        mbar,
-        coord0,
-        coord1,
-    )
-
-
 def tma_store_2d(desc, stage_ptr, coord0, coord1, predicate: PrimExpr | bool = True):
     """Issue one 2D TMA store, optionally guarded by a CUDA-side predicate."""
     args = [desc, stage_ptr, coord0, coord1]
@@ -1736,11 +1654,6 @@ def tcgen05_wait_barrier_ref(mbar, phase):
     )
 
 
-def tcgen05_wait_barrier_ptr(mbar, phase):
-    """Compatibility alias for waiting on a dynamic mbarrier."""
-    return tcgen05_wait_barrier_ref(mbar, phase)
-
-
 def tcgen05_wait_barrier(mbar, phase):
     """Wait on an mbarrier using the compact SM100 helper call."""
     mbar = _mbar_to_buffer_load(mbar)
@@ -1762,11 +1675,6 @@ def tcgen05_commit_1sm(mbar, *, lane0: bool = False):
         mbar,
         annotations=ann,
     )
-
-
-def tcgen05_commit_1sm_lane0(mbar):
-    """Commit a 1SM TCGEN05 MMA; caller must already restrict to lane 0."""
-    return tcgen05_commit_1sm(mbar, lane0=True)
 
 
 def tcgen05_commit_2cta(mbar):
@@ -1823,58 +1731,6 @@ def _tcgen05_num_smem_chunks(smem_src, chunk_elems: int):
     if total_elems % chunk_elems != 0:
         raise ValueError(f"Packed scale-factor helpers require total extent to be a multiple of {chunk_elems}, got {total_elems}.")
     return total_elems // chunk_elems
-
-
-def tcgen05_cp_warpx4(smem_src, tmem_dst, tmem_col_offset=0, *, use_2cta: bool = False):
-    """Copy one or more packed scale-factor chunks from shared memory to tensor memory.
-
-    The helper lowers to one or more ``tcgen05.cp.cta_group::{1,2}.32x128b.warpx4``
-    instructions. For 1D packed ``uint32`` scale buffers, each 128-word chunk maps to
-    4 TMEM columns and the column offset is advanced automatically.
-    """
-    num_chunks = _tcgen05_num_smem_chunks(smem_src, 128)
-    if isinstance(tmem_dst, tirx.Buffer):
-        tmem_ptr = tmem_dst.data
-    elif isinstance(tmem_dst, (BufferLoad, BufferRegion)):
-        tmem_ptr = tmem_dst.buffer.data
-    else:
-        tmem_ptr = tmem_dst
-    ann = {"use_2cta": 1} if use_2cta else None
-    buffer, base_offset = retrieve_buffer_and_offset(smem_src)
-
-    @macro
-    def _tcgen05_cp_warpx4_chunked(buffer, tmem_ptr, tmem_col_offset, base_offset):
-        for i in T.unroll(num_chunks):
-            chunk_ptr = buffer.access_ptr("r", offset=base_offset + i * 128)
-            tirx.call_intrin(
-                "void",
-                tirx.op.Op.get("tl.ptx_tcgen05_cp_warpx4"),
-                chunk_ptr,
-                tmem_ptr,
-                tmem_col_offset + i * 4,
-                annotations=ann,
-            )
-
-    return _tcgen05_cp_warpx4_chunked(buffer, tmem_ptr, tmem_col_offset, base_offset)
-
-
-def tcgen05_sf_warp_transpose(smem_src):
-    """Warp-level transpose for one or more packed scale-factor chunks in shared memory.
-
-    For 1D packed ``uint32`` scale buffers, the helper automatically applies the
-    transpose to each 128-word chunk in order.
-    """
-    num_chunks = _tcgen05_num_smem_chunks(smem_src, 128)
-
-    buffer, base_offset = retrieve_buffer_and_offset(smem_src)
-
-    @macro
-    def _tcgen05_sf_warp_transpose_chunked(buffer, base_offset):
-        for i in T.unroll(num_chunks):
-            chunk_ptr = buffer.access_ptr("rw", offset=base_offset + i * 128)
-            tirx.call_intrin("void", tirx.op.Op.get("tl.ptx_tcgen05_sf_warp_transpose"), chunk_ptr)
-
-    return _tcgen05_sf_warp_transpose_chunked(buffer, base_offset)
 
 
 def ptx_mma_sm70(

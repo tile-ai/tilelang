@@ -29,14 +29,15 @@ using namespace ffi;
 
 class SharedBarrierRewriter : public StmtExprMutator {
 public:
-  static Stmt Rewrite(Stmt body, bool disable_shuffle_elect = false) {
-    SharedBarrierRewriter rewriter(disable_shuffle_elect);
+  static Stmt Rewrite(Stmt body, bool disable_shuffle_elect = false,
+                      bool use_2cta = false) {
+    SharedBarrierRewriter rewriter(disable_shuffle_elect, use_2cta);
     return rewriter(std::move(body));
   }
 
 private:
-  SharedBarrierRewriter(bool disable_shuffle_elect)
-      : disable_shuffle_elect_(disable_shuffle_elect) {}
+  SharedBarrierRewriter(bool disable_shuffle_elect, bool use_2cta)
+      : disable_shuffle_elect_(disable_shuffle_elect), use_2cta_(use_2cta) {}
 
   Stmt VisitStmt_(const SBlockNode *op) final {
     SBlock block = GetRef<SBlock>(op);
@@ -153,7 +154,7 @@ private:
     // observe the initialized barriers, so a separate pre-allocation cluster
     // sync only adds launch prologue overhead and diverges from the intended
     // producer/consumer startup order.
-    bool use_2cta_tmem = op->annotations.count("use_2cta");
+    bool use_2cta_tmem = use_2cta_;
     if (!has_cluster_barrier_ || !use_2cta_tmem) {
       new_body.push_back(Evaluate(
           Call(DataType::Handle(), builtin::tvm_storage_sync(),
@@ -206,13 +207,22 @@ private:
   std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
   // Disable shuffle elect for the warp specialized kernel
   bool disable_shuffle_elect_;
-  // Whether the block has a cluster barrier
+  bool use_2cta_;
   bool has_cluster_barrier_ = false;
 };
 
 PrimFunc LowerSharedBarrier(PrimFunc f, bool disable_shuffle_elect) {
+  bool use_2cta = false;
+  if (auto cluster_attr = f->GetAttr<Array<PrimExpr>>("cluster_dims")) {
+    auto dims = cluster_attr.value();
+    int64_t product = 1;
+    for (auto d : dims) {
+      if (auto *imm = d.as<IntImmNode>()) product *= imm->value;
+    }
+    use_2cta = product > 1;
+  }
   f.CopyOnWrite()->body =
-      SharedBarrierRewriter::Rewrite(f->body, disable_shuffle_elect);
+      SharedBarrierRewriter::Rewrite(f->body, disable_shuffle_elect, use_2cta);
   return f;
 }
 

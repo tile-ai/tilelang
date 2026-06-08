@@ -174,53 +174,48 @@ def alloc_global(shape: ShapeType, dtype: DType, scope="global") -> Buffer:
     return T.sblock_alloc_buffer(shape, dtype, scope=scope)
 
 
-def alloc_barrier(arrive_count: int | list[int]) -> Buffer:
+def alloc_barrier(arrive_count: int | list[int], *, init_thread: int | None = None) -> Buffer:
     """Allocate a barrier buffer.
 
     Args:
         arrive_count (int | list[int]): The number of threads that need to arrive at each barrier
+        init_thread: Which thread initializes the barriers. Defaults to thread 0
+            (or shuffle-elect). Useful in warp-specialized kernels where a
+            specific thread should own barrier initialization.
 
     Returns:
         T.Buffer: A TVM buffer object allocated as a barrier
-
-    Examples
-    --------
-    >>> mbar = alloc_barrier(128)  # allocate a barrier with arrive count 128
-    >>> mbars = alloc_barrier([128] * n)  # allocate n barriers with the same arrive count 128
     """
-    # Normalize to list
     if isinstance(arrive_count, int):
         arrive_count = [arrive_count]
     else:
         arrive_count = list(arrive_count)
     buffer = T.sblock_alloc_buffer((len(arrive_count),), _dtypes.uint64, scope="shared.barrier")
-    # Convert to TIR IntImm expressions for C++ pass to consume as Map<Var, Array<PrimExpr>>
-    # Use buffer.data as key to support multiple barrier buffer allocations
     arrive_count_exprs = [IntImm("int32", c) for c in arrive_count]
     sblock_attr({"barrier_init": {buffer.data: arrive_count_exprs}})
+    if init_thread is not None:
+        sblock_attr({"mbarrier_init_thread": int(init_thread)})
 
     return buffer
 
 
-def alloc_cluster_barrier(arrive_count: int | list[int]) -> Buffer:
+def alloc_cluster_barrier(arrive_count: int | list[int], *, init_thread: int | None = None) -> Buffer:
     """Allocate a cluster barrier buffer.
 
     Args:
         arrive_count (int | list[int]): The number of threads that need to arrive at each barrier
-
-    Returns:
-        T.Buffer: A TVM buffer object allocated as a cluster barrier
+        init_thread: Which thread initializes the barriers. Defaults to thread 0
+            (or shuffle-elect).
     """
-    # Normalize to list
     if isinstance(arrive_count, int):
         arrive_count = [arrive_count]
     else:
         arrive_count = list(arrive_count)
     buffer = T.sblock_alloc_buffer((len(arrive_count),), _dtypes.uint64, scope="shared.cluster_barrier")
-    # Convert to TIR IntImm expressions for C++ pass to consume as Map<Var, Array<PrimExpr>>
-    # Use buffer.data as key to support multiple barrier buffer allocations
     arrive_count_exprs = [IntImm("int32", c) for c in arrive_count]
     sblock_attr({"barrier_init": {buffer.data: arrive_count_exprs}})
+    if init_thread is not None:
+        sblock_attr({"mbarrier_init_thread": int(init_thread)})
 
     return buffer
 
@@ -234,6 +229,7 @@ def alloc_tmem(
     *,
     alias: Buffer | None = None,
     col_offset: int = 0,
+    alloc_warp: int | None = None,
 ) -> Buffer:
     """
     Allocate a Tensor Memory (TMEM) buffer for use with 5th generation Tensor Core operations.
@@ -251,6 +247,9 @@ def alloc_tmem(
             tilelang does not verify it.
         col_offset: TMEM column offset from the alias parent's base address.
             Only meaningful with ``alias=...``. Must be a non-negative int.
+        alloc_warp: Which warp executes the TMEM allocation. Defaults to warp 0.
+            Useful in warp-specialized kernels where only a specific warp role
+            should issue the allocation.
     """
 
     assert len(shape) == 2, "shape must be a 2D tensor for TMEM allocation"
@@ -275,6 +274,8 @@ def alloc_tmem(
                 buf: [alias, IntImm("int32", int(col_offset))]
             }
         })
+    if alloc_warp is not None:
+        sblock_attr({"tmem_alloc_warp": int(alloc_warp)})
     return buf
 
 

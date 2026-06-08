@@ -820,12 +820,6 @@ def attention_kernel_2sm_d128(
         ) as block_id:
             # Use one block per SM while relying on runtime setmaxnreg.inc/dec
             # for role-specific register donation.
-            T.annotate_min_blocks_per_sm(1)
-            T.use_2cta_tmem(
-                mbarrier_init_thread=416,
-                tmem_alloc_warp=12,
-                compact_shared_state=True,
-            )
 
             Q_shared = T.alloc_shared([q_stages, block_m_cta, dim], dtype)
             O_shared = T.alloc_shared([q_stages, block_m_cta, dim], dtype)
@@ -835,7 +829,7 @@ def attention_kernel_2sm_d128(
             # loop to stay under the SM100 shared-memory cap.
             rs_shared = T.alloc_shared([2, q_stages, block_m_cta], accum_dtype)
 
-            Base_tmem = T.alloc_tmem([block_m_cta, 512], accum_dtype)
+            Base_tmem = T.alloc_tmem([block_m_cta, 512], accum_dtype, alloc_warp=12)
             S0_tmem = T.alloc_tmem([block_m_cta, block_n], accum_dtype, alias=Base_tmem, col_offset=0)
             P0_tmem = T.alloc_tmem([block_m_cta, block_n], dtype, alias=Base_tmem, col_offset=64)
             S1_tmem = T.alloc_tmem([block_m_cta, block_n], accum_dtype, alias=Base_tmem, col_offset=128)
@@ -1863,19 +1857,13 @@ def attention_kernel_2sm_d256(
         ) as block_id:
             # Use one block per SM while relying on runtime setmaxnreg.inc/dec
             # for role-specific register donation.
-            T.annotate_min_blocks_per_sm(1)
-            T.use_2cta_tmem(
-                mbarrier_init_thread=416,
-                tmem_alloc_warp=12,
-                compact_shared_state=True,
-            )
 
             # Alias the epilogue staging buffer with Q and use one merged K/V ring.
             QO_shared = T.alloc_shared([block_m_cta, dim], dtype)
             KV_shared = T.alloc_shared([kv_stages, b_per_cta, dim], dtype)
             rs_shared = T.alloc_shared([2, block_m_cta], accum_dtype)
 
-            Base_tmem = T.alloc_tmem([block_m_cta, 512], accum_dtype)
+            Base_tmem = T.alloc_tmem([block_m_cta, 512], accum_dtype, alloc_warp=12)
             S0_tmem = T.alloc_tmem([block_m_cta, block_n], accum_dtype, alias=Base_tmem, col_offset=0)
             P0_tmem = T.alloc_tmem([block_m_cta, block_n], dtype, alias=Base_tmem, col_offset=64)
             S1_tmem = T.alloc_tmem([block_m_cta, block_n], accum_dtype, alias=Base_tmem, col_offset=128)
