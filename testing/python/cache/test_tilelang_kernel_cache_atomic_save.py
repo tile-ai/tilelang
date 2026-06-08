@@ -264,6 +264,34 @@ def test_jit_frontend_cache_hit_skips_tir_elaboration(monkeypatch):
     assert "frontend_cached_kernel" in calls[0][0]["function"]
 
 
+def test_frontend_cache_key_includes_closure_vars():
+    import tilelang
+    import tilelang.language as T
+
+    def build(N):
+        @tilelang.jit
+        def make_kernel():
+            M = T.dynamic("M")
+
+            @T.prim_func
+            def kernel(x: T.Tensor[(M, N), T.float32]):
+                with T.Kernel(M):
+                    T.evaluate(0)
+
+            return kernel
+
+        return make_kernel
+
+    j16, j32 = build(16), build(32)
+    d16 = j16._frontend_cache_key_data(j16.func.parse_args()[0])
+    d32 = j32._frontend_cache_key_data(j32.func.parse_args()[0])
+
+    assert d16["source"] == d32["source"]
+    assert d16 != d32
+    assert d16["closure"]["N"] == "16"
+    assert d32["closure"]["N"] == "32"
+
+
 def test_kernel_cache_disk_hit_rejects_entries_missing_sources(cache_dirs, monkeypatch):
     cache = KernelCache()
     key = "missing-source-entry"

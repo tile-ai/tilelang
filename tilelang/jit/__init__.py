@@ -428,10 +428,25 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         key = (key_args_tuple, key_kwargs_tuple, tuned_key_kwargs_tuple)
         return key
 
+    @staticmethod
+    def _frontend_closure_data(orig_func: Any) -> dict[str, str] | None:
+        freevars = getattr(getattr(orig_func, "__code__", None), "co_freevars", None)
+        closure = getattr(orig_func, "__closure__", None)
+        if not freevars or not closure:
+            return None
+        result: dict[str, str] = {}
+        for name, cell in zip(freevars, closure):
+            try:
+                result[name] = repr(cell.cell_contents)
+            except Exception:
+                result[name] = "<unrepr>"
+        return result
+
     def _frontend_cache_key_data(self, key: tuple) -> dict[str, Any]:
-        func_name = getattr(getattr(self.func, "orig_func", self.func), "__name__", "jit_kernel")
-        func_qualname = getattr(getattr(self.func, "orig_func", self.func), "__qualname__", func_name)
-        func_module = getattr(getattr(self.func, "orig_func", self.func), "__module__", None)
+        orig_func = getattr(self.func, "orig_func", self.func)
+        func_name = getattr(orig_func, "__name__", "jit_kernel")
+        func_qualname = getattr(orig_func, "__qualname__", func_name)
+        func_module = getattr(orig_func, "__module__", None)
         return {
             "function": func_name,
             "qualname": func_qualname,
@@ -440,6 +455,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             "signature": str(self.signature),
             "key": repr(key),
             "mode": self.mode,
+            "closure": self._frontend_closure_data(orig_func),
         }
 
     def get_kernel_source(self, *args: _P.args, **kwargs: _P.kwargs) -> str:
