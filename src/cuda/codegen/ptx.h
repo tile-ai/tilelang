@@ -290,12 +290,6 @@ std::string PrintInitBarrierThreadCountAsm(const std::string &barrier,
 std::string PrintArriveBarrierAsm(const std::string &barrier);
 
 /*!
- * \brief Print ptx barrier arrival, gated to lane 0 of the executing warp.
- * \param barrier: The name of the barrier in shared memory.
- */
-std::string PrintArriveBarrierLane0Asm(const std::string &barrier);
-
-/*!
  * \brief Print ptx barrier arrival with expect tx operation using
  * mbarrier.arrive.expect_tx \param barrier: The name of the barrier in shared
  * memory. \param byte_count: Increases the tx count of the mbarrier object to

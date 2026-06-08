@@ -1120,15 +1120,6 @@ TVM_DLL const Op &tcgen05_ld();
  *
  * The row_offset argument is in TMEM rows. Callers must pass it explicitly.
  */
-TVM_DLL const Op &tcgen05_ld_x16();
-
-/*!
- * \brief Raw TCGEN05 tensor-memory load without an implicit TMEM load fence.
- *
- * Intended for hand-scheduled DSL code that issues several TMEM loads and
- * then calls tcgen05_fence_tmem_load() once.
- */
-TVM_DLL const Op &tcgen05_ld_nofence();
 
 /*!
  * \brief tilelang intrinsic for lowered TCGEN05 tensor-memory store.
@@ -1139,11 +1130,9 @@ TVM_DLL const Op &tcgen05_ld_nofence();
 TVM_DLL const Op &tcgen05_st();
 
 /*!
- * \brief x16-max variant of tcgen05_st for cross-WG TMEM visibility.
- *
- * The row_offset argument is in TMEM rows. Callers must pass it explicitly.
+ * \brief Raw TCGEN05 tensor-memory load without an implicit TMEM load fence.
  */
-TVM_DLL const Op &tcgen05_st_x16();
+TVM_DLL const Op &tcgen05_ld_nofence();
 
 /*!
  * \brief TCGEN05 fence before a thread-block-wide sync (__syncthreads /
@@ -1220,12 +1209,6 @@ TVM_DLL const Op &tcgen05_st_32x32b_x4();
 
 /*! \brief 1SM shared/shared 128x128 tcgen05 MMA sequence plus mbarrier commit. */
 TVM_DLL const Op &tcgen05_mma_1sm_ss_128x128_commit();
-
-/*! \brief Two 1SM tmem/shared 128x64 BMN tcgen05 MMA sequences. */
-TVM_DLL const Op &tcgen05_mma_1sm_ts_128x64_bmn_x2();
-
-/*! \brief Two 1SM tmem/shared 128x64 BMN MMAs with contiguous B tiles. */
-TVM_DLL const Op &tcgen05_mma_1sm_ts_128x64_bmn_x2_contig();
 
 /*!
  * \brief Return one of three pointer expressions selected by stage.

@@ -72,8 +72,7 @@ bool IsMbarrierWaitParity(const CallNode *call) {
 
 bool IsPlainBarrierArrive(const CallNode *call) {
   return call && (call->op.same_as(builtin::ptx_arrive_barrier()) ||
-                  call->op.same_as(ptx_arrive_cluster_barrier()) ||
-                  call->op.same_as(ptx_arrive_barrier_lane0()));
+                  call->op.same_as(ptx_arrive_cluster_barrier()));
 }
 
 bool IsBeforeFenceCall(const CallNode *call) {
@@ -82,14 +81,6 @@ bool IsBeforeFenceCall(const CallNode *call) {
 
 bool IsAfterFenceCall(const CallNode *call) {
   return call && call->op.same_as(tcgen05_after_thread_sync());
-}
-
-bool StoreFenceMarksTcgen05Use(const CallNode *call) {
-  if (!call || !call->op.same_as(tcgen05_fence_tmem_store())) {
-    return false;
-  }
-  auto it = call->annotations.find("tcgen05_use");
-  return it != call->annotations.end() && Downcast<Bool>((*it).second)->value;
 }
 
 const CallNode *GetEvaluateCall(const Stmt &stmt) {
@@ -109,13 +100,9 @@ bool IsTcgen05OrTmemCall(const CallNode *call) {
          call->op.same_as(tcgen05_ld()) ||
          call->op.same_as(tcgen05_ld_nofence()) ||
          call->op.same_as(tcgen05_st()) ||
-         call->op.same_as(tcgen05_ld_x16()) || call->op.same_as(tcgen05_st_x16()) ||
          call->op.same_as(tcgen05_mma_arrive()) ||
-         StoreFenceMarksTcgen05Use(call) ||
          call->op.same_as(ptx_init_tensor_memory()) ||
          call->op.same_as(ptx_deallocate_tensor_memory()) ||
-         call->op.same_as(tcgen05_mma_1sm_ts_128x64_bmn_x2()) ||
-         call->op.same_as(tcgen05_mma_1sm_ts_128x64_bmn_x2_contig()) ||
          call->op.same_as(tcgen05_commit_1sm_op());
 }
 

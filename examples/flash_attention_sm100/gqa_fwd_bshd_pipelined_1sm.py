@@ -440,7 +440,8 @@ def attention_kernel_1sm(
             )
             scores_scale_shared[phase, row] = rs
             T.sync_warp()
-            T.mbarrier_arrive(T.mbarrier_at(mbar_scale, phase), lane0=True)
+            if T.get_thread_binding() % 32 == 0:
+                T.mbarrier_arrive(T.mbarrier_at(mbar_scale, phase))
 
             neg_max_scaled = -(rmax_local * scale)
             for cc in T.unroll(0, 128, 16):
@@ -494,14 +495,16 @@ def attention_kernel_1sm(
                     )
                 if cc == 32:
                     T.tcgen05_fence_tmem_store()
-                    T.mbarrier_arrive(mbar_p2, lane0=True)
+                    if T.get_thread_binding() % 32 == 0:
+                        T.mbarrier_arrive(mbar_p2)
 
             rsum_local += (psa[0] + psa[1]) + (psa[2] + psa[3])
             if k_soft == loop_extent - 1:
                 logsum_shared[row] = rsum_local
 
             T.tcgen05_fence_tmem_store()
-            T.mbarrier_arrive(mbar_p, lane0=True)
+            if T.get_thread_binding() % 32 == 0:
+                T.mbarrier_arrive(mbar_p)
 
 
     @T.prim_func
@@ -656,7 +659,7 @@ def attention_kernel_1sm(
             # ================================================================
             if tid >= 416 and tid < 448:
                 k_desc = T.create_tma_descriptor(
-                    9, 4, T.access_ptr(K, "r"),
+                    9, 4, K,
                     dim, num_kv_heads, seq_len, batch,
                     2, dim * 2, num_kv_heads * dim * 2,
                     seq_len * num_kv_heads * dim * 2,
@@ -665,7 +668,7 @@ def attention_kernel_1sm(
                     0, 3, 2, 0,
                 )
                 v_desc = T.create_tma_descriptor(
-                    9, 4, T.access_ptr(V, "r"),
+                    9, 4, V,
                     dim, num_kv_heads, seq_len, batch,
                     2, dim * 2, num_kv_heads * dim * 2,
                     seq_len * num_kv_heads * dim * 2,
@@ -954,7 +957,8 @@ def attention_kernel_1sm(
                             256,
                         )
                         T.tcgen05_before_thread_sync()
-                        T.mbarrier_arrive(mbar_corr0, lane0=True)
+                        if T.get_thread_binding() % 32 == 0:
+                            T.mbarrier_arrive(mbar_corr0)
 
                         T.mbarrier_wait_parity(
                             T.mbarrier_at(mbar_scale1, scale_idx),
@@ -970,7 +974,8 @@ def attention_kernel_1sm(
                             256,
                         )
                         T.tcgen05_before_thread_sync()
-                        T.mbarrier_arrive(mbar_corr1, lane0=True)
+                        if T.get_thread_binding() % 32 == 0:
+                            T.mbarrier_arrive(mbar_corr1)
 
                 final_phase = (loop_range - 1) & 1
                 T.mbarrier_wait_parity(mbar_pv, final_phase)
@@ -986,7 +991,8 @@ def attention_kernel_1sm(
                 T.tcgen05_before_thread_sync()
                 T.sync_warp()
                 T.fence_proxy_async()
-                T.mbarrier_arrive(mbar_epi0, lane0=True)
+                if T.get_thread_binding() % 32 == 0:
+                    T.mbarrier_arrive(mbar_epi0)
 
                 T.tcgen05_after_thread_sync()
                 T.call_extern(
@@ -1000,7 +1006,8 @@ def attention_kernel_1sm(
                 T.tcgen05_before_thread_sync()
                 T.sync_warp()
                 T.fence_proxy_async()
-                T.mbarrier_arrive(mbar_epi1, lane0=True)
+                if T.get_thread_binding() % 32 == 0:
+                    T.mbarrier_arrive(mbar_epi1)
 
             else:
                 T.evaluate(0)
@@ -1008,7 +1015,7 @@ def attention_kernel_1sm(
             # ---- Split epilogue TMA store ----
             if tid >= 448 and tid < 480:
                 output_desc = T.create_tma_descriptor(
-                    9, 4, T.access_ptr(Output, "w"),
+                    9, 4, Output,
                     dim, heads, seq_len, batch,
                     2, dim * 2, heads * dim * 2, seq_len * heads * dim * 2,
                     64, 1, 32, 1,

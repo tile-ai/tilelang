@@ -130,11 +130,6 @@ bool GetBoolAnnotation(const CopyNode &op, const char *key) {
   return false;
 }
 
-Stmt MakeSeqOrSingle(Array<Stmt> seq) {
-  ICHECK(!seq.empty());
-  return seq.size() == 1 ? seq[0] : SeqStmt(std::move(seq));
-}
-
 bool GetDisableTMA(const CopyNode &op) {
   return GetBoolAnnotation(op, "disable_tma");
 }
@@ -1259,14 +1254,9 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
 
   bool have_succeeded = false;
   Stmt body;
-  bool use_x16 = op.annotations.count("use_x16") &&
-                 Downcast<Bool>(op.annotations.Get("use_x16").value())->value;
 
   auto try_tcgen05_instruction = [&](Tcgen05Meta meta) {
     if (have_succeeded) {
-      return;
-    }
-    if (use_x16 && meta.width != 1) {
       return;
     }
     if (tmem_phy_row_min != 0 || tmem_phy_row_max != 127) {
@@ -1308,10 +1298,6 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
           num_useful_threads == WARPGROUP_SIZE
               ? PrimExpr(0)
               : relative_wg_idx * (effective_chunks * meta.width);
-      PrimExpr relative_warp_idx =
-          FloorMod(FloorDiv(Sub(T.thread_var, T.thread_bounds->min), WARP_SIZE),
-                   WARPGROUP_SIZE / WARP_SIZE);
-      PrimExpr row_offset = relative_warp_idx * WARP_SIZE;
       have_succeeded = true;
       Array<PrimExpr> args;
       Stmt call;
@@ -1322,14 +1308,10 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
         args.push_back(
             BufferLoad(tmem_buf, {(int)logical_row_min, (int)logical_col_min}));
         args.push_back(col_offset);
-        if (use_x16) {
-          args.push_back(row_offset);
-        }
-        args.push_back(reg_buf.access_ptr(
-            /*access_mask=*/2, DataType::Handle(), /*content_lanes=*/1,
-            /*offset=*/0, PrimExpr(tmem_phy_col_extent)));
-        call = Evaluate(Call(DataType::Handle(),
-                             use_x16 ? tcgen05_ld_x16() : tcgen05_ld(), args));
+        args.push_back(reg_buf.access_ptr(/*access_mask=*/2, DataType::Handle(),
+                                          /*content_lanes=*/1, /*offset=*/0,
+                                          PrimExpr(tmem_phy_col_extent)));
+        call = Evaluate(Call(DataType::Handle(), tcgen05_ld(), args));
       } else {
         args.push_back(IntImm(DataType::Int(32), meta.width * 32));
         args.push_back(IntImm(DataType::Int(32), effective_chunks));
@@ -1337,14 +1319,10 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
         args.push_back(
             BufferLoad(tmem_buf, {(int)logical_row_min, (int)logical_col_min}));
         args.push_back(col_offset);
-        if (use_x16) {
-          args.push_back(row_offset);
-        }
-        args.push_back(reg_buf.access_ptr(
-            /*access_mask=*/1, DataType::Handle(), /*content_lanes=*/1,
-            /*offset=*/0, PrimExpr(tmem_phy_col_extent)));
-        call = Evaluate(Call(DataType::Handle(),
-                             use_x16 ? tcgen05_st_x16() : tcgen05_st(), args));
+        args.push_back(reg_buf.access_ptr(/*access_mask=*/1, DataType::Handle(),
+                                          /*content_lanes=*/1, /*offset=*/0,
+                                          PrimExpr(tmem_phy_col_extent)));
+        call = Evaluate(Call(DataType::Handle(), tcgen05_st(), args));
       }
       if (num_useful_threads != num_threads) {
         body =
@@ -1766,20 +1744,11 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
       total_bytes =
           TMATransactionBytesFromElements(total_elements, shared_tensor->dtype);
     }
-    if (auto expect_tx_bytes = annotations.Get("expect_tx_bytes")) {
-      total_bytes = Downcast<PrimExpr>(expect_tx_bytes.value());
-    }
 
-    Optional<Stmt> barrier_before_tma_stmt = std::nullopt;
+    Stmt barrier_before_tma_stmt;
     Optional<Stmt> barrier_after_tma_stmt = std::nullopt;
-    bool skip_expect_tx = false;
-    if (auto skip_expect_val = annotations.Get("skip_expect_tx")) {
-      skip_expect_tx = Downcast<IntImm>(skip_expect_val.value())->value != 0;
-    }
     if (GetIsTmaCopy(op)) {
-      if (skip_expect_tx) {
-        barrier_before_tma_stmt = std::nullopt;
-      } else if (is_cluster_barrier) {
+      if (is_cluster_barrier) {
         PrimExpr cluster_total_bytes =
             total_bytes * IntImm(DataType::Int(32), T.cluster_size);
         Stmt expect_stmt =
@@ -1812,11 +1781,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
           DataType::Handle(), builtin::ptx_arrive_barrier(), {mbar_handle}));
     }
 
-    Array<Stmt> producer_seq;
-    if (barrier_before_tma_stmt.defined()) {
-      producer_seq.push_back(barrier_before_tma_stmt.value());
-    }
-    producer_seq.push_back(tma_copy);
+    Array<Stmt> producer_seq{barrier_before_tma_stmt, tma_copy};
     if (barrier_after_tma_stmt.defined()) {
       producer_seq.push_back(barrier_after_tma_stmt.value());
     }
@@ -2109,34 +2074,12 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
   }
 
   if (is_load && barrier_base_id >= 0) {
-    if (auto expect_tx_bytes = annotations.Get("expect_tx_bytes")) {
-      total_bytes = Downcast<PrimExpr>(expect_tx_bytes.value());
-    }
-    Optional<Stmt> barrier_before_tma_stmt = std::nullopt;
+    Stmt barrier_before_tma_stmt;
     Optional<Stmt> barrier_after_tma_stmt = std::nullopt;
-    bool skip_expect_tx = false;
-    if (auto skip_expect_val = annotations.Get("skip_expect_tx")) {
-      skip_expect_tx = Downcast<IntImm>(skip_expect_val.value())->value != 0;
-    }
     if (GetIsTmaCopy(op)) {
-      if (skip_expect_tx) {
-        barrier_before_tma_stmt = std::nullopt;
-      } else if (auto emit_arrive_val = annotations.Get("emit_arrive")) {
-        if (Downcast<IntImm>(emit_arrive_val.value())->value != 0) {
-          barrier_before_tma_stmt =
-              Evaluate(Call(DataType::Handle(),
-                            builtin::ptx_arrive_barrier_expect_tx(),
-                            {mbar_handle, total_bytes}));
-        } else {
-          barrier_before_tma_stmt =
-              Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
-                            {mbar_handle, total_bytes}));
-        }
-      } else {
-        barrier_before_tma_stmt =
-            Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
-                          {mbar_handle, total_bytes}));
-      }
+      barrier_before_tma_stmt =
+          Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
+                        {mbar_handle, total_bytes}));
     } else {
       barrier_before_tma_stmt =
           Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
@@ -2145,11 +2088,7 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
           DataType::Handle(), builtin::ptx_arrive_barrier(), {mbar_handle}));
     }
 
-    Array<Stmt> producer_seq;
-    if (barrier_before_tma_stmt.defined()) {
-      producer_seq.push_back(barrier_before_tma_stmt.value());
-    }
-    producer_seq.push_back(tma_copy);
+    Array<Stmt> producer_seq{barrier_before_tma_stmt, tma_copy};
     if (barrier_after_tma_stmt.defined()) {
       producer_seq.push_back(barrier_after_tma_stmt.value());
     }

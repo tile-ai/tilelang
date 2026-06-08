@@ -197,25 +197,27 @@ def attention_kernel_2sm_d128(
             )
             q_row = tile_q_row_base + qs * block_m
             q_stage_base = qs * q_stage_elems
-            T.tma_load_2cta_2d(
+            T.tma_load_2sm(
                 q_desc,
+                T.mbarrier_at(mbar_q, qs),
                 T.tcgen05_smem_ptr_add_bf16(
                     T.access_ptr(q_stage, "w"),
                     q_stage_base,
                 ),
-                T.mbarrier_at(mbar_q, qs),
                 tile_q_col_base,
                 q_row,
+                0,
             )
-            T.tma_load_2cta_2d(
+            T.tma_load_2sm(
                 q_desc,
+                T.mbarrier_at(mbar_q, qs),
                 T.tcgen05_smem_ptr_add_bf16(
                     T.access_ptr(q_stage, "w"),
                     q_stage_base + block_m_cta * tile_cols,
                 ),
-                T.mbarrier_at(mbar_q, qs),
                 tile_q_col_base + tile_cols,
                 q_row,
+                0,
             )
 
     @T.macro
@@ -260,15 +262,16 @@ def attention_kernel_2sm_d128(
                 k_stage_offset = (
                     stage * kv_stage_elems + t * b_per_cta * tile_cols
                 )
-                T.tma_load_2cta_2d(
+                T.tma_load_2sm(
                     k_desc,
+                    T.mbarrier_at(mbar_k, stage),
                     T.tcgen05_smem_ptr_add_bf16(
                         T.access_ptr(k_stage, "w"),
                         k_stage_offset,
                     ),
-                    T.mbarrier_at(mbar_k, stage),
                     tile_kv_col_base + t * tile_cols,
                     k_row,
+                    0,
                 )
 
             v_row = tile_kv_row_base + prefetch * block_n
@@ -280,15 +283,16 @@ def attention_kernel_2sm_d128(
                 v_stage_offset = (
                     stage * kv_stage_elems + t * b_per_cta * tile_cols
                 )
-                T.tma_load_2cta_2d(
+                T.tma_load_2sm(
                     v_desc,
+                    T.mbarrier_at(mbar_v, stage),
                     T.tcgen05_smem_ptr_add_bf16(
                         T.access_ptr(v_stage, "w"),
                         v_stage_offset,
                     ),
-                    T.mbarrier_at(mbar_v, stage),
                     tile_v_col_base,
                     v_row + t * b_per_cta,
+                    0,
                 )
 
     @T.macro
@@ -330,15 +334,16 @@ def attention_kernel_2sm_d128(
                 k_stage_offset = (
                     next_stage * kv_stage_elems + t * b_per_cta * tile_cols
                 )
-                T.tma_load_2cta_2d(
+                T.tma_load_2sm(
                     k_desc,
+                    T.mbarrier_at(mbar_k, next_stage),
                     T.tcgen05_smem_ptr_add_bf16(
                         T.access_ptr(k_stage, "w"),
                         k_stage_offset,
                     ),
-                    T.mbarrier_at(mbar_k, next_stage),
                     tile_kv_col_base + t * tile_cols,
                     k_row,
+                    0,
                 )
 
         if kb + kv_stages < loop_extent:
@@ -358,15 +363,16 @@ def attention_kernel_2sm_d128(
                 v_stage_offset = (
                     next_stage * kv_stage_elems + t * b_per_cta * tile_cols
                 )
-                T.tma_load_2cta_2d(
+                T.tma_load_2sm(
                     v_desc,
+                    T.mbarrier_at(mbar_v, next_stage),
                     T.tcgen05_smem_ptr_add_bf16(
                         T.access_ptr(v_stage, "w"),
                         v_stage_offset,
                     ),
-                    T.mbarrier_at(mbar_v, next_stage),
                     tile_v_col_base,
                         v_row + t * b_per_cta,
+                    0,
                     )
 
     @T.macro
@@ -1030,7 +1036,7 @@ def attention_kernel_2sm_d128(
                     elif warp == 13:
                         T.set_max_nreg(80, 0)
                         q_desc = T.create_tma_descriptor(
-                            9, 2, T.access_ptr(Q, "r"),
+                            9, 2, Q,
                             heads * dim, batch * seq_len,
                             2, heads * dim * 2,
                             tile_cols, block_m_cta,
@@ -1038,7 +1044,7 @@ def attention_kernel_2sm_d128(
                             0, 3, 2, 0,
                         )
                         k_desc = T.create_tma_descriptor(
-                            9, 2, T.access_ptr(K, "r"),
+                            9, 2, K,
                             num_kv_heads * dim, batch * seq_len,
                             2, num_kv_heads * dim * 2,
                             tile_cols, b_per_cta,
@@ -1046,7 +1052,7 @@ def attention_kernel_2sm_d128(
                             0, 3, 2, 0,
                         )
                         v_desc = T.create_tma_descriptor(
-                            9, 2, T.access_ptr(V, "r"),
+                            9, 2, V,
                             num_kv_heads * dim, batch * seq_len,
                             2, num_kv_heads * dim * 2,
                             tile_cols, b_per_cta,
@@ -1112,7 +1118,7 @@ def attention_kernel_2sm_d128(
                     elif warp == 14:
                         T.set_max_nreg(80, 0)
                         output_desc = T.create_tma_descriptor(
-                            9, 2, T.access_ptr(Output, "w"),
+                            9, 2, Output,
                             heads * dim, batch * seq_len,
                             2, heads * dim * 2,
                             tile_cols, page_rows,
@@ -1337,15 +1343,16 @@ def attention_kernel_2sm_d256(
             q_bytes,
         )
         for t in T.unroll(4):
-            T.tma_load_2cta_2d(
+            T.tma_load_2sm(
                 q_desc,
+                T.mbarrier_at(mbar_q, 0),
                 T.tcgen05_smem_ptr_add_bf16(
                     T.access_ptr(q_stage, "w"),
                     t * block_m_cta * tile_cols,
                 ),
-                T.mbarrier_at(mbar_q, 0),
                 tile_q_col_base + t * tile_cols,
                 tile_q_row_base,
+                0,
             )
 
     @T.macro
@@ -1375,42 +1382,45 @@ def attention_kernel_2sm_d256(
         if is_k:
             k_row = tile_kv_row_base + kv_block * block_n + cta_rank * b_per_cta
             for t in T.unroll(2):
-                T.tma_load_2cta_2d(
+                T.tma_load_2sm(
                     k_desc,
+                    T.mbarrier_at(mbar_kv, stage),
                     T.tcgen05_smem_ptr_add_bf16(
                         T.access_ptr(kv_stage, "w"),
                         stage_base + t * b_per_cta * tile_cols,
                     ),
-                    T.mbarrier_at(mbar_kv, stage),
                     tile_kv_col_base + t * tile_cols,
                     k_row,
+                    0,
                 )
             for t in T.unroll(2):
-                T.tma_load_2cta_2d(
+                T.tma_load_2sm(
                     k_desc,
+                    T.mbarrier_at(mbar_kv, stage),
                     T.tcgen05_smem_ptr_add_bf16(
                         T.access_ptr(kv_stage, "w"),
                         stage_base + (t + 2) * b_per_cta * tile_cols,
                     ),
-                    T.mbarrier_at(mbar_kv, stage),
                     tile_kv_col_base + (t + 2) * tile_cols,
                     k_row,
+                    0,
                 )
         else:
             v_row_lo = tile_kv_row_base + kv_block * block_n
             v_row_hi = v_row_lo + b_per_cta
             for strip in T.unroll(2):
                 for box in T.unroll(2):
-                    T.tma_load_2cta_2d(
+                    T.tma_load_2sm(
                         v_desc,
+                        T.mbarrier_at(mbar_kv, stage),
                         T.tcgen05_smem_ptr_add_bf16(
                             T.access_ptr(kv_stage, "w"),
                             stage_base
                             + (strip * 2 + box) * b_per_cta * tile_cols,
                         ),
-                        T.mbarrier_at(mbar_kv, stage),
                         tile_kv_col_base + strip * 128 + cta_rank * b_per_cta,
                         T.Select(box == 0, v_row_lo, v_row_hi),
+                        0,
                     )
 
     @T.macro
@@ -2035,7 +2045,7 @@ def attention_kernel_2sm_d256(
                     elif warp == 13:
                         T.set_max_nreg(72, 0)
                         q_desc = T.create_tma_descriptor(
-                            9, 2, T.access_ptr(Q, "r"),
+                            9, 2, Q,
                             heads * dim, batch * seq_len,
                             2, heads * dim * 2,
                             tile_cols, block_m_cta,
@@ -2043,7 +2053,7 @@ def attention_kernel_2sm_d256(
                             0, 3, 2, 0,
                         )
                         k_desc = T.create_tma_descriptor(
-                            9, 2, T.access_ptr(K, "r"),
+                            9, 2, K,
                             num_kv_heads * dim, batch * seq_len,
                             2, num_kv_heads * dim * 2,
                             tile_cols, b_per_cta,
@@ -2051,7 +2061,7 @@ def attention_kernel_2sm_d256(
                             0, 3, 2, 0,
                         )
                         v_desc = T.create_tma_descriptor(
-                            9, 2, T.access_ptr(V, "r"),
+                            9, 2, V,
                             num_kv_heads * dim, batch * seq_len,
                             2, num_kv_heads * dim * 2,
                             tile_cols, b_per_cta,
@@ -2094,7 +2104,7 @@ def attention_kernel_2sm_d256(
                     elif warp == 14:
                         T.set_max_nreg(72, 0)
                         output_desc = T.create_tma_descriptor(
-                            9, 2, T.access_ptr(Output, "w"),
+                            9, 2, Output,
                             heads * dim, batch * seq_len,
                             2, heads * dim * 2,
                             tile_cols, page_rows,

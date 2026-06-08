@@ -1511,44 +1511,9 @@ std::string PrintArriveBarrierAsm(const std::string &barrier) {
   {
     unsigned int barrier_addr_int = cast_smem_ptr_to_int({barrier});
     __asm__ __volatile__(
-      "mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];"
+      "{ .reg .b64 state; mbarrier.arrive.shared.b64 state, [%0]; }"
       :: "r"(barrier_addr_int)
     );
-  }
-)";
-
-  Replacer replacer;
-  replacer.register_rule("{barrier}", "&" + barrier);
-  predicated_asm_code = replacer.rewrite(predicated_asm_code);
-  return predicated_asm_code;
-}
-
-// Lane-0-only variant: only lane 0 of the executing warp actually decrements
-// the barrier. Lets the kernel keep a small ``arrive_count`` (one-per-warp)
-// without all 32 lanes underflowing the counter on an over-arrive — which on
-// SM100 traps with CUDA_ERROR_LAUNCH_FAILED.
-//
-// Implementation: full warp converges on a __syncwarp + a CTA-wide memory
-// fence so that *all 32 lanes'* SMEM writes are visible to other warps in
-// the block before lane 0 decrements the barrier. Then a PTX-level
-// predicated arrive (no host-level if) keeps the warp non-divergent.
-//
-// The warp-wide (count=32) variant doesn't need any of this — every lane
-// issues its own arrive, and each arrive contributes a release fence on the
-// issuing thread's writes. Lane-0-only doesn't have that property: only
-// lane 0's release fence orders its own writes. Without the explicit
-// __threadfence_block(), the consumer warp may read stale SMEM for the
-// data written by lanes 1..31.
-std::string PrintArriveBarrierLane0Asm(const std::string &barrier) {
-  std::string predicated_asm_code = R"(
-  {
-    unsigned int barrier_addr_int = cast_smem_ptr_to_int({barrier});
-    if (cute::elect_one_sync()) {
-      __asm__ __volatile__(
-        "mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];"
-        :: "r"(barrier_addr_int)
-      );
-    }
   }
 )";
 
@@ -1565,7 +1530,7 @@ std::string PrintArriveBarrierExpectTxAsm(const std::string &barrier,
     unsigned int barrier_addr_int = cast_smem_ptr_to_int({barrier});
     int byte_count = {byte_count};
     __asm__ __volatile__(
-      "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%0], %1;"
+      "mbarrier.arrive.expect_tx.shared.b64 _, [%0], %1;"
       :: "r"(barrier_addr_int), "r"(byte_count)
     );
   }
@@ -1584,7 +1549,7 @@ std::string PrintWaitBarrierAsm(const std::string &barrier) {
     unsigned int barrier_addr_int = cast_smem_ptr_to_int({barrier});
     constexpr int phase_bit = 0;
     __asm__ __volatile__(
-      "{ .reg .pred P; WAIT: mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P, [%0], %1; @P bra.uni DONE; bra.uni WAIT; DONE: }"
+      "{ .reg .pred P; WAIT: mbarrier.try_wait.parity.shared.b64 P, [%0], %1; @P bra.uni DONE; bra.uni WAIT; DONE: }"
       :: "r"(barrier_addr_int), "r"(phase_bit)
     );
   }

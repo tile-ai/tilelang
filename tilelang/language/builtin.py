@@ -327,15 +327,21 @@ def create_tma_descriptor(*args):
     This is an internal API used by copy lowering. The argument list depends on
     the tensor rank and encodes the full TMA descriptor configuration:
 
-        create_tma_descriptor(data_type, rank, global_addr,
+        create_tma_descriptor(data_type, rank, global_addr_or_buffer,
             global_shape..., global_stride..., smem_box..., smem_stride...,
             interleave, swizzle, l2_promotion, oob_fill)
 
     Total arguments: 7 + 4 * rank.
 
+    If a tirx.Buffer is passed as the global address (arg 2), its data pointer
+    is extracted automatically.
+
     Returns:
         tirx.Call: A handle to the created TMA descriptor
     """
+    args = list(args)
+    if len(args) > 2 and isinstance(args[2], tirx.Buffer):
+        args[2] = args[2].data
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.create_tma_descriptor"), *args)
 
 
@@ -516,7 +522,7 @@ def mbarrier_wait_parity(mbarrier: BarrierType, parity: int | Var, *, lane0: boo
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.mbarrier_wait_parity"), mbarrier, parity)
 
 
-def mbarrier_arrive(mbarrier: BarrierType, cta_id: int | Var | None = None, *, lane0: bool = False):
+def mbarrier_arrive(mbarrier: BarrierType, cta_id: int | Var | None = None):
     """Arrive at memory barrier.
 
     Args:
@@ -525,27 +531,16 @@ def mbarrier_arrive(mbarrier: BarrierType, cta_id: int | Var | None = None, *, l
         cta_id: int | Var | None
             The peer CTA rank in cluster to arrive at. (Only valid for cluster barriers)
             If not provided, will arrive on current CTA's barrier.
-        lane0: bool
-            If True, only lane 0 of the executing warp actually arrives.
-            Each warp then contributes exactly one arrival regardless of how
-            many lanes are alive at the call site. Useful when a barrier was
-            initialized with ``arrive_count = num_warps``.
-            Without this flag, ``T.mbarrier_arrive`` is warp-wide — every
-            live lane decrements the barrier counter, so a count=1 barrier
-            over-arrives 31 times and underflows (CUDA_ERROR_LAUNCH_FAILED
-            on SM100). Lowered to a new ``tl.ptx_arrive_barrier_lane0`` op
-            whose CUDA codegen emits the inline-ASM block guarded by
-            ``if ((threadIdx.x & 31) == 0)``. Not valid with ``cta_id``.
+
+    Note:
+        For lane-0-only arrive (when barrier arrive_count == num_warps),
+        guard the call with ``with T.If(tid % 32 == 0):`` at the call site.
     """
-    if lane0 and cta_id is not None:
-        raise ValueError("lane0=True is not supported with cta_id (use a per-CTA elect manually).")
     mbarrier = _mbar_to_buffer_load(mbarrier)
     if cta_id is not None:
         assert mbarrier.buffer.scope() == "shared.cluster_barrier", f"mbarrier must be a cluster barrier, but got {mbarrier.buffer.scope}"
         return ptx_arrive_cluster_barrier(mbarrier, cta_id)
-    if not lane0:
-        return ptx_arrive_barrier(mbarrier)
-    return tirx.call_intrin("handle", tirx.op.Op.get("tl.ptx_arrive_barrier_lane0"), mbarrier)
+    return ptx_arrive_barrier(mbarrier)
 
 
 def mbarrier_expect_tx(mbarrier: BarrierType, tx: int):
@@ -1482,7 +1477,6 @@ def tcgen05_ld(
 ):
     """Load from TMEM into a local pointer with `tl::tcgen05_ld_32dp*bNx`.
 
-    `dst_ptr` should normally be produced by `T.access_ptr(local_buf[i], "w", chunks)`.
     Set `emit_fence=False` when issuing several loads and calling
     `T.tcgen05_fence_tmem_load()` manually once afterwards.
     """
@@ -1517,80 +1511,6 @@ def tcgen05_st(
         col_offset,
         src_ptr,
     )
-
-
-def tcgen05_ld_x16(
-    inst_bits: int,
-    chunks: int,
-    pack16: bool,
-    tmem_start_col,
-    col_offset,
-    row_offset,
-    dst_ptr,
-):
-    """x16 TMEM load variant for cross-warpgroup visibility sensitive paths.
-
-    ``row_offset`` is in TMEM rows.
-    """
-    args = [
-        tirx.IntImm("int32", int(inst_bits)),
-        tirx.IntImm("int32", int(chunks)),
-        _as_bool_imm(pack16),
-        tmem_start_col,
-        col_offset,
-        row_offset,
-        dst_ptr,
-    ]
-    return tirx.call_intrin("void", tirx.op.Op.get("tl.tcgen05_ld_x16"), *args)
-
-
-def tcgen05_ld_nofence(
-    inst_bits: int,
-    chunks: int,
-    pack16: bool,
-    tmem_start_col,
-    col_offset,
-    dst_ptr,
-):
-    """Compatibility wrapper for `tcgen05_ld(..., emit_fence=False)`.
-
-    This is intended for DSL code that issues several `tcgen05` TMEM loads and
-    then calls `T.tcgen05_fence_tmem_load()` once.
-    """
-    return tcgen05_ld(
-        inst_bits,
-        chunks,
-        pack16,
-        tmem_start_col,
-        col_offset,
-        dst_ptr,
-        emit_fence=False,
-    )
-
-
-def tcgen05_st_x16(
-    inst_bits: int,
-    chunks: int,
-    unpack16: bool,
-    tmem_start_col,
-    col_offset,
-    row_offset,
-    src_ptr,
-):
-    """x16 TMEM store variant for cross-warpgroup visibility sensitive paths.
-
-    ``row_offset`` is in TMEM rows.
-    """
-    args = [
-        tirx.IntImm("int32", int(inst_bits)),
-        tirx.IntImm("int32", int(chunks)),
-        _as_bool_imm(unpack16),
-        tmem_start_col,
-        col_offset,
-        row_offset,
-        src_ptr,
-    ]
-    return tirx.call_intrin("void", tirx.op.Op.get("tl.tcgen05_st_x16"), *args)
 
 
 def tcgen05_fma_f32x2(r0, r1, a0, a1, b0, b1, c0, c1):
@@ -1699,70 +1619,6 @@ def tcgen05_mma_1sm_ss_128x128_commit_lane0(a_smem_ptr, b_smem_ptr, c_tmem_addr,
         b_smem_ptr,
         c_tmem_addr,
         mbar,
-        lane0=True,
-    )
-
-
-def tcgen05_mma_1sm_ts_128x64_bmn_x2(
-    b_lo_smem_ptr,
-    b_hi_smem_ptr,
-    a_tmem_addr,
-    c_tmem_addr,
-    accumulate,
-):
-    """Issue two 1SM 128x64 BMN tmem/shared MMA sequences.
-
-    `b_lo_smem_ptr` and `b_hi_smem_ptr` point to the low/high 64-column
-    shared-memory B tiles. The helper emits high tile first, then low tile.
-    The caller owns the warp predicate.
-    """
-    return tirx.call_intrin(
-        "void",
-        tirx.op.Op.get("tl.tcgen05_mma_1sm_ts_128x64_bmn_x2"),
-        b_lo_smem_ptr,
-        b_hi_smem_ptr,
-        a_tmem_addr,
-        c_tmem_addr,
-        accumulate,
-    )
-
-
-def tcgen05_mma_1sm_ts_128x64_bmn_x2_contig(
-    b_smem_ptr,
-    a_tmem_addr,
-    c_tmem_addr,
-    accumulate,
-    *,
-    lane0: bool = False,
-):
-    """Issue two 1SM 128x64 BMN tmem/shared MMA sequences.
-
-    The shared-memory B operand is stored as two contiguous [128,64] BF16
-    tiles: low tile at base and high tile at base + 128*64 elements.
-    The caller owns the warp predicate.
-    Set `lane0=True` when execution is already lane 0 only.
-    """
-    ann = {}
-    if lane0:
-        ann["lane0_only"] = True
-    return tirx.call_intrin(
-        "void",
-        tirx.op.Op.get("tl.tcgen05_mma_1sm_ts_128x64_bmn_x2_contig"),
-        b_smem_ptr,
-        a_tmem_addr,
-        c_tmem_addr,
-        accumulate,
-        annotations=ann if ann else None,
-    )
-
-
-def tcgen05_mma_1sm_ts_128x64_bmn_x2_contig_lane0(b_smem_ptr, a_tmem_addr, c_tmem_addr, accumulate):
-    """Issue the contiguous-B 1SM tmem/shared MMA pair from lane 0."""
-    return tcgen05_mma_1sm_ts_128x64_bmn_x2_contig(
-        b_smem_ptr,
-        a_tmem_addr,
-        c_tmem_addr,
-        accumulate,
         lane0=True,
     )
 

@@ -26,37 +26,6 @@ using namespace tirx;
 using namespace ffi;
 
 #if (CUDA_MAJOR_VERSION >= 12)
-Var GetDescriptorBaseVar(const PrimExpr &expr) {
-  if (const auto *var = expr.as<VarNode>()) {
-    return tvm::ffi::GetRef<Var>(var);
-  }
-  if (const auto *call = expr.as<CallNode>()) {
-    if (call->op.same_as(tl::access_ptr())) {
-      ICHECK_EQ(call->args.size(), 3U)
-          << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
-      const auto *load = call->args[0].as<BufferLoadNode>();
-      ICHECK(load) << "tl.access_ptr arg0 must be BufferLoad";
-      const auto *var = load->buffer->data.as<VarNode>();
-      ICHECK(var) << "TMA descriptor access_ptr buffer data must be a Var";
-      return tvm::ffi::GetRef<Var>(var);
-    }
-    if (call->op.same_as(builtin::tvm_access_ptr())) {
-      ICHECK_GE(call->args.size(), 2U);
-      const auto *var = call->args[1].as<VarNode>();
-      ICHECK(var) << "tvm_access_ptr data argument must be a Var";
-      return tvm::ffi::GetRef<Var>(var);
-    }
-  }
-  LOG(FATAL) << "TMA descriptor global address must be a Var, tl.access_ptr, "
-                "or tvm_access_ptr, but got: "
-             << expr;
-  throw;
-}
-
-PrimExpr NormalizeDescriptorBaseArg(const PrimExpr &expr) {
-  return GetDescriptorBaseVar(expr);
-}
-
 class LowerHopperIntrin : public StmtExprMutator {
 public:
   static PrimFunc Substitute(PrimFunc &f, bool disable_shuffle_elect) {
@@ -211,16 +180,15 @@ public:
       if (iter != desc_map_.end()) {
         var = iter->second;
       } else {
-        Var base_var = GetDescriptorBaseVar(call->args[2]);
-        String name = base_var->name_hint;
+        String name = call->args[2].as<Var>().value()->name_hint;
         var = Var(name + "_desc",
                   PointerType(PrimType(cuTensorMapType()), "grid_constant"));
         Call call_ref = GetRef<Call>(call);
         desc_map_[call_ref] = var;
         Array<PrimExpr> init_desc_args = MakeInitDescArgs(call_ref, var);
         init_desc_arg_map_.Set(var, init_desc_args);
-        desc_inits_.push_back(
-            {base_var.get(), MakeInitDescStmt(var, init_desc_args), false});
+        desc_inits_.push_back({call->args[2].as<Var>().value().get(),
+                               MakeInitDescStmt(var, init_desc_args), false});
         prefetch_calls_.push_back(
             Evaluate(Call(DataType::Handle(), builtin::call_extern(),
                           {StringImm("tl::prefetch_tma_descriptor"), var})));
@@ -272,11 +240,8 @@ private:
       ICHECK(0) << call->op;
     }
     init_desc_args.push_back(var);
-    init_desc_args.reserve(call->args.size() + 2);
-    for (size_t i = 0; i < call->args.size(); ++i) {
-      init_desc_args.push_back(i == 2 ? NormalizeDescriptorBaseArg(call->args[i])
-                                      : call->args[i]);
-    }
+    init_desc_args.insert(init_desc_args.end(), call->args.begin(),
+                          call->args.end());
     return init_desc_args;
   }
 

@@ -391,16 +391,6 @@ TIR_DEFINE_TL_BUILTIN(tcgen05_mma_1sm_ss_128x128_commit)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(tcgen05_mma_1sm_ts_128x64_bmn_x2)
-    .set_num_inputs(5)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
-TIR_DEFINE_TL_BUILTIN(tcgen05_mma_1sm_ts_128x64_bmn_x2_contig)
-    .set_num_inputs(4)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
 TIR_DEFINE_TL_BUILTIN(select_stage_ptr)
     .set_num_inputs(4)
     .set_attr<TCallEffectKind>("TCallEffectKind",
@@ -841,18 +831,8 @@ TIR_DEFINE_TL_BUILTIN(tcgen05_st)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(tcgen05_ld_x16)
-    .set_num_inputs(7)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
 TIR_DEFINE_TL_BUILTIN(tcgen05_ld_nofence)
     .set_num_inputs(6)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
-TIR_DEFINE_TL_BUILTIN(tcgen05_st_x16)
-    .set_num_inputs(7)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

@@ -2760,16 +2760,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     ICHECK_EQ(op->args.size(), 1);
     this->PrintIndent();
     auto mbarrier_obj = this->PrintExpr(op->args[0]);
-    // Emit explicit release.cta ordering instead of CUTLASS's default arrive.
-    this->stream << "{\n";
-    this->PrintIndent();
-    this->stream << "  unsigned int barrier_addr_int = cast_smem_ptr_to_int(&"
-                 << mbarrier_obj << ");\n";
-    this->PrintIndent();
-    this->stream << "  asm volatile(\"mbarrier.arrive.release.cta.shared::cta.b64 "
-                    "_, [%0];\" :: \"r\"(barrier_addr_int) : \"memory\");\n";
-    this->PrintIndent();
-    this->stream << "}\n";
+    this->stream << mbarrier_obj << ".arrive();\n";
   } else if (op->op.same_as(tl::ptx_arrive_cluster_barrier())) {
     ICHECK_EQ(op->args.size(), 2);
     this->PrintIndent();
@@ -2790,19 +2781,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->PrintIndent();
       auto mbarrier_obj = this->PrintExpr(op->args[0]);
       auto transaction_bytes = this->PrintExpr(op->args[1]);
-      // Emit explicit release.cta ordering for arrive_expect_tx.
-      this->stream << "{\n";
-      this->PrintIndent();
-      this->stream << "  unsigned int __tx_bar = cast_smem_ptr_to_int(&"
-                   << mbarrier_obj << ");\n";
-      this->PrintIndent();
-      this->stream << "  asm volatile(\"mbarrier.arrive.expect_tx.release.cta"
-                      ".shared::cta.b64 _, [%0], %1;\"\n";
-      this->PrintIndent();
-      this->stream << "    :: \"r\"(__tx_bar), \"r\"((int)("
-                   << transaction_bytes << ")) : \"memory\");\n";
-      this->PrintIndent();
-      this->stream << "}\n";
+      this->stream << mbarrier_obj << ".arrive_and_expect_tx((uint32_t)("
+                   << transaction_bytes << "));\n";
     } else if (op->args.size() == 4) {
       this->PrintIndent();
       auto mbarrier_obj = this->PrintExpr(op->args[0]);
@@ -2834,27 +2814,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     auto mbarrier_obj = this->PrintExpr(op->args[0]);
     auto phase = this->PrintExpr(op->args[1]);
-    // Emit explicit acquire.cta ordering instead of CUTLASS's default wait.
-    this->stream << "{\n";
-    this->PrintIndent();
-    this->stream << "  unsigned int __mbar_addr = cast_smem_ptr_to_int(&"
-                 << mbarrier_obj << ");\n";
-    this->PrintIndent();
-    this->stream << "  unsigned int __mbar_phase = (unsigned int)(" << phase << ");\n";
-    this->PrintIndent();
-    this->stream << "  unsigned int __mbar_ticks = 10000000u;\n";
-    this->PrintIndent();
-    this->stream << "  asm volatile(\n";
-    this->PrintIndent();
-    this->stream << "    \"{ .reg .pred P; WAIT%=:\"\n";
-    this->PrintIndent();
-    this->stream << "    \"mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P, [%0], %1, %2;\"\n";
-    this->PrintIndent();
-    this->stream << "    \"@P bra.uni DONE%=; bra.uni WAIT%=; DONE%=: }\"\n";
-    this->PrintIndent();
-    this->stream << "    :: \"r\"(__mbar_addr), \"r\"(__mbar_phase), \"r\"(__mbar_ticks) : \"memory\");\n";
-    this->PrintIndent();
-    this->stream << "}\n";
+    this->stream << mbarrier_obj << ".wait((uint32_t)(" << phase << "));\n";
   } else if (op->op.same_as(tl::mbarrier_wait_parity_lane0())) {
     ICHECK_EQ(op->args.size(), 2);
     this->PrintIndent();
@@ -2862,22 +2822,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto phase = this->PrintExpr(op->args[1]);
     this->stream << "if ((((int)threadIdx.x) & 31) == 0) {\n";
     this->PrintIndent();
-    this->stream << "  unsigned int __mbar_addr = cast_smem_ptr_to_int(&"
-                 << mbarrier_obj << ");\n";
-    this->PrintIndent();
-    this->stream << "  unsigned int __mbar_phase = (unsigned int)(" << phase << ");\n";
-    this->PrintIndent();
-    this->stream << "  unsigned int __mbar_ticks = 10000000u;\n";
-    this->PrintIndent();
-    this->stream << "  asm volatile(\n";
-    this->PrintIndent();
-    this->stream << "    \"{ .reg .pred P; WAIT%=:\"\n";
-    this->PrintIndent();
-    this->stream << "    \"mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P, [%0], %1, %2;\"\n";
-    this->PrintIndent();
-    this->stream << "    \"@P bra.uni DONE%=; bra.uni WAIT%=; DONE%=: }\"\n";
-    this->PrintIndent();
-    this->stream << "    :: \"r\"(__mbar_addr), \"r\"(__mbar_phase), \"r\"(__mbar_ticks) : \"memory\");\n";
+    this->stream << "  " << mbarrier_obj << ".wait((uint32_t)(" << phase << "));\n";
     this->PrintIndent();
     this->stream << "}\n";
   } else if (op->op.same_as(tl::ptx_init_tensor_memory())) {
@@ -4026,36 +3971,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << ", " << (unpack16 ? "true" : "false") << ">("
                  << tmem_start_col << ", " << col_offset << ", " << src_ptr
                  << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_ld_x16())) {
-    ICHECK_EQ(op->args.size(), 7U) << "tcgen05_ld_x16 expects 7 arguments";
-    need_tcgen05_common_h_ = true;
-    int inst_bits = Downcast<IntImm>(op->args[0])->value;
-    int chunks = Downcast<IntImm>(op->args[1])->value;
-    bool pack16 = Downcast<Bool>(op->args[2])->value;
-    std::string tmem_start_col = this->PrintExpr(op->args[3]);
-    std::string col_offset = this->PrintExpr(op->args[4]);
-    std::string row_offset = this->PrintExpr(op->args[5]);
-    std::string dst_ptr = this->PrintExpr(op->args[6]);
-    this->PrintIndent();
-    this->stream << "tl::tcgen05_ld_32dp" << inst_bits << "bNx_x16<" << chunks
-                 << ", " << (pack16 ? "true" : "false") << ">("
-                 << tmem_start_col << ", " << col_offset << ", "
-                 << row_offset << ", " << dst_ptr << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_st_x16())) {
-    ICHECK_EQ(op->args.size(), 7U) << "tcgen05_st_x16 expects 7 arguments";
-    need_tcgen05_common_h_ = true;
-    int inst_bits = Downcast<IntImm>(op->args[0])->value;
-    int chunks = Downcast<IntImm>(op->args[1])->value;
-    bool unpack16 = Downcast<Bool>(op->args[2])->value;
-    std::string tmem_start_col = this->PrintExpr(op->args[3]);
-    std::string col_offset = this->PrintExpr(op->args[4]);
-    std::string row_offset = this->PrintExpr(op->args[5]);
-    std::string src_ptr = this->PrintExpr(op->args[6]);
-    this->PrintIndent();
-    this->stream << "tl::tcgen05_st_32dp" << inst_bits << "bNx_x16<" << chunks
-                 << ", " << (unpack16 ? "true" : "false") << ">("
-                 << tmem_start_col << ", " << col_offset << ", "
-                 << row_offset << ", " << src_ptr << ");\n";
   } else if (op->op.same_as(tl::tcgen05_mma_arrive())) {
     ICHECK_EQ(op->args.size(), 1U) << "tcgen05_mma_arrive expects 1 argument";
     need_tcgen05_common_h_ = true;
@@ -4152,39 +4067,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << "((void const*)("
                  << a_smem << "), (void const*)(" << b_smem << "), "
                  << c_tmem << ", (void const*)(&" << mbar << "));\n";
-  } else if (op->op.same_as(tl::tcgen05_mma_1sm_ts_128x64_bmn_x2_contig())) {
-    ICHECK_EQ(op->args.size(), 4U)
-        << "tcgen05_mma_1sm_ts_128x64_bmn_x2_contig expects 4 args: B_smem_ptr, A_tmem, C_tmem, accum";
-    this->PrintIndent();
-    bool lane0_only = GetBoolAnnotation(op, "lane0_only", false);
-    auto b_smem = this->PrintExpr(op->args[0]);
-    auto a_tmem = this->PrintExpr(op->args[1]);
-    auto c_tmem = this->PrintExpr(op->args[2]);
-    auto accum = this->PrintExpr(op->args[3]);
-    need_tcgen05_common_h_ = true;
-    if (lane0_only) {
-      this->stream << "tl::tcgen05_mma_1sm_ts_128x64_bmn_x2((void const*)("
-                   << b_smem << "), (void const*)(((bfloat16_t*)(" << b_smem
-                   << ")) + 128 * 64), " << a_tmem << ", " << c_tmem << ", "
-                   << accum << ");\n";
-    } else {
-      this->stream << "tl::tcgen05_mma_1sm_ts_128x64_bmn_x2_contig((void const*)("
-                   << b_smem << "), " << a_tmem << ", " << c_tmem << ", "
-                   << accum << ");\n";
-    }
-  } else if (op->op.same_as(tl::tcgen05_mma_1sm_ts_128x64_bmn_x2())) {
-    ICHECK_EQ(op->args.size(), 5U)
-        << "tcgen05_mma_1sm_ts_128x64_bmn_x2 expects 5 args: B_lo_smem, B_hi_smem, A_tmem, C_tmem, accum";
-    this->PrintIndent();
-    auto b_lo = this->PrintExpr(op->args[0]);
-    auto b_hi = this->PrintExpr(op->args[1]);
-    auto a_tmem = this->PrintExpr(op->args[2]);
-    auto c_tmem = this->PrintExpr(op->args[3]);
-    auto accum = this->PrintExpr(op->args[4]);
-    need_tcgen05_common_h_ = true;
-    this->stream << "tl::tcgen05_mma_1sm_ts_128x64_bmn_x2((void const*)(" << b_lo
-                 << "), (void const*)(" << b_hi << "), " << a_tmem << ", "
-                 << c_tmem << ", " << accum << ");\n";
   } else if (op->op.same_as(tl::tcgen05_mbarrier_arrive_expect_tx_ref())) {
     ICHECK_EQ(op->args.size(), 2U)
         << "tcgen05_mbarrier_arrive_expect_tx_ref expects 2 args";
@@ -4466,25 +4348,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string barrier =
         barrier_name_ + "[" + std::to_string(barrier_id) + "]";
     this->stream << PrintArriveBarrierAsm(barrier);
-  } else if (op->op.same_as(tl::ptx_arrive_barrier_lane0())) {
-    // Lane-0 only variant — see tl::ptx_arrive_barrier_lane0() in builtin.h.
-    // arg may be either an IntImm (after the builtin::ptx_arrive_barrier
-    // lowering substitution) or a BufferLoad on the mbarrier buffer. Support
-    // both forms so we can be called directly from the tilelang frontend.
-    need_cast_smem_ptr_to_int_ = true;
-    std::string barrier;
-    if (const auto *imm = op->args[0].as<IntImmNode>()) {
-      ICHECK(imm->value < barrier_count_);
-      barrier = barrier_name_ + "[" + std::to_string(imm->value) + "]";
-    } else if (const auto *load = op->args[0].as<BufferLoadNode>()) {
-      barrier =
-          load->buffer->name + "[" + this->PrintExpr(load->indices[0]) + "]";
-    } else {
-      LOG(FATAL) << "tl.ptx_arrive_barrier_lane0 expects IntImm or "
-                    "BufferLoad as arg 0, got "
-                 << op->args[0]->GetTypeKey();
-    }
-    this->stream << PrintArriveBarrierLane0Asm(barrier);
   } else if (op->op.same_as(builtin::ptx_arrive_barrier_expect_tx())) {
     need_cast_smem_ptr_to_int_ = true;
     int barrier_id = Downcast<IntImm>(op->args[0])->value;
