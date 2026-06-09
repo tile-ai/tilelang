@@ -44,16 +44,16 @@ PrimExpr MakeTmaLeaderCondition(PrimExpr thread_extent) {
   return Call(DataType::Bool(), tl_shuffle_elect(), {std::move(thread_extent)});
 }
 
-int TMATransactionElementBits(DataType dtype) {
-  // float4_e2m1_unpacked stores one logical FP4 value per 8-bit SMEM slot,
-  // but TMA/mbarrier transaction counts reflect the moved FP4 payload (4b).
+int TMAPayloadElementBits(DataType dtype) {
+  // IR elements are 8-bit unpacked SMEM slots, but TMA/mbarrier transactions
+  // count the packed FP4 payload loaded from global memory.
   if (dtype.is_float4_e2m1_unpacked()) {
     return 4;
   }
   return dtype.bits();
 }
 
-PrimExpr TMABytesFromElements(PrimExpr elements, DataType dtype, int bits) {
+PrimExpr TMABytesFromElements(PrimExpr elements, int bits) {
   PrimExpr elements_i64 = cast(DataType::Int(64), elements);
   if (bits % 8 == 0) {
     return elements_i64 * IntImm(DataType::Int(64), bits / 8);
@@ -63,26 +63,32 @@ PrimExpr TMABytesFromElements(PrimExpr elements, DataType dtype, int bits) {
                   IntImm(DataType::Int(64), 8));
 }
 
-int64_t TMABytesFromElements(int64_t elements, DataType dtype, int bits) {
+int64_t TMABytesFromElements(int64_t elements, int bits) {
   return (elements * bits + 7) / 8;
 }
 
 PrimExpr TMABytesFromElements(PrimExpr elements, DataType dtype) {
-  return TMABytesFromElements(elements, dtype, dtype.bits());
+  return TMABytesFromElements(elements, dtype.bits());
 }
 
 int64_t TMABytesFromElements(int64_t elements, DataType dtype) {
-  return TMABytesFromElements(elements, dtype, dtype.bits());
+  return TMABytesFromElements(elements, dtype.bits());
+}
+
+PrimExpr TMAGlobalBytesFromElements(PrimExpr elements, DataType dtype) {
+  return TMABytesFromElements(elements, TMAPayloadElementBits(dtype));
+}
+
+int64_t TMAGlobalBytesFromElements(int64_t elements, DataType dtype) {
+  return TMABytesFromElements(elements, TMAPayloadElementBits(dtype));
 }
 
 PrimExpr TMATransactionBytesFromElements(PrimExpr elements, DataType dtype) {
-  return TMABytesFromElements(elements, dtype,
-                              TMATransactionElementBits(dtype));
+  return TMABytesFromElements(elements, TMAPayloadElementBits(dtype));
 }
 
 int64_t TMATransactionBytesFromElements(int64_t elements, DataType dtype) {
-  return TMABytesFromElements(elements, dtype,
-                              TMATransactionElementBits(dtype));
+  return TMABytesFromElements(elements, TMAPayloadElementBits(dtype));
 }
 
 int64_t TMAElementsForBytes(int64_t bytes, DataType dtype) {
@@ -136,6 +142,19 @@ bool GetDisableTMA(const CopyNode &op) {
 
 bool GetIsTmaCopy(const CopyNode &op) {
   return GetBoolAnnotation(op, "is_tma_copy");
+}
+
+int TensorMapDataTypeForTMA(DataType global_dtype, DataType shared_dtype) {
+  // 16U4_ALIGN16B: f8f6f4 / mxf8f6f4 unpacked FP4 SMEM
+  // (float_e2m1_unpacksmem_t). 16U4_ALIGN8B: packed FP4 for mxf4 / mxf4nvf4
+  // (float_e2m1_t).
+  constexpr int kTensorMapDataType16U4Align16B = 14;
+  if (shared_dtype.is_float4_e2m1_unpacked()) {
+    ICHECK(global_dtype.is_float4_e2m1fn())
+        << "FP4 packed global tensor required for unpacked shared TMA copy";
+    return kTensorMapDataType16U4Align16B;
+  }
+  return to_CUtensorMapDataType(global_dtype);
 }
 
 int GetEvictionPolicy(const CopyNode &op) {
@@ -1438,12 +1457,14 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   desc.rank = global_tensor->shape.size();
   ICHECK(desc.rank >= 1 && desc.rank <= 5) << desc.rank;
 
-  ICHECK(global_tensor->dtype == shared_tensor->dtype)
+  ICHECK(
+      IsValidTMADtypePair(is_load, global_tensor->dtype, shared_tensor->dtype))
       << "Copy between buffer " << global_tensor->name << " and "
-      << shared_tensor->name << " with different data type "
+      << shared_tensor->name << " with incompatible data type "
       << global_tensor->dtype << " and " << shared_tensor->dtype;
 
-  desc.data_type = to_CUtensorMapDataType(global_tensor->dtype);
+  desc.data_type =
+      TensorMapDataTypeForTMA(global_tensor->dtype, shared_tensor->dtype);
   desc.global_addr = global_tensor->data;
   desc.global_shape = ReverseArray(global_tensor->shape);
   Array<PrimExpr> global_coords =
@@ -1460,7 +1481,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   }
   ICHECK(is_one(desc.global_stride[0])) << desc.global_stride;
   desc.global_stride = desc.global_stride.Map([&](PrimExpr e) {
-    return TMABytesFromElements(e, global_tensor->dtype);
+    return TMAGlobalBytesFromElements(e, global_tensor->dtype);
   });
   for (size_t i{1}; i < desc.global_stride.size(); i++) {
     auto stride = desc.global_stride[i].as<IntImmNode>();
@@ -1559,10 +1580,11 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     return fallback_to_normal("non-constant inner box dimension");
   }
   int instruction_dim = *inner_box_dim;
+  DataType smem_elem_dtype = shared_tensor->dtype;
   if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
-    instruction_dim = TMAElementsForBytes(64, src->dtype);
+    instruction_dim = TMAElementsForBytes(64, smem_elem_dtype);
   } else if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B)) {
-    instruction_dim = TMAElementsForBytes(128, src->dtype);
+    instruction_dim = TMAElementsForBytes(128, smem_elem_dtype);
   }
   if (instruction_dim > 256) {
     ICHECK((*inner_box_dim) % 256 == 0)
@@ -1867,7 +1889,7 @@ Stmt Copy::LowerBulkGather4(const CopyNode &op, const LowerArgs &T,
       << "tma_gather4/scatter4 requires unit innermost global stride, got "
       << desc.global_stride;
   desc.global_stride = desc.global_stride.Map([&](PrimExpr e) {
-    return TMABytesFromElements(e, global_tensor->dtype);
+    return TMAGlobalBytesFromElements(e, global_tensor->dtype);
   });
   for (size_t i = 1; i < desc.global_stride.size(); ++i) {
     if (auto stride = desc.global_stride[i].as<IntImmNode>()) {
@@ -2148,7 +2170,7 @@ Stmt Im2Col::Lower(const Im2ColOpNode &op, const LowerArgs &T,
   }
   ICHECK(is_one(desc.global_stride[0])) << desc.global_stride;
   desc.global_stride = desc.global_stride.Map(
-      [&](PrimExpr e) { return TMABytesFromElements(e, src->dtype); });
+      [&](PrimExpr e) { return TMAGlobalBytesFromElements(e, src->dtype); });
   desc.elem_stride = {1, op.stride_, op.stride_, 1};
   desc.lower_corner = {-op.padding_, -op.padding_};
   desc.upper_corner = {-op.padding_, -op.padding_};

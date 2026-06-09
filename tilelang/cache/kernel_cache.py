@@ -24,6 +24,7 @@ from tilelang.utils.language import get_prim_func_name
 from tilelang import env
 from tilelang.jit import JITKernel
 from tilelang.jit.adapter.base import CachedTextSource
+from tilelang.jit.diagnostics import jit_phase
 from tilelang.contrib.hip_resource_info import dump_to_file, load_from_file
 from tilelang import __version__
 import platform
@@ -374,16 +375,26 @@ class KernelCache:
         if verbose:
             self.logger.debug(f"No cached kernel for {get_prim_func_name(func, '<unknown>')}")
         # Compile kernel if cache miss; leave critical section
-        kernel = JITKernel(
-            func,
-            out_idx=out_idx,
-            execution_backend=execution_backend,
-            target=target,
-            target_host=target_host,
+        with jit_phase(
+            "cache.compile",
             verbose=verbose,
-            pass_configs=pass_configs,
-            compile_flags=compile_flags,
-        )
+            kernel=get_prim_func_name(func, "<unknown>"),
+            target=str(target),
+            target_host=str(target_host) if target_host is not None else None,
+            backend=execution_backend,
+            cache_key=key,
+            cache_path=self._get_cache_path(key),
+        ):
+            kernel = JITKernel(
+                func,
+                out_idx=out_idx,
+                execution_backend=execution_backend,
+                target=target,
+                target_host=target_host,
+                verbose=verbose,
+                pass_configs=pass_configs,
+                compile_flags=compile_flags,
+            )
         with self._lock:
             if env.is_cache_enabled():
                 cache_path = self._get_cache_path(key)

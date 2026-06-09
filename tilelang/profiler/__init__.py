@@ -138,12 +138,10 @@ class Profiler:
         elif ref_outs is None:
             ref_outs = []
 
-        ref_tensors = ins + ref_outs
-        lib_tensors = ins + lib_outs
-
-        assert len(lib_tensors) == len(ref_tensors), "len(lib_tensors) not equals to len(ref_tensors) !"
+        # only compare outputs
+        assert len(lib_outs) == len(ref_outs), "len(lib_outs) not equals to len(ref_outs) !"
         # torch.set_printoptions(edgeitems=torch.inf)
-        for lhs, rhs in zip(lib_tensors, ref_tensors):
+        for lhs, rhs in zip(lib_outs, ref_outs):
             # close_mask = torch.isclose(lhs, rhs, rtol=rtol, atol=atol)
             # total_elements = lhs.numel()
             # num_not_close = (~close_mask).sum().item()

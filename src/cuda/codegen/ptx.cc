@@ -92,7 +92,9 @@ DataType DTypeFromString(const std::string str) {
     return DataType::kFloat6_e2m3fn;
   } else if (str == "float6_e3m2fn" || str == "e3m2" || str == ".e3m2") {
     return DataType::kFloat6_e3m2fn;
-  } else if (str == "float4_e2m1fn" || str == "e2m1" || str == ".e2m1") {
+  } else if (str == "float4_e2m1fn" || str == "float4_e2m1_unpacked" ||
+             str == "custom[float4_e2m1_unpacked]8" || str == "e2m1" ||
+             str == ".e2m1") {
     return DataType::kFloat4_e2m1fn;
   } else if (str == "float16" || str == "fp16" || str == ".f16") {
     return DataType::kFloat16;

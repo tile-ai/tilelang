@@ -283,6 +283,11 @@ std::string GetTileLangFP6Type(DataType type) {
 }
 
 std::string GetTileLangFP4Type(DataType type) {
+  if (type.is_float4_e2m1_unpacked()) {
+    LOG(FATAL) << "float4_e2m1_unpacked is a SMEM/TMA storage tag and has no "
+                  "CUDA register type";
+  }
+
   std::stringstream stream;
   int32_t lanes = type.lanes();
   std::string vec;
@@ -306,7 +311,7 @@ std::string GetTileLangFP4Type(DataType type) {
   }
 
   std::string suffix;
-  if (type.code() == DataType::kFloat4_e2m1fn) {
+  if (type.is_float4_e2m1fn()) {
     suffix = "_e2";
   } else {
     LOG(FATAL) << "Unsupported FP4 type in CUDA codegen";
@@ -1196,7 +1201,11 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
       return;
     }
     fail = true;
-  } else if (t.is_float4()) {
+  } else if (t.is_float4_e2m1_unpacked()) {
+    LOG(FATAL) << "float4_e2m1_unpacked is a SMEM/TMA storage tag and must be "
+                  "lowered through shared-memory allocation";
+    return;
+  } else if (t.is_float4_e2m1fn()) {
     enable_fp4_ = true;
     if (t.lanes() <= 64) {
       os << GetTileLangFP4Type(t);
@@ -2425,6 +2434,9 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
   if (alloc_storage_scope_.count(buffer_var)) {
     scope = alloc_storage_scope_.at(buffer_var);
   }
+  if (scope.empty()) {
+    scope = GetPtrStorageScope(buffer->data);
+  }
   // bool is_vol = IsVolatile(buffer_var);
   // always false for tl cutlass backend.
   bool is_vol = false;
@@ -2438,7 +2450,12 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
     if (!scope.empty() && IsScopePartOfType()) {
       PrintStorageScope(scope, ptr_os);
     }
-    PrintType(pointed_to, ptr_os);
+    if (pointed_to.is_float4_e2m1_unpacked() &&
+        (scope == "shared" || scope == "shared.dyn")) {
+      ptr_os << "uint8_t";
+    } else {
+      PrintType(pointed_to, ptr_os);
+    }
     ptr_os << "*)";
     return ptr_os.str();
   };
@@ -2450,9 +2467,6 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
     std::stringstream temp;
     temp << "(" << ptr_cast(buffer_element_dtype) << vid << ")";
     buffer_str = temp.str();
-  }
-  if (scope.empty()) {
-    scope = GetPtrStorageScope(buffer->data);
   }
   if (scope == "local.var" || scope.find("local.descriptor") == 0) {
     os << vid;
@@ -2474,7 +2488,8 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
        << " + " << index_str << ")";
   } else if (t == buffer_element_dtype) {
     int div_factor = 1;
-    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1) {
+    if (buffer_element_dtype.is_float4_e2m1fn() &&
+        buffer_element_dtype.lanes() == 1) {
       div_factor = 2;
     }
     index_str =
@@ -2484,7 +2499,8 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
     // Fix fp4 pointer arithmetic: fp4 elements are 4-bit packed 2 per byte.
     // fp4* + n incorrectly advances n bytes (skipping 2n elements).
     int div_factor = 1;
-    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1) {
+    if (buffer_element_dtype.is_float4_e2m1fn() &&
+        buffer_element_dtype.lanes() == 1) {
       div_factor = 2;
     }
     index_str =
@@ -3840,8 +3856,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     tcgen05_call = replacer.rewrite(tcgen05_call);
     this->stream << tcgen05_call;
   } else if (op->op.same_as(tl::ptx_tcgen05_mma_blockscaled_ss())) {
-    ICHECK_EQ(op->args.size(), 17U)
-        << "ptx_tcgen05_mma_blockscaled_ss expects 17 arguments";
+    ICHECK_EQ(op->args.size(), 16U)
+        << "ptx_tcgen05_mma_blockscaled_ss expects 16 arguments";
     std::string kind_dtype = Downcast<StringImm>(op->args[0])->value;
     std::string a_desc = this->PrintExpr(op->args[1]);
     std::string A_offset = this->PrintExpr(op->args[2]);
@@ -3856,10 +3872,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string sfb_ref = this->PrintExpr(op->args[11]);
     std::string sfb_offset = this->PrintExpr(op->args[12]);
     // args[13], [14] reserved for future mask/flags
-    bool enable_ws = Downcast<Bool>(op->args[15])->value;
-    bool enable_2cta = Downcast<Bool>(op->args[16])->value;
-    ICHECK(!(enable_ws && enable_2cta))
-        << "Block-scaled TCGEN05 does not support combining .ws and 2CTA";
+    bool enable_2cta = Downcast<Bool>(op->args[15])->value;
 
     auto dtype_enum = tl::codegen::ptx::DTypeFromString(kind_dtype);
 
@@ -3883,9 +3896,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(B_offset)", B_offset);
     replacer.register_rule("(C)", c_ref);
     replacer.register_rule("(C_offset)", c_offset);
-    replacer.register_rule("(tcgen05_name)",
-                           enable_ws ? "tcgen05mma_blockscaled_ws_ss"
-                                     : "tcgen05mma_blockscaled_ss");
+    replacer.register_rule("(tcgen05_name)", "tcgen05mma_blockscaled_ss");
     replacer.register_rule("(scale_out)", scale_out);
     replacer.register_rule("(desc_val)", this->PrintExpr(desc_expr));
     replacer.register_rule("(SFA)", sfa_ref);
@@ -4515,7 +4526,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     DataType src_dtype = op->args[0]->dtype;
     PrimExpr value = op->args[0];
 
-    // Handle float4_e2m1fn reinterpret
+    // Handle packed float4_e2m1fn reinterpret. The unpacked SMEM dtype is not a
+    // general register conversion dtype.
     if (!src_dtype.is_float4_e2m1fn() && !tgt_dtype.is_float4_e2m1fn()) {
       ICHECK_EQ(tgt_dtype.lanes() * tgt_dtype.bits(),
                 src_dtype.lanes() * src_dtype.bits())
@@ -5360,14 +5372,21 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
   } else if (scope == "local.descriptor.tcgen05_instr") {
     stream << "tl::Tcgen05InstrDescriptor " << vid << ";\n";
   } else {
-    bool is_fp4_scalar_local =
-        alloc_dtype.is_float4() && alloc_dtype.is_scalar() && scope == "local";
+    bool is_float4_unpacked_shared =
+        alloc_dtype.is_float4_e2m1_unpacked() &&
+        (scope == "shared" || scope == "shared.dyn");
+    bool is_fp4_scalar_local = alloc_dtype.is_float4_e2m1fn() &&
+                               alloc_dtype.is_scalar() && scope == "local";
     bool is_int4_scalar_local =
         (alloc_dtype == DataType::Int(4) || alloc_dtype == DataType::UInt(4)) &&
         alloc_dtype.is_scalar() && scope == "local";
     if (!is_fp4_scalar_local && !is_int4_scalar_local) {
       PrintStorageScope(scope, stream);
-      PrintType(alloc_dtype, stream);
+      if (is_float4_unpacked_shared) {
+        stream << "uint8_t";
+      } else {
+        PrintType(alloc_dtype, stream);
+      }
     }
   }
 
@@ -5432,7 +5451,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
         PrintType(alloc_dtype, stream);
         stream << ' ' << vid << '[' << (constant_size + 1) / 2 << "];\n";
       } else {
-        if (alloc_dtype.is_float4() && alloc_dtype.is_scalar()) {
+        if (alloc_dtype.is_float4_e2m1fn() && alloc_dtype.is_scalar()) {
           auto vid_packed = vid + "_packed";
           stream << "fp4_e2_2_t " << vid_packed << '['
                  << (constant_size + 1) / 2 << "];\n";
@@ -5563,7 +5582,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
     // GetBufferRef maps two consecutive fp4 elements to the same byte, but
     // reading that byte only returns the low nibble — the odd-indexed element
     // is lost).
-    if (element_dtype.is_float4() && element_dtype.lanes() == 1) {
+    if (element_dtype.is_float4_e2m1fn() && element_dtype.lanes() == 1) {
       std::string idx_str = PrintExpr(index);
       std::string vid = GetVarID(buffer_var.get());
       os << "tl_fp4_packed_load((fp4_e2_2_t*)" << vid << ", " << idx_str << ")";
@@ -5663,7 +5682,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
     // to correctly handle nibble-level writes. The /2 in GetBufferRef maps two
     // consecutive fp4 elements to the same byte, and a plain assignment
     // overwrites the entire byte — destroying the neighboring nibble.
-    if (element_dtype.is_float4() && element_dtype.lanes() == 1) {
+    if (element_dtype.is_float4_e2m1fn() && element_dtype.lanes() == 1) {
       std::string idx_str = PrintExpr(index_expr);
       std::string value = this->PrintExpr(op->value);
       std::string vid = GetVarID(buffer_var.get());

@@ -1,5 +1,5 @@
 from tilelang import tvm as tvm
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing

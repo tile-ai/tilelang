@@ -1,7 +1,7 @@
 # ruff: noqa
 from tilelang import tvm as tvm
 import tilelang as tl
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 import tilelang.language as T
 import tilelang.testing
 from tvm import tirx

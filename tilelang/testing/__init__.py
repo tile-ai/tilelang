@@ -5,7 +5,9 @@ import random
 import torch
 import numpy as np
 from tilelang.contrib import nvcc
-from tilelang.utils.target import determine_target, target_is_cdna, target_is_cuda, target_is_gfx950
+from tilelang.backend.target import determine_target
+from tilelang.cuda.target import target_is_cuda
+from tilelang.rocm.target import target_is_cdna, target_is_gfx950
 from tvm.testing.utils import requires_cuda, requires_package, requires_llvm, requires_metal, requires_rocm, _compose
 
 from tilelang.utils.tensor import torch_assert_close as torch_assert_close

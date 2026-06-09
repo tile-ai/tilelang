@@ -114,6 +114,52 @@ inline bool IsLocalVarBuffer(const Buffer &buffer) {
   return buffer.defined() && buffer.scope() == "local.var";
 }
 
+// True when global packed FP4 is copied into f8f6f4/mxf8f6f4 unpacked FP4 SMEM.
+inline bool IsFP4PackedToUnpackedStorageCopy(DataType global_dtype,
+                                             DataType shared_dtype) {
+  return global_dtype.is_float4_e2m1fn() &&
+         shared_dtype.is_float4_e2m1_unpacked();
+}
+
+inline bool IsValidTMALoadDtypePair(DataType global_dtype,
+                                    DataType shared_dtype) {
+  if (global_dtype.is_float4_e2m1_unpacked() ||
+      shared_dtype.is_float4_e2m1_unpacked()) {
+    return IsFP4PackedToUnpackedStorageCopy(global_dtype, shared_dtype);
+  }
+  if (global_dtype == shared_dtype) {
+    return true;
+  }
+  return false;
+}
+
+inline bool IsValidTMAStoreDtypePair(DataType global_dtype,
+                                     DataType shared_dtype) {
+  return global_dtype == shared_dtype &&
+         !shared_dtype.is_float4_e2m1_unpacked();
+}
+
+inline bool IsValidTMADtypePair(bool is_load, DataType global_dtype,
+                                DataType shared_dtype) {
+  if (is_load) {
+    return IsValidTMALoadDtypePair(global_dtype, shared_dtype);
+  }
+  return IsValidTMAStoreDtypePair(global_dtype, shared_dtype);
+}
+
+// Valid dtype pairs for TMA global->shared copies.
+inline bool IsValidTMACopyDtypePair(DataType global_dtype,
+                                    DataType shared_dtype) {
+  return IsValidTMALoadDtypePair(global_dtype, shared_dtype);
+}
+
+// True only for the supported TMA load transition from packed global FP4 to
+// unpacked shared FP4. The reverse store direction is not a valid TMA path.
+inline bool IsFP4UnpackLoad(const Buffer &src, const Buffer &dst) {
+  return IsGlobalBuffer(src) && IsSharedBuffer(dst) &&
+         IsFP4PackedToUnpackedStorageCopy(src->dtype, dst->dtype);
+}
+
 } // namespace tl
 } // namespace tvm
 

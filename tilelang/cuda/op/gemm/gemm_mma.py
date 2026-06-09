@@ -25,8 +25,8 @@ class GemmMMA(GemmBase):
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         emitter = self.intrin_emitter_cls(
-            a_dtype=self.in_dtype,
-            b_dtype=self.in_dtype,
+            a_dtype=self.a_dtype,
+            b_dtype=self.b_dtype,
             accum_dtype=self.accum_dtype,
             a_transposed=self.trans_A,
             b_transposed=self.trans_B,
@@ -81,7 +81,8 @@ class GemmMMA(GemmBase):
         local_thread_var = thread_var - thread_bounds.min
         mma_emitter = self._make_mma_emitter(target, thread_nums, thread_var=local_thread_var)
 
-        in_dtype = self.in_dtype
+        a_dtype = self.a_dtype
+        b_dtype = self.b_dtype
         warp_rows = mma_emitter.warp_rows
         warp_cols = mma_emitter.warp_cols
         local_size_a = mma_emitter.local_size_a
@@ -113,8 +114,8 @@ class GemmMMA(GemmBase):
                 B_shared into local fragments, then issues Tensor Core mma ops,
                 accumulating into C_local.
                 """
-                A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
-                B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
+                A_local = T.alloc_local((warp_rows * local_size_a), a_dtype)
+                B_local = T.alloc_local((warp_cols * local_size_b), b_dtype)
                 if clear_accum:
                     T.clear(C_buf)
                 for ki in T.serial(0, (block_K // micro_size_k)):
@@ -148,7 +149,7 @@ class GemmMMA(GemmBase):
                 B_shared into local fragments, then issues Tensor Core mma ops,
                 accumulating into C_local.
                 """
-                A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
+                A_local = T.alloc_local((warp_rows * local_size_a), a_dtype)
 
                 for ki in T.serial(0, (block_K // micro_size_k)):
                     if clear_accum:
@@ -178,7 +179,7 @@ class GemmMMA(GemmBase):
                 B_shared into local fragments, then issues Tensor Core mma ops,
                 accumulating into C_local.
                 """
-                B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
+                B_local = T.alloc_local((warp_cols * local_size_b), b_dtype)
                 if clear_accum:
                     T.clear(C_buf)
                 for ki in T.serial(0, (block_K // micro_size_k)):

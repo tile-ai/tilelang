@@ -1397,7 +1397,6 @@ def ptx_tcgen05_mma_blockscaled_ss(
     sfb_offset,
     reserved0=0,
     reserved1=0,
-    variant=False,
     enable_2cta=False,
 ):
     """TVM intrinsic for tcgen05.mma block-scaled (mxf8f6f4.block_scale) instructions.
@@ -1409,26 +1408,8 @@ def ptx_tcgen05_mma_blockscaled_ss(
     Positional args:
     kind_dtype, desc_a, A_offset, desc_b, B_offset, C_ptr, C_offset,
     desc_val, scale_out, sfa_ptr, sfa_offset, sfb_ptr, sfb_offset,
-    reserved0, reserved1, enable_ws, enable_2cta.
+    reserved0, reserved1, enable_2cta.
     """
-
-    if enable_2cta and isinstance(variant, str):
-        v_check = variant.lower()
-        if v_check in ("ws", "warp_specialized", "warp-specialized"):
-            raise ValueError("ptx_tcgen05_mma_blockscaled_ss: .ws and 2CTA cannot be combined")
-    elif enable_2cta and bool(variant):
-        raise ValueError("ptx_tcgen05_mma_blockscaled_ss: .ws and 2CTA cannot be combined")
-
-    if isinstance(variant, str):
-        v = variant.lower()
-        if v in ("ws", "warp_specialized", "warp-specialized"):
-            enable_ws = True
-        elif v in ("default", "std", "ss"):
-            enable_ws = False
-        else:
-            raise ValueError(f"ptx_tcgen05_mma_blockscaled_ss: unknown variant: {variant}")
-    else:
-        enable_ws = bool(variant)
 
     return call_intrin(
         "handle",
@@ -1448,7 +1429,6 @@ def ptx_tcgen05_mma_blockscaled_ss(
         sfb_offset,
         reserved0,
         reserved1,
-        enable_ws,
         enable_2cta,
     )
 
