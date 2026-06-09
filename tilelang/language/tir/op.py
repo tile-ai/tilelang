@@ -1076,6 +1076,57 @@ def ptx_mma_sp(
     )
 
 
+def ptx_mma_block_scale(
+    accum_dtype,
+    shape,
+    A_layout,
+    B_layout,
+    kind,
+    scale_vec_size,
+    A_dtype,
+    B_dtype,
+    scale_type,
+    multiplicand_a,
+    a_index,
+    multiplicand_b,
+    b_index,
+    accumulator,
+    c_index,
+    scale_a,
+    byte_id_a,
+    thread_id_a,
+    scale_b,
+    byte_id_b,
+    thread_id_b,
+):
+    """TVM intrinsic for SM120a warp-level NVF4 block-scale MMA."""
+    return call_intrin(
+        accum_dtype,
+        _tvm_op.Op.get("tl.ptx_mma_block_scale"),
+        tvm.tirx.StringImm(str(accum_dtype)),
+        tvm.tirx.StringImm(str(shape)),
+        tvm.tirx.StringImm(str(A_layout)),
+        tvm.tirx.StringImm(str(B_layout)),
+        tvm.tirx.StringImm(str(kind)),
+        IntImm("int32", scale_vec_size),
+        tvm.tirx.StringImm(str(A_dtype)),
+        tvm.tirx.StringImm(str(B_dtype)),
+        tvm.tirx.StringImm(str(scale_type)),
+        multiplicand_a,
+        a_index,
+        multiplicand_b,
+        b_index,
+        accumulator,
+        c_index,
+        scale_a,
+        byte_id_a,
+        thread_id_a,
+        scale_b,
+        byte_id_b,
+        thread_id_b,
+    )
+
+
 def ptx_wgmma_ss(
     dtype,
     wgmma_prefix,

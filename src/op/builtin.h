@@ -422,6 +422,11 @@ TVM_DLL const Op &ptx_wgmma_sp_ss();
 TVM_DLL const Op &ptx_wgmma_sp_rs();
 
 /*!
+ * \brief tvm intrinsic for ptx tensor core mma with block scaling on SM120a.
+ */
+TVM_DLL const Op &ptx_mma_block_scale();
+
+/*!
  * \brief tvm intrinsic for tcgen05 mma shared-shared instructions.
  */
 TVM_DLL const Op &ptx_tcgen05_mma_ss();

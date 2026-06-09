@@ -2137,6 +2137,7 @@ __all__ = [
     "tvm_warp_activemask",
     "ptx_mma",
     "ptx_mma_sp",
+    "ptx_mma_block_scale",
     "ptx_wgmma_ss",
     "ptx_wgmma_rs",
     "ptx_wgmma_sp_ss",
