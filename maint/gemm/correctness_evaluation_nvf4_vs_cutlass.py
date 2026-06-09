@@ -183,12 +183,7 @@ def _pack_tilelang_sf_u32(sf_bytes):
     mn, sf_blocks = sf_bytes.shape
     assert sf_blocks % SCALE_WORD_K == 0
     words = sf_bytes.reshape(mn, sf_blocks // SCALE_WORD_K, SCALE_WORD_K).to(torch.int64)
-    packed = (
-        words[:, :, 0]
-        | (words[:, :, 1] << 8)
-        | (words[:, :, 2] << 16)
-        | (words[:, :, 3] << 24)
-    )
+    packed = words[:, :, 0] | (words[:, :, 1] << 8) | (words[:, :, 2] << 16) | (words[:, :, 3] << 24)
     return packed.to(torch.uint32).contiguous()
 
 
@@ -247,7 +242,6 @@ def _decode_rowmajor_fp4(packed, rows: int, cols: int):
 
 
 def _build_cutlass_extension():
-    import torch
     from torch.utils.cpp_extension import load
 
     repo = Path(__file__).resolve().parents[2]

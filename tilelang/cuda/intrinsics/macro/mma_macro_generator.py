@@ -1271,6 +1271,7 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
 
         return _warp_mma(A_local_buf, B_local_buf, C_local_buf)
 
+
 class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
     """SM120 warp-level block-scale MMA emitter.
 
@@ -1356,13 +1357,9 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
                 for local_id in T.serial(local_size_a):
                     mi, mk = mma_load_a_32x32_to_shared_16x64_layout(tx, local_id)
                     if a_transposed:
-                        A_local_buf[i * local_size_a + local_id] = A_buf[
-                            tuple(A_other) + (A_base0 + wk + mk, A_base1 + wi + mi)
-                        ]
+                        A_local_buf[i * local_size_a + local_id] = A_buf[tuple(A_other) + (A_base0 + wk + mk, A_base1 + wi + mi)]
                     else:
-                        A_local_buf[i * local_size_a + local_id] = A_buf[
-                            tuple(A_other) + (A_base0 + wi + mi, A_base1 + wk + mk)
-                        ]
+                        A_local_buf[i * local_size_a + local_id] = A_buf[tuple(A_other) + (A_base0 + wi + mi, A_base1 + wk + mk)]
 
         return _warp_ld_a_e2m1(A_local_buf, A_region, ki, thread_binding, rk)
 
@@ -1395,13 +1392,9 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
                     for local_id in T.serial(local_size_b_per_inst):
                         ni, ki_offset = mma_load_b_32x16_to_shared_8x64_layout(tx, local_id)
                         if b_transposed:
-                            B_local_buf[b_base + local_id] = B_buf[
-                                tuple(B_other) + (B_base0 + wi + ni, B_base1 + wk + ki_offset)
-                            ]
+                            B_local_buf[b_base + local_id] = B_buf[tuple(B_other) + (B_base0 + wi + ni, B_base1 + wk + ki_offset)]
                         else:
-                            B_local_buf[b_base + local_id] = B_buf[
-                                tuple(B_other) + (B_base0 + wk + ki_offset, B_base1 + wi + ni)
-                            ]
+                            B_local_buf[b_base + local_id] = B_buf[tuple(B_other) + (B_base0 + wk + ki_offset, B_base1 + wi + ni)]
 
         return _warp_ld_b_e2m1(B_local_buf, B_region, ki, thread_binding, rk)
 
@@ -1514,10 +1507,7 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
                 )
                 if replicate_b:
                     scale_b_rep_ptr = T.access_ptr(
-                        SFB_data[
-                            tuple(SFB_other)
-                            + (SFB_base_n + scale_n + 8, SFB_base_k + scale_b_word_k)
-                        ],
+                        SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n + 8, SFB_base_k + scale_b_word_k)],
                         "r",
                     )
                     T.ptx_mma_block_scale(
@@ -1545,4 +1535,3 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
                     )
 
         return _warp_mma_block_scale(A_local_buf, B_local_buf, C_local_buf, SFA_data, SFB_data, thread_binding)
-
