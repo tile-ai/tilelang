@@ -1,7 +1,7 @@
 #include <torch/extension.h>
 
-#include "cutlass/cutlass.h"
 #include "cute/tensor.hpp"
+#include "cutlass/cutlass.h"
 
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/collective/collective_builder.hpp"
@@ -28,8 +28,10 @@ using LayoutD = cutlass::layout::RowMajor;
 using ElementPairA = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
 using ElementPairB = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
 
-static constexpr int AlignmentA = 16 * 8 / cutlass::sizeof_bits<ElementA>::value;
-static constexpr int AlignmentB = 16 * 8 / cutlass::sizeof_bits<ElementB>::value;
+static constexpr int AlignmentA =
+    16 * 8 / cutlass::sizeof_bits<ElementA>::value;
+static constexpr int AlignmentB =
+    16 * 8 / cutlass::sizeof_bits<ElementB>::value;
 static constexpr int AlignmentC = 128 / cutlass::sizeof_bits<ElementC>::value;
 static constexpr int AlignmentD = 128 / cutlass::sizeof_bits<ElementD>::value;
 
@@ -49,12 +51,11 @@ using CollectiveMainloop =
         cutlass::arch::Sm120, cutlass::arch::OpClassBlockScaledTensorOp,
         ElementPairA, LayoutA, AlignmentA, ElementPairB, LayoutB, AlignmentB,
         ElementAccumulator, TileShape, ClusterShape,
-        cutlass::gemm::collective::StageCountAutoCarveout<
-            static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
+        cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
+            sizeof(typename CollectiveEpilogue::SharedStorage))>,
         cutlass::gemm::KernelTmaWarpSpecializedPingpong>::CollectiveOp;
 
-template <typename T>
-struct Dummy {
+template <typename T> struct Dummy {
   using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
       Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue>;
   using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
@@ -67,18 +68,22 @@ using StrideB = typename GemmKernel::StrideB;
 using StrideC = typename GemmKernel::StrideC;
 using StrideD = typename GemmKernel::StrideD;
 
-void check_tensor(torch::Tensor const& tensor, char const* name, torch::DeviceType device) {
+void check_tensor(torch::Tensor const &tensor, char const *name,
+                  torch::DeviceType device) {
   TORCH_CHECK(tensor.device().type() == device, name, " must be on CUDA");
   TORCH_CHECK(tensor.is_contiguous(), name, " must be contiguous");
 }
 
-}  // namespace
+} // namespace
 
 void cutlass_nvf4_gemm_128x128x256(torch::Tensor A, torch::Tensor B,
                                    torch::Tensor SFA, torch::Tensor SFB,
                                    torch::Tensor C, torch::Tensor D) {
-#if !(defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED) || defined(CUTLASS_ARCH_MMA_SM121_SUPPORTED))
-  TORCH_CHECK(false, "CUTLASS was not compiled with SM120/SM121 block-scale MMA support");
+#if !(defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED) ||                             \
+      defined(CUTLASS_ARCH_MMA_SM121_SUPPORTED))
+  TORCH_CHECK(
+      false,
+      "CUTLASS was not compiled with SM120/SM121 block-scale MMA support");
 #else
   constexpr int M = 128;
   constexpr int N = 128;
@@ -91,10 +96,14 @@ void cutlass_nvf4_gemm_128x128x256(torch::Tensor A, torch::Tensor B,
   check_tensor(C, "C", torch::kCUDA);
   check_tensor(D, "D", torch::kCUDA);
 
-  TORCH_CHECK(A.numel() == M * K / 2, "A must contain packed NVF4 bytes for 128x256");
-  TORCH_CHECK(B.numel() == N * K / 2, "B must contain packed NVF4 bytes for 128x256");
-  TORCH_CHECK(SFA.numel() == M * (K / 16), "SFA must be CUTLASS-layout UE4M3 bytes");
-  TORCH_CHECK(SFB.numel() == N * (K / 16), "SFB must be CUTLASS-layout UE4M3 bytes");
+  TORCH_CHECK(A.numel() == M * K / 2,
+              "A must contain packed NVF4 bytes for 128x256");
+  TORCH_CHECK(B.numel() == N * K / 2,
+              "B must contain packed NVF4 bytes for 128x256");
+  TORCH_CHECK(SFA.numel() == M * (K / 16),
+              "SFA must be CUTLASS-layout UE4M3 bytes");
+  TORCH_CHECK(SFB.numel() == N * (K / 16),
+              "SFB must be CUTLASS-layout UE4M3 bytes");
   TORCH_CHECK(C.numel() == M * N, "C must be 128x128 f32");
   TORCH_CHECK(D.numel() == M * N, "D must be 128x128 f32");
 
@@ -104,36 +113,43 @@ void cutlass_nvf4_gemm_128x128x256(torch::Tensor A, torch::Tensor B,
   auto stride_C = cutlass::make_cute_packed_stride(StrideC{}, {M, N, 1});
   auto stride_D = cutlass::make_cute_packed_stride(StrideD{}, {M, N, 1});
 
-  using Sm1xxBlkScaledConfig = typename GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig;
+  using Sm1xxBlkScaledConfig =
+      typename GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig;
   auto layout_SFA = Sm1xxBlkScaledConfig::tile_atom_to_shape_SFA(problem);
   auto layout_SFB = Sm1xxBlkScaledConfig::tile_atom_to_shape_SFB(problem);
 
   typename Gemm::Arguments arguments{
       cutlass::gemm::GemmUniversalMode::kGemm,
       problem,
-      {reinterpret_cast<ElementA*>(A.data_ptr()), stride_A,
-       reinterpret_cast<ElementB*>(B.data_ptr()), stride_B,
-       reinterpret_cast<ElementPairA::ScaleFactorType*>(SFA.data_ptr()), layout_SFA,
-       reinterpret_cast<ElementPairB::ScaleFactorType*>(SFB.data_ptr()), layout_SFB},
-      {{1.0f, 0.0f}, reinterpret_cast<ElementC*>(C.data_ptr()), stride_C,
-       reinterpret_cast<ElementD*>(D.data_ptr()), stride_D}};
+      {reinterpret_cast<ElementA *>(A.data_ptr()), stride_A,
+       reinterpret_cast<ElementB *>(B.data_ptr()), stride_B,
+       reinterpret_cast<ElementPairA::ScaleFactorType *>(SFA.data_ptr()),
+       layout_SFA,
+       reinterpret_cast<ElementPairB::ScaleFactorType *>(SFB.data_ptr()),
+       layout_SFB},
+      {{1.0f, 0.0f},
+       reinterpret_cast<ElementC *>(C.data_ptr()),
+       stride_C,
+       reinterpret_cast<ElementD *>(D.data_ptr()),
+       stride_D}};
 
   Gemm gemm;
   auto status = gemm.can_implement(arguments);
-  TORCH_CHECK(status == cutlass::Status::kSuccess, "CUTLASS can_implement failed: ",
-              cutlassGetStatusString(status));
+  TORCH_CHECK(status == cutlass::Status::kSuccess,
+              "CUTLASS can_implement failed: ", cutlassGetStatusString(status));
 
   size_t workspace_size = Gemm::get_workspace_size(arguments);
-  auto workspace = torch::empty({static_cast<int64_t>(workspace_size)},
-                                torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+  auto workspace = torch::empty(
+      {static_cast<int64_t>(workspace_size)},
+      torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
 
   status = gemm.initialize(arguments, workspace.data_ptr());
-  TORCH_CHECK(status == cutlass::Status::kSuccess, "CUTLASS initialize failed: ",
-              cutlassGetStatusString(status));
+  TORCH_CHECK(status == cutlass::Status::kSuccess,
+              "CUTLASS initialize failed: ", cutlassGetStatusString(status));
 
   status = gemm.run();
-  TORCH_CHECK(status == cutlass::Status::kSuccess, "CUTLASS run failed: ",
-              cutlassGetStatusString(status));
+  TORCH_CHECK(status == cutlass::Status::kSuccess,
+              "CUTLASS run failed: ", cutlassGetStatusString(status));
   TORCH_CHECK(cudaDeviceSynchronize() == cudaSuccess, "CUTLASS kernel failed");
 #endif
 }

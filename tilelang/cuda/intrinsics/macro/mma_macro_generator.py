@@ -1463,7 +1463,6 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
         warp_col_tiles = self.warp_col_tiles
         micro_size_x = self.micro_size_x
         micro_size_y = self.micro_size_y
-        micro_size_k = self.micro_size_k
         sf_vec_size = self.sf_vec_size
         sf_a_granularity_k = sf_vec_size if sf_a_granularity_k is None else sf_a_granularity_k
         sf_b_granularity_k = sf_vec_size if sf_b_granularity_k is None else sf_b_granularity_k
