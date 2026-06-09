@@ -64,10 +64,7 @@ class _CallFormCache:
     def _matches_last(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> bool:
         if self.last_args is None or self.last_kwargs is None:
             return False
-        try:
-            return args == self.last_args and kwargs == self.last_kwargs
-        except Exception:
-            return False
+        return args == self.last_args and kwargs == self.last_kwargs
 
     def _remember(self, call_form_key: _CallFormKey, kernel: Kernel) -> None:
         args, kwargs_items = call_form_key
@@ -81,10 +78,7 @@ class _CallFormCache:
             return self.last_kernel, None
 
         call_form_key = (args, tuple(kwargs.items()))
-        try:
-            kernel = self.entries.get(call_form_key, _CALL_FORM_CACHE_MISS)
-        except TypeError:
-            return _CALL_FORM_CACHE_MISS, None
+        kernel = self.entries.get(call_form_key, _CALL_FORM_CACHE_MISS)
         if kernel is not _CALL_FORM_CACHE_MISS:
             self._remember(call_form_key, kernel)
         return kernel, call_form_key

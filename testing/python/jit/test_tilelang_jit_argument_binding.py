@@ -57,6 +57,15 @@ def test_lazy_jit_call_form_cache_skips_rebinding(monkeypatch):
     assert _lazy_kernel_factory(hidden=512, token_stride=512) is sentinel_kernel
 
 
+def test_lazy_jit_call_form_cache_requires_hashable_arguments():
+    _lazy_kernel_factory.mode = "lazy"
+    _lazy_kernel_factory.func.set_mode("lazy")
+    _lazy_kernel_factory._call_form_cache.clear()
+
+    with pytest.raises(TypeError, match="unhashable"):
+        _lazy_kernel_factory(hidden=512, token_stride=512, opts=[1, 2])
+
+
 def test_jit_argument_binding_reports_python_call_errors():
     with pytest.raises(TypeError, match="multiple values"):
         _lazy_kernel_factory.func.parse_args(512, hidden=512, token_stride=512)
