@@ -1379,9 +1379,7 @@ def tcgen05_mma_arrive(mbar: tirx.Buffer | BufferLoad | PrimExpr, arrive_2cta: b
     if isinstance(mbar, (tirx.Buffer, BufferLoad)):
         mbar = retrieve_ptr(mbar, access_type="rw")
     ann = {"use_2cta": 1} if arrive_2cta else {}
-    return tirx.call_intrin(
-        "void", tirx.op.Op.get("tl.tcgen05_mma_arrive"), mbar, annotations=ann
-    )
+    return tirx.call_intrin("void", tirx.op.Op.get("tl.tcgen05_mma_arrive"), mbar, annotations=ann)
 
 
 def tcgen05_before_thread_sync():
