@@ -1131,21 +1131,15 @@ def _freeze_jit_key_part(value: Any) -> Any:
     if isinstance(value, tuple):
         return tuple(_freeze_jit_key_part(item) for item in value)
 
-    try:
-        hash(value)
-    except TypeError as err:
-        raise TypeError(f"Unsupported unhashable JIT compile-time cache key value of type {type(value).__qualname__}: {value!r}") from err
+    if not isinstance(value, Hashable):
+        raise TypeError(f"Unsupported unhashable JIT compile-time cache key value of type {type(value).__qualname__}: {value!r}")
     return value
 
 
 def _make_jit_key(values: tuple[Any, ...]) -> tuple[Any, ...]:
-    """Return values unchanged unless the tuple cannot be used as a dict key."""
+    """Return a hashable cache key, canonicalizing supported container values."""
 
-    try:
-        hash(values)
-    except TypeError:
-        return tuple(_freeze_jit_key_part(value) for value in values)
-    return values
+    return tuple(_freeze_jit_key_part(value) for value in values)
 
 
 @dataclass(frozen=True)
