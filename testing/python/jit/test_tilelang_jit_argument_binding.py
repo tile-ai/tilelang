@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 import pytest
 import torch
 
@@ -114,6 +116,11 @@ _UNHASHABLE_DEFAULT_OPTS = [1, 2]
 _UNHASHABLE_DEFAULT_CONFIG = {"axis": [0]}
 
 
+@dataclass
+class _UnhashableConfig:
+    axis: int
+
+
 @tilelang.jit
 def _lazy_unhashable_default_factory(
     M: int,
@@ -138,6 +145,14 @@ def test_lazy_jit_unhashable_defaults_are_normalized_in_cache_key():
     hash(omitted_key)
     assert kernel_args == {}
     assert omitted_key == explicit_key
+
+
+def test_lazy_jit_unsupported_unhashable_compile_time_value_errors():
+    with pytest.raises(TypeError, match="Unsupported unhashable JIT compile-time cache key value"):
+        _lazy_unhashable_default_factory.func.parse_args(
+            128,
+            config=_UnhashableConfig(axis=0),
+        )
 
 
 @tilelang.jit

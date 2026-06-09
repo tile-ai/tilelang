@@ -1114,7 +1114,7 @@ _ExtraJITKwargsKey = tuple[tuple[str, Any], ...]
 
 
 def _freeze_jit_key_part(value: Any) -> Any:
-    """Fallback conversion for rare unhashable compile-time key values."""
+    """Canonicalize supported unhashable compile-time key values."""
 
     if isinstance(value, dict):
         return (
@@ -1133,8 +1133,8 @@ def _freeze_jit_key_part(value: Any) -> Any:
 
     try:
         hash(value)
-    except TypeError:
-        return type(value), repr(value)
+    except TypeError as err:
+        raise TypeError(f"Unsupported unhashable JIT compile-time cache key value of type {type(value).__qualname__}: {value!r}") from err
     return value
 
 
