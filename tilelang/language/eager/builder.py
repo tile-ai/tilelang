@@ -1114,7 +1114,7 @@ _ExtraJITKwargsKey = tuple[tuple[str, Any], ...]
 
 
 def _freeze_jit_key_part(value: Any) -> Any:
-    """Canonicalize supported unhashable compile-time key values."""
+    """Canonicalize supported compile-time values into hashable key parts."""
 
     if isinstance(value, dict):
         return (
@@ -1137,7 +1137,7 @@ def _freeze_jit_key_part(value: Any) -> Any:
 
 
 def _make_jit_key(values: tuple[Any, ...]) -> tuple[Any, ...]:
-    """Return a hashable cache key, canonicalizing supported container values."""
+    """Build the phase-1 cache key from already ordered compile-time values."""
 
     return tuple(_freeze_jit_key_part(value) for value in values)
 
@@ -1152,7 +1152,18 @@ class _BoundJITArgs:
 
 
 class _JITArgumentBinder:
-    """Bind JIT call arguments into a compact, canonical cache key."""
+    """Bind Python JIT calls into TileLang's phase-1 cache inputs.
+
+    The binder keeps three pieces of data separate:
+
+    - phase-1 key values: compile-time arguments that identify the TIR template
+    - tensor args: runtime tensors used later for phase-2 shape/stride matching
+    - compile kwargs: raw values passed back to the user's Python JIT function
+
+    The common path avoids inspect.Signature.bind() because this code runs before
+    every cache lookup. Signatures with *args or **kwargs still use Python's
+    binder because their call semantics are harder to reproduce safely.
+    """
 
     def __init__(
         self,
@@ -1189,13 +1200,20 @@ class _JITArgumentBinder:
 
     @staticmethod
     def _extra_key(extra_kwargs: dict[str, Any]) -> _ExtraJITKwargsKey:
+        # Extra kwargs are compile-time values for explicit T.const bindings.
+        # Sort names so f(M=1, N=2) and f(N=2, M=1) share one key.
         return tuple(sorted(extra_kwargs.items()))
 
     def _pack_no_tensor_key(self, arguments: dict[str, Any]) -> tuple[Any, ...]:
+        """Pack a lazy no-tensor call directly into a phase-1 key."""
+
         p1_values: list[Any] = []
         for param in self.params:
             value = arguments[param.name]
             if param.kind == inspect.Parameter.VAR_KEYWORD:
+                # Signature.bind() stores **kwargs as one dict under the
+                # VAR_KEYWORD parameter. Flatten it so each keyword remains a
+                # normal compile-time key component.
                 if value:
                     p1_values.append(self._extra_key(value))
             else:
@@ -1215,11 +1233,15 @@ class _JITArgumentBinder:
             name = param.name
             value = arguments[name]
             if param.kind == inspect.Parameter.VAR_KEYWORD:
+                # Keep **kwargs flattened both in the key and in compile_kwargs;
+                # passing {"kwargs": {...}} would change the user's call form.
                 if value:
                     p1_values.append(self._extra_key(value))
                     compile_kwargs.update(value)
                 continue
             if name in self.tensor_arg_names:
+                # Tensor args are runtime inputs. They do not identify the TIR
+                # template, but they are needed for phase-2 shape/stride keys.
                 tensor_args[name] = value
             else:
                 p1_values.append(value)
@@ -1230,11 +1252,15 @@ class _JITArgumentBinder:
         return _BoundJITArgs(_make_jit_key(tuple(p1_values)), tensor_args, compile_kwargs)
 
     def _bind_with_signature(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> _BoundJITArgs:
+        """Slow path for signatures that need Python's full binding rules."""
+
         bound = self.signature.bind(*args, **kwargs)
         bound.apply_defaults()
         return self._pack_bound_arguments(bound.arguments)
 
     def _bind_fast(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> _BoundJITArgs:
+        """Fast binder for normal positional/keyword-only JIT signatures."""
+
         if len(args) > self.positional_param_count:
             raise TypeError(
                 f"too many positional arguments for JIT function: expected at most {self.positional_param_count}, got {len(args)}"
@@ -1275,12 +1301,16 @@ class _JITArgumentBinder:
         return _BoundJITArgs(_make_jit_key(tuple(p1_values)), tensor_args, compile_kwargs)
 
     def _bind_fast_no_tensor_key(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[Any, ...]:
+        """Fastest path for lazy factories where every argument is compile-time."""
+
         if len(args) > self.positional_param_count:
             raise TypeError(
                 f"too many positional arguments for JIT function: expected at most {self.positional_param_count}, got {len(args)}"
             )
 
         if not kwargs:
+            # Common lazy cache-hit form: positional values, no tensor args, no
+            # kwargs. Fill omitted defaults without allocating _BoundJITArgs.
             if len(args) == len(self.param_names):
                 return _make_jit_key(args)
             for index in self.required_indices:
