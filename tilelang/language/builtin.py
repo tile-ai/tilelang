@@ -1374,6 +1374,16 @@ def cp_async_barrier_noinc(barrier: BarrierType):
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.ptx_cp_async_barrier_noinc"), barrier)
 
 
+def tcgen05_mma_arrive(mbar: tirx.Buffer | BufferLoad | PrimExpr, arrive_2cta: bool = False):
+    """Signal UMMA (TCGEN05) barrier arrival for a shared-memory mbarrier pointer."""
+    if isinstance(mbar, (tirx.Buffer, BufferLoad)):
+        mbar = retrieve_ptr(mbar, access_type="rw")
+    ann = {"use_2cta": 1} if arrive_2cta else {}
+    return tirx.call_intrin(
+        "void", tirx.op.Op.get("tl.tcgen05_mma_arrive"), mbar, annotations=ann
+    )
+
+
 def tcgen05_before_thread_sync():
     return tirx.call_intrin("void", tirx.op.Op.get("tl.tcgen05_before_thread_sync"))
 
