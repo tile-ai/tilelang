@@ -34,6 +34,10 @@ def get_nvcc_subprocess_env() -> dict[str, str] | None:
     return get_msvc_subprocess_env()
 
 
+def _get_compile_timeout_seconds() -> float | None:
+    return env.get_compile_timeout_seconds()
+
+
 def _resolve_artifact_paths(temp, file_name, target_format, kernels_output_dir=None):
     if kernels_output_dir is None:
         return temp.relpath(f"{file_name}.cu"), temp.relpath(f"{file_name}.{target_format}")
@@ -131,7 +135,20 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
     else:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=compiler_env)
 
-    (out, _) = proc.communicate()
+    timeout = _get_compile_timeout_seconds()
+    try:
+        (out, _) = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        proc.kill()
+        try:
+            out, _ = proc.communicate()
+        except Exception:
+            out = exc.output or b""
+        captured = py_str(out or b"")
+        msg = f"NVCC compilation timed out after {timeout} seconds.\nCommand: {' '.join(cmd)}\nSource: {temp_code}\nTarget: {file_target}\n"
+        if captured:
+            msg += f"Output:\n{captured}\n"
+        raise RuntimeError(msg) from exc
 
     if verbose:
         print(py_str(out))
