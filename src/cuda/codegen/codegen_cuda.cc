@@ -614,7 +614,8 @@ std::string CodeGenTileLangCUDA::Finish() {
     decl_stream << "#include <tl_templates/cuda/instruction/mma_sm70.h>\n";
   }
   if (need_mma_block_scale_instruction_h_) {
-    decl_stream << "#include <tl_templates/cuda/instruction/mma_block_scale.h>\n";
+    decl_stream
+        << "#include <tl_templates/cuda/instruction/mma_block_scale.h>\n";
   }
   if (need_mma_sp_instruction_h_) {
     decl_stream << "#include <tl_templates/cuda/instruction/mma_sp.h>\n";
@@ -2910,17 +2911,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         << ". Currently supported: f32 m16n8k64 row.col kind::mxf4nvf4 "
            "scale_vec::4X e2m1.e2m1 f32 ue4m3.";
 
-    auto resolve_fp4_packed_buffer = [&](const PrimExpr &var_expr,
-                                         std::string &ref,
-                                         std::string &offset) {
-      if (const VarNode *var = var_expr.as<VarNode>()) {
-        auto it = fp4_packed_buffers_.find(var);
-        if (it != fp4_packed_buffers_.end()) {
-          ref = it->second;
-          offset = "(" + offset + ") / 2";
-        }
-      }
-    };
+    auto resolve_fp4_packed_buffer =
+        [&](const PrimExpr &var_expr, std::string &ref, std::string &offset) {
+          if (const VarNode *var = var_expr.as<VarNode>()) {
+            auto it = fp4_packed_buffers_.find(var);
+            if (it != fp4_packed_buffers_.end()) {
+              ref = it->second;
+              offset = "(" + offset + ") / 2";
+            }
+          }
+        };
     resolve_fp4_packed_buffer(op->args[9], a_ref, a_offset);
     resolve_fp4_packed_buffer(op->args[11], b_ref, b_offset);
 

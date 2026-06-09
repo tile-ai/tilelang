@@ -245,9 +245,8 @@ def _build_cutlass_extension():
     from torch.utils.cpp_extension import load
 
     repo = Path(__file__).resolve().parents[2]
-    cutlass_root = Path(os.environ.get("CUTLASS_ROOT", "/data/home/qutao/refactor/m7_inference/cutlass"))
-    if not cutlass_root.exists():
-        cutlass_root = repo / "3rdparty" / "cutlass"
+    cutlass_root_env = os.environ.get("CUTLASS_ROOT")
+    cutlass_root = Path(cutlass_root_env) if cutlass_root_env else repo / "3rdparty" / "cutlass"
 
     return load(
         name="tilelang_cutlass_nvf4_ref",
