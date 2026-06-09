@@ -689,107 +689,106 @@ def attention_kernel_2sm_d128(
         tile_k_base,
         tile_phase,
     ):
-        if cta_rank == 0:
-            if T.shuffle_elect(32):
-                q_base_16b = T.tcgen05_smem_base_16b(T.access_ptr(q_stage, "r"))
-                k_base_16b = T.tcgen05_smem_base_16b(T.access_ptr(k_stage, "r"))
-                v_base_16b = T.tcgen05_smem_base_16b(T.access_ptr(v_stage, "r"))
+        if cta_rank == 0 and T.shuffle_elect(32):
+            q_base_16b = T.tcgen05_smem_base_16b(T.access_ptr(q_stage, "r"))
+            k_base_16b = T.tcgen05_smem_base_16b(T.access_ptr(k_stage, "r"))
+            v_base_16b = T.tcgen05_smem_base_16b(T.access_ptr(v_stage, "r"))
 
-                for qs in T.unroll(q_stages):
-                    T.tcgen05_wait_barrier(
-                        T.mbarrier_at(mbar_q, qs),
-                        tile_phase,
-                    )
-                T.tcgen05_after_thread_sync()
-
-                kv0_stage = tile_k_base % kv_stages
-                kv0_phase = (tile_k_base // kv_stages) & 1
+            for qs in T.unroll(q_stages):
                 T.tcgen05_wait_barrier(
-                    T.mbarrier_at(mbar_k, kv0_stage),
-                    kv0_phase,
+                    T.mbarrier_at(mbar_q, qs),
+                    tile_phase,
                 )
-                T.tcgen05_after_thread_sync()
-                for qs in T.unroll(q_stages):
-                    uma_qk_mma_2cta_dsl(
-                        q_base_16b,
-                        k_base_16b,
-                        qs * q_stage_elems * 2,
-                        kv0_stage * kv_stage_elems * 2,
-                        s0_tmem_addr + qs * 128,
-                        T.mbarrier_at(mbar_s, qs),
+            T.tcgen05_after_thread_sync()
+
+            kv0_stage = tile_k_base % kv_stages
+            kv0_phase = (tile_k_base // kv_stages) & 1
+            T.tcgen05_wait_barrier(
+                T.mbarrier_at(mbar_k, kv0_stage),
+                kv0_phase,
+            )
+            T.tcgen05_after_thread_sync()
+            for qs in T.unroll(q_stages):
+                uma_qk_mma_2cta_dsl(
+                    q_base_16b,
+                    k_base_16b,
+                    qs * q_stage_elems * 2,
+                    kv0_stage * kv_stage_elems * 2,
+                    s0_tmem_addr + qs * 128,
+                    T.mbarrier_at(mbar_s, qs),
+                )
+            T.tcgen05_commit_2cta(T.mbarrier_at(mbar_k_rel, kv0_stage))
+
+            if loop_extent > 0:
+                if tile_k_base > 0:
+                    T.tcgen05_wait_barrier(
+                        mbar_o_tmem_rel,
+                        tile_phase ^ 1,
                     )
-                T.tcgen05_commit_2cta(T.mbarrier_at(mbar_k_rel, kv0_stage))
-
-                if loop_extent > 0:
-                    if tile_k_base > 0:
-                        T.tcgen05_wait_barrier(
-                            mbar_o_tmem_rel,
-                            tile_phase ^ 1,
-                        )
-                        T.tcgen05_after_thread_sync()
-                    tkb0 = tile_k_base
-                    for qs in T.unroll(q_stages):
-                        uma_issue_pv_qs_dsl(
+                    T.tcgen05_after_thread_sync()
+                tkb0 = tile_k_base
+                for qs in T.unroll(q_stages):
+                    uma_issue_pv_qs_dsl(
+                        qs,
+                        tkb0,
+                        v_base_16b,
+                        s0_tmem_addr,
+                        mbar_p,
+                        mbar_p2,
+                        mbar_v,
+                        mbar_pv,
+                        mbar_corr,
+                        mbar_v_rel,
+                        False,
+                        T.uint32(0),
+                    )
+                    if loop_extent > 1:
+                        uma_issue_next_qk_qs_dsl(
                             qs,
-                            tkb0,
-                            v_base_16b,
+                            tkb0 + 1,
+                            q_base_16b,
+                            k_base_16b,
                             s0_tmem_addr,
-                            mbar_p,
-                            mbar_p2,
-                            mbar_v,
-                            mbar_pv,
-                            mbar_corr,
-                            mbar_v_rel,
-                            False,
-                            T.uint32(0),
+                            mbar_k,
+                            mbar_s,
+                            mbar_k_rel,
                         )
-                        if loop_extent > 1:
-                            uma_issue_next_qk_qs_dsl(
-                                qs,
-                                tkb0 + 1,
-                                q_base_16b,
-                                k_base_16b,
-                                s0_tmem_addr,
-                                mbar_k,
-                                mbar_s,
-                                mbar_k_rel,
-                            )
 
-                for kb in T.unroll(
-                    1,
-                    loop_extent,
-                    explicit=False,
-                    unroll_factor=1,
-                ):
-                    tkb = tile_k_base + kb
-                    for qs in T.unroll(q_stages):
-                        uma_issue_pv_qs_dsl(
+            for kb in T.unroll(
+                1,
+                loop_extent,
+                explicit=False,
+                unroll_factor=1,
+            ):
+                tkb = tile_k_base + kb
+                for qs in T.unroll(q_stages):
+                    uma_issue_pv_qs_dsl(
+                        qs,
+                        tkb,
+                        v_base_16b,
+                        s0_tmem_addr,
+                        mbar_p,
+                        mbar_p2,
+                        mbar_v,
+                        mbar_pv,
+                        mbar_corr,
+                        mbar_v_rel,
+                        True,
+                        T.uint32(1),
+                    )
+                    if kb + 1 < loop_extent:
+                        uma_issue_next_qk_qs_dsl(
                             qs,
-                            tkb,
-                            v_base_16b,
+                            tkb + 1,
+                            q_base_16b,
+                            k_base_16b,
                             s0_tmem_addr,
-                            mbar_p,
-                            mbar_p2,
-                            mbar_v,
-                            mbar_pv,
-                            mbar_corr,
-                            mbar_v_rel,
-                            True,
-                            T.uint32(1),
+                            mbar_k,
+                            mbar_s,
+                            mbar_k_rel,
                         )
-                        if kb + 1 < loop_extent:
-                            uma_issue_next_qk_qs_dsl(
-                                qs,
-                                tkb + 1,
-                                q_base_16b,
-                                k_base_16b,
-                                s0_tmem_addr,
-                                mbar_k,
-                                mbar_s,
-                                mbar_k_rel,
-                            )
 
-                T.tcgen05_commit_2cta(mbar_q_rel)
+            T.tcgen05_commit_2cta(mbar_q_rel)
 
     @T.prim_func
     def main(
@@ -803,7 +802,7 @@ def attention_kernel_2sm_d128(
             threads=threads,
             cluster_dims=2,
             prelude=ATTENTION_2SM_EXTERN_SOURCE,
-        ) as block_id:
+        ):
             # Use one block per SM while relying on runtime setmaxnreg.inc/dec
             # for role-specific register donation.
 
@@ -929,24 +928,23 @@ def attention_kernel_2sm_d128(
                             for qs in T.unroll(q_stages):
                                 T.tcgen05_bar_sync(warp_in_corr + qs * 4, 64)
                                 rs = rs_shared[tkb & 1, qs, corr_tid]
-                                if kb > 0:
-                                    if T.ballot(rs < 1.0) != 0:
-                                        prev = tkb - 1
-                                        pv_stage = prev % kv_stages
-                                        pv_phase = (prev // kv_stages) & 1
-                                        T.tcgen05_wait_barrier(
-                                            T.mbarrier_at(mb_pv, pv_stage),
-                                            pv_phase,
-                                        )
-                                        T.tcgen05_after_thread_sync()
-                                        T.call_extern(
-                                            "void",
-                                            f"tl::tcgen05_tmem_rescale_row_x16_addr<{dim}>",
-                                            O0_tmem[0, 0],
-                                            qs * 128,
-                                            tmem_row_offset,
-                                            rs,
-                                        )
+                                if kb > 0 and T.ballot(rs < 1.0) != 0:
+                                    prev = tkb - 1
+                                    pv_stage = prev % kv_stages
+                                    pv_phase = (prev // kv_stages) & 1
+                                    T.tcgen05_wait_barrier(
+                                        T.mbarrier_at(mb_pv, pv_stage),
+                                        pv_phase,
+                                    )
+                                    T.tcgen05_after_thread_sync()
+                                    T.call_extern(
+                                        "void",
+                                        f"tl::tcgen05_tmem_rescale_row_x16_addr<{dim}>",
+                                        O0_tmem[0, 0],
+                                        qs * 128,
+                                        tmem_row_offset,
+                                        rs,
+                                    )
                                 T.tcgen05_mbarrier_arrive_cluster_all_ref(
                                     T.mbarrier_at(mb_corr, qs),
                                 )
@@ -1327,13 +1325,13 @@ def attention_kernel_2sm_d256(
     dtype = T.bfloat16
     accum_dtype = T.float32
 
-    q_stage_elems = block_m_cta * dim
+    block_m_cta * dim
     kv_stage_elems = b_per_cta * dim
     kv_stage_bytes = kv_stage_elems * 2
     box_bytes = b_per_cta * tile_cols * 2
     v_strip_bytes = 2 * box_bytes
     u64 = T.uint32(64)
-    u128 = T.uint32(128)
+    T.uint32(128)
     u256 = T.uint32(256)
     u384 = T.uint32(384)
 
@@ -1767,91 +1765,90 @@ def attention_kernel_2sm_d256(
         tile_k_base,
         tile_phase,
     ):
-        if cta_rank == 0:
-            if T.shuffle_elect(32):
-                q_base_16b = T.tcgen05_smem_base_16b(T.access_ptr(q_stage, "r"))
-                kv_base_16b = T.tcgen05_smem_base_16b(T.access_ptr(kv_stage, "r"))
+        if cta_rank == 0 and T.shuffle_elect(32):
+            q_base_16b = T.tcgen05_smem_base_16b(T.access_ptr(q_stage, "r"))
+            kv_base_16b = T.tcgen05_smem_base_16b(T.access_ptr(kv_stage, "r"))
 
-                T.tcgen05_wait_barrier(T.mbarrier_at(mbar_q, 0), tile_phase)
-                T.tcgen05_after_thread_sync()
+            T.tcgen05_wait_barrier(T.mbarrier_at(mbar_q, 0), tile_phase)
+            T.tcgen05_after_thread_sync()
 
-                if tile_k_base > 0:
-                    T.tcgen05_wait_barrier(
-                        T.mbarrier_at(mbar_o_tmem_rel, 0),
-                        tile_phase ^ 1,
-                    )
-                    T.tcgen05_after_thread_sync()
-
-                kv0_global = 2 * tile_k_base
-                kv0_stage = kv0_global % kv_stages
-                kv0_phase = (kv0_global // kv_stages) & 1
-                T.tcgen05_wait_barrier(T.mbarrier_at(mbar_kv, kv0_stage), kv0_phase)
-                T.tcgen05_after_thread_sync()
-                uma_qk_mma_2cta_dsl(
-                    q_base_16b,
-                    kv_base_16b,
-                    kv0_stage,
-                    tmem_addr(base_tmem_addr, T.uint32((tile_k_base & 1) * 128)),
-                    T.mbarrier_at(mbar_s, tile_k_base & 1),
+            if tile_k_base > 0:
+                T.tcgen05_wait_barrier(
+                    T.mbarrier_at(mbar_o_tmem_rel, 0),
+                    tile_phase ^ 1,
                 )
-                T.tcgen05_commit_2cta(T.mbarrier_at(mbar_kv_rel, kv0_stage))
+                T.tcgen05_after_thread_sync()
 
-                if loop_extent > 0:
-                    tkb0 = tile_k_base
-                    if loop_extent > 1:
-                        d256_issue_qk_dsl(
-                            tkb0 + 1,
-                            q_base_16b,
-                            kv_base_16b,
-                            base_tmem_addr,
-                            mbar_kv,
-                            mbar_s,
-                            mbar_kv_rel,
-                        )
-                    d256_issue_pv_dsl(
-                        tkb0,
+            kv0_global = 2 * tile_k_base
+            kv0_stage = kv0_global % kv_stages
+            kv0_phase = (kv0_global // kv_stages) & 1
+            T.tcgen05_wait_barrier(T.mbarrier_at(mbar_kv, kv0_stage), kv0_phase)
+            T.tcgen05_after_thread_sync()
+            uma_qk_mma_2cta_dsl(
+                q_base_16b,
+                kv_base_16b,
+                kv0_stage,
+                tmem_addr(base_tmem_addr, T.uint32((tile_k_base & 1) * 128)),
+                T.mbarrier_at(mbar_s, tile_k_base & 1),
+            )
+            T.tcgen05_commit_2cta(T.mbarrier_at(mbar_kv_rel, kv0_stage))
+
+            if loop_extent > 0:
+                tkb0 = tile_k_base
+                if loop_extent > 1:
+                    d256_issue_qk_dsl(
+                        tkb0 + 1,
+                        q_base_16b,
                         kv_base_16b,
                         base_tmem_addr,
-                        mbar_p,
-                        mbar_p2,
                         mbar_kv,
-                        mbar_pv,
-                        mbar_corr,
+                        mbar_s,
                         mbar_kv_rel,
-                        False,
-                        T.uint32(0),
                     )
+                d256_issue_pv_dsl(
+                    tkb0,
+                    kv_base_16b,
+                    base_tmem_addr,
+                    mbar_p,
+                    mbar_p2,
+                    mbar_kv,
+                    mbar_pv,
+                    mbar_corr,
+                    mbar_kv_rel,
+                    False,
+                    T.uint32(0),
+                )
 
-                for kb in T.unroll(
-                    1,
-                    loop_extent,
-                    explicit=False,
-                    unroll_factor=1,
-                ):
-                    tkb = tile_k_base + kb
-                    if kb + 1 < loop_extent:
-                        d256_issue_qk_dsl(
-                            tkb + 1,
-                            q_base_16b,
-                            kv_base_16b,
-                            base_tmem_addr,
-                            mbar_kv,
-                            mbar_s,
-                            mbar_kv_rel,
-                        )
-                    d256_issue_pv_dsl(
-                        tkb,
+            for kb in T.unroll(
+                1,
+                loop_extent,
+                explicit=False,
+                unroll_factor=1,
+            ):
+                tkb = tile_k_base + kb
+                if kb + 1 < loop_extent:
+                    d256_issue_qk_dsl(
+                        tkb + 1,
+                        q_base_16b,
                         kv_base_16b,
                         base_tmem_addr,
-                        mbar_p,
-                        mbar_p2,
                         mbar_kv,
-                        mbar_pv,
-                        mbar_corr,
+                        mbar_s,
                         mbar_kv_rel,
-                        True,
-                        T.uint32(1),
                     )
+                d256_issue_pv_dsl(
+                    tkb,
+                    kv_base_16b,
+                    base_tmem_addr,
+                    mbar_p,
+                    mbar_p2,
+                    mbar_kv,
+                    mbar_pv,
+                    mbar_corr,
+                    mbar_kv_rel,
+                    True,
+                    T.uint32(1),
+                )
 
     @T.prim_func
     def main(
@@ -1865,7 +1862,7 @@ def attention_kernel_2sm_d256(
             threads=threads,
             cluster_dims=2,
             prelude=ATTENTION_2SM_D256_EXTERN_SOURCE,
-        ) as block_id:
+        ):
             # Use one block per SM while relying on runtime setmaxnreg.inc/dec
             # for role-specific register donation.
 
@@ -1961,25 +1958,24 @@ def attention_kernel_2sm_d256(
                             tkb = tile_k_base + kb
                             T.tcgen05_bar_sync(warp_in_corr, 64)
                             rs = rs_shared[tkb & 1, corr_tid]
-                            if kb > 0:
-                                if T.ballot(rs < 1.0) != 0:
-                                    prev = tkb - 1
-                                    prev_v_idx = 2 * prev + 1
-                                    pv_stage = prev_v_idx % kv_stages
-                                    pv_phase = (prev // kv_stages) & 1
-                                    T.tcgen05_wait_barrier(
-                                        T.mbarrier_at(mb_pv, pv_stage),
-                                        pv_phase,
-                                    )
-                                    T.tcgen05_after_thread_sync()
-                                    T.call_extern(
-                                        "void",
-                                        f"tl::tcgen05_tmem_rescale_row_x16_addr<{dim}>",
-                                        O0_tmem[0, 0],
-                                        0,
-                                        tmem_row_offset,
-                                        rs,
-                                    )
+                            if kb > 0 and T.ballot(rs < 1.0) != 0:
+                                prev = tkb - 1
+                                prev_v_idx = 2 * prev + 1
+                                pv_stage = prev_v_idx % kv_stages
+                                pv_phase = (prev // kv_stages) & 1
+                                T.tcgen05_wait_barrier(
+                                    T.mbarrier_at(mb_pv, pv_stage),
+                                    pv_phase,
+                                )
+                                T.tcgen05_after_thread_sync()
+                                T.call_extern(
+                                    "void",
+                                    f"tl::tcgen05_tmem_rescale_row_x16_addr<{dim}>",
+                                    O0_tmem[0, 0],
+                                    0,
+                                    tmem_row_offset,
+                                    rs,
+                                )
                             T.tcgen05_mbarrier_arrive_cluster_all_ref(
                                 T.mbarrier_at(mb_corr, 0),
                             )

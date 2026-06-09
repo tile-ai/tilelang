@@ -1102,7 +1102,7 @@ def flashattn_fa4(
             mbar_s_ready = T.alloc_barrier([1] * num_stages)
             mbar_scale_ready = T.alloc_barrier([128] * num_stages)
             mbar_p_ready = T.alloc_barrier([128] * num_stages)
-            mbar_o_rescaled = T.alloc_barrier([128] * num_stages)
+            T.alloc_barrier([128] * num_stages)
             mbar_gemm2 = T.alloc_barrier([1] * num_stages)
 
             S_reg = T.alloc_fragment([block_M, block_N], accum_dtype)
@@ -1137,7 +1137,7 @@ def flashattn_fa4(
             for k in T.serial(loop_range):
                 stage_id = k % num_stages
                 parity = (k // num_stages) & 1
-                parity_inv = parity ^ 1
+                parity ^ 1
 
                 # === CORRECTION + MMA + LOAD (tid 128-255) ===
                 if tid >= 128:
