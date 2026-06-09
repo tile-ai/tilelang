@@ -3,7 +3,7 @@ import pytest
 import tilelang
 import tilelang.testing
 import tilelang.language as T
-from tilelang.utils import determine_fp8_type
+from tilelang.language.fp8 import determine_fp8_type
 
 
 def debug_print_buffer(M=16, N=16, dtype=T.float16):

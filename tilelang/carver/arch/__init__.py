@@ -8,7 +8,8 @@ from .rdna import *
 from .metal import *
 from tvm.target import Target
 import torch
-from tilelang.utils.target import determine_target, target_get_rdna_generation, target_is_rdna
+from tilelang.backend.target import determine_target
+from tilelang.rocm.target import target_get_rdna_generation, target_is_rdna
 
 
 def get_arch(target: str | Target = "cuda") -> TileDevice:

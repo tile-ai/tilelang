@@ -23,7 +23,7 @@ def _lower_cutedsl(program):
     _require_cutedsl()
 
     from tilelang.jit.adapter.cutedsl.wrapper import TLCuTeDSLSourceWrapper
-    from tilelang.utils.target import determine_target
+    from tilelang.backend.target import determine_target
 
     target = determine_target(CUTEDSL_SM90_TARGET)
     with target:

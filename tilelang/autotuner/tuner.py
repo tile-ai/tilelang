@@ -36,7 +36,7 @@ from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
 from tilelang.autotuner.grouped_compile import compile_grouped_unit_tvm_ffi
 from tilelang.utils.language import get_prim_func_name
 from tilelang.autotuner.capture import get_autotune_inputs
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 from tilelang import __version__
 
 
@@ -311,7 +311,7 @@ class AutoTuner:
 
         # Normalize target to a concrete TVM Target and resolve execution backend
         t = Target(determine_target(target))
-        from tilelang.jit.execution_backend import resolve_execution_backend
+        from tilelang.backend.execution_backend import resolve_execution_backend
 
         resolved_backend = resolve_execution_backend(execution_backend, t)
 

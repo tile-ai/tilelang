@@ -11,7 +11,7 @@ from tilelang import tvm as tvm
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter.wrapper import TLPyWrapper
 from tilelang.utils.language import retrieve_func_from_module
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 from tilelang.jit.adapter.nvrtc import is_nvrtc_available, check_nvrtc_available
 

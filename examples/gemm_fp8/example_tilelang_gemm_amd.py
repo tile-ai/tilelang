@@ -2,7 +2,7 @@ import torch
 import tilelang
 import tilelang.language as T
 from tilelang.utils.tensor import torch_assert_close
-from tilelang.utils import determine_fp8_type, determine_torch_fp8_type
+from tilelang.language.fp8 import determine_fp8_type, determine_torch_fp8_type
 import itertools
 
 

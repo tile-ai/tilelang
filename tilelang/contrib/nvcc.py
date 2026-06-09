@@ -17,6 +17,7 @@ from tvm.target import Target
 
 from tvm.base import py_str
 from tvm.contrib import utils
+from .cc import get_cplus_compiler
 
 
 def get_nvcc_subprocess_env() -> dict[str, str] | None:
@@ -94,6 +95,7 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
 
     file_target = path_target if path_target else temp_target
     cmd = [get_nvcc_compiler()]
+    cmd += [f"-ccbin={get_cplus_compiler()}"]
     cmd += [f"--{target_format}", "-O3"]
     # Always include line info for better profiling and mapping
     cmd += ["-lineinfo"]
@@ -123,6 +125,7 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
     cmd += [temp_code]
 
     compiler_env = get_nvcc_subprocess_env()
+
     if compiler_env is None:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     else:
@@ -588,6 +591,19 @@ def is_hopper(target):
 
 
 def have_pdl(target):
+    if target.kind.name != "cuda":
+        return False
+    compute_version = get_target_compute_version(target)
+    major, minor = parse_compute_version(compute_version)
+    return major >= 9
+
+
+def have_mbarrier(target):
+    """Whether hardware mbarrier support (the cutlass Barrier type,
+    tl_shuffle_elect, fence_barrier_init) is available on the target.
+
+    Available on Hopper (sm_90) and later architectures.
+    """
     if target.kind.name != "cuda":
         return False
     compute_version = get_target_compute_version(target)

@@ -17,7 +17,7 @@ from tilelang import tvm
 from tvm import runtime, tirx
 from tvm.target import Target
 from tvm.relax import TensorType
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.engine.param import KernelParam

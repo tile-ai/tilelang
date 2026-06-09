@@ -200,7 +200,7 @@ def get_mxfp_intrin_group(
     _is_gfx950 = False
     if target is not None:
         try:
-            from tilelang.utils.target import target_is_gfx950
+            from tilelang.rocm.target import target_is_gfx950
 
             _is_gfx950 = target_is_gfx950(target)
         except (ImportError, ModuleNotFoundError, AttributeError):

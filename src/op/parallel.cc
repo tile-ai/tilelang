@@ -422,6 +422,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
 
   // Step 1: try to infer loop's partition from a source fragment
   Buffer source_buffer, read_source_buffer;
+  bool source_buffer_is_write = false;
   Buffer replicated_write_buffer; // Backup: fully replicated write buffer
 
   for (const auto &buffer : access_order_) {
@@ -437,6 +438,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
 
       if (access.is_write) {
         source_buffer = buffer;
+        source_buffer_is_write = true;
       } else {
         // Keep the buffer with largest number of indices
         // (which means the inference based on that buffer is more accurate)
@@ -455,6 +457,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
         if (frag.has_value() && is_one(frag.value()->ReplicateExtent()) &&
             !source_buffer.defined()) {
           source_buffer = buffer;
+          source_buffer_is_write = false;
         }
       }
     }
@@ -476,7 +479,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
       predicate_ = annotated_predicate_.value();
     }
   } else if (!loop_layout_.defined() && source_buffer.defined() &&
-             allow_layout_propgate) {
+             (allow_layout_propgate || source_buffer_is_write)) {
     loop_layout_ = ComputeLoopLayoutFromBuffer(source_buffer, T);
   } else if (!loop_layout_.defined() && level == InferLevel::kFree) {
     // For free layout inference
