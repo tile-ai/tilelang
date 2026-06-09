@@ -3,55 +3,8 @@
 #include "common.h"
 #include <cutlass/arch/barrier.h>
 
-// Wrapper that enforces release/acquire memory ordering on arrive/wait.
-// CUTLASS ClusterTransactionBarrier uses plain shared::cta without ordering
-// qualifiers, which is insufficient for cross-WG SMEM handoffs on SM100.
-struct Barrier : public cutlass::arch::ClusterTransactionBarrier {
-  using Base = cutlass::arch::ClusterTransactionBarrier;
-
-  // Local arrive with release.cta ordering.
-  CUTLASS_DEVICE
-  void arrive() const {
-    uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&this->barrier_);
-    asm volatile(
-        "mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];"
-        :
-        : "r"(smem_addr));
-  }
-
-  // Parity wait with acquire.cta ordering.
-  CUTLASS_DEVICE
-  void wait(uint32_t phase) const {
-    uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&this->barrier_);
-    asm volatile(
-        "{\n\t"
-        ".reg .pred P1; \n\t"
-        "LAB_WAIT%=: \n\t"
-        "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P1, [%0], %1; \n\t"
-        "@P1 bra.uni DONE%=; \n\t"
-        "bra.uni LAB_WAIT%=; \n\t"
-        "DONE%=: \n\t"
-        "}"
-        :
-        : "r"(smem_addr), "r"(phase));
-  }
-
-  // arrive_and_expect_tx with release.cta (for TMA barriers)
-  CUTLASS_DEVICE
-  void arrive_and_expect_tx(uint32_t transaction_bytes) const {
-    uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&this->barrier_);
-    asm volatile(
-        "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%0], %1;"
-        :
-        : "r"(smem_addr), "r"(transaction_bytes));
-  }
-
-  // Keep cluster-wide arrive (unchanged — already uses shared::cluster)
-  CUTLASS_DEVICE
-  void arrive(uint32_t cta_id, uint32_t pred = true) const {
-    Base::arrive(&this->barrier_, cta_id, pred);
-  }
-};
+// Reuse cutlass advanced barrier abstraction
+using Barrier = cutlass::arch::ClusterTransactionBarrier;
 
 namespace tl {
 
@@ -69,7 +22,7 @@ TL_DEVICE uint32_t mbarrier_try_wait(uint64_t &smem_barrier, int phase_bit) {
 
   asm volatile("{\n\t"
                ".reg .pred P1; \n\t"
-               "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P1, [%1], %2; \n\t"
+               "mbarrier.try_wait.parity.shared.b64 P1, [%1], %2; \n\t"
                "selp.b32 %0, 1, 0, P1; \n\t"
                "}"
                : "=r"(waitComplete)
@@ -86,7 +39,7 @@ TL_DEVICE void mbarrier_wait(uint64_t &smem_barrier, int phase_bit) {
     asm volatile("{\n\t"
                  ".reg .pred       P1; \n\t"
                  "LAB_WAIT: \n\t"
-                 "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P1, [%0], %1, %2; \n\t"
+                 "mbarrier.try_wait.parity.shared.b64 P1, [%0], %1, %2; \n\t"
                  "@P1 bra DONE; \n\t"
                  "bra     LAB_WAIT; \n\t"
                  "DONE: \n\t"
@@ -114,9 +67,7 @@ TL_DEVICE void mbarrier_test_wait(uint64_t &smem_barrier, int phase_bit) {
 
 TL_DEVICE void mbarrier_arrive(uint64_t &smem_barrier) {
   uint32_t smem_int_ptr = smem_ptr_to_uint(&smem_barrier);
-  asm volatile("mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];"
-               :
-               : "r"(smem_int_ptr));
+  asm volatile("mbarrier.arrive.shared.b64 _, [%0];" : : "r"(smem_int_ptr));
 }
 
 TL_DEVICE void mbarrier_arrive(uint64_t &smem_barrier, int cta_id,
@@ -144,7 +95,7 @@ TL_DEVICE void mbarrier_expect_tx(uint64_t &smem_barrier,
 TL_DEVICE void mbarrier_arrive_expect_tx(uint64_t &smem_barrier,
                                          uint32_t transaction_bytes) {
   uint32_t smem_int_ptr = smem_ptr_to_uint(&smem_barrier);
-  asm volatile("mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%1], %0;"
+  asm volatile("mbarrier.arrive.expect_tx.shared.b64 _, [%1], %0;"
                :
                : "r"(transaction_bytes), "r"(smem_int_ptr));
 }

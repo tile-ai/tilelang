@@ -1181,9 +1181,6 @@ TVM_DLL const Op &tcgen05_exp2_poly_2();
  */
 TVM_DLL const Op &tcgen05_st_32x32b_x4();
 
-/*! \brief 1SM shared/shared 128x128 tcgen05 MMA sequence plus mbarrier commit. */
-TVM_DLL const Op &tcgen05_mma_1sm_ss_128x128_commit();
-
 /*!
  * \brief Return one of three pointer expressions selected by stage.
  * Args: ptr0, ptr1, ptr2, stage(int)

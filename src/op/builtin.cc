@@ -378,11 +378,6 @@ TIR_DEFINE_TL_BUILTIN(tcgen05_st_32x32b_x4)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(tcgen05_mma_1sm_ss_128x128_commit)
-    .set_num_inputs(4)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
 TIR_DEFINE_TL_BUILTIN(select_stage_ptr)
     .set_num_inputs(4)
     .set_attr<TCallEffectKind>("TCallEffectKind",

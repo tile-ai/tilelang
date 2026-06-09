@@ -4042,21 +4042,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << this->PrintExpr(op->args[3]) << ", "
                  << this->PrintExpr(op->args[4]) << ", "
                  << this->PrintExpr(op->args[5]) << ");\n";
-  } else if (op->op.same_as(tl::tcgen05_mma_1sm_ss_128x128_commit())) {
-    ICHECK_EQ(op->args.size(), 4U)
-        << "tcgen05_mma_1sm_ss_128x128_commit expects 4 args: A_smem_ptr, B_smem_ptr, C_tmem, mbar";
-    this->PrintIndent();
-    bool lane0_only = GetBoolAnnotation(op, "lane0_only", false);
-    auto a_smem = this->PrintExpr(op->args[0]);
-    auto b_smem = this->PrintExpr(op->args[1]);
-    auto c_tmem = this->PrintExpr(op->args[2]);
-    auto mbar = this->PrintExpr(op->args[3]);
-    need_tcgen05_common_h_ = true;
-    this->stream << (lane0_only ? "tl::tcgen05_mma_1sm_ss_128x128_commit_lane0"
-                                : "tl::tcgen05_mma_1sm_ss_128x128_commit")
-                 << "((void const*)("
-                 << a_smem << "), (void const*)(" << b_smem << "), "
-                 << c_tmem << ", (void const*)(&" << mbar << "));\n";
   } else if (op->op.same_as(tl::tcgen05_mbarrier_arrive_expect_tx_ref())) {
     ICHECK_EQ(op->args.size(), 2U)
         << "tcgen05_mbarrier_arrive_expect_tx_ref expects 2 args";

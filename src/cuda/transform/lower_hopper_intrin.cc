@@ -157,11 +157,17 @@ public:
         if (prefetch_calls_.empty()) {
           return AttrStmt(op->node, op->attr_key, op->value, body);
         } else {
-          auto stmts = prefetch_calls_;
           Array<Stmt> stmt_seq;
-          Stmt prefetch_seq = stmts.size() > 1 ? SeqStmt(stmts) : stmts[0];
-          PrimExpr thread0 = iv->var == IntImm(iv->var.dtype(), 0);
-          stmt_seq.push_back(IfThenElse(thread0, prefetch_seq));
+          PrimExpr condition;
+          if (!disable_shuffle_elect_) {
+            condition = Call(DataType::Bool(), tl_shuffle_elect(), {0});
+          } else {
+            condition = EQ(iv->var, 0);
+          }
+          auto stmts = prefetch_calls_;
+          auto stmt_ = IfThenElse(condition,
+                                  stmts.size() > 1 ? SeqStmt(stmts) : stmts[0]);
+          stmt_seq.push_back(stmt_);
           stmt_seq.push_back(body);
           Stmt result = SeqStmt(stmt_seq);
           prefetch_calls_.clear();
