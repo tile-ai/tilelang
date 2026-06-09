@@ -2225,7 +2225,7 @@ def main():
         for _ in range(3):
             _ = fn(Q, K, V)
         torch.cuda.synchronize()
-        lat = do_bench(lambda: fn(Q, K, V), warmup=25, rep=100)
+        lat = do_bench(lambda: fn(Q, K, V), warmup=3, rep=5)
         flops = 2.0 * 2.0 * args.batch * args.heads * args.seq * args.seq * args.dim
         print(f"latency={lat:.3f} ms  perf={flops / lat * 1e-9:.2f} TFLOPS")
 
