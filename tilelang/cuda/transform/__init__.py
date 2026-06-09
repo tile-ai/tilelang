@@ -91,6 +91,11 @@ def LowerLDGSTG():
     return _ffi_api.LowerLDGSTG()  # type: ignore
 
 
+def LowerPTXAsyncCopy():
+    """Lower eligible global->shared copies into PTX ``cp.async`` on CUDA."""
+    return _ffi_api.LowerPTXAsyncCopy()  # type: ignore
+
+
 def MarkCudaSyncCalls(have_pdl: bool = False):
     """MarkCudaSyncCalls"""
     return _ffi_api.MarkCudaSyncCalls(have_pdl)  # type: ignore
@@ -154,6 +159,7 @@ __all__ = [
     "LowerHopperIntrin",
     "LowerLDGSTG",
     "LowerL2Persistent",
+    "LowerPTXAsyncCopy",
     "LowerSharedBarrier",
     "LowerSharedTmem",
     "MarkCudaSyncCalls",

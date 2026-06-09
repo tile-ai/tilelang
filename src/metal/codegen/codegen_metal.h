@@ -18,11 +18,11 @@
  */
 
 /*!
- * \file codegen_metal.h
+ * \file metal/codegen/codegen_metal.h
  * \brief Generate Metal device code.
  */
-#ifndef TVM_TARGET_SOURCE_CODEGEN_METAL_H_
-#define TVM_TARGET_SOURCE_CODEGEN_METAL_H_
+#ifndef TILELANG_METAL_CODEGEN_CODEGEN_METAL_H_
+#define TILELANG_METAL_CODEGEN_CODEGEN_METAL_H_
 
 #include <tvm/target/codegen.h>
 
@@ -71,4 +71,4 @@ private:
 } // namespace codegen
 } // namespace tvm
 
-#endif // TVM_TARGET_SOURCE_CODEGEN_METAL_H_
+#endif // TILELANG_METAL_CODEGEN_CODEGEN_METAL_H_

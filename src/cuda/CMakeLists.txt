@@ -150,7 +150,9 @@ file(GLOB TILE_LANG_CUDA_SRCS
   src/cuda/transform/*.cc
 )
 list(REMOVE_ITEM TILE_LANG_CUDA_SRCS
-  "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/op/copy_analysis.cc")
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/op/copy_analysis.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/transform/ptx_async_copy_injector.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/transform/lower_ptx_async_copy.cc")
 list(APPEND TILE_LANG_SRCS ${TILE_LANG_CUDA_SRCS})
 
 list(APPEND TILE_LANG_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})

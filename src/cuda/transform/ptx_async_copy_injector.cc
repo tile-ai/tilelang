@@ -1,11 +1,10 @@
 /*!
- * \brief Lower eligible global->shared copies into PTX cp.async
- * \file lower_ptx_async_copy.cc
+ * \brief Inject eligible global->shared copies into PTX cp.async intrinsics.
+ * \file cuda/transform/ptx_async_copy_injector.cc
  */
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
 #include <tvm/s_tir/stmt.h>
-#include <tvm/target/target.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
@@ -19,12 +18,10 @@
 #include <optional>
 #include <vector>
 
-#include "../op/builtin.h"
-#include "../op/utils.h"
-#include "backend/common/target_utils.h"
-#include "ptx_async_copy_injector.h"
+#include "cuda/transform/ptx_async_copy_injector.h"
+#include "op/builtin.h"
+#include "op/utils.h"
 #include "tir/ir/buffer_common.h"
-#include <tvm/tirx/stmt.h>
 
 namespace tvm {
 namespace tl {
@@ -700,8 +697,6 @@ private:
   bool uncommitted_sync_copies_{false};
 };
 
-using namespace tirx::transform;
-
 PTXAsyncCopyInjectResult
 InjectPTXAsyncCopy(const Stmt &body, bool enable_auto_async_copy,
                    bool async_without_async_commit_wait) {
@@ -709,40 +704,6 @@ InjectPTXAsyncCopy(const Stmt &body, bool enable_auto_async_copy,
                                 async_without_async_commit_wait);
   Stmt injected = injector(body);
   return {injector.Finalize(injected), injector.InjectedPTXAsyncCopy()};
-}
-
-tvm::transform::Pass LowerPTXAsyncCopy() {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    auto target_opt = f->GetAttr<Target>(tvm::attr::kTarget);
-    if (!target_opt.defined()) {
-      return f;
-    }
-    Target target = target_opt.value();
-    if (!TargetIsCuda(target)) {
-      return f;
-    }
-
-    if (!TargetHasAsyncCopy(target)) {
-      // Graceful fallback on older architectures.
-      return f;
-    }
-
-    bool enable_auto_async_copy =
-        ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
-
-    auto *n = f.CopyOnWrite();
-    auto inject_result =
-        InjectPTXAsyncCopy(n->body, enable_auto_async_copy,
-                           /*async_without_async_commit_wait=*/false);
-    n->body = inject_result.stmt;
-    return f;
-  };
-  return CreatePrimFuncPass(pass_func, 0, "tl.LowerPTXAsyncCopy", {});
-}
-
-TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.LowerPTXAsyncCopy", LowerPTXAsyncCopy);
 }
 
 } // namespace tl

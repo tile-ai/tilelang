@@ -373,12 +373,19 @@ file(GLOB TILE_LANG_SRCS
   src/metal/op/*.cc
   src/webgpu/op/*.cc
   src/backend/common/target_utils.cc
+  src/cpu/target_utils.cc
+  src/cuda/target_utils.cc
+  src/metal/target_utils.cc
+  src/rocm/target_utils.cc
   src/backend/common/codegen/codegen_utils.cc
   src/backend/common/codegen/codegen_c_host.cc
-  src/backend/common/codegen/codegen_c.cc
-  src/backend/common/codegen/rt_mod_c.cc
+  src/cpu/codegen/codegen_c.cc
+  src/cpu/codegen/rt_mod_c.cc
   # intrin_rule doesn't have system dependency; always compiled regardless of backend
   src/cuda/codegen/intrin_rule_cuda.cc
+  # CUDA-owned but CPU-safe PTX async-copy transform helpers/registration.
+  src/cuda/transform/ptx_async_copy_injector.cc
+  src/cuda/transform/lower_ptx_async_copy.cc
   src/rocm/codegen/intrin_rule_hip.cc
 )
 
@@ -391,7 +398,7 @@ list(APPEND TILE_LANG_SRCS
 # source on any platform.  Always compile it so that "target.build.tilelang_metal"
 # is available for cross-compilation on Linux/Windows.
 list(APPEND TILE_LANG_SRCS
-  src/backend/common/codegen/codegen_metal.cc
+  src/metal/codegen/codegen_metal.cc
 )
 # Track if the user explicitly selected a backend via cache options.
 set(TILELANG_BACKEND_USER_SELECTED OFF)

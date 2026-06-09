@@ -23,8 +23,9 @@
 #include "../op/gemm_sp.h"
 #include "../op/operator.h"
 #include "../op/utils.h"
-#include "backend/common/target_utils.h"
-#include "ptx_async_copy_injector.h"
+#include "cpu/target_utils.h"
+#include "cuda/target_utils.h"
+#include "cuda/transform/ptx_async_copy_injector.h"
 
 #include "arith/ir_mutator_with_analyzer.h"
 #include "common/mbarrier.h"
@@ -1480,7 +1481,7 @@ private:
     // Only parallel-loop lowering needs PTX cp.async injection. Thread-level
     // lowering does not require converting eligible global->shared copies to
     // `tir.ptx_cp_async`.
-    if (TargetIsCuda(target_) && TargetHasAsyncCopy(target_)) {
+    if (TargetCudaHasAsyncCopy(target_)) {
       tvm::transform::PassContext ctx = tvm::transform::PassContext::Current();
       bool enable_auto_async_copy =
           ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();

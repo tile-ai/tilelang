@@ -122,6 +122,7 @@ file(GLOB TILE_LANG_HIP_SRCS
   src/rocm/codegen/codegen_hip.cc
   src/rocm/codegen/rt_mod_hip.cc
   src/rocm/op/*.cc
+  src/rocm/transform/*.cc
 )
 list(APPEND TILE_LANG_SRCS ${TILE_LANG_HIP_SRCS})
 list(APPEND TILE_LANG_INCLUDES ${ROCM_INCLUDE_DIRS})

@@ -263,22 +263,10 @@ def VectorizeLoop(enable_vectorize: bool = True):
 
 
 def LowerPTXAsyncCopy():
-    """Lower eligible global->shared copies into PTX `cp.async` on CUDA.
+    """Deprecated alias for ``tilelang.cuda.transform.LowerPTXAsyncCopy``."""
+    from tilelang.cuda import transform as cuda_transform
 
-    When enabled (pass config `tl.enable_async_copy`, default True), this pass
-    may rewrite plain user-written global->shared `BufferStore` patterns (e.g.
-    SIMT copies in `T.Parallel`) into `tir.ptx_cp_async`, and insert
-    `tir.ptx_commit_group` + `tir.ptx_wait_group(0)` to preserve synchronous
-    semantics for normal stores. If explicit commit/wait intrinsics already
-    exist, the pass avoids duplicating them (and may insert a missing commit
-    immediately before an existing wait to cover injected `cp.async`).
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.LowerPTXAsyncCopy()  # type: ignore
+    return cuda_transform.LowerPTXAsyncCopy()
 
 
 def InjectPTXAsyncCopy():

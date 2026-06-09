@@ -1,6 +1,6 @@
 /*!
  * \file tl/backend/common/target_utils.h
- * \brief helper functions for target attributes.
+ * \brief Common entry points for target attribute helpers.
  *
  */
 
@@ -9,38 +9,16 @@
 
 #include <tvm/target/target.h>
 
+#include "cpu/target_utils.h"
+#include "cuda/target_utils.h"
+#include "metal/target_utils.h"
+#include "rocm/target_utils.h"
+
 namespace tvm {
 namespace tl {
 
-bool TargetIsCuda(Target target);
-bool TargetIsRocm(Target target);
-bool TargetIsMetal(Target target);
-bool TargetIsCPU(Target target);
-
-bool TargetIsVolta(Target target);
-bool TargetIsTuring(Target target);
-bool TargetIsAmpere(Target target);
-bool TargetIsHopper(Target target);
-bool TargetIsSm100(Target target);
-bool TargetIsSM120(Target target);
-bool TargetIsCDNA(Target target);
-bool TargetIsRDNA(Target target);
-bool TargetIsGfx950(Target target);
-
 bool TargetHasAsyncCopy(Target target);
-bool TargetHasLdmatrix(Target target);
-bool TargetHasStmatrix(Target target);
-bool TargetHasTmem(Target target);
-bool TargetHasBulkCopy(Target target);
-bool TargetIsCuTeDSL(Target target);
-bool TargetSupportVectorize256(Target target);
 int TargetGetWarpSize(Target target);
-bool TargetHasSMVersionGE(Target target, int version);
-
-bool IsCudaVectorizableFP8(DataType dtype);
-bool IsCudaVectorizableCast(DataType from_ty, DataType target_ty);
-
-int TargetGetRDNAGeneration(Target target);
 } // namespace tl
 } // namespace tvm
 

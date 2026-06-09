@@ -8,12 +8,12 @@
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 
-#include "backend/common/target_utils.h"
 #include "op/builtin.h"
 #include "op/utils.h"
+#include "rocm/target_utils.h"
+#include "rocm/transform/async_copy_injector.h"
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
-#include "transform/ptx_async_copy_injector.h"
 
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/transform.h>
@@ -133,13 +133,13 @@ private:
         /*should_vectorize=*/true, par_op->LoopLayoutRequiresPaddingGuard());
 
     auto inject_result =
-        InjectPTXAsyncCopy(lowered_loop, /*enable_auto_async_copy=*/true,
-                           /*async_without_async_commit_wait=*/
-                           no_implicit_commit_wait || GetIsAsyncCopy(op));
-    Stmt cp_async_loop = inject_result.stmt;
-    if (!inject_result.injected_ptx_async_copy) {
-      DLOG(WARNING) << "cp.async rewrite miss for copy src=" << op.src->name
-                    << " (scope=" << op.src.scope()
+        InjectROCmAsyncCopy(lowered_loop, /*enable_auto_async_copy=*/true,
+                            /*async_without_async_commit_wait=*/
+                            no_implicit_commit_wait || GetIsAsyncCopy(op));
+    Stmt async_copy_loop = inject_result.stmt;
+    if (!inject_result.injected_rocm_async_copy) {
+      DLOG(WARNING) << "ROCm async-copy rewrite miss for copy src="
+                    << op.src->name << " (scope=" << op.src.scope()
                     << ", dtype=" << op.src->dtype << "), dst=" << op.dst->name
                     << " (scope=" << op.dst.scope()
                     << ", dtype=" << op.dst->dtype
@@ -149,27 +149,29 @@ private:
       if (no_implicit_commit_wait) {
         DLOG(WARNING)
             << "Pipeline-managed async copy fallback to normal copy because "
-               "cp.async rewrite found no eligible global->shared store.";
+               "ROCm async-copy rewrite found no eligible global->shared "
+               "store.";
         return lowered_loop;
       }
       if (explicit_async_semantics) {
-        LOG(FATAL)
-            << "Explicit async copy semantics require cp.async lowering, "
-               "but no eligible global->shared store was rewritten.";
+        LOG(FATAL) << "Explicit async copy semantics require ROCm async-copy "
+                      "lowering, "
+                      "but no eligible global->shared store was rewritten.";
       }
-      DLOG(WARNING) << "Fallback to normal copy because cp.async rewrite found "
-                       "no eligible global->shared store.";
+      DLOG(WARNING)
+          << "Fallback to normal copy because ROCm async-copy rewrite "
+             "found no eligible global->shared store.";
       return LowerNormalCopy(op, T, analyzer);
     }
     if (no_implicit_commit_wait) {
-      return cp_async_loop;
+      return async_copy_loop;
     }
     if (GetIsAsyncCopy(op)) {
       Stmt commit_group =
           Evaluate(Call(DataType::Handle(), builtin::ptx_commit_group(), {}));
-      return SeqStmt({cp_async_loop, commit_group});
+      return SeqStmt({async_copy_loop, commit_group});
     }
-    return cp_async_loop;
+    return async_copy_loop;
   }
 
   static bool CheckCPAsyncCopyPreconditions(const CopyNode &op) {
@@ -185,7 +187,7 @@ private:
   static bool CheckCPAsyncCopy(const CopyNode &op, Target target,
                                const LayoutMap &layout_map,
                                arith::Analyzer *analyzer) {
-    if (!TargetHasAsyncCopy(target)) {
+    if (!TargetRocmHasAsyncCopy(target)) {
       return false;
     }
     return CheckCPAsyncCopyPreconditions(op);
