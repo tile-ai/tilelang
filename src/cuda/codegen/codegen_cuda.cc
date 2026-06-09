@@ -1559,7 +1559,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   // To add a new type conversion, you should do the following things:
   // 1. Add the new conversion function in tl_templates. (__tl_cvt_xx)
   // 2. Add a new if statement like the one below.
-  // 3. In src/backend/common/target_utils.cc, allow this vectorizable cast.
+  // 3. In src/cuda/target_utils.cc, allow this vectorizable cast.
 
   // Handle conversion from float16 to float32
   if (from_ty.is_float16() && target_ty.is_float() && target_ty.bits() == 32) {

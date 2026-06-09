@@ -7,7 +7,7 @@
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
 
-#include "backend/common/target_utils.h"
+#include "rocm/target_utils.h"
 
 #include <cmath>
 #include <limits>
@@ -118,7 +118,7 @@ struct Gemm {
   ComputeWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
                        int block_size, Target target, ffi::String gemm_inst) {
     (void)gemm_inst;
-    int num_warps = block_size / TargetGetWarpSize(target);
+    int num_warps = block_size / TargetRocmGetWarpSize(target);
     return ComputeDefaultWarpPartition(policy, M, N, num_warps);
   }
 

@@ -18,11 +18,11 @@
  */
 
 /*!
- * \file codegen_c.h
+ * \file cpu/codegen/codegen_c.h
  * \brief Generate C code when target is c (CPU).
  */
-#ifndef TVM_TL_CODEGEN_C_H_
-#define TVM_TL_CODEGEN_C_H_
+#ifndef TILELANG_CPU_CODEGEN_CODEGEN_C_H_
+#define TILELANG_CPU_CODEGEN_CODEGEN_C_H_
 
 #include "support/check.h"
 #include <string>
@@ -123,4 +123,4 @@ private:
 } // namespace codegen
 } // namespace tvm
 
-#endif // TVM_TL_CODEGEN_C_H_
+#endif // TILELANG_CPU_CODEGEN_CODEGEN_C_H_
