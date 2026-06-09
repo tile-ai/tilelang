@@ -262,18 +262,6 @@ def VectorizeLoop(enable_vectorize: bool = True):
     return _ffi_api.VectorizeLoop(enable_vectorize)  # type: ignore
 
 
-def LowerPTXAsyncCopy():
-    """Deprecated alias for ``tilelang.cuda.transform.LowerPTXAsyncCopy``."""
-    from tilelang.cuda import transform as cuda_transform
-
-    return cuda_transform.LowerPTXAsyncCopy()
-
-
-def InjectPTXAsyncCopy():
-    """Deprecated alias of `LowerPTXAsyncCopy`."""
-    return LowerPTXAsyncCopy()
-
-
 def ConfigIndexBitwidth():
     """Config index bitwidth.
 
