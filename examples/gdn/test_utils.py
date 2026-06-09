@@ -6,6 +6,8 @@ def print_red_warning(message):
 
 
 def calc_sim(x, y, name="tensor"):
+    assert isinstance(x, torch.Tensor), f"expected torch.Tensor, got {type(x).__name__}"
+    assert isinstance(y, torch.Tensor), f"expected torch.Tensor, got {type(y).__name__}"
     x, y = x.data.double(), y.data.double()
     denominator = (x * x + y * y).sum()
     if denominator == 0:
@@ -16,6 +18,8 @@ def calc_sim(x, y, name="tensor"):
 
 
 def assert_similar(x, y, eps=1e-8, name="tensor", data="", raise_assert=True):
+    assert isinstance(x, torch.Tensor), f"expected torch.Tensor, got {type(x).__name__}"
+    assert isinstance(y, torch.Tensor), f"expected torch.Tensor, got {type(y).__name__}"
     x_mask = torch.isfinite(x)
     y_mask = torch.isfinite(y)
     if not torch.all(x_mask == y_mask):
