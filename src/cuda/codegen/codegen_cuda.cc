@@ -36,7 +36,8 @@ using namespace ffi;
 
 namespace {
 
-bool GetBoolAnnotation(const CallNode *op, const char *key, bool default_value) {
+bool GetBoolAnnotation(const CallNode *op, const char *key,
+                       bool default_value) {
   auto it = op->annotations.find(key);
   if (it == op->annotations.end()) {
     return default_value;
@@ -535,7 +536,6 @@ public:
   int64_t min_blocks_per_sm = 1; // default to 1
 };
 
-
 class ClusterInfoExtractor : public tirx::StmtVisitor {
 private:
   void VisitStmt(const PrimFunc &f) {
@@ -1032,7 +1032,8 @@ static PrimExpr RewriteCompactTmemBaseExpr(const PrimExpr &expr,
   return expr;
 }
 
-static Stmt RewriteCompactTmemBaseStmt(const Stmt &stmt, const VarNode *base_var,
+static Stmt RewriteCompactTmemBaseStmt(const Stmt &stmt,
+                                       const VarNode *base_var,
                                        const Var &alias_var) {
   class Rewriter : public StmtExprMutator {
   public:
@@ -2581,10 +2582,14 @@ void CodeGenTileLangCUDA::FlushPendingTmemAllocs() {
   std::stable_sort(pending_tmem_allocs_.begin(), pending_tmem_allocs_.end(),
                    [](const auto &a, const auto &b) {
                      auto pri = [](const std::string &s) -> int {
-                       if (s.find("S0") != std::string::npos) return 0;
-                       if (s.find("S1") != std::string::npos) return 1;
-                       if (s.find("O0") != std::string::npos) return 2;
-                       if (s.find("O1") != std::string::npos) return 3;
+                       if (s.find("S0") != std::string::npos)
+                         return 0;
+                       if (s.find("S1") != std::string::npos)
+                         return 1;
+                       if (s.find("O0") != std::string::npos)
+                         return 2;
+                       if (s.find("O1") != std::string::npos)
+                         return 3;
                        return 4;
                      };
                      return pri(a.first) < pri(b.first);
@@ -2639,25 +2644,20 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     return;
   }
   if (op->op.same_as(tl::select_stage_ptr())) {
-    ICHECK_EQ(op->args.size(), 4U)
-        << "select_stage_ptr expects 4 args";
+    ICHECK_EQ(op->args.size(), 4U) << "select_stage_ptr expects 4 args";
     need_tcgen05_common_h_ = true;
-    os << "tl::select_stage_ptr((void*)("
-       << this->PrintExpr(op->args[0]) << "), (void*)("
-       << this->PrintExpr(op->args[1]) << "), (void*)("
-       << this->PrintExpr(op->args[2]) << "), "
-       << this->PrintExpr(op->args[3]) << ")";
+    os << "tl::select_stage_ptr((void*)(" << this->PrintExpr(op->args[0])
+       << "), (void*)(" << this->PrintExpr(op->args[1]) << "), (void*)("
+       << this->PrintExpr(op->args[2]) << "), " << this->PrintExpr(op->args[3])
+       << ")";
     return;
   }
   if (op->op.same_as(tl::select_barrier_ref())) {
-    ICHECK_EQ(op->args.size(), 4U)
-        << "select_barrier_ref expects 4 args";
+    ICHECK_EQ(op->args.size(), 4U) << "select_barrier_ref expects 4 args";
     need_tcgen05_common_h_ = true;
-    os << "tl::select_barrier_ref("
-       << this->PrintExpr(op->args[0]) << ", "
-       << this->PrintExpr(op->args[1]) << ", "
-       << this->PrintExpr(op->args[2]) << ", "
-       << this->PrintExpr(op->args[3]) << ")";
+    os << "tl::select_barrier_ref(" << this->PrintExpr(op->args[0]) << ", "
+       << this->PrintExpr(op->args[1]) << ", " << this->PrintExpr(op->args[2])
+       << ", " << this->PrintExpr(op->args[3]) << ")";
     return;
   }
   if (op->op.same_as(tl::tcgen05_smem_ptr_add_bf16())) {
@@ -2665,8 +2665,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         << "tcgen05_smem_ptr_add_bf16 expects 2 args";
     need_tcgen05_common_h_ = true;
     os << "tl::tcgen05_smem_ptr_add_bf16((void*)("
-       << this->PrintExpr(op->args[0]) << "), "
-       << this->PrintExpr(op->args[1]) << ")";
+       << this->PrintExpr(op->args[0]) << "), " << this->PrintExpr(op->args[1])
+       << ")";
     return;
   }
   if (op->op.same_as(tl::tcgen05_smem_base_16b())) {
@@ -2683,18 +2683,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     return;
   }
   if (op->op.same_as(tl::tcgen05_rcp_approx_ftz())) {
-    ICHECK_EQ(op->args.size(), 1U)
-        << "tcgen05_rcp_approx_ftz expects 1 arg";
-    os << "tl::tcgen05_rcp_approx_ftz(" << this->PrintExpr(op->args[0])
-       << ")";
+    ICHECK_EQ(op->args.size(), 1U) << "tcgen05_rcp_approx_ftz expects 1 arg";
+    os << "tl::tcgen05_rcp_approx_ftz(" << this->PrintExpr(op->args[0]) << ")";
     need_tcgen05_common_h_ = true;
     return;
   }
   if (op->op.same_as(tl::tcgen05_exp2f_approx())) {
-    ICHECK_EQ(op->args.size(), 1U)
-        << "tcgen05_exp2f_approx expects 1 arg";
-    os << "tl::tcgen05_exp2f_approx(" << this->PrintExpr(op->args[0])
-       << ")";
+    ICHECK_EQ(op->args.size(), 1U) << "tcgen05_exp2f_approx expects 1 arg";
+    os << "tl::tcgen05_exp2f_approx(" << this->PrintExpr(op->args[0]) << ")";
     need_tcgen05_common_h_ = true;
     return;
   }
@@ -2824,7 +2820,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     std::ostringstream args_ss;
     for (size_t i = 0; i < op->args.size(); i++) {
-      if (i > 0) args_ss << ", ";
+      if (i > 0)
+        args_ss << ", ";
       args_ss << this->PrintExpr(op->args[i]);
     }
     std::string call_str = ss.str() + "(" + args_ss.str() + ");\n";
@@ -3737,22 +3734,23 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
 
     need_tcgen05mma_instruction_h_ = true;
     this->PrintIndent();
-    std::string c_expr =
-        c_is_tmem_addr
-            ? "uint32_t((" + c_ref + ") + (" + c_offset + "))"
-            : "(*reinterpret_cast<uint32_t*>((" + c_ref + "))) + (" +
-                  c_offset + ")";
+    std::string c_expr = c_is_tmem_addr
+                             ? "uint32_t((" + c_ref + ") + (" + c_offset + "))"
+                             : "(*reinterpret_cast<uint32_t*>((" + c_ref +
+                                   "))) + (" + c_offset + ")";
     std::string tcgen05_call =
-        use_mask
-            ? "tl::(tcgen05_name)<(ABType)(USE_2CTA_SUFFIX)>(uint64_t((desc_a) + "
-              "(A_offset)), "
-              "uint64_t((desc_b) + (B_offset)), (C_EXPR), "
-              "(scale_out), static_cast<uint32_t>((desc_val)), (mask0), (mask1), "
-              "(mask2), (mask3));\n"
-            : "tl::tcgen05mma_ss_nomask<(ABType)(USE_2CTA_SUFFIX)>(uint64_t((desc_a) + "
-              "(A_offset)), "
-              "uint64_t((desc_b) + (B_offset)), (C_EXPR), "
-              "(scale_out), static_cast<uint32_t>((desc_val)));\n";
+        use_mask ? "tl::(tcgen05_name)<(ABType)(USE_2CTA_SUFFIX)>(uint64_t(("
+                   "desc_a) + "
+                   "(A_offset)), "
+                   "uint64_t((desc_b) + (B_offset)), (C_EXPR), "
+                   "(scale_out), static_cast<uint32_t>((desc_val)), (mask0), "
+                   "(mask1), "
+                   "(mask2), (mask3));\n"
+                 : "tl::tcgen05mma_ss_nomask<(ABType)(USE_2CTA_SUFFIX)>(uint64_"
+                   "t((desc_a) + "
+                   "(A_offset)), "
+                   "uint64_t((desc_b) + (B_offset)), (C_EXPR), "
+                   "(scale_out), static_cast<uint32_t>((desc_val)));\n";
     tl::codegen::Replacer replacer;
     replacer.register_rule("(ABType)", ab_type_str);
     replacer.register_rule("(USE_2CTA_SUFFIX)", use_2cta_suffix);
@@ -3804,27 +3802,25 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
 
     need_tcgen05mma_instruction_h_ = true;
     this->PrintIndent();
-    std::string a_expr =
-        a_is_tmem_addr
-            ? "uint32_t((" + a_ref + ") + (" + A_offset + "))"
-            : "(*reinterpret_cast<uint32_t*>((" + a_ref + "))) + (" +
-                  A_offset + ")";
-    std::string c_expr =
-        c_is_tmem_addr
-            ? "uint32_t((" + c_ref + ") + (" + c_offset + "))"
-            : "(*reinterpret_cast<uint32_t*>((" + c_ref + "))) + (" +
-                  c_offset + ")";
+    std::string a_expr = a_is_tmem_addr
+                             ? "uint32_t((" + a_ref + ") + (" + A_offset + "))"
+                             : "(*reinterpret_cast<uint32_t*>((" + a_ref +
+                                   "))) + (" + A_offset + ")";
+    std::string c_expr = c_is_tmem_addr
+                             ? "uint32_t((" + c_ref + ") + (" + c_offset + "))"
+                             : "(*reinterpret_cast<uint32_t*>((" + c_ref +
+                                   "))) + (" + c_offset + ")";
     std::string tcgen05_call =
-        use_mask
-            ? "tl::tcgen05mma_ts<(ABType)(USE_2CTA_SUFFIX)>( "
-              "(A_EXPR), "
-              "uint64_t((desc_b) + (B_offset)), (C_EXPR), "
-              "(scale_out), static_cast<uint32_t>((desc_val)), (mask0), (mask1), "
-              "(mask2), (mask3));\n"
-            : "tl::tcgen05mma_ts_nomask<(ABType)(USE_2CTA_SUFFIX)>( "
-              "(A_EXPR), "
-              "uint64_t((desc_b) + (B_offset)), (C_EXPR), "
-              "(scale_out), static_cast<uint32_t>((desc_val)));\n";
+        use_mask ? "tl::tcgen05mma_ts<(ABType)(USE_2CTA_SUFFIX)>( "
+                   "(A_EXPR), "
+                   "uint64_t((desc_b) + (B_offset)), (C_EXPR), "
+                   "(scale_out), static_cast<uint32_t>((desc_val)), (mask0), "
+                   "(mask1), "
+                   "(mask2), (mask3));\n"
+                 : "tl::tcgen05mma_ts_nomask<(ABType)(USE_2CTA_SUFFIX)>( "
+                   "(A_EXPR), "
+                   "uint64_t((desc_b) + (B_offset)), (C_EXPR), "
+                   "(scale_out), static_cast<uint32_t>((desc_val)));\n";
     tl::codegen::Replacer replacer;
     replacer.register_rule("(ABType)",
                            tl::codegen::ptx::DTypeEnumToString(dtype_enum));
@@ -3995,9 +3991,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     ICHECK_EQ(op->args.size(), 2U) << "tcgen05_bar_arrive expects 2 args";
     this->PrintIndent();
     need_tcgen05_common_h_ = true;
-    this->stream << "tl::tcgen05_bar_arrive("
-                 << this->PrintExpr(op->args[0]) << ", "
-                 << this->PrintExpr(op->args[1]) << ");\n";
+    this->stream << "tl::tcgen05_bar_arrive(" << this->PrintExpr(op->args[0])
+                 << ", " << this->PrintExpr(op->args[1]) << ");\n";
   } else if (op->op.same_as(tl::tcgen05_bar_sync())) {
     ICHECK_EQ(op->args.size(), 2U) << "tcgen05_bar_sync expects 2 args";
     this->PrintIndent();
@@ -4011,10 +4006,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto ref_of = [this](const PrimExpr &expr) {
       return "(&(" + this->PrintExpr(expr) + "))";
     };
-    this->stream << "tl::tcgen05_fma_f32x2(*" << ref_of(op->args[0])
-                 << ", *" << ref_of(op->args[1]) << ", "
-                 << this->PrintExpr(op->args[2]) << ", "
-                 << this->PrintExpr(op->args[3]) << ", "
+    this->stream << "tl::tcgen05_fma_f32x2(*" << ref_of(op->args[0]) << ", *"
+                 << ref_of(op->args[1]) << ", " << this->PrintExpr(op->args[2])
+                 << ", " << this->PrintExpr(op->args[3]) << ", "
                  << this->PrintExpr(op->args[4]) << ", "
                  << this->PrintExpr(op->args[5]) << ", "
                  << this->PrintExpr(op->args[6]) << ", "
@@ -4026,18 +4020,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto ref_of = [this](const PrimExpr &expr) {
       return "(&(" + this->PrintExpr(expr) + "))";
     };
-    this->stream << "tl::tcgen05_exp2_poly_2(*" << ref_of(op->args[0])
-                 << ", *" << ref_of(op->args[1]) << ", "
-                 << this->PrintExpr(op->args[2]) << ", "
-                 << this->PrintExpr(op->args[3]) << ");\n";
+    this->stream << "tl::tcgen05_exp2_poly_2(*" << ref_of(op->args[0]) << ", *"
+                 << ref_of(op->args[1]) << ", " << this->PrintExpr(op->args[2])
+                 << ", " << this->PrintExpr(op->args[3]) << ");\n";
   } else if (op->op.same_as(tl::tcgen05_st_32x32b_x4())) {
-    ICHECK_EQ(op->args.size(), 6U)
-        << "tcgen05_st_32x32b_x4 expects 6 args";
+    ICHECK_EQ(op->args.size(), 6U) << "tcgen05_st_32x32b_x4 expects 6 args";
     this->PrintIndent();
     need_tcgen05_common_h_ = true;
-    this->stream << "tl::tcgen05_st_32x32b_x4("
-                 << this->PrintExpr(op->args[0]) << " + "
-                 << this->PrintExpr(op->args[1]) << ", "
+    this->stream << "tl::tcgen05_st_32x32b_x4(" << this->PrintExpr(op->args[0])
+                 << " + " << this->PrintExpr(op->args[1]) << ", "
                  << this->PrintExpr(op->args[2]) << ", "
                  << this->PrintExpr(op->args[3]) << ", "
                  << this->PrintExpr(op->args[4]) << ", "
@@ -4050,15 +4041,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << "tl::tcgen05_arrive_expect_tx((void const*)(&("
                  << this->PrintExpr(op->args[0]) << ")), uint32_t("
                  << this->PrintExpr(op->args[1]) << "));\n";
-  } else if (op->op.same_as(tl::tcgen05_mbarrier_arrive_expect_tx_cluster_lane0_ref())) {
+  } else if (op->op.same_as(
+                 tl::tcgen05_mbarrier_arrive_expect_tx_cluster_lane0_ref())) {
     ICHECK_EQ(op->args.size(), 2U)
         << "tcgen05_mbarrier_arrive_expect_tx_cluster_lane0_ref expects 2 args";
     this->PrintIndent();
     need_tcgen05_common_h_ = true;
-    this->stream
-        << "tl::tcgen05_mbarrier_arrive_expect_tx_cluster_lane0((void const*)(&("
-        << this->PrintExpr(op->args[0]) << ")), uint32_t("
-        << this->PrintExpr(op->args[1]) << "));\n";
+    this->stream << "tl::tcgen05_mbarrier_arrive_expect_tx_cluster_lane0((void "
+                    "const*)(&("
+                 << this->PrintExpr(op->args[0]) << ")), uint32_t("
+                 << this->PrintExpr(op->args[1]) << "));\n";
   } else if (op->op.same_as(tl::tcgen05_mbarrier_arrive_cluster_all_ref())) {
     ICHECK_EQ(op->args.size(), 1U)
         << "tcgen05_mbarrier_arrive_cluster_all_ref expects 1 arg";
@@ -4074,7 +4066,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     PrimExpr predicate;
     if (has_predicate) {
       predicate = arith::Analyzer().Simplify(op->args[4]);
-      if (is_zero(predicate)) return;
+      if (is_zero(predicate))
+        return;
       has_predicate = !is_one(predicate);
     }
     int predicate_scope = 0;
@@ -4085,8 +4078,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     this->PrintIndent();
     this->stream << "tl::tma_store_2d_raw(&" << this->PrintExpr(op->args[0])
-                 << ", (void const*)(" << this->PrintExpr(op->args[1])
-                 << "), " << this->PrintExpr(op->args[2]) << ", "
+                 << ", (void const*)(" << this->PrintExpr(op->args[1]) << "), "
+                 << this->PrintExpr(op->args[2]) << ", "
                  << this->PrintExpr(op->args[3]) << ");\n";
     if (has_predicate) {
       this->EndScope(predicate_scope);
@@ -4101,16 +4094,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << "tl::tcgen05_mbarrier_arrive_local_all((void const*)(&("
                  << this->PrintExpr(op->args[0]) << ")));\n";
   } else if (op->op.same_as(tl::tcgen05_wait_barrier_ref())) {
-    ICHECK_EQ(op->args.size(), 2U)
-        << "tcgen05_wait_barrier_ref expects 2 args";
+    ICHECK_EQ(op->args.size(), 2U) << "tcgen05_wait_barrier_ref expects 2 args";
     this->PrintIndent();
     need_tcgen05_common_h_ = true;
     this->stream << "tl::tcgen05_wait_barrier((void const*)(&("
                  << this->PrintExpr(op->args[0]) << ")), uint32_t("
                  << this->PrintExpr(op->args[1]) << "));\n";
   } else if (op->op.same_as(tl::tcgen05_wait_barrier_op())) {
-    ICHECK_EQ(op->args.size(), 2U)
-        << "tcgen05_wait_barrier_op expects 2 args";
+    ICHECK_EQ(op->args.size(), 2U) << "tcgen05_wait_barrier_op expects 2 args";
     this->PrintIndent();
     need_tcgen05_common_h_ = true;
     this->stream << "tl::tcgen05_wait_barrier((void const*)(&"
@@ -4124,11 +4115,11 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     need_tcgen05_common_h_ = true;
     bool lane0_only = GetBoolAnnotation(op, "lane0_only", false);
     if (lane0_only) {
-      this->stream << "tl::tcgen05_commit_1sm_lane0((void const*)(&"
-                   << mbar << "));\n";
+      this->stream << "tl::tcgen05_commit_1sm_lane0((void const*)(&" << mbar
+                   << "));\n";
     } else {
-      this->stream << "tl::tcgen05_commit_1sm((void const*)(&"
-                   << mbar << "));\n";
+      this->stream << "tl::tcgen05_commit_1sm((void const*)(&" << mbar
+                   << "));\n";
     }
   } else if (op->op.same_as(tl::tcgen05_commit_2cta_op())) {
     ICHECK_EQ(op->args.size(), 1U)
@@ -4911,8 +4902,8 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
       os << "tl::tcgen05_fmax2(" << PrintExpr(op->args[0]) << ", "
          << PrintExpr(op->args[1]) << ")";
     } else {
-      os << "fmax(" << PrintExpr(op->args[0]) << ", "
-         << PrintExpr(op->args[1]) << ")";
+      os << "fmax(" << PrintExpr(op->args[0]) << ", " << PrintExpr(op->args[1])
+         << ")";
     }
     return true;
   } else if (op->op.same_as(tl::max3())) {
@@ -5248,8 +5239,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
     unroll_factor[op->node.as<VarNode>()] = Downcast<IntImm>(factor);
   } else if (op->attr_key == tl::attr::kDeviceFuncScope) {
     if (outline_warp_spec_enabled_ && !in_outlined_fn_) {
-      std::string fn_name =
-          EmitOutlinedDeviceFunction(op->body, /*forward_captured_scalars=*/true);
+      std::string fn_name = EmitOutlinedDeviceFunction(
+          op->body, /*forward_captured_scalars=*/true);
       bool has_loop_var = !current_loop_var_name_.empty();
       std::vector<ActiveLoopVarInfo> forwarded_loops = active_loop_vars_;
       if (has_loop_var && !forwarded_loops.empty() &&
@@ -5399,13 +5390,11 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
       constant_size = constant_size / 32;
     }
     if (scope == "shared") {
-      if (compact_shared_state_enabled_ &&
-          alloc_dtype == DataType::UInt(32) &&
+      if (compact_shared_state_enabled_ && alloc_dtype == DataType::UInt(32) &&
           constant_size == 1) {
         auto offset = AlignUpInt64(compact_shared_state_bytes_, 4);
         compact_shared_state_bytes_ = offset + 4;
-        compact_shared_state_infos_.push_back(
-            {buffer, vid, "uint*", 4, 4});
+        compact_shared_state_infos_.push_back({buffer, vid, "uint*", 4, 4});
         if (compact_tmem_base_var_ == nullptr) {
           compact_tmem_base_var_ = buffer;
           compact_tmem_base_name_ = vid;
@@ -5435,8 +5424,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
                << "*>(" << v_id_mem << ");\n";
       }
       if (outline_warp_spec_enabled_) {
-        barrier_var_infos_.push_back(
-            {vid, mbarrier_dtype_ + "*", buffer});
+        barrier_var_infos_.push_back({vid, mbarrier_dtype_ + "*", buffer});
       }
     } else if (scope == "local") {
       if (alloc_dtype == DataType::Int(4) || alloc_dtype == DataType::UInt(4)) {
@@ -5454,15 +5442,10 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
         }
       }
       if (outline_warp_spec_enabled_ && !in_outlined_fn_) {
-        bool outline_persistent =
-            outline_persistent_vars_.count(buffer) != 0;
-        local_allocs_.push_back({vid,
-                                 alloc_dtype,
-                                 static_cast<int64_t>(constant_size),
-                                 outline_persistent,
-                                 false,
-                                 PrimExpr(),
-                                 buffer});
+        bool outline_persistent = outline_persistent_vars_.count(buffer) != 0;
+        local_allocs_.push_back(
+            {vid, alloc_dtype, static_cast<int64_t>(constant_size),
+             outline_persistent, false, PrimExpr(), buffer});
       }
     } else if (scope == "local.var") {
       PrimExpr init = tirx::make_const(alloc_dtype, 0);
@@ -5476,17 +5459,10 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
       }
       stream << ' ' << vid << " = " << PrintExpr(init) << ";\n";
       if (outline_warp_spec_enabled_ && !in_outlined_fn_) {
-        bool outline_persistent =
-            outline_persistent_vars_.count(buffer) != 0;
-        local_allocs_.push_back({vid,
-                                 alloc_dtype,
-                                 1,
-                                 outline_persistent,
-                                 true,
-                                 init,
-                                 buffer});
-        local_scalar_var_infos_.push_back(
-            {buffer, vid, alloc_dtype});
+        bool outline_persistent = outline_persistent_vars_.count(buffer) != 0;
+        local_allocs_.push_back(
+            {vid, alloc_dtype, 1, outline_persistent, true, init, buffer});
+        local_scalar_var_infos_.push_back({buffer, vid, alloc_dtype});
       }
     } else if (scope.find("local.descriptor") != 0) {
       ICHECK(false) << "Unsupported scope: " << scope << " for buffer "
@@ -6572,8 +6548,9 @@ void CodeGenTileLangCUDA::FlattenWarpBranches(
   }
 }
 
-std::string CodeGenTileLangCUDA::EmitOutlinedDeviceFunction(
-    const Stmt &body, bool forward_captured_scalars) {
+std::string
+CodeGenTileLangCUDA::EmitOutlinedDeviceFunction(const Stmt &body,
+                                                bool forward_captured_scalars) {
   std::string fn_name =
       "__outlined_warp_fn_" + std::to_string(outlined_fn_count_);
   outlined_fn_count_++;
@@ -6688,13 +6665,13 @@ std::string CodeGenTileLangCUDA::EmitOutlinedDeviceFunction(
   // Re-declare local allocations (each device fn gets its own register set)
   for (const auto &alloc : local_allocs_) {
     if (alloc.buffer_var && !touched.touched.count(alloc.buffer_var)) {
-      continue;  // not used by this branch
+      continue; // not used by this branch
     }
     if (forward_captured_scalars && alloc.is_scalar_var) {
-      continue;  // captured by value as a function parameter
+      continue; // captured by value as a function parameter
     }
     if (alloc.outline_persistent) {
-      continue;  // forwarded from the caller to preserve cross-call state
+      continue; // forwarded from the caller to preserve cross-call state
     }
     outlined_fns_stream_ << "  ";
     std::ostringstream type_os;
@@ -6750,8 +6727,7 @@ std::string CodeGenTileLangCUDA::EmitOutlinedDeviceFunction(
 void CodeGenTileLangCUDA::VisitStmt_(const IfThenElseNode *op) {
   EmitCompactSharedStateIfNeeded();
   if (compact_shared_state_enabled_ && !compact_tmem_base_alias_emitted_ &&
-      compact_tmem_base_var_ != nullptr &&
-      IsThreadXComparison(op->condition) &&
+      compact_tmem_base_var_ != nullptr && IsThreadXComparison(op->condition) &&
       StmtUsesCompactTmemBase(op->then_case, compact_tmem_base_var_)) {
     std::string cond = PrintExpr(op->condition);
     PrintIndent();
@@ -6772,9 +6748,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const IfThenElseNode *op) {
       stream << "const uint32_t " << alias_var->name_hint << " = "
              << compact_tmem_base_name_ << "[0];\n";
       compact_tmem_base_alias_emitted_ = true;
-      PrintStmt(
-          RewriteCompactTmemBaseStmt(op->else_case.value(),
-                                     compact_tmem_base_var_, alias_var));
+      PrintStmt(RewriteCompactTmemBaseStmt(op->else_case.value(),
+                                           compact_tmem_base_var_, alias_var));
       this->EndScope(else_scope);
     }
     PrintIndent();
@@ -6849,8 +6824,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const IfThenElseNode *op) {
     std::vector<bool> emit_direct;
     for (const auto &branch : branches) {
       std::vector<Stmt> prologue;
-      Stmt outlined_body =
-          ExtractLeadingSetMaxNReg(branch.body, &prologue);
+      Stmt outlined_body = ExtractLeadingSetMaxNReg(branch.body, &prologue);
       bool direct = can_emit_directly(outlined_body);
       emit_direct.push_back(direct);
       fn_names.push_back(direct ? std::string()
@@ -6887,8 +6861,10 @@ void CodeGenTileLangCUDA::VisitStmt_(const IfThenElseNode *op) {
       stream << fn_names[i] << "(";
       bool first_arg = true;
       auto sep = [&]() {
-        if (first_arg) first_arg = false;
-        else stream << ", ";
+        if (first_arg)
+          first_arg = false;
+        else
+          stream << ", ";
       };
       if (has_loop_var) {
         sep();

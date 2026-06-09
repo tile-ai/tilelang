@@ -269,11 +269,7 @@ def alloc_tmem(
         # pass boundaries), but Buffer instances are mutated in-place by the
         # script parser — Namer::Name does `buffer->name = name` rather than
         # creating a new Buffer node — so Buffer identity is stable.
-        sblock_attr({
-            "tmem_alias_buffers": {
-                buf: [alias, IntImm("int32", int(col_offset))]
-            }
-        })
+        sblock_attr({"tmem_alias_buffers": {buf: [alias, IntImm("int32", int(col_offset))]}})
     if alloc_warp is not None:
         sblock_attr({"tmem_alloc_warp": int(alloc_warp)})
     return buf

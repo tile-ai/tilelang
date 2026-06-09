@@ -226,7 +226,6 @@ TIR_DEFINE_TL_BUILTIN(mbarrier_wait_parity)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-
 TIR_DEFINE_TL_BUILTIN(mbarrier_expect_tx)
     .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
@@ -372,7 +371,6 @@ TIR_DEFINE_TL_BUILTIN(tcgen05_exp2_poly_2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-
 TIR_DEFINE_TL_BUILTIN(tcgen05_st_32x32b_x4)
     .set_num_inputs(6)
     .set_attr<TCallEffectKind>("TCallEffectKind",
@@ -407,7 +405,6 @@ TIR_DEFINE_TL_BUILTIN(tcgen05_mbarrier_arrive_cluster_all_ref)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
-
 
 TIR_DEFINE_TL_BUILTIN(tma_store_2d)
     .set_num_inputs(-1)
@@ -472,7 +469,6 @@ TIR_DEFINE_TL_BUILTIN(no_set_max_nreg)
     .set_num_inputs(0)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
-
 
 TIR_DEFINE_TL_BUILTIN(warpgroup_arrive)
     .set_num_inputs(0)

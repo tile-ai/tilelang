@@ -30,11 +30,11 @@ TL_DEVICE void
 tcgen05mma_ss_nomask(uint64_t const &desc_a, uint64_t const &desc_b,
                      uint32_t const &tmem_c, uint32_t const &scalec,
                      uint32_t const &desc_val) {
-  static_assert(C_type == DataType::kFloat16 ||
-                    C_type == DataType::kBFloat16,
+  static_assert(C_type == DataType::kFloat16 || C_type == DataType::kBFloat16,
                 "tl::tcgen05mma_ss_nomask: unsupported accumulator type");
   if constexpr (elect_one) {
-    if (!cute::elect_one_sync()) return;
+    if (!cute::elect_one_sync())
+      return;
   }
   if constexpr (use_2cta) {
     asm volatile("{\n\t"
@@ -79,11 +79,11 @@ TL_DEVICE void
 tcgen05mma_ts_nomask(uint32_t const &tmem_a, uint64_t const &desc_b,
                      uint32_t const &tmem_c, uint32_t const &scalec,
                      uint32_t const &desc_val) {
-  static_assert(C_type == DataType::kFloat16 ||
-                    C_type == DataType::kBFloat16,
+  static_assert(C_type == DataType::kFloat16 || C_type == DataType::kBFloat16,
                 "tl::tcgen05mma_ts_nomask: unsupported accumulator type");
   if constexpr (elect_one) {
-    if (!cute::elect_one_sync()) return;
+    if (!cute::elect_one_sync())
+      return;
   }
   if constexpr (use_2cta) {
     asm volatile(
@@ -194,7 +194,7 @@ TL_DEVICE void tcgen05mma_ts_nomask<DataType::kBFloat16, false>(
     uint32_t const &tmem_a, uint64_t const &desc_b, uint32_t const &tmem_c,
     uint32_t const &scalec, uint32_t const &desc_val) {
   tcgen05mma_ts_nomask<DataType::kFloat16, false>(tmem_a, desc_b, tmem_c,
-                                                 scalec, desc_val);
+                                                  scalec, desc_val);
 }
 
 template <>
@@ -210,8 +210,8 @@ template <>
 TL_DEVICE void tcgen05mma_ts_nomask<DataType::kBFloat16, true>(
     uint32_t const &tmem_a, uint64_t const &desc_b, uint32_t const &tmem_c,
     uint32_t const &scalec, uint32_t const &desc_val) {
-  tcgen05mma_ts_nomask<DataType::kFloat16, true>(tmem_a, desc_b, tmem_c,
-                                                scalec, desc_val);
+  tcgen05mma_ts_nomask<DataType::kFloat16, true>(tmem_a, desc_b, tmem_c, scalec,
+                                                 desc_val);
 }
 
 // TF32 instruction kind (2cta not supported currently)
@@ -489,7 +489,7 @@ TL_DEVICE void tcgen05mma_ss_nomask<DataType::kBFloat16, false>(
     uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
     uint32_t const &scalec, uint32_t const &desc_val) {
   tcgen05mma_ss_nomask<DataType::kFloat16, false>(desc_a, desc_b, tmem_c,
-                                                 scalec, desc_val);
+                                                  scalec, desc_val);
 }
 
 template <>
@@ -505,8 +505,8 @@ template <>
 TL_DEVICE void tcgen05mma_ss_nomask<DataType::kBFloat16, true>(
     uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
     uint32_t const &scalec, uint32_t const &desc_val) {
-  tcgen05mma_ss_nomask<DataType::kFloat16, true>(desc_a, desc_b, tmem_c,
-                                                scalec, desc_val);
+  tcgen05mma_ss_nomask<DataType::kFloat16, true>(desc_a, desc_b, tmem_c, scalec,
+                                                 desc_val);
 }
 
 // TF32 instruction kind

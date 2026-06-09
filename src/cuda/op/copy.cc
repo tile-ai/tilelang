@@ -1204,7 +1204,8 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
   const Array<Range> &tmem_range = is_ld ? op.src_range : op.dst_range;
   ICHECK(is_const_int(tmem_range[0]->min) && is_const_int(tmem_range[1]->min))
       << "Tensor memory copy requires the tmem-side slice base to be a "
-         "constant; got non-constant " << tmem_range;
+         "constant; got non-constant "
+      << tmem_range;
   int64_t logical_row_min = *as_const_int(tmem_range[0]->min);
   int64_t logical_col_elem_min = *as_const_int(tmem_range[1]->min);
   ICHECK(logical_col_elem_min % elems_per_cell == 0)
@@ -1350,8 +1351,10 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
   if (!have_succeeded) {
     LOG(WARNING) << "tcgen05." << (is_ld ? "ld" : "st")
                  << " instruction selection failed."
-                 << " tmem_phy_row=[" << tmem_phy_row_min << ", " << tmem_phy_row_max << "]"
-                 << " tmem_phy_col=[" << tmem_phy_col_min << ", " << tmem_phy_col_max << "]"
+                 << " tmem_phy_row=[" << tmem_phy_row_min << ", "
+                 << tmem_phy_row_max << "]"
+                 << " tmem_phy_col=[" << tmem_phy_col_min << ", "
+                 << tmem_phy_col_max << "]"
                  << " col_extent=" << tmem_phy_col_extent
                  << " num_threads=" << num_threads
                  << " thread_bounds=" << T.thread_bounds;

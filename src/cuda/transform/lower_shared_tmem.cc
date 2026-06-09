@@ -176,7 +176,8 @@ private:
     auto check_and_add = [&](const Buffer &buffer) {
       const auto *ptr_type =
           buffer->data->type_annotation.as<PointerTypeNode>();
-      if (!ptr_type) return;
+      if (!ptr_type)
+        return;
       auto storage_scope = ptr_type->storage_scope;
       if (storage_scope == "shared.tmem") {
         tmem_buffers.push_back(buffer);
@@ -195,10 +196,14 @@ private:
     std::sort(sorted_tmem.begin(), sorted_tmem.end(),
               [](const Buffer &a, const Buffer &b) {
                 auto priority = [](const std::string &name) -> int {
-                  if (name.find("S0") != std::string::npos) return 0;
-                  if (name.find("S1") != std::string::npos) return 1;
-                  if (name.find("O0") != std::string::npos) return 2;
-                  if (name.find("O1") != std::string::npos) return 3;
+                  if (name.find("S0") != std::string::npos)
+                    return 0;
+                  if (name.find("S1") != std::string::npos)
+                    return 1;
+                  if (name.find("O0") != std::string::npos)
+                    return 2;
+                  if (name.find("O1") != std::string::npos)
+                    return 3;
                   return 4; // unknown buffers go last
                 };
                 return priority(a->name) < priority(b->name);
@@ -563,7 +568,8 @@ PrimFunc LowerSharedTmem(PrimFunc f) {
     auto dims = cluster_attr.value();
     int64_t product = 1;
     for (auto d : dims) {
-      if (auto *imm = d.as<IntImmNode>()) product *= imm->value;
+      if (auto *imm = d.as<IntImmNode>())
+        product *= imm->value;
     }
     use_2cta = product > 1;
   }

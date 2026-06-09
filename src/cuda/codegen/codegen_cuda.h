@@ -195,7 +195,8 @@ private:
   // --- Device function outlining state ---
   // The threadIdx.x Var node (set in BindThreadIndex)
   const VarNode *thread_x_var_{nullptr};
-  // Total dynamic shared memory size (set when visiting shared.dyn AllocateNode)
+  // Total dynamic shared memory size (set when visiting shared.dyn
+  // AllocateNode)
   int64_t dyn_shmem_size_{0};
   // Whether outlining is enabled (read from pass config)
   bool outline_warp_spec_enabled_{false};
@@ -259,7 +260,7 @@ private:
   // Kernel function parameters (name, type_string) for device fn forwarding
   struct KernelParamInfo {
     std::string var_name;
-    std::string type_str;  // e.g. "const CUtensorMap"
+    std::string type_str; // e.g. "const CUtensorMap"
     bool is_grid_constant{false};
     const VarNode *param_var{nullptr};
   };
@@ -269,8 +270,8 @@ private:
   // Helper: check if condition involves threadIdx.x comparison
   bool IsThreadXComparison(const PrimExpr &cond) const;
   // Helper: emit one outlined device function, returns the function name
-  std::string EmitOutlinedDeviceFunction(
-      const Stmt &body, bool forward_captured_scalars = false);
+  std::string EmitOutlinedDeviceFunction(const Stmt &body,
+                                         bool forward_captured_scalars = false);
   // Helper: flatten nested if-else on threadIdx.x into branches
   struct WarpBranch {
     PrimExpr condition;

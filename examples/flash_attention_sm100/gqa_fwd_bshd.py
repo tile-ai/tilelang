@@ -438,8 +438,12 @@ def flashattn_fa4_pipe(
             for k in T.Pipelined(loop_range, num_stages=1):
                 T.copy(K[bz, k * block_N : (k + 1) * block_N, by // groups, :], K_shared)
                 T.tcgen05_gemm(
-                    Q_shared, K_shared, S_tmem,
-                    transpose_B=True, mbar=mbar_s, clear_accum=True,
+                    Q_shared,
+                    K_shared,
+                    S_tmem,
+                    transpose_B=True,
+                    mbar=mbar_s,
+                    clear_accum=True,
                 )
                 T.mbarrier_wait_parity(mbar_s, k % 2)
 
@@ -484,8 +488,11 @@ def flashattn_fa4_pipe(
 
                 # GEMM2: P @ V → D_tmem, then accumulate into O_reg.
                 T.tcgen05_gemm(
-                    P_tmem, V_shared, D_tmem,
-                    mbar=mbar_d, clear_accum=True,
+                    P_tmem,
+                    V_shared,
+                    D_tmem,
+                    mbar=mbar_d,
+                    clear_accum=True,
                 )
                 T.mbarrier_wait_parity(mbar_d, k % 2)
                 T.copy(D_tmem, D_reg)
@@ -629,14 +636,12 @@ def flashattn_fa4_ws(
                     # K
                     if k >= num_stages:
                         T.mbarrier_wait_parity(mb_k_consumed[stage], parity ^ 1)
-                    T.copy(K[bz, k * block_N : (k + 1) * block_N, by // groups, :],
-                           K_shared[stage, :, :])
+                    T.copy(K[bz, k * block_N : (k + 1) * block_N, by // groups, :], K_shared[stage, :, :])
                     T.mbarrier_arrive(mb_k_loaded[stage])
                     # V
                     if k >= num_stages:
                         T.mbarrier_wait_parity(mb_v_consumed[stage], parity ^ 1)
-                    T.copy(V[bz, k * block_N : (k + 1) * block_N, by // groups, :],
-                           V_shared[stage, :, :])
+                    T.copy(V[bz, k * block_N : (k + 1) * block_N, by // groups, :], V_shared[stage, :, :])
                     T.mbarrier_arrive(mb_v_loaded[stage])
 
             elif tx >= 32 and tx < 64:
@@ -650,8 +655,12 @@ def flashattn_fa4_ws(
                     if k > 0:
                         T.mbarrier_wait_parity(mb_s_empty, (k - 1) & 1)
                     T.tcgen05_gemm(
-                        Q_shared, K_shared[stage, :, :], S_tmem,
-                        transpose_B=True, mbar=mb_s_full, clear_accum=True,
+                        Q_shared,
+                        K_shared[stage, :, :],
+                        S_tmem,
+                        transpose_B=True,
+                        mbar=mb_s_full,
+                        clear_accum=True,
                     )
                     T.mbarrier_wait_parity(mb_s_full, k & 1)
                     T.mbarrier_arrive(mb_k_consumed[stage])
@@ -661,8 +670,11 @@ def flashattn_fa4_ws(
                     if k > 0:
                         T.mbarrier_wait_parity(mb_d_empty, (k - 1) & 1)
                     T.tcgen05_gemm(
-                        P_tmem, V_shared[stage, :, :], D_tmem,
-                        mbar=mb_d_full, clear_accum=True,
+                        P_tmem,
+                        V_shared[stage, :, :],
+                        D_tmem,
+                        mbar=mb_d_full,
+                        clear_accum=True,
                     )
                     T.mbarrier_wait_parity(mb_d_full, k & 1)
                     T.mbarrier_arrive(mb_v_consumed[stage])
@@ -1140,13 +1152,21 @@ def flashattn_fa4(
                     # GEMM1: Q × K^T → S_tmem
                     if stage_id == 0:
                         T.tcgen05_gemm(
-                            Q_shared, K_shared_0, S_tmem,
-                            transpose_B=True, mbar=mbar_s_ready[stage_id], clear_accum=True,
+                            Q_shared,
+                            K_shared_0,
+                            S_tmem,
+                            transpose_B=True,
+                            mbar=mbar_s_ready[stage_id],
+                            clear_accum=True,
                         )
                     else:
                         T.tcgen05_gemm(
-                            Q_shared, K_shared_1, S_tmem,
-                            transpose_B=True, mbar=mbar_s_ready[stage_id], clear_accum=True,
+                            Q_shared,
+                            K_shared_1,
+                            S_tmem,
+                            transpose_B=True,
+                            mbar=mbar_s_ready[stage_id],
+                            clear_accum=True,
                         )
 
                     # Wait for P ready from softmax
@@ -1166,13 +1186,19 @@ def flashattn_fa4(
                     # GEMM2: P × V → O_tmem
                     if stage_id == 0:
                         T.tcgen05_gemm(
-                            P_tmem, V_shared_0, O_tmem,
-                            mbar=mbar_gemm2[stage_id], clear_accum=(k == 0),
+                            P_tmem,
+                            V_shared_0,
+                            O_tmem,
+                            mbar=mbar_gemm2[stage_id],
+                            clear_accum=(k == 0),
                         )
                     else:
                         T.tcgen05_gemm(
-                            P_tmem, V_shared_1, O_tmem,
-                            mbar=mbar_gemm2[stage_id], clear_accum=(k == 0),
+                            P_tmem,
+                            V_shared_1,
+                            O_tmem,
+                            mbar=mbar_gemm2[stage_id],
+                            clear_accum=(k == 0),
                         )
                     T.mbarrier_wait_parity(mbar_gemm2[stage_id], parity)
 
@@ -1379,18 +1405,11 @@ if __name__ == "__main__":
         "--variant",
         choices=["ss", "ts", "ts2", "fa4", "fa4_pipe", "fa4_ws", "wasp"],
         default="ss",
-        help=("ss: pipeline (default); ts: 256 threads; ts2: improved ts; "
-              "fa4: 2-WG warp-spec; fa4_pipe: ts2 + num_stages=3 "
-              "K/V multi-stage; wasp: warp-specialized"),
+        help=(
+            "ss: pipeline (default); ts: 256 threads; ts2: improved ts; "
+            "fa4: 2-WG warp-spec; fa4_pipe: ts2 + num_stages=3 "
+            "K/V multi-stage; wasp: warp-specialized"
+        ),
     )
     args = parser.parse_args()
-    main(
-        args.batch,
-        args.heads,
-        args.seq_len,
-        args.dim,
-        args.is_causal,
-        args.groups,
-        args.variant,
-        args.print_kernel
-    )
+    main(args.batch, args.heads, args.seq_len, args.dim, args.is_causal, args.groups, args.variant, args.print_kernel)

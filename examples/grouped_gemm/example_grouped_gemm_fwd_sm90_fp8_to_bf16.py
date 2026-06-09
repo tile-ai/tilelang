@@ -31,9 +31,7 @@ def construct_inputs_bf16_fp8(batch_sizes_list, K, N, padding_M, device):
     for i in range(G - 1):
         batch_offsets_list.append(batch_offsets_list[-1] + batch_sizes_list[i])
     for i in range(G - 1):
-        batch_padded_offsets_list.append(
-            batch_padded_offsets_list[-1] + math.ceil(batch_sizes_list[i] / padding_M) * padding_M
-        )
+        batch_padded_offsets_list.append(batch_padded_offsets_list[-1] + math.ceil(batch_sizes_list[i] / padding_M) * padding_M)
 
     A = torch.randn(total_M, K, device=device, dtype=torch.bfloat16)
     B = torch.randn(G, K, N, device=device, dtype=torch.float16).to(torch.float8_e4m3fn)
@@ -77,19 +75,20 @@ def grouped_gemm_sm90_fp8_to_bf16(
     total_m_blocks = sum((size + block_M - 1) // block_M for size in batch_sizes_list)
 
     assert block_N % 8 == 0, "block_N must be a multiple of 8 (vec-of-8 fp8 reads)"
-    assert (block_K * block_N) % (threads * 8) == 0, \
+    assert (block_K * block_N) % (threads * 8) == 0, (
         "block_K * block_N must be a multiple of threads * 8 (clean per-thread vec-of-8 tiling)"
+    )
 
     vecs_per_thread = (block_K * block_N) // (threads * 8)
 
     @T.prim_func
     def kernel(
-        A: T.Tensor([batch_sum, K], in_dtype_a),                  # type: ignore
-        B: T.Tensor([batch_count, K, N], in_dtype_b),             # type: ignore
-        C: T.Tensor([batch_sum, N], out_dtype),                   # type: ignore
-        batch_sizes: T.Tensor([batch_count], T.int32),            # type: ignore
-        batch_offsets: T.Tensor([batch_count], T.int32),          # type: ignore
-        batch_padded_offsets: T.Tensor([batch_count], T.int32),   # type: ignore
+        A: T.Tensor([batch_sum, K], in_dtype_a),  # type: ignore
+        B: T.Tensor([batch_count, K, N], in_dtype_b),  # type: ignore
+        C: T.Tensor([batch_sum, N], out_dtype),  # type: ignore
+        batch_sizes: T.Tensor([batch_count], T.int32),  # type: ignore
+        batch_offsets: T.Tensor([batch_count], T.int32),  # type: ignore
+        batch_padded_offsets: T.Tensor([batch_count], T.int32),  # type: ignore
     ):
         with T.Kernel(total_m_blocks, T.ceildiv(N, block_N), threads=threads) as (bx, by):
             A_shared = T.alloc_shared([block_M, block_K], in_dtype_a)
@@ -146,17 +145,25 @@ def grouped_gemm_sm90_fp8_to_bf16(
     return kernel
 
 
-def run(batch_sizes_list, K, N, block_M=128, block_N=128, block_K=64,
-        num_stages=2, threads=128, profile=False):
+def run(batch_sizes_list, K, N, block_M=128, block_N=128, block_K=64, num_stages=2, threads=128, profile=False):
     kernel = grouped_gemm_sm90_fp8_to_bf16(
-        tuple(batch_sizes_list), K, N,
-        block_M=block_M, block_N=block_N, block_K=block_K,
-        num_stages=num_stages, threads=threads,
+        tuple(batch_sizes_list),
+        K,
+        N,
+        block_M=block_M,
+        block_N=block_N,
+        block_K=block_K,
+        num_stages=num_stages,
+        threads=threads,
     )
 
     device = torch.device("cuda")
     A, B, _C, batch_sizes, batch_offsets, batch_padded_offsets = construct_inputs_bf16_fp8(
-        batch_sizes_list, K, N, padding_M=block_M, device=device,
+        batch_sizes_list,
+        K,
+        N,
+        padding_M=block_M,
+        device=device,
     )
 
     out = kernel(A, B, batch_sizes, batch_offsets, batch_padded_offsets)
@@ -170,7 +177,8 @@ def run(batch_sizes_list, K, N, block_M=128, block_N=128, block_K=64,
     if profile:
         profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
         latency = profiler.do_bench(
-            warmup=100, rep=200,
+            warmup=100,
+            rep=200,
             input_tensors=[A, B, batch_sizes, batch_offsets, batch_padded_offsets],
         )
         total_M = sum(batch_sizes_list)
@@ -180,8 +188,7 @@ def run(batch_sizes_list, K, N, block_M=128, block_N=128, block_K=64,
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--batch_sizes", type=str, default="1024,1024,1024,1024",
-                   help="comma-separated per-group row counts")
+    p.add_argument("--batch_sizes", type=str, default="1024,1024,1024,1024", help="comma-separated per-group row counts")
     p.add_argument("--K", type=int, default=4096)
     p.add_argument("--N", type=int, default=4096)
     p.add_argument("--block_M", type=int, default=128)
@@ -193,7 +200,14 @@ if __name__ == "__main__":
     args = p.parse_args()
 
     bs = [int(x) for x in args.batch_sizes.split(",")]
-    run(bs, args.K, args.N,
-        block_M=args.block_M, block_N=args.block_N,
-        block_K=args.block_K, num_stages=args.num_stages,
-        threads=args.threads, profile=args.profile)
+    run(
+        bs,
+        args.K,
+        args.N,
+        block_M=args.block_M,
+        block_N=args.block_N,
+        block_K=args.block_K,
+        num_stages=args.num_stages,
+        threads=args.threads,
+        profile=args.profile,
+    )

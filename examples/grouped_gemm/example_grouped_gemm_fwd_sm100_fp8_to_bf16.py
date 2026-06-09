@@ -42,9 +42,7 @@ def construct_inputs_bf16_fp8(batch_sizes_list, K, N, padding_M, device):
     for i in range(G - 1):
         batch_offsets_list.append(batch_offsets_list[-1] + batch_sizes_list[i])
     for i in range(G - 1):
-        batch_padded_offsets_list.append(
-            batch_padded_offsets_list[-1] + math.ceil(batch_sizes_list[i] / padding_M) * padding_M
-        )
+        batch_padded_offsets_list.append(batch_padded_offsets_list[-1] + math.ceil(batch_sizes_list[i] / padding_M) * padding_M)
 
     A = torch.randn(total_M, K, device=device, dtype=torch.bfloat16)
     B = torch.randn(G, K, N, device=device, dtype=torch.float16).to(torch.float8_e4m3fn)
@@ -94,31 +92,31 @@ def grouped_gemm_sm100_fp8_to_bf16(
 
     @T.prim_func
     def kernel(
-        A: T.Tensor([batch_sum, K], in_dtype_a),                  # type: ignore
-        B: T.Tensor([batch_count, K, N], in_dtype_b),             # type: ignore
-        C: T.Tensor([batch_sum, N], out_dtype),                   # type: ignore
-        batch_sizes: T.Tensor([batch_count], T.int32),            # type: ignore
-        batch_offsets: T.Tensor([batch_count], T.int32),          # type: ignore
-        batch_padded_offsets: T.Tensor([batch_count], T.int32),   # type: ignore
+        A: T.Tensor([batch_sum, K], in_dtype_a),  # type: ignore
+        B: T.Tensor([batch_count, K, N], in_dtype_b),  # type: ignore
+        C: T.Tensor([batch_sum, N], out_dtype),  # type: ignore
+        batch_sizes: T.Tensor([batch_count], T.int32),  # type: ignore
+        batch_offsets: T.Tensor([batch_count], T.int32),  # type: ignore
+        batch_padded_offsets: T.Tensor([batch_count], T.int32),  # type: ignore
     ):
         with T.Kernel(total_m_blocks, T.ceildiv(N, block_N), threads=threads) as (bx, by):
-            A_shared      = T.alloc_shared((num_stages, block_M, block_K), in_dtype_a)
+            A_shared = T.alloc_shared((num_stages, block_M, block_K), in_dtype_a)
             B_fp8_staging = T.alloc_shared((num_stages, block_K, block_N), in_dtype_b)
-            B_shared      = T.alloc_shared((num_stages, block_K, block_N), in_dtype_a)  # bf16, post-dequant
-            C_tmem        = T.alloc_tmem([block_M, block_N], accum_dtype)
-            C_local       = T.alloc_fragment((block_M, block_N), accum_dtype)
-            C_local_cast  = T.alloc_fragment((block_M, block_N), out_dtype)
+            B_shared = T.alloc_shared((num_stages, block_K, block_N), in_dtype_a)  # bf16, post-dequant
+            C_tmem = T.alloc_tmem([block_M, block_N], accum_dtype)
+            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+            C_local_cast = T.alloc_fragment((block_M, block_N), out_dtype)
 
-            tma_done  = T.alloc_barrier([32] * num_stages)  # producer → dequant
-            loaded    = T.alloc_barrier([64] * num_stages)  # dequant (64 lanes) → mma
-            consumed  = T.alloc_barrier([1]  * num_stages)  # mma      → producer
-            tmem_full = T.alloc_barrier([1])                # mma      → epilogue
+            tma_done = T.alloc_barrier([32] * num_stages)  # producer → dequant
+            loaded = T.alloc_barrier([64] * num_stages)  # dequant (64 lanes) → mma
+            consumed = T.alloc_barrier([1] * num_stages)  # mma      → producer
+            tmem_full = T.alloc_barrier([1])  # mma      → epilogue
 
-            cur_fp8x8  = T.alloc_local((8,), in_dtype_b)
+            cur_fp8x8 = T.alloc_local((8,), in_dtype_b)
             cur_fp32x8 = T.alloc_local((8,), T.float32)
             cur_bf16x8 = T.alloc_local((8,), in_dtype_a)
 
-            cur_batch_idx  = T.alloc_var(dtype=T.int32)
+            cur_batch_idx = T.alloc_var(dtype=T.int32)
             cur_batch_size = T.alloc_var(dtype=T.int32)
 
             tx = T.get_thread_binding()
@@ -131,9 +129,7 @@ def grouped_gemm_sm100_fp8_to_bf16(
                 in_cur_batch_idx = m_start_padded >= batch_padded_offsets[i]
                 cur_batch_idx = T.if_then_else(in_cur_batch_idx, i, cur_batch_idx)
             cur_batch_size = batch_sizes[cur_batch_idx]
-            m_start = (m_start_padded
-                       - batch_padded_offsets[cur_batch_idx]
-                       + batch_offsets[cur_batch_idx])
+            m_start = m_start_padded - batch_padded_offsets[cur_batch_idx] + batch_offsets[cur_batch_idx]
             actual_rows = T.max(
                 0,
                 T.min(block_M, cur_batch_size + batch_padded_offsets[cur_batch_idx] - m_start_padded),
@@ -144,19 +140,15 @@ def grouped_gemm_sm100_fp8_to_bf16(
             # ============================ W0: TMA producer ============================
             if tx < 32:
                 for k in T.serial(k_iters):
-                    T.mbarrier_wait_parity(consumed[k % num_stages],
-                                           ((k // num_stages) & 1) ^ 1)
+                    T.mbarrier_wait_parity(consumed[k % num_stages], ((k // num_stages) & 1) ^ 1)
                     T.tma_copy(
-                        A[m_start : m_start + block_M,
-                          k * block_K : (k + 1) * block_K],
+                        A[m_start : m_start + block_M, k * block_K : (k + 1) * block_K],
                         A_shared[k % num_stages, :, :],
                         barrier=tma_done[k % num_stages],
                     )
                     # B is (G, K, N); per-expert (K, N), so slice [k*bK:(k+1)*bK, by*bN:(by+1)*bN]
                     T.tma_copy(
-                        B[cur_batch_idx,
-                          k * block_K : (k + 1) * block_K,
-                          by * block_N : (by + 1) * block_N],
+                        B[cur_batch_idx, k * block_K : (k + 1) * block_K, by * block_N : (by + 1) * block_N],
                         B_fp8_staging[k % num_stages, :, :],
                         barrier=tma_done[k % num_stages],
                     )
@@ -171,8 +163,7 @@ def grouped_gemm_sm100_fp8_to_bf16(
                 row_in_pair = deq_lane // 32
                 col_lane = deq_lane % 32
                 for k in T.serial(k_iters):
-                    T.mbarrier_wait_parity(tma_done[k % num_stages],
-                                           (k // num_stages) & 1)
+                    T.mbarrier_wait_parity(tma_done[k % num_stages], (k // num_stages) & 1)
                     for ki in T.serial(block_K // 2):
                         row = ki * 2 + row_in_pair
                         for ci in T.serial(n_chunks):
@@ -190,8 +181,7 @@ def grouped_gemm_sm100_fp8_to_bf16(
             # ============================ W3: tcgen05.mma issuer ======================
             elif tx < 128:
                 for k in T.serial(k_iters):
-                    T.mbarrier_wait_parity(loaded[k % num_stages],
-                                           (k // num_stages) & 1)
+                    T.mbarrier_wait_parity(loaded[k % num_stages], (k // num_stages) & 1)
                     T.tcgen05_gemm(
                         A_shared[k % num_stages, :, :],
                         B_shared[k % num_stages, :, :],
@@ -212,22 +202,30 @@ def grouped_gemm_sm100_fp8_to_bf16(
     return kernel
 
 
-def run(batch_sizes_list, K, N, block_M=128, block_N=256, block_K=64, num_stages=3,
-        profile=False):
+def run(batch_sizes_list, K, N, block_M=128, block_N=256, block_K=64, num_stages=3, profile=False):
     kernel = grouped_gemm_sm100_fp8_to_bf16(
-        tuple(batch_sizes_list), K, N,
-        block_M=block_M, block_N=block_N, block_K=block_K, num_stages=num_stages,
+        tuple(batch_sizes_list),
+        K,
+        N,
+        block_M=block_M,
+        block_N=block_N,
+        block_K=block_K,
+        num_stages=num_stages,
     )
 
     device = torch.device("cuda")
     A, B, _C, batch_sizes, batch_offsets, batch_padded_offsets = construct_inputs_bf16_fp8(
-        batch_sizes_list, K, N, padding_M=block_M, device=device,
+        batch_sizes_list,
+        K,
+        N,
+        padding_M=block_M,
+        device=device,
     )
 
     out = kernel(A, B, batch_sizes, batch_offsets, batch_padded_offsets)
     ref = torch_gmm_bf16_fp8_ref(A, B, batch_sizes_list, batch_offsets.tolist())
     if torch.allclose(out, ref, rtol=2e-2, atol=2e-2):
-        print(f"✅ Tilelang(SM100, bf16×fp8→bf16) and torch ref match")
+        print("✅ Tilelang(SM100, bf16×fp8→bf16) and torch ref match")
     else:
         diff = (out.float() - ref.float()).abs()
         print(f"❌ mismatch: max={diff.max().item():.4f} mean={diff.mean().item():.4f}")
@@ -235,7 +233,8 @@ def run(batch_sizes_list, K, N, block_M=128, block_N=256, block_K=64, num_stages
     if profile:
         profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
         latency = profiler.do_bench(
-            warmup=100, rep=200,
+            warmup=100,
+            rep=200,
             input_tensors=[A, B, batch_sizes, batch_offsets, batch_padded_offsets],
         )
         total_M = sum(batch_sizes_list)
@@ -245,8 +244,7 @@ def run(batch_sizes_list, K, N, block_M=128, block_N=256, block_K=64, num_stages
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--batch_sizes", type=str, default="1024,1024,1024,1024",
-                   help="comma-separated per-group row counts")
+    p.add_argument("--batch_sizes", type=str, default="1024,1024,1024,1024", help="comma-separated per-group row counts")
     p.add_argument("--K", type=int, default=4096)
     p.add_argument("--N", type=int, default=4096)
     p.add_argument("--block_M", type=int, default=128)
@@ -257,7 +255,13 @@ if __name__ == "__main__":
     args = p.parse_args()
 
     bs = [int(x) for x in args.batch_sizes.split(",")]
-    run(bs, args.K, args.N,
-        block_M=args.block_M, block_N=args.block_N,
-        block_K=args.block_K, num_stages=args.num_stages,
-        profile=args.profile)
+    run(
+        bs,
+        args.K,
+        args.N,
+        block_M=args.block_M,
+        block_N=args.block_N,
+        block_K=args.block_K,
+        num_stages=args.num_stages,
+        profile=args.profile,
+    )

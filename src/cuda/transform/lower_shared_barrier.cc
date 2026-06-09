@@ -149,11 +149,11 @@ private:
                                       ? init_mbarrier_calls_.back()
                                       : SeqStmt(init_mbarrier_calls_),
                                   Stmt()));
-    // 2CTA TMEM lowering inserts a cluster sync immediately after tcgen05.alloc.
-    // In that path the allocation sync is the first point where any role can
-    // observe the initialized barriers, so a separate pre-allocation cluster
-    // sync only adds launch prologue overhead and diverges from the intended
-    // producer/consumer startup order.
+    // 2CTA TMEM lowering inserts a cluster sync immediately after
+    // tcgen05.alloc. In that path the allocation sync is the first point where
+    // any role can observe the initialized barriers, so a separate
+    // pre-allocation cluster sync only adds launch prologue overhead and
+    // diverges from the intended producer/consumer startup order.
     bool use_2cta_tmem = use_2cta_;
     if (!has_cluster_barrier_ || !use_2cta_tmem) {
       new_body.push_back(Evaluate(
@@ -217,7 +217,8 @@ PrimFunc LowerSharedBarrier(PrimFunc f, bool disable_shuffle_elect) {
     auto dims = cluster_attr.value();
     int64_t product = 1;
     for (auto d : dims) {
-      if (auto *imm = d.as<IntImmNode>()) product *= imm->value;
+      if (auto *imm = d.as<IntImmNode>())
+        product *= imm->value;
     }
     use_2cta = product > 1;
   }

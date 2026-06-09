@@ -243,7 +243,6 @@ def attention_kernel_1sm(
         raise ValueError(f"heads={heads} must be divisible by num_kv_heads={num_kv_heads}")
     groups = heads // num_kv_heads
 
-
     # softmax scale baked with log2(e) so exp2 can be used directly
     scale = (1.0 / dim) ** 0.5 * 1.44269504
 
@@ -253,10 +252,7 @@ def attention_kernel_1sm(
     accum_dtype = T.float32
 
     if dim != block_N:
-        raise ValueError(
-            f"attention_kernel_1sm split DSL requires dim == block_N; got "
-            f"dim={dim}, block_N={block_N}"
-        )
+        raise ValueError(f"attention_kernel_1sm split DSL requires dim == block_N; got dim={dim}, block_N={block_N}")
 
     # The 1SM split path covers two 128-row Q tiles per CTA.
     kq2_threads = 512
@@ -330,13 +326,7 @@ def attention_kernel_1sm(
     ):
         a_base = T.tcgen05_smem_base_16b(a_smem_ptr)
         b_base = T.tcgen05_smem_base_16b(b_smem_ptr)
-        idesc = (
-            T.uint32(1 << 4)
-            | T.uint32(1 << 7)
-            | T.uint32(1 << 10)
-            | T.uint32((128 // 8) << 17)
-            | T.uint32((128 // 16) << 24)
-        )
+        idesc = T.uint32(1 << 4) | T.uint32(1 << 7) | T.uint32(1 << 10) | T.uint32((128 // 8) << 17) | T.uint32((128 // 16) << 24)
         first = T.alloc_var(T.uint32, 1)
         for t in T.unroll(2):
             q_off = t * block_M * 64 * 2
@@ -506,7 +496,6 @@ def attention_kernel_1sm(
             if T.get_thread_binding() % 32 == 0:
                 T.mbarrier_arrive(mbar_p)
 
-
     @T.prim_func
     def main_kq2_split(
         Q: T.Tensor(q_shape, dtype),
@@ -535,13 +524,17 @@ def attention_kernel_1sm(
 
             S0_tmem = T.alloc_tmem([kq2_block_M, block_N], accum_dtype)
             P0_tmem = T.alloc_tmem(
-                [kq2_block_M, block_N], dtype,
-                alias=S0_tmem, col_offset=block_N // 2,
+                [kq2_block_M, block_N],
+                dtype,
+                alias=S0_tmem,
+                col_offset=block_N // 2,
             )
             S1_tmem = T.alloc_tmem([kq2_block_M, block_N], accum_dtype)
             P1_tmem = T.alloc_tmem(
-                [kq2_block_M, block_N], dtype,
-                alias=S1_tmem, col_offset=block_N // 2,
+                [kq2_block_M, block_N],
+                dtype,
+                alias=S1_tmem,
+                col_offset=block_N // 2,
             )
             O0_tmem = T.alloc_tmem([kq2_block_M, dim], accum_dtype)
             O1_tmem = T.alloc_tmem([kq2_block_M, dim], accum_dtype)
@@ -553,19 +546,21 @@ def attention_kernel_1sm(
                 [kq2_block_M, block_N],
                 lambda i, j: [i, j],
             )
-            T.annotate_layout({
-                S0_tmem: pv_p_layout,
-                S1_tmem: pv_p_layout,
-                O0_tmem: pv_o_layout,
-                O1_tmem: pv_o_layout,
-                P0_tmem: pv_p_layout,
-                P1_tmem: pv_p_layout,
-                Q0_shared: tilelang.layout.make_full_bank_swizzled_layout(Q0_shared),
-                Q1_shared: tilelang.layout.make_full_bank_swizzled_layout(Q1_shared),
-                K_shared_0: tilelang.layout.make_full_bank_swizzled_layout(K_shared_0),
-                K_shared_1: tilelang.layout.make_full_bank_swizzled_layout(K_shared_1),
-                KV_shared_2: tilelang.layout.make_full_bank_swizzled_layout(KV_shared_2),
-            })
+            T.annotate_layout(
+                {
+                    S0_tmem: pv_p_layout,
+                    S1_tmem: pv_p_layout,
+                    O0_tmem: pv_o_layout,
+                    O1_tmem: pv_o_layout,
+                    P0_tmem: pv_p_layout,
+                    P1_tmem: pv_p_layout,
+                    Q0_shared: tilelang.layout.make_full_bank_swizzled_layout(Q0_shared),
+                    Q1_shared: tilelang.layout.make_full_bank_swizzled_layout(Q1_shared),
+                    K_shared_0: tilelang.layout.make_full_bank_swizzled_layout(K_shared_0),
+                    K_shared_1: tilelang.layout.make_full_bank_swizzled_layout(K_shared_1),
+                    KV_shared_2: tilelang.layout.make_full_bank_swizzled_layout(KV_shared_2),
+                }
+            )
 
             mbar_s0 = T.alloc_barrier(1)
             mbar_s1 = T.alloc_barrier(1)
@@ -659,22 +654,54 @@ def attention_kernel_1sm(
             # ================================================================
             if tid >= 416 and tid < 448:
                 k_desc = T.create_tma_descriptor(
-                    9, 4, K,
-                    dim, num_kv_heads, seq_len, batch,
-                    2, dim * 2, num_kv_heads * dim * 2,
+                    9,
+                    4,
+                    K,
+                    dim,
+                    num_kv_heads,
+                    seq_len,
+                    batch,
+                    2,
+                    dim * 2,
+                    num_kv_heads * dim * 2,
                     seq_len * num_kv_heads * dim * 2,
-                    64, 1, 128, 1,
-                    1, 1, 1, 1,
-                    0, 3, 2, 0,
+                    64,
+                    1,
+                    128,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    0,
+                    3,
+                    2,
+                    0,
                 )
                 v_desc = T.create_tma_descriptor(
-                    9, 4, V,
-                    dim, num_kv_heads, seq_len, batch,
-                    2, dim * 2, num_kv_heads * dim * 2,
+                    9,
+                    4,
+                    V,
+                    dim,
+                    num_kv_heads,
+                    seq_len,
+                    batch,
+                    2,
+                    dim * 2,
+                    num_kv_heads * dim * 2,
                     seq_len * num_kv_heads * dim * 2,
-                    64, 1, 128, 1,
-                    1, 1, 1, 1,
-                    0, 3, 2, 0,
+                    64,
+                    1,
+                    128,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    0,
+                    3,
+                    2,
+                    0,
                 )
                 with T.device_func():
                     if (T.get_thread_binding() & 31) == 0:
@@ -1015,12 +1042,29 @@ def attention_kernel_1sm(
             # ---- Split epilogue TMA store ----
             if tid >= 448 and tid < 480:
                 output_desc = T.create_tma_descriptor(
-                    9, 4, Output,
-                    dim, heads, seq_len, batch,
-                    2, dim * 2, heads * dim * 2, seq_len * heads * dim * 2,
-                    64, 1, 32, 1,
-                    1, 1, 1, 1,
-                    0, 3, 2, 0,
+                    9,
+                    4,
+                    Output,
+                    dim,
+                    heads,
+                    seq_len,
+                    batch,
+                    2,
+                    dim * 2,
+                    heads * dim * 2,
+                    seq_len * heads * dim * 2,
+                    64,
+                    1,
+                    32,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    0,
+                    3,
+                    2,
+                    0,
                 )
                 with T.device_func():
                     if (T.get_thread_binding() & 31) == 0:
@@ -1065,9 +1109,7 @@ def reference_attention(Q, K, V, is_causal=False):
     V_f = V.permute(0, 2, 1, 3).to(torch.float32)
     if Q_f.size(1) != K_f.size(1):
         if Q_f.size(1) % K_f.size(1) != 0:
-            raise ValueError(
-                f"q_heads={Q_f.size(1)} must be divisible by kv_heads={K_f.size(1)}"
-            )
+            raise ValueError(f"q_heads={Q_f.size(1)} must be divisible by kv_heads={K_f.size(1)}")
         groups = Q_f.size(1) // K_f.size(1)
         K_f = K_f.repeat_interleave(groups, dim=1)
         V_f = V_f.repeat_interleave(groups, dim=1)
@@ -1083,7 +1125,6 @@ def reference_attention(Q, K, V, is_causal=False):
     return out.permute(0, 2, 1, 3).to(Q.dtype)
 
 
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--batch", type=int, default=1)
@@ -1094,23 +1135,23 @@ def main():
     ap.add_argument("--causal", action="store_true")
     ap.add_argument("--bench", action="store_true")
     ap.add_argument(
-        "--skip_ref", action="store_true",
+        "--skip_ref",
+        action="store_true",
         help="Skip PyTorch reference validation; useful for long-sequence benchmarking.",
     )
     ap.add_argument(
-        "--split_correction", action="store_true", help=argparse.SUPPRESS,
+        "--split_correction",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     ap.add_argument("--print_source", action="store_true")
     args = ap.parse_args()
 
     torch.manual_seed(0)
-    Q = torch.randn(args.batch, args.seq, args.heads, args.dim,
-                    dtype=torch.bfloat16, device="cuda")
+    Q = torch.randn(args.batch, args.seq, args.heads, args.dim, dtype=torch.bfloat16, device="cuda")
     kv_h = args.kv_heads or args.heads
-    K = torch.randn(args.batch, args.seq, kv_h, args.dim,
-                    dtype=torch.bfloat16, device="cuda")
-    V = torch.randn(args.batch, args.seq, kv_h, args.dim,
-                    dtype=torch.bfloat16, device="cuda")
+    K = torch.randn(args.batch, args.seq, kv_h, args.dim, dtype=torch.bfloat16, device="cuda")
+    V = torch.randn(args.batch, args.seq, kv_h, args.dim, dtype=torch.bfloat16, device="cuda")
 
     fn = attention_kernel_1sm(
         args.batch,
@@ -1129,14 +1170,11 @@ def main():
     else:
         O_ref = reference_attention(Q, K, V, is_causal=args.causal)
         err_abs = (O.to(torch.float32) - O_ref.to(torch.float32)).abs()
-        print(
-            f"shape={tuple(O.shape)}  "
-            f"max_abs={err_abs.max().item():.4f}  "
-            f"mean_abs={err_abs.mean().item():.4f}"
-        )
+        print(f"shape={tuple(O.shape)}  max_abs={err_abs.max().item():.4f}  mean_abs={err_abs.mean().item():.4f}")
 
     if args.bench:
         from tilelang.profiler import do_bench
+
         for _ in range(3):
             _ = fn(Q, K, V)
         torch.cuda.synchronize()

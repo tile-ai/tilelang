@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-import tvm.tirx.script.parser as T
 from tilelang._typing import BufferLikeType, BufferLikeTypeTuple, BarrierType, DType
 from tilelang import tvm as tvm
 from tilelang.language.tir import op as tir_op
 from tilelang.language import ptx_arrive_barrier, evaluate
-from tilelang.language.eager.builder import macro
 from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tilelang.utils.target import check_hip_availability
 from tvm import DataType, tirx
 from tvm.runtime import convert
 from tvm.tirx import PrimExpr, Var, Call, BufferLoad, BufferRegion
-from tilelang.utils.language import retrieve_ptr, get_buffer_region_from_load, retrieve_buffer_and_offset
+from tilelang.utils.language import retrieve_ptr, get_buffer_region_from_load
 
 _IS_HIP_AVAILABLE = check_hip_availability()
 _REGISTERED_TL_OPS = None

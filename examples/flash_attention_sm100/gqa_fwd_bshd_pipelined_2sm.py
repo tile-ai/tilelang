@@ -259,9 +259,7 @@ def attention_kernel_2sm_d128(
                 kv_bytes,
             )
             for t in T.unroll(2):
-                k_stage_offset = (
-                    stage * kv_stage_elems + t * b_per_cta * tile_cols
-                )
+                k_stage_offset = stage * kv_stage_elems + t * b_per_cta * tile_cols
                 T.tma_load_2sm(
                     k_desc,
                     T.mbarrier_at(mbar_k, stage),
@@ -280,9 +278,7 @@ def attention_kernel_2sm_d128(
                 kv_bytes,
             )
             for t in T.unroll(2):
-                v_stage_offset = (
-                    stage * kv_stage_elems + t * b_per_cta * tile_cols
-                )
+                v_stage_offset = stage * kv_stage_elems + t * b_per_cta * tile_cols
                 T.tma_load_2sm(
                     v_desc,
                     T.mbarrier_at(mbar_v, stage),
@@ -331,9 +327,7 @@ def attention_kernel_2sm_d128(
                 kv_bytes,
             )
             for t in T.unroll(2):
-                k_stage_offset = (
-                    next_stage * kv_stage_elems + t * b_per_cta * tile_cols
-                )
+                k_stage_offset = next_stage * kv_stage_elems + t * b_per_cta * tile_cols
                 T.tma_load_2sm(
                     k_desc,
                     T.mbarrier_at(mbar_k, next_stage),
@@ -360,9 +354,7 @@ def attention_kernel_2sm_d128(
                 kv_bytes,
             )
             for t in T.unroll(2):
-                v_stage_offset = (
-                    next_stage * kv_stage_elems + t * b_per_cta * tile_cols
-                )
+                v_stage_offset = next_stage * kv_stage_elems + t * b_per_cta * tile_cols
                 T.tma_load_2sm(
                     v_desc,
                     T.mbarrier_at(mbar_v, next_stage),
@@ -371,9 +363,9 @@ def attention_kernel_2sm_d128(
                         v_stage_offset,
                     ),
                     tile_v_col_base,
-                        v_row + t * b_per_cta,
+                    v_row + t * b_per_cta,
                     0,
-                    )
+                )
 
     @T.macro
     def uma_softmax_role_dsl(
@@ -534,13 +526,7 @@ def attention_kernel_2sm_d128(
         s_tmem_addr,
         mbar_s_qs,
     ):
-        idesc = (
-            T.uint32(1 << 4)
-            | T.uint32(1 << 7)
-            | T.uint32(1 << 10)
-            | T.uint32((128 // 8) << 17)
-            | T.uint32((256 // 16) << 24)
-        )
+        idesc = T.uint32(1 << 4) | T.uint32(1 << 7) | T.uint32(1 << 10) | T.uint32((128 // 8) << 17) | T.uint32((256 // 16) << 24)
         first = T.alloc_var(T.uint32, 1)
         for t in T.unroll(2):
             q_off = q_off_base + t * block_m_cta * tile_cols * 2
@@ -757,7 +743,7 @@ def attention_kernel_2sm_d128(
                             False,
                             T.uint32(0),
                         )
-                        if 1 < loop_extent:
+                        if loop_extent > 1:
                             uma_issue_next_qk_qs_dsl(
                                 qs,
                                 tkb0 + 1,
@@ -840,19 +826,21 @@ def attention_kernel_2sm_d128(
             base_layout = T.Layout([block_m_cta, 512], lambda i, j: [i, j])
             score_layout = T.Layout([block_m_cta, block_n], lambda i, j: [i, j])
             output_layout = T.Layout([block_m_cta, dim], lambda i, j: [i, j])
-            T.annotate_layout({
-                Q_shared: tilelang.layout.make_full_bank_swizzled_layout(Q_shared),
-                O_shared: tilelang.layout.make_full_bank_swizzled_layout(O_shared),
-                K_shared: tilelang.layout.make_full_bank_swizzled_layout(K_shared),
-                V_shared: tilelang.layout.make_full_bank_swizzled_layout(V_shared),
-                Base_tmem: base_layout,
-                S0_tmem: score_layout,
-                P0_tmem: score_layout,
-                S1_tmem: score_layout,
-                P1_tmem: score_layout,
-                O0_tmem: output_layout,
-                O1_tmem: output_layout,
-            })
+            T.annotate_layout(
+                {
+                    Q_shared: tilelang.layout.make_full_bank_swizzled_layout(Q_shared),
+                    O_shared: tilelang.layout.make_full_bank_swizzled_layout(O_shared),
+                    K_shared: tilelang.layout.make_full_bank_swizzled_layout(K_shared),
+                    V_shared: tilelang.layout.make_full_bank_swizzled_layout(V_shared),
+                    Base_tmem: base_layout,
+                    S0_tmem: score_layout,
+                    P0_tmem: score_layout,
+                    S1_tmem: score_layout,
+                    P1_tmem: score_layout,
+                    O0_tmem: output_layout,
+                    O1_tmem: output_layout,
+                }
+            )
 
             mb_q = T.alloc_cluster_barrier([2] * q_stages)
             mb_k = T.alloc_cluster_barrier([2] * kv_stages)
@@ -980,10 +968,7 @@ def attention_kernel_2sm_d128(
                             inv = T.alloc_var(accum_dtype, 0.0)
                             if rsum > 0.0:
                                 inv = T.tcgen05_rcp_approx_ftz(rsum)
-                            epi_offset = (
-                                qs * block_m_cta * dim
-                                + warp_in_corr * 32 * dim
-                            )
+                            epi_offset = qs * block_m_cta * dim + warp_in_corr * 32 * dim
                             T.call_extern(
                                 "void",
                                 f"tl::tcgen05_tmem_normalize_store_row_bf16_x16_addr<{dim}>",
@@ -1030,28 +1015,55 @@ def attention_kernel_2sm_d128(
                     elif warp == 13:
                         T.set_max_nreg(80, 0)
                         q_desc = T.create_tma_descriptor(
-                            9, 2, Q,
-                            heads * dim, batch * seq_len,
-                            2, heads * dim * 2,
-                            tile_cols, block_m_cta,
-                            1, 1,
-                            0, 3, 2, 0,
+                            9,
+                            2,
+                            Q,
+                            heads * dim,
+                            batch * seq_len,
+                            2,
+                            heads * dim * 2,
+                            tile_cols,
+                            block_m_cta,
+                            1,
+                            1,
+                            0,
+                            3,
+                            2,
+                            0,
                         )
                         k_desc = T.create_tma_descriptor(
-                            9, 2, K,
-                            num_kv_heads * dim, batch * seq_len,
-                            2, num_kv_heads * dim * 2,
-                            tile_cols, b_per_cta,
-                            1, 1,
-                            0, 3, 2, 0,
+                            9,
+                            2,
+                            K,
+                            num_kv_heads * dim,
+                            batch * seq_len,
+                            2,
+                            num_kv_heads * dim * 2,
+                            tile_cols,
+                            b_per_cta,
+                            1,
+                            1,
+                            0,
+                            3,
+                            2,
+                            0,
                         )
                         v_desc = T.create_tma_descriptor(
-                            9, 2, V,
-                            num_kv_heads * dim, batch * seq_len,
-                            2, num_kv_heads * dim * 2,
-                            tile_cols, b_per_cta,
-                            1, 1,
-                            0, 3, 2, 0,
+                            9,
+                            2,
+                            V,
+                            num_kv_heads * dim,
+                            batch * seq_len,
+                            2,
+                            num_kv_heads * dim * 2,
+                            tile_cols,
+                            b_per_cta,
+                            1,
+                            1,
+                            0,
+                            3,
+                            2,
+                            0,
                         )
                         with T.device_func():
                             if T.shuffle_elect(32):
@@ -1112,12 +1124,21 @@ def attention_kernel_2sm_d128(
                     elif warp == 14:
                         T.set_max_nreg(80, 0)
                         output_desc = T.create_tma_descriptor(
-                            9, 2, Output,
-                            heads * dim, batch * seq_len,
-                            2, heads * dim * 2,
-                            tile_cols, page_rows,
-                            1, 1,
-                            0, 3, 2, 0,
+                            9,
+                            2,
+                            Output,
+                            heads * dim,
+                            batch * seq_len,
+                            2,
+                            heads * dim * 2,
+                            tile_cols,
+                            page_rows,
+                            1,
+                            1,
+                            0,
+                            3,
+                            2,
+                            0,
                         )
                         if T.shuffle_elect(32):
                             for qs in T.unroll(q_stages):
@@ -1128,10 +1149,7 @@ def attention_kernel_2sm_d128(
                                 for cw in T.unroll(4):
                                     row_seq = tile_ms + qs * block_m + cw * page_rows
                                     row = tile_batch * seq_len + row_seq
-                                    epi_offset = (
-                                        qs * block_m_cta * dim
-                                        + cw * page_rows * dim
-                                    )
+                                    epi_offset = qs * block_m_cta * dim + cw * page_rows * dim
                                     epi_base = T.tcgen05_smem_ptr_add_bf16(
                                         T.access_ptr(O_shared, "r"),
                                         epi_offset,
@@ -1409,8 +1427,7 @@ def attention_kernel_2sm_d256(
                         T.mbarrier_at(mbar_kv, stage),
                         T.tcgen05_smem_ptr_add_bf16(
                             T.access_ptr(kv_stage, "w"),
-                            stage_base
-                            + (strip * 2 + box) * b_per_cta * tile_cols,
+                            stage_base + (strip * 2 + box) * b_per_cta * tile_cols,
                         ),
                         tile_kv_col_base + strip * 128 + cta_rank * b_per_cta,
                         T.Select(box == 0, v_row_lo, v_row_hi),
@@ -1579,13 +1596,7 @@ def attention_kernel_2sm_d256(
         s_tmem_addr,
         mbar_s_qs,
     ):
-        idesc = (
-            T.uint32(1 << 4)
-            | T.uint32(1 << 7)
-            | T.uint32(1 << 10)
-            | T.uint32((128 // 8) << 17)
-            | T.uint32((256 // 16) << 24)
-        )
+        idesc = T.uint32(1 << 4) | T.uint32(1 << 7) | T.uint32(1 << 10) | T.uint32((128 // 8) << 17) | T.uint32((256 // 16) << 24)
         first = T.alloc_var(T.uint32, 1)
         for box in T.unroll(4):
             q_off = box * block_m_cta * tile_cols * 2
@@ -1787,7 +1798,7 @@ def attention_kernel_2sm_d256(
 
                 if loop_extent > 0:
                     tkb0 = tile_k_base
-                    if 1 < loop_extent:
+                    if loop_extent > 1:
                         d256_issue_qk_dsl(
                             tkb0 + 1,
                             q_base_16b,
@@ -1873,16 +1884,18 @@ def attention_kernel_2sm_d256(
             base_layout = T.Layout([block_m_cta, 512], lambda i, j: [i, j])
             score_layout = T.Layout([block_m_cta, block_n], lambda i, j: [i, j])
             output_layout = T.Layout([block_m_cta, dim], lambda i, j: [i, j])
-            T.annotate_layout({
-                QO_shared: tilelang.layout.make_full_bank_swizzled_layout(QO_shared),
-                KV_shared: tilelang.layout.make_full_bank_swizzled_layout(KV_shared),
-                Base_tmem: base_layout,
-                S0_tmem: score_layout,
-                P0_tmem: score_layout,
-                S1_tmem: score_layout,
-                P1_tmem: score_layout,
-                O0_tmem: output_layout,
-            })
+            T.annotate_layout(
+                {
+                    QO_shared: tilelang.layout.make_full_bank_swizzled_layout(QO_shared),
+                    KV_shared: tilelang.layout.make_full_bank_swizzled_layout(KV_shared),
+                    Base_tmem: base_layout,
+                    S0_tmem: score_layout,
+                    P0_tmem: score_layout,
+                    S1_tmem: score_layout,
+                    P1_tmem: score_layout,
+                    O0_tmem: output_layout,
+                }
+            )
 
             mb_q = T.alloc_cluster_barrier(2)
             mb_kv = T.alloc_cluster_barrier([2] * kv_stages)
@@ -2033,28 +2046,55 @@ def attention_kernel_2sm_d256(
                     elif warp == 13:
                         T.set_max_nreg(72, 0)
                         q_desc = T.create_tma_descriptor(
-                            9, 2, Q,
-                            heads * dim, batch * seq_len,
-                            2, heads * dim * 2,
-                            tile_cols, block_m_cta,
-                            1, 1,
-                            0, 3, 2, 0,
+                            9,
+                            2,
+                            Q,
+                            heads * dim,
+                            batch * seq_len,
+                            2,
+                            heads * dim * 2,
+                            tile_cols,
+                            block_m_cta,
+                            1,
+                            1,
+                            0,
+                            3,
+                            2,
+                            0,
                         )
                         k_desc = T.create_tma_descriptor(
-                            9, 2, K,
-                            num_kv_heads * dim, batch * seq_len,
-                            2, num_kv_heads * dim * 2,
-                            tile_cols, b_per_cta,
-                            1, 1,
-                            0, 3, 2, 0,
+                            9,
+                            2,
+                            K,
+                            num_kv_heads * dim,
+                            batch * seq_len,
+                            2,
+                            num_kv_heads * dim * 2,
+                            tile_cols,
+                            b_per_cta,
+                            1,
+                            1,
+                            0,
+                            3,
+                            2,
+                            0,
                         )
                         v_desc = T.create_tma_descriptor(
-                            9, 2, V,
-                            num_kv_heads * dim, batch * seq_len,
-                            2, num_kv_heads * dim * 2,
-                            tile_cols, b_per_cta,
-                            1, 1,
-                            0, 3, 2, 0,
+                            9,
+                            2,
+                            V,
+                            num_kv_heads * dim,
+                            batch * seq_len,
+                            2,
+                            num_kv_heads * dim * 2,
+                            tile_cols,
+                            b_per_cta,
+                            1,
+                            1,
+                            0,
+                            3,
+                            2,
+                            0,
                         )
                         with T.device_func():
                             if T.shuffle_elect(32):
@@ -2092,12 +2132,21 @@ def attention_kernel_2sm_d256(
                     elif warp == 14:
                         T.set_max_nreg(72, 0)
                         output_desc = T.create_tma_descriptor(
-                            9, 2, Output,
-                            heads * dim, batch * seq_len,
-                            2, heads * dim * 2,
-                            tile_cols, page_rows,
-                            1, 1,
-                            0, 3, 2, 0,
+                            9,
+                            2,
+                            Output,
+                            heads * dim,
+                            batch * seq_len,
+                            2,
+                            heads * dim * 2,
+                            tile_cols,
+                            page_rows,
+                            1,
+                            1,
+                            0,
+                            3,
+                            2,
+                            0,
                         )
                         if T.shuffle_elect(32):
                             T.tcgen05_wait_barrier(
@@ -2109,9 +2158,7 @@ def attention_kernel_2sm_d256(
                                 row = tile_batch * seq_len + row_seq
                                 in_bounds = row_seq < seq_len
                                 for b in T.unroll(4):
-                                    epi_offset = (
-                                        (b * 4 + cw) * page_rows * tile_cols
-                                    )
+                                    epi_offset = (b * 4 + cw) * page_rows * tile_cols
                                     epi_base = T.tcgen05_smem_ptr_add_bf16(
                                         T.access_ptr(QO_shared, "r"),
                                         epi_offset,

@@ -1148,7 +1148,8 @@ private:
         // concurrently TMA-written buffers (the merge pass uses sequential
         // liveness and cannot model cross-WG concurrent access).
         // Non-WS kernels: innermost scope is fine (no concurrent access issue).
-        tvm::transform::PassContext ctx = tvm::transform::PassContext::Current();
+        tvm::transform::PassContext ctx =
+            tvm::transform::PassContext::Current();
         bool ws_enabled =
             !ctx->GetConfig<Bool>(kDisableWarpSpecialized, Bool(false)).value();
         if (ws_enabled) {
