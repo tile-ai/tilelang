@@ -20,20 +20,11 @@ bool TargetHasAsyncCopy(Target target) {
   return false;
 }
 
-int TargetGetWarpSize(Target target) {
-  if (TargetIsCDNA(target)) {
-    return 64;
-  }
-  return 32;
-}
-
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef()
-      .def("tl.TargetHasAsyncCopy",
-           [](Target target) { return TargetHasAsyncCopy(target); })
-      .def("tl.TargetGetWarpSize",
-           [](Target target) { return TargetGetWarpSize(target); });
+  refl::GlobalDef().def("tl.TargetHasAsyncCopy", [](Target target) {
+    return TargetHasAsyncCopy(target);
+  });
 }
 
 } // namespace tl

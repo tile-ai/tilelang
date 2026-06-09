@@ -7,7 +7,7 @@
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
 
-#include "backend/common/target_utils.h"
+#include "cuda/target_utils.h"
 #include "op/builtin.h"
 #include "op/tcgen5_meta.h"
 #include "op/utils.h"
@@ -87,7 +87,7 @@ bool AllowTcgen5Mma(const GemmNode &op, Target target) {
 bool AllowWgmma(const GemmNode &op, int block_size, Target target) {
   tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
 
-  int warp_size = TargetGetWarpSize(target);
+  int warp_size = TargetCudaGetWarpSize(target);
   int num_warps = block_size / warp_size;
   return !ctxt->GetConfig(kDisableWGMMA, Optional<Bool>()).value_or(false) &&
          TargetIsHopper(target) && op.m_ >= 64 && num_warps % 4 == 0 &&
@@ -289,7 +289,7 @@ struct Gemm {
   static std::pair<int, int>
   ComputeWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
                        int block_size, Target target, String gemm_inst) {
-    int num_warps = block_size / TargetGetWarpSize(target);
+    int num_warps = block_size / TargetCudaGetWarpSize(target);
     if (gemm_inst == kCudaTCGEN05) {
       policy.m_warp = 1;
       policy.n_warp = num_warps;

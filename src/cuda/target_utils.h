@@ -23,6 +23,7 @@ bool TargetIsSm100(Target target);
 bool TargetIsSM120(Target target);
 
 bool TargetCudaHasAsyncCopy(Target target);
+int TargetCudaGetWarpSize(Target target);
 bool TargetHasLdmatrix(Target target);
 bool TargetHasStmatrix(Target target);
 bool TargetHasTmem(Target target);

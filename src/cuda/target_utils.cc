@@ -89,6 +89,11 @@ bool TargetCudaHasAsyncCopy(Target target) {
   return arch >= 80;
 }
 
+int TargetCudaGetWarpSize(Target target) {
+  (void)target;
+  return 32;
+}
+
 bool TargetHasLdmatrix(Target target) {
   if (!TargetIsCuda(target))
     return false;
@@ -249,6 +254,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](Target target) { return TargetIsHopper(target); })
       .def("tl.TargetIsSM120",
            [](Target target) { return TargetIsSM120(target); })
+      .def("tl.TargetCudaGetWarpSize",
+           [](Target target) { return TargetCudaGetWarpSize(target); })
       .def("tl.TargetHasLdmatrix",
            [](Target target) { return TargetHasLdmatrix(target); })
       .def("tl.TargetHasStmatrix",

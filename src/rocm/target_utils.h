@@ -17,6 +17,7 @@ bool TargetIsRDNA(Target target);
 bool TargetIsGfx950(Target target);
 
 bool TargetRocmHasAsyncCopy(Target target);
+int TargetRocmGetWarpSize(Target target);
 int TargetGetRDNAGeneration(Target target);
 
 } // namespace tl

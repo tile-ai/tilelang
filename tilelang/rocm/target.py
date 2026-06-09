@@ -139,7 +139,7 @@ def target_is_gfx950(target: Target) -> bool:
 
 
 def target_get_warp_size(target: Target) -> int:
-    return _target_ffi_api().TargetGetWarpSize(target)
+    return _target_ffi_api().TargetRocmGetWarpSize(target)
 
 
 def target_get_rdna_generation(target: Target) -> int:

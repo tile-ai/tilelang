@@ -18,7 +18,6 @@ namespace tvm {
 namespace tl {
 
 bool TargetHasAsyncCopy(Target target);
-int TargetGetWarpSize(Target target);
 } // namespace tl
 } // namespace tvm
 

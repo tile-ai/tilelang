@@ -64,6 +64,13 @@ bool TargetRocmHasAsyncCopy(Target target) {
   return false;
 }
 
+int TargetRocmGetWarpSize(Target target) {
+  if (TargetIsCDNA(target)) {
+    return 64;
+  }
+  return 32;
+}
+
 int TargetGetRDNAGeneration(Target target) {
   if (!TargetIsRDNA(target))
     return 0;
@@ -88,6 +95,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](Target target) { return TargetIsRDNA(target); })
       .def("tl.TargetIsGfx950",
            [](Target target) { return TargetIsGfx950(target); })
+      .def("tl.TargetRocmGetWarpSize",
+           [](Target target) { return TargetRocmGetWarpSize(target); })
       .def("tl.TargetGetRDNAGeneration",
            [](Target target) { return TargetGetRDNAGeneration(target); });
 }

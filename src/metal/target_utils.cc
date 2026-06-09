@@ -16,10 +16,18 @@ bool TargetIsMetal(Target target) {
   return target->GetTargetDeviceType() == kDLMetal;
 }
 
+int TargetMetalGetWarpSize(Target target) {
+  (void)target;
+  return 32;
+}
+
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.TargetIsMetal",
-                        [](Target target) { return TargetIsMetal(target); });
+  refl::GlobalDef()
+      .def("tl.TargetIsMetal",
+           [](Target target) { return TargetIsMetal(target); })
+      .def("tl.TargetMetalGetWarpSize",
+           [](Target target) { return TargetMetalGetWarpSize(target); });
 }
 
 } // namespace tl
