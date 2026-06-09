@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import logging
-import json
-from hashlib import sha256
 from typing import TYPE_CHECKING, Literal
 from tvm.target import Target as TVMTarget
 from tvm.tirx import PrimFunc
@@ -29,16 +27,6 @@ _dispatch_map: dict[str, KernelCache] = {
     "cutedsl": CuTeDSLKernelCache(),
     "torch": TorchKernelCache(),
 }
-
-
-def _normalize_for_json(value):
-    if isinstance(value, dict):
-        return {str(k): _normalize_for_json(v) for k, v in sorted(value.items(), key=lambda item: str(item[0]))}
-    if isinstance(value, (list, tuple)):
-        return [_normalize_for_json(v) for v in value]
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    return repr(value)
 
 
 def _resolve_cache_dispatch(
@@ -76,29 +64,6 @@ def _resolve_cache_dispatch(
     return _dispatch_map[resolved_backend], norm_target, resolved_backend, verbose
 
 
-def _make_frontend_cache_key(
-    frontend_key_data: dict,
-    *,
-    target: TVMTarget,
-    target_host: TargetLike | None,
-    execution_backend: str,
-    out_idx: list[int] | int | None,
-    pass_configs: dict | None,
-    compile_flags: list[str] | str | None,
-) -> str:
-    key_data = {
-        "frontend": _normalize_for_json(frontend_key_data),
-        "out_idx": _normalize_for_json(out_idx),
-        "target": str(target),
-        "target_host": str(target_host) if target_host else None,
-        "execution_backend": execution_backend,
-        "pass_configs": _normalize_for_json(pass_configs),
-        "compile_flags": _normalize_for_json(compile_flags),
-    }
-    key_string = json.dumps(key_data, sort_keys=True)
-    return sha256(key_string.encode()).hexdigest()
-
-
 def cached(
     func: PrimFunc = None,
     out_idx: list[int] = None,
@@ -125,64 +90,6 @@ def cached(
         pass_configs=pass_configs,
         compile_flags=compile_flags,
     )
-
-
-def load_frontend_cached(
-    frontend_key_data: dict,
-    *,
-    out_idx: list[int] | int | None = None,
-    target: TargetLike | None = None,
-    target_host: TargetLike | None = None,
-    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
-    verbose: bool | None = None,
-    pass_configs: dict | None = None,
-    compile_flags: list[str] | str | None = None,
-) -> JITKernel | None:
-    cache, norm_target, execution_backend, verbose = _resolve_cache_dispatch(target, execution_backend, verbose)
-    frontend_key = _make_frontend_cache_key(
-        frontend_key_data,
-        target=norm_target,
-        target_host=target_host,
-        execution_backend=execution_backend,
-        out_idx=out_idx,
-        pass_configs=pass_configs,
-        compile_flags=compile_flags,
-    )
-    return cache.load_frontend_cached(
-        frontend_key,
-        target=norm_target,
-        target_host=target_host,
-        out_idx=out_idx,
-        execution_backend=execution_backend,
-        verbose=verbose,
-        pass_configs=pass_configs,
-        compile_flags=compile_flags,
-    )
-
-
-def store_frontend_cache(
-    frontend_key_data: dict,
-    kernel_key: str,
-    *,
-    out_idx: list[int] | int | None = None,
-    target: TargetLike | None = None,
-    target_host: TargetLike | None = None,
-    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
-    verbose: bool | None = None,
-    pass_configs: dict | None = None,
-    compile_flags: list[str] | str | None = None,
-) -> None:
-    cache, norm_target, execution_backend, verbose = _resolve_cache_dispatch(target, execution_backend, verbose)
-    frontend_key = _make_frontend_cache_key(
-        frontend_key_data,
-        target=norm_target,
-        target_host=target_host,
-        execution_backend=execution_backend,
-        out_idx=out_idx,
-        pass_configs=pass_configs,
-        compile_flags=compile_flags,
-    )
-    cache.store_frontend_cache(frontend_key, kernel_key, verbose=verbose)
 
 
 def clear_cache():
