@@ -4,7 +4,7 @@ import cutlass  # noqa: F401
 import cutlass.cute as cute  # noqa: F401
 
 # re-export cutlass.cute.arch functions first
-from cutlass.cute.arch import sync_threads  # noqa: F401
+from cutlass.cute.arch import sync_threads, sync_warp  # noqa: F401
 from cutlass.cute.arch import alloc_smem, get_dyn_smem  # noqa: F401
 from cutlass.cute.arch import warpgroup_reg_alloc, warpgroup_reg_dealloc  # noqa: F401
 
@@ -13,6 +13,7 @@ with suppress(ImportError):
 from cutlass.cute.nvgpu.warpgroup.helpers import wait_group as wgmma_wait_group  # noqa: F401
 
 from cutlass.cute import make_tensor, make_rmem_tensor, recast_ptr, where  # noqa: F401
+from cutlass.cute.testing import assert_ as runtime_assert  # noqa: F401
 from cutlass.cute.typing import Numeric  # noqa: F401
 
 from cutlass.base_dsl.typing import as_numeric, Int8, Int16, Int32, Uint8, Uint16, Uint32, Float16, Float32, BFloat16  # noqa: F401

@@ -393,6 +393,14 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             ref_id, buffer_idx, dim_idx = self.dynamic_symbolic_map[sym]
             ref_val = param_values[buffer_idx]
             if not isinstance(ref_val, torch.Tensor):
+                if ref_val is None:
+                    logger.warning(
+                        "Dynamic symbolic var %s refers to param index %s, but the runtime value is None; using 0 as a fallback",
+                        sym,
+                        buffer_idx,
+                    )
+                    args.append(0)
+                    continue
                 raise TypeError(f"Dynamic symbolic var {sym} refers to a non-tensor param at index {buffer_idx}")
             if ref_id == 0:
                 args.append(ref_val.shape[dim_idx])

@@ -153,7 +153,11 @@ def get_annotated_mod(
 
 
 def pythonic_expr(
-    expr: tvm.tirx.PrimExpr, dtype_map: dict[str, str] | None = None, ignore_cast: bool = False, floor_div_op: str = "/"
+    expr: tvm.tirx.PrimExpr,
+    dtype_map: dict[str, str] | None = None,
+    ignore_cast: bool = False,
+    floor_div_op: str = "/",
+    func_name_map: dict[str, str] | None = None,
 ) -> str:
     """
     Converts a TVM PrimExpr into a Python-style string, correctly handling operator precedence.
@@ -166,6 +170,8 @@ def pythonic_expr(
                       behavior (suitable for generating C/C++ expressions). For generating
                       Python code where integer division is required (e.g. grid/block),
                       pass '//' explicitly.
+        func_name_map: Optional mapping for rendered helper function names, e.g.
+                       {"max": "std::max"} when generating C++.
     Returns:
         A string representation of the expression.
     """
@@ -268,6 +274,8 @@ def pythonic_expr(
             p = my_precedence
         elif isinstance(node, (tvm.tirx.Min, tvm.tirx.Max)):
             op_name = "min" if isinstance(node, tvm.tirx.Min) else "max"
+            if func_name_map is not None:
+                op_name = func_name_map.get(op_name, op_name)
             a_str, _ = node_to_result_map[node.a]
             b_str, _ = node_to_result_map[node.b]
             s = f"{op_name}({a_str}, {b_str})"
