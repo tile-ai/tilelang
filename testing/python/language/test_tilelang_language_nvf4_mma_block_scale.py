@@ -338,6 +338,31 @@ def test_nvf4_mma_block_scale_rejects_unsupported_configs(kwargs):
         )
 
 
+@pytest.mark.parametrize(
+    "dtype_kwargs",
+    [
+        {"a_dtype": T.float16, "b_dtype": T.float4_e2m1fn, "accum_dtype": T.float32},
+        {"a_dtype": T.float4_e2m1fn, "b_dtype": T.float16, "accum_dtype": T.float32},
+        {"a_dtype": T.float4_e2m1fn, "b_dtype": T.float4_e2m1fn, "accum_dtype": T.float16},
+    ],
+)
+def test_nvf4_mma_block_scale_rejects_incompatible_dtypes(dtype_kwargs):
+    with pytest.raises(ValueError, match="mxf4nvf4 expects"):
+        TensorCoreIntrinEmitterWithBlockScale(
+            a_transposed=False,
+            b_transposed=True,
+            block_row_warps=2,
+            block_col_warps=2,
+            warp_row_tiles=32,
+            warp_col_tiles=32,
+            chunk=256,
+            kind="mxf4nvf4",
+            scale_vec_size=4,
+            stype="ue4m3",
+            **dtype_kwargs,
+        )
+
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(12, 0)
 @pytest.mark.parametrize("K", [64, 128, 256])

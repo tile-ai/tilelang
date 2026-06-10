@@ -241,20 +241,45 @@ def _decode_rowmajor_fp4(packed, rows: int, cols: int):
     return out
 
 
+def _decode_ue4m3(sf_bytes):
+    import torch
+
+    u = sf_bytes.to(torch.int32)
+    exponent = (u >> 3) & 0x0F
+    mantissa = u & 0x07
+    normal = (1.0 + mantissa.to(torch.float32) / 8.0) * torch.pow(2.0, exponent.to(torch.float32) - 7.0)
+    subnormal = (mantissa.to(torch.float32) / 8.0) * torch.pow(torch.tensor(2.0, device=sf_bytes.device), -6.0)
+    return torch.where(exponent == 0, subnormal, normal)
+
+
+def _blockscaled_fp4_reference(a, b, sfa_logical, sfb_logical):
+    a_f32 = _decode_rowmajor_fp4(a, M, K)
+    b_f32 = _decode_rowmajor_fp4(b, N, K)
+    sfa = _decode_ue4m3(sfa_logical).repeat_interleave(SF_VEC_SIZE, dim=1)
+    sfb = _decode_ue4m3(sfb_logical).repeat_interleave(SF_VEC_SIZE, dim=1)
+    return (a_f32 * sfa) @ (b_f32 * sfb).T
+
+
 def _build_cutlass_extension():
     from torch.utils.cpp_extension import load
 
     repo = Path(__file__).resolve().parents[2]
     cutlass_root_env = os.environ.get("CUTLASS_ROOT")
     cutlass_root = Path(cutlass_root_env) if cutlass_root_env else repo / "3rdparty" / "cutlass"
+    include_paths = [
+        cutlass_root / "include",
+        cutlass_root / "tools" / "util" / "include",
+    ]
+    if not all(path.exists() for path in include_paths):
+        raise RuntimeError(
+            "CUTLASS headers were not found. Set CUTLASS_ROOT to a CUTLASS checkout "
+            "or populate the repository's 3rdparty/cutlass submodule."
+        )
 
     return load(
         name="tilelang_cutlass_nvf4_ref",
         sources=[str(repo / "maint" / "gemm" / "cutlass_nvf4_ref.cu")],
-        extra_include_paths=[
-            str(cutlass_root / "include"),
-            str(cutlass_root / "tools" / "util" / "include"),
-        ],
+        extra_include_paths=[str(path) for path in include_paths],
         extra_cuda_cflags=[
             "-std=c++20",
             "-arch=sm_120a",
@@ -339,7 +364,7 @@ def run_compare():
     torch.cuda.synchronize()
     diff = (c_tl - c_cutlass).abs()
     diff_t = (c_tl - c_cutlass.T).abs()
-    ref = _decode_rowmajor_fp4(a, M, K) @ _decode_rowmajor_fp4(b, N, K).T
+    ref = _blockscaled_fp4_reference(a, b, sfa_logical, sfb_logical)
     diff_tl_ref = (c_tl - ref).abs()
     diff_cutlass_ref = (c_cutlass - ref).abs()
     print("scale_mode:", scale_mode)

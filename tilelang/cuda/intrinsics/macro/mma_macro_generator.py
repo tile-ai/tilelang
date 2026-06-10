@@ -1300,6 +1300,19 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
         stype: str = "ue4m3",
     ):
         self.block_scale_config = _get_block_scale_mma_config(kind, scale_vec_size, stype)
+        a_dtype_abbrv = self._get_dtype_abbrv(str(a_dtype))
+        b_dtype_abbrv = self._get_dtype_abbrv(str(b_dtype))
+        if (
+            a_dtype_abbrv != self.block_scale_config.a_dtype_abbrv
+            or b_dtype_abbrv != self.block_scale_config.b_dtype_abbrv
+            or str(accum_dtype) != self.block_scale_config.accum_dtype
+        ):
+            raise ValueError(
+                f"{self.block_scale_config.kind} expects a_dtype={self.block_scale_config.a_dtype_abbrv}, "
+                f"b_dtype={self.block_scale_config.b_dtype_abbrv}, "
+                f"accum_dtype={self.block_scale_config.accum_dtype}; "
+                f"got a_dtype={a_dtype}, b_dtype={b_dtype}, accum_dtype={accum_dtype}"
+            )
         self.kind = self.block_scale_config.kind
         self.scale_vec_size = self.block_scale_config.scale_vec_size
         self.stype = self.block_scale_config.scale_type
@@ -1398,13 +1411,19 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
 
         return _warp_ld_b_e2m1(B_local_buf, B_region, ki, thread_binding, rk)
 
-    @staticmethod
-    def _scale_region_parts(scale_buf: Buffer | BufferRegion):
+    def _scale_region_parts(self, scale_buf: Buffer | BufferRegion):
         if isinstance(scale_buf, BufferRegion):
-            return scale_buf.buffer, [r.min for r in scale_buf.region[:-2]], scale_buf.region[-2].min, scale_buf.region[-1].min
-        if isinstance(scale_buf, Buffer):
-            return scale_buf, [], 0, 0
-        raise ValueError(f"Unsupported scale buffer type: {type(scale_buf)}")
+            scale_region = scale_buf
+        elif isinstance(scale_buf, Buffer):
+            scale_region = self._legalize_to_buffer_region(scale_buf)
+        else:
+            raise ValueError(f"Unsupported scale buffer type: {type(scale_buf)}")
+        return (
+            scale_region.buffer,
+            [r.min for r in scale_region.region[:-2]],
+            scale_region.region[-2].min,
+            scale_region.region[-1].min,
+        )
 
     @staticmethod
     def _sfa_row_in_atom(tx: PrimExpr):
