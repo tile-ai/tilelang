@@ -1060,6 +1060,113 @@ For ParallelToSerial(const For &loop) {
   return Downcast<For>(rewriter(loop));
 }
 
+/*!
+ * \brief Demote a scalarized illegal-width cp.async to a synchronous masked
+ * copy.
+ *
+ * A residual copy whose out-of-bounds predicate depends on the vectorized lane
+ * (e.g. a 1-element K residual, "...+vec < 1") is scalarized to per-lane
+ * cp.async calls with num_elems == 1. For sub-16-byte dtypes that per-call
+ * width (fp16/bf16 = 2 B, fp8 = 1 B) is not a legal cp.async size {4, 8, 16}
+ * and would abort at codegen, so we demote it to a synchronous masked store:
+ *
+ *     As[idx] = if_then_else(pred, A[idx], (dtype)0)
+ */
+class IllegalCPAsyncToSyncDemoter : public StmtExprMutator {
+public:
+  /// Rewrite \p stmt, demoting any illegal-width cp.async it contains.
+  static Stmt Demote(Stmt stmt) {
+    IllegalCPAsyncToSyncDemoter demoter;
+    return demoter(std::move(stmt));
+  }
+
+private:
+  /// Recover the underlying BufferLoad (buffer + indices) from a
+  /// `tl::access_ptr(BufferLoad, extent, rw_mask)` argument, or null if \p arg
+  /// is not that form. At this pass cp.async still carries tl::access_ptr
+  /// (LowerAccessPtr has not run yet), so the BufferLoad is directly available.
+  static const BufferLoadNode *AsAccessPtrLoad(const PrimExpr &arg) {
+    const auto *call = arg.as<CallNode>();
+    if (call == nullptr || !call->op.same_as(tl::access_ptr())) {
+      return nullptr;
+    }
+    if (call->args.empty()) {
+      return nullptr;
+    }
+    return call->args[0].as<BufferLoadNode>();
+  }
+
+  /// Demote a single Evaluate(tl::ptx_cp_async(...)) of illegal width to a
+  /// synchronous masked store; leave every other statement unchanged.
+  Stmt VisitStmt_(const EvaluateNode *op) final {
+    const auto *call = op->value.as<CallNode>();
+    if (call == nullptr || !call->op.same_as(tl::ptx_cp_async())) {
+      return StmtExprMutator::VisitStmt_(op);
+    }
+    // args: [dst_access_ptr, src_access_ptr, num_elems, (predicate)]
+    if (call->args.size() != 3 && call->args.size() != 4) {
+      return StmtExprMutator::VisitStmt_(op);
+    }
+    const auto *num_elems_imm = call->args[2].as<IntImmNode>();
+    const BufferLoadNode *dst_load = AsAccessPtrLoad(call->args[0]);
+    const BufferLoadNode *src_load = AsAccessPtrLoad(call->args[1]);
+    if (num_elems_imm == nullptr || dst_load == nullptr ||
+        src_load == nullptr) {
+      // Not the recoverable tl::access_ptr form (e.g. already lowered, or a
+      // multi-element vectorized copy whose width is handled elsewhere). Leave
+      // it for the codegen guard.
+      return StmtExprMutator::VisitStmt_(op);
+    }
+
+    int64_t num_elems = num_elems_imm->value;
+    DataType dst_dtype = dst_load->buffer->dtype;
+    int64_t per_call_bits = num_elems * dst_dtype.bits() * dst_dtype.lanes();
+
+    // Demote only widths that are a whole number of bytes but not a legal
+    // cp.async size. Legal widths keep their cp.async; sub-byte (non-byte-
+    // aligned) widths are left to crash at the codegen guard, since an
+    // element-granular copy is unsafe for packed sub-byte dtypes (nibbles).
+    bool byte_aligned = (per_call_bits % 8 == 0);
+    bool legal = byte_aligned && IsValidCPAsyncTransferBytes(
+                                     static_cast<int>(per_call_bits / 8));
+    if (!byte_aligned || legal) {
+      return StmtExprMutator::VisitStmt_(op);
+    }
+
+    // An illegal width here is always num_elems == 1 (the injector only emits
+    // cp.async at a legal full width, so num_elems > 1 was filtered out above).
+    // The reconstruction copies a single element, so assert the invariant.
+    ICHECK_EQ(num_elems, 1)
+        << "illegal-width cp.async demotion expects num_elems == 1, got "
+        << num_elems;
+
+    PrimExpr loaded = BufferLoad(src_load->buffer, src_load->indices);
+    if (loaded.dtype() != dst_dtype) {
+      loaded = cast(dst_dtype, loaded);
+    }
+    PrimExpr value;
+    if (call->args.size() == 4) {
+      // The typed zero on the false branch replicates cp.async's hardware
+      // zero-fill of the destination when the predicate is false; without it
+      // the residual lane is left uninitialized and a downstream gemm reads
+      // garbage.
+      PrimExpr predicate = call->args[3];
+      value = if_then_else(predicate, loaded, make_zero(dst_dtype));
+    } else {
+      // Non-predicated illegal-width copy: still demote to a plain store (the
+      // address was in-bounds; only the async width was the problem).
+      value = loaded;
+    }
+    return BufferStore(dst_load->buffer, value, dst_load->indices);
+  }
+};
+
+/// Demote every illegal-width scalarized cp.async in \p stmt to a synchronous
+/// masked copy (see IllegalCPAsyncToSyncDemoter).
+Stmt DemoteIllegalCPAsyncToSync(Stmt stmt) {
+  return IllegalCPAsyncToSyncDemoter::Demote(std::move(stmt));
+}
+
 } // namespace
 
 For VectorizeLoop(const For &loop, const LayoutMap &layout_map,
@@ -1069,8 +1176,14 @@ For VectorizeLoop(const For &loop, const LayoutMap &layout_map,
     VectorizePlanner planner(&analyzer, layout_map);
     vectorize_hint = planner.Plan(loop);
   }
+  // Only the scalarized branch (vector_size == 1) can leave an illegal-width
+  // cp.async: the copy stays at num_elems == 1 and is never widened to a legal
+  // {4,8,16}-byte transfer by the later VectorizeLoop pass. Copies that DO
+  // vectorize (hint > 1) keep num_elems == 1 here too, but will be widened
+  // downstream, so they must NOT be demoted (doing so drops cp.async on the
+  // legal fast path -- a perf regression).
   if (vectorize_hint == 1)
-    return ParallelToSerial(loop);
+    return Downcast<For>(DemoteIllegalCPAsyncToSync(ParallelToSerial(loop)));
   auto rewriter = VectorizeRewriter(vectorize_hint);
   return Downcast<For>(rewriter(loop));
 }
@@ -1081,8 +1194,10 @@ For VectorizeLoop(const For &loop, arith::Analyzer *analyzer,
     VectorizePlanner planner(analyzer, layout_map);
     vectorize_hint = planner.Plan(loop);
   }
+  // See the note in the sibling overload: demote only in the scalarized
+  // (vector_size == 1) branch, where the illegal-width cp.async is final.
   if (vectorize_hint == 1)
-    return ParallelToSerial(loop);
+    return Downcast<For>(DemoteIllegalCPAsyncToSync(ParallelToSerial(loop)));
   auto rewriter = VectorizeRewriter(vectorize_hint);
   return Downcast<For>(rewriter(loop));
 }
