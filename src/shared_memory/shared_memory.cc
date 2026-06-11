@@ -19,6 +19,9 @@
 #include <string>
 #include <vector>
 
+#include "cuda/stubs/dynlib.h"
+#include "support/check.h"
+
 using namespace tvm;
 using namespace tvm::ffi;
 
@@ -43,6 +46,110 @@ using namespace tvm::ffi;
                 << (err_str ? err_str : "unknown") << "'";                     \
     }                                                                          \
   } while (0)
+
+namespace {
+
+void *load_libcuda() {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  constexpr const char *kLibCudaPaths[] = {"nvcuda.dll"};
+#else
+  constexpr const char *kLibCudaPaths[] = {"libcuda.so.1", "libcuda.so"};
+#endif
+  for (const char *path : kLibCudaPaths) {
+    if (void *handle = tvm::tl::stubs::dynlib_open(path)) {
+      return handle;
+    }
+  }
+  return nullptr;
+}
+
+template <typename T> T load_required_symbol(void *handle, const char *name) {
+  auto *sym = tvm::tl::stubs::dynlib_sym(handle, name);
+  if (sym == nullptr) {
+    const char *error = tvm::tl::stubs::dynlib_error();
+    LOG_FATAL << "Failed to load CUDA driver symbol '" << name
+              << "': " << (error ? error : "unknown");
+  }
+  return reinterpret_cast<T>(sym);
+}
+
+struct SharedMemoryDriverAPI {
+  decltype(&cuMemSetAccess) cuMemSetAccess_;
+  decltype(&cuMemGetAllocationGranularity) cuMemGetAllocationGranularity_;
+  decltype(&cuMemCreate) cuMemCreate_;
+  decltype(&cuMemAddressReserve) cuMemAddressReserve_;
+  decltype(&cuMemMap) cuMemMap_;
+  decltype(&cuMemRetainAllocationHandle) cuMemRetainAllocationHandle_;
+  decltype(&cuMemGetAddressRange_v2) cuMemGetAddressRange_v2_;
+  decltype(&cuMemUnmap) cuMemUnmap_;
+  decltype(&cuMemAddressFree) cuMemAddressFree_;
+  decltype(&cuMemRelease) cuMemRelease_;
+  decltype(&cuMemExportToShareableHandle) cuMemExportToShareableHandle_;
+  decltype(&cuMemImportFromShareableHandle) cuMemImportFromShareableHandle_;
+  decltype(&cuMulticastGetGranularity) cuMulticastGetGranularity_;
+  decltype(&cuMulticastCreate) cuMulticastCreate_;
+  decltype(&cuMulticastAddDevice) cuMulticastAddDevice_;
+  decltype(&cuMulticastBindMem) cuMulticastBindMem_;
+
+  static SharedMemoryDriverAPI *Get() {
+    static SharedMemoryDriverAPI api = [] {
+      void *handle = load_libcuda();
+      if (handle == nullptr) {
+        LOG_FATAL << "CUDA driver library (libcuda.so) not found. "
+                     "VMM/multicast shared-memory operations require an "
+                     "NVIDIA driver.";
+      }
+      SharedMemoryDriverAPI api{};
+#define LOAD_REQUIRED(name)                                                    \
+  api.name##_ = load_required_symbol<decltype(api.name##_)>(handle, #name)
+      LOAD_REQUIRED(cuMemSetAccess);
+      LOAD_REQUIRED(cuMemGetAllocationGranularity);
+      LOAD_REQUIRED(cuMemCreate);
+      LOAD_REQUIRED(cuMemAddressReserve);
+      LOAD_REQUIRED(cuMemMap);
+      LOAD_REQUIRED(cuMemRetainAllocationHandle);
+      LOAD_REQUIRED(cuMemGetAddressRange_v2);
+      LOAD_REQUIRED(cuMemUnmap);
+      LOAD_REQUIRED(cuMemAddressFree);
+      LOAD_REQUIRED(cuMemRelease);
+      LOAD_REQUIRED(cuMemExportToShareableHandle);
+      LOAD_REQUIRED(cuMemImportFromShareableHandle);
+      LOAD_REQUIRED(cuMulticastGetGranularity);
+      LOAD_REQUIRED(cuMulticastCreate);
+      LOAD_REQUIRED(cuMulticastAddDevice);
+      LOAD_REQUIRED(cuMulticastBindMem);
+#undef LOAD_REQUIRED
+      return api;
+    }();
+    return &api;
+  }
+};
+
+#define cuMemSetAccess SharedMemoryDriverAPI::Get()->cuMemSetAccess_
+#define cuMemGetAllocationGranularity                                          \
+  SharedMemoryDriverAPI::Get()->cuMemGetAllocationGranularity_
+#define cuMemCreate SharedMemoryDriverAPI::Get()->cuMemCreate_
+#define cuMemAddressReserve SharedMemoryDriverAPI::Get()->cuMemAddressReserve_
+#define cuMemMap SharedMemoryDriverAPI::Get()->cuMemMap_
+#define cuMemRetainAllocationHandle                                            \
+  SharedMemoryDriverAPI::Get()->cuMemRetainAllocationHandle_
+#define cuMemGetAddressRange_v2                                                \
+  SharedMemoryDriverAPI::Get()->cuMemGetAddressRange_v2_
+#define cuMemUnmap SharedMemoryDriverAPI::Get()->cuMemUnmap_
+#define cuMemAddressFree SharedMemoryDriverAPI::Get()->cuMemAddressFree_
+#define cuMemRelease SharedMemoryDriverAPI::Get()->cuMemRelease_
+#define cuMemExportToShareableHandle                                           \
+  SharedMemoryDriverAPI::Get()->cuMemExportToShareableHandle_
+#define cuMemImportFromShareableHandle                                         \
+  SharedMemoryDriverAPI::Get()->cuMemImportFromShareableHandle_
+#define cuMulticastGetGranularity                                              \
+  SharedMemoryDriverAPI::Get()->cuMulticastGetGranularity_
+#define cuMulticastCreate SharedMemoryDriverAPI::Get()->cuMulticastCreate_
+#define cuMulticastAddDevice                                                   \
+  SharedMemoryDriverAPI::Get()->cuMulticastAddDevice_
+#define cuMulticastBindMem SharedMemoryDriverAPI::Get()->cuMulticastBindMem_
+
+} // namespace
 
 static void cu_mem_set_access_all(void *ptr, size_t size) {
   int device_count;
@@ -77,6 +184,65 @@ static size_t align_to_granularity(size_t size_raw, size_t granularity) {
   if (size == 0)
     size = granularity;
   return size;
+}
+
+static bool can_create_fabric_allocation(CUdevice device) {
+  CUmemAllocationProp prop = {};
+  prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+  prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+  prop.location.id = device;
+
+  size_t granularity = 0;
+  CUresult result = cuMemGetAllocationGranularity(
+      &granularity, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM);
+  if (result != CUDA_SUCCESS || granularity == 0) {
+    return false;
+  }
+
+  CUmemGenericAllocationHandle handle;
+  result = cuMemCreate(&handle, granularity, &prop, 0);
+  if (result != CUDA_SUCCESS) {
+    return false;
+  }
+
+  return cuMemRelease(handle) == CUDA_SUCCESS;
+}
+
+static bool can_create_multicast_object(int device_count) {
+  CUmulticastObjectProp prop = {};
+  prop.numDevices = static_cast<unsigned int>(device_count);
+  prop.handleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+
+  size_t granularity = 0;
+  CUresult result = cuMulticastGetGranularity(
+      &granularity, &prop, CU_MULTICAST_GRANULARITY_RECOMMENDED);
+  if (result != CUDA_SUCCESS || granularity == 0) {
+    return false;
+  }
+
+  prop.size = granularity;
+
+  CUmemGenericAllocationHandle mc_handle;
+  result = cuMulticastCreate(&mc_handle, &prop);
+  if (result != CUDA_SUCCESS) {
+    return false;
+  }
+
+  bool ok = false;
+  CUmemFabricHandle fabric_handle;
+  result = cuMemExportToShareableHandle(&fabric_handle, mc_handle,
+                                        CU_MEM_HANDLE_TYPE_FABRIC, 0);
+  if (result == CUDA_SUCCESS) {
+    CUmemGenericAllocationHandle imported_handle;
+    result = cuMemImportFromShareableHandle(
+        &imported_handle, &fabric_handle, CU_MEM_HANDLE_TYPE_FABRIC);
+    if (result == CUDA_SUCCESS) {
+      ok = cuMemRelease(imported_handle) == CUDA_SUCCESS;
+    }
+  }
+
+  return cuMemRelease(mc_handle) == CUDA_SUCCESS && ok;
 }
 
 // ---------- VMM malloc/free ----------
@@ -208,18 +374,26 @@ static bool supports_vmm_fabric_impl() {
     return false;
 
   for (int i = 0; i < device_count; ++i) {
-    CUdevice dev;
-    SM_CU_CHECK(cuDeviceGet(&dev, i));
+    CUdevice dev = static_cast<CUdevice>(i);
     int supported = 0;
-    SM_CU_CHECK(cuDeviceGetAttribute(
-        &supported, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, dev));
+    CUresult result = cuDeviceGetAttribute(
+        &supported, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, dev);
+    if (result != CUDA_SUCCESS) {
+      return false;
+    }
     if (!supported)
+      return false;
+    if (!can_create_fabric_allocation(dev))
       return false;
   }
   return true;
 }
 
 static bool supports_multicast_impl() {
+  if (!supports_vmm_fabric_impl()) {
+    return false;
+  }
+
   int device_count = 0;
   cudaError_t err = cudaGetDeviceCount(&device_count);
   if (err != cudaSuccess || device_count == 0)
@@ -231,15 +405,17 @@ static bool supports_multicast_impl() {
     return false;
 
   for (int i = 0; i < device_count; ++i) {
-    CUdevice dev;
-    SM_CU_CHECK(cuDeviceGet(&dev, i));
+    CUdevice dev = static_cast<CUdevice>(i);
     int supported = 0;
-    SM_CU_CHECK(cuDeviceGetAttribute(
-        &supported, CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, dev));
+    CUresult result = cuDeviceGetAttribute(
+        &supported, CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, dev);
+    if (result != CUDA_SUCCESS) {
+      return false;
+    }
     if (!supported)
       return false;
   }
-  return true;
+  return can_create_multicast_object(device_count);
 }
 
 // ---------- Multicast (NVSwitch) ----------
@@ -296,8 +472,7 @@ static int64_t mc_import_handle_impl(ffi::Bytes handle_bytes) {
 static void mc_add_device_impl(int64_t mc_handle_val, int64_t device_id) {
   CUmemGenericAllocationHandle mc_handle =
       (CUmemGenericAllocationHandle)mc_handle_val;
-  CUdevice device;
-  SM_CU_CHECK(cuDeviceGet(&device, (int)device_id));
+  CUdevice device = static_cast<CUdevice>(device_id);
   SM_CU_CHECK(cuMulticastAddDevice(mc_handle, device));
 }
 

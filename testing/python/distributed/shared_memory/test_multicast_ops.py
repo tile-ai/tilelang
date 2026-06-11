@@ -11,10 +11,31 @@ import os
 import torch
 import torch.distributed as dist
 
+import tilelang
+import tilelang.language as T
 import tilelang.testing
 from testing.python.distributed._utils import distributed_test
 
 os.environ.setdefault("NCCL_DEBUG", "WARN")
+
+_N = 256
+_BLOCK_N = 256
+_THREADS = 128
+
+
+def _multimem_reduce_kernel():
+    @T.prim_func
+    def main(mcast_buf: T.Tensor((_N,), T.float32), out: T.Tensor((_N,), T.float32)):
+        with T.Kernel(1, threads=_THREADS):
+            tmp = T.alloc_fragment((_BLOCK_N,), T.float32)
+            T.multimem_ld_reduce(
+                mcast_buf[0:_BLOCK_N],
+                tmp,
+                reduce_op=T.MultimemReduceOp.ADD,
+            )
+            T.copy(tmp, out[0:_BLOCK_N])
+
+    return main
 
 # ---------------------------------------------------------------------------
 # Single-GPU tests
@@ -33,11 +54,10 @@ def test_supports_multicast():
 
 @distributed_test(nprocs=None, require_multicast=True)
 def test_distributed_multicast_allocator(local_rank: int, num_ranks: int):
-    """Create multicast buffer via BaseAllocator, verify P2P access through MC VAs."""
+    """Create multicast buffer via BaseAllocator and verify multimem access."""
     from tilelang.distributed.host import init_dist
     from tilelang.distributed.allocator import BaseAllocator
 
-    tilelang.disable_cache()
     _, _, group = init_dist(local_rank, num_ranks)
 
     allocator = BaseAllocator(
@@ -48,27 +68,39 @@ def test_distributed_multicast_allocator(local_rank: int, num_ranks: int):
         num_local_ranks=num_ranks,
         group=group,
         use_vmm=True,
-        mcast_size=1024 * 1024,  # 1 MB multicast buffer
+        mcast_size=_N * torch.empty((), dtype=torch.float32).element_size(),
     )
 
     assert allocator._initialized
     assert allocator.ptr != 0
     assert allocator._use_multicast
 
-    # Allocate from MC buffer: mcast_t backed by MC VA, local_t by phys VA
-    mcast_t, local_t = allocator._allocate_mcast_tensor((256,), torch.bfloat16)
-    assert mcast_t.shape == (256,)
+    kernel = tilelang.compile(
+        _multimem_reduce_kernel(),
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True},
+        compile_once=True,
+        compile_group=group,
+    )
+    kernel.initialize(allocator=allocator)
 
-    # Each rank writes data to its local (physical) memory
+    # Allocate from MC buffer: mcast_t is backed by MC VA for multimem
+    # instructions, local_t by this rank's physical VA for ordinary writes.
+    mcast_t, local_t = allocator._allocate_mcast_tensor((_N,), torch.float32)
+    assert mcast_t.shape == (_N,)
+
     local_t.fill_(float(local_rank + 1))
+    out = tilelang.tensor((_N,), torch.float32, allocator=allocator).zero_()
+
     torch.cuda.synchronize()
     dist.barrier(group)
 
-    # Read from MC VA — should be visible to all ranks
-    mcast_val = mcast_t[0].item()
-    assert mcast_val >= 1.0 and mcast_val <= float(num_ranks), (
-        f"rank {local_rank}: mcast_t[0] = {mcast_val}, expected 1..{num_ranks}"
-    )
+    kernel(mcast_t, out)
+    torch.cuda.synchronize()
+    dist.barrier(group)
+
+    expected_sum = float(num_ranks * (num_ranks + 1) // 2)
+    expected = torch.full((_N,), expected_sum, dtype=torch.float32, device=f"cuda:{local_rank}")
+    assert torch.allclose(out, expected, atol=1e-6, rtol=1e-6)
 
     dist.barrier(group)
     allocator.close()

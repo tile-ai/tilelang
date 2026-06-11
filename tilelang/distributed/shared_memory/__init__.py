@@ -11,31 +11,56 @@ import tvm_ffi
 
 # ---------- TVM FFI function handles ----------
 
-_vmm_malloc = tvm_ffi.get_global_func("tl.shared_memory.vmm_malloc")
-_vmm_free = tvm_ffi.get_global_func("tl.shared_memory.vmm_free")
-_create_vmm_handle = tvm_ffi.get_global_func("tl.shared_memory.create_vmm_handle")
-_open_vmm_handle = tvm_ffi.get_global_func("tl.shared_memory.open_vmm_handle")
-_close_vmm_handle = tvm_ffi.get_global_func("tl.shared_memory.close_vmm_handle")
-_sync_vmm_handles_raw = tvm_ffi.get_global_func("tl.shared_memory.sync_vmm_handles")
+def _missing_shared_memory_func(name):
+    def _missing(*args, **kwargs):
+        raise RuntimeError(
+            f"TileScale shared-memory FFI function '{name}' is unavailable. "
+            "This usually means TileLang was built without CUDA shared-memory support. "
+            "Rebuild with CUDA enabled to use distributed shared-memory allocations."
+        )
 
-_create_ipc_handle = tvm_ffi.get_global_func("tl.shared_memory.create_ipc_handle")
-_open_ipc_handle = tvm_ffi.get_global_func("tl.shared_memory.open_ipc_handle")
-_close_ipc_handle = tvm_ffi.get_global_func("tl.shared_memory.close_ipc_handle")
-_sync_ipc_handles_raw = tvm_ffi.get_global_func("tl.shared_memory.sync_ipc_handles")
+    return _missing
 
-_supports_vmm_fabric = tvm_ffi.get_global_func("tl.shared_memory.supports_vmm_fabric")
-_supports_multicast = tvm_ffi.get_global_func("tl.shared_memory.supports_multicast")
+
+def _get_required_global_func(name):
+    func = tvm_ffi.get_global_func(name, allow_missing=True)
+    if func is None:
+        return _missing_shared_memory_func(name)
+    return func
+
+
+def _get_capability_global_func(name):
+    func = tvm_ffi.get_global_func(name, allow_missing=True)
+    if func is None:
+        return lambda *args, **kwargs: False
+    return func
+
+
+_vmm_malloc = _get_required_global_func("tl.shared_memory.vmm_malloc")
+_vmm_free = _get_required_global_func("tl.shared_memory.vmm_free")
+_create_vmm_handle = _get_required_global_func("tl.shared_memory.create_vmm_handle")
+_open_vmm_handle = _get_required_global_func("tl.shared_memory.open_vmm_handle")
+_close_vmm_handle = _get_required_global_func("tl.shared_memory.close_vmm_handle")
+_sync_vmm_handles_raw = _get_required_global_func("tl.shared_memory.sync_vmm_handles")
+
+_create_ipc_handle = _get_required_global_func("tl.shared_memory.create_ipc_handle")
+_open_ipc_handle = _get_required_global_func("tl.shared_memory.open_ipc_handle")
+_close_ipc_handle = _get_required_global_func("tl.shared_memory.close_ipc_handle")
+_sync_ipc_handles_raw = _get_required_global_func("tl.shared_memory.sync_ipc_handles")
+
+_supports_vmm_fabric = _get_capability_global_func("tl.shared_memory.supports_vmm_fabric")
+_supports_multicast = _get_capability_global_func("tl.shared_memory.supports_multicast")
 
 # Multicast (NVSwitch) ops
-_mc_create = tvm_ffi.get_global_func("tl.shared_memory.mc_create")
-_mc_export_handle = tvm_ffi.get_global_func("tl.shared_memory.mc_export_handle")
-_mc_import_handle = tvm_ffi.get_global_func("tl.shared_memory.mc_import_handle")
-_mc_add_device = tvm_ffi.get_global_func("tl.shared_memory.mc_add_device")
-_mc_bind_mem = tvm_ffi.get_global_func("tl.shared_memory.mc_bind_mem")
-_mc_map = tvm_ffi.get_global_func("tl.shared_memory.mc_map")
-_mc_release_handle = tvm_ffi.get_global_func("tl.shared_memory.mc_release_handle")
-_mc_unmap = tvm_ffi.get_global_func("tl.shared_memory.mc_unmap")
-_mc_get_aligned_size = tvm_ffi.get_global_func("tl.shared_memory.mc_get_aligned_size")
+_mc_create = _get_required_global_func("tl.shared_memory.mc_create")
+_mc_export_handle = _get_required_global_func("tl.shared_memory.mc_export_handle")
+_mc_import_handle = _get_required_global_func("tl.shared_memory.mc_import_handle")
+_mc_add_device = _get_required_global_func("tl.shared_memory.mc_add_device")
+_mc_bind_mem = _get_required_global_func("tl.shared_memory.mc_bind_mem")
+_mc_map = _get_required_global_func("tl.shared_memory.mc_map")
+_mc_release_handle = _get_required_global_func("tl.shared_memory.mc_release_handle")
+_mc_unmap = _get_required_global_func("tl.shared_memory.mc_unmap")
+_mc_get_aligned_size = _get_required_global_func("tl.shared_memory.mc_get_aligned_size")
 
 
 # ---------- tensor_from_ptr (pure Python, no C++ torch dependency) ----------
