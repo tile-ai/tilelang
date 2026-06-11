@@ -504,17 +504,20 @@ TVM_DLL const Op &ptx_mma_sm70();
  *  scale_vec=2/4, m16n8k64 for e2m1 x e2m1 inputs with ue8m0/ue4m3 scale
  *  factors.
  *
- *  void ptx_mma_blockscale(StringImm shape, StringImm A_layout,
- *                          StringImm B_layout, StringImm A_dtype,
- *                          StringImm B_dtype, StringImm C_dtype,
- *                          Integer scale_vec,
+ *  void ptx_mma_blockscaled(StringImm dtype, StringImm shape,
+ *                          StringImm A_layout, StringImm B_layout,
+ *                          StringImm A_dtype, StringImm B_dtype,
+ *                          StringImm C_dtype, StringImm SF_dtype,
+ *                          Integer scale_vec_size,
  *                          Var multiplicand_a, Expr a_index,
  *                          Var multiplicand_b, Expr b_index,
  *                          Var accumulator, Expr c_index,
- *                          Expr scale_a, Expr scale_b,
- *                          Expr scale_id_a, Expr scale_id_b);
+ *                          Expr scale_a, Expr scale_b);
+ *
+ *  TileLang also accepts optional Expr scale_id_a, Expr scale_id_b arguments
+ *  after scale_b for selecting entries inside packed scale registers.
  */
-TVM_DLL const Op &ptx_mma_blockscale();
+TVM_DLL const Op &ptx_mma_blockscaled();
 
 /*!
  * \brief tvm intrinsics for ldmatrix
