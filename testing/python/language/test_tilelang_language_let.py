@@ -57,5 +57,4 @@ def test_producer_bind_kernel():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_bind_kernel()
+    tilelang.testing.main()
