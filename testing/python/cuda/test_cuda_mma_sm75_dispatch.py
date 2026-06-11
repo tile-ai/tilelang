@@ -5,6 +5,7 @@ from tilelang import tvm
 import tilelang.testing
 from tilelang.cuda.intrinsics.macro.mma_macro_generator import TensorCoreIntrinEmitter, TensorCoreIntrinEmitterWithLadderTransform
 from tilelang.cuda.intrinsics.macro.mma_sm75_macro_generator import TensorCoreIntrinEmitterSM75
+from tilelang.cuda.op.gemm.gemm_fma import GemmFMA
 from tilelang.cuda.op.gemm.gemm_mma import GemmMMA
 from tilelang.cuda.op.gemm.gemm_mma_sm70 import GemmMMASm70
 from tilelang.cuda.op.gemm.gemm_mma_sm75 import GemmMMASm75
@@ -17,6 +18,7 @@ def test_sm75_uses_sm75_mma_gemm_impl():
     assert resolve_gemm_impl("cuda.mma", Target({"kind": "cuda", "arch": "sm_70"})) is GemmMMASm70
     assert resolve_gemm_impl("cuda.mma", Target({"kind": "cuda", "arch": "sm_75"})) is GemmMMASm75
     assert resolve_gemm_impl("cuda.mma", Target({"kind": "cuda", "arch": "sm_80"})) is GemmMMA
+    assert resolve_gemm_impl("cuda.fma", Target({"kind": "cuda", "arch": "sm_70"})) is GemmFMA
 
 
 def test_sm75_fp16_emitter_uses_m16n8k8_shape():
