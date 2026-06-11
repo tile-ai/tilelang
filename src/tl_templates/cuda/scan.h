@@ -179,7 +179,8 @@ template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
   template <typename T>
   static TL_DEVICE void run_auto(const T *__restrict__ src, T *__restrict__ dst,
                                  int H, int W) {
-    InclusiveScan2D<ScanSumOp, threads, Axis, reverse>::run_auto(src, dst, H, W);
+    InclusiveScan2D<ScanSumOp, threads, Axis, reverse>::run_auto(src, dst, H,
+                                                                 W);
   }
 };
 
@@ -207,7 +208,8 @@ template <int threads, int Axis = 0, bool reverse = false> struct CumMax2D {
   template <typename T>
   static TL_DEVICE void run_auto(const T *__restrict__ src, T *__restrict__ dst,
                                  int H, int W) {
-    InclusiveScan2D<ScanMaxOp, threads, Axis, reverse>::run_auto(src, dst, H, W);
+    InclusiveScan2D<ScanMaxOp, threads, Axis, reverse>::run_auto(src, dst, H,
+                                                                 W);
   }
 };
 
