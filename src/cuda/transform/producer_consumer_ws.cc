@@ -1536,12 +1536,23 @@ private:
         continue;
       }
       bool all_movable = true;
+      LocalLiveSet movable_probe_live = producer_body_live;
       for (int ci = compute_cursor; ci < wait_pos; ++ci) {
+        const LocalAccessSummary &summary = consumer_compute_summaries[ci];
+        if (consumer_compute_stmts[ci].as<BindNode>()) {
+          if (!movable_probe_live.NeedsAnyDef(summary)) {
+            all_movable = false;
+            break;
+          }
+          movable_probe_live.AddUses(summary);
+          continue;
+        }
         if (!IsProducerMovableLoopPrefixStmt(consumer_compute_stmts[ci],
                                              target_)) {
           all_movable = false;
           break;
         }
+        movable_probe_live.AddUses(summary);
       }
       if (all_movable) {
         std::vector<bool> add_to_producer(consumer_compute_stmts.size(), false);
