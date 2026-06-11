@@ -6,23 +6,27 @@
 
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include <dmlc/memory_io.h>
 #include <tvm/ffi/extra/c_env_api.h>
+#include <tvm/ffi/extra/module.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/runtime/logging.h>
 
 #include <array>
+#include <cstdint>
 #include <mutex>
+#include <sstream>
 #include <string>
-#include <unordered_map>
-#include <vector>
 
 #include "runtime/cuda/cuda_common.h"
 #include "runtime/file_utils.h"
-#include "runtime/meta_data.h"
+#include "runtime/metadata.h"
 #include "runtime/pack_args.h"
 #include "runtime/thread_storage_scope.h"
-#include "runtime.h"
+#include "cuda/runtime.h"
+#include "cuda/stubs/dynlib.h"
+#include "support/bytes_io.h"
+#include "support/check.h"
 
 namespace tvm {
 namespace runtime {
@@ -35,14 +39,64 @@ inline void EnsureCurrentDeviceContext(int device_id) {
   CUDA_CALL(cudaSetDevice(device_id));
 }
 
-std::unordered_map<std::string, FunctionInfo>
-ToStdFunctionInfoMap(const ffi::Map<ffi::String, FunctionInfo> &fmap) {
-  std::unordered_map<std::string, FunctionInfo> result;
-  for (const auto &kv : fmap) {
-    result.emplace(static_cast<std::string>(kv.first), kv.second);
+void *LoadLibCuda() {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  constexpr const char *kLibCudaPaths[] = {"nvcuda.dll"};
+#else
+  constexpr const char *kLibCudaPaths[] = {"libcuda.so.1", "libcuda.so"};
+#endif
+  for (const char *path : kLibCudaPaths) {
+    if (void *handle = tvm::tl::stubs::dynlib_open(path)) {
+      return handle;
+    }
   }
-  return result;
+  return nullptr;
 }
+
+template <typename T> T LoadRequiredCudaSymbol(void *handle, const char *name) {
+  auto *sym = tvm::tl::stubs::dynlib_sym(handle, name);
+  if (sym == nullptr) {
+    const char *error = tvm::tl::stubs::dynlib_error();
+    LOG(FATAL) << "Failed to load CUDA driver symbol '" << name
+               << "': " << (error ? error : "unknown");
+  }
+  return reinterpret_cast<T>(sym);
+}
+
+struct TileScaleCudaContextAPI {
+  decltype(&cuDeviceGet) cuDeviceGet_;
+  decltype(&cuDevicePrimaryCtxRetain) cuDevicePrimaryCtxRetain_;
+  decltype(&cuCtxSetCurrent) cuCtxSetCurrent_;
+  decltype(&cuDevicePrimaryCtxRelease) cuDevicePrimaryCtxRelease_;
+  decltype(&cuModuleGetGlobal) cuModuleGetGlobal_;
+
+  static TileScaleCudaContextAPI *Get() {
+    static TileScaleCudaContextAPI api = [] {
+      void *handle = LoadLibCuda();
+      if (handle == nullptr) {
+        LOG(FATAL) << "CUDA driver library (libcuda.so) not found.";
+      }
+      TileScaleCudaContextAPI api{};
+      api.cuDeviceGet_ =
+          LoadRequiredCudaSymbol<decltype(api.cuDeviceGet_)>(
+              handle, "cuDeviceGet");
+      api.cuDevicePrimaryCtxRetain_ =
+          LoadRequiredCudaSymbol<decltype(api.cuDevicePrimaryCtxRetain_)>(
+              handle, "cuDevicePrimaryCtxRetain");
+      api.cuCtxSetCurrent_ =
+          LoadRequiredCudaSymbol<decltype(api.cuCtxSetCurrent_)>(
+              handle, "cuCtxSetCurrent");
+      api.cuDevicePrimaryCtxRelease_ =
+          LoadRequiredCudaSymbol<decltype(api.cuDevicePrimaryCtxRelease_)>(
+              handle, "cuDevicePrimaryCtxRelease");
+      api.cuModuleGetGlobal_ =
+          LoadRequiredCudaSymbol<decltype(api.cuModuleGetGlobal_)>(
+              handle, "cuModuleGetGlobal_v2");
+      return api;
+    }();
+    return &api;
+  }
+};
 
 } // namespace
 
@@ -84,18 +138,24 @@ private:
 class TileScaleCUDAModuleNode : public ffi::ModuleObj {
 public:
   explicit TileScaleCUDAModuleNode(
-      std::string data, std::string fmt,
-      std::unordered_map<std::string, FunctionInfo> fmap,
-      std::string cuda_source)
-      : data_(data), fmt_(fmt), fmap_(fmap), cuda_source_(cuda_source) {
+      ffi::Bytes data, ffi::String fmt,
+      ffi::Map<ffi::String, FunctionInfo> fmap,
+      ffi::Map<ffi::String, ffi::String> source)
+      : data_(std::move(data)), fmt_(std::move(fmt)), fmap_(std::move(fmap)),
+        source_(std::move(source)) {
     std::fill(module_.begin(), module_.end(), nullptr);
+    std::fill(context_.begin(), context_.end(), nullptr);
   }
 
   ~TileScaleCUDAModuleNode() {
     for (size_t i = 0; i < module_.size(); ++i) {
       if (module_[i] != nullptr) {
-        EnsureCurrentDeviceContext(static_cast<int>(i));
-        CUDA_DRIVER_CALL(cuModuleUnload(module_[i]));
+        BindPrimaryContext(static_cast<int>(i));
+        CUresult result = cuModuleUnload(module_[i]);
+        (void)result;
+      }
+      if (context_[i] != nullptr) {
+        ReleasePrimaryContext(static_cast<int>(i));
       }
     }
   }
@@ -113,44 +173,50 @@ public:
     std::string fmt = GetFileFormat(file_name, format);
     std::string meta_file = GetMetaFilePath(file_name);
     if (fmt == "cu") {
-      ICHECK_NE(cuda_source_.length(), 0);
+      auto cuda_source = source_.Get("cuda");
+      ICHECK(cuda_source.has_value());
       SaveMetaDataToFile(meta_file, fmap_);
-      SaveBinaryToFile(file_name, cuda_source_);
+      SaveBinaryToFile(file_name, std::string(cuda_source.value()));
     } else {
-      ICHECK_EQ(fmt, fmt_) << "Can only save to format=" << fmt_;
+      ICHECK_EQ(fmt, std::string(fmt_)) << "Can only save to format=" << fmt_;
       SaveMetaDataToFile(meta_file, fmap_);
-      SaveBinaryToFile(file_name, data_);
+      SaveBinaryToFile(file_name, std::string(data_));
     }
   }
 
   ffi::Bytes SaveToBytes() const final {
     std::string buffer;
-    dmlc::MemoryStringStream ms(&buffer);
-    dmlc::Stream *stream = &ms;
-    stream->Write(fmt_);
-    stream->Write(fmap_);
-    stream->Write(data_);
-    return ffi::Bytes(buffer);
+    support::BytesOutStream stream(&buffer);
+    stream.Write(fmt_);
+    stream.Write(fmap_);
+    stream.Write(data_);
+    return ffi::Bytes(std::move(buffer));
   }
 
   ffi::String InspectSource(const ffi::String &format) const final {
-    if (format == fmt_)
-      return data_;
-    if (cuda_source_.length() != 0) {
-      return cuda_source_;
-    } else {
-      if (fmt_ == "ptx")
-        return data_;
-      return "";
+    if (format == fmt_) {
+      return ffi::String(data_.data(), data_.size());
     }
+    if (auto it = source_.find(format); it != source_.end()) {
+      return (*it).second;
+    }
+    if (format.empty()) {
+      if (auto it = source_.find("cuda"); it != source_.end()) {
+        return (*it).second;
+      }
+      if (fmt_ == "ptx" || fmt_ == "cuda") {
+        return ffi::String(data_.data(), data_.size());
+      }
+    }
+    return ffi::String();
   }
 
   // Get a CUfunction from primary context in device_id
   CUfunction GetFunc(int device_id, const std::string &func_name) {
     std::lock_guard<std::mutex> lock(mutex_);
-    EnsureCurrentDeviceContext(device_id);
+    BindPrimaryContext(device_id);
     if (module_[device_id] == nullptr) {
-      CUDA_DRIVER_CALL(cuModuleLoadData(&(module_[device_id]), data_.c_str()));
+      CUDA_DRIVER_CALL(cuModuleLoadData(&(module_[device_id]), data_.data()));
       static auto nvshmem_init_hook =
           ffi::Function::GetGlobal("runtime.nvshmem.cumodule_init");
       if (nvshmem_init_hook.has_value()) {
@@ -173,9 +239,9 @@ public:
   CUdeviceptr GetGlobal(int device_id, const std::string &global_name,
                         size_t expect_nbytes) {
     std::lock_guard<std::mutex> lock(mutex_);
-    EnsureCurrentDeviceContext(device_id);
+    BindPrimaryContext(device_id);
     if (module_[device_id] == nullptr) {
-      CUDA_DRIVER_CALL(cuModuleLoadData(&(module_[device_id]), data_.c_str()));
+      CUDA_DRIVER_CALL(cuModuleLoadData(&(module_[device_id]), data_.data()));
       static auto nvshmem_init_hook =
           ffi::Function::GetGlobal("runtime.nvshmem.cumodule_init");
       if (nvshmem_init_hook.has_value()) {
@@ -185,24 +251,48 @@ public:
     CUdeviceptr global;
     size_t nbytes;
 
-    CUresult result = cuModuleGetGlobal(&global, &nbytes, module_[device_id],
-                                        global_name.c_str());
-    ICHECK_EQ(nbytes, expect_nbytes);
+    CUresult result = TileScaleCudaContextAPI::Get()->cuModuleGetGlobal_(
+        &global, &nbytes, module_[device_id], global_name.c_str());
     if (result != CUDA_SUCCESS) {
       const char *msg;
       cuGetErrorName(result, &msg);
       LOG(FATAL) << "CUDAError: cuModuleGetGlobal " << global_name
                  << " failed with error: " << msg;
     }
+    ICHECK_EQ(nbytes, expect_nbytes);
     return global;
   }
 
+  void BindPrimaryContext(int device_id) {
+    EnsureCurrentDeviceContext(device_id);
+    auto *api = TileScaleCudaContextAPI::Get();
+    CUdevice device;
+    CUDA_DRIVER_CALL(api->cuDeviceGet_(&device, device_id));
+    if (context_[device_id] == nullptr) {
+      CUDA_DRIVER_CALL(api->cuDevicePrimaryCtxRetain_(&context_[device_id],
+                                                      device));
+    }
+    CUDA_DRIVER_CALL(api->cuCtxSetCurrent_(context_[device_id]));
+  }
+
+  void ReleasePrimaryContext(int device_id) {
+    auto *api = TileScaleCudaContextAPI::Get();
+    CUdevice device;
+    CUresult result = api->cuDeviceGet_(&device, device_id);
+    if (result == CUDA_SUCCESS) {
+      result = api->cuDevicePrimaryCtxRelease_(device);
+    }
+    (void)result;
+    context_[device_id] = nullptr;
+  }
+
 private:
-  std::string data_;
-  std::string fmt_;
-  std::unordered_map<std::string, FunctionInfo> fmap_;
-  std::string cuda_source_;
+  ffi::Bytes data_;
+  ffi::String fmt_;
+  ffi::Map<ffi::String, FunctionInfo> fmap_;
+  ffi::Map<ffi::String, ffi::String> source_;
   std::array<CUmodule, kTileScaleMaxNumGPUs> module_;
+  std::array<CUcontext, kTileScaleMaxNumGPUs> context_;
   std::mutex mutex_;
 };
 
@@ -226,11 +316,11 @@ void TileScaleInitDistributedTable::operator()(const ffi::PackedArgs &args,
     pcache_[device_id] = m_->GetGlobal(device_id, "meta_data", kMetaDataSize);
   }
 
-  // Copy data from host to device constant memory.
-  // Note: must use Driver API (cuMemcpyHtoD) instead of cudaMemcpyToSymbol,
-  // because the symbol lives in a dynamically loaded CUmodule.
+  // Copy data from host to device constant memory. The symbol lives in a
+  // dynamically loaded CUmodule, so use the resolved device pointer directly.
   size_t bytes = static_cast<size_t>(table_size) * sizeof(uint64_t);
-  CUDA_DRIVER_CALL(cuMemcpyHtoD(pcache_[device_id], host_table, bytes));
+  CUDA_CALL(cudaMemcpy(reinterpret_cast<void *>(pcache_[device_id]),
+                       host_table, bytes, cudaMemcpyHostToDevice));
 
   // Return success
   *rv = 0;
@@ -241,7 +331,7 @@ class TileScaleCUDAWrappedFunc {
 public:
   void Init(TileScaleCUDAModuleNode *m, ffi::ObjectPtr<ffi::Object> sptr,
             const std::string &func_name, size_t num_void_args,
-            const std::vector<std::string> &launch_param_tags) {
+            const ffi::Array<ffi::String> &launch_param_tags) {
     m_ = m;
     sptr_ = sptr;
     func_name_ = func_name;
@@ -410,32 +500,6 @@ private:
   bool use_dyn_shared_memory_{false};
 };
 
-// Prepare global barrier class
-class TileScaleCUDAPrepGlobalBarrier {
-public:
-  TileScaleCUDAPrepGlobalBarrier(TileScaleCUDAModuleNode *m,
-                                 ffi::ObjectPtr<ffi::Object> sptr)
-      : m_(m), sptr_(sptr) {
-    std::fill(pcache_.begin(), pcache_.end(), 0);
-  }
-
-  void operator()(const ffi::PackedArgs &args, ffi::Any *rv) const {
-    int device_id;
-    CUDA_CALL(cudaGetDevice(&device_id));
-    EnsureCurrentDeviceContext(device_id);
-    if (pcache_[device_id] == 0) {
-      pcache_[device_id] = m_->GetGlobal(
-          device_id, symbol::tvm_global_barrier_state, sizeof(unsigned));
-    }
-    CUDA_DRIVER_CALL(cuMemsetD32(pcache_[device_id], 0, 1));
-  }
-
-private:
-  TileScaleCUDAModuleNode *m_;
-  ffi::ObjectPtr<ffi::Object> sptr_;
-  mutable std::array<CUdeviceptr, kTileScaleMaxNumGPUs> pcache_;
-};
-
 ffi::Optional<ffi::Function>
 TileScaleCUDAModuleNode::GetFunction(const ffi::String &name) {
   ffi::ObjectPtr<ffi::Object> sptr_to_self =
@@ -447,19 +511,22 @@ TileScaleCUDAModuleNode::GetFunction(const ffi::String &name) {
     return ffi::Function(TileScaleInitDistributedTable(this, sptr_to_self));
   }
 
-  // TVM: Handle global barrier preparation
-  if (name == symbol::tvm_prepare_global_barrier) {
-    return ffi::Function(TileScaleCUDAPrepGlobalBarrier(this, sptr_to_self));
-  }
-
-  auto it = fmap_.find(name);
-  if (it == fmap_.end())
+  auto opt_info = fmap_.Get(name);
+  if (!opt_info.has_value())
     return ffi::Function();
-  const FunctionInfo &info = it->second;
+  FunctionInfo info = opt_info.value();
   TileScaleCUDAWrappedFunc f;
-  f.Init(this, sptr_to_self, name, info.arg_types.size(),
-         info.launch_param_tags);
-  return PackFuncVoidAddr(f, info.arg_types, info.arg_extra_tags);
+  f.Init(this, sptr_to_self, name, info->arg_types.size(),
+         info->launch_param_tags);
+  return PackFuncVoidAddr(f, info->arg_types, info->arg_extra_tags);
+}
+
+static ffi::Module TileScaleCUDAModuleCreateImpl(
+    ffi::Bytes data, ffi::String fmt, ffi::Map<ffi::String, FunctionInfo> fmap,
+    ffi::Map<ffi::String, ffi::String> source) {
+  auto n = ffi::make_object<TileScaleCUDAModuleNode>(
+      std::move(data), std::move(fmt), std::move(fmap), std::move(source));
+  return ffi::Module(n);
 }
 
 /*!
@@ -474,35 +541,41 @@ ffi::Module
 TileScaleCUDAModuleCreate(std::string data, std::string fmt,
                           ffi::Map<ffi::String, FunctionInfo> fmap,
                           std::string cuda_source) {
-  auto n = ffi::make_object<TileScaleCUDAModuleNode>(
-      data, fmt, ToStdFunctionInfoMap(fmap), cuda_source);
-  return ffi::Module(n);
+  ffi::Map<ffi::String, ffi::String> source;
+  if (!cuda_source.empty()) {
+    source.Set("cuda", ffi::String(std::move(cuda_source)));
+  }
+  return TileScaleCUDAModuleCreateImpl(ffi::Bytes(std::move(data)),
+                                       ffi::String(std::move(fmt)),
+                                       std::move(fmap), std::move(source));
 }
 
 // Load TileScale CUDA module from serialized bytes (deserialization).
 ffi::Module TileScaleCUDAModuleLoadFromBytes(const ffi::Bytes &bytes) {
-  dmlc::MemoryFixedSizeStream ms(const_cast<char *>(bytes.data()),
-                                 bytes.size());
-  dmlc::Stream *stream = &ms;
-  std::string fmt;
-  std::unordered_map<std::string, FunctionInfo> fmap;
-  std::string data;
-  stream->Read(&fmt);
-  stream->Read(&fmap);
-  stream->Read(&data);
-  return TileScaleCUDAModuleCreate(data, fmt, fmap, std::string());
+  support::BytesInStream stream(bytes);
+  ffi::String fmt;
+  ffi::Map<ffi::String, FunctionInfo> fmap;
+  ffi::Bytes data;
+  stream.Read(&fmt);
+  ICHECK(stream.Read(&fmap));
+  stream.Read(&data);
+  return TileScaleCUDAModuleCreateImpl(
+      std::move(data), std::move(fmt), std::move(fmap),
+      ffi::Map<ffi::String, ffi::String>());
 }
 
 // Load TileScale CUDA module from file.
 ffi::Module TileScaleCUDAModuleLoadFile(const std::string &file_name,
                                         const ffi::String &format) {
   std::string data;
-  std::unordered_map<std::string, FunctionInfo> fmap;
+  ffi::Map<ffi::String, FunctionInfo> fmap;
   std::string fmt = GetFileFormat(file_name, format);
   std::string meta_file = GetMetaFilePath(file_name);
   LoadBinaryFromFile(file_name, &data);
   LoadMetaDataFromFile(meta_file, &fmap);
-  return TileScaleCUDAModuleCreate(data, fmt, fmap, std::string());
+  return TileScaleCUDAModuleCreateImpl(
+      ffi::Bytes(std::move(data)), ffi::String(std::move(fmt)),
+      std::move(fmap), ffi::Map<ffi::String, ffi::String>());
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

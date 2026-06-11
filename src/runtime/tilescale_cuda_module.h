@@ -10,7 +10,7 @@
 
 #include <string>
 
-#include "runtime/meta_data.h"
+#include "runtime/metadata.h"
 
 namespace tvm {
 namespace runtime {
