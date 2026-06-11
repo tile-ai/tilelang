@@ -377,43 +377,90 @@ public:
   }
 
 private:
+  static constexpr int kTensorMapSwizzleNone = 0;
+  static constexpr int kTensorMapSwizzle32B = 1;
+  static constexpr int kTensorMapSwizzle64B = 2;
+  static constexpr int kTensorMapSwizzle128B = 3;
+
+  static int DefaultTmaAlignmentBytes(Target target) {
+    if (TargetIsHopper(target)) {
+      return 1024;
+    }
+    if (TargetHasBulkCopy(target)) {
+      return 128;
+    }
+    return 16;
+  }
+
+  static int SwizzledTmaAlignmentBytes(int swizzle) {
+    // TMA shared-memory swizzle uses the absolute shared base as part of the
+    // swizzle phase. Align to one full eight-span phase for the selected
+    // swizzle width.
+    switch (swizzle) {
+    case kTensorMapSwizzle32B:
+      return 256;
+    case kTensorMapSwizzle64B:
+      return 512;
+    case kTensorMapSwizzle128B:
+      return 1024;
+    case kTensorMapSwizzleNone:
+    default:
+      return 0;
+    }
+  }
+
+  static int TmaCallAlignmentBytes(const CallNode *op, Target target) {
+    int alignment = DefaultTmaAlignmentBytes(target);
+    if (auto swizzle_ref = op->annotations.Get(attr::kTmaSwizzle)) {
+      if (auto swizzle = swizzle_ref.value().as<IntImmNode>()) {
+        alignment = std::max(alignment, SwizzledTmaAlignmentBytes(
+                                            static_cast<int>(swizzle->value)));
+      }
+    }
+    return alignment;
+  }
+
+  static bool IsTmaLikeCall(const CallNode *op) {
+    return op->op.same_as(tl::tma_load()) ||
+           op->op.same_as(tl::tma_load_im2col()) ||
+           op->op.same_as(tl::tma_load_multicast()) ||
+           op->op.same_as(tl::tma_store()) ||
+           op->op.same_as(tl::tma_load_gather4()) ||
+           op->op.same_as(tl::tma_store_scatter4());
+  }
+
   // Helper to record alignment for a shared/shared.dyn Var under alignment
   // scope
   void MarkSharedVarIfNeeded(const VarNode *op) {
-    if (!op || !under_alignment_scope_)
+    if (!op || alignment_scope_bytes_ <= 0)
       return;
     auto ptr_type = op->type_annotation.as<PointerTypeNode>();
     if (!ptr_type)
       return;
     auto scope = GetPtrStorageScope(GetRef<Var>(op));
     if (scope == "shared" || scope == "shared.dyn") {
-      auto target = Target::Current();
-      ICHECK(target.defined()) << "Target is not defined";
-      // TMA bulk-copy operands have stricter shared-memory alignment than
-      // ordinary scalar/shared accesses. Hopper keeps the existing 1024-byte
-      // alignment used by the WGMMA/TMA path, while Blackwell/SM120 also needs
-      // TMA sources at least 128-byte aligned to avoid misaligned-address
-      // launch failures.
-      int alignment = 16;
-      if (TargetIsHopper(target)) {
-        alignment = 1024;
-      } else if (TargetHasBulkCopy(target)) {
-        alignment = 128;
-      }
-      shmem_alignment_map_[op] = alignment;
+      int &alignment = shmem_alignment_map_[op];
+      alignment = std::max(alignment, alignment_scope_bytes_);
     }
   }
 
   void VisitExpr_(const CallNode *op) {
     if (op->op.same_as(tl::tl_gemm()) || op->op.same_as(tl::tl_gemm_sp()) ||
-        op->op.same_as(tl::tma_load()) || op->op.same_as(tl::tma_store()) ||
+        IsTmaLikeCall(op) ||
         op->op.same_as(tl::initialize_wgmma_descriptor()) ||
         op->op.same_as(tl::initialize_tcgen05_descriptor())) {
       // These intrinsics introduce stricter SMEM alignment requirements; mark
       // the subtree.
-      under_alignment_scope_ = true;
+      auto target = Target::Current();
+      ICHECK(target.defined()) << "Target is not defined";
+      int required_alignment = IsTmaLikeCall(op)
+                                   ? TmaCallAlignmentBytes(op, target)
+                                   : DefaultTmaAlignmentBytes(target);
+      int previous_alignment_scope = alignment_scope_bytes_;
+      alignment_scope_bytes_ =
+          std::max(alignment_scope_bytes_, required_alignment);
       StmtExprVisitor::VisitExpr_(op);
-      under_alignment_scope_ = false;
+      alignment_scope_bytes_ = previous_alignment_scope;
     } else {
       StmtExprVisitor::VisitExpr_(op);
     }
@@ -427,14 +474,14 @@ private:
   void VisitExpr_(const BufferLoadNode *op) {
     // If we encounter address_of(BufferLoad(...)) or any direct BufferLoad
     // within an alignment scope, make sure we mark the underlying shared var.
-    if (op && under_alignment_scope_) {
+    if (op && alignment_scope_bytes_ > 0) {
       const VarNode *data_var = op->buffer->data.get();
       MarkSharedVarIfNeeded(data_var);
     }
     StmtExprVisitor::VisitExpr_(op);
   }
 
-  bool under_alignment_scope_{false};
+  int alignment_scope_bytes_{0};
 
   std::unordered_map<const VarNode *, int> shmem_alignment_map_;
 };

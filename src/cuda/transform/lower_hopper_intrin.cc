@@ -13,6 +13,7 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -179,6 +180,22 @@ public:
   }
 
   PrimExpr VisitExpr_(const CallNode *call) final {
+    if (IsDescriptorBackedTmaCall(call)) {
+      Optional<PrimExpr> swizzle = GetDescriptorSwizzle(call->args[0]);
+
+      Array<PrimExpr> args;
+      args.reserve(call->args.size());
+      for (const PrimExpr &arg : call->args) {
+        args.push_back(this->VisitExpr(arg));
+      }
+
+      Map<String, ObjectRef> annotations = call->annotations;
+      if (swizzle.defined()) {
+        annotations.Set(attr::kTmaSwizzle, swizzle.value());
+      }
+      return Call(call->dtype, call->op, args, annotations, call->span);
+    }
+
     if (call->op.same_as(create_tma_descriptor()) ||
         call->op.same_as(create_tma_im2col_descriptor())) {
       Var var;
@@ -259,6 +276,29 @@ private:
     Call init_desc =
         Call(DataType::Handle(), builtin::tvm_call_packed(), init_desc_args);
     return SeqStmt({tirx::Bind(var, alloc_desc), Evaluate(init_desc)});
+  }
+
+  static bool IsDescriptorBackedTmaCall(const CallNode *call) {
+    return call->args.size() >= 1 && (call->op.same_as(tma_load()) ||
+                                      call->op.same_as(tma_load_im2col()) ||
+                                      call->op.same_as(tma_load_multicast()) ||
+                                      call->op.same_as(tma_store()) ||
+                                      call->op.same_as(tma_load_gather4()) ||
+                                      call->op.same_as(tma_store_scatter4()));
+  }
+
+  static Optional<PrimExpr> GetDescriptorSwizzle(const PrimExpr &descriptor) {
+    const auto *desc_call = descriptor.as<CallNode>();
+    if (desc_call == nullptr ||
+        !(desc_call->op.same_as(create_tma_descriptor()) ||
+          desc_call->op.same_as(create_tma_im2col_descriptor()))) {
+      return std::nullopt;
+    }
+
+    // Both descriptor encodings end with:
+    //   ..., interleave, swizzle, l2_promotion, oob_fill
+    ICHECK_GE(desc_call->args.size(), 4U);
+    return desc_call->args[desc_call->args.size() - 3];
   }
 
   Array<Stmt> prefetch_calls_;

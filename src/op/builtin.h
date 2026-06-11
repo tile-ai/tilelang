@@ -47,6 +47,9 @@ static constexpr const char *kAsyncCopyNoImplicitCommitWait =
 // parity from surrounding loop context.
 static constexpr const char *kPipelineMbarPhaseExpr =
     "tl.pipeline_mbar_phase_expr";
+// Low-level TMA call annotation carrying the CUtensorMap swizzle enum encoded
+// in the descriptor used by that call.
+static constexpr const char *kTmaSwizzle = "tl.tma_swizzle";
 static constexpr const char *kLocalVarInit = "tl.local_var_init";
 // A PrimFunc-level attribute carrying a list of handle Vars
 // that must NOT be marked with the restrict qualifier in codegen.

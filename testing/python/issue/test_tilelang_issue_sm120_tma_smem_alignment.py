@@ -18,11 +18,11 @@ arch >= 90 (sm_90, sm_100, sm_103, sm_120 and any future TMA-capable
 target) — the correct set, since TMA support and TMA's alignment
 requirements are coextensive.
 
-The test has two parts:
+The test has three parts:
 
 1. **Generated TIR check** (host-independent). Lowers the buggy-arena
    kernel for explicit `{"kind": "cuda", "arch": "sm_{90,100,120}"}` targets and asserts
-   every `tl.tma_load` destination `tirx.tvm_access_ptr` byte offset is
+   every `tl.tma_load` destination absolute shared-memory byte offset is
    provably 128-byte aligned. Runs on any host.
 
 2. **Runtime check** on the host GPU. Compiles + executes the same kernel
@@ -30,6 +30,11 @@ The test has two parts:
    `CUDA_ERROR_MISALIGNED_ADDRESS`. Pre-fix on sm_120 this crashes; on
    sm_90 (Hopper) the kernel happens to land buffers correctly even
    pre-fix. Post-fix it passes on every TMA-capable arch.
+
+3. **Swizzled TMA generated TIR check**. Lowers a direct `T.tma_copy` into a
+   `make_swizzled_layout` shared tile whose base would otherwise start at
+   `buf_dyn_shmem + 128`, and asserts the absolute TMA destination offsets are
+   1024-byte aligned. A 128B TMA swizzle has a 1024-byte base phase.
 """
 
 import torch
@@ -127,16 +132,22 @@ def _is_op_call(node, op_name: str) -> bool:
     return isinstance(node, tvm.tirx.Call) and isinstance(node.op, tvm.ir.Op) and node.op.name == op_name
 
 
-def _collect_tma_loads(mod):
+def _collect_tma_loads_from_stmt(stmt):
     loads = []
 
     def _visit(node):
         if _is_op_call(node, "tl.tma_load"):
             loads.append(node)
 
+    tvm.tirx.stmt_functor.post_order_visit(stmt, _visit)
+    return loads
+
+
+def _collect_tma_loads(mod):
+    loads = []
     for _, func in mod.functions.items():
         if isinstance(func, tvm.tirx.PrimFunc):
-            tvm.tirx.stmt_functor.post_order_visit(func.body, _visit)
+            loads.extend(_collect_tma_loads_from_stmt(func.body))
     return loads
 
 
@@ -145,20 +156,53 @@ def _byte_offset(access_ptr):
     return access_ptr.args[2] * dtype.bytes * dtype.lanes
 
 
+def _collect_alias_byte_offsets(stmt):
+    analyzer = tvm.arith.Analyzer()
+    alias_offsets = {}
+
+    def _visit(node):
+        if not isinstance(node, tvm.tirx.Bind):
+            return
+        value = node.value
+        if not _is_op_call(value, "tirx.handle_add_byte_offset"):
+            return
+        base = value.args[0]
+        base_offset = alias_offsets.get(base, 0)
+        alias_offsets[node.var] = analyzer.simplify(base_offset + value.args[1])
+
+    tvm.tirx.stmt_functor.post_order_visit(stmt, _visit)
+    return alias_offsets
+
+
+def _absolute_tma_destination_byte_offsets(mod):
+    analyzer = tvm.arith.Analyzer()
+    offsets = []
+    for _, func in mod.functions.items():
+        if not isinstance(func, tvm.tirx.PrimFunc):
+            continue
+        alias_offsets = _collect_alias_byte_offsets(func.body)
+        for load in _collect_tma_loads_from_stmt(func.body):
+            assert len(load.args) >= 3, f"malformed tl.tma_load call: {load}"
+            access_ptr = load.args[2]
+            assert _is_op_call(access_ptr, "tirx.tvm_access_ptr"), (
+                f"expected tl.tma_load destination argument to be tirx.tvm_access_ptr, got: {access_ptr}"
+            )
+            buffer_var = access_ptr.args[1]
+            base_offset = alias_offsets.get(buffer_var, 0)
+            offsets.append(analyzer.simplify(base_offset + _byte_offset(access_ptr)))
+    return offsets
+
+
 def _assert_tma_destinations_128_aligned(arch: str, mod):
     loads = _collect_tma_loads(mod)
     assert loads, f"[{arch}] expected at least one tl.tma_load in generated TIR — the kernel layout should produce TMA loads"
 
     analyzer = tvm.arith.Analyzer()
-    for load in loads:
-        assert len(load.args) >= 3, f"[{arch}] malformed tl.tma_load call: {load}"
-        access_ptr = load.args[2]
-        assert _is_op_call(access_ptr, "tirx.tvm_access_ptr"), (
-            f"[{arch}] expected tl.tma_load destination argument to be tirx.tvm_access_ptr, got: {access_ptr}"
-        )
-        byte_offset = analyzer.simplify(_byte_offset(access_ptr))
+    byte_offsets = _absolute_tma_destination_byte_offsets(mod)
+    assert len(byte_offsets) == len(loads)
+    for byte_offset in byte_offsets:
         assert analyzer.can_prove(byte_offset % 128 == 0), (
-            f"[{arch}] TMA load destination byte offset is not provably 128-byte aligned: {byte_offset}. access_ptr={access_ptr}"
+            f"[{arch}] TMA load destination absolute byte offset is not provably 128-byte aligned: {byte_offset}"
         )
 
 
@@ -187,6 +231,75 @@ def test_tma_smem_alignment_codegen_sm120_blackwell_consumer():
     silicon."""
     mod = _lower_for("sm_120")
     _assert_tma_destinations_128_aligned("sm_120", mod)
+
+
+def _make_swizzled_tma_alignment_kernel(pad_elems: int):
+    MG = 768
+    M = 128
+    K = 256
+    THREADS = 1024
+    ELEMS_PER_THREAD = M * K // THREADS
+
+    @T.prim_func
+    def kernel(
+        A: T.Tensor((MG, K), "bfloat16"),
+        out: T.Tensor((M, K), "bfloat16"),
+        dummy: T.Tensor((1,), "int32"),
+        offset: T.Tensor((1,), "int32"),
+    ):
+        with T.Kernel(1, threads=THREADS):
+            pad = T.alloc_shared((pad_elems,), "int32")
+            smem = T.alloc_shared((M, K), "bfloat16")
+            T.annotate_layout({smem: tilelang.layout.make_swizzled_layout(smem)})
+
+            tid = T.get_thread_binding(0)
+            if tid < pad_elems:
+                pad[tid] = tid
+            T.sync_threads()
+
+            phys = T.alloc_var("int32", init=0)
+            phys = offset[0]
+            bar = T.alloc_barrier(THREADS)
+            T.tma_copy(A[phys, 0], smem, barrier=bar)
+            T.barrier_arrive(bar)
+            T.mbarrier_wait_parity(bar, 0)
+            for i in T.serial(ELEMS_PER_THREAD):
+                elem = tid * ELEMS_PER_THREAD + i
+                row = elem // K
+                col = elem % K
+                out[row, col] = smem[row, col]
+
+            if tid == 0:
+                dummy[0] = pad[pad_elems - 1]
+
+    return kernel
+
+
+def _lower_swizzled_for(arch: str, pad_elems: int):
+    target = tvm.target.Target({"kind": "cuda", "arch": arch})
+    tilelang.disable_cache()
+    try:
+        with target:
+            artifact = tilelang_lower(
+                _make_swizzled_tma_alignment_kernel(pad_elems),
+                target=target,
+            )
+    finally:
+        tilelang.enable_cache()
+    return artifact.device_mod
+
+
+@tilelang.testing.requires_cuda
+def test_swizzled_tma_smem_alignment_codegen_sm120_blackwell_consumer():
+    mod = _lower_swizzled_for("sm_120", pad_elems=32)
+    byte_offsets = _absolute_tma_destination_byte_offsets(mod)
+    assert byte_offsets, "[sm_120] expected swizzled T.tma_copy to lower to tl.tma_load calls"
+
+    analyzer = tvm.arith.Analyzer()
+    for byte_offset in byte_offsets:
+        assert analyzer.can_prove(byte_offset % 1024 == 0), (
+            f"[sm_120] swizzled TMA load destination absolute byte offset is not provably 1024-byte aligned: {byte_offset}"
+        )
 
 
 # --------------------------------------------------------------------------
