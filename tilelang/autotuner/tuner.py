@@ -1280,33 +1280,45 @@ class AutoTuneImpl(Generic[_P, _T]):
             norm_kwargs = _normalize_value(kwargs, sort_dict_items=True)
         key = (norm_args, norm_kwargs)
         if key not in self._tuner_cache:
-
-            def jit_elaborate(**config_arg):
-                merged = dict(kwargs)
-                merged.update(config_arg)
-                return self.jit_impl.get_tir(*args, **merged)
-
-            if mode == "lazy":
-
-                def jit_compile(**config_arg):
-                    return self.jit_impl(*args, **kwargs, __tune_params=config_arg)
-
-                autotuner.jit_compile = jit_compile
-                autotuner.jit_elaborate = jit_elaborate
-                autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
+            # If all config keys are already supplied by the caller, skip autotuning
+            # and compile directly. This avoids triggering scalar-input validation
+            # (which requires set_autotune_inputs) when the user just wants a fixed config.
+            configs = self.configs
+            config_keys = set(configs[0].keys()) if isinstance(configs, list) and configs else set()
+            if config_keys and config_keys.issubset(kwargs.keys()):
+                if mode == "lazy":
+                    best_kernel = self.jit_impl(*args, **kwargs)
+                else:
+                    best_kernel = self.jit_impl.compile(*args, **kwargs)
+                self._tuner_cache[key] = best_kernel, None
             else:
 
-                def jit_compile(**config_arg):
+                def jit_elaborate(**config_arg):
                     merged = dict(kwargs)
                     merged.update(config_arg)
-                    return self.jit_impl.compile(*args, **merged)
+                    return self.jit_impl.get_tir(*args, **merged)
 
-                autotuner.jit_compile = jit_compile
-                autotuner.jit_elaborate = jit_elaborate
-                autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
+                if mode == "lazy":
 
-            artifact = autotuner.run()
-            self._tuner_cache[key] = artifact.kernel, artifact.config
+                    def jit_compile(**config_arg):
+                        return self.jit_impl(*args, **kwargs, __tune_params=config_arg)
+
+                    autotuner.jit_compile = jit_compile
+                    autotuner.jit_elaborate = jit_elaborate
+                    autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
+                else:
+
+                    def jit_compile(**config_arg):
+                        merged = dict(kwargs)
+                        merged.update(config_arg)
+                        return self.jit_impl.compile(*args, **merged)
+
+                    autotuner.jit_compile = jit_compile
+                    autotuner.jit_elaborate = jit_elaborate
+                    autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
+
+                artifact = autotuner.run()
+                self._tuner_cache[key] = artifact.kernel, artifact.config
 
         best_kernel, best_config = self._tuner_cache[key]
 
