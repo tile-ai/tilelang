@@ -12,6 +12,8 @@
 #include <tvm/tirx/index_map.h>
 #include <tvm/tirx/op.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <optional>
@@ -617,9 +619,9 @@ std::string CodeGenTileLangCUDA::Finish() {
   if (need_mma_instruction_h_) {
     decl_stream << "#include <tl_templates/cuda/instruction/mma.h>\n";
   }
-  if (need_mma_blockscale_instruction_h_) {
+  if (need_mma_blockscaled_instruction_h_) {
     decl_stream
-        << "#include <tl_templates/cuda/instruction/mma_blockscale.h>\n";
+        << "#include <tl_templates/cuda/instruction/mma_blockscaled.h>\n";
   }
   if (need_wgmma_instruction_h_) {
     decl_stream << "#include <tl_templates/cuda/instruction/wgmma.h>\n";
@@ -2804,34 +2806,38 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(C_ptr)", c_ref);
     replacer.register_rule("(C_offset)", c_bias);
     this->stream << replacer.rewrite(mma_call);
-  } else if (op->op.same_as(tl::ptx_mma_blockscale())) {
-    // arg 0: shape: mXnXkX
-    // arg 1: A layout: row/col
-    // arg 2: B layout: row/col
-    // arg 3: A precision: e2m1, ...
-    // arg 4: B precision: e2m1, ...
-    // arg 5: C precision: fp32, ...
-    // arg 6: scale vector width
-    // arg 7: A multiplicand
-    // arg 8: A multiplicand index
-    // arg 9: B multiplicand
-    // arg 10: B multiplicand index
-    // arg 11: C accumulator
-    // arg 12: C accumulator index
-    // arg 13: packed A scale vector
-    // arg 14: packed B scale vector
-    // arg 15: A scale selector
-    // arg 16: B scale selector
-    ICHECK_EQ(op->args.size(), 17U)
-        << "ptx_mma_blockscale expects 17 arguments";
-    std::string shape = Downcast<StringImm>(op->args[0])->value;
-    std::string A_layout = Downcast<StringImm>(op->args[1])->value;
-    std::string B_layout = Downcast<StringImm>(op->args[2])->value;
-    std::string A_dtype = Downcast<StringImm>(op->args[3])->value;
-    std::string B_dtype = Downcast<StringImm>(op->args[4])->value;
-    std::string C_dtype = Downcast<StringImm>(op->args[5])->value;
-    int scale_vec = Downcast<IntImm>(op->args[6])->value;
-    constexpr int arg_base = 7;
+  } else if (op->op.same_as(tl::ptx_mma_blockscaled())) {
+    // arg 0: dtype/result precision
+    // arg 1: shape: mXnXkX
+    // arg 2: A layout: row/col
+    // arg 3: B layout: row/col
+    // arg 4: A precision: e2m1, ...
+    // arg 5: B precision: e2m1, ...
+    // arg 6: C precision: fp32, ...
+    // arg 7: scale factor precision: ue8m0/ue4m3 or aliases
+    // arg 8: scale vector width
+    // arg 9: A multiplicand
+    // arg 10: A multiplicand index
+    // arg 11: B multiplicand
+    // arg 12: B multiplicand index
+    // arg 13: C accumulator
+    // arg 14: C accumulator index
+    // arg 15: packed A scale vector
+    // arg 16: packed B scale vector
+    // arg 17: optional A scale selector
+    // arg 18: optional B scale selector
+    ICHECK(op->args.size() == 17U || op->args.size() == 19U)
+        << "ptx_mma_blockscaled expects 17 or 19 arguments";
+    std::string dtype = Downcast<StringImm>(op->args[0])->value;
+    std::string shape = Downcast<StringImm>(op->args[1])->value;
+    std::string A_layout = Downcast<StringImm>(op->args[2])->value;
+    std::string B_layout = Downcast<StringImm>(op->args[3])->value;
+    std::string A_dtype = Downcast<StringImm>(op->args[4])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[5])->value;
+    std::string C_dtype = Downcast<StringImm>(op->args[6])->value;
+    std::string SF_dtype = Downcast<StringImm>(op->args[7])->value;
+    int scale_vec = Downcast<IntImm>(op->args[8])->value;
+    constexpr int arg_base = 9;
     std::string a_ref = this->PrintExpr(op->args[arg_base + 0]);
     PrimExpr a_offset_expr = op->args[arg_base + 1];
     std::string b_ref = this->PrintExpr(op->args[arg_base + 2]);
@@ -2840,11 +2846,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string c_offset = this->PrintExpr(op->args[arg_base + 5]);
     std::string sfa = this->PrintExpr(op->args[arg_base + 6]);
     std::string sfb = this->PrintExpr(op->args[arg_base + 7]);
-    std::string id_a = this->PrintExpr(op->args[arg_base + 8]);
-    std::string id_b = this->PrintExpr(op->args[arg_base + 9]);
+    std::string id_a =
+        op->args.size() == 19U ? this->PrintExpr(op->args[arg_base + 8]) : "0";
+    std::string id_b =
+        op->args.size() == 19U ? this->PrintExpr(op->args[arg_base + 9]) : "0";
     auto dtype_a_enum = tl::codegen::ptx::DTypeFromString(A_dtype);
     auto dtype_b_enum = tl::codegen::ptx::DTypeFromString(B_dtype);
     auto dtype_c_enum = tl::codegen::ptx::DTypeFromString(C_dtype);
+    auto dtype_enum = tl::codegen::ptx::DTypeFromString(dtype);
+    ICHECK(dtype_enum == dtype_c_enum)
+        << "ptx_mma_blockscaled dtype must match C_dtype";
     // The Python intrinsic accepts logical fp4 element offsets. Pointer
     // arithmetic below is byte-addressed for packed e2m1 operands.
     if (dtype_a_enum == tl::codegen::ptx::DataType::kFloat4_e2m1fn) {
@@ -2856,15 +2867,32 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string a_offset = this->PrintExpr(a_offset_expr);
     std::string b_offset = this->PrintExpr(b_offset_expr);
     auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(shape);
-    tl::codegen::ptx::GetMMABlockScaleInfo(
+    auto blockscale_info = tl::codegen::ptx::GetMMABlockScaleInfo(
         dtype_a_enum, dtype_b_enum, dtype_c_enum, m, n, k,
         A_layout == "row" ? false : true, B_layout == "row" ? false : true,
         scale_vec);
+    auto normalize_sf_dtype = [](std::string value) {
+      std::transform(
+          value.begin(), value.end(), value.begin(),
+          [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+      if (value == "ue8m0" || value == "uint8" || value == "uint8_t" ||
+          value == "u8") {
+        return std::string("ue8m0");
+      }
+      if (value == "ue4m3" || value == "e4m3" || value == "float8_e4m3" ||
+          value == "float8_e4m3fn") {
+        return std::string("ue4m3");
+      }
+      return value;
+    };
+    ICHECK_EQ(normalize_sf_dtype(SF_dtype), blockscale_info.scale_dtype)
+        << "ptx_mma_blockscaled SF_dtype does not match the selected "
+           "block-scaled MMA configuration";
 
-    need_mma_blockscale_instruction_h_ = true;
+    need_mma_blockscaled_instruction_h_ = true;
     this->PrintIndent();
     std::string mma_call =
-        "tl::mma_sync_blockscale<(AType), (BType), (CType), (M), (N), (K), "
+        "tl::mma_sync_blockscaled<(AType), (BType), (CType), (M), (N), (K), "
         "(TransA), (TransB), (ScaleVec)>("
         "reinterpret_cast<(CRegType)*>((C_ptr) + (C_offset)), "
         "reinterpret_cast<const (ARegType)*>((A_ptr) + (A_offset)), "

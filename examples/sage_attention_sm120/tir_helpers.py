@@ -33,13 +33,15 @@ def mma_m16n32k64_blockscale_f32(
     """Emit four m16n8k64 FP4 MMAs in contiguous n8-atom register order."""
     scale_a_reg = T.alloc_var("uint32", init=scale_a, role_scoped=True)
     scale_b_reg = T.alloc_var("uint32", init=scale_b, role_scoped=True)
-    T.ptx_mma_blockscale(
+    T.ptx_mma_blockscaled(
         "float32",
         "m16n8k64",
         "row",
         "col",
         "e2m1",
         "e2m1",
+        "float32",
+        "float8_e4m3",
         4,
         a_regs,
         a_offset,
@@ -52,13 +54,15 @@ def mma_m16n32k64_blockscale_f32(
         scale_id_a,
         scale_id_b_base,
     )
-    T.ptx_mma_blockscale(
+    T.ptx_mma_blockscaled(
         "float32",
         "m16n8k64",
         "row",
         "col",
         "e2m1",
         "e2m1",
+        "float32",
+        "float8_e4m3",
         4,
         a_regs,
         a_offset,
@@ -71,13 +75,15 @@ def mma_m16n32k64_blockscale_f32(
         scale_id_a,
         scale_id_b_base + 1,
     )
-    T.ptx_mma_blockscale(
+    T.ptx_mma_blockscaled(
         "float32",
         "m16n8k64",
         "row",
         "col",
         "e2m1",
         "e2m1",
+        "float32",
+        "float8_e4m3",
         4,
         a_regs,
         a_offset,
@@ -90,13 +96,15 @@ def mma_m16n32k64_blockscale_f32(
         scale_id_a,
         scale_id_b_base + 2,
     )
-    T.ptx_mma_blockscale(
+    T.ptx_mma_blockscaled(
         "float32",
         "m16n8k64",
         "row",
         "col",
         "e2m1",
         "e2m1",
+        "float32",
+        "float8_e4m3",
         4,
         a_regs,
         a_offset,
