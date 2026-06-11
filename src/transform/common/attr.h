@@ -27,6 +27,18 @@ inline bool IsDeviceMainBlock(const tirx::SBlockNode *node) {
 constexpr const char *tilelang_is_cpu_kernel_frame =
     "tilelang.is_cpu_kernel_frame";
 
+constexpr const char *tilelang_kernel_scope = "tilelang.kernel_scope";
+constexpr const char *tilelang_kernel_num_blocks = "tilelang.kernel_num_blocks";
+constexpr const char *tilelang_kernel_num_threads =
+    "tilelang.kernel_num_threads";
+constexpr const char *tilelang_kernel_dim_kind = "tilelang.kernel_dim_kind";
+constexpr const char *tilelang_kernel_dim_axis = "tilelang.kernel_dim_axis";
+constexpr const char *tilelang_kernel_thread_default =
+    "tilelang.kernel_thread_default";
+
+constexpr int kTilelangKernelDimBlock = 0;
+constexpr int kTilelangKernelDimThread = 1;
+
 namespace attr {
 // Attributes to mark CUDA sync calls
 constexpr const char *kHasTriggerLaunch = "has_cuda_pdl_trigger";

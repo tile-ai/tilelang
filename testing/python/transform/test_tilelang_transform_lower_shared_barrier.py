@@ -13,6 +13,7 @@ auto_target = tvm.target.Target(determine_target("auto"))
 def _apply(func):
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.LowerKernelLaunchToThreadBinding()(mod)
     mod = tl.cuda.transform.LowerSharedBarrier()(mod)
     return mod
 

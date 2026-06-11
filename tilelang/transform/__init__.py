@@ -338,6 +338,16 @@ def LowerOpaqueBlock():
     return _ffi_api.LowerOpaqueBlock()  # type: ignore
 
 
+def LowerKernelLaunchToSerial():
+    """Lower target-neutral T.Kernel loops to ordinary serial loops."""
+    return _ffi_api.LowerKernelLaunchToSerial()  # type: ignore
+
+
+def LowerKernelLaunchToThreadBinding():
+    """Lower target-neutral T.Kernel loops to blockIdx/threadIdx bindings."""
+    return _ffi_api.LowerKernelLaunchToThreadBinding()  # type: ignore
+
+
 def LowerThreadAllreduce():
     """LowerThreadAllreduce"""
     return _ffi_api.LowerThreadAllreduce()  # type: ignore

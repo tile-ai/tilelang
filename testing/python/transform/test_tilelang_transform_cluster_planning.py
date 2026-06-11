@@ -11,10 +11,12 @@ def _check(original, transformed):
     func = original
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.LowerKernelLaunchToThreadBinding()(mod)
     mod = tl.transform.LowerOpaqueBlock()(mod)
     mod = tl.transform.ClusterPlanning()(mod)
     transformed = tvm.IRModule.from_expr(transformed.with_attr("global_symbol", "main"))
     transformed = tvm.tirx.transform.BindTarget(auto_target)(transformed)
+    transformed = tl.transform.LowerKernelLaunchToThreadBinding()(transformed)
     transformed = tl.transform.LowerOpaqueBlock()(transformed)
 
     tvm.ir.assert_structural_equal(mod["main"], transformed["main"], True)

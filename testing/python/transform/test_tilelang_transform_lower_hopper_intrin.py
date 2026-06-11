@@ -12,10 +12,12 @@ def _check(original, transformed):
     func = original
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.LowerKernelLaunchToThreadBinding()(mod)
     mod = cuda_transform.LowerHopperIntrin()(mod)
     mod = tl.transform.LowerOpaqueBlock()(mod)
     transformed = tvm.IRModule.from_expr(transformed.with_attr("global_symbol", "main"))
     transformed = tvm.tirx.transform.BindTarget(auto_target)(transformed)
+    transformed = tl.transform.LowerKernelLaunchToThreadBinding()(transformed)
     transformed = tl.transform.LowerOpaqueBlock()(transformed)
     transformed["main"] = transformed["main"].with_attr("tma_descriptor_args", {})
 
@@ -39,6 +41,7 @@ def test_lower_shared_barrier():
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.LowerKernelLaunchToThreadBinding()(mod)
     mod = cuda_transform.LowerSharedBarrier()(mod)
     mod = tl.transform.LowerOpaqueBlock()(mod)
 

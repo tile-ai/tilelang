@@ -15,8 +15,7 @@ from tilelang.backend.pass_pipeline.pipeline_utils import (
 )
 
 
-def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
-    mod = tirx.transform.BindTarget(target)(mod)
+def CPUPassPipelineBodyAfterKernelLaunch(mod: IRModule, target: Target) -> IRModule:
     pass_ctx = tilelang.transform.get_pass_context()
 
     if should_force_let_inline():
@@ -82,6 +81,12 @@ def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.LowerDeviceKernelLaunch()(mod)
     return mod
+
+
+def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
+    mod = tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.transform.LowerKernelLaunchToSerial()(mod)
+    return CPUPassPipelineBodyAfterKernelLaunch(mod, target)
 
 
 for _kind in ("c", "llvm"):

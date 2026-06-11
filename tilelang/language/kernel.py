@@ -95,23 +95,41 @@ def _normalize_bindings(bindings: list[Var]) -> Var | list[Var]:
     return bindings
 
 
+def _as_int(value, default: int) -> int:
+    if value is None:
+        return default
+    if hasattr(value, "value"):
+        return int(value.value)
+    return int(value)
+
+
+def _frame_var(frame) -> Var:
+    if hasattr(frame, "vars"):
+        return frame.vars[0]
+    return frame.iter_var.var
+
+
+def _frame_extent(frame):
+    if hasattr(frame, "doms"):
+        return frame.doms[0].extent
+    return frame.iter_var.dom.extent
+
+
 def _normalize_threads(
     threads: int | list[int] | tuple | None,
-    *,
-    is_cpu: bool,
-) -> list[int] | None:
-    if not is_cpu and threads is None:
-        threads = 128  # default thread number
+) -> tuple[list[int], bool]:
+    is_default = threads is None
+    if threads is None:
+        threads = 128  # default thread number for targets that have threads
 
     if isinstance(threads, int):
-        return [threads, 1, 1]
+        return [threads, 1, 1], is_default
     if isinstance(threads, list):
-        return threads + [1] * (3 - len(threads))
+        return threads + [1] * (3 - len(threads)), is_default
     if isinstance(threads, tuple):
-        return list(threads) + [1] * (3 - len(threads))
+        return list(threads) + [1] * (3 - len(threads)), is_default
 
-    assert is_cpu, "threads must be an integer or a list of integers"
-    return None
+    raise TypeError("threads must be an integer, a list of integers, a tuple of integers, or None")
 
 
 def _normalize_cluster_dims(
@@ -140,8 +158,8 @@ class KernelLaunchFrame(TIRFrame):
     def __enter__(self) -> Var | list[Var]:
         """
         Enters the KernelLaunchFrame scope and pushes this frame onto the stack.
-        Returns one Var if we detect exactly 5 frames (meaning there is a single
-        block dimension), or a list of Vars otherwise.
+        Returns a block index Var, or a list of block index Vars for
+        multi-dimensional launches.
         """
         super().__enter__()
         _get_current_stack().push(self)
@@ -149,15 +167,7 @@ class KernelLaunchFrame(TIRFrame):
         last_block_frame = self.frames[-1]
         assert isinstance(last_block_frame, SBlockFrame), f"Last frame must be a block frame, got {last_block_frame}"
 
-        maybe_cpu = last_block_frame.annotations.get("tilelang.is_cpu_kernel_frame", False)
-
-        if maybe_cpu:
-            # CPU kernel frame, return a list of for frame items.
-            return _normalize_bindings([frame.vars[0] for frame in self.frames[0:-1]])
-        else:
-            # Otherwise, return a list of iter_var.var objects (excluding the last 4 frames).
-            # As 4 frames for threadIdx.x, threadIdx.y, threadIdx.z and block frame with attributes
-            return _normalize_bindings([frame.iter_var.var for frame in self.frames[0:-4]])
+        return _normalize_bindings([_frame_var(frame) for frame in self._block_frames()])
 
     def __exit__(self, ptype, value, trace):
         """
@@ -178,54 +188,74 @@ class KernelLaunchFrame(TIRFrame):
         stack = _get_current_stack()
         return stack.top() if stack else None
 
+    def _num_block_dims(self) -> int:
+        annotations = self.frames[-1].annotations
+        if "tilelang.kernel_num_blocks" in annotations:
+            return _as_int(annotations.get("tilelang.kernel_num_blocks"), 0)
+        if annotations.get("tilelang.is_cpu_kernel_frame", False):
+            return len(self.frames) - 1
+        return max(0, len(self.frames) - 4)
+
+    def _num_thread_dims(self) -> int:
+        annotations = self.frames[-1].annotations
+        if "tilelang.kernel_num_threads" in annotations:
+            return _as_int(annotations.get("tilelang.kernel_num_threads"), 0)
+        return max(0, len(self.frames) - self._num_block_dims() - 1)
+
+    def _block_frames(self):
+        return self.frames[: self._num_block_dims()]
+
+    def _thread_frames(self):
+        start = self._num_block_dims()
+        stop = start + self._num_thread_dims()
+        return self.frames[start:stop]
+
     def get_block_extent(self, dim: int) -> int:
         """
         Returns the block extent for the given dimension.
         dim=0 corresponds to blockIdx.x, dim=1 to blockIdx.y, and dim=2 to blockIdx.z.
         """
-        iter_var = self.frames[dim].iter_var
-        return int(iter_var.dom.extent)
+        return int(_frame_extent(self._block_frames()[dim]))
 
     def get_block_extents(self) -> list[int]:
         """
         Returns the block extents for all three dimensions.
         """
-        return [self.get_block_extent(dim) for dim in range(3)]
+        return [self.get_block_extent(dim) for dim in range(self._num_block_dims())]
 
     def get_thread_extent(self, dim: int) -> int:
         """
         Returns the thread extent for the given dimension.
         dim=0 corresponds to threadIdx.x, dim=1 to threadIdx.y, and dim=2 to threadIdx.z.
         """
-        iter_var = self.frames[-4 + dim].iter_var
-        return int(iter_var.dom.extent)
+        return int(_frame_extent(self._thread_frames()[dim]))
 
     def get_thread_extents(self) -> list[int]:
         """
         Returns the thread extents for all three dimensions.
         """
-        return [self.get_thread_extent(dim) for dim in range(3)]
+        return [self.get_thread_extent(dim) for dim in range(self._num_thread_dims())]
 
     def get_thread_binding(self, dim: int = 0) -> Var:
         """
         Returns the thread binding for the given dimension.
         dim=0 corresponds to threadIdx.x, dim=1 to threadIdx.y, and dim=2 to threadIdx.z.
         """
-        return self.frames[-4 + dim].iter_var.var
+        return _frame_var(self._thread_frames()[dim])
 
     def get_thread_bindings(self) -> list[Var]:
         """
         Returns the thread binding for the given dimension.
         dim=0 corresponds to threadIdx.x, dim=1 to threadIdx.y, and dim=2 to threadIdx.z.
         """
-        return [frame.iter_var.var for frame in self.frames[-4:-1]]
+        return [_frame_var(frame) for frame in self._thread_frames()]
 
     def get_num_threads(self) -> int:
         """
         Returns the thread indices from the topmost frame.
         """
         num_threads: int = 1
-        for thread_dim in range(3):
+        for thread_dim in range(self._num_thread_dims()):
             num_threads *= self.get_thread_extent(thread_dim)
         return num_threads
 
@@ -234,27 +264,27 @@ class KernelLaunchFrame(TIRFrame):
         Returns the block binding for the given dimension.
         dim=0 corresponds to blockIdx.x, dim=1 to blockIdx.y, and dim=2 to blockIdx.z.
         """
-        return self.frames[dim].iter_var.var
+        return _frame_var(self._block_frames()[dim])
 
     def get_block_bindings(self) -> list[Var]:
         """
         Returns all three block bindings.
         """
-        return [frame.iter_var.var for frame in self.frames[0:-4]]
+        return [_frame_var(frame) for frame in self._block_frames()]
 
     @property
     def blocks(self) -> list[Var]:
         """
         Returns the block indices from the topmost frame.
         """
-        return [frame.iter_var.var for frame in self.frames[0:-4]]
+        return [_frame_var(frame) for frame in self._block_frames()]
 
     @property
     def threads(self) -> list[Var]:
         """
         Returns the thread indices from the topmost frame.
         """
-        return [frame.iter_var.var for frame in self.frames[-4:]]
+        return [_frame_var(frame) for frame in self._thread_frames()]
 
     @property
     def num_threads(self) -> int:
@@ -271,7 +301,7 @@ def Kernel(
     is_cpu: bool = False,
     prelude: str | None = None,
 ):
-    """Tools to quickly construct a GPU kernel launch frame.
+    """Tools to construct a target-neutral kernel launch frame.
 
     Parameters
     ----------
@@ -281,6 +311,8 @@ def Kernel(
         A integer representing blockDim.x
         Or a list of integers representing blockDim.(x|y|z)
         if the value is -1, we skip the threadIdx.x binding.
+        When omitted, threaded backends use the default block size while CPU
+        backends lower the kernel without synthetic thread loops.
     cluster_dims : int | tuple[int, int, int] | list[int] | None
         The cluster dimensions for SM90+ cluster launch.
         For example, use 2 or (2, 1, 1) to create 2-CTA clusters.
@@ -313,11 +345,12 @@ def Kernel(
             tx, ty = T.get_thread_bindings()
             ...
 
-    Emit a CPU kernel where thread bindings are skipped:
+    The same source can be lowered for CPU or GPU targets. The target-specific
+    loop form is selected during compilation:
 
     .. code-block:: python
 
-        with T.Kernel(loop_extent, is_cpu=True) as (i,):
+        with T.Kernel(loop_extent) as i:
             ...
     """
     # In eager mode, we construct AST directly without prim_func,
@@ -330,10 +363,9 @@ def Kernel(
         raise JITNoBuilderError("T.Kernel() can only be used inside @tilelang.jit or @T.prim_func context. No Builder is available.")
 
     attrs: dict = {}
-    threads = _normalize_threads(threads, is_cpu=is_cpu)
-
-    if is_cpu:
-        attrs["tilelang.is_cpu_kernel_frame"] = True
+    threads, threads_defaulted = _normalize_threads(threads)
+    if threads_defaulted:
+        attrs["tilelang.kernel_thread_default"] = True
 
     if prelude is not None:
         attrs["pragma_import_c"] = prelude
@@ -424,7 +456,9 @@ def CUDASourceCodeKernel(
         raise ValueError("entry_name must be a non-empty string when provided")
     attrs["code_block_entry_name"] = entry_name
 
-    threads = _normalize_threads(threads, is_cpu=False)
+    threads, threads_defaulted = _normalize_threads(threads)
+    if threads_defaulted:
+        attrs["tilelang.kernel_thread_default"] = True
 
     cluster_dims = _normalize_cluster_dims(cluster_dims)
     if cluster_dims is not None:

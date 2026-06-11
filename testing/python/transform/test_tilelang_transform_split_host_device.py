@@ -13,6 +13,7 @@ def run_split_host_device_passes(func: tvm.tirx.PrimFunc):
     """Run the necessary passes before and including SplitHostDevice."""
     mod = tvm.IRModule({func.attrs["global_symbol"]: func})
     mod = tvm.tirx.transform.BindTarget(tvm.target.Target("cuda", "c"))(mod)
+    mod = tl.transform.LowerKernelLaunchToThreadBinding()(mod)
     mod = tl.transform.InjectAssumes()(mod)
     mod = tl.transform.AnnotateDeviceRegions()(mod)
     mod = tl.transform.SplitHostDevice()(mod)
