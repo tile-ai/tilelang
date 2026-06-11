@@ -308,7 +308,7 @@ def _compile_grouped_gemm_ws(batch_sizes=(63, 77), K=128, N=128, block_M=64, blo
 
 
 def test_tiled_ws_places_producer_in_first_warp_group():
-    """Auto-WS should put the producer in the low threadIdx.x partition."""
+    """Auto-WS should put the producer in the high threadIdx.x partition."""
 
     func = matmul_pipelined(64, 64, 64, 64, 32, 64, num_stages=2).with_attr("global_symbol", "main")
     mod = tvm.IRModule.from_expr(func)
@@ -318,13 +318,13 @@ def test_tiled_ws_places_producer_in_first_warp_group():
     script = mod["main"].script()
 
     assert "tl_tiled_ws_applied" in script
-    branch = _find_after(script, "if tx < 128:")
+    branch = _find_after(script, "if tx >= 128:")
     producer_tma = _find_after(script, "T.tma_copy", branch)
     consumer_branch = _find_after(script, "else:", producer_tma)
     consumer_gemm = _find_after(script, "T.gemm", consumer_branch)
 
     assert branch < producer_tma < consumer_branch < consumer_gemm
-    assert "if 128 <= tx:" not in script
+    assert "if tx < 128:" not in script
 
 
 def _run_grouped_gemm_ws(kernel, batch_sizes, K=128, N=128, block_M=64, dtype="float16"):
@@ -534,7 +534,7 @@ def test_tiled_ws_sinks_preloop_tma_waits_into_consumer():
 
     k_load = src.find("tl::tma_load(K_in_desc")
     v_load = src.find("tl::tma_load(V_in_desc")
-    branch = src.find("if (((int)threadIdx.x) < 128)")
+    branch = src.find("if (128 <= ((int)threadIdx.x))")
     first_wait = src.find(".wait(0)")
 
     assert min(k_load, v_load, branch, first_wait) >= 0
@@ -574,7 +574,7 @@ def test_tiled_ws_keeps_preloop_tma_scalar_bind_shared():
 
     start_bind = _find_after(src, "int start =")
     k_load = _find_after(src, "tl::tma_load(K_in_desc")
-    branch = _find_after(src, "if (((int)threadIdx.x) < 128)")
+    branch = _find_after(src, "if (128 <= ((int)threadIdx.x))")
 
     assert start_bind < k_load < branch
 
@@ -606,7 +606,7 @@ def test_tiled_ws_keeps_shared_prelude_local_vars_for_grouped_gemm():
     kernel, batch_sizes = _compile_grouped_gemm_ws()
     src = kernel.get_kernel_source()
 
-    branch = _find_after(src, "if (((int)threadIdx.x) < 128)")
+    branch = _find_after(src, "if (256 <= ((int)threadIdx.x))")
     cur_batch_idx_loop = _find_after(src, "for (int i = 0; i < 2; ++i)")
     m_start = _find_after(src, "int m_start =")
     actual_rows = _find_after(src, "int actual_rows =")

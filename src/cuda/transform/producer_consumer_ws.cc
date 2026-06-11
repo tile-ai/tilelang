@@ -86,6 +86,13 @@ static Optional<ObjectRef> GetSmSpecializeAnnotation(const SBlockNode *op) {
   return Downcast<ObjectRef>(value.value());
 }
 
+static Optional<ObjectRef> GetSmSpecializeAnnotation(const AttrStmtNode *op) {
+  if (op->attr_key != kSmSpecialize) {
+    return Optional<ObjectRef>();
+  }
+  return Downcast<ObjectRef>(op->value);
+}
+
 // ---------------------------------------------------------------------------
 // PhaseCounter: local counter for correct barrier parity in guarded loops
 // ---------------------------------------------------------------------------
@@ -739,6 +746,39 @@ static TileStmtKind ClassifyCopy(const CopyNode *copy, Target target) {
 
 /// Classify a single statement in the pipeline loop body.
 TileStmtKind ClassifyStmt(const Stmt &stmt, Target target) {
+  if (auto *if_stmt = stmt.as<IfThenElseNode>()) {
+    TileStmtKind then_kind = ClassifyStmt(if_stmt->then_case, target);
+    if (!if_stmt->else_case.defined()) {
+      return then_kind;
+    }
+    TileStmtKind else_kind = ClassifyStmt(if_stmt->else_case.value(), target);
+    if (then_kind == else_kind) {
+      return then_kind;
+    }
+    return TileStmtKind::kConsumer;
+  }
+
+  if (auto *seq = stmt.as<SeqStmtNode>()) {
+    bool has_result = false;
+    TileStmtKind result = TileStmtKind::kConsumer;
+    for (const Stmt &s : seq->seq) {
+      TileStmtKind kind = ClassifyStmt(s, target);
+      if (kind != TileStmtKind::kTmaProducer &&
+          kind != TileStmtKind::kCpAsyncProducer &&
+          kind != TileStmtKind::kSimtProducer) {
+        return TileStmtKind::kConsumer;
+      }
+      if (has_result && kind != result) {
+        return TileStmtKind::kConsumer;
+      }
+      result = kind;
+      has_result = true;
+    }
+    if (has_result) {
+      return result;
+    }
+  }
+
   // Tile-op Calls: classify directly via CopyNode checks.
   if (auto *eval = stmt.as<EvaluateNode>()) {
     if (auto *call = eval->value.as<CallNode>()) {
@@ -1199,6 +1239,63 @@ static Stmt RewritePreludeTmaProducerStmt(const Stmt &stmt,
   return rewriter.Rewrite(stmt);
 }
 
+static Stmt RewriteTmaProducerStmt(const Stmt &stmt,
+                                   const Buffer &barrier_buf,
+                                   PrimExpr barrier_id, bool emit_arrive) {
+  class TmaProducerStmtRewriter : public StmtExprMutator {
+  public:
+    TmaProducerStmtRewriter(Buffer barrier_buf, PrimExpr barrier_id,
+                            bool emit_arrive)
+        : barrier_buf_(std::move(barrier_buf)),
+          barrier_id_(std::move(barrier_id)), emit_arrive_(emit_arrive) {}
+
+    Stmt Rewrite(const Stmt &stmt) { return VisitStmt(stmt); }
+
+    int num_rewritten() const { return num_rewritten_; }
+
+  private:
+    PrimExpr VisitExpr_(const CallNode *op) final {
+      Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
+      auto tile_op = ParseOperator(call);
+      if (!tile_op.defined()) {
+        return call;
+      }
+
+      PrimExpr rewritten_call;
+      if (tile_op.as<CopyNode>()) {
+        rewritten_call = RewriteCopyToTmaCopy(call, barrier_buf_, barrier_id_);
+      } else if (tile_op.as<Im2ColOpNode>()) {
+        rewritten_call = AnnotateTileOpBarrier(call, barrier_buf_, barrier_id_);
+      } else {
+        return call;
+      }
+
+      if (emit_arrive_) {
+        Call new_call = Downcast<Call>(rewritten_call);
+        auto annotations = new_call->annotations;
+        annotations.Set("emit_arrive", IntImm(DataType::Int(32), 1));
+        rewritten_call =
+            Call(new_call->dtype, new_call->op, new_call->args, annotations,
+                 new_call->span);
+      }
+      ++num_rewritten_;
+      return rewritten_call;
+    }
+
+    Buffer barrier_buf_;
+    PrimExpr barrier_id_;
+    bool emit_arrive_;
+    int num_rewritten_{0};
+  };
+
+  TmaProducerStmtRewriter rewriter(barrier_buf, std::move(barrier_id),
+                                   emit_arrive);
+  Stmt rewritten = rewriter.Rewrite(stmt);
+  ICHECK_GT(rewriter.num_rewritten(), 0)
+      << "ProducerConsumerWS: failed to rewrite TMA producer";
+  return rewritten;
+}
+
 // ---------------------------------------------------------------------------
 // Main rewriter
 // ---------------------------------------------------------------------------
@@ -1223,6 +1320,11 @@ public:
 private:
   // --- Track threadIdx.x binding ---
   Stmt VisitStmt_(const AttrStmtNode *op) final {
+    if (auto sm_specialize = GetSmSpecializeAnnotation(op)) {
+      if (!SmSpecializeAutoWSValue(sm_specialize.value())) {
+        return GetRef<Stmt>(op);
+      }
+    }
     if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->thread_tag == "threadIdx.x") {
@@ -1252,7 +1354,7 @@ private:
     const SBlock &orig_block = op->block;
     if (auto sm_specialize = GetSmSpecializeAnnotation(orig_block.get())) {
       if (!SmSpecializeAutoWSValue(sm_specialize.value())) {
-        return StmtExprMutator::VisitStmt_(op);
+        return GetRef<Stmt>(op);
       }
     }
 
@@ -1750,13 +1852,6 @@ private:
         for (const auto &stmt : producer_loop_prefix_stmts[tma_idx]) {
           producer_stmts.push_back(stmt);
         }
-        // Convert copy → tma_copy with barrier, or annotate non-copy
-        // TMA tile-ops (e.g. im2col) with barrier reference.
-        const auto *eval = flat_stmts[i].as<EvaluateNode>();
-        ICHECK(eval);
-        Call tile_call = Downcast<Call>(eval->value);
-        auto tile_op = ParseOperator(tile_call);
-        PrimExpr tma_call;
         // For pure TMA, tell LowerTileOp to emit arrive inside the same
         // tl_shuffle_elect block (via emit_arrive annotation), producing
         // arrive_and_expect_tx instead of separate expect_tx + arrive.
@@ -1765,20 +1860,8 @@ private:
             !has_simt_producer && !has_cp_async_producer &&
             (!can_merge_tma_barriers || tma_idx == last_tma_idx);
 
-        if (tile_op.defined() && tile_op.as<CopyNode>()) {
-          tma_call = RewriteCopyToTmaCopy(tile_call, barrier_buf, fwd_id);
-        } else {
-          // Non-copy TMA producer (e.g. Im2ColOp): annotate with
-          // barrier so Lower() uses the WS barrier instead of its own.
-          tma_call = AnnotateTileOpBarrier(tile_call, barrier_buf, fwd_id);
-        }
-        if (emit_arrive_on_this) {
-          auto call = Downcast<Call>(tma_call);
-          auto annos = call->annotations;
-          annos.Set("emit_arrive", IntImm(DataType::Int(32), 1));
-          tma_call = Call(call->dtype, call->op, call->args, annos, call->span);
-        }
-        producer_stmts.push_back(Evaluate(tma_call));
+        producer_stmts.push_back(RewriteTmaProducerStmt(
+            flat_stmts[i], barrier_buf, fwd_id, emit_arrive_on_this));
         ++tma_idx;
       }
       // SIMT/cp.async producers are handled above (after first bp_wait).
@@ -1940,13 +2023,14 @@ private:
     }
 
     // --- Rewrite threadIdx.x for WS partitions ---
-    // Producer owns the low partition and already sees [0, producer_extent).
-    Stmt rewritten_producer = final_producer_loop;
-    // Consumer owns the high partition and is remapped back to
-    // [0, consumer_extent) for existing tile-op layout assumptions.
-    Stmt rewritten_consumer = PCThreadIdxRewriter::Rewrite(
-        final_consumer_loop, thread_iv_->var, thread_iv_->var - producer_extent,
-        consumer_extent, false);
+    // Consumer owns the low partition and keeps the original [0,
+    // consumer_extent) mapping expected by layout inference and tile ops.
+    // Producer owns the high partition and is remapped back to
+    // [0, producer_extent) for its branch-local tile-op lowering.
+    Stmt rewritten_producer = PCThreadIdxRewriter::Rewrite(
+        final_producer_loop, thread_iv_->var, thread_iv_->var - consumer_extent,
+        producer_extent, false);
+    Stmt rewritten_consumer = final_consumer_loop;
 
     shared_prelude_live_seed_ = {};
     producer_prelude_live_seed_ = {};
@@ -1969,7 +2053,7 @@ private:
     // by doing a dry replacement that populates extracted_consumer_init_.
     Stmt dummy_producer = rewritten_producer;
     const Stmt &dummy_consumer = rewritten_consumer;
-    Stmt dummy_ws = IfThenElse(LT(thread_iv_->var, producer_extent),
+    Stmt dummy_ws = IfThenElse(GE(thread_iv_->var, consumer_extent),
                                dummy_producer, dummy_consumer);
     dummy_ws =
         AttrStmt(ws_partition, attr::kWarpSpecializationScope, 0, dummy_ws);
@@ -2037,7 +2121,9 @@ private:
       if (!extracted_producer_init_.empty()) {
         Array<Stmt> producer_parts;
         for (const auto &s : extracted_producer_init_) {
-          producer_parts.push_back(s);
+          producer_parts.push_back(PCThreadIdxRewriter::Rewrite(
+              s, thread_iv_->var, thread_iv_->var - consumer_extent,
+              producer_extent, false));
         }
         producer_parts.push_back(rewritten_producer);
         enriched_producer = producer_parts.size() == 1
@@ -2046,9 +2132,7 @@ private:
       }
       Array<Stmt> consumer_parts;
       for (const auto &s : extracted_consumer_init_) {
-        consumer_parts.push_back(PCThreadIdxRewriter::Rewrite(
-            s, thread_iv_->var, thread_iv_->var - producer_extent,
-            consumer_extent, false));
+        consumer_parts.push_back(s);
       }
       consumer_parts.push_back(rewritten_consumer);
       Stmt enriched_consumer = consumer_parts.size() == 1
@@ -2056,7 +2140,7 @@ private:
                                    : SeqStmt(consumer_parts);
       Stmt scoped_producer = enriched_producer;
       const Stmt &scoped_consumer = enriched_consumer;
-      Stmt ws_body = IfThenElse(LT(thread_iv_->var, producer_extent),
+      Stmt ws_body = IfThenElse(GE(thread_iv_->var, consumer_extent),
                                 scoped_producer, scoped_consumer);
       ws_body =
           AttrStmt(ws_partition, attr::kWarpSpecializationScope, 0, ws_body);
@@ -2084,7 +2168,7 @@ private:
       replaced_stmt = subst(replaced_stmt);
     }
     Stmt new_block_body = SinkGuardedConsumerPostlude::Rewrite(
-        replaced_stmt, thread_iv_->var, producer_extent);
+        replaced_stmt, thread_iv_->var, consumer_extent);
 
     // --- Update block ---
     SBlock new_block = orig_block;
@@ -2155,6 +2239,15 @@ private:
       StmtVisitor::VisitStmt_(op);
     }
 
+    void VisitStmt_(const AttrStmtNode *op) final {
+      if (auto sm_specialize = GetSmSpecializeAnnotation(op)) {
+        if (!SmSpecializeAutoWSValue(sm_specialize.value())) {
+          return;
+        }
+      }
+      StmtVisitor::VisitStmt_(op);
+    }
+
     Optional<For> pipeline_loop_;
   };
 
@@ -2189,9 +2282,6 @@ private:
       }
       return false;
     }
-    if (auto *bind = stmt.as<BindNode>()) {
-      return CollectEnclosingForLoops(bind->body, target, loops);
-    }
     if (auto *realize = stmt.as<SBlockRealizeNode>()) {
       return CollectEnclosingForLoops(realize->block->body, target, loops);
     }
@@ -2211,16 +2301,16 @@ private:
   class SinkGuardedConsumerPostlude : public StmtExprMutator {
   public:
     static Stmt Rewrite(const Stmt &stmt, Var thread_var,
-                        PrimExpr producer_extent) {
+                        PrimExpr consumer_extent) {
       SinkGuardedConsumerPostlude sinker(std::move(thread_var),
-                                         std::move(producer_extent));
+                                         std::move(consumer_extent));
       return sinker.VisitStmt(stmt);
     }
 
   private:
-    SinkGuardedConsumerPostlude(Var thread_var, PrimExpr producer_extent)
+    SinkGuardedConsumerPostlude(Var thread_var, PrimExpr consumer_extent)
         : thread_var_(std::move(thread_var)),
-          producer_extent_(std::move(producer_extent)) {}
+          consumer_extent_(std::move(consumer_extent)) {}
 
     static bool SameExpr(const PrimExpr &lhs, const PrimExpr &rhs) {
       return ExprDeepEqual()(lhs, rhs);
@@ -2231,15 +2321,15 @@ private:
       if (!if_node || !if_node->else_case.defined()) {
         return false;
       }
-      const auto *lt = if_node->condition.as<LTNode>();
-      if (!lt) {
+      const auto *ge = if_node->condition.as<GENode>();
+      if (!ge) {
         return false;
       }
-      const auto *lhs = lt->a.as<VarNode>();
+      const auto *lhs = ge->a.as<VarNode>();
       if (!lhs || !ffi::GetRef<Var>(lhs).same_as(thread_var_)) {
         return false;
       }
-      if (!SameExpr(lt->b, producer_extent_)) {
+      if (!SameExpr(ge->b, consumer_extent_)) {
         return false;
       }
       *branch = GetRef<IfThenElse>(if_node);
@@ -2268,15 +2358,15 @@ private:
       if (!if_node || if_node->else_case.defined()) {
         return false;
       }
-      const auto *ge = if_node->condition.as<GENode>();
-      if (!ge) {
+      const auto *lt = if_node->condition.as<LTNode>();
+      if (!lt) {
         return false;
       }
-      const auto *lhs = ge->a.as<VarNode>();
+      const auto *lhs = lt->a.as<VarNode>();
       if (!lhs || !ffi::GetRef<Var>(lhs).same_as(thread_var_)) {
         return false;
       }
-      if (!SameExpr(ge->b, producer_extent_)) {
+      if (!SameExpr(lt->b, consumer_extent_)) {
         return false;
       }
       *body = if_node->then_case;
@@ -2354,7 +2444,7 @@ private:
     }
 
     Var thread_var_;
-    PrimExpr producer_extent_;
+    PrimExpr consumer_extent_;
   };
 
   class PipelineLoopContainmentChecker
@@ -2402,6 +2492,8 @@ private:
       }
       return op->else_case.defined() && VisitStmt(op->else_case.value());
     }
+
+    bool VisitStmt_(const ForNode *op) final { return VisitStmt(op->body); }
 
     bool VisitStmtDefault_(const Object *) final { return false; }
 
@@ -2515,18 +2607,23 @@ private:
       return IfThenElse(op->condition, new_then, new_else, op->span);
     }
 
+    Optional<Stmt> VisitStmt_(const ForNode *op) final {
+      Optional<Stmt> body = VisitStmt(op->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
+      }
+      For loop = GetRef<For>(op);
+      loop.CopyOnWrite()->body = body.value();
+      return loop;
+    }
+
     Optional<Stmt> VisitStmtDefault_(const Object *) final {
       return Optional<Stmt>();
     }
 
   private:
     Stmt GuardConsumerOnly(const Stmt &stmt) const {
-      Stmt rewritten = PCThreadIdxRewriter::Rewrite(
-          stmt, rewriter_->thread_iv_->var,
-          rewriter_->thread_iv_->var - producer_extent_, consumer_extent_,
-          false);
-      return IfThenElse(GE(rewriter_->thread_iv_->var, producer_extent_),
-                        rewritten);
+      return IfThenElse(LT(rewriter_->thread_iv_->var, consumer_extent_), stmt);
     }
 
     void PropagatePreludeLiveness(const SeqStmtNode *op, int loop_idx) {
@@ -2783,6 +2880,15 @@ private:
     StmtExprVisitor::VisitStmt_(op);
   }
 
+  void VisitStmt_(const AttrStmtNode *op) final {
+    if (auto sm_specialize = GetSmSpecializeAnnotation(op)) {
+      if (!SmSpecializeAutoWSValue(sm_specialize.value())) {
+        return;
+      }
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
   /// A copy destination is TMA-compatible if it has no layout annotation,
   /// or its annotated layout is a recognised swizzle / linear layout.
   bool HasTmaCompatibleLayout(const Buffer &dst) const {
@@ -2847,6 +2953,14 @@ public:
   }
 
 private:
+  void VisitStmt_(const AttrStmtNode *op) final {
+    if (GetSmSpecializeAnnotation(op).defined()) {
+      found_ = true;
+      return;
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
   void VisitStmt_(const SBlockNode *op) final {
     if (GetSmSpecializeAnnotation(op).defined()) {
       found_ = true;
@@ -2861,6 +2975,13 @@ private:
 static PrimFunc StripSmSpecializeAnnotations(PrimFunc f) {
   class Stripper : public StmtExprMutator {
   public:
+    Stmt VisitStmt_(const AttrStmtNode *op) final {
+      if (GetSmSpecializeAnnotation(op).defined()) {
+        return VisitStmt(op->body);
+      }
+      return StmtExprMutator::VisitStmt_(op);
+    }
+
     Stmt VisitStmt_(const SBlockNode *op) final {
       SBlock block = Downcast<SBlock>(StmtExprMutator::VisitStmt_(op));
       if (block->annotations.count(kSmSpecialize)) {

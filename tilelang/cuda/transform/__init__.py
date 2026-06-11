@@ -15,6 +15,12 @@ def ProducerConsumerWarpSpecialized():
     fpass : tvm.transform.Pass
         The result pass
     """
+    if not hasattr(_ffi_api, "ProducerConsumerWarpSpecialized"):
+        raise RuntimeError(
+            "TileLang CUDA transform FFI function "
+            "'tl.cuda.transform.ProducerConsumerWarpSpecialized' is unavailable. "
+            "Rebuild TileLang with CUDA transform support."
+        )
     return _ffi_api.ProducerConsumerWarpSpecialized()  # type: ignore
 
 

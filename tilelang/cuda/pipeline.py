@@ -59,14 +59,11 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LayoutReducer()(mod)
 
     # @CUDA-specific
-    # Tile-level warp specialization: runs before layout inference so that
-    # producer/consumer split happens at the high-level tile-op IR.
-    # The pass classifies copy ops as TMA/cp.async/sync inline (no prior
-    # InstructionAnnotation pass needed). Shared buffers are multi-versioned
-    # internally only for functions where the WS transformation actually
-    # applies.
-    if allow_warp_specialized(target=target):
-        mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
+    # Tile-level warp specialization runs before layout inference so that the
+    # producer/consumer split happens at high-level tile-op IR. The pass also
+    # strips sm_specialize_scope annotations when WS is disabled or unavailable,
+    # keeping that marker frontend-only.
+    mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
 
     # @CUDA / Blackwell specific
     # Lower 2SM TCGEN5MMA and related on Blackwell target (must run before

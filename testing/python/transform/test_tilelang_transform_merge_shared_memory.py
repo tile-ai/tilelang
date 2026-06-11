@@ -1,15 +1,33 @@
 import tilelang
 import tilelang.language as T
 from tilelang import tvm
-from tilelang.engine.lower import lower as tilelang_lower
 from tvm import tirx
 
 
+def _shared_alloc(size: int) -> str:
+    return f'T.alloc_buffer(({size},), "uint8", scope="shared.dyn")'
+
+
 def _apply_merge(func, enable_aggressive_merge: bool = True) -> str:
-    target = tvm.target.Target("cuda -arch=sm_90a")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     with target:
         mod = tvm.tirx.transform.BindTarget(target)(mod)
+        mod = tilelang.transform.MergeSharedMemoryAllocations(
+            enable_aggressive_merge=enable_aggressive_merge
+        )(mod)
+    return mod.script(show_meta=False)
+
+
+def _apply_merge_after_alloc_lowering(func, enable_aggressive_merge: bool = True) -> str:
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    with target:
+        mod = tvm.tirx.transform.BindTarget(target)(mod)
+        mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
+        mod = tilelang.transform.HoistGlobalBufferAllocations()(mod)
+        mod = tilelang.transform.LowerOpaqueBlock()(mod)
+        mod = tilelang.transform.FlattenBuffer()(mod)
         mod = tilelang.transform.MergeSharedMemoryAllocations(
             enable_aggressive_merge=enable_aggressive_merge
         )(mod)
@@ -40,26 +58,16 @@ def _make_sequential_shared_reuse_kernel():
 
 
 def _lower_source(enable_aggressive_merge: bool) -> str:
-    target = tvm.target.Target("cuda -arch=sm_90a")
-    pass_configs = {
-        tilelang.PassConfigKey.TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE: enable_aggressive_merge,
-    }
-    tilelang.disable_cache()
-    try:
-        with target, tvm.transform.PassContext(config=pass_configs):
-            artifact = tilelang_lower(
-                _make_sequential_shared_reuse_kernel(),
-                target=target,
-            )
-    finally:
-        tilelang.enable_cache()
-    return artifact.device_mod.script(show_meta=False)
+    return _apply_merge_after_alloc_lowering(
+        _make_sequential_shared_reuse_kernel(),
+        enable_aggressive_merge=enable_aggressive_merge,
+    )
 
 
 def test_aggressive_merge_uses_statement_level_shared_liveness():
     source = _lower_source(enable_aggressive_merge=True)
-    assert 'T.allocate([196608], "uint8", "shared.dyn")' in source
-    assert 'T.allocate([262144], "uint8", "shared.dyn")' not in source
+    assert _shared_alloc(196608) in source
+    assert _shared_alloc(262144) not in source
 
 
 def _make_ws_tma_store_conflict_kernel():
@@ -112,14 +120,14 @@ def _make_branch_reuse_kernel():
 
 def test_ws_tma_store_source_does_not_reuse_pipeline_shared():
     source = _apply_merge(_make_ws_tma_store_conflict_kernel())
-    assert 'T.allocate([98304], "uint8", "shared.dyn")' in source
-    assert "T.tvm_access_ptr(T.type_annotation(\"uint8\"), C_shared" not in source
+    assert _shared_alloc(98304) in source
+    assert 'C_shared: T.handle("uint8", "shared.dyn") = T.handle_add_byte_offset(buf_dyn_shmem.data, 65536)' in source
 
 
 def test_mutually_exclusive_branches_still_reuse_shared_memory():
     source = _apply_merge(_make_branch_reuse_kernel())
-    assert 'T.allocate([65536], "uint8", "shared.dyn")' in source
-    assert 'T.allocate([98304], "uint8", "shared.dyn")' not in source
+    assert _shared_alloc(65536) in source
+    assert _shared_alloc(98304) not in source
 
 if __name__ == "__main__":
     test_aggressive_merge_uses_statement_level_shared_liveness()
