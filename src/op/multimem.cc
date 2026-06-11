@@ -9,9 +9,10 @@
 
 #include "multimem.h"
 
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/op_attr_types.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
 
 #include <sstream>
 
@@ -26,7 +27,7 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 namespace {
 
@@ -189,15 +190,6 @@ MultimemOp::MultimemOp(Array<PrimExpr> args,
   data_ = std::move(node);
 }
 
-// === GetCoalescedWidth ===
-// 128-bit per multimem instruction => width = 128 / dtype_bits
-int MultimemOpNode::GetCoalescedWidth() const {
-  int bits = src->dtype.bits();
-  // Match the native multimem instruction width used by the element type.
-  // fp32 has vector forms; fp16/bf16 use packed x2 instructions.
-  return bits == 32 ? 4 : 2; // f32->V4, f16/bf16->V2 packed x2 ops
-}
-
 // === MakeIterVars ===
 // Creates loop iteration variables from ranges (skipping dims with extent==1)
 Array<IterVar> MultimemOpNode::MakeIterVars() const {
@@ -277,7 +269,9 @@ PrimExpr MultimemOpNode::MakePredicate(arith::Analyzer *analyzer,
 
 // === MakeSIMTLoop ===
 // Creates the element-wise parallel loop: for (i,j): dst[i,j] = src[i,j]
-// with coalesced_width annotation to limit vectorization to 128 bits.
+// Let ParallelOp choose the widest legal vector width for the region.  The
+// multimem templates support both V4 and V2 f32 forms, and packed 16-bit modes
+// are lowered by LowerPacked16Bit instead of this generic path.
 For MultimemOpNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<IterVar> loop_vars = MakeIterVars();
   bool is_scalar = loop_vars.empty();
@@ -305,13 +299,9 @@ For MultimemOpNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
     return For(Var("i"), 0, 1, ForKind::kSerial, body);
   }
 
-  int coalesced_width = GetCoalescedWidth();
   for (int i = loop_vars.size() - 1; i >= 0; i--) {
-    Map<String, ObjectRef> loop_annotations;
-    loop_annotations.Set(attr::kCoalescedWidth,
-                         IntImm(DataType::Int(32), coalesced_width));
     body = For(loop_vars[i]->var, 0, loop_vars[i]->dom->extent,
-               ForKind::kParallel, body, std::nullopt, loop_annotations);
+               ForKind::kParallel, body);
   }
   return Downcast<For>(body);
 }

@@ -12,7 +12,7 @@
 #define TVM_TL_OP_MULTIMEM_H_
 
 #include <tvm/target/target.h>
-#include <tvm/tir/stmt_functor.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include "operator.h"
 #include "parallel.h"
@@ -20,7 +20,7 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 enum class MultimemMode : int {
   kLdReduce = 0,
@@ -79,7 +79,6 @@ private:
   Array<PrimExpr> MakeIndices(const Array<IterVar> &ivs, int src_dst) const;
   PrimExpr MakePredicate(arith::Analyzer *analyzer, const Array<IterVar> &ivs,
                          Array<PrimExpr> extents, int src_dst) const;
-  int GetCoalescedWidth() const;
   bool IsPacked16BitMultimem() const;
   Stmt LowerPacked16Bit(const LowerArgs &T,
                         arith::Analyzer *analyzer) const;

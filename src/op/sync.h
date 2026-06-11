@@ -8,14 +8,14 @@
 #define TVM_TL_OP_SYNC_H_
 
 #include <tvm/target/target.h>
-#include <tvm/tir/stmt_functor.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include "operator.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 /*!
  * \brief TileOperatorNode for wait operation.

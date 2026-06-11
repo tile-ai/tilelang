@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from enum import Enum
 
-from tvm import tir
-from tvm.tir import PrimExpr, address_of
+from tvm import tirx
+from tvm.tirx import PrimExpr, address_of
 
 
 class BinaryRelation(Enum):
@@ -44,9 +44,9 @@ def _wait(
     scope: WaitScope | str = WaitScope.SYS,
     semantics: WaitSemantics | str = WaitSemantics.ACQUIRE,
 ):
-    return tir.call_intrin(
+    return tirx.call_intrin(
         "handle",
-        tir.op.Op.get("tl.tileop.wait"),
+        tirx.op.Op.get("tl.tileop.wait"),
         relation.value,
         address_of(value),
         expected,
@@ -130,29 +130,29 @@ def wait_lt(
 
 def init_barrier_gpu(barrier: PrimExpr, expected: int):
     """Initialize a barrier for GPU-level synchronization."""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.init_barrier_gpu"), address_of(barrier), expected)
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.init_barrier_gpu"), address_of(barrier), expected)
 
 
 def arrive_barrier_gpu(barrier: PrimExpr):
     """Arrive at a barrier for GPU-level synchronization."""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.arrive_barrier_gpu"), address_of(barrier))
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.arrive_barrier_gpu"), address_of(barrier))
 
 
 def wait_barrier_gpu(barrier: PrimExpr):
     """Wait at a barrier for GPU-level synchronization."""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.wait_barrier_gpu"), address_of(barrier))
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.wait_barrier_gpu"), address_of(barrier))
 
 
 def sync_barrier_gpu(barrier: PrimExpr):
     """Synchronize at a GPU barrier (arrive + wait)."""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.sync_barrier_gpu"), address_of(barrier))
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.sync_barrier_gpu"), address_of(barrier))
 
 
 def barrier_blocks(barrier: PrimExpr):
     """Barrier all blocks at a system-level barrier with fence."""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.barrier_blocks"), address_of(barrier), 1)
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.barrier_blocks"), address_of(barrier), 1)
 
 
 def sync_blocks(barrier: PrimExpr):
     """Synchronize all blocks at a system-level barrier without fence."""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.barrier_blocks"), address_of(barrier), 0)
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.barrier_blocks"), address_of(barrier), 0)

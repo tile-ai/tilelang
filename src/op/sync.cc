@@ -6,9 +6,9 @@
 
 #include "sync.h"
 
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/op_attr_types.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
 
 #include "distributed.h"
 #include "distributed_utils.h"
@@ -16,7 +16,7 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 PrimExpr BarrierBlocksOpNode::get_offset(const BufferLoadNode *load) const {
   PrimExpr offset = 0;

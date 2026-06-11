@@ -6,8 +6,8 @@ to correctly handle fragment layouts, then post-process to emit multimem instruc
 
 from __future__ import annotations
 from enum import Enum
-from tvm import tir
-from tvm.tir import PrimExpr, address_of
+from tvm import tirx
+from tvm.tirx import PrimExpr, address_of
 from tilelang.utils.language import to_buffer_region
 
 
@@ -39,9 +39,9 @@ def _multimem_impl(src, dst, mode: _MultimemMode, reduce_op: MultimemReduceOp = 
     """
     src_region = to_buffer_region(src, access_type="r")
     dst_region = to_buffer_region(dst, access_type="w")
-    return tir.call_intrin(
+    return tirx.call_intrin(
         "handle",
-        tir.op.Op.get("tl.tileop.multimem"),
+        tirx.op.Op.get("tl.tileop.multimem"),
         src_region,
         dst_region,
         mode.value,
@@ -118,11 +118,11 @@ def _signal_dtype_tag(addr, *, allow_signed: bool = False) -> str:
 
 
 def multimem_signal(addr, value: PrimExpr):
-    return tir.call_extern("handle", f"tl::multimem::Signal<{_signal_dtype_tag(addr)}>::run", address_of(addr), value)
+    return tirx.call_extern("handle", f"tl::multimem::Signal<{_signal_dtype_tag(addr)}>::run", address_of(addr), value)
 
 
 def multimem_signal_add(addr, value: PrimExpr):
-    return tir.call_extern(
+    return tirx.call_extern(
         "handle",
         f"tl::multimem::SignalAdd<{_signal_dtype_tag(addr, allow_signed=True)}>::run",
         address_of(addr),

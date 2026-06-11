@@ -173,6 +173,16 @@ pack_float16x4(const half x, const half y, const half z, const half w) {
   return (v0 | (v1 << 16) | (v2 << 32) | (v3 << 48));
 }
 
+__device__ __forceinline__ unsigned long long
+pack_float16x4(const half_t x, const half_t y, const half_t z,
+               const half_t w) {
+  unsigned long long v0 = *((unsigned short *)&x);
+  unsigned long long v1 = *((unsigned short *)&y);
+  unsigned long long v2 = *((unsigned short *)&z);
+  unsigned long long v3 = *((unsigned short *)&w);
+  return (v0 | (v1 << 16) | (v2 << 32) | (v3 << 48));
+}
+
 // Helper function to find the largest K that 2**K <= N
 // Requires N > 0
 template <int N, int K = 0>

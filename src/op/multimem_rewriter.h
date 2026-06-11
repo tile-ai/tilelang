@@ -7,10 +7,11 @@
 #ifndef TVM_TL_OP_MULTIMEM_REWRITER_H_
 #define TVM_TL_OP_MULTIMEM_REWRITER_H_
 
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/expr_functor.h>
-#include <tvm/tir/stmt_functor.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/expr_functor.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <sstream>
 
@@ -19,7 +20,7 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 static inline std::string GetReduceOpStr(int reduce_op) {
   switch (reduce_op) {

@@ -6,15 +6,16 @@
 
 #include "distributed.h"
 
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/op_attr_types.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
 
 #include "backend/common/target_utils.h"
-#include <cuda.h>
 
 namespace tvm {
 namespace tl {
+
+using namespace tirx;
 
 #define TIR_DEFINE_TL_BUILTIN(OpName)                                          \
   const Op &OpName() {                                                         \

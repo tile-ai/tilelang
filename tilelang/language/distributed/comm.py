@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from tvm import tir
-from tvm.tir import PrimExpr, IntImm, address_of
+from tvm import tirx
+from tvm.tirx import PrimExpr, IntImm, address_of
 
 
 def put_warp(
@@ -13,9 +13,9 @@ def put_warp(
     enable_aggressive_vectorize: bool = False,
 ):
     """Put to a remote buffer with unrolled loop."""
-    return tir.call_intrin(
+    return tirx.call_intrin(
         "handle",
-        tir.op.Op.get("tl.tileop.put"),
+        tirx.op.Op.get("tl.tileop.put"),
         src,
         dst,
         size,
@@ -35,9 +35,9 @@ def get_warp(
     enable_aggressive_vectorize: bool = False,
 ):
     """Get from a remote buffer with unrolled loop."""
-    return tir.call_intrin(
+    return tirx.call_intrin(
         "handle",
-        tir.op.Op.get("tl.tileop.get"),
+        tirx.op.Op.get("tl.tileop.get"),
         src,
         dst,
         size,
@@ -50,12 +50,12 @@ def get_warp(
 
 def put_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, dst_pe: PrimExpr | IntImm | None = -1):
     """Put to a remote buffer."""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.put"), src, dst, size, dst_pe, 0, "block", True)
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.put"), src, dst, size, dst_pe, 0, "block", True)
 
 
 def get_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, src_pe: PrimExpr | IntImm | None = -1):
     """Get from a remote buffer."""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.get"), src, dst, size, src_pe, 0, "block", True)
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.get"), src, dst, size, src_pe, 0, "block", True)
 
 
 def ld(
@@ -65,7 +65,7 @@ def ld(
     sem: str = "weak",
     na: bool = False,
     nc: bool = False,
-    src_pe: tir.PrimExpr | tir.IntImm | None = -1,
+    src_pe: PrimExpr | IntImm | None = -1,
 ):
     """Load a value from an address with explicit PTX scope and semantic."""
     assert scope in ["cta", "gpu", "sys"], "Scope must be one of 'cta', 'gpu', or 'sys'."
@@ -74,8 +74,8 @@ def ld(
     )
     scope_id = {"cta": 0, "gpu": 1, "sys": 2}[scope]
     sem_id = {"weak": 0, "volatile": 1, "acquire": 2, "release": 3, "relaxed": 4}[sem]
-    return tir.call_intrin(
-        "handle", tir.op.Op.get("tl.tileop.ld"), address_of(src), value, sem_id, scope_id, int(na), int(nc), src_pe
+    return tirx.call_intrin(
+        "handle", tirx.op.Op.get("tl.tileop.ld"), address_of(src), value, sem_id, scope_id, int(na), int(nc), src_pe
     )
 
 
@@ -85,7 +85,7 @@ def st(
     scope: str = "gpu",
     sem: str = "weak",
     na: bool = False,
-    dst_pe: tir.PrimExpr | tir.IntImm | None = -1,
+    dst_pe: PrimExpr | IntImm | None = -1,
 ):
     """Store a value to an address with explicit PTX scope and semantic."""
     assert scope in ["cta", "gpu", "sys"], "Scope must be one of 'cta', 'gpu', or 'sys'."
@@ -94,7 +94,7 @@ def st(
     )
     scope_id = {"cta": 0, "gpu": 1, "sys": 2}[scope]
     sem_id = {"weak": 0, "volatile": 1, "acquire": 2, "release": 3, "relaxed": 4}[sem]
-    return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.st"), address_of(dst), value, sem_id, scope_id, int(na), dst_pe)
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.st"), address_of(dst), value, sem_id, scope_id, int(na), dst_pe)
 
 
 def atom_add(target: PrimExpr, value: PrimExpr, scope: str = "gpu", sem: str = "relaxed"):
@@ -103,4 +103,4 @@ def atom_add(target: PrimExpr, value: PrimExpr, scope: str = "gpu", sem: str = "
     assert sem in ["relaxed", "acquire", "release", "acq_rel"], (
         "Semantic must be one of 'relaxed', 'acquire', 'release', or 'acq_rel'."
     )
-    return tir.call_intrin("uint32", tir.op.Op.get("tl.atom_add"), address_of(target), value, sem, scope)
+    return tirx.call_intrin("uint32", tirx.op.Op.get("tl.atom_add"), address_of(target), value, sem, scope)
