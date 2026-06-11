@@ -286,8 +286,8 @@ TIR_DEFINE_TL_BUILTIN(ptx_mma_sm70)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(ptx_mma_blockscale)
-    .set_num_inputs(17)
+TIR_DEFINE_TL_BUILTIN(ptx_mma_blockscaled)
+    .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

@@ -116,7 +116,7 @@ private:
   // whether need tl mma instruction header
   bool need_mma_instruction_h_{false};
   // whether need tl block-scaled mma instruction header
-  bool need_mma_blockscale_instruction_h_{false};
+  bool need_mma_blockscaled_instruction_h_{false};
   // whether need tl wgmma instruction header
   bool need_wgmma_instruction_h_{false};
   // whether need tl tcgen05mma instruction header
