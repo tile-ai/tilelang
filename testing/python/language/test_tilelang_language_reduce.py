@@ -12,11 +12,21 @@ tilelang.testing.set_random_seed()
 # ---------------------------------------------------------------------------
 
 
-def _make_input(M, N, dtype):
+def _case_seed(*parts):
+    seed = 17
+    for text in map(str, parts):
+        for char in text:
+            seed = (seed * 131 + ord(char)) % (2**31 - 1)
+    return seed
+
+
+def _make_input(M, N, dtype, seed=42):
     torch_dtype = getattr(torch, dtype)
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
     if torch_dtype in (torch.int32, torch.int64):
-        return torch.randint(-100, 100, (M, N), dtype=torch_dtype).cuda()
-    return torch.randn(M, N, dtype=torch_dtype).cuda()
+        return torch.randint(-100, 100, (M, N), dtype=torch_dtype, generator=generator).cuda()
+    return torch.randn(M, N, dtype=torch_dtype, generator=generator).cuda()
 
 
 def _ref(A, op):
@@ -123,7 +133,8 @@ def test_reduce(op, dtype, M, N, src_scope, dst_scope, threads, batch):
         m = re.search(r",\s*(\d+)\s*,\s*\d+\s*>::run_batch\(", src)
         assert m is not None, f"Expected run_batch in generated source.\n{src}"
 
-    A = _make_input(M, N, dtype)
+    seed = _case_seed("reduce", op, dtype, M, N, src_scope, dst_scope, threads, batch)
+    A = _make_input(M, N, dtype, seed)
     B = jit_kernel(A)
     # float16/bfloat16 accumulate more rounding error over large reductions
     tol = 1e-1 if dtype in (T.float16, T.bfloat16) else 1e-2

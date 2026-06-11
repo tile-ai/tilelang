@@ -1,4 +1,17 @@
-# CUDA backend: toolchain, stub libraries, source files, and build configuration.
+# CUDA backend: source files, toolchain, stubs, and build configuration.
+#
+# Some CUDA-owned files are pure C++ registrations or analysis helpers used by
+# common passes even when the CUDA toolchain is disabled. Keep those in the
+# backend CMake file, but outside the USE_CUDA block.
+file(GLOB TILE_LANG_CUDA_ALWAYS_SRCS
+  src/cuda/codegen/intrin_rule_cuda.cc
+  src/cuda/op/copy_analysis.cc
+  src/cuda/target_utils.cc
+  src/cuda/transform/lower_ptx_async_copy.cc
+  src/cuda/transform/ptx_async_copy_injector.cc
+)
+list(APPEND TILE_LANG_SRCS ${TILE_LANG_CUDA_ALWAYS_SRCS})
+
 if(NOT USE_CUDA)
   return()
 endif()
@@ -138,7 +151,7 @@ if(TILELANG_USE_CUDA_STUBS)
   set(CUDA_NVRTC_LIBRARY nvrtc_stub CACHE STRING "NVRTC library to link against" FORCE)
 endif()
 
-file(GLOB TILE_LANG_CUDA_SRCS
+file(GLOB TILE_LANG_CUDA_ACTIVE_SRCS
   src/cuda/runtime.cc
   src/cuda/codegen/ptx.cc
   src/cuda/codegen/codegen_cuda.cc
@@ -149,9 +162,11 @@ file(GLOB TILE_LANG_CUDA_SRCS
   src/cuda/op/*.cc
   src/cuda/transform/*.cc
 )
-list(REMOVE_ITEM TILE_LANG_CUDA_SRCS
-  "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/op/copy_analysis.cc")
-list(APPEND TILE_LANG_SRCS ${TILE_LANG_CUDA_SRCS})
+list(REMOVE_ITEM TILE_LANG_CUDA_ACTIVE_SRCS
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/op/copy_analysis.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/transform/ptx_async_copy_injector.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/transform/lower_ptx_async_copy.cc")
+list(APPEND TILE_LANG_SRCS ${TILE_LANG_CUDA_ACTIVE_SRCS})
 
 list(APPEND TILE_LANG_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})
 link_directories(${CUDAToolkit_LIBRARY_DIR} ${CUDAToolkit_LIBRARY_DIR}/stubs)

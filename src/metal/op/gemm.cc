@@ -5,8 +5,8 @@
 
 #include "op/gemm.h"
 
-#include "backend/common/target_utils.h"
 #include "metal/op/utils.h"
+#include "metal/target_utils.h"
 
 #include <tvm/runtime/logging.h>
 
@@ -89,7 +89,7 @@ struct Gemm {
                        int block_size, Target target, String gemm_inst) {
     TVM_FFI_ICHECK(gemm_inst == kMetalSIMDGroup)
         << "Unsupported Metal GEMM instruction: " << gemm_inst;
-    int num_warps = block_size / TargetGetWarpSize(target);
+    int num_warps = block_size / TargetMetalGetWarpSize(target);
     return ComputeMetalWarpPartition(policy, M, N, num_warps);
   }
 

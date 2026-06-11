@@ -18,7 +18,7 @@
  */
 
 /*!
- * \file codegen_c.cc
+ * \file cpu/codegen/codegen_c.cc
  */
 #include "codegen_c.h"
 #include "support/check.h"

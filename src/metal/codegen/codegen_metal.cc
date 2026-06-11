@@ -18,7 +18,7 @@
  */
 
 /*!
- * \file codegen_metal.cc
+ * \file metal/codegen/codegen_metal.cc
  */
 #include "codegen_metal.h"
 
