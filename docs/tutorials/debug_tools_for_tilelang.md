@@ -194,6 +194,95 @@ C_local inferenced layout:
   Index:  [_j % 16 // 8 * 4 + _i % 16 // 8 * 2 + _j % 2]
 ```
 
+## Pass Diff: Observing IR Changes Across Passes
+
+TileLang programs are lowered through a sequence of compiler *passes*, each of which may transform the IR. Understanding exactly what each pass changes is essential for debugging incorrect transformations, unexpected optimizations, or missing passes.
+
+TileLang provides a built-in **Pass Diff** tool that automatically captures the IR before and after every pass and generates a human-readable diff report. It works transparently — no code changes are required.
+
+### Quick Start (Environment Variable)
+
+The simplest way to enable pass diff is to set the `TILELANG_PASS_DIFF` environment variable before running your script:
+
+```bash
+# Colored diff printed to the terminal
+TILELANG_PASS_DIFF=terminal python3 my_script.py
+
+# Generate an HTML report
+TILELANG_PASS_DIFF=html python3 my_script.py
+
+# Both terminal output and HTML report
+TILELANG_PASS_DIFF=both python3 my_script.py
+
+# Disabled (default — zero overhead)
+python3 my_script.py
+```
+
+The HTML report is saved to the directory specified by the `TILELANG_PASS_DIFF_OUTPUT` environment variable (default: `tmp/pass_diff_output`). Each run produces a timestamped file, e.g. `pass_diff_20260611_205421.html`.
+
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `TILELANG_PASS_DIFF` | Enable pass diff. Values: `0` (off), `terminal`, `html`, `both` | `0` |
+| `TILELANG_PASS_DIFF_OUTPUT` | Output directory for HTML reports | `tmp/pass_diff_output` |
+
+### HTML Report Features
+
+The HTML report provides a rich diff viewer with:
+
+- **Side-by-side before/after view** for each pass, with color-coded insertions and deletions
+- **Collapsible pass sections** — click a pass header to expand or collapse its diff
+- **Expand context** — when a diff hunk hides unchanged lines, a `⋯ Show N lines above/below` control lets you reveal them
+- **Dark/Light theme toggle** — the default dark theme can be switched via the toolbar button; the preference is persisted across sessions
+- **Copy buttons** — copy the before or after IR of any pass to the clipboard
+- **Summary statistics** — total passes, changed passes, insertions, and deletions shown in the toolbar
+
+```{figure} ../_static/img/pass_diff_html.png
+:width: 600
+:alt: Screenshot of the Pass Diff HTML report
+:align: center
+
+```
+
+### Programmatic API
+
+For more fine-grained control, you can use the `pass_diff` function directly in your code:
+
+```python
+from tilelang.utils.pass_diff import pass_diff
+from tilelang import tvm
+
+# Diff a single pass
+pass_diff(func, tilelang.transform.ThreadSync("shared"))
+
+# Diff a chain of named passes
+pass_diff(func, [
+    ("AnnotateDeviceRegions", tvm.tirx.transform.AnnotateDeviceRegions()),
+    ("SplitHostDevice",       tvm.tirx.transform.SplitHostDevice()),
+    ("ThreadSync",            tilelang.transform.ThreadSync("shared")),
+], mode="html")
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `func` | A `PrimFunc` or `IRModule` to run passes on |
+| `passes` | A single pass or a list of `(name, pass)` tuples |
+| `mode` | `"terminal"`, `"html"`, or `"both"` (default: `"terminal"`) |
+| `context` | Number of context lines in the unified diff (default: 3) |
+| `html_path` | Output path for HTML report (default: `"pass_diff_report.html"`) |
+
+### How It Works
+
+When enabled, the hook monkey-patches `tvm.ir.transform.Pass.__call__` at import time. Every pass invocation is intercepted to capture the IR before and after, compute a unified diff, and emit the result in the chosen format. When disabled (the default), no patching occurs and there is zero overhead.
+
+### Tips
+
+- **Use `terminal` mode** for quick checks — the colored diff is printed as passes run, so you can see changes in real time.
+- **Use `html` mode** for thorough analysis — the report lets you navigate across many passes, expand hidden context, and copy IR snippets.
+- **Combine with `TILELANG_PASS_DIFF_OUTPUT`** to direct reports to a specific location, e.g. when running in CI or comparing across runs.
+- **The hook captures all passes** in the lowering pipeline, including those triggered internally by `tilelang.compile()`. This makes it useful for understanding the full compilation flow.
+
 ## AutoDD: Automatic Delta Debugging
 
 When dealing with complex TileLang programs that produce errors, manually isolating the bug can be tedious. **AutoDD** (Automatic Delta Debugging) is a built-in tool that automatically simplifies your program to the minimal code needed to reproduce a specific error.
@@ -299,7 +388,7 @@ A complete example is available in `examples/autodd/`:
 
 ## Conclusion
 
-By carefully examining intermediate representations (IR) before final code generation—and by leveraging runtime printing through `T.print`—one can quickly diagnose where index calculations, copy logic, or other kernel operations deviate from the intended behavior. This two-pronged approach (inspecting IR transformations and using runtime prints) is often sufficient for resolving generation and correctness issues in TileLang programs.
+By carefully examining intermediate representations (IR) before final code generation—and by leveraging runtime printing through `T.print`—one can quickly diagnose where index calculations, copy logic, or other kernel operations deviate from the intended behavior. The **Pass Diff** tool complements this by providing automatic, pass-by-pass visibility into every IR transformation, making it easy to pinpoint exactly which pass introduces an unexpected change. This three-pronged approach (inspecting IR transformations, observing pass-level diffs, and using runtime prints) is often sufficient for resolving generation and correctness issues in TileLang programs.
 
 For complex programs where manual debugging is tedious, **AutoDD** provides automated delta debugging to quickly isolate the minimal code that reproduces a bug.
 
