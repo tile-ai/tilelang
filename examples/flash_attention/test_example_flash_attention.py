@@ -1,3 +1,4 @@
+import pytest
 import tilelang.testing
 
 import example_gqa_bwd
@@ -61,12 +62,14 @@ def test_example_mha_fwd_bshd():
 
 @tilelang.testing.requires_cuda
 def test_example_mha_fwd_varlen():
+    pytest.importorskip("flash_attn")
     example_mha_fwd_varlen.main(batch=4, heads=16, seq_len=512, dim=64, causal=False)
     example_mha_fwd_varlen.main(batch=4, heads=16, seq_len=512, dim=64, causal=True)
 
 
 @tilelang.testing.requires_cuda
 def test_example_gqa_fwd_varlen():
+    pytest.importorskip("flash_attn")
     example_gqa_fwd_varlen.main(batch=4, heads=16, q_seqlen=512, k_seqlen=512, dim=64, is_causal=False)
     example_gqa_fwd_varlen.main(batch=4, heads=16, q_seqlen=512, k_seqlen=512, dim=64, is_causal=True)
 

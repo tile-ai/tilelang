@@ -83,10 +83,12 @@ def gemm_rs_specialized_kernel(
     ):
         with T.Kernel(sm_num, threads=threads) as bid:
             local_rank = T.get_rank()
-            A_shared = T.alloc_shared((block_M, block_K), dtype)
+            A_shared_low = T.alloc_shared((store_block_M, block_K), dtype)
+            A_shared_high = T.alloc_shared((store_block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
-            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-            C_shared = T.alloc_shared((2, store_block_M, block_N), dtype)
+            C_local_low = T.alloc_fragment((store_block_M, block_N), accum_dtype)
+            C_local_high = T.alloc_fragment((store_block_M, block_N), accum_dtype)
+            C_shared = T.alloc_shared((store_block_M, block_N), dtype)
 
             for w in T.serial(waves):
                 tile_id = bid + w * sm_num
@@ -95,46 +97,67 @@ def gemm_rs_specialized_kernel(
                     dst_rank = by // blocks_per_rank
                     local_by = by - dst_rank * blocks_per_rank
 
-                    T.clear(C_local)
+                    T.clear(C_local_low)
+                    T.clear(C_local_high)
                     for k in T.Pipelined(k_blocks, num_stages=pipeline_stages):
-                        T.copy(A[by * block_M, k * block_K], A_shared)
+                        T.copy(A[by * block_M, k * block_K], A_shared_low)
+                        T.copy(A[by * block_M + store_block_M, k * block_K], A_shared_high)
                         T.copy(B[k * block_K, bx * block_N], B_shared)
-                        T.gemm(A_shared, B_shared, C_local)
+                        T.gemm(A_shared_low, B_shared, C_local_low)
+                        T.gemm(A_shared_high, B_shared, C_local_high)
 
                     # Fused reduce-scatter
-                    for row_offset in T.serial(0, block_M, store_block_M):
-                        store_stage = row_offset // store_block_M
-                        T.copy(
-                            C_local[
-                                row_offset : row_offset + store_block_M,
-                                0:block_N,
+                    T.copy(C_local_low, C_shared)
+                    T.sync_threads(0, threads)
+                    if use_tma_epilogue:
+                        # TMA store-add into peer C.
+                        T.atomic_add(
+                            C[
+                                local_by * block_M : local_by * block_M + store_block_M,
+                                bx * block_N : (bx + 1) * block_N,
                             ],
-                            C_shared[store_stage, :, :],
+                            C_shared,
+                            use_tma=True,
+                            tma_wait=True,
+                            dst_pe=dst_rank,
                         )
-                        if use_tma_epilogue:
-                            # TMA store-add into peer C.
-                            T.atomic_add(
-                                C[
-                                    local_by * block_M + row_offset : local_by * block_M + row_offset + store_block_M,
-                                    bx * block_N : (bx + 1) * block_N,
-                                ],
-                                C_shared[store_stage, :, :],
-                                use_tma=True,
-                                tma_wait=False,
+                    else:
+                        # vectorized bf16x2 red.global.add.
+                        tid = T.get_thread_binding()
+                        for idx in T.serial(tid, store_block_M * block_N // 2, threads):
+                            elem = idx * 2
+                            T.atomic_addx2(
+                                C[local_by * block_M + elem // block_N, bx * block_N + elem % block_N],
+                                C_shared[elem // block_N, elem % block_N],
                                 dst_pe=dst_rank,
                             )
-                        else:
-                            # vectorized bf16x2 red.global.add.
-                            tid = T.get_thread_binding()
-                            for idx in T.serial(tid, store_block_M * block_N // 2, threads):
-                                elem = idx * 2
-                                T.atomic_addx2(
-                                    C[local_by * block_M + row_offset + elem // block_N, bx * block_N + elem % block_N],
-                                    C_shared[store_stage, elem // block_N, elem % block_N],
-                                    dst_pe=dst_rank,
-                                )
-                    if use_tma_epilogue and T.get_thread_binding() == 0:
-                        T.tma_store_wait(0, True)
+                    T.sync_threads(0, threads)
+
+                    T.copy(C_local_high, C_shared)
+                    T.sync_threads(0, threads)
+                    if use_tma_epilogue:
+                        # TMA store-add into peer C.
+                        T.atomic_add(
+                            C[
+                                local_by * block_M + store_block_M : local_by * block_M + block_M,
+                                bx * block_N : (bx + 1) * block_N,
+                            ],
+                            C_shared,
+                            use_tma=True,
+                            tma_wait=True,
+                            dst_pe=dst_rank,
+                        )
+                    else:
+                        # vectorized bf16x2 red.global.add.
+                        tid = T.get_thread_binding()
+                        for idx in T.serial(tid, store_block_M * block_N // 2, threads):
+                            elem = idx * 2
+                            T.atomic_addx2(
+                                C[local_by * block_M + store_block_M + elem // block_N, bx * block_N + elem % block_N],
+                                C_shared[elem // block_N, elem % block_N],
+                                dst_pe=dst_rank,
+                            )
+                    T.sync_threads(0, threads)
     return main
 
 
@@ -220,15 +243,18 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         reset_output()
         run_kernel()
     reset_output()
+    flush_l2 = getattr(args, "flush_l2", False)
+    barrier_comm_profiling = getattr(args, "barrier_comm_profiling", False)
+    discard_first = getattr(args, "discard_first", False)
     tl_t = do_bench(
         run_kernel,
         warmup=0,
         rep=args.rep,
         post_fn=reset_output,
         group=group,
-        flush_l2=args.flush_l2,
-        barrier_comm_profiling=args.barrier_comm_profiling,
-        discard_first=args.discard_first,
+        flush_l2=flush_l2,
+        barrier_comm_profiling=barrier_comm_profiling,
+        discard_first=discard_first,
     )
 
     if local_rank == 0:

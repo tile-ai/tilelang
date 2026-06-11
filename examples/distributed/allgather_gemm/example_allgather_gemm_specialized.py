@@ -366,8 +366,9 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         print(f"rank {local_rank} check failed. ❌")
         print(f"max_diff={max_diff}, ag_max_diff={ag_max_diff}")
 
-    if args.tune_comm_sms:
-        sms_values = [int(s) for s in args.tune_comm_sms.split(",") if s]
+    tune_comm_sms = getattr(args, "tune_comm_sms", "")
+    if tune_comm_sms:
+        sms_values = [int(s) for s in tune_comm_sms.split(",") if s]
     else:
         sms_values = [num_comm_sms]
 

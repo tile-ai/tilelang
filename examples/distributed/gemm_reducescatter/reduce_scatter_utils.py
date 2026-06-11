@@ -13,7 +13,7 @@ else:
 import tilelang
 from tilelang.distributed.host import CUDA_CHECK
 from tilelang.distributed.topology import has_fullmesh_nvlink
-from tilelang.utils.target import target_is_hopper, determine_target
+from tilelang.utils.target import determine_target, target_has_bulk_copy
 import torch.distributed as dist
 import tilelang.language as T
 
@@ -295,10 +295,10 @@ def ring_reduce(
     num_splits,
     num_sms=-1,
 ):
-    if target_is_hopper(target):
+    if target_has_bulk_copy(target):
         return ring_reduce_tma(input, output, begin_idx, num_splits, num_sms)
     else:
-        raise NotImplementedError("Only Hopper ring reduce is implemented now.")
+        raise NotImplementedError("TMA ring reduce requires a CUDA target with bulk copy support (SM90+).")
 
 
 def reduce_scatter_for_each_node(input: torch.Tensor, ctx: ReduceScatter2DContext, output: Optional[torch.Tensor] = None):

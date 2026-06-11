@@ -1,4 +1,7 @@
+import pytest
 import tilelang.testing
+
+pytest.importorskip("fla")
 
 import example_linear_attn_fwd
 import example_linear_attn_bwd

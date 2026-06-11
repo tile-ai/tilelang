@@ -164,7 +164,6 @@ def gemm_ar_sm_specialized_kernel(
                 with T.sm_specialize_scope(auto_ws=True):
                     A_shared = T.alloc_shared((block_M, block_K), dtype)
                     B_shared = T.alloc_shared((block_K, block_N), dtype)
-                    C_shared = T.alloc_shared((store_block_M, block_N), dtype)
                     C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
                     for w in T.serial(waves):
                         tile_id = bid + w * num_comp_sms
@@ -175,11 +174,7 @@ def gemm_ar_sm_specialized_kernel(
                                 T.copy(A[by * block_M, k * block_K], A_shared)
                                 T.copy(B[k * block_K, bx * block_N], B_shared)
                                 T.gemm(A_shared, B_shared, C_local)
-                            for row_offset in T.serial(0, block_M, store_block_M):
-                                T.copy(C_local[row_offset, 0], C_shared)
-                                T.sync_threads()
-                                T.copy(C_shared, C_local_out[by * block_M + row_offset, bx * block_N])
-                                T.sync_threads()
+                            T.copy(C_local, C_local_out[by * block_M, bx * block_N])
                             T.fence_sys()
                             if T.get_thread_binding(0) == 0:
                                 T.multimem_signal_add(mcast_signal[tile_id], 1)

@@ -1,3 +1,4 @@
+import pytest
 import tilelang.testing
 import block_sparse_attn_triton
 import example_tilelang_block_sparse_attn
@@ -14,10 +15,12 @@ def test_example_tilelang_block_sparse_attn():
 
 
 def test_example_tilelang_sparse_gqa_decode_varlen_indice():
+    pytest.importorskip("flash_attn")
     example_tilelang_sparse_gqa_decode_varlen_indice.main(batch=1, max_cache_seqlen=2048)
 
 
 def test_example_tilelang_sparse_gqa_decode_varlen_mask():
+    pytest.importorskip("flash_attn")
     example_tilelang_sparse_gqa_decode_varlen_mask.main(batch=1, max_cache_seqlen=2048)
 
 
