@@ -3,6 +3,7 @@ import subprocess
 
 import tilelang.testing
 import pytest
+from tilelang.testing import requires_cuda
 
 
 @pytest.fixture
@@ -125,6 +126,7 @@ def test_nvcc_compile_cuda_honors_tilelang_timeout(monkeypatch):
     assert "Source:" in message
 
 
+@requires_cuda
 def test_jit_compile_reports_timeout_for_hanging_nvcc(monkeypatch, tmp_path, caplog, capture_tilelang_logs):
     import tilelang
     from tilelang.contrib import nvcc
@@ -225,6 +227,7 @@ def test_kernel_cache_miss_compile_logs_context(monkeypatch, tmp_path, caplog, c
     assert any("cache_diag_kernel" in message and "sm_120" in message for message in messages)
 
 
+@requires_cuda
 def test_explicit_cuda_arch_source_generation_probe():
     import tilelang
     from tilelang import tvm
