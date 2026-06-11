@@ -32,16 +32,6 @@ def ProducerConsumerWarpSpecializedTiled():
     return ProducerConsumerWarpSpecialized()
 
 
-def LowerBlackwell2SM():
-    """Lower 2SM TCGEN5MMA and related on Blackwell target
-
-    Returns:
-        fpass : tvm.transform.Pass
-            The result pass
-    """
-    return _ffi_api.LowerBlackwell2SM()  # type: ignore
-
-
 def LowerHopperIntrin():
     """LowerHopperIntrin"""
     if hasattr(_ffi_api, "LowerHopperIntrin"):
@@ -169,7 +159,6 @@ __all__ = [
     "FuseMBarrierArriveExpectTx",
     "InjectFenceProxy",
     "InjectTcgen05Fence",
-    "LowerBlackwell2SM",
     "LowerHopperIntrin",
     "LowerLDGSTG",
     "LowerL2Persistent",

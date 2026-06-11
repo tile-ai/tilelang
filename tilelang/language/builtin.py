@@ -319,16 +319,24 @@ def tma_load(*args):
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.tma_load"), *args)
 
 
-def tma_load_2sm(*args):
+def tma_load_2sm(*args, barrier_rank: int | None = 0):
     """Perform a TMA load with 2SM (two Streaming Multiprocessors) on Blackwell.
 
     This is an internal API. Same arguments as :func:`tma_load`, but with
-    the ``use_2cta`` annotation enabled for 2-CTA cooperative loading.
+    ``barrier_rank=0`` for 2-CTA cooperative loading (leader CTA only).
 
     Returns:
         tirx.Call: A handle to the TMA load operation
     """
-    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tma_load"), *args, annotations={"use_2cta": 1})
+    if barrier_rank is not None and barrier_rank != 0:
+        raise ValueError(f"barrier_rank must be 0 or None, got {barrier_rank}")
+    ann = {"barrier_rank": 0} if barrier_rank is not None else {}
+    return tirx.call_intrin(
+        "handle",
+        tirx.op.Op.get("tl.tma_load"),
+        *args,
+        annotations=ann,
+    )
 
 
 def fence_proxy_async():

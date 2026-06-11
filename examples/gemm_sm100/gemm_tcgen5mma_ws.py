@@ -103,11 +103,13 @@ def gemm_2cta(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype,
                     A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K],
                     A_shared[k % num_stages, :, :],
                     barrier=loaded[k % num_stages],
+                    barrier_rank=0,
                 )
                 T.tma_copy(
                     B[k * block_K : (k + 1) * block_K, (by * 2 + cta_id) * (block_N // 2) : (by * 2 + cta_id + 1) * (block_N // 2)],
                     B_shared[k % num_stages, :, :],
                     barrier=loaded[k % num_stages],
+                    barrier_rank=0,
                 )
                 T.mbarrier_arrive(loaded[k % num_stages], 0)  # arrive on leader cta's barrier
         elif cta_id == 0 and tx < 64:  # Only warp 1 on leader cta issues tcgen5

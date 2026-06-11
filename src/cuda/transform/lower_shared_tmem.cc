@@ -222,8 +222,8 @@ private:
       return StmtExprMutator::VisitStmt_(op);
     }
 
-    // If block has use_2cta attr, add use_2cta: 1 to tmem alloc/dealloc call
-    // annotations.
+    // If block has use_2cta attr (set by LowerTileOp when lowering 2-CTA
+    // TCGEN05 GEMM), add use_2cta: 1 to tmem alloc/dealloc call annotations.
     Map<String, ObjectRef> tmem_call_ann;
     if (op->annotations.count("use_2cta")) {
       PrimExpr val = Downcast<PrimExpr>(op->annotations["use_2cta"]);

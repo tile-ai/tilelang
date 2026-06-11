@@ -231,11 +231,51 @@ def async_copy(
     )
 
 
+def _barrier_storage_scope(barrier) -> str:
+    from .builtin import _mbar_to_buffer_load
+
+    bar = _mbar_to_buffer_load(barrier).buffer
+    ptr_type = bar.data.type_annotation
+    if hasattr(ptr_type, "storage_scope"):
+        return ptr_type.storage_scope
+    return ""
+
+
+def _set_barrier_rank_ann(
+    ann: dict,
+    barrier_rank: int | None,
+    *,
+    barrier=None,
+    require_cluster_barrier: bool = False,
+) -> None:
+    """Set the barrier rank annotation for TMA loads.
+    1. If barrier_rank is None, each TMA load's transaction will bind to its own barrier.
+    2. If barrier_rank is 0, the TMA load's transaction will bind to the leader CTA's barrier.
+    Currently only support barrier_rank to be either None or 0.
+    """
+
+    if barrier_rank is None:
+        return
+    if not isinstance(barrier_rank, int):
+        raise TypeError(f"barrier_rank must be int, got {type(barrier_rank)}")
+    if barrier_rank != 0:
+        raise ValueError(f"barrier_rank must be 0 or None, got {barrier_rank}")
+    if require_cluster_barrier:
+        if barrier is None:
+            raise ValueError("barrier_rank requires barrier for TMA loads")
+        scope = _barrier_storage_scope(barrier)
+        if scope != "shared.cluster_barrier":
+            raise ValueError(f"barrier_rank is only valid for cluster barriers (shared.cluster_barrier), got {scope!r}")
+    if "barrier_rank" not in ann:
+        ann["barrier_rank"] = 0
+
+
 def tma_copy(
     src: BufferLikeType,
     dst: BufferLikeType,
     *,
     barrier=None,
+    barrier_rank: int | None = None,
     leader_scope_threads: int | None = None,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
     annotations: dict | None = None,
@@ -263,6 +303,10 @@ def tma_copy(
             Required for loads (global -> shared). Not needed for stores.
             The TMA load will arrive at this barrier with expected byte count.
             The user must wait on the same barrier via T.mbarrier_wait_parity().
+        barrier_rank: Enable 2-SM TMA load on cluster barriers. Must be ``None``
+            (default) or ``0`` (leader CTA). Only valid when ``barrier`` is from
+            ``T.alloc_cluster_barrier()``; lowers to ``tma_load_2sm`` and issues
+            ``mbarrier_expect_tx`` only on CTA rank 0.
         leader_scope_threads: Number of threads in each TMA leader-election scope
             (e.g., 32 for per-warp). Defaults to the thread extend in the current context if not specified.
         eviction_policy: Cache eviction policy. Defaults to None.
@@ -294,6 +338,8 @@ def tma_copy(
         from .builtin import _mbar_to_buffer_load
 
         ann["barrier"] = _mbar_to_buffer_load(barrier)
+
+    _set_barrier_rank_ann(ann, barrier_rank, barrier=barrier, require_cluster_barrier=True)
 
     if leader_scope_threads is not None:
         if not isinstance(leader_scope_threads, int) or leader_scope_threads <= 0:
@@ -333,6 +379,7 @@ def tma_gather4(
     rows,
     *,
     barrier,
+    barrier_rank: int | None = None,
     swizzle=None,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
 ):
@@ -344,7 +391,10 @@ def tma_gather4(
 
     Caller must wrap this with ``T.shuffle_elect`` and pair it with
     ``T.mbarrier_expect_tx`` (use :func:`tma_gather4_bytes`) before, and
-    ``barrier_arrive`` / ``mbarrier_wait_parity`` after.
+    ``barrier_arrive`` / ``mbarrier_wait_parity`` after. For 2-CTA kernels,
+    pass ``barrier_rank=0`` with a cluster barrier; use
+    ``tma_gather4_bytes(...) * T.cluster_size`` for ``mbarrier_expect_tx`` on
+    the leader CTA (rank 0).
 
     The ``swizzle`` kwarg is deprecated; mark the shared tile via
     ``T.annotate_layout`` for non-default swizzle.
@@ -401,6 +451,7 @@ def tma_gather4(
         "barrier": bar_load,
         "eviction_policy": ep,
     }
+    _set_barrier_rank_ann(ann, barrier_rank, barrier=barrier, require_cluster_barrier=True)
     return tirx.call_intrin(
         "handle",
         tirx.op.Op.get("tl.tileop.copy"),
@@ -412,7 +463,8 @@ def tma_gather4(
 
 def tma_gather4_bytes(K_box, dtype: str) -> int:
     """Transaction byte count for a 4-row gather4 of width ``K_box``. Pass
-    to ``T.mbarrier_expect_tx`` immediately before ``T.tma_gather4``.
+    to ``T.mbarrier_expect_tx`` immediately before ``T.tma_gather4``. For
+    ``barrier_rank=0``, multiply by ``T.cluster_size`` on the leader CTA.
     """
     if dtype not in _TMA_SUPPORTED_DTYPES:
         raise ValueError(f"Unsupported dtype: {dtype}")

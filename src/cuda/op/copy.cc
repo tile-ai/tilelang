@@ -157,6 +157,20 @@ int TensorMapDataTypeForTMA(DataType global_dtype, DataType shared_dtype) {
   return to_CUtensorMapDataType(global_dtype);
 }
 
+Optional<int> GetBarrierRank(const CopyNode &op) {
+  if (auto val = op.annotations.Get("barrier_rank")) {
+    if (auto int_val = val->as<IntImmNode>()) {
+      int rank = static_cast<int>(int_val->value);
+      ICHECK(rank == 0) << "T.tma_copy barrier_rank must be 0 (leader CTA), "
+                        << "got " << rank;
+      return 0;
+    }
+    LOG(FATAL) << "T.tma_copy barrier_rank annotation must be an integer "
+                  "constant.";
+  }
+  return Optional<int>();
+}
+
 int GetEvictionPolicy(const CopyNode &op) {
   if (auto val = op.annotations.Get("eviction_policy")) {
     if (auto int_val = val->as<IntImmNode>()) {
@@ -1624,6 +1638,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   for (auto e : desc.smem_box)
     total_elements *= e;
 
+  Optional<int> barrier_rank = GetBarrierRank(op);
+
   auto build_multicast_args = [&](const Array<PrimExpr> &regular_args) {
     Array<PrimExpr> mc_args;
     mc_args.reserve(regular_args.size() + 1);
@@ -1653,8 +1669,9 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
       args.push_back(need_reduce);
     args.push_back(GetEvictionPolicy(op));
     Map<String, ObjectRef> ann_loop;
-    if (is_cluster_barrier && TargetIsSm100(T.target) && is_load) {
-      ann_loop.Set("use_2cta", IntImm(DataType::Int(32), 1));
+    if (barrier_rank.has_value() && TargetIsSm100(T.target) && is_load) {
+      ann_loop.Set("barrier_rank",
+                   IntImm(DataType::Int(32), barrier_rank.value()));
     }
     tma_copy = For(loop_var, 0, loop_extent, ForKind::kUnrolled,
                    Evaluate(Call(DataType::Handle(), tma_op, args, ann_loop)));
@@ -1688,10 +1705,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
       args.push_back(need_reduce);
     args.push_back(GetEvictionPolicy(op));
     Map<String, ObjectRef> ann;
-    if (TargetIsSm100(T.target) && is_load &&
-        (annotations.find("use_2cta") != annotations.end() ||
-         is_cluster_barrier)) {
-      ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
+    if (barrier_rank.has_value() && TargetIsSm100(T.target) && is_load) {
+      ann.Set("barrier_rank", IntImm(DataType::Int(32), barrier_rank.value()));
     }
     tma_copy = Evaluate(Call(DataType::Handle(), tma_op, args, ann));
 
@@ -1740,15 +1755,19 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     Stmt barrier_before_tma_stmt;
     Optional<Stmt> barrier_after_tma_stmt = std::nullopt;
     if (GetIsTmaCopy(op)) {
-      if (is_cluster_barrier) {
+      if (barrier_rank.has_value()) {
+        ICHECK(is_cluster_barrier)
+            << "T.tma_copy barrier_rank requires a cluster barrier "
+               "(T.alloc_cluster_barrier).";
+        int leader_rank = barrier_rank.value();
         PrimExpr cluster_total_bytes =
             total_bytes * IntImm(DataType::Int(32), T.cluster_size);
         Stmt expect_stmt =
             Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
                           {mbar_handle, cluster_total_bytes}));
         PrimExpr rank = Call(DataType::Int(32), block_rank_in_cluster(), {});
-        barrier_before_tma_stmt =
-            IfThenElse(EQ(rank, IntImm(DataType::Int(32), 0)), expect_stmt);
+        barrier_before_tma_stmt = IfThenElse(
+            EQ(rank, IntImm(DataType::Int(32), leader_rank)), expect_stmt);
       } else {
         barrier_before_tma_stmt =
             Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
@@ -1927,10 +1946,13 @@ Stmt Copy::LowerBulkGather4(const CopyNode &op, const LowerArgs &T,
       shared_tensor.access_ptr(is_load ? 2 : 1, DataType::Handle(), 1,
                                IntImm(DataType::Int(32), 0), total_elements);
 
+  Optional<int> barrier_rank = GetBarrierRank(op);
+
   Array<PrimExpr> args;
   args.push_back(create_descriptor);
+  Optional<ObjectRef> user_barrier;
   if (is_load) {
-    auto user_barrier = op.annotations.Get("barrier");
+    user_barrier = op.annotations.Get("barrier");
     ICHECK(user_barrier.has_value())
         << "tma_gather4 requires a 'barrier' annotation";
     args.push_back(Downcast<PrimExpr>(user_barrier.value()));
@@ -1944,7 +1966,20 @@ Stmt Copy::LowerBulkGather4(const CopyNode &op, const LowerArgs &T,
   // Fire-and-forget: caller manages mbarrier_expect_tx / wait (loads) and
   // tma_store_arrive / wait (stores), and the leader-thread guard.
   auto tl_op = is_load ? tma_load_gather4() : tma_store_scatter4();
-  return Evaluate(Call(DataType::Handle(), tl_op, args));
+  Map<String, ObjectRef> ann;
+  if (is_load && barrier_rank.has_value() && TargetIsSm100(T.target)) {
+    ICHECK(user_barrier.has_value());
+    PrimExpr bar = Downcast<PrimExpr>(user_barrier.value());
+    bool is_cluster_barrier = false;
+    if (const auto *load = bar.as<BufferLoadNode>()) {
+      is_cluster_barrier = load->buffer.scope() == "shared.cluster_barrier";
+    }
+    ICHECK(is_cluster_barrier)
+        << "T.tma_gather4 barrier_rank requires a cluster barrier "
+           "(T.alloc_cluster_barrier).";
+    ann.Set("barrier_rank", IntImm(DataType::Int(32), 0));
+  }
+  return Evaluate(Call(DataType::Handle(), tl_op, args, ann));
 }
 
 Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,

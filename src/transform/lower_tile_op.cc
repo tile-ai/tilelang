@@ -39,6 +39,41 @@ namespace tl {
 using namespace tirx;
 using namespace ffi;
 
+namespace attr {
+constexpr const char *kUse2Cta = "use_2cta";
+} // namespace attr
+
+static bool HasValidClusterDimsFor2Cta(const Stmt &body) {
+  bool found = false;
+  PostOrderVisit(body, [&](const ObjectRef &node) {
+    if (found)
+      return;
+    if (const auto *block = node.as<SBlockNode>()) {
+      if (block->annotations.count("cluster_dims")) {
+        if (auto arr = block->annotations.Get("cluster_dims")
+                           ->try_cast<Array<Integer>>()) {
+          if (arr.value().size() >= 3) {
+            int64_t x = arr.value()[0]->value;
+            int64_t y = arr.value()[1]->value;
+            int64_t z = arr.value()[2]->value;
+            found = (x == 2 && y == 1 && z == 1);
+          }
+        }
+      }
+    }
+  });
+  return found;
+}
+
+static bool CallRequestsUse2Cta(const CallNode *call) {
+  if (!call->annotations.count(attr::kUse2Cta))
+    return false;
+  auto val = call->annotations.Get(attr::kUse2Cta).value();
+  if (const auto *imm = val.as<IntImmNode>())
+    return imm->value != 0;
+  return false;
+}
+
 static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
                                    Map<Var, Var> &var_remap) {
   const auto *ptr_type =
@@ -219,6 +254,58 @@ private:
   Var fallback_thread_var_;
 };
 
+class Use2CtaBlockAnnotator : public StmtMutator {
+public:
+  static Stmt Annotate(Stmt stmt) {
+    Use2CtaBlockAnnotator annotator(/*require_shared_tmem=*/true);
+    stmt = annotator(std::move(stmt));
+    if (annotator.injected_) {
+      return stmt;
+    }
+
+    Use2CtaBlockAnnotator fallback(/*require_shared_tmem=*/false);
+    stmt = fallback(std::move(stmt));
+    ICHECK(fallback.injected_)
+        << "Failed to find kernel SBlockRealize for use_2cta annotation";
+    return stmt;
+  }
+
+private:
+  explicit Use2CtaBlockAnnotator(bool require_shared_tmem)
+      : require_shared_tmem_(require_shared_tmem) {}
+
+  static bool HasSharedTmemAlloc(const SBlock &block) {
+    for (const auto &buffer : block->alloc_buffers) {
+      const auto *ptr_type =
+          buffer->data->type_annotation.as<PointerTypeNode>();
+      if (ptr_type && ptr_type->storage_scope == "shared.tmem") {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  Stmt VisitStmt_(const SBlockRealizeNode *op) final {
+    if (injected_ || op->block->name_hint == "root") {
+      return StmtMutator::VisitStmt_(op);
+    }
+    if (require_shared_tmem_ && !HasSharedTmemAlloc(op->block)) {
+      return StmtMutator::VisitStmt_(op);
+    }
+
+    injected_ = true;
+    SBlock block = op->block;
+    block.CopyOnWrite()->annotations.Set(attr::kUse2Cta,
+                                         IntImm(DataType::Int(32), 1));
+    block = Downcast<SBlock>(StmtMutator::VisitStmt(block));
+    return SBlockRealize(op->iter_values, op->predicate,
+                         std::move(block));
+  }
+
+  bool require_shared_tmem_{false};
+  bool injected_{false};
+};
+
 class LowerTileOpPass : arith::IRMutatorWithAnalyzer {
 public:
   static PrimFunc Substitute(PrimFunc f) {
@@ -238,6 +325,8 @@ public:
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);
     ICHECK(target.defined()) << "LowerTileOpPass: Require the target attribute";
     substituter.target_ = target.value();
+    substituter.cluster_dims_valid_for_2cta_ =
+        HasValidClusterDimsFor2Cta(f->body);
     PrimFuncNode *fptr = f.CopyOnWrite();
     fptr->body = substituter.VisitStmt(f->body);
     fptr->body =
@@ -309,6 +398,10 @@ public:
       fptr->body = injector(fptr->body);
       ICHECK(injector.injected)
           << "Failed to find root SBlockRealize for barrier injection";
+    }
+
+    if (substituter.needs_use_2cta_) {
+      fptr->body = Use2CtaBlockAnnotator::Annotate(std::move(fptr->body));
     }
 
     if (TargetIsCPU(substituter.target_)) {
@@ -1140,6 +1233,18 @@ private:
     auto tile_op = ParseOperator(GetRef<Stmt>(op));
     if (!tile_op.defined())
       return IRMutatorWithAnalyzer::VisitStmt_(op);
+
+    if (call && CallRequestsUse2Cta(call)) {
+      if (tile_op.as<Gemm>() || tile_op.as<GemmSP>()) {
+        if (cluster_dims_valid_for_2cta_) {
+          needs_use_2cta_ = true;
+        } else if (TargetIsSm100(target_)) {
+          LOG(WARNING) << "Invalid cluster_dims disables 2CTA TCGEN5MMA, use "
+                          "1CTA variant instead.";
+        }
+      }
+    }
+
     AddWorkspaceCallback callback = [this](int num_elem, DataType dtype) {
       auto workspace =
           decl_buffer({PrimExpr(num_elem)}, dtype, "workspace", "shared.dyn");
@@ -1512,6 +1617,8 @@ private:
   size_t thread_block_size_ = 0;
   // Product of cluster_dims from block annotation (default 1).
   int cluster_size_ = 1;
+  bool cluster_dims_valid_for_2cta_{false};
+  bool needs_use_2cta_{false};
   // Stack of per-Block workspace buffers gathered while visiting children
   std::vector<Array<Buffer>> workspace_stack_;
   // Counter and arrive-counts for mbarrier allocation via
