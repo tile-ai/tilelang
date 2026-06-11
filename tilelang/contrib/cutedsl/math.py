@@ -21,6 +21,7 @@ __all__ = [
     "__habs",
     "__float2half_rz",
     "tanh",
+    "pow_of_int",
 ]
 
 import cutlass
@@ -237,3 +238,23 @@ def __tanhf(x: Union[float, Float32], *, fastmath, loc=None, ip=None) -> Float32
 def tanh(x: Union[TensorSSA, Numeric], fastmath: bool = False) -> Union[TensorSSA, Numeric]:
     tanh_op = __tanhf if fastmath else math.tanh
     return _tl_math_op(tanh_op, False, x)
+
+
+def pow_of_int(exp: int):
+    """Return a function that raises its argument to the integer power `exp`.
+
+    Mirrors tl::pow_of_int<exp> from math.cc — the C++ codegen emits
+    tl::pow_of_int<N> as a call_extern, which the CuTeDSL codegen translates
+    to tl.pow_of_int(N)(base). On CUDA/HIP the op is lowered by FLowerIntrinsic
+    before reaching call_extern; for the CuTeDSL Python backend it reaches here.
+    """
+
+    def _pow(base):
+        if exp == 0:
+            return type(base)(1)
+        result = base
+        for _ in range(exp - 1):
+            result = result * base
+        return result
+
+    return _pow
