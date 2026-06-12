@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from tilelang.backend.execution_backend import ExecutionBackendSpec, register_execution_backend
-from tilelang.backend.pass_pipeline.pipeline import PassPipeline, register_pipeline
-from tilelang.cpu.pipeline import CPUPassPipelineBody
+
+# Importing the package registers its pass pipeline.
+import tilelang.webgpu  # noqa: F401
 
 
-register_pipeline(PassPipeline("webgpu", CPUPassPipelineBody))
 register_execution_backend("webgpu", ExecutionBackendSpec("cython"), override=True)
 register_execution_backend(
     "webgpu",
