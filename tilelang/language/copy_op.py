@@ -391,7 +391,7 @@ def tma_gather4(
         inner = src.strides[1]
         if not ((isinstance(inner, int) and inner == 1) or (hasattr(inner, "value") and int(inner.value) == 1)):
             raise ValueError(f"tma_gather4 requires unit innermost global stride, got {inner}")
-    rows = list(rows)
+    rows = [tirx.IntImm("int32", row) if isinstance(row, int) else row for row in rows]
     if len(rows) != 4:
         raise ValueError(f"tma_gather4 expects exactly 4 row indices, got {len(rows)}")
     if swizzle not in (None, "none", 0):
@@ -486,7 +486,7 @@ def tma_scatter4(
         inner = dst.strides[1]
         if not ((isinstance(inner, int) and inner == 1) or (hasattr(inner, "value") and int(inner.value) == 1)):
             raise ValueError(f"tma_scatter4 requires unit innermost global stride, got {inner}")
-    rows = list(rows)
+    rows = [tirx.IntImm("int32", row) if isinstance(row, int) else row for row in rows]
     if len(rows) != 4:
         raise ValueError(f"tma_scatter4 expects exactly 4 row indices, got {len(rows)}")
     if swizzle not in (None, "none", 0):
