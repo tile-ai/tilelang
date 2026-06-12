@@ -152,9 +152,9 @@ class GemmMMA(GemmBase):
                 """
                 A_local = T.alloc_local((warp_rows * local_size_a), a_dtype)
 
+                if clear_accum:
+                    T.clear(C_buf)
                 for ki in T.serial(0, (block_K // micro_size_k)):
-                    if clear_accum:
-                        T.clear(C_buf)
                     # Load A into fragment
                     mma_emitter.ldmatrix_a(
                         A_local,
@@ -209,6 +209,8 @@ class GemmMMA(GemmBase):
                 accumulating into C_local.
                 """
 
+                if clear_accum:
+                    T.clear(C_buf)
                 for ki in T.serial(0, (block_K // micro_size_k)):
                     # Perform Matrix Multiplication
                     mma_emitter.mma(A_buf, B_buf, C_buf, ki)
