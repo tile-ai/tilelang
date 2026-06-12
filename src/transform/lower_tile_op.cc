@@ -826,7 +826,9 @@ private:
     if (op->op.same_as(tl::tma_load()) ||
         op->op.same_as(tl::tma_load_im2col()) ||
         op->op.same_as(tl::tma_load_multicast()) ||
-        op->op.same_as(tl::tma_store())) {
+        op->op.same_as(tl::tma_store()) ||
+        op->op.same_as(tl::tma_load_gather4()) ||
+        op->op.same_as(tl::tma_store_scatter4())) {
       // skip tma related calls, as they were transformed implicitly.
       has_tma_ = true;
       in_tma_context_ = true;
