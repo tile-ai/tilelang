@@ -373,14 +373,15 @@ def test_nvf4_mma_block_scale_codegen(K):
         out_idx=[4],
     )
     src = kernel.get_kernel_source()
-    assert "#include <tl_templates/cuda/instruction/mma_block_scale.h>" in src
-    assert "mma_block_scale_sync" in src
+    assert "#include <tl_templates/cuda/gemm.h>" in src
+    assert "#include <tl_templates/cuda/instruction/mma_block_scale.h>" not in src
+    assert "sm120_mma_sync_blockscaled" in src
     assert "SFA_shared" in src
     assert "SFB_shared" in src
     assert "scale_a_local" not in src
     assert "scale_b_local" not in src
-    assert "MmaBlockScaleKind::kMxf4nvf4" in src
-    assert "ScaleType::kUE4M3" in src
+    assert "SM120MmaBlockScaledKind::kMxf4nvf4" in src
+    assert "SM120MmaScaleType::kUE4M3" in src
 
 
 @tilelang.testing.requires_cuda

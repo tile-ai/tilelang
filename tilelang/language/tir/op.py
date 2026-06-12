@@ -1093,13 +1093,9 @@ def ptx_mma_block_scale(
     accumulator,
     c_index,
     scale_a,
-    byte_id_a,
-    thread_id_a,
     scale_b,
-    byte_id_b,
-    thread_id_b,
 ):
-    """TVM intrinsic for SM120a warp-level NVF4 block-scale MMA."""
+    """TVM intrinsic for SM120a warp-level NVF4 block-scaled MMA."""
     return call_intrin(
         accum_dtype,
         _tvm_op.Op.get("tl.ptx_mma_block_scale"),
@@ -1119,11 +1115,7 @@ def ptx_mma_block_scale(
         accumulator,
         c_index,
         scale_a,
-        byte_id_a,
-        thread_id_a,
         scale_b,
-        byte_id_b,
-        thread_id_b,
     )
 
 

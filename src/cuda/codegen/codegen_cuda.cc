@@ -613,10 +613,6 @@ std::string CodeGenTileLangCUDA::Finish() {
   if (need_mma_sm70_instruction_h_) {
     decl_stream << "#include <tl_templates/cuda/instruction/mma_sm70.h>\n";
   }
-  if (need_mma_block_scale_instruction_h_) {
-    decl_stream
-        << "#include <tl_templates/cuda/instruction/mma_block_scale.h>\n";
-  }
   if (need_mma_sp_instruction_h_) {
     decl_stream << "#include <tl_templates/cuda/instruction/mma_sp.h>\n";
   }
@@ -2870,12 +2866,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     // arg 13: C_data pointer
     // arg 14: C_offset
     // arg 15: scale_a_data
-    // arg 16: byte_id_a
-    // arg 17: thread_id_a
-    // arg 18: scale_b_data
-    // arg 19: byte_id_b
-    // arg 20: thread_id_b
-    ICHECK_EQ(op->args.size(), 21U);
+    // arg 16: scale_b_data
+    ICHECK_EQ(op->args.size(), 17U);
     std::string accum_dtype = Downcast<StringImm>(op->args[0])->value;
     std::string shape = Downcast<StringImm>(op->args[1])->value;
     std::string A_layout = Downcast<StringImm>(op->args[2])->value;
@@ -2892,11 +2884,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string c_ref = this->PrintExpr(op->args[13]);
     std::string c_offset = this->PrintExpr(op->args[14]);
     std::string scale_a = this->PrintExpr(op->args[15]);
-    std::string byte_id_a = this->PrintExpr(op->args[16]);
-    std::string thread_id_a = this->PrintExpr(op->args[17]);
-    std::string scale_b = this->PrintExpr(op->args[18]);
-    std::string byte_id_b = this->PrintExpr(op->args[19]);
-    std::string thread_id_b = this->PrintExpr(op->args[20]);
+    std::string scale_b = this->PrintExpr(op->args[16]);
 
     bool supported_mxf4nvf4_4x_ue4m3 =
         accum_dtype == "float32" && shape == "m16n8k64" && A_layout == "row" &&
@@ -2924,22 +2912,19 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     resolve_fp4_packed_buffer(op->args[9], a_ref, a_offset);
     resolve_fp4_packed_buffer(op->args[11], b_ref, b_offset);
 
-    need_mma_block_scale_instruction_h_ = true;
     this->PrintIndent();
 
-    std::string mma_kind_enum = "tl::MmaBlockScaleKind::kMxf4nvf4";
-    std::string scale_type_enum = "tl::ScaleType::kUE4M3";
+    std::string mma_kind_enum = "tl::SM120MmaBlockScaledKind::kMxf4nvf4";
+    std::string scale_type_enum = "tl::SM120MmaScaleType::kUE4M3";
     std::string mma_call =
-        "tl::mma_block_scale_sync<(MMA_KIND), (SCALE_VEC_SIZE), "
+        "tl::sm120_mma_sync_blockscaled<(MMA_KIND), (SCALE_VEC_SIZE), "
         "(SCALE_TYPE)>("
         "reinterpret_cast<float*>((C_ptr) + (C_offset)), "
         "reinterpret_cast<const uint32_t*>((A_ptr) + (A_offset)), "
         "reinterpret_cast<const uint32_t*>((B_ptr) + (B_offset)), "
         "reinterpret_cast<const float*>((C_ptr) + (C_offset)), "
         "(*reinterpret_cast<const uint32_t*>((scale_a))), "
-        "(uint16_t)(byte_id_a), (uint16_t)(thread_id_a), "
-        "(*reinterpret_cast<const uint32_t*>((scale_b))), "
-        "(uint16_t)(byte_id_b), (uint16_t)(thread_id_b));\n";
+        "(*reinterpret_cast<const uint32_t*>((scale_b))));\n";
 
     tl::codegen::Replacer replacer;
     replacer.register_rule("(MMA_KIND)", mma_kind_enum);
@@ -2952,11 +2937,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(C_ptr)", c_ref);
     replacer.register_rule("(C_offset)", c_offset);
     replacer.register_rule("(scale_a)", scale_a);
-    replacer.register_rule("(byte_id_a)", byte_id_a);
-    replacer.register_rule("(thread_id_a)", thread_id_a);
     replacer.register_rule("(scale_b)", scale_b);
-    replacer.register_rule("(byte_id_b)", byte_id_b);
-    replacer.register_rule("(thread_id_b)", thread_id_b);
     this->stream << replacer.rewrite(mma_call);
   } else if (op->op.same_as(builtin::ptx_mma_sp())) {
     // arg 0: shape: mXnXkX

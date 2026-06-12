@@ -120,8 +120,6 @@ private:
   bool need_tcgen05mma_instruction_h_{false};
   // whether need tl mma_sm70 instruction header
   bool need_mma_sm70_instruction_h_{false};
-  // whether need tl mma block scale instruction header
-  bool need_mma_block_scale_instruction_h_{false};
   // whether need tl mma_sp instruction header
   bool need_mma_sp_instruction_h_{false};
   // whether need tl wgmma_sp instruction header

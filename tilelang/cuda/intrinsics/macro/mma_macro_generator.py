@@ -1518,11 +1518,7 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
                     C_local_buf.data,
                     i * warp_cols * local_size_out + j * local_size_out,
                     scale_a_ptr,
-                    T.uint16(0),
-                    T.uint16(0),
                     scale_b_ptr,
-                    T.uint16(0),
-                    T.uint16(0),
                 )
                 if replicate_b:
                     scale_b_rep_ptr = T.access_ptr(
@@ -1546,11 +1542,7 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
                         C_local_buf.data,
                         i * warp_cols * local_size_out + j * local_size_out + lift(local_size_out) // 2,
                         scale_a_ptr,
-                        T.uint16(0),
-                        T.uint16(0),
                         scale_b_rep_ptr,
-                        T.uint16(0),
-                        T.uint16(0),
                     )
 
         return _warp_mma_block_scale(A_local_buf, B_local_buf, C_local_buf, SFA_data, SFB_data, thread_binding)
