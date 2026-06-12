@@ -20,7 +20,52 @@ GEMM_INST_MMA = "cuda.mma"
 class GemmMMA(GemmBase):
     intrin_emitter_cls = TensorCoreIntrinEmitter
 
+    @property
+    def allow_f8f6f4_mixed_dtypes(self) -> bool:
+        # Let the MMA implementation accept its A8W4 FP8/FP4 path while keeping
+        # the exact supported pairs checked in _validate_mma_dtypes().
+        return True
+
+    @staticmethod
+    def _is_fp8_e4m3(dtype: str) -> bool:
+        return str(dtype) in {"float8_e4m3", "float8_e4m3fn", "float8_e4m3fnuz"}
+
+    @staticmethod
+    def _is_fp4_e2m1(dtype: str) -> bool:
+        return str(dtype) == "float4_e2m1fn"
+
+    @staticmethod
+    def _fragment_carrier_dtype(dtype):
+        if GemmMMA._is_fp4_e2m1(dtype):
+            return T.float4_e2m1_unpacked
+        return dtype
+
+    @staticmethod
+    def _layout_carrier_buffer(buffer):
+        if GemmMMA._is_fp4_e2m1(buffer.dtype):
+            return tirx.decl_buffer(
+                buffer.shape,
+                dtype=T.float4_e2m1_unpacked,
+                name=buffer.name,
+                scope=buffer.scope(),
+            )
+        return buffer
+
+    def _validate_mma_dtypes(self):
+        a_dtype = str(self.A.dtype)
+        b_dtype = str(self.B.dtype)
+        if a_dtype == b_dtype:
+            return
+        # Mixed A8W4 paths are selected only from semantic dtypes. Packed host
+        # storage such as uint8 is not treated as an FP4 GEMM dtype.
+        mixed_fp8_fp4 = (self._is_fp8_e4m3(a_dtype) and self._is_fp4_e2m1(b_dtype)) or (
+            self._is_fp4_e2m1(a_dtype) and self._is_fp8_e4m3(b_dtype)
+        )
+        if not mixed_fp8_fp4:
+            raise AssertionError(f"Unsupported mixed MMA dtypes: A={a_dtype}, B={b_dtype}")
+
     def _make_mma_emitter(self, target: Target, thread_nums: int, thread_var: tirx.Var | None = None):
+        self._validate_mma_dtypes()
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
@@ -37,26 +82,34 @@ class GemmMMA(GemmBase):
             chunk=self.chunk,
             thread_var=thread_var,
         )
+        if self.chunk % emitter.micro_size_k != 0:
+            raise ValueError(
+                f"T.gemm K tile ({self.chunk}) must be divisible by MMA instruction K tile "
+                f"({emitter.micro_size_k}) for A={self.A.dtype}, B={self.B.dtype}"
+            )
         return emitter
 
     def infer_layout(self, target: Target, thread_nums: int):
         mma_emitter = self._make_mma_emitter(target, thread_nums)
+        use_fp4_unpacked_layout = self._is_fp4_e2m1(self.A.dtype) or self._is_fp4_e2m1(self.B.dtype)
+        A_layout_buf = self._layout_carrier_buffer(self.A) if use_fp4_unpacked_layout else self.A
+        B_layout_buf = self._layout_carrier_buffer(self.B) if use_fp4_unpacked_layout else self.B
         if self.is_gemm_ss():
             return {
-                self.A: make_swizzled_layout(self.A),
-                self.B: make_swizzled_layout(self.B),
+                self.A: make_swizzled_layout(A_layout_buf),
+                self.B: make_swizzled_layout(B_layout_buf),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         elif self.is_gemm_sr():
             return {
-                self.A: make_swizzled_layout(self.A),
+                self.A: make_swizzled_layout(A_layout_buf),
                 self.B: mma_emitter.make_mma_load_layout(self.B, matrix="B"),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         elif self.is_gemm_rs():
             return {
                 self.A: mma_emitter.make_mma_load_layout(self.A, matrix="A"),
-                self.B: make_swizzled_layout(self.B),
+                self.B: make_swizzled_layout(B_layout_buf),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         elif self.is_gemm_rr():
@@ -83,6 +136,8 @@ class GemmMMA(GemmBase):
 
         a_dtype = self.a_dtype
         b_dtype = self.b_dtype
+        a_fragment_dtype = self._fragment_carrier_dtype(a_dtype)
+        b_fragment_dtype = self._fragment_carrier_dtype(b_dtype)
         warp_rows = mma_emitter.warp_rows
         warp_cols = mma_emitter.warp_cols
         local_size_a = mma_emitter.local_size_a
@@ -114,8 +169,8 @@ class GemmMMA(GemmBase):
                 B_shared into local fragments, then issues Tensor Core mma ops,
                 accumulating into C_local.
                 """
-                A_local = T.alloc_local((warp_rows * local_size_a), a_dtype)
-                B_local = T.alloc_local((warp_cols * local_size_b), b_dtype)
+                A_local = T.alloc_local((warp_rows * local_size_a), a_fragment_dtype)
+                B_local = T.alloc_local((warp_cols * local_size_b), b_fragment_dtype)
                 if clear_accum:
                     T.clear(C_buf)
                 for ki in T.serial(0, (block_K // micro_size_k)):
@@ -149,7 +204,7 @@ class GemmMMA(GemmBase):
                 B_shared into local fragments, then issues Tensor Core mma ops,
                 accumulating into C_local.
                 """
-                A_local = T.alloc_local((warp_rows * local_size_a), a_dtype)
+                A_local = T.alloc_local((warp_rows * local_size_a), a_fragment_dtype)
 
                 for ki in T.serial(0, (block_K // micro_size_k)):
                     if clear_accum:
@@ -179,7 +234,7 @@ class GemmMMA(GemmBase):
                 B_shared into local fragments, then issues Tensor Core mma ops,
                 accumulating into C_local.
                 """
-                B_local = T.alloc_local((warp_cols * local_size_b), b_dtype)
+                B_local = T.alloc_local((warp_cols * local_size_b), b_fragment_dtype)
                 if clear_accum:
                     T.clear(C_buf)
                 for ki in T.serial(0, (block_K // micro_size_k)):

@@ -96,6 +96,10 @@ TVMFFIABIBuilder::getUndefVars(const std::vector<PrimExpr> &args) {
   return res;
 }
 
+bool TVMFFIABIBuilder::UseFp4UnpackedABI(const Buffer &buffer) const {
+  return buffer->dtype.is_float4_e2m1_unpacked() && buffer->dtype.is_scalar();
+}
+
 bool TVMFFIABIBuilder::BindNullable(const PrimExpr &arg, const PrimExpr &value,
                                     const std::string &arg_name, bool with_lets,
                                     const PrimExpr &nullable_guard) {
@@ -350,7 +354,7 @@ void TVMFFIABIBuilder::BindDLTensors(
 
     // Scan buffer shape for symbolic variables
     for (size_t k = 0; k < buffer->shape.size(); ++k) {
-      if (buffer->dtype.bits() < 8) {
+      if (buffer->dtype.bits() < 8 && !UseFp4UnpackedABI(buffer)) {
         break;
       }
 
@@ -518,6 +522,19 @@ void TVMFFIABIBuilder::BindDLTensors(
            v_type_lanes == expect_lanes);
       cond = cond || float32_ok;
     }
+    if (UseFp4UnpackedABI(buffer)) {
+      PrimExpr code_int = IntImm(DataType::UInt(8), DataType::kInt);
+      PrimExpr code_uint = IntImm(DataType::UInt(8), DataType::kUInt);
+      PrimExpr code_unpacked =
+          IntImm(DataType::UInt(8), DataType::kFloat4_e2m1_unpacked);
+      PrimExpr bits8 = IntImm(DataType::UInt(8), 8);
+      PrimExpr lanes_ok = (v_type_lanes == expect_lanes);
+      PrimExpr byte_carrier_ok =
+          (v_type_bits == bits8 && lanes_ok &&
+           (v_type_code == code_int || v_type_code == code_uint ||
+            v_type_code == code_unpacked));
+      cond = cond || byte_carrier_ok;
+    }
     // Allow bool to match int8/uint8 at runtime, and also kDLBool(code=6).
     if (buffer->dtype.is_bool()) {
       PrimExpr code_int = IntImm(DataType::UInt(8), DataType::kInt);
@@ -544,7 +561,8 @@ void TVMFFIABIBuilder::BindDLTensors(
     }
     // Allow with bits < 8 to match any type with the same total bit count at
     // runtime (PyTorch uses int8 as storage for FP4).
-    bool data_is_subtype = buffer->dtype.bits() < 8;
+    bool data_is_subtype =
+        buffer->dtype.bits() < 8 && !UseFp4UnpackedABI(buffer);
     if (data_is_subtype) {
       // Get the pre-created shape buffer for reading runtime shape
       Buffer buf_shape = shape_buffer_map[arg_name];

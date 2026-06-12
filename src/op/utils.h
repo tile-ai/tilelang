@@ -54,6 +54,10 @@ TVM_DLL PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region,
 TVM_DLL PrimExpr MakeAccessPtrFromBufferLoad(const BufferLoad &load,
                                              int rw_mask);
 
+TVM_DLL bool IsFp4E2M1StoragePair(DataType lhs, DataType rhs);
+
+TVM_DLL PrimExpr CastFp4StorageValue(PrimExpr value, DataType dtype);
+
 inline bool IsFragmentBuffer(const Buffer &buffer) {
   return buffer.defined() && buffer.scope() == "local.fragment";
 }

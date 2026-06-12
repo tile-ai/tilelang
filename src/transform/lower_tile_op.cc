@@ -19,6 +19,7 @@
 #include "../layout/layout.h"
 #include "../layout/utils.h"
 #include "../op/builtin.h"
+#include "../op/copy.h"
 #include "../op/gemm.h"
 #include "../op/gemm_sp.h"
 #include "../op/operator.h"
@@ -39,14 +40,38 @@ namespace tl {
 using namespace tirx;
 using namespace ffi;
 
+static bool IsScalarFp4E2M1(const Buffer &buffer) {
+  return buffer->dtype.is_float4_e2m1fn() && buffer->dtype.is_scalar();
+}
+
+static bool IsScalarUnpackedFp4E2M1(const Buffer &buffer) {
+  return buffer->dtype.is_float4_e2m1_unpacked() && buffer->dtype.is_scalar();
+}
+
+static DataType GetLayoutStorageDType(const Buffer &buffer) {
+  if (IsSharedBuffer(buffer) && IsScalarFp4E2M1(buffer)) {
+    return DataType::Float4E2M1Unpacked(buffer->dtype.lanes());
+  }
+  return buffer->dtype;
+}
+
+static Buffer makeBufferWithDType(const Buffer &buffer, DataType dtype) {
+  return Buffer(buffer->data, dtype, buffer->shape, buffer->strides,
+                buffer->elem_offset, buffer->name, buffer->data_alignment,
+                buffer->offset_factor, buffer->buffer_type);
+}
+
 static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
                                    Map<Var, Var> &var_remap) {
   const auto *ptr_type =
       TVM_TYPE_AS(buffer->data->type_annotation, PointerTypeNode);
+  DataType storage_dtype = GetLayoutStorageDType(buffer);
   Type new_type;
   // convert fragments to normal local buffer
   if (IsFragmentBuffer(buffer)) {
-    new_type = PointerType(ptr_type->element_type, "local");
+    new_type = PointerType(PrimType(storage_dtype), "local");
+  } else if (storage_dtype != buffer->dtype) {
+    new_type = PointerType(PrimType(storage_dtype), ptr_type->storage_scope);
   } else {
     new_type = buffer->data->type_annotation;
   }
@@ -83,7 +108,7 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
       output_shape.insert(output_shape.begin(), replicate_extent);
     }
   }
-  return Buffer(new_var, buffer->dtype, output_shape, {}, buffer->elem_offset,
+  return Buffer(new_var, storage_dtype, output_shape, {}, buffer->elem_offset,
                 buffer->name, buffer->data_alignment, buffer->offset_factor,
                 buffer->buffer_type);
 }
@@ -324,6 +349,22 @@ public:
 
 private:
   using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
+
+  void MaybeRemapFp4CopySource(const CopyNode *copy) {
+    if (!IsGlobalBuffer(copy->src) || !IsScalarFp4E2M1(copy->src) ||
+        !IsSharedBuffer(copy->dst) || !buffer_remap_.count(copy->dst)) {
+      return;
+    }
+    Buffer remapped_dst = buffer_remap_[copy->dst];
+    if (!IsScalarUnpackedFp4E2M1(remapped_dst)) {
+      return;
+    }
+    if (!buffer_remap_.count(copy->src)) {
+      buffer_remap_.Set(
+          copy->src,
+          makeBufferWithDType(copy->src, DataType::Float4E2M1Unpacked()));
+    }
+  }
 
   Stmt VisitStmt_(const SBlockNode *op) final {
     // Record the mapping from buffer data var to buffer for later lookup
@@ -1015,9 +1056,14 @@ private:
     }
     auto buffer = load->buffer;
     if (buffer_remap_.count(buffer)) {
-      auto new_indices = layout_map_[buffer]->Forward(load->indices);
+      Array<PrimExpr> new_indices = load->indices;
+      if (layout_map_.count(buffer)) {
+        new_indices = layout_map_[buffer]->Forward(load->indices);
+      }
       auto new_buffer = buffer_remap_[load->buffer];
-      layout_remap_.Set(new_buffer, layout_map_[load->buffer]);
+      if (layout_map_.count(load->buffer)) {
+        layout_remap_.Set(new_buffer, layout_map_[load->buffer]);
+      }
       return BufferLoad(new_buffer, new_indices);
     } else if (var_remap_.count(buffer->data)) {
       auto new_buffer = Buffer(
@@ -1033,10 +1079,17 @@ private:
     auto store = Downcast<BufferStore>(IRMutatorWithAnalyzer::VisitStmt_(op));
     auto buffer = store->buffer;
     if (buffer_remap_.count(buffer)) {
-      auto new_indices = layout_map_[buffer]->Forward(store->indices);
+      Array<PrimExpr> new_indices = store->indices;
+      if (layout_map_.count(buffer)) {
+        new_indices = layout_map_[buffer]->Forward(store->indices);
+      }
       auto new_buffer = buffer_remap_[store->buffer];
-      layout_remap_.Set(new_buffer, layout_map_[store->buffer]);
-      return BufferStore(new_buffer, store->value, new_indices);
+      if (layout_map_.count(store->buffer)) {
+        layout_remap_.Set(new_buffer, layout_map_[store->buffer]);
+      }
+      return BufferStore(new_buffer,
+                         CastFp4StorageValue(store->value, new_buffer->dtype),
+                         new_indices);
     } else if (var_remap_.count(buffer->data)) {
       auto new_buffer = Buffer(
           var_remap_[buffer->data], buffer->dtype, buffer->shape,
@@ -1140,6 +1193,9 @@ private:
     auto tile_op = ParseOperator(GetRef<Stmt>(op));
     if (!tile_op.defined())
       return IRMutatorWithAnalyzer::VisitStmt_(op);
+    if (auto *copy = tile_op.as<CopyNode>()) {
+      MaybeRemapFp4CopySource(copy);
+    }
     AddWorkspaceCallback callback = [this](int num_elem, DataType dtype) {
       auto workspace =
           decl_buffer({PrimExpr(num_elem)}, dtype, "workspace", "shared.dyn");

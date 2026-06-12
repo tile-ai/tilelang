@@ -237,8 +237,11 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
     for (auto kv : inferred_layouts) {
       const Buffer &buf = kv.first;
       const Layout &layout = kv.second;
-      if (reuse_existing_shared_layout && IsSharedBuffer(buf) &&
-          T.layout_map.count(buf)) {
+      bool is_shared_buffer = IsSharedBuffer(buf);
+      bool replace_fp4_shared_layout =
+          is_shared_buffer && buf->dtype.is_float4_e2m1fn();
+      if (reuse_existing_shared_layout && is_shared_buffer &&
+          T.layout_map.count(buf) && !replace_fp4_shared_layout) {
         continue;
       }
       if (auto frag = layout.as<Fragment>()) {
