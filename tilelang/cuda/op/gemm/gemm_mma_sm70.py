@@ -6,7 +6,7 @@ from tilelang.layout import make_volta_swizzled_layout
 from tilelang.cuda.intrinsics.macro.mma_sm70_macro_generator import (
     TensorCoreIntrinEmitter,
 )
-from tilelang.utils.language import is_shared, is_fragment, is_full_region
+from tilelang.utils.language import is_full_region
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tvm.ir import Range
