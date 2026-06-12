@@ -235,6 +235,10 @@ class CumSum1D:
         if tidx < N:
             dst_tensor[tidx] = val
 
+    @cute.jit
+    def run_auto(self, src: cute.Pointer, dst: cute.Pointer, N):
+        self.run(src, dst, N)
+
 
 class CumSum2D:
     """
@@ -323,6 +327,10 @@ class CumSum2D:
             if row_in_col < H and col < W:
                 dst_tensor[idx] = val
 
+    @cute.jit
+    def run_auto(self, src: cute.Pointer, dst: cute.Pointer, H, W):
+        self.run(src, dst, H, W)
+
 
 class CumMax1D:
     """
@@ -355,6 +363,10 @@ class CumMax1D:
 
         if tidx < N:
             dst_tensor[tidx] = val
+
+    @cute.jit
+    def run_auto(self, src: cute.Pointer, dst: cute.Pointer, N):
+        self.run(src, dst, N)
 
 
 class CumMax2D:
@@ -417,6 +429,10 @@ class CumMax2D:
 
             if row_in_col < H and col < W:
                 dst_tensor[idx] = val
+
+    @cute.jit
+    def run_auto(self, src: cute.Pointer, dst: cute.Pointer, H, W):
+        self.run(src, dst, H, W)
 
 
 class NamedBarrier:

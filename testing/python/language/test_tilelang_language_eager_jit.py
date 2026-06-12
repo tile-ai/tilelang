@@ -73,7 +73,10 @@ def test_jit2_gemm_ptr():
                 T.gemm(A_shared, B_shared, C_local)
             T.copy(C_local, C[bx * block_M, by * block_N])
 
-    prod = product([T.float16, T.tfloat32], [T.float32])
+    from tilelang.utils.target import determine_target, target_is_cuda
+
+    in_dtypes = [T.float16, T.tfloat32] if target_is_cuda(determine_target()) else [T.float16]
+    prod = product(in_dtypes, [T.float32])
     gemm_ptr.par_compile(
         [
             {"A": T.ptr(), "B": T.ptr(), "C": T.ptr(), "M": 1024, "N": 1024, "K": 1024, "dtype": in_dtype, "out_dtype": out_dtype}
