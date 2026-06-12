@@ -18,7 +18,7 @@ one `uint32`.
 | --- | --- | --- | --- | --- |
 | 1CTA | `mxfp8_blockscaled_gemm` | `threads=128` | One CTA computes one logical `block_M x block_N` tile. | Local barriers. Warp 0 loads A/B/SF, warp 1 issues UTCCP and MMA, warp 2 transposes SF in SMEM. |
 | 2CTA | `mxfp8_blockscaled_gemm_2cta` | `threads=128, cluster_dims=2` | A CTA pair computes one logical `128 x 256` tile. | Each peer loads a half-N B panel, A is loaded in both peers, and leader CTA issues `use_2cta=True`. |
-| 2CTA persistent | `mxfp8_blockscaled_gemm_2cta_persistent` | `T.Kernel(sm_num, threads=256, cluster_dims=2)` | Resident CTA pairs walk logical tiles over multiple waves. | Adds a persistent scheduler and dedicated epilogue warpgroup, with `tmem_empty` handing TMEM back to the MMA warp. |
+| 2CTA persistent | `mxfp8_blockscaled_gemm_2cta_persistent` | `T.ClusterKernel(sm_num, threads=256, cluster_dims=2)` | Resident CTA pairs walk logical tiles over multiple waves. | Adds a persistent scheduler and dedicated epilogue warpgroup, with `tmem_empty` handing TMEM back to the MMA warp. |
 
 The grouped kernels reuse the same 2CTA and persistent structure. Their extra
 work is scheduler-side: map `(pid_m, pid_n, eid)` through `offsets`, clamp tail

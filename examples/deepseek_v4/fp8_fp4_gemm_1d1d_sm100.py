@@ -54,7 +54,7 @@ def fp8_fp4_gemm_1d1d_persistent(
         waves = T.ceildiv(m_blocks * n_blocks, sm_num)
         group_size = 16
 
-        with T.Kernel(sm_num, threads=256, cluster_dims=2) as (block_id):
+        with T.ClusterKernel(sm_num, threads=256, cluster_dims=2) as (block_id):
             cta_id = T.block_rank_in_cluster()
             T.assume(cta_id < 2)
 

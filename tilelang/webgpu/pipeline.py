@@ -4,7 +4,7 @@ from tvm import IRModule, s_tir, tirx
 from tvm.target import Target
 
 import tilelang
-from tilelang.backend.pass_pipeline.pipeline import PassPipeline, register_pipeline
+from tilelang.backend.pass_pipeline import PassPipeline, register_pipeline
 from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
     allow_vectorize,
@@ -13,11 +13,12 @@ from tilelang.backend.pass_pipeline.pipeline_utils import (
     should_enable_race_check,
     should_force_let_inline,
 )
-from tilelang.metal.transform import MetalFragmentToSimdgroup
 
 
-def MetalPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
+def WebGPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.BindTarget(target)(mod)
+    # WebGPU is a SIMT backend: lower the launch nest to thread_extent
+    # bindings for codegen.
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     pass_ctx = tilelang.transform.get_pass_context()
 
@@ -35,12 +36,6 @@ def MetalPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.PipelinePlanning()(mod)
     mod = tilelang.transform.InjectSoftwarePipeline()(mod)
     mod = tilelang.transform.Simplify()(mod)
-
-    # @Metal specific
-    # On Metal, rewrite local.fragment GEMM accumulators to metal.simdgroup
-    # before layout inference. simdgroup matrices are opaque and have no
-    # explicit thread-level layout, so layout inference must not see them.
-    mod = MetalFragmentToSimdgroup(mod)
 
     mod = tilelang.transform.LayoutInference()(mod)
     LayoutVisual(mod)
@@ -92,6 +87,4 @@ def MetalPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     return mod
 
 
-metal_pipeline = PassPipeline("metal", MetalPassPipelineBody)
-
-register_pipeline(metal_pipeline)
+register_pipeline(PassPipeline("webgpu", WebGPUPassPipelineBody))
