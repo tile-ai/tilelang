@@ -68,7 +68,6 @@ void RegisterGemmSPImpl(GemmSPImpl impl) {
   ICHECK(impl.select_inst != nullptr);
   ICHECK(impl.compute_warp_partition != nullptr);
   ICHECK(impl.reuse_existing_shared_layout != nullptr);
-  ICHECK(impl.instruction_kind != nullptr);
   GemmSPImplRegistry().push_back(impl);
 }
 
@@ -160,12 +159,6 @@ TileOperator GemmSPNode::Clone() const {
 String GemmSPNode::getGemmSPInstructionKey(int block_size,
                                            Target target) const {
   return ResolveGemmSPImpl(target).select_inst(*this, block_size, target);
-}
-
-String GemmSPNode::getGemmSPInstructionKind(int block_size,
-                                            Target target) const {
-  const GemmSPImpl &impl = ResolveGemmSPImpl(target);
-  return impl.instruction_kind(impl.select_inst(*this, block_size, target));
 }
 
 Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {

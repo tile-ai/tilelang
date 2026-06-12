@@ -305,19 +305,6 @@ struct Gemm {
   static bool ReuseExistingSharedLayout(String gemm_inst) {
     return gemm_inst == kCudaMMA;
   }
-
-  static String InstructionKind(String gemm_inst) {
-    if (gemm_inst == kCudaWGMMA) {
-      return "wgmma";
-    }
-    if (gemm_inst == kCudaTCGEN05) {
-      return "tcgen5mma";
-    }
-    if (gemm_inst == kCudaMMA) {
-      return "mma";
-    }
-    return "unknown";
-  }
 };
 
 } // namespace cuda
@@ -335,7 +322,6 @@ bool RegisterCudaGemm() {
       cuda::Gemm::SelectInst,
       cuda::Gemm::ComputeWarpPartition,
       cuda::Gemm::ReuseExistingSharedLayout,
-      cuda::Gemm::InstructionKind,
   });
   return true;
 }
