@@ -102,6 +102,7 @@ class GemmMMA(GemmBase):
         clear_accum = self.clear_accum
 
         assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
+        assert block_K % micro_size_k == 0, f"block_K ({block_K}) must be a multiple of micro_size_k ({micro_size_k})"
 
         assert is_full_region(C_region), "Fragment output C must be a full region"
 
