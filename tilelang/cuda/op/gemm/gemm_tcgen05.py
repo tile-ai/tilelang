@@ -274,6 +274,9 @@ class GemmTCGEN5(GemmBase):
         use_2cta = _annotation_bool(annotations, "use_2cta")
         is_nvfp4 = _annotation_bool(annotations, "is_nvfp4")
         mma_emitter.get_tcgen5_mma_meta(self.M, self.N, self.K, disable_2cta=not use_2cta)
+        if is_nvfp4:
+            atom_m, atom_n, atom_k, _enable_ws, enable_2cta = (int(x) for x in mma_emitter.meta)
+            mma_emitter.meta = [atom_m, atom_n, atom_k, 0, enable_2cta]
         _atom_m, _atom_n, _atom_k, _enable_ws, enable_2cta = (int(x) for x in mma_emitter.meta)
 
         analyzer = Analyzer()

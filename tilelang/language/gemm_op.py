@@ -429,7 +429,7 @@ def tcgen05_gemm_blockscaled(
         use_2cta: Whether to request true ``cta_group::2`` lowering.
     """
 
-    ann = {}
+    ann = {"is_tcgen05": 1}
     if use_2cta:
         ann["use_2cta"] = int(use_2cta)
     if is_nvfp4:
@@ -464,12 +464,26 @@ def tcgen05_gemm_blockscaled(
     assert len(B_shape) >= 2, "current only support B as a 2D or higher-order tensor"
 
     M, N = C_shape
-    M_A = A_shape[-1] if transpose_A else A_shape[-2]
-    N_B = B_shape[-2] if transpose_B else B_shape[-1]
-    K = A_shape[-2] if transpose_A else A_shape[-1]
-    K_B = B_shape[-1] if transpose_B else B_shape[-2]
+    is_packed_nvfp4 = (
+        is_nvfp4 and str(A_region.buffer.dtype) == "uint8" and str(B_region.buffer.dtype) == "uint8"
+    )
+    if is_packed_nvfp4:
+        assert not transpose_A, "Packed NVFP4 tcgen05_gemm_blockscaled expects non-transposed A"
+        M_A = A_shape[-2]
+        K = A_shape[-1] * 2
+        if transpose_B:
+            N_B = B_shape[-2]
+            K_B = B_shape[-1] * 2
+        else:
+            K_B = B_shape[-2]
+            N_B = B_shape[-1] * 2
+    else:
+        M_A = A_shape[-1] if transpose_A else A_shape[-2]
+        N_B = B_shape[-2] if transpose_B else B_shape[-1]
+        K = A_shape[-2] if transpose_A else A_shape[-1]
+        K_B = B_shape[-1] if transpose_B else B_shape[-2]
     assert prim_expr_equal(K, K_B), f"T.tcgen05_gemm_blockscaled K shape check failed: K_A = {K}, K_B = {K_B}"
-    logical_K = K * 2 if is_nvfp4 and str(A_region.buffer.dtype) == "uint8" and str(B_region.buffer.dtype) == "uint8" else K
+    logical_K = K
     if use_2cta:
         assert prim_expr_equal(M_A, M) and prim_expr_equal(N_B * 2, N), (
             f"T.tcgen05_gemm_blockscaled 2CTA shape check failed: M_A = {M_A}, expected M_C = {M}; N_B = {N_B}, expected N_C / 2 = {N} / 2"

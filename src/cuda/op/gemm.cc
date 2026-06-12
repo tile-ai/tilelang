@@ -34,6 +34,14 @@ constexpr const char *kCudaMMA = "cuda.mma";
 constexpr const char *kCudaWGMMA = "cuda.wgmma";
 constexpr const char *kCudaTCGEN05 = "cuda.tcgen05";
 
+bool HasIntAnnotation(const GemmNode &op, const char *key) {
+  if (auto val = op.annotations_.Get(key)) {
+    const auto *int_val = val->as<IntImmNode>();
+    return int_val && int_val->value != 0;
+  }
+  return false;
+}
+
 bool CheckWgmma(const GemmNode &op) {
   if (op.b_.scope() != "shared.dyn" && op.b_.scope() != "shared") {
     return false;
@@ -81,6 +89,9 @@ bool AllowTcgen5Mma(const GemmNode &op, Target target) {
     return false;
   DataType ab_dtype =
       (op.a_.scope() == "shared.tmem") ? op.b_->dtype : op.a_->dtype;
+  if (HasIntAnnotation(op, "is_nvfp4")) {
+    ab_dtype = DataType::Float4E2M1FN();
+  }
   return GetTCGEN5MMAMeta(op.m_, op.n_, op.k_, ab_dtype, op.c_->dtype).first;
 }
 

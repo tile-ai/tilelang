@@ -174,6 +174,21 @@ def make_align16b_swizzled_layout(buffer: BufferLikeType):
     return make_tcgen05mma_swizzled_layout(buffer)
 
 
+def make_dense_fp4_swizzled_layout(buffer: BufferLikeType):
+    """Dense-packed FP4 (e2m1, two elements per byte) swizzle for tcgen05 mxf4nvf4.
+
+    Unlike the ALIGN16B layout (one FP4 per 8-bit container, used by f8f6f4),
+    mxf4nvf4 consumes FP4 dense-packed. The swizzle is applied at byte
+    granularity over the packed bytes (K/2), matching CUTLASS's dense e2m1
+    SW64/SW128 K-major operand layout.
+
+    Args:
+        buffer: BufferLikeType with a sub-byte dtype (e.g. float4_e2m1fn)
+    """
+    buf, _, _ = _get_buffer_info(buffer)
+    return _ffi_api.make_dense_fp4_swizzled_layout(buf)
+
+
 def make_linear_layout(buffer_or_load_or_region: BufferLikeType):
     """
     Create a row-major linear layout for any dimension.
