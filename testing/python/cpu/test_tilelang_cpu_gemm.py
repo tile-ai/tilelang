@@ -14,7 +14,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.fl
         B: T.Tensor((K, N), dtype),
         C: T.Tensor((M, N), dtype),
     ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), is_cpu=True) as (bx, by):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M)) as (bx, by):
             A_local = T.alloc_local((block_M, block_K), dtype)
             B_local = T.alloc_local((block_K, block_N), dtype)
             C_local = T.alloc_local((block_M, block_N), accum_dtype)
@@ -69,7 +69,7 @@ def test_matmul_compile():
             B: T.Tensor((K, N), dtype),
             C: T.Tensor((M, N), dtype),
         ):
-            with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), is_cpu=True) as (bx, by):
+            with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M)) as (bx, by):
                 A_local = T.alloc_local((block_M, block_K), dtype)
                 B_local = T.alloc_local((block_K, block_N), dtype)
                 C_local = T.alloc_local((block_M, block_N), accum_dtype)
@@ -129,7 +129,7 @@ def test_matmul_with_copy_cython():
         B: T.Tensor((K, N), "float32"),
         C: T.Tensor((M, N), "float32"),
     ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), is_cpu=True) as (bx, by):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M)) as (bx, by):
             A_local = T.alloc_local((block_M, block_K), "float32")
             B_local = T.alloc_local((block_K, block_N), "float32")
             C_local = T.alloc_local((block_M, block_N), "float32")

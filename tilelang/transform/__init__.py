@@ -214,6 +214,28 @@ def MakePackedAPI():
     return _ffi_api.MakePackedAPI()  # type: ignore
 
 
+def MaterializeKernelLaunch(lower_thread_binding: bool = True):
+    """Materialize the target-neutral kernel launch nest (thread_binding
+    For loops emitted by T.Kernel) into a backend-specific form. Each
+    backend pipeline decides the mode for itself:
+
+    Parameters
+    ----------
+    lower_thread_binding : bool
+        If True (SIMT backends, e.g. CUDA/ROCm/Metal), lower the
+        blockIdx.*/threadIdx.* loops into thread_extent AttrStmts.
+        If False (backends without SIMT, e.g. CPU), lower blockIdx.*
+        loops into plain serial For loops and ignore threadIdx.* loops
+        (their extents are dropped; the loop vars are pinned to 0).
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.MaterializeKernelLaunch(lower_thread_binding)  # type: ignore
+
+
 def AnnotateDeviceRegions():
     """AnnotateDeviceRegions
 

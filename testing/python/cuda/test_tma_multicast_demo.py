@@ -12,7 +12,7 @@ def make_tma_multicast_demo_kernel(M, N, block_M, block_N, cluster_mask):
         A: T.Tensor((M, N), "float16"),
         B: T.Tensor((M, N), "float16"),
     ):
-        with T.Kernel(
+        with T.ClusterKernel(
             T.ceildiv(N, block_N),
             T.ceildiv(M, block_M),
             threads=128,

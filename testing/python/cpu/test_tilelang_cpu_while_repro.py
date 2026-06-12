@@ -8,7 +8,7 @@ def test_cpu_kernel_source_generation_with_while() -> None:
     See: https://github.com/tile-ai/tilelang/issues/2202
 
     Historically, a CPU kernel containing `T.While(...)` inside
-    `T.Kernel(..., is_cpu=True)` could leak the synthetic fallback thread
+    `T.Kernel(...)` could leak the synthetic fallback thread
     variable `v_thread` into host/device splitting. That in turn caused CPU
     compilation to fail during packed-API generation or later C wrapper
     generation.
@@ -20,7 +20,7 @@ def test_cpu_kernel_source_generation_with_while() -> None:
 
     @T.prim_func
     def main(flag: T.Buffer((1,), "int32"), out: T.Buffer((1,), "int32")):
-        with T.Kernel(1, is_cpu=True):
+        with T.Kernel(1):
             state = T.alloc_fragment((1,), "int32")
             state[0] = 0
 

@@ -11,7 +11,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.fl
         B: T.Tensor((K, N), dtype),
         C: T.Tensor((M, N), dtype),
     ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128, cluster_dims=(2, 1, 1)) as (bx, by):
+        with T.ClusterKernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128, cluster_dims=(2, 1, 1)) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -33,7 +33,7 @@ def get_cta_rank_in_cluster(cluster_size=4):
 
     @T.prim_func
     def main(A: T.Tensor((128), T.int32)):
-        with T.Kernel(128, cluster_dims=(cluster_size, 1, 1)) as bx:
+        with T.ClusterKernel(128, cluster_dims=(cluster_size, 1, 1)) as bx:
             T.cluster_arrive()
             T.cluster_wait()
             cta_rank_in_cluster = T.block_rank_in_cluster()
@@ -48,7 +48,7 @@ def get_cta_rank_in_cluster(cluster_size=4):
 def barrier_kernel():
     @T.prim_func
     def main(A: T.Tensor((128), T.int32)):
-        with T.Kernel(128, threads=128, cluster_dims=(4, 1, 1)):
+        with T.ClusterKernel(128, threads=128, cluster_dims=(4, 1, 1)):
             mbar = T.alloc_cluster_barrier([256])
             T.cluster_sync()
             T.mbarrier_arrive(mbar, 0)
