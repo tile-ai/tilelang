@@ -117,7 +117,7 @@ def test_gather4_fp4_unpack_descriptor_codegen():
     device_ir = str(artifact.device_mod)
     assert 'T.handle("float4_e2m1fn", "global")' in host_ir
     assert 'smem = T.alloc_buffer((512,), "custom[float4_e2m1_unpacked]"' in device_ir
-    assert 'T.call_extern("handle", "tl.tma_load_gather4"' in device_ir
+    assert "T.tma_load_gather4(" in device_ir
     assert re.search(r'\["__tvm_tensormap_create_tiled", \w+, 14,', host_ir)
     assert re.search(r"T\.mbarrier_expect_tx\([^,]+, 256\)", device_ir)
 
