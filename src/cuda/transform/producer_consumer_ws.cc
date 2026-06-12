@@ -2783,9 +2783,6 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
   refl::GlobalDef().def("tl.cuda.transform.ProducerConsumerWarpSpecialized",
                         ProducerConsumerWarpSpecialized);
-  refl::GlobalDef().def(
-      "tl.cuda.transform.ProducerConsumerWarpSpecializedTiled",
-      ProducerConsumerWarpSpecialized);
 }
 
 } // namespace tl

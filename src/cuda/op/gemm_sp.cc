@@ -306,19 +306,6 @@ struct GemmSP {
   static bool ReuseExistingSharedLayout(String gemm_inst) {
     return gemm_inst == kCudaMMASP;
   }
-
-  static String InstructionKind(String gemm_inst) {
-    if (gemm_inst == kCudaWGMMASP) {
-      return "wgmma.sp";
-    }
-    if (gemm_inst == kCudaTCGEN05SP) {
-      return "tcgen5mma.sp";
-    }
-    if (gemm_inst == kCudaMMASP) {
-      return "mma.sp";
-    }
-    return "unknown";
-  }
 };
 
 } // namespace cuda
@@ -336,7 +323,6 @@ bool RegisterCudaGemmSP() {
       cuda::GemmSP::SelectInst,
       cuda::GemmSP::ComputeWarpPartition,
       cuda::GemmSP::ReuseExistingSharedLayout,
-      cuda::GemmSP::InstructionKind,
   });
   return true;
 }

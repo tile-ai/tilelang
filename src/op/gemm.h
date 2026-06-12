@@ -166,7 +166,6 @@ public:
 
   // Target-specific GEMM instruction key.
   String getGemmInstructionKey(int block_size, Target target) const;
-  String getGemmInstructionKind(int block_size, Target target) const;
 
 private:
   mutable bool completed_ = false;
@@ -185,8 +184,6 @@ struct GemmImpl {
       Target target, String gemm_inst);
 
   bool (*reuse_existing_shared_layout)(String gemm_inst);
-
-  String (*instruction_kind)(String gemm_inst);
 };
 
 void RegisterGemmImpl(GemmImpl impl);

@@ -703,39 +703,6 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
   return Supported(SelectSyncLikeInst(facts));
 }
 
-std::string ClassifyCopyForInstructionAnnotation(const CopyNode &op,
-                                                 Target target,
-                                                 bool in_pipeline) {
-  CopyAnalysisContext ctx;
-  ctx.target = target;
-  CopyFacts facts = AnalyzeCopyFacts(op, ctx);
-  if (!facts.cuda_like_target) {
-    return "sync";
-  }
-
-  if (facts.cluster_mask != 0) {
-    return facts.can_bulk_load ? "tma" : "sync";
-  }
-
-  if (facts.explicit_tma) {
-    CopyInst inst =
-        SelectTmaInst(facts, /*allow_load=*/true, /*allow_store=*/true,
-                      /*check_last_dim=*/false);
-    return CopyInstIsTMA(inst) ? "tma" : "sync";
-  }
-
-  if (facts.explicit_cp_async || facts.no_implicit_async_commit_wait) {
-    return facts.can_cp_async ? "cp_async" : "sync";
-  }
-
-  if (in_pipeline && IsAutoAsyncCopyEnabled(/*default_enabled=*/false) &&
-      facts.can_cp_async) {
-    return "cp_async";
-  }
-
-  return "sync";
-}
-
 CopyInstSelection ClassifyWarpSpecializedProducerCopy(const CopyNode &op,
                                                       Target target) {
   CopyAnalysisContext ctx;

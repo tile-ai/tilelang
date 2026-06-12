@@ -97,13 +97,6 @@ struct Gemm {
     (void)gemm_inst;
     return false;
   }
-
-  static String InstructionKind(String gemm_inst) {
-    if (gemm_inst == kMetalSIMDGroup) {
-      return "metal_simdgroup";
-    }
-    return "unknown";
-  }
 };
 
 } // namespace metal
@@ -119,7 +112,6 @@ bool RegisterMetalGemm() {
       metal::Gemm::SelectInst,
       metal::Gemm::ComputeWarpPartition,
       metal::Gemm::ReuseExistingSharedLayout,
-      metal::Gemm::InstructionKind,
   });
   return true;
 }

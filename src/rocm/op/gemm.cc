@@ -126,16 +126,6 @@ struct Gemm {
     (void)gemm_inst;
     return false;
   }
-
-  static ffi::String InstructionKind(ffi::String gemm_inst) {
-    if (gemm_inst == kROCmMFMA) {
-      return "mfma";
-    }
-    if (gemm_inst == kROCmWMMA) {
-      return "wmma";
-    }
-    return "unknown";
-  }
 };
 
 } // namespace rocm
@@ -151,7 +141,6 @@ bool RegisterROCmGemm() {
       rocm::Gemm::SelectInst,
       rocm::Gemm::ComputeWarpPartition,
       rocm::Gemm::ReuseExistingSharedLayout,
-      rocm::Gemm::InstructionKind,
   });
   return true;
 }
