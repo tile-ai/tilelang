@@ -173,7 +173,7 @@ static Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
  * - Detects parallel thread splitting from the normalized iterator sum and
  *   emits a call to a templated `tl::AllReduce<...>::run`
  *   via `builtin::call_extern`. For sufficiently large reducing thread counts
- *   (> 32) a workspace is allocated via T.AddWorkspace and passed to the
+ *   (> 32) a workspace is allocated via T.add_workspace and passed to the
  *   AllReduce call.
  * - The final body is wrapped in parallel loops over the destination spatial
  *   dimensions and partitioned by the lowering thread variable. If a temporary
