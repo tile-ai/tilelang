@@ -34,6 +34,7 @@
 
 #include "backend/common/target_utils.h"
 #include "cuda/op/copy.h"
+#include "layout/cute_layout.h"
 #include "multi_version_buffer_rewriter.h"
 #include "op/builtin.h"
 #include "op/copy.h"
@@ -2620,15 +2621,14 @@ private:
 /// swizzle modes (32B / 64B / 128B).  Any other layout (e.g. padded,
 /// Volta-style) cannot be used with TMA.
 static bool IsTmaCompatibleLayout(const Layout &layout, const Buffer &buffer) {
-  // Recognised swizzle → TMA with swizzle.
-  if (DetectSwizzleMode(layout, buffer) != SwizzleMode::kNone) {
-    return true;
-  }
-  // Identity / row-major linear → TMA without swizzle.
-  if (StructuralEqual()(layout, makeLinearLayout(buffer->shape))) {
-    return true;
-  }
-  return false;
+  Optional<cute::ComposedLayout> composed =
+      cute::ComposedLayoutFromTileLang(layout);
+  if (!composed.defined())
+    return false;
+  // Recast to byte space (the swizzle atom is defined on byte addresses).
+  cute::ComposedLayout composed_bytes =
+      composed.value().Recast(buffer->dtype.bits(), /*new_bits=*/8);
+  return composed_bytes->swizzle->IsTMACompatible();
 }
 
 class TiledWSCandidate : public StmtExprVisitor {
