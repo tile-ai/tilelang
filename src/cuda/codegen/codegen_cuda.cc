@@ -2849,6 +2849,96 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(C_ptr)", c_ref);
     replacer.register_rule("(C_offset)", c_bias);
     this->stream << replacer.rewrite(mma_call);
+  } else if (op->op.same_as(tl::ptx_mma_block_scale())) {
+    // arg 0: accum_dtype
+    // arg 1: shape: mXnXkX
+    // arg 2: A layout: row/col
+    // arg 3: B layout: row/col
+    // arg 4: kind: mxf4nvf4
+    // arg 5: scale_vec_size: 4
+    // arg 6: A dtype: e2m1
+    // arg 7: B dtype: e2m1
+    // arg 8: scale_type: ue4m3
+    // arg 9: A_data pointer
+    // arg 10: A_offset
+    // arg 11: B_data pointer
+    // arg 12: B_offset
+    // arg 13: C_data pointer
+    // arg 14: C_offset
+    // arg 15: scale_a_data
+    // arg 16: scale_b_data
+    ICHECK_EQ(op->args.size(), 17U);
+    std::string accum_dtype = Downcast<StringImm>(op->args[0])->value;
+    std::string shape = Downcast<StringImm>(op->args[1])->value;
+    std::string A_layout = Downcast<StringImm>(op->args[2])->value;
+    std::string B_layout = Downcast<StringImm>(op->args[3])->value;
+    std::string kind = Downcast<StringImm>(op->args[4])->value;
+    int scale_vec_size = static_cast<int>(Downcast<IntImm>(op->args[5])->value);
+    std::string A_dtype = Downcast<StringImm>(op->args[6])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[7])->value;
+    std::string scale_type = Downcast<StringImm>(op->args[8])->value;
+    std::string a_ref = this->PrintExpr(op->args[9]);
+    std::string a_offset = this->PrintExpr(op->args[10]);
+    std::string b_ref = this->PrintExpr(op->args[11]);
+    std::string b_offset = this->PrintExpr(op->args[12]);
+    std::string c_ref = this->PrintExpr(op->args[13]);
+    std::string c_offset = this->PrintExpr(op->args[14]);
+    std::string scale_a = this->PrintExpr(op->args[15]);
+    std::string scale_b = this->PrintExpr(op->args[16]);
+
+    bool supported_mxf4nvf4_4x_ue4m3 =
+        accum_dtype == "float32" && shape == "m16n8k64" && A_layout == "row" &&
+        B_layout == "col" && kind == "mxf4nvf4" && scale_vec_size == 4 &&
+        A_dtype == "e2m1" && B_dtype == "e2m1" && scale_type == "ue4m3";
+    ICHECK(supported_mxf4nvf4_4x_ue4m3)
+        << "Unsupported ptx_mma_block_scale configuration: accum_dtype="
+        << accum_dtype << ", shape=" << shape << ", A_layout=" << A_layout
+        << ", B_layout=" << B_layout << ", kind=" << kind
+        << ", scale_vec_size=" << scale_vec_size << ", A_dtype=" << A_dtype
+        << ", B_dtype=" << B_dtype << ", scale_type=" << scale_type
+        << ". Currently supported: f32 m16n8k64 row.col kind::mxf4nvf4 "
+           "scale_vec::4X e2m1.e2m1 f32 ue4m3.";
+
+    auto resolve_fp4_packed_buffer =
+        [&](const PrimExpr &var_expr, std::string &ref, std::string &offset) {
+          if (const VarNode *var = var_expr.as<VarNode>()) {
+            auto it = fp4_packed_buffers_.find(var);
+            if (it != fp4_packed_buffers_.end()) {
+              ref = it->second;
+              offset = "(" + offset + ") / 2";
+            }
+          }
+        };
+    resolve_fp4_packed_buffer(op->args[9], a_ref, a_offset);
+    resolve_fp4_packed_buffer(op->args[11], b_ref, b_offset);
+
+    this->PrintIndent();
+
+    std::string mma_kind_enum = "tl::SM120MmaBlockScaledKind::kMxf4nvf4";
+    std::string scale_type_enum = "tl::SM120MmaScaleType::kUE4M3";
+    std::string mma_call =
+        "tl::sm120_mma_sync_blockscaled<(MMA_KIND), (SCALE_VEC_SIZE), "
+        "(SCALE_TYPE)>("
+        "reinterpret_cast<float*>((C_ptr) + (C_offset)), "
+        "reinterpret_cast<const uint32_t*>((A_ptr) + (A_offset)), "
+        "reinterpret_cast<const uint32_t*>((B_ptr) + (B_offset)), "
+        "reinterpret_cast<const float*>((C_ptr) + (C_offset)), "
+        "(*reinterpret_cast<const uint32_t*>((scale_a))), "
+        "(*reinterpret_cast<const uint32_t*>((scale_b))));\n";
+
+    tl::codegen::Replacer replacer;
+    replacer.register_rule("(MMA_KIND)", mma_kind_enum);
+    replacer.register_rule("(SCALE_VEC_SIZE)", std::to_string(scale_vec_size));
+    replacer.register_rule("(SCALE_TYPE)", scale_type_enum);
+    replacer.register_rule("(A_ptr)", a_ref);
+    replacer.register_rule("(A_offset)", a_offset);
+    replacer.register_rule("(B_ptr)", b_ref);
+    replacer.register_rule("(B_offset)", b_offset);
+    replacer.register_rule("(C_ptr)", c_ref);
+    replacer.register_rule("(C_offset)", c_offset);
+    replacer.register_rule("(scale_a)", scale_a);
+    replacer.register_rule("(scale_b)", scale_b);
+    this->stream << replacer.rewrite(mma_call);
   } else if (op->op.same_as(builtin::ptx_mma_sp())) {
     // arg 0: shape: mXnXkX
     // arg 1: A layout: row/col

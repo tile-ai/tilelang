@@ -1,5 +1,6 @@
 from __future__ import annotations
 import tilelang.language as T
+from dataclasses import dataclass
 from typing import Literal
 from collections.abc import Callable
 from tilelang.common import TransformKind
@@ -28,9 +29,52 @@ from tilelang.cuda.intrinsics.layout.mma_layout import (
     mma_load_a_32x16_to_shared_16x32_layout,
     mma_load_b_32x16_to_shared_16x32_layout,
     mma_load_a_32x8_to_shared_16x16_layout,
+    shared_16x64_to_mma_32x32_layout_sr_a,
+    shared_8x64_to_mma_32x16_layout_sr_b,
+    mma_load_a_32x32_to_shared_16x64_layout,
+    mma_load_b_32x16_to_shared_8x64_layout,
 )
 
 lift = convert
+
+
+@dataclass(frozen=True)
+class BlockScaleMmaConfig:
+    """Static SM120 warp-level block-scale MMA configuration."""
+
+    kind: str
+    mma_prefix: str
+    atom_k: int
+    scale_vec_size: int
+    sf_vec_size: int
+    scale_type: str
+    a_dtype_abbrv: str
+    b_dtype_abbrv: str
+    accum_dtype: str = T.float32
+    active_sfa_threads: int = 16
+    active_sfb_threads: int = 8
+
+
+_SUPPORTED_BLOCK_SCALE_MMA_CONFIGS = {
+    ("mxf4nvf4", 4, "ue4m3"): BlockScaleMmaConfig(
+        kind="mxf4nvf4",
+        mma_prefix="m16n8k64",
+        atom_k=64,
+        scale_vec_size=4,
+        sf_vec_size=16,
+        scale_type="ue4m3",
+        a_dtype_abbrv="e2m1",
+        b_dtype_abbrv="e2m1",
+    ),
+}
+
+
+def _get_block_scale_mma_config(kind: str, scale_vec_size: int, scale_type: str) -> BlockScaleMmaConfig:
+    key = (kind, scale_vec_size, scale_type)
+    if key not in _SUPPORTED_BLOCK_SCALE_MMA_CONFIGS:
+        supported = ", ".join(str(k) for k in sorted(_SUPPORTED_BLOCK_SCALE_MMA_CONFIGS))
+        raise ValueError(f"Unsupported SM120 block-scale MMA config {key}; supported: {supported}")
+    return _SUPPORTED_BLOCK_SCALE_MMA_CONFIGS[key]
 
 
 class TensorCoreIntrinEmitter:
@@ -715,6 +759,9 @@ class TensorCoreIntrinEmitter:
         elif dtype_bits == 8:
             transform_func_sr_a = shared_16x32_to_mma_32x16_layout_sr_a
             transform_func_sr_b = shared_16x32_to_mma_32x16_layout_sr_b
+        elif dtype_bits == 4:
+            transform_func_sr_a = shared_16x64_to_mma_32x32_layout_sr_a
+            transform_func_sr_b = shared_8x64_to_mma_32x16_layout_sr_b
         else:
             raise ValueError(f"Unsupported dtype {dtype}")
 
@@ -1223,3 +1270,279 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
                 )
 
         return _warp_mma(A_local_buf, B_local_buf, C_local_buf)
+
+
+class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
+    """SM120 warp-level block-scale MMA emitter.
+
+    The emitter keeps scale-factor storage explicit, matching TileLang's
+    TCGEN05 block-scaled style while targeting warp-level ``mma.sync``.
+    """
+
+    def __init__(
+        self,
+        a_dtype: str = T.float4_e2m1fn,
+        b_dtype: str = T.float4_e2m1fn,
+        accum_dtype: str = T.float32,
+        a_transposed: bool = False,
+        b_transposed: bool = False,
+        block_row_warps: int = 2,
+        block_col_warps: int = 2,
+        warp_row_tiles: int = 32,
+        warp_col_tiles: int = 32,
+        chunk: int = 64,
+        reduce_k: int = 1,
+        num_elems_per_byte: int = 1,
+        is_m_first: bool | None = False,
+        thread_var: Var | None = None,
+        kind: str = "mxf4nvf4",
+        scale_vec_size: int = 4,
+        stype: str = "ue4m3",
+    ):
+        self.block_scale_config = _get_block_scale_mma_config(kind, scale_vec_size, stype)
+        a_dtype_abbrv = self._get_dtype_abbrv(str(a_dtype))
+        b_dtype_abbrv = self._get_dtype_abbrv(str(b_dtype))
+        if (
+            a_dtype_abbrv != self.block_scale_config.a_dtype_abbrv
+            or b_dtype_abbrv != self.block_scale_config.b_dtype_abbrv
+            or str(accum_dtype) != self.block_scale_config.accum_dtype
+        ):
+            raise ValueError(
+                f"{self.block_scale_config.kind} expects a_dtype={self.block_scale_config.a_dtype_abbrv}, "
+                f"b_dtype={self.block_scale_config.b_dtype_abbrv}, "
+                f"accum_dtype={self.block_scale_config.accum_dtype}; "
+                f"got a_dtype={a_dtype}, b_dtype={b_dtype}, accum_dtype={accum_dtype}"
+            )
+        self.kind = self.block_scale_config.kind
+        self.scale_vec_size = self.block_scale_config.scale_vec_size
+        self.stype = self.block_scale_config.scale_type
+        self.sf_vec_size = self.block_scale_config.sf_vec_size
+        super().__init__(
+            a_dtype=a_dtype,
+            b_dtype=b_dtype,
+            accum_dtype=accum_dtype,
+            a_transposed=a_transposed,
+            b_transposed=b_transposed,
+            block_row_warps=block_row_warps,
+            block_col_warps=block_col_warps,
+            warp_row_tiles=warp_row_tiles,
+            warp_col_tiles=warp_col_tiles,
+            chunk=chunk,
+            reduce_k=reduce_k,
+            num_elems_per_byte=num_elems_per_byte,
+            is_m_first=is_m_first,
+            thread_var=thread_var,
+        )
+
+    def _initialize_k_dim(self, a_dtype=T.float16):
+        self.k_dim = self.block_scale_config.atom_k
+
+    def _initialize_abbrev(self, a_dtype, b_dtype, accum_dtype):
+        self.a_dtype_abbrv = self.block_scale_config.a_dtype_abbrv
+        self.b_dtype_abbrv = self.block_scale_config.b_dtype_abbrv
+        self.accum_dtype_abbrv = self._get_dtype_abbrv(accum_dtype)
+
+    def _initialize_mma_prefix(self, k_dim: int = 16):
+        self.mma_prefix = self.block_scale_config.mma_prefix
+
+    def ldmatrix_a(self, A_local_buf: Buffer, A_shared_buf: Buffer | BufferRegion, ki: PrimExpr, rk: PrimExpr | None = 0):
+        warp_row_tiles = self.warp_row_tiles
+        warp_rows = self.warp_rows
+        chunk = self.chunk
+        micro_size_x = self.micro_size_x
+        micro_size_k = self.micro_size_k
+        local_size_a = self.local_size_a
+        a_transposed = self.a_transposed
+
+        thread_binding = self.get_thread_binding()
+        A_region = self._legalize_to_buffer_region(A_shared_buf)
+        A_buf = A_region.buffer
+        A_base0 = A_region.region[-2].min
+        A_base1 = A_region.region[-1].min
+        A_other = [r.min for r in A_region.region[:-2]]
+
+        @T.macro
+        def _warp_ld_a_e2m1(A_local_buf, A_shared_buf, ki, thread_binding, rk=0):
+            tx, _, warp_m = self.extract_thread_binding(thread_binding)
+            for i in T.serial(warp_rows):
+                wi = warp_m * warp_row_tiles + i * micro_size_x
+                wk = rk * chunk + ki * micro_size_k
+                for local_id in T.serial(local_size_a):
+                    mi, mk = mma_load_a_32x32_to_shared_16x64_layout(tx, local_id)
+                    if a_transposed:
+                        A_local_buf[i * local_size_a + local_id] = A_buf[tuple(A_other) + (A_base0 + wk + mk, A_base1 + wi + mi)]
+                    else:
+                        A_local_buf[i * local_size_a + local_id] = A_buf[tuple(A_other) + (A_base0 + wi + mi, A_base1 + wk + mk)]
+
+        return _warp_ld_a_e2m1(A_local_buf, A_region, ki, thread_binding, rk)
+
+    def ldmatrix_b(self, B_local_buf: Buffer, B_shared_buf: Buffer | BufferRegion, ki: PrimExpr, rk: PrimExpr | None = 0):
+        warp_col_tiles = self.warp_col_tiles
+        warp_cols = self.warp_cols
+        chunk = self.chunk
+        micro_size_y = self.micro_size_y
+        micro_size_k = self.micro_size_k
+        local_size_b = self.local_size_b
+        b_transposed = self.b_transposed
+        replicate_b = self.n_dim == 16
+        local_size_b_per_inst = (8 * self.micro_size_k) // self.WARP_SIZE
+
+        thread_binding = self.get_thread_binding()
+        B_region = self._legalize_to_buffer_region(B_shared_buf)
+        B_buf = B_region.buffer
+        B_base0 = B_region.region[-2].min
+        B_base1 = B_region.region[-1].min
+        B_other = [r.min for r in B_region.region[:-2]]
+
+        @T.macro
+        def _warp_ld_b_e2m1(B_local_buf, B_shared_buf, ki, thread_binding, rk=0):
+            tx, warp_n, _ = self.extract_thread_binding(thread_binding)
+            for i in T.serial(warp_cols):
+                for n_half in T.serial(2 if replicate_b else 1):
+                    wi = warp_n * warp_col_tiles + i * micro_size_y + (n_half * 8 if replicate_b else 0)
+                    wk = rk * chunk + ki * micro_size_k
+                    b_base = i * local_size_b + n_half * local_size_b_per_inst if replicate_b else i * local_size_b
+                    for local_id in T.serial(local_size_b_per_inst):
+                        ni, ki_offset = mma_load_b_32x16_to_shared_8x64_layout(tx, local_id)
+                        if b_transposed:
+                            B_local_buf[b_base + local_id] = B_buf[tuple(B_other) + (B_base0 + wi + ni, B_base1 + wk + ki_offset)]
+                        else:
+                            B_local_buf[b_base + local_id] = B_buf[tuple(B_other) + (B_base0 + wk + ki_offset, B_base1 + wi + ni)]
+
+        return _warp_ld_b_e2m1(B_local_buf, B_region, ki, thread_binding, rk)
+
+    def _scale_region_parts(self, scale_buf: Buffer | BufferRegion):
+        if isinstance(scale_buf, BufferRegion):
+            scale_region = scale_buf
+        elif isinstance(scale_buf, Buffer):
+            scale_region = self._legalize_to_buffer_region(scale_buf)
+        else:
+            raise ValueError(f"Unsupported scale buffer type: {type(scale_buf)}")
+        return (
+            scale_region.buffer,
+            [r.min for r in scale_region.region[:-2]],
+            scale_region.region[-2].min,
+            scale_region.region[-1].min,
+        )
+
+    @staticmethod
+    def _sfa_row_in_atom(tx: PrimExpr):
+        # CUTLASS SFALayout for k64 uses ((2,2,8),64), stride ((8,0,1),16).
+        # With K-major flattening, the M coordinate is 8 * (lane % 2) + lane // 4.
+        return 8 * (tx % 2) + (tx // 4)
+
+    @staticmethod
+    def _sfb_col_in_atom(tx: PrimExpr):
+        # CUTLASS SFBLayout for k64 uses ((4,8),64), stride ((0,1),8), so the
+        # logical N coordinate is lane // 4 with broadcast across four groups.
+        return tx // 4
+
+    def _scale_word_k(self, k_start: PrimExpr, ki: PrimExpr, sf_granularity_k: int):
+        packed_word_k = int(sf_granularity_k) * 4
+        if packed_word_k != self.sf_vec_size * 4:
+            raise ValueError(
+                f"{self.kind} expects packed scale words covering {self.sf_vec_size * 4} K elements, "
+                f"got sf_granularity_k={sf_granularity_k}"
+            )
+        _k_start = tvm.tirx.const(k_start, "int32") if isinstance(k_start, int) else k_start
+        return (_k_start + self.micro_size_k * ki) // packed_word_k
+
+    def mma(
+        self,
+        A_local_buf,
+        B_local_buf,
+        C_local_buf,
+        SFA_buf,
+        SFB_buf,
+        ki: PrimExpr = 0,
+        k_start: PrimExpr = 0,
+        sf_a_granularity_k: int | None = None,
+        sf_b_granularity_k: int | None = None,
+    ):
+        warp_rows = self.warp_rows
+        warp_cols = self.warp_cols
+        local_size_a = self.local_size_a
+        local_size_b = self.local_size_b
+        local_size_out = self.local_size_out
+        kind = self.kind
+        scale_vec_size = self.scale_vec_size
+        stype = self.stype
+        accum_dtype = self.accum_dtype
+        a_dtype_abbrv = self.a_dtype_abbrv
+        b_dtype_abbrv = self.b_dtype_abbrv
+        mma_prefix = self.mma_prefix
+        warp_row_tiles = self.warp_row_tiles
+        warp_col_tiles = self.warp_col_tiles
+        micro_size_x = self.micro_size_x
+        micro_size_y = self.micro_size_y
+        sf_vec_size = self.sf_vec_size
+        sf_a_granularity_k = sf_vec_size if sf_a_granularity_k is None else sf_a_granularity_k
+        sf_b_granularity_k = sf_vec_size if sf_b_granularity_k is None else sf_b_granularity_k
+        scale_a_word_k = self._scale_word_k(k_start, ki, sf_a_granularity_k)
+        scale_b_word_k = self._scale_word_k(k_start, ki, sf_b_granularity_k)
+        thread_binding = self.get_thread_binding()
+        SFA_data, SFA_other, SFA_base_m, SFA_base_k = self._scale_region_parts(SFA_buf)
+        SFB_data, SFB_other, SFB_base_n, SFB_base_k = self._scale_region_parts(SFB_buf)
+        replicate_b = self.n_dim == 16
+
+        @T.macro
+        def _warp_mma_block_scale(A_local_buf, B_local_buf, C_local_buf, SFA_data, SFB_data, thread_binding):
+            tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
+            sfa_row = self._sfa_row_in_atom(tx)
+            sfb_col = self._sfb_col_in_atom(tx)
+            for i, j in T.grid(warp_rows, warp_cols):
+                scale_m = warp_m * warp_row_tiles + i * micro_size_x + sfa_row
+                scale_n = warp_n * warp_col_tiles + j * micro_size_y + sfb_col
+                scale_a_ptr = T.access_ptr(
+                    SFA_data[tuple(SFA_other) + (SFA_base_m + scale_m, SFA_base_k + scale_a_word_k)],
+                    "r",
+                )
+                scale_b_ptr = T.access_ptr(
+                    SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n, SFB_base_k + scale_b_word_k)],
+                    "r",
+                )
+                T.ptx_mma_block_scale(
+                    accum_dtype,
+                    mma_prefix,
+                    "row",
+                    "col",
+                    kind,
+                    scale_vec_size,
+                    a_dtype_abbrv,
+                    b_dtype_abbrv,
+                    stype,
+                    A_local_buf.data,
+                    i * local_size_a,
+                    B_local_buf.data,
+                    j * local_size_b,
+                    C_local_buf.data,
+                    i * warp_cols * local_size_out + j * local_size_out,
+                    scale_a_ptr,
+                    scale_b_ptr,
+                )
+                if replicate_b:
+                    scale_b_rep_ptr = T.access_ptr(
+                        SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n + 8, SFB_base_k + scale_b_word_k)],
+                        "r",
+                    )
+                    T.ptx_mma_block_scale(
+                        accum_dtype,
+                        mma_prefix,
+                        "row",
+                        "col",
+                        kind,
+                        scale_vec_size,
+                        a_dtype_abbrv,
+                        b_dtype_abbrv,
+                        stype,
+                        A_local_buf.data,
+                        i * local_size_a,
+                        B_local_buf.data,
+                        j * local_size_b + lift(local_size_b) // 2,
+                        C_local_buf.data,
+                        i * warp_cols * local_size_out + j * local_size_out + lift(local_size_out) // 2,
+                        scale_a_ptr,
+                        scale_b_rep_ptr,
+                    )
+
+        return _warp_mma_block_scale(A_local_buf, B_local_buf, C_local_buf, SFA_data, SFB_data, thread_binding)

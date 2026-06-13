@@ -188,6 +188,60 @@ def mma_load_b_32x8_to_shared_16x16_layout(thread_id, local_id):
     return row, col
 
 
+def shared_16x64_to_mma_a_32x32_layout(i, j):
+    """A fragment layout for m16n8k64 e2m1 row-major operand."""
+    thread_id = 4 * (i % 8) + (j % 32) // 8
+    local_id = 16 * (i // 8) + 8 * (j // 32) + j % 8
+    return thread_id, local_id
+
+
+def shared_64x16_to_mma_a_32x32_layout_trans(i, j):
+    return shared_16x64_to_mma_a_32x32_layout(j, i)
+
+
+def shared_8x64_to_mma_b_32x16_layout(i, j):
+    """B fragment layout for m16n8k64 e2m1 col-major operand."""
+    thread_id = 4 * i + (j % 32) // 8
+    local_id = 8 * (j // 32) + j % 8
+    return thread_id, local_id
+
+
+def shared_64x8_to_mma_b_32x16_layout_trans(i, j):
+    return shared_8x64_to_mma_b_32x16_layout(j, i)
+
+
+shared_16x64_to_mma_32x32_layout_sr_a = shared_16x64_to_mma_a_32x32_layout
+shared_16x64_to_mma_32x32_layout_rs_a = shared_64x16_to_mma_a_32x32_layout_trans
+shared_8x64_to_mma_32x16_layout_sr_b = shared_8x64_to_mma_b_32x16_layout
+shared_8x64_to_mma_32x16_layout_rs_b = shared_64x8_to_mma_b_32x16_layout_trans
+
+
+def mma_load_a_32x32_to_shared_16x64_layout(thread_id, local_id):
+    """Inverse: (thread_id, local_id) -> (m, k) for A m16k64 e2m1.
+
+    Matches CUTLASS/CuTe SM120 ALayout:
+    Layout<Shape<Shape<_4,_8>, Shape<_8,_2,_2>>,
+           Stride<Stride<_128,_1>, Stride<_16,_8,_512>>>.
+    """
+    tid_m = thread_id % 4
+    tid_k = thread_id // 4
+    val_k8 = local_id % 8
+    val_m8 = (local_id // 8) % 2
+    val_k32 = local_id // 16
+    row = tid_k + 8 * val_m8
+    col = tid_m * 8 + val_k8 + 32 * val_k32
+    return row, col
+
+
+def mma_load_b_32x16_to_shared_8x64_layout(thread_id, local_id):
+    """Inverse: (thread_id, local_id) -> (n, k) for B n8k64 e2m1."""
+    group_id = thread_id // 4
+    tid_in_group = thread_id % 4
+    row = group_id
+    col = tid_in_group * 8 + (local_id % 8) + 32 * (local_id // 8)
+    return row, col
+
+
 def shared_16x16_to_mma_32x8_smoothlayout(i, j):
     return (i * 2 + j // 8, j % 8)
 
