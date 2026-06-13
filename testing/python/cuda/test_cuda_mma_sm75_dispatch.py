@@ -70,6 +70,29 @@ def test_sm75_int8_emitter_uses_m8n8k16_shape():
     assert emitter.get_store_index_map() is not None
 
 
+def test_sm75_uint8_emitter_uses_m8n8k16_shape():
+    emitter = TensorCoreIntrinEmitterSM75(
+        a_dtype=T.uint8,
+        b_dtype=T.uint8,
+        accum_dtype=T.int32,
+        a_transposed=False,
+        b_transposed=True,
+        block_row_warps=2,
+        block_col_warps=2,
+        warp_row_tiles=32,
+        warp_col_tiles=32,
+        chunk=64,
+    )
+
+    assert emitter.mma_prefix == "m8n8k16"
+    assert emitter.micro_size_x == 8
+    assert emitter.micro_size_y == 8
+    assert emitter.micro_size_k == 16
+    assert emitter.local_size_a == 4
+    assert emitter.local_size_b == 4
+    assert emitter.local_size_out == 2
+
+
 def test_sm75_int4_emitter_uses_m8n8k32_shape():
     emitter = TensorCoreIntrinEmitterSM75(
         a_dtype=T.int4,

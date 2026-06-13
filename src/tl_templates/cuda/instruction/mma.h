@@ -104,6 +104,57 @@ struct SM75_8x8x32_S32U4U4S32_TN {
   }
 };
 
+struct SM75_16x8x8_F16F16F16F16_TN {
+  using DRegisters = uint32_t[2];
+  using ARegisters = uint32_t[2];
+  using BRegisters = uint32_t[1];
+  using CRegisters = uint32_t[2];
+
+  CUTE_HOST_DEVICE static void fma(uint32_t &d0, uint32_t &d1,
+                                   uint32_t const &a0, uint32_t const &a1,
+                                   uint32_t const &b0, uint32_t const &c0,
+                                   uint32_t const &c1) {
+#if defined(CUTE_ARCH_MMA_SM75_ENABLED)
+    asm volatile("mma.sync.aligned.m16n8k8.row.col.f16.f16.f16.f16"
+                 "{%0, %1},"
+                 "{%2, %3},"
+                 "{%4},"
+                 "{%5, %6};\n"
+                 : "=r"(d0), "=r"(d1)
+                 : "r"(a0), "r"(a1), "r"(b0), "r"(c0), "r"(c1));
+#else
+    CUTE_INVALID_CONTROL_PATH(
+        "Attempting to use SM75_16x8x8_F16F16F16F16_TN without "
+        "CUTE_ARCH_MMA_SM75_ENABLED");
+#endif
+  }
+};
+
+struct SM75_8x8x16_S32U8U8S32_TN {
+  using DRegisters = uint32_t[2];
+  using ARegisters = uint32_t[1];
+  using BRegisters = uint32_t[1];
+  using CRegisters = uint32_t[2];
+
+  CUTE_HOST_DEVICE static void fma(uint32_t &d0, uint32_t &d1,
+                                   uint32_t const &a0, uint32_t const &b0,
+                                   uint32_t const &c0, uint32_t const &c1) {
+#if defined(CUTE_ARCH_MMA_SM75_ENABLED)
+    asm volatile("mma.sync.aligned.m8n8k16.row.col.s32.u8.u8.s32"
+                 "{%0, %1},"
+                 "{%2},"
+                 "{%3},"
+                 "{%4, %5};\n"
+                 : "=r"(d0), "=r"(d1)
+                 : "r"(a0), "r"(b0), "r"(c0), "r"(c1));
+#else
+    CUTE_INVALID_CONTROL_PATH(
+        "Attempting to use SM75_8x8x16_S32U8U8S32_TN without "
+        "CUTE_ARCH_MMA_SM75_ENABLED");
+#endif
+  }
+};
+
 template <DataType AType, DataType BType, DataType CType, int M, int N, int K,
           bool TransA, bool TransB, bool Saturate>
 struct MmaDispatcher {
@@ -146,6 +197,9 @@ TL_DEFINE_MMA_DISPATCHER(kFloat16, kFloat16, kFloat32, 16, 8, 16, false, true,
                          false, cute::SM80_16x8x16_F32F16F16F32_TN)
 TL_DEFINE_MMA_DISPATCHER(kFloat16, kFloat16, kFloat32, 16, 8, 8, false, true,
                          false, cute::SM75_16x8x8_F32F16F16F32_TN)
+// FP16 accumulation (k8) for SM75
+TL_DEFINE_MMA_DISPATCHER(kFloat16, kFloat16, kFloat16, 16, 8, 8, false, true,
+                         false, tl::detail::SM75_16x8x8_F16F16F16F16_TN)
 
 // BF16 inputs
 TL_DEFINE_MMA_DISPATCHER(kBFloat16, kBFloat16, kFloat32, 16, 8, 16, false, true,
@@ -160,6 +214,8 @@ TL_DEFINE_MMA_DISPATCHER(kUInt8, kUInt8, kInt32, 16, 8, 32, false, true, false,
 // INT8 inputs (k16) for SM75
 TL_DEFINE_MMA_DISPATCHER(kInt8, kInt8, kInt32, 8, 8, 16, false, true, false,
                          cute::SM75_8x8x16_S32S8S8S32_TN)
+TL_DEFINE_MMA_DISPATCHER(kUInt8, kUInt8, kInt32, 8, 8, 16, false, true, false,
+                         tl::detail::SM75_8x8x16_S32U8U8S32_TN)
 
 // INT4 inputs (k32) for SM75
 TL_DEFINE_MMA_DISPATCHER(kInt4, kInt4, kInt32, 8, 8, 32, false, true, false,
