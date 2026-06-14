@@ -203,6 +203,10 @@ class PassConfigKey(str, Enum):
 
     """
 
+    TL_TILESIGHT_ENABLE = "tl.tilesight_enable"
+    """Enable TileSight graph extraction and cost modeling during CUDA lowering.
+    Default: False"""
+
     TL_STORAGE_REWRITE_DETECT_INPLACE = "tl.storage_rewrite_detect_inplace"
     """Control StorageRewrite inplace detection.
 
