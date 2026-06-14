@@ -325,6 +325,10 @@ class Environment:
     TILELANG_JIT_DIAGNOSTICS = EnvVar("TILELANG_JIT_DIAGNOSTICS", "0")  # enable JIT phase diagnostics
     TILELANG_COMPILE_TIMEOUT_SECONDS = EnvVar("TILELANG_COMPILE_TIMEOUT_SECONDS", "")  # optional NVCC subprocess timeout in seconds
 
+    # Pass diff debugging
+    TILELANG_PASS_DIFF = EnvVar("TILELANG_PASS_DIFF", "0")  # "0"=off, "terminal", "html", "both"
+    TILELANG_PASS_DIFF_OUTPUT = EnvVar("TILELANG_PASS_DIFF_OUTPUT", "tmp/pass_diff_output")  # output directory for HTML reports
+
     # Auto-tuning settings
     TILELANG_AUTO_TUNING_DISABLE_CACHE = EnvVar("TILELANG_AUTO_TUNING_DISABLE_CACHE", "0")
     TILELANG_AUTO_TUNING_CPU_UTILITIES = EnvVar("TILELANG_AUTO_TUNING_CPU_UTILITIES", "0.9")  # percent of CPUs used
@@ -390,6 +394,17 @@ class Environment:
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("TILELANG_COMPILE_TIMEOUT_SECONDS must be empty or a non-negative number")
         return timeout if timeout > 0 else None
+
+    def get_pass_diff_mode(self) -> str | None:
+        """Return the pass diff mode: None (off), 'terminal', 'html', or 'both'."""
+        value = str(self.TILELANG_PASS_DIFF).lower().strip()
+        if value in ("0", "false", "no", "off", ""):
+            return None
+        if value in ("1", "true", "yes", "on", "terminal"):
+            return "terminal"
+        if value in ("html", "both"):
+            return value
+        return "terminal"  # fallback for unrecognized truthy values
 
     def get_default_target(self) -> str:
         """Get default compilation target from environment."""
