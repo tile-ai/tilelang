@@ -59,7 +59,7 @@ def get_configs():
 
 
 @tilelang.autotune(configs=get_configs())
-@tilelang.jit(out_idx=[-1], target="hip -mcpu=gfx950")
+@tilelang.jit(out_idx=[-1], target={"kind": "hip", "mcpu": "gfx950"})
 def matmul(
     M,
     N,

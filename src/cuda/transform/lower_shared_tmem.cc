@@ -99,9 +99,10 @@ static std::pair<VarSet, bool> CollectFallthroughDeallocs(const Stmt &stmt) {
 
 class SharedTmemRewriter : public StmtExprMutator {
 public:
-  static Stmt Rewrite(Stmt body, Target target) {
+  static Stmt Rewrite(Stmt body, Target target, bool use_2cta) {
     SharedTmemRewriter rewriter;
     rewriter.target_ = std::move(target);
+    rewriter.use_2cta_ = use_2cta;
     return rewriter(body);
   }
 
@@ -132,6 +133,34 @@ private:
       ICHECK(layout_map) << "layout map is not defined";
       layout_map_ = layout_map->as<Map<Buffer, Layout>>().value();
     }
+    // Pick up the per-buffer alias map planted by Python alloc_tmem(alias=...).
+    // Each entry is: aliased_buffer -> [parent_buffer, col_offset].
+    // We key by Buffer identity (NodeRef pointer): the script parser's
+    // Namer mutates buffer->name in-place rather than constructing a new
+    // Buffer, so Buffer identity is preserved across pass boundaries
+    // (whereas Var identity is not — Vars get replaced by some passes).
+    // The annotation uses Buffer keys whose Namer-applied names survive
+    // pass boundaries (Var/Buffer pointer identity is NOT stable — by the
+    // time we get here, upstream passes have rebuilt the Buffer instances —
+    // but the buffer NAMES carry through because the Python-side annotation
+    // captures the Buffer node by reference, and Namer mutates name in
+    // place on whichever instance is current when assignment happens).
+    if (op->annotations.count("tmem_alias_buffers")) {
+      auto val = op->annotations.Get("tmem_alias_buffers");
+      auto opt_map = val ? val->as<Map<Buffer, Array<Any>>>() : std::nullopt;
+      if (opt_map.has_value()) {
+        for (const auto &kv : opt_map.value()) {
+          ICHECK_EQ(kv.second.size(), 2U)
+              << "tmem_alias_buffers entry must be [parent_buffer, col_offset]";
+          auto parent_buf = kv.second[0].try_cast<Buffer>();
+          auto col_offset = kv.second[1].try_cast<IntImm>();
+          ICHECK(parent_buf && col_offset)
+              << "tmem_alias_buffers entry has malformed payload";
+          tmem_alias_parent_name_[kv.first->name] = (*parent_buf)->name;
+          tmem_alias_col_offset_by_name_[kv.first->name] = (*col_offset)->value;
+        }
+      }
+    }
 
     // Record the mapping from buffer data var to buffer for later lookup
     for (auto buffer : alloc_buffers) {
@@ -143,15 +172,43 @@ private:
 
     Array<Buffer> tmem_buffers;
 
-    for (const auto &[data, buffer] : buffer_map_) {
+    // Collect TMEM buffers from both alloc_buffers and match_buffers.
+    auto check_and_add = [&](const Buffer &buffer) {
       const auto *ptr_type =
           buffer->data->type_annotation.as<PointerTypeNode>();
+      if (!ptr_type)
+        return;
       auto storage_scope = ptr_type->storage_scope;
-      ICHECK(ptr_type) << "Buffer Var's type annotation must be of PointerType";
       if (storage_scope == "shared.tmem") {
         tmem_buffers.push_back(buffer);
       }
+    };
+    for (auto buffer : alloc_buffers) {
+      check_and_add(buffer);
     }
+    for (auto match_buffer : op->match_buffers) {
+      check_and_add(match_buffer->buffer);
+    }
+    // Sort for deterministic allocation order when buffer names encode a
+    // double-buffered S/O layout: S buffers before O buffers, then by numeric
+    // suffix. Other names keep lexicographic fallback ordering.
+    std::vector<Buffer> sorted_tmem(tmem_buffers.begin(), tmem_buffers.end());
+    std::sort(sorted_tmem.begin(), sorted_tmem.end(),
+              [](const Buffer &a, const Buffer &b) {
+                auto priority = [](const std::string &name) -> int {
+                  if (name.find("S0") != std::string::npos)
+                    return 0;
+                  if (name.find("S1") != std::string::npos)
+                    return 1;
+                  if (name.find("O0") != std::string::npos)
+                    return 2;
+                  if (name.find("O1") != std::string::npos)
+                    return 3;
+                  return 4; // unknown buffers go last
+                };
+                return priority(a->name) < priority(b->name);
+              });
+    tmem_buffers = Array<Buffer>(sorted_tmem.begin(), sorted_tmem.end());
 
     if (tmem_buffers.empty()) {
       return StmtExprMutator::VisitStmt_(op);
@@ -181,12 +238,18 @@ private:
           T.ptx_init_tensor_memory(tmem_buf0[0], 128)
           T.ptx_init_tensor_memory(tmem_buf1[0], 128)
     */
-    // 1. create new data vars
+    // 1. create new data vars. Aliased buffers reuse the parent's address slot
+    // and are represented as `parent_addr + col_offset`, so they do not need a
+    // separate shared-memory slot.
     Array<Var> new_data_vars;
     for (auto buffer : tmem_buffers) {
       auto data = buffer->data;
       if (var_remap_.count(data))
         continue;
+      if (tmem_alias_parent_name_.find(buffer->name) !=
+          tmem_alias_parent_name_.end()) {
+        continue;
+      }
       auto new_data =
           Var(data->name_hint, PointerType(PrimType(tmem_dtype_), "shared"));
       var_remap_.Set(data, new_data);
@@ -197,6 +260,10 @@ private:
     Array<Buffer> new_buffers;
     for (auto buffer : tmem_buffers) {
       auto data = buffer->data;
+      if (tmem_alias_parent_name_.find(buffer->name) !=
+          tmem_alias_parent_name_.end()) {
+        continue;
+      }
       ICHECK(var_remap_.find(data) != var_remap_.end())
           << "data not found in var_remap_";
       auto new_data = var_remap_.at(data);
@@ -222,26 +289,29 @@ private:
       return StmtExprMutator::VisitStmt_(op);
     }
 
-    // If block has use_2cta attr, add use_2cta: 1 to tmem alloc/dealloc call
-    // annotations.
+    // Propagate use_2cta (inferred from cluster_dims) to tmem alloc/dealloc
+    // call annotations so codegen emits cta_group::2.
     Map<String, ObjectRef> tmem_call_ann;
-    if (op->annotations.count("use_2cta")) {
-      PrimExpr val = Downcast<PrimExpr>(op->annotations["use_2cta"]);
-      // Bool in TVM is a subclass of IntImm, so only check IntImm.
-      if (const auto *i = val.as<IntImmNode>()) {
-        if (i->value != 0) {
-          tmem_call_ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
-        }
-      }
+    int64_t tmem_alloc_warp = 0;
+    if (use_2cta_) {
+      tmem_call_ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
+    }
+    if (op->annotations.count("tmem_alloc_warp")) {
+      PrimExpr val = Downcast<PrimExpr>(op->annotations["tmem_alloc_warp"]);
+      const auto *i = val.as<IntImmNode>();
+      ICHECK(i) << "tmem_alloc_warp must be an integer constant";
+      ICHECK_GE(i->value, 0) << "tmem_alloc_warp must be non-negative";
+      tmem_alloc_warp = i->value;
     }
 
-    // 3. create init & dealloc calls for new buffers
+    // 3. create init & dealloc calls for new buffers. Aliased buffers
+    // (alloc_tmem(alias=...)) are pure address expressions and get no
+    // tcgen05.alloc or shared address slot.
     std::vector<Stmt> init_mtmem_calls_;
     std::vector<Stmt> dealloc_tmem_calls_;
     for (auto buffer : tmem_buffers) {
       auto data = buffer->data;
       auto old_buffer = buffer_data_to_buffer_.at(data);
-      auto new_buffer = buffer_remap_.at(old_buffer);
       int num_cols_allocated = GetNumColsAllocated(old_buffer);
 
       // Check that the number of rows doesn't exceed the tmem limit
@@ -258,6 +328,14 @@ private:
 
       tmem_num_cols_allocated_.insert({data, num_cols_allocated});
       tmem_call_annotations_.insert({data, tmem_call_ann});
+
+      auto alias_it = tmem_alias_parent_name_.find(old_buffer->name);
+      if (alias_it != tmem_alias_parent_name_.end()) {
+        // Aliased: skip alloc/dealloc. Uses are rewritten to the parent's
+        // address plus a constant column offset in VisitExpr_(BufferLoadNode).
+        continue;
+      }
+      auto new_buffer = buffer_remap_.at(old_buffer);
 
       auto new_buffer_access = new_buffer.access_ptr(1, DataType::Handle(), 1,
                                                      PrimExpr(0), PrimExpr(1));
@@ -287,21 +365,32 @@ private:
     auto warp_size = TargetCudaGetWarpSize(target_);
     auto thread_var_div_warp_size =
         FloorDiv(thread_var_->var, IntImm(thread_var_->var->dtype, warp_size));
-    new_body.push_back(IfThenElse(EQ(thread_var_div_warp_size, 0),
+    PrimExpr tmem_guard = EQ(thread_var_div_warp_size, 0);
+    bool use_2cta_tmem = tmem_call_ann.find("use_2cta") != tmem_call_ann.end();
+    if (use_2cta_tmem) {
+      tmem_guard = EQ(thread_var_div_warp_size,
+                      IntImm(thread_var_->var->dtype, tmem_alloc_warp));
+    }
+    new_body.push_back(IfThenElse(tmem_guard,
                                   init_mtmem_calls_.size() > 1
                                       ? SeqStmt(init_mtmem_calls_)
                                       : init_mtmem_calls_.back(),
                                   Stmt()));
-    new_body.push_back(
-        Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
-                      {StringImm("shared")})));
+    if (use_2cta_tmem) {
+      new_body.push_back(
+          Evaluate(Call(DataType::Handle(), tl::cluster_sync(), {})));
+    } else {
+      new_body.push_back(
+          Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
+                        {StringImm("shared")})));
+    }
     new_body.push_back(block->body);
     if (!dealloc_tmem_calls_.empty()) {
-      if (tmem_call_ann.find("use_2cta") != tmem_call_ann.end()) {
+      if (use_2cta_tmem) {
         new_body.push_back(
             Evaluate(Call(DataType::Handle(), tl::cluster_sync(), {})));
       }
-      new_body.push_back(IfThenElse(EQ(thread_var_div_warp_size, 0),
+      new_body.push_back(IfThenElse(tmem_guard,
                                     dealloc_tmem_calls_.size() > 1
                                         ? SeqStmt(dealloc_tmem_calls_)
                                         : dealloc_tmem_calls_.back(),
@@ -344,14 +433,33 @@ private:
     auto buffer = load->buffer;
     auto indices = load->indices;
 
+    auto alias_it = tmem_alias_parent_name_.find(buffer->name);
+    if (alias_it != tmem_alias_parent_name_.end()) {
+      const std::string &parent_name = alias_it->second;
+      Buffer parent_new;
+      bool found = false;
+      for (const auto &kv : buffer_remap_) {
+        if (kv.first->name == parent_name) {
+          parent_new = kv.second;
+          found = true;
+          break;
+        }
+      }
+      ICHECK(found) << "tmem_alias parent '" << parent_name
+                    << "' not found among tmem buffers";
+      int col_off = tmem_alias_col_offset_by_name_.at(buffer->name);
+      return BufferLoad(parent_new, {0}) + IntImm(parent_new->dtype, col_off) +
+             GetTmemOffset(buffer, indices);
+    }
+
     if (buffer_remap_.count(buffer)) {
       auto new_buffer = buffer_remap_[load->buffer];
       return BufferLoad(new_buffer, {0}) + GetTmemOffset(buffer, indices);
     } else if (var_remap_.count(buffer->data)) {
       auto new_buffer = Buffer(
-          var_remap_[buffer->data], tmem_dtype_, buffer->shape, buffer->strides,
-          buffer->elem_offset, buffer->name, buffer->data_alignment,
-          buffer->offset_factor, buffer->buffer_type);
+          var_remap_[buffer->data], tmem_dtype_, Array<PrimExpr>({1}),
+          Array<PrimExpr>({1}), PrimExpr(0), buffer->name,
+          buffer->data_alignment, buffer->offset_factor, buffer->buffer_type);
       return BufferLoad(new_buffer, {0}) + GetTmemOffset(buffer, indices);
     }
     return load;
@@ -429,6 +537,7 @@ private:
   // we need to define a thread_var for the serial loop.
   IterVar thread_var_;
   Target target_;
+  bool use_2cta_ = false;
   Map<Var, Var> var_remap_;
   Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Buffer, Buffer> buffer_remap_;
@@ -439,12 +548,33 @@ private:
   std::unordered_map<Var, Map<String, ObjectRef>, ObjectPtrHash, ObjectPtrEqual>
       tmem_call_annotations_;
   Map<Buffer, Layout> layout_map_;
+  // Alias relationships planted by alloc_tmem(alias=..., col_offset=...).
+  // Keyed by buffer NAME (string): neither Var nor Buffer pointer identity
+  // is preserved across the TIR pass pipeline (some upstream pass rebuilds
+  // Buffer instances). But names ARE — the Python-side annotation captures
+  // the Buffer node, the script parser then renames it via Namer in place,
+  // and the annotation's stored Buffer reflects that rename. Names then
+  // carry through subsequent pass-driven Buffer reconstructions because
+  // each new Buffer copies the name field.
+  std::unordered_map<std::string, std::string> tmem_alias_parent_name_;
+  std::unordered_map<std::string, int> tmem_alias_col_offset_by_name_;
 };
 
 PrimFunc LowerSharedTmem(PrimFunc f) {
   auto target = f->GetAttr<Target>(tvm::attr::kTarget);
   ICHECK(target.defined()) << "LowerSharedTmem: Require the target attribute";
-  f.CopyOnWrite()->body = SharedTmemRewriter::Rewrite(f->body, target.value());
+  bool use_2cta = false;
+  if (auto cluster_attr = f->GetAttr<Array<PrimExpr>>("cluster_dims")) {
+    auto dims = cluster_attr.value();
+    int64_t product = 1;
+    for (auto d : dims) {
+      if (auto *imm = d.as<IntImmNode>())
+        product *= imm->value;
+    }
+    use_2cta = product > 1;
+  }
+  f.CopyOnWrite()->body =
+      SharedTmemRewriter::Rewrite(f->body, target.value(), use_2cta);
   return f;
 }
 

@@ -10,6 +10,7 @@ from tvm.tirx import FloatImm, tvm_tuple
 
 __all__ = [
     "use_swizzle",
+    "device_func",
     "annotate_layout",
     "annotate_safe_value",
     "annotate_l2_hit_ratio",
@@ -24,6 +25,18 @@ def use_swizzle(panel_size: int, order: str = "row", enable: bool = True):
     if not enable:
         return None
     return attr(None, "threadblock_swizzle_pattern", tvm_tuple(device_func, panel_size))
+
+
+def device_func(enable: bool = True):
+    """Outline the following statement subtree as a CUDA device function.
+
+    This is intentionally a codegen-only control surface. It preserves the DSL
+    body but emits it as a separate `static __device__ __noinline__` helper so
+    ptxas can allocate registers independently from the caller.
+    """
+    if not enable:
+        return None
+    return attr(None, "tl.device_func", 1)
 
 
 def annotate_layout(layout_map: dict):
@@ -77,7 +90,10 @@ def annotate_min_blocks_per_sm(n: int):
                 T.annotate_min_blocks_per_sm(2)
     ...         ...
     """
-    assert isinstance(n, int) and n > 0, "n must be a positive integer"
+    # n=0 emits `__launch_bounds__(N, 0)` which CUDA interprets as "no minBlocks
+    # constraint" — useful when one warpgroup needs more regs than the default
+    # 64K/N per-thread budget would allow (with setmaxnreg redistributing later).
+    assert isinstance(n, int) and n >= 0, "n must be non-negative"
     return attr(None, "tl.min_blocks_per_sm", n)
 
 

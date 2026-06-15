@@ -65,6 +65,9 @@ static constexpr const char *kMinBlocksPerSM = "tl.min_blocks_per_sm";
 // giving the underlying compiler accurate variable lifetime information for
 // register allocation.
 static constexpr const char *kLexicalAllocScope = "lexical_alloc_scope";
+// Codegen-only marker: outline the annotated statement subtree into a
+// `static __device__ __noinline__` helper and emit a call at the original site.
+static constexpr const char *kDeviceFuncScope = "tl.device_func";
 } // namespace attr
 
 inline ffi::Optional<PrimExpr> GetAnnotatedMbarPhaseExpr(
@@ -191,6 +194,9 @@ static constexpr const char *kForceLetInline = "tl.force_let_inline";
 static constexpr const char *kDisableOutOfBoundWarning =
     "tl.disable_out_of_bound_warning";
 
+static constexpr const char *kOutlineWarpSpecBranches =
+    "tl.outline_warp_spec_branches";
+
 /*!
  * \brief Enable dumping IR during lowering between passes.
  *
@@ -277,6 +283,19 @@ TVM_DLL const Op &min2();
 TVM_DLL const Op &abs2();
 TVM_DLL const Op &max2_nan();
 TVM_DLL const Op &min2_nan();
+
+// Scalar 2-input max with FTZ (SM_100+ PTX `max.ftz.f32 d, a, b`).
+TVM_DLL const Op &fmax2_ftz();
+
+// Scalar 3-input max with FTZ (SM_100+ PTX `max.ftz.f32 d, a, b, c`).
+// One-cycle instruction vs 2 cycles for nested binary max. Falls back to
+// `fmax(a, fmax(b, c))` on targets that don't support the 3-input form.
+TVM_DLL const Op &max3();
+
+// Polynomial exp2 approximation (degree-3 minimax on [0,1) + bit manipulation
+// for integer exponent). Higher throughput than SFU ex2.approx on SM100+ when
+// exp2 is the bottleneck (uses FMA units instead of limited SFU slots).
+TVM_DLL const Op &exp2_poly();
 
 // random op
 TVM_DLL const Op &rng_init();
@@ -701,6 +720,27 @@ TVM_DLL const Op &cluster_sync();
 TVM_DLL const Op &block_rank_in_cluster();
 
 /*!
+ * \brief Return the X dimension cluster rank in the grid.
+ *
+ * int cluster_id_x()
+ *
+ */
+TVM_DLL const Op &cluster_id_x();
+
+/*!
+ * \brief Return the physical CUDA blockIdx.x value.
+ *
+ * This is intentionally lower-level than the TileLang Kernel block binding,
+ * which may be transformed for cluster launches.  Persistent clustered kernels
+ * that need to match handwritten CUDA scheduling can derive cluster id and CTA
+ * rank explicitly from this value and block_rank_in_cluster().
+ *
+ * int cuda_block_idx_x()
+ *
+ */
+TVM_DLL const Op &cuda_block_idx_x();
+
+/*!
  * \brief Issue a Blackwell cluster launch control query that writes a 16-byte
  * response into shared memory and signals completion on the given mbarrier.
  *
@@ -1042,6 +1082,12 @@ TVM_DLL const Op &initialize_wgmma_descriptor();
  */
 TVM_DLL const Op &initialize_tcgen05_descriptor();
 
+/*! \brief Return the shared-memory pointer base in 16-byte units. */
+TVM_DLL const Op &tcgen05_smem_base_16b();
+
+/*! \brief Build an SM100 fast TCGEN05 shared-memory descriptor. */
+TVM_DLL const Op &tcgen05_mk_fast_desc();
+
 /*!
  * \brief tilelang intrinsic for committing UMMA (TCGEN05) barrier arrive.
  *
@@ -1059,12 +1105,23 @@ TVM_DLL const Op &tcgen05_mma_arrive();
 TVM_DLL const Op &tcgen05_ld();
 
 /*!
+ * \brief x16-max variant of tcgen05_ld for cross-WG TMEM visibility.
+ *
+ * The row_offset argument is in TMEM rows. Callers must pass it explicitly.
+ */
+
+/*!
  * \brief tilelang intrinsic for lowered TCGEN05 tensor-memory store.
  *
  *  Internal lowering op used by LowerTmemCopy to represent
  *  `tl::tcgen05_st_*` calls without routing through `call_extern`.
  */
 TVM_DLL const Op &tcgen05_st();
+
+/*!
+ * \brief Raw TCGEN05 tensor-memory load without an implicit TMEM load fence.
+ */
+TVM_DLL const Op &tcgen05_ld_nofence();
 
 /*!
  * \brief TCGEN05 fence before a thread-block-wide sync (__syncthreads /
@@ -1078,6 +1135,140 @@ TVM_DLL const Op &tcgen05_before_thread_sync();
  * tcgen05.fence::after_thread_sync.
  */
 TVM_DLL const Op &tcgen05_after_thread_sync();
+
+/*!
+ * \brief Fence to wait for async TMEM load visibility.
+ *
+ * Emits \c tl::fence_view_async_tmem_load().
+ */
+TVM_DLL const Op &tcgen05_fence_tmem_load();
+
+/*!
+ * \brief Raw fence to wait for async TMEM store visibility.
+ *
+ * Emits \c tl::fence_view_async_tmem_store(). By default this op is not
+ * classified as a TCGEN05/TMEM use by InjectTcgen05Fence. Use the
+ * "tcgen05_use" call annotation only for the old \c tcgen05_wait_st marker
+ * semantics.
+ */
+TVM_DLL const Op &tcgen05_fence_tmem_store();
+
+/*!
+ * \brief CTA bar.arrive/bar.sync wrappers used by SM100 warp-role handoff code.
+ * Args: barrier_id, thread_count
+ */
+TVM_DLL const Op &tcgen05_bar_arrive();
+TVM_DLL const Op &tcgen05_bar_sync();
+
+/*!
+ * \brief Packed scalar-pair FMA using SM100 fma.rn.ftz.f32x2.
+ *
+ * Updates two scalar FP32 lvalues with one `fma.rn.ftz.f32x2` instruction.
+ * Args: r0, r1, a0, a1, b0, b1, c0, c1.
+ */
+TVM_DLL const Op &tcgen05_fma_f32x2();
+
+/*! \brief Approximate FTZ FP32 reciprocal. Args: x. Returns float32. */
+TVM_DLL const Op &tcgen05_rcp_approx_ftz();
+
+/*! \brief Approximate FP32 exp2 using ex2.approx.ftz.f32. Args: x. */
+TVM_DLL const Op &tcgen05_exp2f_approx();
+
+/*!
+ * \brief Pair polynomial exp2 approximation using packed FP32x2 arithmetic.
+ *
+ * Updates two scalar FP32 lvalues. Args: r0, r1, in0, in1.
+ */
+TVM_DLL const Op &tcgen05_exp2_poly_2();
+
+/*!
+ * \brief Store four packed B32 words into TMEM with
+ * tcgen05.st.sync.aligned.32x32b.x4.b32.
+ *
+ * Args: tmem_base, offset, v0, v1, v2, v3.
+ */
+TVM_DLL const Op &tcgen05_st_32x32b_x4();
+
+/*!
+ * \brief Return one of three pointer expressions selected by stage.
+ * Args: ptr0, ptr1, ptr2, stage(int)
+ */
+TVM_DLL const Op &select_stage_ptr();
+
+/*!
+ * \brief Return one of three mbarriers as a CUDA Barrier& expression.
+ * Args: mbar0, mbar1, mbar2, stage(int)
+ */
+TVM_DLL const Op &select_barrier_ref();
+
+/*!
+ * \brief Add a BF16 element offset to a shared-memory pointer expression.
+ * Args: ptr, offset(int elements)
+ */
+TVM_DLL const Op &tcgen05_smem_ptr_add_bf16();
+
+/*!
+ * \brief Arrive+expect on a dynamic mbarrier reference.
+ * Args: mbar_ref, transaction_bytes
+ */
+TVM_DLL const Op &tcgen05_mbarrier_arrive_expect_tx_ref();
+
+/*!
+ * \brief Cluster arrive+expect from lane 0 on a dynamic mbarrier reference.
+ * Args: mbar_ref, transaction_bytes
+ */
+TVM_DLL const Op &tcgen05_mbarrier_arrive_expect_tx_cluster_lane0_ref();
+
+/*!
+ * \brief Cluster-scope mbarrier arrive from all active lanes.
+ * Args: mbar_ref
+ */
+TVM_DLL const Op &tcgen05_mbarrier_arrive_cluster_all_ref();
+
+/*!
+ * \brief 2D TMA store using global.shared::cta.bulk_group encoding.
+ * Args: tensor_map, smem_ptr, coord0, coord1, optional predicate
+ */
+TVM_DLL const Op &tma_store_2d();
+
+/*!
+ * \brief Warp-wide local CTA mbarrier arrive using the SM100 release helper.
+ * Args: mbar_ref
+ */
+TVM_DLL const Op &tcgen05_mbarrier_arrive_local_all_ref();
+
+/*!
+ * \brief Wait on a dynamic mbarrier reference.
+ * Args: mbar_ref, phase
+ */
+TVM_DLL const Op &tcgen05_wait_barrier_ref();
+
+/*!
+ * \brief Wait on an mbarrier using the compact SM100 helper call.
+ * Args: mbar, phase
+ */
+TVM_DLL const Op &tcgen05_wait_barrier_op();
+
+/*!
+ * \brief Commit a 1SM TCGEN05 MMA to an mbarrier using the plain .b64 form.
+ * Args: mbar_ptr
+ */
+TVM_DLL const Op &tcgen05_commit_1sm_op();
+
+/*!
+ * \brief Commit a 2CTA TCGEN05 MMA to an mbarrier.
+ * Args: mbar_ptr
+ */
+TVM_DLL const Op &tcgen05_commit_2cta_op();
+
+/*!
+ * \brief Mark a local allocation as persistent across CUDA warp-specialized
+ * outlined function calls. The intrinsic is codegen-only and has no runtime
+ * effect.
+ *
+ * void outline_persistent(buffer_handle)
+ */
+TVM_DLL const Op &outline_persistent();
 
 /*!
  * \brief tilelang intrinsic for setting the start address of a descriptor

@@ -404,6 +404,41 @@ def min2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
     return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.min2"), x, y)
 
 
+def max3(a: PrimExpr, b: PrimExpr, c: PrimExpr) -> PrimExpr:
+    """3-input scalar max with FTZ. Emits `max.ftz.f32 d, a, b, c` (one
+    cycle) on SM_100+, falls back to nested fmax elsewhere. Used to halve
+    the dependency chain in reduce_max bodies."""
+    a = tirx.convert(a)
+    b = tirx.convert(b)
+    c = tirx.convert(c)
+    return tirx.call_intrin(a.dtype, tirx.op.Op.get("tl.max3"), a, b, c)
+
+
+def fmax2_ftz(a: PrimExpr, b: PrimExpr) -> PrimExpr:
+    """2-input scalar max with FTZ. Emits `max.ftz.f32 d, a, b` for fp32."""
+    a = tirx.convert(a)
+    b = tirx.convert(b)
+    return tirx.call_intrin(a.dtype, tirx.op.Op.get("tl.fmax2_ftz"), a, b)
+
+
+def exp2_poly(x: PrimExpr) -> PrimExpr:
+    """Polynomial exp2 approximation using FMA units (degree-3 minimax).
+    Higher throughput than SFU exp2f when exp2 is the bottleneck on SM100+.
+    Accurate to ~20 bits on [-127, 127]."""
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.exp2_poly"), x)
+
+
+def exp2_approx(x: PrimExpr) -> PrimExpr:
+    """Approximate base-2 exponent using SM100 `ex2.approx.ftz.f32`.
+
+    This exposes the hardware approximate exponent path instead of CUDA's
+    libdevice `exp2f`.
+    """
+    x = tirx.convert(x)
+    return tirx.call_pure_extern(x.dtype, "tl::tcgen05_exp2f_approx", x)
+
+
 def abs2(x: PrimExpr) -> PrimExpr:
     """Packed element-wise absolute value."""
     x = tirx.convert(x)
@@ -435,4 +470,8 @@ __all__ = [
     "max2",  # noqa: F401
     "min2",  # noqa: F401
     "abs2",  # noqa: F401
+    "fmax2_ftz",  # noqa: F401
+    "max3",  # noqa: F401
+    "exp2_poly",  # noqa: F401
+    "exp2_approx",  # noqa: F401
 ]

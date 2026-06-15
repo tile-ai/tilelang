@@ -275,6 +275,13 @@ bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
         layout_map.Get(shared_tensor).value().as<Layout>().value();
     Layout linear_layout = makeLinearLayout(shared_tensor->shape);
     shared_is_contiguous = StructuralEqual()(existing, linear_layout);
+    // A 1D bulk TMA writes raw contiguous bytes and does not encode the shared
+    // memory swizzle from the layout map. If a caller has attached a non-linear
+    // shared layout, keep the descriptor TMA path so the CUtensorMap swizzle
+    // matches the layout consumed by later SMEM descriptors.
+    if (!shared_is_contiguous) {
+      return false;
+    }
   }
 
   bool global_is_contiguous = true;

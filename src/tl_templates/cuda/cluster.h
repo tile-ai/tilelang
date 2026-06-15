@@ -66,6 +66,17 @@ TL_DEVICE dim3 cluster_id_in_grid() {
 #endif
 }
 
+// Returns the X dimension cluster rank in the grid.
+TL_DEVICE int cluster_id_x() {
+#if defined(TILELANG_CLUSTER_ENABLED)
+  uint32_t x;
+  asm volatile("mov.u32 %0, %%clusterid.x;\n" : "=r"(x) :);
+  return static_cast<int>(x);
+#else
+  TILELANG_UNREACHABLE("TILELANG_CLUSTER_ENABLED is not defined");
+#endif
+}
+
 // Returns the dim3 cluster shape.
 TL_DEVICE dim3 cluster_shape() {
 #if defined(TILELANG_CLUSTER_ENABLED)

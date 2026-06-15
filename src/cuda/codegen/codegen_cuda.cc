@@ -7,14 +7,18 @@
 #include "support/check.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/cast.h>
+#include <tvm/ir/transform.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/s_tir/stmt.h>
 #include <tvm/tirx/index_map.h>
 #include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -31,6 +35,20 @@ using namespace tvm::tl::codegen;
 using namespace ffi;
 
 namespace {
+
+bool GetBoolAnnotation(const CallNode *op, const char *key,
+                       bool default_value) {
+  auto it = op->annotations.find(key);
+  if (it == op->annotations.end()) {
+    return default_value;
+  }
+  return Downcast<Bool>((*it).second)->value;
+}
+
+int64_t AlignUpInt64(int64_t value, int64_t align) {
+  ICHECK_GT(align, 0);
+  return ((value + align - 1) / align) * align;
+}
 
 bool IsValidCPAsyncTransferBytes(int64_t bytes) {
   return bytes == 4 || bytes == 8 || bytes == 16;
@@ -565,8 +583,6 @@ void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
   if (const IntImmNode *const threadIdx_ext_int =
           threadIdx_ext.as<IntImmNode>()) {
     if (threadIdx_ext_int->value == 1) {
-      // unable to extract the number of threads per block, hence directly
-      // return
       return;
     }
     stream << " __launch_bounds__(" << threadIdx_ext_int->value << ", "
@@ -660,8 +676,172 @@ std::string CodeGenTileLangCUDA::Finish() {
   decl_stream << "#endif\n";
   decl_stream << "\n";
 
+  if (!outlined_fns_stream_.str().empty()) {
+    decl_stream << outlined_fns_stream_.str();
+  }
+
   return CodeGenC::Finish();
 }
+
+namespace {
+
+class BufferVarTouchCollector : public tirx::StmtExprVisitor {
+public:
+  std::unordered_set<const VarNode *> touched;
+
+  void VisitExpr_(const BufferLoadNode *op) final {
+    touched.insert(op->buffer->data.get());
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitStmt_(const BufferStoreNode *op) final {
+    touched.insert(op->buffer->data.get());
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void VisitExpr_(const VarNode *op) final { touched.insert(op); }
+};
+
+bool IsSetMaxNRegOnlyStmt(const Stmt &stmt) {
+  if (const auto *eval = stmt.as<EvaluateNode>()) {
+    if (const auto *call = eval->value.as<CallNode>()) {
+      return call->op.same_as(tl::set_max_nreg()) ||
+             call->op.same_as(tl::no_set_max_nreg());
+    }
+    return is_const_int(eval->value, 0);
+  }
+  if (const auto *seq = stmt.as<SeqStmtNode>()) {
+    for (const auto &sub_stmt : seq->seq) {
+      if (!IsSetMaxNRegOnlyStmt(sub_stmt)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  if (const auto *if_stmt = stmt.as<IfThenElseNode>()) {
+    if (!IsSetMaxNRegOnlyStmt(if_stmt->then_case)) {
+      return false;
+    }
+    if (if_stmt->else_case.defined() &&
+        !IsSetMaxNRegOnlyStmt(if_stmt->else_case.value())) {
+      return false;
+    }
+    return true;
+  }
+  if (const auto *attr = stmt.as<AttrStmtNode>()) {
+    return IsSetMaxNRegOnlyStmt(attr->body);
+  }
+  if (const auto *block = stmt.as<SBlockNode>()) {
+    return IsSetMaxNRegOnlyStmt(block->body);
+  }
+  if (const auto *realize = stmt.as<SBlockRealizeNode>()) {
+    return IsSetMaxNRegOnlyStmt(realize->block->body);
+  }
+  return false;
+}
+
+bool IsNoOpEvaluate(const Stmt &stmt) {
+  if (const auto *eval = stmt.as<EvaluateNode>()) {
+    return is_const_int(eval->value, 0);
+  }
+  return false;
+}
+
+bool IsSetMaxNRegStmt(const Stmt &stmt) {
+  const auto *eval = stmt.as<EvaluateNode>();
+  if (!eval) {
+    return false;
+  }
+  const auto *call = eval->value.as<CallNode>();
+  return call && (call->op.same_as(tl::set_max_nreg()) ||
+                  call->op.same_as(tl::no_set_max_nreg()));
+}
+
+Stmt MakeSeqOrNoOp(std::vector<Stmt> stmts) {
+  if (stmts.empty()) {
+    return Evaluate(IntImm(DataType::Int(32), 0));
+  }
+  if (stmts.size() == 1) {
+    return stmts[0];
+  }
+  return SeqStmt(stmts);
+}
+
+Stmt ExtractLeadingSetMaxNReg(const Stmt &body, std::vector<Stmt> *prologue) {
+  if (IsSetMaxNRegStmt(body)) {
+    prologue->push_back(body);
+    return Evaluate(IntImm(DataType::Int(32), 0));
+  }
+
+  const auto *seq = body.as<SeqStmtNode>();
+  if (!seq) {
+    return body;
+  }
+
+  bool still_leading = true;
+  std::vector<Stmt> rest;
+  for (const auto &stmt : seq->seq) {
+    if (still_leading && IsNoOpEvaluate(stmt)) {
+      continue;
+    }
+    if (still_leading && IsSetMaxNRegStmt(stmt)) {
+      prologue->push_back(stmt);
+      continue;
+    }
+    still_leading = false;
+    rest.push_back(stmt);
+  }
+  return MakeSeqOrNoOp(std::move(rest));
+}
+
+bool IsLoopVarEqualZero(const PrimExpr &cond, const VarNode *loop_var) {
+  const auto *eq = cond.as<EQNode>();
+  if (!eq) {
+    return false;
+  }
+  auto is_loop_var = [loop_var](const PrimExpr &expr) {
+    const auto *var = expr.as<VarNode>();
+    return var && var == loop_var;
+  };
+  return (is_loop_var(eq->a) && is_const_int(eq->b, 0)) ||
+         (is_loop_var(eq->b) && is_const_int(eq->a, 0));
+}
+
+Optional<Stmt> MatchOneShotDeviceFunc(const Stmt &body,
+                                      const VarNode *loop_var) {
+  if (const auto *seq = body.as<SeqStmtNode>()) {
+    Optional<Stmt> matched;
+    for (const auto &stmt : seq->seq) {
+      if (IsNoOpEvaluate(stmt)) {
+        continue;
+      }
+      if (matched.defined()) {
+        return Optional<Stmt>();
+      }
+      matched = MatchOneShotDeviceFunc(stmt, loop_var);
+      if (!matched.defined()) {
+        return Optional<Stmt>();
+      }
+    }
+    return matched;
+  }
+
+  const auto *if_stmt = body.as<IfThenElseNode>();
+  if (!if_stmt || !IsLoopVarEqualZero(if_stmt->condition, loop_var)) {
+    return Optional<Stmt>();
+  }
+  if (if_stmt->else_case.defined() &&
+      !IsNoOpEvaluate(if_stmt->else_case.value())) {
+    return Optional<Stmt>();
+  }
+  const auto *attr = if_stmt->then_case.as<AttrStmtNode>();
+  if (!attr || attr->attr_key != tl::attr::kDeviceFuncScope) {
+    return Optional<Stmt>();
+  }
+  return attr->body;
+}
+
+} // namespace
 
 void CodeGenTileLangCUDA::VisitStmt_(const tirx::ForNode *op) {
   if (op->kind == tirx::ForKind::kUnrolled) {
@@ -683,7 +863,13 @@ void CodeGenTileLangCUDA::VisitStmt_(const tirx::ForNode *op) {
   stream << ' ' << vid << " = " << start << "; " << vid << " < " << extent
          << "; ++" << vid << ") {\n";
   int for_scope = BeginScope();
+  std::string saved_loop_var = current_loop_var_name_;
+  current_loop_var_name_ = vid;
+  active_loop_vars_.push_back({op->loop_var.get(), vid, op->loop_var.dtype()});
   PrintStmt(op->body);
+  FlushPendingTmemAllocs();
+  active_loop_vars_.pop_back();
+  current_loop_var_name_ = saved_loop_var;
   this->EndScope(for_scope);
   PrintIndent();
   stream << "}\n";
@@ -693,6 +879,221 @@ void CodeGenTileLangCUDA::BindThreadIndex(const IterVar &iv) {
   ICHECK(!var_idmap_.count(iv->var.get()));
   var_idmap_[iv->var.get()] =
       CastFromTo(iv->thread_tag, DataType::UInt(32), iv->var.dtype());
+  if (iv->thread_tag == "threadIdx.x") {
+    thread_x_var_ = iv->var.get();
+  }
+}
+
+void CodeGenTileLangCUDA::VisitStmt_(const BindNode *op) {
+  EmitCompactSharedStateIfNeeded();
+  if (const auto *load = op->value.as<BufferLoadNode>()) {
+    bool is_barrier_load = false;
+    for (const auto &bar : barrier_var_infos_) {
+      if (bar.buffer_var && load->buffer->data.get() == bar.buffer_var) {
+        is_barrier_load = true;
+        break;
+      }
+    }
+    if (is_barrier_load) {
+      std::string value = PrintExpr(op->value);
+      PrintIndent();
+      stream << "auto& " << AllocVarID(op->var.get()) << " = " << value
+             << ";\n";
+      if (outline_warp_spec_enabled_ && !in_outlined_fn_) {
+        scalar_var_infos_.push_back(
+            {op->var.get(), GetVarID(op->var.get()), op->var.dtype()});
+      }
+      return;
+    }
+  }
+  if (op->var.dtype() == DataType::Handle()) {
+    if (const auto *call = op->value.as<CallNode>()) {
+      if (call->op.same_as(tl::select_barrier_ref())) {
+        std::string value = PrintExpr(op->value);
+        PrintIndent();
+        stream << "auto& " << AllocVarID(op->var.get()) << " = " << value
+               << ";\n";
+        return;
+      }
+      if (call->op.same_as(builtin::handle_add_byte_offset()) &&
+          call->args.size() == 2) {
+        std::string base = PrintExpr(call->args[0]);
+        std::string offset = PrintExpr(call->args[1]);
+        std::string vid = AllocVarID(op->var.get());
+        PrintIndent();
+        stream << "void* " << vid << " = ((void*)((char*)" << base << " + "
+               << offset << "));\n";
+        if (outline_warp_spec_enabled_ && !in_outlined_fn_ &&
+            base == "buf_dyn_shmem") {
+          shared_dyn_alias_infos_.push_back({vid, offset, op->var.get()});
+        }
+        return;
+      }
+    }
+  }
+  std::string value = PrintExpr(op->value);
+  if (print_ssa_form_) {
+    ICHECK(!var_idmap_.count(op->var.get()));
+    var_idmap_[op->var.get()] = value;
+  } else {
+    PrintIndent();
+    if (op->var.dtype() == DataType::Handle() &&
+        handle_data_type_.count(op->var.get())) {
+      PrintType(handle_data_type_.at(op->var.get()), stream);
+      stream << "* " << AllocVarID(op->var.get()) << " = (";
+      PrintType(handle_data_type_.at(op->var.get()), stream);
+      stream << "*)" << value << ";\n";
+    } else {
+      PrintType(op->var.dtype(), this->stream);
+      stream << ' ' << AllocVarID(op->var.get()) << " = " << value << ";\n";
+      if (outline_warp_spec_enabled_ && !in_outlined_fn_) {
+        scalar_var_infos_.push_back(
+            {op->var.get(), GetVarID(op->var.get()), op->var.dtype()});
+      }
+    }
+  }
+}
+
+void CodeGenTileLangCUDA::VisitStmt_(const SBlockNode *op) {
+  bool old_compact = compact_shared_state_enabled_;
+  bool enable_compact = old_compact;
+  if (auto opt = op->annotations.Get("pragma_tl_compact_shared_state")) {
+    PrimExpr value = Downcast<PrimExpr>(opt.value());
+    enable_compact = !is_zero(value);
+  }
+  if (auto opt = op->annotations.Get("tl_compact_shared_state")) {
+    PrimExpr value = Downcast<PrimExpr>(opt.value());
+    enable_compact = !is_zero(value);
+  }
+  compact_shared_state_enabled_ = enable_compact;
+  if (op->init.defined()) {
+    PrintStmt(op->init.value());
+  }
+  PrintStmt(op->body);
+  compact_shared_state_enabled_ = old_compact;
+}
+
+void CodeGenTileLangCUDA::VisitStmt_(const SBlockRealizeNode *op) {
+  VisitStmt(op->block);
+}
+
+static bool IsCompactTmemBaseAccess(const PrimExpr &expr,
+                                    const VarNode *base_var) {
+  if (!base_var) {
+    return false;
+  }
+  const auto *load = expr.as<BufferLoadNode>();
+  if (!load || load->indices.size() != 1 || !is_zero(load->indices[0])) {
+    return false;
+  }
+  return load->buffer->data.get() == base_var;
+}
+
+static bool IsCompactTmemBasePlusOffset(const PrimExpr &expr,
+                                        const VarNode *base_var) {
+  if (IsCompactTmemBaseAccess(expr, base_var)) {
+    return true;
+  }
+  const auto *add = expr.as<AddNode>();
+  if (!add) {
+    return false;
+  }
+  return IsCompactTmemBaseAccess(add->a, base_var) ||
+         IsCompactTmemBaseAccess(add->b, base_var);
+}
+
+static bool StmtUsesCompactTmemBase(const Stmt &stmt, const VarNode *base_var) {
+  if (!base_var) {
+    return false;
+  }
+  bool found = false;
+  PostOrderVisit(stmt, [&](const ObjectRef &node) {
+    if (found) {
+      return;
+    }
+    if (const auto *load = node.as<BufferLoadNode>()) {
+      if (load->buffer->data.get() == base_var && load->indices.size() == 1 &&
+          is_zero(load->indices[0])) {
+        found = true;
+      }
+    }
+  });
+  return found;
+}
+
+static PrimExpr RewriteCompactTmemBaseExpr(const PrimExpr &expr,
+                                           const VarNode *base_var,
+                                           const Var &alias_var) {
+  if (IsCompactTmemBaseAccess(expr, base_var)) {
+    return alias_var;
+  }
+  if (const auto *add = expr.as<AddNode>()) {
+    PrimExpr a = RewriteCompactTmemBaseExpr(add->a, base_var, alias_var);
+    PrimExpr b = RewriteCompactTmemBaseExpr(add->b, base_var, alias_var);
+    if (!a.same_as(add->a) || !b.same_as(add->b)) {
+      return a + b;
+    }
+  }
+  return expr;
+}
+
+static Stmt RewriteCompactTmemBaseStmt(const Stmt &stmt,
+                                       const VarNode *base_var,
+                                       const Var &alias_var) {
+  class Rewriter : public StmtExprMutator {
+  public:
+    Rewriter(const VarNode *base_var, Var alias_var)
+        : base_var_(base_var), alias_var_(std::move(alias_var)) {}
+
+  private:
+    PrimExpr VisitExpr_(const BufferLoadNode *op) final {
+      auto load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
+      if (load->buffer->data.get() == base_var_ && load->indices.size() == 1 &&
+          is_zero(load->indices[0])) {
+        return alias_var_;
+      }
+      return load;
+    }
+    const VarNode *base_var_;
+    Var alias_var_;
+  };
+  return Rewriter(base_var, alias_var)(stmt);
+}
+
+void CodeGenTileLangCUDA::EmitCompactSharedStateIfNeeded() {
+  if (!compact_shared_state_enabled_ || compact_shared_state_decl_emitted_ ||
+      compact_shared_state_infos_.empty()) {
+    return;
+  }
+  int64_t total_bytes = AlignUpInt64(compact_shared_state_bytes_, 16);
+  this->PrintIndent();
+  this->stream << "__shared__ __align__(16) unsigned char "
+                  "tl_compact_shared_state_mem["
+               << total_bytes << "];\n";
+  this->PrintIndent();
+  this->stream << "unsigned char *tl_compact_shared_state = "
+                  "tl_compact_shared_state_mem;\n";
+  int64_t offset = 0;
+  for (const auto &info : compact_shared_state_infos_) {
+    offset = AlignUpInt64(offset, info.align);
+    this->PrintIndent();
+    this->stream << "auto " << info.var_name << " = reinterpret_cast<"
+                 << info.type_str << ">(tl_compact_shared_state + " << offset
+                 << ");\n";
+    offset += info.bytes;
+  }
+  compact_shared_state_decl_emitted_ = true;
+}
+
+void CodeGenTileLangCUDA::EmitCompactTmemBaseAliasIfNeeded() {
+  if (!compact_shared_state_enabled_ || compact_tmem_base_alias_emitted_ ||
+      compact_tmem_base_var_ == nullptr || compact_tmem_base_name_.empty()) {
+    return;
+  }
+  PrintIndent();
+  stream << "const uint32_t __tl_compact_tbase = " << compact_tmem_base_name_
+         << "[0];\n";
+  compact_tmem_base_alias_emitted_ = true;
 }
 
 void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
@@ -2189,6 +2590,33 @@ void CodeGenTileLangCUDA::PrintVecStore(const BufferNode *buffer, DataType t,
  *            expects an expression result (some paths write directly to the
  *            member stream instead).
  */
+void CodeGenTileLangCUDA::FlushPendingTmemAllocs() {
+  if (pending_tmem_allocs_.empty()) {
+    return;
+  }
+
+  std::stable_sort(pending_tmem_allocs_.begin(), pending_tmem_allocs_.end(),
+                   [](const auto &a, const auto &b) {
+                     auto pri = [](const std::string &s) -> int {
+                       if (s.find("S0") != std::string::npos)
+                         return 0;
+                       if (s.find("S1") != std::string::npos)
+                         return 1;
+                       if (s.find("O0") != std::string::npos)
+                         return 2;
+                       if (s.find("O1") != std::string::npos)
+                         return 3;
+                       return 4;
+                     };
+                     return pri(a.first) < pri(b.first);
+                   });
+  for (const auto &entry : pending_tmem_allocs_) {
+    this->PrintIndent();
+    this->stream << entry.second;
+  }
+  pending_tmem_allocs_.clear();
+}
+
 void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   auto print_extern_call_stmt = [&](std::string name, size_t start = 0,
                                     size_t end = 0) {
@@ -2207,6 +2635,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << ss.str();
     this->stream << ");\n";
   };
+
   if (op->op.same_as(tl::max_nan()) || op->op.same_as(tl::min_nan())) {
     ICHECK_EQ(op->args.size(), 2);
     const bool is_max = op->op.same_as(tl::max_nan());
@@ -2228,6 +2657,57 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     os << fallback << "(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ")";
+    return;
+  }
+  if (op->op.same_as(tl::select_stage_ptr())) {
+    ICHECK_EQ(op->args.size(), 4U) << "select_stage_ptr expects 4 args";
+    need_tcgen05_common_h_ = true;
+    os << "tl::select_stage_ptr((void*)(" << this->PrintExpr(op->args[0])
+       << "), (void*)(" << this->PrintExpr(op->args[1]) << "), (void*)("
+       << this->PrintExpr(op->args[2]) << "), " << this->PrintExpr(op->args[3])
+       << ")";
+    return;
+  }
+  if (op->op.same_as(tl::select_barrier_ref())) {
+    ICHECK_EQ(op->args.size(), 4U) << "select_barrier_ref expects 4 args";
+    need_tcgen05_common_h_ = true;
+    os << "tl::select_barrier_ref(" << this->PrintExpr(op->args[0]) << ", "
+       << this->PrintExpr(op->args[1]) << ", " << this->PrintExpr(op->args[2])
+       << ", " << this->PrintExpr(op->args[3]) << ")";
+    return;
+  }
+  if (op->op.same_as(tl::tcgen05_smem_ptr_add_bf16())) {
+    ICHECK_EQ(op->args.size(), 2U)
+        << "tcgen05_smem_ptr_add_bf16 expects 2 args";
+    need_tcgen05_common_h_ = true;
+    os << "tl::tcgen05_smem_ptr_add_bf16((void*)("
+       << this->PrintExpr(op->args[0]) << "), " << this->PrintExpr(op->args[1])
+       << ")";
+    return;
+  }
+  if (op->op.same_as(tl::tcgen05_smem_base_16b())) {
+    ICHECK_EQ(op->args.size(), 1U) << "tcgen05_smem_base_16b expects 1 arg";
+    os << "uint32_t((__cvta_generic_to_shared((void*)("
+       << this->PrintExpr(op->args[0]) << ")) & 0x3FFFF) >> 4)";
+    return;
+  }
+  if (op->op.same_as(tl::tcgen05_mk_fast_desc())) {
+    ICHECK_EQ(op->args.size(), 2U) << "tcgen05_mk_fast_desc expects 2 args";
+    need_tcgen05_common_h_ = true;
+    os << "tl::tcgen05_mk_fast_desc(" << this->PrintExpr(op->args[0]) << ", "
+       << this->PrintExpr(op->args[1]) << ")";
+    return;
+  }
+  if (op->op.same_as(tl::tcgen05_rcp_approx_ftz())) {
+    ICHECK_EQ(op->args.size(), 1U) << "tcgen05_rcp_approx_ftz expects 1 arg";
+    os << "tl::tcgen05_rcp_approx_ftz(" << this->PrintExpr(op->args[0]) << ")";
+    need_tcgen05_common_h_ = true;
+    return;
+  }
+  if (op->op.same_as(tl::tcgen05_exp2f_approx())) {
+    ICHECK_EQ(op->args.size(), 1U) << "tcgen05_exp2f_approx expects 1 arg";
+    os << "tl::tcgen05_exp2f_approx(" << this->PrintExpr(op->args[0]) << ")";
+    need_tcgen05_common_h_ = true;
     return;
   }
   if (op->op.same_as(builtin::ptx_cp_async())) {
@@ -2354,7 +2834,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         Downcast<Bool>(op->annotations["use_2cta"])->value) {
       ss << "<true>";
     }
-    print_extern_call_stmt(ss.str());
+    std::ostringstream args_ss;
+    for (size_t i = 0; i < op->args.size(); i++) {
+      if (i > 0)
+        args_ss << ", ";
+      args_ss << this->PrintExpr(op->args[i]);
+    }
+    std::string call_str = ss.str() + "(" + args_ss.str() + ");\n";
+    this->PrintIndent();
+    this->stream << call_str;
   } else if (op->op.same_as(tl::ptx_deallocate_tensor_memory())) {
     std::ostringstream ss;
     ss << "tl::tmem_deallocate";
@@ -2362,7 +2850,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         Downcast<Bool>(op->annotations["use_2cta"])->value) {
       ss << "<true>";
     }
+    bool old_suppress_alias = suppress_compact_tmem_base_alias_;
+    suppress_compact_tmem_base_alias_ = true;
     print_extern_call_stmt(ss.str());
+    suppress_compact_tmem_base_alias_ = old_suppress_alias;
   } else if (op->op.same_as(tl::no_set_max_nreg())) {
     return;
   } else if (op->op.same_as(tl::tma_load())) {
@@ -2585,9 +3076,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     need_cluster_h_ = true;
     this->PrintIndent();
     this->stream << "tl::cluster_sync();\n";
+    EmitCompactTmemBaseAliasIfNeeded();
   } else if (op->op.same_as(tl::block_rank_in_cluster())) {
     need_cluster_h_ = true;
     os << "tl::block_rank_in_cluster()";
+  } else if (op->op.same_as(tl::cluster_id_x())) {
+    need_cluster_h_ = true;
+    os << "tl::cluster_id_x()";
+  } else if (op->op.same_as(tl::cuda_block_idx_x())) {
+    os << "((int)blockIdx.x)";
   } else if (op->op.same_as(tl::clc_try_cancel())) {
     need_cluster_h_ = true;
     print_extern_call_stmt("tl::clc_try_cancel");
@@ -3230,26 +3727,46 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string mask3 = this->PrintExpr(op->args[12]);
     bool enable_ws = Downcast<Bool>(op->args[13])->value;
     bool enable_2cta = Downcast<Bool>(op->args[14])->value;
+    bool use_mask = GetBoolAnnotation(op, "use_mask", true);
+    bool elect_one = GetBoolAnnotation(op, "elect_one", true);
+    bool c_is_tmem_addr = GetBoolAnnotation(op, "c_is_tmem_addr", false);
 
     std::string use_2cta_suffix;
     if (enable_ws) {
       ICHECK(!enable_2cta)
           << "enable_ws and enable_2cta cannot be true at the same time";
+      ICHECK(use_mask) << "warp-specialized tcgen05mma_ss requires masks";
+      ICHECK(elect_one) << "warp-specialized tcgen05mma_ss requires elect_one";
+      ICHECK(!c_is_tmem_addr)
+          << "warp-specialized tcgen05mma_ss requires C buffer operands";
     } else {
       use_2cta_suffix = std::string(", ") + (enable_2cta ? "true" : "false");
+      if (!use_mask) {
+        use_2cta_suffix += std::string(", ") + (elect_one ? "true" : "false");
+      }
     }
     auto dtype_enum = tl::codegen::ptx::DTypeFromString(kind_dtype);
     std::string ab_type_str = tl::codegen::ptx::DTypeEnumToString(dtype_enum);
 
     need_tcgen05mma_instruction_h_ = true;
     this->PrintIndent();
+    std::string c_expr = c_is_tmem_addr
+                             ? "uint32_t((" + c_ref + ") + (" + c_offset + "))"
+                             : "(*reinterpret_cast<uint32_t*>((" + c_ref +
+                                   "))) + (" + c_offset + ")";
     std::string tcgen05_call =
-        "tl::(tcgen05_name)<(ABType)(USE_2CTA_SUFFIX)>(uint64_t((desc_a) + "
-        "(A_offset)), "
-        "uint64_t((desc_b) + (B_offset)), (*reinterpret_cast<uint32_t*>((C))) "
-        "+ (C_offset), "
-        "(scale_out), static_cast<uint32_t>((desc_val)), (mask0), (mask1), "
-        "(mask2), (mask3));\n";
+        use_mask ? "tl::(tcgen05_name)<(ABType)(USE_2CTA_SUFFIX)>(uint64_t(("
+                   "desc_a) + "
+                   "(A_offset)), "
+                   "uint64_t((desc_b) + (B_offset)), (C_EXPR), "
+                   "(scale_out), static_cast<uint32_t>((desc_val)), (mask0), "
+                   "(mask1), "
+                   "(mask2), (mask3));\n"
+                 : "tl::tcgen05mma_ss_nomask<(ABType)(USE_2CTA_SUFFIX)>(uint64_"
+                   "t((desc_a) + "
+                   "(A_offset)), "
+                   "uint64_t((desc_b) + (B_offset)), (C_EXPR), "
+                   "(scale_out), static_cast<uint32_t>((desc_val)));\n";
     tl::codegen::Replacer replacer;
     replacer.register_rule("(ABType)", ab_type_str);
     replacer.register_rule("(USE_2CTA_SUFFIX)", use_2cta_suffix);
@@ -3257,7 +3774,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(A_offset)", A_offset);
     replacer.register_rule("(desc_b)", b_desc);
     replacer.register_rule("(B_offset)", B_offset);
-    replacer.register_rule("(C)", c_ref);
+    replacer.register_rule("(C_EXPR)", c_expr);
     replacer.register_rule("(C_offset)", c_offset);
     replacer.register_rule("(tcgen05_name)",
                            enable_ws ? "tcgen05mma_ws_ss" : "tcgen05mma_ss");
@@ -3287,30 +3804,48 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string mask2 = this->PrintExpr(op->args[11]);
     std::string mask3 = this->PrintExpr(op->args[12]);
     bool enable_2cta = Downcast<Bool>(op->args[13])->value;
+    bool use_mask = GetBoolAnnotation(op, "use_mask", true);
+    bool elect_one = GetBoolAnnotation(op, "elect_one", true);
+    bool a_is_tmem_addr = GetBoolAnnotation(op, "a_is_tmem_addr", false);
+    bool c_is_tmem_addr = GetBoolAnnotation(op, "c_is_tmem_addr", false);
 
     auto dtype_enum = tl::codegen::ptx::DTypeFromString(kind_dtype);
     std::string use_2cta_suffix =
         std::string(", ") + (enable_2cta ? "true" : "false");
+    if (!use_mask) {
+      use_2cta_suffix += std::string(", ") + (elect_one ? "true" : "false");
+    }
 
     need_tcgen05mma_instruction_h_ = true;
     this->PrintIndent();
+    std::string a_expr = a_is_tmem_addr
+                             ? "uint32_t((" + a_ref + ") + (" + A_offset + "))"
+                             : "(*reinterpret_cast<uint32_t*>((" + a_ref +
+                                   "))) + (" + A_offset + ")";
+    std::string c_expr = c_is_tmem_addr
+                             ? "uint32_t((" + c_ref + ") + (" + c_offset + "))"
+                             : "(*reinterpret_cast<uint32_t*>((" + c_ref +
+                                   "))) + (" + c_offset + ")";
     std::string tcgen05_call =
-        "tl::tcgen05mma_ts<(ABType)(USE_2CTA_SUFFIX)>( "
-        "(*reinterpret_cast<uint32_t*>((A))) + "
-        "(A_offset), "
-        "uint64_t((desc_b) + (B_offset)), (*reinterpret_cast<uint32_t*>((C))) "
-        "+ (C_offset), "
-        "(scale_out), static_cast<uint32_t>((desc_val)), (mask0), (mask1), "
-        "(mask2), (mask3));\n";
+        use_mask ? "tl::tcgen05mma_ts<(ABType)(USE_2CTA_SUFFIX)>( "
+                   "(A_EXPR), "
+                   "uint64_t((desc_b) + (B_offset)), (C_EXPR), "
+                   "(scale_out), static_cast<uint32_t>((desc_val)), (mask0), "
+                   "(mask1), "
+                   "(mask2), (mask3));\n"
+                 : "tl::tcgen05mma_ts_nomask<(ABType)(USE_2CTA_SUFFIX)>( "
+                   "(A_EXPR), "
+                   "uint64_t((desc_b) + (B_offset)), (C_EXPR), "
+                   "(scale_out), static_cast<uint32_t>((desc_val)));\n";
     tl::codegen::Replacer replacer;
     replacer.register_rule("(ABType)",
                            tl::codegen::ptx::DTypeEnumToString(dtype_enum));
     replacer.register_rule("(USE_2CTA_SUFFIX)", use_2cta_suffix);
-    replacer.register_rule("(A)", a_ref);
+    replacer.register_rule("(A_EXPR)", a_expr);
     replacer.register_rule("(A_offset)", A_offset);
     replacer.register_rule("(desc_b)", b_desc);
     replacer.register_rule("(B_offset)", B_offset);
-    replacer.register_rule("(C)", c_ref);
+    replacer.register_rule("(C_EXPR)", c_expr);
     replacer.register_rule("(C_offset)", c_offset);
     replacer.register_rule("(scale_out)", scale_out);
     replacer.register_rule("(desc_val)", this->PrintExpr(desc_expr));
@@ -3397,9 +3932,11 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     this->stream << "tl::tcgen05_sf_warp_transpose(reinterpret_cast<uint32_t*>("
                  << smem_ptr << "));\n";
-  } else if (op->op.same_as(tl::tcgen05_ld())) {
+  } else if (op->op.same_as(tl::tcgen05_ld()) ||
+             op->op.same_as(tl::tcgen05_ld_nofence())) {
     ICHECK_EQ(op->args.size(), 6U) << "tcgen05_ld expects 6 arguments";
     need_tcgen05_common_h_ = true;
+    bool emit_fence = op->op.same_as(tl::tcgen05_ld());
     int inst_bits = Downcast<IntImm>(op->args[0])->value;
     int chunks = Downcast<IntImm>(op->args[1])->value;
     bool pack16 = Downcast<Bool>(op->args[2])->value;
@@ -3407,10 +3944,17 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string col_offset = this->PrintExpr(op->args[4]);
     std::string dst_ptr = this->PrintExpr(op->args[5]);
     this->PrintIndent();
-    this->stream << "tl::tcgen05_ld_32dp" << inst_bits << "bNx<" << chunks
-                 << ", " << (pack16 ? "true" : "false") << ">("
-                 << tmem_start_col << ", " << col_offset << ", " << dst_ptr
-                 << ");\n";
+    if (emit_fence) {
+      this->stream << "tl::tcgen05_ld_32dp" << inst_bits << "bNx<" << chunks
+                   << ", " << (pack16 ? "true" : "false") << ">("
+                   << tmem_start_col << ", " << col_offset << ", " << dst_ptr
+                   << ");\n";
+    } else {
+      this->stream << "tl::tmem_ld_32dp" << inst_bits << "bNx<"
+                   << (pack16 ? "true" : "false") << ">::copy<" << chunks
+                   << ">(" << tmem_start_col << " + " << col_offset << ", "
+                   << "(uint32_t *)(" << dst_ptr << "));\n";
+    }
   } else if (op->op.same_as(tl::tcgen05_st())) {
     ICHECK_EQ(op->args.size(), 6U) << "tcgen05_st expects 6 arguments";
     int inst_bits = Downcast<IntImm>(op->args[0])->value;
@@ -3444,6 +3988,171 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         << "tcgen05_after_thread_sync expects no arguments";
     need_tcgen05_common_h_ = true;
     print_extern_call_stmt("tl::tcgen05_after_thread_sync");
+  } else if (op->op.same_as(tl::tcgen05_fence_tmem_store())) {
+    ICHECK_EQ(op->args.size(), 0U)
+        << "tcgen05 TMEM store fence expects no arguments";
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::fence_view_async_tmem_store();\n";
+  } else if (op->op.same_as(tl::tcgen05_fence_tmem_load())) {
+    ICHECK_EQ(op->args.size(), 0U)
+        << "tcgen05_fence_tmem_load expects no arguments";
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::fence_view_async_tmem_load();\n";
+  } else if (op->op.same_as(tl::tcgen05_bar_arrive())) {
+    ICHECK_EQ(op->args.size(), 2U) << "tcgen05_bar_arrive expects 2 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::tcgen05_bar_arrive(" << this->PrintExpr(op->args[0])
+                 << ", " << this->PrintExpr(op->args[1]) << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_bar_sync())) {
+    ICHECK_EQ(op->args.size(), 2U) << "tcgen05_bar_sync expects 2 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::tcgen05_bar_sync(" << this->PrintExpr(op->args[0])
+                 << ", " << this->PrintExpr(op->args[1]) << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_fma_f32x2())) {
+    ICHECK_EQ(op->args.size(), 8U) << "tcgen05_fma_f32x2 expects 8 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    auto ref_of = [this](const PrimExpr &expr) {
+      return "(&(" + this->PrintExpr(expr) + "))";
+    };
+    this->stream << "tl::tcgen05_fma_f32x2(*" << ref_of(op->args[0]) << ", *"
+                 << ref_of(op->args[1]) << ", " << this->PrintExpr(op->args[2])
+                 << ", " << this->PrintExpr(op->args[3]) << ", "
+                 << this->PrintExpr(op->args[4]) << ", "
+                 << this->PrintExpr(op->args[5]) << ", "
+                 << this->PrintExpr(op->args[6]) << ", "
+                 << this->PrintExpr(op->args[7]) << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_exp2_poly_2())) {
+    ICHECK_EQ(op->args.size(), 4U) << "tcgen05_exp2_poly_2 expects 4 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    auto ref_of = [this](const PrimExpr &expr) {
+      return "(&(" + this->PrintExpr(expr) + "))";
+    };
+    this->stream << "tl::tcgen05_exp2_poly_2(*" << ref_of(op->args[0]) << ", *"
+                 << ref_of(op->args[1]) << ", " << this->PrintExpr(op->args[2])
+                 << ", " << this->PrintExpr(op->args[3]) << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_st_32x32b_x4())) {
+    ICHECK_EQ(op->args.size(), 6U) << "tcgen05_st_32x32b_x4 expects 6 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::tcgen05_st_32x32b_x4(" << this->PrintExpr(op->args[0])
+                 << " + " << this->PrintExpr(op->args[1]) << ", "
+                 << this->PrintExpr(op->args[2]) << ", "
+                 << this->PrintExpr(op->args[3]) << ", "
+                 << this->PrintExpr(op->args[4]) << ", "
+                 << this->PrintExpr(op->args[5]) << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_mbarrier_arrive_expect_tx_ref())) {
+    ICHECK_EQ(op->args.size(), 2U)
+        << "tcgen05_mbarrier_arrive_expect_tx_ref expects 2 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::tcgen05_arrive_expect_tx((void const*)(&("
+                 << this->PrintExpr(op->args[0]) << ")), uint32_t("
+                 << this->PrintExpr(op->args[1]) << "));\n";
+  } else if (op->op.same_as(
+                 tl::tcgen05_mbarrier_arrive_expect_tx_cluster_lane0_ref())) {
+    ICHECK_EQ(op->args.size(), 2U)
+        << "tcgen05_mbarrier_arrive_expect_tx_cluster_lane0_ref expects 2 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::tcgen05_mbarrier_arrive_expect_tx_cluster_lane0((void "
+                    "const*)(&("
+                 << this->PrintExpr(op->args[0]) << ")), uint32_t("
+                 << this->PrintExpr(op->args[1]) << "));\n";
+  } else if (op->op.same_as(tl::tcgen05_mbarrier_arrive_cluster_all_ref())) {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "tcgen05_mbarrier_arrive_cluster_all_ref expects 1 arg";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::tcgen05_mbarrier_arrive_cluster_all((void const*)(&("
+                 << this->PrintExpr(op->args[0]) << ")));\n";
+  } else if (op->op.same_as(tl::tma_store_2d())) {
+    ICHECK(op->args.size() == 4U || op->args.size() == 5U)
+        << "tma_store_2d expects 4 args plus an optional predicate";
+    need_tcgen05_common_h_ = true;
+    bool has_predicate = op->args.size() == 5U;
+    PrimExpr predicate;
+    if (has_predicate) {
+      predicate = arith::Analyzer().Simplify(op->args[4]);
+      if (is_zero(predicate))
+        return;
+      has_predicate = !is_one(predicate);
+    }
+    int predicate_scope = 0;
+    if (has_predicate) {
+      this->PrintIndent();
+      this->stream << "if (" << this->PrintExpr(predicate) << ") {\n";
+      predicate_scope = this->BeginScope();
+    }
+    this->PrintIndent();
+    this->stream << "tl::tma_store_2d_raw(&" << this->PrintExpr(op->args[0])
+                 << ", (void const*)(" << this->PrintExpr(op->args[1]) << "), "
+                 << this->PrintExpr(op->args[2]) << ", "
+                 << this->PrintExpr(op->args[3]) << ");\n";
+    if (has_predicate) {
+      this->EndScope(predicate_scope);
+      this->PrintIndent();
+      this->stream << "}\n";
+    }
+  } else if (op->op.same_as(tl::tcgen05_mbarrier_arrive_local_all_ref())) {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "tcgen05_mbarrier_arrive_local_all_ref expects 1 arg";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::tcgen05_mbarrier_arrive_local_all((void const*)(&("
+                 << this->PrintExpr(op->args[0]) << ")));\n";
+  } else if (op->op.same_as(tl::tcgen05_wait_barrier_ref())) {
+    ICHECK_EQ(op->args.size(), 2U) << "tcgen05_wait_barrier_ref expects 2 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::tcgen05_wait_barrier((void const*)(&("
+                 << this->PrintExpr(op->args[0]) << ")), uint32_t("
+                 << this->PrintExpr(op->args[1]) << "));\n";
+  } else if (op->op.same_as(tl::tcgen05_wait_barrier_op())) {
+    ICHECK_EQ(op->args.size(), 2U) << "tcgen05_wait_barrier_op expects 2 args";
+    this->PrintIndent();
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::tcgen05_wait_barrier((void const*)(&"
+                 << this->PrintExpr(op->args[0]) << "), uint32_t("
+                 << this->PrintExpr(op->args[1]) << "));\n";
+  } else if (op->op.same_as(tl::tcgen05_commit_1sm_op())) {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "tcgen05_commit_1sm_op expects 1 arg: mbar_ptr";
+    this->PrintIndent();
+    auto mbar = this->PrintExpr(op->args[0]);
+    need_tcgen05_common_h_ = true;
+    bool lane0_only = GetBoolAnnotation(op, "lane0_only", false);
+    if (lane0_only) {
+      this->stream << "tl::tcgen05_commit_1sm_lane0((void const*)(&" << mbar
+                   << "));\n";
+    } else {
+      this->stream << "tl::tcgen05_commit_1sm((void const*)(&" << mbar
+                   << "));\n";
+    }
+  } else if (op->op.same_as(tl::tcgen05_commit_2cta_op())) {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "tcgen05_commit_2cta_op expects 1 arg: mbar_ptr";
+    this->PrintIndent();
+    auto mbar = this->PrintExpr(op->args[0]);
+    need_tcgen05_common_h_ = true;
+    this->stream << "tl::tcgen05_commit_2cta((void const*)(&" << mbar
+                 << "));\n";
+  } else if (op->op.same_as(tl::outline_persistent())) {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "outline_persistent expects 1 buffer handle";
+    if (const auto *var = op->args[0].as<VarNode>()) {
+      outline_persistent_vars_.insert(var);
+      for (auto &alloc : local_allocs_) {
+        if (alloc.buffer_var == var) {
+          alloc.outline_persistent = true;
+        }
+      }
+    } else {
+      LOG(FATAL) << "outline_persistent expects a direct buffer handle Var";
+    }
   } else if (op->op.same_as(builtin::ptx_ldmatrix())) {
     // arg 0: whether the matrix is loaded in column major format or not.
     // arg 1: number of matrices to load.
@@ -4197,6 +4906,53 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
     os << func_name << "(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ")";
     return true;
+  } else if (op->op.same_as(tl::fmax2_ftz())) {
+    // Inline PTX `max.ftz.f32 d, a, b` for fp32.
+    if (op->dtype.is_float() && op->dtype.bits() == 32 &&
+        op->dtype.lanes() == 1) {
+      need_tcgen05_common_h_ = true;
+      os << "tl::tcgen05_fmax2(" << PrintExpr(op->args[0]) << ", "
+         << PrintExpr(op->args[1]) << ")";
+    } else {
+      os << "fmax(" << PrintExpr(op->args[0]) << ", " << PrintExpr(op->args[1])
+         << ")";
+    }
+    return true;
+  } else if (op->op.same_as(tl::max3())) {
+    // Inline PTX `max.ftz.f32 d, a, b, c` for fp32 (one cycle on SM_100+).
+    // Falls back to nested fmax for other dtypes.
+    if (op->dtype.is_float() && op->dtype.bits() == 32 &&
+        op->dtype.lanes() == 1) {
+      need_tcgen05_common_h_ = true;
+      os << "tl::tcgen05_fmax3(" << PrintExpr(op->args[0]) << ", "
+         << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ")";
+    } else {
+      os << "fmax(fmax(" << PrintExpr(op->args[0]) << ", "
+         << PrintExpr(op->args[1]) << "), " << PrintExpr(op->args[2]) << ")";
+    }
+    return true;
+  } else if (op->op.same_as(tl::exp2_poly())) {
+    // Degree-3 minimax polynomial exp2 on CUDA cores.
+    // Uses FMA units instead of SFU for higher throughput when exp2 is the
+    // bottleneck. Accurate to ~20 bits on [-127, 127].
+    if (op->dtype.is_float() && op->dtype.bits() == 32 &&
+        op->dtype.lanes() == 1) {
+      std::string x = PrintExpr(op->args[0]);
+      os << "([&]{float _x = fmaxf(" << x << ", -127.0f);"
+         << "float _xr = _x + 12582912.0f; float _f = _x - (_xr - 12582912.0f);"
+         << "float _h = 0.0771190896630287f;"
+         << "_h = _h * _f + 0.227564394474030f;"
+         << "_h = _h * _f + 0.695146143436432f;"
+         << "_h = _h * _f + 1.0f;"
+         << "int _xi; asm(\"mov.b32 %0, %1;\" : \"=r\"(_xi) : \"f\"(_xr));"
+         << "int _hi; asm(\"mov.b32 %0, %1;\" : \"=r\"(_hi) : \"f\"(_h));"
+         << "_xi = _xi << 23; _hi = _xi + _hi;"
+         << "float _r; asm(\"mov.b32 %0, %1;\" : \"=f\"(_r) : \"r\"(_hi));"
+         << "return _r;}())";
+    } else {
+      os << "exp2f(" << PrintExpr(op->args[0]) << ")";
+    }
+    return true;
   } else if (op->op.same_as(tl::add2()) || op->op.same_as(tl::sub2()) ||
              op->op.same_as(tl::mul2()) || op->op.same_as(tl::fma2()) ||
              op->op.same_as(tl::max2()) || op->op.same_as(tl::min2()) ||
@@ -4431,6 +5187,14 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
 }
 
 void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
+  if (op->attr_key != "pragma_tl_compact_shared_state" &&
+      op->attr_key != "tl_compact_shared_state") {
+    EmitCompactSharedStateIfNeeded();
+  }
+  if (op->attr_key == "tl_compact_tmem_base_alias") {
+    PrintStmt(op->body);
+    return;
+  }
   if (op->attr_key == tl::attr::kLexicalAllocScope) {
     PrintIndent();
     stream << "{\n";
@@ -4485,6 +5249,94 @@ void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
     const IntImmNode *factor = op->value.as<IntImmNode>();
     ICHECK(factor);
     unroll_factor[op->node.as<VarNode>()] = Downcast<IntImm>(factor);
+  } else if (op->attr_key == tl::attr::kDeviceFuncScope) {
+    if (outline_warp_spec_enabled_ && !in_outlined_fn_) {
+      std::string fn_name = EmitOutlinedDeviceFunction(
+          op->body, /*forward_captured_scalars=*/true);
+      bool has_loop_var = !current_loop_var_name_.empty();
+      std::vector<ActiveLoopVarInfo> forwarded_loops = active_loop_vars_;
+      if (has_loop_var && !forwarded_loops.empty() &&
+          forwarded_loops.back().name == current_loop_var_name_) {
+        forwarded_loops.pop_back();
+      }
+
+      PrintIndent();
+      stream << fn_name << "(";
+      bool first_arg = true;
+      auto sep = [&]() {
+        if (first_arg) {
+          first_arg = false;
+        } else {
+          stream << ", ";
+        }
+      };
+      if (has_loop_var) {
+        sep();
+        stream << current_loop_var_name_;
+      }
+      for (const auto &loop : forwarded_loops) {
+        sep();
+        stream << loop.name;
+      }
+      BufferVarTouchCollector touched;
+      touched(op->body);
+      for (const auto &scalar : scalar_var_infos_) {
+        if (scalar.var && touched.touched.count(scalar.var)) {
+          sep();
+          stream << scalar.var_name;
+        }
+      }
+      for (const auto &scalar : local_scalar_var_infos_) {
+        if (scalar.var && touched.touched.count(scalar.var)) {
+          sep();
+          stream << scalar.var_name;
+        }
+      }
+      for (const auto &bar : barrier_var_infos_) {
+        if (bar.buffer_var && !touched.touched.count(bar.buffer_var)) {
+          continue;
+        }
+        sep();
+        stream << bar.var_name;
+      }
+      for (const auto &tm : tmem_var_infos_) {
+        if (tm.buffer_var && !touched.touched.count(tm.buffer_var)) {
+          continue;
+        }
+        sep();
+        stream << tm.var_name;
+      }
+      for (const auto &kp : kernel_param_infos_) {
+        if (kp.param_var && !touched.touched.count(kp.param_var)) {
+          continue;
+        }
+        sep();
+        stream << kp.var_name;
+      }
+      for (const auto &alloc : local_allocs_) {
+        if (!alloc.outline_persistent) {
+          continue;
+        }
+        if (alloc.buffer_var && !touched.touched.count(alloc.buffer_var)) {
+          continue;
+        }
+        sep();
+        stream << alloc.var_name;
+      }
+      stream << ");\n";
+    } else {
+      PrintStmt(op->body);
+    }
+    return;
+  } else if (op->attr_key == tl::attr::kWarpSpecializationScope) {
+    const auto *if_node = op->body.as<IfThenElseNode>();
+    if (if_node) {
+      // Delegate to VisitStmt_(IfThenElseNode*) which handles outlining
+      VisitStmt_(if_node);
+    } else {
+      PrintStmt(op->body);
+    }
+    return;
   }
 
   CodeGenC::VisitStmt_(op);
@@ -4557,13 +5409,42 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
       constant_size = constant_size / 32;
     }
     if (scope == "shared") {
-      stream << ' ' << vid << '[' << constant_size << "];\n";
+      if (compact_shared_state_enabled_ && alloc_dtype == DataType::UInt(32) &&
+          constant_size == 1) {
+        auto offset = AlignUpInt64(compact_shared_state_bytes_, 4);
+        compact_shared_state_bytes_ = offset + 4;
+        compact_shared_state_infos_.push_back({buffer, vid, "uint*", 4, 4});
+        if (compact_tmem_base_var_ == nullptr) {
+          compact_tmem_base_var_ = buffer;
+          compact_tmem_base_name_ = vid;
+        }
+      } else {
+        stream << ' ' << vid << '[' << constant_size << "];\n";
+      }
+      if (outline_warp_spec_enabled_) {
+        // Track all shared variables for device function params
+        std::ostringstream type_os;
+        PrintType(alloc_dtype, type_os);
+        tmem_var_infos_.push_back({vid, "uint*", buffer});
+      }
     } else if (scope == "shared.barrier" || scope == "shared.cluster_barrier") {
-      auto v_id_mem = vid + "_mem";
-      stream << ' ' << v_id_mem << "[" << constant_size << "];\n";
-      PrintIndent();
-      stream << "auto " << vid << " = reinterpret_cast<" << mbarrier_dtype_
-             << "*>(" << v_id_mem << ");\n";
+      if (compact_shared_state_enabled_) {
+        auto offset = AlignUpInt64(compact_shared_state_bytes_, 8);
+        compact_shared_state_bytes_ =
+            offset + static_cast<int64_t>(constant_size) * 8;
+        compact_shared_state_infos_.push_back(
+            {buffer, vid, mbarrier_dtype_ + "*",
+             static_cast<int64_t>(constant_size) * 8, 8});
+      } else {
+        auto v_id_mem = vid + "_mem";
+        stream << ' ' << v_id_mem << "[" << constant_size << "];\n";
+        PrintIndent();
+        stream << "auto " << vid << " = reinterpret_cast<" << mbarrier_dtype_
+               << "*>(" << v_id_mem << ");\n";
+      }
+      if (outline_warp_spec_enabled_) {
+        barrier_var_infos_.push_back({vid, mbarrier_dtype_ + "*", buffer});
+      }
     } else if (scope == "local") {
       if (alloc_dtype == DataType::Int(4) || alloc_dtype == DataType::UInt(4)) {
         stream << "alignas(16) ";
@@ -4579,6 +5460,12 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
           stream << ' ' << vid << '[' << constant_size << "];\n";
         }
       }
+      if (outline_warp_spec_enabled_ && !in_outlined_fn_) {
+        bool outline_persistent = outline_persistent_vars_.count(buffer) != 0;
+        local_allocs_.push_back(
+            {vid, alloc_dtype, static_cast<int64_t>(constant_size),
+             outline_persistent, false, PrimExpr(), buffer});
+      }
     } else if (scope == "local.var") {
       PrimExpr init = tirx::make_const(alloc_dtype, 0);
       auto init_it = op->annotations.find(tl::attr::kLocalVarInit);
@@ -4590,6 +5477,12 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
         init = user_init;
       }
       stream << ' ' << vid << " = " << PrintExpr(init) << ";\n";
+      if (outline_warp_spec_enabled_ && !in_outlined_fn_) {
+        bool outline_persistent = outline_persistent_vars_.count(buffer) != 0;
+        local_allocs_.push_back(
+            {vid, alloc_dtype, 1, outline_persistent, true, init, buffer});
+        local_scalar_var_infos_.push_back({buffer, vid, alloc_dtype});
+      }
     } else if (scope.find("local.descriptor") != 0) {
       ICHECK(false) << "Unsupported scope: " << scope << " for buffer "
                     << op->buffer->data->name_hint;
@@ -4650,6 +5543,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
   PrimExpr index = op->indices[0];
   Var buffer_var = op->buffer->data;
   DataType element_dtype = op->buffer->dtype;
+
+  if (compact_shared_state_enabled_ && compact_tmem_base_alias_emitted_ &&
+      !suppress_compact_tmem_base_alias_ &&
+      buffer_var.get() == compact_tmem_base_var_ && op->indices.size() == 1 &&
+      is_zero(index)) {
+    os << "__tl_compact_tbase";
+    return;
+  }
 
   if ((element_dtype == DataType::Int(4) ||
        element_dtype == DataType::UInt(4)) &&
@@ -4739,6 +5640,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
 }
 
 void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
+  FlushPendingTmemAllocs();
   ICHECK_EQ(op->indices.size(), 1) << "Store to non-flat memory not supported.";
   ICHECK(!op->predicate.defined())
       << "Predicated buffer store is not supported.";
@@ -5518,8 +6420,25 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
   CodeGenC::DeclareFunction(gvar, f);
   // clear previous generated state.
   this->InitFuncState(f);
+  compact_shared_state_infos_.clear();
+  compact_shared_state_enabled_ = false;
+  compact_shared_state_decl_emitted_ = false;
+  compact_shared_state_bytes_ = 0;
+  compact_tmem_base_var_ = nullptr;
+  compact_tmem_base_name_.clear();
+  compact_tmem_base_alias_emitted_ = false;
+  suppress_compact_tmem_base_alias_ = false;
+  shared_dyn_alias_infos_.clear();
   // reserve keywords
   ReserveKeywordsAsUnique_();
+
+  // Check if device function outlining is enabled via pass config
+  {
+    auto ctxt = tvm::transform::PassContext::Current();
+    outline_warp_spec_enabled_ =
+        ctxt->GetConfig(tl::kOutlineWarpSpecBranches, Optional<Bool>())
+            .value_or(Bool(false));
+  }
 
   auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
   ICHECK(global_symbol)
@@ -5561,8 +6480,13 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
       if (auto *ptr = v->type_annotation.as<PointerTypeNode>()) {
         if (ptr->storage_scope == "grid_constant") {
           stream << "__grid_constant__ const ";
-          CodeGenC::PrintType(ptr->element_type, stream);
-          stream << ' ' << vid;
+          std::ostringstream type_os;
+          CodeGenC::PrintType(ptr->element_type, type_os);
+          stream << type_os.str() << ' ' << vid;
+          if (outline_warp_spec_enabled_) {
+            kernel_param_infos_.push_back(
+                {vid, "const " + type_os.str(), true, v.get()});
+          }
           continue;
         }
       }
@@ -5581,6 +6505,14 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
           RegisterHandleType(v.get(), prim->dtype);
         }
       }
+      if (outline_warp_spec_enabled_) {
+        std::ostringstream type_os;
+        if (ro_param_indices.count(static_cast<int>(i))) {
+          type_os << "const ";
+        }
+        CodeGenC::PrintType(GetType(v), type_os);
+        kernel_param_infos_.push_back({vid, type_os.str(), false, v.get()});
+      }
 
       if (!has_cuda_pdl_sync && no_alias && !non_restrict.count(v.get())) {
         PrintRestrict(v, stream);
@@ -5594,9 +6526,434 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
   this->PreFunctionBody(f);
   int func_scope = this->BeginScope();
   this->PrintStmt(f->body);
+  FlushPendingTmemAllocs();
   this->EndScope(func_scope);
   this->PrintIndent();
   this->stream << "}\n\n";
+}
+
+bool CodeGenTileLangCUDA::IsThreadXComparison(const PrimExpr &cond) const {
+  if (!thread_x_var_)
+    return false;
+  auto check_var = [this](const PrimExpr &e) -> bool {
+    const auto *v = e.as<VarNode>();
+    return v && v == thread_x_var_;
+  };
+  if (const auto *ge = cond.as<GENode>())
+    return check_var(ge->a) || check_var(ge->b);
+  if (const auto *lt = cond.as<LTNode>())
+    return check_var(lt->a) || check_var(lt->b);
+  if (const auto *le = cond.as<LENode>())
+    return check_var(le->a) || check_var(le->b);
+  if (const auto *gt = cond.as<GTNode>())
+    return check_var(gt->a) || check_var(gt->b);
+  if (const auto *and_node = cond.as<AndNode>())
+    return IsThreadXComparison(and_node->a) || IsThreadXComparison(and_node->b);
+  return false;
+}
+
+void CodeGenTileLangCUDA::FlattenWarpBranches(
+    const IfThenElseNode *node, std::vector<WarpBranch> *branches) {
+  branches->push_back({node->condition, node->then_case});
+  if (node->else_case.defined()) {
+    const auto *nested = node->else_case.value().as<IfThenElseNode>();
+    if (nested && IsThreadXComparison(nested->condition)) {
+      FlattenWarpBranches(nested, branches);
+    } else {
+      // Terminal else branch — no condition needed for dispatch
+      // Use a "true" placeholder; dispatch will emit it as final else
+      branches->push_back({PrimExpr(), node->else_case.value()});
+    }
+  }
+}
+
+std::string
+CodeGenTileLangCUDA::EmitOutlinedDeviceFunction(const Stmt &body,
+                                                bool forward_captured_scalars) {
+  std::string fn_name =
+      "__outlined_warp_fn_" + std::to_string(outlined_fn_count_);
+  outlined_fn_count_++;
+
+  // When this is invoked from VisitStmt_(IfThenElseNode) at the top level
+  // (no enclosing for-loop), there is no loop var to forward; the for-loop
+  // lives inside the branch body itself.
+  bool has_loop_var = !current_loop_var_name_.empty();
+  std::vector<ActiveLoopVarInfo> forwarded_loops = active_loop_vars_;
+  if (has_loop_var && !forwarded_loops.empty() &&
+      forwarded_loops.back().name == current_loop_var_name_) {
+    forwarded_loops.pop_back();
+  }
+
+  // Build function signature
+  outlined_fns_stream_ << "static __device__ __noinline__ void " << fn_name
+                       << "(";
+  bool first_param = true;
+  auto emit_sep = [&]() {
+    if (first_param) {
+      outlined_fns_stream_ << "\n    ";
+      first_param = false;
+    } else {
+      outlined_fns_stream_ << ",\n    ";
+    }
+  };
+  if (has_loop_var) {
+    emit_sep();
+    outlined_fns_stream_ << "int " << current_loop_var_name_;
+  }
+  for (const auto &loop : forwarded_loops) {
+    emit_sep();
+    std::ostringstream type_os;
+    PrintType(loop.dtype, type_os);
+    outlined_fns_stream_ << type_os.str() << " " << loop.name;
+  }
+  BufferVarTouchCollector touched;
+  touched(body);
+  if (forward_captured_scalars) {
+    for (const auto &scalar : scalar_var_infos_) {
+      if (scalar.var && touched.touched.count(scalar.var)) {
+        emit_sep();
+        std::ostringstream type_os;
+        PrintType(scalar.dtype, type_os);
+        outlined_fns_stream_ << type_os.str() << " " << scalar.var_name;
+      }
+    }
+    for (const auto &scalar : local_scalar_var_infos_) {
+      if (scalar.var && touched.touched.count(scalar.var)) {
+        emit_sep();
+        std::ostringstream type_os;
+        PrintType(scalar.dtype, type_os);
+        outlined_fns_stream_ << type_os.str() << " " << scalar.var_name;
+      }
+    }
+  }
+  for (const auto &bar : barrier_var_infos_) {
+    if (bar.buffer_var && !touched.touched.count(bar.buffer_var)) {
+      continue;
+    }
+    emit_sep();
+    outlined_fns_stream_ << bar.type_str << " " << bar.var_name;
+  }
+  for (const auto &tm : tmem_var_infos_) {
+    if (tm.buffer_var && !touched.touched.count(tm.buffer_var)) {
+      continue;
+    }
+    emit_sep();
+    outlined_fns_stream_ << tm.type_str << " " << tm.var_name;
+  }
+  for (const auto &kp : kernel_param_infos_) {
+    if (kp.param_var && !touched.touched.count(kp.param_var)) {
+      continue;
+    }
+    emit_sep();
+    outlined_fns_stream_ << kp.type_str;
+    if (kp.is_grid_constant) {
+      outlined_fns_stream_ << "&";
+    }
+    outlined_fns_stream_ << " " << kp.var_name;
+  }
+  for (const auto &alloc : local_allocs_) {
+    if (!alloc.outline_persistent) {
+      continue;
+    }
+    if (alloc.buffer_var && !touched.touched.count(alloc.buffer_var)) {
+      continue;
+    }
+    emit_sep();
+    std::ostringstream type_os;
+    PrintType(alloc.dtype, type_os);
+    outlined_fns_stream_ << type_os.str() << "* " << alloc.var_name;
+  }
+  outlined_fns_stream_ << "\n) {\n";
+
+  // extern shared for buf_dyn_shmem access
+  outlined_fns_stream_
+      << "  extern __shared__ __align__(1024) unsigned char buf_dyn_shmem[];\n";
+  for (const auto &alias : shared_dyn_alias_infos_) {
+    if (alias.buffer_var && !touched.touched.count(alias.buffer_var)) {
+      continue;
+    }
+    outlined_fns_stream_ << "  void* " << alias.var_name
+                         << " = ((void*)((char*)buf_dyn_shmem + "
+                         << alias.offset_expr << "));\n";
+  }
+
+  // Find which kernel-scope locals this branch actually touches; declaring
+  // the rest as `= {}` would force ptxas to keep dead initializers alive,
+  // inflating register pressure (the unused ones can add 300+ regs/thread
+  // for FA-style kernels with many per-warp fragments).
+  // Re-declare local allocations (each device fn gets its own register set)
+  for (const auto &alloc : local_allocs_) {
+    if (alloc.buffer_var && !touched.touched.count(alloc.buffer_var)) {
+      continue; // not used by this branch
+    }
+    if (forward_captured_scalars && alloc.is_scalar_var) {
+      continue; // captured by value as a function parameter
+    }
+    if (alloc.outline_persistent) {
+      continue; // forwarded from the caller to preserve cross-call state
+    }
+    outlined_fns_stream_ << "  ";
+    std::ostringstream type_os;
+    PrintType(alloc.dtype, type_os);
+    if (alloc.is_scalar_var) {
+      outlined_fns_stream_ << type_os.str() << " " << alloc.var_name << " = "
+                           << PrintExpr(alloc.init) << ";\n";
+    } else {
+      outlined_fns_stream_ << type_os.str() << " " << alloc.var_name << "["
+                           << alloc.size << "];\n";
+    }
+  }
+  outlined_fns_stream_ << "\n";
+
+  // Emit body: swap the main stream, print the body, capture output
+  std::ostringstream saved_stream;
+  saved_stream.swap(stream);
+
+  in_outlined_fn_ = true;
+  // Emit at base indent level (one level inside the function)
+  // PrintStmt will manage its own sub-scopes
+  auto saved_var_idmap = var_idmap_;
+  for (const auto &loop : forwarded_loops) {
+    var_idmap_[loop.var] = loop.name;
+  }
+  if (forward_captured_scalars) {
+    for (const auto &scalar : scalar_var_infos_) {
+      if (scalar.var && touched.touched.count(scalar.var)) {
+        var_idmap_[scalar.var] = scalar.var_name;
+      }
+    }
+    for (const auto &scalar : local_scalar_var_infos_) {
+      if (scalar.var && touched.touched.count(scalar.var)) {
+        var_idmap_[scalar.var] = scalar.var_name;
+      }
+    }
+  }
+  PrintStmt(body);
+  FlushPendingTmemAllocs();
+  var_idmap_ = saved_var_idmap;
+  in_outlined_fn_ = false;
+
+  // Capture the emitted body and restore
+  outlined_fns_stream_ << stream.str();
+  stream.str("");
+  stream.clear();
+  saved_stream.swap(stream);
+
+  outlined_fns_stream_ << "}\n\n";
+  return fn_name;
+}
+
+void CodeGenTileLangCUDA::VisitStmt_(const IfThenElseNode *op) {
+  EmitCompactSharedStateIfNeeded();
+  if (compact_shared_state_enabled_ && !compact_tmem_base_alias_emitted_ &&
+      compact_tmem_base_var_ != nullptr && IsThreadXComparison(op->condition) &&
+      StmtUsesCompactTmemBase(op->then_case, compact_tmem_base_var_)) {
+    std::string cond = PrintExpr(op->condition);
+    PrintIndent();
+    if (cond[0] == '(' && cond[cond.length() - 1] == ')') {
+      stream << "if " << cond << " {\n";
+    } else {
+      stream << "if (" << cond << ") {\n";
+    }
+    int then_scope = BeginScope();
+    PrintStmt(op->then_case);
+    this->EndScope(then_scope);
+    if (op->else_case.defined()) {
+      PrintIndent();
+      stream << "} else {\n";
+      int else_scope = BeginScope();
+      Var alias_var("__tl_compact_tbase", DataType::UInt(32));
+      PrintIndent();
+      stream << "const uint32_t " << alias_var->name_hint << " = "
+             << compact_tmem_base_name_ << "[0];\n";
+      compact_tmem_base_alias_emitted_ = true;
+      PrintStmt(RewriteCompactTmemBaseStmt(op->else_case.value(),
+                                           compact_tmem_base_var_, alias_var));
+      this->EndScope(else_scope);
+    }
+    PrintIndent();
+    stream << "}\n";
+    return;
+  }
+  // Check if this is a warp-spec branch that should be outlined.
+  // Two patterns are supported:
+  //   1. Inside a for-loop: the loop var is forwarded as the first arg so
+  //      the outlined function can reference it.
+  //   2. Top-level (no enclosing loop): each branch contains its own loop +
+  //      init + epilogue. No loop var is forwarded. This is what lets a
+  //      math warp's `-INF` init survive into the outlined function — the
+  //      init runs inside the branch body itself.
+  if (outline_warp_spec_enabled_ && !in_outlined_fn_ &&
+      IsThreadXComparison(op->condition)) {
+    bool has_loop_var = !current_loop_var_name_.empty();
+    std::vector<ActiveLoopVarInfo> forwarded_loops = active_loop_vars_;
+    if (has_loop_var && !forwarded_loops.empty() &&
+        forwarded_loops.back().name == current_loop_var_name_) {
+      forwarded_loops.pop_back();
+    }
+
+    // Flatten nested if-else into branches
+    std::vector<WarpBranch> branches;
+    FlattenWarpBranches(op, &branches);
+
+    bool all_branches_setmax_only = true;
+    for (const auto &branch : branches) {
+      if (!IsSetMaxNRegOnlyStmt(branch.body)) {
+        all_branches_setmax_only = false;
+        break;
+      }
+    }
+    if (all_branches_setmax_only) {
+      std::string cond = PrintExpr(op->condition);
+      PrintIndent();
+      stream << "if (" << cond << ") {\n";
+      int then_scope = BeginScope();
+      PrintStmt(op->then_case);
+      EndScope(then_scope);
+      if (op->else_case.defined()) {
+        PrintIndent();
+        stream << "} else {\n";
+        int else_scope = BeginScope();
+        PrintStmt(op->else_case.value());
+        EndScope(else_scope);
+      }
+      PrintIndent();
+      stream << "}\n";
+      return;
+    }
+
+    auto can_emit_directly = [&](const Stmt &body) {
+      BufferVarTouchCollector touched;
+      touched(body);
+      for (const auto &alloc : local_allocs_) {
+        if (alloc.buffer_var && touched.touched.count(alloc.buffer_var)) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    // Emit helper-only branches directly in the kernel. These branches already
+    // call noinline role helpers (softmax/MMA/producer/correction/epilogue);
+    // wrapping them in an extra __outlined_warp_fn adds an unnecessary second
+    // call layer.
+    std::vector<std::string> fn_names;
+    std::vector<std::vector<Stmt>> branch_prologues;
+    std::vector<Stmt> outlined_bodies;
+    std::vector<bool> emit_direct;
+    for (const auto &branch : branches) {
+      std::vector<Stmt> prologue;
+      Stmt outlined_body = ExtractLeadingSetMaxNReg(branch.body, &prologue);
+      bool direct = can_emit_directly(outlined_body);
+      emit_direct.push_back(direct);
+      fn_names.push_back(direct ? std::string()
+                                : EmitOutlinedDeviceFunction(outlined_body));
+      branch_prologues.push_back(std::move(prologue));
+      outlined_bodies.push_back(outlined_body);
+    }
+
+    // Emit dispatch in kernel stream
+    for (size_t i = 0; i < branches.size(); i++) {
+      PrintIndent();
+      if (i == 0) {
+        stream << "if (";
+        PrintExpr(branches[i].condition, stream);
+        stream << ") {\n";
+      } else if (branches[i].condition.defined()) {
+        stream << "} else if (";
+        PrintExpr(branches[i].condition, stream);
+        stream << ") {\n";
+      } else {
+        stream << "} else {\n";
+      }
+      int call_scope = BeginScope();
+      for (const auto &stmt : branch_prologues[i]) {
+        PrintStmt(stmt);
+      }
+      PrintIndent();
+      if (emit_direct[i]) {
+        PrintStmt(outlined_bodies[i]);
+        FlushPendingTmemAllocs();
+        EndScope(call_scope);
+        continue;
+      }
+      stream << fn_names[i] << "(";
+      bool first_arg = true;
+      auto sep = [&]() {
+        if (first_arg)
+          first_arg = false;
+        else
+          stream << ", ";
+      };
+      if (has_loop_var) {
+        sep();
+        stream << current_loop_var_name_;
+      }
+      for (const auto &loop : forwarded_loops) {
+        sep();
+        stream << loop.name;
+      }
+      BufferVarTouchCollector touched;
+      touched(outlined_bodies[i]);
+      for (const auto &bar : barrier_var_infos_) {
+        if (bar.buffer_var && !touched.touched.count(bar.buffer_var)) {
+          continue;
+        }
+        sep();
+        stream << bar.var_name;
+      }
+      for (const auto &tm : tmem_var_infos_) {
+        if (tm.buffer_var && !touched.touched.count(tm.buffer_var)) {
+          continue;
+        }
+        sep();
+        stream << tm.var_name;
+      }
+      for (const auto &kp : kernel_param_infos_) {
+        if (kp.param_var && !touched.touched.count(kp.param_var)) {
+          continue;
+        }
+        sep();
+        stream << kp.var_name;
+      }
+      for (const auto &alloc : local_allocs_) {
+        if (!alloc.outline_persistent) {
+          continue;
+        }
+        if (alloc.buffer_var && !touched.touched.count(alloc.buffer_var)) {
+          continue;
+        }
+        sep();
+        stream << alloc.var_name;
+      }
+      stream << ");\n";
+      EndScope(call_scope);
+    }
+    PrintIndent();
+    stream << "}\n";
+    return;
+  }
+
+  // Default: emit inline if-else (same as CodeGenC base class)
+  std::string cond = PrintExpr(op->condition);
+  PrintIndent();
+  if (cond[0] == '(' && cond[cond.length() - 1] == ')') {
+    stream << "if " << cond << " {\n";
+  } else {
+    stream << "if (" << cond << ") {\n";
+  }
+  int then_scope = BeginScope();
+  PrintStmt(op->then_case);
+  this->EndScope(then_scope);
+  if (op->else_case.defined()) {
+    PrintIndent();
+    stream << "} else {\n";
+    int else_scope = BeginScope();
+    PrintStmt(op->else_case.value());
+    this->EndScope(else_scope);
+  }
+  PrintIndent();
+  stream << "}\n";
 }
 
 } // namespace codegen

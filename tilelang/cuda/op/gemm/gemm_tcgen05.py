@@ -113,7 +113,7 @@ class GemmTCGEN5(GemmBase):
         if self.is_gemm_ts():
             b_continuity = _shared_layout_continuity(self.B, b_is_k_major, self.K, int(self.B.shape[-1]))
             layouts = {
-                self.A: mma_emitter.make_mma_store_layout(self.A),
+                self.A: mma_emitter.make_mma_store_layout(self.A, matrix="A"),
                 self.B: self.infer_shared_layout(self.B, b_continuity)(self.B),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
@@ -177,10 +177,12 @@ class GemmTCGEN5(GemmBase):
             raise ValueError("TCGEN5MMA only accepts wg_wait in {0, -1}")
 
         mbar = self.mbar
-        if mbar is None:
-            raise ValueError("TCGEN5MMA requires a valid mbarrier")
+        no_commit = mbar is None
 
-        mbarptr = retrieve_ptr(mbar, "rw")
+        if not no_commit:
+            mbarptr = retrieve_ptr(mbar, "rw")
+        else:
+            mbarptr = None
 
         C_coords = self.C_coords
         if len(C_coords) != 2:
@@ -189,6 +191,10 @@ class GemmTCGEN5(GemmBase):
         accum_dtype = str(self.C.dtype)
         if accum_dtype not in [str(T.float32), str(T.float16), str(T.int32)]:
             raise ValueError(f"Unsupported accumulator dtype for TCGEN5MMA: {accum_dtype}")
+
+        # Pass C column start to emitter for sliced TMEM output (e.g., O[:, 64:128]).
+        accum_dtype_bits = {"float32": 32, "float16": 16, "int32": 32}[accum_dtype]
+        mma_emitter._c_col_start_u32 = int(C_coords[1]) * accum_dtype_bits // 32
 
         A_shared = self.ARegion
         B_shared = self.BRegion

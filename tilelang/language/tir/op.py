@@ -1262,6 +1262,9 @@ def ptx_tcgen05_mma_ss(
     ws=None,
     warp_specialized=None,
     variant=None,
+    use_mask=True,
+    elect_one=True,
+    c_is_tmem_addr=False,
 ):
     """TVM intrinsic for tcgen05.mma shared-memory x shared-memory instructions.
 
@@ -1291,6 +1294,13 @@ def ptx_tcgen05_mma_ss(
             # Treat non-string as truthy flag
             enable_ws = bool(variant)
 
+    annotations = {}
+    if not use_mask:
+        annotations["use_mask"] = False
+    if not elect_one:
+        annotations["elect_one"] = False
+    if c_is_tmem_addr:
+        annotations["c_is_tmem_addr"] = True
     return call_intrin(
         "handle",
         _tvm_op.Op.get("tl.ptx_tcgen05_mma_ss"),
@@ -1309,6 +1319,7 @@ def ptx_tcgen05_mma_ss(
         mask3,
         enable_ws,
         enable_2cta,
+        annotations=annotations or None,
     )
 
 
@@ -1327,6 +1338,10 @@ def ptx_tcgen05_mma_ts(
     mask2,
     mask3,
     enable_2cta=False,
+    use_mask=True,
+    elect_one=True,
+    a_is_tmem_addr=False,
+    c_is_tmem_addr=False,
 ):
     """TVM intrinsic for tcgen05.mma tensor-memory x shared-memory instructions.
 
@@ -1336,6 +1351,15 @@ def ptx_tcgen05_mma_ts(
     - kind_dtype: instruction kind selector (e.g., T.float16 for kind::f16,
       "tf32" for kind::tf32, "int8" for kind::i8, "float8_e4m3" for kind::f8f6f4).
     """
+    annotations = {}
+    if not use_mask:
+        annotations["use_mask"] = False
+    if not elect_one:
+        annotations["elect_one"] = False
+    if a_is_tmem_addr:
+        annotations["a_is_tmem_addr"] = True
+    if c_is_tmem_addr:
+        annotations["c_is_tmem_addr"] = True
     return call_intrin(
         "handle",
         _tvm_op.Op.get("tl.ptx_tcgen05_mma_ts"),
@@ -1353,6 +1377,7 @@ def ptx_tcgen05_mma_ts(
         mask2,
         mask3,
         enable_2cta,
+        annotations=annotations or None,
     )
 
 

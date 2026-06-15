@@ -1184,8 +1184,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
            << A_offset << ", (" << b_desc << " + " << B_offset << "), " << c_ref
            << " + " << c_offset << ", " << scale_out << ")\n";
   } else if (op->op.same_as(tl::ptx_tcgen05_mma_ss())) {
-    ICHECK_EQ(op->args.size(), 14U)
-        << "ptx_tcgen05_mma_ss expects 14 arguments";
+    ICHECK_EQ(op->args.size(), 15U)
+        << "ptx_tcgen05_mma_ss expects 15 arguments";
     std::string kind_dtype = Downcast<StringImm>(op->args[0])->value;
     std::string a_desc = PrintExpr_(op->args[1]);
     std::string A_offset = PrintExpr_(op->args[2]);
@@ -1200,6 +1200,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     std::string mask2 = PrintExpr_(op->args[11]);
     std::string mask3 = PrintExpr_(op->args[12]);
     bool enable_ws = Downcast<Bool>(op->args[13])->value;
+    bool enable_2cta = Downcast<Bool>(op->args[14])->value;
+    ICHECK(!enable_2cta) << "cutedsl tcgen05mma_ss does not support 2CTA yet";
     PrintIndent();
     if (enable_ws) {
       stream << "tl.tcgen05mma_ws_ss(\"" << kind_dtype << "\", (" << a_desc
@@ -1214,8 +1216,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
              << mask2 << ", " << mask3 << ")\n";
     }
   } else if (op->op.same_as(tl::ptx_tcgen05_mma_ts())) {
-    ICHECK_EQ(op->args.size(), 13U)
-        << "ptx_tcgen05_mma_ts expects 13 arguments";
+    ICHECK_EQ(op->args.size(), 14U)
+        << "ptx_tcgen05_mma_ts expects 14 arguments";
     std::string kind_dtype = Downcast<StringImm>(op->args[0])->value;
     std::string a_ref = PrintExpr_(op->args[1]);
     std::string A_offset = PrintExpr_(op->args[2]);
@@ -1229,6 +1231,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     std::string mask1 = PrintExpr_(op->args[10]);
     std::string mask2 = PrintExpr_(op->args[11]);
     std::string mask3 = PrintExpr_(op->args[12]);
+    bool enable_2cta = Downcast<Bool>(op->args[13])->value;
+    ICHECK(!enable_2cta) << "cutedsl tcgen05mma_ts does not support 2CTA yet";
     PrintIndent();
     stream << "tl.tcgen05mma_ts(\"" << kind_dtype << "\", " << a_ref << "[0] + "
            << A_offset << ", (" << b_desc << " + " << B_offset << "), " << c_ref

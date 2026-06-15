@@ -219,6 +219,9 @@ ProxyEvent ClassifyCallProxyEvent(const CallNode *call) {
   if (IsAsyncIntrinsic(call)) {
     return ProxyEvent::kAsync;
   }
+  if (call->op.same_as(initialize_tcgen05_descriptor())) {
+    return ProxyEvent::kNone;
+  }
   if (CallMayWriteSharedMemory(call)) {
     return ProxyEvent::kGeneric;
   }
