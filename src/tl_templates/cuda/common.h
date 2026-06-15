@@ -946,8 +946,11 @@ TL_DEVICE __half2 abs2(__half2 a) {
 using tl::tfloat32_t;
 
 namespace cutlass {
+// Mirror cutlass's own half_t fast_exp (fast_math.h): route through float.
+// A direct `return ::hexp(x)` recurses, since `hexp` is #define'd to this
+// same cutlass::fast_exp and x is already bfloat16_t.
 TL_DEVICE
-bfloat16_t fast_exp(bfloat16_t x) { return ::hexp(x); }
+bfloat16_t fast_exp(bfloat16_t x) { return bfloat16_t(fast_exp(float(x))); }
 } // namespace cutlass
 
 //
