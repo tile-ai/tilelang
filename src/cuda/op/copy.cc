@@ -12,6 +12,7 @@
 #include "cuda/op/copy.h"
 #include "cuda/target_utils.h"
 #include "cuda/transform/ptx_async_copy_injector.h"
+#include "layout/cute_layout.h"
 #include "layout/tcgen05_layout.h"
 #include "op/builtin.h"
 #include "op/utils.h"
@@ -1375,6 +1376,30 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
   return body;
 }
 
+namespace {
+
+Array<PrimExpr> makeRowMajorStrides(const Array<PrimExpr> &shape) {
+  Array<PrimExpr> strides(shape.size(), PrimExpr{1});
+  PrimExpr stride = 1;
+  for (int i = shape.size() - 1; i >= 0; --i) {
+    strides.Set(i, stride);
+    stride *= shape[i];
+  }
+  return strides;
+}
+
+Array<PrimExpr> makeColMajorStrides(const Array<PrimExpr> &shape) {
+  Array<PrimExpr> strides(shape.size(), PrimExpr{1});
+  PrimExpr stride = 1;
+  for (size_t i = 0; i < shape.size(); ++i) {
+    strides.Set(i, stride);
+    stride *= shape[i];
+  }
+  return strides;
+}
+
+} // namespace
+
 Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
                      arith::Analyzer *analyzer, CopyInst copy_inst) {
   const Buffer &src = op.src;
@@ -1388,7 +1413,6 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   bool is_load = copy_inst == CopyInst::kBulkLoad;
   Buffer global_tensor = is_load ? src : dst;
   Buffer shared_tensor = is_load ? dst : src;
-  Buffer shared_tensor_unmapped = shared_tensor;
   Array<Range> global_range = is_load ? src_range : dst_range;
   Array<Range> shared_range = is_load ? dst_range : src_range;
 
@@ -1407,47 +1431,51 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     return fallback_to_normal("non-swizzled global layout");
   }
 
-  auto linear_layout = ComputeLinearLayout(shared_tensor);
-
-  Array<PrimExpr> shared_indices;
-  for (auto r : shared_range)
-    shared_indices.push_back(r->min);
-  std::vector<PrimExpr> shared_strides;
-  PrimExpr shared_stride = 1;
-  for (size_t i = 0; i < shared_tensor->shape.size(); i++) {
-    auto s = shared_tensor->shape[shared_tensor->shape.size() - i - 1];
-    shared_strides.insert(shared_strides.begin(), shared_stride);
-    shared_stride *= s;
-  }
-
-  Array<PrimExpr> global_indices;
-  for (auto r : global_range) {
-    global_indices.push_back(r->min);
-  }
-  std::vector<PrimExpr> global_strides;
-  PrimExpr global_stride = 1;
-  for (size_t i = 0; i < global_tensor->shape.size(); i++) {
-    auto s = global_tensor->shape[global_tensor->shape.size() - i - 1];
-    global_strides.insert(global_strides.begin(), global_stride);
-    global_stride *= s;
-  }
-
-  ICHECK(shared_strides.size() == shared_indices.size())
-      << "shared_strides.size() != shared_indices.size()"
-      << shared_strides.size() << " " << shared_indices.size();
+  // SMEM linear element offset of the tile origin (for the shared access ptr).
+  auto shared_strides = makeRowMajorStrides(shared_tensor->shape);
+  ICHECK(shared_strides.size() == shared_range.size())
+      << "shared_strides.size() != shared_range.size() "
+      << shared_strides.size() << " " << shared_range.size();
   PrimExpr shared_offset = 0;
-  for (size_t i = 0; i < shared_indices.size(); i++) {
-    shared_offset += shared_indices[i] * shared_strides[i];
+  for (size_t i = 0; i < shared_range.size(); i++)
+    shared_offset += shared_range[i]->min * shared_strides[i];
+
+  // Column-major place values of the LOGICAL shared buffer dims (mode 0
+  // fastest). This is captured here, before shared_tensor is reassigned to the
+  // remapped physical buffer below; it is the coordinate basis of smem_plain's
+  // domain (the recovered layout linearizes its input column-major over these
+  // logical dims), and is used to build the tile selector. smem_plain itself is
+  // coalesced and its leaf shape is arbitrary, so it cannot supply this basis.
+  auto shared_place_strides = makeColMajorStrides(shared_tensor->shape);
+  std::vector<int64_t> shared_place(shared_place_strides.size());
+  for (size_t d = 0; d < shared_place_strides.size(); ++d) {
+    auto c = as_const_int(shared_place_strides[d]);
+    ICHECK(c) << "Bulk copy shared shape is expected to be const";
+    shared_place[d] = *c;
   }
-  PrimExpr global_offset = 0;
-  for (size_t i = 0; i < global_indices.size(); i++) {
-    global_offset += global_indices[i] * global_strides[i];
+
+  // Full global tensor element extents and strides as PrimExpr (row-major when
+  // not explicitly strided). These may be dynamic/symbolic: the box geometry is
+  // derived purely from the SMEM layout (see cute::DeriveTmaTile), and these
+  // only fill in the descriptor's per-mode globalDim/globalStride/coords. One
+  // descriptor describes the WHOLE tensor; each block's origin enters via
+  // coords.
+  std::vector<PrimExpr> g_extents(global_tensor->shape.begin(),
+                                  global_tensor->shape.end());
+  std::vector<PrimExpr> g_elem_strides;
+  if (!global_tensor->strides.empty()) {
+    g_elem_strides.assign(global_tensor->strides.begin(),
+                          global_tensor->strides.end());
+  } else {
+    g_elem_strides.assign(g_extents.size(), PrimExpr(1));
+    PrimExpr st = 1;
+    for (int i = static_cast<int>(g_extents.size()) - 1; i >= 0; --i) {
+      g_elem_strides[i] = st;
+      st = st * g_extents[i];
+    }
   }
 
   TMADesc desc;
-  desc.rank = global_tensor->shape.size();
-  ICHECK(desc.rank >= 1 && desc.rank <= 5) << desc.rank;
-
   ICHECK(
       IsValidTMADtypePair(is_load, global_tensor->dtype, shared_tensor->dtype))
       << "Copy between buffer " << global_tensor->name << " and "
@@ -1457,65 +1485,13 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   desc.data_type =
       TensorMapDataTypeForTMA(global_tensor->dtype, shared_tensor->dtype);
   desc.global_addr = global_tensor->data;
-  desc.global_shape = ReverseArray(global_tensor->shape);
-  Array<PrimExpr> global_coords =
-      ReverseArray(global_range.Map([](Range r) { return r->min; }));
-  if (!global_tensor->strides.empty()) {
-    desc.global_stride = ReverseArray(global_tensor->strides);
-  } else {
-    PrimExpr stride = 1;
-    desc.global_stride.reserve(desc.rank);
-    for (size_t i = 0; i < desc.rank; i++) {
-      desc.global_stride.push_back(stride);
-      stride *= desc.global_shape[i];
-    }
-  }
-  ICHECK(is_one(desc.global_stride[0])) << desc.global_stride;
-  desc.global_stride = desc.global_stride.Map([&](PrimExpr e) {
-    return TMAGlobalBytesFromElements(e, global_tensor->dtype);
-  });
-  for (size_t i{1}; i < desc.global_stride.size(); i++) {
-    auto stride = desc.global_stride[i].as<IntImmNode>();
-    if (stride != nullptr) {
-      if (stride->value % 16 != 0 || stride->value >= (1ULL << 40)) {
-        DLOG(WARNING) << "TMA bulk copy cannot support a global stride of "
-                      << desc.global_stride[i] << ", fallback to normal copy.";
-        return fallback_to_normal("unsupported global stride");
-      }
-    }
-  }
-
-  auto s_range_idx = 0;
-  for (size_t i = 0; i < global_range.size(); i++) {
-    auto g_range = global_range[i];
-    if (is_one(g_range->extent)) {
-      continue;
-    }
-    while (is_one(shared_range[s_range_idx]->extent) &&
-           s_range_idx < shared_range.size()) {
-      s_range_idx++;
-    }
-    if (s_range_idx >= shared_range.size()) {
-      LOG(FATAL) << "TMA bulk copy cannot support a global range of "
-                 << global_range << ", shared_range " << shared_range;
-    }
-    auto s_range = shared_range[s_range_idx];
-    s_range_idx++;
-
-    ICHECK(StructuralEqual()(g_range->extent, s_range->extent))
-        << global_tensor->name << "[" << i << "] is illegal, "
-        << global_tensor->name << "[" << i << "] = " << g_range->extent << ", "
-        << shared_tensor->name << "[" << s_range_idx
-        << "] = " << s_range->extent;
-  }
-  desc.smem_box =
-      ReverseArray(global_range.Map([](Range r) { return r->extent; }));
-
-  desc.smem_stride = Array<PrimExpr>(desc.rank, PrimExpr(1));
   desc.l2_promotion = static_cast<int>(CU_TENSOR_MAP_L2_PROMOTION_L2_128B);
   desc.oob_fill = static_cast<int>(CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
   desc.interleave = static_cast<int>(CU_TENSOR_MAP_INTERLEAVE_NONE);
 
+  // The shared layout: default to a plain row-major layout when none was
+  // inferred, so the SINGLE CuTe-based path below always has a ComposedLayout
+  // to decode (no special-case for the non-swizzled tile).
   Layout shared_layout;
   if (T.layout_map.count(shared_tensor)) {
     shared_layout = T.layout_map.at(shared_tensor);
@@ -1523,44 +1499,48 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
         << "shared_tensor: " << shared_tensor->name
         << " not found in buffer_remap";
     shared_tensor = T.buffer_remap.at(shared_tensor);
-  }
-  if (!shared_layout.defined()) {
-    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
-  } else if (StructuralEqual()(shared_layout, linear_layout)) {
-    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
   } else {
-    if (shared_layout->InputDim() < 2) {
-      DLOG(WARNING) << "TMA bulk copy cannot support shared layout with input "
-                    << "dimension " << shared_layout->InputDim()
-                    << ", fallback to normal copy.";
-      return fallback_to_normal("shared layout input dimension is less than 2");
-    }
-    const int ndim = static_cast<int>(shared_layout->InputDim());
-    auto stride = as_const_int(shared_layout->InputShape()[ndim - 2]);
-    auto continuous = as_const_int(shared_layout->InputShape()[ndim - 1]);
-    ICHECK(stride != nullptr && continuous != nullptr);
-    SwizzleMode swizzle_mode =
-        DetectSwizzleMode(shared_layout, shared_tensor_unmapped);
-    if (swizzle_mode == SwizzleMode::kQuarter) {
-      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
-    } else if (swizzle_mode == SwizzleMode::kHalf) {
-      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
-    } else if (swizzle_mode == SwizzleMode::kFull) {
-      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
-    } else if (StructuralEqual()(
-                   shared_layout,
-                   makeGemmABLayoutPadded(*stride, *continuous,
-                                          shared_tensor->dtype.bits()))) {
-      DLOG(WARNING) << "Bulk copy cannot support a padded layout for src: "
-                    << src->name << ", dst: " << dst->name
-                    << ", fallback to normal copy";
-      return fallback_to_normal("padded shared layout");
-    } else {
-      DLOG(WARNING) << "Came across unsupported swizzle layout for src: "
-                    << src->name << ", dst: " << dst->name
-                    << ", fallback to normal copy";
-      return fallback_to_normal("unsupported shared swizzle layout");
-    }
+    // No inferred layout: the tile is stored plain row-major. Default to it so
+    // the single CuTe path always decodes a ComposedLayout (the swizzle comes
+    // out as NONE), removing the old non-swizzled special-case.
+    shared_layout = makeLinearLayout(shared_tensor->shape);
+  }
+
+  // Decode the shared layout to its byte-space CuTe ComposedLayout. The swizzle
+  // must match one of the three fixed CUtensorMap atoms
+  // (Sw<b in {1,2,3}, m_base=4, s_shift=3>) or be unswizzled; anything else
+  // (e.g. wider s_shift=4/5 MMA swizzles, or a padded/undecodable layout) is
+  // not TMA-expressible and falls back to a normal copy.
+  Optional<cute::ComposedLayout> composed =
+      cute::ComposedLayoutFromTileLang(shared_layout);
+  if (!composed.defined()) {
+    DLOG(WARNING) << "Shared layout for src: " << src->name
+                  << ", dst: " << dst->name
+                  << " is not a CuTe swizzle over an affine layout, fallback "
+                     "to normal copy";
+    return fallback_to_normal("undecodable shared swizzle layout");
+  }
+  // Recast element-space recovery into byte-address space (the CuTe/CUTLASS
+  // convention where swizzles act on byte addresses).
+  int elem_bits = shared_tensor->dtype.bits();
+  cute::ComposedLayout composed_bytes =
+      composed.value().Recast(elem_bits, /*new_bits=*/8);
+  const auto *sw = composed_bytes->swizzle.get();
+  int b_bits = sw->b_bits, m_base = sw->m_base, s_shift = sw->s_shift;
+  if (!sw->IsSwizzled()) {
+    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
+  } else if (m_base == 4 && s_shift == 3 && b_bits == 1) {
+    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
+  } else if (m_base == 4 && s_shift == 3 && b_bits == 2) {
+    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
+  } else if (m_base == 4 && s_shift == 3 && b_bits == 3) {
+    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
+  } else {
+    DLOG(WARNING) << "Shared swizzle Sw<" << b_bits << "," << m_base << ","
+                  << s_shift << "> for src: " << src->name
+                  << ", dst: " << dst->name
+                  << " is not a TMA swizzle atom, fallback to normal copy";
+    return fallback_to_normal("non-TMA shared swizzle layout");
   }
 
   // The TMA unit applies the descriptor's swizzle pattern relative to the
@@ -1570,50 +1550,186 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   // mode so MergeSharedMemoryAllocations can align the buffer accordingly.
   RequireTMASmemAlignment(T, shared_tensor, desc.swizzle);
 
-  auto inner_box_dim = as_const_int(desc.smem_box[0]);
-  if (inner_box_dim == nullptr) {
-    DLOG(WARNING) << "inner_box_dim " << desc.smem_box[0]
-                  << " can only be a constant integer for TMA bulk copy, "
-                     "fallback to normal copy";
-    return fallback_to_normal("non-constant inner box dimension");
-  }
-  int instruction_dim = *inner_box_dim;
-  DataType smem_elem_dtype = shared_tensor->dtype;
-  if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
-    instruction_dim = TMAElementsForBytes(64, smem_elem_dtype);
-  } else if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B)) {
-    instruction_dim = TMAElementsForBytes(128, smem_elem_dtype);
-  }
-  if (instruction_dim > 256) {
-    ICHECK((*inner_box_dim) % 256 == 0)
-        << "inner_box_dim: " << *inner_box_dim << " is not divisible by 256";
-    instruction_dim = 256;
-  }
-  ICHECK((*inner_box_dim) % instruction_dim == 0)
-      << "inner_box_dim: " << *inner_box_dim
-      << " is not divisible by instruction_dim: " << instruction_dim;
-  desc.smem_box.Set(0, PrimExpr(instruction_dim));
+  // Element-space plain layout (the un-recast recovery): the swizzle is the XOR
+  // bijection over the same address space, so the SMEM-address ordering used
+  // for the box derivation is exactly this plain layout. Its single-coordinate
+  // domain is the column-major linearization over the *full shared buffer*.
+  cute::Layout smem_plain = composed.value()->layout;
 
-  int inner_box_dim_ =
-      TMABytesFromElements(instruction_dim, shared_tensor->dtype);
+  // Per-global-axis tile extents (aligned 1:1 with the global tensor dims, so a
+  // mode's axis tag indexes the global strides directly).
+  // Also checks that it is compatible with shared_range.
+  std::vector<int64_t> tile_shape;
+  // The shared tensor tile is not necessarily the whole tensor: the shared
+  // buffer can carry extra dims that are not part of the TMA tile (e.g.
+  // pipeline stages), or simply because the user writes a slice expression, so
+  // smem_plain's domain (the whole buffer) is larger than the tile. So we
+  // should select some portion of smem_plain.
+  Array<int64_t> s_range_select_shape, s_range_select_stride;
+  // smem_plain's single-coordinate domain is the column-major linearization
+  // over smem_plain's OWN dims (mode 0 fastest), which span the full shared
+  // buffer (incl. pipeline stages) -- the shared_range stage extent can read as
+  // 1 even when smem_plain carries the real stage count, so the place values
+  // must come from the logical shared-buffer place values (shared_place,
+  // captured above), which align positionally with shared_range. The selector
+  // maps each tile coordinate into smem_plain's domain via these place values.
+  ICHECK_EQ(shared_place.size(), shared_range.size())
+      << "shared buffer rank " << shared_place.size()
+      << " != shared_range rank " << shared_range.size();
+  for (size_t g_range_idx = 0, s_range_idx = 0;
+       g_range_idx < global_range.size(); ++g_range_idx) {
+    auto g_range = global_range[g_range_idx];
+    auto g_extent = as_const_int(g_range->extent);
+    ICHECK(g_extent)
+        << "Bulk copy global tile extent is expected to be constant, got "
+        << g_range->extent;
+    tile_shape.push_back(*g_extent);
 
-  struct SwizzleCheck {
-    int swizzle;
-    int max_dim;
-  };
-  static const std::vector<SwizzleCheck> swizzle_checks = {
-      {static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B), 32},
-      {static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B), 64},
-      {static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B), 128},
-  };
-  for (const auto &check : swizzle_checks) {
-    if (desc.swizzle == check.swizzle && inner_box_dim_ > check.max_dim) {
-      DLOG(WARNING) << "TMA bulk copy cannot support a swizzled global layout "
-                       "with inner_box_dim_ > "
-                    << check.max_dim << ", will be fallback to normal copy";
-      return fallback_to_normal(
-          "swizzled shared box exceeds swizzle byte width");
+    if (*g_extent == 1)
+      continue;
+
+    while (s_range_idx < shared_range.size() &&
+           is_one(shared_range[s_range_idx]->extent)) {
+      s_range_idx++;
     }
+    if (s_range_idx >= shared_range.size()) {
+      LOG(FATAL) << "TMA bulk copy cannot support a global range of "
+                 << global_range << ", shared_range " << shared_range;
+    }
+    auto s_range = shared_range[s_range_idx];
+    auto s_extent = as_const_int(s_range->extent);
+    ICHECK(s_extent)
+        << "Bulk copy shared tile extent is expected to be constant, got "
+        << s_range->extent;
+
+    s_range_select_shape.push_back(*s_extent);
+    s_range_select_stride.push_back(shared_place[s_range_idx]);
+    s_range_idx++;
+
+    ICHECK_EQ(*g_extent, *s_extent)
+        << global_tensor->name << "[" << g_range_idx << "] is illegal, "
+        << global_tensor->name << "[" << g_range_idx
+        << "] = " << g_range->extent << ", " << shared_tensor->name << "["
+        << s_range_idx << "] = " << s_range->extent;
+  }
+
+  // The shared buffer can carry extra dims that are not part of the TMA tile
+  // (e.g. pipeline stages), so smem_plain's domain (the whole buffer) is larger
+  // than the tile.
+  auto s_range_select =
+      cute::Layout(s_range_select_shape, s_range_select_stride);
+  smem_plain = cute::Coalesce(cute::Composition(smem_plain, s_range_select));
+
+  // Derive the faithful-CuTe decomposition (CuTe construct_tma_gbasis): ONE
+  // descriptor box plus a rest iteration space (one TMA instruction per rest
+  // coordinate). The box is the contiguous unit-scale prefix of the SMEM->gmode
+  // map; any non-contiguous global mode is NOT folded into the box but replayed
+  // as separate instructions, so per-box out-of-bounds is exact. The result is
+  // cute::Layouts with `scale @ axis` strides; we recover the descriptor
+  // geometry by Composition (the `@axis` routing = CuTe's gtensor.compose /
+  // basis_get).
+  //
+  // gmem: the global tensor as a cute::Layout (extents as shape, element
+  // strides as stride; both may be dynamic -> IntTuplePrimExpr leaves).
+  Array<cute::IntTuple> g_shape_leaves, g_stride_leaves;
+  for (size_t a = 0; a < g_extents.size(); ++a) {
+    g_shape_leaves.push_back(
+        cute::IntTuplePrimExpr(cast(DataType::Int(32), g_extents[a])));
+    g_stride_leaves.push_back(
+        cute::IntTuplePrimExpr(cast(DataType::Int(32), g_elem_strides[a])));
+  }
+  std::vector<int64_t> ones(g_extents.size(), 1);
+  Array<int64_t> ones_arr(ones.begin(), ones.end());
+  cute::Layout gmem(ones_arr, g_stride_leaves);
+
+  std::optional<cute::TmaTile> tile_opt =
+      cute::DeriveTmaTile(gmem, smem_plain, tile_shape);
+  if (!tile_opt.has_value()) {
+    DLOG(WARNING)
+        << "SMEM layout for src: " << src->name << ", dst: " << dst->name
+        << " has no TMA-expressible box (non-contiguous inner mode, rank > 5, "
+           "or unsplittable >256 mode), fallback to normal copy";
+    return fallback_to_normal("no TMA-expressible box");
+  }
+  const cute::TmaTile &tile = tile_opt.value();
+  size_t rank = cute::Rank(tile.box);
+  desc.rank = rank;
+
+  // Route global properties through the box by Composition: a box mode's `1 @
+  // a` stride selects axis `a`, so Composition(<axis-indexed layout>, box)
+  // yields the per-mode value. tile_gstride strides are the per-mode element
+  // strides; tile_gextent strides are the per-mode full extents.
+  cute::Layout gextent(ones_arr, g_shape_leaves);
+  cute::IntTuple mode_gstride =
+      cute::Flatten(cute::Composition(gmem, tile.box)->stride);
+  cute::IntTuple mode_gextent =
+      cute::Flatten(cute::Composition(gextent, tile.box)->stride);
+  cute::IntTuple box_ext = cute::Flatten(tile.box->shape);
+  ICHECK_EQ(cute::Rank(mode_gstride), rank);
+  ICHECK_EQ(cute::Rank(mode_gextent), rank);
+
+  // Assemble the single descriptor (fastest mode first). Each box mode reads
+  // its axis at unit gmem step, so globalStride is that axis's element stride
+  // (bytes) and globalDim is the FULL extent of the axis -- the descriptor
+  // spans the whole tensor; the per-instruction coordinate selects the block.
+  // The encoder drops globalStride[0] (implicit unit element).
+  desc.global_shape = Array<PrimExpr>();
+  desc.global_stride = Array<PrimExpr>();
+  desc.smem_box = Array<PrimExpr>();
+  desc.smem_stride = Array<PrimExpr>(rank, PrimExpr(1));
+
+  for (size_t k = 0; k < rank; ++k) {
+    desc.smem_box.push_back(
+        IntImm(DataType::Int(32), cute::AsConst(box_ext[k])));
+    desc.global_shape.push_back(
+        cast(DataType::Int(64), cute::AsPrimExpr(mode_gextent[k])));
+
+    PrimExpr elem_stride = cute::AsPrimExpr(mode_gstride[k]);
+    PrimExpr byte_stride =
+        TMAGlobalBytesFromElements(elem_stride, global_tensor->dtype);
+    if (k >= 1) {
+      if (auto s = byte_stride.as<IntImmNode>()) {
+        if (s->value % 16 != 0 || s->value >= (1LL << 40)) {
+          DLOG(WARNING) << "TMA global stride " << byte_stride
+                        << " unsupported for src: " << src->name
+                        << ", dst: " << dst->name
+                        << ", fallback to normal copy";
+          return fallback_to_normal("unsupported global stride");
+        }
+      }
+    }
+    desc.global_stride.push_back(byte_stride);
+    // The innermost descriptor mode must be globally contiguous: the encoder
+    // drops globalStride[0] and assumes it is one element. A transposed SMEM
+    // tile (whose innermost box mode reads a non-unit global stride) is not
+    // TMA-expressible -- fall back.
+    if (k == 0 && !is_one(elem_stride)) {
+      DLOG(WARNING)
+          << "TMA innermost global stride " << elem_stride
+          << " != 1 element for src: " << src->name << ", dst: " << dst->name
+          << " (transposed/non-contiguous box), fallback to normal copy";
+      return fallback_to_normal("non-contiguous innermost TMA box");
+    }
+  }
+
+  // Per-instruction coordinates (block origin + rest shift, routed through the
+  // box) are computed inside the rest loop below.
+
+  // The innermost box mode's byte span must be a multiple of 16 (TMA operates
+  // at 16-byte granularity). boxDim <= 256 is guaranteed by DeriveTmaTile (the
+  // >256 split into a rest mode). The swizzle width imposes NO box constraint:
+  // CuTe emits boxDim[0]*elem freely larger than the swizzle width (the XOR
+  // pattern is periodic and repeats across the box) and asserts only
+  // boxDim<=256.
+  const int64_t *box0 = as_const_int(desc.smem_box[0]);
+  ICHECK(box0 != nullptr) << "inner box dim must be a constant: "
+                          << desc.smem_box[0];
+  int64_t inner_box_bytes = TMABytesFromElements(*box0, shared_tensor->dtype);
+  if (inner_box_bytes % 16 != 0) {
+    DLOG(WARNING) << "TMA inner box dim " << *box0 << " (=" << inner_box_bytes
+                  << " bytes) is not 16-byte aligned for src: " << src->name
+                  << ", dst: " << dst->name << ", fallback to normal copy";
+    return fallback_to_normal("inner box not 16-byte aligned");
   }
 
   Call create_descriptor =
@@ -1643,17 +1759,14 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     }
   }
 
-  Array<PrimExpr> args;
-  args.reserve(desc.rank + 4);
-  args.push_back(create_descriptor);
-  if (is_load)
-    args.push_back(barrier_base_id >= 0 ? mbar_handle : PrimExpr(0));
   auto tma_op = is_load ? tma_load() : tma_store();
 
-  Stmt tma_copy;
-  PrimExpr total_elements = 1;
-  for (auto e : desc.smem_box)
-    total_elements *= e;
+  // Per-instruction box size (elements moved by one tma_load/store) and the
+  // total across all rest instructions (for the mbarrier transaction count).
+  int64_t box_elements = cute::Size(tile.box);
+  int64_t rest_count = cute::Size(tile.rest_gmem);
+  PrimExpr total_elements =
+      IntImm(DataType::Int(32), box_elements * rest_count);
 
   auto build_multicast_args = [&](const Array<PrimExpr> &regular_args) {
     Array<PrimExpr> mc_args;
@@ -1668,81 +1781,102 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     return mc_args;
   };
 
-  if ((*inner_box_dim) != instruction_dim) {
-    Var loop_var("i");
-    int loop_extent = (*inner_box_dim) / instruction_dim;
+  // Per-axis rest contribution: Composition(unit_axis_a, rest_gmem) is a plain
+  // layout whose EvalExpr(i) is axis a's coordinate step at the (symbolic) rest
+  // index i (the `@axis` routing keeps only the rest modes on a; others give
+  // 0).
+  std::vector<cute::Layout> rest_on_axis;
+  rest_on_axis.reserve(g_extents.size());
+  for (size_t a = 0; a < g_extents.size(); ++a) {
+    std::vector<int64_t> unit_stride(g_extents.size(), 0);
+    unit_stride[a] = 1;
+    cute::Layout unit_a(ones_arr,
+                        Array<int64_t>(unit_stride.begin(), unit_stride.end()));
+    rest_on_axis.push_back(cute::Composition(unit_a, tile.rest_gmem));
+  }
 
-    PrimExpr shared_addr = shared_tensor.access_ptr(
-        is_load ? 2 : 1, DataType::Handle(), 1,
-        shared_offset + total_elements * loop_var, total_elements);
-    args.push_back(shared_addr);
-    global_coords.Set(0, global_coords[0] + instruction_dim * loop_var);
-    for (auto coord : global_coords)
-      args.push_back(coord);
-    int need_reduce = 0;
+  // The use_2cta annotation (SM100) is loop-invariant, so it is the same for
+  // every rest instruction (it depended only on target/load/cluster, never on
+  // the box split). Match the original single-instruction condition (which also
+  // honors an explicit use_2cta annotation, unlike the original's loop branch).
+  Map<String, ObjectRef> tma_ann;
+  if (TargetIsSm100(T.target) && is_load &&
+      (annotations.find("use_2cta") != annotations.end() || is_cluster_barrier))
+    tma_ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
+
+  // Build the descriptor args for rest index `i`: the per-axis gmem coordinate
+  // is (block origin + rest shift at i), routed through the box to the
+  // descriptor coordinates; the SMEM offset is rest_smem.EvalExpr(i). The arg
+  // layout is identical for the regular and multicast variants (the latter just
+  // inserts the cluster mask via build_multicast_args), so a single builder
+  // serves both the single- and multi-instruction cases.
+  auto make_args = [&](PrimExpr i) -> Array<PrimExpr> {
+    Array<cute::IntTuple> coord_leaves;
+    for (size_t a = 0; a < g_extents.size(); ++a) {
+      PrimExpr c = global_range[a]->min + cast(global_range[a]->min->dtype,
+                                               rest_on_axis[a]->operator()(i));
+      coord_leaves.push_back(
+          cute::IntTuplePrimExpr(cast(DataType::Int(32), c)));
+    }
+    cute::Layout coord_layout(ones_arr, coord_leaves);
+    cute::IntTuple mode_coords =
+        cute::Flatten(cute::Composition(coord_layout, tile.box)->stride);
+    PrimExpr smem_off = shared_offset + tile.rest_smem->operator()(i);
+
+    Array<PrimExpr> args;
+    args.reserve(rank + 5);
+    args.push_back(create_descriptor);
+    if (is_load)
+      args.push_back(barrier_base_id >= 0 ? mbar_handle : PrimExpr(0));
+    args.push_back(shared_tensor.access_ptr(
+        is_load ? 2 : 1, DataType::Handle(), 1, smem_off,
+        IntImm(DataType::Int(32), box_elements)));
+    for (size_t k = 0; k < rank; ++k)
+      args.push_back(cute::AsPrimExpr(mode_coords[k]));
     if (!is_load)
-      args.push_back(need_reduce);
+      args.push_back(0); // need_reduce
     args.push_back(GetEvictionPolicy(op));
-    Map<String, ObjectRef> ann_loop;
-    if (is_cluster_barrier && TargetIsSm100(T.target) && is_load) {
-      ann_loop.Set("use_2cta", IntImm(DataType::Int(32), 1));
-    }
-    tma_copy = For(loop_var, 0, loop_extent, ForKind::kUnrolled,
-                   Evaluate(Call(DataType::Handle(), tma_op, args, ann_loop)));
+    return args;
+  };
 
-    if (use_multicast) {
-      Array<PrimExpr> mc_args = build_multicast_args(args);
-      Stmt multicast_copy = For(
-          loop_var, 0, loop_extent, ForKind::kUnrolled,
-          Evaluate(Call(DataType::Handle(), tma_load_multicast(), mc_args)));
+  // Emit the (unrolled) replay of one tma op variant across the rest space. No
+  // rest -> a single bare instruction at the origin; otherwise an UNROLLED For
+  // over [0, rest_count) (matching the original LowerBulk's instruction-dim
+  // loop, so codegen emits the instructions inline). `multicast` switches to
+  // the multicast op + args; the cluster-rank selection wraps the whole loop
+  // below.
+  auto make_replay = [&](bool multicast) -> Stmt {
+    auto one = [&](PrimExpr i) -> Stmt {
+      Array<PrimExpr> args = make_args(i);
+      if (multicast)
+        return Evaluate(Call(DataType::Handle(), tma_load_multicast(),
+                             build_multicast_args(args)));
+      return Evaluate(Call(DataType::Handle(), tma_op, args, tma_ann));
+    };
+    if (rest_count == 1)
+      return one(IntImm(DataType::Int(32), 0));
+    Var i("tma_rest", DataType::Int(32));
+    return For(i, IntImm(DataType::Int(32), 0),
+               IntImm(DataType::Int(32), rest_count), ForKind::kUnrolled,
+               one(i));
+  };
 
-      int min_cta_rank = MinRankInClusterMask(cluster_mask);
-      PrimExpr block_rank =
-          Call(DataType::Int(32), block_rank_in_cluster(), {});
-      PrimExpr mask_imm = IntImm(DataType::Int(32), cluster_mask);
-      PrimExpr not_in_mask = EQ(bitwise_and(right_shift(mask_imm, block_rank),
-                                            IntImm(DataType::Int(32), 1)),
-                                IntImm(DataType::Int(32), 0));
-      Stmt regular_or_noop = IfThenElse(not_in_mask, tma_copy, std::nullopt);
-      tma_copy =
-          IfThenElse(EQ(block_rank, IntImm(DataType::Int(32), min_cta_rank)),
-                     multicast_copy, regular_or_noop);
-    }
-  } else {
-    PrimExpr shared_addr = shared_tensor.access_ptr(
-        is_load ? 2 : 1, DataType::Handle(), 1, shared_offset, total_elements);
-    args.push_back(shared_addr);
-    for (auto coord : global_coords)
-      args.push_back(coord);
-    int need_reduce = 0;
-    if (!is_load)
-      args.push_back(need_reduce);
-    args.push_back(GetEvictionPolicy(op));
-    Map<String, ObjectRef> ann;
-    if (TargetIsSm100(T.target) && is_load &&
-        (annotations.find("use_2cta") != annotations.end() ||
-         is_cluster_barrier)) {
-      ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
-    }
-    tma_copy = Evaluate(Call(DataType::Handle(), tma_op, args, ann));
-
-    if (use_multicast) {
-      Array<PrimExpr> mc_args = build_multicast_args(args);
-      Stmt multicast_copy =
-          Evaluate(Call(DataType::Handle(), tma_load_multicast(), mc_args));
-
-      int min_cta_rank = MinRankInClusterMask(cluster_mask);
-      PrimExpr block_rank =
-          Call(DataType::Int(32), block_rank_in_cluster(), {});
-      PrimExpr mask_imm = IntImm(DataType::Int(32), cluster_mask);
-      PrimExpr not_in_mask = EQ(bitwise_and(right_shift(mask_imm, block_rank),
-                                            IntImm(DataType::Int(32), 1)),
-                                IntImm(DataType::Int(32), 0));
-      Stmt regular_or_noop = IfThenElse(not_in_mask, tma_copy, std::nullopt);
-      tma_copy =
-          IfThenElse(EQ(block_rank, IntImm(DataType::Int(32), min_cta_rank)),
-                     multicast_copy, regular_or_noop);
-    }
+  // Cluster-rank selection wraps the whole (unrolled) replay, exactly as in the
+  // original: the leader rank issues the multicast replay, other in-mask ranks
+  // a no-op, out-of-mask ranks the regular replay.
+  Stmt tma_copy = make_replay(/*multicast=*/false);
+  if (use_multicast) {
+    Stmt multicast_copy = make_replay(/*multicast=*/true);
+    int min_cta_rank = MinRankInClusterMask(cluster_mask);
+    PrimExpr block_rank = Call(DataType::Int(32), block_rank_in_cluster(), {});
+    PrimExpr mask_imm = IntImm(DataType::Int(32), cluster_mask);
+    PrimExpr not_in_mask = EQ(bitwise_and(right_shift(mask_imm, block_rank),
+                                          IntImm(DataType::Int(32), 1)),
+                              IntImm(DataType::Int(32), 0));
+    Stmt regular_or_noop = IfThenElse(not_in_mask, tma_copy, std::nullopt);
+    tma_copy =
+        IfThenElse(EQ(block_rank, IntImm(DataType::Int(32), min_cta_rank)),
+                   multicast_copy, regular_or_noop);
   }
 
   if (!is_load) {
@@ -1758,15 +1892,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   }
 
   if (is_load && barrier_base_id >= 0) {
-    PrimExpr total_bytes;
-    if ((*inner_box_dim) != instruction_dim) {
-      int loop_extent = (*inner_box_dim) / instruction_dim;
-      total_bytes = TMATransactionBytesFromElements(
-          total_elements * loop_extent, shared_tensor->dtype);
-    } else {
-      total_bytes =
-          TMATransactionBytesFromElements(total_elements, shared_tensor->dtype);
-    }
+    PrimExpr total_bytes =
+        TMATransactionBytesFromElements(total_elements, shared_tensor->dtype);
 
     Stmt barrier_before_tma_stmt;
     Optional<Stmt> barrier_after_tma_stmt = std::nullopt;
