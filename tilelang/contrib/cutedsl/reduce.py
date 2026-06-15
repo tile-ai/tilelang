@@ -115,7 +115,7 @@ def bar_sync_ptx(barrier_id, number_of_threads):
 
 
 # Import shuffle functions from warp module
-from .warp import __shfl_up_sync, __shfl_down_sync
+from .warp import __shfl_sync, __shfl_up_sync, __shfl_down_sync
 
 
 def _warp_prefix_sum_forward(val, lane, MASK=0xFFFFFFFF):
@@ -172,20 +172,105 @@ def _warp_prefix_max_forward(val, lane, MASK=0xFFFFFFFF):
     return val
 
 
-def _warp_prefix_max_reverse(val, lane, MASK=0xFFFFFFFF):
+def _warp_prefix_max_reverse(val, lane, active, MASK=0xFFFFFFFF):
     """Warp-level inclusive prefix max (reverse)."""
-    SEG = 32
     n = __shfl_down_sync(MASK, val, 1)
-    val = cutlass.select_(lane < SEG - 1, max(val, n), val)
+    val = cutlass.select_(lane + 1 < active, max(val, n), val)
     n = __shfl_down_sync(MASK, val, 2)
-    val = cutlass.select_(lane < SEG - 2, max(val, n), val)
+    val = cutlass.select_(lane + 2 < active, max(val, n), val)
     n = __shfl_down_sync(MASK, val, 4)
-    val = cutlass.select_(lane < SEG - 4, max(val, n), val)
+    val = cutlass.select_(lane + 4 < active, max(val, n), val)
     n = __shfl_down_sync(MASK, val, 8)
-    val = cutlass.select_(lane < SEG - 8, max(val, n), val)
+    val = cutlass.select_(lane + 8 < active, max(val, n), val)
     n = __shfl_down_sync(MASK, val, 16)
-    val = cutlass.select_(lane < SEG - 16, max(val, n), val)
+    val = cutlass.select_(lane + 16 < active, max(val, n), val)
     return val
+
+
+@cute.jit
+def _scan_line_sum(src_tensor, dst_tensor, base_offset, extent, stride, lane, reverse, MASK=0xFFFFFFFF):
+    """Inclusive sum scan over one strided line using one warp."""
+    SEG = 32
+    carry = src_tensor.element_type(0)
+    has_carry = False
+    num_segments = (extent + SEG - 1) // SEG
+
+    if reverse:
+        for seg_offset in range(num_segments):
+            seg = num_segments - 1 - seg_offset
+            base = seg * SEG
+            active = min(extent - base, SEG)
+            val = src_tensor.element_type(0)
+            if lane < active:
+                val = src_tensor[base_offset + (base + lane) * stride]
+
+            val = _warp_prefix_sum_reverse(val, lane, MASK)
+            if has_carry and lane < active:
+                val = val + carry
+            if lane < active:
+                dst_tensor[base_offset + (base + lane) * stride] = val
+
+            carry = __shfl_sync(MASK, val, 0)
+            has_carry = True
+    else:
+        for seg in range(num_segments):
+            base = seg * SEG
+            active = min(extent - base, SEG)
+            val = src_tensor.element_type(0)
+            if lane < active:
+                val = src_tensor[base_offset + (base + lane) * stride]
+
+            val = _warp_prefix_sum_forward(val, lane, MASK)
+            if has_carry and lane < active:
+                val = val + carry
+            if lane < active:
+                dst_tensor[base_offset + (base + lane) * stride] = val
+
+            carry = __shfl_sync(MASK, val, active - 1)
+            has_carry = True
+
+
+@cute.jit
+def _scan_line_max(src_tensor, dst_tensor, base_offset, extent, stride, lane, reverse, MASK=0xFFFFFFFF):
+    """Inclusive max scan over one strided line using one warp."""
+    SEG = 32
+    carry = src_tensor.element_type(0)
+    has_carry = False
+    num_segments = (extent + SEG - 1) // SEG
+
+    if reverse:
+        for seg_offset in range(num_segments):
+            seg = num_segments - 1 - seg_offset
+            base = seg * SEG
+            active = min(extent - base, SEG)
+            val = src_tensor.element_type(0)
+            if lane < active:
+                val = src_tensor[base_offset + (base + lane) * stride]
+
+            val = _warp_prefix_max_reverse(val, lane, active, MASK)
+            if has_carry and lane < active:
+                val = max(val, carry)
+            if lane < active:
+                dst_tensor[base_offset + (base + lane) * stride] = val
+
+            carry = __shfl_sync(MASK, val, 0)
+            has_carry = True
+    else:
+        for seg in range(num_segments):
+            base = seg * SEG
+            active = min(extent - base, SEG)
+            val = src_tensor.element_type(0)
+            if lane < active:
+                val = src_tensor[base_offset + (base + lane) * stride]
+
+            val = _warp_prefix_max_forward(val, lane, MASK)
+            if has_carry and lane < active:
+                val = max(val, carry)
+            if lane < active:
+                dst_tensor[base_offset + (base + lane) * stride] = val
+
+            carry = __shfl_sync(MASK, val, active - 1)
+            has_carry = True
 
 
 class CumSum1D:
@@ -220,20 +305,8 @@ class CumSum1D:
         src_tensor = cute.make_tensor(src, (N,))
         dst_tensor = cute.make_tensor(dst, (N,))
 
-        # Load value (0 if out of bounds)
-        val = src_tensor.element_type(0)
-        if tidx < N:
-            val = src_tensor[tidx]
-
-        # Warp-level prefix sum
-        if self.reverse:
-            val = _warp_prefix_sum_reverse(val, lane, MASK)
-        else:
-            val = _warp_prefix_sum_forward(val, lane, MASK)
-
-        # Store result - only valid threads write
-        if tidx < N:
-            dst_tensor[tidx] = val
+        if tidx < self.SEG:
+            _scan_line_sum(src_tensor, dst_tensor, 0, N, 1, lane, self.reverse, MASK)
 
 
 class CumSum2D:
@@ -268,60 +341,24 @@ class CumSum2D:
         MASK = 0xFFFFFFFF
         tidx, _, _ = cute.arch.thread_idx()
         lane = tidx % self.SEG
-        row = tidx // self.SEG
+        item = tidx // self.SEG
+        tile = self.threads // self.SEG
 
         src_tensor = cute.make_tensor(src, (H * W,))
         dst_tensor = cute.make_tensor(dst, (H * W,))
 
-        # For 2D cumsum along dim=1 (row-wise cumsum):
-        # Each warp handles one row, lane id is the column index
-        # For dim=0 (column-wise), interpretation is swapped
-
         if self.dim == 1:
-            # Row-wise cumsum: each warp processes one row
-            # row = which row this warp handles
-            # lane = column index within the row
-            col = lane
-            # Linear index into the flattened buffer
-            idx = row * W + col
-
-            # Load value (0 if out of bounds)
-            val = src_tensor.element_type(0)
-            if row < H and col < W:
-                val = src_tensor[idx]
-
-            # Warp-level prefix sum along the row
-            if self.reverse:
-                val = _warp_prefix_sum_reverse(val, lane, MASK)
-            else:
-                val = _warp_prefix_sum_forward(val, lane, MASK)
-
-            # Store result - only valid threads write
-            if row < H and col < W:
-                dst_tensor[idx] = val
+            num_blocks = (H + tile - 1) // tile
+            for block in cutlass.range_constexpr(num_blocks):
+                row = block * tile + item
+                if row < H:
+                    _scan_line_sum(src_tensor, dst_tensor, row * W, W, 1, lane, self.reverse, MASK)
         else:
-            # Column-wise cumsum (dim=0): each warp processes one column
-            # Each lane maps to a row index, so H must be <= 32 (warp size).
-            assert H <= 32, (
-                f"CumSum2D dim=0 only supports H <= 32 (got H={H}). Use dim=1 for row-wise cumsum or implement multi-warp column iteration."
-            )
-            col = row  # warp index becomes column index
-            row_in_col = lane  # lane becomes row index within column
-            idx = row_in_col * W + col
-
-            # Load value (0 if out of bounds)
-            val = src_tensor.element_type(0)
-            if row_in_col < H and col < W:
-                val = src_tensor[idx]
-
-            if self.reverse:
-                val = _warp_prefix_sum_reverse(val, lane, MASK)
-            else:
-                val = _warp_prefix_sum_forward(val, lane, MASK)
-
-            # Store result - only valid threads write
-            if row_in_col < H and col < W:
-                dst_tensor[idx] = val
+            num_blocks = (W + tile - 1) // tile
+            for block in cutlass.range_constexpr(num_blocks):
+                col = block * tile + item
+                if col < W:
+                    _scan_line_sum(src_tensor, dst_tensor, col, H, W, lane, self.reverse, MASK)
 
 
 class CumMax1D:
@@ -344,17 +381,8 @@ class CumMax1D:
         src_tensor = cute.make_tensor(src, (N,))
         dst_tensor = cute.make_tensor(dst, (N,))
 
-        val = src_tensor[0]
-        if tidx < N:
-            val = src_tensor[tidx]
-
-        if self.reverse:
-            val = _warp_prefix_max_reverse(val, lane, MASK)
-        else:
-            val = _warp_prefix_max_forward(val, lane, MASK)
-
-        if tidx < N:
-            dst_tensor[tidx] = val
+        if tidx < self.SEG:
+            _scan_line_max(src_tensor, dst_tensor, 0, N, 1, lane, self.reverse, MASK)
 
 
 class CumMax2D:
@@ -374,49 +402,24 @@ class CumMax2D:
         MASK = 0xFFFFFFFF
         tidx, _, _ = cute.arch.thread_idx()
         lane = tidx % self.SEG
-        row = tidx // self.SEG
+        item = tidx // self.SEG
+        tile = self.threads // self.SEG
 
         src_tensor = cute.make_tensor(src, (H * W,))
         dst_tensor = cute.make_tensor(dst, (H * W,))
 
         if self.dim == 1:
-            col = lane
-            idx = row * W + col
-
-            val = src_tensor.element_type(0)
-            if row < H:
-                val = src_tensor[row * W]
-            if row < H and col < W:
-                val = src_tensor[idx]
-
-            if self.reverse:
-                val = _warp_prefix_max_reverse(val, lane, MASK)
-            else:
-                val = _warp_prefix_max_forward(val, lane, MASK)
-
-            if row < H and col < W:
-                dst_tensor[idx] = val
+            num_blocks = (H + tile - 1) // tile
+            for block in cutlass.range_constexpr(num_blocks):
+                row = block * tile + item
+                if row < H:
+                    _scan_line_max(src_tensor, dst_tensor, row * W, W, 1, lane, self.reverse, MASK)
         else:
-            assert H <= 32, (
-                f"CumMax2D dim=0 only supports H <= 32 (got H={H}). Use dim=1 for row-wise cummax or implement multi-warp column iteration."
-            )
-            col = row
-            row_in_col = lane
-            idx = row_in_col * W + col
-
-            val = src_tensor.element_type(0)
-            if col < W:
-                val = src_tensor[col]
-            if row_in_col < H and col < W:
-                val = src_tensor[idx]
-
-            if self.reverse:
-                val = _warp_prefix_max_reverse(val, lane, MASK)
-            else:
-                val = _warp_prefix_max_forward(val, lane, MASK)
-
-            if row_in_col < H and col < W:
-                dst_tensor[idx] = val
+            num_blocks = (W + tile - 1) // tile
+            for block in cutlass.range_constexpr(num_blocks):
+                col = block * tile + item
+                if col < W:
+                    _scan_line_max(src_tensor, dst_tensor, col, H, W, lane, self.reverse, MASK)
 
 
 class NamedBarrier:
