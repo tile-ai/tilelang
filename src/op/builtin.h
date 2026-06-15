@@ -525,6 +525,14 @@ TVM_DLL const Op &ptx_cp_async_barrier_noinc();
 TVM_DLL const Op &ptx_cp_async();
 
 /*!
+ * \brief TileLang intrinsic for zeroing shared memory with st.bulk.
+ *
+ * ptx_st_bulk_shared(smem_data, bytes, init_val)
+ *
+ */
+TVM_DLL const Op &ptx_st_bulk_shared();
+
+/*!
  * \brief Pack two b16 value into a b32 value
  *
  * int32 pack_b16(b16_value, b16_value)
