@@ -3586,6 +3586,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         barrier_name_ + "[" + std::to_string(barrier_id) + "]";
     this->stream << PrintCpAsyncBulkAsm(dst, dst_offset, src, src_offset, size,
                                         barrier);
+  } else if (op->op.same_as(tl::ptx_st_bulk_shared())) {
+    need_cast_smem_ptr_to_int_ = true;
+    std::string smem = this->PrintExpr(op->args[0]);
+    int64_t bytes = Downcast<IntImm>(op->args[1])->value;
+    int64_t init_val = Downcast<IntImm>(op->args[2])->value;
+    this->stream << "tl::st_bulk_shared<" << bytes << ", " << init_val
+                 << ">((void*)(" << smem << "));\n";
   } else if (op->op.same_as(builtin::ptx_commit_group())) {
     this->stream << "__asm__ __volatile__(\"cp.async.commit_group;\");\n\n";
   } else if (op->op.same_as(builtin::ptx_wait_group())) {

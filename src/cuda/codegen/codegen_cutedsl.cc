@@ -1302,6 +1302,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(builtin::ptx_cp_async_bulk())) {
     LOG(FATAL) << "Currently unsupported op: " << op->op;
+  } else if (op->op.same_as(tl::ptx_st_bulk_shared())) {
+    LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(builtin::ptx_wait_barrier())) {
     LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(builtin::ptx_ldg32())) {
