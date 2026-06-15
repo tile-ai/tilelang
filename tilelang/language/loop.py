@@ -191,11 +191,25 @@ def Pipelined(
     return _ffi_api.Pipelined(start, stop, num_stages, order, stage, sync, group)
 
 
+def _apply_unroll_factor(
+    annotations: dict[str, Any] | None,
+    unroll_factor: int | None,
+) -> dict[str, Any] | None:
+    if unroll_factor is None:
+        return annotations
+    if unroll_factor <= 0:
+        raise ValueError("unroll_factor must be positive")
+    annotations = {} if annotations is None else dict(annotations)
+    annotations["pragma_unroll_factor"] = unroll_factor
+    return annotations
+
+
 def serial(
     start: tirx.PrimExpr,
     stop: tirx.PrimExpr | None = None,
     step: tirx.PrimExpr | None = None,
     *,
+    unroll_factor: int | None = None,
     annotations: dict[str, Any] | None = None,
 ) -> frame.ForFrame:
     """The serial For statement.
@@ -211,6 +225,10 @@ def serial(
     step : PrimExpr
         The step size of the iteration.
 
+    unroll_factor : int
+        The unroll factor emitted as a backend pragma while preserving a serial
+        loop in IR.
+
     annotations : Dict[str, Any]
         The optional annotations of the For statement.
 
@@ -223,6 +241,7 @@ def serial(
     step_is_one = False
     step_is_one |= isinstance(step, int) and step == 1
     step_is_one |= isinstance(step, IntImm) and step.value == 1
+    annotations = _apply_unroll_factor(annotations, unroll_factor)
     if step is None or step_is_one:
         return tb_tir.serial(start, stop, annotations=annotations)
     else:
@@ -270,6 +289,8 @@ def unroll(
     """
 
     step_is_one = False
+    step_is_one |= isinstance(step, int) and step == 1
+    step_is_one |= isinstance(step, IntImm) and step.value == 1
     if stop is None:
         stop = start
         if hasattr(start, "dtype"):
@@ -277,19 +298,18 @@ def unroll(
         else:
             start = 0
 
-    # Ensure annotations has {"pragma_unroll_explicit": True} by default
+    # Ensure annotations has {"pragma_unroll_explicit": explicit} by default
     if annotations is None:
         annotations = {"pragma_unroll_explicit": explicit}
     else:
-        # Add "pragma_unroll_explicit": True if not already present
+        # Add "pragma_unroll_explicit" if not already present
         annotations = dict(annotations)
         annotations.setdefault("pragma_unroll_explicit", explicit)
 
     if unroll_factor is not None:
-        # check pragma_unroll_explicit must be False
         if annotations.get("pragma_unroll_explicit", True):
-            raise ValueError("pragma_unroll_explicit must be True when unroll_factor is not None")
-        annotations.update({"pragma_unroll_factor": unroll_factor})
+            raise ValueError("pragma_unroll_explicit must be False when unroll_factor is not None")
+        annotations = _apply_unroll_factor(annotations, unroll_factor)
 
     if step is None or step_is_one:
         return tb_tir.unroll(start, stop, annotations=annotations)
@@ -305,11 +325,18 @@ def Serial(
     stop: tirx.PrimExpr | None = None,
     step: tirx.PrimExpr | None = None,
     *,
+    unroll_factor: int | None = None,
     annotations: dict[str, Any] | None = None,
 ) -> frame.ForFrame:
     """Alias of T.serial."""
 
-    return serial(start, stop, step, annotations=annotations)
+    return serial(
+        start,
+        stop,
+        step,
+        unroll_factor=unroll_factor,
+        annotations=annotations,
+    )
 
 
 def Unroll(

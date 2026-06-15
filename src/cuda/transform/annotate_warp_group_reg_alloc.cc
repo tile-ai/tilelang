@@ -26,6 +26,16 @@ using namespace ffi;
 
 namespace {
 
+bool IsManualWarpSpecializationScope(const AttrStmtNode *op) {
+  return op->attr_key == "warp_specialize";
+}
+
+Evaluate MakeSetMaxNRegCall(int reg_count, int is_inc) {
+  return Evaluate(Call(DataType::Handle(), set_max_nreg(),
+                       {IntImm(DataType::Int(32), reg_count),
+                        IntImm(DataType::Int(32), is_inc)}));
+}
+
 template <typename F>
 Stmt RewriteWarpSpecializationBody(const Stmt &stmt, F &&rewrite_if,
                                    bool *rewrote) {
@@ -203,6 +213,20 @@ private:
           call->op.same_as(set_max_nreg())) {
         return StmtExprMutator::VisitStmt_(op);
       }
+      if (in_manual_warp_specialization_ &&
+          call->op.same_as(annotate_producer_reg_dealloc())) {
+        auto reg_hint = call->args[0].as<IntImmNode>()->value;
+        ICHECK(reg_hint <= 240 && reg_hint >= 24)
+            << "Invalid reg hint: " << reg_hint;
+        return MakeSetMaxNRegCall(reg_hint, 0);
+      }
+      if (in_manual_warp_specialization_ &&
+          call->op.same_as(annotate_consumer_reg_alloc())) {
+        auto reg_hint = call->args[0].as<IntImmNode>()->value;
+        ICHECK(reg_hint <= 240 && reg_hint >= 24)
+            << "Invalid reg hint: " << reg_hint;
+        return MakeSetMaxNRegCall(reg_hint, 1);
+      }
       if (call->op.same_as(annotate_producer_reg_dealloc()) ||
           call->op.same_as(annotate_consumer_reg_alloc()) ||
           call->op.same_as(no_set_max_nreg())) {
@@ -225,6 +249,12 @@ private:
         attr_stmt.CopyOnWrite()->value = updated_thread_extent_.value();
       }
       thread_iv_ = {};
+      return attr_stmt;
+    } else if (IsManualWarpSpecializationScope(op)) {
+      bool old_in_manual_ws = in_manual_warp_specialization_;
+      in_manual_warp_specialization_ = true;
+      AttrStmt attr_stmt = Downcast<AttrStmt>(StmtExprMutator::VisitStmt_(op));
+      in_manual_warp_specialization_ = old_in_manual_ws;
       return attr_stmt;
     } else if (op->attr_key == attr::kWarpSpecializationScope) {
       bool rewrote_ws_body = false;
@@ -291,6 +321,7 @@ private:
 
   Array<IntImm> nreg_;
   bool preserve_explicit_set_max_nreg_{false};
+  bool in_manual_warp_specialization_{false};
   IterVar thread_iv_;
   Optional<PrimExpr> updated_thread_extent_;
   bool need_update_thread_extent_ = false;

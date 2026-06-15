@@ -797,6 +797,31 @@ private:
         }
       }
     }
+    if (op->annotations.count("layout_view_map")) {
+      auto maybe_map = op->annotations.Get("layout_view_map")
+                           ->as<Map<ObjectRef, ObjectRef>>();
+      ICHECK(maybe_map.has_value())
+          << "layout_view_map must be a Map<Buffer, Layout>";
+      for (const auto &[key, val] : maybe_map.value()) {
+        auto maybe_buffer = key.as<Buffer>();
+        ICHECK(maybe_buffer.has_value())
+            << "layout_view_map key must be a Buffer";
+        auto maybe_layout = val.as<Layout>();
+        ICHECK(maybe_layout.has_value())
+            << "layout_view_map value must be a Layout";
+        Buffer buffer = maybe_buffer.value();
+        Layout layout = maybe_layout.value();
+        if (ShapesEqual(layout->InputShape(), buffer->shape, &analyzer_)) {
+          annotated_layout_map_.Set(buffer, layout);
+        } else {
+          auto reshaped_layout =
+              layout->Reshape(buffer->shape, &analyzer_,
+                              Integer(GetElementStorageBits(buffer->dtype)),
+                              Integer(GetElementStorageBits(buffer->dtype)));
+          annotated_layout_map_.Set(buffer, reshaped_layout);
+        }
+      }
+    }
   }
 
   void VisitStmt_(const AttrStmtNode *op) final {

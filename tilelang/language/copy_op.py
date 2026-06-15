@@ -3,14 +3,14 @@
 from __future__ import annotations
 from typing import Literal, Any
 
-from tilelang._typing import BufferLikeType
+from tilelang._typing import BufferLikeType, DType
 from tilelang.utils.language import (
     to_buffer_region,
     legalize_pairwise_extents,
 )
 from tilelang.utils.deprecated import deprecated
+from tilelang.language.dtypes import get_tvm_dtype
 from tilelang.language.utils import get_extent, buffer_region_to_tile_region
-import tvm
 from tvm import ir, tirx
 
 
@@ -71,10 +71,12 @@ def copy(
         disable_tma (bool, keyword-only): Whether to disable TMA acceleration. Defaults to False.
         eviction_policy (Optional[str], keyword-only): Cache eviction policy. Defaults to None.
         prefer_instruction (Optional[str], keyword-only): Backend-specific preferred lowering
-            instruction category. For CUDA, recognized values include "tma", "cp_async", and
-            "sync". For "tma", T.copy keeps synchronous copy semantics; global -> shared copies
-            lower through TMA with an automatically allocated barrier and wait when constraints
-            are satisfied.
+            instruction category. For CUDA, recognized values include "tma", "cp_async",
+            "ldsm", "stsm", and "sync". For "tma", T.copy keeps synchronous copy semantics;
+            global -> shared copies lower through TMA with an automatically allocated barrier
+            and wait when constraints are satisfied. "ldsm" and "stsm" are strict requests:
+            lowering fails instead of silently using normal SIMT copy when ldmatrix/stmatrix
+            constraints are not met.
         annotations (Optional[dict], keyword-only): Additional annotations dict. If provided,
             coalesced_width, disable_tma, eviction_policy, and prefer_instruction can also
             be specified here.
@@ -237,6 +239,7 @@ def tma_copy(
     *,
     barrier=None,
     leader_scope_threads: int | None = None,
+    tma_element_dtype: DType | None = None,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
     annotations: dict | None = None,
 ) -> tirx.PrimExpr | tirx.Stmt:
@@ -255,6 +258,9 @@ def tma_copy(
     FP4 unpacked shared-memory storage is load-only for TMA: packed global
     ``float4_e2m1fn`` may be loaded into unpacked shared
     ``float4_e2m1_unpacked``, but the reverse TMA store is not supported.
+    Packed global ``float4_e2m1fn`` may also be loaded into ``uint8`` shared
+    byte storage; the TensorMap descriptor remains packed FP4 and the uint8
+    shared buffer is only the physical byte-addressable storage.
 
     Args:
         src: Source memory region (global or shared)
@@ -264,7 +270,11 @@ def tma_copy(
             The TMA load will arrive at this barrier with expected byte count.
             The user must wait on the same barrier via T.mbarrier_wait_parity().
         leader_scope_threads: Number of threads in each TMA leader-election scope
-            (e.g., 32 for per-warp). Defaults to the thread extend in the current context if not specified.
+            (e.g., 32 for per-warp). Defaults to the full block size if not specified.
+        tma_element_dtype: Optional descriptor element type for TMA. When set,
+            descriptor data type, descriptor strides, and transaction byte
+            counts use this dtype while the source/destination buffers keep
+            their normal TileLang dtypes.
         eviction_policy: Cache eviction policy. Defaults to None.
         annotations: Additional annotations dict. Values in annotations take
             precedence over individual arguments.
@@ -303,6 +313,11 @@ def tma_copy(
         if "leader_scope_threads" not in ann:
             ann["leader_scope_threads"] = leader_scope_threads
 
+    if "tma_element_dtype" not in ann and tma_element_dtype is not None:
+        ann["tma_element_dtype"] = tirx.StringImm(str(get_tvm_dtype(tma_element_dtype)))
+    if isinstance(ann.get("tma_element_dtype"), str):
+        ann["tma_element_dtype"] = tirx.StringImm(ann["tma_element_dtype"])
+
     if "eviction_policy" not in ann and eviction_policy is not None:
         eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
         ann["eviction_policy"] = eviction_policy_map[eviction_policy]
@@ -322,8 +337,15 @@ _TMA_SUPPORTED_DTYPES = frozenset(
         "float32",
         "float64",
         "bfloat16",
+        "float4_e2m1fn",
+        "float4_e2m1_unpacked",
+        "custom[float4_e2m1_unpacked]8",
     }
 )
+
+
+def _is_fp4_unpack_tma_load(src_dtype: DType, dst_dtype: DType) -> bool:
+    return get_tvm_dtype(src_dtype).is_float4_e2m1fn() and get_tvm_dtype(dst_dtype).is_float4_e2m1_unpacked()
 
 
 def tma_gather4(
@@ -361,7 +383,7 @@ def tma_gather4(
         raise ValueError(f"tma_gather4 expects rank-2 global buffer, got {len(src.shape)}")
     if len(dst.shape) != 2:
         raise ValueError(f"tma_gather4 expects rank-2 shared buffer (4 x K_box), got {len(dst.shape)}")
-    if src.dtype != dst.dtype:
+    if src.dtype != dst.dtype and not _is_fp4_unpack_tma_load(src.dtype, dst.dtype):
         raise ValueError(f"tma_gather4 dtype mismatch: src={src.dtype}, dst={dst.dtype}")
     if not (isinstance(dst.shape[0], int) and dst.shape[0] == 4) and not (hasattr(dst.shape[0], "value") and int(dst.shape[0].value) == 4):
         raise ValueError(f"tma_gather4 shared tile leading dim must be 4, got {dst.shape[0]}")
@@ -369,7 +391,7 @@ def tma_gather4(
         inner = src.strides[1]
         if not ((isinstance(inner, int) and inner == 1) or (hasattr(inner, "value") and int(inner.value) == 1)):
             raise ValueError(f"tma_gather4 requires unit innermost global stride, got {inner}")
-    rows = list(rows)
+    rows = [tirx.IntImm("int32", row) if isinstance(row, int) else row for row in rows]
     if len(rows) != 4:
         raise ValueError(f"tma_gather4 expects exactly 4 row indices, got {len(rows)}")
     if swizzle not in (None, "none", 0):
@@ -414,9 +436,13 @@ def tma_gather4_bytes(K_box, dtype: str) -> int:
     """Transaction byte count for a 4-row gather4 of width ``K_box``. Pass
     to ``T.mbarrier_expect_tx`` immediately before ``T.tma_gather4``.
     """
-    if dtype not in _TMA_SUPPORTED_DTYPES:
+    dtype_str = str(dtype)
+    if dtype_str not in _TMA_SUPPORTED_DTYPES:
         raise ValueError(f"Unsupported dtype: {dtype}")
-    dt = tvm.DataType(dtype)
+    if dtype_str == "float4_e2m1_unpacked":
+        dt = get_tvm_dtype("custom[float4_e2m1_unpacked]8")
+    else:
+        dt = get_tvm_dtype(dtype)
     if dt.is_float4_e2m1_unpacked():
         elem_bits = 4
     else:
@@ -460,7 +486,7 @@ def tma_scatter4(
         inner = dst.strides[1]
         if not ((isinstance(inner, int) and inner == 1) or (hasattr(inner, "value") and int(inner.value) == 1)):
             raise ValueError(f"tma_scatter4 requires unit innermost global stride, got {inner}")
-    rows = list(rows)
+    rows = [tirx.IntImm("int32", row) if isinstance(row, int) else row for row in rows]
     if len(rows) != 4:
         raise ValueError(f"tma_scatter4 expects exactly 4 row indices, got {len(rows)}")
     if swizzle not in (None, "none", 0):

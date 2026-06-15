@@ -34,6 +34,21 @@ def test_unroll_with_unroll_factor():
     assert "#pragma unroll 4" in kernel.get_kernel_source()
 
 
+@tilelang.testing.requires_cuda
+def test_unroll_with_unroll_factor_one():
+    @T.prim_func
+    def main(A_ptr: T.handle):
+        A = T.match_buffer(A_ptr, (16,), dtype=T.float32, align=16)
+
+        for _blockIdx in T.thread_binding(1, thread="blockIdx.x"):
+            for _threadIdx in T.thread_binding(128, thread="threadIdx.x"):
+                for i in T.unroll(0, 16, unroll_factor=1):
+                    A[i] = T.Cast(T.float32, i)
+
+    kernel = tilelang.compile(main)
+    assert "#pragma unroll 1" in kernel.get_kernel_source()
+
+
 def test_unroll_with_extent_only():
     """Test T.unroll with only extent parameter."""
 
@@ -49,6 +64,21 @@ def test_unroll_with_extent_only():
     kernel = unroll_kernel.compile()
     source = kernel.get_kernel_source()
     assert "#pragma unroll" in source
+
+
+@tilelang.testing.requires_cuda
+def test_serial_with_unroll_factor():
+    @T.prim_func
+    def main(A_ptr: T.handle):
+        A = T.match_buffer(A_ptr, (16,), dtype=T.float32, align=16)
+
+        for _blockIdx in T.thread_binding(1, thread="blockIdx.x"):
+            for _threadIdx in T.thread_binding(128, thread="threadIdx.x"):
+                for i in T.serial(0, 16, unroll_factor=1):
+                    A[i] = T.Cast(T.float32, i)
+
+    kernel = tilelang.compile(main)
+    assert "#pragma unroll 1" in kernel.get_kernel_source()
 
 
 if __name__ == "__main__":

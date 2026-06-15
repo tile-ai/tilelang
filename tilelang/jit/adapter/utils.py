@@ -293,36 +293,80 @@ def pythonic_expr(
     return next(iter(node_to_result_map[expr]), "")
 
 
-def maybe_desc_name(name: str, matches: list[str], i: int, desc_name_map: dict[str, str] | None = None) -> bool:
-    """
-    Check if a parameter name corresponds to a TMA descriptor.
+HANDLE_ADD_BYTE_OFFSET_OP = tvm.ir.Op.get("tirx.handle_add_byte_offset")
 
-    Args:
-        name: The parameter name to check.
-        matches: List of all matched parameter names.
-        i: Index of the current match.
-        desc_name_map: Optional mapping to store descriptor name relationships.
 
-    Returns:
-        True if the parameter is a TMA descriptor.
-    """
-    match = matches[i]
-    if not (match == name + "_desc" or match.startswith(name + "_desc_")):
-        return False
-    desc_decls = []
-    if desc_name_map is not None:
-        desc_name_map[match] = name
-    if i > 0:
-        desc_decls.append(matches[i - 1])
-    if i < len(matches) - 1:
-        desc_decls.append(matches[i + 1])
-    return any([decl == "CUtensorMap" for decl in desc_decls])
+def split_function_parameters(declaration: str) -> list[str]:
+    """Return top-level C/CUDA parameter declarations from the function parameter list."""
+    end = declaration.rfind(")")
+    start = -1
+    depth = 0
+    for index in range(end, -1, -1):
+        char = declaration[index]
+        if char == ")":
+            depth += 1
+        elif char == "(":
+            depth -= 1
+            if depth == 0:
+                start = index
+                break
+    if start == -1 or end <= start:
+        return []
+
+    params = []
+    depth = 0
+    current = []
+    for char in declaration[start + 1 : end]:
+        if char == "," and depth == 0:
+            param = "".join(current).strip()
+            if param:
+                params.append(param)
+            current = []
+            continue
+        current.append(char)
+        if char in "([{<":
+            depth += 1
+        elif char in ")]}>":
+            depth = max(depth - 1, 0)
+    param = "".join(current).strip()
+    if param:
+        params.append(param)
+    return params
+
+
+def parse_c_parameter(param: str) -> tuple[str, str] | None:
+    """Parse one C/CUDA parameter declaration into (name, type)."""
+    param = param.strip()
+    if not param or param == "void":
+        return None
+    match = re.search(r"([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*$", param)
+    if match is None:
+        return None
+    name = match.group(1)
+    param_type = param[: match.start(1)].strip()
+    return name, param_type
+
+
+def is_tma_descriptor_type(param_type: str) -> bool:
+    return re.search(r"\bCUtensorMap\b", param_type) is not None
+
+
+def resolve_descriptor_source_name(param_name: str, function_args: list[dict[str, str]]) -> str:
+    for arg in function_args:
+        name = arg["name"]
+        if param_name == name + "_desc" or param_name.startswith(name + "_desc_"):
+            return name
+    return param_name
+
+
+def is_handle_add_byte_offset_call(expr: Any) -> bool:
+    return isinstance(expr, tvm.tirx.Call) and expr.op.same_as(HANDLE_ADD_BYTE_OFFSET_OP)
 
 
 def parse_function_call_args(
     declaration: str,
     function_args: list[dict[str, str]],
-    function_params: list[Any],
+    function_params: list[Any] | None,
     desc_name_map: dict[str, str] | None = None,
     desc_name_var_map: dict[str, tvm.tirx.Var] | None = None,
     transform_arg: Callable[[str, str], Any] | None = None,
@@ -341,25 +385,32 @@ def parse_function_call_args(
     Returns:
         List of parsed call arguments.
     """
-    pattern = r"[,\s]*(?:\w+\s*\*+\s*__restrict__\s+)?(\w+)"
-    matches = re.findall(pattern, declaration)
+    params = []
+    for param in split_function_parameters(declaration):
+        parsed = parse_c_parameter(param)
+        if parsed is not None:
+            params.append(parsed)
+
+    function_arg_map = {arg["name"]: arg for arg in function_args}
     call_args = []
 
-    for i, match in enumerate(matches):
-        for arg in function_args:
-            if arg["name"] == match:
-                if transform_arg is not None:
-                    call_args.append(transform_arg(match, arg["type"]))
-                else:
-                    call_args.append(match)
-            elif maybe_desc_name(arg["name"], matches, i, desc_name_map):
-                if transform_arg is not None:
-                    call_args.append(transform_arg(match, "None"))
-                else:
-                    call_args.append(match)
-                if desc_name_var_map is not None and function_params is not None:
-                    assert len(call_args) <= len(function_params), f"Too many arguments: {len(call_args)} > {len(function_params)}"
-                    desc_name_var_map[match] = function_params[len(call_args) - 1]
+    for param_name, param_type in params:
+        if param_name in function_arg_map:
+            arg = function_arg_map[param_name]
+            if transform_arg is not None:
+                call_args.append(transform_arg(param_name, arg["type"]))
+            else:
+                call_args.append(param_name)
+        elif is_tma_descriptor_type(param_type):
+            if transform_arg is not None:
+                call_args.append(transform_arg(param_name, "None"))
+            else:
+                call_args.append(param_name)
+            if desc_name_map is not None:
+                desc_name_map[param_name] = resolve_descriptor_source_name(param_name, function_args)
+            if desc_name_var_map is not None and function_params is not None:
+                assert len(call_args) <= len(function_params), f"Too many arguments: {len(call_args)} > {len(function_params)}"
+                desc_name_var_map[param_name] = function_params[len(call_args) - 1]
 
     return call_args
 
@@ -398,6 +449,7 @@ def parse_tma_descriptor_args(
     desc_name_map: dict[str, str],
     desc_name_var_map: dict[str, tvm.tirx.Var],
     pythonic_expr_func: Callable[[Any], str],
+    global_address_expr_func: Callable[[Any], str] | None = None,
 ) -> list[TMADescriptorParams]:
     """
     Parse TMA descriptor arguments into structured parameters.
@@ -407,6 +459,7 @@ def parse_tma_descriptor_args(
         desc_name_map: Mapping from descriptor handles to parameter names.
         desc_name_var_map: Mapping from descriptor handles to TVM variables.
         pythonic_expr_func: Function to convert TVM expressions to strings.
+        global_address_expr_func: Optional function for handle expressions.
 
     Returns:
         List of parsed TMA descriptor parameters.
@@ -439,7 +492,10 @@ def parse_tma_descriptor_args(
         if not isinstance(tensor_rank, int) or tensor_rank <= 0:
             raise ValueError(f"Invalid tensor_rank: {tensor_rank}. Must be a positive integer")
 
-        global_address = pythonic_expr_func(global_address)
+        if global_address_expr_func is None:
+            global_address = pythonic_expr_func(global_address)
+        else:
+            global_address = global_address_expr_func(global_address)
         params = TMADescriptorParams(handle_name, dtype, tensor_rank, global_address, is_img2col)
 
         if not is_img2col:

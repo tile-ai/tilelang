@@ -17,6 +17,19 @@ from tilelang import PassConfigKey
 N = 1024
 
 
+def _extract_merged_smem_offsets(src: str) -> list[int]:
+    """Extract merged shared-memory byte offsets from generated CUDA code."""
+    # Alias-preserving lowering emits:
+    #   void* a_shared = ((void*)((char*)buf_dyn_shmem + 0));
+    alias_pattern = r"void\*\s+\w+\s*=\s*\(\(void\*\)\(\(char\*\)buf_dyn_shmem\s*\+\s*(\d+)\)\);"
+    # Direct merged-buffer lowering emits access patterns such as:
+    #   buf_dyn_shmem)[1024])
+    direct_pattern = r"buf_dyn_shmem\)\[(\d+)\]"
+    offsets = {int(m) for m in re.findall(alias_pattern, src)}
+    offsets.update(int(m) for m in re.findall(direct_pattern, src))
+    return sorted(offsets)
+
+
 def _make_data_integrity_kernel():
 
     @tilelang.jit(
@@ -124,20 +137,8 @@ def test_disable_reuse_no_overlap():
     src_no_reuse = kernel_no_reuse.get_kernel_source()
     src_reuse = kernel_reuse.get_kernel_source()
 
-    def extract_smem_offsets(src: str) -> list[int]:
-        """Extract merged shared-memory offsets from generated code."""
-        # Alias-preserving lowering emits:
-        #   void* a_shared = ((void*)((char*)buf_dyn_shmem + 0));
-        alias_pattern = r"void\*\s+\w+\s*=\s*\(\(void\*\)\(\(char\*\)buf_dyn_shmem\s*\+\s*(\d+)\)\);"
-        # Direct merged-buffer lowering emits access patterns such as:
-        #   buf_dyn_shmem)[1024])
-        direct_pattern = r"buf_dyn_shmem\)\[(\d+)\]"
-        offsets = {int(m) for m in re.findall(alias_pattern, src)}
-        offsets.update(int(m) for m in re.findall(direct_pattern, src))
-        return sorted(offsets)
-
-    offsets_no_reuse = extract_smem_offsets(src_no_reuse)
-    offsets_reuse = extract_smem_offsets(src_reuse)
+    offsets_no_reuse = _extract_merged_smem_offsets(src_no_reuse)
+    offsets_reuse = _extract_merged_smem_offsets(src_reuse)
 
     # With reuse disabled: must have at least 2 distinct offsets (buffers not merged)
     assert len(offsets_no_reuse) >= 2, f"Expected >=2 distinct smem offsets with reuse disabled, got {offsets_no_reuse}"
@@ -146,7 +147,37 @@ def test_disable_reuse_no_overlap():
     assert len(offsets_reuse) == 1, f"Expected 1 smem offset with reuse enabled, got {offsets_reuse}"
 
 
+@tilelang.testing.requires_cuda
+def test_disable_reuse_fp4_uses_packed_storage_size():
+    """FP4 shared-memory merge planning should count two logical elements per byte."""
+
+    @T.prim_func
+    def main(C: T.Tensor((1,), T.uint8)):
+        with T.Kernel(1, threads=128):
+            a_shared = T.alloc_shared((128,), T.float4_e2m1fn)
+            b_shared = T.alloc_shared((128,), T.float4_e2m1fn)
+            a_bytes = T.view(a_shared, (64,), dtype=T.uint8)
+            b_bytes = T.view(b_shared, (64,), dtype=T.uint8)
+
+            for i in T.Parallel(64):
+                a_bytes[i] = T.uint8(1)
+            for i in T.Parallel(64):
+                b_bytes[i] = a_bytes[i]
+            C[0] = b_bytes[0]
+
+    kernel = tilelang.compile(
+        main,
+        out_idx=[0],
+        target="cuda",
+        pass_configs={PassConfigKey.TL_DISABLE_SHARED_MEMORY_REUSE: True},
+    )
+    offsets = _extract_merged_smem_offsets(kernel.get_kernel_source())
+    assert 0 in offsets, f"Expected first FP4 shared buffer at byte offset 0, got {offsets}"
+    assert 64 in offsets, f"Expected second FP4 shared buffer at byte offset 64, got {offsets}"
+
+
 if __name__ == "__main__":
     test_disable_reuse_data_integrity()
     test_disable_reuse_no_overlap()
+    test_disable_reuse_fp4_uses_packed_storage_size()
     print("All tests passed!")
