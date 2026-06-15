@@ -1,4 +1,4 @@
-"""Tests for TileLang `LowerPTXAsyncCopy` transform pass."""
+"""Tests for TileLang CUDA `LowerPTXAsyncCopy` transform pass."""
 
 from tilelang import tvm
 import tilelang as tl
@@ -48,7 +48,7 @@ def test_lower_ptx_async_copy_rewrites_plain_parallel_copy():
     func = before.with_attr("global_symbol", "main").with_attr("target", target)
     mod = tvm.IRModule.from_expr(func)
 
-    mod = tl.transform.LowerPTXAsyncCopy()(mod)
+    mod = tl.cuda.transform.LowerPTXAsyncCopy()(mod)
     calls = _count_calls(mod["main"])
 
     assert calls.get("tl.ptx_cp_async", 0) > 0
@@ -74,7 +74,7 @@ def test_lower_ptx_async_copy_respects_explicit_async_scope():
     func = before.with_attr("global_symbol", "main").with_attr("target", target)
     mod = tvm.IRModule.from_expr(func)
 
-    mod = tl.transform.LowerPTXAsyncCopy()(mod)
+    mod = tl.cuda.transform.LowerPTXAsyncCopy()(mod)
     calls = _count_calls(mod["main"])
 
     assert calls.get("tl.ptx_cp_async", 0) > 0
@@ -99,7 +99,7 @@ def test_lower_ptx_async_copy_supports_multi_dim_indices():
     func = before.with_attr("global_symbol", "main").with_attr("target", target)
     mod = tvm.IRModule.from_expr(func)
 
-    mod = tl.transform.LowerPTXAsyncCopy()(mod)
+    mod = tl.cuda.transform.LowerPTXAsyncCopy()(mod)
     calls = _count_calls(mod["main"])
 
     assert calls.get("tl.ptx_cp_async", 0) > 0
@@ -125,7 +125,7 @@ def test_lower_ptx_async_copy_rewrites_vectorized_float16_loop():
     func = before.with_attr("global_symbol", "main").with_attr("target", target)
     mod = tvm.IRModule.from_expr(func)
 
-    mod = tl.transform.LowerPTXAsyncCopy()(mod)
+    mod = tl.cuda.transform.LowerPTXAsyncCopy()(mod)
     calls = _count_calls(mod["main"])
 
     assert calls.get("tl.ptx_cp_async", 0) > 0
@@ -153,7 +153,7 @@ def test_lower_ptx_async_copy_hoists_sync_out_of_predicated_block():
     func = before.with_attr("global_symbol", "main").with_attr("target", target)
     mod = tvm.IRModule.from_expr(func)
 
-    mod = tl.transform.LowerPTXAsyncCopy()(mod)
+    mod = tl.cuda.transform.LowerPTXAsyncCopy()(mod)
     calls = _count_calls(mod["main"])
     assert calls.get("tl.ptx_cp_async", 0) > 0
     assert calls.get("tirx.ptx_commit_group", 0) > 0
@@ -192,7 +192,7 @@ def test_lower_ptx_async_copy_respects_enable_async_copy_config():
     mod = tvm.IRModule.from_expr(func)
 
     with tvm.transform.PassContext(config={tl.PassConfigKey.TL_ENABLE_ASYNC_COPY: False}):
-        mod = tl.transform.LowerPTXAsyncCopy()(mod)
+        mod = tl.cuda.transform.LowerPTXAsyncCopy()(mod)
     calls = _count_calls(mod["main"])
 
     assert calls.get("tl.ptx_cp_async", 0) == 0
@@ -219,7 +219,7 @@ def test_lower_ptx_async_copy_does_not_duplicate_existing_sync():
     func = before.with_attr("global_symbol", "main").with_attr("target", target)
     mod = tvm.IRModule.from_expr(func)
 
-    mod = tl.transform.LowerPTXAsyncCopy()(mod)
+    mod = tl.cuda.transform.LowerPTXAsyncCopy()(mod)
     calls = _count_calls(mod["main"])
 
     assert calls.get("tl.ptx_cp_async", 0) > 0
@@ -245,7 +245,7 @@ def test_lower_ptx_async_copy_inserts_commit_before_existing_wait():
     func = before.with_attr("global_symbol", "main").with_attr("target", target)
     mod = tvm.IRModule.from_expr(func)
 
-    mod = tl.transform.LowerPTXAsyncCopy()(mod)
+    mod = tl.cuda.transform.LowerPTXAsyncCopy()(mod)
     calls = _count_calls(mod["main"])
 
     assert calls.get("tl.ptx_cp_async", 0) > 0
@@ -271,7 +271,7 @@ def test_lower_ptx_async_copy_keeps_sync_out_of_inner_unrolled_loops_in_pipeline
     func = before.with_attr("global_symbol", "main").with_attr("target", target)
     mod = tvm.IRModule.from_expr(func)
 
-    mod = tl.transform.LowerPTXAsyncCopy()(mod)
+    mod = tl.cuda.transform.LowerPTXAsyncCopy()(mod)
     calls = _count_calls(mod["main"])
     assert calls.get("tl.ptx_cp_async", 0) > 0
     assert calls.get("tirx.ptx_commit_group", 0) > 0
@@ -319,7 +319,7 @@ def test_lower_ptx_async_copy_from_vectorized_loop():
     func = before.with_attr("global_symbol", "main").with_attr("target", target)
     mod = tvm.IRModule.from_expr(func)
 
-    mod = tl.transform.LowerPTXAsyncCopy()(mod)
+    mod = tl.cuda.transform.LowerPTXAsyncCopy()(mod)
     calls = _count_calls(mod["main"])
     assert calls.get("tl.ptx_cp_async", 0) > 0
 
@@ -342,7 +342,7 @@ def test_lower_ptx_async_copy_skips_vectorized_broadcast_source():
     func = before.with_attr("global_symbol", "main").with_attr("target", target)
     mod = tvm.IRModule.from_expr(func)
 
-    mod = tl.transform.LowerPTXAsyncCopy()(mod)
+    mod = tl.cuda.transform.LowerPTXAsyncCopy()(mod)
     calls = _count_calls(mod["main"])
     assert calls.get("tl.ptx_cp_async", 0) == 0
     assert calls.get("tirx.ptx_commit_group", 0) == 0
@@ -365,7 +365,7 @@ def test_lower_ptx_async_copy_from_ramp():
     func = before.with_attr("global_symbol", "main").with_attr("target", target)
     mod = tvm.IRModule.from_expr(func)
 
-    mod = tl.transform.LowerPTXAsyncCopy()(mod)
+    mod = tl.cuda.transform.LowerPTXAsyncCopy()(mod)
     print(mod)
     calls = _count_calls(mod["main"])
     print(calls)

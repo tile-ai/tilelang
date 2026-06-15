@@ -201,7 +201,7 @@ def mxfp8_blockscaled_gemm_2cta(
     SFB: T.Tensor[[sf_k_groups * N], T.uint32]
     C = T.empty((M, N), out_dtype)
 
-    with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=128, cluster_dims=2) as (bx, by):
+    with T.ClusterKernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=128, cluster_dims=2) as (bx, by):
         cta_id = T.block_rank_in_cluster()
         T.assume(cta_id < 2)
 
@@ -356,7 +356,7 @@ def mxfp8_blockscaled_gemm_2cta_persistent(
     group_size = 16  # in cluster
     assert n_blocks % (2 * group_size) == 0  # Please adjust group_size if not satisfied
 
-    with T.Kernel(sm_num, threads=256, cluster_dims=2) as (block_id):
+    with T.ClusterKernel(sm_num, threads=256, cluster_dims=2) as (block_id):
         cta_id = T.block_rank_in_cluster()
         T.assume(cta_id < 2)
 

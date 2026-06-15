@@ -39,7 +39,7 @@ def gemm_clc_persistent_2cta(
     k_blocks = T.ceildiv(K, block_K)
     assert n_blocks % (2 * group_size) == 0
 
-    with T.Kernel(total_cluster_tiles * 2, threads=256, cluster_dims=2) as block_id:
+    with T.ClusterKernel(total_cluster_tiles * 2, threads=256, cluster_dims=2) as block_id:
         A_shared = T.alloc_shared((num_stages, block_M, block_K), in_dtype)
         B_shared = T.alloc_shared((num_stages, block_K, block_N // 2), in_dtype)
         C_tmem_0 = T.alloc_tmem([block_M, block_N], accum_dtype)
@@ -206,7 +206,7 @@ def gemm_clc_persistent_2cta_pipelined_clc(
     k_blocks = T.ceildiv(K, block_K)
     assert n_blocks % (2 * group_size) == 0
 
-    with T.Kernel(total_cluster_tiles * 2, threads=256, cluster_dims=2) as block_id:
+    with T.ClusterKernel(total_cluster_tiles * 2, threads=256, cluster_dims=2) as block_id:
         A_shared = T.alloc_shared((num_stages, block_M, block_K), in_dtype)
         B_shared = T.alloc_shared((num_stages, block_K, block_N // 2), in_dtype)
         C_tmem_0 = T.alloc_tmem([block_M, block_N], accum_dtype)

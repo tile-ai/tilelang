@@ -60,7 +60,7 @@ def grouped_mxfp8_blockscaled_gemm_2cta(
     max_M_blocks = T.ceildiv(max_M_per_E, block_M)
     max_M_blocks_padded = T.ceildiv(max_M_blocks, 2) * 2
 
-    with T.Kernel(max_M_blocks_padded, n_blocks, E, threads=128, cluster_dims=2) as (pid_m, pid_n, eid):
+    with T.ClusterKernel(max_M_blocks_padded, n_blocks, E, threads=128, cluster_dims=2) as (pid_m, pid_n, eid):
         cta_id = T.block_rank_in_cluster()
         T.assume(cta_id < 2)
 
@@ -242,7 +242,7 @@ def grouped_mxfp8_blockscaled_gemm_2cta_persistent(
     waves = T.ceildiv(total_cluster_tiles, num_clusters)
     group_size = 8
 
-    with T.Kernel(sm_num, threads=256, cluster_dims=2) as (block_id):
+    with T.ClusterKernel(sm_num, threads=256, cluster_dims=2) as (block_id):
         cta_id = T.block_rank_in_cluster()
         T.assume(cta_id < 2)
 

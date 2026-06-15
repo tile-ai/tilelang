@@ -3,7 +3,7 @@
  *  \brief Convert shared.tmem buffers to plain shared + ptx init, and do
  *         coordinate translation (from logical address to physical address)
  */
-#include "backend/common/target_utils.h"
+#include "cuda/target_utils.h"
 #include "op/builtin.h"
 #include "support/check.h"
 #include "tvm/ir/type.h"
@@ -284,7 +284,7 @@ private:
 
     Array<Stmt> new_body;
     ICHECK(target_.defined()) << "LowerSharedTmem requires a bound target";
-    auto warp_size = TargetGetWarpSize(target_);
+    auto warp_size = TargetCudaGetWarpSize(target_);
     auto thread_var_div_warp_size =
         FloorDiv(thread_var_->var, IntImm(thread_var_->var->dtype, warp_size));
     new_body.push_back(IfThenElse(EQ(thread_var_div_warp_size, 0),

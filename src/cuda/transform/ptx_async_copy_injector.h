@@ -13,8 +13,8 @@ struct PTXAsyncCopyInjectResult {
 /*! \brief Inject PTX cp.async lowering patterns into a statement.
  *
  * This is the statement-level entrypoint used by other transforms to apply the
- * same rewrite as the `tl.LowerPTXAsyncCopy` pass, but scoped to a region
- * (e.g., a lowered parallel loop) rather than the whole PrimFunc.
+ * same rewrite as CUDA PTX async-copy passes, but scoped to a region (e.g.,
+ * a lowered parallel loop) rather than the whole PrimFunc.
  */
 PTXAsyncCopyInjectResult
 InjectPTXAsyncCopy(const tvm::tirx::Stmt &body, bool enable_auto_async_copy,

@@ -97,10 +97,8 @@ def _normalize_bindings(bindings: list[Var]) -> Var | list[Var]:
 
 def _normalize_threads(
     threads: int | list[int] | tuple | None,
-    *,
-    is_cpu: bool,
-) -> list[int] | None:
-    if not is_cpu and threads is None:
+) -> list[int]:
+    if threads is None:
         threads = 128  # default thread number
 
     if isinstance(threads, int):
@@ -110,8 +108,7 @@ def _normalize_threads(
     if isinstance(threads, tuple):
         return list(threads) + [1] * (3 - len(threads))
 
-    assert is_cpu, "threads must be an integer or a list of integers"
-    return None
+    raise ValueError("threads must be an integer or a list of integers")
 
 
 def _normalize_cluster_dims(
@@ -149,15 +146,9 @@ class KernelLaunchFrame(TIRFrame):
         last_block_frame = self.frames[-1]
         assert isinstance(last_block_frame, SBlockFrame), f"Last frame must be a block frame, got {last_block_frame}"
 
-        maybe_cpu = last_block_frame.annotations.get("tilelang.is_cpu_kernel_frame", False)
-
-        if maybe_cpu:
-            # CPU kernel frame, return a list of for frame items.
-            return _normalize_bindings([frame.vars[0] for frame in self.frames[0:-1]])
-        else:
-            # Otherwise, return a list of iter_var.var objects (excluding the last 4 frames).
-            # As 4 frames for threadIdx.x, threadIdx.y, threadIdx.z and block frame with attributes
-            return _normalize_bindings([frame.iter_var.var for frame in self.frames[0:-4]])
+        # Return a list of grid loop vars (excluding the last 4 frames:
+        # threadIdx.x, threadIdx.y, threadIdx.z and the block frame with attributes).
+        return _normalize_bindings([frame.vars[0] for frame in self.frames[0:-4]])
 
     def __exit__(self, ptype, value, trace):
         """
@@ -183,8 +174,8 @@ class KernelLaunchFrame(TIRFrame):
         Returns the block extent for the given dimension.
         dim=0 corresponds to blockIdx.x, dim=1 to blockIdx.y, and dim=2 to blockIdx.z.
         """
-        iter_var = self.frames[dim].iter_var
-        return int(iter_var.dom.extent)
+        iter_var = self.frames[dim].doms[0]
+        return int(iter_var.extent)
 
     def get_block_extents(self) -> list[int]:
         """
@@ -197,8 +188,8 @@ class KernelLaunchFrame(TIRFrame):
         Returns the thread extent for the given dimension.
         dim=0 corresponds to threadIdx.x, dim=1 to threadIdx.y, and dim=2 to threadIdx.z.
         """
-        iter_var = self.frames[-4 + dim].iter_var
-        return int(iter_var.dom.extent)
+        iter_var = self.frames[-4 + dim].doms[0]
+        return int(iter_var.extent)
 
     def get_thread_extents(self) -> list[int]:
         """
@@ -211,14 +202,14 @@ class KernelLaunchFrame(TIRFrame):
         Returns the thread binding for the given dimension.
         dim=0 corresponds to threadIdx.x, dim=1 to threadIdx.y, and dim=2 to threadIdx.z.
         """
-        return self.frames[-4 + dim].iter_var.var
+        return self.frames[-4 + dim].vars[0]
 
     def get_thread_bindings(self) -> list[Var]:
         """
         Returns the thread binding for the given dimension.
         dim=0 corresponds to threadIdx.x, dim=1 to threadIdx.y, and dim=2 to threadIdx.z.
         """
-        return [frame.iter_var.var for frame in self.frames[-4:-1]]
+        return [frame.vars[0] for frame in self.frames[-4:-1]]
 
     def get_num_threads(self) -> int:
         """
@@ -234,27 +225,27 @@ class KernelLaunchFrame(TIRFrame):
         Returns the block binding for the given dimension.
         dim=0 corresponds to blockIdx.x, dim=1 to blockIdx.y, and dim=2 to blockIdx.z.
         """
-        return self.frames[dim].iter_var.var
+        return self.frames[dim].vars[0]
 
     def get_block_bindings(self) -> list[Var]:
         """
         Returns all three block bindings.
         """
-        return [frame.iter_var.var for frame in self.frames[0:-4]]
+        return [frame.vars[0] for frame in self.frames[0:-4]]
 
     @property
     def blocks(self) -> list[Var]:
         """
         Returns the block indices from the topmost frame.
         """
-        return [frame.iter_var.var for frame in self.frames[0:-4]]
+        return [frame.vars[0] for frame in self.frames[0:-4]]
 
     @property
     def threads(self) -> list[Var]:
         """
         Returns the thread indices from the topmost frame.
         """
-        return [frame.iter_var.var for frame in self.frames[-4:]]
+        return [frame.vars[0] for frame in self.frames[-4:-1]]
 
     @property
     def num_threads(self) -> int:
@@ -267,11 +258,15 @@ class KernelLaunchFrame(TIRFrame):
 def Kernel(
     *blocks: int | tirx.PrimExpr,
     threads: int | list[int] | tuple | None = None,
-    cluster_dims: int | tuple[int, int, int] | list[int] | None = None,
-    is_cpu: bool = False,
     prelude: str | None = None,
 ):
-    """Tools to quickly construct a GPU kernel launch frame.
+    """Tools to quickly construct a kernel launch frame.
+
+    The launch nest is emitted in a target-neutral form (thread_binding
+    For loops); each backend pipeline materializes it via
+    MaterializeKernelLaunch. Backends without SIMT (e.g. CPU) simply
+    ignore the thread extents at compile time, so the same kernel can be
+    compiled for any target.
 
     Parameters
     ----------
@@ -281,11 +276,6 @@ def Kernel(
         A integer representing blockDim.x
         Or a list of integers representing blockDim.(x|y|z)
         if the value is -1, we skip the threadIdx.x binding.
-    cluster_dims : int | tuple[int, int, int] | list[int] | None
-        The cluster dimensions for SM90+ cluster launch.
-        For example, use 2 or (2, 1, 1) to create 2-CTA clusters.
-        When specified, the kernel will be launched using cudaLaunchKernelEx
-        with cudaLaunchAttributeClusterDimension.
     prelude : str
         The import c code of the kernel,
         will be injected before the generated kernel code.
@@ -312,13 +302,6 @@ def Kernel(
         with T.Kernel(grid_x, grid_y, threads=(64, 2)) as (bx, by):
             tx, ty = T.get_thread_bindings()
             ...
-
-    Emit a CPU kernel where thread bindings are skipped:
-
-    .. code-block:: python
-
-        with T.Kernel(loop_extent, is_cpu=True) as (i,):
-            ...
     """
     # In eager mode, we construct AST directly without prim_func,
     # so there must be a Builder available. If not, this function
@@ -330,10 +313,56 @@ def Kernel(
         raise JITNoBuilderError("T.Kernel() can only be used inside @tilelang.jit or @T.prim_func context. No Builder is available.")
 
     attrs: dict = {}
-    threads = _normalize_threads(threads, is_cpu=is_cpu)
+    threads = _normalize_threads(threads)
 
-    if is_cpu:
-        attrs["tilelang.is_cpu_kernel_frame"] = True
+    if prelude is not None:
+        attrs["pragma_import_c"] = prelude
+
+    return _ffi_api.KernelLaunch(blocks, threads, attrs)
+
+
+def ClusterKernel(
+    *blocks: int | tirx.PrimExpr,
+    cluster_dims: int | tuple[int, int, int] | list[int],
+    threads: int | list[int] | tuple | None = None,
+    prelude: str | None = None,
+):
+    """Construct a kernel launch frame with a CUDA thread block cluster
+    (SM90+ only).
+
+    This is the CUDA-specific variant of :func:`Kernel`: identical launch
+    semantics and bindings, plus a ``cluster_dims`` annotation. The kernel
+    will be launched with cudaLaunchKernelEx using
+    cudaLaunchAttributeClusterDimension.
+
+    Parameters
+    ----------
+    blocks : int
+        A list of extent, can be 1-3 dimension, representing gridDim.(x|y|z)
+    cluster_dims : int | tuple[int, int, int] | list[int]
+        The cluster dimensions. For example, use 2 or (2, 1, 1) to create
+        2-CTA clusters.
+    threads : int
+        A integer representing blockDim.x
+        Or a list of integers representing blockDim.(x|y|z)
+    prelude : str
+        The import c code of the kernel,
+        will be injected before the generated kernel code.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        with T.ClusterKernel(grid_x, grid_y, cluster_dims=2, threads=128) as (bx, by):
+            ...
+    """
+    from tilelang.language.eager.builder import Builder
+
+    if Builder.current() is None:
+        raise JITNoBuilderError("T.ClusterKernel() can only be used inside @tilelang.jit or @T.prim_func context. No Builder is available.")
+
+    attrs: dict = {}
+    threads = _normalize_threads(threads)
 
     if prelude is not None:
         attrs["pragma_import_c"] = prelude
@@ -424,7 +453,7 @@ def CUDASourceCodeKernel(
         raise ValueError("entry_name must be a non-empty string when provided")
     attrs["code_block_entry_name"] = entry_name
 
-    threads = _normalize_threads(threads, is_cpu=False)
+    threads = _normalize_threads(threads)
 
     cluster_dims = _normalize_cluster_dims(cluster_dims)
     if cluster_dims is not None:

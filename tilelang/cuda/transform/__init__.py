@@ -18,20 +18,6 @@ def ProducerConsumerWarpSpecialized():
     return _ffi_api.ProducerConsumerWarpSpecialized()  # type: ignore
 
 
-def ProducerConsumerWarpSpecializedTiled():
-    """Compatibility alias for ``ProducerConsumerWarpSpecialized``.
-
-    The tiled tile-op implementation is now the canonical
-    ``ProducerConsumerWarpSpecialized`` pass.
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return ProducerConsumerWarpSpecialized()
-
-
 def LowerBlackwell2SM():
     """Lower 2SM TCGEN5MMA and related on Blackwell target
 
@@ -89,6 +75,25 @@ def LowerLDGSTG():
         The result pass
     """
     return _ffi_api.LowerLDGSTG()  # type: ignore
+
+
+def LowerPTXAsyncCopy():
+    """Lower eligible global->shared copies into PTX `cp.async` on CUDA.
+
+    When enabled (pass config `tl.enable_async_copy`, default True), this pass
+    may rewrite plain user-written global->shared `BufferStore` patterns (e.g.
+    SIMT copies in `T.Parallel`) into `tir.ptx_cp_async`, and insert
+    `tir.ptx_commit_group` + `tir.ptx_wait_group(0)` to preserve synchronous
+    semantics for normal stores. If explicit commit/wait intrinsics already
+    exist, the pass avoids duplicating them (and may insert a missing commit
+    immediately before an existing wait to cover injected `cp.async`).
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.LowerPTXAsyncCopy()  # type: ignore
 
 
 def MarkCudaSyncCalls(have_pdl: bool = False):
@@ -154,10 +159,10 @@ __all__ = [
     "LowerHopperIntrin",
     "LowerLDGSTG",
     "LowerL2Persistent",
+    "LowerPTXAsyncCopy",
     "LowerSharedBarrier",
     "LowerSharedTmem",
     "MarkCudaSyncCalls",
     "PersistThreadblock",
     "ProducerConsumerWarpSpecialized",
-    "ProducerConsumerWarpSpecializedTiled",
 ]

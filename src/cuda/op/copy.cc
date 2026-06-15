@@ -9,15 +9,15 @@
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 
-#include "backend/common/target_utils.h"
 #include "cuda/op/copy.h"
+#include "cuda/target_utils.h"
+#include "cuda/transform/ptx_async_copy_injector.h"
 #include "layout/tcgen05_layout.h"
 #include "op/builtin.h"
 #include "op/utils.h"
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
 #include "transform/loop_vectorize.h"
-#include "transform/ptx_async_copy_injector.h"
 
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
@@ -347,6 +347,30 @@ MakeTMARows(const Buffer &src, const Array<Range> &src_ranges,
 } // namespace
 
 namespace cuda {
+
+// The TMA unit applies the descriptor's swizzle pattern relative to the
+// shared-memory base address, so the base must sit on a swizzle-pattern
+// repeat boundary or the data lands with a shifted phase (silently wrong
+// results, no fault). Report the requirement implied by the chosen
+// CU_TENSOR_MAP_SWIZZLE_* mode so MergeSharedMemoryAllocations can align the
+// buffer accordingly.
+static void RequireTMASmemAlignment(const LowerArgs &T,
+                                    const Buffer &shared_tensor,
+                                    int cu_tensor_map_swizzle) {
+  if (!T.require_smem_alignment)
+    return;
+  SwizzleMode mode = SwizzleMode::kNone;
+  if (cu_tensor_map_swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B)) {
+    mode = SwizzleMode::kQuarter;
+  } else if (cu_tensor_map_swizzle ==
+             static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
+    mode = SwizzleMode::kHalf;
+  } else if (cu_tensor_map_swizzle ==
+             static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B)) {
+    mode = SwizzleMode::kFull;
+  }
+  T.require_smem_alignment(shared_tensor->data, SmemAlignmentForSwizzle(mode));
+}
 
 struct TMAIm2ColDesc {
   size_t rank;
@@ -876,8 +900,8 @@ Stmt Copy::LowerCluster(const CopyNode &op, const LowerArgs &T,
           MakeTMARows(src, src_range, dst, dst_range, op.dst_block.value(),
                       barrier_load, analyzer);
 
-      if (T.UpdateBarrierArrive) {
-        T.UpdateBarrierArrive(barrier_data_var, n_rows);
+      if (T.update_barrier_arrive) {
+        T.update_barrier_arrive(barrier_data_var, n_rows);
       }
 
       Stmt seq = (tma_stmts.size() == 1)
@@ -1539,6 +1563,13 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     }
   }
 
+  // The TMA unit applies the descriptor's swizzle pattern relative to the
+  // shared-memory base address, so the base must sit on a swizzle-pattern
+  // repeat boundary or the data lands with a shifted phase (silently wrong
+  // results, no fault). Report the requirement implied by the chosen swizzle
+  // mode so MergeSharedMemoryAllocations can align the buffer accordingly.
+  RequireTMASmemAlignment(T, shared_tensor, desc.swizzle);
+
   auto inner_box_dim = as_const_int(desc.smem_box[0]);
   if (inner_box_dim == nullptr) {
     DLOG(WARNING) << "inner_box_dim " << desc.smem_box[0]
@@ -1604,9 +1635,9 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     } else if (GetIsTmaCopy(op)) {
       LOG(FATAL) << "T.tma_copy() requires a barrier argument. "
                  << "Use T.tma_copy(src, dst, barrier=mbar[idx]).";
-    } else if (T.AllocMBarrier) {
+    } else if (T.alloc_mbarrier) {
       barrier_base_id =
-          T.AllocMBarrier(1, MakeCopyMBarrierName(op.src, op.dst));
+          T.alloc_mbarrier(1, MakeCopyMBarrierName(op.src, op.dst));
       PrimExpr mbar_idx = IntImm(DataType::Int(32), barrier_base_id);
       mbar_handle = BufferLoad(T.mbarrier_buffer->value(), {mbar_idx});
     }
@@ -1918,6 +1949,7 @@ Stmt Copy::LowerBulkGather4(const CopyNode &op, const LowerArgs &T,
           << " exceeds " << max_bytes << "B swizzle limit";
     }
   }
+  RequireTMASmemAlignment(T, shared_tensor, desc.swizzle);
 
   Call create_descriptor =
       Call(DataType::Handle(), create_tma_descriptor(), desc.EncodeCallArgs());
@@ -2026,9 +2058,9 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
     } else if (GetIsTmaCopy(op)) {
       LOG(FATAL) << "T.tma_copy() requires a barrier argument. "
                  << "Use T.tma_copy(src, dst, barrier=mbar[idx]).";
-    } else if (T.AllocMBarrier) {
+    } else if (T.alloc_mbarrier) {
       barrier_base_id =
-          T.AllocMBarrier(1, MakeCopyMBarrierName(op.src, op.dst));
+          T.alloc_mbarrier(1, MakeCopyMBarrierName(op.src, op.dst));
       PrimExpr mbar_idx = IntImm(DataType::Int(32), barrier_base_id);
       mbar_handle = BufferLoad(T.mbarrier_buffer->value(), {mbar_idx});
     }
@@ -2164,6 +2196,8 @@ Stmt Im2Col::Lower(const Im2ColOpNode &op, const LowerArgs &T,
       LOG(FATAL) << "Cannot detect TMA layout.";
     }
   }
+  RequireTMASmemAlignment(
+      T, T.buffer_remap.count(dst) ? T.buffer_remap[dst] : dst, desc.swizzle);
 
   Call create_desc = Call(DataType::Handle(), create_tma_im2col_descriptor(),
                           desc.EncodeCallArgs());
@@ -2209,9 +2243,9 @@ Stmt Im2Col::Lower(const Im2ColOpNode &op, const LowerArgs &T,
   if (auto user_barrier = op.annotations_.Get("barrier")) {
     mbar_handle = Downcast<PrimExpr>(user_barrier.value());
     barrier_base_id = 0;
-  } else if (T.AllocMBarrier) {
+  } else if (T.alloc_mbarrier) {
     barrier_base_id =
-        T.AllocMBarrier(1, MakeCopyMBarrierName(op.src_, op.dst_));
+        T.alloc_mbarrier(1, MakeCopyMBarrierName(op.src_, op.dst_));
     PrimExpr mbar_idx = IntImm(DataType::Int(32), barrier_base_id);
     mbar_handle = BufferLoad(T.mbarrier_buffer->value(), {mbar_idx});
   }

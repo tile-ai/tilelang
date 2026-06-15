@@ -257,6 +257,7 @@ void ParallelOpNode::RecordBufferAccess(const Buffer &buffer,
     BufferAccessInfo info;
     info.indices = indices;
     it = indice_map_.emplace(buffer, std::move(info)).first;
+    access_order_.push_back(buffer);
   }
   if (is_write) {
     it->second.is_write = true;
@@ -337,7 +338,8 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     // for i in T.Parallel(m):
     //   fragment[0] = x[i]
     // then fragment[0] must be replicated on all threads.
-    for (const auto &[buffer, access] : indice_map_) {
+    for (const auto &buffer : access_order_) {
+      const auto &access = GetAccessInfo(buffer);
       if (T.layout_map.count(buffer)) {
         continue;
       }
@@ -387,7 +389,8 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
 
   // Collect fragment buffers with const index and all fragment_buffers
   std::vector<Buffer> const_index_fragment_buffer, fragment_buffers;
-  for (const auto &[buffer, access] : indice_map_) {
+  for (const auto &buffer : access_order_) {
+    const auto &access = GetAccessInfo(buffer);
     if (!IsFragmentBuffer(buffer))
       continue;
     fragment_buffers.push_back(buffer);
@@ -419,9 +422,11 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
 
   // Step 1: try to infer loop's partition from a source fragment
   Buffer source_buffer, read_source_buffer;
+  bool source_buffer_is_write = false;
   Buffer replicated_write_buffer; // Backup: fully replicated write buffer
 
-  for (const auto &[buffer, access] : indice_map_) {
+  for (const auto &buffer : access_order_) {
+    const auto &access = GetAccessInfo(buffer);
     if (T.layout_map.count(buffer)) {
       // skip reducers with rep=ALL
       if (auto info = reducer_info_map_.Get(buffer->data);
@@ -433,6 +438,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
 
       if (access.is_write) {
         source_buffer = buffer;
+        source_buffer_is_write = true;
       } else {
         // Keep the buffer with largest number of indices
         // (which means the inference based on that buffer is more accurate)
@@ -451,6 +457,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
         if (frag.has_value() && is_one(frag.value()->ReplicateExtent()) &&
             !source_buffer.defined()) {
           source_buffer = buffer;
+          source_buffer_is_write = false;
         }
       }
     }
@@ -472,7 +479,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
       predicate_ = annotated_predicate_.value();
     }
   } else if (!loop_layout_.defined() && source_buffer.defined() &&
-             allow_layout_propgate) {
+             (allow_layout_propgate || source_buffer_is_write)) {
     loop_layout_ = ComputeLoopLayoutFromBuffer(source_buffer, T);
   } else if (!loop_layout_.defined() && level == InferLevel::kFree) {
     // For free layout inference
@@ -560,7 +567,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
 
   // Step 4: Collect buffer fragments
   LayoutMap results;
-  for (const auto &[buffer, access] : indice_map_) {
+  for (const auto &buffer : access_order_) {
     if (!T.layout_map.count(buffer)) {
       auto dst_layout =
           CompleteBufferFragment(buffer)->BindThreadRange(T.thread_bounds);
@@ -640,7 +647,8 @@ bool ParallelOpNode::ValidateCandidateAgainstFragments(
     bool check_forward_index, const Buffer &source_buffer) const {
   auto vars =
       loop_vars_.Map([](const IterVar &iv) { return PrimExpr(iv->var); });
-  for (const auto &[buffer, access] : indice_map_) {
+  for (const auto &buffer : access_order_) {
+    const auto &access = GetAccessInfo(buffer);
     if (!T.layout_map.count(buffer))
       continue;
     if (auto info = reducer_info_map_.Get(buffer->data);
@@ -660,9 +668,14 @@ bool ParallelOpNode::ValidateCandidateAgainstFragments(
       }
       success = false;
     }
+    // Fragment writes need exact owner-thread compatibility. Coverage alone
+    // allows extra loop threads to write local slots that belong to different
+    // logical fragment elements under the buffer layout.
     if (access.is_write &&
-        !ProveFragmentContains(fragment, candidate, access.indices, vars,
-                               analyzer_, check_forward_index)) {
+        (!ProveFragmentContains(fragment, candidate, access.indices, vars,
+                                analyzer_, check_forward_index) ||
+         !ProveFragmentContains(candidate, fragment, vars, access.indices,
+                                analyzer_, check_forward_index))) {
       if (throw_on_error) {
         oss << "Layout infer conflict between " << buffer << " and "
             << source_buffer << " in T.Parallel loop:" << '\n'

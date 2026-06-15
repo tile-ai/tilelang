@@ -11,6 +11,7 @@
 #include <tvm/tirx/stmt_functor.h>
 
 #include <unordered_map>
+#include <vector>
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
@@ -121,6 +122,8 @@ public:
   For GetRoot() const { return root_; }
   // Get the mapping from buffer to access indices + access type.
   const BufferIndiceMap &GetIndiceMap() const { return indice_map_; }
+  // Get buffers in the order they first appear in the loop body.
+  const std::vector<Buffer> &GetAccessOrder() const { return access_order_; }
   // Get the predicate for a given thread variable.
   Optional<PrimExpr> GetPredicate(Var thread_var) const;
 
@@ -184,6 +187,9 @@ private:
   ParallelLoopNestVisitor V;
   // Mapping from buffer to their access indices and access type in the loop.
   BufferIndiceMap indice_map_;
+  // Stable first-use order for indice_map_.  Layout inference must not depend
+  // on std::unordered_map iteration order when selecting source buffers.
+  std::vector<Buffer> access_order_;
   // The loop variables for the parallel loop nest.
   Array<IterVar> loop_vars_;
   // The inner_vars_

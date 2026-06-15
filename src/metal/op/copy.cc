@@ -5,8 +5,8 @@
 
 #include "op/copy.h"
 
-#include "backend/common/target_utils.h"
 #include "metal/op/utils.h"
+#include "metal/target_utils.h"
 #include "op/utils.h"
 
 #include <tvm/tirx/builtin.h>
@@ -48,7 +48,7 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &T,
   PrimExpr dst_col_base = op.dst_range[1]->min;
   PrimExpr dst_stride = op.dst->shape[op.dst->shape.size() - 1];
 
-  int warp_size = TargetGetWarpSize(T.target);
+  int warp_size = TargetMetalGetWarpSize(T.target);
   const auto *block_size_imm = T.thread_bounds->extent.as<IntImmNode>();
   TVM_FFI_ICHECK(block_size_imm)
       << "simdgroup copy requires constant thread bounds";

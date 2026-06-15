@@ -5,7 +5,7 @@ import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm as tvm
 from tilelang.layout import make_swizzled_layout
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 
 
 def matmul_pipelined(M, N, K, block_M, block_K, block_N, num_stages, dtype="float16", threads=128):
@@ -314,6 +314,7 @@ def test_tiled_ws_places_producer_in_first_warp_group():
     mod = tvm.IRModule.from_expr(func)
     target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
     mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
     script = mod["main"].script()
 
@@ -548,6 +549,7 @@ def test_tiled_ws_explicit_cp_async_wait_precedes_first_consumer_read():
     mod = tvm.IRModule.from_expr(func)
     target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
     mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
     script = mod["main"].script()
 
@@ -586,6 +588,7 @@ def test_tiled_ws_propagates_nested_postloop_liveness_to_outer_prelude():
     mod = tvm.IRModule.from_expr(func)
     target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
     mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
     script = mod["main"].script()
 

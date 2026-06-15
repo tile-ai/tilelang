@@ -3,7 +3,7 @@ from __future__ import annotations
 from tilelang.tileop.gemm.registry import register_gemm_impl
 from .gemm_mfma import GEMM_INST_MFMA, GemmMFMA
 from .gemm_wmma import GEMM_INST_WMMA, GemmWMMA
-from tilelang.utils.target import target_is_hip
+from tilelang.rocm.target import target_is_hip
 
 
 def _match_mfma(target) -> bool:

@@ -56,7 +56,6 @@ def _write_complete_kernel_cache_entry(
     key: str,
     device_source: str = "// device kernel",
     host_source: str = "// host kernel",
-    prim_func=None,
 ) -> Path:
     cache_path = Path(cache._get_cache_path(key))
     cache_path.mkdir(parents=True)
@@ -65,9 +64,6 @@ def _write_complete_kernel_cache_entry(
     (cache_path / cache.kernel_lib_path).write_bytes(b"fake-so")
     with (cache_path / cache.params_path).open("wb") as f:
         cloudpickle.dump(["param"], f)
-    if prim_func is not None:
-        with (cache_path / cache.prim_func_path).open("wb") as f:
-            cloudpickle.dump(prim_func, f)
     return cache_path
 
 
@@ -159,109 +155,45 @@ def test_kernel_cache_disk_hit_perf_skips_large_source_file_reads(cache_dirs, mo
     assert source_read_count == 0
 
 
-def test_kernel_cache_frontend_hit_loads_serialized_prim_func(cache_dirs, monkeypatch):
-    cache = KernelCache()
-    key = "frontend-kernel-key"
-    prim_func = {"name": "cached_prim_func"}
-    cache_path = _write_complete_kernel_cache_entry(cache, key, prim_func=prim_func)
-    cache.store_frontend_cache("frontend-key", key)
-
-    sentinel = object()
-    captured = {}
-
-    def fake_from_database(cls, **kwargs):
-        captured.update(kwargs)
-        return sentinel
-
-    monkeypatch.setattr(kernel_cache_mod.JITKernel, "from_database", classmethod(fake_from_database))
-
-    loaded = cache.load_frontend_cached(
-        "frontend-key",
-        target="cuda",
-        target_host=None,
-        out_idx=[0],
-        execution_backend="tvm_ffi",
-        pass_configs=None,
-        compile_flags=None,
-    )
-
-    assert loaded is sentinel
-    assert captured["func"] == prim_func
-    assert captured["host_kernel_source"] == CachedTextSource(path=str(cache_path / cache.host_kernel_path))
-    assert captured["device_kernel_source"] == CachedTextSource(path=str(cache_path / cache.device_kernel_path))
-
-
-def test_kernel_cache_frontend_hit_round_trips_real_prim_func(cache_dirs, tmp_path, monkeypatch):
-    import tilelang.language as T
-    import tvm
-
-    @T.prim_func
-    def kernel():
-        T.evaluate(0)
-
-    cache = KernelCache()
-    key = "frontend-real-prim-func-key"
-    frontend_key = "frontend-real-prim-func"
-    cache_path = Path(cache._get_cache_path(key))
-
-    cache._save_kernel_to_disk(key, _make_fake_kernel(tmp_path), func=kernel)
-    cache.store_frontend_cache(frontend_key, key)
-
-    sentinel = object()
-    captured = {}
-
-    def fake_from_database(cls, **kwargs):
-        captured.update(kwargs)
-        return sentinel
-
-    monkeypatch.setattr(kernel_cache_mod.JITKernel, "from_database", classmethod(fake_from_database))
-
-    loaded = cache.load_frontend_cached(
-        frontend_key,
-        target="cuda",
-        target_host=None,
-        out_idx=[0],
-        execution_backend="tvm_ffi",
-        pass_configs=None,
-        compile_flags=None,
-    )
-
-    assert loaded is sentinel
-    assert (cache_path / cache.prim_func_path).exists()
-    assert isinstance(captured["func"], tvm.tirx.PrimFunc)
-    assert tvm.ir.structural_equal(captured["func"], kernel)
-    assert str(captured["func"].attrs["global_symbol"]) == str(kernel.attrs["global_symbol"])
-
-
-def test_jit_frontend_cache_hit_skips_tir_elaboration(monkeypatch):
+def test_lazy_jit_closure_specialization_re_elaborates_before_kernel_cache(cache_dirs):
     import tilelang
     import tilelang.language as T
-    from tilelang.jit import JITImpl
+    from tilelang.cache import _dispatch_map
 
-    sentinel = object()
-    calls = []
+    try:
+        import torch
+    except ImportError:
+        pytest.skip("PyTorch is required for CUDA availability checks")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to compile the test kernel")
 
-    @tilelang.jit
-    def frontend_cached_kernel(block_m: int = 16):
-        @T.prim_func
-        def kernel():
-            T.evaluate(0)
+    for cache in _dispatch_map.values():
+        cache._memory_cache.clear()
 
-        return kernel
+    def build(n: int):
+        @tilelang.jit
+        def make_kernel():
+            m = T.dynamic("M")
 
-    def fake_load_frontend_cached(frontend_key_data, **kwargs):
-        calls.append((frontend_key_data, kwargs))
-        return sentinel
+            @T.prim_func
+            def copy_kernel(
+                x: T.Tensor[(m, n), T.float32],
+                y: T.Tensor[(m, n), T.float32],
+            ):
+                with T.Kernel(m, threads=128) as pid:
+                    for j in T.Parallel(n):
+                        y[pid, j] = x[pid, j]
 
-    def fail_compile(self, *args, **kwargs):
-        raise AssertionError("frontend cache hit should not elaborate TIR")
+            return copy_kernel
 
-    monkeypatch.setattr("tilelang.cache.load_frontend_cached", fake_load_frontend_cached)
-    monkeypatch.setattr(JITImpl, "compile", fail_compile)
+        return make_kernel()
 
-    assert frontend_cached_kernel(block_m=32) is sentinel
-    assert calls
-    assert "frontend_cached_kernel" in calls[0][0]["function"]
+    kernel_128 = build(128)
+    kernel_256 = build(256)
+
+    assert kernel_128 is not kernel_256
+    assert [tuple(map(str, param.shape)) for param in kernel_128.adapter.params] == [("M", "128"), ("M", "128")]
+    assert [tuple(map(str, param.shape)) for param in kernel_256.adapter.params] == [("M", "256"), ("M", "256")]
 
 
 def test_kernel_cache_disk_hit_rejects_entries_missing_sources(cache_dirs, monkeypatch):

@@ -611,7 +611,7 @@ template <typename Impl> struct ReduceLowerer {
           bool need_workspace = reducing_threads > 32;
           if (need_workspace) {
             int ws_size = reducing_threads * eff_batch;
-            workspace = T.AddWorkspace(ws_size, ws_dtype);
+            workspace = T.add_workspace(ws_size, ws_dtype);
           }
 
           int64_t N_total = 1;
@@ -792,7 +792,7 @@ template <typename Impl> struct ReduceLowerer {
             int workspace_size =
                 static_cast<int>(*as_const_int(T.thread_bounds->extent));
             PrimExpr workspace =
-                T.AddWorkspace(workspace_size, clear_buffer->dtype);
+                T.add_workspace(workspace_size, clear_buffer->dtype);
             thread_reduce_args.push_back(workspace);
           }
           auto call = Call(clear_buffer->dtype, builtin::call_extern(),

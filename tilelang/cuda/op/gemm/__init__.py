@@ -9,7 +9,7 @@ from .gemm_mma_sm70 import GemmMMASm70
 from .gemm_mma_sm75 import GemmMMASm75
 from .gemm_tcgen05 import GEMM_INST_TCGEN05, GemmTCGEN5
 from .gemm_wgmma import GEMM_INST_WGMMA, GemmWGMMA
-from tilelang.utils.target import target_is_cuda, target_is_turing, target_is_volta
+from tilelang.cuda.target import target_is_cuda, target_is_turing, target_is_volta
 
 
 def _match_mma(target) -> bool:
@@ -25,6 +25,7 @@ def _match_mma_sm75(target) -> bool:
 
 
 def _match_fma(target) -> bool:
+    # _match_fma checks CUDA FMA capability; SelectInst decides when to use it.
     return target_is_cuda(target)
 
 
