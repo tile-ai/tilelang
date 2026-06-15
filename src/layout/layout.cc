@@ -1162,10 +1162,6 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](const Buffer &buffer) {
              return makeAlign16BSwizzleLayout(buffer);
            })
-      .def("tl.make_dense_fp4_swizzled_layout",
-           [](const Buffer &buffer) {
-             return makeDenseFp4SwizzleLayout(buffer);
-           })
       .def("tl.make_linear_layout",
            [](Array<PrimExpr> shape) { return makeLinearLayout(shape); })
       .def("tl.make_gemm_fragment_8x8", []() { return makeGemmFragment8x8(); })

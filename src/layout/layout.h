@@ -287,8 +287,6 @@ Layout makeFullBankSwizzleLayout(const Buffer &buffer);
 Layout makeHalfBankSwizzleLayout(const Buffer &buffer);
 Layout makeQuarterBankSwizzleLayout(const Buffer &buffer);
 Layout makeAlign16BSwizzleLayout(const Buffer &buffer);
-// Dense-packed FP4 (e2m1, two per byte) swizzle for tcgen05 mxf4nvf4 operands.
-Layout makeDenseFp4SwizzleLayout(const Buffer &buffer);
 
 // Swizzle mode for shared memory layouts (nvidia only)
 // Smaller enum value = smaller swizzle granularity

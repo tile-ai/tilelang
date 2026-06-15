@@ -525,59 +525,6 @@ static Layout MakeAlign16BSwizzleLayout2D(int stride, int continuous,
   return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
 }
 
-// Dense-packed FP4 swizzle for tcgen05 mxf4nvf4.
-//
-// Unlike MakeAlign16BSwizzleLayout2D (f8f6f4 / unpacksmem: one FP4 per 8-bit
-// container), the mxf4nvf4 MMA consumes FP4 DENSE-packed (two e2m1 per byte).
-// We therefore swizzle at *byte* granularity: a logical FP4 element j maps to
-// packed byte (j/2) plus nibble (j%2); the byte coordinate is XOR-swizzled with
-// the standard >=8-bit bank pattern (SW128/SW64/SW32 chosen by byte width), and
-// the result is re-expanded to an FP4-element index (byte*2 + nibble) so the
-// codegen div_factor=2 packing lands two FP4 per byte.
-static Layout MakeDenseFp4SwizzleLayout2D(int stride, int continuous,
-                                          int element_size) {
-  ICHECK(element_size == 4)
-      << "Dense FP4 swizzle is for e2m1 (4-bit), got element_size="
-      << element_size;
-  ICHECK(stride % 8 == 0) << "stride=" << stride;
-  ICHECK(continuous % 2 == 0) << "continuous (FP4 count) must be even, got "
-                              << continuous;
-  const int byte_continuous = continuous / 2; // packed bytes along K
-  const int vector_size = 16;                 // 128 / 8 (byte domain)
-  // Pick the largest bank swizzle whose period divides the packed byte width.
-  int bank; // number of 16B columns XOR-mixed: 8=SW128, 4=SW64, 2=SW32, 1=none
-  if (byte_continuous % (vector_size * 8) == 0)
-    bank = 8;
-  else if (byte_continuous % (vector_size * 4) == 0)
-    bank = 4;
-  else if (byte_continuous % (vector_size * 2) == 0)
-    bank = 2;
-  else
-    bank = 1;
-
-  Var i = InputPlaceholder(0);
-  Var j = InputPlaceholder(1);
-  PrimExpr ts = FloorDiv(i, 8);
-  PrimExpr s = FloorMod(i, 8);
-  PrimExpr b = FloorDiv(j, 2);   // packed byte coordinate
-  PrimExpr nib = FloorMod(j, 2); // nibble within the byte
-  PrimExpr tc = FloorDiv(FloorDiv(b, vector_size), bank);
-  PrimExpr c = FloorMod(FloorDiv(b, vector_size), bank);
-  PrimExpr vec = FloorMod(b, vector_size);
-  PrimExpr c_swizzle;
-  if (bank == 8)
-    c_swizzle = xor8x8(c, s);
-  else if (bank == 4)
-    c_swizzle = xor4x4(c, FloorDiv(s, 2));
-  else if (bank == 2)
-    c_swizzle = xor2x2(c, FloorDiv(s, 4));
-  else
-    c_swizzle = c;
-  PrimExpr byte_index = vec + (c_swizzle + s * bank) * vector_size;
-  PrimExpr index = byte_index * 2 + nib;
-  return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
-}
-
 // Layout swizzling for 128 bytes
 static Layout MakeFullBankSwizzleLayout2D(int stride, int continuous,
                                           int element_size) {
@@ -610,19 +557,6 @@ Layout makeFullBankSwizzleLayout(const Buffer &buffer) {
 Layout makeAlign16BSwizzleLayout(const Buffer &buffer) {
   auto info = GetSwizzleShapeInfoChecked(buffer);
   auto base = MakeAlign16BSwizzleLayout2D(static_cast<int>(info.stride),
-                                          static_cast<int>(info.continuous),
-                                          info.element_size);
-  Array<PrimExpr> leading_shape;
-  leading_shape.reserve(buffer->shape.size() - 2);
-  for (size_t i = 0; i + 2 < buffer->shape.size(); ++i) {
-    leading_shape.push_back(buffer->shape[i]);
-  }
-  return base->Expand(leading_shape);
-}
-
-Layout makeDenseFp4SwizzleLayout(const Buffer &buffer) {
-  auto info = GetSwizzleShapeInfoChecked(buffer);
-  auto base = MakeDenseFp4SwizzleLayout2D(static_cast<int>(info.stride),
                                           static_cast<int>(info.continuous),
                                           info.element_size);
   Array<PrimExpr> leading_shape;
