@@ -41,3 +41,46 @@ def test_bfloat16_rsqrt_compiles_and_runs():
     actual = kernel(inputs)
 
     torch.testing.assert_close(actual, torch.full_like(actual, 0.5))
+
+
+def test_cuda_common_h_bfloat16_fast_exp_does_not_self_recurse():
+    repo_root = Path(__file__).resolve().parents[3]
+    common_h = repo_root / "src" / "tl_templates" / "cuda" / "common.h"
+    source = common_h.read_text()
+
+    # `hexp` is #define'd to cutlass::fast_exp, so the bf16 fast_exp overload
+    # must route through float; calling `::hexp(x)` here recurses into itself.
+    match = re.search(
+        r"bfloat16_t\s+fast_exp\s*\(\s*bfloat16_t\s+x\s*\)\s*\{([^}]*)\}",
+        source,
+    )
+    assert match, "common.h must define fast_exp(bfloat16_t) for bf16 T.exp codegen"
+    body = match.group(1)
+    assert "float(" in body, "bf16 fast_exp must route through float to avoid self-recursion"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+def test_bfloat16_exp_compiles_and_runs():
+    import tilelang
+    import tilelang.language as T
+
+    if torch.cuda.get_device_capability() < (8, 0):
+        pytest.skip("bfloat16 CUDA math requires compute capability >= 8.0")
+
+    n = 32
+
+    @T.prim_func
+    def main(A: T.Tensor((n,), T.bfloat16), B: T.Tensor((n,), T.bfloat16)):
+        with T.Kernel(1, threads=32):
+            values = T.alloc_fragment((n,), T.bfloat16)
+            for i in T.Parallel(n):
+                values[i] = T.exp(A[i])
+            for i in T.Parallel(n):
+                B[i] = values[i]
+
+    kernel = tilelang.compile(main, out_idx=[1], target="cuda")
+    inputs = torch.full((n,), 1.0, dtype=torch.bfloat16, device="cuda")
+    actual = kernel(inputs)
+
+    expected = torch.exp(inputs)
+    torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
