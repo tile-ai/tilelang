@@ -61,5 +61,4 @@ def test_tilelang_language_tma_1d():
 
 
 if __name__ == "__main__":
-    tilelang.disable_cache()
-    run_elementwise_add(128, 128)
+    test_tilelang_language_tma_1d()
