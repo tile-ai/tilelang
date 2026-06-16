@@ -15,7 +15,7 @@ class TVMFFIKernelCache(KernelCache):
 
     def _save_so_cubin_to_disk(self, kernel: JITKernel, cache_path: str, verbose: bool = False):
         kernel_lib_path = os.path.join(cache_path, self.kernel_lib_path)
-        executable = kernel.adapter.executable
+        executable = kernel.adapter.get_exportable_executable()
         if verbose:
             self.logger.debug(f"Saving kernel executable to file: {executable}")
         KernelCache._safe_write_executable(executable, kernel_lib_path)

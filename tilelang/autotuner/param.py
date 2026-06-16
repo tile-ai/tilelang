@@ -249,7 +249,7 @@ class AutotuneResult:
                     logger.debug(f"Copying kernel library to file: {kernel_lib_path}")
                 self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
             else:
-                executable = kernel.adapter.executable
+                executable = kernel.adapter.get_exportable_executable()
                 if verbose:
                     logger.debug(f"Saving kernel executable to file: {kernel_lib_path}")
                 self._safe_write_executable(executable, kernel_lib_path)
