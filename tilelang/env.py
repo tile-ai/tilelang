@@ -43,7 +43,7 @@ if not os.path.exists(THIRD_PARTY_ROOT):
     logger.warning(f"Loading tilelang libs from dev root: {dev_lib_root}")
 else:
     try:
-        import z3
+        import z3  # noqa: F401
     except ImportError:
         logger.error("Failed to import z3, consider to reinstall tilelang.")
 
