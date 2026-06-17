@@ -1045,6 +1045,12 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &T,
 
   Buffer shared_tensor = is_ldmatrix ? src : dst;
   Buffer local_tensor = is_ldmatrix ? dst : src;
+  bool is_fp4_ldmatrix = is_ldmatrix &&
+                         shared_tensor->dtype.is_float4_e2m1_unpacked() &&
+                         local_tensor->dtype.is_float4_e2m1_unpacked();
+  if (is_fp4_ldmatrix && !TargetSupportsFp4Ldmatrix(T.target)) {
+    return LowerNormal(op, T, analyzer);
+  }
   Array<Range> local_region = is_ldmatrix ? src_range : dst_range;
   bool is_full_range = true;
   for (size_t i = 0; i < local_region.size(); i++) {
@@ -1094,27 +1100,34 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &T,
   } else {
     return LowerNormal(op, T, analyzer);
   }
-  if (shared_tensor->dtype.bytes() != 2) {
+  if (!is_fp4_ldmatrix && shared_tensor->dtype.bytes() != 2) {
     return LowerNormal(op, T, analyzer);
   }
+
+  PrimExpr extent = local_tensor->shape[0];
+  int num = 1;
+  // FP4 unpacked byte carrier returns four logical elements per register; b16
+  // returns two.
+  int elems_per_reg = is_fp4_ldmatrix ? 4 : 2;
+  int max_elems_per_inst = elems_per_reg * 4;
+  int mid_elems_per_inst = elems_per_reg * 2;
   PrimExpr flattened_indice = shared_tensor.OffsetOf(shared_indices).back();
   if (!IndicesCanVectorize(flattened_indice, loop_vars.back()->var,
-                           loop_vars.back()->dom->extent, 8, analyzer)) {
+                           loop_vars.back()->dom->extent, max_elems_per_inst,
+                           analyzer)) {
     return LowerNormal(op, T, analyzer);
   }
+  if (analyzer->CanProveEqual(FloorMod(extent, max_elems_per_inst), 0))
+    num = 4;
+  else if (analyzer->CanProveEqual(FloorMod(extent, mid_elems_per_inst), 0))
+    num = 2;
+  int elems_per_inst = elems_per_reg * num;
 
   for (size_t i = 0; i < dst_range.size(); i++) {
     if (!is_zero(dst_range[i]->min) ||
         !analyzer->CanProveEqual(dst_range[i]->extent, dst->shape[i]))
       return LowerNormal(op, T, analyzer);
   }
-
-  PrimExpr extent = local_tensor->shape[0];
-  int num = 1;
-  if (analyzer->CanProveEqual(FloorMod(extent, 8), 0))
-    num = 4;
-  else if (analyzer->CanProveEqual(FloorMod(extent, 4), 0))
-    num = 2;
 
   Array<PrimExpr> args;
   const Op &copy_op = is_ldmatrix ? tl::ptx_ldmatrix() : tl::ptx_stmatrix();
@@ -1127,7 +1140,8 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &T,
   PrimExpr warp = FloorDiv(T.thread_var, 32) * 32;
   if (!is_transposed) {
     auto local_index = analyzer->Simplify(
-        local_iter * 2 * num + 2 * FloorMod(FloorDiv(T.thread_var, 8), num));
+        local_iter * elems_per_inst +
+        elems_per_reg * FloorMod(FloorDiv(T.thread_var, 8), num));
     auto thread_index =
         analyzer->Simplify(warp + FloorMod(T.thread_var, 8) * 4);
     shared_coords = inv->Forward({local_index, thread_index});
@@ -1142,18 +1156,19 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &T,
   shared_coords.pop_back();
   PrimExpr shared_addr =
       Call(DataType::Handle(), tl::access_ptr(),
-           {BufferLoad(shared_tensor, shared_coords), PrimExpr(2 * num),
+           {BufferLoad(shared_tensor, shared_coords), PrimExpr(elems_per_inst),
             make_const(DataType::Int(32), is_ldmatrix ? 1 : 2)});
   args.push_back(shared_addr);
 
   if (is_ldmatrix) {
-    if (local_tensor->dtype != shared_tensor->dtype) {
+    if (local_tensor->dtype != shared_tensor->dtype &&
+        !(is_fp4_ldmatrix && local_tensor->dtype.is_float4_e2m1_unpacked())) {
       return LowerNormal(op, T, analyzer);
     }
     PrimExpr local_addr =
         Call(DataType::Handle(), tl::access_ptr(),
-             {BufferLoad(local_tensor, {local_iter * 2 * num}),
-              PrimExpr(2 * num), make_const(DataType::Int(32), 2)});
+             {BufferLoad(local_tensor, {local_iter * elems_per_inst}),
+              PrimExpr(elems_per_inst), make_const(DataType::Int(32), 2)});
     args.push_back(local_addr);
   } else {
     for (int i = 0; i < num; i++) {
@@ -1172,8 +1187,8 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &T,
   }
 
   auto body = Evaluate(Call(DataType::Handle(), copy_op, args));
-  For for_node =
-      For(local_iter, 0, FloorDiv(extent, 2 * num), ForKind::kSerial, body);
+  For for_node = For(local_iter, 0, FloorDiv(extent, elems_per_inst),
+                     ForKind::kSerial, body);
   for_node = PragmaUnrollLoop(for_node);
   auto range = T.thread_bounds;
   if (range.defined()) {
@@ -1595,7 +1610,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   desc.smem_box.Set(0, PrimExpr(instruction_dim));
 
   int inner_box_dim_ =
-      TMABytesFromElements(instruction_dim, shared_tensor->dtype);
+      TMABytesFromElements(instruction_dim, shared_tensor_unmapped->dtype);
 
   struct SwizzleCheck {
     int swizzle;
