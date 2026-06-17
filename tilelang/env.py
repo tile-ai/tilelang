@@ -41,6 +41,11 @@ if not os.path.exists(THIRD_PARTY_ROOT):
     TL_LIBS = [os.path.join(dev_lib_root, "lib"), os.path.join(dev_lib_root, "tvm")]
     THIRD_PARTY_ROOT = os.path.join(tl_dev_root, "3rdparty")
     logger.warning(f"Loading tilelang libs from dev root: {dev_lib_root}")
+else:
+    try:
+        import z3  # noqa: F401
+    except ImportError:
+        logger.error("Failed to import z3, consider to reinstall tilelang.")
 
 assert TL_LIBS and all(os.path.exists(i) for i in TL_LIBS), f"tilelang lib root do not exists: {TL_LIBS}"
 
