@@ -2952,6 +2952,44 @@ void CodeGenTileLangCuTeDSL::PrintVecStore_(const BufferNode *buffer,
   }
 
   if (scope == "local" && buffer->dtype.is_scalar()) {
+    if (t.element_of().is_float8()) {
+      const int packed_bits = t.lanes() * t.element_of().bits();
+      ICHECK_EQ(packed_bits % 8, 0)
+          << "FP8 local vector stores must cover whole bytes";
+      const int packed_bytes = packed_bits / 8;
+
+      std::string src_tensor = store_rhs;
+      if (EndsWithLoad(src_tensor)) {
+        src_tensor = name_supply_->FreshName("_store_tensor");
+        PrintIndent();
+        stream << src_tensor << " = tl.make_rmem_tensor((" << t.lanes()
+               << ",), " << DTypeToString(t.element_of()) << ")\n";
+        PrintIndent();
+        stream << src_tensor << ".store(" << store_rhs << ")\n";
+      }
+
+      std::string vid = GetVarID(buffer_var);
+      std::string src_bytes = name_supply_->FreshName("_fp8_store_src");
+      std::string dst_view = name_supply_->FreshName("_fp8_store_view");
+      std::string dst_bytes = name_supply_->FreshName("_fp8_store_dst");
+      PrintIndent();
+      stream << src_bytes << " = cute.recast_tensor(" << src_tensor
+             << ", cutlass.Uint8)\n";
+      PrintIndent();
+      stream << dst_view << " = tl.make_tensor_at_offset(" << vid
+             << ".iterator, " << PrintExpr_(base) << ", (" << t.lanes()
+             << ",), div_by=1)\n";
+      PrintIndent();
+      stream << dst_bytes << " = cute.recast_tensor(" << dst_view
+             << ", cutlass.Uint8)\n";
+      for (int i = 0; i < packed_bytes; ++i) {
+        PrintIndent();
+        stream << dst_bytes << "[" << i << "] = " << src_bytes << "[" << i
+               << "]\n";
+      }
+      return;
+    }
+
     if (store_rhs.size() < 7 ||
         store_rhs.compare(store_rhs.size() - 7, 7, ".load()") != 0) {
       std::string store_tensor = name_supply_->FreshName("_store_tensor");
