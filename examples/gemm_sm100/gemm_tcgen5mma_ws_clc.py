@@ -224,6 +224,10 @@ def gemm_clc_persistent_2cta_pipelined_clc(
         clc_result = T.alloc_shared((clc_stages, 4), "uint32", scope="shared")
         schedule_valid = T.alloc_shared((clc_stages,), "int32")
         schedule_tile_id = T.alloc_shared((clc_stages,), "int32")
+        # Reading the schedule into thread local registers before arriving schedule_finished,
+        # so the pipelined scheduler can't overwrite the slot mid-read (causing intermittent hang).
+        local_valid = T.alloc_local((1,), "int32")
+        local_tile_id = T.alloc_local((1,), "int32")
 
         tx = T.get_thread_binding()
         cta_id = T.block_rank_in_cluster()
@@ -236,15 +240,17 @@ def gemm_clc_persistent_2cta_pipelined_clc(
 
                 if work_iter > 0:
                     T.mbarrier_wait_parity(schedule_arrived[s_cons], c_cons & 1)
+                    local_valid[0] = schedule_valid[s_cons]
+                    local_tile_id[0] = schedule_tile_id[s_cons]
                     if tx == 0:
                         T.mbarrier_arrive(schedule_finished[s_cons], 0)
-                    if schedule_valid[s_cons] == 0:
+                    if local_valid[0] == 0:
                         break
 
                 tile_id = T.if_then_else(
                     work_iter == 0,
                     block_id // 2,
-                    schedule_tile_id[s_cons],
+                    local_tile_id[0],
                 )
                 bx, by = get_swizzled_block_idx(tile_id, group_size, m_clusters, cta_id)
 
@@ -270,9 +276,10 @@ def gemm_clc_persistent_2cta_pipelined_clc(
 
                 if work_iter > 0:
                     T.mbarrier_wait_parity(schedule_arrived[s_cons], c_cons & 1)
+                    local_valid[0] = schedule_valid[s_cons]
                     if tx == 32:
                         T.mbarrier_arrive(schedule_finished[s_cons], 0)
-                    if schedule_valid[s_cons] == 0:
+                    if local_valid[0] == 0:
                         break
 
                 T.mbarrier_wait_parity(tmem_empty[work_iter & 1], ((work_iter // 2) & 1) ^ 1)
@@ -324,15 +331,17 @@ def gemm_clc_persistent_2cta_pipelined_clc(
 
                 if work_iter > 0:
                     T.mbarrier_wait_parity(schedule_arrived[s_cons], c_cons & 1)
+                    local_valid[0] = schedule_valid[s_cons]
+                    local_tile_id[0] = schedule_tile_id[s_cons]
                     if tx == 128:
                         T.mbarrier_arrive(schedule_finished[s_cons], 0)
-                    if schedule_valid[s_cons] == 0:
+                    if local_valid[0] == 0:
                         break
 
                 tile_id = T.if_then_else(
                     work_iter == 0,
                     block_id // 2,
-                    schedule_tile_id[s_cons],
+                    local_tile_id[0],
                 )
                 bx, by = get_swizzled_block_idx(tile_id, group_size, m_clusters, cta_id)
 
@@ -362,6 +371,12 @@ def ref_program(A, B):
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--stress", type=int, default=0)
+    args = parser.parse_args()
+
     block_M, block_N, store_block_N, block_K = 128, 256, 64, 64
     num_stages, group_size = 6, 8
     base_args = (block_M, block_N, store_block_N, block_K, T.bfloat16, T.bfloat16, T.float, num_stages)
@@ -382,6 +397,9 @@ if __name__ == "__main__":
         for clc in (2, 3, 4):
             c2 = gemm_clc_persistent_2cta_pipelined_clc(a, b, *base_args, clc, group_size)
             torch.testing.assert_close(c2, ref, rtol=1e-2, atol=1e-2)
+            for _ in range(args.stress):
+                gemm_clc_persistent_2cta_pipelined_clc(a, b, *base_args, clc, group_size)
+                torch.cuda.synchronize()
             ms_pipe = do_bench(
                 lambda a=a, b=b, clc=clc: gemm_clc_persistent_2cta_pipelined_clc(a, b, *base_args, clc, group_size), backend="event"
             )
