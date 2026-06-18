@@ -7,10 +7,16 @@ __all__ = [
     "log1p",
     "log2",
     "log10",
+    "floor",
+    "floorf",
     "tan",
     "cos",
     "sin",
+    "erf",
+    "erff",
     "sqrt",
+    "hexp",
+    "hsqrt",
     "rsqrt",
     "fabsf",
     "max2",
@@ -113,6 +119,13 @@ def log10(x: Union[TensorSSA, Numeric], fastmath: bool = False, **kwargs) -> Uni
     return _tl_math_op(math.log10, fastmath, x, **kwargs)
 
 
+def floor(x: Union[TensorSSA, Numeric], fastmath: bool = False, **kwargs) -> Union[TensorSSA, Numeric]:
+    return _tl_math_op(math.floor, fastmath, x, **kwargs)
+
+
+floorf = floor
+
+
 def tan(x: Union[TensorSSA, Numeric], fastmath: bool = False, **kwargs) -> Union[TensorSSA, Numeric]:
     return _tl_math_op(math.tan, fastmath, x, **kwargs)
 
@@ -125,12 +138,21 @@ def sin(x: Union[TensorSSA, Numeric], fastmath: bool = False, **kwargs) -> Union
     return _tl_math_op(math.sin, fastmath, x, **kwargs)
 
 
+def erf(x: Union[TensorSSA, Numeric], fastmath: bool = False, **kwargs) -> Union[TensorSSA, Numeric]:
+    return _tl_math_op(math.erf, fastmath, x, **kwargs)
+
+
 def sqrt(x: Union[TensorSSA, Numeric], fastmath: bool = False, **kwargs) -> Union[TensorSSA, Numeric]:
     return _tl_math_op(math.sqrt, fastmath, x, **kwargs)
 
 
 def rsqrt(x: Union[TensorSSA, Numeric], fastmath: bool = False, **kwargs) -> Union[TensorSSA, Numeric]:
     return _tl_math_op(math.rsqrt, fastmath, x, **kwargs)
+
+
+erff = erf
+hexp = exp
+hsqrt = sqrt
 
 
 def exp10(x: Union[TensorSSA, Numeric], fastmath: bool = False) -> Union[TensorSSA, Numeric]:

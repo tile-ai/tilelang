@@ -15,6 +15,7 @@ __all__ = [
     "AtomicMinRet",
     "AtomicLoad",
     "AtomicStore",
+    "tl_atomic_add_offset",
 ]
 
 import cutlass
@@ -157,6 +158,11 @@ def AtomicAddRet(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
     This is the same as AtomicAdd since nvvm.atomicrmw always returns old value.
     """
     return AtomicAdd(ptr, value, loc=loc, ip=ip)
+
+
+def tl_atomic_add_offset(base: cute.Pointer, offset, value: Numeric, *, loc=None, ip=None):
+    """TileLang call_extern helper: atomicAdd(base + offset, value)."""
+    return AtomicAdd(base + offset, value, loc=loc, ip=ip)
 
 
 # =============================================================================
