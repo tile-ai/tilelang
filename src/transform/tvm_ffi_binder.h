@@ -188,6 +188,7 @@ private:
   // Internal bind function
   bool Bind_(const PrimExpr &arg, const PrimExpr &value,
              const std::string &arg_name, bool with_lets);
+  bool UseFp4UnpackedABI(const Buffer &buffer) const;
   /*! \brief The definition map, can be uses to substitute */
   std::unordered_map<const VarNode *, PrimExpr> *def_map_;
   /*! \brief defs generated in the current binder */

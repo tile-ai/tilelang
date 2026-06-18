@@ -137,6 +137,17 @@ PreferredCopyInstruction GetPreferredInstruction(const CopyNode &op) {
   return PreferredCopyInstruction::kAuto;
 }
 
+bool IsFp4E2M1CarrierDType(DataType dtype) {
+  return dtype.is_float4_e2m1fn() || dtype.is_float4_e2m1_unpacked();
+}
+
+bool IsGlobalSharedFp4CarrierCopy(const CopyNode &op) {
+  bool global_shared = (IsGlobalBuffer(op.src) && IsSharedBuffer(op.dst)) ||
+                       (IsSharedBuffer(op.src) && IsGlobalBuffer(op.dst));
+  return global_shared && IsFp4E2M1CarrierDType(op.src->dtype) &&
+         IsFp4E2M1CarrierDType(op.dst->dtype);
+}
+
 bool CheckGlobalStrides(const Buffer &buffer, arith::Analyzer *analyzer,
                         bool emit_diagnostics) {
   Array<PrimExpr> strides = buffer->strides;
@@ -198,6 +209,14 @@ bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
       (op.dst.scope() != "shared.dyn" && op.dst.scope() != "shared")) {
     return false;
   }
+  if (!GetIsTmaCopy(op) && IsGlobalSharedFp4CarrierCopy(op)) {
+    if (emit_diagnostics) {
+      DLOG(WARNING)
+          << "TMA bulk load is disabled for implicit FP4 carrier copies, "
+             "fallback to normal copy.";
+    }
+    return false;
+  }
   if (check_last_dim &&
       analyzer->CanProve(
           FloorMod(
@@ -235,6 +254,14 @@ bool CheckBulkStore(const CopyNode &op, Target target,
   }
   if ((op.src.scope() != "shared.dyn" && op.src.scope() != "shared") ||
       op.dst.scope() != "global") {
+    return false;
+  }
+  if (!GetIsTmaCopy(op) && IsGlobalSharedFp4CarrierCopy(op)) {
+    if (emit_diagnostics) {
+      DLOG(WARNING)
+          << "TMA bulk store is disabled for implicit FP4 carrier copies, "
+             "fallback to normal copy.";
+    }
     return false;
   }
   if (check_last_dim &&
@@ -330,13 +357,27 @@ bool CheckBulkStore1D(const CopyNode &op, Target target,
 }
 
 bool CheckLDSMCopy(const CopyNode &op, Target target) {
-  return TargetHasLdmatrix(target) && IsSharedBuffer(op.src) &&
-         IsFragmentBuffer(op.dst);
+  if (!TargetHasLdmatrix(target) || !IsSharedBuffer(op.src) ||
+      !IsFragmentBuffer(op.dst)) {
+    return false;
+  }
+  bool uses_fp4 = IsFp4E2M1CarrierDType(op.src->dtype) ||
+                  IsFp4E2M1CarrierDType(op.dst->dtype);
+  if (!uses_fp4) {
+    return true;
+  }
+  if (!TargetSupportsFp4Ldmatrix(target)) {
+    return false;
+  }
+  return op.src->dtype == op.dst->dtype ||
+         (op.src->dtype.is_float4_e2m1fn() &&
+          op.dst->dtype.is_float4_e2m1_unpacked());
 }
 
 bool CheckSTSMCopy(const CopyNode &op, Target target) {
-  return TargetHasStmatrix(target) && IsFragmentBuffer(op.src) &&
-         IsSharedBuffer(op.dst);
+  return !IsFp4E2M1CarrierDType(op.src->dtype) &&
+         !IsFp4E2M1CarrierDType(op.dst->dtype) && TargetHasStmatrix(target) &&
+         IsFragmentBuffer(op.src) && IsSharedBuffer(op.dst);
 }
 
 bool CheckTMemLoad(const CopyNode &op, Target target) {
@@ -408,6 +449,10 @@ bool CopyInstIsTMA(CopyInst inst) {
 }
 
 bool CopyInstIsCPAsync(CopyInst inst) { return inst == CopyInst::kCPAsync; }
+
+bool TargetSupportsFp4Ldmatrix(Target target) {
+  return TargetHasSMVersionGE(target, 120);
+}
 
 namespace {
 

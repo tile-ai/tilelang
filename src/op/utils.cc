@@ -148,6 +148,20 @@ PrimExpr MakeAccessPtrFromBufferLoad(const BufferLoad &load, int rw_mask) {
   return Call(DataType::Handle(), builtin::tvm_access_ptr(), acc_args);
 }
 
+bool IsFp4E2M1StoragePair(DataType lhs, DataType rhs) {
+  auto is_e2m1 = [](DataType dtype) {
+    return dtype.is_float4_e2m1fn() || dtype.is_float4_e2m1_unpacked();
+  };
+  return is_e2m1(lhs) && is_e2m1(rhs) && lhs.lanes() == rhs.lanes();
+}
+
+PrimExpr CastFp4StorageValue(PrimExpr value, DataType dtype) {
+  if (value.dtype() != dtype && IsFp4E2M1StoragePair(value.dtype(), dtype)) {
+    return Cast(dtype, value);
+  }
+  return value;
+}
+
 // Maps TVM DataType to CUDA's CUtensorMapDataType enum value.
 int to_CUtensorMapDataType(DataType dtype) {
   // CUDA 13 adds packed U4 TensorMap formats. The vendored CUDA stub may lag

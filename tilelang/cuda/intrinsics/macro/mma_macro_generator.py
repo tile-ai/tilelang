@@ -118,7 +118,13 @@ class TensorCoreIntrinEmitter:
     def _initialize_k_dim(self, a_dtype=T.float16):
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
-        self.k_dim = min(256 // a_dtype.bits, self.chunk)
+        a_dtype_str = str(a_dtype)
+        if a_dtype_str == "float4_e2m1fn":
+            if self.chunk < 32:
+                raise ValueError(f"float4_e2m1fn MMA requires chunk >= 32, got chunk={self.chunk}")
+            self.k_dim = 32
+        else:
+            self.k_dim = min(256 // a_dtype.bits, self.chunk)
 
     def _initialize_m_dim(self, a_dtype=T.float16):
         if isinstance(a_dtype, str):
@@ -314,18 +320,21 @@ class TensorCoreIntrinEmitter:
         micro_size_k = self.micro_size_k
         local_size_a = self.local_size_a
         a_transposed = self.a_transposed
+        a_dtype_obj = DataType(a_dtype)
+        a_dtype_bits = a_dtype_obj.bits
+        is_fp4_a = str(a_dtype_obj) == "float4_e2m1fn"
         # ldmatrix cannot be used for int8 + trans case.
-        ldmatrix_available = not (DataType(a_dtype).bits != 16 and a_transposed)
+        ldmatrix_available = not (a_dtype_bits != 16 and a_transposed)
 
         def mma_load_layout(i, j):
             return i, j
 
         if not ldmatrix_available:
-            if DataType(a_dtype).bits == 8:
+            if a_dtype_bits == 8 or is_fp4_a:
                 mma_load_layout = mma_load_a_32x16_to_shared_16x32_layout
-            elif DataType(a_dtype).bits == 16:
+            elif a_dtype_bits == 16:
                 mma_load_layout = mma_load_a_32x8_to_shared_16x16_layout
-            elif DataType(a_dtype).bits == 32:
+            elif a_dtype_bits == 32:
                 mma_load_layout = mma_load_a_32x4_to_shared_16x8_layout
             else:
                 raise ValueError(f"Unsupported dtype: {a_dtype}")
@@ -356,6 +365,8 @@ class TensorCoreIntrinEmitter:
                 wi, wk = warp_m * warp_row_tiles + i * micro_size_x, rk * chunk + ki * micro_size_k
 
                 if ldmatrix_available:
+                    num = 4
+                    access_extent = 4 * num if is_fp4_a else 2 * num
                     row_off, col_off = get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed)
                     src_indices = (
                         tuple(A_other) + (A_base0 + wk + row_off, A_base1 + wi + col_off)
@@ -364,9 +375,9 @@ class TensorCoreIntrinEmitter:
                     )
                     T.ptx_ldmatrix(
                         T.bool(trans),
-                        4,
-                        T.access_ptr(A_buf[src_indices], "r", extent=8),
-                        T.access_ptr(A_local_buf[i * local_size_a], "w", extent=8),
+                        num,
+                        T.access_ptr(A_buf[src_indices], "r", extent=access_extent),
+                        T.access_ptr(A_local_buf[i * local_size_a], "w", extent=access_extent),
                     )
                 else:
                     for j in T.serial(local_size_a):
@@ -426,6 +437,9 @@ class TensorCoreIntrinEmitter:
         micro_size_k = self.micro_size_k
         local_size_b = self.local_size_b
         b_transposed = self.b_transposed
+        b_dtype_obj = DataType(b_dtype)
+        b_dtype_bits = b_dtype_obj.bits
+        is_fp4_b = str(b_dtype_obj) == "float4_e2m1fn"
         thread_binding = self.get_thread_binding()
 
         # legalize shared buffer to region
@@ -437,17 +451,17 @@ class TensorCoreIntrinEmitter:
         B_stride_last = B_buf.shape[-1]
         replicate_b = self.n_dim == 16
         # ldmatrix cannot be used for int8 + trans case.
-        ldmatrix_available = not (DataType(b_dtype).bits != 16 and not b_transposed)
+        ldmatrix_available = not (b_dtype_bits != 16 and not b_transposed)
 
         def mma_load_layout(i, j):
             return i, j
 
         if not ldmatrix_available:
-            if DataType(b_dtype).bits == 8:
+            if b_dtype_bits == 8 or is_fp4_b:
                 mma_load_layout = mma_load_b_32x16_to_shared_16x32_layout
-            elif DataType(b_dtype).bits == 16:
+            elif b_dtype_bits == 16:
                 mma_load_layout = mma_load_b_32x8_to_shared_16x16_layout
-            elif DataType(b_dtype).bits == 32:
+            elif b_dtype_bits == 32:
                 mma_load_layout = mma_load_b_32x4_to_shared_16x8_layout
             else:
                 raise ValueError(f"Unsupported dtype: {b_dtype}")
@@ -473,6 +487,7 @@ class TensorCoreIntrinEmitter:
 
                 if ldmatrix_available:
                     num = 4 if replicate_b else 2
+                    access_extent = 4 * num if is_fp4_b else 2 * num
                     row_off, col_off = get_ldmatrix_offset("B", tx, 0, stride, b_dtype, b_transposed)
                     src_indices = (
                         tuple(B_other) + (B_base0 + wi + row_off, B_base1 + wk + col_off)
@@ -482,8 +497,8 @@ class TensorCoreIntrinEmitter:
                     T.ptx_ldmatrix(
                         T.bool(trans),
                         num,
-                        T.access_ptr(B_buf[src_indices], "r", extent=2 * num),
-                        T.access_ptr(B_local_buf[i * local_size_b], "w", extent=2 * num),
+                        T.access_ptr(B_buf[src_indices], "r", extent=access_extent),
+                        T.access_ptr(B_local_buf[i * local_size_b], "w", extent=access_extent),
                     )
 
                 else:
@@ -695,7 +710,9 @@ class TensorCoreIntrinEmitter:
         matrix_is_a: bool = matrix == "A"
         matrix_is_b: bool = matrix == "B"
         dtype = self.a_dtype if matrix_is_a else self.b_dtype
-        dtype_bits = DataType(dtype).bits
+        dtype_obj = DataType(dtype)
+        dtype_bits = dtype_obj.bits
+        is_fp4_e2m1fn = str(dtype_obj) == "float4_e2m1fn"
         transposed = self.a_transposed if matrix_is_a else self.b_transposed
 
         # s represents spatial axis
@@ -712,7 +729,7 @@ class TensorCoreIntrinEmitter:
         elif dtype_bits == 16:
             transform_func_sr_a = shared_16x16_to_mma_32x8_layout_sr_a
             transform_func_sr_b = shared_16x16_to_mma_32x8_layout_sr_b
-        elif dtype_bits == 8:
+        elif dtype_bits == 8 or is_fp4_e2m1fn:
             transform_func_sr_a = shared_16x32_to_mma_32x16_layout_sr_a
             transform_func_sr_b = shared_16x32_to_mma_32x16_layout_sr_b
         else:
@@ -936,7 +953,11 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
         self._initialize_transform_kind(transform_kind_a, transform_kind_b)
 
     def _initialize_k_dim(self, a_dtype=T.float16):
-        self.k_dim = 256 // DataType(a_dtype).bits
+        a_dtype_obj = DataType(a_dtype)
+        if str(a_dtype_obj) == "float4_e2m1fn":
+            self.k_dim = 32
+        else:
+            self.k_dim = 256 // a_dtype_obj.bits
 
     def _initialize_local_size(self, m_dim=16, n_dim=16, k_dim=16, warp_size=32):
         self.local_size_a = (m_dim * k_dim) // warp_size

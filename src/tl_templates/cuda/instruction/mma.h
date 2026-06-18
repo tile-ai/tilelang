@@ -4,6 +4,15 @@
 #include <cute/arch/mma_sm75.hpp>
 #include <cute/arch/mma_sm80.hpp>
 #include <cute/arch/mma_sm89.hpp>
+
+#if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 1200)) ||           \
+    (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1200))
+#define TL_HAS_F8F6F4_MMA_DISPATCHER 1
+#include <cute/arch/mma_sm120.hpp>
+#else
+#define TL_HAS_F8F6F4_MMA_DISPATCHER 0
+#endif
+
 #ifndef __CUDACC_RTC__
 #include <type_traits>
 #include <utility>
@@ -155,6 +164,49 @@ struct SM75_8x8x16_S32U8U8S32_TN {
   }
 };
 
+#if TL_HAS_F8F6F4_MMA_DISPATCHER
+template <class Impl, bool ShiftA, bool ShiftB> struct F8F6F4_16x8x32_TN {
+  using DRegisters = typename Impl::DRegisters;
+  using ARegisters = typename Impl::ARegisters;
+  using BRegisters = typename Impl::BRegisters;
+  using CRegisters = typename Impl::CRegisters;
+
+  template <bool Shift>
+  CUTE_HOST_DEVICE static uint32_t shift_fp4_mma_operand(uint32_t value) {
+    if constexpr (Shift) {
+      return value << 2;
+    } else {
+      return value;
+    }
+  }
+
+  CUTE_HOST_DEVICE static void fma(float &d0, float &d1, float &d2, float &d3,
+                                   uint32_t const &a0, uint32_t const &a1,
+                                   uint32_t const &a2, uint32_t const &a3,
+                                   uint32_t const &b0, uint32_t const &b1,
+                                   float const &c0, float const &c1,
+                                   float const &c2, float const &c3) {
+    // F8F6F4 MMA consumes the e2m1 payload from bits 2..5 of each
+    // byte-carrier lane, so FP4 operands are shifted immediately before fma.
+    Impl::fma(
+        d0, d1, d2, d3, shift_fp4_mma_operand<ShiftA>(a0),
+        shift_fp4_mma_operand<ShiftA>(a1), shift_fp4_mma_operand<ShiftA>(a2),
+        shift_fp4_mma_operand<ShiftA>(a3), shift_fp4_mma_operand<ShiftB>(b0),
+        shift_fp4_mma_operand<ShiftB>(b1), c0, c1, c2, c3);
+  }
+};
+
+using F8F6F4_FP4_FP4_F32_TN = F8F6F4_16x8x32_TN<
+    cute::SM120_16x8x32_TN<cute::float_e2m1_t, cute::float_e2m1_t, float>, true,
+    true>;
+using F8F6F4_FP8_FP4_F32_TN = F8F6F4_16x8x32_TN<
+    cute::SM120_16x8x32_TN<cute::float_e4m3_t, cute::float_e2m1_t, float>,
+    false, true>;
+using F8F6F4_FP4_FP8_F32_TN = F8F6F4_16x8x32_TN<
+    cute::SM120_16x8x32_TN<cute::float_e2m1_t, cute::float_e4m3_t, float>, true,
+    false>;
+#endif
+
 template <DataType AType, DataType BType, DataType CType, int M, int N, int K,
           bool TransA, bool TransB, bool Saturate>
 struct MmaDispatcher {
@@ -233,6 +285,16 @@ TL_DEFINE_MMA_DISPATCHER(kUInt4, kUInt4, kInt32, 16, 8, 32, false, true, false,
 TL_DEFINE_MMA_DISPATCHER(kUInt4, kUInt4, kInt32, 16, 8, 64, false, true, false,
                          cute::SM80_16x8x64_S32U4U4S32_TN)
 
+#if TL_HAS_F8F6F4_MMA_DISPATCHER
+// FP4/F8F6F4 inputs (k32)
+TL_DEFINE_MMA_DISPATCHER(kFloat4_e2m1fn, kFloat4_e2m1fn, kFloat32, 16, 8, 32,
+                         false, true, false, tl::detail::F8F6F4_FP4_FP4_F32_TN)
+TL_DEFINE_MMA_DISPATCHER(kFloat8_e4m3, kFloat4_e2m1fn, kFloat32, 16, 8, 32,
+                         false, true, false, tl::detail::F8F6F4_FP8_FP4_F32_TN)
+TL_DEFINE_MMA_DISPATCHER(kFloat4_e2m1fn, kFloat8_e4m3, kFloat32, 16, 8, 32,
+                         false, true, false, tl::detail::F8F6F4_FP4_FP8_F32_TN)
+#endif
+
 // FP8 inputs (k32)
 TL_DEFINE_MMA_DISPATCHER(kFloat8_e4m3, kFloat8_e4m3, kFloat16, 16, 8, 32, false,
                          true, false, cute::SM89_16x8x32_F16E4M3E4M3F16_TN)
@@ -265,6 +327,7 @@ TL_DEFINE_MMA_DISPATCHER(kFloat64, kFloat64, kFloat64, 8, 8, 4, false, true,
                          false, cute::SM80_8x8x4_F64F64F64F64_TN)
 
 #undef TL_DEFINE_MMA_DISPATCHER
+#undef TL_HAS_F8F6F4_MMA_DISPATCHER
 
 } // namespace detail
 
