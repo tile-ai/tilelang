@@ -6,6 +6,7 @@
 #define TVM_TL_TRANSFORM_COMMON_BIND_UTILS_H_
 
 #include <tvm/ir/type.h>
+#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/stmt.h>
 
 #include <unordered_set>
@@ -30,6 +31,9 @@ inline bool IsReplayableScalarBind(const Stmt &stmt,
     return false;
   }
   if (!bind->value.dtype().is_scalar() || bind->value.dtype().is_handle()) {
+    return false;
+  }
+  if (SideEffect(bind->value) > CallEffectKind::kReadState) {
     return false;
   }
   for (const BufferRegion &read : reads) {
