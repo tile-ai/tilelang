@@ -196,6 +196,7 @@ std::string CodeGenTileLangCuTeDSL::CanonicalizeFastmathFunctionName_(
       {"divf", "tl.divf"},
       {"exp", "tl.exp"},
       {"expf", "tl.exp"},
+      {"hexp", "tl.exp"},
       {"exp2", "tl.exp2"},
       {"exp2f", "tl.exp2"},
       {"log", "tl.log"},
@@ -205,11 +206,16 @@ std::string CodeGenTileLangCuTeDSL::CanonicalizeFastmathFunctionName_(
       {"log2", "tl.log2"},
       {"log2f", "tl.log2"},
       {"log10", "tl.log10"},
+      {"floor", "tl.floor"},
+      {"floorf", "tl.floor"},
       {"tan", "tl.tan"},
       {"cos", "tl.cos"},
       {"sin", "tl.sin"},
+      {"erf", "tl.erf"},
+      {"erff", "tl.erf"},
       {"sqrt", "tl.sqrt"},
       {"sqrtf", "tl.sqrt"},
+      {"hsqrt", "tl.sqrt"},
       {"tanh", "tl.tanh"},
       {"tanhf", "tl.tanh"},
       {"rsqrt", "tl.rsqrt"},
@@ -669,7 +675,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const DivNode *op,
   if (op->dtype.is_int() || op->dtype.is_uint()) {
     PrintBinaryExpr_("//", op->dtype, op->a, op->b, os);
   } else {
-    if (enable_fastmath_) {
+    if (enable_fastmath_ && op->dtype.is_scalar()) {
       os << "tl.divf(" << PrintExpr_(op->a) << ", " << PrintExpr_(op->b)
          << ", fastmath=True)";
     } else {
@@ -1175,13 +1181,29 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     // scaleA/scaleB: True (scale_in) -> 1, False -> -1
     int scaleA = scale_in_a ? 1 : -1;
     int scaleB = scale_in_b ? 1 : -1;
-    PrintIndent();
-    stream << "tl.wgmma_ss(\"" << A_dtype << "\", \"" << B_dtype << "\", \""
-           << C_dtype << "\", " << m << ", " << n << ", " << k << ", " << tnspA
-           << ", " << tnspB << ", " << scaleA << ", " << scaleB << ", ("
-           << a_desc << " + " << A_offset << "), (" << b_desc << " + "
-           << B_offset << "), " << c_ref << " + " << c_offset << ", "
-           << scale_out << ")\n";
+    auto emit_wgmma_ss = [&](const std::string &scale_out_arg) {
+      PrintIndent();
+      stream << "tl.wgmma_ss(\"" << A_dtype << "\", \"" << B_dtype << "\", \""
+             << C_dtype << "\", " << m << ", " << n << ", " << k << ", "
+             << tnspA << ", " << tnspB << ", " << scaleA << ", " << scaleB
+             << ", (" << a_desc << " + " << A_offset << "), (" << b_desc
+             << " + " << B_offset << "), " << c_ref << " + " << c_offset << ", "
+             << scale_out_arg << ")\n";
+    };
+    if (const int64_t *scale_out_value = as_const_int(op->args[12])) {
+      emit_wgmma_ss(*scale_out_value != 0 ? "1" : "0");
+    } else {
+      PrintIndent();
+      stream << "if " << RemoveOutermostParentheses(scale_out) << ":\n";
+      int then_scope = BeginScope();
+      emit_wgmma_ss("1");
+      EndScope(then_scope);
+      PrintIndent();
+      stream << "else:\n";
+      int else_scope = BeginScope();
+      emit_wgmma_ss("0");
+      EndScope(else_scope);
+    }
   } else if (op->op.same_as(tl::ptx_wgmma_rs())) {
     // arg 0: shape (StringImm, e.g. "m64n128k16")
     // arg 1: b_is_k_major (Bool)
@@ -1961,6 +1983,31 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
     }
 
     if (is_contiguous) {
+      std::string scope;
+      if (alloc_storage_scope_.count(buffer_var.get())) {
+        scope = alloc_storage_scope_.at(buffer_var.get());
+      }
+      if (scope.empty()) {
+        scope = GetPtrStorageScope(buffer_var);
+      }
+      if (scope == "local" && element_dtype.is_scalar()) {
+        std::string sret = name_supply_->FreshName("_lvec");
+        PrintIndent();
+        stream << sret << " = tl.make_rmem_tensor((" << value_lanes << ",), ";
+        PrintType(element_dtype, stream);
+        stream << ")\n";
+        for (int i = 0; i < value_lanes; ++i) {
+          PrimExpr idx_expr =
+              arith::Analyzer().Simplify(base.Eval() + Integer(i));
+          PrintIndent();
+          stream << sret << "[" << i << "] = "
+                 << GetBufferRef_(element_dtype, op->buffer.get(), idx_expr)
+                 << "\n";
+        }
+        os << sret << ".load()";
+        return;
+      }
+
       std::string ref =
           GetBufferRef_(value_dtype, op->buffer.get(), base.Eval());
       if (ref.back() == ')') {
@@ -2883,9 +2930,18 @@ void CodeGenTileLangCuTeDSL::PrintVecStore_(const BufferNode *buffer,
                                             const std::string &value) {
   ICHECK(!t.is_scalar()) << "PrintVecStore_() should not be used for scalar";
 
-  std::string ref = GetBufferRef_(t, buffer, base);
   std::string store_rhs = value;
+  const VarNode *buffer_var = buffer->data.get();
+  std::string scope;
+  if (alloc_storage_scope_.count(buffer_var)) {
+    scope = alloc_storage_scope_.at(buffer_var);
+  }
+  if (scope.empty()) {
+    scope = GetPtrStorageScope(buffer->data);
+  }
+
   if (t.element_of().bits() < 8) {
+    std::string ref = GetBufferRef_(t, buffer, base);
     if (store_rhs.size() < 7 ||
         store_rhs.compare(store_rhs.size() - 7, 7, ".load()") != 0) {
       store_rhs += ".load()";
@@ -2895,6 +2951,32 @@ void CodeGenTileLangCuTeDSL::PrintVecStore_(const BufferNode *buffer,
     return;
   }
 
+  if (scope == "local" && buffer->dtype.is_scalar()) {
+    if (store_rhs.size() < 7 ||
+        store_rhs.compare(store_rhs.size() - 7, 7, ".load()") != 0) {
+      std::string store_tensor = name_supply_->FreshName("_store_tensor");
+      PrintIndent();
+      stream << store_tensor << " = tl.make_rmem_tensor((" << t.lanes()
+             << ",), " << DTypeToString(t.element_of()) << ")\n";
+      for (int i = 0; i < t.lanes(); ++i) {
+        PrintIndent();
+        stream << store_tensor << "[" << i << "] = ";
+        PrintVecElemLoad_(store_rhs, t, i, stream);
+        stream << "\n";
+      }
+      store_rhs = store_tensor;
+    }
+    for (int i = 0; i < t.lanes(); ++i) {
+      PrimExpr idx_expr = arith::Analyzer().Simplify(base + Integer(i));
+      PrintIndent();
+      stream << GetBufferRef_(t.element_of(), buffer, idx_expr) << " = ";
+      PrintVecElemLoad_(store_rhs, t, i, stream);
+      stream << "\n";
+    }
+    return;
+  }
+
+  std::string ref = GetBufferRef_(t, buffer, base);
   if (store_rhs.size() < 7 ||
       store_rhs.compare(store_rhs.size() - 7, 7, ".load()") != 0) {
     std::string store_tensor = name_supply_->FreshName("_store_tensor");
@@ -3058,6 +3140,9 @@ void CodeGenTileLangCuTeDSL::PrintCallExtern_(Type ret_type,
   // Warp-level primitives (__activemask, __shfl_down_sync, __shfl_sync)
   if (global_symbol_str.substr(0, 2) == "__") {
     global_symbol_str = "tl." + global_symbol_str;
+  }
+  if (global_symbol_str == "tl_atomic_add_offset") {
+    global_symbol_str = "tl.tl_atomic_add_offset";
   }
   // some optional template arguments might be ommited, so add names explicitly
   // for remain arguments
