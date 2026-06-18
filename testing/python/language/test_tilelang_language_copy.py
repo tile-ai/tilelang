@@ -233,13 +233,7 @@ def test_tilelang_copy_uses_stmatrix_m16n8_for_sm100_int8_shared_store():
             frag = T.alloc_fragment((16, 8), T.int8)
             smem = T.alloc_shared((16, 8), T.int8)
 
-            T.annotate_layout(
-                {
-                    frag: make_gemm_fragment_8x8_transposed().repeat(
-                        [2, 1], repeat_on_thread=False
-                    )
-                }
-            )
+            T.annotate_layout({frag: make_gemm_fragment_8x8_transposed().repeat([2, 1], repeat_on_thread=False)})
 
             for i, j in T.Parallel(16, 8):
                 frag[i, j] = A[i, j]
