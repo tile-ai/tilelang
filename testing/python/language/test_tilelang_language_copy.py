@@ -2,6 +2,8 @@ import tilelang
 import tilelang.language as T
 import torch
 import tilelang.testing
+from tilelang import tvm
+from tilelang.layout import make_gemm_fragment_8x8_transposed
 
 print(torch.__version__)
 
@@ -221,6 +223,34 @@ def test_tilelang_copy_fp4():
     run_tilelang_copy_fp4(src_dtype=T.float4_e2m1fn, dst_dtype=T.float4_e2m1fn)
     run_tilelang_copy_fp4(src_dtype=T.float4_e2m1fn, dst_dtype=T.float16)
     run_tilelang_copy_fp4(src_dtype=T.float4_e2m1fn, dst_dtype=T.bfloat16)
+
+
+@tilelang.testing.requires_cuda
+def test_tilelang_copy_uses_stmatrix_m16n8_for_sm100_int8_shared_store():
+    @T.prim_func
+    def main(A: T.Tensor((16, 8), T.int8)):
+        with T.Kernel(1, threads=32):
+            frag = T.alloc_fragment((16, 8), T.int8)
+            smem = T.alloc_shared((16, 8), T.int8)
+
+            T.annotate_layout(
+                {
+                    frag: make_gemm_fragment_8x8_transposed().repeat(
+                        [2, 1], repeat_on_thread=False
+                    )
+                }
+            )
+
+            for i, j in T.Parallel(16, 8):
+                frag[i, j] = A[i, j]
+
+            T.copy(frag, smem)
+
+    target = {"kind": "cuda", "arch": "sm_100a"}
+    with tvm.transform.PassContext(), tvm.target.Target(target):
+        artifact = tilelang.lower(main, target=target)
+
+    assert "tl::ptx_stmatrix_x1_m16n8_trans" in artifact.kernel_source
 
 
 if __name__ == "__main__":

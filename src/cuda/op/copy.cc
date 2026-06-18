@@ -1094,12 +1094,23 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &T,
   } else {
     return LowerNormal(op, T, analyzer);
   }
-  if (shared_tensor->dtype.bytes() != 2) {
+
+  const bool use_m16n8_stmatrix =
+      !is_ldmatrix && is_transposed &&
+      TargetHasStmatrix(T.target, /*is_m16n8=*/true) &&
+      shared_tensor->dtype.bits() == 8;
+  const int elems_per_reg = use_m16n8_stmatrix ? 4 : 2;
+  if (is_ldmatrix || !use_m16n8_stmatrix) {
+    if (shared_tensor->dtype.bytes() != 2) {
+      return LowerNormal(op, T, analyzer);
+    }
+  } else if (shared_tensor->dtype.bytes() != 1) {
     return LowerNormal(op, T, analyzer);
   }
   PrimExpr flattened_indice = shared_tensor.OffsetOf(shared_indices).back();
   if (!IndicesCanVectorize(flattened_indice, loop_vars.back()->var,
-                           loop_vars.back()->dom->extent, 8, analyzer)) {
+                           loop_vars.back()->dom->extent,
+                           use_m16n8_stmatrix ? 4 : 8, analyzer)) {
     return LowerNormal(op, T, analyzer);
   }
 
@@ -1111,15 +1122,18 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &T,
 
   PrimExpr extent = local_tensor->shape[0];
   int num = 1;
-  if (analyzer->CanProveEqual(FloorMod(extent, 8), 0))
+  if (analyzer->CanProveEqual(FloorMod(extent, elems_per_reg * 4), 0))
     num = 4;
-  else if (analyzer->CanProveEqual(FloorMod(extent, 4), 0))
+  else if (analyzer->CanProveEqual(FloorMod(extent, elems_per_reg * 2), 0))
     num = 2;
 
   Array<PrimExpr> args;
   const Op &copy_op = is_ldmatrix ? tl::ptx_ldmatrix() : tl::ptx_stmatrix();
   args.push_back(static_cast<int>(is_transposed));
   args.push_back(num);
+  if (!is_ldmatrix) {
+    args.push_back(StringImm(use_m16n8_stmatrix ? "m16n8" : "m8n8"));
+  }
 
   Var local_iter("i");
   Layout inv = local_layout->Inverse();
@@ -1127,23 +1141,25 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &T,
   PrimExpr warp = FloorDiv(T.thread_var, 32) * 32;
   if (!is_transposed) {
     auto local_index = analyzer->Simplify(
-        local_iter * 2 * num + 2 * FloorMod(FloorDiv(T.thread_var, 8), num));
+        local_iter * elems_per_reg * num +
+        elems_per_reg * FloorMod(FloorDiv(T.thread_var, 8), num));
     auto thread_index =
         analyzer->Simplify(warp + FloorMod(T.thread_var, 8) * 4);
     shared_coords = inv->Forward({local_index, thread_index});
   } else {
     auto local_index = analyzer->Simplify(
-        local_iter * 2 * num + 2 * FloorMod(FloorDiv(T.thread_var, 8), num) +
-        FloorMod(T.thread_var, 2));
-    auto thread_index =
-        analyzer->Simplify(warp + FloorDiv(FloorMod(T.thread_var, 8), 2));
+        local_iter * elems_per_reg * num +
+        elems_per_reg * FloorMod(FloorDiv(T.thread_var, 8), num) +
+        FloorMod(T.thread_var, elems_per_reg));
+    auto thread_index = analyzer->Simplify(
+        warp + FloorDiv(FloorMod(T.thread_var, 8), elems_per_reg));
     shared_coords = inv->Forward({local_index, thread_index});
   }
   shared_coords.pop_back();
-  PrimExpr shared_addr =
-      Call(DataType::Handle(), tl::access_ptr(),
-           {BufferLoad(shared_tensor, shared_coords), PrimExpr(2 * num),
-            make_const(DataType::Int(32), is_ldmatrix ? 1 : 2)});
+  PrimExpr shared_addr = Call(
+      DataType::Handle(), tl::access_ptr(),
+      {BufferLoad(shared_tensor, shared_coords), PrimExpr(elems_per_reg * num),
+       make_const(DataType::Int(32), is_ldmatrix ? 1 : 2)});
   args.push_back(shared_addr);
 
   if (is_ldmatrix) {
@@ -1157,23 +1173,26 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &T,
     args.push_back(local_addr);
   } else {
     for (int i = 0; i < num; i++) {
-      PrimExpr value0 =
-          BufferLoad(local_tensor, {local_iter * 2 * num + 2 * i});
-      PrimExpr value1 =
-          BufferLoad(local_tensor, {local_iter * 2 * num + 2 * i + 1});
-      if (local_tensor->dtype != shared_tensor->dtype) {
-        value0 = Cast(shared_tensor->dtype, value0);
-        value1 = Cast(shared_tensor->dtype, value1);
+      Array<PrimExpr> values;
+      for (int j = 0; j < elems_per_reg; ++j) {
+        PrimExpr value =
+            BufferLoad(local_tensor, {local_iter * elems_per_reg * num +
+                                      elems_per_reg * i + j});
+        if (local_tensor->dtype != shared_tensor->dtype) {
+          value = Cast(shared_tensor->dtype, value);
+        }
+        values.push_back(value);
       }
-      PrimExpr value_packed =
-          Call(DataType::Int(32), pack_b16(), {value0, value1});
+      PrimExpr value_packed = use_m16n8_stmatrix
+                                  ? Call(DataType::Int(32), pack_b8x4(), values)
+                                  : Call(DataType::Int(32), pack_b16(), values);
       args.push_back(value_packed);
     }
   }
 
   auto body = Evaluate(Call(DataType::Handle(), copy_op, args));
-  For for_node =
-      For(local_iter, 0, FloorDiv(extent, 2 * num), ForKind::kSerial, body);
+  For for_node = For(local_iter, 0, FloorDiv(extent, elems_per_reg * num),
+                     ForKind::kSerial, body);
   for_node = PragmaUnrollLoop(for_node);
   auto range = T.thread_bounds;
   if (range.defined()) {

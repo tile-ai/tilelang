@@ -1230,10 +1230,16 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::ptx_stmatrix())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
+    int payload_start = 2;
+    if (op->args.size() >= 4 && op->args[2].as<StringImmNode>()) {
+      ICHECK_EQ(Downcast<StringImm>(op->args[2])->value, "m8n8")
+          << "HIP stmatrix codegen only supports m8n8";
+      payload_start = 3;
+    }
     std::string func_name = "tl::ptx_stmatrix_x" + std::to_string(num);
     if (trans == 1)
       func_name += "_trans";
-    print_extern_call_stmt(func_name, 2);
+    print_extern_call_stmt(func_name, payload_start);
   } else if (op->op.same_as(tl::wait_wgmma())) {
     this->PrintIndent();
     int num_mma = Downcast<IntImm>(op->args[0])->value;

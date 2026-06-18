@@ -541,6 +541,14 @@ TVM_DLL const Op &ptx_st_bulk_shared();
 TVM_DLL const Op &pack_b16();
 
 /*!
+ * \brief Pack four b8 value into a b32 value
+ *
+ * int32 pack_b8x4(b8_value, b8_value, b8_value, b8_value)
+ *
+ */
+TVM_DLL const Op &pack_b8x4();
+
+/*!
  * \brief Issue a shared memory fence for async operations
  *
  * FenceProxyAsync()

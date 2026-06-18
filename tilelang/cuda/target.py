@@ -141,8 +141,8 @@ def target_has_ldmatrix(target: Target) -> bool:
     return _target_ffi_api().TargetHasLdmatrix(target)
 
 
-def target_has_stmatrix(target: Target) -> bool:
-    return _target_ffi_api().TargetHasStmatrix(target)
+def target_has_stmatrix(target: Target, is_m16n8: bool = False) -> bool:
+    return _target_ffi_api().TargetHasStmatrix(target, is_m16n8)
 
 
 def target_has_bulk_copy(target: Target) -> bool:

@@ -2497,10 +2497,17 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::ptx_stmatrix())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
-    std::string func_name = "tl::ptx_stmatrix_x" + std::to_string(num);
+    std::string shape = "m8n8";
+    int payload_start = 2;
+    if (op->args.size() >= 4 && op->args[2].as<StringImmNode>()) {
+      shape = Downcast<StringImm>(op->args[2])->value;
+      payload_start = 3;
+    }
+    std::string func_name =
+        "tl::ptx_stmatrix_x" + std::to_string(num) + "_" + shape;
     if (trans == 1)
       func_name += "_trans";
-    print_extern_call_stmt(func_name, 2);
+    print_extern_call_stmt(func_name, payload_start);
   } else if (op->op.same_as(tl::fence_proxy_async())) {
     print_extern_call_stmt("tl::fence_proxy_async");
   } else if (op->op.same_as(tl::tma_store_arrive())) {
@@ -2554,6 +2561,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::pack_b16())) {
     os << "__pack_half2(" << this->PrintExpr(op->args[0]) << ", "
        << this->PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::pack_b8x4())) {
+    os << "tl::pack_b8x4(";
+    for (int i = 0; i < 4; ++i) {
+      if (i > 0)
+        os << ", ";
+      os << this->PrintExpr(op->args[i]);
+    }
+    os << ")";
   } else if (op->op.same_as(tl::sync_grid())) {
     this->need_cooperative_groups_ = true;
     this->PrintIndent();
