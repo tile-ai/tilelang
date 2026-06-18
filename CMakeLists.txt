@@ -250,11 +250,12 @@ else()
 endif()
 
 # Configs
-set(TILELANG_BACKENDS CUDA ROCM METAL)
+set(TILELANG_BACKENDS CUDA ROCM METAL LLVM)
 
 set(TILELANG_BACKEND_DOC_CUDA "Enable CUDA backend (ON/OFF/or CUDA SDK path)")
 set(TILELANG_BACKEND_DOC_ROCM "Enable ROCm backend (ON/OFF/or ROCm SDK path)")
 set(TILELANG_BACKEND_DOC_METAL "Enable Metal backend")
+set(TILELANG_BACKEND_DOC_LLVM "Enable LLVM backend")
 
 # TVM's config.cmake redefines USE_* options later, so we cache the user's choice
 # (including explicit -DUSE_XXX arguments) before we include TVM and restore it
@@ -415,6 +416,16 @@ if(NOT TILELANG_BACKEND_USER_SELECTED)
       set(USE_METAL ON)
     else()
       set(USE_METAL OFF)
+    endif()
+  endif()
+
+
+  if(DEFINED ENV{USE_LLVM})
+    set(_tilelang_backend_env_selected ON)
+    if($ENV{USE_LLVM})
+      set(USE_LLVM ON)
+    else()
+      set(USE_LLVM OFF)
     endif()
   endif()
 

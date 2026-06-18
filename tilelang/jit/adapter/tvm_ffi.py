@@ -239,7 +239,10 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
 
             # Resolve the device used for outputs. Prefer the first tensor input's device
             # if available, otherwise use PyTorch's current device.
-            out_device: torch.device | None = None
+            out_device: torch.device | None = next(
+                (input.device for input in inputs if isinstance(input, torch.Tensor)),
+                None,
+            )
 
             # Stitch the full positional argument list expected by the TVM executable
             ins_idx: int = 0
