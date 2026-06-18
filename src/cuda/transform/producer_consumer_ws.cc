@@ -1540,7 +1540,11 @@ private:
       LocalLiveSet movable_probe_live = producer_body_live;
       for (int ci = compute_cursor; ci < wait_pos; ++ci) {
         const LocalAccessSummary &summary = consumer_compute_summaries[ci];
-        if (consumer_compute_stmts[ci].as<BindNode>()) {
+        if (const auto *bind = consumer_compute_stmts[ci].as<BindNode>()) {
+          if (SideEffect(bind->value) > CallEffectKind::kReadState) {
+            all_movable = false;
+            break;
+          }
           if (!movable_probe_live.NeedsAnyDef(summary)) {
             all_movable = false;
             break;
@@ -1707,9 +1711,14 @@ private:
               bitwise_xor(p_parity_expr, IntImm(DataType::Int(32), 1))));
         }
 
-        // After the first bp_wait, emit all SIMT/cp.async producers
-        // followed immediately by commit_group so the hardware can start
-        // the async transfers as early as possible, overlapping with TMA.
+        for (const auto &stmt : producer_loop_prefix_stmts[tma_idx]) {
+          producer_stmts.push_back(stmt);
+        }
+
+        // After the first bp_wait and producer-local prefix definitions, emit
+        // all SIMT/cp.async producers followed immediately by commit_group so
+        // the hardware can start the async transfers as early as possible,
+        // overlapping with TMA.
         if (!simt_stmts_emitted && !simt_producer_stmts.empty()) {
           for (const auto &s : simt_producer_stmts) {
             producer_stmts.push_back(s);
@@ -1723,9 +1732,6 @@ private:
           simt_stmts_emitted = true;
         }
 
-        for (const auto &stmt : producer_loop_prefix_stmts[tma_idx]) {
-          producer_stmts.push_back(stmt);
-        }
         // Convert copy → tma_copy with barrier, or annotate non-copy
         // TMA tile-ops (e.g. im2col) with barrier reference.
         const auto *eval = flat_stmts[i].as<EvaluateNode>();

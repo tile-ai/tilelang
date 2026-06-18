@@ -204,6 +204,43 @@ def explicit_cp_async_wait_position(iters=4, block=16, cp_elems=8, dtype="float1
     return main
 
 
+def guarded_simt_tma_prefix_bind(
+    block_m=64,
+    block_n=128,
+    block_k=128,
+    dtype="float16",
+    threads=128,
+):
+    """Mixed TMA + SIMT producer where SIMT uses a scalar prefix bind."""
+
+    @T.prim_func
+    def main(
+        W: T.Buffer((block_m, block_k), dtype),
+        X: T.Buffer((32, 260), dtype),
+        C: T.Buffer((block_m, block_n), "float32"),
+    ):
+        with T.Kernel(2, threads=threads) as bx:
+            W_shared = T.alloc_shared((block_m, block_k), dtype)
+            X_shared = T.alloc_shared((block_k, block_n), dtype)
+            C_local = T.alloc_fragment((block_m, block_n), "float32")
+
+            T.clear(C_local)
+            tile_spatial_full = bx < 1
+            for ko in T.Pipelined(1, num_stages=3):
+                T.copy(W[0, 0], W_shared)
+                tile_full = tile_spatial_full & (ko == 0)
+                for i, j in T.Parallel(block_k, block_n):
+                    if tile_full:
+                        X_shared[i, j] = X[i % 32, bx * block_n + j + i // 32]
+                    else:
+                        X_shared[i, j] = T.cast(0.0, dtype)
+                T.gemm(W_shared, X_shared, C_local)
+
+            T.copy(C_local, C[0, 0])
+
+    return main
+
+
 def grouped_gemm_padded_pipelined(
     batch_sizes,
     K,
@@ -326,6 +363,26 @@ def test_tiled_ws_places_producer_in_first_warp_group():
 
     assert branch < producer_tma < consumer_branch < consumer_gemm
     assert "if 128 <= tx:" not in script
+
+
+def test_tiled_ws_places_prefix_binds_before_simt_producer_use():
+    """Producer-local scalar binds must be emitted before SIMT producers use them."""
+
+    func = guarded_simt_tma_prefix_bind().with_attr("global_symbol", "main")
+    mod = tvm.IRModule.from_expr(func)
+    target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
+    script = mod["main"].script()
+
+    producer_branch = _find_after(script, "if tx < 128:")
+    bp_wait = _find_after(script, "T.mbarrier_wait_parity", producer_branch)
+    tile_full_def = _find_after(script, "tile_full", bp_wait)
+    tile_full_use = _find_after(script, "if tile_full:", tile_full_def)
+    producer_tma = _find_after(script, "T.tma_copy", tile_full_use)
+
+    assert tile_full_def < tile_full_use < producer_tma
 
 
 def _run_grouped_gemm_ws(kernel, batch_sizes, K=128, N=128, block_M=64, dtype="float16"):
