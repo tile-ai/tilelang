@@ -12,6 +12,7 @@
 #include "cuda/op/copy.h"
 #include "cuda/target_utils.h"
 #include "cuda/transform/ptx_async_copy_injector.h"
+#include "layout/cute_layout.h"
 #include "layout/tcgen05_layout.h"
 #include "op/builtin.h"
 #include "op/utils.h"
@@ -1375,6 +1376,126 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
   return body;
 }
 
+namespace {
+
+Array<PrimExpr> makeRowMajorStrides(const Array<PrimExpr> &shape) {
+  Array<PrimExpr> strides(shape.size(), PrimExpr{1});
+  PrimExpr stride = 1;
+  for (int64_t i = static_cast<int64_t>(shape.size()) - 1; i >= 0; --i) {
+    strides.Set(i, stride);
+    stride *= shape[i];
+  }
+  return strides;
+}
+
+Array<PrimExpr> makeColumnMajorStrides(const Array<PrimExpr> &shape) {
+  Array<PrimExpr> strides;
+  PrimExpr stride = 1;
+  for (int64_t i = 0; i < shape.size(); i++) {
+    strides.push_back(stride);
+    stride *= shape[i];
+  }
+  return strides;
+}
+
+struct BulkCopyTile {
+  // Shape of the copied tile.
+  Array<int64_t> tile_shape;
+  // tile -> logical shared.
+  cute::Layout tile_to_shared_logical;
+  // tile -> logical global, using ScaledBasis for modes.
+  cute::Layout tile_to_global_mode;
+  // logical shared offset.
+  cute::IntTuple shared_logical_offset;
+  // logical global coords.
+  cute::IntTuple global_logical_coords;
+};
+
+// The shared tile and the global tile should be of the exact same size. And we
+// derive the mappings of the tile to the logical shared and global tensors.
+BulkCopyTile ComputeBulkCopyTile(const Array<PrimExpr> &shared_shape,
+                                 const Array<Range> &shared_range,
+                                 const Array<Range> &global_range) {
+  // The tile should have constant shape.
+  Array<int64_t> shared_range_extents =
+      shared_range.Map([](const Range &range) {
+        auto s = as_const_int(range->extent);
+        ICHECK(s) << "extent of shared_range: " << range << " is not constant";
+        return *s;
+      });
+  Array<int64_t> global_range_extents =
+      global_range.Map([](const Range &range) {
+        auto s = as_const_int(range->extent);
+        ICHECK(s) << "extent of global_range: " << range << " is not constant";
+        return *s;
+      });
+
+  // Find out the corresponding shared modes and global modes.
+  Array<int64_t> tile_shape;
+  Array<cute::IntTuple> tile_to_shared_mode_stride, tile_to_global_mode_stride;
+  int64_t shared_cur = 0, global_cur = 0;
+  while (shared_cur < shared_range_extents.size() &&
+         global_cur < global_range_extents.size()) {
+    int64_t s_extent = shared_range_extents[shared_cur];
+    int64_t g_extent = global_range_extents[global_cur];
+    if (s_extent <= 1) {
+      shared_cur++;
+      continue;
+    }
+    if (g_extent <= 1) {
+      global_cur++;
+      continue;
+    }
+    ICHECK_EQ(s_extent, g_extent)
+        << "Shared tile and global tile shape mismatch: tile_shape_shared["
+        << shared_cur << "] = " << s_extent << " != " << g_extent
+        << " = tile_shape_global[" << global_cur << "]";
+    tile_shape.push_back(s_extent);
+    tile_to_shared_mode_stride.push_back(cute::E({shared_cur}));
+    tile_to_global_mode_stride.push_back(cute::E({global_cur}));
+    shared_cur++;
+    global_cur++;
+  }
+  for (; shared_cur < shared_range_extents.size(); shared_cur++) {
+    ICHECK_EQ(shared_range_extents[shared_cur], 1)
+        << "Shared tile and global tile shape mismatch: "
+        << shared_range_extents << " vs " << global_range_extents;
+  }
+  for (; global_cur < global_range_extents.size(); global_cur++) {
+    ICHECK_EQ(global_range_extents[global_cur], 1)
+        << "Shared tile and global tile shape mismatch: "
+        << shared_range_extents << " vs " << global_range_extents;
+  }
+
+  // tile -> logical shared mode
+  auto tile_to_shared_mode =
+      cute::Layout(tile_shape, std::move(tile_to_shared_mode_stride));
+  // logical shared mode -> logical shared
+  auto shared_mode_to_shared_logical =
+      cute::MakeColumnMajorLayout(shared_shape);
+  // tile -> logical shared mode -> logical shared
+  auto tile_to_shared_logical =
+      cute::Composition(shared_mode_to_shared_logical, tile_to_shared_mode);
+
+  auto shared_coords =
+      shared_range.Map([](const Range &r) { return cute::IntTuple(r->min); });
+  auto shared_logical_offset =
+      shared_mode_to_shared_logical(cute::IntTupleTuple(shared_coords));
+
+  auto global_logical_coords =
+      global_range.Map([](const Range &r) { return cute::IntTuple(r->min); });
+
+  return {
+      tile_shape,
+      std::move(tile_to_shared_logical),
+      cute::Layout(tile_shape, std::move(tile_to_global_mode_stride)),
+      std::move(shared_logical_offset),
+      cute::IntTupleTuple(std::move(global_logical_coords)),
+  };
+}
+
+} // namespace
+
 Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
                      arith::Analyzer *analyzer, CopyInst copy_inst) {
   const Buffer &src = op.src;
@@ -1388,7 +1509,6 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   bool is_load = copy_inst == CopyInst::kBulkLoad;
   Buffer global_tensor = is_load ? src : dst;
   Buffer shared_tensor = is_load ? dst : src;
-  Buffer shared_tensor_unmapped = shared_tensor;
   Array<Range> global_range = is_load ? src_range : dst_range;
   Array<Range> shared_range = is_load ? dst_range : src_range;
 
@@ -1407,47 +1527,23 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     return fallback_to_normal("non-swizzled global layout");
   }
 
-  auto linear_layout = ComputeLinearLayout(shared_tensor);
-
-  Array<PrimExpr> shared_indices;
-  for (auto r : shared_range)
-    shared_indices.push_back(r->min);
-  std::vector<PrimExpr> shared_strides;
-  PrimExpr shared_stride = 1;
-  for (size_t i = 0; i < shared_tensor->shape.size(); i++) {
-    auto s = shared_tensor->shape[shared_tensor->shape.size() - i - 1];
-    shared_strides.insert(shared_strides.begin(), shared_stride);
-    shared_stride *= s;
+  Array<PrimExpr> global_shape = global_tensor->shape;
+  Array<PrimExpr> global_stride;
+  if (!global_tensor->strides.empty()) {
+    global_stride = global_tensor->strides;
+  } else {
+    global_stride = makeRowMajorStrides(global_shape);
   }
 
-  Array<PrimExpr> global_indices;
-  for (auto r : global_range) {
-    global_indices.push_back(r->min);
-  }
-  std::vector<PrimExpr> global_strides;
-  PrimExpr global_stride = 1;
-  for (size_t i = 0; i < global_tensor->shape.size(); i++) {
-    auto s = global_tensor->shape[global_tensor->shape.size() - i - 1];
-    global_strides.insert(global_strides.begin(), global_stride);
-    global_stride *= s;
-  }
-
-  ICHECK(shared_strides.size() == shared_indices.size())
-      << "shared_strides.size() != shared_indices.size()"
-      << shared_strides.size() << " " << shared_indices.size();
-  PrimExpr shared_offset = 0;
-  for (size_t i = 0; i < shared_indices.size(); i++) {
-    shared_offset += shared_indices[i] * shared_strides[i];
-  }
-  PrimExpr global_offset = 0;
-  for (size_t i = 0; i < global_indices.size(); i++) {
-    global_offset += global_indices[i] * global_strides[i];
-  }
+  // Check if tile shapes match, and compute the tile layouts.
+  // E.g., tile_shape = (64,512)
+  //       tile_to_shared_logical = (64,512):(1,64)
+  //       tile_to_global_mode = (64,512):(1@1,1@2)
+  auto [tile_shape, tile_to_shared_logical, tile_to_global_mode,
+        shared_logical_offset, global_logical_coords] =
+      ComputeBulkCopyTile(shared_tensor->shape, shared_range, global_range);
 
   TMADesc desc;
-  desc.rank = global_tensor->shape.size();
-  ICHECK(desc.rank >= 1 && desc.rank <= 5) << desc.rank;
-
   ICHECK(
       IsValidTMADtypePair(is_load, global_tensor->dtype, shared_tensor->dtype))
       << "Copy between buffer " << global_tensor->name << " and "
@@ -1457,65 +1553,12 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   desc.data_type =
       TensorMapDataTypeForTMA(global_tensor->dtype, shared_tensor->dtype);
   desc.global_addr = global_tensor->data;
-  desc.global_shape = ReverseArray(global_tensor->shape);
-  Array<PrimExpr> global_coords =
-      ReverseArray(global_range.Map([](Range r) { return r->min; }));
-  if (!global_tensor->strides.empty()) {
-    desc.global_stride = ReverseArray(global_tensor->strides);
-  } else {
-    PrimExpr stride = 1;
-    desc.global_stride.reserve(desc.rank);
-    for (size_t i = 0; i < desc.rank; i++) {
-      desc.global_stride.push_back(stride);
-      stride *= desc.global_shape[i];
-    }
-  }
-  ICHECK(is_one(desc.global_stride[0])) << desc.global_stride;
-  desc.global_stride = desc.global_stride.Map([&](PrimExpr e) {
-    return TMAGlobalBytesFromElements(e, global_tensor->dtype);
-  });
-  for (size_t i{1}; i < desc.global_stride.size(); i++) {
-    auto stride = desc.global_stride[i].as<IntImmNode>();
-    if (stride != nullptr) {
-      if (stride->value % 16 != 0 || stride->value >= (1ULL << 40)) {
-        DLOG(WARNING) << "TMA bulk copy cannot support a global stride of "
-                      << desc.global_stride[i] << ", fallback to normal copy.";
-        return fallback_to_normal("unsupported global stride");
-      }
-    }
-  }
-
-  auto s_range_idx = 0;
-  for (size_t i = 0; i < global_range.size(); i++) {
-    auto g_range = global_range[i];
-    if (is_one(g_range->extent)) {
-      continue;
-    }
-    while (is_one(shared_range[s_range_idx]->extent) &&
-           s_range_idx < shared_range.size()) {
-      s_range_idx++;
-    }
-    if (s_range_idx >= shared_range.size()) {
-      LOG(FATAL) << "TMA bulk copy cannot support a global range of "
-                 << global_range << ", shared_range " << shared_range;
-    }
-    auto s_range = shared_range[s_range_idx];
-    s_range_idx++;
-
-    ICHECK(StructuralEqual()(g_range->extent, s_range->extent))
-        << global_tensor->name << "[" << i << "] is illegal, "
-        << global_tensor->name << "[" << i << "] = " << g_range->extent << ", "
-        << shared_tensor->name << "[" << s_range_idx
-        << "] = " << s_range->extent;
-  }
-  desc.smem_box =
-      ReverseArray(global_range.Map([](Range r) { return r->extent; }));
-
-  desc.smem_stride = Array<PrimExpr>(desc.rank, PrimExpr(1));
   desc.l2_promotion = static_cast<int>(CU_TENSOR_MAP_L2_PROMOTION_L2_128B);
   desc.oob_fill = static_cast<int>(CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
   desc.interleave = static_cast<int>(CU_TENSOR_MAP_INTERLEAVE_NONE);
 
+  Array<PrimExpr> shared_shape = shared_tensor->shape;
+  // logical shared -> physical shared, in TileLang convention
   Layout shared_layout;
   if (T.layout_map.count(shared_tensor)) {
     shared_layout = T.layout_map.at(shared_tensor);
@@ -1523,44 +1566,42 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
         << "shared_tensor: " << shared_tensor->name
         << " not found in buffer_remap";
     shared_tensor = T.buffer_remap.at(shared_tensor);
-  }
-  if (!shared_layout.defined()) {
-    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
-  } else if (StructuralEqual()(shared_layout, linear_layout)) {
-    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
   } else {
-    if (shared_layout->InputDim() < 2) {
-      DLOG(WARNING) << "TMA bulk copy cannot support shared layout with input "
-                    << "dimension " << shared_layout->InputDim()
-                    << ", fallback to normal copy.";
-      return fallback_to_normal("shared layout input dimension is less than 2");
-    }
-    const int ndim = static_cast<int>(shared_layout->InputDim());
-    auto stride = as_const_int(shared_layout->InputShape()[ndim - 2]);
-    auto continuous = as_const_int(shared_layout->InputShape()[ndim - 1]);
-    ICHECK(stride != nullptr && continuous != nullptr);
-    SwizzleMode swizzle_mode =
-        DetectSwizzleMode(shared_layout, shared_tensor_unmapped);
-    if (swizzle_mode == SwizzleMode::kQuarter) {
-      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
-    } else if (swizzle_mode == SwizzleMode::kHalf) {
-      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
-    } else if (swizzle_mode == SwizzleMode::kFull) {
-      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
-    } else if (StructuralEqual()(
-                   shared_layout,
-                   makeGemmABLayoutPadded(*stride, *continuous,
-                                          shared_tensor->dtype.bits()))) {
-      DLOG(WARNING) << "Bulk copy cannot support a padded layout for src: "
-                    << src->name << ", dst: " << dst->name
-                    << ", fallback to normal copy";
-      return fallback_to_normal("padded shared layout");
-    } else {
-      DLOG(WARNING) << "Came across unsupported swizzle layout for src: "
-                    << src->name << ", dst: " << dst->name
-                    << ", fallback to normal copy";
-      return fallback_to_normal("unsupported shared swizzle layout");
-    }
+    shared_layout = makeLinearLayout(shared_shape);
+  }
+
+  // Convert the TileLang layout to a possibly swizzled CuTe ComposedLayout.
+  // This computes the swizzle from an arbitrary TileLang layout.
+  // E.g., composed = Sw<3,3,3> o 0 o (64,64,8):(64,1,4096)
+  auto composed = cute::ComposedLayoutFromTileLang(shared_layout);
+  if (!composed.defined()) {
+    DLOG(WARNING) << "Shared layout for src: " << src->name
+                  << ", dst: " << dst->name
+                  << " is not a CuTe swizzle over an affine layout, fallback "
+                     "to normal copy";
+    return fallback_to_normal("undecodable shared swizzle layout");
+  }
+  // Recast element-space layout into byte-address space.
+  // Because CuTe swizzle are based on byte addresses.
+  int elem_bits = shared_tensor->dtype.bits();
+  // E.g., composed_bytes = Sw<3,4,3> o 0 o (64,64,8):(128,2,8192)
+  auto composed_bytes = composed.value().Recast(elem_bits, /*new_bits=*/8);
+  const auto *sw = composed_bytes->swizzle.get();
+  int b_bits = sw->b_bits, m_base = sw->m_base, s_shift = sw->s_shift;
+  if (!sw->IsSwizzled()) {
+    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
+  } else if (b_bits == 1 && m_base == 4 && s_shift == 3) {
+    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
+  } else if (b_bits == 2 && m_base == 4 && s_shift == 3) {
+    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
+  } else if (b_bits == 3 && m_base == 4 && s_shift == 3) {
+    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
+  } else {
+    DLOG(WARNING) << "Shared swizzle Sw<" << b_bits << "," << m_base << ","
+                  << s_shift << "> for src: " << src->name
+                  << ", dst: " << dst->name
+                  << " is not a TMA swizzle atom, fallback to normal copy";
+    return fallback_to_normal("non-TMA shared swizzle layout");
   }
 
   // The TMA unit applies the descriptor's swizzle pattern relative to the
@@ -1570,50 +1611,234 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   // mode so MergeSharedMemoryAllocations can align the buffer accordingly.
   RequireTMASmemAlignment(T, shared_tensor, desc.swizzle);
 
-  auto inner_box_dim = as_const_int(desc.smem_box[0]);
-  if (inner_box_dim == nullptr) {
-    DLOG(WARNING) << "inner_box_dim " << desc.smem_box[0]
-                  << " can only be a constant integer for TMA bulk copy, "
-                     "fallback to normal copy";
-    return fallback_to_normal("non-constant inner box dimension");
-  }
-  int instruction_dim = *inner_box_dim;
-  DataType smem_elem_dtype = shared_tensor->dtype;
-  if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
-    instruction_dim = TMAElementsForBytes(64, smem_elem_dtype);
-  } else if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B)) {
-    instruction_dim = TMAElementsForBytes(128, smem_elem_dtype);
-  }
-  if (instruction_dim > 256) {
-    ICHECK((*inner_box_dim) % 256 == 0)
-        << "inner_box_dim: " << *inner_box_dim << " is not divisible by 256";
-    instruction_dim = 256;
-  }
-  ICHECK((*inner_box_dim) % instruction_dim == 0)
-      << "inner_box_dim: " << *inner_box_dim
-      << " is not divisible by instruction_dim: " << instruction_dim;
-  desc.smem_box.Set(0, PrimExpr(instruction_dim));
+  // logical shared -> physical shared (without swizzle)
+  // E.g., smem_plain = (64,64,8):(64,1,4096)
+  auto smem_plain = composed.value()->layout;
 
-  int inner_box_dim_ =
-      TMABytesFromElements(instruction_dim, shared_tensor->dtype);
+  // tile -> logical shared -> physical shared (without siwzzle)
+  // E.g., tile_to_smem_plain = (64,64,8):(64,1,4096)
+  auto tile_to_smem_plain =
+      cute::Composition(smem_plain, tile_to_shared_logical);
 
-  struct SwizzleCheck {
-    int swizzle;
-    int max_dim;
-  };
-  static const std::vector<SwizzleCheck> swizzle_checks = {
-      {static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B), 32},
-      {static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B), 64},
-      {static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B), 128},
-  };
-  for (const auto &check : swizzle_checks) {
-    if (desc.swizzle == check.swizzle && inner_box_dim_ > check.max_dim) {
-      DLOG(WARNING) << "TMA bulk copy cannot support a swizzled global layout "
-                       "with inner_box_dim_ > "
-                    << check.max_dim << ", will be fallback to normal copy";
-      return fallback_to_normal(
-          "swizzled shared box exceeds swizzle byte width");
+  // physical shared (without swizzle) -> tile
+  // E.g., smem_plain_to_tile = (64,64,8):(64,1,4096)
+  auto smem_plain_to_tile = cute::RightInverse(tile_to_smem_plain);
+  // right_inverse only inverts the bijective stride chain, so a gapped or
+  // non-injective SMEM layout would silently cover fewer elements than the
+  // tile.
+  int64_t inv_size = cute::AsConst(cute::Size(smem_plain_to_tile));
+  int64_t tile_size = cute::AsConst(cute::Size(tile_to_smem_plain));
+  ICHECK_EQ(inv_size, tile_size)
+      << "plain SMEM layout is not a bijection (gapped or non-injective): "
+      << "RightInverse covers " << inv_size << " of " << tile_size
+      << " elements; try to use annotate_layout to make your SMEM tile "
+         "contiguous";
+
+  // Each TMA box dim is at most 256.
+  const int64_t max_box_dim = 256;
+
+  // physical shared (without swizzle) -> tile -> logical global mode
+  // E.g, physical_shared_to_global_mode = (64,64,8):(1@2,1@1,64@2)
+  auto physical_shared_to_global_mode = cute::Coalesce(
+      cute::Composition(tile_to_global_mode, smem_plain_to_tile), max_box_dim);
+
+  // Truncate, because we do not want to start in the middle of a global mode.
+  // E.g., smem_rank = 2
+  int64_t smem_rank = 0;
+  while (smem_rank < cute::Rank(physical_shared_to_global_mode)) {
+    auto st =
+        cute::BasisValue(physical_shared_to_global_mode->stride[smem_rank]);
+    if (!cute::IsConst(st) || AsConst(st) != 1) {
+      break;
     }
+    smem_rank++;
+  }
+
+  if (smem_rank == 0) {
+    DLOG(WARNING) << "TMA bulk copy requires a contiguous innermost stride for "
+                     "SMEM, fallback to normal copy.";
+    return fallback_to_normal("non-contiguous SMEM innermost stride");
+  }
+
+  // physical shared (without swizzle) -> logical global mode (no > 1 stride)
+  // Ideally the shape of this is the exact box_dim. But we have
+  // several hardware constraints.
+  // E.g., tile_gbasis = (64, 64):(1@2, 1@1)
+  auto tile_gbasis = cute::Take(physical_shared_to_global_mode, smem_rank);
+
+  // logical global mode -> TMA mode
+  Array<cute::IntTuple> gmode_to_tma_mode_shape(global_shape.size(),
+                                                cute::IntTuple(int64_t(1)));
+  Array<cute::IntTuple> gmode_to_tma_mode_stride(global_shape.size(),
+                                                 cute::E({}));
+  // TMA mode -> logical global mode
+  std::vector<int64_t> tma_mode_to_gmode(global_shape.size());
+  // Some of the modes are not included in tile_gbasis and we need to track
+  // the modes, and later add the missed modes.
+  std::vector<bool> visited_global_modes(global_shape.size(), false);
+  // We have some hardware restrictions on tile_gbasis. But we can shrink it to
+  // meet some requirements if we need to. This is the modified tile_gbasis.
+  Array<cute::IntTuple> box_shape, box_stride;
+  for (int64_t i = 0; i < smem_rank; i++) {
+    int64_t cap = max_box_dim;
+    bool is_swizzle_inner = (i == 0 && sw->IsSwizzled());
+    if (is_swizzle_inner) {
+      int64_t span_bits = sw->Granularity() * 8;
+      cap = std::max<int64_t>(1, span_bits / elem_bits);
+    }
+    int64_t box_dim = cute::AsConst(tile_gbasis->shape[i]);
+    if (box_dim > cap) {
+      // This exceeds the hardware constraint. But we can make it work by
+      // spliting a mode.
+      // Only the slowest box mode has leftover the rest loop can absorb;
+      // shrinking a faster mode would gap the contiguous shared prefix.
+      int64_t inner = -1;
+      if (i == smem_rank - 1) {
+        for (int64_t d = cap; d > 1; --d) {
+          if (box_dim % d == 0) {
+            inner = d;
+            break;
+          }
+        }
+      }
+      if (inner != -1) {
+        box_dim = inner;
+      }
+    }
+    if (is_swizzle_inner) {
+      ICHECK_EQ(box_dim, cap)
+          << "The innermost box dim of a BulkCopy is not the swizzle "
+             "granularity: "
+          << "shared_layout = " << shared_layout << ", "
+          << "tile_to_smem_plain = " << tile_to_smem_plain << ", "
+          << "physical_shared_to_global_mode = "
+          << physical_shared_to_global_mode << ", "
+          << "tile_gbasis = " << tile_gbasis << ". "
+          << "Currently the automatically generated swizzling do not violate "
+             "this constraint. If you are annotating the layout, please make "
+             "sure the contiguous SMEM tile mode has size of your swizzle "
+             "granularity.";
+    } else {
+      if (box_dim > cap) {
+        DLOG(WARNING)
+            << "TMA box dim " << box_dim << " (mode " << i
+            << ") exceeds the cap " << cap
+            << " and cannot be cleanly split, fallback to normal copy";
+        return fallback_to_normal("box dim exceeds cap");
+      }
+    }
+    // The innermost box dim must be a whole 16-byte multiple: TMA transfers the
+    // innermost box as 16-byte vectors.
+    if (i == 0 &&
+        TMABytesFromElements(box_dim, shared_tensor->dtype) % 16 != 0) {
+      DLOG(WARNING) << "TMA innermost box dim " << box_dim << " (="
+                    << TMABytesFromElements(box_dim, shared_tensor->dtype)
+                    << " bytes) is not 16-byte aligned for src: " << src->name
+                    << ", dst: " << dst->name << ", fallback to normal copy";
+      return fallback_to_normal("inner box not 16-byte aligned");
+    }
+    box_shape.push_back(cute::IntTuple(box_dim));
+    box_stride.push_back(tile_gbasis->stride[i]);
+
+    // Collect the global mode information.
+    auto basis = cute::BasisPath(tile_gbasis->stride[i]);
+    ICHECK(basis.size() == 1);
+    auto mode = basis[0];
+    ICHECK(!visited_global_modes[mode]);
+    visited_global_modes[mode] = true;
+    gmode_to_tma_mode_stride.Set(mode, cute::E({i}));
+    tma_mode_to_gmode[i] = mode;
+  }
+
+  // Adopt the validated/shrunk box dims (a no-op when nothing was shrunk).
+  tile_gbasis = cute::Layout(cute::IntTupleTuple(std::move(box_shape)),
+                             cute::IntTupleTuple(std::move(box_stride)));
+
+  // The TMA rank with all the modes.
+  // E.g., tma_rank = 3
+  int64_t tma_rank = smem_rank;
+  // Basically tile_gbasis, but with all the global modes.
+  auto tma_gbasis_shape = cute::TupleFields(cute::Wrap(tile_gbasis->shape));
+  auto tma_gbasis_stride = cute::TupleFields(cute::Wrap(tile_gbasis->stride));
+  for (int64_t i = static_cast<int64_t>(global_shape.size()) - 1; i >= 0; i--) {
+    if (visited_global_modes[i])
+      continue;
+    gmode_to_tma_mode_stride.Set(i, cute::E({tma_rank}));
+    tma_mode_to_gmode[tma_rank] = i;
+    tma_gbasis_shape.push_back(1);
+    tma_gbasis_stride.push_back(cute::E({i}));
+    tma_rank++;
+  }
+
+  ICHECK_EQ(tma_rank, global_shape.size());
+  desc.rank = tma_rank;
+  ICHECK(desc.rank >= 1 && desc.rank <= 5) << desc.rank;
+
+  // logical global mode -> global mode in TMA's view
+  // E.g., (1,1,1):(1@2,1@1,1@0)
+  auto gmode_to_tma_mode = cute::Layout(std::move(gmode_to_tma_mode_shape),
+                                        std::move(gmode_to_tma_mode_stride));
+
+  // physical shared (without swizzle) -> logical global mode, all global modes
+  // E.g., tma_gbasis = (64,64.1):(1@2,1@1,1@0)
+  auto tma_gbasis =
+      cute::Layout(std::move(tma_gbasis_shape), std::move(tma_gbasis_stride));
+  ICHECK_EQ(cute::Rank(tma_gbasis), tma_rank);
+
+  // The size in the box.
+  // E.g., box_size = 4096
+  const int64_t box_size =
+      cute::AsConst(cute::Size(tile_gbasis)); // also tma_gbasis
+  // The size out of the box.
+  // E.g., rest_size = 8
+  const int64_t rest_size =
+      cute::AsConst(cute::Size(tile_to_shared_logical)) / box_size;
+
+  // Rest index -> physical shared
+  // E.g., 8:4096
+  auto rest_to_smem = cute::Coalesce(cute::Layout(rest_size, box_size));
+  // Rest index -> physical shared -> logical global mode
+  // E.g., 8:64@2
+  auto rest_to_gmode =
+      cute::Composition(physical_shared_to_global_mode, rest_to_smem);
+  // Rest index -> logical global mode -> global mode in TMA's view
+  // E.g., 8:64@0
+  auto rest_to_tma_mode =
+      cute::Coalesce(cute::Composition(gmode_to_tma_mode, rest_to_gmode));
+
+  desc.global_shape = Array<PrimExpr>();
+  desc.global_stride = Array<PrimExpr>();
+  desc.smem_box = Array<PrimExpr>();
+  desc.smem_stride = Array<PrimExpr>(tma_rank, PrimExpr(1));
+
+  for (int64_t i = 0; i < tma_rank; i++) {
+    desc.smem_box.push_back(
+        cute::AsConstOrPrimExpr(tma_gbasis->shape[i], DataType::Int(32)));
+
+    desc.global_shape.push_back(global_shape[tma_mode_to_gmode[i]]);
+
+    PrimExpr elem_stride = global_stride[tma_mode_to_gmode[i]];
+    if (i == 0 && !is_one(elem_stride)) {
+      DLOG(WARNING)
+          << "TMA innermost global stride " << elem_stride
+          << " != 1 element for src: " << src->name << ", dst: " << dst->name
+          << " (transposed/non-contiguous box), fallback to normal copy";
+      return fallback_to_normal("non-contiguous innermost TMA box");
+    }
+    PrimExpr byte_stride =
+        TMAGlobalBytesFromElements(elem_stride, global_tensor->dtype);
+    if (i >= 1) {
+      if (auto s = as_const_int(byte_stride)) {
+        if (*s % 16 != 0 || *s >= (1LL << 40)) {
+          DLOG(WARNING) << "TMA global stride " << byte_stride
+                        << " unsupported for src: " << src->name
+                        << ", dst: " << dst->name
+                        << ", fallback to normal copy";
+          return fallback_to_normal("unsupported global stride");
+        }
+      }
+    }
+    desc.global_stride.push_back(byte_stride);
   }
 
   Call create_descriptor =
@@ -1651,9 +1876,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   auto tma_op = is_load ? tma_load() : tma_store();
 
   Stmt tma_copy;
-  PrimExpr total_elements = 1;
-  for (auto e : desc.smem_box)
-    total_elements *= e;
+
+  PrimExpr total_elements = IntImm(DataType::Int(32), box_size);
 
   auto build_multicast_args = [&](const Array<PrimExpr> &regular_args) {
     Array<PrimExpr> mc_args;
@@ -1668,16 +1892,44 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     return mc_args;
   };
 
-  if ((*inner_box_dim) != instruction_dim) {
-    Var loop_var("i");
-    int loop_extent = (*inner_box_dim) / instruction_dim;
+  // physical shared offset
+  cute::IntTuple shared_offset = smem_plain(shared_logical_offset);
+  auto make_shared_offset = [&](std::optional<PrimExpr> rest_idx) {
+    cute::IntTuple off = shared_offset;
+    if (rest_idx.has_value())
+      off += rest_to_smem(*rest_idx);
+    return cute::AsConstOrPrimExpr(off, DataType::Int(32));
+  };
 
-    PrimExpr shared_addr = shared_tensor.access_ptr(
-        is_load ? 2 : 1, DataType::Handle(), 1,
-        shared_offset + total_elements * loop_var, total_elements);
+  // TMA coords
+  cute::IntTuple tma_coords;
+  {
+    Array<cute::IntTuple> modes;
+    modes.reserve(tma_rank);
+    for (int64_t i = 0; i < tma_rank; i++)
+      modes.push_back(global_logical_coords[tma_mode_to_gmode[i]]);
+    tma_coords = cute::IntTupleTuple(std::move(modes));
+  }
+  auto make_tma_coords = [&](std::optional<PrimExpr> rest_idx) {
+    cute::IntTuple coords = tma_coords;
+    if (rest_idx.has_value())
+      coords += rest_to_tma_mode(*rest_idx);
+    Array<PrimExpr> out;
+    out.reserve(tma_rank);
+    for (int64_t i = 0; i < tma_rank; i++)
+      out.push_back(cute::AsConstOrPrimExpr(coords[i], DataType::Int(32)));
+    return out;
+  };
+
+  if (rest_size > 1) {
+    Var loop_var("i", DataType::Int(32));
+    int loop_extent = rest_size;
+
+    PrimExpr shared_addr =
+        shared_tensor.access_ptr(is_load ? 2 : 1, DataType::Handle(), 1,
+                                 make_shared_offset(loop_var), total_elements);
     args.push_back(shared_addr);
-    global_coords.Set(0, global_coords[0] + instruction_dim * loop_var);
-    for (auto coord : global_coords)
+    for (auto coord : make_tma_coords(loop_var))
       args.push_back(coord);
     int need_reduce = 0;
     if (!is_load)
@@ -1710,9 +1962,10 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     }
   } else {
     PrimExpr shared_addr = shared_tensor.access_ptr(
-        is_load ? 2 : 1, DataType::Handle(), 1, shared_offset, total_elements);
+        is_load ? 2 : 1, DataType::Handle(), 1,
+        make_shared_offset(std::nullopt), total_elements);
     args.push_back(shared_addr);
-    for (auto coord : global_coords)
+    for (auto coord : make_tma_coords(std::nullopt))
       args.push_back(coord);
     int need_reduce = 0;
     if (!is_load)
@@ -1759,8 +2012,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
 
   if (is_load && barrier_base_id >= 0) {
     PrimExpr total_bytes;
-    if ((*inner_box_dim) != instruction_dim) {
-      int loop_extent = (*inner_box_dim) / instruction_dim;
+    if (rest_size > 1) {
+      int loop_extent = rest_size;
       total_bytes = TMATransactionBytesFromElements(
           total_elements * loop_extent, shared_tensor->dtype);
     } else {
