@@ -31,6 +31,9 @@ from .eager.builder import OutTensor
 from .proxy import Tensor, ptr as _ptr_sentinel
 
 
+_ROLE_SCOPED_ALLOC_ATTR = "tl.role_scoped_alloc"
+
+
 def alloc_shared(shape: ShapeType, dtype: DType, scope="shared.dyn") -> Buffer:
     """Allocate a shared memory buffer for inter-thread communication.
 
@@ -49,43 +52,63 @@ def alloc_shared(shape: ShapeType, dtype: DType, scope="shared.dyn") -> Buffer:
     return T.sblock_alloc_buffer(shape, dtype, scope=scope)
 
 
-def alloc_local(shape: ShapeType, dtype: DType, scope="local") -> Buffer:
+def alloc_local(shape: ShapeType, dtype: DType, scope="local", role_scoped: bool = False) -> Buffer:
     """Allocate a local memory buffer for thread-private storage.
 
     Args:
         shape (tuple): The shape of the buffer to allocate
         dtype (str): The data type of the buffer (e.g., 'float32', 'int32')
         scope (str, optional): The memory scope. Defaults to "local"
+        role_scoped (bool, optional): Emit the allocation at the current
+            statement position instead of as an SBlock allocation.
 
     Returns:
         T.Buffer: A TVM buffer object allocated in local memory
     """
+    if role_scoped:
+        return T.alloc_buffer(shape, dtype, scope=scope, annotations={_ROLE_SCOPED_ALLOC_ATTR: True})
     return T.sblock_alloc_buffer(shape, dtype, scope=scope)
 
 
-def alloc_fragment(shape: ShapeType, dtype: DType, scope="local.fragment") -> Buffer:
+def alloc_fragment(shape: ShapeType, dtype: DType, scope="local.fragment", role_scoped: bool = False) -> Buffer:
     """Allocate a fragment memory buffer for specialized operations.
 
     Args:
         shape (tuple): The shape of the buffer to allocate
         dtype (str): The data type of the buffer (e.g., 'float32', 'int32')
         scope (str, optional): The memory scope. Defaults to "local.fragment"
+        role_scoped (bool, optional): Emit the allocation at the current
+            statement position instead of as an SBlock allocation.
 
     Returns:
         T.Buffer: A TVM buffer object allocated in fragment memory
     """
+    if role_scoped:
+        return T.alloc_buffer(shape, dtype, scope=scope, annotations={_ROLE_SCOPED_ALLOC_ATTR: True})
     return T.sblock_alloc_buffer(shape, dtype, scope=scope)
 
 
 @overload
-def alloc_var(dtype: DType, init: PrimExpr | int | float, scope: str = "local.var") -> Buffer: ...
+def alloc_var(dtype: DType, init: PrimExpr | int | float, scope: str = "local.var", *, role_scoped: bool = False) -> Buffer: ...
 
 
 @overload
-def alloc_var(dtype: DType, scope: str = "local.var", *, init: PrimExpr | int | float | None = None) -> Buffer: ...
+def alloc_var(
+    dtype: DType,
+    scope: str = "local.var",
+    *,
+    init: PrimExpr | int | float | None = None,
+    role_scoped: bool = False,
+) -> Buffer: ...
 
 
-def alloc_var(dtype: DType, *args, scope: str = "local.var", init: PrimExpr | int | float | None = None) -> Buffer:
+def alloc_var(
+    dtype: DType,
+    *args,
+    scope: str = "local.var",
+    init: PrimExpr | int | float | None = None,
+    role_scoped: bool = False,
+) -> Buffer:
     """Allocate a single-element variable buffer.
 
     Args:
@@ -100,6 +123,8 @@ def alloc_var(dtype: DType, *args, scope: str = "local.var", init: PrimExpr | in
         init (PrimExpr, optional): The optional initializer value. When provided,
             the generated code will initialize the variable with this value instead
             of defaulting to zero.
+        role_scoped (bool, optional): Emit the allocation at the current
+            statement position instead of as an SBlock allocation.
     Examples:
         a = T.alloc_var('int32', 1) # var with init 1
         a = T.alloc_var('int32', 'local.var') # var with local.var scope
@@ -136,7 +161,10 @@ def alloc_var(dtype: DType, *args, scope: str = "local.var", init: PrimExpr | in
     if dtype is _ptr_sentinel:
         dtype = _dtypes.int64
 
-    buffer = T.sblock_alloc_buffer([1], dtype, scope=parsed_scope)
+    if role_scoped:
+        buffer = T.alloc_buffer([1], dtype, scope=parsed_scope, annotations={_ROLE_SCOPED_ALLOC_ATTR: True})
+    else:
+        buffer = T.sblock_alloc_buffer([1], dtype, scope=parsed_scope)
     if parsed_init is not None:
         # Always use T.buffer_store for reliable initialisation across all
         # backends.  The sblock_attr("tl.local_var_init") path feeds into the

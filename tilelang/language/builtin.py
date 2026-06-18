@@ -1499,6 +1499,11 @@ def ds_read_tr8_b64(src: BufferLikeType) -> PrimExpr:
     return tirx.call_intrin("uint32x2", tirx.op.Op.get("tl.ds_read_tr8_b64"), ptr)
 
 
+def pack_b16(v0: PrimExpr, v1: PrimExpr) -> PrimExpr:
+    """Pack two b16 values into one uint32 lane."""
+    return tirx.call_intrin("uint32", tirx.op.Op.get("tl.pack_b16"), v0, v1)
+
+
 def ldg32(src: BufferLikeType, pred: PrimExpr = None) -> PrimExpr:
     """Load 32 bits (4 bytes) from global memory using explicit PTX instructions.
 
@@ -1523,6 +1528,21 @@ def ldg32(src: BufferLikeType, pred: PrimExpr = None) -> PrimExpr:
         return tirx.call_intrin("uint32", tirx.op.Op.get("tl.ldg32"), ptr)
     else:
         return tirx.call_intrin("uint32", tirx.op.Op.get("tl.ldg32"), ptr, pred)
+
+
+def lds32(src: BufferLikeType, pred: PrimExpr = None) -> PrimExpr:
+    """Load one aligned 32-bit word from shared memory.
+
+    Usage: `T.lds32(smem_u8[i])` emits `tl::load_shared_32(ptr)`.
+    `T.lds32(smem_u8[i], pred=i < N)` emits a predicated shared load.
+    """
+    if not isinstance(src, BufferLikeTypeTuple):
+        raise TypeError(f"T.lds32 expects Buffer, BufferRegion, or BufferLoad. Got {type(src)}: {src}")
+    ptr = retrieve_ptr(src, access_type="r")
+    if pred is None:
+        return tirx.call_intrin("uint32", tirx.op.Op.get("tl.lds32"), ptr)
+    else:
+        return tirx.call_intrin("uint32", tirx.op.Op.get("tl.lds32"), ptr, pred)
 
 
 def ldg64(src: BufferLikeType, pred: PrimExpr = None) -> PrimExpr:

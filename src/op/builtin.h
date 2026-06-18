@@ -48,6 +48,11 @@ static constexpr const char *kAsyncCopyNoImplicitCommitWait =
 static constexpr const char *kPipelineMbarPhaseExpr =
     "tl.pipeline_mbar_phase_expr";
 static constexpr const char *kLocalVarInit = "tl.local_var_init";
+// Allocation annotation requesting StorageRewrite to keep the allocation at
+// the lexical statement where it was emitted.  This is intended for manual
+// warp-specialized code where branch-local register arrays must not be hoisted
+// ahead of setmaxnreg or out of a producer/consumer role branch.
+static constexpr const char *kRoleScopedAlloc = "tl.role_scoped_alloc";
 // A PrimFunc-level attribute carrying a list of handle Vars
 // that must NOT be marked with the restrict qualifier in codegen.
 // Type: ffi::Array<tirx::Var>
@@ -490,6 +495,29 @@ TVM_DLL const Op &ptx_deallocate_tensor_memory();
  *                    Var accumulator, Expr c_index, bool saturate);
  */
 TVM_DLL const Op &ptx_mma_sm70();
+
+/*!
+ * \brief TileLang intrinsic for PTX block-scaled MMA instructions.
+ *
+ *  SM120 currently supports mxf8f6f4 scale_vec=1, m16n8k32 for all pairs of
+ *  e2m1/e3m2/e2m3/e4m3/e5m2 inputs with ue8m0 scale factors, plus mxf4nvf4
+ *  scale_vec=2/4, m16n8k64 for e2m1 x e2m1 inputs with ue8m0/ue4m3 scale
+ *  factors.
+ *
+ *  void ptx_mma_blockscaled(StringImm dtype, StringImm shape,
+ *                          StringImm A_layout, StringImm B_layout,
+ *                          StringImm A_dtype, StringImm B_dtype,
+ *                          StringImm C_dtype, StringImm SF_dtype,
+ *                          Integer scale_vec_size,
+ *                          Var multiplicand_a, Expr a_index,
+ *                          Var multiplicand_b, Expr b_index,
+ *                          Var accumulator, Expr c_index,
+ *                          Expr scale_a, Expr scale_b);
+ *
+ *  TileLang also accepts optional Expr scale_id_a, Expr scale_id_b arguments
+ *  after scale_b for selecting entries inside packed scale registers.
+ */
+TVM_DLL const Op &ptx_mma_blockscaled();
 
 /*!
  * \brief tvm intrinsics for ldmatrix
@@ -1254,6 +1282,19 @@ TVM_DLL const Op &__ffs();
  *    y[i] = T.ldg32(x, i)
  */
 TVM_DLL const Op &ldg32();
+
+/*!
+ * \brief tilelang intrinsic for shared memory load with 32-bit vector width.
+ *
+ *  This op loads 32 bits (4 bytes) from shared memory using an explicit
+ *  PTX ld.shared.u32 instruction. The source pointer must be 4-byte aligned.
+ *  An optional predicate skips the load and returns zero when false.
+ *
+ *  Usage from TVMScript:
+ *    y = T.lds32(smem_u8[i])
+ *    y = T.lds32(smem_u8[i], pred=i < N)
+ */
+TVM_DLL const Op &lds32();
 
 /*!
  * \brief tilelang intrinsic for global memory load with 64-bit vector width.

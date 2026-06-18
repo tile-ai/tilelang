@@ -87,6 +87,41 @@ def run_gather_scatter(N=64, K=64, K_box=64):
     torch.testing.assert_close(Dst, expected)
 
 
+def gather4_fp4_unpack_program(N: int = 64, K_box: int = 128):
+    @T.prim_func
+    def main(
+        Src: T.Tensor((N, K_box), T.float4_e2m1fn),
+    ):
+        with T.Kernel(1, 1, threads=128):
+            smem = T.alloc_shared((4, K_box), T.float4_e2m1_unpacked)
+            mbar = T.alloc_barrier(1)
+
+            if T.shuffle_elect(128):
+                T.mbarrier_expect_tx(mbar, T.tma_gather4_bytes(K_box, "float4_e2m1_unpacked"))
+                T.tma_gather4(Src, smem, 0, [0, 7, 23, 42], barrier=mbar)
+                T.barrier_arrive(mbar)
+            T.mbarrier_wait_parity(mbar, 0)
+
+    return main
+
+
+def test_gather4_fp4_unpack_descriptor_codegen():
+    import re
+
+    artifact = tilelang.lower(
+        gather4_fp4_unpack_program(),
+        target={"kind": "cuda", "arch": "sm_100"},
+        enable_device_compile=False,
+    )
+    host_ir = str(artifact.host_mod)
+    device_ir = str(artifact.device_mod)
+    assert 'T.handle("float4_e2m1fn", "global")' in host_ir
+    assert 'smem = T.alloc_buffer((512,), "custom[float4_e2m1_unpacked]"' in device_ir
+    assert "T.tma_load_gather4(" in device_ir
+    assert re.search(r'\["__tvm_tensormap_create_tiled", \w+, 14,', host_ir)
+    assert re.search(r"T\.mbarrier_expect_tx\([^,]+, 256\)", device_ir)
+
+
 @requires_sm100
 def test_gather_scatter_basic():
     run_gather_scatter(N=64, K=64, K_box=64)

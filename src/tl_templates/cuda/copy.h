@@ -146,11 +146,46 @@ template <typename AccessType> struct global_load<AccessType, 16> {
   }
 };
 
+// Shared memory load intrinsics with explicit vector widths
+// Following the same wrapper/specialization shape as global_load.
+
+// Primary template declaration
+template <typename AccessType, int LoadBytes> struct shared_load;
+
+// lds32: Load 32 bits (4 bytes) from shared memory
+template <typename AccessType> struct shared_load<AccessType, 4> {
+  TL_DEVICE shared_load(AccessType &D, void const *ptr) {
+    unsigned &data = reinterpret_cast<unsigned &>(D);
+    uint32_t smem_int_ptr = smem_ptr_to_uint(ptr);
+    asm volatile("ld.shared.u32 %0, [%1];\n" : "=r"(data) : "r"(smem_int_ptr));
+  }
+
+  TL_DEVICE shared_load(AccessType &D, void const *ptr, bool pred_guard) {
+    unsigned &data = reinterpret_cast<unsigned &>(D);
+    uint32_t smem_int_ptr = smem_ptr_to_uint(ptr);
+    asm volatile("{\n"
+                 "  .reg .pred p;\n"
+                 "  setp.ne.b32 p, %2, 0;\n"
+                 "  mov.b32 %0, %3;\n"
+                 "  @p ld.shared.u32 %0, [%1];\n"
+                 "}\n"
+                 : "=r"(data)
+                 : "r"(smem_int_ptr), "r"((int)pred_guard), "r"(data));
+  }
+};
+
 // Convenience wrapper functions for direct use
 // load_global_32: Load 32 bits, return uint32_t
 TL_DEVICE uint32_t load_global_32(const void *ptr) {
   uint32_t ret{};
   global_load<uint32_t, 4>(ret, ptr, true);
+  return ret;
+}
+
+// load_shared_32: Load one aligned 32-bit word from shared memory.
+TL_DEVICE uint32_t load_shared_32(const void *ptr) {
+  uint32_t ret{};
+  shared_load<uint32_t, 4>(ret, ptr);
   return ret;
 }
 
@@ -172,6 +207,12 @@ TL_DEVICE uint4 load_global_128(const void *ptr) {
 TL_DEVICE uint32_t load_global_32_conditional(const void *ptr, bool pred) {
   uint32_t ret{};
   global_load<uint32_t, 4>(ret, ptr, pred);
+  return ret;
+}
+
+TL_DEVICE uint32_t load_shared_32_conditional(const void *ptr, bool pred) {
+  uint32_t ret{};
+  shared_load<uint32_t, 4>(ret, ptr, pred);
   return ret;
 }
 

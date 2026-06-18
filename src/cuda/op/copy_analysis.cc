@@ -94,6 +94,8 @@ enum class PreferredCopyInstruction {
   kAuto,
   kTMA,
   kCPAsync,
+  kLDSM,
+  kSTSM,
   kSync,
 };
 
@@ -103,6 +105,8 @@ constexpr std::pair<const char *, PreferredCopyInstruction>
     kPreferredCopyInstructions[] = {
         {"tma", PreferredCopyInstruction::kTMA},
         {"cp_async", PreferredCopyInstruction::kCPAsync},
+        {"ldsm", PreferredCopyInstruction::kLDSM},
+        {"stsm", PreferredCopyInstruction::kSTSM},
         {"sync", PreferredCopyInstruction::kSync},
 };
 
@@ -126,7 +130,8 @@ ParsePreferredCopyInstruction(const std::string &prefer) {
     }
   }
   LOG(FATAL) << "Unsupported T.copy prefer_instruction=\"" << prefer
-             << "\". Expected one of: \"tma\", \"cp_async\", \"sync\".";
+             << "\". Expected one of: \"tma\", \"cp_async\", \"ldsm\", "
+                "\"stsm\", \"sync\".";
   return PreferredCopyInstruction::kAuto;
 }
 
@@ -462,6 +467,15 @@ std::string MakeTmaUnavailableReason(const CopyNode &op) {
         << " (scope=" << op.dst.scope() << ", dtype=" << op.dst->dtype << ").";
     return oss.str();
   }
+  if (op.src->dtype.is_float4_e2m1fn() && op.dst->dtype == DataType::UInt(8)) {
+    oss << "T.tma_copy() supports packed FP4 global -> uint8 shared only as a "
+           "descriptor-based TMA load where the shared uint8 buffer is "
+           "physical byte storage. Got src="
+        << op.src->name << " (scope=" << op.src.scope()
+        << ", dtype=" << op.src->dtype << "), dst=" << op.dst->name
+        << " (scope=" << op.dst.scope() << ", dtype=" << op.dst->dtype << ").";
+    return oss.str();
+  }
   oss << "T.tma_copy() requires TMA-capable target and global<->shared copy "
          "pattern, but TMA is not available for src="
       << op.src->name << ", dst=" << op.dst->name;
@@ -687,6 +701,28 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
                              facts.async_unavailable_reason);
   }
 
+  if (facts.prefer_instruction == PreferredCopyInstruction::kLDSM) {
+    if (!facts.can_ldsm) {
+      return Unsupported(
+          "T.copy prefer_instruction=\"ldsm\" requires a shared->fragment copy "
+          "on a target with ldmatrix support. Got src=" +
+          std::string(op.src->name) + " (scope=" + op.src.scope() + "), dst=" +
+          std::string(op.dst->name) + " (scope=" + op.dst.scope() + ").");
+    }
+    return Supported(CopyInst::kLDSM);
+  }
+
+  if (facts.prefer_instruction == PreferredCopyInstruction::kSTSM) {
+    if (!facts.can_stsm) {
+      return Unsupported(
+          "T.copy prefer_instruction=\"stsm\" requires a fragment->shared copy "
+          "on a target with stmatrix support. Got src=" +
+          std::string(op.src->name) + " (scope=" + op.src.scope() + "), dst=" +
+          std::string(op.dst->name) + " (scope=" + op.dst.scope() + ").");
+    }
+    return Supported(CopyInst::kSTSM);
+  }
+
   if (facts.prefer_instruction == PreferredCopyInstruction::kSync) {
     return Supported(SelectSyncLikeInst(facts));
   }
@@ -729,6 +765,19 @@ CopyInstSelection ClassifyWarpSpecializedProducerCopy(const CopyNode &op,
   if (facts.explicit_cp_async || facts.no_implicit_async_commit_wait) {
     return facts.can_cp_async ? Supported(CopyInst::kCPAsync)
                               : Unsupported(facts.async_unavailable_reason);
+  }
+
+  if (facts.prefer_instruction == PreferredCopyInstruction::kLDSM) {
+    return facts.can_ldsm
+               ? Supported(CopyInst::kLDSM)
+               : Unsupported("T.copy prefer_instruction=\"ldsm\" could not be "
+                             "honored for the producer copy.");
+  }
+  if (facts.prefer_instruction == PreferredCopyInstruction::kSTSM) {
+    return facts.can_stsm
+               ? Supported(CopyInst::kSTSM)
+               : Unsupported("T.copy prefer_instruction=\"stsm\" could not be "
+                             "honored for the producer copy.");
   }
 
   if (!facts.disable_tma) {

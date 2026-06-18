@@ -87,6 +87,25 @@ std::string DTypeEnumToString(const DataType &dtype);
 std::string DTypeEnumToString(const std::string &dtype);
 
 /*!
+ * \brief Get the PTX suffix string for a data type, e.g. ".e2m1".
+ */
+std::string DTypeToString(DataType dtype);
+
+struct MMABlockScaleInfo {
+  std::string kind;
+  std::string scale_vec;
+  std::string scale_dtype;
+};
+
+/*!
+ * \brief Validate and describe an SM120 dense block-scaled MMA configuration.
+ */
+MMABlockScaleInfo GetMMABlockScaleInfo(DataType dtype_a, DataType dtype_b,
+                                       DataType dtype_c, int m, int n, int k,
+                                       bool trans_a, bool trans_b,
+                                       int scale_vec);
+
+/*!
  * \brief Parse MMA shape from string.
  */
 std::tuple<int, int, int> ParseMMAShape(const std::string &str);
@@ -153,6 +172,16 @@ PrintMMAAssembly(const std::string &shape, const std::string &A_layout,
                  const std::string &metadata_offset,
                  const std::string &sparsity_selector,
                  const std::string &bit_op, bool sparse, bool saturate);
+
+std::string PrintMMABlockScaleAssembly(
+    const std::string &shape, const std::string &A_layout,
+    const std::string &B_layout, const std::string &A_dtype,
+    const std::string &B_dtype, const std::string &C_dtype, int scale_vec,
+    const std::string &a_ptr, const std::string &a_offset,
+    const std::string &b_ptr, const std::string &b_offset,
+    const std::string &c_ptr, const std::string &c_offset,
+    const std::string &sfa, const std::string &sfb, const std::string &id_a,
+    const std::string &id_b);
 
 /*!
  * \brief Print WGMMA assembly string given parameters.

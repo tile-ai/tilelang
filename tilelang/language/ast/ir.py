@@ -1882,6 +1882,7 @@ call_llvm_pure_intrin = _dtype_forward(_tir_op.call_llvm_pure_intrin)
 call_pure_extern = _dtype_forward(_tir_op.call_pure_extern)
 ptx_mma = _dtype_forward(_tir_op.ptx_mma)
 ptx_mma_sp = _dtype_forward(_tir_op.ptx_mma_sp)
+ptx_mma_blockscaled = _dtype_forward(_tir_op.ptx_mma_blockscaled)
 ptx_wgmma_ss = _dtype_forward(_tir_op.ptx_wgmma_ss)
 ptx_wgmma_rs = _dtype_forward(_tir_op.ptx_wgmma_rs)
 ptx_wgmma_sp_ss = _dtype_forward(_tir_op.ptx_wgmma_sp_ss)
@@ -2137,6 +2138,7 @@ __all__ = [
     "tvm_warp_activemask",
     "ptx_mma",
     "ptx_mma_sp",
+    "ptx_mma_blockscaled",
     "ptx_wgmma_ss",
     "ptx_wgmma_rs",
     "ptx_wgmma_sp_ss",
