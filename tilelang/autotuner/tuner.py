@@ -17,7 +17,7 @@ from tvm.target import Target
 import inspect
 from functools import partial
 from typing import Generic, Literal, Any, ParamSpec, TypeVar
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from tqdm.auto import tqdm
 import logging
 import concurrent.futures
@@ -212,6 +212,31 @@ def _normalize_value(value, sort_dict_items: bool = False):
             return tuple(sorted(items))
         return {k: v for k, v in items}
     return value
+
+
+def _provided_jit_parameter_names(signature: inspect.Signature, args: tuple[Any, ...], kwargs: dict[str, Any]) -> set[str]:
+    provided = set(kwargs)
+    positional_arg_count = len(args)
+    positional_index = 0
+    for name, param in signature.parameters.items():
+        if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
+            if positional_index >= positional_arg_count:
+                break
+            provided.add(name)
+            positional_index += 1
+        elif param.kind == inspect.Parameter.VAR_POSITIONAL:
+            break
+    return provided
+
+
+def _first_autotune_config(configs: Any) -> Mapping[str, Any] | None:
+    if isinstance(configs, Mapping):
+        return configs
+    if isinstance(configs, (list, tuple)) and configs:
+        first_config = configs[0]
+        if isinstance(first_config, Mapping):
+            return first_config
+    return None
 
 
 @dataclass
@@ -1277,10 +1302,19 @@ class AutoTuneImpl(Generic[_P, _T]):
 
         mode = self.jit_impl.initialize_jit_mode(*args, **kwargs)
         autotuner = self.get_tunner()
-        # Defer scalar-input validation to run(), after we know whether
-        # tuning will actually execute or be skipped because all tunable
-        # parameters are already provided by the caller.
-        autotuner._prim_func_for_validation = self.jit_impl.get_tir(*args, **kwargs)
+        validation_kwargs = dict(kwargs)
+        provided = _provided_jit_parameter_names(self.jit_impl.signature, args, kwargs)
+        first_config = _first_autotune_config(self.configs)
+        if first_config is not None:
+            for name in self.jit_impl.signature.parameters:
+                if name in first_config and name not in provided:
+                    validation_kwargs[name] = first_config[name]
+        try:
+            autotuner._prim_func_for_validation = self.jit_impl.get_tir(*args, **validation_kwargs)
+        except TypeError as exc:
+            if "missing a required argument" not in str(exc):
+                raise
+            logger.debug("Skipping autotune input validation TIR generation: %s", exc)
 
         # Compute the cache key, excluding do_not_specialize parameters
         # so that changing them does not trigger re-autotuning.
