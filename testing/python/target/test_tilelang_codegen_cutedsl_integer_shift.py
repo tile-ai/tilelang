@@ -94,5 +94,23 @@ def test_cutedsl_codegen_local_vector_slice_uses_lane_access():
     assert "local[3]" in artifact.kernel_source
 
 
+def test_cutedsl_codegen_local_fp8_vector_store_uses_byte_recast():
+    @T.prim_func
+    def prog(A: T.Tensor((4,), "float32"), C: T.Tensor((4,), "float8_e4m3fn")):
+        with T.Kernel(1, threads=1):
+            local = T.alloc_local((4,), "float32")
+            local_fp8 = T.alloc_local((4,), "float8_e4m3fn")
+            idx = T.Ramp(0, 1, 4)
+            local[idx] = A[idx]
+            local_fp8[idx] = T.Cast("float8_e4m3fnx4", local[idx])
+            C[idx] = local_fp8[idx]
+
+    artifact = _lower_cutedsl(prog)
+
+    assert "cute.recast_tensor" in artifact.kernel_source
+    assert "cutlass.Uint8" in artifact.kernel_source
+    assert "local_fp8[0] = _cast.load()[0]" not in artifact.kernel_source
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
