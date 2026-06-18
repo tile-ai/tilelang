@@ -48,5 +48,21 @@ def test_parallel_scope():
     _check(before, expected)
 
 
+def test_effectful_bind_is_not_inlined():
+    @T.prim_func
+    def before(A: T.Tensor((8,), T.int32), B: T.Tensor((8,), T.int32), C: T.Tensor((8,), T.int32)):
+        slot = T.call_extern("int32", "opaque_next", A[0])
+        B[slot] = A[1]
+        C[0] = slot
+
+    @T.prim_func
+    def expected(A: T.Tensor((8,), T.int32), B: T.Tensor((8,), T.int32), C: T.Tensor((8,), T.int32)):
+        slot = T.call_extern("int32", "opaque_next", A[0])
+        B[slot] = A[1]
+        C[0] = slot
+
+    _check(before, expected)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
