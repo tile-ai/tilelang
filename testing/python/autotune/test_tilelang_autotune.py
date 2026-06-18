@@ -1,8 +1,10 @@
 import itertools
+import inspect
 
 import tilelang.testing
 import tilelang.language as T
 from tilelang.autotuner import AutoTuner
+from tilelang.autotuner.tuner import _first_autotune_config, _provided_jit_parameter_names
 
 
 def ref_program(A, B):
@@ -202,6 +204,71 @@ def matmul(M, N, K):
 @tilelang.testing.requires_cuda
 def test_autotune_get_configs():
     get_configs()
+
+
+def test_autotune_validation_config_skips_positional_args():
+    def kernel(
+        B,
+        S,
+        H,
+        DK,
+        DV,
+        input_dtype,
+        output_dtype,
+        accum_dtype,
+        gate_dtype,
+        state_dtype,
+        chunk_size,
+        use_g,
+        use_initial_state,
+        store_final_state,
+        save_new_value,
+        block_DK,
+        block_DV,
+        threads,
+        num_stages,
+    ):
+        return None
+
+    signature = inspect.signature(kernel)
+    args = (
+        1,
+        1024,
+        32,
+        128,
+        128,
+        "bfloat16",
+        "bfloat16",
+        "float32",
+        "float32",
+        "bfloat16",
+        64,
+        True,
+        True,
+        True,
+        False,
+        32,
+        32,
+        128,
+        1,
+    )
+
+    provided = _provided_jit_parameter_names(signature, args, {})
+    first_config = _first_autotune_config([{"block_DK": 64, "block_DV": 64, "threads": 256, "num_stages": 2}])
+    validation_kwargs = {}
+    for name in signature.parameters:
+        if name in first_config and name not in provided:
+            validation_kwargs[name] = first_config[name]
+
+    assert validation_kwargs == {}
+
+
+def test_first_autotune_config_accepts_mapping_and_sequence_shapes():
+    assert _first_autotune_config({"threads": 128}) == {"threads": 128}
+    assert _first_autotune_config([{"threads": 128}]) == {"threads": 128}
+    assert _first_autotune_config(({"threads": 128},)) == {"threads": 128}
+    assert _first_autotune_config(lambda: [{"threads": 128}]) is None
+    assert _first_autotune_config([]) is None
 
 
 @tilelang.testing.requires_cuda
