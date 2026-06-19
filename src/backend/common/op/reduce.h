@@ -403,7 +403,8 @@ template <typename Impl> struct ReduceLowerer {
       Array<IterVar> src_var_compressed;
       for (size_t i = 0; i < src_layout->OutputDim(); ++i) {
         auto [expr, var] = CompressIterator(src_indices[i], src_vars,
-                                            src_vars[op.dim]->var, analyzer);
+                                            src_vars[op.dim]->var, analyzer,
+                                            /*collapse_dead_residue=*/true);
         src_indice_compressed.push_back(expr);
         src_var_compressed.push_back(var);
       }

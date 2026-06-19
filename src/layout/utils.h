@@ -43,11 +43,16 @@ DivideUnusedIterators(const Array<PrimExpr> &exprs,
  * present in the expr
  *
  *  Returns the compressed IterVar as well as the Updated iter sum expression.
+ *
+ *  When \p collapse_dead_residue is true, an extra pass drops residues of the
+ *  compressed var that provably do not affect the rebuilt expression (absorbed
+ *  by an outer floordiv): iterating them re-reads an element and over-counts
+ *  additive reductions. No-op when there is no dead residue.
  */
-std::pair<PrimExpr, IterVar> CompressIterator(const PrimExpr &expr,
-                                              const Array<IterVar> input_iters,
-                                              const Var &var,
-                                              arith::Analyzer *analyzer);
+std::pair<PrimExpr, IterVar>
+CompressIterator(const PrimExpr &expr, const Array<IterVar> input_iters,
+                 const Var &var, arith::Analyzer *analyzer,
+                 bool collapse_dead_residue = false);
 
 /*!
  * \brief Convert the iter splits returned by DivideUnusedIterators into

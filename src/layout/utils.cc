@@ -298,7 +298,8 @@ private:
 std::pair<PrimExpr, IterVar> CompressIterator(const PrimExpr &expr,
                                               const Array<IterVar> input_iters,
                                               const Var &var,
-                                              arith::Analyzer *analyzer) {
+                                              arith::Analyzer *analyzer,
+                                              bool collapse_dead_residue) {
   auto iter_sum =
       arith::NormalizeToIterSum(expr, ToVMap(input_iters), analyzer);
   IterMarkSplitCollector collector;
@@ -337,6 +338,51 @@ std::pair<PrimExpr, IterVar> CompressIterator(const PrimExpr &expr,
   IterSumMutator mutator(replace_map);
   PrimExpr reaplced =
       analyzer->Simplify(NormalizeIterMapToExpr(mutator.Mutate(iter_sum)));
+
+  if (collapse_dead_residue) {
+    // Drop residues of `var` that survive iter-map collection but are absorbed
+    // by an outer floordiv (constant in the index, yet mapping to a
+    // cross-thread reduction): iterating them re-reads the same element and
+    // over-counts additive reduces. Bind the iter ranges first so the
+    // invariance proof is deterministic -- otherwise CanProveEqual depends on
+    // accumulated analyzer state and the collapse becomes order-dependent
+    // across reduce ops.
+    for (const auto &iv : input_iters)
+      analyzer->Bind(iv->var, iv->dom, /*allow_override=*/true);
+    analyzer->Bind(new_var, Range(0, extent), /*allow_override=*/true);
+    PrimExpr cur_expr = reaplced;
+    Var cur_var = new_var;
+    PrimExpr cur_extent = extent;
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      const int64_t *ext_ptr = as_const_int(cur_extent);
+      if (!ext_ptr || *ext_ptr <= 1)
+        break;
+      int64_t E = *ext_ptr;
+      for (int64_t S = E; S >= 2; --S) {
+        if (E % S != 0)
+          continue;
+        PrimExpr s_const = make_const(cur_var.dtype(), S);
+        PrimExpr masked = FloorDiv(cur_var, s_const) * s_const;
+        PrimExpr probe =
+            analyzer->Simplify(Substitute(cur_expr, {{cur_var, masked}}));
+        if (analyzer->CanProveEqual(probe, cur_expr)) {
+          auto nv = Var(var->name_hint, var->type_annotation);
+          cur_expr = analyzer->Simplify(
+              Substitute(cur_expr, {{cur_var, nv * s_const}}));
+          cur_var = nv;
+          cur_extent = make_const(cur_extent.dtype(), E / S);
+          changed = true;
+          break;
+        }
+      }
+    }
+    if (!cur_var.same_as(new_var)) {
+      auto iv = IterVar(Range(0, cur_extent), cur_var, IterVarType::kDataPar);
+      return {cur_expr, iv};
+    }
+  }
 
   return {reaplced, new_iter_var};
 }
