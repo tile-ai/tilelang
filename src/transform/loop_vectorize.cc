@@ -26,9 +26,9 @@
 #include "../config.h"
 #include "../op/builtin.h"
 #include "../op/utils.h"
-#include "../target/utils.h"
 #include "arith/int_operator.h"
 #include "arith/ir_visitor_with_analyzer.h"
+#include "backend/common/target_utils.h"
 #include "common/loop_vectorization_utils.h"
 #include "support/check.h"
 #include <iostream>
@@ -742,6 +742,22 @@ private:
       max_lanes = std::min(target_lanes, source_lanes);
     }
     int cast_vector_size = arith::ZeroAwareGCD(max_lanes, initial_vector_size_);
+    // For casts that carry a "rbits" annotation (stochastic rounding), the
+    // rbits operand must be invariant within the vectorized boundary so the
+    // same value can be shared across the lanes of each PTX cvt.rs.*
+    // instruction. Halve the vector size until invariance holds, mirroring
+    // the call-node fallback above.
+    if (inner_for_) {
+      auto it = node->annotations.find("rbits");
+      if (it != node->annotations.end()) {
+        PrimExpr rbits = Downcast<PrimExpr>((*it).second);
+        while (cast_vector_size > 1 &&
+               !IsExprInvariantInVectorBoundary(rbits, inner_for_->loop_var,
+                                                cast_vector_size, analyzer_)) {
+          cast_vector_size /= 2;
+        }
+      }
+    }
     // Record cast constraint (use empty buffer to indicate cast)
     // Mark is_cast=true so Plan() can distinguish cast from other call nodes
     buffer_vector_infos_.push_back(

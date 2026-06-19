@@ -1,7 +1,7 @@
 # ruff: noqa
 from tilelang import tvm as tvm
 import tilelang as tl
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 import tilelang.language as T
 import tilelang.testing
 from tvm import tirx
@@ -13,7 +13,7 @@ def _check(original, transformed):
     func = original
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.InjectFenceProxy()(mod)
+    mod = tl.cuda.transform.InjectFenceProxy()(mod)
     mod = tl.transform.LowerOpaqueBlock()(mod)
     transformed = tvm.IRModule.from_expr(transformed.with_attr("global_symbol", "main"))
     transformed = tvm.tirx.transform.BindTarget(auto_target)(transformed)
@@ -83,7 +83,7 @@ def test_async_to_generic_no_double_fence():
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.InjectFenceProxy()(mod)
+    mod = tl.cuda.transform.InjectFenceProxy()(mod)
 
     def _count_fences(stmt):
         count = 0
@@ -189,7 +189,7 @@ def test_unknown_extern_default_is_none():
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.InjectFenceProxy()(mod)
+    mod = tl.cuda.transform.InjectFenceProxy()(mod)
 
     def _count_fences(stmt):
         count = 0
@@ -357,7 +357,7 @@ def test_inject_fence_proxy_does_not_inject_tma_store_sync():
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.InjectFenceProxy()(mod)
+    mod = tl.cuda.transform.InjectFenceProxy()(mod)
 
     arrives = 0
     waits = 0
@@ -410,7 +410,7 @@ def test_wgmma_marked_async():
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.InjectFenceProxy()(mod)
+    mod = tl.cuda.transform.InjectFenceProxy()(mod)
     order = []
 
     def visit(node):

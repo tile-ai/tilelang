@@ -24,9 +24,6 @@ inline bool IsDeviceMainBlock(const tirx::SBlockNode *node) {
   return node->name_hint == DeviceMainBlockName;
 }
 
-constexpr const char *tilelang_is_cpu_kernel_frame =
-    "tilelang.is_cpu_kernel_frame";
-
 namespace attr {
 // Attributes to mark CUDA sync calls
 constexpr const char *kHasTriggerLaunch = "has_cuda_pdl_trigger";

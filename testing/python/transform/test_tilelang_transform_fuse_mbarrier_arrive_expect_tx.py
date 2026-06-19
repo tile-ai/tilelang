@@ -1,7 +1,7 @@
 # ruff: noqa
 from tilelang import tvm as tvm
 import tilelang as tl
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 import tilelang.language as T
 import tilelang.testing
 from tvm import tirx
@@ -12,7 +12,7 @@ auto_target = tvm.target.Target(determine_target("auto"))
 def _apply(func):
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.FuseMBarrierArriveExpectTx()(mod)
+    mod = tl.cuda.transform.FuseMBarrierArriveExpectTx()(mod)
     return tl.transform.LowerOpaqueBlock()(mod)
 
 

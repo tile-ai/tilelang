@@ -59,7 +59,6 @@ void RegisterGemmImpl(GemmImpl impl) {
   ICHECK(impl.select_inst != nullptr);
   ICHECK(impl.compute_warp_partition != nullptr);
   ICHECK(impl.reuse_existing_shared_layout != nullptr);
-  ICHECK(impl.instruction_kind != nullptr);
   GemmImplRegistry().push_back(impl);
 }
 
@@ -136,10 +135,7 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
     node->sfbRegion_ = NormalizeToBufferRegion(args[20]);
   }
   if (args.size() > 21) {
-    node->sfAId_ = args[21].as<PrimExpr>().value();
-  }
-  if (args.size() > 22) {
-    node->sfBId_ = args[22].as<PrimExpr>().value();
+    node->sfKStart_ = args[21].as<PrimExpr>().value();
   }
   node->annotations_ = annotations;
   data_ = std::move(node);
@@ -169,11 +165,6 @@ TileOperator GemmNode::Clone() const {
 
 String GemmNode::getGemmInstructionKey(int block_size, Target target) const {
   return ResolveGemmImpl(target).select_inst(*this, block_size, target);
-}
-
-String GemmNode::getGemmInstructionKind(int block_size, Target target) const {
-  const GemmImpl &impl = ResolveGemmImpl(target);
-  return impl.instruction_kind(impl.select_inst(*this, block_size, target));
 }
 
 std::pair<int, int> GemmWarpPolicyNode::computeWarpPartition(

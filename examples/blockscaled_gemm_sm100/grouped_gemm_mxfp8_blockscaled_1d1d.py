@@ -60,7 +60,7 @@ def grouped_mxfp8_blockscaled_gemm_2cta(
     max_M_blocks = T.ceildiv(max_M_per_E, block_M)
     max_M_blocks_padded = T.ceildiv(max_M_blocks, 2) * 2
 
-    with T.Kernel(max_M_blocks_padded, n_blocks, E, threads=128, cluster_dims=2) as (pid_m, pid_n, eid):
+    with T.ClusterKernel(max_M_blocks_padded, n_blocks, E, threads=128, cluster_dims=2) as (pid_m, pid_n, eid):
         cta_id = T.block_rank_in_cluster()
         T.assume(cta_id < 2)
 
@@ -158,8 +158,9 @@ def grouped_mxfp8_blockscaled_gemm_2cta(
                     transpose_B=transpose_B,
                     mbar=consumed[stage],
                     clear_accum=k == 0,
-                    sf_a_id=k % sf_load_period,
-                    sf_b_id=k % sf_load_period,
+                    k_start=k * block_K,
+                    sf_a_granularity_k=sf_granularity_k,
+                    sf_b_granularity_k=sf_granularity_k,
                     use_2cta=True,
                 )
             T.tcgen05_mma_arrive(tmem_full, arrive_2cta=True)
@@ -241,7 +242,7 @@ def grouped_mxfp8_blockscaled_gemm_2cta_persistent(
     waves = T.ceildiv(total_cluster_tiles, num_clusters)
     group_size = 8
 
-    with T.Kernel(sm_num, threads=256, cluster_dims=2) as (block_id):
+    with T.ClusterKernel(sm_num, threads=256, cluster_dims=2) as (block_id):
         cta_id = T.block_rank_in_cluster()
         T.assume(cta_id < 2)
 
@@ -364,8 +365,9 @@ def grouped_mxfp8_blockscaled_gemm_2cta_persistent(
                             transpose_B=transpose_B,
                             mbar=consumed[stage],
                             clear_accum=k == 0,
-                            sf_a_id=k % sf_load_period,
-                            sf_b_id=k % sf_load_period,
+                            k_start=k * block_K,
+                            sf_a_granularity_k=sf_granularity_k,
+                            sf_b_granularity_k=sf_granularity_k,
                             use_2cta=True,
                         )
                     T.tcgen05_mma_arrive(tmem_full, arrive_2cta=True)

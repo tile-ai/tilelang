@@ -12,11 +12,21 @@ tilelang.testing.set_random_seed()
 # ---------------------------------------------------------------------------
 
 
-def _make_input(M, N, dtype):
+def _case_seed(*parts):
+    seed = 17
+    for text in map(str, parts):
+        for char in text:
+            seed = (seed * 131 + ord(char)) % (2**31 - 1)
+    return seed
+
+
+def _make_input(M, N, dtype, seed=42):
     torch_dtype = getattr(torch, dtype)
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
     if torch_dtype in (torch.int32, torch.int64):
-        return torch.randint(-100, 100, (M, N), dtype=torch_dtype).cuda()
-    return torch.randn(M, N, dtype=torch_dtype).cuda()
+        return torch.randint(-100, 100, (M, N), dtype=torch_dtype, generator=generator).cuda()
+    return torch.randn(M, N, dtype=torch_dtype, generator=generator).cuda()
 
 
 def _ref(A, op):
@@ -123,7 +133,8 @@ def test_reduce(op, dtype, M, N, src_scope, dst_scope, threads, batch):
         m = re.search(r",\s*(\d+)\s*,\s*\d+\s*>::run_batch\(", src)
         assert m is not None, f"Expected run_batch in generated source.\n{src}"
 
-    A = _make_input(M, N, dtype)
+    seed = _case_seed("reduce", op, dtype, M, N, src_scope, dst_scope, threads, batch)
+    A = _make_input(M, N, dtype, seed)
     B = jit_kernel(A)
     # float16/bfloat16 accumulate more rounding error over large reductions
     tol = 1e-1 if dtype in (T.float16, T.bfloat16) else 1e-2
@@ -307,6 +318,38 @@ def test_finalize_reducer_invalid_batch(batch, exc_type, match):
         tl.compile(k, out_idx=-1, pass_configs=_COMPILE_FLAGS)
 
 
+@tilelang.testing.requires_cuda
+def test_reduce_absmax_bf16_noncontiguous_packed_layout_regression():
+    num_tokens = 64
+    hidden = 2560
+    num_threads = 128
+    num_vectorize = 4
+
+    def x_layout_fn(i, j):
+        idx = i * hidden + j
+        return (
+            idx // num_vectorize % num_threads,
+            idx // (num_vectorize * num_threads) * num_vectorize + idx % num_vectorize,
+        )
+
+    @T.prim_func
+    def kernel(A: T.Tensor((num_tokens, hidden), T.bfloat16), B: T.Tensor((num_tokens,), T.float32)):
+        with T.Kernel(num_tokens, threads=num_threads) as (pid,):
+            src = T.alloc_fragment((1, hidden), T.bfloat16)
+            dst = T.alloc_fragment((1, 1), T.bfloat16)
+            T.annotate_layout({src: T.Fragment((1, hidden), forward_fn=x_layout_fn)})
+            T.copy(A[pid, 0], src, disable_tma=True)
+            src_reshaped = T.reshape(src, (1, 1, hidden))
+            T.reduce_absmax(src_reshaped, dst, dim=2)
+            B[pid] = T.cast(dst[0, 0], T.float32)
+
+    A = torch.zeros((num_tokens, hidden), dtype=torch.bfloat16, device="cuda")
+    A[:, 512] = -10
+    B = _compile(kernel)(A)
+    ref = A.abs().amax(dim=1).float()
+    torch.testing.assert_close(B, ref, atol=0, rtol=0)
+
+
 # ---------------------------------------------------------------------------
 # nan_propagate tests – packed (vsize=2) path for bf16/fp16
 # ---------------------------------------------------------------------------
@@ -327,6 +370,36 @@ def _make_nan_reduce_kernel(reduce_fn, M, N, dtype, threads, *, nan_propagate):
             T.copy(dst, B)
 
     return kernel
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8, 9)
+def test_reduce_packed_fp8_to_float16_absmax_runtime():
+    if not hasattr(torch, "float8_e4m3fn"):
+        pytest.skip("torch.float8_e4m3fn is not available")
+
+    @T.prim_func
+    def kernel(A: T.Tensor((4, 32), T.float8_e4m3fn), B: T.Tensor((4,), T.float16)):
+        with T.Kernel(1, threads=32):
+            src = T.alloc_fragment((4, 32), T.float8_e4m3fn)
+            dst = T.alloc_fragment((4,), T.float16)
+            T.copy(A, src)
+            T.reduce_absmax(src, dst, dim=1)
+            T.copy(dst, B)
+
+    k = _compile(kernel)
+    source = k.get_kernel_source()
+    assert "from_uint1<__half2>(*(fp8" not in source
+
+    base = torch.linspace(-2.0, 2.0, 128, device="cuda", dtype=torch.float16).reshape(4, 32)
+    base[0, 3] = -7.0
+    base[1, 17] = 5.5
+    base[2, 31] = -3.25
+    base[3, 0] = 4.0
+    A = base.to(torch.float8_e4m3fn)
+    B = k(A)
+    ref = A.to(torch.float16).abs().amax(dim=1)
+    torch.testing.assert_close(B, ref, atol=0, rtol=0)
 
 
 @tilelang.testing.requires_cuda

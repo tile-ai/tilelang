@@ -25,7 +25,7 @@ def _apply_passes(mod, enable_non_predicated=False, enable_predicated=False):
             PassConfigKey.TL_ENABLE_LOWER_LDGSTG_PREDICATED: enable_predicated,
         }
     ):
-        mod = tl.transform.LowerLDGSTG()(mod)
+        mod = tl.cuda.transform.LowerLDGSTG()(mod)
     return mod
 
 
@@ -217,6 +217,33 @@ def test_predicated_store_with_load():
     assert _check_has_intrinsic(mod, "stg128"), "Expected predicated stg128"
 
 
+def test_predicated_store_with_shared_load_keeps_explicit_guard():
+    """Do not hoist shared-memory loads out of a predicated global store."""
+
+    @T.prim_func
+    def func(B: T.Buffer((128,), "float32"), pred: T.int32):
+        S = T.alloc_buffer((128,), dtype=T.float32, scope="shared")
+        for i in T.thread_binding(32, "threadIdx.x"):
+            for j in T.vectorized(4):
+                with T.If(pred > 0), T.Then():
+                    B[i * 4 + j] = S[i * 4 + j]
+
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = _apply_passes(mod, enable_predicated=True)
+    print("=== test_predicated_store_with_shared_load_keeps_explicit_guard ===")
+    print(mod)
+
+    has_if = [False]
+
+    def visitor(obj):
+        if isinstance(obj, tirx.IfThenElse):
+            has_if[0] = True
+
+    tirx.stmt_functor.post_order_visit(mod["main"].body, visitor)
+    assert has_if[0], "Expected explicit IfThenElse to keep shared load guarded"
+    assert not _check_has_intrinsic(mod, "stg128"), "Predicated stg128 would evaluate the shared load before the predicate"
+
+
 def test_predicated_disabled():
     """Test that predicated lowering can be disabled."""
 
@@ -251,7 +278,7 @@ def test_non_cuda_target_skip():
     mod = tl.transform.FlattenBuffer()(mod)
     mod = tl.transform.VectorizeLoop()(mod)
     with tvm.transform.PassContext(config={PassConfigKey.TL_ENABLE_LOWER_LDGSTG: True}):
-        mod = tl.transform.LowerLDGSTG()(mod)
+        mod = tl.cuda.transform.LowerLDGSTG()(mod)
     print("=== test_non_cuda_target_skip ===")
     print(mod)
     # The load should NOT be lowered to ldg because target is not CUDA

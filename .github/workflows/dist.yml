@@ -16,6 +16,7 @@ on:
       - pyproject.toml
       - MANIFEST.in
       - CMakeLists.txt
+      - VERSION
       - version_provider.py
       - .github/workflows/dist.yml
       # Type aliases can affect package import/build behavior.
@@ -94,8 +95,8 @@ jobs:
           TEMP_DIR="$(mktemp -d -t tilelang-sdist-test)"
           cp -r dist "${TEMP_DIR}/dist"
           cd "${TEMP_DIR}"
-          uv pip install -v dist/*.tar.gz
-          python3 -c "import tilelang; print(tilelang.__version__)"
+          env -u NO_VERSION_LABEL uv pip install -v dist/*.tar.gz
+          env -u NO_VERSION_LABEL python3 -c "import tilelang; print(tilelang.__version__)"
 
       - name: Upload SDist
         # Not PR to save artifact storage, as SDist is only needed for releases.
@@ -204,7 +205,7 @@ jobs:
           }
 
       - name: Build wheels
-        uses: pypa/cibuildwheel@v3.4
+        uses: pypa/cibuildwheel@v4.1
         with:
           package-dir: .
           output-dir: wheelhouse
@@ -371,3 +372,40 @@ jobs:
           name: artifacts
           path: dist/*
           if-no-files-found: error
+
+  publish-pypi:
+    name: Publish to PyPI
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+    needs: [list-artifacts]
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/p/tilelang
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Validate release tag matches VERSION
+        run: |
+          VERSION="$(cat VERSION)"
+          TAG="${GITHUB_REF_NAME}"
+          if [ "${TAG}" != "v${VERSION}" ]; then
+            echo "Release tag ${TAG} does not match VERSION v${VERSION}"
+            exit 1
+          fi
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: artifacts
+          path: dist
+
+      - name: List distributions
+        run: ls -lh dist/*
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

@@ -182,7 +182,9 @@ struct AtomicReduce {
     }
     auto loop_layout = par_op->GetLoopLayout();
     return LowerParallelLoop(fused_loop, loop_layout, T.thread_var, analyzer,
-                             T.layout_map, par_op->GetPredicate(T.thread_var));
+                             T.layout_map, par_op->GetPredicate(T.thread_var),
+                             /*parallel_loop=*/true, /*should_vectorize=*/true,
+                             par_op->LoopLayoutRequiresPaddingGuard());
   }
 };
 

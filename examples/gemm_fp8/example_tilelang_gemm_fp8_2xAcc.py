@@ -1,7 +1,7 @@
 import torch
 import tilelang
 import tilelang.language as T
-from tilelang.utils import determine_fp8_type
+from tilelang.language.fp8 import determine_fp8_type
 
 
 @tilelang.jit

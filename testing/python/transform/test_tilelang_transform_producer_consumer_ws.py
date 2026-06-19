@@ -5,7 +5,7 @@ import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm as tvm
 from tilelang.layout import make_swizzled_layout
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 
 
 def matmul_pipelined(M, N, K, block_M, block_K, block_N, num_stages, dtype="float16", threads=128):
@@ -307,6 +307,27 @@ def _compile_grouped_gemm_ws(batch_sizes=(63, 77), K=128, N=128, block_M=64, blo
     return kernel, batch_sizes
 
 
+def test_tiled_ws_places_producer_in_first_warp_group():
+    """Auto-WS should put the producer in the low threadIdx.x partition."""
+
+    func = matmul_pipelined(64, 64, 64, 64, 32, 64, num_stages=2).with_attr("global_symbol", "main")
+    mod = tvm.IRModule.from_expr(func)
+    target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
+    script = mod["main"].script()
+
+    assert "tl_tiled_ws_applied" in script
+    branch = _find_after(script, "if tx < 128:")
+    producer_tma = _find_after(script, "T.tma_copy", branch)
+    consumer_branch = _find_after(script, "else:", producer_tma)
+    consumer_gemm = _find_after(script, "T.gemm", consumer_branch)
+
+    assert branch < producer_tma < consumer_branch < consumer_gemm
+    assert "if 128 <= tx:" not in script
+
+
 def _run_grouped_gemm_ws(kernel, batch_sizes, K=128, N=128, block_M=64, dtype="float16"):
     import torch
 
@@ -514,7 +535,7 @@ def test_tiled_ws_sinks_preloop_tma_waits_into_consumer():
 
     k_load = src.find("tl::tma_load(K_in_desc")
     v_load = src.find("tl::tma_load(V_in_desc")
-    branch = src.find("if (128 <= ((int)threadIdx.x))")
+    branch = src.find("if (((int)threadIdx.x) < 128)")
     first_wait = src.find(".wait(0)")
 
     assert min(k_load, v_load, branch, first_wait) >= 0
@@ -528,7 +549,8 @@ def test_tiled_ws_explicit_cp_async_wait_precedes_first_consumer_read():
     mod = tvm.IRModule.from_expr(func)
     target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
     mod = tvm.tirx.transform.BindTarget(target)(mod)
-    mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
     script = mod["main"].script()
 
     assert "tl_tiled_ws_applied" in script
@@ -554,7 +576,7 @@ def test_tiled_ws_keeps_preloop_tma_scalar_bind_shared():
 
     start_bind = _find_after(src, "int start =")
     k_load = _find_after(src, "tl::tma_load(K_in_desc")
-    branch = _find_after(src, "if (128 <= ((int)threadIdx.x))")
+    branch = _find_after(src, "if (((int)threadIdx.x) < 128)")
 
     assert start_bind < k_load < branch
 
@@ -566,7 +588,8 @@ def test_tiled_ws_propagates_nested_postloop_liveness_to_outer_prelude():
     mod = tvm.IRModule.from_expr(func)
     target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
     mod = tvm.tirx.transform.BindTarget(target)(mod)
-    mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
     script = mod["main"].script()
 
     assert "tl_tiled_ws_applied" in script
@@ -586,7 +609,7 @@ def test_tiled_ws_keeps_shared_prelude_local_vars_for_grouped_gemm():
     kernel, batch_sizes = _compile_grouped_gemm_ws()
     src = kernel.get_kernel_source()
 
-    branch = _find_after(src, "if (256 <= ((int)threadIdx.x))")
+    branch = _find_after(src, "if (((int)threadIdx.x) < 128)")
     cur_batch_idx_loop = _find_after(src, "for (int i = 0; i < 2; ++i)")
     m_start = _find_after(src, "int m_start =")
     actual_rows = _find_after(src, "int actual_rows =")
@@ -610,6 +633,7 @@ def test_tiled_ws_does_not_clone_local_var_into_producer_branch():
 
 
 if __name__ == "__main__":
+    test_tiled_ws_places_producer_in_first_warp_group()
     test_tiled_ws_stage1_dynamic_loop_start()
     test_tiled_ws_correctness()
     test_tiled_ws_stage3()

@@ -212,6 +212,12 @@ if not env.is_light_import():
     from . import cpu as cpu  # noqa: F401
     from . import cuda as cuda  # noqa: F401
     from . import rocm as rocm  # noqa: F401
-    from .backend import metal as metal  # noqa: F401
+    from . import metal as metal  # noqa: F401
 
 del _lazy_load_lib
+
+# Install pass diff hook if TILELANG_PASS_DIFF is enabled (zero overhead when off)
+from .utils.pass_diff_hook import install_pass_diff_hook as _install_pass_diff_hook  # noqa: E402
+
+_install_pass_diff_hook()
+del _install_pass_diff_hook

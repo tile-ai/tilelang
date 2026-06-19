@@ -11,7 +11,8 @@ TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
 def _apply(func):
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(TARGET)(mod)
-    mod = tl.transform.LowerSharedTmem()(mod)
+    mod = tl.transform.MaterializeKernelLaunch()(mod)
+    mod = tl.cuda.transform.LowerSharedTmem()(mod)
     return mod
 
 

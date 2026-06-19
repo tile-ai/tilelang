@@ -13,14 +13,10 @@ from tvm.target import Target
 from tilelang.contrib import hipcc, nvcc
 from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
 from tilelang.transform import PassConfigKey
-from tilelang.transform.metal import MarkHostMetalContext
 from tilelang.engine.param import KernelParam, CompiledArtifact
-from tilelang.utils.target import determine_target, target_get_mcpu
-from tilelang.engine.phase import (
-    PreLowerSemanticCheck,
-    LowerAndLegalize,
-    OptimizeForTarget,
-)
+from tilelang.engine.semantic_check import PreLowerSemanticCheck
+from tilelang.backend.target import determine_target
+from tilelang.backend.pass_pipeline import resolve_pipeline
 
 
 def is_cpu_device_backend(target: Target):
@@ -162,6 +158,8 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
 
 @tvm_ffi.register_global_func("tilelang_callback_hip_compile", override=True)
 def tilelang_callback_hip_compile(code, target):
+    from tilelang.rocm.target import target_get_mcpu
+
     arch = target_get_mcpu(target)
     hsaco = hipcc.compile_hip(
         code,
@@ -219,6 +217,8 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target, target: Target | N
     if combine_context_call is not None:
         host_mod = combine_context_call()(host_mod)
     if target is not None and target.kind.name == "metal":
+        from tilelang.metal.transform import MarkHostMetalContext
+
         host_mod = MarkHostMetalContext()(host_mod)
     if target_host.kind.name == "llvm":
         host_mod = tvm.ffi.get_global_func("target.build.llvm")(host_mod, target_host)
@@ -244,6 +244,8 @@ def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
 
         register_default_metal_compile_callback(override=True)
         device_mod = tvm.ffi.get_global_func("target.build.tilelang_metal")(device_mod, target)
+    elif target.kind.name == "llvm":
+        device_mod = tvm.ffi.get_global_func("target.build.llvm")(device_mod, target)
     else:
         raise ValueError(f"Target {target.kind.name} is not supported")
 
@@ -300,14 +302,11 @@ def lower_to_host_device_ir(
     _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))
     _is_device_call = get_device_call(is_device_c=is_cpu_device_backend(target))
 
-    # Before lowering, do semantic check
+    # Run backend-independent semantic checks before target-specific lowering.
     PreLowerSemanticCheck(mod)
 
-    # Phase 1: Lower and legalize the IR
-    mod = LowerAndLegalize(mod, target)
-
-    # Phase 2: Optimize the IR for the target
-    mod = OptimizeForTarget(mod, target)
+    pipeline = resolve_pipeline(target)
+    mod = pipeline.lower(mod, target)
 
     host_mod = tirx.transform.Filter(_is_host_call)(mod)
     device_mod = tirx.transform.Filter(_is_device_call)(mod)

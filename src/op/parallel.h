@@ -11,6 +11,7 @@
 #include <tvm/tirx/stmt_functor.h>
 
 #include <unordered_map>
+#include <vector>
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
@@ -65,6 +66,9 @@ public:
   // annotations). When true, subsequent InferLayout calls can early-exit
   // without re-emitting buffer layout updates.
   mutable bool loop_layout_inferred_ = false;
+  // Whether the inferred loop layout intentionally over-covers a ragged
+  // non-fragment iteration space and therefore needs guarded inverse lowering.
+  mutable bool loop_layout_requires_padding_guard_ = false;
   // The predicate expression for the loop, if any, mutable for lazy
   // construction.
   mutable Optional<PrimExpr> predicate_;
@@ -73,6 +77,7 @@ public:
   // lets InferLayout adopt them cleanly without re-parsing annotations.
   mutable Optional<Fragment> annotated_layout_unbound_;
   mutable Optional<PrimExpr> annotated_predicate_;
+  mutable bool annotated_requires_padding_guard_ = false;
 
   // Type key for TVM object system.
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ParallelOp", ParallelOpNode,
@@ -101,16 +106,24 @@ public:
     loop_layout_ = other.loop_layout_;
     predicate_ = other.predicate_;
     loop_layout_inferred_ = other.loop_layout_inferred_;
+    loop_layout_requires_padding_guard_ =
+        other.loop_layout_requires_padding_guard_;
     annotated_layout_unbound_ = other.annotated_layout_unbound_;
     annotated_predicate_ = other.annotated_predicate_;
+    annotated_requires_padding_guard_ = other.annotated_requires_padding_guard_;
   }
 
   // Get the inferred loop layout.
   Fragment GetLoopLayout() const { return loop_layout_; }
+  bool LoopLayoutRequiresPaddingGuard() const {
+    return loop_layout_requires_padding_guard_;
+  }
   // Get the root For loop.
   For GetRoot() const { return root_; }
   // Get the mapping from buffer to access indices + access type.
   const BufferIndiceMap &GetIndiceMap() const { return indice_map_; }
+  // Get buffers in the order they first appear in the loop body.
+  const std::vector<Buffer> &GetAccessOrder() const { return access_order_; }
   // Get the predicate for a given thread variable.
   Optional<PrimExpr> GetPredicate(Var thread_var) const;
 
@@ -162,10 +175,10 @@ private:
   void AddPredicate(const PrimExpr &expr) const {
     predicate_ = predicate_.defined() ? And(expr, predicate_.value()) : expr;
   }
-  // Expand let bindings to find fragment buffer accesses and add them to
+  // Expand Bind values to find fragment buffer accesses and add them to
   // indice_map_. This handles cases like: a = block_mask_f[i]; T.copy(A[a, 0],
   // ...)
-  void ExpandLetBindings(const Map<Var, PrimExpr> &let_var_to_expr);
+  void ExpandBindValues(const Map<Var, PrimExpr> &bind_var_to_expr);
 
   // Allow ParallelLoopNestVisitor to access private members.
   friend class ParallelLoopNestVisitor;
@@ -174,6 +187,9 @@ private:
   ParallelLoopNestVisitor V;
   // Mapping from buffer to their access indices and access type in the loop.
   BufferIndiceMap indice_map_;
+  // Stable first-use order for indice_map_.  Layout inference must not depend
+  // on std::unordered_map iteration order when selecting source buffers.
+  std::vector<Buffer> access_order_;
   // The loop variables for the parallel loop nest.
   Array<IterVar> loop_vars_;
   // The inner_vars_

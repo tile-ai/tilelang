@@ -343,17 +343,34 @@ public:
 
   PrimExpr VisitExpr_(const CastNode *op) final {
     PrimExpr value = this->VisitExpr(op->value);
-    if (value.same_as(op->value)) {
-      return GetRef<PrimExpr>(op);
-    } else {
-      if (value.dtype().is_scalable_vector()) {
-        return Cast(op->dtype.with_scalable_vscale_factor(
-                        value.dtype().vscale_factor()),
-                    value);
+
+    // Vectorize PrimExpr values inside annotations (e.g. "rbits" for
+    // stochastic-rounding casts). Keys and non-PrimExpr values pass through
+    // unchanged.
+    ffi::Map<ffi::String, ffi::Any> new_annotations;
+    bool annotations_changed = false;
+    for (const auto &kv : op->annotations) {
+      if (auto opt = kv.second.as<PrimExpr>()) {
+        PrimExpr new_val = this->VisitExpr(opt.value());
+        new_annotations.Set(kv.first, new_val);
+        if (!new_val.same_as(opt.value()))
+          annotations_changed = true;
       } else {
-        return Cast(op->dtype.with_lanes(value.dtype().lanes()), value);
+        new_annotations.Set(kv.first, kv.second);
       }
     }
+    if (value.same_as(op->value) && !annotations_changed) {
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+    DataType new_dtype = value.dtype().is_scalable_vector()
+                             ? op->dtype.with_scalable_vscale_factor(
+                                   value.dtype().vscale_factor())
+                             : op->dtype.with_lanes(value.dtype().lanes());
+    if (op->annotations.empty()) {
+      return Cast(new_dtype, value);
+    }
+    return Cast(new_dtype, value,
+                annotations_changed ? new_annotations : op->annotations);
   }
 
   PrimExpr VisitExpr_(const FloatImmNode *op) final {

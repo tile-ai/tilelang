@@ -104,6 +104,11 @@ TL_PATCH TL_DEVICE half_t hrsqrt(const half_t x) {
   return half_t(hrsqrt(x.to_half()));
 }
 
+// hrsqrt function for bfloat16_t
+TL_PATCH TL_DEVICE bfloat16_t hrsqrt(const bfloat16_t x) {
+  return bfloat16_t(hrsqrt(x.to_nv_bfloat16()));
+}
+
 // Pack two half values.
 TL_DEVICE unsigned __pack_half2(const half x, const half y) {
   unsigned v0 = *((unsigned short *)&x);
@@ -585,6 +590,15 @@ TL_DEVICE void __sync_thread_partial(int barrier_id = 0, int thread_count = 0) {
   asm volatile("bar.sync %0, %1;" : : "r"(barrier_id), "r"(thread_count));
 }
 
+// CTA named barrier one-sided arrive (bar.arrive).
+// Signals arrival at the named barrier without waiting for other participants.
+// Useful in warp-specialized pipelines where one warp group signals readiness
+// without blocking, while the other waits with bar.sync /
+// __sync_thread_partial.
+TL_DEVICE void __named_barrier_arrive(int barrier_id, int thread_count) {
+  asm volatile("bar.arrive %0, %1;" : : "r"(barrier_id), "r"(thread_count));
+}
+
 template <int layout_type = 0, int leading_byte_offset = 0,
           int stride_byte_offset = 0, typename T>
 TL_DEVICE void initialize_wgmma_descriptor(GmmaDescriptor &descriptor,
@@ -710,6 +724,21 @@ TL_DEVICE uint1 pack_half2(half_t a, half_t b) {
   unsigned packed =
       __pack_half2(static_cast<__half>(a), static_cast<__half>(b));
   return uint1{packed};
+}
+
+template <uint64_t bytes, uint64_t init_val>
+TL_DEVICE void st_bulk_shared(void *smem_ptr) {
+  static_assert(init_val == 0,
+                "tl::st_bulk_shared only supports init_val == 0");
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
+    (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 8)
+  asm volatile("st.bulk.weak.shared::cta [%0], %1, 0;" ::"l"(
+                   __cvta_generic_to_shared(smem_ptr)),
+               "l"(bytes)
+               : "memory");
+#else
+  static_assert(false, "tl::st_bulk_shared requires CUDA >= 12.8");
+#endif
 }
 
 // --- add2 ----------------------------------------------------------------
@@ -932,8 +961,11 @@ TL_DEVICE __half2 abs2(__half2 a) {
 using tl::tfloat32_t;
 
 namespace cutlass {
+// Mirror cutlass's own half_t fast_exp (fast_math.h): route through float.
+// A direct `return ::hexp(x)` recurses, since `hexp` is #define'd to this
+// same cutlass::fast_exp and x is already bfloat16_t.
 TL_DEVICE
-bfloat16_t fast_exp(bfloat16_t x) { return ::hexp(x); }
+bfloat16_t fast_exp(bfloat16_t x) { return bfloat16_t(fast_exp(float(x))); }
 } // namespace cutlass
 
 //

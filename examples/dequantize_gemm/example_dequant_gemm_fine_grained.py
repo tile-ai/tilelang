@@ -8,6 +8,11 @@ import tilelang.language as T
 tilelang.testing.set_random_seed(0)
 
 
+def _unpack_unsigned_int4_to_half(qB):
+    qB = qB.to(torch.uint8)
+    return torch.stack((qB & 0x0F, qB >> 4), dim=-1).reshape(qB.shape[0], qB.shape[1] * 2).to(torch.half)
+
+
 @tilelang.jit(out_idx=[2])
 def matmul(
     M,
@@ -120,10 +125,7 @@ def run_gemm(
     def ref_program(A, qB):
         import torch
 
-        B = torch.zeros(qB.shape[0], qB.shape[1] * 8 // 4, dtype=torch.half).to(torch.half).to(A.device)
-        for i in range(B.shape[0]):
-            for j in range(B.shape[1]):
-                B[i][j] = ((qB[i][j // 2] >> (4 * (j % 2))) & 0xF).to(torch.half)
+        B = _unpack_unsigned_int4_to_half(qB)
         C = torch.matmul(A.to(torch.float), B.T.to(torch.float))
         C = C.to(torch.__getattribute__(out_dtype))
         return C
@@ -411,10 +413,7 @@ def assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correct
     # Ensure that the latency is not None
     assert latency is not None
 
-    B = torch.zeros(qB.shape[0], qB.shape[1] * 8 // 4, dtype=torch.half).to(torch.half).to(A.device)
-    for i in range(B.shape[0]):
-        for j in range(B.shape[1]):
-            B[i][j] = ((qB[i][j // 2] >> (4 * (j % 2))) & 0xF).to(torch.half)
+    B = _unpack_unsigned_int4_to_half(qB)
 
     # Get Reference Result
     ref_c = torch.matmul(A, B.T).to(getattr(torch, accum_dtype))

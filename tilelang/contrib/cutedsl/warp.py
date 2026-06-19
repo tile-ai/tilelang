@@ -10,6 +10,9 @@ __all__ = [
     "__shfl_down_sync",
     "__shfl_up_sync",
     "__shfl_sync",
+    "__shfl_xor_sync",
+    "__match_any_sync",
+    "__popc",
     "warp_reduce_sum",
     "warp_reduce_max",
     "warp_reduce_min",
@@ -79,6 +82,64 @@ def __shfl_sync(mask, val, srcLane, width=32):
     """
     mask_and_clamp = ((WARP_SIZE - width) << 8) | ((width - 1) & 0x1F)
     return shuffle_sync(val, offset=srcLane, mask=mask, mask_and_clamp=mask_and_clamp)
+
+
+def __shfl_xor_sync(mask, val, lane_mask, width=32):
+    """
+    Butterfly (XOR) shuffle within warp.
+
+    Uses CuTeDSL's shuffle_sync_bfly with the same clamp encoding as CUDA
+    __shfl_xor_sync.
+    """
+    mask_and_clamp = ((WARP_SIZE - width) << 8) | ((width - 1) & 0x1F)
+    return shuffle_sync_bfly(val, offset=lane_mask, mask=mask, mask_and_clamp=mask_and_clamp)
+
+
+@dsl_user_op
+def __match_any_sync(mask, val, *, loc=None, ip=None) -> Uint32:
+    """
+    Return a bitmask of lanes whose value matches the calling lane.
+
+    PTX: match.any.sync.b32 d, a, membermask;
+    """
+    return Uint32(
+        llvm.inline_asm(
+            T.i32(),
+            [
+                Int32(val).ir_value(loc=loc, ip=ip),
+                Int32(mask).ir_value(loc=loc, ip=ip),
+            ],
+            "match.any.sync.b32 $0, $1, $2;",
+            "=r,r,r",
+            has_side_effects=True,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
+            loc=loc,
+            ip=ip,
+        )
+    )
+
+
+@dsl_user_op
+def __popc(val, *, loc=None, ip=None) -> Int32:
+    """
+    Count set bits in a 32-bit value.
+
+    PTX: popc.b32 d, a;
+    """
+    return Int32(
+        llvm.inline_asm(
+            T.i32(),
+            [Int32(val).ir_value(loc=loc, ip=ip)],
+            "popc.b32 $0, $1;",
+            "=r,r",
+            has_side_effects=False,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
+            loc=loc,
+            ip=ip,
+        )
+    )
 
 
 def _shfl_xor_sync(val, lane_mask):

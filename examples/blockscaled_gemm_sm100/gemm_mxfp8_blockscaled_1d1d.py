@@ -126,8 +126,6 @@ def mxfp8_blockscaled_gemm(
                 if k % sf_load_period == 0:
                     T.tcgen05_cp_warpx4(SFA_shared[stage, :], SFA_tmem)
                     T.tcgen05_cp_warpx4(SFB_shared[stage, :], SFB_tmem)
-
-                # sf_id selects which of the 4 packed E8M0 values to use
                 T.tcgen05_gemm_blockscaled(
                     A_shared[stage, :, :],
                     B_shared[stage, :, :],
@@ -137,8 +135,9 @@ def mxfp8_blockscaled_gemm(
                     transpose_B=transpose_B,
                     mbar=consumed[stage],
                     clear_accum=k == 0,
-                    sf_a_id=k % sf_load_period,
-                    sf_b_id=k % sf_load_period,
+                    k_start=k * block_K,
+                    sf_a_granularity_k=sf_granularity_k,
+                    sf_b_granularity_k=sf_granularity_k,
                 )
 
             T.tcgen05_mma_arrive(tmem_full)
@@ -202,7 +201,7 @@ def mxfp8_blockscaled_gemm_2cta(
     SFB: T.Tensor[[sf_k_groups * N], T.uint32]
     C = T.empty((M, N), out_dtype)
 
-    with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=128, cluster_dims=2) as (bx, by):
+    with T.ClusterKernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=128, cluster_dims=2) as (bx, by):
         cta_id = T.block_rank_in_cluster()
         T.assume(cta_id < 2)
 
@@ -290,8 +289,9 @@ def mxfp8_blockscaled_gemm_2cta(
                     transpose_B=transpose_B,
                     mbar=consumed[stage],
                     clear_accum=k == 0,
-                    sf_a_id=k % sf_load_period,
-                    sf_b_id=k % sf_load_period,
+                    k_start=k * block_K,
+                    sf_a_granularity_k=sf_granularity_k,
+                    sf_b_granularity_k=sf_granularity_k,
                     use_2cta=True,
                 )
             T.tcgen05_mma_arrive(tmem_full, arrive_2cta=True)
@@ -356,7 +356,7 @@ def mxfp8_blockscaled_gemm_2cta_persistent(
     group_size = 16  # in cluster
     assert n_blocks % (2 * group_size) == 0  # Please adjust group_size if not satisfied
 
-    with T.Kernel(sm_num, threads=256, cluster_dims=2) as (block_id):
+    with T.ClusterKernel(sm_num, threads=256, cluster_dims=2) as (block_id):
         cta_id = T.block_rank_in_cluster()
         T.assume(cta_id < 2)
 
@@ -463,8 +463,9 @@ def mxfp8_blockscaled_gemm_2cta_persistent(
                             transpose_B=transpose_B,
                             mbar=consumed[stage],
                             clear_accum=k == 0,
-                            sf_a_id=k % sf_load_period,
-                            sf_b_id=k % sf_load_period,
+                            k_start=k * block_K,
+                            sf_a_granularity_k=sf_granularity_k,
+                            sf_b_granularity_k=sf_granularity_k,
                             use_2cta=True,
                         )
                     T.tcgen05_mma_arrive(tmem_full, arrive_2cta=True)

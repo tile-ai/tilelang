@@ -564,7 +564,12 @@ CUBIN_KERNEL_LAUNCH_TEMPLATE = """\
 
 # Fake tensor creation template
 CUBIN_FAKE_TENSOR_TEMPLATE = """\
-  __fake_{arg_name}__ = make_fake_compact_tensor(_DTYPE_MAP[str({arg_name}.dtype)], {arg_name}.shape, stride_order={arg_name}.dim_order()[::-1], assumed_align=16)"""
+  __fake_{arg_name}__ = make_fake_compact_tensor(
+      {dtype_expr},
+      _positive_fake_shape({arg_name}.shape),
+      stride_order={arg_name}.dim_order()[::-1],
+      assumed_align=16,
+  )"""
 
 # Complete cubin generation code template
 # {lib_code} contains the @cute.kernel definitions and is embedded here
@@ -662,6 +667,9 @@ def _generate_cubin_if_needed({cubin_gen_params}):
       "torch.uint16": cutlass.Uint16,
       "torch.uchar": cutlass.Uint8}}
 
+  def _positive_fake_shape(shape):
+    return tuple(max(int(dim), 1) for dim in tuple(shape))
+
 {cubin_gen_code}
 
   _cubin_generated = True
@@ -722,7 +730,9 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         "float16": "cutlass.Float16",
         "bfloat16": "cutlass.BFloat16",
         "float8_e4m3": "cutlass.Float8E4M3",
+        "float8_e4m3fn": "cutlass.Float8E4M3FN",
         "float8_e5m2": "cutlass.Float8E5M2",
+        "float4_e2m1fn": "cutlass.Float4E2M1FN",
         "float64": "cutlass.Float64",
         "int64": "cutlass.Int64",
         "int32": "cutlass.Int32",
@@ -827,7 +837,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
 
     def _cxx_expr(self, expr: tvm.tirx.PrimExpr) -> str:
         """Convert TVM expression to C++ string for generated launcher code."""
-        return pythonic_expr(expr, self._CXX_TYPE_MAP)
+        return pythonic_expr(expr, self._CXX_TYPE_MAP, func_name_map={"min": "std::min", "max": "std::max"})
 
     @staticmethod
     def _cxx_cast(ctype: str, expr_str: str) -> str:
@@ -904,7 +914,13 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         for param in self.prim_func.params:
             if param in self.prim_func.buffer_map:
                 buffer = self.prim_func.buffer_map[param]
-                function_args.append({"name": buffer.data.name, "type": "buffer"})
+                function_args.append(
+                    {
+                        "name": buffer.data.name,
+                        "type": "buffer",
+                        "dtype": self._TYPE_MAP.get(buffer.dtype) or self._TYPE_MAP.get(str(buffer.dtype)),
+                    }
+                )
                 buffer_args.append(buffer.data.name)
             elif isinstance(param, tvm.tirx.Var):
                 function_args.append({"name": param.name, "type": self._TYPE_MAP[param.dtype]})
@@ -1203,6 +1219,26 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
     # C++ Launcher Generation
     # =========================================================================
 
+    @staticmethod
+    def _select_launcher_args(
+        function_args: list[dict],
+        kernel_metadata_list: list[dict],
+        all_tma_tensors: list[str],
+    ) -> list[dict]:
+        """Select host launcher args needed by the emitted device launches.
+
+        The Python wrapper still accepts the full PrimFunc signature so callers
+        can pass optional/unused tensors as None. The C++ launcher should only
+        type-bind buffers that are actually dereferenced or passed to CUDA.
+        """
+        active_buffers = set(all_tma_tensors)
+        for kernel_meta in kernel_metadata_list:
+            for arg_name, arg_type in kernel_meta["call_args"]:
+                if arg_type == "buffer":
+                    active_buffers.add(arg_name)
+
+        return [arg for arg in function_args if arg["type"] != "buffer" or arg["name"] in active_buffers]
+
     def _generate_cpp_launcher(
         self,
         kernel_metadata_list: list[dict],
@@ -1231,9 +1267,10 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         tma_init_func = self._generate_tma_init_func(all_desc_names, all_tma_tensors, tensor_arg_map, scalar_args)
 
         # Generate launch function signature and get_ptr code
+        launcher_args = self._select_launcher_args(function_args, kernel_metadata_list, all_tma_tensors)
         func_sig_parts = []
         get_ptr_code = ""
-        for arg in function_args:
+        for arg in launcher_args:
             if arg["type"] == "buffer":
                 func_sig_parts.append(f"tvm::ffi::TensorView {arg['name']}")
                 get_ptr_code += f"  uint64_t {arg['name']}_ptr = reinterpret_cast<uint64_t>({arg['name']}.data_ptr());\n"
@@ -1265,6 +1302,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
     def _generate_cubin_gen_code(
         self,
         kernel_metadata_list: list[dict],
+        function_args: list[dict],
         buffer_args: list[str],
         all_desc_names: list[str],
         lib_code: str = "",
@@ -1333,8 +1371,14 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         # (e.g. Output_partial_) for another kernel. Skipping fake tensor creation
         # just because a matching "{arg}_desc" exists is a correctness bug and
         # results in undefined names like "__fake_Output_partial__".
+        buffer_arg_dtypes = {arg["name"]: arg.get("dtype") for arg in function_args if arg["type"] == "buffer"}
         fake_tensor_code = "\n".join(
-            CUBIN_FAKE_TENSOR_TEMPLATE.format(arg_name=arg_name) for arg_name in wrapper_params_union if arg_name in buffer_args
+            CUBIN_FAKE_TENSOR_TEMPLATE.format(
+                arg_name=arg_name,
+                dtype_expr=buffer_arg_dtypes.get(arg_name) or f"_DTYPE_MAP[str({arg_name}.dtype)]",
+            )
+            for arg_name in wrapper_params_union
+            if arg_name in buffer_args
         )
         if fake_tensor_code:
             fake_tensor_code += "\n"
@@ -1364,13 +1408,14 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
     def _generate_python_wrapper(
         self,
         function_args: list[dict],
+        launcher_args: list[dict],
         cubin_gen_code: str,
         cubin_gen_params: str,
     ) -> str:
         """Generate Python wrapper code."""
         # Build function parameters
         call_func_params = ", ".join(arg["name"] for arg in function_args)
-        launcher_call_args = ", ".join(arg["name"] for arg in function_args)
+        launcher_call_args = ", ".join(arg["name"] for arg in launcher_args)
 
         return PYTHON_HOST_FUNC_TEMPLATE.format(
             cubin_gen_params=cubin_gen_params,
@@ -1565,6 +1610,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         launcher_cpp_code = self._generate_cpp_launcher(
             kernel_metadata, function_args, all_tma_tensors, all_desc_names_union, tensor_arg_map
         )
+        launcher_args = self._select_launcher_args(function_args, kernel_metadata, all_tma_tensors)
 
         self.launcher_cpp_code = launcher_cpp_code
         # Use a deterministic name so that:
@@ -1575,7 +1621,11 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
 
         # Generate cubin generation code (includes lib_code with @cute.kernel definitions)
         cubin_gen_code = self._generate_cubin_gen_code(
-            kernel_metadata, buffer_args, all_desc_names_union, lib_code=getattr(self, "lib_code", "")
+            kernel_metadata,
+            function_args,
+            buffer_args,
+            all_desc_names_union,
+            lib_code=getattr(self, "lib_code", ""),
         )
 
         # Generate Python wrapper
@@ -1586,7 +1636,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         scalar_names = [arg["name"] for arg in function_args if arg["type"] != "buffer"]
         cubin_gen_params = ", ".join(buffer_names + scalar_names)
 
-        python_wrapper = self._generate_python_wrapper(function_args, cubin_gen_code, cubin_gen_params)
+        python_wrapper = self._generate_python_wrapper(function_args, launcher_args, cubin_gen_code, cubin_gen_params)
 
         return python_wrapper
 

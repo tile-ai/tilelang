@@ -77,7 +77,9 @@ Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &T,
   auto loop_layout = par_op->GetLoopLayout();
   return LowerParallelLoop(par_op->GetRoot(), loop_layout, T.thread_var,
                            analyzer, T.layout_map,
-                           par_op->GetPredicate(T.thread_var));
+                           par_op->GetPredicate(T.thread_var),
+                           /*parallel_loop=*/true, /*should_vectorize=*/true,
+                           par_op->LoopLayoutRequiresPaddingGuard());
 }
 
 namespace {
@@ -226,7 +228,9 @@ Stmt LowerIm2ColSIMT(const Im2ColOpNode &op, const LowerArgs &T,
   auto loop_layout = par_op->GetLoopLayout();
   return LowerParallelLoop(par_op->GetRoot(), loop_layout, T.thread_var,
                            analyzer, T.layout_map,
-                           par_op->GetPredicate(T.thread_var));
+                           par_op->GetPredicate(T.thread_var),
+                           /*parallel_loop=*/true, /*should_vectorize=*/true,
+                           par_op->LoopLayoutRequiresPaddingGuard());
 }
 
 bool RegisterDefaultIm2Col() {
@@ -444,6 +448,13 @@ PrimExpr CopyNode::MakePredicate(arith::Analyzer *analyzer,
 
 // Constructs a SIMT-style nested loop that implements the copy.
 For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
+  if (IsFP4UnpackLoad(src, dst)) {
+    LOG(FATAL) << "SIMT copy from packed global float4_e2m1fn to unpacked "
+               << "shared float4_e2m1_unpacked is not supported; use "
+               << "T.tma_copy() for FP4 unpack loads (src=" << src->name
+               << ", dst=" << dst->name << ").";
+  }
+
   Array<IterVar> loop_vars = MakeIterVars();
   bool is_scalar = loop_vars.empty();
 

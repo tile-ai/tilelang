@@ -1,5 +1,6 @@
 import tilelang
 import tilelang.testing
+import pytest
 from tilelang import language as T
 
 
@@ -30,6 +31,56 @@ def test_tilelang_issue_layout_free_inference_choose_smallest_replication():
     assert "float S_frag[4];" in source, "S_frag is not in the source"
     assert "float B_frag[4];" in source, "B_frag is not in the source"
     assert "float A_frag[4];" in source, "A_frag is not in the source"
+
+
+@tilelang.jit
+def _invalid_fragment_write_owner_layout():
+    def token_loop_layout_fn(i, j, rep):
+        return i * 4 + rep % 4 + (rep // 4) * 32, j
+
+    def scalar_buffer_layout_fn(i, j, rep):
+        return i * 4 + j + rep * 32, 0
+
+    loop_layout = T.Fragment((8, 4), forward_fn=token_loop_layout_fn, replicate=8)
+    buffer_layout = T.Fragment((8, 4), forward_fn=scalar_buffer_layout_fn, replicate=2)
+
+    @T.prim_func
+    def main():
+        with T.Kernel(1, threads=64):
+            frag = T.alloc_fragment((8, 4), T.float32)
+            T.annotate_layout({frag: buffer_layout})
+            for i, j in T.Parallel(8, 4, loop_layout=loop_layout):
+                frag[i, j] = T.float32(1.0)
+
+    return main
+
+
+def test_reject_fragment_write_from_non_owner_threads():
+    with pytest.raises(Exception, match="Layout infer conflict"):
+        _invalid_fragment_write_owner_layout()
+
+
+@tilelang.jit
+def _scalar_reduce_accumulator_owner_layout():
+    @T.prim_func
+    def main(out: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=128):
+            acc = T.alloc_fragment((128,), T.float32)
+            total = T.alloc_fragment((1,), T.float32)
+            total[0] = T.float32(0.0)
+            for k in T.Parallel(128):
+                acc[k] = T.float32(1.0)
+            T.reduce_sum(acc, total, clear=False)
+            if T.get_thread_binding() == 0:
+                out[0] = total[0]
+
+    return main
+
+
+def test_scalar_reduce_accumulator_owner_layout():
+    kernel = _scalar_reduce_accumulator_owner_layout()
+    source = kernel.get_kernel_source()
+    assert "AllReduce" in source
 
 
 if __name__ == "__main__":

@@ -60,6 +60,44 @@ def test_sm75_f16_gemm_uses_m16n8k8_and_matches_torch():
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_eq(7, 5)
+def test_sm75_f16_gemm_f16_accum_uses_m16n8k8_and_matches_torch():
+    M = N = K = 128
+    kernel = tilelang.compile(
+        _make_gemm_kernel(M, N, K, 64, 64, 32, T.float16, T.float16, T.float16),
+        target="cuda",
+        out_idx=[2],
+    )
+    _assert_mma_sync_shape(kernel.get_kernel_source(), "kFloat16", "kFloat16", 16, 8, 8)
+
+    a = torch.randn((M, K), device="cuda", dtype=torch.float16) * 0.1
+    b = torch.randn((N, K), device="cuda", dtype=torch.float16) * 0.1
+    c = kernel(a, b)
+    ref = (a.float() @ b.float().T).to(torch.float16)
+
+    tilelang.testing.torch_assert_close(c, ref, rtol=1e-2, atol=1e-2, max_mismatched_ratio=0.01)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(7, 5)
+def test_sm75_uint8_gemm_uses_m8n8k16_and_matches_torch():
+    M = N = K = 128
+    kernel = tilelang.compile(
+        _make_gemm_kernel(M, N, K, 64, 64, 64, T.uint8, T.int32, T.int32),
+        target="cuda",
+        out_idx=[2],
+    )
+    _assert_mma_sync_shape(kernel.get_kernel_source(), "kUInt8", "kInt32", 8, 8, 16)
+
+    a = torch.randint(0, 256, (M, K), device="cuda", dtype=torch.uint8)
+    b = torch.randint(0, 256, (N, K), device="cuda", dtype=torch.uint8)
+    c = kernel(a, b)
+    ref = (a.cpu().to(torch.int32) @ b.cpu().to(torch.int32).T).to(device="cuda")
+
+    tilelang.testing.torch_assert_close(c, ref, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(7, 5)
 def test_sm75_int8_gemm_uses_m8n8k16_and_matches_torch():
     M = N = K = 128
     kernel = tilelang.compile(

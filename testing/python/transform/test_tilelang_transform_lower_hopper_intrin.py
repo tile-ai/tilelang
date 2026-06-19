@@ -1,7 +1,7 @@
 from tilelang import tvm as tvm
 import tilelang as tl
 from tilelang.cuda import transform as cuda_transform
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 import tilelang.language as T
 import tilelang.testing
 
@@ -12,10 +12,12 @@ def _check(original, transformed):
     func = original
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.MaterializeKernelLaunch()(mod)
     mod = cuda_transform.LowerHopperIntrin()(mod)
     mod = tl.transform.LowerOpaqueBlock()(mod)
     transformed = tvm.IRModule.from_expr(transformed.with_attr("global_symbol", "main"))
     transformed = tvm.tirx.transform.BindTarget(auto_target)(transformed)
+    transformed = tl.transform.MaterializeKernelLaunch()(transformed)
     transformed = tl.transform.LowerOpaqueBlock()(transformed)
     transformed["main"] = transformed["main"].with_attr("tma_descriptor_args", {})
 
@@ -39,7 +41,8 @@ def test_lower_shared_barrier():
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.LowerSharedBarrier()(mod)
+    mod = tl.transform.MaterializeKernelLaunch()(mod)
+    mod = cuda_transform.LowerSharedBarrier()(mod)
     mod = tl.transform.LowerOpaqueBlock()(mod)
 
     main_func = mod["main"]
@@ -90,6 +93,7 @@ def test_tma_descriptor_init_after_alloc_global():
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.MaterializeKernelLaunch()(mod)
     mod = cuda_transform.LowerHopperIntrin()(mod)
     func = mod["main"]
 

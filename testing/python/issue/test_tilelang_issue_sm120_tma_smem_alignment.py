@@ -5,7 +5,7 @@ Pre-fix `SharedMemoryAlignmentPlanner` (`merge_shared_memory_allocations.cc`)
 gated the 1024-byte alignment of TMA-touched smem buffers on
 `TargetIsHopper(target)` (arch in `[90, 100)`). For sm_100 / sm_120 (also
 TMA-capable: see `cp.async.bulk.tensor.{1..5}d.shared::cta.global.*` PTX
-support gated by `TargetHasBulkCopy(target)` in `src/target/utils.cc`)
+support gated by `TargetHasBulkCopy(target)` in `src/cuda/target_utils.cc`)
 the planner fell back to the global default (16 bytes) and TMA destinations
 landed at 16-byte-aligned offsets. `cp.async.bulk.tensor.*` requires the
 destination smem pointer to be 128-byte aligned, so on sm_100/sm_120 this

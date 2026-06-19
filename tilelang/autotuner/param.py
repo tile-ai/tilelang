@@ -13,6 +13,7 @@ from pathlib import Path
 import errno
 
 from tilelang.jit import JITKernel
+from tilelang.jit.adapter.base import CachedTextSource
 import cloudpickle
 import os
 import shutil
@@ -248,7 +249,7 @@ class AutotuneResult:
                     logger.debug(f"Copying kernel library to file: {kernel_lib_path}")
                 self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
             else:
-                executable = kernel.adapter.executable
+                executable = kernel.adapter.get_exportable_executable()
                 if verbose:
                     logger.debug(f"Saving kernel executable to file: {kernel_lib_path}")
                 self._safe_write_executable(executable, kernel_lib_path)
@@ -367,8 +368,8 @@ class AutotuneResult:
         if host_kernel_source and device_kernel_source and kernel_params:
             return JITKernel.from_database(
                 func=func,
-                host_kernel_source=host_kernel_source,
-                device_kernel_source=device_kernel_source,
+                host_kernel_source=CachedTextSource(text=host_kernel_source),
+                device_kernel_source=CachedTextSource(text=device_kernel_source),
                 kernel_lib_path=kernel_lib_path,
                 params=kernel_params,
                 target=target,
@@ -473,8 +474,8 @@ class AutotuneResult:
 
         verbose = compile_args.verbose
         # Normalize target and resolve execution backend for loading
-        from tilelang.utils.target import determine_target as _determine_target
-        from tilelang.jit.execution_backend import resolve_execution_backend
+        from tilelang.backend.target import determine_target as _determine_target
+        from tilelang.backend.execution_backend import resolve_execution_backend
 
         norm_target = _determine_target(compile_args.target, return_object=True)
         requested_backend = compile_args.execution_backend

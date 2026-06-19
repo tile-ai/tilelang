@@ -3,7 +3,7 @@
 This page describes two advanced data-movement features that are available on
 NVIDIA Hopper (SM90) and later: **TMA multicast** and **SM-to-SM cluster
 copy**. Both features are exposed through extensions to the existing `T.copy`
-operator and require a kernel launched with thread block cluster, i.e., with `cluster_dims != (1, 1, 1)`.
+operator and require a kernel launched with `T.ClusterKernel`, i.e., with `cluster_dims != (1, 1, 1)`.
 
 Requirements:
 - CUDA Compute Capability ≥ 9.0 (Hopper / Blackwell / RTX 5090)
@@ -19,7 +19,7 @@ position inside the cluster), and all CTAs can observe each other's shared
 memory via the `shared::cluster` address space.
 
 ```python
-with T.Kernel(grid_x, grid_y, threads=128, cluster_dims=(4, 1, 1)) as (bx, by):
+with T.ClusterKernel(grid_x, grid_y, threads=128, cluster_dims=(4, 1, 1)) as (bx, by):
     rank  = T.block_rank_in_cluster()   # 0..3 within this cluster
     T.cluster_sync()                     # barrier across all CTAs in cluster
 ```
@@ -68,7 +68,7 @@ def make_tma_multicast_kernel(M, N, block_M, block_N, cluster_mask):
         B: T.Tensor((M, N), "float16"),
     ):
         # 4 CTAs per cluster; ranks 0 and 1 share the same tile via multicast.
-        with T.Kernel(
+        with T.ClusterKernel(
             T.ceildiv(N, block_N),
             T.ceildiv(M, block_M),
             threads=128,
@@ -166,7 +166,7 @@ def make_cluster_copy_kernel(N: int):
         A: T.Tensor((N,), "float32"),
         B: T.Tensor((N,), "float32"),
     ):
-        with T.Kernel(2, threads=128, cluster_dims=(2, 1, 1)) as pid:
+        with T.ClusterKernel(2, threads=128, cluster_dims=(2, 1, 1)) as pid:
             s_src     = T.alloc_shared((N,), "float32")
             s_dst     = T.alloc_shared((N,), "float32")
             s_barrier = T.alloc_cluster_barrier([1])
@@ -300,7 +300,7 @@ SM-to-SM copy (saving global-memory round trips).
 ```python
 @T.prim_func
 def split_k_gemm(A, B, C):
-    with T.Kernel(grid_x, grid_y, threads=256, cluster_dims=(4, 1, 1)) as (bx, by):
+    with T.ClusterKernel(grid_x, grid_y, threads=256, cluster_dims=(4, 1, 1)) as (bx, by):
         rank    = T.block_rank_in_cluster()
         A_s     = T.alloc_shared((BM, BK), "float16")
         B_s     = T.alloc_shared((BK, BN), "float16")

@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tvm import tirx
+from tvm.ir import Range
 from tilelang.utils.language import is_shared, is_fragment
 from tilelang.ir import GemmSPWarpPolicy
 from tvm.ir.base import Node
@@ -14,7 +15,7 @@ class GemmSPBase:
     def infer_layout(self, target: Target, thread_nums: int):
         raise NotImplementedError("infer_layout is not implemented")
 
-    def lower(self, layout_map: dict, target: Target, thread_nums: int, thread_var: tirx.Var):
+    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tirx.Var):
         raise NotImplementedError("lower is not implemented")
 
     def is_gemm_ss(self) -> bool:
@@ -58,9 +59,14 @@ class GemmSPBase:
         return self.E.dtype
 
     @property
-    def in_dtype(self) -> str:
+    def a_dtype(self):
         assert self.A.dtype == self.B.dtype, "A and B must have the same dtype"
         return self.A.dtype
+
+    @property
+    def b_dtype(self):
+        assert self.A.dtype == self.B.dtype, "A and B must have the same dtype"
+        return self.B.dtype
 
     @property
     def accum_dtype(self) -> str:

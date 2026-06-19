@@ -58,6 +58,7 @@ def copy(
     coalesced_width: int | None = None,
     disable_tma: bool = False,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+    prefer_instruction: str | None = None,
     annotations: dict | None = None,
     loop_layout: Any | None = None,
 ) -> tirx.PrimExpr | tirx.Stmt:
@@ -69,8 +70,14 @@ def copy(
         coalesced_width (Optional[int], keyword-only): Width for coalesced memory access. Defaults to None.
         disable_tma (bool, keyword-only): Whether to disable TMA acceleration. Defaults to False.
         eviction_policy (Optional[str], keyword-only): Cache eviction policy. Defaults to None.
+        prefer_instruction (Optional[str], keyword-only): Backend-specific preferred lowering
+            instruction category. For CUDA, recognized values include "tma", "cp_async", and
+            "sync". For "tma", T.copy keeps synchronous copy semantics; global -> shared copies
+            lower through TMA with an automatically allocated barrier and wait when constraints
+            are satisfied.
         annotations (Optional[dict], keyword-only): Additional annotations dict. If provided,
-            coalesced_width, disable_tma, and eviction_policy can also be specified here.
+            coalesced_width, disable_tma, eviction_policy, and prefer_instruction can also
+            be specified here.
             Values in annotations take precedence over individual arguments.
         loop_layout (Optional[Fragment], keyword-only): A parallel loop layout hint for the SIMT copy
             (only valid for normal SIMT copy; incompatible with TMA/LDSM/STSM/TMem). When provided,
@@ -115,6 +122,10 @@ def copy(
     if "eviction_policy" not in ann and eviction_policy is not None:
         eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
         ann["eviction_policy"] = eviction_policy_map[eviction_policy]
+    if "prefer_instruction" not in ann and prefer_instruction is not None:
+        ann["prefer_instruction"] = prefer_instruction
+    if isinstance(ann.get("prefer_instruction"), str):
+        ann["prefer_instruction"] = tirx.StringImm(ann["prefer_instruction"])
 
     # Parallel loop layout hint (Fragment). Mirrors T.Parallel(loop_layout=...)
     if loop_layout is not None and "parallel_loop_layout" not in ann:
@@ -225,6 +236,7 @@ def tma_copy(
     dst: BufferLikeType,
     *,
     barrier=None,
+    leader_scope_threads: int | None = None,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
     annotations: dict | None = None,
 ) -> tirx.PrimExpr | tirx.Stmt:
@@ -240,6 +252,9 @@ def tma_copy(
     Unlike T.copy() which emits tma_store + tma_store_arrive + tma_store_wait,
     T.tma_copy() omits the wait so the user can batch multiple stores before
     calling T.tma_store_wait() explicitly. ``barrier`` is not needed for stores.
+    FP4 unpacked shared-memory storage is load-only for TMA: packed global
+    ``float4_e2m1fn`` may be loaded into unpacked shared
+    ``float4_e2m1_unpacked``, but the reverse TMA store is not supported.
 
     Args:
         src: Source memory region (global or shared)
@@ -248,6 +263,8 @@ def tma_copy(
             Required for loads (global -> shared). Not needed for stores.
             The TMA load will arrive at this barrier with expected byte count.
             The user must wait on the same barrier via T.mbarrier_wait_parity().
+        leader_scope_threads: Number of threads in each TMA leader-election scope
+            (e.g., 32 for per-warp). Defaults to the thread extend in the current context if not specified.
         eviction_policy: Cache eviction policy. Defaults to None.
         annotations: Additional annotations dict. Values in annotations take
             precedence over individual arguments.
@@ -277,6 +294,14 @@ def tma_copy(
         from .builtin import _mbar_to_buffer_load
 
         ann["barrier"] = _mbar_to_buffer_load(barrier)
+
+    if leader_scope_threads is not None:
+        if not isinstance(leader_scope_threads, int) or leader_scope_threads <= 0:
+            raise ValueError(f"leader_scope_threads must be a positive int, got {leader_scope_threads}")
+        if leader_scope_threads % 32 != 0:
+            raise ValueError(f"leader_scope_threads must be a multiple of warp size (32), got {leader_scope_threads}")
+        if "leader_scope_threads" not in ann:
+            ann["leader_scope_threads"] = leader_scope_threads
 
     if "eviction_policy" not in ann and eviction_policy is not None:
         eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
@@ -391,8 +416,12 @@ def tma_gather4_bytes(K_box, dtype: str) -> int:
     """
     if dtype not in _TMA_SUPPORTED_DTYPES:
         raise ValueError(f"Unsupported dtype: {dtype}")
-    elem_bytes = tvm.DataType(dtype).bits // 8
-    return 4 * K_box * elem_bytes
+    dt = tvm.DataType(dtype)
+    if dt.is_float4_e2m1_unpacked():
+        elem_bits = 4
+    else:
+        elem_bits = dt.bits
+    return (4 * K_box * elem_bits + 7) // 8
 
 
 def tma_scatter4(

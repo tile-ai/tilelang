@@ -60,6 +60,7 @@ class TensorCoreIntrinEmitter:
         "float6_e2m3fn": "e2m3",
         "float6_e3m2fn": "e3m2",
         "float4_e2m1fn": "e2m1",
+        "custom[float4_e2m1_unpacked]8": "e2m1",
         "custom[tfloat32]": "tf32",
     }
 
@@ -135,11 +136,23 @@ class TensorCoreIntrinEmitter:
         self.a_dtype_abbrv = self._get_dtype_abbrv(a_dtype)
         self.b_dtype_abbrv = self._get_dtype_abbrv(b_dtype)
         self.accum_dtype_abbrv = self._get_dtype_abbrv(accum_dtype)
+        if self._should_use_tf32_mma_operand(a_dtype, accum_dtype):
+            self.a_dtype_abbrv = "tf32"
+        if self._should_use_tf32_mma_operand(b_dtype, accum_dtype):
+            self.b_dtype_abbrv = "tf32"
 
     def _get_dtype_abbrv(self, dtype: str) -> str:
+        if "float4_e2m1_unpacked" in dtype:
+            return "e2m1"
         if dtype not in self.dtype_abbrv:
             raise ValueError(f"Unsupported dtype: {dtype}")
         return self.dtype_abbrv[dtype]
+
+    @staticmethod
+    def _should_use_tf32_mma_operand(dtype: str, accum_dtype: str) -> bool:
+        operand_dtype = DataType(dtype)
+        accumulator_dtype = DataType(accum_dtype)
+        return str(operand_dtype) == "float32" and str(accumulator_dtype) == "float32"
 
     def _initialize_mma_prefix(self, k_dim: int = 16):
         if k_dim == 4:

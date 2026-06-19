@@ -85,7 +85,7 @@ template <typename Impl> struct FinalizeReducerLowerer {
           op_str, reducing_threads, 1, thread_offset, T.thread_bounds->extent,
           static_cast<int>(effective_batch), workspace_stride, T.target);
       int ws_size = workspace_stride * static_cast<int>(effective_batch);
-      PrimExpr workspace = T.AddWorkspace(ws_size, buffer->dtype);
+      PrimExpr workspace = T.add_workspace(ws_size, buffer->dtype);
       Array<PrimExpr> args = {StringImm(allreduce), buffer->data, workspace};
       return Evaluate(Call(DataType::Handle(), builtin::call_extern(), args));
     }
@@ -96,8 +96,8 @@ template <typename Impl> struct FinalizeReducerLowerer {
     Array<PrimExpr> thread_reduce_args = {StringImm(allreduce),
                                           BufferLoad(buffer, indices_0)};
     if (reducing_threads >= 32) {
-      PrimExpr workspace =
-          T.AddWorkspace(*as_const_int(T.thread_bounds->extent), buffer->dtype);
+      PrimExpr workspace = T.add_workspace(
+          *as_const_int(T.thread_bounds->extent), buffer->dtype);
       thread_reduce_args.push_back(workspace);
     }
     auto call = Call(buffer->dtype, builtin::call_extern(), thread_reduce_args);

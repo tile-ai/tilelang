@@ -60,7 +60,7 @@ if(MSVC)
   #     flags injected by CMake/TVM (e.g. /FS, /Zc:preprocessor, /MP).
   #   * -fdelayed-template-parsing: TVM headers declare std::vector<T>
   #     members where T is only forward-declared at that point (e.g.
-  #     std::vector<tvm::tir::Stmt> in src/transform/arg_binder.h). cl.exe
+  #     std::vector<tvm::tir::Stmt> in src/transform/tvm_ffi_binder.h). cl.exe
   #     defers template parsing by default so the late stmt.h include in
   #     the .cc file resolves T before instantiation; modern clang parses
   #     templates eagerly and emits "incomplete type" errors. Re-enabling
@@ -250,11 +250,12 @@ else()
 endif()
 
 # Configs
-set(TILELANG_BACKENDS CUDA ROCM METAL)
+set(TILELANG_BACKENDS CUDA ROCM METAL LLVM)
 
 set(TILELANG_BACKEND_DOC_CUDA "Enable CUDA backend (ON/OFF/or CUDA SDK path)")
 set(TILELANG_BACKEND_DOC_ROCM "Enable ROCm backend (ON/OFF/or ROCm SDK path)")
 set(TILELANG_BACKEND_DOC_METAL "Enable Metal backend")
+set(TILELANG_BACKEND_DOC_LLVM "Enable LLVM backend")
 
 # TVM's config.cmake redefines USE_* options later, so we cache the user's choice
 # (including explicit -DUSE_XXX arguments) before we include TVM and restore it
@@ -357,7 +358,7 @@ set(HIDE_PRIVATE_SYMBOLS OFF CACHE BOOL "Compile TVM with -fvisibility=hidden." 
 # Include directories for TileLang
 set(TILE_LANG_INCLUDES ${TVM_INCLUDES})
 # Add TileLang's own src/ to include path so cross-directory includes
-# can use paths relative to src/ (e.g. "target/utils.h", "op/builtin.h").
+# can use paths relative to src/ (e.g. "backend/common/target_utils.h", "op/builtin.h").
 list(INSERT TILE_LANG_INCLUDES 0 "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 # Collect source files
@@ -366,30 +367,16 @@ file(GLOB TILE_LANG_SRCS
   src/layout/*.cc
   src/transform/*.cc
   src/transform/common/*.cc
+  src/transform/pipeline/*.cc
   src/op/*.cc
-  src/backend/cpu/op/*.cc
-  src/backend/cuda/op/copy_analysis.cc
-  src/backend/metal/op/*.cc
-  src/backend/webgpu/op/*.cc
-  src/target/utils.cc
-  src/target/codegen_c_host.cc
-  src/target/codegen_c.cc
-  src/target/rt_mod_c.cc
-  # intrin_rule doesn't have system dependency; always compiled regardless of backend
-  src/backend/cuda/codegen/intrin_rule_cuda.cc
-  src/backend/rocm/codegen/intrin_rule_hip.cc
+  src/backend/common/target_utils.cc
+  src/backend/common/codegen/codegen_utils.cc
+  src/backend/common/codegen/codegen_c_host.cc
 )
 
 # Always include CPU-safe runtime helpers
 list(APPEND TILE_LANG_SRCS
   src/runtime/error_helpers.cc
-)
-
-# Metal codegen is pure C++ (no Apple frameworks) and can generate Metal shader
-# source on any platform.  Always compile it so that "target.build.tilelang_metal"
-# is available for cross-compilation on Linux/Windows.
-list(APPEND TILE_LANG_SRCS
-  src/target/codegen_metal.cc
 )
 # Track if the user explicitly selected a backend via cache options.
 set(TILELANG_BACKEND_USER_SELECTED OFF)
@@ -432,6 +419,16 @@ if(NOT TILELANG_BACKEND_USER_SELECTED)
     endif()
   endif()
 
+
+  if(DEFINED ENV{USE_LLVM})
+    set(_tilelang_backend_env_selected ON)
+    if($ENV{USE_LLVM})
+      set(USE_LLVM ON)
+    else()
+      set(USE_LLVM OFF)
+    endif()
+  endif()
+
   if(NOT _tilelang_backend_env_selected)
     if(APPLE)
       message(STATUS "Enable Metal support by default.")
@@ -449,9 +446,11 @@ endif()
 
 # Backend-local CMake files own native source lists, stubs, include paths, and
 # compile definitions. Top-level CMake only selects and delegates.
-include("${CMAKE_CURRENT_SOURCE_DIR}/src/backend/cuda/CMakeLists.txt")
-include("${CMAKE_CURRENT_SOURCE_DIR}/src/backend/rocm/CMakeLists.txt")
-include("${CMAKE_CURRENT_SOURCE_DIR}/src/backend/metal/CMakeLists.txt")
+include("${CMAKE_CURRENT_SOURCE_DIR}/src/cpu/CMakeLists.txt")
+include("${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/CMakeLists.txt")
+include("${CMAKE_CURRENT_SOURCE_DIR}/src/rocm/CMakeLists.txt")
+include("${CMAKE_CURRENT_SOURCE_DIR}/src/metal/CMakeLists.txt")
+include("${CMAKE_CURRENT_SOURCE_DIR}/src/webgpu/CMakeLists.txt")
 
 set(USE_Z3      ON CACHE STRING "Use Z3 SMT solver for TileLang optimizations")
 set(USE_PYPI_Z3 ON CACHE BOOL   "Use Z3 provided by PyPI z3-solver package")
@@ -495,6 +494,20 @@ if(MSVC)
       endif()
     endif()
   endforeach()
+
+  # TVM links against tvm_ffi_shared on Windows. Do not also export tvm-ffi
+  # inline class members from TileLang-built TVM DLLs, or lld-link reports
+  # duplicate symbols for tvm::ffi types already exported by tvm_ffi.dll.
+  foreach(_tilelang_tvm_obj_tgt IN ITEMS tvm_objs tvm_runtime_objs)
+    if(TARGET ${_tilelang_tvm_obj_tgt})
+      get_target_property(_tilelang_tvm_defs ${_tilelang_tvm_obj_tgt} COMPILE_DEFINITIONS)
+      if(_tilelang_tvm_defs)
+        list(REMOVE_ITEM _tilelang_tvm_defs TVM_FFI_EXPORTS -DTVM_FFI_EXPORTS)
+        set_target_properties(${_tilelang_tvm_obj_tgt}
+          PROPERTIES COMPILE_DEFINITIONS "${_tilelang_tvm_defs}")
+      endif()
+    endif()
+  endforeach()
 endif()
 
 # Provide the custom LogMessageImpl / LogFatalImpl implementation to TVM,
@@ -533,32 +546,16 @@ if(TILELANG_RELEASE_BUILD)
   target_compile_definitions(tilelang_objs PRIVATE TILELANG_RELEASE_BUILD=1)
 endif()
 
+set(TILELANG_OUTPUT_TARGETS tvm_runtime tvm_compiler)
 if(WIN32)
-  set(TILELANG_OUTPUT_TARGETS tvm)
-  # On Windows, TileLang subclasses a large number of non-exported TVM C++
-  # classes. Building those objects into tvm.dll avoids an otherwise fragile
-  # cross-DLL ABI boundary while keeping Python-side registration semantics.
-  #
-  # MSVC can still discard translation-unit-local static init triggers from
-  # object-library inputs when those TUs are otherwise only referenced for
-  # side effects (for example TVM_FFI_STATIC_INIT_BLOCK() registrations).
-  # Archive the TileLang objects first, then force-include that archive into
-  # tvm.dll so tl.* object/global registrations survive the final link.
-  add_library(tilelang_archive STATIC $<TARGET_OBJECTS:tilelang_objs>)
-  set_target_properties(tilelang_archive PROPERTIES
-    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-    LINKER_LANGUAGE CXX
-  )
-  target_link_libraries(tvm PRIVATE tilelang_archive)
-  target_link_options(tvm PRIVATE
-    "/WHOLEARCHIVE:$<TARGET_FILE:tilelang_archive>"
-  )
-  # TVM is added with EXCLUDE_FROM_ALL above, but on Windows we install
-  # tvm.dll as the only native artifact that ships TileLang symbols, so make
-  # sure `ninja` (and `cmake --build`) actually builds it by default.
-  set_property(TARGET tvm PROPERTY EXCLUDE_FROM_ALL FALSE)
+  # Windows ships tvm_runtime.dll and tvm_compiler.dll. The compiler DLL also
+  # carries TileLang's native registration/object code: TileLang uses TVM
+  # compiler-side C++ internals that are not consistently exported from a
+  # separate tilelang.dll, while exporting every TVM compiler object would exceed
+  # Windows' 65535-symbol DLL limit. This keeps Windows on explicit split TVM
+  # DLL names without falling back to the old unified tvm.dll.
+  target_sources(tvm_compiler PRIVATE $<TARGET_OBJECTS:tilelang_objs>)
 else()
-  set(TILELANG_OUTPUT_TARGETS tvm_runtime tvm_compiler)
   add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
   target_link_libraries(tilelang PUBLIC tvm_compiler)
 
@@ -569,6 +566,15 @@ else()
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
   )
   list(PREPEND TILELANG_OUTPUT_TARGETS tilelang)
+endif()
+
+if(WIN32)
+  # TVM is added with EXCLUDE_FROM_ALL above. The split Windows build ships the
+  # same native target set as POSIX, so make sure default builds materialize all
+  # DLLs needed by Python import and wheel installation.
+  foreach(_tilelang_win_target IN LISTS TILELANG_OUTPUT_TARGETS)
+    set_property(TARGET ${_tilelang_win_target} PROPERTY EXCLUDE_FROM_ALL FALSE)
+  endforeach()
 endif()
 # Build cython extension
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT})

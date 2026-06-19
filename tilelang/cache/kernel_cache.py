@@ -23,6 +23,9 @@ from tilelang.engine.param import KernelParam
 from tilelang.utils.language import get_prim_func_name
 from tilelang import env
 from tilelang.jit import JITKernel
+from tilelang.jit.adapter.base import CachedTextSource
+from tilelang.jit.diagnostics import jit_phase
+from tilelang.contrib.hip_resource_info import dump_to_file, load_from_file
 from tilelang import __version__
 import platform
 
@@ -47,6 +50,7 @@ class KernelCache:
     host_kernel_path = "host_kernel.cu"
     kernel_lib_path = "kernel_lib.so"
     params_path = "params.pkl"
+    resource_usage_path = "resource_usage.json"
     cache_root_dir = "kernels"
     staging_root_dir = ".staging"
 
@@ -90,7 +94,7 @@ class KernelCache:
             pass
 
         if sys.platform == "win32":
-            lib_names = ["tilelang.dll", "libtilelang.dll", "tvm.dll", "tvm_ffi.dll"]
+            lib_names = ["tvm_runtime.dll", "tvm_compiler.dll", "tvm_ffi.dll"]
         elif sys.platform == "darwin":
             lib_names = [
                 "libtilelang.dylib",
@@ -343,33 +347,47 @@ class KernelCache:
                 )
                 return self._memory_cache[key]
 
-            if verbose:
-                self.logger.debug(f"Checking disk cache for kernel {get_prim_func_name(func, '<unknown>')}")
+        if verbose:
+            self.logger.debug(f"Checking disk cache for kernel {get_prim_func_name(func, '<unknown>')}")
 
-            # Then check disk cache
-            kernel = self._load_kernel_from_disk(
-                key, target, target_host, out_idx, execution_backend, pass_configs, compile_flags, func, verbose
-            )
-            if kernel is not None:
-                if verbose:
-                    self.logger.debug(f"Found kernel in disk cache for {get_prim_func_name(func, '<unknown>')}")
-                # Populate memory cache with disk result
+        # Disk loads can be expensive for large kernel sets; keep them outside
+        # the global cache lock so independent cache hits can proceed in parallel.
+        kernel = self._load_kernel_from_disk(
+            key, target, target_host, out_idx, execution_backend, pass_configs, compile_flags, func, verbose
+        )
+        if kernel is not None:
+            if verbose:
+                self.logger.debug(f"Found kernel in disk cache for {get_prim_func_name(func, '<unknown>')}")
+            with self._lock:
+                existing = self._memory_cache.get(key)
+                if existing is not None:
+                    return existing
                 self._memory_cache[key] = kernel
-                return kernel
+            return kernel
 
         if verbose:
             self.logger.debug(f"No cached kernel for {get_prim_func_name(func, '<unknown>')}")
         # Compile kernel if cache miss; leave critical section
-        kernel = JITKernel(
-            func,
-            out_idx=out_idx,
-            execution_backend=execution_backend,
-            target=target,
-            target_host=target_host,
+        with jit_phase(
+            "cache.compile",
             verbose=verbose,
-            pass_configs=pass_configs,
-            compile_flags=compile_flags,
-        )
+            kernel=get_prim_func_name(func, "<unknown>"),
+            target=str(target),
+            target_host=str(target_host) if target_host is not None else None,
+            backend=execution_backend,
+            cache_key=key,
+            cache_path=self._get_cache_path(key),
+        ):
+            kernel = JITKernel(
+                func,
+                out_idx=out_idx,
+                execution_backend=execution_backend,
+                target=target,
+                target_host=target_host,
+                verbose=verbose,
+                pass_configs=pass_configs,
+                compile_flags=compile_flags,
+            )
         with self._lock:
             if env.is_cache_enabled():
                 cache_path = self._get_cache_path(key)
@@ -378,7 +396,12 @@ class KernelCache:
                 self._set_adapter_cache_path(kernel, cache_path)
 
         # Store in memory cache after compilation
-        self._memory_cache[key] = kernel
+        self._tag_kernel_cache_entry(kernel, key, self._get_cache_path(key))
+        with self._lock:
+            existing = self._memory_cache.get(key)
+            if existing is not None:
+                return existing
+            self._memory_cache[key] = kernel
         return kernel
 
     def clear_cache(self):
@@ -400,6 +423,19 @@ class KernelCache:
             str: Absolute path to the cache directory for this kernel.
         """
         return os.path.join(self._get_cache_root(), key)
+
+    @staticmethod
+    def _tag_kernel_cache_entry(kernel: JITKernel, key: str, cache_path: str) -> None:
+        try:
+            kernel._tilelang_cache_key = key
+            kernel._tilelang_cache_path = cache_path
+        except (AttributeError, TypeError):
+            logging.getLogger(__name__).debug(
+                "Could not tag kernel cache entry for key %s at %s",
+                key,
+                cache_path,
+                exc_info=True,
+            )
 
     @staticmethod
     def _load_binary(path: str):
@@ -472,6 +508,11 @@ class KernelCache:
                 self.logger.debug(f"Saving kernel parameters to disk: {params_path}")
             KernelCache._safe_write_file(params_path, "wb", lambda file: cloudpickle.dump(kernel.params, file))
 
+            # Persist HIP kernel-resource-usage remarks
+            usage = getattr(kernel, "_resource_usage", None) or {}
+            if usage:
+                dump_to_file(usage, os.path.join(staging_path, self.resource_usage_path))
+
             missing_files = self._get_missing_complete_cache_files(staging_path)
             if missing_files:
                 missing_names = ", ".join(os.path.basename(path) for path in missing_files)
@@ -526,13 +567,11 @@ class KernelCache:
         kernel_lib_path = os.path.join(cache_path, self.kernel_lib_path)
         params_path = os.path.join(cache_path, self.params_path)
 
-        required_files = self._get_required_files(cache_path)
-
-        if not all([os.path.exists(file) for file in required_files]):
+        missing_files = self._get_missing_complete_cache_files(cache_path)
+        if missing_files:
+            if verbose:
+                self.logger.debug("Disk cache entry is incomplete; missing files: %s", missing_files)
             return None
-
-        # Load the kernel source file (optional)
-        device_kernel_source, host_kernel_source = self._load_kernel_source(device_kernel_path, host_kernel_path, verbose)
 
         # Load kernel parameters
         kernel_params: list[KernelParam] | None = None
@@ -544,10 +583,10 @@ class KernelCache:
         except Exception:
             self.logger.exception("Error loading kernel parameters from disk")
 
-        return self._build_kernel(
+        kernel = self._build_kernel(
             func=func,
-            host_kernel_source=host_kernel_source,
-            device_kernel_source=device_kernel_source,
+            host_kernel_source=CachedTextSource(path=host_kernel_path),
+            device_kernel_source=CachedTextSource(path=device_kernel_path),
             kernel_lib_path=kernel_lib_path,
             kernel_params=kernel_params,
             target=target,
@@ -557,6 +596,18 @@ class KernelCache:
             pass_configs=pass_configs,
             compile_flags=compile_flags,
         )
+        if kernel is not None:
+            # Restore parsed kernel-resource-usage if a previous compile
+            # persisted it; absent file is fine (older caches, non-HIP).
+            ru_path = os.path.join(cache_path, self.resource_usage_path)
+            if os.path.exists(ru_path):
+                try:
+                    kernel._resource_usage = load_from_file(ru_path)
+                except Exception:
+                    self.logger.exception("Error loading kernel resource_usage from disk")
+
+            self._tag_kernel_cache_entry(kernel, key, cache_path)
+        return kernel
 
     def _clear_disk_cache(self):
         """
@@ -651,8 +702,8 @@ class KernelCache:
     def _build_kernel(
         self,
         func: Callable | None,
-        host_kernel_source: str,
-        device_kernel_source: str,
+        host_kernel_source: CachedTextSource,
+        device_kernel_source: CachedTextSource,
         kernel_lib_path: str,
         kernel_params: list[KernelParam] | None,
         target: str | Target,
@@ -664,10 +715,6 @@ class KernelCache:
     ) -> JITKernel | None:
         # Check all required components and report specific failures
         missing_components = []
-        if not host_kernel_source:
-            missing_components.append("host_kernel_source")
-        if not device_kernel_source:
-            missing_components.append("device_kernel_source")
         if not kernel_params:
             missing_components.append("kernel_params")
 

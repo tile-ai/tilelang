@@ -1,5 +1,5 @@
 from tilelang import tvm as tvm
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
@@ -89,9 +89,11 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
 
     with tvm.target.Target(auto_target):
         mod = tvm.tirx.transform.BindTarget(auto_target)(before())
+        mod = tl.transform.MaterializeKernelLaunch()(mod)
         mod = tl.transform.LayoutInference()(mod)
         mod = tvm.tirx.transform.Simplify()(mod)
         ref_mod = tvm.tirx.transform.BindTarget(auto_target)(after())
+        ref_mod = tl.transform.MaterializeKernelLaunch()(ref_mod)
         ref_mod = tvm.tirx.transform.Simplify()(ref_mod)
         # Note(tzj): The structures are equal except one more "for" loop after the LayoutInference pass
         # This loop is "for vec in T.parallel(1)",
@@ -100,6 +102,73 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
         # tvm.ir.assert_structural_equal(mod, ref_mod)
 
 
+def test_static_ragged_copy_minimizes_full_thread_padding():
+    n = 514
+    threads = 128
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((n,), T.float32),
+        B: T.Tensor((n,), T.float32),
+    ):
+        with T.Kernel(1, threads=threads):
+            T.copy(A, B)
+
+    with tvm.target.Target(auto_target):
+        artifact = tl.lower(main, target=auto_target, enable_device_compile=False)
+
+    kernel_source = str(artifact.kernel_source)
+    assert "__launch_bounds__(128, 1)" in kernel_source
+    assert "for (int i = 0; i < 5; ++i)" in kernel_source
+    assert "threadIdx.x) >> 1)) < 257" in kernel_source
+    assert "float2" not in kernel_source
+    assert "threadIdx.x) < 1" not in kernel_source
+
+
+def test_static_ragged_fp8_copy_minimizes_full_thread_padding():
+    n = 3072
+    threads = 128
+
+    @T.prim_func
+    def main(
+        B: T.Tensor((n,), T.float8_e4m3),
+    ):
+        with T.Kernel(1, threads=threads):
+            S = T.alloc_shared((n,), T.float8_e4m3)
+            T.copy(S, B, disable_tma=True)
+
+    with tvm.target.Target(auto_target):
+        artifact = tl.lower(main, target=auto_target, enable_device_compile=False)
+
+    kernel_source = str(artifact.kernel_source)
+    assert "__launch_bounds__(128, 1)" in kernel_source
+    assert "for (int i = 0; i < 3; ++i)" in kernel_source
+    assert "fp8_e4_8_t" in kernel_source
+    assert "fp8_e4_16_t" not in kernel_source
+
+
+def test_static_ragged_copy_allows_1024_elements_384_threads():
+    n = 1024
+    threads = 384
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((n,), T.float32),
+        B: T.Tensor((n,), T.float32),
+    ):
+        with T.Kernel(1, threads=threads):
+            T.copy(A, B, coalesced_width=1)
+
+    with tvm.target.Target(auto_target):
+        artifact = tl.lower(main, target=auto_target, enable_device_compile=False)
+
+    kernel_source = str(artifact.kernel_source)
+    assert "__launch_bounds__(384, 1)" in kernel_source
+    assert "for (int i = 0; i < 3; ++i)" in kernel_source
+    assert "B[((i * 384) + ((int)threadIdx.x))]" in kernel_source
+    assert "(((int)threadIdx.x) >> 7)) < 8" in kernel_source
+    assert "threadIdx.x) < 128" not in kernel_source
+
+
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_loop_tail_split(64, 64, 32, 128, 8, T.float16)
+    tilelang.testing.main()

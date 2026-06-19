@@ -13,10 +13,8 @@ from tilelang.engine.lower import (
     canon_target_host,
     is_cpu_device_backend,
 )
-from tilelang.engine.phase import (
-    LowerAndLegalize,
-    OptimizeForTarget,
-)
+from tilelang.backend.pass_pipeline.pipeline import resolve_pipeline
+from tilelang.engine.semantic_check import PreLowerSemanticCheck
 
 
 def match_global_kernel(source: str, annotation: str = "__global__") -> int:
@@ -141,8 +139,8 @@ def get_annotated_mod(
     _is_device_call = get_device_call(is_device_c=is_cpu_device_backend(target))
 
     # Apply transformations
-    mod = LowerAndLegalize(mod, target)
-    mod = OptimizeForTarget(mod, target)
+    PreLowerSemanticCheck(mod)
+    mod = resolve_pipeline(target).lower(mod, target)
 
     # Define dispatch dictionary for different model types
     dispatch = {
@@ -155,7 +153,11 @@ def get_annotated_mod(
 
 
 def pythonic_expr(
-    expr: tvm.tirx.PrimExpr, dtype_map: dict[str, str] | None = None, ignore_cast: bool = False, floor_div_op: str = "/"
+    expr: tvm.tirx.PrimExpr,
+    dtype_map: dict[str, str] | None = None,
+    ignore_cast: bool = False,
+    floor_div_op: str = "/",
+    func_name_map: dict[str, str] | None = None,
 ) -> str:
     """
     Converts a TVM PrimExpr into a Python-style string, correctly handling operator precedence.
@@ -168,6 +170,8 @@ def pythonic_expr(
                       behavior (suitable for generating C/C++ expressions). For generating
                       Python code where integer division is required (e.g. grid/block),
                       pass '//' explicitly.
+        func_name_map: Optional mapping for rendered helper function names, e.g.
+                       {"max": "std::max"} when generating C++.
     Returns:
         A string representation of the expression.
     """
@@ -270,6 +274,8 @@ def pythonic_expr(
             p = my_precedence
         elif isinstance(node, (tvm.tirx.Min, tvm.tirx.Max)):
             op_name = "min" if isinstance(node, tvm.tirx.Min) else "max"
+            if func_name_map is not None:
+                op_name = func_name_map.get(op_name, op_name)
             a_str, _ = node_to_result_map[node.a]
             b_str, _ = node_to_result_map[node.b]
             s = f"{op_name}({a_str}, {b_str})"

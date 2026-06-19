@@ -3,10 +3,8 @@ This module provides macros and utilities for debugging TileLang (tl) programs.
 It includes functionality to print variables, print values in buffers, conditionally execute debug prints and assert.
 """
 
-from tilelang.language.eager.builder import Builder
 from tvm import tirx
 from typing import Any
-import tilelang.language as T
 from tilelang.language.kernel import get_thread_bindings
 from tilelang.language import copy, macro, serial, alloc_shared
 from tilelang.language.utils import index_to_coordinates
@@ -123,36 +121,10 @@ def print_local_buffer_with_condition(condition: tirx.PrimExpr, buffer: tirx.Buf
             tirx.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
 
 
-from tilelang.utils.target import check_cuda_availability
-import warnings
-
-_IS_CUDA_AVAILABLE = check_cuda_availability()
-
-
-def get_stack_str(msg, stacklevel=1):
-    stack = Builder.current().get_fileline_stack(stacklevel)
-    msg = msg + "\n"
-    for fileline, lineno, macro_name in stack:
-        msg += f"  at {fileline}:{lineno} in {macro_name}\n"
-    return msg
-
-
-@macro
 def device_assert(condition: tirx.PrimExpr, msg: str = "", no_stack_info=False):
-    """
-    Device-side assert emulation.
-    Emits a device-side assert call on CUDA targets when CUDA is available.
-    The assert is always enabled and cannot be disabled at runtime.
-    """
-    if _IS_CUDA_AVAILABLE:
-        if no_stack_info:
-            if msg == "":
-                T.call_intrin("void", tirx.op.Op.get("tl.device_assert"), condition)
-            else:
-                warnings.warn("Non-empty msg may slightly slow down the kernel", stacklevel=2)
-                T.call_intrin("void", tirx.op.Op.get("tl.device_assert_with_msg"), condition, msg)
-        else:
-            T.call_intrin("void", tirx.op.Op.get("tl.device_assert_with_msg"), condition, get_stack_str(msg, stacklevel=2))
+    from tilelang.cuda.debug import device_assert as cuda_device_assert
+
+    return cuda_device_assert(condition, msg, no_stack_info)
 
 
 # NOTE(chaofan): T.print is implemented as a macro, so no return

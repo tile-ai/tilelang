@@ -153,58 +153,6 @@ public:
   static const Op &Get();
 };
 
-/// Node class for cumulative sum operations
-class CumSumOpNode : public TileOperatorNode {
-public:
-  tirx::Buffer src, dst; ///< Source and destination buffers
-  // Optional: keep the original regions used to construct this op
-  BufferRegion srcRegion_, dstRegion_;
-  int dim;      ///< Dimension along which to compute cumulative sum
-  bool reverse; ///< Whether to compute in reverse order
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.CumSumOp", CumSumOpNode,
-                                    TileOperatorNode);
-
-  static void RegisterReflection() {
-    namespace refl = reflection;
-    refl::ObjectDef<CumSumOpNode>()
-        .def_ro("src", &CumSumOpNode::src)
-        .def_ro("dst", &CumSumOpNode::dst)
-        .def_ro("srcRegion", &CumSumOpNode::srcRegion_)
-        .def_ro("dstRegion", &CumSumOpNode::dstRegion_)
-        .def_ro("dim", &CumSumOpNode::dim)
-        .def_ro("reverse", &CumSumOpNode::reverse);
-  }
-
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
-  LayoutMap InferLayout(const LayoutInferArgs &T,
-                        InferLevel level) const override;
-  static const Op &Get();
-  TileOperator Clone() const;
-};
-
-using CumSumTargetPredicate = bool (*)(Target target);
-
-struct CumSumImpl {
-  const char *name;
-  CumSumTargetPredicate match_target;
-
-  Stmt (*lower)(const CumSumOpNode &op, const LowerArgs &T,
-                arith::Analyzer *analyzer);
-};
-
-void RegisterCumSumImpl(CumSumImpl impl);
-
-/// Wrapper class for cumulative sum operations
-class CumSumOp : public TileOperator {
-public:
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(CumSumOp, TileOperator,
-                                             CumSumOpNode);
-  TVM_DLL
-  CumSumOp(Array<PrimExpr> args,
-           Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
-  static const Op &Get();
-};
-
 } // namespace tl
 } // namespace tvm
 

@@ -64,6 +64,65 @@ def test_thread_extent_simplify():
     assert isinstance(body.body.body.body, tvm.tirx.BufferStore)
 
 
+def test_context_singleton_floordiv_index():
+    A, C = buffer_pair((128,))
+    tx = te.thread_axis("threadIdx.x")
+    i = tvm.tirx.Var("i", "int32")
+    vec = tvm.tirx.Var("vec", "int32")
+
+    before_index = tx.var // 128 * 64 + i * 4 + vec - 64
+    expected_index = i * 4 + vec
+    before_accum_index = (tx.var - 128) // 128 * 64 + i
+    expected_accum_index = i
+    before_store = tvm.tirx.BufferStore(A, tvm.tirx.const(0, "float32"), [before_index])
+    expected_store = tvm.tirx.BufferStore(A, tvm.tirx.const(0, "float32"), [expected_index])
+    before_accum_store = tvm.tirx.BufferStore(C, tvm.tirx.const(0, "float32"), [before_accum_index])
+    expected_accum_store = tvm.tirx.BufferStore(C, tvm.tirx.const(0, "float32"), [expected_accum_index])
+
+    before_body = tvm.tirx.For(
+        i,
+        0,
+        32,
+        tvm.tirx.ForKind.SERIAL,
+        tvm.tirx.For(
+            vec,
+            0,
+            4,
+            tvm.tirx.ForKind.SERIAL,
+            tvm.tirx.SeqStmt([before_store, before_accum_store]),
+        ),
+    )
+    expected_body = tvm.tirx.For(
+        i,
+        0,
+        32,
+        tvm.tirx.ForKind.SERIAL,
+        tvm.tirx.For(
+            vec,
+            0,
+            4,
+            tvm.tirx.ForKind.SERIAL,
+            tvm.tirx.SeqStmt([expected_store, expected_accum_store]),
+        ),
+    )
+    before_stmt = tvm.tirx.AttrStmt(
+        tx,
+        "thread_extent",
+        256,
+        tvm.tirx.IfThenElse(tx.var < 128, tvm.tirx.Evaluate(0), before_body),
+    )
+    expected_stmt = tvm.tirx.AttrStmt(
+        tx,
+        "thread_extent",
+        256,
+        tvm.tirx.IfThenElse(tx.var < 128, tvm.tirx.Evaluate(0), expected_body),
+    )
+
+    mod_before = tvm.IRModule.from_expr(tvm.tirx.PrimFunc([A, C], before_stmt))
+    mod_expected = tvm.IRModule.from_expr(tvm.tirx.PrimFunc([A, C], expected_stmt))
+    simplify_and_compare(mod_before, mod_expected)
+
+
 def test_if_likely():
     A, C = buffer_pair((1024,))
     n = te.size_var("n")
