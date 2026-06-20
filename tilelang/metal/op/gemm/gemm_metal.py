@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from tilelang import language as T
 from tilelang import tvm as tvm
 from tilelang.layout import Layout
@@ -137,19 +139,59 @@ class GemmMetal(GemmBase):
     def is_gemm_gg(self) -> bool:
         return is_global(self.A) and is_global(self.B)
 
+    @staticmethod
+    def _valid_gg_warp_partitions(M: int, N: int, num_warps: int):
+        for m_warp in range(1, num_warps + 1):
+            if num_warps % m_warp != 0:
+                continue
+            n_warp = num_warps // m_warp
+            if M % (m_warp * 16) == 0 and N % (n_warp * 32) == 0:
+                yield m_warp, n_warp
+
     def _make_mps_emitter(self, target: Target, thread_nums: int):
         from tilelang.metal.intrinsics.metal_macro_generator import MPSIntrinEmitter
 
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_METAL_COOPERATIVE_TENSOR)
         if self.is_gemm_gg():
+            if int(thread_nums) % 32 != 0:
+                raise ValueError(f"Metal cooperative tensor GG requires threads to be a multiple of 32, got {thread_nums}")
             num_warps = int(thread_nums) // 32
-            k_n_per_warp = 32
-            m_warp, n_warp = 1, num_warps
-            if int(self.N) % (n_warp * k_n_per_warp) != 0:
-                n_warp = int(self.N) // k_n_per_warp
-                m_warp = num_warps // n_warp
-                if m_warp == 0:
-                    m_warp = 1
+            if num_warps <= 0:
+                raise ValueError(f"Metal cooperative tensor GG requires at least one warp, got {thread_nums} threads")
+            override = os.environ.get("TILELANG_METAL_CT_WARP_PARTITION")
+            if override:
+                parts = override.split(",")
+                if len(parts) != 2:
+                    raise ValueError("TILELANG_METAL_CT_WARP_PARTITION must be 'm,n'")
+                m_warp, n_warp = int(parts[0]), int(parts[1])
+                if m_warp * n_warp != num_warps:
+                    raise ValueError(
+                        f"TILELANG_METAL_CT_WARP_PARTITION={override} does not match {num_warps} warps"
+                    )
+                if int(self.M) % (m_warp * 16) != 0 or int(self.N) % (n_warp * 32) != 0:
+                    raise ValueError(
+                        "TILELANG_METAL_CT_WARP_PARTITION="
+                        f"{override} does not evenly cover GG tile ({self.M}, {self.N}) "
+                        "with 16x32 cooperative tensor tiles"
+                    )
+            else:
+                candidates = list(self._valid_gg_warp_partitions(int(self.M), int(self.N), num_warps))
+                if not candidates:
+                    raise ValueError(
+                        "Metal cooperative tensor GG requires a warp partition "
+                        f"where M is divisible by m_warp*16 and N by n_warp*32; "
+                        f"got tile ({self.M}, {self.N}) with {num_warps} warps"
+                    )
+                # Prefer partitions where each simdgroup owns a balanced grid
+                # of 16x32 cooperative tensor operations.  This keeps A/B
+                # cooperative tensor load counts balanced for direct GG tiles.
+                m_warp, n_warp = min(
+                    candidates,
+                    key=lambda part: (
+                        abs(int(self.M) // (part[0] * 16) - int(self.N) // (part[1] * 32)),
+                        -part[1],
+                    ),
+                )
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         return (
@@ -208,10 +250,19 @@ class GemmMetal(GemmBase):
 
         c_bytes_per_thread = warp_row_tiles * warp_col_tiles * 64
         inner_k_steps = 2 if c_bytes_per_thread <= 128 else 1
+        inner_k_steps_override = os.environ.get("TILELANG_METAL_CT_INNER_K_STEPS")
+        if inner_k_steps_override:
+            inner_k_steps = int(inner_k_steps_override)
+        output_dtype = self.accum_dtype
+        accum_dtype = (
+            T.float32
+            if self.is_gemm_gg() and str(output_dtype) in ("float16", "bfloat16")
+            else output_dtype
+        )
         mps_emitter = MPSIntrinEmitter(
             a_dtype=self.a_dtype,
             b_dtype=self.b_dtype,
-            accum_dtype=self.accum_dtype,
+            accum_dtype=accum_dtype,
             a_transposed=self.trans_A,
             b_transposed=self.trans_B,
             block_row_warps=m_warp,
@@ -227,7 +278,6 @@ class GemmMetal(GemmBase):
 
         a_dtype = self.a_dtype
         b_dtype = self.b_dtype
-        accum_dtype = self.accum_dtype
         warp_rows = mps_emitter.warp_rows
         warp_cols = mps_emitter.warp_cols
         num_simd_c = warp_rows * warp_cols
@@ -247,12 +297,12 @@ class GemmMetal(GemmBase):
         clear_accum = self.clear_accum
         c_in_cooperative_tensor = is_metal_cooperative_tensor(C_buf) or is_fragment(C_buf)
         assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
-        assert is_full_region(C_region), "Fragment output C must be a full region"
 
         if not (self.is_gemm_ss() or self.is_gemm_gg()):
             raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
 
         if c_in_cooperative_tensor:
+            assert is_full_region(C_region), "Fragment output C must be a full region"
 
             @T.prim_func
             def _gemm_cooperative_tensor() -> None:
@@ -280,7 +330,7 @@ class GemmMetal(GemmBase):
                 for _i in T.serial(num_simd_c):
                     T.cooperative_tensor_fill(C_ct.data, _i, T.cast(0, accum_dtype), micro_size_x, micro_size_y)
             else:
-                mps_emitter.simd_load(C_ct, C_buf)
+                mps_emitter.simd_load(C_ct, C_region)
             for k_outer in T.serial(0, (block_K // (micro_size_k * inner_k_steps))):
                 for k_inner in T.serial(0, inner_k_steps):
                     ki = k_outer * inner_k_steps + k_inner
@@ -288,6 +338,6 @@ class GemmMetal(GemmBase):
                     mps_emitter.ldmatrix_b(B_local, B_region, ki, k_inner)
                 for k_inner in T.serial(0, inner_k_steps):
                     mps_emitter.mma(A_local, B_local, C_ct, k_inner)
-            mps_emitter.simd_store(C_ct, C_buf)
+            mps_emitter.simd_store(C_ct, C_region)
 
         return _Simplify(_gemm_with_c_writeback, inline_let=True)

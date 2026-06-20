@@ -10,13 +10,18 @@ import tilelang.language as T
 logging.getLogger("tilelang").setLevel(logging.WARNING)
 
 BLOCK_CONFIGS = [
-    ("simdgroup", 16, 16, 16),
-    ("simdgroup", 32, 32, 16),
-    ("simdgroup", 32, 32, 32),
-    ("simdgroup", 64, 64, 32),
-    ("ct_shared", 32, 64, 32),
-    ("ct_shared", 64, 64, 32),
-    ("ct_shared", 64, 128, 32),
+    ("simdgroup", 16, 16, 16, 128, 0, "row"),
+    ("simdgroup", 32, 32, 16, 128, 0, "row"),
+    ("simdgroup", 32, 32, 32, 128, 0, "row"),
+    ("simdgroup", 64, 64, 32, 128, 0, "row"),
+    ("ct_shared", 32, 64, 32, 128, 0, "row"),
+    ("ct_shared", 64, 64, 32, 128, 0, "row"),
+    # Direct global cooperative tensor path.  The K tile is the full problem K,
+    # so C is accumulated in cooperative-tensor registers and written once.
+    ("ct_global", 64, 64, 0, 64, 0, "row"),
+    ("ct_global", 64, 128, 0, 128, 0, "row"),
+    ("ct_global", 64, 128, 0, 128, 4, "mlx"),
+    ("ct_global", 64, 128, 0, 256, 4, "mlx"),
 ]
 
 
@@ -75,6 +80,63 @@ def matmul_cooperative_tensor_shared_c(
     return gemm_kernel
 
 
+@tilelang.jit
+def matmul_cooperative_tensor_global(
+    M,
+    N,
+    K,
+    block_M=64,
+    block_N=64,
+    threads=128,
+    swizzle_panel=0,
+    swizzle_order="row",
+    dtype=T.float16,
+    accum_dtype=T.float32,
+):
+
+    @T.prim_func
+    def gemm_kernel(
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        C: T.Tensor((M, N), accum_dtype),
+    ):
+        tiles_n = T.ceildiv(N, block_N)
+        tiles_m = T.ceildiv(M, block_M)
+        use_mlx_swizzle = swizzle_panel and swizzle_order == "mlx"
+        grid_n = tiles_n * swizzle_panel if use_mlx_swizzle else tiles_n
+        grid_m = T.ceildiv(tiles_m, swizzle_panel) if use_mlx_swizzle else tiles_m
+        with T.Kernel(grid_n, grid_m, threads=threads) as (bx, by):
+            logical_bx = bx // swizzle_panel if use_mlx_swizzle else bx
+            logical_by = by * swizzle_panel + bx % swizzle_panel if use_mlx_swizzle else by
+
+            if swizzle_panel:
+                T.use_swizzle(panel_size=swizzle_panel, order=swizzle_order)
+
+            if use_mlx_swizzle:
+                if logical_by < tiles_m:
+                    T.gemm(
+                        A[logical_by * block_M : (logical_by + 1) * block_M, 0:K],
+                        B[0:K, logical_bx * block_N : (logical_bx + 1) * block_N],
+                        C[
+                            logical_by * block_M : (logical_by + 1) * block_M,
+                            logical_bx * block_N : (logical_bx + 1) * block_N,
+                        ],
+                        clear_accum=True,
+                    )
+            else:
+                T.gemm(
+                    A[logical_by * block_M : (logical_by + 1) * block_M, 0:K],
+                    B[0:K, logical_bx * block_N : (logical_bx + 1) * block_N],
+                    C[
+                        logical_by * block_M : (logical_by + 1) * block_M,
+                        logical_bx * block_N : (logical_bx + 1) * block_N,
+                    ],
+                    clear_accum=True,
+                )
+
+    return gemm_kernel
+
+
 def _tflops(M, N, K, seconds):
     return 2.0 * M * N * K / seconds / 1e12
 
@@ -118,14 +180,19 @@ def bench_mlx(M, N, K, warmup, repeats):
     return _tflops(M, N, K, (time.perf_counter() - t0) / repeats)
 
 
-def bench_tilelang(mode, M, N, K, block_M, block_N, block_K, warmup, repeats):
+def bench_tilelang(mode, M, N, K, block_M, block_N, block_K, threads, swizzle_panel, swizzle_order, warmup, repeats):
+    output_dtype = T.float16
     if mode == "ct_shared":
-        kernel = matmul_cooperative_tensor_shared_c(M, N, K, block_M, block_N, block_K)
+        kernel = matmul_cooperative_tensor_shared_c(M, N, K, block_M, block_N, block_K, accum_dtype=output_dtype)
+    elif mode == "ct_global":
+        kernel = matmul_cooperative_tensor_global(
+            M, N, K, block_M, block_N, threads, swizzle_panel, swizzle_order, accum_dtype=output_dtype
+        )
     else:
-        kernel = matmul_simdgroup(M, N, K, block_M, block_N, block_K)
+        kernel = matmul_simdgroup(M, N, K, block_M, block_N, block_K, accum_dtype=output_dtype)
     a = torch.randn(M, K, dtype=torch.float16, device="mps")
     b = torch.randn(K, N, dtype=torch.float16, device="mps")
-    c = torch.zeros(M, N, dtype=torch.float32, device="mps")
+    c = torch.zeros(M, N, dtype=output_dtype.as_torch(), device="mps")
     avg_s = _bench(lambda: kernel(a, b, c), warmup, repeats)
     return _tflops(M, N, K, avg_s)
 
@@ -155,25 +222,35 @@ if __name__ == "__main__":
         print(f"MLX matmul fp16:           {mlx_tflops:.1f} TFLOPS")
     print()
 
-    configs = BLOCK_CONFIGS if args.sweep else [("ct_shared", 64, 64, 32)]
+    configs = BLOCK_CONFIGS if args.sweep else [("ct_global", 64, 128, 0, 128, 0, "row")]
 
-    print(f"{'path':>10s} | {'block (M,N,K)':>16s} | {'TileLang':>14s} | {'vs Torch':>8s} | {'vs MLX':>8s}")
-    print("-" * 70)
+    print(
+        f"{'path':>10s} | {'block (M,N,K)':>16s} | {'thr':>4s} | {'swizzle':>8s} | "
+        f"{'TileLang':>14s} | {'vs Torch':>8s} | {'vs MLX':>8s}"
+    )
+    print("-" * 88)
 
     best_tflops = 0.0
     best_config = configs[0]
-    for mode, bM, bN, bK in configs:
+    for mode, bM, bN, bK, threads, swizzle_panel, swizzle_order in configs:
+        block_text = f"({bM},{bN},{bK if bK else 'all'})"
+        swizzle_text = f"{swizzle_panel}:{swizzle_order}" if swizzle_panel else "-"
         try:
-            tl = bench_tilelang(mode, M, N, K, bM, bN, bK, args.warmup, args.repeats)
+            tl = bench_tilelang(
+                mode, M, N, K, bM, bN, bK, threads, swizzle_panel, swizzle_order, args.warmup, args.repeats
+            )
             torch_ratio = tl / ref_tflops * 100
             mlx_ratio = tl / mlx_tflops * 100 if mlx_tflops else None
             if tl > best_tflops:
                 best_tflops = tl
-                best_config = (mode, bM, bN, bK)
+                best_config = (mode, bM, bN, bK, threads, swizzle_panel, swizzle_order)
             mlx_text = f"{mlx_ratio:>7.0f}%" if mlx_ratio is not None else "     N/A"
-            print(f"{mode:>10s} | {f'({bM},{bN},{bK})':>16s} | {tl:>10.1f} TFLOPS | {torch_ratio:>7.0f}% | {mlx_text}")
+            print(
+                f"{mode:>10s} | {block_text:>16s} | {threads:>4d} | {swizzle_text:>8s} | "
+                f"{tl:>10.1f} TFLOPS | {torch_ratio:>7.0f}% | {mlx_text}"
+            )
         except Exception as e:
-            print(f"{mode:>10s} | {f'({bM},{bN},{bK})':>16s} | {'FAILED':>14s} | {e}")
+            print(f"{mode:>10s} | {block_text:>16s} | {threads:>4d} | {swizzle_text:>8s} | {'FAILED':>14s} | {e}")
 
     if args.sweep:
         print()

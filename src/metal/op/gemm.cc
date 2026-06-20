@@ -105,7 +105,12 @@ bool CanUseCooperativeTensor(const GemmWarpPolicyNode &policy, int M, int N,
   }
   if (policy.isSquare()) {
     for (int m = 1; m <= std::min(num_warps, max_m); ++m) {
-      if (num_warps % m == 0 && num_warps / m <= max_n) {
+      if (num_warps % m != 0) {
+        continue;
+      }
+      int n = num_warps / m;
+      if (n <= max_n && M % (m * kMPerWarp) == 0 &&
+          N % (n * kNPerWarp) == 0) {
         return true;
       }
     }

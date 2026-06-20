@@ -101,8 +101,6 @@ def _gemm_impl(
 
     A_offset = retrieve_offset(A_region)
     B_offset = retrieve_offset(B_region)
-    assert A_offset[-2] == 0, "The offset of the first dimension of A must be 0"
-    assert B_offset[-2] == 0, "The offset of the first dimension of B must be 0"
     offset_a = A_offset[-1]
     offset_b = B_offset[-1]
 

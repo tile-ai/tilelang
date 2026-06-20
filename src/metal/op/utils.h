@@ -44,6 +44,8 @@ inline std::pair<int, int> ComputeSquareWarpPartition(int num_warps, int M,
     int n = num_warps / m;
     if (n > max_n)
       continue;
+    if (M % (m * kMPerWarp) != 0 || N % (n * kNPerWarp) != 0)
+      continue;
 
     float m_per = static_cast<float>(M) / (m * kMPerWarp);
     float n_per = static_cast<float>(N) / (n * kNPerWarp);
