@@ -58,35 +58,9 @@ using namespace ffi;
 
 namespace {
 
-class MetalCooperativeTensorScopeDetector : public StmtExprVisitor {
-public:
-  static bool Detect(const PrimFunc &func) {
-    MetalCooperativeTensorScopeDetector detector;
-    detector(func->body);
-    return detector.found_;
-  }
-
-private:
-  void VisitStmt_(const AllocBufferNode *op) final {
-    if (op->buffer.scope() == "metal.cooperative_tensor") {
-      found_ = true;
-      return;
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const SBlockNode *op) final {
-    for (const Buffer &buffer : op->alloc_buffers) {
-      if (buffer.scope() == "metal.cooperative_tensor") {
-        found_ = true;
-        return;
-      }
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  bool found_{false};
-};
+bool IsMetalCooperativeTensorBuffer(const Buffer &buffer) {
+  return buffer.defined() && buffer.scope() == "metal.cooperative_tensor";
+}
 
 } // namespace
 
@@ -164,6 +138,10 @@ public:
   };
 
   void VisitStmt_(const AllocBufferNode *op) final {
+    if (IsMetalCooperativeTensorBuffer(op->buffer)) {
+      StmtExprVisitor::VisitStmt_(op);
+      return;
+    }
     size_t level = scope_.size();
     const VarNode *buf = op->buffer->data.get();
 
@@ -617,6 +595,9 @@ public:
   }
 
   Stmt VisitStmt_(const AllocBufferNode *op) final {
+    if (IsMetalCooperativeTensorBuffer(op->buffer)) {
+      return StmtExprMutator::VisitStmt_(op);
+    }
     // AllocBuffer combines allocation and buffer declaration.
     // Storage rewrite may merge this allocation with others.
     if (auto it = alloc_map_.find(op->buffer->data.get());
@@ -1398,6 +1379,10 @@ public:
   }
 
   void VisitStmt_(const AllocBufferNode *op) final {
+    if (IsMetalCooperativeTensorBuffer(op->buffer)) {
+      StmtExprVisitor::VisitStmt_(op);
+      return;
+    }
     const Array<PrimExpr> &shape = op->buffer->shape;
     PrimExpr extent = !shape.empty() ? shape[shape.size() - 1] : PrimExpr(0);
     OnArrayDeclaration(op->buffer->data, op->buffer->dtype, extent,
@@ -1957,9 +1942,6 @@ using namespace tirx::transform;
 namespace transform {
 Pass StorageRewrite() {
   auto pass_func = [](PrimFunc f, const IRModule &m, PassContext ctx) {
-    if (MetalCooperativeTensorScopeDetector::Detect(f)) {
-      return f;
-    }
     bool detect_inplace =
         ctx->GetConfig<Bool>(kStorageRewriteDetectInplace, Bool(false)).value();
     bool enable_reuse = false;

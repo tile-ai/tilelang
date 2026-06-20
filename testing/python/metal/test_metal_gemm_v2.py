@@ -9,6 +9,15 @@ from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang.language as T
 import torch
+import pytest
+
+from tilelang.metal.target import check_metal4_availability
+
+
+requires_metal4 = pytest.mark.skipif(
+    not check_metal4_availability(),
+    reason="direct global-C Metal GEMM requires Metal 4 cooperative tensor support",
+)
 
 
 @tilelang.jit
@@ -188,11 +197,13 @@ def test_gemm_v2_cooperative_tensor_non_square():
 
 
 @tilelang.testing.requires_metal
+@requires_metal4
 def test_gemm_v2_cooperative_tensor_global_c():
     assert_gemm_v2_global_c(256, 256, 256, 64, 128)
 
 
 @tilelang.testing.requires_metal
+@requires_metal4
 def test_gemm_v2_cooperative_tensor_global_c_fp16_mlx_swizzle():
     assert_gemm_v2_global_c(
         256,
@@ -209,6 +220,7 @@ def test_gemm_v2_cooperative_tensor_global_c_fp16_mlx_swizzle():
 
 
 @tilelang.testing.requires_metal
+@requires_metal4
 def test_gemm_v2_cooperative_tensor_global_c_fp16_mlx_swizzle_multirow():
     assert_gemm_v2_global_c(
         512,

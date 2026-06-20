@@ -224,10 +224,7 @@ if __name__ == "__main__":
 
     configs = BLOCK_CONFIGS if args.sweep else [("ct_global", 64, 128, 0, 128, 0, "row")]
 
-    print(
-        f"{'path':>10s} | {'block (M,N,K)':>16s} | {'thr':>4s} | {'swizzle':>8s} | "
-        f"{'TileLang':>14s} | {'vs Torch':>8s} | {'vs MLX':>8s}"
-    )
+    print(f"{'path':>10s} | {'block (M,N,K)':>16s} | {'thr':>4s} | {'swizzle':>8s} | {'TileLang':>14s} | {'vs Torch':>8s} | {'vs MLX':>8s}")
     print("-" * 88)
 
     best_tflops = 0.0
@@ -236,9 +233,7 @@ if __name__ == "__main__":
         block_text = f"({bM},{bN},{bK if bK else 'all'})"
         swizzle_text = f"{swizzle_panel}:{swizzle_order}" if swizzle_panel else "-"
         try:
-            tl = bench_tilelang(
-                mode, M, N, K, bM, bN, bK, threads, swizzle_panel, swizzle_order, args.warmup, args.repeats
-            )
+            tl = bench_tilelang(mode, M, N, K, bM, bN, bK, threads, swizzle_panel, swizzle_order, args.warmup, args.repeats)
             torch_ratio = tl / ref_tflops * 100
             mlx_ratio = tl / mlx_tflops * 100 if mlx_tflops else None
             if tl > best_tflops:

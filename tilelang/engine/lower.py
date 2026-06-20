@@ -240,9 +240,6 @@ def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
     elif target.kind.name == "hip":
         device_mod = tvm.ffi.get_global_func("target.build.tilelang_hip")(device_mod, target)
     elif target.kind.name == "metal":
-        from tilelang.engine.callback import register_default_metal_compile_callback
-
-        register_default_metal_compile_callback(override=True)
         device_mod = tvm.ffi.get_global_func("target.build.tilelang_metal")(device_mod, target)
     elif target.kind.name == "llvm":
         device_mod = tvm.ffi.get_global_func("target.build.llvm")(device_mod, target)

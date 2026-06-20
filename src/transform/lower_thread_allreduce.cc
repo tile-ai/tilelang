@@ -70,7 +70,7 @@ private:
 public:
   void VisitStmt_(const AllocBufferNode *op) final {
     if (op->buffer.scope() == "metal.cooperative_tensor") {
-      has_metal_cooperative_tensor_ = true;
+      StmtExprVisitor::VisitStmt_(op);
       return;
     }
     if (IsDynamicSharedMemory(op->buffer->data)) {
@@ -86,7 +86,6 @@ public:
   // The static mapping from the original buffer var to its allocate
   std::unordered_map<const VarNode *, const AllocBufferNode *>
       static_shmem_allocs_;
-  bool has_metal_cooperative_tensor_{false};
 };
 
 class ThreadAllreduceBuilder final : public StmtExprMutator {
@@ -945,9 +944,6 @@ tvm::transform::Pass LowerThreadAllreduce() {
   auto pass_func = [](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     AllocateCollector collector;
     collector(f->body);
-    if (collector.has_metal_cooperative_tensor_) {
-      return f;
-    }
     bool is_dynamic = collector.dyn_shmem_allocs_.size() > 1;
 
     auto *n = f.CopyOnWrite();

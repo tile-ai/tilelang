@@ -165,8 +165,8 @@ public:
                                   level);
     } catch (const std::bad_optional_access &e) {
       LOG(FATAL) << "bad_optional_access while inferring layout for op "
-                 << cur_infer_id << " (" << next->GetTypeKey()
-                 << ") at level " << InferLevelToString(level)
+                 << cur_infer_id << " (" << next->GetTypeKey() << ") at level "
+                 << InferLevelToString(level)
                  << "\nthread_bounds=" << thread_bounds
                  << "\nstmt=" << infer_list_stmt_[cur_infer_id];
     }

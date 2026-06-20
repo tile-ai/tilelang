@@ -45,6 +45,35 @@
 namespace tvm {
 namespace codegen {
 
+namespace {
+
+class CooperativeTensorUseCollector : public StmtExprVisitor {
+public:
+  void VisitStmt_(const AllocBufferNode *op) final {
+    if (op->buffer.scope() == "metal.cooperative_tensor") {
+      uses_cooperative_tensor = true;
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(tl::cooperative_tensor_load()) ||
+        op->op.same_as(tl::cooperative_tensor_store())) {
+      uses_cooperative_tensor = true;
+      needs_fragment_lane_vars = true;
+    } else if (op->op.same_as(tl::cooperative_tensor_fill()) ||
+               op->op.same_as(tl::cooperative_tensor_multiply_accumulate())) {
+      uses_cooperative_tensor = true;
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  bool uses_cooperative_tensor{false};
+  bool needs_fragment_lane_vars{false};
+};
+
+} // namespace
+
 void CodeGenTileLangMetal::InitFuncState(const PrimFunc &f) {
   CodeGenC::InitFuncState(f);
   emitted_frag_lane_vars_ = false;
@@ -58,6 +87,10 @@ void CodeGenTileLangMetal::InitFuncState(const PrimFunc &f) {
   ct_c_storage_elided_.clear();
   cooperative_tensor_dtype_.clear();
   simdgroup_dtype_.clear();
+  CooperativeTensorUseCollector ct_collector;
+  ct_collector(f->body);
+  uses_cooperative_tensor_ = ct_collector.uses_cooperative_tensor;
+  needs_fragment_lane_vars_ = ct_collector.needs_fragment_lane_vars;
   // analyze the data;
   for (Var arg : f->params) {
     if (arg.dtype().is_handle()) {
@@ -68,16 +101,26 @@ void CodeGenTileLangMetal::InitFuncState(const PrimFunc &f) {
 
 CodeGenTileLangMetal::CodeGenTileLangMetal(Target target) : target_(target) {
   restrict_keyword_ = "__restrict";
-  decl_stream << "#include <metal_stdlib>\n";
-  decl_stream << "#include <metal_simdgroup>\n";
-  decl_stream
-      << "#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n";
-  decl_stream
-      << "#define TILELANG_PRAGMA_UNROLL _Pragma(\"clang loop unroll(full)\")\n";
-  decl_stream << "using namespace metal;\n\n";
   decl_stream << "union __TVMArgUnion {\n"
               << " int v_int[2];\n"
               << "};\n\n";
+}
+
+std::string CodeGenTileLangMetal::Finish() {
+  std::ostringstream code;
+  code << "#include <metal_stdlib>\n";
+  code << "#include <metal_simdgroup>\n";
+  if (uses_cooperative_tensor_) {
+    code << "#include "
+            "<MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n";
+  }
+  code << "#define TILELANG_PRAGMA_UNROLL _Pragma(\"clang loop "
+          "unroll(full)\")\n";
+  code << "using namespace metal;\n\n";
+  code << decl_stream.str();
+  code << fwd_decl_stream.str();
+  code << stream.str();
+  return code.str();
 }
 
 void CodeGenTileLangMetal::AddFunction(const GlobalVar &gvar,
@@ -259,17 +302,8 @@ void CodeGenTileLangMetal::AddFunction(const GlobalVar &gvar,
   // the function scope.
   stream << ") {\n";
   int func_scope = this->BeginScope();
-  if (work_dim > 0) {
-    this->PrintIndent();
-    stream << "const ushort __lane = "
-              "__metal_get_thread_index_in_simdgroup(ushort());\n";
-    this->PrintIndent();
-    stream << "const ushort __qid = __lane >> 2;\n";
-    this->PrintIndent();
-    stream << "const ushort __base_row = (__qid & 4) | ((__lane >> 1) & 3);\n";
-    this->PrintIndent();
-    stream << "const ushort __base_col = ((__qid & 2) | (__lane & 1)) * 4;\n";
-    emitted_frag_lane_vars_ = true;
+  if (needs_fragment_lane_vars_) {
+    EnsureFragmentLaneVars();
   }
   this->PrintStmt(func->body);
   this->EndScope(func_scope);
@@ -503,8 +537,7 @@ void CodeGenTileLangMetal::VisitStmt_(const AttrStmtNode *op) {
       stream << "const uint3 blockIdx = uint3("
              << "(__physical_blockIdx.x >> " << swizzle_log << "), "
              << "((__physical_blockIdx.y << " << swizzle_log
-             << ") + (__physical_blockIdx.x & " << (panel_size - 1)
-             << "u)), "
+             << ") + (__physical_blockIdx.x & " << (panel_size - 1) << "u)), "
              << "__physical_blockIdx.z);\n";
       int old_panel = active_mlx_swizzle_panel_;
       int old_log = active_mlx_swizzle_log_;
@@ -517,8 +550,8 @@ void CodeGenTileLangMetal::VisitStmt_(const AttrStmtNode *op) {
       stream << "}\n";
       return;
     } else {
-      LOG(FATAL) << "Unknown Metal threadblock swizzle pattern `"
-                 << func_name << "`";
+      LOG(FATAL) << "Unknown Metal threadblock swizzle pattern `" << func_name
+                 << "`";
     }
     this->VisitStmt(op->body);
     this->PrintIndent();
@@ -572,8 +605,7 @@ void CodeGenTileLangMetal::VisitStmt_(const ForNode *op) {
       arith::Analyzer analyzer;
       class ConstFolder : public tirx::StmtExprMutator {
       public:
-        explicit ConstFolder(arith::Analyzer *analyzer)
-            : analyzer_(analyzer) {}
+        explicit ConstFolder(arith::Analyzer *analyzer) : analyzer_(analyzer) {}
 
         PrimExpr VisitExpr(const PrimExpr &expr) final {
           PrimExpr visited = tirx::StmtExprMutator::VisitExpr(expr);
@@ -628,6 +660,7 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocBufferNode *op) {
   auto scope = GetPtrStorageScope(op->buffer->data);
   alloc_storage_scope_[op->buffer->data.get()] = scope;
   if (scope == "metal.cooperative_tensor") {
+    uses_cooperative_tensor_ = true;
     TVM_FFI_ICHECK(dtype == DataType::Float(16) ||
                    dtype == DataType::Float(32) ||
                    dtype == DataType::BFloat(16))
@@ -648,8 +681,8 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocBufferNode *op) {
     int num_c_tiles = can_inline_c ? elems_per_thread / 16 : 0;
     bool elide_c_storage = can_inline_c && num_c_tiles <= 4;
     if (!elide_c_storage) {
-      stream << "thread " << dtype_str << " " << vid << '['
-             << elems_per_thread << "];\n";
+      stream << "thread " << dtype_str << " " << vid << '[' << elems_per_thread
+             << "];\n";
     }
     if (can_inline_c) {
       ct_c_inlined_.insert(op->buffer->data);
@@ -751,6 +784,22 @@ void CodeGenTileLangMetal::EnsureCooperativeTensorBuffer(const Var &var) {
   cooperative_tensor_dtype_[var] = dtype_os.str();
 }
 
+void CodeGenTileLangMetal::EnsureFragmentLaneVars() {
+  if (emitted_frag_lane_vars_) {
+    return;
+  }
+  this->PrintIndent();
+  stream << "const ushort __lane = "
+            "__metal_get_thread_index_in_simdgroup(ushort());\n";
+  this->PrintIndent();
+  stream << "const ushort __qid = __lane >> 2;\n";
+  this->PrintIndent();
+  stream << "const ushort __base_row = (__qid & 4) | ((__lane >> 1) & 3);\n";
+  this->PrintIndent();
+  stream << "const ushort __base_col = ((__qid & 2) | (__lane & 1)) * 4;\n";
+  emitted_frag_lane_vars_ = true;
+}
+
 void CodeGenTileLangMetal::VisitExpr_(const SelectNode *op,
                                       std::ostream &os) { // NOLINT(*)
   os << "select(" << PrintExpr(op->false_value) << ", "
@@ -844,8 +893,9 @@ CodeGenTileLangMetal::GetAddrSpaceOf(const PrimExpr &ptr_expr) const {
   return "thread";
 }
 
-std::string CodeGenTileLangMetal::GetPointeeTypeOf(
-    const PrimExpr &ptr_expr, const std::string &fallback) {
+std::string
+CodeGenTileLangMetal::GetPointeeTypeOf(const PrimExpr &ptr_expr,
+                                       const std::string &fallback) {
   if (auto *call = ptr_expr.as<CallNode>()) {
     if (call->op.same_as(builtin::address_of())) {
       if (auto *load = call->args[0].as<BufferLoadNode>()) {
@@ -885,8 +935,7 @@ bool CodeGenTileLangMetal::IsThreadIdxXExpr(const PrimExpr &expr) const {
   return false;
 }
 
-bool CodeGenTileLangMetal::IsBlockIdxExpr(const PrimExpr &expr,
-                                          int dim) const {
+bool CodeGenTileLangMetal::IsBlockIdxExpr(const PrimExpr &expr, int dim) const {
   const PrimExpr *current = &expr;
   while (const auto *cast = current->as<CastNode>()) {
     current = &cast->value;
@@ -911,8 +960,7 @@ bool CodeGenTileLangMetal::IsConstIntExpr(const PrimExpr &expr,
   return imm && imm->value == value;
 }
 
-bool CodeGenTileLangMetal::IsMlxPanelRemainderExpr(
-    const PrimExpr &expr) const {
+bool CodeGenTileLangMetal::IsMlxPanelRemainderExpr(const PrimExpr &expr) const {
   if (active_mlx_swizzle_panel_ <= 0) {
     return false;
   }
@@ -957,8 +1005,7 @@ bool CodeGenTileLangMetal::IsMlxPanelRowExpr(const PrimExpr &expr) const {
   return active_mlx_swizzle_panel_ == 1 && IsBlockIdxExpr(expr, 1);
 }
 
-bool CodeGenTileLangMetal::IsMlxLogicalBlockXExpr(
-    const PrimExpr &expr) const {
+bool CodeGenTileLangMetal::IsMlxLogicalBlockXExpr(const PrimExpr &expr) const {
   if (active_mlx_swizzle_panel_ <= 0) {
     return false;
   }
@@ -979,8 +1026,7 @@ bool CodeGenTileLangMetal::IsMlxLogicalBlockXExpr(
   return active_mlx_swizzle_panel_ == 1 && IsBlockIdxExpr(expr, 0);
 }
 
-bool CodeGenTileLangMetal::IsMlxLogicalBlockYExpr(
-    const PrimExpr &expr) const {
+bool CodeGenTileLangMetal::IsMlxLogicalBlockYExpr(const PrimExpr &expr) const {
   if (active_mlx_swizzle_panel_ <= 0) {
     return false;
   }
@@ -994,8 +1040,8 @@ bool CodeGenTileLangMetal::IsMlxLogicalBlockYExpr(
   return false;
 }
 
-bool CodeGenTileLangMetal::TryPrintMlxLogicalYAffineExpr(
-    const PrimExpr &expr, std::ostream &os) {
+bool CodeGenTileLangMetal::TryPrintMlxLogicalYAffineExpr(const PrimExpr &expr,
+                                                         std::ostream &os) {
   if (active_mlx_swizzle_panel_ <= 0) {
     return false;
   }
@@ -1136,8 +1182,8 @@ bool CodeGenTileLangMetal::TryPrintMlxLogicalYAffineExpr(
   return true;
 }
 
-bool CodeGenTileLangMetal::TryPrintMlxSwizzleExpr(
-    const PrimExpr &expr, std::ostream &os) {
+bool CodeGenTileLangMetal::TryPrintMlxSwizzleExpr(const PrimExpr &expr,
+                                                  std::ostream &os) {
   if (TryPrintMlxLogicalYAffineExpr(expr, os)) {
     return true;
   }
@@ -1285,11 +1331,11 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
       TVM_FFI_ICHECK(!storage_elided)
           << "Elided cooperative tensor C storage requires constant fill index";
       os << "TILELANG_PRAGMA_UNROLL for (ushort __i = 0; __i < "
-         << elems_per_tile << "; __i++) "
-         << var << "[" << idx << " * " << elems_per_tile << " + __i] = "
-         << val;
+         << elems_per_tile << "; __i++) " << var << "[" << idx << " * "
+         << elems_per_tile << " + __i] = " << val;
     }
   } else if (op->op.same_as(tl::cooperative_tensor_load())) {
+    uses_cooperative_tensor_ = true;
     TVM_FFI_ICHECK_GE(op->args.size(), 11);
     std::string var = PrintExpr(op->args[0]);
     std::string idx = PrintExpr(op->args[1]);
@@ -1334,8 +1380,8 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
         if (!direct_c_load_name.empty()) {
           os << direct_c_load_name << "[" << elem_offset << "]";
         } else {
-          os << var << "[" << idx << " * " << (nfrag_r * nfrag_c * 8)
-             << " + " << elem_offset << "]";
+          os << var << "[" << idx << " * " << (nfrag_r * nfrag_c * 8) << " + "
+             << elem_offset << "]";
         }
         os << ") = ";
         std::string load0 = std::string("*(") + src_addr_space + " " +
@@ -1351,8 +1397,8 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
         if (!direct_c_load_name.empty()) {
           os << direct_c_load_name << "[" << (elem_offset + 4) << "]";
         } else {
-          os << var << "[" << idx << " * " << (nfrag_r * nfrag_c * 8)
-             << " + " << (elem_offset + 4) << "]";
+          os << var << "[" << idx << " * " << (nfrag_r * nfrag_c * 8) << " + "
+             << (elem_offset + 4) << "]";
         }
         os << ") = ";
         std::string load1 = std::string("*(") + src_addr_space + " " +
@@ -1372,12 +1418,14 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
       int mma_tiles_per_load = total_elems / 16;
       int base_pct = load_idx_imm->value * mma_tiles_per_load;
       for (int t = 0; t < mma_tiles_per_load; t++) {
-        os << "; TILELANG_PRAGMA_UNROLL for (ushort __i = 0; __i < 16; __i++) __pct_c"
+        os << "; TILELANG_PRAGMA_UNROLL for (ushort __i = 0; __i < 16; __i++) "
+              "__pct_c"
            << (base_pct + t) << "[__i] = " << var << "[" << idx << " * "
            << total_elems << " + " << (t * 16) << " + __i];";
       }
     }
   } else if (op->op.same_as(tl::cooperative_tensor_store())) {
+    uses_cooperative_tensor_ = true;
     TVM_FFI_ICHECK_GE(op->args.size(), 11);
     std::string var = PrintExpr(op->args[0]);
     std::string idx = PrintExpr(op->args[1]);
@@ -1401,8 +1449,8 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
     auto *store_idx_imm = op->args[1].as<IntImmNode>();
     TVM_FFI_ICHECK(!(storage_elided && !(is_inlined && store_idx_imm)))
         << "Elided cooperative tensor C storage requires constant store index";
-    os << "{ " << addr_space << " " << dst_dtype << "* __dst = ("
-       << addr_space << " " << dst_dtype << "*)" << dst_ptr << "; ";
+    os << "{ " << addr_space << " " << dst_dtype << "* __dst = (" << addr_space
+       << " " << dst_dtype << "*)" << dst_ptr << "; ";
     int elem_offset = 0;
     for (int fr = 0; fr < nfrag_r; fr++) {
       for (int fc = 0; fc < nfrag_c; fc++) {
@@ -1419,38 +1467,37 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
            << "ushort __r0 = __base_row + " << row_off << "; "
            << "ushort __r1 = __r0 + 8; "
            << "ushort __c0 = __base_col + " << col_off << "; "
-           << "*(" << addr_space << " " << dst_dtype
-           << "4*)(&__dst[__r0 * "
+           << "*(" << addr_space << " " << dst_dtype << "4*)(&__dst[__r0 * "
            << stride << " + __c0]) = ";
         if (is_inlined && store_idx_imm) {
-          int pct_idx = store_idx_imm->value * (total_elems / 16) +
-                        elem_offset / 16;
+          int pct_idx =
+              store_idx_imm->value * (total_elems / 16) + elem_offset / 16;
           int pct_elem = elem_offset % 16;
           std::string value0 = std::string("*(thread ") + dtype +
-                               "4*)(&__pct_c" + std::to_string(pct_idx) +
-                               "[" + std::to_string(pct_elem) + "])";
+                               "4*)(&__pct_c" + std::to_string(pct_idx) + "[" +
+                               std::to_string(pct_elem) + "])";
           std::string value1 = std::string("*(thread ") + dtype +
-                               "4*)(&__pct_c" + std::to_string(pct_idx) +
-                               "[" + std::to_string(pct_elem + 4) + "])";
+                               "4*)(&__pct_c" + std::to_string(pct_idx) + "[" +
+                               std::to_string(pct_elem + 4) + "])";
           emit_store_value(value0);
           os << "; "
-             << "*(" << addr_space << " " << dst_dtype
-             << "4*)(&__dst[__r1 * " << stride << " + __c0]) = ";
+             << "*(" << addr_space << " " << dst_dtype << "4*)(&__dst[__r1 * "
+             << stride << " + __c0]) = ";
           emit_store_value(value1);
           os << "; } ";
         } else {
-          std::string value0 =
-              std::string("*(thread ") + dtype + "4*)(&" + var + "[" + idx +
-              " * " + std::to_string(total_elems) + " + " +
-              std::to_string(elem_offset) + "])";
-          std::string value1 =
-              std::string("*(thread ") + dtype + "4*)(&" + var + "[" + idx +
-              " * " + std::to_string(total_elems) + " + " +
-              std::to_string(elem_offset + 4) + "])";
+          std::string value0 = std::string("*(thread ") + dtype + "4*)(&" +
+                               var + "[" + idx + " * " +
+                               std::to_string(total_elems) + " + " +
+                               std::to_string(elem_offset) + "])";
+          std::string value1 = std::string("*(thread ") + dtype + "4*)(&" +
+                               var + "[" + idx + " * " +
+                               std::to_string(total_elems) + " + " +
+                               std::to_string(elem_offset + 4) + "])";
           emit_store_value(value0);
           os << "; "
-             << "*(" << addr_space << " " << dst_dtype
-             << "4*)(&__dst[__r1 * " << stride << " + __c0]) = ";
+             << "*(" << addr_space << " " << dst_dtype << "4*)(&__dst[__r1 * "
+             << stride << " + __c0]) = ";
           emit_store_value(value1);
           os << "; } ";
         }
@@ -1459,6 +1506,7 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
     }
     os << "}";
   } else if (op->op.same_as(tl::cooperative_tensor_multiply_accumulate())) {
+    uses_cooperative_tensor_ = true;
     TVM_FFI_ICHECK_GE(op->args.size(), 13);
     int M = op->args[8].as<IntImmNode>()->value;
     int N = op->args[9].as<IntImmNode>()->value;
@@ -1521,21 +1569,19 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
               "; "
            << "mpp::tensor_ops::matmul2d<__desc, metal::execution_simdgroup> "
               "__op; "
-           << "auto __ct_a = __op.get_left_input_cooperative_tensor<"
-           << a_dtype << ", " << b_dtype << ", " << c_dtype << ">(); "
+           << "auto __ct_a = __op.get_left_input_cooperative_tensor<" << a_dtype
+           << ", " << b_dtype << ", " << c_dtype << ">(); "
            << "auto __ct_b = __op.get_right_input_cooperative_tensor<"
            << a_dtype << ", " << b_dtype << ", " << c_dtype << ">(); ";
       }
-      os
-         << "TILELANG_PRAGMA_UNROLL for (ushort __i = 0; __i < " << a_elems
+      os << "TILELANG_PRAGMA_UNROLL for (ushort __i = 0; __i < " << a_elems
          << "; __i++) "
          << "__ct_a[__i] = " << a_var << "[" << a_idx << " * " << a_elems
          << " + __i]; "
          << "TILELANG_PRAGMA_UNROLL for (ushort __i = 0; __i < " << b_elems
          << "; __i++) "
          << "__ct_b[__i] = " << b_var << "[" << b_idx << " * " << b_elems
-         << " + __i]; "
-         << (can_reuse_pct_op ? "__pct_op" : "__op")
+         << " + __i]; " << (can_reuse_pct_op ? "__pct_op" : "__op")
          << ".run(__ct_a, __ct_b, __pct_c" << c_idx_imm->value << "); }";
     } else {
       os << "{ "

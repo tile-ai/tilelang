@@ -109,8 +109,7 @@ bool CanUseCooperativeTensor(const GemmWarpPolicyNode &policy, int M, int N,
         continue;
       }
       int n = num_warps / m;
-      if (n <= max_n && M % (m * kMPerWarp) == 0 &&
-          N % (n * kNPerWarp) == 0) {
+      if (n <= max_n && M % (m * kMPerWarp) == 0 && N % (n * kNPerWarp) == 0) {
         return true;
       }
     }
@@ -133,7 +132,8 @@ struct Gemm {
       return kMetalSIMDGroup;
     }
     int num_warps = block_size / TargetMetalGetWarpSize(target);
-    if (CanUseCooperativeTensor(*op.policy_.operator->(), op.m_, op.n_, op.k_,
+    if (TargetMetalSupportsMetal4(target) &&
+        CanUseCooperativeTensor(*op.policy_.operator->(), op.m_, op.n_, op.k_,
                                 num_warps)) {
       return kMetalCooperativeTensor;
     }

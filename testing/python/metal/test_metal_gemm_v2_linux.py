@@ -10,6 +10,9 @@ from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang.language as T
 
+METAL_TARGET = tvm.target.Target({"kind": "metal", "keys": ["metal", "gpu"]})
+METAL4_TARGET = tvm.target.Target({"kind": "metal", "keys": ["metal", "gpu", "metal4"]})
+
 
 def matmul_gemm_v2(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     @T.prim_func
@@ -149,8 +152,8 @@ def assert_metal_gemm_v2_cooperative_tensor_codegen(
     accum_dtype=T.float32,
 ):
     func = matmul_gemm_v2_shared_c(M, N, K, block_M, block_N, block_K, dtype=dtype, accum_dtype=accum_dtype)
-    with tvm.transform.PassContext(), tvm.target.Target("metal"):
-        artifact = tilelang.lower(func, target="metal")
+    with tvm.transform.PassContext(), METAL4_TARGET:
+        artifact = tilelang.lower(func, target=METAL4_TARGET)
 
     src_code = artifact.kernel_source
     assert src_code is not None
@@ -183,8 +186,8 @@ def assert_metal_gemm_v2_global_cooperative_tensor_codegen(
         swizzle_panel=swizzle_panel,
         swizzle_order=swizzle_order,
     )
-    with tvm.transform.PassContext(), tvm.target.Target("metal"):
-        artifact = tilelang.lower(func, target="metal")
+    with tvm.transform.PassContext(), METAL4_TARGET:
+        artifact = tilelang.lower(func, target=METAL4_TARGET)
 
     src_code = artifact.kernel_source
     assert src_code is not None
@@ -228,6 +231,18 @@ def test_metal_gemm_v2_larger():
 
 def test_metal_gemm_v2_cooperative_tensor_codegen():
     assert_metal_gemm_v2_cooperative_tensor_codegen(128, 128, 128, 32, 64, 32, dtype=T.float16)
+
+
+def test_metal_gemm_v2_without_metal4_uses_simdgroup():
+    func = matmul_gemm_v2_shared_c(128, 128, 128, 32, 64, 32, dtype=T.float16)
+    with tvm.transform.PassContext(), METAL_TARGET:
+        artifact = tilelang.lower(func, target=METAL_TARGET)
+
+    src_code = artifact.kernel_source
+    assert src_code is not None
+    assert "mpp::tensor_ops::matmul2d" not in src_code
+    assert "MetalPerformancePrimitives" not in src_code
+    assert "simdgroup_multiply_accumulate" in src_code
 
 
 def test_metal_gemm_v2_global_cooperative_tensor_codegen():

@@ -38,6 +38,7 @@ namespace codegen {
 class CodeGenTileLangMetal final : public CodeGenC {
 public:
   explicit CodeGenTileLangMetal(Target target);
+  std::string Finish() final;
   // override print thread tag.
   void PrintArgUnionDecl();
   void AddFunction(const GlobalVar &gvar, const PrimFunc &func) final;
@@ -47,8 +48,9 @@ public:
   void PrintStorageSync(const CallNode *op) final;    // NOLINT(*)
   void PrintType(DataType t, std::ostream &os) final; // NOLINT(*)
   void BindThreadIndex(const IterVar &iv) final;      // NOLINT(*)
-  void VisitExpr_(const BufferLoadNode *op, std::ostream &os) final; // NOLINT(*)
-  void VisitStmt_(const BufferStoreNode *op) final;                  // NOLINT(*)
+  void VisitExpr_(const BufferLoadNode *op,
+                  std::ostream &os) final;          // NOLINT(*)
+  void VisitStmt_(const BufferStoreNode *op) final; // NOLINT(*)
   // print load of single element
   void PrintVecElemLoad(const std::string &vec, DataType t, int i,
                         std::ostream &os) final; // NOLINT(*)
@@ -80,19 +82,17 @@ private:
   bool IsMlxPanelRowExpr(const PrimExpr &expr) const;
   bool IsMlxLogicalBlockXExpr(const PrimExpr &expr) const;
   bool IsMlxLogicalBlockYExpr(const PrimExpr &expr) const;
-  bool TryPrintMlxLogicalYAffineExpr(const PrimExpr &expr,
-                                     std::ostream &os);
+  bool TryPrintMlxLogicalYAffineExpr(const PrimExpr &expr, std::ostream &os);
   bool TryPrintMlxSwizzleExpr(const PrimExpr &expr, std::ostream &os);
   bool TryPrintSimdgroupIndexExpr(const CallNode *op, std::ostream &os);
   void PrintSimdgroupIndexExpr(int64_t group_mask, int64_t group_shift,
                                std::ostream &os) const;
+  void EnsureFragmentLaneVars();
   void EnsureCooperativeTensorBuffer(const Var &var);
 
-  std::unordered_map<Var, std::string, ffi::ObjectPtrHash,
-                     ffi::ObjectPtrEqual>
+  std::unordered_map<Var, std::string, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
       simdgroup_dtype_;
-  std::unordered_map<Var, std::string, ffi::ObjectPtrHash,
-                     ffi::ObjectPtrEqual>
+  std::unordered_map<Var, std::string, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
       cooperative_tensor_dtype_;
   std::unordered_set<Var, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
       ct_c_inlined_;
@@ -105,6 +105,8 @@ private:
   int active_mlx_swizzle_log_{0};
   bool emitted_metal_simdgroup_id_{false};
   bool emitted_frag_lane_vars_{false};
+  bool uses_cooperative_tensor_{false};
+  bool needs_fragment_lane_vars_{false};
   int thread_index_bits_{32};
   int thread_work_dim_{0};
   Target target_;

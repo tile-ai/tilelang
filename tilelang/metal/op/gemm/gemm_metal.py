@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-
 from tilelang import language as T
 from tilelang import tvm as tvm
 from tilelang.layout import Layout
@@ -158,40 +156,23 @@ class GemmMetal(GemmBase):
             num_warps = int(thread_nums) // 32
             if num_warps <= 0:
                 raise ValueError(f"Metal cooperative tensor GG requires at least one warp, got {thread_nums} threads")
-            override = os.environ.get("TILELANG_METAL_CT_WARP_PARTITION")
-            if override:
-                parts = override.split(",")
-                if len(parts) != 2:
-                    raise ValueError("TILELANG_METAL_CT_WARP_PARTITION must be 'm,n'")
-                m_warp, n_warp = int(parts[0]), int(parts[1])
-                if m_warp * n_warp != num_warps:
-                    raise ValueError(
-                        f"TILELANG_METAL_CT_WARP_PARTITION={override} does not match {num_warps} warps"
-                    )
-                if int(self.M) % (m_warp * 16) != 0 or int(self.N) % (n_warp * 32) != 0:
-                    raise ValueError(
-                        "TILELANG_METAL_CT_WARP_PARTITION="
-                        f"{override} does not evenly cover GG tile ({self.M}, {self.N}) "
-                        "with 16x32 cooperative tensor tiles"
-                    )
-            else:
-                candidates = list(self._valid_gg_warp_partitions(int(self.M), int(self.N), num_warps))
-                if not candidates:
-                    raise ValueError(
-                        "Metal cooperative tensor GG requires a warp partition "
-                        f"where M is divisible by m_warp*16 and N by n_warp*32; "
-                        f"got tile ({self.M}, {self.N}) with {num_warps} warps"
-                    )
-                # Prefer partitions where each simdgroup owns a balanced grid
-                # of 16x32 cooperative tensor operations.  This keeps A/B
-                # cooperative tensor load counts balanced for direct GG tiles.
-                m_warp, n_warp = min(
-                    candidates,
-                    key=lambda part: (
-                        abs(int(self.M) // (part[0] * 16) - int(self.N) // (part[1] * 32)),
-                        -part[1],
-                    ),
+            candidates = list(self._valid_gg_warp_partitions(int(self.M), int(self.N), num_warps))
+            if not candidates:
+                raise ValueError(
+                    "Metal cooperative tensor GG requires a warp partition "
+                    f"where M is divisible by m_warp*16 and N by n_warp*32; "
+                    f"got tile ({self.M}, {self.N}) with {num_warps} warps"
                 )
+            # Prefer partitions where each simdgroup owns a balanced grid of
+            # 16x32 cooperative tensor operations. This keeps A/B cooperative
+            # tensor load counts balanced for direct GG tiles.
+            m_warp, n_warp = min(
+                candidates,
+                key=lambda part: (
+                    abs(int(self.M) // (part[0] * 16) - int(self.N) // (part[1] * 32)),
+                    -part[1],
+                ),
+            )
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         return (
@@ -250,15 +231,8 @@ class GemmMetal(GemmBase):
 
         c_bytes_per_thread = warp_row_tiles * warp_col_tiles * 64
         inner_k_steps = 2 if c_bytes_per_thread <= 128 else 1
-        inner_k_steps_override = os.environ.get("TILELANG_METAL_CT_INNER_K_STEPS")
-        if inner_k_steps_override:
-            inner_k_steps = int(inner_k_steps_override)
         output_dtype = self.accum_dtype
-        accum_dtype = (
-            T.float32
-            if self.is_gemm_gg() and str(output_dtype) in ("float16", "bfloat16")
-            else output_dtype
-        )
+        accum_dtype = T.float32 if self.is_gemm_gg() and str(output_dtype) in ("float16", "bfloat16") else output_dtype
         mps_emitter = MPSIntrinEmitter(
             a_dtype=self.a_dtype,
             b_dtype=self.b_dtype,

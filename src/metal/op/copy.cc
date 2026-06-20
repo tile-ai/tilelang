@@ -153,46 +153,23 @@ Stmt LowerCooperativeTensorCopy(const CopyNode &op, const LowerArgs &T,
   int max_m = M / kMPerWarp;
   int max_n = N / kNPerWarp;
 
-  bool is_gmem_kernel = false;
-  if (IsGlobalBuffer(op.dst)) {
-    is_gmem_kernel = true;
-    for (auto &kv : T.layout_map) {
-      if (IsSharedBuffer(kv.first)) {
-        is_gmem_kernel = false;
-        break;
-      }
+  float ideal = N > 0 ? static_cast<float>(M) / N : 1.f;
+  float best_score = std::numeric_limits<float>::max();
+  for (int m = 1; m <= std::min(num_warps, max_m); ++m) {
+    if (num_warps % m != 0) {
+      continue;
     }
-  }
-  if (is_gmem_kernel) {
-    m_warp = 1;
-    n_warp = num_warps;
-    if (N % (n_warp * kNPerWarp) != 0) {
-      int max_n_warps = N / kNPerWarp;
-      n_warp = max_n_warps;
-      m_warp = num_warps / n_warp;
-      if (m_warp == 0) {
-        m_warp = 1;
-      }
+    int n = num_warps / m;
+    if (n > max_n) {
+      continue;
     }
-  } else {
-    float ideal = N > 0 ? static_cast<float>(M) / N : 1.f;
-    float best_score = std::numeric_limits<float>::max();
-    for (int m = 1; m <= std::min(num_warps, max_m); ++m) {
-      if (num_warps % m != 0) {
-        continue;
-      }
-      int n = num_warps / m;
-      if (n > max_n) {
-        continue;
-      }
-      float m_per = static_cast<float>(M) / (m * kMPerWarp);
-      float n_per = static_cast<float>(N) / (n * kNPerWarp);
-      float score = std::abs(m_per / n_per - ideal);
-      if (score < best_score) {
-        best_score = score;
-        m_warp = m;
-        n_warp = n;
-      }
+    float m_per = static_cast<float>(M) / (m * kMPerWarp);
+    float n_per = static_cast<float>(N) / (n * kNPerWarp);
+    float score = std::abs(m_per / n_per - ideal);
+    if (score < best_score) {
+      best_score = score;
+      m_warp = m;
+      n_warp = n;
     }
   }
 

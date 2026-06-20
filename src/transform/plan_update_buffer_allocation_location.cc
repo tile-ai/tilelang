@@ -24,12 +24,15 @@
 
 #include "support/check.h"
 #include <tvm/ir/cast.h>
+#include <tvm/ir/type.h>
 #include <tvm/s_tir/analysis.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 #include <tvm/tirx/var.h>
+
+#include <unordered_map>
 
 #include "../op/utils.h"
 #include "tir/transforms/ir_utils.h"
@@ -52,7 +55,74 @@ using namespace tirx::transform;
 using tirx::SBlockNode;
 using tirx::SBlockRealizeNode;
 
-// Use TVM's tir analysis API for LCA detection.
+// TVM's LCA detector parses StorageScope for every touched buffer, while this
+// TVM submodule does not know TileLang's Metal cooperative tensor scope yet.
+// Cooperative tensor allocations are preserved in their original blocks, so the
+// LCA query can use an analysis-only copy where those buffers look local.
+class MetalCooperativeTensorLCASanitizer : public StmtExprMutator {
+public:
+  struct Result {
+    PrimFunc func;
+    std::unordered_map<const StmtNode *, const StmtNode *> stmt_remap;
+  };
+
+  static Result Sanitize(PrimFunc func) {
+    MetalCooperativeTensorLCASanitizer sanitizer;
+    auto fptr = func.CopyOnWrite();
+    fptr->body = sanitizer.VisitStmt(func->body);
+    return {func, std::move(sanitizer.stmt_remap_)};
+  }
+
+private:
+  Stmt VisitStmt(const Stmt &stmt) final {
+    if (!stmt.defined()) {
+      return stmt;
+    }
+    const StmtNode *original = stmt.get();
+    Stmt result = StmtExprMutator::VisitStmt(stmt);
+    stmt_remap_.emplace(original, original);
+    stmt_remap_.emplace(result.get(), original);
+    return result;
+  }
+
+  Buffer VisitBufferDef(const Buffer &buffer, bool alloc_data) final {
+    Buffer new_buffer = StmtExprMutator::VisitBufferDef(buffer, alloc_data);
+    return SanitizeBuffer(new_buffer);
+  }
+
+  Buffer VisitBufferUse(const Buffer &buffer) final {
+    Buffer new_buffer = StmtExprMutator::VisitBufferUse(buffer);
+    return SanitizeBuffer(new_buffer);
+  }
+
+  Buffer SanitizeBuffer(const Buffer &buffer) {
+    if (!buffer.defined() || buffer.scope() != "metal.cooperative_tensor") {
+      return buffer;
+    }
+    auto it = sanitized_buffers_.find(buffer.get());
+    if (it != sanitized_buffers_.end()) {
+      return it->second;
+    }
+
+    const auto *ptr_type = buffer->data->type_annotation.as<PointerTypeNode>();
+    ICHECK(ptr_type != nullptr)
+        << "Expected cooperative tensor buffer data to have pointer type: "
+        << buffer;
+    Var local_data(buffer->data->name_hint,
+                   PointerType(ptr_type->element_type, "local"),
+                   buffer->data->span);
+    Buffer sanitized(local_data, buffer->dtype, buffer->shape, buffer->strides,
+                     buffer->elem_offset, buffer->name, buffer->data_alignment,
+                     buffer->offset_factor, buffer->buffer_type,
+                     buffer->axis_separators, buffer->span);
+    sanitized_buffers_.emplace(buffer.get(), sanitized);
+    buffer_remap_.Set(buffer, sanitized);
+    return sanitized;
+  }
+
+  std::unordered_map<const BufferNode *, Buffer> sanitized_buffers_;
+  std::unordered_map<const StmtNode *, const StmtNode *> stmt_remap_;
+};
 
 class CollectManagedAllocations : public StmtExprVisitor {
 public:
@@ -194,8 +264,12 @@ class BufferAllocationLocator : public StmtExprMutator {
 public:
   explicit BufferAllocationLocator(const PrimFunc &func) {
     // Use TVM's tir LCA detection implementation
-    Map<Buffer, Optional<Stmt>> buffer_lca = tirx::DetectBufferAccessLCA(func);
-    Map<Var, Optional<Stmt>> var_lca = tirx::DetectBufferVarAccessLCA(func);
+    MetalCooperativeTensorLCASanitizer::Result lca_input =
+        MetalCooperativeTensorLCASanitizer::Sanitize(func);
+    Map<Buffer, Optional<Stmt>> buffer_lca =
+        tirx::DetectBufferAccessLCA(lca_input.func);
+    Map<Var, Optional<Stmt>> var_lca =
+        tirx::DetectBufferVarAccessLCA(lca_input.func);
 
     // The buffer_alloc_recorder Array is used to keep the buffer allocation
     // order since the buffer_lca Map is unordered.
@@ -221,7 +295,7 @@ public:
       // barrier_init annotation remains attached to the block that owns the
       // initialization. Moving them into injected opaque blocks causes
       // LowerSharedBarrier to see barrier buffers without local annotations.
-      if (IsBarrierBuffer(buffer)) {
+      if (ShouldPreserveOriginalBlock(buffer)) {
         continue;
       }
       // Prefer the LCA derived from the underlying data var. If missing, fall
@@ -229,11 +303,11 @@ public:
       const StmtNode *stmt = nullptr;
       auto vit = var_lca.find(buffer->data);
       if (vit != var_lca.end()) {
-        stmt = (*vit).second.get();
+        stmt = RemapAnalysisStmt((*vit).second.get(), lca_input.stmt_remap);
       } else {
         auto bit = buffer_lca.find(buffer);
         if (bit != buffer_lca.end()) {
-          stmt = (*bit).second.get();
+          stmt = RemapAnalysisStmt((*bit).second.get(), lca_input.stmt_remap);
         }
       }
       stmt = ResolveAllocationSite(buffer->data.get(), stmt);
@@ -254,6 +328,16 @@ public:
   }
 
 private:
+  static const StmtNode *RemapAnalysisStmt(
+      const StmtNode *stmt,
+      const std::unordered_map<const StmtNode *, const StmtNode *> &remap) {
+    if (stmt == nullptr) {
+      return nullptr;
+    }
+    auto it = remap.find(stmt);
+    return it == remap.end() ? stmt : it->second;
+  }
+
   // Maintain a stack of Buffers per data var to correctly handle cases
   // where multiple Buffer objects share the same underlying data Var.
   void PushBinding(const Var &v, const Buffer &buf) {
@@ -351,11 +435,11 @@ private:
   Stmt VisitStmt_(const SBlockNode *op) final {
     ICHECK(!op->init.defined());
     Array<Buffer> alloc_buffers;
-    Array<Buffer> preserved_barrier_buffers;
+    Array<Buffer> preserved_original_block_buffers;
     for (const Buffer &buf : op->alloc_buffers) {
-      if (IsBarrierBuffer(buf)) {
+      if (ShouldPreserveOriginalBlock(buf)) {
         alloc_buffers.push_back(buf);
-        preserved_barrier_buffers.push_back(buf);
+        preserved_original_block_buffers.push_back(buf);
         PushBinding(buf->data, buf);
       }
     }
@@ -389,7 +473,7 @@ private:
         PopBinding(buf->data);
       }
     }
-    for (const Buffer &buf : preserved_barrier_buffers) {
+    for (const Buffer &buf : preserved_original_block_buffers) {
       PopBinding(buf->data);
     }
 
@@ -445,38 +529,14 @@ private:
    */
   std::unordered_set<const VarNode *> managed_allocations_;
 
-  static bool IsBarrierBuffer(const Buffer &buffer) {
+  static bool ShouldPreserveOriginalBlock(const Buffer &buffer) {
     String scope = buffer.scope();
-    return scope == "shared.barrier" || scope == "shared.cluster_barrier";
+    return scope == "shared.barrier" || scope == "shared.cluster_barrier" ||
+           scope == "metal.cooperative_tensor";
   }
-};
-
-class CooperativeTensorScopeDetector : public StmtExprVisitor {
-public:
-  static bool Detect(const PrimFunc &func) {
-    CooperativeTensorScopeDetector detector;
-    detector(func->body);
-    return detector.found_;
-  }
-
-private:
-  void VisitStmt_(const SBlockNode *op) final {
-    for (const Buffer &buffer : op->alloc_buffers) {
-      if (buffer.scope() == "metal.cooperative_tensor") {
-        found_ = true;
-        return;
-      }
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  bool found_{false};
 };
 
 PrimFunc PlanAndUpdateBufferAllocationLocation(PrimFunc func) {
-  if (CooperativeTensorScopeDetector::Detect(func)) {
-    return func;
-  }
   auto fptr = func.CopyOnWrite();
   BufferAllocationLocator locator(func);
   fptr->body = locator(fptr->body);

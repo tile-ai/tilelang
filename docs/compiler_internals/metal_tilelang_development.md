@@ -70,8 +70,8 @@ For `M=128, N=256, K=128, block_M=64, block_N=128, threads=128`:
 
 - `threads=128` means 4 simdgroups.
 - The 4 simdgroups cover a `64 x 128` C tile as a `2 x 2` partition.
-- Each simdgroup owns a `32 x 64` C subtile.
-- Each `32 x 64` subtile is covered by `(32 / 16) x (64 / 32) = 4` op-level
+- Each simdgroup owns a `32 x 64` C sub-tile.
+- Each `32 x 64` sub-tile is covered by `(32 / 16) x (64 / 32) = 4` op-level
   fragments, corresponding to 4 destination cooperative tensors.
 
 ### 1.3 The MPP op: `matmul2d(M, N, K)`
@@ -195,19 +195,24 @@ Path selection has two stages.
 
 **Stage 1: instruction kind (`SelectInst`, `src/metal/op/gemm.cc`).** This stage
 only chooses between `metal.cooperative_tensor` and `metal.simdgroup`. It looks
-at C scope, tile shape, warp policy, and warp count. It does not look at whether
-A/B are global or shared, and it does not check runtime or hardware capability.
+at the lowering target capability, C scope, tile shape, warp policy, and warp
+count. It does not look at whether A/B are global or shared.
 
 | Condition | Instruction kind |
 | --- | --- |
 | C is in `local.fragment` or `metal.simdgroup` | `metal.simdgroup` |
-| Otherwise `CanUseCooperativeTensor(policy, M, N, K, warps)` is true | `metal.cooperative_tensor` |
+| Target has the `metal4` key and `CanUseCooperativeTensor(policy, M, N, K, warps)` is true | `metal.cooperative_tensor` |
 | Otherwise | `metal.simdgroup` as a safe lowering fallback |
 
 `CanUseCooperativeTensor` is a pure shape and policy check: `M % 16 == 0`,
 `N % 32 == 0`, `K % 16 == 0`, and the warp policy must be able to split
 `num_warps` into a legal `m_warp x n_warp` partition. `threads` must be a
 multiple of 32 because each simdgroup has 32 lanes.
+
+`target="metal"` is normalized to include the `metal4` key only when the local
+macOS version, SDK, and Apple GPU generation are known to support Metal 4.
+Source-only tests or cross-builds can pass an explicit target with
+`keys=["metal", "gpu", "metal4"]` when they intentionally want MPP source.
 
 **Stage 2: cooperative tensor dataflow (`GemmMetal.lower`,
 `tilelang/metal/op/gemm/gemm_metal.py`).** After Stage 1 selects
@@ -274,6 +279,8 @@ counterpart:
   logical tile indices.
 - **simdgroup id / lane id lowering**: Metal execution attributes are used
   instead of re-deriving them from thread id.
+- **Metal 4 target capability gate**: cooperative tensor lowering requires the
+  `metal4` target key.
 - **Metal 4 runtime language-version guard**: MSL 4.0 is requested only when the
   SDK, runtime OS, and device family support it.
 
@@ -406,9 +413,9 @@ unconditionally. It selects `MTLLanguageVersion4_0` only when the SDK, runtime
 OS, and device family support Metal 4; otherwise it compiles with
 `MTLLanguageVersion2_3`. This is not an instruction-level fallback. It cannot
 rewrite generated MPP source into simdgroup source. Cooperative tensor vs.
-simdgroup is a lowering-time shape/scope/policy decision (Section 2.1), separate
-from runtime language-version selection. A complete runtime capability fallback
-still needs a separate design.
+simdgroup is a lowering-time target/shape/scope/policy decision (Section 2.1),
+separate from runtime language-version selection. A complete runtime fallback
+still needs a separate multi-version or retry design.
 
 ### 5.2 Memory Scopes and Unified Memory
 
@@ -449,6 +456,7 @@ descriptor shape described in Section 1.3.
 
 | Feature | Status | Notes |
 | --- | --- | --- |
+| Metal 4 target capability gate | Implemented | Cooperative tensor lowering requires the `metal4` target key |
 | Metal 4 runtime guard | Implemented | Requests MSL 4.0 only when SDK, OS, and device family support it |
 | Cooperative tensor GEMM lowering | Implemented | M5+ mainline |
 | Direct-global A/B cooperative tensor | Implemented / default | Current recommended performance path, Section 1 |
@@ -467,15 +475,15 @@ Current limitations:
 - The direct-global path mainly covers full-tile GEMM.
 - Edge masking and partial tile support are not complete.
 - The `gmem -> smem` bypass pass is not implemented.
-- NAX / MLX-style 8-simdgroup lowering is not implemented.
+- MLX-style 8-simdgroup lowering is not implemented.
 - Pointer induction and address hoisting still have room for improvement.
 - CUDA-style thread-level layout and per-thread swizzle control are not exposed
   (Section 5.1).
 - The simdgroup path is not yet a complete old-device strategy.
 - The primary validated path is fp16 input, fp16 output, fp32 accumulation.
-- There is no instruction-level runtime capability fallback. Path selection is
-  a lowering-time shape/scope/policy decision, and the runtime guard only
-  selects the MSL language version (Sections 2.1 and 5.1).
+- There is no multi-version runtime fallback. Path selection is a lowering-time
+  target/shape/scope/policy decision, and the runtime guard only selects the MSL
+  language version (Sections 2.1 and 5.1).
 
 Planned work:
 
@@ -492,7 +500,7 @@ Planned work:
   The proof must rule out layout transforms, padding, edge fill,
   multi-consumer reuse, and threadgroup communication semantics. If the proof
   fails, the shared path must be preserved.
-- **NAX / MLX-style 8-simdgroup cooperative tensor lowering**: `BM=64`,
+- **MLX-style 8-simdgroup cooperative tensor lowering**: `BM=64`,
   `BN=128`, 8 simdgroups / 256 threads, each simdgroup owning a `32 x 32` C
   tile covered by multiple `matmul2d(16, 32, 16)` op-level fragments.
 - **Pointer induction and address hoisting**: hoist A/B/C tile base pointers,
@@ -502,7 +510,7 @@ Planned work:
   predicated C store, out-of-bounds return for padded physical grids after
   swizzle, and branch-free fast paths for aligned cases.
 - **Metal-specific policy and tuner**: distinguish at least four policy classes:
-  4-simdgroup conservative direct-global, 8-simdgroup NAX / MLX-style,
+  4-simdgroup conservative direct-global, 8-simdgroup MLX-style,
   shared path for layout / fusion / edge-heavy workloads, and simdgroup
   fallback.
 
@@ -525,8 +533,8 @@ library versions. Reproduction commands are in Section 5.8.
 | PyTorch | 2.12.1, MPS enabled |
 | MLX | 0.31.2 |
 | TileLang branch | `metal-gemm-perf` |
-| TileLang commit | `6f952ed9` |
-| TVM submodule | `11c1968acf` |
+| TileLang measurement commit | `6f952ed9` |
+| TVM measurement submodule | `11c1968acf` |
 
 Benchmark conditions: fp16 input, fp16 output, internal fp32 accumulation,
 full-tile shapes, default path `ct_global`, `block_M=64`, `block_N=128`,
@@ -588,6 +596,8 @@ When changing TVM / Metal runtime code, check:
   Metal 4;
 - whether the MSL 2.3 fallback is preserved and non-Metal-4 devices are not
   regressed.
+- whether `target="metal"` adds the `metal4` key only on supported local
+  hardware, and source-only tests use an explicit `metal4` target when needed.
 
 To reproduce the fp16-output MSL snippet in Section 1.4 from the repository root
 (codegen-only, no Metal runtime required):
@@ -606,8 +616,9 @@ func = matmul_gemm_v2_global_c(
     threads=128,
 )
 
-with tvm.transform.PassContext(), tvm.target.Target('metal'):
-    print(tilelang.lower(func, target='metal').kernel_source)
+metal4_target = tvm.target.Target({"kind": "metal", "keys": ["metal", "gpu", "metal4"]})
+with tvm.transform.PassContext(), metal4_target:
+    print(tilelang.lower(func, target=metal4_target).kernel_source)
 PY
 ```
 
