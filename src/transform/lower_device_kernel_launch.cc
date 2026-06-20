@@ -163,8 +163,13 @@ private:
   }
 
   void VisitStmt_(const AllocBufferNode *op) final {
-    auto storage_scope =
-        runtime::StorageScope::Create(GetPtrStorageScope(op->buffer->data));
+    auto scope = GetPtrStorageScope(op->buffer->data);
+    if (scope == "metal.cooperative_tensor") {
+      StmtVisitor::VisitStmt_(op);
+      return;
+    }
+
+    auto storage_scope = runtime::StorageScope::Create(scope);
     if (storage_scope.rank == runtime::StorageRank::kShared &&
         storage_scope.tag == ".dyn") {
       ICHECK(!dyn_shmem_size.defined())

@@ -294,19 +294,26 @@ class MPSIntrinEmitter:
         return _simdgroup_copy(C_simd_buf, buffer, offset_m, offset_n, stride, warp_m, warp_n)
 
     def make_cooperative_tensor_store_layout(self, local_buf):
-        from tilelang.cuda.intrinsics.layout.mma_layout import metal_ct_store_index_map
         from tilelang.utils.language import is_fragment
 
         assert is_fragment(local_buf), f"{local_buf} must be a fragment"
         shape = local_buf.shape
-        inverse_index_map = metal_ct_store_index_map().inverse([self.WARP_SIZE, 16])
+
+        def inverse_metal_ct_index(i, j):
+            row = i % self.micro_size_x
+            col = j % self.micro_size_y
+            row_low = row % 8
+            col_group = (col % 16) // 4
+            lane_id = (col_group % 2) + (row_low % 4) * 2 + (col_group // 2) * 8 + (row_low // 4) * 16
+            local_id = (col // 16) * 8 + (row // 8) * 4 + (col % 4)
+            return lane_id, local_id
 
         def forward_thread(i: int, j: int) -> int:
             warp_m = (i // self.micro_size_x) // self.warp_rows
             warp_n = (j // self.micro_size_y) // self.warp_cols
             mma_i = i % self.micro_size_x
             mma_j = j % self.micro_size_y
-            lane_id, _ = inverse_index_map.map_indices([mma_i, mma_j])
+            lane_id, _ = inverse_metal_ct_index(mma_i, mma_j)
             return warp_m * (self.block_col_warps * self.WARP_SIZE) + warp_n * self.WARP_SIZE + lane_id
 
         def forward_index(i: int, j: int) -> int:
@@ -314,7 +321,7 @@ class MPSIntrinEmitter:
             warp_j = (j // self.micro_size_y) % self.warp_cols
             mma_i = i % self.micro_size_x
             mma_j = j % self.micro_size_y
-            _, local_id = inverse_index_map.map_indices([mma_i, mma_j])
+            _, local_id = inverse_metal_ct_index(mma_i, mma_j)
             return warp_i * (self.warp_cols * 16) + warp_j * 16 + local_id
 
         return T.Fragment(shape, forward_thread_fn=forward_thread, forward_index_fn=forward_index)

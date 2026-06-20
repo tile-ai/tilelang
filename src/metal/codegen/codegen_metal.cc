@@ -22,6 +22,7 @@
  */
 #include "codegen_metal.h"
 
+#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -33,6 +34,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "op/builtin.h"
 #include "runtime/thread_storage_scope.h"
@@ -414,7 +416,76 @@ void CodeGenTileLangMetal::VisitStmt_(const AttrStmtNode *op) {
 }
 
 void CodeGenTileLangMetal::VisitStmt_(const ForNode *op) {
+  auto *min_imm = op->min.as<IntImmNode>();
   auto *ext_imm = op->extent.as<IntImmNode>();
+  // Unroll small constant-bound loops at codegen time so loop variables become
+  // IntImm constants. Persistent cooperative_tensor C uses named Metal CT
+  // objects (__pct_c0, __pct_c1, ...), so its tile index must be constant.
+  bool body_has_alloc = false;
+  bool needs_ct_index_const = false;
+  auto check_ct_index = [&](const PrimExpr &buffer, const PrimExpr &idx) {
+    if (idx.as<IntImmNode>()) {
+      return;
+    }
+    if (auto *var = buffer.as<tirx::VarNode>()) {
+      needs_ct_index_const = ct_c_inlined_.count(var) != 0;
+    }
+  };
+  tirx::PostOrderVisit(op->body, [&](const ffi::ObjectRef &node) {
+    if (node->IsInstance<tirx::AllocBufferNode>()) {
+      body_has_alloc = true;
+    }
+    if (auto *call = node.as<tirx::CallNode>()) {
+      if (call->op.same_as(tl::cooperative_tensor_fill()) ||
+          call->op.same_as(tl::cooperative_tensor_store()) ||
+          call->op.same_as(tl::cooperative_tensor_multiply_accumulate())) {
+        check_ct_index(call->args[0], call->args[1]);
+      }
+    }
+  });
+  if (ext_imm && min_imm && ext_imm->value >= 2 && ext_imm->value <= 4 &&
+      !body_has_alloc && needs_ct_index_const) {
+    int64_t start = min_imm->value;
+    int64_t extent = ext_imm->value;
+    for (int64_t i = 0; i < extent; i++) {
+      ffi::Map<tirx::Var, PrimExpr> vmap;
+      vmap.Set(op->loop_var, IntImm(op->loop_var->dtype, start + i));
+      tirx::Stmt body = tirx::Substitute(op->body, vmap);
+      // Substitute leaves expressions such as (0 * 2 + 1); fold them so
+      // cooperative_tensor indices can become IntImm.
+      arith::Analyzer analyzer;
+      class ConstFolder : public tirx::StmtExprMutator {
+      public:
+        explicit ConstFolder(arith::Analyzer *analyzer)
+            : analyzer_(analyzer) {}
+
+        PrimExpr VisitExpr(const PrimExpr &expr) final {
+          PrimExpr visited = tirx::StmtExprMutator::VisitExpr(expr);
+          if (!visited.as<IntImmNode>() && !visited.as<tirx::VarNode>()) {
+            return analyzer_->Simplify(visited);
+          }
+          return visited;
+        }
+
+      private:
+        arith::Analyzer *analyzer_;
+      };
+      body = ConstFolder(&analyzer)(std::move(body));
+      std::vector<const tirx::VarNode *> local_vars;
+      tirx::PostOrderVisit(body, [&](const ffi::ObjectRef &node) {
+        if (auto *bind = node.as<tirx::BindNode>()) {
+          local_vars.push_back(bind->var.get());
+        } else if (auto *inner_for = node.as<tirx::ForNode>()) {
+          local_vars.push_back(inner_for->loop_var.get());
+        }
+      });
+      this->VisitStmt(body);
+      for (auto *var : local_vars) {
+        var_idmap_.erase(var);
+      }
+    }
+    return;
+  }
   if (ext_imm && ext_imm->value > 4) {
     PrintIndent();
     stream << "#pragma clang loop unroll(disable)\n";
@@ -679,6 +750,9 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
     int frag_rows = 16, frag_cols = 16;
     int nfrag_r = rows / frag_rows;
     int nfrag_c = cols / frag_cols;
+    int total_elems = nfrag_r * nfrag_c * 8;
+    bool is_inlined = ct_c_inlined_.count(v.get()) > 0;
+    auto *load_idx_imm = op->args[1].as<IntImmNode>();
     os << "{ " << addr_space << " " << dtype << "* __src = (" << addr_space
        << " " << dtype << "*)" << src_ptr << "; ";
     int elem_offset = 0;
@@ -702,6 +776,15 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
       }
     }
     os << "}";
+    if (is_inlined && load_idx_imm) {
+      int mma_tiles_per_load = total_elems / 16;
+      int base_pct = load_idx_imm->value * mma_tiles_per_load;
+      for (int t = 0; t < mma_tiles_per_load; t++) {
+        os << "; for (ushort __i = 0; __i < 16; __i++) __pct_c"
+           << (base_pct + t) << "[__i] = " << var << "[" << idx << " * "
+           << total_elems << " + " << (t * 16) << " + __i];";
+      }
+    }
   } else if (op->op.same_as(tl::cooperative_tensor_store())) {
     TVM_FFI_ICHECK_GE(op->args.size(), 11);
     std::string var = PrintExpr(op->args[0]);

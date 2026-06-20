@@ -32,20 +32,32 @@ If any condition fails the compiler falls back to `metal.simdgroup` without user
 ### Current limitations
 
 - **Shared-C only.** The `local.fragment` C path always uses simdgroup today. Direct
-  fragment-C cooperative tensor requires a fragment layout that `tirx.IndexMap.inverse`
-  cannot yet represent; this is being worked on.
+  fragment-C cooperative tensor still needs the fragment accumulator storage remap to
+  become `metal.cooperative_tensor`; otherwise the lowered fragment becomes vectorized
+  local storage that cannot be used as an MPP destination.
 - **float32 accumulation only in MPP path.** MPP matmul2d loads `half`/`bfloat` inputs
   but the destination `cooperative_tensor` is always `float32`.
 - **No software pipelining (`num_stages=0`).** Cooperative tensor shared-memory loads
   are emitted inside the inner loop; the pipeline planner does not yet interleave them.
 - **No transpose flags.** The lowering assumes `trans_A=False, trans_B=False`.
 
+### Benchmarking
+
+Use the Metal matmul benchmark to compare TileLang against PyTorch MPS and MLX:
+
+```bash
+python benchmark/matmul_metal/benchmark_matmul_metal.py --m 4096 --n 4096 --k 4096 --warmup 3 --repeats 10 --sweep
+```
+
+The benchmark includes both legacy `metal.simdgroup` and shared-C
+`metal.cooperative_tensor` configurations. MLX is reported when `mlx` is installed.
+
 ## Future Work
 
-- Support fragment-C cooperative tensor (requires inverse layout work or a
-  `metal.cooperative_tensor` scope for accumulators).
+- Support direct fragment-C cooperative tensor by remapping eligible fragment
+  accumulators to `metal.cooperative_tensor` storage.
 - Enable software pipelining for cooperative tensor loads.
 - Extend to transposed operand layouts.
 - Add direct global-to-global GEMM (GG) lowering through MPP.
-- Performance tuning: auto-select inner-K steps, persistent cooperative tensor
-  accumulators.
+- Performance tuning: broader block-shape search, shared-memory usage reduction,
+  and fragment-C persistent accumulators.

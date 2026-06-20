@@ -9,6 +9,7 @@ from tilelang.utils.language import (
     is_fragment,
     is_full_region,
     is_global,
+    is_metal_cooperative_tensor,
     is_metal_simdgroup,
     is_shared,
 )
@@ -244,17 +245,37 @@ class GemmMetal(GemmBase):
         C_region = self.CRegion
         C_buf = C_region.buffer
         clear_accum = self.clear_accum
+        c_in_cooperative_tensor = is_metal_cooperative_tensor(C_buf) or is_fragment(C_buf)
         assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
         assert is_full_region(C_region), "Fragment output C must be a full region"
 
         if not (self.is_gemm_ss() or self.is_gemm_gg()):
             raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
 
+        if c_in_cooperative_tensor:
+
+            @T.prim_func
+            def _gemm_cooperative_tensor() -> None:
+                A_local = T.alloc_local((warp_rows * a_tile_elems * inner_k_steps), a_dtype, scope="metal.cooperative_tensor")
+                B_local = T.alloc_local((warp_cols * b_tile_elems * inner_k_steps), b_dtype, scope="metal.cooperative_tensor")
+                if clear_accum:
+                    for _i in T.serial(num_simd_c):
+                        T.cooperative_tensor_fill(C_buf.data, _i, T.cast(0, accum_dtype), micro_size_x, micro_size_y)
+                for k_outer in T.serial(0, (block_K // (micro_size_k * inner_k_steps))):
+                    for k_inner in T.serial(0, inner_k_steps):
+                        ki = k_outer * inner_k_steps + k_inner
+                        mps_emitter.ldmatrix_a(A_local, A_region, ki, k_inner)
+                        mps_emitter.ldmatrix_b(B_local, B_region, ki, k_inner)
+                    for k_inner in T.serial(0, inner_k_steps):
+                        mps_emitter.mma(A_local, B_local, C_buf, k_inner)
+
+            return _Simplify(_gemm_cooperative_tensor, inline_let=True)
+
         @T.prim_func
         def _gemm_with_c_writeback() -> None:
-            A_local = T.alloc_local((warp_rows * a_tile_elems * inner_k_steps), a_dtype)
-            B_local = T.alloc_local((warp_cols * b_tile_elems * inner_k_steps), b_dtype)
-            C_ct = T.alloc_local((num_simd_c * c_tile_elems), accum_dtype)
+            A_local = T.alloc_local((warp_rows * a_tile_elems * inner_k_steps), a_dtype, scope="metal.cooperative_tensor")
+            B_local = T.alloc_local((warp_cols * b_tile_elems * inner_k_steps), b_dtype, scope="metal.cooperative_tensor")
+            C_ct = T.alloc_local((num_simd_c * c_tile_elems), accum_dtype, scope="metal.cooperative_tensor")
             if clear_accum:
                 for _i in T.serial(num_simd_c):
                     T.cooperative_tensor_fill(C_ct.data, _i, T.cast(0, accum_dtype), micro_size_x, micro_size_y)
