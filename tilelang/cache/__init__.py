@@ -90,22 +90,3 @@ def cached(
         pass_configs=pass_configs,
         compile_flags=compile_flags,
     )
-
-
-def clear_cache():
-    """
-    Disabled helper that previously removed the entire kernel cache.
-
-    Raises:
-        RuntimeError: Always raised to warn users to clear the cache manually.
-    """
-    cache_dir = env.TILELANG_CACHE_DIR
-    raise RuntimeError(
-        "tilelang.clear_cache() is disabled because deleting the cache directory "
-        "is dangerous. If you accept the risk, remove it manually with "
-        f"`rm -rf '{cache_dir}'`."
-    )
-
-
-if env.TILELANG_CLEAR_CACHE.lower() in ("1", "true", "yes", "on"):
-    clear_cache()
