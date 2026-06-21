@@ -89,8 +89,8 @@ jobs:
           #   # Format: [Nightly-]ROCm-<major>.<minor>[.<patch>]. E.g., "ROCm-6.4" or "Nightly-ROCm-7.0".
           #   # Use "Nightly-" prefix to use torch nightly builds.
           #   toolkit: Nightly-ROCm-7.2
-          - tags: [macos-26]
-            name: macos-26
+          - tags: [macos-latest]
+            name: macos-latest
             toolkit: Metal # or Nightly-Metal
         python-version:
           - "3.12"
