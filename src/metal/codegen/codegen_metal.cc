@@ -1654,9 +1654,9 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
 
   std::ostringstream source_maker;
   ffi::Map<ffi::String, ffi::Bytes> smap;
-  const auto fmetal_compile =
-      tvm::ffi::Function::GetGlobal("tvm_callback_metal_compile");
-  std::string fmt = fmetal_compile ? "metallib" : "metal";
+  const auto fmetal_postproc =
+      tvm::ffi::Function::GetGlobal("tilelang_callback_metal_postproc");
+  std::string fmt = "metal";
 
   for (auto kv : mod->functions) {
     TVM_FFI_ICHECK(kv.second->IsInstance<tirx::PrimFuncNode>())
@@ -1679,8 +1679,8 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
 
     std::string fsource = cg.Finish();
     source_maker << fsource << "\n";
-    if (fmetal_compile) {
-      fsource = (*fmetal_compile)(fsource, target).cast<std::string>();
+    if (fmetal_postproc) {
+      fsource = (*fmetal_postproc)(fsource, target).cast<std::string>();
     }
     smap.Set(func_name, ffi::Bytes(std::move(fsource)));
   }

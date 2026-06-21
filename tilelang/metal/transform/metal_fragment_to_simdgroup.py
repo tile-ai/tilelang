@@ -107,52 +107,6 @@ def _remap_match_buffer(match, buf_map):
     return tir.MatchBufferRegion(new_buf if new_buf is not None else match.buffer, new_src)
 
 
-def _is_fill_on_accum_var(stmt, accum_vars):
-    if not isinstance(stmt, tir.Evaluate):
-        return False
-    call = stmt.value
-    if not isinstance(call, tir.Call):
-        return False
-    op_name = str(call.op) if hasattr(call.op, "__str__") else ""
-    if "fill" not in op_name:
-        return False
-    if len(call.args) < 1:
-        return False
-    arg0 = call.args[0]
-    if isinstance(arg0, tir.BufferLoad):
-        return arg0.buffer.data in accum_vars
-    if isinstance(arg0, tir.Call) and len(arg0.args) >= 1:
-        inner = arg0.args[0]
-        if isinstance(inner, tir.BufferLoad):
-            return inner.buffer.data in accum_vars
-        if isinstance(inner, tir.Var):
-            return inner in accum_vars
-    return False
-
-
-def _remove_fills_on_accum(body, accum_vars):
-    def _pre_order(stmt):
-        if _is_fill_on_accum_var(stmt, accum_vars):
-            return tir.Evaluate(tir.const(0, "int32"))
-        if isinstance(stmt, tir.SeqStmt):
-            new_stmts = []
-            changed = False
-            for s in stmt.seq:
-                if _is_fill_on_accum_var(s, accum_vars):
-                    changed = True
-                else:
-                    new_stmts.append(s)
-            if changed:
-                if len(new_stmts) == 0:
-                    return tir.Evaluate(tir.const(0, "int32"))
-                if len(new_stmts) == 1:
-                    return new_stmts[0]
-                return tir.SeqStmt(new_stmts)
-        return None
-
-    return tir.stmt_functor.ir_transform(body, _pre_order, None, ["tirx.Evaluate", "tirx.SeqStmt"])
-
-
 def _rewrite_scope(body, var_map, num_warps=1):
     body = tir.stmt_functor.substitute(body, var_map)
     buf_map = {}
@@ -217,6 +171,4 @@ MetalFragmentToSimdgroup = prim_func_pass(
     name="tl.MetalFragmentToSimdgroup",
 )
 
-MetalFragmentToCooperativeTensor = MetalFragmentToSimdgroup
-
-__all__ = ["MetalFragmentToCooperativeTensor", "MetalFragmentToSimdgroup"]
+__all__ = ["MetalFragmentToSimdgroup"]
