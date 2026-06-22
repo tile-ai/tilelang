@@ -2504,7 +2504,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       shape = Downcast<StringImm>(op->args.back())->value;
     }
     std::string func_name =
-        "tl::ptx_stmatrix_x" + std::to_string(num) + "_" + shape;
+        "tl::ptx_stmatrix_" + shape + "_x" + std::to_string(num);
     if (trans == 1)
       func_name += "_trans";
     print_extern_call_stmt(func_name, 2, has_shape ? 1 : 0);

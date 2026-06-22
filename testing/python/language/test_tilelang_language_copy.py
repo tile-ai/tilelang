@@ -244,7 +244,7 @@ def test_tilelang_copy_uses_stmatrix_m16n8_for_sm100_int8_shared_store():
     with tvm.transform.PassContext(), tvm.target.Target(target):
         artifact = tilelang.lower(main, target=target)
 
-    assert "tl::ptx_stmatrix_x1_m16n8_trans" in artifact.kernel_source
+    assert "tl::ptx_stmatrix_m16n8_x1_trans" in artifact.kernel_source
 
 
 if __name__ == "__main__":
