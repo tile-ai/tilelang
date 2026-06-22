@@ -121,9 +121,10 @@ public:
   }
 
   /// Lower the operator to TIR statements
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
+  Stmt Lower(const LowerArgs &lower_args,
+             arith::Analyzer *analyzer) const override;
   /// Infer memory layout for buffers
-  LayoutMap InferLayout(const LayoutInferArgs &T,
+  LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
   AccessRegions GetAccessRegions() const override;
   static const Op &Get();
@@ -136,7 +137,7 @@ struct ReduceImpl {
   const char *name;
   ReduceTargetPredicate match_target;
 
-  Stmt (*lower)(const ReduceOpNode &op, const LowerArgs &T,
+  Stmt (*lower)(const ReduceOpNode &op, const LowerArgs &lower_args,
                 arith::Analyzer *analyzer);
 };
 

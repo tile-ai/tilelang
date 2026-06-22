@@ -161,11 +161,12 @@ String GemmSPNode::getGemmSPInstructionKey(int block_size,
   return ResolveGemmSPImpl(target).select_inst(*this, block_size, target);
 }
 
-Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+Stmt GemmSPNode::Lower(const LowerArgs &lower_args,
+                       arith::Analyzer *analyzer) const {
   if (const auto f = Function::GetGlobal("tl.gemm_sp.lower")) {
-    auto prim_func =
-        Downcast<PrimFunc>((*f)(GetRef<GemmSP>(this), T.target, T.layout_map,
-                                T.thread_bounds, T.thread_var));
+    auto prim_func = Downcast<PrimFunc>(
+        (*f)(GetRef<GemmSP>(this), lower_args.target, lower_args.layout_map,
+             lower_args.thread_bounds, lower_args.thread_var));
     ICHECK(prim_func->attrs.defined());
     auto global_symbol = prim_func->attrs.GetAttr<String>("global_symbol");
     ICHECK(global_symbol.has_value());
@@ -199,27 +200,29 @@ Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   }
 }
 
-LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
+LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &layout_args,
                                   InferLevel level) const {
   if (completed_)
     return {};
   LayoutMap results;
   if (const auto f = Function::GetGlobal("tl.gemm_sp.infer_layout")) {
-    auto inferred_layouts = Downcast<LayoutMap>(
-        (*f)(GetRef<GemmSP>(this), T.target, T.thread_bounds));
-    auto block_size = *as_const_int(T.thread_bounds->extent);
-    String gemm_inst = getGemmSPInstructionKey(block_size, T.target);
+    auto inferred_layouts = Downcast<LayoutMap>((*f)(
+        GetRef<GemmSP>(this), layout_args.target, layout_args.thread_bounds));
+    auto block_size = *as_const_int(layout_args.thread_bounds->extent);
+    String gemm_inst = getGemmSPInstructionKey(block_size, layout_args.target);
     bool reuse_existing_shared_layout =
-        ResolveGemmSPImpl(T.target).reuse_existing_shared_layout(gemm_inst);
+        ResolveGemmSPImpl(layout_args.target)
+            .reuse_existing_shared_layout(gemm_inst);
     for (auto kv : inferred_layouts) {
       const Buffer &buf = kv.first;
       const Layout &layout = kv.second;
       if (reuse_existing_shared_layout && IsSharedBuffer(buf) &&
-          T.layout_map.count(buf)) {
+          layout_args.layout_map.count(buf)) {
         continue;
       }
       if (auto frag = layout.as<Fragment>()) {
-        results.Set(buf, frag.value()->BindThreadRange(T.thread_bounds));
+        results.Set(buf,
+                    frag.value()->BindThreadRange(layout_args.thread_bounds));
       } else {
         results.Set(buf, layout);
       }

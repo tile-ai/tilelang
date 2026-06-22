@@ -208,12 +208,13 @@ For MakeSIMTLoop(const AtomicAddNode &op, arith::Analyzer *analyzer) {
   return Downcast<For>(body);
 }
 
-LayoutMap InferSIMTLayout(const AtomicAddNode &op, const LayoutInferArgs &T,
-                          InferLevel) {
+LayoutMap InferSIMTLayout(const AtomicAddNode &op,
+                          const LayoutInferArgs &layout_args, InferLevel) {
   if (IsFragmentBuffer(op.src) && IsFragmentBuffer(op.dst)) {
-    if (T.layout_map.count(op.src) && T.layout_map.count(op.dst)) {
-      Layout src_layout = T.layout_map.at(op.src);
-      Layout dst_layout = T.layout_map.at(op.dst);
+    if (layout_args.layout_map.count(op.src) &&
+        layout_args.layout_map.count(op.dst)) {
+      Layout src_layout = layout_args.layout_map.at(op.src);
+      Layout dst_layout = layout_args.layout_map.at(op.dst);
       ICHECK(StructuralEqual()(src_layout, dst_layout))
           << "AtomicAdd requires src and dst to have the same layout, but got "
           << "src layout: " << src_layout << ", dst layout: " << dst_layout
@@ -227,7 +228,7 @@ LayoutMap InferSIMTLayout(const AtomicAddNode &op, const LayoutInferArgs &T,
 } // namespace
 
 struct AtomicAdd {
-  static Stmt LowerSIMT(const AtomicAddNode &op, const LowerArgs &T,
+  static Stmt LowerSIMT(const AtomicAddNode &op, const LowerArgs &lower_args,
                         arith::Analyzer *analyzer) {
     auto simt_loop = MakeSIMTLoop(op, analyzer);
     auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
@@ -235,26 +236,28 @@ struct AtomicAdd {
     std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
                                       InferLevel::kFree};
     for (auto level : levels) {
-      par_op->InferLayout({T.target,
-                           T.thread_bounds,
-                           T.layout_map,
+      par_op->InferLayout({lower_args.target,
+                           lower_args.thread_bounds,
+                           lower_args.layout_map,
                            analyzer,
                            false,
-                           T.buffer_remap,
+                           lower_args.buffer_remap,
                            {}},
                           level);
     }
     auto loop_layout = par_op->GetLoopLayout();
-    return LowerParallelLoop(fused_loop, loop_layout, T.thread_var, analyzer,
-                             T.layout_map, par_op->GetPredicate(T.thread_var),
+    return LowerParallelLoop(fused_loop, loop_layout, lower_args.thread_var,
+                             analyzer, lower_args.layout_map,
+                             par_op->GetPredicate(lower_args.thread_var),
                              /*parallel_loop=*/true, /*should_vectorize=*/true,
                              par_op->LoopLayoutRequiresPaddingGuard());
   }
 
   static LayoutMap InferLayout(const AtomicAddNode &op,
-                               const LayoutInferArgs &T, InferLevel level) {
+                               const LayoutInferArgs &layout_args,
+                               InferLevel level) {
     if (!UseTMA(op)) {
-      return InferSIMTLayout(op, T, level);
+      return InferSIMTLayout(op, layout_args, level);
     }
 
     Map<Buffer, Layout> result_map;
@@ -265,7 +268,8 @@ struct AtomicAdd {
       return result_map;
     }
 
-    if (level == InferLevel::kFree && !T.layout_map.count(shared_tensor)) {
+    if (level == InferLevel::kFree &&
+        !layout_args.layout_map.count(shared_tensor)) {
       int dim = shared_tensor->shape.size();
       const int64_t mat_stride = *as_const_int(shared_tensor->shape[dim - 2]);
       const int64_t mat_continuous =
@@ -286,10 +290,10 @@ struct AtomicAdd {
     return result_map;
   }
 
-  static Stmt Lower(const AtomicAddNode &op, const LowerArgs &T,
+  static Stmt Lower(const AtomicAddNode &op, const LowerArgs &lower_args,
                     arith::Analyzer *analyzer) {
     if (!UseTMA(op)) {
-      return LowerSIMT(op, T, analyzer);
+      return LowerSIMT(op, lower_args, analyzer);
     }
 
     // For AtomicAdd with TMA: src is shared memory, dst is global memory.
@@ -338,12 +342,12 @@ struct AtomicAdd {
     Buffer shared_tensor_unmapped = shared_tensor;
     desc.interleave = static_cast<int>(CU_TENSOR_MAP_INTERLEAVE_NONE);
     Layout shared_layout;
-    if (T.layout_map.count(shared_tensor)) {
-      shared_layout = T.layout_map.at(shared_tensor);
-      ICHECK(T.buffer_remap.count(shared_tensor))
+    if (lower_args.layout_map.count(shared_tensor)) {
+      shared_layout = lower_args.layout_map.at(shared_tensor);
+      ICHECK(lower_args.buffer_remap.count(shared_tensor))
           << "shared_tensor: " << shared_tensor->name
           << " not found in buffer_remap";
-      shared_tensor = T.buffer_remap.at(shared_tensor);
+      shared_tensor = lower_args.buffer_remap.at(shared_tensor);
     }
     if (!shared_layout.defined()) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
@@ -492,7 +496,7 @@ struct AtomicAdd {
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(),
                                 {IntImm(DataType::Int(32), 0), Bool(true)})));
-    return IfThenElse(EQ(T.thread_var, T.thread_bounds->min),
+    return IfThenElse(EQ(lower_args.thread_var, lower_args.thread_bounds->min),
                       SeqStmt(std::move(seq)));
   }
 };

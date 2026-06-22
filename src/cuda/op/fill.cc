@@ -52,9 +52,9 @@ std::optional<PrimExpr> FullRegionElements(const Buffer &buffer,
 }
 
 std::optional<Stmt> TryLowerSharedBulkZeroFill(const FillNode &op,
-                                               const LowerArgs &T,
+                                               const LowerArgs &lower_args,
                                                arith::Analyzer *analyzer) {
-  if (!CanUseStBulkShared(T.target)) {
+  if (!CanUseStBulkShared(lower_args.target)) {
     return std::nullopt;
   }
   if (!IsSharedBuffer(op.dst) || !IsZeroFillValue(op.value, analyzer)) {
@@ -84,18 +84,19 @@ std::optional<Stmt> TryLowerSharedBulkZeroFill(const FillNode &op,
       Call(DataType::Handle(), ptx_st_bulk_shared(),
            {op.dst->data, bytes, make_const(DataType::UInt(64), 0)});
   Stmt body = Evaluate(bulk_store);
-  if (T.thread_var.defined() && T.thread_bounds.defined()) {
-    body = IfThenElse(EQ(T.thread_var, T.thread_bounds->min), body);
+  if (lower_args.thread_var.defined() && lower_args.thread_bounds.defined()) {
+    body = IfThenElse(EQ(lower_args.thread_var, lower_args.thread_bounds->min),
+                      body);
   }
   return body;
 }
 
-Stmt LowerCudaFill(const FillNode &op, const LowerArgs &T,
+Stmt LowerCudaFill(const FillNode &op, const LowerArgs &lower_args,
                    arith::Analyzer *analyzer) {
-  if (auto bulk_fill = TryLowerSharedBulkZeroFill(op, T, analyzer)) {
+  if (auto bulk_fill = TryLowerSharedBulkZeroFill(op, lower_args, analyzer)) {
     return bulk_fill.value();
   }
-  return backend::Fill::Lower(op, T, analyzer);
+  return backend::Fill::Lower(op, lower_args, analyzer);
 }
 
 bool RegisterCudaFill() {

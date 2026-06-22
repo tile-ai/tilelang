@@ -147,10 +147,10 @@ class TileOperator;
 
 class TileOperatorNode : public ffi::Object {
 public:
-  virtual tirx::Stmt Lower(const LowerArgs &T,
+  virtual tirx::Stmt Lower(const LowerArgs &lower_args,
                            arith::Analyzer *analyzer) const = 0;
 
-  virtual LayoutMap InferLayout(const LayoutInferArgs &T,
+  virtual LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                                 InferLevel level) const = 0;
 
   virtual TileOperator Clone() const = 0;

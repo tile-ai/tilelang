@@ -139,11 +139,13 @@ inline For MakeSIMTLoop(const AtomicOpBaseNode &op, arith::Analyzer *analyzer) {
 }
 
 inline LayoutMap InferSIMTLayout(const AtomicOpBaseNode &op,
-                                 const LayoutInferArgs &T, InferLevel) {
+                                 const LayoutInferArgs &layout_args,
+                                 InferLevel) {
   if (IsFragmentBuffer(op.src) && IsFragmentBuffer(op.dst)) {
-    if (T.layout_map.count(op.src) && T.layout_map.count(op.dst)) {
-      Layout src_layout = T.layout_map.at(op.src);
-      Layout dst_layout = T.layout_map.at(op.dst);
+    if (layout_args.layout_map.count(op.src) &&
+        layout_args.layout_map.count(op.dst)) {
+      Layout src_layout = layout_args.layout_map.at(op.src);
+      Layout dst_layout = layout_args.layout_map.at(op.dst);
       ICHECK(StructuralEqual()(src_layout, dst_layout))
           << "Atomic reduce requires src and dst to have the same layout, but "
              "got "
@@ -159,11 +161,12 @@ inline LayoutMap InferSIMTLayout(const AtomicOpBaseNode &op,
 
 struct AtomicReduce {
   static LayoutMap InferLayout(const AtomicOpBaseNode &op,
-                               const LayoutInferArgs &T, InferLevel level) {
-    return atomic_reduce::InferSIMTLayout(op, T, level);
+                               const LayoutInferArgs &layout_args,
+                               InferLevel level) {
+    return atomic_reduce::InferSIMTLayout(op, layout_args, level);
   }
 
-  static Stmt Lower(const AtomicOpBaseNode &op, const LowerArgs &T,
+  static Stmt Lower(const AtomicOpBaseNode &op, const LowerArgs &lower_args,
                     arith::Analyzer *analyzer) {
     auto simt_loop = atomic_reduce::MakeSIMTLoop(op, analyzer);
     auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
@@ -171,18 +174,19 @@ struct AtomicReduce {
     std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
                                       InferLevel::kFree};
     for (auto level : levels) {
-      par_op->InferLayout({T.target,
-                           T.thread_bounds,
-                           T.layout_map,
+      par_op->InferLayout({lower_args.target,
+                           lower_args.thread_bounds,
+                           lower_args.layout_map,
                            analyzer,
                            false,
-                           T.buffer_remap,
+                           lower_args.buffer_remap,
                            {}},
                           level);
     }
     auto loop_layout = par_op->GetLoopLayout();
-    return LowerParallelLoop(fused_loop, loop_layout, T.thread_var, analyzer,
-                             T.layout_map, par_op->GetPredicate(T.thread_var),
+    return LowerParallelLoop(fused_loop, loop_layout, lower_args.thread_var,
+                             analyzer, lower_args.layout_map,
+                             par_op->GetPredicate(lower_args.thread_var),
                              /*parallel_loop=*/true, /*should_vectorize=*/true,
                              par_op->LoopLayoutRequiresPaddingGuard());
   }

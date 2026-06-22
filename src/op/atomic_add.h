@@ -25,10 +25,11 @@ public:
                                     TileOperatorNode);
 
   /// Override Lower to add TMA support
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const;
+  Stmt Lower(const LowerArgs &lower_args, arith::Analyzer *analyzer) const;
 
   /// Override InferLayout to add TMA layout inference
-  LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) const;
+  LayoutMap InferLayout(const LayoutInferArgs &layout_args,
+                        InferLevel level) const;
 
   static const Op &Get();
   const Op &GetElemOp() const override;
@@ -52,10 +53,11 @@ struct AtomicAddImpl {
   const char *name;
   AtomicAddTargetPredicate match_target;
 
-  LayoutMap (*infer_layout)(const AtomicAddNode &op, const LayoutInferArgs &T,
+  LayoutMap (*infer_layout)(const AtomicAddNode &op,
+                            const LayoutInferArgs &layout_args,
                             InferLevel level);
 
-  Stmt (*lower)(const AtomicAddNode &op, const LowerArgs &T,
+  Stmt (*lower)(const AtomicAddNode &op, const LowerArgs &lower_args,
                 arith::Analyzer *analyzer);
 };
 

@@ -306,6 +306,23 @@ Keep include order stable within each group and let the formatter handle
 spacing. Avoid adding transitive includes just because another header currently
 pulls in the type.
 
+## Audit Tool
+
+Use the C++ API style audit script to find cleanup candidates before starting a
+focused naming or header-boundary cleanup:
+
+```bash
+python3 maint/scripts/audit_cpp_api_style.py
+```
+
+The script is intentionally advisory. It reports candidates such as non-Pascal
+API names, ambiguous `T` parameters, public ObjectNode fields that need
+compatibility review, and broad namespace imports in headers. Review each
+finding before changing code, because FFI-visible names, overrides, generated
+interfaces, and backend/runtime shims may need exceptions. By default the audit
+excludes generated templates and runtime shim directories; use the script flags
+to include those areas when a cleanup explicitly targets them.
+
 ## Exceptions
 
 Generated kernel templates, CUDA/HIP runtime shims, and external API adapters

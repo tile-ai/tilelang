@@ -123,13 +123,16 @@ TileOperator AtomicAddNode::Clone() const {
 
 const Op &AtomicAddNode::GetElemOp() const { return atomic_add_elem_op(); }
 
-LayoutMap AtomicAddNode::InferLayout(const LayoutInferArgs &T,
+LayoutMap AtomicAddNode::InferLayout(const LayoutInferArgs &layout_args,
                                      InferLevel level) const {
-  return ResolveAtomicAddImpl(T.target).infer_layout(*this, T, level);
+  return ResolveAtomicAddImpl(layout_args.target)
+      .infer_layout(*this, layout_args, level);
 }
 
-Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  return ResolveAtomicAddImpl(T.target).lower(*this, T, analyzer);
+Stmt AtomicAddNode::Lower(const LowerArgs &lower_args,
+                          arith::Analyzer *analyzer) const {
+  return ResolveAtomicAddImpl(lower_args.target)
+      .lower(*this, lower_args, analyzer);
 }
 
 TIR_REGISTER_TL_TILE_OP(AtomicAdd, atomicadd)
