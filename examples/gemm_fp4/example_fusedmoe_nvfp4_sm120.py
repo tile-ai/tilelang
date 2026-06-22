@@ -59,6 +59,29 @@ def unpack_fp4_to_float(packed: torch.Tensor, rows: int, cols: int) -> torch.Ten
     return lut[codes]
 
 
+def make_nvfp4_sf(mn, K, block_mn, block_K=64):
+    """Random NVFP4 E4M3 scale words for the SM120 layout: one word per
+    (block_mn-row block, K64 tile); its 4 bytes = the 4 K16-group scales, shared
+    across the block's rows. Returns (words [mn/block_mn, K/64] uint32, e4 [.., .., 4])."""
+    sf_mn = (mn + block_mn - 1) // block_mn
+    sf_k = (K + block_K - 1) // block_K
+    groups = block_K // 16
+    vals = torch.rand(sf_mn, sf_k, groups, device="cuda") * 1.75 + 0.25
+    e4 = vals.to(torch.float8_e4m3fn).view(torch.uint8)
+    words = e4.contiguous().view(torch.uint32).reshape(sf_mn, sf_k)
+    return words, e4
+
+
+def decode_nvfp4_sf(e4, mn, K, block_mn, block_K=64):
+    """[sf_mn, sf_k, 4] E4M3 bytes -> [mn, K] float scale (byte b -> K16-group b,
+    shared across block_mn rows)."""
+    sc = e4.view(torch.float8_e4m3fn).float()
+    sf_mn, sf_k, groups = sc.shape
+    sc = sc.reshape(sf_mn, sf_k * groups)
+    sc = sc.repeat_interleave(block_mn, dim=0)[:mn]
+    return sc.repeat_interleave(16, dim=1)[:, :K]
+
+
 def fusedmoe_nvfp4_sm120(
     num_tokens=128,
     hidden_size=256,
@@ -152,7 +175,6 @@ if __name__ == "__main__":
     num_tokens = args.num_tokens
     hidden_size = args.hidden_size
     intermediate_size = args.intermediate_size
-    one_scale = pack_e4m3x4_to_u32((1.0, 1.0, 1.0, 1.0))
 
     kernel = tilelang.compile(
         fusedmoe_nvfp4_sm120(num_tokens, hidden_size, intermediate_size),
@@ -169,25 +191,30 @@ if __name__ == "__main__":
     x = torch.randint(0, 256, (num_tokens, hidden_size // 2), device="cuda", dtype=torch.uint8)
     w_gate = torch.randint(0, 256, (intermediate_size, hidden_size // 2), device="cuda", dtype=torch.uint8)
     w_up = torch.randint(0, 256, (intermediate_size, hidden_size // 2), device="cuda", dtype=torch.uint8)
-    token_blocks = num_tokens // 16
-    hidden_blocks = hidden_size // 64
-    intermediate_blocks = intermediate_size // 8
-    x_scale = torch.full((token_blocks, hidden_blocks), one_scale, device="cuda", dtype=torch.uint32)
-    w_gate_scale = torch.full((intermediate_blocks, hidden_blocks), one_scale, device="cuda", dtype=torch.uint32)
-    w_up_scale = torch.full((intermediate_blocks, hidden_blocks), one_scale, device="cuda", dtype=torch.uint32)
+    # Random NVFP4 scales: blocks are 16 rows (tokens) for X, 8 rows (experts) for W,
+    # 64 along K (the m16n8k64 atom); one E4M3 word per (row-block, K64 tile).
+    x_scale, e4x = make_nvfp4_sf(num_tokens, hidden_size, 16)
+    w_gate_scale, e4g = make_nvfp4_sf(intermediate_size, hidden_size, 8)
+    w_up_scale, e4u = make_nvfp4_sf(intermediate_size, hidden_size, 8)
     selected = torch.zeros((num_tokens,), device="cuda", dtype=torch.int32)
     routing = torch.ones((num_tokens,), device="cuda", dtype=torch.float32)
 
     out = kernel(x, x_scale, w_gate, w_gate_scale, w_up, w_up_scale, selected, routing)
 
-    x_f32 = unpack_fp4_to_float(x, num_tokens, hidden_size)
-    gate_f32 = unpack_fp4_to_float(w_gate, intermediate_size, hidden_size)
-    up_f32 = unpack_fp4_to_float(w_up, intermediate_size, hidden_size)
-    gate = x_f32 @ gate_f32.T
-    up = x_f32 @ up_f32.T
-    ref = up * (gate * torch.sigmoid(gate))
+    # Reference (FlashInfer NVFP4 numerics): dequantize with E4M3 scales, gate/up GEMM,
+    # SiLU(gate)*up, then routing (expert 0 -> token_final_scales, else 0).
+    sx = decode_nvfp4_sf(e4x, num_tokens, hidden_size, 16)
+    sg = decode_nvfp4_sf(e4g, intermediate_size, hidden_size, 8)
+    su = decode_nvfp4_sf(e4u, intermediate_size, hidden_size, 8)
+    x_f32 = unpack_fp4_to_float(x, num_tokens, hidden_size) * sx
+    gate = x_f32 @ (unpack_fp4_to_float(w_gate, intermediate_size, hidden_size) * sg).T
+    up = x_f32 @ (unpack_fp4_to_float(w_up, intermediate_size, hidden_size) * su).T
+    routed = torch.where(selected == 0, routing, torch.zeros_like(routing)).unsqueeze(1)
+    ref = up * (gate * torch.sigmoid(gate)) * routed
     diff = (out.float() - ref).abs()
-    print(f"[NUMERICAL] max_abs_diff={diff.max().item():.4f}, rel_err={diff.sum().item() / (ref.abs().sum().item() + 1e-10):.6f}")
+    rel_err = diff.sum().item() / (ref.abs().sum().item() + 1e-10)
+    print(f"[NUMERICAL] max_abs_diff={diff.max().item():.4f}, rel_err={rel_err:.6f}")
+    print("[PASS] numerical verification" if rel_err < 0.05 else "[WARN] large diff")
 
     warmup = int(os.environ.get("TL_NVFP4_MOE_WARMUP", "20"))
     iters = int(os.environ.get("TL_NVFP4_MOE_ITERS", "100"))

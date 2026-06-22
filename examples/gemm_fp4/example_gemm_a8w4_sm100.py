@@ -87,6 +87,9 @@ block_M = int(os.environ.get("TL_A8W4_BLOCK_M", "128"))
 block_N = int(os.environ.get("TL_A8W4_BLOCK_N", "64"))
 block_K = int(os.environ.get("TL_A8W4_BLOCK_K", "128"))
 
+if K % 2 != 0:
+    raise ValueError("TL_A8W4_K must be even for packed FP4 weights")
+
 print(f"Running SM100 A8W4 GEMM: M={M}, N={N}, K={K}, block=({block_M},{block_N},{block_K})")
 
 func = matmul_a8w4_sm100(M, N, K, block_M, block_N, block_K, T.float32, T.float32)

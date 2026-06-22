@@ -119,6 +119,9 @@ block_token = int(os.environ.get("TL_MOE_BLOCK_TOKEN", "128"))
 block_hidden = int(os.environ.get("TL_MOE_BLOCK_HIDDEN", "128"))
 block_expert = int(os.environ.get("TL_MOE_BLOCK_EXPERT", "64"))
 
+if d_hidden % 2 != 0:
+    raise ValueError("TL_MOE_HIDDEN must be even for packed FP4 expert weights")
+
 print(
     f"Running SM100 A8W4 fused MoE: tokens={num_tokens}, hidden={d_hidden}, "
     f"expert={d_expert}, block=({block_token},{block_hidden},{block_expert})"

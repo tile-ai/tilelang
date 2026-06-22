@@ -276,6 +276,8 @@ def nvfp4_gemm(
     B_shape = retrieve_shape(B_region)
     C_shape = retrieve_shape(C_region)
 
+    assert len(A_shape) >= 2 and len(B_shape) >= 2, (
+        f"T.nvfp4_gemm requires rank>=2 A/B operands, got {len(A_shape)}, {len(B_shape)}")
     M, N = C_shape
     M_A = A_shape[-1] if transpose_A else A_shape[-2]
     K = A_shape[-2] if transpose_A else A_shape[-1]
@@ -293,6 +295,10 @@ def nvfp4_gemm(
     B_stride = retrieve_stride(B_region)
     A_offset = retrieve_offset(A_region)
     B_offset = retrieve_offset(B_region)
+    # Only the inner (K-dim) base offset is forwarded; the outer-dim base offset must
+    # be zero or a row-sliced packed tile would silently read the wrong data.
+    assert prim_expr_equal(A_offset[-2], 0), f"T.nvfp4_gemm requires A outer base offset 0, got {A_offset[-2]}"
+    assert prim_expr_equal(B_offset[-2], 0), f"T.nvfp4_gemm requires B outer base offset 0, got {B_offset[-2]}"
     C_coords = [r.min for r in C_region.region]
 
     A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])

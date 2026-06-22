@@ -80,17 +80,22 @@ def matmul_fp4_sm120(M, N, K, block_M, block_N, block_K, out_dtype, accum_dtype,
 def matmul_nvfp4_sm120(M, N, K, out_dtype, accum_dtype):
     block_M, block_N, block_K = 16, 8, 64
     threads = 32
+    packed_K = K // 2
     packed_block_K = block_K // 2
 
     @T.prim_func
     def main(
-        A: T.Tensor((M, K // 2), "uint8"),
-        B: T.Tensor((N, K // 2), "uint8"),
+        A: T.Tensor((M, K), T.float4_e2m1fn),
+        B: T.Tensor((N, K), T.float4_e2m1fn),
         SFA: T.Tensor((T.ceildiv(M, block_M), T.ceildiv(K, block_K)), "uint32"),
         SFB: T.Tensor((T.ceildiv(N, block_N), T.ceildiv(K, block_K)), "uint32"),
         C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
+            # NVFP4 operands are native FP4; view as dense packed bytes (2 e2m1/byte)
+            # for the mxf4nvf4 ldmatrix staging path.
+            A_bytes = T.view(A, (M, packed_K), "uint8")
+            B_bytes = T.view(B, (N, packed_K), "uint8")
             A_shared = T.alloc_shared((block_M, packed_block_K), "uint8")
             B_shared = T.alloc_shared((block_N, packed_block_K), "uint8")
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -104,8 +109,8 @@ def matmul_nvfp4_sm120(M, N, K, out_dtype, accum_dtype):
 
             T.clear(C_local)
             for ko in T.serial(T.ceildiv(K, block_K)):
-                T.copy(A[by * block_M, ko * packed_block_K], A_shared)
-                T.copy(B[bx * block_N, ko * packed_block_K], B_shared)
+                T.copy(A_bytes[by * block_M, ko * packed_block_K], A_shared)
+                T.copy(B_bytes[bx * block_N, ko * packed_block_K], B_shared)
                 SFA_local[0] = SFA[by, ko]
                 SFB_local[0] = SFB[bx, ko]
                 T.nvfp4_gemm(A_shared, B_shared, SFA_local, SFB_local, C_local,
@@ -153,10 +158,36 @@ def run_fp4(args):
     _bench(lambda: jit_kernel(a_unpacked, b_unpacked), M, N, K, args)
 
 
+def make_nvfp4_sf(mn, K, block_mn, block_K=64):
+    """Random NVFP4 scale factors for the SM120 mma.sync block-scale layout.
+
+    Each warp lane loads the SAME uint32 SF word per (block_mn-row block, K64 tile),
+    so that word's 4 E4M3 bytes are the 4 K16-group scales, shared across the block's
+    rows. Returns (sf_words [mn/block_mn, K/64] uint32, e4 bytes [.., .., 4] uint8).
+    """
+    sf_mn = (mn + block_mn - 1) // block_mn
+    sf_k = (K + block_K - 1) // block_K
+    groups = block_K // 16  # 4 E4M3 per word
+    vals = torch.rand(sf_mn, sf_k, groups, device="cuda") * 1.75 + 0.25
+    e4 = vals.to(torch.float8_e4m3fn).view(torch.uint8)  # [sf_mn, sf_k, 4]
+    words = e4.contiguous().view(torch.uint32).reshape(sf_mn, sf_k)
+    return words, e4
+
+
+def decode_nvfp4_sf(e4, mn, K, block_mn, block_K=64):
+    """[sf_mn, sf_k, 4] E4M3 bytes -> [mn, K] float scale. byte b -> K16-group b
+    within the K64 tile; the scale is shared across the block_mn rows of each block."""
+    sc = e4.view(torch.float8_e4m3fn).float()        # [sf_mn, sf_k, 4]
+    sf_mn, sf_k, groups = sc.shape
+    sc = sc.reshape(sf_mn, sf_k * groups)            # [sf_mn, K//16]
+    sc = sc.repeat_interleave(block_mn, dim=0)[:mn]  # [mn, K//16] (rows share)
+    return sc.repeat_interleave(16, dim=1)[:, :K]    # [mn, K]
+
+
 def run_nvfp4(args):
     M, N, K = args.m, args.n, args.k
     block_M, block_N, block_K = 16, 8, 64
-    print(f"Running SM120 NVFP4 GEMM (kind::mxf4nvf4.block_scale): M={M}, N={N}, K={K}, scale=uniform")
+    print(f"Running SM120 NVFP4 GEMM (kind::mxf4nvf4.block_scale): M={M}, N={N}, K={K}, scale=random")
 
     kernel = tilelang.compile(
         matmul_nvfp4_sm120(M, N, K, T.float32, T.float32),
@@ -172,34 +203,18 @@ def run_nvfp4(args):
     a = torch.randint(0, 256, (M, K // 2), device="cuda", dtype=torch.uint8)
     b = torch.randint(0, 256, (N, K // 2), device="cuda", dtype=torch.uint8)
 
-    # Scale factors: 2D [ceil(M/16), ceil(K/64)] uint32, 4 E4M3 packed per word.
-    # NOTE: the exact SM120 mma.sync SF-register -> (row, K16-block) mapping is not
-    # modeled in this reference, so verification uses UNIFORM scale (=1.0) for an
-    # exact data check, plus a scale spot-check (0.5 x 2.0 preserves the product).
-    # Random per-block-scale verification is a follow-up (needs the SF layout).
-    sf_m, sf_n, sf_k = (M + block_M - 1) // block_M, (N + block_N - 1) // block_N, (K + block_K - 1) // block_K
-    one = pack_e4m3x4_to_u32((1.0, 1.0, 1.0, 1.0))
-    half = pack_e4m3x4_to_u32((0.5, 0.5, 0.5, 0.5))
-    two = pack_e4m3x4_to_u32((2.0, 2.0, 2.0, 2.0))
-    sfa = torch.full((sf_m, sf_k), one, device="cuda", dtype=torch.uint32)
-    sfb = torch.full((sf_n, sf_k), one, device="cuda", dtype=torch.uint32)
-
+    sfa, e4a = make_nvfp4_sf(M, K, block_M, block_K)
+    sfb, e4b = make_nvfp4_sf(N, K, block_N, block_K)
     c = kernel(a, b, sfa, sfb)
-    ref = unpack_fp4_to_float(a, M, K) @ unpack_fp4_to_float(b, N, K).T
+
+    sa = decode_nvfp4_sf(e4a, M, K, block_M, block_K)  # [M, K]
+    sb = decode_nvfp4_sf(e4b, N, K, block_N, block_K)  # [N, K]
+    ref = (unpack_fp4_to_float(a, M, K) * sa) @ (unpack_fp4_to_float(b, N, K) * sb).T
     diff = (c.float() - ref).abs()
     max_diff = diff.max().item()
     rel_err = diff.sum().item() / (ref.abs().sum().item() + 1e-10)
     print(f"[NUMERICAL] max_abs_diff={max_diff:.4f}, rel_err={rel_err:.6f}")
-    print("[PASS] numerical verification" if max_diff < 1.0 else "[WARN] large diff")
-
-    # Scale spot-check: SFA=0.5, SFB=2.0 must reproduce the unit-scale result.
-    c_scaled = kernel(
-        a, b,
-        torch.full((sf_m, sf_k), half, device="cuda", dtype=torch.uint32),
-        torch.full((sf_n, sf_k), two, device="cuda", dtype=torch.uint32),
-    )
-    sdiff = (c_scaled.float() - ref).abs().max().item()
-    print(f"[SCALE] max_abs_diff(SFA=0.5 x SFB=2.0 vs unit)={sdiff:.4f} ({'PASS' if sdiff < 1.0 else 'WARN'})")
+    print("[PASS] numerical verification" if rel_err < 0.05 else "[WARN] large diff")
 
     _bench(lambda: kernel(a, b, sfa, sfb), M, N, K, args)
 

@@ -124,14 +124,22 @@ class TensorCoreIntrinEmitter:
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
         if self.is_blockscaled:
-            if str(a_dtype) != "float4_e2m1fn" or self.chunk < 64:
-                raise ValueError("SM120 block-scaled NVFP4 MMA requires FP4 inputs and chunk >= 64")
+            if str(a_dtype) != "float4_e2m1fn":
+                raise ValueError("SM120 block-scaled NVFP4 MMA requires FP4 inputs")
+            # One call consumes exactly one m16n8k64 atom and a single per-lane scale
+            # register (4 E4M3 = the 4 K16 groups of this K64). Multiple K64 atoms in
+            # one call would reuse that one scale word, so require chunk == 64 and tile
+            # larger K with an outer loop (as the examples do).
+            if self.chunk != 64:
+                raise ValueError(
+                    "SM120 block-scaled NVFP4 MMA requires chunk == 64 (one K64 atom per "
+                    "call); tile larger K with an outer loop")
             self.k_dim = 64
             return
         # SM120 f8f6f4 FP4 MMA is m16n8k32.  Although 256 / 4 would allow a
         # k64 fragment by bit count, there is no k64 dispatcher for FP4.
         if str(a_dtype) == "float4_e2m1fn":
-            if self.chunk < 32:
+            if self.chunk % 32 != 0:
                 raise ValueError("FP4 MMA requires chunk to be a multiple of 32 (m16n8k32)")
             self.k_dim = min(32, self.chunk)
         else:

@@ -138,7 +138,8 @@ z_input = torch.zeros(num_tokens, d_hidden, device="cuda", dtype=torch.float8_e4
 z_gate = torch.zeros(d_expert, d_hidden, device="cuda", dtype=torch.uint8)
 z_up = torch.zeros(d_expert, d_hidden, device="cuda", dtype=torch.uint8)
 c_zero = jit_kernel(z_input, z_gate, z_up)
-print(f"[{'PASS' if c_zero.abs().max().item() == 0.0 else 'FAIL'}] zeros in -> zeros out")
+assert c_zero.abs().max().item() == 0.0, f"Zero test failed: max={c_zero.abs().max().item()}"
+print("[PASS] zeros in -> zeros out")
 
 # --- Test 2: numerical verification (gate+up only, no down GEMM in this kernel) ---
 out = jit_kernel(input_fp8, W_gate_uint8, W_up_uint8)
