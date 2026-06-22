@@ -185,7 +185,6 @@ if not env.is_light_import():
 
     from .jit import jit, JITKernel, compile, par_compile  # noqa: F401
     from .profiler import Profiler  # noqa: F401
-    from .cache import clear_cache  # noqa: F401
     from .utils import (
         TensorSupplyType,  # noqa: F401
         deprecated,  # noqa: F401

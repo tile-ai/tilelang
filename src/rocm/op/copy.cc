@@ -58,10 +58,12 @@ enum class CopyInst : uint8_t {
 };
 
 struct Copy {
-  static LayoutMap InferLayout(const CopyNode &op, const LayoutInferArgs &T,
+  static LayoutMap InferLayout(const CopyNode &op,
+                               const LayoutInferArgs &layout_args,
                                InferLevel level) {
-    SelectInst(op, T.target, T.layout_map, T.analyzer);
-    return op.InferSIMTLayout(T, level);
+    SelectInst(op, layout_args.target, layout_args.layout_map,
+               layout_args.analyzer);
+    return op.InferSIMTLayout(layout_args, level);
   }
 
   static CopyInst SelectInst(const CopyNode &op, Target target,
@@ -82,20 +84,21 @@ struct Copy {
     return CopyInst::kNormal;
   }
 
-  static Stmt Lower(const CopyNode &op, const LowerArgs &T,
+  static Stmt Lower(const CopyNode &op, const LowerArgs &lower_args,
                     arith::Analyzer *analyzer) {
-    auto copy_inst = SelectInst(op, T.target, T.layout_map, analyzer);
+    auto copy_inst =
+        SelectInst(op, lower_args.target, lower_args.layout_map, analyzer);
     if (copy_inst == CopyInst::kCPAsync) {
-      return LowerCPAsync(op, T, analyzer);
+      return LowerCPAsync(op, lower_args, analyzer);
     }
     if (copy_inst == CopyInst::kNormal) {
-      return LowerNormalCopy(op, T, analyzer);
+      return LowerNormalCopy(op, lower_args, analyzer);
     }
     LOG(FATAL) << "Unsupported ROCm copy inst " << static_cast<int>(copy_inst);
   }
 
 private:
-  static Stmt LowerCPAsync(const CopyNode &op, const LowerArgs &T,
+  static Stmt LowerCPAsync(const CopyNode &op, const LowerArgs &lower_args,
                            arith::Analyzer *analyzer) {
     using namespace tvm::transform;
 
@@ -106,7 +109,7 @@ private:
     bool explicit_async_semantics =
         no_implicit_commit_wait || GetIsAsyncCopy(op);
     if (!enable_async_copy && !explicit_async_semantics) {
-      return LowerNormalCopy(op, T, analyzer);
+      return LowerNormalCopy(op, lower_args, analyzer);
     }
 
     auto simt_loop = op.MakeSIMTLoop(analyzer);
@@ -116,19 +119,19 @@ private:
     std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
                                       InferLevel::kFree};
     for (auto level : levels) {
-      par_op->InferLayout({T.target,
-                           T.thread_bounds,
-                           T.layout_map,
+      par_op->InferLayout({lower_args.target,
+                           lower_args.thread_bounds,
+                           lower_args.layout_map,
                            analyzer,
                            false,
-                           T.buffer_remap,
+                           lower_args.buffer_remap,
                            {}},
                           level);
     }
     auto loop_layout = par_op->GetLoopLayout();
     Stmt lowered_loop = LowerParallelLoop(
-        par_op->GetRoot(), loop_layout, T.thread_var, analyzer, T.layout_map,
-        par_op->GetPredicate(T.thread_var),
+        par_op->GetRoot(), loop_layout, lower_args.thread_var, analyzer,
+        lower_args.layout_map, par_op->GetPredicate(lower_args.thread_var),
         /*parallel_loop=*/true,
         /*should_vectorize=*/true, par_op->LoopLayoutRequiresPaddingGuard());
 
@@ -161,7 +164,7 @@ private:
       DLOG(WARNING)
           << "Fallback to normal copy because ROCm async-copy rewrite "
              "found no eligible global->shared store.";
-      return LowerNormalCopy(op, T, analyzer);
+      return LowerNormalCopy(op, lower_args, analyzer);
     }
     if (no_implicit_commit_wait) {
       return async_copy_loop;

@@ -143,14 +143,16 @@ TileOperator AtomicMinNode::Clone() const {
 
 const Op &AtomicMinNode::GetElemOp() const { return atomic_min_elem_op(); }
 
-LayoutMap AtomicOpBaseNode::InferLayout(const LayoutInferArgs &T,
+LayoutMap AtomicOpBaseNode::InferLayout(const LayoutInferArgs &layout_args,
                                         InferLevel level) const {
-  return ResolveAtomicReduceImpl(T.target).infer_layout(*this, T, level);
+  return ResolveAtomicReduceImpl(layout_args.target)
+      .infer_layout(*this, layout_args, level);
 }
 
-Stmt AtomicOpBaseNode::Lower(const LowerArgs &T,
+Stmt AtomicOpBaseNode::Lower(const LowerArgs &lower_args,
                              arith::Analyzer *analyzer) const {
-  return ResolveAtomicReduceImpl(T.target).lower(*this, T, analyzer);
+  return ResolveAtomicReduceImpl(lower_args.target)
+      .lower(*this, lower_args, analyzer);
 }
 
 // ============================================================================

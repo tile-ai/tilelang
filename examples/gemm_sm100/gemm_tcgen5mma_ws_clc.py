@@ -52,7 +52,8 @@ def gemm_clc_persistent_2cta(
         tmem_full = T.alloc_cluster_barrier([1] * 2)
         tmem_empty = T.alloc_cluster_barrier([128 * 2] * 2)
         schedule_arrived = T.alloc_cluster_barrier([1])
-        schedule_finished = T.alloc_cluster_barrier([7])
+        schedule_finished = T.alloc_cluster_barrier([13])
+        schedule_published = T.alloc_barrier([1])
         clc_result = T.alloc_shared((4,), "uint32", scope="shared")
         schedule_valid = T.alloc_shared((1,), "int32")
         schedule_tile_id = T.alloc_shared((1,), "int32")
@@ -63,18 +64,14 @@ def gemm_clc_persistent_2cta(
 
         if tx < 32:
             for work_iter in T.unroll(total_cluster_tiles):
+                tile_id = T.alloc_var(T.int32, init=block_id // 2)
                 if work_iter > 0:
-                    T.mbarrier_wait_parity(schedule_arrived, (work_iter - 1) & 1)
-                    if tx == 0:
-                        T.mbarrier_arrive(schedule_finished, 0)
+                    T.mbarrier_wait_parity(schedule_published, (work_iter - 1) & 1)
                     if schedule_valid[0] == 0:
                         break
-
-                tile_id = T.if_then_else(
-                    work_iter == 0,
-                    block_id // 2,
-                    schedule_tile_id[0],
-                )
+                    tile_id = schedule_tile_id[0]
+                    if tx == 0:
+                        T.mbarrier_arrive(schedule_finished, 0)
                 bx, by = get_swizzled_block_idx(tile_id, group_size, m_clusters, cta_id)
 
                 for k in T.serial(k_blocks):
@@ -95,11 +92,11 @@ def gemm_clc_persistent_2cta(
         elif cta_id == 0 and tx < 64:
             for work_iter in T.unroll(total_cluster_tiles):
                 if work_iter > 0:
-                    T.mbarrier_wait_parity(schedule_arrived, (work_iter - 1) & 1)
-                    if tx == 32:
-                        T.mbarrier_arrive(schedule_finished, 0)
+                    T.mbarrier_wait_parity(schedule_published, (work_iter - 1) & 1)
                     if schedule_valid[0] == 0:
                         break
+                    if tx == 32:
+                        T.mbarrier_arrive(schedule_finished, 0)
 
                 T.mbarrier_wait_parity(tmem_empty[work_iter & 1], ((work_iter // 2) & 1) ^ 1)
                 for k in T.serial(k_blocks):
@@ -136,24 +133,21 @@ def gemm_clc_persistent_2cta(
                     T.mbarrier_wait_parity(schedule_arrived, work_iter & 1)
                     schedule_valid[0] = T.clc_is_canceled(clc_result)
                     schedule_tile_id[0] = T.cast(T.clc_get_first_ctaid_x(clc_result), "int32") // 2
+                    T.mbarrier_arrive(schedule_published)
                     T.mbarrier_arrive(schedule_finished, 0)
                     if schedule_valid[0] == 0:
                         break
 
         elif 128 <= tx < 256:
             for work_iter in T.unroll(total_cluster_tiles):
+                tile_id = T.alloc_var(T.int32, init=block_id // 2)
                 if work_iter > 0:
-                    T.mbarrier_wait_parity(schedule_arrived, (work_iter - 1) & 1)
-                    if tx == 128:
-                        T.mbarrier_arrive(schedule_finished, 0)
+                    T.mbarrier_wait_parity(schedule_published, (work_iter - 1) & 1)
                     if schedule_valid[0] == 0:
                         break
-
-                tile_id = T.if_then_else(
-                    work_iter == 0,
-                    block_id // 2,
-                    schedule_tile_id[0],
-                )
+                    tile_id = schedule_tile_id[0]
+                    if tx % 32 == 0:
+                        T.mbarrier_arrive(schedule_finished, 0)
                 bx, by = get_swizzled_block_idx(tile_id, group_size, m_clusters, cta_id)
 
                 T.mbarrier_wait_parity(tmem_full[work_iter & 1], (work_iter // 2) & 1)
@@ -220,7 +214,8 @@ def gemm_clc_persistent_2cta_pipelined_clc(
         tmem_empty = T.alloc_cluster_barrier([128 * 2] * 2)
 
         schedule_arrived = T.alloc_cluster_barrier([1] * clc_stages)
-        schedule_finished = T.alloc_cluster_barrier([5] * clc_stages)
+        schedule_finished = T.alloc_cluster_barrier([11] * clc_stages)
+        schedule_published = T.alloc_barrier([1] * clc_stages)
         clc_result = T.alloc_shared((clc_stages, 4), "uint32", scope="shared")
         schedule_valid = T.alloc_shared((clc_stages,), "int32")
         schedule_tile_id = T.alloc_shared((clc_stages,), "int32")
@@ -233,19 +228,15 @@ def gemm_clc_persistent_2cta_pipelined_clc(
             for work_iter in T.unroll(total_cluster_tiles):
                 s_cons = (work_iter - 1) % clc_stages
                 c_cons = (work_iter - 1) // clc_stages
+                tile_id = T.alloc_var(T.int32, init=block_id // 2)
 
                 if work_iter > 0:
-                    T.mbarrier_wait_parity(schedule_arrived[s_cons], c_cons & 1)
-                    if tx == 0:
-                        T.mbarrier_arrive(schedule_finished[s_cons], 0)
+                    T.mbarrier_wait_parity(schedule_published[s_cons], c_cons & 1)
                     if schedule_valid[s_cons] == 0:
                         break
-
-                tile_id = T.if_then_else(
-                    work_iter == 0,
-                    block_id // 2,
-                    schedule_tile_id[s_cons],
-                )
+                    tile_id = schedule_tile_id[s_cons]
+                    if tx == 0:
+                        T.mbarrier_arrive(schedule_finished[s_cons], 0)
                 bx, by = get_swizzled_block_idx(tile_id, group_size, m_clusters, cta_id)
 
                 for k in T.serial(k_blocks):
@@ -269,11 +260,11 @@ def gemm_clc_persistent_2cta_pipelined_clc(
                 c_cons = (work_iter - 1) // clc_stages
 
                 if work_iter > 0:
-                    T.mbarrier_wait_parity(schedule_arrived[s_cons], c_cons & 1)
-                    if tx == 32:
-                        T.mbarrier_arrive(schedule_finished[s_cons], 0)
+                    T.mbarrier_wait_parity(schedule_published[s_cons], c_cons & 1)
                     if schedule_valid[s_cons] == 0:
                         break
+                    if tx == 32:
+                        T.mbarrier_arrive(schedule_finished[s_cons], 0)
 
                 T.mbarrier_wait_parity(tmem_empty[work_iter & 1], ((work_iter // 2) & 1) ^ 1)
                 for k in T.serial(k_blocks):
@@ -314,6 +305,7 @@ def gemm_clc_persistent_2cta_pipelined_clc(
                     T.mbarrier_wait_parity(schedule_arrived[s_clc], c_clc & 1)
                     schedule_valid[s_clc] = T.clc_is_canceled(clc_result[s_clc, :])
                     schedule_tile_id[s_clc] = T.cast(T.clc_get_first_ctaid_x(clc_result[s_clc, :]), "int32") // 2
+                    T.mbarrier_arrive(schedule_published[s_clc])
                     if schedule_valid[s_clc] == 0:
                         break
 
@@ -321,19 +313,15 @@ def gemm_clc_persistent_2cta_pipelined_clc(
             for work_iter in T.unroll(total_cluster_tiles):
                 s_cons = (work_iter - 1) % clc_stages
                 c_cons = (work_iter - 1) // clc_stages
+                tile_id = T.alloc_var(T.int32, init=block_id // 2)
 
                 if work_iter > 0:
-                    T.mbarrier_wait_parity(schedule_arrived[s_cons], c_cons & 1)
-                    if tx == 128:
-                        T.mbarrier_arrive(schedule_finished[s_cons], 0)
+                    T.mbarrier_wait_parity(schedule_published[s_cons], c_cons & 1)
                     if schedule_valid[s_cons] == 0:
                         break
-
-                tile_id = T.if_then_else(
-                    work_iter == 0,
-                    block_id // 2,
-                    schedule_tile_id[s_cons],
-                )
+                    tile_id = schedule_tile_id[s_cons]
+                    if tx % 32 == 0:
+                        T.mbarrier_arrive(schedule_finished[s_cons], 0)
                 bx, by = get_swizzled_block_idx(tile_id, group_size, m_clusters, cta_id)
 
                 T.mbarrier_wait_parity(tmem_full[work_iter & 1], (work_iter // 2) & 1)

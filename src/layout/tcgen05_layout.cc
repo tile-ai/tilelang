@@ -15,6 +15,8 @@
 namespace tvm {
 namespace tl {
 
+using namespace tirx;
+
 static IterVar make_itervar(std::string name, Range dom) {
   Var var = Var(name, dom->min->dtype);
   return IterVar(dom, var, IterVarType::kDataPar);

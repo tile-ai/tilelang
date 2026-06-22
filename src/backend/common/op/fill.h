@@ -20,25 +20,26 @@ namespace backend {
 using namespace tirx;
 
 struct Fill {
-  static Stmt Lower(const FillNode &op, const LowerArgs &T,
+  static Stmt Lower(const FillNode &op, const LowerArgs &lower_args,
                     arith::Analyzer *analyzer) {
     if (IsFragmentBuffer(op.dst)) {
       auto par_op = ParallelOp(op.MakeSIMTLoop(analyzer));
-      par_op->InferLayout({T.target,
-                           T.thread_bounds,
-                           T.layout_map,
+      par_op->InferLayout({lower_args.target,
+                           lower_args.thread_bounds,
+                           lower_args.layout_map,
                            analyzer,
                            false,
-                           T.buffer_remap,
+                           lower_args.buffer_remap,
                            {}},
                           InferLevel::kFree);
-      auto thread_loop = PartitionLoop(par_op->GetRoot(), T.thread_var,
+      auto thread_loop = PartitionLoop(par_op->GetRoot(), lower_args.thread_var,
                                        analyzer, par_op->GetLoopLayout());
-      auto vectorized_loop = VectorizeLoop(thread_loop, analyzer, T.layout_map);
+      auto vectorized_loop =
+          VectorizeLoop(thread_loop, analyzer, lower_args.layout_map);
       auto unrolled_loop = PragmaUnrollLoop(vectorized_loop);
 
-      if (par_op->GetPredicate(T.thread_var).defined()) {
-        return IfThenElse(par_op->GetPredicate(T.thread_var).value(),
+      if (par_op->GetPredicate(lower_args.thread_var).defined()) {
+        return IfThenElse(par_op->GetPredicate(lower_args.thread_var).value(),
                           unrolled_loop);
       }
       return unrolled_loop;
@@ -46,26 +47,28 @@ struct Fill {
 
     if (IsLocalBuffer(op.dst) || IsLocalVarBuffer(op.dst)) {
       auto init_loop = op.MakeSIMTLoop(analyzer);
-      auto vectorized_loop = VectorizeLoop(init_loop, analyzer, T.layout_map);
+      auto vectorized_loop =
+          VectorizeLoop(init_loop, analyzer, lower_args.layout_map);
       return PragmaUnrollLoop(vectorized_loop);
     }
 
     if (IsSharedBuffer(op.dst) || IsGlobalBuffer(op.dst)) {
       auto par_op = ParallelOp(op.MakeSIMTLoop(analyzer));
-      par_op->InferLayout({T.target,
-                           T.thread_bounds,
-                           T.layout_map,
+      par_op->InferLayout({lower_args.target,
+                           lower_args.thread_bounds,
+                           lower_args.layout_map,
                            analyzer,
                            false,
-                           T.buffer_remap,
+                           lower_args.buffer_remap,
                            {}},
                           InferLevel::kFree);
-      auto thread_loop = PartitionLoop(par_op->GetRoot(), T.thread_var,
+      auto thread_loop = PartitionLoop(par_op->GetRoot(), lower_args.thread_var,
                                        analyzer, par_op->GetLoopLayout());
-      auto vectorized_loop = VectorizeLoop(thread_loop, analyzer, T.layout_map);
+      auto vectorized_loop =
+          VectorizeLoop(thread_loop, analyzer, lower_args.layout_map);
       auto unrolled_loop = PragmaUnrollLoop(vectorized_loop);
-      if (par_op->GetPredicate(T.thread_var).defined()) {
-        return IfThenElse(par_op->GetPredicate(T.thread_var).value(),
+      if (par_op->GetPredicate(lower_args.thread_var).defined()) {
+        return IfThenElse(par_op->GetPredicate(lower_args.thread_var).value(),
                           unrolled_loop);
       }
       return unrolled_loop;

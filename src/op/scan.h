@@ -35,8 +35,9 @@ public:
         .def_ro("reverse", &CumSumOpNode::reverse);
   }
 
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
-  LayoutMap InferLayout(const LayoutInferArgs &T,
+  Stmt Lower(const LowerArgs &lower_args,
+             arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
   static const Op &Get();
   TileOperator Clone() const;
@@ -48,7 +49,7 @@ struct CumSumImpl {
   const char *name;
   CumSumTargetPredicate match_target;
 
-  Stmt (*lower)(const CumSumOpNode &op, const LowerArgs &T,
+  Stmt (*lower)(const CumSumOpNode &op, const LowerArgs &lower_args,
                 arith::Analyzer *analyzer);
 };
 
@@ -86,8 +87,9 @@ public:
         .def_ro("reverse", &CumMaxOpNode::reverse);
   }
 
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
-  LayoutMap InferLayout(const LayoutInferArgs &T,
+  Stmt Lower(const LowerArgs &lower_args,
+             arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
   static const Op &Get();
   TileOperator Clone() const;
@@ -99,7 +101,7 @@ struct CumMaxImpl {
   const char *name;
   CumMaxTargetPredicate match_target;
 
-  Stmt (*lower)(const CumMaxOpNode &op, const LowerArgs &T,
+  Stmt (*lower)(const CumMaxOpNode &op, const LowerArgs &lower_args,
                 arith::Analyzer *analyzer);
 };
 

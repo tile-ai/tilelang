@@ -174,17 +174,18 @@ std::pair<int, int> GemmWarpPolicyNode::computeWarpPartition(
                                                         target, gemm_inst);
 }
 
-Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+Stmt GemmNode::Lower(const LowerArgs &lower_args,
+                     arith::Analyzer *analyzer) const {
   if (const auto f = Function::GetGlobal("tl.gemm.lower")) {
-    PrimExpr mbar_phase = T.mbar_phase_expr;
+    PrimExpr mbar_phase = lower_args.mbar_phase_expr;
     if (auto explicit_phase = GetAnnotatedMbarPhaseExpr(annotations_)) {
       mbar_phase = explicit_phase.value();
     }
     // NOTE(wt): Decide the instruction key and compute warp partition on Python
     // side.
-    auto prim_func =
-        Downcast<PrimFunc>((*f)(GetRef<Gemm>(this), T.layout_map, T.target,
-                                T.thread_bounds, T.thread_var, mbar_phase));
+    auto prim_func = Downcast<PrimFunc>(
+        (*f)(GetRef<Gemm>(this), lower_args.layout_map, lower_args.target,
+             lower_args.thread_bounds, lower_args.thread_var, mbar_phase));
     ICHECK(prim_func->attrs.defined());
     auto global_symbol = prim_func->attrs.GetAttr<String>("global_symbol");
     ICHECK(global_symbol.has_value());
@@ -218,32 +219,34 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   }
 }
 
-LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
+LayoutMap GemmNode::InferLayout(const LayoutInferArgs &layout_args,
                                 InferLevel level) const {
   if (completed_)
     return {};
   LayoutMap results;
   if (const auto f = Function::GetGlobal("tl.gemm.infer_layout")) {
-    auto inferred_layouts = Downcast<LayoutMap>(
-        (*f)(GetRef<Gemm>(this), T.target, T.thread_bounds));
+    auto inferred_layouts = Downcast<LayoutMap>((*f)(
+        GetRef<Gemm>(this), layout_args.target, layout_args.thread_bounds));
     // For MMA instructions, skip shared buffer layouts that are already
     // inferred by a prior operator to avoid layout conflicts when the same
     // shared buffer is consumed by multiple gemm ops with different transpose
     // semantics. WGMMA/TCGEN5MMA have strict shared memory layout requirements
     // and must always set their layouts.
-    auto block_size = *as_const_int(T.thread_bounds->extent);
-    String gemm_inst = getGemmInstructionKey(block_size, T.target);
+    auto block_size = *as_const_int(layout_args.thread_bounds->extent);
+    String gemm_inst = getGemmInstructionKey(block_size, layout_args.target);
     bool reuse_existing_shared_layout =
-        ResolveGemmImpl(T.target).reuse_existing_shared_layout(gemm_inst);
+        ResolveGemmImpl(layout_args.target)
+            .reuse_existing_shared_layout(gemm_inst);
     for (auto kv : inferred_layouts) {
       const Buffer &buf = kv.first;
       const Layout &layout = kv.second;
       if (reuse_existing_shared_layout && IsSharedBuffer(buf) &&
-          T.layout_map.count(buf)) {
+          layout_args.layout_map.count(buf)) {
         continue;
       }
       if (auto frag = layout.as<Fragment>()) {
-        results.Set(buf, frag.value()->BindThreadRange(T.thread_bounds));
+        results.Set(buf,
+                    frag.value()->BindThreadRange(layout_args.thread_bounds));
       } else {
         results.Set(buf, layout);
       }
