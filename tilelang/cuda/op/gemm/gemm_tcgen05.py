@@ -6,6 +6,7 @@ from tilelang.layout import (
     make_full_bank_swizzled_layout,
     make_half_bank_swizzled_layout,
     make_quarter_bank_swizzled_layout,
+    make_tcgen05mma_swizzled_layout,
     make_linear_layout,
 )
 from tilelang.cuda.intrinsics.macro.tcgen05_macro_generator import (
@@ -14,7 +15,7 @@ from tilelang.cuda.intrinsics.macro.tcgen05_macro_generator import (
 from tilelang import language as T
 from tilelang.utils.language import retrieve_ptr
 from tilelang.transform.simplify import _Simplify
-from tvm import tirx
+from tvm import DataType, tirx
 from tvm.target import Target
 from tvm.ir import Range
 from tvm.arith import Analyzer
@@ -41,6 +42,11 @@ def _shared_layout_continuity(buffer, is_k_major: bool, k_extent: int, mn_extent
 GEMM_INST_TCGEN05 = "cuda.tcgen05"
 
 
+def _annotation_bool(annotations: dict, key: str) -> bool:
+    value = annotations.get(key, 0)
+    return bool(getattr(value, "value", value))
+
+
 class GemmTCGEN5(GemmBase):
     """GEMM operator for Blackwell (SM100) TCGEN5MMA instructions.
 
@@ -54,10 +60,30 @@ class GemmTCGEN5(GemmBase):
     def allow_f8f6f4_mixed_dtypes(self) -> bool:
         return True
 
-    def infer_shared_layout(self, buffer: tirx.Buffer, continuity: int) -> Callable[[tirx.Buffer], Layout]:
-        """Infer a standard shared-memory swizzle layout for TCGEN05 operands."""
-        elem_bits = buffer.dtype.bits
-        vectorized_size = 128 // elem_bits
+    def infer_shared_layout(self, dtype, continuity: int, k_major: bool) -> Callable[[tirx.Buffer], Layout]:
+        """Infer the shared-memory layout for TCGEN05 operands.
+
+        Sub-byte inputs (e.g. FP4) must use the TCGEN05-specific layout helper so
+        they match the ALIGN16B + gap-aware SMEM organization expected by TMA and
+        descriptor generation.  When TMA is disabled (non-TMA / cp.async path),
+        the SIMT copy writes packed-linear data, so we return a plain linear layout
+        to keep the SMEM descriptor consistent with the actual data layout.
+        """
+        dtype_bits = dtype.bits if hasattr(dtype, "bits") else DataType(dtype).bits
+        if dtype_bits < 8:
+            import tvm
+
+            try:
+                _pass_ctx = tvm.transform.PassContext.current()
+                disable_tma = _pass_ctx.config.get("tl.disable_tma_lower", False)
+            except (AttributeError, KeyError, TypeError):
+                disable_tma = False
+            if disable_tma:
+                # Non-TMA path: SIMT copy writes packed-linear nibbles; use a
+                # linear layout so the SMEM descriptor matches the actual data.
+                return make_linear_layout
+            return lambda buffer: make_tcgen05mma_swizzled_layout(buffer, continuity=continuity, k_major=k_major)
+        vectorized_size = 128 // dtype_bits
         if continuity % (vectorized_size * 8) == 0:
             return make_full_bank_swizzled_layout
         elif continuity % (vectorized_size * 4) == 0:
@@ -106,15 +132,15 @@ class GemmTCGEN5(GemmBase):
             b_continuity = _shared_layout_continuity(self.B, b_is_k_major, self.K, int(self.B.shape[-1]))
 
             return {
-                self.A: self.infer_shared_layout(self.A, a_continuity)(self.A),
-                self.B: self.infer_shared_layout(self.B, b_continuity)(self.B),
+                self.A: self.infer_shared_layout(self.a_dtype, a_continuity, a_is_k_major)(self.A),
+                self.B: self.infer_shared_layout(self.b_dtype, b_continuity, b_is_k_major)(self.B),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         if self.is_gemm_ts():
             b_continuity = _shared_layout_continuity(self.B, b_is_k_major, self.K, int(self.B.shape[-1]))
             layouts = {
                 self.A: mma_emitter.make_mma_store_layout(self.A),
-                self.B: self.infer_shared_layout(self.B, b_continuity)(self.B),
+                self.B: self.infer_shared_layout(self.b_dtype, b_continuity, b_is_k_major)(self.B),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
             return layouts
@@ -258,12 +284,20 @@ class GemmTCGEN5(GemmBase):
 
         annotations = getattr(self.gemm_node, "annotations", {})
         use_2cta = bool(annotations.get("use_2cta", 0))
-        sf_a_granularity_k = annotations.get("sf_a_granularity_k")
-        sf_b_granularity_k = annotations.get("sf_b_granularity_k")
-        if sf_a_granularity_k is None or sf_b_granularity_k is None:
-            raise ValueError("Block-scaled GEMM requires sf_a_granularity_k and sf_b_granularity_k")
-        k = int(self.chunk)
-        mma_emitter.get_tcgen5_mma_meta(int(self.M), int(self.N), k, disable_2cta=not use_2cta, disable_ws=True)
+        is_nvfp4 = bool(annotations.get("is_nvfp4", 0))
+        if is_nvfp4:
+            # NVFP4 (mxf4nvf4): single per-call K64 atom; preserve HEAD's meta and
+            # force ws off (the scale register is passed directly, no sf_id path).
+            mma_emitter.get_tcgen5_mma_meta(self.M, self.N, self.K, disable_2cta=not use_2cta)
+            atom_m, atom_n, atom_k, _enable_ws, enable_2cta = (int(x) for x in mma_emitter.meta)
+            mma_emitter.meta = [atom_m, atom_n, atom_k, 0, enable_2cta]
+        else:
+            sf_a_granularity_k = annotations.get("sf_a_granularity_k")
+            sf_b_granularity_k = annotations.get("sf_b_granularity_k")
+            if sf_a_granularity_k is None or sf_b_granularity_k is None:
+                raise ValueError("Block-scaled GEMM requires sf_a_granularity_k and sf_b_granularity_k")
+            k = int(self.chunk)
+            mma_emitter.get_tcgen5_mma_meta(int(self.M), int(self.N), k, disable_2cta=not use_2cta, disable_ws=True)
         _atom_m, _atom_n, _atom_k, _enable_ws, enable_2cta = (int(x) for x in mma_emitter.meta)
 
         analyzer = Analyzer()
@@ -276,34 +310,56 @@ class GemmTCGEN5(GemmBase):
         @T.prim_func
         def _gemm_blockscaled_cond() -> None:
             if cluster_cond and thread_var // 32 == thread_bounds.min // warp_size:
-                mma_emitter.tcgen05mma_blockscaled(
-                    A_shared,
-                    B_shared,
-                    C_local,
-                    SFA_tmem,
-                    SFB_tmem,
-                    mbarptr,
-                    sf_k_start=sf_k_start,
-                    sf_a_granularity_k=int(sf_a_granularity_k),
-                    sf_b_granularity_k=int(sf_b_granularity_k),
-                    clear_accum=clear_accum,
-                )
+                if is_nvfp4:
+                    mma_emitter.tcgen05mma_mxf4nvf4_blockscaled(
+                        A_shared,
+                        B_shared,
+                        C_local,
+                        SFA_tmem,
+                        SFB_tmem,
+                        mbarptr,
+                        clear_accum,
+                    )
+                else:
+                    mma_emitter.tcgen05mma_blockscaled(
+                        A_shared,
+                        B_shared,
+                        C_local,
+                        SFA_tmem,
+                        SFB_tmem,
+                        mbarptr,
+                        sf_k_start=sf_k_start,
+                        sf_a_granularity_k=int(sf_a_granularity_k),
+                        sf_b_granularity_k=int(sf_b_granularity_k),
+                        clear_accum=clear_accum,
+                    )
 
         @T.prim_func
         def _gemm_blockscaled() -> None:
             if cluster_cond:
-                mma_emitter.tcgen05mma_blockscaled(
-                    A_shared,
-                    B_shared,
-                    C_local,
-                    SFA_tmem,
-                    SFB_tmem,
-                    mbarptr,
-                    sf_k_start=sf_k_start,
-                    sf_a_granularity_k=int(sf_a_granularity_k),
-                    sf_b_granularity_k=int(sf_b_granularity_k),
-                    clear_accum=clear_accum,
-                )
+                if is_nvfp4:
+                    mma_emitter.tcgen05mma_mxf4nvf4_blockscaled(
+                        A_shared,
+                        B_shared,
+                        C_local,
+                        SFA_tmem,
+                        SFB_tmem,
+                        mbarptr,
+                        clear_accum,
+                    )
+                else:
+                    mma_emitter.tcgen05mma_blockscaled(
+                        A_shared,
+                        B_shared,
+                        C_local,
+                        SFA_tmem,
+                        SFB_tmem,
+                        mbarptr,
+                        sf_k_start=sf_k_start,
+                        sf_a_granularity_k=int(sf_a_granularity_k),
+                        sf_b_granularity_k=int(sf_b_granularity_k),
+                        clear_accum=clear_accum,
+                    )
 
         return (
             _Simplify(_gemm_blockscaled, inline_let=True)

@@ -663,6 +663,20 @@ struct float_e5m2_t : public cute::float_e5m2_t {
       : cute::float_e5m2_t(*reinterpret_cast<cute::float_e5m2_t *>(&x)) {}
 };
 
+struct float_e2m1_t : public cute::float_e2m1_t {
+  using cute::float_e2m1_t::float_e2m1_t;
+  CUTLASS_HOST_DEVICE
+  float_e2m1_t() = default;
+
+  CUTLASS_HOST_DEVICE
+  explicit float_e2m1_t(__nv_bfloat16 x)
+      : float_e2m1_t(static_cast<float>(x)) {}
+
+  CUTLASS_HOST_DEVICE
+  float_e2m1_t(cutlass::float_e2m1_t x)
+      : cute::float_e2m1_t(*reinterpret_cast<cute::float_e2m1_t *>(&x)) {}
+};
+
 struct tfloat32_t : public cute::tfloat32_t {
   using cute::tfloat32_t::tfloat32_t;
   CUTLASS_HOST_DEVICE
@@ -685,6 +699,10 @@ template <> struct to_cute_type<tl::float_e4m3_t> {
 template <> struct to_cute_type<tl::float_e5m2_t> {
   using type = cute::float_e5m2_t;
 };
+template <> struct to_cute_type<tl::float_e2m1_t> {
+  using type = cute::float_e2m1_t;
+};
+
 template <> struct to_cute_type<tl::tfloat32_t> {
   using type = cute::tfloat32_t;
 };

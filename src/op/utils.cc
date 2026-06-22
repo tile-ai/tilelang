@@ -158,7 +158,7 @@ int to_CUtensorMapDataType(DataType dtype) {
     return kTensorMapDataType16U4Align16B;
   }
   if (dtype.is_float4_e2m1fn()) {
-    return kTensorMapDataType16U4Align8B;
+    return kTensorMapDataType16U4Align16B;
   }
 
   CUtensorMapDataType tp;

@@ -294,6 +294,7 @@ Layout makeTcgen05mmaSwizzledLayout(const tirx::Buffer &buffer,
 Layout makeFullBankSwizzleLayout(const tirx::Buffer &buffer);
 Layout makeHalfBankSwizzleLayout(const tirx::Buffer &buffer);
 Layout makeQuarterBankSwizzleLayout(const tirx::Buffer &buffer);
+Layout makeAlign16BSwizzleLayout(const tirx::Buffer &buffer);
 
 // Swizzle mode for shared memory layouts (nvidia only)
 // Smaller enum value = smaller swizzle granularity

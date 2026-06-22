@@ -25,7 +25,9 @@ def LowerBlackwell2SM():
         fpass : tvm.transform.Pass
             The result pass
     """
-    return _ffi_api.LowerBlackwell2SM()  # type: ignore
+    if hasattr(_ffi_api, "LowerBlackwell2SM"):
+        return _ffi_api.LowerBlackwell2SM()  # type: ignore
+    return lambda f: f
 
 
 def LowerHopperIntrin():

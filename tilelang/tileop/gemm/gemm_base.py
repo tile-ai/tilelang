@@ -91,14 +91,43 @@ class GemmBase:
         return getattr(self.gemm_node, "transB", None)
 
     @property
-    def a_dtype(self):
-        """A operand dtype."""
-        return self.A.dtype
+    def a_dtype(self) -> str:
+        """A operand dtype for the MMA.
+
+        For the TS variant A resides in TMEM with the accumulator dtype, so the
+        input dtype is derived from B. For FP4/FP8 on SM120 the input buffers use
+        uint8 storage (unpacked, 1 element per byte) but the MMA instruction uses
+        float4_e2m1fn / float8_e4m3fn; mixed types (e.g. FP8 x FP4) are supported.
+        """
+        if is_tensor_memory(self.A):
+            return self.B.dtype
+        dtype = self.A.dtype
+        if dtype == "uint8" and self.C.dtype in ("float32", "float16"):
+            return "float4_e2m1fn"
+        return dtype
 
     @property
-    def b_dtype(self):
-        """B operand dtype."""
-        return self.B.dtype
+    def in_dtype(self) -> str:
+        """Backward-compatible alias for a_dtype."""
+        return self.a_dtype
+
+    @property
+    def in_dtype_b(self) -> str:
+        """Backward-compatible alias for b_dtype."""
+        return self.b_dtype
+
+    @property
+    def b_dtype(self) -> str:
+        """B operand dtype (may differ from A for mixed-type MMA).
+
+        uint8 B with a float32/float16 accumulator maps to float4_e2m1fn (FP4).
+        """
+        if is_tensor_memory(self.A):
+            return self.B.dtype
+        dtype = self.B.dtype
+        if dtype == "uint8" and self.C.dtype in ("float32", "float16"):
+            return "float4_e2m1fn"
+        return dtype
 
     @property
     def accum_dtype(self) -> str:
@@ -106,6 +135,8 @@ class GemmBase:
 
     @property
     def chunk(self) -> int:
+        if self.is_blockscaled:
+            return self.K
         return self.A.shape[-2] if self.trans_A else self.A.shape[-1]
 
     @property

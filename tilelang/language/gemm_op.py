@@ -233,6 +233,114 @@ def wgmma_gemm(
     )
 
 
+def nvfp4_gemm(
+    A: BufferLikeType,
+    B: BufferLikeType,
+    SFA: BufferLikeType,
+    SFB: BufferLikeType,
+    C: BufferLikeType,
+    transpose_A: bool = False,
+    transpose_B: bool = True,
+    policy: GemmWarpPolicy = GemmWarpPolicy.Square,
+    clear_accum: bool = False,
+    scale_dtype: str = "float8_e4m3",
+    scale_vec_size: int = 16,
+) -> tirx.PrimExpr:
+    """SM120 NVFP4 block-scaled GEMM tile op.
+
+    This is a thin SM120-only frontend for the currently supported
+    ``mxf4nvf4.block_scale`` MMA path.  A and B are packed FP4 tiles (normally
+    exposed as ``T.float4_e2m1fn`` tensors and viewed as packed bytes before
+    shared-memory staging), while SFA/SFB are scale-register buffers containing
+    packed FP8 E4M3 values.
+    """
+
+    def legalize(arg):
+        if isinstance(arg, tirx.Var) and T.has_let_value(arg):
+            return T.get_let_value(arg).buffer
+        return arg
+
+    A = legalize(A)
+    B = legalize(B)
+    C = legalize(C)
+    SFA = legalize(SFA)
+    SFB = legalize(SFB)
+
+    A_region = to_buffer_region(A)
+    B_region = to_buffer_region(B)
+    C_region = to_buffer_region(C)
+    SFA_region = to_buffer_region(SFA)
+    SFB_region = to_buffer_region(SFB)
+
+    A_shape = retrieve_shape(A_region)
+    B_shape = retrieve_shape(B_region)
+    C_shape = retrieve_shape(C_region)
+
+    assert len(A_shape) >= 2 and len(B_shape) >= 2, (
+        f"T.nvfp4_gemm requires rank>=2 A/B operands, got {len(A_shape)}, {len(B_shape)}")
+    M, N = C_shape
+    M_A = A_shape[-1] if transpose_A else A_shape[-2]
+    K = A_shape[-2] if transpose_A else A_shape[-1]
+    N_B = B_shape[-2] if transpose_B else B_shape[-1]
+    K_B = B_shape[-1] if transpose_B else B_shape[-2]
+    assert prim_expr_equal(M_A, M), f"T.nvfp4_gemm M shape check failed: M_A = {M_A}, M_C = {M}"
+    assert prim_expr_equal(N_B, N), f"T.nvfp4_gemm N shape check failed: N_B = {N_B}, N_C = {N}"
+    assert prim_expr_equal(K, K_B), f"T.nvfp4_gemm K shape check failed: K_A = {K}, K_B = {K_B}"
+    # The current SM120 mxf4nvf4 ldmatrix path consumes packed bytes in shared
+    # memory (two FP4 values per byte).  The GEMM node still needs the logical
+    # K so the emitter selects m16n8k64.
+    logical_K = K * 2 if str(A_region.buffer.dtype) == "uint8" and str(B_region.buffer.dtype) == "uint8" else K
+
+    A_stride = retrieve_stride(A_region)
+    B_stride = retrieve_stride(B_region)
+    A_offset = retrieve_offset(A_region)
+    B_offset = retrieve_offset(B_region)
+    # Only the inner (K-dim) base offset is forwarded; the outer-dim base offset must
+    # be zero or a row-sliced packed tile would silently read the wrong data.
+    assert prim_expr_equal(A_offset[-2], 0), f"T.nvfp4_gemm requires A outer base offset 0, got {A_offset[-2]}"
+    assert prim_expr_equal(B_offset[-2], 0), f"T.nvfp4_gemm requires B outer base offset 0, got {B_offset[-2]}"
+    C_coords = [r.min for r in C_region.region]
+
+    A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])
+    B_arg = buffer_region_to_tile_region(B_region, "r", [r for r in B_shape])
+    C_arg = buffer_region_to_tile_region(C_region, "rw", [r for r in C_shape])
+    SFA_arg = buffer_region_to_tile_region(SFA_region, "r", list(retrieve_shape(SFA_region)))
+    SFB_arg = buffer_region_to_tile_region(SFB_region, "r", list(retrieve_shape(SFB_region)))
+
+    return tirx.call_intrin(
+        "handle",
+        tirx.op.Op.get("tl.tileop.gemm"),
+        A_arg,
+        B_arg,
+        C_arg,
+        transpose_A,
+        transpose_B,
+        M,
+        N,
+        logical_K,
+        policy,
+        clear_accum,
+        A_stride[-2],
+        B_stride[-2],
+        A_offset[-1],
+        B_offset[-1],
+        1,
+        0,
+        tirx.const(0, dtype="int32"),
+        C_coords[0],
+        C_coords[1],
+        SFA_arg,
+        SFB_arg,
+        tirx.const(0, dtype="int32"),
+        tirx.const(0, dtype="int32"),
+        annotations={
+            "is_nvfp4": tirx.IntImm("int32", 1),
+            "scale_dtype": tirx.StringImm(scale_dtype),
+            "scale_vec_size": tirx.IntImm("int32", scale_vec_size),
+        },
+    )
+
+
 def tcgen05_gemm(
     A: BufferLikeType,
     B: BufferLikeType,
@@ -294,6 +402,7 @@ def tcgen05_gemm_blockscaled(
     sf_a_granularity_k: int,
     sf_b_granularity_k: int,
     use_2cta: bool = False,
+    is_nvfp4: bool = False,
 ) -> tirx.PrimExpr:
     """Explicit Blackwell TCGEN05 block-scaled GEMM without an implicit wait.
 
@@ -334,8 +443,11 @@ def tcgen05_gemm_blockscaled(
         use_2cta: Whether to request true ``cta_group::2`` lowering.
     """
 
-    ann = {"use_2cta": int(use_2cta)} if use_2cta else None
-    ann = {} if ann is None else dict(ann)
+    ann = {"is_tcgen05": 1}
+    if use_2cta:
+        ann["use_2cta"] = int(use_2cta)
+    if is_nvfp4:
+        ann["is_nvfp4"] = 1
     ann["sf_a_granularity_k"] = int(sf_a_granularity_k)
     ann["sf_b_granularity_k"] = int(sf_b_granularity_k)
 
@@ -368,11 +480,26 @@ def tcgen05_gemm_blockscaled(
     assert len(B_shape) >= 2, "current only support B as a 2D or higher-order tensor"
 
     M, N = C_shape
-    M_A = A_shape[-1] if transpose_A else A_shape[-2]
-    N_B = B_shape[-2] if transpose_B else B_shape[-1]
-    K = A_shape[-2] if transpose_A else A_shape[-1]
-    K_B = B_shape[-1] if transpose_B else B_shape[-2]
+    is_packed_nvfp4 = (
+        is_nvfp4 and str(A_region.buffer.dtype) == "uint8" and str(B_region.buffer.dtype) == "uint8"
+    )
+    if is_packed_nvfp4:
+        assert not transpose_A, "Packed NVFP4 tcgen05_gemm_blockscaled expects non-transposed A"
+        M_A = A_shape[-2]
+        K = A_shape[-1] * 2
+        if transpose_B:
+            N_B = B_shape[-2]
+            K_B = B_shape[-1] * 2
+        else:
+            K_B = B_shape[-2]
+            N_B = B_shape[-1] * 2
+    else:
+        M_A = A_shape[-1] if transpose_A else A_shape[-2]
+        N_B = B_shape[-2] if transpose_B else B_shape[-1]
+        K = A_shape[-2] if transpose_A else A_shape[-1]
+        K_B = B_shape[-1] if transpose_B else B_shape[-2]
     assert prim_expr_equal(K, K_B), f"T.tcgen05_gemm_blockscaled K shape check failed: K_A = {K}, K_B = {K_B}"
+    logical_K = K
     if use_2cta:
         assert prim_expr_equal(M_A, M) and prim_expr_equal(N_B * 2, N), (
             f"T.tcgen05_gemm_blockscaled 2CTA shape check failed: M_A = {M_A}, expected M_C = {M}; N_B = {N_B}, expected N_C / 2 = {N} / 2"
@@ -423,7 +550,7 @@ def tcgen05_gemm_blockscaled(
         transpose_B,
         M,
         N,
-        K,
+        logical_K,
         policy,
         clear_accum,
         stride_a,

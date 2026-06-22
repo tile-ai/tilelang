@@ -12,6 +12,7 @@ from tilelang.language.dtypes import get_tvm_dtype
 from tilelang.utils import is_tensor_memory
 from tilelang.layout import (
     Layout,
+    make_align16b_swizzled_layout,
     make_full_bank_swizzled_layout,
     make_half_bank_swizzled_layout,
     make_quarter_bank_swizzled_layout,
@@ -188,13 +189,18 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
     def _determinate_swizzle_mode(self, buffer, layout: Layout) -> SwizzleMode:
         buffer = self._as_buffer(buffer)
         # same behavior to src/layout/gemm_layouts.cc::makeGemmABLayoutHopper
-        if layout is None or layout.is_equal(make_linear_layout(buffer)):
+        tir_buffer = buffer.buffer if isinstance(buffer, BufferRegion) else buffer
+        if layout is None or layout.is_equal(make_linear_layout(tir_buffer)):
             return SwizzleMode.NONE
-        elif layout.is_equal(make_quarter_bank_swizzled_layout(buffer)):
+        if DataType(tir_buffer.dtype).bits < 8:
+            if layout.is_equal(make_align16b_swizzled_layout(tir_buffer)):
+                return SwizzleMode.SWIZZLE_128B
+            raise ValueError(f"Unsupported sub-byte swizzle mode: {layout}")
+        elif layout.is_equal(make_quarter_bank_swizzled_layout(tir_buffer)):
             return SwizzleMode.SWIZZLE_32B
-        elif layout.is_equal(make_half_bank_swizzled_layout(buffer)):
+        elif layout.is_equal(make_half_bank_swizzled_layout(tir_buffer)):
             return SwizzleMode.SWIZZLE_64B
-        elif layout.is_equal(make_full_bank_swizzled_layout(buffer)):
+        elif layout.is_equal(make_full_bank_swizzled_layout(tir_buffer)):
             return SwizzleMode.SWIZZLE_128B
         else:
             raise ValueError(f"Unsupported swizzle mode: {layout}")
@@ -477,6 +483,166 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             b_sf_id,
         )
         return lift(desc)
+
+    def tcgen05mma_mxf4nvf4_blockscaled(
+        self,
+        A_buf: Buffer,
+        B_buf: Buffer,
+        C_local_buf: Buffer,
+        SFA_tmem,
+        SFB_tmem,
+        mbar,
+        clear_accum: PrimExpr = False,
+    ):
+        """Emit a mxf4nvf4 block-scaled TCGEN5MMA (SS variant with TMEM scale factors).
+
+        Uses ``tcgen05.mma.cta_group::1|2.kind::mxf4nvf4.block_scale`` PTX instruction.
+        Scale factors must already reside in tensor memory.
+        """
+        m_dim = self.block_row_warps * self.warp_row_tiles
+        micro_size_k = self.micro_size_k
+        k_dim, n_dim = self.chunk, self.block_col_warps * self.warp_col_tiles
+
+        assert k_dim >= micro_size_k
+        assert not self.a_transposed, "A must be non-transposed for mxf4nvf4 block-scaled"
+
+        a_swizzle_mode = self._determinate_swizzle_mode(A_buf, self.a_shared_layout)
+
+        a_elems_in_bytes = (DataType(self.a_dtype).bits + 7) // 8
+
+        if len(self.meta) != 5:
+            # mxf4nvf4 uses a single CTA in this lowering path. Picking the
+            # generic 2CTA-preferred meta leaves part of C owned by the peer CTA.
+            self.get_tcgen5_mma_meta(m_dim, n_dim, k_dim, disable_2cta=True)
+        if len(self.meta) != 5:
+            raise ValueError(
+                f"Unsupported TCGEN5MMA configuration for block-scaled: M={m_dim}, N={n_dim}, "
+                f"K={k_dim}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
+            )
+        atom_m, atom_n, _, _, enable_2cta = self.tcgen05_meta_unpacked
+        atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
+
+        # Row stride in the gap-expanded align16b SMEM is measured in element slots
+        # (1 byte per sub-byte element), matching the validated plain-FP4 path
+        # (compute_tcgen05_a_desc_params): swizzle_byte_size // elems_in_bytes.
+        a_swizzle_atom_elems = a_swizzle_mode.swizzle_byte_size() // a_elems_in_bytes
+
+        # Below computation assumes A is K-major.
+        # tcgen05 mxf4nvf4 requires a swizzled K-major SMEM operand (CUTLASS
+        # always selects SW128/SW64/SW32, never SWIZZLE_NONE). A linear/no-swizzle
+        # staging mis-addresses the core matrices, so reject it here. LBO/SBO mirror
+        # the validated FP4 path in compute_tcgen05_b_desc_params().
+        if a_swizzle_mode.is_none():
+            raise ValueError(
+                "mxf4nvf4 block-scaled requires a swizzled K-major A operand "
+                "(SWIZZLE_128B); a linear/no-swizzle shared layout is unsupported."
+            )
+        a_leading_byte_offset = 16  # >>4 == 1, canonical for swizzled K-major
+        a_stride_byte_offset = 8 * a_swizzle_mode.swizzle_byte_size()
+
+        a_params = TCGEN05DescriptorParams(
+            swizzle_mode=int(a_swizzle_mode),
+            leading_byte_offset=int(a_leading_byte_offset >> 4),
+            stride_byte_offset=int(a_stride_byte_offset >> 4),
+            swizzle_atom_elems=a_swizzle_atom_elems,
+            k_atom_size=max(a_swizzle_atom_elems // micro_size_k, 1),
+            elem_bits=a_elems_in_bytes * 8,
+            is_k_major=True,
+        )
+
+        # The PTX mxf4nvf4 opcode has fixed transpose bits, but the shared-memory
+        # descriptor still needs a 16-byte-aligned physical operand layout.
+        b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
+        b_elems_in_bytes = (DataType(self.b_dtype).bits + 7) // 8
+        n_dim_per_cta = n_dim // 2 if enable_2cta else n_dim
+        b_swizzle_atom_elems = b_swizzle_mode.swizzle_byte_size() // b_elems_in_bytes
+
+        if self.b_transposed:
+            if b_swizzle_mode.is_none():
+                raise ValueError(
+                    "mxf4nvf4 block-scaled requires a swizzled K-major B operand "
+                    "(SWIZZLE_128B); a linear/no-swizzle shared layout is unsupported."
+                )
+            b_leading_byte_offset = 16  # >>4 == 1, canonical for swizzled K-major
+            b_stride_byte_offset = 8 * b_swizzle_mode.swizzle_byte_size()
+        else:
+            raise ValueError("mxf4nvf4 currently requires transpose_B=True (K-major B)")
+        b_params = TCGEN05DescriptorParams(
+            swizzle_mode=int(b_swizzle_mode),
+            leading_byte_offset=int(b_leading_byte_offset >> 4),
+            stride_byte_offset=int(b_stride_byte_offset >> 4),
+            swizzle_atom_elems=b_swizzle_atom_elems,
+            k_atom_size=max(b_swizzle_atom_elems // micro_size_k, 1),
+            elem_bits=b_elems_in_bytes * 8,
+            is_k_major=self.b_transposed,
+        )
+
+        sf_dtype = DataType(SFA_tmem.dtype)
+        is_mxfp4 = sf_dtype == DataType("float8_e8m0fnu") or sf_dtype == DataType("uint8")  # UE8M0 storage
+
+        # The operands are staged DENSE as uint8 (two e2m1 per byte), so self.a_dtype
+        # is uint8; the mxf4nvf4 instruction descriptor must still describe e2m1.
+        inst_desc = _ffi_api.get_tcgen5_mxf4nvf4_blockscaled_instr_desc(
+            atom_m,
+            atom_n,
+            DataType("float4_e2m1fn"),
+            1,
+            1,
+            is_mxfp4,
+        )
+        instr_desc = lift(inst_desc)
+
+        if isinstance(SFA_tmem, BufferRegion):
+            sfa_data = SFA_tmem.buffer.data
+        elif isinstance(SFA_tmem, Buffer):
+            sfa_data = SFA_tmem.data
+        else:
+            raise ValueError(f"Unsupported SFA_tmem type: {type(SFA_tmem)}")
+
+        if isinstance(SFB_tmem, BufferRegion):
+            sfb_data = SFB_tmem.buffer.data
+        elif isinstance(SFB_tmem, Buffer):
+            sfb_data = SFB_tmem.data
+        else:
+            raise ValueError(f"Unsupported SFB_tmem type: {type(SFB_tmem)}")
+
+        desc_a = T.alloc_tcgen05_smem_desc()
+        desc_b = T.alloc_tcgen05_smem_desc()
+        self.init_tcgen05_a_desc(desc_a, A_buf, a_params)
+        self.init_tcgen05_b_desc(desc_b, B_buf, b_params)
+
+        num_inst_m = m_dim // atom_m_per_cta
+        num_inst_n = n_dim // atom_n
+        # k_dim is the logical e2m1 K extent (e.g. 128). Each mxf4nvf4 MMA atom
+        # consumes 64 e2m1 along K (== 32 dense uint8 bytes; the byte stride is
+        # applied as ki*32 in tcgen05_blockscaled_atom).
+        assert k_dim % 64 == 0, "mxf4nvf4 block-scaled expects K to be a multiple of 64"
+        num_k_atoms = k_dim // 64
+
+        @T.macro
+        def _warp_mma_mxf4nvf4_blockscaled(desc_a, desc_b, C_local_buf, sfa_data, sfb_data, mbar):
+            for j in T.unroll(num_inst_n):
+                for i in T.unroll(num_inst_m):
+                    for ki in T.unroll(0, num_k_atoms):
+                        self.tcgen05_blockscaled_atom(
+                            desc_a,
+                            desc_b,
+                            C_local_buf,
+                            sfa_data,
+                            sfb_data,
+                            i,
+                            j,
+                            ki,
+                            a_params,
+                            b_params,
+                            instr_desc,
+                            clear_accum,
+                            use_mxf4nvf4=True,
+                        )
+            self.tcgen05_atom_arrive(mbar)
+
+        return _warp_mma_mxf4nvf4_blockscaled(desc_a, desc_b, C_local_buf, sfa_data, sfb_data, mbar)
+
 
     def make_mma_load_layout(self, local_buf: Buffer, matrix: str = "A") -> T.Fragment:
         raise NotImplementedError
@@ -1051,6 +1217,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         b_params: TCGEN05DescriptorParams,
         instr_desc: PrimExpr,
         clear_accum: PrimExpr = False,
+        use_mxf4nvf4: bool = False,
     ):
         """Emit a single TCGEN05MMA block-scaled SS instruction.
 
@@ -1108,8 +1275,16 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 k_dim if n_dim_per_cta // b_swizzle_atom_elems > 1 else 1
             )
 
-        A_byte_offset = _elements_to_bytes(A_elem_offset, a_elem_bits)
-        B_byte_offset = _elements_to_bytes(B_elem_offset, b_elem_bits)
+        if use_mxf4nvf4:
+            # Operands are dense uint8 (two e2m1 per byte). Offsets are in uint8
+            # (=byte) units; each mxf4nvf4 K-atom spans 64 e2m1 == 32 dense bytes
+            # along K. Row stride is `*_swizzle_atom_elems` (uint8 elements).
+            MXF4NVF4_ATOM_BYTES = 32
+            A_byte_offset = inst_m_idx * atom_m_per_cta * a_swizzle_atom_elems + ki * MXF4NVF4_ATOM_BYTES
+            B_byte_offset = inst_n_idx * atom_n * b_swizzle_atom_elems + ki * MXF4NVF4_ATOM_BYTES
+        else:
+            A_byte_offset = _elements_to_bytes(A_elem_offset, a_elem_bits)
+            B_byte_offset = _elements_to_bytes(B_elem_offset, b_elem_bits)
         tmem_col_step = atom_n // (128 // atom_m_per_cta)
         C_offset = (inst_m_idx * n_dim + inst_n_idx * tmem_col_step) * accum_dtype_in_bits // 32
 
@@ -1130,7 +1305,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 0,
                 sfb_data,
                 0,
-                0,
+                1 if use_mxf4nvf4 else 0,
                 0,
                 enable_2cta,
             )

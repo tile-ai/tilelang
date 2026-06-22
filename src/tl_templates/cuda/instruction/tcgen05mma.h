@@ -801,4 +801,66 @@ TL_DEVICE void tcgen05mma_blockscaled_ss<DataType::kFloat4_e2m1fn, true>(
       desc_a, desc_b, tmem_c, scalec, desc_val, tmem_sfa, tmem_sfb);
 }
 
+// NVFP4 block-scaled uses mxf4nvf4 instead of the mxf8f6f4 instruction family
+// above. Scale factors are addressed through TMEM operands.
+template <bool use_2cta = false>
+TL_DEVICE void tcgen05mma_mxf4nvf4_blockscaled_ss(
+    uint64_t const & /*desc_a*/, uint64_t const & /*desc_b*/,
+    uint32_t const & /*tmem_c*/, uint32_t const & /*scalec*/,
+    uint32_t const & /*desc_val*/, uint32_t const & /*tmem_sfa*/,
+    uint32_t const & /*tmem_sfb*/) {
+  static_assert(always_false_v<std::bool_constant<use_2cta>>,
+                "tl::tcgen05mma_mxf4nvf4_blockscaled_ss: unsupported CTA group");
+}
+
+template <>
+TL_DEVICE void tcgen05mma_mxf4nvf4_blockscaled_ss<false>(
+    uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, uint32_t const &tmem_sfa,
+    uint32_t const &tmem_sfb) {
+  if (cute::elect_one_sync()) {
+    asm volatile(
+        "{\n\t"
+        ".reg .pred p;\n\t"
+        "setp.ne.b32 p, %4, 0;\n\t"
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
+    (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9)
+        "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.block16 [%0], %1, "
+        "%2, %3, [%5], [%6], p; \n\t"
+#else
+        "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.scale_vec::4X "
+        "[%0], %1, %2, %3, [%5], [%6], p; \n\t"
+#endif
+        "}\n"
+        :
+        : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(desc_val), "r"(scalec),
+          "r"(tmem_sfa), "r"(tmem_sfb));
+  }
+}
+
+template <>
+TL_DEVICE void tcgen05mma_mxf4nvf4_blockscaled_ss<true>(
+    uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, uint32_t const &tmem_sfa,
+    uint32_t const &tmem_sfb) {
+  if (cute::elect_one_sync()) {
+    asm volatile(
+        "{\n\t"
+        ".reg .pred p;\n\t"
+        "setp.ne.b32 p, %4, 0;\n\t"
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
+    (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9)
+        "tcgen05.mma.cta_group::2.kind::mxf4nvf4.block_scale.block16 [%0], %1, "
+        "%2, %3, [%5], [%6], p; \n\t"
+#else
+        "tcgen05.mma.cta_group::2.kind::mxf4nvf4.block_scale.scale_vec::4X "
+        "[%0], %1, %2, %3, [%5], [%6], p; \n\t"
+#endif
+        "}\n"
+        :
+        : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(desc_val), "r"(scalec),
+          "r"(tmem_sfa), "r"(tmem_sfb));
+  }
+}
+
 } // namespace tl
