@@ -2507,6 +2507,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         "tl::ptx_stmatrix_" + shape + "_x" + std::to_string(num);
     if (trans == 1)
       func_name += "_trans";
+    // trans, num, and shape are encoded in the helper name; print only smem_ptr
+    // and value operands.
     print_extern_call_stmt(func_name, 2, has_shape ? 1 : 0);
   } else if (op->op.same_as(tl::fence_proxy_async())) {
     print_extern_call_stmt("tl::fence_proxy_async");
