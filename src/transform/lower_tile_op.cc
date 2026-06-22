@@ -935,12 +935,10 @@ private:
       is_ptx_ = true;
       auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
       is_ptx_ = false;
-      // form: T.ptx_stmatrix(trans, num, [shape,] smem_ptr, value0, value1,
-      // ...) smem_ptr: T.tvm_access_ptr(ptype, data, offset, extent, rw_mask)
-      // or T.address_of(buffer, offset)
-      int access_ptr_index =
-          call->args.size() >= 4 && call->args[2].as<StringImmNode>() ? 3 : 2;
-      PrimExpr access_ptr = call->args[access_ptr_index];
+      // form: T.ptx_stmatrix(trans, num, smem_ptr, value0, value1, ...,
+      // [shape]) smem_ptr: T.tvm_access_ptr(ptype, data, offset, extent,
+      // rw_mask) or T.address_of(buffer, offset)
+      PrimExpr access_ptr = call->args[2];
       Call access_ptr_call = Downcast<Call>(access_ptr);
 
       // Handle both tvm_access_ptr and address_of
@@ -949,7 +947,7 @@ private:
             HandleAccessPtrAndOffset(access_ptr, std::nullopt, call->dtype);
         if (new_access_ptr.rewritten) {
           auto new_call = call.CopyOnWrite();
-          new_call->args.Set(access_ptr_index, new_access_ptr.expr);
+          new_call->args.Set(2, new_access_ptr.expr);
         }
       } else if (access_ptr_call->op.same_as(builtin::address_of())) {
         Optional<PrimExpr> resolved =
@@ -960,25 +958,24 @@ private:
         PrimExpr load_expr = resolved.value();
         if (!load_expr.same_as(access_ptr_call->args[0])) {
           auto call_node = call.CopyOnWrite();
-          call_node->args.Set(access_ptr_index,
-                              Call(access_ptr_call->dtype, access_ptr_call->op,
-                                   {load_expr}, access_ptr_call->annotations,
-                                   access_ptr_call->span));
-          access_ptr_call = Downcast<Call>(call->args[access_ptr_index]);
-          access_ptr = call->args[access_ptr_index];
+          call_node->args.Set(
+              2, Call(access_ptr_call->dtype, access_ptr_call->op, {load_expr},
+                      access_ptr_call->annotations, access_ptr_call->span));
+          access_ptr_call = Downcast<Call>(call->args[2]);
+          access_ptr = call->args[2];
         }
         auto new_access_ptr =
             HandleAccessPtrAndOffset(access_ptr, std::nullopt, call->dtype);
         if (new_access_ptr.rewritten) {
           auto new_call = call.CopyOnWrite();
-          new_call->args.Set(access_ptr_index, new_access_ptr.expr);
+          new_call->args.Set(2, new_access_ptr.expr);
         }
       } else if (access_ptr_call->op.same_as(tl::access_ptr())) {
         auto new_access_ptr =
             HandleAccessPtrAndOffset(access_ptr, std::nullopt, call->dtype);
         if (new_access_ptr.rewritten) {
           auto new_call = call.CopyOnWrite();
-          new_call->args.Set(access_ptr_index, new_access_ptr.expr);
+          new_call->args.Set(2, new_access_ptr.expr);
         }
       } else {
         LOG(FATAL) << "Invalid access ptr for permuted layout: " << access_ptr;

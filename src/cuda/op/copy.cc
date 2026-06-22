@@ -1131,9 +1131,6 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &T,
   const Op &copy_op = is_ldmatrix ? tl::ptx_ldmatrix() : tl::ptx_stmatrix();
   args.push_back(static_cast<int>(is_transposed));
   args.push_back(num);
-  if (!is_ldmatrix) {
-    args.push_back(StringImm(use_m16n8_stmatrix ? "m16n8" : "m8n8"));
-  }
 
   Var local_iter("i");
   Layout inv = local_layout->Inverse();
@@ -1188,6 +1185,7 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &T,
                                   : Call(DataType::Int(32), pack_b16(), values);
       args.push_back(value_packed);
     }
+    args.push_back(StringImm(use_m16n8_stmatrix ? "m16n8" : "m8n8"));
   }
 
   auto body = Evaluate(Call(DataType::Handle(), copy_op, args));
