@@ -111,7 +111,7 @@ public:
       kTVMFFISEqHashKindTreeNode;
 
 protected:
-  virtual ffi::Map<tirx::Var, Range> getVarMap() const;
+  virtual ffi::Map<tirx::Var, Range> GetVarMap() const;
   void UpdateAnalyzer(arith::Analyzer *analyzer) const;
   ffi::Array<PrimExpr> forward_index_;
   ffi::Array<PrimExpr> input_size_;
@@ -188,7 +188,7 @@ public:
       kTVMFFISEqHashKindTreeNode;
 
 protected:
-  ffi::Map<tirx::Var, Range> getVarMap() const final;
+  ffi::Map<tirx::Var, Range> GetVarMap() const final;
   Range thread_range_;
   PrimExpr forward_thread_;
   PrimExpr replicate_size_;
@@ -227,73 +227,73 @@ public:
 
 tirx::Var InputPlaceholder(size_t idx);
 tirx::Var ReplicationPlaceholder();
-tirx::IterVar make_itervar(std::string name, PrimExpr dom);
+tirx::IterVar MakeIterVar(std::string name, PrimExpr dom);
 
-Fragment makeGemmFragment8x8();
-Fragment makeGemmFragment8x8Transposed();
-Fragment makeGemmFragmentC(const int block_m, const int block_n,
+Fragment MakeGemmFragment8x8();
+Fragment MakeGemmFragment8x8Transposed();
+Fragment MakeGemmFragmentC(const int block_m, const int block_n,
                            const int warp_m, const int warp_n,
                            const int element_size);
-Fragment makeGemmSparseFragmentC(const int block_m, const int block_n,
+Fragment MakeGemmSparseFragmentC(const int block_m, const int block_n,
                                  const int warp_m, const int warp_n,
                                  const int element_size);
-Fragment makeGemmFragmentCCDNA(const int block_m, const int block_n,
+Fragment MakeGemmFragmentCCDNA(const int block_m, const int block_n,
                                const int warp_m, const int warp_n,
                                const int element_size);
-Fragment makeGemmFragmentCHopper(const int block_m, const int block_n,
+Fragment MakeGemmFragmentCHopper(const int block_m, const int block_n,
                                  const int warp_m, const int warp_n,
                                  const int element_size);
-Fragment makeGemmFragmentA(const int block_m, const int block_n,
+Fragment MakeGemmFragmentA(const int block_m, const int block_n,
                            const int block_k, const int warp_m,
                            const int warp_n, const int element_size,
                            bool transposed = false);
-Fragment makeGemmFragmentB(const int block_m, const int block_n,
+Fragment MakeGemmFragmentB(const int block_m, const int block_n,
                            const int block_k, const int warp_m,
                            const int warp_n, bool transposed = false);
 
-Fragment makeGemmFragmentACDNA(const int block_m, const int block_n,
+Fragment MakeGemmFragmentACDNA(const int block_m, const int block_n,
                                const int block_k, const int warp_m,
                                const int warp_n, const int element_size,
                                const int k_pack, bool transposed = false);
 
 // Default Memory Layout (row-major linear layout for any dimension)
-Layout makeLinearLayout(ffi::Array<PrimExpr> shape);
-Layout makeGemmABLayoutPadded(int stride, int continuous, int element_size);
-Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
+Layout MakeLinearLayout(ffi::Array<PrimExpr> shape);
+Layout MakeGemmABLayoutPadded(int stride, int continuous, int element_size);
+Layout MakeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
                         int element_size, bool k_inner = true);
-Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
+Layout MakeGemmABLayoutHopper(int mat_stride, int mat_continuous,
                               int continuity, int element_size,
                               bool k_inner = true);
-Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
+Layout MakeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
                              int element_size, bool k_inner = true);
-Layout makeGemmABLayoutCDNA(int stride, int continuous, int element_size,
+Layout MakeGemmABLayoutCDNA(int stride, int continuous, int element_size,
                             int kPack);
 
-Fragment makeGemmVoltaFragmentC(const int block_m, const int block_n,
+Fragment MakeGemmVoltaFragmentC(const int block_m, const int block_n,
                                 const int warp_m, const int warp_n,
                                 const int element_size);
-Fragment makeGemmVoltaFragmentA(const int block_m, const int block_n,
+Fragment MakeGemmVoltaFragmentA(const int block_m, const int block_n,
                                 const int block_k, const int warp_m,
                                 const int warp_n);
-Layout makeGemmVoltaABLayout(int stride, int continuous, bool is_a,
+Layout MakeGemmVoltaABLayout(int stride, int continuous, bool is_a,
                              bool k_inner = true);
 
-Layout makeTensorOpMultiplicand(int mat_stride, int mat_continuous,
+Layout MakeTensorOpMultiplicand(int mat_stride, int mat_continuous,
                                 int elementsize, int crosswise);
-Layout makeGemmSparseAmpereABLayout(int mat_stride, int mat_continuous,
+Layout MakeGemmSparseAmpereABLayout(int mat_stride, int mat_continuous,
                                     int elementsize);
 
-Layout makeSwizzledLayout(const tirx::Buffer &buffer, bool k_inner = true,
+Layout MakeSwizzledLayout(const tirx::Buffer &buffer, bool k_inner = true,
                           bool allow_pad = true);
-Layout makeVoltaSwizzledLayout(const tirx::Buffer &buffer, bool is_a = true,
+Layout MakeVoltaSwizzledLayout(const tirx::Buffer &buffer, bool is_a = true,
                                bool k_inner = true);
-Layout makeWgmmaSwizzledLayout(const tirx::Buffer &buffer, int continuity = -1,
+Layout MakeWgmmaSwizzledLayout(const tirx::Buffer &buffer, int continuity = -1,
                                bool k_inner = true);
-Layout makeTcgen05mmaSwizzledLayout(const tirx::Buffer &buffer,
+Layout MakeTcgen05MmaSwizzledLayout(const tirx::Buffer &buffer,
                                     int continuity = -1, bool k_inner = true);
-Layout makeFullBankSwizzleLayout(const tirx::Buffer &buffer);
-Layout makeHalfBankSwizzleLayout(const tirx::Buffer &buffer);
-Layout makeQuarterBankSwizzleLayout(const tirx::Buffer &buffer);
+Layout MakeFullBankSwizzleLayout(const tirx::Buffer &buffer);
+Layout MakeHalfBankSwizzleLayout(const tirx::Buffer &buffer);
+Layout MakeQuarterBankSwizzleLayout(const tirx::Buffer &buffer);
 
 // Swizzle mode for shared memory layouts (nvidia only)
 // Smaller enum value = smaller swizzle granularity
