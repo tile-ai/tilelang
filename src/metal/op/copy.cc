@@ -31,7 +31,7 @@ bool CheckCooperativeTensorCopy(const CopyNode &op) {
          (IsSharedBuffer(op.dst) || IsGlobalBuffer(op.dst));
 }
 
-Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &T,
+Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
                         arith::Analyzer *analyzer) {
   (void)analyzer;
   TVM_FFI_ICHECK(IsSIMDGroupBuffer(op.src));
@@ -246,7 +246,7 @@ struct Copy {
       return LowerSIMDGroupCopy(op, lower_args, analyzer);
     }
     if (CheckCooperativeTensorCopy(op)) {
-      return LowerCooperativeTensorCopy(op, T, analyzer);
+      return LowerCooperativeTensorCopy(op, lower_args, analyzer);
     }
     return LowerNormalCopy(op, lower_args, analyzer);
   }

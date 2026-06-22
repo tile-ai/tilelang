@@ -23,6 +23,7 @@
  *  Re-write data access to enable memory sharing when possible.
  */
 #include "common/attr.h"
+#include "metal/op/utils.h"
 #include "support/check.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/attrs.h>
@@ -58,8 +59,11 @@ using namespace ffi;
 
 namespace {
 
-bool IsMetalCooperativeTensorBuffer(const Buffer &buffer) {
-  return buffer.defined() && buffer.scope() == "metal.cooperative_tensor";
+// Backend-managed allocation scopes whose AllocBuffer nodes must remain in
+// place. StorageRewrite should still visit their bodies, but must not plan,
+// hoist, merge, or remap the allocation itself.
+bool IsStorageRewriteOpaqueAllocBuffer(const Buffer &buffer) {
+  return metal::IsCooperativeTensorBuffer(buffer);
 }
 
 } // namespace
@@ -138,7 +142,7 @@ public:
   };
 
   void VisitStmt_(const AllocBufferNode *op) final {
-    if (IsMetalCooperativeTensorBuffer(op->buffer)) {
+    if (IsStorageRewriteOpaqueAllocBuffer(op->buffer)) {
       StmtExprVisitor::VisitStmt_(op);
       return;
     }
@@ -595,7 +599,7 @@ public:
   }
 
   Stmt VisitStmt_(const AllocBufferNode *op) final {
-    if (IsMetalCooperativeTensorBuffer(op->buffer)) {
+    if (IsStorageRewriteOpaqueAllocBuffer(op->buffer)) {
       return StmtExprMutator::VisitStmt_(op);
     }
     // AllocBuffer combines allocation and buffer declaration.
@@ -1379,7 +1383,7 @@ public:
   }
 
   void VisitStmt_(const AllocBufferNode *op) final {
-    if (IsMetalCooperativeTensorBuffer(op->buffer)) {
+    if (IsStorageRewriteOpaqueAllocBuffer(op->buffer)) {
       StmtExprVisitor::VisitStmt_(op);
       return;
     }

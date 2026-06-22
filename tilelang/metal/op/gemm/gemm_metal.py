@@ -9,9 +9,11 @@ from tilelang.utils.language import (
     is_fragment,
     is_full_region,
     is_global,
+    is_shared,
+)
+from tilelang.metal.utils import (
     is_metal_cooperative_tensor,
     is_metal_simdgroup,
-    is_shared,
 )
 from tvm import tirx as tir
 from tvm.ir import Range
