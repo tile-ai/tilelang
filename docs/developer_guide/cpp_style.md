@@ -172,7 +172,8 @@ explicit DeviceRegionAnnotator(Target device_target)
 
 Keep headers narrow and predictable.
 
-- Avoid `using namespace` in headers.
+- Avoid `using namespace` in installed public headers or headers that are widely
+  included across TileLang subsystems.
 - Prefer explicit qualifications or narrow aliases in the smallest namespace
   where they are needed.
 - Include the headers that define the types used by the file.
@@ -197,6 +198,64 @@ Avoid:
 using namespace tirx;
 using namespace ffi;
 ```
+
+## Namespace Usage
+
+Namespace rules should make public APIs predictable without making implementation
+files noisy. TVM itself is not mechanically uniform across the whole repository,
+so TileLang uses the following policy as a review guideline rather than as a
+blanket rewrite rule.
+
+TileLang currently does not maintain a separate installed C++ header tree like
+TVM's `include/tvm/`. The strictest rule applies to any future installed public
+headers and to TileLang-owned headers that behave like shared interfaces inside
+the repository: headers that define cross-module APIs, ObjectRef/ObjectNode
+types, FFI-visible fields, or interfaces included across multiple subsystems. Do
+not add namespace-wide imports there. Use qualified names for ordinary types:
+
+```cpp
+class LayoutNode : public ffi::Object {
+ public:
+  ffi::Array<tirx::PrimExpr> input_shape;
+  ffi::Optional<tirx::Buffer> buffer;
+};
+```
+
+Use a narrow alias in a header only when the alias is part of the API or removes
+real repetition:
+
+```cpp
+using LayoutMap = ffi::Map<tirx::Buffer, Layout>;
+```
+
+Implementation files may use file-local namespace imports when the file is
+dense with IR or DSL expressions:
+
+```cpp
+namespace tvm {
+namespace tl {
+
+using namespace tirx;
+
+}  // namespace tl
+}  // namespace tvm
+```
+
+Narrowly included implementation headers under `src/` may follow the same rule
+as `.cc` files. This mirrors TVM's internal schedule and transform headers,
+where `tirx` imports are sometimes used to keep IR visitor code readable. If an
+internal helper header grows into a cross-module interface, revisit its
+namespace imports.
+
+For `ffi`, prefer explicit names such as `ffi::Any`, `ffi::Array`,
+`ffi::Map`, and `ffi::make_object` in core-style code. A `.cc` file may use
+`using namespace ffi;` when FFI helpers are pervasive and the shorter names make
+the implementation materially easier to read. Keep the choice consistent within
+the file.
+
+Do not run mechanical namespace rewrites across unrelated code. When touching a
+file for functional work, avoid making its namespace style less clear, but keep
+large style-only cleanups isolated in focused pull requests.
 
 ## Comments And Documentation
 

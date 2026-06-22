@@ -73,8 +73,15 @@ explicit migration plan.
 
 ## Headers And Includes
 
-- Avoid `using namespace` in headers.
-- Prefer explicit qualifications or narrow aliases in the smallest useful scope.
+- TileLang currently has no separate installed public C++ header tree. Avoid
+  `using namespace` in any future installed public headers and in headers that
+  behave like shared cross-module interfaces inside the repository.
+- Prefer explicit qualifications in shared headers, or narrow aliases when they
+  are part of the API or remove real repetition.
+- In `.cc` files and narrowly included internal `src/` helper headers,
+  file-local namespace imports are acceptable when they improve readability.
+  `tirx` imports are common for IR-heavy code; prefer explicit `ffi::` names in
+  core-style code unless FFI helpers are pervasive in the file.
 - Include the headers that define the types used by the file.
 - Keep implementation-only helpers in `.cc` files or anonymous namespaces.
 - Group includes as paired header, standard library, TVM/third-party, then local
