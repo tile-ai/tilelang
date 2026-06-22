@@ -216,7 +216,7 @@ void CodeGenTileLangMetal::PrintType(DataType t,
     os << "bool";
     return;
   }
-  if (t.is_float() && t.bits() == 16 && lanes > 4 && lanes <= 8 &&
+  if ((t.is_float16() || t.is_bfloat16()) && lanes > 4 && lanes <= 8 &&
       lanes % 2 == 0) {
     os << "uint" << lanes / 2;
     return;
