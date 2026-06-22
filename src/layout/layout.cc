@@ -1063,6 +1063,7 @@ void FragmentNode::RegisterReflection() {
   refl::ObjectDef<FragmentNode>()
       .def_ro("forward_thread", &FragmentNode::forward_thread_)
       .def_ro("replicate_size", &FragmentNode::replicate_size_)
+      .def_ro("thread_range", &FragmentNode::thread_range_)
       .def("_DebugOutput", &FragmentNode::DebugOutput);
 }
 

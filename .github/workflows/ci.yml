@@ -7,6 +7,7 @@ on:
       - opened
       - synchronize
       - reopened
+      - ready_for_review
   # Allow to trigger the workflow manually
   workflow_dispatch:
 
@@ -39,7 +40,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           submodules: recursive
@@ -98,7 +99,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           submodules: recursive
@@ -123,8 +124,8 @@ jobs:
           echo "UV_CACHE_DIR=${XDG_CACHE_HOME}/uv" | tee -a "${GITHUB_ENV}"
           echo "PRE_COMMIT_HOME=${XDG_CACHE_HOME}/pip/.pre-commit" | tee -a "${GITHUB_ENV}"
 
-      # Do not use ccache on self-hosted runners, as it will download/upload caches which is slow.
-      # Self-hosted runners usually have more CPU power to compile without ccache.
+      # Use the ccache action only on GitHub-hosted runners, where it manages
+      # remote cache restore/save. Self-hosted runners use a local cache below.
       - name: Setup ccache (GitHub-hosted runners)
         id: setup-ccache
         if: ${{ !startsWith(matrix.runner.name, 'self-hosted') }}
@@ -138,6 +139,26 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-${{ matrix.runner.toolkit }}-${{ hashFiles('**/*.cc') }}
             ${{ runner.os }}-${{ runner.arch }}-${{ matrix.runner.toolkit }}
             ${{ runner.os }}-${{ runner.arch }}
+
+      - name: Setup ccache (self-hosted runners)
+        if: startsWith(matrix.runner.name, 'self-hosted')
+        run: |
+          if ! command -v ccache >/dev/null 2>&1; then
+            echo "::warning::ccache is not installed on this self-hosted runner; CMake will build without ccache."
+            exit 0
+          fi
+
+          export CCACHE_DIR="${XDG_CACHE_HOME}/ccache/${{ matrix.runner.name }}/${{ matrix.runner.toolkit }}"
+          mkdir -p "${CCACHE_DIR}"
+
+          echo "CCACHE_DIR=${CCACHE_DIR}" | tee -a "${GITHUB_ENV}"
+          echo "CCACHE_BASEDIR=${{ github.workspace }}" | tee -a "${GITHUB_ENV}"
+          echo "CCACHE_NOHASHDIR=true" | tee -a "${GITHUB_ENV}"
+          echo "CCACHE_COMPILERCHECK=content" | tee -a "${GITHUB_ENV}"
+
+          ccache -M 20G
+          ccache -z
+          ccache -s
 
       - name: Set environment (CUDA)
         if: contains(matrix.runner.toolkit, 'CUDA')
@@ -296,6 +317,13 @@ jobs:
         run: |
           uv pip install -v .
 
+      - name: Show ccache stats
+        if: always()
+        run: |
+          if command -v ccache >/dev/null 2>&1; then
+            ccache -s || true
+          fi
+
       - name: Clean up stale /tmp files (self-hosted runners)
         if: startsWith(matrix.runner.name, 'self-hosted')
         run: |
@@ -376,7 +404,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           submodules: recursive
@@ -399,6 +427,25 @@ jobs:
           echo "PIP_CACHE_DIR=${XDG_CACHE_HOME}/pip" | tee -a "${GITHUB_ENV}"
           echo "UV_CACHE_DIR=${XDG_CACHE_HOME}/uv" | tee -a "${GITHUB_ENV}"
           echo "PRE_COMMIT_HOME=${XDG_CACHE_HOME}/pip/.pre-commit" | tee -a "${GITHUB_ENV}"
+
+      - name: Setup ccache (self-hosted runners)
+        run: |
+          if ! command -v ccache >/dev/null 2>&1; then
+            echo "::warning::ccache is not installed on this self-hosted runner; CMake will build without ccache."
+            exit 0
+          fi
+
+          export CCACHE_DIR="${XDG_CACHE_HOME}/ccache/self-hosted-nvidia/CUDA-12.8"
+          mkdir -p "${CCACHE_DIR}"
+
+          echo "CCACHE_DIR=${CCACHE_DIR}" | tee -a "${GITHUB_ENV}"
+          echo "CCACHE_BASEDIR=${{ github.workspace }}" | tee -a "${GITHUB_ENV}"
+          echo "CCACHE_NOHASHDIR=true" | tee -a "${GITHUB_ENV}"
+          echo "CCACHE_COMPILERCHECK=content" | tee -a "${GITHUB_ENV}"
+
+          ccache -M 20G
+          ccache -z
+          ccache -s
 
       - name: Set environment (CUDA)
         run: |
@@ -471,6 +518,13 @@ jobs:
       - name: Install project (wheel form)
         run: |
           uv pip install -v .
+
+      - name: Show ccache stats
+        if: always()
+        run: |
+          if command -v ccache >/dev/null 2>&1; then
+            ccache -s || true
+          fi
 
       - name: Clean up stale /tmp files (self-hosted runners)
         run: |

@@ -11,13 +11,14 @@ from __future__ import annotations
 from typing import Any
 from collections.abc import Callable
 import sys
+import threading
 
 import torch
 from tilelang import tvm
 from tvm import runtime, tirx
 from tvm.target import Target
 from tvm.relax import TensorType
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.engine.param import KernelParam
@@ -112,8 +113,25 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         self.compile_flags = compile_flags
         self.dynamic_symbolic_map = self._process_dynamic_symbolic()
         self.kernel_global_source = self.device_kernel_source
+        self.executable = None
+        self._executables_by_device: dict[int | str, tvm.runtime.Executable] = {}
+        self._executable_lock = threading.Lock()
 
         self._post_init()
+
+    def _make_executable(self) -> tvm.runtime.Executable:
+        if self.rt_mod is None:
+            raise RuntimeError("Cannot create TVM FFI executable without a runtime module.")
+        executable = runtime.Executable(self.rt_mod)
+        if COMPILE_ARGS:
+            # Precompile jit module with extra arguments.
+            executable.jit(**COMPILE_ARGS)
+        return executable
+
+    def get_exportable_executable(self) -> tvm.runtime.Executable:
+        if self.executable is not None:
+            return self.executable
+        return self._make_executable()
 
     def _process_dynamic_symbolic(self) -> dict[tirx.Var, tuple[int, int, int, int]]:
         """Extract information about dynamic shapes from the TIR function.
@@ -176,14 +194,26 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 native_shape[-1] = native_shape[-1] * tl_dtype.bits * tl_dtype.lanes // (stroage_dtype.bits * stroage_dtype.lanes)
             param_shapes.append(native_shape)
 
-        if self.executable is None:
-            self.executable = runtime.Executable(self.rt_mod)
-            if COMPILE_ARGS:
-                # Precompile jit module with extra arguments
-                self.executable.jit(**COMPILE_ARGS)
-
         dynamic_symbolic_map = self._process_dynamic_symbolic()
-        executable = self.executable
+
+        def get_executable():
+            if self.executable is not None:
+                return self.executable
+
+            device_key: int | str = "cpu"
+            if torch.cuda.is_available():
+                device_key = torch.cuda.current_device()
+
+            executable = self._executables_by_device.get(device_key)
+            if executable is not None:
+                return executable
+
+            with self._executable_lock:
+                executable = self._executables_by_device.get(device_key)
+                if executable is None:
+                    executable = self._make_executable()
+                    self._executables_by_device[device_key] = executable
+                return executable
 
         # Prepare helpers for friendly dtype error messages
         prim_func = self.prim_func
@@ -209,7 +239,10 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
 
             # Resolve the device used for outputs. Prefer the first tensor input's device
             # if available, otherwise use PyTorch's current device.
-            out_device: torch.device | None = None
+            out_device: torch.device | None = next(
+                (input.device for input in inputs if isinstance(input, torch.Tensor)),
+                None,
+            )
 
             # Stitch the full positional argument list expected by the TVM executable
             ins_idx: int = 0
@@ -250,6 +283,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                     ins_idx += 1
                 tensor_list.append(tensor)
 
+            executable = get_executable()
             executable(*tensor_list)
 
             # Return outputs in the requested form
@@ -298,6 +332,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         adapter.kernel_global_source = device_kernel_source.text
         adapter.rt_mod = None
         adapter.executable = runtime.load_module(kernel_lib_path)
+        adapter._executables_by_device = {}
+        adapter._executable_lock = threading.Lock()
         adapter._post_init()
         return adapter
 

@@ -57,23 +57,25 @@ public:
 
   /*!
    * \brief Lower the copy operator to a TIR statement.
-   * \param T        Arguments for lowering.
+   * \param lower_args Arguments for lowering.
    * \param analyzer Analyzer for simplification and bounds checks.
    */
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
+  Stmt Lower(const LowerArgs &lower_args,
+             arith::Analyzer *analyzer) const override;
 
   /*!
    * \brief Infer buffer layouts after applying this operator.
-   * \param T     Arguments for layout inference.
+   * \param layout_args Arguments for layout inference.
    * \param level Level of inference (basic or detailed).
    */
-  LayoutMap InferLayout(const LayoutInferArgs &T,
+  LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
 
   /*!
    * \brief Infer layout through the generated SIMT copy loop.
    */
-  LayoutMap InferSIMTLayout(const LayoutInferArgs &T, InferLevel level) const;
+  LayoutMap InferSIMTLayout(const LayoutInferArgs &layout_args,
+                            InferLevel level) const;
 
   /*!
    * \brief Generate SIMT (thread-level) loop for copying.
@@ -131,16 +133,17 @@ struct CopyImpl {
   CopyTargetPredicate match_target;
   int priority;
 
-  LayoutMap (*infer_layout)(const CopyNode &op, const LayoutInferArgs &T,
+  LayoutMap (*infer_layout)(const CopyNode &op,
+                            const LayoutInferArgs &layout_args,
                             InferLevel level);
 
-  Stmt (*lower)(const CopyNode &op, const LowerArgs &T,
+  Stmt (*lower)(const CopyNode &op, const LowerArgs &lower_args,
                 arith::Analyzer *analyzer);
 };
 
 void RegisterCopyImpl(CopyImpl impl);
 
-Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &T,
+Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &lower_args,
                      arith::Analyzer *analyzer);
 
 class Copy : public TileOperator {
@@ -201,12 +204,13 @@ public:
   /*!
    * \brief Lower to TIR statement.
    */
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
+  Stmt Lower(const LowerArgs &lower_args,
+             arith::Analyzer *analyzer) const override;
 
   /*!
    * \brief Infer layout for this operator.
    */
-  LayoutMap InferLayout(const LayoutInferArgs &T,
+  LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
 
   /*!
@@ -221,7 +225,7 @@ struct Im2ColImpl {
   CopyTargetPredicate match_target;
   int priority;
 
-  Stmt (*lower)(const Im2ColOpNode &op, const LowerArgs &T,
+  Stmt (*lower)(const Im2ColOpNode &op, const LowerArgs &lower_args,
                 arith::Analyzer *analyzer);
 };
 

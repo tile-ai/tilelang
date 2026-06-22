@@ -48,6 +48,39 @@ def unwrap_expr(expr) -> PrimExpr | int | float:
     return expr
 
 
+def _dtype_total_bits(dtype: dt.dtype) -> int:
+    return dtype.bits * dtype.lanes
+
+
+def _packed_storage_factor(buffer: Buffer, value) -> int:
+    if isinstance(value, Buffer):
+        return 1
+
+    logical_bits = _dtype_total_bits(buffer.dtype)
+    if logical_bits >= 8:
+        return 1
+
+    storage_dtype = dt.dtype(value.dtype)
+    return _dtype_total_bits(storage_dtype) // logical_bits
+
+
+def _logical_shape_value(value, buffer: Buffer, dim: int):
+    shape = value.shape[dim]
+    if dim == len(buffer.shape) - 1:
+        shape *= _packed_storage_factor(buffer, value)
+    return shape
+
+
+def _logical_stride_value(value, buffer: Buffer, dim: int):
+    if isinstance(value, Buffer):
+        return value.strides[dim]
+
+    stride = value.stride()[dim]
+    if dim != len(buffer.strides) - 1:
+        stride *= _packed_storage_factor(buffer, value)
+    return stride
+
+
 def unwrap_cond(expr):
     """
     unwrap expr and convert to bool condition
@@ -1042,18 +1075,17 @@ class TirTemplate(Generic[_P, _T]):
         if self.matcher is None:
             return ()
         result = []
+        buffers = {param.name: buffer for param, buffer in self.prim_func.buffer_map.items()}
         for k, ty, i, name in self.matcher.values():
             if name in kwargs:
                 result.append(kwargs.get(name))
             elif k in kwargs:
+                value = kwargs[k]
+                buffer = buffers[k]
                 if ty == "shape":
-                    result.append(kwargs[k].shape[i])
+                    result.append(_logical_shape_value(value, buffer, i))
                 elif ty == "stride":
-                    v = kwargs[k]
-                    if isinstance(v, Buffer):
-                        result.append(v.strides[i])
-                    else:
-                        result.append(kwargs[k].stride()[i])
+                    result.append(_logical_stride_value(value, buffer, i))
             else:
                 raise ValueError(
                     f"Cannot find value for constexpr variable `{name}`\n"
@@ -1077,6 +1109,239 @@ class TirTemplate(Generic[_P, _T]):
         return pf
 
 
+_MISSING_ARG = object()
+_ExtraJITKwargsKey = tuple[tuple[str, Any], ...]
+
+
+def _freeze_jit_key_part(value: Any) -> Any:
+    """Canonicalize supported compile-time values into hashable key parts."""
+
+    if isinstance(value, dict):
+        return (
+            dict,
+            tuple(
+                (_freeze_jit_key_part(key), _freeze_jit_key_part(item_value))
+                for key, item_value in sorted(value.items(), key=lambda item: repr(item[0]))
+            ),
+        )
+    if isinstance(value, list):
+        return list, tuple(_freeze_jit_key_part(item) for item in value)
+    if isinstance(value, set):
+        return set, tuple(sorted((_freeze_jit_key_part(item) for item in value), key=repr))
+    if isinstance(value, tuple):
+        return tuple(_freeze_jit_key_part(item) for item in value)
+
+    if not isinstance(value, Hashable):
+        raise TypeError(f"Unsupported unhashable JIT compile-time cache key value of type {type(value).__qualname__}: {value!r}")
+    return value
+
+
+def _make_jit_key(values: tuple[Any, ...]) -> tuple[Any, ...]:
+    """Build the phase-1 cache key from already ordered compile-time values."""
+
+    return tuple(_freeze_jit_key_part(value) for value in values)
+
+
+@dataclass(frozen=True)
+class _BoundJITArgs:
+    """JIT arguments split into phase-1 key, runtime tensors, and compile kwargs."""
+
+    p1_key: tuple[Any, ...]
+    tensor_args: dict[str, Any]
+    compile_kwargs: dict[str, Any]
+
+
+class _JITArgumentBinder:
+    """Bind Python JIT calls into TileLang's phase-1 cache inputs.
+
+    The binder keeps three pieces of data separate:
+
+    - phase-1 key values: compile-time arguments that identify the TIR template
+    - tensor args: runtime tensors used later for phase-2 shape/stride matching
+    - compile kwargs: raw values passed back to the user's Python JIT function
+
+    The common path avoids inspect.Signature.bind() because this code runs before
+    every cache lookup. Signatures with *args or **kwargs still use Python's
+    binder because their call semantics are harder to reproduce safely.
+    """
+
+    def __init__(
+        self,
+        signature: inspect.Signature,
+        tensor_arg_names: set[str],
+    ):
+        self.signature = signature
+        self.tensor_arg_names = tensor_arg_names
+        self.params = tuple(signature.parameters.values())
+        self.param_names = tuple(param.name for param in self.params)
+        self.param_index = {name: i for i, name in enumerate(self.param_names)}
+        self.defaults = tuple(param.default if param.default is not inspect.Parameter.empty else _MISSING_ARG for param in self.params)
+        self.required_indices = tuple(i for i, value in enumerate(self.defaults) if value is _MISSING_ARG)
+        self.positional_param_count = sum(
+            1 for param in self.params if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        )
+        self.use_signature_bind = any(
+            param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD) for param in self.params
+        )
+
+    def bind(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> _BoundJITArgs:
+        if self.use_signature_bind:
+            return self._bind_with_signature(args, kwargs)
+        return self._bind_fast(args, kwargs)
+
+    def bind_no_tensor_key(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[Any, ...]:
+        if self.tensor_arg_names:
+            raise ValueError("bind_no_tensor_key is only valid for JIT functions without tensor arguments")
+        if self.use_signature_bind:
+            bound = self.signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            return self._pack_no_tensor_key(bound.arguments)
+        return self._bind_fast_no_tensor_key(args, kwargs)
+
+    @staticmethod
+    def _extra_key(extra_kwargs: dict[str, Any]) -> _ExtraJITKwargsKey:
+        # Extra kwargs are compile-time values for explicit T.const bindings.
+        # Sort names so f(M=1, N=2) and f(N=2, M=1) share one key.
+        return tuple(sorted(extra_kwargs.items()))
+
+    def _pack_no_tensor_key(self, arguments: dict[str, Any]) -> tuple[Any, ...]:
+        """Pack a lazy no-tensor call directly into a phase-1 key."""
+
+        p1_values: list[Any] = []
+        for param in self.params:
+            value = arguments[param.name]
+            if param.kind == inspect.Parameter.VAR_KEYWORD:
+                # Signature.bind() stores **kwargs as one dict under the
+                # VAR_KEYWORD parameter. Flatten it so each keyword remains a
+                # normal compile-time key component.
+                if value:
+                    p1_values.append(self._extra_key(value))
+            else:
+                p1_values.append(value)
+        return _make_jit_key(tuple(p1_values))
+
+    def _pack_bound_arguments(
+        self,
+        arguments: dict[str, Any],
+        extra_kwargs: dict[str, Any] | None = None,
+    ) -> _BoundJITArgs:
+        p1_values: list[Any] = []
+        tensor_args: dict[str, Any] = {}
+        compile_kwargs: dict[str, Any] = {}
+        extra_kwargs = extra_kwargs or {}
+        for param in self.params:
+            name = param.name
+            value = arguments[name]
+            if param.kind == inspect.Parameter.VAR_KEYWORD:
+                # Keep **kwargs flattened both in the key and in compile_kwargs;
+                # passing {"kwargs": {...}} would change the user's call form.
+                if value:
+                    p1_values.append(self._extra_key(value))
+                    compile_kwargs.update(value)
+                continue
+            if name in self.tensor_arg_names:
+                # Tensor args are runtime inputs. They do not identify the TIR
+                # template, but they are needed for phase-2 shape/stride keys.
+                tensor_args[name] = value
+            else:
+                p1_values.append(value)
+                compile_kwargs[name] = value
+        if extra_kwargs:
+            p1_values.append(self._extra_key(extra_kwargs))
+            compile_kwargs.update(extra_kwargs)
+        return _BoundJITArgs(_make_jit_key(tuple(p1_values)), tensor_args, compile_kwargs)
+
+    def _bind_with_signature(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> _BoundJITArgs:
+        """Slow path for signatures that need Python's full binding rules."""
+
+        bound = self.signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        return self._pack_bound_arguments(bound.arguments)
+
+    def _bind_fast(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> _BoundJITArgs:
+        """Fast binder for normal positional/keyword-only JIT signatures."""
+
+        if len(args) > self.positional_param_count:
+            raise TypeError(
+                f"too many positional arguments for JIT function: expected at most {self.positional_param_count}, got {len(args)}"
+            )
+
+        values = list(self.defaults)
+        extra_kwargs: dict[str, Any] = {}
+        for i, value in enumerate(args):
+            values[i] = value
+
+        for name, value in kwargs.items():
+            index = self.param_index.get(name)
+            if index is None:
+                # TileLang allows extra compile-time kwargs for explicit T.const bindings.
+                extra_kwargs[name] = value
+                continue
+            if index < len(args):
+                raise TypeError(f"got multiple values for argument '{name}'")
+            values[index] = value
+
+        for index in self.required_indices:
+            if values[index] is _MISSING_ARG and self.param_names[index] not in self.tensor_arg_names:
+                raise TypeError(f"missing a required argument: '{self.param_names[index]}'")
+
+        p1_values: list[Any] = []
+        tensor_args: dict[str, Any] = {}
+        compile_kwargs: dict[str, Any] = {}
+        for name, value in zip(self.param_names, values):
+            if name in self.tensor_arg_names:
+                if value is not _MISSING_ARG:
+                    tensor_args[name] = value
+            else:
+                p1_values.append(value)
+                compile_kwargs[name] = value
+        if extra_kwargs:
+            p1_values.append(self._extra_key(extra_kwargs))
+            compile_kwargs.update(extra_kwargs)
+        return _BoundJITArgs(_make_jit_key(tuple(p1_values)), tensor_args, compile_kwargs)
+
+    def _bind_fast_no_tensor_key(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[Any, ...]:
+        """Fastest path for lazy factories where every argument is compile-time."""
+
+        if len(args) > self.positional_param_count:
+            raise TypeError(
+                f"too many positional arguments for JIT function: expected at most {self.positional_param_count}, got {len(args)}"
+            )
+
+        if not kwargs:
+            # Common lazy cache-hit form: positional values, no tensor args, no
+            # kwargs. Fill omitted defaults without allocating _BoundJITArgs.
+            if len(args) == len(self.param_names):
+                return _make_jit_key(args)
+            for index in self.required_indices:
+                if index >= len(args):
+                    raise TypeError(f"missing a required argument: '{self.param_names[index]}'")
+            return _make_jit_key(args + self.defaults[len(args) :])
+
+        values = list(self.defaults)
+        extra_kwargs: dict[str, Any] = {}
+        for i, value in enumerate(args):
+            values[i] = value
+
+        for name, value in kwargs.items():
+            index = self.param_index.get(name)
+            if index is None:
+                # TileLang allows extra compile-time kwargs for explicit T.const bindings.
+                extra_kwargs[name] = value
+                continue
+            if index < len(args):
+                raise TypeError(f"got multiple values for argument '{name}'")
+            values[index] = value
+
+        for index in self.required_indices:
+            if values[index] is _MISSING_ARG:
+                raise TypeError(f"missing a required argument: '{self.param_names[index]}'")
+
+        if extra_kwargs:
+            values.append(self._extra_key(extra_kwargs))
+        return _make_jit_key(tuple(values))
+
+
 @dataclass
 class JITFunc(Generic[_P, _T]):
     """
@@ -1096,6 +1361,7 @@ class JITFunc(Generic[_P, _T]):
     """
 
     orig_func: Callable[_P, _T]
+    signature: inspect.Signature
     arg_names: list[str]
     tensor_args: dict[str, Buffer | Var]
     tensor_args_defaults: dict[str, Any]
@@ -1105,17 +1371,11 @@ class JITFunc(Generic[_P, _T]):
     def __post_init__(self):
         # we don't want it to show up in the constructor
         self.p1_cache: dict[Any, TirTemplate[_P, _T]] = {}
+        self._argument_binder = _JITArgumentBinder(self.signature, set(self.tensor_args))
 
     def _parse_phase1_key(self, *args, **kwargs):
-        kwargs.update({k: v for k, v in zip(self.arg_names, args)})
-        tensor_args = {}
-        for k in self.tensor_args:
-            if k in kwargs:
-                tensor_args[k] = kwargs.pop(k)
-            elif k in self.tensor_args_defaults:
-                tensor_args[k] = self.tensor_args_defaults[k]
-        p1_key = tuple(sorted(kwargs.items()))
-        return p1_key, tensor_args, kwargs
+        bound = self._argument_binder.bind(args, kwargs)
+        return bound.p1_key, bound.tensor_args, bound.compile_kwargs
 
     def _is_lazy_style(self, *args, **kwargs) -> bool:
         """
@@ -1145,8 +1405,8 @@ class JITFunc(Generic[_P, _T]):
             prim_func = self.orig_func(*args, **kwargs)
             # lazy jit must return PrimFunc
             if isinstance(prim_func, PrimFunc):
-                p1_key, _, _ = self._parse_phase1_key(*args, **kwargs)
-                self.p1_cache[p1_key] = TirTemplate.from_lazy_style(self.orig_func.__name__, prim_func)
+                bound = self._argument_binder.bind(args, kwargs)
+                self.p1_cache[bound.p1_key] = TirTemplate.from_lazy_style(self.orig_func.__name__, prim_func)
                 return True
             return False
         except (JITNoBuilderError, EagerJITBuildError):
@@ -1176,23 +1436,29 @@ class JITFunc(Generic[_P, _T]):
 
     def parse_args(self, *args, **kwargs):
         """Parse arguments and return cache key and tensor args."""
-        p1_key, tensor_args, kwargs = self._parse_phase1_key(*args, **kwargs)
-        if not tensor_args:
+        if not self.tensor_args:
+            p1_key = self._argument_binder.bind_no_tensor_key(args, kwargs)
             return (p1_key, None), {}
-        tir_temp = self.p1_cache.get(p1_key, None)
+
+        bound = self._argument_binder.bind(args, kwargs)
+        tir_temp = self.p1_cache.get(bound.p1_key, None)
         if tir_temp is None:
             # mode should be set by JITImpl before calling parse_args
-            tir_temp = self._build_tir_template(**kwargs)
-            self.p1_cache[p1_key] = tir_temp
-        p2_key = tir_temp._parse_phase2_key(**tensor_args, **kwargs)
-        return (p1_key, p2_key), tensor_args
+            tir_temp = self._build_tir_template(**bound.compile_kwargs)
+            self.p1_cache[bound.p1_key] = tir_temp
+        p2_key = tir_temp._parse_phase2_key(**bound.tensor_args, **bound.compile_kwargs)
+        return (bound.p1_key, p2_key), bound.tensor_args
 
     def get_tir(self, *args, **kwargs):
-        p1_key, tensor_args, kwargs = self._parse_phase1_key(*args, **kwargs)
-        if p1_key not in self.p1_cache:
+        bound = self._argument_binder.bind(args, kwargs)
+        if bound.p1_key not in self.p1_cache:
             # in legacy gemm, we use lazy tir template to build the tir
-            self.p1_cache[p1_key] = self._build_tir_template(**kwargs)
-        return self.p1_cache[p1_key].get_tir(self.tensor_args, tensor_args, kwargs)
+            self.p1_cache[bound.p1_key] = self._build_tir_template(**bound.compile_kwargs)
+        return self.p1_cache[bound.p1_key].get_tir(
+            self.tensor_args,
+            bound.tensor_args,
+            bound.compile_kwargs,
+        )
 
     def __call__(self, *args, **kwargs):
         return self.get_tir(*args, **kwargs)
@@ -1262,7 +1528,7 @@ def prim_func(func: Callable[_P, _T] = None, *, eager_jit: bool = False) -> Prim
             tensor_args_defaults = {
                 k: sig.parameters[k].default for k in tensor_args if sig.parameters[k].default is not sig.parameters[k].empty
             }
-            return JITFunc(func, arg_names, tensor_args, tensor_args_defaults, ir_gen)
+            return JITFunc(func, sig, arg_names, tensor_args, tensor_args_defaults, ir_gen)
         else:
             try:
                 builder = Builder()

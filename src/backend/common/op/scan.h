@@ -26,7 +26,7 @@ using namespace ffi;
 namespace scan {
 
 template <typename ScanOpNode>
-Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &T,
+Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &lower_args,
                      const char *op_name, const char *pretty_name,
                      const char *symbol_prefix, const char *scan_noun) {
   if (IsFragmentBuffer(op.src) && IsFragmentBuffer(op.dst)) {
@@ -36,7 +36,7 @@ Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &T,
   } else if (IsSharedBuffer(op.src)) {
     ICHECK(IsSharedBuffer(op.dst));
     std::stringstream ss;
-    auto threads = T.thread_bounds->extent;
+    auto threads = lower_args.thread_bounds->extent;
     Array<PrimExpr> args;
 
     PrimExpr src_ptr = MakeAccessPtrFromRegion(op.srcRegion_, 1);
@@ -73,14 +73,15 @@ Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &T,
   return Stmt();
 }
 
-inline Stmt LowerCumSum(const CumSumOpNode &op, const LowerArgs &T,
+inline Stmt LowerCumSum(const CumSumOpNode &op, const LowerArgs &lower_args,
                         arith::Analyzer *) {
-  return LowerSharedScan(op, T, "cumsum", "CumSum", "CumSum", "Cumulative sum");
+  return LowerSharedScan(op, lower_args, "cumsum", "CumSum", "CumSum",
+                         "Cumulative sum");
 }
 
-inline Stmt LowerCumMax(const CumMaxOpNode &op, const LowerArgs &T,
+inline Stmt LowerCumMax(const CumMaxOpNode &op, const LowerArgs &lower_args,
                         arith::Analyzer *) {
-  return LowerSharedScan(op, T, "cummax", "CumMax", "CumMax",
+  return LowerSharedScan(op, lower_args, "cummax", "CumMax", "CumMax",
                          "Cumulative maximum");
 }
 

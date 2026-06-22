@@ -121,7 +121,7 @@ public:
   mutable GemmWarpPolicy policy_;
   Map<String, ObjectRef> annotations_;
   BufferRegion sfaRegion_, sfbRegion_;
-  PrimExpr sfAId_, sfBId_;
+  PrimExpr sfKStart_;
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Gemm", GemmNode, TileOperatorNode);
 
@@ -154,12 +154,12 @@ public:
         .def_ro("annotations", &GemmNode::annotations_)
         .def_ro("sfaRegion", &GemmNode::sfaRegion_)
         .def_ro("sfbRegion", &GemmNode::sfbRegion_)
-        .def_ro("sfAId", &GemmNode::sfAId_)
-        .def_ro("sfBId", &GemmNode::sfBId_);
+        .def_ro("sfKStart", &GemmNode::sfKStart_);
   }
 
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
-  LayoutMap InferLayout(const LayoutInferArgs &T,
+  Stmt Lower(const LowerArgs &lower_args,
+             arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
   AccessRegions GetAccessRegions() const override;
 
@@ -167,7 +167,6 @@ public:
 
   // Target-specific GEMM instruction key.
   String getGemmInstructionKey(int block_size, Target target) const;
-  String getGemmInstructionKind(int block_size, Target target) const;
 
 private:
   mutable bool completed_ = false;
@@ -186,8 +185,6 @@ struct GemmImpl {
       Target target, String gemm_inst);
 
   bool (*reuse_existing_shared_layout)(String gemm_inst);
-
-  String (*instruction_kind)(String gemm_inst);
 };
 
 void RegisterGemmImpl(GemmImpl impl);

@@ -61,7 +61,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
           submodules: recursive
@@ -95,8 +95,8 @@ jobs:
           TEMP_DIR="$(mktemp -d -t tilelang-sdist-test)"
           cp -r dist "${TEMP_DIR}/dist"
           cd "${TEMP_DIR}"
-          uv pip install -v dist/*.tar.gz
-          python3 -c "import tilelang; print(tilelang.__version__)"
+          env -u NO_VERSION_LABEL uv pip install -v dist/*.tar.gz
+          env -u NO_VERSION_LABEL python3 -c "import tilelang; print(tilelang.__version__)"
 
       - name: Upload SDist
         # Not PR to save artifact storage, as SDist is only needed for releases.
@@ -136,7 +136,7 @@ jobs:
         run: git config --global core.longpaths true
 
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
           submodules: recursive
@@ -205,7 +205,7 @@ jobs:
           }
 
       - name: Build wheels
-        uses: pypa/cibuildwheel@v3.4
+        uses: pypa/cibuildwheel@v4.1
         with:
           package-dir: .
           output-dir: wheelhouse
@@ -387,7 +387,7 @@ jobs:
       id-token: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Validate release tag matches VERSION
         run: |

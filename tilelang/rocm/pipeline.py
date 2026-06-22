@@ -17,6 +17,7 @@ from tilelang.backend.pass_pipeline.pipeline_utils import (
 
 def ROCMPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     pass_ctx = tilelang.transform.get_pass_context()
 
     if should_force_let_inline():

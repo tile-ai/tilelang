@@ -1,11 +1,12 @@
 import pytest
 
+
+import tilelang.testing
 from tilelang import tvm as tvm
 from tvm.target import Target
 
-import tilelang.utils.target as target_utils
-from tilelang.utils.target import (
-    determine_target,
+from tilelang.backend.target import determine_target
+from tilelang.rocm.target import (
     normalize_rocm_arch,
     rocm_warp_size_for_arch,
     target_get_mcpu,
@@ -53,16 +54,30 @@ def test_determine_target_rejects_legacy_option_string():
         determine_target("hip -mcpu=gfx1151", return_object=True)
 
 
-def test_auto_target_prefers_rocm_pytorch_over_cuda_toolkit(monkeypatch):
-    monkeypatch.setattr(target_utils.torch.version, "hip", "test", raising=False)
-    monkeypatch.setattr(target_utils, "check_hip_availability", lambda: True)
-    monkeypatch.setattr(target_utils, "check_cuda_availability", lambda: True)
-    monkeypatch.setattr(target_utils, "_detect_torch_rocm_arch", lambda: "gfx1151")
+def test_auto_target_uses_registered_detector_order_for_rocm():
+    import tilelang.backend.target as target_registry
 
-    target = determine_target("auto", return_object=True)
-    assert target.kind.name == "hip"
-    assert target_get_mcpu(target) == "gfx1151"
-    assert int(target.attrs["thread_warp_size"]) == 32
+    old_detectors = dict(target_registry._TARGET_DETECTORS)
+    try:
+        target_registry._TARGET_DETECTORS.clear()
+        target_registry.register_target_detector(
+            "unit-hip",
+            lambda: Target({"kind": "hip", "mcpu": "gfx1151"}),
+            override=True,
+        )
+        target_registry.register_target_detector(
+            "unit-cuda",
+            lambda: Target({"kind": "cuda", "arch": "sm_90"}),
+            override=True,
+        )
+
+        target = determine_target("auto", return_object=True)
+        assert target.kind.name == "hip"
+        assert target_get_mcpu(target) == "gfx1151"
+        assert int(target.attrs["thread_warp_size"]) == 32
+    finally:
+        target_registry._TARGET_DETECTORS.clear()
+        target_registry._TARGET_DETECTORS.update(old_detectors)
 
 
 def test_rdna_gfx1151_target_classification():
@@ -92,6 +107,7 @@ def test_carver_routes_rdna_without_instantiating_device(monkeypatch):
     assert target_get_mcpu(arch[1]) == "gfx1151"
 
 
+@tilelang.testing.requires_rocm
 def test_carver_rejects_unsupported_rdna_generations(monkeypatch):
     import tilelang.carver.arch as arch_mod
 
@@ -103,6 +119,7 @@ def test_carver_rejects_unsupported_rdna_generations(monkeypatch):
         arch_mod.get_arch(_hip_target("gfx1200"))
 
 
+@tilelang.testing.requires_rocm
 def test_rdna_device_model_rejects_gfx12_before_device_probe():
     from tilelang.carver.arch.rdna import RDNA
 
@@ -110,6 +127,7 @@ def test_rdna_device_model_rejects_gfx12_before_device_probe():
         RDNA(_hip_target("gfx1200"))
 
 
+@tilelang.testing.requires_rocm
 def test_rdna_tensor_instruction_lookup_is_generation_aware():
     from tilelang.carver.arch.rdna import RDNA
 
@@ -135,3 +153,7 @@ def test_rdna_internal_tuning_config_allows_mcpu_overrides():
     assert gfx1151.preferred_warps_per_block == 4
     assert gfx1151.pipeline_stage == 2
     assert gfx1151.reduction_step_for_dtype_bits(16) == 32
+
+
+if __name__ == "__main__":
+    tilelang.testing.main()

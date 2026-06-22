@@ -6,7 +6,7 @@ import pytest
 import tilelang.testing
 from tilelang import tvm as tvm
 import tilelang as tl
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 
 
 @tilelang.jit

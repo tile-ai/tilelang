@@ -1,5 +1,9 @@
 import tilelang
+import tilelang.testing
 import tilelang.language as T
+import pytest
+import torch
+from tilelang.contrib import nvcc
 
 
 # add decorator @tilelang.jit if you want to return a torch function
@@ -52,6 +56,29 @@ def run_matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=
 
 def test_matmul():
     run_matmul(1024, 1024, 1024, 128, 128, 32)
+
+
+@tilelang.testing.requires_cuda_compute_version(10)
+def test_shared_fill_cast_zero_uses_st_bulk():
+    if nvcc.get_cuda_version() < (12, 8):
+        pytest.skip("st.bulk shared lowering requires CUDA toolkit >= 12.8")
+
+    @T.prim_func
+    def main(out: T.Tensor((128,), T.float32)):
+        with T.Kernel(1, threads=128):
+            smem = T.alloc_shared((128,), T.float32)
+            for i in T.Parallel(128):
+                smem[i] = T.float32(1.0)
+            T.fill(smem, T.cast(0, T.float32))
+            T.copy(smem, out)
+
+    kernel = tilelang.compile(main, target="cuda")
+    assert "tl::st_bulk_shared<512, 0>" in kernel.get_kernel_source()
+
+    out = torch.empty((128,), dtype=torch.float32, device="cuda")
+    kernel(out)
+    torch.cuda.synchronize()
+    assert torch.allclose(out, torch.zeros_like(out))
 
 
 if __name__ == "__main__":

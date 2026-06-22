@@ -44,6 +44,20 @@ def test_tilelang_copy():
     run_tilelang_copy(M=1024, N=576, block_M=32, block_N=576, dtype=T.float32)
 
 
+def run_tilelang_copy_cross_dtype(M=256, N=256, block_M=128, block_N=128, src_dtype=T.float16, dst_dtype=T.bfloat16):
+    program = tilelang_copy(M, N, block_M, block_N, src_dtype=src_dtype, dst_dtype=dst_dtype)
+    kernel = tilelang.compile(program, out_idx=[1])
+    a = torch.randn(M, N, device="cuda", dtype=getattr(torch, src_dtype))
+    b = kernel(a)
+    torch.testing.assert_close(b, a.to(getattr(torch, dst_dtype)), rtol=1e-2, atol=1e-2)
+
+
+@tilelang.testing.requires_cuda
+def test_tilelang_copy_cross_dtype():
+    run_tilelang_copy_cross_dtype(src_dtype=T.float16, dst_dtype=T.bfloat16)
+    run_tilelang_copy_cross_dtype(src_dtype=T.bfloat16, dst_dtype=T.float16)
+
+
 def tilelang_copy_with_stride(M, N, NN, block_M, block_N, dtype=T.float16):
     @T.prim_func
     def main(

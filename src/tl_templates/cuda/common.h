@@ -104,6 +104,11 @@ TL_PATCH TL_DEVICE half_t hrsqrt(const half_t x) {
   return half_t(hrsqrt(x.to_half()));
 }
 
+// hrsqrt function for bfloat16_t
+TL_PATCH TL_DEVICE bfloat16_t hrsqrt(const bfloat16_t x) {
+  return bfloat16_t(hrsqrt(x.to_nv_bfloat16()));
+}
+
 // Pack two half values.
 TL_DEVICE unsigned __pack_half2(const half x, const half y) {
   unsigned v0 = *((unsigned short *)&x);
@@ -739,6 +744,21 @@ TL_DEVICE uint1 pack_half2(half_t a, half_t b) {
   return uint1{packed};
 }
 
+template <uint64_t bytes, uint64_t init_val>
+TL_DEVICE void st_bulk_shared(void *smem_ptr) {
+  static_assert(init_val == 0,
+                "tl::st_bulk_shared only supports init_val == 0");
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
+    (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 8)
+  asm volatile("st.bulk.weak.shared::cta [%0], %1, 0;" ::"l"(
+                   __cvta_generic_to_shared(smem_ptr)),
+               "l"(bytes)
+               : "memory");
+#else
+  static_assert(false, "tl::st_bulk_shared requires CUDA >= 12.8");
+#endif
+}
+
 // --- add2 ----------------------------------------------------------------
 
 TL_DEVICE float2 add2(float2 a, float2 b) {
@@ -959,8 +979,11 @@ TL_DEVICE __half2 abs2(__half2 a) {
 using tl::tfloat32_t;
 
 namespace cutlass {
+// Mirror cutlass's own half_t fast_exp (fast_math.h): route through float.
+// A direct `return ::hexp(x)` recurses, since `hexp` is #define'd to this
+// same cutlass::fast_exp and x is already bfloat16_t.
 TL_DEVICE
-bfloat16_t fast_exp(bfloat16_t x) { return ::hexp(x); }
+bfloat16_t fast_exp(bfloat16_t x) { return bfloat16_t(fast_exp(float(x))); }
 } // namespace cutlass
 
 //

@@ -34,8 +34,8 @@ class GemmMMA(GemmBase):
         warp_col_tiles = int(self.N // n_warp)
         annotations = getattr(self.gemm_node, "annotations", {})
         emitter = self.intrin_emitter_cls(
-            a_dtype=self.in_dtype,
-            b_dtype=self.in_dtype_b,
+            a_dtype=self.a_dtype,
+            b_dtype=self.b_dtype,
             accum_dtype=self.accum_dtype,
             a_transposed=self.trans_A,
             b_transposed=self.trans_B,
@@ -89,10 +89,14 @@ class GemmMMA(GemmBase):
         mbar_phase_expr: tirx.PrimExpr | None = None,
     ):
         thread_nums = thread_bounds.extent
-        mma_emitter = self._make_mma_emitter(target, thread_nums, thread_var=thread_var)
+        # Emitter lane/warp math uses zero-based ids within the current thread bounds.
+        local_thread_var = thread_var - thread_bounds.min
+        mma_emitter = self._make_mma_emitter(target, thread_nums, thread_var=local_thread_var)
 
-        in_dtype = self.in_dtype
-        in_dtype_b = self.in_dtype_b
+        a_dtype = self.a_dtype
+        b_dtype = self.b_dtype
+        in_dtype = a_dtype  # alias used by the NVFP4 block-scaled branch
+        in_dtype_b = b_dtype
         warp_rows = mma_emitter.warp_rows
         warp_cols = mma_emitter.warp_cols
         local_size_a = mma_emitter.local_size_a
@@ -112,6 +116,7 @@ class GemmMMA(GemmBase):
         clear_accum = self.clear_accum
 
         assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
+        assert block_K % micro_size_k == 0, f"block_K ({block_K}) must be a multiple of micro_size_k ({micro_size_k})"
 
         assert is_full_region(C_region), "Fragment output C must be a full region"
 
@@ -143,8 +148,8 @@ class GemmMMA(GemmBase):
                 B_shared into local fragments, then issues Tensor Core mma ops,
                 accumulating into C_local.
                 """
-                A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
-                B_local = T.alloc_local((warp_cols * local_size_b), in_dtype_b)
+                A_local = T.alloc_local((warp_rows * local_size_a), a_dtype)
+                B_local = T.alloc_local((warp_cols * local_size_b), b_dtype)
                 if clear_accum:
                     T.clear(C_buf)
                 for ki in T.serial(0, (block_K // micro_size_k)):
@@ -178,11 +183,11 @@ class GemmMMA(GemmBase):
                 B_shared into local fragments, then issues Tensor Core mma ops,
                 accumulating into C_local.
                 """
-                A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
+                A_local = T.alloc_local((warp_rows * local_size_a), a_dtype)
 
+                if clear_accum:
+                    T.clear(C_buf)
                 for ki in T.serial(0, (block_K // micro_size_k)):
-                    if clear_accum:
-                        T.clear(C_buf)
                     # Load A into fragment
                     mma_emitter.ldmatrix_a(
                         A_local,
@@ -208,7 +213,7 @@ class GemmMMA(GemmBase):
                 B_shared into local fragments, then issues Tensor Core mma ops,
                 accumulating into C_local.
                 """
-                B_local = T.alloc_local((warp_cols * local_size_b), in_dtype_b)
+                B_local = T.alloc_local((warp_cols * local_size_b), b_dtype)
                 if clear_accum:
                     T.clear(C_buf)
                 for ki in T.serial(0, (block_K // micro_size_k)):
@@ -237,6 +242,8 @@ class GemmMMA(GemmBase):
                 accumulating into C_local.
                 """
 
+                if clear_accum:
+                    T.clear(C_buf)
                 for ki in T.serial(0, (block_K // micro_size_k)):
                     # Perform Matrix Multiplication
                     mma_emitter.mma(A_buf, B_buf, C_buf, ki)

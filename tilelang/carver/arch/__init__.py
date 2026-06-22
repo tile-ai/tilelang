@@ -8,7 +8,8 @@ from .rdna import *
 from .metal import *
 from tvm.target import Target
 import torch
-from tilelang.utils.target import determine_target, target_get_rdna_generation, target_is_rdna
+from tilelang.backend.target import determine_target
+from tilelang.rocm.target import target_get_rdna_generation, target_is_rdna
 
 
 def get_arch(target: str | Target = "cuda") -> TileDevice:
@@ -21,9 +22,9 @@ def get_arch(target: str | Target = "cuda") -> TileDevice:
         return CPU(target)
     elif target.kind.name == "hip":
         if target_is_rdna(target):
-            if target_get_rdna_generation(target) == 11:
+            if target_get_rdna_generation(target) in (11, 12):
                 return RDNA(target)
-            raise ValueError(f"RDNA device model currently supports gfx11 targets only, got {target}.")
+            raise ValueError(f"RDNA device model currently supports gfx11/gfx12 targets only, got {target}.")
         return CDNA(target)
     elif target.kind.name == "metal":
         return METAL(target)

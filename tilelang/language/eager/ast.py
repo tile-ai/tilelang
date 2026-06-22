@@ -469,8 +469,10 @@ class DSLMutator(ast.NodeTransformer):
         arg_names = set()
         all_args = node.args.posonlyargs + node.args.args
         if node.args.vararg is not None:
-            all_args += node.args.vararg
+            all_args.append(node.args.vararg)
         all_args += node.args.kwonlyargs
+        if node.args.kwarg is not None:
+            all_args.append(node.args.kwarg)
         for arg in all_args:
             name = arg.arg
             arg_names.add(name)
@@ -487,7 +489,8 @@ class DSLMutator(ast.NodeTransformer):
         node.body = stmts + node.body
         node.decorator_list.clear()
         name = node.name
-        node.args.kwarg = ast.arg(arg="__kwargs")
+        if node.args.kwarg is None:
+            node.args.kwarg = ast.arg(arg="__kwargs")
         node = SpanAttacher("__tb_fl", "__tb_fn").visit(node)
         return quote1(
             f"def make_closure({', '.join(self.nonlocals.keys())}):\n"
@@ -584,11 +587,11 @@ class DSLMutator(ast.NodeTransformer):
         is_kernel_ctx = False
         for expr in node.items:
             cexpr = expr.context_expr
-            if isinstance(cexpr, ast.Call) and isinstance(cexpr.func, ast.Attribute) and cexpr.func.attr == "Kernel":
+            if isinstance(cexpr, ast.Call) and isinstance(cexpr.func, ast.Attribute) and cexpr.func.attr in ("Kernel", "ClusterKernel"):
                 eval_res = self._try_eval(cexpr.func)
-                from tilelang.language import Kernel
+                from tilelang.language import Kernel, ClusterKernel
 
-                if eval_res is Kernel:
+                if eval_res is Kernel or eval_res is ClusterKernel:
                     is_kernel_ctx = True
         node = self.generic_visit(node)
         for expr in node.items:

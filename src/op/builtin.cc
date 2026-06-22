@@ -17,6 +17,8 @@
 namespace tvm {
 namespace tl {
 
+using namespace tirx;
+
 TVM_REGISTER_PASS_CONFIG_OPTION(kDebugMergeSharedMemoryAllocations, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableSafeMemoryLegalize, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableWarpSpecialized, Bool);
@@ -308,6 +310,11 @@ TIR_DEFINE_TL_BUILTIN(ptx_cp_async_barrier_noinc)
 
 TIR_DEFINE_TL_BUILTIN(ptx_cp_async)
     .set_num_inputs(-1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(ptx_st_bulk_shared)
+    .set_num_inputs(3)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

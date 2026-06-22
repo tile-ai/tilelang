@@ -204,11 +204,13 @@ For TransposeNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   return Downcast<For>(body);
 }
 
-Stmt TransposeNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  return ResolveTransposeImpl(T.target).lower(*this, T, analyzer);
+Stmt TransposeNode::Lower(const LowerArgs &lower_args,
+                          arith::Analyzer *analyzer) const {
+  return ResolveTransposeImpl(lower_args.target)
+      .lower(*this, lower_args, analyzer);
 }
 
-LayoutMap TransposeNode::InferLayout(const LayoutInferArgs &T,
+LayoutMap TransposeNode::InferLayout(const LayoutInferArgs &layout_args,
                                      InferLevel level) const {
   // Transpose always uses SIMT loops; no special layout inference needed.
   return {};

@@ -4,11 +4,12 @@ import tvm
 from tvm.target import Target
 from .arch_base import TileDevice
 from .cuda import TensorInstruction
-from tilelang.utils.target import target_get_mcpu, target_get_rdna_generation
+from tilelang.rocm.target import target_get_mcpu, target_get_rdna_generation
 
 _RDNA_DEFAULT_LDS_SIZE = 64 * 1024
 _RDNA_TENSOR_INSTRUCTIONS = {
     11: (TensorInstruction("wmma", [16, 16]),),
+    12: (TensorInstruction("wmma", [16, 16]),),
 }
 
 
@@ -60,16 +61,16 @@ def is_rdna_arch(arch: TileDevice) -> bool:
 class RDNA(TileDevice):
     def __init__(self, target: Target | str):
         if isinstance(target, str):
-            from tilelang.utils.target import determine_target
+            from tilelang.backend.target import determine_target
 
             target = determine_target(target, return_object=True)
         self.target = target
         self.mcpu = target_get_mcpu(target)
         self.rdna_generation = target_get_rdna_generation(target)
         self.tuning = _get_rdna_tuning_config(self.mcpu)
-        if self.rdna_generation != 11:
+        if self.rdna_generation not in (11, 12):
             arch = self.mcpu or str(target)
-            raise ValueError(f"RDNA device model currently supports gfx11 targets only, got {arch}.")
+            raise ValueError(f"RDNA device model currently supports gfx11/gfx12 targets only, got {arch}.")
         device = tvm.runtime.rocm(0)
         if not device.exist:
             raise RuntimeError("Cannot find HIP device 0.")

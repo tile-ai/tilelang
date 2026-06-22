@@ -70,6 +70,10 @@ public:
     cluster_dims_ = std::move(cluster_dims);
   }
 
+  void SetSmemAlignmentMap(Map<String, IntImm> smem_alignment_map) {
+    smem_alignment_map_ = std::move(smem_alignment_map);
+  }
+
   void SetHostFuncSignature(const tirx::PrimFunc &func) {
     host_buffer_map_ = func->buffer_map;
   }
@@ -113,6 +117,9 @@ private:
   Map<tirx::Var, tirx::Buffer> host_buffer_map_;
   Array<tirx::Var> non_restrict_params_;
   Optional<Array<Integer>> cluster_dims_{std::nullopt};
+  // Per-buffer shared-memory alignment requirements (kSmemAlignmentMap)
+  // propagated from the host PrimFunc onto each split device kernel.
+  Map<String, IntImm> smem_alignment_map_;
   Optional<String> code_block_source_{std::nullopt};
   Optional<String> code_block_entry_name_{std::nullopt};
 
@@ -372,6 +379,9 @@ private:
     if (cluster_dims_.defined()) {
       device_attrs.Set("cluster_dims", cluster_dims_.value());
     }
+    if (!smem_alignment_map_.empty()) {
+      device_attrs.Set(tl::kSmemAlignmentMap, smem_alignment_map_);
+    }
     if (code_block_source_) {
       device_attrs.Set(tl::attr::kCodeBlockSource, code_block_source_.value());
     }
@@ -431,6 +441,13 @@ tirx::PrimFunc SplitHostDevice(tirx::PrimFunc func, IRModule *device_mod,
   if (auto opt = func->GetAttr<Array<Integer>>("cluster_dims")) {
     splitter.SetClusterDims(opt.value());
     func = tvm::WithoutAttr(std::move(func), "cluster_dims");
+  }
+  // Propagate per-buffer shared-memory alignment requirements collected by
+  // LowerTileOp onto the device kernel, where MergeSharedMemoryAllocations
+  // consumes them.
+  if (auto opt = func->GetAttr<Map<String, IntImm>>(tl::kSmemAlignmentMap)) {
+    splitter.SetSmemAlignmentMap(opt.value());
+    func = tvm::WithoutAttr(std::move(func), tl::kSmemAlignmentMap);
   }
 
   if (auto body = splitter(func->body); !body.same_as(func->body)) {

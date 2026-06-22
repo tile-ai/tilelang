@@ -397,9 +397,10 @@ def tcgen05_gemm_blockscaled(
     clear_accum=False,
     wg_wait: int = 0,
     mbar: BarrierType | None = None,
-    sf_a_id: int = 0,
-    sf_b_id: int = 0,
     *,
+    k_start: int | tirx.PrimExpr,
+    sf_a_granularity_k: int,
+    sf_b_granularity_k: int,
     use_2cta: bool = False,
     is_nvfp4: bool = False,
 ) -> tirx.PrimExpr:
@@ -414,14 +415,20 @@ def tcgen05_gemm_blockscaled(
     path only; there is no fallback or emulation. That mode requires
     ``cluster_dims`` to be ``(2,1,1)`` or ``(1,2,1)``.
 
-    A and B are FP8 (E4M3/E5M2) in shared memory, C is the accumulator in
-    tensor memory, and SFA/SFB are E8M0 scale factors already resident in
-    tensor memory. As with `T.tcgen05_gemm(...)`, this API is explicit-async:
-    it issues the MMA and leaves synchronization to the user schedule.
+    A and B are FP8/FP6/FP4 mxf8f6f4 operands in shared memory, C is the
+    accumulator in tensor memory, and SFA/SFB are E8M0 scale factors already
+    resident in tensor memory. As with `T.tcgen05_gemm(...)`, this API is
+    explicit-async: it issues the MMA and leaves synchronization to the user
+    schedule.
+
+    ``k_start`` is the logical K-axis start offset for this MMA tile.
+    ``sf_a_granularity_k`` and ``sf_b_granularity_k`` describe how many K
+    elements one packed scale factor covers. The compiler derives the PTX
+    scale-factor A/B IDs for each internal K32 MMA atom from these values.
 
     Args:
-        A: FP8 input buffer A in shared memory.
-        B: FP8 input buffer B in shared memory.
+        A: FP8/FP6/FP4 input buffer A in shared memory.
+        B: FP8/FP6/FP4 input buffer B in shared memory.
         C: Accumulator in tensor memory.
         SFA_tmem: Scale factors for A in tensor memory.
         SFB_tmem: Scale factors for B in tensor memory.
@@ -430,8 +437,9 @@ def tcgen05_gemm_blockscaled(
         clear_accum: Whether to zero the accumulator.
         wg_wait: Warp group wait identifier.
         mbar: Mbarrier for MMA completion signaling.
-        sf_a_id: Scale factor ID for A (0-3).
-        sf_b_id: Scale factor ID for B (0-3).
+        k_start: Logical K-axis start offset for this MMA tile.
+        sf_a_granularity_k: K elements covered by one A scale factor.
+        sf_b_granularity_k: K elements covered by one B scale factor.
         use_2cta: Whether to request true ``cta_group::2`` lowering.
     """
 
@@ -440,6 +448,8 @@ def tcgen05_gemm_blockscaled(
         ann["use_2cta"] = int(use_2cta)
     if is_nvfp4:
         ann["is_nvfp4"] = 1
+    ann["sf_a_granularity_k"] = int(sf_a_granularity_k)
+    ann["sf_b_granularity_k"] = int(sf_b_granularity_k)
 
     # Re-read normalized regions below after let legalization.
 
@@ -524,11 +534,8 @@ def tcgen05_gemm_blockscaled(
 
     assert mbar is not None, "mbar is required for tcgen05_gemm_blockscaled"
 
-    # Ensure sf_a_id and sf_b_id are PrimExpr
-    if not isinstance(sf_a_id, tirx.PrimExpr):
-        sf_a_id = tirx.const(sf_a_id, dtype="int32")
-    if not isinstance(sf_b_id, tirx.PrimExpr):
-        sf_b_id = tirx.const(sf_b_id, dtype="int32")
+    if not isinstance(k_start, tirx.PrimExpr):
+        k_start = tirx.const(k_start, dtype="int32")
 
     # Block-scaled always uses Square policy (1x1 warp partition)
     policy = GemmWarpPolicy.Square
@@ -557,8 +564,7 @@ def tcgen05_gemm_blockscaled(
         C_coords[1],
         SFA_arg,  # arg 19
         SFB_arg,  # arg 20
-        sf_a_id,  # arg 21
-        sf_b_id,  # arg 22
+        k_start,  # arg 21
         annotations=ann,
     )
 

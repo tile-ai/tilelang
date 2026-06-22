@@ -31,8 +31,8 @@ class GemmMetal(GemmBase):
         from tilelang.metal.intrinsics.metal_macro_generator import MPSIntrinEmitter
 
         mps_emitter = MPSIntrinEmitter(
-            a_dtype=self.in_dtype,
-            b_dtype=self.in_dtype,
+            a_dtype=self.a_dtype,
+            b_dtype=self.b_dtype,
             accum_dtype=self.accum_dtype,
             a_transposed=self.trans_A,
             b_transposed=self.trans_B,
@@ -44,7 +44,8 @@ class GemmMetal(GemmBase):
             thread_var=thread_var,
         )
 
-        in_dtype = self.in_dtype
+        a_dtype = self.a_dtype
+        b_dtype = self.b_dtype
         accum_dtype = self.accum_dtype
         warp_rows = mps_emitter.warp_rows
         warp_cols = mps_emitter.warp_cols
@@ -72,8 +73,8 @@ class GemmMetal(GemmBase):
 
                 @T.prim_func
                 def _gemm_ss_simdgroup() -> None:
-                    A_local = T.alloc_local((warp_rows * 64), in_dtype, scope="metal.simdgroup")
-                    B_local = T.alloc_local((warp_cols * 64), in_dtype, scope="metal.simdgroup")
+                    A_local = T.alloc_local((warp_rows * 64), a_dtype, scope="metal.simdgroup")
+                    B_local = T.alloc_local((warp_cols * 64), b_dtype, scope="metal.simdgroup")
                     if clear_accum:
                         for _i in T.serial(num_simd_c):
                             T.make_filled_simdgroup_matrix(C_buf.data, _i, T.cast(0, accum_dtype))
@@ -87,8 +88,8 @@ class GemmMetal(GemmBase):
 
                 @T.prim_func
                 def _gemm_ss_shared() -> None:
-                    A_local = T.alloc_local((warp_rows * 64), in_dtype, scope="metal.simdgroup")
-                    B_local = T.alloc_local((warp_cols * 64), in_dtype, scope="metal.simdgroup")
+                    A_local = T.alloc_local((warp_rows * 64), a_dtype, scope="metal.simdgroup")
+                    B_local = T.alloc_local((warp_cols * 64), b_dtype, scope="metal.simdgroup")
                     C_simd = T.alloc_local((num_simd_c * 64), accum_dtype, scope="metal.simdgroup")
                     if clear_accum:
                         for _i in T.serial(num_simd_c):

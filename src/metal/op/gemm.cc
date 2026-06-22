@@ -5,8 +5,8 @@
 
 #include "op/gemm.h"
 
-#include "backend/common/target_utils.h"
 #include "metal/op/utils.h"
+#include "metal/target_utils.h"
 
 #include <tvm/runtime/logging.h>
 
@@ -89,20 +89,13 @@ struct Gemm {
                        int block_size, Target target, String gemm_inst) {
     TVM_FFI_ICHECK(gemm_inst == kMetalSIMDGroup)
         << "Unsupported Metal GEMM instruction: " << gemm_inst;
-    int num_warps = block_size / TargetGetWarpSize(target);
+    int num_warps = block_size / TargetMetalGetWarpSize(target);
     return ComputeMetalWarpPartition(policy, M, N, num_warps);
   }
 
   static bool ReuseExistingSharedLayout(String gemm_inst) {
     (void)gemm_inst;
     return false;
-  }
-
-  static String InstructionKind(String gemm_inst) {
-    if (gemm_inst == kMetalSIMDGroup) {
-      return "metal_simdgroup";
-    }
-    return "unknown";
   }
 };
 
@@ -119,7 +112,6 @@ bool RegisterMetalGemm() {
       metal::Gemm::SelectInst,
       metal::Gemm::ComputeWarpPartition,
       metal::Gemm::ReuseExistingSharedLayout,
-      metal::Gemm::InstructionKind,
   });
   return true;
 }

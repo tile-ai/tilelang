@@ -161,7 +161,7 @@ def gemm_persistent_2cta(
     group_size = 8  # in cluster
     assert n_blocks % (2 * group_size) == 0  # Please adjust group_size if not satisfied
 
-    with T.Kernel(sm_num, threads=256, cluster_dims=2) as (block_id):
+    with T.ClusterKernel(sm_num, threads=256, cluster_dims=2) as (block_id):
         A_shared = T.alloc_shared((num_stages, block_M, block_K), in_dtype)
         B_shared = T.alloc_shared((num_stages, block_K, block_N // 2), in_dtype)
         C_tmem_0 = T.alloc_tmem([block_M, block_N], accum_dtype)

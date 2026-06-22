@@ -60,6 +60,7 @@ class TensorCoreIntrinEmitter:
         "float6_e2m3fn": "e2m3",
         "float6_e3m2fn": "e3m2",
         "float4_e2m1fn": "e2m1",
+        "custom[float4_e2m1_unpacked]8": "e2m1",
         "custom[tfloat32]": "tf32",
     }
 
@@ -167,6 +168,8 @@ class TensorCoreIntrinEmitter:
             self.b_dtype_abbrv = "tf32"
 
     def _get_dtype_abbrv(self, dtype: str) -> str:
+        if "float4_e2m1_unpacked" in dtype:
+            return "e2m1"
         if dtype not in self.dtype_abbrv:
             raise ValueError(f"Unsupported dtype: {dtype}")
         return self.dtype_abbrv[dtype]

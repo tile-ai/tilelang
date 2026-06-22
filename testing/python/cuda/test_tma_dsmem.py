@@ -13,7 +13,7 @@ def make_store_cluster_kernel(N: int):
         A: T.Tensor((N,), "float32"),
         B: T.Tensor((N,), "float32"),
     ):
-        with T.Kernel(2, threads=128, cluster_dims=(2, 1, 1)) as pid:
+        with T.ClusterKernel(2, threads=128, cluster_dims=(2, 1, 1)) as pid:
             s_src = T.alloc_shared((N,), "float32")
             s_dst = T.alloc_shared((N,), "float32")
             s_barrier = T.alloc_cluster_barrier([1])
@@ -43,7 +43,7 @@ def make_store_cluster_simt_no_barrier_kernel(N: int):
         A: T.Tensor((N,), "float32"),
         B: T.Tensor((N,), "float32"),
     ):
-        with T.Kernel(2, threads=128, cluster_dims=(2, 1, 1)) as pid:
+        with T.ClusterKernel(2, threads=128, cluster_dims=(2, 1, 1)) as pid:
             s_src = T.alloc_shared((N,), "float32")
             s_dst = T.alloc_shared((N,), "float32")
 
@@ -91,7 +91,7 @@ def make_store_cluster_simt_barrier_kernel(M: int, N_full: int, N_tile: int):
         A: T.Tensor((M, N_tile), "float32"),
         B: T.Tensor((M, N_tile), "float32"),
     ):
-        with T.Kernel(2, threads=128, cluster_dims=(2, 1, 1)) as pid:
+        with T.ClusterKernel(2, threads=128, cluster_dims=(2, 1, 1)) as pid:
             # Deliberately wider buffer: N_full > N_tile so the slice
             # [0:M, 0:N_tile] is non-contiguous in row-major storage.
             s_src = T.alloc_shared((M, N_full), "float32")
@@ -226,7 +226,7 @@ def make_store_cluster_3d_multi_tma_kernel(D: int, M: int, N_full: int, N_tile: 
         A: T.Tensor((D, M, N_tile), "float32"),
         B: T.Tensor((D, M, N_tile), "float32"),
     ):
-        with T.Kernel(2, threads=D * M * N_tile, cluster_dims=(2, 1, 1)) as pid:
+        with T.ClusterKernel(2, threads=D * M * N_tile, cluster_dims=(2, 1, 1)) as pid:
             s_src = T.alloc_shared((D, M, N_full), "float32")
             s_dst = T.alloc_shared((D, M, N_full), "float32")
             s_barrier = T.alloc_cluster_barrier([1])

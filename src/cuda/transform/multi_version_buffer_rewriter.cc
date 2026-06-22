@@ -119,7 +119,83 @@ bool UpdateExpandedLayoutMapForRemappedAllocs(
 
 } // namespace
 
-enum class Role : uint8_t { kConsumer, kProducer, kBoth };
+enum class Role : uint8_t { kNeutral, kConsumer, kProducer, kBoth };
+
+using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
+using VarRoleMap = std::unordered_map<Var, Role, ObjectPtrHash, ObjectPtrEqual>;
+
+Role CombineRoles(Role lhs, Role rhs) {
+  if (lhs == Role::kNeutral) {
+    return rhs;
+  }
+  if (rhs == Role::kNeutral || lhs == rhs) {
+    return lhs;
+  }
+  return Role::kBoth;
+}
+
+struct ScalarAccess {
+  VarSet defs;
+  VarSet uses;
+};
+
+class ScalarAccessCollector : public StmtExprVisitor {
+public:
+  static ScalarAccess Collect(const Stmt &stmt) {
+    ScalarAccessCollector collector;
+    collector(stmt);
+    return std::move(collector.access_);
+  }
+
+private:
+  void VisitStmt_(const BindNode *op) final {
+    VisitExpr(op->value);
+    access_.defs.insert(op->var);
+  }
+
+  void VisitExpr_(const VarNode *op) final {
+    access_.uses.insert(GetRef<Var>(op));
+  }
+
+  ScalarAccess access_;
+};
+
+void PropagateScalarDependencyRoles(const Array<Stmt> &stmts,
+                                    std::vector<Role> *roles) {
+  ICHECK_EQ(stmts.size(), roles->size());
+  std::vector<ScalarAccess> accesses;
+  accesses.reserve(stmts.size());
+  for (const Stmt &stmt : stmts) {
+    accesses.push_back(ScalarAccessCollector::Collect(stmt));
+  }
+
+  VarRoleMap live_roles;
+  for (int i = static_cast<int>(stmts.size()) - 1; i >= 0; --i) {
+    Role role = (*roles)[i];
+    for (const Var &def : accesses[i].defs) {
+      auto it = live_roles.find(def);
+      if (it != live_roles.end()) {
+        role = CombineRoles(role, it->second);
+      }
+    }
+    (*roles)[i] = role;
+
+    for (const Var &def : accesses[i].defs) {
+      live_roles.erase(def);
+    }
+    if (role == Role::kNeutral) {
+      continue;
+    }
+    for (const Var &use : accesses[i].uses) {
+      auto it = live_roles.find(use);
+      if (it == live_roles.end()) {
+        live_roles.emplace(use, role);
+      } else {
+        it->second = CombineRoles(it->second, role);
+      }
+    }
+  }
+}
 
 class WarpSpecializedRoleMarker_ : public StmtVisitor {
 public:
@@ -173,23 +249,27 @@ public:
 
   void VisitStmt_(const SeqStmtNode *op) final {
     StmtVisitor::VisitStmt_(op);
-    auto role = GetRole(op->seq[0]);
-    for (auto stmt : op->seq) {
-      if (role != GetRole(stmt)) {
-        role = Role::kBoth;
-        break;
-      }
+    std::vector<Role> roles;
+    roles.reserve(op->seq.size());
+    for (const Stmt &stmt : op->seq) {
+      roles.push_back(GetRole(stmt));
     }
+    PropagateScalarDependencyRoles(op->seq, &roles);
+
+    Role role = Role::kNeutral;
+    for (size_t i = 0; i < op->seq.size(); ++i) {
+      SetRole(op->seq[i].get(), roles[i]);
+      role = CombineRoles(role, roles[i]);
+    }
+
     SetRole(op, role);
   }
 
   void VisitStmt_(const IfThenElseNode *op) final {
     StmtVisitor::VisitStmt_(op);
-    auto role = GetRole(op->then_case);
+    Role role = GetRole(op->then_case);
     if (op->else_case.defined()) {
-      auto role_else = GetRole(op->else_case.value());
-      if (role != role_else)
-        role = Role::kBoth;
+      role = CombineRoles(role, GetRole(op->else_case.value()));
     }
     SetRole(op, role);
   }
@@ -205,17 +285,23 @@ public:
   }
 
   void VisitStmt_(const ForNode *op) final { HandleBodyStmt(op); }
-  void VisitStmt_(const BindNode *op) final { StmtVisitor::VisitStmt_(op); }
+  void VisitStmt_(const BindNode *op) final {
+    StmtVisitor::VisitStmt_(op);
+    SetRole(op, Role::kNeutral);
+  }
   void VisitStmt_(const AttrStmtNode *op) final { HandleBodyStmt(op); }
   void VisitStmt_(const AssertStmtNode *op) final {
     StmtVisitor::VisitStmt_(op);
+    SetRole(op, Role::kConsumer);
   }
   void VisitStmt_(const SBlockNode *op) final { HandleBodyStmt(op); }
   void VisitStmt_(const AllocBufferNode *op) final {
     StmtVisitor::VisitStmt_(op);
+    SetRole(op, Role::kNeutral);
   }
   void VisitStmt_(const DeclBufferNode *op) final {
     StmtVisitor::VisitStmt_(op);
+    SetRole(op, Role::kNeutral);
   }
 
   bool HasProducer() { return has_simt_copy_ || has_bulk_copy_; }
@@ -254,9 +340,6 @@ private:
         for (const Stmt &s : seq->seq) {
           collect_stmts(s);
         }
-        return;
-      }
-      if (const auto *let = stmt.as<BindNode>()) {
         return;
       }
       if (const auto *attr = stmt.as<AttrStmtNode>()) {
@@ -339,6 +422,7 @@ private:
       writes.push_back(stmt_writes);
       roles.push_back(marker.GetRole(stmt));
     }
+    PropagateScalarDependencyRoles(pipeline_stmts, &roles);
 
     std::unordered_set<const BufferNode *> consumer_used, producer_used;
     std::unordered_map<const BufferNode *, size_t> first_write_index;

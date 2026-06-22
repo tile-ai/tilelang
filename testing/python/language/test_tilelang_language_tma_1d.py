@@ -17,8 +17,16 @@ def elementwise_add(M, N, block_M, block_N, in_dtype, out_dtype, threads):
             C_local = T.alloc_fragment((block_M, block_N), out_dtype)
             C_shared = T.alloc_shared((block_M, block_N), out_dtype)
 
-            T.copy(A[by * block_M, bx * block_N], A_shared)
-            T.copy(B[by * block_M, bx * block_N], B_shared)
+            T.copy(
+                A[by * block_M, bx * block_N],
+                A_shared,
+                annotations={"prefer_instruction": "tma"},
+            )
+            T.copy(
+                B[by * block_M, bx * block_N],
+                B_shared,
+                annotations={"prefer_instruction": "tma"},
+            )
             for local_y, local_x in T.Parallel(block_M, block_N):
                 C_local[local_y, local_x] = A_shared[local_y, local_x] + B_shared[local_y, local_x]
             T.copy(C_local, C_shared)
@@ -46,11 +54,11 @@ def run_elementwise_add(M, N):
         assert "tma_load" in code and "CUtensorMap" in code
 
 
-def main():
+def test_tilelang_language_tma_1d():
     run_elementwise_add(128, 128)
     run_elementwise_add(256, 128)
     run_elementwise_add(256, 256)
 
 
 if __name__ == "__main__":
-    main()
+    test_tilelang_language_tma_1d()

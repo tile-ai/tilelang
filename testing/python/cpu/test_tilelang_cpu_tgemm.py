@@ -24,7 +24,7 @@ def matmul(M, N, K, block_M, block_N, block_K, trans_A=False, trans_B=False, dty
         B: T.Tensor(B_shape, dtype),
         C: T.Tensor((M, N), dtype),
     ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), is_cpu=True) as (bx, by):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M)) as (bx, by):
             A_local = T.alloc_local(A_local_shape, dtype)
             B_local = T.alloc_local(B_local_shape, dtype)
             C_local = T.alloc_local((block_M, block_N), accum_dtype)

@@ -28,15 +28,17 @@ def _read_cmake_bool(i: str | None, default=False):
 def get_git_commit_id() -> str | None:
     """Get the current git commit hash by running git in the current file's directory."""
 
-    r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, encoding="utf-8")
-    if r.returncode == 0:
-        _git = r.stdout.strip()
-        git_pin.write_text(_git)
-        return _git
-    elif git_pin.exists():
+    if (ROOT / ".git").exists():
+        r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, encoding="utf-8")
+        if r.returncode == 0:
+            _git = r.stdout.strip()
+            git_pin.write_text(_git)
+            return _git
+
+    if git_pin.exists():
         return git_pin.read_text().strip()
-    else:
-        return None
+
+    return None
 
 
 def dynamic_metadata(field: str, settings: dict[str, object] | None = None) -> str:
@@ -44,10 +46,14 @@ def dynamic_metadata(field: str, settings: dict[str, object] | None = None) -> s
 
     version = base_version
 
-    # generate git version for sdist
+    # Pin the source commit for sdists, even when the public version omits it.
     get_git_commit_id()
 
-    if not _read_cmake_bool(os.environ.get("NO_VERSION_LABEL")):
+    no_version_label = _read_cmake_bool(
+        os.environ.get("NO_VERSION_LABEL"),
+        default=not (ROOT / ".git").exists(),
+    )
+    if not no_version_label:
         exts = []
         backend = None
         if _read_cmake_bool(os.environ.get("NO_TOOLCHAIN_VERSION")):

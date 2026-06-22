@@ -44,6 +44,9 @@ protected:
   void VisitExpr_(const MaxNode *op, std::ostream &os) override;    // NOLINT(*)
   void VisitExpr_(const CallNode *op, std::ostream &os) override;   // NOLINT(*)
   void VisitExpr_(const SelectNode *op, std::ostream &os) override; // NOLINT(*)
+  void VisitExpr_(const LetNode *op, std::ostream &os) override;    // NOLINT(*)
+  void VisitExpr_(const ShuffleNode *op,
+                  std::ostream &os) override; // NOLINT(*)
   void VisitExpr_(const BufferLoadNode *op,
                   std::ostream &os) override; // NOLINT(*)
 
@@ -79,6 +82,8 @@ protected:
   std::string GetBufferPtr_(const BufferNode *buffer, PrimExpr index);
   std::string GetBufferRef_(DataType t, const BufferNode *buffer,
                             PrimExpr index) override;
+  PrimExpr LinearizeBufferIndices_(const BufferNode *buffer,
+                                   const ffi::Array<PrimExpr> &indices);
 
   // Get pointer string from a Var expression (local buffer -> vid.iterator)
   std::string GetVarPtr_(const PrimExpr &expr);
@@ -101,6 +106,7 @@ private:
   std::unordered_map<const VarNode *, IntImm> unroll_factor_;
 
   std::unordered_set<const VarNode *> raw_pointer_vars_;
+  std::unordered_set<const VarNode *> zero_like_vars_;
 
   std::vector<std::string> eviction_policy_names_ = {
       "EVICT_NORMAL", "EVICT_FIRST", "EVICT_LAST"};

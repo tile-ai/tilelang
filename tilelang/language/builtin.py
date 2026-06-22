@@ -8,13 +8,10 @@ from tilelang import tvm as tvm
 from tilelang.language import ptx_arrive_barrier, evaluate
 from tilelang.language.eager.builder import macro
 from tilelang.language.kernel import get_thread_bindings, get_block_extents
-from tilelang.utils.target import check_hip_availability
 from tvm import DataType, tirx
 from tvm.runtime import convert
 from tvm.tirx import PrimExpr, Var, Call, BufferLoad, BufferRegion
 from tilelang.utils.language import retrieve_ptr, get_buffer_region_from_load, retrieve_buffer_and_offset
-
-_IS_HIP_AVAILABLE = check_hip_availability()
 
 
 def _normalize_index_arg(value: int | PrimExpr | None) -> PrimExpr | None:
@@ -522,7 +519,7 @@ def mbarrier_expect_tx(mbarrier: BarrierType, tx: int):
 
 def mbarrier_arrive_expect_tx(mbarrier: BarrierType, tx: int):
     """Arrive at a memory barrier and expect completion of async transactions."""
-    from tilelang.language.tirx.op import ptx_arrive_barrier_expect_tx
+    from tilelang.language.tir.op import ptx_arrive_barrier_expect_tx
 
     mbarrier = _mbar_to_buffer_load(mbarrier)
     return ptx_arrive_barrier_expect_tx(mbarrier, tx)

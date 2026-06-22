@@ -8,12 +8,12 @@
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 
-#include "backend/common/target_utils.h"
 #include "op/builtin.h"
 #include "op/utils.h"
+#include "rocm/target_utils.h"
+#include "rocm/transform/async_copy_injector.h"
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
-#include "transform/ptx_async_copy_injector.h"
 
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/transform.h>
@@ -58,10 +58,12 @@ enum class CopyInst : uint8_t {
 };
 
 struct Copy {
-  static LayoutMap InferLayout(const CopyNode &op, const LayoutInferArgs &T,
+  static LayoutMap InferLayout(const CopyNode &op,
+                               const LayoutInferArgs &layout_args,
                                InferLevel level) {
-    SelectInst(op, T.target, T.layout_map, T.analyzer);
-    return op.InferSIMTLayout(T, level);
+    SelectInst(op, layout_args.target, layout_args.layout_map,
+               layout_args.analyzer);
+    return op.InferSIMTLayout(layout_args, level);
   }
 
   static CopyInst SelectInst(const CopyNode &op, Target target,
@@ -82,20 +84,21 @@ struct Copy {
     return CopyInst::kNormal;
   }
 
-  static Stmt Lower(const CopyNode &op, const LowerArgs &T,
+  static Stmt Lower(const CopyNode &op, const LowerArgs &lower_args,
                     arith::Analyzer *analyzer) {
-    auto copy_inst = SelectInst(op, T.target, T.layout_map, analyzer);
+    auto copy_inst =
+        SelectInst(op, lower_args.target, lower_args.layout_map, analyzer);
     if (copy_inst == CopyInst::kCPAsync) {
-      return LowerCPAsync(op, T, analyzer);
+      return LowerCPAsync(op, lower_args, analyzer);
     }
     if (copy_inst == CopyInst::kNormal) {
-      return LowerNormalCopy(op, T, analyzer);
+      return LowerNormalCopy(op, lower_args, analyzer);
     }
     LOG(FATAL) << "Unsupported ROCm copy inst " << static_cast<int>(copy_inst);
   }
 
 private:
-  static Stmt LowerCPAsync(const CopyNode &op, const LowerArgs &T,
+  static Stmt LowerCPAsync(const CopyNode &op, const LowerArgs &lower_args,
                            arith::Analyzer *analyzer) {
     using namespace tvm::transform;
 
@@ -106,7 +109,7 @@ private:
     bool explicit_async_semantics =
         no_implicit_commit_wait || GetIsAsyncCopy(op);
     if (!enable_async_copy && !explicit_async_semantics) {
-      return LowerNormalCopy(op, T, analyzer);
+      return LowerNormalCopy(op, lower_args, analyzer);
     }
 
     auto simt_loop = op.MakeSIMTLoop(analyzer);
@@ -116,30 +119,30 @@ private:
     std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
                                       InferLevel::kFree};
     for (auto level : levels) {
-      par_op->InferLayout({T.target,
-                           T.thread_bounds,
-                           T.layout_map,
+      par_op->InferLayout({lower_args.target,
+                           lower_args.thread_bounds,
+                           lower_args.layout_map,
                            analyzer,
                            false,
-                           T.buffer_remap,
+                           lower_args.buffer_remap,
                            {}},
                           level);
     }
     auto loop_layout = par_op->GetLoopLayout();
     Stmt lowered_loop = LowerParallelLoop(
-        par_op->GetRoot(), loop_layout, T.thread_var, analyzer, T.layout_map,
-        par_op->GetPredicate(T.thread_var),
+        par_op->GetRoot(), loop_layout, lower_args.thread_var, analyzer,
+        lower_args.layout_map, par_op->GetPredicate(lower_args.thread_var),
         /*parallel_loop=*/true,
         /*should_vectorize=*/true, par_op->LoopLayoutRequiresPaddingGuard());
 
     auto inject_result =
-        InjectPTXAsyncCopy(lowered_loop, /*enable_auto_async_copy=*/true,
-                           /*async_without_async_commit_wait=*/
-                           no_implicit_commit_wait || GetIsAsyncCopy(op));
-    Stmt cp_async_loop = inject_result.stmt;
-    if (!inject_result.injected_ptx_async_copy) {
-      DLOG(WARNING) << "cp.async rewrite miss for copy src=" << op.src->name
-                    << " (scope=" << op.src.scope()
+        InjectROCmAsyncCopy(lowered_loop, /*enable_auto_async_copy=*/true,
+                            /*async_without_async_commit_wait=*/
+                            no_implicit_commit_wait || GetIsAsyncCopy(op));
+    Stmt async_copy_loop = inject_result.stmt;
+    if (!inject_result.injected_rocm_async_copy) {
+      DLOG(WARNING) << "ROCm async-copy rewrite miss for copy src="
+                    << op.src->name << " (scope=" << op.src.scope()
                     << ", dtype=" << op.src->dtype << "), dst=" << op.dst->name
                     << " (scope=" << op.dst.scope()
                     << ", dtype=" << op.dst->dtype
@@ -149,27 +152,29 @@ private:
       if (no_implicit_commit_wait) {
         DLOG(WARNING)
             << "Pipeline-managed async copy fallback to normal copy because "
-               "cp.async rewrite found no eligible global->shared store.";
+               "ROCm async-copy rewrite found no eligible global->shared "
+               "store.";
         return lowered_loop;
       }
       if (explicit_async_semantics) {
-        LOG(FATAL)
-            << "Explicit async copy semantics require cp.async lowering, "
-               "but no eligible global->shared store was rewritten.";
+        LOG(FATAL) << "Explicit async copy semantics require ROCm async-copy "
+                      "lowering, "
+                      "but no eligible global->shared store was rewritten.";
       }
-      DLOG(WARNING) << "Fallback to normal copy because cp.async rewrite found "
-                       "no eligible global->shared store.";
-      return LowerNormalCopy(op, T, analyzer);
+      DLOG(WARNING)
+          << "Fallback to normal copy because ROCm async-copy rewrite "
+             "found no eligible global->shared store.";
+      return LowerNormalCopy(op, lower_args, analyzer);
     }
     if (no_implicit_commit_wait) {
-      return cp_async_loop;
+      return async_copy_loop;
     }
     if (GetIsAsyncCopy(op)) {
       Stmt commit_group =
           Evaluate(Call(DataType::Handle(), builtin::ptx_commit_group(), {}));
-      return SeqStmt({cp_async_loop, commit_group});
+      return SeqStmt({async_copy_loop, commit_group});
     }
-    return cp_async_loop;
+    return async_copy_loop;
   }
 
   static bool CheckCPAsyncCopyPreconditions(const CopyNode &op) {
@@ -185,7 +190,7 @@ private:
   static bool CheckCPAsyncCopy(const CopyNode &op, Target target,
                                const LayoutMap &layout_map,
                                arith::Analyzer *analyzer) {
-    if (!TargetHasAsyncCopy(target)) {
+    if (!TargetRocmHasAsyncCopy(target)) {
       return false;
     }
     return CheckCPAsyncCopyPreconditions(op);

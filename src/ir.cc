@@ -23,37 +23,31 @@ namespace tl {
 using namespace script::ir_builder::tirx;
 using namespace ffi;
 
-static Var CreateEnvThread(String name, String thread_tag, DataType dtype) {
+// Build a ForFrame that emits a target-neutral kThreadBinding loop for one
+// kernel-launch dimension. The launch nest is materialized into the
+// target-specific form (thread_extent AttrStmt on GPU, serial For on CPU) by
+// the tl.MaterializeKernelLaunch pass once the Target is known at compile
+// time.
+static ForFrame MakeThreadBindingFrame(const std::string &name,
+                                       const String &thread_tag,
+                                       const PrimExpr &extent) {
   using namespace tvm::tirx;
-  using namespace tvm::script::ir_builder;
-  IterVar iter_var(Range{nullptr}, Var(std::move(name), dtype),
-                   tvm::tirx::IterVarType::kThreadIndex, std::move(thread_tag));
-  Var var = iter_var->var;
-  if (Optional<PrimFuncFrame> opt_frame =
-          IRBuilder::Current()->FindFrame<PrimFuncFrame>()) {
-    opt_frame.value()->env_threads.Set(var, iter_var);
-  } else {
-    LOG(FATAL) << "EnvThread can only be used inside a PrimFunc";
-  }
-  return var;
-}
-
-static ForFrame MakeIterVarFrame(const std::string &name, const PrimExpr &dom) {
-  using namespace tvm::tirx;
-  Var var = Var(name, dom->dtype);
-  // Create a frame that represents a loop over the given domain.
+  Var var = Var(name, extent->dtype);
   ObjectPtr<ForFrameNode> n = make_object<ForFrameNode>();
   n->vars.push_back(var);
-  n->doms.push_back(Range(0, dom));
-  n->f_make_for_loop = [](const Array<Var> &vars, const Array<Range> &doms,
-                          const Array<Optional<PrimExpr>> &steps,
-                          Stmt body) -> Stmt {
+  n->doms.push_back(Range(make_const(extent->dtype, 0), extent));
+  n->f_make_for_loop =
+      [thread_tag](const Array<Var> &vars, const Array<Range> &doms,
+                   const Array<Optional<PrimExpr>> &steps, Stmt body) -> Stmt {
     ICHECK_EQ(vars.size(), 1);
     ICHECK_EQ(doms.size(), 1);
+    IterVar iter_var(Range{nullptr}, Var(thread_tag, vars[0]->dtype),
+                     IterVarType::kThreadIndex, thread_tag);
     Optional<PrimExpr> step =
         !steps.empty() ? steps[0] : Optional<PrimExpr>(std::nullopt);
-    return For(vars[0], doms[0]->min, doms[0]->extent, ForKind::kSerial, body,
-               /*thread_binding=*/std::nullopt,
+    return For(vars[0], doms[0]->min, doms[0]->extent, ForKind::kThreadBinding,
+               body,
+               /*thread_binding=*/iter_var,
                /*annotations=*/Map<String, Any>{},
                /*step=*/step);
   };
@@ -265,55 +259,23 @@ KernelLaunchFrame KernelLaunch(const Array<PrimExpr> &grid_size,
                                const Map<String, Any> &attrs) {
   ObjectPtr<KernelLaunchFrameNode> n = make_object<KernelLaunchFrameNode>();
 
-  // If the kernel is a CPU kernel, we don't need to launch any threads.
-  bool is_cpu_kernel_frame =
-      attrs.defined() && attrs.count(tilelang_is_cpu_kernel_frame);
-
   auto block_size = block_size_opt.value_or(Array<PrimExpr>());
+  ICHECK(grid_size.size() <= 3);
+  ICHECK(block_size.size() <= 3);
 
-  if (is_cpu_kernel_frame) {
-    // Launch CPU Kernel
-    ICHECK(grid_size.size() >= 0);
-    ICHECK(block_size.empty()) << "CPU kernel cannot have block size";
-    ICHECK(attrs.defined());
-    // create grid loop var
-    for (int i = 0; i < grid_size.size(); i++) {
-      n->frames.push_back(
-          MakeIterVarFrame("block_var_" + std::to_string(i), grid_size[i]));
-    }
-  } else {
-    // Launch GPU Kernel
-    ICHECK(grid_size.size() <= 3);
-    if (!grid_size.empty())
-      n->frames.push_back(LaunchThread(
-          CreateEnvThread("bx", "blockIdx.x", grid_size[0].dtype()),
-          grid_size[0]));
-    if (grid_size.size() > 1)
-      n->frames.push_back(LaunchThread(
-          CreateEnvThread("by", "blockIdx.y", grid_size[1].dtype()),
-          grid_size[1]));
-    if (grid_size.size() > 2)
-      n->frames.push_back(LaunchThread(
-          CreateEnvThread("bz", "blockIdx.z", grid_size[2].dtype()),
-          grid_size[2]));
-    if (block_size.defined()) {
-      ICHECK(block_size.size() <= 3);
-      if (!block_size.empty()) {
-        n->frames.push_back(LaunchThread(
-            CreateEnvThread("tx", "threadIdx.x", block_size[0].dtype()),
-            block_size[0]));
-      }
-      if (block_size.size() > 1) {
-        n->frames.push_back(LaunchThread(
-            CreateEnvThread("ty", "threadIdx.y", block_size[1].dtype()),
-            block_size[1]));
-      }
-      if (block_size.size() > 2) {
-        n->frames.push_back(LaunchThread(
-            CreateEnvThread("tz", "threadIdx.z", block_size[2].dtype()),
-            block_size[2]));
-      }
-    }
+  static const char *kBlockVarNames[3] = {"bx", "by", "bz"};
+  static const char *kBlockTags[3] = {"blockIdx.x", "blockIdx.y", "blockIdx.z"};
+  static const char *kThreadVarNames[3] = {"tx", "ty", "tz"};
+  static const char *kThreadTags[3] = {"threadIdx.x", "threadIdx.y",
+                                       "threadIdx.z"};
+
+  for (size_t i = 0; i < grid_size.size(); i++) {
+    n->frames.push_back(
+        MakeThreadBindingFrame(kBlockVarNames[i], kBlockTags[i], grid_size[i]));
+  }
+  for (size_t i = 0; i < block_size.size(); i++) {
+    n->frames.push_back(MakeThreadBindingFrame(kThreadVarNames[i],
+                                               kThreadTags[i], block_size[i]));
   }
 
   auto empty_block = tvm::script::ir_builder::tirx::Block(DeviceMainBlockName);
@@ -420,7 +382,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
   refl::GlobalDef()
       .def("tl.WarpSpecialize", WarpSpecialize)
-      .def("tl.SideEffect", SideEffect);
+      .def("tl.SideEffect", tirx::SideEffect);
   KernelLaunchFrameNode::RegisterReflection();
   WarpSpecializeFrameNode::RegisterReflection();
 }

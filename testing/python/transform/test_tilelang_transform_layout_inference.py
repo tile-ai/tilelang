@@ -1,5 +1,5 @@
 from tilelang import tvm as tvm
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
@@ -89,9 +89,11 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
 
     with tvm.target.Target(auto_target):
         mod = tvm.tirx.transform.BindTarget(auto_target)(before())
+        mod = tl.transform.MaterializeKernelLaunch()(mod)
         mod = tl.transform.LayoutInference()(mod)
         mod = tvm.tirx.transform.Simplify()(mod)
         ref_mod = tvm.tirx.transform.BindTarget(auto_target)(after())
+        ref_mod = tl.transform.MaterializeKernelLaunch()(ref_mod)
         ref_mod = tvm.tirx.transform.Simplify()(ref_mod)
         # Note(tzj): The structures are equal except one more "for" loop after the LayoutInference pass
         # This loop is "for vec in T.parallel(1)",

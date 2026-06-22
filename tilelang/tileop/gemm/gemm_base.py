@@ -8,6 +8,7 @@ from tvm import tirx
 from tilelang import language as T
 from tilelang.utils.language import is_shared, is_fragment, is_tensor_memory
 from tilelang.tileop.base import GemmWarpPolicy
+from tilelang.language.dtypes import validate_gemm_ab_dtypes
 from tvm.ir.base import Node
 from tvm.ir import PrimExpr
 
@@ -22,6 +23,19 @@ class GemmBase:
     """
 
     gemm_node: Node
+
+    def __post_init__(self) -> None:
+        validate_gemm_ab_dtypes(
+            self.A.dtype,
+            self.B.dtype,
+            a_in_tmem=is_tensor_memory(self.A),
+            allow_f8f6f4_mixed=self.allow_f8f6f4_mixed_dtypes,
+        )
+
+    @property
+    def allow_f8f6f4_mixed_dtypes(self) -> bool:
+        # TODO(wt): Consider enabling mixed f8f6f4 operands for MMA paths too.
+        return False
 
     def infer_layout(self, target: Target, thread_nums: int):
         raise NotImplementedError("infer_layout is not implemented")
@@ -77,15 +91,13 @@ class GemmBase:
         return getattr(self.gemm_node, "transB", None)
 
     @property
-    def in_dtype(self) -> str:
-        """Input data type for the multiplication.
+    def a_dtype(self) -> str:
+        """A operand dtype for the MMA.
 
-        For the TS variant, A resides in TMEM with the accumulator dtype, so
-        the actual input dtype is derived from B.
-
-        For FP4/FP8 on SM120, input buffers use uint8 storage (unpacked,
-        1 element per byte) but the MMA instruction uses float4_e2m1fn or
-        float8_e4m3fn. Mixed types (e.g. FP8 x FP4) are supported.
+        For the TS variant A resides in TMEM with the accumulator dtype, so the
+        input dtype is derived from B. For FP4/FP8 on SM120 the input buffers use
+        uint8 storage (unpacked, 1 element per byte) but the MMA instruction uses
+        float4_e2m1fn / float8_e4m3fn; mixed types (e.g. FP8 x FP4) are supported.
         """
         if is_tensor_memory(self.A):
             return self.B.dtype
@@ -95,10 +107,20 @@ class GemmBase:
         return dtype
 
     @property
-    def in_dtype_b(self) -> str:
-        """Input data type for B operand (may differ from A for mixed-type MMA).
+    def in_dtype(self) -> str:
+        """Backward-compatible alias for a_dtype."""
+        return self.a_dtype
 
-        uint8 B with float32 accumulator maps to float4_e2m1fn (unpacked FP4).
+    @property
+    def in_dtype_b(self) -> str:
+        """Backward-compatible alias for b_dtype."""
+        return self.b_dtype
+
+    @property
+    def b_dtype(self) -> str:
+        """B operand dtype (may differ from A for mixed-type MMA).
+
+        uint8 B with a float32/float16 accumulator maps to float4_e2m1fn (FP4).
         """
         if is_tensor_memory(self.A):
             return self.B.dtype
@@ -202,12 +224,8 @@ class GemmBase:
         return getattr(self.gemm_node, "sfbRegion", None)
 
     @property
-    def sf_a_id(self) -> PrimExpr:
-        return getattr(self.gemm_node, "sfAId", tvm.tirx.const(0, T.int32))
-
-    @property
-    def sf_b_id(self) -> PrimExpr:
-        return getattr(self.gemm_node, "sfBId", tvm.tirx.const(0, T.int32))
+    def sf_k_start(self) -> PrimExpr:
+        return getattr(self.gemm_node, "sfKStart", tvm.tirx.const(0, T.int32))
 
     @property
     def is_blockscaled(self) -> bool:

@@ -11,6 +11,7 @@ from tilelang.layout import (
 from tilelang.cuda.intrinsics.macro.wgmma_sp_macro_generator import WGSparseTensorCoreIntrinEmitter
 from tilelang.utils.language import is_shared, is_fragment
 from tvm.target import Target
+from tvm.ir import Range
 from tvm import tirx
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
@@ -21,7 +22,7 @@ GEMM_SP_INST_WGMMA_SP = "cuda.wgmma.sp"
 
 class GemmSPWGMMA(GemmSPBase):
     def infer_shared_layout(self, continuity: int) -> Callable[[tirx.Buffer], Layout]:
-        vectorized_size = 128 // self.in_dtype.bits
+        vectorized_size = 128 // self.a_dtype.bits
         if continuity % (vectorized_size * 8) == 0:
             return make_full_bank_swizzled_layout
         elif continuity % (vectorized_size * 4) == 0:
@@ -36,9 +37,9 @@ class GemmSPWGMMA(GemmSPBase):
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = WGSparseTensorCoreIntrinEmitter(
-            a_dtype=self.in_dtype,
+            a_dtype=self.a_dtype,
             e_dtype=self.e_dtype,
-            b_dtype=self.in_dtype,
+            b_dtype=self.b_dtype,
             accum_dtype=self.accum_dtype,
             a_transposed=self.trans_A,
             b_transposed=self.trans_B,
@@ -73,17 +74,20 @@ class GemmSPWGMMA(GemmSPBase):
         self,
         layout_map: dict,
         target: Target,
-        thread_nums: int,
+        thread_bounds: Range,
         thread_var: tirx.Var,
         mbar_phase_expr: tirx.PrimExpr | None = None,
     ):
+        thread_nums = thread_bounds.extent
+        # Emitter lane/warp math uses zero-based ids within the current thread bounds.
+        local_thread_var = thread_var - thread_bounds.min
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_SP_INST_WGMMA_SP)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = WGSparseTensorCoreIntrinEmitter(
-            a_dtype=self.in_dtype,
+            a_dtype=self.a_dtype,
             e_dtype=self.e_dtype,
-            b_dtype=self.in_dtype,
+            b_dtype=self.b_dtype,
             accum_dtype=self.accum_dtype,
             a_transposed=self.trans_A,
             b_transposed=self.trans_B,
@@ -93,7 +97,7 @@ class GemmSPWGMMA(GemmSPBase):
             warp_row_tiles=warp_row_tiles,
             warp_col_tiles=warp_col_tiles,
             warp_k=self.K,
-            thread_var=thread_var,
+            thread_var=local_thread_var,
         )
 
         if self.A in layout_map:

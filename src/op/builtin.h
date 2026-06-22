@@ -85,6 +85,14 @@ static constexpr const char *kDebugMergeSharedMemoryAllocations =
 // PrimFunc attribute: set by LowerTileOp to indicate TMA operations were
 // actually generated.  Read by OptimizeForTarget to pick the right pipeline.
 static constexpr const char *kHasTMA = "tl.has_tma";
+// PrimFunc attribute: Map<String, IntImm> from a shared buffer's data Var
+// name to the minimum base alignment (bytes) required by swizzle-sensitive
+// instructions that consume it (TMA bulk copy, wgmma/tcgen05 descriptors).
+// Keyed by name rather than Var so the attribute does not hold references
+// into the function body (which would perturb printing and SSA passes); a
+// name collision can only over-align, never under-align. Written by
+// LowerTileOp, consumed by MergeSharedMemoryAllocations.
+static constexpr const char *kSmemAlignmentMap = "tl.smem_alignment_map";
 static constexpr const char *kDisableSafeMemoryLegalize =
     "tl.disable_safe_memory_legalize";
 static constexpr const char *kDisableWarpSpecialized =
@@ -525,6 +533,14 @@ TVM_DLL const Op &ptx_cp_async_barrier_noinc();
  *
  */
 TVM_DLL const Op &ptx_cp_async();
+
+/*!
+ * \brief TileLang intrinsic for zeroing shared memory with st.bulk.
+ *
+ * ptx_st_bulk_shared(smem_data, bytes, init_val)
+ *
+ */
+TVM_DLL const Op &ptx_st_bulk_shared();
 
 /*!
  * \brief Pack two b16 value into a b32 value
