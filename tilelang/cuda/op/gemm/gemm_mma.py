@@ -4,6 +4,7 @@ from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang.layout import make_swizzled_layout
 from tilelang.cuda.intrinsics.macro.mma_macro_generator import (
     TensorCoreIntrinEmitter,
+    TensorCoreIntrinEmitterWithBlockScale,
 )
 from tilelang.utils.language import is_shared, is_fragment, is_full_region
 from tilelang import tvm as tvm
@@ -17,14 +18,30 @@ from tilelang.transform.simplify import _Simplify
 GEMM_INST_MMA = "cuda.mma"
 
 
+def _is_explicit_non_sm120_cuda(target: Target) -> bool:
+    if target.kind.name != "cuda":
+        return False
+    arch = target.attrs.get("arch", None)
+    if arch is None:
+        return False
+    arch_str = str(arch)
+    if not arch_str.startswith("sm_"):
+        return False
+    arch_int = int(arch_str[3:].rstrip("af"))
+    return arch_int < 120 or arch_int >= 130
+
+
 class GemmMMA(GemmBase):
     intrin_emitter_cls = TensorCoreIntrinEmitter
 
     def _make_mma_emitter(self, target: Target, thread_nums: int, thread_var: tirx.Var | None = None):
+        if self.is_blockscaled and _is_explicit_non_sm120_cuda(target):
+            raise ValueError("T.mma_gemm_blockscaled requires SM120 CUDA target")
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
-        emitter = self.intrin_emitter_cls(
+        emitter_cls = TensorCoreIntrinEmitterWithBlockScale if self.is_blockscaled else self.intrin_emitter_cls
+        emitter = emitter_cls(
             a_dtype=self.a_dtype,
             b_dtype=self.b_dtype,
             accum_dtype=self.accum_dtype,
@@ -41,6 +58,8 @@ class GemmMMA(GemmBase):
 
     def infer_layout(self, target: Target, thread_nums: int):
         mma_emitter = self._make_mma_emitter(target, thread_nums)
+        if self.is_blockscaled and not self.is_gemm_ss():
+            raise ValueError("T.mma_gemm_blockscaled supports shared-memory A/B operands only")
         if self.is_gemm_ss():
             return {
                 self.A: make_swizzled_layout(self.A),
@@ -100,10 +119,41 @@ class GemmMMA(GemmBase):
         C_buf = C_region.buffer
 
         clear_accum = self.clear_accum
-
         assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
 
         assert is_full_region(C_region), "Fragment output C must be a full region"
+
+        if self.is_blockscaled:
+            if not self.is_gemm_ss():
+                raise ValueError("T.mma_gemm_blockscaled supports shared-memory A/B operands only")
+            annotations = getattr(self.gemm_node, "annotations", {})
+            sf_a_granularity_k = annotations.get("sf_a_granularity_k")
+            sf_b_granularity_k = annotations.get("sf_b_granularity_k")
+            if sf_a_granularity_k is None or sf_b_granularity_k is None:
+                raise ValueError("Block-scaled MMA GEMM requires sf_a_granularity_k and sf_b_granularity_k")
+
+            @T.prim_func
+            def _gemm_ss_blockscaled() -> None:
+                A_local = T.alloc_local((warp_rows * local_size_a), a_dtype)
+                B_local = T.alloc_local((warp_cols * local_size_b), b_dtype)
+                if clear_accum:
+                    T.clear(C_buf)
+                for ki in T.serial(0, (block_K // micro_size_k)):
+                    mma_emitter.ldmatrix_a(A_local, A_region, ki)
+                    mma_emitter.ldmatrix_b(B_local, B_region, ki)
+                    mma_emitter.mma(
+                        A_local,
+                        B_local,
+                        C_buf,
+                        self.SFARegion,
+                        self.SFBRegion,
+                        ki=ki,
+                        k_start=self.sf_k_start,
+                        sf_a_granularity_k=int(sf_a_granularity_k),
+                        sf_b_granularity_k=int(sf_b_granularity_k),
+                    )
+
+            return _Simplify(_gemm_ss_blockscaled, inline_let=True)
 
         if self.is_gemm_ss():
 

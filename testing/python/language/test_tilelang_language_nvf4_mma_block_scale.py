@@ -51,8 +51,6 @@ def _make_nvf4_matmul_codegen_kernel(M, N, K):
     out_dtype = T.float32
     accum_dtype = T.float32
 
-    micro_size_x = 16
-    micro_size_y = 16
     micro_size_k = 64
 
     block_row_warps = 2
@@ -74,36 +72,9 @@ def _make_nvf4_matmul_codegen_kernel(M, N, K):
     B_shared_shape = (block_N, block_K)
     SFA_shared_shape = (block_M, block_K // micro_size_k)
     SFB_shared_shape = (block_N, block_K // micro_size_k)
-    C_shared_shape = (
-        block_M // micro_size_x,
-        block_N // micro_size_y,
-        micro_size_x,
-        micro_size_y,
-    )
 
     warp_size = 32
     threads = warp_size * (block_row_warps * block_col_warps)
-    local_size_a = (micro_size_x * micro_size_k) // warp_size
-    local_size_b = (micro_size_y * micro_size_k) // warp_size
-    local_size_c = (micro_size_x * micro_size_y) // warp_size
-    warp_rows = warp_row_tiles // micro_size_x
-    warp_cols = warp_col_tiles // micro_size_y
-
-    mma_emitter = TensorCoreIntrinEmitterWithBlockScale(
-        a_dtype=in_dtype,
-        b_dtype=in_dtype,
-        accum_dtype=accum_dtype,
-        a_transposed=False,
-        b_transposed=True,
-        block_row_warps=block_row_warps,
-        block_col_warps=block_col_warps,
-        warp_row_tiles=warp_row_tiles,
-        warp_col_tiles=warp_col_tiles,
-        chunk=chunk,
-        kind="mxf4nvf4",
-        scale_vec_size=4,
-        stype="ue4m3",
-    )
 
     @T.prim_func
     def main(
@@ -121,20 +92,8 @@ def _make_nvf4_matmul_codegen_kernel(M, N, K):
             B_shared = T.alloc_shared(B_shared_shape, in_dtype, scope=shared_scope)
             SFA_shared = T.alloc_shared(SFA_shared_shape, T.uint32, scope=shared_scope)
             SFB_shared = T.alloc_shared(SFB_shared_shape, T.uint32, scope=shared_scope)
-            C_shared = T.alloc_shared(C_shared_shape, out_dtype, scope=shared_scope)
-            A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
-            B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
-            C_local = T.alloc_local((warp_rows * warp_cols * local_size_c), accum_dtype)
-
-            T.annotate_layout(
-                {
-                    A_shared: _make_swizzle_layout(A_shared),
-                    B_shared: _make_swizzle_layout(B_shared),
-                }
-            )
+            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.use_swizzle(panel_size=10)
-
-            T.clear(C_local)
 
             for ko in T.Pipelined((K // block_K), num_stages=2):
                 for i, k in T.Parallel(block_M, block_K):
@@ -149,30 +108,20 @@ def _make_nvf4_matmul_codegen_kernel(M, N, K):
                 for j, k in T.Parallel(block_N, block_K // micro_size_k):
                     SFB_shared[j, k] = SFB[bx * block_N + j, ko * (block_K // micro_size_k) + k]
 
-                for ki in T.serial(0, (block_K // micro_size_k)):
-                    mma_emitter.ldmatrix_a(A_local, A_shared, ki)
-                    mma_emitter.ldmatrix_b(B_local, B_shared, ki)
-                    mma_emitter.mma(
-                        A_local,
-                        B_local,
-                        C_local,
-                        SFA_shared,
-                        SFB_shared,
-                        ki=ki,
-                        k_start=0,
-                        sf_a_granularity_k=16,
-                        sf_b_granularity_k=16,
-                    )
+                T.mma_gemm_blockscaled(
+                    A_shared,
+                    B_shared,
+                    C_local,
+                    SFA_shared,
+                    SFB_shared,
+                    transpose_B=True,
+                    clear_accum=True,
+                    k_start=ko * block_K,
+                    sf_a_granularity_k=16,
+                    sf_b_granularity_k=16,
+                )
 
-            mma_emitter.stmatrix(C_local, C_shared)
-
-            for i, j in T.Parallel(block_M, block_N):
-                C[by * block_M + i, bx * block_N + j] = C_shared[
-                    i // micro_size_x,
-                    j // micro_size_y,
-                    i % micro_size_x,
-                    j % micro_size_y,
-                ]
+            T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main
 

@@ -73,6 +73,7 @@ from .gemm_op import (  # noqa: F401
     wgmma_gemm,
     tcgen05_gemm,
     tcgen05_gemm_blockscaled,
+    mma_gemm_blockscaled,
     make_blockscaled_gemm_layout,
 )
 from .experimental.gemm_sp_op import (  # noqa: F401
