@@ -481,14 +481,25 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
     def make_mma_load_layout(self, local_buf: Buffer, matrix: str = "A") -> T.Fragment:
         raise NotImplementedError
 
-    def make_mma_store_layout(self, tmem_buf: Buffer) -> Layout:
+    def make_mma_store_layout(self, tmem_buf: Buffer, matrix: str = "C") -> Layout:
         """
-        Create the TCGEN5 tensor-memory layout used to store MMA accumulators.
+        Create the TCGEN5 tensor-memory layout used to store MMA accumulators
+        (matrix="C") or to lay out a TMEM-resident A operand for the ``ts``
+        variant of TCGEN5MMA (matrix="A").
 
         Parameters
         ----------
         tmem_buf : tir.Buffer
-            The local buffer representing tensormemory of a mma's output
+            The local buffer representing tensormemory of a mma's output.
+        matrix : str
+            Which MMA operand this layout is for:
+              - "C" (default): the accumulator (M, N). Column dim is N.
+              - "A": A operand (M, K) for the .ts MMA variant. The column
+                dim is the contraction K, so we validate and tile against
+                atom_k rather than atom_n. This is what gets called when a
+                non-square GEMM (e.g. M=128, N=256, K=128 for d=256 attention)
+                has atom_n != atom_k — the old code always used atom_n and
+                rejected any A operand whose width didn't equal N.
 
         Returns
         -------
@@ -504,6 +515,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         assert is_tensor_memory(tmem_buf), "tmem_buf must reside in tensor memory (shared.tmem)"
         if len(tmem_buf.shape) != 2:
             raise ValueError(f"TCGEN5MMA expects a 2-D tensor-memory buffer, got shape {tmem_buf.shape}")
+        if matrix not in ("A", "C"):
+            raise ValueError(f"matrix must be 'A' or 'C', got {matrix!r}")
 
         m = int(tmem_buf.shape[0])
         n = int(tmem_buf.shape[1])
@@ -517,16 +530,25 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             raise ValueError(
                 f"Unsupported TCGEN5MMA configuration: M={m}, N={n}, K={k}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
             )
-        atom_m, atom_n, _, _, enable_2cta = (int(x) for x in meta)
+        atom_m, atom_n, atom_k, _, enable_2cta = (int(x) for x in meta)
         atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
+        # For matrix=A in ts MMA, the column dim of tmem_buf is the GEMM K,
+        # which tiles in atom_k chunks (not atom_n).
+        col_atom = atom_k if matrix == "A" else atom_n
 
-        if m % atom_m_per_cta != 0 or n % atom_n != 0:
-            raise ValueError(f"Invalid TCGEN5MMA store layout for shape ({m}, {n}) with atoms ({atom_m}, {atom_n})")
+        if m % atom_m_per_cta != 0 or n % col_atom != 0:
+            raise ValueError(
+                f"Invalid TCGEN5MMA store layout for shape ({m}, {n}) with atoms ({atom_m}, {col_atom}) "
+                f"[matrix={matrix}, atom_n={atom_n}, atom_k={atom_k}]"
+            )
 
+        # ``col_atom`` is the per-MMA-instruction column extent we tile by.
+        # For C operand it's atom_n (output column dim); for an A operand
+        # (ts variant) it's atom_k (contraction dim).
         def forward(i: PrimExpr, j: PrimExpr):
-            atom_idx = (i // atom_m_per_cta) + (j // atom_n) * (m // atom_m_per_cta)
+            atom_idx = (i // atom_m_per_cta) + (j // col_atom) * (m // atom_m_per_cta)
             ai = i % atom_m_per_cta
-            aj = j % atom_n
+            aj = j % col_atom
 
             # NOTE: Currently not all 7 layout are supported
             if atom_m == 256:
@@ -534,35 +556,35 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 assert enable_2cta, "atom_m=256 for TCGEN5MMA must use 2cta"
                 return [
                     ai % 128,
-                    aj + atom_idx * atom_n,
+                    aj + atom_idx * col_atom,
                 ]
             if atom_m == 128:
                 if enable_2cta:
                     # Layout B
-                    half_atom_n = atom_n // 2
+                    half_col = col_atom // 2
                     return [
-                        ai + (aj // half_atom_n) * 64,
-                        (aj % half_atom_n) + atom_idx * half_atom_n,
+                        ai + (aj // half_col) * 64,
+                        (aj % half_col) + atom_idx * half_col,
                     ]
                 else:
                     # Layout D
                     return [
                         ai,
-                        aj + atom_idx * atom_n,
+                        aj + atom_idx * col_atom,
                     ]
             if atom_m == 64:
                 # Layout E (.ws variant)
-                half_atom_n = atom_n // 2
+                half_col = col_atom // 2
                 return [
-                    (ai // 32) * 32 + ai % 32 + (aj // half_atom_n) * 64,
-                    (aj % half_atom_n) + atom_idx * half_atom_n,
+                    (ai // 32) * 32 + ai % 32 + (aj // half_col) * 64,
+                    (aj % half_col) + atom_idx * half_col,
                 ]
             if atom_m == 32:
                 # Layout G
-                quarter_atom_n = atom_n // 4
+                quarter_col = col_atom // 4
                 return [
-                    ai % 32 + (aj // quarter_atom_n) * 32,
-                    (aj % quarter_atom_n) + atom_idx * quarter_atom_n,
+                    ai % 32 + (aj // quarter_col) * 32,
+                    (aj % quarter_col) + atom_idx * quarter_col,
                 ]
 
             raise ValueError(f"Unsupported TCGEN5 atom_m={atom_m}")
@@ -827,7 +849,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
     # -- Arrive --
 
     def tcgen05_atom_arrive(self, mbar):
-        """Emit ``tcgen05_mma_arrive(mbar)``."""
+        """Emit ``tcgen05_mma_arrive(mbar)``. No-op when mbar is None."""
+        if mbar is None:
+            return
         _, _, _, _, enable_2cta = self.tcgen05_meta_unpacked
 
         @T.macro
@@ -918,6 +942,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         B_byte_offset = _elements_to_bytes(B_elem_offset, b_elem_bits)
         tmem_col_step = atom_n // (128 // atom_m_per_cta)
         C_offset = (inst_m_idx * n_dim + inst_n_idx * tmem_col_step) * accum_dtype_in_bits // 32
+        C_offset += getattr(self, "_c_col_start_u32", 0)
 
         @T.macro
         def _ss_atom(desc_a, desc_b, C_local_buf):
@@ -1014,6 +1039,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         tmem_col_step = atom_n // (128 // atom_m_per_cta)
         C_offset = (inst_m_idx * n_dim + inst_n_idx * tmem_col_step) * accum_dtype_in_bits // 32
+        C_offset += getattr(self, "_c_col_start_u32", 0)
 
         @T.macro
         def _ts_atom(a_data, desc_b, C_local_buf):
@@ -1112,6 +1138,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         B_byte_offset = _elements_to_bytes(B_elem_offset, b_elem_bits)
         tmem_col_step = atom_n // (128 // atom_m_per_cta)
         C_offset = (inst_m_idx * n_dim + inst_n_idx * tmem_col_step) * accum_dtype_in_bits // 32
+        C_offset += getattr(self, "_c_col_start_u32", 0)
 
         @T.macro
         def _bs_atom(desc_a, desc_b, C_local_buf, sfa_data, sfb_data):

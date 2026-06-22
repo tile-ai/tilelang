@@ -1161,13 +1161,22 @@ private:
                                                          DataType dtype) {
       auto workspace =
           decl_buffer({PrimExpr(num_elem)}, dtype, "workspace", "shared.dyn");
-      // Record workspace under the innermost block scope so its lifetime
-      // covers the statements that requested it and does not sink into
-      // subsequently created inner blocks (e.g., GEMM macro blocks).
       if (!workspace_stack_.empty()) {
-        workspace_stack_.back().push_back(workspace);
+        // Warp-specialized kernels: place workspace at outermost scope so that
+        // the aggressive shared memory merge pass does not alias it with
+        // concurrently TMA-written buffers (the merge pass uses sequential
+        // liveness and cannot model cross-WG concurrent access).
+        // Non-WS kernels: innermost scope is fine (no concurrent access issue).
+        tvm::transform::PassContext ctx =
+            tvm::transform::PassContext::Current();
+        bool ws_enabled =
+            !ctx->GetConfig<Bool>(kDisableWarpSpecialized, Bool(false)).value();
+        if (ws_enabled) {
+          workspace_stack_.front().push_back(workspace);
+        } else {
+          workspace_stack_.back().push_back(workspace);
+        }
       } else {
-        // Fallback: create a temporary frame (should be rare)
         workspace_stack_.emplace_back(Array<Buffer>{workspace});
       }
       return workspace.access_ptr(2); // write

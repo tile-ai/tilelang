@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import tvm.tirx.script.parser as T
 from tilelang._typing import BufferLikeType, BufferLikeTypeTuple, BarrierType, DType
 from tilelang import tvm as tvm
+from tilelang.language.tir import op as tir_op
 from tilelang.language import ptx_arrive_barrier, evaluate
-from tilelang.language.eager.builder import macro
 from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tvm import DataType, tirx
 from tvm.runtime import convert
 from tvm.tirx import PrimExpr, Var, Call, BufferLoad, BufferRegion
-from tilelang.utils.language import retrieve_ptr, get_buffer_region_from_load, retrieve_buffer_and_offset
+from tilelang.utils.language import retrieve_ptr, get_buffer_region_from_load
 
 
 def _normalize_index_arg(value: int | PrimExpr | None) -> PrimExpr | None:
@@ -38,6 +37,10 @@ def _mbar_to_buffer_load(mbar: BarrierType) -> BufferLoad:
     Returns:
         tirx.BufferLoad: A buffer load of the memory barrier
     """
+    from tilelang.language.frame import has_let_value, get_let_value
+
+    if isinstance(mbar, tirx.Var) and has_let_value(mbar):
+        mbar = get_let_value(mbar)
     if isinstance(mbar, tirx.BufferLoad):
         return mbar
     elif isinstance(mbar, tirx.Buffer):
@@ -45,6 +48,20 @@ def _mbar_to_buffer_load(mbar: BarrierType) -> BufferLoad:
         return tirx.BufferLoad(mbar, [0])
     else:
         raise TypeError(f"mbarrier must be an tirx.BufferLoad or a tirx.Buffer, but got {type(mbar)}")
+
+
+def mbarrier_at(mbar: BarrierType, index: PrimExpr | int) -> BufferLoad:
+    """Return a dynamic mbarrier element as a BufferLoad."""
+    from tilelang.language.frame import has_let_value, get_let_value
+
+    if isinstance(mbar, tirx.Var) and has_let_value(mbar):
+        mbar = get_let_value(mbar)
+    if isinstance(mbar, tirx.BufferLoad):
+        return tirx.BufferLoad(mbar.buffer, [index])
+    if isinstance(mbar, tirx.Buffer):
+        assert len(mbar.shape) == 1, f"mbarrier must be a 1D buffer, but got {mbar.shape}"
+        return tirx.BufferLoad(mbar, [index])
+    raise TypeError(f"mbarrier must be an tirx.BufferLoad or a tirx.Buffer, but got {type(mbar)}")
 
 
 def __ldg(load_or_buf: BufferLoad | tirx.Buffer, index: PrimExpr | int | None = None) -> PrimExpr:
@@ -294,15 +311,21 @@ def create_tma_descriptor(*args):
     This is an internal API used by copy lowering. The argument list depends on
     the tensor rank and encodes the full TMA descriptor configuration:
 
-        create_tma_descriptor(data_type, rank, global_addr,
+        create_tma_descriptor(data_type, rank, global_addr_or_buffer,
             global_shape..., global_stride..., smem_box..., smem_stride...,
             interleave, swizzle, l2_promotion, oob_fill)
 
     Total arguments: 7 + 4 * rank.
 
+    If a tirx.Buffer is passed as the global address (arg 2), its data pointer
+    is extracted automatically.
+
     Returns:
         tirx.Call: A handle to the created TMA descriptor
     """
+    args = list(args)
+    if len(args) > 2 and isinstance(args[2], tirx.Buffer):
+        args[2] = args[2].data
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.create_tma_descriptor"), *args)
 
 
@@ -442,7 +465,7 @@ def ptx_arrive_cluster_barrier(mbarrier: BarrierType, cta_id: int | Var):
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.ptx_arrive_cluster_barrier"), mbarrier, cta_id)
 
 
-def mbarrier_wait_parity(mbarrier: BarrierType, parity: int | Var):
+def mbarrier_wait_parity(mbarrier: BarrierType, parity: int | Var, *, lane0: bool = False):
     """Wait for memory barrier parity condition.
 
     Args:
@@ -492,13 +515,16 @@ def mbarrier_arrive(mbarrier: BarrierType, cta_id: int | Var | None = None):
         cta_id: int | Var | None
             The peer CTA rank in cluster to arrive at. (Only valid for cluster barriers)
             If not provided, will arrive on current CTA's barrier.
+
+    Note:
+        For lane-0-only arrive (when barrier arrive_count == num_warps),
+        guard the call with ``with T.If(tid % 32 == 0):`` at the call site.
     """
     mbarrier = _mbar_to_buffer_load(mbarrier)
     if cta_id is not None:
         assert mbarrier.buffer.scope() == "shared.cluster_barrier", f"mbarrier must be a cluster barrier, but got {mbarrier.buffer.scope}"
         return ptx_arrive_cluster_barrier(mbarrier, cta_id)
-    else:
-        return ptx_arrive_barrier(mbarrier)
+    return ptx_arrive_barrier(mbarrier)
 
 
 def mbarrier_expect_tx(mbarrier: BarrierType, tx: int):
@@ -1225,6 +1251,96 @@ def initialize_tcgen05_descriptor(
     )
 
 
+def tcgen05_smem_base_16b(ptr):
+    """Return the shared-memory pointer base in 16-byte units."""
+    return tirx.call_intrin(
+        "uint32",
+        tirx.op.Op.get("tl.tcgen05_smem_base_16b"),
+        ptr,
+    )
+
+
+def tcgen05_mk_fast_desc(smem_base_16b, byte_offset):
+    """Construct a fast-path TCGEN05 SMEM descriptor from a 16-byte base."""
+    return tirx.call_intrin(
+        "uint64",
+        tirx.op.Op.get("tl.tcgen05_mk_fast_desc"),
+        smem_base_16b,
+        byte_offset,
+    )
+
+
+def tcgen05_mma_ss(
+    desc_a,
+    desc_b,
+    c_tmem_addr,
+    idesc,
+    accumulate,
+    *,
+    dtype="float16",
+    cta_group=1,
+    use_mask=False,
+    elect_one=False,
+):
+    """Issue a shared/shared TCGEN05 MMA using raw descriptor operands."""
+    mask_zero = tirx.IntImm("int32", 0)
+    return tir_op.ptx_tcgen05_mma_ss(
+        dtype,
+        desc_a,
+        0,
+        desc_b,
+        0,
+        c_tmem_addr,
+        0,
+        idesc,
+        accumulate,
+        mask_zero,
+        mask_zero,
+        mask_zero,
+        mask_zero,
+        enable_2cta=(cta_group == 2),
+        use_mask=use_mask,
+        elect_one=elect_one,
+        c_is_tmem_addr=True,
+    )
+
+
+def tcgen05_mma_ts(
+    a_tmem_addr,
+    desc_b,
+    c_tmem_addr,
+    idesc,
+    accumulate,
+    *,
+    dtype="float16",
+    cta_group=1,
+    use_mask=False,
+    elect_one=False,
+):
+    """Issue a TMEM/shared TCGEN05 MMA using raw descriptor operands."""
+    mask_zero = tirx.IntImm("int32", 0)
+    return tir_op.ptx_tcgen05_mma_ts(
+        dtype,
+        a_tmem_addr,
+        0,
+        desc_b,
+        0,
+        c_tmem_addr,
+        0,
+        idesc,
+        accumulate,
+        mask_zero,
+        mask_zero,
+        mask_zero,
+        mask_zero,
+        enable_2cta=(cta_group == 2),
+        use_mask=use_mask,
+        elect_one=elect_one,
+        a_is_tmem_addr=True,
+        c_is_tmem_addr=True,
+    )
+
+
 def increase_descriptor_offset(descriptor: PrimExpr, offset: PrimExpr) -> PrimExpr:
     """
     Increase the offset of a memory descriptor.
@@ -1259,16 +1375,7 @@ def cp_async_barrier_noinc(barrier: BarrierType):
 
 
 def tcgen05_mma_arrive(mbar: tirx.Buffer | BufferLoad | PrimExpr, arrive_2cta: bool = False):
-    """Signal UMMA (TCGEN05) barrier arrival for a shared-memory mbarrier pointer.
-
-    Parameters
-    ----------
-    mbar: tirx.Buffer | BufferLoad | PrimExpr
-        The mbarrier object in shared memory (e.g., Barrier*) or its address.
-    arrive_2cta: bool
-        Whether to also arrive at the peer CTA's barrier.
-        If set, will be lowered to umma_arrive_multicast_2x1SM.
-    """
+    """Signal UMMA (TCGEN05) barrier arrival for a shared-memory mbarrier pointer."""
     if isinstance(mbar, (tirx.Buffer, BufferLoad)):
         mbar = retrieve_ptr(mbar, access_type="rw")
     ann = {"use_2cta": 1} if arrive_2cta else {}
@@ -1281,6 +1388,318 @@ def tcgen05_before_thread_sync():
 
 def tcgen05_after_thread_sync():
     return tirx.call_intrin("void", tirx.op.Op.get("tl.tcgen05_after_thread_sync"))
+
+
+def tcgen05_fence_tmem_load():
+    """Wait for pending asynchronous TMEM loads to become visible."""
+    return tirx.call_intrin("void", tirx.op.Op.get("tl.tcgen05_fence_tmem_load"))
+
+
+def tcgen05_fence_tmem_store(classify_as_tmem_use: bool = False):
+    """Wait for pending asynchronous TMEM stores to become visible.
+
+    By default this is a raw store-view fence and is not treated as a
+    tcgen05/TMEM use by the automatic before/after-thread-sync fence pass.
+    Set ``classify_as_tmem_use`` only for compatibility with the old
+    ``tcgen05_wait_st`` marker semantics.
+    """
+    ann = {"tcgen05_use": 1} if classify_as_tmem_use else {}
+    return tirx.call_intrin(
+        "void",
+        tirx.op.Op.get("tl.tcgen05_fence_tmem_store"),
+        annotations=ann,
+    )
+
+
+def tcgen05_bar_arrive(barrier_id, count):
+    """Issue `bar.arrive barrier_id, count`."""
+    return tirx.call_intrin(
+        "void",
+        tirx.op.Op.get("tl.tcgen05_bar_arrive"),
+        barrier_id,
+        count,
+    )
+
+
+def tcgen05_bar_sync(barrier_id, count):
+    """Issue `bar.sync barrier_id, count`."""
+    return tirx.call_intrin(
+        "void",
+        tirx.op.Op.get("tl.tcgen05_bar_sync"),
+        barrier_id,
+        count,
+    )
+
+
+def _as_bool_imm(value: bool):
+    return tirx.const(bool(value), "bool")
+
+
+def tcgen05_ld(
+    inst_bits: int,
+    chunks: int,
+    pack16: bool,
+    tmem_start_col,
+    col_offset,
+    dst_ptr,
+    *,
+    emit_fence: bool = True,
+):
+    """Load from TMEM into a local pointer with `tl::tcgen05_ld_32dp*bNx`.
+
+    Set `emit_fence=False` when issuing several loads and calling
+    `T.tcgen05_fence_tmem_load()` manually once afterwards.
+    """
+    return tirx.call_intrin(
+        "void",
+        tirx.op.Op.get("tl.tcgen05_ld" if emit_fence else "tl.tcgen05_ld_nofence"),
+        tirx.IntImm("int32", int(inst_bits)),
+        tirx.IntImm("int32", int(chunks)),
+        _as_bool_imm(pack16),
+        tmem_start_col,
+        col_offset,
+        dst_ptr,
+    )
+
+
+def tcgen05_st(
+    inst_bits: int,
+    chunks: int,
+    unpack16: bool,
+    tmem_start_col,
+    col_offset,
+    src_ptr,
+):
+    """Store a local pointer into TMEM with `tl::tcgen05_st_32dp*bNx`."""
+    return tirx.call_intrin(
+        "void",
+        tirx.op.Op.get("tl.tcgen05_st"),
+        tirx.IntImm("int32", int(inst_bits)),
+        tirx.IntImm("int32", int(chunks)),
+        _as_bool_imm(unpack16),
+        tmem_start_col,
+        col_offset,
+        src_ptr,
+    )
+
+
+def tcgen05_fma_f32x2(r0, r1, a0, a1, b0, b1, c0, c1):
+    """Update two FP32 scalar lvalues with one SM100 `fma.rn.ftz.f32x2`.
+
+    This is a statement-level primitive for adjacent scalar fragment slots.
+    """
+    return tirx.call_intrin(
+        "void",
+        tirx.op.Op.get("tl.tcgen05_fma_f32x2"),
+        r0,
+        r1,
+        a0,
+        a1,
+        b0,
+        b1,
+        c0,
+        c1,
+    )
+
+
+def tcgen05_rcp_approx_ftz(x):
+    """Approximate FTZ FP32 reciprocal using `rcp.approx.ftz.f32`."""
+    return tirx.call_intrin(
+        "float32",
+        tirx.op.Op.get("tl.tcgen05_rcp_approx_ftz"),
+        x,
+    )
+
+
+def tcgen05_exp2f_approx(x):
+    """Approximate FP32 exp2 using `ex2.approx.ftz.f32`."""
+    return tirx.call_intrin(
+        "float32",
+        tirx.op.Op.get("tl.tcgen05_exp2f_approx"),
+        x,
+    )
+
+
+def tcgen05_exp2_poly_2(r0, r1, in0, in1):
+    """Update two FP32 scalar lvalues with a polynomial exp2 pair path."""
+    return tirx.call_intrin(
+        "void",
+        tirx.op.Op.get("tl.tcgen05_exp2_poly_2"),
+        r0,
+        r1,
+        in0,
+        in1,
+    )
+
+
+def tcgen05_st_32x32b_x4(tmem_base, offset, v0, v1, v2, v3):
+    """Store four packed uint32 words to TMEM with `tcgen05.st ... x4.b32`."""
+    return tirx.call_intrin(
+        "void",
+        tirx.op.Op.get("tl.tcgen05_st_32x32b_x4"),
+        tmem_base,
+        offset,
+        v0,
+        v1,
+        v2,
+        v3,
+    )
+
+
+def select_stage_ptr(stage0_ptr, stage1_ptr, stage2_ptr, stage):
+    """Return one of three pointer expressions selected by ``stage``."""
+    return tirx.call_intrin(
+        "handle",
+        tirx.op.Op.get("tl.select_stage_ptr"),
+        stage0_ptr,
+        stage1_ptr,
+        stage2_ptr,
+        stage,
+    )
+
+
+def select_barrier_ref(mbar0, mbar1, mbar2, stage):
+    """Return one of three mbarriers as a CUDA ``Barrier&`` expression."""
+    mbar0 = _mbar_to_buffer_load(mbar0)
+    mbar1 = _mbar_to_buffer_load(mbar1)
+    mbar2 = _mbar_to_buffer_load(mbar2)
+    return tirx.call_intrin(
+        "handle",
+        tirx.op.Op.get("tl.select_barrier_ref"),
+        mbar0,
+        mbar1,
+        mbar2,
+        stage,
+    )
+
+
+def tcgen05_smem_ptr_add_bf16(ptr, offset):
+    """Return ``ptr + offset`` for a BF16 shared-memory pointer expression."""
+    return tirx.call_intrin(
+        "handle",
+        tirx.op.Op.get("tl.tcgen05_smem_ptr_add_bf16"),
+        ptr,
+        offset,
+    )
+
+
+def tcgen05_mbarrier_arrive_expect_tx_ref(mbar, tx):
+    """Arrive+expect on a dynamic mbarrier reference."""
+    return tirx.call_intrin(
+        "void",
+        tirx.op.Op.get("tl.tcgen05_mbarrier_arrive_expect_tx_ref"),
+        mbar,
+        tx,
+    )
+
+
+def tcgen05_mbarrier_arrive_expect_tx_cluster_lane0_ref(mbar, tx):
+    """Cluster arrive+expect on a dynamic mbarrier reference, issued by lane 0 only."""
+    return tirx.call_intrin(
+        "void",
+        tirx.op.Op.get("tl.tcgen05_mbarrier_arrive_expect_tx_cluster_lane0_ref"),
+        mbar,
+        tx,
+    )
+
+
+def tcgen05_mbarrier_arrive_cluster_all_ref(mbar):
+    """Arrive on a cluster mbarrier from all active lanes."""
+    mbar = _mbar_to_buffer_load(mbar)
+    return tirx.call_intrin(
+        "void",
+        tirx.op.Op.get("tl.tcgen05_mbarrier_arrive_cluster_all_ref"),
+        mbar,
+    )
+
+
+def tma_store_2d(desc, stage_ptr, coord0, coord1, predicate: PrimExpr | bool = True):
+    """Issue one 2D TMA store, optionally guarded by a CUDA-side predicate."""
+    args = [desc, stage_ptr, coord0, coord1]
+    if not (isinstance(predicate, bool) and predicate):
+        pred_expr = predicate if isinstance(predicate, PrimExpr) else tirx.IntImm("bool", bool(predicate))
+        args.append(pred_expr)
+    return tirx.call_intrin(
+        "void",
+        tirx.op.Op.get("tl.tma_store_2d"),
+        *args,
+    )
+
+
+def tcgen05_mbarrier_arrive_local_all_ref(mbar):
+    """Arrive on a local CTA mbarrier from all active lanes."""
+    mbar = _mbar_to_buffer_load(mbar)
+    return tirx.call_intrin(
+        "void",
+        tirx.op.Op.get("tl.tcgen05_mbarrier_arrive_local_all_ref"),
+        mbar,
+    )
+
+
+def tcgen05_wait_barrier_ref(mbar, phase):
+    """Wait on a dynamic mbarrier reference."""
+    return tirx.call_intrin(
+        "void",
+        tirx.op.Op.get("tl.tcgen05_wait_barrier_ref"),
+        mbar,
+        phase,
+    )
+
+
+def tcgen05_wait_barrier(mbar, phase):
+    """Wait on an mbarrier using the compact SM100 helper call."""
+    mbar = _mbar_to_buffer_load(mbar)
+    return tirx.call_intrin(
+        "void",
+        tirx.op.Op.get("tl.tcgen05_wait_barrier_op"),
+        mbar,
+        phase,
+    )
+
+
+def tcgen05_commit_1sm(mbar, *, lane0: bool = False):
+    """Commit a 1SM TCGEN05 MMA to an mbarrier."""
+    mbar = _mbar_to_buffer_load(mbar)
+    ann = {"lane0_only": True} if lane0 else {}
+    return tirx.call_intrin(
+        "void",
+        tirx.op.Op.get("tl.tcgen05_commit_1sm_op"),
+        mbar,
+        annotations=ann,
+    )
+
+
+def tcgen05_commit_2cta(mbar):
+    """Commit a 2CTA TCGEN05 MMA to an mbarrier.
+
+    Lowers to:
+      tcgen05.commit.cta_group::2.mbarrier::arrive::one.shared::cluster...
+
+    The caller must already restrict execution to the issuing lane/warp.
+    """
+    mbar = _mbar_to_buffer_load(mbar)
+    return tirx.call_intrin(
+        "void",
+        tirx.op.Op.get("tl.tcgen05_commit_2cta_op"),
+        mbar,
+    )
+
+
+def outline_persistent(buffer):
+    """Mark a local fragment as persistent across warp-spec outlined calls."""
+    if isinstance(buffer, tirx.Buffer):
+        buffer = buffer.data
+    return tirx.call_intrin("void", tirx.op.Op.get("tl.outline_persistent"), buffer)
+
+
+def cuda_block_idx_x():
+    """Return the physical CUDA blockIdx.x value."""
+    return tirx.call_intrin("int32", tirx.op.Op.get("tl.cuda_block_idx_x"))
+
+
+def cluster_id_x():
+    """Return the X dimension cluster rank in the CUDA cluster grid."""
+    return tirx.call_intrin("int32", tirx.op.Op.get("tl.cluster_id_x"))
 
 
 def _tcgen05_num_smem_chunks(smem_src, chunk_elems: int):
@@ -1304,58 +1723,6 @@ def _tcgen05_num_smem_chunks(smem_src, chunk_elems: int):
     if total_elems % chunk_elems != 0:
         raise ValueError(f"Packed scale-factor helpers require total extent to be a multiple of {chunk_elems}, got {total_elems}.")
     return total_elems // chunk_elems
-
-
-def tcgen05_cp_warpx4(smem_src, tmem_dst, tmem_col_offset=0, *, use_2cta: bool = False):
-    """Copy one or more packed scale-factor chunks from shared memory to tensor memory.
-
-    The helper lowers to one or more ``tcgen05.cp.cta_group::{1,2}.32x128b.warpx4``
-    instructions. For 1D packed ``uint32`` scale buffers, each 128-word chunk maps to
-    4 TMEM columns and the column offset is advanced automatically.
-    """
-    num_chunks = _tcgen05_num_smem_chunks(smem_src, 128)
-    if isinstance(tmem_dst, tirx.Buffer):
-        tmem_ptr = tmem_dst.data
-    elif isinstance(tmem_dst, (BufferLoad, BufferRegion)):
-        tmem_ptr = tmem_dst.buffer.data
-    else:
-        tmem_ptr = tmem_dst
-    ann = {"use_2cta": 1} if use_2cta else None
-    buffer, base_offset = retrieve_buffer_and_offset(smem_src)
-
-    @macro
-    def _tcgen05_cp_warpx4_chunked(buffer, tmem_ptr, tmem_col_offset, base_offset):
-        for i in T.unroll(num_chunks):
-            chunk_ptr = buffer.access_ptr("r", offset=base_offset + i * 128)
-            tirx.call_intrin(
-                "void",
-                tirx.op.Op.get("tl.ptx_tcgen05_cp_warpx4"),
-                chunk_ptr,
-                tmem_ptr,
-                tmem_col_offset + i * 4,
-                annotations=ann,
-            )
-
-    return _tcgen05_cp_warpx4_chunked(buffer, tmem_ptr, tmem_col_offset, base_offset)
-
-
-def tcgen05_sf_warp_transpose(smem_src):
-    """Warp-level transpose for one or more packed scale-factor chunks in shared memory.
-
-    For 1D packed ``uint32`` scale buffers, the helper automatically applies the
-    transpose to each 128-word chunk in order.
-    """
-    num_chunks = _tcgen05_num_smem_chunks(smem_src, 128)
-
-    buffer, base_offset = retrieve_buffer_and_offset(smem_src)
-
-    @macro
-    def _tcgen05_sf_warp_transpose_chunked(buffer, base_offset):
-        for i in T.unroll(num_chunks):
-            chunk_ptr = buffer.access_ptr("rw", offset=base_offset + i * 128)
-            tirx.call_intrin("void", tirx.op.Op.get("tl.ptx_tcgen05_sf_warp_transpose"), chunk_ptr)
-
-    return _tcgen05_sf_warp_transpose_chunked(buffer, base_offset)
 
 
 def ptx_mma_sm70(

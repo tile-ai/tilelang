@@ -58,8 +58,12 @@ public:
   void VisitExpr_(const MinNode *op, std::ostream &os) final;
   void VisitExpr_(const MaxNode *op, std::ostream &os) final;
   void VisitStmt_(const EvaluateNode *op) final;
+  void VisitStmt_(const BindNode *op) final;
   void VisitStmt_(const AllocBufferNode *op) final;
   void VisitStmt_(const AttrStmtNode *op) final;
+  void VisitStmt_(const SBlockNode *op) final;
+  void VisitStmt_(const SBlockRealizeNode *op) final;
+  void VisitStmt_(const IfThenElseNode *op) final;
   void VisitExpr_(const BufferLoadNode *op, std::ostream &os) final;
   void VisitStmt_(const BufferStoreNode *op) final;
 
@@ -81,6 +85,8 @@ private:
   void HandleVolatileLoads(const std::string &value, const BufferLoadNode *op,
                            std::ostream &os) final;
   bool HandleLateIntrinsicCall(const CallNode *op, std::ostream &os);
+  void FlushPendingTmemAllocs();
+  void EmitCompactSharedStateIfNeeded();
 
   // Whether scope such as "__shared__" or "__constant__"  is part of type.
   bool IsScopePartOfType() const final { return false; }
@@ -147,6 +153,25 @@ private:
   const std::string mbarrier_name_ = "mbarrier";
   // The type name of the mbarrier array
   const std::string mbarrier_dtype_ = "Barrier";
+  // Buffered TMEM allocations for deterministic sorted emission.
+  // Each entry: {sort_key (buffer arg text), full call string}.
+  std::vector<std::pair<std::string, std::string>> pending_tmem_allocs_;
+  struct CompactSharedStateInfo {
+    const VarNode *buffer_var{nullptr};
+    std::string var_name;
+    std::string type_str;
+    int64_t bytes{0};
+    int64_t align{1};
+  };
+  std::vector<CompactSharedStateInfo> compact_shared_state_infos_;
+  bool compact_shared_state_enabled_{false};
+  bool compact_shared_state_decl_emitted_{false};
+  int64_t compact_shared_state_bytes_{0};
+  const VarNode *compact_tmem_base_var_{nullptr};
+  std::string compact_tmem_base_name_;
+  bool compact_tmem_base_alias_emitted_{false};
+  bool suppress_compact_tmem_base_alias_{false};
+  void EmitCompactTmemBaseAliasIfNeeded();
   // The alignment of the barrier array in shared memory
   // Set to 16 to maintain minimum alignment requirements for async bulk copy
   const int barrier_alignment_bytes_ = 16;
@@ -157,6 +182,103 @@ private:
   std::optional<std::tuple<int64_t, int64_t, int64_t>> cluster_dims;
   // ffi::Map from VarNode to packed buffer variable name for fp4 packed storage
   std::unordered_map<const VarNode *, std::string> fp4_packed_buffers_;
+  // Stream for outlined __noinline__ device functions (emitted before kernel)
+  std::ostringstream outlined_fns_stream_;
+  // Track shared-memory barrier/TMEM declarations for device function params
+  // Each entry: (var_name, type_string) e.g. ("mbar_s0", "Barrier*")
+  std::vector<std::pair<std::string, std::string>> shared_state_vars_;
+  // Whether we're currently inside an outlined device function emission
+  bool in_outlined_fn_{false};
+  // Counter for unique device function names
+  int outlined_fn_count_{0};
+
+  // --- Device function outlining state ---
+  // The threadIdx.x Var node (set in BindThreadIndex)
+  const VarNode *thread_x_var_{nullptr};
+  // Total dynamic shared memory size (set when visiting shared.dyn
+  // AllocateNode)
+  int64_t dyn_shmem_size_{0};
+  // Whether outlining is enabled (read from pass config)
+  bool outline_warp_spec_enabled_{false};
+  // Innermost for-loop variable name (for passing to device functions)
+  std::string current_loop_var_name_;
+  struct ActiveLoopVarInfo {
+    const VarNode *var{nullptr};
+    std::string name;
+    DataType dtype;
+  };
+  std::vector<ActiveLoopVarInfo> active_loop_vars_;
+  // Kernel-scope LetStmt scalar bindings that device-function outlining may
+  // need to forward when a `with T.device_func()` body captures outer values.
+  struct ScalarVarInfo {
+    const VarNode *var{nullptr};
+    std::string var_name;
+    DataType dtype;
+  };
+  std::vector<ScalarVarInfo> scalar_var_infos_;
+
+  struct LocalAllocInfo {
+    std::string var_name;
+    DataType dtype;
+    int64_t size;
+    bool outline_persistent{false};
+    bool is_scalar_var{false};
+    PrimExpr init;
+    // Buffer variable handle so we can check which branches touch this alloc
+    // during outlining. Without this we conservatively re-declare every kernel-
+    // scope local in every outlined fn, forcing ptxas to keep dead `= {}`
+    // initializers alive and inflating register pressure (e.g. the math0
+    // outlined fn would declare S1_reg[128] + P1_cast[128] + O*_reg[128]
+    // even though it never touches them, costing >300 unused regs/thread).
+    const VarNode *buffer_var{nullptr};
+  };
+  std::vector<LocalAllocInfo> local_allocs_;
+  // Kernel-scope scalar local.var allocations. Explicit `T.device_func()`
+  // bodies can capture these by value to keep precomputed schedule scalars out
+  // of the outlined helper body.
+  std::vector<ScalarVarInfo> local_scalar_var_infos_;
+  struct OutlinedStateInfo {
+    std::string var_name;
+    std::string type_str;
+    const VarNode *buffer_var{nullptr};
+  };
+  // Barrier variables declared as __shared__ (e.g., "mbar_s0")
+  std::vector<OutlinedStateInfo> barrier_var_infos_;
+  // TMEM handle variables declared as __shared__ (e.g., "S0_tmem")
+  std::vector<OutlinedStateInfo> tmem_var_infos_;
+  // Dynamic shared-memory aliases produced by MergeSharedMemoryAllocations.
+  // These are handle-valued binds such as:
+  //   Q_shared = handle_add_byte_offset(buf_dyn_shmem, 1234)
+  // Outlined device functions need to reconstruct the aliases locally when
+  // they touch the corresponding buffer var.
+  struct SharedDynAliasInfo {
+    std::string var_name;
+    std::string offset_expr;
+    const VarNode *buffer_var{nullptr};
+  };
+  std::vector<SharedDynAliasInfo> shared_dyn_alias_infos_;
+  // Kernel function parameters (name, type_string) for device fn forwarding
+  struct KernelParamInfo {
+    std::string var_name;
+    std::string type_str; // e.g. "const CUtensorMap"
+    bool is_grid_constant{false};
+    const VarNode *param_var{nullptr};
+  };
+  std::vector<KernelParamInfo> kernel_param_infos_;
+  std::unordered_set<const VarNode *> outline_persistent_vars_;
+
+  // Helper: check if condition involves threadIdx.x comparison
+  bool IsThreadXComparison(const PrimExpr &cond) const;
+  // Helper: emit one outlined device function, returns the function name
+  std::string EmitOutlinedDeviceFunction(const Stmt &body,
+                                         bool forward_captured_scalars = false);
+  // Helper: flatten nested if-else on threadIdx.x into branches
+  struct WarpBranch {
+    PrimExpr condition;
+    Stmt body;
+  };
+  void FlattenWarpBranches(const IfThenElseNode *node,
+                           std::vector<WarpBranch> *branches);
   friend void PrintConst(const FloatImmNode *op, std::ostream &os,
                          CodeGenTileLangCUDA *p);
   void PrintWmmaScope(const std::string &scope, DataType t,
