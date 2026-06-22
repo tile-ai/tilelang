@@ -25,7 +25,7 @@ bool CheckSIMDGroupCopy(const CopyNode &op) {
          (IsSharedBuffer(op.dst) || IsGlobalBuffer(op.dst));
 }
 
-Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &T,
+Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
                         arith::Analyzer *analyzer) {
   (void)analyzer;
   TVM_FFI_ICHECK(IsSIMDGroupBuffer(op.src));
@@ -48,13 +48,14 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &T,
   PrimExpr dst_col_base = op.dst_range[1]->min;
   PrimExpr dst_stride = op.dst->shape[op.dst->shape.size() - 1];
 
-  int warp_size = TargetMetalGetWarpSize(T.target);
-  const auto *block_size_imm = T.thread_bounds->extent.as<IntImmNode>();
+  int warp_size = TargetMetalGetWarpSize(lower_args.target);
+  const auto *block_size_imm =
+      lower_args.thread_bounds->extent.as<IntImmNode>();
   TVM_FFI_ICHECK(block_size_imm)
       << "simdgroup copy requires constant thread bounds";
   int block_size = block_size_imm->value;
   int num_warps = block_size / warp_size;
-  PrimExpr warp_id = FloorDiv(T.thread_var, warp_size);
+  PrimExpr warp_id = FloorDiv(lower_args.thread_var, warp_size);
 
   const auto *m_imm = op.src_range[0]->extent.as<IntImmNode>();
   const auto *n_imm = op.src_range[1]->extent.as<IntImmNode>();
@@ -106,17 +107,18 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &T,
 } // namespace
 
 struct Copy {
-  static LayoutMap InferLayout(const CopyNode &op, const LayoutInferArgs &T,
+  static LayoutMap InferLayout(const CopyNode &op,
+                               const LayoutInferArgs &layout_args,
                                InferLevel level) {
-    return op.InferSIMTLayout(T, level);
+    return op.InferSIMTLayout(layout_args, level);
   }
 
-  static Stmt Lower(const CopyNode &op, const LowerArgs &T,
+  static Stmt Lower(const CopyNode &op, const LowerArgs &lower_args,
                     arith::Analyzer *analyzer) {
     if (CheckSIMDGroupCopy(op)) {
-      return LowerSIMDGroupCopy(op, T, analyzer);
+      return LowerSIMDGroupCopy(op, lower_args, analyzer);
     }
-    return LowerNormalCopy(op, T, analyzer);
+    return LowerNormalCopy(op, lower_args, analyzer);
   }
 };
 

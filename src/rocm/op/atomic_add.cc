@@ -190,12 +190,13 @@ For MakeSIMTLoop(const AtomicAddNode &op, arith::Analyzer *analyzer) {
   return Downcast<For>(body);
 }
 
-LayoutMap InferSIMTLayout(const AtomicAddNode &op, const LayoutInferArgs &T,
-                          InferLevel) {
+LayoutMap InferSIMTLayout(const AtomicAddNode &op,
+                          const LayoutInferArgs &layout_args, InferLevel) {
   if (IsFragmentBuffer(op.src) && IsFragmentBuffer(op.dst)) {
-    if (T.layout_map.count(op.src) && T.layout_map.count(op.dst)) {
-      Layout src_layout = T.layout_map.at(op.src);
-      Layout dst_layout = T.layout_map.at(op.dst);
+    if (layout_args.layout_map.count(op.src) &&
+        layout_args.layout_map.count(op.dst)) {
+      Layout src_layout = layout_args.layout_map.at(op.src);
+      Layout dst_layout = layout_args.layout_map.at(op.dst);
       ICHECK(StructuralEqual()(src_layout, dst_layout))
           << "AtomicAdd requires src and dst to have the same layout, but got "
           << "src layout: " << src_layout << ", dst layout: " << dst_layout
@@ -209,7 +210,7 @@ LayoutMap InferSIMTLayout(const AtomicAddNode &op, const LayoutInferArgs &T,
 } // namespace
 
 struct AtomicAdd {
-  static Stmt LowerSIMT(const AtomicAddNode &op, const LowerArgs &T,
+  static Stmt LowerSIMT(const AtomicAddNode &op, const LowerArgs &lower_args,
                         arith::Analyzer *analyzer) {
     auto simt_loop = MakeSIMTLoop(op, analyzer);
     auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
@@ -217,34 +218,36 @@ struct AtomicAdd {
     std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
                                       InferLevel::kFree};
     for (auto level : levels) {
-      par_op->InferLayout({T.target,
-                           T.thread_bounds,
-                           T.layout_map,
+      par_op->InferLayout({lower_args.target,
+                           lower_args.thread_bounds,
+                           lower_args.layout_map,
                            analyzer,
                            false,
-                           T.buffer_remap,
+                           lower_args.buffer_remap,
                            {}},
                           level);
     }
     auto loop_layout = par_op->GetLoopLayout();
-    return LowerParallelLoop(fused_loop, loop_layout, T.thread_var, analyzer,
-                             T.layout_map, par_op->GetPredicate(T.thread_var),
+    return LowerParallelLoop(fused_loop, loop_layout, lower_args.thread_var,
+                             analyzer, lower_args.layout_map,
+                             par_op->GetPredicate(lower_args.thread_var),
                              /*parallel_loop=*/true, /*should_vectorize=*/true,
                              par_op->LoopLayoutRequiresPaddingGuard());
   }
 
   static LayoutMap InferLayout(const AtomicAddNode &op,
-                               const LayoutInferArgs &T, InferLevel level) {
+                               const LayoutInferArgs &layout_args,
+                               InferLevel level) {
     ICHECK(!UseTMA(op))
         << "TMA atomic_add is only supported by the CUDA backend";
-    return InferSIMTLayout(op, T, level);
+    return InferSIMTLayout(op, layout_args, level);
   }
 
-  static Stmt Lower(const AtomicAddNode &op, const LowerArgs &T,
+  static Stmt Lower(const AtomicAddNode &op, const LowerArgs &lower_args,
                     arith::Analyzer *analyzer) {
     ICHECK(!UseTMA(op))
         << "TMA atomic_add is only supported by the CUDA backend";
-    return LowerSIMT(op, T, analyzer);
+    return LowerSIMT(op, lower_args, analyzer);
   }
 };
 

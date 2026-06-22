@@ -36,10 +36,12 @@ public:
   mutable ParallelOp par_op_; ///< Associated parallel operation
 
   /// Lower through the registered target implementation.
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
+  Stmt Lower(const LowerArgs &lower_args,
+             arith::Analyzer *analyzer) const override;
 
   /// Infer layout through the registered target implementation.
-  LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) const;
+  LayoutMap InferLayout(const LayoutInferArgs &layout_args,
+                        InferLevel level) const;
 
   /// Get memory order from annotations (default: relaxed = 0)
   int GetMemoryOrder() const {
@@ -62,9 +64,10 @@ struct AtomicReduceImpl {
   AtomicReduceTargetPredicate match_target;
 
   LayoutMap (*infer_layout)(const AtomicOpBaseNode &op,
-                            const LayoutInferArgs &T, InferLevel level);
+                            const LayoutInferArgs &layout_args,
+                            InferLevel level);
 
-  Stmt (*lower)(const AtomicOpBaseNode &op, const LowerArgs &T,
+  Stmt (*lower)(const AtomicOpBaseNode &op, const LowerArgs &lower_args,
                 arith::Analyzer *analyzer);
 };
 

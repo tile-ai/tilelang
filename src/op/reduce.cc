@@ -179,32 +179,34 @@ static Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
  *   dimensions and partitioned by the lowering thread variable. If a temporary
  *   clear buffer is used, it is allocated for the body.
  *
- * @param T Lowering context providing buffer and layout maps, thread bounds,
- *          target information, thread variable, and workspace allocation
- * helper.
+ * @param lower_args Lowering context providing buffer and layout maps, thread
+ * bounds, target information, thread variable, and workspace allocation helper.
  * @param analyzer Analyzer used for iterator compression and arithmetic
  * normalization.
  * @return Stmt Lowered TIR statement implementing the reduction.
  */
-Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  return ResolveReduceImpl(T.target).lower(*this, T, analyzer);
+Stmt ReduceOpNode::Lower(const LowerArgs &lower_args,
+                         arith::Analyzer *analyzer) const {
+  return ResolveReduceImpl(lower_args.target)
+      .lower(*this, lower_args, analyzer);
 }
 
-LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &T,
+LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &layout_args,
                                     InferLevel level) const {
   if (level >= InferLevel::kStrict)
     return {};
 
   if (IsFragmentBuffer(src) && IsFragmentBuffer(dst) &&
-      T.layout_map.count(src)) {
-    auto src_layout = T.layout_map[src].as<Fragment>().value();
+      layout_args.layout_map.count(src)) {
+    auto src_layout = layout_args.layout_map[src].as<Fragment>().value();
     auto reducer_layout = ComputeReducerLayout(src_layout, this->dim);
 
-    if (!T.layout_map.count(dst)) {
+    if (!layout_args.layout_map.count(dst)) {
       return {{dst, reducer_layout}};
     }
 
-    auto orig_dst_layout = T.layout_map.Get(dst).value().as<Fragment>().value();
+    auto orig_dst_layout =
+        layout_args.layout_map.Get(dst).value().as<Fragment>().value();
     ICHECK(reducer_layout->InputDim() == orig_dst_layout->InputDim());
 
     auto indices = InputPlaceholders(reducer_layout->InputDim());

@@ -90,9 +90,10 @@ FinalizeReducerOp::FinalizeReducerOp(
   data_ = std::move(node);
 }
 
-Stmt FinalizeReducerOpNode::Lower(const LowerArgs &T,
+Stmt FinalizeReducerOpNode::Lower(const LowerArgs &lower_args,
                                   arith::Analyzer *analyzer) const {
-  return ResolveFinalizeReducerImpl(T.target).lower(*this, T, analyzer);
+  return ResolveFinalizeReducerImpl(lower_args.target)
+      .lower(*this, lower_args, analyzer);
 }
 
 /**
@@ -102,16 +103,16 @@ Stmt FinalizeReducerOpNode::Lower(const LowerArgs &T,
  * into a new LayoutMap and returns it. The inference does not modify the
  * layout; it preserves the reducer's current layout.
  *
- * @param T Provides the input layout map from which the reducer's layout is
- * copied.
+ * @param layout_args Provides the input layout map from which the reducer's
+ * layout is copied.
  * @param level Unused by this operator; present for API compatibility.
  * @return LayoutMap A map that contains the reducer buffer mapped to its
  * original layout.
  */
-LayoutMap FinalizeReducerOpNode::InferLayout(const LayoutInferArgs &T,
+LayoutMap FinalizeReducerOpNode::InferLayout(const LayoutInferArgs &layout_args,
                                              InferLevel level) const {
   LayoutMap layout_map;
-  layout_map.Set(reducer, T.layout_map.Get(reducer).value());
+  layout_map.Set(reducer, layout_args.layout_map.Get(reducer).value());
   return layout_map;
 }
 
