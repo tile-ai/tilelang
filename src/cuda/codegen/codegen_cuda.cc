@@ -2508,10 +2508,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
     std::string shape = "m8n8";
-    bool is_shape_encoded = op->args.size() >= 4;
+    bool is_shape_encoded =
+        op->args.size() >= 4 && op->args.back().as<StringImmNode>();
     if (is_shape_encoded) {
-      ICHECK(op->args[3].as<StringImmNode>());
-      shape = Downcast<StringImm>(op->args[3])->value;
+      shape = Downcast<StringImm>(op->args.back())->value;
     }
     std::string func_name =
         "tl::ptx_stmatrix_" + shape + "_x" + std::to_string(num);

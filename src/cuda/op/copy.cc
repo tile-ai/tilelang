@@ -1099,14 +1099,11 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &T,
       !is_ldmatrix && is_transposed &&
       TargetHasStmatrix(T.target, /*is_m16n8=*/true) &&
       shared_tensor->dtype.bits() == 8;
-  const int elems_per_reg = use_m16n8_stmatrix ? 4 : 2;
-  if (is_ldmatrix || !use_m16n8_stmatrix) {
-    if (shared_tensor->dtype.bytes() != 2) {
-      return LowerNormal(op, T, analyzer);
-    }
-  } else if (shared_tensor->dtype.bytes() != 1) {
+  const int shared_elem_bytes = use_m16n8_stmatrix ? 1 : 2;
+  if (shared_tensor->dtype.bytes() != shared_elem_bytes) {
     return LowerNormal(op, T, analyzer);
   }
+  const int elems_per_reg = 4 / shared_elem_bytes;
   PrimExpr flattened_indice = shared_tensor.OffsetOf(shared_indices).back();
   if (!IndicesCanVectorize(flattened_indice, loop_vars.back()->var,
                            loop_vars.back()->dom->extent,
