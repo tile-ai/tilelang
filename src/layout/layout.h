@@ -6,18 +6,19 @@
 #ifndef TVM_TL_LAYOUT_LAYOUT_H_
 #define TVM_TL_LAYOUT_LAYOUT_H_
 
-#include "support/check.h"
+#include <cstddef>
 #include <exception>
+#include <string>
+#include <utility>
+
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/iter_affine_map.h>
 #include <tvm/tirx/buffer.h>
-#include <utility>
+
+#include "support/check.h"
 
 namespace tvm {
 namespace tl {
-
-using namespace tirx;
-using namespace ffi;
 
 // Common layout-related exceptions
 class LayoutConflictException : public std::exception {
@@ -41,24 +42,25 @@ private:
 class Layout;
 class Fragment;
 
-class LayoutNode : public Object {
+class LayoutNode : public ffi::Object {
 public:
   LayoutNode() = default;
-  LayoutNode(Array<PrimExpr> input_size, Array<PrimExpr> forward_index);
+  LayoutNode(ffi::Array<PrimExpr> input_size,
+             ffi::Array<PrimExpr> forward_index);
 
   size_t InputDim() const { return input_size_.size(); }
 
   size_t OutputDim() const { return forward_index_.size(); }
 
-  Array<PrimExpr> InputShape() const { return input_size_; }
+  ffi::Array<PrimExpr> InputShape() const { return input_size_; }
 
-  Array<PrimExpr> OutputShape() const;
+  ffi::Array<PrimExpr> OutputShape() const;
 
-  Array<PrimExpr> GetForwardIndex() const { return forward_index_; }
+  ffi::Array<PrimExpr> GetForwardIndex() const { return forward_index_; }
 
-  virtual Array<PrimExpr> GetForwardVars() const;
+  virtual ffi::Array<PrimExpr> GetForwardVars() const;
 
-  virtual Array<PrimExpr> Forward(const Array<PrimExpr> &vars) const;
+  virtual ffi::Array<PrimExpr> Forward(const ffi::Array<PrimExpr> &vars) const;
 
   // Repeat the layout along a single input dimension and prepend a new output
   // dimension that indicates the repeat-group index.
@@ -76,7 +78,7 @@ public:
   // Expand([I]) produces a 3D layout L': [I, J, K] -> [I] + F(J, K).
   //
   // `leading_shape` can contain multiple dimensions.
-  virtual Layout Expand(const Array<PrimExpr> &leading_shape) const;
+  virtual Layout Expand(const ffi::Array<PrimExpr> &leading_shape) const;
 
   virtual Layout Inverse() const;
 
@@ -91,7 +93,7 @@ public:
   // For sub-byte subtype views, the output layout may temporarily gain or drop
   // a trailing "pack lane" dimension so that the layout still describes how
   // multiple logical elements share the same physical storage slot.
-  virtual Layout Reshape(const Array<PrimExpr> &shape,
+  virtual Layout Reshape(const ffi::Array<PrimExpr> &shape,
                          arith::Analyzer *analyzer = nullptr,
                          const PrimExpr rescale_num = Integer(1),
                          const PrimExpr rescale_den = Integer(1)) const;
@@ -104,41 +106,45 @@ public:
   virtual bool IsEqual(const LayoutNode *other, bool skip_index = false) const;
 
   static void RegisterReflection();
-  TVM_FFI_DECLARE_OBJECT_INFO("tl.Layout", LayoutNode, Object);
+  TVM_FFI_DECLARE_OBJECT_INFO("tl.Layout", LayoutNode, ffi::Object);
   static constexpr TVMFFISEqHashKind _type_s_eq_hash_kind =
       kTVMFFISEqHashKindTreeNode;
 
 protected:
-  virtual Map<Var, Range> getVarMap() const;
+  virtual ffi::Map<tirx::Var, Range> getVarMap() const;
   void UpdateAnalyzer(arith::Analyzer *analyzer) const;
-  Array<PrimExpr> forward_index_;
-  Array<PrimExpr> input_size_;
+  ffi::Array<PrimExpr> forward_index_;
+  ffi::Array<PrimExpr> input_size_;
 };
 
 /*!
  * \brief Layout reference class.
  */
-class Layout : public ObjectRef {
+class Layout : public ffi::ObjectRef {
 public:
-  TVM_DLL Layout(Array<IterVar> forward_var, Array<PrimExpr> forward_index);
-  TVM_DLL Layout(Array<PrimExpr> input_size, Array<PrimExpr> forward_index);
+  TVM_DLL Layout(ffi::Array<tirx::IterVar> forward_var,
+                 ffi::Array<PrimExpr> forward_index);
+  TVM_DLL Layout(ffi::Array<PrimExpr> input_size,
+                 ffi::Array<PrimExpr> forward_index);
 
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Layout, ObjectRef, LayoutNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Layout, ffi::ObjectRef,
+                                             LayoutNode);
 };
 
 class FragmentNode : public LayoutNode {
 public:
   FragmentNode() = default;
-  FragmentNode(Array<PrimExpr> input_size, Array<PrimExpr> forward_index,
-               PrimExpr forward_thread, PrimExpr replicate_size);
+  FragmentNode(ffi::Array<PrimExpr> input_size,
+               ffi::Array<PrimExpr> forward_index, PrimExpr forward_thread,
+               PrimExpr replicate_size);
 
   PrimExpr GetForwardThread() const { return forward_thread_; }
 
-  Array<PrimExpr> GetForwardVars() const final;
+  ffi::Array<PrimExpr> GetForwardVars() const final;
 
   Layout Inverse() const final;
 
-  Layout Reshape(const Array<PrimExpr> &shape,
+  Layout Reshape(const ffi::Array<PrimExpr> &shape,
                  arith::Analyzer *analyzer = nullptr,
                  const PrimExpr rescale_num = Integer(1),
                  const PrimExpr rescale_den = Integer(1)) const;
@@ -150,10 +156,10 @@ public:
 
   PrimExpr ReplicateExtent() const { return replicate_size_; };
 
-  PrimExpr ForwardThread(const Array<PrimExpr> &vars,
-                         const Optional<PrimExpr> &rep_var) const;
+  PrimExpr ForwardThread(const ffi::Array<PrimExpr> &vars,
+                         const ffi::Optional<PrimExpr> &rep_var) const;
 
-  Fragment Repeat(const Array<PrimExpr> &repeats, bool repeat_on_thread,
+  Fragment Repeat(const ffi::Array<PrimExpr> &repeats, bool repeat_on_thread,
                   bool lower_dim_first = true) const;
 
   Fragment Replicate(int repeats) const;
@@ -182,7 +188,7 @@ public:
       kTVMFFISEqHashKindTreeNode;
 
 protected:
-  Map<Var, Range> getVarMap() const final;
+  ffi::Map<tirx::Var, Range> getVarMap() const final;
   Range thread_range_;
   PrimExpr forward_thread_;
   PrimExpr replicate_size_;
@@ -193,12 +199,14 @@ protected:
  */
 class Fragment : public Layout {
 public:
-  TVM_DLL Fragment(Array<IterVar> forward_var, Array<PrimExpr> forward_index,
-                   PrimExpr forward_thread, IterVar thread_replicate);
+  TVM_DLL Fragment(ffi::Array<tirx::IterVar> forward_var,
+                   ffi::Array<PrimExpr> forward_index, PrimExpr forward_thread,
+                   tirx::IterVar thread_replicate);
 
-  TVM_DLL Fragment(Array<PrimExpr> input_size, Array<PrimExpr> forward_index,
-                   PrimExpr forward_thread, PrimExpr replicate_size,
-                   Optional<Var> replicate_var);
+  TVM_DLL Fragment(ffi::Array<PrimExpr> input_size,
+                   ffi::Array<PrimExpr> forward_index, PrimExpr forward_thread,
+                   PrimExpr replicate_size,
+                   ffi::Optional<tirx::Var> replicate_var);
 
   /*!
    * \brief Create a fully replicated fragment layout.
@@ -211,15 +219,15 @@ public:
    * \param thread_extent The number of threads.
    * \return A Fragment where each thread has a complete copy of all elements.
    */
-  TVM_DLL static Fragment FullyReplicated(Array<PrimExpr> shape,
+  TVM_DLL static Fragment FullyReplicated(ffi::Array<PrimExpr> shape,
                                           PrimExpr thread_extent);
 
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Fragment, Layout, FragmentNode);
 };
 
-Var InputPlaceholder(size_t idx);
-Var ReplicationPlaceholder();
-IterVar make_itervar(std::string name, PrimExpr dom);
+tirx::Var InputPlaceholder(size_t idx);
+tirx::Var ReplicationPlaceholder();
+tirx::IterVar make_itervar(std::string name, PrimExpr dom);
 
 Fragment makeGemmFragment8x8();
 Fragment makeGemmFragment8x8Transposed();
@@ -249,7 +257,7 @@ Fragment makeGemmFragmentACDNA(const int block_m, const int block_n,
                                const int k_pack, bool transposed = false);
 
 // Default Memory Layout (row-major linear layout for any dimension)
-Layout makeLinearLayout(Array<PrimExpr> shape);
+Layout makeLinearLayout(ffi::Array<PrimExpr> shape);
 Layout makeGemmABLayoutPadded(int stride, int continuous, int element_size);
 Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
                         int element_size, bool k_inner = true);
@@ -275,17 +283,17 @@ Layout makeTensorOpMultiplicand(int mat_stride, int mat_continuous,
 Layout makeGemmSparseAmpereABLayout(int mat_stride, int mat_continuous,
                                     int elementsize);
 
-Layout makeSwizzledLayout(const Buffer &buffer, bool k_inner = true,
+Layout makeSwizzledLayout(const tirx::Buffer &buffer, bool k_inner = true,
                           bool allow_pad = true);
-Layout makeVoltaSwizzledLayout(const Buffer &buffer, bool is_a = true,
+Layout makeVoltaSwizzledLayout(const tirx::Buffer &buffer, bool is_a = true,
                                bool k_inner = true);
-Layout makeWgmmaSwizzledLayout(const Buffer &buffer, int continuity = -1,
+Layout makeWgmmaSwizzledLayout(const tirx::Buffer &buffer, int continuity = -1,
                                bool k_inner = true);
-Layout makeTcgen05mmaSwizzledLayout(const Buffer &buffer, int continuity = -1,
-                                    bool k_inner = true);
-Layout makeFullBankSwizzleLayout(const Buffer &buffer);
-Layout makeHalfBankSwizzleLayout(const Buffer &buffer);
-Layout makeQuarterBankSwizzleLayout(const Buffer &buffer);
+Layout makeTcgen05mmaSwizzledLayout(const tirx::Buffer &buffer,
+                                    int continuity = -1, bool k_inner = true);
+Layout makeFullBankSwizzleLayout(const tirx::Buffer &buffer);
+Layout makeHalfBankSwizzleLayout(const tirx::Buffer &buffer);
+Layout makeQuarterBankSwizzleLayout(const tirx::Buffer &buffer);
 
 // Swizzle mode for shared memory layouts (nvidia only)
 // Smaller enum value = smaller swizzle granularity
@@ -297,7 +305,7 @@ enum class SwizzleMode {
 };
 
 // Detect which swizzle mode a layout uses
-SwizzleMode DetectSwizzleMode(const Layout &layout, const Buffer &buffer);
+SwizzleMode DetectSwizzleMode(const Layout &layout, const tirx::Buffer &buffer);
 
 // Required shared-memory base alignment (in bytes) for a TMA/bulk-copy or
 // MMA-descriptor operand with the given swizzle mode. The base must lie on a
@@ -320,9 +328,9 @@ inline int SmemAlignmentForSwizzle(SwizzleMode mode) {
 
 // Merge two swizzle layouts by taking the smaller granularity
 // Returns NullOpt if either layout is not a swizzle layout
-Optional<Layout> MergeSwizzleLayouts(const Layout &layout1,
-                                     const Layout &layout2,
-                                     const Buffer &buffer);
+ffi::Optional<Layout> MergeSwizzleLayouts(const Layout &layout1,
+                                          const Layout &layout2,
+                                          const tirx::Buffer &buffer);
 
 namespace attr {
 // BlockAttr, Containing the layout for all the buffers in the block

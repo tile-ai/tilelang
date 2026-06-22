@@ -7,12 +7,14 @@
 #ifndef TVM_TL_OP_OP_H_
 #define TVM_TL_OP_OP_H_
 
-// Dependencies for operators
-#include "support/check.h"
 #include <array>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
+
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/op.h>
 #include <tvm/target/target.h>
@@ -20,16 +22,12 @@
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/op_attr_types.h>
 #include <tvm/tirx/stmt.h>
-#include <utility>
-#include <vector>
 
 #include "../layout/layout.h"
+#include "support/check.h"
 
 namespace tvm {
 namespace tl {
-
-using namespace tirx;
-using namespace ffi;
 
 using AddWorkspaceCallback = std::function<PrimExpr(int, DataType)>;
 // Allocate a compiler-generated shared mbarrier slot. The optional hint names
@@ -37,12 +35,12 @@ using AddWorkspaceCallback = std::function<PrimExpr(int, DataType)>;
 // the same buffer and may ignore the hint.
 using AllocMBarrierCallback =
     std::function<int(int arrive_count, std::optional<std::string> name)>;
-using UpdateBarrierArriveCallback = std::function<void(Var, PrimExpr)>;
+using UpdateBarrierArriveCallback = std::function<void(tirx::Var, PrimExpr)>;
 // Record a minimum shared-memory base alignment (bytes) required for the
 // buffer backed by the given data Var (e.g. TMA/MMA swizzle constraints).
-using RequireSmemAlignmentCallback = std::function<void(Var, int)>;
-using LayoutMap = Map<Buffer, Layout>;
-using BufferMap = Map<Var, Buffer>;
+using RequireSmemAlignmentCallback = std::function<void(tirx::Var, int)>;
+using LayoutMap = ffi::Map<tirx::Buffer, Layout>;
+using BufferMap = ffi::Map<tirx::Var, tirx::Buffer>;
 
 enum AccessMask : int {
   kAccessRead = 1,
@@ -51,18 +49,18 @@ enum AccessMask : int {
 };
 
 struct AccessRegion {
-  BufferRegion region;
+  tirx::BufferRegion region;
   int access_mask{kAccessReadWrite};
 };
 
 struct AccessRegions {
-  Array<BufferRegion> reads;
-  Array<BufferRegion> writes;
+  ffi::Array<tirx::BufferRegion> reads;
+  ffi::Array<tirx::BufferRegion> writes;
 };
 
 inline void AppendAccessRegionByMask(const AccessRegion &access,
-                                     Array<BufferRegion> *reads,
-                                     Array<BufferRegion> *writes) {
+                                     ffi::Array<tirx::BufferRegion> *reads,
+                                     ffi::Array<tirx::BufferRegion> *writes) {
   if (!access.region.defined()) {
     return;
   }
@@ -97,12 +95,12 @@ inline const char *InferLevelToString(InferLevel level) {
 struct LowerArgs {
   Target target;
   Range thread_bounds;
-  Var thread_var;
+  tirx::Var thread_var;
   LayoutMap layout_map;
-  Map<Buffer, Buffer> buffer_remap;
+  ffi::Map<tirx::Buffer, tirx::Buffer> buffer_remap;
   // Map from Bind variable to its bound expression, for resolving
   // fragment buffer accesses through Bind values
-  Map<Var, PrimExpr> bind_var_to_expr;
+  ffi::Map<tirx::Var, PrimExpr> bind_var_to_expr;
   // Fallback mbarrier parity for ops that do not carry an explicit
   // tl.pipeline_mbar_phase_expr annotation. LowerTileOp derives this from the
   // nearest enclosing serial loop so non-pipelined TMA loops still alternate
@@ -111,7 +109,7 @@ struct LowerArgs {
   // Pointer to the shared.barrier buffer for compiler-generated mbarriers.
   // Points to the LowerTileOpPass member so copy.cc sees the buffer
   // even when created lazily by the alloc_mbarrier callback.
-  Optional<Buffer> *mbarrier_buffer = nullptr;
+  ffi::Optional<tirx::Buffer> *mbarrier_buffer = nullptr;
   // Product of cluster_dims (from block annotation). Defaults to 1 (no
   // cluster). Used by TMA copy lowering to scale expect_tx bytes for cluster
   // barriers.
@@ -136,10 +134,10 @@ struct LayoutInferArgs {
   LayoutMap layout_map;
   arith::Analyzer *analyzer;
   bool buffer_oob = false;
-  Map<Buffer, Buffer> buffer_remap;
+  ffi::Map<tirx::Buffer, tirx::Buffer> buffer_remap;
   // Map from Bind variable to its bound expression, for resolving
   // fragment buffer accesses through Bind values
-  Map<Var, PrimExpr> bind_var_to_expr;
+  ffi::Map<tirx::Var, PrimExpr> bind_var_to_expr;
   // Whether the current TileOp is nested inside a pipelined loop
   // (i.e. a surrounding loop annotated with num_stages > 0).
   bool in_pipeline = false;
@@ -147,9 +145,10 @@ struct LayoutInferArgs {
 
 class TileOperator;
 
-class TileOperatorNode : public Object {
+class TileOperatorNode : public ffi::Object {
 public:
-  virtual Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const = 0;
+  virtual tirx::Stmt Lower(const LowerArgs &T,
+                           arith::Analyzer *analyzer) const = 0;
 
   virtual LayoutMap InferLayout(const LayoutInferArgs &T,
                                 InferLevel level) const = 0;
@@ -168,25 +167,25 @@ public:
     access_regions_ = std::move(access_regions);
   }
 
-  TVM_FFI_DECLARE_OBJECT_INFO("tl.TileOperator", TileOperatorNode, Object);
+  TVM_FFI_DECLARE_OBJECT_INFO("tl.TileOperator", TileOperatorNode, ffi::Object);
 
 protected:
   std::vector<AccessRegion> access_regions_;
 };
 
-class TileOperator : public ObjectRef {
+class TileOperator : public ffi::ObjectRef {
 public:
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(TileOperator, ObjectRef,
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(TileOperator, ffi::ObjectRef,
                                              TileOperatorNode);
 };
 
-Var GetVarFromAccessPtr(const PrimExpr &expr);
+tirx::Var GetVarFromAccessPtr(const PrimExpr &expr);
 
-TileOperator ParseOperator(Call call);
-TileOperator ParseOperator(Stmt stmt);
+TileOperator ParseOperator(tirx::Call call);
+TileOperator ParseOperator(tirx::Stmt stmt);
 
-using OpBuilderFunc =
-    TypedFunction<TileOperator(Array<PrimExpr>, Map<String, ObjectRef>)>;
+using OpBuilderFunc = ffi::TypedFunction<TileOperator(
+    ffi::Array<PrimExpr>, ffi::Map<ffi::String, ffi::ObjectRef>)>;
 
 #define TIR_REGISTER_TL_TILE_OP(Entry, OpName)                                 \
   const Op &Entry::Get() {                                                     \
@@ -194,10 +193,11 @@ using OpBuilderFunc =
     return op;                                                                 \
   }                                                                            \
   TVM_REGISTER_OP("tl.tileop." #OpName)                                        \
-      .set_attr<TScriptPrinterName>("TScriptPrinterName", #OpName)             \
+      .set_attr<tirx::TScriptPrinterName>("TScriptPrinterName", #OpName)       \
       .set_attr<OpBuilderFunc>(                                                \
           "TLOpBuilder",                                                       \
-          [](Array<PrimExpr> args, Map<String, ObjectRef> annotations) {       \
+          [](ffi::Array<PrimExpr> args,                                        \
+             ffi::Map<ffi::String, ffi::ObjectRef> annotations) {              \
             return Entry(args, annotations);                                   \
           })
 
