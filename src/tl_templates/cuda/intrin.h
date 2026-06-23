@@ -91,7 +91,7 @@ template <int thread_extent> TL_DEVICE bool tl_shuffle_elect() {
   // in the entire thread block", i.e., the leader of the first warp of the
   // block.
   if constexpr (thread_extent == 0) {
-    // cutlass::canonical_warp_idx_sync():
+    // cutlass::canonical_warp_idx():
     //   Returns the warp ID within the thread block in a "canonical" way
     //   (0 for the first warp, 1 for the second, ...).
     // cute::elect_one_sync():
@@ -100,26 +100,25 @@ template <int thread_extent> TL_DEVICE bool tl_shuffle_elect() {
     // The condition ensures that:
     //   (1) We are in warp 0 of the block.
     //   (2) We are the elected lane in this warp.
-    return cutlass::canonical_warp_idx_sync() == 0 && cute::elect_one_sync();
+    // NOTE: we prefer canonical_warp_idx to canonical_warp_idx_sync here,
+    //       because the latter uses shfl.sync to broadcast the value from lane
+    //       0 to the whole warp to ensure that ptxas knows it is warp-uniform,
+    //       which helps the register allocator to assign the value to a uniform
+    //       register. However, shfl.sync is dispatched to the LSU pipe, causing
+    //       contention with other SMEM traffic, which can cause serious
+    //       performance degradation in SMEM-intensive kernels.
+    //       Here, we use elect.sync to inform ptxas that we are executing this
+    //       with only one thread, so we do not need shfl.sync to make it
+    //       warp-uniform.
+    return cute::elect_one_sync() && cutlass::canonical_warp_idx() == 0;
   } else if constexpr (thread_extent == 32) {
     return cute::elect_one_sync();
   }
   // General case: thread_extent != 0
-  // (threadIdx.x / 32) is the warp index in the block.
-  // (thread_extent / 32) is the number of warps in one group of size
-  // thread_extent. We take warp_id % num_warps_in_group to get the warp's index
-  // within the group.
-  // __shfl_sync(mask, value, srcLane): broadcast 'value' from srcLane to all
-  // lanes in the warp. Here it broadcasts the group-local warp index from lane
-  // 0. Comparing to 0 selects only the group's warp 0.
-  return __shfl_sync(0xffffffff, // full warp mask
-                     (threadIdx.x / 32) %
-                         (thread_extent / 32), // warp index within group
-                     0                         // take the value from lane 0
-                     ) == 0 &&
-         // Within that group leader warp, elect exactly one lane (typically
-         // lane 0) to be the single representative for the group.
-         cute::elect_one_sync();
+  // We select warps with multiple of (thread_extent / 32) warp IDs.
+  // NOTE: we use canonical_warp_idx for the same reason as above.
+  return cute::elect_one_sync() &&
+         (cutlass::canonical_warp_idx() % (thread_extent / 32)) == 0;
 }
 
 template <uint32_t RegCount> TL_DEVICE void warpgroup_reg_alloc() {
