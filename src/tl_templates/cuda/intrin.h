@@ -86,7 +86,6 @@ TL_DEVICE void warpgroup_fence_operand(float *regs, int count) {
 //                  within which we want to elect exactly ONE representative
 //                  thread.
 template <int thread_extent> TL_DEVICE bool tl_shuffle_elect() {
-  static_assert(thread_extent % 32 == 0);
   // Special case: thread_extent == 0 means "elect exactly one thread
   // in the entire thread block", i.e., the leader of the first warp of the
   // block.
@@ -113,12 +112,14 @@ template <int thread_extent> TL_DEVICE bool tl_shuffle_elect() {
     return cute::elect_one_sync() && cutlass::canonical_warp_idx() == 0;
   } else if constexpr (thread_extent == 32) {
     return cute::elect_one_sync();
+  } else {
+    // General case: thread_extent != 0
+    // We select warps with multiple of (thread_extent / 32) warp IDs.
+    // NOTE: we use canonical_warp_idx for the same reason as above.
+    static_assert(thread_extent % 32 == 0);
+    return cute::elect_one_sync() &&
+           (cutlass::canonical_warp_idx() % (thread_extent / 32)) == 0;
   }
-  // General case: thread_extent != 0
-  // We select warps with multiple of (thread_extent / 32) warp IDs.
-  // NOTE: we use canonical_warp_idx for the same reason as above.
-  return cute::elect_one_sync() &&
-         (cutlass::canonical_warp_idx() % (thread_extent / 32)) == 0;
 }
 
 template <uint32_t RegCount> TL_DEVICE void warpgroup_reg_alloc() {
