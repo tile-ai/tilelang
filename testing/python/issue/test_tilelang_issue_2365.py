@@ -1,6 +1,5 @@
 import tilelang
 import tilelang.language as T
-import torch
 
 M, N, K = 128, 128, 33  # K = BLOCK_K + 1 -> 1-element residual K-tile
 BM, BN, BK = 64, 64, 32
@@ -20,17 +19,16 @@ def main(A: T.Tensor((M, K), "float16"), B: T.Tensor((K, N), "float16"), C: T.Te
         T.copy(Cl, C[by * BM, bx * BN])
 
 
-tilelang.disable_cache()
-kernel = tilelang.compile(
-    main,
-    out_idx=[2],
-    execution_backend="cython",
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    },
-)  # crashes here
-a = torch.randn(M, K, device="cuda", dtype=torch.float16)
-b = torch.randn(K, N, device="cuda", dtype=torch.float16)
-c = kernel(a, b)
-print("ok:", torch.allclose(c, a.float() @ b.float(), rtol=1e-2, atol=1e-1))
+def test_issue_2365():
+    tilelang.compile(
+        main,
+        out_idx=[2],
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        },
+    )  # crashes here
+
+
+if __name__ == "__main__":
+    test_issue_2365()
