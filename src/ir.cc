@@ -382,7 +382,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
   refl::GlobalDef()
       .def("tl.WarpSpecialize", WarpSpecialize)
-      .def("tl.SideEffect", SideEffect);
+      .def("tl.SideEffect", tirx::SideEffect);
   KernelLaunchFrameNode::RegisterReflection();
   WarpSpecializeFrameNode::RegisterReflection();
 }

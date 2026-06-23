@@ -187,7 +187,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
     def _determinate_swizzle_mode(self, buffer, layout: Layout) -> SwizzleMode:
         buffer = self._as_buffer(buffer)
-        # same behavior to src/layout/gemm_layouts.cc::makeGemmABLayoutHopper
+        # same behavior to src/layout/gemm_layouts.cc::MakeGemmABLayoutHopper
         if layout is None or layout.is_equal(make_linear_layout(buffer)):
             return SwizzleMode.NONE
         elif layout.is_equal(make_quarter_bank_swizzled_layout(buffer)):

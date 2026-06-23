@@ -33,8 +33,9 @@ public:
         .def_ro("dst_range", &TransposeNode::dst_range);
   }
 
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
-  LayoutMap InferLayout(const LayoutInferArgs &T,
+  Stmt Lower(const LowerArgs &lower_args,
+             arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
   TileOperator Clone() const override;
 
@@ -61,7 +62,7 @@ struct TransposeImpl {
   const char *name;
   TransposeTargetPredicate match_target;
 
-  Stmt (*lower)(const TransposeNode &op, const LowerArgs &T,
+  Stmt (*lower)(const TransposeNode &op, const LowerArgs &lower_args,
                 arith::Analyzer *analyzer);
 };
 

@@ -76,7 +76,7 @@ void BinderAddAssert(arith::Analyzer *ana, PrimExpr cond,
 }
 
 std::vector<Var>
-TVMFFIABIBuilder::getUndefVars(const std::vector<PrimExpr> &args) {
+TVMFFIABIBuilder::GetUndefVars(const std::vector<PrimExpr> &args) {
   std::unordered_set<const VarNode *> visit;
   std::vector<Var> res;
   for (const auto &arg : args) {
@@ -125,7 +125,7 @@ bool TVMFFIABIBuilder::BindNullable(const PrimExpr &arg, const PrimExpr &value,
   } else {
     // 2. complex binding expr = value
     //  get undefined variables
-    auto undefs = Array<Var>(getUndefVars({arg}));
+    auto undefs = Array<Var>(GetUndefVars({arg}));
     if (!undefs.empty()) {
       // if value is not integer, such as float, we are unable to solve it
       if (!value.dtype().is_int() && !value.dtype().is_uint()) {

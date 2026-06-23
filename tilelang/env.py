@@ -322,7 +322,6 @@ class Environment:
     TILELANG_DISABLE_CACHE = EnvVar(
         "TILELANG_DISABLE_CACHE", "0"
     )  # disable kernel cache, usually for unit testing / debugging, high priority
-    TILELANG_CLEAR_CACHE = EnvVar("TILELANG_CLEAR_CACHE", "0")  # DEPRECATED! clear cache automatically if set
     TILELANG_CLEANUP_TEMP_FILES = EnvVar(
         "TILELANG_CLEANUP_TEMP_FILES", "1"
     )  # cleanup temporary compiler files/dirs after compilation (set to 0 to keep for debugging)

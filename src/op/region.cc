@@ -70,11 +70,12 @@ bool RegionOpNode::IsFullRegion() const {
   return true;
 }
 
-Stmt RegionOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+Stmt RegionOpNode::Lower(const LowerArgs &lower_args,
+                         arith::Analyzer *analyzer) const {
   return Evaluate(0);
 }
 
-LayoutMap RegionOpNode::InferLayout(const LayoutInferArgs &T,
+LayoutMap RegionOpNode::InferLayout(const LayoutInferArgs &layout_args,
                                     InferLevel level) const {
   return {};
 }

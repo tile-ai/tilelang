@@ -62,6 +62,13 @@ compiler_internals/tensor_checks
 
 :::{toctree}
 :maxdepth: 1
+:caption: DEVELOPER GUIDE
+
+developer_guide/cpp_style
+:::
+
+:::{toctree}
+:maxdepth: 1
 :caption: API Reference
 
 autoapi/tilelang/index

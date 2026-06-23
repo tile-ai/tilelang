@@ -66,13 +66,11 @@ struct PipelineStageInfo {
       -1; // Initialized to -1, indicating no consumers found yet
 
 public:
-  bool is_first_stage() const { return copy_stage || producer_for_copy; }
-  bool is_copy_stage() const { return copy_stage; }
-  bool is_tma_copy() const { return tma_copy; }
-  bool is_producer_for_copy() const { return producer_for_copy; }
-  bool is_last_use_stmt_index_valid() const {
-    return last_use_stmt_index != -1;
-  }
+  bool IsFirstStage() const { return copy_stage || producer_for_copy; }
+  bool IsCopyStage() const { return copy_stage; }
+  bool IsTmaCopy() const { return tma_copy; }
+  bool IsProducerForCopy() const { return producer_for_copy; }
+  bool IsLastUseStmtIndexValid() const { return last_use_stmt_index != -1; }
 };
 
 class PipelineStageAnalyzer {
@@ -128,10 +126,10 @@ public:
     if (pinfo.conditional_execution) {
       return false;
     }
-    if (pinfo.is_tma_copy()) {
+    if (pinfo.IsTmaCopy()) {
       return false;
     }
-    return pinfo.is_copy_stage();
+    return pinfo.IsCopyStage();
   }
 
   bool IsPureCopyStmt(const Stmt &stmt) const {
@@ -271,7 +269,7 @@ public:
   void AnalyzeCopyLastUse(
       std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
     for (auto &pinfo : *pipeline_stage_infos) {
-      if (!pinfo.is_first_stage()) {
+      if (!pinfo.IsFirstStage()) {
         continue;
       }
 
@@ -287,7 +285,7 @@ public:
           }
         }
 
-        if (!pinfo.is_copy_stage()) {
+        if (!pinfo.IsCopyStage()) {
           continue;
         }
 
@@ -339,7 +337,7 @@ public:
     CopyStageDependencyReadsManager copy_stage_dependency_reads_mgr;
 
     for (const auto &pinfo : *pipeline_stage_infos) {
-      if (pinfo.is_copy_stage()) {
+      if (pinfo.IsCopyStage()) {
         for (const BufferRegion &read : pinfo.reads) {
           copy_stage_dependency_reads_mgr.AddUnique(read);
         }
@@ -350,7 +348,7 @@ public:
     size_t iter_count = 0;
 
     for (auto &pinfo : *pipeline_stage_infos) {
-      if (!pinfo.is_copy_stage()) {
+      if (!pinfo.IsCopyStage()) {
         continue;
       }
       auto original_copy_stmt_index = pinfo.original_stmt_index;
@@ -358,7 +356,7 @@ public:
       while (updated) {
         updated = false;
         for (auto &pinfo_inner : *pipeline_stage_infos) {
-          if (pinfo_inner.is_copy_stage()) {
+          if (pinfo_inner.IsCopyStage()) {
             continue;
           }
           if (pinfo_inner.original_stmt_index >= original_copy_stmt_index) {
@@ -372,7 +370,7 @@ public:
               break;
             }
           }
-          if (should_prepare && !pinfo_inner.is_producer_for_copy()) {
+          if (should_prepare && !pinfo_inner.IsProducerForCopy()) {
             pinfo_inner.producer_for_copy = true;
             updated = true;
           }
@@ -425,7 +423,7 @@ public:
         producer->producer_for_copy = true;
         producer->last_use_stmt_index = consumer_last_use;
         changed = true;
-      } else if (!producer->is_last_use_stmt_index_valid() ||
+      } else if (!producer->IsLastUseStmtIndexValid() ||
                  consumer_last_use < producer->last_use_stmt_index) {
         producer->last_use_stmt_index = consumer_last_use;
         changed = true;
@@ -439,8 +437,7 @@ public:
            consumer_idx < static_cast<int>(pipeline_stage_infos->size());
            ++consumer_idx) {
         const auto &consumer = (*pipeline_stage_infos)[consumer_idx];
-        if (!(consumer.is_first_stage() &&
-              consumer.is_last_use_stmt_index_valid())) {
+        if (!(consumer.IsFirstStage() && consumer.IsLastUseStmtIndexValid())) {
           continue;
         }
         for (const VarNode *var : consumer.scalar_uses) {
@@ -449,7 +446,7 @@ public:
             continue;
           }
           auto &producer = (*pipeline_stage_infos)[it->second];
-          if (producer.is_copy_stage()) {
+          if (producer.IsCopyStage()) {
             continue;
           }
           updated |= update_producer(&producer, consumer.last_use_stmt_index);
@@ -580,7 +577,7 @@ public:
       ClassifyCopyLikeStage(pipeline_stmts[i], &pinfo);
       pinfo.order = static_cast<int>(order_array[i]->value);
       pinfo.stage = static_cast<int>(stage_array[i]->value);
-      if (!pinfo.is_copy_stage() && !pinfo.conditional_execution &&
+      if (!pinfo.IsCopyStage() && !pinfo.conditional_execution &&
           pinfo.stage == 0) {
         bool reads_global = false;
         bool writes_shared = false;
