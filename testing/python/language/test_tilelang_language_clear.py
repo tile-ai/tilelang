@@ -81,5 +81,27 @@ def test_shared_fill_cast_zero_uses_st_bulk():
     assert torch.allclose(out, torch.zeros_like(out))
 
 
+@tilelang.testing.requires_cuda
+def test_fill_int8_negative():
+    M, N = 8, 128
+
+    def program(value):
+        @T.prim_func
+        def main(out: T.Tensor((M, N), "int8")):
+            with T.Kernel(1, threads=128):
+                smem = T.alloc_shared((M, N), "int8")
+                T.fill(smem, value)
+                T.copy(smem, out)
+
+        return main
+
+    for value in (-7, -128, -1, 5):
+        kernel = tilelang.compile(program(value), out_idx=[0])
+        out = kernel()
+        torch.cuda.synchronize()
+        ref = torch.full((M, N), value, dtype=torch.int8, device="cuda")
+        torch.testing.assert_close(out, ref)
+
+
 if __name__ == "__main__":
     test_matmul()
