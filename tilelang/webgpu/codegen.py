@@ -7,6 +7,7 @@ register_device_codegen(
     "webgpu",
     DeviceCodegen(
         "webgpu",
+        build=global_func_device_codegen("target.build.webgpu"),
         build_without_compile=global_func_device_codegen("target.build.webgpu"),
     ),
     override=True,

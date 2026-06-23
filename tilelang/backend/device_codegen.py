@@ -62,6 +62,7 @@ def register_device_codegen(
 
 def register_lazy_device_codegen(target_kind: str, import_path: str) -> None:
     _LAZY_DEVICE_CODEGENS[target_kind] = import_path
+    _LOADED_DEVICE_CODEGENS.discard(target_kind)
 
 
 def _ensure_device_codegens_loaded(target_kind: str) -> None:

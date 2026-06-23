@@ -8,6 +8,7 @@ from tilelang.backend.device_codegen import (
     DeviceCodegen,
     allowed_device_codegens_for_target,
     register_device_codegen,
+    register_lazy_device_codegen,
     resolve_device_codegen,
 )
 
@@ -45,6 +46,7 @@ def test_device_codegen_invokes_registered_global_func(monkeypatch):
     cuda_target = Target("cuda")
     cutedsl_target = _cutedsl_target()
     llvm_target = Target("llvm")
+    webgpu_target = Target("webgpu")
 
     assert resolve_device_codegen(cuda_target).lower("mod", cuda_target, compile_device=False) == (
         "built:target.build.tilelang_cuda_without_compile"
@@ -53,9 +55,11 @@ def test_device_codegen_invokes_registered_global_func(monkeypatch):
         "built:target.build.tilelang_cutedsl"
     )
     assert resolve_device_codegen(llvm_target).lower("mod", llvm_target, compile_device=True) == "built:target.build.llvm"
+    assert resolve_device_codegen(webgpu_target).lower("mod", webgpu_target, compile_device=True) == "built:target.build.webgpu"
     assert calls[0][0] == "target.build.tilelang_cuda_without_compile"
     assert calls[1][0] == "target.build.tilelang_cutedsl"
     assert calls[2][0] == "target.build.llvm"
+    assert calls[3][0] == "target.build.webgpu"
 
 
 def test_c_device_codegen_preserves_compile_unsupported_behavior():
@@ -89,4 +93,52 @@ def test_device_codegen_registry_is_extensible():
         else:
             registry._DEVICE_CODEGENS[target_kind] = old_codegen_specs
         if not was_loaded:
+            registry._LOADED_DEVICE_CODEGENS.discard(target_kind)
+
+
+def test_lazy_device_codegen_registration_after_prior_miss(monkeypatch):
+    from tilelang.backend import device_codegen as registry
+
+    target_kind = "llvm"
+    target = Target(target_kind)
+    old_codegen_specs = registry._DEVICE_CODEGENS.get(target_kind)
+    old_lazy_import = registry._LAZY_DEVICE_CODEGENS.get(target_kind)
+    was_loaded = target_kind in registry._LOADED_DEVICE_CODEGENS
+    imports: list[str] = []
+
+    def fake_import_module(import_path: str):
+        imports.append(import_path)
+        register_device_codegen(
+            target_kind,
+            DeviceCodegen("late", build_without_compile=lambda mod, target: mod),
+            override=True,
+        )
+
+    monkeypatch.setattr(registry, "import_module", fake_import_module)
+    try:
+        registry._DEVICE_CODEGENS[target_kind] = []
+        registry._LAZY_DEVICE_CODEGENS.pop(target_kind, None)
+        registry._LOADED_DEVICE_CODEGENS.discard(target_kind)
+
+        with pytest.raises(ValueError, match="No device codegen registered"):
+            resolve_device_codegen(target)
+        assert target_kind in registry._LOADED_DEVICE_CODEGENS
+
+        register_lazy_device_codegen(target_kind, "unit.codegen")
+
+        assert target_kind not in registry._LOADED_DEVICE_CODEGENS
+        assert resolve_device_codegen(target).name == "late"
+        assert imports == ["unit.codegen"]
+    finally:
+        if old_codegen_specs is None:
+            registry._DEVICE_CODEGENS.pop(target_kind, None)
+        else:
+            registry._DEVICE_CODEGENS[target_kind] = old_codegen_specs
+        if old_lazy_import is None:
+            registry._LAZY_DEVICE_CODEGENS.pop(target_kind, None)
+        else:
+            registry._LAZY_DEVICE_CODEGENS[target_kind] = old_lazy_import
+        if was_loaded:
+            registry._LOADED_DEVICE_CODEGENS.add(target_kind)
+        else:
             registry._LOADED_DEVICE_CODEGENS.discard(target_kind)
