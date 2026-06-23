@@ -315,6 +315,9 @@ void CodeGenTileLangMetal::PrintVecElemStore(const std::string &vec, DataType t,
   if (t.is_float16() && t.lanes() > 4) {
     stream << "((thread half*)(&" << vec << "))[" << i << "] = " << value
            << ";\n";
+  } else if (t.is_bfloat16() && t.lanes() > 4) {
+    stream << "((thread bfloat*)(&" << vec << "))[" << i << "] = " << value
+           << ";\n";
   } else {
     stream << vec << "[" << i << "]"
            << " = " << value << ";\n";
