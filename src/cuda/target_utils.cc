@@ -101,11 +101,11 @@ bool TargetHasLdmatrix(Target target) {
   return arch >= 75;
 }
 
-bool TargetHasStmatrix(Target target) {
+bool TargetHasStmatrix(Target target, bool is_m16n8) {
   if (!TargetIsCuda(target))
     return false;
   int arch = GetCudaArchInt(target);
-  return arch >= 90;
+  return is_m16n8 ? arch >= 100 : arch >= 90;
 }
 
 bool TargetHasTmem(Target target) {
@@ -258,8 +258,15 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](Target target) { return TargetCudaGetWarpSize(target); })
       .def("tl.TargetHasLdmatrix",
            [](Target target) { return TargetHasLdmatrix(target); })
-      .def("tl.TargetHasStmatrix",
-           [](Target target) { return TargetHasStmatrix(target); })
+      .def_packed(
+          "tl.TargetHasStmatrix",
+          [](ffi::PackedArgs args, ffi::Any *ret) {
+            ICHECK(args.size() == 1 || args.size() == 2)
+                << "TargetHasStmatrix expects target and optional is_m16n8";
+            Target target = args[0].cast<Target>();
+            bool is_m16n8 = args.size() == 2 ? args[1].cast<bool>() : false;
+            *ret = TargetHasStmatrix(target, is_m16n8);
+          })
       .def("tl.TargetHasBulkCopy",
            [](Target target) { return TargetHasBulkCopy(target); });
 }

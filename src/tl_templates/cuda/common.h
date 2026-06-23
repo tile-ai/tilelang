@@ -184,6 +184,13 @@ TL_DEVICE unsigned int make_uint(unsigned char x0, unsigned char x1,
   return (x3 << 24) | (x2 << 16) | (x1 << 8) | x0;
 }
 
+template <typename T> TL_DEVICE unsigned int pack_b8x4(T x0, T x1, T x2, T x3) {
+  return make_uint(*reinterpret_cast<unsigned char *>(&x0),
+                   *reinterpret_cast<unsigned char *>(&x1),
+                   *reinterpret_cast<unsigned char *>(&x2),
+                   *reinterpret_cast<unsigned char *>(&x3));
+}
+
 // Pack eight char values.
 TL_DEVICE uint2 make_uint2(unsigned char x0, unsigned char x1, unsigned char x2,
                            unsigned char x3, unsigned char y0, unsigned char y1,

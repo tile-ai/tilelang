@@ -2216,6 +2216,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << ss.str();
     this->stream << ");\n";
   };
+  auto print_extern_call_expr = [&](std::ostream &os, std::string name,
+                                    size_t start = 0, size_t end = 0) {
+    os << name << "(";
+    for (size_t i = start; i < op->args.size() - end; i++) {
+      if (i > start)
+        os << ", ";
+      os << this->PrintExpr(op->args[i]);
+    }
+    os << ")";
+  };
   if (op->op.same_as(tl::max_nan()) || op->op.same_as(tl::min_nan())) {
     ICHECK_EQ(op->args.size(), 2);
     const bool is_max = op->op.same_as(tl::max_nan());
@@ -2497,10 +2507,17 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::ptx_stmatrix())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
-    std::string func_name = "tl::ptx_stmatrix_x" + std::to_string(num);
+    std::string shape = "m8n8";
+    bool is_shape_encoded =
+        op->args.size() >= 4 && op->args.back().as<StringImmNode>();
+    if (is_shape_encoded) {
+      shape = Downcast<StringImm>(op->args.back())->value;
+    }
+    std::string func_name =
+        "tl::ptx_stmatrix_" + shape + "_x" + std::to_string(num);
     if (trans == 1)
       func_name += "_trans";
-    print_extern_call_stmt(func_name, 2);
+    print_extern_call_stmt(func_name, 2, is_shape_encoded ? 1 : 0);
   } else if (op->op.same_as(tl::fence_proxy_async())) {
     print_extern_call_stmt("tl::fence_proxy_async");
   } else if (op->op.same_as(tl::tma_store_arrive())) {
@@ -2554,6 +2571,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::pack_b16())) {
     os << "__pack_half2(" << this->PrintExpr(op->args[0]) << ", "
        << this->PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::pack_b8x4())) {
+    print_extern_call_expr(os, "tl::pack_b8x4");
   } else if (op->op.same_as(tl::sync_grid())) {
     this->need_cooperative_groups_ = true;
     this->PrintIndent();

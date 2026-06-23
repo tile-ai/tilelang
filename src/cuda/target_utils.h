@@ -25,7 +25,7 @@ bool TargetIsSM120(Target target);
 bool TargetCudaHasAsyncCopy(Target target);
 int TargetCudaGetWarpSize(Target target);
 bool TargetHasLdmatrix(Target target);
-bool TargetHasStmatrix(Target target);
+bool TargetHasStmatrix(Target target, bool is_m16n8 = false);
 bool TargetHasTmem(Target target);
 bool TargetHasBulkCopy(Target target);
 bool TargetSupportVectorize256(Target target);

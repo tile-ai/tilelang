@@ -405,6 +405,9 @@ TIR_DEFINE_TL_BUILTIN(wait_wgmma)
 TIR_DEFINE_TL_BUILTIN(pack_b16).set_num_inputs(2).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 
+TIR_DEFINE_TL_BUILTIN(pack_b8x4).set_num_inputs(4).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
 TIR_DEFINE_TL_BUILTIN(cluster_arrive_relaxed)
     .set_num_inputs(0)
     .set_attr<TCallEffectKind>("TCallEffectKind",

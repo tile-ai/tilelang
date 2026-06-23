@@ -993,10 +993,16 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::ptx_stmatrix())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
+    bool is_shape_encoded =
+        op->args.size() >= 4 && op->args.back().as<StringImmNode>();
+    if (is_shape_encoded) {
+      ICHECK_EQ(Downcast<StringImm>(op->args.back())->value, "m8n8")
+          << "CuTeDSL stmatrix codegen only supports m8n8";
+    }
     std::string func_name = "tl.ptx_stmatrix_x" + std::to_string(num);
     if (trans == 1)
       func_name += "_trans";
-    print_extern_call_stmt(func_name, 2);
+    print_extern_call_stmt(func_name, 2, is_shape_encoded ? 1 : 0);
   } else if (op->op.same_as(tl::fence_proxy_async())) {
     print_extern_call_stmt("tl.fence_proxy_async");
   } else if (op->op.same_as(tl::tma_store_arrive())) {
