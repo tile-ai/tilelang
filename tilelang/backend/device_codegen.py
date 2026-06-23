@@ -1,3 +1,5 @@
+"""Device codegen registry shared by backend packages."""
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -14,6 +16,8 @@ TargetPredicate = Callable[[Target], bool]
 
 
 def global_func_device_codegen(global_func_name: str) -> DeviceCodegenFunc:
+    """Create a device codegen callback backed by a TVM global function."""
+
     def build(mod: IRModule, target: Target) -> IRModule:
         return tvm.ffi.get_global_func(global_func_name)(mod, target)
 
@@ -51,6 +55,8 @@ def register_device_codegen(
     *,
     override: bool = False,
 ) -> DeviceCodegen:
+    """Register a device codegen entry for a target kind."""
+
     codegens = _DEVICE_CODEGENS.setdefault(target_kind, [])
     if override:
         codegens[:] = [item for item in codegens if item.name != codegen.name]
@@ -61,6 +67,8 @@ def register_device_codegen(
 
 
 def register_lazy_device_codegen(target_kind: str, import_path: str) -> None:
+    """Register a backend module to import when its target kind is first used."""
+
     _LAZY_DEVICE_CODEGENS[target_kind] = import_path
     _LOADED_DEVICE_CODEGENS.discard(target_kind)
 
@@ -81,14 +89,22 @@ def _matching_device_codegens(target: Target) -> list[DeviceCodegen]:
 
 
 def allowed_device_codegens_for_target(target: Target) -> list[str]:
+    """Return matching device codegen names for a target."""
+
     return [codegen.name for codegen in _matching_device_codegens(target)]
 
 
+def _format_codegen_names(codegens: list[DeviceCodegen]) -> str:
+    names = [codegen.name for codegen in codegens]
+    return ", ".join(names) if names else "<none>"
+
+
 def resolve_device_codegen(target: Target) -> DeviceCodegen:
+    """Resolve a device codegen entry from a TVM target."""
+
     matches = _matching_device_codegens(target)
     if not matches:
         target_kind = target.kind.name
-        available = [codegen.name for codegen in _DEVICE_CODEGENS.get(target_kind, ())]
-        options = ", ".join(available) if available else "<none>"
+        options = _format_codegen_names(_DEVICE_CODEGENS.get(target_kind, []))
         raise ValueError(f"No device codegen registered for target '{target_kind}'. Available: {options}.")
     return matches[0]
