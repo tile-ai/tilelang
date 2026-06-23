@@ -16,6 +16,7 @@ from tilelang.transform import PassConfigKey
 from tilelang.engine.param import KernelParam, CompiledArtifact
 from tilelang.engine.semantic_check import PreLowerSemanticCheck
 from tilelang.backend.device_codegen import resolve_device_codegen
+from tilelang.backend.host_codegen import apply_host_codegen_hooks, resolve_host_codegen
 from tilelang.backend.target import determine_target
 from tilelang.backend.pass_pipeline import resolve_pipeline
 
@@ -217,17 +218,8 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target, target: Target | N
     combine_context_call = getattr(tirx.transform, "CombineContextCall", None)
     if combine_context_call is not None:
         host_mod = combine_context_call()(host_mod)
-    if target is not None and target.kind.name == "metal":
-        from tilelang.metal.transform import MarkHostMetalContext
-
-        host_mod = MarkHostMetalContext()(host_mod)
-    if target_host.kind.name == "llvm":
-        host_mod = tvm.ffi.get_global_func("target.build.llvm")(host_mod, target_host)
-    elif target_host.kind.name == "c":
-        host_mod = tvm.ffi.get_global_func("target.build.tilelang_c_host")(host_mod, target_host)
-    else:
-        raise ValueError(f"Target host {target_host.kind.name} is not supported")
-    return host_mod
+    host_mod = apply_host_codegen_hooks(host_mod, target_host, target)
+    return resolve_host_codegen(target_host).lower(host_mod, target_host)
 
 
 def _prepare_device_codegen_mod(device_mod: tvm.IRModule) -> tvm.IRModule:
