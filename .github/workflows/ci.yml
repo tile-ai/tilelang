@@ -61,6 +61,12 @@ jobs:
         run: |
           "${{ steps.setup-pylowest.outputs.python-path }}" -m compileall -q -f tilelang
 
+      - name: C++ API Style Audit (warning only)
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          "${{ steps.setup-pylowest.outputs.python-path }}" maint/scripts/audit_cpp_api_style.py --github-warnings --limit 20
+
       - name: Pre-commit Lint
         run: |
           if ! pipx run pre-commit run --all-files --color=always --show-diff-on-failure; then

@@ -323,6 +323,11 @@ interfaces, and backend/runtime shims may need exceptions. By default the audit
 excludes generated templates and runtime shim directories; use the script flags
 to include those areas when a cleanup explicitly targets them.
 
+CI runs the audit in warning-only mode so new findings are visible on pull
+requests without blocking unrelated work. Use local review to decide whether a
+warning should be fixed, suppressed with a narrow `NOLINT`, or left for a
+focused cleanup.
+
 ## Exceptions
 
 Generated kernel templates, CUDA/HIP runtime shims, and external API adapters

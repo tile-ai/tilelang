@@ -81,7 +81,7 @@ LayoutMap InferScanLayout(const ScanOpNode &op,
   LayoutMap result_map;
 
   auto make_linear_layout = [](const Buffer &buf) -> Layout {
-    return makeLinearLayout(buf->shape);
+    return MakeLinearLayout(buf->shape);
   };
 
   auto check_or_set_linear_layout = [&](const Buffer &buf) {

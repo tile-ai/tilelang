@@ -273,7 +273,7 @@ bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
   if (layout_map.count(shared_tensor)) {
     Layout existing =
         layout_map.Get(shared_tensor).value().as<Layout>().value();
-    Layout linear_layout = makeLinearLayout(shared_tensor->shape);
+    Layout linear_layout = MakeLinearLayout(shared_tensor->shape);
     shared_is_contiguous = StructuralEqual()(existing, linear_layout);
   }
 

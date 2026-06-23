@@ -125,7 +125,7 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
   ICHECK(N % k_n_per_warp == 0)
       << "N must be divisible by " << k_n_per_warp << ", but got " << N;
 
-  if (policy.isFullRow()) {
+  if (policy.IsFullRow()) {
     m_warp = num_warps;
     n_warp = 1;
     if (M % (m_warp * kMPerWarp) != 0) {
@@ -135,7 +135,7 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
       if (n_warp == 0)
         n_warp = 1;
     }
-  } else if (policy.isFullCol()) {
+  } else if (policy.IsFullCol()) {
     m_warp = 1;
     n_warp = num_warps;
     if (N % (n_warp * k_n_per_warp) != 0) {
@@ -145,7 +145,7 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
       if (m_warp == 0)
         m_warp = 1;
     }
-  } else if (policy.isSquare()) {
+  } else if (policy.IsSquare()) {
     int max_m_warps = M / kMPerWarp;
     float ideal_ratio = N > 0 ? static_cast<float>(M) / N : 1.0f;
 
@@ -201,7 +201,7 @@ std::pair<int, int> ComputeWgmmaWarpPartition(const GemmWarpPolicyNode &policy,
   m_warp = kGroup;
   n_warp = num_warps / m_warp;
 
-  if (policy.isFullRow()) {
+  if (policy.IsFullRow()) {
     for (int cand = num_warps; cand >= kGroup; cand -= kGroup) {
       if (M % (cand * kMPerWarp) == 0) {
         m_warp = cand;
@@ -209,7 +209,7 @@ std::pair<int, int> ComputeWgmmaWarpPartition(const GemmWarpPolicyNode &policy,
         break;
       }
     }
-  } else if (policy.isFullCol()) {
+  } else if (policy.IsFullCol()) {
     int cand_n = n_warp;
     if (N % (cand_n * kNPerWarp) != 0) {
       int max_n = N / kNPerWarp;
@@ -221,7 +221,7 @@ std::pair<int, int> ComputeWgmmaWarpPartition(const GemmWarpPolicyNode &policy,
         }
       }
     }
-  } else if (policy.isSquare()) {
+  } else if (policy.IsSquare()) {
     int max_m = M / kMPerWarp;
     int max_n = N / kNPerWarp;
 

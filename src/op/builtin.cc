@@ -52,7 +52,7 @@ TVM_REGISTER_PASS_CONFIG_OPTION(kDisableOutOfBoundWarning, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnableDumpIR, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDumpIRDir, ffi::String);
 
-DataType cuTensorMapType() { return DataType::UInt(8, 128); }
+DataType CuTensorMapType() { return DataType::UInt(8, 128); }
 
 #define TIR_DEFINE_TL_BUILTIN(OpName)                                          \
   const Op &OpName() {                                                         \

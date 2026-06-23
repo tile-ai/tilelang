@@ -252,7 +252,7 @@ private:
       // handling
       //    because they have consumers that depend on their data
       // 2. All Producer stages for copy stages.
-      if (pinfo.is_first_stage() && pinfo.is_last_use_stmt_index_valid()) {
+      if (pinfo.IsFirstStage() && pinfo.IsLastUseStmtIndexValid()) {
         continue;
       }
 
@@ -266,7 +266,7 @@ private:
       // This ensures copy operations are placed right before their final
       // consumer for optimal pipeline efficiency
       for (auto &pinfo_1 : pipeline_stage_infos) {
-        if ((pinfo_1.is_first_stage() &&
+        if ((pinfo_1.IsFirstStage() &&
              pinfo_1.last_use_stmt_index == pinfo.original_stmt_index)) {
           pinfo_1.order = order_idx++;
           pinfo_1.stage = 0; // Copy stages are typically assigned to stage 0
@@ -287,7 +287,7 @@ private:
       int copy_order_min = pipeline_stage_infos.size();
       int non_copy_order_max = 0;
       for (auto &pinfo : pipeline_stage_infos) {
-        if (pinfo.is_first_stage()) {
+        if (pinfo.IsFirstStage()) {
           copy_stage_cnt++;
           copy_order_min = std::min(copy_order_min, pinfo.order);
         } else {
@@ -302,7 +302,7 @@ private:
       for (auto &pinfo : pipeline_stage_infos) { // move copy to the beginning
         pinfo.order =
             (pinfo.order + copy_stage_at_end) % pipeline_stage_infos.size();
-        if (!pinfo.is_copy_stage() && !pinfo.is_producer_for_copy())
+        if (!pinfo.IsCopyStage() && !pinfo.IsProducerForCopy())
           pinfo.stage--;
       }
     }
@@ -349,9 +349,9 @@ private:
       tma_copies.reserve(pipeline_stage_infos.size());
       bool has_tma_copy = false;
       for (auto &pinfo : pipeline_stage_infos) {
-        bool is_tma_copy = pinfo.is_tma_copy();
-        has_tma_copy = has_tma_copy || is_tma_copy;
-        tma_copies.push_back(Integer(is_tma_copy ? 1 : 0));
+        bool IsTmaCopy = pinfo.IsTmaCopy();
+        has_tma_copy = has_tma_copy || IsTmaCopy;
+        tma_copies.push_back(Integer(IsTmaCopy ? 1 : 0));
       }
       if (has_tma_copy) {
         annotations.Set(kPipelineTmaCopies, Array<Integer>(tma_copies));

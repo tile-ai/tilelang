@@ -188,7 +188,7 @@ public:
       } else {
         String name = call->args[2].as<Var>().value()->name_hint;
         var = Var(name + "_desc",
-                  PointerType(PrimType(cuTensorMapType()), "grid_constant"));
+                  PointerType(PrimType(CuTensorMapType()), "grid_constant"));
         Call call_ref = GetRef<Call>(call);
         desc_map_[call_ref] = var;
         Array<PrimExpr> init_desc_args = MakeInitDescArgs(call_ref, var);

@@ -603,9 +603,9 @@ LayoutMap Copy::InferTMemLayout(const CopyNode &op,
     for (int num_useful_wgs = num_threads / WARPGROUP_SIZE; num_useful_wgs >= 1;
          --num_useful_wgs) {
       int num_useful_threads = num_useful_wgs * WARPGROUP_SIZE;
-      Tcgen05Meta meta = getTcgen05MetaLd_32dp32b();
+      Tcgen05Meta meta = GetTcgen05MetaLd32Dp32B();
       auto [is_success, tmem_coord2frag, num_chunks_each_wg] =
-          expandTcgen05Layout(
+          ExpandTcgen05Layout(
               meta, phy_col_bounds->max_value - phy_col_bounds->min_value + 1,
               num_useful_threads, row_dom, col_dom);
       (void)num_chunks_each_wg;
@@ -615,7 +615,7 @@ LayoutMap Copy::InferTMemLayout(const CopyNode &op,
       Fragment logical_coord2frag =
           Fragment(logical_coords, tmem_coord2frag->Forward(phy_indices),
                    tmem_coord2frag->ForwardThread(phy_indices, std::nullopt),
-                   make_itervar("rep", 1));
+                   MakeIterVar("rep", 1));
       results.Set(reg_buf, logical_coord2frag->BindThreadRange(
                                layout_args.thread_bounds));
       break;
@@ -680,10 +680,10 @@ LayoutMap Copy::InferBulkLayout(const CopyNode &op,
       const int64_t mat_continuous =
           *as_const_int(shared_tensor->shape[dim - 1]);
       Layout swizzle_layout_2d =
-          makeGemmABLayoutHopper(mat_stride, mat_continuous, mat_continuous,
+          MakeGemmABLayoutHopper(mat_stride, mat_continuous, mat_continuous,
                                  shared_tensor->dtype.bits(),
                                  /*k_inner=*/true);
-      if (StructuralEqual()(swizzle_layout_2d, makeLinearLayout(Array<PrimExpr>{
+      if (StructuralEqual()(swizzle_layout_2d, MakeLinearLayout(Array<PrimExpr>{
                                                    Integer(mat_stride),
                                                    Integer(mat_continuous)}))) {
         result_map.Set(shared_tensor, ComputeLinearLayout(shared_tensor));
@@ -1094,10 +1094,10 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &lower_args,
   IterVar row_var = loop_vars[loop_vars.size() - 2];
   PrimExpr local_layout_thread_map =
       FloorMod(local_layout->ForwardThread(local_indices, std::nullopt), 32);
-  PrimExpr matrix_8x8_thread_map = makeGemmFragment8x8()->ForwardThread(
+  PrimExpr matrix_8x8_thread_map = MakeGemmFragment8x8()->ForwardThread(
       {FloorMod(row_var, 8), FloorMod(col_var, 8)}, std::nullopt);
   PrimExpr matrix_8x8_thread_map_trans =
-      makeGemmFragment8x8Transposed()->ForwardThread(
+      MakeGemmFragment8x8Transposed()->ForwardThread(
           {FloorMod(row_var, 8), FloorMod(col_var, 8)}, std::nullopt);
   PrimExpr local_indices_flattened =
       local_tensor.OffsetOf(local_indices_transformed).back();
@@ -1316,7 +1316,7 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
     for (int num_useful_wgs = num_threads / WARPGROUP_SIZE; num_useful_wgs >= 1;
          num_useful_wgs--) {
       int num_useful_threads = num_useful_wgs * WARPGROUP_SIZE;
-      auto [is_success, target_frag, num_chunks_each_wg] = expandTcgen05Layout(
+      auto [is_success, target_frag, num_chunks_each_wg] = ExpandTcgen05Layout(
           meta, tmem_phy_col_extent, num_useful_threads, row_dom, col_dom);
       if (!is_success) {
         continue;
@@ -1384,15 +1384,15 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
   };
 
   if (is_ld) {
-    try_tcgen05_instruction(getTcgen05MetaLd_32dp32b());
-    try_tcgen05_instruction(getTcgen05MetaLd_32dp64b());
-    try_tcgen05_instruction(getTcgen05MetaLd_32dp128b());
-    try_tcgen05_instruction(getTcgen05MetaLd_32dp256b());
+    try_tcgen05_instruction(GetTcgen05MetaLd32Dp32B());
+    try_tcgen05_instruction(GetTcgen05MetaLd32Dp64B());
+    try_tcgen05_instruction(GetTcgen05MetaLd32Dp128B());
+    try_tcgen05_instruction(GetTcgen05MetaLd32Dp256B());
   } else {
-    try_tcgen05_instruction(getTcgen05MetaSt_32dp32b());
-    try_tcgen05_instruction(getTcgen05MetaSt_32dp64b());
-    try_tcgen05_instruction(getTcgen05MetaSt_32dp128b());
-    try_tcgen05_instruction(getTcgen05MetaSt_32dp256b());
+    try_tcgen05_instruction(GetTcgen05MetaSt32Dp32B());
+    try_tcgen05_instruction(GetTcgen05MetaSt32Dp64B());
+    try_tcgen05_instruction(GetTcgen05MetaSt32Dp128B());
+    try_tcgen05_instruction(GetTcgen05MetaSt32Dp256B());
   }
 
   ICHECK(have_succeeded) << "Failed to find a suitable instruction for tcgen05."
@@ -1592,7 +1592,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
         << " not found in buffer_remap";
     shared_tensor = lower_args.buffer_remap.at(shared_tensor);
   } else {
-    shared_layout = makeLinearLayout(shared_shape);
+    shared_layout = MakeLinearLayout(shared_shape);
   }
 
   // Convert the TileLang layout to a possibly swizzled CuTe ComposedLayout.
@@ -2462,13 +2462,13 @@ Stmt Im2Col::Lower(const Im2ColOpNode &op, const LowerArgs &lower_args,
     desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
   } else {
     ICHECK(shared_layout->InputDim() >= 2) << "Cannot detect TMA layout.";
-    if (StructuralEqual()(shared_layout, makeQuarterBankSwizzleLayout(dst))) {
+    if (StructuralEqual()(shared_layout, MakeQuarterBankSwizzleLayout(dst))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
     } else if (StructuralEqual()(shared_layout,
-                                 makeHalfBankSwizzleLayout(dst))) {
+                                 MakeHalfBankSwizzleLayout(dst))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
     } else if (StructuralEqual()(shared_layout,
-                                 makeFullBankSwizzleLayout(dst))) {
+                                 MakeFullBankSwizzleLayout(dst))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
     } else {
       LOG(FATAL) << "Cannot detect TMA layout.";

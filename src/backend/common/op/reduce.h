@@ -107,9 +107,9 @@ inline PrimExpr MakeInitValue(const ReduceOpNode &op, int vsize = 1) {
   auto bits = dst_dtype.bits();
 
   PrimExpr scalar;
-  if (op.type->isSum() || op.type->isAbsSum()) {
+  if (op.type->IsSum() || op.type->IsAbsSum()) {
     scalar = make_zero(op.dst->dtype);
-  } else if (op.type->isMax()) {
+  } else if (op.type->IsMax()) {
     if (is_int) {
       scalar = make_const(op.dst->dtype, SignedMin(bits));
     } else if (is_uint) {
@@ -117,7 +117,7 @@ inline PrimExpr MakeInitValue(const ReduceOpNode &op, int vsize = 1) {
     } else {
       scalar = make_const(op.dst->dtype, -INFINITY);
     }
-  } else if (op.type->isMin()) {
+  } else if (op.type->IsMin()) {
     if (is_int) {
       scalar = make_const(op.dst->dtype, SignedMax(bits));
     } else if (is_uint) {
@@ -125,9 +125,9 @@ inline PrimExpr MakeInitValue(const ReduceOpNode &op, int vsize = 1) {
     } else {
       scalar = make_const(op.dst->dtype, INFINITY);
     }
-  } else if (op.type->isAbsMax()) {
+  } else if (op.type->IsAbsMax()) {
     scalar = make_const(op.dst->dtype, 0);
-  } else if (op.type->isBitAnd()) {
+  } else if (op.type->IsBitAnd()) {
     if (is_int) {
       scalar = make_const(op.dst->dtype, -1);
     } else if (is_uint) {
@@ -135,7 +135,7 @@ inline PrimExpr MakeInitValue(const ReduceOpNode &op, int vsize = 1) {
     } else {
       scalar = make_const(op.dst->dtype, -INFINITY);
     }
-  } else if (op.type->isBitOr() || op.type->isBitXor()) {
+  } else if (op.type->IsBitOr() || op.type->IsBitXor()) {
     scalar = make_zero(op.dst->dtype);
   } else {
     LOG(FATAL) << "Unsupported reduce type: " << op.type->type;
@@ -162,43 +162,43 @@ inline PrimExpr MakeReduce(const ReduceOpNode &op, int vsize,
   if (vsize == 1) {
     const bool use_nan_op = op.nan_propagate && (acc.dtype().is_float16() ||
                                                  acc.dtype().is_bfloat16());
-    if (op.type->isSum()) {
+    if (op.type->IsSum()) {
       return acc + rhs;
-    } else if (op.type->isAbsSum()) {
+    } else if (op.type->IsAbsSum()) {
       return acc + Max(rhs, -rhs);
-    } else if (op.type->isMax()) {
+    } else if (op.type->IsMax()) {
       return use_nan_op ? Call(acc.dtype(), tl::max_nan(), {acc, rhs})
                         : PrimExpr(Max(acc, rhs));
-    } else if (op.type->isMin()) {
+    } else if (op.type->IsMin()) {
       return use_nan_op ? Call(acc.dtype(), tl::min_nan(), {acc, rhs})
                         : PrimExpr(Min(acc, rhs));
-    } else if (op.type->isAbsMax()) {
+    } else if (op.type->IsAbsMax()) {
       auto abs_rhs = Max(rhs, -rhs);
       return use_nan_op ? Call(acc.dtype(), tl::max_nan(), {acc, abs_rhs})
                         : PrimExpr(Max(acc, abs_rhs));
-    } else if (op.type->isBitAnd()) {
+    } else if (op.type->IsBitAnd()) {
       return acc & rhs;
-    } else if (op.type->isBitOr()) {
+    } else if (op.type->IsBitOr()) {
       return acc | rhs;
-    } else if (op.type->isBitXor()) {
+    } else if (op.type->IsBitXor()) {
       return acc ^ rhs;
     }
     LOG(FATAL) << "Unsupported reduce type: " << op.type->type;
     return PrimExpr();
   }
 
-  if (op.type->isSum()) {
+  if (op.type->IsSum()) {
     return Call(acc.dtype(), tl::add2(), {acc, rhs});
-  } else if (op.type->isAbsSum()) {
+  } else if (op.type->IsAbsSum()) {
     return Call(acc.dtype(), tl::add2(),
                 {acc, Call(acc.dtype(), tl::abs2(), {rhs})});
-  } else if (op.type->isMax()) {
+  } else if (op.type->IsMax()) {
     return Call(acc.dtype(), op.nan_propagate ? tl::max2_nan() : tl::max2(),
                 {acc, rhs});
-  } else if (op.type->isMin()) {
+  } else if (op.type->IsMin()) {
     return Call(acc.dtype(), op.nan_propagate ? tl::min2_nan() : tl::min2(),
                 {acc, rhs});
-  } else if (op.type->isAbsMax()) {
+  } else if (op.type->IsAbsMax()) {
     return Call(acc.dtype(), op.nan_propagate ? tl::max2_nan() : tl::max2(),
                 {acc, Call(acc.dtype(), tl::abs2(), {rhs})});
   }
@@ -212,19 +212,19 @@ inline std::optional<std::string> MakeCodegenReducer(const ReduceOpNode &op,
                                                op.dst->dtype.is_bfloat16());
 
   auto base = [&]() -> std::string {
-    if (op.type->isSum() || op.type->isAbsSum())
+    if (op.type->IsSum() || op.type->IsAbsSum())
       return "tl::SumOp";
-    if (op.type->isMax())
+    if (op.type->IsMax())
       return use_nan_op ? "tl::MaxOpNan" : "tl::MaxOp";
-    if (op.type->isMin())
+    if (op.type->IsMin())
       return use_nan_op ? "tl::MinOpNan" : "tl::MinOp";
-    if (op.type->isAbsMax())
+    if (op.type->IsAbsMax())
       return use_nan_op ? "tl::MaxOpNan" : "tl::MaxOp";
-    if (op.type->isBitAnd())
+    if (op.type->IsBitAnd())
       return "tl::BitAndOp";
-    if (op.type->isBitOr())
+    if (op.type->IsBitOr())
       return "tl::BitOrOp";
-    if (op.type->isBitXor())
+    if (op.type->IsBitXor())
       return "tl::BitXorOp";
     LOG(FATAL) << "Unsupported reduce type: " << op.type->type;
     return "";
@@ -233,8 +233,8 @@ inline std::optional<std::string> MakeCodegenReducer(const ReduceOpNode &op,
   if (vsize <= 1)
     return base;
 
-  if (!(op.type->isSum() || op.type->isAbsSum() || op.type->isMax() ||
-        op.type->isMin() || op.type->isAbsMax())) {
+  if (!(op.type->IsSum() || op.type->IsAbsSum() || op.type->IsMax() ||
+        op.type->IsMin() || op.type->IsAbsMax())) {
     return std::nullopt;
   }
 
@@ -277,17 +277,17 @@ inline bool CanUsePackedRamp(const PrimExpr &index, const Var &var, int vsize,
 
 inline PrimExpr MakeUpdate(const ReduceOpNode &op, PrimExpr dst_val,
                            PrimExpr src_val) {
-  if (op.type->isSum() || op.type->isAbsSum()) {
+  if (op.type->IsSum() || op.type->IsAbsSum()) {
     return dst_val + src_val;
-  } else if (op.type->isBitAnd()) {
+  } else if (op.type->IsBitAnd()) {
     return op.clear ? src_val : bitwise_and(dst_val, src_val);
-  } else if (op.type->isBitOr()) {
+  } else if (op.type->IsBitOr()) {
     return bitwise_or(dst_val, src_val);
-  } else if (op.type->isBitXor()) {
+  } else if (op.type->IsBitXor()) {
     return bitwise_xor(dst_val, src_val);
-  } else if (op.type->isMax() || op.type->isAbsMax()) {
+  } else if (op.type->IsMax() || op.type->IsAbsMax()) {
     return Max(dst_val, src_val);
-  } else if (op.type->isMin()) {
+  } else if (op.type->IsMin()) {
     return Min(dst_val, src_val);
   }
   LOG(FATAL) << "Unsupported reduce type: " << op.type->type;
@@ -360,25 +360,25 @@ template <typename Impl> struct ReduceLowerer {
       Array<Stmt> stmts;
 
       auto require_init = op.clear;
-      if (op.type->isSum() || op.type->isAbsSum() || op.type->isBitAnd() ||
-          op.type->isBitOr() || op.type->isBitXor()) {
+      if (op.type->IsSum() || op.type->IsAbsSum() || op.type->IsBitAnd() ||
+          op.type->IsBitOr() || op.type->IsBitXor()) {
         require_init = true;
       }
 
       auto clear_buffer = dst_buffer;
       auto need_duplicate = false;
       auto need_update = false;
-      if ((op.type->isSum() || op.type->isAbsSum()) && !op.clear) {
+      if ((op.type->IsSum() || op.type->IsAbsSum()) && !op.clear) {
         need_duplicate = true;
         need_update = true;
-      } else if (op.type->isBitAnd() && !op.clear) {
+      } else if (op.type->IsBitAnd() && !op.clear) {
         need_duplicate = true;
         need_update = true;
-      } else if ((op.type->isBitOr() || op.type->isBitXor()) && !op.clear) {
+      } else if ((op.type->IsBitOr() || op.type->IsBitXor()) && !op.clear) {
         need_duplicate = true;
         need_update = true;
-      } else if ((op.type->isMax() || op.type->isMin() ||
-                  op.type->isAbsMax()) &&
+      } else if ((op.type->IsMax() || op.type->IsMin() ||
+                  op.type->IsAbsMax()) &&
                  !op.clear) {
         need_duplicate = true;
         need_update = true;
@@ -434,8 +434,8 @@ template <typename Impl> struct ReduceLowerer {
             Array<Stmt> local_body;
 
             if (require_init ||
-                (need_duplicate && (op.type->isMax() || op.type->isMin() ||
-                                    op.type->isAbsMax()))) {
+                (need_duplicate && (op.type->IsMax() || op.type->IsMin() ||
+                                    op.type->IsAbsMax()))) {
               local_body.push_back(BufferStore(clear_buffer_packed,
                                                reduce::MakeInitValue(op, vsize),
                                                red_indices));
@@ -496,7 +496,7 @@ template <typename Impl> struct ReduceLowerer {
       if (!can_pack) {
         if (require_init ||
             (need_duplicate &&
-             (op.type->isMax() || op.type->isMin() || op.type->isAbsMax()))) {
+             (op.type->IsMax() || op.type->IsMin() || op.type->IsAbsMax()))) {
           stmts.push_back(BufferStore(clear_buffer, reduce::MakeInitValue(op),
                                       red_indices));
         }
