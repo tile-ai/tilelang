@@ -172,15 +172,14 @@ class PersistentTileScheduler(BaseTileScheduler):
 
     Manual warp-specialized kernels use ``current_iter`` as the single iteration clock
     (no separate ``for w`` loop): each warp role runs its own
-    ``while sched.valid()`` loop and reads ``w = sched.current_iter[0]`` for
-    pipeline/double-buffer state (``w & 1`` etc.) while reading ``sched.m_idx[0]``
-    / ``sched.n_idx[0]`` for the tile::
+    ``while sched.valid()`` loop and reads ``sched.current_iter[0]`` for
+    pipeline/double-buffer state (``sched.current_iter[0] & 1`` etc.) while reading
+    ``sched.m_idx[0]`` / ``sched.n_idx[0]`` for the tile::
 
         sched.init(block_id)
         while sched.valid():
-            w = sched.current_iter[0]
             bx, by = sched.m_idx[0], sched.n_idx[0]
-            # ... use w for barrier phase / w & 1 double-buffering ...
+            # ... use sched.current_iter[0] for barrier phase / double-buffering ...
             sched.next_tile()
 
     Notes

@@ -9,6 +9,7 @@ docstring for the details.
 from __future__ import annotations
 
 import ast
+import contextlib
 import inspect
 import textwrap
 from collections.abc import Callable
@@ -106,10 +107,8 @@ def _name_buffer(prefix: str, attr: str, value: Any) -> None:
 
     if not isinstance(value, Buffer):
         return
-    try:
+    with contextlib.suppress(Exception):  # naming is best-effort, never fatal
         IRBuilder.name(f"{prefix}_{attr}", value)
-    except Exception:  # noqa: BLE001 - naming is best-effort, never fatal
-        pass
 
 
 def _install_prefix_naming(cls: type) -> None:
