@@ -28,42 +28,42 @@ namespace tl {
 using namespace tirx;
 using namespace ffi;
 
-IterVar make_itervar(std::string name, PrimExpr dom) {
+IterVar MakeIterVar(std::string name, PrimExpr dom) {
   Var var = Var(name, dom->dtype);
   return IterVar(Range(0, dom), var, IterVarType::kDataPar);
 }
 
 Fragment makeGemmFragment8x4() {
-  IterVar i = make_itervar("i", 8);
-  IterVar j = make_itervar("j", 4);
-  IterVar rep = make_itervar("rep", 1);
+  IterVar i = MakeIterVar("i", 8);
+  IterVar j = MakeIterVar("j", 4);
+  IterVar rep = MakeIterVar("rep", 1);
   PrimExpr forward_thread = FloorDiv(j->var, 1) + 4 * i;
   PrimExpr index = FloorMod(j->var, 1);
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
-Fragment makeGemmFragment8x8() {
-  IterVar i = make_itervar("i", 8);
-  IterVar j = make_itervar("j", 8);
-  IterVar rep = make_itervar("rep", 1);
+Fragment MakeGemmFragment8x8() {
+  IterVar i = MakeIterVar("i", 8);
+  IterVar j = MakeIterVar("j", 8);
+  IterVar rep = MakeIterVar("rep", 1);
   PrimExpr forward_thread = FloorDiv(j->var, 2) + 4 * i;
   PrimExpr index = FloorMod(j->var, 2);
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
 Fragment makeGemmFragment8x16() {
-  IterVar i = make_itervar("i", 8);
-  IterVar j = make_itervar("j", 16);
-  IterVar rep = make_itervar("rep", 1);
+  IterVar i = MakeIterVar("i", 8);
+  IterVar j = MakeIterVar("j", 16);
+  IterVar rep = MakeIterVar("rep", 1);
   PrimExpr forward_thread = FloorDiv(j->var, 4) + 4 * i;
   PrimExpr index = FloorMod(j->var, 4);
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
-Fragment makeGemmFragment8x8Transposed() {
-  IterVar i = make_itervar("i", 8);
-  IterVar j = make_itervar("j", 8);
-  IterVar rep = make_itervar("rep", 1);
+Fragment MakeGemmFragment8x8Transposed() {
+  IterVar i = MakeIterVar("i", 8);
+  IterVar j = MakeIterVar("j", 8);
+  IterVar rep = MakeIterVar("rep", 1);
   PrimExpr forward_thread = FloorDiv(i->var, 2) + 4 * j;
   PrimExpr index = FloorMod(i->var, 2);
   return Fragment({i, j}, {index}, forward_thread, rep);
@@ -75,45 +75,45 @@ From https://github.com/RadeonOpenCompute/amd_matrix_instruction_calculator
 --detail-instruction
 */
 Fragment makeGemmFragmentAB16x16CDNA(const int k_pack) {
-  IterVar i = make_itervar("i", 16);
-  IterVar j = make_itervar("j", 16 * k_pack);
-  IterVar rep = make_itervar("rep", 1);
+  IterVar i = MakeIterVar("i", 16);
+  IterVar j = MakeIterVar("j", 16 * k_pack);
+  IterVar rep = MakeIterVar("rep", 1);
   PrimExpr forward_thread = 16 * FloorDiv(j->var, 4 * k_pack) + i;
   PrimExpr index = FloorMod(j->var, 4 * k_pack);
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
 Fragment makeGemmFragmentAB16x16CDNATransposed(const int k_pack) {
-  IterVar i = make_itervar("i", 16 * k_pack);
-  IterVar j = make_itervar("j", 16);
-  IterVar rep = make_itervar("rep", 1);
+  IterVar i = MakeIterVar("i", 16 * k_pack);
+  IterVar j = MakeIterVar("j", 16);
+  IterVar rep = MakeIterVar("rep", 1);
   PrimExpr forward_thread = 16 * FloorDiv(i->var, 4 * k_pack) + j;
   PrimExpr index = FloorMod(i->var, 4 * k_pack);
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
 Fragment makeGemmFragmentAB16x32CDNA(const int k_pack) {
-  IterVar i = make_itervar("i", 16);
-  IterVar j = make_itervar("j", 32 * k_pack);
-  IterVar rep = make_itervar("rep", 1);
+  IterVar i = MakeIterVar("i", 16);
+  IterVar j = MakeIterVar("j", 32 * k_pack);
+  IterVar rep = MakeIterVar("rep", 1);
   PrimExpr forward_thread = 16 * FloorDiv(j->var, 8 * k_pack) + i;
   PrimExpr index = FloorMod(j->var, 8 * k_pack);
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
 Fragment makeGemmFragmentAB16x32CDNATransposed(const int k_pack) {
-  IterVar i = make_itervar("i", 32 * k_pack);
-  IterVar j = make_itervar("j", 16);
-  IterVar rep = make_itervar("rep", 1);
+  IterVar i = MakeIterVar("i", 32 * k_pack);
+  IterVar j = MakeIterVar("j", 16);
+  IterVar rep = MakeIterVar("rep", 1);
   PrimExpr forward_thread = 16 * FloorDiv(i->var, 8 * k_pack) + j;
   PrimExpr index = FloorMod(i->var, 8 * k_pack);
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
 Fragment makeGemmFragmentC16x16CDNA() {
-  IterVar i = make_itervar("i", 16);
-  IterVar j = make_itervar("j", 16);
-  IterVar rep = make_itervar("rep", 1);
+  IterVar i = MakeIterVar("i", 16);
+  IterVar j = MakeIterVar("j", 16);
+  IterVar rep = MakeIterVar("rep", 1);
   PrimExpr forward_thread = 16 * FloorDiv(j->var, 4) + i;
   PrimExpr index = FloorMod(j->var, 4);
   return Fragment({i, j}, {index}, forward_thread, rep);
@@ -125,7 +125,7 @@ Fragment makeGemmFragmentC_F64(const int block_m, const int block_n,
   ICHECK(block_n % warp_n == 0);
   ICHECK(warp_m % 16 == 0);
   ICHECK(warp_n % 8 == 0);
-  auto base_layout = makeGemmFragment8x8();
+  auto base_layout = MakeGemmFragment8x8();
   auto warp_layout =
       base_layout->Repeat({block_m / warp_m, block_n / warp_n}, true, false);
   auto block_layout =
@@ -133,7 +133,7 @@ Fragment makeGemmFragmentC_F64(const int block_m, const int block_n,
   return block_layout;
 }
 
-Fragment makeGemmFragmentC(const int block_m, const int block_n,
+Fragment MakeGemmFragmentC(const int block_m, const int block_n,
                            const int warp_m, const int warp_n,
                            const int element_size) {
   if (element_size == 64)
@@ -142,7 +142,7 @@ Fragment makeGemmFragmentC(const int block_m, const int block_n,
   ICHECK(block_n % warp_n == 0);
   ICHECK(warp_m % 16 == 0) << "warp_m=" << warp_m;
   ICHECK(warp_n % 8 == 0) << "warp_n=" << warp_n;
-  auto base_layout = makeGemmFragment8x8()->Repeat({2, 1}, false);
+  auto base_layout = MakeGemmFragment8x8()->Repeat({2, 1}, false);
   auto warp_layout =
       base_layout->Repeat({block_m / warp_m, block_n / warp_n}, true, false);
   auto block_layout =
@@ -150,7 +150,7 @@ Fragment makeGemmFragmentC(const int block_m, const int block_n,
   return block_layout;
 }
 
-Fragment makeGemmSparseFragmentC(const int block_m, const int block_n,
+Fragment MakeGemmSparseFragmentC(const int block_m, const int block_n,
                                  const int warp_m, const int warp_n,
                                  const int element_size) {
   if (element_size == 64) {
@@ -160,7 +160,7 @@ Fragment makeGemmSparseFragmentC(const int block_m, const int block_n,
   ICHECK(block_n % warp_n == 0);
   ICHECK(warp_m % 16 == 0) << "warp_m=" << warp_m;
   ICHECK(warp_n % 8 == 0) << "warp_n=" << warp_n;
-  auto base_layout = makeGemmFragment8x8()->Repeat({2, 1}, false);
+  auto base_layout = MakeGemmFragment8x8()->Repeat({2, 1}, false);
   // NOTE: This func wasn't implemented by following the CUTLASS 2 iterator
   // but by inspecting the output, it appears that we first need to
   // repeat the warp layout while avoiding duplicate thread mappings.
@@ -171,7 +171,7 @@ Fragment makeGemmSparseFragmentC(const int block_m, const int block_n,
   return block_layout;
 }
 
-Fragment makeGemmFragmentCCDNA(const int block_m, const int block_n,
+Fragment MakeGemmFragmentCCDNA(const int block_m, const int block_n,
                                const int warp_m, const int warp_n,
                                const int element_size) {
   if (element_size == 64)
@@ -188,20 +188,20 @@ Fragment makeGemmFragmentCCDNA(const int block_m, const int block_n,
   return block_layout;
 }
 
-Fragment makeGemmFragmentCHopper(const int block_m, const int block_n,
+Fragment MakeGemmFragmentCHopper(const int block_m, const int block_n,
                                  const int warp_m, const int warp_n,
                                  const int element_size) {
   ICHECK(block_m % warp_m == 0);
   ICHECK(warp_m % 16 == 0) << "warp_m=" << warp_m;
 
-  auto warp_layout = makeGemmFragment8x8()->Repeat({2, warp_n / 8}, false,
+  auto warp_layout = MakeGemmFragment8x8()->Repeat({2, warp_n / 8}, false,
                                                    false); // 16 x N (1 warp)
   auto block_layout = warp_layout->Repeat({block_m / warp_m, block_n / warp_n},
                                           true, false); // 16*Y x N (Y warp)
   return block_layout->Repeat({warp_m / 16, 1}, false, false);
 }
 
-Fragment makeGemmFragmentA(const int block_m, const int block_n,
+Fragment MakeGemmFragmentA(const int block_m, const int block_n,
                            const int block_k, const int warp_m,
                            const int warp_n, const int element_size,
                            bool transposed) {
@@ -216,7 +216,7 @@ Fragment makeGemmFragmentA(const int block_m, const int block_n,
 
   if (transposed) {
     auto base_layout =
-        makeGemmFragment8x8Transposed()->Repeat({2, 2}, false, true);
+        MakeGemmFragment8x8Transposed()->Repeat({2, 2}, false, true);
     auto warp_layout = base_layout->Repeat({1, block_m / warp_m}, true, false)
                            ->Replicate(block_n / warp_n);
     auto block_layout =
@@ -231,7 +231,7 @@ Fragment makeGemmFragmentA(const int block_m, const int block_n,
           warp_layout->Repeat({warp_m / 16, block_k / 32}, false, false);
       return block_layout;
     } else if (element_size == 16) {
-      auto base_layout = makeGemmFragment8x8()->Repeat({2, 2}, false, false);
+      auto base_layout = MakeGemmFragment8x8()->Repeat({2, 2}, false, false);
       auto warp_layout = base_layout->Repeat({block_m / warp_m, 1}, true)
                              ->Replicate(block_n / warp_n);
       auto block_layout =
@@ -251,14 +251,14 @@ Fragment makeGemmFragmentA(const int block_m, const int block_n,
   }
 }
 
-Fragment makeGemmFragmentB(const int block_m, const int block_n,
+Fragment MakeGemmFragmentB(const int block_m, const int block_n,
                            const int block_k, const int warp_m,
                            const int warp_n, bool transposed) {
   // transposed
   ICHECK(warp_n % 8 == 0);
   ICHECK(block_k % 16 == 0);
   if (transposed) {
-    auto base_layout = makeGemmFragment8x8()->Repeat({1, 2}, false, false);
+    auto base_layout = MakeGemmFragment8x8()->Repeat({1, 2}, false, false);
     auto warp_layout = base_layout->Replicate(block_m / warp_m)
                            ->Repeat({block_n / warp_n, 1}, true, false);
     auto block_layout =
@@ -266,7 +266,7 @@ Fragment makeGemmFragmentB(const int block_m, const int block_n,
     return block_layout;
   } else {
     auto base_layout =
-        makeGemmFragment8x8Transposed()->Repeat({2, 1}, false, false);
+        MakeGemmFragment8x8Transposed()->Repeat({2, 1}, false, false);
     auto warp_layout = base_layout->Replicate(block_m / warp_m)
                            ->Repeat({1, block_n / warp_n}, true);
     auto block_layout =
@@ -275,7 +275,7 @@ Fragment makeGemmFragmentB(const int block_m, const int block_n,
   }
 }
 
-Fragment makeGemmFragmentACDNA(const int block_m, const int block_n,
+Fragment MakeGemmFragmentACDNA(const int block_m, const int block_n,
                                const int block_k, const int warp_m,
                                const int warp_n, const int element_size,
                                const int k_pack, bool transposed) {
@@ -313,9 +313,9 @@ Fragment makeGemmFragmentACDNA(const int block_m, const int block_n,
 }
 
 Fragment makeGemmFragment32x32(int element_size) {
-  IterVar i = make_itervar("i", 32);
-  IterVar j = make_itervar("j", 32);
-  IterVar rep = make_itervar("rep", 1);
+  IterVar i = MakeIterVar("i", 32);
+  IterVar j = MakeIterVar("j", 32);
+  IterVar rep = MakeIterVar("rep", 1);
   ICHECK(element_size == 16 || element_size == 32);
   if (element_size == 16) {
     PrimExpr thd = FloorMod(i, 4) + FloorDiv(FloorMod(i, 16), 8) * 4 +
@@ -335,7 +335,7 @@ Fragment makeGemmFragment32x32(int element_size) {
   }
 }
 
-Fragment makeGemmVoltaFragmentC(const int block_m, const int block_n,
+Fragment MakeGemmVoltaFragmentC(const int block_m, const int block_n,
                                 const int warp_m, const int warp_n,
                                 int element_size) {
   ICHECK(block_m % warp_m == 0);
@@ -350,7 +350,7 @@ Fragment makeGemmVoltaFragmentC(const int block_m, const int block_n,
   return block_layout;
 }
 
-Fragment makeGemmVoltaFragmentA(const int block_m, const int block_n,
+Fragment MakeGemmVoltaFragmentA(const int block_m, const int block_n,
                                 const int block_k, const int warp_m,
                                 const int warp_n) {
   // assume not transposed
@@ -359,9 +359,9 @@ Fragment makeGemmVoltaFragmentA(const int block_m, const int block_n,
   ICHECK(warp_m % 32 == 0);
   ICHECK(block_k % 4 == 0);
   // this is a special case
-  IterVar i = make_itervar("i", 32);
-  IterVar j = make_itervar("j", 4);
-  IterVar rep = make_itervar("rep", 2);
+  IterVar i = MakeIterVar("i", 32);
+  IterVar j = MakeIterVar("j", 4);
+  IterVar rep = MakeIterVar("rep", 2);
   PrimExpr thd = FloorDiv(FloorMod(i, 16), 8) * 4 + 16 * FloorDiv(i, 16) +
                  FloorMod(i, 4) + 8 * rep;
   PrimExpr idx = j + FloorDiv(FloorMod(i, 8), 4) * 4;
@@ -461,7 +461,7 @@ static Layout MakeQuarterBankSwizzleLayout2D(int stride, int continuous,
   return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
 }
 
-Layout makeQuarterBankSwizzleLayout(const Buffer &buffer) {
+Layout MakeQuarterBankSwizzleLayout(const Buffer &buffer) {
   auto info = GetSwizzleShapeInfoChecked(buffer);
   auto base = MakeQuarterBankSwizzleLayout2D(static_cast<int>(info.stride),
                                              static_cast<int>(info.continuous),
@@ -490,7 +490,7 @@ static Layout MakeHalfBankSwizzleLayout2D(int stride, int continuous,
   return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
 }
 
-Layout makeHalfBankSwizzleLayout(const Buffer &buffer) {
+Layout MakeHalfBankSwizzleLayout(const Buffer &buffer) {
   auto info = GetSwizzleShapeInfoChecked(buffer);
   auto base = MakeHalfBankSwizzleLayout2D(static_cast<int>(info.stride),
                                           static_cast<int>(info.continuous),
@@ -547,7 +547,7 @@ static Layout MakeFullBankSwizzleLayout2D(int stride, int continuous,
   return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
 }
 
-Layout makeFullBankSwizzleLayout(const Buffer &buffer) {
+Layout MakeFullBankSwizzleLayout(const Buffer &buffer) {
   auto info = GetSwizzleShapeInfoChecked(buffer);
   auto base = MakeFullBankSwizzleLayout2D(static_cast<int>(info.stride),
                                           static_cast<int>(info.continuous),
@@ -583,8 +583,8 @@ Layout makeMatrixCoreSwizzleLayout(int stride, int continuous, int element_size,
   const int perPhase = std::max(1, elemsPerOneBanksRow / innerDimLength);
   const int maxPhase = std::min(SIMDWidth / perPhase, innerDimLength / vecSize);
 
-  IterVar row = make_itervar("row", stride);
-  IterVar col = make_itervar("col", continuous);
+  IterVar row = MakeIterVar("row", stride);
+  IterVar col = MakeIterVar("col", continuous);
   PrimExpr phase = FloorMod(FloorDiv(row, perPhase), maxPhase);
   PrimExpr colOffSwizzled = (FloorDiv(col, vecSize) ^ phase) * vecSize;
   PrimExpr colOffOrdered = FloorMod(col, vecSize);
@@ -620,11 +620,11 @@ Layout makeGemmABLayoutF64_Kouter(int stride, int continuous) {
 }
 
 // The Default Layout for Tensor Access (row-major linear layout)
-Layout makeLinearLayout(Array<PrimExpr> shape) {
+Layout MakeLinearLayout(Array<PrimExpr> shape) {
   int ndim = static_cast<int>(shape.size());
   Array<IterVar> iter_vars;
   for (int i = 0; i < ndim; i++) {
-    iter_vars.push_back(make_itervar(std::string{char('i' + i)}, shape[i]));
+    iter_vars.push_back(MakeIterVar(std::string{char('i' + i)}, shape[i]));
   }
   // Row-major: index = i0 * (d1 * d2 * ...) + i1 * (d2 * ...) + ... + i_{n-1}
   PrimExpr linear_index = 0;
@@ -638,9 +638,9 @@ Layout makeLinearLayout(Array<PrimExpr> shape) {
   return Layout(iter_vars, {linear_index});
 }
 
-Layout makeGemmABLayoutPadded(int stride, int continuous, int element_size) {
-  IterVar i = make_itervar("i", stride);
-  IterVar j = make_itervar("j", continuous);
+Layout MakeGemmABLayoutPadded(int stride, int continuous, int element_size) {
+  IterVar i = MakeIterVar("i", stride);
+  IterVar j = MakeIterVar("j", continuous);
   int padded = continuous;
   // Add 128 bits padding when the last dim is a multiple of 256 bits
   if ((element_size * continuous) % 256 == 0)
@@ -650,8 +650,8 @@ Layout makeGemmABLayoutPadded(int stride, int continuous, int element_size) {
 
 Layout MakeGemmVoltaABLayoutCrosswise(int stride, int continuous) {
   ICHECK(stride % 32 == 0 && continuous % 32 == 0);
-  IterVar i = make_itervar("i", stride);
-  IterVar j = make_itervar("j", continuous);
+  IterVar i = MakeIterVar("i", stride);
+  IterVar j = MakeIterVar("j", continuous);
   PrimExpr vec_contiguous_idx = FloorDiv(j, 4);
   PrimExpr vec_strided_within_tile = FloorMod(vec_contiguous_idx, 8);
 
@@ -671,8 +671,8 @@ Layout MakeGemmVoltaABLayoutCrosswise(int stride, int continuous) {
 
 Layout MakeGemmVoltaALayoutCongruous(int stride, int continuous) {
   ICHECK(stride % 4 == 0 && continuous % 64 == 0);
-  IterVar i = make_itervar("i", stride);
-  IterVar j = make_itervar("j", continuous);
+  IterVar i = MakeIterVar("i", stride);
+  IterVar j = MakeIterVar("j", continuous);
   PrimExpr vec_contiguous_idx = FloorDiv(j, 8);
   PrimExpr vec_strided_idx = i;
   PrimExpr tile_contiguous_idx = FloorDiv(vec_contiguous_idx, 8);
@@ -696,8 +696,8 @@ Layout MakeGemmVoltaALayoutCongruous(int stride, int continuous) {
 
 Layout MakeGemmVoltaBLayoutCongruous(int stride, int continuous) {
   ICHECK(stride % 4 == 0 && continuous % 64 == 0);
-  IterVar i = make_itervar("i", stride);
-  IterVar j = make_itervar("j", continuous);
+  IterVar i = MakeIterVar("i", stride);
+  IterVar j = MakeIterVar("j", continuous);
   PrimExpr vec_contiguous_idx = FloorDiv(j, 8);
   PrimExpr vec_strided_idx = i;
   PrimExpr tile_contiguous_idx = FloorDiv(vec_contiguous_idx, 8);
@@ -719,7 +719,7 @@ Layout MakeGemmVoltaBLayoutCongruous(int stride, int continuous) {
   return Layout(Array{i, j}, {offset});
 }
 
-Layout makeGemmVoltaABLayout(int stride, int continuous, bool is_a,
+Layout MakeGemmVoltaABLayout(int stride, int continuous, bool is_a,
                              bool k_inner) {
   if (k_inner && continuous % 32 == 0 && stride % 32 == 0)
     return MakeGemmVoltaABLayoutCrosswise(stride, continuous);
@@ -727,14 +727,14 @@ Layout makeGemmVoltaABLayout(int stride, int continuous, bool is_a,
     return MakeGemmVoltaALayoutCongruous(stride, continuous);
   if (!is_a && continuous % 64 == 0 && stride % 4 == 0)
     return MakeGemmVoltaBLayoutCongruous(stride, continuous);
-  return makeGemmABLayoutPadded(stride, continuous, 16);
+  return MakeGemmABLayoutPadded(stride, continuous, 16);
 }
 
 // ref:
 // https://github.com/nvidia/cutlass/blob/ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e/include/cutlass/layout/tensor_op_multiplicand_sm75.h#L54
 // Although the four settings (T or NT) used distinct layouts in CUTLASS, they
 // appeared to result in the same mem layout
-Layout makeTensorOpMultiplicand(int mat_stride, int mat_continuous,
+Layout MakeTensorOpMultiplicand(int mat_stride, int mat_continuous,
                                 int elementsize, int crosswise) {
   /// This layout is optimized for 128b accesses
   static int const kAccessSize = 128;
@@ -769,8 +769,8 @@ Layout makeTensorOpMultiplicand(int mat_stride, int mat_continuous,
   const int kPartitionShapeStride = 4;
 
   // NOTE: it's always row major for tl
-  IterVar i = make_itervar("i", mat_stride);
-  IterVar j = make_itervar("j", mat_continuous);
+  IterVar i = MakeIterVar("i", mat_stride);
+  IterVar j = MakeIterVar("j", mat_continuous);
 
   PrimExpr vec_contiguous_idx = FloorDiv(j, kElementsPerAccess);
   PrimExpr vec_strided_idx = FloorDiv(i, kFactor);
@@ -824,10 +824,10 @@ Layout makeTensorOpMultiplicand(int mat_stride, int mat_continuous,
                 {element_contiguous + element_strided * stride * kFactor});
 }
 
-Layout makeGemmSparseAmpereABLayout(int mat_stride, int mat_continuous,
+Layout MakeGemmSparseAmpereABLayout(int mat_stride, int mat_continuous,
                                     int elementsize) {
   int kCrosswise = std::min(mat_continuous, (1024 / elementsize));
-  return makeTensorOpMultiplicand(mat_stride, mat_continuous, elementsize,
+  return MakeTensorOpMultiplicand(mat_stride, mat_continuous, elementsize,
                                   kCrosswise);
 }
 
@@ -861,18 +861,18 @@ Layout makeGemmSparseAmpereABLayout(int mat_stride, int mat_continuous,
  *                  - k_inner == false uses a padded layout.
  * \return A Layout object representing the chosen memory layout.
  */
-Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
+Layout MakeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
                         int element_size, bool k_inner) {
   if (element_size == 64) {
     if (!k_inner && continuity % 16 == 0) // float64 KxN
       return makeGemmABLayoutF64_Kouter(mat_stride, mat_continuous);
     if (k_inner && continuity % 16 == 0) // float64 NxK
       return makeGemmABLayoutF64_Kinner(mat_stride, mat_continuous);
-    return makeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
+    return MakeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
   }
   int vector_size = 128 / element_size;
   if (!k_inner && element_size == 8) // int8 KxN
-    return makeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
+    return MakeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
   else if (mat_continuous % (vector_size * 8) == 0)
     return MakeFullBankSwizzleLayout2D(mat_stride, mat_continuous,
                                        element_size);
@@ -883,11 +883,11 @@ Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
     return MakeQuarterBankSwizzleLayout2D(mat_stride, mat_continuous,
                                           element_size);
   else {
-    return makeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
+    return MakeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
   }
 }
 
-Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
+Layout MakeGemmABLayoutHopper(int mat_stride, int mat_continuous,
                               int continuity, int element_size, bool k_inner) {
   if (element_size == 64) {
     if (!k_inner && continuity % 16 == 0) // float64 KxN
@@ -896,7 +896,7 @@ Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
       return makeGemmABLayoutF64_Kinner(mat_stride, mat_continuous);
     // fallback for float64 when stride % 8 != 0
     if (mat_stride % 8 != 0)
-      return makeLinearLayout(
+      return MakeLinearLayout(
           Array<PrimExpr>{Integer(mat_stride), Integer(mat_continuous)});
     return MakeQuarterBankSwizzleLayout2D(mat_stride, mat_continuous,
                                           element_size);
@@ -916,7 +916,7 @@ Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
   }
 
   if (mat_continuous % vector_size == 0)
-    return makeLinearLayout(
+    return MakeLinearLayout(
         Array<PrimExpr>{Integer(mat_stride), Integer(mat_continuous)});
   else
     ICHECK(0) << "Unsupported layout for Hopper with stride=" << mat_stride
@@ -925,7 +925,7 @@ Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
   TILELANG_COMPILER_UNREACHABLE(); // to prevent compiler warning
 }
 
-Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
+Layout MakeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
                              int element_size, bool k_inner) {
   if (element_size == 64) {
     ICHECK(0) << "float64 on sm100 is not supported now";
@@ -939,7 +939,7 @@ Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
     }
     int vector_size = 128 / element_size;
     if (mat_continuous % vector_size == 0) {
-      return makeLinearLayout(
+      return MakeLinearLayout(
           Array<PrimExpr>{Integer(mat_stride), Integer(mat_continuous)});
     }
     return MakeAlign16BSwizzleLayout2D(mat_stride, mat_continuous,
@@ -960,7 +960,7 @@ Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
   }
 
   if (mat_continuous % vector_size == 0)
-    return makeLinearLayout(
+    return MakeLinearLayout(
         Array<PrimExpr>{Integer(mat_stride), Integer(mat_continuous)});
   else
     ICHECK(0) << "Unsupported layout for sm100 with stride=" << mat_stride
@@ -969,51 +969,51 @@ Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
   TILELANG_COMPILER_UNREACHABLE(); // to prevent compiler warning
 }
 
-Layout makeGemmABLayoutCDNA(int stride, int continuous, int element_size,
+Layout MakeGemmABLayoutCDNA(int stride, int continuous, int element_size,
                             int kPack) {
   return makeMatrixCoreSwizzleLayout(stride, continuous, element_size, kPack);
 }
 
-Layout makeSwizzledLayout(const Buffer &buffer, bool k_inner, bool allow_pad) {
+Layout MakeSwizzledLayout(const Buffer &buffer, bool k_inner, bool allow_pad) {
   auto info = GetSwizzleShapeInfoChecked(buffer);
   Layout base;
   if (allow_pad) {
-    base = makeGemmABLayout(
+    base = MakeGemmABLayout(
         static_cast<int>(info.stride), static_cast<int>(info.continuous),
         static_cast<int>(info.continuous), info.element_size, k_inner);
   } else {
-    base = makeGemmABLayoutHopper(
+    base = MakeGemmABLayoutHopper(
         static_cast<int>(info.stride), static_cast<int>(info.continuous),
         static_cast<int>(info.continuous), info.element_size, k_inner);
   }
   return ExpandLayout2D(base, buffer);
 }
 
-Layout makeVoltaSwizzledLayout(const Buffer &buffer, bool is_a, bool k_inner) {
+Layout MakeVoltaSwizzledLayout(const Buffer &buffer, bool is_a, bool k_inner) {
   auto info = GetSwizzleShapeInfoChecked(buffer);
   auto base =
-      makeGemmVoltaABLayout(static_cast<int>(info.stride),
+      MakeGemmVoltaABLayout(static_cast<int>(info.stride),
                             static_cast<int>(info.continuous), is_a, k_inner);
   return ExpandLayout2D(base, buffer);
 }
 
-Layout makeWgmmaSwizzledLayout(const Buffer &buffer, int continuity,
+Layout MakeWgmmaSwizzledLayout(const Buffer &buffer, int continuity,
                                bool k_inner) {
   auto info = GetSwizzleShapeInfoChecked(buffer);
   if (continuity < 0)
     continuity = static_cast<int>(info.continuous);
-  auto base = makeGemmABLayoutHopper(static_cast<int>(info.stride),
+  auto base = MakeGemmABLayoutHopper(static_cast<int>(info.stride),
                                      static_cast<int>(info.continuous),
                                      continuity, info.element_size, k_inner);
   return ExpandLayout2D(base, buffer);
 }
 
-Layout makeTcgen05mmaSwizzledLayout(const Buffer &buffer, int continuity,
+Layout MakeTcgen05MmaSwizzledLayout(const Buffer &buffer, int continuity,
                                     bool k_inner) {
   auto info = GetSwizzleShapeInfoChecked(buffer);
   if (continuity < 0)
     continuity = static_cast<int>(info.continuous);
-  auto base = makeGemmABLayoutSm100(static_cast<int>(info.stride),
+  auto base = MakeGemmABLayoutSm100(static_cast<int>(info.stride),
                                     static_cast<int>(info.continuous),
                                     continuity, info.element_size, k_inner);
   return ExpandLayout2D(base, buffer);
@@ -1044,19 +1044,19 @@ SwizzleMode DetectSwizzleMode(const Layout &layout, const Buffer &buffer) {
   bool stride_ok = info.stride == 4 || info.stride % 8 == 0;
   if (stride_ok &&
       info.continuous % (static_cast<int64_t>(vector_size) * 2) == 0) {
-    if (StructuralEqual()(layout, makeQuarterBankSwizzleLayout(buffer))) {
+    if (StructuralEqual()(layout, MakeQuarterBankSwizzleLayout(buffer))) {
       return SwizzleMode::kQuarter;
     }
   }
   if (stride_ok &&
       info.continuous % (static_cast<int64_t>(vector_size) * 4) == 0) {
-    if (StructuralEqual()(layout, makeHalfBankSwizzleLayout(buffer))) {
+    if (StructuralEqual()(layout, MakeHalfBankSwizzleLayout(buffer))) {
       return SwizzleMode::kHalf;
     }
   }
   if (stride_ok &&
       info.continuous % (static_cast<int64_t>(vector_size) * 8) == 0) {
-    if (StructuralEqual()(layout, makeFullBankSwizzleLayout(buffer))) {
+    if (StructuralEqual()(layout, MakeFullBankSwizzleLayout(buffer))) {
       return SwizzleMode::kFull;
     }
   }
@@ -1083,11 +1083,11 @@ Optional<Layout> MergeSwizzleLayouts(const Layout &layout1,
 
   switch (min_mode) {
   case SwizzleMode::kQuarter:
-    return makeQuarterBankSwizzleLayout(buffer);
+    return MakeQuarterBankSwizzleLayout(buffer);
   case SwizzleMode::kHalf:
-    return makeHalfBankSwizzleLayout(buffer);
+    return MakeHalfBankSwizzleLayout(buffer);
   case SwizzleMode::kFull:
-    return makeFullBankSwizzleLayout(buffer);
+    return MakeFullBankSwizzleLayout(buffer);
   default:
     return std::nullopt;
   }

@@ -188,7 +188,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
     def _determinate_swizzle_mode(self, buffer, layout: Layout) -> SwizzleMode:
         buffer = self._as_buffer(buffer)
-        # same behavior to src/layout/gemm_layouts.cc::makeGemmABLayoutHopper
+        # same behavior to src/layout/gemm_layouts.cc::MakeGemmABLayoutHopper
+        # buffer is already unwrapped by _as_buffer above; keep tir_buffer as the
+        # name used by the swizzle-equality checks below.
         tir_buffer = buffer.buffer if isinstance(buffer, BufferRegion) else buffer
         if layout is None or layout.is_equal(make_linear_layout(tir_buffer)):
             return SwizzleMode.NONE
@@ -554,7 +556,6 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         # descriptor still needs a 16-byte-aligned physical operand layout.
         b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
         b_elems_in_bytes = (DataType(self.b_dtype).bits + 7) // 8
-        n_dim_per_cta = n_dim // 2 if enable_2cta else n_dim
         b_swizzle_atom_elems = b_swizzle_mode.swizzle_byte_size() // b_elems_in_bytes
 
         if self.b_transposed:
@@ -642,7 +643,6 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             self.tcgen05_atom_arrive(mbar)
 
         return _warp_mma_mxf4nvf4_blockscaled(desc_a, desc_b, C_local_buf, sfa_data, sfb_data, mbar)
-
 
     def make_mma_load_layout(self, local_buf: Buffer, matrix: str = "A") -> T.Fragment:
         raise NotImplementedError
@@ -843,7 +843,11 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         n_dim_per_cta = n_dim // 2 if enable_2cta else n_dim
         k_dim = self.chunk
         micro_size_k = self.micro_size_k
-        elem_bits = get_tvm_dtype(self._as_buffer(B_buf).dtype).bits
+        # Sub-byte FP4 is staged gap-expanded in ALIGN16B SMEM (one e2m1 per
+        # 8-bit byte container), so byte-addressing uses an 8-bit element stride
+        # (matches the validated feat/gemm-fp4 descriptor: elems_in_bytes=1).
+        _b_bits = get_tvm_dtype(self._as_buffer(B_buf).dtype).bits
+        elem_bits = 8 if _b_bits < 8 else _b_bits
         b_is_k_major = self.b_transposed
 
         b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
@@ -895,7 +899,13 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         m_dim = self.block_row_warps * self.warp_row_tiles
         k_dim = self.chunk
         micro_size_k = self.micro_size_k
-        elem_bits = get_tvm_dtype(self._as_buffer(A_buf).dtype).bits
+        # Sub-byte FP4 is staged gap-expanded in ALIGN16B SMEM (one e2m1 per
+        # 8-bit byte container), so byte-addressing uses an 8-bit element stride
+        # (matches the validated feat/gemm-fp4 descriptor: elems_in_bytes=1, i.e.
+        # ceil(bits/8)). Using the raw 4 bits would halve the stride and double
+        # swizzle_atom_elems, corrupting the f8f6f4 operand addressing.
+        _a_bits = get_tvm_dtype(self._as_buffer(A_buf).dtype).bits
+        elem_bits = 8 if _a_bits < 8 else _a_bits
         a_is_k_major = not self.a_transposed
 
         a_swizzle_mode = self._determinate_swizzle_mode(A_buf, self.a_shared_layout)

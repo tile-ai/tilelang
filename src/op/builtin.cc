@@ -52,7 +52,7 @@ TVM_REGISTER_PASS_CONFIG_OPTION(kDisableOutOfBoundWarning, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnableDumpIR, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDumpIRDir, ffi::String);
 
-DataType cuTensorMapType() { return DataType::UInt(8, 128); }
+DataType CuTensorMapType() { return DataType::UInt(8, 128); }
 
 #define TIR_DEFINE_TL_BUILTIN(OpName)                                          \
   const Op &OpName() {                                                         \
@@ -408,6 +408,9 @@ TIR_DEFINE_TL_BUILTIN(wait_wgmma)
                                Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_TL_BUILTIN(pack_b16).set_num_inputs(2).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(pack_b8x4).set_num_inputs(4).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 
 TIR_DEFINE_TL_BUILTIN(cluster_arrive_relaxed)

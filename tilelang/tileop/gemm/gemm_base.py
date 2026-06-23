@@ -25,9 +25,13 @@ class GemmBase:
     gemm_node: Node
 
     def __post_init__(self) -> None:
+        # Validate the *effective* MMA operand dtypes. On SM120 FP4/FP8 inputs are
+        # staged as uint8 byte storage (1 elem/byte); a_dtype/b_dtype map that to
+        # the real float4_e2m1fn / float8_e4m3fn the f8f6f4 MMA consumes, so an
+        # FP8 x FP4 (a8w4) pair validates as a legitimate mixed f8f6f4 GEMM.
         validate_gemm_ab_dtypes(
-            self.A.dtype,
-            self.B.dtype,
+            self.a_dtype,
+            self.b_dtype,
             a_in_tmem=is_tensor_memory(self.A),
             allow_f8f6f4_mixed=self.allow_f8f6f4_mixed_dtypes,
         )

@@ -21,8 +21,22 @@ import tilelang.language as T
 
 
 FP4_E2M1_TO_FLOAT = [
-    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
+    0.0,
+    0.5,
+    1.0,
+    1.5,
+    2.0,
+    3.0,
+    4.0,
+    6.0,
+    -0.0,
+    -0.5,
+    -1.0,
+    -1.5,
+    -2.0,
+    -3.0,
+    -4.0,
+    -6.0,
 ]
 
 
@@ -44,8 +58,7 @@ def pack_e4m3x4_to_u32(values):
 # ---------------------------------------------------------------------------
 # Plain FP4 (kind::f8f6f4): A/B are native float4_e2m1fn, transpose_B (TN).
 # ---------------------------------------------------------------------------
-def matmul_fp4_sm100(M, N, K, block_M, block_N, block_K, in_dtype, out_dtype,
-                     accum_dtype, num_stages=1, threads=128):
+def matmul_fp4_sm100(M, N, K, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_stages=1, threads=128):
 
     @T.prim_func
     def main(
@@ -65,9 +78,13 @@ def matmul_fp4_sm100(M, N, K, block_M, block_N, block_K, in_dtype, out_dtype,
                 T.copy(A[by * block_M, k * block_K], A_shared)
                 T.copy(B[bx * block_N, k * block_K], B_shared)
                 T.tcgen05_gemm(
-                    A_shared, B_shared, C_tmem,
-                    transpose_A=False, transpose_B=True,
-                    mbar=mbar, clear_accum=(k == 0),
+                    A_shared,
+                    B_shared,
+                    C_tmem,
+                    transpose_A=False,
+                    transpose_B=True,
+                    mbar=mbar,
+                    clear_accum=(k == 0),
                 )
                 T.mbarrier_wait_parity(mbar, k % 2)
 
@@ -132,11 +149,17 @@ def matmul_nvfp4_sm100(M, N, K, block_M, block_N, block_K, out_dtype, accum_dtyp
                     T.tcgen05_cp_warpx4(SFB_shared, SFB_tmem)
                 T.sync_threads()
 
-                if 32 <= tx and tx < 64:
+                if tx >= 32 and tx < 64:
                     T.tcgen05_gemm_blockscaled(
-                        A_shared, B_shared, C_tmem, SFA_tmem, SFB_tmem,
-                        transpose_B=True, mbar=mbar,
-                        clear_accum=(ko == 0), is_nvfp4=True,
+                        A_shared,
+                        B_shared,
+                        C_tmem,
+                        SFA_tmem,
+                        SFB_tmem,
+                        transpose_B=True,
+                        mbar=mbar,
+                        clear_accum=(ko == 0),
+                        is_nvfp4=True,
                     )
                 T.mbarrier_wait_parity(mbar, ko % 2)
                 T.sync_threads()
@@ -179,7 +202,9 @@ def run_fp4(args):
 
     func = matmul_fp4_sm100(M, N, K, block_M, block_N, block_K, T.float4_e2m1fn, T.float32, T.float32)
     jit_kernel = tilelang.compile(
-        func, out_idx=[2], target={"kind": "cuda", "arch": arch},
+        func,
+        out_idx=[2],
+        target={"kind": "cuda", "arch": arch},
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
@@ -215,12 +240,12 @@ def run_nvfp4(args):
     sf_tiles = (K + block_K - 1) // block_K
     blocks_per_tile = block_K // 16
 
-    print(f"Running SM100 NVFP4 GEMM (kind::mxf4nvf4.block_scale): M={M}, N={N}, K={K}, arch={arch}, "
-          f"scale=random")
+    print(f"Running SM100 NVFP4 GEMM (kind::mxf4nvf4.block_scale): M={M}, N={N}, K={K}, arch={arch}, scale=random")
 
     kernel = tilelang.compile(
         matmul_nvfp4_sm100(M, N, K, block_M, block_N, block_K, T.float32, T.float32),
-        out_idx=[4], target={"kind": "cuda", "arch": arch},
+        out_idx=[4],
+        target={"kind": "cuda", "arch": arch},
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
@@ -241,7 +266,7 @@ def run_nvfp4(args):
         e4 = vals.to(torch.float8_e4m3fn).view(torch.uint8)
         out = torch.zeros(sf_tiles * rows, 4, device="cuda", dtype=torch.uint8)
         for t in range(sf_tiles):
-            out[t * rows:(t + 1) * rows, :blocks_per_tile] = e4[:, t * blocks_per_tile:(t + 1) * blocks_per_tile]
+            out[t * rows : (t + 1) * rows, :blocks_per_tile] = e4[:, t * blocks_per_tile : (t + 1) * blocks_per_tile]
         return out.contiguous().view(torch.uint32).reshape(sf_tiles * rows)
 
     def decode_sf_full(sf, rows):
@@ -279,13 +304,13 @@ def _bench(fn, M, N, K, args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="FP4 / NVFP4 GEMM on SM100/SM110")
-    parser.add_argument("--nvfp4", action="store_true",
-                        help="run NVFP4 block-scaled GEMM with random E4M3 scales (default: plain FP4)")
+    parser.add_argument("--nvfp4", action="store_true", help="run NVFP4 block-scaled GEMM with random E4M3 scales (default: plain FP4)")
     parser.add_argument("--m", type=int, default=None)
     parser.add_argument("--n", type=int, default=None)
     parser.add_argument("--k", type=int, default=None)
-    parser.add_argument("--input-mode", default=os.environ.get("TL_FP4_INPUT_MODE", "random"),
-                        help="[fp4] random|positive|low_nibble|high_nibble")
+    parser.add_argument(
+        "--input-mode", default=os.environ.get("TL_FP4_INPUT_MODE", "random"), help="[fp4] random|positive|low_nibble|high_nibble"
+    )
     parser.add_argument("--warmup", type=int, default=int(os.environ.get("TL_FP4_WARMUP", "20")))
     parser.add_argument("--iters", type=int, default=int(os.environ.get("TL_FP4_ITERS", "100")))
     parser.add_argument("--arch", default=os.environ.get("TL_FP4_ARCH"))

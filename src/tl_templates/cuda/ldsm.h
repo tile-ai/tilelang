@@ -94,16 +94,17 @@ TL_DEVICE void ptx_ldmatrix_x4_trans(void const *const smem_ptr,
       : "r"(smem_int_ptr));
 }
 
-TL_DEVICE void ptx_stmatrix_x1(void const *const smem_ptr,
-                               const int32_t &value0) {
+TL_DEVICE void ptx_stmatrix_m8n8_x1(void const *const smem_ptr,
+                                    const int32_t &value0) {
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile("stmatrix.sync.aligned.x1.m8n8.shared.b16 [%0], {%1};\n" ::"r"(
                    smem_int_ptr),
                "r"(value0));
 }
 
-TL_DEVICE void ptx_stmatrix_x2(void const *const smem_ptr,
-                               const int32_t &value0, const int32_t &value1) {
+TL_DEVICE void ptx_stmatrix_m8n8_x2(void const *const smem_ptr,
+                                    const int32_t &value0,
+                                    const int32_t &value1) {
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile(
       "stmatrix.sync.aligned.x2.m8n8.shared.b16 [%0], {%1, %2};\n" ::"r"(
@@ -111,9 +112,11 @@ TL_DEVICE void ptx_stmatrix_x2(void const *const smem_ptr,
       "r"(value0), "r"(value1));
 }
 
-TL_DEVICE void ptx_stmatrix_x4(void const *const smem_ptr,
-                               const int32_t &value0, const int32_t &value1,
-                               const int32_t &value2, const int32_t &value3) {
+TL_DEVICE void ptx_stmatrix_m8n8_x4(void const *const smem_ptr,
+                                    const int32_t &value0,
+                                    const int32_t &value1,
+                                    const int32_t &value2,
+                                    const int32_t &value3) {
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile(
       "stmatrix.sync.aligned.x4.m8n8.shared.b16 [%0], {%1, %2, %3, %4};\n" ::
@@ -121,8 +124,8 @@ TL_DEVICE void ptx_stmatrix_x4(void const *const smem_ptr,
       "r"(value0), "r"(value1), "r"(value2), "r"(value3));
 }
 
-TL_DEVICE void ptx_stmatrix_x1_trans(void const *const smem_ptr,
-                                     const int32_t &value0) {
+TL_DEVICE void ptx_stmatrix_m8n8_x1_trans(void const *const smem_ptr,
+                                          const int32_t &value0) {
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile(
       "stmatrix.sync.aligned.x1.trans.m8n8.shared.b16 [%0], {%1};\n" ::"r"(
@@ -130,9 +133,9 @@ TL_DEVICE void ptx_stmatrix_x1_trans(void const *const smem_ptr,
       "r"(value0));
 }
 
-TL_DEVICE void ptx_stmatrix_x2_trans(void const *const smem_ptr,
-                                     const int32_t &value0,
-                                     const int32_t &value1) {
+TL_DEVICE void ptx_stmatrix_m8n8_x2_trans(void const *const smem_ptr,
+                                          const int32_t &value0,
+                                          const int32_t &value1) {
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile(
       "stmatrix.sync.aligned.x2.trans.m8n8.shared.b16 [%0], {%1, %2};\n" ::"r"(
@@ -140,15 +143,86 @@ TL_DEVICE void ptx_stmatrix_x2_trans(void const *const smem_ptr,
       "r"(value0), "r"(value1));
 }
 
+TL_DEVICE void ptx_stmatrix_m8n8_x4_trans(void const *const smem_ptr,
+                                          const int32_t &value0,
+                                          const int32_t &value1,
+                                          const int32_t &value2,
+                                          const int32_t &value3) {
+  uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
+  asm volatile("stmatrix.sync.aligned.x4.trans.m8n8.shared.b16 [%0], {%1, %2, "
+               "%3, %4};\n" ::"r"(smem_int_ptr),
+               "r"(value0), "r"(value1), "r"(value2), "r"(value3));
+}
+
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) &&                       \
+    (defined(__CUDA_ARCH_FEAT_SM100_ALL) || defined(__CUDA_ARCH_FEAT_SM100_F))
+
+TL_DEVICE void ptx_stmatrix_m16n8_x1_trans(void const *const smem_ptr,
+                                           const int32_t &value0) {
+  uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
+  asm volatile(
+      "stmatrix.sync.aligned.m16n8.x1.trans.shared.b8 [%0], {%1};\n" ::"r"(
+          smem_int_ptr),
+      "r"(value0));
+}
+
+TL_DEVICE void ptx_stmatrix_m16n8_x2_trans(void const *const smem_ptr,
+                                           const int32_t &value0,
+                                           const int32_t &value1) {
+  uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
+  asm volatile(
+      "stmatrix.sync.aligned.m16n8.x2.trans.shared.b8 [%0], {%1, %2};\n" ::"r"(
+          smem_int_ptr),
+      "r"(value0), "r"(value1));
+}
+
+TL_DEVICE void ptx_stmatrix_m16n8_x4_trans(void const *const smem_ptr,
+                                           const int32_t &value0,
+                                           const int32_t &value1,
+                                           const int32_t &value2,
+                                           const int32_t &value3) {
+  uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
+  asm volatile(
+      "stmatrix.sync.aligned.m16n8.x4.trans.shared.b8 [%0], {%1, %2, %3, "
+      "%4};\n" ::"r"(smem_int_ptr),
+      "r"(value0), "r"(value1), "r"(value2), "r"(value3));
+}
+
+#endif
+
+TL_DEVICE void ptx_stmatrix_x1(void const *const smem_ptr,
+                               const int32_t &value0) {
+  ptx_stmatrix_m8n8_x1(smem_ptr, value0);
+}
+
+TL_DEVICE void ptx_stmatrix_x2(void const *const smem_ptr,
+                               const int32_t &value0, const int32_t &value1) {
+  ptx_stmatrix_m8n8_x2(smem_ptr, value0, value1);
+}
+
+TL_DEVICE void ptx_stmatrix_x4(void const *const smem_ptr,
+                               const int32_t &value0, const int32_t &value1,
+                               const int32_t &value2, const int32_t &value3) {
+  ptx_stmatrix_m8n8_x4(smem_ptr, value0, value1, value2, value3);
+}
+
+TL_DEVICE void ptx_stmatrix_x1_trans(void const *const smem_ptr,
+                                     const int32_t &value0) {
+  ptx_stmatrix_m8n8_x1_trans(smem_ptr, value0);
+}
+
+TL_DEVICE void ptx_stmatrix_x2_trans(void const *const smem_ptr,
+                                     const int32_t &value0,
+                                     const int32_t &value1) {
+  ptx_stmatrix_m8n8_x2_trans(smem_ptr, value0, value1);
+}
+
 TL_DEVICE void ptx_stmatrix_x4_trans(void const *const smem_ptr,
                                      const int32_t &value0,
                                      const int32_t &value1,
                                      const int32_t &value2,
                                      const int32_t &value3) {
-  uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
-  asm volatile("stmatrix.sync.aligned.x4.trans.m8n8.shared.b16 [%0], {%1, %2, "
-               "%3, %4};\n" ::"r"(smem_int_ptr),
-               "r"(value0), "r"(value1), "r"(value2), "r"(value3));
+  ptx_stmatrix_m8n8_x4_trans(smem_ptr, value0, value1, value2, value3);
 }
 
 } // namespace tl

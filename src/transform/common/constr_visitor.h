@@ -42,7 +42,7 @@ struct Constr {
   Constr(Constr &&other) = default;
   Constr &operator=(const Constr &other) = default;
 
-  void format(std::ostream &os) const {
+  void Format(std::ostream &os) const {
     os << "Constr(kind=";
     switch (kind) {
     case kConstr:
@@ -138,11 +138,11 @@ struct ConstrSet {
     return result;
   }
 
-  void format(std::ostream &os) const {
+  void Format(std::ostream &os) const {
     os << "ConstrSet(size=" << constrs_.size() << ") {\n";
     for (size_t i = 0; i < constrs_.size(); ++i) {
       os << "  [" << i << "] ";
-      constrs_[i].format(os);
+      constrs_[i].Format(os);
       os << "\n";
     }
     os << "}";

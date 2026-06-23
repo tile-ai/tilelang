@@ -566,7 +566,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   // Return error code of zero on success
   body = SeqStmt({body, Evaluate(ret(Integer(0)))});
 
-  body = MergeNest({seq_init, binder.init_nest(), seq_check, binder.asserts(),
+  body = MergeNest({seq_init, binder.InitNest(), seq_check, binder.Asserts(),
                     arg_buffer_declarations},
                    body);
   func_ptr->body = body;

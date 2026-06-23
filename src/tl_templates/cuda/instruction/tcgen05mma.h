@@ -809,8 +809,9 @@ TL_DEVICE void tcgen05mma_mxf4nvf4_blockscaled_ss(
     uint32_t const & /*tmem_c*/, uint32_t const & /*scalec*/,
     uint32_t const & /*desc_val*/, uint32_t const & /*tmem_sfa*/,
     uint32_t const & /*tmem_sfb*/) {
-  static_assert(always_false_v<std::bool_constant<use_2cta>>,
-                "tl::tcgen05mma_mxf4nvf4_blockscaled_ss: unsupported CTA group");
+  static_assert(
+      always_false_v<std::bool_constant<use_2cta>>,
+      "tl::tcgen05mma_mxf4nvf4_blockscaled_ss: unsupported CTA group");
 }
 
 template <>

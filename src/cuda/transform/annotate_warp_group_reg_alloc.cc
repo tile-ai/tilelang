@@ -281,8 +281,10 @@ private:
             int consumer_wg = (total_threads > producer_threads)
                                   ? (total_threads - producer_threads) / 128
                                   : -1;
-            if (producer_wg == 1 && consumer_wg == 2) {
-              // 1P + 2C (384 threads): 128*24 + 256*240 = 64512. Original pair.
+            if (producer_wg == 1 && consumer_wg <= 2) {
+              // 1P + 1C (128 threads): 128*24 + 128*240 = 32256 <= 64512.
+              // 1P + 2C (384 threads): 128*24 + 256*240 = 64512.
+              // Original pair is good.
             } else if (producer_wg == 2 && consumer_wg == 2) {
               // 2P + 2C (512 threads): 256*24 + 256*224 = 63488 <= 64512.
               final_inc_reg = 224;

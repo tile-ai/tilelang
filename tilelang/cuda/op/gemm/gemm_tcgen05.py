@@ -70,6 +70,13 @@ class GemmTCGEN5(GemmBase):
         to keep the SMEM descriptor consistent with the actual data layout.
         """
         dtype_bits = dtype.bits if hasattr(dtype, "bits") else DataType(dtype).bits
+        # float4_e2m1_unpacked is an 8-bit byte-container dtype (one e2m1 per byte
+        # for tcgen05 kind::f8f6f4 / mxf8f6f4). It is laid out and addressed as a
+        # dense 8-bit operand via the >=8-bit bank-swizzle path below, which
+        # together with the descriptor's elem_bits=8 reproduces the gap-expanded
+        # byte stride. _determinate_swizzle_mode only accepts the ALIGN16B layout
+        # for genuinely sub-byte (<8-bit) operands, so unpacked FP4 must NOT take
+        # that branch.
         if dtype_bits < 8:
             import tvm
 

@@ -203,10 +203,10 @@ static constexpr const char *kDumpIRDir = "tl.dump_ir_path";
 /*!
  * \brief Get the type of the CUDA tensor map
  *
- * DataType cuTensorMapType()
+ * DataType CuTensorMapType()
  *
  */
-DataType cuTensorMapType();
+DataType CuTensorMapType();
 
 /*!
  * \brief TileLang intrinsic for carrying pointer access metadata in frontend.
@@ -549,6 +549,14 @@ TVM_DLL const Op &ptx_st_bulk_shared();
  *
  */
 TVM_DLL const Op &pack_b16();
+
+/*!
+ * \brief Pack four b8 value into a b32 value
+ *
+ * int32 pack_b8x4(b8_value, b8_value, b8_value, b8_value)
+ *
+ */
+TVM_DLL const Op &pack_b8x4();
 
 /*!
  * \brief Issue a shared memory fence for async operations

@@ -276,8 +276,7 @@ def nvfp4_gemm(
     B_shape = retrieve_shape(B_region)
     C_shape = retrieve_shape(C_region)
 
-    assert len(A_shape) >= 2 and len(B_shape) >= 2, (
-        f"T.nvfp4_gemm requires rank>=2 A/B operands, got {len(A_shape)}, {len(B_shape)}")
+    assert len(A_shape) >= 2 and len(B_shape) >= 2, f"T.nvfp4_gemm requires rank>=2 A/B operands, got {len(A_shape)}, {len(B_shape)}"
     M, N = C_shape
     M_A = A_shape[-1] if transpose_A else A_shape[-2]
     K = A_shape[-2] if transpose_A else A_shape[-1]
@@ -398,9 +397,9 @@ def tcgen05_gemm_blockscaled(
     wg_wait: int = 0,
     mbar: BarrierType | None = None,
     *,
-    k_start: int | tirx.PrimExpr,
-    sf_a_granularity_k: int,
-    sf_b_granularity_k: int,
+    k_start: int | tirx.PrimExpr = 0,
+    sf_a_granularity_k: int = 16,
+    sf_b_granularity_k: int = 16,
     use_2cta: bool = False,
     is_nvfp4: bool = False,
 ) -> tirx.PrimExpr:
@@ -480,9 +479,7 @@ def tcgen05_gemm_blockscaled(
     assert len(B_shape) >= 2, "current only support B as a 2D or higher-order tensor"
 
     M, N = C_shape
-    is_packed_nvfp4 = (
-        is_nvfp4 and str(A_region.buffer.dtype) == "uint8" and str(B_region.buffer.dtype) == "uint8"
-    )
+    is_packed_nvfp4 = is_nvfp4 and str(A_region.buffer.dtype) == "uint8" and str(B_region.buffer.dtype) == "uint8"
     if is_packed_nvfp4:
         assert not transpose_A, "Packed NVFP4 tcgen05_gemm_blockscaled expects non-transposed A"
         M_A = A_shape[-2]

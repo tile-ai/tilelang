@@ -25,6 +25,12 @@ def _annotation_value(annotations: dict, key: str, default):
 class GemmMMA(GemmBase):
     intrin_emitter_cls = TensorCoreIntrinEmitter
 
+    @property
+    def allow_f8f6f4_mixed_dtypes(self) -> bool:
+        # mma.sync.aligned.kind::f8f6f4 supports mixed f8/f6/f4 operands, e.g.
+        # FP8 (float8_e4m3fn) x FP4 (float4_e2m1fn) for A8W4 GEMM/MoE on SM120.
+        return True
+
     def _make_mma_emitter(self, target: Target, thread_nums: int, thread_var: tirx.Var | None = None):
         if self.is_blockscaled:
             m_warp, n_warp = 1, 1

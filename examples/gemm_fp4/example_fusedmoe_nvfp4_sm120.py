@@ -168,10 +168,10 @@ def fusedmoe_nvfp4_sm120(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("-n","--num-tokens", type=int, default=1024)
-    parser.add_argument("-c","--hidden-size", type=int, default=256)
-    parser.add_argument("-s","--intermediate-size", type=int, default=1024)
-    args = parser.parse_args()  
+    parser.add_argument("-n", "--num-tokens", type=int, default=1024)
+    parser.add_argument("-c", "--hidden-size", type=int, default=256)
+    parser.add_argument("-s", "--intermediate-size", type=int, default=1024)
+    args = parser.parse_args()
     num_tokens = args.num_tokens
     hidden_size = args.hidden_size
     intermediate_size = args.intermediate_size

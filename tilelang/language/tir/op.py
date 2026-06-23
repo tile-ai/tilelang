@@ -1000,6 +1000,7 @@ def ptx_mma_blockscaled(
     ``mma.sync.aligned.kind::mxf4nvf4.block_scale`` with FP4 A/B,
     FP32 accumulators, and UE4M3 scale factors.
     """
+
     def _string_imm(value):
         return tvm.tirx.StringImm(str(value))
 

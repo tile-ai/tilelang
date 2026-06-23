@@ -935,9 +935,9 @@ private:
       is_ptx_ = true;
       auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
       is_ptx_ = false;
-      // form: T.ptx_stmatrix(trans, num, smem_ptr, value0, value1, ...)
-      // smem_ptr: T.tvm_access_ptr(ptype, data, offset, extent, rw_mask)
-      // or T.address_of(buffer, offset)
+      // form: T.ptx_stmatrix(trans, num, smem_ptr, value0, value1, ...,
+      // [shape]) smem_ptr: T.tvm_access_ptr(ptype, data, offset, extent,
+      // rw_mask) or T.address_of(buffer, offset)
       PrimExpr access_ptr = call->args[2];
       Call access_ptr_call = Downcast<Call>(access_ptr);
 

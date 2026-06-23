@@ -300,7 +300,7 @@ Var InputPlaceholder(size_t idx) {
   return getPlaceholder(std::string{'_', char('i' + idx)});
 }
 
-Map<Var, Range> LayoutNode::getVarMap() const {
+Map<Var, Range> LayoutNode::GetVarMap() const {
   Map<Var, Range> map;
   for (size_t i = 0; i < InputDim(); i++) {
     map.Set(InputPlaceholder(i), {0, input_size_[i]});
@@ -308,8 +308,8 @@ Map<Var, Range> LayoutNode::getVarMap() const {
   return map;
 }
 
-Map<Var, Range> FragmentNode::getVarMap() const {
-  auto map = LayoutNode::getVarMap();
+Map<Var, Range> FragmentNode::GetVarMap() const {
+  auto map = LayoutNode::GetVarMap();
   map.Set(ReplicationPlaceholder(), {0, ReplicateExtent()});
   return map;
 }
@@ -351,7 +351,7 @@ void LayoutNode::RegisterReflection() {
 }
 
 void LayoutNode::UpdateAnalyzer(arith::Analyzer *analyzer) const {
-  for (const auto &[var, dom] : getVarMap()) {
+  for (const auto &[var, dom] : GetVarMap()) {
     analyzer->Bind(var, dom);
   }
 }
@@ -623,7 +623,7 @@ LayoutNode::InverseWithLevel(bool require_padding_guard) const {
                   << symbolic_dims;
   }
   arith::IterMapResult res =
-      arith::DetectIterMap(forward_index_, getVarMap(), 1, level, &analyzer);
+      arith::DetectIterMap(forward_index_, GetVarMap(), 1, level, &analyzer);
   if (!res->errors.empty()) {
     std::ostringstream msg;
     msg << "Layout " << DebugOutput() << " has errors: " << res->errors;
@@ -799,7 +799,7 @@ FragmentNode::FragmentNode(Array<PrimExpr> input_size,
   forward_thread_ = analyzer.Simplify(forward_thread);
   if (forward_index.empty()) {
     forward_index = {
-        infer_fragment_index(getVarMap(), forward_thread_, &analyzer)};
+        infer_fragment_index(GetVarMap(), forward_thread_, &analyzer)};
   }
   forward_index_ = forward_index.Map(
       [&](const PrimExpr &e) { return analyzer.Simplify(e); });
@@ -901,7 +901,7 @@ FragmentNode::DetectInjective(bool require_padding_guard) const {
         << "NoCheck; symbolic dims: " << symbolic_dims;
   }
 
-  return arith::DetectIterMap(indices, getVarMap(), 1, level, &analyzer);
+  return arith::DetectIterMap(indices, GetVarMap(), 1, level, &analyzer);
 }
 
 PrimExpr FragmentNode::ThreadExtent() const {
@@ -955,7 +955,7 @@ FragmentNode::InverseWithLevel(bool require_padding_guard) const {
 
 Fragment FragmentNode::CondenseReplicateVar() const {
   arith::Analyzer analyzer;
-  auto input_iters = getVarMap();
+  auto input_iters = GetVarMap();
   input_iters.Set(ReplicationPlaceholder(), {0, ReplicateExtent()});
   PrimExpr new_forward_thread;
   IterVar new_thread_replicate;
@@ -1133,41 +1133,41 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](Fragment fragment) { return fragment->CondenseReplicateVar(); })
       .def("tl.make_swizzled_layout",
            [](const Buffer &buffer, bool k_inner, bool allow_pad) {
-             return makeSwizzledLayout(buffer, k_inner, allow_pad);
+             return MakeSwizzledLayout(buffer, k_inner, allow_pad);
            })
       .def("tl.make_volta_swizzled_layout",
            [](const Buffer &buffer, bool is_a, bool k_inner) {
-             return makeVoltaSwizzledLayout(buffer, is_a, k_inner);
+             return MakeVoltaSwizzledLayout(buffer, is_a, k_inner);
            })
       .def("tl.make_wgmma_swizzled_layout",
            [](const Buffer &buffer, int continuity, bool k_inner) {
-             return makeWgmmaSwizzledLayout(buffer, continuity, k_inner);
+             return MakeWgmmaSwizzledLayout(buffer, continuity, k_inner);
            })
       .def("tl.make_tcgen05mma_swizzled_layout",
            [](const Buffer &buffer, int continuity, bool k_inner) {
-             return makeTcgen05mmaSwizzledLayout(buffer, continuity, k_inner);
+             return MakeTcgen05MmaSwizzledLayout(buffer, continuity, k_inner);
            })
       .def("tl.make_full_bank_swizzled_layout",
            [](const Buffer &buffer) {
-             return makeFullBankSwizzleLayout(buffer);
+             return MakeFullBankSwizzleLayout(buffer);
            })
       .def("tl.make_half_bank_swizzled_layout",
            [](const Buffer &buffer) {
-             return makeHalfBankSwizzleLayout(buffer);
+             return MakeHalfBankSwizzleLayout(buffer);
            })
       .def("tl.make_quarter_bank_swizzled_layout",
            [](const Buffer &buffer) {
-             return makeQuarterBankSwizzleLayout(buffer);
+             return MakeQuarterBankSwizzleLayout(buffer);
            })
       .def("tl.make_align16b_swizzled_layout",
            [](const Buffer &buffer) {
              return makeAlign16BSwizzleLayout(buffer);
            })
       .def("tl.make_linear_layout",
-           [](Array<PrimExpr> shape) { return makeLinearLayout(shape); })
-      .def("tl.make_gemm_fragment_8x8", []() { return makeGemmFragment8x8(); })
+           [](Array<PrimExpr> shape) { return MakeLinearLayout(shape); })
+      .def("tl.make_gemm_fragment_8x8", []() { return MakeGemmFragment8x8(); })
       .def("tl.make_gemm_fragment_8x8_transposed",
-           []() { return makeGemmFragment8x8Transposed(); })
+           []() { return MakeGemmFragment8x8Transposed(); })
       .def("tl.make_fully_replicated_layout_fragment",
            [](Array<PrimExpr> shape, PrimExpr thread_extent) {
              return Fragment::FullyReplicated(shape, thread_extent);

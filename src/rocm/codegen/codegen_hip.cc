@@ -302,7 +302,7 @@ void CodeGenTileLangHIP::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     return;
   }
 
-  if (t == tl::cuTensorMapType()) {
+  if (t == tl::CuTensorMapType()) {
     os << "CUtensorMap";
     return;
   }
@@ -1159,11 +1159,12 @@ std::string CodeGenTileLangHIP::GetBufferRef(DataType t,
 }
 
 void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
-  auto print_extern_call_stmt = [&](std::string name, size_t offset = 0) {
+  auto print_extern_call_stmt = [&](std::string name, size_t start = 0,
+                                    size_t end = 0) {
     this->PrintIndent();
     this->stream << name << "(";
-    for (size_t i = offset; i < op->args.size(); i++) {
-      if (i > offset)
+    for (size_t i = start; i < op->args.size() - end; i++) {
+      if (i > start)
         this->stream << ", ";
       this->stream << this->PrintExpr(op->args[i]);
     }
@@ -1230,10 +1231,16 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::ptx_stmatrix())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
+    bool has_shape =
+        op->args.size() >= 4 && op->args.back().as<StringImmNode>();
+    if (has_shape) {
+      ICHECK_EQ(Downcast<StringImm>(op->args.back())->value, "m8n8")
+          << "HIP stmatrix codegen only supports m8n8";
+    }
     std::string func_name = "tl::ptx_stmatrix_x" + std::to_string(num);
     if (trans == 1)
       func_name += "_trans";
-    print_extern_call_stmt(func_name, 2);
+    print_extern_call_stmt(func_name, 2, has_shape ? 1 : 0);
   } else if (op->op.same_as(tl::wait_wgmma())) {
     this->PrintIndent();
     int num_mma = Downcast<IntImm>(op->args[0])->value;

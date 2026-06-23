@@ -18,6 +18,7 @@ from pathlib import Path
 
 HEADER_SUFFIXES = {".h", ".hh", ".hpp", ".cuh"}
 SOURCE_SUFFIXES = {".cc", ".cpp", ".cxx", ".cu"}
+CPP_SUFFIXES = HEADER_SUFFIXES | SOURCE_SUFFIXES
 DEFAULT_EXCLUDED_PARTS = {
     "3rdparty",
     "build",
@@ -66,6 +67,10 @@ QUALIFIER_TOKENS = {
     "static",
     "virtual",
 }
+
+REGISTERED_TL_BUILTIN_RE = re.compile(r"\bTIR_DEFINE_TL_BUILTIN\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)")
+REGISTERED_LITERAL_TL_OP_RE = re.compile(r'\bTVM_REGISTER_OP\s*\(\s*"tl\.([A-Za-z_][A-Za-z0-9_]*)"\s*\)')
+OP_ACCESSOR_DECL_RE = re.compile(r"^(?:TVM_DLL\s+)?const\s+Op\s*&\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 
 
 @dataclass(order=True)
@@ -117,6 +122,11 @@ def parse_args() -> argparse.Namespace:
         "--json",
         action="store_true",
         help="Emit JSON instead of text.",
+    )
+    parser.add_argument(
+        "--github-warnings",
+        action="store_true",
+        help="Emit GitHub Actions warning annotations without changing the exit code.",
     )
     parser.add_argument(
         "--limit",
@@ -179,6 +189,23 @@ def candidate_files(args: argparse.Namespace) -> list[Path]:
     return sorted(set(result))
 
 
+def registry_scan_files(args: argparse.Namespace) -> list[Path]:
+    roots = {Path(raw_path) for raw_path in args.paths if Path(raw_path).exists()}
+    if Path("src").exists():
+        roots.add(Path("src"))
+
+    result: list[Path] = []
+    for root in roots:
+        if root.is_file():
+            if root.suffix in CPP_SUFFIXES and not is_excluded(root, args):
+                result.append(root)
+            continue
+        for child in root.rglob("*"):
+            if child.is_file() and child.suffix in CPP_SUFFIXES and not is_excluded(child, args):
+                result.append(child)
+    return sorted(set(result))
+
+
 def strip_line_comment(line: str) -> str:
     """Strip // comments while preserving URLs and simple string literals enough for auditing."""
     in_string = False
@@ -200,6 +227,25 @@ def strip_block_comments(text: str) -> str:
     return re.sub(r"/\*.*?\*/", lambda match: "\n" * match.group(0).count("\n"), text, flags=re.S)
 
 
+def has_nolint_suppression(lines: list[str], index: int) -> bool:
+    if "NOLINT" in lines[index]:
+        return True
+    return index > 0 and "NOLINTNEXTLINE" in lines[index - 1]
+
+
+def collect_registered_op_names(args: argparse.Namespace) -> set[str]:
+    names: set[str] = set()
+    for path in registry_scan_files(args):
+        text = strip_block_comments(path.read_text(encoding="utf-8", errors="replace"))
+        for line in text.splitlines():
+            stripped = strip_line_comment(line).strip()
+            if not stripped or stripped.startswith("#define"):
+                continue
+            names.update(REGISTERED_TL_BUILTIN_RE.findall(stripped))
+            names.update(REGISTERED_LITERAL_TL_OP_RE.findall(stripped))
+    return names
+
+
 def is_pascal_case(name: str) -> bool:
     if not re.fullmatch(r"[A-Z][A-Za-z0-9]*", name):
         return False
@@ -208,6 +254,12 @@ def is_pascal_case(name: str) -> bool:
 
 def is_tvm_hook_name(name: str) -> bool:
     return bool(re.fullmatch(r"[A-Z][A-Za-z0-9]*_", name))
+
+
+def is_registered_op_accessor(statement: str, registered_op_names: set[str]) -> bool:
+    compact = " ".join(statement.strip().split())
+    match = OP_ACCESSOR_DECL_RE.match(compact)
+    return bool(match and match.group(1) in registered_op_names)
 
 
 def split_parameters(params: str) -> list[str]:
@@ -255,6 +307,8 @@ def function_statement_name(statement: str) -> tuple[str, str] | None:
         return None
     if compact.startswith(("TVM_", "ICHECK", "LOG(", "CHECK")):
         return None
+    if re.search(r"\(\s*\*", compact):
+        return None
     first_paren = compact.find("(")
     if first_paren >= 0 and "=" in compact[:first_paren]:
         return None
@@ -294,7 +348,7 @@ def statement_starting_at(lines: list[str], index: int) -> tuple[str, int]:
     return " ".join(pieces), end_index
 
 
-def audit_functions(path: Path, lines: list[str]) -> list[Finding]:
+def audit_functions(path: Path, lines: list[str], registered_op_names: set[str]) -> list[Finding]:
     findings: list[Finding] = []
     class_stack: list[ClassState] = []
     brace_depth = 0
@@ -334,6 +388,13 @@ def audit_functions(path: Path, lines: list[str]) -> list[Finding]:
             continue
 
         statement, end_index = statement_starting_at(lines, index)
+        if is_registered_op_accessor(statement, registered_op_names):
+            processed_until = end_index
+            brace_depth += stripped.count("{") - stripped.count("}")
+            while class_stack and brace_depth <= class_stack[-1].brace_depth:
+                class_stack.pop()
+            continue
+
         parsed = function_statement_name(statement)
         if not parsed:
             brace_depth += stripped.count("{") - stripped.count("}")
@@ -343,7 +404,12 @@ def audit_functions(path: Path, lines: list[str]) -> list[Finding]:
         processed_until = end_index
 
         name, params = parsed
-        if not is_pascal_case(name) and not is_tvm_hook_name(name) and "override" not in statement:
+        if (
+            not has_nolint_suppression(lines, index)
+            and not is_pascal_case(name)
+            and not is_tvm_hook_name(name)
+            and "override" not in statement
+        ):
             findings.append(
                 Finding(
                     str(normalize_path(path)),
@@ -481,13 +547,13 @@ def audit_namespace_imports(path: Path, lines: list[str]) -> list[Finding]:
     return findings
 
 
-def audit_file(path: Path) -> list[Finding]:
+def audit_file(path: Path, registered_op_names: set[str]) -> list[Finding]:
     text = path.read_text(encoding="utf-8", errors="replace")
     text = strip_block_comments(text)
     lines = text.splitlines()
     findings: list[Finding] = []
     findings.extend(audit_namespace_imports(path, lines))
-    findings.extend(audit_functions(path, lines))
+    findings.extend(audit_functions(path, lines, registered_op_names))
     findings.extend(audit_object_node_fields(path, lines))
     return sorted(findings)
 
@@ -512,12 +578,33 @@ def print_text(findings: list[Finding], file_count: int, limit: int) -> None:
         print(f"... omitted {len(findings) - limit} finding(s); rerun with --limit 0 to show all.")
 
 
+def github_escape(value: str, *, property_value: bool = False) -> str:
+    value = value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    if property_value:
+        value = value.replace(":", "%3A").replace(",", "%2C")
+    return value
+
+
+def print_github_warnings(findings: list[Finding], limit: int) -> None:
+    shown = findings if limit <= 0 else findings[:limit]
+    for finding in shown:
+        path = github_escape(finding.path, property_value=True)
+        title = github_escape(f"{finding.rule}: {finding.symbol}", property_value=True)
+        message = github_escape(f"{finding.message} Snippet: {finding.snippet}")
+        print(f"::warning file={path},line={finding.line},title={title}::{message}")
+    if limit > 0 and len(findings) > limit:
+        omitted = len(findings) - limit
+        message = github_escape(f"{omitted} additional C++ API style audit finding(s) omitted.")
+        print(f"::notice title=C++ API style audit::{message}")
+
+
 def main() -> int:
     args = parse_args()
     files = candidate_files(args)
+    registered_op_names = collect_registered_op_names(args)
     findings: list[Finding] = []
     for path in files:
-        findings.extend(audit_file(path))
+        findings.extend(audit_file(path, registered_op_names))
     findings.sort()
 
     if args.json:
@@ -530,6 +617,8 @@ def main() -> int:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print_text(findings, len(files), args.limit)
+    if args.github_warnings:
+        print_github_warnings(findings, args.limit)
 
     return 1 if args.fail_on_findings and findings else 0
 

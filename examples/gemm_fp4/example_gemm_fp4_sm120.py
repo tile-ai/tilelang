@@ -22,8 +22,22 @@ from tilelang.layout import make_swizzled_layout
 
 
 FP4_E2M1_TO_FLOAT = [
-    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
+    0.0,
+    0.5,
+    1.0,
+    1.5,
+    2.0,
+    3.0,
+    4.0,
+    6.0,
+    -0.0,
+    -0.5,
+    -1.0,
+    -1.5,
+    -2.0,
+    -3.0,
+    -4.0,
+    -6.0,
 ]
 
 
@@ -48,8 +62,7 @@ def pack_e4m3x4_to_u32(values):
 # ---------------------------------------------------------------------------
 # Plain FP4 (kind::f8f6f4): A/B unpacked to uint8 (1 byte/FP4), fragment T.gemm.
 # ---------------------------------------------------------------------------
-def matmul_fp4_sm120(M, N, K, block_M, block_N, block_K, out_dtype, accum_dtype,
-                     num_stages=2, threads=128):
+def matmul_fp4_sm120(M, N, K, block_M, block_N, block_K, out_dtype, accum_dtype, num_stages=2, threads=128):
 
     @T.prim_func
     def main(
@@ -102,10 +115,12 @@ def matmul_nvfp4_sm120(M, N, K, out_dtype, accum_dtype):
             SFA_local = T.alloc_local((1,), "uint32")
             SFB_local = T.alloc_local((1,), "uint32")
 
-            T.annotate_layout({
-                A_shared: make_swizzled_layout(A_shared),
-                B_shared: make_swizzled_layout(B_shared),
-            })
+            T.annotate_layout(
+                {
+                    A_shared: make_swizzled_layout(A_shared),
+                    B_shared: make_swizzled_layout(B_shared),
+                }
+            )
 
             T.clear(C_local)
             for ko in T.serial(T.ceildiv(K, block_K)):
@@ -113,8 +128,7 @@ def matmul_nvfp4_sm120(M, N, K, out_dtype, accum_dtype):
                 T.copy(B_bytes[bx * block_N, ko * packed_block_K], B_shared)
                 SFA_local[0] = SFA[by, ko]
                 SFB_local[0] = SFB[bx, ko]
-                T.nvfp4_gemm(A_shared, B_shared, SFA_local, SFB_local, C_local,
-                             transpose_B=True, clear_accum=(ko == 0))
+                T.nvfp4_gemm(A_shared, B_shared, SFA_local, SFB_local, C_local, transpose_B=True, clear_accum=(ko == 0))
 
             T.copy(C_local, C[by * block_M, bx * block_N])
 
@@ -128,7 +142,9 @@ def run_fp4(args):
 
     func = matmul_fp4_sm120(M, N, K, block_M, block_N, block_K, T.float32, T.float32, num_stages=2)
     jit_kernel = tilelang.compile(
-        func, out_idx=[2], target="cuda",
+        func,
+        out_idx=[2],
+        target="cuda",
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
@@ -177,11 +193,11 @@ def make_nvfp4_sf(mn, K, block_mn, block_K=64):
 def decode_nvfp4_sf(e4, mn, K, block_mn, block_K=64):
     """[sf_mn, sf_k, 4] E4M3 bytes -> [mn, K] float scale. byte b -> K16-group b
     within the K64 tile; the scale is shared across the block_mn rows of each block."""
-    sc = e4.view(torch.float8_e4m3fn).float()        # [sf_mn, sf_k, 4]
+    sc = e4.view(torch.float8_e4m3fn).float()  # [sf_mn, sf_k, 4]
     sf_mn, sf_k, groups = sc.shape
-    sc = sc.reshape(sf_mn, sf_k * groups)            # [sf_mn, K//16]
+    sc = sc.reshape(sf_mn, sf_k * groups)  # [sf_mn, K//16]
     sc = sc.repeat_interleave(block_mn, dim=0)[:mn]  # [mn, K//16] (rows share)
-    return sc.repeat_interleave(16, dim=1)[:, :K]    # [mn, K]
+    return sc.repeat_interleave(16, dim=1)[:, :K]  # [mn, K]
 
 
 def run_nvfp4(args):
@@ -191,7 +207,8 @@ def run_nvfp4(args):
 
     kernel = tilelang.compile(
         matmul_nvfp4_sm120(M, N, K, T.float32, T.float32),
-        out_idx=[4], target="cuda",
+        out_idx=[4],
+        target="cuda",
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
@@ -235,8 +252,7 @@ def _bench(fn, M, N, K, args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="FP4 / NVFP4 GEMM on SM120")
-    parser.add_argument("--nvfp4", action="store_true",
-                        help="run NVFP4 block-scaled GEMM with random E4M3 scales (default: plain FP4)")
+    parser.add_argument("--nvfp4", action="store_true", help="run NVFP4 block-scaled GEMM with random E4M3 scales (default: plain FP4)")
     parser.add_argument("--m", type=int, default=None)
     parser.add_argument("--n", type=int, default=None)
     parser.add_argument("--k", type=int, default=None)

@@ -1,0 +1,44 @@
+language: en-US
+
+reviews:
+  high_level_summary_instructions: |
+    Add a short "C++ style / lint notes" section when the PR changes C++, CI,
+    lint tooling, or C++ style documentation.
+
+    In that section:
+    - Mention whether the PR touches rules documented in docs/developer_guide/cpp_style.md.
+    - Mention the "C++ API Style Audit (warning only)" CI step when relevant.
+    - Focus on warnings introduced or touched by this PR; do not treat historical backlog as blocking.
+    - Clearly separate correctness, build, and test issues from warning-only style suggestions.
+    - Do not recommend blocking merge for advisory TLCPP003/TLCPP004 findings unless the PR
+      introduces a clear API, FFI, or maintainability risk.
+
+  path_instructions:
+    - path: "src/**/*.{h,hh,hpp,cuh,cc,cpp,cxx,cu}"
+      instructions: |
+        Review changed C++ against docs/developer_guide/cpp_style.md.
+
+        Pay attention to:
+        - Regular C++ APIs should use PascalCase function and method names.
+        - TIR/TileLang registered op accessors may intentionally use lower_snake to mirror registry names.
+        - Parameters and local variables should use descriptive lower_snake names; avoid ambiguous `T`
+          for API parameters.
+        - Public reflected ObjectNode fields are FFI-visible; do not recommend renaming without
+          compatibility notes.
+        - Shared headers should avoid broad `using namespace`; internal .cc/local helper code may
+          follow local TVM style.
+        - Existing warning-only audit findings are advisory unless this PR introduces or worsens them.
+
+    - path: "maint/scripts/audit_cpp_api_style.py"
+      instructions: |
+        Review this audit script as an advisory lint tool, not a hard gate.
+
+        Ensure new checks avoid broad path-specific hacks, support explicit suppressions like NOLINT
+        where appropriate, and do not turn existing TLCPP003/TLCPP004 backlog into CI failures.
+
+    - path: ".github/workflows/**"
+      instructions: |
+        For C++ style audit CI changes, verify the audit remains warning-only unless the PR explicitly
+        changes policy.
+
+        Do not suggest failing CI for existing advisory backlog.

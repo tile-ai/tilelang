@@ -382,7 +382,6 @@ inline uint32_t GetTCGEN5MXF4NVF4BlockScaledInstrDesc(int atom_m, int atom_n,
   return desc;
 }
 
-
 } // namespace tl
 } // namespace tvm
 

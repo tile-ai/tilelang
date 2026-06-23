@@ -34,7 +34,7 @@ std::pair<int, int> ComputeMetalWarpPartition(const GemmWarpPolicyNode &policy,
   TVM_FFI_ICHECK(N % kNPerWarp == 0)
       << "N must be divisible by " << kNPerWarp << ", but got " << N;
 
-  if (policy.isFullRow()) {
+  if (policy.IsFullRow()) {
     m_warp = num_warps;
     n_warp = 1;
     if (M % (m_warp * kMPerWarp) != 0) {
@@ -45,7 +45,7 @@ std::pair<int, int> ComputeMetalWarpPartition(const GemmWarpPolicyNode &policy,
         n_warp = 1;
       }
     }
-  } else if (policy.isFullCol()) {
+  } else if (policy.IsFullCol()) {
     m_warp = 1;
     n_warp = num_warps;
     if (N % (n_warp * kNPerWarp) != 0) {
@@ -56,7 +56,7 @@ std::pair<int, int> ComputeMetalWarpPartition(const GemmWarpPolicyNode &policy,
         m_warp = 1;
       }
     }
-  } else if (policy.isSquare()) {
+  } else if (policy.IsSquare()) {
     std::tie(m_warp, n_warp) =
         ComputeSquareWarpPartition(num_warps, M, N, kMPerWarp, kNPerWarp);
   } else {

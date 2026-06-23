@@ -102,7 +102,7 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         self.wgmma_prefix = f"m{inst_m}n{inst_n}k{inst_k}"
 
     def _determinate_swizzle_mode(self, buffer: Buffer, layout: Layout) -> SwizzleMode:
-        # same behavior to src/layout/gemm_layouts.cc::makeGemmABLayoutHopper
+        # same behavior to src/layout/gemm_layouts.cc::MakeGemmABLayoutHopper
         if layout is None or layout.is_equal(make_linear_layout(buffer)):
             return SwizzleMode.NONE
         elif layout.is_equal(make_quarter_bank_swizzled_layout(buffer)):
@@ -601,7 +601,7 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
             _, local_id = inverse_mma_store_layout.map_indices([i, j])
             return local_id
 
-        # reproduce src/layout/gemm_layouts.cc::makeGemmFragmentCHopper
+        # reproduce src/layout/gemm_layouts.cc::MakeGemmFragmentCHopper
         base_fragment = T.Fragment(
             [micro_size_x, micro_size_y],
             forward_thread_fn=forward_thread,

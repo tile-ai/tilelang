@@ -22,8 +22,22 @@ import tilelang.language as T
 
 
 FP4_E2M1_TO_FLOAT = [
-    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
+    0.0,
+    0.5,
+    1.0,
+    1.5,
+    2.0,
+    3.0,
+    4.0,
+    6.0,
+    -0.0,
+    -0.5,
+    -1.0,
+    -1.5,
+    -2.0,
+    -3.0,
+    -4.0,
+    -6.0,
 ]
 
 
@@ -36,8 +50,7 @@ def unpack_fp4_to_float(packed, rows, cols):
     return lut[codes]
 
 
-def fusedmoe_nvfp4_sm100(num_tokens, hidden, intermediate,
-                         block_token=128, block_hidden=64, block_expert=128, threads=128):
+def fusedmoe_nvfp4_sm100(num_tokens, hidden, intermediate, block_token=128, block_hidden=64, block_expert=128, threads=128):
     packed_hidden = hidden // 2
     packed_block_hidden = block_hidden // 2
     k_tiles = T.ceildiv(hidden, block_hidden)
@@ -55,8 +68,7 @@ def fusedmoe_nvfp4_sm100(num_tokens, hidden, intermediate,
         token_final_scales: T.Tensor((num_tokens,), "float32"),
         Output: T.Tensor((num_tokens, intermediate), "float32"),
     ):
-        with T.Kernel(T.ceildiv(intermediate, block_expert), T.ceildiv(num_tokens, block_token),
-                      threads=threads) as (bx, by):
+        with T.Kernel(T.ceildiv(intermediate, block_expert), T.ceildiv(num_tokens, block_token), threads=threads) as (bx, by):
             # NVFP4 operands staged DENSE (two e2m1 per byte) as uint8.
             X_bytes = T.view(X, (num_tokens, packed_hidden), "uint8")
             Wg_bytes = T.view(W_gate, (intermediate, packed_hidden), "uint8")
@@ -101,15 +113,31 @@ def fusedmoe_nvfp4_sm100(num_tokens, hidden, intermediate,
                     T.tcgen05_cp_warpx4(sfu_shared, sfu_tmem)
                 T.sync_threads()
 
-                if 32 <= tx and tx < 64:
-                    T.tcgen05_gemm_blockscaled(X_shared, gate_shared, gate_tmem, sfx_tmem, sfg_tmem,
-                                               transpose_B=True, mbar=gate_mbar,
-                                               clear_accum=(ko == 0), is_nvfp4=True)
+                if tx >= 32 and tx < 64:
+                    T.tcgen05_gemm_blockscaled(
+                        X_shared,
+                        gate_shared,
+                        gate_tmem,
+                        sfx_tmem,
+                        sfg_tmem,
+                        transpose_B=True,
+                        mbar=gate_mbar,
+                        clear_accum=(ko == 0),
+                        is_nvfp4=True,
+                    )
                 T.mbarrier_wait_parity(gate_mbar, ko % 2)
-                if 32 <= tx and tx < 64:
-                    T.tcgen05_gemm_blockscaled(X_shared, up_shared, up_tmem, sfx_tmem, sfu_tmem,
-                                               transpose_B=True, mbar=up_mbar,
-                                               clear_accum=(ko == 0), is_nvfp4=True)
+                if tx >= 32 and tx < 64:
+                    T.tcgen05_gemm_blockscaled(
+                        X_shared,
+                        up_shared,
+                        up_tmem,
+                        sfx_tmem,
+                        sfu_tmem,
+                        transpose_B=True,
+                        mbar=up_mbar,
+                        clear_accum=(ko == 0),
+                        is_nvfp4=True,
+                    )
                 T.mbarrier_wait_parity(up_mbar, ko % 2)
                 T.sync_threads()
 
@@ -119,8 +147,7 @@ def fusedmoe_nvfp4_sm100(num_tokens, hidden, intermediate,
                 token_idx = by * block_token + t
                 gate = gate_local[t, i]
                 silu = gate * (1.0 / (1.0 + T.exp2(-gate * silu_scale)))
-                routed = T.if_then_else(token_selected_experts[token_idx] == 0,
-                                        token_final_scales[token_idx], 0.0)
+                routed = T.if_then_else(token_selected_experts[token_idx] == 0, token_final_scales[token_idx], 0.0)
                 Output[token_idx, bx * block_expert + i] = up_local[t, i] * silu * routed
 
     return main
@@ -131,9 +158,9 @@ def _decode_sf_full(sf, rows, hidden, block_hidden):
     sf_tiles = (hidden + block_hidden - 1) // block_hidden
     blocks_per_tile = block_hidden // 16  # 4 E4M3 per uint32
     raw = sf.view(torch.uint8).reshape(sf_tiles, rows, 4)[:, :, :blocks_per_tile].contiguous()
-    sc = raw.view(torch.float8_e4m3fn).float()                 # [tile, row, blocks_per_tile]
+    sc = raw.view(torch.float8_e4m3fn).float()  # [tile, row, blocks_per_tile]
     sc = sc.permute(1, 0, 2).reshape(rows, sf_tiles * blocks_per_tile)  # [row, hidden//16]
-    return sc.repeat_interleave(16, dim=1)                     # [row, hidden]
+    return sc.repeat_interleave(16, dim=1)  # [row, hidden]
 
 
 def make_sf(rows, hidden, block_hidden):
@@ -145,7 +172,7 @@ def make_sf(rows, hidden, block_hidden):
     e4 = vals.to(torch.float8_e4m3fn).view(torch.uint8)
     out = torch.zeros(sf_tiles * rows, 4, device="cuda", dtype=torch.uint8)
     for t in range(sf_tiles):
-        out[t * rows:(t + 1) * rows, :blocks_per_tile] = e4[:, t * blocks_per_tile:(t + 1) * blocks_per_tile]
+        out[t * rows : (t + 1) * rows, :blocks_per_tile] = e4[:, t * blocks_per_tile : (t + 1) * blocks_per_tile]
     return out.contiguous().view(torch.uint32).reshape(sf_tiles * rows)
 
 
@@ -160,12 +187,12 @@ def main():
     num_tokens, hidden, intermediate = args.num_tokens, args.hidden_size, args.intermediate_size
     block_hidden = 64
 
-    print(f"Running SM100 NVFP4 fused MoE (kind::mxf4nvf4.block_scale): "
-          f"tokens={num_tokens}, hidden={hidden}, intermediate={intermediate}")
+    print(f"Running SM100 NVFP4 fused MoE (kind::mxf4nvf4.block_scale): tokens={num_tokens}, hidden={hidden}, intermediate={intermediate}")
 
     kernel = tilelang.compile(
         fusedmoe_nvfp4_sm100(num_tokens, hidden, intermediate, block_hidden=block_hidden),
-        out_idx=[8], target="cuda",
+        out_idx=[8],
+        target="cuda",
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,

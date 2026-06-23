@@ -79,13 +79,13 @@ TL_DEVICE void call_blockscaled_fma_impl(
 }
 
 template <class Impl>
-TL_DEVICE void
-call_blockscaled_fma(typename BlockScaledMmaImplTraits<Impl>::DReg *d,
-                     const typename BlockScaledMmaImplTraits<Impl>::AReg *a,
-                     const typename BlockScaledMmaImplTraits<Impl>::BReg *b,
-                     const typename BlockScaledMmaImplTraits<Impl>::CReg *c,
-                     const typename BlockScaledMmaImplTraits<Impl>::SFReg *sfa,
-                     const typename BlockScaledMmaImplTraits<Impl>::SFReg *sfb) {
+TL_DEVICE void call_blockscaled_fma(
+    typename BlockScaledMmaImplTraits<Impl>::DReg *d,
+    const typename BlockScaledMmaImplTraits<Impl>::AReg *a,
+    const typename BlockScaledMmaImplTraits<Impl>::BReg *b,
+    const typename BlockScaledMmaImplTraits<Impl>::CReg *c,
+    const typename BlockScaledMmaImplTraits<Impl>::SFReg *sfa,
+    const typename BlockScaledMmaImplTraits<Impl>::SFReg *sfb) {
   call_blockscaled_fma_impl<Impl>(
       d, a, b, c, sfa, sfb,
       std::make_index_sequence<BlockScaledMmaImplTraits<Impl>::kDRegs>{},
@@ -249,12 +249,12 @@ struct BlockScaledMmaDispatcher {
 
 #define TL_DEFINE_BLOCKSCALED_MMA_DISPATCHER(                                  \
     ATypeEnum, BTypeEnum, CTypeEnum, SFTypeEnum, MValue, NValue, KValue,       \
-    TransAValue, TransBValue, VSValue, ImplType)                                \
+    TransAValue, TransBValue, VSValue, ImplType)                               \
   template <>                                                                  \
-  struct BlockScaledMmaDispatcher<                                             \
-      DataType::ATypeEnum, DataType::BTypeEnum, DataType::CTypeEnum,           \
-      DataType::SFTypeEnum, MValue, NValue, KValue, TransAValue, TransBValue,  \
-      VSValue> {                                                               \
+  struct BlockScaledMmaDispatcher<DataType::ATypeEnum, DataType::BTypeEnum,    \
+                                  DataType::CTypeEnum, DataType::SFTypeEnum,   \
+                                  MValue, NValue, KValue, TransAValue,         \
+                                  TransBValue, VSValue> {                      \
     using Impl = ImplType;                                                     \
     using Traits = BlockScaledMmaImplTraits<Impl>;                             \
     using CRegType = typename Traits::DReg;                                    \
@@ -368,12 +368,12 @@ using SM120_NVFP4_NVFP4_F32_UE4M3_TN =
 using SM120_NVFP4_NVFP4_F32_UE4M3_VS16_TN =
     cute::SM120::BLOCKSCALED::SM120_16x8x64_TN_VS<
         cute::float_e2m1_t, cute::float_e2m1_t, float, cute::float_ue4m3_t, 16>;
-TL_DEFINE_BLOCKSCALED_MMA_DISPATCHER(
-    kFloat4_e2m1fn, kFloat4_e2m1fn, kFloat32, kFloat8_e4m3, 16, 8, 64, false,
-    true, 32, SM120_NVFP4_NVFP4_F32_UE4M3_TN)
-TL_DEFINE_BLOCKSCALED_MMA_DISPATCHER(
-    kFloat4_e2m1fn, kFloat4_e2m1fn, kFloat32, kFloat8_e4m3, 16, 8, 64, false,
-    true, 16, SM120_NVFP4_NVFP4_F32_UE4M3_VS16_TN)
+TL_DEFINE_BLOCKSCALED_MMA_DISPATCHER(kFloat4_e2m1fn, kFloat4_e2m1fn, kFloat32,
+                                     kFloat8_e4m3, 16, 8, 64, false, true, 32,
+                                     SM120_NVFP4_NVFP4_F32_UE4M3_TN)
+TL_DEFINE_BLOCKSCALED_MMA_DISPATCHER(kFloat4_e2m1fn, kFloat4_e2m1fn, kFloat32,
+                                     kFloat8_e4m3, 16, 8, 64, false, true, 16,
+                                     SM120_NVFP4_NVFP4_F32_UE4M3_VS16_TN)
 
 #undef TL_DEFINE_MMA_DISPATCHER
 #undef TL_DEFINE_BLOCKSCALED_MMA_DISPATCHER
@@ -422,14 +422,15 @@ TL_DEVICE void mma_sync_blockscaled(
         AType, BType, CType, SFType, M, N, K, TransA, TransB, VS>::ARegType *a,
     const typename detail::BlockScaledMmaDispatcher<
         AType, BType, CType, SFType, M, N, K, TransA, TransB, VS>::BRegType *b,
-    const typename detail::BlockScaledMmaDispatcher<
-        AType, BType, CType, SFType, M, N, K, TransA, TransB, VS>::SFRegType
-        *sfa,
-    const typename detail::BlockScaledMmaDispatcher<
-        AType, BType, CType, SFType, M, N, K, TransA, TransB, VS>::SFRegType
-        *sfb) {
-  using Dispatcher = detail::BlockScaledMmaDispatcher<
-      AType, BType, CType, SFType, M, N, K, TransA, TransB, VS>;
+    const typename detail::BlockScaledMmaDispatcher<AType, BType, CType, SFType,
+                                                    M, N, K, TransA, TransB,
+                                                    VS>::SFRegType *sfa,
+    const typename detail::BlockScaledMmaDispatcher<AType, BType, CType, SFType,
+                                                    M, N, K, TransA, TransB,
+                                                    VS>::SFRegType *sfb) {
+  using Dispatcher =
+      detail::BlockScaledMmaDispatcher<AType, BType, CType, SFType, M, N, K,
+                                       TransA, TransB, VS>;
   static_assert(!std::is_void_v<typename Dispatcher::CRegType>,
                 "tl::mma_sync_blockscaled: unsupported configuration");
 

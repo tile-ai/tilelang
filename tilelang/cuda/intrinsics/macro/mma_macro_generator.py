@@ -133,8 +133,8 @@ class TensorCoreIntrinEmitter:
             # larger K with an outer loop (as the examples do).
             if self.chunk != 64:
                 raise ValueError(
-                    "SM120 block-scaled NVFP4 MMA requires chunk == 64 (one K64 atom per "
-                    "call); tile larger K with an outer loop")
+                    "SM120 block-scaled NVFP4 MMA requires chunk == 64 (one K64 atom per call); tile larger K with an outer loop"
+                )
             self.k_dim = 64
             return
         # SM120 f8f6f4 FP4 MMA is m16n8k32.  Although 256 / 4 would allow a
