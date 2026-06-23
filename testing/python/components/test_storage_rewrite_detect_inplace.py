@@ -1,6 +1,7 @@
 import tilelang
 import tilelang.testing
 from tilelang import language as T, tvm
+from tilelang.testing import requires_cuda
 
 
 @tilelang.jit
@@ -51,6 +52,7 @@ def _get_device_kernel_script(detect_inplace: bool) -> str:
     return artifact.kernel_source
 
 
+@requires_cuda
 def test_storage_rewrite_detect_inplace_toggle():
     script_off = _get_device_kernel_script(detect_inplace=False)
     script_on = _get_device_kernel_script(detect_inplace=True)

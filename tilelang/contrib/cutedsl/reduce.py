@@ -308,6 +308,10 @@ class CumSum1D:
         if tidx < self.WARP_SIZE:
             _scan_line_sum(src_tensor, dst_tensor, 0, N, 1, lane, self.reverse, MASK)
 
+    @cute.jit
+    def run_auto(self, src: cute.Pointer, dst: cute.Pointer, N):
+        self.run(src, dst, N)
+
 
 class CumSum2D:
     """
@@ -360,6 +364,10 @@ class CumSum2D:
                 if col < W:
                     _scan_line_sum(src_tensor, dst_tensor, col, H, W, lane, self.reverse, MASK)
 
+    @cute.jit
+    def run_auto(self, src: cute.Pointer, dst: cute.Pointer, H, W):
+        self.run(src, dst, H, W)
+
 
 class CumMax1D:
     """
@@ -383,6 +391,10 @@ class CumMax1D:
 
         if tidx < self.WARP_SIZE:
             _scan_line_max(src_tensor, dst_tensor, 0, N, 1, lane, self.reverse, MASK)
+
+    @cute.jit
+    def run_auto(self, src: cute.Pointer, dst: cute.Pointer, N):
+        self.run(src, dst, N)
 
 
 class CumMax2D:
@@ -420,6 +432,10 @@ class CumMax2D:
                 col = block * tile + item
                 if col < W:
                     _scan_line_max(src_tensor, dst_tensor, col, H, W, lane, self.reverse, MASK)
+
+    @cute.jit
+    def run_auto(self, src: cute.Pointer, dst: cute.Pointer, H, W):
+        self.run(src, dst, H, W)
 
 
 class NamedBarrier:

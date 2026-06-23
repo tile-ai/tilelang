@@ -22,6 +22,12 @@ __all__ = [
     "tcgen05_ld_32dp64bNx",
     "tcgen05_ld_32dp128bNx",
     "tcgen05_ld_32dp256bNx",
+    "tcgen05_st_32dp32bNx",
+    "tcgen05_st_32dp64bNx",
+    "tcgen05_st_32dp128bNx",
+    "tcgen05_st_32dp256bNx",
+    "tcgen05_before_thread_sync",
+    "tcgen05_after_thread_sync",
 ]
 
 import cutlass
@@ -507,7 +513,7 @@ def _emit_tmem_ld(n_x, max_log_n, ptx_type, regs_per_x, src_addr, dst_view, dst_
 
 
 def _emit_tmem_fence():
-    """Emit tcgen05.wait fence.  Called during @cute.jit compilation."""
+    """Emit tcgen05.wait::ld fence.  Called during @cute.jit compilation."""
     llvm.inline_asm(
         None,
         [],
@@ -517,6 +523,77 @@ def _emit_tmem_fence():
         is_align_stack=False,
         asm_dialect=llvm.AsmDialect.AD_ATT,
     )
+
+
+def _emit_tmem_st_fence():
+    """Emit tcgen05.wait::st fence.  Called during @cute.jit compilation."""
+    llvm.inline_asm(
+        None,
+        [],
+        "tcgen05.wait::st.sync.aligned;",
+        "",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+    )
+
+
+def _emit_tmem_st_segment(ptx_type, seg_x, regs_per_x, addr_ir, src_vals):
+    """Emit one tcgen05.st inline asm for a power-of-2 segment.
+
+    Called during @cute.jit compilation — emits MLIR ops directly.
+    ptx_type:  PTX instruction type, e.g. "32x32b", "16x64b", "16x128b", "16x256b"
+    seg_x:     x-count in the PTX instruction (power of 2)
+    regs_per_x: number of i32 input registers per x-element
+    addr_ir:   MLIR IR value for TMEM destination address
+    src_vals:  list of cutlass.Int32 values to store
+    """
+    total_regs = seg_x * regs_per_x
+    in_regs = ", ".join(f"${i + 1}" for i in range(total_regs))
+    asm_str = f"tcgen05.st.sync.aligned.{ptx_type}.x{seg_x}.b32 [$0], {{{in_regs}}};"
+    constraints = "r," + ",".join(["r"] * total_regs)
+    operands = [addr_ir] + [v.ir_value() for v in src_vals]
+    llvm.inline_asm(
+        None,
+        operands,
+        asm_str,
+        constraints,
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+    )
+
+
+def _emit_tmem_st(n_x, max_log_n, ptx_type, regs_per_x, dst_addr, src_view, src_offset=0, dst_col_offset=0):
+    """Recursively split x-count into power-of-2 segments and emit TMEM stores.
+
+    Called during @cute.jit compilation.
+    n_x:            remaining x-element count to store
+    max_log_n:      max log2 of x-count per PTX instruction
+    ptx_type:       PTX instruction type, e.g. "32x32b", "16x64b"
+    regs_per_x:     i32 input registers per x-element
+    dst_addr:       CuTeDSL Int32 (runtime TMEM base address)
+    src_view:       CuTeDSL tensor view over source registers
+    src_offset:     Python int — i32 offset into src_view (compile-time constant)
+    dst_col_offset: Python int — TMEM column offset from dst_addr (compile-time constant)
+    """
+    if n_x <= 0:
+        return
+
+    log_n = n_x.bit_length() - 1
+    seg_log = min(log_n, max_log_n)
+    seg_x = 1 << seg_log
+    total_regs = seg_x * regs_per_x
+
+    if dst_col_offset == 0:
+        addr_ir = dst_addr.ir_value()
+    else:
+        addr_ir = (dst_addr + cutlass.Int32(dst_col_offset)).ir_value()
+
+    src_vals = [cutlass.Int32(src_view[src_offset + j]) for j in range(total_regs)]
+    _emit_tmem_st_segment(ptx_type, seg_x, regs_per_x, addr_ir, src_vals)
+
+    _emit_tmem_st(n_x - seg_x, max_log_n, ptx_type, regs_per_x, dst_addr, src_view, src_offset + total_regs, dst_col_offset + seg_x)
 
 
 @cute.jit
@@ -592,3 +669,129 @@ def tcgen05_ld_32dp256bNx(N: Constexpr[int], pack16: Constexpr[bool], tmem_start
     upper_addr = src_addr + cutlass.Int32(16 << 16)
     _emit_tmem_ld(N, min(_TMEM_LD_MAX_LOG_N, 6), "16x256b", 4, upper_addr, dst_view, dst_offset=regs_per_half, src_col_offset=0)
     _emit_tmem_fence()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# TMEM store  —  tcgen05.st.sync.aligned.32x32b.xN.b32
+# Mirrors the ld functions above but writes from register memory to TMEM.
+# ──────────────────────────────────────────────────────────────────────
+
+_TMEM_ST_MAX_LOG_N = 3  # cap at x8 to stay within LLVM inline-asm operand limits
+
+
+@cute.jit
+def tcgen05_st_32dp32bNx(N: Constexpr[int], unpack16: Constexpr[bool], tmem_start_col: int, tmem_col_offset: int, src_ptr: cute.Pointer):
+    """Store N uint32 values to TMEM using tcgen05.st.sync.aligned.32x32b.
+
+    Matches tl::tcgen05_st_32dp32bNx from copy_sm100.h.
+    N: number of 32-bit elements to store (x-count, compile-time constant).
+    unpack16: if True, use 16-bit unpacking variant.
+    tmem_start_col: TMEM base column address.
+    tmem_col_offset: additional column offset.
+    src_ptr: source pointer (register memory).
+    """
+    dst_addr = cutlass.Int32(tmem_start_col) + cutlass.Int32(tmem_col_offset)
+    src_view = cute.make_tensor(cute.recast_ptr(src_ptr, dtype=cute.Int32), (N,))
+    _emit_tmem_st(N, _TMEM_ST_MAX_LOG_N, "32x32b", 1, dst_addr, src_view)
+    _emit_tmem_st_fence()
+
+
+@cute.jit
+def tcgen05_st_32dp64bNx(N: Constexpr[int], unpack16: Constexpr[bool], tmem_start_col: int, tmem_col_offset: int, src_ptr: cute.Pointer):
+    """Store to TMEM using 32dp64b pattern (2x 16x64b for lower/upper 16 rows).
+
+    Matches tl::tcgen05_st_32dp64bNx from copy_sm100.h.
+    N: x-count for 16x64b instructions. Total input: 2*N i32 regs.
+    """
+    total_regs = N * 2
+    dst_addr = cutlass.Int32(tmem_start_col) + cutlass.Int32(tmem_col_offset)
+    src_view = cute.make_tensor(cute.recast_ptr(src_ptr, dtype=cute.Int32), (total_regs,))
+    # Lower 16 rows
+    _emit_tmem_st(N, _TMEM_ST_MAX_LOG_N, "16x64b", 1, dst_addr, src_view, src_offset=0, dst_col_offset=0)
+    # Upper 16 rows (TMEM row offset = 16 << 16)
+    upper_addr = dst_addr + cutlass.Int32(16 << 16)
+    _emit_tmem_st(N, _TMEM_ST_MAX_LOG_N, "16x64b", 1, upper_addr, src_view, src_offset=N, dst_col_offset=0)
+    _emit_tmem_st_fence()
+
+
+@cute.jit
+def tcgen05_st_32dp128bNx(N: Constexpr[int], unpack16: Constexpr[bool], tmem_start_col: int, tmem_col_offset: int, src_ptr: cute.Pointer):
+    """Store to TMEM using 32dp128b pattern (2x 16x128b for lower/upper 16 rows).
+
+    Matches tl::tcgen05_st_32dp128bNx from copy_sm100.h.
+    N: x-count for 16x128b instructions. Total input: 4*N i32 regs.
+    """
+    regs_per_half = N * 2
+    total_regs = regs_per_half * 2
+    dst_addr = cutlass.Int32(tmem_start_col) + cutlass.Int32(tmem_col_offset)
+    src_view = cute.make_tensor(cute.recast_ptr(src_ptr, dtype=cute.Int32), (total_regs,))
+    # Lower 16 rows
+    _emit_tmem_st(N, min(_TMEM_ST_MAX_LOG_N, 6), "16x128b", 2, dst_addr, src_view, src_offset=0, dst_col_offset=0)
+    # Upper 16 rows (TMEM row offset = 16 << 16)
+    upper_addr = dst_addr + cutlass.Int32(16 << 16)
+    _emit_tmem_st(N, min(_TMEM_ST_MAX_LOG_N, 6), "16x128b", 2, upper_addr, src_view, src_offset=regs_per_half, dst_col_offset=0)
+    _emit_tmem_st_fence()
+
+
+@cute.jit
+def tcgen05_st_32dp256bNx(N: Constexpr[int], unpack16: Constexpr[bool], tmem_start_col: int, tmem_col_offset: int, src_ptr: cute.Pointer):
+    """Store to TMEM using 32dp256b pattern (2x 16x256b for lower/upper 16 rows).
+
+    Matches tl::tcgen05_st_32dp256bNx from copy_sm100.h.
+    N: x-count for 16x256b instructions. Total input: 8*N i32 regs.
+    """
+    regs_per_half = N * 4
+    total_regs = regs_per_half * 2
+    dst_addr = cutlass.Int32(tmem_start_col) + cutlass.Int32(tmem_col_offset)
+    src_view = cute.make_tensor(cute.recast_ptr(src_ptr, dtype=cute.Int32), (total_regs,))
+    # Lower 16 rows
+    _emit_tmem_st(N, min(_TMEM_ST_MAX_LOG_N, 6), "16x256b", 4, dst_addr, src_view, src_offset=0, dst_col_offset=0)
+    # Upper 16 rows (TMEM row offset = 16 << 16)
+    upper_addr = dst_addr + cutlass.Int32(16 << 16)
+    _emit_tmem_st(N, min(_TMEM_ST_MAX_LOG_N, 6), "16x256b", 4, upper_addr, src_view, src_offset=regs_per_half, dst_col_offset=0)
+    _emit_tmem_st_fence()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# TMEM thread-sync fences — tcgen05.fence::before/after_thread_sync
+# Required around __syncthreads() when accessing TMEM to preserve
+# memory ordering between TMEM ops and shared-memory ops.
+# ──────────────────────────────────────────────────────────────────────
+
+
+@cute.jit
+def tcgen05_before_thread_sync():
+    """Emit tcgen05.fence::before_thread_sync PTX instruction.
+
+    Must be called before __syncthreads() when TMEM operations precede a
+    thread synchronization barrier. Matches tl::tcgen05_before_thread_sync
+    from tcgen_05.h.
+    """
+    llvm.inline_asm(
+        None,
+        [],
+        "tcgen05.fence::before_thread_sync;",
+        "",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+    )
+
+
+@cute.jit
+def tcgen05_after_thread_sync():
+    """Emit tcgen05.fence::after_thread_sync PTX instruction.
+
+    Must be called after __syncthreads() when TMEM operations follow a
+    thread synchronization barrier. Matches tl::tcgen05_after_thread_sync
+    from tcgen_05.h.
+    """
+    llvm.inline_asm(
+        None,
+        [],
+        "tcgen05.fence::after_thread_sync;",
+        "",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+    )

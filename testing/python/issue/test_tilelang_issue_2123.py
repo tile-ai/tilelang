@@ -1,11 +1,19 @@
+import pytest
 import tilelang
 import tilelang.testing
 import tilelang.language as T
 from tilelang import tvm
 from tvm import tirx
 from tvm.tirx import op
-from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
 from tilelang.transform import LowerAccessPtr
+
+try:
+    from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
+    import tilelang.cuda._ffi_api as _cuda_ffi_api
+
+    _has_cuda_transforms = hasattr(_cuda_ffi_api, "LowerBlackwell2SM")
+except Exception:
+    _has_cuda_transforms = False
 
 
 def issue_2123_atomic_load_repro(num_tiles, threads=32):
@@ -60,6 +68,7 @@ def test_issue_2123_atomic_load_lower_access_ptr_direct():
     _assert_access_ptr_lowered(lowered)
 
 
+@pytest.mark.skipif(not _has_cuda_transforms, reason="CUDA transforms not available in this build (USE_CUDA=OFF)")
 def test_issue_2123_atomic_load_lower_access_ptr_pipeline():
     target = tvm.target.Target("cuda", host="llvm")
     func = issue_2123_atomic_load_repro(4).with_attr("global_symbol", "main")
