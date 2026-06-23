@@ -114,11 +114,12 @@ template <int thread_extent> TL_DEVICE bool tl_shuffle_elect() {
     return cute::elect_one_sync();
   } else {
     // General case: thread_extent != 0
-    // We select warps with multiple of (thread_extent / 32) warp IDs.
+    // We select warps with multiple of ceil(thread_extent / 32) warp IDs.
     // NOTE: we use canonical_warp_idx for the same reason as above.
-    static_assert(thread_extent % 32 == 0);
+    constexpr int warp_extent = (thread_extent + 31) / 32;
+    static_assert(warp_extent > 0);
     return cute::elect_one_sync() &&
-           (cutlass::canonical_warp_idx() % (thread_extent / 32)) == 0;
+           (cutlass::canonical_warp_idx() % warp_extent) == 0;
   }
 }
 

@@ -679,7 +679,6 @@ def shuffle_elect(thread_extent: int) -> PrimExpr:
     thread_extent : int
         Size (in threads) of the group in which a single lane should be elected.
         Passing 0 elects a single lane in the entire thread block.
-        Must be multiple of 32 (warp size).
 
     Example
     -------
