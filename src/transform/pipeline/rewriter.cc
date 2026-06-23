@@ -256,14 +256,14 @@ public:
     // Step 2: Emit the pipeline prologue, body and epilogue.
     Optional<Integer> pipeline_num_stages =
         GetPipelineNumStages(pipeline_loop_.get());
-    Stmt prologue = StripPipelineContextAttrs(EmitImpl(
-        pipeline_loop_->min, pipeline_loop_->min + max_stage_, true, true));
-    Stmt body = StripPipelineContextAttrs(
+    Stmt prologue = EmitImpl(pipeline_loop_->min,
+                             pipeline_loop_->min + max_stage_, true, true);
+    Stmt body =
         EmitImpl(pipeline_loop_->min + max_stage_,
-                 pipeline_loop_->min + pipeline_loop_->extent, false, false));
-    Stmt epilogue = StripPipelineContextAttrs(EmitImpl(
+                 pipeline_loop_->min + pipeline_loop_->extent, false, false);
+    Stmt epilogue = EmitImpl(
         pipeline_loop_->min + pipeline_loop_->extent,
-        pipeline_loop_->min + pipeline_loop_->extent + max_stage_, true, true));
+        pipeline_loop_->min + pipeline_loop_->extent + max_stage_, true, true);
 
     Array<Stmt> pipeline_parts;
     for (const Stmt &part : {prologue, body, epilogue}) {
@@ -290,14 +290,6 @@ public:
     for (const auto &alloc : local_allocs_) {
       alloc_buffers.push_back(buffer_remap_.Get(alloc).value_or(alloc));
       buffer_data_to_buffer_.erase(alloc->data);
-    }
-    if (pipeline_num_stages) {
-      if (pipeline_num_stages.value().IntValue() > 1) {
-        stmt = AttrStmt(Integer(0), kPipelineMVBContextNumStages,
-                        Downcast<PrimExpr>(pipeline_num_stages.value()), stmt);
-      }
-      stmt = AttrStmt(Integer(0), kPipelineContextNumStages,
-                      Downcast<PrimExpr>(pipeline_num_stages.value()), stmt);
     }
     SBlock block = MakeBlock(stmt, buffer_data_to_buffer_);
     block.CopyOnWrite()->alloc_buffers = std::move(alloc_buffers);
@@ -774,23 +766,6 @@ private:
     const PipelineRewriter *rewriter_;
   };
 
-  Stmt WrapPipelineStageContext(Stmt stmt,
-                                const PrimExpr &normalized_access_index,
-                                const Optional<Integer> &pipeline_num_stages) {
-    if (!(pipeline_num_stages && pipeline_num_stages.value().IntValue() > 1)) {
-      return stmt;
-    }
-    PrimExpr ns =
-        IntImm(DataType::Int(32), pipeline_num_stages.value().IntValue());
-    PrimExpr stage_expr =
-        analyzer_.Simplify(FloorMod(normalized_access_index, ns));
-    PrimExpr parity_expr = analyzer_.Simplify(FloorMod(
-        FloorDiv(normalized_access_index, ns), IntImm(DataType::Int(32), 2)));
-    stmt = AttrStmt(Integer(0), kPipelineMVBParityExpr, parity_expr, stmt);
-    stmt = AttrStmt(Integer(0), kPipelineMVBStageExpr, stage_expr, stmt);
-    return stmt;
-  }
-
   Optional<PrimExpr>
   ComputePipelineMbarPhaseExpr(const PrimExpr &normalized_access_index,
                                const Optional<Integer> &pipeline_num_stages) {
@@ -830,17 +805,6 @@ private:
           0, static_cast<int>(pipeline_num_stages.value().IntValue()) - 1);
     }
     return retain;
-  }
-
-  Stmt StripPipelineContextAttrs(Stmt stmt) const {
-    while (const auto *attr = stmt.as<AttrStmtNode>()) {
-      if (attr->attr_key != kPipelineContextNumStages &&
-          attr->attr_key != kPipelineMVBContextNumStages) {
-        break;
-      }
-      stmt = attr->body;
-    }
-    return stmt;
   }
 
   Array<Stmt> FlattenTopLevelSeq(const Stmt &stmt) const {
@@ -1827,19 +1791,9 @@ private:
                 analyzer_.Simplify(start + IntImm(extent.dtype(), iter + 1));
             Stmt unit_stmt =
                 EmitImpl(unit_start, unit_end, false, need_bound_check);
-            expanded.push_back(StripPipelineContextAttrs(unit_stmt));
+            expanded.push_back(unit_stmt);
           }
           Stmt result = expanded.size() == 1 ? expanded[0] : SeqStmt(expanded);
-          if (pipeline_num_stages) {
-            if (pipeline_num_stages.value().IntValue() > 1) {
-              result = AttrStmt(Integer(0), kPipelineMVBContextNumStages,
-                                Downcast<PrimExpr>(pipeline_num_stages.value()),
-                                result);
-            }
-            result = AttrStmt(Integer(0), kPipelineContextNumStages,
-                              Downcast<PrimExpr>(pipeline_num_stages.value()),
-                              result);
-          }
           return result;
         }
       }
@@ -1912,9 +1866,6 @@ private:
       new_block = ReplayScalarBindings(new_block, normalized_access_index);
 
       Stmt rewritten_stmt = SBlockRealize({}, inbound, new_block);
-      rewritten_stmt = WrapPipelineStageContext(std::move(rewritten_stmt),
-                                                normalized_access_index,
-                                                pipeline_num_stages);
       Optional<PrimExpr> pipeline_mbar_phase = ComputePipelineMbarPhaseExpr(
           normalized_access_index, pipeline_num_stages);
 
@@ -1957,8 +1908,6 @@ private:
               ana_normalized.Simplify(local_state.predicate.value() & inbound);
         }
         rewritten_stmt = AnnotateSimtProducer(rewritten_stmt, target_);
-        rewritten_stmt = AttrStmt(make_zero(DataType::Int(32)),
-                                  s_tir::attr::async_scope, 1, rewritten_stmt);
       }
       if (pipeline_mbar_phase) {
         rewritten_stmt = AnnotateTileOpMbarPhase(rewritten_stmt,
@@ -2026,16 +1975,6 @@ private:
     }
     Stmt result = SBlockRealize({}, Bool(true),
                                 MakeBlock(new_loop, buffer_data_to_buffer_));
-    if (pipeline_num_stages) {
-      if (pipeline_num_stages.value().IntValue() > 1) {
-        result =
-            AttrStmt(Integer(0), kPipelineMVBContextNumStages,
-                     Downcast<PrimExpr>(pipeline_num_stages.value()), result);
-      }
-      result =
-          AttrStmt(Integer(0), kPipelineContextNumStages,
-                   Downcast<PrimExpr>(pipeline_num_stages.value()), result);
-    }
     return result;
   }
 

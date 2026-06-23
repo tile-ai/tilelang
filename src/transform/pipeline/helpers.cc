@@ -443,8 +443,7 @@ bool ContainsPipelineAsyncControlAttrs(const Stmt &stmt) {
       return;
     }
     if (const auto *attr = obj.as<AttrStmtNode>()) {
-      if (attr->attr_key == s_tir::attr::async_scope ||
-          attr->attr_key == s_tir::attr::async_commit_queue_scope ||
+      if (attr->attr_key == s_tir::attr::async_commit_queue_scope ||
           attr->attr_key == s_tir::attr::async_wait_queue_scope ||
           attr->attr_key == s_tir::attr::async_wait_inflight_count) {
         found = true;

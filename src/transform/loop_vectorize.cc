@@ -614,7 +614,18 @@ private:
   }
 
   void CheckConditionVectorized(const PrimExpr &cond) {
-    // TODO: perform some checks here
+    if (!inner_for_) {
+      return;
+    }
+    PrimExpr condition = analyzer_->Simplify(cond);
+    int condition_vector_size = loop_extent_vector_size_;
+    while (condition_vector_size > 1 &&
+           !IsExprInvariantInVectorBoundary(condition, inner_for_->loop_var,
+                                            condition_vector_size, analyzer_)) {
+      condition_vector_size /= 2;
+    }
+    buffer_vector_infos_.push_back(
+        {Buffer(), condition_vector_size, false, {}});
   }
 
   void HandleTvmAccessPtr(const CallNode *node) {
