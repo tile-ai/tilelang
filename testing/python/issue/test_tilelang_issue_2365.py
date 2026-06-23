@@ -6,7 +6,7 @@ BM, BN, BK = 64, 64, 32
 
 
 @T.prim_func
-def main(A: T.Tensor((M, K), "float16"), B: T.Tensor((K, N), "float16"), C: T.Tensor((M, N), "float32")):
+def main(A: T.Tensor((M, K), T.float16), B: T.Tensor((K, N), T.float16), C: T.Tensor((M, N), T.float32)):
     with T.Kernel(T.ceildiv(N, BN), T.ceildiv(M, BM), threads=128) as (bx, by):
         As = T.alloc_shared((BM, BK), "float16")
         Bs = T.alloc_shared((BK, BN), "float16")
