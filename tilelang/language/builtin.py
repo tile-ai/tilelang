@@ -679,6 +679,7 @@ def shuffle_elect(thread_extent: int) -> PrimExpr:
     thread_extent : int
         Size (in threads) of the group in which a single lane should be elected.
         Passing 0 elects a single lane in the entire thread block.
+        Must be multiple of 32 (warp size).
 
     Example
     -------
@@ -689,8 +690,8 @@ def shuffle_elect(thread_extent: int) -> PrimExpr:
     --------------------
     Lowered to the CUDA helper `tl::tl_shuffle_elect<thread_extent>()` defined in
     `src/tl_templates/cuda/intrin.h`, which relies on
-    `cutlass::canonical_warp_idx_sync()` and `cute::elect_one_sync()` (or
-    `__shfl_sync`) to pick one lane per group.
+    `cutlass::canonical_warp_idx()` and `cute::elect_one_sync()`
+    to pick one lane per group.
     """
     return tirx.call_intrin("bool", tirx.op.Op.get("tl.tl_shuffle_elect"), thread_extent)
 

@@ -86,7 +86,7 @@ TL_DEVICE void warpgroup_fence_operand(float *regs, int count) {
 //                  within which we want to elect exactly ONE representative
 //                  thread.
 template <int thread_extent> TL_DEVICE bool tl_shuffle_elect() {
-
+  static_assert(thread_extent % 32 == 0);
   // Special case: thread_extent == 0 means "elect exactly one thread
   // in the entire thread block", i.e., the leader of the first warp of the
   // block.
