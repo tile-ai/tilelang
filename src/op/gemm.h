@@ -108,7 +108,7 @@ public:
   bool transA_, transB_;
   int m_, n_, k_;
   int strideA_, strideB_;
-  int offsetA_, offsetB_;
+  PrimExpr offsetA_, offsetB_;
   PrimExpr clearAccum_ = const_false();
   tirx::BufferLoad mbar_; // mbar is optional, only used for TCGEN5MMA
   Array<PrimExpr> cCoords_;

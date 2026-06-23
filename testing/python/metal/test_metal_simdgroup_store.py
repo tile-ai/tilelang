@@ -63,9 +63,10 @@ def assert_simdgroup_store_codegen(M, N, K, block_M, block_N, block_K, dtype=T.f
 
     src = artifact.kernel_source
     assert src is not None
-    assert "kernel void" in src
+    assert "[[kernel" in src or "kernel void" in src
     assert "simdgroup_multiply_accumulate" in src
     assert "make_filled_simdgroup_matrix" in src
+    assert "MetalPerformancePrimitives" not in src
 
     assert "simdgroup_float8x8" in src or "simdgroup_half8x8" in src, "Expected simdgroup_float8x8 or simdgroup_half8x8 for C accumulator"
 

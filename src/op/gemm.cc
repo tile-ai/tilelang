@@ -74,7 +74,8 @@ void RegisterGemmImpl(GemmImpl impl) {
  *   expected layout is:
  *     [Aptr, Bptr, Cptr, trans_A (Bool), trans_B (Bool),
  *      M (Int), N (Int), K (Int), policy (Int), clear_accum (Bool),
- *      stride_A (Int), stride_B (Int), offset_A (Int), offset_B (Int),
+ *      stride_A (Int), stride_B (Int), offset_A (PrimExpr),
+ *      offset_B (PrimExpr),
  *      (optional) kPack (Int), (optional) internal wg_wait (Int),
  *      (optional) mbar (BufferLoad), cCoord_y (PrimExpr), cCoord_x (PrimExpr)]
  */
@@ -102,8 +103,8 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->clearAccum_ = args[9].as<PrimExpr>().value();
   node->strideA_ = args[10].as<IntImm>().value()->value;
   node->strideB_ = args[11].as<IntImm>().value()->value;
-  node->offsetA_ = args[12].as<IntImm>().value()->value;
-  node->offsetB_ = args[13].as<IntImm>().value()->value;
+  node->offsetA_ = args[12].as<PrimExpr>().value();
+  node->offsetB_ = args[13].as<PrimExpr>().value();
   if (args.size() > 14) {
     node->kPack_ = args[14].as<IntImm>().value()->value;
     if (node->kPack_ != 1 && node->kPack_ != 2) {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 from tvm import DataType
+from tvm.tirx import IndexMap
 import tilelang.language as T
 
 
@@ -37,6 +38,22 @@ def ldmatrix_32x16_to_shared_16x32_layout_b(thread_id, local_id):
     row = (thread_id // 16) * 8 + (thread_id % 8)
     col = local_id + 16 * ((thread_id % 16) // 8)
     return row, col
+
+
+def metal_ct_store_32x16_to_16x32_layout(thread_id, local_id):
+    lane = thread_id % 32
+    qid = lane >> 2
+    base_row = (qid & 4) | ((lane >> 1) & 3)
+    base_col = ((qid & 2) | (lane & 1)) * 4
+    frag = local_id // 8
+    frag_local = local_id % 8
+    row = base_row + (frag_local // 4) * 8
+    col = base_col + frag * 16 + frag_local % 4
+    return row, col
+
+
+def metal_ct_store_index_map():
+    return IndexMap.from_func(metal_ct_store_32x16_to_16x32_layout, index_dtype=T.int32)
 
 
 def mma_store_32x8_to_shared_16x16_layout(thread_id, local_id):

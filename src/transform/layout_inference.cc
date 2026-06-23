@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <deque>
 #include <memory>
+#include <optional>
 #include <queue>
 
 #include "../layout/layout.h"
@@ -151,15 +152,24 @@ public:
            "required for layout inference.";
 
     // Run InferLayout
-    auto updates = next->InferLayout(LayoutInferArgs{target_,
-                                                     thread_bounds,
-                                                     layout_map,
-                                                     cur_analyzer,
-                                                     buffer_oob,
-                                                     {},
-                                                     bind_var_to_expr_,
-                                                     false},
-                                     level);
+    LayoutMap updates;
+    try {
+      updates = next->InferLayout(LayoutInferArgs{target_,
+                                                  thread_bounds,
+                                                  layout_map,
+                                                  cur_analyzer,
+                                                  buffer_oob,
+                                                  {},
+                                                  bind_var_to_expr_,
+                                                  false},
+                                  level);
+    } catch (const std::bad_optional_access &e) {
+      LOG(FATAL) << "bad_optional_access while inferring layout for op "
+                 << cur_infer_id << " (" << next->GetTypeKey() << ") at level "
+                 << InferLevelToString(level)
+                 << "\nthread_bounds=" << thread_bounds
+                 << "\nstmt=" << infer_list_stmt_[cur_infer_id];
+    }
 
     // Process the returned updates
     for (const auto &[buffer, layout] : updates) {
@@ -553,7 +563,13 @@ private:
     if (op->op.as<GlobalVarNode>())
       return;
 
-    auto p = ParseOperator(GetRef<Call>(op));
+    TileOperator p;
+    try {
+      p = ParseOperator(GetRef<Call>(op));
+    } catch (const std::bad_optional_access &e) {
+      LOG(FATAL) << "bad_optional_access while parsing tile op call: "
+                 << GetRef<Call>(op);
+    }
     if (p.defined()) {
       for (const auto &arg : op->args) {
         if (auto buffer = getBufferFromAccessPtr(arg)) {
