@@ -40,6 +40,25 @@ Stmt Lower(const LowerArgs& args, arith::Analyzer* analyzer) const;
 Avoid adding new lowerCamelCase helpers or ambiguous context names like
 `const LowerArgs& T`.
 
+## API Boundaries And Ownership
+
+Prefer concrete type declarations over `auto` when the type is short or the
+value crosses an API boundary. `auto` is fine for obvious pattern checks,
+iterators, lambdas, `Downcast<T>()`, and `node.as<T>()` results where spelling
+the type would obscure the logic.
+
+Pass TVM object handles and non-trivial inputs by `const&` unless the callee
+will store the value. If a constructor or helper stores the value, take it by
+value and `std::move` into the field.
+
+Mark query methods and helpers `const` whenever possible. For visitor classes,
+keep mutable state explicit in private fields and prefer short static entry
+points such as `Collect`, `Rewrite`, or `Analyze` that hide the visitor object.
+
+Use TVM `Array`, `Map`, `Optional`, and ObjectRefs at FFI/API boundaries.
+Internal analysis code may use `std::vector`, `std::unordered_map`, and
+`std::unordered_set` when that is simpler, but convert back at the boundary.
+
 ## TVM Object Conventions
 
 Treat `Stmt`, `PrimExpr`, `Buffer`, `Var`, `SBlock`, `Layout`, and related types
@@ -60,6 +79,31 @@ For identity maps/sets keyed by handles, use TVM pointer hash/equality helpers:
 using BufferSet = std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>;
 using VarMap = std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual>;
 ```
+
+Use `Optional<T>` for nullable ObjectRef results. Return an undefined
+`Optional<T>` or ObjectRef for "not found" cases instead of retaining raw node
+pointers or relying on unrelated sentinel state.
+
+## Symbolic Arithmetic And Analyzer Use
+
+Do not force a `PrimExpr` to a constant integer if symbolic arithmetic can carry
+the logic. Keeping expressions symbolic preserves dynamic shape support.
+
+When a constant is truly required, extract it as `int64_t` (`as_const_int`,
+`IntImmNode::value`, or an equivalent helper), check the failure path, and
+rebuild constants with the intended dtype (`Integer`, `IntImm(expr->dtype, v)`,
+or `make_const(dtype, v)`). Avoid narrowing to `int` unless the target API
+requires it and the range is checked.
+
+Use a populated `arith::Analyzer` for `Simplify`, `CanProve`,
+`CanProveEqual`, bounds, and modular reasoning. Bind loop/shape variable ranges
+before asking the analyzer to prove facts. If a function accepts an optional
+analyzer pointer, create a local fallback only for simple self-contained
+reasoning.
+
+Be careful mixing `int32` and `int64` in analyzer-sensitive expressions. In
+layout/swizzle code, preserve the native dtype of the expression spine when
+casts would prevent simplification.
 
 ## ObjectNode Fields
 
@@ -86,6 +130,16 @@ explicit migration plan.
 - Keep implementation-only helpers in `.cc` files or anonymous namespaces.
 - Group includes as paired header, standard library, TVM/third-party, then local
   TileLang headers.
+
+## Formatter And Macro Edge Cases
+
+Use `clang-format off/on` narrowly around dense generated tables, inline asm, or
+registration blocks only when the formatter makes the code materially worse.
+Keep the disabled region as small as possible.
+
+Write macros so clang-format can still parse surrounding C++: macro functions
+should look like calls at use sites, and declaration macros should leave the
+declaration syntactically complete, including a semicolon when appropriate.
 
 ## Migration Policy
 
