@@ -128,6 +128,10 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
     cmd += ["-o", file_target]
     cmd += [temp_code]
 
+    print_compile_command = pass_context.config.get("tl.print_device_compile_command", False)
+    if print_compile_command:
+        print(f"nvcc compilation command: {' '.join(cmd)}")
+
     compiler_env = get_nvcc_subprocess_env()
 
     if compiler_env is None:

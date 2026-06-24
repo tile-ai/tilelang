@@ -71,6 +71,10 @@ class PassConfigKey(str, Enum):
     TL_ENABLE_PTXAS_VERBOSE_OUTPUT = "tl.enable_ptxas_verbose_output"
     """Enable ptxas verbose output. Default: False"""
 
+    TL_PRINT_DEVICE_COMPILE_COMMAND = "tl.print_device_compile_command"
+    """Print the device compiler (e.g. nvcc) command line used to compile the
+    generated kernel. Useful for debugging compilation issues. Default: False"""
+
     TL_DEVICE_COMPILE_FLAGS = "tl.device_compile_flags"
     """Additional device compiler flags passed to nvcc/NVRTC.
 
