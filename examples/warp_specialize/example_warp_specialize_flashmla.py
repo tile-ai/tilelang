@@ -264,6 +264,12 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                                 barrier=kv_shared_1_l_is_ready[j],
                             )
                             T.barrier_arrive(kv_shared_1_l_is_ready[j])
+                        T.tma_copy(
+                            K_pe[bid, (2 * k + 3) * block_N : (2 * k + 4) * block_N, cur_kv_head, :],
+                            K_pe_shared_1,
+                            barrier=kv_shared_1_pe_is_ready,
+                        )
+                        T.barrier_arrive(kv_shared_1_pe_is_ready)
                         # Another half of QK0 and QPE0
                         for j in T.unroll(num_k_tiles):
                             T.barrier_wait(kv_shared_0_r_is_ready[j], (k + 1) % 2)
@@ -387,18 +393,6 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                                 barrier=kv_shared_1_r_is_ready[j],
                             )
                             T.barrier_arrive(kv_shared_1_r_is_ready[j])
-                        T.tma_copy(
-                            K_pe[
-                                bid,
-                                (2 * k + 3) * block_N : (2 * k + 4) * block_N,
-                                cur_kv_head,
-                                :,
-                            ],
-                            K_pe_shared_1,
-                            barrier=kv_shared_1_pe_is_ready,
-                        )
-                        T.barrier_arrive(kv_shared_1_pe_is_ready)
-
                         T.wait_wgmma(0)
                         for j in T.unroll(num_k_tiles):
                             T.tma_copy(
