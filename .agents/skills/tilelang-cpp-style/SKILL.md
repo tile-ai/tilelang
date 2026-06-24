@@ -17,9 +17,22 @@ API adapter has a concrete reason to match another convention.
 Do not apply broad style churn to `3rdparty/` or generated/template code unless
 the task explicitly targets those files.
 
+Before writing new C++:
+
+- Identify whether the file is TileLang-owned compiler/runtime code, a
+  `src/tl_templates` runtime template, a CUDA/HIP/Metal shim, or an external API
+  adapter. Owned compiler/runtime code follows this skill. Templates and shims
+  may follow the generated or external interface they model.
+- Prefer the nearest local pattern in the same subsystem (`op`, `layout`,
+  `transform`, `backend`, `cuda/op`, `rocm/op`, etc.) over inventing a new
+  abstraction.
+- Keep style-only edits separate from behavior changes unless the style cleanup
+  is needed to make the behavioral change reviewable.
+
 ## Naming Checklist
 
 - File names: `lower_snake_case`.
+- Namespaces: `lower_snake_case`.
 - Types, classes, structs, ObjectRefs, ObjectNodes: `PascalCase`.
 - Object nodes: `PascalCaseNode`; ObjectRefs: `PascalCase`.
 - Functions and methods: `PascalCase`.
@@ -40,6 +53,10 @@ Stmt Lower(const LowerArgs& args, arith::Analyzer* analyzer) const;
 Avoid adding new lowerCamelCase helpers or ambiguous context names like
 `const LowerArgs& T`.
 
+Existing code still has legacy lowerCamelCase reflection names and public fields
+with trailing underscores. Do not copy those patterns into new APIs. When
+touching them, preserve compatibility unless the migration is explicit.
+
 ## API Boundaries And Ownership
 
 Prefer concrete type declarations over `auto` when the type is short or the
@@ -58,6 +75,10 @@ points such as `Collect`, `Rewrite`, or `Analyze` that hide the visitor object.
 Use TVM `Array`, `Map`, `Optional`, and ObjectRefs at FFI/API boundaries.
 Internal analysis code may use `std::vector`, `std::unordered_map`, and
 `std::unordered_set` when that is simpler, but convert back at the boundary.
+
+Use `TVM_DLL` only for functions and constructors that need cross-translation
+unit or extension visibility, following nearby exported APIs. Keep file-local
+helpers in anonymous namespaces or private methods.
 
 ## TVM Object Conventions
 
@@ -84,6 +105,14 @@ Use `Optional<T>` for nullable ObjectRef results. Return an undefined
 `Optional<T>` or ObjectRef for "not found" cases instead of retaining raw node
 pointers or relying on unrelated sentinel state.
 
+Construct ObjectRefs with `make_object<Node>()`, populate reflected fields, then
+assign `data_ = std::move(node)`. For `Clone()`, a shallow
+`make_object<Node>(*this)` is fine only when embedded mutable ObjectRefs do not
+need independent copies; clone nested mutable operators explicitly when needed.
+
+When mutating existing IR/ObjectRefs, call `CopyOnWrite()` on a handle. Do not
+mutate raw callback nodes directly.
+
 ## Symbolic Arithmetic And Analyzer Use
 
 Do not force a `PrimExpr` to a constant integer if symbolic arithmetic can carry
@@ -105,6 +134,14 @@ Be careful mixing `int32` and `int64` in analyzer-sensitive expressions. In
 layout/swizzle code, preserve the native dtype of the expression spine when
 casts would prevent simplification.
 
+When constructing constants, prefer dtype-aware helpers:
+
+```cpp
+PrimExpr zero = make_const(buffer->dtype, 0);
+PrimExpr one_i32 = IntImm(DataType::Int(32), 1);
+PrimExpr same_dtype = IntImm(expr->dtype, value);
+```
+
 ## ObjectNode Fields
 
 For TVM-style `ObjectNode` classes, public reflected fields should use
@@ -114,6 +151,75 @@ private/protected implementation state.
 Before renaming reflected fields, check whether the field name is FFI-visible or
 used by Python/debugging surfaces. Do not break compatibility without an
 explicit migration plan.
+
+For a new FFI-visible Object:
+
+- Node classes use `TVM_FFI_DECLARE_OBJECT_INFO` or
+  `TVM_FFI_DECLARE_OBJECT_INFO_FINAL`.
+- ObjectRef classes use `TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE` unless the
+  handle is intentionally non-nullable.
+- `RegisterReflection()` defines public fields with stable string names.
+- A `TVM_FFI_STATIC_INIT_BLOCK()` registers reflection and global functions.
+
+Treat registered field names and global names as API. Python-facing global
+names usually follow existing strings such as `tl.transform.Simplify`,
+`tl.make_linear_layout`, or target-specific `tl.cuda.transform.*`.
+
+## Tile Operators And Backend Implementations
+
+New tile operators should follow the `TileOperatorNode` pattern:
+
+- Parse `ffi::Array<PrimExpr>` arguments and `Map<String, ObjectRef>`
+  annotations in the ObjectRef constructor.
+- Fill access regions with `SetAccessRegions` so analysis sees reads/writes.
+- Implement `Lower`, `InferLayout`, and `Clone`.
+- Register the TIR op with `TIR_REGISTER_TL_TILE_OP` or a matching
+  `TVM_REGISTER_OP` variant. Set call effects and printer names consistently.
+
+Target-specific lowering belongs in target directories such as `src/cuda/op`,
+`src/rocm/op`, `src/cpu/op`, or `src/metal/op`. Use small target predicates and
+registration structs (`RegisterCopyImpl`, `RegisterAtomic...Impl`, etc.) instead
+of hardcoding target branches in common code. Put shared fallback logic in
+`src/backend/common` or the common op file.
+
+Use target helper APIs (`TargetIsCuda`, `TargetHasAsyncCopy`,
+`TargetCudaGetWarpSize`, etc.) instead of string-matching targets at call sites.
+
+For annotations, prefer existing `attr::k...` constants when available. When a
+string key is required for compatibility, parse it through a small helper and
+validate type/range close to the parse site.
+
+## Passes And Visitors
+
+Transform passes usually use local visitor/mutator classes plus a small public
+factory:
+
+```cpp
+tvm::transform::Pass MyPass() {
+  auto pass_func = [](PrimFunc func, const IRModule& mod,
+                      PassContext ctx) -> PrimFunc {
+    arith::Analyzer analyzer;
+    return MyRewriter::Rewrite(std::move(func), &analyzer);
+  };
+  return CreatePrimFuncPass(pass_func, 0, "tl.MyPass", {});
+}
+```
+
+Register pass factories in `TVM_FFI_STATIC_INIT_BLOCK()` under
+`tl.transform.*` or target-specific namespaces like `tl.cuda.transform.*`.
+
+Visitor rules:
+
+- Use `StmtExprVisitor`, `StmtExprMutator`, `StmtMutator`, or
+  `arith::IRMutatorWithAnalyzer` according to whether the pass needs expression
+  traversal, mutation, or analyzer context.
+- Provide static entry points such as `Collect`, `Rewrite`, `Substitute`, or
+  `Apply`; keep mutable traversal state private.
+- In callback overrides, call the base visitor/mutator unless intentionally
+  stopping traversal. Convert callback nodes with `GetRef<T>(op)` when passing
+  or storing the handle.
+- Preserve annotations, spans, and read/write metadata when rebuilding IR
+  unless the pass intentionally changes them.
 
 ## Headers And Includes
 
@@ -130,8 +236,34 @@ explicit migration plan.
 - Keep implementation-only helpers in `.cc` files or anonymous namespaces.
 - Group includes as paired header, standard library, TVM/third-party, then local
   TileLang headers.
+- Use header guards shaped like `TVM_TL_<PATH>_<FILE>_H_` where possible, and
+  close namespaces and guards with comments.
 
-## Formatter And Macro Edge Cases
+## Error Handling And Diagnostics
+
+Use `ICHECK`/`ICHECK_EQ` for internal compiler invariants. Use `LOG(FATAL)` for
+unsupported or unreachable branches where a streamed message is clearer than a
+boolean check. Avoid new bare `ICHECK(0)` without context.
+
+Use `CHECK(..., ErrorKind)` only for user-facing FFI validation paths where a
+typed TVM FFI error is intended. Runtime ABI validation should follow existing
+generated `AssertStmt` or `runtime/error_helpers` patterns.
+
+Make messages actionable: include the op, target, buffer name, scope, dtype,
+shape/range, or annotation key that caused the failure. Prefer messages that
+explain the violated constraint over "not supported".
+
+## Comments And Documentation
+
+Use Doxygen comments for public APIs, ObjectRefs/ObjectNodes, pass factories,
+and non-obvious fields. For local code, comment invariants and target-specific
+constraints, not line-by-line restatements.
+
+Good comments in TileLang often explain why a fallback, annotation, dtype cast,
+or analyzer binding is required. Keep comments short unless they describe a
+subtle lowering invariant.
+
+## Clang-Format And Macro Boundaries
 
 Use `clang-format off/on` narrowly around dense generated tables, inline asm, or
 registration blocks only when the formatter makes the code materially worse.
@@ -151,8 +283,18 @@ Style convergence should be incremental:
 - Do not mix broad formatting changes with behavior changes.
 - Keep `.clang-format` changes in a focused PR.
 
-Validate style/documentation edits with:
+For C++ code edits, run the formatter/checks on changed files:
 
 ```bash
-python3 -m pre_commit run --files <changed-file>...
+bash format.sh --files <changed-file>...
 ```
+
+For documentation or skill edits, `python3 -m pre_commit run --files
+<changed-file>...` is enough. For C++ API cleanup, also run:
+
+```bash
+python3 maint/scripts/audit_cpp_api_style.py <path>...
+```
+
+The audit is advisory. Review each finding for overrides, FFI-visible fields,
+generated interfaces, and backend/runtime shim constraints.
