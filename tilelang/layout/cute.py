@@ -14,6 +14,7 @@ from tvm.runtime import Scriptable
 
 from tilelang._typing import BufferLikeType
 from . import _cute_ffi_api
+from .swizzle_mode import SwizzleMode
 
 PyIntTuple = Union[int, PrimExpr, "ScaledBasis", tuple]
 IntTupleLike = Union[int, PrimExpr, "ScaledBasis", Sequence, "IntTuple"]
@@ -60,6 +61,15 @@ class Swizzle(Node, Scriptable):
 
     def recast(self, old_bits: int, new_bits: int) -> Swizzle:
         return _cute_ffi_api.swizzle_recast(self, int(old_bits), int(new_bits))
+
+    def to_swizzle_mode(self) -> SwizzleMode:
+        """The canonical :class:`SwizzleMode` for this swizzle.
+
+        ICHECKs the swizzle is a canonical GMMA atom ``Sw<b,4,3>`` (byte-address
+        space). The hardware descriptor fields (WGMMA / TCGEN05) are derived
+        projections off the returned mode (``mode.wgmma_layout_type()`` etc.).
+        """
+        return _cute_ffi_api.swizzle_to_swizzle_mode(self)
 
 
 @tvm_ffi.register_object("tl.cute.IntTuple")
@@ -180,6 +190,23 @@ def right_inverse(layout: Layout) -> Layout:
 
 def composition(lhs: Layout, rhs: Layout) -> Layout:
     return _cute_ffi_api.composition(lhs, rhs)
+
+
+def filter(layout: Layout) -> Layout:  # noqa: A001 - mirrors CuTe `filter`
+    return _cute_ffi_api.filter(layout)
+
+
+def cosize(layout: Layout) -> int:
+    # Mirrors CuTe `cosize`: a plain int for a static layout, else a PrimExpr.
+    return to_python(_cute_ffi_api.cosize(layout))
+
+
+def complement(layout: Layout, cotarget: int) -> Layout:
+    return _cute_ffi_api.complement(layout, int(cotarget))
+
+
+def logical_divide(layout: Layout, tiler: Layout) -> Layout:
+    return _cute_ffi_api.logical_divide(layout, tiler)
 
 
 def make_layout(shape: PyIntTuple, stride=None) -> Layout:

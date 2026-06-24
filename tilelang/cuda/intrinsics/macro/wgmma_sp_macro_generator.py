@@ -1,5 +1,5 @@
 from __future__ import annotations
-from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import SwizzleMode, gcd
+from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import gcd
 from tilelang.cuda.intrinsics.macro.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 import tilelang.language as T
 from tvm import DataType
@@ -12,6 +12,7 @@ from tilelang.cuda.intrinsics.layout.mma_layout import (
 )
 from tilelang.layout import (
     Layout,
+    SwizzleMode,
     make_full_bank_swizzled_layout,
     make_half_bank_swizzled_layout,
     make_quarter_bank_swizzled_layout,
@@ -226,8 +227,12 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
 
             desc_a = T.alloc_wgmma_desc()
             desc_b = T.alloc_wgmma_desc()
-            T.initialize_wgmma_descriptor(desc_a, A_ptr, a_swizzle_mode, int(a_leading_byte_offset >> 4), int(a_stride_byte_offset >> 4))
-            T.initialize_wgmma_descriptor(desc_b, B_ptr, b_swizzle_mode, int(b_leading_byte_offset >> 4), int(b_stride_byte_offset >> 4))
+            T.initialize_wgmma_descriptor(
+                desc_a, A_ptr, a_swizzle_mode.wgmma_layout_type(), int(a_leading_byte_offset >> 4), int(a_stride_byte_offset >> 4)
+            )
+            T.initialize_wgmma_descriptor(
+                desc_b, B_ptr, b_swizzle_mode.wgmma_layout_type(), int(b_leading_byte_offset >> 4), int(b_stride_byte_offset >> 4)
+            )
 
             for ki in T.unroll(k_blocks):
                 for i in T.unroll(num_inst_m):
@@ -370,7 +375,9 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
             E_local = T.alloc_local((k_blocks * e_stage_elems), self.e_dtype)
 
             desc_b = T.alloc_wgmma_desc()
-            T.initialize_wgmma_descriptor(desc_b, B_ptr, b_swizzle_mode, int(b_leading_byte_offset >> 4), int(b_stride_byte_offset >> 4))
+            T.initialize_wgmma_descriptor(
+                desc_b, B_ptr, b_swizzle_mode.wgmma_layout_type(), int(b_leading_byte_offset >> 4), int(b_stride_byte_offset >> 4)
+            )
 
             for ki in T.unroll(k_blocks):
                 for i in T.unroll(num_inst_m):

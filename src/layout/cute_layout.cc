@@ -61,17 +61,26 @@ Swizzle Swizzle::Recast(int old_bits, int new_bits) const {
   ICHECK(n != nullptr) << "Recast on a null Swizzle";
   if (!n->IsSwizzled())
     return Swizzle::Identity();
-  // Reinterpreting the element size scales every address by old_bits/new_bits,
-  // so bit positions shift by log2(old_bits) - log2(new_bits). Element sizes
-  // must be powers of two for this to be a clean bit shift.
   int old_log = Log2Exact(old_bits);
   int new_log = Log2Exact(new_bits);
   ICHECK(old_log >= 0 && new_log >= 0)
       << "Recast expects power-of-two element sizes, got " << old_bits << " -> "
       << new_bits;
-  int m_base = n->m_base + (old_log - new_log);
-  ICHECK(m_base >= 0) << "Recast produced negative m_base: " << m_base;
-  return Swizzle(n->b_bits, m_base, n->s_shift);
+  // Mirror CuTe swizzle_layout.hpp recast_layout(Swizzle<B,M,S>):
+  //   new_bits > old_bits => upcast<new/old>:  NewM = M - log2(N);
+  //       NewM >= 0 -> Swizzle<B, NewM, S>;  else ->
+  //       Swizzle<max(B+NewM,0),0,S>.
+  //   new_bits < old_bits => downcast<old/new>: Swizzle<B, M + log2(N), S>.
+  if (new_bits >= old_bits) {
+    int log2_n = new_log - old_log; // log2(N), N = new/old
+    int new_m = n->m_base - log2_n;
+    if (new_m >= 0)
+      return Swizzle(n->b_bits, new_m, n->s_shift);
+    return Swizzle(std::max(n->b_bits + new_m, 0), 0, n->s_shift);
+  } else {
+    int log2_n = old_log - new_log; // log2(N), N = old/new
+    return Swizzle(n->b_bits, n->m_base + log2_n, n->s_shift);
+  }
 }
 
 IntTuple::IntTuple(int64_t value) {
@@ -854,6 +863,190 @@ Layout Take(const Layout &layout, int64_t n) {
   return Layout(std::move(shape), std::move(stride));
 }
 
+Layout Filter(const Layout &layout) {
+  // CuTe filter = coalesce(filter_zeros(layout)): a provably-zero-stride mode
+  // becomes size-1 (then dropped by coalesce), and contiguous runs are merged.
+  // Mirror CuTe: only a *constant* 0 stride is provably zero; dynamic and
+  // ScaledBasis modes pass through and Coalesce leaves them unfused.
+  IntTuple fsh = Flatten(layout->shape), fst = Flatten(layout->stride);
+  int64_t r = Rank(fsh);
+  Array<IntTuple> out_sh, out_st;
+  for (int64_t i = 0; i < r; ++i) {
+    // filter_zeros: a stride-0 mode contributes nothing -> shape 1.
+    out_sh.push_back(IsZeroLeaf(fst[i]) ? IntTuple(int64_t(1)) : fsh[i]);
+    out_st.push_back(fst[i]);
+  }
+  return Coalesce(Layout(out_sh, out_st));
+}
+
+IntTuple Cosize(const Layout &layout) {
+  // CuTe cosize = size(coshape) = 1 + sum_i (shape_i - 1) * |stride_i|, over
+  // the flattened scalar modes. Constant modes fold to an int; a dynamic mode
+  // (or dynamic shape) keeps the sum symbolic. |stride| emits CuTe's
+  // abs(stride) (coshape's abs_fn) for a dynamic stride.
+  IntTuple fsh = Flatten(layout->shape), fst = Flatten(layout->stride);
+  int64_t r = Rank(fsh);
+  IntTuple co = IntTuple(int64_t(1));
+  for (int64_t i = 0; i < r; ++i) {
+    IntTuple sh = fsh[i], st = fst[i];
+    ICHECK(!IsTuple(sh) && !IsScaledBasis(sh))
+        << "Cosize requires scalar shapes, got " << sh;
+    ICHECK(!IsTuple(st) && !IsScaledBasis(st))
+        << "Cosize requires scalar strides, got " << st;
+    if (IsConst(st)) {
+      int64_t s = AsConst(st);
+      st = IntTuple(s < 0 ? -s : s); // |stride|
+    } else {
+      st = IntTuple(tvm::abs(AsPrimExpr(st)));
+    }
+    IntTuple extent = AddLeaf(sh, IntTuple(int64_t(-1))); // shape_i - 1
+    co = AddLeaf(co, MulLeaf(extent, st));
+  }
+  return co;
+}
+
+namespace {
+
+// ceil_div of two scalar leaves (CuTe ceil_div = (a + b - 1) / b), assuming
+// non-negative operands. Constant when both are constant, else a PrimExpr.
+IntTuple CeilDivLeaf(const IntTuple &a, const IntTuple &b) {
+  if (IsConst(a) && IsConst(b))
+    return IntTuple(CeilDiv(AsConst(a), AsConst(b)));
+  DataType dt = IsPrimExpr(a) ? AsPrimExpr(a)->dtype : AsPrimExpr(b)->dtype;
+  PrimExpr ae = AsConstOrPrimExpr(a, dt);
+  PrimExpr be = AsConstOrPrimExpr(b, dt);
+  return IntTuple(tvm::floordiv(ae + be - 1, be));
+}
+
+// Static port of CuTe detail::complement (layout.hpp:1176-1227). `shapes`/
+// `strides` are the FILTERED flat modes (no stride-0, no size-1); `cotarget` is
+// the total codomain size to fill. Returns the complement layout (flat modes).
+Layout ComplementStatic(std::vector<int64_t> shapes,
+                        std::vector<int64_t> strides, int64_t cotarget) {
+  int64_t R = static_cast<int64_t>(shapes.size());
+  if (R == 0) {
+    // Fully-trivial layout: complement is the whole [0, cotarget) run.
+    return Coalesce(Layout(Array<int64_t>{cotarget}, Array<int64_t>{1}));
+  }
+  // Sort-and-fold: repeatedly take the smallest remaining stride, emit the gap
+  // below it as a new mode, and advance the running stride past that mode.
+  std::vector<int64_t> result_shape, result_stride;
+  result_stride.push_back(1);
+  for (int64_t i = 0; i < R - 1; ++i) {
+    int64_t min_idx = 0;
+    for (size_t j = 1; j < strides.size(); ++j)
+      if (strides[j] < strides[min_idx])
+        min_idx = static_cast<int64_t>(j);
+    int64_t min_stride = strides[min_idx];
+    int64_t new_shape = min_stride / result_stride[i];
+    int64_t new_stride = min_stride * shapes[min_idx];
+    ICHECK(new_shape != 0) << "Non-injective layout detected in complement";
+    shapes.erase(shapes.begin() + min_idx);
+    strides.erase(strides.begin() + min_idx);
+    result_shape.push_back(new_shape);
+    result_stride.push_back(new_stride);
+  }
+  // Append the last shape mode and the rest mode that fills up to cotarget.
+  int64_t new_shape = strides[0] / result_stride[R - 1];
+  ICHECK(new_shape != 0) << "Non-injective layout detected in complement";
+  result_shape.push_back(new_shape);
+  int64_t new_stride = strides[0] * shapes[0];
+  int64_t rest_extent = (cotarget + new_stride - 1) / new_stride; // ceil_div
+  Array<int64_t> out_sh, out_st;
+  for (int64_t i = 0; i < R; ++i) {
+    out_sh.push_back(result_shape[i]);
+    out_st.push_back(result_stride[i]);
+  }
+  out_sh.push_back(rest_extent);
+  out_st.push_back(new_stride);
+  return Coalesce(Layout(out_sh, out_st));
+}
+
+// CuTe detail::complement for a single filtered rank-1 mode (s):(d), with a
+// possibly-dynamic shape/stride (layout.hpp:1207-1222 specialized to R==1: the
+// fold body runs zero times). Result is
+//   coalesce( (d, ceil_div(cotarget, d*s)) : (1, d*s) ).
+Layout ComplementRank1(const IntTuple &shape, const IntTuple &stride,
+                       int64_t cotarget) {
+  ICHECK(!IsTuple(stride) && !IsScaledBasis(stride))
+      << "Complement requires a scalar stride, got " << stride;
+  IntTuple ds = MulLeaf(stride, shape); // d * s
+  IntTuple rest_shape = CeilDivLeaf(IntTuple(cotarget), ds);
+  Array<IntTuple> out_sh{stride, rest_shape};       // (d, ceil_div(..))
+  Array<IntTuple> out_st{IntTuple(int64_t(1)), ds}; // (1, d*s)
+  return Coalesce(Layout(out_sh, out_st));
+}
+
+} // namespace
+
+Layout Complement(const Layout &layout, int64_t cotarget) {
+  Layout f = Filter(layout); // flat (Coalesce output).
+  IntTuple fsh = Flatten(f->shape), fst = Flatten(f->stride);
+  int64_t r = Rank(fsh);
+  // Drop the residual (1):(0) that Coalesce/Filter leaves for an empty layout.
+  std::vector<IntTuple> sh, st;
+  for (int64_t i = 0; i < r; ++i) {
+    if (IsConst(fsh[i]) && AsConst(fsh[i]) == 1 && IsZeroLeaf(fst[i]))
+      continue;
+    sh.push_back(fsh[i]);
+    st.push_back(fst[i]);
+  }
+  int64_t R = static_cast<int64_t>(sh.size());
+  bool all_const = true;
+  for (int64_t i = 0; i < R; ++i)
+    if (!IsConst(sh[i]) || !IsConst(st[i]))
+      all_const = false;
+  if (all_const) {
+    std::vector<int64_t> ci_sh, ci_st;
+    for (int64_t i = 0; i < R; ++i) {
+      ci_sh.push_back(AsConst(sh[i]));
+      ci_st.push_back(AsConst(st[i]));
+    }
+    return ComplementStatic(std::move(ci_sh), std::move(ci_st), cotarget);
+  }
+  // Dynamic modes: CuTe only supports rank-1 here -- the rank>1 sort-and-fold
+  // orders modes by stride magnitude, which a symbolic stride cannot do
+  // (layout.hpp:1187-1189: static_assert(R == 1 || is_static<Stride>)).
+  ICHECK(R == 1) << "Dynamic-stride complement only for rank-1 layouts "
+                    "(mirrors CuTe static_assert); got rank "
+                 << R;
+  return ComplementRank1(sh[0], st[0], cotarget);
+}
+
+Layout Complement(const Layout &layout) {
+  IntTuple cs = Cosize(Filter(layout));
+  ICHECK(IsConst(cs)) << "single-argument Complement needs a static cosize "
+                         "(its codomain target), got "
+                      << cs;
+  return Complement(layout, AsConst(cs));
+}
+
+Layout LogicalDivide(const Layout &layout, const Layout &tiler) {
+  // CuTe 2-arg logical_divide (layout.hpp:1559-1562):
+  //   composition(layout, make_layout(tiler, complement(tiler,
+  //   size(coalesce(layout))))).
+  // The result is rank-2: mode 0 is the tile (layout o tiler), mode 1 the rest.
+  // size(coalesce(layout)) is the complement's cotarget, so it must be static
+  // (CuTe's cotarget is a compile-time Int) -- i.e. `layout` needs a static
+  // shape. Its STRIDES may be dynamic: Complement runs on the (static) tiler,
+  // and Composition handles a dynamic-stride layout.
+  IntTuple sz = Size(Coalesce(layout));
+  ICHECK(IsConst(sz)) << "LogicalDivide needs a static layout size (the "
+                         "complement cotarget), got "
+                      << sz;
+  Layout comp = Complement(tiler, AsConst(sz));
+  // make_layout(tiler, comp): concatenate the tiler modes with the complement.
+  Array<IntTuple> sh, st;
+  sh.push_back(tiler->shape);
+  st.push_back(tiler->stride);
+  sh.push_back(comp->shape);
+  st.push_back(comp->stride);
+  IntTuple combined_shape = IntTupleTuple(sh);
+  IntTuple combined_stride = IntTupleTuple(st);
+  Layout combined(combined_shape, combined_stride);
+  return Composition(layout, combined);
+}
+
 Layout MakeColumnMajorLayout(const IntTuple &shape) {
   return Layout(shape, CompactColMajor(shape));
 }
@@ -875,6 +1068,83 @@ ComposedLayout::ComposedLayout(Swizzle swizzle, int64_t offset, Layout layout) {
   data_ = std::move(node);
 }
 
+namespace {
+
+int64_t AbsI(int64_t v) { return v < 0 ? -v : v; }
+int64_t SignumI(int64_t v) { return (v > 0) - (v < 0); }
+int64_t CeilDivI(int64_t a, int64_t b) { return (a + b - 1) / b; }
+
+// CuTe upcast<N> for one flat mode (layout.hpp:1806-1823), mirrored literally:
+//   is_constant<0,Stride>           : Layout{shape, stride} (stride 0)
+//   is_static<Stride> (general)     : make_layout(
+//       ceil_div(shape,  ceil_div(N, abs(stride))),
+//       signum(stride) * ceil_div(abs(stride), N))
+// (the static_assert "Stride % N == 0 or N % Stride == 0" precondition holds
+// for
+//  all canonical GMMA layouts; we keep the divisibility implicit in ceil_div).
+void UpcastMode(int64_t N, int64_t shape, int64_t stride, int64_t *out_shape,
+                int64_t *out_stride) {
+  if (stride == 0) {
+    *out_shape = shape;
+    *out_stride = 0;
+    return;
+  }
+  int64_t abs_stride = AbsI(stride);
+  *out_shape = CeilDivI(shape, CeilDivI(N, abs_stride));
+  *out_stride = SignumI(stride) * CeilDivI(abs_stride, N);
+}
+
+// CuTe downcast<N> for one flat mode (layout.hpp:1841-1855), mirrored
+// literally:
+//   is_constant<1,Stride> || is_constant<-1,Stride> : make_layout(shape*N,
+//   stride) else                                            :
+//   make_layout(shape, stride*N)
+void DowncastMode(int64_t N, int64_t shape, int64_t stride, int64_t *out_shape,
+                  int64_t *out_stride) {
+  if (stride == 1 || stride == -1) {
+    *out_shape = shape * N;
+    *out_stride = stride;
+  } else {
+    *out_shape = shape;
+    *out_stride = stride * N;
+  }
+}
+
+// Apply upcast<factor>/downcast<factor> to a (shape, stride) tree congruently,
+// preserving the hierarchy (CuTe upcast/downcast recurse via transform_layout).
+// `up` selects upcast (true) vs downcast; factor == 1 is the identity.
+void RecastTree(int64_t factor, bool up, const IntTuple &sh, const IntTuple &st,
+                IntTuple *out_sh, IntTuple *out_st) {
+  if (IsTuple(sh)) {
+    ICHECK(IsTuple(st) && Rank(sh) == Rank(st))
+        << "Recast: shape/stride tree mismatch";
+    Array<IntTuple> nsh, nst;
+    for (int64_t i = 0, n = Rank(sh); i < n; ++i) {
+      IntTuple csh, cst;
+      RecastTree(factor, up, sh[i], st[i], &csh, &cst);
+      nsh.push_back(csh);
+      nst.push_back(cst);
+    }
+    *out_sh = IntTupleTuple(nsh);
+    *out_st = IntTupleTuple(nst);
+    return;
+  }
+  ICHECK(IsConst(sh) && IsConst(st)) << "Recast requires plain integer leaves";
+  int64_t s = AsConst(sh), d = AsConst(st), os, od;
+  if (factor == 1) {
+    os = s;
+    od = d;
+  } else if (up) {
+    UpcastMode(factor, s, d, &os, &od);
+  } else {
+    DowncastMode(factor, s, d, &os, &od);
+  }
+  *out_sh = IntTuple(os);
+  *out_st = IntTuple(od);
+}
+
+} // namespace
+
 ComposedLayout ComposedLayout::Recast(int old_bits, int new_bits) const {
   const ComposedLayoutNode *n = get();
   ICHECK(n != nullptr) << "Recast on a null ComposedLayout";
@@ -883,26 +1153,32 @@ ComposedLayout ComposedLayout::Recast(int old_bits, int new_bits) const {
   ICHECK(old_log >= 0 && new_log >= 0)
       << "Recast expects power-of-two element sizes, got " << old_bits << " -> "
       << new_bits;
-  // Scaling the element width multiplies every address by old_bits/new_bits.
-  // For a clean integer layout this must be an exact power-of-two scale; the
-  // shift can be positive (smaller elements) or negative (larger elements).
-  int shift = old_log - new_log;
-  auto scale = [&](int64_t v) -> int64_t {
-    if (shift >= 0)
-      return v << shift;
-    int64_t d = static_cast<int64_t>(1) << (-shift);
-    ICHECK(v % d == 0) << "Recast cannot scale " << v << " by 2^" << shift
-                       << " without remainder";
-    return v / d;
-  };
-  // Scale every stride leaf, preserving the shape tree (TransformLeaf keeps the
-  // hierarchy; the recovered layout's strides are plain integers).
-  IntTuple new_stride = TransformLeaf(n->layout->stride, [&](IntTuple s) {
-    ICHECK(IsConst(s)) << "Recast requires plain integer strides";
-    return IntTuple(scale(AsConst(s)));
-  });
-  Layout new_layout(n->layout->shape, new_stride);
-  return ComposedLayout(n->swizzle.Recast(old_bits, new_bits), scale(n->offset),
+  // Recasting the element width from old_bits to new_bits is CuTe
+  // recast_layout: new_bits > old_bits  => upcast<new/old>;  new_bits <
+  // old_bits => downcast<old/new>. upcast/downcast treat the unit-stride
+  // (contiguous) mode specially -- they scale its SHAPE, not its stride --
+  // which uniform stride scaling gets wrong (e.g. a stride-1 mode would acquire
+  // a fractional stride). The recursion preserves the layout's hierarchy (CuTe
+  // transform_layout). The offset is a plain address and scales by old/new.
+  bool up = new_bits >= old_bits;
+  int64_t factor = up ? (int64_t(1) << (new_log - old_log))
+                      : (int64_t(1) << (old_log - new_log));
+  IntTuple out_sh, out_st;
+  RecastTree(factor, up, n->layout->shape, n->layout->stride, &out_sh, &out_st);
+  // The offset is an address in old-element units; convert to new-element
+  // units.
+  int64_t new_offset;
+  if (factor == 1) {
+    new_offset = n->offset;
+  } else if (up) {
+    ICHECK(n->offset % factor == 0)
+        << "Recast cannot scale offset " << n->offset << " up by " << factor;
+    new_offset = n->offset / factor;
+  } else {
+    new_offset = n->offset * factor;
+  }
+  Layout new_layout(out_sh, out_st);
+  return ComposedLayout(n->swizzle.Recast(old_bits, new_bits), new_offset,
                         new_layout);
 }
 
@@ -1395,6 +1671,22 @@ Optional<Layout> RecoverPlainLayout(const AddrProbe &A, const Swizzle &swizzle,
   return plain;
 }
 
+// Reshape a recovered flat layout (whose single linear coordinate is the
+// column-major linearization of the TileLang input shape) so that its modes are
+// congruent to the input shape. CuTe: result = plain o col_major(input_shape);
+// since composition(lhs,rhs)(c) == lhs(rhs(c)) and col_major(S) maps a
+// coordinate in shape S to its linear index, the result is a function-identical
+// layout whose top-level modes mirror S (a contiguous input mode that the
+// swizzle splits becomes a hierarchical mode, e.g. (64,512) -> (64,(64,8))).
+Layout ReshapeToInputShape(const Layout &plain,
+                           const std::vector<int32_t> &input_shape) {
+  Array<IntTuple> dims;
+  for (int32_t s : input_shape)
+    dims.push_back(IntTuple(static_cast<int64_t>(s)));
+  IntTuple shape_tuple = IntTupleTuple(dims);
+  return Composition(plain, MakeColumnMajorLayout(shape_tuple));
+}
+
 } // namespace
 
 // Recover a TileLang layout that has no swizzle and zero offset as a plain
@@ -1405,7 +1697,12 @@ Optional<Layout> LayoutFromTileLang(const tvm::tl::Layout &layout) {
   AddrProbe A(layout);
   if (A.shape().empty())
     return std::nullopt;
-  return RecoverPlainLayout(A, Swizzle::Identity(), /*offset=*/0);
+  Optional<Layout> plain =
+      RecoverPlainLayout(A, Swizzle::Identity(), /*offset=*/0);
+  if (!plain.defined())
+    return std::nullopt;
+  // Return a layout congruent to the input TileLang shape (not the flat form).
+  return ReshapeToInputShape(plain.value(), A.shape());
 }
 
 // Recover a swizzled affine layout, A(x) = Sw(offset + plain(x)), from a
@@ -1490,7 +1787,10 @@ ComposedLayoutFromTileLang(const tvm::tl::Layout &layout) {
   Optional<Layout> plain = RecoverPlainLayout(A, swizzle, offset);
   if (!plain.defined())
     return std::nullopt;
-  return ComposedLayout(swizzle, offset, plain.value());
+  // Return a layout congruent to the input TileLang shape (not the flat form),
+  // so callers can index modes positionally (e.g. logical_divide per mode).
+  return ComposedLayout(swizzle, offset,
+                        ReshapeToInputShape(plain.value(), A.shape()));
 }
 
 namespace {
@@ -1604,6 +1904,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       // -- Swizzle --------------------------------------------------------
       .def("tl.cute.swizzle_is_swizzled",
            [](const Swizzle &swizzle) { return swizzle->IsSwizzled(); })
+      .def("tl.cute.swizzle_to_swizzle_mode",
+           [](const Swizzle &swizzle) { return swizzle->ToSwizzleMode(); })
       .def("tl.cute.swizzle_recast",
            [](const Swizzle &swizzle, int old_bits, int new_bits) {
              return swizzle.Recast(old_bits, new_bits);
@@ -1666,6 +1968,18 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("tl.cute.coalesce_max",
            [](const Layout &layout, int64_t max_extent) {
              return Coalesce(layout, max_extent);
+           })
+      .def("tl.cute.filter",
+           [](const Layout &layout) { return Filter(layout); })
+      .def("tl.cute.cosize",
+           [](const Layout &layout) { return Cosize(layout); })
+      .def("tl.cute.complement",
+           [](const Layout &layout, int64_t cotarget) {
+             return Complement(layout, cotarget);
+           })
+      .def("tl.cute.logical_divide",
+           [](const Layout &layout, const Layout &tiler) {
+             return LogicalDivide(layout, tiler);
            })
       // -- Make*Layout ----------------------------------------------------
       .def("tl.cute.make_column_major_layout",

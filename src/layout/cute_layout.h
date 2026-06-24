@@ -7,6 +7,7 @@
 #define TVM_TL_LAYOUT_CUTE_LAYOUT_H_
 
 #include "support/check.h"
+#include "swizzle_mode.h"
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/object.h>
 #include <tvm/ffi/reflection/registry.h>
@@ -75,6 +76,28 @@ public:
   // The span of one swizzle period: 2^(m_base + b_bits). For the TMA atoms
   // <b,4,3> this is the CUtensorMap swizzle size (32/64/128 B for b = 1/2/3).
   int64_t Granularity() const { return int64_t(1) << (m_base + b_bits); }
+
+  // The canonical swizzle mode (SwizzleMode) this swizzle corresponds to:
+  //   b_bits 0 -> None, 1 -> 32B, 2 -> 64B, 3 -> 128B.
+  // The descriptor-field encodings (WGMMA/TCGEN05) are derived projections off
+  // the returned mode. The swizzle MUST be a canonical GMMA atom <b,4,3>;
+  // ICHECKs m_base==4, s_shift==3.
+  // @pre this is in BYTE-ADDRESS space. CuTe's GMMA swizzle atoms are defined
+  // on
+  //      byte addresses (effective element width 8), so the canonical m_base is
+  //      4 only after recasting the decoded element-space swizzle to bytes.
+  //      (The u128 recast used for the descriptor STRIDES drives m_base to 0 --
+  //      do not call this on the u128-space swizzle.)
+  SwizzleMode ToSwizzleMode() const {
+    if (b_bits == 0) {
+      return SwizzleMode::None();
+    }
+    ICHECK(m_base == 4 && s_shift == 3 && b_bits >= 1 && b_bits <= 3)
+        << "Not a canonical GMMA swizzle atom Sw<" << b_bits << "," << m_base
+        << "," << s_shift << ">; expected Sw<{1,2,3},4,3>";
+    // b_bits 1->32B(ord 1), 2->64B(ord 2), 3->128B(ord 3).
+    return SwizzleMode::FromOrdinal(b_bits);
+  }
 
   // Apply the swizzle to a physical offset: ZZZ ^= YYY.
   int64_t Apply(int64_t offset) const;
@@ -402,6 +425,47 @@ TVM_DLL Layout Coalesce(const Layout &layout, int64_t max_extent);
 
 /// Take a given number of modes from a layout.
 TVM_DLL Layout Take(const Layout &layout, int64_t n);
+
+/// Drop stride-0 and size-1 modes, then coalesce (CuTe `filter` =
+/// `coalesce(filter_zeros(layout))`). Mirrors CuTe: only *provably*-zero (const
+/// 0) strides and const size-1 modes are dropped, so dynamic and ScaledBasis
+/// modes survive untouched.
+/// @post the result is a function equal to `layout` on its domain, with the
+///       trivial (broadcast / singleton) modes removed.
+TVM_DLL Layout Filter(const Layout &layout);
+
+/// Codomain size of a layout (CuTe `cosize` = `size(coshape(layout))`):
+/// `1 + sum_i (shape_i-1)*|stride_i|` over the flattened layout, i.e. one past
+/// the largest reachable physical index. Scalar shapes and strides only (a
+/// tuple or ScaledBasis stride has no scalar codomain size).
+/// @return a constant when shape and stride are constant, else a PrimExpr; the
+///         `|stride_i|` term emits CuTe's `abs(stride)` for dynamic strides.
+TVM_DLL IntTuple Cosize(const Layout &layout);
+
+/// Complement of a layout within `cotarget` (CuTe `complement`,
+/// layout.hpp:1176-1247). Builds the layout of the codomain elements NOT hit by
+/// `layout`, so that `make_layout(layout, complement(layout, cotarget))` tiles
+/// `[0, cotarget)`. `layout` is filtered first.
+/// @note Mirrors CuTe's support boundary exactly (layout.hpp:1187-1189
+///       `static_assert(R == 1 || is_static<Stride>)`): the rank>1
+///       sort-and-fold needs a concrete stride order, so only a filtered rank-1
+///       layout may carry a dynamic stride; rank>1 requires static strides.
+/// @post size(result) >= cotarget / size(filter(layout)).
+TVM_DLL Layout Complement(const Layout &layout, int64_t cotarget);
+
+/// Complement against the layout's own cosize (the single-argument CuTe
+/// overload).
+TVM_DLL Layout Complement(const Layout &layout);
+
+/// Logical divide of `layout` by `tiler` (CuTe `logical_divide`,
+/// layout.hpp:1559-1562):
+///   Composition(layout, make_layout(tiler, Complement(tiler,
+///   Size(Coalesce(layout))))).
+/// Splits each tiled mode into (tile, rest), giving the canonical block view
+/// used by the GMMA descriptor analysis. The `tiler` and `Size(layout)` must be
+/// static (the complement runs on the tiler and `Size` is its cotarget), but
+/// the `layout`'s strides may be dynamic -- Composition carries them through.
+TVM_DLL Layout LogicalDivide(const Layout &layout, const Layout &tiler);
 
 // Column major layout over `shape`.
 template <typename Container>

@@ -108,7 +108,11 @@ public:
   bool transA_, transB_;
   int m_, n_, k_;
   int strideA_, strideB_;
-  int offsetA_, offsetB_;
+  // Offsets may be symbolic (e.g. a sliced operand B[:, j*64:...] in a loop),
+  // so store them as PrimExpr. They are not used by the C++ inference/lowering
+  // logic (the operand BufferRegion already carries the offset for the
+  // descriptor base pointer); kept for reflection / Python-side access.
+  PrimExpr offsetA_, offsetB_;
   PrimExpr clearAccum_ = const_false();
   tirx::BufferLoad mbar_; // mbar is optional, only used for TCGEN5MMA
   Array<PrimExpr> cCoords_;

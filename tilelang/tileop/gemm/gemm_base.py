@@ -106,7 +106,11 @@ class GemmBase:
 
     @property
     def chunk(self) -> int:
-        return self.A.shape[-2] if self.trans_A else self.A.shape[-1]
+        # The contraction (K) extent of THIS gemm. Use the gemm op's K (derived
+        # from the operand BufferRegion in _gemm_impl), not the raw buffer shape:
+        # for a sliced operand (e.g. A_shared[:, j*64:(j+1)*64]) the buffer's last
+        # dim is the full width, but the gemm only contracts the slice's K.
+        return self.K
 
     @property
     def A(self) -> tirx.Buffer:
