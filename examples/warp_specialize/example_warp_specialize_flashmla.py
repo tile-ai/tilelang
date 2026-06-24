@@ -185,9 +185,9 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
                     # Step 4.
                     for i, j in T.Parallel(block_H, block_N):
-                        acc_s_0[i, j] = T.exp2(acc_s_0[i, j] * scale - scores_max[i] * scale)
+                        acc_s_0[i, j] = T.exp2(acc_s_0[i, j] * scale - scores_max_0[i] * scale)
                     for i in T.Parallel(block_H):
-                        scores_scale_0[i] = T.exp2(scores_max_prev_0[i] * scale - scores_max[i] * scale)
+                        scores_scale_0[i] = T.exp2(scores_max_prev_0[i] * scale - scores_max_0[i] * scale)
 
                     T.reduce_sum(acc_s_0, scores_sum_0, dim=1)
 
@@ -346,11 +346,11 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                     T.copy(scores_max_1, scores_max)
 
                     for i in T.Parallel(block_H):
-                        scores_scale_1[i] = T.exp2(scores_max_prev_1[i] * scale - scores_max[i] * scale)
+                        scores_scale_1[i] = T.exp2(scores_max_prev_1[i] * scale - scores_max_1[i] * scale)
 
                     # Step 8.
                     for i, j in T.Parallel(block_H, block_N):
-                        acc_s_1[i, j] = T.exp2(acc_s_1[i, j] * scale - scores_max[i] * scale)
+                        acc_s_1[i, j] = T.exp2(acc_s_1[i, j] * scale - scores_max_1[i] * scale)
 
                     # Step 9.
                     T.reduce_sum(acc_s_1, scores_sum_1, dim=1)
