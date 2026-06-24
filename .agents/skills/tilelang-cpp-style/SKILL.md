@@ -289,18 +289,8 @@ Style convergence should be incremental:
 - Do not mix broad formatting changes with behavior changes.
 - Keep `.clang-format` changes in a focused PR.
 
-For C++ code edits, run the formatter/checks on changed files:
+Validate style/documentation edits with:
 
 ```bash
-bash format.sh --files <changed-file>...
+python3 -m pre_commit run --files <changed-file>...
 ```
-
-For documentation or skill edits, `python3 -m pre_commit run --files
-<changed-file>...` is enough. For C++ API cleanup, also run:
-
-```bash
-python3 maint/scripts/audit_cpp_api_style.py <path>...
-```
-
-The audit is advisory. Review each finding for overrides, FFI-visible fields,
-generated interfaces, and backend/runtime shim constraints.
