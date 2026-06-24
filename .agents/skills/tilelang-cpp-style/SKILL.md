@@ -35,10 +35,13 @@ Before writing new C++:
 - Namespaces: `lower_snake_case`.
 - Types, classes, structs, ObjectRefs, ObjectNodes: `PascalCase`.
 - Object nodes: `PascalCaseNode`; ObjectRefs: `PascalCase`.
-- Functions and methods: `PascalCase`.
+- Public functions and methods: `PascalCase`.
+- Private/protected methods: `PascalCase_`.
+- Inherited TVM visitor, mutator, and codegen hooks keep upstream names such as
+  `VisitExpr_`, `VisitStmt_`, `VisitStmtDefault_`, and `InitFuncState_`.
 - Boolean helpers: `Is`/`Has`/`Can` + `PascalCase`.
 - Parameters and local variables: `lower_snake_case`.
-- Private/protected members: `lower_snake_case_`.
+- Private/protected data members: `lower_snake_case_`.
 - Constants and enum values: `kPascalCase`.
 - Macros: `UPPER_SNAKE_CASE`.
 
@@ -56,6 +59,9 @@ Avoid adding new lowerCamelCase helpers or ambiguous context names like
 Existing code still has legacy lowerCamelCase reflection names and public fields
 with trailing underscores. Do not copy those patterns into new APIs. When
 touching them, preserve compatibility unless the migration is explicit.
+Trailing-underscore method names also exist in inherited TVM hooks and local
+codegen helper families; keep that style for new private/protected helper
+methods.
 
 ## API Boundaries And Ownership
 
