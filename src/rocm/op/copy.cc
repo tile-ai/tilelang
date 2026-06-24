@@ -136,8 +136,7 @@ private:
         /*should_vectorize=*/true, par_op->LoopLayoutRequiresPaddingGuard());
 
     auto inject_result =
-        InjectROCmAsyncCopy(lowered_loop, /*enable_auto_async_copy=*/true,
-                            /*async_without_async_commit_wait=*/
+        InjectROCmAsyncCopy(lowered_loop, /*async_without_async_commit_wait=*/
                             no_implicit_commit_wait || GetIsAsyncCopy(op));
     Stmt async_copy_loop = inject_result.stmt;
     if (!inject_result.injected_rocm_async_copy) {

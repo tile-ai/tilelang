@@ -61,19 +61,22 @@ std::optional<DataType> GetAccessPtrElementType(const PrimExpr &expr) {
 }
 
 int GetTileLangCPAsyncTransferBytes(const CallNode *op) {
-  ICHECK(op->args.size() == 3 || op->args.size() == 4)
-      << "tl::ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
+  auto call = Downcast<Call>(GetRef<PrimExpr>(op));
+  ICHECK(call->args.size() == 3 || call->args.size() == 4)
+      << call
+      << " expects 3 or 4 arguments (dst_access_ptr, "
          "src_access_ptr, num_elems, [predicate])";
-  const auto *num_elems_imm = op->args[2].as<IntImmNode>();
-  ICHECK(num_elems_imm) << "tl::ptx_cp_async num_elems must be IntImm, but got "
-                        << op->args[2];
+  const auto *num_elems_imm = call->args[2].as<IntImmNode>();
+  ICHECK(num_elems_imm) << call << " num_elems must be IntImm, but got "
+                        << call->args[2];
   int64_t num_elems = num_elems_imm->value;
-  ICHECK_GT(num_elems, 0);
+  ICHECK_GT(num_elems, 0) << call << " num_elems must be positive";
 
-  auto dst_elem_type = GetAccessPtrElementType(op->args[0]);
-  auto src_elem_type = GetAccessPtrElementType(op->args[1]);
+  auto dst_elem_type = GetAccessPtrElementType(call->args[0]);
+  auto src_elem_type = GetAccessPtrElementType(call->args[1]);
   ICHECK(dst_elem_type.has_value() && src_elem_type.has_value())
-      << "tl::ptx_cp_async expects address_of, tl.access_ptr, or "
+      << call
+      << " expects address_of, tl.access_ptr, or "
          "tvm_access_ptr operands";
 
   int64_t dst_total_bits =
@@ -81,16 +84,15 @@ int GetTileLangCPAsyncTransferBytes(const CallNode *op) {
   int64_t src_total_bits =
       num_elems * src_elem_type.value().bits() * src_elem_type.value().lanes();
   ICHECK_EQ(dst_total_bits, src_total_bits)
-      << "tl::ptx_cp_async requires src/dst transfer widths to match, but got "
+      << call << " requires src/dst transfer widths to match, but got "
       << dst_total_bits << " vs " << src_total_bits << " bits";
   ICHECK_EQ(dst_total_bits % 8, 0)
-      << "tl::ptx_cp_async requires byte-aligned transfers, but got "
-      << dst_total_bits << " bits";
+      << call << " requires byte-aligned transfers, but got " << dst_total_bits
+      << " bits";
 
   int64_t total_bytes = dst_total_bits / 8;
   ICHECK(IsValidCPAsyncTransferBytes(total_bytes))
-      << "tl::ptx_cp_async requires a final PTX byte width in {4, 8, 16}, but "
-         "got "
+      << call << " requires a final PTX byte width in {4, 8, 16}, but got "
       << total_bytes;
   return static_cast<int>(total_bytes);
 }

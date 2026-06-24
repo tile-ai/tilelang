@@ -1223,9 +1223,6 @@ private:
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == kPipelineContextNumStages) {
-      return VisitStmt(op->body);
-    }
     if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       ICHECK_NE(iv->thread_tag.length(), 0U);
@@ -1513,15 +1510,16 @@ private:
     // `tir.ptx_cp_async`.
     if (TargetCudaHasAsyncCopy(target_)) {
       tvm::transform::PassContext ctx = tvm::transform::PassContext::Current();
-      bool enable_auto_async_copy =
+      bool auto_async_copy_enabled =
           ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
-      bool should_enable_async_copy =
+      bool should_inject_async_copy =
           parallel_prefer_async ||
-          (enable_auto_async_copy && parallel_async_without_async_commit_wait);
-      auto inject_result =
-          InjectPTXAsyncCopy(lowered, should_enable_async_copy,
-                             parallel_async_without_async_commit_wait);
-      lowered = inject_result.stmt;
+          (auto_async_copy_enabled && parallel_async_without_async_commit_wait);
+      if (should_inject_async_copy) {
+        auto inject_result = InjectPTXAsyncCopy(
+            lowered, parallel_async_without_async_commit_wait);
+        lowered = inject_result.stmt;
+      }
     }
     return lowered;
   }

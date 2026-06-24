@@ -794,8 +794,7 @@ Stmt Copy::LowerCPAsync(const CopyNode &op, const LowerArgs &lower_args,
       par_op->LoopLayoutRequiresPaddingGuard());
 
   auto inject_result =
-      InjectPTXAsyncCopy(lowered_loop, /*enable_auto_async_copy=*/true,
-                         /*async_without_async_commit_wait=*/
+      InjectPTXAsyncCopy(lowered_loop, /*async_without_async_commit_wait=*/
                          no_implicit_commit_wait || GetIsAsyncCopy(op));
   Stmt cp_async_loop = inject_result.stmt;
   if (!inject_result.injected_ptx_async_copy) {
