@@ -54,8 +54,9 @@ def reshape(src: Buffer, shape: ShapeType) -> Buffer:
     Returns:
         Buffer: A new buffer view with the specified shape
     """
-    assert prim_expr_equal(bits_product(shape, src.dtype), bits_product(src.shape, src.dtype)), (
-        f"T.reshape/view shape check failed. src {src} src.shape: {src.shape}, src.dtype: {src.dtype}, target shape: {shape}, target dtype: {src.dtype}"
+    bits, src_bits = bits_product(shape, src.dtype), bits_product(src.shape, src.dtype)
+    assert prim_expr_equal(bits, src_bits) or arith.Analyzer().can_prove_equal(bits, src_bits), (
+        f"T.reshape/view shape check failed. {bits_product(shape, src.dtype)}, {bits_product(src.shape, src.dtype)}"
     )
     return T.Tensor(shape, src.dtype, src.data)
 
@@ -69,7 +70,10 @@ def view(src: Buffer, shape: ShapeType | None = None, dtype: DType | None = None
         shape = src.shape
     if dtype is None:
         dtype = src.dtype
-    assert prim_expr_equal(bits_product(shape, dtype), bits_product(src.shape, src.dtype)), "T.reshape/view shape check failed."
+    bits, src_bits = bits_product(shape, dtype), bits_product(src.shape, src.dtype)
+    assert prim_expr_equal(bits, src_bits) or arith.Analyzer().can_prove_equal(bits, src_bits), (
+        f"T.reshape/view shape check failed. {bits_product(shape, dtype)}, {bits_product(src.shape, src.dtype)}"
+    )
     return T.Tensor(shape, dtype, src.data)
 
 
