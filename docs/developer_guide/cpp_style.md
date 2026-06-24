@@ -29,26 +29,6 @@ TileLang aims to stay close to TVM's Google-based C++ formatting. If the
 repository `.clang-format` is changed, do it in a focused pull request and avoid
 mixing that change with semantic edits.
 
-## Pull Request Scope
-
-Style-only pull requests should be easy to review. Pick one reviewable target,
-such as formatting, public C++ API naming, header namespace usage, or an
-ObjectNode field migration. Avoid mixing those mechanical changes with compiler
-behavior changes.
-
-State the scope in the pull request description:
-
-- Which style rule the change applies.
-- Which directories or file classes were intentionally excluded.
-- Whether any `audit_cpp_api_style.py` findings were fixed, suppressed with a
-  narrow `NOLINT`, or left for a later cleanup.
-- Whether any FFI-visible or Python-visible names changed, and what migration
-  path keeps users compatible.
-
-Generated templates, runtime shims, external API adapters, and vendored code
-often need local exceptions. Prefer a documented exception over a broad rename
-that makes the code less consistent with the interface it adapts.
-
 ## Naming
 
 Use the following names in new C++ code.

@@ -56,13 +56,6 @@ Stmt Lower(const LowerArgs& args, arith::Analyzer* analyzer) const;
 Avoid adding new lowerCamelCase helpers or ambiguous context names like
 `const LowerArgs& T`.
 
-Existing code still has legacy lowerCamelCase reflection names and public fields
-with trailing underscores. Do not copy those patterns into new APIs. When
-touching them, preserve compatibility unless the migration is explicit.
-Trailing-underscore method names also exist in inherited TVM hooks and local
-codegen helper families; keep that style for new private/protected helper
-methods.
-
 ## API Boundaries And Ownership
 
 Prefer concrete type declarations over `auto` when the type is short or the
