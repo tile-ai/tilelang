@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import warnings
 import contextlib
@@ -50,6 +51,46 @@ def _resolve_artifact_paths(temp, file_name, target_format, kernels_output_dir=N
     return temp_code, temp_target
 
 
+def get_target_arch_and_code(target: Target | None = None) -> tuple[str, list[str] | None]:
+    """Return the CUDA target arch suffix and optional NVCC code targets."""
+    target = target or Target.current(allow_none=True)
+    target_code = get_target_code_list(target.attrs["code"]) if target is not None and "code" in target.attrs else None
+
+    if target is not None and "arch" in target.attrs:
+        arch = str(target.attrs["arch"])
+        if arch.startswith("sm_"):
+            return arch.removeprefix("sm_"), target_code
+        raise ValueError("CUDA target arch must be an exact SM token such as 'sm_90' or 'sm_100f'.")
+
+    return get_target_arch(get_target_compute_version(target)), target_code
+
+
+def get_target_code_list(target_code: object | None) -> list[str]:
+    if target_code is None:
+        return []
+    if isinstance(target_code, str):
+        raise ValueError('CUDA target code must be a list of exact SM code tokens, for example ["sm_100a", "sm_103a"].')
+    try:
+        code_list = list(target_code)
+    except TypeError as err:
+        raise ValueError('CUDA target code must be a list of exact SM code tokens, for example ["sm_100a", "sm_103a"].') from err
+    if not code_list:
+        raise ValueError("CUDA target code must be a non-empty list of SM code tokens")
+
+    cuda_code_re = re.compile(r"^sm_[A-Za-z0-9]+$")
+    for code in code_list:
+        if not isinstance(code, str) or not cuda_code_re.fullmatch(code):
+            raise ValueError("CUDA target code entries must be exact SM code tokens such as 'sm_100a' or 'sm_103a'.")
+    return code_list
+
+
+def format_target_code_for_gencode(target_code: object | None) -> str | None:
+    code_list = get_target_code_list(target_code)
+    if not code_list:
+        return None
+    return code_list[0] if len(code_list) == 1 else f"[{','.join(code_list)}]"
+
+
 def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target=None, verbose=False):
     """Compile cuda code with NVCC from env.
 
@@ -72,24 +113,31 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
 
     Return
     ------
-    cubin : bytearray
-        The bytearray of the cubin
+    data : bytearray
+        The compiled output bytes.
     """
+    target_code = None
     if arch is None:
         # If None, then it will use `tvm.target.Target.current().arch`.
-        # Target arch could be a str like "sm_xx", or a list, such as
-        # [
-        #   "-gencode", "arch=compute_52,code=sm_52",
-        #   "-gencode", "arch=compute_70,code=sm_70"
-        # ]
-        compute_version = get_target_compute_version(Target.current(allow_none=True))
-        target_arch = get_target_arch(compute_version)
-        arch = ["-gencode", f"arch=compute_{target_arch},code=sm_{target_arch}"]
+        target_arch, target_code = get_target_arch_and_code(Target.current(allow_none=True))
+        gencode_code = format_target_code_for_gencode(target_code)
+        if gencode_code is None:
+            arch = [f"-arch=sm_{target_arch}"]
+        else:
+            arch = ["-gencode", f"arch=compute_{target_arch},code={gencode_code}"]
+        if target_format == "cubin" and len(get_target_code_list(target_code)) > 1:
+            warnings.warn(
+                "NVCC does not allow '--cubin' with multiple code targets; using '--fatbin' instead.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            target_format = "fatbin"
 
     temp = utils.tempdir(keep_for_debug=not env.should_cleanup_temp_files())
     file_name = "tvm_kernels"
     if target_format not in ["cubin", "ptx", "fatbin"]:
         raise ValueError("target_format must be in cubin, ptx, fatbin")
+
     pass_context = tvm.get_global_func("transform.GetCurrentPassContext")()
     kernels_output_dir = pass_context.config.get("cuda.kernels_output_dir", None)
     temp_code, temp_target = _resolve_artifact_paths(temp, file_name, target_format, kernels_output_dir=kernels_output_dir)

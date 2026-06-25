@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
-TargetLike = str | Target
+TargetLike = str | dict[str, object] | Target
 
 
 class JITKernel(Generic[_P, _T]):
@@ -84,9 +84,10 @@ class JITKernel(Generic[_P, _T]):
             Index(es) of the output tensors to return (default: None).
         execution_backend : Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"], optional
             Execution backend to use for kernel execution.
-        target : str or tvm.target.Target, optional
-            Compilation target (default: "auto").
-        target_host : str or tvm.target.Target, optional
+        target : str, dict, or tvm.target.Target, optional
+            Compilation target (default: "auto"). Use a dict for target attributes,
+            for example {"kind": "cuda", "arch": "sm_90"}.
+        target_host : str, dict, or tvm.target.Target, optional
             Target host for cross-compilation (default: None).
         verbose : bool, optional
             Whether to enable verbose output (default: False).

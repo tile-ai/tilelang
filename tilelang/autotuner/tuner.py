@@ -39,6 +39,8 @@ from tilelang.autotuner.capture import get_autotune_inputs
 from tilelang.backend.target import determine_target
 from tilelang import __version__
 
+TargetLike = str | dict[str, object] | Target
+
 
 class TimeoutException(Exception):
     pass
@@ -275,9 +277,9 @@ class AutoTuner:
     def set_compile_args(
         self,
         out_idx: list[int] | int | None = None,
-        target: Literal["auto", "cuda", "hip", "metal"] | None = None,
+        target: TargetLike | None = None,
         execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch"] | None = None,
-        target_host: str | Target | None = None,
+        target_host: TargetLike | None = None,
         verbose: bool | None = None,
         pass_configs: dict[str, Any] | None = None,
     ):
@@ -285,7 +287,9 @@ class AutoTuner:
 
         Args:
             out_idx: List of output tensor indices.
-            target: Target platform. If None, reads from TILELANG_TARGET environment variable (defaults to "auto").
+            target: Target platform. If None, reads from TILELANG_DEFAULT_TARGET environment variable
+                (defaults to "auto"). Use a dict for target attributes, for example
+                {"kind": "cuda", "arch": "sm_90"}.
             execution_backend: Execution backend to use for kernel execution. If None, reads from
                 TILELANG_EXECUTION_BACKEND environment variable (defaults to "auto").
             target_host: Target host for cross-compilation.
@@ -294,7 +298,8 @@ class AutoTuner:
             pass_configs: Additional keyword arguments to pass to the Compiler PassContext.
 
         Environment Variables:
-            TILELANG_TARGET: Default compilation target (e.g., "cuda", "llvm"). Defaults to "auto".
+            TILELANG_DEFAULT_TARGET: Default compilation target (e.g., "cuda", "llvm", or a dict-like
+                target config string). Defaults to "auto".
             TILELANG_EXECUTION_BACKEND: Default execution backend. Defaults to "auto".
             TILELANG_VERBOSE: Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
 
@@ -1390,9 +1395,9 @@ def autotune(  # This is the new public interface
     rep : int, optional
         Number of repetitions for timing measurements.
     timeout : int, optional
-    target : Union[str, Target], optional
+    target : Union[str, dict, Target], optional
         Compilation target for TVM (e.g., "cuda", "llvm"). Defaults to "auto".
-    target_host : Union[str, Target], optional
+    target_host : Union[str, dict, Target], optional
         Target host for cross-compilation. Defaults to None.
     execution_backend : Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch"], optional
         Backend for kernel execution and argument passing. Use "auto" to pick a sensible
