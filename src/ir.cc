@@ -143,9 +143,11 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
     domain_size *= domain[i];
   }
 
-  group_size = min(group_size, domain[domain.size() - 1]);
+  PrimExpr last_extent = domain[domain.size() - 1];
+  group_size =
+      max(make_const(group_size.dtype(), 1), min(group_size, last_extent));
   Array<PrimExpr> grouped_domain;
-  grouped_domain.push_back(ceildiv(domain[domain.size() - 1], group_size));
+  grouped_domain.push_back(ceildiv(last_extent, group_size));
   for (int i = 0; i < domain.size() - 1; ++i) {
     grouped_domain.push_back(domain[i]);
   }
