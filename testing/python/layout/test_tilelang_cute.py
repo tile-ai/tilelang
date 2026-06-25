@@ -6,6 +6,8 @@ from tvm import tirx
 
 from tilelang.layout import Layout
 from tilelang.layout import cute
+from tilelang.layout import SwizzleMode
+from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import analyze_gmma_descriptor
 from tilelang.layout.swizzle import (
     make_full_bank_swizzled_layout,
     make_half_bank_swizzled_layout,
@@ -637,6 +639,164 @@ def test_tma_load_with_explicit_swizzled_layout():
     X = ((ii * N + jj) % 2048).to(torch.float16)
     ok = kernel(X)
     assert int(ok.min()) == 1, f"{(ok == 0).sum().item()} shared elements mismatched"
+
+
+# ---------------------------------------------------------------------------
+# Layout algebra ported from CuTe for the GMMA descriptor analysis:
+# filter / cosize / complement / logical_divide. Reference values computed by
+# hand from CuTe (layout.hpp): complement sort-and-fold, logical_divide =
+# composition(layout, make_layout(tiler, complement(tiler, size(coalesce)))).
+# ---------------------------------------------------------------------------
+def test_filter_drops_trivial_modes():
+    # filter = coalesce(filter_zeros): drop stride-0 and size-1 modes.
+    _assert_struct(cute.filter(cute.make_layout((4, 1, 2), stride=(1, 0, 8))), (4, 2), (1, 8))
+    _assert_struct(cute.filter(cute.make_layout((1, 1), stride=(5, 7))), (1,), (0,))
+
+
+def test_cosize_matches_cute():
+    # cosize = 1 + sum_i (shape_i - 1) * |stride_i|.
+    assert cute.cosize(cute.make_layout((4, 2), stride=(1, 8))) == 12
+    assert cute.cosize(cute.make_layout((8, 8), stride=(8, 1))) == 64
+    assert cute.cosize(cute.make_layout((64, 8), stride=(8, 1))) == 512
+
+
+def test_complement_matches_cute():
+    # complement(layout, cotarget): the gaps the layout does not address.
+    _assert_same_fn(cute.complement(cute.make_layout(2, stride=1), 16), cute.make_layout(8, stride=2))
+    # 4:1 within 24 -> rest is 6:4.
+    _assert_same_fn(cute.complement(cute.make_layout(4, stride=1), 24), cute.make_layout(6, stride=4))
+
+
+def test_logical_divide_matches_cute():
+    # logical_divide splits a mode into (tile, rest).
+    _assert_same_fn(
+        cute.logical_divide(cute.make_layout(8, stride=1), cute.make_layout(2, stride=1)), cute.make_layout((2, 4), stride=(1, 2))
+    )
+    _assert_same_fn(
+        cute.logical_divide(cute.make_layout(8, stride=1), cute.make_layout(8, stride=1)), cute.make_layout((8, 1), stride=(1, 0))
+    )
+
+
+# ---------------------------------------------------------------------------
+# Dynamic-value support, mirroring CuTe's own boundary (layout.hpp):
+#   - filter / coalesce keep dynamic and ScaledBasis modes unfused.
+#   - cosize = size(coshape) stays symbolic for a dynamic shape/stride.
+#   - complement is dynamic ONLY for rank 1 (static_assert at 1187-1189);
+#     rank>1 dynamic strides are rejected.
+#   - logical_divide allows a dynamic LAYOUT stride (composition handles it);
+#     it only needs a static tiler and static size(layout).
+# ---------------------------------------------------------------------------
+def test_filter_keeps_dynamic_modes():
+    s = tvm.tirx.Var("s", "int32")
+    # A const-0 stride mode is dropped; the dynamic-stride mode survives.
+    _assert_struct(cute.filter(cute.make_layout((4, 1, 8), stride=(s, 0, 1))), (4, 8), (s, 1))
+
+
+def test_cosize_dynamic_is_symbolic():
+    s = tvm.tirx.Var("s", "int32")
+    # cosize = 1 + (4-1)*|s| + (8-1)*1 = 3*|s| + 8 ; stays a PrimExpr, and the
+    # |stride| term emits CuTe's abs(stride). Check by substituting s.
+    got = cute.cosize(cute.make_layout((4, 8), stride=(s, 1)))
+    assert isinstance(got, tirx.PrimExpr)
+    ana = tvm.arith.Analyzer()
+    for sv, expect in [(5, 3 * 5 + 8), (-5, 3 * 5 + 8)]:
+        sub = tvm.tirx.stmt_functor.substitute(got, {s: tvm.tirx.const(sv, "int32")})
+        assert int(ana.simplify(sub)) == expect
+
+
+def test_complement_rank1_dynamic():
+    s = tvm.tirx.Var("s", "int32")
+    # complement((4):(s), 1024) = coalesce((s, ceil_div(1024, 4s)):(1, 4s)).
+    comp = cute.complement(cute.make_layout(4, stride=s), 1024)
+    assert comp.shape[0] == s and comp.stride[0] == 1
+    # rest stride = 4*s ; rest extent = ceil_div(1024, 4*s) (symbolic).
+    ana = tvm.arith.Analyzer()
+    assert ana.simplify(comp.stride[1] - 4 * s) == 0
+
+
+def test_complement_rank_gt1_dynamic_rejected():
+    s = tvm.tirx.Var("s", "int32")
+    # CuTe static_assert: dynamic-stride complement only for rank-1 layouts.
+    with pytest.raises(Exception, match="rank-1"):
+        cute.complement(cute.make_layout((4, 8), stride=(s, 1)), 1024)
+
+
+def test_logical_divide_dynamic_layout_stride():
+    s = tvm.tirx.Var("s", "int32")
+    # Static shape (so size is concrete) but a dynamic stride: division still
+    # works because complement is on the (static) tiler and composition handles
+    # the dynamic layout stride. (8):(s) by (2):(1) -> (2, 4):(s, 2s).
+    res = cute.logical_divide(cute.make_layout(8, stride=s), cute.make_layout(2, stride=1))
+    ana = tvm.arith.Analyzer()
+    # Result is hierarchical: shape (2, (4,)), stride (s, (2s,)).
+    assert ana.simplify(res(0) - 0) == 0
+    assert ana.simplify(res(1) - s) == 0  # next tile element: stride s
+    assert ana.simplify(res(2) - 2 * s) == 0  # next rest element: stride 2s
+
+
+# ---------------------------------------------------------------------------
+# ComposedLayoutFromTileLang now returns a layout congruent to the TileLang
+# input shape (not a flat coalesced layout). A swizzle that splits the
+# contiguous dim yields a hierarchical sub-mode.
+# ---------------------------------------------------------------------------
+def test_decoder_preserves_input_shape():
+    buf = tirx.decl_buffer((64, 512), "float16", name="A", scope="shared")
+    mode = cute.ComposedLayout.from_tilelang(make_full_bank_swizzled_layout(buf), buf)
+    # Congruent to (64, 512): in byte space the 512-elem contiguous dim is 1024
+    # bytes, split by the 128B swizzle atom into (128, 8).
+    assert mode.layout.shape == (64, (128, 8))
+
+
+# ---------------------------------------------------------------------------
+# analyze_gmma_descriptor (CuTe make_gmma_desc port): K-major reproduces the
+# canonical descriptor across all bank swizzles and operand sizes. SBO equals
+# the swizzle byte size (in 16B units), LBO == 1 (one uint128 row), matching the
+# hardcoded compute_wgmma_*_desc_params K-major branch.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "maker,mode,wgmma_field,sbo",
+    [
+        (make_full_bank_swizzled_layout, SwizzleMode.SWIZZLE_128B, 1, 64),
+        (make_half_bank_swizzled_layout, SwizzleMode.SWIZZLE_64B, 2, 32),
+        (make_quarter_bank_swizzled_layout, SwizzleMode.SWIZZLE_32B, 3, 16),
+    ],
+)
+@pytest.mark.parametrize("n_dim,k_dim", [(64, 64), (64, 256), (128, 64), (64, 512)])
+def test_analyze_gmma_descriptor_k_major(maker, mode, wgmma_field, sbo, n_dim, k_dim):
+    buf = tirx.decl_buffer((n_dim, k_dim), "float16", name="B", scope="shared")
+    p = analyze_gmma_descriptor(maker(buf), buf, transposed=False)
+    assert p is not None
+    assert p.swizzle_mode == mode
+    assert p.swizzle_mode.wgmma_layout_type() == wgmma_field
+    assert p.leading_byte_offset == 1
+    assert p.stride_byte_offset == sbo
+
+
+# MN-major (operand buffer is [K, MN], MN contiguous). `infer_shared_layout`
+# always picks the swizzle whose atom matches the contiguous (MN) extent, so a
+# 128B-swizzled buffer is the realistic case. The analyzer accepts the SAME
+# physical (K-oriented) maker layout as both a K-major and an MN-major operand --
+# this is what FlashMLA's KV_shared needs (QK uses it K-major, PV MN-major).
+@pytest.mark.parametrize("k_dim,n_dim", [(64, 128), (64, 256), (64, 64)])
+def test_analyze_gmma_descriptor_mn_major_128b(k_dim, n_dim):
+    buf = tirx.decl_buffer((k_dim, n_dim), "float16", name="B", scope="shared")
+    p = analyze_gmma_descriptor(make_full_bank_swizzled_layout(buf), buf, transposed=True)
+    assert p is not None
+    assert p.swizzle_mode == SwizzleMode.SWIZZLE_128B
+    assert p.stride_byte_offset == 64
+    # LBO is 0 for a single MN atom (n_dim == atom), else the multi-atom step.
+    assert p.leading_byte_offset in (0, 512)
+
+
+def test_analyze_gmma_descriptor_same_layout_both_majors():
+    # FlashMLA KV_shared [block_N, h_dim] (128B swizzle) must analyze as BOTH a
+    # K-major operand (QK) and an MN-major operand (PV) -- the same physical bytes.
+    buf = tirx.decl_buffer((64, 256), "float16", name="KV", scope="shared")
+    lay = make_full_bank_swizzled_layout(buf)
+    pk = analyze_gmma_descriptor(lay, buf, transposed=False)
+    pmn = analyze_gmma_descriptor(lay, buf, transposed=True)
+    assert pk is not None and pk.leading_byte_offset == 1 and pk.stride_byte_offset == 64
+    assert pmn is not None and pmn.swizzle_mode == SwizzleMode.SWIZZLE_128B
 
 
 if __name__ == "__main__":

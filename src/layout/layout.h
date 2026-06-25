@@ -16,6 +16,7 @@
 #include <tvm/tirx/buffer.h>
 
 #include "support/check.h"
+#include "swizzle_mode.h"
 
 namespace tvm {
 namespace tl {
@@ -296,35 +297,10 @@ Layout MakeHalfBankSwizzleLayout(const tirx::Buffer &buffer);
 Layout MakeQuarterBankSwizzleLayout(const tirx::Buffer &buffer);
 
 // Swizzle mode for shared memory layouts (nvidia only)
-// Smaller enum value = smaller swizzle granularity
-enum class SwizzleMode {
-  kNone = 0,    // Not a swizzle layout (linear or padded)
-  kQuarter = 1, // 32B swizzle (CU_TENSOR_MAP_SWIZZLE_32B)
-  kHalf = 2,    // 64B swizzle (CU_TENSOR_MAP_SWIZZLE_64B)
-  kFull = 3     // 128B swizzle (CU_TENSOR_MAP_SWIZZLE_128B)
-};
+// Canonical granularity enum, shared across C++/Python. See swizzle_mode.h.
 
 // Detect which swizzle mode a layout uses
 SwizzleMode DetectSwizzleMode(const Layout &layout, const tirx::Buffer &buffer);
-
-// Required shared-memory base alignment (in bytes) for a TMA/bulk-copy or
-// MMA-descriptor operand with the given swizzle mode. The base must lie on a
-// swizzle-pattern repeat boundary (swizzle byte width x 8 rows); otherwise the
-// hardware applies the swizzle with a phase shift relative to the layout the
-// compiler assumed, silently producing wrong data.
-inline int SmemAlignmentForSwizzle(SwizzleMode mode) {
-  switch (mode) {
-  case SwizzleMode::kQuarter:
-    return 256; // 32B swizzle
-  case SwizzleMode::kHalf:
-    return 512; // 64B swizzle
-  case SwizzleMode::kFull:
-    return 1024; // 128B swizzle
-  case SwizzleMode::kNone:
-  default:
-    return 128; // bulk-copy base requirement for non-swizzled operands
-  }
-}
 
 // Merge two swizzle layouts by taking the smaller granularity
 // Returns NullOpt if either layout is not a swizzle layout

@@ -1,6 +1,5 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from enum import IntEnum
 import tilelang.language as T
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 from tvm import DataType
@@ -12,6 +11,7 @@ from tilelang.language.dtypes import get_tvm_dtype
 from tilelang.utils import is_tensor_memory
 from tilelang.layout import (
     Layout,
+    SwizzleMode,
     make_full_bank_swizzled_layout,
     make_half_bank_swizzled_layout,
     make_quarter_bank_swizzled_layout,
@@ -30,8 +30,8 @@ class TCGEN05DescriptorParams:
     ``init_tcgen05_*_desc()`` and ``tcgen05_*_atom()`` methods.
     """
 
-    swizzle_mode: int
-    """SwizzleMode enum value (passed directly to ``T.initialize_tcgen05_descriptor``)."""
+    swizzle_mode: SwizzleMode
+    """Canonical swizzle mode; project to the descriptor field via ``tcgen05_layout_type()``."""
     leading_byte_offset: int
     """LBO >> 4, ready to pass to ``T.initialize_tcgen05_descriptor``."""
     stride_byte_offset: int
@@ -44,46 +44,6 @@ class TCGEN05DescriptorParams:
     """Bit width of a single logical element."""
     is_k_major: bool
     """Whether the matrix is stored in K-major order (affects offset formula branching)."""
-
-
-class SwizzleMode(IntEnum):
-    # SWIZZLE_NONE = 0, SWIZZLE_32B = 3, SWIZZLE_64B = 2, SWIZZLE_128B = 1
-    NONE = 0
-    SWIZZLE_128B = 2
-    SWIZZLE_64B = 4
-    SWIZZLE_32B = 6
-
-    def is_none(self) -> bool:
-        return self == SwizzleMode.NONE
-
-    def is_swizzle_32b(self) -> bool:
-        return self == SwizzleMode.SWIZZLE_32B
-
-    def is_swizzle_64b(self) -> bool:
-        return self == SwizzleMode.SWIZZLE_64B
-
-    def is_swizzle_128b(self) -> bool:
-        return self == SwizzleMode.SWIZZLE_128B
-
-    def swizzle_byte_size(self) -> int:
-        if self.is_swizzle_32b():
-            return 32
-        elif self.is_swizzle_64b():
-            return 64
-        elif self.is_swizzle_128b():
-            return 128
-        else:
-            return 1
-
-    def swizzle_atom_size(self) -> int:
-        if self.is_swizzle_32b():
-            return 32 // 16
-        elif self.is_swizzle_64b():
-            return 64 // 16
-        elif self.is_swizzle_128b():
-            return 128 // 16
-        else:
-            return 1
 
 
 def _bytes_to_elements(byte_count: int, elem_bits: int) -> int:
@@ -381,7 +341,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 )
 
         a_params = TCGEN05DescriptorParams(
-            swizzle_mode=int(a_swizzle_mode),
+            swizzle_mode=a_swizzle_mode,
             leading_byte_offset=int(a_leading_byte_offset >> 4),
             stride_byte_offset=int(a_stride_byte_offset >> 4),
             swizzle_atom_elems=a_swizzle_atom_elems,
@@ -707,7 +667,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                     b_stride_byte_offset = _elements_to_bytes(8 * b_swizzle_atom_elems, elem_bits)
 
         return TCGEN05DescriptorParams(
-            swizzle_mode=int(b_swizzle_mode),
+            swizzle_mode=b_swizzle_mode,
             leading_byte_offset=int(b_leading_byte_offset >> 4),
             stride_byte_offset=int(b_stride_byte_offset >> 4),
             swizzle_atom_elems=b_swizzle_atom_elems,
@@ -753,7 +713,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                     a_stride_byte_offset = _elements_to_bytes(8 * a_swizzle_atom_elems, elem_bits)
 
         return TCGEN05DescriptorParams(
-            swizzle_mode=int(a_swizzle_mode),
+            swizzle_mode=a_swizzle_mode,
             leading_byte_offset=int(a_leading_byte_offset >> 4),
             stride_byte_offset=int(a_stride_byte_offset >> 4),
             swizzle_atom_elems=a_swizzle_atom_elems,
@@ -779,7 +739,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         access_ptr_from = self._access_ptr_from
         lbo = b_params.leading_byte_offset
         sbo = b_params.stride_byte_offset
-        swizzle_mode = b_params.swizzle_mode
+        swizzle_mode = b_params.swizzle_mode.tcgen05_layout_type()
         B_ptr = access_ptr_from(B_buf, "r")
 
         @T.macro
@@ -803,7 +763,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         access_ptr_from = self._access_ptr_from
         lbo = a_params.leading_byte_offset
         sbo = a_params.stride_byte_offset
-        swizzle_mode = a_params.swizzle_mode
+        swizzle_mode = a_params.swizzle_mode.tcgen05_layout_type()
         A_ptr = access_ptr_from(A_buf, "r")
 
         @T.macro
