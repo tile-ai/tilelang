@@ -39,6 +39,18 @@ def test_default_target_env_keeps_plain_string(monkeypatch):
     assert tilelang.env.get_default_target() == "cuda"
 
 
+def test_bare_cuda_target_uses_detected_exact_arch(monkeypatch):
+    from tilelang.cuda import target as cuda_target
+
+    monkeypatch.setattr(cuda_target, "_detect_torch_cuda_arch", lambda: "sm_90a")
+
+    target = determine_target("cuda", return_object=True)
+
+    assert isinstance(target, Target)
+    assert target.kind.name == "cuda"
+    assert str(target.attrs["arch"]) == "sm_90a"
+
+
 def test_cuda_target_code_attr_survives_target_normalization():
     target = determine_target(
         {"kind": "cuda", "arch": "sm_100f", "code": ["sm_100a", "sm_103a"]},
