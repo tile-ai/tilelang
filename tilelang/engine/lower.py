@@ -11,7 +11,7 @@ import tvm_ffi
 from tvm.ir import CallingConv
 from tvm.target import Target
 from tilelang.contrib import hipcc, nvcc
-from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
+from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH, env
 from tilelang.transform import PassConfigKey
 from tilelang.engine.param import KernelParam, CompiledArtifact
 from tilelang.engine.semantic_check import PreLowerSemanticCheck
@@ -112,7 +112,6 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
     ptxas_usage_level = cfg.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None)
     if ptxas_usage_level is not None:
         ptxas_usage_level = int(ptxas_usage_level)
-    verbose_ptxas_output = bool(cfg.get(PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False))
 
     options = [
         # tl_templates/cuda/reduce.h uses explicit lambda template parameters
@@ -137,15 +136,14 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
                     tokens.append(str(flag))
         options += tokens
 
-    verbose = False
+    verbose = env.get_default_verbose()
     if enable_fast_math:
         options.append("--use_fast_math")
     if ptxas_usage_level is not None:
         options.append(f"--ptxas-options=--register-usage-level={ptxas_usage_level}")
-    if verbose_ptxas_output:
+    if verbose:
         options.append("--ptxas-options=--verbose")
         options.append("-w")  # Suppress warnings to make ptxas output more readable
-        verbose = True
 
     ptx = nvcc.compile_cuda(
         code,

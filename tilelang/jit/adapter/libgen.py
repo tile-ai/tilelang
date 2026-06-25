@@ -72,7 +72,6 @@ class LibraryGenerator:
             ptxas_usage_level = self.pass_configs.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None)
             if ptxas_usage_level is not None:
                 ptxas_usage_level = int(ptxas_usage_level)
-            verbose_ptxas_output = self.pass_configs.get(PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False)
             cuda_library_flags = [f"-L{lib_dir}" for lib_dir in get_cuda_library_dirs()]
 
             command = [
@@ -106,7 +105,7 @@ class LibraryGenerator:
                 command += ["--use_fast_math"]
             if ptxas_usage_level is not None:
                 command += [f"--ptxas-options=--register-usage-level={ptxas_usage_level}"]
-            if verbose_ptxas_output:
+            if self.verbose:
                 command += ["--ptxas-options=--verbose"]
             command += [
                 "-I" + CUTLASS_INCLUDE_DIR,
