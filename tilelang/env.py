@@ -1,6 +1,8 @@
 from __future__ import annotations
+import ast
 import importlib.metadata
 import math
+import re
 import sys
 import os
 import pathlib
@@ -8,11 +10,12 @@ import logging
 import shutil
 import glob
 from dataclasses import dataclass
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 logger = logging.getLogger(__name__)
 
 EnvVarDefault = str | None | Callable[[], str | None]
+TargetConfig = dict[str, object]
 
 # SETUP ENVIRONMENT VARIABLES
 CUTLASS_NOT_FOUND_MESSAGE = "CUTLASS is not installed or found in the expected path"
@@ -257,7 +260,7 @@ class EnvVar:
 
     key: str  # Environment variable name (e.g. "TILELANG_PRINT_ON_COMPILATION")
     default: EnvVarDefault  # Default value if the environment variable is not set
-    _forced_value: str | None = None  # Temporary runtime override (mainly for tests/debugging)
+    _forced_value: object | None = None  # Temporary runtime override (mainly for tests/debugging)
 
     def _get_default(self):
         return self.default() if callable(self.default) else self.default
@@ -286,6 +289,25 @@ class EnvVar:
         self._forced_value = value
         # Uncomment the following line if you want the override to persist globally:
         # os.environ[self.key] = value
+
+
+def _parse_target_config(value: str) -> TargetConfig | None:
+    value = value.strip()
+    if not value.startswith("{"):
+        return None
+
+    key_re = re.compile(r"([{\[,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)")
+    try:
+        parsed = ast.literal_eval(key_re.sub(r'\1"\2"\3', value))
+    except (ValueError, SyntaxError) as err:
+        raise ValueError(
+            'TILELANG_DEFAULT_TARGET looks like a dict but could not be parsed. Use syntax like {kind: "cuda", arch: "sm_100"}.'
+        ) from err
+    if not isinstance(parsed, dict):
+        raise ValueError("TILELANG_DEFAULT_TARGET must parse to a dict")
+    if not all(isinstance(key, str) for key in parsed):
+        raise ValueError("TILELANG_DEFAULT_TARGET dict keys must be strings")
+    return dict(parsed)
 
 
 # Utility function for environment variables with defaults
@@ -341,7 +363,7 @@ class Environment:
 
     # Compilation defaults (for jit, autotune, compile)
     # These allow overriding default compilation parameters via environment variables
-    TILELANG_DEFAULT_TARGET = EnvVar("TILELANG_TARGET", "auto")
+    TILELANG_DEFAULT_TARGET = EnvVar("TILELANG_DEFAULT_TARGET", "auto")
     TILELANG_DEFAULT_EXECUTION_BACKEND = EnvVar("TILELANG_EXECUTION_BACKEND", "auto")
     TILELANG_DEFAULT_VERBOSE = EnvVar("TILELANG_VERBOSE", "0")
 
@@ -410,9 +432,16 @@ class Environment:
             return value
         return "terminal"  # fallback for unrecognized truthy values
 
-    def get_default_target(self) -> str:
+    def get_default_target(self) -> str | TargetConfig:
         """Get default compilation target from environment."""
-        return self.TILELANG_DEFAULT_TARGET
+        target = self.TILELANG_DEFAULT_TARGET
+        if target is None:
+            return "auto"
+        if isinstance(target, Mapping):
+            return dict(target)
+        if isinstance(target, str):
+            return _parse_target_config(target) or target
+        raise TypeError("TILELANG_DEFAULT_TARGET must be a string or target config dict")
 
     def get_default_execution_backend(self) -> str:
         """Get default execution backend from environment."""

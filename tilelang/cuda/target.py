@@ -57,6 +57,13 @@ def _detect_cuda_target() -> Target | str | None:
     return _cuda_target_from_arch(arch)
 
 
+def normalize_cuda_target(target: TargetLike) -> Target | None:
+    if not isinstance(target, str) or target.strip() != "cuda":
+        return None
+    normalized = _cuda_target_from_arch(_detect_torch_cuda_arch())
+    return normalized if isinstance(normalized, Target) else None
+
+
 def _with_cutedsl_key(target: Target | str) -> Target:
     if not isinstance(target, Target):
         target = Target(target)
@@ -150,4 +157,5 @@ def target_has_bulk_copy(target: Target) -> bool:
 
 
 register_target_detector("cuda", _detect_cuda_target, override=True)
+register_target_normalizer("cuda", normalize_cuda_target, override=True)
 register_target_normalizer("cutedsl", _normalize_cutedsl_target_for_resolve, override=True)

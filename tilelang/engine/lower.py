@@ -100,10 +100,13 @@ def tilelang_callback_cuda_validate(device_mod):
 
 @tvm_ffi.register_global_func("tilelang_callback_cuda_compile", override=True)
 def tilelang_callback_cuda_compile(code, target, pass_config=None):
-    target_arch = nvcc.get_target_arch(nvcc.get_target_compute_version(target))
-
-    arch = [f"-arch=sm_{target_arch}"]
-    compile_format = "cubin"
+    target_arch, target_code = nvcc.get_target_arch_and_code(target)
+    gencode_code = nvcc.format_target_code_for_gencode(target_code)
+    if gencode_code is None:
+        arch = [f"-arch=sm_{target_arch}"]
+    else:
+        arch = ["-gencode", f"arch=compute_{target_arch},code={gencode_code}"]
+    compile_format = "fatbin" if len(nvcc.get_target_code_list(target_code)) > 1 else "cubin"
 
     # Read pass-config keys (string-valued) like in jit.adapter.libgen.compile_lib
     cfg = pass_config or {}

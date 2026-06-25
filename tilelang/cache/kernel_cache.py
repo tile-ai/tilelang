@@ -246,8 +246,8 @@ class KernelCache:
             out_idx (List[int]): Indices specifying which outputs to return.
             execution_backend (Literal): Backend type for execution. Defaults to "tvm_ffi".
             args: Arguments passed to the function.
-            target (Union[str, Target]): Compilation target platform. Defaults to "auto".
-            target_host (Union[str, Target], optional): Host target platform.
+            target (Union[str, dict, Target]): Compilation target platform. Defaults to "auto".
+            target_host (Union[str, dict, Target], optional): Host target platform.
 
         Returns:
             str: SHA256 hash key for the kernel configuration.
@@ -291,7 +291,8 @@ class KernelCache:
         Args:
             func: Function to be compiled or a prepared PrimFunc
             out_idx: Indices specifying which outputs to return
-            target: Compilation target platform (None = read from TILELANG_TARGET env var)
+            target: Compilation target platform (None = read from TILELANG_DEFAULT_TARGET env var).
+                Use a dict for target attributes, for example {"kind": "cuda", "arch": "sm_90"}.
             target_host: Host target platform
             execution_backend: Execution backend (None = read from TILELANG_EXECUTION_BACKEND)
             verbose: Enable verbose output (None = read from TILELANG_VERBOSE)
@@ -302,8 +303,9 @@ class KernelCache:
 
         Environment Variables
         ---------------------
-        TILELANG_TARGET : str
-            Default compilation target (e.g., "cuda", "llvm"). Defaults to "auto".
+        TILELANG_DEFAULT_TARGET : str
+            Default compilation target (e.g., "cuda", "llvm", or a dict-like target config string).
+            Defaults to "auto".
         TILELANG_EXECUTION_BACKEND : str
             Default execution backend. Defaults to "auto".
         TILELANG_VERBOSE : str
@@ -550,8 +552,8 @@ class KernelCache:
 
         Args:
             key (str): The hash key identifying the kernel.
-            target (Union[str, Target]): Compilation target platform. Defaults to "auto".
-            target_host (Union[str, Target], optional): Host target platform.
+            target (Union[str, dict, Target]): Compilation target platform. Defaults to "auto".
+            target_host (Union[str, dict, Target], optional): Host target platform.
             out_idx (List[int], optional): Indices specifying which outputs to return.
             execution_backend (Literal): Backend type for execution. Defaults to "tvm_ffi".
             pass_configs (dict, optional): Configuration for compiler passes.
