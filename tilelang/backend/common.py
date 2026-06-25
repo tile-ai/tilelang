@@ -1,14 +1,46 @@
 from __future__ import annotations
 
-from tilelang.backend.execution_backend import ExecutionBackendSpec, register_execution_backend
+from tvm.target import Target
 
-# Importing the package registers its pass pipeline.
+from tilelang import tvm
+from tilelang.backend import Backend, ExecutionBackendSpec, register_backend
+from tilelang.backend.codegen import build_device_with_global_func
+from tilelang.backend.execution_backend import (
+    ExecutionBackendSpec as LegacyExecutionBackendSpec,
+    register_execution_backend,
+)
+from tilelang.webgpu.pipeline import WebGPUPassPipelineBody
+
 import tilelang.webgpu  # noqa: F401
 
 
-register_execution_backend("webgpu", ExecutionBackendSpec("cython"), override=True)
+def webgpu_device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
+    return build_device_with_global_func(device_mod, target, "target.build.webgpu")
+
+
+webgpu_backend = Backend(
+    name="webgpu",
+    target_kinds=("webgpu",),
+    import_path="tilelang.backend.common",
+    pipeline=WebGPUPassPipelineBody,
+    device_codegen_without_compile=webgpu_device_codegen_without_compile,
+    execution_backends={
+        "tvm_ffi": ExecutionBackendSpec(
+            name="tvm_ffi",
+            enable_host_codegen=True,
+            enable_device_compile=True,
+        ),
+        "cython": ExecutionBackendSpec(name="cython"),
+    },
+    default_execution_backend="tvm_ffi",
+    cmake_name="WEBGPU",
+)
+
+register_backend(webgpu_backend, override=True)
+
+register_execution_backend("webgpu", LegacyExecutionBackendSpec("cython"), override=True)
 register_execution_backend(
     "webgpu",
-    ExecutionBackendSpec("tvm_ffi", enable_host_codegen=True, enable_device_compile=True),
+    LegacyExecutionBackendSpec("tvm_ffi", enable_host_codegen=True, enable_device_compile=True),
     override=True,
 )

@@ -8,12 +8,12 @@ TileLang language surface backend-neutral.
 
 The Python backend layer is split into two parts:
 
-- `tilelang/backend/`: common backend infrastructure, especially pass-pipeline
-  registration, host/device-codegen registration, and shared pipeline
-  utilities.
+- `tilelang/backend/`: common backend infrastructure, especially the `Backend`
+  descriptor, backend registry, pass-pipeline registration, host/device-codegen
+  registration, target registration, and shared pipeline utilities.
 - `tilelang/<backend>/`: backend-owned Python implementation files, such as
-  pass pipelines, host/device-codegen entry registration, tile-op
-  implementation registration, and backend intrinsics.
+  backend descriptors, pass pipelines, tile-op implementation registration,
+  callbacks, codegen hooks, and backend intrinsics.
 
 The native side mirrors this split under `src/<backend>/`, where C++ op
 lowering, codegen, runtime modules, stubs, and backend-local CMake files live.
@@ -22,18 +22,23 @@ lowering, codegen, runtime modules, stubs, and backend-local CMake files live.
 ## Lowering Entry
 
 `tilelang/engine/lower.py` owns the high-level lowering entry. It runs
-backend-independent semantic checks first, then resolves a pass pipeline from
-the TVM target kind:
+backend-independent semantic checks first, then resolves a `Backend` from the
+TVM target kind:
 
 ```text
 PreLowerSemanticCheck(mod)
-pipeline = resolve_pipeline(target)
-mod = pipeline.lower(mod, target)
+backend = resolve_backend(target)
+mod = backend.lower(mod, target)
+codegen_mod = backend.codegen(device_mod, target, compile=enable_device_compile)
 ```
 
-The resolver is implemented in `tilelang/backend/pass_pipeline/pipeline.py`.
-Backends register a `PassPipeline(name, lower)` at import time. The pipeline
-name should match `target.kind.name`.
+The resolver is implemented in `tilelang/backend/registry.py`. Backends register
+a `Backend` descriptor at import time. The descriptor owns target matching,
+pipeline lowering, device codegen hooks, optional host pre-codegen hooks,
+callback registration, feature queries, JIT metadata, and CMake metadata.
+
+The existing `PassPipeline` API remains available and is wrapped by
+`Backend.pipeline` during migration.
 
 Device codegen follows the same ownership model after host/device splitting:
 
@@ -67,11 +72,72 @@ host functions that need Metal runtime context.
 
 | Python package | Target kind | Notes |
 | --- | --- | --- |
-| `tilelang/cuda` | `cuda` | CUDA-specific pass sequence, CUDA tile ops, MMA/WGMMA/TCGEN05 intrinsics, CUDA transform wrappers. |
-| `tilelang/rocm` | `hip` | ROCm/HIP pass sequence and MFMA/WMMA tile-op implementations. |
-| `tilelang/cpu` | `c`, `llvm` | CPU pass sequence and scalar CPU tile-op implementations. |
-| `tilelang/metal` | `metal` | Metal pass sequence and Metal GEMM registration. |
+| `tilelang/cuda/backend.py` | `cuda` | CUDA-specific pass sequence, CUDA tile ops, MMA/WGMMA/TCGEN05 intrinsics, CUDA transform wrappers, CUDA compile callbacks. |
+| `tilelang/rocm/backend.py` | `hip` | ROCm/HIP pass sequence, MFMA/WMMA tile-op implementations, HIP compile callback. |
+| `tilelang/cpu/backend.py` | `c`, `llvm` | CPU pass sequence and scalar CPU tile-op implementations. |
+| `tilelang/metal/backend.py` | `metal` | Metal pass sequence, Metal GEMM registration, Metal host pre-codegen hook. |
 | `tilelang/backend/common.py` | `webgpu` | Temporary/common registration for targets that do not yet own a dedicated Python backend package. |
+
+The backend package name does not have to match `target.kind.name`. ROCm is the
+main example: the package is `tilelang/rocm`, but it registers target kind
+`hip`.
+
+## Backend Descriptor
+
+`Backend` is a Python-side descriptor:
+
+```python
+Backend(
+    name="cuda",
+    target_kinds=("cuda",),
+    pipeline=cuda_pipeline,
+    device_codegen=cuda_device_codegen,
+    device_codegen_without_compile=cuda_device_codegen_without_compile,
+    register_callbacks=register_cuda_callbacks,
+    features={"warp_size": target_get_warp_size},
+    execution_backends={
+        "tvm_ffi": ExecutionBackendSpec(
+            "tvm_ffi",
+            enable_host_codegen=True,
+            enable_device_compile=True,
+        ),
+        "cython": ExecutionBackendSpec("cython"),
+        "nvrtc": ExecutionBackendSpec("nvrtc", is_available=is_nvrtc_available),
+    },
+    default_execution_backend="tvm_ffi",
+    cmake_name="CUDA",
+)
+```
+
+The registry resolves exactly one backend for a concrete TVM target. If multiple
+backends match the same target kind, `priority` must break the tie; otherwise
+resolution fails with an explicit ambiguity error.
+
+The backend descriptor also owns target-dependent JIT execution policy. For
+example, CUDA declares `nvrtc`, ROCm does not; CPU can choose `cython` by
+default; and a backend can choose whether an execution mode requests host
+codegen and device compilation.
+
+Lazy import is supported through `register_lazy_backend(target_kind,
+import_path)`, so optional backends can delay importing toolchain-specific Python
+modules until a matching target is requested.
+
+## TVM/tvm-ffi Boundary
+
+The `Backend` registry is intentionally Python-side because it stores Python
+callables, lazy import policy, feature query functions, and diagnostics.
+
+TVM/tvm-ffi remains the right boundary for cross-language registration:
+
+- Python compile callbacks use `tvm_ffi.register_global_func`, for example
+  `tilelang_callback_cuda_compile` and `tilelang_callback_hip_compile`.
+- Native transforms and codegen entry points stay registered from C++ through
+  TVM FFI global functions, for example `target.build.tilelang_cuda`.
+- Python `_ffi_api.py` modules should continue using `tvm_ffi.init_ffi_api`.
+
+The first implementation should not make `Backend` a TVM FFI `ObjectRef`;
+there is no native enumeration requirement yet, and doing so would make the
+Python orchestration path more complex.
 
 ## `tilelang/backend`
 
@@ -81,15 +147,24 @@ backend-specific implementation details.
 ```text
 tilelang/backend/
   __init__.py
+  backend.py
   common.py
+  codegen.py
   device_codegen.py
+  execution_backend.py
   host_codegen.py
+  registry.py
+  target.py
   pass_pipeline/
     __init__.py
     pipeline.py
     pipeline_utils.py
 ```
 
+- `backend.py` defines the `Backend` descriptor and hook types.
+- `registry.py` defines `register_backend`, `register_lazy_backend`,
+  `resolve_backend`, `get_backend`, and `list_backends`.
+- `codegen.py` contains shared device-codegen cleanup helpers.
 - `pass_pipeline/pipeline.py` defines `PassPipeline`, `register_pipeline`, and
   `resolve_pipeline`.
 - `device_codegen.py` defines `DeviceCodegen`, `register_device_codegen`, and
@@ -112,26 +187,37 @@ for that backend.
 
 ```text
 tilelang/cuda/
+  backend.py
   codegen.py
+  execution_backend.py
   pipeline.py
+  target.py
   transform/
   op/
   intrinsics/
 
 tilelang/rocm/
+  backend.py
   codegen.py
+  execution_backend.py
   pipeline.py
+  target.py
   op/
   intrinsics/
 
 tilelang/cpu/
+  backend.py
   codegen.py
+  execution_backend.py
   pipeline.py
   op/
 
 tilelang/metal/
+  backend.py
   codegen.py
+  execution_backend.py
   pipeline.py
+  target.py
   transform/
   op/
   intrinsics/
