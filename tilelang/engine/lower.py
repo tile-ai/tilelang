@@ -99,12 +99,13 @@ def tilelang_callback_cuda_validate(device_mod):
 @tvm_ffi.register_global_func("tilelang_callback_cuda_compile", override=True)
 def tilelang_callback_cuda_compile(code, target, pass_config=None):
     target_arch, target_code = nvcc.get_target_arch_and_code(target)
+    target_code_list = nvcc.get_target_code_list(target_code)
     gencode_code = nvcc.format_target_code_for_gencode(target_code)
     if gencode_code is None:
         arch = [f"-arch=sm_{target_arch}"]
     else:
         arch = ["-gencode", f"arch=compute_{target_arch},code={gencode_code}"]
-    compile_format = "fatbin" if len(nvcc.get_target_code_list(target_code)) > 1 else "cubin"
+    compile_format = "fatbin" if len(target_code_list) > 1 else "cubin"
 
     # Read pass-config keys (string-valued) like in jit.adapter.libgen.compile_lib
     cfg = pass_config or {}
@@ -148,6 +149,19 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
         options.append("-w")  # Suppress warnings to make ptxas output more readable
         verbose = True
 
+    from tilelang.cache.cuda_binary_cache import CUDABinaryCache
+
+    cache_key = CUDABinaryCache.make_key(
+        code=code,
+        target_kind=target.kind.name,
+        target_arch=target_arch,
+        target_code=target_code_list,
+        compile_format=compile_format,
+    )
+    cached_binary = CUDABinaryCache.load(cache_key, compile_format)
+    if cached_binary is not None:
+        return bytearray(cached_binary)
+
     ptx = nvcc.compile_cuda(
         code,
         compile_format,
@@ -155,6 +169,7 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
         options=options,
         verbose=verbose,
     )
+    CUDABinaryCache.save(cache_key, compile_format, ptx)
 
     return ptx
 
