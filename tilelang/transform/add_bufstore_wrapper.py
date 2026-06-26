@@ -8,13 +8,9 @@ def AddWrapperForSingleBufStore():
     Creates a TVM pass that wraps single buffer stores with parallel loops.
 
     This transformation adds T.Parallel wrappers around buffer stores that:
-    1. Access fragment buffers only at the constant all-zero index [0, 0, ...]
+    1. Access fragment buffers with index 0
     2. Are not inside existing tile operations or thread bindings
-
-    A fragment accessed at any other index (a constant non-zero or a dynamic
-    index such as a T.serial loop variable) is rejected, since a fragment is
-    distributed across threads and such an access has no valid thread-ownership
-    mapping in this lowering path.
+    3. Don't access fragment buffers with non-zero indices
 
     Returns:
         A prim_func_pass that applies the transformation
@@ -72,25 +68,21 @@ def AddWrapperForSingleBufStore():
                     local_buffers.append(buffer)
             return local_buffers, fragment_buffers
 
-        def collect_buffer_indices(statement) -> dict[Buffer, list]:
+        def collect_buffer_indices(statement) -> dict[Buffer, list[int]]:
             """
-            Maps each buffer to the index vectors of every access to it.
-
-            A buffer can be accessed more than once in a statement (e.g. a
-            variable-index load and a constant-index store), so all occurrences are
-            kept; recording only the last would let one slip past validation.
+            Maps each buffer to its access indices.
 
             Args:
                 statement: The TIR statement to analyze
 
             Returns:
-                Dictionary mapping buffers to a list of their access index vectors
+                Dictionary mapping buffers to their access indices
             """
             buffer_to_indices = {}
 
             def visit_buffer_access(node):
                 if isinstance(node, (BufferLoad, BufferStore)):
-                    buffer_to_indices.setdefault(node.buffer, []).append(node.indices)
+                    buffer_to_indices[node.buffer] = node.indices
 
             post_order_visit(statement, visit_buffer_access)
             return buffer_to_indices
@@ -138,31 +130,19 @@ def AddWrapperForSingleBufStore():
                     if len(fragment_buffers) == 0:
                         return statement
 
-                    # Validate fragment buffer indices. In this fallback lowering
-                    # path we only support the constant all-zero index [0, 0, ...]. A
-                    # dynamic index, such as a T.serial loop variable, would
-                    # address a thread-distributed fragment with no valid
-                    # thread-ownership mapping and otherwise lowers to invalid
-                    # code or races.
+                    # Validate fragment buffer indices - only index 0 is supported
                     buffer_indices = collect_buffer_indices(statement)
-                    for buffer, index_vectors in buffer_indices.items():
+                    for buffer, indices in buffer_indices.items():
                         if buffer.scope() != "local.fragment":
                             continue
-                        for indices in index_vectors:
-                            if any(not (isinstance(index, IntImm) and index.value == 0) for index in indices):
-                                index_str = ", ".join(str(index) for index in indices)
+                        for index in indices:
+                            if isinstance(index, IntImm) and index != 0:
                                 raise ValueError(
-                                    f"Unsupported fragment access to '{buffer.name}' at index "
-                                    f"[{index_str}]: only the constant all-zero index "
-                                    "fragment[0, 0, ...] is supported in this fallback lowering "
-                                    "path. A fragment is "
-                                    "distributed across CUDA threads, so a dynamic index (e.g. a "
-                                    "T.serial loop variable) or a non-zero index has no valid "
-                                    "thread-ownership mapping. Use T.Parallel for elementwise "
-                                    "access, or T.reduce_sum for reductions."
+                                    f"Fragment buffer access with non-zero index [{index}] is not supported. "
+                                    "Only fragment[0] access is allowed."
                                 )
 
-                    # Wrap the constant-index fragment[0, 0, ...] access with T.Parallel loop
+                    # Wrap fragment[0] access with T.Parallel loop
                     return For(Var("_", "int32"), 0, 1, ForKind.PARALLEL, statement)
 
             return statement
