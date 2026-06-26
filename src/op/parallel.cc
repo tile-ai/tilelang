@@ -719,8 +719,8 @@ Fragment ParallelOpNode::ComputeLoopLayoutFromBuffer(
         std::ostringstream oss;
         oss << "Cannot lower access to thread-distributed fragment `"
             << buffer->name
-            << "` from a T.serial loop: fragment elements are spread across "
-               "CUDA threads, so the serial loop variable `"
+            << "`: its elements are spread across CUDA threads, so the "
+               "non-parallel loop variable `"
             << *opt_var
             << "` cannot be used to address them safely (thread map: "
             << loop_var_to_thread
