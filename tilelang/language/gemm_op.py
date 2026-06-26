@@ -442,6 +442,121 @@ def tcgen05_gemm_blockscaled(
     )
 
 
+def mma_gemm_blockscaled(
+    A: BufferLikeType,
+    B: BufferLikeType,
+    C: BufferLikeType,
+    SFA: BufferLikeType,
+    SFB: BufferLikeType,
+    transpose_A: bool = False,
+    transpose_B: bool = False,
+    policy: GemmWarpPolicy = GemmWarpPolicy.Square,
+    clear_accum: bool = False,
+    *,
+    k_start: int | tirx.PrimExpr,
+    sf_a_granularity_k: int,
+    sf_b_granularity_k: int,
+) -> tirx.PrimExpr:
+    """Explicit SM120 warp-level block-scaled MMA GEMM.
+
+    This API follows the same scale-factor model as
+    ``T.tcgen05_gemm_blockscaled``: users pass the scale tensors, logical
+    ``k_start``, and K granularity, while the lowering derives the low-level
+    scale addressing. Unlike TCGEN05, this path is synchronous warp-level
+    ``mma.sync`` and does not use tensor memory or mbarriers.
+
+    The current supported instruction is SM120 NVF4:
+    ``m16n8k64.kind::mxf4nvf4.block_scale.scale_vec::4X`` with E2M1 operands,
+    FP32 accumulation, and UE4M3 scale factors.
+    """
+
+    ann = {
+        "sf_a_granularity_k": int(sf_a_granularity_k),
+        "sf_b_granularity_k": int(sf_b_granularity_k),
+    }
+
+    def legalize(arg):
+        if isinstance(arg, tirx.Var) and T.has_let_value(arg):
+            return T.get_let_value(arg).buffer
+        return arg
+
+    A = legalize(A)
+    B = legalize(B)
+    C = legalize(C)
+    SFA = legalize(SFA)
+    SFB = legalize(SFB)
+
+    A_region = to_buffer_region(A)
+    B_region = to_buffer_region(B)
+    C_region = to_buffer_region(C)
+    SFA_region = to_buffer_region(SFA)
+    SFB_region = to_buffer_region(SFB)
+
+    A_shape = retrieve_shape(A_region)
+    B_shape = retrieve_shape(B_region)
+    C_shape = retrieve_shape(C_region)
+
+    assert len(C_shape) == 2, "current only support C as a 2D tensor"
+    assert len(A_shape) >= 2, "current only support A as a 2D or higher-order tensor"
+    assert len(B_shape) >= 2, "current only support B as a 2D or higher-order tensor"
+
+    M, N = C_shape
+    M_A = A_shape[-1] if transpose_A else A_shape[-2]
+    K = A_shape[-2] if transpose_A else A_shape[-1]
+    N_B = B_shape[-2] if transpose_B else B_shape[-1]
+    K_B = B_shape[-1] if transpose_B else B_shape[-2]
+    assert prim_expr_equal(M_A, M), f"T.mma_gemm_blockscaled M shape check failed: M_A = {M_A}, M_C = {M}"
+    assert prim_expr_equal(K, K_B), f"T.mma_gemm_blockscaled K shape check failed: K_A = {K}, K_B = {K_B}"
+    assert prim_expr_equal(N_B, N), f"T.mma_gemm_blockscaled N shape check failed: N_B = {N_B}, N_C = {N}"
+
+    A_stride = retrieve_stride(A_region)
+    B_stride = retrieve_stride(B_region)
+    A_offset = retrieve_offset(A_region)
+    B_offset = retrieve_offset(B_region)
+    stride_a = A_stride[-2]
+    stride_b = B_stride[-2]
+    offset_a = A_offset[-1]
+    offset_b = B_offset[-1]
+    C_coords = [r.min for r in C_region.region]
+
+    A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])
+    B_arg = buffer_region_to_tile_region(B_region, "r", [r for r in B_shape])
+    C_arg = buffer_region_to_tile_region(C_region, "rw", [r for r in C_shape])
+    SFA_arg = buffer_region_to_tile_region(SFA_region, "r", list(retrieve_shape(SFA_region)))
+    SFB_arg = buffer_region_to_tile_region(SFB_region, "r", list(retrieve_shape(SFB_region)))
+
+    if not isinstance(k_start, tirx.PrimExpr):
+        k_start = tirx.const(k_start, dtype="int32")
+
+    return tirx.call_intrin(
+        "handle",
+        tirx.op.Op.get("tl.tileop.gemm"),
+        A_arg,
+        B_arg,
+        C_arg,
+        transpose_A,
+        transpose_B,
+        M,
+        N,
+        K,
+        policy,
+        clear_accum,
+        stride_a,
+        stride_b,
+        offset_a,
+        offset_b,
+        1,  # k_pack
+        0,  # wg_wait
+        tirx.const(0, dtype="int32"),  # no mbarrier for synchronous mma.sync
+        C_coords[0],
+        C_coords[1],
+        SFA_arg,
+        SFB_arg,
+        k_start,
+        annotations=ann,
+    )
+
+
 def make_blockscaled_gemm_layout(
     C: BufferLikeType,
     A: BufferLikeType,
