@@ -15,6 +15,8 @@ from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, CUTLASS_INCLUDE_DIR, TIL
 from tilelang.transform import PassConfigKey
 from tilelang.engine.param import KernelParam, CompiledArtifact
 from tilelang.engine.semantic_check import PreLowerSemanticCheck
+from tilelang.backend.device_codegen import resolve_device_codegen
+from tilelang.backend.host_codegen import apply_host_codegen_hooks, resolve_host_codegen
 from tilelang.backend.target import determine_target
 from tilelang.backend.pass_pipeline import resolve_pipeline
 
@@ -234,61 +236,25 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target, target: Target | N
     combine_context_call = getattr(tirx.transform, "CombineContextCall", None)
     if combine_context_call is not None:
         host_mod = combine_context_call()(host_mod)
-    if target is not None and target.kind.name == "metal":
-        from tilelang.metal.transform import MarkHostMetalContext
+    host_mod = apply_host_codegen_hooks(host_mod, target_host, target)
+    return resolve_host_codegen(target_host).lower(host_mod, target_host)
 
-        host_mod = MarkHostMetalContext()(host_mod)
-    if target_host.kind.name == "llvm":
-        host_mod = tvm.ffi.get_global_func("target.build.llvm")(host_mod, target_host)
-    elif target_host.kind.name == "c":
-        host_mod = tvm.ffi.get_global_func("target.build.tilelang_c_host")(host_mod, target_host)
-    else:
-        raise ValueError(f"Target host {target_host.kind.name} is not supported")
-    return host_mod
+
+def _prepare_device_codegen_mod(device_mod: tvm.IRModule) -> tvm.IRModule:
+    device_mod = tilelang.transform.LowerIntrin()(device_mod)
+    device_mod = tirx.transform.Simplify()(device_mod)
+    device_mod = tilelang.transform.HoistBroadcastValues()(device_mod)
+    return device_mod
 
 
 def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
-    device_mod = tilelang.transform.LowerIntrin()(device_mod)
-    device_mod = tirx.transform.Simplify()(device_mod)
-    device_mod = tilelang.transform.HoistBroadcastValues()(device_mod)
-
-    if target.kind.name == "cuda":
-        global_func = "target.build.tilelang_" + ("cutedsl" if "cutedsl" in target.keys else "cuda")
-        device_mod = tvm.ffi.get_global_func(global_func)(device_mod, target)
-    elif target.kind.name == "hip":
-        device_mod = tvm.ffi.get_global_func("target.build.tilelang_hip")(device_mod, target)
-    elif target.kind.name == "metal":
-        device_mod = tvm.ffi.get_global_func("target.build.tilelang_metal")(device_mod, target)
-    elif target.kind.name == "llvm":
-        device_mod = tvm.ffi.get_global_func("target.build.llvm")(device_mod, target)
-    else:
-        raise ValueError(f"Target {target.kind.name} is not supported")
-
-    return device_mod
+    device_mod = _prepare_device_codegen_mod(device_mod)
+    return resolve_device_codegen(target).lower(device_mod, target, compile_device=True)
 
 
 def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
-    device_mod = tilelang.transform.LowerIntrin()(device_mod)
-    device_mod = tirx.transform.Simplify()(device_mod)
-    device_mod = tilelang.transform.HoistBroadcastValues()(device_mod)
-
-    if target.kind.name == "cuda":
-        global_func = "target.build.tilelang_" + ("cutedsl" if "cutedsl" in target.keys else "cuda") + "_without_compile"
-        device_mod = tvm.ffi.get_global_func(global_func)(device_mod, target)
-    elif target.kind.name == "hip":
-        device_mod = tvm.ffi.get_global_func("target.build.tilelang_hip_without_compile")(device_mod, target)
-    elif target.kind.name == "c":
-        device_mod = tvm.ffi.get_global_func("target.build.tilelang_c")(device_mod, target)
-    elif target.kind.name == "llvm":
-        device_mod = tvm.ffi.get_global_func("target.build.llvm")(device_mod, target)
-    elif target.kind.name == "webgpu":
-        device_mod = tvm.ffi.get_global_func("target.build.webgpu")(device_mod, target)
-    elif target.kind.name == "metal":
-        device_mod = tvm.ffi.get_global_func("target.build.tilelang_metal")(device_mod, target)
-    else:
-        raise ValueError(f"Target {target.kind.name} is not supported")
-
-    return device_mod
+    device_mod = _prepare_device_codegen_mod(device_mod)
+    return resolve_device_codegen(target).lower(device_mod, target, compile_device=False)
 
 
 def lower_to_host_device_ir(

@@ -175,6 +175,16 @@ from .cluster import (
     clc_get_first_ctaid_z,  # noqa: F401
 )
 
+from .meta import (
+    inline,  # noqa: F401
+    meta_class,  # noqa: F401
+)
+
+from .tile_schedule import (
+    BaseTileScheduler,  # noqa: F401
+    PersistentTileScheduler,  # noqa: F401
+)
+
 
 def import_source(source: str | None = None):
     # source is the source code to be imported
