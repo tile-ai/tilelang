@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import cloudpickle
 import importlib
+import os
 
 import tilelang
 import tilelang.cache.kernel_cache as kernel_cache_mod
@@ -31,7 +32,7 @@ def test_kernel_cache_namespace_includes_host_platform(monkeypatch):
     monkeypatch.setattr(kernel_cache_mod.platform, "machine", lambda: "aarch64")
     KernelCache._get_cache_namespace.cache_clear()
 
-    assert KernelCache._get_cache_namespace() == "1.2.3_cuda_gitabc-linux-aarch64"
+    assert KernelCache._get_cache_namespace() == os.path.join("1.2.3_cuda_gitabc", "linux-aarch64")
 
 
 def test_cuda_binary_cache_hit_skips_nvcc_compile(monkeypatch, tmp_path):

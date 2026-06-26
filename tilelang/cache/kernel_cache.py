@@ -158,7 +158,7 @@ class KernelCache:
         version = KernelCache._format_version_namespace(str(base_key.get("version", "unknown")))
         host_platform = KernelCache._sanitize_path_component(sys.platform)
         host_machine = KernelCache._sanitize_path_component(platform.machine())
-        return f"{version}-{host_platform}-{host_machine}"
+        return os.path.join(version, f"{host_platform}-{host_machine}")
 
     def __new__(cls):
         """
