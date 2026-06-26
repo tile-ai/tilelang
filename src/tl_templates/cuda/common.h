@@ -430,8 +430,8 @@ union GmmaDescriptor {
   template <typename T>
   CUTE_HOST_DEVICE constexpr GmmaDescriptor operator+(const T &offset) const {
     GmmaDescriptor ret;
-    ret.reg32_[0] = reg32_[0] + uint32_t(offset);
-    ret.reg32_[1] = reg32_[1];
+    ret.desc_ = desc_;
+    ret.reg32_[0] += uint32_t(offset);
     return ret;
   }
 };
@@ -493,9 +493,9 @@ union Tcgen05SMemDescriptor {
   CUTE_HOST_DEVICE constexpr Tcgen05SMemDescriptor
   operator+(const T &offset) const {
     Tcgen05SMemDescriptor ret;
+    ret.desc_ = desc_;
     // Address addition is in units of 16 bytes (4 LSB not encoded)
-    ret.reg32_[0] = reg32_[0] + (uint32_t(offset) >> 4);
-    ret.reg32_[1] = reg32_[1];
+    ret.reg32_[0] += uint32_t(offset) >> 4;
     return ret;
   }
 };
