@@ -350,6 +350,39 @@ def test_reduce_absmax_bf16_noncontiguous_packed_layout_regression():
     torch.testing.assert_close(B, ref, atol=0, rtol=0)
 
 
+@tilelang.testing.requires_cuda
+def test_reduce_sum_grouped_straddle_overcount_regression():
+    """Grouped reduce_sum over a straddle reshape (G not pow2) must not over-count by the AllReduce width."""
+    # Minimal trigger: [TILE_X, K] -> [TILE_X, G, gran_k], reduce dim=2.
+    TILE_X, K, gran_k, threads = 2, 192, 32, 128
+    G = K // gran_k
+
+    @tilelang.jit(out_idx=-1)
+    def build():
+        M = T.dynamic("M")
+
+        @T.prim_func
+        def main(A: T.Tensor((M, K), T.float32), Out: T.Tensor((M, G), T.float32)):
+            with T.Kernel(T.ceildiv(M, TILE_X), threads=threads) as pid:
+                x = T.alloc_fragment((TILE_X, K), T.float32)
+                o = T.alloc_fragment((TILE_X, G), T.float32)
+                for i, j in T.Parallel(TILE_X, K):
+                    x[i, j] = A[pid * TILE_X + i, j]
+                xr = T.reshape(x, (TILE_X, G, gran_k))
+                T.reduce_sum(xr, o, dim=2)
+                for i, g in T.Parallel(TILE_X, G):
+                    Out[pid * TILE_X + i, g] = o[i, g]
+
+        return main
+
+    M = TILE_X
+    torch.manual_seed(0)
+    A = torch.randn(M, K, device="cuda", dtype=torch.float32)
+    out = build()(A)
+    ref = A.reshape(M, G, gran_k).sum(dim=2)
+    torch.testing.assert_close(out, ref, atol=1e-3, rtol=1e-3)
+
+
 # ---------------------------------------------------------------------------
 # nan_propagate tests – packed (vsize=2) path for bf16/fp16
 # ---------------------------------------------------------------------------
