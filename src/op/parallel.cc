@@ -717,8 +717,15 @@ Fragment ParallelOpNode::ComputeLoopLayoutFromBuffer(
       if (auto opt_var = objref.as<Var>();
           opt_var && inner_vars_.count(*opt_var)) {
         std::ostringstream oss;
-        oss << "loop_var_to_thread = " << loop_var_to_thread
-            << "contains inner var" << *opt_var;
+        oss << "Cannot lower access to thread-distributed fragment `"
+            << buffer->name
+            << "` from a T.serial loop: fragment elements are spread across "
+               "CUDA threads, so the serial loop variable `"
+            << *opt_var
+            << "` cannot be used to address them safely (thread map: "
+            << loop_var_to_thread
+            << "). Use T.reduce_sum for reductions, T.Parallel for elementwise "
+               "access, or stage through shared memory to change the layout.";
         throw LayoutConflictException(oss.str());
       }
     });
