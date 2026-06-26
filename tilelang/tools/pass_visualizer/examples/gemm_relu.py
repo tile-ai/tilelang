@@ -7,7 +7,7 @@ the bias add and the ReLU are fused into the GEMM epilogue: they run on the
 accumulator fragment `C_local` (still in registers) right before writing back to
 global memory. No extra kernel launch, no extra global round-trip.
 
-Used as input to ``tilelang.utils.pass_visualizer.viewer``; see the package
+Used as input to ``tilelang.tools.pass_visualizer.viewer``; see the package
 README for the exact command.
 """
 

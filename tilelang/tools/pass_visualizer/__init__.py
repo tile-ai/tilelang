@@ -17,5 +17,5 @@ from .core import (
 
 # NOTE: viewer (build_pass_data / emit_html / emit_txt) is intentionally NOT
 # imported here. Pre-importing it would trigger a RuntimeWarning when the module
-# is run as ``python -m tilelang.utils.pass_visualizer.viewer``. Import those
-# from ``tilelang.utils.pass_visualizer.viewer`` directly.
+# is run as ``python -m tilelang.tools.pass_visualizer.viewer``. Import those
+# from ``tilelang.tools.pass_visualizer.viewer`` directly.

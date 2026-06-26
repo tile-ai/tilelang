@@ -25,8 +25,8 @@ and operator semantics change, not just which text lines moved.
 ## Usage
 
 ```bash
-python -m tilelang.utils.pass_visualizer.viewer \
-    tilelang/utils/pass_visualizer/examples/gemm_relu.py \
+python -m tilelang.tools.pass_visualizer.viewer \
+    tilelang/tools/pass_visualizer/examples/gemm_relu.py \
     --set M=1024 --set N=1024 --set K=1024 \
     --set block_M=128 --set block_N=128 --set block_K=32 \
     --out gemm_relu_passes.html
@@ -58,7 +58,7 @@ This writes `gemm_relu_passes.html` (the interactive browser) and a sibling
 ## Programmatic API
 
 ```python
-from tilelang.utils.pass_visualizer.viewer import build_pass_data, emit_html
+from tilelang.tools.pass_visualizer.viewer import build_pass_data, emit_html
 
 name, stages = build_pass_data(
     "path/to/kernel.py", factory=None, target="auto",

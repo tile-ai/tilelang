@@ -15,12 +15,12 @@ import tilelang.testing
 import tilelang.language as T
 from tilelang import tvm
 
-from tilelang.utils.pass_visualizer import (
+from tilelang.tools.pass_visualizer import (
     build_module,
     build_pass_stages,
     inspect_structure,
 )
-from tilelang.utils.pass_visualizer.viewer import (
+from tilelang.tools.pass_visualizer.viewer import (
     _capture_tree,
     build_pass_data,
     emit_html,
@@ -132,7 +132,7 @@ def test_build_pass_data_and_emit(tmp_path):
     import os
 
     kernel_path = os.path.join(
-        os.path.dirname(tilelang.utils.pass_visualizer.__file__),
+        os.path.dirname(tilelang.tools.pass_visualizer.__file__),
         "examples",
         "gemm_relu.py",
     )

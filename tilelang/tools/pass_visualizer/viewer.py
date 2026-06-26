@@ -11,8 +11,8 @@ per-pass capture, line-level diffing (difflib), and HTML emission.
 
 Run with::
 
-    python -m tilelang.utils.pass_visualizer.viewer \\
-        tilelang/utils/pass_visualizer/examples/gemm_relu.py \\
+    python -m tilelang.tools.pass_visualizer.viewer \\
+        tilelang/tools/pass_visualizer/examples/gemm_relu.py \\
         --set M=1024 --set N=1024 --set K=1024 \\
         --set block_M=128 --set block_N=128 --set block_K=32 \\
         --out gemm_relu_passes.html
@@ -401,7 +401,9 @@ renderTree();
 
 
 def emit_html(title: str, stages: list[dict]) -> str:
-    data_json = json.dumps(stages)
+    # Escape "</" so embedded row text containing "</script>" cannot terminate
+    # the <script> block early and inject HTML/JS into the report.
+    data_json = json.dumps(stages).replace("</", "<\\/")
     out = HTML_TEMPLATE.replace("__TITLE__", html.escape(title))
     out = out.replace("__DATA__", data_json)
     return out
@@ -426,10 +428,10 @@ def emit_txt(title: str, stages: list[dict]) -> str:
 def _write_outputs(name: str, stages: list[dict], html_path: str) -> str:
     """Write the HTML and a sibling .txt; return the txt path."""
     os.makedirs(os.path.dirname(os.path.abspath(html_path)), exist_ok=True)
-    with open(html_path, "w") as f:
+    with open(html_path, "w", encoding="utf-8") as f:
         f.write(emit_html(name, stages))
     txt_path = os.path.splitext(html_path)[0] + ".txt"
-    with open(txt_path, "w") as f:
+    with open(txt_path, "w", encoding="utf-8") as f:
         f.write(emit_txt(name, stages))
     return txt_path
 
@@ -450,7 +452,7 @@ def main():
     parser.add_argument("--out", default=None, help="Output HTML path (default: <kernel>_passes.html next to the source).")
     args = parser.parse_args()
 
-    with open(args.path) as f:
+    with open(args.path, encoding="utf-8") as f:
         source = f.read()
 
     name, stages = build_pass_data(args.path, args.factory, args.target, M._parse_kv(args.kwargs), source)

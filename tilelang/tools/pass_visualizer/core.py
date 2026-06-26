@@ -38,6 +38,8 @@ from tilelang.backend.pass_pipeline.pipeline_utils import (
 def load_user_module(path: str):
     """Import an arbitrary user TileLang source file as a module."""
     spec = importlib.util.spec_from_file_location("_user_kernel", path)
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"Cannot import a Python module from {path!r}.")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -101,6 +103,7 @@ def build_pass_stages(target: Target) -> list[tuple[str, object]]:
     stages: list[tuple[str, object]] = []
 
     stages.append(("BindTarget", tirx.transform.BindTarget(target)))
+    stages.append(("MaterializeKernelLaunch", tilelang.transform.MaterializeKernelLaunch()))
 
     if should_force_let_inline():
         stages.append(("LetInline", tilelang.transform.LetInline()))
@@ -140,7 +143,13 @@ def build_pass_stages(target: Target) -> list[tuple[str, object]]:
 
 
 def _fmt_shape(shape) -> list:
-    return [int(d) if hasattr(d, "__int__") else d for d in shape]
+    out = []
+    for d in shape:
+        try:
+            out.append(int(d))
+        except (TypeError, ValueError):
+            out.append(d)
+    return out
 
 
 def _fmt_buffer(buf) -> str:
