@@ -344,6 +344,9 @@ class Environment:
     TILELANG_DISABLE_CACHE = EnvVar(
         "TILELANG_DISABLE_CACHE", "0"
     )  # disable kernel cache, usually for unit testing / debugging, high priority
+    TILELANG_KERNEL_CACHE_USE_LIB_STAMP = EnvVar(
+        "TILELANG_KERNEL_CACHE_USE_LIB_STAMP", "0"
+    )  # include native TileLang library content hash in kernel cache keys
     TILELANG_CLEANUP_TEMP_FILES = EnvVar(
         "TILELANG_CLEANUP_TEMP_FILES", "1"
     )  # cleanup temporary compiler files/dirs after compilation (set to 0 to keep for debugging)
@@ -396,6 +399,9 @@ class Environment:
 
     def is_cache_globally_disabled(self) -> bool:
         return self.TILELANG_DISABLE_CACHE.lower() in ("1", "true", "yes", "on")
+
+    def should_use_kernel_cache_lib_stamp(self) -> bool:
+        return str(self.TILELANG_KERNEL_CACHE_USE_LIB_STAMP).lower() in ("1", "true", "yes", "on")
 
     def is_autotune_cache_disabled(self) -> bool:
         return self.TILELANG_AUTO_TUNING_DISABLE_CACHE.lower() in ("1", "true", "yes", "on")
