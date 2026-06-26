@@ -157,10 +157,20 @@ private:
  * local buffer optimization.
  */
 bool ForBodyContainsSeqStmt(const For &loop) {
+  // Ignore flat Bind nodes (SSA value defs): a single store wrapped in leading
+  // Binds is not multi-stmt. Keeps this in sync with DecoupleTypeCast.
   bool has_seq_stmt = false;
   PostOrderVisit(loop->body, [&](const ObjectRef &obj) {
-    if (obj.as<SeqStmtNode>()) {
-      has_seq_stmt = true;
+    if (auto seq = obj.as<SeqStmtNode>()) {
+      int num_real_stmts = 0;
+      for (const Stmt &s : seq->seq) {
+        if (!s.as<BindNode>()) {
+          ++num_real_stmts;
+        }
+      }
+      if (num_real_stmts >= 2) {
+        has_seq_stmt = true;
+      }
     }
   });
   return has_seq_stmt;
