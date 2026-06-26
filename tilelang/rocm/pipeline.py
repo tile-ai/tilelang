@@ -58,7 +58,6 @@ def ROCMPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.StorageRewrite()(mod)
     mod = tilelang.transform.LoopUnswitching()(mod)
     mod = tilelang.transform.UnrollLoop()(mod)
-    mod = s_tir.transform.RenormalizeSplitPattern()(mod)
     mod = tirx.transform.Simplify()(mod)
     mod = tirx.transform.RemoveNoOp()(mod)
     mod = s_tir.transform.HoistIfThenElse()(mod)
