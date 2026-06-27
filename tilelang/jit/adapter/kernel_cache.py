@@ -18,4 +18,4 @@ class TVMFFIKernelCache(KernelCache):
         executable = kernel.adapter.get_exportable_executable()
         if verbose:
             self.logger.debug(f"Saving kernel executable to file: {executable}")
-        KernelCache._safe_write_executable(executable, kernel_lib_path)
+        KernelCache._safe_write_executable(executable, kernel_lib_path, target=kernel.target)
