@@ -47,7 +47,6 @@ from .diff import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-
 STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
 STATUS_SKIPPED = "skipped"
@@ -143,21 +142,23 @@ _CODEGEN_FFI_NAMES: list[str] = [
     "target.build.tilelang_ascend_pto",
     "target.build.llvm",
     "target.build.webgpu",
+    "target.build.tilelang_cpp",
+    "target.build.tilelang_webgpu",
 ]
 
-# FFIs whose returned module is consumed *only* via ``inspect_source()`` — i.e.
+# FFIs whose returned module is consumed *only* via ``get_source()`` — i.e.
 # the module holds source text (C / WGSL / etc.), not a compiled binary, and is
-# never passed to ``host_mod.import_module()``.  For these FFIs a
-# ``_CodegenSourceProxy`` can be safely returned in place of the real module so
-# that the downstream JIT adapter (NVRTC / Cython / CuTeDSL) recompiles the
-# user-edited source.
+# never passed to ``host_mod.import_module()``.  For these FFIs a real
+# ``CSourceModule`` rebuilt from the user-edited source can be returned in
+# place of the original module so that the downstream JIT adapter (NVRTC /
+# Cython / CuTeDSL / bisheng) recompiles the user-edited source.
 #
 # Membership is determined by tracing the call sites in
 # ``tilelang.engine.lower``:
 # - ``*_without_compile`` FFIs are only called from ``device_codegen_without_compile``
 #   (which sets ``enable_device_compile=False`` → ``enable_host_codegen=False``),
 #   so the result is never passed to ``import_module``.
-# - ``tilelang_c`` and ``webgpu`` produce ``CSourceModule`` / ``WebGPUModule``
+# - ``tilelang_cpp`` and ``tilelang_webgpu`` produce ``CSourceModule`` / ``WebGPUModule``
 #   (source-only, no binary compilation step); they are likewise only called from
 #   ``device_codegen_without_compile``.
 # - ``tilelang_metal`` is dual-use: called from both ``device_codegen``
@@ -169,6 +170,14 @@ _CODEGEN_FFI_NAMES: list[str] = [
 #   is consumed by the host runtime module tree).
 # - ``tilelang_cuda``, ``tilelang_hip``, ``tilelang_cutedsl`` (full-compile
 #   variants) produce binary modules consumed via ``import_module``.
+# - ``tilelang_ascend`` and ``tilelang_ascend_pto`` are called from
+#   ``device_codegen`` (not ``device_codegen_without_compile``), but
+#   ``BuildTileLangAscend`` returns a ``CSourceModuleCreate(code, "c", ...)``
+#   — a *source-only* module, not a binary.  ``tilelang.engine.lower`` only
+#   calls ``.get_source()`` on it and never ``import_module()``; the
+#   ``CythonKernelAdapter`` recompiles that source string via the ``bisheng``
+#   compiler.  Hence a ``CSourceModule`` rebuilt from the patched source is
+#   safe and user edits get recompiled.
 #
 # New FFIs default to *not* being in this set (conservative: return real module
 # + NOTE), and must be explicitly added here once their call chain is verified
@@ -180,6 +189,10 @@ _SOURCE_ONLY_CODEGEN_FFIS: frozenset[str] = frozenset(
         "target.build.tilelang_hip_without_compile",
         "target.build.tilelang_c",
         "target.build.webgpu",
+        "target.build.tilelang_cpp",
+        "target.build.tilelang_webgpu",
+        "target.build.tilelang_ascend",
+        "target.build.tilelang_ascend_pto",
     }
 )
 _current_phase: str | None = None
@@ -334,9 +347,9 @@ def _save_raw_files(record: LowerRecord):
         prefix = f"{record.index:02d}_{_safe_filename_component(record.name)}"
         before_ext = ".tir"
         after_ext = ".cpp" if record.status == STATUS_CODEGEN else ".tir"
-        with open(os.path.join(phase_dir, f"{prefix}_before{before_ext}"), "w") as f:
+        with open(os.path.join(phase_dir, f"{prefix}_before{before_ext}"), "w", encoding="utf-8") as f:
             f.write(record.before_text)
-        with open(os.path.join(phase_dir, f"{prefix}_after{after_ext}"), "w") as f:
+        with open(os.path.join(phase_dir, f"{prefix}_after{after_ext}"), "w", encoding="utf-8") as f:
             f.write(record.after_text)
     except Exception as exc:
         print(f"  {_ANSI_RED}[lower_trace] WARNING: could not save raw trace files: {exc}{_ANSI_RESET}")
@@ -412,6 +425,9 @@ def _traced_pass_call(self, mod):
             _records.append(record)
             _save_raw_files(record)
             print(f"  {_ANSI_RED}[lower_trace] {phase}/{idx:02d}_{record.name}: FAILED ({e}){_ANSI_RESET}")
+            if gen_html:
+                with contextlib.suppress(Exception):
+                    _incremental_flush_html()
         raise
 
     after_text = str(result)
@@ -757,33 +773,29 @@ def _traced_pipeline_lower(self, mod, target):
     return result
 
 
-class _CodegenSourceProxy:
-    """Proxy returned when codegen source is patched from the user-edited working copy.
+def _make_patched_source_module(original_module, patched_source: str):
+    """Build a real ``CSourceModule`` carrying ``patched_source``.
 
-    Only exposes ``inspect_source``/``get_source`` because the ``_without_compile``
-    codegen FFIs (e.g. ``tilelang_cuda_without_compile``) produce modules whose
-    sole consumer is ``inspect_source()`` — called in ``tilelang.engine.lower``
-    to populate ``kernel_source``.  The downstream JIT adapter (NVRTC / Cython /
-    CuTeDSL) then compiles that source string at runtime, so returning this
-    proxy in place of the real module is safe and causes the user's edits to
-    be compiled.
+    Every codegen FFI in ``_CODEGEN_FFI_NAMES`` is invoked via
+    ``tvm._ffi.get_global_func(name)(...)`` (see ``tilelang.engine.lower``
+    ``device_codegen`` / ``device_codegen_without_compile``).  The wrapper is
+    registered as a PackedFunc, so its return value is marshalled back through
+    ``TVMCFuncSetReturn`` which only accepts TVM-recognised types (Module /
+    Object / PackedFunc / scalars / str / ...).  A pure-Python proxy cannot
+    cross that boundary (``TypeError: Don't know how to handle type ...``).
 
-    For full-compile FFIs (e.g. ``tilelang_cuda``) the real module is returned
-    instead, because its binary payload (PTX/hsaco) was compiled from TIR and
-    cannot be patched from C++ source without a full recompilation.
+    We therefore construct a genuine ``CSourceModule`` — the same factory used
+    by ``BuildTileLangAscend`` in C++ (``CSourceModuleCreate(code, "c",
+    function_names)``) — so the patched source both crosses the FFI boundary
+    and is returned by ``.get_source()``, which is the sole consumer in
+    ``tilelang.engine.lower`` (line 233: ``codegen_mod.get_source()``).
     """
-
-    def __init__(self, source: str):
-        """Store the user-edited source string to be returned to callers."""
-        self._source = source
-
-    def inspect_source(self) -> str:
-        """Return the patched source (TVM ``inspect_source`` interface)."""
-        return self._source
-
-    def get_source(self) -> str:
-        """Return the patched source (legacy ``get_source`` alias)."""
-        return self._source
+    import tvm.runtime._ffi_api as _ffi_api
+    try:
+        fmt = original_module.format
+    except Exception:
+        fmt = "c"
+    return _ffi_api.CSourceModuleCreate(patched_source, fmt, [], None)
 
 
 def _wrap_codegen_ffi(original_build, ffi_name=""):
@@ -795,8 +807,8 @@ def _wrap_codegen_ffi(original_build, ffi_name=""):
         The original codegen FFI function.
     ffi_name : str
         The registered FFI name (e.g. ``target.build.tilelang_cuda``).
-        Used to decide whether a ``_CodegenSourceProxy`` can be returned
-        (safe for ``*_without_compile`` FFIs) or the real module must be
+        Used to decide whether a patched ``CSourceModule`` can be returned
+        (safe for source-only FFIs) or the real module must be
         returned (required for full-compile FFIs whose binary is consumed
         downstream via ``host_mod.import_module``).
 
@@ -837,9 +849,12 @@ def _wrap_codegen_ffi(original_build, ffi_name=""):
 
     When the working copy is injected (PATCHED / SYNCED), the return value
     depends on whether the FFI is in ``_SOURCE_ONLY_CODEGEN_FFIS``:
-    - Source-only FFIs (``*_without_compile``, ``tilelang_c``, ``webgpu``)
-      → return ``_CodegenSourceProxy`` so the downstream JIT adapter
-      (NVRTC / Cython / CuTeDSL) recompiles the edited source.
+    - Source-only FFIs (``*_without_compile``, ``tilelang_c``, ``webgpu``,
+      ``tilelang_ascend``, ``tilelang_ascend_pto``)
+      → return a ``CSourceModule`` rebuilt from the patched source (via
+      ``_make_patched_source_module``) so it crosses the FFI boundary and
+      the downstream JIT adapter (NVRTC / Cython / CuTeDSL / bisheng)
+      recompiles the edited source.
     - Full-compile FFIs (``tilelang_cuda``, ``tilelang_hip``, ``tilelang_metal``,
       ``llvm``, ``tilelang_c_host``, …) → return the original ``result``
       (whose binary was compiled from TIR) and print a NOTE advising the
@@ -893,124 +908,110 @@ def _wrap_codegen_ffi(original_build, ffi_name=""):
             with _lock:
                 idx = _pass_index
                 _pass_index += 1
+            patched_text = None
+            codegen_text = ""
+            after_text = ""
             try:
                 codegen_text = _inspect_module_source(result)
-            except Exception as e:
-                # inspect_source() failed after a successful build: record a
-                # FAILED entry for the already-reserved idx (so pass numbering
-                # stays gap-free) and re-raise so the caller sees the error.
+                if codegen_out_path:
+                    original_path = codegen_out_path + ".original"
+                    latest_path = codegen_out_path + ".latest"
+                    try:
+                        os.makedirs(os.path.dirname(os.path.abspath(codegen_out_path)), exist_ok=True)
+                        with open(latest_path, "w", encoding="utf-8") as _f:
+                            _f.write(codegen_text)
+                        if not os.path.isfile(codegen_out_path) or not os.path.isfile(original_path):
+                            if os.path.isfile(codegen_out_path):
+                                shutil.copyfile(codegen_out_path, codegen_out_path + ".bak")
+                                print(
+                                    f"  [lower_trace] codegen/{idx:02d}_codegen: INIT-BACKUP — {_ANSI_BOLD}{_ANSI_YELLOW}{codegen_out_path}{_ANSI_RESET} existed without baseline, backed up to {_ANSI_BOLD}{_ANSI_YELLOW}{codegen_out_path}.bak{_ANSI_RESET}"
+                                )
+                            with open(original_path, "w", encoding="utf-8") as _f:
+                                _f.write(codegen_text)
+                            shutil.copyfile(original_path, codegen_out_path)
+                            print(f"  [lower_trace] codegen source initialized at: {_ANSI_GREEN}{codegen_out_path}{_ANSI_RESET}")
+                        else:
+                            with open(original_path, encoding="utf-8") as _f:
+                                baseline_text = _f.read()
+                            with open(codegen_out_path, encoding="utf-8") as _f:
+                                working_text = _f.read()
+                            user_edited = working_text.rstrip() != baseline_text.rstrip()
+                            codegen_changed = codegen_text.rstrip() != baseline_text.rstrip()
+                            if not user_edited and not codegen_changed:
+                                patched_text = None
+                            elif not user_edited and codegen_changed:
+                                with open(original_path, "w", encoding="utf-8") as _f:
+                                    _f.write(codegen_text)
+                                with open(codegen_out_path, "w", encoding="utf-8") as _f:
+                                    _f.write(codegen_text)
+                                print(
+                                    f"  {_ANSI_CYAN}[lower_trace] codegen/{idx:02d}_codegen: REGENERATED (codegen changed, no user edits){_ANSI_RESET}"
+                                )
+                                patched_text = None
+                            elif user_edited and not codegen_changed:
+                                patched_text = working_text
+                                print(
+                                    f"  {_ANSI_BOLD}{_ANSI_GREEN}[lower_trace] codegen/{idx:02d}_codegen: PATCHED (user edits){_ANSI_RESET}"
+                                )
+                            else:
+                                if working_text.rstrip() == codegen_text.rstrip():
+                                    with open(original_path, "w", encoding="utf-8") as _f:
+                                        _f.write(codegen_text)
+                                    patched_text = working_text
+                                    print(
+                                        f"  {_ANSI_BOLD}{_ANSI_GREEN}[lower_trace] codegen/{idx:02d}_codegen: SYNCED (user edits & codegen changed, but they are the same){_ANSI_RESET}"
+                                    )
+                                else:
+                                    shutil.copyfile(codegen_out_path, codegen_out_path + ".bak")
+                                    shutil.copyfile(original_path, original_path + ".bak")
+                                    with open(original_path, "w", encoding="utf-8") as _f:
+                                        _f.write(codegen_text)
+                                    with open(codegen_out_path, "w", encoding="utf-8") as _f:
+                                        _f.write(codegen_text)
+                                    print(
+                                        f"  {_ANSI_BOLD}{_ANSI_YELLOW}[lower_trace] codegen/{idx:02d}_codegen: CONFLICT (user edits & codegen changed, conflict with each other, codegen overwrites user edits). {_ANSI_RESET}"
+                                    )
+                                    patched_text = None
+                    except Exception as _exc:
+                        print(f"  {_ANSI_RED}[lower_trace] WARNING: codegen file I/O failed: {_exc}{_ANSI_RESET}")
+                        patched_text = None
+
+                after_text = patched_text if patched_text is not None else codegen_text
+
+                sm = difflib.SequenceMatcher(None, before_text.splitlines(), after_text.splitlines())
+                add_count = del_count = 0
+                for _tag, i1, i2, j1, j2 in sm.get_opcodes():
+                    if _tag == "insert":
+                        add_count += j2 - j1
+                    elif _tag == "delete":
+                        del_count += i2 - i1
+                    elif _tag == "replace":
+                        add_count += j2 - j1
+                        del_count += i2 - i1
+
                 with _lock:
                     record = LowerRecord(
                         phase="codegen",
-                        name=getattr(original_build, "__name__", "codegen"),
+                        name="codegen",
                         index=idx,
                         before_text=before_text,
-                        after_text="",
-                        changed=False,
-                        status=STATUS_FAILED,
-                        error_msg=str(e),
+                        after_text=after_text,
+                        changed=True,
+                        add_lines=add_count,
+                        del_lines=del_count,
+                        status=STATUS_CODEGEN,
                     )
                     _records.append(record)
                     _save_raw_files(record)
-                    print(f"  {_ANSI_RED}[lower_trace] codegen/{idx:02d}_codegen: FAILED ({e}){_ANSI_RESET}")
-                raise
+                    tag = "CODEGEN"
+                    path_suffix = f"  →  {_ANSI_BLUE}{codegen_out_path}{_ANSI_RESET}" if codegen_out_path else ""
+                    print(f"  [lower_trace] codegen/{idx:02d}_codegen: {tag} (+{add_count}/-{del_count}){path_suffix}")
 
-            patched_text = None
-            if codegen_out_path:
-                original_path = codegen_out_path + ".original"
-                latest_path = codegen_out_path + ".latest"
-                try:
-                    os.makedirs(os.path.dirname(os.path.abspath(codegen_out_path)), exist_ok=True)
-                    with open(latest_path, "w") as _f:
-                        _f.write(codegen_text)
-                    if not os.path.isfile(codegen_out_path) or not os.path.isfile(original_path):
-                        if os.path.isfile(codegen_out_path):
-                            shutil.copyfile(codegen_out_path, codegen_out_path + ".bak")
-                            print(
-                                f"  [lower_trace] codegen/{idx:02d}_codegen: INIT-BACKUP — {_ANSI_BOLD}{_ANSI_YELLOW}{codegen_out_path}{_ANSI_RESET} existed without baseline, backed up to {_ANSI_BOLD}{_ANSI_YELLOW}{codegen_out_path}.bak{_ANSI_RESET}"
-                            )
-                        with open(original_path, "w") as _f:
-                            _f.write(codegen_text)
-                        shutil.copyfile(original_path, codegen_out_path)
-                        print(f"  [lower_trace] codegen source initialized at: {_ANSI_GREEN}{codegen_out_path}{_ANSI_RESET}")
-                    else:
-                        with open(original_path) as _f:
-                            baseline_text = _f.read()
-                        with open(codegen_out_path) as _f:
-                            working_text = _f.read()
-                        user_edited = working_text.rstrip() != baseline_text.rstrip()
-                        codegen_changed = codegen_text.rstrip() != baseline_text.rstrip()
-                        if not user_edited and not codegen_changed:
-                            patched_text = None
-                        elif not user_edited and codegen_changed:
-                            with open(original_path, "w") as _f:
-                                _f.write(codegen_text)
-                            with open(codegen_out_path, "w") as _f:
-                                _f.write(codegen_text)
-                            print(
-                                f"  {_ANSI_CYAN}[lower_trace] codegen/{idx:02d}_codegen: REGENERATED (codegen changed, no user edits){_ANSI_RESET}"
-                            )
-                            patched_text = None
-                        elif user_edited and not codegen_changed:
-                            patched_text = working_text
-                            print(f"  {_ANSI_BOLD}{_ANSI_GREEN}[lower_trace] codegen/{idx:02d}_codegen: PATCHED (user edits){_ANSI_RESET}")
-                        else:
-                            if working_text.rstrip() == codegen_text.rstrip():
-                                with open(original_path, "w") as _f:
-                                    _f.write(codegen_text)
-                                patched_text = working_text
-                                print(
-                                    f"  {_ANSI_BOLD}{_ANSI_GREEN}[lower_trace] codegen/{idx:02d}_codegen: SYNCED (user edits & codegen changed, but they are the same){_ANSI_RESET}"
-                                )
-                            else:
-                                shutil.copyfile(codegen_out_path, codegen_out_path + ".bak")
-                                shutil.copyfile(original_path, original_path + ".bak")
-                                with open(original_path, "w") as _f:
-                                    _f.write(codegen_text)
-                                with open(codegen_out_path, "w") as _f:
-                                    _f.write(codegen_text)
-                                print(
-                                    f"  {_ANSI_BOLD}{_ANSI_YELLOW}[lower_trace] codegen/{idx:02d}_codegen: CONFLICT (user edits & codegen changed, conflict with each other, codegen overwrites user edits). {_ANSI_RESET}"
-                                )
-                                patched_text = None
-                except Exception as _exc:
-                    print(f"  {_ANSI_RED}[lower_trace] WARNING: codegen file I/O failed: {_exc}{_ANSI_RESET}")
-                    patched_text = None
-
-            after_text = patched_text if patched_text is not None else codegen_text
-
-            sm = difflib.SequenceMatcher(None, before_text.splitlines(), after_text.splitlines())
-            add_count = del_count = 0
-            for _tag, i1, i2, j1, j2 in sm.get_opcodes():
-                if _tag == "insert":
-                    add_count += j2 - j1
-                elif _tag == "delete":
-                    del_count += i2 - i1
-                elif _tag == "replace":
-                    add_count += j2 - j1
-                    del_count += i2 - i1
-
-            with _lock:
-                record = LowerRecord(
-                    phase="codegen",
-                    name="codegen",
-                    index=idx,
-                    before_text=before_text,
-                    after_text=after_text,
-                    changed=True,
-                    add_lines=add_count,
-                    del_lines=del_count,
-                    status=STATUS_CODEGEN,
-                )
-                _records.append(record)
-                _save_raw_files(record)
-                tag = "CODEGEN"
-                path_suffix = f"  →  {_ANSI_BLUE}{codegen_out_path}{_ANSI_RESET}" if codegen_out_path else ""
-                print(f"  [lower_trace] codegen/{idx:02d}_codegen: {tag} (+{add_count}/-{del_count}){path_suffix}")
-
-                if gen_html:
-                    with contextlib.suppress(Exception):
-                        _incremental_flush_html()
+                    if gen_html:
+                        with contextlib.suppress(Exception):
+                            _incremental_flush_html()
+            except Exception as exc:
+                print(f"  {_ANSI_RED}[lower_trace] WARNING: post-codegen tracing failed: {exc}{_ANSI_RESET}")
         finally:
             with _lock:
                 _current_phase = previous_phase
@@ -1023,10 +1024,13 @@ def _wrap_codegen_ffi(original_build, ffi_name=""):
         if patched_text is not None:
             if ffi_name in _SOURCE_ONLY_CODEGEN_FFIS:
                 # Source-only FFIs produce modules whose sole consumer is
-                # inspect_source(); the downstream JIT adapter (NVRTC/Cython/
-                # CuTeDSL) recompiles the source string, so returning a proxy
-                # is safe and causes the user's edits to be compiled.
-                return _CodegenSourceProxy(patched_text)
+                # get_source()/inspect_source(); the downstream JIT adapter
+                # (NVRTC/Cython/CuTeDSL/bisheng) recompiles the source string.
+                # Return a real CSourceModule built from the patched source so
+                # that (1) it crosses the TVM PackedFunc FFI return-value
+                # boundary (a pure-Python proxy cannot) and (2) get_source()
+                # yields the user-edited source for recompilation.
+                return _make_patched_source_module(result, patched_text)
             else:
                 # Full-compile FFIs return a module whose binary (PTX/hsaco)
                 # was compiled from TIR and is consumed downstream via
