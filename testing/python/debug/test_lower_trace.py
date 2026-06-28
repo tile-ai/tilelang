@@ -330,14 +330,10 @@ def test_terminal_mode_no_html(monkeypatch, tmp_path):
     script_dir = _core._script_dir
     assert script_dir is not None, "script_dir should be set after a run"
     symlink_report = os.path.join(script_dir, "report.html")
-    assert not os.path.exists(symlink_report), (
-        f"terminal mode must not write report.html symlink at {symlink_report}"
-    )
+    assert not os.path.exists(symlink_report), f"terminal mode must not write report.html symlink at {symlink_report}"
     if _core._run_dir is not None:
         run_report = os.path.join(_core._run_dir, "report.html")
-        assert not os.path.exists(run_report), (
-            f"terminal mode must not write report.html at {run_report}"
-        )
+        assert not os.path.exists(run_report), f"terminal mode must not write report.html at {run_report}"
 
     disable()
     monkeypatch.delenv("TL_LOWER_TRACE", raising=False)
@@ -717,10 +713,7 @@ def test_import_time_activation(tmp_path):
         capture_output=True,
         text=True,
     )
-    assert result.returncode == 0, (
-        f"subprocess failed (rc={result.returncode}):\n"
-        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
+    assert result.returncode == 0, f"subprocess failed (rc={result.returncode}):\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
 
 
 if __name__ == "__main__":
