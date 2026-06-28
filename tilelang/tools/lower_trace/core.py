@@ -359,7 +359,7 @@ def _incremental_flush_html():
     recomputed on every flush.  Only newly recorded passes incur the diff
     cost, keeping the total tracing overhead O(n) rather than O(n^2).
     """
-    if not _records or not _run_dir:
+    if not _should_gen_html() or not _records or not _run_dir:
         return
 
     from .html import generate_html
@@ -1189,7 +1189,7 @@ def enable(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
 
 def _final_report():
     """Generate final HTML report at process exit, covering all accumulated runs."""
-    if not _records or not _run_dir:
+    if not _should_gen_html() or not _records or not _run_dir:
         return
     try:
         from .html import generate_html

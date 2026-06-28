@@ -296,6 +296,86 @@ def test_no_skipped_phantom_records(monkeypatch, tmp_path):
     monkeypatch.delenv("TL_LOWER_TRACE_DIR", raising=False)
 
 
+def test_terminal_mode_no_html(monkeypatch, tmp_path):
+    """TL_LOWER_TRACE=terminal must not produce an HTML report at process exit.
+
+    Regression guard for the ``_final_report()`` hook: ``_save_raw_files()``
+    populates ``_run_dir`` even in terminal-only mode, so without an explicit
+    ``_should_gen_html()`` check the atexit hook would still emit ``report.html``.
+    """
+    from tilelang.tools.lower_trace import enable, disable
+    from tilelang.backend.pass_pipeline import resolve_pipeline
+    import tilelang.language as T
+
+    monkeypatch.setenv("TL_LOWER_TRACE", "terminal")
+    monkeypatch.setenv("TL_LOWER_TRACE_DIR", str(tmp_path))
+
+    disable()
+    enable()
+
+    @T.prim_func
+    def tiny(A: T.Tensor((32,), "float32"), B: T.Tensor((32,), "float32")):
+        with T.Kernel(32):
+            tid = T.get_thread_binding()
+            B[tid] = A[tid] + 1.0
+
+    mod = tvm.IRModule({"main": tiny})
+    target = tvm.target.Target("c")
+    pipeline = resolve_pipeline(target)
+    pipeline.lower(mod, target)
+
+    # Simulate the atexit hook that fires at process exit.
+    _core._final_report()
+
+    script_dir = _core._script_dir
+    assert script_dir is not None, "script_dir should be set after a run"
+    symlink_report = os.path.join(script_dir, "report.html")
+    assert not os.path.exists(symlink_report), (
+        f"terminal mode must not write report.html symlink at {symlink_report}"
+    )
+    if _core._run_dir is not None:
+        run_report = os.path.join(_core._run_dir, "report.html")
+        assert not os.path.exists(run_report), (
+            f"terminal mode must not write report.html at {run_report}"
+        )
+
+    disable()
+    monkeypatch.delenv("TL_LOWER_TRACE", raising=False)
+    monkeypatch.delenv("TL_LOWER_TRACE_DIR", raising=False)
+
+
+def test_lower_trace_html_on_failure(tmp_path):
+    """lower_trace() flushes a partial HTML report even when a pass raises.
+
+    Regression guard: previously an exception from ``p(mod)`` aborted the
+    function before ``generate_html()`` ran, so ``mode='html'``/``'both'``
+    lost the partial trace of completed passes.
+    """
+    from tilelang.tools.lower_trace import lower_trace
+
+    program = _simple_program()
+    html_path = str(tmp_path / "partial.html")
+
+    class _BoomPass:
+        def __call__(self, mod):
+            raise RuntimeError("intentional boom")
+
+    passes = [
+        ("Simplify", _noop_pass()),
+        ("Boom", _BoomPass()),
+    ]
+
+    with pytest.raises(RuntimeError, match="intentional boom"):
+        lower_trace(program, passes, mode="html", html_path=html_path)
+
+    assert os.path.exists(html_path), "partial HTML report must be flushed on failure"
+    with open(html_path) as f:
+        content = f.read()
+    assert "Simplify" in content, "completed pass must still appear in partial report"
+    assert "Boom" in content, "failing pass name must appear in partial report"
+    assert "FAILED" in content, "failing step must be marked FAILED"
+
+
 # ---------------------------------------------------------------------------
 # Codegen edit-and-recompile (Phase 1: _CodegenSourceProxy for _without_compile)
 # ---------------------------------------------------------------------------
@@ -435,7 +515,7 @@ def test_codegen_no_proxy_for_full_compile(tmp_path, capsys):
 
 def test_codegen_conflict_backup(tmp_path):
     """CONFLICT: both user edited and codegen changed → backup + regenerate."""
-    from tilelang.tools.lower_trace.core import _wrap_codegen_ffi
+    from tilelang.tools.lower_trace.core import _wrap_codegen_ffi, _CodegenSourceProxy
 
     source_v1 = "// generated kernel v1\n"
     mock_build = _make_mock_build(source_v1)
@@ -473,6 +553,7 @@ def test_codegen_conflict_backup(tmp_path):
             assert f.read() == source_v2
 
         # No proxy returned (regenerated from new codegen, patched_text=None)
+        assert not isinstance(result2, _CodegenSourceProxy), "CONFLICT must not return a proxy"
         assert result2.inspect_source() == source_v2
     finally:
         _clear_trace_overrides()
@@ -608,6 +689,38 @@ def test_codegen_record_index_after_nested_pass(tmp_path):
         assert indices == sorted(indices), f"records not in ascending index order: {indices}"
     finally:
         _clear_trace_overrides()
+
+
+def test_import_time_activation(tmp_path):
+    """The env hook in tilelang/__init__.py must activate tracing on first import.
+
+    This module clears TL_LOWER_TRACE before importing tilelang, so the rest of
+    the suite never exercises the import-time activation path. Use a subprocess
+    to set the env var *before* the first import and verify tracing is on.
+    """
+    import subprocess
+    import sys
+
+    env = dict(os.environ)
+    env["TL_LOWER_TRACE"] = "1"
+    env["TL_LOWER_TRACE_DIR"] = str(tmp_path)
+
+    code = (
+        "import tilelang\n"
+        "from tilelang.tools.lower_trace import core as _core\n"
+        "assert _core._is_trace_enabled(), 'tracing not enabled at import time'\n"
+        "assert _core._get_mode() == 'html', 'expected html mode for TL_LOWER_TRACE=1'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"subprocess failed (rc={result.returncode}):\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
 
 
 if __name__ == "__main__":

@@ -102,72 +102,91 @@ def lower_trace(
 
     results: list[dict] = []
 
-    for step_idx, (name, p) in enumerate(named_passes, 1):
-        before_script = mod.script()
-        mod = p(mod)
-        after_script = mod.script()
-
-        diff_text = unified_diff(
-            before_script,
-            after_script,
-            before_label=f"step {step_idx} before",
-            after_label=f"step {step_idx} after",
-            context=context,
-            color=False,
-        )
-        diff_lines = diff_text.splitlines() if diff_text else []
-
-        insertions = sum(1 for d in diff_lines if d.startswith("+") and not d.startswith("+++"))
-        deletions = sum(1 for d in diff_lines if d.startswith("-") and not d.startswith("---"))
-        changed = insertions > 0 or deletions > 0
-
-        step_result = {
-            "name": name,
-            "before_script": before_script,
-            "after_script": after_script,
-            "diff_lines": diff_lines,
-            "insertions": insertions,
-            "deletions": deletions,
-            "changed": changed,
-        }
-        results.append(step_result)
-
-        if mode in ("terminal", "both"):
-            header = f"\n{'=' * 60}\n  Pass {step_idx}: {name}\n{'=' * 60}\n"
-            print(header)
-            if changed:
-                colored = unified_diff(
-                    before_script,
-                    after_script,
-                    before_label=f"step {step_idx} before",
-                    after_label=f"step {step_idx} after",
-                    context=context,
-                    color=True,
+    try:
+        for step_idx, (name, p) in enumerate(named_passes, 1):
+            before_script = mod.script()
+            try:
+                mod = p(mod)
+            except Exception as e:
+                results.append(
+                    {
+                        "name": name,
+                        "before_script": before_script,
+                        "after_script": "",
+                        "diff_lines": [],
+                        "insertions": 0,
+                        "deletions": 0,
+                        "changed": False,
+                        "error": str(e),
+                    }
                 )
-                print(colored, end="")
-                print(f"\n  >>> +{insertions} insertion(s), -{deletions} deletion(s)")
-            else:
-                print("  (no changes)")
+                raise
 
-    if mode in ("html", "both"):
-        from .html import generate_html
+            after_script = mod.script()
 
-        records = []
-        for i, r in enumerate(results):
-            changed = r["changed"]
-            records.append(
-                LowerRecord(
-                    phase="lower_trace",
-                    name=r["name"],
-                    index=i,
-                    before_text=r["before_script"],
-                    after_text=r["after_script"],
-                    changed=changed,
-                    add_lines=r["insertions"],
-                    del_lines=r["deletions"],
-                )
+            diff_text = unified_diff(
+                before_script,
+                after_script,
+                before_label=f"step {step_idx} before",
+                after_label=f"step {step_idx} after",
+                context=context,
+                color=False,
             )
-        generate_html(records, html_path)
-        print(f"\nHTML report written to: {html_path}")
+            diff_lines = diff_text.splitlines() if diff_text else []
+
+            insertions = sum(1 for d in diff_lines if d.startswith("+") and not d.startswith("+++"))
+            deletions = sum(1 for d in diff_lines if d.startswith("-") and not d.startswith("---"))
+            changed = insertions > 0 or deletions > 0
+
+            step_result = {
+                "name": name,
+                "before_script": before_script,
+                "after_script": after_script,
+                "diff_lines": diff_lines,
+                "insertions": insertions,
+                "deletions": deletions,
+                "changed": changed,
+            }
+            results.append(step_result)
+
+            if mode in ("terminal", "both"):
+                header = f"\n{'=' * 60}\n  Pass {step_idx}: {name}\n{'=' * 60}\n"
+                print(header)
+                if changed:
+                    colored = unified_diff(
+                        before_script,
+                        after_script,
+                        before_label=f"step {step_idx} before",
+                        after_label=f"step {step_idx} after",
+                        context=context,
+                        color=True,
+                    )
+                    print(colored, end="")
+                    print(f"\n  >>> +{insertions} insertion(s), -{deletions} deletion(s)")
+                else:
+                    print("  (no changes)")
+    finally:
+        if mode in ("html", "both"):
+            from .html import generate_html
+
+            records = []
+            for i, r in enumerate(results):
+                failed = "error" in r
+                records.append(
+                    LowerRecord(
+                        phase="lower_trace",
+                        name=r["name"],
+                        index=i,
+                        before_text=r["before_script"],
+                        after_text=r["after_script"],
+                        changed=r["changed"],
+                        add_lines=r["insertions"],
+                        del_lines=r["deletions"],
+                        status=STATUS_FAILED if failed else STATUS_COMPLETED,
+                        error_msg=r.get("error", ""),
+                    )
+                )
+            generate_html(records, html_path)
+            print(f"\nHTML report written to: {html_path}")
 
     return results

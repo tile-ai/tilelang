@@ -256,11 +256,13 @@ A single run produces the following layout under `TL_LOWER_TRACE_DIR`:
     └── .run_records/
         └── run_<YYYYMMDD_HHMMSS_ffffff>_<pid>/
             ├── report.html        # this run's full report
-            ├── pipeline_c/             # one subdir per phase
+            ├── pipeline_c/             # one subdir per phase (example)
             │   ├── 00_BindTarget_before.tir
             │   ├── 00_BindTarget_after.tir
             │   ├── 01_Simplify_before.tir
             │   └── 01_Simplify_after.tir
+            ├── phase2_optimize/        # another phase (illustrative)
+            │   └── ...
             ├── codegen/
             │   ├── 42_codegen_before.tir
             │   └── 42_codegen_after.cpp
@@ -404,9 +406,11 @@ On each run a three-way comparison (baseline / working copy / current codegen ou
 | Codegen changed only | identical | **differs** | Regenerate `codegen.cpp` and `.original` from new codegen | `REGENERATED` |
 | User edited only | **differs** | identical | Inject the working copy (`PATCHED`) | `PATCHED` |
 | Both changed, working == latest | **differs** | **differs** (working matches latest) | Advance baseline; use working copy | `SYNCED` |
-| Both changed, working != latest | **differs** | **differs** (working differs from latest) | **CONFLICT** — back up working copy → `.bak` and old baseline → `.original.bak`, then regenerate from new codegen | `CONFLICT` |
+| Both changed, working != latest | **differs** | **differs** (working differs from latest) | **CONFLICT** — back up working copy → `.bak` (*conflict backup*) and old baseline → `.original.bak`, then regenerate from new codegen | `CONFLICT` |
 | First run (no baseline) | — | — | Initialise `.original`, copy to `codegen.cpp` | (init) |
-| `codegen.cpp` exists without baseline | — | — | Back up `codegen.cpp` → `.bak`, then initialise baseline | `INIT-BACKUP` |
+| `codegen.cpp` exists without baseline | — | — | Back up pre-existing `codegen.cpp` → `.bak` (*safety backup*), then initialise baseline | `INIT-BACKUP` |
+
+> **Note on `.bak` files:** The backups created by `CONFLICT` and `INIT-BACKUP` serve different purposes. `INIT-BACKUP` preserves a pre-existing `codegen.cpp` of unknown origin before the trace tool takes it over. `CONFLICT` preserves the user's edits before a codegen change overwrites them. Recover `CONFLICT` edits with `diff codegen.cpp.original.bak codegen.cpp.bak`.
 
 #### Typical Workflow
 
