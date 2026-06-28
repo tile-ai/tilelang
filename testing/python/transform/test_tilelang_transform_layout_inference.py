@@ -223,7 +223,7 @@ def _column_broadcast_fragment_kernel(block_n):
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("block_n", [32, 48, 96])
+@pytest.mark.parametrize("block_n", [24, 32, 40, 48, 96])
 def test_column_broadcast_fragment_values(block_n):
     # Numerical regression for issue #2394: the column broadcast must match D*2.
     kernel = _column_broadcast_fragment_kernel(block_n)
