@@ -1,6 +1,8 @@
 import builtins
 import errno
 from pathlib import Path
+import sys
+from types import SimpleNamespace
 
 import cloudpickle
 import pytest
@@ -343,3 +345,32 @@ def test_nvrtc_kernel_cache_rewrites_dir_missing_launcher(cache_dirs, tmp_path):
 
     assert (cache_path / cache.kernel_py_path).exists()
     assert not (cache_path / "legacy.txt").exists()
+
+
+def test_safe_write_executable_skips_source_options_for_llvm_target(cache_dirs, tmp_path):
+    """Regression: source-compilation options (e.g. -x objective-c++) must not be
+    passed when exporting LLVM modules, because they export as binary .o objects
+    that only need linking.  Other compile args must be preserved, and the
+    @functools.cache'd _get_compile_args dict must not be mutated.
+    """
+
+    cache = KernelCache()
+    captured = []
+
+    class FakeExecutable:
+        def export_library(self, path, **kwargs):
+            captured.append(dict(kwargs))
+            with open(path, "wb") as f:
+                f.write(b"fake-so")
+
+    executable = FakeExecutable()
+    llvm_target = SimpleNamespace(kind=SimpleNamespace(name="llvm"))
+    c_target = SimpleNamespace(kind=SimpleNamespace(name="c"))
+    is_darwin = sys.platform == "darwin"
+
+    cache._safe_write_executable(executable, str(tmp_path / "llvm.so"), target=llvm_target)
+    assert not is_darwin or "options" not in captured[-1], "Source-compilation options must be dropped for LLVM module export"
+    captured.clear()
+
+    cache._safe_write_executable(executable, str(tmp_path / "c.so"), target=c_target)
+    assert not is_darwin or "options" in captured[-1], "Source-compilation options must be preserved for non-LLVM module export"
