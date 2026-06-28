@@ -313,31 +313,31 @@ def test_terminal_mode_no_html(monkeypatch, tmp_path):
     disable()
     enable()
 
-    @T.prim_func
-    def tiny(A: T.Tensor((32,), "float32"), B: T.Tensor((32,), "float32")):
-        with T.Kernel(32):
-            tid = T.get_thread_binding()
-            B[tid] = A[tid] + 1.0
+    try:
 
-    mod = tvm.IRModule({"main": tiny})
-    target = tvm.target.Target("c")
-    pipeline = resolve_pipeline(target)
-    pipeline.lower(mod, target)
+        @T.prim_func
+        def tiny(A: T.Tensor((32,), "float32"), B: T.Tensor((32,), "float32")):
+            with T.Kernel(32):
+                tid = T.get_thread_binding()
+                B[tid] = A[tid] + 1.0
 
-    # Simulate the atexit hook that fires at process exit.
-    _core._final_report()
+        mod = tvm.IRModule({"main": tiny})
+        target = tvm.target.Target("c")
+        pipeline = resolve_pipeline(target)
+        pipeline.lower(mod, target)
 
-    script_dir = _core._script_dir
-    assert script_dir is not None, "script_dir should be set after a run"
-    symlink_report = os.path.join(script_dir, "report.html")
-    assert not os.path.exists(symlink_report), f"terminal mode must not write report.html symlink at {symlink_report}"
-    if _core._run_dir is not None:
-        run_report = os.path.join(_core._run_dir, "report.html")
-        assert not os.path.exists(run_report), f"terminal mode must not write report.html at {run_report}"
+        # Simulate the atexit hook that fires at process exit.
+        _core._final_report()
 
-    disable()
-    monkeypatch.delenv("TL_LOWER_TRACE", raising=False)
-    monkeypatch.delenv("TL_LOWER_TRACE_DIR", raising=False)
+        script_dir = _core._script_dir
+        assert script_dir is not None, "script_dir should be set after a run"
+        symlink_report = os.path.join(script_dir, "report.html")
+        assert not os.path.exists(symlink_report), f"terminal mode must not write report.html symlink at {symlink_report}"
+        if _core._run_dir is not None:
+            run_report = os.path.join(_core._run_dir, "report.html")
+            assert not os.path.exists(run_report), f"terminal mode must not write report.html at {run_report}"
+    finally:
+        disable()
 
 
 def test_lower_trace_html_on_failure(tmp_path):
@@ -712,6 +712,7 @@ def test_import_time_activation(tmp_path):
         env=env,
         capture_output=True,
         text=True,
+        timeout=30,
     )
     assert result.returncode == 0, f"subprocess failed (rc={result.returncode}):\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
 
