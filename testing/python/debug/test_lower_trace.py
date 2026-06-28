@@ -1,6 +1,7 @@
 # type: ignore
 """Tests for the lower_trace debugging feature."""
 
+import contextlib
 import os
 import pytest
 import tempfile
@@ -373,7 +374,7 @@ def test_lower_trace_html_on_failure(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Codegen edit-and-recompile (Phase 1: _CodegenSourceProxy for _without_compile)
+# Codegen edit-and-recompile (Phase 1: _make_patched_source_module for _without_compile)
 # ---------------------------------------------------------------------------
 
 
@@ -386,6 +387,9 @@ class _MockCodegenModule:
     def inspect_source(self) -> str:
         return self._source
 
+    def get_source(self) -> str:
+        return self._source
+
 
 def _make_mock_build(source: str):
     """Return a mock codegen FFI that always produces *source*."""
@@ -394,6 +398,24 @@ def _make_mock_build(source: str):
         return _MockCodegenModule(source)
 
     return mock_build
+
+
+class _MockPatchedModule:
+    """Stand-in for the CSourceModule returned by _make_patched_source_module."""
+
+    def __init__(self, source: str):
+        self._source = source
+
+    def get_source(self) -> str:
+        return self._source
+
+    def inspect_source(self) -> str:
+        return self._source
+
+
+def _patched_module_factory(original_module, patched_source):
+    """Test replacement for _make_patched_source_module (avoids real TVM C++ FFI)."""
+    return _MockPatchedModule(patched_source)
 
 
 def _setup_trace_overrides(tmp_path, mode="terminal"):
@@ -416,9 +438,18 @@ def _clear_trace_overrides():
     _core.reset()
 
 
+@contextlib.contextmanager
+def _patch_make_patched_source_module():
+    """Patch _make_patched_source_module so tests avoid the real TVM C++ FFI."""
+    from unittest.mock import patch
+
+    with patch("tilelang.tools.lower_trace.core._make_patched_source_module", side_effect=_patched_module_factory) as mock:
+        yield mock
+
+
 def test_codegen_proxy_for_without_compile(tmp_path):
-    """*_without_compile FFIs return _CodegenSourceProxy when user edits codegen.cpp."""
-    from tilelang.tools.lower_trace.core import _wrap_codegen_ffi, _CodegenSourceProxy
+    """*_without_compile FFIs return a patched module when user edits codegen.cpp."""
+    from tilelang.tools.lower_trace.core import _wrap_codegen_ffi
 
     source_v1 = "// generated kernel v1\n"
     mock_build = _make_mock_build(source_v1)
@@ -427,27 +458,28 @@ def test_codegen_proxy_for_without_compile(tmp_path):
     _setup_trace_overrides(tmp_path)
     codegen_path = _core._codegen_output_path_override
 
-    try:
-        # Run 1: initializes codegen.cpp + .original from codegen output
-        result1 = wrapper("fake_mod")
-        assert result1.inspect_source() == source_v1
+    with _patch_make_patched_source_module() as mock_factory:
+        try:
+            # Run 1: initializes codegen.cpp + .original from codegen output
+            result1 = wrapper("fake_mod")
+            assert result1.inspect_source() == source_v1
 
-        # Edit codegen.cpp (user edit)
-        edited = "// edited by user\n"
-        with open(codegen_path, "w") as f:
-            f.write(edited)
+            # Edit codegen.cpp (user edit)
+            edited = "// edited by user\n"
+            with open(codegen_path, "w") as f:
+                f.write(edited)
 
-        # Run 2: user edited, codegen unchanged → PATCHED → proxy returned
-        result2 = wrapper("fake_mod")
-        assert isinstance(result2, _CodegenSourceProxy), "Expected _CodegenSourceProxy for _without_compile FFI"
-        assert result2.inspect_source() == edited, "Proxy should return the user-edited source"
-    finally:
-        _clear_trace_overrides()
+            # Run 2: user edited, codegen unchanged → PATCHED → patched module returned
+            result2 = wrapper("fake_mod")
+            assert mock_factory.called, "_make_patched_source_module should be called for _without_compile FFI"
+            assert result2.get_source() == edited, "Patched module should return the user-edited source"
+        finally:
+            _clear_trace_overrides()
 
 
 def test_codegen_proxy_for_source_only_ffi(tmp_path):
-    """Source-only FFIs without a _without_compile suffix (tilelang_c, webgpu) also return proxy."""
-    from tilelang.tools.lower_trace.core import _wrap_codegen_ffi, _CodegenSourceProxy
+    """Source-only FFIs without a _without_compile suffix (tilelang_c, webgpu) also return patched module."""
+    from tilelang.tools.lower_trace.core import _wrap_codegen_ffi
 
     source_v1 = "// generated C kernel v1\n"
     mock_build = _make_mock_build(source_v1)
@@ -456,26 +488,27 @@ def test_codegen_proxy_for_source_only_ffi(tmp_path):
     _setup_trace_overrides(tmp_path)
     codegen_path = _core._codegen_output_path_override
 
-    try:
-        # Run 1: initializes codegen.cpp + .original
-        wrapper("fake_mod")
+    with _patch_make_patched_source_module() as mock_factory:
+        try:
+            # Run 1: initializes codegen.cpp + .original
+            wrapper("fake_mod")
 
-        # Edit codegen.cpp
-        edited = "// edited C kernel\n"
-        with open(codegen_path, "w") as f:
-            f.write(edited)
+            # Edit codegen.cpp
+            edited = "// edited C kernel\n"
+            with open(codegen_path, "w") as f:
+                f.write(edited)
 
-        # Run 2: PATCHED → proxy returned (tilelang_c is in _SOURCE_ONLY_CODEGEN_FFIS)
-        result2 = wrapper("fake_mod")
-        assert isinstance(result2, _CodegenSourceProxy), "Expected _CodegenSourceProxy for source-only FFI tilelang_c"
-        assert result2.inspect_source() == edited
-    finally:
-        _clear_trace_overrides()
+            # Run 2: PATCHED → patched module returned (tilelang_c is in _SOURCE_ONLY_CODEGEN_FFIS)
+            result2 = wrapper("fake_mod")
+            assert mock_factory.called, "Expected patched module for source-only FFI tilelang_c"
+            assert result2.get_source() == edited
+        finally:
+            _clear_trace_overrides()
 
 
 def test_codegen_no_proxy_for_full_compile(tmp_path, capsys):
-    """Full-compile FFIs return the real module (not proxy) + NOTE when user edits codegen.cpp."""
-    from tilelang.tools.lower_trace.core import _wrap_codegen_ffi, _CodegenSourceProxy
+    """Full-compile FFIs return the real module (not patched) + NOTE when user edits codegen.cpp."""
+    from tilelang.tools.lower_trace.core import _wrap_codegen_ffi
 
     source_v1 = "// generated kernel v1\n"
     mock_build = _make_mock_build(source_v1)
@@ -485,33 +518,34 @@ def test_codegen_no_proxy_for_full_compile(tmp_path, capsys):
     codegen_path = _core._codegen_output_path_override
     target = tvm.target.Target("cuda")
 
-    try:
-        # Run 1: initializes codegen.cpp + .original
-        result1 = wrapper("fake_mod", target)
-        assert result1.inspect_source() == source_v1
+    with _patch_make_patched_source_module() as mock_factory:
+        try:
+            # Run 1: initializes codegen.cpp + .original
+            result1 = wrapper("fake_mod", target)
+            assert result1.inspect_source() == source_v1
 
-        # Edit codegen.cpp
-        edited = "// edited by user\n"
-        with open(codegen_path, "w") as f:
-            f.write(edited)
+            # Edit codegen.cpp
+            edited = "// edited by user\n"
+            with open(codegen_path, "w") as f:
+                f.write(edited)
 
-        # Run 2: user edited, codegen unchanged → PATCHED
-        # But full-compile FFI → return real module, NOT proxy
-        capsys.readouterr()  # clear prior output
-        result2 = wrapper("fake_mod", target)
-        assert not isinstance(result2, _CodegenSourceProxy), "Full-compile FFI must NOT return proxy (would crash tvm_ffi backend)"
-        assert result2.inspect_source() == source_v1, "Full-compile FFI should return original (unpatched) module"
+            # Run 2: user edited, codegen unchanged → PATCHED
+            # But full-compile FFI → return real module, NOT patched
+            capsys.readouterr()  # clear prior output
+            result2 = wrapper("fake_mod", target)
+            assert not mock_factory.called, "Full-compile FFI must NOT call _make_patched_source_module (would crash tvm_ffi backend)"
+            assert result2.inspect_source() == source_v1, "Full-compile FFI should return original (unpatched) module"
 
-        captured = capsys.readouterr()
-        assert "NOT recompiled" in captured.out
-        assert "nvrtc" in captured.out  # backend hint
-    finally:
-        _clear_trace_overrides()
+            captured = capsys.readouterr()
+            assert "NOT recompiled" in captured.out
+            assert "nvrtc" in captured.out  # backend hint
+        finally:
+            _clear_trace_overrides()
 
 
 def test_codegen_conflict_backup(tmp_path):
     """CONFLICT: both user edited and codegen changed → backup + regenerate."""
-    from tilelang.tools.lower_trace.core import _wrap_codegen_ffi, _CodegenSourceProxy
+    from tilelang.tools.lower_trace.core import _wrap_codegen_ffi
 
     source_v1 = "// generated kernel v1\n"
     mock_build = _make_mock_build(source_v1)
@@ -521,43 +555,44 @@ def test_codegen_conflict_backup(tmp_path):
     codegen_path = _core._codegen_output_path_override
     original_path = codegen_path + ".original"
 
-    try:
-        # Run 1: init
-        wrapper("fake_mod")
+    with _patch_make_patched_source_module() as mock_factory:
+        try:
+            # Run 1: init
+            wrapper("fake_mod")
 
-        # Edit codegen.cpp (user edit)
-        with open(codegen_path, "w") as f:
-            f.write("// user edit\n")
+            # Edit codegen.cpp (user edit)
+            with open(codegen_path, "w") as f:
+                f.write("// user edit\n")
 
-        # Change codegen output (new wrapper with different source)
-        source_v2 = "// new codegen output v2\n"
-        wrapper = _wrap_codegen_ffi(_make_mock_build(source_v2), "target.build.tilelang_cuda_without_compile")
+            # Change codegen output (new wrapper with different source)
+            source_v2 = "// new codegen output v2\n"
+            wrapper = _wrap_codegen_ffi(_make_mock_build(source_v2), "target.build.tilelang_cuda_without_compile")
 
-        # Run 2: CONFLICT — working != current
-        result2 = wrapper("fake_mod")
+            # Run 2: CONFLICT — working != current
+            result2 = wrapper("fake_mod")
 
-        # .bak files created
-        assert os.path.exists(codegen_path + ".bak"), "User working copy not backed up"
-        assert os.path.exists(original_path + ".bak"), "Old baseline not backed up"
+            # .bak files created
+            assert os.path.exists(codegen_path + ".bak"), "User working copy not backed up"
+            assert os.path.exists(original_path + ".bak"), "Old baseline not backed up"
 
-        # codegen.cpp regenerated from new codegen
-        with open(codegen_path) as f:
-            assert f.read() == source_v2
+            # codegen.cpp regenerated from new codegen
+            with open(codegen_path) as f:
+                assert f.read() == source_v2
 
-        # .original advanced to new codegen
-        with open(original_path) as f:
-            assert f.read() == source_v2
+            # .original advanced to new codegen
+            with open(original_path) as f:
+                assert f.read() == source_v2
 
-        # No proxy returned (regenerated from new codegen, patched_text=None)
-        assert not isinstance(result2, _CodegenSourceProxy), "CONFLICT must not return a proxy"
-        assert result2.inspect_source() == source_v2
-    finally:
-        _clear_trace_overrides()
+            # No patched module returned (regenerated from new codegen, patched_text=None)
+            assert not mock_factory.called, "CONFLICT must not call _make_patched_source_module"
+            assert result2.inspect_source() == source_v2
+        finally:
+            _clear_trace_overrides()
 
 
 def test_codegen_synced(tmp_path):
-    """SYNCED: user edits match new codegen output → baseline advances, proxy returned."""
-    from tilelang.tools.lower_trace.core import _wrap_codegen_ffi, _CodegenSourceProxy
+    """SYNCED: user edits match new codegen output → baseline advances, patched module returned."""
+    from tilelang.tools.lower_trace.core import _wrap_codegen_ffi
 
     source_v1 = "// generated kernel v1\n"
     mock_build = _make_mock_build(source_v1)
@@ -567,38 +602,40 @@ def test_codegen_synced(tmp_path):
     codegen_path = _core._codegen_output_path_override
     original_path = codegen_path + ".original"
 
-    try:
-        # Run 1: init
-        wrapper("fake_mod")
+    with _patch_make_patched_source_module() as mock_factory:
+        try:
+            # Run 1: init
+            wrapper("fake_mod")
 
-        # Edit codegen.cpp to match what the new codegen will produce
-        source_v2 = "// new codegen output v2\n"
-        with open(codegen_path, "w") as f:
-            f.write(source_v2)
+            # Edit codegen.cpp to match what the new codegen will produce
+            source_v2 = "// new codegen output v2\n"
+            with open(codegen_path, "w") as f:
+                f.write(source_v2)
 
-        # Change codegen output to the same value
-        wrapper = _wrap_codegen_ffi(_make_mock_build(source_v2), "target.build.tilelang_cuda_without_compile")
+            # Change codegen output to the same value
+            wrapper = _wrap_codegen_ffi(_make_mock_build(source_v2), "target.build.tilelang_cuda_without_compile")
 
-        # Run 2: SYNCED
-        result2 = wrapper("fake_mod")
+            # Run 2: SYNCED
+            result2 = wrapper("fake_mod")
 
-        # .original advanced to new codegen
-        with open(original_path) as f:
-            assert f.read() == source_v2
+            # .original advanced to new codegen
+            with open(original_path) as f:
+                assert f.read() == source_v2
 
-        # Proxy returned (patched_text = working_text = source_v2)
-        assert isinstance(result2, _CodegenSourceProxy), "SYNCED should return proxy for _without_compile FFI"
-        assert result2.inspect_source() == source_v2
-    finally:
-        _clear_trace_overrides()
+            # Patched module returned (patched_text = working_text = source_v2)
+            assert mock_factory.called, "SYNCED should call _make_patched_source_module for _without_compile FFI"
+            assert result2.get_source() == source_v2
+        finally:
+            _clear_trace_overrides()
 
 
 def test_codegen_phase_reset_on_inspect_source_failure(tmp_path):
-    """_current_phase must be reset to None even if inspect_source() raises.
+    """_current_phase must be reset even if post-codegen tracing raises.
 
     Regression guard: previously an exception in the codegen post-processing
     (inspect_source / file I/O / diff) left _current_phase stuck at "codegen",
-    misattributing later records.
+    misattributing later records.  The exception is now caught and warned
+    (does not propagate), but _current_phase must still be restored.
     """
     from tilelang.tools.lower_trace.core import _wrap_codegen_ffi
 
@@ -613,10 +650,8 @@ def test_codegen_phase_reset_on_inspect_source_failure(tmp_path):
 
     _setup_trace_overrides(tmp_path)
     try:
-        import pytest
-
-        with pytest.raises(RuntimeError, match="inspect_source blew up"):
-            wrapper("fake_mod")
+        # The post-codegen tracing exception is caught + warned (not re-raised).
+        wrapper("fake_mod")
 
         assert _core._current_phase is None, "_current_phase must be reset after inspect_source failure"
     finally:

@@ -791,6 +791,7 @@ def _make_patched_source_module(original_module, patched_source: str):
     ``tilelang.engine.lower`` (line 233: ``codegen_mod.get_source()``).
     """
     import tvm.runtime._ffi_api as _ffi_api
+
     try:
         fmt = original_module.format
     except Exception:
