@@ -73,6 +73,34 @@ static bool IsStaticSharedMemory(Var buffer_var) {
          storage_scope.tag.empty();
 }
 
+static int64_t SharedAllocationBytes(int64_t elements, DataType dtype) {
+  if (dtype.is_float4_e2m1fn() && dtype.is_scalar()) {
+    return (elements + 1) / 2;
+  }
+  return elements * static_cast<int64_t>(dtype.bytes() * dtype.lanes());
+}
+
+static PrimExpr SharedAllocationBytes(Array<PrimExpr> shape, DataType dtype,
+                                      DataType size_dtype) {
+  PrimExpr elements = make_const(size_dtype, 1);
+  for (const PrimExpr &extent : shape) {
+    PrimExpr e = extent;
+    if (e.dtype() != size_dtype) {
+      e = cast(size_dtype, e);
+    }
+    elements = elements * e;
+  }
+
+  if (dtype.is_float4_e2m1fn() && dtype.is_scalar()) {
+    return FloorDiv(elements + make_const(size_dtype, 1),
+                    make_const(size_dtype, 2));
+  }
+
+  PrimExpr bytes_per_elem = make_const(
+      size_dtype, static_cast<int64_t>(dtype.bytes() * dtype.lanes()));
+  return elements * bytes_per_elem;
+}
+
 /*!
  * \brief collect the mapping from the buffer var to its allocate
  */
@@ -547,8 +575,6 @@ private:
 
     for (const VarNode *var : sorted_vars) {
       const AllocBufferNode *alloc = shmem_allocs_.at(var);
-      int64_t bytes_per_elem = static_cast<int64_t>(
-          alloc->buffer->dtype.bytes() * alloc->buffer->dtype.lanes());
 
       DataType size_dtype = DataType::Int(32);
       if (!alloc->buffer->shape.empty()) {
@@ -558,14 +584,8 @@ private:
         size_dtype = DataType::Int(32);
       }
 
-      PrimExpr size_expr = make_const(size_dtype, bytes_per_elem);
-      for (const PrimExpr &extent : alloc->buffer->shape) {
-        PrimExpr e = extent;
-        if (e.dtype() != size_dtype) {
-          e = cast(size_dtype, e);
-        }
-        size_expr = size_expr * e;
-      }
+      PrimExpr size_expr = SharedAllocationBytes(
+          alloc->buffer->shape, alloc->buffer->dtype, size_dtype);
 
       int alignment = align_bytes_;
       auto align_it = shmem_alignment_map_.find(var);
@@ -1395,8 +1415,6 @@ private:
       }
 
       const AllocBufferNode *alloc = shmem_allocs_.at(var);
-      int64_t bytes_per_elem = static_cast<int64_t>(
-          alloc->buffer->dtype.bytes() * alloc->buffer->dtype.lanes());
       DataType size_dtype = DataType::Int(32);
       if (!alloc->buffer->shape.empty()) {
         size_dtype = alloc->buffer->shape[0].dtype();
@@ -1405,20 +1423,15 @@ private:
         size_dtype = DataType::Int(32);
       }
 
-      PrimExpr size_expr = make_const(size_dtype, bytes_per_elem);
-      for (const PrimExpr &extent : alloc->buffer->shape) {
-        PrimExpr e = extent;
-        if (e.dtype() != size_dtype) {
-          e = cast(size_dtype, e);
-        }
-        size_expr = size_expr * e;
-      }
+      PrimExpr size_expr = SharedAllocationBytes(
+          alloc->buffer->shape, alloc->buffer->dtype, size_dtype);
       info.size_dtype = size_dtype;
       info.size_expr = size_expr;
 
       auto const_size = GetRef<AllocBuffer>(alloc).ConstantAllocationSize();
       if (const_size.has_value()) {
-        info.const_size_bytes = const_size.value() * bytes_per_elem;
+        info.const_size_bytes =
+            SharedAllocationBytes(const_size.value(), alloc->buffer->dtype);
       }
 
       buf_infos.push_back(std::move(info));
