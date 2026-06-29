@@ -720,6 +720,10 @@ TIR_DEFINE_TL_BUILTIN(__ldg).set_num_inputs(-1).set_attr<TCallEffectKind>(
 TIR_DEFINE_TL_BUILTIN(__ffs).set_num_inputs(1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 
+// __fns(mask, base, offset) -> zero-based nth set-bit position, or 0xFFFFFFFF.
+TIR_DEFINE_TL_BUILTIN(__fns).set_num_inputs(3).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
 // ldg32(address, predicate(optional)) -> 32-bit value
 // Global memory load with 32-bit vector width
 TIR_DEFINE_TL_BUILTIN(ldg32).set_num_inputs(-1).set_attr<TCallEffectKind>(

@@ -1238,6 +1238,17 @@ TVM_DLL const Op &__ldg();
 TVM_DLL const Op &__ffs();
 
 /*!
+ * \brief tilelang intrinsic for CUDA find-nth-set bit (__fns).
+ *
+ *  Returns the zero-based position of the offset-th set bit in mask starting
+ *  from base, or 0xFFFFFFFF when not found. CUDA codegen emits `__fns`.
+ *
+ *  Usage from TVMScript:
+ *    lane = T.__fns(mask, 0, k + 1)
+ */
+TVM_DLL const Op &__fns();
+
+/*!
  * \brief tilelang intrinsic for global memory load with 32-bit vector width.
  *
  *  This op loads 32 bits (4 bytes) from global memory using explicit

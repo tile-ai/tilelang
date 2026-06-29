@@ -87,6 +87,19 @@ def __ffs(value: int | PrimExpr) -> PrimExpr:
     return tirx.call_intrin("int32", tirx.op.Op.get("tl.__ffs"), value)
 
 
+def __fns(mask: int | PrimExpr, base: int | PrimExpr, offset: int | PrimExpr) -> PrimExpr:
+    """Find the position of the nth set bit in a bitmask.
+
+    Lowers to CUDA ``__fns``. Returns a zero-based bit position (0-31), or
+    ``0xFFFFFFFF`` when not found. ``mask`` is a 32-bit bitmask; ``base`` is
+    the starting bit (0-31); ``offset`` selects the nth set bit (1-based).
+    """
+    mask = tirx.convert(mask)
+    base = tirx.convert(base)
+    offset = tirx.convert(offset)
+    return tirx.call_intrin("uint32", tirx.op.Op.get("tl.__fns"), mask, base, offset)
+
+
 def access_ptr(
     base: BufferLikeType,
     access_type: str | int = "r",
