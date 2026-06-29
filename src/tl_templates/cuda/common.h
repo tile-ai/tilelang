@@ -855,21 +855,13 @@ TL_DEVICE __half2 fma2(__half2 a, __half2 b, __half2 c) {
 #endif
 }
 
-template <typename T> TL_DEVICE T fast_max(T a, T b) {
-  return a < b ? b : a;
-}
+template <typename T> TL_DEVICE T fast_max(T a, T b) { return a < b ? b : a; }
 
-template <> TL_DEVICE float fast_max(float a, float b) {
-  return fmaxf(a, b);
-}
+template <> TL_DEVICE float fast_max(float a, float b) { return fmaxf(a, b); }
 
-template <typename T> TL_DEVICE T fast_min(T a, T b) {
-  return b < a ? b : a;
-}
+template <typename T> TL_DEVICE T fast_min(T a, T b) { return b < a ? b : a; }
 
-template <> TL_DEVICE float fast_min(float a, float b) {
-  return fminf(a, b);
-}
+template <> TL_DEVICE float fast_min(float a, float b) { return fminf(a, b); }
 
 // --- max2 ----------------------------------------------------------------
 
