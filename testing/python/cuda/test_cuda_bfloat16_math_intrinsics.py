@@ -43,18 +43,23 @@ def test_bfloat16_rsqrt_compiles_and_runs():
     torch.testing.assert_close(actual, torch.full_like(actual, 0.5))
 
 
-def test_cuda_common_h_bfloat16_fast_exp_does_not_self_recurse():
+def test_cuda_math_h_bfloat16_fast_exp_does_not_self_recurse():
     repo_root = Path(__file__).resolve().parents[3]
     common_h = repo_root / "src" / "tl_templates" / "cuda" / "common.h"
-    source = common_h.read_text()
+    math_h = repo_root / "src" / "tl_templates" / "cuda" / "math.h"
+    common_source = common_h.read_text()
+    source = math_h.read_text()
 
     # `hexp` is #define'd to cutlass::fast_exp, so the bf16 fast_exp overload
     # must route through float; calling `::hexp(x)` here recurses into itself.
+    assert "#include <cutlass/fast_math.h>" not in common_source
+    assert "#include <cutlass/fast_math.h>" in source
+    assert "#define hexp cutlass::fast_exp" in source
     match = re.search(
         r"bfloat16_t\s+fast_exp\s*\(\s*bfloat16_t\s+x\s*\)\s*\{([^}]*)\}",
         source,
     )
-    assert match, "common.h must define fast_exp(bfloat16_t) for bf16 T.exp codegen"
+    assert match, "math.h must define fast_exp(bfloat16_t) for bf16 T.exp codegen"
     body = match.group(1)
     assert "float(" in body, "bf16 fast_exp must route through float to avoid self-recursion"
 

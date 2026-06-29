@@ -18,10 +18,7 @@
 #define __volatile__ volatile
 #endif
 
-#include "atomic.h"
-#include <cute/arch/util.hpp>
-#include <cutlass/fast_math.h>
-#include <cutlass/numeric_types.h>
+#include <cute/numeric/numeric_types.hpp>
 #include <math_constants.h>
 
 #include <cutlass/bfloat16.h>
@@ -30,17 +27,7 @@
 using cutlass::bfloat16_t;
 using cutlass::half_t;
 
-using cute::cast_smem_ptr_to_uint;
-
 using int4_t = int4;
-
-#define hexp cutlass::fast_exp
-#define hlog cutlass::fast_log
-#define hsqrt cutlass::fast_sqrt
-#define hsin cutlass::fast_sin
-#define hcos cutlass::fast_cos
-#define htanh cutlass::fast_tanh
-#define hpow powf
 
 #define uint unsigned int
 #define uchar unsigned char
@@ -285,7 +272,12 @@ TL_DEVICE longlong4 make_longlong4(int x0, int x1, int y0, int y1, int z0,
 
 // Helper to cast SMEM pointer to unsigned
 TL_DEVICE uint32_t smem_ptr_to_uint(void const *const ptr) {
-  return static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
+  uint32_t smem_ptr;
+  asm volatile("{ .reg .u64 smem_ptr; cvta.to.shared.u64 smem_ptr, %1; "
+               "cvt.u32.u64 %0, smem_ptr; }\n"
+               : "=r"(smem_ptr)
+               : "l"(ptr));
+  return smem_ptr;
 }
 
 /**
@@ -302,12 +294,7 @@ TL_DEVICE uint32_t smem_ptr_to_uint(void const *const ptr) {
  *       pointers in other address spaces.
  */
 TL_DEVICE unsigned int cast_smem_ptr_to_int(const void *const smem_ptr) {
-  unsigned int smem_int;
-  asm volatile("{ .reg .u64 smem_int; cvta.to.shared.u64 smem_int, %1; "
-               "cvt.u32.u64 %0, smem_int; }"
-               : "=r"(smem_int)
-               : "l"(smem_ptr));
-  return smem_int;
+  return smem_ptr_to_uint(smem_ptr);
 }
 
 // DP4A
@@ -616,8 +603,7 @@ template <int layout_type = 0, int leading_byte_offset = 0,
           int stride_byte_offset = 0, typename T>
 TL_DEVICE void initialize_wgmma_descriptor(GmmaDescriptor &descriptor,
                                            T *start_address) {
-  descriptor.bitfield.start_address_ =
-      cute::cast_smem_ptr_to_uint(start_address) >> 4;
+  descriptor.bitfield.start_address_ = smem_ptr_to_uint(start_address) >> 4;
   descriptor.bitfield.layout_type_ = layout_type;
   descriptor.bitfield.base_offset_ = 0;
   descriptor.bitfield.leading_byte_offset_ = leading_byte_offset;
@@ -632,7 +618,7 @@ initialize_tcgen05_descriptor(Tcgen05SMemDescriptor &descriptor,
                               bool leading_is_absolute, int swizzle_mode) {
 
   descriptor.bitfield.start_address_ =
-      static_cast<uint16_t>(cast_smem_ptr_to_uint(start_address) >> 4);
+      static_cast<uint16_t>(smem_ptr_to_uint(start_address) >> 4);
   descriptor.bitfield.leading_byte_offset_ = leading_byte_offset;
   descriptor.bitfield.stride_byte_offset_ = stride_byte_offset;
   descriptor.bitfield.version_ = 1;
@@ -972,14 +958,6 @@ TL_DEVICE __half2 abs2(__half2 a) {
 } // namespace tl
 
 using tl::tfloat32_t;
-
-namespace cutlass {
-// Mirror cutlass's own half_t fast_exp (fast_math.h): route through float.
-// A direct `return ::hexp(x)` recurses, since `hexp` is #define'd to this
-// same cutlass::fast_exp and x is already bfloat16_t.
-TL_DEVICE
-bfloat16_t fast_exp(bfloat16_t x) { return bfloat16_t(fast_exp(float(x))); }
-} // namespace cutlass
 
 //
 // Optimized type-punned warp shuffle helpers for 16-bit types

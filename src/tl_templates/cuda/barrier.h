@@ -1,10 +1,8 @@
 #pragma once
 
-#include "common.h"
-#include <cutlass/arch/barrier.h>
+#include <type_traits>
 
-// Reuse cutlass advanced barrier abstraction
-using Barrier = cutlass::arch::ClusterTransactionBarrier;
+#include "common.h"
 
 namespace tl {
 
@@ -100,6 +98,23 @@ TL_DEVICE void mbarrier_arrive_expect_tx(uint64_t &smem_barrier,
                : "r"(transaction_bytes), "r"(smem_int_ptr));
 }
 
+TL_DEVICE void mbarrier_arrive_expect_tx(uint64_t &smem_barrier,
+                                         uint32_t transaction_bytes,
+                                         uint32_t cta_id, uint32_t pred) {
+  uint32_t smem_int_ptr = smem_ptr_to_uint(&smem_barrier);
+  asm volatile("{\n\t"
+               ".reg .pred p;\n\t"
+               ".reg .b32 remAddr32;\n\t"
+               "setp.eq.u32 p, %2, 1;\n\t"
+               "@p mapa.shared::cluster.u32  remAddr32, %0, %1;\n\t"
+               "@p mbarrier.arrive.expect_tx.shared::cluster.b64  _, "
+               "[remAddr32], %3;\n\t"
+               "}"
+               :
+               : "r"(smem_int_ptr), "r"(cta_id), "r"(pred),
+                 "r"(transaction_bytes));
+}
+
 template <typename BarrierType = uint64_t>
 TL_DEVICE void mbarrier_cp_async_arrive(BarrierType &smem_mbar) {
   uint32_t smem_int_mbar;
@@ -126,7 +141,6 @@ TL_DEVICE void mbarrier_cp_async_arrive_noinc(BarrierType &smem_mbar) {
                "}"
                :
                : "r"(smem_int_mbar));
-  cutlass::arch::synclog_emit_cpasync_barrier_arrive(__LINE__, smem_int_mbar);
 }
 
 TL_DEVICE void fence_proxy_async() {
@@ -164,3 +178,52 @@ TL_DEVICE void syncthreads_partial(uint64_t &smem_barrier) {
                : "r"(smem_int_ptr), "l"(state));
 }
 } // namespace tl
+
+struct alignas(8) Barrier {
+  using ValueType = uint64_t;
+
+private:
+  ValueType barrier_;
+
+  TL_DEVICE ValueType &storage() const {
+    return *const_cast<ValueType *>(&barrier_);
+  }
+
+public:
+  Barrier() = delete;
+
+  TL_DEVICE void init(uint32_t arrive_count) const {
+    tl::mbarrier_init(storage(), arrive_count);
+  }
+
+  TL_DEVICE void wait(uint32_t phase) const {
+    tl::mbarrier_wait(storage(), phase);
+  }
+
+  TL_DEVICE bool try_wait(uint32_t phase) const {
+    return static_cast<bool>(tl::mbarrier_try_wait(storage(), phase));
+  }
+
+  TL_DEVICE void arrive() const { tl::mbarrier_arrive(storage()); }
+
+  TL_DEVICE void arrive(uint32_t cta_id, uint32_t pred = 1u) const {
+    tl::mbarrier_arrive(storage(), cta_id, pred);
+  }
+
+  TL_DEVICE void expect_transaction(uint32_t transaction_bytes) const {
+    tl::mbarrier_expect_tx(storage(), transaction_bytes);
+  }
+
+  TL_DEVICE void arrive_and_expect_tx(uint32_t transaction_bytes) const {
+    tl::mbarrier_arrive_expect_tx(storage(), transaction_bytes);
+  }
+
+  TL_DEVICE void arrive_and_expect_tx(uint32_t transaction_bytes,
+                                      uint32_t cta_id,
+                                      uint32_t pred = 1u) const {
+    tl::mbarrier_arrive_expect_tx(storage(), transaction_bytes, cta_id, pred);
+  }
+};
+
+static_assert(sizeof(Barrier) == sizeof(uint64_t));
+static_assert(alignof(Barrier) == alignof(uint64_t));
