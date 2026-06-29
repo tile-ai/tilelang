@@ -2630,6 +2630,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
              op->op.same_as(tl::annotate_consumer_reg_alloc())) {
     return;
   } else if (op->op.same_as(tl::wait_wgmma())) {
+    need_intrin_h_ = true;
     this->PrintIndent();
     int num_mma = Downcast<IntImm>(op->args[0])->value;
     this->stream << "tl::wait_wgmma<" << std::to_string(num_mma) << ">();\n";
