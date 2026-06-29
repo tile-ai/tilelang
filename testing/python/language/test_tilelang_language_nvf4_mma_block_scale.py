@@ -164,10 +164,50 @@ def _make_constant_scale_words(rows: int, K: int, byte: int = 0x38):
     return torch.full((rows, K // 64), word, device="cuda", dtype=torch.uint32)
 
 
+def _pack_scale_words(scale_bytes):
+    import torch
+
+    scale_i64 = scale_bytes.to(torch.int64).reshape(scale_bytes.shape[0], -1, 4)
+    word = scale_i64[:, :, 0]
+    word = word | (scale_i64[:, :, 1] << 8)
+    word = word | (scale_i64[:, :, 2] << 16)
+    word = word | (scale_i64[:, :, 3] << 24)
+    return word.to(torch.uint32).contiguous()
+
+
+def _make_varying_power_of_two_scale_words(rows: int, K: int):
+    import torch
+
+    scale_choices = torch.tensor([0x30, 0x38, 0x40], device="cuda", dtype=torch.uint8)
+    row = torch.arange(rows, device="cuda", dtype=torch.int64)[:, None]
+    col = torch.arange(K // 16, device="cuda", dtype=torch.int64)[None, :]
+    scale_bytes = scale_choices[(row + 2 * col) % scale_choices.numel()]
+    return _pack_scale_words(scale_bytes), scale_bytes
+
+
+def _decode_ue4m3_scale_bytes(scale_bytes):
+    import torch
+
+    u = scale_bytes.to(torch.int32)
+    exponent = (u >> 3) & 0x0F
+    mantissa = u & 0x07
+    normal = (1.0 + mantissa.to(torch.float32) / 8.0) * torch.pow(2.0, exponent.to(torch.float32) - 7.0)
+    subnormal = (mantissa.to(torch.float32) / 8.0) * torch.pow(torch.tensor(2.0, device=scale_bytes.device), -6.0)
+    return torch.where(exponent == 0, subnormal, normal)
+
+
 def _reference_constant_scale_gemm(A, B, M: int, N: int, K: int):
     a_f32 = _decode_rowmajor_fp4(A, M, K)
     b_f32 = _decode_rowmajor_fp4(B, N, K)
     return a_f32 @ b_f32.T
+
+
+def _reference_blockscaled_gemm(A, B, SFA, SFB, M: int, N: int, K: int):
+    a_f32 = _decode_rowmajor_fp4(A, M, K)
+    b_f32 = _decode_rowmajor_fp4(B, N, K)
+    sfa = _decode_ue4m3_scale_bytes(SFA).repeat_interleave(16, dim=1)
+    sfb = _decode_ue4m3_scale_bytes(SFB).repeat_interleave(16, dim=1)
+    return (a_f32 * sfa) @ (b_f32 * sfb).T
 
 
 def test_nvf4_mma_block_scale_fragment_layouts_match_cute():
@@ -366,6 +406,29 @@ def test_nvf4_mma_block_scale_constant_scale_correctness(K, input_mode):
 
     C = kernel(A, B, SFA, SFB)
     ref = _reference_constant_scale_gemm(A, B, M, N, K)
+    torch.testing.assert_close(C, ref, rtol=0.0, atol=0.0)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(12, 0)
+def test_nvf4_mma_block_scale_varying_scale_correctness():
+    import torch
+
+    torch.manual_seed(0)
+    M = N = 128
+    K = 128
+    kernel = tilelang.compile(
+        _make_nvf4_matmul_codegen_kernel(M, N, K),
+        target="cuda",
+        out_idx=[4],
+    )
+
+    A, B = _make_packed_fp4_inputs(M, N, K, "random")
+    SFA, sfa_bytes = _make_varying_power_of_two_scale_words(M, K)
+    SFB, sfb_bytes = _make_varying_power_of_two_scale_words(N, K)
+
+    C = kernel(A, B, SFA, SFB)
+    ref = _reference_blockscaled_gemm(A, B, sfa_bytes, sfb_bytes, M, N, K)
     torch.testing.assert_close(C, ref, rtol=0.0, atol=0.0)
 
 
