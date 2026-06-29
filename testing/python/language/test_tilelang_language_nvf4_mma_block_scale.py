@@ -331,10 +331,11 @@ def test_nvf4_mma_block_scale_codegen(K):
     assert "scale_b_local" not in src
     assert "SM120MmaBlockScaledKind::kMxf4nvf4" in src
     assert "SM120MmaScaleType::kUE4M3" in src
-    if K == 256:
-        assert "void* B_shared = ((void*)((char*)buf_dyn_shmem + 16384));" in src
-        assert "void* SFA_shared = ((void*)((char*)buf_dyn_shmem + 32768));" in src
-        assert "void* SFB_shared = ((void*)((char*)buf_dyn_shmem + 34816));" in src
+    fp4_tile_bytes = 128 * K // 2
+    sf_tile_bytes = 128 * (K // 64) * 4
+    assert f"void* B_shared = ((void*)((char*)buf_dyn_shmem + {fp4_tile_bytes}));" in src
+    assert f"void* SFA_shared = ((void*)((char*)buf_dyn_shmem + {2 * fp4_tile_bytes}));" in src
+    assert f"void* SFB_shared = ((void*)((char*)buf_dyn_shmem + {2 * fp4_tile_bytes + sf_tile_bytes}));" in src
 
 
 @tilelang.testing.requires_cuda
