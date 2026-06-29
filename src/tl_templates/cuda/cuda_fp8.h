@@ -350,7 +350,7 @@ TL_DEVICE __nv_fp8x2_storage_t
 __tl_cvt_bfloat162_to_fp8x2(const __nv_bfloat162 src,
                             const __nv_fp8_interpretation_t fp8_interpretation) {
   __nv_bfloat162_raw raw = *reinterpret_cast<const __nv_bfloat162_raw *>(&src);
-  return __nv_cvt_bfloat162raw_to_fp8x2(raw, __NV_SATFINITE,
+  return __nv_cvt_bfloat16raw2_to_fp8x2(raw, __NV_SATFINITE,
                                         fp8_interpretation);
 }
 
