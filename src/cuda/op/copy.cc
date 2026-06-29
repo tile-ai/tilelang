@@ -26,6 +26,7 @@
 #include <tvm/tirx/transform.h>
 
 #include <cctype>
+#include <cstdlib>
 #include <cstdint>
 #include <sstream>
 #include <string>
@@ -42,6 +43,12 @@ namespace {
 
 PrimExpr MakeTmaLeaderCondition(PrimExpr thread_extent) {
   return Call(DataType::Bool(), tl_shuffle_elect(), {std::move(thread_extent)});
+}
+
+bool EnableSM120CompactUnpackedFP4Shared() {
+  const char *value = std::getenv("TL_SM120_COMPACT_UNPACKED_FP4_SHARED");
+  return value != nullptr && value[0] != '\0' &&
+         !(value[0] == '0' && value[1] == '\0');
 }
 
 int TMAPayloadElementBits(DataType dtype) {
@@ -89,6 +96,17 @@ PrimExpr TMATransactionBytesFromElements(PrimExpr elements, DataType dtype) {
 
 int64_t TMATransactionBytesFromElements(int64_t elements, DataType dtype) {
   return TMABytesFromElements(elements, TMAPayloadElementBits(dtype));
+}
+
+PrimExpr CompactUnpackedFP4SharedOffset(PrimExpr offset, DataType dtype) {
+  if (!EnableSM120CompactUnpackedFP4Shared() ||
+      !dtype.is_float4_e2m1_unpacked()) {
+    return offset;
+  }
+  // Keep TMA offsets in logical FP4 element units. access_ptr lowers through
+  // CUDA BufferRef, which applies the compact shared logical-to-physical /2
+  // conversion exactly once for unpacked FP4 shared buffers.
+  return offset;
 }
 
 int64_t TMAElementsForBytes(int64_t bytes, DataType dtype) {
@@ -1641,9 +1659,11 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     Var loop_var("i");
     int loop_extent = (*inner_box_dim) / instruction_dim;
 
+    PrimExpr tma_shared_offset = CompactUnpackedFP4SharedOffset(
+        shared_offset + total_elements * loop_var, shared_tensor->dtype);
     PrimExpr shared_addr = shared_tensor.access_ptr(
-        is_load ? 2 : 1, DataType::Handle(), 1,
-        shared_offset + total_elements * loop_var, total_elements);
+        is_load ? 2 : 1, DataType::Handle(), 1, tma_shared_offset,
+        total_elements);
     args.push_back(shared_addr);
     global_coords.Set(0, global_coords[0] + instruction_dim * loop_var);
     for (auto coord : global_coords)
@@ -1678,8 +1698,11 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
                      multicast_copy, regular_or_noop);
     }
   } else {
+    PrimExpr tma_shared_offset =
+        CompactUnpackedFP4SharedOffset(shared_offset, shared_tensor->dtype);
     PrimExpr shared_addr = shared_tensor.access_ptr(
-        is_load ? 2 : 1, DataType::Handle(), 1, shared_offset, total_elements);
+        is_load ? 2 : 1, DataType::Handle(), 1, tma_shared_offset,
+        total_elements);
     args.push_back(shared_addr);
     for (auto coord : global_coords)
       args.push_back(coord);
@@ -2012,8 +2035,10 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
   }
 
   PrimExpr elements = analyzer->Simplify(shared_elements);
+  PrimExpr tma_shared_offset =
+      CompactUnpackedFP4SharedOffset(shared_offset, shared_tensor->dtype);
   PrimExpr shared_addr = shared_tensor.access_ptr(
-      is_load ? 2 : 1, DataType::Handle(), 1, shared_offset, elements);
+      is_load ? 2 : 1, DataType::Handle(), 1, tma_shared_offset, elements);
   PrimExpr global_addr = global_tensor.access_ptr(
       is_load ? 1 : 2, DataType::Handle(), 1, global_offset, elements);
 

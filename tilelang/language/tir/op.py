@@ -1094,8 +1094,16 @@ def ptx_mma_block_scale(
     c_index,
     scale_a,
     scale_b,
+    scale_a_byte_id=0,
+    scale_a_thread_id=0,
+    scale_b_byte_id=0,
+    scale_b_thread_id=0,
 ):
     """TVM intrinsic for SM120a warp-level NVF4 block-scaled MMA."""
+
+    def _selector_value(value):
+        return IntImm("int32", value) if isinstance(value, int) else value
+
     return call_intrin(
         accum_dtype,
         _tvm_op.Op.get("tl.ptx_mma_block_scale"),
@@ -1116,6 +1124,276 @@ def ptx_mma_block_scale(
         c_index,
         scale_a,
         scale_b,
+        _selector_value(scale_a_byte_id),
+        _selector_value(scale_a_thread_id),
+        _selector_value(scale_b_byte_id),
+        _selector_value(scale_b_thread_id),
+    )
+
+
+def sm120_mma_blockscaled_kblock_fulltile(
+    accumulator,
+    c_index,
+    a0,
+    a1,
+    a2,
+    a3,
+    b0,
+    b1,
+    b2,
+    b3,
+    sfa0,
+    sfa1,
+    sfa2,
+    sfa3,
+    sfb0,
+    sfb1,
+    sfb2,
+    sfb3,
+    sfb_rep0,
+    sfb_rep1,
+    sfb_rep2,
+    sfb_rep3,
+    ki=0,
+):
+    """Internal SM120 NVF4 full-tile K-block helper.
+
+    This is a private lowering hook for the 128x128x256 diagnostic path.  It
+    keeps A/B ldmatrix loads, SFA/SFB loads, and all m16n8k64 block-scaled MMA
+    atoms inside one CUDA helper, instead of exposing per-atom local fragments
+    in TIR.
+    """
+    return call_intrin(
+        "handle",
+        _tvm_op.Op.get("tl.sm120_mma_blockscaled_kblock_fulltile"),
+        accumulator,
+        c_index,
+        a0,
+        a1,
+        a2,
+        a3,
+        b0,
+        b1,
+        b2,
+        b3,
+        sfa0,
+        sfa1,
+        sfa2,
+        sfa3,
+        sfb0,
+        sfb1,
+        sfb2,
+        sfb3,
+        sfb_rep0,
+        sfb_rep1,
+        sfb_rep2,
+        sfb_rep3,
+        ki,
+    )
+
+
+def sm120_mma_blockscaled_kblock_fulltile_ab_owner_wide(
+    accumulator,
+    c_index,
+    a0,
+    a1,
+    a2,
+    a3,
+    b0,
+    b1,
+    b2,
+    b3,
+    sfa_base,
+    sfb_base,
+    ki=0,
+):
+    """Internal SM120 NVF4 full-tile helper with backend-owned scale words.
+
+    This private hook keeps the verified packed A/B access pointers but lets the
+    CUDA helper compute the 2x2 scale-owner package from SFA/SFB base pointers.
+    It avoids TIR local scale arrays used by the earlier owner-wide probe.
+    """
+    return call_intrin(
+        "handle",
+        _tvm_op.Op.get("tl.sm120_mma_blockscaled_kblock_fulltile_ab_owner_wide"),
+        accumulator,
+        c_index,
+        a0,
+        a1,
+        a2,
+        a3,
+        b0,
+        b1,
+        b2,
+        b3,
+        sfa_base,
+        sfb_base,
+        ki,
+    )
+
+
+def sm120_mma_blockscaled_kblock_fulltile_afull_bpanel_owner_wide(
+    accumulator,
+    c_index,
+    a0,
+    a1,
+    a2,
+    a3,
+    b0,
+    b1,
+    b2,
+    b3,
+    sfa_base,
+    sfb_base,
+    ki=0,
+):
+    """Internal SM120 NVF4 helper for A-full/B-panel owner-wide probe."""
+    return call_intrin(
+        "handle",
+        _tvm_op.Op.get("tl.sm120_mma_blockscaled_kblock_fulltile_afull_bpanel_owner_wide"),
+        accumulator,
+        c_index,
+        a0,
+        a1,
+        a2,
+        a3,
+        b0,
+        b1,
+        b2,
+        b3,
+        sfa_base,
+        sfb_base,
+        ki,
+    )
+
+
+def sm120_mma_blockscaled_kblock_fulltile_package_pingpong(
+    accumulator,
+    c_index,
+    a_base,
+    b_base,
+    sfa_base,
+    sfb_base,
+):
+    """Internal SM120 NVF4 K-block package-lifecycle probe.
+
+    The CUDA helper receives full shared K-stage bases, creates two backend
+    register packages, and runs copy_kblock_package(next) ->
+    gemm_kblock_package(current) for the four K64 atoms inside block_K=256.
+    """
+    return call_intrin(
+        "handle",
+        _tvm_op.Op.get("tl.sm120_mma_blockscaled_kblock_fulltile_package_pingpong"),
+        accumulator,
+        c_index,
+        a_base,
+        b_base,
+        sfa_base,
+        sfb_base,
+    )
+
+
+def sm120_mma_blockscaled_cute_consumer_bridge(
+    accumulator,
+    c_index,
+    a_base,
+    b_base,
+    sfa_base,
+    sfb_base,
+    ki=0,
+):
+    """Internal SM120 NVF4 full shared-tile consumer bridge.
+
+    This private hook is intentionally lower-level than the public tile API. It
+    passes full shared-memory tile bases into the CUDA helper so the backend can
+    own A/B/SFA/SFB fragment lifetime instead of receiving only per-atom row
+    pointers.
+    """
+    return call_intrin(
+        "handle",
+        _tvm_op.Op.get("tl.sm120_mma_blockscaled_cute_consumer_bridge"),
+        accumulator,
+        c_index,
+        a_base,
+        b_base,
+        sfa_base,
+        sfb_base,
+        ki,
+    )
+
+
+def sm120_store_full_c_fragment_panel64_bf16(
+    accumulator,
+    c_index,
+    c_shared,
+    c_shared_index,
+    panel,
+):
+    """Internal SM120 NVF4 full-fragment epilogue panel-store helper.
+
+    This private hook lets CUDA codegen consume the full 128x128 accumulator
+    fragment pointer directly.  It avoids forcing the TIR frontend to flatten a
+    fragment with T.access_ptr(C_local[0, 0]), which conflicts with the fragment
+    layout used by the full-tile MMA lowering.
+    """
+    return call_intrin(
+        "handle",
+        _tvm_op.Op.get("tl.sm120_store_full_c_fragment_panel64_bf16"),
+        accumulator,
+        c_index,
+        c_shared,
+        c_shared_index,
+        panel,
+    )
+
+
+def sm120_store_full_c_fragment_panel32_tma_bf16(
+    accumulator,
+    c_index,
+    c_shared,
+    c_shared_index,
+    panel32,
+):
+    """Internal SM120 NVF4 full-fragment epilogue TMA-store helper.
+
+    This private hook writes one 128x32 BF16 output panel from the full
+    128x128 accumulator fragment into the swizzled shared-memory layout expected
+    by TileLang's C TMA-store lowering.
+    """
+    return call_intrin(
+        "handle",
+        _tvm_op.Op.get("tl.sm120_store_full_c_fragment_panel32_tma_bf16"),
+        accumulator,
+        c_index,
+        c_shared,
+        c_shared_index,
+        panel32,
+    )
+
+
+def sm120_store_full_c_fragment_epi64x32_tma_bf16(
+    accumulator,
+    c_index,
+    c_shared,
+    c_shared_index,
+    row64,
+    col32,
+):
+    """Internal SM120 NVF4 full-fragment epilogue TMA-store helper.
+
+    This private hook writes one 64x32 BF16 output tile from the full 128x128
+    accumulator fragment into the swizzled shared-memory layout expected by a
+    64x32 C TMA-store.
+    """
+    return call_intrin(
+        "handle",
+        _tvm_op.Op.get("tl.sm120_store_full_c_fragment_epi64x32_tma_bf16"),
+        accumulator,
+        c_index,
+        c_shared,
+        c_shared_index,
+        row64,
+        col32,
     )
 
 

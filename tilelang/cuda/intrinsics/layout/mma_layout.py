@@ -216,6 +216,27 @@ shared_8x64_to_mma_32x16_layout_sr_b = shared_8x64_to_mma_b_32x16_layout
 shared_8x64_to_mma_32x16_layout_rs_b = shared_64x8_to_mma_b_32x16_layout_trans
 
 
+def ldmatrix_32x32_to_shared_16x64_layout_a(thread_id):
+    """Row-start addresses for ldmatrix.x4 loading A m16k64 e2m1."""
+    row = thread_id % 16
+    col = (thread_id // 16) * 32
+    return row, col
+
+
+def ldmatrix_32x32_to_shared_16x64_layout_b(thread_id):
+    """Row-start addresses for ldmatrix.x4 loading B n16k64 e2m1."""
+    row = (thread_id // 16) * 8 + (thread_id % 8)
+    col = ((thread_id % 16) // 8) * 32
+    return row, col
+
+
+def ldmatrix_32x16_to_shared_8x64_layout_b(thread_id):
+    """Row-start addresses for ldmatrix.x2 loading B n8k64 e2m1."""
+    row = thread_id % 8
+    col = ((thread_id // 8) % 2) * 32
+    return row, col
+
+
 def mma_load_a_32x32_to_shared_16x64_layout(thread_id, local_id):
     """Inverse: (thread_id, local_id) -> (m, k) for A m16k64 e2m1.
 

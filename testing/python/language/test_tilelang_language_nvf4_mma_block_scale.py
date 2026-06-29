@@ -45,7 +45,7 @@ def _make_swizzle_layout(shared_buf):
 
 
 @simplify_prim_func
-def _make_nvf4_matmul_codegen_kernel(M, N, K):
+def _make_nvf4_matmul_codegen_kernel(M, N, K, num_stages=2):
     assert K % 64 == 0
     in_dtype = T.float4_e2m1fn
     out_dtype = T.float32
@@ -95,7 +95,7 @@ def _make_nvf4_matmul_codegen_kernel(M, N, K):
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.use_swizzle(panel_size=10)
 
-            for ko in T.Pipelined((K // block_K), num_stages=2):
+            for ko in T.Pipelined((K // block_K), num_stages=num_stages):
                 for i, k in T.Parallel(block_M, block_K):
                     A_shared[i, k] = A[by * block_M + i, ko * block_K + k]
 
@@ -331,6 +331,21 @@ def test_nvf4_mma_block_scale_codegen(K):
     assert "scale_b_local" not in src
     assert "SM120MmaBlockScaledKind::kMxf4nvf4" in src
     assert "SM120MmaScaleType::kUE4M3" in src
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(12, 0)
+def test_nvf4_mma_block_scale_packed_smem_offsets():
+    kernel = tilelang.compile(
+        _make_nvf4_matmul_codegen_kernel(256, 256, 256, num_stages=3),
+        target="cuda",
+        out_idx=[4],
+    )
+    src = kernel.get_kernel_source()
+    assert "void* A_shared = ((void*)((char*)buf_dyn_shmem + 0));" in src
+    assert "void* B_shared = ((void*)((char*)buf_dyn_shmem + 24576));" in src
+    assert "void* SFA_shared = ((void*)((char*)buf_dyn_shmem + 49152));" in src
+    assert "void* SFB_shared = ((void*)((char*)buf_dyn_shmem + 52224));" in src
 
 
 @tilelang.testing.requires_cuda

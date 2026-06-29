@@ -50,6 +50,10 @@ using int4_t = int4;
 #define TL_DEVICE_NOINLINE __noinline__ __device__
 #define TL_PATCH
 
+TL_DEVICE unsigned char tl_debug_load_u8(const void *base, int byte_offset) {
+  return reinterpret_cast<const unsigned char *>(base)[byte_offset];
+}
+
 #define TILELANG_CHECK(stmt)                                                   \
   do {                                                                         \
     cudaError_t __err = (stmt);                                                \
