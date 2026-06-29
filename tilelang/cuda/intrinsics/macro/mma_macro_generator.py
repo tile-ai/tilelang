@@ -1635,10 +1635,7 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
                         scale_b_rep_n = scale_n + 8
                         scale_b_rep_word = _cutlass_sf_word(scale_b_rep_n, scale_b_word_k)
                         scale_b_rep_ptr = T.access_ptr(
-                            SFB_data[
-                                tuple(SFB_other)
-                                + (SFB_base_n + scale_b_rep_word // 4, SFB_base_k + scale_b_rep_word % 4)
-                            ],
+                            SFB_data[tuple(SFB_other) + (SFB_base_n + scale_b_rep_word // 4, SFB_base_k + scale_b_rep_word % 4)],
                             "r",
                         )
                     else:
@@ -1711,18 +1708,14 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
                 scale_m = warp_m * warp_row_tiles + i * micro_size_x + sfa_row
                 if sf_layout == "cutlass_128x4":
                     scale_a_word = _cutlass_sf_word(scale_m, scale_a_word_k)
-                    SFA_local_buf[i] = SFA_data[
-                        tuple(SFA_other) + (SFA_base_m + scale_a_word // 4, SFA_base_k + scale_a_word % 4)
-                    ]
+                    SFA_local_buf[i] = SFA_data[tuple(SFA_other) + (SFA_base_m + scale_a_word // 4, SFA_base_k + scale_a_word % 4)]
                 else:
                     SFA_local_buf[i] = SFA_data[tuple(SFA_other) + (SFA_base_m + scale_m, SFA_base_k + scale_a_word_k)]
             for j in T.unroll(warp_cols):
                 scale_n = warp_n * warp_col_tiles + j * micro_size_y + sfb_col
                 if sf_layout == "cutlass_128x4":
                     scale_b_word = _cutlass_sf_word(scale_n, scale_b_word_k)
-                    SFB_local_buf[j] = SFB_data[
-                        tuple(SFB_other) + (SFB_base_n + scale_b_word // 4, SFB_base_k + scale_b_word % 4)
-                    ]
+                    SFB_local_buf[j] = SFB_data[tuple(SFB_other) + (SFB_base_n + scale_b_word // 4, SFB_base_k + scale_b_word % 4)]
                 else:
                     SFB_local_buf[j] = SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n, SFB_base_k + scale_b_word_k)]
                 if replicate_b:
@@ -1730,13 +1723,10 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
                         scale_b_rep_n = scale_n + 8
                         scale_b_rep_word = _cutlass_sf_word(scale_b_rep_n, scale_b_word_k)
                         SFB_rep_local_buf[j] = SFB_data[
-                            tuple(SFB_other)
-                            + (SFB_base_n + scale_b_rep_word // 4, SFB_base_k + scale_b_rep_word % 4)
+                            tuple(SFB_other) + (SFB_base_n + scale_b_rep_word // 4, SFB_base_k + scale_b_rep_word % 4)
                         ]
                     else:
-                        SFB_rep_local_buf[j] = SFB_data[
-                            tuple(SFB_other) + (SFB_base_n + scale_n + 8, SFB_base_k + scale_b_word_k)
-                        ]
+                        SFB_rep_local_buf[j] = SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n + 8, SFB_base_k + scale_b_word_k)]
 
         return _warp_ldscale_block_scale(
             SFA_local_buf,
@@ -1818,9 +1808,7 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
             qlane = tx & 3
             for i in T.unroll(warp_rows):
                 scale_m = warp_m * warp_row_tiles + i * micro_size_x + sfa_row
-                SFA_fragment_buf[i] = SFA_data[
-                    tuple(SFA_other) + (SFA_base_m + scale_m, SFA_base_k + scale_a_word_k)
-                ]
+                SFA_fragment_buf[i] = SFA_data[tuple(SFA_other) + (SFA_base_m + scale_m, SFA_base_k + scale_a_word_k)]
             SFB_owner_buf[0] = SFB_data[
                 tuple(SFB_other) + (SFB_base_n + warp_n * warp_col_tiles + sfb_col + qlane * 8, SFB_base_k + scale_b_word_k)
             ]
@@ -1873,9 +1861,7 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
             a_owner_in_pair = qlane >> 1
             for g in T.unroll(2):
                 scale_m = warp_m * warp_row_tiles + g * (2 * micro_size_x) + a_owner_in_pair * micro_size_x + sfa_row
-                SFA_owner_buf[g] = SFA_data[
-                    tuple(SFA_other) + (SFA_base_m + scale_m, SFA_base_k + scale_a_word_k)
-                ]
+                SFA_owner_buf[g] = SFA_data[tuple(SFA_other) + (SFA_base_m + scale_m, SFA_base_k + scale_a_word_k)]
             SFB_owner_buf[0] = SFB_data[
                 tuple(SFB_other) + (SFB_base_n + warp_n * warp_col_tiles + sfb_col + qlane * 8, SFB_base_k + scale_b_word_k)
             ]
@@ -1941,24 +1927,16 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
                 scale_m = warp_m * warp_row_tiles + g * (2 * micro_size_x) + a_owner_in_pair * micro_size_x + sfa_row
                 if sf_layout == "cutlass_128x4":
                     scale_a_word = _cutlass_sf_word(scale_m, scale_a_word_k)
-                    SFA_owner_buf[g] = SFA_data[
-                        tuple(SFA_other) + (SFA_base_m + scale_a_word // 4, SFA_base_k + scale_a_word % 4)
-                    ]
+                    SFA_owner_buf[g] = SFA_data[tuple(SFA_other) + (SFA_base_m + scale_a_word // 4, SFA_base_k + scale_a_word % 4)]
                 else:
-                    SFA_owner_buf[g] = SFA_data[
-                        tuple(SFA_other) + (SFA_base_m + scale_m, SFA_base_k + scale_a_word_k)
-                    ]
+                    SFA_owner_buf[g] = SFA_data[tuple(SFA_other) + (SFA_base_m + scale_m, SFA_base_k + scale_a_word_k)]
             for g in T.unroll(2):
                 scale_n = warp_n * warp_col_tiles + g * (2 * micro_size_y) + sfb_col + qlane * 8
                 if sf_layout == "cutlass_128x4":
                     scale_b_word = _cutlass_sf_word(scale_n, scale_b_word_k)
-                    SFB_owner_buf[g] = SFB_data[
-                        tuple(SFB_other) + (SFB_base_n + scale_b_word // 4, SFB_base_k + scale_b_word % 4)
-                    ]
+                    SFB_owner_buf[g] = SFB_data[tuple(SFB_other) + (SFB_base_n + scale_b_word // 4, SFB_base_k + scale_b_word % 4)]
                 else:
-                    SFB_owner_buf[g] = SFB_data[
-                        tuple(SFB_other) + (SFB_base_n + scale_n, SFB_base_k + scale_b_word_k)
-                    ]
+                    SFB_owner_buf[g] = SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n, SFB_base_k + scale_b_word_k)]
 
         return _warp_ldscale_ab_owner_wide(
             SFA_owner_buf,
@@ -2022,8 +2000,7 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
                     ]
                     if replicate_b:
                         SFB_rep_pack_buf[j * num_k_blocks + kk] = SFB_data[
-                            tuple(SFB_other)
-                            + (SFB_base_n + scale_n + 8, SFB_base_k + scale_b_word_start + kk)
+                            tuple(SFB_other) + (SFB_base_n + scale_n + 8, SFB_base_k + scale_b_word_start + kk)
                         ]
 
         return _warp_ldscale_kpack(
@@ -2066,7 +2043,6 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
         micro_size_x = self.micro_size_x
         micro_size_y = self.micro_size_y
         micro_size_k = self.micro_size_k
-        chunk = self.chunk
         local_size_a = self.local_size_a
         local_size_b = self.local_size_b
         sf_vec_size = self.sf_vec_size
@@ -2118,26 +2094,17 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
                     extent=local_size_a,
                 )
                 a1 = T.access_ptr(
-                    A_buf[
-                        tuple(A_other)
-                        + (A_base0 + wk + a_row_off, A_base1 + warp_m * warp_row_tiles + micro_size_x + a_col_off)
-                    ],
+                    A_buf[tuple(A_other) + (A_base0 + wk + a_row_off, A_base1 + warp_m * warp_row_tiles + micro_size_x + a_col_off)],
                     "r",
                     extent=local_size_a,
                 )
                 a2 = T.access_ptr(
-                    A_buf[
-                        tuple(A_other)
-                        + (A_base0 + wk + a_row_off, A_base1 + warp_m * warp_row_tiles + 2 * micro_size_x + a_col_off)
-                    ],
+                    A_buf[tuple(A_other) + (A_base0 + wk + a_row_off, A_base1 + warp_m * warp_row_tiles + 2 * micro_size_x + a_col_off)],
                     "r",
                     extent=local_size_a,
                 )
                 a3 = T.access_ptr(
-                    A_buf[
-                        tuple(A_other)
-                        + (A_base0 + wk + a_row_off, A_base1 + warp_m * warp_row_tiles + 3 * micro_size_x + a_col_off)
-                    ],
+                    A_buf[tuple(A_other) + (A_base0 + wk + a_row_off, A_base1 + warp_m * warp_row_tiles + 3 * micro_size_x + a_col_off)],
                     "r",
                     extent=local_size_a,
                 )
@@ -2148,26 +2115,17 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
                     extent=local_size_a,
                 )
                 a1 = T.access_ptr(
-                    A_buf[
-                        tuple(A_other)
-                        + (A_base0 + warp_m * warp_row_tiles + micro_size_x + a_row_off, A_base1 + wk + a_col_off)
-                    ],
+                    A_buf[tuple(A_other) + (A_base0 + warp_m * warp_row_tiles + micro_size_x + a_row_off, A_base1 + wk + a_col_off)],
                     "r",
                     extent=local_size_a,
                 )
                 a2 = T.access_ptr(
-                    A_buf[
-                        tuple(A_other)
-                        + (A_base0 + warp_m * warp_row_tiles + 2 * micro_size_x + a_row_off, A_base1 + wk + a_col_off)
-                    ],
+                    A_buf[tuple(A_other) + (A_base0 + warp_m * warp_row_tiles + 2 * micro_size_x + a_row_off, A_base1 + wk + a_col_off)],
                     "r",
                     extent=local_size_a,
                 )
                 a3 = T.access_ptr(
-                    A_buf[
-                        tuple(A_other)
-                        + (A_base0 + warp_m * warp_row_tiles + 3 * micro_size_x + a_row_off, A_base1 + wk + a_col_off)
-                    ],
+                    A_buf[tuple(A_other) + (A_base0 + warp_m * warp_row_tiles + 3 * micro_size_x + a_row_off, A_base1 + wk + a_col_off)],
                     "r",
                     extent=local_size_a,
                 )
@@ -2178,26 +2136,17 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
                 extent=local_size_b,
             )
             b1 = T.access_ptr(
-                B_buf[
-                    tuple(B_other)
-                    + (B_base0 + warp_n * warp_col_tiles + micro_size_y + b_row_off, B_base1 + wk + b_col_off)
-                ],
+                B_buf[tuple(B_other) + (B_base0 + warp_n * warp_col_tiles + micro_size_y + b_row_off, B_base1 + wk + b_col_off)],
                 "r",
                 extent=local_size_b,
             )
             b2 = T.access_ptr(
-                B_buf[
-                    tuple(B_other)
-                    + (B_base0 + warp_n * warp_col_tiles + 2 * micro_size_y + b_row_off, B_base1 + wk + b_col_off)
-                ],
+                B_buf[tuple(B_other) + (B_base0 + warp_n * warp_col_tiles + 2 * micro_size_y + b_row_off, B_base1 + wk + b_col_off)],
                 "r",
                 extent=local_size_b,
             )
             b3 = T.access_ptr(
-                B_buf[
-                    tuple(B_other)
-                    + (B_base0 + warp_n * warp_col_tiles + 3 * micro_size_y + b_row_off, B_base1 + wk + b_col_off)
-                ],
+                B_buf[tuple(B_other) + (B_base0 + warp_n * warp_col_tiles + 3 * micro_size_y + b_row_off, B_base1 + wk + b_col_off)],
                 "r",
                 extent=local_size_b,
             )
@@ -2386,26 +2335,17 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
                     extent=local_size_a,
                 )
                 a1 = T.access_ptr(
-                    A_buf[
-                        tuple(A_other)
-                        + (A_base0 + wk + a_row_off, A_base1 + warp_m * warp_row_tiles + micro_size_x + a_col_off)
-                    ],
+                    A_buf[tuple(A_other) + (A_base0 + wk + a_row_off, A_base1 + warp_m * warp_row_tiles + micro_size_x + a_col_off)],
                     "r",
                     extent=local_size_a,
                 )
                 a2 = T.access_ptr(
-                    A_buf[
-                        tuple(A_other)
-                        + (A_base0 + wk + a_row_off, A_base1 + warp_m * warp_row_tiles + 2 * micro_size_x + a_col_off)
-                    ],
+                    A_buf[tuple(A_other) + (A_base0 + wk + a_row_off, A_base1 + warp_m * warp_row_tiles + 2 * micro_size_x + a_col_off)],
                     "r",
                     extent=local_size_a,
                 )
                 a3 = T.access_ptr(
-                    A_buf[
-                        tuple(A_other)
-                        + (A_base0 + wk + a_row_off, A_base1 + warp_m * warp_row_tiles + 3 * micro_size_x + a_col_off)
-                    ],
+                    A_buf[tuple(A_other) + (A_base0 + wk + a_row_off, A_base1 + warp_m * warp_row_tiles + 3 * micro_size_x + a_col_off)],
                     "r",
                     extent=local_size_a,
                 )
@@ -2416,26 +2356,17 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
                     extent=local_size_a,
                 )
                 a1 = T.access_ptr(
-                    A_buf[
-                        tuple(A_other)
-                        + (A_base0 + warp_m * warp_row_tiles + micro_size_x + a_row_off, A_base1 + wk + a_col_off)
-                    ],
+                    A_buf[tuple(A_other) + (A_base0 + warp_m * warp_row_tiles + micro_size_x + a_row_off, A_base1 + wk + a_col_off)],
                     "r",
                     extent=local_size_a,
                 )
                 a2 = T.access_ptr(
-                    A_buf[
-                        tuple(A_other)
-                        + (A_base0 + warp_m * warp_row_tiles + 2 * micro_size_x + a_row_off, A_base1 + wk + a_col_off)
-                    ],
+                    A_buf[tuple(A_other) + (A_base0 + warp_m * warp_row_tiles + 2 * micro_size_x + a_row_off, A_base1 + wk + a_col_off)],
                     "r",
                     extent=local_size_a,
                 )
                 a3 = T.access_ptr(
-                    A_buf[
-                        tuple(A_other)
-                        + (A_base0 + warp_m * warp_row_tiles + 3 * micro_size_x + a_row_off, A_base1 + wk + a_col_off)
-                    ],
+                    A_buf[tuple(A_other) + (A_base0 + warp_m * warp_row_tiles + 3 * micro_size_x + a_row_off, A_base1 + wk + a_col_off)],
                     "r",
                     extent=local_size_a,
                 )
@@ -2446,26 +2377,17 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
                 extent=local_size_b,
             )
             b1 = T.access_ptr(
-                B_buf[
-                    tuple(B_other)
-                    + (B_base0 + warp_n * warp_col_tiles + micro_size_y + b_row_off, B_base1 + wk + b_col_off)
-                ],
+                B_buf[tuple(B_other) + (B_base0 + warp_n * warp_col_tiles + micro_size_y + b_row_off, B_base1 + wk + b_col_off)],
                 "r",
                 extent=local_size_b,
             )
             b2 = T.access_ptr(
-                B_buf[
-                    tuple(B_other)
-                    + (B_base0 + warp_n * warp_col_tiles + 2 * micro_size_y + b_row_off, B_base1 + wk + b_col_off)
-                ],
+                B_buf[tuple(B_other) + (B_base0 + warp_n * warp_col_tiles + 2 * micro_size_y + b_row_off, B_base1 + wk + b_col_off)],
                 "r",
                 extent=local_size_b,
             )
             b3 = T.access_ptr(
-                B_buf[
-                    tuple(B_other)
-                    + (B_base0 + warp_n * warp_col_tiles + 3 * micro_size_y + b_row_off, B_base1 + wk + b_col_off)
-                ],
+                B_buf[tuple(B_other) + (B_base0 + warp_n * warp_col_tiles + 3 * micro_size_y + b_row_off, B_base1 + wk + b_col_off)],
                 "r",
                 extent=local_size_b,
             )

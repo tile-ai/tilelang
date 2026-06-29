@@ -26,8 +26,8 @@
 #include <tvm/tirx/transform.h>
 
 #include <cctype>
-#include <cstdlib>
 #include <cstdint>
+#include <cstdlib>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -1661,9 +1661,9 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
 
     PrimExpr tma_shared_offset = CompactUnpackedFP4SharedOffset(
         shared_offset + total_elements * loop_var, shared_tensor->dtype);
-    PrimExpr shared_addr = shared_tensor.access_ptr(
-        is_load ? 2 : 1, DataType::Handle(), 1, tma_shared_offset,
-        total_elements);
+    PrimExpr shared_addr =
+        shared_tensor.access_ptr(is_load ? 2 : 1, DataType::Handle(), 1,
+                                 tma_shared_offset, total_elements);
     args.push_back(shared_addr);
     global_coords.Set(0, global_coords[0] + instruction_dim * loop_var);
     for (auto coord : global_coords)
@@ -1700,9 +1700,9 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   } else {
     PrimExpr tma_shared_offset =
         CompactUnpackedFP4SharedOffset(shared_offset, shared_tensor->dtype);
-    PrimExpr shared_addr = shared_tensor.access_ptr(
-        is_load ? 2 : 1, DataType::Handle(), 1, tma_shared_offset,
-        total_elements);
+    PrimExpr shared_addr =
+        shared_tensor.access_ptr(is_load ? 2 : 1, DataType::Handle(), 1,
+                                 tma_shared_offset, total_elements);
     args.push_back(shared_addr);
     for (auto coord : global_coords)
       args.push_back(coord);

@@ -43,20 +43,18 @@ TL_DEVICE uint32_t sm120_cutlass_128x4_sf_word(uint32_t idx, uint32_t ki) {
 
 TL_DEVICE uint32_t sm120_cute_sfa_slot_word(uint32_t lane, uint32_t warp_m,
                                             uint32_t ki, uint32_t m_atom) {
-  return ki * 128u + warp_m * 64u + (lane >> 2) * 4u +
-         ((lane & 1u) << 5) + m_atom;
+  return ki * 128u + warp_m * 64u + (lane >> 2) * 4u + ((lane & 1u) << 5) +
+         m_atom;
 }
 
 TL_DEVICE uint32_t sm120_cute_sfb_slot_word(uint32_t lane, uint32_t warp_n,
                                             uint32_t ki, uint32_t n16_col,
                                             uint32_t n8_half) {
-  return ki * 128u + warp_n * 64u + (lane >> 2) * 4u + n16_col +
-         n8_half * 32u;
+  return ki * 128u + warp_n * 64u + (lane >> 2) * 4u + n16_col + n8_half * 32u;
 }
 
 TL_DEVICE void sm120_ldscale_v4_u32(void const *const smem_ptr, uint32_t &d0,
-                                    uint32_t &d1, uint32_t &d2,
-                                    uint32_t &d3) {
+                                    uint32_t &d1, uint32_t &d2, uint32_t &d3) {
   asm volatile("ld.shared.v4.u32 {%0, %1, %2, %3}, [%4];\n"
                : "=r"(d0), "=r"(d1), "=r"(d2), "=r"(d3)
                : "r"(sm120_smem_addr(smem_ptr)));
@@ -82,8 +80,7 @@ TL_DEVICE void sm120_ldmatrix_x4_u32_addr(uint32_t smem_int_ptr, uint32_t &d0,
 }
 
 TL_DEVICE void sm120_ldmatrix_x4_u32(void const *const smem_ptr, uint32_t &d0,
-                                     uint32_t &d1, uint32_t &d2,
-                                     uint32_t &d3) {
+                                     uint32_t &d1, uint32_t &d2, uint32_t &d3) {
   sm120_ldmatrix_x4_u32_addr(smem_ptr_to_uint(smem_ptr), d0, d1, d2, d3);
 }
 
@@ -94,11 +91,10 @@ TL_DEVICE void sm120_ldmatrix_x4_u32(void const *const smem_ptr, uint32_t &d0,
 TL_DEVICE void sm120_ldmatrix_x4_fp4_u32_addr(uint32_t smem_int_ptr,
                                               uint32_t &d0, uint32_t &d1,
                                               uint32_t &d2, uint32_t &d3) {
-  asm volatile(
-      "ldmatrix.sync.aligned.m8n16.x4.shared.b8x16.b4x16_p64 "
-      "{%0, %1, %2, %3}, [%4];\n"
-      : "=r"(d0), "=r"(d1), "=r"(d2), "=r"(d3)
-      : "r"(smem_int_ptr));
+  asm volatile("ldmatrix.sync.aligned.m8n16.x4.shared.b8x16.b4x16_p64 "
+               "{%0, %1, %2, %3}, [%4];\n"
+               : "=r"(d0), "=r"(d1), "=r"(d2), "=r"(d3)
+               : "r"(smem_int_ptr));
 #if !defined(TL_SM120_FULLTILE_FP4_LDSM_NO_SHIFT)
   d0 <<= 2;
   d1 <<= 2;
@@ -113,9 +109,11 @@ TL_DEVICE void sm120_ldmatrix_x4_fp4_u32(void const *const smem_ptr,
   sm120_ldmatrix_x4_fp4_u32_addr(smem_ptr_to_uint(smem_ptr), d0, d1, d2, d3);
 }
 
-TL_DEVICE void sm120_ldmatrix_x4_blockscaled_operand_addr(
-    uint32_t smem_int_ptr, uint32_t &d0, uint32_t &d1, uint32_t &d2,
-    uint32_t &d3) {
+TL_DEVICE void sm120_ldmatrix_x4_blockscaled_operand_addr(uint32_t smem_int_ptr,
+                                                          uint32_t &d0,
+                                                          uint32_t &d1,
+                                                          uint32_t &d2,
+                                                          uint32_t &d3) {
 #if defined(TL_SM120_FULLTILE_FP4_LDSM)
   sm120_ldmatrix_x4_fp4_u32_addr(smem_int_ptr, d0, d1, d2, d3);
 #else
@@ -129,9 +127,10 @@ TL_DEVICE void sm120_ldmatrix_x4_blockscaled_operand_addr(
 #endif
 }
 
-TL_DEVICE void sm120_ldmatrix_x4_blockscaled_operand(
-    void const *const smem_ptr, uint32_t &d0, uint32_t &d1, uint32_t &d2,
-    uint32_t &d3) {
+TL_DEVICE void sm120_ldmatrix_x4_blockscaled_operand(void const *const smem_ptr,
+                                                     uint32_t &d0, uint32_t &d1,
+                                                     uint32_t &d2,
+                                                     uint32_t &d3) {
 #if defined(TL_SM120_FULLTILE_FP4_LDSM)
   sm120_ldmatrix_x4_fp4_u32(smem_ptr, d0, d1, d2, d3);
 #else
@@ -155,9 +154,10 @@ TL_DEVICE uint32_t sm120_cute_accum_pair_offset_from_tl_pair(uint32_t tl_pair) {
   return i * 4u + j * 32u + half * 16u + reg_pair;
 }
 
-TL_DEVICE void sm120_store_full_c_fragment_panel64_bf16(
-    float const *const c_fragment, bfloat16_t *const c_shared,
-    int const panel) {
+TL_DEVICE void
+sm120_store_full_c_fragment_panel64_bf16(float const *const c_fragment,
+                                         bfloat16_t *const c_shared,
+                                         int const panel) {
   uint32_t const tx = uint32_t(threadIdx.x) & 127u;
   if (int(tx >> 6) != panel) {
     return;
@@ -167,11 +167,13 @@ TL_DEVICE void sm120_store_full_c_fragment_panel64_bf16(
   for (int i = 0; i < 64; ++i) {
     uint32_t const tl_pair = uint32_t(i) * 2u;
 #if defined(TL_SM120_FULLTILE_CUTE_ACCUM_DIRECT)
-    uint32_t const src_pair = sm120_cute_accum_pair_offset_from_tl_pair(tl_pair);
+    uint32_t const src_pair =
+        sm120_cute_accum_pair_offset_from_tl_pair(tl_pair);
 #else
     uint32_t const src_pair = tl_pair;
 #endif
-    float2 const value = *reinterpret_cast<float2 const *>(c_fragment + src_pair);
+    float2 const value =
+        *reinterpret_cast<float2 const *>(c_fragment + src_pair);
     uint1 packed;
     reinterpret_cast<__nv_bfloat162 *>(&packed)[0] =
         __float22bfloat162_rn(value);
@@ -183,16 +185,17 @@ TL_DEVICE void sm120_store_full_c_fragment_panel64_bf16(
 }
 
 TL_DEVICE uint32_t sm120_tma_store_128x32_bf16_swizzle_offset(uint32_t row,
-                                                             uint32_t col8) {
+                                                              uint32_t col8) {
   uint32_t const tx = ((row & 31u) << 2) | (col8 >> 3);
   return ((row >> 5) * 1024u) + ((tx >> 2) * 32u) +
          (((((tx & 31u) >> 4) + ((tx & 3u) >> 1)) & 1u) * 16u) +
-	         (((((tx & 15u) >> 3) + (tx & 1u)) & 1u) * 8u);
+         (((((tx & 15u) >> 3) + (tx & 1u)) & 1u) * 8u);
 }
 
-TL_DEVICE void sm120_store_full_c_fragment_panel32_tma_bf16(
-    float const *const c_fragment, bfloat16_t *const c_shared,
-    int const panel32) {
+TL_DEVICE void
+sm120_store_full_c_fragment_panel32_tma_bf16(float const *const c_fragment,
+                                             bfloat16_t *const c_shared,
+                                             int const panel32) {
   uint32_t const tx = uint32_t(threadIdx.x) & 127u;
   uint32_t const panel64 = uint32_t(panel32) >> 1;
   uint32_t const sub32 = uint32_t(panel32) & 1u;
@@ -209,11 +212,13 @@ TL_DEVICE void sm120_store_full_c_fragment_panel32_tma_bf16(
 
     uint32_t const tl_pair = uint32_t(i) * 2u;
 #if defined(TL_SM120_FULLTILE_CUTE_ACCUM_DIRECT)
-    uint32_t const src_pair = sm120_cute_accum_pair_offset_from_tl_pair(tl_pair);
+    uint32_t const src_pair =
+        sm120_cute_accum_pair_offset_from_tl_pair(tl_pair);
 #else
     uint32_t const src_pair = tl_pair;
 #endif
-    float2 const value = *reinterpret_cast<float2 const *>(c_fragment + src_pair);
+    float2 const value =
+        *reinterpret_cast<float2 const *>(c_fragment + src_pair);
     uint1 packed;
     reinterpret_cast<__nv_bfloat162 *>(&packed)[0] =
         __float22bfloat162_rn(value);
@@ -229,8 +234,8 @@ TL_DEVICE void sm120_store_full_c_fragment_panel32_tma_bf16(
 }
 
 TL_DEVICE void sm120_store_full_c_fragment_epi64x32_tma_bf16(
-    float const *const c_fragment, bfloat16_t *const c_shared,
-    int const row64, int const col32_panel) {
+    float const *const c_fragment, bfloat16_t *const c_shared, int const row64,
+    int const col32_panel) {
   uint32_t const tx = uint32_t(threadIdx.x) & 127u;
   uint32_t const col64_panel = uint32_t(col32_panel) >> 1;
   uint32_t const sub32 = uint32_t(col32_panel) & 1u;
@@ -253,11 +258,13 @@ TL_DEVICE void sm120_store_full_c_fragment_epi64x32_tma_bf16(
 
     uint32_t const tl_pair = uint32_t(i) * 2u;
 #if defined(TL_SM120_FULLTILE_CUTE_ACCUM_DIRECT)
-    uint32_t const src_pair = sm120_cute_accum_pair_offset_from_tl_pair(tl_pair);
+    uint32_t const src_pair =
+        sm120_cute_accum_pair_offset_from_tl_pair(tl_pair);
 #else
     uint32_t const src_pair = tl_pair;
 #endif
-    float2 const value = *reinterpret_cast<float2 const *>(c_fragment + src_pair);
+    float2 const value =
+        *reinterpret_cast<float2 const *>(c_fragment + src_pair);
     uint1 packed;
     reinterpret_cast<__nv_bfloat162 *>(&packed)[0] =
         __float22bfloat162_rn(value);
@@ -288,10 +295,10 @@ TL_DEVICE void sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3_regs(
       "{%14}, {%15, %16}, "
       "{%17}, {%18, %19};\n"
       : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
-      : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1),
-        "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]), "r"(scale_a),
-        "h"(scale_a_byte_id), "h"(scale_a_thread_id), "r"(scale_b),
-        "h"(scale_b_byte_id), "h"(scale_b_thread_id));
+      : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "f"(c[0]),
+        "f"(c[1]), "f"(c[2]), "f"(c[3]), "r"(scale_a), "h"(scale_a_byte_id),
+        "h"(scale_a_thread_id), "r"(scale_b), "h"(scale_b_byte_id),
+        "h"(scale_b_thread_id));
 }
 
 TL_DEVICE void sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3_accum_regs(
@@ -309,16 +316,16 @@ TL_DEVICE void sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3_accum_regs(
       "{%10}, {%11, %12}, "
       "{%13}, {%14, %15};\n"
       : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
-      : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1),
-        "r"(scale_a), "h"(scale_a_byte_id), "h"(scale_a_thread_id),
-        "r"(scale_b), "h"(scale_b_byte_id), "h"(scale_b_thread_id));
+      : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "r"(scale_a),
+        "h"(scale_a_byte_id), "h"(scale_a_thread_id), "r"(scale_b),
+        "h"(scale_b_byte_id), "h"(scale_b_thread_id));
 }
 
 TL_DEVICE void sm120_mma2_m16n8k64_mxf4nvf4_4x_ue4m3_same_b_regs(
     float *d0, uint32_t a00, uint32_t a01, uint32_t a02, uint32_t a03,
-    const float *c0, uint32_t scale_a0, float *d1, uint32_t a10,
-    uint32_t a11, uint32_t a12, uint32_t a13, const float *c1,
-    uint32_t scale_a1, uint32_t b0, uint32_t b1, uint32_t scale_b) {
+    const float *c0, uint32_t scale_a0, float *d1, uint32_t a10, uint32_t a11,
+    uint32_t a12, uint32_t a13, const float *c1, uint32_t scale_a1, uint32_t b0,
+    uint32_t b1, uint32_t scale_b) {
   uint16_t const zero = 0;
   asm volatile(
       "mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale.scale_vec::"
@@ -337,13 +344,12 @@ TL_DEVICE void sm120_mma2_m16n8k64_mxf4nvf4_4x_ue4m3_same_b_regs(
       "{%22, %23, %24, %25}, "
       "{%27}, {%29, %29}, "
       "{%28}, {%29, %29};\n"
-      : "=&f"(d0[0]), "=&f"(d0[1]), "=&f"(d0[2]), "=&f"(d0[3]),
-        "=&f"(d1[0]), "=&f"(d1[1]), "=&f"(d1[2]), "=&f"(d1[3])
-      : "r"(a00), "r"(a01), "r"(a02), "r"(a03), "r"(a10), "r"(a11),
-        "r"(a12), "r"(a13), "r"(b0), "r"(b1), "f"(c0[0]), "f"(c0[1]),
-        "f"(c0[2]), "f"(c0[3]), "f"(c1[0]), "f"(c1[1]), "f"(c1[2]),
-        "f"(c1[3]), "r"(scale_a0), "r"(scale_a1), "r"(scale_b),
-        "h"(zero));
+      : "=&f"(d0[0]), "=&f"(d0[1]), "=&f"(d0[2]), "=&f"(d0[3]), "=&f"(d1[0]),
+        "=&f"(d1[1]), "=&f"(d1[2]), "=&f"(d1[3])
+      : "r"(a00), "r"(a01), "r"(a02), "r"(a03), "r"(a10), "r"(a11), "r"(a12),
+        "r"(a13), "r"(b0), "r"(b1), "f"(c0[0]), "f"(c0[1]), "f"(c0[2]),
+        "f"(c0[3]), "f"(c1[0]), "f"(c1[1]), "f"(c1[2]), "f"(c1[3]),
+        "r"(scale_a0), "r"(scale_a1), "r"(scale_b), "h"(zero));
 }
 
 TL_DEVICE void sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3(
@@ -353,28 +359,25 @@ TL_DEVICE void sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3(
     uint16_t scale_b_thread_id = 0) {
   sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3_regs(
       d, a[0], a[1], a[2], a[3], b[0], b[1], c, scale_a, scale_b,
-      scale_a_byte_id, scale_a_thread_id, scale_b_byte_id,
-      scale_b_thread_id);
+      scale_a_byte_id, scale_a_thread_id, scale_b_byte_id, scale_b_thread_id);
 }
 
 TL_DEVICE uint32_t sm120_fulltile_compact_k_swizzle_offset(uint32_t tx,
-                                                          int k_block_idx) {
+                                                           int k_block_idx) {
   switch (k_block_idx & 3) {
   case 0:
     return ((tx & 7u) >> 1) * 32u;
   case 1:
     return ((tx & 7u) >> 2) * 64u + (((((tx & 3u) >> 1) + 1u) & 1u) * 32u);
   case 2:
-    return (((((tx & 7u) >> 2) + 1u) & 1u) * 64u) +
-           (((tx & 3u) >> 1) * 32u);
+    return (((((tx & 7u) >> 2) + 1u) & 1u) * 64u) + (((tx & 3u) >> 1) * 32u);
   default:
     return (((((tx & 7u) >> 2) + 1u) & 1u) * 64u) +
            (((((tx & 3u) >> 1) + 1u) & 1u) * 32u);
   }
 }
 
-TL_DEVICE uint32_t sm120_fulltile_compact_a_offset(uint32_t tx,
-                                                   int k_block_idx,
+TL_DEVICE uint32_t sm120_fulltile_compact_a_offset(uint32_t tx, int k_block_idx,
                                                    int row_idx) {
   return (((tx & 63u) >> 5) * 2048u) + ((tx & 15u) * 128u) +
          sm120_fulltile_compact_k_swizzle_offset(tx, k_block_idx) +
@@ -382,8 +385,7 @@ TL_DEVICE uint32_t sm120_fulltile_compact_a_offset(uint32_t tx,
          uint32_t(row_idx) * 4096u;
 }
 
-TL_DEVICE uint32_t sm120_fulltile_compact_b_offset(uint32_t tx,
-                                                   int k_block_idx,
+TL_DEVICE uint32_t sm120_fulltile_compact_b_offset(uint32_t tx, int k_block_idx,
                                                    int panel_idx) {
   return ((tx >> 6) * 2048u) + (((tx & 31u) >> 4) * 1024u) +
          ((tx & 7u) * 128u) +
@@ -411,8 +413,7 @@ TL_DEVICE uint32_t sm120_fulltile_rowmajor_b_offset(uint32_t tx,
          uint32_t(panel_idx) * 2048u;
 }
 
-TL_DEVICE uint32_t sm120_fulltile_package_a_offset(uint32_t tx,
-                                                   int k_block_idx,
+TL_DEVICE uint32_t sm120_fulltile_package_a_offset(uint32_t tx, int k_block_idx,
                                                    int row_idx) {
 #if defined(TL_SM120_FULLTILE_PACKAGE_ROWMAJOR_VIEW)
   return sm120_fulltile_rowmajor_a_offset(tx, k_block_idx, row_idx);
@@ -421,8 +422,7 @@ TL_DEVICE uint32_t sm120_fulltile_package_a_offset(uint32_t tx,
 #endif
 }
 
-TL_DEVICE uint32_t sm120_fulltile_package_b_offset(uint32_t tx,
-                                                   int k_block_idx,
+TL_DEVICE uint32_t sm120_fulltile_package_b_offset(uint32_t tx, int k_block_idx,
                                                    int panel_idx) {
 #if defined(TL_SM120_FULLTILE_PACKAGE_ROWMAJOR_VIEW)
   return sm120_fulltile_rowmajor_b_offset(tx, k_block_idx, panel_idx);
@@ -437,8 +437,7 @@ template <SM120MmaBlockScaledKind Kind, int ScaleVecSize,
           SM120MmaScaleType SType>
 TL_DEVICE void sm120_mma_sync_blockscaled(float *d, const uint32_t *a,
                                           const uint32_t *b, const float *c,
-                                          uint32_t scale_a,
-                                          uint32_t scale_b,
+                                          uint32_t scale_a, uint32_t scale_b,
                                           uint16_t scale_a_byte_id = 0,
                                           uint16_t scale_a_thread_id = 0,
                                           uint16_t scale_b_byte_id = 0,
@@ -448,21 +447,21 @@ TL_DEVICE void sm120_mma_sync_blockscaled(float *d, const uint32_t *a,
   static_assert(ScaleVecSize == 4, "Only scale_vec::4X is supported");
   static_assert(SType == SM120MmaScaleType::kUE4M3,
                 "kind::mxf4nvf4 only supports ue4m3 scale factors");
-  static_assert(SM120MmaBlockScaledConfig<Kind, ScaleVecSize, SType>::kSupported,
-                "Unsupported sm120 mma.block_scale configuration");
+  static_assert(
+      SM120MmaBlockScaledConfig<Kind, ScaleVecSize, SType>::kSupported,
+      "Unsupported sm120 mma.block_scale configuration");
   detail::sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3(
       d, a, b, c, scale_a, scale_b, scale_a_byte_id, scale_a_thread_id,
       scale_b_byte_id, scale_b_thread_id);
 }
 
 TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile(
-    float *c, const void *a_smem_0, const void *a_smem_1,
-    const void *a_smem_2, const void *a_smem_3, const void *b_smem_0,
-    const void *b_smem_1, const void *b_smem_2, const void *b_smem_3,
-    const uint32_t *sfa_0, const uint32_t *sfa_1, const uint32_t *sfa_2,
-    const uint32_t *sfa_3, const uint32_t *sfb_0, const uint32_t *sfb_1,
-    const uint32_t *sfb_2, const uint32_t *sfb_3,
-    const uint32_t *sfb_rep_0, const uint32_t *sfb_rep_1,
+    float *c, const void *a_smem_0, const void *a_smem_1, const void *a_smem_2,
+    const void *a_smem_3, const void *b_smem_0, const void *b_smem_1,
+    const void *b_smem_2, const void *b_smem_3, const uint32_t *sfa_0,
+    const uint32_t *sfa_1, const uint32_t *sfa_2, const uint32_t *sfa_3,
+    const uint32_t *sfb_0, const uint32_t *sfb_1, const uint32_t *sfb_2,
+    const uint32_t *sfb_3, const uint32_t *sfb_rep_0, const uint32_t *sfb_rep_1,
     const uint32_t *sfb_rep_2, const uint32_t *sfb_rep_3, int k_block_idx);
 
 TL_DEVICE void sm120_mma_blockscaled_cute_consumer_bridge(
@@ -482,10 +481,9 @@ TL_DEVICE void sm120_mma_blockscaled_cute_consumer_bridge(
       b_base + detail::sm120_fulltile_compact_b_offset(tx, k_block_idx, 1),
       b_base + detail::sm120_fulltile_compact_b_offset(tx, k_block_idx, 2),
       b_base + detail::sm120_fulltile_compact_b_offset(tx, k_block_idx, 3),
-      sfa_smem_base, sfa_smem_base, sfa_smem_base, sfa_smem_base,
-      sfb_smem_base, sfb_smem_base, sfb_smem_base, sfb_smem_base,
-      sfb_smem_base, sfb_smem_base, sfb_smem_base, sfb_smem_base,
-      k_block_idx);
+      sfa_smem_base, sfa_smem_base, sfa_smem_base, sfa_smem_base, sfb_smem_base,
+      sfb_smem_base, sfb_smem_base, sfb_smem_base, sfb_smem_base, sfb_smem_base,
+      sfb_smem_base, sfb_smem_base, k_block_idx);
 #else
   asm volatile("" ::"l"(c), "l"(a_smem_base), "l"(b_smem_base),
                "l"(sfa_smem_base), "l"(sfb_smem_base), "r"(k_block_idx)
@@ -494,22 +492,20 @@ TL_DEVICE void sm120_mma_blockscaled_cute_consumer_bridge(
 }
 
 TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile(
-    float *c, const void *a_smem_0, const void *a_smem_1,
-    const void *a_smem_2, const void *a_smem_3, const void *b_smem_0,
-    const void *b_smem_1, const void *b_smem_2, const void *b_smem_3,
-    const uint32_t *sfa_0, const uint32_t *sfa_1, const uint32_t *sfa_2,
-    const uint32_t *sfa_3, const uint32_t *sfb_0, const uint32_t *sfb_1,
-    const uint32_t *sfb_2, const uint32_t *sfb_3,
-    const uint32_t *sfb_rep_0, const uint32_t *sfb_rep_1,
-    const uint32_t *sfb_rep_2, const uint32_t *sfb_rep_3,
-    int k_block_idx) {
+    float *c, const void *a_smem_0, const void *a_smem_1, const void *a_smem_2,
+    const void *a_smem_3, const void *b_smem_0, const void *b_smem_1,
+    const void *b_smem_2, const void *b_smem_3, const uint32_t *sfa_0,
+    const uint32_t *sfa_1, const uint32_t *sfa_2, const uint32_t *sfa_3,
+    const uint32_t *sfb_0, const uint32_t *sfb_1, const uint32_t *sfb_2,
+    const uint32_t *sfb_3, const uint32_t *sfb_rep_0, const uint32_t *sfb_rep_1,
+    const uint32_t *sfb_rep_2, const uint32_t *sfb_rep_3, int k_block_idx) {
   uint32_t b00, b01, b02, b03;
   uint32_t b10, b11, b12, b13;
   uint32_t b20, b21, b22, b23;
   uint32_t b30, b31, b32, b33;
 
-#if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                              \
-    defined(TL_SM120_FULLTILE_CUTE_ROWSTART_A) ||                            \
+#if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                                \
+    defined(TL_SM120_FULLTILE_CUTE_ROWSTART_A) ||                              \
     defined(TL_SM120_FULLTILE_CUTE_ROWSTART_B)
   int const warp128 = (int(threadIdx.x) & 127) >> 5;
   int const m_group = warp128 & 1;
@@ -557,15 +553,14 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile(
     uint32_t single_b0, single_b1, single_b2, single_b3;
 #if defined(TL_SM120_FULLTILE_SINGLE_SCRATCH_ONES)
 #if TL_SM120_FULLTILE_SINGLE_I != 0 || TL_SM120_FULLTILE_SINGLE_J != 0
-#error "TL_SM120_FULLTILE_SINGLE_SCRATCH_ONES currently supports site I=0,J=0 only"
+#error                                                                         \
+    "TL_SM120_FULLTILE_SINGLE_SCRATCH_ONES currently supports site I=0,J=0 only"
 #endif
 #if !defined(TL_SM120_FULLTILE_SINGLE_SCRATCH_BYTE)
 #define TL_SM120_FULLTILE_SINGLE_SCRATCH_BYTE 0x22
 #endif
-    __shared__ __align__(128) unsigned char
-        tl_sm120_single_a_scratch[4 * 512];
-    __shared__ __align__(128) unsigned char
-        tl_sm120_single_b_scratch[4 * 512];
+    __shared__ __align__(128) unsigned char tl_sm120_single_a_scratch[4 * 512];
+    __shared__ __align__(128) unsigned char tl_sm120_single_b_scratch[4 * 512];
     int const single_warp = (int(threadIdx.x) & 127) >> 5;
     int const lane = int(threadIdx.x) & 31;
     unsigned char *const a_scratch =
@@ -579,18 +574,19 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile(
       b_scratch[byte_i] = TL_SM120_FULLTILE_SINGLE_SCRATCH_BYTE;
     }
     __syncwarp();
-    detail::sm120_ldmatrix_x4_fp4_u32(
-        a_scratch + lane * 16, single_a0, single_a1, single_a2, single_a3);
-    detail::sm120_ldmatrix_x4_fp4_u32(
-        b_scratch + lane * 16, single_b0, single_b1, single_b2, single_b3);
+    detail::sm120_ldmatrix_x4_fp4_u32(a_scratch + lane * 16, single_a0,
+                                      single_a1, single_a2, single_a3);
+    detail::sm120_ldmatrix_x4_fp4_u32(b_scratch + lane * 16, single_b0,
+                                      single_b1, single_b2, single_b3);
 #elif defined(TL_SM120_FULLTILE_SINGLE_REAL_SCRATCH)
 #if TL_SM120_FULLTILE_SINGLE_I != 0 || TL_SM120_FULLTILE_SINGLE_J != 0
-#error "TL_SM120_FULLTILE_SINGLE_REAL_SCRATCH currently supports site I=0,J=0 only"
+#error                                                                         \
+    "TL_SM120_FULLTILE_SINGLE_REAL_SCRATCH currently supports site I=0,J=0 only"
 #endif
-    __shared__ __align__(128) unsigned char
-        tl_sm120_single_a_real_scratch[4 * 512];
-    __shared__ __align__(128) unsigned char
-        tl_sm120_single_b_real_scratch[4 * 512];
+    __shared__ __align__(
+        128) unsigned char tl_sm120_single_a_real_scratch[4 * 512];
+    __shared__ __align__(
+        128) unsigned char tl_sm120_single_b_real_scratch[4 * 512];
     int const single_warp = (int(threadIdx.x) & 127) >> 5;
     int const lane = int(threadIdx.x) & 31;
     unsigned char *const a_scratch =
@@ -609,60 +605,52 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile(
       b_scratch[lane * 16 + byte_i + 8] = 0;
     }
     __syncwarp();
-    detail::sm120_ldmatrix_x4_fp4_u32(
-        a_scratch + lane * 16, single_a0, single_a1, single_a2, single_a3);
-    detail::sm120_ldmatrix_x4_fp4_u32(
-        b_scratch + lane * 16, single_b0, single_b1, single_b2, single_b3);
+    detail::sm120_ldmatrix_x4_fp4_u32(a_scratch + lane * 16, single_a0,
+                                      single_a1, single_a2, single_a3);
+    detail::sm120_ldmatrix_x4_fp4_u32(b_scratch + lane * 16, single_b0,
+                                      single_b1, single_b2, single_b3);
 #else
-#if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                              \
+#if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                                \
     defined(TL_SM120_FULLTILE_CUTE_ROWSTART_A)
     detail::sm120_ldmatrix_x4_fp4_u32(
         a_cute_m0 + kCuteKAtomStride * TL_SM120_FULLTILE_SINGLE_I, single_a0,
         single_a1, single_a2, single_a3);
 #else
 #if TL_SM120_FULLTILE_SINGLE_I == 0
-    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_0, single_a0,
-                                                  single_a1, single_a2,
-                                                  single_a3);
+    detail::sm120_ldmatrix_x4_blockscaled_operand(
+        a_smem_0, single_a0, single_a1, single_a2, single_a3);
 #elif TL_SM120_FULLTILE_SINGLE_I == 1
-    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_1, single_a0,
-                                                  single_a1, single_a2,
-                                                  single_a3);
+    detail::sm120_ldmatrix_x4_blockscaled_operand(
+        a_smem_1, single_a0, single_a1, single_a2, single_a3);
 #elif TL_SM120_FULLTILE_SINGLE_I == 2
-    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_2, single_a0,
-                                                  single_a1, single_a2,
-                                                  single_a3);
+    detail::sm120_ldmatrix_x4_blockscaled_operand(
+        a_smem_2, single_a0, single_a1, single_a2, single_a3);
 #elif TL_SM120_FULLTILE_SINGLE_I == 3
-    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_3, single_a0,
-                                                  single_a1, single_a2,
-                                                  single_a3);
+    detail::sm120_ldmatrix_x4_blockscaled_operand(
+        a_smem_3, single_a0, single_a1, single_a2, single_a3);
 #else
 #error "TL_SM120_FULLTILE_SINGLE_I must be in [0, 3]"
 #endif
 #endif
 
-#if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                              \
+#if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                                \
     defined(TL_SM120_FULLTILE_CUTE_ROWSTART_B)
     detail::sm120_ldmatrix_x4_fp4_u32(
         b_cute_n0 + kCuteKAtomStride * TL_SM120_FULLTILE_SINGLE_J, single_b0,
         single_b1, single_b2, single_b3);
 #else
 #if TL_SM120_FULLTILE_SINGLE_J == 0
-    detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_0, single_b0,
-                                                  single_b1, single_b2,
-                                                  single_b3);
+    detail::sm120_ldmatrix_x4_blockscaled_operand(
+        b_smem_0, single_b0, single_b1, single_b2, single_b3);
 #elif TL_SM120_FULLTILE_SINGLE_J == 1
-    detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_1, single_b0,
-                                                  single_b1, single_b2,
-                                                  single_b3);
+    detail::sm120_ldmatrix_x4_blockscaled_operand(
+        b_smem_1, single_b0, single_b1, single_b2, single_b3);
 #elif TL_SM120_FULLTILE_SINGLE_J == 2
-    detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_2, single_b0,
-                                                  single_b1, single_b2,
-                                                  single_b3);
+    detail::sm120_ldmatrix_x4_blockscaled_operand(
+        b_smem_2, single_b0, single_b1, single_b2, single_b3);
 #elif TL_SM120_FULLTILE_SINGLE_J == 3
-    detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_3, single_b0,
-                                                  single_b1, single_b2,
-                                                  single_b3);
+    detail::sm120_ldmatrix_x4_blockscaled_operand(
+        b_smem_3, single_b0, single_b1, single_b2, single_b3);
 #else
 #error "TL_SM120_FULLTILE_SINGLE_J must be in [0, 3]"
 #endif
@@ -734,73 +722,69 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile(
                                 TL_SM120_FULLTILE_SINGLE_J * 8 +
                                 TL_SM120_FULLTILE_SINGLE_HALF * 4;
 #endif
-	    float *d = c + single_c_offset;
+    float *d = c + single_c_offset;
 #if defined(TL_SM120_FULLTILE_REG_DEBUG)
 #if defined(TL_SM120_FULLTILE_REG_TAG_DEBUG)
-	    {
-	      uint32_t const debug_warp = (uint32_t(int(threadIdx.x) & 127) >> 5);
-	      uint32_t const debug_lane = uint32_t(int(threadIdx.x) & 31);
-	      uint32_t const debug_base = 0xa5000000u | (debug_warp << 16) |
-	                                  (debug_lane << 8);
-#define TL_SM120_REG_DEBUG_TAG(SLOT)                                          \
+    {
+      uint32_t const debug_warp = (uint32_t(int(threadIdx.x) & 127) >> 5);
+      uint32_t const debug_lane = uint32_t(int(threadIdx.x) & 31);
+      uint32_t const debug_base =
+          0xa5000000u | (debug_warp << 16) | (debug_lane << 8);
+#define TL_SM120_REG_DEBUG_TAG(SLOT)                                           \
   d[SLOT] = __uint_as_float(debug_base | uint32_t(SLOT))
-	      TL_SM120_REG_DEBUG_TAG(0);
-	      TL_SM120_REG_DEBUG_TAG(1);
-	      TL_SM120_REG_DEBUG_TAG(2);
-	      TL_SM120_REG_DEBUG_TAG(3);
-	      TL_SM120_REG_DEBUG_TAG(4);
-	      TL_SM120_REG_DEBUG_TAG(5);
-	      TL_SM120_REG_DEBUG_TAG(6);
-	      TL_SM120_REG_DEBUG_TAG(7);
-	      TL_SM120_REG_DEBUG_TAG(8);
-	      TL_SM120_REG_DEBUG_TAG(9);
-	      TL_SM120_REG_DEBUG_TAG(10);
-	      TL_SM120_REG_DEBUG_TAG(11);
+      TL_SM120_REG_DEBUG_TAG(0);
+      TL_SM120_REG_DEBUG_TAG(1);
+      TL_SM120_REG_DEBUG_TAG(2);
+      TL_SM120_REG_DEBUG_TAG(3);
+      TL_SM120_REG_DEBUG_TAG(4);
+      TL_SM120_REG_DEBUG_TAG(5);
+      TL_SM120_REG_DEBUG_TAG(6);
+      TL_SM120_REG_DEBUG_TAG(7);
+      TL_SM120_REG_DEBUG_TAG(8);
+      TL_SM120_REG_DEBUG_TAG(9);
+      TL_SM120_REG_DEBUG_TAG(10);
+      TL_SM120_REG_DEBUG_TAG(11);
 #undef TL_SM120_REG_DEBUG_TAG
-	    }
+    }
 #else
-		    d[0] = __uint_as_float(single_a0);
-		    d[1] = __uint_as_float(single_a1);
-		    d[2] = __uint_as_float(single_a2);
-		    d[3] = __uint_as_float(single_a3);
-	    d[4] = __uint_as_float(single_b0);
-	    d[5] = __uint_as_float(single_b1);
-	    d[6] = __uint_as_float(single_b2);
-	    d[7] = __uint_as_float(single_b3);
-		    d[8] = __uint_as_float(single_b_lo);
-		    d[9] = __uint_as_float(single_b_hi);
-		    d[10] = __uint_as_float(single_sa);
-		    d[11] = __uint_as_float(single_sb);
+    d[0] = __uint_as_float(single_a0);
+    d[1] = __uint_as_float(single_a1);
+    d[2] = __uint_as_float(single_a2);
+    d[3] = __uint_as_float(single_a3);
+    d[4] = __uint_as_float(single_b0);
+    d[5] = __uint_as_float(single_b1);
+    d[6] = __uint_as_float(single_b2);
+    d[7] = __uint_as_float(single_b3);
+    d[8] = __uint_as_float(single_b_lo);
+    d[9] = __uint_as_float(single_b_hi);
+    d[10] = __uint_as_float(single_sa);
+    d[11] = __uint_as_float(single_sb);
 #endif
-		    return;
+    return;
 #endif
-	    detail::sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3_regs(
-	        d, single_a0, single_a1, single_a2, single_a3, single_b_lo,
-	        single_b_hi, d, single_sa, single_sb);
+    detail::sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3_regs(
+        d, single_a0, single_a1, single_a2, single_a3, single_b_lo, single_b_hi,
+        d, single_sa, single_sb);
     return;
   }
 #endif
 
-#if !defined(TL_SM120_FULLTILE_BOUNDED_2X2_PACKAGE) &&                       \
+#if !defined(TL_SM120_FULLTILE_BOUNDED_2X2_PACKAGE) &&                         \
     !defined(TL_SM120_FULLTILE_AFULL_B_PANEL_STREAM)
-#if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                              \
+#if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                                \
     defined(TL_SM120_FULLTILE_CUTE_ROWSTART_B)
   detail::sm120_ldmatrix_x4_fp4_u32(b_cute_n0 + 0, b00, b01, b02, b03);
-  detail::sm120_ldmatrix_x4_fp4_u32(b_cute_n0 + kCuteKAtomStride, b10, b11,
-                                    b12, b13);
-  detail::sm120_ldmatrix_x4_fp4_u32(b_cute_n0 + 2 * kCuteKAtomStride, b20,
-                                    b21, b22, b23);
-  detail::sm120_ldmatrix_x4_fp4_u32(b_cute_n0 + 3 * kCuteKAtomStride, b30,
-                                    b31, b32, b33);
+  detail::sm120_ldmatrix_x4_fp4_u32(b_cute_n0 + kCuteKAtomStride, b10, b11, b12,
+                                    b13);
+  detail::sm120_ldmatrix_x4_fp4_u32(b_cute_n0 + 2 * kCuteKAtomStride, b20, b21,
+                                    b22, b23);
+  detail::sm120_ldmatrix_x4_fp4_u32(b_cute_n0 + 3 * kCuteKAtomStride, b30, b31,
+                                    b32, b33);
 #else
-  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_0, b00, b01, b02,
-                                                b03);
-  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_1, b10, b11, b12,
-                                                b13);
-  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_2, b20, b21, b22,
-                                                b23);
-  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_3, b30, b31, b32,
-                                                b33);
+  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_0, b00, b01, b02, b03);
+  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_1, b10, b11, b12, b13);
+  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_2, b20, b21, b22, b23);
+  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_3, b30, b31, b32, b33);
 #endif
 
 #if defined(TL_SM120_FULLTILE_CUTLASS_SF_BASEPTR)
@@ -865,7 +849,7 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile(
 #endif
 #endif
 
-#if defined(TL_SM120_FULLTILE_CUTE_ACCUM_LAYOUT) &&                           \
+#if defined(TL_SM120_FULLTILE_CUTE_ACCUM_LAYOUT) &&                            \
     !defined(TL_SM120_FULLTILE_CUTE_ACCUM_DIRECT)
   float c_cute[128];
 #pragma unroll
@@ -886,30 +870,30 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile(
   float *c_mma = c;
 #endif
 
-#if defined(TL_SM120_FULLTILE_CUTE_ACCUM_LAYOUT) ||                           \
+#if defined(TL_SM120_FULLTILE_CUTE_ACCUM_LAYOUT) ||                            \
     defined(TL_SM120_FULLTILE_CUTE_ACCUM_DIRECT)
-#define TL_SM120_C_OFFSET(I, J, HALF) ((I)*4 + (J)*32 + (HALF)*16)
+#define TL_SM120_C_OFFSET(I, J, HALF) ((I) * 4 + (J) * 32 + (HALF) * 16)
 #else
-#define TL_SM120_C_OFFSET(I, J, HALF) ((I)*32 + (J)*8 + (HALF)*4)
+#define TL_SM120_C_OFFSET(I, J, HALF) ((I) * 32 + (J) * 8 + (HALF) * 4)
 #endif
 
-#define TL_SM120_MMA_N8(I, J, HALF, A0, A1, A2, A3, B0, B1, SA, SB)          \
-  do {                                                                       \
-    float *d = c_mma + TL_SM120_C_OFFSET(I, J, HALF);                        \
-    detail::sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3_regs(                       \
-        d, A0, A1, A2, A3, B0, B1, d, SA, SB);                               \
+#define TL_SM120_MMA_N8(I, J, HALF, A0, A1, A2, A3, B0, B1, SA, SB)            \
+  do {                                                                         \
+    float *d = c_mma + TL_SM120_C_OFFSET(I, J, HALF);                          \
+    detail::sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3_regs(d, A0, A1, A2, A3, B0,   \
+                                                      B1, d, SA, SB);          \
   } while (0)
 
-#define TL_SM120_MMA_ROW(I, A0, A1, A2, A3, SA)                              \
-  do {                                                                       \
-    TL_SM120_MMA_N8(I, 0, 0, A0, A1, A2, A3, b00, b01, SA, sb0);             \
-    TL_SM120_MMA_N8(I, 0, 1, A0, A1, A2, A3, b02, b03, SA, sbr0);            \
-    TL_SM120_MMA_N8(I, 1, 0, A0, A1, A2, A3, b10, b11, SA, sb1);             \
-    TL_SM120_MMA_N8(I, 1, 1, A0, A1, A2, A3, b12, b13, SA, sbr1);            \
-    TL_SM120_MMA_N8(I, 2, 0, A0, A1, A2, A3, b20, b21, SA, sb2);             \
-    TL_SM120_MMA_N8(I, 2, 1, A0, A1, A2, A3, b22, b23, SA, sbr2);            \
-    TL_SM120_MMA_N8(I, 3, 0, A0, A1, A2, A3, b30, b31, SA, sb3);             \
-    TL_SM120_MMA_N8(I, 3, 1, A0, A1, A2, A3, b32, b33, SA, sbr3);            \
+#define TL_SM120_MMA_ROW(I, A0, A1, A2, A3, SA)                                \
+  do {                                                                         \
+    TL_SM120_MMA_N8(I, 0, 0, A0, A1, A2, A3, b00, b01, SA, sb0);               \
+    TL_SM120_MMA_N8(I, 0, 1, A0, A1, A2, A3, b02, b03, SA, sbr0);              \
+    TL_SM120_MMA_N8(I, 1, 0, A0, A1, A2, A3, b10, b11, SA, sb1);               \
+    TL_SM120_MMA_N8(I, 1, 1, A0, A1, A2, A3, b12, b13, SA, sbr1);              \
+    TL_SM120_MMA_N8(I, 2, 0, A0, A1, A2, A3, b20, b21, SA, sb2);               \
+    TL_SM120_MMA_N8(I, 2, 1, A0, A1, A2, A3, b22, b23, SA, sbr2);              \
+    TL_SM120_MMA_N8(I, 3, 0, A0, A1, A2, A3, b30, b31, SA, sb3);               \
+    TL_SM120_MMA_N8(I, 3, 1, A0, A1, A2, A3, b32, b33, SA, sbr3);              \
   } while (0)
 
   uint32_t a0, a1, a2, a3;
@@ -917,21 +901,20 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile(
   uint32_t a4, a5, a6, a7;
   uint32_t a8, a9, a10, a11;
   uint32_t a12, a13, a14, a15;
-#if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                              \
+#if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                                \
     defined(TL_SM120_FULLTILE_CUTE_ROWSTART_A)
   detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + 0, a0, a1, a2, a3);
   detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + kCuteKAtomStride, a4, a5, a6,
                                     a7);
   detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + 2 * kCuteKAtomStride, a8, a9,
                                     a10, a11);
-  detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + 3 * kCuteKAtomStride, a12,
-                                    a13, a14, a15);
+  detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + 3 * kCuteKAtomStride, a12, a13,
+                                    a14, a15);
 #else
   detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_0, a0, a1, a2, a3);
   detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_1, a4, a5, a6, a7);
   detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_2, a8, a9, a10, a11);
-  detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_3, a12, a13, a14,
-                                                a15);
+  detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_3, a12, a13, a14, a15);
 #endif
 
 #if defined(TL_SM120_FULLTILE_AFULL_SCALE_REGS)
@@ -975,7 +958,7 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile(
 #endif
 
 #if defined(TL_SM120_FULLTILE_AFULL_B_PANEL_ADDRS)
-#if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                              \
+#if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                                \
     defined(TL_SM120_FULLTILE_CUTE_ROWSTART_B)
   uint32_t const b_panel_0_addr = detail::sm120_smem_addr(b_cute_n0 + 0);
   uint32_t const b_panel_1_addr =
@@ -992,80 +975,74 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile(
 #endif
 #endif
 
-#if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                              \
+#if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                                \
     defined(TL_SM120_FULLTILE_CUTE_ROWSTART_B)
 #if defined(TL_SM120_FULLTILE_AFULL_B_PANEL_ADDRS)
-#define TL_SM120_LOAD_B_PANEL_0()                                            \
-  detail::sm120_ldmatrix_x4_blockscaled_operand_addr(                        \
-      b_panel_0_addr, b00, b01, b02, b03)
-#define TL_SM120_LOAD_B_PANEL_1()                                            \
-  detail::sm120_ldmatrix_x4_blockscaled_operand_addr(                        \
-      b_panel_1_addr, b00, b01, b02, b03)
-#define TL_SM120_LOAD_B_PANEL_2()                                            \
-  detail::sm120_ldmatrix_x4_blockscaled_operand_addr(                        \
-      b_panel_2_addr, b00, b01, b02, b03)
-#define TL_SM120_LOAD_B_PANEL_3()                                            \
-  detail::sm120_ldmatrix_x4_blockscaled_operand_addr(                        \
-      b_panel_3_addr, b00, b01, b02, b03)
+#define TL_SM120_LOAD_B_PANEL_0()                                              \
+  detail::sm120_ldmatrix_x4_blockscaled_operand_addr(b_panel_0_addr, b00, b01, \
+                                                     b02, b03)
+#define TL_SM120_LOAD_B_PANEL_1()                                              \
+  detail::sm120_ldmatrix_x4_blockscaled_operand_addr(b_panel_1_addr, b00, b01, \
+                                                     b02, b03)
+#define TL_SM120_LOAD_B_PANEL_2()                                              \
+  detail::sm120_ldmatrix_x4_blockscaled_operand_addr(b_panel_2_addr, b00, b01, \
+                                                     b02, b03)
+#define TL_SM120_LOAD_B_PANEL_3()                                              \
+  detail::sm120_ldmatrix_x4_blockscaled_operand_addr(b_panel_3_addr, b00, b01, \
+                                                     b02, b03)
 #else
-#define TL_SM120_LOAD_B_PANEL_0()                                            \
+#define TL_SM120_LOAD_B_PANEL_0()                                              \
   detail::sm120_ldmatrix_x4_fp4_u32(b_cute_n0 + 0, b00, b01, b02, b03)
-#define TL_SM120_LOAD_B_PANEL_1()                                            \
-  detail::sm120_ldmatrix_x4_fp4_u32(b_cute_n0 + kCuteKAtomStride, b00, b01,  \
+#define TL_SM120_LOAD_B_PANEL_1()                                              \
+  detail::sm120_ldmatrix_x4_fp4_u32(b_cute_n0 + kCuteKAtomStride, b00, b01,    \
                                     b02, b03)
-#define TL_SM120_LOAD_B_PANEL_2()                                            \
-  detail::sm120_ldmatrix_x4_fp4_u32(b_cute_n0 + 2 * kCuteKAtomStride, b00,   \
+#define TL_SM120_LOAD_B_PANEL_2()                                              \
+  detail::sm120_ldmatrix_x4_fp4_u32(b_cute_n0 + 2 * kCuteKAtomStride, b00,     \
                                     b01, b02, b03)
-#define TL_SM120_LOAD_B_PANEL_3()                                            \
-  detail::sm120_ldmatrix_x4_fp4_u32(b_cute_n0 + 3 * kCuteKAtomStride, b00,   \
+#define TL_SM120_LOAD_B_PANEL_3()                                              \
+  detail::sm120_ldmatrix_x4_fp4_u32(b_cute_n0 + 3 * kCuteKAtomStride, b00,     \
                                     b01, b02, b03)
 #endif
 #else
 #if defined(TL_SM120_FULLTILE_AFULL_B_PANEL_ADDRS)
-#define TL_SM120_LOAD_B_PANEL_0()                                            \
-  detail::sm120_ldmatrix_x4_blockscaled_operand_addr(                        \
-      b_panel_0_addr, b00, b01, b02, b03)
-#define TL_SM120_LOAD_B_PANEL_1()                                            \
-  detail::sm120_ldmatrix_x4_blockscaled_operand_addr(                        \
-      b_panel_1_addr, b00, b01, b02, b03)
-#define TL_SM120_LOAD_B_PANEL_2()                                            \
-  detail::sm120_ldmatrix_x4_blockscaled_operand_addr(                        \
-      b_panel_2_addr, b00, b01, b02, b03)
-#define TL_SM120_LOAD_B_PANEL_3()                                            \
-  detail::sm120_ldmatrix_x4_blockscaled_operand_addr(                        \
-      b_panel_3_addr, b00, b01, b02, b03)
+#define TL_SM120_LOAD_B_PANEL_0()                                              \
+  detail::sm120_ldmatrix_x4_blockscaled_operand_addr(b_panel_0_addr, b00, b01, \
+                                                     b02, b03)
+#define TL_SM120_LOAD_B_PANEL_1()                                              \
+  detail::sm120_ldmatrix_x4_blockscaled_operand_addr(b_panel_1_addr, b00, b01, \
+                                                     b02, b03)
+#define TL_SM120_LOAD_B_PANEL_2()                                              \
+  detail::sm120_ldmatrix_x4_blockscaled_operand_addr(b_panel_2_addr, b00, b01, \
+                                                     b02, b03)
+#define TL_SM120_LOAD_B_PANEL_3()                                              \
+  detail::sm120_ldmatrix_x4_blockscaled_operand_addr(b_panel_3_addr, b00, b01, \
+                                                     b02, b03)
 #else
-#define TL_SM120_LOAD_B_PANEL_0()                                            \
-  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_0, b00, b01, b02,     \
-                                                b03)
-#define TL_SM120_LOAD_B_PANEL_1()                                            \
-  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_1, b00, b01, b02,     \
-                                                b03)
-#define TL_SM120_LOAD_B_PANEL_2()                                            \
-  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_2, b00, b01, b02,     \
-                                                b03)
-#define TL_SM120_LOAD_B_PANEL_3()                                            \
-  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_3, b00, b01, b02,     \
-                                                b03)
+#define TL_SM120_LOAD_B_PANEL_0()                                              \
+  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_0, b00, b01, b02, b03)
+#define TL_SM120_LOAD_B_PANEL_1()                                              \
+  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_1, b00, b01, b02, b03)
+#define TL_SM120_LOAD_B_PANEL_2()                                              \
+  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_2, b00, b01, b02, b03)
+#define TL_SM120_LOAD_B_PANEL_3()                                              \
+  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_3, b00, b01, b02, b03)
 #endif
 #endif
 
-#define TL_SM120_MMA_B_PANEL(J, LOAD_B, SFB, SFB_REP)                        \
-  do {                                                                       \
-    LOAD_B();                                                                \
-    uint32_t const sb = (SFB);                                               \
-    uint32_t const sbr = (SFB_REP);                                          \
-    TL_SM120_MMA_N8(0, J, 0, a0, a1, a2, a3, b00, b01, TL_SM120_SFA0, sb);   \
-    TL_SM120_MMA_N8(1, J, 0, a4, a5, a6, a7, b00, b01, TL_SM120_SFA1, sb);   \
-    TL_SM120_MMA_N8(2, J, 0, a8, a9, a10, a11, b00, b01, TL_SM120_SFA2, sb); \
-    TL_SM120_MMA_N8(3, J, 0, a12, a13, a14, a15, b00, b01, TL_SM120_SFA3,    \
-                    sb);                                                     \
-    TL_SM120_MMA_N8(0, J, 1, a0, a1, a2, a3, b02, b03, TL_SM120_SFA0, sbr);  \
-    TL_SM120_MMA_N8(1, J, 1, a4, a5, a6, a7, b02, b03, TL_SM120_SFA1, sbr);  \
-    TL_SM120_MMA_N8(2, J, 1, a8, a9, a10, a11, b02, b03, TL_SM120_SFA2,      \
-                    sbr);                                                    \
-    TL_SM120_MMA_N8(3, J, 1, a12, a13, a14, a15, b02, b03, TL_SM120_SFA3,    \
-                    sbr);                                                    \
+#define TL_SM120_MMA_B_PANEL(J, LOAD_B, SFB, SFB_REP)                          \
+  do {                                                                         \
+    LOAD_B();                                                                  \
+    uint32_t const sb = (SFB);                                                 \
+    uint32_t const sbr = (SFB_REP);                                            \
+    TL_SM120_MMA_N8(0, J, 0, a0, a1, a2, a3, b00, b01, TL_SM120_SFA0, sb);     \
+    TL_SM120_MMA_N8(1, J, 0, a4, a5, a6, a7, b00, b01, TL_SM120_SFA1, sb);     \
+    TL_SM120_MMA_N8(2, J, 0, a8, a9, a10, a11, b00, b01, TL_SM120_SFA2, sb);   \
+    TL_SM120_MMA_N8(3, J, 0, a12, a13, a14, a15, b00, b01, TL_SM120_SFA3, sb); \
+    TL_SM120_MMA_N8(0, J, 1, a0, a1, a2, a3, b02, b03, TL_SM120_SFA0, sbr);    \
+    TL_SM120_MMA_N8(1, J, 1, a4, a5, a6, a7, b02, b03, TL_SM120_SFA1, sbr);    \
+    TL_SM120_MMA_N8(2, J, 1, a8, a9, a10, a11, b02, b03, TL_SM120_SFA2, sbr);  \
+    TL_SM120_MMA_N8(3, J, 1, a12, a13, a14, a15, b02, b03, TL_SM120_SFA3,      \
+                    sbr);                                                      \
   } while (0)
 
   TL_SM120_MMA_B_PANEL(0, TL_SM120_LOAD_B_PANEL_0, TL_SM120_SFB0,
@@ -1096,57 +1073,52 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile(
 #undef TL_SM120_SFA0
 #elif defined(TL_SM120_FULLTILE_PAIR_ASM_B)
   uint32_t a4, a5, a6, a7;
-#if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                              \
+#if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                                \
     defined(TL_SM120_FULLTILE_CUTE_ROWSTART_A)
-#define TL_SM120_LOAD_A_PAIR_01()                                            \
-  do {                                                                       \
-    detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + 0, a0, a1, a2, a3);        \
-    detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + kCuteKAtomStride, a4, a5,  \
-                                      a6, a7);                                \
+#define TL_SM120_LOAD_A_PAIR_01()                                              \
+  do {                                                                         \
+    detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + 0, a0, a1, a2, a3);          \
+    detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + kCuteKAtomStride, a4, a5,    \
+                                      a6, a7);                                 \
   } while (0)
-#define TL_SM120_LOAD_A_PAIR_23()                                            \
-  do {                                                                       \
-    detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + 2 * kCuteKAtomStride, a0,  \
-                                      a1, a2, a3);                            \
-    detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + 3 * kCuteKAtomStride, a4,  \
-                                      a5, a6, a7);                            \
+#define TL_SM120_LOAD_A_PAIR_23()                                              \
+  do {                                                                         \
+    detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + 2 * kCuteKAtomStride, a0,    \
+                                      a1, a2, a3);                             \
+    detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + 3 * kCuteKAtomStride, a4,    \
+                                      a5, a6, a7);                             \
   } while (0)
 #else
-#define TL_SM120_LOAD_A_PAIR_01()                                            \
-  do {                                                                       \
-    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_0, a0, a1, a2,      \
-                                                  a3);                       \
-    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_1, a4, a5, a6,      \
-                                                  a7);                       \
+#define TL_SM120_LOAD_A_PAIR_01()                                              \
+  do {                                                                         \
+    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_0, a0, a1, a2, a3);   \
+    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_1, a4, a5, a6, a7);   \
   } while (0)
-#define TL_SM120_LOAD_A_PAIR_23()                                            \
-  do {                                                                       \
-    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_2, a0, a1, a2,      \
-                                                  a3);                       \
-    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_3, a4, a5, a6,      \
-                                                  a7);                       \
+#define TL_SM120_LOAD_A_PAIR_23()                                              \
+  do {                                                                         \
+    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_2, a0, a1, a2, a3);   \
+    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_3, a4, a5, a6, a7);   \
   } while (0)
 #endif
 
-#define TL_SM120_MMA2_SAME_B(I0, I1, J, HALF, B0, B1, SA0, SA1, SB)          \
-  do {                                                                       \
-    float *d0 = c_mma + TL_SM120_C_OFFSET(I0, J, HALF);                      \
-    float *d1 = c_mma + TL_SM120_C_OFFSET(I1, J, HALF);                      \
-    detail::sm120_mma2_m16n8k64_mxf4nvf4_4x_ue4m3_same_b_regs(               \
-        d0, a0, a1, a2, a3, d0, SA0, d1, a4, a5, a6, a7, d1, SA1, B0, B1,    \
-        SB);                                                                 \
+#define TL_SM120_MMA2_SAME_B(I0, I1, J, HALF, B0, B1, SA0, SA1, SB)            \
+  do {                                                                         \
+    float *d0 = c_mma + TL_SM120_C_OFFSET(I0, J, HALF);                        \
+    float *d1 = c_mma + TL_SM120_C_OFFSET(I1, J, HALF);                        \
+    detail::sm120_mma2_m16n8k64_mxf4nvf4_4x_ue4m3_same_b_regs(                 \
+        d0, a0, a1, a2, a3, d0, SA0, d1, a4, a5, a6, a7, d1, SA1, B0, B1, SB); \
   } while (0)
 
-#define TL_SM120_MMA2_PAIR_ROWS(I0, I1, SA0, SA1)                            \
-  do {                                                                       \
-    TL_SM120_MMA2_SAME_B(I0, I1, 0, 0, b00, b01, SA0, SA1, sb0);             \
-    TL_SM120_MMA2_SAME_B(I0, I1, 0, 1, b02, b03, SA0, SA1, sbr0);            \
-    TL_SM120_MMA2_SAME_B(I0, I1, 1, 0, b10, b11, SA0, SA1, sb1);             \
-    TL_SM120_MMA2_SAME_B(I0, I1, 1, 1, b12, b13, SA0, SA1, sbr1);            \
-    TL_SM120_MMA2_SAME_B(I0, I1, 2, 0, b20, b21, SA0, SA1, sb2);             \
-    TL_SM120_MMA2_SAME_B(I0, I1, 2, 1, b22, b23, SA0, SA1, sbr2);            \
-    TL_SM120_MMA2_SAME_B(I0, I1, 3, 0, b30, b31, SA0, SA1, sb3);             \
-    TL_SM120_MMA2_SAME_B(I0, I1, 3, 1, b32, b33, SA0, SA1, sbr3);            \
+#define TL_SM120_MMA2_PAIR_ROWS(I0, I1, SA0, SA1)                              \
+  do {                                                                         \
+    TL_SM120_MMA2_SAME_B(I0, I1, 0, 0, b00, b01, SA0, SA1, sb0);               \
+    TL_SM120_MMA2_SAME_B(I0, I1, 0, 1, b02, b03, SA0, SA1, sbr0);              \
+    TL_SM120_MMA2_SAME_B(I0, I1, 1, 0, b10, b11, SA0, SA1, sb1);               \
+    TL_SM120_MMA2_SAME_B(I0, I1, 1, 1, b12, b13, SA0, SA1, sbr1);              \
+    TL_SM120_MMA2_SAME_B(I0, I1, 2, 0, b20, b21, SA0, SA1, sb2);               \
+    TL_SM120_MMA2_SAME_B(I0, I1, 2, 1, b22, b23, SA0, SA1, sbr2);              \
+    TL_SM120_MMA2_SAME_B(I0, I1, 3, 0, b30, b31, SA0, SA1, sb3);               \
+    TL_SM120_MMA2_SAME_B(I0, I1, 3, 1, b32, b33, SA0, SA1, sbr3);              \
   } while (0)
 
   TL_SM120_LOAD_A_PAIR_01();
@@ -1160,98 +1132,90 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile(
 #undef TL_SM120_LOAD_A_PAIR_01
 #elif defined(TL_SM120_FULLTILE_BOUNDED_2X2_PACKAGE)
   uint32_t a4, a5, a6, a7;
-#if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                              \
+#if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                                \
     defined(TL_SM120_FULLTILE_CUTE_ROWSTART_A)
-#define TL_SM120_LOAD_A_PAIR_01()                                            \
-  do {                                                                       \
-    detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + 0, a0, a1, a2, a3);        \
-    detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + kCuteKAtomStride, a4, a5,  \
-                                      a6, a7);                                \
+#define TL_SM120_LOAD_A_PAIR_01()                                              \
+  do {                                                                         \
+    detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + 0, a0, a1, a2, a3);          \
+    detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + kCuteKAtomStride, a4, a5,    \
+                                      a6, a7);                                 \
   } while (0)
-#define TL_SM120_LOAD_A_PAIR_23()                                            \
-  do {                                                                       \
-    detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + 2 * kCuteKAtomStride, a0,  \
-                                      a1, a2, a3);                            \
-    detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + 3 * kCuteKAtomStride, a4,  \
-                                      a5, a6, a7);                            \
+#define TL_SM120_LOAD_A_PAIR_23()                                              \
+  do {                                                                         \
+    detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + 2 * kCuteKAtomStride, a0,    \
+                                      a1, a2, a3);                             \
+    detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + 3 * kCuteKAtomStride, a4,    \
+                                      a5, a6, a7);                             \
   } while (0)
 #else
-#define TL_SM120_LOAD_A_PAIR_01()                                            \
-  do {                                                                       \
-    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_0, a0, a1, a2,      \
-                                                  a3);                       \
-    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_1, a4, a5, a6,      \
-                                                  a7);                       \
+#define TL_SM120_LOAD_A_PAIR_01()                                              \
+  do {                                                                         \
+    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_0, a0, a1, a2, a3);   \
+    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_1, a4, a5, a6, a7);   \
   } while (0)
-#define TL_SM120_LOAD_A_PAIR_23()                                            \
-  do {                                                                       \
-    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_2, a0, a1, a2,      \
-                                                  a3);                       \
-    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_3, a4, a5, a6,      \
-                                                  a7);                       \
+#define TL_SM120_LOAD_A_PAIR_23()                                              \
+  do {                                                                         \
+    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_2, a0, a1, a2, a3);   \
+    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_3, a4, a5, a6, a7);   \
   } while (0)
 #endif
 
-#if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                              \
+#if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                                \
     defined(TL_SM120_FULLTILE_CUTE_ROWSTART_B)
-#define TL_SM120_LOAD_B_PANEL_0()                                            \
+#define TL_SM120_LOAD_B_PANEL_0()                                              \
   detail::sm120_ldmatrix_x4_fp4_u32(b_cute_n0 + 0, b00, b01, b02, b03)
-#define TL_SM120_LOAD_B_PANEL_1()                                            \
-  detail::sm120_ldmatrix_x4_fp4_u32(b_cute_n0 + kCuteKAtomStride, b00, b01,  \
+#define TL_SM120_LOAD_B_PANEL_1()                                              \
+  detail::sm120_ldmatrix_x4_fp4_u32(b_cute_n0 + kCuteKAtomStride, b00, b01,    \
                                     b02, b03)
-#define TL_SM120_LOAD_B_PANEL_2()                                            \
-  detail::sm120_ldmatrix_x4_fp4_u32(b_cute_n0 + 2 * kCuteKAtomStride, b00,   \
+#define TL_SM120_LOAD_B_PANEL_2()                                              \
+  detail::sm120_ldmatrix_x4_fp4_u32(b_cute_n0 + 2 * kCuteKAtomStride, b00,     \
                                     b01, b02, b03)
-#define TL_SM120_LOAD_B_PANEL_3()                                            \
-  detail::sm120_ldmatrix_x4_fp4_u32(b_cute_n0 + 3 * kCuteKAtomStride, b00,   \
+#define TL_SM120_LOAD_B_PANEL_3()                                              \
+  detail::sm120_ldmatrix_x4_fp4_u32(b_cute_n0 + 3 * kCuteKAtomStride, b00,     \
                                     b01, b02, b03)
 #else
-#define TL_SM120_LOAD_B_PANEL_0()                                            \
-  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_0, b00, b01, b02,     \
-                                                b03)
-#define TL_SM120_LOAD_B_PANEL_1()                                            \
-  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_1, b00, b01, b02,     \
-                                                b03)
-#define TL_SM120_LOAD_B_PANEL_2()                                            \
-  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_2, b00, b01, b02,     \
-                                                b03)
-#define TL_SM120_LOAD_B_PANEL_3()                                            \
-  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_3, b00, b01, b02,     \
-                                                b03)
+#define TL_SM120_LOAD_B_PANEL_0()                                              \
+  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_0, b00, b01, b02, b03)
+#define TL_SM120_LOAD_B_PANEL_1()                                              \
+  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_1, b00, b01, b02, b03)
+#define TL_SM120_LOAD_B_PANEL_2()                                              \
+  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_2, b00, b01, b02, b03)
+#define TL_SM120_LOAD_B_PANEL_3()                                              \
+  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_3, b00, b01, b02, b03)
 #endif
 
-#define TL_SM120_MMA_PAIR_FWD(I0, I1, J, HALF, B0, B1, SA0, SA1, SB)         \
-  do {                                                                       \
-    TL_SM120_MMA_N8(I0, J, HALF, a0, a1, a2, a3, B0, B1, SA0, SB);           \
-    TL_SM120_MMA_N8(I1, J, HALF, a4, a5, a6, a7, B0, B1, SA1, SB);           \
+#define TL_SM120_MMA_PAIR_FWD(I0, I1, J, HALF, B0, B1, SA0, SA1, SB)           \
+  do {                                                                         \
+    TL_SM120_MMA_N8(I0, J, HALF, a0, a1, a2, a3, B0, B1, SA0, SB);             \
+    TL_SM120_MMA_N8(I1, J, HALF, a4, a5, a6, a7, B0, B1, SA1, SB);             \
   } while (0)
 
-#define TL_SM120_MMA_PAIR_REV(I0, I1, J, HALF, B0, B1, SA0, SA1, SB)         \
-  do {                                                                       \
-    TL_SM120_MMA_N8(I1, J, HALF, a4, a5, a6, a7, B0, B1, SA1, SB);           \
-    TL_SM120_MMA_N8(I0, J, HALF, a0, a1, a2, a3, B0, B1, SA0, SB);           \
+#define TL_SM120_MMA_PAIR_REV(I0, I1, J, HALF, B0, B1, SA0, SA1, SB)           \
+  do {                                                                         \
+    TL_SM120_MMA_N8(I1, J, HALF, a4, a5, a6, a7, B0, B1, SA1, SB);             \
+    TL_SM120_MMA_N8(I0, J, HALF, a0, a1, a2, a3, B0, B1, SA0, SB);             \
   } while (0)
 
-#define TL_SM120_MMA_B_PANEL(I0, I1, J, LOAD_B, SFB, SFB_REP, SA0, SA1)      \
-  do {                                                                       \
-    LOAD_B();                                                                \
-    uint32_t const sb = *(SFB);                                              \
-    uint32_t const sbr = *(SFB_REP);                                         \
-    TL_SM120_MMA_PAIR_FWD(I0, I1, J, 0, b00, b01, SA0, SA1, sb);             \
-    TL_SM120_MMA_PAIR_REV(I0, I1, J, 1, b02, b03, SA0, SA1, sbr);            \
+#define TL_SM120_MMA_B_PANEL(I0, I1, J, LOAD_B, SFB, SFB_REP, SA0, SA1)        \
+  do {                                                                         \
+    LOAD_B();                                                                  \
+    uint32_t const sb = *(SFB);                                                \
+    uint32_t const sbr = *(SFB_REP);                                           \
+    TL_SM120_MMA_PAIR_FWD(I0, I1, J, 0, b00, b01, SA0, SA1, sb);               \
+    TL_SM120_MMA_PAIR_REV(I0, I1, J, 1, b02, b03, SA0, SA1, sbr);              \
   } while (0)
 
-#define TL_SM120_MMA_A_PAIR(I0, I1, LOAD_A, SA0, SA1)                        \
-  do {                                                                       \
-    LOAD_A();                                                                \
-    TL_SM120_MMA_B_PANEL(I0, I1, 0, TL_SM120_LOAD_B_PANEL_0, sfb_0,          \
-                         sfb_rep_0, SA0, SA1);                               \
-    TL_SM120_MMA_B_PANEL(I0, I1, 1, TL_SM120_LOAD_B_PANEL_1, sfb_1,          \
-                         sfb_rep_1, SA0, SA1);                               \
-    TL_SM120_MMA_B_PANEL(I0, I1, 2, TL_SM120_LOAD_B_PANEL_2, sfb_2,          \
-                         sfb_rep_2, SA0, SA1);                               \
-    TL_SM120_MMA_B_PANEL(I0, I1, 3, TL_SM120_LOAD_B_PANEL_3, sfb_3,          \
-                         sfb_rep_3, SA0, SA1);                               \
+#define TL_SM120_MMA_A_PAIR(I0, I1, LOAD_A, SA0, SA1)                          \
+  do {                                                                         \
+    LOAD_A();                                                                  \
+    TL_SM120_MMA_B_PANEL(I0, I1, 0, TL_SM120_LOAD_B_PANEL_0, sfb_0, sfb_rep_0, \
+                         SA0, SA1);                                            \
+    TL_SM120_MMA_B_PANEL(I0, I1, 1, TL_SM120_LOAD_B_PANEL_1, sfb_1, sfb_rep_1, \
+                         SA0, SA1);                                            \
+    TL_SM120_MMA_B_PANEL(I0, I1, 2, TL_SM120_LOAD_B_PANEL_2, sfb_2, sfb_rep_2, \
+                         SA0, SA1);                                            \
+    TL_SM120_MMA_B_PANEL(I0, I1, 3, TL_SM120_LOAD_B_PANEL_3, sfb_3, sfb_rep_3, \
+                         SA0, SA1);                                            \
   } while (0)
 
   TL_SM120_MMA_A_PAIR(0, 1, TL_SM120_LOAD_A_PAIR_01, *sfa_0, *sfa_1);
@@ -1269,60 +1233,56 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile(
 #undef TL_SM120_LOAD_A_PAIR_01
 #elif defined(TL_SM120_FULLTILE_A2_BPAIR_ORDER)
   uint32_t a4, a5, a6, a7;
-#if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                              \
+#if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                                \
     defined(TL_SM120_FULLTILE_CUTE_ROWSTART_A)
-#define TL_SM120_LOAD_A_PAIR_01()                                            \
-  do {                                                                       \
-    detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + 0, a0, a1, a2, a3);        \
-    detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + kCuteKAtomStride, a4, a5,  \
-                                      a6, a7);                                \
+#define TL_SM120_LOAD_A_PAIR_01()                                              \
+  do {                                                                         \
+    detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + 0, a0, a1, a2, a3);          \
+    detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + kCuteKAtomStride, a4, a5,    \
+                                      a6, a7);                                 \
   } while (0)
-#define TL_SM120_LOAD_A_PAIR_23()                                            \
-  do {                                                                       \
-    detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + 2 * kCuteKAtomStride, a0,  \
-                                      a1, a2, a3);                            \
-    detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + 3 * kCuteKAtomStride, a4,  \
-                                      a5, a6, a7);                            \
+#define TL_SM120_LOAD_A_PAIR_23()                                              \
+  do {                                                                         \
+    detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + 2 * kCuteKAtomStride, a0,    \
+                                      a1, a2, a3);                             \
+    detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + 3 * kCuteKAtomStride, a4,    \
+                                      a5, a6, a7);                             \
   } while (0)
 #else
-#define TL_SM120_LOAD_A_PAIR_01()                                            \
-  do {                                                                       \
-    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_0, a0, a1, a2,      \
-                                                  a3);                       \
-    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_1, a4, a5, a6,      \
-                                                  a7);                       \
+#define TL_SM120_LOAD_A_PAIR_01()                                              \
+  do {                                                                         \
+    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_0, a0, a1, a2, a3);   \
+    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_1, a4, a5, a6, a7);   \
   } while (0)
-#define TL_SM120_LOAD_A_PAIR_23()                                            \
-  do {                                                                       \
-    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_2, a0, a1, a2,      \
-                                                  a3);                       \
-    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_3, a4, a5, a6,      \
-                                                  a7);                       \
+#define TL_SM120_LOAD_A_PAIR_23()                                              \
+  do {                                                                         \
+    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_2, a0, a1, a2, a3);   \
+    detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_3, a4, a5, a6, a7);   \
   } while (0)
 #endif
 
-#define TL_SM120_MMA_PAIR_FWD(I0, I1, J, HALF, B0, B1, SA0, SA1, SB)         \
-  do {                                                                       \
-    TL_SM120_MMA_N8(I0, J, HALF, a0, a1, a2, a3, B0, B1, SA0, SB);           \
-    TL_SM120_MMA_N8(I1, J, HALF, a4, a5, a6, a7, B0, B1, SA1, SB);           \
+#define TL_SM120_MMA_PAIR_FWD(I0, I1, J, HALF, B0, B1, SA0, SA1, SB)           \
+  do {                                                                         \
+    TL_SM120_MMA_N8(I0, J, HALF, a0, a1, a2, a3, B0, B1, SA0, SB);             \
+    TL_SM120_MMA_N8(I1, J, HALF, a4, a5, a6, a7, B0, B1, SA1, SB);             \
   } while (0)
 
-#define TL_SM120_MMA_PAIR_REV(I0, I1, J, HALF, B0, B1, SA0, SA1, SB)         \
-  do {                                                                       \
-    TL_SM120_MMA_N8(I1, J, HALF, a4, a5, a6, a7, B0, B1, SA1, SB);           \
-    TL_SM120_MMA_N8(I0, J, HALF, a0, a1, a2, a3, B0, B1, SA0, SB);           \
+#define TL_SM120_MMA_PAIR_REV(I0, I1, J, HALF, B0, B1, SA0, SA1, SB)           \
+  do {                                                                         \
+    TL_SM120_MMA_N8(I1, J, HALF, a4, a5, a6, a7, B0, B1, SA1, SB);             \
+    TL_SM120_MMA_N8(I0, J, HALF, a0, a1, a2, a3, B0, B1, SA0, SB);             \
   } while (0)
 
-#define TL_SM120_MMA_PAIR_ROWS(I0, I1, SA0, SA1)                             \
-  do {                                                                       \
-    TL_SM120_MMA_PAIR_FWD(I0, I1, 0, 0, b00, b01, SA0, SA1, sb0);            \
-    TL_SM120_MMA_PAIR_REV(I0, I1, 0, 1, b02, b03, SA0, SA1, sbr0);           \
-    TL_SM120_MMA_PAIR_FWD(I0, I1, 1, 0, b10, b11, SA0, SA1, sb1);            \
-    TL_SM120_MMA_PAIR_REV(I0, I1, 1, 1, b12, b13, SA0, SA1, sbr1);           \
-    TL_SM120_MMA_PAIR_FWD(I0, I1, 2, 0, b20, b21, SA0, SA1, sb2);            \
-    TL_SM120_MMA_PAIR_REV(I0, I1, 2, 1, b22, b23, SA0, SA1, sbr2);           \
-    TL_SM120_MMA_PAIR_FWD(I0, I1, 3, 0, b30, b31, SA0, SA1, sb3);            \
-    TL_SM120_MMA_PAIR_REV(I0, I1, 3, 1, b32, b33, SA0, SA1, sbr3);           \
+#define TL_SM120_MMA_PAIR_ROWS(I0, I1, SA0, SA1)                               \
+  do {                                                                         \
+    TL_SM120_MMA_PAIR_FWD(I0, I1, 0, 0, b00, b01, SA0, SA1, sb0);              \
+    TL_SM120_MMA_PAIR_REV(I0, I1, 0, 1, b02, b03, SA0, SA1, sbr0);             \
+    TL_SM120_MMA_PAIR_FWD(I0, I1, 1, 0, b10, b11, SA0, SA1, sb1);              \
+    TL_SM120_MMA_PAIR_REV(I0, I1, 1, 1, b12, b13, SA0, SA1, sbr1);             \
+    TL_SM120_MMA_PAIR_FWD(I0, I1, 2, 0, b20, b21, SA0, SA1, sb2);              \
+    TL_SM120_MMA_PAIR_REV(I0, I1, 2, 1, b22, b23, SA0, SA1, sbr2);             \
+    TL_SM120_MMA_PAIR_FWD(I0, I1, 3, 0, b30, b31, SA0, SA1, sb3);              \
+    TL_SM120_MMA_PAIR_REV(I0, I1, 3, 1, b32, b33, SA0, SA1, sbr3);             \
   } while (0)
 
   TL_SM120_LOAD_A_PAIR_01();
@@ -1336,50 +1296,46 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile(
 #undef TL_SM120_LOAD_A_PAIR_23
 #undef TL_SM120_LOAD_A_PAIR_01
 #elif defined(TL_SM120_FULLTILE_ROLLING_A_ORDER)
-#if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                              \
+#if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                                \
     defined(TL_SM120_FULLTILE_CUTE_ROWSTART_A)
-#define TL_SM120_LOAD_A_ROW(I)                                                \
-  detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + (I)*kCuteKAtomStride, a0, a1, \
-                                    a2, a3)
+#define TL_SM120_LOAD_A_ROW(I)                                                 \
+  detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + (I) * kCuteKAtomStride, a0,    \
+                                    a1, a2, a3)
 #else
-#define TL_SM120_LOAD_A_ROW(I)                                                \
-  do {                                                                        \
-    if ((I) == 0) {                                                           \
-      detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_0, a0, a1, a2,    \
-                                                    a3);                      \
-    } else if ((I) == 1) {                                                    \
-      detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_1, a0, a1, a2,    \
-                                                    a3);                      \
-    } else if ((I) == 2) {                                                    \
-      detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_2, a0, a1, a2,    \
-                                                    a3);                      \
-    } else {                                                                  \
-      detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_3, a0, a1, a2,    \
-                                                    a3);                      \
-    }                                                                         \
+#define TL_SM120_LOAD_A_ROW(I)                                                 \
+  do {                                                                         \
+    if ((I) == 0) {                                                            \
+      detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_0, a0, a1, a2, a3); \
+    } else if ((I) == 1) {                                                     \
+      detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_1, a0, a1, a2, a3); \
+    } else if ((I) == 2) {                                                     \
+      detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_2, a0, a1, a2, a3); \
+    } else {                                                                   \
+      detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_3, a0, a1, a2, a3); \
+    }                                                                          \
   } while (0)
 #endif
 
-#define TL_SM120_MMA_N8_ROLL(I, J, HALF, B0, B1, SA, SB)                      \
-  do {                                                                        \
-    TL_SM120_LOAD_A_ROW(I);                                                   \
-    TL_SM120_MMA_N8(I, J, HALF, a0, a1, a2, a3, B0, B1, SA, SB);             \
+#define TL_SM120_MMA_N8_ROLL(I, J, HALF, B0, B1, SA, SB)                       \
+  do {                                                                         \
+    TL_SM120_LOAD_A_ROW(I);                                                    \
+    TL_SM120_MMA_N8(I, J, HALF, a0, a1, a2, a3, B0, B1, SA, SB);               \
   } while (0)
 
-#define TL_SM120_MMA_N8_ROLL_FWD(J, HALF, B0, B1, SB)                         \
-  do {                                                                        \
-    TL_SM120_MMA_N8_ROLL(0, J, HALF, B0, B1, *sfa_0, SB);                    \
-    TL_SM120_MMA_N8_ROLL(1, J, HALF, B0, B1, *sfa_1, SB);                    \
-    TL_SM120_MMA_N8_ROLL(2, J, HALF, B0, B1, *sfa_2, SB);                    \
-    TL_SM120_MMA_N8_ROLL(3, J, HALF, B0, B1, *sfa_3, SB);                    \
+#define TL_SM120_MMA_N8_ROLL_FWD(J, HALF, B0, B1, SB)                          \
+  do {                                                                         \
+    TL_SM120_MMA_N8_ROLL(0, J, HALF, B0, B1, *sfa_0, SB);                      \
+    TL_SM120_MMA_N8_ROLL(1, J, HALF, B0, B1, *sfa_1, SB);                      \
+    TL_SM120_MMA_N8_ROLL(2, J, HALF, B0, B1, *sfa_2, SB);                      \
+    TL_SM120_MMA_N8_ROLL(3, J, HALF, B0, B1, *sfa_3, SB);                      \
   } while (0)
 
-#define TL_SM120_MMA_N8_ROLL_REV(J, HALF, B0, B1, SB)                         \
-  do {                                                                        \
-    TL_SM120_MMA_N8_ROLL(3, J, HALF, B0, B1, *sfa_3, SB);                    \
-    TL_SM120_MMA_N8_ROLL(2, J, HALF, B0, B1, *sfa_2, SB);                    \
-    TL_SM120_MMA_N8_ROLL(1, J, HALF, B0, B1, *sfa_1, SB);                    \
-    TL_SM120_MMA_N8_ROLL(0, J, HALF, B0, B1, *sfa_0, SB);                    \
+#define TL_SM120_MMA_N8_ROLL_REV(J, HALF, B0, B1, SB)                          \
+  do {                                                                         \
+    TL_SM120_MMA_N8_ROLL(3, J, HALF, B0, B1, *sfa_3, SB);                      \
+    TL_SM120_MMA_N8_ROLL(2, J, HALF, B0, B1, *sfa_2, SB);                      \
+    TL_SM120_MMA_N8_ROLL(1, J, HALF, B0, B1, *sfa_1, SB);                      \
+    TL_SM120_MMA_N8_ROLL(0, J, HALF, B0, B1, *sfa_0, SB);                      \
   } while (0)
 
   TL_SM120_MMA_N8_ROLL_FWD(0, 0, b00, b01, sb0);
@@ -1399,8 +1355,8 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile(
     defined(TL_SM120_FULLTILE_CUTE_ROWSTART_A)
   detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + 0, a0, a1, a2, a3);
   TL_SM120_MMA_ROW(0, a0, a1, a2, a3, TL_SM120_SFA0);
-  detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + kCuteKAtomStride, a0, a1,
-                                    a2, a3);
+  detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + kCuteKAtomStride, a0, a1, a2,
+                                    a3);
   TL_SM120_MMA_ROW(1, a0, a1, a2, a3, TL_SM120_SFA1);
   detail::sm120_ldmatrix_x4_fp4_u32(a_cute_m0 + 2 * kCuteKAtomStride, a0, a1,
                                     a2, a3);
@@ -1419,7 +1375,7 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile(
   TL_SM120_MMA_ROW(3, a0, a1, a2, a3, TL_SM120_SFA3);
 #endif
 
-#if !defined(TL_SM120_FULLTILE_BOUNDED_2X2_PACKAGE) &&                       \
+#if !defined(TL_SM120_FULLTILE_BOUNDED_2X2_PACKAGE) &&                         \
     !defined(TL_SM120_FULLTILE_AFULL_B_PANEL_STREAM)
 #undef TL_SM120_SFA3
 #undef TL_SM120_SFA2
@@ -1427,7 +1383,7 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile(
 #undef TL_SM120_SFA0
 #endif
 
-#if defined(TL_SM120_FULLTILE_CUTE_ACCUM_LAYOUT) &&                           \
+#if defined(TL_SM120_FULLTILE_CUTE_ACCUM_LAYOUT) &&                            \
     !defined(TL_SM120_FULLTILE_CUTE_ACCUM_DIRECT)
 #pragma unroll
   for (int mi = 0; mi < 4; ++mi) {
@@ -1450,23 +1406,19 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile(
 }
 
 TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile_ab_owner_wide(
-    float *c, const void *a_smem_0, const void *a_smem_1,
-    const void *a_smem_2, const void *a_smem_3, const void *b_smem_0,
-    const void *b_smem_1, const void *b_smem_2, const void *b_smem_3,
-    const uint32_t *sfa_base, const uint32_t *sfb_base, int k_block_idx) {
+    float *c, const void *a_smem_0, const void *a_smem_1, const void *a_smem_2,
+    const void *a_smem_3, const void *b_smem_0, const void *b_smem_1,
+    const void *b_smem_2, const void *b_smem_3, const uint32_t *sfa_base,
+    const uint32_t *sfb_base, int k_block_idx) {
   uint32_t b00, b01, b02, b03;
   uint32_t b10, b11, b12, b13;
   uint32_t b20, b21, b22, b23;
   uint32_t b30, b31, b32, b33;
 
-  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_0, b00, b01, b02,
-                                                b03);
-  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_1, b10, b11, b12,
-                                                b13);
-  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_2, b20, b21, b22,
-                                                b23);
-  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_3, b30, b31, b32,
-                                                b33);
+  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_0, b00, b01, b02, b03);
+  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_1, b10, b11, b12, b13);
+  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_2, b20, b21, b22, b23);
+  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_3, b30, b31, b32, b33);
 
   uint32_t const tx = uint32_t(int(threadIdx.x) & 127);
   uint32_t const lane = tx & 31u;
@@ -1492,19 +1444,19 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile_ab_owner_wide(
   uint32_t const sb_owner1 =
       sfb_base[detail::sm120_cutlass_128x4_sf_word(scale_n1, scale_k)];
 
-#if defined(TL_SM120_FULLTILE_CUTE_ACCUM_LAYOUT) ||                             \
+#if defined(TL_SM120_FULLTILE_CUTE_ACCUM_LAYOUT) ||                            \
     defined(TL_SM120_FULLTILE_CUTE_ACCUM_DIRECT)
-#define TL_SM120_OWNER_C_OFFSET(I, J, HALF) ((I)*4 + (J)*32 + (HALF)*16)
+#define TL_SM120_OWNER_C_OFFSET(I, J, HALF) ((I) * 4 + (J) * 32 + (HALF) * 16)
 #else
-#define TL_SM120_OWNER_C_OFFSET(I, J, HALF) ((I)*32 + (J)*8 + (HALF)*4)
+#define TL_SM120_OWNER_C_OFFSET(I, J, HALF) ((I) * 32 + (J) * 8 + (HALF) * 4)
 #endif
 
-#define TL_SM120_OWNER_MMA_N8(I, J, HALF, A0, A1, A2, A3, B0, B1, SA, SB,       \
+#define TL_SM120_OWNER_MMA_N8(I, J, HALF, A0, A1, A2, A3, B0, B1, SA, SB,      \
                               SA_TID, SB_TID)                                  \
   do {                                                                         \
     float *d = c + TL_SM120_OWNER_C_OFFSET(I, J, HALF);                        \
     detail::sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3_regs(                         \
-        d, A0, A1, A2, A3, B0, B1, d, SA, SB, 0, uint16_t(SA_TID), 0,           \
+        d, A0, A1, A2, A3, B0, B1, d, SA, SB, 0, uint16_t(SA_TID), 0,          \
         uint16_t(SB_TID));                                                     \
   } while (0)
 
@@ -1544,17 +1496,16 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile_ab_owner_wide(
 }
 
 TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile_afull_bpanel_owner_wide(
-    float *c, const void *a_smem_0, const void *a_smem_1,
-    const void *a_smem_2, const void *a_smem_3, const void *b_smem_0,
-    const void *b_smem_1, const void *b_smem_2, const void *b_smem_3,
-    const uint32_t *sfa_base, const uint32_t *sfb_base, int k_block_idx) {
+    float *c, const void *a_smem_0, const void *a_smem_1, const void *a_smem_2,
+    const void *a_smem_3, const void *b_smem_0, const void *b_smem_1,
+    const void *b_smem_2, const void *b_smem_3, const uint32_t *sfa_base,
+    const uint32_t *sfb_base, int k_block_idx) {
   uint32_t b00, b01, b02, b03;
   uint32_t b10, b11, b12, b13;
 
   // Load B0 first so the following A/scale setup gives it real distance before
   // its first OMMA use.
-  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_0, b00, b01, b02,
-                                                b03);
+  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_0, b00, b01, b02, b03);
 
   uint32_t const tx = uint32_t(int(threadIdx.x) & 127);
   uint32_t const lane = tx & 31u;
@@ -1584,66 +1535,59 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile_afull_bpanel_owner_wide(
   uint32_t a10, a11, a12, a13;
   uint32_t a20, a21, a22, a23;
   uint32_t a30, a31, a32, a33;
-  detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_0, a00, a01, a02,
-                                                a03);
-  detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_1, a10, a11, a12,
-                                                a13);
-  detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_2, a20, a21, a22,
-                                                a23);
-  detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_3, a30, a31, a32,
-                                                a33);
+  detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_0, a00, a01, a02, a03);
+  detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_1, a10, a11, a12, a13);
+  detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_2, a20, a21, a22, a23);
+  detail::sm120_ldmatrix_x4_blockscaled_operand(a_smem_3, a30, a31, a32, a33);
 
-#if defined(TL_SM120_FULLTILE_CUTE_ACCUM_LAYOUT) ||                         \
+#if defined(TL_SM120_FULLTILE_CUTE_ACCUM_LAYOUT) ||                            \
     defined(TL_SM120_FULLTILE_CUTE_ACCUM_DIRECT)
-#define TL_SM120_AFULL_C_OFFSET(I, J, HALF) ((I)*4 + (J)*32 + (HALF)*16)
+#define TL_SM120_AFULL_C_OFFSET(I, J, HALF) ((I) * 4 + (J) * 32 + (HALF) * 16)
 #else
-#define TL_SM120_AFULL_C_OFFSET(I, J, HALF) ((I)*32 + (J)*8 + (HALF)*4)
+#define TL_SM120_AFULL_C_OFFSET(I, J, HALF) ((I) * 32 + (J) * 8 + (HALF) * 4)
 #endif
 
-#define TL_SM120_AFULL_MMA_N8(I, J, HALF, A0, A1, A2, A3, B0, B1, SA, SB,   \
-                              SA_TID, SB_TID)                               \
-  do {                                                                       \
-    float *d = c + TL_SM120_AFULL_C_OFFSET(I, J, HALF);                      \
-    detail::sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3_regs(                       \
-        d, A0, A1, A2, A3, B0, B1, d, SA, SB, 0, uint16_t(SA_TID), 0,         \
-        uint16_t(SB_TID));                                                   \
+#define TL_SM120_AFULL_MMA_N8(I, J, HALF, A0, A1, A2, A3, B0, B1, SA, SB,      \
+                              SA_TID, SB_TID)                                  \
+  do {                                                                         \
+    float *d = c + TL_SM120_AFULL_C_OFFSET(I, J, HALF);                        \
+    detail::sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3_regs(                         \
+        d, A0, A1, A2, A3, B0, B1, d, SA, SB, 0, uint16_t(SA_TID), 0,          \
+        uint16_t(SB_TID));                                                     \
   } while (0)
 
-#define TL_SM120_AFULL_MMA_PANEL_LO(J, B0, B1, SB, SB_TID)                  \
-  do {                                                                       \
-    TL_SM120_AFULL_MMA_N8(0, J, 0, a00, a01, a02, a03, B0, B1, sa_owner0,    \
-                          SB, 0, SB_TID);                                    \
-    TL_SM120_AFULL_MMA_N8(1, J, 0, a10, a11, a12, a13, B0, B1, sa_owner0,    \
-                          SB, 1, SB_TID);                                    \
-    TL_SM120_AFULL_MMA_N8(2, J, 0, a20, a21, a22, a23, B0, B1, sa_owner1,    \
-                          SB, 0, SB_TID);                                    \
-    TL_SM120_AFULL_MMA_N8(3, J, 0, a30, a31, a32, a33, B0, B1, sa_owner1,    \
-                          SB, 1, SB_TID);                                    \
+#define TL_SM120_AFULL_MMA_PANEL_LO(J, B0, B1, SB, SB_TID)                     \
+  do {                                                                         \
+    TL_SM120_AFULL_MMA_N8(0, J, 0, a00, a01, a02, a03, B0, B1, sa_owner0, SB,  \
+                          0, SB_TID);                                          \
+    TL_SM120_AFULL_MMA_N8(1, J, 0, a10, a11, a12, a13, B0, B1, sa_owner0, SB,  \
+                          1, SB_TID);                                          \
+    TL_SM120_AFULL_MMA_N8(2, J, 0, a20, a21, a22, a23, B0, B1, sa_owner1, SB,  \
+                          0, SB_TID);                                          \
+    TL_SM120_AFULL_MMA_N8(3, J, 0, a30, a31, a32, a33, B0, B1, sa_owner1, SB,  \
+                          1, SB_TID);                                          \
   } while (0)
 
-#define TL_SM120_AFULL_MMA_PANEL_HI(J, B2, B3, SB, SB_TID)                  \
-  do {                                                                       \
-    TL_SM120_AFULL_MMA_N8(3, J, 1, a30, a31, a32, a33, B2, B3, sa_owner1,    \
-                          SB, 1, SB_TID);                                    \
-    TL_SM120_AFULL_MMA_N8(2, J, 1, a20, a21, a22, a23, B2, B3, sa_owner1,    \
-                          SB, 0, SB_TID);                                    \
-    TL_SM120_AFULL_MMA_N8(1, J, 1, a10, a11, a12, a13, B2, B3, sa_owner0,    \
-                          SB, 1, SB_TID);                                    \
-    TL_SM120_AFULL_MMA_N8(0, J, 1, a00, a01, a02, a03, B2, B3, sa_owner0,    \
-                          SB, 0, SB_TID);                                    \
+#define TL_SM120_AFULL_MMA_PANEL_HI(J, B2, B3, SB, SB_TID)                     \
+  do {                                                                         \
+    TL_SM120_AFULL_MMA_N8(3, J, 1, a30, a31, a32, a33, B2, B3, sa_owner1, SB,  \
+                          1, SB_TID);                                          \
+    TL_SM120_AFULL_MMA_N8(2, J, 1, a20, a21, a22, a23, B2, B3, sa_owner1, SB,  \
+                          0, SB_TID);                                          \
+    TL_SM120_AFULL_MMA_N8(1, J, 1, a10, a11, a12, a13, B2, B3, sa_owner0, SB,  \
+                          1, SB_TID);                                          \
+    TL_SM120_AFULL_MMA_N8(0, J, 1, a00, a01, a02, a03, B2, B3, sa_owner0, SB,  \
+                          0, SB_TID);                                          \
   } while (0)
 
   TL_SM120_AFULL_MMA_PANEL_LO(0, b00, b01, sb_owner0, 0);
-  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_1, b10, b11, b12,
-                                                b13);
+  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_1, b10, b11, b12, b13);
   TL_SM120_AFULL_MMA_PANEL_HI(0, b02, b03, sb_owner0, 1);
   TL_SM120_AFULL_MMA_PANEL_LO(1, b10, b11, sb_owner0, 2);
-  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_2, b00, b01, b02,
-                                                b03);
+  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_2, b00, b01, b02, b03);
   TL_SM120_AFULL_MMA_PANEL_HI(1, b12, b13, sb_owner0, 3);
   TL_SM120_AFULL_MMA_PANEL_LO(2, b00, b01, sb_owner1, 0);
-  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_3, b10, b11, b12,
-                                                b13);
+  detail::sm120_ldmatrix_x4_blockscaled_operand(b_smem_3, b10, b11, b12, b13);
   TL_SM120_AFULL_MMA_PANEL_HI(2, b02, b03, sb_owner1, 1);
   TL_SM120_AFULL_MMA_PANEL_LO(3, b10, b11, sb_owner1, 2);
   TL_SM120_AFULL_MMA_PANEL_HI(3, b12, b13, sb_owner1, 3);
@@ -1663,7 +1607,7 @@ struct SM120FulltileABOwnerWidePackage {
   uint32_t b10, b11, b12, b13;
   uint32_t b20, b21, b22, b23;
   uint32_t b30, b31, b32, b33;
-#if defined(TL_SM120_FULLTILE_SCALE_SLOT_PACKAGE) ||                            \
+#if defined(TL_SM120_FULLTILE_SCALE_SLOT_PACKAGE) ||                           \
     defined(TL_SM120_FULLTILE_SCALE_SELECTOR0_RETAINED_PACKAGE)
   uint32_t sa0, sa1, sa2, sa3;
   uint32_t sb0, sb1, sb2, sb3, sb4, sb5, sb6, sb7;
@@ -1793,42 +1737,42 @@ TL_DEVICE void sm120_copy_fulltile_ab_owner_wide_package(
 
 TL_DEVICE void sm120_gemm_fulltile_ab_owner_wide_package(
     float *c, const SM120FulltileABOwnerWidePackage &pkg) {
-#if defined(TL_SM120_FULLTILE_CUTE_ACCUM_LAYOUT) ||                          \
+#if defined(TL_SM120_FULLTILE_CUTE_ACCUM_LAYOUT) ||                            \
     defined(TL_SM120_FULLTILE_CUTE_ACCUM_DIRECT)
-#define TL_SM120_PKG_C_OFFSET(I, J, HALF) ((I)*4 + (J)*32 + (HALF)*16)
+#define TL_SM120_PKG_C_OFFSET(I, J, HALF) ((I) * 4 + (J) * 32 + (HALF) * 16)
 #else
-#define TL_SM120_PKG_C_OFFSET(I, J, HALF) ((I)*32 + (J)*8 + (HALF)*4)
+#define TL_SM120_PKG_C_OFFSET(I, J, HALF) ((I) * 32 + (J) * 8 + (HALF) * 4)
 #endif
 
-#define TL_SM120_PKG_MMA_N8(I, J, HALF, A0, A1, A2, A3, B0, B1, SA, SB,       \
-                            SA_TID, SB_TID)                                  \
-  do {                                                                       \
-    float *d = c + TL_SM120_PKG_C_OFFSET(I, J, HALF);                        \
-    detail::sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3_regs(                       \
-        d, A0, A1, A2, A3, B0, B1, d, SA, SB, 0, uint16_t(SA_TID), 0,         \
-        uint16_t(SB_TID));                                                    \
+#define TL_SM120_PKG_MMA_N8(I, J, HALF, A0, A1, A2, A3, B0, B1, SA, SB,        \
+                            SA_TID, SB_TID)                                    \
+  do {                                                                         \
+    float *d = c + TL_SM120_PKG_C_OFFSET(I, J, HALF);                          \
+    detail::sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3_regs(                         \
+        d, A0, A1, A2, A3, B0, B1, d, SA, SB, 0, uint16_t(SA_TID), 0,          \
+        uint16_t(SB_TID));                                                     \
   } while (0)
 
-#if defined(TL_SM120_FULLTILE_SCALE_SLOT_PACKAGE) ||                            \
+#if defined(TL_SM120_FULLTILE_SCALE_SLOT_PACKAGE) ||                           \
     defined(TL_SM120_FULLTILE_SCALE_SELECTOR0_RETAINED_PACKAGE)
-#define TL_SM120_PKG_MMA_ROW_SLOT(I, A0, A1, A2, A3, SA)                     \
-  do {                                                                       \
-    TL_SM120_PKG_MMA_N8(I, 0, 0, A0, A1, A2, A3, pkg.b00, pkg.b01, SA,       \
-                        pkg.sb0, 0, 0);                                      \
-    TL_SM120_PKG_MMA_N8(I, 0, 1, A0, A1, A2, A3, pkg.b02, pkg.b03, SA,       \
-                        pkg.sb1, 0, 0);                                      \
-    TL_SM120_PKG_MMA_N8(I, 1, 0, A0, A1, A2, A3, pkg.b10, pkg.b11, SA,       \
-                        pkg.sb2, 0, 0);                                      \
-    TL_SM120_PKG_MMA_N8(I, 1, 1, A0, A1, A2, A3, pkg.b12, pkg.b13, SA,       \
-                        pkg.sb3, 0, 0);                                      \
-    TL_SM120_PKG_MMA_N8(I, 2, 0, A0, A1, A2, A3, pkg.b20, pkg.b21, SA,       \
-                        pkg.sb4, 0, 0);                                      \
-    TL_SM120_PKG_MMA_N8(I, 2, 1, A0, A1, A2, A3, pkg.b22, pkg.b23, SA,       \
-                        pkg.sb5, 0, 0);                                      \
-    TL_SM120_PKG_MMA_N8(I, 3, 0, A0, A1, A2, A3, pkg.b30, pkg.b31, SA,       \
-                        pkg.sb6, 0, 0);                                      \
-    TL_SM120_PKG_MMA_N8(I, 3, 1, A0, A1, A2, A3, pkg.b32, pkg.b33, SA,       \
-                        pkg.sb7, 0, 0);                                      \
+#define TL_SM120_PKG_MMA_ROW_SLOT(I, A0, A1, A2, A3, SA)                       \
+  do {                                                                         \
+    TL_SM120_PKG_MMA_N8(I, 0, 0, A0, A1, A2, A3, pkg.b00, pkg.b01, SA,         \
+                        pkg.sb0, 0, 0);                                        \
+    TL_SM120_PKG_MMA_N8(I, 0, 1, A0, A1, A2, A3, pkg.b02, pkg.b03, SA,         \
+                        pkg.sb1, 0, 0);                                        \
+    TL_SM120_PKG_MMA_N8(I, 1, 0, A0, A1, A2, A3, pkg.b10, pkg.b11, SA,         \
+                        pkg.sb2, 0, 0);                                        \
+    TL_SM120_PKG_MMA_N8(I, 1, 1, A0, A1, A2, A3, pkg.b12, pkg.b13, SA,         \
+                        pkg.sb3, 0, 0);                                        \
+    TL_SM120_PKG_MMA_N8(I, 2, 0, A0, A1, A2, A3, pkg.b20, pkg.b21, SA,         \
+                        pkg.sb4, 0, 0);                                        \
+    TL_SM120_PKG_MMA_N8(I, 2, 1, A0, A1, A2, A3, pkg.b22, pkg.b23, SA,         \
+                        pkg.sb5, 0, 0);                                        \
+    TL_SM120_PKG_MMA_N8(I, 3, 0, A0, A1, A2, A3, pkg.b30, pkg.b31, SA,         \
+                        pkg.sb6, 0, 0);                                        \
+    TL_SM120_PKG_MMA_N8(I, 3, 1, A0, A1, A2, A3, pkg.b32, pkg.b33, SA,         \
+                        pkg.sb7, 0, 0);                                        \
   } while (0)
 
   TL_SM120_PKG_MMA_ROW_SLOT(0, pkg.a00, pkg.a01, pkg.a02, pkg.a03, pkg.sa0);
@@ -1838,24 +1782,24 @@ TL_DEVICE void sm120_gemm_fulltile_ab_owner_wide_package(
 
 #undef TL_SM120_PKG_MMA_ROW_SLOT
 #else
-#define TL_SM120_PKG_MMA_ROW(I, A0, A1, A2, A3, SA, SA_TID)                  \
-  do {                                                                       \
-    TL_SM120_PKG_MMA_N8(I, 0, 0, A0, A1, A2, A3, pkg.b00, pkg.b01, SA,       \
-                        pkg.sb0, SA_TID, 0);                                 \
-    TL_SM120_PKG_MMA_N8(I, 0, 1, A0, A1, A2, A3, pkg.b02, pkg.b03, SA,       \
-                        pkg.sb0, SA_TID, 1);                                 \
-    TL_SM120_PKG_MMA_N8(I, 1, 0, A0, A1, A2, A3, pkg.b10, pkg.b11, SA,       \
-                        pkg.sb0, SA_TID, 2);                                 \
-    TL_SM120_PKG_MMA_N8(I, 1, 1, A0, A1, A2, A3, pkg.b12, pkg.b13, SA,       \
-                        pkg.sb0, SA_TID, 3);                                 \
-    TL_SM120_PKG_MMA_N8(I, 2, 0, A0, A1, A2, A3, pkg.b20, pkg.b21, SA,       \
-                        pkg.sb1, SA_TID, 0);                                 \
-    TL_SM120_PKG_MMA_N8(I, 2, 1, A0, A1, A2, A3, pkg.b22, pkg.b23, SA,       \
-                        pkg.sb1, SA_TID, 1);                                 \
-    TL_SM120_PKG_MMA_N8(I, 3, 0, A0, A1, A2, A3, pkg.b30, pkg.b31, SA,       \
-                        pkg.sb1, SA_TID, 2);                                 \
-    TL_SM120_PKG_MMA_N8(I, 3, 1, A0, A1, A2, A3, pkg.b32, pkg.b33, SA,       \
-                        pkg.sb1, SA_TID, 3);                                 \
+#define TL_SM120_PKG_MMA_ROW(I, A0, A1, A2, A3, SA, SA_TID)                    \
+  do {                                                                         \
+    TL_SM120_PKG_MMA_N8(I, 0, 0, A0, A1, A2, A3, pkg.b00, pkg.b01, SA,         \
+                        pkg.sb0, SA_TID, 0);                                   \
+    TL_SM120_PKG_MMA_N8(I, 0, 1, A0, A1, A2, A3, pkg.b02, pkg.b03, SA,         \
+                        pkg.sb0, SA_TID, 1);                                   \
+    TL_SM120_PKG_MMA_N8(I, 1, 0, A0, A1, A2, A3, pkg.b10, pkg.b11, SA,         \
+                        pkg.sb0, SA_TID, 2);                                   \
+    TL_SM120_PKG_MMA_N8(I, 1, 1, A0, A1, A2, A3, pkg.b12, pkg.b13, SA,         \
+                        pkg.sb0, SA_TID, 3);                                   \
+    TL_SM120_PKG_MMA_N8(I, 2, 0, A0, A1, A2, A3, pkg.b20, pkg.b21, SA,         \
+                        pkg.sb1, SA_TID, 0);                                   \
+    TL_SM120_PKG_MMA_N8(I, 2, 1, A0, A1, A2, A3, pkg.b22, pkg.b23, SA,         \
+                        pkg.sb1, SA_TID, 1);                                   \
+    TL_SM120_PKG_MMA_N8(I, 3, 0, A0, A1, A2, A3, pkg.b30, pkg.b31, SA,         \
+                        pkg.sb1, SA_TID, 2);                                   \
+    TL_SM120_PKG_MMA_N8(I, 3, 1, A0, A1, A2, A3, pkg.b32, pkg.b33, SA,         \
+                        pkg.sb1, SA_TID, 3);                                   \
   } while (0)
 
   TL_SM120_PKG_MMA_ROW(0, pkg.a00, pkg.a01, pkg.a02, pkg.a03, pkg.sa0, 0);
@@ -1877,16 +1821,16 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile_package_pingpong(
   SM120FulltileABOwnerWidePackage pkg0;
   SM120FulltileABOwnerWidePackage pkg1;
 
-  sm120_copy_fulltile_ab_owner_wide_package(pkg0, a_base, b_base,
-                                            sfa_smem_base, sfb_smem_base, 0);
-  sm120_copy_fulltile_ab_owner_wide_package(pkg1, a_base, b_base,
-                                            sfa_smem_base, sfb_smem_base, 1);
+  sm120_copy_fulltile_ab_owner_wide_package(pkg0, a_base, b_base, sfa_smem_base,
+                                            sfb_smem_base, 0);
+  sm120_copy_fulltile_ab_owner_wide_package(pkg1, a_base, b_base, sfa_smem_base,
+                                            sfb_smem_base, 1);
   sm120_gemm_fulltile_ab_owner_wide_package(c, pkg0);
-  sm120_copy_fulltile_ab_owner_wide_package(pkg0, a_base, b_base,
-                                            sfa_smem_base, sfb_smem_base, 2);
+  sm120_copy_fulltile_ab_owner_wide_package(pkg0, a_base, b_base, sfa_smem_base,
+                                            sfb_smem_base, 2);
   sm120_gemm_fulltile_ab_owner_wide_package(c, pkg1);
-  sm120_copy_fulltile_ab_owner_wide_package(pkg1, a_base, b_base,
-                                            sfa_smem_base, sfb_smem_base, 3);
+  sm120_copy_fulltile_ab_owner_wide_package(pkg1, a_base, b_base, sfa_smem_base,
+                                            sfb_smem_base, 3);
   sm120_gemm_fulltile_ab_owner_wide_package(c, pkg0);
   sm120_gemm_fulltile_ab_owner_wide_package(c, pkg1);
 }

@@ -256,7 +256,8 @@ TIR_DEFINE_TL_BUILTIN(sm120_mma_blockscaled_kblock_fulltile_ab_owner_wide)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(sm120_mma_blockscaled_kblock_fulltile_afull_bpanel_owner_wide)
+TIR_DEFINE_TL_BUILTIN(
+    sm120_mma_blockscaled_kblock_fulltile_afull_bpanel_owner_wide)
     .set_num_inputs(13)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));

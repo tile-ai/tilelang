@@ -109,6 +109,7 @@ def _early_bench_options() -> argparse.Namespace:
         choices=["rowmajor", "cutlass_128x4"],
         default="rowmajor",
     )
+    parser.add_argument("--micro-pipeline", default="none")
     parser.add_argument("--manual-ws2-reg-debug", action="store_true")
     parser.add_argument("--manual-ws2-reg-debug-mode", choices=["value", "tag"], default="value")
     args, _ = parser.parse_known_args()
@@ -152,9 +153,16 @@ def _device_compile_flags() -> list[str]:
         flags.append("-DTL_SM120_FULLTILE_AFULL_SCALE_REGS=1")
     if _EARLY_BENCH_OPTIONS.manual_ws2_sf_layout == "cutlass_128x4":
         flags.append("-DTL_SM120_FULLTILE_CUTLASS_SF_BASEPTR=1")
-    if os.environ.get("TL_SM120_FULLTILE_SCALE_VECTOR_PACKAGE") not in (None, "", "0"):
+    scale_vector_package = os.environ.get("TL_SM120_FULLTILE_SCALE_VECTOR_PACKAGE") not in (None, "", "0")
+    scale_slot_package = os.environ.get("TL_SM120_FULLTILE_SCALE_SLOT_PACKAGE") not in (None, "", "0")
+    auto_scale_slot_package = (
+        _EARLY_BENCH_OPTIONS.micro_pipeline == "sm120_backend_kblock_fulltile_package_pingpong"
+        and _EARLY_BENCH_OPTIONS.manual_ws2_sf_layout == "cutlass_128x4"
+        and not scale_vector_package
+    )
+    if scale_vector_package:
         flags.append("-DTL_SM120_FULLTILE_SCALE_VECTOR_PACKAGE=1")
-    if os.environ.get("TL_SM120_FULLTILE_SCALE_SLOT_PACKAGE") not in (None, "", "0"):
+    if scale_slot_package or auto_scale_slot_package:
         flags.append("-DTL_SM120_FULLTILE_SCALE_SLOT_PACKAGE=1")
     if os.environ.get("TL_SM120_FULLTILE_PACKAGE_ROWMAJOR_VIEW") not in (None, "", "0"):
         flags.append("-DTL_SM120_FULLTILE_PACKAGE_ROWMAJOR_VIEW=1")
@@ -172,9 +180,10 @@ def _device_compile_flags() -> list[str]:
         if _EARLY_BENCH_OPTIONS.maxrregcount <= 0:
             raise ValueError("--maxrregcount must be positive")
         flags.append(f"--maxrregcount={_EARLY_BENCH_OPTIONS.maxrregcount}")
-    if (
-        _EARLY_BENCH_OPTIONS.manual_ws2_ab_copy_view in _P64_LDSM_COPY_VIEWS
-        and os.environ.get("TL_SM120_ALLOW_P64_LDSM_FOR_NVFP4") in (None, "", "0")
+    if _EARLY_BENCH_OPTIONS.manual_ws2_ab_copy_view in _P64_LDSM_COPY_VIEWS and os.environ.get("TL_SM120_ALLOW_P64_LDSM_FOR_NVFP4") in (
+        None,
+        "",
+        "0",
     ):
         raise ValueError(
             "--manual-ws2-ab-copy-view="
@@ -277,11 +286,7 @@ def _device_compile_flags() -> list[str]:
     elif _EARLY_BENCH_OPTIONS.manual_ws2_ab_copy_view == "fp4_ldsm_single_omma_scratch_shifted_ones":
         flags.append("-DTL_SM120_FULLTILE_SINGLE_OMMA=1")
         flags.append("-DTL_SM120_FULLTILE_SINGLE_SCRATCH_ONES=1")
-        scratch_byte = (
-            0x88
-            if _EARLY_BENCH_OPTIONS.manual_ws2_scratch_byte is None
-            else _EARLY_BENCH_OPTIONS.manual_ws2_scratch_byte
-        )
+        scratch_byte = 0x88 if _EARLY_BENCH_OPTIONS.manual_ws2_scratch_byte is None else _EARLY_BENCH_OPTIONS.manual_ws2_scratch_byte
         flags.append(f"-DTL_SM120_FULLTILE_SINGLE_SCRATCH_BYTE={scratch_byte:#x}")
         flags.append("-DTL_SM120_FULLTILE_SINGLE_KI=0")
         flags.append("-DTL_SM120_FULLTILE_SINGLE_I=0")
@@ -475,10 +480,7 @@ def tilelang_nvfp4_gemm_manual_ws2(
     if not ab_swizzle_layout and os.environ.get("TL_SM120_WS2_AB_TCGEN05_SWIZZLE") not in (None, "", "0"):
         ab_swizzle_layout = "tcgen05"
     if ab_swizzle_layout not in ("", "tcgen05", "wgmma", "full_bank", "generic"):
-        raise ValueError(
-            "TL_SM120_WS2_AB_SWIZZLE_LAYOUT must be one of: "
-            "tcgen05, wgmma, full_bank, generic"
-        )
+        raise ValueError("TL_SM120_WS2_AB_SWIZZLE_LAYOUT must be one of: tcgen05, wgmma, full_bank, generic")
     accum_dtype = T.float32
     half_block_M = block_M // 2
     half_block_N = block_N // 2
@@ -566,9 +568,7 @@ def tilelang_nvfp4_gemm_manual_ws2(
                         }
                     )
                 if literal_panel_store or panel32_tma_store or panel64_tma_store:
-                    C_shared = T.alloc_shared(
-                        (epilogue_store_slots, epilogue_store_block_M, epilogue_store_block_N), out_dtype
-                    )
+                    C_shared = T.alloc_shared((epilogue_store_slots, epilogue_store_block_M, epilogue_store_block_N), out_dtype)
 
                 loaded = T.alloc_barrier([128] * (2 * num_stages))
                 consumed = T.alloc_barrier([128] * (2 * num_stages))
@@ -897,8 +897,7 @@ def tilelang_nvfp4_gemm_manual_ws2(
                                             C_shared[epi_slot, :, :],
                                             C[
                                                 tile_m * block_M : (tile_m + 1) * block_M,
-                                                tile_n * block_N
-                                                + panel32 * epilogue_store_block_N : tile_n * block_N
+                                                tile_n * block_N + panel32 * epilogue_store_block_N : tile_n * block_N
                                                 + (panel32 + 1) * epilogue_store_block_N,
                                             ],
                                             leader_scope_threads=128,
@@ -926,11 +925,9 @@ def tilelang_nvfp4_gemm_manual_ws2(
                                         T.tma_copy(
                                             C_shared[epi_slot, :, :],
                                             C[
-                                                tile_m * block_M
-                                                + epi_m * epilogue_store_block_M : tile_m * block_M
+                                                tile_m * block_M + epi_m * epilogue_store_block_M : tile_m * block_M
                                                 + (epi_m + 1) * epilogue_store_block_M,
-                                                tile_n * block_N
-                                                + epi_n * epilogue_store_block_N : tile_n * block_N
+                                                tile_n * block_N + epi_n * epilogue_store_block_N : tile_n * block_N
                                                 + (epi_n + 1) * epilogue_store_block_N,
                                             ],
                                             leader_scope_threads=128,
@@ -951,9 +948,7 @@ def tilelang_nvfp4_gemm_manual_ws2(
                                     for linear in T.Parallel(block_M * epilogue_store_block_N):
                                         store_i = linear // epilogue_store_block_N
                                         store_j = linear % epilogue_store_block_N
-                                        C[tile_m * block_M + store_i, base_n0 + store_j] = C_shared[
-                                            0, store_i, store_j
-                                        ]
+                                        C[tile_m * block_M + store_i, base_n0 + store_j] = C_shared[0, store_i, store_j]
 
                                     base_n2 = tile_n * block_N + half_block_N
                                     T.sm120_store_full_c_fragment_panel64_bf16(
@@ -968,9 +963,7 @@ def tilelang_nvfp4_gemm_manual_ws2(
                                     for linear in T.Parallel(block_M * epilogue_store_block_N):
                                         store_i = linear // epilogue_store_block_N
                                         store_j = linear % epilogue_store_block_N
-                                        C[tile_m * block_M + store_i, base_n2 + store_j] = C_shared[
-                                            0, store_i, store_j
-                                        ]
+                                        C[tile_m * block_M + store_i, base_n2 + store_j] = C_shared[0, store_i, store_j]
                                 else:
                                     base_n0 = tile_n * block_N
                                     T.sm120_store_full_c_fragment_panel32_tma_bf16(
@@ -1315,8 +1308,7 @@ def tilelang_nvfp4_gemm_manual_ws2(
                                             C_shared[epi_slot, :, :],
                                             C[
                                                 tile_m * block_M : (tile_m + 1) * block_M,
-                                                tile_n * block_N
-                                                + panel32 * epilogue_store_block_N : tile_n * block_N
+                                                tile_n * block_N + panel32 * epilogue_store_block_N : tile_n * block_N
                                                 + (panel32 + 1) * epilogue_store_block_N,
                                             ],
                                             leader_scope_threads=128,
@@ -1344,11 +1336,9 @@ def tilelang_nvfp4_gemm_manual_ws2(
                                         T.tma_copy(
                                             C_shared[epi_slot, :, :],
                                             C[
-                                                tile_m * block_M
-                                                + epi_m * epilogue_store_block_M : tile_m * block_M
+                                                tile_m * block_M + epi_m * epilogue_store_block_M : tile_m * block_M
                                                 + (epi_m + 1) * epilogue_store_block_M,
-                                                tile_n * block_N
-                                                + epi_n * epilogue_store_block_N : tile_n * block_N
+                                                tile_n * block_N + epi_n * epilogue_store_block_N : tile_n * block_N
                                                 + (epi_n + 1) * epilogue_store_block_N,
                                             ],
                                             leader_scope_threads=128,
@@ -1369,9 +1359,7 @@ def tilelang_nvfp4_gemm_manual_ws2(
                                     for linear in T.Parallel(block_M * epilogue_store_block_N):
                                         store_i = linear // epilogue_store_block_N
                                         store_j = linear % epilogue_store_block_N
-                                        C[tile_m * block_M + store_i, base_n0 + store_j] = C_shared[
-                                            0, store_i, store_j
-                                        ]
+                                        C[tile_m * block_M + store_i, base_n0 + store_j] = C_shared[0, store_i, store_j]
 
                                     base_n2 = tile_n * block_N + half_block_N
                                     T.sm120_store_full_c_fragment_panel64_bf16(
@@ -1386,9 +1374,7 @@ def tilelang_nvfp4_gemm_manual_ws2(
                                     for linear in T.Parallel(block_M * epilogue_store_block_N):
                                         store_i = linear // epilogue_store_block_N
                                         store_j = linear % epilogue_store_block_N
-                                        C[tile_m * block_M + store_i, base_n2 + store_j] = C_shared[
-                                            0, store_i, store_j
-                                        ]
+                                        C[tile_m * block_M + store_i, base_n2 + store_j] = C_shared[0, store_i, store_j]
                                 else:
                                     base_n0 = tile_n * block_N
                                     T.sm120_store_full_c_fragment_panel32_tma_bf16(
@@ -1481,9 +1467,7 @@ def tilelang_nvfp4_gemm_manual_ws2(
 
     if manual_ws2_split in ("pp", "pp_one", "pp_wait"):
         if sf_load_mode not in ("tma", "parallel", "serial", "none", "direct"):
-            raise ValueError(
-                "manual_ws2_split='pp*' currently supports --manual-ws2-sf-load tma, parallel, serial, none, or direct"
-            )
+            raise ValueError("manual_ws2_split='pp*' currently supports --manual-ws2-sf-load tma, parallel, serial, none, or direct")
         if sf_words_per_block_k < 4:
             raise ValueError("manual_ws2_split='pp' requires block_K >= 256 for scale TMA")
         if manual_ws2_split in ("pp", "pp_one", "pp_wait") and (N // block_N) % 2 != 0:
@@ -1585,23 +1569,15 @@ def tilelang_nvfp4_gemm_manual_ws2(
                                     if sf_load_mode == "serial":
                                         for i in T.serial(block_M):
                                             for k in T.serial(sf_words_per_block_k):
-                                                SFA_shared[stage, i, k] = SFA[
-                                                    tile0_m * block_M + i, ko * sf_words_per_block_k + k
-                                                ]
+                                                SFA_shared[stage, i, k] = SFA[tile0_m * block_M + i, ko * sf_words_per_block_k + k]
                                         for j in T.serial(block_N):
                                             for k in T.serial(sf_words_per_block_k):
-                                                SFB_shared[stage, j, k] = SFB[
-                                                    tile0_n * block_N + j, ko * sf_words_per_block_k + k
-                                                ]
+                                                SFB_shared[stage, j, k] = SFB[tile0_n * block_N + j, ko * sf_words_per_block_k + k]
                                     else:
                                         for i, k in T.Parallel(block_M, sf_words_per_block_k):
-                                            SFA_shared[stage, i, k] = SFA[
-                                                tile0_m * block_M + i, ko * sf_words_per_block_k + k
-                                            ]
+                                            SFA_shared[stage, i, k] = SFA[tile0_m * block_M + i, ko * sf_words_per_block_k + k]
                                         for j, k in T.Parallel(block_N, sf_words_per_block_k):
-                                            SFB_shared[stage, j, k] = SFB[
-                                                tile0_n * block_N + j, ko * sf_words_per_block_k + k
-                                            ]
+                                            SFB_shared[stage, j, k] = SFB[tile0_n * block_N + j, ko * sf_words_per_block_k + k]
                                 T.barrier_arrive(loaded0[stage])
                         for ko in T.unroll(k_tiles, explicit=False, unroll_factor=1):
                             iter_k = wave * k_tiles + ko
@@ -1655,23 +1631,15 @@ def tilelang_nvfp4_gemm_manual_ws2(
                                     if sf_load_mode == "serial":
                                         for i in T.serial(block_M):
                                             for k in T.serial(sf_words_per_block_k):
-                                                SFA_shared[stage, i, k] = SFA[
-                                                    tile1_m * block_M + i, ko * sf_words_per_block_k + k
-                                                ]
+                                                SFA_shared[stage, i, k] = SFA[tile1_m * block_M + i, ko * sf_words_per_block_k + k]
                                         for j in T.serial(block_N):
                                             for k in T.serial(sf_words_per_block_k):
-                                                SFB_shared[stage, j, k] = SFB[
-                                                    tile1_n * block_N + j, ko * sf_words_per_block_k + k
-                                                ]
+                                                SFB_shared[stage, j, k] = SFB[tile1_n * block_N + j, ko * sf_words_per_block_k + k]
                                     else:
                                         for i, k in T.Parallel(block_M, sf_words_per_block_k):
-                                            SFA_shared[stage, i, k] = SFA[
-                                                tile1_m * block_M + i, ko * sf_words_per_block_k + k
-                                            ]
+                                            SFA_shared[stage, i, k] = SFA[tile1_m * block_M + i, ko * sf_words_per_block_k + k]
                                         for j, k in T.Parallel(block_N, sf_words_per_block_k):
-                                            SFB_shared[stage, j, k] = SFB[
-                                                tile1_n * block_N + j, ko * sf_words_per_block_k + k
-                                            ]
+                                            SFB_shared[stage, j, k] = SFB[tile1_n * block_N + j, ko * sf_words_per_block_k + k]
                                 T.barrier_arrive(loaded1[stage])
 
                 elif tx < 128:
@@ -1850,17 +1818,13 @@ def tilelang_nvfp4_gemm_manual_ws2(
                                 k = linear % sf_words_per_block_k
                                 dst_i = k * 32 + (i % 32)
                                 dst_k = i // 32
-                                SFA_shared[stage, dst_i, dst_k] = SFA[
-                                    by * block_M + i, ko * sf_words_per_block_k + k
-                                ]
+                                SFA_shared[stage, dst_i, dst_k] = SFA[by * block_M + i, ko * sf_words_per_block_k + k]
                             for linear in T.Parallel(block_N * sf_words_per_block_k):
                                 j = linear // sf_words_per_block_k
                                 k = linear % sf_words_per_block_k
                                 dst_j = k * 32 + (j % 32)
                                 dst_k = j // 32
-                                SFB_shared[stage, dst_j, dst_k] = SFB[
-                                    bx * block_N + j, ko * sf_words_per_block_k + k
-                                ]
+                                SFB_shared[stage, dst_j, dst_k] = SFB[bx * block_N + j, ko * sf_words_per_block_k + k]
                         elif sf_load_mode == "tma" and sf_words_per_block_k >= 4:
                             T.tma_copy(
                                 SFA[
@@ -1882,13 +1846,9 @@ def tilelang_nvfp4_gemm_manual_ws2(
                             )
                         elif sf_load_mode != "direct":
                             for i, k in T.Parallel(block_M, sf_words_per_block_k):
-                                SFA_shared[stage, i, k] = SFA[
-                                    by * block_M + i, ko * sf_words_per_block_k + k
-                                ]
+                                SFA_shared[stage, i, k] = SFA[by * block_M + i, ko * sf_words_per_block_k + k]
                             for j, k in T.Parallel(block_N, sf_words_per_block_k):
-                                SFB_shared[stage, j, k] = SFB[
-                                    bx * block_N + j, ko * sf_words_per_block_k + k
-                                ]
+                                SFB_shared[stage, j, k] = SFB[bx * block_N + j, ko * sf_words_per_block_k + k]
                         T.barrier_arrive(loaded[stage])
 
                 elif tx < full_consumer_threads:
@@ -2006,13 +1966,9 @@ def tilelang_nvfp4_gemm_manual_ws2(
                             )
                         elif sf_load_mode != "direct":
                             for i, k in T.Parallel(block_M, sf_words_per_block_k):
-                                SFA_shared[stage, i, k] = SFA[
-                                    by * block_M + i, ko * sf_words_per_block_k + k
-                                ]
+                                SFA_shared[stage, i, k] = SFA[by * block_M + i, ko * sf_words_per_block_k + k]
                             for j, k in T.Parallel(block_N, sf_words_per_block_k):
-                                SFB_shared[stage, j, k] = SFB[
-                                    bx * block_N + j, ko * sf_words_per_block_k + k
-                                ]
+                                SFB_shared[stage, j, k] = SFB[bx * block_N + j, ko * sf_words_per_block_k + k]
                         T.barrier_arrive(loaded[stage])
 
                 elif tx < 128:
@@ -2177,13 +2133,9 @@ def tilelang_nvfp4_gemm_manual_ws2(
                         )
                     elif sf_load_mode != "direct":
                         for i, k in T.Parallel(block_M, sf_words_per_block_k):
-                            SFA_shared[stage, i, k] = SFA[
-                                by * block_M + i, ko * sf_words_per_block_k + k
-                            ]
+                            SFA_shared[stage, i, k] = SFA[by * block_M + i, ko * sf_words_per_block_k + k]
                         for j, k in T.Parallel(block_N, sf_words_per_block_k):
-                            SFB_shared[stage, j, k] = SFB[
-                                bx * block_N + j, ko * sf_words_per_block_k + k
-                            ]
+                            SFB_shared[stage, j, k] = SFB[bx * block_N + j, ko * sf_words_per_block_k + k]
                     T.barrier_arrive(loaded[stage])
 
             elif tx < 128:
@@ -2328,20 +2280,18 @@ def _make_constant_scale_words(rows: int, k: int, byte: int = 0x38) -> torch.Ten
 def _make_binary_scale_words(rows: int, k: int, *, seed: int) -> torch.Tensor:
     generator = torch.Generator(device="cuda")
     generator.manual_seed(seed)
-    scale_bytes = torch.randint(
-        0,
-        2,
-        (rows, k // 16),
-        device="cuda",
-        dtype=torch.int64,
-        generator=generator,
-    ) * 0x38
-    words = (
-        scale_bytes[:, 0::4]
-        | (scale_bytes[:, 1::4] << 8)
-        | (scale_bytes[:, 2::4] << 16)
-        | (scale_bytes[:, 3::4] << 24)
+    scale_bytes = (
+        torch.randint(
+            0,
+            2,
+            (rows, k // 16),
+            device="cuda",
+            dtype=torch.int64,
+            generator=generator,
+        )
+        * 0x38
     )
+    words = scale_bytes[:, 0::4] | (scale_bytes[:, 1::4] << 8) | (scale_bytes[:, 2::4] << 16) | (scale_bytes[:, 3::4] << 24)
     return words.to(torch.uint32)
 
 
@@ -2411,7 +2361,7 @@ def _verify_tilelang_output(
     try:
         torch.testing.assert_close(C, ref, rtol=0.0, atol=0.0)
     except AssertionError:
-        diff = C != ref
+        diff = ref != C
         mismatch = int(diff.sum().item())
         total = diff.numel()
         print(f"TileLang mismatch summary: {mismatch}/{total} ({mismatch / total:.2%})")
@@ -2430,11 +2380,7 @@ def _verify_tilelang_output(
                 owner = "unknown"
                 if sm_num is not None and sm_num > 0:
                     owner = f"WG{(tile_id // sm_num) & 1}"
-                print(
-                    "  tile "
-                    f"m={tile_m} n={tile_n} tile_id={tile_id} owner={owner} "
-                    f"mismatch={int(value)}/{block_m * block_n}"
-                )
+                print(f"  tile m={tile_m} n={tile_n} tile_id={tile_id} owner={owner} mismatch={int(value)}/{block_m * block_n}")
             if block_n % 64 == 0:
                 panel_counts = diff.reshape(m_blocks, block_m, n_blocks, block_n // 64, 64).sum(dim=(1, 4))
                 panel_flat = panel_counts.flatten()
@@ -2480,10 +2426,7 @@ def _verify_tilelang_output(
                     panel_diff = tile0[:, panel * 32 : (panel + 1) * 32]
                     row32 = panel_diff.reshape(4, 32, 32).sum(dim=(1, 2)).cpu().tolist()
                     col8 = panel_diff.reshape(block_m, 4, 8).sum(dim=(0, 2)).cpu().tolist()
-                    print(
-                        "  tile0-panel32-buckets "
-                        f"panel={panel} row32={[int(x) for x in row32]} col8={[int(x) for x in col8]}"
-                    )
+                    print(f"  tile0-panel32-buckets panel={panel} row32={[int(x) for x in row32]} col8={[int(x) for x in col8]}")
         raise
 
 
@@ -2506,7 +2449,7 @@ def _print_kblock_debug(
 
     named_refs = [(f"kblock{idx}", ref) for idx, ref in enumerate(refs)] + [("full", full_ref)]
     for name, ref in named_refs:
-        diff = C != ref
+        diff = ref != C
         print(
             f"kblock-debug {name}: mismatch={int(diff.sum().item())}/{C.numel()}, "
             f"maxabs={float((C.float() - ref.float()).abs().max().item())}"
@@ -2519,7 +2462,7 @@ def _print_kblock_debug(
             row.append(int((C[tm : tm + block_m, tn : tn + block_n] != full_ref[tm : tm + block_m, tn : tn + block_n]).sum().item()))
         print(f"kblock-debug tile-row {tm // block_m}: {row}")
 
-    coords = torch.nonzero(C != full_ref)[:16].detach().cpu().tolist()
+    coords = torch.nonzero(full_ref != C)[:16].detach().cpu().tolist()
     samples = [
         (
             int(i),
@@ -2561,7 +2504,7 @@ def _verify_tilelang_single_omma_site(
                         else:
                             ref_f32[rows, cols] += A_full[rows, k_range] @ B_full[cols, k_range].T
     ref = ref_f32.to(out_dtype)
-    diff_mask = C != ref
+    diff_mask = ref != C
     if torch.any(diff_mask):
         actual_mask = C != 0
         ref_mask = ref != 0
@@ -2574,10 +2517,7 @@ def _verify_tilelang_single_omma_site(
             f"mismatch={int(diff_mask.sum().item())}"
         )
         coords = torch.nonzero(diff_mask)[:16].cpu().tolist()
-        samples = [
-            (int(i), int(j), float(C[i, j].float().item()), float(ref[i, j].float().item()))
-            for i, j in coords
-        ]
+        samples = [(int(i), int(j), float(C[i, j].float().item()), float(ref[i, j].float().item())) for i, j in coords]
         print(f"single-OMMA diagnostic samples: {samples}")
     torch.testing.assert_close(C, ref, rtol=0.0, atol=0.0)
 
@@ -2588,10 +2528,14 @@ def _print_single_omma_active_stats(C: torch.Tensor, block_m: int, block_n: int)
         for tile_n in range(0, C.shape[1], block_n):
             for warp_m_base in (0, 64):
                 for warp_n_base in (0, 64):
-                    active.append(C[
-                        tile_m + warp_m_base : tile_m + warp_m_base + 16,
-                        tile_n + warp_n_base : tile_n + warp_n_base + 8,
-                    ].float().reshape(-1))
+                    active.append(
+                        C[
+                            tile_m + warp_m_base : tile_m + warp_m_base + 16,
+                            tile_n + warp_n_base : tile_n + warp_n_base + 8,
+                        ]
+                        .float()
+                        .reshape(-1)
+                    )
     values = torch.cat(active)
     unique = torch.unique(values)
     preview = unique[:16].detach().cpu().tolist()
@@ -2697,8 +2641,7 @@ def run_tilelang(args: argparse.Namespace) -> tuple[float, float]:
         print(f"TileLang SASS: {sass_path}")
     if (
         args.manual_ws2_split != "pp_wait"
-        and
-        "sm120_mma_sync_blockscaled" not in source
+        and "sm120_mma_sync_blockscaled" not in source
         and "sm120_mma_blockscaled_kblock_fulltile" not in source
         and "sm120_mma_blockscaled_cute_consumer_bridge" not in source
     ):
@@ -2769,9 +2712,7 @@ def run_tilelang(args: argparse.Namespace) -> tuple[float, float]:
                 args.block_n,
                 args.block_k,
                 scratch_ones=args.manual_ws2_ab_copy_view.startswith("fp4_ldsm_single_omma_scratch"),
-                scratch_expected=32.0
-                if args.manual_ws2_ab_copy_view == "fp4_ldsm_single_omma_scratch_shifted_ones"
-                else 64.0,
+                scratch_expected=32.0 if args.manual_ws2_ab_copy_view == "fp4_ldsm_single_omma_scratch_shifted_ones" else 64.0,
             )
         else:
             _verify_tilelang_output(
@@ -2999,20 +2940,20 @@ def parse_args() -> argparse.Namespace:
         choices=[
             "legacy_b16",
             "legacy_b16_single_omma",
-        "fp4_ldsm",
-        "fp4_ldsm_single_omma",
-        "fp4_ldsm_noshift",
-        "fp4_ldsm_single_omma_noshift",
-        "fp4_ldsm_cute_rowstart",
-        "fp4_ldsm_cute_rowstart_noshift",
-        "fp4_ldsm_cute_rowstart_aonly",
-        "fp4_ldsm_cute_rowstart_bonly",
-        "fp4_ldsm_cute_rowstart_caccum",
-        "fp4_ldsm_cute_rowstart_single_omma",
-        "fp4_ldsm_cute_rowstart_single_omma_noshift",
-        "fp4_ldsm_cute_rowstart_single_omma_aonly",
-        "fp4_ldsm_cute_rowstart_single_omma_bonly",
-        "fp4_ldsm_single_omma_real_scratch",
+            "fp4_ldsm",
+            "fp4_ldsm_single_omma",
+            "fp4_ldsm_noshift",
+            "fp4_ldsm_single_omma_noshift",
+            "fp4_ldsm_cute_rowstart",
+            "fp4_ldsm_cute_rowstart_noshift",
+            "fp4_ldsm_cute_rowstart_aonly",
+            "fp4_ldsm_cute_rowstart_bonly",
+            "fp4_ldsm_cute_rowstart_caccum",
+            "fp4_ldsm_cute_rowstart_single_omma",
+            "fp4_ldsm_cute_rowstart_single_omma_noshift",
+            "fp4_ldsm_cute_rowstart_single_omma_aonly",
+            "fp4_ldsm_cute_rowstart_single_omma_bonly",
+            "fp4_ldsm_single_omma_real_scratch",
             "fp4_ldsm_single_omma_scratch_ones",
             "fp4_ldsm_single_omma_scratch_shifted_ones",
         ],

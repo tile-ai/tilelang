@@ -441,7 +441,8 @@ TVM_DLL const Op &sm120_mma_blockscaled_kblock_fulltile_ab_owner_wide();
  * \brief Private SM120a NVF4 full-tile helper with A-full/B-panel schedule and
  * backend-owned scale-owner words.
  */
-TVM_DLL const Op &sm120_mma_blockscaled_kblock_fulltile_afull_bpanel_owner_wide();
+TVM_DLL const Op &
+sm120_mma_blockscaled_kblock_fulltile_afull_bpanel_owner_wide();
 
 /*!
  * \brief Private SM120a NVF4 full-tile package-lifecycle probe.
@@ -464,7 +465,8 @@ TVM_DLL const Op &sm120_store_full_c_fragment_panel64_bf16();
 TVM_DLL const Op &sm120_store_full_c_fragment_panel32_tma_bf16();
 
 /*!
- * \brief Private SM120a NVF4 full accumulator fragment 64x32 epilogue TMA-store helper.
+ * \brief Private SM120a NVF4 full accumulator fragment 64x32 epilogue TMA-store
+ * helper.
  */
 TVM_DLL const Op &sm120_store_full_c_fragment_epi64x32_tma_bf16();
 

@@ -13,8 +13,8 @@
 #include <tvm/tirx/op.h>
 
 #include <cmath>
-#include <cstdlib>
 #include <cstdint>
+#include <cstdlib>
 #include <optional>
 #include <string>
 #include <utility>
@@ -2551,10 +2551,11 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     };
 
     std::string src_ptr = this->PrintExpr(op->args[2]);
-	    std::optional<std::string> packed_dst_ptr =
-	        print_fp4_packed_local_ptr(op->args[3]);
-	    std::string dst_ptr =
-	        packed_dst_ptr.has_value() ? packed_dst_ptr.value() : this->PrintExpr(op->args[3]);
+    std::optional<std::string> packed_dst_ptr =
+        print_fp4_packed_local_ptr(op->args[3]);
+    std::string dst_ptr = packed_dst_ptr.has_value()
+                              ? packed_dst_ptr.value()
+                              : this->PrintExpr(op->args[3]);
     this->PrintIndent();
     this->stream << func_name << "(" << src_ptr << ", " << dst_ptr << ");\n";
   } else if (op->op.same_as(tl::ptx_stmatrix())) {
@@ -3039,28 +3040,32 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string c_ref = this->PrintExpr(op->args[0]);
     std::string c_offset = this->PrintExpr(op->args[1]);
     auto void_ptr_arg = [&](size_t idx) {
-      return "reinterpret_cast<const void*>(" + this->PrintExpr(op->args[idx]) + ")";
+      return "reinterpret_cast<const void*>(" + this->PrintExpr(op->args[idx]) +
+             ")";
     };
     auto mma_operand_void_ptr_arg = [&](size_t idx) {
       if (EnableSM120MmaRawUnpackedFP4AccessPtr()) {
-        std::optional<DataType> element_type = GetAccessPtrElementType(op->args[idx]);
+        std::optional<DataType> element_type =
+            GetAccessPtrElementType(op->args[idx]);
         const auto *call = op->args[idx].as<CallNode>();
         if (element_type.has_value() &&
             element_type.value().is_float4_e2m1_unpacked() && call != nullptr) {
           if (call->op.same_as(builtin::tvm_access_ptr())) {
             ICHECK_GE(call->args.size(), 3U);
-            return "reinterpret_cast<const void*>(reinterpret_cast<const char*>(" +
+            return "reinterpret_cast<const void*>(reinterpret_cast<const "
+                   "char*>(" +
                    this->PrintExpr(call->args[1]) + ") + (" +
                    this->PrintExpr(call->args[2]) + "))";
           }
           if (call->op.same_as(tl::access_ptr())) {
-            ICHECK_EQ(call->args.size(), 3U)
-                << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
+            ICHECK_EQ(call->args.size(), 3U) << "tl.access_ptr expects 3 args: "
+                                                "(BufferLoad, extent, rw_mask)";
             const auto *load = call->args[0].as<BufferLoadNode>();
             ICHECK(load) << "tl.access_ptr arg0 must be BufferLoad";
             ICHECK_EQ(load->indices.size(), 1U)
                 << "SM120 raw FP4 bridge access expects 1D shared operand";
-            return "reinterpret_cast<const void*>(reinterpret_cast<const char*>(" +
+            return "reinterpret_cast<const void*>(reinterpret_cast<const "
+                   "char*>(" +
                    GetVarID(load->buffer->data.get()) + ") + (" +
                    this->PrintExpr(load->indices[0]) + "))";
           }
@@ -3070,7 +3075,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
             ICHECK(load) << "address_of arg must be BufferLoad";
             ICHECK_EQ(load->indices.size(), 1U)
                 << "SM120 raw FP4 bridge address_of expects 1D shared operand";
-            return "reinterpret_cast<const void*>(reinterpret_cast<const char*>(" +
+            return "reinterpret_cast<const void*>(reinterpret_cast<const "
+                   "char*>(" +
                    GetVarID(load->buffer->data.get()) + ") + (" +
                    this->PrintExpr(load->indices[0]) + "))";
           }
@@ -3079,17 +3085,17 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       return void_ptr_arg(idx);
     };
     auto uint32_ptr_arg = [&](size_t idx) {
-      return "reinterpret_cast<const uint32_t*>(" + this->PrintExpr(op->args[idx]) + ")";
+      return "reinterpret_cast<const uint32_t*>(" +
+             this->PrintExpr(op->args[idx]) + ")";
     };
 
     this->PrintIndent();
-    this->stream
-        << "tl::sm120_mma_blockscaled_cute_consumer_bridge("
-        << "reinterpret_cast<float*>((" << c_ref << ") + (" << c_offset
-        << ")), "
-        << mma_operand_void_ptr_arg(2) << ", " << mma_operand_void_ptr_arg(3)
-        << ", " << uint32_ptr_arg(4) << ", " << uint32_ptr_arg(5) << ", "
-        << this->PrintExpr(op->args[6]) << ");\n";
+    this->stream << "tl::sm120_mma_blockscaled_cute_consumer_bridge("
+                 << "reinterpret_cast<float*>((" << c_ref << ") + (" << c_offset
+                 << ")), " << mma_operand_void_ptr_arg(2) << ", "
+                 << mma_operand_void_ptr_arg(3) << ", " << uint32_ptr_arg(4)
+                 << ", " << uint32_ptr_arg(5) << ", "
+                 << this->PrintExpr(op->args[6]) << ");\n";
   } else if (op->op.same_as(tl::sm120_store_full_c_fragment_panel64_bf16())) {
     // arg 0: C fragment pointer
     // arg 1: C fragment offset
@@ -3103,14 +3109,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string c_shared_offset = this->PrintExpr(op->args[3]);
 
     this->PrintIndent();
-    this->stream
-        << "tl::detail::sm120_store_full_c_fragment_panel64_bf16("
-        << "reinterpret_cast<float const*>((" << c_ref << ") + (" << c_offset
-        << ")), "
-        << "(reinterpret_cast<bfloat16_t*>(" << c_shared_ref << ") + ("
-        << c_shared_offset << ")), " << this->PrintExpr(op->args[4])
-        << ");\n";
-  } else if (op->op.same_as(tl::sm120_store_full_c_fragment_panel32_tma_bf16())) {
+    this->stream << "tl::detail::sm120_store_full_c_fragment_panel64_bf16("
+                 << "reinterpret_cast<float const*>((" << c_ref << ") + ("
+                 << c_offset << ")), "
+                 << "(reinterpret_cast<bfloat16_t*>(" << c_shared_ref << ") + ("
+                 << c_shared_offset << ")), " << this->PrintExpr(op->args[4])
+                 << ");\n";
+  } else if (op->op.same_as(
+                 tl::sm120_store_full_c_fragment_panel32_tma_bf16())) {
     // arg 0: C fragment pointer
     // arg 1: C fragment offset
     // arg 2: C shared output slice pointer
@@ -3123,14 +3129,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string c_shared_offset = this->PrintExpr(op->args[3]);
 
     this->PrintIndent();
-    this->stream
-        << "tl::detail::sm120_store_full_c_fragment_panel32_tma_bf16("
-        << "reinterpret_cast<float const*>((" << c_ref << ") + (" << c_offset
-        << ")), "
-        << "(reinterpret_cast<bfloat16_t*>(" << c_shared_ref << ") + ("
-        << c_shared_offset << ")), " << this->PrintExpr(op->args[4])
-        << ");\n";
-  } else if (op->op.same_as(tl::sm120_store_full_c_fragment_epi64x32_tma_bf16())) {
+    this->stream << "tl::detail::sm120_store_full_c_fragment_panel32_tma_bf16("
+                 << "reinterpret_cast<float const*>((" << c_ref << ") + ("
+                 << c_offset << ")), "
+                 << "(reinterpret_cast<bfloat16_t*>(" << c_shared_ref << ") + ("
+                 << c_shared_offset << ")), " << this->PrintExpr(op->args[4])
+                 << ");\n";
+  } else if (op->op.same_as(
+                 tl::sm120_store_full_c_fragment_epi64x32_tma_bf16())) {
     // arg 0: C fragment pointer
     // arg 1: C fragment offset
     // arg 2: C shared output slice pointer
@@ -3144,15 +3150,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string c_shared_offset = this->PrintExpr(op->args[3]);
 
     this->PrintIndent();
-    this->stream
-        << "tl::detail::sm120_store_full_c_fragment_epi64x32_tma_bf16("
-        << "reinterpret_cast<float const*>((" << c_ref << ") + (" << c_offset
-        << ")), "
-        << "(reinterpret_cast<bfloat16_t*>(" << c_shared_ref << ") + ("
-        << c_shared_offset << ")), " << this->PrintExpr(op->args[4]) << ", "
-        << this->PrintExpr(op->args[5]) << ");\n";
-  } else if (op->op.same_as(
-                 tl::sm120_mma_blockscaled_kblock_fulltile_afull_bpanel_owner_wide())) {
+    this->stream << "tl::detail::sm120_store_full_c_fragment_epi64x32_tma_bf16("
+                 << "reinterpret_cast<float const*>((" << c_ref << ") + ("
+                 << c_offset << ")), "
+                 << "(reinterpret_cast<bfloat16_t*>(" << c_shared_ref << ") + ("
+                 << c_shared_offset << ")), " << this->PrintExpr(op->args[4])
+                 << ", " << this->PrintExpr(op->args[5]) << ");\n";
+  } else if (
+      op->op.same_as(
+          tl::sm120_mma_blockscaled_kblock_fulltile_afull_bpanel_owner_wide())) {
     // arg 0: C fragment pointer
     // arg 1: C fragment offset
     // args 2..5: A ldmatrix source pointers
@@ -3164,10 +3170,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string c_ref = this->PrintExpr(op->args[0]);
     std::string c_offset = this->PrintExpr(op->args[1]);
     auto void_ptr_arg = [&](size_t idx) {
-      return "reinterpret_cast<const void*>(" + this->PrintExpr(op->args[idx]) + ")";
+      return "reinterpret_cast<const void*>(" + this->PrintExpr(op->args[idx]) +
+             ")";
     };
     auto uint32_ptr_arg = [&](size_t idx) {
-      return "reinterpret_cast<const uint32_t*>(" + this->PrintExpr(op->args[idx]) + ")";
+      return "reinterpret_cast<const uint32_t*>(" +
+             this->PrintExpr(op->args[idx]) + ")";
     };
 
     this->PrintIndent();
@@ -3175,13 +3183,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         << "tl::sm120_mma_blockscaled_kblock_fulltile_afull_bpanel_owner_wide("
         << "reinterpret_cast<float*>((" << c_ref << ") + (" << c_offset
         << ")), " << void_ptr_arg(2) << ", " << void_ptr_arg(3) << ", "
-        << void_ptr_arg(4) << ", " << void_ptr_arg(5) << ", "
-        << void_ptr_arg(6) << ", " << void_ptr_arg(7) << ", "
-        << void_ptr_arg(8) << ", " << void_ptr_arg(9) << ", "
-        << uint32_ptr_arg(10) << ", " << uint32_ptr_arg(11) << ", "
-        << this->PrintExpr(op->args[12]) << ");\n";
-  } else if (op->op.same_as(
-                 tl::sm120_mma_blockscaled_kblock_fulltile_package_pingpong())) {
+        << void_ptr_arg(4) << ", " << void_ptr_arg(5) << ", " << void_ptr_arg(6)
+        << ", " << void_ptr_arg(7) << ", " << void_ptr_arg(8) << ", "
+        << void_ptr_arg(9) << ", " << uint32_ptr_arg(10) << ", "
+        << uint32_ptr_arg(11) << ", " << this->PrintExpr(op->args[12])
+        << ");\n";
+  } else if (
+      op->op.same_as(
+          tl::sm120_mma_blockscaled_kblock_fulltile_package_pingpong())) {
     // arg 0: C fragment pointer
     // arg 1: C fragment offset
     // arg 2: A shared K-stage base
@@ -3192,10 +3201,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string c_ref = this->PrintExpr(op->args[0]);
     std::string c_offset = this->PrintExpr(op->args[1]);
     auto void_ptr_arg = [&](size_t idx) {
-      return "reinterpret_cast<const void*>(" + this->PrintExpr(op->args[idx]) + ")";
+      return "reinterpret_cast<const void*>(" + this->PrintExpr(op->args[idx]) +
+             ")";
     };
     auto uint32_ptr_arg = [&](size_t idx) {
-      return "reinterpret_cast<const uint32_t*>(" + this->PrintExpr(op->args[idx]) + ")";
+      return "reinterpret_cast<const uint32_t*>(" +
+             this->PrintExpr(op->args[idx]) + ")";
     };
 
     this->PrintIndent();
@@ -3217,23 +3228,23 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string c_ref = this->PrintExpr(op->args[0]);
     std::string c_offset = this->PrintExpr(op->args[1]);
     auto void_ptr_arg = [&](size_t idx) {
-      return "reinterpret_cast<const void*>(" + this->PrintExpr(op->args[idx]) + ")";
+      return "reinterpret_cast<const void*>(" + this->PrintExpr(op->args[idx]) +
+             ")";
     };
     auto uint32_ptr_arg = [&](size_t idx) {
-      return "reinterpret_cast<const uint32_t*>(" + this->PrintExpr(op->args[idx]) + ")";
+      return "reinterpret_cast<const uint32_t*>(" +
+             this->PrintExpr(op->args[idx]) + ")";
     };
 
     this->PrintIndent();
-    this->stream
-        << "tl::sm120_mma_blockscaled_kblock_fulltile_ab_owner_wide("
-        << "reinterpret_cast<float*>((" << c_ref << ") + (" << c_offset
-        << ")), "
-        << void_ptr_arg(2) << ", " << void_ptr_arg(3) << ", "
-        << void_ptr_arg(4) << ", " << void_ptr_arg(5) << ", "
-        << void_ptr_arg(6) << ", " << void_ptr_arg(7) << ", "
-        << void_ptr_arg(8) << ", " << void_ptr_arg(9) << ", "
-        << uint32_ptr_arg(10) << ", " << uint32_ptr_arg(11) << ", "
-        << this->PrintExpr(op->args[12]) << ");\n";
+    this->stream << "tl::sm120_mma_blockscaled_kblock_fulltile_ab_owner_wide("
+                 << "reinterpret_cast<float*>((" << c_ref << ") + (" << c_offset
+                 << ")), " << void_ptr_arg(2) << ", " << void_ptr_arg(3) << ", "
+                 << void_ptr_arg(4) << ", " << void_ptr_arg(5) << ", "
+                 << void_ptr_arg(6) << ", " << void_ptr_arg(7) << ", "
+                 << void_ptr_arg(8) << ", " << void_ptr_arg(9) << ", "
+                 << uint32_ptr_arg(10) << ", " << uint32_ptr_arg(11) << ", "
+                 << this->PrintExpr(op->args[12]) << ");\n";
   } else if (op->op.same_as(tl::sm120_mma_blockscaled_kblock_fulltile())) {
     // arg 0: C fragment pointer
     // arg 1: C fragment offset
@@ -3247,11 +3258,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string c_ref = this->PrintExpr(op->args[0]);
     std::string c_offset = this->PrintExpr(op->args[1]);
     auto void_ptr_arg = [&](size_t idx) {
-      return "reinterpret_cast<const void*>(" + this->PrintExpr(op->args[idx]) + ")";
+      return "reinterpret_cast<const void*>(" + this->PrintExpr(op->args[idx]) +
+             ")";
     };
     auto mma_operand_void_ptr_arg = [&](size_t idx) {
       if (EnableSM120MmaRawUnpackedFP4AccessPtr()) {
-        std::optional<DataType> element_type = GetAccessPtrElementType(op->args[idx]);
+        std::optional<DataType> element_type =
+            GetAccessPtrElementType(op->args[idx]);
         const auto *call = op->args[idx].as<CallNode>();
         if (element_type.has_value() &&
             element_type.value().is_float4_e2m1_unpacked() && call != nullptr) {
@@ -3262,18 +3275,20 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
           // generic /2 compacting.
           if (call->op.same_as(builtin::tvm_access_ptr())) {
             ICHECK_GE(call->args.size(), 3U);
-            return "reinterpret_cast<const void*>(reinterpret_cast<const char*>(" +
+            return "reinterpret_cast<const void*>(reinterpret_cast<const "
+                   "char*>(" +
                    this->PrintExpr(call->args[1]) + ") + (" +
                    this->PrintExpr(call->args[2]) + "))";
           }
           if (call->op.same_as(tl::access_ptr())) {
-            ICHECK_EQ(call->args.size(), 3U)
-                << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
+            ICHECK_EQ(call->args.size(), 3U) << "tl.access_ptr expects 3 args: "
+                                                "(BufferLoad, extent, rw_mask)";
             const auto *load = call->args[0].as<BufferLoadNode>();
             ICHECK(load) << "tl.access_ptr arg0 must be BufferLoad";
             ICHECK_EQ(load->indices.size(), 1U)
                 << "SM120 raw FP4 MMA access expects 1D shared operand";
-            return "reinterpret_cast<const void*>(reinterpret_cast<const char*>(" +
+            return "reinterpret_cast<const void*>(reinterpret_cast<const "
+                   "char*>(" +
                    GetVarID(load->buffer->data.get()) + ") + (" +
                    this->PrintExpr(load->indices[0]) + "))";
           }
@@ -3283,7 +3298,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
             ICHECK(load) << "address_of arg must be BufferLoad";
             ICHECK_EQ(load->indices.size(), 1U)
                 << "SM120 raw FP4 MMA address_of expects 1D shared operand";
-            return "reinterpret_cast<const void*>(reinterpret_cast<const char*>(" +
+            return "reinterpret_cast<const void*>(reinterpret_cast<const "
+                   "char*>(" +
                    GetVarID(load->buffer->data.get()) + ") + (" +
                    this->PrintExpr(load->indices[0]) + "))";
           }
@@ -3292,27 +3308,28 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       return void_ptr_arg(idx);
     };
     auto uint32_ptr_arg = [&](size_t idx) {
-      return "reinterpret_cast<const uint32_t*>(" + this->PrintExpr(op->args[idx]) + ")";
+      return "reinterpret_cast<const uint32_t*>(" +
+             this->PrintExpr(op->args[idx]) + ")";
     };
 
     this->PrintIndent();
-    this->stream
-        << "tl::sm120_mma_blockscaled_kblock_fulltile("
-        << "reinterpret_cast<float*>((" << c_ref << ") + (" << c_offset
-        << ")), "
-        << mma_operand_void_ptr_arg(2) << ", " << mma_operand_void_ptr_arg(3)
-        << ", " << mma_operand_void_ptr_arg(4) << ", "
-        << mma_operand_void_ptr_arg(5) << ", " << mma_operand_void_ptr_arg(6)
-        << ", " << mma_operand_void_ptr_arg(7) << ", "
-        << mma_operand_void_ptr_arg(8) << ", " << mma_operand_void_ptr_arg(9)
-        << ", "
-        << uint32_ptr_arg(10) << ", " << uint32_ptr_arg(11) << ", "
-        << uint32_ptr_arg(12) << ", " << uint32_ptr_arg(13) << ", "
-        << uint32_ptr_arg(14) << ", " << uint32_ptr_arg(15) << ", "
-        << uint32_ptr_arg(16) << ", " << uint32_ptr_arg(17) << ", "
-        << uint32_ptr_arg(18) << ", " << uint32_ptr_arg(19) << ", "
-        << uint32_ptr_arg(20) << ", " << uint32_ptr_arg(21) << ", "
-        << this->PrintExpr(op->args[22]) << ");\n";
+    this->stream << "tl::sm120_mma_blockscaled_kblock_fulltile("
+                 << "reinterpret_cast<float*>((" << c_ref << ") + (" << c_offset
+                 << ")), " << mma_operand_void_ptr_arg(2) << ", "
+                 << mma_operand_void_ptr_arg(3) << ", "
+                 << mma_operand_void_ptr_arg(4) << ", "
+                 << mma_operand_void_ptr_arg(5) << ", "
+                 << mma_operand_void_ptr_arg(6) << ", "
+                 << mma_operand_void_ptr_arg(7) << ", "
+                 << mma_operand_void_ptr_arg(8) << ", "
+                 << mma_operand_void_ptr_arg(9) << ", " << uint32_ptr_arg(10)
+                 << ", " << uint32_ptr_arg(11) << ", " << uint32_ptr_arg(12)
+                 << ", " << uint32_ptr_arg(13) << ", " << uint32_ptr_arg(14)
+                 << ", " << uint32_ptr_arg(15) << ", " << uint32_ptr_arg(16)
+                 << ", " << uint32_ptr_arg(17) << ", " << uint32_ptr_arg(18)
+                 << ", " << uint32_ptr_arg(19) << ", " << uint32_ptr_arg(20)
+                 << ", " << uint32_ptr_arg(21) << ", "
+                 << this->PrintExpr(op->args[22]) << ");\n";
   } else if (op->op.same_as(builtin::ptx_mma_sp())) {
     // arg 0: shape: mXnXkX
     // arg 1: A layout: row/col
@@ -4960,9 +4977,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
   std::string scope = GetPtrStorageScope(op->buffer->data);
   const VarNode *buffer = op->buffer->data.as<VarNode>();
   DataType alloc_dtype = op->buffer->dtype;
-  bool is_float4_unpacked_shared =
-      alloc_dtype.is_float4_e2m1_unpacked() &&
-      (scope == "shared" || scope == "shared.dyn");
+  bool is_float4_unpacked_shared = alloc_dtype.is_float4_e2m1_unpacked() &&
+                                   (scope == "shared" || scope == "shared.dyn");
   bool is_compact_unpacked_fp4_shared =
       is_float4_unpacked_shared && EnableSM120CompactUnpackedFP4Shared();
   if (scope.find("wmma.") == 0) {

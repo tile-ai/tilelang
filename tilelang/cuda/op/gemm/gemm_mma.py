@@ -256,13 +256,9 @@ class GemmMMA(GemmBase):
             if micro_pipeline == "k_static_b_pingpong_scale_stream":
                 num_k_blocks = int(block_K // micro_size_k)
                 if num_k_blocks != 4:
-                    raise ValueError(
-                        "micro_pipeline='k_static_b_pingpong_scale_stream' currently requires block_K / micro_size_k == 4"
-                    )
+                    raise ValueError("micro_pipeline='k_static_b_pingpong_scale_stream' currently requires block_K / micro_size_k == 4")
                 if int(warp_rows) != 1 or int(warp_cols) != 8:
-                    raise ValueError(
-                        "micro_pipeline='k_static_b_pingpong_scale_stream' currently targets warp_rows=1, warp_cols=8"
-                    )
+                    raise ValueError("micro_pipeline='k_static_b_pingpong_scale_stream' currently targets warp_rows=1, warp_cols=8")
 
                 @T.prim_func
                 def _gemm_ss_blockscaled_k_static_b_pingpong_scale_stream() -> None:
@@ -308,36 +304,20 @@ class GemmMMA(GemmBase):
 
                     mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 0, 0)
                     mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 0, 1)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_0, B_local_0, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 0
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_0, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 0)
                     mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 0, 2)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_0, B_local_1, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 1
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_1, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 1)
                     mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 0, 3)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_0, B_local_0, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 2
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_0, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 2)
                     mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 0, 4)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_0, B_local_1, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 3
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_1, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 3)
                     mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 0, 5)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_0, B_local_0, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 4
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_0, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 4)
                     mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 0, 6)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_0, B_local_1, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 5
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_1, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 5)
                     mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 0, 7)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_0, B_local_0, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 6
-                    )
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_0, B_local_1, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 7
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_0, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 6)
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_1, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 7)
 
                     mma_emitter.ldmatrix_a(A_local_0, A_region, 2)
                     mma_emitter.ldscale_fragment(
@@ -354,36 +334,20 @@ class GemmMMA(GemmBase):
                     )
                     mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 1, 0)
                     mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 1, 1)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_1, B_local_0, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 0
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_0, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 0)
                     mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 1, 2)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_1, B_local_1, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 1
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_1, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 1)
                     mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 1, 3)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_1, B_local_0, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 2
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_0, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 2)
                     mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 1, 4)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_1, B_local_1, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 3
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_1, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 3)
                     mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 1, 5)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_1, B_local_0, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 4
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_0, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 4)
                     mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 1, 6)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_1, B_local_1, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 5
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_1, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 5)
                     mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 1, 7)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_1, B_local_0, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 6
-                    )
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_1, B_local_1, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 7
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_0, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 6)
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_1, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 7)
 
                     mma_emitter.ldmatrix_a(A_local_1, A_region, 3)
                     mma_emitter.ldscale_fragment(
@@ -400,78 +364,44 @@ class GemmMMA(GemmBase):
                     )
                     mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 2, 0)
                     mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 2, 1)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_0, B_local_0, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 0
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_0, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 0)
                     mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 2, 2)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_0, B_local_1, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 1
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_1, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 1)
                     mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 2, 3)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_0, B_local_0, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 2
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_0, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 2)
                     mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 2, 4)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_0, B_local_1, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 3
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_1, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 3)
                     mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 2, 5)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_0, B_local_0, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 4
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_0, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 4)
                     mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 2, 6)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_0, B_local_1, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 5
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_1, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 5)
                     mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 2, 7)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_0, B_local_0, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 6
-                    )
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_0, B_local_1, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 7
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_0, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 6)
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_1, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 7)
 
                     mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 3, 0)
                     mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 3, 1)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_1, B_local_0, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 0
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_0, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 0)
                     mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 3, 2)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_1, B_local_1, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 1
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_1, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 1)
                     mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 3, 3)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_1, B_local_0, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 2
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_0, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 2)
                     mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 3, 4)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_1, B_local_1, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 3
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_1, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 3)
                     mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 3, 5)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_1, B_local_0, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 4
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_0, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 4)
                     mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 3, 6)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_1, B_local_1, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 5
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_1, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 5)
                     mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 3, 7)
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_1, B_local_0, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 6
-                    )
-                    mma_emitter.mma_atom_with_scale_fragments(
-                        A_local_1, B_local_1, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 7
-                    )
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_0, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 6)
+                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_1, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 7)
 
                 return _Simplify(_gemm_ss_blockscaled_k_static_b_pingpong_scale_stream, inline_let=True)
 
             if micro_pipeline == "k_static_b_atom_n8_stream":
                 num_k_blocks = int(block_K // micro_size_k)
                 if num_k_blocks != 4:
-                    raise ValueError(
-                        "micro_pipeline='k_static_b_atom_n8_stream' currently requires block_K / micro_size_k == 4"
-                    )
+                    raise ValueError("micro_pipeline='k_static_b_atom_n8_stream' currently requires block_K / micro_size_k == 4")
                 if int(warp_cols) != 8:
                     raise ValueError("micro_pipeline='k_static_b_atom_n8_stream' currently targets warp_cols=8")
 
@@ -551,9 +481,7 @@ class GemmMMA(GemmBase):
             if micro_pipeline == "k_static_b_atom_n8_stream_vecsf":
                 num_k_blocks = int(block_K // micro_size_k)
                 if num_k_blocks != 4:
-                    raise ValueError(
-                        "micro_pipeline='k_static_b_atom_n8_stream_vecsf' currently requires block_K / micro_size_k == 4"
-                    )
+                    raise ValueError("micro_pipeline='k_static_b_atom_n8_stream_vecsf' currently requires block_K / micro_size_k == 4")
                 if int(warp_cols) != 8:
                     raise ValueError("micro_pipeline='k_static_b_atom_n8_stream_vecsf' currently targets warp_cols=8")
 
@@ -631,9 +559,7 @@ class GemmMMA(GemmBase):
             if micro_pipeline == "k_static_full_b_atom_scale_stream":
                 num_k_blocks = int(block_K // micro_size_k)
                 if num_k_blocks != 4:
-                    raise ValueError(
-                        "micro_pipeline='k_static_full_b_atom_scale_stream' currently requires block_K / micro_size_k == 4"
-                    )
+                    raise ValueError("micro_pipeline='k_static_full_b_atom_scale_stream' currently requires block_K / micro_size_k == 4")
 
                 @T.prim_func
                 def _gemm_ss_blockscaled_k_static_full_b_atom_scale_stream() -> None:
@@ -767,9 +693,7 @@ class GemmMMA(GemmBase):
             ):
                 num_k_blocks = int(block_K // micro_size_k)
                 if num_k_blocks != 4:
-                    raise ValueError(
-                        f"micro_pipeline={micro_pipeline!r} currently requires block_K / micro_size_k == 4"
-                    )
+                    raise ValueError(f"micro_pipeline={micro_pipeline!r} currently requires block_K / micro_size_k == 4")
                 if int(warp_rows) != 4 or int(warp_cols) != 2:
                     raise ValueError(
                         f"micro_pipeline={micro_pipeline!r} currently targets the balanced "
@@ -898,13 +822,11 @@ class GemmMMA(GemmBase):
                 num_k_blocks = int(block_K // micro_size_k)
                 if num_k_blocks != 4:
                     raise ValueError(
-                        "micro_pipeline='sm120_kblock_fulltile_ab_owner_wide_probe' "
-                        "currently requires block_K / micro_size_k == 4"
+                        "micro_pipeline='sm120_kblock_fulltile_ab_owner_wide_probe' currently requires block_K / micro_size_k == 4"
                     )
                 if int(warp_rows) != 4 or int(warp_cols) != 4:
                     raise ValueError(
-                        "micro_pipeline='sm120_kblock_fulltile_ab_owner_wide_probe' "
-                        "currently targets warp_rows=4, warp_cols=4"
+                        "micro_pipeline='sm120_kblock_fulltile_ab_owner_wide_probe' currently targets warp_rows=4, warp_cols=4"
                     )
 
                 def copy_kblock(A_frag, B_frag, SFA_owner_frag, SFB_owner_frag, k_block):
@@ -961,20 +883,11 @@ class GemmMMA(GemmBase):
             ):
                 num_k_blocks = int(block_K // micro_size_k)
                 if num_k_blocks != 4:
-                    raise ValueError(
-                        f"micro_pipeline={micro_pipeline!r} "
-                        "currently requires block_K / micro_size_k == 4"
-                    )
+                    raise ValueError(f"micro_pipeline={micro_pipeline!r} currently requires block_K / micro_size_k == 4")
                 if int(warp_rows) != 4 or int(warp_cols) != 4:
-                    raise ValueError(
-                        f"micro_pipeline={micro_pipeline!r} "
-                        "currently targets warp_rows=4, warp_cols=4"
-                    )
+                    raise ValueError(f"micro_pipeline={micro_pipeline!r} currently targets warp_rows=4, warp_cols=4")
                 if sf_layout != "cutlass_128x4":
-                    raise ValueError(
-                        f"micro_pipeline={micro_pipeline!r} "
-                        "currently requires sf_layout='cutlass_128x4'"
-                    )
+                    raise ValueError(f"micro_pipeline={micro_pipeline!r} currently requires sf_layout='cutlass_128x4'")
                 backend_op = (
                     "afull_bpanel_owner_wide"
                     if micro_pipeline == "sm120_backend_kblock_fulltile_afull_bpanel_owner_wide"
@@ -1044,14 +957,9 @@ class GemmMMA(GemmBase):
             if micro_pipeline == "sm120_backend_kblock_fulltile":
                 num_k_blocks = int(block_K // micro_size_k)
                 if num_k_blocks != 4:
-                    raise ValueError(
-                        "micro_pipeline='sm120_backend_kblock_fulltile' currently requires block_K / micro_size_k == 4"
-                    )
+                    raise ValueError("micro_pipeline='sm120_backend_kblock_fulltile' currently requires block_K / micro_size_k == 4")
                 if int(warp_rows) != 4 or int(warp_cols) != 4:
-                    raise ValueError(
-                        "micro_pipeline='sm120_backend_kblock_fulltile' currently targets "
-                        "warp_rows=4, warp_cols=4"
-                    )
+                    raise ValueError("micro_pipeline='sm120_backend_kblock_fulltile' currently targets warp_rows=4, warp_cols=4")
 
                 @T.prim_func
                 def _gemm_ss_blockscaled_sm120_backend_kblock_fulltile() -> None:
@@ -1112,15 +1020,9 @@ class GemmMMA(GemmBase):
             if micro_pipeline == "sm120_cute_consumer_bridge_skeleton":
                 num_k_blocks = int(block_K // micro_size_k)
                 if num_k_blocks != 4:
-                    raise ValueError(
-                        "micro_pipeline='sm120_cute_consumer_bridge_skeleton' currently requires "
-                        "block_K / micro_size_k == 4"
-                    )
+                    raise ValueError("micro_pipeline='sm120_cute_consumer_bridge_skeleton' currently requires block_K / micro_size_k == 4")
                 if int(warp_rows) != 4 or int(warp_cols) != 4:
-                    raise ValueError(
-                        "micro_pipeline='sm120_cute_consumer_bridge_skeleton' currently targets "
-                        "warp_rows=4, warp_cols=4"
-                    )
+                    raise ValueError("micro_pipeline='sm120_cute_consumer_bridge_skeleton' currently targets warp_rows=4, warp_cols=4")
 
                 @T.prim_func
                 def _gemm_ss_blockscaled_sm120_cute_consumer_bridge_skeleton() -> None:
@@ -1166,18 +1068,15 @@ class GemmMMA(GemmBase):
                 num_k_blocks = int(block_K // micro_size_k)
                 if num_k_blocks != 4:
                     raise ValueError(
-                        "micro_pipeline='sm120_backend_kblock_fulltile_package_pingpong' currently requires "
-                        "block_K / micro_size_k == 4"
+                        "micro_pipeline='sm120_backend_kblock_fulltile_package_pingpong' currently requires block_K / micro_size_k == 4"
                     )
                 if int(warp_rows) != 4 or int(warp_cols) != 4:
                     raise ValueError(
-                        "micro_pipeline='sm120_backend_kblock_fulltile_package_pingpong' currently targets "
-                        "warp_rows=4, warp_cols=4"
+                        "micro_pipeline='sm120_backend_kblock_fulltile_package_pingpong' currently targets warp_rows=4, warp_cols=4"
                     )
                 if sf_layout != "cutlass_128x4":
                     raise ValueError(
-                        "micro_pipeline='sm120_backend_kblock_fulltile_package_pingpong' currently requires "
-                        "sf_layout='cutlass_128x4'"
+                        "micro_pipeline='sm120_backend_kblock_fulltile_package_pingpong' currently requires sf_layout='cutlass_128x4'"
                     )
 
                 @T.prim_func
@@ -1199,9 +1098,7 @@ class GemmMMA(GemmBase):
             if micro_pipeline == "sm120_pkg_atom_neutral":
                 num_k_blocks = int(block_K // micro_size_k)
                 if num_k_blocks != 4:
-                    raise ValueError(
-                        "micro_pipeline='sm120_pkg_atom_neutral' currently requires block_K / micro_size_k == 4"
-                    )
+                    raise ValueError("micro_pipeline='sm120_pkg_atom_neutral' currently requires block_K / micro_size_k == 4")
 
                 @T.prim_func
                 def _gemm_ss_blockscaled_sm120_pkg_atom_neutral() -> None:
@@ -1275,9 +1172,7 @@ class GemmMMA(GemmBase):
             if micro_pipeline == "k_static_scale_prefetch":
                 num_k_blocks = int(block_K // micro_size_k)
                 if num_k_blocks != 4:
-                    raise ValueError(
-                        f"micro_pipeline='{micro_pipeline}' currently requires block_K / micro_size_k == 4"
-                    )
+                    raise ValueError(f"micro_pipeline='{micro_pipeline}' currently requires block_K / micro_size_k == 4")
 
                 @T.prim_func
                 def _gemm_ss_blockscaled_k_static_scale_prefetch() -> None:
@@ -1343,9 +1238,7 @@ class GemmMMA(GemmBase):
             if micro_pipeline in ("k_static_scale_stream", "k_static_scale_stream_cutlass_order"):
                 num_k_blocks = int(block_K // micro_size_k)
                 if num_k_blocks != 4:
-                    raise ValueError(
-                        f"micro_pipeline={micro_pipeline!r} currently requires block_K / micro_size_k == 4"
-                    )
+                    raise ValueError(f"micro_pipeline={micro_pipeline!r} currently requires block_K / micro_size_k == 4")
                 issue_mma = (
                     mma_emitter.mma_with_prefetched_scales_cutlass_order
                     if micro_pipeline == "k_static_scale_stream_cutlass_order"
@@ -1458,10 +1351,7 @@ class GemmMMA(GemmBase):
             if micro_pipeline == "k_static_b_all_prefetch_scale_stream":
                 num_k_blocks = int(block_K // micro_size_k)
                 if num_k_blocks != 4:
-                    raise ValueError(
-                        "micro_pipeline='k_static_b_all_prefetch_scale_stream' currently requires "
-                        "block_K / micro_size_k == 4"
-                    )
+                    raise ValueError("micro_pipeline='k_static_b_all_prefetch_scale_stream' currently requires block_K / micro_size_k == 4")
 
                 @T.prim_func
                 def _gemm_ss_blockscaled_k_static_b_all_prefetch_scale_stream() -> None:
