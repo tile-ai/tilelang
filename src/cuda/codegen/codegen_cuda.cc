@@ -1739,9 +1739,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     bool from_type_is_e4m3 =
         from_ty.is_float8_e4m3() || from_ty.is_float8_e4m3fn();
     // PTX cvt encodes the fp8 type in the mnemonic, so pick the helper by name.
-    std::string cast_func = from_type_is_e4m3
-                                ? "__tl_cvt_e4m3x2_to_bfloat162"
-                                : "__tl_cvt_e5m2x2_to_bfloat162";
+    std::string cast_func = from_type_is_e4m3 ? "__tl_cvt_e4m3x2_to_bfloat162"
+                                              : "__tl_cvt_e5m2x2_to_bfloat162";
     if (lanes == 2 || lanes == 4 || lanes == 8) {
       PrintVectorizedCast(cast_func, "__nv_fp8x2_storage_t", "__nv_bfloat162",
                           "", true, false);

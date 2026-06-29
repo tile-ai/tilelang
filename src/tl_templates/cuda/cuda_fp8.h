@@ -322,9 +322,8 @@ __tl_cvt_fp8x2_to_half2(const __nv_fp8x2_storage_t x,
 }
 
 // half2 -> e4m3x2
-TL_DEVICE __nv_fp8x2_storage_t
-__tl_cvt_half2_to_fp8x2(const half2 src,
-                        const __nv_fp8_interpretation_t fp8_interpretation) {
+TL_DEVICE __nv_fp8x2_storage_t __tl_cvt_half2_to_fp8x2(
+    const half2 src, const __nv_fp8_interpretation_t fp8_interpretation) {
   __half2_raw raw = *reinterpret_cast<const __half2_raw *>(&src);
   return __nv_cvt_halfraw2_to_fp8x2(raw, __NV_SATFINITE, fp8_interpretation);
 }
@@ -346,9 +345,9 @@ __tl_cvt_e5m2x2_to_bfloat162(const __nv_fp8x2_storage_t x) {
 }
 
 // bfloat162 -> e4m3x2
-TL_DEVICE __nv_fp8x2_storage_t
-__tl_cvt_bfloat162_to_fp8x2(const __nv_bfloat162 src,
-                            const __nv_fp8_interpretation_t fp8_interpretation) {
+TL_DEVICE __nv_fp8x2_storage_t __tl_cvt_bfloat162_to_fp8x2(
+    const __nv_bfloat162 src,
+    const __nv_fp8_interpretation_t fp8_interpretation) {
   __nv_bfloat162_raw raw = *reinterpret_cast<const __nv_bfloat162_raw *>(&src);
   return __nv_cvt_bfloat16raw2_to_fp8x2(raw, __NV_SATFINITE,
                                         fp8_interpretation);
