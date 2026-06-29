@@ -93,6 +93,95 @@ def test_stg128_codegen():
 
 
 @tilelang.testing.requires_cuda
+def test_lds_sts32_codegen():
+    """Test that lds32/sts32 generate shared memory helper calls."""
+
+    @tilelang.jit
+    def lds_sts32_kernel(X, Y):
+        N = T.const("N")
+        X: T.Tensor[[N], T.float32]
+        Y: T.Tensor[[N], T.float32]
+
+        with T.Kernel(N, threads=32) as pid:
+            S = T.alloc_shared((N,), T.float32)
+            T.sts32(S[pid], T.reinterpret(X[pid], T.uint32))
+            T.sync_threads()
+            val = T.lds32(S[pid])
+            T.stg32(Y[pid], val)
+
+    X = torch.randn(128, dtype=torch.float32, device="cuda")
+    Y = torch.empty(128, dtype=torch.float32, device="cuda")
+
+    lds_sts32_kernel(X, Y)
+    src = lds_sts32_kernel.get_kernel_source(N=128)
+    print("=== lds/sts32 codegen ===")
+    print(src)
+    assert "store_shared_32" in src
+    assert "load_shared_32" in src
+    torch.testing.assert_close(Y, X, atol=1e-5, rtol=1e-5)
+
+
+@tilelang.testing.requires_cuda
+def test_lds_sts64_codegen():
+    """Test that lds64/sts64 generate shared memory helper calls."""
+
+    @tilelang.jit
+    def lds_sts64_kernel(X, Y):
+        N = T.const("N")
+        X: T.Tensor[[N], T.float32]
+        Y: T.Tensor[[N], T.float32]
+
+        with T.Kernel(N // 2, threads=32) as pid:
+            S = T.alloc_shared((N,), T.float32)
+            val = T.ldg64(X[pid * 2 : pid * 2 + 2])
+            T.sts64(S[pid * 2 : pid * 2 + 2], val)
+            T.sync_threads()
+            val = T.lds64(S[pid * 2 : pid * 2 + 2])
+            T.stg64(Y[pid * 2 : pid * 2 + 2], val)
+
+    X = torch.randn(128, dtype=torch.float32, device="cuda")
+    Y = torch.empty(128, dtype=torch.float32, device="cuda")
+
+    lds_sts64_kernel(X, Y)
+    src = lds_sts64_kernel.get_kernel_source(N=128)
+    print("=== lds/sts64 codegen ===")
+    print(src)
+    assert "store_shared_64" in src
+    assert "load_shared_64" in src
+    torch.testing.assert_close(Y, X, atol=1e-5, rtol=1e-5)
+
+
+@tilelang.testing.requires_cuda
+def test_lds_sts128_codegen():
+    """Test that lds128/sts128 generate shared memory helper calls."""
+
+    @tilelang.jit
+    def lds_sts128_kernel(X, Y):
+        N = T.const("N")
+        X: T.Tensor[[N], T.float32]
+        Y: T.Tensor[[N], T.float32]
+
+        with T.Kernel(N // 4, threads=32) as pid:
+            S = T.alloc_shared((N,), T.float32)
+            val = T.ldg128(X[pid * 4 : pid * 4 + 4])
+            T.sts128(S[pid * 4 : pid * 4 + 4], val)
+            T.sync_threads()
+            val = T.lds128(S[pid * 4 : pid * 4 + 4])
+            T.stg128(Y[pid * 4 : pid * 4 + 4], val)
+
+    X = torch.randn(128, dtype=torch.float32, device="cuda")
+    Y = torch.empty(128, dtype=torch.float32, device="cuda")
+
+    lds_sts128_kernel(X, Y)
+    src = lds_sts128_kernel.get_kernel_source(N=128)
+    print("=== lds/sts128 codegen ===")
+    print(src)
+    assert "store_shared_128" in src
+    assert "load_shared_128" in src
+    torch.testing.assert_close(Y, X, atol=1e-5, rtol=1e-5)
+
+
+@tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 def test_stg256_codegen():
     """Test that stg256 generates tl::store_global_256 in CUDA source."""

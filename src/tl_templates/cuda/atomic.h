@@ -730,3 +730,55 @@ TL_DEVICE void AtomicStore(T1 *ref, T2 value, int memory_order) {
   TL_NOT_IMPLEMENTED();
 #endif
 }
+
+template <typename T1, typename T2>
+TL_DEVICE void AtomicOr(T1 *ref, T2 value,
+                        int memory_order = int(cuda::memory_order_relaxed)) {
+  using NT1 = typename normalize_atomic_type<T1>::type;
+#if CUDART_VERSION >= 11080
+  if constexpr (std::is_same_v<NT1, int> || std::is_same_v<NT1, unsigned int>) {
+    uint32_t val = static_cast<uint32_t>(value);
+    auto addr = reinterpret_cast<unsigned long long>(ref);
+    if (memory_order == int(cuda::memory_order_release)) {
+      asm volatile("red.release.gpu.global.or.b32 [%0], %1;" ::"l"(addr),
+                   "r"(val));
+    } else if (memory_order == int(cuda::memory_order_acq_rel)) {
+      asm volatile("red.acq_rel.gpu.global.or.b32 [%0], %1;" ::"l"(addr),
+                   "r"(val));
+    } else if (memory_order == int(cuda::memory_order_acquire)) {
+      asm volatile("red.acquire.gpu.global.or.b32 [%0], %1;" ::"l"(addr),
+                   "r"(val));
+    } else if (memory_order == int(cuda::memory_order_relaxed)) {
+      asm volatile("red.relaxed.gpu.global.or.b32 [%0], %1;" ::"l"(addr),
+                   "r"(val));
+    } else {
+      cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*ref);
+      aref.fetch_or(cuda_cast<NT1>(value), cuda::memory_order(memory_order));
+    }
+  } else if constexpr (std::is_same_v<NT1, unsigned long long>) {
+    unsigned long long val = static_cast<unsigned long long>(value);
+    auto addr = reinterpret_cast<unsigned long long>(ref);
+    if (memory_order == int(cuda::memory_order_release)) {
+      asm volatile("red.release.gpu.global.or.b64 [%0], %1;" ::"l"(addr),
+                   "l"(val));
+    } else if (memory_order == int(cuda::memory_order_acq_rel)) {
+      asm volatile("red.acq_rel.gpu.global.or.b64 [%0], %1;" ::"l"(addr),
+                   "l"(val));
+    } else if (memory_order == int(cuda::memory_order_acquire)) {
+      asm volatile("red.acquire.gpu.global.or.b64 [%0], %1;" ::"l"(addr),
+                   "l"(val));
+    } else if (memory_order == int(cuda::memory_order_relaxed)) {
+      asm volatile("red.relaxed.gpu.global.or.b64 [%0], %1;" ::"l"(addr),
+                   "l"(val));
+    } else {
+      cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*ref);
+      aref.fetch_or(cuda_cast<NT1>(value), cuda::memory_order(memory_order));
+    }
+  } else {
+    cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*ref);
+    aref.fetch_or(cuda_cast<NT1>(value), cuda::memory_order(memory_order));
+  }
+#else
+  TL_NOT_IMPLEMENTED();
+#endif
+}

@@ -92,6 +92,9 @@ TIR_DEFINE_TL_BUILTIN(__cos).set_num_inputs(1).set_attr<TCallEffectKind>(
 TIR_DEFINE_TL_BUILTIN(__sin).set_num_inputs(1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(fast_rcp).set_num_inputs(1).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
 TIR_DEFINE_TL_BUILTIN(max_nan).set_num_inputs(2).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 
@@ -627,6 +630,11 @@ TIR_DEFINE_TL_BUILTIN(atomic_store_elem_op)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(atomic_or_elem_op)
+    .set_num_inputs(3)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TIR_DEFINE_TL_BUILTIN(atomic_max_elem_op)
     .set_num_inputs(3)
     .set_attr<TCallEffectKind>("TCallEffectKind",
@@ -739,6 +747,21 @@ TIR_DEFINE_TL_BUILTIN(ldg64).set_num_inputs(-1).set_attr<TCallEffectKind>(
 TIR_DEFINE_TL_BUILTIN(ldg128).set_num_inputs(-1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 
+// lds32(address) -> 32-bit value
+// Shared memory load with 32-bit vector width
+TIR_DEFINE_TL_BUILTIN(lds32).set_num_inputs(1).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
+// lds64(address) -> 64-bit value
+// Shared memory load with 64-bit vector width
+TIR_DEFINE_TL_BUILTIN(lds64).set_num_inputs(1).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
+// lds128(address) -> 128-bit value
+// Shared memory load with 128-bit vector width
+TIR_DEFINE_TL_BUILTIN(lds128).set_num_inputs(1).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
 // ldg256(address, predicate(optional)) -> 256-bit value
 // Global memory load with 256-bit vector width
 TIR_DEFINE_TL_BUILTIN(ldg256).set_num_inputs(-1).set_attr<TCallEffectKind>(
@@ -757,6 +780,21 @@ TIR_DEFINE_TL_BUILTIN(stg64).set_num_inputs(-1).set_attr<TCallEffectKind>(
 // stg128(Buffer, idx, value) -> void
 // Global memory store with 128-bit vector width
 TIR_DEFINE_TL_BUILTIN(stg128).set_num_inputs(-1).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
+// sts32(Buffer, idx, value) -> void
+// Shared memory store with 32-bit vector width
+TIR_DEFINE_TL_BUILTIN(sts32).set_num_inputs(2).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
+// sts64(Buffer, idx, value) -> void
+// Shared memory store with 64-bit vector width
+TIR_DEFINE_TL_BUILTIN(sts64).set_num_inputs(2).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
+// sts128(Buffer, idx, value) -> void
+// Shared memory store with 128-bit vector width
+TIR_DEFINE_TL_BUILTIN(sts128).set_num_inputs(2).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
 // stg256(Buffer, idx, value) -> void

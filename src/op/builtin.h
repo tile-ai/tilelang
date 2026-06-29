@@ -242,6 +242,8 @@ TVM_DLL const Op &__tan();
 TVM_DLL const Op &__cos();
 // __sin(x) - fast sine
 TVM_DLL const Op &__sin();
+// fast_rcp(x) - approximate reciprocal
+TVM_DLL const Op &fast_rcp();
 // max_nan(x, y) - max with CUDA __hmax_nan semantics for fp16/bf16
 TVM_DLL const Op &max_nan();
 // min_nan(x, y) - min with CUDA __hmin_nan semantics for fp16/bf16
@@ -1137,6 +1139,14 @@ TVM_DLL const Op &atomic_load_elem_op();
 TVM_DLL const Op &atomic_store_elem_op();
 
 /*!
+ * \brief tilelang intrinsic for element-wise atomic bitwise-or.
+ *
+ *  This op is used to represent an element-wise atomic or operation in
+ * tilelang.
+ */
+TVM_DLL const Op &atomic_or_elem_op();
+
+/*!
  * \brief tilelang intrinsic for element-wise atomic maximum.
  *
  *  This op is used to represent an element-wise atomic max operation in
@@ -1282,6 +1292,27 @@ TVM_DLL const Op &ldg64();
 TVM_DLL const Op &ldg128();
 
 /*!
+ * \brief tilelang intrinsic for shared memory load with 32-bit vector width.
+ *
+ * This op loads 32 bits (4 bytes) from shared memory and returns uint32.
+ */
+TVM_DLL const Op &lds32();
+
+/*!
+ * \brief tilelang intrinsic for shared memory load with 64-bit vector width.
+ *
+ * This op loads 64 bits (8 bytes) from shared memory and returns uint32x2.
+ */
+TVM_DLL const Op &lds64();
+
+/*!
+ * \brief tilelang intrinsic for shared memory load with 128-bit vector width.
+ *
+ * This op loads 128 bits (16 bytes) from shared memory and returns uint32x4.
+ */
+TVM_DLL const Op &lds128();
+
+/*!
  * \brief tilelang intrinsic for global memory load with 256-bit vector width.
  *
  *  This op loads 256 bits (32 bytes) from global memory using explicit
@@ -1326,6 +1357,27 @@ TVM_DLL const Op &stg64();
  *    T.stg128(y, i, value)
  */
 TVM_DLL const Op &stg128();
+
+/*!
+ * \brief tilelang intrinsic for shared memory store with 32-bit vector width.
+ *
+ * This op stores a uint32 value to shared memory.
+ */
+TVM_DLL const Op &sts32();
+
+/*!
+ * \brief tilelang intrinsic for shared memory store with 64-bit vector width.
+ *
+ * This op stores a uint32x2 value to shared memory.
+ */
+TVM_DLL const Op &sts64();
+
+/*!
+ * \brief tilelang intrinsic for shared memory store with 128-bit vector width.
+ *
+ * This op stores a uint32x4 value to shared memory.
+ */
+TVM_DLL const Op &sts128();
 
 /*!
  * \brief tilelang intrinsic for global memory store with 256-bit vector width.
