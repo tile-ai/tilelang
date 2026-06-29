@@ -72,6 +72,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             acc_s_0_cast = T.alloc_fragment([block_H, block_N], dtype)
             acc_s_1 = T.alloc_fragment([block_H, block_N], accum_dtype)
             acc_s_1_cast = T.alloc_fragment([block_H, block_N], dtype)
+            sp0_cast = T.alloc_fragment([block_H, block_N], dtype)
             acc_o_l = T.alloc_fragment([block_H, h_dim], accum_dtype)
             acc_o_r = T.alloc_fragment([block_H, h_dim], accum_dtype)
             scores_max_0 = T.alloc_fragment([block_H], accum_dtype)
@@ -224,7 +225,10 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
                     # Step 11.
                     for i, j in T.Parallel(block_H, block_N):
-                        SP0_shared[i, j] = acc_s_0[i, j] * scores_scale_1[i]
+                        sp0_cast[i, j] = acc_s_0[i, j] * scores_scale_1[i]
+                    T.copy(sp0_cast, SP0_shared)
+                    # Currently InjectFenceProxy cannot infer from warp specialization code that this is a RAW dependency with another warpgroup. We need to fence the async proxy so that GMMA knows that we have written to SMEM.
+                    T.fence_proxy_async()
 
                     T.barrier_arrive(p0_1_1_ready_barrier)
 
