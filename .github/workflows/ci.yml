@@ -86,9 +86,10 @@ jobs:
         runner:
           - tags: [self-hosted, nvidia]
             name: self-hosted-nvidia
-            # Format: [Nightly-]CUDA-<major>.<minor>[.<patch>]. E.g., "CUDA-12.8" or "Nightly-CUDA-13.0".
+            # Format: CUDA-auto or [Nightly-]CUDA-<major>.<minor>[.<patch>].
+            # E.g., "CUDA-auto", "CUDA-13.0", or "Nightly-CUDA-13.0".
             # Use "Nightly-" prefix to use torch nightly builds.
-            toolkit: CUDA-12.8
+            toolkit: CUDA-auto
           # ROCm CI is temporarily disabled.
           # - tags: [self-hosted, amd, gpu]
           #   name: self-hosted-amd
@@ -169,11 +170,50 @@ jobs:
       - name: Set environment (CUDA)
         if: contains(matrix.runner.toolkit, 'CUDA')
         run: |
-          TOOLKIT="${{ matrix.runner.toolkit }}"
-          CUDA_VERSION="${TOOLKIT##*-}"
+          RAW_TOOLKIT="${{ matrix.runner.toolkit }}"
+          TOOLKIT="${RAW_TOOLKIT#Nightly-}"
+          USE_TORCH_NIGHTLY=0
+          if [[ "${RAW_TOOLKIT}" == "Nightly-"* ]]; then
+            USE_TORCH_NIGHTLY=1
+          fi
+
+          if [[ ! -x "$(command -v nvcc)" ]]; then
+            export PATH="/usr/local/cuda/bin:${PATH}"
+            export LD_LIBRARY_PATH="/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+            echo "PATH=${PATH}" | tee -a "${GITHUB_ENV}"
+            echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" | tee -a "${GITHUB_ENV}"
+          fi
+
+          NVCC_VERSION=""
+          if [[ -x "$(command -v nvcc)" ]]; then
+            echo "\$ $(command -v nvcc) --version" && nvcc --version
+            NVCC_VERSION="$(nvcc --version | sed -n 's/.*release \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n1)"
+          fi
+
+          if [[ "${TOOLKIT}" == "CUDA-auto" ]]; then
+            if [[ -z "${NVCC_VERSION}" ]]; then
+              echo "::error::CUDA-auto requires nvcc in PATH, but nvcc was not found or its version could not be parsed."
+              exit 1
+            fi
+            case "${NVCC_VERSION%%.*}" in
+              12) CUDA_VERSION="12.8" ;;
+              13) CUDA_VERSION="13.0" ;;
+              *)
+                echo "::error::Unsupported CUDA version for CUDA-auto: ${NVCC_VERSION}"
+                exit 1
+                ;;
+            esac
+          else
+            CUDA_VERSION="${TOOLKIT##*-}"
+            if [[ -n "${NVCC_VERSION}" && "${NVCC_VERSION%%.*}" != "${CUDA_VERSION%%.*}" ]]; then
+              echo "::error::nvcc CUDA ${NVCC_VERSION} does not match requested ${TOOLKIT}."
+              exit 1
+            fi
+          fi
+
           CUDA_VERSION_MAJMIN="$(echo ${CUDA_VERSION} | cut -d '.' -f-2)"
           CUDA_VERSION_MAJMIN_NODOT="${CUDA_VERSION_MAJMIN//./}"
-          if [[ "${TOOLKIT}" == "Nightly-"* ]]; then
+          if [[ "${USE_TORCH_NIGHTLY}" == "1" ]]; then
             # Use torch nightly builds
             export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/nightly/cu${CUDA_VERSION_MAJMIN_NODOT}"
           else
@@ -185,20 +225,9 @@ jobs:
           echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"
           echo "CUDA_VERSION_MAJMIN=${CUDA_VERSION_MAJMIN}" | tee -a "${GITHUB_ENV}"
           echo "CUDA_VERSION_MAJMIN_NODOT=${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
+          echo "CUDA_NVCC_VERSION=${NVCC_VERSION:-unknown}" | tee -a "${GITHUB_ENV}"
           echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
           echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
-
-          if [[ ! -x "$(command -v nvcc)" ]]; then
-            export PATH="/usr/local/cuda/bin:${PATH}"
-            export LD_LIBRARY_PATH="/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-            echo "PATH=${PATH}" | tee -a "${GITHUB_ENV}"
-            echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" | tee -a "${GITHUB_ENV}"
-          fi
-          if [[ -x "$(command -v nvcc)" ]]; then
-            echo "\$ $(command -v nvcc) --version" && nvcc --version
-          else
-            echo "::warning::nvcc not found in PATH!"
-          fi
 
       - name: Set environment (ROCm)
         if: contains(matrix.runner.toolkit, 'ROCm')
@@ -400,7 +429,7 @@ jobs:
           fi
 
   cutedsl:
-    name: CuTeDSL Examples for Python 3.12 with CUDA-12.8 (on self-hosted-nvidia)
+    name: CuTeDSL Examples for Python 3.12 with CUDA-auto (on self-hosted-nvidia)
     if: |
       github.repository_owner == 'tile-ai' &&
       (github.event_name != 'pull_request' || !github.event.pull_request.draft)
@@ -441,7 +470,7 @@ jobs:
             exit 0
           fi
 
-          export CCACHE_DIR="${XDG_CACHE_HOME}/ccache/self-hosted-nvidia/CUDA-12.8"
+          export CCACHE_DIR="${XDG_CACHE_HOME}/ccache/self-hosted-nvidia/CUDA-auto"
           mkdir -p "${CCACHE_DIR}"
 
           echo "CCACHE_DIR=${CCACHE_DIR}" | tee -a "${GITHUB_ENV}"
@@ -455,8 +484,31 @@ jobs:
 
       - name: Set environment (CUDA)
         run: |
-          TOOLKIT="CUDA-12.8"
-          CUDA_VERSION="${TOOLKIT##*-}"
+          TOOLKIT="CUDA-auto"
+
+          if [[ ! -x "$(command -v nvcc)" ]]; then
+            export PATH="/usr/local/cuda/bin:${PATH}"
+            export LD_LIBRARY_PATH="/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+            echo "PATH=${PATH}" | tee -a "${GITHUB_ENV}"
+            echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" | tee -a "${GITHUB_ENV}"
+          fi
+
+          if [[ ! -x "$(command -v nvcc)" ]]; then
+            echo "::error::CUDA-auto requires nvcc in PATH."
+            exit 1
+          fi
+          echo "\$ $(command -v nvcc) --version" && nvcc --version
+          NVCC_VERSION="$(nvcc --version | sed -n 's/.*release \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n1)"
+
+          case "${NVCC_VERSION%%.*}" in
+            12) CUDA_VERSION="12.8" ;;
+            13) CUDA_VERSION="13.0" ;;
+            *)
+              echo "::error::Unsupported CUDA version for CUDA-auto: ${NVCC_VERSION}"
+              exit 1
+              ;;
+          esac
+
           CUDA_VERSION_MAJMIN="$(echo ${CUDA_VERSION} | cut -d '.' -f-2)"
           CUDA_VERSION_MAJMIN_NODOT="${CUDA_VERSION_MAJMIN//./}"
           export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cu${CUDA_VERSION_MAJMIN_NODOT}"
@@ -466,20 +518,9 @@ jobs:
           echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"
           echo "CUDA_VERSION_MAJMIN=${CUDA_VERSION_MAJMIN}" | tee -a "${GITHUB_ENV}"
           echo "CUDA_VERSION_MAJMIN_NODOT=${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
+          echo "CUDA_NVCC_VERSION=${NVCC_VERSION}" | tee -a "${GITHUB_ENV}"
           echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
           echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
-
-          if [[ ! -x "$(command -v nvcc)" ]]; then
-            export PATH="/usr/local/cuda/bin:${PATH}"
-            export LD_LIBRARY_PATH="/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-            echo "PATH=${PATH}" | tee -a "${GITHUB_ENV}"
-            echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" | tee -a "${GITHUB_ENV}"
-          fi
-          if [[ -x "$(command -v nvcc)" ]]; then
-            echo "\$ $(command -v nvcc) --version" && nvcc --version
-          else
-            echo "::warning::nvcc not found in PATH!"
-          fi
 
       - name: Setup Python and uv with caching
         id: setup-uv
@@ -491,7 +532,7 @@ jobs:
           prune-cache: false
           cache-local-path: ${{ env.UV_CACHE_DIR }}
           ignore-nothing-to-cache: true
-          cache-suffix: uv-${{ runner.os }}-${{ runner.arch }}-3.12-self-hosted-nvidia-CUDA-12.8
+          cache-suffix: uv-${{ runner.os }}-${{ runner.arch }}-3.12-self-hosted-nvidia-CUDA-auto
           cache-dependency-glob: |
             pyproject.toml
             requirements*.txt
@@ -537,7 +578,7 @@ jobs:
           rm -f /tmp/tmp*.so /tmp/tmp*.cu /tmp/tmp*.cubin /tmp/tmp*.cpp
           rm -rf /tmp/tvm-debug-mode-tempdirs /tmp/tilelang_cutedsl_*
 
-      - name: Run CuTeDSL examples with Python 3.12 (CUDA-12.8)
+      - name: Run CuTeDSL examples with Python 3.12 (CUDA-auto)
         env:
           TILELANG_TARGET: cutedsl
         run: |
