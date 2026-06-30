@@ -1005,7 +1005,8 @@ __device__ void decode_i4s_to_i8s(T1 *_i4b, T2 *_i8s, const int N = 16)
     static constexpr uint immLut = (0xf0 & 0xcc) | 0xaa;
     static constexpr uint BOTTOM_MASK = 0x0f0f0f0f;          // 0xf -> 0b1111 select 0,4,8,12
     static constexpr uint I4b_TO_I8s_MAGIC_NUM = 0x00000000; // 0
-    static constexpr uint MEDIAN_NUM = 0x07070707;
+    static constexpr uint SIGN_BIT = 0x08080808;
+    static constexpr uint MEDIAN_NUM = 0x08080808;
 #pragma unroll
     for (int i = 0; i < (N / 8); i++)
     {
@@ -1017,8 +1018,8 @@ __device__ void decode_i4s_to_i8s(T1 *_i4b, T2 *_i8s, const int N = 16)
         asm volatile("lop3.b32 %0, %1, %2, %3, %4;\\n"
                      : "=r"(i8s[i + 2])
                      : "r"(i4b[1] >> (4 * i)), "n"(BOTTOM_MASK), "n"(I4b_TO_I8s_MAGIC_NUM), "n"(immLut));
-        i8s[i] = __vsubss4(i8s[i], MEDIAN_NUM);
-        i8s[i + 2] = __vsubss4(i8s[i + 2], MEDIAN_NUM);
+        i8s[i] = __vsubss4(i8s[i] ^ SIGN_BIT, MEDIAN_NUM);
+        i8s[i + 2] = __vsubss4(i8s[i + 2] ^ SIGN_BIT, MEDIAN_NUM);
     }
 }
 
