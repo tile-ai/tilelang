@@ -125,6 +125,14 @@ static PrimExpr ByteOffsetToElementOffset(const PrimExpr &byte_offset,
                   make_const(byte_offset.dtype(), element_bits));
 }
 
+static PrimExpr BufferIndexOffsetFromByteOffset(PrimExpr byte_offset,
+                                                DataType dtype) {
+  if (dtype.is_float4_e2m1fn() && dtype.is_scalar()) {
+    return byte_offset * make_const(byte_offset.dtype(), 2);
+  }
+  return indexdiv(byte_offset, dtype.bytes() * dtype.lanes());
+}
+
 /*!
  * \brief collect the mapping from the buffer var to its allocate
  */
@@ -822,7 +830,7 @@ private:
     auto it = buffer_byte_offsets_.find(buffer_var.get());
     ICHECK(it != buffer_byte_offsets_.end())
         << "buffer_var = " << buffer_var->name_hint << ", dtype = " << dtype;
-    return ByteOffsetToElementOffset(it->second, dtype);
+    return BufferIndexOffsetFromByteOffset(it->second, dtype);
   }
 
   bool HasBufferOffset(const Var &buffer_var) {
