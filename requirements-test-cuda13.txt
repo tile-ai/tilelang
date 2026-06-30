@@ -1,0 +1,8 @@
+# Common CUDA test requirements
+--requirement requirements-test-cuda.txt
+
+# CUDA 13 specific requirements
+cuda-python==13.0.3
+# Use the cu13 extra so CuTeDSL installs the CUDA 13 runtime package instead of
+# leaving the environment on the CUDA 12-oriented default dependency set.
+nvidia-cutlass-dsl[cu13]==4.5.0

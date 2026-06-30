@@ -307,7 +307,12 @@ jobs:
           uv pip install -v -r requirements-test.txt
           echo "import torch; print(f'torch: {torch.__version__}')" | uv run --no-project --script -
           if [[ "${{ matrix.runner.toolkit }}" == *"CUDA"* ]]; then
-            uv pip install --no-build-isolation-package=flash-attn -v -r requirements-test-cuda.txt
+            CUDA_REQUIREMENTS="requirements-test-cuda${CUDA_VERSION%%.*}.txt"
+            if [[ ! -f "${CUDA_REQUIREMENTS}" ]]; then
+              echo "::error::No CUDA test requirements file for CUDA_VERSION=${CUDA_VERSION}: ${CUDA_REQUIREMENTS}"
+              exit 1
+            fi
+            uv pip install --no-build-isolation-package=flash-attn -v -r "${CUDA_REQUIREMENTS}"
             echo "import flash_attn; print(f'flash_attn: {flash_attn.__version__}')" | uv run --no-project --script -
           elif [[ "${{ matrix.runner.toolkit }}" == *"ROCm"* ]]; then
             uv pip install -v -r requirements-test-rocm.txt
@@ -546,7 +551,12 @@ jobs:
           uv pip install --upgrade pip setuptools wheel
           uv pip install -v -r requirements-test.txt
           echo "import torch; print(f'torch: {torch.__version__}')" | uv run --no-project --script -
-          uv pip install --no-build-isolation-package=flash-attn -v -r requirements-test-cuda.txt
+          CUDA_REQUIREMENTS="requirements-test-cuda${CUDA_VERSION%%.*}.txt"
+          if [[ ! -f "${CUDA_REQUIREMENTS}" ]]; then
+            echo "::error::No CUDA test requirements file for CUDA_VERSION=${CUDA_VERSION}: ${CUDA_REQUIREMENTS}"
+            exit 1
+          fi
+          uv pip install --no-build-isolation-package=flash-attn -v -r "${CUDA_REQUIREMENTS}"
           echo "import flash_attn; print(f'flash_attn: {flash_attn.__version__}')" | uv run --no-project --script -
           echo "::group::torch.utils.collect_env"
           uv run --no-project -m -- torch.utils.collect_env
