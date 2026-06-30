@@ -12,7 +12,6 @@ It can optionally compare against the official CUTLASS GeForce NVFP4 example
 """
 
 import argparse
-import os
 from pathlib import Path
 import re
 import shutil
@@ -21,42 +20,6 @@ import sys
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-
-
-def _prepend_env_path(name: str, value: str) -> bool:
-    old = os.environ.get(name, "")
-    parts = [p for p in old.split(os.pathsep) if p]
-    if value in parts:
-        return False
-    os.environ[name] = value if not old else value + os.pathsep + old
-    return True
-
-
-def _bootstrap_runtime_env() -> None:
-    """Re-exec once with the source-build libraries first in the loader path."""
-
-    if os.environ.get("TILELANG_SM120_NVFP4_BENCH_BOOTSTRAPPED") == "1":
-        return
-
-    changed = False
-    build_lib = REPO_ROOT / "build" / "lib"
-    if build_lib.is_dir():
-        changed |= _prepend_env_path("LD_LIBRARY_PATH", str(build_lib))
-
-    system_libstdcpp = Path("/usr/lib/x86_64-linux-gnu/libstdc++.so.6")
-    if system_libstdcpp.exists():
-        changed |= _prepend_env_path("LD_PRELOAD", str(system_libstdcpp))
-
-    cuda_bin = Path("/usr/local/cuda-12.8/bin")
-    if cuda_bin.is_dir():
-        changed |= _prepend_env_path("PATH", str(cuda_bin))
-
-    if changed:
-        os.environ["TILELANG_SM120_NVFP4_BENCH_BOOTSTRAPPED"] = "1"
-        os.execv(sys.executable, [sys.executable, *sys.argv])
-
-
-_bootstrap_runtime_env()
 
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
