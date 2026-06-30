@@ -310,6 +310,10 @@ def _parse_target_config(value: str) -> TargetConfig | None:
     return dict(parsed)
 
 
+def _env_flag_enabled(value: object) -> bool:
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 # Utility function for environment variables with defaults
 # Assuming EnvVar and CacheState are defined elsewhere
 class Environment:
@@ -398,22 +402,22 @@ class Environment:
         CacheState.disable()
 
     def is_cache_globally_disabled(self) -> bool:
-        return self.TILELANG_DISABLE_CACHE.lower() in ("1", "true", "yes", "on")
+        return _env_flag_enabled(self.TILELANG_DISABLE_CACHE)
 
     def should_use_kernel_cache_lib_stamp(self) -> bool:
-        return str(self.TILELANG_KERNEL_CACHE_USE_LIB_STAMP).lower() in ("1", "true", "yes", "on")
+        return _env_flag_enabled(self.TILELANG_KERNEL_CACHE_USE_LIB_STAMP)
 
     def is_autotune_cache_disabled(self) -> bool:
-        return self.TILELANG_AUTO_TUNING_DISABLE_CACHE.lower() in ("1", "true", "yes", "on")
+        return _env_flag_enabled(self.TILELANG_AUTO_TUNING_DISABLE_CACHE)
 
     def is_print_on_compilation_enabled(self) -> bool:
-        return self.TILELANG_PRINT_ON_COMPILATION.lower() in ("1", "true", "yes", "on")
+        return _env_flag_enabled(self.TILELANG_PRINT_ON_COMPILATION)
 
     def should_cleanup_temp_files(self) -> bool:
-        return str(self.TILELANG_CLEANUP_TEMP_FILES).lower() in ("1", "true", "yes", "on")
+        return _env_flag_enabled(self.TILELANG_CLEANUP_TEMP_FILES)
 
     def is_jit_diagnostics_enabled(self) -> bool:
-        return str(self.TILELANG_JIT_DIAGNOSTICS).lower() in ("1", "true", "yes", "on")
+        return _env_flag_enabled(self.TILELANG_JIT_DIAGNOSTICS)
 
     def get_compile_timeout_seconds(self) -> float | None:
         value = str(self.TILELANG_COMPILE_TIMEOUT_SECONDS).strip()
@@ -455,7 +459,7 @@ class Environment:
 
     def get_default_verbose(self) -> bool:
         """Get default verbose flag from environment."""
-        return self.TILELANG_DEFAULT_VERBOSE.lower() in ("1", "true", "yes", "on")
+        return _env_flag_enabled(self.TILELANG_DEFAULT_VERBOSE)
 
     def is_running_autodd(self) -> bool:
         """Return True if we are running under `python -m tilelang.autodd`."""
