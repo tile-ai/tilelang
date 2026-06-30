@@ -597,6 +597,22 @@ AtomicAddx2Ret(bfloat16_t *ref, src_type *val,
 }
 #endif
 
+template <typename SrcType>
+TL_DEVICE void AtomicAddx4(half_t *ref, SrcType *val,
+                           int memory_order = int(cuda::memory_order_relaxed)) {
+  AtomicAddx2(ref, val, memory_order);
+  AtomicAddx2(ref + 2, val + 2, memory_order);
+}
+
+#if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ > 750))
+template <typename SrcType>
+TL_DEVICE void AtomicAddx4(bfloat16_t *ref, SrcType *val,
+                           int memory_order = int(cuda::memory_order_relaxed)) {
+  AtomicAddx2(ref, val, memory_order);
+  AtomicAddx2(ref + 2, val + 2, memory_order);
+}
+#endif
+
 template <typename T> TL_DEVICE float2 ToFloat2(T *val) {
   return *reinterpret_cast<const float2 *>(val);
 }
