@@ -61,6 +61,12 @@ DataType CuTensorMapType() { return DataType::UInt(8, 128); }
   TVM_REGISTER_OP("tl." #OpName)                                               \
       .set_attr<TScriptPrinterName>("TScriptPrinterName", #OpName)
 
+#define TIR_DEFINE_TL_OPAQUE_BUILTIN(OpName, NumInputs)                        \
+  TIR_DEFINE_TL_BUILTIN(OpName)                                                \
+      .set_num_inputs(NumInputs)                                               \
+      .set_attr<TCallEffectKind>("TCallEffectKind",                            \
+                                 Integer(CallEffectKind::kOpaque))
+
 // Pointer access metadata op (frontend-only, lowered later).
 TIR_DEFINE_TL_BUILTIN(access_ptr)
     .set_num_inputs(3)
@@ -242,51 +248,26 @@ TIR_DEFINE_TL_BUILTIN(ptx_wgmma_sp_rs)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(ptx_mma_block_scale)
-    .set_num_inputs(21)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+TIR_DEFINE_TL_OPAQUE_BUILTIN(ptx_mma_block_scale, 21);
 
-TIR_DEFINE_TL_BUILTIN(sm120_mma_blockscaled_kblock_fulltile)
-    .set_num_inputs(23)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+TIR_DEFINE_TL_OPAQUE_BUILTIN(sm120_mma_blockscaled_kblock_fulltile, 23);
 
-TIR_DEFINE_TL_BUILTIN(sm120_mma_blockscaled_kblock_fulltile_ab_owner_wide)
-    .set_num_inputs(13)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+TIR_DEFINE_TL_OPAQUE_BUILTIN(
+    sm120_mma_blockscaled_kblock_fulltile_ab_owner_wide, 13);
 
-TIR_DEFINE_TL_BUILTIN(
-    sm120_mma_blockscaled_kblock_fulltile_afull_bpanel_owner_wide)
-    .set_num_inputs(13)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+TIR_DEFINE_TL_OPAQUE_BUILTIN(
+    sm120_mma_blockscaled_kblock_fulltile_afull_bpanel_owner_wide, 13);
 
-TIR_DEFINE_TL_BUILTIN(sm120_mma_blockscaled_kblock_fulltile_package_pingpong)
-    .set_num_inputs(6)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+TIR_DEFINE_TL_OPAQUE_BUILTIN(
+    sm120_mma_blockscaled_kblock_fulltile_package_pingpong, 6);
 
-TIR_DEFINE_TL_BUILTIN(sm120_mma_blockscaled_cute_consumer_bridge)
-    .set_num_inputs(7)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+TIR_DEFINE_TL_OPAQUE_BUILTIN(sm120_mma_blockscaled_cute_consumer_bridge, 7);
 
-TIR_DEFINE_TL_BUILTIN(sm120_store_full_c_fragment_panel64_bf16)
-    .set_num_inputs(5)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+TIR_DEFINE_TL_OPAQUE_BUILTIN(sm120_store_full_c_fragment_panel64_bf16, 5);
 
-TIR_DEFINE_TL_BUILTIN(sm120_store_full_c_fragment_panel32_tma_bf16)
-    .set_num_inputs(5)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+TIR_DEFINE_TL_OPAQUE_BUILTIN(sm120_store_full_c_fragment_panel32_tma_bf16, 5);
 
-TIR_DEFINE_TL_BUILTIN(sm120_store_full_c_fragment_epi64x32_tma_bf16)
-    .set_num_inputs(6)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+TIR_DEFINE_TL_OPAQUE_BUILTIN(sm120_store_full_c_fragment_epi64x32_tma_bf16, 6);
 
 TIR_DEFINE_TL_BUILTIN(ptx_tcgen05_mma_ss)
     .set_num_inputs(14)
