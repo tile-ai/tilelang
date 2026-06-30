@@ -1699,6 +1699,35 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     }
   }
 
+  // Handle conversion from float16 to float8 (E4M3/E5M2)
+  if (from_ty.is_float16() && tl::IsCudaVectorizableFP8(target_ty)) {
+    bool target_type_is_e4m3 =
+        target_ty.is_float8_e4m3() || target_ty.is_float8_e4m3fn();
+    std::string type_suffix = target_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2";
+    // Use __tl_cvt_half2_to_fp8x2 for vectorized conversion (half2 -> fp8x2)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__tl_cvt_half2_to_fp8x2", "half2",
+                          "__nv_fp8x2_storage_t", ", " + type_suffix, false,
+                          true);
+      return;
+    }
+  }
+
+  // Handle conversion from bfloat16 to float8 (E4M3/E5M2)
+  if (from_ty.is_bfloat16() && tl::IsCudaVectorizableFP8(target_ty)) {
+    bool target_type_is_e4m3 =
+        target_ty.is_float8_e4m3() || target_ty.is_float8_e4m3fn();
+    std::string type_suffix = target_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2";
+    // Use __tl_cvt_bfloat162_to_fp8x2 for vectorized conversion (bfloat162 ->
+    // fp8x2)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__tl_cvt_bfloat162_to_fp8x2", "__nv_bfloat162",
+                          "__nv_fp8x2_storage_t", ", " + type_suffix, true,
+                          true);
+      return;
+    }
+  }
+
   // Handle conversion from float8 (E4M3/E5M2) to float32
   if (tl::IsCudaVectorizableFP8(from_ty) && target_ty.is_float() &&
       target_ty.bits() == 32) {
@@ -1710,6 +1739,33 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     if (lanes == 2 || lanes == 4 || lanes == 8) {
       PrintVectorizedCast("__tl_cvt_fp8x2_to_float2", "__nv_fp8x2_storage_t",
                           "float2", ", " + type_suffix, true, false);
+      return;
+    }
+  }
+
+  // Handle conversion from float8 (E4M3/E5M2) to float16
+  if (tl::IsCudaVectorizableFP8(from_ty) && target_ty.is_float16()) {
+    bool from_type_is_e4m3 =
+        from_ty.is_float8_e4m3() || from_ty.is_float8_e4m3fn();
+    std::string type_suffix = from_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2";
+    // Use __tl_cvt_fp8x2_to_half2 for vectorized conversion (fp8x2 -> half2)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__tl_cvt_fp8x2_to_half2", "__nv_fp8x2_storage_t",
+                          "half2", ", " + type_suffix, true, false);
+      return;
+    }
+  }
+
+  // Handle conversion from float8 (E4M3/E5M2) to bfloat16
+  if (tl::IsCudaVectorizableFP8(from_ty) && target_ty.is_bfloat16()) {
+    bool from_type_is_e4m3 =
+        from_ty.is_float8_e4m3() || from_ty.is_float8_e4m3fn();
+    // PTX cvt encodes the fp8 type in the mnemonic, so pick the helper by name.
+    std::string cast_func = from_type_is_e4m3 ? "__tl_cvt_e4m3x2_to_bfloat162"
+                                              : "__tl_cvt_e5m2x2_to_bfloat162";
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast(cast_func, "__nv_fp8x2_storage_t", "__nv_bfloat162",
+                          "", true, false);
       return;
     }
   }

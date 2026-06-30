@@ -1,8 +1,7 @@
 from __future__ import annotations
-import ast
 import importlib.metadata
+import json
 import math
-import re
 import sys
 import os
 import pathlib
@@ -296,12 +295,11 @@ def _parse_target_config(value: str) -> TargetConfig | None:
     if not value.startswith("{"):
         return None
 
-    key_re = re.compile(r"([{\[,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)")
     try:
-        parsed = ast.literal_eval(key_re.sub(r'\1"\2"\3', value))
-    except (ValueError, SyntaxError) as err:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as err:
         raise ValueError(
-            'TILELANG_DEFAULT_TARGET looks like a dict but could not be parsed. Use syntax like {kind: "cuda", arch: "sm_100"}.'
+            'TILELANG_DEFAULT_TARGET looks like a dict but could not be parsed. Use JSON syntax like {"kind": "cuda", "arch": "sm_100"}.'
         ) from err
     if not isinstance(parsed, dict):
         raise ValueError("TILELANG_DEFAULT_TARGET must parse to a dict")
