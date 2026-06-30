@@ -1635,12 +1635,21 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
                      "to normal copy";
     return fallback_to_normal("undecodable shared swizzle layout");
   }
-  // Recast element-space layout into byte-address space.
-  // Because CuTe swizzle are based on byte addresses.
+  // Recast the swizzle atom into byte-address space because CuTe/TMA
+  // swizzles are based on byte addresses. For scalar NVFP4, only the swizzle
+  // atom can be recast cleanly from 4-bit logical elements; the plain layout
+  // may contain half-byte contiguous strides and remains in element space for
+  // offset/coordinate analysis below.
   int elem_bits = shared_tensor->dtype.bits();
-  // E.g., composed_bytes = Sw<3,4,3> o 0 o (64,64,8):(128,2,8192)
-  auto composed_bytes = composed.value().Recast(elem_bits, /*new_bits=*/8);
-  const auto *sw = composed_bytes->swizzle.get();
+  cute::Swizzle swizzle_bytes;
+  if (shared_tensor->dtype.is_float4_e2m1fn() &&
+      shared_tensor->dtype.is_scalar()) {
+    swizzle_bytes = composed.value()->swizzle.Recast(elem_bits, /*new_bits=*/8);
+  } else {
+    // E.g., composed_bytes = Sw<3,4,3> o 0 o (64,64,8):(128,2,8192)
+    swizzle_bytes = composed.value().Recast(elem_bits, /*new_bits=*/8)->swizzle;
+  }
+  const auto *sw = swizzle_bytes.get();
   int b_bits = sw->b_bits, m_base = sw->m_base, s_shift = sw->s_shift;
   if (!sw->IsSwizzled()) {
     desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
