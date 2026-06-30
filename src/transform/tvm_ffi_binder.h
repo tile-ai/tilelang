@@ -128,23 +128,23 @@ public:
                 const std::unordered_set<const VarNode *> &used_shape_vars);
 
   /*! \return The defs generated in binding. */
-  const std::vector<Var> &defs() const { return defs_; }
+  const std::vector<Var> &Defs() const { return defs_; }
 
   /*! \return The asserts generated in binding
    *
    * This contains statements that assert the correct value has been
    * bound.  For example, `binder.Bind(var, expr_1)` will produce an
-   * entry mapping `var` to `expr_1` in the `binder.defs()`.  If
+   * entry mapping `var` to `expr_1` in the `binder.Defs()`.  If
    * `binder.Bind(var, expr_2)` is called later, then this will
    * produce an assert statemtn that `expr_1 == expr_2`.
    *
    * Note: Some assert statements produced by BindDLTensor are located
-   * in `binder.init_nest()`, not within `binder.asserts()`.  This is
+   * in `binder.InitNest()`, not within `binder.Asserts()`.  This is
    * deliberate, as some values may require checks prior to
    * initialization.  (e.g. Intializing `m = dl_tensor->shape[3]`
    * requires first asserting that `3 < dl_tensor->ndim`.)
    */
-  const std::vector<Stmt> &asserts() const { return asserts_; }
+  const std::vector<Stmt> &Asserts() const { return asserts_; }
 
   /*!
    * \brief Initialization nest generated
@@ -168,9 +168,9 @@ public:
    *
    * \return The initialization nest generated during binding.
    */
-  const std::vector<Stmt> &init_nest() const { return init_nest_; }
+  const std::vector<Stmt> &InitNest() const { return init_nest_; }
   /*! \return Handle data type of the data */
-  const ffi::Map<Var, PrimExpr> &def_handle_dtype() const {
+  const ffi::Map<Var, PrimExpr> &DefHandleDtype() const {
     return def_handle_dtype_;
   }
 
@@ -184,7 +184,7 @@ public:
                           const std::string &stride_element_name);
 
 private:
-  std::vector<Var> getUndefVars(const std::vector<PrimExpr> &arg);
+  std::vector<Var> GetUndefVars(const std::vector<PrimExpr> &arg);
   // Internal bind function
   bool Bind_(const PrimExpr &arg, const PrimExpr &value,
              const std::string &arg_name, bool with_lets);

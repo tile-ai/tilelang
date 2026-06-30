@@ -23,8 +23,9 @@
 #include "../op/gemm_sp.h"
 #include "../op/operator.h"
 #include "../op/utils.h"
-#include "backend/common/target_utils.h"
-#include "ptx_async_copy_injector.h"
+#include "cpu/target_utils.h"
+#include "cuda/target_utils.h"
+#include "cuda/transform/ptx_async_copy_injector.h"
 
 #include "arith/ir_mutator_with_analyzer.h"
 #include "common/mbarrier.h"
@@ -247,6 +248,14 @@ public:
     // later phases (OptimizeForTarget) can choose the right pass pipeline
     // without relying on pass-context side-channel mutation.
     f = WithAttr(std::move(f), kHasTMA, Bool(substituter.has_tma_));
+    // Propagate per-buffer shared-memory alignment requirements collected
+    // during lowering (swizzle-dependent TMA/MMA constraints) so that
+    // MergeSharedMemoryAllocations can honor them when laying out the merged
+    // dynamic shared memory buffer.
+    if (!substituter.smem_alignment_map_.empty()) {
+      f = WithAttr(std::move(f), kSmemAlignmentMap,
+                   substituter.smem_alignment_map_);
+    }
     fptr = f.CopyOnWrite();
 
     // If any TMA copies allocated mbarriers, inject the barrier buffer
@@ -255,7 +264,7 @@ public:
     // LowerSharedBarrier will process it into ptx_init_barrier_thread_count.
     if (substituter.mbarrier_count_ > 0) {
       ICHECK(substituter.mbarrier_buffer_.defined())
-          << "mbarrier_buffer_ must have been created by AllocMBarrier "
+          << "mbarrier_buffer_ must have been created by alloc_mbarrier "
              "callback";
       Buffer mbar_buf = substituter.mbarrier_buffer_.value();
       // Update buffer shape in-place to final count. We use const_cast
@@ -926,9 +935,9 @@ private:
       is_ptx_ = true;
       auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
       is_ptx_ = false;
-      // form: T.ptx_stmatrix(trans, num, smem_ptr, value0, value1, ...)
-      // smem_ptr: T.tvm_access_ptr(ptype, data, offset, extent, rw_mask)
-      // or T.address_of(buffer, offset)
+      // form: T.ptx_stmatrix(trans, num, smem_ptr, value0, value1, ...,
+      // [shape]) smem_ptr: T.tvm_access_ptr(ptype, data, offset, extent,
+      // rw_mask) or T.address_of(buffer, offset)
       PrimExpr access_ptr = call->args[2];
       Call access_ptr_call = Downcast<Call>(access_ptr);
 
@@ -1139,7 +1148,17 @@ private:
     auto tile_op = ParseOperator(GetRef<Stmt>(op));
     if (!tile_op.defined())
       return IRMutatorWithAnalyzer::VisitStmt_(op);
-    AddWorkspaceCallback callback = [this](int num_elem, DataType dtype) {
+
+    Range thread_bounds = CurrentThreadBounds();
+
+    // Convert bind_var_to_expr_ to Map<Var, PrimExpr> for LowerArgs
+    Map<Var, PrimExpr> bind_var_to_expr;
+    for (const auto &[var, expr] : bind_var_to_expr_) {
+      bind_var_to_expr.Set(var, expr);
+    }
+
+    AddWorkspaceCallback add_workspace_callback = [this](int num_elem,
+                                                         DataType dtype) {
       auto workspace =
           decl_buffer({PrimExpr(num_elem)}, dtype, "workspace", "shared.dyn");
       // Record workspace under the innermost block scope so its lifetime
@@ -1153,14 +1172,6 @@ private:
       }
       return workspace.access_ptr(2); // write
     };
-
-    Range thread_bounds = CurrentThreadBounds();
-
-    // Convert bind_var_to_expr_ to Map<Var, PrimExpr> for LowerArgs
-    Map<Var, PrimExpr> bind_var_to_expr;
-    for (const auto &[var, expr] : bind_var_to_expr_) {
-      bind_var_to_expr.Set(var, expr);
-    }
 
     AllocMBarrierCallback mbarrier_callback =
         [this](int arrive_count, std::optional<std::string> name) -> int {
@@ -1178,23 +1189,40 @@ private:
       barrier_arrive_updates_[data_var] = n;
     };
 
-    auto lowered = tile_op->Lower(
-        LowerArgs{target_, thread_bounds, thread_var_->var, callback,
-                  mbarrier_callback, barrier_arrive_callback, layout_map_,
-                  buffer_remap_, bind_var_to_expr,
-                  loop_mbar_phase_stack_.empty()
-                      ? PrimExpr(IntImm(DataType::Int(32), 0))
-                      : loop_mbar_phase_stack_.back(),
-                  &mbarrier_buffer_, cluster_size_},
-        analyzer_);
+    RequireSmemAlignmentCallback require_smem_alignment_callback =
+        [this](Var data_var, int alignment) {
+          String key = data_var->name_hint;
+          auto it = smem_alignment_map_.find(key);
+          int64_t prev =
+              it != smem_alignment_map_.end() ? (*it).second->value : 0;
+          if (alignment > prev) {
+            smem_alignment_map_.Set(key, IntImm(DataType::Int(32), alignment));
+          }
+        };
+
+    LowerArgs lower_args;
+    lower_args.target = target_;
+    lower_args.thread_bounds = thread_bounds;
+    lower_args.thread_var = thread_var_->var;
+    lower_args.layout_map = layout_map_;
+    lower_args.buffer_remap = buffer_remap_;
+    lower_args.bind_var_to_expr = bind_var_to_expr;
+    lower_args.mbar_phase_expr = loop_mbar_phase_stack_.empty()
+                                     ? PrimExpr(IntImm(DataType::Int(32), 0))
+                                     : loop_mbar_phase_stack_.back();
+    lower_args.mbarrier_buffer = &mbarrier_buffer_;
+    lower_args.cluster_size = cluster_size_;
+    lower_args.add_workspace = add_workspace_callback;
+    lower_args.alloc_mbarrier = mbarrier_callback;
+    lower_args.update_barrier_arrive = barrier_arrive_callback;
+    lower_args.require_smem_alignment = require_smem_alignment_callback;
+
+    auto lowered = tile_op->Lower(lower_args, analyzer_);
 
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == kPipelineContextNumStages) {
-      return VisitStmt(op->body);
-    }
     if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       ICHECK_NE(iv->thread_tag.length(), 0U);
@@ -1480,17 +1508,18 @@ private:
     // Only parallel-loop lowering needs PTX cp.async injection. Thread-level
     // lowering does not require converting eligible global->shared copies to
     // `tir.ptx_cp_async`.
-    if (TargetIsCuda(target_) && TargetHasAsyncCopy(target_)) {
+    if (TargetCudaHasAsyncCopy(target_)) {
       tvm::transform::PassContext ctx = tvm::transform::PassContext::Current();
-      bool enable_auto_async_copy =
+      bool auto_async_copy_enabled =
           ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
-      bool should_enable_async_copy =
+      bool should_inject_async_copy =
           parallel_prefer_async ||
-          (enable_auto_async_copy && parallel_async_without_async_commit_wait);
-      auto inject_result =
-          InjectPTXAsyncCopy(lowered, should_enable_async_copy,
-                             parallel_async_without_async_commit_wait);
-      lowered = inject_result.stmt;
+          (auto_async_copy_enabled && parallel_async_without_async_commit_wait);
+      if (should_inject_async_copy) {
+        auto inject_result = InjectPTXAsyncCopy(
+            lowered, parallel_async_without_async_commit_wait);
+        lowered = inject_result.stmt;
+      }
     }
     return lowered;
   }
@@ -1514,11 +1543,11 @@ private:
   // Stack of per-Block workspace buffers gathered while visiting children
   std::vector<Array<Buffer>> workspace_stack_;
   // Counter and arrive-counts for mbarrier allocation via
-  // AllocMBarrierCallback. Used to inject a barrier buffer with
+  // alloc_mbarrier callback. Used to inject a barrier buffer with
   // barrier_init annotation into the root block after all tile ops are lowered.
   int mbarrier_count_{0};
   std::vector<int> mbarrier_arrive_counts_;
-  // The shared.barrier scope buffer created lazily by AllocMBarrier callback.
+  // The shared.barrier scope buffer created lazily by alloc_mbarrier callback.
   Optional<Buffer> mbarrier_buffer_;
   // Fallback mbarrier parity derived from the nearest enclosing serial loop.
   std::vector<PrimExpr> loop_mbar_phase_stack_;
@@ -1539,6 +1568,10 @@ private:
   // Pending barrier arrive-count overrides from multi-TMA cluster copies.
   std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual>
       barrier_arrive_updates_;
+  // Per-buffer shared-memory alignment requirements (bytes) reported by op
+  // lowerings via the require_smem_alignment callback, keyed by the data Var's
+  // name hint. Written back as the kSmemAlignmentMap PrimFunc attribute.
+  Map<String, IntImm> smem_alignment_map_;
 };
 
 namespace transform {

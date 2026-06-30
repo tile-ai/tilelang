@@ -135,8 +135,8 @@ Below is an example that demonstrates more advanced features: layout annotation,
 
 ```python
 # @tilelang.jit(target="cuda")
-# target currently can be "cuda" or "hip" or "cpu".
-# if not specified, it will be inferred from the input tensors during compile time
+# target can be "auto", a bare kind such as "cuda", or a config dict such as
+# {"kind": "cuda", "arch": "sm_90"}.
 @tilelang.jit
 def matmul_relu(
     A, B,

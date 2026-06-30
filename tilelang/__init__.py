@@ -185,7 +185,6 @@ if not env.is_light_import():
 
     from .jit import jit, JITKernel, compile, par_compile  # noqa: F401
     from .profiler import Profiler  # noqa: F401
-    from .cache import clear_cache  # noqa: F401
     from .utils import (
         TensorSupplyType,  # noqa: F401
         deprecated,  # noqa: F401
@@ -215,3 +214,9 @@ if not env.is_light_import():
     from . import metal as metal  # noqa: F401
 
 del _lazy_load_lib
+
+# Install pass diff hook if TILELANG_PASS_DIFF is enabled (zero overhead when off)
+from .utils.pass_diff_hook import install_pass_diff_hook as _install_pass_diff_hook  # noqa: E402
+
+_install_pass_diff_hook()
+del _install_pass_diff_hook

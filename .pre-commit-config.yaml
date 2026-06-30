@@ -57,3 +57,4 @@ repos:
     hooks:
       - id: pymarkdown
         args: ["--config", ".pymarkdown", "fix"]
+        exclude: ^\.agents/

@@ -392,13 +392,16 @@ def run_cummax(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32, sc
     torch.testing.assert_close(tilelang_res, ref_res, atol=1e-3, rtol=1e-3)
 
 
-def cummax_smem_test_1d(N, block_N, reverse=False, dtype=T.float32):
+def cummax_smem_test_1d(N, block_N, reverse=False, dtype=T.float32, threads=None):
+    if threads is None:
+        threads = block_N
+
     @T.prim_func
     def cummax(
         A: T.Tensor((N,), dtype),
         B: T.Tensor((N,), dtype),
     ):
-        with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
+        with T.Kernel(T.ceildiv(N, block_N), threads=threads) as bx:
             A_shared = T.alloc_shared((block_N,), dtype)
 
             T.copy(A[bx * block_N], A_shared)
@@ -426,16 +429,20 @@ def cummax_fragment_test_1d(N, block_N, reverse=False, dtype=T.float32):
     return cummax
 
 
-def run_cummax_1d(N, block_N, reverse=False, dtype=T.float32, scope="smem"):
+def run_cummax_1d(N, block_N, reverse=False, dtype=T.float32, scope="smem", negative_input=False, threads=None):
     if scope == "smem":
-        program = cummax_smem_test_1d(N, block_N, reverse, dtype)
+        program = cummax_smem_test_1d(N, block_N, reverse, dtype, threads)
     elif scope == "fragment":
         program = cummax_fragment_test_1d(N, block_N, reverse, dtype)
     else:
         raise ValueError(f"Unknown scope {scope}")
 
     jit_kernel = tl.compile(program, out_idx=-1)
-    A = torch.randn(N, dtype=getattr(torch, dtype)).cuda()
+    torch_dtype = getattr(torch, dtype)
+    if negative_input:
+        A = -torch.arange(1, N + 1, dtype=torch.float32, device="cuda").to(torch_dtype)
+    else:
+        A = torch.randn(N, dtype=torch_dtype).cuda()
 
     def ref_program(A):
         ref_b = torch.empty_like(A)
@@ -472,6 +479,7 @@ def test_cummax_out_of_place():
 def test_cummax_smem_1d():
     run_cummax_1d(512, 64)
     run_cummax_1d(512, 64, reverse=True)
+    run_cummax_1d(80, 40, reverse=True, negative_input=True, threads=64)
 
 
 def test_cummax_fragment_1d():

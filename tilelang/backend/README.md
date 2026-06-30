@@ -9,9 +9,11 @@ TileLang language surface backend-neutral.
 The Python backend layer is split into two parts:
 
 - `tilelang/backend/`: common backend infrastructure, especially pass-pipeline
-  registration and shared pipeline utilities.
+  registration, host/device-codegen registration, and shared pipeline
+  utilities.
 - `tilelang/<backend>/`: backend-owned Python implementation files, such as
-  pass pipelines, tile-op implementation registration, and backend intrinsics.
+  pass pipelines, host/device-codegen entry registration, tile-op
+  implementation registration, and backend intrinsics.
 
 The native side mirrors this split under `src/<backend>/`, where C++ op
 lowering, codegen, runtime modules, stubs, and backend-local CMake files live.
@@ -33,6 +35,34 @@ The resolver is implemented in `tilelang/backend/pass_pipeline/pipeline.py`.
 Backends register a `PassPipeline(name, lower)` at import time. The pipeline
 name should match `target.kind.name`.
 
+Device codegen follows the same ownership model after host/device splitting:
+
+```text
+codegen = resolve_device_codegen(target)
+device_mod = codegen.lower(device_mod, target, compile_device=...)
+```
+
+The resolver is implemented in `tilelang/backend/device_codegen.py`. Backend
+packages register one or more `DeviceCodegen` entries for their target kind.
+CUDA, for example, owns both the plain CUDA entry and the CuTeDSL target
+variant, while CPU owns the `c` and `llvm` entries. The engine-level lowering
+code should not keep backend-specific `target.kind.name` dispatch for device
+codegen.
+
+Host codegen is resolved from the host target in the same style:
+
+```text
+host_mod = apply_host_codegen_hooks(host_mod, target_host, target)
+codegen = resolve_host_codegen(target_host)
+host_mod = codegen.lower(host_mod, target_host)
+```
+
+The resolver is implemented in `tilelang/backend/host_codegen.py`. Host build
+entries are registered by the package that owns the host target kind, such as
+`tilelang/cpu` for `c` and `llvm`. Device backends may also register host
+codegen hooks for target-specific host preparation; Metal uses this to mark
+host functions that need Metal runtime context.
+
 ## Target Registration
 
 | Python package | Target kind | Notes |
@@ -52,6 +82,8 @@ backend-specific implementation details.
 tilelang/backend/
   __init__.py
   common.py
+  device_codegen.py
+  host_codegen.py
   pass_pipeline/
     __init__.py
     pipeline.py
@@ -60,6 +92,10 @@ tilelang/backend/
 
 - `pass_pipeline/pipeline.py` defines `PassPipeline`, `register_pipeline`, and
   `resolve_pipeline`.
+- `device_codegen.py` defines `DeviceCodegen`, `register_device_codegen`, and
+  `resolve_device_codegen`.
+- `host_codegen.py` defines `HostCodegen`, host codegen hooks, and
+  `resolve_host_codegen`.
 - `pass_pipeline/pipeline_utils.py` contains small shared helpers for pass
   configuration, layout visualization, vectorization gates, and shared-memory
   reuse flags.
@@ -76,21 +112,25 @@ for that backend.
 
 ```text
 tilelang/cuda/
+  codegen.py
   pipeline.py
   transform/
   op/
   intrinsics/
 
 tilelang/rocm/
+  codegen.py
   pipeline.py
   op/
   intrinsics/
 
 tilelang/cpu/
+  codegen.py
   pipeline.py
   op/
 
 tilelang/metal/
+  codegen.py
   pipeline.py
   transform/
   op/
@@ -102,6 +142,11 @@ semantic checking. It may use shared helpers from `tilelang/backend`, but the
 ordered pass list should be visible in the backend-owned file. CUDA-only,
 ROCm-only, and Metal-only passes should be called from the corresponding
 backend pipeline rather than from engine-level code.
+
+The `codegen.py` file should register the backend-owned host/device codegen
+entry points, usually by mapping the target kind to native `target.build.*`
+global functions. Target variants should be represented by backend-owned
+predicates, not by engine-level branching.
 
 The `op/` and `intrinsics/` folders contain Python implementation and helper
 code used by tile-op lowering. For example, CUDA owns MMA/WGMMA/TCGEN05
@@ -138,6 +183,9 @@ Shared native helpers that have no target runtime dependency belong in
 
 - Keep `tilelang/language` and `tilelang/tileop` backend-neutral.
 - Keep backend-specific pass ordering in the backend package.
+- Keep backend-specific host-codegen dispatch and host preparation hooks in the
+  backend package.
+- Keep backend-specific device-codegen dispatch in the backend package.
 - Register backend implementations at import time, but keep import-time work
   light.
 - Prefer explicit target-kind registration over implicit folder-name matching,

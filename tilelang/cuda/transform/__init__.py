@@ -18,20 +18,6 @@ def ProducerConsumerWarpSpecialized():
     return _ffi_api.ProducerConsumerWarpSpecialized()  # type: ignore
 
 
-def ProducerConsumerWarpSpecializedTiled():
-    """Compatibility alias for ``ProducerConsumerWarpSpecialized``.
-
-    The tiled tile-op implementation is now the canonical
-    ``ProducerConsumerWarpSpecialized`` pass.
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return ProducerConsumerWarpSpecialized()
-
-
 def LowerBlackwell2SM():
     """Lower 2SM TCGEN5MMA and related on Blackwell target
 
@@ -159,5 +145,4 @@ __all__ = [
     "MarkCudaSyncCalls",
     "PersistThreadblock",
     "ProducerConsumerWarpSpecialized",
-    "ProducerConsumerWarpSpecializedTiled",
 ]

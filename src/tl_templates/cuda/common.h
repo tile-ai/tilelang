@@ -108,6 +108,11 @@ TL_PATCH TL_DEVICE half_t hrsqrt(const half_t x) {
   return half_t(hrsqrt(x.to_half()));
 }
 
+// hrsqrt function for bfloat16_t
+TL_PATCH TL_DEVICE bfloat16_t hrsqrt(const bfloat16_t x) {
+  return bfloat16_t(hrsqrt(x.to_nv_bfloat16()));
+}
+
 // Pack two half values.
 TL_DEVICE unsigned __pack_half2(const half x, const half y) {
   unsigned v0 = *((unsigned short *)&x);
@@ -136,10 +141,16 @@ TL_DEVICE unsigned __pack_nv_bfloat162(const bfloat16_t x, const bfloat16_t y) {
   return (v1 << 16) | v0;
 }
 
-// Pack four char values.
+// Pack four char values. Build the 32-bit pattern from unsigned bytes: a
+// negative signed char would otherwise sign-extend and flood the other lanes
+// through the OR.
 TL_DEVICE int make_int(signed char x0, signed char x1, signed char x2,
                        signed char x3) {
-  return (x3 << 24) | (x2 << 16) | (x1 << 8) | x0;
+  const unsigned int b0 = static_cast<unsigned char>(x0);
+  const unsigned int b1 = static_cast<unsigned char>(x1);
+  const unsigned int b2 = static_cast<unsigned char>(x2);
+  const unsigned int b3 = static_cast<unsigned char>(x3);
+  return static_cast<int>((b3 << 24) | (b2 << 16) | (b1 << 8) | b0);
 }
 
 // Pack eight char values.
@@ -181,6 +192,13 @@ TL_DEVICE int4_t make_int4(short x0, short x1, short y0, short y1, short z0,
 TL_DEVICE unsigned int make_uint(unsigned char x0, unsigned char x1,
                                  unsigned char x2, unsigned char x3) {
   return (x3 << 24) | (x2 << 16) | (x1 << 8) | x0;
+}
+
+template <typename T> TL_DEVICE unsigned int pack_b8x4(T x0, T x1, T x2, T x3) {
+  return make_uint(*reinterpret_cast<unsigned char *>(&x0),
+                   *reinterpret_cast<unsigned char *>(&x1),
+                   *reinterpret_cast<unsigned char *>(&x2),
+                   *reinterpret_cast<unsigned char *>(&x3));
 }
 
 // Pack eight char values.
@@ -416,8 +434,8 @@ union GmmaDescriptor {
   template <typename T>
   CUTE_HOST_DEVICE constexpr GmmaDescriptor operator+(const T &offset) const {
     GmmaDescriptor ret;
-    ret.reg32_[0] = reg32_[0] + uint32_t(offset);
-    ret.reg32_[1] = reg32_[1];
+    ret.desc_ = desc_;
+    ret.reg32_[0] += uint32_t(offset);
     return ret;
   }
 };
@@ -479,9 +497,9 @@ union Tcgen05SMemDescriptor {
   CUTE_HOST_DEVICE constexpr Tcgen05SMemDescriptor
   operator+(const T &offset) const {
     Tcgen05SMemDescriptor ret;
+    ret.desc_ = desc_;
     // Address addition is in units of 16 bytes (4 LSB not encoded)
-    ret.reg32_[0] = reg32_[0] + (uint32_t(offset) >> 4);
-    ret.reg32_[1] = reg32_[1];
+    ret.reg32_[0] += uint32_t(offset) >> 4;
     return ret;
   }
 };
@@ -725,6 +743,21 @@ TL_DEVICE uint1 pack_half2(half_t a, half_t b) {
   return uint1{packed};
 }
 
+template <uint64_t bytes, uint64_t init_val>
+TL_DEVICE void st_bulk_shared(void *smem_ptr) {
+  static_assert(init_val == 0,
+                "tl::st_bulk_shared only supports init_val == 0");
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
+    (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 8)
+  asm volatile("st.bulk.weak.shared::cta [%0], %1, 0;" ::"l"(
+                   __cvta_generic_to_shared(smem_ptr)),
+               "l"(bytes)
+               : "memory");
+#else
+  static_assert(false, "tl::st_bulk_shared requires CUDA >= 12.8");
+#endif
+}
+
 // --- add2 ----------------------------------------------------------------
 
 TL_DEVICE float2 add2(float2 a, float2 b) {
@@ -945,8 +978,11 @@ TL_DEVICE __half2 abs2(__half2 a) {
 using tl::tfloat32_t;
 
 namespace cutlass {
+// Mirror cutlass's own half_t fast_exp (fast_math.h): route through float.
+// A direct `return ::hexp(x)` recurses, since `hexp` is #define'd to this
+// same cutlass::fast_exp and x is already bfloat16_t.
 TL_DEVICE
-bfloat16_t fast_exp(bfloat16_t x) { return ::hexp(x); }
+bfloat16_t fast_exp(bfloat16_t x) { return bfloat16_t(fast_exp(float(x))); }
 } // namespace cutlass
 
 //

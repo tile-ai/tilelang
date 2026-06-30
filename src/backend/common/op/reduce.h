@@ -107,9 +107,9 @@ inline PrimExpr MakeInitValue(const ReduceOpNode &op, int vsize = 1) {
   auto bits = dst_dtype.bits();
 
   PrimExpr scalar;
-  if (op.type->isSum() || op.type->isAbsSum()) {
+  if (op.type->IsSum() || op.type->IsAbsSum()) {
     scalar = make_zero(op.dst->dtype);
-  } else if (op.type->isMax()) {
+  } else if (op.type->IsMax()) {
     if (is_int) {
       scalar = make_const(op.dst->dtype, SignedMin(bits));
     } else if (is_uint) {
@@ -117,7 +117,7 @@ inline PrimExpr MakeInitValue(const ReduceOpNode &op, int vsize = 1) {
     } else {
       scalar = make_const(op.dst->dtype, -INFINITY);
     }
-  } else if (op.type->isMin()) {
+  } else if (op.type->IsMin()) {
     if (is_int) {
       scalar = make_const(op.dst->dtype, SignedMax(bits));
     } else if (is_uint) {
@@ -125,9 +125,9 @@ inline PrimExpr MakeInitValue(const ReduceOpNode &op, int vsize = 1) {
     } else {
       scalar = make_const(op.dst->dtype, INFINITY);
     }
-  } else if (op.type->isAbsMax()) {
+  } else if (op.type->IsAbsMax()) {
     scalar = make_const(op.dst->dtype, 0);
-  } else if (op.type->isBitAnd()) {
+  } else if (op.type->IsBitAnd()) {
     if (is_int) {
       scalar = make_const(op.dst->dtype, -1);
     } else if (is_uint) {
@@ -135,7 +135,7 @@ inline PrimExpr MakeInitValue(const ReduceOpNode &op, int vsize = 1) {
     } else {
       scalar = make_const(op.dst->dtype, -INFINITY);
     }
-  } else if (op.type->isBitOr() || op.type->isBitXor()) {
+  } else if (op.type->IsBitOr() || op.type->IsBitXor()) {
     scalar = make_zero(op.dst->dtype);
   } else {
     LOG(FATAL) << "Unsupported reduce type: " << op.type->type;
@@ -162,43 +162,43 @@ inline PrimExpr MakeReduce(const ReduceOpNode &op, int vsize,
   if (vsize == 1) {
     const bool use_nan_op = op.nan_propagate && (acc.dtype().is_float16() ||
                                                  acc.dtype().is_bfloat16());
-    if (op.type->isSum()) {
+    if (op.type->IsSum()) {
       return acc + rhs;
-    } else if (op.type->isAbsSum()) {
+    } else if (op.type->IsAbsSum()) {
       return acc + Max(rhs, -rhs);
-    } else if (op.type->isMax()) {
+    } else if (op.type->IsMax()) {
       return use_nan_op ? Call(acc.dtype(), tl::max_nan(), {acc, rhs})
                         : PrimExpr(Max(acc, rhs));
-    } else if (op.type->isMin()) {
+    } else if (op.type->IsMin()) {
       return use_nan_op ? Call(acc.dtype(), tl::min_nan(), {acc, rhs})
                         : PrimExpr(Min(acc, rhs));
-    } else if (op.type->isAbsMax()) {
+    } else if (op.type->IsAbsMax()) {
       auto abs_rhs = Max(rhs, -rhs);
       return use_nan_op ? Call(acc.dtype(), tl::max_nan(), {acc, abs_rhs})
                         : PrimExpr(Max(acc, abs_rhs));
-    } else if (op.type->isBitAnd()) {
+    } else if (op.type->IsBitAnd()) {
       return acc & rhs;
-    } else if (op.type->isBitOr()) {
+    } else if (op.type->IsBitOr()) {
       return acc | rhs;
-    } else if (op.type->isBitXor()) {
+    } else if (op.type->IsBitXor()) {
       return acc ^ rhs;
     }
     LOG(FATAL) << "Unsupported reduce type: " << op.type->type;
     return PrimExpr();
   }
 
-  if (op.type->isSum()) {
+  if (op.type->IsSum()) {
     return Call(acc.dtype(), tl::add2(), {acc, rhs});
-  } else if (op.type->isAbsSum()) {
+  } else if (op.type->IsAbsSum()) {
     return Call(acc.dtype(), tl::add2(),
                 {acc, Call(acc.dtype(), tl::abs2(), {rhs})});
-  } else if (op.type->isMax()) {
+  } else if (op.type->IsMax()) {
     return Call(acc.dtype(), op.nan_propagate ? tl::max2_nan() : tl::max2(),
                 {acc, rhs});
-  } else if (op.type->isMin()) {
+  } else if (op.type->IsMin()) {
     return Call(acc.dtype(), op.nan_propagate ? tl::min2_nan() : tl::min2(),
                 {acc, rhs});
-  } else if (op.type->isAbsMax()) {
+  } else if (op.type->IsAbsMax()) {
     return Call(acc.dtype(), op.nan_propagate ? tl::max2_nan() : tl::max2(),
                 {acc, Call(acc.dtype(), tl::abs2(), {rhs})});
   }
@@ -212,19 +212,19 @@ inline std::optional<std::string> MakeCodegenReducer(const ReduceOpNode &op,
                                                op.dst->dtype.is_bfloat16());
 
   auto base = [&]() -> std::string {
-    if (op.type->isSum() || op.type->isAbsSum())
+    if (op.type->IsSum() || op.type->IsAbsSum())
       return "tl::SumOp";
-    if (op.type->isMax())
+    if (op.type->IsMax())
       return use_nan_op ? "tl::MaxOpNan" : "tl::MaxOp";
-    if (op.type->isMin())
+    if (op.type->IsMin())
       return use_nan_op ? "tl::MinOpNan" : "tl::MinOp";
-    if (op.type->isAbsMax())
+    if (op.type->IsAbsMax())
       return use_nan_op ? "tl::MaxOpNan" : "tl::MaxOp";
-    if (op.type->isBitAnd())
+    if (op.type->IsBitAnd())
       return "tl::BitAndOp";
-    if (op.type->isBitOr())
+    if (op.type->IsBitOr())
       return "tl::BitOrOp";
-    if (op.type->isBitXor())
+    if (op.type->IsBitXor())
       return "tl::BitXorOp";
     LOG(FATAL) << "Unsupported reduce type: " << op.type->type;
     return "";
@@ -233,8 +233,8 @@ inline std::optional<std::string> MakeCodegenReducer(const ReduceOpNode &op,
   if (vsize <= 1)
     return base;
 
-  if (!(op.type->isSum() || op.type->isAbsSum() || op.type->isMax() ||
-        op.type->isMin() || op.type->isAbsMax())) {
+  if (!(op.type->IsSum() || op.type->IsAbsSum() || op.type->IsMax() ||
+        op.type->IsMin() || op.type->IsAbsMax())) {
     return std::nullopt;
   }
 
@@ -277,17 +277,17 @@ inline bool CanUsePackedRamp(const PrimExpr &index, const Var &var, int vsize,
 
 inline PrimExpr MakeUpdate(const ReduceOpNode &op, PrimExpr dst_val,
                            PrimExpr src_val) {
-  if (op.type->isSum() || op.type->isAbsSum()) {
+  if (op.type->IsSum() || op.type->IsAbsSum()) {
     return dst_val + src_val;
-  } else if (op.type->isBitAnd()) {
+  } else if (op.type->IsBitAnd()) {
     return op.clear ? src_val : bitwise_and(dst_val, src_val);
-  } else if (op.type->isBitOr()) {
+  } else if (op.type->IsBitOr()) {
     return bitwise_or(dst_val, src_val);
-  } else if (op.type->isBitXor()) {
+  } else if (op.type->IsBitXor()) {
     return bitwise_xor(dst_val, src_val);
-  } else if (op.type->isMax() || op.type->isAbsMax()) {
+  } else if (op.type->IsMax() || op.type->IsAbsMax()) {
     return Max(dst_val, src_val);
-  } else if (op.type->isMin()) {
+  } else if (op.type->IsMin()) {
     return Min(dst_val, src_val);
   }
   LOG(FATAL) << "Unsupported reduce type: " << op.type->type;
@@ -297,19 +297,19 @@ inline PrimExpr MakeUpdate(const ReduceOpNode &op, PrimExpr dst_val,
 } // namespace reduce
 
 template <typename Impl> struct ReduceLowerer {
-  static Stmt Lower(const ReduceOpNode &op, const LowerArgs &T,
+  static Stmt Lower(const ReduceOpNode &op, const LowerArgs &lower_args,
                     arith::Analyzer *analyzer) {
     if (op.nan_propagate &&
         (op.dst->dtype.is_float16() || op.dst->dtype.is_bfloat16()) &&
-        !Impl::SupportsFp16Bf16NanReduce(T.target)) {
+        !Impl::SupportsFp16Bf16NanReduce(lower_args.target)) {
       LOG(FATAL) << "ReduceOp: nan_propagate=True for fp16/bf16 "
                     "max/min/absmax is only supported on CUDA targets "
                     "(requires __hmax_nan/__hmin_nan intrinsics). Target was: "
-                 << T.target->str();
+                 << lower_args.target->str();
     }
     auto get_buffer = [&](const Buffer &buf) {
-      if (T.buffer_remap.count(buf)) {
-        return T.buffer_remap[buf];
+      if (lower_args.buffer_remap.count(buf)) {
+        return lower_args.buffer_remap[buf];
       }
       return buf;
     };
@@ -320,8 +320,8 @@ template <typename Impl> struct ReduceLowerer {
     if (src_scope == "local.fragment" && dst_scope == "local.fragment") {
       auto src_buffer = get_buffer(op.src);
       auto dst_buffer = get_buffer(op.dst);
-      auto src_layout = T.layout_map[op.src].as<Fragment>().value();
-      auto dst_layout = T.layout_map[op.dst].as<Fragment>().value();
+      auto src_layout = lower_args.layout_map[op.src].as<Fragment>().value();
+      auto dst_layout = lower_args.layout_map[op.dst].as<Fragment>().value();
       auto red_layout = reduce::ComputeReducerLayout(src_layout, op.dim);
       auto src_dim = src_layout->InputDim();
       auto dst_dim = dst_layout->InputDim();
@@ -360,25 +360,25 @@ template <typename Impl> struct ReduceLowerer {
       Array<Stmt> stmts;
 
       auto require_init = op.clear;
-      if (op.type->isSum() || op.type->isAbsSum() || op.type->isBitAnd() ||
-          op.type->isBitOr() || op.type->isBitXor()) {
+      if (op.type->IsSum() || op.type->IsAbsSum() || op.type->IsBitAnd() ||
+          op.type->IsBitOr() || op.type->IsBitXor()) {
         require_init = true;
       }
 
       auto clear_buffer = dst_buffer;
       auto need_duplicate = false;
       auto need_update = false;
-      if ((op.type->isSum() || op.type->isAbsSum()) && !op.clear) {
+      if ((op.type->IsSum() || op.type->IsAbsSum()) && !op.clear) {
         need_duplicate = true;
         need_update = true;
-      } else if (op.type->isBitAnd() && !op.clear) {
+      } else if (op.type->IsBitAnd() && !op.clear) {
         need_duplicate = true;
         need_update = true;
-      } else if ((op.type->isBitOr() || op.type->isBitXor()) && !op.clear) {
+      } else if ((op.type->IsBitOr() || op.type->IsBitXor()) && !op.clear) {
         need_duplicate = true;
         need_update = true;
-      } else if ((op.type->isMax() || op.type->isMin() ||
-                  op.type->isAbsMax()) &&
+      } else if ((op.type->IsMax() || op.type->IsMin() ||
+                  op.type->IsAbsMax()) &&
                  !op.clear) {
         need_duplicate = true;
         need_update = true;
@@ -414,8 +414,8 @@ template <typename Impl> struct ReduceLowerer {
       Buffer clear_buffer_packed;
       Buffer clear_batch_pack_buffer;
       {
-        int vsize =
-            Impl::GetPreferedVectorizedSize(clear_buffer->dtype, T.target);
+        int vsize = Impl::GetPreferedVectorizedSize(clear_buffer->dtype,
+                                                    lower_args.target);
         if (vsize > 1 && !src_var_compressed.empty()) {
           auto *ext = src_var_compressed.back()->dom->extent.as<IntImmNode>();
           if (ext && ext->value >= vsize && ext->value % vsize == 0 &&
@@ -434,8 +434,8 @@ template <typename Impl> struct ReduceLowerer {
             Array<Stmt> local_body;
 
             if (require_init ||
-                (need_duplicate && (op.type->isMax() || op.type->isMin() ||
-                                    op.type->isAbsMax()))) {
+                (need_duplicate && (op.type->IsMax() || op.type->IsMin() ||
+                                    op.type->IsAbsMax()))) {
               local_body.push_back(BufferStore(clear_buffer_packed,
                                                reduce::MakeInitValue(op, vsize),
                                                red_indices));
@@ -496,7 +496,7 @@ template <typename Impl> struct ReduceLowerer {
       if (!can_pack) {
         if (require_init ||
             (need_duplicate &&
-             (op.type->isMax() || op.type->isMin() || op.type->isAbsMax()))) {
+             (op.type->IsMax() || op.type->IsMin() || op.type->IsAbsMax()))) {
           stmts.push_back(BufferStore(clear_buffer, reduce::MakeInitValue(op),
                                       red_indices));
         }
@@ -545,8 +545,8 @@ template <typename Impl> struct ReduceLowerer {
           body = For(vars[i]->var, 0, vars[i]->dom->extent, ForKind::kParallel,
                      body);
         }
-        body = PartitionLoop(Downcast<For>(body), T.thread_var, analyzer,
-                             red_layout);
+        body = PartitionLoop(Downcast<For>(body), lower_args.thread_var,
+                             analyzer, red_layout);
         body = PragmaUnrollLoop(Downcast<For>(body));
         return body;
       };
@@ -589,10 +589,10 @@ template <typename Impl> struct ReduceLowerer {
           }
 
           int reducing_threads = (*extent) * (*scale);
-          auto thread_offset = T.thread_bounds->min;
+          auto thread_offset = lower_args.thread_bounds->min;
 
-          int vsize =
-              Impl::GetPreferedVectorizedSize(clear_buffer->dtype, T.target);
+          int vsize = Impl::GetPreferedVectorizedSize(clear_buffer->dtype,
+                                                      lower_args.target);
           bool can_batch_pack =
               vsize > 1 && batch >= vsize && batch % vsize == 0 &&
               reduce::MakeCodegenReducer(op, vsize).has_value();
@@ -602,7 +602,8 @@ template <typename Impl> struct ReduceLowerer {
                   .value();
           std::string allreduce = Impl::MakeBatchAllReduce(
               reducer, reducing_threads, *scale, thread_offset,
-              T.thread_bounds->extent, eff_batch, reducing_threads, T.target);
+              lower_args.thread_bounds->extent, eff_batch, reducing_threads,
+              lower_args.target);
 
           DataType ws_dtype = can_batch_pack
                                   ? clear_buffer->dtype.with_lanes(vsize)
@@ -611,7 +612,7 @@ template <typename Impl> struct ReduceLowerer {
           bool need_workspace = reducing_threads > 32;
           if (need_workspace) {
             int ws_size = reducing_threads * eff_batch;
-            workspace = T.AddWorkspace(ws_size, ws_dtype);
+            workspace = lower_args.add_workspace(ws_size, ws_dtype);
           }
 
           int64_t N_total = 1;
@@ -731,7 +732,7 @@ template <typename Impl> struct ReduceLowerer {
           PrimExpr predicate = Bool(true);
           {
             auto dst_th = post_dst_idx;
-            dst_th.push_back(T.thread_var);
+            dst_th.push_back(lower_args.thread_var);
             auto inv = dst_layout->Inverse()->Forward(dst_th);
             inv.pop_back();
             for (int i = 0; i < static_cast<int>(dst_layout->InputDim()); i++) {
@@ -782,17 +783,18 @@ template <typename Impl> struct ReduceLowerer {
           }
 
           int reducing_threads = (*extent) * (*scale);
-          auto thread_offset = T.thread_bounds->min;
+          auto thread_offset = lower_args.thread_bounds->min;
           std::string allreduce = Impl::MakeScalarAllReduce(
               reduce::MakeCodegenReducer(op).value(), reducing_threads, *scale,
-              thread_offset, T.thread_bounds->extent, T.target);
+              thread_offset, lower_args.thread_bounds->extent,
+              lower_args.target);
           Array<PrimExpr> thread_reduce_args = {
               StringImm(allreduce), BufferLoad(clear_buffer, red_indices)};
           if (reducing_threads > 32) {
-            int workspace_size =
-                static_cast<int>(*as_const_int(T.thread_bounds->extent));
+            int workspace_size = static_cast<int>(
+                *as_const_int(lower_args.thread_bounds->extent));
             PrimExpr workspace =
-                T.AddWorkspace(workspace_size, clear_buffer->dtype);
+                lower_args.add_workspace(workspace_size, clear_buffer->dtype);
             thread_reduce_args.push_back(workspace);
           }
           auto call = Call(clear_buffer->dtype, builtin::call_extern(),
@@ -804,7 +806,7 @@ template <typename Impl> struct ReduceLowerer {
       PrimExpr predicate = Bool(true);
       {
         auto dst_th_indices = dst_indices;
-        dst_th_indices.push_back(T.thread_var);
+        dst_th_indices.push_back(lower_args.thread_var);
         auto inv = dst_layout->Inverse()->Forward(dst_th_indices);
         inv.pop_back();
         for (int i = 0; i < static_cast<int>(dst_layout->InputDim()); i++) {
@@ -833,11 +835,11 @@ template <typename Impl> struct ReduceLowerer {
       }
 
       if (dst_layout->InputDim() > 0) {
-        body = PartitionLoop(Downcast<For>(body), T.thread_var, analyzer,
-                             red_layout);
+        body = PartitionLoop(Downcast<For>(body), lower_args.thread_var,
+                             analyzer, red_layout);
         body = PragmaUnrollLoop(Downcast<For>(body));
       } else {
-        auto guard = (T.thread_var == T.thread_bounds->min);
+        auto guard = (lower_args.thread_var == lower_args.thread_bounds->min);
         body = IfThenElse(guard, body);
       }
 

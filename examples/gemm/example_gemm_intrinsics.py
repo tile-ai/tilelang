@@ -17,8 +17,7 @@ def make_swizzle_layout(shared_buf):
         return T.Layout(shape, lambda *args: args)
 
     def transform_func(i, j):
-        new_warp_i, new_warp_j = get_swizzle_layout(i, j, shape[-1], dtype)
-        return [new_warp_i, new_warp_j]
+        return list(get_swizzle_layout(i, j, shape[-1], dtype))
 
     return T.Layout(shape, transform_func)
 

@@ -30,6 +30,7 @@ from .frame import has_let_value, get_let_value  # noqa: F401
 from .math_intrinsics import *  # noqa: F401
 from .kernel import (
     Kernel,  # noqa: F401
+    ClusterKernel,  # noqa: F401
     CUDASourceCodeKernel,  # noqa: F401
     KernelLaunchFrame,  # noqa: F401
     get_thread_binding,  # noqa: F401
@@ -173,6 +174,16 @@ from .cluster import (
     clc_get_first_ctaid_x,  # noqa: F401
     clc_get_first_ctaid_y,  # noqa: F401
     clc_get_first_ctaid_z,  # noqa: F401
+)
+
+from .meta import (
+    inline,  # noqa: F401
+    meta_class,  # noqa: F401
+)
+
+from .tile_schedule import (
+    BaseTileScheduler,  # noqa: F401
+    PersistentTileScheduler,  # noqa: F401
 )
 
 

@@ -124,6 +124,7 @@ Some useful CMake options you can toggle while configuring:
 - `-DUSE_CUDA=ON|OFF` builds against NVIDIA CUDA (default ON when CUDA headers are found).
 - `-DUSE_ROCM=ON` selects ROCm support when building on AMD GPUs.
 - `-DNO_VERSION_LABEL=ON` disables the backend/git suffix in `tilelang.__version__`.
+- `-DUSE_LLVM=ON` enables the LLVM backend for CPU codegen.
 
 (using-existing-tvm)=
 
@@ -270,7 +271,7 @@ pip install -e . -v --no-build-isolation --no-deps
 
 # Manually install required runtime deps when using --no-deps.
 # Note: skip torch-c-dlpack-ext on ROCm (its wheel expects CUDA libs).
-pip install "apache-tvm-ffi>=0.1.6" "z3-solver>=4.13.0"
+pip install "apache-tvm-ffi>=0.1.10,<=0.1.11" "z3-solver>=4.13.0"
 # If you already installed torch-c-dlpack-ext and hit `libtorch_cuda.so` errors:
 # pip uninstall -y torch-c-dlpack-ext
 
@@ -304,6 +305,8 @@ pip install tilelang -f https://tile-ai.github.io/whl/nightly
 `USE_ROCM`: If to enable ROCm support, default: `OFF`. If your ROCm SDK does not located in `/opt/rocm`, set `USE_ROCM=<rocm_sdk>` to enable build ROCm against custom sdk path.
 
 `USE_METAL`: If to enable Metal support, default: `ON` on Darwin.
+
+`USE_LLVM`: If to enable LLVM support for CPU codegen, default: `OFF`. Set `USE_LLVM=1` for auto-detection, or pass `-DUSE_LLVM=/path/to/llvm-config` through `CMAKE_ARGS` when you need a specific LLVM installation. LLVM 15 or newer is required.
 
 `TVM_ROOT`: TVM source root to use.
 

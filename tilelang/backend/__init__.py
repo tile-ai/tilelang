@@ -1,4 +1,22 @@
 from .pass_pipeline import PassPipeline, register_pipeline, resolve_pipeline  # noqa: F401
+from .device_codegen import (  # noqa: F401
+    DeviceCodegen,
+    allowed_device_codegens_for_target,
+    register_device_codegen,
+    register_lazy_device_codegen,
+    resolve_device_codegen,
+)
+from .host_codegen import (  # noqa: F401
+    HostCodegen,
+    HostCodegenHook,
+    allowed_host_codegens_for_target,
+    apply_host_codegen_hooks,
+    register_host_codegen,
+    register_host_codegen_hook,
+    register_lazy_host_codegen,
+    register_lazy_host_codegen_hooks,
+    resolve_host_codegen,
+)
 from .execution_backend import (  # noqa: F401
     ExecutionBackendSpec,
     allowed_backends_for_target,
@@ -20,5 +38,16 @@ register_lazy_execution_backends("hip", "tilelang.rocm.execution_backend")
 register_lazy_execution_backends("c", "tilelang.cpu.execution_backend")
 register_lazy_execution_backends("llvm", "tilelang.cpu.execution_backend")
 register_lazy_execution_backends("metal", "tilelang.metal.execution_backend")
+
+register_lazy_device_codegen("cuda", "tilelang.cuda.codegen")
+register_lazy_device_codegen("hip", "tilelang.rocm.codegen")
+register_lazy_device_codegen("c", "tilelang.cpu.codegen")
+register_lazy_device_codegen("llvm", "tilelang.cpu.codegen")
+register_lazy_device_codegen("metal", "tilelang.metal.codegen")
+register_lazy_device_codegen("webgpu", "tilelang.webgpu.codegen")
+
+register_lazy_host_codegen("c", "tilelang.cpu.codegen")
+register_lazy_host_codegen("llvm", "tilelang.cpu.codegen")
+register_lazy_host_codegen_hooks("metal", "tilelang.metal.codegen")
 
 from . import common as common  # noqa: F401,E402

@@ -157,10 +157,20 @@ private:
  * local buffer optimization.
  */
 bool ForBodyContainsSeqStmt(const For &loop) {
+  // Ignore flat Bind nodes (SSA value defs): a single store wrapped in leading
+  // Binds is not multi-stmt. Keeps this in sync with DecoupleTypeCast.
   bool has_seq_stmt = false;
   PostOrderVisit(loop->body, [&](const ObjectRef &obj) {
-    if (obj.as<SeqStmtNode>()) {
-      has_seq_stmt = true;
+    if (auto seq = obj.as<SeqStmtNode>()) {
+      int num_real_stmts = 0;
+      for (const Stmt &s : seq->seq) {
+        if (!s.as<BindNode>()) {
+          ++num_real_stmts;
+        }
+      }
+      if (num_real_stmts >= 2) {
+        has_seq_stmt = true;
+      }
     }
   });
   return has_seq_stmt;
@@ -614,7 +624,18 @@ private:
   }
 
   void CheckConditionVectorized(const PrimExpr &cond) {
-    // TODO: perform some checks here
+    if (!inner_for_) {
+      return;
+    }
+    PrimExpr condition = analyzer_->Simplify(cond);
+    int condition_vector_size = loop_extent_vector_size_;
+    while (condition_vector_size > 1 &&
+           !IsExprInvariantInVectorBoundary(condition, inner_for_->loop_var,
+                                            condition_vector_size, analyzer_)) {
+      condition_vector_size /= 2;
+    }
+    buffer_vector_infos_.push_back(
+        {Buffer(), condition_vector_size, false, {}});
   }
 
   void HandleTvmAccessPtr(const CallNode *node) {

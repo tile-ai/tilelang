@@ -74,19 +74,22 @@ std::optional<DataType> GetAccessPtrElementType(const PrimExpr &expr) {
 }
 
 int GetTileLangCPAsyncTransferBytes(const CallNode *op) {
-  ICHECK(op->args.size() == 3 || op->args.size() == 4)
-      << "tl::ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
+  auto call = Downcast<Call>(GetRef<PrimExpr>(op));
+  ICHECK(call->args.size() == 3 || call->args.size() == 4)
+      << call
+      << " expects 3 or 4 arguments (dst_access_ptr, "
          "src_access_ptr, num_elems, [predicate])";
-  const auto *num_elems_imm = op->args[2].as<IntImmNode>();
-  ICHECK(num_elems_imm) << "tl::ptx_cp_async num_elems must be IntImm, but got "
-                        << op->args[2];
+  const auto *num_elems_imm = call->args[2].as<IntImmNode>();
+  ICHECK(num_elems_imm) << call << " num_elems must be IntImm, but got "
+                        << call->args[2];
   int64_t num_elems = num_elems_imm->value;
-  ICHECK_GT(num_elems, 0);
+  ICHECK_GT(num_elems, 0) << call << " num_elems must be positive";
 
-  auto dst_elem_type = GetAccessPtrElementType(op->args[0]);
-  auto src_elem_type = GetAccessPtrElementType(op->args[1]);
+  auto dst_elem_type = GetAccessPtrElementType(call->args[0]);
+  auto src_elem_type = GetAccessPtrElementType(call->args[1]);
   ICHECK(dst_elem_type.has_value() && src_elem_type.has_value())
-      << "tl::ptx_cp_async expects address_of, tl.access_ptr, or "
+      << call
+      << " expects address_of, tl.access_ptr, or "
          "tvm_access_ptr operands";
 
   int64_t dst_total_bits =
@@ -94,16 +97,15 @@ int GetTileLangCPAsyncTransferBytes(const CallNode *op) {
   int64_t src_total_bits =
       num_elems * src_elem_type.value().bits() * src_elem_type.value().lanes();
   ICHECK_EQ(dst_total_bits, src_total_bits)
-      << "tl::ptx_cp_async requires src/dst transfer widths to match, but got "
+      << call << " requires src/dst transfer widths to match, but got "
       << dst_total_bits << " vs " << src_total_bits << " bits";
   ICHECK_EQ(dst_total_bits % 8, 0)
-      << "tl::ptx_cp_async requires byte-aligned transfers, but got "
-      << dst_total_bits << " bits";
+      << call << " requires byte-aligned transfers, but got " << dst_total_bits
+      << " bits";
 
   int64_t total_bytes = dst_total_bits / 8;
   ICHECK(IsValidCPAsyncTransferBytes(total_bytes))
-      << "tl::ptx_cp_async requires a final PTX byte width in {4, 8, 16}, but "
-         "got "
+      << call << " requires a final PTX byte width in {4, 8, 16}, but got "
       << total_bytes;
   return static_cast<int>(total_bytes);
 }
@@ -721,7 +723,7 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     return;
   }
 
-  if (t == tl::cuTensorMapType()) {
+  if (t == tl::CuTensorMapType()) {
     os << "CUtensorMap";
     return;
   }
@@ -1572,7 +1574,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   // To add a new type conversion, you should do the following things:
   // 1. Add the new conversion function in tl_templates. (__tl_cvt_xx)
   // 2. Add a new if statement like the one below.
-  // 3. In src/backend/common/target_utils.cc, allow this vectorizable cast.
+  // 3. In src/cuda/target_utils.cc, allow this vectorizable cast.
 
   // Handle conversion from float16 to float32
   if (from_ty.is_float16() && target_ty.is_float() && target_ty.bits() == 32) {
@@ -1688,6 +1690,35 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     }
   }
 
+  // Handle conversion from float16 to float8 (E4M3/E5M2)
+  if (from_ty.is_float16() && tl::IsCudaVectorizableFP8(target_ty)) {
+    bool target_type_is_e4m3 =
+        target_ty.is_float8_e4m3() || target_ty.is_float8_e4m3fn();
+    std::string type_suffix = target_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2";
+    // Use __tl_cvt_half2_to_fp8x2 for vectorized conversion (half2 -> fp8x2)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__tl_cvt_half2_to_fp8x2", "half2",
+                          "__nv_fp8x2_storage_t", ", " + type_suffix, false,
+                          true);
+      return;
+    }
+  }
+
+  // Handle conversion from bfloat16 to float8 (E4M3/E5M2)
+  if (from_ty.is_bfloat16() && tl::IsCudaVectorizableFP8(target_ty)) {
+    bool target_type_is_e4m3 =
+        target_ty.is_float8_e4m3() || target_ty.is_float8_e4m3fn();
+    std::string type_suffix = target_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2";
+    // Use __tl_cvt_bfloat162_to_fp8x2 for vectorized conversion (bfloat162 ->
+    // fp8x2)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__tl_cvt_bfloat162_to_fp8x2", "__nv_bfloat162",
+                          "__nv_fp8x2_storage_t", ", " + type_suffix, true,
+                          true);
+      return;
+    }
+  }
+
   // Handle conversion from float8 (E4M3/E5M2) to float32
   if (tl::IsCudaVectorizableFP8(from_ty) && target_ty.is_float() &&
       target_ty.bits() == 32) {
@@ -1699,6 +1730,33 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     if (lanes == 2 || lanes == 4 || lanes == 8) {
       PrintVectorizedCast("__tl_cvt_fp8x2_to_float2", "__nv_fp8x2_storage_t",
                           "float2", ", " + type_suffix, true, false);
+      return;
+    }
+  }
+
+  // Handle conversion from float8 (E4M3/E5M2) to float16
+  if (tl::IsCudaVectorizableFP8(from_ty) && target_ty.is_float16()) {
+    bool from_type_is_e4m3 =
+        from_ty.is_float8_e4m3() || from_ty.is_float8_e4m3fn();
+    std::string type_suffix = from_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2";
+    // Use __tl_cvt_fp8x2_to_half2 for vectorized conversion (fp8x2 -> half2)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__tl_cvt_fp8x2_to_half2", "__nv_fp8x2_storage_t",
+                          "half2", ", " + type_suffix, true, false);
+      return;
+    }
+  }
+
+  // Handle conversion from float8 (E4M3/E5M2) to bfloat16
+  if (tl::IsCudaVectorizableFP8(from_ty) && target_ty.is_bfloat16()) {
+    bool from_type_is_e4m3 =
+        from_ty.is_float8_e4m3() || from_ty.is_float8_e4m3fn();
+    // PTX cvt encodes the fp8 type in the mnemonic, so pick the helper by name.
+    std::string cast_func = from_type_is_e4m3 ? "__tl_cvt_e4m3x2_to_bfloat162"
+                                              : "__tl_cvt_e5m2x2_to_bfloat162";
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast(cast_func, "__nv_fp8x2_storage_t", "__nv_bfloat162",
+                          "", true, false);
       return;
     }
   }
@@ -1896,13 +1954,22 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
                << " (only f32 -> fp8/fp4 supported)";
   }
 
-  // Fallback: elementwise cast
+  // Fallback: elementwise cast.
+  // fp16<->bf16 elements load as native __half/__nv_bfloat16, where a direct
+  // `(half_t)(__nv_bfloat16)` (or reverse) is an ambiguous conversion; route
+  // through float to disambiguate.
+  bool cross_half = (from_ty.is_float16() && target_ty.is_bfloat16()) ||
+                    (from_ty.is_bfloat16() && target_ty.is_float16());
   for (int i = 0, lanes = from_ty.lanes(); i < lanes; ++i) {
     std::ostringstream val;
     val << "(";
     PrintType(target_ty.element_of(), val);
     val << ")(";
+    if (cross_half)
+      val << "(float)(";
     PrintVecElemLoad(src, from_ty, i, val);
+    if (cross_half)
+      val << ")";
     val << ")";
     PrintVecElemStore(sret, target_ty, i, val.str());
   }
@@ -2228,6 +2295,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << name << "(";
     this->stream << ss.str();
     this->stream << ");\n";
+  };
+  auto print_extern_call_expr = [&](std::ostream &os, std::string name,
+                                    size_t start = 0, size_t end = 0) {
+    os << name << "(";
+    for (size_t i = start; i < op->args.size() - end; i++) {
+      if (i > start)
+        os << ", ";
+      os << this->PrintExpr(op->args[i]);
+    }
+    os << ")";
   };
   if (op->op.same_as(tl::max_nan()) || op->op.same_as(tl::min_nan())) {
     ICHECK_EQ(op->args.size(), 2);
@@ -2561,10 +2638,17 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::ptx_stmatrix())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
-    std::string func_name = "tl::ptx_stmatrix_x" + std::to_string(num);
+    std::string shape = "m8n8";
+    bool is_shape_encoded =
+        op->args.size() >= 4 && op->args.back().as<StringImmNode>();
+    if (is_shape_encoded) {
+      shape = Downcast<StringImm>(op->args.back())->value;
+    }
+    std::string func_name =
+        "tl::ptx_stmatrix_" + shape + "_x" + std::to_string(num);
     if (trans == 1)
       func_name += "_trans";
-    print_extern_call_stmt(func_name, 2);
+    print_extern_call_stmt(func_name, 2, is_shape_encoded ? 1 : 0);
   } else if (op->op.same_as(tl::fence_proxy_async())) {
     print_extern_call_stmt("tl::fence_proxy_async");
   } else if (op->op.same_as(tl::tma_store_arrive())) {
@@ -2618,6 +2702,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::pack_b16())) {
     os << "__pack_half2(" << this->PrintExpr(op->args[0]) << ", "
        << this->PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::pack_b8x4())) {
+    print_extern_call_expr(os, "tl::pack_b8x4");
   } else if (op->op.same_as(tl::sync_grid())) {
     this->need_cooperative_groups_ = true;
     this->PrintIndent();
@@ -4067,6 +4153,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         barrier_name_ + "[" + std::to_string(barrier_id) + "]";
     this->stream << PrintCpAsyncBulkAsm(dst, dst_offset, src, src_offset, size,
                                         barrier);
+  } else if (op->op.same_as(tl::ptx_st_bulk_shared())) {
+    need_cast_smem_ptr_to_int_ = true;
+    std::string smem = this->PrintExpr(op->args[0]);
+    int64_t bytes = Downcast<IntImm>(op->args[1])->value;
+    int64_t init_val = Downcast<IntImm>(op->args[2])->value;
+    this->stream << "tl::st_bulk_shared<" << bytes << ", " << init_val
+                 << ">((void*)(" << smem << "));\n";
   } else if (op->op.same_as(builtin::ptx_commit_group())) {
     this->stream << "__asm__ __volatile__(\"cp.async.commit_group;\");\n\n";
   } else if (op->op.same_as(builtin::ptx_wait_group())) {

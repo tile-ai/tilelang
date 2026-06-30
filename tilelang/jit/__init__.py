@@ -38,7 +38,7 @@ _P = ParamSpec("_P")
 _KP = ParamSpec("_KP")
 _T = TypeVar("_T")
 _Ret = TypeVar("_Ret")
-TargetLike = str | Target
+TargetLike = str | dict[str, object] | Target
 _CallFormKey = tuple[tuple[Any, ...], tuple[tuple[str, Any], ...]]
 _CALL_FORM_CACHE_MISS = object()
 
@@ -110,10 +110,11 @@ def compile(
     execution_backend : Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"], optional
         Execution backend to use for kernel execution. If None, reads from
         TILELANG_EXECUTION_BACKEND environment variable (defaults to "auto").
-    target : str or tvm.target.Target, optional
-        Compilation target. If None, reads from TILELANG_TARGET environment
-        variable (defaults to "auto").
-    target_host : str or tvm.target.Target, optional
+    target : str, dict, or tvm.target.Target, optional
+        Compilation target. If None, reads from TILELANG_DEFAULT_TARGET environment
+        variable (defaults to "auto"). Use a dict for target attributes, for example
+        {"kind": "cuda", "arch": "sm_90"}.
+    target_host : str, dict, or tvm.target.Target, optional
         Target host for cross-compilation (default: None).
     verbose : bool, optional
         Whether to enable verbose output. If None, reads from
@@ -124,8 +125,9 @@ def compile(
 
     Environment Variables
     ---------------------
-    TILELANG_TARGET : str
-        Default compilation target (e.g., "cuda", "llvm"). Defaults to "auto".
+    TILELANG_DEFAULT_TARGET : str
+        Default compilation target (e.g., "cuda", "llvm", or a dict-like target config string).
+        Defaults to "auto".
     TILELANG_EXECUTION_BACKEND : str
         Default execution backend. Defaults to "auto".
     TILELANG_VERBOSE : str
@@ -192,10 +194,11 @@ def par_compile(
     execution_backend : Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"], optional
         Execution backend to use for kernel execution. If None, reads from
         TILELANG_EXECUTION_BACKEND environment variable (defaults to "auto").
-    target : str or tvm.target.Target, optional
-        Compilation target. If None, reads from TILELANG_TARGET environment
-        variable (defaults to "auto").
-    target_host : str or tvm.target.Target, optional
+    target : str, dict, or tvm.target.Target, optional
+        Compilation target. If None, reads from TILELANG_DEFAULT_TARGET environment
+        variable (defaults to "auto"). Use a dict for target attributes, for example
+        {"kind": "cuda", "arch": "sm_90"}.
+    target_host : str, dict, or tvm.target.Target, optional
         Target host for cross-compilation (default: None).
     verbose : bool, optional
         Whether to enable verbose output. If None, reads from
@@ -206,8 +209,9 @@ def par_compile(
 
     Environment Variables
     ---------------------
-    TILELANG_TARGET : str
-        Default compilation target (e.g., "cuda", "llvm"). Defaults to "auto".
+    TILELANG_DEFAULT_TARGET : str
+        Default compilation target (e.g., "cuda", "llvm", or a dict-like target config string).
+        Defaults to "auto".
     TILELANG_EXECUTION_BACKEND : str
         Default execution backend. Defaults to "auto".
     TILELANG_VERBOSE : str
@@ -476,20 +480,6 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         key = (key_args_tuple, key_kwargs_tuple, tuned_key_kwargs_tuple)
         return key
 
-    def _frontend_cache_key_data(self, key: tuple) -> dict[str, Any]:
-        func_name = getattr(getattr(self.func, "orig_func", self.func), "__name__", "jit_kernel")
-        func_qualname = getattr(getattr(self.func, "orig_func", self.func), "__qualname__", func_name)
-        func_module = getattr(getattr(self.func, "orig_func", self.func), "__module__", None)
-        return {
-            "function": func_name,
-            "qualname": func_qualname,
-            "module": func_module,
-            "source": self.func_source,
-            "signature": str(self.signature),
-            "key": repr(key),
-            "mode": self.mode,
-        }
-
     def get_kernel_source(self, *args: _P.args, **kwargs: _P.kwargs) -> str:
         kernel = self.compile(*args, **kwargs)
         return kernel.get_kernel_source()
@@ -536,42 +526,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         key, kernel_args = self.func.parse_args(*args, **kwargs)
         kernel = self._kernel_cache.get(key, None)
         if kernel is None:
-            frontend_key_data = None
-            # Frontend cache is only safe when lazy-mode parse_args leaves no
-            # runtime kernel_args; then _frontend_cache_key_data fully identifies
-            # the compiled kernel, assuming compile-time values have stable reprs.
-            if self.is_lazy_mode() and not kernel_args:
-                frontend_key_data = self._frontend_cache_key_data(key)
-                from tilelang.cache import load_frontend_cached
-
-                kernel = load_frontend_cached(
-                    frontend_key_data,
-                    out_idx=self.out_idx,
-                    execution_backend=self.execution_backend,
-                    target=self.target,
-                    target_host=self.target_host,
-                    verbose=self.verbose,
-                    pass_configs=self.pass_configs,
-                    compile_flags=self.compile_flags,
-                )
-            if kernel is None:
-                kernel = self.compile(*args, **kwargs)
-                if frontend_key_data is not None:
-                    kernel_key = getattr(kernel, "_tilelang_cache_key", None)
-                    if kernel_key:
-                        from tilelang.cache import store_frontend_cache
-
-                        store_frontend_cache(
-                            frontend_key_data,
-                            kernel_key,
-                            out_idx=self.out_idx,
-                            execution_backend=self.execution_backend,
-                            target=self.target,
-                            target_host=self.target_host,
-                            verbose=self.verbose,
-                            pass_configs=self.pass_configs,
-                            compile_flags=self.compile_flags,
-                        )
+            kernel = self.compile(*args, **kwargs)
             self._kernel_cache[key] = kernel
 
         if call_form_key is not None and self.is_lazy_mode() and not kernel_args:

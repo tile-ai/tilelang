@@ -47,11 +47,6 @@ struct Gemm {
     (void)gemm_inst;
     return false;
   }
-
-  static String InstructionKind(String gemm_inst) {
-    (void)gemm_inst;
-    return "scalar";
-  }
 };
 
 } // namespace cpu
@@ -67,7 +62,6 @@ bool RegisterCPUGemm() {
       cpu::Gemm::SelectInst,
       cpu::Gemm::ComputeWarpPartition,
       cpu::Gemm::ReuseExistingSharedLayout,
-      cpu::Gemm::InstructionKind,
   });
   return true;
 }

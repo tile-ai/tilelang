@@ -85,6 +85,14 @@ static constexpr const char *kDebugMergeSharedMemoryAllocations =
 // PrimFunc attribute: set by LowerTileOp to indicate TMA operations were
 // actually generated.  Read by OptimizeForTarget to pick the right pipeline.
 static constexpr const char *kHasTMA = "tl.has_tma";
+// PrimFunc attribute: Map<String, IntImm> from a shared buffer's data Var
+// name to the minimum base alignment (bytes) required by swizzle-sensitive
+// instructions that consume it (TMA bulk copy, wgmma/tcgen05 descriptors).
+// Keyed by name rather than Var so the attribute does not hold references
+// into the function body (which would perturb printing and SSA passes); a
+// name collision can only over-align, never under-align. Written by
+// LowerTileOp, consumed by MergeSharedMemoryAllocations.
+static constexpr const char *kSmemAlignmentMap = "tl.smem_alignment_map";
 static constexpr const char *kDisableSafeMemoryLegalize =
     "tl.disable_safe_memory_legalize";
 static constexpr const char *kDisableWarpSpecialized =
@@ -101,8 +109,6 @@ static constexpr const char *kDisableFastMath = "tl.disable_fast_math";
 static constexpr const char *kEnableFastMath = "tl.enable_fast_math";
 static constexpr const char *kPtxasRegisterUsageLevel =
     "tl.ptxas_register_usage_level";
-static constexpr const char *kEnablePTXASVerboseOutput =
-    "tl.enable_ptxas_verbose_output";
 static constexpr const char *kDisableVectorize256 = "tl.disable_vectorize_256";
 static constexpr const char *kEnableAsyncCopy = "tl.enable_async_copy";
 static constexpr const char *kEnableVectorizePlannerVerbose =
@@ -195,10 +201,10 @@ static constexpr const char *kDumpIRDir = "tl.dump_ir_path";
 /*!
  * \brief Get the type of the CUDA tensor map
  *
- * DataType cuTensorMapType()
+ * DataType CuTensorMapType()
  *
  */
-DataType cuTensorMapType();
+DataType CuTensorMapType();
 
 /*!
  * \brief TileLang intrinsic for carrying pointer access metadata in frontend.
@@ -566,12 +572,28 @@ TVM_DLL const Op &ptx_cp_async_barrier_noinc();
 TVM_DLL const Op &ptx_cp_async();
 
 /*!
+ * \brief TileLang intrinsic for zeroing shared memory with st.bulk.
+ *
+ * ptx_st_bulk_shared(smem_data, bytes, init_val)
+ *
+ */
+TVM_DLL const Op &ptx_st_bulk_shared();
+
+/*!
  * \brief Pack two b16 value into a b32 value
  *
  * int32 pack_b16(b16_value, b16_value)
  *
  */
 TVM_DLL const Op &pack_b16();
+
+/*!
+ * \brief Pack four b8 value into a b32 value
+ *
+ * int32 pack_b8x4(b8_value, b8_value, b8_value, b8_value)
+ *
+ */
+TVM_DLL const Op &pack_b8x4();
 
 /*!
  * \brief Issue a shared memory fence for async operations

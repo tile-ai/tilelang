@@ -7,7 +7,7 @@
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
 
-#include "backend/common/target_utils.h"
+#include "cuda/target_utils.h"
 #include "op/builtin.h"
 #include "op/tcgen5_meta.h"
 #include "op/utils.h"
@@ -87,7 +87,7 @@ bool AllowTcgen5Mma(const GemmNode &op, Target target) {
 bool AllowWgmma(const GemmNode &op, int block_size, Target target) {
   tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
 
-  int warp_size = TargetGetWarpSize(target);
+  int warp_size = TargetCudaGetWarpSize(target);
   int num_warps = block_size / warp_size;
   return !ctxt->GetConfig(kDisableWGMMA, Optional<Bool>()).value_or(false) &&
          TargetIsHopper(target) && op.m_ >= 64 && num_warps % 4 == 0 &&
@@ -125,7 +125,7 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
   ICHECK(N % k_n_per_warp == 0)
       << "N must be divisible by " << k_n_per_warp << ", but got " << N;
 
-  if (policy.isFullRow()) {
+  if (policy.IsFullRow()) {
     m_warp = num_warps;
     n_warp = 1;
     if (M % (m_warp * kMPerWarp) != 0) {
@@ -135,7 +135,7 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
       if (n_warp == 0)
         n_warp = 1;
     }
-  } else if (policy.isFullCol()) {
+  } else if (policy.IsFullCol()) {
     m_warp = 1;
     n_warp = num_warps;
     if (N % (n_warp * k_n_per_warp) != 0) {
@@ -145,7 +145,7 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
       if (m_warp == 0)
         m_warp = 1;
     }
-  } else if (policy.isSquare()) {
+  } else if (policy.IsSquare()) {
     int max_m_warps = M / kMPerWarp;
     float ideal_ratio = N > 0 ? static_cast<float>(M) / N : 1.0f;
 
@@ -201,7 +201,7 @@ std::pair<int, int> ComputeWgmmaWarpPartition(const GemmWarpPolicyNode &policy,
   m_warp = kGroup;
   n_warp = num_warps / m_warp;
 
-  if (policy.isFullRow()) {
+  if (policy.IsFullRow()) {
     for (int cand = num_warps; cand >= kGroup; cand -= kGroup) {
       if (M % (cand * kMPerWarp) == 0) {
         m_warp = cand;
@@ -209,7 +209,7 @@ std::pair<int, int> ComputeWgmmaWarpPartition(const GemmWarpPolicyNode &policy,
         break;
       }
     }
-  } else if (policy.isFullCol()) {
+  } else if (policy.IsFullCol()) {
     int cand_n = n_warp;
     if (N % (cand_n * kNPerWarp) != 0) {
       int max_n = N / kNPerWarp;
@@ -221,7 +221,7 @@ std::pair<int, int> ComputeWgmmaWarpPartition(const GemmWarpPolicyNode &policy,
         }
       }
     }
-  } else if (policy.isSquare()) {
+  } else if (policy.IsSquare()) {
     int max_m = M / kMPerWarp;
     int max_n = N / kNPerWarp;
 
@@ -289,7 +289,7 @@ struct Gemm {
   static std::pair<int, int>
   ComputeWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
                        int block_size, Target target, String gemm_inst) {
-    int num_warps = block_size / TargetGetWarpSize(target);
+    int num_warps = block_size / TargetCudaGetWarpSize(target);
     if (gemm_inst == kCudaTCGEN05) {
       policy.m_warp = 1;
       policy.n_warp = num_warps;
@@ -304,19 +304,6 @@ struct Gemm {
 
   static bool ReuseExistingSharedLayout(String gemm_inst) {
     return gemm_inst == kCudaMMA;
-  }
-
-  static String InstructionKind(String gemm_inst) {
-    if (gemm_inst == kCudaWGMMA) {
-      return "wgmma";
-    }
-    if (gemm_inst == kCudaTCGEN05) {
-      return "tcgen5mma";
-    }
-    if (gemm_inst == kCudaMMA) {
-      return "mma";
-    }
-    return "unknown";
   }
 };
 
@@ -335,7 +322,6 @@ bool RegisterCudaGemm() {
       cuda::Gemm::SelectInst,
       cuda::Gemm::ComputeWarpPartition,
       cuda::Gemm::ReuseExistingSharedLayout,
-      cuda::Gemm::InstructionKind,
   });
   return true;
 }

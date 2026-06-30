@@ -38,6 +38,7 @@ KERNEL_LIB_PATH = "kernel_lib.so"
 KERNEL_CUBIN_PATH = "kernel.cubin"
 KERNEL_PY_PATH = "kernel.py"
 PARAMS_PATH = "params.pkl"
+TargetLike = str | dict[str, object] | Target
 
 
 @dataclass(frozen=True)
@@ -46,7 +47,7 @@ class CompileArgs:
     Attributes:
         out_idx: List of output tensor indices.
         execution_backend: Execution backend to use for kernel execution (default: "auto").
-        target: Compilation target, either as a string or a TVM Target object (default: "auto").
+        target: Compilation target, either as a string, config dict, or a TVM Target object (default: "auto").
         target_host: Target host for cross-compilation (default: None).
         verbose: Whether to enable verbose output (default: False).
         pass_configs: Additional keyword arguments to pass to the Compiler PassContext.
@@ -55,8 +56,8 @@ class CompileArgs:
 
     out_idx: list[int] | int | None = None
     execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch"] = "auto"
-    target: Literal["auto", "cuda", "hip"] = "auto"
-    target_host: str | Target = None
+    target: TargetLike = "auto"
+    target_host: TargetLike | None = None
     verbose: bool = False
     pass_configs: dict[str, Any] | None = None
 
@@ -249,7 +250,7 @@ class AutotuneResult:
                     logger.debug(f"Copying kernel library to file: {kernel_lib_path}")
                 self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
             else:
-                executable = kernel.adapter.executable
+                executable = kernel.adapter.get_exportable_executable()
                 if verbose:
                     logger.debug(f"Saving kernel executable to file: {kernel_lib_path}")
                 self._safe_write_executable(executable, kernel_lib_path)
@@ -293,8 +294,8 @@ class AutotuneResult:
     def _load_kernel_from_disk(
         self,
         cache_path: Path,
-        target: str | Target = "auto",
-        target_host: str | Target = None,
+        target: TargetLike = "auto",
+        target_host: TargetLike | None = None,
         out_idx: list[int] | int | None = None,
         execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi",
         pass_configs: dict = None,
@@ -307,8 +308,8 @@ class AutotuneResult:
 
         Args:
             key (str): The hash key identifying the kernel.
-            target (Union[str, Target]): Compilation target platform. Defaults to "auto".
-            target_host (Union[str, Target], optional): Host target platform.
+            target (Union[str, dict, Target]): Compilation target platform. Defaults to "auto".
+            target_host (Union[str, dict, Target], optional): Host target platform.
             out_idx (List[int], optional): Indices specifying which outputs to return.
             execution_backend (Literal): Backend type for execution. Defaults to "cython".
             pass_configs (dict, optional): Configuration for compiler passes.

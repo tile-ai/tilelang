@@ -39,6 +39,8 @@ from tilelang.autotuner.capture import get_autotune_inputs
 from tilelang.backend.target import determine_target
 from tilelang import __version__
 
+TargetLike = str | dict[str, object] | Target
+
 
 class TimeoutException(Exception):
     pass
@@ -275,9 +277,9 @@ class AutoTuner:
     def set_compile_args(
         self,
         out_idx: list[int] | int | None = None,
-        target: Literal["auto", "cuda", "hip", "metal"] | None = None,
+        target: TargetLike | None = None,
         execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch"] | None = None,
-        target_host: str | Target | None = None,
+        target_host: TargetLike | None = None,
         verbose: bool | None = None,
         pass_configs: dict[str, Any] | None = None,
     ):
@@ -285,7 +287,9 @@ class AutoTuner:
 
         Args:
             out_idx: List of output tensor indices.
-            target: Target platform. If None, reads from TILELANG_TARGET environment variable (defaults to "auto").
+            target: Target platform. If None, reads from TILELANG_DEFAULT_TARGET environment variable
+                (defaults to "auto"). Use a dict for target attributes, for example
+                {"kind": "cuda", "arch": "sm_90"}.
             execution_backend: Execution backend to use for kernel execution. If None, reads from
                 TILELANG_EXECUTION_BACKEND environment variable (defaults to "auto").
             target_host: Target host for cross-compilation.
@@ -294,7 +298,8 @@ class AutoTuner:
             pass_configs: Additional keyword arguments to pass to the Compiler PassContext.
 
         Environment Variables:
-            TILELANG_TARGET: Default compilation target (e.g., "cuda", "llvm"). Defaults to "auto".
+            TILELANG_DEFAULT_TARGET: Default compilation target (e.g., "cuda", "llvm", or a dict-like
+                target config string). Defaults to "auto".
             TILELANG_EXECUTION_BACKEND: Default execution backend. Defaults to "auto".
             TILELANG_VERBOSE: Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
 
@@ -622,6 +627,26 @@ class AutoTuner:
                 logger.warning("Failed to bind benchmark worker to cuda:%s", worker_device)
                 logger.debug("Error: %s", traceback.format_exc())
 
+        benchmark_device = worker_device if torch.cuda.is_available() and target_kind == "cuda" else None
+
+        def _call_benchmark_target(
+            jit_kernel: tilelang.JITKernel,
+            benchmark_state: _BenchmarkWorkerState,
+        ) -> tuple[float, float | None]:
+            # Timeout mode runs benchmark_target in a fresh daemon thread, so
+            # scope the device at the actual call site.
+            def invoke():
+                return benchmark_target(
+                    jit_kernel=jit_kernel,
+                    benchmark_state=benchmark_state,
+                    benchmark_device=benchmark_device,
+                )
+
+            if benchmark_device is None:
+                return invoke()
+            with torch.cuda.device(benchmark_device):
+                return invoke()
+
         start_event.wait()
         queue_poll_timeout_s = 0.1
         while True:
@@ -647,10 +672,7 @@ class AutoTuner:
                         _call_result_queue: queue.Queue = call_result_queue,
                     ):
                         try:
-                            latency, worker_ref_latency = benchmark_target(
-                                jit_kernel=_jit_kernel,
-                                benchmark_state=_worker_state,
-                            )
+                            latency, worker_ref_latency = _call_benchmark_target(_jit_kernel, _worker_state)
                             _call_result_queue.put(("ok", latency, worker_ref_latency, ""))
                         except TimeoutException:
                             _call_result_queue.put(("timeout", None, None, ""))
@@ -690,10 +712,7 @@ class AutoTuner:
                     else:
                         result_queue.put((idx, config, jit_kernel, None, None, "error", error_text))
                 else:
-                    latency, worker_ref_latency = benchmark_target(
-                        jit_kernel=jit_kernel,
-                        benchmark_state=worker_state,
-                    )
+                    latency, worker_ref_latency = _call_benchmark_target(jit_kernel, worker_state)
                     result_queue.put((idx, config, jit_kernel, latency, worker_ref_latency, None, ""))
             except TimeoutException:
                 result_queue.put((idx, config, jit_kernel, None, None, "timeout", ""))
@@ -706,6 +725,7 @@ class AutoTuner:
         warmup: int,
         rep: int,
         benchmark_state: _BenchmarkWorkerState,
+        benchmark_device: int | torch.device | None = None,
     ) -> tuple[float, float | None]:
         profile_args = self.profile_args
         supply_type = profile_args.supply_type
@@ -785,6 +805,7 @@ class AutoTuner:
                 n_repeat=rep,
                 input_tensors=ref_input_tensors_cache,
                 backend=backend,
+                device=benchmark_device,
             )
 
         benchmark_state.jit_input_tensors = jit_input_tensors_cache
@@ -1051,7 +1072,7 @@ class AutoTuner:
 
         def _enqueue_benchmark_task(jit_kernel: tilelang.JITKernel, config: dict[str, Any], idx: int):
             nonlocal benchmark_expected_results
-            queue_idx = idx % len(benchmark_task_queues)
+            queue_idx = min(len(benchmark_task_queues) - 1, idx * len(benchmark_task_queues) // max(1, len(config_args)))
             benchmark_task_queues[queue_idx].put((jit_kernel, config, idx))
             benchmark_expected_results += 1
 
@@ -1374,9 +1395,9 @@ def autotune(  # This is the new public interface
     rep : int, optional
         Number of repetitions for timing measurements.
     timeout : int, optional
-    target : Union[str, Target], optional
+    target : Union[str, dict, Target], optional
         Compilation target for TVM (e.g., "cuda", "llvm"). Defaults to "auto".
-    target_host : Union[str, Target], optional
+    target_host : Union[str, dict, Target], optional
         Target host for cross-compilation. Defaults to None.
     execution_backend : Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch"], optional
         Backend for kernel execution and argument passing. Use "auto" to pick a sensible

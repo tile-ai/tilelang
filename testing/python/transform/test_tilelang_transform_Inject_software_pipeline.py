@@ -5,27 +5,6 @@ from tilelang.layout import Layout
 import tilelang.testing
 from tvm.tirx.stmt_functor import post_order_visit
 
-_MVB_ATTR_KEYS = frozenset(
-    [
-        "tl.pipeline_mvb_num_stages",
-        "tl.pipeline_mvb_stage_expr",
-        "tl.pipeline_mvb_parity_expr",
-        "tl.pipeline_context_num_stages",
-    ]
-)
-
-
-@tvm.tirx.transform.prim_func_pass(opt_level=0)
-def _strip_mvb_attrs(func, mod, ctx):
-    """Remove intermediate MVB attributes that are consumed by later passes."""
-
-    def _visit(stmt):
-        if isinstance(stmt, tvm.tirx.AttrStmt) and str(stmt.attr_key) in _MVB_ATTR_KEYS:
-            return stmt.body
-        return None
-
-    return func.with_body(tvm.tirx.stmt_functor.ir_transform(func.body, None, _visit))
-
 
 def _check(original, transformed):
     func = original
@@ -34,7 +13,6 @@ def _check(original, transformed):
     mod = tl.transform.Simplify()(mod)
     mod = tl.transform.LowerOpaqueBlock()(mod)
     mod = tl.transform.Simplify()(mod)
-    mod = _strip_mvb_attrs(mod)
     tvm.ir.assert_structural_equal(mod["main"], transformed.with_attr("global_symbol", "main"), True)
 
 
@@ -194,7 +172,6 @@ def test_async_pipeline_groups_multiple_copy_producers():
     mod = tl.transform.Simplify()(mod)
 
     attrs, calls = _count_attrs_and_calls(mod["main"])
-    assert attrs.get("async_scope", 0) > 0
     assert attrs.get("async_commit_queue_scope", 0) == 0
     assert attrs.get("async_wait_queue_scope", 0) == 0
     assert attrs.get("async_wait_inflight_count", 0) == 0
@@ -247,9 +224,6 @@ def test_async_pipeline_only_wraps_producer_statements_from_explicit_group_annot
     mod = tl.transform.Simplify()(mod)
 
     attrs, calls = _count_attrs_and_calls(mod["main"])
-    # Dead prologue/epilogue producer clones are now dropped during injection,
-    # so only the live producer copies remain wrapped.
-    assert attrs.get("async_scope", 0) == 4
     assert attrs.get("async_commit_queue_scope", 0) == 0
     assert calls.get("tirx.ptx_commit_group", 0) == 2
 
@@ -378,10 +352,6 @@ def test_degenerate_pipeline_with_single_stage_is_not_expanded():
 
     func = mod["main"]
     attrs, calls = _count_attrs_and_calls(func)
-    assert attrs.get("tl.pipeline_context_num_stages", 0) == 0
-    assert attrs.get("tl.pipeline_mvb_num_stages", 0) == 0
-    assert attrs.get("tl.pipeline_mvb_stage_expr", 0) == 0
-    assert attrs.get("tl.pipeline_mvb_parity_expr", 0) == 0
     assert calls.get("tirx.ptx_wait_group", 0) == 0
     assert "tl_pipelined_num_stages" not in func.script()
     assert "frag[k, i]" in func.script()

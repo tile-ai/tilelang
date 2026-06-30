@@ -33,6 +33,19 @@ class _FakeProcess:
         self.killed = True
 
 
+class _SuccessfulNvccProcess:
+    returncode = 0
+
+    def __init__(self, cmd):
+        self.cmd = cmd
+
+    def communicate(self, timeout=None):
+        output_path = self.cmd[self.cmd.index("-o") + 1]
+        with open(output_path, "wb") as output_file:
+            output_file.write(b"fake-cuda-binary")
+        return b"", None
+
+
 class _HangingProcess:
     returncode = 0
 
@@ -122,7 +135,75 @@ def test_nvcc_compile_cuda_honors_tilelang_timeout(monkeypatch):
     assert fake_proc.killed
     assert "timed out after 0.25 seconds" in message
     assert "Command:" in message
+    assert "-arch=sm_120" in message
+    assert "-gencode" not in message
     assert "Source:" in message
+
+
+def test_nvcc_target_code_list_parser():
+    from tilelang.contrib.nvcc import get_target_code_list
+
+    assert get_target_code_list(None) == []
+    assert get_target_code_list(["sm_100a"]) == ["sm_100a"]
+    assert get_target_code_list(["sm_100a", "sm_103a"]) == ["sm_100a", "sm_103a"]
+    with pytest.raises(ValueError, match="CUDA target code"):
+        get_target_code_list("sm_100a")
+    with pytest.raises(ValueError, match="CUDA target code"):
+        get_target_code_list([])
+    with pytest.raises(ValueError, match="CUDA target code"):
+        get_target_code_list(["sm100a+103a"])
+    with pytest.raises(ValueError, match="CUDA target code"):
+        get_target_code_list(["sm_100a", ""])
+    with pytest.raises(ValueError, match="CUDA target code"):
+        get_target_code_list(["compute_100f"])
+
+
+def test_nvcc_compile_cuda_honors_target_code(monkeypatch):
+    from tilelang.backend.target import determine_target
+    from tilelang.contrib import nvcc
+
+    captured = {}
+
+    def fake_popen(cmd, *args, **kwargs):
+        captured["cmd"] = cmd
+        return _SuccessfulNvccProcess(cmd)
+
+    monkeypatch.setattr(nvcc.env, "TILELANG_CLEANUP_TEMP_FILES", "0")
+    monkeypatch.setattr(nvcc, "get_nvcc_compiler", lambda: "nvcc")
+    monkeypatch.setattr(nvcc, "get_nvcc_subprocess_env", lambda: None)
+    monkeypatch.setattr(nvcc.subprocess, "Popen", fake_popen)
+
+    target = determine_target({"kind": "cuda", "arch": "sm_100f", "code": ["sm_100a", "sm_103a"]}, return_object=True)
+    with target, pytest.warns(RuntimeWarning, match="using '--fatbin' instead"):
+        nvcc.compile_cuda("__global__ void kernel() {}", target_format="cubin", verbose=False)
+
+    assert "--fatbin" in captured["cmd"]
+    assert "--cubin" not in captured["cmd"]
+    gencode_index = captured["cmd"].index("-gencode")
+    assert captured["cmd"][gencode_index + 1] == "arch=compute_100f,code=[sm_100a,sm_103a]"
+
+
+def test_cuda_compile_callback_uses_fatbin_for_multiple_target_code(monkeypatch):
+    import importlib
+
+    from tilelang.backend.target import determine_target
+
+    lower = importlib.import_module("tilelang.engine.lower")
+
+    captured = {}
+
+    def fake_compile_cuda(code, target_format, arch, options=None, verbose=False):
+        captured["target_format"] = target_format
+        captured["arch"] = arch
+        return bytearray(b"fake-cuda-binary")
+
+    monkeypatch.setattr(lower.nvcc, "compile_cuda", fake_compile_cuda)
+
+    target = determine_target({"kind": "cuda", "arch": "sm_100f", "code": ["sm_100a", "sm_103a"]}, return_object=True)
+    lower.tilelang_callback_cuda_compile("__global__ void kernel() {}", target)
+
+    assert captured["target_format"] == "fatbin"
+    assert captured["arch"] == ["-gencode", "arch=compute_100f,code=[sm_100a,sm_103a]"]
 
 
 def test_jit_compile_reports_timeout_for_hanging_nvcc(monkeypatch, tmp_path, caplog, capture_tilelang_logs):

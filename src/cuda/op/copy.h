@@ -96,11 +96,6 @@ struct CopyInstSelection {
 CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
                                             const CopyAnalysisContext &ctx);
 
-// Coarse pre-layout classification used by InstructionAnnotation.
-std::string ClassifyCopyForInstructionAnnotation(const CopyNode &op,
-                                                 Target target,
-                                                 bool in_pipeline);
-
 // Pre-layout producer classification used by warp-specialized scheduling.
 CopyInstSelection ClassifyWarpSpecializedProducerCopy(const CopyNode &op,
                                                       Target target);

@@ -34,6 +34,7 @@
 
 #include "backend/common/target_utils.h"
 #include "cuda/op/copy.h"
+#include "layout/cute_layout.h"
 #include "multi_version_buffer_rewriter.h"
 #include "op/builtin.h"
 #include "op/copy.h"
@@ -1536,12 +1537,23 @@ private:
         continue;
       }
       bool all_movable = true;
+      LocalLiveSet movable_probe_live = producer_body_live;
       for (int ci = compute_cursor; ci < wait_pos; ++ci) {
+        const LocalAccessSummary &summary = consumer_compute_summaries[ci];
+        if (consumer_compute_stmts[ci].as<BindNode>()) {
+          if (!movable_probe_live.NeedsAnyDef(summary)) {
+            all_movable = false;
+            break;
+          }
+          movable_probe_live.AddUses(summary);
+          continue;
+        }
         if (!IsProducerMovableLoopPrefixStmt(consumer_compute_stmts[ci],
                                              target_)) {
           all_movable = false;
           break;
         }
+        movable_probe_live.AddUses(summary);
       }
       if (all_movable) {
         std::vector<bool> add_to_producer(consumer_compute_stmts.size(), false);
@@ -2609,15 +2621,14 @@ private:
 /// swizzle modes (32B / 64B / 128B).  Any other layout (e.g. padded,
 /// Volta-style) cannot be used with TMA.
 static bool IsTmaCompatibleLayout(const Layout &layout, const Buffer &buffer) {
-  // Recognised swizzle → TMA with swizzle.
-  if (DetectSwizzleMode(layout, buffer) != SwizzleMode::kNone) {
-    return true;
-  }
-  // Identity / row-major linear → TMA without swizzle.
-  if (StructuralEqual()(layout, makeLinearLayout(buffer->shape))) {
-    return true;
-  }
-  return false;
+  Optional<cute::ComposedLayout> composed =
+      cute::ComposedLayoutFromTileLang(layout);
+  if (!composed.defined())
+    return false;
+  // Recast to byte space (the swizzle atom is defined on byte addresses).
+  cute::ComposedLayout composed_bytes =
+      composed.value().Recast(buffer->dtype.bits(), /*new_bits=*/8);
+  return composed_bytes->swizzle->IsTMACompatible();
 }
 
 class TiledWSCandidate : public StmtExprVisitor {
@@ -2783,9 +2794,6 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
   refl::GlobalDef().def("tl.cuda.transform.ProducerConsumerWarpSpecialized",
                         ProducerConsumerWarpSpecialized);
-  refl::GlobalDef().def(
-      "tl.cuda.transform.ProducerConsumerWarpSpecializedTiled",
-      ProducerConsumerWarpSpecialized);
 }
 
 } // namespace tl

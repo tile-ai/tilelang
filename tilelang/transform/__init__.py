@@ -38,22 +38,6 @@ def PipelinePlanning():
     return _ffi_api.PipelinePlanning()  # type: ignore
 
 
-def InstructionAnnotation():
-    """Annotate tile operations with coarse-grained instruction kind.
-
-    This pass runs before LayoutInference and LowerTileOp.  It adds a
-    ``tl_instruction_kind`` annotation to each tile-op Call node indicating
-    the instruction category ("tma", "cp_async", "sync", "wgmma", etc.)
-    that will be selected during lowering.
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.InstructionAnnotation()  # type: ignore
-
-
 def LayoutInference():
     """LayoutInference
 
@@ -214,6 +198,28 @@ def MakePackedAPI():
     return _ffi_api.MakePackedAPI()  # type: ignore
 
 
+def MaterializeKernelLaunch(lower_thread_binding: bool = True):
+    """Materialize the target-neutral kernel launch nest (thread_binding
+    For loops emitted by T.Kernel) into a backend-specific form. Each
+    backend pipeline decides the mode for itself:
+
+    Parameters
+    ----------
+    lower_thread_binding : bool
+        If True (SIMT backends, e.g. CUDA/ROCm/Metal), lower the
+        blockIdx.*/threadIdx.* loops into thread_extent AttrStmts.
+        If False (backends without SIMT, e.g. CPU), lower blockIdx.*
+        loops into plain serial For loops and ignore threadIdx.* loops
+        (their extents are dropped; the loop vars are pinned to 0).
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.MaterializeKernelLaunch(lower_thread_binding)  # type: ignore
+
+
 def AnnotateDeviceRegions():
     """AnnotateDeviceRegions
 
@@ -260,30 +266,6 @@ def VectorizeLoop(enable_vectorize: bool = True):
         The result pass
     """
     return _ffi_api.VectorizeLoop(enable_vectorize)  # type: ignore
-
-
-def LowerPTXAsyncCopy():
-    """Lower eligible global->shared copies into PTX `cp.async` on CUDA.
-
-    When enabled (pass config `tl.enable_async_copy`, default True), this pass
-    may rewrite plain user-written global->shared `BufferStore` patterns (e.g.
-    SIMT copies in `T.Parallel`) into `tir.ptx_cp_async`, and insert
-    `tir.ptx_commit_group` + `tir.ptx_wait_group(0)` to preserve synchronous
-    semantics for normal stores. If explicit commit/wait intrinsics already
-    exist, the pass avoids duplicating them (and may insert a missing commit
-    immediately before an existing wait to cover injected `cp.async`).
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.LowerPTXAsyncCopy()  # type: ignore
-
-
-def InjectPTXAsyncCopy():
-    """Deprecated alias of `LowerPTXAsyncCopy`."""
-    return LowerPTXAsyncCopy()
 
 
 def ConfigIndexBitwidth():

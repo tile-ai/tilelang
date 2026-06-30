@@ -42,8 +42,9 @@ public:
         .def_ro("batch", &FinalizeReducerOpNode::batch);
   }
 
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
-  LayoutMap InferLayout(const LayoutInferArgs &T,
+  Stmt Lower(const LowerArgs &lower_args,
+             arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
   static const Op &Get();
   TileOperator Clone() const;
@@ -55,7 +56,7 @@ struct FinalizeReducerImpl {
   const char *name;
   FinalizeReducerTargetPredicate match_target;
 
-  Stmt (*lower)(const FinalizeReducerOpNode &op, const LowerArgs &T,
+  Stmt (*lower)(const FinalizeReducerOpNode &op, const LowerArgs &lower_args,
                 arith::Analyzer *analyzer);
 };
 

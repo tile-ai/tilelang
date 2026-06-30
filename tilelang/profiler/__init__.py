@@ -229,6 +229,7 @@ class Profiler:
         quantiles: list[float] | None = None,
         return_mode: Literal["min", "max", "mean", "median"] = "mean",
         dynamic_symbolic_constraints: dict[str, int] | None = None,
+        device: int | torch.device | None = None,
     ) -> float:
         """Benchmarks the execution time of a given function.
 
@@ -243,30 +244,41 @@ class Profiler:
             dynamic_symbolic_constraints: Optional dict mapping dynamic symbolic variable
                 names to concrete int values. Use this when benchmarking kernels with
                 dynamic shapes, e.g., {"m": 2048, "n": 1024}
+            device: Optional CUDA device to benchmark on.
 
         Returns:
             float: Average execution time in milliseconds
         """
-        if func is None:
-            assert self.adapter is not None, "benchmarking function should be provided"
-            func = self.adapter
-        if input_tensors is not None:
-            ins = input_tensors
-        elif dynamic_symbolic_constraints is not None:
-            ins = self._get_inputs(dynamic_symbolic_constraints=dynamic_symbolic_constraints)
-        else:
-            ins = self._get_inputs()
-        bench_func = partial(func, *ins)
-        return do_bench(
-            bench_func,
-            warmup=warmup,
-            rep=rep,
-            _n_warmup=n_warmup,
-            _n_repeat=n_repeat,
-            quantiles=quantiles,
-            backend=backend,
-            return_mode=return_mode,
-        )
+
+        def run_bench():
+            if func is None:
+                assert self.adapter is not None, "benchmarking function should be provided"
+                bench_target = self.adapter
+            else:
+                bench_target = func
+            if input_tensors is not None:
+                ins = input_tensors
+            elif dynamic_symbolic_constraints is not None:
+                ins = self._get_inputs(dynamic_symbolic_constraints=dynamic_symbolic_constraints)
+            else:
+                ins = self._get_inputs()
+            bench_func = partial(bench_target, *ins)
+            return do_bench(
+                bench_func,
+                warmup=warmup,
+                rep=rep,
+                _n_warmup=n_warmup,
+                _n_repeat=n_repeat,
+                quantiles=quantiles,
+                backend=backend,
+                return_mode=return_mode,
+                device=device,
+            )
+
+        if device is None:
+            return run_bench()
+        with torch.cuda.device(device):
+            return run_bench()
 
     @property
     def func(self):

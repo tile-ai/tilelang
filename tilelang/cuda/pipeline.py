@@ -67,6 +67,7 @@ def _module_has_shared_barrier(mod: IRModule) -> bool:
 
 def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     if should_force_let_inline():
         # Force-let inline whenever the pass config requests it.
         mod = tilelang.transform.LetInline()(mod)
@@ -87,10 +88,9 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     # @CUDA-specific
     # Tile-level warp specialization: runs before layout inference so that
     # producer/consumer split happens at the high-level tile-op IR.
-    # The pass classifies copy ops as TMA/cp.async/sync inline (no prior
-    # InstructionAnnotation pass needed). Shared buffers are multi-versioned
-    # internally only for functions where the WS transformation actually
-    # applies.
+    # The pass classifies copy ops as TMA/cp.async/sync inline. Shared buffers
+    # are multi-versioned internally only for functions where the WS
+    # transformation actually applies.
     if allow_warp_specialized(target=target):
         mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
 
@@ -240,8 +240,6 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
 
     mod = tilelang.transform.MergeIfStmt()(mod)
 
-    # @CUDA-specific
-    # NOTE: LowerPTXAsyncCopy is applied earlier (before PipelinePlanning).
     if allow_warp_specialized(pass_ctx=pass_ctx, target=target):
         mod = tilelang.cuda.transform.AnnotateWarpGroupRegAlloc()(mod)
 

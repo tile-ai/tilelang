@@ -7,6 +7,7 @@ import json
 import logging
 import errno
 import os
+import platform
 import shutil
 import threading
 import uuid
@@ -27,7 +28,6 @@ from tilelang.jit.adapter.base import CachedTextSource
 from tilelang.jit.diagnostics import jit_phase
 from tilelang.contrib.hip_resource_info import dump_to_file, load_from_file
 from tilelang import __version__
-import platform
 
 
 class KernelCache:
@@ -50,10 +50,8 @@ class KernelCache:
     host_kernel_path = "host_kernel.cu"
     kernel_lib_path = "kernel_lib.so"
     params_path = "params.pkl"
-    prim_func_path = "prim_func.pkl"
     resource_usage_path = "resource_usage.json"
     cache_root_dir = "kernels"
-    frontend_cache_root_dir = "frontend"
     staging_root_dir = ".staging"
 
     @staticmethod
@@ -126,12 +124,12 @@ class KernelCache:
         return None
 
     @staticmethod
-    @functools.cache
     def _get_base_key() -> dict:
-        base = {"version": __version__, "platform": platform.machine()}
-        lib_stamp = KernelCache._get_tilelang_lib_stamp()
-        if lib_stamp:
-            base["tilelang_lib"] = lib_stamp
+        base = {"version": __version__}
+        if env.should_use_kernel_cache_lib_stamp():
+            lib_stamp = KernelCache._get_tilelang_lib_stamp()
+            if lib_stamp:
+                base["tilelang_lib"] = lib_stamp
         if sys.platform == "darwin":
             import torch
 
@@ -158,8 +156,9 @@ class KernelCache:
     def _get_cache_namespace() -> str:
         base_key = KernelCache._get_base_key()
         version = KernelCache._format_version_namespace(str(base_key.get("version", "unknown")))
-        platform_name = KernelCache._sanitize_path_component(str(base_key.get("platform", "unknown")))
-        return f"{version}-{platform_name}"
+        host_platform = KernelCache._sanitize_path_component(sys.platform)
+        host_machine = KernelCache._sanitize_path_component(platform.machine())
+        return os.path.join(version, f"{host_platform}-{host_machine}")
 
     def __new__(cls):
         """
@@ -185,7 +184,6 @@ class KernelCache:
         os.makedirs(env.TILELANG_TMP_DIR, exist_ok=True)
         os.makedirs(KernelCache._get_namespace_root(), exist_ok=True)
         os.makedirs(KernelCache._get_cache_root(), exist_ok=True)
-        os.makedirs(KernelCache._get_frontend_cache_root(), exist_ok=True)
         os.makedirs(KernelCache._get_staging_root(), exist_ok=True)
 
         staging_root = KernelCache._get_staging_root()
@@ -201,10 +199,6 @@ class KernelCache:
     @staticmethod
     def _get_cache_root() -> str:
         return os.path.join(KernelCache._get_namespace_root(), KernelCache.cache_root_dir)
-
-    @staticmethod
-    def _get_frontend_cache_root() -> str:
-        return os.path.join(KernelCache._get_namespace_root(), KernelCache.frontend_cache_root_dir)
 
     @staticmethod
     def _get_staging_root() -> str:
@@ -253,8 +247,8 @@ class KernelCache:
             out_idx (List[int]): Indices specifying which outputs to return.
             execution_backend (Literal): Backend type for execution. Defaults to "tvm_ffi".
             args: Arguments passed to the function.
-            target (Union[str, Target]): Compilation target platform. Defaults to "auto".
-            target_host (Union[str, Target], optional): Host target platform.
+            target (Union[str, dict, Target]): Compilation target platform. Defaults to "auto".
+            target_host (Union[str, dict, Target], optional): Host target platform.
 
         Returns:
             str: SHA256 hash key for the kernel configuration.
@@ -298,7 +292,8 @@ class KernelCache:
         Args:
             func: Function to be compiled or a prepared PrimFunc
             out_idx: Indices specifying which outputs to return
-            target: Compilation target platform (None = read from TILELANG_TARGET env var)
+            target: Compilation target platform (None = read from TILELANG_DEFAULT_TARGET env var).
+                Use a dict for target attributes, for example {"kind": "cuda", "arch": "sm_90"}.
             target_host: Host target platform
             execution_backend: Execution backend (None = read from TILELANG_EXECUTION_BACKEND)
             verbose: Enable verbose output (None = read from TILELANG_VERBOSE)
@@ -309,8 +304,9 @@ class KernelCache:
 
         Environment Variables
         ---------------------
-        TILELANG_TARGET : str
-            Default compilation target (e.g., "cuda", "llvm"). Defaults to "auto".
+        TILELANG_DEFAULT_TARGET : str
+            Default compilation target (e.g., "cuda", "llvm", or a dict-like target config string).
+            Defaults to "auto".
         TILELANG_EXECUTION_BACKEND : str
             Default execution backend. Defaults to "auto".
         TILELANG_VERBOSE : str
@@ -431,12 +427,6 @@ class KernelCache:
         """
         return os.path.join(self._get_cache_root(), key)
 
-    def _get_frontend_cache_path(self, frontend_key: str) -> str:
-        return os.path.join(
-            self._get_frontend_cache_root(),
-            f"{self._sanitize_path_component(frontend_key)}.json",
-        )
-
     @staticmethod
     def _tag_kernel_cache_entry(kernel: JITKernel, key: str, cache_path: str) -> None:
         try:
@@ -521,19 +511,6 @@ class KernelCache:
                 self.logger.debug(f"Saving kernel parameters to disk: {params_path}")
             KernelCache._safe_write_file(params_path, "wb", lambda file: cloudpickle.dump(kernel.params, file))
 
-            # Save the PrimFunc so frontend cache hits can rebuild the adapter
-            # without re-elaborating the Python DSL in a fresh process. This is
-            # optional for backward compatibility with existing cache entries.
-            if func is not None:
-                prim_func_path = os.path.join(staging_path, self.prim_func_path)
-                if verbose:
-                    self.logger.debug(f"Saving PrimFunc to disk: {prim_func_path}")
-                try:
-                    KernelCache._safe_write_file(prim_func_path, "wb", lambda file: cloudpickle.dump(func, file))
-                except Exception:
-                    if verbose:
-                        self.logger.exception("Error saving optional PrimFunc cache metadata")
-
             # Persist HIP kernel-resource-usage remarks
             usage = getattr(kernel, "_resource_usage", None) or {}
             if usage:
@@ -576,8 +553,8 @@ class KernelCache:
 
         Args:
             key (str): The hash key identifying the kernel.
-            target (Union[str, Target]): Compilation target platform. Defaults to "auto".
-            target_host (Union[str, Target], optional): Host target platform.
+            target (Union[str, dict, Target]): Compilation target platform. Defaults to "auto".
+            target_host (Union[str, dict, Target], optional): Host target platform.
             out_idx (List[int], optional): Indices specifying which outputs to return.
             execution_backend (Literal): Backend type for execution. Defaults to "tvm_ffi".
             pass_configs (dict, optional): Configuration for compiler passes.
@@ -609,28 +586,30 @@ class KernelCache:
         except Exception:
             self.logger.exception("Error loading kernel parameters from disk")
 
-        kernel = self._build_kernel(
-            func=func,
-            host_kernel_source=CachedTextSource(path=host_kernel_path),
-            device_kernel_source=CachedTextSource(path=device_kernel_path),
-            kernel_lib_path=kernel_lib_path,
-            kernel_params=kernel_params,
-            target=target,
-            target_host=target_host,
-            out_idx=out_idx,
-            execution_backend=execution_backend,
-            pass_configs=pass_configs,
-            compile_flags=compile_flags,
-        )
+        try:
+            kernel = self._build_kernel(
+                func=func,
+                host_kernel_source=CachedTextSource(path=host_kernel_path),
+                device_kernel_source=CachedTextSource(path=device_kernel_path),
+                kernel_lib_path=kernel_lib_path,
+                kernel_params=kernel_params,
+                target=target,
+                target_host=target_host,
+                out_idx=out_idx,
+                execution_backend=execution_backend,
+                pass_configs=pass_configs,
+                compile_flags=compile_flags,
+            )
+        except Exception as err:
+            self.logger.warning(
+                "Failed to load kernel from disk cache at %s; treating it as a cache miss: %s",
+                cache_path,
+                err,
+                exc_info=verbose,
+            )
+            shutil.rmtree(cache_path, ignore_errors=True)
+            return None
         if kernel is not None:
-            prim_func_path = os.path.join(cache_path, self.prim_func_path)
-            if func is not None and not os.path.exists(prim_func_path):
-                try:
-                    KernelCache._safe_write_file(prim_func_path, "wb", lambda file: cloudpickle.dump(func, file))
-                except Exception:
-                    if verbose:
-                        self.logger.exception("Error upgrading cache entry with PrimFunc")
-
             # Restore parsed kernel-resource-usage if a previous compile
             # persisted it; absent file is fine (older caches, non-HIP).
             ru_path = os.path.join(cache_path, self.resource_usage_path)
@@ -642,85 +621,6 @@ class KernelCache:
 
             self._tag_kernel_cache_entry(kernel, key, cache_path)
         return kernel
-
-    def load_frontend_cached(
-        self,
-        frontend_key: str,
-        *,
-        target: str | Target = "auto",
-        target_host: str | Target | None = None,
-        out_idx: list[int] | None = None,
-        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi",
-        pass_configs: dict | None = None,
-        compile_flags: list[str] | str | None = None,
-        verbose: bool = False,
-    ) -> JITKernel | None:
-        if not env.is_cache_enabled():
-            return None
-
-        frontend_path = self._get_frontend_cache_path(frontend_key)
-        try:
-            with open(frontend_path, encoding="utf-8") as file:
-                frontend_entry = json.load(file)
-        except OSError:
-            return None
-        except Exception:
-            self.logger.exception("Error loading frontend cache entry")
-            return None
-
-        key = frontend_entry.get("kernel_key")
-        if not isinstance(key, str) or not key:
-            return None
-
-        with self._lock:
-            existing = self._memory_cache.get(key)
-            if existing is not None:
-                return existing
-
-        cache_path = self._get_cache_path(key)
-        prim_func_path = os.path.join(cache_path, self.prim_func_path)
-        try:
-            with open(prim_func_path, "rb") as file:
-                func = cloudpickle.load(file)
-        except OSError:
-            return None
-        except Exception:
-            self.logger.exception("Error loading PrimFunc from frontend cache entry")
-            return None
-
-        kernel = self._load_kernel_from_disk(
-            key,
-            target=target,
-            target_host=target_host,
-            out_idx=out_idx,
-            execution_backend=execution_backend,
-            pass_configs=pass_configs,
-            compile_flags=compile_flags,
-            func=func,
-            verbose=verbose,
-        )
-        if kernel is None:
-            return None
-
-        with self._lock:
-            existing = self._memory_cache.get(key)
-            if existing is not None:
-                return existing
-            self._memory_cache[key] = kernel
-        return kernel
-
-    def store_frontend_cache(self, frontend_key: str, kernel_key: str, *, verbose: bool = False) -> None:
-        if not env.is_cache_enabled():
-            return
-
-        KernelCache._create_dirs()
-        frontend_path = self._get_frontend_cache_path(frontend_key)
-        payload = {"kernel_key": kernel_key}
-        try:
-            KernelCache._safe_write_file(frontend_path, "w", lambda file: json.dump(payload, file, sort_keys=True))
-        except Exception:
-            if verbose:
-                self.logger.exception("Error saving frontend cache entry")
 
     def _clear_disk_cache(self):
         """

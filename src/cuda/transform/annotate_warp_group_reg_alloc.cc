@@ -251,14 +251,87 @@ private:
             (has_explicit_hints || !has_simt_copy)) {
           int final_dec_reg = has_explicit_hints ? dec_reg : 24;
           int final_inc_reg = has_explicit_hints ? inc_reg : 240;
-          dec_reg_stmt =
-              Evaluate(Call(DataType::Handle(), set_max_nreg(),
-                            {IntImm(DataType::Int(32), final_dec_reg),
-                             IntImm(DataType::Int(32), 0)}));
-          inc_reg_stmt =
-              Evaluate(Call(DataType::Handle(), set_max_nreg(),
-                            {IntImm(DataType::Int(32), final_inc_reg),
-                             IntImm(DataType::Int(32), 1)}));
+          bool inject_set_max_nreg = true;
+
+          // The hard-coded 24/240 default pair only fits the canonical
+          // 1-producer + 2-consumer warpgroup layout (<=384 threads):
+          //   128*24 + 256*240 = 64512 max regs/SM.
+          // Wider warp-specialized layouts over-subscribe the register file
+          // and the consumer's setmaxnreg.inc deadlocks. When no explicit
+          // hint is given, derive the producer/consumer split from the
+          // warp-specialization guard and pick a consumer request so that
+          // producer_threads*dec + consumer_threads*inc <= 64512; only a
+          // handful of layouts have a known-good pair, any other layout falls
+          // back to no register reallocation at all.
+          if (!has_explicit_hints) {
+            int producer_threads = -1;
+            int total_threads = -1;
+            if (const auto *lt = if_then_else->condition.as<LTNode>()) {
+              if (const auto *imm = lt->b.as<IntImmNode>()) {
+                producer_threads = static_cast<int>(imm->value);
+              }
+            }
+            if (thread_iv_.defined()) {
+              if (const auto *imm = thread_iv_->dom->extent.as<IntImmNode>()) {
+                total_threads = static_cast<int>(imm->value);
+              }
+            }
+            int producer_wg =
+                producer_threads > 0 ? producer_threads / 128 : -1;
+            int consumer_wg = (total_threads > producer_threads)
+                                  ? (total_threads - producer_threads) / 128
+                                  : -1;
+            if (producer_wg == 1 && consumer_wg <= 2) {
+              // 1P + 1C (128 threads): 128*24 + 128*240 = 32256 <= 64512.
+              // 1P + 2C (384 threads): 128*24 + 256*240 = 64512.
+              // Original pair is good.
+            } else if (producer_wg == 2 && consumer_wg == 2) {
+              // 2P + 2C (512 threads): 256*24 + 256*224 = 63488 <= 64512.
+              final_inc_reg = 224;
+              LOG(WARNING)
+                  << "AnnotateWarpGroupRegAlloc: 2-producer + 2-consumer "
+                     "warp-specialized layout (512 threads) cannot use the "
+                     "default consumer register allocation of 240; lowering "
+                     "to 24/224 to fit the 64512 max regs/SM. This may reduce "
+                     "occupancy/performance — consider an explicit "
+                     "T.annotate_consumer_reg_alloc() hint or a different "
+                     "warpgroup layout.";
+            } else if (producer_wg == 1 && consumer_wg == 3) {
+              // 1P + 3C (512 threads): 128*24 + 384*160 = 64512.
+              final_inc_reg = 160;
+              LOG(WARNING)
+                  << "AnnotateWarpGroupRegAlloc: 1-producer + 3-consumer "
+                     "warp-specialized layout (512 threads) cannot use the "
+                     "default consumer register allocation of 240; lowering "
+                     "to 24/160 to fit the 64512 max regs/SM. This may reduce "
+                     "occupancy/performance — consider an explicit "
+                     "T.annotate_consumer_reg_alloc() hint or a different "
+                     "warpgroup layout.";
+            } else {
+              // Unknown / unsupported layout: skip register reallocation
+              // entirely rather than risk over-subscribing the register file.
+              inject_set_max_nreg = false;
+              LOG(WARNING)
+                  << "AnnotateWarpGroupRegAlloc: unsupported warp-specialized "
+                     "warpgroup layout (producer="
+                  << producer_threads << ", total=" << total_threads
+                  << " threads); skipping setmaxnreg register reallocation to "
+                     "avoid register-file over-subscription. This may reduce "
+                     "occupancy/performance — consider an explicit "
+                     "T.annotate_producer_reg_dealloc()/"
+                     "T.annotate_consumer_reg_alloc() hint.";
+            }
+          }
+          if (inject_set_max_nreg) {
+            dec_reg_stmt =
+                Evaluate(Call(DataType::Handle(), set_max_nreg(),
+                              {IntImm(DataType::Int(32), final_dec_reg),
+                               IntImm(DataType::Int(32), 0)}));
+            inc_reg_stmt =
+                Evaluate(Call(DataType::Handle(), set_max_nreg(),
+                              {IntImm(DataType::Int(32), final_inc_reg),
+                               IntImm(DataType::Int(32), 1)}));
+          }
         }
 
         Array<Stmt> producer_stmts;

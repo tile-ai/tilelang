@@ -54,6 +54,46 @@ static bool ContainsLoopBreak(const Stmt &stmt) {
   return det.found;
 }
 
+static bool IsThreadReturnEvaluate(const Stmt &stmt) {
+  const auto *eval = stmt.as<EvaluateNode>();
+  if (eval == nullptr) {
+    return false;
+  }
+  const auto *call = eval->value.as<CallNode>();
+  return call != nullptr && call->op.same_as(builtin::thread_return());
+}
+
+struct ConditionalThreadReturn {
+  PrimExpr condition;
+  std::optional<Stmt> pre_return;
+};
+
+std::optional<ConditionalThreadReturn>
+GetConditionalThreadReturn(const Stmt &stmt) {
+  const auto *if_node = stmt.as<IfThenElseNode>();
+  if (if_node == nullptr || if_node->else_case) {
+    return std::nullopt;
+  }
+  if (IsThreadReturnEvaluate(if_node->then_case)) {
+    return ConditionalThreadReturn{if_node->condition, std::nullopt};
+  }
+  if (const auto *seq = if_node->then_case.as<SeqStmtNode>();
+      seq != nullptr && !seq->seq.empty() &&
+      IsThreadReturnEvaluate(seq->seq[seq->seq.size() - 1])) {
+    if (seq->seq.size() == 1) {
+      return ConditionalThreadReturn{if_node->condition, std::nullopt};
+    }
+    Array<Stmt> pre_return;
+    for (size_t i = 0; i + 1 < seq->seq.size(); ++i) {
+      pre_return.push_back(seq->seq[i]);
+    }
+    Stmt pre_return_stmt =
+        pre_return.size() == 1 ? pre_return[0] : SeqStmt(pre_return);
+    return ConditionalThreadReturn{if_node->condition, pre_return_stmt};
+  }
+  return std::nullopt;
+}
+
 // The threshold of the loop extent to use cutlass.range_constexpr
 // Higher values would lead to DSLOptimizationWarning:
 // This static loop has 128 iterations, which may be very slow to compile,
@@ -146,6 +186,7 @@ CodeGenTileLangCuTeDSL::CodeGenTileLangCuTeDSL() {
 
 void CodeGenTileLangCuTeDSL::InitFuncState_(const PrimFunc &f) {
   raw_pointer_vars_.clear();
+  zero_like_vars_.clear();
   CodeGenTileLangPY::InitFuncState_(f);
 }
 
@@ -159,6 +200,8 @@ std::string CodeGenTileLangCuTeDSL::CanonicalizeFastmathFunctionName_(
       {"exp2f", "tl.exp2"},
       {"log", "tl.log"},
       {"logf", "tl.log"},
+      {"log1p", "tl.log1p"},
+      {"log1pf", "tl.log1p"},
       {"log2", "tl.log2"},
       {"log2f", "tl.log2"},
       {"log10", "tl.log10"},
@@ -175,6 +218,7 @@ std::string CodeGenTileLangCuTeDSL::CanonicalizeFastmathFunctionName_(
       {"fabsf", "tl.fabsf"},
       {"copysign", "tl.copysignf"},
       {"copysignf", "tl.copysignf"},
+      {"isfinite", "tl.isfinite"},
   };
 
   auto it = kFastMathMap.find(func_name);
@@ -203,7 +247,7 @@ std::string DTypeToString(DataType t) {
   if (t.is_void()) {
     return "void";
   }
-  if (t == tl::cuTensorMapType()) {
+  if (t == tl::CuTensorMapType()) {
     return "CUtensorMap";
   }
 
@@ -276,8 +320,70 @@ void CodeGenTileLangCuTeDSL::PrintType(DataType t,
   os << DTypeToString(t);
 }
 
+static bool IsZeroLike(const PrimExpr &expr) {
+  PrimExpr value = expr;
+  if (const CastNode *cast = value.as<CastNode>()) {
+    value = cast->value;
+  }
+  if (const IntImmNode *imm = value.as<IntImmNode>()) {
+    return imm->value == 0;
+  }
+  if (const FloatImmNode *imm = value.as<FloatImmNode>()) {
+    return imm->value == 0.0;
+  }
+  return false;
+}
+
+static bool EndsWithLoad(const std::string &s) {
+  return s.size() >= 7 && s.compare(s.size() - 7, 7, ".load()") == 0;
+}
+
+static bool IsZeroTensorLike(
+    const PrimExpr &expr,
+    const std::unordered_set<const VarNode *> *zero_like_vars = nullptr) {
+  PrimExpr value = expr;
+  while (true) {
+    if (const CastNode *cast = value.as<CastNode>()) {
+      value = cast->value;
+      continue;
+    }
+    if (const BroadcastNode *broadcast = value.as<BroadcastNode>()) {
+      value = broadcast->value;
+      continue;
+    }
+    break;
+  }
+  if (const VarNode *var = value.as<VarNode>()) {
+    return zero_like_vars != nullptr && zero_like_vars->count(var);
+  }
+  return IsZeroLike(value);
+}
+
+class BufferLoadDetector : public tirx::StmtExprVisitor {
+public:
+  bool found = false;
+
+  void VisitExpr_(const BufferLoadNode *op) override { found = true; }
+};
+
+static bool ContainsBufferLoad(const PrimExpr &expr) {
+  BufferLoadDetector det;
+  det(expr);
+  return det.found;
+}
+
 void CodeGenTileLangCuTeDSL::VisitExpr_(const BroadcastNode *op,
                                         std::ostream &os) { // NOLINT(*)
+  if (op->dtype.is_float4_e2m1fn()) {
+    bool is_zero = IsZeroTensorLike(op->value, &zero_like_vars_);
+    ICHECK(is_zero)
+        << "CuTeDSL cannot materialize scalar Float4E2M1FN values; only zero "
+           "broadcast is supported via packed storage";
+    os << "tl.make_filled_tensor((" << PrintExpr_(op->lanes)
+       << ",), 0, dtype=cutlass.Float4E2M1FN).load()";
+    return;
+  }
+
   // Note: We need to pass the dtype to make_filled_tensor so it can create
   // the correct CuTeDSL type (e.g., cutlass.Int32 instead of Python int)
   std::ostringstream dtype_str;
@@ -359,6 +465,109 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
   DataType target_ty = op->dtype;
   ICHECK_EQ(target_ty.lanes(), from_ty.lanes());
 
+  const bool from_is_cutedsl_fp8 = from_ty.is_float8_e4m3() ||
+                                   from_ty.is_float8_e4m3fn() ||
+                                   from_ty.is_float8_e5m2();
+  const bool target_is_fp8_widening = target_ty == DataType::Float(16) ||
+                                      target_ty == DataType::Float(32) ||
+                                      target_ty.is_bfloat16();
+  const bool target_is_cutedsl_fp8 = target_ty.is_float8_e4m3() ||
+                                     target_ty.is_float8_e4m3fn() ||
+                                     target_ty.is_float8_e5m2();
+  const bool from_is_fp8_narrowing_source = from_ty == DataType::Float(16) ||
+                                            from_ty == DataType::Float(32) ||
+                                            from_ty.is_bfloat16();
+  if (from_ty.is_scalar() && target_ty.is_scalar() &&
+      (from_ty.is_int() || from_ty.is_uint()) &&
+      (target_ty.is_int() || target_ty.is_uint()) &&
+      target_ty.bits() > from_ty.bits()) {
+    if (const CallNode *call = op->value.as<CallNode>();
+        call && (call->op.same_as(builtin::shift_left()) ||
+                 call->op.same_as(builtin::shift_right()))) {
+      ICHECK_EQ(call->args.size(), 2U);
+      const DataType lhs_ty = call->args[0].dtype();
+      const bool same_signedness = (lhs_ty.is_int() && target_ty.is_int()) ||
+                                   (lhs_ty.is_uint() && target_ty.is_uint());
+      if (same_signedness && lhs_ty.bits() < target_ty.bits()) {
+        const std::string lhs = PrintExpr_(call->args[0]);
+        const std::string rhs = PrintExpr_(call->args[1]);
+        PrintType(target_ty, os);
+        os << "((";
+        PrintType(target_ty, os);
+        os << "(" << lhs << ") "
+           << (call->op.same_as(builtin::shift_left()) ? "<<" : ">>") << " "
+           << rhs << "))";
+        return;
+      }
+    }
+  }
+
+  if (from_ty.is_scalar() && from_is_cutedsl_fp8 && target_is_fp8_widening) {
+    // CuTeDSL/NVGPU widens FP8 through nvgpu.cvt_fpext, whose operand must be
+    // a 32-bit aligned vector.  Pack the scalar into a four-lane FP8 vector,
+    // reuse the tensor cast path, then read back lane zero.
+    std::string src = SSAGetID(PrintExpr_(op->value), from_ty);
+    std::string src_vec = name_supply_->FreshName("_scalar_fp8_src");
+    PrintIndent();
+    stream << src_vec << " = tl.make_rmem_tensor((4,), ";
+    PrintType(from_ty, stream);
+    stream << ")\n";
+    PrintIndent();
+    stream << src_vec << "[0] = " << src << "\n";
+    for (int i = 1; i < 4; ++i) {
+      PrintIndent();
+      stream << src_vec << "[" << i << "] = ";
+      PrintType(from_ty, stream);
+      stream << "(0)\n";
+    }
+
+    std::string f16_vec = name_supply_->FreshName("_scalar_fp8_f16");
+    PrintIndent();
+    stream << f16_vec << " = tl.make_rmem_tensor((4,), cutlass.Float16)\n";
+    PrintIndent();
+    stream << f16_vec << ".store(tl.cast_tensor(" << src_vec
+           << ".load(), cutlass.Float16))\n";
+    if (target_ty == DataType::Float(16)) {
+      os << f16_vec << "[0]";
+    } else {
+      PrintType(target_ty, os);
+      os << "(" << f16_vec << "[0])";
+    }
+    return;
+  }
+
+  if (from_ty.is_scalar() && target_is_cutedsl_fp8 &&
+      from_is_fp8_narrowing_source) {
+    // CuTeDSL lowers FP8 narrowing through vector tensor casts.  Pack a scalar
+    // source into an aligned four-lane tensor, cast it, then extract lane zero.
+    std::string src = SSAGetID(PrintExpr_(op->value), from_ty);
+    std::string src_vec = name_supply_->FreshName("_scalar_fp8_src");
+    PrintIndent();
+    stream << src_vec << " = tl.make_rmem_tensor((4,), ";
+    PrintType(from_ty, stream);
+    stream << ")\n";
+    PrintIndent();
+    stream << src_vec << "[0] = " << src << "\n";
+    for (int i = 1; i < 4; ++i) {
+      PrintIndent();
+      stream << src_vec << "[" << i << "] = ";
+      PrintType(from_ty, stream);
+      stream << "(0)\n";
+    }
+
+    std::string dst_vec = name_supply_->FreshName("_scalar_fp8_dst");
+    PrintIndent();
+    stream << dst_vec << " = tl.make_rmem_tensor((4,), ";
+    PrintType(target_ty, stream);
+    stream << ")\n";
+    PrintIndent();
+    stream << dst_vec << ".store(tl.cast_tensor(" << src_vec << ".load(), ";
+    PrintType(target_ty, stream);
+    stream << "))\n";
+    os << dst_vec << "[0]";
+    return;
+  }
+
   if (from_ty.is_scalar())
     return CodeGenTileLangPY::VisitExpr_(op, os);
 
@@ -371,14 +580,47 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
   // extracting only value_lanes elements when writing back.
   bool is_narrow_unaligned = target_ty.bits() < 32 && lanes > 1 &&
                              (target_ty.bits() * lanes) % 32 != 0;
+  bool source_is_narrow_unaligned =
+      from_ty.bits() < 32 && from_ty.lanes() > 1 &&
+      (from_ty.bits() * from_ty.lanes()) % 32 != 0;
   int aligned_lanes = is_narrow_unaligned ? (32 / target_ty.bits()) : lanes;
 
   std::string src = SSAGetID(PrintExpr_(op->value), from_ty);
 
+  if (source_is_narrow_unaligned && !is_narrow_unaligned) {
+    int source_aligned_lanes = 32 / from_ty.bits();
+    std::string aligned_dst = name_supply_->FreshName("_aligned_cast");
+    PrintIndent();
+    stream << aligned_dst << " = tl.make_rmem_tensor((" << source_aligned_lanes
+           << ",), ";
+    PrintType(target_ty.element_of(), stream);
+    stream << ")\n";
+    PrintIndent();
+    stream << aligned_dst << ".store(tl.cast_tensor(tl.as_tensor_ssa(" << src
+           << "), ";
+    PrintType(target_ty.element_of(), stream);
+    stream << "))\n";
+
+    std::string cast_dst = name_supply_->FreshName("_cast");
+    PrintIndent();
+    stream << cast_dst << " = tl.make_rmem_tensor((" << lanes << ",), ";
+    PrintType(target_ty.element_of(), stream);
+    stream << ")\n";
+    for (int i = 0; i < lanes; ++i) {
+      PrintIndent();
+      stream << cast_dst << "[" << i << "] = " << aligned_dst << "[" << i
+             << "]\n";
+    }
+    os << cast_dst << ".load()";
+    return;
+  }
+
   // If unaligned, pad source to aligned width
   std::string cast_src = src;
+  bool cast_src_is_tensor = false;
   if (is_narrow_unaligned) {
     cast_src = name_supply_->FreshName("_pad_src");
+    cast_src_is_tensor = true;
     PrintIndent();
     stream << cast_src << " = tl.make_rmem_tensor((" << aligned_lanes << ",), ";
     PrintType(from_ty.element_of(), stream);
@@ -402,11 +644,11 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
   PrintType(target_ty.element_of(), stream);
   stream << ")\n";
   PrintIndent();
-  if (is_narrow_unaligned) {
-    stream << cast_dst << ".store(" << cast_src << ".load().to(";
-  } else {
-    stream << cast_dst << ".store(" << src << ".to(";
+  stream << cast_dst << ".store(tl.cast_tensor(" << cast_src;
+  if (cast_src_is_tensor) {
+    stream << ".load()";
   }
+  stream << ", ";
   PrintType(target_ty.element_of(), stream);
   stream << "))\n";
 
@@ -494,13 +736,43 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     stream << ")\n";
   };
 
-  // NOTE: builtin::if_then_else is handled by the base class
-  // (CodeGenTileLangPY) as a Python ternary: (true_val if cond else false_val).
-  // This is correct for expression contexts (range(), arithmetic, etc.). When
-  // the result is used in a BufferStore that needs TensorSSA, the store handler
-  // wraps it with tl.where().
-
-  if (op->op.same_as(builtin::ptx_cp_async())) {
+  if (op->op.same_as(builtin::if_then_else()) ||
+      op->op.same_as(tirx::builtin::if_then_else())) {
+    ICHECK_EQ(op->args.size(), 3U)
+        << "if_then_else expects <condition, true_value, false_value>";
+    auto cast_branch = [&](std::string value, DataType branch_dtype) {
+      DataType result_dtype = op->dtype;
+      if (result_dtype.is_uint() && result_dtype.bits() == 8 &&
+          result_dtype.is_scalar()) {
+        std::ostringstream casted;
+        PrintType(result_dtype, casted);
+        casted << "(" << value << ")";
+        return casted.str();
+      }
+      if (branch_dtype == result_dtype || !branch_dtype.is_scalar() ||
+          !result_dtype.is_scalar()) {
+        return value;
+      }
+      const bool integer_like =
+          (branch_dtype.is_int() || branch_dtype.is_uint()) &&
+          (result_dtype.is_int() || result_dtype.is_uint());
+      const bool float_like =
+          branch_dtype.is_float() && result_dtype.is_float();
+      if (!integer_like && !float_like) {
+        return value;
+      }
+      std::ostringstream casted;
+      PrintType(result_dtype, casted);
+      casted << "(" << value << ")";
+      return casted.str();
+    };
+    std::string cond = PrintExpr_(op->args[0]);
+    std::string true_val =
+        cast_branch(PrintExpr_(op->args[1]), op->args[1].dtype());
+    std::string false_val =
+        cast_branch(PrintExpr_(op->args[2]), op->args[2].dtype());
+    os << "(" << true_val << " if " << cond << " else " << false_val << ")";
+  } else if (op->op.same_as(builtin::ptx_cp_async())) {
     // args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
     // args[3] = predicate (optional)
     ICHECK(op->args.size() == 3 || op->args.size() == 4)
@@ -721,10 +993,16 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::ptx_stmatrix())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
+    bool is_shape_encoded =
+        op->args.size() >= 4 && op->args.back().as<StringImmNode>();
+    if (is_shape_encoded) {
+      ICHECK_EQ(Downcast<StringImm>(op->args.back())->value, "m8n8")
+          << "CuTeDSL stmatrix codegen only supports m8n8";
+    }
     std::string func_name = "tl.ptx_stmatrix_x" + std::to_string(num);
     if (trans == 1)
       func_name += "_trans";
-    print_extern_call_stmt(func_name, 2);
+    print_extern_call_stmt(func_name, 2, is_shape_encoded ? 1 : 0);
   } else if (op->op.same_as(tl::fence_proxy_async())) {
     print_extern_call_stmt("tl.fence_proxy_async");
   } else if (op->op.same_as(tl::tma_store_arrive())) {
@@ -1070,6 +1348,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(builtin::ptx_cp_async_bulk())) {
     LOG(FATAL) << "Currently unsupported op: " << op->op;
+  } else if (op->op.same_as(tl::ptx_st_bulk_shared())) {
+    LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(builtin::ptx_wait_barrier())) {
     LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(builtin::ptx_ldg32())) {
@@ -1084,22 +1364,48 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
 
     const BufferLoadNode *load = op->args[0].as<BufferLoadNode>();
     if (load) {
-      // Path 1: BufferLoad - use recast_ptr for memory access
-      ICHECK_EQ(load->indices.size(), 1)
-          << "CodeGenTileLangCuTeDSL only supports flat memory";
+      std::string scope;
+      const VarNode *buffer_var = load->buffer->data.get();
+      if (alloc_storage_scope_.count(buffer_var)) {
+        scope = alloc_storage_scope_.at(buffer_var);
+      }
+      if (scope.empty()) {
+        scope = GetPtrStorageScope(load->buffer->data);
+      }
+      if (scope == "local.var") {
+        std::string expr_str = GetBufferRef_(
+            src_dtype, load->buffer.get(),
+            LinearizeBufferIndices_(load->buffer.get(), load->indices));
+        os << "tl.bitcast(" << expr_str << ", ";
+        PrintType(tgt_dtype.element_of(), os);
+        os << ")";
+        return;
+      }
 
-      PrimExpr index = load->indices[0];
+      // Path 1: BufferLoad - use recast_ptr for memory access
+      PrimExpr index =
+          LinearizeBufferIndices_(load->buffer.get(), load->indices);
       if (const RampNode *node = index.as<RampNode>(); node) {
         auto *p_stride = as_const_int(node->stride);
         ICHECK(p_stride);
         ICHECK_EQ(*p_stride, 1) << "reinterpret expects contiguous elements";
         index = node->base;
+      } else {
+        arith::PVar<PrimExpr> ramp_base;
+        if (arith::ramp(ramp_base, 1, tgt_dtype.lanes()).Match(index)) {
+          index = ramp_base.Eval();
+        }
       }
 
       auto ptr_str = GetBufferPtr_(load->buffer.get(), index);
       os << "tl.make_tensor(tl.recast_ptr(" << ptr_str << ", dtype=";
       PrintType(tgt_dtype.element_of(), os);
-      os << "), (" << tgt_dtype.lanes() << ",)).load()";
+      os << "), (" << tgt_dtype.lanes() << ",))";
+      if (tgt_dtype.is_scalar()) {
+        os << "[0]";
+      } else {
+        os << ".load()";
+      }
     } else {
       // Path 2: General expression - use arith.bitcast
       std::string expr_str = PrintExpr_(op->args[0]);
@@ -1119,6 +1425,35 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
                      op->args, true, os);
   } else if (op->op.same_as(tl::tl_gemm_sp())) {
     LOG(FATAL) << "Currently unsupported op: " << op->op;
+  } else if (op->op.same_as(tl::shfl_sync())) {
+    ICHECK_EQ(op->args.size(), 4U)
+        << "tl.shfl_sync expects <mask, value, src_lane, width>.";
+    os << "tl.__shfl_sync(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ", " << PrintExpr_(op->args[2]) << ", "
+       << PrintExpr_(op->args[3]) << ")";
+  } else if (op->op.same_as(tl::shfl_xor_sync())) {
+    ICHECK_EQ(op->args.size(), 4U)
+        << "tl.shfl_xor_sync expects <mask, value, lane_mask, width>.";
+    os << "tl.__shfl_xor_sync(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ", " << PrintExpr_(op->args[2]) << ", "
+       << PrintExpr_(op->args[3]) << ")";
+  } else if (op->op.same_as(tl::shfl_down_sync())) {
+    ICHECK_EQ(op->args.size(), 4U)
+        << "tl.shfl_down_sync expects <mask, value, delta, width>.";
+    os << "tl.__shfl_down_sync(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ", " << PrintExpr_(op->args[2]) << ", "
+       << PrintExpr_(op->args[3]) << ")";
+  } else if (op->op.same_as(tl::shfl_up_sync())) {
+    ICHECK_EQ(op->args.size(), 4U)
+        << "tl.shfl_up_sync expects <mask, value, delta, width>.";
+    os << "tl.__shfl_up_sync(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ", " << PrintExpr_(op->args[2]) << ", "
+       << PrintExpr_(op->args[3]) << ")";
+  } else if (op->op.same_as(tl::match_any_sync())) {
+    ICHECK_EQ(op->args.size(), 2U)
+        << "tl.match_any_sync expects <mask, value>.";
+    os << "tl.__match_any_sync(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ")";
   } else if (op->op.same_as(tl::get_lane_idx())) {
     // get_lane_idx(warp_size?) -> threadIdx.x % warp_size
     ICHECK_LE(op->args.size(), 1U)
@@ -1240,12 +1575,39 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     os << "tl.warp_reduce_bitand(" << PrintExpr_(op->args[0]) << ")";
   } else if (op->op.same_as(tl::warp_reduce_bitor())) {
     os << "tl.warp_reduce_bitor(" << PrintExpr_(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::add2())) {
+    ICHECK_EQ(op->args.size(), 2U);
+    os << "(" << PrintExpr_(op->args[0]) << " + " << PrintExpr_(op->args[1])
+       << ")";
+  } else if (op->op.same_as(tl::sub2())) {
+    ICHECK_EQ(op->args.size(), 2U);
+    os << "(" << PrintExpr_(op->args[0]) << " - " << PrintExpr_(op->args[1])
+       << ")";
+  } else if (op->op.same_as(tl::mul2())) {
+    ICHECK_EQ(op->args.size(), 2U);
+    os << "(" << PrintExpr_(op->args[0]) << " * " << PrintExpr_(op->args[1])
+       << ")";
+  } else if (op->op.same_as(tl::fma2())) {
+    ICHECK_EQ(op->args.size(), 3U);
+    os << "((" << PrintExpr_(op->args[0]) << " * " << PrintExpr_(op->args[1])
+       << ") + " << PrintExpr_(op->args[2]) << ")";
+  } else if (op->op.same_as(tl::max2()) || op->op.same_as(tl::max2_nan())) {
+    ICHECK_EQ(op->args.size(), 2U);
+    os << "tl.max2(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::min2()) || op->op.same_as(tl::min2_nan())) {
+    ICHECK_EQ(op->args.size(), 2U);
+    os << "tl.min2(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::abs2())) {
+    ICHECK_EQ(op->args.size(), 1U);
+    os << "tl.abs2(" << PrintExpr_(op->args[0]) << ")";
   } else if (op->op.same_as(builtin::address_of())) {
     const BufferLoadNode *load = op->args[0].as<BufferLoadNode>();
     ICHECK(op->args.size() == 1 && load);
-    ICHECK_EQ(load->indices.size(), 1)
-        << "CodeGenTileLangCuTeDSL only supports flat memory";
-    os << GetBufferPtr_(load->buffer.get(), load->indices[0]);
+    os << GetBufferPtr_(
+        load->buffer.get(),
+        LinearizeBufferIndices_(load->buffer.get(), load->indices));
   } else if (op->op.same_as(builtin::handle_add_byte_offset())) {
     ICHECK_EQ(op->args.size(), 2U);
     os << "tl.handle_add_byte_offset(" << PrintExpr_(op->args[0]) << ", "
@@ -1337,18 +1699,110 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const SelectNode *op,
   std::string cond = PrintExpr_(op->condition);
   std::string t = PrintExpr_(op->true_value);
   std::string f = PrintExpr_(op->false_value);
+  auto cast_branch = [&](std::string value, DataType branch_dtype) {
+    DataType result_dtype = op->dtype;
+    if (result_dtype.is_uint() && result_dtype.bits() == 8 &&
+        result_dtype.is_scalar()) {
+      std::ostringstream casted;
+      PrintType(result_dtype, casted);
+      casted << "(" << value << ")";
+      return casted.str();
+    }
+    if (branch_dtype == result_dtype || !branch_dtype.is_scalar() ||
+        !result_dtype.is_scalar()) {
+      return value;
+    }
+    const bool integer_like =
+        (branch_dtype.is_int() || branch_dtype.is_uint()) &&
+        (result_dtype.is_int() || result_dtype.is_uint());
+    const bool float_like = branch_dtype.is_float() && result_dtype.is_float();
+    if (!integer_like && !float_like) {
+      return value;
+    }
+    std::ostringstream casted;
+    PrintType(result_dtype, casted);
+    casted << "(" << value << ")";
+    return casted.str();
+  };
+  t = cast_branch(t, op->true_value.dtype());
+  f = cast_branch(f, op->false_value.dtype());
   os << "(" << t << " if " << cond << " else " << f << ")";
+}
+
+void CodeGenTileLangCuTeDSL::VisitExpr_(const LetNode *op,
+                                        std::ostream &os) { // NOLINT(*)
+  std::string value = PrintExpr_(op->value);
+  ICHECK(!var_idmap_.count(op->var.get()));
+  const bool is_zero_like = IsZeroTensorLike(op->value, &zero_like_vars_);
+  PrintIndent();
+  stream << AllocVarID(op->var.get()) << " = " << value << "\n";
+  if (is_zero_like) {
+    zero_like_vars_.insert(op->var.get());
+  }
+  os << PrintExpr_(op->body);
+  if (is_zero_like) {
+    zero_like_vars_.erase(op->var.get());
+  }
+  bool removed = var_idmap_.erase(op->var.get());
+  ICHECK(removed);
+}
+
+void CodeGenTileLangCuTeDSL::VisitExpr_(const ShuffleNode *op,
+                                        std::ostream &os) { // NOLINT(*)
+  std::vector<std::string> concat_vec;
+
+  for (const PrimExpr &vec : op->vectors) {
+    std::string vec_value = PrintExpr_(vec);
+    if (vec.dtype().is_scalar()) {
+      concat_vec.push_back(vec_value);
+    } else {
+      std::string vec_id = SSAGetID(vec_value, vec.dtype());
+      for (int i = 0; i < vec.dtype().lanes(); ++i) {
+        std::ostringstream elem;
+        PrintVecElemLoad_(vec_id, vec.dtype(), i, elem);
+        concat_vec.push_back(elem.str());
+      }
+    }
+  }
+
+  if (op->indices.size() == 1) {
+    ICHECK(op->indices[0]->IsInstance<IntImmNode>())
+        << "ShuffleNode indices must be constants at codegen time, got "
+        << op->indices[0];
+    int64_t idx = Downcast<IntImm>(op->indices[0])->value;
+    ICHECK_GE(idx, 0);
+    ICHECK_LT(idx, static_cast<int64_t>(concat_vec.size()));
+    os << concat_vec[idx];
+    return;
+  }
+
+  std::string sret = name_supply_->FreshName("_shuffle");
+  PrintIndent();
+  stream << sret << " = tl.make_rmem_tensor((" << op->indices.size() << ",), ";
+  PrintType(op->dtype.element_of(), stream);
+  stream << ")\n";
+
+  for (size_t i = 0; i < op->indices.size(); ++i) {
+    ICHECK(op->indices[i]->IsInstance<IntImmNode>())
+        << "ShuffleNode indices must be constants at codegen time, got "
+        << op->indices[i];
+    int64_t idx = Downcast<IntImm>(op->indices[i])->value;
+    ICHECK_GE(idx, 0);
+    ICHECK_LT(idx, static_cast<int64_t>(concat_vec.size()));
+    PrintVecElemStore_(sret, op->dtype, static_cast<int>(i), concat_vec[idx]);
+  }
+  os << sret << ".load()";
 }
 
 void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
                                         std::ostream &os) { // NOLINT(*)
-  ICHECK_EQ(op->indices.size(), 1)
-      << "Load from non-flat memory not supported.";
+  ICHECK_GE(op->indices.size(), 1U)
+      << "Buffer load must have at least one index.";
   ICHECK(!op->predicate.defined())
       << "Predicated buffer load is not supported.";
 
   DataType value_dtype = op->dtype;
-  PrimExpr index = op->indices[0];
+  PrimExpr index = LinearizeBufferIndices_(op->buffer.get(), op->indices);
   Var buffer_var = op->buffer->data;
   DataType element_dtype = op->buffer->dtype;
 
@@ -1387,8 +1841,65 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
     // extractelement (which fails due to unrealized_conversion_cast).
     std::string aligned_rmem = name_supply_->FreshName("_aload");
 
-    if (scope == "local") {
-      // For rmem: load aligned_lanes elements without cute.assume.
+    if (value_dtype.bits() < 8) {
+      const int packed_bits = value_lanes * value_dtype.bits();
+      ICHECK_EQ(packed_bits % 8, 0)
+          << "Sub-byte vector loads must cover whole bytes";
+      const int packed_bytes = packed_bits / 8;
+      const int aligned_bytes = aligned_lanes * value_dtype.bits() / 8;
+      const int byte_lanes = 8 / value_dtype.bits();
+
+      std::string ptr_str;
+      if (scope == "local" || scope == "shared" || scope == "shared.dyn") {
+        ptr_str = vid + ".iterator";
+      } else {
+        bool is_handle_match =
+            HandleTypeMatch_(buffer_var.get(), element_dtype);
+        if (is_handle_match) {
+          ptr_str = vid + ".iterator";
+        } else {
+          std::ostringstream ptr_os;
+          ptr_os << "tl.recast_ptr(" << vid << ".iterator, dtype=";
+          PrintType(value_dtype.element_of(), ptr_os);
+          ptr_os << ")";
+          ptr_str = ptr_os.str();
+        }
+      }
+
+      std::string dst_bytes = name_supply_->FreshName("_pload_dst");
+      std::string src_view = name_supply_->FreshName("_pload_view");
+      std::string src_bytes = name_supply_->FreshName("_pload_src");
+      PrintIndent();
+      stream << aligned_rmem << " = tl.make_rmem_tensor((" << aligned_lanes
+             << ",), ";
+      PrintType(value_dtype.element_of(), stream);
+      stream << ")\n";
+      PrintIndent();
+      stream << dst_bytes << " = cute.recast_tensor(" << aligned_rmem
+             << ", cutlass.Uint8)\n";
+      for (int i = 0; i < aligned_bytes; ++i) {
+        PrintIndent();
+        stream << dst_bytes << "[" << i << "] = cutlass.Uint8(0)\n";
+      }
+      PrintIndent();
+      stream << src_view << " = tl.make_tensor_at_offset(" << ptr_str << ", "
+             << PrintExpr_(scalar_base) << ", (" << value_lanes
+             << ",), div_by=" << byte_lanes << ")\n";
+      PrintIndent();
+      stream << src_bytes << " = cute.recast_tensor(" << src_view
+             << ", cutlass.Uint8)\n";
+      for (int i = 0; i < packed_bytes; ++i) {
+        PrintIndent();
+        stream << dst_bytes << "[" << i << "] = " << src_bytes << "[" << i
+               << "]\n";
+      }
+
+      os << aligned_rmem;
+      return;
+    }
+
+    if (scope == "local" || scope == "shared" || scope == "shared.dyn") {
+      // For rmem/smem: load aligned_lanes elements without cute.assume.
       // cute.assume(offset, divby=N) silently truncates offsets that
       // are not exact multiples of N; for rmem there is no hardware
       // alignment constraint, so we skip assume (use default div_by=1).
@@ -1492,13 +2003,14 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
 }
 
 void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
-  ICHECK_EQ(op->indices.size(), 1) << "Store to non-flat memory not supported.";
+  ICHECK_GE(op->indices.size(), 1U)
+      << "Buffer store must have at least one index.";
   ICHECK(!op->predicate.defined())
       << "Predicated buffer store is not supported.";
 
   DataType value_dtype = op->value.dtype();
   DataType element_dtype = op->buffer->dtype;
-  PrimExpr index_expr = op->indices[0];
+  PrimExpr index_expr = LinearizeBufferIndices_(op->buffer.get(), op->indices);
   Var buffer_var = op->buffer->data;
 
   // Pre-compute Select/if_then_else as tl.where() at statement level.
@@ -1540,61 +2052,250 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
     int lanes = value_dtype.lanes();
     if (lanes == 0)
       lanes = 1;
-    // Helper: wrap a sub-expression as TensorSSA via make_rmem_tensor.
-    auto as_tsa = [this](const PrimExpr &e, int n,
-                         DataType elem_dt) -> std::string {
-      std::string s = PrintExpr_(e);
-      if (n == 0)
-        n = 1;
-      if (s.size() >= 7 && s.compare(s.size() - 7, 7, ".load()") == 0)
-        return s;
-      std::string var = name_supply_->FreshName("_tsa");
+    DataType conditional_dtype =
+        cast_to_dtype.bits() > 0 ? cast_to_dtype : value_dtype;
+    int conditional_lanes = conditional_dtype.lanes();
+    if (conditional_lanes == 0)
+      conditional_lanes = 1;
+    const bool true_is_zero_ast = IsZeroTensorLike(true_expr, &zero_like_vars_);
+    const bool false_is_zero_ast =
+        IsZeroTensorLike(false_expr, &zero_like_vars_);
+    const bool true_has_buffer_load = ContainsBufferLoad(true_expr);
+    const bool false_has_buffer_load = ContainsBufferLoad(false_expr);
+    const bool is_subbyte_vector_conditional =
+        conditional_dtype.element_of().bits() < 8 &&
+        conditional_dtype.lanes() > 1;
+    if ((true_is_zero_ast && false_has_buffer_load) ||
+        (false_is_zero_ast && true_has_buffer_load)) {
+      const bool data_is_true_branch = false_is_zero_ast;
+      PrimExpr data_expr = data_is_true_branch ? true_expr : false_expr;
+      DataType elem_dtype = conditional_dtype.element_of();
+
+      std::string result_tensor = name_supply_->FreshName("_if_tensor");
       PrintIndent();
-      if (elem_dt.is_bool()) {
-        stream << var << " = tl.make_rmem_tensor((" << n
-               << ",), cutlass.Boolean)\n";
-      } else {
-        stream << var << " = tl.make_rmem_tensor((" << n << ",), "
-               << DTypeToString(elem_dt) << ")\n";
-      }
-      for (int i = 0; i < n; ++i) {
+      stream << result_tensor << " = tl.make_rmem_tensor((" << conditional_lanes
+             << ",), " << DTypeToString(elem_dtype) << ")\n";
+
+      if (elem_dtype.bits() < 8 && conditional_lanes > 1) {
+        const int packed_bits = conditional_lanes * elem_dtype.bits();
+        ICHECK_EQ(packed_bits % 8, 0)
+            << "Sub-byte conditional vectors must cover whole bytes";
+        const int packed_bytes = packed_bits / 8;
+        std::string result_bytes = name_supply_->FreshName("_if_dst");
         PrintIndent();
-        if (n == 1) {
-          stream << var << "[0] = " << s << "\n";
-        } else {
-          stream << var << "[" << i << "] = " << s << "[" << i << "]\n";
+        stream << result_bytes << " = cute.recast_tensor(" << result_tensor
+               << ", cutlass.Uint8)\n";
+        for (int i = 0; i < packed_bytes; ++i) {
+          PrintIndent();
+          stream << result_bytes << "[" << i << "] = cutlass.Uint8(0)\n";
+        }
+      } else {
+        for (int i = 0; i < conditional_lanes; ++i) {
+          PrintIndent();
+          stream << result_tensor << "[" << i << "] = ";
+          if (elem_dtype.is_bool()) {
+            stream << "False\n";
+          } else {
+            stream << DTypeToString(elem_dtype) << "(0)\n";
+          }
         }
       }
-      return var + ".load()";
-    };
-    DataType true_ty = true_expr.dtype().element_of();
-    DataType false_ty = false_expr.dtype().element_of();
-    std::string cond_tsa = as_tsa(cond_expr, 1, DataType::Bool());
-    std::string then_tsa = as_tsa(true_expr, lanes, true_ty);
-    std::string else_tsa = as_tsa(false_expr, lanes, false_ty);
-    if (true_ty != false_ty) {
-      DataType common =
-          (true_ty.bits() >= false_ty.bits()) ? true_ty : false_ty;
-      if (common.bits() < 32 && true_ty.is_float() && false_ty.is_float())
-        common = DataType::Float(32);
-      std::string common_str = DTypeToString(common);
-      then_tsa += ".to(" + common_str + ")";
-      else_tsa += ".to(" + common_str + ")";
-    }
-    std::string result = name_supply_->FreshName("_where");
-    PrintIndent();
-    stream << result << " = tl.where(" << cond_tsa << ", " << then_tsa << ", "
-           << else_tsa << ")\n";
-    // If the conditional was wrapped in a Cast, apply .to() on the result.
-    // tl.where() returns TensorSSA, and .to() on TensorSSA returns TensorSSA.
-    if (cast_to_dtype.bits() > 0) {
-      std::string cast_result = name_supply_->FreshName("_wcast");
+
+      std::string cond = PrintExpr_(cond_expr);
       PrintIndent();
-      stream << cast_result << " = " << result << ".to("
-             << DTypeToString(cast_to_dtype.element_of()) << ")\n";
-      value_str = cast_result;
+      if (data_is_true_branch) {
+        stream << "if " << cond << ":\n";
+      } else {
+        stream << "if not (" << cond << "):\n";
+      }
+      int scope = BeginScope();
+      DataType data_dtype = data_expr.dtype();
+      std::string data;
+      if (cast_to_dtype.bits() > 0 && data_dtype != conditional_dtype) {
+        if (conditional_dtype.is_scalar()) {
+          data = PrintExpr_(tirx::Cast(conditional_dtype, data_expr));
+        } else {
+          data = PrintExpr_(data_expr);
+          data = "tl.as_tensor_ssa(" + data + ").to(" +
+                 DTypeToString(elem_dtype) + ")";
+        }
+      } else {
+        data = PrintExpr_(data_expr);
+      }
+
+      if (elem_dtype.bits() < 8 && conditional_lanes > 1) {
+        const int packed_bits = conditional_lanes * elem_dtype.bits();
+        ICHECK_EQ(packed_bits % 8, 0)
+            << "Sub-byte conditional vectors must cover whole bytes";
+        const int packed_bytes = packed_bits / 8;
+        std::string data_tensor = name_supply_->FreshName("_if_src_tensor");
+        PrintIndent();
+        stream << data_tensor << " = tl.as_rmem_tensor(" << data << ", ("
+               << conditional_lanes << ",), " << DTypeToString(elem_dtype)
+               << ")\n";
+
+        std::string src_bytes = name_supply_->FreshName("_if_src");
+        std::string dst_bytes = name_supply_->FreshName("_if_dst");
+        PrintIndent();
+        stream << src_bytes << " = cute.recast_tensor(" << data_tensor
+               << ", cutlass.Uint8)\n";
+        PrintIndent();
+        stream << dst_bytes << " = cute.recast_tensor(" << result_tensor
+               << ", cutlass.Uint8)\n";
+        for (int i = 0; i < packed_bytes; ++i) {
+          PrintIndent();
+          stream << dst_bytes << "[" << i << "] = " << src_bytes << "[" << i
+                 << "]\n";
+        }
+      } else if (conditional_lanes == 1) {
+        PrintIndent();
+        stream << result_tensor << "[0] = " << data << "\n";
+      } else {
+        PrintIndent();
+        stream << result_tensor << ".store(tl.as_tensor_ssa(" << data << "))\n";
+      }
+      EndScope(scope);
+
+      value_str = result_tensor;
+    } else if (is_subbyte_vector_conditional) {
+      std::string cond = PrintExpr_(cond_expr);
+      std::string true_data = PrintExpr_(true_expr);
+      std::string false_data = PrintExpr_(false_expr);
+      auto is_zero_tensor_string = [](const std::string &s) {
+        return s.find("tl.make_filled_tensor") != std::string::npos &&
+               s.find(", 0, dtype=") != std::string::npos;
+      };
+      const bool true_is_zero =
+          true_is_zero_ast || is_zero_tensor_string(true_data);
+      const bool false_is_zero =
+          false_is_zero_ast || is_zero_tensor_string(false_data);
+      ICHECK(true_is_zero || false_is_zero)
+          << "Sub-byte conditional vectors currently require one zero branch";
+      std::string data = true_is_zero ? false_data : true_data;
+      const DataType elem_dtype = conditional_dtype.element_of();
+      const int packed_bits = conditional_dtype.lanes() * elem_dtype.bits();
+      ICHECK_EQ(packed_bits % 8, 0)
+          << "Sub-byte conditional vectors must cover whole bytes";
+      const int packed_bytes = packed_bits / 8;
+
+      std::string result_tensor = name_supply_->FreshName("_where_tensor");
+      std::string data_tensor = name_supply_->FreshName("_where_data");
+      std::string data_bytes = name_supply_->FreshName("_where_src");
+      std::string result_bytes = name_supply_->FreshName("_where_dst");
+      PrintIndent();
+      stream << result_tensor << " = tl.make_rmem_tensor(("
+             << conditional_dtype.lanes() << ",), " << DTypeToString(elem_dtype)
+             << ")\n";
+      PrintIndent();
+      stream << data_tensor << " = tl.as_rmem_tensor(" << data << ", ("
+             << conditional_dtype.lanes() << ",), " << DTypeToString(elem_dtype)
+             << ")\n";
+      PrintIndent();
+      stream << data_bytes << " = cute.recast_tensor(" << data_tensor
+             << ", cutlass.Uint8)\n";
+      PrintIndent();
+      stream << result_bytes << " = cute.recast_tensor(" << result_tensor
+             << ", cutlass.Uint8)\n";
+      for (int i = 0; i < packed_bytes; ++i) {
+        PrintIndent();
+        stream << result_bytes << "[" << i << "] = ";
+        if (true_is_zero) {
+          stream << "(cutlass.Uint8(0) if " << cond << " else " << data_bytes
+                 << "[" << i << "])\n";
+        } else {
+          stream << "(" << data_bytes << "[" << i << "] if " << cond
+                 << " else cutlass.Uint8(0))\n";
+        }
+      }
+      value_str = result_tensor;
     } else {
-      value_str = result;
+      // Helper: wrap a sub-expression as TensorSSA via make_rmem_tensor.
+      auto as_tsa = [this](const PrimExpr &e, int n,
+                           DataType elem_dt) -> std::string {
+        std::string s = PrintExpr_(e);
+        if (n == 0)
+          n = 1;
+        if (EndsWithLoad(s))
+          return s;
+        std::string var = name_supply_->FreshName("_tsa");
+        PrintIndent();
+        if (elem_dt.is_bool()) {
+          stream << var << " = tl.make_rmem_tensor((" << n
+                 << ",), cutlass.Boolean)\n";
+        } else {
+          stream << var << " = tl.make_rmem_tensor((" << n << ",), "
+                 << DTypeToString(elem_dt) << ")\n";
+        }
+        if (elem_dt.bits() < 8 && n > 1) {
+          const int packed_bits = n * elem_dt.bits();
+          ICHECK_EQ(packed_bits % 8, 0)
+              << "Sub-byte conditional vectors must cover whole bytes";
+          const int packed_bytes = packed_bits / 8;
+          std::string src_bytes = name_supply_->FreshName("_where_src");
+          std::string dst_bytes = name_supply_->FreshName("_where_dst");
+          PrintIndent();
+          stream << src_bytes << " = cute.recast_tensor(" << s
+                 << ", cutlass.Uint8)\n";
+          PrintIndent();
+          stream << dst_bytes << " = cute.recast_tensor(" << var
+                 << ", cutlass.Uint8)\n";
+          for (int i = 0; i < packed_bytes; ++i) {
+            PrintIndent();
+            stream << dst_bytes << "[" << i << "] = " << src_bytes << "[" << i
+                   << "]\n";
+          }
+        } else {
+          for (int i = 0; i < n; ++i) {
+            PrintIndent();
+            if (n == 1) {
+              stream << var << "[0] = " << s << "\n";
+            } else {
+              stream << var << "[" << i << "] = " << s << "[" << i << "]\n";
+            }
+          }
+        }
+        return var + ".load()";
+      };
+      DataType true_ty = true_expr.dtype().element_of();
+      DataType false_ty = false_expr.dtype().element_of();
+      std::string cond_tsa = as_tsa(cond_expr, 1, DataType::Bool());
+      std::string then_tsa = as_tsa(true_expr, lanes, true_ty);
+      std::string else_tsa = as_tsa(false_expr, lanes, false_ty);
+      if (true_ty != false_ty) {
+        DataType common =
+            (true_ty.bits() >= false_ty.bits()) ? true_ty : false_ty;
+        if (common.bits() < 32 && true_ty.is_float() && false_ty.is_float())
+          common = DataType::Float(32);
+        std::string common_str = DTypeToString(common);
+        then_tsa += ".to(" + common_str + ")";
+        else_tsa += ".to(" + common_str + ")";
+      }
+      std::string result = name_supply_->FreshName("_where");
+      PrintIndent();
+      stream << result << " = tl.where(" << cond_tsa << ", " << then_tsa << ", "
+             << else_tsa << ")\n";
+      // If the conditional was wrapped in a Cast, apply .to() on the result.
+      // tl.where() returns TensorSSA, and .to() on TensorSSA returns TensorSSA.
+      if (cast_to_dtype.bits() > 0) {
+        std::string cast_result = name_supply_->FreshName("_wcast");
+        PrintIndent();
+        stream << cast_result << " = " << result << ".to("
+               << DTypeToString(cast_to_dtype.element_of()) << ")\n";
+        value_str = cast_result;
+      } else {
+        value_str = result;
+      }
+      if (conditional_dtype.element_of().bits() < 8 &&
+          conditional_dtype.lanes() > 1) {
+        std::string tensor_result = name_supply_->FreshName("_where_tensor");
+        PrintIndent();
+        stream << tensor_result << " = tl.make_rmem_tensor(("
+               << conditional_dtype.lanes() << ",), "
+               << DTypeToString(conditional_dtype.element_of()) << ")\n";
+        PrintIndent();
+        stream << tensor_result << ".store(" << value_str << ")\n";
+        value_str = tensor_result;
+      }
     }
   } else {
     value_str = PrintExpr_(op->value);
@@ -1637,13 +2338,10 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
     }
 
     if (scope == "local") {
-      // For local rmem: use element-by-element assignment.
-      // A padded (aligned_lanes,) .store() writes beyond value_lanes
-      // elements, causing overlapping writes and OOB at the end of the
-      // rmem tensor.  And cute.assume with div_by=aligned_lanes silently
-      // truncates non-aligned offsets.  Element assignment (vid[i]=val)
-      // avoids both issues and does not trigger CuTeDSL's 32-bit
-      // alignment check that .store() enforces for FP8 types.
+      // For local rmem: use element-by-element assignment when the scalar
+      // element can be dereferenced.  Sub-byte types such as FP4 cannot be
+      // scalar-dereferenced by CuTeDSL, so move their packed byte storage
+      // through a Uint8 recast instead.
       PrimExpr scalar_base;
       if (value_lanes == element_dtype.lanes()) {
         scalar_base = index_expr * value_lanes;
@@ -1654,10 +2352,36 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
             << "Non-contiguous narrow-precision store not supported";
         scalar_base = ramp_base.Eval() * element_dtype.lanes();
       }
-      for (int i = 0; i < value_lanes; ++i) {
+      if (value_dtype.bits() < 8) {
+        const int packed_bits = value_lanes * value_dtype.bits();
+        ICHECK_EQ(packed_bits % 8, 0)
+            << "Sub-byte local vector stores must cover whole bytes";
+        const int packed_bytes = packed_bits / 8;
+        const int byte_lanes = 8 / value_dtype.bits();
+        std::string src_bytes = name_supply_->FreshName("_pstore_src");
+        std::string dst_view = name_supply_->FreshName("_pstore_view");
+        std::string dst_bytes = name_supply_->FreshName("_pstore_dst");
         PrintIndent();
-        stream << vid << "[" << PrintExpr_(scalar_base) << " + " << i
-               << "] = " << value_str << "[" << i << "]\n";
+        stream << src_bytes << " = cute.recast_tensor(" << value_str
+               << ", cutlass.Uint8)\n";
+        PrintIndent();
+        stream << dst_view << " = tl.make_tensor_at_offset(" << vid
+               << ".iterator, " << PrintExpr_(scalar_base) << ", ("
+               << value_lanes << ",), div_by=" << byte_lanes << ")\n";
+        PrintIndent();
+        stream << dst_bytes << " = cute.recast_tensor(" << dst_view
+               << ", cutlass.Uint8)\n";
+        for (int i = 0; i < packed_bytes; ++i) {
+          PrintIndent();
+          stream << dst_bytes << "[" << i << "] = " << src_bytes << "[" << i
+                 << "]\n";
+        }
+      } else {
+        for (int i = 0; i < value_lanes; ++i) {
+          PrintIndent();
+          stream << vid << "[" << PrintExpr_(scalar_base) << " + " << i
+                 << "] = " << value_str << "[" << i << "]\n";
+        }
       }
     } else {
       // For global/shared: use scalar element stores (works at any alignment).
@@ -1685,22 +2409,51 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
         ptr_str = ptr_os.str();
       }
 
-      // Create a tensor view and store each element individually
+      // Create a tensor view and store each element individually.  For
+      // sub-byte types, use a packed Uint8 view because CuTeDSL rejects scalar
+      // dereference of FP4/FP6 storage.
       std::string view_var = name_supply_->FreshName("_sview");
       PrintIndent();
-      stream << view_var << " = tl.make_tensor(" << ptr_str << " + "
-             << PrintExpr_(scalar_base) << ", (" << value_lanes << ",))\n";
-      for (int i = 0; i < value_lanes; ++i) {
+      if (value_dtype.bits() < 8) {
+        stream << view_var << " = tl.make_tensor_at_offset(" << ptr_str << ", "
+               << PrintExpr_(scalar_base) << ", (" << value_lanes
+               << ",), div_by=" << (8 / value_dtype.bits()) << ")\n";
+      } else {
+        stream << view_var << " = tl.make_tensor(" << ptr_str << " + "
+               << PrintExpr_(scalar_base) << ", (" << value_lanes << ",))\n";
+      }
+      if (value_dtype.bits() < 8) {
+        const int packed_bits = value_lanes * value_dtype.bits();
+        ICHECK_EQ(packed_bits % 8, 0)
+            << "Sub-byte vector stores must cover whole bytes";
+        const int packed_bytes = packed_bits / 8;
+        const int byte_lanes = 8 / value_dtype.bits();
+        std::string src_bytes = name_supply_->FreshName("_pstore_src");
+        std::string dst_bytes = name_supply_->FreshName("_pstore_dst");
         PrintIndent();
-        stream << view_var << "[" << i << "] = " << value_str << "[" << i
-               << "]\n";
+        stream << src_bytes << " = cute.recast_tensor(" << value_str
+               << ", cutlass.Uint8)\n";
+        PrintIndent();
+        stream << dst_bytes << " = cute.recast_tensor(" << view_var
+               << ", cutlass.Uint8)\n";
+        for (int i = 0; i < packed_bytes; ++i) {
+          PrintIndent();
+          stream << dst_bytes << "[" << i << "] = " << src_bytes << "[" << i
+                 << "]\n";
+        }
+      } else {
+        for (int i = 0; i < value_lanes; ++i) {
+          PrintIndent();
+          stream << view_var << "[" << i << "] = " << value_str << "[" << i
+                 << "]\n";
+        }
       }
     }
   } else if (value_lanes == element_dtype.lanes()) {
     std::string ref = GetBufferRef_(value_dtype, op->buffer.get(), index_expr);
-    PrintIndent();
 
     if (ref.back() != ')') {
+      PrintIndent();
       // Direct element assignment (e.g. vid[i] = value).
       // For conditionals (pre-computed as tl.where), extract scalar via [0].
       if (value_is_conditional && value_lanes == 1) {
@@ -1714,13 +2467,29 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
       // (TensorSSA) at the top. For other scalar expressions, wrap in
       // make_filled_tensor.
       std::string store_rhs = value_str;
-      if (!value_is_conditional && value_lanes == 1 &&
-          !op->value.as<BufferLoadNode>()) {
+      if (!value_is_conditional && value_lanes > 1 &&
+          !op->value.as<BufferLoadNode>() &&
+          (store_rhs.size() < 7 ||
+           store_rhs.compare(store_rhs.size() - 7, 7, ".load()") != 0)) {
+        std::string store_tensor = name_supply_->FreshName("_store_tensor");
+        PrintIndent();
+        stream << store_tensor << " = tl.make_rmem_tensor((" << value_lanes
+               << ",), " << DTypeToString(value_dtype.element_of()) << ")\n";
+        for (int i = 0; i < value_lanes; ++i) {
+          PrintIndent();
+          stream << store_tensor << "[" << i << "] = ";
+          PrintVecElemLoad_(store_rhs, value_dtype, i, stream);
+          stream << "\n";
+        }
+        store_rhs = store_tensor + ".load()";
+      } else if (!value_is_conditional && value_lanes == 1 &&
+                 !op->value.as<BufferLoadNode>()) {
         if (store_rhs.size() < 7 ||
             store_rhs.compare(store_rhs.size() - 7, 7, ".load()") != 0) {
           store_rhs = "tl.make_filled_tensor((1,), " + store_rhs + ").load()";
         }
       }
+      PrintIndent();
       stream << ref << ".store(" << RemoveOutermostParentheses(store_rhs)
              << ")\n";
     }
@@ -1786,6 +2555,9 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BindNode *op) {
     }
   }
 
+  if (IsZeroTensorLike(op->value, &zero_like_vars_)) {
+    zero_like_vars_.insert(op->var.get());
+  }
   CodeGenTileLangPY::VisitStmt_(op);
 }
 
@@ -1815,17 +2587,29 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocBufferNode *op) {
         << (opt_size.has_value() ? opt_size.value() : 0) << " for "
         << op->buffer->data->name_hint;
     size_t constant_size = static_cast<size_t>(opt_size.value());
+    const bool scalarized_vector_alloc =
+        (scope == "shared" || scope == "local") &&
+        alloc_dtype.is_fixed_length_vector();
+    DataType storage_dtype =
+        scalarized_vector_alloc ? alloc_dtype.element_of() : alloc_dtype;
+    size_t storage_size = constant_size;
+    if (scalarized_vector_alloc) {
+      storage_size *= static_cast<size_t>(alloc_dtype.lanes());
+    }
+    if ((scope == "shared" || scope == "local") && storage_dtype.bits() < 8) {
+      storage_size += static_cast<size_t>(32 / storage_dtype.bits() - 1);
+    }
 
     if (scope == "shared") {
       stream << vid << " = tl.make_tensor(tl.alloc_smem(";
-      PrintType(alloc_dtype, stream);
-      stream << ", " << constant_size << "), (" << constant_size << ",))\n";
+      PrintType(storage_dtype, stream);
+      stream << ", " << storage_size << "), (" << storage_size << ",))\n";
     } else if (scope == "shared.barrier" || scope == "shared.cluster_barrier") {
       stream << vid << " = tl.alloc_smem(cutlass.Uint64, size_in_elems="
              << constant_size << ")\n";
     } else if (scope == "local") {
-      stream << vid << " = tl.make_rmem_tensor((" << constant_size << "),";
-      PrintType(alloc_dtype, stream);
+      stream << vid << " = tl.make_rmem_tensor((" << storage_size << "),";
+      PrintType(storage_dtype, stream);
       stream << ")\n";
     } else if (scope == "local.var") {
       PrimExpr init = tirx::make_const(alloc_dtype, 0);
@@ -1843,13 +2627,19 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocBufferNode *op) {
     }
   }
 
-  RegisterHandleType_(op->buffer->data.get(), alloc_dtype);
+  DataType registered_dtype = ((scope == "shared" || scope == "local") &&
+                               alloc_dtype.is_fixed_length_vector())
+                                  ? alloc_dtype.element_of()
+                                  : alloc_dtype;
+  RegisterHandleType_(op->buffer->data.get(), registered_dtype);
 }
 
 void CodeGenTileLangCuTeDSL::VisitStmt_(const AttrStmtNode *op) {
   if (op->attr_key == tirx::attr::thread_extent) {
     IterVar iv = Downcast<IterVar>(op->node);
-    if (!iv->thread_tag.empty()) {
+    const std::string thread_tag =
+        !iv->thread_tag.empty() ? iv->thread_tag : iv->var->name_hint;
+    if (!thread_tag.empty()) {
       if (!var_idmap_.count(iv->var.get())) {
         BindThreadIndex_(iv);
       }
@@ -1970,20 +2760,44 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const ForNode *op) {
 }
 
 void CodeGenTileLangCuTeDSL::VisitStmt_(const SeqStmtNode *op) {
-  if (!in_break_loop_) {
-    // Normal path: delegate to base class
-    CodeGenTileLangPY::VisitStmt_(op);
-    return;
-  }
+  // CuTeDSL does not allow dynamic early returns. Convert
+  // `if cond: thread_return(); rest` into `if not cond: rest`.
+  std::vector<int> thread_return_guard_scopes;
 
-  // In a break loop: after visiting a statement that contains loop_break(),
-  // wrap the remaining statements in an `if _loop_break_N == 0:` guard
-  // so they don't execute in the same iteration after the break.
+  // In a break loop, after visiting a statement that contains loop_break(),
+  // wrap the remaining statements in an `if _loop_break_N == 0:` guard so they
+  // don't execute in the same iteration after the break.
   int guard_scope = -1;
   for (size_t i = 0; i < op->seq.size(); ++i) {
+    if (auto guarded_return = GetConditionalThreadReturn(op->seq[i])) {
+      if (guarded_return->pre_return) {
+        PrintIndent();
+        stream << "if "
+               << RemoveOutermostParentheses(
+                      PrintExpr_(guarded_return->condition))
+               << ":\n";
+        int pre_return_scope = BeginScope();
+        PrintStmt_(guarded_return->pre_return.value());
+        EndScope(pre_return_scope);
+      }
+      if (i + 1 < op->seq.size()) {
+        PrintIndent();
+        stream << "if not ("
+               << RemoveOutermostParentheses(
+                      PrintExpr_(guarded_return->condition))
+               << "):\n";
+        thread_return_guard_scopes.push_back(BeginScope());
+      }
+      continue;
+    }
+    if (IsThreadReturnEvaluate(op->seq[i])) {
+      break;
+    }
+
     break_emitted_in_seq_ = false;
     PrintStmt_(op->seq[i]);
-    if (break_emitted_in_seq_ && guard_scope < 0 && i + 1 < op->seq.size()) {
+    if (in_break_loop_ && break_emitted_in_seq_ && guard_scope < 0 &&
+        i + 1 < op->seq.size()) {
       // Insert guard for remaining statements
       PrintIndent();
       stream << "if _loop_break_" << current_break_id_ << " == 0:\n";
@@ -1993,6 +2807,10 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const SeqStmtNode *op) {
   }
   if (guard_scope >= 0) {
     EndScope(guard_scope);
+  }
+  for (auto it = thread_return_guard_scopes.rbegin();
+       it != thread_return_guard_scopes.rend(); ++it) {
+    EndScope(*it);
   }
 }
 
@@ -2029,12 +2847,19 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const EvaluateNode *op) {
   if (call && (call->op.same_as(tvm::tl::device_assert()))) {
     std::string cond = RemoveOutermostParentheses(PrintExpr_(call->args[0]));
     PrintIndent();
-    stream << "assert " << cond << "\n";
+    stream << "tl.runtime_assert(" << cond << ")\n";
   } else if (call && call->op.same_as(tvm::tl::device_assert_with_msg())) {
     std::string cond = RemoveOutermostParentheses(PrintExpr_(call->args[0]));
     std::string msg_expr = PrintExpr_(call->args[1]);
     PrintIndent();
-    stream << "assert " << cond << ", " << msg_expr << "\n";
+    stream << "tl.runtime_assert(" << cond << ", " << msg_expr << ")\n";
+  } else if (call && call->op.same_as(tvm::tl::sync_warp())) {
+    PrintIndent();
+    stream << "tl.sync_warp(";
+    if (!call->args.empty()) {
+      stream << PrintExpr_(call->args[0]);
+    }
+    stream << ")\n";
   } else if (call && call->op.same_as(builtin::tvm_storage_sync())) {
     PrintStorageSync_(call);
   } else {
@@ -2065,8 +2890,33 @@ void CodeGenTileLangCuTeDSL::PrintVecStore_(const BufferNode *buffer,
   ICHECK(!t.is_scalar()) << "PrintVecStore_() should not be used for scalar";
 
   std::string ref = GetBufferRef_(t, buffer, base);
+  std::string store_rhs = value;
+  if (t.element_of().bits() < 8) {
+    if (store_rhs.size() < 7 ||
+        store_rhs.compare(store_rhs.size() - 7, 7, ".load()") != 0) {
+      store_rhs += ".load()";
+    }
+    PrintIndent();
+    stream << ref << ".store(" << store_rhs << ")\n";
+    return;
+  }
+
+  if (store_rhs.size() < 7 ||
+      store_rhs.compare(store_rhs.size() - 7, 7, ".load()") != 0) {
+    std::string store_tensor = name_supply_->FreshName("_store_tensor");
+    PrintIndent();
+    stream << store_tensor << " = tl.make_rmem_tensor((" << t.lanes() << ",), "
+           << DTypeToString(t.element_of()) << ")\n";
+    for (int i = 0; i < t.lanes(); ++i) {
+      PrintIndent();
+      stream << store_tensor << "[" << i << "] = ";
+      PrintVecElemLoad_(store_rhs, t, i, stream);
+      stream << "\n";
+    }
+    store_rhs = store_tensor + ".load()";
+  }
   PrintIndent();
-  stream << ref << ".store(" << value << ")\n";
+  stream << ref << ".store(" << store_rhs << ")\n";
 }
 
 void CodeGenTileLangCuTeDSL::PrintVecBinaryOp_(const std::string &opstr,
@@ -2080,8 +2930,12 @@ void CodeGenTileLangCuTeDSL::PrintVecBinaryOp_(const std::string &opstr,
   PrintType(dtype.element_of(), stream);
   stream << ")\n";
 
-  std::string vlhs = SSAGetID(PrintExpr_(lhs), lhs.dtype());
-  std::string vrhs = SSAGetID(PrintExpr_(rhs), rhs.dtype());
+  auto print_operand = [this](const PrimExpr &expr) {
+    std::string value = PrintExpr_(expr);
+    return ContainsBufferLoad(expr) ? value : SSAGetID(value, expr.dtype());
+  };
+  std::string vlhs = print_operand(lhs);
+  std::string vrhs = print_operand(rhs);
 
   const std::string one_char_op{"+-*%<>^|&"};
   const std::string two_char_op{"// == != <= >="};
@@ -2198,9 +3052,9 @@ void CodeGenTileLangCuTeDSL::PrintCallExtern_(Type ret_type,
     global_symbol_str = "tl." + global_symbol_str;
     // Convert first argument (Buffer) to pointer for atomic operations
     if (const BufferLoadNode *load = args[arg_begin].as<BufferLoadNode>()) {
-      ICHECK_EQ(load->indices.size(), 1)
-          << "CodeGenTileLangCuTeDSL only supports flat memory";
-      sargs[0] = GetBufferPtr_(load->buffer.get(), load->indices[0]);
+      sargs[0] = GetBufferPtr_(
+          load->buffer.get(),
+          LinearizeBufferIndices_(load->buffer.get(), load->indices));
     }
   }
   // Quantization Functions (decode_i4u_to_f16, decode_i4s_to_f16, etc.)
@@ -2277,21 +3131,65 @@ void CodeGenTileLangCuTeDSL::PrintCallExtern_(Type ret_type,
   }
 }
 
+PrimExpr CodeGenTileLangCuTeDSL::LinearizeBufferIndices_(
+    const BufferNode *buffer, const ffi::Array<PrimExpr> &indices) {
+  ICHECK_GE(indices.size(), 1U)
+      << "Buffer access must have at least one index.";
+  if (indices.size() == 1 &&
+      (buffer->shape.size() != 1 || buffer->strides.empty() ||
+       indices[0].dtype().lanes() != 1)) {
+    return indices[0];
+  }
+
+  ICHECK_EQ(indices.size(), buffer->shape.size())
+      << "Buffer access rank " << indices.size()
+      << " does not match buffer rank " << buffer->shape.size() << " for "
+      << buffer->name;
+
+  DataType index_dtype = buffer->DefaultIndexType();
+  auto cast_index = [index_dtype](const PrimExpr &expr) -> PrimExpr {
+    return expr.dtype() == index_dtype ? expr : tirx::Cast(index_dtype, expr);
+  };
+
+  PrimExpr offset = tirx::make_const(index_dtype, 0);
+  if (!buffer->strides.empty()) {
+    ICHECK_EQ(buffer->strides.size(), indices.size())
+        << "Buffer stride rank " << buffer->strides.size()
+        << " does not match index rank " << indices.size() << " for "
+        << buffer->name;
+    for (size_t i = 0; i < indices.size(); ++i) {
+      offset = offset + cast_index(indices[i]) * cast_index(buffer->strides[i]);
+    }
+  } else {
+    PrimExpr stride = tirx::make_const(index_dtype, 1);
+    for (int i = static_cast<int>(indices.size()) - 1; i >= 0; --i) {
+      offset = offset + cast_index(indices[i]) * stride;
+      stride = stride * cast_index(buffer->shape[i]);
+    }
+  }
+  return arith::Analyzer().Simplify(offset);
+}
+
 std::string CodeGenTileLangCuTeDSL::GetBufferPtr_(const BufferNode *buffer,
                                                   PrimExpr index) {
   const VarNode *buffer_var = buffer->data.get();
   const std::string vid = GetVarID(buffer_var);
 
   DataType buffer_element_dtype = buffer->dtype;
+  std::string scope;
+  if (alloc_storage_scope_.count(buffer_var)) {
+    scope = alloc_storage_scope_.at(buffer_var);
+  }
+  if (scope.empty())
+    scope = GetPtrStorageScope(buffer->data);
+  const bool scalarized_local_vector_buffer =
+      (scope == "local" || scope == "shared") &&
+      buffer_element_dtype.is_fixed_length_vector();
   // CuTeDSL only supports i1 (Boolean) in rmem; use Uint8 for gmem pointers.
-  DataType effective_dtype = buffer_element_dtype;
+  DataType effective_dtype = scalarized_local_vector_buffer
+                                 ? buffer_element_dtype.element_of()
+                                 : buffer_element_dtype;
   if (buffer_element_dtype.is_bool()) {
-    std::string scope;
-    if (alloc_storage_scope_.count(buffer_var)) {
-      scope = alloc_storage_scope_.at(buffer_var);
-    }
-    if (scope.empty())
-      scope = GetPtrStorageScope(buffer->data);
     if (scope != "local" && scope != "local.var") {
       effective_dtype = DataType::UInt(8);
     }
@@ -2299,12 +3197,6 @@ std::string CodeGenTileLangCuTeDSL::GetBufferPtr_(const BufferNode *buffer,
   // shared.barrier and shared.cluster_barrier are allocated via tl.alloc_smem()
   // which returns _Pointer (not _Tensor), so it doesn't have .iterator — use
   // vid directly.
-  std::string scope;
-  if (alloc_storage_scope_.count(buffer_var)) {
-    scope = alloc_storage_scope_.at(buffer_var);
-  }
-  if (scope.empty())
-    scope = GetPtrStorageScope(buffer->data);
 
   std::string ptr_str;
   if (raw_pointer_vars_.count(buffer_var)) {
@@ -2328,6 +3220,10 @@ std::string CodeGenTileLangCuTeDSL::GetBufferPtr_(const BufferNode *buffer,
   }
 
   std::string index_str = PrintExpr_(index);
+  if (scalarized_local_vector_buffer) {
+    index_str = "(" + index_str + " * " +
+                std::to_string(buffer_element_dtype.lanes()) + ")";
+  }
   return "(" + ptr_str + " + " + index_str + ")";
 }
 
@@ -2369,9 +3265,14 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
   }
 
   DataType buffer_element_dtype = buffer->dtype;
+  const bool scalarized_local_vector_buffer =
+      (scope == "local" || scope == "shared") &&
+      buffer_element_dtype.is_fixed_length_vector();
   // CuTeDSL only supports i1 (Boolean) in rmem. For gmem/shared bool buffers,
   // use Uint8 instead (matches PyTorch's torch.bool memory layout).
-  DataType effective_dtype = buffer_element_dtype;
+  DataType effective_dtype = scalarized_local_vector_buffer
+                                 ? buffer_element_dtype.element_of()
+                                 : buffer_element_dtype;
   if (buffer_element_dtype.is_bool() && scope != "local" &&
       scope != "local.var") {
     effective_dtype = DataType::UInt(8);
@@ -2409,6 +3310,16 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
     }
   }
   const std::string index_str = PrintExpr_(offset_expr);
+  const std::string scalarized_index_str =
+      scalarized_local_vector_buffer
+          ? "(" + index_str + " * " +
+                std::to_string(buffer_element_dtype.lanes()) + ")"
+          : index_str;
+  const int scalarized_div_by =
+      scalarized_local_vector_buffer &&
+              buffer_element_dtype.element_of().bits() < 8
+          ? 8 / buffer_element_dtype.element_of().bits()
+          : buffer_element_dtype.lanes();
 
   if (t == buffer_element_dtype) {
     if (scope == "shared.barrier" || scope == "shared.cluster_barrier") {
@@ -2417,6 +3328,12 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
       // subscript access [i], but supports pointer arithmetic (ptr + i). Use
       // pointer addition instead of subscript.
       return "(" + vid + " + " + index_str + ")";
+    } else if (scalarized_local_vector_buffer) {
+      std::ostringstream os;
+      os << "tl.make_tensor_at_offset(" << vid << ".iterator, "
+         << scalarized_index_str << ", (" << buffer_element_dtype.lanes()
+         << ",), div_by=" << scalarized_div_by << ")";
+      return os.str();
     } else if (is_handle_type_match && buffer_element_dtype.is_scalar() &&
                (scope == "local" || scope == "shared")) {
       // Tensors in these scopes are allocated as one-dimensional, so can be
@@ -2429,7 +3346,7 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
     } else {
       std::ostringstream os;
       os << "tl.make_tensor_at_offset(" << ptr_str << ", " << index_str
-         << ", (1,), div_by=" << buffer_element_dtype.lanes() << ")";
+         << ", (1,), div_by=" << scalarized_div_by << ")";
       // for vector data types, ".load()" (added by BufferLoadNode) is neeed
       // instead of "[0]"
       if (buffer_element_dtype.is_scalar()) {
@@ -2437,15 +3354,23 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
       }
       return os.str();
     }
+  } else if (scalarized_local_vector_buffer &&
+             t == buffer_element_dtype.element_of()) {
+    return vid + "[" + index_str + "]";
   } else {
     const int num = t.bits() * t.lanes();
-    const int den = buffer_element_dtype.bits() * buffer_element_dtype.lanes();
+    DataType storage_element_dtype = scalarized_local_vector_buffer
+                                         ? buffer_element_dtype.element_of()
+                                         : buffer_element_dtype;
+    const int den =
+        storage_element_dtype.bits() * storage_element_dtype.lanes();
     ICHECK_EQ(num % den, 0) << "Cannot form view: bitwidth not divisible";
     int buffer_size = num / den;
 
     std::ostringstream os;
-    os << "tl.make_tensor_at_offset(" << ptr_str << ", " << index_str << ", ("
-       << buffer_size << ",), div_by=" << buffer_size << ")";
+    os << "tl.make_tensor_at_offset(" << ptr_str << ", "
+       << (scalarized_local_vector_buffer ? scalarized_index_str : index_str)
+       << ", (" << buffer_size << ",), div_by=" << buffer_size << ")";
     return os.str();
   }
 }
@@ -2453,7 +3378,8 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
 void CodeGenTileLangCuTeDSL::BindThreadIndex_(const IterVar &iv) {
   ICHECK(!var_idmap_.count(iv->var.get()));
 
-  auto &thread_tag = iv->thread_tag;
+  const std::string thread_tag =
+      !iv->thread_tag.empty() ? iv->thread_tag : iv->var->name_hint;
   ICHECK(thread_tag == "threadIdx.x" || thread_tag == "threadIdx.y" ||
          thread_tag == "threadIdx.z" || thread_tag == "blockIdx.x" ||
          thread_tag == "blockIdx.y" || thread_tag == "blockIdx.z");

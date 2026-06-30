@@ -58,20 +58,20 @@ public:
         .def_ro("n_warp", &GemmWarpPolicyNode::n_warp);
   }
 
-  std::pair<int, int> computeWarpPartition(int M, int N, int block_size,
+  std::pair<int, int> ComputeWarpPartition(int M, int N, int block_size,
                                            Target target,
                                            String gemm_inst) const;
 
-  bool isSquare() const {
+  bool IsSquare() const {
     return policy_type == int(GemmWarpPolicyType::kSquare);
   }
-  bool isFullRow() const {
+  bool IsFullRow() const {
     return policy_type == int(GemmWarpPolicyType::kFullRow);
   }
-  bool isFullCol() const {
+  bool IsFullCol() const {
     return policy_type == int(GemmWarpPolicyType::kFullCol);
   }
-  bool isFree() const { return policy_type == int(GemmWarpPolicyType::kFree); }
+  bool IsFree() const { return policy_type == int(GemmWarpPolicyType::kFree); }
 };
 
 class GemmWarpPolicy : public ObjectRef {
@@ -157,16 +157,16 @@ public:
         .def_ro("sfKStart", &GemmNode::sfKStart_);
   }
 
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
-  LayoutMap InferLayout(const LayoutInferArgs &T,
+  Stmt Lower(const LowerArgs &lower_args,
+             arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
   AccessRegions GetAccessRegions() const override;
 
   TileOperator Clone() const;
 
   // Target-specific GEMM instruction key.
-  String getGemmInstructionKey(int block_size, Target target) const;
-  String getGemmInstructionKind(int block_size, Target target) const;
+  String GetGemmInstructionKey(int block_size, Target target) const;
 
 private:
   mutable bool completed_ = false;
@@ -185,8 +185,6 @@ struct GemmImpl {
       Target target, String gemm_inst);
 
   bool (*reuse_existing_shared_layout)(String gemm_inst);
-
-  String (*instruction_kind)(String gemm_inst);
 };
 
 void RegisterGemmImpl(GemmImpl impl);

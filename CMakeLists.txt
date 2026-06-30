@@ -250,11 +250,12 @@ else()
 endif()
 
 # Configs
-set(TILELANG_BACKENDS CUDA ROCM METAL)
+set(TILELANG_BACKENDS CUDA ROCM METAL LLVM)
 
 set(TILELANG_BACKEND_DOC_CUDA "Enable CUDA backend (ON/OFF/or CUDA SDK path)")
 set(TILELANG_BACKEND_DOC_ROCM "Enable ROCm backend (ON/OFF/or ROCm SDK path)")
 set(TILELANG_BACKEND_DOC_METAL "Enable Metal backend")
+set(TILELANG_BACKEND_DOC_LLVM "Enable LLVM backend")
 
 # TVM's config.cmake redefines USE_* options later, so we cache the user's choice
 # (including explicit -DUSE_XXX arguments) before we include TVM and restore it
@@ -368,30 +369,14 @@ file(GLOB TILE_LANG_SRCS
   src/transform/common/*.cc
   src/transform/pipeline/*.cc
   src/op/*.cc
-  src/cpu/op/*.cc
-  src/cuda/op/copy_analysis.cc
-  src/metal/op/*.cc
-  src/webgpu/op/*.cc
   src/backend/common/target_utils.cc
   src/backend/common/codegen/codegen_utils.cc
   src/backend/common/codegen/codegen_c_host.cc
-  src/backend/common/codegen/codegen_c.cc
-  src/backend/common/codegen/rt_mod_c.cc
-  # intrin_rule doesn't have system dependency; always compiled regardless of backend
-  src/cuda/codegen/intrin_rule_cuda.cc
-  src/rocm/codegen/intrin_rule_hip.cc
 )
 
 # Always include CPU-safe runtime helpers
 list(APPEND TILE_LANG_SRCS
   src/runtime/error_helpers.cc
-)
-
-# Metal codegen is pure C++ (no Apple frameworks) and can generate Metal shader
-# source on any platform.  Always compile it so that "target.build.tilelang_metal"
-# is available for cross-compilation on Linux/Windows.
-list(APPEND TILE_LANG_SRCS
-  src/backend/common/codegen/codegen_metal.cc
 )
 # Track if the user explicitly selected a backend via cache options.
 set(TILELANG_BACKEND_USER_SELECTED OFF)
@@ -434,6 +419,16 @@ if(NOT TILELANG_BACKEND_USER_SELECTED)
     endif()
   endif()
 
+
+  if(DEFINED ENV{USE_LLVM})
+    set(_tilelang_backend_env_selected ON)
+    if($ENV{USE_LLVM})
+      set(USE_LLVM ON)
+    else()
+      set(USE_LLVM OFF)
+    endif()
+  endif()
+
   if(NOT _tilelang_backend_env_selected)
     if(APPLE)
       message(STATUS "Enable Metal support by default.")
@@ -451,9 +446,11 @@ endif()
 
 # Backend-local CMake files own native source lists, stubs, include paths, and
 # compile definitions. Top-level CMake only selects and delegates.
+include("${CMAKE_CURRENT_SOURCE_DIR}/src/cpu/CMakeLists.txt")
 include("${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/CMakeLists.txt")
 include("${CMAKE_CURRENT_SOURCE_DIR}/src/rocm/CMakeLists.txt")
 include("${CMAKE_CURRENT_SOURCE_DIR}/src/metal/CMakeLists.txt")
+include("${CMAKE_CURRENT_SOURCE_DIR}/src/webgpu/CMakeLists.txt")
 
 set(USE_Z3      ON CACHE STRING "Use Z3 SMT solver for TileLang optimizations")
 set(USE_PYPI_Z3 ON CACHE BOOL   "Use Z3 provided by PyPI z3-solver package")

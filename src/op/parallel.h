@@ -95,10 +95,11 @@ public:
   ParallelOpNode(For root);
 
   // Lower the operator to a TIR statement.
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
+  Stmt Lower(const LowerArgs &lower_args,
+             arith::Analyzer *analyzer) const override;
 
   // Infer the layout for this parallel operator.
-  LayoutMap InferLayout(const LayoutInferArgs &T,
+  LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
 
   // Copy constructor for ParallelOpNode.
@@ -148,25 +149,26 @@ private:
   // false. When throw_on_error is true, throws LayoutConflictException with
   // detailed error message on failure.
   bool ValidateCandidateAgainstFragments(
-      const Fragment &candidate, const LayoutInferArgs &T,
+      const Fragment &candidate, const LayoutInferArgs &layout_args,
       bool throw_on_error = false, bool check_forward_index = false,
       const Buffer &source_buffer = Buffer()) const;
   // Choose the better loop layout from two candidates using validation,
   // containment and replication heuristic.
   Fragment ChooseBestCandidate(const Fragment &candidate_from_buffer,
                                const Fragment &candidate_from_plan,
-                               const LayoutInferArgs &T) const;
+                               const LayoutInferArgs &layout_args) const;
   // (No helper needed anymore; annotations are parsed once in ctor and adopted
   // inside InferLayout.)
   // Compute loop layout from a source buffer's fragment mapping.
-  Fragment ComputeLoopLayoutFromBuffer(const Buffer &buffer,
-                                       const LayoutInferArgs &T) const;
+  Fragment
+  ComputeLoopLayoutFromBuffer(const Buffer &buffer,
+                              const LayoutInferArgs &layout_args) const;
   // Compute plan-based loop layout candidate using vectorization and thread
   // bounds.
-  Fragment ComputePlanCandidate(const LayoutInferArgs &T) const;
+  Fragment ComputePlanCandidate(const LayoutInferArgs &layout_args) const;
   // Add replication guard predicates when needed for cross-thread stores.
   void BuildReplicationGuardsIfNeeded(
-      const LayoutInferArgs &T,
+      const LayoutInferArgs &layout_args,
       const std::vector<Buffer> &store_shared_global_buffers,
       const std::vector<Buffer> &store_fragment_buffers,
       bool has_cross_thread_access,
