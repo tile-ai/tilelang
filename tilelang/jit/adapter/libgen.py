@@ -73,10 +73,14 @@ class LibraryGenerator:
                 ptxas_usage_level = int(ptxas_usage_level)
             cuda_library_flags = [f"-L{lib_dir}" for lib_dir in get_cuda_library_dirs()]
             target_arch, target_code = get_target_arch_and_code(target)
-            arch_flags = [f"-arch=sm_{target_arch}"]
             gencode_code = format_target_code_for_gencode(target_code)
-            if gencode_code is not None:
-                arch_flags = ["-gencode", f"arch=compute_{target_arch},code={gencode_code}"]
+            if gencode_code is None:
+                gencode_code = f"sm_{target_arch}"
+            # CUDA 13.1 expands `nvcc --shared -arch=sm_90a` through an sm_90
+            # PTX pass, which rejects Hopper-only instructions such as
+            # setmaxnreg. Use explicit gencode so shared-library compilation
+            # preserves the requested accelerated target.
+            arch_flags = ["-gencode", f"arch=compute_{target_arch},code={gencode_code}"]
 
             command = [
                 get_nvcc_compiler(),
