@@ -77,6 +77,9 @@ def tilelang_nvfp4_blockscaled_ws(
         C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
+            # Keep these allocations single-stage. T.Pipelined owns the
+            # multi-versioning for num_stages; adding an explicit leading
+            # num_stages dimension here would multiply the physical smem budget.
             A_shared = T.alloc_shared((block_M, block_K), in_dtype)
             B_shared = T.alloc_shared((block_N, block_K), in_dtype)
             SFA_shared = T.alloc_shared((block_M, sf_words_per_block_k), T.uint32)

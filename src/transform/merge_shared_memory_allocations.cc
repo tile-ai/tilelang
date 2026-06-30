@@ -73,7 +73,7 @@ static bool IsStaticSharedMemory(Var buffer_var) {
          storage_scope.tag.empty();
 }
 
-static DataType GetSizeDType(const Buffer &buffer) {
+static DataType GetStorageSizeExprDType(const Buffer &buffer) {
   DataType size_dtype = DataType::Int(32);
   if (!buffer->shape.empty()) {
     size_dtype = buffer->shape[0].dtype();
@@ -90,7 +90,7 @@ static bool EnableSM120CompactUnpackedFP4Shared() {
          !(value[0] == '0' && value[1] == '\0');
 }
 
-static int64_t GetStorageElementBits(DataType dtype) {
+static int64_t GetSharedStorageBitsPerLogicalElement(DataType dtype) {
   if (EnableSM120CompactUnpackedFP4Shared() &&
       dtype.is_float4_e2m1_unpacked()) {
     return 4 * dtype.lanes();
@@ -98,9 +98,15 @@ static int64_t GetStorageElementBits(DataType dtype) {
   return static_cast<int64_t>(dtype.bits()) * dtype.lanes();
 }
 
-static PrimExpr GetBufferStorageSizeBytes(const Buffer &buffer) {
-  DataType size_dtype = GetSizeDType(buffer);
-  int64_t element_bits = GetStorageElementBits(buffer->dtype);
+static PrimExpr GetSharedStorageSizeBytes(const Buffer &buffer) {
+  DataType size_dtype = GetStorageSizeExprDType(buffer);
+  int64_t element_bits = GetSharedStorageBitsPerLogicalElement(buffer->dtype);
+
+  // Buffer shapes are expressed in logical elements.  Do not use
+  // DataType::bytes() here: it rounds sub-byte scalar types up per element, so
+  // scalar packed FP4 would be charged as one byte per value instead of two
+  // values per byte.  Compute total bits first, then round the whole allocation
+  // up to bytes.
   PrimExpr size_bits = make_const(size_dtype, element_bits);
   for (const PrimExpr &extent : buffer->shape) {
     PrimExpr e = extent;
@@ -117,15 +123,12 @@ static PrimExpr GetBufferStorageSizeBytes(const Buffer &buffer) {
                   make_const(size_dtype, 8));
 }
 
-static PrimExpr ByteOffsetToElementOffset(const PrimExpr &byte_offset,
-                                          DataType dtype) {
-  int64_t element_bits = static_cast<int64_t>(dtype.bits()) * dtype.lanes();
-  return indexdiv(byte_offset * make_const(byte_offset.dtype(), 8),
-                  make_const(byte_offset.dtype(), element_bits));
-}
-
-static PrimExpr BufferIndexOffsetFromByteOffset(PrimExpr byte_offset,
-                                                DataType dtype) {
+static PrimExpr SharedByteOffsetToLogicalIndexOffset(PrimExpr byte_offset,
+                                                     DataType dtype) {
+  // buffer_byte_offsets_ stores byte offsets into the merged uint8 arena, but
+  // the non-alias rewrite still indexes the original typed buffer. Convert the
+  // byte offset back to that buffer's logical element index.  Packed scalar
+  // NVFP4 has two logical elements per byte.
   if (dtype.is_float4_e2m1fn() && dtype.is_scalar()) {
     return byte_offset * make_const(byte_offset.dtype(), 2);
   }
@@ -631,7 +634,7 @@ private:
 
     for (const VarNode *var : sorted_vars) {
       const AllocBufferNode *alloc = shmem_allocs_.at(var);
-      PrimExpr size_expr = GetBufferStorageSizeBytes(alloc->buffer);
+      PrimExpr size_expr = GetSharedStorageSizeBytes(alloc->buffer);
 
       int alignment = align_bytes_;
       auto align_it = shmem_alignment_map_.find(var);
@@ -671,7 +674,7 @@ private:
           if (alloc_it != shmem_allocs_.end()) {
             const AllocBufferNode *alloc = alloc_it->second;
             PrimExpr buffer_size_bytes =
-                GetBufferStorageSizeBytes(alloc->buffer);
+                GetSharedStorageSizeBytes(alloc->buffer);
             LOG(DEBUG) << "    Buffer: " << buffer_var_node->name_hint
                        << " (Type: " << alloc->buffer->dtype << ")"
                        << ", Start Offset: " << byte_offset
@@ -854,7 +857,7 @@ private:
     auto it = buffer_byte_offsets_.find(buffer_var.get());
     ICHECK(it != buffer_byte_offsets_.end())
         << "buffer_var = " << buffer_var->name_hint << ", dtype = " << dtype;
-    return BufferIndexOffsetFromByteOffset(it->second, dtype);
+    return SharedByteOffsetToLogicalIndexOffset(it->second, dtype);
   }
 
   bool HasBufferOffset(const Var &buffer_var) {
@@ -1460,14 +1463,15 @@ private:
       }
 
       const AllocBufferNode *alloc = shmem_allocs_.at(var);
-      PrimExpr size_expr = GetBufferStorageSizeBytes(alloc->buffer);
-      DataType size_dtype = GetSizeDType(alloc->buffer);
+      PrimExpr size_expr = GetSharedStorageSizeBytes(alloc->buffer);
+      DataType size_dtype = GetStorageSizeExprDType(alloc->buffer);
       info.size_dtype = size_dtype;
       info.size_expr = size_expr;
 
       auto const_size = GetRef<AllocBuffer>(alloc).ConstantAllocationSize();
       if (const_size.has_value()) {
-        int64_t element_bits = GetStorageElementBits(alloc->buffer->dtype);
+        int64_t element_bits =
+            GetSharedStorageBitsPerLogicalElement(alloc->buffer->dtype);
         info.const_size_bytes = (const_size.value() * element_bits + 7) / 8;
       }
 
