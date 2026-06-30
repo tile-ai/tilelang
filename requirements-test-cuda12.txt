@@ -1,9 +1,0 @@
-# Common CUDA test requirements
---requirement requirements-test-cuda.txt
-
-# CUDA 12 specific requirements
-cuda-python==12.9.4
-# CuTeDSL test environment. Version 4.5.0 is pinned to match the CUDA CI wheel
-# stack while covering PDL APIs introduced in 4.3.4. The backend runtime check
-# still accepts older compatible CuTeDSL versions.
-nvidia-cutlass-dsl==4.5.0
