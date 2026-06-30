@@ -1056,7 +1056,6 @@ __device__ void decode_i2b_to_i4s(T1 *_i2b, T2 *_i4s, const int N = 16)
     static constexpr uint immLut = (0xf0 & 0xcc) | 0xaa;
     static constexpr uint BOTTOM_MASK = 0x33333333;          // 0xf -> 0b1111 select 0,2,4,6,8,10,12
     static constexpr uint I4b_TO_I8s_MAGIC_NUM = 0x00000000; // 0
-    static constexpr uint MEDIAN_NUM = isSigned ? 0x33333333 : 0x00000000;
 
 #pragma unroll
     for (int i = 0; i < (N / 8); i++)
@@ -1067,9 +1066,9 @@ __device__ void decode_i2b_to_i4s(T1 *_i2b, T2 *_i4s, const int N = 16)
                      : "r"(i2b[i / 2] >> (2 * (i % 2))), "n"(BOTTOM_MASK), "n"(I4b_TO_I8s_MAGIC_NUM), "n"(immLut));
         if constexpr (isSigned)
         {
-            // TODO(lei): uint4 sub should be enhanced.
-            // 0x03 0x03 0x03 0x03
-            // i4s[i] = (((i4s[i] << 1) | i4s[i]) << 1) | i4s[i];
+            static constexpr uint SIGN_BIT_MASK = 0x22222222;
+            uint sign_bits = i4s[i] & SIGN_BIT_MASK;
+            i4s[i] |= (sign_bits << 1) | (sign_bits << 2);
         }
     }
 }
