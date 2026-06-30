@@ -218,6 +218,7 @@ def _run_regression_case(
     case_id: str,
     examples_root: str | os.PathLike[str] | None,
     repo_root: Path,
+    use_installed_package: bool,
 ) -> tuple[dict[str, object] | None, dict[str, object] | None]:
     script = Path(__file__).with_name("regression_all.py")
     cmd = [sys.executable, str(script), "--format", "rich-json", case_id]
@@ -225,8 +226,9 @@ def _run_regression_case(
         cmd.extend(["--examples-root", str(examples_root)])
 
     child_env = os.environ.copy()
-    pythonpath = child_env.get("PYTHONPATH", "")
-    child_env["PYTHONPATH"] = str(repo_root) if not pythonpath else str(repo_root) + os.pathsep + pythonpath
+    if not use_installed_package:
+        pythonpath = child_env.get("PYTHONPATH", "")
+        child_env["PYTHONPATH"] = str(repo_root) if not pythonpath else str(repo_root) + os.pathsep + pythonpath
 
     proc = subprocess.Popen(
         cmd,
@@ -339,6 +341,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--refresh", action="store_true", help="Rerun selected cases and overwrite cached results")
     parser.add_argument("--list", action="store_true", help="List selected cases and cache status without running")
     parser.add_argument("--fail-on-error", action="store_true", help="Exit non-zero if any selected case fails")
+    parser.add_argument(
+        "--use-installed-package",
+        action="store_true",
+        help="Do not prepend the repo root to child PYTHONPATH; use the package installed in the active environment.",
+    )
     parser.add_argument("--output", default=None, help="Write final JSON payload to this path")
     parser.add_argument("--format", choices=("markdown", "json"), default="markdown", help="Final stdout format")
     return parser.parse_args(argv)
@@ -376,7 +383,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             cache = _empty_cache(git_state, env_meta, env_key)
         for idx, case_id in enumerate(missing_case_ids, 1):
             print(f"\n[{idx}/{len(missing_case_ids)}] {case_id}")
-            run_data, failure = _run_regression_case(case_id, args.examples_root, repo_root)
+            run_data, failure = _run_regression_case(case_id, args.examples_root, repo_root, args.use_installed_package)
             if run_data is not None:
                 _merge_run_into_cache(cache, run_data)
             elif failure is not None:

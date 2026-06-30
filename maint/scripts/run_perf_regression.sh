@@ -25,11 +25,13 @@
 #   REGRESSION_THRESHOLD Speedup threshold for FAIL_ON_REGRESSION (default: 1.0)
 #   FAIL_ON_MISSING      Exit non-zero if one side is missing results when set to 1
 #   CMAKE_GENERATOR      CMake generator for package builds (default: Ninja)
+#   INHERIT_PYTHONPATH   Keep caller PYTHONPATH when set to 1 (default: 0)
+#   EXTRA_PYTHONPATH     PYTHONPATH to expose to regression/compare processes
 
 set -euo pipefail
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-    sed -n '1,35p' "$0"
+    sed -n '1,29p' "$0"
     exit 0
 fi
 
@@ -60,6 +62,8 @@ FAIL_ON_REGRESSION="${FAIL_ON_REGRESSION:-0}"
 REGRESSION_THRESHOLD="${REGRESSION_THRESHOLD:-1.0}"
 FAIL_ON_MISSING="${FAIL_ON_MISSING:-0}"
 UPDATE_SUBMODULES="${UPDATE_SUBMODULES:-1}"
+INHERIT_PYTHONPATH="${INHERIT_PYTHONPATH:-0}"
+EXTRA_PYTHONPATH="${EXTRA_PYTHONPATH:-}"
 
 mkdir -p "${WORK_DIR}"
 WORK_DIR="$(cd "${WORK_DIR}" && pwd)"
@@ -77,6 +81,20 @@ RESULT_PNG="${WORK_DIR}/regression_result.png"
 RESULT_JSON="${WORK_DIR}/regression_result.json"
 
 REGRESSION_ARGS=("$@")
+
+run_isolated_python() {
+    if [[ "${INHERIT_PYTHONPATH}" == "1" ]]; then
+        if [[ -n "${EXTRA_PYTHONPATH}" ]]; then
+            PYTHONPATH="${EXTRA_PYTHONPATH}${PYTHONPATH:+:${PYTHONPATH}}" "$@"
+        else
+            "$@"
+        fi
+    elif [[ -n "${EXTRA_PYTHONPATH}" ]]; then
+        PYTHONPATH="${EXTRA_PYTHONPATH}" "$@"
+    else
+        env -u PYTHONPATH "$@"
+    fi
+}
 
 handle_interrupt() {
     local status=$?
@@ -213,8 +231,10 @@ run_regression() {
     echo "============================================"
     (
         cd "${repo_dir}"
-        "${python_bin}" "${repo_dir}/maint/scripts/run_current_regression.py" \
+        run_isolated_python "${python_bin}" "${SCRIPT_DIR}/run_current_regression.py" \
             "${runner_flags[@]}" \
+            "--examples-root" "${repo_dir}/examples" \
+            "--use-installed-package" \
             "${REGRESSION_ARGS[@]}"
     )
 }
@@ -244,7 +264,7 @@ compare_results() {
     echo "============================================"
     echo "Comparing results"
     echo "============================================"
-    "${CURRENT_VENV}/bin/python" "${SCRIPT_DIR}/compare_perf_regression.py" "${compare_flags[@]}"
+    run_isolated_python "${CURRENT_VENV}/bin/python" "${SCRIPT_DIR}/compare_perf_regression.py" "${compare_flags[@]}"
 }
 
 fetch_baseline
