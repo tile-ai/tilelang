@@ -97,8 +97,6 @@ template <> struct is_void<const volatile void> : true_type {};
 
 template <class T> inline constexpr bool is_void_v = is_void<T>::value;
 
-template <class...> using void_t = void;
-
 template <class T> struct is_pointer : false_type {};
 
 template <class T> struct is_pointer<T *> : true_type {};
