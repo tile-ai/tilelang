@@ -57,12 +57,12 @@ the default is `auto`.
 export TILELANG_DEFAULT_TARGET=cuda
 ```
 
-For target options, use a dict-like string. This is useful in scripts that rely on the default target through
+For target options, use a JSON object string. This is useful in scripts that rely on the default target through
 `tilelang.compile(..., target=None)`, `@tilelang.jit`, or autotuning:
 
 ```bash
-export TILELANG_DEFAULT_TARGET='{kind: "cuda", arch: "sm_90"}'
-export TILELANG_DEFAULT_TARGET='{kind: "cuda", arch: "sm_100f", code: ["sm_100a", "sm_103a"]}'
+export TILELANG_DEFAULT_TARGET='{"kind": "cuda", "arch": "sm_90"}'
+export TILELANG_DEFAULT_TARGET='{"kind": "cuda", "arch": "sm_100f", "code": ["sm_100a", "sm_103a"]}'
 ```
 
 In Python code, prefer passing a real dictionary instead of a string:
