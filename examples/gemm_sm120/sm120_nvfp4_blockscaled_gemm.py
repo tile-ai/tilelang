@@ -1,8 +1,9 @@
 """SM120 NVFP4 block-scaled GEMM benchmark.
 
-This example runs TileLang's final SM120 NVFP4 block-scaled GEMM path:
-2-stage persistent pingpong, TMA A/B/SF loads, CUTLASS-style 128x4 scale
-storage, packed A/B shared storage, and the full-tile SM120 MMA lowering.
+This example runs TileLang's SM120 NVFP4 block-scaled GEMM benchmark.
+The user-facing surface is intentionally a single block-scaled GEMM entry;
+SM120-specific scale layout, TMA, and persistent scheduling details stay inside
+the implementation contract.
 
 It can optionally compare against the official CUTLASS GeForce NVFP4 example
 79a. Run from the repository root:
@@ -86,15 +87,15 @@ def _early_bench_options() -> argparse.Namespace:
 _EARLY_BENCH_OPTIONS = _early_bench_options()
 
 
-_FINAL_MICRO_PIPELINE = "sm120_backend_kblock_fulltile"
-_FINAL_WS2_SPLIT = "pp_stream_output_tma_panel32_pipe2"
-_FINAL_SCALE_LAYOUT = "cutlass_128x4"
-_FINAL_SCALE_LOAD = "tma"
-_FINAL_AB_SHARED_STORAGE = "packed"
-_FINAL_THREADS = 384
+_SM120_MICRO_PIPELINE = "sm120_backend_kblock_fulltile"
+_SM120_SCHEDULE = "pp_stream_output_tma_panel32_pipe2"
+_SM120_SCALE_LAYOUT = "cutlass_128x4"
+_SM120_SCALE_LOAD = "tma"
+_SM120_AB_SHARED_STORAGE = "packed"
+_SM120_THREADS = 384
 
 
-# Scale source contract for the final path:
+# Scale source contract for the SM120 optimized path:
 # - semantic SFA/SFB shape is [M or N, K / 64] uint32; each word packs four
 #   scale bytes for four consecutive K/16 groups.
 # - host storage is pre-swizzled per 128 rows x 4 words (K=256 tile):
@@ -112,7 +113,7 @@ def _device_compile_flags() -> list[str]:
     return flags
 
 
-def _manual_ws2_jit_pass_configs() -> dict:
+def _sm120_nvfp4_jit_pass_configs() -> dict:
     pass_configs = {}
     pass_configs[tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS] = _device_compile_flags()
     if _EARLY_BENCH_OPTIONS.ptxas_verbose:
@@ -122,9 +123,9 @@ def _manual_ws2_jit_pass_configs() -> dict:
 
 @tilelang.jit(
     out_idx=None,
-    pass_configs=_manual_ws2_jit_pass_configs(),
+    pass_configs=_sm120_nvfp4_jit_pass_configs(),
 )
-def tilelang_nvfp4_gemm_manual_ws2(
+def tilelang_nvfp4_blockscaled_gemm(
     M: int,
     N: int,
     K: int,
@@ -134,31 +135,15 @@ def tilelang_nvfp4_gemm_manual_ws2(
     num_stages: int,
     warp_policy,
     out_dtype,
-    micro_pipeline,
     producer_regs: int,
     consumer_regs: int,
-    sf_load_mode: str,
-    manual_ws2_split: str,
-    sf_layout: str,
-    ab_shared_storage: str,
 ):
-    """Final 2-stage persistent pingpong SM120 NVFP4 path.
+    """SM120 NVFP4 block-scaled GEMM implementation.
 
-    This benchmark intentionally keeps only the accepted performance contract:
-    pp_stream_output_tma_panel32_pipe2, TMA scale load, CUTLASS-style 128x4
-    scale source layout, packed A/B shared storage, and full-tile SM120 MMA.
+    This function has a compact external contract. The selected SM120
+    scheduling, scale-source layout, and MMA helper are fixed internally by
+    the SM120 implementation contract.
     """
-
-    if micro_pipeline != _FINAL_MICRO_PIPELINE:
-        raise ValueError(f"This benchmark only supports micro_pipeline={_FINAL_MICRO_PIPELINE!r}")
-    if sf_load_mode != _FINAL_SCALE_LOAD:
-        raise ValueError(f"This benchmark only supports sf_load_mode={_FINAL_SCALE_LOAD!r}")
-    if manual_ws2_split != _FINAL_WS2_SPLIT:
-        raise ValueError(f"This benchmark only supports manual_ws2_split={_FINAL_WS2_SPLIT!r}")
-    if sf_layout != _FINAL_SCALE_LAYOUT:
-        raise ValueError(f"This benchmark only supports sf_layout={_FINAL_SCALE_LAYOUT!r}")
-    if ab_shared_storage != _FINAL_AB_SHARED_STORAGE:
-        raise ValueError(f"This benchmark only supports ab_shared_storage={_FINAL_AB_SHARED_STORAGE!r}")
 
     assert M % block_M == 0
     assert N % block_N == 0
@@ -167,20 +152,17 @@ def tilelang_nvfp4_gemm_manual_ws2(
     assert block_K % 64 == 0
     assert num_stages >= 2
     in_dtype = T.float4_e2m1fn
-    ab_shared_dtype = T.float4_e2m1_unpacked if ab_shared_storage == "unpacked" else in_dtype
-    ab_swizzle_layout = os.environ.get("TL_SM120_WS2_AB_SWIZZLE_LAYOUT", "").strip()
-    if not ab_swizzle_layout and os.environ.get("TL_SM120_WS2_AB_TCGEN05_SWIZZLE") not in (None, "", "0"):
-        ab_swizzle_layout = "tcgen05"
-    if ab_swizzle_layout not in ("", "tcgen05", "wgmma", "full_bank", "generic"):
-        raise ValueError("TL_SM120_WS2_AB_SWIZZLE_LAYOUT must be one of: tcgen05, wgmma, full_bank, generic")
+    ab_shared_dtype = in_dtype
+    micro_pipeline = _SM120_MICRO_PIPELINE
+    sf_layout = _SM120_SCALE_LAYOUT
     accum_dtype = T.float32
     half_block_N = block_N // 2
     sf_granularity_k = 16
     sf_words_per_block_k = block_K // 64
 
-    if manual_ws2_split in (_FINAL_WS2_SPLIT,):
+    if _SM120_SCHEDULE == "pp_stream_output_tma_panel32_pipe2":
         if sf_words_per_block_k < 4:
-            raise ValueError("The final SM120 NVFP4 path requires block_K >= 256 for scale TMA")
+            raise ValueError("The SM120 NVFP4 optimized path requires block_K >= 256 for scale TMA")
         output_tma_panel32_pipe2 = True
         output_tma_epi64x32 = False
         tma_store_literal_copy = False
@@ -192,7 +174,7 @@ def tilelang_nvfp4_gemm_manual_ws2(
         epilogue_store_block_N = store_block_N
         epilogue_store_slots = 2
         if block_N != 128:
-            raise ValueError("The final SM120 NVFP4 path requires block_N=128")
+            raise ValueError("The SM120 NVFP4 optimized path requires block_N=128")
 
         sm_num = driver.get_num_sms()
         n_blocks = T.ceildiv(N, block_N)
@@ -215,34 +197,6 @@ def tilelang_nvfp4_gemm_manual_ws2(
                 B_shared = T.alloc_shared((num_stages, block_N, block_K), ab_shared_dtype)
                 SFA_shared = T.alloc_shared((num_stages, block_M, sf_words_per_block_k), T.uint32)
                 SFB_shared = T.alloc_shared((num_stages, block_N, sf_words_per_block_k), T.uint32)
-                if ab_swizzle_layout == "tcgen05":
-                    T.annotate_layout(
-                        {
-                            A_shared: tilelang.layout.make_tcgen05mma_swizzled_layout(A_shared),
-                            B_shared: tilelang.layout.make_tcgen05mma_swizzled_layout(B_shared),
-                        }
-                    )
-                elif ab_swizzle_layout == "wgmma":
-                    T.annotate_layout(
-                        {
-                            A_shared: tilelang.layout.make_wgmma_swizzled_layout(A_shared),
-                            B_shared: tilelang.layout.make_wgmma_swizzled_layout(B_shared),
-                        }
-                    )
-                elif ab_swizzle_layout == "full_bank":
-                    T.annotate_layout(
-                        {
-                            A_shared: tilelang.layout.make_full_bank_swizzled_layout(A_shared),
-                            B_shared: tilelang.layout.make_full_bank_swizzled_layout(B_shared),
-                        }
-                    )
-                elif ab_swizzle_layout == "generic":
-                    T.annotate_layout(
-                        {
-                            A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-                            B_shared: tilelang.layout.make_swizzled_layout(B_shared),
-                        }
-                    )
                 if literal_panel_store or panel32_tma_store or panel64_tma_store:
                     C_shared = T.alloc_shared((epilogue_store_slots, epilogue_store_block_M, epilogue_store_block_N), out_dtype)
 
@@ -1345,7 +1299,7 @@ def run_tilelang(args: argparse.Namespace) -> tuple[float, float]:
     out_torch_dtype = torch.bfloat16 if args.out_dtype == "bfloat16" else torch.float32
     warp_policy = getattr(T.GemmWarpPolicy, args.warp_policy)
 
-    kernel = tilelang_nvfp4_gemm_manual_ws2(
+    kernel = tilelang_nvfp4_blockscaled_gemm(
         args.m,
         args.n,
         args.k,
@@ -1355,13 +1309,8 @@ def run_tilelang(args: argparse.Namespace) -> tuple[float, float]:
         args.num_stages,
         warp_policy,
         out_dtype,
-        _FINAL_MICRO_PIPELINE,
         args.producer_regs,
         args.consumer_regs,
-        _FINAL_SCALE_LOAD,
-        _FINAL_WS2_SPLIT,
-        _FINAL_SCALE_LAYOUT,
-        _FINAL_AB_SHARED_STORAGE,
     )
 
     source = kernel.get_kernel_source()
@@ -1385,7 +1334,7 @@ def run_tilelang(args: argparse.Namespace) -> tuple[float, float]:
         kernel.compile_flags = saved_compile_flags
         print(f"TileLang SASS: {sass_path}")
     if "sm120_mma_blockscaled_kblock_fulltile" not in source:
-        raise RuntimeError("TileLang source did not lower to the final SM120 full-tile MMA helper")
+        raise RuntimeError("TileLang source did not lower to the SM120 full-tile MMA helper")
 
     if args.input_mode == "ones":
         A = _make_ones_packed_fp4(args.m, args.k)
@@ -1615,16 +1564,13 @@ def main() -> None:
     print(f"Shape: M={args.m}, N={args.n}, K={args.k}")
     print(
         f"TileLang tile: {args.block_m}x{args.block_n}x{args.block_k}, "
-        f"threads={_FINAL_THREADS}, policy={args.warp_policy}, output={args.out_dtype}, "
+        f"threads={_SM120_THREADS}, policy={args.warp_policy}, output={args.out_dtype}, "
         f"input_mode={args.input_mode}, scale_mode={args.scale_mode}"
     )
     print(
-        "TileLang final path: "
-        f"split={_FINAL_WS2_SPLIT}, sf_load={_FINAL_SCALE_LOAD}, "
-        f"sf_layout={_FINAL_SCALE_LAYOUT}, ab_shared={_FINAL_AB_SHARED_STORAGE}, "
-        f"micro_pipeline={_FINAL_MICRO_PIPELINE}, "
-        f"producer_regs={args.producer_regs}, consumer_regs={args.consumer_regs}, "
-        f"maxrregcount={args.maxrregcount}"
+        "TileLang SM120 block-scaled path: "
+        f"scale_layout={_SM120_SCALE_LAYOUT}, producer_regs={args.producer_regs}, "
+        f"consumer_regs={args.consumer_regs}, maxrregcount={args.maxrregcount}"
     )
 
     tilelang_latency_ms, tilelang_tflops = run_tilelang(args)
