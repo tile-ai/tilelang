@@ -16,6 +16,9 @@ from tilelang.backend.target import (
     determine_target,
     list_target_detectors,
     register_target_detector,
+    register_target_normalizer,
+    unregister_target_detector,
+    unregister_target_normalizer,
 )
 
 
@@ -106,6 +109,31 @@ def test_auto_target_detector_falls_through_none_result():
     finally:
         target_registry._TARGET_DETECTORS.clear()
         target_registry._TARGET_DETECTORS.update(old_detectors)
+
+
+def test_target_registry_unregister_removes_specs():
+    detector_name = "unit-detector-remove"
+    normalizer_name = "unit-normalizer-remove"
+    old_detectors = dict(target_registry._TARGET_DETECTORS)
+    old_normalizers = dict(target_registry._TARGET_NORMALIZERS)
+    try:
+        register_target_detector(detector_name, lambda: "llvm", override=True)
+        register_target_normalizer(normalizer_name, lambda target: None, override=True)
+
+        detector_spec = unregister_target_detector(detector_name)
+        normalizer_spec = unregister_target_normalizer(normalizer_name)
+
+        assert detector_spec is not None
+        assert detector_spec.name == detector_name
+        assert normalizer_spec is not None
+        assert normalizer_spec.name == normalizer_name
+        assert unregister_target_detector(detector_name) is None
+        assert unregister_target_normalizer(normalizer_name) is None
+    finally:
+        target_registry._TARGET_DETECTORS.clear()
+        target_registry._TARGET_DETECTORS.update(old_detectors)
+        target_registry._TARGET_NORMALIZERS.clear()
+        target_registry._TARGET_NORMALIZERS.update(old_normalizers)
 
 
 def test_execution_backend_registry_resolves_target_policy():

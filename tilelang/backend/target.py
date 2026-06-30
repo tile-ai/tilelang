@@ -42,6 +42,10 @@ def register_target_detector(
     return spec
 
 
+def unregister_target_detector(name: str) -> TargetDetectorSpec | None:
+    return _TARGET_DETECTORS.pop(name, None)
+
+
 def register_target_normalizer(
     name: str,
     normalize: TargetNormalizer,
@@ -53,6 +57,10 @@ def register_target_normalizer(
     spec = TargetNormalizerSpec(name=name, normalize=normalize)
     _TARGET_NORMALIZERS[name] = spec
     return spec
+
+
+def unregister_target_normalizer(name: str) -> TargetNormalizerSpec | None:
+    return _TARGET_NORMALIZERS.pop(name, None)
 
 
 def _normalize_registered_target(target: TargetLike) -> TargetInput | None:

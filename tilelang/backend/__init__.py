@@ -31,6 +31,8 @@ from .target import (  # noqa: F401
     list_target_detectors,
     register_target_detector,
     register_target_normalizer,
+    unregister_target_detector,
+    unregister_target_normalizer,
 )
 
 register_lazy_execution_backends("cuda", "tilelang.cuda.execution_backend")
