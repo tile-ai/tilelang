@@ -33,10 +33,6 @@ struct SM120MmaBlockScaledConfig<SM120MmaBlockScaledKind::kMxf4nvf4, 4,
 
 namespace detail {
 
-TL_DEVICE uint32_t sm120_smem_addr(void const *const smem_ptr) {
-  return smem_ptr_to_uint(smem_ptr);
-}
-
 TL_DEVICE uint32_t sm120_cutlass_128x4_sf_word(uint32_t idx, uint32_t ki) {
   return ki * 128u + (idx & 31u) * 4u + (idx >> 5);
 }
@@ -57,7 +53,7 @@ TL_DEVICE void sm120_ldscale_v4_u32(void const *const smem_ptr, uint32_t &d0,
                                     uint32_t &d1, uint32_t &d2, uint32_t &d3) {
   asm volatile("ld.shared.v4.u32 {%0, %1, %2, %3}, [%4];\n"
                : "=r"(d0), "=r"(d1), "=r"(d2), "=r"(d3)
-               : "r"(sm120_smem_addr(smem_ptr)));
+               : "r"(smem_ptr_to_uint(smem_ptr)));
 }
 
 TL_DEVICE uint32_t sm120_select4_u32(uint32_t v0, uint32_t v1, uint32_t v2,
@@ -70,6 +66,11 @@ TL_DEVICE uint32_t sm120_broadcast_u8_from_u32(uint32_t word, uint32_t idx) {
   return byte * 0x01010101u;
 }
 
+// SM120 blockscaled fulltile kernels precompute some shared-memory addresses
+// and keep operand fragments in named scalar registers. The generic
+// ptx_ldmatrix_x4(void*, void*) helper takes a C++ pointer and a contiguous
+// local buffer, so keep this address-register/scalar-register form local to the
+// SM120 operand-package helpers.
 TL_DEVICE void sm120_ldmatrix_x4_u32_addr(uint32_t smem_int_ptr, uint32_t &d0,
                                           uint32_t &d1, uint32_t &d2,
                                           uint32_t &d3) {
@@ -960,18 +961,18 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile(
 #if defined(TL_SM120_FULLTILE_AFULL_B_PANEL_ADDRS)
 #if defined(TL_SM120_FULLTILE_CUTE_ROWSTART) ||                                \
     defined(TL_SM120_FULLTILE_CUTE_ROWSTART_B)
-  uint32_t const b_panel_0_addr = detail::sm120_smem_addr(b_cute_n0 + 0);
+  uint32_t const b_panel_0_addr = smem_ptr_to_uint(b_cute_n0 + 0);
   uint32_t const b_panel_1_addr =
-      detail::sm120_smem_addr(b_cute_n0 + kCuteKAtomStride);
+      smem_ptr_to_uint(b_cute_n0 + kCuteKAtomStride);
   uint32_t const b_panel_2_addr =
-      detail::sm120_smem_addr(b_cute_n0 + 2 * kCuteKAtomStride);
+      smem_ptr_to_uint(b_cute_n0 + 2 * kCuteKAtomStride);
   uint32_t const b_panel_3_addr =
-      detail::sm120_smem_addr(b_cute_n0 + 3 * kCuteKAtomStride);
+      smem_ptr_to_uint(b_cute_n0 + 3 * kCuteKAtomStride);
 #else
-  uint32_t const b_panel_0_addr = detail::sm120_smem_addr(b_smem_0);
-  uint32_t const b_panel_1_addr = detail::sm120_smem_addr(b_smem_1);
-  uint32_t const b_panel_2_addr = detail::sm120_smem_addr(b_smem_2);
-  uint32_t const b_panel_3_addr = detail::sm120_smem_addr(b_smem_3);
+  uint32_t const b_panel_0_addr = smem_ptr_to_uint(b_smem_0);
+  uint32_t const b_panel_1_addr = smem_ptr_to_uint(b_smem_1);
+  uint32_t const b_panel_2_addr = smem_ptr_to_uint(b_smem_2);
+  uint32_t const b_panel_3_addr = smem_ptr_to_uint(b_smem_3);
 #endif
 #endif
 
