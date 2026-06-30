@@ -22,6 +22,29 @@ from tilelang.transform import PassConfigKey
 CompileUnitResult = tuple[int, dict[str, Any], JITKernel | None, Exception | None]
 
 
+def _merge_pass_configs_into_compile_args(
+    base: CompileArgs,
+    per_config_pass_configs: dict[str, Any] | None,
+) -> CompileArgs:
+    """Merge per-config pass_configs over global CompileArgs defaults.
+
+    If *per_config_pass_configs* is None or empty, returns *base* unchanged.
+    Otherwise returns a new CompileArgs with merged pass_configs.
+    """
+    if not per_config_pass_configs:
+        return base
+    merged = dict(base.pass_configs or {})
+    merged.update(per_config_pass_configs)
+    return CompileArgs(
+        out_idx=base.out_idx,
+        execution_backend=base.execution_backend,
+        target=base.target,
+        target_host=base.target_host,
+        verbose=base.verbose,
+        pass_configs=merged,
+    )
+
+
 def compile_grouped_unit_tvm_ffi(
     unit_items: list[tuple[int, dict[str, Any]]],
     compile_args: CompileArgs,
@@ -37,7 +60,36 @@ def compile_grouped_unit_tvm_ffi(
     5. Construct per-config JITKernel objects that share the grouped device module.
     """
 
-    pass_configs = dict(compile_args.pass_configs) if compile_args.pass_configs else {}
+    # Extract per-config pass_configs and check uniformity
+    per_config_pass_configs_list = []
+    for _, config_arg in unit_items:
+        per_config_pass_configs_list.append(config_arg.pop("__pass_configs__", None))
+
+    # Determine if all per-config pass_configs are the same
+    # Normalize: treat None and {} (empty dict) as equivalent "no config"
+    normalized_list = [pc if pc else None for pc in per_config_pass_configs_list]
+    has_uniform_pass_configs = all(
+        pc == normalized_list[0] for pc in normalized_list[1:]
+    )
+
+    if not has_uniform_pass_configs:
+        # Fall back to per-config compilation when pass_configs differ
+        unit_results: list[CompileUnitResult] = []
+        for (idx, config_arg), per_pc in zip(unit_items, per_config_pass_configs_list):
+            try:
+                effective_compile_args = _merge_pass_configs_into_compile_args(compile_args, per_pc)
+                program = elaborate_func(**config_arg)
+                jit_kernel = effective_compile_args.compile_program(program)
+                unit_results.append((idx, config_arg, jit_kernel, None))
+            except Exception as e:
+                unit_results.append((idx, config_arg, None, e))
+        return unit_results
+
+    # Resolve effective pass_configs for the uniform case
+    uniform_per_config_pc = normalized_list[0] if normalized_list else None
+    effective_compile_args = _merge_pass_configs_into_compile_args(compile_args, uniform_per_config_pc)
+    pass_configs = dict(effective_compile_args.pass_configs) if effective_compile_args.pass_configs else {}
+
     pass_instruments = []
     if pass_configs.get(PassConfigKey.TL_ENABLE_DUMP_IR):
         dump_ir_path = pass_configs.get(PassConfigKey.TL_DUMP_IR_DIR, "./dump_ir")
