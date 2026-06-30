@@ -162,10 +162,9 @@ jobs:
               exit 1
             fi
             case "${NVCC_VERSION%%.*}" in
-              12) CUDA_VERSION="12.8" ;;
               13) CUDA_VERSION="13.0" ;;
               *)
-                echo "::error::Unsupported CUDA version for CUDA-auto: ${NVCC_VERSION}"
+                echo "::error::CUDA-auto requires a CUDA 13 runner, but nvcc reported ${NVCC_VERSION}."
                 exit 1
                 ;;
             esac
