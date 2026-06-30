@@ -33,7 +33,6 @@ def matmul(
         C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-            T.disable_warp_group_reg_alloc()
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -82,7 +81,6 @@ def matmu_jit_kernel(
         C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-            T.disable_warp_group_reg_alloc()
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
