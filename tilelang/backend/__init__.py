@@ -29,6 +29,7 @@ from .execution_backend import (  # noqa: F401
 from .target import (  # noqa: F401
     auto_detect_target,
     list_target_detectors,
+    list_target_normalizers,
     register_target_detector,
     register_target_normalizer,
 )

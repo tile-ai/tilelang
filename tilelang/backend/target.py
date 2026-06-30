@@ -82,6 +82,10 @@ def list_target_detectors() -> tuple[str, ...]:
     return tuple(_TARGET_DETECTORS)
 
 
+def list_target_normalizers() -> tuple[str, ...]:
+    return tuple(_TARGET_NORMALIZERS)
+
+
 def _validate_manual_target(target: TargetLike) -> TargetInput:
     normalized = _normalize_registered_target(target)
     if normalized is not None:

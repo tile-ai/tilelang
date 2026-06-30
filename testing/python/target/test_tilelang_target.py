@@ -15,7 +15,9 @@ from tilelang.backend.target import (
     auto_detect_target,
     determine_target,
     list_target_detectors,
+    list_target_normalizers,
     register_target_detector,
+    register_target_normalizer,
 )
 
 
@@ -106,6 +108,19 @@ def test_auto_target_detector_falls_through_none_result():
     finally:
         target_registry._TARGET_DETECTORS.clear()
         target_registry._TARGET_DETECTORS.update(old_detectors)
+
+
+def test_target_normalizer_registry_lists_registered_names():
+    name = "unit-normalizer-list"
+    old_normalizers = dict(target_registry._TARGET_NORMALIZERS)
+    try:
+        target_registry._TARGET_NORMALIZERS.clear()
+        register_target_normalizer(name, lambda target: None, override=True)
+
+        assert list_target_normalizers() == (name,)
+    finally:
+        target_registry._TARGET_NORMALIZERS.clear()
+        target_registry._TARGET_NORMALIZERS.update(old_normalizers)
 
 
 def test_execution_backend_registry_resolves_target_policy():
