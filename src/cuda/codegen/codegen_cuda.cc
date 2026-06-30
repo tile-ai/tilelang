@@ -2052,9 +2052,6 @@ void CodeGenTileLangCUDA::PrintCallExtern(Type ret_type, String global_symbol,
                                           const Array<PrimExpr> &args,
                                           bool skip_first_arg,
                                           std::ostream &os) { // NOLINT(*)
-  if (NeedsCutlassFastMathHeader(global_symbol)) {
-    need_math_h_ = true;
-  }
   if (global_symbol == "tl::prefetch_tma_descriptor") {
     need_copy_sm90_h_ = true;
   }
