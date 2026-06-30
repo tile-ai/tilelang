@@ -23,14 +23,21 @@ def test_tilelang_does_not_export_target_wrapper():
     assert not hasattr(tilelang, "Target")
 
 
-def test_default_target_env_accepts_dict_like_string(monkeypatch):
-    monkeypatch.setenv("TILELANG_DEFAULT_TARGET", '{kind: "cuda", "arch": "sm_100f", code: ["sm_100a", "sm_103a"]}')
+def test_default_target_env_accepts_json_string(monkeypatch):
+    monkeypatch.setenv("TILELANG_DEFAULT_TARGET", '{"kind": "cuda", "arch": "sm_100f", "code": ["sm_100a", "sm_103a"]}')
 
     assert tilelang.env.get_default_target() == {
         "kind": "cuda",
         "arch": "sm_100f",
         "code": ["sm_100a", "sm_103a"],
     }
+
+
+def test_default_target_env_rejects_unquoted_json_keys(monkeypatch):
+    monkeypatch.setenv("TILELANG_DEFAULT_TARGET", '{kind: "cuda", arch: "sm_100f"}')
+
+    with pytest.raises(ValueError, match="Use JSON syntax"):
+        tilelang.env.get_default_target()
 
 
 def test_default_target_env_keeps_plain_string(monkeypatch):
