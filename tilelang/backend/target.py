@@ -64,8 +64,10 @@ def _normalize_registered_target(target: TargetLike) -> TargetInput | None:
 
 
 def auto_detect_target() -> TargetInput:
+    tried: list[str] = []
     errors: list[str] = []
     for spec in _TARGET_DETECTORS.values():
+        tried.append(spec.name)
         try:
             detected = spec.detect()
         except Exception as err:
@@ -74,7 +76,9 @@ def auto_detect_target() -> TargetInput:
         if detected is not None:
             return detected
 
-    details = f" Tried: {', '.join(errors)}." if errors else ""
+    details = f" Tried detectors: {', '.join(tried)}." if tried else ""
+    if errors:
+        details += f" Detector errors: {'; '.join(errors)}."
     raise ValueError(f"No registered target detector found an available target.{details}")
 
 

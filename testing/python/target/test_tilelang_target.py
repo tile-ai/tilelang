@@ -108,6 +108,33 @@ def test_auto_target_detector_falls_through_none_result():
         target_registry._TARGET_DETECTORS.update(old_detectors)
 
 
+def test_auto_target_error_lists_none_detectors():
+    old_detectors = dict(target_registry._TARGET_DETECTORS)
+    try:
+        target_registry._TARGET_DETECTORS.clear()
+        register_target_detector("unit-none-a", lambda: None, override=True)
+        register_target_detector("unit-none-b", lambda: None, override=True)
+
+        with pytest.raises(ValueError, match="Tried detectors: unit-none-a, unit-none-b"):
+            auto_detect_target()
+    finally:
+        target_registry._TARGET_DETECTORS.clear()
+        target_registry._TARGET_DETECTORS.update(old_detectors)
+
+
+def test_auto_target_error_includes_detector_exception():
+    old_detectors = dict(target_registry._TARGET_DETECTORS)
+    try:
+        target_registry._TARGET_DETECTORS.clear()
+        register_target_detector("unit-error", lambda: (_ for _ in ()).throw(RuntimeError("boom")), override=True)
+
+        with pytest.raises(ValueError, match="Detector errors: unit-error: boom"):
+            auto_detect_target()
+    finally:
+        target_registry._TARGET_DETECTORS.clear()
+        target_registry._TARGET_DETECTORS.update(old_detectors)
+
+
 def test_execution_backend_registry_resolves_target_policy():
     target_kind = "llvm"
     target = Target({"kind": target_kind})
