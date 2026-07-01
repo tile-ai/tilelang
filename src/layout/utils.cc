@@ -341,6 +341,55 @@ std::pair<PrimExpr, IterVar> CompressIterator(const PrimExpr &expr,
   return {reaplced, new_iter_var};
 }
 
+std::pair<PrimExpr, IterVar>
+CollapseDeadReduceResidue(const PrimExpr &expr, const IterVar &iv,
+                          const Array<IterVar> input_iters, const Var &orig_var,
+                          arith::Analyzer *analyzer) {
+  const int64_t *extent_ptr = as_const_int(iv->dom->extent);
+  if (!extent_ptr || *extent_ptr <= 1)
+    return {expr, iv};
+
+  // Bind the iter ranges first so the invariance proof is deterministic --
+  // otherwise CanProveEqual depends on accumulated analyzer state and the
+  // collapse becomes order-dependent across reduce ops.
+  for (const auto &input_iv : input_iters)
+    analyzer->Bind(input_iv->var, input_iv->dom, /*allow_override=*/true);
+  analyzer->Bind(iv->var, iv->dom, /*allow_override=*/true);
+
+  PrimExpr cur_expr = expr;
+  Var cur_var = iv->var;
+  PrimExpr cur_extent = iv->dom->extent;
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    const int64_t *ext_ptr = as_const_int(cur_extent);
+    if (!ext_ptr || *ext_ptr <= 1)
+      break;
+    int64_t E = *ext_ptr;
+    for (int64_t S = E; S >= 2; --S) {
+      if (E % S != 0)
+        continue;
+      PrimExpr s_const = make_const(cur_var.dtype(), S);
+      PrimExpr masked = FloorDiv(cur_var, s_const) * s_const;
+      PrimExpr probe =
+          analyzer->Simplify(Substitute(cur_expr, {{cur_var, masked}}));
+      if (analyzer->CanProveEqual(probe, cur_expr)) {
+        auto nv = Var(orig_var->name_hint, orig_var->type_annotation);
+        cur_expr =
+            analyzer->Simplify(Substitute(cur_expr, {{cur_var, nv * s_const}}));
+        cur_var = nv;
+        cur_extent = make_const(cur_extent.dtype(), E / S);
+        changed = true;
+        break;
+      }
+    }
+  }
+  if (cur_var.same_as(iv->var))
+    return {expr, iv};
+  return {cur_expr,
+          IterVar(Range(0, cur_extent), cur_var, IterVarType::kDataPar)};
+}
+
 Array<IterVar> ToIterVars(const Map<Var, Range> &vmap) {
   Array<IterVar> result;
   for (const auto &[var, range] : vmap) {

@@ -50,6 +50,25 @@ std::pair<PrimExpr, IterVar> CompressIterator(const PrimExpr &expr,
                                               arith::Analyzer *analyzer);
 
 /*!
+ * \brief Drop residues of a compressed reduce var that provably do not affect
+ * the rebuilt index expression (absorbed by an outer floordiv): iterating them
+ * re-reads the same element and over-counts additive reductions. Reduction-
+ * specific post-pass over the output of \ref CompressIterator; no-op when there
+ * is no dead residue.
+ *
+ *  \param expr        The compressed index expression from CompressIterator.
+ *  \param iv          The compressed IterVar from CompressIterator.
+ *  \param input_iters The input iter ranges (bound so the invariance proof is
+ *                     deterministic, independent of accumulated analyzer
+ * state).
+ *  \param orig_var    The original reduce var, used only for naming.
+ */
+std::pair<PrimExpr, IterVar>
+CollapseDeadReduceResidue(const PrimExpr &expr, const IterVar &iv,
+                          const Array<IterVar> input_iters, const Var &orig_var,
+                          arith::Analyzer *analyzer);
+
+/*!
  * \brief Convert the iter splits returned by DivideUnusedIterators into
  * flattened expression
  *
