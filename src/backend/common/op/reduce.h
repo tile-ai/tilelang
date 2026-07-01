@@ -404,6 +404,8 @@ template <typename Impl> struct ReduceLowerer {
       for (size_t i = 0; i < src_layout->OutputDim(); ++i) {
         auto [expr, var] = CompressIterator(src_indices[i], src_vars,
                                             src_vars[op.dim]->var, analyzer);
+        std::tie(expr, var) = CollapseDeadReduceResidue(
+            expr, var, src_vars, src_vars[op.dim]->var, analyzer);
         src_indice_compressed.push_back(expr);
         src_var_compressed.push_back(var);
       }
