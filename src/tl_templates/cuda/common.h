@@ -272,12 +272,7 @@ TL_DEVICE longlong4 make_longlong4(int x0, int x1, int y0, int y1, int z0,
 
 // Helper to cast SMEM pointer to unsigned
 TL_DEVICE uint32_t smem_ptr_to_uint(void const *const ptr) {
-  uint32_t smem_ptr;
-  asm volatile("{ .reg .u64 smem_ptr; cvta.to.shared.u64 smem_ptr, %1; "
-               "cvt.u32.u64 %0, smem_ptr; }\n"
-               : "=r"(smem_ptr)
-               : "l"(ptr));
-  return smem_ptr;
+  return static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
 }
 
 /**
