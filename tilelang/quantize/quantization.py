@@ -110,7 +110,10 @@ def _tir_u32_to_bf16x2_to_f32x2(x: tirx.PrimExpr):
 def _tir_u32_to_int_to_float(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, dtype: str):
     assert val.dtype == T.uint32
     mask = tvm.tirx.const((1 << nbit) - 1, T.uint32)
-    return tirx.Cast(dtype, (val >> (pos * nbit).astype(T.uint32)) & mask)
+    unextended = (val >> (pos * nbit).astype(T.uint32)) & mask
+    shift = tirx.const(32 - nbit, T.int32)
+    extended = (tirx.Cast(T.int32, unextended) << shift) >> shift
+    return tirx.Cast(dtype, extended)
 
 
 def _tir_packed_uint_to_uint_to_float(storage_nbit: int):
