@@ -18,6 +18,25 @@
 #define __volatile__ volatile
 #endif
 
+#if defined(__CUDACC_RTC__)
+#include <vector_types.h>
+#if defined(__CUDACC_RTC_BUILTIN_VECTOR_TYPES__)
+struct __device_builtin__ __builtin_align__(16) double4_16a {
+  double x, y, z, w;
+};
+
+struct __device_builtin__ __builtin_align__(32) double4_32a {
+  double x, y, z, w;
+};
+#endif
+#ifndef __NV_SILENCE_DEPRECATION_BEGIN
+#define __NV_SILENCE_DEPRECATION_BEGIN
+#endif
+#ifndef __NV_SILENCE_DEPRECATION_END
+#define __NV_SILENCE_DEPRECATION_END
+#endif
+#endif
+
 #include <cute/numeric/numeric_types.hpp>
 #include <math_constants.h>
 

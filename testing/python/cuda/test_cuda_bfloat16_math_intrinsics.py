@@ -5,6 +5,7 @@ import torch
 import tilelang.testing
 import tilelang.language as T
 
+
 def test_cuda_common_h_defines_bfloat16_rsqrt_overload():
     repo_root = Path(__file__).resolve().parents[3]
     common_h = repo_root / "src" / "tl_templates" / "cuda" / "common.h"
@@ -59,8 +60,6 @@ def test_cuda_math_h_bfloat16_fast_exp_does_not_self_recurse():
     assert "float(" in body, "bf16 fast_exp must route through float to avoid self-recursion"
 
 
-
-
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(8, 0)
 def test_bfloat16_exp_compiles_and_runs():
@@ -81,6 +80,7 @@ def test_bfloat16_exp_compiles_and_runs():
 
     expected = torch.exp(inputs)
     torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+
 
 if __name__ == "__main__":
     tilelang.testing.main()

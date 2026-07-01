@@ -115,11 +115,7 @@ bool CanEmitPackedX2Math(DataType t) {
   return false;
 }
 
-bool RequiresTileLangMathHeader(const std::string &func_name) {
-  return func_name == "hexp" || func_name == "hlog" ||
-         func_name == "hsqrt" || func_name == "hsin" ||
-         func_name == "hcos" || func_name == "htanh" || func_name == "hpow";
-}
+
 
 } // namespace
 
@@ -2052,9 +2048,6 @@ void CodeGenTileLangCUDA::PrintCallExtern(Type ret_type, String global_symbol,
                                           const Array<PrimExpr> &args,
                                           bool skip_first_arg,
                                           std::ostream &os) { // NOLINT(*)
-  if (RequiresTileLangMathHeader(global_symbol)) {
-    need_math_h_ = true;
-  }
   if (global_symbol == "tl::prefetch_tma_descriptor") {
     need_copy_sm90_h_ = true;
   }
@@ -4266,9 +4259,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
   if (op->op.same_as(tl::__exp())) {
     CUDAFastMath math_func;
     std::string func_name = math_func(op->dtype, "exp");
-    if (RequiresTileLangMathHeader(func_name)) {
-      need_math_h_ = true;
-    }
+    need_math_h_ = true;
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
     return true;
   } else if (op->op.same_as(tl::__exp10())) {
@@ -4279,9 +4270,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
   } else if (op->op.same_as(tl::__log())) {
     CUDAFastMath math_func;
     std::string func_name = math_func(op->dtype, "log");
-    if (RequiresTileLangMathHeader(func_name)) {
-      need_math_h_ = true;
-    }
+    need_math_h_ = true;
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
     return true;
   } else if (op->op.same_as(tl::__log2())) {
@@ -4302,17 +4291,13 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
   } else if (op->op.same_as(tl::__cos())) {
     CUDAFastMath math_func;
     std::string func_name = math_func(op->dtype, "cos");
-    if (RequiresTileLangMathHeader(func_name)) {
-      need_math_h_ = true;
-    }
+    need_math_h_ = true;
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
     return true;
   } else if (op->op.same_as(tl::__sin())) {
     CUDAFastMath math_func;
     std::string func_name = math_func(op->dtype, "sin");
-    if (RequiresTileLangMathHeader(func_name)) {
-      need_math_h_ = true;
-    }
+    need_math_h_ = true;
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
     return true;
   } else if (op->op.same_as(tl::ieee_add())) {

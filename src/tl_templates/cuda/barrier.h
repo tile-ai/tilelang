@@ -1,8 +1,10 @@
 #pragma once
 
-#include <type_traits>
-
 #include "common.h"
+
+#ifndef __CUDACC_RTC__
+#include <type_traits>
+#endif
 
 namespace tl {
 
@@ -65,21 +67,24 @@ TL_DEVICE bool mbarrier_test_wait(uint64_t &smem_barrier, int phase_bit,
                                   uint32_t pred) {
   uint32_t smem_int_ptr = smem_ptr_to_uint(&smem_barrier);
   uint32_t wait_complete;
-  asm volatile("{\n\t"
-               ".reg .pred P1; \n\t"
-               ".reg .pred P2; \n\t"
-               "setp.eq.u32 P2, %3, 1;\n\t"
-               "@P2 mbarrier.test_wait.parity.shared::cta.b64 P1, [%1], %2; \n\t"
-               "selp.b32 %0, 1, 0, P1; \n\t"
-               "}"
-               : "=r"(wait_complete)
-               : "r"(smem_int_ptr), "r"(phase_bit), "r"(pred));
+  asm volatile(
+      "{\n\t"
+      ".reg .pred P1; \n\t"
+      ".reg .pred P2; \n\t"
+      "setp.eq.u32 P2, %3, 1;\n\t"
+      "@P2 mbarrier.test_wait.parity.shared::cta.b64 P1, [%1], %2; \n\t"
+      "selp.b32 %0, 1, 0, P1; \n\t"
+      "}"
+      : "=r"(wait_complete)
+      : "r"(smem_int_ptr), "r"(phase_bit), "r"(pred));
   return static_cast<bool>(wait_complete);
 }
 
 TL_DEVICE void mbarrier_arrive(uint64_t &smem_barrier) {
   uint32_t smem_int_ptr = smem_ptr_to_uint(&smem_barrier);
-  asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];" : : "r"(smem_int_ptr));
+  asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];"
+               :
+               : "r"(smem_int_ptr));
 }
 
 TL_DEVICE void mbarrier_arrive(uint64_t &smem_barrier, int cta_id,
