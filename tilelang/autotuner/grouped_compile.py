@@ -68,14 +68,12 @@ def compile_grouped_unit_tvm_ffi(
     # Determine if all per-config pass_configs are the same
     # Normalize: treat None and {} (empty dict) as equivalent "no config"
     normalized_list = [pc if pc else None for pc in per_config_pass_configs_list]
-    has_uniform_pass_configs = all(
-        pc == normalized_list[0] for pc in normalized_list[1:]
-    )
+    has_uniform_pass_configs = all(pc == normalized_list[0] for pc in normalized_list[1:])
 
     if not has_uniform_pass_configs:
         # Fall back to per-config compilation when pass_configs differ
         unit_results: list[CompileUnitResult] = []
-        for (idx, config_arg), per_pc in zip(unit_items, per_config_pass_configs_list):
+        for (idx, config_arg), per_pc in zip(unit_items, per_config_pass_configs_list, strict=True):
             try:
                 effective_compile_args = _merge_pass_configs_into_compile_args(compile_args, per_pc)
                 program = elaborate_func(**config_arg)

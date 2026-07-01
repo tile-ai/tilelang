@@ -18,6 +18,15 @@ from tilelang.transform import PassConfigKey
 
 
 def ref_program(A, B):
+    """Compute reference matrix multiplication C = A @ B^T.
+
+    Args:
+        A: Input matrix of shape (M, K).
+        B: Input matrix of shape (N, K).
+
+    Returns:
+        Result matrix of shape (M, N).
+    """
     return A @ B.T
 
 
@@ -45,6 +54,17 @@ def get_configs():
 
 
 def get_best_config(M, N, K):
+    """Run autotuning to find the best kernel config for GEMM (API mode).
+
+    Args:
+        M: Number of rows of matrix A and C.
+        N: Number of rows of matrix B (columns of C).
+        K: Shared dimension of A and B.
+
+    Returns:
+        AutoTuner result containing the best config and latency.
+    """
+
     def kernel(
         block_M=None,
         block_N=None,
@@ -52,6 +72,7 @@ def get_best_config(M, N, K):
         num_stages=None,
         thread_num=None,
     ):
+        """Kernel factory that returns a TIR GEMM prim_func for given tile parameters."""
         dtype = T.float16
         accum_dtype = T.float32
 
@@ -61,6 +82,7 @@ def get_best_config(M, N, K):
             B: T.Tensor((N, K), dtype),
             C: T.Tensor((M, N), dtype),
         ):
+            """Tiled GEMM kernel computing C = A @ B^T with pipelined shared memory loads."""
             with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (
                 bx,
                 by,
@@ -94,6 +116,13 @@ def get_best_config(M, N, K):
 
 
 def main(M: int = 4096, N: int = 4096, K: int = 4096):
+    """Run autotuning in API mode and print the best config and performance.
+
+    Args:
+        M: Matrix dimension M (default 4096).
+        N: Matrix dimension N (default 4096).
+        K: Matrix dimension K (default 4096).
+    """
     result = get_best_config(M, N, K)
     print(f"Best config: {result.config}")
     print(f"Best latency: {result.latency} ms")
@@ -129,6 +158,7 @@ def matmul_decorator(
         B: T.Tensor((N, K), dtype),
         C: T.Tensor((M, N), dtype),
     ):
+        """Tiled GEMM kernel computing C = A @ B^T with pipelined shared memory loads."""
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (
             bx,
             by,
@@ -148,9 +178,16 @@ def matmul_decorator(
 
 
 def main_decorator(M: int = 4096, N: int = 4096, K: int = 4096):
+    """Run autotuning in decorator mode and print the resulting kernel info.
+
+    Args:
+        M: Matrix dimension M (default 4096).
+        N: Matrix dimension N (default 4096).
+        K: Matrix dimension K (default 4096).
+    """
     # Calling the decorated function triggers autotuning and returns a JITKernel
     kernel = matmul_decorator(M, N, K)
-    print(f"[Decorator mode] Kernel compiled successfully")
+    print("[Decorator mode] Kernel compiled successfully")
     print(f"[Decorator mode] Kernel source length: {len(kernel.get_kernel_source())} chars")
 
 
