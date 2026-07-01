@@ -283,6 +283,65 @@ When enabled, the hook monkey-patches `tvm.ir.transform.Pass.__call__` at import
 - **Combine with `TILELANG_PASS_DIFF_OUTPUT`** to direct reports to a specific location, e.g. when running in CI or comparing across runs.
 - **The hook captures all passes** in the lowering pipeline, including those triggered internally by `tilelang.compile()`. This makes it useful for understanding the full compilation flow.
 
+## Pass Visualizer: Structure-Tree View Across Passes
+
+The **Pass Visualizer** is a complement to Pass Diff. Where Pass Diff shows a line-level diff of the **TVMScript text**, the Pass Visualizer renders the IR as a **structure tree** (the `SBlock` nesting, with `reads` / `writes` / `alloc_buffers` / `annotations` fields) and expands every tile op by field name. It produces a single self-contained, interactive HTML file that steps through each CUDA lowering pass.
+
+This view is most useful when debugging **structural** passes — layout inference, warp specialization, pipelining — where you care about how the IR's block structure and operator semantics change, not just which text lines moved.
+
+### How It Differs From Pass Diff
+
+| Aspect | Pass Diff | Pass Visualizer |
+|--------|-----------|-----------------|
+| Compared object | TVMScript text lines | `SBlock` structure tree |
+| Operator display | Raw one-liner, positional args | Expanded **by field name** (`M=64`, `K=32`, `policy=0`) |
+| Highlighting | Generic `+` / `-` | Per-class: tile op / sync primitive / lowered hardware intrinsic |
+| Trigger | Environment-variable hook, captures the real full pipeline | Explicit CLI, runs the focused lowering prologue |
+
+### Quick Start (CLI)
+
+Run the visualizer on a kernel file that defines a `@tilelang.jit` kernel:
+
+```bash
+python -m tilelang.tools.pass_visualizer.viewer \
+    tilelang/tools/pass_visualizer/examples/gemm_relu.py \
+    --set M=1024 --set N=1024 --set K=1024 \
+    --set block_M=128 --set block_N=128 --set block_K=32 \
+    --out gemm_relu_passes.html
+```
+
+This writes `gemm_relu_passes.html` (the interactive browser) and a sibling `gemm_relu_passes.txt` (a greppable text dump of the same per-pass trees).
+
+| Argument | Description |
+|----------|-------------|
+| `path` | Python file containing a `@tilelang.jit` kernel (positional) |
+| `--factory` | Name of the kernel to analyze (default: first discovered) |
+| `--target` | Compilation target (default: `auto`) |
+| `--set K=V` | Argument forwarded to the kernel factory (repeatable) |
+| `--out` | Output HTML path (default: `<kernel>_passes.html` next to the source) |
+
+### HTML Report Features
+
+- **Left pane**: the ordered pass list, each tagged `changed` / `no-op` with an added/removed line count. Click a pass — or use the <kbd>↑</kbd>/<kbd>↓</kbd> keys — to step through the pipeline.
+- **Right pane**: the structure tree for the selected pass, with lines **added** by that pass highlighted green and lines it **removed** shown ghosted red.
+- **Operator highlighting**: tile ops (e.g. `T.gemm`, `T.copy`), synchronization primitives, and lowered hardware intrinsics (`ptx_mma`, `tma_load`, …) are each colored distinctly, so you can follow a `T.copy` as it lowers into TMA/PTX intrinsics.
+
+### Programmatic API
+
+The core helpers can also be used directly:
+
+```python
+from tilelang.tools.pass_visualizer.viewer import build_pass_data, emit_html
+
+name, stages = build_pass_data(
+    "path/to/kernel.py", factory=None, target="auto",
+    kwargs={"M": 1024, "N": 1024, "K": 1024,
+            "block_M": 128, "block_N": 128, "block_K": 32},
+    source=open("path/to/kernel.py").read(),
+)
+html = emit_html(name, stages)
+```
+
 ## AutoDD: Automatic Delta Debugging
 
 When dealing with complex TileLang programs that produce errors, manually isolating the bug can be tedious. **AutoDD** (Automatic Delta Debugging) is a built-in tool that automatically simplifies your program to the minimal code needed to reproduce a specific error.
