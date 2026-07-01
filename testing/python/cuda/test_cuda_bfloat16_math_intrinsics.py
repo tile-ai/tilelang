@@ -1,9 +1,9 @@
 from pathlib import Path
 import re
 
-import pytest
 import torch
-
+import tilelang.testing
+import tilelang.language as T
 
 def test_cuda_common_h_defines_bfloat16_rsqrt_overload():
     repo_root = Path(__file__).resolve().parents[3]
@@ -17,14 +17,9 @@ def test_cuda_common_h_defines_bfloat16_rsqrt_overload():
     assert pattern.search(source), "common.h must define hrsqrt(bfloat16_t) for bf16 T.rsqrt codegen"
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(8, 0)
 def test_bfloat16_rsqrt_compiles_and_runs():
-    import tilelang
-    import tilelang.language as T
-
-    if torch.cuda.get_device_capability() < (8, 0):
-        pytest.skip("bfloat16 CUDA math requires compute capability >= 8.0")
-
     n = 32
 
     @T.prim_func
@@ -64,14 +59,11 @@ def test_cuda_math_h_bfloat16_fast_exp_does_not_self_recurse():
     assert "float(" in body, "bf16 fast_exp must route through float to avoid self-recursion"
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(8, 0)
 def test_bfloat16_exp_compiles_and_runs():
-    import tilelang
-    import tilelang.language as T
-
-    if torch.cuda.get_device_capability() < (8, 0):
-        pytest.skip("bfloat16 CUDA math requires compute capability >= 8.0")
-
     n = 32
 
     @T.prim_func
@@ -89,3 +81,6 @@ def test_bfloat16_exp_compiles_and_runs():
 
     expected = torch.exp(inputs)
     torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+
+if __name__ == "__main__":
+    tilelang.testing.main()

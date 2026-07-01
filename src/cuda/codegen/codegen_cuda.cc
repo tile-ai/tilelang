@@ -115,6 +115,12 @@ bool CanEmitPackedX2Math(DataType t) {
   return false;
 }
 
+bool RequiresTileLangMathHeader(const std::string &func_name) {
+  return func_name == "hexp" || func_name == "hlog" ||
+         func_name == "hsqrt" || func_name == "hsin" ||
+         func_name == "hcos" || func_name == "htanh" || func_name == "hpow";
+}
+
 } // namespace
 
 struct CUDAMath {
@@ -2046,6 +2052,9 @@ void CodeGenTileLangCUDA::PrintCallExtern(Type ret_type, String global_symbol,
                                           const Array<PrimExpr> &args,
                                           bool skip_first_arg,
                                           std::ostream &os) { // NOLINT(*)
+  if (RequiresTileLangMathHeader(global_symbol)) {
+    need_math_h_ = true;
+  }
   if (global_symbol == "tl::prefetch_tma_descriptor") {
     need_copy_sm90_h_ = true;
   }
@@ -2310,7 +2319,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     const bool is_max = op->op.same_as(tl::max_nan());
     const DataType t = op->dtype;
     const char *f16_intrin = is_max ? "__hmax_nan" : "__hmin_nan";
-    const char *fallback = is_max ? "cutlass::fast_max" : "cutlass::fast_min";
+    const char *fallback = is_max ? "tl::fast_max" : "tl::fast_min";
 
     if (t.is_bfloat16() && t.is_scalar()) {
       os << "cutlass::bfloat16_t(" << f16_intrin << "("
@@ -4257,8 +4266,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
   if (op->op.same_as(tl::__exp())) {
     CUDAFastMath math_func;
     std::string func_name = math_func(op->dtype, "exp");
-    if (op->dtype.is_bfloat16() ||
-        (op->dtype.is_float() && op->dtype.bits() == 16)) {
+    if (RequiresTileLangMathHeader(func_name)) {
       need_math_h_ = true;
     }
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
@@ -4271,8 +4279,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
   } else if (op->op.same_as(tl::__log())) {
     CUDAFastMath math_func;
     std::string func_name = math_func(op->dtype, "log");
-    if (op->dtype.is_bfloat16() ||
-        (op->dtype.is_float() && op->dtype.bits() == 16)) {
+    if (RequiresTileLangMathHeader(func_name)) {
       need_math_h_ = true;
     }
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
@@ -4295,8 +4302,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
   } else if (op->op.same_as(tl::__cos())) {
     CUDAFastMath math_func;
     std::string func_name = math_func(op->dtype, "cos");
-    if (op->dtype.is_bfloat16() ||
-        (op->dtype.is_float() && op->dtype.bits() == 16)) {
+    if (RequiresTileLangMathHeader(func_name)) {
       need_math_h_ = true;
     }
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
@@ -4304,8 +4310,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
   } else if (op->op.same_as(tl::__sin())) {
     CUDAFastMath math_func;
     std::string func_name = math_func(op->dtype, "sin");
-    if (op->dtype.is_bfloat16() ||
-        (op->dtype.is_float() && op->dtype.bits() == 16)) {
+    if (RequiresTileLangMathHeader(func_name)) {
       need_math_h_ = true;
     }
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
