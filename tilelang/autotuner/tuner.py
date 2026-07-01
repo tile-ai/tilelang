@@ -298,7 +298,7 @@ class AutoTuner:
             pass_configs: Additional keyword arguments to pass to the Compiler PassContext.
 
         Environment Variables:
-            TILELANG_DEFAULT_TARGET: Default compilation target (e.g., "cuda", "llvm", or a dict-like
+            TILELANG_DEFAULT_TARGET: Default compilation target (e.g., "cuda", "llvm", or a JSON
                 target config string). Defaults to "auto".
             TILELANG_EXECUTION_BACKEND: Default execution backend. Defaults to "auto".
             TILELANG_VERBOSE: Set to "1", "true", "yes", or "on" to enable verbose compilation by default.

@@ -315,7 +315,7 @@ class KernelCache:
         Environment Variables
         ---------------------
         TILELANG_DEFAULT_TARGET : str
-            Default compilation target (e.g., "cuda", "llvm", or a dict-like target config string).
+            Default compilation target (e.g., "cuda", "llvm", or a JSON target config string).
             Defaults to "auto".
         TILELANG_EXECUTION_BACKEND : str
             Default execution backend. Defaults to "auto".

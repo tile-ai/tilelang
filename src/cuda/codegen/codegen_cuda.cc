@@ -621,6 +621,27 @@ std::string CodeGenTileLangCUDA::Finish() {
   if (need_tcgen05_common_h_) {
     decl_stream << "#include <tl_templates/cuda/tcgen_05.h>\n";
   }
+  if (need_intrin_h_) {
+    decl_stream << "#include <tl_templates/cuda/intrin.h>\n";
+  }
+  if (need_atomic_h_) {
+    decl_stream << "#include <tl_templates/cuda/atomic.h>\n";
+  }
+  if (need_math_h_) {
+    decl_stream << "#include <tl_templates/cuda/math.h>\n";
+  }
+  if (need_barrier_h_) {
+    decl_stream << "#include <tl_templates/cuda/barrier.h>\n";
+  }
+  if (need_copy_h_) {
+    decl_stream << "#include <tl_templates/cuda/copy.h>\n";
+  }
+  if (need_copy_sm90_h_ || need_copy_sm100_h_) {
+    decl_stream << "#include <tl_templates/cuda/copy_sm90.h>\n";
+  }
+  if (need_copy_sm100_h_) {
+    decl_stream << "#include <tl_templates/cuda/copy_sm100.h>\n";
+  }
   if (enable_fp8_) {
     decl_stream << "#include <tl_templates/cuda/cuda_fp8.h>\n";
   }
@@ -647,11 +668,6 @@ std::string CodeGenTileLangCUDA::Finish() {
     decl_stream << "#include <curand_kernel.h>\n";
   }
 
-  decl_stream << "#include <tl_templates/cuda/gemm.h>\n";
-  if (enable_sparse_gemm_) {
-    decl_stream << "#include <tl_templates/cuda/gemm_sp.h>\n";
-  }
-  decl_stream << "#include <tl_templates/cuda/copy.h>\n";
   decl_stream << "#include <tl_templates/cuda/reduce.h>\n";
   decl_stream << "#include <tl_templates/cuda/scan.h>\n";
   decl_stream << "#include <tl_templates/cuda/ldsm.h>\n";
@@ -1677,6 +1693,35 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     }
   }
 
+  // Handle conversion from float16 to float8 (E4M3/E5M2)
+  if (from_ty.is_float16() && tl::IsCudaVectorizableFP8(target_ty)) {
+    bool target_type_is_e4m3 =
+        target_ty.is_float8_e4m3() || target_ty.is_float8_e4m3fn();
+    std::string type_suffix = target_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2";
+    // Use __tl_cvt_half2_to_fp8x2 for vectorized conversion (half2 -> fp8x2)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__tl_cvt_half2_to_fp8x2", "half2",
+                          "__nv_fp8x2_storage_t", ", " + type_suffix, false,
+                          true);
+      return;
+    }
+  }
+
+  // Handle conversion from bfloat16 to float8 (E4M3/E5M2)
+  if (from_ty.is_bfloat16() && tl::IsCudaVectorizableFP8(target_ty)) {
+    bool target_type_is_e4m3 =
+        target_ty.is_float8_e4m3() || target_ty.is_float8_e4m3fn();
+    std::string type_suffix = target_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2";
+    // Use __tl_cvt_bfloat162_to_fp8x2 for vectorized conversion (bfloat162 ->
+    // fp8x2)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__tl_cvt_bfloat162_to_fp8x2", "__nv_bfloat162",
+                          "__nv_fp8x2_storage_t", ", " + type_suffix, true,
+                          true);
+      return;
+    }
+  }
+
   // Handle conversion from float8 (E4M3/E5M2) to float32
   if (tl::IsCudaVectorizableFP8(from_ty) && target_ty.is_float() &&
       target_ty.bits() == 32) {
@@ -1688,6 +1733,33 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     if (lanes == 2 || lanes == 4 || lanes == 8) {
       PrintVectorizedCast("__tl_cvt_fp8x2_to_float2", "__nv_fp8x2_storage_t",
                           "float2", ", " + type_suffix, true, false);
+      return;
+    }
+  }
+
+  // Handle conversion from float8 (E4M3/E5M2) to float16
+  if (tl::IsCudaVectorizableFP8(from_ty) && target_ty.is_float16()) {
+    bool from_type_is_e4m3 =
+        from_ty.is_float8_e4m3() || from_ty.is_float8_e4m3fn();
+    std::string type_suffix = from_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2";
+    // Use __tl_cvt_fp8x2_to_half2 for vectorized conversion (fp8x2 -> half2)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__tl_cvt_fp8x2_to_half2", "__nv_fp8x2_storage_t",
+                          "half2", ", " + type_suffix, true, false);
+      return;
+    }
+  }
+
+  // Handle conversion from float8 (E4M3/E5M2) to bfloat16
+  if (tl::IsCudaVectorizableFP8(from_ty) && target_ty.is_bfloat16()) {
+    bool from_type_is_e4m3 =
+        from_ty.is_float8_e4m3() || from_ty.is_float8_e4m3fn();
+    // PTX cvt encodes the fp8 type in the mnemonic, so pick the helper by name.
+    std::string cast_func = from_type_is_e4m3 ? "__tl_cvt_e4m3x2_to_bfloat162"
+                                              : "__tl_cvt_e5m2x2_to_bfloat162";
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast(cast_func, "__nv_fp8x2_storage_t", "__nv_bfloat162",
+                          "", true, false);
       return;
     }
   }
@@ -2138,6 +2210,7 @@ std::string CodeGenTileLangCUDA::GetVecLoad(DataType t,
   }
   ICHECK_EQ(t.bits() * t.lanes(), 256)
       << "Unsupported vector load size: " << t.bits() * t.lanes();
+  need_copy_sm100_h_ = true;
   auto buffer_ref = this->GetBufferRef(t, buffer, base);
   std::ostringstream os;
   os << "tl::load_global_256(&(" << buffer_ref << "))";
@@ -2162,6 +2235,7 @@ void CodeGenTileLangCUDA::PrintVecStore(const BufferNode *buffer, DataType t,
   }
   ICHECK_EQ(t.bits() * t.lanes(), 256)
       << "Unsupported vector load size: " << t.bits() * t.lanes();
+  need_copy_sm100_h_ = true;
   auto buffer_ref = this->GetBufferRef(t, buffer, base);
   this->PrintIndent();
   this->stream << "tl::store_global_256(&(" << buffer_ref << "), " << value
@@ -2183,7 +2257,7 @@ void CodeGenTileLangCUDA::PrintVecStore(const BufferNode *buffer, DataType t,
  * ldmatrix/stmatrix helpers, mbarrier APIs, cooperative grid sync, WMMA/legacy
  * MMA intrinsics (fill/load/store/mma/bmma/ptx_mma/ptx_mma_sp), low-level PTX
  * asm helpers (ldg32, cp_async bulk/init/arrive/wait barriers), reinterpret
- * paths for special small-float encodings (e.g., float4 e2m1fn), tl::tl_gemm
+ * paths for special small-float encodings (e.g., float4 e2m1fn)
  * and related external calls, and other TL runtime calls.
  *
  * Side effects:
@@ -2233,7 +2307,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     const bool is_max = op->op.same_as(tl::max_nan());
     const DataType t = op->dtype;
     const char *f16_intrin = is_max ? "__hmax_nan" : "__hmin_nan";
-    const char *fallback = is_max ? "cutlass::fast_max" : "cutlass::fast_min";
+    const char *fallback = is_max ? "tl::fast_max" : "tl::fast_min";
 
     if (t.is_bfloat16() && t.is_scalar()) {
       os << "cutlass::bfloat16_t(" << f16_intrin << "("
@@ -2252,6 +2326,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     return;
   }
   if (op->op.same_as(builtin::ptx_cp_async())) {
+    need_copy_h_ = true;
     // args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
     // args[3] = predicate (optional)
     ICHECK(op->args.size() == 3 || op->args.size() == 4)
@@ -2274,6 +2349,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                    << ", " << src << ", " << condition << ");\n";
     }
   } else if (op->op.same_as(tl::ptx_cp_async())) {
+    need_copy_h_ = true;
     // TileLang version: args[0] = dst_access_ptr, args[1] = src_access_ptr,
     // args[2] = num_elems, args[3] = predicate (optional)
     int total_bytes = GetTileLangCPAsyncTransferBytes(op);
@@ -2294,12 +2370,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                    << ", " << src << ", " << condition << ");\n";
     }
   } else if (op->op.same_as(builtin::ptx_commit_group())) {
+    need_copy_h_ = true;
     print_extern_call_stmt("tl::cp_async_commit");
   } else if (op->op.same_as(builtin::ptx_wait_group())) {
+    need_copy_h_ = true;
     int n = Downcast<IntImm>(op->args[0])->value;
     std::string func_name = "tl::cp_async_wait<" + std::to_string(n) + ">";
     print_extern_call_stmt(func_name, 1);
   } else if (op->op.same_as(builtin::create_barriers())) {
+    need_barrier_h_ = true;
     this->PrintIndent();
     int barrier_count = Downcast<IntImm>(op->args[0])->value;
     auto mbarrier_storage_name = mbarrier_name_ + "_mem";
@@ -2310,11 +2389,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << "auto " << mbarrier_name_ << " = reinterpret_cast<"
                  << mbarrier_dtype_ << "*>(" << mbarrier_storage_name << ");\n";
   } else if (op->op.same_as(builtin::ptx_arrive_barrier())) {
+    need_barrier_h_ = true;
     ICHECK_EQ(op->args.size(), 1);
     this->PrintIndent();
     auto mbarrier_obj = this->PrintExpr(op->args[0]);
     this->stream << mbarrier_obj << ".arrive();\n";
   } else if (op->op.same_as(tl::ptx_arrive_cluster_barrier())) {
+    need_barrier_h_ = true;
     ICHECK_EQ(op->args.size(), 2);
     this->PrintIndent();
     auto mbarrier_obj = this->PrintExpr(op->args[0]);
@@ -2324,12 +2405,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     this->stream << mbarrier_obj << ".arrive(" << cta_id << ");\n";
   } else if (op->op.same_as(builtin::ptx_init_barrier_thread_count())) {
+    need_barrier_h_ = true;
     ICHECK_EQ(op->args.size(), 2);
     this->PrintIndent();
     auto mbarrier_obj = this->PrintExpr(op->args[0]);
     auto arrive_count = this->PrintExpr(op->args[1]);
     this->stream << mbarrier_obj << ".init(" << arrive_count << ");\n";
   } else if (op->op.same_as(builtin::ptx_arrive_barrier_expect_tx())) {
+    need_barrier_h_ = true;
     if (op->args.size() == 2) {
       this->PrintIndent();
       auto mbarrier_obj = this->PrintExpr(op->args[0]);
@@ -2350,12 +2433,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << op->args.size();
     }
   } else if (op->op.same_as(builtin::ptx_cp_async_barrier())) {
+    need_barrier_h_ = true;
     print_extern_call_stmt("tl::mbarrier_cp_async_arrive");
   } else if (op->op.same_as(tl::ptx_fence_barrier_init())) {
+    need_barrier_h_ = true;
     print_extern_call_stmt("tl::fence_barrier_init");
   } else if (op->op.same_as(tl::ptx_cp_async_barrier_noinc())) {
+    need_barrier_h_ = true;
     print_extern_call_stmt("tl::mbarrier_cp_async_arrive_noinc");
   } else if (op->op.same_as(tl::mbarrier_expect_tx())) {
+    need_barrier_h_ = true;
     ICHECK_EQ(op->args.size(), 2);
     this->PrintIndent();
     auto mbarrier_obj = this->PrintExpr(op->args[0]);
@@ -2363,12 +2450,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << mbarrier_obj << ".expect_transaction(" << transaction_bytes
                  << ");\n";
   } else if (op->op.same_as(tl::mbarrier_wait_parity())) {
+    need_barrier_h_ = true;
     ICHECK_EQ(op->args.size(), 2);
     this->PrintIndent();
     auto mbarrier_obj = this->PrintExpr(op->args[0]);
     auto phase = this->PrintExpr(op->args[1]);
     this->stream << mbarrier_obj << ".wait(" << phase << ");\n";
   } else if (op->op.same_as(tl::ptx_init_tensor_memory())) {
+    need_tcgen05_common_h_ = true;
     std::ostringstream ss;
     ss << "tl::tmem_allocate";
     if (op->annotations.find("use_2cta") != op->annotations.end() &&
@@ -2377,6 +2466,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     print_extern_call_stmt(ss.str());
   } else if (op->op.same_as(tl::ptx_deallocate_tensor_memory())) {
+    need_tcgen05_common_h_ = true;
     std::ostringstream ss;
     ss << "tl::tmem_deallocate";
     if (op->annotations.find("use_2cta") != op->annotations.end() &&
@@ -2386,6 +2476,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt(ss.str());
   } else if (op->op.same_as(tl::no_set_max_nreg())) {
     return;
+  } else if (op->op.same_as(tl::prefetch_tma_descriptor())) {
+    need_copy_sm90_h_ = true;
+    print_extern_call_stmt("tl::prefetch_tma_descriptor");
   } else if (op->op.same_as(tl::tma_load())) {
     std::ostringstream ss;
     ICHECK_GE(op->args.size(), 2);
@@ -2395,16 +2488,20 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     // Simplify the code by using the default eviction policy
     if (op->annotations.find("use_2cta") != op->annotations.end() &&
         Downcast<Bool>(op->annotations["use_2cta"])->value) {
+      need_copy_sm100_h_ = true;
       if (eviction_policy != "EVICT_NORMAL") {
         ss << "tl::tma_load_2sm<tl::CacheHintSm100::" << eviction_policy
            << ">(";
       } else {
         ss << "tl::tma_load_2sm(";
       }
-    } else if (eviction_policy != "EVICT_NORMAL") {
-      ss << "tl::tma_load<tl::CacheHintSm90::" << eviction_policy << ">(";
     } else {
-      ss << "tl::tma_load(";
+      need_copy_sm90_h_ = true;
+      if (eviction_policy != "EVICT_NORMAL") {
+        ss << "tl::tma_load<tl::CacheHintSm90::" << eviction_policy << ">(";
+      } else {
+        ss << "tl::tma_load(";
+      }
     }
     auto desc = op->args[0];
     ss << this->PrintExpr(desc) << ", ";
@@ -2418,6 +2515,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     this->stream << ss.str();
   } else if (op->op.same_as(tl::tma_load_multicast())) {
+    need_copy_sm90_h_ = true;
     std::ostringstream ss;
     ICHECK_GE(op->args.size(), 5)
         << "tma_load_multicast requires at least 5 args";
@@ -2441,6 +2539,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     this->stream << ss.str();
   } else if (op->op.same_as(tl::tma_load_im2col())) {
+    need_copy_sm90_h_ = true;
     std::stringstream ss;
     auto eviction_policy =
         this->eviction_policy_names_
@@ -2452,6 +2551,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     print_extern_call_stmt(ss.str(), 0, 1);
   } else if (op->op.same_as(tl::tma_store())) {
+    need_copy_sm90_h_ = true;
     std::stringstream ss;
     auto need_reduce = op->args[op->args.size() - 2].as<IntImmNode>()->value;
     if (need_reduce) {
@@ -2468,6 +2568,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     print_extern_call_stmt(ss.str(), 0, 2);
   } else if (op->op.same_as(tl::tma_load_gather4())) {
+    need_copy_sm100_h_ = true;
     std::ostringstream ss;
     ICHECK_EQ(op->args.size(), 9u)
         << "tma_load_gather4 expects 9 args (desc, mbar, smem, col, "
@@ -2484,6 +2585,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     print_extern_call_stmt(ss.str(), 0, 1);
   } else if (op->op.same_as(tl::tma_store_scatter4())) {
+    need_copy_sm100_h_ = true;
     std::ostringstream ss;
     ICHECK_EQ(op->args.size(), 8u)
         << "tma_store_scatter4 expects 8 args (desc, smem, col, r0..r3, "
@@ -2521,10 +2623,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       func_name += "_trans";
     print_extern_call_stmt(func_name, 2, is_shape_encoded ? 1 : 0);
   } else if (op->op.same_as(tl::fence_proxy_async())) {
+    need_barrier_h_ = true;
     print_extern_call_stmt("tl::fence_proxy_async");
   } else if (op->op.same_as(tl::tma_store_arrive())) {
+    need_barrier_h_ = true;
     print_extern_call_stmt("tl::tma_store_arrive");
   } else if (op->op.same_as(tl::tma_store_wait())) {
+    need_barrier_h_ = true;
     int count = Downcast<IntImm>(op->args[0])->value;
     bool read =
         op->args.size() == 1 || Downcast<IntImm>(op->args[1])->value != 0;
@@ -2532,15 +2637,19 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << "tl::tma_store_wait<" << count << ", "
                  << (read ? "true" : "false") << ">();\n";
   } else if (op->op.same_as(tl::warpgroup_arrive())) {
+    need_intrin_h_ = true;
     print_extern_call_stmt("tl::warpgroup_arrive");
   } else if (op->op.same_as(tl::warpgroup_commit_batch())) {
+    need_intrin_h_ = true;
     print_extern_call_stmt("tl::warpgroup_commit_batch");
   } else if (op->op.same_as(tl::warpgroup_wait())) {
+    need_intrin_h_ = true;
     this->PrintIndent();
     int num_mma = Downcast<IntImm>(op->args[0])->value;
     this->stream << "tl::warpgroup_wait<" << std::to_string(num_mma)
                  << ">();\n";
   } else if (op->op.same_as(tl::warpgroup_fence_operand())) {
+    need_intrin_h_ = true;
     ICHECK_EQ(op->args.size(), 4U);
     std::string dtype = Downcast<StringImm>(op->args[0])->value;
     std::string data_ptr = this->PrintExpr(op->args[1]);
@@ -2557,6 +2666,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << "*>(" << data_ptr << " + " << offset << "), " << num_regs
                  << ");\n";
   } else if (op->op.same_as(tl::set_max_nreg())) {
+    need_intrin_h_ = true;
     this->PrintIndent();
     int nreg = Downcast<IntImm>(op->args[0])->value;
     int is_inc = Downcast<IntImm>(op->args[1])->value;
@@ -2567,6 +2677,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
              op->op.same_as(tl::annotate_consumer_reg_alloc())) {
     return;
   } else if (op->op.same_as(tl::wait_wgmma())) {
+    need_intrin_h_ = true;
     this->PrintIndent();
     int num_mma = Downcast<IntImm>(op->args[0])->value;
     this->stream << "tl::wait_wgmma<" << std::to_string(num_mma) << ">();\n";
@@ -2781,6 +2892,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(C_offset)", c_bias);
     this->stream << replacer.rewrite(mma_call);
   } else if (op->op.same_as(tl::tma_store_cluster())) {
+    need_copy_sm90_h_ = true;
     ICHECK_EQ(op->args.size(), 5U) << "tma_store_cluster requires 5 args";
     this->PrintIndent();
     this->stream << "tl::tma_store_cluster(";
@@ -3430,6 +3542,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::tcgen05_ld())) {
     ICHECK_EQ(op->args.size(), 6U) << "tcgen05_ld expects 6 arguments";
     need_tcgen05_common_h_ = true;
+    need_copy_sm100_h_ = true;
     int inst_bits = Downcast<IntImm>(op->args[0])->value;
     int chunks = Downcast<IntImm>(op->args[1])->value;
     bool pack16 = Downcast<Bool>(op->args[2])->value;
@@ -3443,6 +3556,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << ");\n";
   } else if (op->op.same_as(tl::tcgen05_st())) {
     ICHECK_EQ(op->args.size(), 6U) << "tcgen05_st expects 6 arguments";
+    need_tcgen05_common_h_ = true;
+    need_copy_sm100_h_ = true;
     int inst_bits = Downcast<IntImm>(op->args[0])->value;
     int chunks = Downcast<IntImm>(op->args[1])->value;
     bool unpack16 = Downcast<Bool>(op->args[2])->value;
@@ -3718,6 +3833,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << (arg_dtype.bits() == 64 ? "__ffsll(" : "__ffs(")
        << PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(tl::ldg32())) {
+    need_copy_h_ = true;
     // Explicit 32-bit global memory load: load_global_32(ptr) or
     // load_global_32_conditional(ptr, pred)
     ICHECK(!op->args.empty()) << "T.ldg32 expects a pointer argument.";
@@ -3732,6 +3848,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     os << ")";
   } else if (op->op.same_as(tl::ldg64())) {
+    need_copy_h_ = true;
     // Explicit 64-bit global memory load: load_global_64(ptr) or
     // load_global_64_conditional(ptr, pred)
     ICHECK(!op->args.empty()) << "T.ldg64 expects a pointer argument.";
@@ -3746,6 +3863,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     os << ")";
   } else if (op->op.same_as(tl::ldg128())) {
+    need_copy_h_ = true;
     // Explicit 128-bit global memory load: load_global_128(ptr) or
     // load_global_128_conditional(ptr, pred)
     ICHECK(!op->args.empty()) << "T.ldg128 expects a pointer argument.";
@@ -3760,6 +3878,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     os << ")";
   } else if (op->op.same_as(tl::ldg256())) {
+    need_copy_sm100_h_ = true;
     // Explicit 256-bit global memory load: load_global_256(ptr) or
     // load_global_256_conditional(ptr, pred)
     ICHECK(!op->args.empty()) << "T.ldg256 expects a pointer argument.";
@@ -3774,6 +3893,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     os << ")";
   } else if (op->op.same_as(tl::stg32())) {
+    need_copy_h_ = true;
     // Explicit 32-bit global memory store: store_global_32(ptr, value) or
     // store_global_32_conditional(ptr, value, pred)
     ICHECK(op->args.size() >= 2)
@@ -3793,6 +3913,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     os << ")";
   } else if (op->op.same_as(tl::stg64())) {
+    need_copy_h_ = true;
     // Explicit 64-bit global memory store: store_global_64(ptr, value) or
     // store_global_64_conditional(ptr, value, pred)
     ICHECK(op->args.size() >= 2)
@@ -3812,6 +3933,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     os << ")";
   } else if (op->op.same_as(tl::stg128())) {
+    need_copy_h_ = true;
     // Explicit 128-bit global memory store: store_global_128(ptr, value) or
     // store_global_128_conditional(ptr, value, pred)
     ICHECK(op->args.size() >= 2)
@@ -3831,6 +3953,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     os << ")";
   } else if (op->op.same_as(tl::stg256())) {
+    need_copy_sm100_h_ = true;
     // Explicit 256-bit global memory store: store_global_256(ptr, value) or
     // store_global_256_conditional(ptr, value, pred)
     ICHECK(op->args.size() >= 2)
@@ -3973,22 +4096,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     EndScope(ssa_scope);
   } else if (op->op.same_as(builtin::thread_return())) {
     os << "return";
-  } else if (op->op.same_as(tl::tl_gemm())) {
-    ICHECK(op->args.size() == 4) << "tl_gemm expects 4 arguments <op_instance, "
-                                    "A_ptr, B_ptr, C_ptr>, but got "
-                                 << op->args.size();
-    auto op_instance = Downcast<StringImm>(op->args[0]);
-    this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)), op_instance->value,
-                          op->args, true, os);
-  } else if (op->op.same_as(tl::tl_gemm_sp())) {
-    ICHECK(op->args.size() == 5)
-        << "tl_gemm_sp expects 5 arguments <op_instance, A_ptr, B_ptr, C_ptr, "
-           "E_ptr>, but got "
-        << op->args.size();
-    auto op_instance = Downcast<StringImm>(op->args[0]);
-    enable_sparse_gemm_ = true;
-    this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)), op_instance->value,
-                          op->args, true, os);
   } else if (op->op.same_as(tl::any_sync())) {
     ICHECK_EQ(op->args.size(), 2U) << "tl.any_sync expects <mask, predicate>.";
     os << "__any_sync(" << PrintExpr(op->args[0]) << ", "
@@ -4060,6 +4167,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
        << PrintExpr(op->args[0]) << ", " << PrintExpr(op->args[1])
        << ", &_tl_pred); }())";
   } else if (op->op.same_as(tl::get_lane_idx())) {
+    need_intrin_h_ = true;
     ICHECK_LE(op->args.size(), 1)
         << "tl.get_lane_idx expects at most one argument <warp_size>.";
     os << "tl::get_lane_idx(";
@@ -4068,6 +4176,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     os << ")";
   } else if (op->op.same_as(tl::get_warp_idx_sync())) {
+    need_intrin_h_ = true;
     ICHECK_LE(op->args.size(), 1)
         << "tl.get_warp_idx_sync expects at most one argument <warp_size>.";
     os << "tl::get_warp_idx_sync(";
@@ -4076,6 +4185,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     os << ")";
   } else if (op->op.same_as(tl::get_warp_idx())) {
+    need_intrin_h_ = true;
     ICHECK_LE(op->args.size(), 1)
         << "tl.get_warp_idx expects at most one argument <warp_size>.";
     os << "tl::get_warp_idx(";
@@ -4084,6 +4194,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     os << ")";
   } else if (op->op.same_as(tl::get_warp_group_idx())) {
+    need_intrin_h_ = true;
     ICHECK_LE(op->args.size(), 2)
         << "tl.get_warp_group_idx expects <warp_size, warps_per_group>.";
     os << "tl::get_warp_group_idx(";
@@ -4095,6 +4206,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     os << ")";
   } else if (op->op.same_as(tl::tl_shuffle_elect())) {
+    need_intrin_h_ = true;
     os << "tl::tl_shuffle_elect<" << PrintExpr(op->args[0]) << ">()";
   } else if (op->op.same_as(tl::initialize_wgmma_descriptor())) {
     ICHECK(op->args.size() == 5)
@@ -4145,6 +4257,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
   if (op->op.same_as(tl::__exp())) {
     CUDAFastMath math_func;
     std::string func_name = math_func(op->dtype, "exp");
+    need_math_h_ = true;
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
     return true;
   } else if (op->op.same_as(tl::__exp10())) {
@@ -4155,6 +4268,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
   } else if (op->op.same_as(tl::__log())) {
     CUDAFastMath math_func;
     std::string func_name = math_func(op->dtype, "log");
+    need_math_h_ = true;
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
     return true;
   } else if (op->op.same_as(tl::__log2())) {
@@ -4175,11 +4289,13 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
   } else if (op->op.same_as(tl::__cos())) {
     CUDAFastMath math_func;
     std::string func_name = math_func(op->dtype, "cos");
+    need_math_h_ = true;
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
     return true;
   } else if (op->op.same_as(tl::__sin())) {
     CUDAFastMath math_func;
     std::string func_name = math_func(op->dtype, "sin");
+    need_math_h_ = true;
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
     return true;
   } else if (op->op.same_as(tl::ieee_add())) {
@@ -4365,6 +4481,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
     os << "tl::warp_reduce_bitor(" << PrintExpr(op->args[0]) << ")";
     return true;
   } else if (op->op.same_as(tl::atomic_add_elem_op())) {
+    need_atomic_h_ = true;
     // atomic_add_elem_op(dst_ptr, src_value[, memory_order])
     std::string dst_ptr = PrintExpr(op->args[0]);
     std::string src_value = PrintExpr(op->args[1]);
@@ -4376,6 +4493,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
     this->stream << ");\n";
     return true;
   } else if (op->op.same_as(tl::atomic_add_ret_elem_op())) {
+    need_atomic_h_ = true;
     // atomic_add_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
     // prev value
     os << "AtomicAddRet(" << PrintExpr(op->args[0]) << ", "
@@ -4386,6 +4504,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
     os << ")";
     return true;
   } else if (op->op.same_as(tl::atomic_addx2_elem_op())) {
+    need_atomic_h_ = true;
     // atomic_addx2_elem_op(dst_ptr, src_ptr[, memory_order])
     std::string dst_ptr = PrintExpr(op->args[0]);
     std::string src_ptr = PrintExpr(op->args[1]);
@@ -4397,6 +4516,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
     this->stream << ");\n";
     return true;
   } else if (op->op.same_as(tl::atomic_addx4_elem_op())) {
+    need_atomic_h_ = true;
     // atomic_addx4_elem_op(dst_ptr, src_ptr[, memory_order])
     std::string dst_ptr = PrintExpr(op->args[0]);
     std::string src_ptr = PrintExpr(op->args[1]);
@@ -4408,11 +4528,13 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
     this->stream << ");\n";
     return true;
   } else if (op->op.same_as(tl::atomic_load_elem_op())) {
+    need_atomic_h_ = true;
     // atomic_load_elem_op(src_ptr, memory_order) -> returns loaded value
     os << "AtomicLoad(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ")";
     return true;
   } else if (op->op.same_as(tl::atomic_store_elem_op())) {
+    need_atomic_h_ = true;
     // atomic_store_elem_op(dst_ptr, value, memory_order)
     std::string dst_ptr = PrintExpr(op->args[0]);
     std::string value = PrintExpr(op->args[1]);
@@ -4422,6 +4544,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
                  << memory_order << ");\n";
     return true;
   } else if (op->op.same_as(tl::atomic_max_elem_op())) {
+    need_atomic_h_ = true;
     // atomic_max_elem_op(dst_ptr, src_value[, memory_order])
     std::string dst_ptr = PrintExpr(op->args[0]);
     std::string src_value = PrintExpr(op->args[1]);
@@ -4433,6 +4556,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
     this->stream << ");\n";
     return true;
   } else if (op->op.same_as(tl::atomic_max_ret_elem_op())) {
+    need_atomic_h_ = true;
     // atomic_max_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
     // prev value
     os << "AtomicMaxRet(" << PrintExpr(op->args[0]) << ", "
@@ -4443,6 +4567,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
     os << ")";
     return true;
   } else if (op->op.same_as(tl::atomic_min_elem_op())) {
+    need_atomic_h_ = true;
     // atomic_min_elem_op(dst_ptr, src_value[, memory_order])
     std::string dst_ptr = PrintExpr(op->args[0]);
     std::string src_value = PrintExpr(op->args[1]);
@@ -4454,6 +4579,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
     this->stream << ");\n";
     return true;
   } else if (op->op.same_as(tl::atomic_min_ret_elem_op())) {
+    need_atomic_h_ = true;
     // atomic_min_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
     // prev value
     os << "AtomicMinRet(" << PrintExpr(op->args[0]) << ", "

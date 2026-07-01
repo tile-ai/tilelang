@@ -313,6 +313,46 @@ __tl_cvt_fp8x2_to_float2(const __nv_fp8x2_storage_t x,
   return result;
 }
 
+// e4m3x2 -> half2
+TL_DEVICE half2
+__tl_cvt_fp8x2_to_half2(const __nv_fp8x2_storage_t x,
+                        const __nv_fp8_interpretation_t fp8_interpretation) {
+  __half2_raw raw = __nv_cvt_fp8x2_to_halfraw2(x, fp8_interpretation);
+  return *reinterpret_cast<half2 *>(&raw);
+}
+
+// half2 -> e4m3x2
+TL_DEVICE __nv_fp8x2_storage_t __tl_cvt_half2_to_fp8x2(
+    const half2 src, const __nv_fp8_interpretation_t fp8_interpretation) {
+  __half2_raw raw = *reinterpret_cast<const __half2_raw *>(&src);
+  return __nv_cvt_halfraw2_to_fp8x2(raw, __NV_SATFINITE, fp8_interpretation);
+}
+
+// e4m3x2 -> bfloat162 (PTX: cvt.rn.satfinite.bf16x2.e4m3x2)
+TL_DEVICE __nv_bfloat162
+__tl_cvt_e4m3x2_to_bfloat162(const __nv_fp8x2_storage_t x) {
+  unsigned int packed;
+  asm("cvt.rn.satfinite.bf16x2.e4m3x2 %0, %1;" : "=r"(packed) : "h"(x));
+  return *reinterpret_cast<__nv_bfloat162 *>(&packed);
+}
+
+// e5m2x2 -> bfloat162 (PTX: cvt.rn.satfinite.bf16x2.e5m2x2)
+TL_DEVICE __nv_bfloat162
+__tl_cvt_e5m2x2_to_bfloat162(const __nv_fp8x2_storage_t x) {
+  unsigned int packed;
+  asm("cvt.rn.satfinite.bf16x2.e5m2x2 %0, %1;" : "=r"(packed) : "h"(x));
+  return *reinterpret_cast<__nv_bfloat162 *>(&packed);
+}
+
+// bfloat162 -> e4m3x2
+TL_DEVICE __nv_fp8x2_storage_t __tl_cvt_bfloat162_to_fp8x2(
+    const __nv_bfloat162 src,
+    const __nv_fp8_interpretation_t fp8_interpretation) {
+  __nv_bfloat162_raw raw = *reinterpret_cast<const __nv_bfloat162_raw *>(&src);
+  return __nv_cvt_bfloat16raw2_to_fp8x2(raw, __NV_SATFINITE,
+                                        fp8_interpretation);
+}
+
 // ============================================================================
 // Inline PTX FP8 Conversions with Stochastic Rounding
 // ============================================================================

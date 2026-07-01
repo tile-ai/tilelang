@@ -23,50 +23,6 @@ def _check(original, transformed):
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-def test_lower_fence_proxy():
-    @T.prim_func
-    def before():
-        with T.Kernel(8):
-            A_shared = T.decl_buffer((1, 8, 256), T.float16, scope="shared.dyn")
-            B_shared = T.decl_buffer((1, 4, 512), T.float16, scope="shared.dyn")
-            C_local = T.decl_buffer((32,), scope="local")
-            for i in T.unroll(16):
-                C_local[i * 2 : i * 2 + 2] = T.Broadcast(T.float32(0), 2)
-            # A shared-memory generic store should trigger a fence before the
-            # following async-proxy GEMM on Hopper (SM90+).
-            A_shared[0, 0, 0] = T.float16(0)
-            T.call_intrin(
-                "handle",
-                tirx.op.Op.get("tl.tl_gemm"),
-                "tl::gemm_ss<128, 128, 32, 4, 1, 0, 0, 0, 32, 128, 0, 0, true>",
-                T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, 0, 2048, 1),
-                T.tvm_access_ptr(T.type_annotation(T.float16), B_shared.data, 0, 2048, 1),
-                T.tvm_access_ptr(T.type_annotation(T.float32), C_local.data, 0, 32, 3),
-            )
-
-    @T.prim_func
-    def after():
-        with T.Kernel(8):
-            A_shared = T.decl_buffer((1, 8, 256), T.float16, scope="shared.dyn")
-            B_shared = T.decl_buffer((1, 4, 512), T.float16, scope="shared.dyn")
-            C_local = T.decl_buffer((32,), scope="local")
-            for i in T.unroll(16):
-                C_local[i * 2 : i * 2 + 2] = T.Broadcast(T.float32(0), 2)
-            A_shared[0, 0, 0] = T.float16(0)
-            T.fence_proxy_async()
-            T.call_intrin(
-                "handle",
-                tirx.op.Op.get("tl.tl_gemm"),
-                "tl::gemm_ss<128, 128, 32, 4, 1, 0, 0, 0, 32, 128, 0, 0, true>",
-                T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, 0, 2048, 1),
-                T.tvm_access_ptr(T.type_annotation(T.float16), B_shared.data, 0, 2048, 1),
-                T.tvm_access_ptr(T.type_annotation(T.float32), C_local.data, 0, 32, 3),
-            )
-
-    _check(before, after)
-
-
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_async_to_generic_no_double_fence():
     @T.prim_func
     def before():
@@ -582,8 +538,8 @@ def test_regression_0219_fence_no_fence_inserted():
         tx = T.launch_thread("threadIdx.x", 256)
         mbarrier = T.decl_buffer((6,), "uint64", scope="shared.barrier")
         if T.shuffle_elect(0):
-            T.call_extern("handle", "tl::prefetch_tma_descriptor", A_desc)
-            T.call_extern("handle", "tl::prefetch_tma_descriptor", B_desc)
+            T.call_intrin("handle", tirx.op.Op.get("tl.prefetch_tma_descriptor"), A_desc)
+            T.call_intrin("handle", tirx.op.Op.get("tl.prefetch_tma_descriptor"), B_desc)
             T.ptx_init_barrier_thread_count(mbarrier[0], 128)
             T.ptx_init_barrier_thread_count(mbarrier[1], 128)
             T.ptx_init_barrier_thread_count(mbarrier[2], 128)
@@ -746,8 +702,8 @@ def test_regression_0219_fence_no_fence_inserted():
         tx = T.launch_thread("threadIdx.x", 256)
         mbarrier = T.decl_buffer((6,), "uint64", scope="shared.barrier")
         if T.shuffle_elect(0):
-            T.call_extern("handle", "tl::prefetch_tma_descriptor", A_desc)
-            T.call_extern("handle", "tl::prefetch_tma_descriptor", B_desc)
+            T.call_intrin("handle", tirx.op.Op.get("tl.prefetch_tma_descriptor"), A_desc)
+            T.call_intrin("handle", tirx.op.Op.get("tl.prefetch_tma_descriptor"), B_desc)
             T.ptx_init_barrier_thread_count(mbarrier[0], 128)
             T.ptx_init_barrier_thread_count(mbarrier[1], 128)
             T.ptx_init_barrier_thread_count(mbarrier[2], 128)

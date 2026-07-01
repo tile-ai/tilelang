@@ -4,13 +4,17 @@
 
 namespace tl {
 
+TL_DEVICE unsigned int ceil_div(unsigned int a, unsigned int b) {
+  return (a + b - 1) / b;
+}
+
 template <int panel_width> TL_DEVICE dim3 rasterization2DRow() {
   const unsigned int block_idx = blockIdx.x + blockIdx.y * gridDim.x;
   const unsigned int grid_size = gridDim.x * gridDim.y;
   const unsigned int panel_size = panel_width * gridDim.x;
   const unsigned int panel_offset = block_idx % panel_size;
   const unsigned int panel_idx = block_idx / panel_size;
-  const unsigned int total_panel = cutlass::ceil_div(grid_size, panel_size);
+  const unsigned int total_panel = tl::ceil_div(grid_size, panel_size);
   const unsigned int stride =
       panel_idx + 1 < total_panel
           ? panel_width
@@ -28,7 +32,7 @@ template <int panel_width> TL_DEVICE dim3 rasterization2DColumn() {
   const unsigned int panel_size = panel_width * gridDim.y;
   const unsigned int panel_offset = block_idx % panel_size;
   const unsigned int panel_idx = block_idx / panel_size;
-  const unsigned int total_panel = cutlass::ceil_div(grid_size, panel_size);
+  const unsigned int total_panel = tl::ceil_div(grid_size, panel_size);
   const unsigned int stride =
       panel_idx + 1 < total_panel
           ? panel_width

@@ -14,7 +14,7 @@ struct ScanSumOp {
 
 struct ScanMaxOp {
   template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
-    return cutlass::fast_max(x, y);
+    return tl::fast_max(x, y);
   }
 
   TL_DEVICE bfloat16_t operator()(bfloat16_t const &x, bfloat16_t const &y) {

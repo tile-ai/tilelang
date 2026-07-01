@@ -97,7 +97,7 @@ template <typename Impl> struct FinalizeReducerLowerer {
         lower_args.thread_bounds->extent, lower_args.target);
     Array<PrimExpr> thread_reduce_args = {StringImm(allreduce),
                                           BufferLoad(buffer, indices_0)};
-    if (reducing_threads >= 32) {
+    if (reducing_threads > Impl::WarpSize(lower_args.target)) {
       PrimExpr workspace = lower_args.add_workspace(
           *as_const_int(lower_args.thread_bounds->extent), buffer->dtype);
       thread_reduce_args.push_back(workspace);
