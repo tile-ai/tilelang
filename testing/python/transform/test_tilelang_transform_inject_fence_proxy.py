@@ -538,8 +538,8 @@ def test_regression_0219_fence_no_fence_inserted():
         tx = T.launch_thread("threadIdx.x", 256)
         mbarrier = T.decl_buffer((6,), "uint64", scope="shared.barrier")
         if T.shuffle_elect(0):
-            T.call_extern("handle", "tl::prefetch_tma_descriptor", A_desc)
-            T.call_extern("handle", "tl::prefetch_tma_descriptor", B_desc)
+            T.call_intrin("handle", tirx.op.Op.get("tl.prefetch_tma_descriptor"), A_desc)
+            T.call_intrin("handle", tirx.op.Op.get("tl.prefetch_tma_descriptor"), B_desc)
             T.ptx_init_barrier_thread_count(mbarrier[0], 128)
             T.ptx_init_barrier_thread_count(mbarrier[1], 128)
             T.ptx_init_barrier_thread_count(mbarrier[2], 128)
@@ -702,8 +702,8 @@ def test_regression_0219_fence_no_fence_inserted():
         tx = T.launch_thread("threadIdx.x", 256)
         mbarrier = T.decl_buffer((6,), "uint64", scope="shared.barrier")
         if T.shuffle_elect(0):
-            T.call_extern("handle", "tl::prefetch_tma_descriptor", A_desc)
-            T.call_extern("handle", "tl::prefetch_tma_descriptor", B_desc)
+            T.call_intrin("handle", tirx.op.Op.get("tl.prefetch_tma_descriptor"), A_desc)
+            T.call_intrin("handle", tirx.op.Op.get("tl.prefetch_tma_descriptor"), B_desc)
             T.ptx_init_barrier_thread_count(mbarrier[0], 128)
             T.ptx_init_barrier_thread_count(mbarrier[1], 128)
             T.ptx_init_barrier_thread_count(mbarrier[2], 128)

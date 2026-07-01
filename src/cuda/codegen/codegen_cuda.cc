@@ -2046,9 +2046,6 @@ void CodeGenTileLangCUDA::PrintCallExtern(Type ret_type, String global_symbol,
                                           const Array<PrimExpr> &args,
                                           bool skip_first_arg,
                                           std::ostream &os) { // NOLINT(*)
-  if (global_symbol == "tl::prefetch_tma_descriptor") {
-    need_copy_sm90_h_ = true;
-  }
   DataType ret_dtype = GetRuntimeDataType(ret_type);
   if (ret_dtype.is_fixed_length_vector()) {
     //
@@ -2479,6 +2476,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt(ss.str());
   } else if (op->op.same_as(tl::no_set_max_nreg())) {
     return;
+  } else if (op->op.same_as(tl::prefetch_tma_descriptor())) {
+    need_copy_sm90_h_ = true;
+    print_extern_call_stmt("tl::prefetch_tma_descriptor");
   } else if (op->op.same_as(tl::tma_load())) {
     std::ostringstream ss;
     ICHECK_GE(op->args.size(), 2);

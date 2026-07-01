@@ -303,6 +303,14 @@ TVM_DLL const Op &create_tma_descriptor();
 TVM_DLL const Op &create_tma_im2col_descriptor();
 
 /*!
+ * \brief tvm intrinsic for prefetching a TMA descriptor on Hopper.
+ *
+ * prefetch_tma_descriptor(descriptor)
+ *
+ */
+TVM_DLL const Op &prefetch_tma_descriptor();
+
+/*!
  * \brief tvm intrinsics for loading data from global tensor descriptor to
  * shared memory
  *
