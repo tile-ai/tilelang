@@ -22,7 +22,7 @@
 #include <vector_types.h>
 // Older NVRTC builtin vector headers omit these aligned double4 aliases.
 // CUDA 13 defines them already, so keep this compatibility patch pre-CUDA 13.
-#if defined(__CUDACC_RTC_BUILTIN_VECTOR_TYPES__) &&                          \
+#if defined(__CUDACC_RTC_BUILTIN_VECTOR_TYPES__) &&                            \
     (!defined(__CUDACC_VER_MAJOR__) || __CUDACC_VER_MAJOR__ < 13)
 struct __device_builtin__ __builtin_align__(16) double4_16a {
   double x, y, z, w;
