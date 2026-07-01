@@ -8,12 +8,13 @@ from collections.abc import Sequence
 
 import tvm
 import tvm_ffi
-from tvm.ir import PrimExpr
+from tvm.ir import PrimExpr, Range
 from tvm.ir.base import Node
 from tvm.runtime import Scriptable
 
 from tilelang._typing import BufferLikeType
 from . import _cute_ffi_api
+from .swizzle_mode import SwizzleMode
 
 PyIntTuple = Union[int, PrimExpr, "ScaledBasis", tuple]
 IntTupleLike = Union[int, PrimExpr, "ScaledBasis", Sequence, "IntTuple"]
@@ -60,6 +61,9 @@ class Swizzle(Node, Scriptable):
 
     def recast(self, old_bits: int, new_bits: int) -> Swizzle:
         return _cute_ffi_api.swizzle_recast(self, int(old_bits), int(new_bits))
+
+    def to_swizzle_mode(self) -> SwizzleMode:
+        return _cute_ffi_api.swizzle_to_swizzle_mode(self)
 
 
 @tvm_ffi.register_object("tl.cute.IntTuple")
@@ -149,6 +153,9 @@ class Layout(Node, Scriptable):
     def __call__(self, coord: IntTupleLike):
         return to_python(_cute_ffi_api.layout_eval(self, from_python(coord)))
 
+    def with_shape(self, shape: IntTupleLike) -> Layout:
+        return _cute_ffi_api.with_shape(self, from_python(shape))
+
     @staticmethod
     def from_tilelang(layout) -> Layout | None:
         return _cute_ffi_api.layout_from_tilelang(layout)
@@ -182,21 +189,44 @@ def composition(lhs: Layout, rhs: Layout) -> Layout:
     return _cute_ffi_api.composition(lhs, rhs)
 
 
-def make_layout(shape: PyIntTuple, stride=None) -> Layout:
+def filter(layout: Layout) -> Layout:  # noqa: A001 - mirrors CuTe `filter`
+    return _cute_ffi_api.filter(layout)
+
+
+def congruent(a: IntTupleLike, b: IntTupleLike) -> bool:
+    return bool(_cute_ffi_api.congruent(from_python(a), from_python(b)))
+
+
+def cosize(layout: Layout) -> int:
+    return to_python(_cute_ffi_api.cosize(layout))
+
+
+def complement(layout: Layout, cotarget: int) -> Layout:
+    return _cute_ffi_api.complement(layout, int(cotarget))
+
+
+def logical_divide(layout: Layout, tiler: Layout) -> Layout:
+    return _cute_ffi_api.logical_divide(layout, tiler)
+
+
+def make_layout(shape: IntTupleLike, stride=None) -> Layout:
+    # Concat: make_layout([layout0, layout1, ...])
+    if stride is None and isinstance(shape, (tuple, list)) and shape and all(isinstance(x, Layout) for x in shape):
+        return _cute_ffi_api.make_layout_concat(list(shape))
     if stride is None:
         return _cute_ffi_api.make_column_major_layout(from_python(shape))
     return _cute_ffi_api.make_layout(from_python(shape), from_python(stride))
 
 
-def make_column_major_layout(shape: PyIntTuple) -> Layout:
+def make_column_major_layout(shape: IntTupleLike) -> Layout:
     return _cute_ffi_api.make_column_major_layout(from_python(shape))
 
 
-def make_row_major_layout(shape: PyIntTuple) -> Layout:
+def make_row_major_layout(shape: IntTupleLike) -> Layout:
     return _cute_ffi_api.make_row_major_layout(from_python(shape))
 
 
-def make_identity_layout(shape: PyIntTuple) -> Layout:
+def make_identity_layout(shape: IntTupleLike) -> Layout:
     return _cute_ffi_api.make_identity_layout(from_python(shape))
 
 
@@ -218,3 +248,8 @@ class ComposedLayout(Node, Scriptable):
 
         _, _, dtype = _get_buffer_info(buffer)
         return mode.recast(int(tvm.DataType(dtype).bits), 8)
+
+
+def restrict(layout: Layout, region: Sequence[Range]) -> tuple[PyIntTuple, Layout]:
+    offset, sublayout = _cute_ffi_api.restrict(layout, list(region))
+    return to_python(offset), sublayout

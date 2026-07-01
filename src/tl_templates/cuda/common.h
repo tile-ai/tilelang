@@ -659,6 +659,12 @@ TL_DEVICE void increase_descriptor_offset(GmmaDescriptor &descriptor,
   descriptor.reg32_[0] += (offset >> 4);
 }
 
+template <typename T>
+TL_DEVICE void increase_descriptor_offset(Tcgen05SMemDescriptor &descriptor,
+                                          T offset) {
+  descriptor.reg32_[0] += (offset >> 4);
+}
+
 // and add the desired implicit conversion from bfloat16_t.
 struct float_e4m3_t : public cute::float_e4m3_t {
   using cute::float_e4m3_t::float_e4m3_t;
