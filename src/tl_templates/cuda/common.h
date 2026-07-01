@@ -18,10 +18,29 @@
 #define __volatile__ volatile
 #endif
 
-#include "atomic.h"
-#include <cute/arch/util.hpp>
-#include <cutlass/fast_math.h>
-#include <cutlass/numeric_types.h>
+#if defined(__CUDACC_RTC__)
+#include <vector_types.h>
+// Older NVRTC builtin vector headers omit these aligned double4 aliases.
+// CUDA 13 defines them already, so keep this compatibility patch pre-CUDA 13.
+#if defined(__CUDACC_RTC_BUILTIN_VECTOR_TYPES__) &&                            \
+    (!defined(__CUDACC_VER_MAJOR__) || __CUDACC_VER_MAJOR__ < 13)
+struct __device_builtin__ __builtin_align__(16) double4_16a {
+  double x, y, z, w;
+};
+
+struct __device_builtin__ __builtin_align__(32) double4_32a {
+  double x, y, z, w;
+};
+#endif
+#ifndef __NV_SILENCE_DEPRECATION_BEGIN
+#define __NV_SILENCE_DEPRECATION_BEGIN
+#endif
+#ifndef __NV_SILENCE_DEPRECATION_END
+#define __NV_SILENCE_DEPRECATION_END
+#endif
+#endif
+
+#include <cute/numeric/numeric_types.hpp>
 #include <math_constants.h>
 
 #include <cutlass/bfloat16.h>
@@ -30,17 +49,7 @@
 using cutlass::bfloat16_t;
 using cutlass::half_t;
 
-using cute::cast_smem_ptr_to_uint;
-
 using int4_t = int4;
-
-#define hexp cutlass::fast_exp
-#define hlog cutlass::fast_log
-#define hsqrt cutlass::fast_sqrt
-#define hsin cutlass::fast_sin
-#define hcos cutlass::fast_cos
-#define htanh cutlass::fast_tanh
-#define hpow powf
 
 #define uint unsigned int
 #define uchar unsigned char
@@ -107,6 +116,15 @@ TL_PATCH TL_DEVICE half_t hrsqrt(const half_t x) {
 // hrsqrt function for bfloat16_t
 TL_PATCH TL_DEVICE bfloat16_t hrsqrt(const bfloat16_t x) {
   return bfloat16_t(hrsqrt(x.to_nv_bfloat16()));
+}
+
+// TVM lowers T.exp(bfloat16) to the CUDA half-style `hexp` name. TileLang uses
+// cutlass::bfloat16_t for scalar bf16, while CUDA only overloads hexp for
+// __nv_bfloat16. Keep this narrow bridge in common.h so plain T.exp works
+// without pulling tl_templates/cuda/math.h and cutlass/fast_math.h into every
+// kernel.
+TL_PATCH TL_DEVICE bfloat16_t hexp(const bfloat16_t x) {
+  return bfloat16_t(hexp(x.to_nv_bfloat16()));
 }
 
 // Pack two half values.
@@ -302,12 +320,7 @@ TL_DEVICE uint32_t smem_ptr_to_uint(void const *const ptr) {
  *       pointers in other address spaces.
  */
 TL_DEVICE unsigned int cast_smem_ptr_to_int(const void *const smem_ptr) {
-  unsigned int smem_int;
-  asm volatile("{ .reg .u64 smem_int; cvta.to.shared.u64 smem_int, %1; "
-               "cvt.u32.u64 %0, smem_int; }"
-               : "=r"(smem_int)
-               : "l"(smem_ptr));
-  return smem_int;
+  return smem_ptr_to_uint(smem_ptr);
 }
 
 // DP4A
@@ -616,8 +629,7 @@ template <int layout_type = 0, int leading_byte_offset = 0,
           int stride_byte_offset = 0, typename T>
 TL_DEVICE void initialize_wgmma_descriptor(GmmaDescriptor &descriptor,
                                            T *start_address) {
-  descriptor.bitfield.start_address_ =
-      cute::cast_smem_ptr_to_uint(start_address) >> 4;
+  descriptor.bitfield.start_address_ = smem_ptr_to_uint(start_address) >> 4;
   descriptor.bitfield.layout_type_ = layout_type;
   descriptor.bitfield.base_offset_ = 0;
   descriptor.bitfield.leading_byte_offset_ = leading_byte_offset;
@@ -632,7 +644,7 @@ initialize_tcgen05_descriptor(Tcgen05SMemDescriptor &descriptor,
                               bool leading_is_absolute, int swizzle_mode) {
 
   descriptor.bitfield.start_address_ =
-      static_cast<uint16_t>(cast_smem_ptr_to_uint(start_address) >> 4);
+      static_cast<uint16_t>(smem_ptr_to_uint(start_address) >> 4);
   descriptor.bitfield.leading_byte_offset_ = leading_byte_offset;
   descriptor.bitfield.stride_byte_offset_ = stride_byte_offset;
   descriptor.bitfield.version_ = 1;
@@ -643,6 +655,12 @@ initialize_tcgen05_descriptor(Tcgen05SMemDescriptor &descriptor,
 
 template <typename T>
 TL_DEVICE void increase_descriptor_offset(GmmaDescriptor &descriptor,
+                                          T offset) {
+  descriptor.reg32_[0] += (offset >> 4);
+}
+
+template <typename T>
+TL_DEVICE void increase_descriptor_offset(Tcgen05SMemDescriptor &descriptor,
                                           T offset) {
   descriptor.reg32_[0] += (offset >> 4);
 }
@@ -869,6 +887,14 @@ TL_DEVICE __half2 fma2(__half2 a, __half2 b, __half2 c) {
 #endif
 }
 
+template <typename T> TL_DEVICE T fast_max(T a, T b) { return a < b ? b : a; }
+
+template <> TL_DEVICE float fast_max(float a, float b) { return fmaxf(a, b); }
+
+template <typename T> TL_DEVICE T fast_min(T a, T b) { return b < a ? b : a; }
+
+template <> TL_DEVICE float fast_min(float a, float b) { return fminf(a, b); }
+
 // --- max2 ----------------------------------------------------------------
 
 TL_DEVICE float2 max2(float2 a, float2 b) {
@@ -972,14 +998,6 @@ TL_DEVICE __half2 abs2(__half2 a) {
 } // namespace tl
 
 using tl::tfloat32_t;
-
-namespace cutlass {
-// Mirror cutlass's own half_t fast_exp (fast_math.h): route through float.
-// A direct `return ::hexp(x)` recurses, since `hexp` is #define'd to this
-// same cutlass::fast_exp and x is already bfloat16_t.
-TL_DEVICE
-bfloat16_t fast_exp(bfloat16_t x) { return bfloat16_t(fast_exp(float(x))); }
-} // namespace cutlass
 
 //
 // Optimized type-punned warp shuffle helpers for 16-bit types

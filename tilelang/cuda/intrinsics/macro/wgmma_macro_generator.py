@@ -1,19 +1,17 @@
 from __future__ import annotations
 import tilelang.language as T
 from dataclasses import dataclass
-from enum import IntEnum
 from collections.abc import Callable
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 from tvm import DataType
 from tvm.tirx import PrimExpr, Buffer, Var, IndexMap, BufferRegion
-from tilelang.utils import is_fragment, retrive_ptr_from_buffer_region, is_full_region
+from tilelang import tvm as tvm
+from tilelang.utils import is_fragment, is_full_region
 from math import gcd
 from tilelang.layout import (
     Layout,
-    make_full_bank_swizzled_layout,
-    make_half_bank_swizzled_layout,
-    make_quarter_bank_swizzled_layout,
-    make_linear_layout,
+    SwizzleMode,
+    cute,
 )
 from tvm.runtime import convert
 from tilelang.cuda.intrinsics.layout.mma_layout import (
@@ -25,16 +23,22 @@ from tilelang.cuda.intrinsics.layout.mma_layout import (
 lift = convert
 
 
+def _min_leaf_stride(stride) -> int:
+    """Smallest leaf stride within a (possibly nested) stride tuple."""
+    if isinstance(stride, tuple):
+        return min(_min_leaf_stride(s) for s in stride)
+    return int(stride)
+
+
 @dataclass(frozen=True)
 class WGMMADescriptorParams:
-    """Pre-computed parameters for WGMMA descriptor initialization and atom offset computation.
-
-    Returned by ``compute_wgmma_*_desc_params()`` and consumed by
-    ``init_wgmma_*_desc()`` and ``wgmma_*_atom()`` methods.
+    """Pre-computed WGMMA descriptor parameters, produced by
+    :func:`compute_gmma_descriptor` (a port of CuTe ``make_gmma_desc``) and
+    consumed by ``init_wgmma_*_desc()`` and ``wgmma_*_atom()``.
     """
 
-    swizzle_mode: int
-    """SwizzleMode enum value (passed directly to ``T.initialize_wgmma_descriptor``)."""
+    swizzle_mode: SwizzleMode
+    """Canonical swizzle mode; project to the descriptor field via ``wgmma_layout_type()``."""
     leading_byte_offset: int
     """LBO >> 4, ready to pass to ``T.initialize_wgmma_descriptor``."""
     stride_byte_offset: int
@@ -47,46 +51,134 @@ class WGMMADescriptorParams:
     """Byte width of a single element: ``DataType(dtype).bits // 8``."""
     is_k_major: bool
     """Whether the matrix is stored in K-major order (affects offset formula branching)."""
+    slice_byte_offset: object = 0
+    """Physical byte offset (raw bytes) of the operand slice origin within its
+    buffer; passed to ``T.increase_descriptor_offset`` after building the
+    descriptor from the buffer base. ``0`` for a whole-buffer / base-origin
+    operand. Computed by :func:`compute_gmma_descriptor` from the CuTe layout."""
 
 
-class SwizzleMode(IntEnum):
-    # SWIZZLE_NONE = 0, SWIZZLE_32B = 3, SWIZZLE_64B = 2, SWIZZLE_128B = 1
-    NONE = 0
-    SWIZZLE_128B = 1
-    SWIZZLE_64B = 2
-    SWIZZLE_32B = 3
+def compute_gmma_descriptor(tl_layout, buffer, transposed: bool, micro_size_k: int = 16, region=None) -> WGMMADescriptorParams:
+    """Port of CuTe ``make_gmma_desc``.
 
-    def is_none(self) -> bool:
-        return self == SwizzleMode.NONE
+    Decode an arbitrary shared-memory ``tl_layout`` for ``buffer`` and compute the
+    WGMMA descriptor parameters, accepting *any* WGMMA-canonical layout -- not
+    just the four "maker" layouts. A non-GMMA-canonical layout is a programming
+    error, so the canonicity checks assert (mirroring CuTe's ``static_assert``s).
 
-    def is_swizzle_32b(self) -> bool:
-        return self == SwizzleMode.SWIZZLE_32B
+    ``transposed`` selects which logical axis is MN vs K (shape only): default
+    ``[MN, K]``, transposed ``[K, MN]``. The operand is required to be row-major,
+    i.e. K-major iff ``not transposed``; the contiguity detected from the layout
+    (the GMMA mode owning the stride-1 sub-mode) is asserted to agree.
 
-    def is_swizzle_64b(self) -> bool:
-        return self == SwizzleMode.SWIZZLE_64B
+    ``region`` is the operand's per-axis ranges (one :class:`tvm.ir.Range` per
+    logical buffer mode), used to restrict the decoded layout to a sliced
+    operand (e.g. ``B[:, j*64:...]``). It may be ``None`` for a full-buffer
+    operand or the atom-level API.
+    """
+    elems_in_bytes = int(DataType(buffer.dtype).bits) // 8
+    bits = int(DataType(buffer.dtype).bits)
+    # One decode in element space; the byte- and u128-address variants are pure
+    # recasts of it (no second from_tilelang).
+    composed_elem = cute.ComposedLayout.from_tilelang(tl_layout)
+    assert composed_elem is not None, f"WGMMA operand layout is not decodable by the CuTe analyzer: {tl_layout}"
+    # Swizzle is read in BYTE space (canonical atom Sw<b,4,3>, m_base==4).
+    byte_swizzle = composed_elem.recast(bits, 8).swizzle
+    swizzle_mode = byte_swizzle.to_swizzle_mode()
 
-    def is_swizzle_128b(self) -> bool:
-        return self == SwizzleMode.SWIZZLE_128B
+    # Restrict the (possibly hierarchical, swizzle-split) element-space layout to
+    # the operand's slice. ``restrict`` reshapes each mode to its logical extent
+    # via with_shape -- collapsing the split sub-modes back to the logical tile,
+    # and skipping extent-1 modes (e.g. a software-pipeline stage the region pins
+    # to one element) so the result is the bare (MN, K) operand. It also returns
+    # the slice origin's physical element offset, which we scale to raw bytes for
+    # increase_descriptor_offset: the descriptor is built from the buffer base, so
+    # this advance lands it on the slice origin while keeping the cvta operand
+    # (the base) loop-invariant => warp-uniform. With no region (atom API) the
+    # layout is already the bare operand.
+    tile = composed_elem.layout
+    slice_byte_offset = 0
+    if region is not None:
+        slice_off_elems, tile = cute.restrict(composed_elem.layout, region)
+        # A statically-zero origin is a plain int 0; a runtime origin is a PrimExpr.
+        if slice_off_elems != 0:
+            slice_byte_offset = tvm.arith.Analyzer().simplify(slice_off_elems * bits // 8)
+    assert cute.rank(tile) == 2, f"WGMMA operand tile must be rank-2 (MN, K), got rank {cute.rank(tile)}"
 
-    def swizzle_byte_size(self) -> int:
-        if self.is_swizzle_32b():
-            return 32
-        elif self.is_swizzle_64b():
-            return 64
-        elif self.is_swizzle_128b():
-            return 128
-        else:
-            return 1
+    # Present in GMMA (MN, K) order, then recast the swizzled element layout to
+    # uint128_t (exactly CuTe's recast<uint128_t const>(tensor)).
+    mn_idx = 1 if transposed else 0
+    k_idx = 1 - mn_idx
+    mn_dim = int(cute.size(tile[mn_idx]))
+    mnk = cute.make_layout([tile[mn_idx], tile[k_idx]])
+    u128 = cute.ComposedLayout(composed_elem.swizzle, composed_elem.offset, mnk).recast(bits, 128)
+    mn_mode, k_mode = u128.layout[0], u128.layout[1]
 
-    def swizzle_atom_size(self) -> int:
-        if self.is_swizzle_32b():
-            return 32 // 16
-        elif self.is_swizzle_64b():
-            return 64 // 16
-        elif self.is_swizzle_128b():
-            return 128 // 16
-        else:
-            return 1
+    # Row-major only: K-major iff not transposed. Assert the contiguity detected
+    # from the layout (K mode owns the stride-1 sub-mode) agrees with that.
+    k_major = not transposed
+    detected_k_major = _min_leaf_stride(k_mode.stride) == 1
+    assert detected_k_major == k_major, (
+        f"WGMMA operand layout contiguity (k_major={detected_k_major}) disagrees with "
+        f"the row-major expectation (k_major={k_major} for transposed={transposed}); "
+        f"only row-major operand layouts are supported."
+    )
+
+    # W per CuTe LayoutType (INTERLEAVE->1, B32->2, B64->4, B128->8) = 1 << b_bits.
+    W = 1 << byte_swizzle.b_bits
+    swizzled = not swizzle_mode.is_none()
+
+    # CuTe make_gmma_desc logical_divides each u128 (MN, K) mode by the canonical
+    # tiler:
+    #   MN-major: ((W,m),(8,k)):((1,LBO),(W,SBO))   [INTERLEAVE: ((1,m),(8,k)):((X,SBO),(1,LBO))]
+    #   K-major : ((8,m),(2,k)):((8,SBO),(1,2))
+    # Each divided mode is (tile, rest) and its strides read directly as scalars.
+    if k_major:
+        d_mn = cute.logical_divide(mn_mode, cute.make_layout(8, 1))
+        d_k = cute.logical_divide(k_mode, cute.make_layout(2, 1))
+    else:
+        d_mn = cute.logical_divide(mn_mode, cute.make_layout(W, 1))
+        d_k = cute.logical_divide(k_mode, cute.make_layout(8, 1))
+    # The MN mode is always a clean (tile, rest) scalar pair. So is the K mode's
+    # tile (stride<1,0>); only the K *rest* (stride<1,1>) may stay multi-atom for
+    # a whole operand (CuTe's tensor is one K atom), and K-major never reads it.
+    assert cute.congruent(d_mn.shape, (1, 1)) and cute.congruent(d_k[0].shape, 1), (
+        f"WGMMA operand is not a canonical GMMA layout: divided MN={d_mn.shape}, K-tile={d_k[0].shape}"
+    )
+    s00, s01 = d_mn.stride
+    s10 = d_k.stride[0]
+
+    if k_major:
+        # Canonical ((8,m),(2,k)):((8,SBO),(1,2)). stride<0,0>==W; stride<1,0> is
+        # the INTERLEAVE pass-through or 1 when swizzled. SBO=stride<0,1>, LBO=1.
+        assert s00 == W, f"Not a canonical GMMA_K layout: stride<0,0>={s00} != W={W}"
+        assert not (swizzled and s10 != 1), f"Not a canonical GMMA_K layout: stride<1,0>={s10} != 1"
+        sbo = s01
+        lbo = s10
+    else:
+        # Canonical ((W,m),(8,k)). stride<1,0>==W, and stride<0,0>==1 when swizzled
+        # (INTERLEAVE passes through). Rejects layouts CuTe itself rejects (e.g.
+        # tilelang's K-oriented maker used as an MN operand).
+        assert cute.congruent(d_k.shape, (1, 1)), f"WGMMA MN-major operand is not a canonical GMMA layout: divided K={d_k.shape}"
+        s11 = d_k.stride[1]
+        assert not (swizzled and s00 != 1), f"Not a canonical GMMA_MN layout: stride<0,0>={s00} != 1"
+        assert s10 == W, f"Not a canonical GMMA_MN layout: stride<1,0>={s10} != W={W}"
+        sbo = s11 if swizzled else s01
+        lbo = s01 if swizzled else s11
+
+    # Elements per swizzle atom along the non-K (MN) dimension; the unswizzled
+    # case spans the whole MN tile.
+    swizzle_atom_elems = mn_dim if swizzle_mode.is_none() else swizzle_mode.swizzle_byte_size() // elems_in_bytes
+    return WGMMADescriptorParams(
+        swizzle_mode=swizzle_mode,
+        leading_byte_offset=int(lbo),
+        stride_byte_offset=int(sbo),
+        swizzle_atom_elems=swizzle_atom_elems,
+        k_atom_size=max(swizzle_atom_elems // micro_size_k, 1),
+        elems_in_bytes=elems_in_bytes,
+        is_k_major=k_major,
+        slice_byte_offset=slice_byte_offset,
+    )
 
 
 # derive from MMAIntrinEmitter as some layouts are the same
@@ -186,19 +278,6 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         self.micro_size_x = m_dim
         self.micro_size_k = k_dim
-
-    def _determinate_swizzle_mode(self, buffer: Buffer, layout: Layout) -> SwizzleMode:
-        # same behavior to src/layout/gemm_layouts.cc::MakeGemmABLayoutHopper
-        if layout is None or layout.is_equal(make_linear_layout(buffer)):
-            return SwizzleMode.NONE
-        elif layout.is_equal(make_quarter_bank_swizzled_layout(buffer)):
-            return SwizzleMode.SWIZZLE_32B
-        elif layout.is_equal(make_half_bank_swizzled_layout(buffer)):
-            return SwizzleMode.SWIZZLE_64B
-        elif layout.is_equal(make_full_bank_swizzled_layout(buffer)):
-            return SwizzleMode.SWIZZLE_128B
-        else:
-            raise ValueError(f"Unsupported swizzle mode: {layout}")
 
     def wgmma(
         self, A_region: BufferRegion, B_region: BufferRegion, C_region: BufferRegion, clear_accum: PrimExpr = False, wg_wait: int = 0
@@ -315,87 +394,31 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
     def compute_wgmma_b_desc_params(self, B_region: BufferRegion) -> WGMMADescriptorParams:
         """Compute B descriptor parameters from the B shared buffer region.
 
-        This is a pure-Python helper -- no TIR code is emitted.
-        The returned ``WGMMADescriptorParams`` is passed to
-        ``init_wgmma_b_desc()`` and ``wgmma_*_atom()`` methods.
+        Pure-Python helper (no TIR emitted); the returned ``WGMMADescriptorParams``
+        is consumed by ``init_wgmma_b_desc()`` and ``wgmma_*_atom()``.
         """
-        n_dim = self.block_col_warps * self.warp_col_tiles
-        k_dim = self.chunk
-        micro_size_k = self.micro_size_k
-        elems_in_bytes = DataType(self.a_dtype).bits // 8
-        b_is_k_major = self.b_transposed
-
-        b_swizzle_mode = self._determinate_swizzle_mode(B_region, self.b_shared_layout)
-        b_swizzle_atom_elems = n_dim if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
-
-        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim * elems_in_bytes)
-        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (0 if n_dim == 8 else (8 * 8 * elems_in_bytes))
-        if not b_swizzle_mode.is_none():
-            if b_is_k_major:
-                b_leading_byte_offset = 16
-                b_stride_byte_offset = 8 * b_swizzle_mode.swizzle_byte_size()
-            else:
-                b_n_axis_atoms = n_dim // b_swizzle_atom_elems
-                if b_n_axis_atoms <= 1:
-                    b_leading_byte_offset = 0
-                else:
-                    b_leading_byte_offset = 8 * 8 * elems_in_bytes * k_dim
-                if b_n_axis_atoms <= 1:
-                    b_stride_byte_offset = 8 * elems_in_bytes * n_dim
-                else:
-                    b_stride_byte_offset = 8 * elems_in_bytes * b_swizzle_atom_elems
-
-        return WGMMADescriptorParams(
-            swizzle_mode=int(b_swizzle_mode),
-            leading_byte_offset=int(b_leading_byte_offset >> 4),
-            stride_byte_offset=int(b_stride_byte_offset >> 4),
-            swizzle_atom_elems=b_swizzle_atom_elems,
-            k_atom_size=max(b_swizzle_atom_elems // micro_size_k, 1),
-            elems_in_bytes=elems_in_bytes,
-            is_k_major=b_is_k_major,
+        assert self.b_shared_layout is not None, "WGMMA B operand has no shared layout to decode"
+        return compute_gmma_descriptor(
+            self.b_shared_layout,
+            B_region.buffer if isinstance(B_region, BufferRegion) else B_region,
+            transposed=not self.b_transposed,
+            micro_size_k=self.micro_size_k,
+            region=list(B_region.region) if isinstance(B_region, BufferRegion) else None,
         )
 
     def compute_wgmma_a_desc_params(self, A_region: BufferRegion) -> WGMMADescriptorParams:
         """Compute A descriptor parameters from the A shared buffer region (SS variant).
 
-        This is a pure-Python helper -- no TIR code is emitted.
-        The returned ``WGMMADescriptorParams`` is passed to
-        ``init_wgmma_a_desc()`` and ``wgmma_ss_atom()`` methods.
+        Pure-Python helper (no TIR emitted); the returned ``WGMMADescriptorParams``
+        is consumed by ``init_wgmma_a_desc()`` and ``wgmma_ss_atom()``.
         """
-        m_dim = self.block_row_warps * self.warp_row_tiles
-        k_dim = self.chunk
-        micro_size_k = self.micro_size_k
-        elems_in_bytes = DataType(self.a_dtype).bits // 8
-        a_is_k_major = not self.a_transposed
-
-        a_swizzle_mode = self._determinate_swizzle_mode(A_region, self.a_shared_layout)
-        a_swizzle_atom_elems = a_swizzle_mode.swizzle_byte_size() // elems_in_bytes
-
-        a_leading_byte_offset = (8 * 8 * elems_in_bytes) if a_is_k_major else (8 * m_dim * elems_in_bytes)
-        a_stride_byte_offset = (8 * k_dim * elems_in_bytes) if a_is_k_major else (8 * 8 * elems_in_bytes)
-        if not a_swizzle_mode.is_none():
-            if a_is_k_major:
-                a_leading_byte_offset = 16
-                a_stride_byte_offset = 8 * a_swizzle_mode.swizzle_byte_size()
-            else:
-                a_m_axis_atoms = m_dim // a_swizzle_atom_elems
-                if a_m_axis_atoms <= 1:
-                    a_leading_byte_offset = 0
-                else:
-                    a_leading_byte_offset = 8 * a_swizzle_mode.swizzle_atom_size() * (a_swizzle_mode.swizzle_byte_size() // elems_in_bytes)
-                if a_m_axis_atoms <= 1:
-                    a_stride_byte_offset = 8 * elems_in_bytes * m_dim
-                else:
-                    a_stride_byte_offset = 8 * elems_in_bytes * a_swizzle_atom_elems
-
-        return WGMMADescriptorParams(
-            swizzle_mode=int(a_swizzle_mode),
-            leading_byte_offset=int(a_leading_byte_offset >> 4),
-            stride_byte_offset=int(a_stride_byte_offset >> 4),
-            swizzle_atom_elems=a_swizzle_atom_elems,
-            k_atom_size=max(a_swizzle_atom_elems // micro_size_k, 1),
-            elems_in_bytes=elems_in_bytes,
-            is_k_major=a_is_k_major,
+        assert self.a_shared_layout is not None, "WGMMA A operand has no shared layout to decode"
+        return compute_gmma_descriptor(
+            self.a_shared_layout,
+            A_region.buffer if isinstance(A_region, BufferRegion) else A_region,
+            transposed=self.a_transposed,
+            micro_size_k=self.micro_size_k,
+            region=list(A_region.region) if isinstance(A_region, BufferRegion) else None,
         )
 
     # -- Descriptor initialization (emit TIR) --
@@ -417,16 +440,25 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         b_params : WGMMADescriptorParams
             Pre-computed parameters from ``compute_wgmma_b_desc_params()``.
         """
-        B_ptr = retrive_ptr_from_buffer_region(B_region)
-        swizzle_mode = b_params.swizzle_mode
+        B_buf = B_region.buffer if isinstance(B_region, BufferRegion) else B_region
+        B_base_ptr = B_buf.access_ptr("r")
+        slice_byte_offset = b_params.slice_byte_offset
+        is_sliced = not isinstance(slice_byte_offset, int) or slice_byte_offset != 0
+        swizzle_mode = b_params.swizzle_mode.wgmma_layout_type()
         lbo = b_params.leading_byte_offset
         sbo = b_params.stride_byte_offset
 
         @T.macro
-        def _init_b_desc(desc_b, B_ptr):
-            T.initialize_wgmma_descriptor(desc_b, B_ptr, swizzle_mode, lbo, sbo)
+        def _init_b_desc(desc_b, B_base_ptr):
+            # Build from the buffer base (loop-invariant => uniform cvta), then
+            # advance start_address_ to the slice origin via the descriptor's
+            # in-place add. Keeps the descriptor warp-uniform (no per-thread cvta
+            # of a slice pointer carrying an induction variable).
+            T.initialize_wgmma_descriptor(desc_b, B_base_ptr, swizzle_mode, lbo, sbo)
+            if is_sliced:
+                T.increase_descriptor_offset(desc_b, slice_byte_offset)
 
-        return _init_b_desc(desc_b, B_ptr)
+        return _init_b_desc(desc_b, B_base_ptr)
 
     def init_wgmma_a_desc(
         self,
@@ -445,16 +477,23 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         a_params : WGMMADescriptorParams
             Pre-computed parameters from ``compute_wgmma_a_desc_params()``.
         """
-        A_ptr = retrive_ptr_from_buffer_region(A_region)
-        swizzle_mode = a_params.swizzle_mode
+        A_buf = A_region.buffer if isinstance(A_region, BufferRegion) else A_region
+        A_base_ptr = A_buf.access_ptr("r")
+        slice_byte_offset = a_params.slice_byte_offset
+        is_sliced = not isinstance(slice_byte_offset, int) or slice_byte_offset != 0
+        swizzle_mode = a_params.swizzle_mode.wgmma_layout_type()
         lbo = a_params.leading_byte_offset
         sbo = a_params.stride_byte_offset
 
         @T.macro
-        def _init_a_desc(desc_a, A_ptr):
-            T.initialize_wgmma_descriptor(desc_a, A_ptr, swizzle_mode, lbo, sbo)
+        def _init_a_desc(desc_a, A_base_ptr):
+            # Build from the buffer base (uniform cvta), then advance to the slice
+            # origin (see init_wgmma_b_desc).
+            T.initialize_wgmma_descriptor(desc_a, A_base_ptr, swizzle_mode, lbo, sbo)
+            if is_sliced:
+                T.increase_descriptor_offset(desc_a, slice_byte_offset)
 
-        return _init_a_desc(desc_a, A_ptr)
+        return _init_a_desc(desc_a, A_base_ptr)
 
     # -- Fence / Arrive / Commit / Wait primitives --
 

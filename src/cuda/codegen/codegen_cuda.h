@@ -110,10 +110,22 @@ private:
   bool enable_warp_shuffle_{false};
   // whether need math_constants.h
   bool need_math_constants_h_{false};
+  // whether need tl CUDA math helpers
+  bool need_math_h_{false};
+  // whether need tl copy helpers
+  bool need_copy_h_{false};
+  // whether need tl SM90 TMA copy helpers
+  bool need_copy_sm90_h_{false};
+  // whether need tl SM100 TMA/tensor-memory copy helpers
+  bool need_copy_sm100_h_{false};
+  // whether need tl mbarrier helpers
+  bool need_barrier_h_{false};
   // whether need mma.h
   bool need_mma_h_{false};
   // whether need tl mma instruction header
   bool need_mma_instruction_h_{false};
+  // whether need tl SM120 block-scaled GEMM helper header
+  bool need_gemm_sm120_h_{false};
   // whether need tl wgmma instruction header
   bool need_wgmma_instruction_h_{false};
   // whether need tl tcgen05mma instruction header
@@ -126,6 +138,10 @@ private:
   bool need_wgmma_sp_instruction_h_{false};
   // whether need tcgen_05 common header
   bool need_tcgen05_common_h_{false};
+  // whether need tl runtime intrinsic helpers
+  bool need_intrin_h_{false};
+  // whether need tl atomic helpers
+  bool need_atomic_h_{false};
   // whether need cast_smem_ptr_to_int helper function
   bool need_cast_smem_ptr_to_int_{false};
   // whether need cooperative_groups.h

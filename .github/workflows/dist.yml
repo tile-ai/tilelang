@@ -116,8 +116,8 @@ jobs:
       matrix:
         target:
           # Build wheels for the minimum supported Python ABI.
-          - { runner: ubuntu-latest, toolkit: "CUDA-12.8", test_backends: "cu118 cu130", python_version: "3.10" }
-          - { runner: ubuntu-24.04-arm, toolkit: "CUDA-12.8", test_backends: "cu126 cu130", python_version: "3.10" }
+          - { runner: ubuntu-latest, toolkit: "CUDA-13.0", test_backends: "cu130", python_version: "3.10" }
+          - { runner: ubuntu-24.04-arm, toolkit: "CUDA-13.0", test_backends: "cu130", python_version: "3.10" }
           - { runner: windows-latest, toolkit: "CUDA-13.0", test_backends: "cu130", python_version: "3.10" }
           - { runner: macos-latest, toolkit: "Metal", python_version: "3.10" }
           # - "3.14t"  # let user to build from source for now

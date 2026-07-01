@@ -1,15 +1,13 @@
 #pragma once
 
-#include "gemm_mma.h"
+#include "common.h"
+#include "ldsm.h"
 
 #ifndef __CUDACC_RTC__
 #include <cstdint>
 #endif
 
 namespace tl {
-using tl_mma::gemm_rs;
-using tl_mma::gemm_sr;
-using tl_mma::gemm_ss;
 
 enum class SM120MmaBlockScaledKind : int {
   kMxf4nvf4 = 0,

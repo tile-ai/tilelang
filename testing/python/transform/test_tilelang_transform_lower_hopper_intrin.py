@@ -4,8 +4,41 @@ from tilelang.cuda import transform as cuda_transform
 from tilelang.backend.target import determine_target
 import tilelang.language as T
 import tilelang.testing
+from tvm import tirx
 
 auto_target = tvm.target.Target(determine_target("auto"))
+
+
+def _count_calls(stmt, op_name: str):
+    count = 0
+
+    def visitor(node):
+        nonlocal count
+        if isinstance(node, tirx.Call) and hasattr(node, "op") and hasattr(node.op, "name") and node.op.name == op_name:
+            count += 1
+
+    tirx.stmt_functor.post_order_visit(stmt, visitor)
+    return count
+
+
+def _count_prefetch_call_externs(stmt):
+    count = 0
+
+    def visitor(node):
+        nonlocal count
+        if not isinstance(node, tirx.Call):
+            return
+        op = getattr(node, "op", None)
+        if getattr(op, "name", None) != "tirx.call_extern":
+            return
+        if not node.args:
+            return
+        name = node.args[0]
+        if isinstance(name, tirx.StringImm) and name.value == "tl::prefetch_tma_descriptor":
+            count += 1
+
+    tirx.stmt_functor.post_order_visit(stmt, visitor)
+    return count
 
 
 def _check(original, transformed):
@@ -98,6 +131,9 @@ def test_tma_descriptor_init_after_alloc_global():
     func = mod["main"]
 
     assert not tvm.tirx.analysis.undefined_vars(func.body, func.params)
+    assert _count_calls(func.body, "tl.prefetch_tma_descriptor") == 1
+    assert _count_prefetch_call_externs(func.body) == 0
+
     body_text = func.script()
     alloc_pos = body_text.index('T.alloc_buffer((32,), "float16")')
     assert alloc_pos < body_text.index('T.call_packed("__tvm_tensormap_create_tiled"')

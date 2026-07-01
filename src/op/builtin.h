@@ -303,6 +303,14 @@ TVM_DLL const Op &create_tma_descriptor();
 TVM_DLL const Op &create_tma_im2col_descriptor();
 
 /*!
+ * \brief tvm intrinsic for prefetching a TMA descriptor on Hopper.
+ *
+ * prefetch_tma_descriptor(descriptor)
+ *
+ */
+TVM_DLL const Op &prefetch_tma_descriptor();
+
+/*!
  * \brief tvm intrinsics for loading data from global tensor descriptor to
  * shared memory
  *
@@ -1061,27 +1069,6 @@ TVM_DLL const Op &tvm_rdna_wmma();
  * src_offset, Var dst_stride);
  */
 TVM_DLL const Op &tvm_rdna_wmma_store();
-
-/*!
- * \brief tilelang intrinsic for general matrix multiplication (GEMM).
- *
- *  This op wraps a templated `tl::gemm_*<...>` call into the generated device
- *  code. Python-side lowering backends that want to delegate to the C++
- *  template implementations in `src/tl_templates/<target>/gemm*.h` can emit a
- *  call to this builtin directly via
- *    T.call_intrin("handle", "tl.tl_gemm", op_instance_str, A_ptr, B_ptr,
- * C_ptr) where `op_instance_str` is the fully-instantiated `tl::gemm_ss<M, N,
- * K, ...>` template string.
- */
-TVM_DLL const Op &tl_gemm();
-
-/*!
- * \brief tilelang intrinsic for sparse matrix multiplication (GEMM with
- * sparsity).
- *
- *  This op is used to represent a sparse GEMM operation in tilelang.
- */
-TVM_DLL const Op &tl_gemm_sp();
 
 /*!
  * \brief tilelang intrinsic for shuffle elect.

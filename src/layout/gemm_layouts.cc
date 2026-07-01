@@ -966,7 +966,7 @@ Layout MakeTcgen05MmaSwizzledLayout(const Buffer &buffer, int continuity,
 SwizzleMode DetectSwizzleMode(const Layout &layout, const Buffer &buffer) {
   SwizzleShapeInfo info;
   if (!TryGetSwizzleShapeInfo(buffer, &info)) {
-    return SwizzleMode::kNone;
+    return SwizzleMode::None();
   }
   int vector_size = 128 / info.element_size;
 
@@ -978,22 +978,22 @@ SwizzleMode DetectSwizzleMode(const Layout &layout, const Buffer &buffer) {
   if (stride_ok &&
       info.continuous % (static_cast<int64_t>(vector_size) * 2) == 0) {
     if (StructuralEqual()(layout, MakeQuarterBankSwizzleLayout(buffer))) {
-      return SwizzleMode::kQuarter;
+      return SwizzleMode::Swizzle32B();
     }
   }
   if (stride_ok &&
       info.continuous % (static_cast<int64_t>(vector_size) * 4) == 0) {
     if (StructuralEqual()(layout, MakeHalfBankSwizzleLayout(buffer))) {
-      return SwizzleMode::kHalf;
+      return SwizzleMode::Swizzle64B();
     }
   }
   if (stride_ok &&
       info.continuous % (static_cast<int64_t>(vector_size) * 8) == 0) {
     if (StructuralEqual()(layout, MakeFullBankSwizzleLayout(buffer))) {
-      return SwizzleMode::kFull;
+      return SwizzleMode::Swizzle128B();
     }
   }
-  return SwizzleMode::kNone;
+  return SwizzleMode::None();
 }
 
 Optional<Layout> MergeSwizzleLayouts(const Layout &layout1,
@@ -1007,23 +1007,22 @@ Optional<Layout> MergeSwizzleLayouts(const Layout &layout1,
   SwizzleMode mode2 = DetectSwizzleMode(layout2, buffer);
 
   // If either is not a swizzle layout, cannot merge
-  if (mode1 == SwizzleMode::kNone || mode2 == SwizzleMode::kNone) {
+  if (mode1.IsNone() || mode2.IsNone()) {
     return std::nullopt;
   }
 
-  // Take the smaller swizzle granularity (smaller enum value)
-  SwizzleMode min_mode = std::min(mode1, mode2);
+  // Take the smaller swizzle granularity (smaller canonical ordinal)
+  SwizzleMode min_mode =
+      mode1.CanonicalOrdinal() <= mode2.CanonicalOrdinal() ? mode1 : mode2;
 
-  switch (min_mode) {
-  case SwizzleMode::kQuarter:
+  if (min_mode == SwizzleMode::Swizzle32B()) {
     return MakeQuarterBankSwizzleLayout(buffer);
-  case SwizzleMode::kHalf:
+  } else if (min_mode == SwizzleMode::Swizzle64B()) {
     return MakeHalfBankSwizzleLayout(buffer);
-  case SwizzleMode::kFull:
+  } else if (min_mode == SwizzleMode::Swizzle128B()) {
     return MakeFullBankSwizzleLayout(buffer);
-  default:
-    return std::nullopt;
   }
+  return std::nullopt;
 }
 
 } // namespace tl

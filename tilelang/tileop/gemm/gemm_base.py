@@ -106,7 +106,7 @@ class GemmBase:
 
     @property
     def chunk(self) -> int:
-        return self.A.shape[-2] if self.trans_A else self.A.shape[-1]
+        return self.K
 
     @property
     def A(self) -> tirx.Buffer:

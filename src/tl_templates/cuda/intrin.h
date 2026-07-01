@@ -67,6 +67,10 @@ template <int NumMma> TL_DEVICE void warpgroup_wait() {
   cute::warpgroup_wait<NumMma>();
 }
 
+template <int NumMma> TL_DEVICE void wait_wgmma() {
+  cute::warpgroup_wait<NumMma>();
+}
+
 TL_DEVICE void warpgroup_fence_operand(uint32_t *regs, int count) {
 #pragma unroll
   for (int i = 0; i < count; ++i) {

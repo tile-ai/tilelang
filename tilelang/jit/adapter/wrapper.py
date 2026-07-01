@@ -446,6 +446,11 @@ class TLCUDASourceWrapper:
 
         return tma_descriptor_init
 
+    def get_cuda_host_adapter_include(self) -> str:
+        if is_cuda_target(self.target) and self.tma_descriptor_args is not None:
+            return "#include <cutlass/cuda_host_adapter.hpp>\n"
+        return ""
+
     def parse_source_information(self):
         if self.device_mod is None or self.host_mod is None:
             with tvm.transform.PassContext(opt_level=3, config=self.pass_configs):
@@ -615,7 +620,7 @@ class TLCUDASourceWrapper:
         # Create the host function wrapper for the CUDA kernel
         host_func = self.create_dispatch_func(code, function_informations)
         # Combine the source, initialization function, and host function to form the complete library code
-        lib_code = self.source + init_func + host_func
+        lib_code = self.source + self.get_cuda_host_adapter_include() + init_func + host_func
         return lib_code
 
     def get_stream_type(self) -> dict[str, str]:

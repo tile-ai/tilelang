@@ -379,18 +379,9 @@ static void RequireTMASmemAlignment(const LowerArgs &lower_args,
                                     int cu_tensor_map_swizzle) {
   if (!lower_args.require_smem_alignment)
     return;
-  SwizzleMode mode = SwizzleMode::kNone;
-  if (cu_tensor_map_swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B)) {
-    mode = SwizzleMode::kQuarter;
-  } else if (cu_tensor_map_swizzle ==
-             static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
-    mode = SwizzleMode::kHalf;
-  } else if (cu_tensor_map_swizzle ==
-             static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B)) {
-    mode = SwizzleMode::kFull;
-  }
-  lower_args.require_smem_alignment(shared_tensor->data,
-                                    SmemAlignmentForSwizzle(mode));
+  // CU_TENSOR_MAP_SWIZZLE_* values equal the SwizzleMode canonical ordinals.
+  SwizzleMode mode = SwizzleMode::FromOrdinal(cu_tensor_map_swizzle);
+  lower_args.require_smem_alignment(shared_tensor->data, mode.SmemAlignment());
 }
 
 struct TMAIm2ColDesc {
@@ -2242,11 +2233,11 @@ Stmt Copy::LowerBulkGather4(const CopyNode &op, const LowerArgs &lower_args,
   desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
   if (shared_layout.defined() && shared_layout->InputDim() >= 2) {
     SwizzleMode mode = DetectSwizzleMode(shared_layout, shared_tensor_unmapped);
-    if (mode == SwizzleMode::kQuarter) {
+    if (mode == SwizzleMode::Swizzle32B()) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
-    } else if (mode == SwizzleMode::kHalf) {
+    } else if (mode == SwizzleMode::Swizzle64B()) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
-    } else if (mode == SwizzleMode::kFull) {
+    } else if (mode == SwizzleMode::Swizzle128B()) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
     }
   }
