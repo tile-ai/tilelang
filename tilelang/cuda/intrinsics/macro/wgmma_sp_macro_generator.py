@@ -170,8 +170,10 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         b_swizzle_mode = b_params.swizzle_mode
         a_swizzle_atom_elems = a_params.swizzle_atom_elems
         b_swizzle_atom_elems = b_params.swizzle_atom_elems
-        a_slice_off_bytes = a_params.slice_byte_offset
-        b_slice_off_bytes = b_params.slice_byte_offset
+        a_slice_byte_offset = a_params.slice_byte_offset
+        b_slice_byte_offset = b_params.slice_byte_offset
+        a_is_sliced = not isinstance(a_slice_byte_offset, int) or a_slice_byte_offset != 0
+        b_is_sliced = not isinstance(b_slice_byte_offset, int) or b_slice_byte_offset != 0
 
         accum_bits = DataType(accum_dtype).bits
         accum_regs = ((m_dim // 64) * warp_cols * local_size_out * accum_bits + 31) // 32
@@ -209,13 +211,13 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
             T.initialize_wgmma_descriptor(
                 desc_a, A_base_ptr, a_swizzle_mode.wgmma_layout_type(), a_params.leading_byte_offset, a_params.stride_byte_offset
             )
-            if a_slice_off_bytes != 0:
-                T.increase_descriptor_offset(desc_a, a_slice_off_bytes)
+            if a_is_sliced:
+                T.increase_descriptor_offset(desc_a, a_slice_byte_offset)
             T.initialize_wgmma_descriptor(
                 desc_b, B_base_ptr, b_swizzle_mode.wgmma_layout_type(), b_params.leading_byte_offset, b_params.stride_byte_offset
             )
-            if b_slice_off_bytes != 0:
-                T.increase_descriptor_offset(desc_b, b_slice_off_bytes)
+            if b_is_sliced:
+                T.increase_descriptor_offset(desc_b, b_slice_byte_offset)
 
             for ki in T.unroll(k_blocks):
                 for i in T.unroll(num_inst_m):
@@ -319,8 +321,8 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         b_params = self.compute_wgmma_b_desc_params(B_region)
         b_swizzle_mode = b_params.swizzle_mode
         b_swizzle_atom_elems = b_params.swizzle_atom_elems
-        b_slice_off_bytes = b_params.slice_byte_offset
-
+        b_slice_byte_offset = b_params.slice_byte_offset
+        b_is_sliced = not isinstance(b_slice_byte_offset, int) or b_slice_byte_offset != 0
         bk_atom_size = b_params.k_atom_size
         wgmma_inst_m, wgmma_inst_n = self.wgmma_inst_m, self.wgmma_inst_n
         num_inst_m = 4 * self.warp_row_tiles // wgmma_inst_m
@@ -348,8 +350,8 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
             T.initialize_wgmma_descriptor(
                 desc_b, B_base_ptr, b_swizzle_mode.wgmma_layout_type(), b_params.leading_byte_offset, b_params.stride_byte_offset
             )
-            if b_slice_off_bytes != 0:
-                T.increase_descriptor_offset(desc_b, b_slice_off_bytes)
+            if b_is_sliced:
+                T.increase_descriptor_offset(desc_b, b_slice_byte_offset)
 
             for ki in T.unroll(k_blocks):
                 for i in T.unroll(num_inst_m):

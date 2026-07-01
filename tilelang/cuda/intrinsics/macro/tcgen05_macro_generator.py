@@ -758,16 +758,16 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         lbo = b_params.leading_byte_offset
         sbo = b_params.stride_byte_offset
         swizzle_mode = b_params.swizzle_mode.tcgen05_layout_type()
-        slice_off_bytes = b_params.slice_byte_offset
+        slice_byte_offset = b_params.slice_byte_offset
+        is_sliced = not isinstance(slice_byte_offset, int) or slice_byte_offset != 0
         B_base_ptr = self._as_buffer(B_buf).access_ptr("r")
 
         @T.macro
         def _init_b(desc_b, B_base_ptr):
-            # Build from the buffer base (loop-invariant => uniform cvta), then
-            # advance start_address_ to the slice origin (warp-uniform).
+            # Build from the buffer base (uniform cvta), then advance to the slice origin.
             T.initialize_tcgen05_descriptor(desc_b, B_base_ptr, lbo, sbo, 0, False, swizzle_mode)
-            if slice_off_bytes != 0:
-                T.increase_descriptor_offset(desc_b, slice_off_bytes)
+            if is_sliced:
+                T.increase_descriptor_offset(desc_b, slice_byte_offset)
 
         return _init_b(desc_b, B_base_ptr)
 
@@ -786,15 +786,16 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         lbo = a_params.leading_byte_offset
         sbo = a_params.stride_byte_offset
         swizzle_mode = a_params.swizzle_mode.tcgen05_layout_type()
-        slice_off_bytes = a_params.slice_byte_offset
+        slice_byte_offset = a_params.slice_byte_offset
+        is_sliced = not isinstance(slice_byte_offset, int) or slice_byte_offset != 0
         A_base_ptr = self._as_buffer(A_buf).access_ptr("r")
 
         @T.macro
         def _init_a(desc_a, A_base_ptr):
             # Build from the buffer base (uniform cvta), then advance to the slice origin.
             T.initialize_tcgen05_descriptor(desc_a, A_base_ptr, lbo, sbo, 0, False, swizzle_mode)
-            if slice_off_bytes != 0:
-                T.increase_descriptor_offset(desc_a, slice_off_bytes)
+            if is_sliced:
+                T.increase_descriptor_offset(desc_a, slice_byte_offset)
 
         return _init_a(desc_a, A_base_ptr)
 

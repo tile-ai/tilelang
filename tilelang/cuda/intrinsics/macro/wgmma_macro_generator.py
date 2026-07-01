@@ -442,7 +442,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         """
         B_buf = B_region.buffer if isinstance(B_region, BufferRegion) else B_region
         B_base_ptr = B_buf.access_ptr("r")
-        slice_off_bytes = b_params.slice_byte_offset
+        slice_byte_offset = b_params.slice_byte_offset
+        is_sliced = not isinstance(slice_byte_offset, int) or slice_byte_offset != 0
         swizzle_mode = b_params.swizzle_mode.wgmma_layout_type()
         lbo = b_params.leading_byte_offset
         sbo = b_params.stride_byte_offset
@@ -454,8 +455,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             # in-place add. Keeps the descriptor warp-uniform (no per-thread cvta
             # of a slice pointer carrying an induction variable).
             T.initialize_wgmma_descriptor(desc_b, B_base_ptr, swizzle_mode, lbo, sbo)
-            if slice_off_bytes != 0:
-                T.increase_descriptor_offset(desc_b, slice_off_bytes)
+            if is_sliced:
+                T.increase_descriptor_offset(desc_b, slice_byte_offset)
 
         return _init_b_desc(desc_b, B_base_ptr)
 
@@ -478,7 +479,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         """
         A_buf = A_region.buffer if isinstance(A_region, BufferRegion) else A_region
         A_base_ptr = A_buf.access_ptr("r")
-        slice_off_bytes = a_params.slice_byte_offset
+        slice_byte_offset = a_params.slice_byte_offset
+        is_sliced = not isinstance(slice_byte_offset, int) or slice_byte_offset != 0
         swizzle_mode = a_params.swizzle_mode.wgmma_layout_type()
         lbo = a_params.leading_byte_offset
         sbo = a_params.stride_byte_offset
@@ -488,8 +490,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             # Build from the buffer base (uniform cvta), then advance to the slice
             # origin (see init_wgmma_b_desc).
             T.initialize_wgmma_descriptor(desc_a, A_base_ptr, swizzle_mode, lbo, sbo)
-            if slice_off_bytes != 0:
-                T.increase_descriptor_offset(desc_a, slice_off_bytes)
+            if is_sliced:
+                T.increase_descriptor_offset(desc_a, slice_byte_offset)
 
         return _init_a_desc(desc_a, A_base_ptr)
 
