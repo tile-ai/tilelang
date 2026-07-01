@@ -18,6 +18,18 @@ def test_cuda_common_h_defines_bfloat16_rsqrt_overload():
     assert pattern.search(source), "common.h must define hrsqrt(bfloat16_t) for bf16 T.rsqrt codegen"
 
 
+def test_cuda_common_h_defines_bfloat16_hexp_overload():
+    repo_root = Path(__file__).resolve().parents[3]
+    common_h = repo_root / "src" / "tl_templates" / "cuda" / "common.h"
+    source = common_h.read_text()
+
+    pattern = re.compile(
+        r"TL_PATCH\s+TL_DEVICE\s+bfloat16_t\s+hexp\s*"
+        r"\(\s*const\s+bfloat16_t\s+x\s*\)\s*\{"
+    )
+    assert pattern.search(source), "common.h must define hexp(bfloat16_t) for bf16 T.exp codegen"
+
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(8, 0)
 def test_bfloat16_rsqrt_compiles_and_runs():

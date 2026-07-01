@@ -20,7 +20,10 @@
 
 #if defined(__CUDACC_RTC__)
 #include <vector_types.h>
-#if defined(__CUDACC_RTC_BUILTIN_VECTOR_TYPES__)
+// Older NVRTC builtin vector headers omit these aligned double4 aliases.
+// CUDA 13 defines them already, so keep this compatibility patch pre-CUDA 13.
+#if defined(__CUDACC_RTC_BUILTIN_VECTOR_TYPES__) &&                          \
+    (!defined(__CUDACC_VER_MAJOR__) || __CUDACC_VER_MAJOR__ < 13)
 struct __device_builtin__ __builtin_align__(16) double4_16a {
   double x, y, z, w;
 };
@@ -113,6 +116,15 @@ TL_PATCH TL_DEVICE half_t hrsqrt(const half_t x) {
 // hrsqrt function for bfloat16_t
 TL_PATCH TL_DEVICE bfloat16_t hrsqrt(const bfloat16_t x) {
   return bfloat16_t(hrsqrt(x.to_nv_bfloat16()));
+}
+
+// TVM lowers T.exp(bfloat16) to the CUDA half-style `hexp` name. TileLang uses
+// cutlass::bfloat16_t for scalar bf16, while CUDA only overloads hexp for
+// __nv_bfloat16. Keep this narrow bridge in common.h so plain T.exp works
+// without pulling tl_templates/cuda/math.h and cutlass/fast_math.h into every
+// kernel.
+TL_PATCH TL_DEVICE bfloat16_t hexp(const bfloat16_t x) {
+  return bfloat16_t(hexp(x.to_nv_bfloat16()));
 }
 
 // Pack two half values.

@@ -892,6 +892,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     stream << "tl.tmem_deallocate(" << tmem_buffer << ", " << num_cols << ")\n";
   } else if (op->op.same_as(tl::no_set_max_nreg())) {
     // do nothing
+  } else if (op->op.same_as(tl::prefetch_tma_descriptor())) {
+    print_extern_call_stmt("tl.prefetch_tma_descriptor");
   } else if (op->op.same_as(tl::tma_load())) {
     std::ostringstream ss;
     ICHECK_GE(op->args.size(), 2);
