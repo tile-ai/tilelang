@@ -115,8 +115,6 @@ bool CanEmitPackedX2Math(DataType t) {
   return false;
 }
 
-
-
 } // namespace
 
 struct CUDAMath {
