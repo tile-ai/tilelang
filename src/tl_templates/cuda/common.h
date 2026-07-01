@@ -155,6 +155,14 @@ TL_DEVICE unsigned __pack_nv_bfloat162(const bfloat16_t x, const bfloat16_t y) {
   return (v1 << 16) | v0;
 }
 
+namespace tl {
+TL_DEVICE float fast_rcp(float x) {
+  float ret;
+  asm volatile("rcp.approx.ftz.f32 %0, %1;" : "=f"(ret) : "f"(x));
+  return ret;
+}
+} // namespace tl
+
 // Pack four char values. Build the 32-bit pattern from unsigned bytes: a
 // negative signed char would otherwise sign-extend and flood the other lanes
 // through the OR.

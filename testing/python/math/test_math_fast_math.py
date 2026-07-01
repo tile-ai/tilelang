@@ -252,6 +252,26 @@ def run_fastmath_mathop_test(mathop_name, mathop_func, M=32, N=32, block_M=32, b
     print(f"✓ {mathop_name} numerical test passed")
 
 
+@tilelang.testing.requires_cuda
+def test_fast_rcp_codegen_uses_approx_rcp():
+    @T.prim_func
+    def main(
+        A: T.Tensor((32,), T.float32),
+        B: T.Tensor((32,), T.float32),
+    ):
+        with T.Kernel(1, threads=32):
+            tx = T.get_thread_binding()
+            B[tx] = T.fast_rcp(A[tx])
+
+    kernel = tilelang.compile(main, out_idx=[1], target="cuda")
+    source = kernel.get_kernel_source()
+    assert "tl::fast_rcp" in source
+
+    a = torch.rand((32,), device="cuda", dtype=torch.float32) + 0.25
+    b = kernel(a)
+    torch.testing.assert_close(b, 1.0 / a, rtol=2e-3, atol=2e-3)
+
+
 FASTMATH_MATHOPS = [
     ("__exp", T.__exp),
     ("__exp10", T.__exp10),
