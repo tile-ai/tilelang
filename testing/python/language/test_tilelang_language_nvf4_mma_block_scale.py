@@ -5,7 +5,9 @@ import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
 from tilelang.cuda.intrinsics.layout.mma_layout import mma_load_a_32x32_to_shared_16x64_layout
+from tilelang.cuda.intrinsics.macro.mma_macro_generator import SM120BlockScaledFullTilePackageContract
 from tilelang.intrinsics import TensorCoreIntrinEmitterWithBlockScale, get_swizzle_layout
+from tilelang.quantize import blockscaled_chunk_kmajor_word_offset
 from tilelang.transform import simplify_prim_func
 
 
@@ -29,6 +31,35 @@ _FP4_E2M1_VALUES = (
 )
 
 
+def _make_sm120_fulltile_contract():
+    emitter = TensorCoreIntrinEmitterWithBlockScale(
+        a_dtype=T.float4_e2m1fn,
+        b_dtype=T.float4_e2m1fn,
+        accum_dtype=T.float32,
+        a_transposed=False,
+        b_transposed=True,
+        block_row_warps=2,
+        block_col_warps=2,
+        warp_row_tiles=64,
+        warp_col_tiles=64,
+        chunk=256,
+        reduce_k=1,
+        num_elems_per_byte=2,
+        kind="mxf4nvf4",
+        scale_vec_size=4,
+        stype="ue4m3",
+    )
+    return SM120BlockScaledFullTilePackageContract.for_package_pingpong(
+        emitter,
+        sf_layout="blockscaled_chunk_kmajor",
+    )
+
+
+def _oracle_blockscaled_chunk_kmajor_flat_word(row: int, kblock: int) -> int:
+    physical_row, physical_word = blockscaled_chunk_kmajor_word_offset(row, kblock)
+    return physical_row * 4 + physical_word
+
+
 def _make_swizzle_layout(shared_buf):
     dtype = shared_buf.dtype
     shape = shared_buf.shape
@@ -45,7 +76,19 @@ def _make_swizzle_layout(shared_buf):
 
 
 @simplify_prim_func
-def _make_nvf4_matmul_codegen_kernel(M, N, K, num_stages=2):
+def _make_nvf4_matmul_codegen_kernel(
+    M,
+    N,
+    K,
+    num_stages=2,
+    *,
+    block_row_warps=2,
+    block_col_warps=2,
+    warp_row_tiles=32,
+    warp_col_tiles=32,
+    micro_pipeline=None,
+    sf_layout=None,
+):
     assert K % 64 == 0
     in_dtype = T.float4_e2m1fn
     out_dtype = T.float32
@@ -53,10 +96,6 @@ def _make_nvf4_matmul_codegen_kernel(M, N, K, num_stages=2):
 
     micro_size_k = 64
 
-    block_row_warps = 2
-    block_col_warps = 2
-    warp_row_tiles = 32
-    warp_col_tiles = 32
     chunk = K
     shared_scope = "shared.dyn"
 
@@ -119,6 +158,8 @@ def _make_nvf4_matmul_codegen_kernel(M, N, K, num_stages=2):
                     k_start=ko * block_K,
                     sf_a_granularity_k=16,
                     sf_b_granularity_k=16,
+                    micro_pipeline=micro_pipeline,
+                    sf_layout=sf_layout,
                 )
 
             T.copy(C_local, C[by * block_M, bx * block_N])
@@ -352,6 +393,128 @@ def test_nvf4_mma_block_scale_rejects_incompatible_dtypes(dtype_kwargs):
         )
 
 
+def test_sm120_fulltile_package_contract_matches_current_pingpong_path():
+    contract = _make_sm120_fulltile_contract()
+
+    assert (contract.tile_m, contract.tile_n, contract.tile_k) == (128, 128, 256)
+    assert (contract.block_row_warps, contract.block_col_warps) == (2, 2)
+    assert (contract.warp_rows, contract.warp_cols) == (4, 4)
+    assert (contract.warp_row_tiles, contract.warp_col_tiles) == (64, 64)
+    assert (contract.kblocks, contract.micro_size_k) == (4, 64)
+    assert (contract.scale_package_words_sfa, contract.scale_package_words_sfb) == (2, 2)
+    assert (contract.issue_count_per_warp, contract.issue_count_per_warpgroup) == (32, 128)
+
+
+def test_sm120_fulltile_package_contract_describes_compact_selector_copy_view():
+    contract = _make_sm120_fulltile_contract()
+
+    assert contract.compact_selector_scale_rows(lane=0, warp_m=0, warp_n=0) == ((0, 32), (0, 32))
+    assert contract.compact_selector_scale_rows(lane=1, warp_m=0, warp_n=0) == ((8, 40), (8, 40))
+    assert contract.compact_selector_scale_rows(lane=2, warp_m=1, warp_n=1) == ((80, 112), (80, 112))
+    assert contract.compact_selector_scale_rows(lane=31, warp_m=1, warp_n=1) == ((95, 127), (95, 127))
+
+
+@pytest.mark.parametrize("lane", [0, 1, 2, 17, 31])
+@pytest.mark.parametrize("warp_m", [0, 1])
+@pytest.mark.parametrize("warp_n", [0, 1])
+@pytest.mark.parametrize("kblock", [0, 2, 3])
+def test_sm120_fulltile_package_contract_word_offsets_match_source_layout_oracle(lane, warp_m, warp_n, kblock):
+    contract = _make_sm120_fulltile_contract()
+
+    sfa_rows, sfb_rows = contract.compact_selector_scale_rows(lane=lane, warp_m=warp_m, warp_n=warp_n)
+    expected_sfa = tuple(_oracle_blockscaled_chunk_kmajor_flat_word(row, kblock) for row in sfa_rows)
+    expected_sfb = tuple(_oracle_blockscaled_chunk_kmajor_flat_word(row, kblock) for row in sfb_rows)
+
+    assert contract.compact_selector_scale_word_offsets(lane=lane, warp_m=warp_m, warp_n=warp_n, kblock=kblock) == (
+        expected_sfa,
+        expected_sfb,
+    )
+
+
+def test_sm120_fulltile_package_contract_describes_pingpong_lifecycle():
+    contract = _make_sm120_fulltile_contract()
+
+    assert contract.package_pingpong_lifecycle() == (
+        ("copy", 0, 0),
+        ("copy", 1, 1),
+        ("gemm", 0, 0),
+        ("copy", 0, 2),
+        ("gemm", 1, 1),
+        ("copy", 1, 3),
+        ("gemm", 0, 2),
+        ("gemm", 1, 3),
+    )
+
+
+def test_sm120_fulltile_package_contract_pingpong_lifecycle_is_data_ready():
+    contract = _make_sm120_fulltile_contract()
+
+    package_kblock = {}
+    gemmed_kblocks = []
+    for op, package_id, kblock in contract.package_pingpong_lifecycle():
+        if op == "copy":
+            package_kblock[package_id] = kblock
+        elif op == "gemm":
+            assert package_kblock[package_id] == kblock
+            gemmed_kblocks.append(kblock)
+        else:
+            raise AssertionError(f"unexpected package lifecycle op: {op}")
+
+    assert gemmed_kblocks == [0, 1, 2, 3]
+
+
+def test_sm120_fulltile_package_contract_describes_omma_sf_issue_schedule():
+    contract = _make_sm120_fulltile_contract()
+    schedule = contract.omma_sf_issue_schedule_per_warp()
+
+    assert len(schedule) == contract.issue_count_per_warp
+    assert schedule[0] == (0, 0, 0, 0, 0, 0, 0)
+    assert schedule[1] == (0, 0, 1, 0, 0, 0, 1)
+    assert schedule[2] == (0, 1, 0, 0, 0, 0, 2)
+    assert schedule[3] == (0, 1, 1, 0, 0, 0, 3)
+    assert schedule[16] == (2, 0, 0, 1, 0, 0, 0)
+    assert schedule[-1] == (3, 3, 1, 1, 1, 1, 3)
+
+    for mma_i, mma_j, n8_half, sfa_word, sfb_word, scale_a_tid, scale_b_tid in schedule:
+        assert sfa_word == (0 if mma_i < 2 else 1)
+        assert sfb_word == (0 if mma_j < 2 else 1)
+        assert scale_a_tid == (mma_i & 1)
+        assert scale_b_tid == (mma_j & 1) * 2 + n8_half
+
+    assert sorted({issue[5] for issue in schedule}) == [0, 1]
+    assert sorted({issue[6] for issue in schedule}) == [0, 1, 2, 3]
+    assert sum(1 for issue in schedule if issue[3] == 0) == 16
+    assert sum(1 for issue in schedule if issue[3] == 1) == 16
+    assert sum(1 for issue in schedule if issue[4] == 0) == 16
+    assert sum(1 for issue in schedule if issue[4] == 1) == 16
+
+
+def test_sm120_fulltile_package_contract_rejects_shape_drift():
+    emitter = TensorCoreIntrinEmitterWithBlockScale(
+        a_dtype=T.float4_e2m1fn,
+        b_dtype=T.float4_e2m1fn,
+        accum_dtype=T.float32,
+        a_transposed=False,
+        b_transposed=True,
+        block_row_warps=2,
+        block_col_warps=4,
+        warp_row_tiles=64,
+        warp_col_tiles=64,
+        chunk=256,
+        reduce_k=1,
+        num_elems_per_byte=2,
+        kind="mxf4nvf4",
+        scale_vec_size=4,
+        stype="ue4m3",
+    )
+
+    with pytest.raises(ValueError, match="128x128x256"):
+        SM120BlockScaledFullTilePackageContract.for_package_pingpong(
+            emitter,
+            sf_layout="blockscaled_chunk_kmajor",
+        )
+
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(12, 0)
 @pytest.mark.parametrize("K", [64, 128, 256])
@@ -376,6 +539,65 @@ def test_nvf4_mma_block_scale_codegen(K):
     assert f"void* B_shared = ((void*)((char*)buf_dyn_shmem + {fp4_tile_bytes}));" in src
     assert f"void* SFA_shared = ((void*)((char*)buf_dyn_shmem + {2 * fp4_tile_bytes}));" in src
     assert f"void* SFB_shared = ((void*)((char*)buf_dyn_shmem + {2 * fp4_tile_bytes + sf_tile_bytes}));" in src
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(12, 0)
+def test_nvf4_mma_block_scale_rejects_unknown_micro_pipeline():
+    with pytest.raises(ValueError, match="Unsupported block-scaled micro_pipeline"):
+        tilelang.compile(
+            _make_nvf4_matmul_codegen_kernel(
+                128,
+                128,
+                256,
+                warp_row_tiles=64,
+                warp_col_tiles=64,
+                micro_pipeline="sm120_backend_kblock_fulltile_unknown",
+                sf_layout="blockscaled_chunk_kmajor",
+            ),
+            target="cuda",
+            out_idx=[4],
+        )
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(12, 0)
+def test_nvf4_mma_block_scale_rejects_legacy_cutlass_128x4_layout_alias():
+    with pytest.raises(ValueError, match="Unsupported SM120 scale layout: cutlass_128x4"):
+        tilelang.compile(
+            _make_nvf4_matmul_codegen_kernel(
+                128,
+                128,
+                256,
+                warp_row_tiles=64,
+                warp_col_tiles=64,
+                micro_pipeline="sm120_backend_kblock_fulltile_package_pingpong",
+                sf_layout="cutlass_128x4",
+            ),
+            target="cuda",
+            out_idx=[4],
+        )
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(12, 0)
+def test_nvf4_mma_block_scale_package_pingpong_contract_lowers_fulltile():
+    kernel = tilelang.compile(
+        _make_nvf4_matmul_codegen_kernel(
+            128,
+            128,
+            256,
+            warp_row_tiles=64,
+            warp_col_tiles=64,
+            micro_pipeline="sm120_backend_kblock_fulltile_package_pingpong",
+            sf_layout="blockscaled_chunk_kmajor",
+        ),
+        target="cuda",
+        out_idx=[4],
+    )
+
+    src = kernel.get_kernel_source()
+    assert "sm120_mma_blockscaled_kblock_fulltile_package_pingpong" in src
 
 
 @tilelang.testing.requires_cuda

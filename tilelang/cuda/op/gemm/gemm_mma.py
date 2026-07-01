@@ -133,7 +133,7 @@ class GemmMMA(GemmBase):
             sf_b_granularity_k = annotations.get("sf_b_granularity_k")
             micro_pipeline = annotations.get("micro_pipeline")
             sf_layout = annotations.get("sf_layout", "rowmajor")
-            if sf_layout not in ("rowmajor", "cutlass_128x4", "blockscaled_chunk_kmajor"):
+            if sf_layout not in ("rowmajor", "blockscaled_chunk_kmajor"):
                 raise ValueError(f"Unsupported SM120 scale layout: {sf_layout}")
             if sf_a_granularity_k is None or sf_b_granularity_k is None:
                 raise ValueError("Block-scaled MMA GEMM requires sf_a_granularity_k and sf_b_granularity_k")
@@ -887,11 +887,8 @@ class GemmMMA(GemmBase):
                     raise ValueError(f"micro_pipeline={micro_pipeline!r} currently requires block_K / micro_size_k == 4")
                 if int(warp_rows) != 4 or int(warp_cols) != 4:
                     raise ValueError(f"micro_pipeline={micro_pipeline!r} currently targets warp_rows=4, warp_cols=4")
-                if sf_layout not in ("cutlass_128x4", "blockscaled_chunk_kmajor"):
-                    raise ValueError(
-                        f"micro_pipeline={micro_pipeline!r} currently requires "
-                        "sf_layout='blockscaled_chunk_kmajor' or legacy 'cutlass_128x4'"
-                    )
+                if sf_layout != "blockscaled_chunk_kmajor":
+                    raise ValueError(f"micro_pipeline={micro_pipeline!r} currently requires sf_layout='blockscaled_chunk_kmajor'")
                 backend_op = (
                     "afull_bpanel_owner_wide"
                     if micro_pipeline == "sm120_backend_kblock_fulltile_afull_bpanel_owner_wide"
@@ -1071,18 +1068,14 @@ class GemmMMA(GemmBase):
             if micro_pipeline == "sm120_backend_kblock_fulltile_package_pingpong":
                 num_k_blocks = int(block_K // micro_size_k)
                 if num_k_blocks != 4:
-                    raise ValueError(
-                        "micro_pipeline='sm120_backend_kblock_fulltile_package_pingpong' currently requires block_K / micro_size_k == 4"
-                    )
+                    raise ValueError(f"micro_pipeline={micro_pipeline!r} currently requires block_K / micro_size_k == 4")
                 if int(warp_rows) != 4 or int(warp_cols) != 4:
                     raise ValueError(
-                        "micro_pipeline='sm120_backend_kblock_fulltile_package_pingpong' currently targets warp_rows=4, warp_cols=4"
+                        f"micro_pipeline={micro_pipeline!r} currently targets warp_rows=4, warp_cols=4, "
+                        f"got warp_rows={int(warp_rows)}, warp_cols={int(warp_cols)}"
                     )
-                if sf_layout not in ("cutlass_128x4", "blockscaled_chunk_kmajor"):
-                    raise ValueError(
-                        "micro_pipeline='sm120_backend_kblock_fulltile_package_pingpong' currently requires "
-                        "sf_layout='blockscaled_chunk_kmajor' or legacy 'cutlass_128x4'"
-                    )
+                if sf_layout != "blockscaled_chunk_kmajor":
+                    raise ValueError(f"micro_pipeline={micro_pipeline!r} currently requires sf_layout='blockscaled_chunk_kmajor'")
 
                 @T.prim_func
                 def _gemm_ss_blockscaled_sm120_backend_package_pingpong() -> None:
@@ -1535,6 +1528,9 @@ class GemmMMA(GemmBase):
                     )
 
                 return _Simplify(_gemm_ss_blockscaled_k_static, inline_let=True)
+
+            if micro_pipeline is not None:
+                raise ValueError(f"Unsupported block-scaled micro_pipeline: {micro_pipeline!r}")
 
             @T.prim_func
             def _gemm_ss_blockscaled() -> None:

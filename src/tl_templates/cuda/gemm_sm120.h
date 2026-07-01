@@ -34,49 +34,65 @@ struct SM120MmaBlockScaledConfig<SM120MmaBlockScaledKind::kMxf4nvf4, 4,
 namespace detail {
 
 // CUTLASS BlockScaledBasicChunk K-major scale layout, compressed to uint32
-// words.  The element-level byte offset for one K=64 atom is:
+// words. The scale-byte offset for one 128x64 atom is:
 //
 //   (idx % 32) * 16 + (idx / 32) * 4 + k16
 //
-// where k16 is the scale byte inside the four K/16 groups.  Since TileLang
-// stores those four adjacent scale bytes in one uint32 word, the word offset is
-// the same formula without the final +k16 byte selector.
+// where k16 is the scale byte inside the four K/16 groups. TileLang packs those
+// four adjacent scale bytes in one uint32, so this helper returns the flattened
+// uint32 word offset:
+//
+//   ki * 128 + (idx % 32) * 4 + (idx / 32)
+//
+// This is the byte offset divided by four, not the byte-offset formula with
+// only the final +k16 term removed.
 TL_DEVICE uint32_t sm120_blockscaled_chunk_kmajor_sf_word(uint32_t idx,
                                                           uint32_t ki) {
   return ki * 128u + (idx & 31u) * 4u + (idx >> 5);
 }
 
-TL_DEVICE uint32_t sm120_cutlass_128x4_sf_word(uint32_t idx, uint32_t ki) {
-  return sm120_blockscaled_chunk_kmajor_sf_word(idx, ki);
+// First-class scale package for the SM120 blockscaled TV copy-view work. The
+// current implementation intentionally preserves the compact-selector semantic
+// rows used by production. The important contract boundary is that scale
+// loading is now isolated from the A/B operand package, so future
+// get_layoutSFA_TV / get_layoutSFB_TV lowering can change the producer-lane
+// copy view without rewriting the OMMA.SF issue loop.
+struct SM120ScaleTVPackage {
+  uint32_t sa0, sa1;
+  uint32_t sb0, sb1;
+};
+
+template <class ScalePkg>
+TL_DEVICE void sm120_load_scale_tv_package(ScalePkg &pkg,
+                                           const uint32_t *sfa_base,
+                                           const uint32_t *sfb_base,
+                                           uint32_t lane, uint32_t warp_m,
+                                           uint32_t warp_n, uint32_t scale_k) {
+  uint32_t const qlane = lane & 3u;
+  uint32_t const sfa_row = 8u * (lane & 1u) + (lane >> 2);
+  uint32_t const sfb_col = lane >> 2;
+  uint32_t const a_owner_in_pair = qlane >> 1;
+  uint32_t const scale_m0 = warp_m * 64u + a_owner_in_pair * 16u + sfa_row;
+  uint32_t const scale_n0 = warp_n * 64u + qlane * 8u + sfb_col;
+  pkg.sa0 = sfa_base[sm120_blockscaled_chunk_kmajor_sf_word(scale_m0, scale_k)];
+  pkg.sa1 =
+      sfa_base[sm120_blockscaled_chunk_kmajor_sf_word(scale_m0 + 32u, scale_k)];
+  pkg.sb0 = sfb_base[sm120_blockscaled_chunk_kmajor_sf_word(scale_n0, scale_k)];
+  pkg.sb1 =
+      sfb_base[sm120_blockscaled_chunk_kmajor_sf_word(scale_n0 + 32u, scale_k)];
 }
 
-TL_DEVICE uint32_t sm120_cute_sfa_slot_word(uint32_t lane, uint32_t warp_m,
-                                            uint32_t ki, uint32_t m_atom) {
-  return ki * 128u + warp_m * 64u + (lane >> 2) * 4u + ((lane & 1u) << 5) +
-         m_atom;
-}
-
-TL_DEVICE uint32_t sm120_cute_sfb_slot_word(uint32_t lane, uint32_t warp_n,
-                                            uint32_t ki, uint32_t n16_col,
-                                            uint32_t n8_half) {
-  return ki * 128u + warp_n * 64u + (lane >> 2) * 4u + n16_col + n8_half * 32u;
-}
-
-TL_DEVICE void sm120_ldscale_v4_u32(void const *const smem_ptr, uint32_t &d0,
-                                    uint32_t &d1, uint32_t &d2, uint32_t &d3) {
-  asm volatile("ld.shared.v4.u32 {%0, %1, %2, %3}, [%4];\n"
-               : "=r"(d0), "=r"(d1), "=r"(d2), "=r"(d3)
-               : "r"(smem_ptr_to_uint(smem_ptr)));
-}
-
-TL_DEVICE uint32_t sm120_select4_u32(uint32_t v0, uint32_t v1, uint32_t v2,
-                                     uint32_t v3, uint32_t idx) {
-  return idx == 0u ? v0 : (idx == 1u ? v1 : (idx == 2u ? v2 : v3));
-}
-
-TL_DEVICE uint32_t sm120_broadcast_u8_from_u32(uint32_t word, uint32_t idx) {
-  uint32_t const byte = (word >> ((idx & 3u) * 8u)) & 0xffu;
-  return byte * 0x01010101u;
+TL_DEVICE void sm120_copy_scale_tv_package(SM120ScaleTVPackage &pkg,
+                                           const uint32_t *sfa_base,
+                                           const uint32_t *sfb_base,
+                                           int k_block_idx) {
+  uint32_t const tx = uint32_t(int(threadIdx.x) & 127);
+  uint32_t const lane = tx & 31u;
+  uint32_t const warp = tx >> 5;
+  uint32_t const warp_m = warp & 1u;
+  uint32_t const warp_n = warp >> 1;
+  sm120_load_scale_tv_package(pkg, sfa_base, sfb_base, lane, warp_m, warp_n,
+                              uint32_t(k_block_idx));
 }
 
 // SM120 blockscaled fulltile kernels precompute some shared-memory addresses
@@ -1629,116 +1645,13 @@ struct SM120FulltileABOwnerWidePackage {
   uint32_t b10, b11, b12, b13;
   uint32_t b20, b21, b22, b23;
   uint32_t b30, b31, b32, b33;
-#if defined(TL_SM120_FULLTILE_SCALE_SLOT_PACKAGE) ||                           \
-    defined(TL_SM120_FULLTILE_SCALE_SELECTOR0_RETAINED_PACKAGE)
-  uint32_t sa0, sa1, sa2, sa3;
-  uint32_t sb0, sb1, sb2, sb3, sb4, sb5, sb6, sb7;
-#else
-  uint32_t sa0, sa1;
-  uint32_t sb0, sb1;
-#endif
 };
 
-TL_DEVICE void sm120_copy_fulltile_ab_owner_wide_package(
-    SM120FulltileABOwnerWidePackage &pkg, const char *a_base,
-    const char *b_base, const uint32_t *sfa_base, const uint32_t *sfb_base,
-    int k_block_idx) {
+TL_DEVICE void
+sm120_copy_fulltile_ab_owner_wide_package(SM120FulltileABOwnerWidePackage &pkg,
+                                          const char *a_base,
+                                          const char *b_base, int k_block_idx) {
   uint32_t const tx = uint32_t(int(threadIdx.x) & 127);
-  uint32_t const lane = tx & 31u;
-  uint32_t const warp = tx >> 5;
-  uint32_t const warp_m = warp & 1u;
-  uint32_t const warp_n = warp >> 1;
-  uint32_t const scale_k = uint32_t(k_block_idx);
-#if !defined(TL_SM120_FULLTILE_SCALE_SLOT_PACKAGE)
-  uint32_t const qlane = lane & 3u;
-  uint32_t const sfa_row = 8u * (lane & 1u) + (lane >> 2);
-  uint32_t const sfb_col = lane >> 2;
-  uint32_t const a_owner_in_pair = qlane >> 1;
-  uint32_t const scale_m0 = warp_m * 64u + a_owner_in_pair * 16u + sfa_row;
-  uint32_t const scale_n0 = warp_n * 64u + qlane * 8u + sfb_col;
-#endif
-#if defined(TL_SM120_FULLTILE_SCALE_SELECTOR0_RETAINED_PACKAGE)
-  uint32_t const scale_m1 = scale_m0 + 32u;
-  uint32_t const scale_n1 = scale_n0 + 32u;
-  uint32_t const retained_sa0 =
-      sfa_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_m0,
-                                                              scale_k)];
-  uint32_t const retained_sa1 =
-      sfa_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_m1,
-                                                              scale_k)];
-  uint32_t const retained_sb0 =
-      sfb_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_n0,
-                                                              scale_k)];
-  uint32_t const retained_sb1 =
-      sfb_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_n1,
-                                                              scale_k)];
-  pkg.sa0 = detail::sm120_broadcast_u8_from_u32(retained_sa0, 0);
-  pkg.sa1 = detail::sm120_broadcast_u8_from_u32(retained_sa0, 1);
-  pkg.sa2 = detail::sm120_broadcast_u8_from_u32(retained_sa1, 0);
-  pkg.sa3 = detail::sm120_broadcast_u8_from_u32(retained_sa1, 1);
-  pkg.sb0 = detail::sm120_broadcast_u8_from_u32(retained_sb0, 0);
-  pkg.sb1 = detail::sm120_broadcast_u8_from_u32(retained_sb0, 1);
-  pkg.sb2 = detail::sm120_broadcast_u8_from_u32(retained_sb0, 2);
-  pkg.sb3 = detail::sm120_broadcast_u8_from_u32(retained_sb0, 3);
-  pkg.sb4 = detail::sm120_broadcast_u8_from_u32(retained_sb1, 0);
-  pkg.sb5 = detail::sm120_broadcast_u8_from_u32(retained_sb1, 1);
-  pkg.sb6 = detail::sm120_broadcast_u8_from_u32(retained_sb1, 2);
-  pkg.sb7 = detail::sm120_broadcast_u8_from_u32(retained_sb1, 3);
-#elif defined(TL_SM120_FULLTILE_SCALE_SLOT_PACKAGE)
-  uint32_t const sfa_slot_base =
-      detail::sm120_cute_sfa_slot_word(lane, warp_m, scale_k, 0);
-  detail::sm120_ldscale_v4_u32(sfa_base + sfa_slot_base, pkg.sa0, pkg.sa1,
-                               pkg.sa2, pkg.sa3);
-
-  uint32_t sfb_even0, sfb_even1, sfb_even2, sfb_even3;
-  uint32_t sfb_odd0, sfb_odd1, sfb_odd2, sfb_odd3;
-  uint32_t const sfb_slot_even =
-      detail::sm120_cute_sfb_slot_word(lane, warp_n, scale_k, 0, 0);
-  uint32_t const sfb_slot_odd =
-      detail::sm120_cute_sfb_slot_word(lane, warp_n, scale_k, 0, 1);
-  detail::sm120_ldscale_v4_u32(sfb_base + sfb_slot_even, sfb_even0, sfb_even1,
-                               sfb_even2, sfb_even3);
-  detail::sm120_ldscale_v4_u32(sfb_base + sfb_slot_odd, sfb_odd0, sfb_odd1,
-                               sfb_odd2, sfb_odd3);
-  pkg.sb0 = sfb_even0;
-  pkg.sb1 = sfb_odd0;
-  pkg.sb2 = sfb_even1;
-  pkg.sb3 = sfb_odd1;
-  pkg.sb4 = sfb_even2;
-  pkg.sb5 = sfb_odd2;
-  pkg.sb6 = sfb_even3;
-  pkg.sb7 = sfb_odd3;
-#elif defined(TL_SM120_FULLTILE_SCALE_VECTOR_PACKAGE)
-  uint32_t sfa0, sfa1, sfa2, sfa3;
-  uint32_t sfb0, sfb1, sfb2, sfb3;
-  detail::sm120_ldscale_v4_u32(
-      sfa_base + detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_m0 & 31u,
-                                                                scale_k),
-      sfa0, sfa1, sfa2, sfa3);
-  detail::sm120_ldscale_v4_u32(
-      sfb_base + detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_n0 & 31u,
-                                                                scale_k),
-      sfb0, sfb1, sfb2, sfb3);
-  uint32_t const scale_m_group = scale_m0 >> 5;
-  uint32_t const scale_n_group = scale_n0 >> 5;
-  pkg.sa0 = detail::sm120_select4_u32(sfa0, sfa1, sfa2, sfa3, scale_m_group);
-  pkg.sa1 =
-      detail::sm120_select4_u32(sfa0, sfa1, sfa2, sfa3, scale_m_group + 1u);
-  pkg.sb0 = detail::sm120_select4_u32(sfb0, sfb1, sfb2, sfb3, scale_n_group);
-  pkg.sb1 =
-      detail::sm120_select4_u32(sfb0, sfb1, sfb2, sfb3, scale_n_group + 1u);
-#else
-  uint32_t const scale_m1 = scale_m0 + 32u;
-  uint32_t const scale_n1 = scale_n0 + 32u;
-  pkg.sa0 = sfa_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_m0,
-                                                                    scale_k)];
-  pkg.sa1 = sfa_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_m1,
-                                                                    scale_k)];
-  pkg.sb0 = sfb_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_n0,
-                                                                    scale_k)];
-  pkg.sb1 = sfb_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_n1,
-                                                                    scale_k)];
-#endif
 
   detail::sm120_ldmatrix_x4_blockscaled_operand(
       a_base + detail::sm120_fulltile_package_a_offset(tx, k_block_idx, 0),
@@ -1768,7 +1681,8 @@ TL_DEVICE void sm120_copy_fulltile_ab_owner_wide_package(
 }
 
 TL_DEVICE void sm120_gemm_fulltile_ab_owner_wide_package(
-    float *c, const SM120FulltileABOwnerWidePackage &pkg) {
+    float *c, const SM120FulltileABOwnerWidePackage &pkg,
+    const detail::SM120ScaleTVPackage &scale_pkg) {
 #if defined(TL_SM120_FULLTILE_CUTE_ACCUM_LAYOUT) ||                            \
     defined(TL_SM120_FULLTILE_CUTE_ACCUM_DIRECT)
 #define TL_SM120_PKG_C_OFFSET(I, J, HALF) ((I) * 4 + (J) * 32 + (HALF) * 16)
@@ -1785,62 +1699,32 @@ TL_DEVICE void sm120_gemm_fulltile_ab_owner_wide_package(
         uint16_t(SB_TID));                                                     \
   } while (0)
 
-#if defined(TL_SM120_FULLTILE_SCALE_SLOT_PACKAGE) ||                           \
-    defined(TL_SM120_FULLTILE_SCALE_SELECTOR0_RETAINED_PACKAGE)
-#define TL_SM120_PKG_MMA_ROW_SLOT(I, A0, A1, A2, A3, SA)                       \
-  do {                                                                         \
-    TL_SM120_PKG_MMA_N8(I, 0, 0, A0, A1, A2, A3, pkg.b00, pkg.b01, SA,         \
-                        pkg.sb0, 0, 0);                                        \
-    TL_SM120_PKG_MMA_N8(I, 0, 1, A0, A1, A2, A3, pkg.b02, pkg.b03, SA,         \
-                        pkg.sb1, 0, 0);                                        \
-    TL_SM120_PKG_MMA_N8(I, 1, 0, A0, A1, A2, A3, pkg.b10, pkg.b11, SA,         \
-                        pkg.sb2, 0, 0);                                        \
-    TL_SM120_PKG_MMA_N8(I, 1, 1, A0, A1, A2, A3, pkg.b12, pkg.b13, SA,         \
-                        pkg.sb3, 0, 0);                                        \
-    TL_SM120_PKG_MMA_N8(I, 2, 0, A0, A1, A2, A3, pkg.b20, pkg.b21, SA,         \
-                        pkg.sb4, 0, 0);                                        \
-    TL_SM120_PKG_MMA_N8(I, 2, 1, A0, A1, A2, A3, pkg.b22, pkg.b23, SA,         \
-                        pkg.sb5, 0, 0);                                        \
-    TL_SM120_PKG_MMA_N8(I, 3, 0, A0, A1, A2, A3, pkg.b30, pkg.b31, SA,         \
-                        pkg.sb6, 0, 0);                                        \
-    TL_SM120_PKG_MMA_N8(I, 3, 1, A0, A1, A2, A3, pkg.b32, pkg.b33, SA,         \
-                        pkg.sb7, 0, 0);                                        \
-  } while (0)
-
-  TL_SM120_PKG_MMA_ROW_SLOT(0, pkg.a00, pkg.a01, pkg.a02, pkg.a03, pkg.sa0);
-  TL_SM120_PKG_MMA_ROW_SLOT(1, pkg.a10, pkg.a11, pkg.a12, pkg.a13, pkg.sa1);
-  TL_SM120_PKG_MMA_ROW_SLOT(2, pkg.a20, pkg.a21, pkg.a22, pkg.a23, pkg.sa2);
-  TL_SM120_PKG_MMA_ROW_SLOT(3, pkg.a30, pkg.a31, pkg.a32, pkg.a33, pkg.sa3);
-
-#undef TL_SM120_PKG_MMA_ROW_SLOT
-#else
 #define TL_SM120_PKG_MMA_ROW(I, A0, A1, A2, A3, SA, SA_TID)                    \
   do {                                                                         \
     TL_SM120_PKG_MMA_N8(I, 0, 0, A0, A1, A2, A3, pkg.b00, pkg.b01, SA,         \
-                        pkg.sb0, SA_TID, 0);                                   \
+                        scale_pkg.sb0, SA_TID, 0);                             \
     TL_SM120_PKG_MMA_N8(I, 0, 1, A0, A1, A2, A3, pkg.b02, pkg.b03, SA,         \
-                        pkg.sb0, SA_TID, 1);                                   \
+                        scale_pkg.sb0, SA_TID, 1);                             \
     TL_SM120_PKG_MMA_N8(I, 1, 0, A0, A1, A2, A3, pkg.b10, pkg.b11, SA,         \
-                        pkg.sb0, SA_TID, 2);                                   \
+                        scale_pkg.sb0, SA_TID, 2);                             \
     TL_SM120_PKG_MMA_N8(I, 1, 1, A0, A1, A2, A3, pkg.b12, pkg.b13, SA,         \
-                        pkg.sb0, SA_TID, 3);                                   \
+                        scale_pkg.sb0, SA_TID, 3);                             \
     TL_SM120_PKG_MMA_N8(I, 2, 0, A0, A1, A2, A3, pkg.b20, pkg.b21, SA,         \
-                        pkg.sb1, SA_TID, 0);                                   \
+                        scale_pkg.sb1, SA_TID, 0);                             \
     TL_SM120_PKG_MMA_N8(I, 2, 1, A0, A1, A2, A3, pkg.b22, pkg.b23, SA,         \
-                        pkg.sb1, SA_TID, 1);                                   \
+                        scale_pkg.sb1, SA_TID, 1);                             \
     TL_SM120_PKG_MMA_N8(I, 3, 0, A0, A1, A2, A3, pkg.b30, pkg.b31, SA,         \
-                        pkg.sb1, SA_TID, 2);                                   \
+                        scale_pkg.sb1, SA_TID, 2);                             \
     TL_SM120_PKG_MMA_N8(I, 3, 1, A0, A1, A2, A3, pkg.b32, pkg.b33, SA,         \
-                        pkg.sb1, SA_TID, 3);                                   \
+                        scale_pkg.sb1, SA_TID, 3);                             \
   } while (0)
 
-  TL_SM120_PKG_MMA_ROW(0, pkg.a00, pkg.a01, pkg.a02, pkg.a03, pkg.sa0, 0);
-  TL_SM120_PKG_MMA_ROW(1, pkg.a10, pkg.a11, pkg.a12, pkg.a13, pkg.sa0, 1);
-  TL_SM120_PKG_MMA_ROW(2, pkg.a20, pkg.a21, pkg.a22, pkg.a23, pkg.sa1, 0);
-  TL_SM120_PKG_MMA_ROW(3, pkg.a30, pkg.a31, pkg.a32, pkg.a33, pkg.sa1, 1);
+  TL_SM120_PKG_MMA_ROW(0, pkg.a00, pkg.a01, pkg.a02, pkg.a03, scale_pkg.sa0, 0);
+  TL_SM120_PKG_MMA_ROW(1, pkg.a10, pkg.a11, pkg.a12, pkg.a13, scale_pkg.sa0, 1);
+  TL_SM120_PKG_MMA_ROW(2, pkg.a20, pkg.a21, pkg.a22, pkg.a23, scale_pkg.sa1, 0);
+  TL_SM120_PKG_MMA_ROW(3, pkg.a30, pkg.a31, pkg.a32, pkg.a33, scale_pkg.sa1, 1);
 
 #undef TL_SM120_PKG_MMA_ROW
-#endif
 #undef TL_SM120_PKG_MMA_N8
 #undef TL_SM120_PKG_C_OFFSET
 }
@@ -1852,19 +1736,25 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile_package_pingpong(
   const char *b_base = static_cast<const char *>(b_smem_base);
   SM120FulltileABOwnerWidePackage pkg0;
   SM120FulltileABOwnerWidePackage pkg1;
+  detail::SM120ScaleTVPackage scale_pkg0;
+  detail::SM120ScaleTVPackage scale_pkg1;
 
-  sm120_copy_fulltile_ab_owner_wide_package(pkg0, a_base, b_base, sfa_smem_base,
-                                            sfb_smem_base, 0);
-  sm120_copy_fulltile_ab_owner_wide_package(pkg1, a_base, b_base, sfa_smem_base,
-                                            sfb_smem_base, 1);
-  sm120_gemm_fulltile_ab_owner_wide_package(c, pkg0);
-  sm120_copy_fulltile_ab_owner_wide_package(pkg0, a_base, b_base, sfa_smem_base,
-                                            sfb_smem_base, 2);
-  sm120_gemm_fulltile_ab_owner_wide_package(c, pkg1);
-  sm120_copy_fulltile_ab_owner_wide_package(pkg1, a_base, b_base, sfa_smem_base,
-                                            sfb_smem_base, 3);
-  sm120_gemm_fulltile_ab_owner_wide_package(c, pkg0);
-  sm120_gemm_fulltile_ab_owner_wide_package(c, pkg1);
+  sm120_copy_fulltile_ab_owner_wide_package(pkg0, a_base, b_base, 0);
+  detail::sm120_copy_scale_tv_package(scale_pkg0, sfa_smem_base, sfb_smem_base,
+                                      0);
+  sm120_copy_fulltile_ab_owner_wide_package(pkg1, a_base, b_base, 1);
+  detail::sm120_copy_scale_tv_package(scale_pkg1, sfa_smem_base, sfb_smem_base,
+                                      1);
+  sm120_gemm_fulltile_ab_owner_wide_package(c, pkg0, scale_pkg0);
+  sm120_copy_fulltile_ab_owner_wide_package(pkg0, a_base, b_base, 2);
+  detail::sm120_copy_scale_tv_package(scale_pkg0, sfa_smem_base, sfb_smem_base,
+                                      2);
+  sm120_gemm_fulltile_ab_owner_wide_package(c, pkg1, scale_pkg1);
+  sm120_copy_fulltile_ab_owner_wide_package(pkg1, a_base, b_base, 3);
+  detail::sm120_copy_scale_tv_package(scale_pkg1, sfa_smem_base, sfb_smem_base,
+                                      3);
+  sm120_gemm_fulltile_ab_owner_wide_package(c, pkg0, scale_pkg0);
+  sm120_gemm_fulltile_ab_owner_wide_package(c, pkg1, scale_pkg1);
 }
 
 } // namespace tl

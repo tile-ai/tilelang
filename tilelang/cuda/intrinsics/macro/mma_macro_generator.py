@@ -56,6 +56,207 @@ class BlockScaleMmaConfig:
     active_sfb_threads: int = 8
 
 
+@dataclass(frozen=True)
+class SM120BlockScaledFullTilePackageContract:
+    """Internal contract for the SM120 full-tile blockscaled package path.
+
+    This is deliberately a lowering-level contract, not a user option.  The CUDA
+    helper is still the instruction backend today, but the emitter must name the
+    fragment/package shape it expects before it can route a tile to that helper.
+    """
+
+    tile_m: int
+    tile_n: int
+    tile_k: int
+    block_row_warps: int
+    block_col_warps: int
+    warp_rows: int
+    warp_cols: int
+    warp_row_tiles: int
+    warp_col_tiles: int
+    kblocks: int
+    micro_size_k: int
+    sf_layout: str
+    scale_package_words_sfa: int
+    scale_package_words_sfb: int
+    issue_count_per_warp: int
+    issue_count_per_warpgroup: int
+
+    @classmethod
+    def for_package_pingpong(
+        cls,
+        emitter: TensorCoreIntrinEmitterWithBlockScale,
+        *,
+        sf_layout: str,
+        kblocks: int = 4,
+    ) -> SM120BlockScaledFullTilePackageContract:
+        contract = cls(
+            tile_m=int(emitter.block_row_warps) * int(emitter.warp_row_tiles),
+            tile_n=int(emitter.block_col_warps) * int(emitter.warp_col_tiles),
+            tile_k=kblocks * int(emitter.micro_size_k),
+            block_row_warps=int(emitter.block_row_warps),
+            block_col_warps=int(emitter.block_col_warps),
+            warp_rows=int(emitter.warp_rows),
+            warp_cols=int(emitter.warp_cols),
+            warp_row_tiles=int(emitter.warp_row_tiles),
+            warp_col_tiles=int(emitter.warp_col_tiles),
+            kblocks=kblocks,
+            micro_size_k=int(emitter.micro_size_k),
+            sf_layout=sf_layout,
+            scale_package_words_sfa=2,
+            scale_package_words_sfb=2,
+            issue_count_per_warp=32,
+            issue_count_per_warpgroup=128,
+        )
+        contract.validate()
+        return contract
+
+    def validate(self) -> None:
+        if (self.tile_m, self.tile_n, self.tile_k) != (128, 128, 256):
+            raise ValueError(
+                f"SM120 full-tile package contract currently requires tile shape 128x128x256, got {self.tile_m}x{self.tile_n}x{self.tile_k}"
+            )
+        if (self.warp_rows, self.warp_cols) != (4, 4):
+            raise ValueError(
+                "SM120 full-tile package contract currently requires each consumer "
+                f"warp to issue a 4x4 MMA atom grid, got {self.warp_rows}x{self.warp_cols}"
+            )
+        if (self.block_row_warps, self.block_col_warps) != (2, 2):
+            raise ValueError(
+                "SM120 full-tile package contract currently requires a 2x2 consumer "
+                f"warp layout, got {self.block_row_warps}x{self.block_col_warps}"
+            )
+        if (self.warp_row_tiles, self.warp_col_tiles) != (64, 64):
+            raise ValueError(
+                "SM120 full-tile package contract currently requires each consumer "
+                f"warp tile to be 64x64, got {self.warp_row_tiles}x{self.warp_col_tiles}"
+            )
+        if self.kblocks != 4 or self.micro_size_k != 64:
+            raise ValueError(
+                "SM120 full-tile package contract currently requires four K=64 "
+                f"blocks, got kblocks={self.kblocks}, micro_size_k={self.micro_size_k}"
+            )
+        if self.sf_layout != "blockscaled_chunk_kmajor":
+            raise ValueError("SM120 full-tile package contract requires sf_layout='blockscaled_chunk_kmajor'")
+        if (self.scale_package_words_sfa, self.scale_package_words_sfb) != (2, 2):
+            raise ValueError(
+                "SM120 compact scale TV package requires 2 SFA and 2 SFB "
+                f"words, got {self.scale_package_words_sfa}, {self.scale_package_words_sfb}"
+            )
+        if self.issue_count_per_warp != 32 or self.issue_count_per_warpgroup != 128:
+            raise ValueError(
+                "SM120 full-tile package contract expects 32 OMMA.SF issues per "
+                f"warp and 128 per warpgroup, got {self.issue_count_per_warp}, "
+                f"{self.issue_count_per_warpgroup}"
+            )
+
+    @staticmethod
+    def blockscaled_chunk_kmajor_sf_word(row: int, kblock: int) -> int:
+        """Return the uint32 scale-word offset for the source/smem scale layout."""
+
+        if row < 0 or row >= 128:
+            raise ValueError(f"scale row must be in [0, 128), got {row}")
+        if kblock < 0 or kblock >= 4:
+            raise ValueError(f"kblock must be in [0, 4), got {kblock}")
+        return kblock * 128 + (row & 31) * 4 + (row >> 5)
+
+    def compact_selector_scale_rows(self, lane: int, warp_m: int, warp_n: int) -> tuple[tuple[int, int], tuple[int, int]]:
+        """Return SFA/SFB semantic rows loaded by the current compact TV package."""
+
+        if lane < 0 or lane >= 32:
+            raise ValueError(f"lane must be in [0, 32), got {lane}")
+        if warp_m < 0 or warp_m >= self.block_row_warps:
+            raise ValueError(f"warp_m must be in [0, {self.block_row_warps}), got {warp_m}")
+        if warp_n < 0 or warp_n >= self.block_col_warps:
+            raise ValueError(f"warp_n must be in [0, {self.block_col_warps}), got {warp_n}")
+
+        qlane = lane & 3
+        sfa_row = 8 * (lane & 1) + (lane >> 2)
+        sfb_col = lane >> 2
+        a_owner_in_pair = qlane >> 1
+        scale_m0 = warp_m * 64 + a_owner_in_pair * 16 + sfa_row
+        scale_n0 = warp_n * 64 + qlane * 8 + sfb_col
+        return (scale_m0, scale_m0 + 32), (scale_n0, scale_n0 + 32)
+
+    def compact_selector_scale_word_offsets(
+        self, lane: int, warp_m: int, warp_n: int, kblock: int
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        sfa_rows, sfb_rows = self.compact_selector_scale_rows(lane, warp_m, warp_n)
+        return (
+            tuple(self.blockscaled_chunk_kmajor_sf_word(row, kblock) for row in sfa_rows),
+            tuple(self.blockscaled_chunk_kmajor_sf_word(row, kblock) for row in sfb_rows),
+        )
+
+    @staticmethod
+    def sfa_selector_source_lane(lane: int, scale_a_thread_id: int) -> int:
+        return (lane & ~3) | ((scale_a_thread_id & 1) << 1) | (lane & 1)
+
+    @staticmethod
+    def sfb_selector_source_lane(lane: int, scale_b_thread_id: int) -> int:
+        return (lane & ~3) | (scale_b_thread_id & 3)
+
+    def compact_selector_effective_rows(
+        self, lane: int, warp_m: int, warp_n: int, issue: tuple[int, int, int, int, int, int, int]
+    ) -> tuple[int, int]:
+        """Return semantic SFA/SFB rows consumed by one compact-selector issue."""
+
+        mma_i, mma_j, n8_half, sfa_word, sfb_word, scale_a_tid, scale_b_tid = issue
+        del mma_i, mma_j, n8_half
+        sfa_source_lane = self.sfa_selector_source_lane(lane, scale_a_tid)
+        sfb_source_lane = self.sfb_selector_source_lane(lane, scale_b_tid)
+        sfa_rows, _ = self.compact_selector_scale_rows(sfa_source_lane, warp_m, warp_n)
+        _, sfb_rows = self.compact_selector_scale_rows(sfb_source_lane, warp_m, warp_n)
+        return sfa_rows[sfa_word], sfb_rows[sfb_word]
+
+    def package_pingpong_lifecycle(self) -> tuple[tuple[str, int, int], ...]:
+        """Return the current copy/gemm package lifecycle from the CUDA helper.
+
+        Each tuple is ``(op, register_package, kblock)``.  Scale and A/B packages
+        share the same register package id in the current implementation.
+        """
+
+        return (
+            ("copy", 0, 0),
+            ("copy", 1, 1),
+            ("gemm", 0, 0),
+            ("copy", 0, 2),
+            ("gemm", 1, 1),
+            ("copy", 1, 3),
+            ("gemm", 0, 2),
+            ("gemm", 1, 3),
+        )
+
+    def omma_sf_issue_schedule_per_warp(self) -> tuple[tuple[int, int, int, int, int, int, int], ...]:
+        """Return the current per-warp OMMA.SF issue schedule.
+
+        Each tuple is ``(mma_i, mma_j, n8_half, sfa_word, sfb_word,
+        scale_a_thread_id, scale_b_thread_id)``.  ``sfa_word`` and ``sfb_word``
+        are indices inside the current compact-selector scale package, not
+        source-memory offsets.
+        """
+
+        issues = []
+        for mma_i in range(4):
+            sfa_word = 0 if mma_i < 2 else 1
+            scale_a_thread_id = mma_i & 1
+            for mma_j in range(4):
+                sfb_word = 0 if mma_j < 2 else 1
+                for n8_half in range(2):
+                    scale_b_thread_id = (mma_j & 1) * 2 + n8_half
+                    issues.append(
+                        (
+                            mma_i,
+                            mma_j,
+                            n8_half,
+                            sfa_word,
+                            sfb_word,
+                            scale_a_thread_id,
+                            scale_b_thread_id,
+                        )
+                    )
+        return tuple(issues)
+
+
 _SUPPORTED_BLOCK_SCALE_MMA_CONFIGS = {
     ("mxf4nvf4", 4, "ue4m3"): BlockScaleMmaConfig(
         kind="mxf4nvf4",
@@ -1577,7 +1778,7 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
         SFA_data, SFA_other, SFA_base_m, SFA_base_k = self._scale_region_parts(SFA_buf)
         SFB_data, SFB_other, SFB_base_n, SFB_base_k = self._scale_region_parts(SFB_buf)
         replicate_b = self.n_dim == 16
-        if sf_layout not in ("rowmajor", "cutlass_128x4", "blockscaled_chunk_kmajor"):
+        if sf_layout not in ("rowmajor", "blockscaled_chunk_kmajor"):
             raise ValueError(f"Unsupported SM120 scale layout: {sf_layout}")
 
         def _cutlass_sf_word(idx, word_k):
@@ -1591,7 +1792,7 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
             for i, j in T.grid(warp_rows, warp_cols):
                 scale_m = warp_m * warp_row_tiles + i * micro_size_x + sfa_row
                 scale_n = warp_n * warp_col_tiles + j * micro_size_y + sfb_col
-                if sf_layout in ("cutlass_128x4", "blockscaled_chunk_kmajor"):
+                if sf_layout == "blockscaled_chunk_kmajor":
                     scale_a_word = _cutlass_sf_word(scale_m, scale_a_word_k)
                     scale_b_word = _cutlass_sf_word(scale_n, scale_b_word_k)
                     scale_a_ptr = T.access_ptr(
@@ -1631,7 +1832,7 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
                     scale_b_ptr,
                 )
                 if replicate_b:
-                    if sf_layout in ("cutlass_128x4", "blockscaled_chunk_kmajor"):
+                    if sf_layout == "blockscaled_chunk_kmajor":
                         scale_b_rep_n = scale_n + 8
                         scale_b_rep_word = _cutlass_sf_word(scale_b_rep_n, scale_b_word_k)
                         scale_b_rep_ptr = T.access_ptr(
@@ -1693,7 +1894,7 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
         SFA_data, SFA_other, SFA_base_m, SFA_base_k = self._scale_region_parts(SFA_buf)
         SFB_data, SFB_other, SFB_base_n, SFB_base_k = self._scale_region_parts(SFB_buf)
         replicate_b = self.n_dim == 16
-        if sf_layout not in ("rowmajor", "cutlass_128x4", "blockscaled_chunk_kmajor"):
+        if sf_layout not in ("rowmajor", "blockscaled_chunk_kmajor"):
             raise ValueError(f"Unsupported SM120 scale layout: {sf_layout}")
 
         def _cutlass_sf_word(idx, word_k):
@@ -1706,20 +1907,20 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
             sfb_col = self._sfb_col_in_atom(tx)
             for i in T.unroll(warp_rows):
                 scale_m = warp_m * warp_row_tiles + i * micro_size_x + sfa_row
-                if sf_layout in ("cutlass_128x4", "blockscaled_chunk_kmajor"):
+                if sf_layout == "blockscaled_chunk_kmajor":
                     scale_a_word = _cutlass_sf_word(scale_m, scale_a_word_k)
                     SFA_local_buf[i] = SFA_data[tuple(SFA_other) + (SFA_base_m + scale_a_word // 4, SFA_base_k + scale_a_word % 4)]
                 else:
                     SFA_local_buf[i] = SFA_data[tuple(SFA_other) + (SFA_base_m + scale_m, SFA_base_k + scale_a_word_k)]
             for j in T.unroll(warp_cols):
                 scale_n = warp_n * warp_col_tiles + j * micro_size_y + sfb_col
-                if sf_layout in ("cutlass_128x4", "blockscaled_chunk_kmajor"):
+                if sf_layout == "blockscaled_chunk_kmajor":
                     scale_b_word = _cutlass_sf_word(scale_n, scale_b_word_k)
                     SFB_local_buf[j] = SFB_data[tuple(SFB_other) + (SFB_base_n + scale_b_word // 4, SFB_base_k + scale_b_word % 4)]
                 else:
                     SFB_local_buf[j] = SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n, SFB_base_k + scale_b_word_k)]
                 if replicate_b:
-                    if sf_layout in ("cutlass_128x4", "blockscaled_chunk_kmajor"):
+                    if sf_layout == "blockscaled_chunk_kmajor":
                         scale_b_rep_n = scale_n + 8
                         scale_b_rep_word = _cutlass_sf_word(scale_b_rep_n, scale_b_word_k)
                         SFB_rep_local_buf[j] = SFB_data[
@@ -1910,7 +2111,7 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
         SFB_data, SFB_other, SFB_base_n, SFB_base_k = self._scale_region_parts(SFB_buf)
         if int(warp_rows) != 4 or self.n_dim != 16 or int(warp_cols) != 4:
             raise ValueError("ldscale_fragment_ab_owner_wide requires warp_rows=4, warp_cols=4")
-        if sf_layout not in ("rowmajor", "cutlass_128x4", "blockscaled_chunk_kmajor"):
+        if sf_layout not in ("rowmajor", "blockscaled_chunk_kmajor"):
             raise ValueError(f"Unsupported SM120 scale layout: {sf_layout}")
 
         def _cutlass_sf_word(idx, word_k):
@@ -1925,14 +2126,14 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
             a_owner_in_pair = qlane >> 1
             for g in T.unroll(2):
                 scale_m = warp_m * warp_row_tiles + g * (2 * micro_size_x) + a_owner_in_pair * micro_size_x + sfa_row
-                if sf_layout in ("cutlass_128x4", "blockscaled_chunk_kmajor"):
+                if sf_layout == "blockscaled_chunk_kmajor":
                     scale_a_word = _cutlass_sf_word(scale_m, scale_a_word_k)
                     SFA_owner_buf[g] = SFA_data[tuple(SFA_other) + (SFA_base_m + scale_a_word // 4, SFA_base_k + scale_a_word % 4)]
                 else:
                     SFA_owner_buf[g] = SFA_data[tuple(SFA_other) + (SFA_base_m + scale_m, SFA_base_k + scale_a_word_k)]
             for g in T.unroll(2):
                 scale_n = warp_n * warp_col_tiles + g * (2 * micro_size_y) + sfb_col + qlane * 8
-                if sf_layout in ("cutlass_128x4", "blockscaled_chunk_kmajor"):
+                if sf_layout == "blockscaled_chunk_kmajor":
                     scale_b_word = _cutlass_sf_word(scale_n, scale_b_word_k)
                     SFB_owner_buf[g] = SFB_data[tuple(SFB_other) + (SFB_base_n + scale_b_word // 4, SFB_base_k + scale_b_word % 4)]
                 else:
@@ -2053,7 +2254,7 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
         scale_a_word_k = self._scale_word_k(k_start, ki, sf_a_granularity_k)
         scale_b_word_k = self._scale_word_k(k_start, ki, sf_b_granularity_k)
         thread_binding = self.get_thread_binding()
-        if sf_layout not in ("rowmajor", "cutlass_128x4", "blockscaled_chunk_kmajor"):
+        if sf_layout not in ("rowmajor", "blockscaled_chunk_kmajor"):
             raise ValueError(f"Unsupported SM120 scale layout: {sf_layout}")
 
         A_region = self._legalize_to_buffer_region(A_shared_buf)
@@ -2160,7 +2361,7 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
             scale_n2 = warp_n * warp_col_tiles + 2 * micro_size_y + sfb_col
             scale_n3 = warp_n * warp_col_tiles + 3 * micro_size_y + sfb_col
 
-            if sf_layout in ("cutlass_128x4", "blockscaled_chunk_kmajor"):
+            if sf_layout == "blockscaled_chunk_kmajor":
                 sfa0 = T.access_ptr(SFA_data[tuple(SFA_other) + (SFA_base_m, SFA_base_k)], "r")
                 sfa1 = sfa0
                 sfa2 = sfa0
@@ -2286,10 +2487,8 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
             raise ValueError("sm120 backend owner-wide helper requires replicated B n_dim=16")
         if not self.b_transposed:
             raise ValueError("sm120 backend owner-wide helper currently requires transpose_B=True")
-        if sf_layout not in ("cutlass_128x4", "blockscaled_chunk_kmajor"):
-            raise ValueError(
-                "sm120 backend owner-wide helper currently requires sf_layout='blockscaled_chunk_kmajor' or legacy 'cutlass_128x4'"
-            )
+        if sf_layout != "blockscaled_chunk_kmajor":
+            raise ValueError("sm120 backend owner-wide helper currently requires sf_layout='blockscaled_chunk_kmajor'")
 
         warp_row_tiles = self.warp_row_tiles
         warp_col_tiles = self.warp_col_tiles
@@ -2541,10 +2740,14 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
             raise ValueError("sm120 package pingpong helper requires replicated B n_dim=16")
         if not self.b_transposed:
             raise ValueError("sm120 package pingpong helper currently requires transpose_B=True")
-        if sf_layout not in ("cutlass_128x4", "blockscaled_chunk_kmajor"):
-            raise ValueError(
-                "sm120 package pingpong helper currently requires sf_layout='blockscaled_chunk_kmajor' or legacy 'cutlass_128x4'"
-            )
+        if sf_layout != "blockscaled_chunk_kmajor":
+            raise ValueError("sm120 package pingpong helper currently requires sf_layout='blockscaled_chunk_kmajor'")
+        package_contract = SM120BlockScaledFullTilePackageContract.for_package_pingpong(
+            self,
+            sf_layout=sf_layout,
+            kblocks=4,
+        )
+        assert package_contract.issue_count_per_warpgroup == 128
 
         A_region = self._legalize_to_buffer_region(A_shared_buf)
         A_buf = A_region.buffer

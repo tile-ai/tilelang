@@ -29,6 +29,13 @@ import tilelang
 import tilelang.language as T
 from tilelang.carver.arch import driver
 from tilelang.profiler import do_bench
+from tilelang.quantize import (
+    blockscaled_chunk_kmajor_word_offset,
+    decode_ue4m3_scale_bytes,
+    swizzle_blockscaled_chunk_kmajor_scale_words,
+    tilelang_quantize_bf16_to_nvfp4_blockscaled,
+    unswizzle_blockscaled_chunk_kmajor_scale_words,
+)
 
 
 def _ceil_div(x: int, y: int) -> int:
@@ -1092,6 +1099,12 @@ def _make_packed_fp4(rows: int, cols: int, *, seed: int) -> torch.Tensor:
     return torch.randint(-128, 128, (rows, cols // 2), device="cuda", dtype=torch.int8, generator=generator)
 
 
+def _make_bf16_activation(rows: int, cols: int, *, seed: int) -> torch.Tensor:
+    generator = torch.Generator(device="cuda")
+    generator.manual_seed(seed)
+    return (torch.randn((rows, cols), device="cuda", dtype=torch.float32, generator=generator) * 2.0).to(torch.bfloat16)
+
+
 def _make_ones_packed_fp4(rows: int, cols: int) -> torch.Tensor:
     # Two FP4 e2m1 values with raw code 0x2, packed into one byte.
     return torch.full((rows, cols // 2), 0x22, device="cuda", dtype=torch.int8)
@@ -1100,6 +1113,15 @@ def _make_ones_packed_fp4(rows: int, cols: int) -> torch.Tensor:
 def _make_constant_scale_words(rows: int, k: int, byte: int = 0x38) -> torch.Tensor:
     word = byte | (byte << 8) | (byte << 16) | (byte << 24)
     return torch.full((rows, k // 64), word, device="cuda", dtype=torch.uint32)
+
+
+def _pack_scale_words(scale_bytes: torch.Tensor) -> torch.Tensor:
+    scale_i64 = scale_bytes.to(torch.int64).reshape(scale_bytes.shape[0], -1, 4)
+    words = scale_i64[:, :, 0]
+    words = words | (scale_i64[:, :, 1] << 8)
+    words = words | (scale_i64[:, :, 2] << 16)
+    words = words | (scale_i64[:, :, 3] << 24)
+    return words.to(torch.uint32).contiguous()
 
 
 def _make_binary_scale_words(rows: int, k: int, *, seed: int) -> torch.Tensor:
@@ -1116,8 +1138,7 @@ def _make_binary_scale_words(rows: int, k: int, *, seed: int) -> torch.Tensor:
         )
         * 0x38
     )
-    words = scale_bytes[:, 0::4] | (scale_bytes[:, 1::4] << 8) | (scale_bytes[:, 2::4] << 16) | (scale_bytes[:, 3::4] << 24)
-    return words.to(torch.uint32)
+    return _pack_scale_words(scale_bytes)
 
 
 def _blockscaled_chunk_kmajor_word_offset(row: int, k64_word: int, block_rows: int = 128) -> tuple[int, int]:
@@ -1129,9 +1150,7 @@ def _blockscaled_chunk_kmajor_word_offset(row: int, k64_word: int, block_rows: i
     This benchmark stores the four adjacent ((k // 16) % 4) bytes in one
     uint32, so the physical word coordinate is the byte offset divided by four.
     """
-    if row < 0 or row >= block_rows:
-        raise ValueError(f"row must be in [0, {block_rows}), got {row}")
-    return k64_word * 32 + (row % 32), row // 32
+    return blockscaled_chunk_kmajor_word_offset(row, k64_word, block_rows=block_rows)
 
 
 def _swizzle_scale_words_blockscaled_chunk_kmajor(words: torch.Tensor, block_rows: int = 128, block_words: int = 4) -> torch.Tensor:
@@ -1142,24 +1161,7 @@ def _swizzle_scale_words_blockscaled_chunk_kmajor(words: torch.Tensor, block_row
     uint32-compressed form of CUTLASS BlockScaledBasicChunk K-major order.  TMA
     copies this physical tile directly into shared memory.
     """
-    rows, cols = words.shape
-    if rows % block_rows != 0 or cols % block_words != 0:
-        raise ValueError(
-            f"blockscaled_chunk_kmajor scale storage requires rows multiple of {block_rows} "
-            f"and cols multiple of {block_words}, got {tuple(words.shape)}"
-        )
-    src = words.view(rows // block_rows, block_rows, cols // block_words, block_words)
-    dst = torch.empty_like(src)
-    for row in range(block_rows):
-        for k64_word in range(block_words):
-            physical_row, physical_word = _blockscaled_chunk_kmajor_word_offset(row, k64_word, block_rows)
-            dst[:, physical_row, :, physical_word] = src[:, row, :, k64_word]
-    return dst.view(rows, cols).contiguous()
-
-
-def _swizzle_scale_words_cutlass_128x4(words: torch.Tensor, block_rows: int = 128, block_words: int = 4) -> torch.Tensor:
-    """Backward-compatible alias for the compressed BlockScaledBasicChunk layout."""
-    return _swizzle_scale_words_blockscaled_chunk_kmajor(words, block_rows, block_words)
+    return swizzle_blockscaled_chunk_kmajor_scale_words(words, block_rows=block_rows, block_words=block_words)
 
 
 def _check_blockscaled_chunk_kmajor_offsets() -> None:
@@ -1196,6 +1198,16 @@ def _decode_binary_scale_words(words: torch.Tensor, k: int) -> torch.Tensor:
     return (scale_bytes != 0).to(torch.float32)
 
 
+def _decode_ue4m3_scale_words(words: torch.Tensor, k: int) -> torch.Tensor:
+    w = words.to(torch.int64)
+    scale_bytes = torch.empty((words.shape[0], k // 16), device=words.device, dtype=torch.uint8)
+    scale_bytes[:, 0::4] = (w & 0xFF).to(torch.uint8)
+    scale_bytes[:, 1::4] = ((w >> 8) & 0xFF).to(torch.uint8)
+    scale_bytes[:, 2::4] = ((w >> 16) & 0xFF).to(torch.uint8)
+    scale_bytes[:, 3::4] = ((w >> 24) & 0xFF).to(torch.uint8)
+    return decode_ue4m3_scale_bytes(scale_bytes)
+
+
 def _decode_rowmajor_fp4(packed: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
     u = packed.contiguous().view(torch.uint8)
     lut = torch.tensor(_FP4_E2M1_VALUES, device=packed.device, dtype=torch.float32)
@@ -1221,9 +1233,13 @@ def _verify_tilelang_output(
     B_full = _decode_rowmajor_fp4(B, B.shape[0], B.shape[1] * 2)
     if scale_mode == "constant":
         ref = (A_full @ B_full.T).to(out_dtype)
-    elif scale_mode in ("random_binary", "random_sfa", "random_sfb"):
-        sfa = _decode_binary_scale_words(SFA, A_full.shape[1])
-        sfb = _decode_binary_scale_words(SFB, B_full.shape[1])
+    elif scale_mode in ("random_binary", "random_sfa", "random_sfb", "ue4m3"):
+        if scale_mode == "ue4m3":
+            sfa = _decode_ue4m3_scale_words(SFA, A_full.shape[1])
+            sfb = _decode_ue4m3_scale_words(SFB, B_full.shape[1])
+        else:
+            sfa = _decode_binary_scale_words(SFA, A_full.shape[1])
+            sfb = _decode_binary_scale_words(SFB, B_full.shape[1])
         ref_f32 = torch.zeros((A_full.shape[0], B_full.shape[0]), device=C.device, dtype=torch.float32)
         for k_sf in range(A_full.shape[1] // 16):
             k0 = k_sf * 16
@@ -1352,25 +1368,33 @@ def run_tilelang(args: argparse.Namespace) -> tuple[float, float]:
     if args.input_mode == "ones":
         A = _make_ones_packed_fp4(args.m, args.k)
         B = _make_ones_packed_fp4(args.n, args.k)
+    elif args.input_mode == "bf16_quantized":
+        A_bf16 = _make_bf16_activation(args.m, args.k, seed=args.seed)
+        B_bf16 = _make_bf16_activation(args.n, args.k, seed=args.seed + 1)
+        A, SFA = tilelang_quantize_bf16_to_nvfp4_blockscaled(A_bf16)
+        B, SFB = tilelang_quantize_bf16_to_nvfp4_blockscaled(B_bf16)
+        SFA_semantic = unswizzle_blockscaled_chunk_kmajor_scale_words(SFA)
+        SFB_semantic = unswizzle_blockscaled_chunk_kmajor_scale_words(SFB)
     else:
         A = _make_packed_fp4(args.m, args.k, seed=args.seed)
         B = _make_packed_fp4(args.n, args.k, seed=args.seed + 1)
-    if args.scale_mode == "constant":
-        SFA_semantic = _make_constant_scale_words(args.m, args.k)
-        SFB_semantic = _make_constant_scale_words(args.n, args.k)
-    elif args.scale_mode == "random_binary":
-        SFA_semantic = _make_binary_scale_words(args.m, args.k, seed=args.seed + 100)
-        SFB_semantic = _make_binary_scale_words(args.n, args.k, seed=args.seed + 200)
-    elif args.scale_mode == "random_sfa":
-        SFA_semantic = _make_binary_scale_words(args.m, args.k, seed=args.seed + 100)
-        SFB_semantic = _make_constant_scale_words(args.n, args.k)
-    elif args.scale_mode == "random_sfb":
-        SFA_semantic = _make_constant_scale_words(args.m, args.k)
-        SFB_semantic = _make_binary_scale_words(args.n, args.k, seed=args.seed + 200)
-    else:
-        raise ValueError(f"Unsupported scale_mode={args.scale_mode!r}")
-    SFA = _swizzle_scale_words_blockscaled_chunk_kmajor(SFA_semantic)
-    SFB = _swizzle_scale_words_blockscaled_chunk_kmajor(SFB_semantic)
+    if args.input_mode != "bf16_quantized":
+        if args.scale_mode == "constant":
+            SFA_semantic = _make_constant_scale_words(args.m, args.k)
+            SFB_semantic = _make_constant_scale_words(args.n, args.k)
+        elif args.scale_mode == "random_binary":
+            SFA_semantic = _make_binary_scale_words(args.m, args.k, seed=args.seed + 100)
+            SFB_semantic = _make_binary_scale_words(args.n, args.k, seed=args.seed + 200)
+        elif args.scale_mode == "random_sfa":
+            SFA_semantic = _make_binary_scale_words(args.m, args.k, seed=args.seed + 100)
+            SFB_semantic = _make_constant_scale_words(args.n, args.k)
+        elif args.scale_mode == "random_sfb":
+            SFA_semantic = _make_constant_scale_words(args.m, args.k)
+            SFB_semantic = _make_binary_scale_words(args.n, args.k, seed=args.seed + 200)
+        else:
+            raise ValueError(f"Unsupported scale_mode={args.scale_mode!r}")
+        SFA = _swizzle_scale_words_blockscaled_chunk_kmajor(SFA_semantic)
+        SFB = _swizzle_scale_words_blockscaled_chunk_kmajor(SFB_semantic)
     C = torch.empty((args.m, args.n), device="cuda", dtype=out_torch_dtype)
 
     kernel(A, B, SFA, SFB, C)
@@ -1392,7 +1416,7 @@ def run_tilelang(args: argparse.Namespace) -> tuple[float, float]:
             SFB_semantic,
             C,
             out_torch_dtype,
-            args.scale_mode,
+            "ue4m3" if args.input_mode == "bf16_quantized" else args.scale_mode,
             args.block_m,
             args.block_n,
             driver.get_num_sms(),
@@ -1533,7 +1557,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-stages", type=int, default=2)
     parser.add_argument("--warp-policy", choices=["Square"], default="Square")
     parser.add_argument("--out-dtype", choices=["bfloat16", "float32"], default="bfloat16")
-    parser.add_argument("--input-mode", choices=["random", "ones"], default="random")
+    parser.add_argument("--input-mode", choices=["random", "ones", "bf16_quantized"], default="random")
     parser.add_argument(
         "--scale-mode",
         choices=["constant", "random_binary", "random_sfa", "random_sfb"],
@@ -1575,10 +1599,11 @@ def main() -> None:
         raise RuntimeError(f"SM120 or newer is required, got compute capability {capability}")
 
     print(f"Shape: M={args.m}, N={args.n}, K={args.k}")
+    effective_scale_mode = "ue4m3_from_tilelang_bf16_quantizer" if args.input_mode == "bf16_quantized" else args.scale_mode
     print(
         f"TileLang tile: {args.block_m}x{args.block_n}x{args.block_k}, "
         f"threads={_SM120_THREADS}, policy={args.warp_policy}, output={args.out_dtype}, "
-        f"input_mode={args.input_mode}, scale_mode={args.scale_mode}"
+        f"input_mode={args.input_mode}, scale_mode={effective_scale_mode}"
     )
     print(
         "TileLang SM120 block-scaled path: "
