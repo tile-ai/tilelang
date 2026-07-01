@@ -52,7 +52,7 @@ _EARLY_BENCH_OPTIONS = _early_bench_options()
 
 _SM120_MICRO_PIPELINE = "sm120_backend_kblock_fulltile_package_pingpong"
 _SM120_SCHEDULE = "pp_stream_output_tma_panel32_pipe2"
-_SM120_SCALE_LAYOUT = "cutlass_128x4"
+_SM120_SCALE_LAYOUT = "blockscaled_chunk_kmajor"
 _SM120_SCALE_LOAD = "tma"
 _SM120_AB_SHARED_STORAGE = "packed"
 _SM120_THREADS = 384
@@ -61,10 +61,11 @@ _SM120_THREADS = 384
 # Scale source contract for the SM120 optimized path:
 # - semantic SFA/SFB shape is [M or N, K / 64] uint32; each word packs four
 #   scale bytes for four consecutive K/16 groups.
-# - host storage is pre-swizzled per 128 rows x 4 words (K=256 tile):
-#   source row i and K-word k moves to physical row k * 32 + (i % 32),
-#   physical word i // 32. This matches the CUTLASS-style 128x4 source
-#   layout consumed by scale TMA and the SM120 full-tile helper.
+# - host storage uses CUTLASS BlockScaledBasicChunk K-major order:
+#     atom_shape=((32, 4), (16, 4)), atom_stride=((16, 4), (0, 1)).
+#   For one K=64 atom, the scale-byte offset is
+#     (row % 32) * 16 + (row // 32) * 4 + ((k // 16) % 4).
+#   The uint32 source layout below is the compressed form of that byte layout.
 # - the benchmark always passes this swizzled storage to the kernel; reference
 #   checking keeps the semantic row-major copy separate.
 def _device_compile_flags() -> list[str]:
@@ -79,14 +80,14 @@ def _device_compile_flags() -> list[str]:
         if _EARLY_BENCH_OPTIONS.maxrregcount <= 0:
             raise ValueError("--maxrregcount must be positive")
         flags.append(f"--maxrregcount={_EARLY_BENCH_OPTIONS.maxrregcount}")
+    if _EARLY_BENCH_OPTIONS.ptxas_verbose:
+        flags.append("--ptxas-options=--verbose")
     return flags
 
 
 def _sm120_nvfp4_jit_pass_configs() -> dict:
     pass_configs = {}
     pass_configs[tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS] = _device_compile_flags()
-    if _EARLY_BENCH_OPTIONS.ptxas_verbose:
-        pass_configs[tilelang.PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT] = True
     return pass_configs
 
 
@@ -1119,28 +1120,70 @@ def _make_binary_scale_words(rows: int, k: int, *, seed: int) -> torch.Tensor:
     return words.to(torch.uint32)
 
 
-def _swizzle_scale_words_cutlass_128x4(words: torch.Tensor, block_rows: int = 128, block_words: int = 4) -> torch.Tensor:
-    """Convert semantic row-major scale words to the final CUTLASS-style source layout.
+def _blockscaled_chunk_kmajor_word_offset(row: int, k64_word: int, block_rows: int = 128) -> tuple[int, int]:
+    """Return compressed word coordinates for CUTLASS BlockScaledBasicChunk.
 
-    Input words[row, k_word] is the natural scale matrix used by the reference:
-    one uint32 packs scale bytes for K groups [4*k_word + 0, ..., +3].
-    For each 128-row x 4-word tile, storage is rearranged so the four K words
-    become four 32-row bands. TMA copies this already-swizzled source tile into
-    shared memory; the SM120 full-tile helper then indexes the same
-    128x4 contract when issuing OMMA.SF.
+    CUTLASS' element-level byte offset for one K=64 atom is:
+        (row % 32) * 16 + (row // 32) * 4 + ((k // 16) % 4)
+
+    This benchmark stores the four adjacent ((k // 16) % 4) bytes in one
+    uint32, so the physical word coordinate is the byte offset divided by four.
+    """
+    if row < 0 or row >= block_rows:
+        raise ValueError(f"row must be in [0, {block_rows}), got {row}")
+    return k64_word * 32 + (row % 32), row // 32
+
+
+def _swizzle_scale_words_blockscaled_chunk_kmajor(words: torch.Tensor, block_rows: int = 128, block_words: int = 4) -> torch.Tensor:
+    """Convert semantic row-major scale words to BlockScaledBasicChunk K-major.
+
+    Input words[row, k_word] is the natural reference matrix: one uint32 packs
+    scale bytes for K groups [4*k_word + 0, ..., +3].  Output storage is the
+    uint32-compressed form of CUTLASS BlockScaledBasicChunk K-major order.  TMA
+    copies this physical tile directly into shared memory.
     """
     rows, cols = words.shape
     if rows % block_rows != 0 or cols % block_words != 0:
         raise ValueError(
-            f"cutlass_128x4 scale storage requires rows multiple of {block_rows} "
+            f"blockscaled_chunk_kmajor scale storage requires rows multiple of {block_rows} "
             f"and cols multiple of {block_words}, got {tuple(words.shape)}"
         )
     src = words.view(rows // block_rows, block_rows, cols // block_words, block_words)
     dst = torch.empty_like(src)
-    for i in range(block_rows):
-        for k in range(block_words):
-            dst[:, k * 32 + (i % 32), :, i // 32] = src[:, i, :, k]
+    for row in range(block_rows):
+        for k64_word in range(block_words):
+            physical_row, physical_word = _blockscaled_chunk_kmajor_word_offset(row, k64_word, block_rows)
+            dst[:, physical_row, :, physical_word] = src[:, row, :, k64_word]
     return dst.view(rows, cols).contiguous()
+
+
+def _swizzle_scale_words_cutlass_128x4(words: torch.Tensor, block_rows: int = 128, block_words: int = 4) -> torch.Tensor:
+    """Backward-compatible alias for the compressed BlockScaledBasicChunk layout."""
+    return _swizzle_scale_words_blockscaled_chunk_kmajor(words, block_rows, block_words)
+
+
+def _check_blockscaled_chunk_kmajor_offsets() -> None:
+    expected = {
+        (0, 0): (0, 0),
+        (0, 1): (32, 0),
+        (0, 2): (64, 0),
+        (0, 3): (96, 0),
+        (1, 0): (1, 0),
+        (15, 0): (15, 0),
+        (16, 0): (16, 0),
+        (31, 0): (31, 0),
+        (32, 0): (0, 1),
+        (33, 0): (1, 1),
+        (64, 0): (0, 2),
+        (96, 0): (0, 3),
+        (127, 0): (31, 3),
+    }
+    for (row, k64_word), physical in expected.items():
+        actual = _blockscaled_chunk_kmajor_word_offset(row, k64_word)
+        if actual != physical:
+            raise AssertionError(
+                f"BlockScaledBasicChunk K-major offset mismatch: row={row} k64_word={k64_word} expected={physical} actual={actual}"
+            )
 
 
 def _decode_binary_scale_words(words: torch.Tensor, k: int) -> torch.Tensor:
@@ -1264,6 +1307,7 @@ def _verify_tilelang_output(
 
 
 def run_tilelang(args: argparse.Namespace) -> tuple[float, float]:
+    _check_blockscaled_chunk_kmajor_offsets()
     out_dtype = T.bfloat16 if args.out_dtype == "bfloat16" else T.float32
     out_torch_dtype = torch.bfloat16 if args.out_dtype == "bfloat16" else torch.float32
     warp_policy = getattr(T.GemmWarpPolicy, args.warp_policy)
@@ -1325,8 +1369,8 @@ def run_tilelang(args: argparse.Namespace) -> tuple[float, float]:
         SFB_semantic = _make_binary_scale_words(args.n, args.k, seed=args.seed + 200)
     else:
         raise ValueError(f"Unsupported scale_mode={args.scale_mode!r}")
-    SFA = _swizzle_scale_words_cutlass_128x4(SFA_semantic)
-    SFB = _swizzle_scale_words_cutlass_128x4(SFB_semantic)
+    SFA = _swizzle_scale_words_blockscaled_chunk_kmajor(SFA_semantic)
+    SFB = _swizzle_scale_words_blockscaled_chunk_kmajor(SFB_semantic)
     C = torch.empty((args.m, args.n), device="cuda", dtype=out_torch_dtype)
 
     kernel(A, B, SFA, SFB, C)

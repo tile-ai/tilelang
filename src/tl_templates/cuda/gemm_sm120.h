@@ -33,8 +33,21 @@ struct SM120MmaBlockScaledConfig<SM120MmaBlockScaledKind::kMxf4nvf4, 4,
 
 namespace detail {
 
-TL_DEVICE uint32_t sm120_cutlass_128x4_sf_word(uint32_t idx, uint32_t ki) {
+// CUTLASS BlockScaledBasicChunk K-major scale layout, compressed to uint32
+// words.  The element-level byte offset for one K=64 atom is:
+//
+//   (idx % 32) * 16 + (idx / 32) * 4 + k16
+//
+// where k16 is the scale byte inside the four K/16 groups.  Since TileLang
+// stores those four adjacent scale bytes in one uint32 word, the word offset is
+// the same formula without the final +k16 byte selector.
+TL_DEVICE uint32_t sm120_blockscaled_chunk_kmajor_sf_word(uint32_t idx,
+                                                          uint32_t ki) {
   return ki * 128u + (idx & 31u) * 4u + (idx >> 5);
+}
+
+TL_DEVICE uint32_t sm120_cutlass_128x4_sf_word(uint32_t idx, uint32_t ki) {
+  return sm120_blockscaled_chunk_kmajor_sf_word(idx, ki);
 }
 
 TL_DEVICE uint32_t sm120_cute_sfa_slot_word(uint32_t lane, uint32_t warp_m,
@@ -806,30 +819,30 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile(
   uint32_t const scale_n3 = scale_n0 + 48u;
   uint32_t const *sfa_base = sfa_0;
   uint32_t const *sfb_base = sfb_0;
-  uint32_t const sa0 =
-      sfa_base[detail::sm120_cutlass_128x4_sf_word(scale_m0, scale_k)];
-  uint32_t const sa1 =
-      sfa_base[detail::sm120_cutlass_128x4_sf_word(scale_m1, scale_k)];
-  uint32_t const sa2 =
-      sfa_base[detail::sm120_cutlass_128x4_sf_word(scale_m2, scale_k)];
-  uint32_t const sa3 =
-      sfa_base[detail::sm120_cutlass_128x4_sf_word(scale_m3, scale_k)];
-  uint32_t const sb0 =
-      sfb_base[detail::sm120_cutlass_128x4_sf_word(scale_n0, scale_k)];
-  uint32_t const sb1 =
-      sfb_base[detail::sm120_cutlass_128x4_sf_word(scale_n1, scale_k)];
-  uint32_t const sb2 =
-      sfb_base[detail::sm120_cutlass_128x4_sf_word(scale_n2, scale_k)];
-  uint32_t const sb3 =
-      sfb_base[detail::sm120_cutlass_128x4_sf_word(scale_n3, scale_k)];
-  uint32_t const sbr0 =
-      sfb_base[detail::sm120_cutlass_128x4_sf_word(scale_n0 + 8u, scale_k)];
-  uint32_t const sbr1 =
-      sfb_base[detail::sm120_cutlass_128x4_sf_word(scale_n1 + 8u, scale_k)];
-  uint32_t const sbr2 =
-      sfb_base[detail::sm120_cutlass_128x4_sf_word(scale_n2 + 8u, scale_k)];
-  uint32_t const sbr3 =
-      sfb_base[detail::sm120_cutlass_128x4_sf_word(scale_n3 + 8u, scale_k)];
+  uint32_t const sa0 = sfa_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(
+      scale_m0, scale_k)];
+  uint32_t const sa1 = sfa_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(
+      scale_m1, scale_k)];
+  uint32_t const sa2 = sfa_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(
+      scale_m2, scale_k)];
+  uint32_t const sa3 = sfa_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(
+      scale_m3, scale_k)];
+  uint32_t const sb0 = sfb_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(
+      scale_n0, scale_k)];
+  uint32_t const sb1 = sfb_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(
+      scale_n1, scale_k)];
+  uint32_t const sb2 = sfb_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(
+      scale_n2, scale_k)];
+  uint32_t const sb3 = sfb_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(
+      scale_n3, scale_k)];
+  uint32_t const sbr0 = sfb_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(
+      scale_n0 + 8u, scale_k)];
+  uint32_t const sbr1 = sfb_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(
+      scale_n1 + 8u, scale_k)];
+  uint32_t const sbr2 = sfb_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(
+      scale_n2 + 8u, scale_k)];
+  uint32_t const sbr3 = sfb_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(
+      scale_n3 + 8u, scale_k)];
 #define TL_SM120_SFA0 sa0
 #define TL_SM120_SFA1 sa1
 #define TL_SM120_SFA2 sa2
@@ -1437,13 +1450,17 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile_ab_owner_wide(
   uint32_t const scale_n0 = warp_n * 64u + qlane * 8u + sfb_col;
   uint32_t const scale_n1 = scale_n0 + 32u;
   uint32_t const sa_owner0 =
-      sfa_base[detail::sm120_cutlass_128x4_sf_word(scale_m0, scale_k)];
+      sfa_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_m0,
+                                                              scale_k)];
   uint32_t const sa_owner1 =
-      sfa_base[detail::sm120_cutlass_128x4_sf_word(scale_m1, scale_k)];
+      sfa_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_m1,
+                                                              scale_k)];
   uint32_t const sb_owner0 =
-      sfb_base[detail::sm120_cutlass_128x4_sf_word(scale_n0, scale_k)];
+      sfb_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_n0,
+                                                              scale_k)];
   uint32_t const sb_owner1 =
-      sfb_base[detail::sm120_cutlass_128x4_sf_word(scale_n1, scale_k)];
+      sfb_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_n1,
+                                                              scale_k)];
 
 #if defined(TL_SM120_FULLTILE_CUTE_ACCUM_LAYOUT) ||                            \
     defined(TL_SM120_FULLTILE_CUTE_ACCUM_DIRECT)
@@ -1524,13 +1541,17 @@ TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile_afull_bpanel_owner_wide(
   uint32_t const scale_n0 = warp_n * 64u + qlane * 8u + sfb_col;
   uint32_t const scale_n1 = scale_n0 + 32u;
   uint32_t const sa_owner0 =
-      sfa_base[detail::sm120_cutlass_128x4_sf_word(scale_m0, scale_k)];
+      sfa_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_m0,
+                                                              scale_k)];
   uint32_t const sa_owner1 =
-      sfa_base[detail::sm120_cutlass_128x4_sf_word(scale_m1, scale_k)];
+      sfa_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_m1,
+                                                              scale_k)];
   uint32_t const sb_owner0 =
-      sfb_base[detail::sm120_cutlass_128x4_sf_word(scale_n0, scale_k)];
+      sfb_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_n0,
+                                                              scale_k)];
   uint32_t const sb_owner1 =
-      sfb_base[detail::sm120_cutlass_128x4_sf_word(scale_n1, scale_k)];
+      sfb_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_n1,
+                                                              scale_k)];
 
   uint32_t a00, a01, a02, a03;
   uint32_t a10, a11, a12, a13;
@@ -1640,13 +1661,17 @@ TL_DEVICE void sm120_copy_fulltile_ab_owner_wide_package(
   uint32_t const scale_m1 = scale_m0 + 32u;
   uint32_t const scale_n1 = scale_n0 + 32u;
   uint32_t const retained_sa0 =
-      sfa_base[detail::sm120_cutlass_128x4_sf_word(scale_m0, scale_k)];
+      sfa_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_m0,
+                                                              scale_k)];
   uint32_t const retained_sa1 =
-      sfa_base[detail::sm120_cutlass_128x4_sf_word(scale_m1, scale_k)];
+      sfa_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_m1,
+                                                              scale_k)];
   uint32_t const retained_sb0 =
-      sfb_base[detail::sm120_cutlass_128x4_sf_word(scale_n0, scale_k)];
+      sfb_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_n0,
+                                                              scale_k)];
   uint32_t const retained_sb1 =
-      sfb_base[detail::sm120_cutlass_128x4_sf_word(scale_n1, scale_k)];
+      sfb_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_n1,
+                                                              scale_k)];
   pkg.sa0 = detail::sm120_broadcast_u8_from_u32(retained_sa0, 0);
   pkg.sa1 = detail::sm120_broadcast_u8_from_u32(retained_sa0, 1);
   pkg.sa2 = detail::sm120_broadcast_u8_from_u32(retained_sa1, 0);
@@ -1687,10 +1712,12 @@ TL_DEVICE void sm120_copy_fulltile_ab_owner_wide_package(
   uint32_t sfa0, sfa1, sfa2, sfa3;
   uint32_t sfb0, sfb1, sfb2, sfb3;
   detail::sm120_ldscale_v4_u32(
-      sfa_base + detail::sm120_cutlass_128x4_sf_word(scale_m0 & 31u, scale_k),
+      sfa_base + detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_m0 & 31u,
+                                                                scale_k),
       sfa0, sfa1, sfa2, sfa3);
   detail::sm120_ldscale_v4_u32(
-      sfb_base + detail::sm120_cutlass_128x4_sf_word(scale_n0 & 31u, scale_k),
+      sfb_base + detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_n0 & 31u,
+                                                                scale_k),
       sfb0, sfb1, sfb2, sfb3);
   uint32_t const scale_m_group = scale_m0 >> 5;
   uint32_t const scale_n_group = scale_n0 >> 5;
@@ -1703,10 +1730,14 @@ TL_DEVICE void sm120_copy_fulltile_ab_owner_wide_package(
 #else
   uint32_t const scale_m1 = scale_m0 + 32u;
   uint32_t const scale_n1 = scale_n0 + 32u;
-  pkg.sa0 = sfa_base[detail::sm120_cutlass_128x4_sf_word(scale_m0, scale_k)];
-  pkg.sa1 = sfa_base[detail::sm120_cutlass_128x4_sf_word(scale_m1, scale_k)];
-  pkg.sb0 = sfb_base[detail::sm120_cutlass_128x4_sf_word(scale_n0, scale_k)];
-  pkg.sb1 = sfb_base[detail::sm120_cutlass_128x4_sf_word(scale_n1, scale_k)];
+  pkg.sa0 = sfa_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_m0,
+                                                                    scale_k)];
+  pkg.sa1 = sfa_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_m1,
+                                                                    scale_k)];
+  pkg.sb0 = sfb_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_n0,
+                                                                    scale_k)];
+  pkg.sb1 = sfb_base[detail::sm120_blockscaled_chunk_kmajor_sf_word(scale_n1,
+                                                                    scale_k)];
 #endif
 
   detail::sm120_ldmatrix_x4_blockscaled_operand(
