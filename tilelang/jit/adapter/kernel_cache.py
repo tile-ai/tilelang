@@ -7,6 +7,15 @@ from tilelang.jit import JITKernel
 class TVMFFIKernelCache(KernelCache):
     kernel_lib_path = "executable.so"
 
+    @staticmethod
+    def _get_export_kwargs(kernel: JITKernel) -> dict:
+        artifact = getattr(kernel, "artifact", None)
+        target_host = getattr(artifact, "target_host", None)
+        target_host_kind = getattr(getattr(target_host, "kind", None), "name", None)
+        if target_host_kind == "c":
+            return KernelCache._get_source_compile_args()
+        return KernelCache._get_export_link_args()
+
     def _save_wrapper_kernel_code_to_disk(self, kernel: JITKernel, cache_path: str, verbose: bool = False):
         host_kernel_path = os.path.join(cache_path, self.host_kernel_path)
         if verbose:
@@ -18,4 +27,4 @@ class TVMFFIKernelCache(KernelCache):
         executable = kernel.adapter.get_exportable_executable()
         if verbose:
             self.logger.debug(f"Saving kernel executable to file: {executable}")
-        KernelCache._safe_write_executable(executable, kernel_lib_path, target=kernel.target)
+        KernelCache._safe_write_executable(executable, kernel_lib_path, export_kwargs=self._get_export_kwargs(kernel))

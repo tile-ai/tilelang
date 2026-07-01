@@ -56,7 +56,7 @@ class KernelCache:
 
     @staticmethod
     @functools.cache
-    def _get_compile_args() -> dict:
+    def _get_source_compile_args() -> dict:
         if sys.platform == "win32":
             from tilelang.contrib.msvc import create_shared as msvc_create_shared
 
@@ -68,6 +68,16 @@ class KernelCache:
         from torch.utils import cpp_extension
 
         return {"options": ["-x", "objective-c++", "-g", "-std=gnu++17"] + ["-I" + i for i in cpp_extension.include_paths()]}
+
+    @staticmethod
+    @functools.cache
+    def _get_export_link_args() -> dict:
+        if sys.platform == "win32":
+            from tilelang.contrib.msvc import create_shared as msvc_create_shared
+
+            return {"fcompile": msvc_create_shared}
+
+        return {}
 
     @staticmethod
     @functools.cache
@@ -456,19 +466,10 @@ class KernelCache:
         # Use atomic POSIX replace, so other processes cannot see a partial write
         os.replace(temp_path, path)
 
-    @classmethod
-    def _safe_write_executable(cls, executable: Executable, path: str, target: Target = None):
+    @staticmethod
+    def _safe_write_executable(executable: Executable, path: str, export_kwargs: dict | None = None):
         temp_path = os.path.join(env.TILELANG_TMP_DIR, f"{os.getpid()}_{uuid.uuid4()}.so")
-        compile_args = cls._get_compile_args()
-        # LLVM modules export as binary .o objects that only need linking.
-        # Drop source-compilation options (e.g. -x objective-c++) that would
-        # make the compiler misinterpret .o as source text. Copy first because
-        # _get_compile_args is @functools.cache'd (returns a shared dict).
-        is_llvm = target is not None and target.kind.name == "llvm"
-        if sys.platform == "darwin" and is_llvm:
-            compile_args = dict(compile_args)
-            compile_args.pop("options", None)
-        executable.export_library(temp_path, **compile_args)
+        executable.export_library(temp_path, **(export_kwargs or {}))
         os.replace(temp_path, path)
 
     def _save_kernel_to_disk(self, key: str, kernel: JITKernel, func: Callable = None, verbose: bool = False):

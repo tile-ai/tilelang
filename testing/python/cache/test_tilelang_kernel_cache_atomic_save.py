@@ -1,7 +1,6 @@
 import builtins
 import errno
 from pathlib import Path
-import sys
 from types import SimpleNamespace
 
 import cloudpickle
@@ -11,6 +10,7 @@ import tilelang.cache.kernel_cache as kernel_cache_mod
 from tilelang.cache.kernel_cache import KernelCache
 from tilelang.env import env
 from tilelang.jit.adapter.base import CachedTextSource
+from tilelang.jit.adapter.kernel_cache import TVMFFIKernelCache
 from tilelang.jit.adapter.nvrtc.kernel_cache import NVRTCKernelCache
 
 
@@ -347,14 +347,7 @@ def test_nvrtc_kernel_cache_rewrites_dir_missing_launcher(cache_dirs, tmp_path):
     assert not (cache_path / "legacy.txt").exists()
 
 
-def test_safe_write_executable_skips_source_options_for_llvm_target(cache_dirs, tmp_path):
-    """Regression: source-compilation options (e.g. -x objective-c++) must not be
-    passed when exporting LLVM modules, because they export as binary .o objects
-    that only need linking.  Other compile args must be preserved, and the
-    @functools.cache'd _get_compile_args dict must not be mutated.
-    """
-
-    cache = KernelCache()
+def test_safe_write_executable_uses_explicit_export_kwargs(cache_dirs, tmp_path):
     captured = []
 
     class FakeExecutable:
@@ -363,14 +356,51 @@ def test_safe_write_executable_skips_source_options_for_llvm_target(cache_dirs, 
             with open(path, "wb") as f:
                 f.write(b"fake-so")
 
-    executable = FakeExecutable()
-    llvm_target = SimpleNamespace(kind=SimpleNamespace(name="llvm"))
-    c_target = SimpleNamespace(kind=SimpleNamespace(name="c"))
-    is_darwin = sys.platform == "darwin"
+    export_kwargs = {"options": ["-Wl,-dead_strip"], "custom": "keep"}
 
-    cache._safe_write_executable(executable, str(tmp_path / "llvm.so"), target=llvm_target)
-    assert not is_darwin or "options" not in captured[-1], "Source-compilation options must be dropped for LLVM module export"
-    captured.clear()
+    KernelCache._safe_write_executable(
+        FakeExecutable(),
+        str(tmp_path / "explicit.so"),
+        export_kwargs=export_kwargs,
+    )
 
-    cache._safe_write_executable(executable, str(tmp_path / "c.so"), target=c_target)
-    assert not is_darwin or "options" in captured[-1], "Source-compilation options must be preserved for non-LLVM module export"
+    assert captured == [export_kwargs]
+
+
+def test_tvm_ffi_kernel_cache_selects_export_kwargs_from_host_target(cache_dirs, tmp_path, monkeypatch):
+    """Regression: device target may be cuda while the exported host module is LLVM.
+    Source-compilation options must not be passed to that LLVM object-link step.
+    """
+
+    source_compile_args = {"options": ["-x", "objective-c++"], "source": "keep"}
+    export_link_args = {"link": "keep"}
+    captured = []
+
+    monkeypatch.setattr(KernelCache, "_get_source_compile_args", staticmethod(lambda: source_compile_args))
+    monkeypatch.setattr(KernelCache, "_get_export_link_args", staticmethod(lambda: export_link_args))
+
+    class FakeExecutable:
+        def export_library(self, path, **kwargs):
+            captured.append(dict(kwargs))
+            with open(path, "wb") as f:
+                f.write(b"fake-so")
+
+    class FakeAdapter:
+        def get_exportable_executable(self):
+            return FakeExecutable()
+
+    def make_kernel(target_host_kind: str):
+        return SimpleNamespace(
+            adapter=FakeAdapter(),
+            target=SimpleNamespace(kind=SimpleNamespace(name="cuda")),
+            artifact=SimpleNamespace(target_host=SimpleNamespace(kind=SimpleNamespace(name=target_host_kind))),
+        )
+
+    cache = TVMFFIKernelCache()
+
+    cache._save_so_cubin_to_disk(make_kernel("llvm"), str(tmp_path))
+    assert captured[-1] == export_link_args
+    assert "options" not in captured[-1]
+
+    cache._save_so_cubin_to_disk(make_kernel("c"), str(tmp_path))
+    assert captured[-1] == source_compile_args
