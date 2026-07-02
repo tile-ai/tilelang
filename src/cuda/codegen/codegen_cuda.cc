@@ -1536,6 +1536,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   bool cast_sat = get_bool_anno("sat", true);
   Optional<PrimExpr> cast_rbits = get_expr_anno("rbits");
 
+  if (from_ty.is_scalar() &&
+      (target_ty.is_bfloat16() || target_ty.is_float16()) &&
+      (from_ty.is_int() || from_ty.is_uint()) && cast_round.empty()) {
+    os << "((";
+    this->PrintType(target_ty, os);
+    os << ")(float)(" << PrintExpr(op->value) << "))";
+    return;
+  }
+
   // Emit simple C-style type conversion for scalar casts without custom
   // rounding.
   if (from_ty.is_scalar() && cast_round.empty())
