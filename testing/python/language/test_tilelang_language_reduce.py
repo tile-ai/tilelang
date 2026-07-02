@@ -339,6 +339,58 @@ def test_reduce_absmax_bf16_noncontiguous_packed_layout_regression():
     torch.testing.assert_close(B, ref, atol=0, rtol=0)
 
 
+@pytest.mark.parametrize("N", [96, 160, 257])
+@tilelang.testing.requires_cuda
+def test_reduce_sum_ragged_width_uses_full_thread_allreduce(N):
+    threads = 128
+
+    @T.prim_func
+    def kernel(A: T.Tensor((1, N), T.float32), B: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=threads):
+            src = T.alloc_fragment((1, N), T.float32)
+            dst = T.alloc_fragment((1,), T.float32)
+            for i, j in T.Parallel(1, N):
+                src[i, j] = A[i, j]
+            T.reduce_sum(src, dst, dim=1)
+            for i in T.Parallel(1):
+                B[i] = dst[i]
+
+    compiled = tilelang.compile(kernel, target="cuda")
+    source = compiled.get_kernel_source()
+    assert "tl::AllReduce<tl::SumOp, 128, 1, 0" in source
+
+    A = torch.arange(N, dtype=torch.float32, device="cuda").reshape(1, N)
+    B = torch.empty(1, dtype=torch.float32, device="cuda")
+    compiled(A, B)
+    torch.testing.assert_close(B, A.sum(dim=1), atol=0, rtol=0)
+
+
+@tilelang.testing.requires_cuda
+def test_reduce_sum_grouped_straddle_overcount_regression():
+    tile_x, k, gran_k, threads = 2, 192, 32, 128
+    groups = k // gran_k
+
+    @T.prim_func
+    def kernel(A: T.Tensor((tile_x, k), T.float32), B: T.Tensor((tile_x, groups), T.float32)):
+        with T.Kernel(1, threads=threads):
+            src = T.alloc_fragment((tile_x, k), T.float32)
+            dst = T.alloc_fragment((tile_x, groups), T.float32)
+            for i, j in T.Parallel(tile_x, k):
+                src[i, j] = A[i, j]
+            reshaped = T.reshape(src, (tile_x, groups, gran_k))
+            T.reduce_sum(reshaped, dst, dim=2)
+            for i, g in T.Parallel(tile_x, groups):
+                B[i, g] = dst[i, g]
+
+    compiled = tilelang.compile(kernel, target="cuda")
+    torch.manual_seed(0)
+    A = torch.randn(tile_x, k, dtype=torch.float32, device="cuda")
+    B = torch.empty(tile_x, groups, dtype=torch.float32, device="cuda")
+    compiled(A, B)
+    ref = A.reshape(tile_x, groups, gran_k).sum(dim=2)
+    torch.testing.assert_close(B, ref, atol=1e-3, rtol=1e-3)
+
+
 # ---------------------------------------------------------------------------
 # nan_propagate tests – packed (vsize=2) path for bf16/fp16
 # ---------------------------------------------------------------------------

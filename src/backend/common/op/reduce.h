@@ -73,6 +73,99 @@ inline Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
       ->BindThreadRange(src_layout->ThreadRange());
 }
 
+inline bool IsPowerOfTwo(int64_t value) {
+  return value > 0 && (value & (value - 1)) == 0;
+}
+
+inline bool FragmentNeedsPaddingGuard(const Fragment &layout,
+                                      const Range &thread_bounds,
+                                      arith::Analyzer *analyzer) {
+  const int64_t *rep = as_const_int(layout->ReplicateExtent());
+  const int64_t *threads = as_const_int(thread_bounds->extent);
+  if (rep && threads) {
+    int64_t logical = *rep;
+    int64_t physical = *threads;
+    bool all_static = true;
+    for (const auto &dim : layout->InputShape()) {
+      const int64_t *extent = as_const_int(dim);
+      if (!extent) {
+        all_static = false;
+        break;
+      }
+      logical *= *extent;
+    }
+    for (const auto &dim : layout->OutputShape()) {
+      const int64_t *extent = as_const_int(dim);
+      if (!extent) {
+        all_static = false;
+        break;
+      }
+      physical *= *extent;
+    }
+    if (all_static) {
+      return logical < physical;
+    }
+  }
+
+  PrimExpr logical = layout->ReplicateExtent();
+  for (const auto &dim : layout->InputShape()) {
+    logical *= dim;
+  }
+
+  PrimExpr physical = thread_bounds->extent;
+  for (const auto &dim : layout->OutputShape()) {
+    physical *= dim;
+  }
+  return analyzer->CanProve(logical < physical);
+}
+
+struct ReducePlan {
+  Fragment logical_layout;
+  Fragment execution_layout;
+  bool full_thread_allreduce{false};
+  bool guard_source_load{false};
+};
+
+inline ReducePlan ComputeReducePlan(const Fragment &src_layout,
+                                    const Fragment &dst_layout, int dim,
+                                    const Range &thread_bounds,
+                                    arith::Analyzer *analyzer) {
+  ReducePlan plan;
+  plan.logical_layout = ComputeReducerLayout(src_layout, dim);
+  plan.execution_layout = plan.logical_layout;
+  plan.guard_source_load =
+      FragmentNeedsPaddingGuard(src_layout, thread_bounds, analyzer);
+
+  if (!plan.logical_layout->IsEqual(dst_layout.get()) &&
+      dst_layout->IsCompletedReplicated()) {
+    const int64_t *dst_rep = as_const_int(dst_layout->ReplicateExtent());
+    const int64_t *thread_extent = as_const_int(thread_bounds->extent);
+    ICHECK(dst_rep && thread_extent && *dst_rep == *thread_extent &&
+           IsPowerOfTwo(*dst_rep))
+        << "ReduceOp ragged full-thread reduction requires destination "
+           "replication to be a power-of-two thread extent, but got "
+        << "dst_layout=" << dst_layout
+        << " and thread_bounds=" << thread_bounds;
+    ICHECK_EQ(dst_layout->InputDim(), plan.logical_layout->InputDim())
+        << "Inconsistent layouts between src and dst in ReduceOp: "
+        << "dst_layout=" << dst_layout << "red_layout=" << plan.logical_layout;
+    plan.execution_layout = dst_layout;
+    plan.full_thread_allreduce = true;
+    plan.guard_source_load = true;
+    return plan;
+  }
+
+  if (!plan.logical_layout->IsEqual(dst_layout.get())) {
+    ICHECK(ProveFragmentContains(plan.logical_layout, dst_layout,
+                                 InputPlaceholders(dst_layout->InputDim()),
+                                 InputPlaceholders(dst_layout->InputDim()),
+                                 *analyzer))
+        << "Inconsistent layouts between src and dst in ReduceOp: "
+        << "dst_layout=" << dst_layout << "red_layout=" << plan.logical_layout;
+  }
+  return plan;
+}
+
 inline int64_t SignedMin(int bits) {
   if (bits >= 64) {
     return std::numeric_limits<int64_t>::min();
@@ -322,7 +415,10 @@ template <typename Impl> struct ReduceLowerer {
       auto dst_buffer = get_buffer(op.dst);
       auto src_layout = T.layout_map[op.src].as<Fragment>().value();
       auto dst_layout = T.layout_map[op.dst].as<Fragment>().value();
-      auto red_layout = reduce::ComputeReducerLayout(src_layout, op.dim);
+      auto reduce_plan = reduce::ComputeReducePlan(
+          src_layout, dst_layout, op.dim, T.thread_bounds, analyzer);
+      auto red_layout = reduce_plan.logical_layout;
+      auto reduce_exec_layout = reduce_plan.execution_layout;
       auto src_dim = src_layout->InputDim();
       auto dst_dim = dst_layout->InputDim();
 
@@ -388,10 +484,6 @@ template <typename Impl> struct ReduceLowerer {
                               red_layout->ReplicateExtent())) {
         need_duplicate = true;
       }
-      ICHECK(!analyzer->CanProve(dst_layout->ReplicateExtent() >
-                                 red_layout->ReplicateExtent()))
-          << "Inconsistent layouts between src and dst in ReduceOp: "
-          << "dst_layout=" << dst_layout << "red_layout=" << red_layout;
 
       if (need_duplicate) {
         clear_buffer = decl_buffer(red_layout->OutputShape(), dst_buffer->dtype,
@@ -401,11 +493,16 @@ template <typename Impl> struct ReduceLowerer {
 
       Array<PrimExpr> src_indice_compressed;
       Array<IterVar> src_var_compressed;
-      for (size_t i = 0; i < src_layout->OutputDim(); ++i) {
-        auto [expr, var] = CompressIterator(src_indices[i], src_vars,
-                                            src_vars[op.dim]->var, analyzer);
-        src_indice_compressed.push_back(expr);
-        src_var_compressed.push_back(var);
+      if (reduce_plan.guard_source_load) {
+        src_indice_compressed = src_indices;
+        src_var_compressed.push_back(src_vars[op.dim]);
+      } else {
+        for (size_t i = 0; i < src_layout->OutputDim(); ++i) {
+          auto [expr, var] = CompressIterator(src_indices[i], src_vars,
+                                              src_vars[op.dim]->var, analyzer);
+          src_indice_compressed.push_back(expr);
+          src_var_compressed.push_back(var);
+        }
       }
 
       bool can_pack = false;
@@ -416,7 +513,8 @@ template <typename Impl> struct ReduceLowerer {
       {
         int vsize =
             Impl::GetPreferedVectorizedSize(clear_buffer->dtype, T.target);
-        if (vsize > 1 && !src_var_compressed.empty()) {
+        if (vsize > 1 && !src_var_compressed.empty() &&
+            !reduce_plan.guard_source_load) {
           auto *ext = src_var_compressed.back()->dom->extent.as<IntImmNode>();
           if (ext && ext->value >= vsize && ext->value % vsize == 0 &&
               reduce::MakeCodegenReducer(op, vsize).has_value() &&
@@ -493,6 +591,13 @@ template <typename Impl> struct ReduceLowerer {
         }
       }
 
+      auto make_source_valid_predicate = [&]() -> PrimExpr {
+        PrimExpr expected_thread = src_layout->ForwardThread(
+            src_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }),
+            std::nullopt);
+        return analyzer->Simplify(T.thread_var == expected_thread);
+      };
+
       if (!can_pack) {
         if (require_init ||
             (need_duplicate &&
@@ -501,13 +606,18 @@ template <typename Impl> struct ReduceLowerer {
                                       red_indices));
         }
 
+        PrimExpr src_value = BufferLoad(src_buffer, src_indice_compressed);
+        if (reduce_plan.guard_source_load) {
+          src_value = if_then_else(make_source_valid_predicate(), src_value,
+                                   reduce::MakeInitValue(op));
+        }
         Stmt reduce_local = BufferStore(
             clear_buffer,
             reduce::MakeReduce(op, 1, BufferLoad(clear_buffer, red_indices),
-                               BufferLoad(src_buffer, src_indice_compressed)),
+                               src_value),
             red_indices);
 
-        for (int i = static_cast<int>(src_layout->OutputDim()) - 1; i >= 0;
+        for (int i = static_cast<int>(src_var_compressed.size()) - 1; i >= 0;
              --i) {
           reduce_local = For(
               src_var_compressed[i]->var, 0, src_var_compressed[i]->dom->extent,
@@ -546,7 +656,7 @@ template <typename Impl> struct ReduceLowerer {
                      body);
         }
         body = PartitionLoop(Downcast<For>(body), T.thread_var, analyzer,
-                             red_layout);
+                             reduce_exec_layout);
         body = PragmaUnrollLoop(Downcast<For>(body));
         return body;
       };
@@ -768,36 +878,59 @@ template <typename Impl> struct ReduceLowerer {
         return body;
       }
 
-      for (const auto &iter_split : iter_sum->args) {
-        auto mark = iter_split->source->source.template as<Var>();
-        if (!mark) {
-          continue;
+      if (reduce_plan.full_thread_allreduce) {
+        const int64_t *rep_extent =
+            as_const_int(reduce_exec_layout->ReplicateExtent());
+        ICHECK(rep_extent);
+        int reducing_threads = static_cast<int>(*rep_extent);
+        auto thread_offset = T.thread_bounds->min;
+        std::string allreduce = Impl::MakeScalarAllReduce(
+            reduce::MakeCodegenReducer(op).value(), reducing_threads, 1,
+            thread_offset, T.thread_bounds->extent, T.target);
+        Array<PrimExpr> thread_reduce_args = {
+            StringImm(allreduce), BufferLoad(clear_buffer, red_indices)};
+        if (reducing_threads > 32) {
+          int workspace_size =
+              static_cast<int>(*as_const_int(T.thread_bounds->extent));
+          PrimExpr workspace =
+              T.AddWorkspace(workspace_size, clear_buffer->dtype);
+          thread_reduce_args.push_back(workspace);
         }
-        if (mark.value().same_as(src_vars[op.dim]->var)) {
-          auto scale = as_const_int(iter_split->scale);
-          auto extent = as_const_int(iter_split->extent);
-          ICHECK(scale != nullptr && extent != nullptr);
-          if (*extent == 1) {
+        auto call = Call(clear_buffer->dtype, builtin::call_extern(),
+                         thread_reduce_args);
+        stmts.push_back(BufferStore(clear_buffer, call, red_indices));
+      } else {
+        for (const auto &iter_split : iter_sum->args) {
+          auto mark = iter_split->source->source.template as<Var>();
+          if (!mark) {
             continue;
           }
+          if (mark.value().same_as(src_vars[op.dim]->var)) {
+            auto scale = as_const_int(iter_split->scale);
+            auto extent = as_const_int(iter_split->extent);
+            ICHECK(scale != nullptr && extent != nullptr);
+            if (*extent == 1) {
+              continue;
+            }
 
-          int reducing_threads = (*extent) * (*scale);
-          auto thread_offset = T.thread_bounds->min;
-          std::string allreduce = Impl::MakeScalarAllReduce(
-              reduce::MakeCodegenReducer(op).value(), reducing_threads, *scale,
-              thread_offset, T.thread_bounds->extent, T.target);
-          Array<PrimExpr> thread_reduce_args = {
-              StringImm(allreduce), BufferLoad(clear_buffer, red_indices)};
-          if (reducing_threads > 32) {
-            int workspace_size =
-                static_cast<int>(*as_const_int(T.thread_bounds->extent));
-            PrimExpr workspace =
-                T.AddWorkspace(workspace_size, clear_buffer->dtype);
-            thread_reduce_args.push_back(workspace);
+            int reducing_threads = (*extent) * (*scale);
+            auto thread_offset = T.thread_bounds->min;
+            std::string allreduce = Impl::MakeScalarAllReduce(
+                reduce::MakeCodegenReducer(op).value(), reducing_threads,
+                *scale, thread_offset, T.thread_bounds->extent, T.target);
+            Array<PrimExpr> thread_reduce_args = {
+                StringImm(allreduce), BufferLoad(clear_buffer, red_indices)};
+            if (reducing_threads > 32) {
+              int workspace_size =
+                  static_cast<int>(*as_const_int(T.thread_bounds->extent));
+              PrimExpr workspace =
+                  T.AddWorkspace(workspace_size, clear_buffer->dtype);
+              thread_reduce_args.push_back(workspace);
+            }
+            auto call = Call(clear_buffer->dtype, builtin::call_extern(),
+                             thread_reduce_args);
+            stmts.push_back(BufferStore(clear_buffer, call, red_indices));
           }
-          auto call = Call(clear_buffer->dtype, builtin::call_extern(),
-                           thread_reduce_args);
-          stmts.push_back(BufferStore(clear_buffer, call, red_indices));
         }
       }
 
@@ -834,7 +967,7 @@ template <typename Impl> struct ReduceLowerer {
 
       if (dst_layout->InputDim() > 0) {
         body = PartitionLoop(Downcast<For>(body), T.thread_var, analyzer,
-                             red_layout);
+                             reduce_exec_layout);
         body = PragmaUnrollLoop(Downcast<For>(body));
       } else {
         auto guard = (T.thread_var == T.thread_bounds->min);

@@ -624,7 +624,7 @@ LayoutNode::InverseWithLevel(bool require_padding_guard) const {
   }
   arith::IterMapResult res =
       arith::DetectIterMap(forward_index_, getVarMap(), 1, level, &analyzer);
-  if (!res->errors.empty()) {
+  if (!res->errors.empty() && !require_padding_guard) {
     std::ostringstream msg;
     msg << "Layout " << DebugOutput() << " has errors: " << res->errors;
     throw NormalizeIterException(msg.str());

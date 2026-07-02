@@ -88,7 +88,8 @@ bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
                            Array<PrimExpr> small_frag_indices,
                            Array<PrimExpr> large_frag_indices,
                            arith::Analyzer &analyzer,
-                           bool check_forward_index = false);
+                           bool check_forward_index = false,
+                           bool require_padding_guard = false);
 
 } // namespace tl
 } // namespace tvm

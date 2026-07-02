@@ -381,7 +381,8 @@ Map<Var, Range> ToVMap(const Array<IterVar> &ivs) {
 bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
                            Array<PrimExpr> small_frag_indices,
                            Array<PrimExpr> large_frag_indices,
-                           Analyzer &analyzer, bool check_forward_index) {
+                           Analyzer &analyzer, bool check_forward_index,
+                           bool require_padding_guard) {
   // When check_forward_index is true, verify that the physical indices
   // (forward index) of both fragments are equal. This is required when
   // validating loop layout against buffer fragment, as code generation
@@ -420,7 +421,8 @@ bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
   // Add small_frag's thread to the large fragment's thread info.
   large_frag_physical_and_thread.push_back(thread);
   // Get the inverse of the large fragment.
-  auto inv_large_frag = large_frag->Inverse();
+  auto inv_large_frag =
+      large_frag->InverseWithLevel(require_padding_guard).first;
   // Compute logical index and replicate index using inverse layout.
   auto inv_large_frag_logical_and_rep =
       inv_large_frag->Forward(large_frag_physical_and_thread);

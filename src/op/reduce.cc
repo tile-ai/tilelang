@@ -4,6 +4,7 @@
  */
 
 #include "reduce.h"
+#include "arith/int_operator.h"
 #include "support/check.h"
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ir/cast.h>
@@ -151,6 +152,62 @@ static Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
   return reducer_layout;
 }
 
+static bool FragmentNeedsPaddingGuard(const Fragment &layout,
+                                      const Range &thread_bounds,
+                                      arith::Analyzer *analyzer) {
+  PrimExpr logical = layout->ReplicateExtent();
+  for (const auto &dim : layout->InputShape()) {
+    logical *= dim;
+  }
+
+  PrimExpr physical = thread_bounds->extent;
+  for (const auto &dim : layout->OutputShape()) {
+    physical *= dim;
+  }
+  return analyzer->CanProve(logical < physical);
+}
+
+static Fragment ComputeRaggedReduceSourceLayout(const Fragment &dst_layout,
+                                                const Buffer &src, int dim,
+                                                const Range &thread_bounds,
+                                                arith::Analyzer *analyzer) {
+  ICHECK(dst_layout->IsCompletedReplicated())
+      << "Ragged reduction source inference requires a fully replicated "
+         "destination layout, but got "
+      << dst_layout;
+  ICHECK_GE(dim, 0);
+  ICHECK_LT(dim, static_cast<int>(src->shape.size()));
+
+  Array<PrimExpr> src_coords;
+  Array<PrimExpr> dst_coords;
+  src_coords.reserve(src->shape.size());
+  dst_coords.reserve(src->shape.size() - 1);
+  for (int i = 0; i < static_cast<int>(src->shape.size()); ++i) {
+    PrimExpr coord = InputPlaceholder(i);
+    src_coords.push_back(coord);
+    if (i != dim) {
+      dst_coords.push_back(coord);
+    }
+  }
+
+  ICHECK_EQ(dst_coords.size(), dst_layout->InputDim());
+  Array<PrimExpr> forward_index = dst_layout->Forward(dst_coords);
+  PrimExpr reduce_coord = src_coords[dim];
+  PrimExpr thread_extent = thread_bounds->extent;
+  const int64_t *reduce_extent = as_const_int(src->shape[dim]);
+  const int64_t *thread_extent_const = as_const_int(thread_bounds->extent);
+  bool needs_chunk = !reduce_extent || !thread_extent_const ||
+                     *reduce_extent > *thread_extent_const;
+  if (needs_chunk) {
+    forward_index.push_back(indexdiv(reduce_coord, thread_extent));
+  }
+  PrimExpr forward_thread = indexmod(reduce_coord, thread_extent);
+  Array<PrimExpr> input_shape = src->shape;
+  return Fragment(input_shape, forward_index, forward_thread, Integer(1),
+                  std::nullopt)
+      ->BindThreadRange(thread_bounds);
+}
+
 /**
  * @brief Lower the Reduce operator to a TIR statement.
  *
@@ -224,6 +281,18 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &T,
           << "You may need to use a shared memory to transform the "
              "layout";
       throw LayoutConflictException(oss.str());
+    }
+  }
+
+  if (IsFragmentBuffer(src) && IsFragmentBuffer(dst) &&
+      !T.layout_map.count(src) && T.layout_map.count(dst)) {
+    auto dst_layout = T.layout_map.Get(dst).value().as<Fragment>().value();
+    if (dst_layout->IsCompletedReplicated()) {
+      auto src_layout = ComputeRaggedReduceSourceLayout(
+          dst_layout, src, this->dim, T.thread_bounds, T.analyzer);
+      if (FragmentNeedsPaddingGuard(src_layout, T.thread_bounds, T.analyzer)) {
+        return {{src, src_layout}};
+      }
     }
   }
   return {};

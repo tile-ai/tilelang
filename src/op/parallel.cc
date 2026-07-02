@@ -116,6 +116,48 @@ int SelectMinPaddingVectorSize(int max_vector_size, PrimExpr loop_total_size,
   return best_vector_size;
 }
 
+bool FragmentNeedsPaddingGuard(const Fragment &layout,
+                               const Range &thread_bounds,
+                               arith::Analyzer *analyzer) {
+  const int64_t *rep = as_const_int(layout->ReplicateExtent());
+  const int64_t *threads = as_const_int(thread_bounds->extent);
+  if (rep && threads) {
+    int64_t logical = *rep;
+    int64_t physical = *threads;
+    bool all_static = true;
+    for (const auto &dim : layout->InputShape()) {
+      const int64_t *extent = as_const_int(dim);
+      if (!extent) {
+        all_static = false;
+        break;
+      }
+      logical *= *extent;
+    }
+    for (const auto &dim : layout->OutputShape()) {
+      const int64_t *extent = as_const_int(dim);
+      if (!extent) {
+        all_static = false;
+        break;
+      }
+      physical *= *extent;
+    }
+    if (all_static) {
+      return logical < physical;
+    }
+  }
+
+  PrimExpr logical = layout->ReplicateExtent();
+  for (const auto &dim : layout->InputShape()) {
+    logical *= dim;
+  }
+
+  PrimExpr physical = thread_bounds->extent;
+  for (const auto &dim : layout->OutputShape()) {
+    physical *= dim;
+  }
+  return analyzer->CanProve(logical < physical);
+}
+
 } // anonymous namespace
 
 /**
@@ -481,6 +523,15 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
   } else if (!loop_layout_.defined() && source_buffer.defined() &&
              (allow_layout_propgate || source_buffer_is_write)) {
     loop_layout_ = ComputeLoopLayoutFromBuffer(source_buffer, T);
+    if (source_buffer_is_write) {
+      loop_layout_requires_padding_guard_ = true;
+    }
+    if (auto source_layout = T.layout_map[source_buffer].as<Fragment>();
+        source_layout.has_value() &&
+        FragmentNeedsPaddingGuard(source_layout.value(), T.thread_bounds,
+                                  &analyzer_)) {
+      loop_layout_requires_padding_guard_ = true;
+    }
   } else if (!loop_layout_.defined() && level == InferLevel::kFree) {
     // For free layout inference
     // In free inference, try two mechanisms and prefer the one that
@@ -522,12 +573,16 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     return {};
   }
 
-  // Non-fragment SIMT loops may deliberately over-cover a ragged iteration
-  // space; PartitionLoop emits guards for the padded points. Fragment/reducer
-  // loops stay strict because padding would change per-thread ownership.
+  if (!loop_layout_requires_padding_guard_ &&
+      FragmentNeedsPaddingGuard(loop_layout_, T.thread_bounds, &analyzer_)) {
+    loop_layout_requires_padding_guard_ = true;
+  }
+
+  // Some loop layouts may deliberately over-cover a ragged iteration space;
+  // PartitionLoop emits guards for the padded points.
   auto injective_res =
       loop_layout_->DetectInjective(loop_layout_requires_padding_guard_);
-  if (!injective_res->errors.empty()) {
+  if (!injective_res->errors.empty() && !loop_layout_requires_padding_guard_) {
     std::ostringstream oss;
     oss << "Loop layout is not injective: " << loop_layout_->DebugOutput()
         << '\n'
@@ -655,11 +710,15 @@ bool ParallelOpNode::ValidateCandidateAgainstFragments(
         info && info.value()->rep == ReducerRepType::ALL)
       continue;
     auto fragment = T.layout_map[buffer].as<Fragment>().value();
+    bool require_padding_guard =
+        FragmentNeedsPaddingGuard(candidate, T.thread_bounds, &analyzer_) ||
+        FragmentNeedsPaddingGuard(fragment, T.thread_bounds, &analyzer_);
     std::ostringstream oss;
     bool success = true;
     if (access.is_read &&
         !ProveFragmentContains(candidate, fragment, vars, access.indices,
-                               analyzer_, check_forward_index)) {
+                               analyzer_, check_forward_index,
+                               require_padding_guard)) {
       if (throw_on_error) {
         oss << "Layout infer conflict between " << buffer << " and "
             << source_buffer << " in T.Parallel loop:" << '\n'
@@ -673,9 +732,11 @@ bool ParallelOpNode::ValidateCandidateAgainstFragments(
     // logical fragment elements under the buffer layout.
     if (access.is_write &&
         (!ProveFragmentContains(fragment, candidate, access.indices, vars,
-                                analyzer_, check_forward_index) ||
+                                analyzer_, check_forward_index,
+                                require_padding_guard) ||
          !ProveFragmentContains(candidate, fragment, vars, access.indices,
-                                analyzer_, check_forward_index))) {
+                                analyzer_, check_forward_index,
+                                require_padding_guard))) {
       if (throw_on_error) {
         oss << "Layout infer conflict between " << buffer << " and "
             << source_buffer << " in T.Parallel loop:" << '\n'
@@ -723,7 +784,9 @@ ParallelOpNode::ComputeLoopLayoutFromBuffer(const Buffer &buffer,
     });
 
     try {
-      result = Fragment(loop_vars_, {}, loop_var_to_thread, rep_iter)
+      Array<PrimExpr> forward_index =
+          src_layout->Forward(GetAccessInfo(buffer).indices);
+      result = Fragment(loop_vars_, forward_index, loop_var_to_thread, rep_iter)
                    ->BindThreadRange(T.thread_bounds);
     } catch (const Error &err) {
       std::ostringstream msg;
