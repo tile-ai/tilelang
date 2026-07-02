@@ -187,8 +187,11 @@ def test_cuda_compile_callback_uses_fatbin_for_multiple_target_code(monkeypatch)
     import importlib
 
     from tilelang.backend.target import determine_target
+    from tilelang.env import env
 
     lower = importlib.import_module("tilelang.engine.lower")
+
+    monkeypatch.setattr(env, "is_cache_enabled", lambda: False)
 
     captured = {}
 
@@ -212,7 +215,7 @@ def test_jit_compile_reports_timeout_for_hanging_nvcc(monkeypatch, tmp_path, cap
     from tilelang.env import env
 
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(tmp_path / "cache"))
-    monkeypatch.setenv("TILELANG_JIT_DIAGNOSTICS", "1")
+    monkeypatch.setattr(env, "TILELANG_JIT_DIAGNOSTICS", "1")
     monkeypatch.setenv("TILELANG_COMPILE_TIMEOUT_SECONDS", "0.25")
     monkeypatch.setattr(nvcc.subprocess, "Popen", lambda *args, **kwargs: _HangingProcess())
 
@@ -274,7 +277,7 @@ def test_kernel_cache_miss_compile_logs_context(monkeypatch, tmp_path, caplog, c
     tmp_dir.mkdir()
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(cache_dir))
     monkeypatch.setattr(env, "TILELANG_TMP_DIR", str(tmp_dir))
-    monkeypatch.setenv("TILELANG_JIT_DIAGNOSTICS", "1")
+    monkeypatch.setattr(env, "TILELANG_JIT_DIAGNOSTICS", "1")
 
     class _FakeKernel:
         params = []
