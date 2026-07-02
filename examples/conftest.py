@@ -4,6 +4,17 @@ import pytest
 
 os.environ["PYTHONHASHSEED"] = "0"
 
+
+def _configure_torch_extensions_dir():
+    cache_dir = os.environ.get("TILELANG_CACHE_DIR", os.path.expanduser("~/.tilelang/cache"))
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+    path = os.path.join(cache_dir, "torch_extension", f"{worker}-{os.getpid()}")
+    os.makedirs(path, exist_ok=True)
+    os.environ["TORCH_EXTENSIONS_DIR"] = path
+
+
+_configure_torch_extensions_dir()
+
 random.seed(0)
 
 try:
