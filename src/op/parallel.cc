@@ -766,7 +766,7 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
   auto maybe_remapped_root_ = IfBufferRemapLoopGenerator::run(
       root_, layout_args.buffer_remap, layout_args.layout_map);
   int vector_size = GetVectorizeSize(maybe_remapped_root_, layout_args.analyzer,
-                                     layout_args.layout_map);
+                                     layout_args.layout_map, reducer_info_map_);
   DLOG(INFO) << "[PlanLoopPartition] vector_size = " << vector_size << '\n';
 
   PrimExpr loop_total_size = 1;
