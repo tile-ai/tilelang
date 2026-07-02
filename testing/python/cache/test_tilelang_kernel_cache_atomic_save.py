@@ -1,6 +1,7 @@
 import builtins
 import errno
 from pathlib import Path
+from types import SimpleNamespace
 
 import cloudpickle
 import pytest
@@ -9,6 +10,7 @@ import tilelang.cache.kernel_cache as kernel_cache_mod
 from tilelang.cache.kernel_cache import KernelCache
 from tilelang.env import env
 from tilelang.jit.adapter.base import CachedTextSource
+from tilelang.jit.adapter.kernel_cache import TVMFFIKernelCache
 from tilelang.jit.adapter.nvrtc.kernel_cache import NVRTCKernelCache
 
 
@@ -343,3 +345,62 @@ def test_nvrtc_kernel_cache_rewrites_dir_missing_launcher(cache_dirs, tmp_path):
 
     assert (cache_path / cache.kernel_py_path).exists()
     assert not (cache_path / "legacy.txt").exists()
+
+
+def test_safe_write_executable_uses_explicit_export_kwargs(cache_dirs, tmp_path):
+    captured = []
+
+    class FakeExecutable:
+        def export_library(self, path, **kwargs):
+            captured.append(dict(kwargs))
+            with open(path, "wb") as f:
+                f.write(b"fake-so")
+
+    export_kwargs = {"options": ["-Wl,-dead_strip"], "custom": "keep"}
+
+    KernelCache._safe_write_executable(
+        FakeExecutable(),
+        str(tmp_path / "explicit.so"),
+        export_kwargs=export_kwargs,
+    )
+
+    assert captured == [export_kwargs]
+
+
+def test_tvm_ffi_kernel_cache_selects_export_kwargs_from_host_target(cache_dirs, tmp_path, monkeypatch):
+    """Regression: device target may be cuda while the exported host module is LLVM.
+    Source-compilation options must not be passed to that LLVM object-link step.
+    """
+
+    source_compile_args = {"options": ["-x", "objective-c++"], "source": "keep"}
+    export_link_args = {"link": "keep"}
+    captured = []
+
+    monkeypatch.setattr(KernelCache, "_get_source_compile_args", staticmethod(lambda: source_compile_args))
+    monkeypatch.setattr(KernelCache, "_get_export_link_args", staticmethod(lambda: export_link_args))
+
+    class FakeExecutable:
+        def export_library(self, path, **kwargs):
+            captured.append(dict(kwargs))
+            with open(path, "wb") as f:
+                f.write(b"fake-so")
+
+    class FakeAdapter:
+        def get_exportable_executable(self):
+            return FakeExecutable()
+
+    def make_kernel(target_host_kind: str):
+        return SimpleNamespace(
+            adapter=FakeAdapter(),
+            target=SimpleNamespace(kind=SimpleNamespace(name="cuda")),
+            artifact=SimpleNamespace(target_host=SimpleNamespace(kind=SimpleNamespace(name=target_host_kind))),
+        )
+
+    cache = TVMFFIKernelCache()
+
+    cache._save_so_cubin_to_disk(make_kernel("llvm"), str(tmp_path))
+    assert captured[-1] == export_link_args
+    assert "options" not in captured[-1]
+
+    cache._save_so_cubin_to_disk(make_kernel("c"), str(tmp_path))
+    assert captured[-1] == source_compile_args
