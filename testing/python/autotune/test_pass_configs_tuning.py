@@ -58,7 +58,6 @@ def _make_matmul_kernel(M, N, K):
     """Helper to create a simple matmul kernel factory."""
 
     def kernel(block_M=None, block_N=None, block_K=None):
-        """Kernel factory returning a tiled GEMM prim_func for given block sizes."""
 
         @T.prim_func
         def main(
@@ -66,7 +65,6 @@ def _make_matmul_kernel(M, N, K):
             B: T.Tensor((N, K), T.float16),
             C: T.Tensor((M, N), T.float16),
         ):
-            """Tiled GEMM kernel computing C = A @ B^T."""
             with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
                 A_shared = T.alloc_shared((block_M, block_K), T.float16)
                 B_shared = T.alloc_shared((block_N, block_K), T.float16)
@@ -170,7 +168,6 @@ def test_autotune_decorator_with_per_config_pass_configs():
     @autotune(configs=configs, warmup=1, rep=3, skip_check=True, supply_type=tilelang.TensorSupplyType.Integer)
     @tilelang.jit(out_idx=[-1])
     def matmul_kernel(M, N, K, block_M=64, block_N=64, block_K=64):
-        """GEMM kernel factory with per-config pass_configs in decorator mode."""
 
         @T.prim_func
         def main(
@@ -178,7 +175,6 @@ def test_autotune_decorator_with_per_config_pass_configs():
             B: T.Tensor((N, K), T.float16),
             C: T.Tensor((M, N), T.float16),
         ):
-            """Tiled GEMM kernel computing C = A @ B^T."""
             with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
                 A_shared = T.alloc_shared((block_M, block_K), T.float16)
                 B_shared = T.alloc_shared((block_N, block_K), T.float16)
@@ -192,7 +188,6 @@ def test_autotune_decorator_with_per_config_pass_configs():
 
         return main
 
-    # This should compile and return a kernel without errors
     kernel = matmul_kernel(M, N, K, __return_kernel=True)
     assert kernel is not None
 
@@ -207,7 +202,6 @@ def test_autotune_decorator_pass_configs_override_jit_global():
     @autotune(configs=configs, warmup=1, rep=3, skip_check=True, supply_type=tilelang.TensorSupplyType.Integer)
     @tilelang.jit(out_idx=[-1], pass_configs={PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True})
     def matmul_kernel(M, N, K, block_M=64, block_N=64, block_K=64):
-        """GEMM kernel factory verifying per-config pass_configs override global jit configs."""
 
         @T.prim_func
         def main(
@@ -215,7 +209,6 @@ def test_autotune_decorator_pass_configs_override_jit_global():
             B: T.Tensor((N, K), T.float16),
             C: T.Tensor((M, N), T.float16),
         ):
-            """Tiled GEMM kernel computing C = A @ B^T."""
             with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
                 A_shared = T.alloc_shared((block_M, block_K), T.float16)
                 B_shared = T.alloc_shared((block_N, block_K), T.float16)
@@ -229,7 +222,6 @@ def test_autotune_decorator_pass_configs_override_jit_global():
 
         return main
 
-    # This should compile and return a kernel without errors
     kernel = matmul_kernel(M, N, K, __return_kernel=True)
     assert kernel is not None
 

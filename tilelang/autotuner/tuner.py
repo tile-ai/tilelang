@@ -33,7 +33,7 @@ import traceback
 from pathlib import Path
 
 from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
-from tilelang.autotuner.grouped_compile import compile_grouped_unit_tvm_ffi, _merge_pass_configs_into_compile_args
+from tilelang.autotuner.grouped_compile import compile_grouped_unit_tvm_ffi
 from tilelang.utils.language import get_prim_func_name
 from tilelang.autotuner.capture import get_autotune_inputs
 from tilelang.backend.target import determine_target
@@ -478,17 +478,31 @@ class AutoTuner:
         return result
 
     # Compile-related helpers
+    def _merge_pass_configs_into_compile_args(
+        self,
+        per_config_pass_configs: dict[str, Any] | None,
+    ) -> CompileArgs:
+        """Merge per-config pass_configs over global CompileArgs defaults."""
+        if not per_config_pass_configs:
+            return self.compile_args
+        merged = dict(self.compile_args.pass_configs or {})
+        merged.update(per_config_pass_configs)
+        return CompileArgs(
+            out_idx=self.compile_args.out_idx,
+            execution_backend=self.compile_args.execution_backend,
+            target=self.compile_args.target,
+            target_host=self.compile_args.target_host,
+            verbose=self.compile_args.verbose,
+            pass_configs=merged,
+        )
+
     def _default_compile(
         self,
         **config_arg,
     ) -> tilelang.JITKernel:
         per_config_pass_configs = config_arg.pop("__pass_configs__", None)
-        compile_args = self._resolve_compile_args(per_config_pass_configs)
+        compile_args = self._merge_pass_configs_into_compile_args(per_config_pass_configs)
         return compile_args.compile_program(self.fn(**config_arg))
-
-    def _resolve_compile_args(self, per_config_pass_configs: dict[str, Any] | None) -> CompileArgs:
-        """Resolve CompileArgs, merging per-config pass_configs over the global defaults."""
-        return _merge_pass_configs_into_compile_args(self.compile_args, per_config_pass_configs)
 
     def _default_elaborate(self, **config_arg) -> PrimFunc:
         config_arg.pop("__pass_configs__", None)
@@ -583,11 +597,12 @@ class AutoTuner:
                 elaborate_impl = cuda_device_wrapper(elaborate_func, device)
             return elaborate_impl
 
-        def compile_unit(unit_items: list[tuple[int, dict[str, Any]]]):
+        def compile_unit(unit_items: list[tuple[int, dict[str, Any]]], per_config_pass_configs=None):
             if grouped_compile_active:
+                effective_compile_args = self._merge_pass_configs_into_compile_args(per_config_pass_configs)
                 return compile_grouped_unit_tvm_ffi(
                     unit_items=unit_items,
-                    compile_args=self.compile_args,
+                    compile_args=effective_compile_args,
                     elaborate_func=get_elaborate_func(),
                 )
             compile_impl = get_compile_func()
@@ -600,17 +615,26 @@ class AutoTuner:
                     unit_results.append((idx, config_arg, None, e))
             return unit_results
 
-        compile_units: list[list[tuple[int, dict[str, Any]]]] = []
+        compile_units: list[tuple[list[tuple[int, dict[str, Any]]], dict | None]] = []
         if grouped_compile_active:
-            for start in range(0, len(config_args), group_compile_size):
-                end = min(start + group_compile_size, len(config_args))
-                compile_units.append([(i, config_args[i]) for i in range(start, end)])
+            # Bucket configs by __pass_configs__ value
+            buckets: dict[tuple | None, list[tuple[int, dict[str, Any], dict | None]]] = {}
+            for i, cfg in enumerate(config_args):
+                pc = cfg.pop("__pass_configs__", None)
+                key = tuple(sorted(pc.items())) if pc else None
+                buckets.setdefault(key, []).append((i, cfg, pc))
+            for bucket_items in buckets.values():
+                per_pc = bucket_items[0][2]  # all items in bucket share same pass_configs
+                items = [(idx, cfg) for idx, cfg, _ in bucket_items]
+                for start in range(0, len(items), group_compile_size):
+                    end = min(start + group_compile_size, len(items))
+                    compile_units.append((items[start:end], per_pc))
         else:
             for i, config_arg in enumerate(config_args):
-                compile_units.append([(i, config_arg)])
+                compile_units.append(([(i, config_arg)], None))
 
-        for unit_items in compile_units:
-            future = pool.submit(compile_unit, unit_items)
+        for unit_items, per_pc in compile_units:
+            future = pool.submit(compile_unit, unit_items, per_pc)
             futures.append(future)
             future_to_unit[future] = unit_items
 
@@ -1053,8 +1077,6 @@ class AutoTuner:
             nonlocal best_latency, best_config, best_kernel
             if latency < best_latency:
                 best_latency = latency
-                # Use the original user config (which contains 'pass_configs' if specified)
-                # instead of the internal config_arg (which uses '__pass_configs__')
                 best_config = dict(self.configs[idx])
                 best_kernel = jit_kernel
 
