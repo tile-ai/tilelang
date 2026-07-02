@@ -26,6 +26,7 @@
 #define TVM_TL_LOOP_VECTORIZE_H_
 
 #include "../op/operator.h"
+#include "layout_reducer.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/tirx/op.h>
 
@@ -34,10 +35,12 @@ namespace tl {
 
 using namespace tirx;
 
-int GetVectorizeSize(const For &loop, const LayoutMap &layout_map = {});
+int GetVectorizeSize(const For &loop, const LayoutMap &layout_map = {},
+                     const ffi::Map<Var, ReducerInfo> &reducer_info_map = {});
 
 int GetVectorizeSize(const For &loop, arith::Analyzer *analyzer,
-                     const LayoutMap &layout_map = {});
+                     const LayoutMap &layout_map = {},
+                     const ffi::Map<Var, ReducerInfo> &reducer_info_map = {});
 
 For VectorizeLoop(const For &loop, const LayoutMap &layout_map = {},
                   int vectorize_hint = -1);
