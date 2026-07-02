@@ -337,9 +337,8 @@ __tl_cvt_fp8_to_half(const __nv_fp8_storage_t x,
 }
 
 // Scalar half -> fp8 (native CUDA intrinsic; single cvt on supported HW).
-TL_DEVICE __nv_fp8_storage_t
-__tl_cvt_half_to_fp8(const half src,
-                     const __nv_fp8_interpretation_t fp8_interpretation) {
+TL_DEVICE __nv_fp8_storage_t __tl_cvt_half_to_fp8(
+    const half src, const __nv_fp8_interpretation_t fp8_interpretation) {
   __half_raw raw = *reinterpret_cast<const __half_raw *>(&src);
   return __nv_cvt_halfraw_to_fp8(raw, __NV_SATFINITE, fp8_interpretation);
 }
