@@ -1520,6 +1520,49 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   bool cast_sat = get_bool_anno("sat", true);
   Optional<PrimExpr> cast_rbits = get_expr_anno("rbits");
 
+  // Scalar fp8 <-> half via the __tl_cvt helpers; the default cast detours
+  // through fp32.
+  if (from_ty.is_scalar() && cast_round.empty() && target_ty.is_float16() &&
+      tl::IsCudaVectorizableFP8(from_ty)) {
+    bool is_e4m3 = from_ty.is_float8_e4m3() || from_ty.is_float8_e4m3fn();
+    std::string interp = is_e4m3 ? "__NV_E4M3" : "__NV_E5M2";
+    os << "half_t(__tl_cvt_fp8_to_half(*reinterpret_cast<const "
+          "__nv_fp8_storage_t*>(&("
+       << PrintExpr(op->value) << ")), " << interp << "))";
+    return;
+  }
+
+  if (from_ty.is_scalar() && cast_round.empty() && from_ty.is_float16() &&
+      tl::IsCudaVectorizableFP8(target_ty)) {
+    bool is_e4m3 = target_ty.is_float8_e4m3() || target_ty.is_float8_e4m3fn();
+    std::string interp = is_e4m3 ? "__NV_E4M3" : "__NV_E5M2";
+    this->PrintType(target_ty, os);
+    os << "::bitcast(__tl_cvt_half_to_fp8((" << PrintExpr(op->value)
+       << ").to_half(), " << interp << "))";
+    return;
+  }
+
+  // Scalar fp8 <-> bfloat16: same idea, via the native/PTX helpers.
+  if (from_ty.is_scalar() && cast_round.empty() && target_ty.is_bfloat16() &&
+      tl::IsCudaVectorizableFP8(from_ty)) {
+    bool is_e4m3 = from_ty.is_float8_e4m3() || from_ty.is_float8_e4m3fn();
+    std::string interp = is_e4m3 ? "__NV_E4M3" : "__NV_E5M2";
+    os << "bfloat16_t(__tl_cvt_fp8_to_bfloat16(*reinterpret_cast<const "
+          "__nv_fp8_storage_t*>(&("
+       << PrintExpr(op->value) << ")), " << interp << "))";
+    return;
+  }
+
+  if (from_ty.is_scalar() && cast_round.empty() && from_ty.is_bfloat16() &&
+      tl::IsCudaVectorizableFP8(target_ty)) {
+    bool is_e4m3 = target_ty.is_float8_e4m3() || target_ty.is_float8_e4m3fn();
+    std::string interp = is_e4m3 ? "__NV_E4M3" : "__NV_E5M2";
+    this->PrintType(target_ty, os);
+    os << "::bitcast(__tl_cvt_bfloat16_to_fp8((" << PrintExpr(op->value)
+       << ").to_nv_bfloat16(), " << interp << "))";
+    return;
+  }
+
   // Emit simple C-style type conversion for scalar casts without custom
   // rounding.
   if (from_ty.is_scalar() && cast_round.empty())
