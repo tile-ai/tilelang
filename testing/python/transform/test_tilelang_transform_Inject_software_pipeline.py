@@ -236,12 +236,24 @@ def test_async_pipeline_waits_for_individual_physical_commit_group():
 
     loop = _find_pipelined_loop(mod["main"])
     loop_waits = _collect_wait_args(loop.body)
+    all_waits = _collect_wait_args(mod["main"])
 
     assert loop_waits[:3] == [
         8,
         8,
         8,
     ], f"Expected fine-grained physical waits, got {loop_waits}"
+    assert all_waits[-9:] == [
+        8,
+        7,
+        6,
+        5,
+        4,
+        3,
+        2,
+        1,
+        0,
+    ], f"Expected physical tail drain waits, got {all_waits}"
 
 
 def test_async_pipeline_only_wraps_producer_statements_from_explicit_group_annotations():
