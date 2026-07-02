@@ -112,6 +112,7 @@ from .customize import (
     reshape,  # noqa: F401
     view,  # noqa: F401
     atomic_load,  # noqa: F401
+    atomic_or,  # noqa: F401
     atomic_store,  # noqa: F401
     loop_break,  # noqa: F401
 )
@@ -119,15 +120,22 @@ from .logical import any_of, all_of  # noqa: F401
 from .builtin import *  # noqa: F401
 from .builtin import __ldg as __ldg  # noqa: F401
 from .builtin import __ffs as __ffs  # noqa: F401
+from .builtin import __fns as __fns  # noqa: F401
 from .builtin import ds_read_tr16_b64 as ds_read_tr16_b64  # noqa: F401
 from .builtin import ds_read_tr8_b64 as ds_read_tr8_b64  # noqa: F401
 from .builtin import ldg32 as ldg32  # noqa: F401
 from .builtin import ldg64 as ldg64  # noqa: F401
 from .builtin import ldg128 as ldg128  # noqa: F401
+from .builtin import lds32 as lds32  # noqa: F401
+from .builtin import lds64 as lds64  # noqa: F401
+from .builtin import lds128 as lds128  # noqa: F401
 from .builtin import ldg256 as ldg256  # noqa: F401
 from .builtin import stg32 as stg32  # noqa: F401
 from .builtin import stg64 as stg64  # noqa: F401
 from .builtin import stg128 as stg128  # noqa: F401
+from .builtin import sts32 as sts32  # noqa: F401
+from .builtin import sts64 as sts64  # noqa: F401
+from .builtin import sts128 as sts128  # noqa: F401
 from .builtin import stg256 as stg256  # noqa: F401
 from .builtin import any_sync as any_sync  # noqa: F401
 from .builtin import all_sync as all_sync  # noqa: F401

@@ -6,7 +6,7 @@ import tilelang.language as T
 from tvm import arith
 from tvm.tirx import PrimExpr, Buffer, op
 from tilelang.utils.language import bits_product, prim_expr_equal
-from .atomic import atomic_max, atomic_min, atomic_add, atomic_addx2, atomic_addx4, atomic_load, atomic_store  # noqa: F401
+from .atomic import atomic_max, atomic_min, atomic_add, atomic_addx2, atomic_addx4, atomic_load, atomic_or, atomic_store  # noqa: F401
 
 
 def dp4a(A: Buffer, B: Buffer, C: Buffer) -> PrimExpr:

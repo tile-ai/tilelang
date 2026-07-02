@@ -455,3 +455,17 @@ def atomic_store(dst: Buffer, src: PrimExpr, memory_order: str = "seq_cst") -> P
         src,
         _MEMORY_ORDER_ID_MAP[memory_order],
     )
+
+
+def atomic_or(dst: Buffer, value: PrimExpr, memory_order: str | None = None) -> PrimExpr:
+    """Atomically bitwise-or an integer scalar address."""
+    if get_extent(dst) is not None or get_extent(value) is not None:
+        raise NotImplementedError("atomic_or currently supports scalar addresses only")
+    memory_order_id = _MEMORY_ORDER_ID_MAP[memory_order] if memory_order else 0
+    return T.call_intrin(
+        "handle",
+        op.Op.get("tl.atomic_or_elem_op"),
+        T.access_ptr(dst, "rw"),
+        value,
+        memory_order_id,
+    )

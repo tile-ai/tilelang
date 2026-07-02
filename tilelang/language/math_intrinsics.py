@@ -148,6 +148,12 @@ def __exp(x: PrimExpr) -> PrimExpr:
     return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__exp"), x)
 
 
+def fast_rcp(x: PrimExpr) -> PrimExpr:
+    """Approximate reciprocal using CUDA fast reciprocal."""
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.fast_rcp"), x)
+
+
 # IEEE-compliant operations
 def ieee_add(x: PrimExpr, y: PrimExpr, rounding_mode="rn") -> PrimExpr:
     """IEEE-compliant addition with specified rounding mode
@@ -420,6 +426,7 @@ __all__ = [
     "__sin",  # noqa: F401
     "__exp10",  # noqa: F401
     "__exp",  # noqa: F401
+    "fast_rcp",  # noqa: F401
     "ieee_add",  # noqa: F401
     "ieee_sub",  # noqa: F401
     "ieee_mul",  # noqa: F401

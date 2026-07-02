@@ -1524,6 +1524,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     os << "tl.cos(" << PrintExpr_(op->args[0]) << ", fastmath=True)";
   } else if (op->op.same_as(tl::__sin())) {
     os << "tl.sin(" << PrintExpr_(op->args[0]) << ", fastmath=True)";
+  } else if (op->op.same_as(tl::fast_rcp())) {
+    os << "(1.0 / " << PrintExpr_(op->args[0]) << ")";
   } else if (op->op.same_as(tl::ieee_add())) {
     // ieee_add(a, b, rounding_mode)
     std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
@@ -1637,6 +1639,16 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     this->PrintIndent();
     this->stream << "tl.AtomicStore(" << dst_ptr << ", " << value << ", "
                  << memory_order << ")\n";
+  } else if (op->op.same_as(tl::atomic_or_elem_op())) {
+    // atomic_or_elem_op(dst_ptr, src_value[, memory_order])
+    std::string dst_ptr = PrintExpr_(op->args[0]);
+    std::string src_value = PrintExpr_(op->args[1]);
+    this->PrintIndent();
+    this->stream << "tl.AtomicOr(" << dst_ptr << ", " << src_value;
+    if (op->args.size() > 2) {
+      this->stream << ", " << PrintExpr_(op->args[2]);
+    }
+    this->stream << ")\n";
   } else if (op->op.same_as(tl::atomic_max_elem_op())) {
     // atomic_max_elem_op(dst_ptr, src_value[, memory_order])
     std::string dst_ptr = PrintExpr_(op->args[0]);

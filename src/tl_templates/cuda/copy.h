@@ -178,6 +178,30 @@ TL_DEVICE uint4 load_global_128_conditional(const void *ptr, bool pred) {
   return ret;
 }
 
+TL_DEVICE uint32_t load_shared_32(const void *ptr) {
+  return *reinterpret_cast<const uint32_t *>(ptr);
+}
+
+TL_DEVICE uint2 load_shared_64(const void *ptr) {
+  return *reinterpret_cast<const uint2 *>(ptr);
+}
+
+TL_DEVICE uint4 load_shared_128(const void *ptr) {
+  return *reinterpret_cast<const uint4 *>(ptr);
+}
+
+TL_DEVICE void store_shared_32(void *ptr, uint32_t value) {
+  *reinterpret_cast<uint32_t *>(ptr) = value;
+}
+
+TL_DEVICE void store_shared_64(void *ptr, uint2 value) {
+  *reinterpret_cast<uint2 *>(ptr) = value;
+}
+
+TL_DEVICE void store_shared_128(void *ptr, uint4 value) {
+  *reinterpret_cast<uint4 *>(ptr) = value;
+}
+
 // Global memory store intrinsics with explicit vector widths
 // Following CUTLASS style with template specialization
 
