@@ -1246,8 +1246,15 @@ public:
     stmt = relaxed_pipeline_parts.size() == 1 ? relaxed_pipeline_parts[0]
                                               : SeqStmt(relaxed_pipeline_parts);
 
-    // Step 3: Make a new block that contains new buffer allocations after
-    // pipeline rewriting.
+    // Step 3: Make a new block only when the rewritten pipeline owns local
+    // allocations.  When all buffers are already allocated by an outer block
+    // (the common TileLang kernel-root case), an extra synthetic scope would
+    // only carry a very large inferred read/write region and make the IR hard
+    // to inspect.
+    if (local_allocs_.empty()) {
+      return stmt;
+    }
+
     // Only include buffers that are locally allocated in the pipeline block.
     // Buffers from outer blocks will be handled separately.
     Array<Buffer> alloc_buffers;
@@ -1538,6 +1545,8 @@ private:
 
   struct AsyncStateGlobal {
     BufferSet dst_buffers;
+    BufferCommitGroupMap buffer_to_commit_group;
+    int commit_group_count{0};
     Optional<PrimExpr> producer_head{PrimExpr(-1)};
 
     bool writes(const Buffer &buffer) const {
@@ -2300,8 +2309,7 @@ private:
           if (uses_head_fallback) {
             per_sync_groups = 1;
           }
-          int candidate_wait_n =
-              std::max(0, std::min(retain * per_sync_groups, 7));
+          int candidate_wait_n = std::max(0, retain * per_sync_groups);
           bool enough_pre_outstanding =
               !uses_head_fallback || outstanding_lb >= (candidate_wait_n + 1);
           if (candidate_wait_n > 0 && enough_pre_outstanding &&
@@ -2523,11 +2531,47 @@ private:
                           arith::Analyzer *ana_normalized,
                           const BufferCommitGroupMap &buffer_to_commit_group,
                           std::map<int, AsyncStateLocal> *async_states_local) {
+    std::vector<int> stmt_to_commit_group(new_stmts.size(), -1);
+    std::map<int, std::vector<int>> commit_group_last_stmt;
+    for (const auto &[stage_id, state] : *async_states_local) {
+      auto &last_stmt = commit_group_last_stmt[stage_id];
+      last_stmt.assign(state.commit_groups.size(), -1);
+      for (size_t group_id = 0; group_id < state.commit_groups.size();
+           ++group_id) {
+        for (size_t stmt_idx : state.commit_groups[group_id]) {
+          ICHECK_LT(stmt_idx, new_stmts.size());
+          ICHECK_EQ(stmt_to_commit_group[stmt_idx], -1);
+          stmt_to_commit_group[stmt_idx] = static_cast<int>(group_id);
+          last_stmt[group_id] =
+              std::max(last_stmt[group_id], static_cast<int>(stmt_idx));
+        }
+      }
+    }
+
+    std::map<int, int> last_committed_group;
+    auto record_pending_wait = [&](AsyncStateLocal *state, int commit_group_id,
+                                   int insert_before, PrimExpr wait_count) {
+      auto &pending_wait = state->pending_waits[commit_group_id];
+      if (!pending_wait.valid()) {
+        pending_wait = {insert_before, wait_count};
+      } else if (analyzer_.CanProve(wait_count < pending_wait.wait_count)) {
+        pending_wait = {pending_wait.insert_before, wait_count};
+      }
+    };
+
     for (size_t i = 0; i < new_stmts.size(); ++i) {
       if (new_stmts[i].is_async) {
+        auto &local_state = (*async_states_local)[new_stmts[i].stage];
         for (const BufferRegion &write_region : new_stmts[i].writes) {
-          (*async_states_local)[new_stmts[i].stage].seen.insert(
-              write_region->buffer);
+          local_state.seen.insert(write_region->buffer);
+        }
+        int commit_group_id = stmt_to_commit_group[i];
+        if (commit_group_id >= 0) {
+          const auto &last_stmt = commit_group_last_stmt.at(new_stmts[i].stage);
+          ICHECK_LT(commit_group_id, static_cast<int>(last_stmt.size()));
+          if (last_stmt[commit_group_id] == static_cast<int>(i)) {
+            last_committed_group[new_stmts[i].stage] = commit_group_id;
+          }
         }
         continue;
       }
@@ -2550,59 +2594,107 @@ private:
 
       auto &dep_local_state = (*async_states_local)[producer_stage_idx];
       int num_commit_group = dep_local_state.commit_groups.size();
-      std::vector<Optional<PrimExpr>> producer_head_per_commit;
-      std::vector<int> dependent_commit_groups;
 
       if (num_commit_group == 0) {
         ICHECK(!dep_local_state.producer_head);
-        dependent_commit_groups.push_back(-1);
-        producer_head_per_commit.push_back(
-            async_states_[producer_stage_idx].producer_head);
-      } else {
-        ICHECK(dep_local_state.producer_head);
-        std::vector<bool> need_wait_count(num_commit_group, true);
-        for (const BufferRegion &read_region : new_stmts[i].reads) {
-          if (!async_states_[producer_stage_idx].writes(read_region->buffer)) {
+        const auto &global_state = async_states_[producer_stage_idx];
+        PrimExpr tail_start =
+            analyzer_.Simplify(pipeline_loop_->min + pipeline_loop_->extent -
+                               PrimExpr(max_stage_));
+        bool is_tail_consumer =
+            ana_normalized->CanProve(new_stmts[i].access_index >= tail_start);
+        if (is_tail_consumer && global_state.commit_group_count > 0) {
+          int latest_group_id = global_state.commit_group_count - 1;
+          PrimExpr latest_producer_head = analyzer_.Simplify(
+              pipeline_loop_->min + pipeline_loop_->extent - PrimExpr(1));
+          std::vector<bool> need_wait_count(global_state.commit_group_count,
+                                            true);
+          bool handled = false;
+          for (const BufferRegion &read_region : new_stmts[i].reads) {
+            if (!global_state.writes(read_region->buffer)) {
+              continue;
+            }
+            auto it =
+                global_state.buffer_to_commit_group.find(read_region->buffer);
+            if (it == global_state.buffer_to_commit_group.end()) {
+              handled = false;
+              break;
+            }
+            int commit_group_id = it->second;
+            ICHECK_GE(commit_group_id, 0);
+            ICHECK_LT(commit_group_id, global_state.commit_group_count);
+            if (!need_wait_count[commit_group_id]) {
+              continue;
+            }
+            PrimExpr wait_count = analyzer_.Simplify(
+                (latest_producer_head - new_stmts[i].access_index) *
+                    global_state.commit_group_count +
+                (latest_group_id - commit_group_id));
+            if (!ana_normalized->CanProve(wait_count >= 0)) {
+              wait_count = PrimExpr(0);
+            }
+            record_pending_wait(&dep_local_state, commit_group_id,
+                                static_cast<int>(i), wait_count);
+            need_wait_count[commit_group_id] = false;
+            handled = true;
+          }
+          if (handled) {
             continue;
           }
-          auto commit_group_id = buffer_to_commit_group.at(read_region->buffer);
-          if (!need_wait_count[commit_group_id]) {
-            continue;
-          }
-          dependent_commit_groups.push_back(commit_group_id);
-          if (!dep_local_state.seen.count(read_region->buffer)) {
-            producer_head_per_commit.push_back(
-                dep_local_state.producer_head.value() - 1);
-          } else {
-            producer_head_per_commit.push_back(
-                dep_local_state.producer_head.value());
-          }
-          need_wait_count[commit_group_id] = false;
         }
+
+        PrimExpr wait_count = PrimExpr(0);
+        Optional<PrimExpr> producer_head =
+            async_states_[producer_stage_idx].producer_head;
+        if (producer_head &&
+            ana_normalized->CanProve(producer_head.value() >= 0)) {
+          wait_count = analyzer_.Simplify(producer_head.value() -
+                                          new_stmts[i].access_index);
+        }
+        record_pending_wait(&dep_local_state, -1, static_cast<int>(i),
+                            wait_count);
+        continue;
       }
 
-      PrimExpr wait_count = [&]() {
-        PrimExpr sum = PrimExpr(0);
-        for (const Optional<PrimExpr> &producer_head :
-             producer_head_per_commit) {
-          if (producer_head &&
-              ana_normalized->CanProve(producer_head.value() >= 0)) {
-            sum += analyzer_.Simplify(producer_head.value() -
-                                      new_stmts[i].access_index);
-          } else {
-            return PrimExpr(0);
+      ICHECK(dep_local_state.producer_head);
+      int latest_group_id = -1;
+      Optional<PrimExpr> latest_producer_head;
+      if (auto it = last_committed_group.find(producer_stage_idx);
+          it != last_committed_group.end()) {
+        latest_group_id = it->second;
+        latest_producer_head = dep_local_state.producer_head.value();
+      } else {
+        latest_group_id = num_commit_group - 1;
+        latest_producer_head = dep_local_state.producer_head.value() - 1;
+      }
+
+      std::vector<bool> need_wait_count(num_commit_group, true);
+      for (const BufferRegion &read_region : new_stmts[i].reads) {
+        if (!async_states_[producer_stage_idx].writes(read_region->buffer)) {
+          continue;
+        }
+        auto commit_group_id = buffer_to_commit_group.at(read_region->buffer);
+        ICHECK_GE(commit_group_id, 0);
+        ICHECK_LT(commit_group_id, num_commit_group);
+        if (!need_wait_count[commit_group_id]) {
+          continue;
+        }
+
+        PrimExpr wait_count = PrimExpr(0);
+        if (latest_producer_head &&
+            ana_normalized->CanProve(latest_producer_head.value() >= 0)) {
+          wait_count = analyzer_.Simplify(
+              (latest_producer_head.value() - new_stmts[i].access_index) *
+                  num_commit_group +
+              (latest_group_id - commit_group_id));
+          if (!ana_normalized->CanProve(wait_count >= 0)) {
+            wait_count = PrimExpr(0);
           }
         }
-        return sum;
-      }();
 
-      for (int commit_group_id : dependent_commit_groups) {
-        auto &pending_wait = dep_local_state.pending_waits[commit_group_id];
-        if (!pending_wait.valid()) {
-          pending_wait = {static_cast<int>(i), wait_count};
-        } else if (analyzer_.CanProve(wait_count < pending_wait.wait_count)) {
-          pending_wait = {pending_wait.insert_before, wait_count};
-        }
+        record_pending_wait(&dep_local_state, commit_group_id,
+                            static_cast<int>(i), wait_count);
+        need_wait_count[commit_group_id] = false;
       }
     }
   }
@@ -2859,7 +2951,13 @@ private:
         }
 
         for (const BufferRegion &write_region : new_block->writes) {
-          async_states_[stage].dst_buffers.insert(write_region->buffer);
+          auto &global_state = async_states_[stage];
+          global_state.dst_buffers.insert(write_region->buffer);
+          global_state.buffer_to_commit_group[write_region->buffer] =
+              commit_group_id;
+          global_state.commit_group_count =
+              std::max(global_state.commit_group_count,
+                       static_cast<int>(local_state.commit_groups.size()));
           buffer_to_commit_group[write_region->buffer] = commit_group_id;
         }
         async_states_[stage].producer_head = normalized_access_index;
@@ -3615,59 +3713,66 @@ private:
     // counts across the expanded slots.
     {
       auto [outer_attrs, inner_stmt] = unwrap_outer_attrs(pipeline);
-      SBlockRealize br = Downcast<SBlockRealize>(inner_stmt);
-      SBlock block = br->block;
-      SBlockNode *bn = block.CopyOnWrite();
+      auto br_opt = inner_stmt.as<SBlockRealizeNode>();
+      if (br_opt == nullptr) {
+        ICHECK(!pipeline_barrier_buf.defined())
+            << "Pipeline barrier initialization requires a pipeline scope "
+               "block";
+      } else {
+        SBlockRealize br = Downcast<SBlockRealize>(inner_stmt);
+        SBlock block = br->block;
+        SBlockNode *bn = block.CopyOnWrite();
 
-      Map<Var, Array<PrimExpr>> barrier_init_map;
-      if (bn->annotations.count("barrier_init")) {
-        barrier_init_map = Downcast<Map<Var, Array<PrimExpr>>>(
-            bn->annotations.Get("barrier_init").value());
-      }
-      bool changed = false;
-
-      // Handle ISP-created pipeline barrier (needs new entry).
-      if (pipeline_barrier_buf.defined()) {
-        // After ExpandPipelineBarriers, pipeline_mbar has been expanded.
-        // Look up the expanded buffer via buffer_data_to_buffer_.
-        Buffer expanded_buf =
-            buffer_data_to_buffer_[pipeline_barrier_buf->data];
-        int expanded_slots = Downcast<IntImm>(expanded_buf->shape[0])->value;
-        Array<PrimExpr> counts;
-        for (int s = 0; s < expanded_slots; ++s) {
-          counts.push_back(IntImm(DataType::Int(32), 1));
+        Map<Var, Array<PrimExpr>> barrier_init_map;
+        if (bn->annotations.count("barrier_init")) {
+          barrier_init_map = Downcast<Map<Var, Array<PrimExpr>>>(
+              bn->annotations.Get("barrier_init").value());
         }
-        barrier_init_map.Set(expanded_buf->data, counts);
-        changed = true;
-      }
+        bool changed = false;
 
-      // Replicate existing barrier_init entries for expanded barriers.
-      Map<Var, Array<PrimExpr>> updated_init;
-      for (const auto &[var, counts] : barrier_init_map) {
-        Buffer buf = buffer_data_to_buffer_[var];
-        int buf_size = Downcast<IntImm>(buf->shape[0])->value;
-        int orig_size = static_cast<int>(counts.size());
-        if (buf_size > orig_size && orig_size > 0 &&
-            buf_size % orig_size == 0) {
-          // Replicate pattern to match expanded size.
-          Array<PrimExpr> new_counts;
-          for (int v = 0; v < buf_size; v += orig_size) {
-            for (const auto &c : counts) {
-              new_counts.push_back(c);
-            }
+        // Handle ISP-created pipeline barrier (needs new entry).
+        if (pipeline_barrier_buf.defined()) {
+          // After ExpandPipelineBarriers, pipeline_mbar has been expanded.
+          // Look up the expanded buffer via buffer_data_to_buffer_.
+          Buffer expanded_buf =
+              buffer_data_to_buffer_[pipeline_barrier_buf->data];
+          int expanded_slots = Downcast<IntImm>(expanded_buf->shape[0])->value;
+          Array<PrimExpr> counts;
+          for (int s = 0; s < expanded_slots; ++s) {
+            counts.push_back(IntImm(DataType::Int(32), 1));
           }
-          updated_init.Set(var, new_counts);
+          barrier_init_map.Set(expanded_buf->data, counts);
           changed = true;
-        } else {
-          updated_init.Set(var, counts);
         }
-      }
 
-      if (changed) {
-        bn->annotations.Set("barrier_init", updated_init);
-        pipeline = rewrap_outer_attrs(
-            SBlockRealize(br->iter_values, br->predicate, block, br->span),
-            outer_attrs);
+        // Replicate existing barrier_init entries for expanded barriers.
+        Map<Var, Array<PrimExpr>> updated_init;
+        for (const auto &[var, counts] : barrier_init_map) {
+          Buffer buf = buffer_data_to_buffer_[var];
+          int buf_size = Downcast<IntImm>(buf->shape[0])->value;
+          int orig_size = static_cast<int>(counts.size());
+          if (buf_size > orig_size && orig_size > 0 &&
+              buf_size % orig_size == 0) {
+            // Replicate pattern to match expanded size.
+            Array<PrimExpr> new_counts;
+            for (int v = 0; v < buf_size; v += orig_size) {
+              for (const auto &c : counts) {
+                new_counts.push_back(c);
+              }
+            }
+            updated_init.Set(var, new_counts);
+            changed = true;
+          } else {
+            updated_init.Set(var, counts);
+          }
+        }
+
+        if (changed) {
+          bn->annotations.Set("barrier_init", updated_init);
+          pipeline = rewrap_outer_attrs(
+              SBlockRealize(br->iter_values, br->predicate, block, br->span),
+              outer_attrs);
+        }
       }
     }
 
