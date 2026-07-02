@@ -6,6 +6,7 @@ so tuner.py can stay focused on orchestration.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 from collections.abc import Callable
 
@@ -19,6 +20,8 @@ from tilelang.jit.adapter import TVMFFIKernelAdapter
 from tilelang.jit.kernel import JITKernel
 from tilelang.transform import PassConfigKey
 
+logger = logging.getLogger(__name__)
+
 CompileUnitResult = tuple[int, dict[str, Any], JITKernel | None, Exception | None]
 
 
@@ -26,11 +29,7 @@ def _merge_pass_configs_into_compile_args(
     base: CompileArgs,
     per_config_pass_configs: dict[str, Any] | None,
 ) -> CompileArgs:
-    """Merge per-config pass_configs over global CompileArgs defaults.
-
-    If *per_config_pass_configs* is None or empty, returns *base* unchanged.
-    Otherwise returns a new CompileArgs with merged pass_configs.
-    """
+    """Merge per-config pass_configs over global CompileArgs defaults."""
     if not per_config_pass_configs:
         return base
     merged = dict(base.pass_configs or {})
@@ -60,34 +59,28 @@ def compile_grouped_unit_tvm_ffi(
     5. Construct per-config JITKernel objects that share the grouped device module.
     """
 
-    # Extract per-config pass_configs and check uniformity
-    per_config_pass_configs_list = []
-    for _, config_arg in unit_items:
-        per_config_pass_configs_list.append(config_arg.pop("__pass_configs__", None))
+    per_config_pc_list = [cfg.pop("__pass_configs__", None) for _, cfg in unit_items]
 
-    # Determine if all per-config pass_configs are the same
-    # Normalize: treat None and {} (empty dict) as equivalent "no config"
-    normalized_list = [pc if pc else None for pc in per_config_pass_configs_list]
-    has_uniform_pass_configs = all(
-        pc == normalized_list[0] for pc in normalized_list[1:]
-    )
+    # Treat None and {} as equivalent for uniformity check
+    normalized = [pc if pc else None for pc in per_config_pc_list]
+    uniform = all(pc == normalized[0] for pc in normalized[1:])
 
-    if not has_uniform_pass_configs:
-        # Fall back to per-config compilation when pass_configs differ
+    if not uniform:
+        # Per-config compilation fallback
         unit_results: list[CompileUnitResult] = []
-        for (idx, config_arg), per_pc in zip(unit_items, per_config_pass_configs_list):
+        for (idx, config_arg), per_pc in zip(unit_items, per_config_pc_list, strict=True):
             try:
-                effective_compile_args = _merge_pass_configs_into_compile_args(compile_args, per_pc)
+                args = _merge_pass_configs_into_compile_args(compile_args, per_pc)
                 program = elaborate_func(**config_arg)
-                jit_kernel = effective_compile_args.compile_program(program)
+                jit_kernel = args.compile_program(program)
                 unit_results.append((idx, config_arg, jit_kernel, None))
             except Exception as e:
+                logger.debug("Per-config compile failed (idx=%d): %s", idx, e)
                 unit_results.append((idx, config_arg, None, e))
         return unit_results
 
-    # Resolve effective pass_configs for the uniform case
-    uniform_per_config_pc = normalized_list[0] if normalized_list else None
-    effective_compile_args = _merge_pass_configs_into_compile_args(compile_args, uniform_per_config_pc)
+    # Uniform pass_configs — proceed with grouped compilation
+    effective_compile_args = _merge_pass_configs_into_compile_args(compile_args, normalized[0])
     pass_configs = dict(effective_compile_args.pass_configs) if effective_compile_args.pass_configs else {}
 
     pass_instruments = []
@@ -125,6 +118,7 @@ def compile_grouped_unit_tvm_ffi(
                 }
             )
         except Exception as e:
+            logger.debug("Lowering failed (idx=%d): %s", idx, e)
             unit_results.append((idx, config_arg, None, e))
 
     if not lowered_items:
@@ -200,8 +194,10 @@ def compile_grouped_unit_tvm_ffi(
 
                 unit_results.append((idx, config_arg, jit_kernel, None))
             except Exception as e:
+                logger.debug("Host codegen failed (idx=%d): %s", idx, e)
                 unit_results.append((idx, config_arg, None, e))
     except Exception as e:
+        logger.debug("Grouped device codegen failed: %s", e)
         for item in lowered_items:
             unit_results.append((item["idx"], item["config_arg"], None, e))
 
