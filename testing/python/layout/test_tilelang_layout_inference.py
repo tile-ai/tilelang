@@ -1,7 +1,11 @@
+import re
+
+import pytest
 import tilelang
 import tilelang.testing
-import pytest
+import tvm
 from tilelang import language as T
+from tvm.target import Target
 
 
 @tilelang.jit
@@ -81,6 +85,52 @@ def test_scalar_reduce_accumulator_owner_layout():
     kernel = _scalar_reduce_accumulator_owner_layout()
     source = kernel.get_kernel_source()
     assert "AllReduce" in source
+
+
+def _lower_fully_replicated_readback(use_copy: bool) -> str:
+    @T.prim_func
+    def main(inp: T.Tensor((128,), T.float32), out: T.Tensor((128,), T.float32)):
+        with T.Kernel(1, threads=128):
+            fragment = T.alloc_fragment((128,), T.float32)
+            T.annotate_layout({fragment: tilelang.layout.make_fully_replicated_layout_fragment(fragment, 128)})
+
+            for i in T.serial(128):
+                fragment[i] = inp[i]
+
+            if use_copy:
+                T.copy(fragment, out)
+            else:
+                for i in T.Parallel(128):
+                    out[i] = fragment[i]
+
+    target = Target("cuda")
+    pass_configs = {
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER.value: True,
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED.value: True,
+        tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK.value: True,
+    }
+    with tvm.transform.PassContext(config=pass_configs), target:
+        artifact = tilelang.lower(main, target=target)
+    return artifact.kernel_source
+
+
+def _assert_single_thread_replicated_readback(src: str) -> None:
+    assert not re.search(r"fragment\[[^\]\n]*threadIdx\.x", src), src
+    assert not re.search(r"out\[[^\]\n]*threadIdx\.x", src), src
+    assert "if (((int)threadIdx.x) == 0)" in src
+    assert re.search(r"for \(int i(_\d+)? = 0; i(_\d+)? < 128; \+\+i(_\d+)?\)", src), src
+
+
+@tilelang.testing.requires_cuda
+def test_parallel_readback_from_fully_replicated_fragment_uses_rep_guard():
+    src = _lower_fully_replicated_readback(use_copy=False)
+    _assert_single_thread_replicated_readback(src)
+
+
+@tilelang.testing.requires_cuda
+def test_copy_readback_from_fully_replicated_fragment_uses_rep_guard():
+    src = _lower_fully_replicated_readback(use_copy=True)
+    _assert_single_thread_replicated_readback(src)
 
 
 if __name__ == "__main__":
