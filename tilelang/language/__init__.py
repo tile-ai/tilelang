@@ -161,6 +161,21 @@ from .pdl import (
     pdl_sync,  # noqa: F401
 )
 
+from . import iket as iket  # noqa: F401
+from .iket import (  # noqa: F401
+    iket_disable,
+    iket_enable,
+    iket_enable_runtime_payloads,
+    iket_disable_runtime_payloads,
+    iket_set_output_dir,
+    iket_reset,
+    iket_mark,
+    iket_range_push,
+    iket_range_pop,
+    iket_range_start,
+    iket_range_end,
+)
+
 from .cluster import (
     cluster_arrive_relaxed,  # noqa: F401
     cluster_arrive,  # noqa: F401
