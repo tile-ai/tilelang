@@ -200,10 +200,10 @@ matching `.pftrace`.
 
 ## Trace Screenshot
 
-The screenshot below is generated from the real JSON trace emitted by the
-all-features example. It presents the Perfetto-style timeline view with the range
-lane, instant marker lanes, runtime payload markers, event counts, and payload
-schema from the same kernel launch.
+The screenshot below is captured from the real Perfetto UI after loading the
+all-features IKET trace. It uses Perfetto's Query (SQL) view to summarize the
+decoded TileLang IKET events: range slices, no-payload markers, runtime payload
+markers, and payload value ranges from the same kernel launch.
 
 <p align="center">
   <img
