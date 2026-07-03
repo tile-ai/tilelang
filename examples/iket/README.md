@@ -115,6 +115,7 @@ examples/iket/
   minimal.py
   payload_minimal.py
   all_features.py
+  validate_overhead.py
   assets/
     iket_perfetto_all_features.png
 ```
@@ -168,6 +169,53 @@ iket_pid_0x....pftrace.gz
 iket_pid_0x....trace.json
 iket_pid_0x....html
 ```
+
+## Validation and Overhead
+
+`validate_overhead.py` checks that IKET instrumentation preserves kernel output
+and measures median CUDA event latency against a non-IKET baseline. It covers
+representative TileLang CUDA workloads:
+
+- `vector_add_ranges`: one range and two markers inside a 1D vector add.
+- `vector_add_payloads`: the same vector add with runtime `int32` payloads.
+- `add_scale_all_features`: range, no-payload markers, and payload markers in
+  one elementwise kernel.
+- `gemm_tile_markers`: a SIMT GEMM with tile-level range markers and a
+  `tile_id` payload.
+
+Run the validation from the TileLang repo root:
+
+```bash
+rm -rf /tmp/tilelang_iket_validation
+
+conda run -n tl python examples/iket/validate_overhead.py \
+  --output-dir /tmp/tilelang_iket_validation \
+  --vector-n 1048576 \
+  --gemm-m 256 --gemm-n 256 --gemm-k 256 \
+  --warmup-ms 10 \
+  --rep-ms 30
+```
+
+The script writes a machine-readable copy to:
+
+```text
+/tmp/tilelang_iket_validation/validation_results.json
+```
+
+One run on the local development GPU produced:
+
+| case | workload | features | baseline ms | IKET ms | overhead | max abs error | correctness |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- |
+| vector_add_ranges | 1D vector add, N=1048576 | range + markers | 0.0113 | 0.0113 | +0.00% | 0 | pass |
+| vector_add_payloads | 1D vector add, N=1048576 | range + markers + int32 payloads | 0.0113 | 0.0113 | +0.00% | 0 | pass |
+| add_scale_all_features | add + scale, N=1048576 | range + no-payload markers + int32 payloads | 0.0113 | 0.0112 | -0.28% | 0 | pass |
+| gemm_tile_markers | SIMT GEMM 256x256x256 | tile range + tile_id payload | 0.0871 | 0.0870 | -0.04% | 0.0173 | pass |
+
+The small negative overhead values are measurement noise from CUDA event timing.
+The important result is that the instrumented kernels produce correct outputs
+and do not show measurable slowdown for block- or tile-level event density in
+these examples. Very dense instrumentation, especially per-element payload
+markers, should still be profiled for the target workload.
 
 ## Visualizing a Trace
 
