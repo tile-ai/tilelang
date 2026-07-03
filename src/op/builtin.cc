@@ -61,6 +61,12 @@ DataType CuTensorMapType() { return DataType::UInt(8, 128); }
   TVM_REGISTER_OP("tl." #OpName)                                               \
       .set_attr<TScriptPrinterName>("TScriptPrinterName", #OpName)
 
+#define TIR_DEFINE_TL_OPAQUE_BUILTIN(OpName, NumInputs)                        \
+  TIR_DEFINE_TL_BUILTIN(OpName)                                                \
+      .set_num_inputs(NumInputs)                                               \
+      .set_attr<TCallEffectKind>("TCallEffectKind",                            \
+                                 Integer(CallEffectKind::kOpaque))
+
 // Pointer access metadata op (frontend-only, lowered later).
 TIR_DEFINE_TL_BUILTIN(access_ptr)
     .set_num_inputs(3)
@@ -249,6 +255,27 @@ TIR_DEFINE_TL_BUILTIN(ptx_wgmma_sp_rs)
     .set_num_inputs(17)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_OPAQUE_BUILTIN(ptx_mma_block_scale, 21);
+
+TIR_DEFINE_TL_OPAQUE_BUILTIN(sm120_mma_blockscaled_kblock_fulltile, 23);
+
+TIR_DEFINE_TL_OPAQUE_BUILTIN(
+    sm120_mma_blockscaled_kblock_fulltile_ab_owner_wide, 13);
+
+TIR_DEFINE_TL_OPAQUE_BUILTIN(
+    sm120_mma_blockscaled_kblock_fulltile_afull_bpanel_owner_wide, 13);
+
+TIR_DEFINE_TL_OPAQUE_BUILTIN(
+    sm120_mma_blockscaled_kblock_fulltile_package_pingpong, 6);
+
+TIR_DEFINE_TL_OPAQUE_BUILTIN(sm120_mma_blockscaled_cute_consumer_bridge, 7);
+
+TIR_DEFINE_TL_OPAQUE_BUILTIN(sm120_store_full_c_fragment_panel64_bf16, 5);
+
+TIR_DEFINE_TL_OPAQUE_BUILTIN(sm120_store_full_c_fragment_panel32_tma_bf16, 5);
+
+TIR_DEFINE_TL_OPAQUE_BUILTIN(sm120_store_full_c_fragment_epi64x32_tma_bf16, 6);
 
 TIR_DEFINE_TL_BUILTIN(ptx_tcgen05_mma_ss)
     .set_num_inputs(14)

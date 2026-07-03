@@ -28,6 +28,7 @@
 
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -43,6 +44,12 @@ namespace {
 
 PrimExpr MakeTmaLeaderCondition(PrimExpr thread_extent) {
   return Call(DataType::Bool(), tl_shuffle_elect(), {std::move(thread_extent)});
+}
+
+bool EnableSM120CompactUnpackedFP4Shared() {
+  const char *value = std::getenv("TL_SM120_COMPACT_UNPACKED_FP4_SHARED");
+  return value != nullptr && value[0] != '\0' &&
+         !(value[0] == '0' && value[1] == '\0');
 }
 
 int TMAPayloadElementBits(DataType dtype) {
@@ -90,6 +97,17 @@ PrimExpr TMATransactionBytesFromElements(PrimExpr elements, DataType dtype) {
 
 int64_t TMATransactionBytesFromElements(int64_t elements, DataType dtype) {
   return TMABytesFromElements(elements, TMAPayloadElementBits(dtype));
+}
+
+PrimExpr CompactUnpackedFP4SharedOffset(PrimExpr offset, DataType dtype) {
+  if (!EnableSM120CompactUnpackedFP4Shared() ||
+      !dtype.is_float4_e2m1_unpacked()) {
+    return offset;
+  }
+  // Keep TMA offsets in logical FP4 element units. access_ptr lowers through
+  // CUDA BufferRef, which applies the compact shared logical-to-physical /2
+  // conversion exactly once for unpacked FP4 shared buffers.
+  return offset;
 }
 
 int64_t TMAElementsForBytes(int64_t bytes, DataType dtype) {
@@ -1608,12 +1626,21 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
                      "to normal copy";
     return fallback_to_normal("undecodable shared swizzle layout");
   }
-  // Recast element-space layout into byte-address space.
-  // Because CuTe swizzle are based on byte addresses.
+  // Recast the swizzle atom into byte-address space because CuTe/TMA
+  // swizzles are based on byte addresses. For scalar NVFP4, only the swizzle
+  // atom can be recast cleanly from 4-bit logical elements; the plain layout
+  // may contain half-byte contiguous strides and remains in element space for
+  // offset/coordinate analysis below.
   int elem_bits = shared_tensor->dtype.bits();
-  // E.g., composed_bytes = Sw<3,4,3> o 0 o (64,64,8):(128,2,8192)
-  auto composed_bytes = composed.value().Recast(elem_bits, /*new_bits=*/8);
-  const auto *sw = composed_bytes->swizzle.get();
+  cute::Swizzle swizzle_bytes;
+  if (shared_tensor->dtype.is_float4_e2m1fn() &&
+      shared_tensor->dtype.is_scalar()) {
+    swizzle_bytes = composed.value()->swizzle.Recast(elem_bits, /*new_bits=*/8);
+  } else {
+    // E.g., composed_bytes = Sw<3,4,3> o 0 o (64,64,8):(128,2,8192)
+    swizzle_bytes = composed.value().Recast(elem_bits, /*new_bits=*/8)->swizzle;
+  }
+  const auto *sw = swizzle_bytes.get();
   int b_bits = sw->b_bits, m_base = sw->m_base, s_shift = sw->s_shift;
   if (!sw->IsSwizzled()) {
     desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
@@ -2324,8 +2351,10 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &lower_args,
   }
 
   PrimExpr elements = analyzer->Simplify(shared_elements);
+  PrimExpr tma_shared_offset =
+      CompactUnpackedFP4SharedOffset(shared_offset, shared_tensor->dtype);
   PrimExpr shared_addr = shared_tensor.access_ptr(
-      is_load ? 2 : 1, DataType::Handle(), 1, shared_offset, elements);
+      is_load ? 2 : 1, DataType::Handle(), 1, tma_shared_offset, elements);
   PrimExpr global_addr = global_tensor.access_ptr(
       is_load ? 1 : 2, DataType::Handle(), 1, global_offset, elements);
 

@@ -15,6 +15,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <optional>
 #include <string>
 #include <utility>
@@ -32,6 +33,18 @@ using namespace tvm::tl::codegen;
 using namespace ffi;
 
 namespace {
+
+bool EnableSM120CompactUnpackedFP4Shared() {
+  const char *value = std::getenv("TL_SM120_COMPACT_UNPACKED_FP4_SHARED");
+  return value != nullptr && value[0] != '\0' &&
+         !(value[0] == '0' && value[1] == '\0');
+}
+
+bool EnableSM120MmaRawUnpackedFP4AccessPtr() {
+  const char *value = std::getenv("TL_SM120_MMA_RAW_UNPACKED_FP4_ACCESS_PTR");
+  return value != nullptr && value[0] != '\0' &&
+         !(value[0] == '0' && value[1] == '\0');
+}
 
 bool IsValidCPAsyncTransferBytes(int64_t bytes) {
   return bytes == 4 || bytes == 8 || bytes == 16;
@@ -603,6 +616,9 @@ std::string CodeGenTileLangCUDA::Finish() {
   }
   if (need_mma_instruction_h_) {
     decl_stream << "#include <tl_templates/cuda/instruction/mma.h>\n";
+  }
+  if (need_gemm_sm120_h_) {
+    decl_stream << "#include <tl_templates/cuda/gemm_sm120.h>\n";
   }
   if (need_wgmma_instruction_h_) {
     decl_stream << "#include <tl_templates/cuda/instruction/wgmma.h>\n";
@@ -2184,7 +2200,12 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
     }
     if (pointed_to.is_float4_e2m1_unpacked() &&
         (scope == "shared" || scope == "shared.dyn")) {
-      ptr_os << "uint8_t";
+      if (EnableSM120CompactUnpackedFP4Shared()) {
+        enable_fp4_ = true;
+        ptr_os << "fp4_e2_t";
+      } else {
+        ptr_os << "uint8_t";
+      }
     } else {
       PrintType(pointed_to, ptr_os);
     }
@@ -2205,6 +2226,12 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
     return os.str();
   }
   std::string index_str = PrintExpr(index);
+  bool is_compact_scalar_fp4 =
+      buffer_element_dtype.lanes() == 1 &&
+      (buffer_element_dtype.is_float4_e2m1fn() ||
+       (EnableSM120CompactUnpackedFP4Shared() &&
+        buffer_element_dtype.is_float4_e2m1_unpacked() &&
+        (scope == "shared" || scope == "shared.dyn")));
   if ((t.bits() == 4 && !t.is_float4()) || (t.bits() == 1 && t.is_int())) {
     // Scalar int4/uint4 storage is byte-packed (2 logical elements per byte).
     // Vector int4 loads/stores reinterpret the underlying packed bytes as the
@@ -2220,8 +2247,7 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
        << " + " << index_str << ")";
   } else if (t == buffer_element_dtype) {
     int div_factor = 1;
-    if (buffer_element_dtype.is_float4_e2m1fn() &&
-        buffer_element_dtype.lanes() == 1) {
+    if (is_compact_scalar_fp4) {
       div_factor = 2;
     }
     index_str =
@@ -2231,8 +2257,7 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
     // Fix fp4 pointer arithmetic: fp4 elements are 4-bit packed 2 per byte.
     // fp4* + n incorrectly advances n bytes (skipping 2n elements).
     int div_factor = 1;
-    if (buffer_element_dtype.is_float4_e2m1fn() &&
-        buffer_element_dtype.lanes() == 1) {
+    if (is_compact_scalar_fp4) {
       div_factor = 2;
     }
     index_str =
@@ -2652,12 +2677,63 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     print_extern_call_stmt(ss.str(), 0, 1);
   } else if (op->op.same_as(tl::ptx_ldmatrix())) {
+    ICHECK_EQ(op->args.size(), 4U);
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
     std::string func_name = "tl::ptx_ldmatrix_x" + std::to_string(num);
     if (trans == 1)
       func_name += "_trans";
-    print_extern_call_stmt(func_name, 2);
+    arith::Analyzer analyzer;
+    auto print_fp4_packed_local_ptr =
+        [&](const PrimExpr &expr) -> std::optional<std::string> {
+      const VarNode *buffer_var = nullptr;
+      PrimExpr offset;
+
+      if (const auto *call = expr.as<CallNode>()) {
+        if (call->op.same_as(builtin::tvm_access_ptr())) {
+          ICHECK_GE(call->args.size(), 3U);
+          buffer_var = call->args[1].as<VarNode>();
+          offset = call->args[2];
+        } else if (call->op.same_as(tl::access_ptr())) {
+          ICHECK_EQ(call->args.size(), 3U)
+              << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
+          const auto *load = call->args[0].as<BufferLoadNode>();
+          ICHECK(load) << "tl.access_ptr arg0 must be BufferLoad";
+          if (load->indices.size() != 1) {
+            return std::nullopt;
+          }
+          buffer_var = load->buffer->data.get();
+          offset = load->indices[0];
+        } else if (call->op.same_as(builtin::address_of())) {
+          const auto *load = call->args[0].as<BufferLoadNode>();
+          ICHECK(load) << "address_of arg must be BufferLoad";
+          if (load->indices.size() != 1) {
+            return std::nullopt;
+          }
+          buffer_var = load->buffer->data.get();
+          offset = load->indices[0];
+        }
+      }
+
+      if (buffer_var == nullptr || !offset.defined()) {
+        return std::nullopt;
+      }
+      auto it = fp4_packed_buffers_.find(buffer_var);
+      if (it == fp4_packed_buffers_.end()) {
+        return std::nullopt;
+      }
+      PrimExpr packed_offset = analyzer.Simplify(truncdiv(offset, 2));
+      return "(" + it->second + " + (" + this->PrintExpr(packed_offset) + "))";
+    };
+
+    std::string src_ptr = this->PrintExpr(op->args[2]);
+    std::optional<std::string> packed_dst_ptr =
+        print_fp4_packed_local_ptr(op->args[3]);
+    std::string dst_ptr = packed_dst_ptr.has_value()
+                              ? packed_dst_ptr.value()
+                              : this->PrintExpr(op->args[3]);
+    this->PrintIndent();
+    this->stream << func_name << "(" << src_ptr << ", " << dst_ptr << ");\n";
   } else if (op->op.same_as(tl::ptx_stmatrix())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
@@ -3041,6 +3117,423 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(C_ptr)", c_ref);
     replacer.register_rule("(C_offset)", c_bias);
     this->stream << replacer.rewrite(mma_call);
+  } else if (op->op.same_as(tl::ptx_mma_block_scale())) {
+    need_gemm_sm120_h_ = true;
+    // arg 0: accum_dtype
+    // arg 1: shape: mXnXkX
+    // arg 2: A layout: row/col
+    // arg 3: B layout: row/col
+    // arg 4: kind: mxf4nvf4
+    // arg 5: scale_vec_size: 4
+    // arg 6: A dtype: e2m1
+    // arg 7: B dtype: e2m1
+    // arg 8: scale_type: ue4m3
+    // arg 9: A_data pointer
+    // arg 10: A_offset
+    // arg 11: B_data pointer
+    // arg 12: B_offset
+    // arg 13: C_data pointer
+    // arg 14: C_offset
+    // arg 15: scale_a_data
+    // arg 16: scale_b_data
+    // arg 17: scale_a_byte_id
+    // arg 18: scale_a_thread_id
+    // arg 19: scale_b_byte_id
+    // arg 20: scale_b_thread_id
+    ICHECK_EQ(op->args.size(), 21U);
+    std::string accum_dtype = Downcast<StringImm>(op->args[0])->value;
+    std::string shape = Downcast<StringImm>(op->args[1])->value;
+    std::string A_layout = Downcast<StringImm>(op->args[2])->value;
+    std::string B_layout = Downcast<StringImm>(op->args[3])->value;
+    std::string kind = Downcast<StringImm>(op->args[4])->value;
+    int scale_vec_size = static_cast<int>(Downcast<IntImm>(op->args[5])->value);
+    std::string A_dtype = Downcast<StringImm>(op->args[6])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[7])->value;
+    std::string scale_type = Downcast<StringImm>(op->args[8])->value;
+    std::string a_ref = this->PrintExpr(op->args[9]);
+    std::string a_offset = this->PrintExpr(op->args[10]);
+    std::string b_ref = this->PrintExpr(op->args[11]);
+    std::string b_offset = this->PrintExpr(op->args[12]);
+    std::string c_ref = this->PrintExpr(op->args[13]);
+    std::string c_offset = this->PrintExpr(op->args[14]);
+    std::string scale_a = this->PrintExpr(op->args[15]);
+    std::string scale_b = this->PrintExpr(op->args[16]);
+    std::string scale_a_byte_id = this->PrintExpr(op->args[17]);
+    std::string scale_a_thread_id = this->PrintExpr(op->args[18]);
+    std::string scale_b_byte_id = this->PrintExpr(op->args[19]);
+    std::string scale_b_thread_id = this->PrintExpr(op->args[20]);
+
+    bool supported_mxf4nvf4_4x_ue4m3 =
+        accum_dtype == "float32" && shape == "m16n8k64" && A_layout == "row" &&
+        B_layout == "col" && kind == "mxf4nvf4" && scale_vec_size == 4 &&
+        A_dtype == "e2m1" && B_dtype == "e2m1" && scale_type == "ue4m3";
+    ICHECK(supported_mxf4nvf4_4x_ue4m3)
+        << "Unsupported ptx_mma_block_scale configuration: accum_dtype="
+        << accum_dtype << ", shape=" << shape << ", A_layout=" << A_layout
+        << ", B_layout=" << B_layout << ", kind=" << kind
+        << ", scale_vec_size=" << scale_vec_size << ", A_dtype=" << A_dtype
+        << ", B_dtype=" << B_dtype << ", scale_type=" << scale_type
+        << ". Currently supported: f32 m16n8k64 row.col kind::mxf4nvf4 "
+           "scale_vec::4X e2m1.e2m1 f32 ue4m3.";
+
+    auto resolve_fp4_packed_buffer =
+        [&](const PrimExpr &var_expr, std::string &ref, std::string &offset) {
+          if (const VarNode *var = var_expr.as<VarNode>()) {
+            auto it = fp4_packed_buffers_.find(var);
+            if (it != fp4_packed_buffers_.end()) {
+              ref = it->second;
+              offset = "(" + offset + ") / 2";
+            }
+          }
+        };
+    resolve_fp4_packed_buffer(op->args[9], a_ref, a_offset);
+    resolve_fp4_packed_buffer(op->args[11], b_ref, b_offset);
+
+    this->PrintIndent();
+
+    std::string mma_kind_enum = "tl::SM120MmaBlockScaledKind::kMxf4nvf4";
+    std::string scale_type_enum = "tl::SM120MmaScaleType::kUE4M3";
+    std::string mma_call =
+        "tl::sm120_mma_sync_blockscaled<(MMA_KIND), (SCALE_VEC_SIZE), "
+        "(SCALE_TYPE)>("
+        "reinterpret_cast<float*>((C_ptr) + (C_offset)), "
+        "reinterpret_cast<const uint32_t*>((A_ptr) + (A_offset)), "
+        "reinterpret_cast<const uint32_t*>((B_ptr) + (B_offset)), "
+        "reinterpret_cast<const float*>((C_ptr) + (C_offset)), "
+        "(*reinterpret_cast<const uint32_t*>((scale_a))), "
+        "(*reinterpret_cast<const uint32_t*>((scale_b))), "
+        "static_cast<uint16_t>((scale_a_byte_id)), "
+        "static_cast<uint16_t>((scale_a_thread_id)), "
+        "static_cast<uint16_t>((scale_b_byte_id)), "
+        "static_cast<uint16_t>((scale_b_thread_id)));\n";
+
+    tl::codegen::Replacer replacer;
+    replacer.register_rule("(MMA_KIND)", mma_kind_enum);
+    replacer.register_rule("(SCALE_VEC_SIZE)", std::to_string(scale_vec_size));
+    replacer.register_rule("(SCALE_TYPE)", scale_type_enum);
+    replacer.register_rule("(A_ptr)", a_ref);
+    replacer.register_rule("(A_offset)", a_offset);
+    replacer.register_rule("(B_ptr)", b_ref);
+    replacer.register_rule("(B_offset)", b_offset);
+    replacer.register_rule("(C_ptr)", c_ref);
+    replacer.register_rule("(C_offset)", c_offset);
+    replacer.register_rule("(scale_a)", scale_a);
+    replacer.register_rule("(scale_b)", scale_b);
+    replacer.register_rule("(scale_a_byte_id)", scale_a_byte_id);
+    replacer.register_rule("(scale_a_thread_id)", scale_a_thread_id);
+    replacer.register_rule("(scale_b_byte_id)", scale_b_byte_id);
+    replacer.register_rule("(scale_b_thread_id)", scale_b_thread_id);
+    this->stream << replacer.rewrite(mma_call);
+  } else if (op->op.same_as(tl::sm120_mma_blockscaled_cute_consumer_bridge())) {
+    need_gemm_sm120_h_ = true;
+    // arg 0: C fragment pointer
+    // arg 1: C fragment offset
+    // arg 2: A shared tile base pointer
+    // arg 3: B shared tile base pointer
+    // arg 4: SFA shared tile base pointer
+    // arg 5: SFB shared tile base pointer
+    // arg 6: static K64 index inside the block_K tile
+    ICHECK_EQ(op->args.size(), 7U);
+    std::string c_ref = this->PrintExpr(op->args[0]);
+    std::string c_offset = this->PrintExpr(op->args[1]);
+    auto void_ptr_arg = [&](size_t idx) {
+      return "reinterpret_cast<const void*>(" + this->PrintExpr(op->args[idx]) +
+             ")";
+    };
+    auto mma_operand_void_ptr_arg = [&](size_t idx) {
+      if (EnableSM120MmaRawUnpackedFP4AccessPtr()) {
+        std::optional<DataType> element_type =
+            GetAccessPtrElementType(op->args[idx]);
+        const auto *call = op->args[idx].as<CallNode>();
+        if (element_type.has_value() &&
+            element_type.value().is_float4_e2m1_unpacked() && call != nullptr) {
+          if (call->op.same_as(builtin::tvm_access_ptr())) {
+            ICHECK_GE(call->args.size(), 3U);
+            return "reinterpret_cast<const void*>(reinterpret_cast<const "
+                   "char*>(" +
+                   this->PrintExpr(call->args[1]) + ") + (" +
+                   this->PrintExpr(call->args[2]) + "))";
+          }
+          if (call->op.same_as(tl::access_ptr())) {
+            ICHECK_EQ(call->args.size(), 3U) << "tl.access_ptr expects 3 args: "
+                                                "(BufferLoad, extent, rw_mask)";
+            const auto *load = call->args[0].as<BufferLoadNode>();
+            ICHECK(load) << "tl.access_ptr arg0 must be BufferLoad";
+            ICHECK_EQ(load->indices.size(), 1U)
+                << "SM120 raw FP4 bridge access expects 1D shared operand";
+            return "reinterpret_cast<const void*>(reinterpret_cast<const "
+                   "char*>(" +
+                   GetVarID(load->buffer->data.get()) + ") + (" +
+                   this->PrintExpr(load->indices[0]) + "))";
+          }
+          if (call->op.same_as(builtin::address_of())) {
+            ICHECK_EQ(call->args.size(), 1U);
+            const auto *load = call->args[0].as<BufferLoadNode>();
+            ICHECK(load) << "address_of arg must be BufferLoad";
+            ICHECK_EQ(load->indices.size(), 1U)
+                << "SM120 raw FP4 bridge address_of expects 1D shared operand";
+            return "reinterpret_cast<const void*>(reinterpret_cast<const "
+                   "char*>(" +
+                   GetVarID(load->buffer->data.get()) + ") + (" +
+                   this->PrintExpr(load->indices[0]) + "))";
+          }
+        }
+      }
+      return void_ptr_arg(idx);
+    };
+    auto uint32_ptr_arg = [&](size_t idx) {
+      return "reinterpret_cast<const uint32_t*>(" +
+             this->PrintExpr(op->args[idx]) + ")";
+    };
+
+    this->PrintIndent();
+    this->stream << "tl::sm120_mma_blockscaled_cute_consumer_bridge("
+                 << "reinterpret_cast<float*>((" << c_ref << ") + (" << c_offset
+                 << ")), " << mma_operand_void_ptr_arg(2) << ", "
+                 << mma_operand_void_ptr_arg(3) << ", " << uint32_ptr_arg(4)
+                 << ", " << uint32_ptr_arg(5) << ", "
+                 << this->PrintExpr(op->args[6]) << ");\n";
+  } else if (op->op.same_as(tl::sm120_store_full_c_fragment_panel64_bf16())) {
+    need_gemm_sm120_h_ = true;
+    // arg 0: C fragment pointer
+    // arg 1: C fragment offset
+    // arg 2: C shared output slice pointer
+    // arg 3: C shared output slice offset
+    // arg 4: panel id inside the full 128x128 accumulator
+    ICHECK_EQ(op->args.size(), 5U);
+    std::string c_ref = this->PrintExpr(op->args[0]);
+    std::string c_offset = this->PrintExpr(op->args[1]);
+    std::string c_shared_ref = this->PrintExpr(op->args[2]);
+    std::string c_shared_offset = this->PrintExpr(op->args[3]);
+
+    this->PrintIndent();
+    this->stream << "tl::detail::sm120_store_full_c_fragment_panel64_bf16("
+                 << "reinterpret_cast<float const*>((" << c_ref << ") + ("
+                 << c_offset << ")), "
+                 << "(reinterpret_cast<bfloat16_t*>(" << c_shared_ref << ") + ("
+                 << c_shared_offset << ")), " << this->PrintExpr(op->args[4])
+                 << ");\n";
+  } else if (op->op.same_as(
+                 tl::sm120_store_full_c_fragment_panel32_tma_bf16())) {
+    need_gemm_sm120_h_ = true;
+    // arg 0: C fragment pointer
+    // arg 1: C fragment offset
+    // arg 2: C shared output slice pointer
+    // arg 3: C shared output slice offset
+    // arg 4: 32-column panel id inside the full 128x128 accumulator
+    ICHECK_EQ(op->args.size(), 5U);
+    std::string c_ref = this->PrintExpr(op->args[0]);
+    std::string c_offset = this->PrintExpr(op->args[1]);
+    std::string c_shared_ref = this->PrintExpr(op->args[2]);
+    std::string c_shared_offset = this->PrintExpr(op->args[3]);
+
+    this->PrintIndent();
+    this->stream << "tl::detail::sm120_store_full_c_fragment_panel32_tma_bf16("
+                 << "reinterpret_cast<float const*>((" << c_ref << ") + ("
+                 << c_offset << ")), "
+                 << "(reinterpret_cast<bfloat16_t*>(" << c_shared_ref << ") + ("
+                 << c_shared_offset << ")), " << this->PrintExpr(op->args[4])
+                 << ");\n";
+  } else if (op->op.same_as(
+                 tl::sm120_store_full_c_fragment_epi64x32_tma_bf16())) {
+    need_gemm_sm120_h_ = true;
+    // arg 0: C fragment pointer
+    // arg 1: C fragment offset
+    // arg 2: C shared output slice pointer
+    // arg 3: C shared output slice offset
+    // arg 4: 64-row epilogue tile id inside the full 128x128 accumulator
+    // arg 5: 32-column epilogue tile id inside the full 128x128 accumulator
+    ICHECK_EQ(op->args.size(), 6U);
+    std::string c_ref = this->PrintExpr(op->args[0]);
+    std::string c_offset = this->PrintExpr(op->args[1]);
+    std::string c_shared_ref = this->PrintExpr(op->args[2]);
+    std::string c_shared_offset = this->PrintExpr(op->args[3]);
+
+    this->PrintIndent();
+    this->stream << "tl::detail::sm120_store_full_c_fragment_epi64x32_tma_bf16("
+                 << "reinterpret_cast<float const*>((" << c_ref << ") + ("
+                 << c_offset << ")), "
+                 << "(reinterpret_cast<bfloat16_t*>(" << c_shared_ref << ") + ("
+                 << c_shared_offset << ")), " << this->PrintExpr(op->args[4])
+                 << ", " << this->PrintExpr(op->args[5]) << ");\n";
+  } else if (
+      op->op.same_as(
+          tl::sm120_mma_blockscaled_kblock_fulltile_afull_bpanel_owner_wide())) {
+    need_gemm_sm120_h_ = true;
+    // arg 0: C fragment pointer
+    // arg 1: C fragment offset
+    // args 2..5: A ldmatrix source pointers
+    // args 6..9: B ldmatrix source pointers
+    // arg 10: SFA shared base pointer
+    // arg 11: SFB shared base pointer
+    // arg 12: static K64 index inside the block_K tile
+    ICHECK_EQ(op->args.size(), 13U);
+    std::string c_ref = this->PrintExpr(op->args[0]);
+    std::string c_offset = this->PrintExpr(op->args[1]);
+    auto void_ptr_arg = [&](size_t idx) {
+      return "reinterpret_cast<const void*>(" + this->PrintExpr(op->args[idx]) +
+             ")";
+    };
+    auto uint32_ptr_arg = [&](size_t idx) {
+      return "reinterpret_cast<const uint32_t*>(" +
+             this->PrintExpr(op->args[idx]) + ")";
+    };
+
+    this->PrintIndent();
+    this->stream
+        << "tl::sm120_mma_blockscaled_kblock_fulltile_afull_bpanel_owner_wide("
+        << "reinterpret_cast<float*>((" << c_ref << ") + (" << c_offset
+        << ")), " << void_ptr_arg(2) << ", " << void_ptr_arg(3) << ", "
+        << void_ptr_arg(4) << ", " << void_ptr_arg(5) << ", " << void_ptr_arg(6)
+        << ", " << void_ptr_arg(7) << ", " << void_ptr_arg(8) << ", "
+        << void_ptr_arg(9) << ", " << uint32_ptr_arg(10) << ", "
+        << uint32_ptr_arg(11) << ", " << this->PrintExpr(op->args[12])
+        << ");\n";
+  } else if (
+      op->op.same_as(
+          tl::sm120_mma_blockscaled_kblock_fulltile_package_pingpong())) {
+    need_gemm_sm120_h_ = true;
+    // arg 0: C fragment pointer
+    // arg 1: C fragment offset
+    // arg 2: A shared K-stage base
+    // arg 3: B shared K-stage base
+    // arg 4: SFA shared K-stage base
+    // arg 5: SFB shared K-stage base
+    ICHECK_EQ(op->args.size(), 6U);
+    std::string c_ref = this->PrintExpr(op->args[0]);
+    std::string c_offset = this->PrintExpr(op->args[1]);
+    auto void_ptr_arg = [&](size_t idx) {
+      return "reinterpret_cast<const void*>(" + this->PrintExpr(op->args[idx]) +
+             ")";
+    };
+    auto uint32_ptr_arg = [&](size_t idx) {
+      return "reinterpret_cast<const uint32_t*>(" +
+             this->PrintExpr(op->args[idx]) + ")";
+    };
+
+    this->PrintIndent();
+    this->stream
+        << "tl::sm120_mma_blockscaled_kblock_fulltile_package_pingpong("
+        << "reinterpret_cast<float*>((" << c_ref << ") + (" << c_offset
+        << ")), " << void_ptr_arg(2) << ", " << void_ptr_arg(3) << ", "
+        << uint32_ptr_arg(4) << ", " << uint32_ptr_arg(5) << ");\n";
+  } else if (op->op.same_as(
+                 tl::sm120_mma_blockscaled_kblock_fulltile_ab_owner_wide())) {
+    need_gemm_sm120_h_ = true;
+    // arg 0: C fragment pointer
+    // arg 1: C fragment offset
+    // args 2..5: A ldmatrix source pointers
+    // args 6..9: B ldmatrix source pointers
+    // arg 10: SFA shared base pointer
+    // arg 11: SFB shared base pointer
+    // arg 12: static K64 index inside the block_K tile
+    ICHECK_EQ(op->args.size(), 13U);
+    std::string c_ref = this->PrintExpr(op->args[0]);
+    std::string c_offset = this->PrintExpr(op->args[1]);
+    auto void_ptr_arg = [&](size_t idx) {
+      return "reinterpret_cast<const void*>(" + this->PrintExpr(op->args[idx]) +
+             ")";
+    };
+    auto uint32_ptr_arg = [&](size_t idx) {
+      return "reinterpret_cast<const uint32_t*>(" +
+             this->PrintExpr(op->args[idx]) + ")";
+    };
+
+    this->PrintIndent();
+    this->stream << "tl::sm120_mma_blockscaled_kblock_fulltile_ab_owner_wide("
+                 << "reinterpret_cast<float*>((" << c_ref << ") + (" << c_offset
+                 << ")), " << void_ptr_arg(2) << ", " << void_ptr_arg(3) << ", "
+                 << void_ptr_arg(4) << ", " << void_ptr_arg(5) << ", "
+                 << void_ptr_arg(6) << ", " << void_ptr_arg(7) << ", "
+                 << void_ptr_arg(8) << ", " << void_ptr_arg(9) << ", "
+                 << uint32_ptr_arg(10) << ", " << uint32_ptr_arg(11) << ", "
+                 << this->PrintExpr(op->args[12]) << ");\n";
+  } else if (op->op.same_as(tl::sm120_mma_blockscaled_kblock_fulltile())) {
+    need_gemm_sm120_h_ = true;
+    // arg 0: C fragment pointer
+    // arg 1: C fragment offset
+    // args 2..5: A ldmatrix source pointers
+    // args 6..9: B ldmatrix source pointers
+    // args 10..13: SFA scale-word pointers
+    // args 14..17: SFB scale-word pointers
+    // args 18..21: SFB replicate scale-word pointers
+    // arg 22: static K64 index inside the block_K tile
+    ICHECK_EQ(op->args.size(), 23U);
+    std::string c_ref = this->PrintExpr(op->args[0]);
+    std::string c_offset = this->PrintExpr(op->args[1]);
+    auto void_ptr_arg = [&](size_t idx) {
+      return "reinterpret_cast<const void*>(" + this->PrintExpr(op->args[idx]) +
+             ")";
+    };
+    auto mma_operand_void_ptr_arg = [&](size_t idx) {
+      if (EnableSM120MmaRawUnpackedFP4AccessPtr()) {
+        std::optional<DataType> element_type =
+            GetAccessPtrElementType(op->args[idx]);
+        const auto *call = op->args[idx].as<CallNode>();
+        if (element_type.has_value() &&
+            element_type.value().is_float4_e2m1_unpacked() && call != nullptr) {
+          // The SM120 FP4 LDSM helper consumes byte row-start addresses.  The
+          // compact shared path still uses logical FP4 offsets for normal
+          // scalar accesses, but A/B MMA operand pointers must keep the
+          // CUTLASS-compatible byte rowstart instead of applying GetBufferRef's
+          // generic /2 compacting.
+          if (call->op.same_as(builtin::tvm_access_ptr())) {
+            ICHECK_GE(call->args.size(), 3U);
+            return "reinterpret_cast<const void*>(reinterpret_cast<const "
+                   "char*>(" +
+                   this->PrintExpr(call->args[1]) + ") + (" +
+                   this->PrintExpr(call->args[2]) + "))";
+          }
+          if (call->op.same_as(tl::access_ptr())) {
+            ICHECK_EQ(call->args.size(), 3U) << "tl.access_ptr expects 3 args: "
+                                                "(BufferLoad, extent, rw_mask)";
+            const auto *load = call->args[0].as<BufferLoadNode>();
+            ICHECK(load) << "tl.access_ptr arg0 must be BufferLoad";
+            ICHECK_EQ(load->indices.size(), 1U)
+                << "SM120 raw FP4 MMA access expects 1D shared operand";
+            return "reinterpret_cast<const void*>(reinterpret_cast<const "
+                   "char*>(" +
+                   GetVarID(load->buffer->data.get()) + ") + (" +
+                   this->PrintExpr(load->indices[0]) + "))";
+          }
+          if (call->op.same_as(builtin::address_of())) {
+            ICHECK_EQ(call->args.size(), 1U);
+            const auto *load = call->args[0].as<BufferLoadNode>();
+            ICHECK(load) << "address_of arg must be BufferLoad";
+            ICHECK_EQ(load->indices.size(), 1U)
+                << "SM120 raw FP4 MMA address_of expects 1D shared operand";
+            return "reinterpret_cast<const void*>(reinterpret_cast<const "
+                   "char*>(" +
+                   GetVarID(load->buffer->data.get()) + ") + (" +
+                   this->PrintExpr(load->indices[0]) + "))";
+          }
+        }
+      }
+      return void_ptr_arg(idx);
+    };
+    auto uint32_ptr_arg = [&](size_t idx) {
+      return "reinterpret_cast<const uint32_t*>(" +
+             this->PrintExpr(op->args[idx]) + ")";
+    };
+
+    this->PrintIndent();
+    this->stream << "tl::sm120_mma_blockscaled_kblock_fulltile("
+                 << "reinterpret_cast<float*>((" << c_ref << ") + (" << c_offset
+                 << ")), " << mma_operand_void_ptr_arg(2) << ", "
+                 << mma_operand_void_ptr_arg(3) << ", "
+                 << mma_operand_void_ptr_arg(4) << ", "
+                 << mma_operand_void_ptr_arg(5) << ", "
+                 << mma_operand_void_ptr_arg(6) << ", "
+                 << mma_operand_void_ptr_arg(7) << ", "
+                 << mma_operand_void_ptr_arg(8) << ", "
+                 << mma_operand_void_ptr_arg(9) << ", " << uint32_ptr_arg(10)
+                 << ", " << uint32_ptr_arg(11) << ", " << uint32_ptr_arg(12)
+                 << ", " << uint32_ptr_arg(13) << ", " << uint32_ptr_arg(14)
+                 << ", " << uint32_ptr_arg(15) << ", " << uint32_ptr_arg(16)
+                 << ", " << uint32_ptr_arg(17) << ", " << uint32_ptr_arg(18)
+                 << ", " << uint32_ptr_arg(19) << ", " << uint32_ptr_arg(20)
+                 << ", " << uint32_ptr_arg(21) << ", "
+                 << this->PrintExpr(op->args[22]) << ");\n";
   } else if (op->op.same_as(builtin::ptx_mma_sp())) {
     // arg 0: shape: mXnXkX
     // arg 1: A layout: row/col
@@ -4785,6 +5278,10 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
   std::string scope = GetPtrStorageScope(op->buffer->data);
   const VarNode *buffer = op->buffer->data.as<VarNode>();
   DataType alloc_dtype = op->buffer->dtype;
+  bool is_float4_unpacked_shared = alloc_dtype.is_float4_e2m1_unpacked() &&
+                                   (scope == "shared" || scope == "shared.dyn");
+  bool is_compact_unpacked_fp4_shared =
+      is_float4_unpacked_shared && EnableSM120CompactUnpackedFP4Shared();
   if (scope.find("wmma.") == 0) {
     if (scope == "wmma.matrix_a" || scope == "wmma.matrix_b") {
       ICHECK(
@@ -4809,9 +5306,6 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
   } else if (scope == "local.descriptor.tcgen05_instr") {
     stream << "tl::Tcgen05InstrDescriptor " << vid << ";\n";
   } else {
-    bool is_float4_unpacked_shared =
-        alloc_dtype.is_float4_e2m1_unpacked() &&
-        (scope == "shared" || scope == "shared.dyn");
     bool is_fp4_scalar_local = alloc_dtype.is_float4_e2m1fn() &&
                                alloc_dtype.is_scalar() && scope == "local";
     bool is_int4_scalar_local =
@@ -4820,7 +5314,12 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
     if (!is_fp4_scalar_local && !is_int4_scalar_local) {
       PrintStorageScope(scope, stream);
       if (is_float4_unpacked_shared) {
-        stream << "uint8_t";
+        if (is_compact_unpacked_fp4_shared) {
+          enable_fp4_ = true;
+          stream << "fp4_e2_t";
+        } else {
+          stream << "uint8_t";
+        }
       } else {
         PrintType(alloc_dtype, stream);
       }
@@ -4839,8 +5338,12 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
     if (scope.find("wmma.") == 0) {
       constant_size = GetWmmaFragmentSize(scope, buffer, constant_size);
     }
-    if ((alloc_dtype == DataType::Int(4) || alloc_dtype == DataType::UInt(4)) &&
+    if (((alloc_dtype == DataType::Int(4) ||
+          alloc_dtype == DataType::UInt(4)) ||
+         (alloc_dtype.is_float4_e2m1fn() && alloc_dtype.is_scalar())) &&
         scope == "shared") {
+      constant_size = (constant_size + 1) / 2;
+    } else if (is_compact_unpacked_fp4_shared) {
       constant_size = (constant_size + 1) / 2;
     } else if (alloc_dtype == DataType::Int(1) && scope == "shared") {
       constant_size = constant_size / 32;
