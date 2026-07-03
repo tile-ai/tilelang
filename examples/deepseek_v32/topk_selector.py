@@ -66,6 +66,10 @@ def tl_topk_impl(input, index, starts, ends, in_dtype=T.float32, out_dtype=T.int
         T.fill(s_histogram, 0)
         T.fill(s_num_input[0], 0)
 
+        # Default to bin 0 in case no threshold crossing is found, e.g. when
+        # the valid input range has no more than topk elements.
+        T.fill(s_threshold_bin_id, 0)
+
         T.sync_threads()
         for s in T.serial(T.ceildiv(seq_len, BLOCK_SIZE)):
             input_idx = s * BLOCK_SIZE + tx
@@ -87,7 +91,9 @@ def tl_topk_impl(input, index, starts, ends, in_dtype=T.float32, out_dtype=T.int
 
             # find threshold bin id
             T.sync_threads(3, RADIX)
-            if s_histogram[tx] > l_new_topk and s_histogram[tx + 1] <= l_new_topk:
+            # s_histogram[tx] is the suffix count for bins >= tx. Use >=/< to
+            # also catch the exact-boundary case where that count equals topk.
+            if s_histogram[tx] >= l_new_topk and s_histogram[tx + 1] < l_new_topk:
                 s_threshold_bin_id[0] = tx
         T.sync_threads()
         l_threshold_bin_id = s_threshold_bin_id[0]
@@ -146,7 +152,9 @@ def tl_topk_impl(input, index, starts, ends, in_dtype=T.float32, out_dtype=T.int
 
                 # find threshold bin id
                 T.sync_threads(3, RADIX)
-                if s_histogram[tx] > l_new_topk and s_histogram[tx + 1] <= l_new_topk:
+                # s_histogram[tx] is the suffix count for bins >= tx. Use >=/< to
+                # also catch the exact-boundary case where that count equals topk.
+                if s_histogram[tx] >= l_new_topk and s_histogram[tx + 1] < l_new_topk:
                     s_threshold_bin_id[0] = tx
             T.sync_threads()
 
