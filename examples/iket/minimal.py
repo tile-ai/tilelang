@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Minimal IKET example using TileLang frontend APIs on the CUDA backend.
 
 Run with:
@@ -33,14 +32,13 @@ def elementwise_add_with_iket(n: int, threads: int = THREADS, dtype=T.float32):
         B: T.Tensor((n,), dtype),
         C: T.Tensor((n,), dtype),
     ):
-        with T.Kernel(T.ceildiv(n, threads), threads=threads) as bx:
-            with T.iket.range("kernel_total"):
-                for i in T.Parallel(threads):
-                    idx = bx * threads + i
-                    if idx < n:
-                        T.iket.mark("before_store")
-                        C[idx] = A[idx] + B[idx]
-                        T.iket.mark("after_store")
+        with T.Kernel(T.ceildiv(n, threads), threads=threads) as bx, T.iket.range("kernel_total"):
+            for i in T.Parallel(threads):
+                idx = bx * threads + i
+                if idx < n:
+                    T.iket.mark("before_store")
+                    C[idx] = A[idx] + B[idx]
+                    T.iket.mark("after_store")
 
     return main
 
@@ -78,7 +76,7 @@ def main() -> None:
 
     source = kernel.get_kernel_source()
     print("tilelang cuda backend run ok")
-    print(f"frontend_api=True")
+    print("frontend_api=True")
     print(f"instrumented={'__iket_meta_info' in source and 'TL_IKET_EVENT' in source}")
     print(f"source_len={len(source)}")
     print(f"first_values={c[:4].detach().cpu().tolist()}")

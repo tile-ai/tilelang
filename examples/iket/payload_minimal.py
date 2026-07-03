@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Minimal TileLang CUDA IKET runtime payload example."""
 
 import argparse

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Comprehensive TileLang CUDA IKET payload example.
 
 This example covers the current TileLang IKET feature set:
@@ -30,18 +29,17 @@ def add_scale_with_iket(n: int, threads: int = THREADS, dtype=T.float32):
         Scale: T.Tensor((1,), dtype),
         C: T.Tensor((n,), dtype),
     ):
-        with T.Kernel(T.ceildiv(n, threads), threads=threads) as bx:
-            with T.iket.range("block_total"):
-                T.iket.mark("block_enter", payload=T.iket.payload(bx, dtype="int32"))
-                for i in T.Parallel(threads):
-                    idx = bx * threads + i
-                    if idx < n:
-                        T.iket.mark("load_inputs")
-                        value = (A[idx] + B[idx]) * Scale[0]
-                        T.iket.mark("store_index", payload=T.iket.payload(idx, dtype="int32"))
-                        C[idx] = value
-                        T.iket.mark("store_done")
-                T.iket.mark("block_exit", payload=T.iket.payload(bx, dtype="int32"))
+        with T.Kernel(T.ceildiv(n, threads), threads=threads) as bx, T.iket.range("block_total"):
+            T.iket.mark("block_enter", payload=T.iket.payload(bx, dtype="int32"))
+            for i in T.Parallel(threads):
+                idx = bx * threads + i
+                if idx < n:
+                    T.iket.mark("load_inputs")
+                    value = (A[idx] + B[idx]) * Scale[0]
+                    T.iket.mark("store_index", payload=T.iket.payload(idx, dtype="int32"))
+                    C[idx] = value
+                    T.iket.mark("store_done")
+            T.iket.mark("block_exit", payload=T.iket.payload(bx, dtype="int32"))
 
     return main
 

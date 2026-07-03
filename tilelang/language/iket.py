@@ -15,7 +15,8 @@ import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Sequence
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 import tvm_ffi
 from tvm import tirx
@@ -440,10 +441,7 @@ def _normalize_payload_dtype(dtype: str) -> str:
 
 def _validate_runtime_payload_dtype(dtype: str) -> None:
     if dtype not in ("int32", "uint32", "float32"):
-        raise NotImplementedError(
-            "TileLang IKET runtime payload capture currently supports only "
-            "int32, uint32, and float32 payloads."
-        )
+        raise NotImplementedError("TileLang IKET runtime payload capture currently supports only int32, uint32, and float32 payloads.")
 
 
 def _payload_iket_id(dtype: str) -> int:
@@ -518,10 +516,7 @@ def _range_attrs(name: str, range_id: int) -> list[int]:
 
 def _c_array(symbol: str, data: list[int]) -> str:
     values = ", ".join(str(x) for x in data)
-    return (
-        f"__device__ __attribute__((used, aligned(1))) "
-        f"unsigned char {symbol}[{len(data)}] = {{{values}}};"
-    )
+    return f"__device__ __attribute__((used, aligned(1))) unsigned char {symbol}[{len(data)}] = {{{values}}};"
 
 
 def _metadata_decls() -> str:
@@ -565,7 +560,7 @@ def _metadata_decls() -> str:
     return "\n".join(lines)
 
 
-_IKET_EVENT_MACRO = r'''
+_IKET_EVENT_MACRO = r"""
 #define TL_IKET_EVENT(ID) \
   asm volatile("{\n\t" \
                ".reg .b32 r, t;\n\t" \
@@ -604,7 +599,7 @@ _IKET_EVENT_MACRO = r'''
   __tl_iket_payload.f = (float)(VALUE); \
   TL_IKET_EVENT_PAYLOAD_U32(ID, __tl_iket_payload.u); \
 } while (0)
-'''
+"""
 
 
 def _inject_iket_cuda(code: str) -> str:
@@ -619,10 +614,6 @@ def _inject_iket_cuda(code: str) -> str:
 
     prefix = (
         "// __tilelang_iket_frontend__\n"
-        "// Experimental IKET metadata emitted from TileLang frontend APIs.\n"
-        + _metadata_decls()
-        + "\n"
-        + _IKET_EVENT_MACRO
-        + "\n"
+        "// Experimental IKET metadata emitted from TileLang frontend APIs.\n" + _metadata_decls() + "\n" + _IKET_EVENT_MACRO + "\n"
     )
     return code[:insert_at] + prefix + code[insert_at:]
