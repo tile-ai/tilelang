@@ -200,10 +200,10 @@ matching `.pftrace`.
 
 ## Trace Screenshot
 
-The screenshot below is captured from the real Perfetto UI after loading the
-all-features IKET trace. It uses Perfetto's Query (SQL) view to summarize the
-decoded TileLang IKET events: range slices, no-payload markers, runtime payload
-markers, and payload value ranges from the same kernel launch.
+The screenshot below is captured from the real Perfetto Timeline after loading
+the all-features IKET trace. The `IKET events` track visualizes decoded TileLang
+range slices, no-payload markers, and runtime payload markers from the same
+kernel launch.
 
 <p align="center">
   <img
