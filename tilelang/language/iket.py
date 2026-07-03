@@ -331,20 +331,6 @@ def session(
     )
 
 
-# Backward-compatible flat names for existing experiments.
-iket_enable = enable
-iket_disable = disable
-iket_set_output_dir = set_output_dir
-iket_enable_runtime_payloads = enable_runtime_payloads
-iket_disable_runtime_payloads = disable_runtime_payloads
-iket_reset = reset
-iket_mark = mark
-iket_range_push = range_push
-iket_range_pop = range_pop
-iket_range_start = range_start
-iket_range_end = range_end
-
-
 def _payload_spec(value: Any) -> PayloadSpec | None:
     if value is None:
         return None

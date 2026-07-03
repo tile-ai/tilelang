@@ -205,7 +205,13 @@ all-features example. It presents the Perfetto-style timeline view with the rang
 lane, instant marker lanes, runtime payload markers, event counts, and payload
 schema from the same kernel launch.
 
-![IKET Perfetto all-features trace](assets/iket_perfetto_all_features.png)
+<p align="center">
+  <img
+    src="./assets/iket_perfetto_all_features.png"
+    alt="IKET Perfetto all-features trace"
+    width="100%"
+  />
+</p>
 
 ## Inspecting Payloads Programmatically
 
