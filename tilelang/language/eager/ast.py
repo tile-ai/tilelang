@@ -3,7 +3,7 @@ import ast
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Generic, Any, Literal, ParamSpec, TypeVar, TypeAlias, cast
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
 from collections.abc import Iterable
 
@@ -15,6 +15,7 @@ from .. import dtypes
 
 _span_attrs = ["lineno", "col_offset", "end_lineno", "end_col_offset"]
 Span: TypeAlias = tuple[int, int, int, int]
+QuoteReplacement: TypeAlias = ast.AST | list[ast.stmt] | None
 
 
 def ast_has_span(ast: ast.AST) -> bool:
@@ -35,28 +36,30 @@ def ast_set_span(ast: ast.AST, span: Span | None):
 
 
 class QuoteVisitor(ast.NodeTransformer):
-    def __init__(self, names: dict[str, Any], passes: list[Any] | None = None, span: Span | None = None):
+    def __init__(self, names: dict[str, QuoteReplacement], passes: Sequence[QuoteReplacement] | None = None, span: Span | None = None):
         self.names = names
-        self.passes = passes or []
+        self.passes = list(passes) if passes is not None else []
         self.span = span
 
-    def generic_visit(self, node: ast.AST) -> Any:
+    def generic_visit(self, node: ast.AST) -> ast.AST | list[ast.AST] | None:
         if self.span is not None:
             ast_set_span(node, self.span)
         return super().generic_visit(node)
 
-    def visit_Name(self, node: ast.Name) -> Any:
+    def visit_Name(self, node: ast.Name) -> QuoteReplacement:
         if node.id in self.names:
             return self.names[node.id]
         else:
             return node
 
-    def visit_Pass(self, node: ast.Pass) -> Any:
+    def visit_Pass(self, node: ast.Pass) -> QuoteReplacement:
         item = self.passes.pop(0)
         return item if item else node
 
 
-def quote(expr: str, *, passes: list[Any] | None = None, span: ast.AST | Span | None = None, **kws: Any) -> list[ast.stmt]:
+def quote(
+    expr: str, *, passes: Sequence[QuoteReplacement] | None = None, span: ast.AST | Span | None = None, **kws: QuoteReplacement
+) -> list[ast.stmt]:
     tree = ast.parse(expr)
     if isinstance(span, ast.AST):
         span = ast_get_span(span)
@@ -64,13 +67,15 @@ def quote(expr: str, *, passes: list[Any] | None = None, span: ast.AST | Span | 
     return tree.body
 
 
-def quote1(expr: str, *, passes: list[Any] | None = None, span: ast.AST | Span | None = None, **kws: Any) -> ast.stmt:
+def quote1(
+    expr: str, *, passes: Sequence[QuoteReplacement] | None = None, span: ast.AST | Span | None = None, **kws: QuoteReplacement
+) -> ast.stmt:
     res = quote(expr, passes=passes, span=span, **kws)
     assert len(res) == 1
     return res[0]
 
 
-def quote_expr(expr: str, **kws) -> ast.expr:
+def quote_expr(expr: str, **kws: QuoteReplacement) -> ast.expr:
     res = quote1(expr, **kws)
     assert isinstance(res, ast.Expr)
     return res.value
