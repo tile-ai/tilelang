@@ -2,8 +2,8 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Generic, Any, Literal, ParamSpec, TypeVar
-from collections.abc import Callable
+from typing import Generic, Any, Literal, ParamSpec, TypeVar, cast
+from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
 from collections.abc import Iterable
 
@@ -307,7 +307,7 @@ class DSLMutator(ast.NodeTransformer):
             f"for {tmp} in __tb.ctx_for(range):\n  pass\n",
             target=node.target,
             range=node.iter,
-            passes=[stmts + node.body],
+            passes=[*stmts, *node.body],
             span=node,
         )
 
@@ -319,7 +319,7 @@ class DSLMutator(ast.NodeTransformer):
         node = self.generic_visit(node)
         return quote("if __tb.ctx_break(): break", span=node)
 
-    def _emit_assign_target(self, target: ast.expr, rval: ast.expr, annot: ast.expr = None) -> list[ast.AST]:
+    def _emit_assign_target(self, target: ast.expr, rval: ast.expr, annot: ast.expr = None) -> Sequence[ast.AST]:
         if isinstance(target, ast.Name):
             if annot is None:
                 return quote(f"name = __tb.bind('{target.id}', value)", name=target, value=rval, span=target)
@@ -350,7 +350,7 @@ class DSLMutator(ast.NodeTransformer):
             # flatten nested tuple into a list of (tmp_name, target)
             unpacked = []
 
-            def _visit_target(target: ast.expr) -> str:
+            def _visit_target(target: ast.expr) -> ast.expr:
                 if isinstance(target, (ast.Name, ast.Subscript)):
                     tmp = self.get_tmp()
                     unpacked.append((tmp, target))
@@ -374,7 +374,7 @@ class DSLMutator(ast.NodeTransformer):
 
             def flush_binds():
                 if bind_lvals:
-                    stmts.append(quote1(f"{', '.join(bind_lvals)}, = {', '.join(bind_rvals)},", span=target))
+                    stmts.append(cast(ast.Assign, quote1(f"{', '.join(bind_lvals)}, = {', '.join(bind_rvals)},", span=target)))
                     bind_lvals.clear()
                     bind_rvals.clear()
 
@@ -415,14 +415,14 @@ class DSLMutator(ast.NodeTransformer):
         node = self.generic_visit(node)
         rval = node.value
         if len(node.targets) == 1:
-            return self._emit_assign_target(node.targets[0], rval)
+            return list(self._emit_assign_target(node.targets[0], rval))
         else:
             tmp_name = self.get_tmp()
             tmp_store = ast.Name(tmp_name, ctx=ast.Store())
             tmp_load = ast.Name(tmp_name, ctx=ast.Load())
-            ast_set_span(tmp_store, node.targets[0])
-            ast_set_span(tmp_load, node.targets[0])
-            stmt = self._emit_assign_target(tmp_store, rval)
+            ast_set_span(tmp_store, ast_get_span(node.targets[0]))
+            ast_set_span(tmp_load, ast_get_span(node.targets[0]))
+            stmt = list(self._emit_assign_target(tmp_store, rval))
             for target in node.targets:
                 stmt.extend(self._emit_assign_target(target, tmp_load))
             return stmt
