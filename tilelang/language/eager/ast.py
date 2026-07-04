@@ -486,10 +486,7 @@ class DSLMutator(ast.NodeTransformer):
         for arg in all_args:
             name = arg.arg
             arg_names.add(name)
-            if arg.annotation is not None:
-                arg_stmt = quote1(f'{name} = __tb.arg("{name}", {name})', span=arg)
-            else:
-                arg_stmt = quote1(f'{name} = __tb.arg("{name}", {name})', span=arg)
+            arg_stmt = quote1(f'{name} = __tb.arg("{name}", {name})', span=arg)
             arg.annotation = None
             stmts.append(arg_stmt)
         # trying to find `A: T.Tensor, b: T.float32` like type hints
