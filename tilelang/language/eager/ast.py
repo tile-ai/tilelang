@@ -600,6 +600,7 @@ class DSLMutator(ast.NodeTransformer):
 
                 if eval_res is Kernel or eval_res is ClusterKernel:
                     is_kernel_ctx = True
+                    break
         node = self.generic_visit(node)
         for expr in node.items:
             expr.context_expr = quote_expr("__tb.ctx_with(e)", e=expr.context_expr, span=expr)
