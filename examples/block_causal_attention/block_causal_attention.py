@@ -44,9 +44,10 @@ def _bwd_allowed_64x64_mask32(query_tile, key_tile, query_col, key_row, region_t
 
     noisy_diag = (1 - key_clean) * T.if_then_else(query_half == key_half, 1, 0)
     clean_full = key_clean * T.if_then_else(query_local_tile > key_local_tile, 1, 0)
-    clean_boundary = key_clean * T.if_then_else(query_local_tile == key_local_tile, 1, 0) * (
-        query_clean * T.if_then_else(query_half >= key_half, 1, 0)
-        + (1 - query_clean) * T.if_then_else(query_half > key_half, 1, 0)
+    clean_boundary = (
+        key_clean
+        * T.if_then_else(query_local_tile == key_local_tile, 1, 0)
+        * (query_clean * T.if_then_else(query_half >= key_half, 1, 0) + (1 - query_clean) * T.if_then_else(query_half > key_half, 1, 0))
     )
     return noisy_diag + clean_full + clean_boundary
 
@@ -360,8 +361,7 @@ def _bwd_dkv_template(
 
                 needs_mask = T.if_then_else(by < region_tiles, 1, 0) + T.if_then_else(
                     by >= region_tiles,
-                    T.if_then_else(q_tile == first_q_tile, 1, 0)
-                    + T.if_then_else(q_tile == region_tiles + first_q_tile, 1, 0),
+                    T.if_then_else(q_tile == first_q_tile, 1, 0) + T.if_then_else(q_tile == region_tiles + first_q_tile, 1, 0),
                     0,
                 )
                 if needs_mask != 0:
