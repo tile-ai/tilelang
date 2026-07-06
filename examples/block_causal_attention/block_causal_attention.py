@@ -26,9 +26,7 @@ def _diffusion_allowed(q_abs, k_abs, half_len: int, mask_block: int):
     k_local = T.if_then_else(k_abs >= half_len, k_abs - half_len, k_abs)
     q_block = q_local // mask_block
     k_block = k_local // mask_block
-
-    same_region = T.if_then_else(q_clean == k_clean, 1, 0)
-    block_diagonal = T.if_then_else(q_block == k_block, 1, 0) * same_region
+    block_diagonal = T.if_then_else(q_block == k_block, 1, 0) * (1 - q_clean) * (1 - k_clean)
     offset_causal = T.if_then_else(q_block > k_block, 1, 0) * (1 - q_clean) * k_clean
     clean_causal = T.if_then_else(q_block >= k_block, 1, 0) * q_clean * k_clean
     return block_diagonal + offset_causal + clean_causal
@@ -520,8 +518,7 @@ def block_causal_attention_ref(query, key, value, mask_block_size: int, softmax_
     q_block = q_local // mask_block_size
     k_block = k_local // mask_block_size
 
-    same_region = q_clean == k_clean
-    block_diagonal = (q_block == k_block) & same_region
+    block_diagonal = T.if_then_else(q_block == k_block, 1, 0) & (~q_clean) & (~k_clean)
     offset_causal = (q_block > k_block) & ~q_clean & k_clean
     clean_causal = (q_block >= k_block) & q_clean & k_clean
     attn_mask = block_diagonal | offset_causal | clean_causal
