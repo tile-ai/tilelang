@@ -51,23 +51,27 @@ def test_cuda_binary_cache_hit_skips_nvcc_compile(monkeypatch, tmp_path):
     target = Target({"kind": "cuda", "arch": "sm_90a"})
     source = 'extern "C" __global__ void kernel() {}'
 
+    fast_math_pass_configs = {
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+        tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ["--extra-device-vectorization"],
+    }
+
     first = lower.tilelang_callback_cuda_compile(source, target)
     second = lower.tilelang_callback_cuda_compile(source, target)
-    third = lower.tilelang_callback_cuda_compile(
-        source,
-        target,
-        {
-            tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-            tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ["--extra-device-vectorization"],
-        },
-    )
+    # Different compiler options (e.g. --use_fast_math) change the generated
+    # SASS without changing the source, so they must NOT share a cache entry.
+    third = lower.tilelang_callback_cuda_compile(source, target, fast_math_pass_configs)
+    fourth = lower.tilelang_callback_cuda_compile(source, target, fast_math_pass_configs)
 
     assert bytes(first) == b"fake-cubin"
     assert bytes(second) == b"fake-cubin"
     assert bytes(third) == b"fake-cubin"
-    assert len(compile_calls) == 1
+    assert bytes(fourth) == b"fake-cubin"
+    # first compiles, second hits; third compiles (new options), fourth hits
+    assert len(compile_calls) == 2
+    assert compile_calls[0][3] != compile_calls[1][3]
     cache_files = list((tmp_path / "cache").glob("*/cuda-binaries/*.cubin"))
-    assert len(cache_files) == 1
+    assert len(cache_files) == 2
 
 
 def test_disk_cache_load_failure_is_cache_miss(monkeypatch, tmp_path):
