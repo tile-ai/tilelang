@@ -64,7 +64,18 @@ Useful cmake options:
 
 ## Editable Installs
 
-**Never use `pip install -e .`** (editable install). When running Python from the repo root, the local `./tilelang` directory is imported instead of the installed copy (because `.` is on `sys.path` by default). This makes editable installs unnecessary. Avoid `pip install -e .` as it can cause import confusion with this project's layout.
+`pip install -e .` is a supported development install, and is what `README.md`, `CONTRIBUTING.md`, and `docs/get_started/Installation.md` recommend for development:
+
+```bash
+pip install -r requirements-dev.txt
+pip install -e . -v --no-build-isolation
+```
+
+Notes specific to this repo's layout:
+
+- When Python is run from the repo root, the local `./tilelang` directory is imported instead of any copy installed into `site-packages` (because the repo root is on `sys.path` ahead of `site-packages`). This is by design: `tilelang/env.py` detects a dev checkout (when `3rdparty/` is not inside the package dir) and loads native libraries from `build/lib/` and `build/tvm/`, logging `Loading tilelang libs from dev root: <repo>/build`.
+- Because of the above, an editable install and a plain `PYTHONPATH=$(pwd)` import resolve to the same on-disk `./tilelang`. Either is fine; pick based on whether you want pip to manage metadata/deps.
+- For pure C++ iteration (no Python metadata needed), the `cmake + PYTHONPATH` flow above is faster and avoids re-running pip entirely.
 
 ## Running Tests
 
