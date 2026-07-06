@@ -73,6 +73,7 @@ def do_bench(
     backend: Literal["event", "cupti", "cudagraph"] = "event",
     return_mode: Literal["min", "max", "mean", "median"] = "mean",
     device: int | torch.device | None = None,
+    cache_size: int = int(256e6),
 ) -> float | list[float]:
     """Benchmark the runtime of a PyTorch function with L2 cache management.
 
@@ -95,6 +96,7 @@ def do_bench(
         device: Optional CUDA device to benchmark on. When provided, CUDA
             events, streams, cache buffers, and synchronizations are scoped to
             that device.
+        cache_size: L2 cache flush buffer size in bytes (default: 256MB)
 
     Returns:
         Runtime in milliseconds (float) or list of quantile values if quantiles specified
@@ -115,6 +117,7 @@ def do_bench(
                 backend=backend,
                 return_mode=return_mode,
                 device_idx=device_idx,
+                cache_size=cache_size,
             )
 
     return _do_bench_impl(
@@ -128,6 +131,7 @@ def do_bench(
         backend=backend,
         return_mode=return_mode,
         device_idx=None,
+        cache_size=cache_size,
     )
 
 
@@ -170,16 +174,17 @@ def _do_bench_impl(
     backend: Literal["event", "cupti", "cudagraph"],
     return_mode: Literal["min", "max", "mean", "median"],
     device_idx: int | None,
+    cache_size: int,
 ) -> float | list[float]:
     # Initial function call and synchronization
     fn()
     _cuda_synchronize(device_idx)
 
-    # Create L2 cache flush buffer (256 MB)
+    # Create L2 cache flush buffer (`cache_size` bytes)
     # Fast flush uses int32 (4 bytes), regular uses int8 (1 byte)
-    cache_size = int(256e6 // 4) if fast_flush else int(256e6)
+    cache_numel = cache_size // 4 if fast_flush else cache_size
     cache_dtype = torch.int if fast_flush else torch.int8
-    cache = torch.empty(cache_size, dtype=cache_dtype, device=_cache_device(device_idx))
+    cache = torch.empty(cache_numel, dtype=cache_dtype, device=_cache_device(device_idx))
 
     # Estimate kernel runtime with 5 iterations
     start_event = torch.cuda.Event(enable_timing=True)
