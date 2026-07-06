@@ -518,7 +518,7 @@ def block_causal_attention_ref(query, key, value, mask_block_size: int, softmax_
     q_block = q_local // mask_block_size
     k_block = k_local // mask_block_size
 
-    block_diagonal = T.if_then_else(q_block == k_block, 1, 0) & (~q_clean) & (~k_clean)
+    block_diagonal = (q_block == k_block) & (~q_clean) & (~k_clean)
     offset_causal = (q_block > k_block) & ~q_clean & k_clean
     clean_causal = (q_block >= k_block) & q_clean & k_clean
     attn_mask = block_diagonal | offset_causal | clean_causal
