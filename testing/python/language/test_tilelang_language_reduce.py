@@ -350,6 +350,38 @@ def test_reduce_absmax_bf16_noncontiguous_packed_layout_regression():
     torch.testing.assert_close(B, ref, atol=0, rtol=0)
 
 
+@tilelang.testing.requires_cuda
+def test_reduce_sum_reshape_straddle_layout_regression():
+    tile_m = 2
+    hidden = 192
+    group = 6
+    group_k = 32
+    threads = 128
+
+    @T.prim_func
+    def kernel(
+        A: T.Tensor((tile_m, hidden), T.float32),
+        B: T.Tensor((tile_m, group), T.float32),
+    ):
+        with T.Kernel(1, threads=threads):
+            src = T.alloc_fragment((tile_m, hidden), T.float32)
+            dst = T.alloc_fragment((tile_m, group), T.float32)
+
+            for i, j in T.Parallel(tile_m, hidden):
+                src[i, j] = A[i, j]
+
+            src_reshaped = T.reshape(src, (tile_m, group, group_k))
+            T.reduce_sum(src_reshaped, dst, dim=2)
+
+            for i, g in T.Parallel(tile_m, group):
+                B[i, g] = dst[i, g]
+
+    A = torch.arange(1, tile_m * hidden + 1, dtype=torch.float32, device="cuda").reshape(tile_m, hidden)
+    B = _compile(kernel)(A)
+    ref = A.reshape(tile_m, group, group_k).sum(dim=2)
+    torch.testing.assert_close(B, ref, atol=1e-3, rtol=1e-3)
+
+
 # ---------------------------------------------------------------------------
 # nan_propagate tests – packed (vsize=2) path for bf16/fp16
 # ---------------------------------------------------------------------------
