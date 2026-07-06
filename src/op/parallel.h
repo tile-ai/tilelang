@@ -157,6 +157,11 @@ private:
   Fragment ChooseBestCandidate(const Fragment &candidate_from_buffer,
                                const Fragment &candidate_from_plan,
                                const LayoutInferArgs &layout_args) const;
+  // Return true if partitioning by `candidate` would make any known fragment
+  // buffer's physical index depend on the CUDA thread variable.
+  bool
+  HasThreadDependentFragmentIndex(const Fragment &candidate,
+                                  const LayoutInferArgs &layout_args) const;
   // (No helper needed anymore; annotations are parsed once in ctor and adopted
   // inside InferLayout.)
   // Compute loop layout from a source buffer's fragment mapping.

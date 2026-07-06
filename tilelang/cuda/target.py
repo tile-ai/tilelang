@@ -34,7 +34,7 @@ def _detect_torch_cuda_arch() -> str | None:
 
     if not torch.cuda.is_available():
         return None
-    cap = torch.cuda.get_device_capability(0)
+    cap = torch.cuda.get_device_capability(torch.cuda.current_device())
     return f"sm_{nvcc.get_target_arch(cap)}" if cap else None
 
 

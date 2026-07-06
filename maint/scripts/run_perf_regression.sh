@@ -18,6 +18,9 @@
 #   BASE_REF             Baseline git ref (default: origin/main)
 #   SKIP_BUILD_NEW       Reuse current venv when set to 1
 #   SKIP_BUILD_OLD       Reuse baseline venv when set to 1
+#   WHEEL_CACHE          Reuse/build cached TileLang wheels when set to 1 (default: 1)
+#   WHEEL_CACHE_DIR      Wheel cache directory (default: $HOME/.tilelang/perf-regression/wheels)
+#   REFRESH_WHEEL_CACHE  Rebuild selected wheels even if cached when set to 1
 #   REFRESH              Rerun selected cases and overwrite perf cache when set to 1
 #   NO_CACHE             Disable perf result cache when set to 1
 #   FAIL_ON_ERROR        Exit non-zero if either run has failed cases when set to 1
@@ -31,7 +34,7 @@
 set -euo pipefail
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-    sed -n '1,29p' "$0"
+    awk '/^set -euo pipefail$/ {exit} {print}' "$0"
     exit 0
 fi
 
@@ -55,6 +58,8 @@ CURRENT_LABEL="${CURRENT_LABEL:-current}"
 
 SKIP_BUILD_NEW="${SKIP_BUILD_NEW:-0}"
 SKIP_BUILD_OLD="${SKIP_BUILD_OLD:-0}"
+WHEEL_CACHE="${WHEEL_CACHE:-1}"
+REFRESH_WHEEL_CACHE="${REFRESH_WHEEL_CACHE:-0}"
 REFRESH="${REFRESH:-0}"
 NO_CACHE="${NO_CACHE:-0}"
 FAIL_ON_ERROR="${FAIL_ON_ERROR:-0}"
@@ -64,6 +69,14 @@ FAIL_ON_MISSING="${FAIL_ON_MISSING:-0}"
 UPDATE_SUBMODULES="${UPDATE_SUBMODULES:-1}"
 INHERIT_PYTHONPATH="${INHERIT_PYTHONPATH:-0}"
 EXTRA_PYTHONPATH="${EXTRA_PYTHONPATH:-}"
+
+if [[ -z "${WHEEL_CACHE_DIR:-}" ]]; then
+    if [[ -n "${HOME:-}" ]]; then
+        WHEEL_CACHE_DIR="${HOME%/}/.tilelang/perf-regression/wheels"
+    else
+        WHEEL_CACHE_DIR="${WORK_DIR%/}/wheel-cache"
+    fi
+fi
 
 mkdir -p "${WORK_DIR}"
 WORK_DIR="$(cd "${WORK_DIR}" && pwd)"
@@ -117,6 +130,7 @@ echo "Work dir:       ${WORK_DIR}"
 echo "Python version: ${PYTHON_VERSION}"
 echo "Baseline ref:   ${BASE_REF}"
 echo "Filters:        ${REGRESSION_ARGS[*]:-(all)}"
+echo "Wheel cache:    ${WHEEL_CACHE} (${WHEEL_CACHE_DIR})"
 echo ""
 
 cd "${REPO_ROOT}"
@@ -169,6 +183,191 @@ create_venv() {
     fi
 }
 
+hash_stdin() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | awk '{print $1}'
+    else
+        shasum -a 256 | awk '{print $1}'
+    fi
+}
+
+repo_has_untracked_files() {
+    local repo_dir="$1"
+    if [[ -n "$(git -C "${repo_dir}" ls-files --others --exclude-standard)" ]]; then
+        return 0
+    fi
+
+    local submodule_status
+    submodule_status="$(
+        git -C "${repo_dir}" submodule foreach --quiet --recursive \
+            'git ls-files --others --exclude-standard | sed "s#^#$name/#"' 2>/dev/null || true
+    )"
+    [[ -n "${submodule_status}" ]]
+}
+
+repo_source_key() {
+    local repo_dir="$1"
+    local commit
+    commit="$(git -C "${repo_dir}" rev-parse --verify HEAD)"
+
+    if git -C "${repo_dir}" diff --quiet --ignore-submodules=none &&
+        git -C "${repo_dir}" diff --cached --quiet --ignore-submodules=none &&
+        [[ -z "$(git -C "${repo_dir}" status --porcelain=v1 --untracked-files=no)" ]]; then
+        printf '%s-clean\n' "${commit}"
+        return
+    fi
+
+    local digest
+    digest="$(
+        {
+            git -C "${repo_dir}" rev-parse --verify HEAD
+            git -C "${repo_dir}" status --porcelain=v1 --untracked-files=no
+            git -C "${repo_dir}" diff --binary --no-ext-diff --submodule=short
+            git -C "${repo_dir}" diff --cached --binary --no-ext-diff --submodule=short
+            git -C "${repo_dir}" submodule status --recursive 2>/dev/null || true
+            git -C "${repo_dir}" submodule foreach --quiet --recursive '
+                printf "submodule %s\n" "$name"
+                git rev-parse --verify HEAD
+                git status --porcelain=v1 --untracked-files=no
+                git diff --binary --no-ext-diff
+                git diff --cached --binary --no-ext-diff
+            ' 2>/dev/null || true
+        } | hash_stdin
+    )"
+    printf '%s-dirty-%s\n' "${commit}" "${digest:0:16}"
+}
+
+wheel_cache_metadata() {
+    local repo_dir="$1"
+    local python_bin="$2"
+
+    printf 'schema=tilelang-perf-wheel-cache-v1\n'
+    printf 'source_key=%s\n' "$(repo_source_key "${repo_dir}")"
+    "${python_bin}" - <<'PY'
+import platform
+import sys
+import sysconfig
+
+print(f"python_version={sys.version.split()[0]}")
+print(f"python_cache_tag={sys.implementation.cache_tag or ''}")
+print(f"python_soabi={sysconfig.get_config_var('SOABI') or ''}")
+print(f"python_platform={sysconfig.get_platform()}")
+print(f"platform_system={platform.system()}")
+print(f"platform_machine={platform.machine()}")
+PY
+    printf 'uname_s=%s\n' "$(uname -s)"
+    printf 'uname_m=%s\n' "$(uname -m)"
+    if command -v cmake >/dev/null 2>&1; then
+        cmake --version | sed -n '1s/^cmake version /cmake_version=/p'
+    fi
+    if command -v ninja >/dev/null 2>&1; then
+        printf 'ninja_version=%s\n' "$(ninja --version)"
+    fi
+    if command -v nvcc >/dev/null 2>&1; then
+        nvcc --version | sed -n 's/.*release \([^,]*\).*/nvcc_release=\1/p'
+    fi
+    env | LC_ALL=C sort | grep -E '^(CMAKE_|SKBUILD_|USE_CUDA=|USE_ROCM=|USE_METAL=|TILELANG_USE_CUDA_STUBS=|WITH_PIP_CUDA_TOOLCHAIN=|CUDA_HOME=|CUDA_PATH=|CUDA_VERSION=|CUDACXX=|HIP_PATH=|ROCM_PATH=|NO_VERSION_LABEL=|NO_TOOLCHAIN_VERSION=|NO_GIT_VERSION=)' || true
+}
+
+build_wheel_to_dir() {
+    local repo_dir="$1"
+    local venv_dir="$2"
+    local build_dir="$3"
+    local wheel_dir="$4"
+
+    rm -rf "${build_dir}"
+    mkdir -p "$(dirname "${build_dir}")" "${wheel_dir}"
+
+    if command -v uv >/dev/null 2>&1; then
+        uv build -v --wheel --python "${venv_dir}/bin/python" -C "build-dir=${build_dir}" --out-dir "${wheel_dir}" "${repo_dir}"
+    else
+        "${venv_dir}/bin/python" -m pip wheel -v --no-deps -C "build-dir=${build_dir}" --wheel-dir "${wheel_dir}" "${repo_dir}"
+    fi
+}
+
+install_wheel_file() {
+    local venv_dir="$1"
+    local wheel_file="$2"
+
+    if [[ -z "${wheel_file}" || ! -f "${wheel_file}" ]]; then
+        echo "Wheel file not found: ${wheel_file}" >&2
+        exit 1
+    fi
+
+    if command -v uv >/dev/null 2>&1; then
+        uv pip install -v "${wheel_file}"
+    else
+        "${venv_dir}/bin/python" -m pip install -v "${wheel_file}"
+    fi
+}
+
+install_repo_wheel() {
+    local label="$1"
+    local repo_dir="$2"
+    local venv_dir="$3"
+    local build_dir="$4"
+
+    if [[ "${WHEEL_CACHE}" != "1" ]]; then
+        echo "Wheel cache disabled for ${label}."
+        local uncached_dir="${build_dir}-wheel"
+        rm -rf "${uncached_dir}"
+        build_wheel_to_dir "${repo_dir}" "${venv_dir}" "${build_dir}" "${uncached_dir}"
+        local uncached_wheel
+        uncached_wheel="$(find "${uncached_dir}" -maxdepth 1 -type f -name '*.whl' | sort | tail -n 1)"
+        install_wheel_file "${venv_dir}" "${uncached_wheel}"
+        return
+    fi
+
+    if repo_has_untracked_files "${repo_dir}"; then
+        echo "Wheel cache skipped for ${label}; untracked source files are present."
+        local untracked_dir="${build_dir}-wheel"
+        rm -rf "${untracked_dir}"
+        build_wheel_to_dir "${repo_dir}" "${venv_dir}" "${build_dir}" "${untracked_dir}"
+        local untracked_wheel
+        untracked_wheel="$(find "${untracked_dir}" -maxdepth 1 -type f -name '*.whl' | sort | tail -n 1)"
+        install_wheel_file "${venv_dir}" "${untracked_wheel}"
+        return
+    fi
+
+    local metadata
+    metadata="$(wheel_cache_metadata "${repo_dir}" "${venv_dir}/bin/python")"
+    local cache_key
+    cache_key="$(printf '%s\n' "${metadata}" | hash_stdin | cut -c 1-24)"
+    local cache_entry="${WHEEL_CACHE_DIR%/}/${cache_key}"
+    local cached_wheel
+    cached_wheel="$(find "${cache_entry}" -maxdepth 1 -type f -name '*.whl' 2>/dev/null | sort | tail -n 1 || true)"
+
+    mkdir -p "${WHEEL_CACHE_DIR}"
+    echo "Wheel cache key for ${label}: ${cache_key}"
+    echo "Wheel cache dir: ${WHEEL_CACHE_DIR}"
+
+    if [[ "${REFRESH_WHEEL_CACHE}" != "1" && -n "${cached_wheel}" && -f "${cached_wheel}" ]]; then
+        echo "Wheel cache hit for ${label}: ${cached_wheel}"
+        install_wheel_file "${venv_dir}" "${cached_wheel}"
+        return
+    fi
+
+    echo "Wheel cache miss for ${label}; building wheel."
+    local tmp_entry="${cache_entry}.tmp.$$"
+    rm -rf "${tmp_entry}"
+    mkdir -p "${tmp_entry}"
+    printf '%s\n' "${metadata}" >"${tmp_entry}/metadata.txt"
+    build_wheel_to_dir "${repo_dir}" "${venv_dir}" "${build_dir}" "${tmp_entry}"
+
+    local built_wheel
+    built_wheel="$(find "${tmp_entry}" -maxdepth 1 -type f -name '*.whl' | sort | tail -n 1)"
+    if [[ -z "${built_wheel}" || ! -f "${built_wheel}" ]]; then
+        echo "No wheel produced for ${label}." >&2
+        exit 1
+    fi
+
+    rm -rf "${cache_entry}"
+    mv "${tmp_entry}" "${cache_entry}"
+    cached_wheel="$(find "${cache_entry}" -maxdepth 1 -type f -name '*.whl' | sort | tail -n 1)"
+    echo "Wheel cached for ${label}: ${cached_wheel}"
+    install_wheel_file "${venv_dir}" "${cached_wheel}"
+}
+
 install_repo() {
     local label="$1"
     local repo_dir="$2"
@@ -203,11 +402,10 @@ install_repo() {
         unset CMAKE_MAKE_PROGRAM
         if command -v uv >/dev/null 2>&1; then
             uv pip install -v -r requirements-test.txt
-            uv pip install -v -C "build-dir=${build_dir}" .
         else
             python -m pip install -v -r requirements-test.txt
-            python -m pip install -v -C "build-dir=${build_dir}" .
         fi
+        install_repo_wheel "${label}" "${repo_dir}" "${venv_dir}" "${build_dir}"
     )
 }
 

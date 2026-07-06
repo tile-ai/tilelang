@@ -140,6 +140,12 @@ def __exp(x: PrimExpr) -> PrimExpr:
     return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__exp"), x)
 
 
+def fast_rcp(x: PrimExpr) -> PrimExpr:
+    """Approximate reciprocal using CUDA fast reciprocal."""
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.fast_rcp"), x)
+
+
 __all__ = [
     "__log",  # noqa: F401
     "__log2",  # noqa: F401
@@ -149,4 +155,5 @@ __all__ = [
     "__sin",  # noqa: F401
     "__exp10",  # noqa: F401
     "__exp",  # noqa: F401
+    "fast_rcp",  # noqa: F401
 ]

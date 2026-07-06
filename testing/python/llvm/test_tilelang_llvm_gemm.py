@@ -103,7 +103,8 @@ def test_matmul_compile():
     block_M, block_N, block_K = M // 4, N // 4, K // 4
     llvm_func = matmul_jit_test(M, N, K, block_M, block_N, block_K)
     with tvm.target.Target("llvm"):
-        complied_fun = tilelang.compile(llvm_func, -1, execution_backend="tvm_ffi")
+        complied_fun = tilelang.compile(llvm_func, -1)
+    assert complied_fun.execution_backend == "tvm_ffi"
 
     in_dtype = T.float16
     A = torch.randn(M, K, dtype=torch.__getattribute__(in_dtype))

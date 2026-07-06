@@ -2,15 +2,6 @@
 
 #include "common.h"
 
-#ifdef __CUDA_ARCH_LIST__
-#if __CUDA_ARCH_LIST__ >= 900
-#include "copy_sm90.h"
-#endif
-#if __CUDA_ARCH_LIST__ >= 1000
-#include "copy_sm100.h"
-#endif
-#endif
-
 namespace tl {
 
 TL_DEVICE void cp_async_commit() {
@@ -185,6 +176,30 @@ TL_DEVICE uint4 load_global_128_conditional(const void *ptr, bool pred) {
   uint4 ret{};
   global_load<uint4, 16>(ret, ptr, pred);
   return ret;
+}
+
+TL_DEVICE uint32_t load_shared_32(const void *ptr) {
+  return *reinterpret_cast<const uint32_t *>(ptr);
+}
+
+TL_DEVICE uint2 load_shared_64(const void *ptr) {
+  return *reinterpret_cast<const uint2 *>(ptr);
+}
+
+TL_DEVICE uint4 load_shared_128(const void *ptr) {
+  return *reinterpret_cast<const uint4 *>(ptr);
+}
+
+TL_DEVICE void store_shared_32(void *ptr, uint32_t value) {
+  *reinterpret_cast<uint32_t *>(ptr) = value;
+}
+
+TL_DEVICE void store_shared_64(void *ptr, uint2 value) {
+  *reinterpret_cast<uint2 *>(ptr) = value;
+}
+
+TL_DEVICE void store_shared_128(void *ptr, uint4 value) {
+  *reinterpret_cast<uint4 *>(ptr) = value;
 }
 
 // Global memory store intrinsics with explicit vector widths

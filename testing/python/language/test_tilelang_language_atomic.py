@@ -205,6 +205,35 @@ def run_atomic_addx4(M, N, block_M, block_N):
 
 
 @tilelang.jit
+def atomic_addx4_16bit_program(dtype, offset, nthreads):
+    @T.prim_func
+    def atomic_addx4(A: T.Tensor((16,), dtype), B: T.Tensor((16,), dtype)):
+        with T.Kernel(1, threads=nthreads):
+            T.atomic_addx4(B[offset], A[offset])
+
+    return atomic_addx4
+
+
+def run_atomic_addx4_16bit(dtype, offset, nthreads):
+    kernel = atomic_addx4_16bit_program(dtype, offset, nthreads)
+    source = kernel.get_kernel_source()
+    assert "AtomicAddx4" in source
+
+    torch_dtype = getattr(torch, str(dtype))
+    A = torch.zeros(16, dtype=torch_dtype, device="cuda")
+    B_init = torch.zeros(16, dtype=torch_dtype, device="cuda")
+    A[offset : offset + 4] = torch.tensor([1, 2, 3, 4], dtype=torch_dtype, device="cuda")
+    B_init[offset : offset + 4] = torch.tensor([10, 20, 30, 40], dtype=torch_dtype, device="cuda")
+    B = B_init.clone()
+
+    ref_B = B_init.float()
+    ref_B[offset : offset + 4] += nthreads * A[offset : offset + 4].float()
+
+    kernel(A, B)
+    torch.testing.assert_close(B.float(), ref_B, atol=0, rtol=0)
+
+
+@tilelang.jit
 def atomic_return_prev_program(M, N, block_M, block_N, dtype=T.float32):
     @T.prim_func
     def atomic_with_return_prev(A: T.Tensor((M, N), dtype), B: T.Tensor((M, N), dtype), old_vals: T.Tensor((M, N), dtype)):
@@ -342,9 +371,16 @@ def test_atomic_different_memory_orders():
     run_atomic_different_memory_orders(32, 32, 8, 8, dtype=T.bfloat16)
 
 
-# TODO: atomic_addx4 currently not support half
 def test_atomic_addx4():
     run_atomic_addx4(16, 64, 4, 4)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_atomic_addx4_16bit():
+    for dtype in (T.float16, T.bfloat16):
+        for offset in (0, 4):
+            run_atomic_addx4_16bit(dtype, offset=offset, nthreads=2)
 
 
 def test_atomic_return_prev():
@@ -564,6 +600,18 @@ def run_atomic_load_store(M, N, block_M, block_N, dtype=T.float32):
     B = torch.zeros(M, N, dtype=getattr(torch, dtype)).cuda()
     kernel(A, B)
     torch.testing.assert_close(B, A, atol=1e-3, rtol=1e-3)
+
+
+@tilelang.testing.requires_cuda
+def test_atomic_or_codegen():
+    @T.prim_func
+    def atomic_or_kernel(A: T.Tensor((1,), T.int32), mask: T.int32):
+        with T.Kernel(1, threads=32):
+            T.atomic_or(A[0], mask, memory_order="release")
+
+    kernel = tilelang.compile(atomic_or_kernel, out_idx=[0], target="cuda")
+    source = kernel.get_kernel_source()
+    assert "AtomicOr" in source
 
 
 def test_atomic_max():

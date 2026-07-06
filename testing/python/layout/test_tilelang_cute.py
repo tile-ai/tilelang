@@ -55,6 +55,19 @@ def _build_swizzled_layout(shape, intermediate_fn, b_bits, m_base, s_shift):
 
 
 # ---------------------------------------------------------------------------
+# to_python / from_python: round-trip nested shapes; a layout exposes its
+# shape/stride as raw IntTuples.
+# ---------------------------------------------------------------------------
+def test_from_python_roundtrips_to_python():
+    # from_python is the inverse of to_python for nested shapes.
+    assert cute.to_python(cute.from_python([2, (3, 4)])) == (2, (3, 4))
+    # A layout exposes its shape/stride as raw IntTuples for algebra.
+    L = cute.make_layout((2, 3))
+    assert L.shape == (2, 3)
+    assert L.stride == (1, 2)
+
+
+# ---------------------------------------------------------------------------
 # IntTuple: construction, unpacking, and CuTe arithmetic (operator + / *).
 # ---------------------------------------------------------------------------
 def test_int_tuple_scalar_arithmetic():
@@ -81,67 +94,10 @@ def test_int_tuple_scaled_basis_arithmetic():
     assert cute.to_python(spread) == (1, 1)  # 1@0 + 1@1 -> (1)+(0,1) -> (1,1)
 
 
-def test_from_python_roundtrips_to_python():
-    # from_python is the inverse of to_python for nested shapes.
-    assert cute.to_python(cute.from_python([2, (3, 4)])) == (2, (3, 4))
-    # A layout exposes its shape/stride as raw IntTuples for algebra.
-    L = cute.make_layout((2, 3))
-    assert L.shape == (2, 3)
-    assert L.stride == (1, 2)
-
-
 # ---------------------------------------------------------------------------
-# make_layout / make_identity_layout / accessors:
-# rank, size, layout[idx], layout(coord), flatten, flatten_to_tuple.
+# product / flatten_to_tuple: leaf product of a raw shape; collapse a
+# hierarchical shape/stride to a flat tuple of leaves.
 # ---------------------------------------------------------------------------
-def test_make_layout_default_stride_is_column_major():
-    # Omitting stride yields the compact column-major stride (mode 0 fastest).
-    assert tvm.ir.structural_equal(cute.make_layout((4, 8)), cute.make_column_major_layout((4, 8)))
-    _assert_struct(cute.make_layout((4, 8)), (4, 8), (1, 4))
-
-
-def test_make_identity_layout_strides_are_unit_basis():
-    # Each identity stride is the unit basis E<k>.
-    L = cute.make_layout((4, 4), stride=(cute.E(0), cute.E(1)))
-    assert tvm.ir.structural_equal(L, cute.make_identity_layout((4, 4)))
-    for k, s in enumerate(L.stride):
-        assert isinstance(s, cute.ScaledBasis) and s.value == 1 and s.mode == (k,)
-
-
-def test_make_layout_nested_column_row_identity():
-    # Column/row-major and identity over a nested shape produce congruent nested
-    # strides (CuTe compact_col_major / compact_row_major / make_identity_layout).
-    assert tvm.ir.structural_equal(cute.make_column_major_layout((2, (2, 2))), cute.make_layout((2, (2, 2)), stride=(1, (2, 4))))
-    assert tvm.ir.structural_equal(cute.make_row_major_layout((2, (2, 2))), cute.make_layout((2, (2, 2)), stride=(4, (2, 1))))
-    # Identity maps each linear coord to its full nested idx2crd coordinate.
-    I = cute.make_identity_layout((2, (2, 2)))
-    assert I.shape == (2, (2, 2))
-    assert [I(c) for c in range(8)] == [(c % 2, (c // 2 % 2, c // 4)) for c in range(8)]
-    # Dynamic extents thread through the makers.
-    n = tvm.tirx.Var("n", "int32")
-    assert tvm.ir.structural_equal(cute.make_column_major_layout((n, 4)), cute.make_layout((n, 4), stride=(1, n)))
-
-
-def test_scaled_basis_and_int_expr_strides():
-    # A non-unit ScaledBasis stride round-trips its scale and mode.
-    (sb,) = cute.make_layout((2,), stride=(cute.ScaledBasis(64, 1),)).stride
-    assert isinstance(sb, cute.ScaledBasis) and sb.value == 64 and sb.mode == (1,)
-    # A dynamic (PrimExpr) stride round-trips structurally.
-    s = tvm.tirx.Var("s", "int32")
-    (leaf,) = cute.make_layout((8,), stride=(s,)).stride
-    assert tvm.ir.structural_equal(leaf, s)
-
-
-def test_rank_size_getitem_flatten():
-    L = cute.make_layout((4, 8), stride=(8, 1))
-    assert cute.rank(L) == 2 and cute.size(L) == 32
-    # layout[idx] is the i-th sublayout (a single mode unpacks to a scalar).
-    assert L[0].shape == 4 and L[0].stride == 8
-    assert L[1].shape == 8 and L[1].stride == 1
-    # flatten of an already-flat layout is itself.
-    assert tvm.ir.structural_equal(cute.flatten(L), L)
-
-
 def test_size_and_product():
     # size() is the domain of a Layout / ComposedLayout; product() is the leaf
     # product of a raw shape (flat, nested, or a scalar).
@@ -153,6 +109,27 @@ def test_size_and_product():
     n = tvm.tirx.Var("n", "int32")
     assert tvm.ir.structural_equal(cute.product((n, 4)), n * 4)
     assert tvm.ir.structural_equal(cute.size(cute.make_layout((n, 4), stride=(1, n))), n * 4)
+
+
+def test_flatten_to_tuple_collapses_hierarchy():
+    # A hierarchical composition result flattens to a flat tuple of leaves.
+    R = cute.composition(cute.make_layout((8, 8), stride=(8, 1)), cute.make_layout((2, 4), stride=(1, 4)))
+    assert cute.flatten_to_tuple(R.shape) == tuple(int(s) for s in cute.flatten(R).shape)
+    assert len(cute.flatten_to_tuple(R.shape)) == len(cute.flatten_to_tuple(R.stride))
+
+
+# ---------------------------------------------------------------------------
+# Layout: rank / size / layout[idx] / flatten, layout(coord) evaluation,
+# with_shape, and from_tilelang (recover a plain affine layout, else None).
+# ---------------------------------------------------------------------------
+def test_rank_size_getitem_flatten():
+    L = cute.make_layout((4, 8), stride=(8, 1))
+    assert cute.rank(L) == 2 and cute.size(L) == 32
+    # layout[idx] is the i-th sublayout (a single mode unpacks to a scalar).
+    assert L[0].shape == 4 and L[0].stride == 8
+    assert L[1].shape == 8 and L[1].stride == 1
+    # flatten of an already-flat layout is itself.
+    assert tvm.ir.structural_equal(cute.flatten(L), L)
 
 
 def test_eval_plain_is_scalar():
@@ -200,11 +177,26 @@ def test_eval_basis_is_coordinate_tuple():
     assert all(same(c) == (c,) for c in range(4))
 
 
-def test_flatten_to_tuple_collapses_hierarchy():
-    # A hierarchical composition result flattens to a flat tuple of leaves.
-    R = cute.composition(cute.make_layout((8, 8), stride=(8, 1)), cute.make_layout((2, 4), stride=(1, 4)))
-    assert cute.flatten_to_tuple(R.shape) == tuple(int(s) for s in cute.flatten(R).shape)
-    assert len(cute.flatten_to_tuple(R.shape)) == len(cute.flatten_to_tuple(R.stride))
+def test_with_shape_splits_contiguous_run():
+    # A flat layout reinterpreted over a 2D shape: (8):(1) with_shape (2,4) ->
+    # the column-major linearization keeps function identity.
+    L = cute.make_layout(8, stride=1)
+    r = L.with_shape((2, 4))
+    assert r.shape == (2, 4)
+    for c0 in range(2):
+        for c1 in range(4):
+            assert r((c0, c1)) == L(c0 + 2 * c1)
+
+
+def test_layout_from_tilelang_affine():
+    L = cute.Layout.from_tilelang(Layout((16, 128), lambda i, j: i * 128 + j))
+    assert L is not None
+    _assert_struct(L, (16, 128), (128, 1))
+
+
+def test_layout_from_tilelang_rejects_swizzle():
+    swz = _build_swizzled_layout((64, 512), lambda i, j: i * 512 + j, 3, 3, 3)
+    assert cute.Layout.from_tilelang(swz) is None
 
 
 # ---------------------------------------------------------------------------
@@ -236,10 +228,11 @@ def test_coalesce_preserves_function(shape, stride):
 
 def test_coalesce_structural_results():
     # Contiguous bit-modes fuse to one; non-contiguous stay split; a fully
-    # size-1 layout collapses to the scalar (1):(0).
-    _assert_struct(cute.coalesce(cute.make_layout((2, 2, 2, 2, 2), stride=(1, 2, 4, 8, 16))), (32,), (1,))
+    # size-1 layout collapses to the scalar 1:0. A single surviving mode is
+    # scalar-shaped (CuTe bw_coalesce returns Layout<NewShape,NewStride>).
+    _assert_struct(cute.coalesce(cute.make_layout((2, 2, 2, 2, 2), stride=(1, 2, 4, 8, 16))), 32, 1)
     _assert_struct(cute.coalesce(cute.make_layout((8, 8), stride=(64, 1))), (8, 8), (64, 1))
-    _assert_struct(cute.coalesce(cute.make_layout((1, 1), stride=(5, 7))), (1,), (0,))
+    _assert_struct(cute.coalesce(cute.make_layout((1, 1), stride=(5, 7))), 1, 0)
     # A nested layout flattens, then fuses the contiguous (2,2):(1,4) prefix into
     # one mode while the gapped last mode stays split (CuTe pycute coalesce).
     _assert_struct(cute.coalesce(cute.make_layout(((2, 2), (2, 2)), stride=((1, 4), (8, 32)))), (2, 4, 2), (1, 4, 32))
@@ -390,18 +383,167 @@ def test_tma_box_validity_via_composite():
 
 
 # ---------------------------------------------------------------------------
-# Layout.from_tilelang: recover a plain affine layout (no swizzle, zero offset),
-# else None.
+# Layout algebra ported from CuTe for the GMMA descriptor analysis:
+# filter / cosize / complement / logical_divide. Reference values computed by
+# hand from CuTe (layout.hpp): complement sort-and-fold, logical_divide =
+# composition(layout, make_layout(tiler, complement(tiler, size(coalesce)))).
 # ---------------------------------------------------------------------------
-def test_layout_from_tilelang_affine():
-    L = cute.Layout.from_tilelang(Layout((16, 128), lambda i, j: i * 128 + j))
-    assert L is not None
-    _assert_struct(L, (16, 128), (128, 1))
+def test_filter_drops_trivial_modes():
+    # filter = coalesce(filter_zeros): drop stride-0 and size-1 modes.
+    _assert_struct(cute.filter(cute.make_layout((4, 1, 2), stride=(1, 0, 8))), (4, 2), (1, 8))
+    _assert_struct(cute.filter(cute.make_layout((1, 1), stride=(5, 7))), 1, 0)
 
 
-def test_layout_from_tilelang_rejects_swizzle():
-    swz = _build_swizzled_layout((64, 512), lambda i, j: i * 512 + j, 3, 3, 3)
-    assert cute.Layout.from_tilelang(swz) is None
+def test_filter_keeps_dynamic_modes():
+    s = tvm.tirx.Var("s", "int32")
+    # A const-0 stride mode is dropped; the dynamic-stride mode survives.
+    _assert_struct(cute.filter(cute.make_layout((4, 1, 8), stride=(s, 0, 1))), (4, 8), (s, 1))
+
+
+def test_cosize_matches_cute():
+    # cosize = 1 + sum_i (shape_i - 1) * |stride_i|.
+    assert cute.cosize(cute.make_layout((4, 2), stride=(1, 8))) == 12
+    assert cute.cosize(cute.make_layout((8, 8), stride=(8, 1))) == 64
+    assert cute.cosize(cute.make_layout((64, 8), stride=(8, 1))) == 512
+
+
+def test_cosize_dynamic_is_symbolic():
+    s = tvm.tirx.Var("s", "int32")
+    # cosize = 1 + (4-1)*|s| + (8-1)*1 = 3*|s| + 8 ; stays a PrimExpr, and the
+    # |stride| term emits CuTe's abs(stride). Check by substituting s.
+    got = cute.cosize(cute.make_layout((4, 8), stride=(s, 1)))
+    assert isinstance(got, tirx.PrimExpr)
+    ana = tvm.arith.Analyzer()
+    for sv, expect in [(5, 3 * 5 + 8), (-5, 3 * 5 + 8)]:
+        sub = tvm.tirx.stmt_functor.substitute(got, {s: tvm.tirx.const(sv, "int32")})
+        assert int(ana.simplify(sub)) == expect
+
+
+def test_complement_matches_cute():
+    # complement(layout, cotarget): the gaps the layout does not address.
+    _assert_same_fn(cute.complement(cute.make_layout(2, stride=1), 16), cute.make_layout(8, stride=2))
+    # 4:1 within 24 -> rest is 6:4.
+    _assert_same_fn(cute.complement(cute.make_layout(4, stride=1), 24), cute.make_layout(6, stride=4))
+    # Structural: a single surviving mode is SCALAR-shaped (CuTe bw_coalesce
+    # returns Layout<NewShape,NewStride>, not a 1-tuple).
+    _assert_struct(cute.complement(cute.make_layout(2, stride=1), 16), 8, 2)
+    _assert_struct(cute.complement(cute.make_layout(4, stride=1), 24), 6, 4)
+
+
+def test_complement_rank1_dynamic():
+    s = tvm.tirx.Var("s", "int32")
+    # complement((4):(s), 1024) = coalesce((s, ceil_div(1024, 4s)):(1, 4s)).
+    comp = cute.complement(cute.make_layout(4, stride=s), 1024)
+    assert comp.shape[0] == s and comp.stride[0] == 1
+    # rest stride = 4*s ; rest extent = ceil_div(1024, 4*s) (symbolic).
+    ana = tvm.arith.Analyzer()
+    assert ana.simplify(comp.stride[1] - 4 * s) == 0
+
+
+def test_complement_rank_gt1_dynamic_rejected():
+    s = tvm.tirx.Var("s", "int32")
+    # CuTe static_assert: dynamic-stride complement only for rank-1 layouts.
+    with pytest.raises(Exception, match="rank-1"):
+        cute.complement(cute.make_layout((4, 8), stride=(s, 1)), 1024)
+
+
+def test_logical_divide_matches_cute():
+    # logical_divide splits a mode into (tile, rest).
+    _assert_same_fn(
+        cute.logical_divide(cute.make_layout(8, stride=1), cute.make_layout(2, stride=1)), cute.make_layout((2, 4), stride=(1, 2))
+    )
+    _assert_same_fn(
+        cute.logical_divide(cute.make_layout(8, stride=1), cute.make_layout(8, stride=1)), cute.make_layout((8, 1), stride=(1, 0))
+    )
+    # Structural: the result is FLAT (tile, rest), congruent to (_1, _1) -- the
+    # complement's single mode is scalar, so no spurious nesting (mirrors CuTe).
+    _assert_struct(cute.logical_divide(cute.make_layout(8, stride=1), cute.make_layout(2, stride=1)), (2, 4), (1, 2))
+    _assert_struct(cute.logical_divide(cute.make_layout(8, stride=1), cute.make_layout(8, stride=1)), (8, 1), (1, 0))
+    # Strided base (GMMA MN mode 128:4 divided by the W=8 tile) stays flat.
+    _assert_struct(cute.logical_divide(cute.make_layout(128, stride=4), cute.make_layout(8, stride=1)), (8, 16), (4, 32))
+    assert cute.congruent(cute.logical_divide(cute.make_layout(128, stride=4), cute.make_layout(8, stride=1)).shape, (1, 1))
+
+
+def test_logical_divide_dynamic_layout_stride():
+    s = tvm.tirx.Var("s", "int32")
+    # Static shape (so size is concrete) but a dynamic stride: division still
+    # works because complement is on the (static) tiler and composition handles
+    # the dynamic layout stride. (8):(s) by (2):(1) -> (2, 4):(s, 2s).
+    res = cute.logical_divide(cute.make_layout(8, stride=s), cute.make_layout(2, stride=1))
+    ana = tvm.arith.Analyzer()
+    # Result is hierarchical: shape (2, (4,)), stride (s, (2s,)).
+    assert ana.simplify(res(0) - 0) == 0
+    assert ana.simplify(res(1) - s) == 0  # next tile element: stride s
+    assert ana.simplify(res(2) - 2 * s) == 0  # next rest element: stride 2s
+
+
+# ---------------------------------------------------------------------------
+# make_layout / make_column_major / make_row_major / make_identity_layout, and
+# the make_layout([layout, ...]) concat form.
+# ---------------------------------------------------------------------------
+def test_make_layout_default_stride_is_column_major():
+    # Omitting stride yields the compact column-major stride (mode 0 fastest).
+    assert tvm.ir.structural_equal(cute.make_layout((4, 8)), cute.make_column_major_layout((4, 8)))
+    _assert_struct(cute.make_layout((4, 8)), (4, 8), (1, 4))
+
+
+def test_make_identity_layout_strides_are_unit_basis():
+    # Each identity stride is the unit basis E<k>.
+    L = cute.make_layout((4, 4), stride=(cute.E(0), cute.E(1)))
+    assert tvm.ir.structural_equal(L, cute.make_identity_layout((4, 4)))
+    for k, s in enumerate(L.stride):
+        assert isinstance(s, cute.ScaledBasis) and s.value == 1 and s.mode == (k,)
+
+
+def test_make_layout_nested_column_row_identity():
+    # Column/row-major and identity over a nested shape produce congruent nested
+    # strides (CuTe compact_col_major / compact_row_major / make_identity_layout).
+    assert tvm.ir.structural_equal(cute.make_column_major_layout((2, (2, 2))), cute.make_layout((2, (2, 2)), stride=(1, (2, 4))))
+    assert tvm.ir.structural_equal(cute.make_row_major_layout((2, (2, 2))), cute.make_layout((2, (2, 2)), stride=(4, (2, 1))))
+    # Identity maps each linear coord to its full nested idx2crd coordinate.
+    I = cute.make_identity_layout((2, (2, 2)))
+    assert I.shape == (2, (2, 2))
+    assert [I(c) for c in range(8)] == [(c % 2, (c // 2 % 2, c // 4)) for c in range(8)]
+    # Dynamic extents thread through the makers.
+    n = tvm.tirx.Var("n", "int32")
+    assert tvm.ir.structural_equal(cute.make_column_major_layout((n, 4)), cute.make_layout((n, 4), stride=(1, n)))
+
+
+def test_scaled_basis_and_int_expr_strides():
+    # A non-unit ScaledBasis stride round-trips its scale and mode.
+    (sb,) = cute.make_layout((2,), stride=(cute.ScaledBasis(64, 1),)).stride
+    assert isinstance(sb, cute.ScaledBasis) and sb.value == 64 and sb.mode == (1,)
+    # A dynamic (PrimExpr) stride round-trips structurally.
+    s = tvm.tirx.Var("s", "int32")
+    (leaf,) = cute.make_layout((8,), stride=(s,)).stride
+    assert tvm.ir.structural_equal(leaf, s)
+
+
+def test_make_layout_concat():
+    a = cute.make_layout(64, stride=1)
+    b = cute.make_layout(4, stride=64)
+    cat = cute.make_layout([a, b])
+    assert cat.shape == (64, 4)
+    assert cat.stride == (1, 64)
+
+
+# ---------------------------------------------------------------------------
+# ComposedLayout.recast: shift m_base by log2(old) - log2(new); b_bits /
+# s_shift preserved (a linear layout recast is a no-op).
+# ---------------------------------------------------------------------------
+def test_recast_method():
+    # Recast shifts m_base by log2(old) - log2(new); b_bits / s_shift preserved.
+    mode = cute.ComposedLayout.from_tilelang(_build_swizzled_layout((64, 512), lambda i, j: (j % 64) + i * 64 + (j // 64) * 4096, 3, 3, 3))
+    assert _swizzle(mode) == (3, 3, 3)
+    assert _swizzle(mode.recast(16, 8)) == (3, 4, 3)  # smaller elem -> m_base += 1
+    assert _swizzle(mode.recast(32, 8)) == (3, 5, 3)  # m_base += 2
+    assert _swizzle(mode.recast(16, 16)) == (3, 3, 3)  # same width -> no-op
+
+
+def test_recast_linear_is_noop():
+    mode = cute.ComposedLayout.from_tilelang(Layout((16, 128), lambda i, j: i * 128 + j))
+    assert not mode.swizzle.is_swizzled
+    assert _swizzle(mode.recast(32, 8)) == (0, 0, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -493,21 +635,6 @@ def test_core_is_dtype_agnostic_and_buffer_recasts():
     assert _swizzle(cute.ComposedLayout.from_tilelang(layout, buf)) == (3, 4, 3)
 
 
-def test_recast_method():
-    # Recast shifts m_base by log2(old) - log2(new); b_bits / s_shift preserved.
-    mode = cute.ComposedLayout.from_tilelang(_build_swizzled_layout((64, 512), lambda i, j: (j % 64) + i * 64 + (j // 64) * 4096, 3, 3, 3))
-    assert _swizzle(mode) == (3, 3, 3)
-    assert _swizzle(mode.recast(16, 8)) == (3, 4, 3)  # smaller elem -> m_base += 1
-    assert _swizzle(mode.recast(32, 8)) == (3, 5, 3)  # m_base += 2
-    assert _swizzle(mode.recast(16, 16)) == (3, 3, 3)  # same width -> no-op
-
-
-def test_recast_linear_is_noop():
-    mode = cute.ComposedLayout.from_tilelang(Layout((16, 128), lambda i, j: i * 128 + j))
-    assert not mode.swizzle.is_swizzled
-    assert _swizzle(mode.recast(32, 8)) == (0, 0, 0)
-
-
 @pytest.mark.parametrize("OFFSET", [4096, 5 * 4096, 8192 + 4096])
 def test_swizzle_with_nonzero_base_offset(OFFSET):
     # A swizzle over a high, disjoint base offset: the base is carried as the
@@ -593,6 +720,17 @@ def test_non_constant_extent_rejected():
         cute.ComposedLayout.from_tilelang(Layout((n, 8), lambda i, j: i * 8 + j))
 
 
+def test_decoder_preserves_input_shape():
+    # ComposedLayoutFromTileLang returns a layout congruent to the TileLang input
+    # shape (not a flat coalesced layout); a swizzle that splits the contiguous
+    # dim yields a hierarchical sub-mode.
+    buf = tirx.decl_buffer((64, 512), "float16", name="A", scope="shared")
+    mode = cute.ComposedLayout.from_tilelang(make_full_bank_swizzled_layout(buf), buf)
+    # Congruent to (64, 512): in byte space the 512-elem contiguous dim is 1024
+    # bytes, split by the 128B swizzle atom into (128, 8).
+    assert mode.layout.shape == (64, (128, 8))
+
+
 # ---------------------------------------------------------------------------
 # End-to-end TMA copy with an explicitly-written swizzled layout. The forward
 # index gives the design's full-bank (128B) swizzle address:
@@ -637,6 +775,61 @@ def test_tma_load_with_explicit_swizzled_layout():
     X = ((ii * N + jj) % 2048).to(torch.float16)
     ok = kernel(X)
     assert int(ok.min()) == 1, f"{(ok == 0).sum().item()} shared elements mismatched"
+
+
+# ---------------------------------------------------------------------------
+# Restrict: affine sub-tile of a layout, one Range per top-level mode. The
+# offset is layout(mins); each mode is reshaped to its logical extent via
+# with_shape, so layout(mins + c) == offset + sublayout(c). A hierarchical
+# (swizzle-split) mode is flattened to the logical slice.
+# ---------------------------------------------------------------------------
+def test_restrict_static_slice():
+    from tvm.ir import Range
+
+    L = cute.make_layout((64, 256), (256, 1))
+    off, sub = cute.restrict(L, [Range.from_min_extent(0, 64), Range.from_min_extent(64, 64)])
+    assert off == 64
+    assert sub.shape == (64, 64)
+    assert sub.stride == (256, 1)
+    # Identity at an interior coordinate.
+    assert L((3, 64 + 5)) == off + sub((3, 5))
+
+
+def test_restrict_dynamic_slice_origin():
+    from tvm.ir import Range
+
+    j = tvm.tirx.Var("j", "int32")
+    L = cute.make_layout((64, 256), (256, 1))
+    off, sub = cute.restrict(L, [Range.from_min_extent(0, 64), Range.from_min_extent(j * 64, 64)])
+    ana = tvm.arith.Analyzer()
+    assert ana.simplify(off - j * 64) == 0
+    assert sub.shape == (64, 64)
+    # Identity holds symbolically.
+    assert ana.simplify(L((3, j * 64 + 5)) - (off + sub((3, 5)))) == 0
+
+
+def test_restrict_rank_mismatch_rejected():
+    from tvm.ir import Range
+
+    L = cute.make_layout((64, 256), (256, 1))
+    with pytest.raises(tvm.error.InternalError):
+        cute.restrict(L, [Range.from_min_extent(0, 64)])  # 1 range for a rank-2 layout
+
+
+def test_restrict_hierarchical_mode():
+    from tvm.ir import Range
+
+    # A hierarchical mode (a swizzle-split K dim, (64,4):(1,4096)) is addressed
+    # by a single logical Range; with_shape flattens it to the j-th 64-wide tile.
+    j = tvm.tirx.Var("j", "int32")
+    L = cute.make_layout((64, (64, 4)), (64, (1, 4096)))
+    off, sub = cute.restrict(L, [Range.from_min_extent(0, 64), Range.from_min_extent(j * 64, 64)])
+    ana = tvm.arith.Analyzer()
+    # Logical K-origin j*64 maps through the split layout to physical j*4096.
+    assert ana.simplify(off - j * 4096) == 0
+    assert sub.shape == (64, 64)
+    # Identity through the hierarchical layout.
+    assert ana.simplify(L((3, j * 64 + 5)) - (off + sub((3, 5)))) == 0
 
 
 if __name__ == "__main__":

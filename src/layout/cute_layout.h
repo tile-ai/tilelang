@@ -7,6 +7,7 @@
 #define TVM_TL_LAYOUT_CUTE_LAYOUT_H_
 
 #include "support/check.h"
+#include "swizzle_mode.h"
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/object.h>
 #include <tvm/ffi/reflection/registry.h>
@@ -75,6 +76,20 @@ public:
   // The span of one swizzle period: 2^(m_base + b_bits). For the TMA atoms
   // <b,4,3> this is the CUtensorMap swizzle size (32/64/128 B for b = 1/2/3).
   int64_t Granularity() const { return int64_t(1) << (m_base + b_bits); }
+
+  /// The canonical swizzle mode supported by the hardware.
+  /// @pre this should be in byte-address space, so M=4 and S=3 if there is
+  /// swizzling present.
+  SwizzleMode ToSwizzleMode() const {
+    if (b_bits == 0) {
+      return SwizzleMode::None();
+    }
+    ICHECK(m_base == 4 && s_shift == 3 && b_bits >= 1 && b_bits <= 3)
+        << "Not a canonical GMMA swizzle atom Sw<" << b_bits << "," << m_base
+        << "," << s_shift << ">; expected Sw<{1,2,3},4,3>";
+    // b_bits 1->32B(ord 1), 2->64B(ord 2), 3->128B(ord 3).
+    return SwizzleMode::FromOrdinal(b_bits);
+  }
 
   // Apply the swizzle to a physical offset: ZZZ ^= YYY.
   int64_t Apply(int64_t offset) const;
@@ -363,6 +378,9 @@ public:
   ///         is a tuple.
   TVM_DLL IntTuple operator()(const IntTuple &coord) const;
 
+  // Compose with a column-major layout of this shape.
+  TVM_DLL Layout WithShape(const IntTuple &shape) const;
+
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Layout, ObjectRef, LayoutNode);
 };
 
@@ -402,6 +420,24 @@ TVM_DLL Layout Coalesce(const Layout &layout, int64_t max_extent);
 
 /// Take a given number of modes from a layout.
 TVM_DLL Layout Take(const Layout &layout, int64_t n);
+
+/// Drop stride-0 and size-1 modes, then coalesce.
+TVM_DLL Layout Filter(const Layout &layout);
+
+/// Codomain size of a layout.
+/// @post for all `0 <= i < size(layout)`, layout(i) < result.
+TVM_DLL IntTuple Cosize(const Layout &layout);
+
+/// Complement of a layout.
+TVM_DLL Layout Complement(const Layout &layout, int64_t cotarget);
+
+/// Complement against the layout's own cosize.
+TVM_DLL Layout Complement(const Layout &layout);
+
+/// Logical divide of `layout` by `tiler`.
+/// Splits each tiled mode into (tile, rest).
+/// @pre `tiler` and `Size(layout)` must be static.
+TVM_DLL Layout LogicalDivide(const Layout &layout, const Layout &tiler);
 
 // Column major layout over `shape`.
 template <typename Container>
@@ -455,6 +491,9 @@ TVM_DLL Layout MakeRowMajorLayout(const IntTuple &shape);
 
 // Identity layout over `shape`: per-axis unit ScaledBases.
 TVM_DLL Layout MakeIdentityLayout(const IntTuple &shape);
+
+// Concatenate layouts.
+TVM_DLL Layout MakeLayout(const Array<Layout> &layouts);
 
 // A CuTe ComposedLayout of the form Swizzle o offset o Layout.
 // Evaluating at x yields swizzle.apply(offset + layout(x)).
@@ -512,6 +551,12 @@ Optional<Layout> LayoutFromTileLang(const tvm::tl::Layout &layout);
 ///       `.Recast(dtype.bits(), 8)` for the byte-address uses.
 Optional<ComposedLayout>
 ComposedLayoutFromTileLang(const tvm::tl::Layout &layout);
+
+/// Restrict the layout to a sublayout defined by a region.
+/// @return result.sublayout(coords_in_region) + result.offset
+//            == layout(range.min + coords_in_region)
+Tuple<IntTuple, Layout> Restrict(const Layout &layout,
+                                 const Array<Range> &range);
 
 } // namespace cute
 } // namespace tl

@@ -17,4 +17,5 @@ from .swizzle import (
     make_fully_replicated_layout_fragment,  # noqa: F401
 )
 from .gemm_sp import make_cutlass_metadata_layout  # noqa: F401
+from .swizzle_mode import SwizzleMode  # noqa: F401
 from . import cute  # noqa: F401  (registers tl.cute.* FFI objects on import)

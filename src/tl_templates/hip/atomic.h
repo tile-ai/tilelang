@@ -61,6 +61,23 @@ __forceinline__ __device__ void AtomicMin(T1 &address, T2 val,
   atomicMin(reinterpret_cast<T1 *>(&address), static_cast<T1>(val));
 }
 
+// Add an extra unused input to accommodate the additional 'memory_order'
+// argument during lowering.
+template <typename T1, typename T2>
+__forceinline__ __device__ void AtomicOr(T1 *address, T2 val,
+                                         int memory_order = 0) {
+  atomicOr(reinterpret_cast<T1 *>(address), static_cast<T1>(val));
+}
+
+// Add an extra unused input to accommodate the additional 'memory_order'
+// argument during lowering.
+// Overload for when the first argument is a value instead of a pointer.
+template <typename T1, typename T2>
+__forceinline__ __device__ void AtomicOr(T1 &address, T2 val,
+                                         int memory_order = 0) {
+  atomicOr(reinterpret_cast<T1 *>(&address), static_cast<T1>(val));
+}
+
 __forceinline__ __device__ void AtomicAddx2(float *ref, float *val,
                                             int memory_order = 0) {
   float2 add_val = *reinterpret_cast<float2 *>(val);

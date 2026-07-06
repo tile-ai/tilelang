@@ -162,3 +162,5 @@ class CompiledArtifact:
     params: list[KernelParam]  # List of parameters (tensors/scalars) used by the kernel
     kernel_source: str  # Raw source code of the generated kernel
     rt_mod: tvm.runtime.Module | None = None  # Runtime module for execution, may be lazily initialized
+    target: tvm.target.Target | None = None  # Normalized device target used for lowering
+    target_host: tvm.target.Target | None = None  # Normalized host target used for host codegen/export

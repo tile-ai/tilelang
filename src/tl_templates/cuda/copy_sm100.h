@@ -6,6 +6,7 @@
 
 #include "barrier.h"
 #include "common.h"
+#include "copy_sm90.h"
 #include "cuda_fp8.h"
 #include "tcgen_05.h"
 #include "tcgen_05_ld.h"

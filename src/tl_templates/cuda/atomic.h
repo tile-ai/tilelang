@@ -168,6 +168,72 @@ TL_DEVICE void tl_atomic_add_v2_bf16(unsigned short &ret_x,
   }
 }
 
+TL_DEVICE void
+tl_atomic_add_v4_f16(unsigned short &ret_x, unsigned short &ret_y,
+                     unsigned short &ret_z, unsigned short &ret_w,
+                     unsigned long long addr, unsigned short val_x,
+                     unsigned short val_y, unsigned short val_z,
+                     unsigned short val_w, int memory_order) {
+  if (IsRelaxedMemoryOrder(memory_order)) {
+    asm volatile(
+        "atom.global.v4.f16.add.noftz {%0,%1,%2,%3}, [%4], {%5,%6,%7,%8};"
+        : "=h"(ret_x), "=h"(ret_y), "=h"(ret_z), "=h"(ret_w)
+        : "l"(addr), "h"(val_x), "h"(val_y), "h"(val_z), "h"(val_w)
+        : "memory");
+  } else if (IsReleaseLikeMemoryOrder(memory_order)) {
+    asm volatile("atom.release.gpu.global.v4.f16.add.noftz {%0,%1,%2,%3}, "
+                 "[%4], {%5,%6,%7,%8};"
+                 : "=h"(ret_x), "=h"(ret_y), "=h"(ret_z), "=h"(ret_w)
+                 : "l"(addr), "h"(val_x), "h"(val_y), "h"(val_z), "h"(val_w)
+                 : "memory");
+  } else if (IsAcquireMemoryOrder(memory_order)) {
+    asm volatile("atom.acquire.gpu.global.v4.f16.add.noftz {%0,%1,%2,%3}, "
+                 "[%4], {%5,%6,%7,%8};"
+                 : "=h"(ret_x), "=h"(ret_y), "=h"(ret_z), "=h"(ret_w)
+                 : "l"(addr), "h"(val_x), "h"(val_y), "h"(val_z), "h"(val_w)
+                 : "memory");
+  } else if (IsAcqRelLikeMemoryOrder(memory_order)) {
+    asm volatile("atom.acq_rel.gpu.global.v4.f16.add.noftz {%0,%1,%2,%3}, "
+                 "[%4], {%5,%6,%7,%8};"
+                 : "=h"(ret_x), "=h"(ret_y), "=h"(ret_z), "=h"(ret_w)
+                 : "l"(addr), "h"(val_x), "h"(val_y), "h"(val_z), "h"(val_w)
+                 : "memory");
+  }
+}
+
+TL_DEVICE void
+tl_atomic_add_v4_bf16(unsigned short &ret_x, unsigned short &ret_y,
+                      unsigned short &ret_z, unsigned short &ret_w,
+                      unsigned long long addr, unsigned short val_x,
+                      unsigned short val_y, unsigned short val_z,
+                      unsigned short val_w, int memory_order) {
+  if (IsRelaxedMemoryOrder(memory_order)) {
+    asm volatile(
+        "atom.global.v4.bf16.add.noftz {%0,%1,%2,%3}, [%4], {%5,%6,%7,%8};"
+        : "=h"(ret_x), "=h"(ret_y), "=h"(ret_z), "=h"(ret_w)
+        : "l"(addr), "h"(val_x), "h"(val_y), "h"(val_z), "h"(val_w)
+        : "memory");
+  } else if (IsReleaseLikeMemoryOrder(memory_order)) {
+    asm volatile("atom.release.gpu.global.v4.bf16.add.noftz {%0,%1,%2,%3}, "
+                 "[%4], {%5,%6,%7,%8};"
+                 : "=h"(ret_x), "=h"(ret_y), "=h"(ret_z), "=h"(ret_w)
+                 : "l"(addr), "h"(val_x), "h"(val_y), "h"(val_z), "h"(val_w)
+                 : "memory");
+  } else if (IsAcquireMemoryOrder(memory_order)) {
+    asm volatile("atom.acquire.gpu.global.v4.bf16.add.noftz {%0,%1,%2,%3}, "
+                 "[%4], {%5,%6,%7,%8};"
+                 : "=h"(ret_x), "=h"(ret_y), "=h"(ret_z), "=h"(ret_w)
+                 : "l"(addr), "h"(val_x), "h"(val_y), "h"(val_z), "h"(val_w)
+                 : "memory");
+  } else if (IsAcqRelLikeMemoryOrder(memory_order)) {
+    asm volatile("atom.acq_rel.gpu.global.v4.bf16.add.noftz {%0,%1,%2,%3}, "
+                 "[%4], {%5,%6,%7,%8};"
+                 : "=h"(ret_x), "=h"(ret_y), "=h"(ret_z), "=h"(ret_w)
+                 : "l"(addr), "h"(val_x), "h"(val_y), "h"(val_z), "h"(val_w)
+                 : "memory");
+  }
+}
+
 TL_DEVICE void tl_atomic_add_v2_f32(float &ret_x, float &ret_y,
                                     unsigned long long addr, float val_x,
                                     float val_y, int memory_order) {
@@ -597,6 +663,66 @@ AtomicAddx2Ret(bfloat16_t *ref, src_type *val,
 }
 #endif
 
+#if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 900))
+template <typename SrcType>
+TL_DEVICE void AtomicAddx4(half_t *ref, SrcType *val,
+                           int memory_order = int(cuda::memory_order_relaxed)) {
+  half2 add_val_lo = ToHalf2(val);
+  half2 add_val_hi = ToHalf2(val + 2);
+  unsigned short add_val_x_cast = tl_atomic_detail::PackBits16(add_val_lo.x);
+  unsigned short add_val_y_cast = tl_atomic_detail::PackBits16(add_val_lo.y);
+  unsigned short add_val_z_cast = tl_atomic_detail::PackBits16(add_val_hi.x);
+  unsigned short add_val_w_cast = tl_atomic_detail::PackBits16(add_val_hi.y);
+  unsigned long long ref_addr = reinterpret_cast<unsigned long long>(ref);
+  unsigned short ret_val_x_cast;
+  unsigned short ret_val_y_cast;
+  unsigned short ret_val_z_cast;
+  unsigned short ret_val_w_cast;
+  tl_atomic_detail::tl_atomic_add_v4_f16(
+      ret_val_x_cast, ret_val_y_cast, ret_val_z_cast, ret_val_w_cast, ref_addr,
+      add_val_x_cast, add_val_y_cast, add_val_z_cast, add_val_w_cast,
+      memory_order);
+}
+#else
+template <typename SrcType>
+TL_DEVICE void AtomicAddx4(half_t *ref, SrcType *val,
+                           int memory_order = int(cuda::memory_order_relaxed)) {
+  AtomicAddx2(ref, val, memory_order);
+  AtomicAddx2(ref + 2, val + 2, memory_order);
+}
+#endif
+
+#if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ > 750))
+#if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 900))
+template <typename SrcType>
+TL_DEVICE void AtomicAddx4(bfloat16_t *ref, SrcType *val,
+                           int memory_order = int(cuda::memory_order_relaxed)) {
+  __nv_bfloat162 add_val_lo = ToBfloat162(val);
+  __nv_bfloat162 add_val_hi = ToBfloat162(val + 2);
+  unsigned short add_val_x_cast = tl_atomic_detail::PackBits16(add_val_lo.x);
+  unsigned short add_val_y_cast = tl_atomic_detail::PackBits16(add_val_lo.y);
+  unsigned short add_val_z_cast = tl_atomic_detail::PackBits16(add_val_hi.x);
+  unsigned short add_val_w_cast = tl_atomic_detail::PackBits16(add_val_hi.y);
+  unsigned long long ref_addr = reinterpret_cast<unsigned long long>(ref);
+  unsigned short ret_val_x_cast;
+  unsigned short ret_val_y_cast;
+  unsigned short ret_val_z_cast;
+  unsigned short ret_val_w_cast;
+  tl_atomic_detail::tl_atomic_add_v4_bf16(
+      ret_val_x_cast, ret_val_y_cast, ret_val_z_cast, ret_val_w_cast, ref_addr,
+      add_val_x_cast, add_val_y_cast, add_val_z_cast, add_val_w_cast,
+      memory_order);
+}
+#else
+template <typename SrcType>
+TL_DEVICE void AtomicAddx4(bfloat16_t *ref, SrcType *val,
+                           int memory_order = int(cuda::memory_order_relaxed)) {
+  AtomicAddx2(ref, val, memory_order);
+  AtomicAddx2(ref + 2, val + 2, memory_order);
+}
+#endif
+#endif
+
 template <typename T> TL_DEVICE float2 ToFloat2(T *val) {
   return *reinterpret_cast<const float2 *>(val);
 }
@@ -726,6 +852,58 @@ TL_DEVICE void AtomicStore(T1 *ref, T2 value, int memory_order) {
 #if CUDART_VERSION >= 11080
   cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*ref);
   aref.store(cuda_cast<NT1>(value), cuda::memory_order(memory_order));
+#else
+  TL_NOT_IMPLEMENTED();
+#endif
+}
+
+template <typename T1, typename T2>
+TL_DEVICE void AtomicOr(T1 *ref, T2 value,
+                        int memory_order = int(cuda::memory_order_relaxed)) {
+  using NT1 = typename normalize_atomic_type<T1>::type;
+#if CUDART_VERSION >= 11080
+  if constexpr (std::is_same_v<NT1, int> || std::is_same_v<NT1, unsigned int>) {
+    uint32_t val = static_cast<uint32_t>(value);
+    auto addr = reinterpret_cast<unsigned long long>(ref);
+    if (memory_order == int(cuda::memory_order_release)) {
+      asm volatile("red.release.gpu.global.or.b32 [%0], %1;" ::"l"(addr),
+                   "r"(val));
+    } else if (memory_order == int(cuda::memory_order_acq_rel)) {
+      asm volatile("red.acq_rel.gpu.global.or.b32 [%0], %1;" ::"l"(addr),
+                   "r"(val));
+    } else if (memory_order == int(cuda::memory_order_acquire)) {
+      asm volatile("red.acquire.gpu.global.or.b32 [%0], %1;" ::"l"(addr),
+                   "r"(val));
+    } else if (memory_order == int(cuda::memory_order_relaxed)) {
+      asm volatile("red.relaxed.gpu.global.or.b32 [%0], %1;" ::"l"(addr),
+                   "r"(val));
+    } else {
+      cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*ref);
+      aref.fetch_or(cuda_cast<NT1>(value), cuda::memory_order(memory_order));
+    }
+  } else if constexpr (std::is_same_v<NT1, unsigned long long>) {
+    unsigned long long val = static_cast<unsigned long long>(value);
+    auto addr = reinterpret_cast<unsigned long long>(ref);
+    if (memory_order == int(cuda::memory_order_release)) {
+      asm volatile("red.release.gpu.global.or.b64 [%0], %1;" ::"l"(addr),
+                   "l"(val));
+    } else if (memory_order == int(cuda::memory_order_acq_rel)) {
+      asm volatile("red.acq_rel.gpu.global.or.b64 [%0], %1;" ::"l"(addr),
+                   "l"(val));
+    } else if (memory_order == int(cuda::memory_order_acquire)) {
+      asm volatile("red.acquire.gpu.global.or.b64 [%0], %1;" ::"l"(addr),
+                   "l"(val));
+    } else if (memory_order == int(cuda::memory_order_relaxed)) {
+      asm volatile("red.relaxed.gpu.global.or.b64 [%0], %1;" ::"l"(addr),
+                   "l"(val));
+    } else {
+      cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*ref);
+      aref.fetch_or(cuda_cast<NT1>(value), cuda::memory_order(memory_order));
+    }
+  } else {
+    cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*ref);
+    aref.fetch_or(cuda_cast<NT1>(value), cuda::memory_order(memory_order));
+  }
 #else
   TL_NOT_IMPLEMENTED();
 #endif

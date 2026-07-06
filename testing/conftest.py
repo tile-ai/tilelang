@@ -11,6 +11,17 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+
+def _configure_torch_extensions_dir():
+    cache_dir = os.environ.get("TILELANG_CACHE_DIR", os.path.expanduser("~/.tilelang/cache"))
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+    path = os.path.join(cache_dir, "torch_extension", f"{worker}-{os.getpid()}")
+    os.makedirs(path, exist_ok=True)
+    os.environ["TORCH_EXTENSIONS_DIR"] = path
+
+
+_configure_torch_extensions_dir()
+
 random.seed(0)
 
 try:

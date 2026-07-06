@@ -4,6 +4,7 @@ import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 import pytest
+import torch
 
 auto_target = tvm.target.Target(determine_target("auto"))
 
@@ -168,6 +169,70 @@ def test_static_ragged_copy_allows_1024_elements_384_threads():
     assert "B[((i * 384) + ((int)threadIdx.x))]" in kernel_source
     assert "(((int)threadIdx.x) >> 7)) < 8" in kernel_source
     assert "threadIdx.x) < 128" not in kernel_source
+
+
+@pytest.mark.parametrize("block_n", [24, 40, 48, 64, 96])
+def test_column_broadcast_fragment_tile_width_lowers(block_n):
+    # Regression for issue #2394: LayoutInference used to synthesize a zero-extent
+    # leftover iterator for non-power-of-two column broadcasts, then divide by zero.
+    m, n = 256, block_n * 4
+    block_m = 64
+
+    @T.prim_func
+    def main(D_in: T.Tensor((n,), T.bfloat16), Out: T.Tensor((m, n), T.bfloat16)):
+        with T.Kernel(T.ceildiv(n, block_n), T.ceildiv(m, block_m), threads=128) as (bx, by):
+            d_local = T.alloc_fragment((block_n,), T.float32)
+            d_shared = T.alloc_shared((block_n,), T.bfloat16)
+            x = T.alloc_fragment((block_m, block_n), T.float32)
+            xs = T.alloc_shared((block_m, block_n), T.bfloat16)
+
+            T.copy(D_in[bx * block_n], d_shared)
+            T.copy(d_shared, d_local)
+            for i, j in T.Parallel(block_m, block_n):
+                x[i, j] = d_local[j] * 2.0
+            T.copy(x, xs)
+            T.copy(xs, Out[by * block_m, bx * block_n])
+
+    with tvm.target.Target(auto_target):
+        artifact = tl.lower(main, target=auto_target, enable_device_compile=False)
+
+    assert artifact.kernel_source
+
+
+@tl.jit(out_idx=[1])
+def _column_broadcast_fragment_kernel(block_n):
+    m, n = 256, block_n * 4
+    block_m = 64
+
+    @T.prim_func
+    def main(D_in: T.Tensor((n,), T.float32), Out: T.Tensor((m, n), T.float32)):
+        with T.Kernel(T.ceildiv(n, block_n), T.ceildiv(m, block_m), threads=128) as (bx, by):
+            d_local = T.alloc_fragment((block_n,), T.float32)
+            d_shared = T.alloc_shared((block_n,), T.float32)
+            x = T.alloc_fragment((block_m, block_n), T.float32)
+            xs = T.alloc_shared((block_m, block_n), T.float32)
+
+            T.copy(D_in[bx * block_n], d_shared)
+            T.copy(d_shared, d_local)
+            for i, j in T.Parallel(block_m, block_n):
+                x[i, j] = d_local[j] * 2.0
+            T.copy(x, xs)
+            T.copy(xs, Out[by * block_m, bx * block_n])
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("block_n", [24, 32, 40, 48, 96])
+def test_column_broadcast_fragment_values(block_n):
+    # Numerical regression for issue #2394: the column broadcast must match D*2.
+    kernel = _column_broadcast_fragment_kernel(block_n)
+
+    d = torch.arange(block_n * 4, device="cuda", dtype=torch.float32)
+    out = kernel(d)
+    expected = d.unsqueeze(0).expand(256, -1) * 2.0
+
+    assert torch.equal(out, expected)
 
 
 if __name__ == "__main__":

@@ -111,12 +111,17 @@ Array<IterSplitExpr> get_unused_iters(const IterMark &mark,
     } else {
       used[j] = true;
       i++;
-      expected_lower_factor = splits[j]->lower_factor * splits[j]->extent;
+      expected_lower_factor =
+          analyzer->Simplify(splits[j]->lower_factor * splits[j]->extent);
     }
   }
-  bool match_full_iter =
-      analyzer->CanProveEqual(expected_lower_factor, mark->extent);
-  if (!match_full_iter) {
+  // Iter split normalization may over-approximate the original mark span.
+  // Treat over-coverage as fully covered instead of synthesizing a zero-extent
+  // leftover iterator, which later normalizes into division by zero.
+  bool covers_full_iter =
+      analyzer->CanProveEqual(expected_lower_factor, mark->extent) ||
+      analyzer->CanProve(expected_lower_factor > mark->extent);
+  if (!covers_full_iter) {
     results.emplace_back(
         mark, expected_lower_factor,
         analyzer->Simplify(FloorDiv(mark->extent, expected_lower_factor)), 1);
