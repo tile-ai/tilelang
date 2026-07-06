@@ -1542,9 +1542,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
       tl::IsCudaVectorizableFP8(from_ty)) {
     bool is_e4m3 = from_ty.is_float8_e4m3() || from_ty.is_float8_e4m3fn();
     std::string interp = is_e4m3 ? "__NV_E4M3" : "__NV_E5M2";
-    os << "half_t(__tl_cvt_fp8_to_half(*reinterpret_cast<const "
-          "__nv_fp8_storage_t*>(&("
-       << PrintExpr(op->value) << ")), " << interp << "))";
+    os << "half_t(__tl_cvt_fp8_to_half((" << PrintExpr(op->value)
+       << ").raw(), " << interp << "))";
     return;
   }
 
@@ -1563,9 +1562,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
       tl::IsCudaVectorizableFP8(from_ty)) {
     bool is_e4m3 = from_ty.is_float8_e4m3() || from_ty.is_float8_e4m3fn();
     std::string interp = is_e4m3 ? "__NV_E4M3" : "__NV_E5M2";
-    os << "bfloat16_t(__tl_cvt_fp8_to_bfloat16(*reinterpret_cast<const "
-          "__nv_fp8_storage_t*>(&("
-       << PrintExpr(op->value) << ")), " << interp << "))";
+    os << "bfloat16_t(__tl_cvt_fp8_to_bfloat16((" << PrintExpr(op->value)
+       << ").raw(), " << interp << "))";
     return;
   }
 
