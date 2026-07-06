@@ -395,6 +395,28 @@ TryRemoveThreadOwnedFactor(const PrimExpr &expr, const IterVar &iter_var,
   return std::make_pair(new_expr, new_iter_var);
 }
 
+inline void CheckThreadOwnedFactorProjectable(const PrimExpr &index_expr,
+                                              const Var &reduce_var,
+                                              int64_t thread_owned_factor,
+                                              arith::Analyzer *analyzer) {
+  if (thread_owned_factor <= 1) {
+    return;
+  }
+
+  PrimExpr factor = make_const(reduce_var.dtype(), thread_owned_factor);
+  PrimExpr masked_reduce_var = FloorDiv(reduce_var, factor) * factor;
+  PrimExpr simplified_index = analyzer->Simplify(index_expr);
+  PrimExpr projected_index = analyzer->Simplify(
+      Substitute(simplified_index, {{reduce_var, masked_reduce_var}}));
+
+  ICHECK(analyzer->CanProveEqual(projected_index, simplified_index))
+      << "ReduceOp cannot lower a layout where a source index depends on a "
+         "thread-owned reduce factor: src_index="
+      << simplified_index << ", projected_src_index=" << projected_index
+      << ", reduce_var=" << reduce_var
+      << ", thread_owned_factor=" << thread_owned_factor;
+}
+
 inline std::pair<PrimExpr, IterVar>
 BuildLocalReduceIterator(const PrimExpr &index_expr,
                          const Array<IterVar> &input_iters,
@@ -406,6 +428,8 @@ BuildLocalReduceIterator(const PrimExpr &index_expr,
   for (const auto &iv : input_iters) {
     proof_analyzer.Bind(iv->var, iv->dom, /*allow_override=*/true);
   }
+  CheckThreadOwnedFactorProjectable(index_expr, reduce_var, thread_owned_factor,
+                                    &proof_analyzer);
 
   int64_t remaining_thread_owned_factor = thread_owned_factor;
   PrimExpr cur_expr = expr;
@@ -437,11 +461,19 @@ MakeReduceOwnershipPlan(const Array<PrimExpr> &src_indices,
                         const PrimExpr &src_thread,
                         const Array<IterVar> &src_vars, const Var &reduce_var,
                         arith::Analyzer *analyzer) {
+  // Use src_thread as the single source of truth for thread-owned reduce
+  // splits.  These steps are later used verbatim to emit scalar or batched
+  // AllReduce, so the local loop must not enumerate the same split again.
   auto thread_iter_sum =
       arith::NormalizeToIterSum(src_thread, ToVMap(src_vars), analyzer);
   auto thread_steps = CollectThreadReduceSteps(thread_iter_sum, reduce_var);
   int64_t thread_owned_factor = ThreadOwnedReduceFactor(thread_steps);
 
+  // Build the per-thread source indexing plan.  A thread-owned factor is
+  // removed from the compressed local iterator only after proving that
+  // projecting out that factor leaves the physical source index unchanged.
+  // This keeps ownership from src_thread, while using src_indices as a safety
+  // check against dropping a factor that still selects different local values.
   Array<PrimExpr> local_src_indices;
   Array<IterVar> local_reduce_vars;
   for (const auto &src_index : src_indices) {
@@ -535,8 +567,10 @@ template <typename Impl> struct ReduceLowerer {
           dst_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
       auto src_thread = src_layout->ForwardThread(
           src_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }), {});
+
       auto reduce_plan = reduce::MakeReduceOwnershipPlan(
           src_indices, src_thread, src_vars, src_vars[op.dim]->var, analyzer);
+
       Array<Stmt> stmts;
 
       auto require_init = op.clear;
