@@ -8,8 +8,6 @@ from tilelang.backend.pass_pipeline import PassPipeline, register_pipeline
 from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
     allow_vectorize,
-    should_disable_shared_memory_reuse,
-    should_enable_aggressive_merge,
     should_enable_race_check,
     should_force_let_inline,
 )
@@ -31,8 +29,6 @@ def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LayoutReducer()(mod)
 
     mod = tilelang.transform.IfStmtBinding()(mod)
-    mod = tilelang.transform.PipelinePlanning()(mod)
-    mod = tilelang.transform.InjectSoftwarePipeline()(mod)
     mod = tilelang.transform.Simplify()(mod)
 
     mod = tilelang.transform.LayoutInference()(mod)
@@ -66,18 +62,13 @@ def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.VerifyMemory()(mod)
     mod = tirx.transform.AnnotateEntryFunc()(mod)
     mod = s_tir.transform.InferFragment()(mod)
-    mod = tilelang.transform.LowerThreadAllreduce()(mod)
+    # CPU currently skips LowerThreadAllreduce because thread bindings are lowered
+    # as serial loops. Revisit this if CPU gains thread-level reduce/allreduce support.
 
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tilelang.transform.SplitHostDevice()(mod)
     mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
 
-    enable_aggressive_merge = should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target)
-    disable_reuse = should_disable_shared_memory_reuse(pass_ctx=pass_ctx)
-    mod = tilelang.transform.MergeSharedMemoryAllocations(enable_aggressive_merge=enable_aggressive_merge, disable_reuse=disable_reuse)(mod)
-
-    mod = tilelang.transform.ThreadSync("shared")(mod)
-    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
     mod = tilelang.transform.MergeIfStmt()(mod)
     mod = tilelang.transform.MakePackedAPI()(mod)
     mod = tilelang.transform.Simplify()(mod)
