@@ -10,6 +10,11 @@ namespace tl {
 template <class> inline constexpr bool always_false_v = false;
 #endif
 
+TL_DEVICE uint32_t tmem_u8_addr(uint32_t const &base,
+                                uint32_t const &byte_offset) {
+  return base + ((byte_offset >> 2) | (byte_offset << 30));
+}
+
 // Generic declaration: unsupported by default
 template <DataType C_type, bool use_2cta = false>
 TL_DEVICE void
@@ -799,6 +804,174 @@ TL_DEVICE void tcgen05mma_blockscaled_ss<DataType::kFloat4_e2m1fn, true>(
     uint32_t const &tmem_sfb) {
   tcgen05mma_blockscaled_ss<DataType::kFloat8_e4m3, true>(
       desc_a, desc_b, tmem_c, scalec, desc_val, tmem_sfa, tmem_sfb);
+}
+
+// Packed MXFP4 block-scaled MMA:
+// tcgen05.mma.cta_group::{1,2}.kind::mxf4.block_scale.block32
+// Uses packed FP4 E2M1 operands and UE8M0 block32 scale factors.
+template <DataType C_type, bool use_2cta = false>
+TL_DEVICE void tcgen05mma_blockscaled_mxf4_ss(
+    uint64_t const & /*desc_a*/, uint64_t const & /*desc_b*/,
+    uint32_t const & /*tmem_c*/, uint32_t const & /*scalec*/,
+    uint32_t const & /*desc_val*/, uint32_t const & /*tmem_sfa*/,
+    uint32_t const & /*tmem_sfb*/) {
+  static_assert(
+      always_false_v<std::integral_constant<int, static_cast<int>(C_type)>>,
+      "tl::tcgen05mma_blockscaled_mxf4_ss: unsupported operand type");
+}
+
+template <>
+TL_DEVICE void tcgen05mma_blockscaled_mxf4_ss<DataType::kFloat4_e2m1fn, false>(
+    uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, uint32_t const &tmem_sfa,
+    uint32_t const &tmem_sfb) {
+  if (cute::elect_one_sync()) {
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                            \
+    (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9)
+    asm volatile(
+        "{\n\t"
+        ".reg .pred p;\n\t"
+        "setp.ne.b32 p, %4, 0;\n\t"
+        "tcgen05.mma.cta_group::1.kind::mxf4.block_scale.block32 [%0], "
+        "%1, %2, %3, [%5], [%6], p; \n\t"
+        "}\n"
+        :
+        : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(desc_val), "r"(scalec),
+          "r"(tmem_sfa), "r"(tmem_sfb));
+#else
+    asm volatile(
+        "{\n\t"
+        ".reg .pred p;\n\t"
+        "setp.ne.b32 p, %4, 0;\n\t"
+        "tcgen05.mma.cta_group::1.kind::mxf4.block_scale.scale_vec::2X "
+        "[%0], %1, %2, %3, [%5], [%6], p; \n\t"
+        "}\n"
+        :
+        : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(desc_val), "r"(scalec),
+          "r"(tmem_sfa), "r"(tmem_sfb));
+#endif
+  }
+}
+
+template <>
+TL_DEVICE void tcgen05mma_blockscaled_mxf4_ss<DataType::kFloat4_e2m1fn, true>(
+    uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, uint32_t const &tmem_sfa,
+    uint32_t const &tmem_sfb) {
+  if (cute::elect_one_sync()) {
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                            \
+    (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9)
+    asm volatile(
+        "{\n\t"
+        ".reg .pred p;\n\t"
+        "setp.ne.b32 p, %4, 0;\n\t"
+        "tcgen05.mma.cta_group::2.kind::mxf4.block_scale.block32 [%0], "
+        "%1, %2, %3, [%5], [%6], p; \n\t"
+        "}\n"
+        :
+        : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(desc_val), "r"(scalec),
+          "r"(tmem_sfa), "r"(tmem_sfb));
+#else
+    asm volatile(
+        "{\n\t"
+        ".reg .pred p;\n\t"
+        "setp.ne.b32 p, %4, 0;\n\t"
+        "tcgen05.mma.cta_group::2.kind::mxf4.block_scale.scale_vec::2X "
+        "[%0], %1, %2, %3, [%5], [%6], p; \n\t"
+        "}\n"
+        :
+        : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(desc_val), "r"(scalec),
+          "r"(tmem_sfa), "r"(tmem_sfb));
+#endif
+  }
+}
+
+// NVFP4 block-scaled MMA:
+// tcgen05.mma.cta_group::{1,2}.kind::mxf4nvf4.block_scale.block16
+// Uses packed FP4 E2M1 operands and UE4M3 block16 scale factors.
+template <DataType C_type, bool use_2cta = false>
+TL_DEVICE void tcgen05mma_blockscaled_nvfp4_ss(
+    uint64_t const & /*desc_a*/, uint64_t const & /*desc_b*/,
+    uint32_t const & /*tmem_c*/, uint32_t const & /*scalec*/,
+    uint32_t const & /*desc_val*/, uint32_t const & /*tmem_sfa*/,
+    uint32_t const & /*tmem_sfb*/) {
+  static_assert(
+      always_false_v<std::integral_constant<int, static_cast<int>(C_type)>>,
+      "tl::tcgen05mma_blockscaled_nvfp4_ss: unsupported operand type");
+}
+
+template <>
+TL_DEVICE void
+tcgen05mma_blockscaled_nvfp4_ss<DataType::kFloat4_e2m1fn, false>(
+    uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, uint32_t const &tmem_sfa,
+    uint32_t const &tmem_sfb) {
+  if (cute::elect_one_sync()) {
+    uint32_t const runtime_desc_val =
+        desc_val | ((tmem_sfa & 0xC0000000u) >> 1) |
+        (((tmem_sfb & 0xC0000000u) >> 30) << 4);
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                            \
+    (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9)
+    asm volatile(
+        "{\n\t"
+        ".reg .pred p;\n\t"
+        "setp.ne.b32 p, %4, 0;\n\t"
+        "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.block16 [%0], "
+        "%1, %2, %3, [%5], [%6], p; \n\t"
+        "}\n"
+        :
+        : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(runtime_desc_val), "r"(scalec),
+          "r"(tmem_sfa), "r"(tmem_sfb));
+#else
+    asm volatile(
+        "{\n\t"
+        ".reg .pred p;\n\t"
+        "setp.ne.b32 p, %4, 0;\n\t"
+        "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.scale_vec::4X "
+        "[%0], %1, %2, %3, [%5], [%6], p; \n\t"
+        "}\n"
+        :
+        : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(runtime_desc_val), "r"(scalec),
+          "r"(tmem_sfa), "r"(tmem_sfb));
+#endif
+  }
+}
+
+template <>
+TL_DEVICE void
+tcgen05mma_blockscaled_nvfp4_ss<DataType::kFloat4_e2m1fn, true>(
+    uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, uint32_t const &tmem_sfa,
+    uint32_t const &tmem_sfb) {
+  if (cute::elect_one_sync()) {
+    uint32_t const runtime_desc_val =
+        desc_val | ((tmem_sfa & 0xC0000000u) >> 1) |
+        (((tmem_sfb & 0xC0000000u) >> 30) << 4);
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                            \
+    (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9)
+    asm volatile(
+        "{\n\t"
+        ".reg .pred p;\n\t"
+        "setp.ne.b32 p, %4, 0;\n\t"
+        "tcgen05.mma.cta_group::2.kind::mxf4nvf4.block_scale.block16 [%0], "
+        "%1, %2, %3, [%5], [%6], p; \n\t"
+        "}\n"
+        :
+        : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(runtime_desc_val), "r"(scalec),
+          "r"(tmem_sfa), "r"(tmem_sfb));
+#else
+    asm volatile(
+        "{\n\t"
+        ".reg .pred p;\n\t"
+        "setp.ne.b32 p, %4, 0;\n\t"
+        "tcgen05.mma.cta_group::2.kind::mxf4nvf4.block_scale.scale_vec::4X "
+        "[%0], %1, %2, %3, [%5], [%6], p; \n\t"
+        "}\n"
+        :
+        : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(runtime_desc_val), "r"(scalec),
+          "r"(tmem_sfa), "r"(tmem_sfb));
+#endif
+  }
 }
 
 } // namespace tl

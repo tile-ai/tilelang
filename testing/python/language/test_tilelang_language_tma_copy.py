@@ -325,6 +325,29 @@ def fp4_tma_copy_unpacked_smem_store(M=128, N=256, block_M=64, block_N=128):
     return main
 
 
+
+def fp4_staged_tma_copy_load(M=128, N=256, block_M=64, block_N=128, num_stages=4):
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, N), T.float4_e2m1fn),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+            A_shared = T.alloc_shared((num_stages, block_M, block_N), T.float4_e2m1fn)
+            mbar = T.alloc_barrier([128] * num_stages)
+            T.use_swizzle(16)
+            for k in T.serial(num_stages):
+                stage = k % num_stages
+                T.tma_copy(
+                    A[by * block_M : (by + 1) * block_M, bx * block_N : (bx + 1) * block_N],
+                    A_shared[stage, :, :],
+                    barrier=mbar[stage],
+                )
+                T.mbarrier_arrive(mbar[stage])
+                T.mbarrier_wait_parity(mbar[stage], 0)
+
+    return main
+
+
 def _fp4_tma_descriptor_init_block(host_source, desc_name):
 
     marker = f"[0].v_ptr) = {desc_name};"
@@ -363,6 +386,13 @@ def _assert_fp4_packed_tma_descriptor(host_source, desc_name):
     block = _fp4_tma_descriptor_init_block(host_source, desc_name)
     for index, expected in expected_tma_args.items():
         assert _fp4_tma_stack_int(block, index) == expected
+
+
+def _assert_fp4_packed_tma_descriptor_kind(host_source, desc_name, *, expect_swizzle):
+    block = _fp4_tma_descriptor_init_block(host_source, desc_name)
+    assert _fp4_tma_stack_int(block, 1) == 13  # CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B
+    assert _fp4_tma_stack_int(block, 2) == 2
+    assert _fp4_tma_stack_int(block, 13) == expect_swizzle
 
 
 def _assert_fp4_unpacked_tma_descriptor(host_source, desc_name, *, expect_swizzle=None):
@@ -459,10 +489,29 @@ def run_fp4_tma_copy_unpacked_smem_load():
     assert "expect_transaction(4096)" in device_source
 
 
+def run_fp4_staged_tma_copy_load():
+    program = fp4_staged_tma_copy_load()
+    kernel = tilelang.compile(
+        program,
+        target="cuda",
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+    device_source = kernel.get_kernel_source()
+    host_source = kernel.get_host_source()
+    assert "tl::tma_load" in device_source
+    _assert_fp4_packed_tma_descriptor_kind(host_source, "A_desc", expect_swizzle=0)
+
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 def test_fp4_tma_copy_roundtrip_packed_smem():
     run_fp4_tma_copy_roundtrip()
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(10, 0)
+def test_fp4_staged_tma_copy_packed_smem_codegen():
+    run_fp4_staged_tma_copy_load()
 
 
 @tilelang.testing.requires_cuda

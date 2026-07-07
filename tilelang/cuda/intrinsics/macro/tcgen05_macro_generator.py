@@ -269,7 +269,29 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             return buf_or_region.buffer
         return buf_or_region
 
-    def tcgen05mma(self, A_buf: Buffer, B_buf: Buffer, C_local_buf: Buffer, mbar, clear_accum: PrimExpr = False):
+    def _determinate_swizzle_mode(self, buffer, layout: Layout) -> SwizzleMode:
+        buffer = self._as_buffer(buffer)
+        # same behavior to src/layout/gemm_layouts.cc::MakeGemmABLayoutHopper
+        if layout is None or layout.is_equal(make_linear_layout(buffer)):
+            return SwizzleMode.NONE
+        elif layout.is_equal(make_quarter_bank_swizzled_layout(buffer)):
+            return SwizzleMode.SWIZZLE_32B
+        elif layout.is_equal(make_half_bank_swizzled_layout(buffer)):
+            return SwizzleMode.SWIZZLE_64B
+        elif layout.is_equal(make_full_bank_swizzled_layout(buffer)):
+            return SwizzleMode.SWIZZLE_128B
+        else:
+            raise ValueError(f"Unsupported swizzle mode: {layout}")
+
+    def tcgen05mma(
+        self,
+        A_buf: Buffer,
+        B_buf: Buffer,
+        C_local_buf: Buffer,
+        mbar,
+        clear_accum: PrimExpr = False,
+        c_col_offset: PrimExpr = tvm.tirx.const(0, "int32"),
+    ):
         """Emit a TCGEN5MMA operation, dispatching to SS or TS variant based on A's memory scope.
 
         If *A_buf* resides in tensor memory (``shared.tmem``), the TS variant is
@@ -289,10 +311,18 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             Whether to zero the accumulator before the first MMA.
         """
         if is_tensor_memory(A_buf):
-            return self.tcgen05mma_ts(A_buf, B_buf, C_local_buf, mbar, clear_accum)
-        return self.tcgen05mma_ss(A_buf, B_buf, C_local_buf, mbar, clear_accum)
+            return self.tcgen05mma_ts(A_buf, B_buf, C_local_buf, mbar, clear_accum, c_col_offset)
+        return self.tcgen05mma_ss(A_buf, B_buf, C_local_buf, mbar, clear_accum, c_col_offset)
 
-    def tcgen05mma_ss(self, A_buf: Buffer, B_buf: Buffer, C_local_buf: Buffer, mbar, clear_accum: PrimExpr = False):
+    def tcgen05mma_ss(
+        self,
+        A_buf: Buffer,
+        B_buf: Buffer,
+        C_local_buf: Buffer,
+        mbar,
+        clear_accum: PrimExpr = False,
+        c_col_offset: PrimExpr = tvm.tirx.const(0, "int32"),
+    ):
         """Emit the SS (Shared-Shared) variant of TCGEN5MMA.
 
         Reads operand A and B from shared memory via a descriptor.
@@ -331,12 +361,32 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             for j in T.unroll(num_inst_n):
                 for i in T.unroll(num_inst_m):
                     for ki in T.unroll(0, num_k_atoms):
-                        self.tcgen05_ss_atom(desc_a, desc_b, C_local_buf, i, j, ki, a_params, b_params, instr_desc, clear_accum)
+                        self.tcgen05_ss_atom(
+                            desc_a,
+                            desc_b,
+                            C_local_buf,
+                            i,
+                            j,
+                            ki,
+                            a_params,
+                            b_params,
+                            instr_desc,
+                            clear_accum,
+                            c_col_offset,
+                        )
             self.tcgen05_atom_arrive(mbar)
 
         return _warp_mma_ss(A_buf, B_buf, C_local_buf, mbar)
 
-    def tcgen05mma_ts(self, A_buf, B_buf, C_local_buf, mbar, clear_accum: PrimExpr = False):
+    def tcgen05mma_ts(
+        self,
+        A_buf,
+        B_buf,
+        C_local_buf,
+        mbar,
+        clear_accum: PrimExpr = False,
+        c_col_offset: PrimExpr = tvm.tirx.const(0, "int32"),
+    ):
         """Emit the TS (TensorMemory-Shared) variant of TCGEN5MMA.
 
         Reads operand A directly from tensor memory (TMEM) and operand B from
@@ -383,7 +433,18 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             for j in T.unroll(num_inst_n):
                 for i in T.unroll(num_inst_m):
                     for ki in T.unroll(0, num_k_atoms):
-                        self.tcgen05_ts_atom(a_data, desc_b, C_local_buf, i, j, ki, b_params, instr_desc, clear_accum)
+                        self.tcgen05_ts_atom(
+                            a_data,
+                            desc_b,
+                            C_local_buf,
+                            i,
+                            j,
+                            ki,
+                            b_params,
+                            instr_desc,
+                            clear_accum,
+                            c_col_offset,
+                        )
             self.tcgen05_atom_arrive(mbar)
 
         return _warp_mma_ts(a_tmem_data, B_buf, C_local_buf, mbar)
@@ -399,13 +460,21 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         sf_k_start: PrimExpr,
         sf_a_granularity_k: int,
         sf_b_granularity_k: int,
+        blockscale_format: str = "mx",
         clear_accum: PrimExpr = False,
+        c_col_offset: PrimExpr = tvm.tirx.const(0, "int32"),
+        sfa_col_offset: PrimExpr = tvm.tirx.const(0, "int32"),
+        sfb_col_offset: PrimExpr = tvm.tirx.const(0, "int32"),
     ):
         """Emit a block-scaled TCGEN5MMA (SS variant with TMEM scale factors).
 
-        Uses ``tcgen05.mma.cta_group::1|2.kind::mxf8f6f4.block_scale`` PTX instruction.
+        Uses ``tcgen05.mma.cta_group::1|2.kind::mxf8f6f4.block_scale``,
+        packed ``kind::mxf4.block_scale``, or
+        ``kind::mxf4nvf4.block_scale`` PTX instruction.
         Scale factors must already reside in tensor memory.
         """
+        if blockscale_format not in ("mx", "nv", "mxf4"):
+            raise ValueError(f"Unsupported blockscale_format: {blockscale_format!r}")
         m_dim = self.block_row_warps * self.warp_row_tiles
         micro_size_k = self.micro_size_k
         k_dim, n_dim = self.chunk, self.block_col_warps * self.warp_col_tiles
@@ -434,7 +503,6 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         # walks within the whole-tile descriptor exactly as tcgen05_ss_atom does.
         a_params = self.compute_tcgen05_a_desc_params(A_buf)
         b_params = self.compute_tcgen05_b_desc_params(B_buf)
-
         base_instr_desc = self.get_tcgen5_blockscaled_instr_desc(
             atom_m,
             atom_n,
@@ -444,6 +512,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             1,
             0,
             0,
+            blockscale_format,
         )
 
         num_inst_m = m_dim // atom_m_per_cta
@@ -475,9 +544,12 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             for j in T.unroll(num_inst_n):
                 for i in T.unroll(num_inst_m):
                     for ki in T.unroll(0, num_k_atoms):
-                        runtime_sf_a_id = ((_sf_k_start + ki * micro_size_k) // int(sf_a_granularity_k)) % 4
-                        runtime_sf_b_id = ((_sf_k_start + ki * micro_size_k) // int(sf_b_granularity_k)) % 4
-                        runtime_instr_desc = base_instr_desc | (runtime_sf_a_id << 29) | (runtime_sf_b_id << 4)
+                        if blockscale_format == "nv":
+                            runtime_instr_desc = base_instr_desc
+                        else:
+                            runtime_sf_a_id = ((_sf_k_start + ki * micro_size_k) // int(sf_a_granularity_k)) % 4
+                            runtime_sf_b_id = ((_sf_k_start + ki * micro_size_k) // int(sf_b_granularity_k)) % 4
+                            runtime_instr_desc = base_instr_desc | (runtime_sf_a_id << 29) | (runtime_sf_b_id << 4)
                         self.tcgen05_blockscaled_atom(
                             desc_a,
                             desc_b,
@@ -490,7 +562,11 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                             a_params,
                             b_params,
                             runtime_instr_desc,
+                            blockscale_format,
                             clear_accum,
+                            c_col_offset,
+                            sfa_col_offset,
+                            sfb_col_offset,
                         )
             self.tcgen05_atom_arrive(mbar)
 
@@ -506,8 +582,11 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         scale_in_b: int,
         a_sf_id: int,
         b_sf_id: int,
+        blockscale_format: str = "mx",
     ) -> PrimExpr:
         """Build the block-scaled instruction descriptor via FFI."""
+        if blockscale_format not in ("mx", "nv", "mxf4"):
+            raise ValueError(f"Unsupported blockscale_format: {blockscale_format!r}")
         desc = _ffi_api.get_tcgen5_blockscaled_instr_desc(
             atom_m,
             atom_n,
@@ -519,6 +598,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             scale_in_b,
             a_sf_id,
             b_sf_id,
+            blockscale_format,
         )
         return lift(desc)
 
@@ -837,6 +917,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         b_params: TCGEN05DescriptorParams,
         instr_desc: PrimExpr,
         clear_accum: PrimExpr = False,
+        c_col_offset: PrimExpr = tvm.tirx.const(0, "int32"),
     ):
         """Emit a single TCGEN05MMA SS instruction for atom ``(inst_m_idx, inst_n_idx, ki)``.
 
@@ -905,6 +986,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         B_byte_offset = _elements_to_bytes(B_elem_offset, b_elem_bits)
         tmem_col_step = atom_n // (128 // atom_m_per_cta)
         C_offset = (inst_m_idx * n_dim + inst_n_idx * tmem_col_step) * accum_dtype_in_bits // 32
+        C_offset = C_offset + c_col_offset * accum_dtype_in_bits // 32
 
         @T.macro
         def _ss_atom(desc_a, desc_b, C_local_buf):
@@ -940,6 +1022,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         b_params: TCGEN05DescriptorParams,
         instr_desc: PrimExpr,
         clear_accum: PrimExpr = False,
+        c_col_offset: PrimExpr = tvm.tirx.const(0, "int32"),
     ):
         """Emit a single TCGEN05MMA TS instruction for atom ``(inst_m_idx, inst_n_idx, ki)``.
 
@@ -1001,6 +1084,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         tmem_col_step = atom_n // (128 // atom_m_per_cta)
         C_offset = (inst_m_idx * n_dim + inst_n_idx * tmem_col_step) * accum_dtype_in_bits // 32
+        C_offset = C_offset + c_col_offset * accum_dtype_in_bits // 32
 
         @T.macro
         def _ts_atom(a_data, desc_b, C_local_buf):
@@ -1037,7 +1121,11 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         a_params: TCGEN05DescriptorParams,
         b_params: TCGEN05DescriptorParams,
         instr_desc: PrimExpr,
+        blockscale_format: str = "mx",
         clear_accum: PrimExpr = False,
+        c_col_offset: PrimExpr = tvm.tirx.const(0, "int32"),
+        sfa_col_offset: PrimExpr = tvm.tirx.const(0, "int32"),
+        sfb_col_offset: PrimExpr = tvm.tirx.const(0, "int32"),
     ):
         """Emit a single TCGEN05MMA block-scaled SS instruction.
 
@@ -1055,9 +1143,14 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             Pre-computed descriptor parameters.
         instr_desc : PrimExpr
             Block-scaled instruction descriptor (with SF IDs already encoded).
+        blockscale_format : str
+            ``"mx"`` for mxf8f6f4, ``"mxf4"`` for packed FP4 with UE8M0,
+            or ``"nv"`` for mxf4nvf4.
         clear_accum : PrimExpr
             Whether to zero the accumulator on the first K atom.
         """
+        if blockscale_format not in ("mx", "nv", "mxf4"):
+            raise ValueError(f"Unsupported blockscale_format: {blockscale_format!r}")
         atom_m, atom_n, _, _enable_ws, enable_2cta = self.tcgen05_meta_unpacked
         del _enable_ws  # block-scaled TCGEN05 does not support .ws
         atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
@@ -1099,6 +1192,15 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         B_byte_offset = _elements_to_bytes(B_elem_offset, b_elem_bits)
         tmem_col_step = atom_n // (128 // atom_m_per_cta)
         C_offset = (inst_m_idx * n_dim + inst_n_idx * tmem_col_step) * accum_dtype_in_bits // 32
+        C_offset = C_offset + c_col_offset * accum_dtype_in_bits // 32
+        if blockscale_format == "nv":
+            sfa_tmem_offset = ki * (atom_m_per_cta // 128) * 16
+            sfb_tmem_offset = ki * (atom_n // 128) * 16
+        else:
+            sfa_tmem_offset = 0
+            sfb_tmem_offset = 0
+        sfa_tmem_offset = sfa_tmem_offset + sfa_col_offset
+        sfb_tmem_offset = sfb_tmem_offset + sfb_col_offset
 
         @T.macro
         def _bs_atom(desc_a, desc_b, C_local_buf, sfa_data, sfb_data):
@@ -1114,11 +1216,11 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 instr_desc,
                 scale_out,
                 sfa_data,
-                0,
+                sfa_tmem_offset,
                 sfb_data,
+                sfb_tmem_offset,
                 0,
-                0,
-                0,
+                tvm.tirx.const({"mx": 0, "nv": 1, "mxf4": 2}[blockscale_format], "int32"),
                 enable_2cta,
             )
 

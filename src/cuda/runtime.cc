@@ -228,6 +228,13 @@ static bool IsTensorMapSwizzle128BFamily(CUtensorMapSwizzle swizzle) {
 static bool IsSupportedPackedTensorMapSwizzle(CUtensorMapDataType type,
                                               CUtensorMapSwizzle swizzle) {
   int swizzle_value = static_cast<int>(swizzle);
+  if (IsTensorMapDataType16U4Align8B(type)) {
+    return swizzle_value == CU_TENSOR_MAP_SWIZZLE_NONE ||
+           swizzle_value == CU_TENSOR_MAP_SWIZZLE_32B ||
+           swizzle_value == CU_TENSOR_MAP_SWIZZLE_64B ||
+           swizzle_value == kTensorMapSwizzle128BAtom32B ||
+           swizzle_value == kTensorMapSwizzle128BAtom64B;
+  }
   if (IsTensorMapDataType16U6Align16B(type)) {
     return swizzle_value == CU_TENSOR_MAP_SWIZZLE_NONE ||
            swizzle_value == CU_TENSOR_MAP_SWIZZLE_128B ||

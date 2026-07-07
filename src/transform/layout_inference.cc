@@ -235,6 +235,13 @@ public:
               << buffer << ", layout type is "
               << layout_map[buffer]->GetTypeKey();
           const auto &src_layout = src_layout_opt.value();
+          if (floating_fragment_buffers_.count(buffer) &&
+              !is_one(src_layout->ReplicateExtent()) &&
+              is_one(dst_layout->ReplicateExtent())) {
+            layout_map.Set(buffer, layout);
+            propagate_alias(buffer, layout);
+            continue;
+          }
           ICHECK(dst_layout->InputDim() == src_layout->InputDim());
           Array<PrimExpr> indices;
           indices.reserve(dst_layout->InputDim());
@@ -389,6 +396,9 @@ public:
     }
 
     for (const auto &[buffer, layout] : layout_map) {
+      if (floating_fragment_buffers_.count(buffer)) {
+        continue;
+      }
       strict_layout_map.Set(buffer, layout);
     }
 

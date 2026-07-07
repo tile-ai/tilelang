@@ -236,6 +236,7 @@ def tma_copy(
     dst: BufferLikeType,
     *,
     barrier=None,
+    cluster_mask: int | None = None,
     leader_scope_threads: int | None = None,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
     annotations: dict | None = None,
@@ -263,6 +264,8 @@ def tma_copy(
             Required for loads (global -> shared). Not needed for stores.
             The TMA load will arrive at this barrier with expected byte count.
             The user must wait on the same barrier via T.mbarrier_wait_parity().
+        cluster_mask: Bitmask of CTAs that participate in TMA multicast.
+            Only valid for global-to-shared loads in a cluster kernel.
         leader_scope_threads: Number of threads in each TMA leader-election scope
             (e.g., 32 for per-warp). Defaults to the thread extend in the current context if not specified.
         eviction_policy: Cache eviction policy. Defaults to None.
@@ -294,6 +297,8 @@ def tma_copy(
         from .builtin import _mbar_to_buffer_load
 
         ann["barrier"] = _mbar_to_buffer_load(barrier)
+    if cluster_mask is not None:
+        ann["cluster_mask"] = cluster_mask
 
     if leader_scope_threads is not None:
         if not isinstance(leader_scope_threads, int) or leader_scope_threads <= 0:

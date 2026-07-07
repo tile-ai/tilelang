@@ -67,6 +67,13 @@ class GemmTCGEN5(GemmBase):
         else:
             return make_linear_layout
 
+    def infer_nvfp4_shared_layout(self, buffer: tirx.Buffer, continuity: int) -> Callable[[tirx.Buffer], Layout]:
+        """Infer a shared-memory layout that both packed FP4 TMA and TCGEN05 can address."""
+        layout_fn = self.infer_shared_layout(buffer, continuity)
+        if buffer.dtype.is_float4_e2m1fn() and layout_fn is make_full_bank_swizzled_layout:
+            return make_half_bank_swizzled_layout
+        return layout_fn
+
     def infer_layout(self, target: Target, thread_nums: int):
         """Infer swizzled layouts for operands and accumulator.
 
@@ -98,16 +105,24 @@ class GemmTCGEN5(GemmBase):
 
         annotations = getattr(self.gemm_node, "annotations", {})
         use_2cta = bool(annotations.get("use_2cta", 0))
+        disable_ws = self.is_blockscaled or bool(annotations.get("disable_ws", 0))
         k = int(self.chunk)
-        mma_emitter.get_tcgen5_mma_meta(int(self.M), int(self.N), k, disable_2cta=not use_2cta, disable_ws=self.is_blockscaled)
+        mma_emitter.get_tcgen5_mma_meta(int(self.M), int(self.N), k, disable_2cta=not use_2cta, disable_ws=disable_ws)
 
         if self.is_blockscaled or self.is_gemm_ss():
             a_continuity = _shared_layout_continuity(self.A, a_is_k_major, self.K, self.M)
             b_continuity = _shared_layout_continuity(self.B, b_is_k_major, self.K, int(self.B.shape[-1]))
+            blockscale_format = int(annotations.get("blockscale_format", 0))
+            has_packed_fp4_operands = self.A.dtype.is_float4_e2m1fn() and self.B.dtype.is_float4_e2m1fn()
+            infer_shared_layout = (
+                self.infer_nvfp4_shared_layout
+                if self.is_blockscaled and (blockscale_format == 1 or has_packed_fp4_operands)
+                else self.infer_shared_layout
+            )
 
             return {
-                self.A: self.infer_shared_layout(self.A, a_continuity)(self.A),
-                self.B: self.infer_shared_layout(self.B, b_continuity)(self.B),
+                self.A: infer_shared_layout(self.A, a_continuity)(self.A),
+                self.B: infer_shared_layout(self.B, b_continuity)(self.B),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         if self.is_gemm_ts():
@@ -163,8 +178,9 @@ class GemmTCGEN5(GemmBase):
 
         annotations = getattr(self.gemm_node, "annotations", {})
         use_2cta = bool(annotations.get("use_2cta", 0))
+        disable_ws = bool(annotations.get("disable_ws", 0))
         k = int(self.chunk)
-        mma_emitter.get_tcgen5_mma_meta(int(self.M), int(self.N), k, disable_2cta=not use_2cta)
+        mma_emitter.get_tcgen5_mma_meta(int(self.M), int(self.N), k, disable_2cta=not use_2cta, disable_ws=disable_ws)
         atom_m, atom_n, atom_k, enable_ws, enable_2cta = mma_emitter.meta
 
         if self.A.scope() not in {"shared", "shared.dyn", "shared.tmem"}:
@@ -193,6 +209,7 @@ class GemmTCGEN5(GemmBase):
         A_shared = self.ARegion
         B_shared = self.BRegion
         C_local = self.C
+        C_coords = self.C_coords
         clear_accum = self.clear_accum
         mbar_phase = mbar_phase_expr if mbar_phase_expr is not None else 0
 
@@ -209,14 +226,14 @@ class GemmTCGEN5(GemmBase):
         @T.prim_func
         def _gemm_ss_cond() -> None:
             if cluster_cond and thread_var // 32 == thread_bounds.min // warp_size:
-                mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
+                mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum, C_coords[1])
             if not self.is_tcgen05:
                 T.mbarrier_wait_parity(mbar, mbar_phase)
 
         @T.prim_func
         def _gemm_ss() -> None:
             if cluster_cond:
-                mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
+                mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum, C_coords[1])
             if not self.is_tcgen05:
                 T.mbarrier_wait_parity(mbar, mbar_phase)
 
@@ -246,9 +263,14 @@ class GemmTCGEN5(GemmBase):
         A_shared = self.ARegion
         B_shared = self.BRegion
         C_local = self.C
+        C_coords = self.C_coords
         clear_accum = self.clear_accum
-        SFA_tmem = self.SFARegion.buffer
-        SFB_tmem = self.SFBRegion.buffer
+        SFA_tmem = self.SFARegion
+        SFB_tmem = self.SFBRegion
+        SFA_coords = self.get_region_base_offsets(self.SFARegion)
+        SFB_coords = self.get_region_base_offsets(self.SFBRegion)
+        sfa_col_offset = SFA_coords[1] if len(SFA_coords) > 1 else 0
+        sfb_col_offset = SFB_coords[1] if len(SFB_coords) > 1 else 0
         sf_k_start = self.sf_k_start
         # NOTE: mbar_phase_expr is intentionally unused in the current
         # frontend, which always requests explicit-async semantics. Keep the
@@ -260,10 +282,31 @@ class GemmTCGEN5(GemmBase):
         use_2cta = bool(annotations.get("use_2cta", 0))
         sf_a_granularity_k = annotations.get("sf_a_granularity_k")
         sf_b_granularity_k = annotations.get("sf_b_granularity_k")
+        blockscale_format_value = int(annotations.get("blockscale_format", 0))
+        if blockscale_format_value not in (0, 1):
+            raise ValueError(f"Unsupported blockscale_format annotation: {blockscale_format_value}")
+        blockscale_format = "nv" if blockscale_format_value == 1 else "mx"
+        blockscale_kind = blockscale_format
+        has_packed_fp4_operands = self.A.dtype.is_float4_e2m1fn() and self.B.dtype.is_float4_e2m1fn()
+        if blockscale_format == "mx" and has_packed_fp4_operands:
+            blockscale_kind = "mxf4"
+        if blockscale_kind in ("nv", "mxf4"):
+            if not self.A.dtype.is_float4_e2m1fn() or not self.B.dtype.is_float4_e2m1fn():
+                raise ValueError(
+                    f"blockscale_format='{blockscale_format}' requires packed FP4 E2M1 A and B operands "
+                    f"for TCGEN05 block-scaled GEMM, got A dtype={self.A.dtype}, B dtype={self.B.dtype}"
+                )
+            if int(self.chunk) % 64 != 0:
+                raise ValueError(
+                    f"blockscale_format='{blockscale_format}' with packed FP4 operands requires K chunk "
+                    f"to be a multiple of 64, got {self.chunk}"
+                )
         if sf_a_granularity_k is None or sf_b_granularity_k is None:
             raise ValueError("Block-scaled GEMM requires sf_a_granularity_k and sf_b_granularity_k")
         k = int(self.chunk)
         mma_emitter.get_tcgen5_mma_meta(int(self.M), int(self.N), k, disable_2cta=not use_2cta, disable_ws=True)
+        if blockscale_kind in ("nv", "mxf4"):
+            mma_emitter.micro_size_k = 64
         _atom_m, _atom_n, _atom_k, _enable_ws, enable_2cta = (int(x) for x in mma_emitter.meta)
 
         analyzer = Analyzer()
@@ -286,7 +329,11 @@ class GemmTCGEN5(GemmBase):
                     sf_k_start=sf_k_start,
                     sf_a_granularity_k=int(sf_a_granularity_k),
                     sf_b_granularity_k=int(sf_b_granularity_k),
+                    blockscale_format=blockscale_kind,
                     clear_accum=clear_accum,
+                    c_col_offset=C_coords[1],
+                    sfa_col_offset=sfa_col_offset,
+                    sfb_col_offset=sfb_col_offset,
                 )
 
         @T.prim_func
@@ -302,7 +349,11 @@ class GemmTCGEN5(GemmBase):
                     sf_k_start=sf_k_start,
                     sf_a_granularity_k=int(sf_a_granularity_k),
                     sf_b_granularity_k=int(sf_b_granularity_k),
+                    blockscale_format=blockscale_kind,
                     clear_accum=clear_accum,
+                    c_col_offset=C_coords[1],
+                    sfa_col_offset=sfa_col_offset,
+                    sfb_col_offset=sfb_col_offset,
                 )
 
         return (
