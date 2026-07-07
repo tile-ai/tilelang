@@ -11,8 +11,6 @@ import torch
 import tilelang
 import tilelang.language as T
 from tilelang.carver.arch import driver
-from tilelang.profiler import do_bench
-
 
 _WRELU_REDUCE_SRC = r"""
 #include <tl_templates/cuda/tcgen_05.h>
@@ -358,7 +356,6 @@ extern "C" __device__ __forceinline__ void tl_mqa_fp4_epilogue_half_cached_h64(
 }
 """
 
-
 def _ceil_div(x: int, y: int) -> int:
     return (x + y - 1) // y
 
@@ -375,6 +372,14 @@ def _torch_logits_dtype(dtype: str) -> torch.dtype:
     raise ValueError(f"unsupported logits dtype: {dtype}")
 
 
+def _tilelang_logits_dtype(dtype: str):
+    if dtype == "float32":
+        return T.float32
+    if dtype == "bfloat16":
+        return T.bfloat16
+    raise ValueError(f"unsupported logits dtype: {dtype}")
+
+
 @dataclass(frozen=True)
 class MQALogitsConfig:
     seq_len: int = 2048
@@ -382,34 +387,28 @@ class MQALogitsConfig:
     num_heads: int = 64
     head_dim: int = 128
     logits_dtype: str = "float32"
-    compressed_logits: bool = False
     seed: int = 0
 
     @property
     def block_q(self) -> int:
         return 128 // self.num_heads
 
-    @property
-    def block_kv(self) -> int:
-        return 128
-
-    @property
-    def aligned_seq_len(self) -> int:
-        return _align_up(self.seq_len, self.block_q)
-
     def validate(self) -> None:
-        if self.num_heads not in (32, 64):
-            raise ValueError("num_heads must be 32 or 64")
-        if 128 % self.num_heads != 0:
-            raise ValueError("128 must be divisible by num_heads")
-        if self.head_dim not in (64, 128):
-            raise ValueError("head_dim must be 64 or 128")
+        if self.num_heads != 64:
+            raise ValueError("SM100 MQA SOTA kernels currently require num_heads=64")
+        if self.head_dim != 128:
+            raise ValueError("SM100 MQA SOTA kernels currently require head_dim=128")
+        if self.seq_len <= 0 or self.seq_len_kv <= 0:
+            raise ValueError("sequence lengths must be positive")
+        if self.seq_len > self.seq_len_kv:
+            raise ValueError("seq_len must be <= seq_len_kv for the demo causal ranges")
+        if self.seq_len_kv - self.seq_len < 128:
+            raise ValueError("seq_len_kv must exceed seq_len by at least one 128-wide tile")
         if self.seq_len % self.block_q != 0:
             raise ValueError("seq_len must be divisible by block_q")
-        if self.seq_len_kv % self.block_kv != 0:
-            raise ValueError("seq_len_kv must be divisible by block_kv")
-        if self.logits_dtype not in ("float32", "bfloat16"):
-            raise ValueError("logits_dtype must be float32 or bfloat16")
+        if self.seq_len_kv % 128 != 0:
+            raise ValueError("seq_len_kv must be divisible by 128")
+        _torch_logits_dtype(self.logits_dtype)
 
 
 def generate_ks_ke(config: MQALogitsConfig) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -439,7 +438,6 @@ def ref_mqa_logits(
         mask = (cols[None, :] >= ks[start:end, None]) & (cols[None, :] < ke[start:end, None])
         logits[start:end] = part.masked_fill(~mask, float("-inf"))
     return logits
-
 
 @tilelang.jit(
     pass_configs={
@@ -837,354 +835,6 @@ def mqa_logits_fp4_persistent_ws_kernel(
             ))
 
         T.sync_threads()
-
-
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
-    },
-)
-def mqa_logits_fp8_kernel(
-    Q,
-    KV,
-    KVScale,
-    Weights,
-    KS,
-    KE,
-    Logits,
-    seq_len: int,
-    seq_len_kv: int,
-    heads: int = 64,
-    head_dim: int = 128,
-    logits_stride: int = 4096,
-    compressed_logits: bool = False,
-    logits_dtype=T.float32,
-):
-    block_q = 128 // heads
-    block_kv = 128
-    accum_dtype = T.float32
-
-    Q: T.Tensor((seq_len * heads, head_dim), T.float8_e4m3fn)
-    KV: T.Tensor((seq_len_kv, head_dim), T.float8_e4m3fn)
-    KVScale: T.Tensor((seq_len_kv,), accum_dtype)
-    Weights: T.Tensor((seq_len, heads), accum_dtype)
-    KS: T.Tensor((seq_len,), T.int32)
-    KE: T.Tensor((seq_len,), T.int32)
-    Logits: T.Tensor((seq_len, logits_stride), logits_dtype)
-
-    with T.Kernel(T.ceildiv(seq_len, block_q), T.ceildiv(seq_len_kv, block_kv), threads=128) as (bq, bkv):
-        q_shared = T.alloc_shared((block_q * heads, head_dim), T.float8_e4m3fn)
-        kv_shared = T.alloc_shared((block_kv, head_dim), T.float8_e4m3fn)
-        c_tmem = T.alloc_tmem((block_kv, block_q * heads), accum_dtype)
-        c_frag = T.alloc_fragment((block_kv, block_q * heads), accum_dtype)
-        c_view = T.reshape(c_frag, (block_kv, block_q, heads))
-        logits_frag = T.alloc_fragment((block_kv, block_q), accum_dtype)
-        weights = T.alloc_fragment((block_q, heads), accum_dtype)
-        kv_scale = T.alloc_fragment((block_kv,), accum_dtype)
-        mbar = T.alloc_barrier(1)
-
-        q_row = bq * block_q
-        kv_row = bkv * block_kv
-        tile_min_ks = T.alloc_var(T.int32)
-        tile_max_ke = T.alloc_var(T.int32)
-        tile_min_ks = KS[q_row]
-        tile_max_ke = KE[q_row]
-        for qi_offset in T.unroll(block_q - 1):
-            qi = qi_offset + 1
-            tile_min_ks = T.min(tile_min_ks, KS[q_row + qi])
-            tile_max_ke = T.max(tile_max_ke, KE[q_row + qi])
-
-        if (kv_row < tile_max_ke) and (kv_row + block_kv > tile_min_ks):
-            T.copy(Q[q_row * heads : q_row * heads + block_q * heads, :], q_shared)
-            T.copy(KV[kv_row : kv_row + block_kv, :], kv_shared)
-            T.copy(Weights[q_row : q_row + block_q, :], weights)
-            T.copy(KVScale[kv_row : kv_row + block_kv], kv_scale)
-
-            T.tcgen05_gemm(
-                kv_shared,
-                q_shared,
-                c_tmem,
-                transpose_B=True,
-                mbar=mbar,
-                clear_accum=True,
-            )
-            T.mbarrier_wait_parity(mbar, 0)
-            T.copy(c_tmem, c_frag)
-
-            for bn, qi, h in T.Parallel(block_kv, block_q, heads):
-                c_view[bn, qi, h] = T.max(c_view[bn, qi, h] * kv_scale[bn], T.float32(0)) * weights[qi, h]
-
-            T.reduce_sum(c_view, logits_frag, dim=-1, clear=True)
-
-            for bn, qi in T.Parallel(block_kv, block_q):
-                row = q_row + qi
-                col = kv_row + bn
-                valid = (col >= KS[row]) and (col < KE[row])
-                if compressed_logits:
-                    if valid:
-                        Logits[row, col - KS[row]] = T.cast(logits_frag[bn, qi], logits_dtype)
-                else:
-                    if valid:
-                        Logits[row, col] = T.cast(logits_frag[bn, qi], logits_dtype)
-
-
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
-    },
-)
-def mqa_logits_fp8_qloop_kernel(
-    Q,
-    KV,
-    KVScale,
-    Weights,
-    KS,
-    KE,
-    Logits,
-    seq_len: int,
-    seq_len_kv: int,
-    heads: int = 64,
-    head_dim: int = 128,
-    logits_stride: int = 4096,
-    compressed_logits: bool = False,
-    logits_dtype=T.float32,
-):
-    block_q = 128 // heads
-    block_kv = 128
-    accum_dtype = T.float32
-
-    Q: T.Tensor((seq_len * heads, head_dim), T.float8_e4m3fn)
-    KV: T.Tensor((seq_len_kv, head_dim), T.float8_e4m3fn)
-    KVScale: T.Tensor((seq_len_kv,), accum_dtype)
-    Weights: T.Tensor((seq_len, heads), accum_dtype)
-    KS: T.Tensor((seq_len,), T.int32)
-    KE: T.Tensor((seq_len,), T.int32)
-    Logits: T.Tensor((seq_len, logits_stride), logits_dtype)
-
-    with T.Kernel(T.ceildiv(seq_len, block_q), threads=128) as bq:
-        q_shared = T.alloc_shared((block_q * heads, head_dim), T.float8_e4m3fn)
-        kv_shared = T.alloc_shared((block_kv, head_dim), T.float8_e4m3fn)
-        c_tmem = T.alloc_tmem((block_kv, block_q * heads), accum_dtype)
-        c_frag = T.alloc_fragment((block_kv, block_q * heads), accum_dtype)
-        c_view = T.reshape(c_frag, (block_kv, block_q, heads))
-        logits_frag = T.alloc_fragment((block_kv, block_q), accum_dtype)
-        weights = T.alloc_fragment((block_q, heads), accum_dtype)
-        kv_scale = T.alloc_fragment((block_kv,), accum_dtype)
-        mbar = T.alloc_barrier(1)
-
-        q_row = bq * block_q
-        tile_min_ks = T.alloc_var(T.int32)
-        tile_max_ke = T.alloc_var(T.int32)
-        gemm_iter = T.alloc_var(T.int32)
-        tile_min_ks = KS[q_row]
-        tile_max_ke = KE[q_row]
-        gemm_iter = 0
-        for qi_offset in T.unroll(block_q - 1):
-            qi = qi_offset + 1
-            tile_min_ks = T.min(tile_min_ks, KS[q_row + qi])
-            tile_max_ke = T.max(tile_max_ke, KE[q_row + qi])
-
-        T.copy(Q[q_row * heads : q_row * heads + block_q * heads, :], q_shared)
-        T.copy(Weights[q_row : q_row + block_q, :], weights)
-
-        for bkv in T.serial(T.ceildiv(seq_len_kv, block_kv)):
-            kv_row = bkv * block_kv
-            if (kv_row < tile_max_ke) and (kv_row + block_kv > tile_min_ks):
-                T.copy(KV[kv_row : kv_row + block_kv, :], kv_shared)
-                T.copy(KVScale[kv_row : kv_row + block_kv], kv_scale)
-
-                T.tcgen05_gemm(
-                    kv_shared,
-                    q_shared,
-                    c_tmem,
-                    transpose_B=True,
-                    mbar=mbar,
-                    clear_accum=True,
-                )
-                T.mbarrier_wait_parity(mbar, gemm_iter & 1)
-                T.copy(c_tmem, c_frag)
-
-                for bn, qi in T.Parallel(block_kv, block_q):
-                    logits_frag[bn, qi] = T.float32(0)
-                    for h in T.serial(heads):
-                        logits_frag[bn, qi] += T.max(c_view[bn, qi, h] * kv_scale[bn], T.float32(0)) * weights[qi, h]
-
-                for bn, qi in T.Parallel(block_kv, block_q):
-                    row = q_row + qi
-                    col = kv_row + bn
-                    valid = (col >= KS[row]) and (col < KE[row])
-                    if compressed_logits:
-                        if valid:
-                            Logits[row, col - KS[row]] = T.cast(logits_frag[bn, qi], logits_dtype)
-                    else:
-                        if valid:
-                            Logits[row, col] = T.cast(logits_frag[bn, qi], logits_dtype)
-
-                gemm_iter = gemm_iter + 1
-
-
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
-    },
-)
-def mqa_logits_fp8_ws_kernel(
-    Q,
-    KV,
-    KVScale,
-    Weights,
-    KS,
-    KE,
-    Logits,
-    seq_len: int,
-    seq_len_kv: int,
-    heads: int = 64,
-    head_dim: int = 128,
-    logits_stride: int = 4096,
-    compressed_logits: bool = False,
-    logits_dtype=T.float32,
-):
-    block_q = 128 // heads
-    block_kv = 128
-    num_stages = 3
-    accum_dtype = T.float32
-
-    Q: T.Tensor((seq_len * heads, head_dim), T.float8_e4m3fn)
-    KV: T.Tensor((seq_len_kv, head_dim), T.float8_e4m3fn)
-    KVScale: T.Tensor((seq_len_kv,), accum_dtype)
-    Weights: T.Tensor((seq_len, heads), accum_dtype)
-    KS: T.Tensor((seq_len,), T.int32)
-    KE: T.Tensor((seq_len,), T.int32)
-    Logits: T.Tensor((seq_len, logits_stride), logits_dtype)
-
-    with T.Kernel(T.ceildiv(seq_len, block_q), threads=256) as bq:
-        q_shared = T.alloc_shared((block_q * heads, head_dim), T.float8_e4m3fn)
-        weights_shared = T.alloc_shared((block_q, heads), accum_dtype)
-        kv_shared = T.alloc_shared((num_stages, block_kv, head_dim), T.float8_e4m3fn)
-        kv_scale_shared = T.alloc_shared((num_stages, block_kv), accum_dtype)
-        c_tmem_0 = T.alloc_tmem((block_kv, block_q * heads), accum_dtype)
-        c_tmem_1 = T.alloc_tmem((block_kv, block_q * heads), accum_dtype)
-        c_frag = T.alloc_fragment((block_kv, block_q * heads), accum_dtype)
-        c_view = T.reshape(c_frag, (block_kv, block_q, heads))
-        logits_frag = T.alloc_fragment((block_kv, block_q), accum_dtype)
-        weights = T.alloc_fragment((block_q, heads), accum_dtype)
-        kv_scale = T.alloc_fragment((block_kv,), accum_dtype)
-        q_loaded = T.alloc_barrier([32])
-        kv_loaded = T.alloc_barrier([32] * num_stages)
-        consumed = T.alloc_barrier([1] * num_stages)
-        kv_scale_consumed = T.alloc_barrier([128] * num_stages)
-        tmem_full = T.alloc_barrier([1] * 2)
-        tmem_empty = T.alloc_barrier([128] * 2)
-
-        q_row = bq * block_q
-        tile_min_ks = T.alloc_var(T.int32)
-        tile_max_ke = T.alloc_var(T.int32)
-        tile_min_ks = KS[q_row]
-        tile_max_ke = KE[q_row]
-        for qi_offset in T.unroll(block_q - 1):
-            qi = qi_offset + 1
-            tile_min_ks = T.min(tile_min_ks, KS[q_row + qi])
-            tile_max_ke = T.max(tile_max_ke, KE[q_row + qi])
-
-        tx = T.get_thread_binding()
-
-        if tx < 32:
-            T.tma_copy(Q[q_row * heads : q_row * heads + block_q * heads, :], q_shared, barrier=q_loaded[0])
-            T.tma_copy(Weights[q_row : q_row + block_q, :], weights_shared, barrier=q_loaded[0])
-            T.mbarrier_arrive(q_loaded[0])
-
-            gemm_iter = T.alloc_var(T.int32)
-            gemm_iter = 0
-            for bkv in T.serial(T.ceildiv(seq_len_kv, block_kv)):
-                kv_row = bkv * block_kv
-                if (kv_row < tile_max_ke) and (kv_row + block_kv > tile_min_ks):
-                    stage = gemm_iter % num_stages
-                    parity = (gemm_iter // num_stages) & 1
-                    T.mbarrier_wait_parity(consumed[stage], parity ^ 1)
-                    T.mbarrier_wait_parity(kv_scale_consumed[stage], parity ^ 1)
-                    T.tma_copy(KV[kv_row : kv_row + block_kv, :], kv_shared[stage, :, :], barrier=kv_loaded[stage])
-                    T.tma_copy(KVScale[kv_row : kv_row + block_kv], kv_scale_shared[stage, :], barrier=kv_loaded[stage])
-                    T.mbarrier_arrive(kv_loaded[stage])
-                    gemm_iter = gemm_iter + 1
-
-        elif tx < 64:
-            T.mbarrier_wait_parity(q_loaded[0], 0)
-            gemm_iter = T.alloc_var(T.int32)
-            gemm_iter = 0
-            for bkv in T.serial(T.ceildiv(seq_len_kv, block_kv)):
-                kv_row = bkv * block_kv
-                if (kv_row < tile_max_ke) and (kv_row + block_kv > tile_min_ks):
-                    stage = gemm_iter % num_stages
-                    parity = (gemm_iter // num_stages) & 1
-                    tmem_stage = gemm_iter & 1
-                    T.mbarrier_wait_parity(tmem_empty[tmem_stage], ((gemm_iter // 2) & 1) ^ 1)
-                    T.mbarrier_wait_parity(kv_loaded[stage], parity)
-                    if tmem_stage == 0:
-                        T.tcgen05_gemm(
-                            kv_shared[stage, :, :],
-                            q_shared,
-                            c_tmem_0,
-                            transpose_B=True,
-                            mbar=consumed[stage],
-                            clear_accum=True,
-                        )
-                        T.tcgen05_mma_arrive(tmem_full[0])
-                    else:
-                        T.tcgen05_gemm(
-                            kv_shared[stage, :, :],
-                            q_shared,
-                            c_tmem_1,
-                            transpose_B=True,
-                            mbar=consumed[stage],
-                            clear_accum=True,
-                        )
-                        T.tcgen05_mma_arrive(tmem_full[1])
-                    gemm_iter = gemm_iter + 1
-
-        elif 128 <= tx < 256:
-            c_frag = T.alloc_fragment((half_kv, heads), accum_dtype)
-            T.mbarrier_wait_parity(q_loaded[0], 0)
-            T.copy(weights_shared, weights)
-            gemm_iter = T.alloc_var(T.int32)
-            gemm_iter = 0
-            for bkv in T.serial(T.ceildiv(seq_len_kv, block_kv)):
-                kv_row = bkv * block_kv
-                if (kv_row < tile_max_ke) and (kv_row + block_kv > tile_min_ks):
-                    stage = gemm_iter % num_stages
-                    tmem_stage = gemm_iter & 1
-                    T.mbarrier_wait_parity(tmem_full[tmem_stage], (gemm_iter // 2) & 1)
-                    if tmem_stage == 0:
-                        T.copy(c_tmem_0, c_frag)
-                    else:
-                        T.copy(c_tmem_1, c_frag)
-                    T.mbarrier_arrive(tmem_empty[tmem_stage])
-                    T.copy(kv_scale_shared[stage, :], kv_scale)
-                    T.mbarrier_arrive(kv_scale_consumed[stage])
-
-                    for bn, qi in T.Parallel(block_kv, block_q):
-                        logits_frag[bn, qi] = T.float32(0)
-                        for h in T.serial(heads):
-                            logits_frag[bn, qi] += T.max(c_view[bn, qi, h] * kv_scale[bn], T.float32(0)) * weights[qi, h]
-
-                    for bn, qi in T.Parallel(block_kv, block_q):
-                        row = q_row + qi
-                        col = kv_row + bn
-                        valid = (col >= KS[row]) and (col < KE[row])
-                        if compressed_logits:
-                            if valid:
-                                Logits[row, col - KS[row]] = T.cast(logits_frag[bn, qi], logits_dtype)
-                        else:
-                            if valid:
-                                Logits[row, col] = T.cast(logits_frag[bn, qi], logits_dtype)
-
-                    gemm_iter = gemm_iter + 1
-
 
 @tilelang.jit(
     pass_configs={
@@ -1643,1063 +1293,6 @@ def mqa_logits_fp8_persistent_ws_kernel(
 
         T.sync_threads()
 
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
-    },
-)
-def mqa_logits_fp8_ws2_kernel(
-    Q,
-    KV,
-    KVScale,
-    Weights,
-    KS,
-    KE,
-    Logits,
-    seq_len: int,
-    seq_len_kv: int,
-    heads: int = 64,
-    head_dim: int = 128,
-    logits_stride: int = 4096,
-    compressed_logits: bool = False,
-    logits_dtype=T.float32,
-):
-    block_q = 128 // heads
-    block_kv = 256
-    half_kv = 128
-    num_stages = 5
-    accum_dtype = T.float32
-
-    Q: T.Tensor((seq_len * heads, head_dim), T.float8_e4m3fn)
-    KV: T.Tensor((seq_len_kv, head_dim), T.float8_e4m3fn)
-    KVScale: T.Tensor((seq_len_kv,), accum_dtype)
-    Weights: T.Tensor((seq_len, heads), accum_dtype)
-    KS: T.Tensor((seq_len,), T.int32)
-    KE: T.Tensor((seq_len,), T.int32)
-    Logits: T.Tensor((seq_len, logits_stride), logits_dtype)
-
-    with T.Kernel(T.ceildiv(seq_len, block_q), threads=256) as bq:
-        T.import_source(_WRELU_REDUCE_SRC)
-        q_shared = T.alloc_shared((block_q * heads, head_dim), T.float8_e4m3fn)
-        weights_shared = T.alloc_shared((block_q, heads), accum_dtype)
-        kv_shared_0 = T.alloc_shared((num_stages, half_kv, head_dim), T.float8_e4m3fn)
-        kv_shared_1 = T.alloc_shared((num_stages, half_kv, head_dim), T.float8_e4m3fn)
-        kv_scale_shared_0 = T.alloc_shared((num_stages, half_kv), accum_dtype)
-        kv_scale_shared_1 = T.alloc_shared((num_stages, half_kv), accum_dtype)
-        c_tmem_0 = T.alloc_tmem((half_kv, block_q * heads), accum_dtype)
-        c_tmem_1 = T.alloc_tmem((half_kv, block_q * heads), accum_dtype)
-        weights = T.alloc_fragment((block_q, heads), accum_dtype)
-        kv_scale = T.alloc_fragment((half_kv,), accum_dtype)
-        q_loaded = T.alloc_barrier([32])
-        kv_loaded = T.alloc_barrier([32] * num_stages)
-        consumed_0 = T.alloc_barrier([1] * num_stages)
-        consumed_1 = T.alloc_barrier([1] * num_stages)
-        kv_scale_consumed = T.alloc_barrier([256] * num_stages)
-        tmem_full = T.alloc_barrier([1] * 2)
-        tmem_empty = T.alloc_barrier([128] * 2)
-
-        q_row = bq * block_q
-        tile_min_ks = T.alloc_var(T.int32)
-        tile_max_ke = T.alloc_var(T.int32)
-        tile_min_ks = KS[q_row]
-        tile_max_ke = KE[q_row]
-        for qi_offset in T.unroll(block_q - 1):
-            qi = qi_offset + 1
-            tile_min_ks = T.min(tile_min_ks, KS[q_row + qi])
-            tile_max_ke = T.max(tile_max_ke, KE[q_row + qi])
-
-        tx = T.get_thread_binding()
-
-        if tx < 32:
-            T.tma_copy(Q[q_row * heads : q_row * heads + block_q * heads, :], q_shared, barrier=q_loaded[0])
-            T.tma_copy(Weights[q_row : q_row + block_q, :], weights_shared, barrier=q_loaded[0])
-            T.mbarrier_arrive(q_loaded[0])
-
-            tile_iter = T.alloc_var(T.int32, init=0)
-            for bkv in T.serial(T.ceildiv(seq_len_kv, block_kv)):
-                kv_row = bkv * block_kv
-                if (kv_row < tile_max_ke) and (kv_row + block_kv > tile_min_ks):
-                    stage = tile_iter % num_stages
-                    parity = (tile_iter // num_stages) & 1
-                    T.mbarrier_wait_parity(consumed_0[stage], parity ^ 1)
-                    T.mbarrier_wait_parity(consumed_1[stage], parity ^ 1)
-                    T.mbarrier_wait_parity(kv_scale_consumed[stage], parity ^ 1)
-                    T.tma_copy(KV[kv_row : kv_row + half_kv, :], kv_shared_0[stage, :, :], barrier=kv_loaded[stage])
-                    T.tma_copy(KV[kv_row + half_kv : kv_row + block_kv, :], kv_shared_1[stage, :, :], barrier=kv_loaded[stage])
-                    T.tma_copy(KVScale[kv_row : kv_row + half_kv], kv_scale_shared_0[stage, :], barrier=kv_loaded[stage])
-                    T.tma_copy(KVScale[kv_row + half_kv : kv_row + block_kv], kv_scale_shared_1[stage, :], barrier=kv_loaded[stage])
-                    T.mbarrier_arrive(kv_loaded[stage])
-                    tile_iter = tile_iter + 1
-
-        elif tx < 64:
-            T.mbarrier_wait_parity(q_loaded[0], 0)
-            tile_iter = T.alloc_var(T.int32, init=0)
-            for bkv in T.serial(T.ceildiv(seq_len_kv, block_kv)):
-                kv_row = bkv * block_kv
-                if (kv_row < tile_max_ke) and (kv_row + block_kv > tile_min_ks):
-                    stage = tile_iter % num_stages
-                    parity = (tile_iter // num_stages) & 1
-                    tmem_phase = tile_iter & 1
-                    T.mbarrier_wait_parity(tmem_empty[0], tmem_phase ^ 1)
-                    T.mbarrier_wait_parity(kv_loaded[stage], parity)
-                    T.tcgen05_gemm(
-                        kv_shared_0[stage, :, :],
-                        q_shared,
-                        c_tmem_0,
-                        transpose_B=True,
-                        mbar=consumed_0[stage],
-                        clear_accum=True,
-                    )
-                    T.tcgen05_mma_arrive(tmem_full[0])
-                    tile_iter = tile_iter + 1
-
-        elif tx < 96:
-            T.mbarrier_wait_parity(q_loaded[0], 0)
-            tile_iter = T.alloc_var(T.int32, init=0)
-            for bkv in T.serial(T.ceildiv(seq_len_kv, block_kv)):
-                kv_row = bkv * block_kv
-                if (kv_row < tile_max_ke) and (kv_row + block_kv > tile_min_ks):
-                    stage = tile_iter % num_stages
-                    parity = (tile_iter // num_stages) & 1
-                    tmem_phase = tile_iter & 1
-                    T.mbarrier_wait_parity(tmem_empty[1], tmem_phase ^ 1)
-                    T.mbarrier_wait_parity(kv_loaded[stage], parity)
-                    T.tcgen05_gemm(
-                        kv_shared_1[stage, :, :],
-                        q_shared,
-                        c_tmem_1,
-                        transpose_B=True,
-                        mbar=consumed_1[stage],
-                        clear_accum=True,
-                    )
-                    T.tcgen05_mma_arrive(tmem_full[1])
-                    tile_iter = tile_iter + 1
-
-        elif 128 <= tx < 256:
-            T.mbarrier_wait_parity(q_loaded[0], 0)
-            T.copy(weights_shared, weights)
-            tile_iter = T.alloc_var(T.int32, init=0)
-            for bkv in T.serial(T.ceildiv(seq_len_kv, block_kv)):
-                kv_row = bkv * block_kv
-                if (kv_row < tile_max_ke) and (kv_row + block_kv > tile_min_ks):
-                    stage = tile_iter % num_stages
-                    tmem_phase = tile_iter & 1
-                    T.mbarrier_wait_parity(tmem_full[0], tmem_phase)
-                    T.tcgen05_after_thread_sync()
-                    T.copy(kv_scale_shared_0[stage, :], kv_scale)
-
-                    for qi in T.unroll(block_q):
-                        for bn in T.Parallel(half_kv):
-                            if heads == 64:
-                                result = T.call_extern(
-                                    "float32",
-                                    "tl_mqa_wrelu_tmem_reduce64",
-                                    c_tmem_0[0, 0],
-                                    qi * heads,
-                                    T.address_of(weights[qi, 0]),
-                                    kv_scale[bn],
-                                )
-                            else:
-                                result = T.call_extern(
-                                    "float32",
-                                    "tl_mqa_wrelu_tmem_reduce32",
-                                    c_tmem_0[0, 0],
-                                    qi * heads,
-                                    T.address_of(weights[qi, 0]),
-                                    kv_scale[bn],
-                                )
-                            row = q_row + qi
-                            col = kv_row + bn
-                            valid = (col >= KS[row]) and (col < KE[row])
-                            if compressed_logits:
-                                if valid:
-                                    Logits[row, col - KS[row]] = T.cast(result, logits_dtype)
-                            else:
-                                if valid:
-                                    Logits[row, col] = T.cast(result, logits_dtype)
-                    T.tcgen05_before_thread_sync()
-                    T.mbarrier_arrive(tmem_empty[0])
-                    T.mbarrier_arrive(kv_scale_consumed[stage])
-
-                    T.mbarrier_wait_parity(tmem_full[1], tmem_phase)
-                    T.tcgen05_after_thread_sync()
-                    T.copy(kv_scale_shared_1[stage, :], kv_scale)
-
-                    for qi in T.unroll(block_q):
-                        for bn in T.Parallel(half_kv):
-                            if heads == 64:
-                                result = T.call_extern(
-                                    "float32",
-                                    "tl_mqa_wrelu_tmem_reduce64",
-                                    c_tmem_1[0, 0],
-                                    qi * heads,
-                                    T.address_of(weights[qi, 0]),
-                                    kv_scale[bn],
-                                )
-                            else:
-                                result = T.call_extern(
-                                    "float32",
-                                    "tl_mqa_wrelu_tmem_reduce32",
-                                    c_tmem_1[0, 0],
-                                    qi * heads,
-                                    T.address_of(weights[qi, 0]),
-                                    kv_scale[bn],
-                                )
-                            row = q_row + qi
-                            col = kv_row + half_kv + bn
-                            valid = (col >= KS[row]) and (col < KE[row])
-                            if compressed_logits:
-                                if valid:
-                                    Logits[row, col - KS[row]] = T.cast(result, logits_dtype)
-                            else:
-                                if valid:
-                                    Logits[row, col] = T.cast(result, logits_dtype)
-                    T.tcgen05_before_thread_sync()
-                    T.mbarrier_arrive(tmem_empty[1])
-                    T.mbarrier_arrive(kv_scale_consumed[stage])
-                    tile_iter = tile_iter + 1
-
-
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
-    },
-)
-def mqa_logits_fp4_kernel(
-    Q,
-    QScale,
-    KV,
-    KVScale,
-    Weights,
-    KS,
-    KE,
-    Logits,
-    seq_len: int,
-    seq_len_kv: int,
-    heads: int = 64,
-    head_dim: int = 128,
-    logits_stride: int = 4096,
-    compressed_logits: bool = False,
-    logits_dtype=T.float32,
-):
-    block_q = 128 // heads
-    block_kv = 128
-    sf_granularity_k = 32
-    sf_k_groups = T.ceildiv(T.ceildiv(head_dim, sf_granularity_k), 4)
-    accum_dtype = T.float32
-
-    Q: T.Tensor((seq_len * heads, head_dim), T.float4_e2m1fn)
-    QScale: T.Tensor((sf_k_groups * seq_len * heads,), T.uint32)
-    KV: T.Tensor((seq_len_kv, head_dim), T.float4_e2m1fn)
-    KVScale: T.Tensor((sf_k_groups * seq_len_kv,), T.uint32)
-    Weights: T.Tensor((seq_len, heads), accum_dtype)
-    KS: T.Tensor((seq_len,), T.int32)
-    KE: T.Tensor((seq_len,), T.int32)
-    Logits: T.Tensor((seq_len, logits_stride), logits_dtype)
-
-    with T.Kernel(T.ceildiv(seq_len, block_q), T.ceildiv(seq_len_kv, block_kv), threads=128) as (bq, bkv):
-        q_shared = T.alloc_shared((block_q * heads, head_dim), T.float4_e2m1_unpacked)
-        kv_shared = T.alloc_shared((block_kv, head_dim), T.float4_e2m1_unpacked)
-        sf_q_shared = T.alloc_shared((block_q * heads,), T.uint32)
-        sf_kv_shared = T.alloc_shared((block_kv,), T.uint32)
-        sf_q_tmem = T.alloc_tmem((block_kv, 4), T.uint32)
-        sf_kv_tmem = T.alloc_tmem((block_kv, 4), T.uint32)
-        c_tmem = T.alloc_tmem((block_kv, block_q * heads), accum_dtype)
-        c_frag = T.alloc_fragment((block_kv, block_q * heads), accum_dtype)
-        c_view = T.reshape(c_frag, (block_kv, block_q, heads))
-        logits_frag = T.alloc_fragment((block_kv, block_q), accum_dtype)
-        weights = T.alloc_fragment((block_q, heads), accum_dtype)
-        loaded = T.alloc_barrier([32])
-        sf_full = T.alloc_barrier([32])
-        consumed = T.alloc_barrier([1])
-        tmem_full = T.alloc_barrier([1])
-
-        q_row = bq * block_q
-        kv_row = bkv * block_kv
-        tile_min_ks = T.alloc_var(T.int32)
-        tile_max_ke = T.alloc_var(T.int32)
-        tile_min_ks = KS[q_row]
-        tile_max_ke = KE[q_row]
-        for qi_offset in T.unroll(block_q - 1):
-            qi = qi_offset + 1
-            tile_min_ks = T.min(tile_min_ks, KS[q_row + qi])
-            tile_max_ke = T.max(tile_max_ke, KE[q_row + qi])
-
-        if (kv_row < tile_max_ke) and (kv_row + block_kv > tile_min_ks):
-            T.copy(Weights[q_row : q_row + block_q, :], weights)
-
-            tx = T.get_thread_binding()
-            if tx < 32:
-                T.tma_copy(Q[q_row * heads : q_row * heads + block_q * heads, :], q_shared, barrier=loaded[0])
-                T.tma_copy(KV[kv_row : kv_row + block_kv, :], kv_shared, barrier=loaded[0])
-                T.tma_copy(QScale[q_row * heads : q_row * heads + block_q * heads], sf_q_shared, barrier=loaded[0])
-                T.tma_copy(KVScale[kv_row : kv_row + block_kv], sf_kv_shared, barrier=loaded[0])
-                T.mbarrier_arrive(loaded[0])
-
-            elif 64 <= tx < 96:
-                T.mbarrier_wait_parity(loaded[0], 0)
-                T.tcgen05_sf_warp_transpose(sf_kv_shared)
-                T.tcgen05_sf_warp_transpose(sf_q_shared)
-                T.fence_proxy_async()
-                T.mbarrier_arrive(sf_full[0])
-
-            elif 32 <= tx < 64:
-                T.mbarrier_wait_parity(loaded[0], 0)
-                T.mbarrier_wait_parity(sf_full[0], 0)
-                T.tcgen05_cp_warpx4(sf_kv_shared, sf_kv_tmem)
-                T.tcgen05_cp_warpx4(sf_q_shared, sf_q_tmem)
-                T.tcgen05_gemm_blockscaled(
-                    kv_shared,
-                    q_shared,
-                    c_tmem,
-                    sf_kv_tmem,
-                    sf_q_tmem,
-                    transpose_B=True,
-                    mbar=consumed[0],
-                    clear_accum=True,
-                    k_start=0,
-                    sf_a_granularity_k=sf_granularity_k,
-                    sf_b_granularity_k=sf_granularity_k,
-                    blockscale_format="mx",
-                )
-                T.tcgen05_mma_arrive(tmem_full)
-
-            T.mbarrier_wait_parity(tmem_full, 0)
-            T.copy(c_tmem, c_frag)
-
-            for bn, qi, h in T.Parallel(block_kv, block_q, heads):
-                c_view[bn, qi, h] = T.max(c_view[bn, qi, h], T.float32(0)) * weights[qi, h]
-
-            T.reduce_sum(c_view, logits_frag, dim=-1, clear=True)
-
-            for bn, qi in T.Parallel(block_kv, block_q):
-                row = q_row + qi
-                col = kv_row + bn
-                valid = (col >= KS[row]) and (col < KE[row])
-                if compressed_logits:
-                    if valid:
-                        Logits[row, col - KS[row]] = T.cast(logits_frag[bn, qi], logits_dtype)
-                else:
-                    if valid:
-                        Logits[row, col] = T.cast(logits_frag[bn, qi], logits_dtype)
-
-
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
-    },
-)
-def mqa_logits_fp4_qloop_kernel(
-    Q,
-    QScale,
-    KV,
-    KVScale,
-    Weights,
-    KS,
-    KE,
-    Logits,
-    seq_len: int,
-    seq_len_kv: int,
-    heads: int = 64,
-    head_dim: int = 128,
-    logits_stride: int = 4096,
-    compressed_logits: bool = False,
-    logits_dtype=T.float32,
-):
-    block_q = 128 // heads
-    block_kv = 128
-    sf_granularity_k = 32
-    sf_k_groups = T.ceildiv(T.ceildiv(head_dim, sf_granularity_k), 4)
-    accum_dtype = T.float32
-
-    Q: T.Tensor((seq_len * heads, head_dim), T.float4_e2m1fn)
-    QScale: T.Tensor((sf_k_groups * seq_len * heads,), T.uint32)
-    KV: T.Tensor((seq_len_kv, head_dim), T.float4_e2m1fn)
-    KVScale: T.Tensor((sf_k_groups * seq_len_kv,), T.uint32)
-    Weights: T.Tensor((seq_len, heads), accum_dtype)
-    KS: T.Tensor((seq_len,), T.int32)
-    KE: T.Tensor((seq_len,), T.int32)
-    Logits: T.Tensor((seq_len, logits_stride), logits_dtype)
-
-    with T.Kernel(T.ceildiv(seq_len, block_q), threads=128) as bq:
-        q_shared = T.alloc_shared((block_q * heads, head_dim), T.float4_e2m1_unpacked)
-        kv_shared = T.alloc_shared((block_kv, head_dim), T.float4_e2m1_unpacked)
-        sf_q_shared = T.alloc_shared((block_q * heads,), T.uint32)
-        sf_kv_shared = T.alloc_shared((block_kv,), T.uint32)
-        sf_q_tmem = T.alloc_tmem((block_kv, 4), T.uint32)
-        sf_kv_tmem = T.alloc_tmem((block_kv, 4), T.uint32)
-        c_tmem = T.alloc_tmem((block_kv, block_q * heads), accum_dtype)
-        c_frag = T.alloc_fragment((block_kv, block_q * heads), accum_dtype)
-        c_view = T.reshape(c_frag, (block_kv, block_q, heads))
-        logits_frag = T.alloc_fragment((block_kv, block_q), accum_dtype)
-        weights = T.alloc_fragment((block_q, heads), accum_dtype)
-        q_loaded = T.alloc_barrier([32])
-        q_sf_full = T.alloc_barrier([32])
-        kv_loaded = T.alloc_barrier([32])
-        kv_sf_full = T.alloc_barrier([32])
-        consumed = T.alloc_barrier([1])
-        tmem_full = T.alloc_barrier([1])
-
-        q_row = bq * block_q
-        tile_min_ks = T.alloc_var(T.int32)
-        tile_max_ke = T.alloc_var(T.int32)
-        gemm_iter = T.alloc_var(T.int32)
-        tile_min_ks = KS[q_row]
-        tile_max_ke = KE[q_row]
-        gemm_iter = 0
-        for qi_offset in T.unroll(block_q - 1):
-            qi = qi_offset + 1
-            tile_min_ks = T.min(tile_min_ks, KS[q_row + qi])
-            tile_max_ke = T.max(tile_max_ke, KE[q_row + qi])
-
-        T.copy(Weights[q_row : q_row + block_q, :], weights)
-
-        tx = T.get_thread_binding()
-        if tx < 32:
-            T.tma_copy(Q[q_row * heads : q_row * heads + block_q * heads, :], q_shared, barrier=q_loaded[0])
-            T.tma_copy(QScale[q_row * heads : q_row * heads + block_q * heads], sf_q_shared, barrier=q_loaded[0])
-            T.mbarrier_arrive(q_loaded[0])
-        elif 64 <= tx < 96:
-            T.mbarrier_wait_parity(q_loaded[0], 0)
-            T.tcgen05_sf_warp_transpose(sf_q_shared)
-            T.fence_proxy_async()
-            T.mbarrier_arrive(q_sf_full[0])
-
-        for bkv in T.serial(T.ceildiv(seq_len_kv, block_kv)):
-            kv_row = bkv * block_kv
-            if (kv_row < tile_max_ke) and (kv_row + block_kv > tile_min_ks):
-                phase = gemm_iter & 1
-                if tx < 32:
-                    T.tma_copy(KV[kv_row : kv_row + block_kv, :], kv_shared, barrier=kv_loaded[0])
-                    T.tma_copy(KVScale[kv_row : kv_row + block_kv], sf_kv_shared, barrier=kv_loaded[0])
-                    T.mbarrier_arrive(kv_loaded[0])
-
-                elif 64 <= tx < 96:
-                    T.mbarrier_wait_parity(kv_loaded[0], phase)
-                    T.tcgen05_sf_warp_transpose(sf_kv_shared)
-                    T.fence_proxy_async()
-                    T.mbarrier_arrive(kv_sf_full[0])
-
-                elif 32 <= tx < 64:
-                    T.mbarrier_wait_parity(q_loaded[0], 0)
-                    T.mbarrier_wait_parity(q_sf_full[0], 0)
-                    T.mbarrier_wait_parity(kv_loaded[0], phase)
-                    T.mbarrier_wait_parity(kv_sf_full[0], phase)
-                    T.tcgen05_cp_warpx4(sf_kv_shared, sf_kv_tmem)
-                    T.tcgen05_cp_warpx4(sf_q_shared, sf_q_tmem)
-                    T.tcgen05_gemm_blockscaled(
-                        kv_shared,
-                        q_shared,
-                        c_tmem,
-                        sf_kv_tmem,
-                        sf_q_tmem,
-                        transpose_B=True,
-                        mbar=consumed[0],
-                        clear_accum=True,
-                        k_start=0,
-                        sf_a_granularity_k=sf_granularity_k,
-                        sf_b_granularity_k=sf_granularity_k,
-                        blockscale_format="mx",
-                    )
-                    T.tcgen05_mma_arrive(tmem_full)
-
-                T.mbarrier_wait_parity(tmem_full, phase)
-                T.copy(c_tmem, c_frag)
-
-                for bn, qi in T.Parallel(block_kv, block_q):
-                    logits_frag[bn, qi] = T.float32(0)
-                    for h in T.serial(heads):
-                        logits_frag[bn, qi] += T.max(c_view[bn, qi, h], T.float32(0)) * weights[qi, h]
-
-                for bn, qi in T.Parallel(block_kv, block_q):
-                    row = q_row + qi
-                    col = kv_row + bn
-                    valid = (col >= KS[row]) and (col < KE[row])
-                    if compressed_logits:
-                        if valid:
-                            Logits[row, col - KS[row]] = T.cast(logits_frag[bn, qi], logits_dtype)
-                    else:
-                        if valid:
-                            Logits[row, col] = T.cast(logits_frag[bn, qi], logits_dtype)
-
-                gemm_iter = gemm_iter + 1
-
-
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
-    },
-)
-def mqa_logits_fp4_ws_kernel(
-    Q,
-    QScale,
-    KV,
-    KVScale,
-    Weights,
-    KS,
-    KE,
-    Logits,
-    seq_len: int,
-    seq_len_kv: int,
-    heads: int = 64,
-    head_dim: int = 128,
-    logits_stride: int = 4096,
-    compressed_logits: bool = False,
-    logits_dtype=T.float32,
-):
-    block_q = 128 // heads
-    block_kv = 128
-    num_stages = 3
-    sf_granularity_k = 32
-    sf_k_groups = T.ceildiv(T.ceildiv(head_dim, sf_granularity_k), 4)
-    accum_dtype = T.float32
-
-    Q: T.Tensor((seq_len * heads, head_dim), T.float4_e2m1fn)
-    QScale: T.Tensor((sf_k_groups * seq_len * heads,), T.uint32)
-    KV: T.Tensor((seq_len_kv, head_dim), T.float4_e2m1fn)
-    KVScale: T.Tensor((sf_k_groups * seq_len_kv,), T.uint32)
-    Weights: T.Tensor((seq_len, heads), accum_dtype)
-    KS: T.Tensor((seq_len,), T.int32)
-    KE: T.Tensor((seq_len,), T.int32)
-    Logits: T.Tensor((seq_len, logits_stride), logits_dtype)
-
-    with T.Kernel(T.ceildiv(seq_len, block_q), threads=256) as bq:
-        T.import_source(_WRELU_REDUCE_SRC)
-        q_shared = T.alloc_shared((block_q * heads, head_dim), T.float4_e2m1_unpacked)
-        kv_shared = T.alloc_shared((num_stages, block_kv, head_dim), T.float4_e2m1_unpacked)
-        sf_q_shared = T.alloc_shared((block_q * heads,), T.uint32)
-        sf_kv_shared = T.alloc_shared((num_stages, block_kv), T.uint32)
-        weights_shared = T.alloc_shared((block_q, heads), accum_dtype)
-        sf_q_tmem = T.alloc_tmem((block_kv, 4), T.uint32)
-        sf_kv_tmem = T.alloc_tmem((block_kv, 4), T.uint32)
-        c_tmem_0 = T.alloc_tmem((block_kv, block_q * heads), accum_dtype)
-        c_tmem_1 = T.alloc_tmem((block_kv, block_q * heads), accum_dtype)
-        c_frag = T.alloc_fragment((block_kv, block_q * heads), accum_dtype)
-        c_view = T.reshape(c_frag, (block_kv, block_q, heads))
-        logits_frag = T.alloc_fragment((block_kv, block_q), accum_dtype)
-        weights = T.alloc_fragment((block_q, heads), accum_dtype)
-        q_loaded = T.alloc_barrier([32])
-        q_sf_full = T.alloc_barrier([32])
-        kv_loaded = T.alloc_barrier([32] * num_stages)
-        kv_sf_full = T.alloc_barrier([32] * num_stages)
-        consumed = T.alloc_barrier([1] * num_stages)
-        tmem_full = T.alloc_barrier([1] * 2)
-        tmem_empty = T.alloc_barrier([128] * 2)
-
-        q_row = bq * block_q
-        tile_min_ks = T.alloc_var(T.int32)
-        tile_max_ke = T.alloc_var(T.int32)
-        tile_min_ks = KS[q_row]
-        tile_max_ke = KE[q_row]
-        for qi_offset in T.unroll(block_q - 1):
-            qi = qi_offset + 1
-            tile_min_ks = T.min(tile_min_ks, KS[q_row + qi])
-            tile_max_ke = T.max(tile_max_ke, KE[q_row + qi])
-
-        tx = T.get_thread_binding()
-
-        if tx < 32:
-            T.tma_copy(Q[q_row * heads : q_row * heads + block_q * heads, :], q_shared, barrier=q_loaded[0])
-            T.tma_copy(QScale[q_row * heads : q_row * heads + block_q * heads], sf_q_shared, barrier=q_loaded[0])
-            T.tma_copy(Weights[q_row : q_row + block_q, :], weights_shared, barrier=q_loaded[0])
-            T.mbarrier_arrive(q_loaded[0])
-
-            gemm_iter = T.alloc_var(T.int32)
-            gemm_iter = 0
-            for bkv in T.serial(T.ceildiv(seq_len_kv, block_kv)):
-                kv_row = bkv * block_kv
-                if (kv_row < tile_max_ke) and (kv_row + block_kv > tile_min_ks):
-                    stage = gemm_iter % num_stages
-                    parity = (gemm_iter // num_stages) & 1
-                    T.mbarrier_wait_parity(consumed[stage], parity ^ 1)
-                    T.tma_copy(KV[kv_row : kv_row + block_kv, :], kv_shared[stage, :, :], barrier=kv_loaded[stage])
-                    T.tma_copy(KVScale[kv_row : kv_row + block_kv], sf_kv_shared[stage, :], barrier=kv_loaded[stage])
-                    T.mbarrier_arrive(kv_loaded[stage])
-                    gemm_iter = gemm_iter + 1
-
-        elif 64 <= tx < 96:
-            T.mbarrier_wait_parity(q_loaded[0], 0)
-            T.tcgen05_sf_warp_transpose(sf_q_shared)
-            T.fence_proxy_async()
-            T.mbarrier_arrive(q_sf_full[0])
-
-            gemm_iter = T.alloc_var(T.int32)
-            gemm_iter = 0
-            for bkv in T.serial(T.ceildiv(seq_len_kv, block_kv)):
-                kv_row = bkv * block_kv
-                if (kv_row < tile_max_ke) and (kv_row + block_kv > tile_min_ks):
-                    stage = gemm_iter % num_stages
-                    parity = (gemm_iter // num_stages) & 1
-                    T.mbarrier_wait_parity(kv_loaded[stage], parity)
-                    T.tcgen05_sf_warp_transpose(sf_kv_shared[stage, :])
-                    T.fence_proxy_async()
-                    T.mbarrier_arrive(kv_sf_full[stage])
-                    gemm_iter = gemm_iter + 1
-
-        elif 32 <= tx < 64:
-            T.mbarrier_wait_parity(q_loaded[0], 0)
-            T.mbarrier_wait_parity(q_sf_full[0], 0)
-            T.tcgen05_cp_warpx4(sf_q_shared, sf_q_tmem)
-
-            gemm_iter = T.alloc_var(T.int32)
-            gemm_iter = 0
-            for bkv in T.serial(T.ceildiv(seq_len_kv, block_kv)):
-                kv_row = bkv * block_kv
-                if (kv_row < tile_max_ke) and (kv_row + block_kv > tile_min_ks):
-                    stage = gemm_iter % num_stages
-                    parity = (gemm_iter // num_stages) & 1
-                    tmem_stage = gemm_iter & 1
-                    T.mbarrier_wait_parity(tmem_empty[tmem_stage], ((gemm_iter // 2) & 1) ^ 1)
-                    T.mbarrier_wait_parity(kv_loaded[stage], parity)
-                    T.mbarrier_wait_parity(kv_sf_full[stage], parity)
-                    T.tcgen05_cp_warpx4(sf_kv_shared[stage, :], sf_kv_tmem)
-                    if tmem_stage == 0:
-                        T.tcgen05_gemm_blockscaled(
-                            kv_shared[stage, :, :],
-                            q_shared,
-                            c_tmem_0,
-                            sf_kv_tmem,
-                            sf_q_tmem,
-                            transpose_B=True,
-                            mbar=consumed[stage],
-                            clear_accum=True,
-                            k_start=0,
-                            sf_a_granularity_k=sf_granularity_k,
-                            sf_b_granularity_k=sf_granularity_k,
-                            blockscale_format="mx",
-                        )
-                        T.tcgen05_mma_arrive(tmem_full[0])
-                    else:
-                        T.tcgen05_gemm_blockscaled(
-                            kv_shared[stage, :, :],
-                            q_shared,
-                            c_tmem_1,
-                            sf_kv_tmem,
-                            sf_q_tmem,
-                            transpose_B=True,
-                            mbar=consumed[stage],
-                            clear_accum=True,
-                            k_start=0,
-                            sf_a_granularity_k=sf_granularity_k,
-                            sf_b_granularity_k=sf_granularity_k,
-                            blockscale_format="mx",
-                        )
-                        T.tcgen05_mma_arrive(tmem_full[1])
-                    gemm_iter = gemm_iter + 1
-
-        elif 128 <= tx < 256:
-            T.mbarrier_wait_parity(q_loaded[0], 0)
-            T.copy(weights_shared, weights)
-
-            gemm_iter = T.alloc_var(T.int32)
-            gemm_iter = 0
-            for bkv in T.serial(T.ceildiv(seq_len_kv, block_kv)):
-                kv_row = bkv * block_kv
-                if (kv_row < tile_max_ke) and (kv_row + block_kv > tile_min_ks):
-                    tmem_stage = gemm_iter & 1
-                    T.mbarrier_wait_parity(tmem_full[tmem_stage], (gemm_iter // 2) & 1)
-                    if tmem_stage == 0:
-                        T.copy(c_tmem_0, c_frag)
-                    else:
-                        T.copy(c_tmem_1, c_frag)
-                    T.mbarrier_arrive(tmem_empty[tmem_stage])
-
-                    for bn, qi in T.Parallel(block_kv, block_q):
-                        logits_frag[bn, qi] = T.float32(0)
-                        for h in T.serial(heads):
-                            logits_frag[bn, qi] += T.max(c_view[bn, qi, h], T.float32(0)) * weights[qi, h]
-
-                    for bn, qi in T.Parallel(block_kv, block_q):
-                        row = q_row + qi
-                        col = kv_row + bn
-                        valid = (col >= KS[row]) and (col < KE[row])
-                        if compressed_logits:
-                            if valid:
-                                Logits[row, col - KS[row]] = T.cast(logits_frag[bn, qi], logits_dtype)
-                        else:
-                            if valid:
-                                Logits[row, col] = T.cast(logits_frag[bn, qi], logits_dtype)
-
-                    gemm_iter = gemm_iter + 1
-
-
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
-    },
-)
-def mqa_logits_fp4_ws2_kernel(
-    Q,
-    QScale,
-    KV,
-    KVScale,
-    Weights,
-    KS,
-    KE,
-    Logits,
-    seq_len: int,
-    seq_len_kv: int,
-    heads: int = 64,
-    head_dim: int = 128,
-    logits_stride: int = 4096,
-    compressed_logits: bool = False,
-    logits_dtype=T.float32,
-):
-    block_q = 128 // heads
-    block_kv = 256
-    half_kv = 128
-    num_stages = 4
-    sf_granularity_k = 32
-    sf_k_groups = T.ceildiv(T.ceildiv(head_dim, sf_granularity_k), 4)
-    accum_dtype = T.float32
-
-    Q: T.Tensor((seq_len * heads, head_dim), T.float4_e2m1fn)
-    QScale: T.Tensor((sf_k_groups * seq_len * heads,), T.uint32)
-    KV: T.Tensor((seq_len_kv, head_dim), T.float4_e2m1fn)
-    KVScale: T.Tensor((sf_k_groups * seq_len_kv,), T.uint32)
-    Weights: T.Tensor((seq_len, heads), accum_dtype)
-    KS: T.Tensor((seq_len,), T.int32)
-    KE: T.Tensor((seq_len,), T.int32)
-    Logits: T.Tensor((seq_len, logits_stride), logits_dtype)
-
-    with T.Kernel(T.ceildiv(seq_len, block_q), threads=256) as bq:
-        T.import_source(_WRELU_REDUCE_SRC)
-        q_shared = T.alloc_shared((block_q * heads, head_dim), T.float4_e2m1_unpacked)
-        kv_shared_0 = T.alloc_shared((num_stages, half_kv, head_dim), T.float4_e2m1_unpacked)
-        kv_shared_1 = T.alloc_shared((num_stages, half_kv, head_dim), T.float4_e2m1_unpacked)
-        sf_q_shared = T.alloc_shared((block_q * heads,), T.uint32)
-        sf_kv_shared_0 = T.alloc_shared((num_stages, half_kv), T.uint32)
-        sf_kv_shared_1 = T.alloc_shared((num_stages, half_kv), T.uint32)
-        weights_shared = T.alloc_shared((block_q, heads), accum_dtype)
-        sf_q_tmem = T.alloc_tmem((half_kv, 4), T.uint32)
-        sf_kv_tmem_0 = T.alloc_tmem((half_kv, 4), T.uint32)
-        sf_kv_tmem_1 = T.alloc_tmem((half_kv, 4), T.uint32)
-        c_tmem_0 = T.alloc_tmem((half_kv, block_q * heads), accum_dtype)
-        c_tmem_1 = T.alloc_tmem((half_kv, block_q * heads), accum_dtype)
-        logits_frag = T.alloc_fragment((half_kv,), accum_dtype)
-        weights = T.alloc_fragment((block_q, heads), accum_dtype)
-        q_loaded = T.alloc_barrier([32])
-        q_sf_full = T.alloc_barrier([32])
-        q_sf_tmem_full = T.alloc_barrier([32])
-        kv_loaded = T.alloc_barrier([32] * num_stages)
-        kv_sf_full_0 = T.alloc_barrier([32] * num_stages)
-        kv_sf_full_1 = T.alloc_barrier([32] * num_stages)
-        kv_empty = T.alloc_barrier([64] * num_stages)
-        tmem_full = T.alloc_barrier([1] * 2)
-        tmem_empty = T.alloc_barrier([128] * 2)
-
-        q_row = bq * block_q
-        tile_min_ks = T.alloc_var(T.int32)
-        tile_max_ke = T.alloc_var(T.int32)
-        tile_min_ks = KS[q_row]
-        tile_max_ke = KE[q_row]
-        for qi_offset in T.unroll(block_q - 1):
-            qi = qi_offset + 1
-            tile_min_ks = T.min(tile_min_ks, KS[q_row + qi])
-            tile_max_ke = T.max(tile_max_ke, KE[q_row + qi])
-
-        tx = T.get_thread_binding()
-
-        if tx < 32:
-            T.tma_copy(Q[q_row * heads : q_row * heads + block_q * heads, :], q_shared, barrier=q_loaded[0])
-            T.tma_copy(QScale[q_row * heads : q_row * heads + block_q * heads], sf_q_shared, barrier=q_loaded[0])
-            T.tma_copy(Weights[q_row : q_row + block_q, :], weights_shared, barrier=q_loaded[0])
-            T.mbarrier_arrive(q_loaded[0])
-
-            tile_iter = T.alloc_var(T.int32, init=0)
-            for bkv in T.serial(T.ceildiv(seq_len_kv, block_kv)):
-                kv_row = bkv * block_kv
-                if (kv_row < tile_max_ke) and (kv_row + block_kv > tile_min_ks):
-                    stage = tile_iter % num_stages
-                    parity = (tile_iter // num_stages) & 1
-                    T.mbarrier_wait_parity(kv_empty[stage], parity ^ 1)
-                    T.tma_copy(KV[kv_row : kv_row + half_kv, :], kv_shared_0[stage, :, :], barrier=kv_loaded[stage])
-                    T.tma_copy(KV[kv_row + half_kv : kv_row + block_kv, :], kv_shared_1[stage, :, :], barrier=kv_loaded[stage])
-                    T.tma_copy(KVScale[kv_row : kv_row + half_kv], sf_kv_shared_0[stage, :], barrier=kv_loaded[stage])
-                    T.tma_copy(KVScale[kv_row + half_kv : kv_row + block_kv], sf_kv_shared_1[stage, :], barrier=kv_loaded[stage])
-                    T.mbarrier_arrive(kv_loaded[stage])
-                    tile_iter = tile_iter + 1
-
-        elif tx < 64:
-            T.mbarrier_wait_parity(q_loaded[0], 0)
-            T.mbarrier_wait_parity(q_sf_full[0], 0)
-            T.tcgen05_cp_warpx4(sf_q_shared, sf_q_tmem)
-            T.mbarrier_arrive(q_sf_tmem_full[0])
-
-            tile_iter = T.alloc_var(T.int32, init=0)
-            for bkv in T.serial(T.ceildiv(seq_len_kv, block_kv)):
-                kv_row = bkv * block_kv
-                if (kv_row < tile_max_ke) and (kv_row + block_kv > tile_min_ks):
-                    stage = tile_iter % num_stages
-                    parity = (tile_iter // num_stages) & 1
-                    tmem_phase = tile_iter & 1
-                    T.mbarrier_wait_parity(tmem_empty[0], tmem_phase ^ 1)
-                    T.mbarrier_wait_parity(kv_loaded[stage], parity)
-                    T.mbarrier_wait_parity(kv_sf_full_0[stage], parity)
-                    T.tcgen05_cp_warpx4(sf_kv_shared_0[stage, :], sf_kv_tmem_0)
-                    T.tcgen05_gemm_blockscaled(
-                        kv_shared_0[stage, :, :],
-                        q_shared,
-                        c_tmem_0,
-                        sf_kv_tmem_0,
-                        sf_q_tmem,
-                        transpose_B=True,
-                        mbar=tmem_full[0],
-                        clear_accum=True,
-                        k_start=0,
-                        sf_a_granularity_k=sf_granularity_k,
-                        sf_b_granularity_k=sf_granularity_k,
-                        blockscale_format="mx",
-                    )
-                    T.mbarrier_arrive(kv_empty[stage])
-                    tile_iter = tile_iter + 1
-
-        elif tx < 96:
-            T.mbarrier_wait_parity(q_loaded[0], 0)
-            T.tcgen05_sf_warp_transpose(sf_q_shared)
-            T.fence_proxy_async()
-            T.mbarrier_arrive(q_sf_full[0])
-
-            tile_iter = T.alloc_var(T.int32, init=0)
-            for bkv in T.serial(T.ceildiv(seq_len_kv, block_kv)):
-                kv_row = bkv * block_kv
-                if (kv_row < tile_max_ke) and (kv_row + block_kv > tile_min_ks):
-                    stage = tile_iter % num_stages
-                    parity = (tile_iter // num_stages) & 1
-                    T.mbarrier_wait_parity(kv_loaded[stage], parity)
-                    T.tcgen05_sf_warp_transpose(sf_kv_shared_0[stage, :])
-                    T.fence_proxy_async()
-                    T.mbarrier_arrive(kv_sf_full_0[stage])
-                    T.tcgen05_sf_warp_transpose(sf_kv_shared_1[stage, :])
-                    T.fence_proxy_async()
-                    T.mbarrier_arrive(kv_sf_full_1[stage])
-                    tile_iter = tile_iter + 1
-
-        elif tx < 128:
-            T.mbarrier_wait_parity(q_loaded[0], 0)
-            T.mbarrier_wait_parity(q_sf_full[0], 0)
-            T.mbarrier_wait_parity(q_sf_tmem_full[0], 0)
-
-            tile_iter = T.alloc_var(T.int32, init=0)
-            for bkv in T.serial(T.ceildiv(seq_len_kv, block_kv)):
-                kv_row = bkv * block_kv
-                if (kv_row < tile_max_ke) and (kv_row + block_kv > tile_min_ks):
-                    stage = tile_iter % num_stages
-                    parity = (tile_iter // num_stages) & 1
-                    tmem_phase = tile_iter & 1
-                    T.mbarrier_wait_parity(tmem_empty[1], tmem_phase ^ 1)
-                    T.mbarrier_wait_parity(kv_loaded[stage], parity)
-                    T.mbarrier_wait_parity(kv_sf_full_1[stage], parity)
-                    T.tcgen05_cp_warpx4(sf_kv_shared_1[stage, :], sf_kv_tmem_1)
-                    T.tcgen05_gemm_blockscaled(
-                        kv_shared_1[stage, :, :],
-                        q_shared,
-                        c_tmem_1,
-                        sf_kv_tmem_1,
-                        sf_q_tmem,
-                        transpose_B=True,
-                        mbar=tmem_full[1],
-                        clear_accum=True,
-                        k_start=0,
-                        sf_a_granularity_k=sf_granularity_k,
-                        sf_b_granularity_k=sf_granularity_k,
-                        blockscale_format="mx",
-                    )
-                    T.mbarrier_arrive(kv_empty[stage])
-                    tile_iter = tile_iter + 1
-
-        elif tx < 256:
-            T.mbarrier_wait_parity(q_loaded[0], 0)
-            T.copy(weights_shared, weights)
-
-            tile_iter = T.alloc_var(T.int32, init=0)
-            for bkv in T.serial(T.ceildiv(seq_len_kv, block_kv)):
-                kv_row = bkv * block_kv
-                if (kv_row < tile_max_ke) and (kv_row + block_kv > tile_min_ks):
-                    tmem_phase = tile_iter & 1
-                    T.mbarrier_wait_parity(tmem_full[0], tmem_phase)
-                    T.tcgen05_after_thread_sync()
-
-                    for qi in T.unroll(block_q):
-                        for bn in T.Parallel(half_kv):
-                            if heads == 64:
-                                logits_frag[bn] = T.call_extern(
-                                    "float32",
-                                    "tl_mqa_wrelu_tmem_reduce64",
-                                    c_tmem_0[0, 0],
-                                    qi * heads,
-                                    T.address_of(weights[qi, 0]),
-                                    T.float32(1),
-                                )
-                            else:
-                                logits_frag[bn] = T.call_extern(
-                                    "float32",
-                                    "tl_mqa_wrelu_tmem_reduce32",
-                                    c_tmem_0[0, 0],
-                                    qi * heads,
-                                    T.address_of(weights[qi, 0]),
-                                    T.float32(1),
-                                )
-                        for bn in T.Parallel(half_kv):
-                            row = q_row + qi
-                            col = kv_row + bn
-                            valid = (col >= KS[row]) and (col < KE[row])
-                            if compressed_logits:
-                                if valid:
-                                    Logits[row, col - KS[row]] = T.cast(logits_frag[bn], logits_dtype)
-                            else:
-                                if valid:
-                                    Logits[row, col] = T.cast(logits_frag[bn], logits_dtype)
-                    T.tcgen05_before_thread_sync()
-                    T.mbarrier_arrive(tmem_empty[0])
-
-                    T.mbarrier_wait_parity(tmem_full[1], tmem_phase)
-                    T.tcgen05_after_thread_sync()
-
-                    for qi in T.unroll(block_q):
-                        for bn in T.Parallel(half_kv):
-                            if heads == 64:
-                                logits_frag[bn] = T.call_extern(
-                                    "float32",
-                                    "tl_mqa_wrelu_tmem_reduce64",
-                                    c_tmem_1[0, 0],
-                                    qi * heads,
-                                    T.address_of(weights[qi, 0]),
-                                    T.float32(1),
-                                )
-                            else:
-                                logits_frag[bn] = T.call_extern(
-                                    "float32",
-                                    "tl_mqa_wrelu_tmem_reduce32",
-                                    c_tmem_1[0, 0],
-                                    qi * heads,
-                                    T.address_of(weights[qi, 0]),
-                                    T.float32(1),
-                                )
-                        for bn in T.Parallel(half_kv):
-                            row = q_row + qi
-                            col = kv_row + half_kv + bn
-                            valid = (col >= KS[row]) and (col < KE[row])
-                            if compressed_logits:
-                                if valid:
-                                    Logits[row, col - KS[row]] = T.cast(logits_frag[bn], logits_dtype)
-                            else:
-                                if valid:
-                                    Logits[row, col] = T.cast(logits_frag[bn], logits_dtype)
-                    T.tcgen05_before_thread_sync()
-                    T.mbarrier_arrive(tmem_empty[1])
-
-                    tile_iter = tile_iter + 1
-
-
-def run_fp8(
-    q_fp8: torch.Tensor,
-    kv_fp8: torch.Tensor,
-    kv_scale: torch.Tensor,
-    weights: torch.Tensor,
-    ks: torch.Tensor,
-    ke: torch.Tensor,
-    logits_dtype: str,
-    compressed_logits: bool,
-) -> torch.Tensor:
-    seq_len, heads, head_dim = q_fp8.shape
-    seq_len_kv = kv_fp8.shape[0]
-    max_seqlen_k = int((ke - ks).max().item()) if compressed_logits else seq_len_kv
-    logits_stride = _align_up(max_seqlen_k, 128) if compressed_logits else seq_len_kv
-    logits = torch.full(
-        (seq_len, logits_stride),
-        float("-inf"),
-        device=q_fp8.device,
-        dtype=_torch_logits_dtype(logits_dtype),
-    )
-    fp8_kernel = mqa_logits_fp8_ws2_kernel if compressed_logits else mqa_logits_fp8_persistent_ws_kernel
-    fp8_kernel(
-        q_fp8.reshape(seq_len * heads, head_dim),
-        kv_fp8,
-        kv_scale,
-        weights,
-        ks,
-        ke,
-        logits,
-        seq_len,
-        seq_len_kv,
-        heads=heads,
-        head_dim=head_dim,
-        logits_stride=logits_stride,
-        compressed_logits=compressed_logits,
-        logits_dtype=T.float32 if logits_dtype == "float32" else T.bfloat16,
-                        )
-    return logits
-
-
-def run_fp4(
-    q_fp4: torch.Tensor,
-    q_scale: torch.Tensor,
-    kv_fp4: torch.Tensor,
-    kv_scale: torch.Tensor,
-    weights: torch.Tensor,
-    ks: torch.Tensor,
-    ke: torch.Tensor,
-    logits_dtype: str,
-    compressed_logits: bool,
-) -> torch.Tensor:
-    seq_len, heads, head_dim_packed = q_fp4.shape
-    head_dim = head_dim_packed * 2
-    seq_len_kv = kv_fp4.shape[0]
-    max_seqlen_k = int((ke - ks).max().item()) if compressed_logits else seq_len_kv
-    logits_stride = _align_up(max_seqlen_k, 128) if compressed_logits else seq_len_kv
-    logits = torch.full(
-        (seq_len, logits_stride),
-        float("-inf"),
-        device=q_fp4.device,
-        dtype=_torch_logits_dtype(logits_dtype),
-    )
-    fp4_kernel = (
-        mqa_logits_fp4_persistent_ws_kernel
-        if (not compressed_logits and heads == 64 and head_dim == 128)
-        else mqa_logits_fp4_ws2_kernel
-    )
-    fp4_kernel(
-        q_fp4.reshape(seq_len * heads, head_dim_packed),
-        q_scale.reshape(-1),
-        kv_fp4,
-        kv_scale.reshape(-1),
-        weights,
-        ks,
-        ke,
-        logits,
-        seq_len,
-        seq_len_kv,
-        heads=heads,
-        head_dim=head_dim,
-        logits_stride=logits_stride,
-        compressed_logits=compressed_logits,
-        logits_dtype=T.float32 if logits_dtype == "float32" else T.bfloat16,
-                        )
-    return logits
-
-
-def expand_compressed(logits: torch.Tensor, ks: torch.Tensor, ke: torch.Tensor, seq_len_kv: int) -> torch.Tensor:
-    if logits.shape[1] == seq_len_kv:
-        return logits
-    out = torch.full((logits.shape[0], seq_len_kv), float("-inf"), device=logits.device, dtype=logits.dtype)
-    for row in range(logits.shape[0]):
-        start = int(ks[row].item())
-        end = int(ke[row].item())
-        out[row, start:end] = logits[row, : end - start]
-    return out
-
-
 def calc_diff(x: torch.Tensor, y: torch.Tensor) -> float:
     x = x.double().flatten()
     y = y.double().flatten()
@@ -2718,7 +1311,7 @@ def ceil_to_ue8m0(x: torch.Tensor) -> torch.Tensor:
 def pack_sf_u8_to_u32_1d(sf_u8: torch.Tensor) -> torch.Tensor:
     assert sf_u8.dtype == torch.uint8
     assert sf_u8.dim() == 2
-    mn, sf_k_padded = sf_u8.shape
+    _, sf_k_padded = sf_u8.shape
     assert sf_k_padded % 4 == 0
     words = sf_u8.to(torch.int64)
     packed = (
@@ -2791,85 +1384,6 @@ def quantize_mxfp4_with_packed_ue8m0(
     return x_fp4, pack_sf_u8_to_u32_1d(sf_padded), sf_u8
 
 
-def pack_sf_u8_to_tcgen05_u32(sf_u8: torch.Tensor) -> torch.Tensor:
-    assert sf_u8.dtype == torch.uint8
-    assert sf_u8.dim() == 2
-    rows, sf_k_padded = sf_u8.shape
-    assert sf_k_padded % 4 == 0
-    assert rows % 128 == 0
-    row = torch.arange(rows, device=sf_u8.device)
-    row_block = row // 128
-    row_in_block = row % 128
-    lane = row_in_block % 32
-    inner = row_in_block // 32
-    tcgen05_row = row_block * 128 + lane * 4 + inner
-    sf_tcgen05 = sf_u8[tcgen05_row, :]
-    words = sf_tcgen05.to(torch.int64)
-    packed = (
-        words[:, 0::4]
-        | (words[:, 1::4] << 8)
-        | (words[:, 2::4] << 16)
-        | (words[:, 3::4] << 24)
-    ).to(torch.uint32)
-    return packed.T.contiguous().reshape(-1)
-
-
-def unpack_tcgen05_u32_to_sf_u8(packed_sf: torch.Tensor, rows: int, sf_k_blocks: int) -> torch.Tensor:
-    sf_k_groups = _ceil_div(sf_k_blocks, 4)
-    packed_2d = packed_sf.view(sf_k_groups, rows).to(torch.int64)
-    row = torch.arange(rows, device=packed_sf.device)
-    row_block = row // 128
-    row_in_block = row % 128
-    lane = row_in_block % 32
-    inner = row_in_block // 32
-    tcgen05_row = row_block * 128 + lane * 4 + inner
-    packed_original = packed_2d[:, tcgen05_row].T.contiguous().to(torch.int64)
-    unpacked = torch.empty((rows, sf_k_groups * 4), device=packed_sf.device, dtype=torch.uint8)
-    for i in range(4):
-        unpacked[:, i::4] = ((packed_original >> (8 * i)) & 0xFF).to(torch.uint8)
-    return unpacked[:, :sf_k_blocks].contiguous()
-
-
-def decode_ue4m3(sf_u8: torch.Tensor) -> torch.Tensor:
-    bits = sf_u8.to(torch.int32)
-    exponent = ((bits >> 3) & 0xF).to(torch.float32)
-    mantissa = (bits & 0x7).to(torch.float32)
-    return torch.ldexp(1.0 + mantissa * 0.125, (exponent - 7).to(torch.int32))
-
-
-def encode_ue4m3(x: torch.Tensor) -> torch.Tensor:
-    x = x.float().clamp_min(2.0**-7).clamp_max(1.875 * (2.0**8))
-    exponent = torch.floor(torch.log2(x)).clamp(-7, 8)
-    base = torch.pow(2.0, exponent)
-    mantissa = torch.round((x / base - 1.0) * 8.0).clamp(0, 7)
-    return (((exponent.to(torch.int32) + 7) << 3) | mantissa.to(torch.int32)).to(torch.uint8)
-
-
-def quantize_nvfp4_with_packed_ue4m3(
-    x: torch.Tensor, gran_k: int = 16
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    assert x.dim() == 2
-    assert x.size(1) % 2 == 0
-    rows, k = x.shape
-    padded_k = _align_up(k, gran_k)
-    x_padded = torch.zeros((rows, padded_k), device=x.device, dtype=x.dtype)
-    x_padded[:, :k] = x
-    x_view = x_padded.view(rows, padded_k // gran_k, gran_k)
-    amax = x_view.abs().float().amax(dim=2).clamp_min(2.0**-7 * 6.0)
-    sf_u8 = encode_ue4m3(amax / 6.0)
-    sf = decode_ue4m3(sf_u8)
-    x_fp4 = quantize_float_to_fp4_packed((x_view * (1.0 / sf.unsqueeze(2))).reshape(rows, padded_k))[
-        :, : k // 2
-    ].contiguous()
-    sf_k_padded = _align_up(sf_u8.shape[1], 4)
-    if sf_k_padded != sf_u8.shape[1]:
-        sf_padded = torch.zeros((rows, sf_k_padded), device=x.device, dtype=torch.uint8)
-        sf_padded[:, : sf_u8.shape[1]] = sf_u8
-    else:
-        sf_padded = sf_u8
-    return x_fp4, pack_sf_u8_to_tcgen05_u32(sf_padded), sf_u8
-
-
 def cast_back_from_mxfp4(
     x_fp4: torch.Tensor, sf_packed: torch.Tensor, logical_k: int, gran_k: int = 32
 ) -> torch.Tensor:
@@ -2894,37 +1408,14 @@ def cast_back_from_mxfp4(
     return x
 
 
-def cast_back_from_nvfp4(
-    x_fp4: torch.Tensor, sf_packed: torch.Tensor, logical_k: int, gran_k: int = 16
-) -> torch.Tensor:
-    u = x_fp4.contiguous().view(torch.uint8)
-    lut = fp4_lut(u.device)
-    lo = lut[(u & 0x0F).long()]
-    hi = lut[((u >> 4) & 0x0F).long()]
-    x = torch.empty((u.shape[0], logical_k), device=u.device, dtype=torch.float32)
-    x[:, 0::2] = lo[:, : logical_k // 2]
-    x[:, 1::2] = hi[:, : logical_k // 2]
-    sf_k_blocks = _ceil_div(logical_k, gran_k)
-    scales = decode_ue4m3(unpack_tcgen05_u32_to_sf_u8(sf_packed, u.shape[0], sf_k_blocks))
-    for bi in range(sf_k_blocks):
-        k0 = bi * gran_k
-        k1 = min(k0 + gran_k, logical_k)
-        x[:, k0:k1] *= scales[:, bi : bi + 1]
-    return x
-
-
 def local_per_custom_dims_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     amax = x.abs().float().amax(dim=1).clamp_min(1e-4)
     scale = (amax / 448.0).contiguous()
     return (x.float() * (1.0 / scale[:, None])).to(torch.float8_e4m3fn).contiguous(), scale
 
 
-def prepare_deepgemm_data(config: MQALogitsConfig, dtype: str):
-    try:
-        import deep_gemm
-    except Exception:
-        deep_gemm = None
-
+def prepare_mqa_data(config: MQALogitsConfig, dtype: str):
+    config.validate()
     torch.manual_seed(config.seed)
     q = torch.randn(config.seq_len, config.num_heads, config.head_dim, device="cuda", dtype=torch.bfloat16)
     kv = torch.randn(config.seq_len_kv, config.head_dim, device="cuda", dtype=torch.bfloat16)
@@ -2933,11 +1424,7 @@ def prepare_deepgemm_data(config: MQALogitsConfig, dtype: str):
 
     if dtype == "fp8":
         q_in = q.to(torch.float8_e4m3fn).contiguous()
-        kv_in = (
-            deep_gemm.utils.per_custom_dims_cast_to_fp8(kv, (0,), False)
-            if deep_gemm is not None
-            else local_per_custom_dims_cast_to_fp8(kv)
-        )
+        kv_in = local_per_custom_dims_cast_to_fp8(kv)
         q_sim = q_in.to(torch.bfloat16)
         kv_sim = (kv_in[0].float() * kv_in[1].unsqueeze(1)).to(torch.bfloat16)
         return {
@@ -2950,198 +1437,148 @@ def prepare_deepgemm_data(config: MQALogitsConfig, dtype: str):
             "ke": ke,
         }
 
-    if deep_gemm is not None:
-        q_fp4 = deep_gemm.utils.per_token_cast_to_fp4(
-            q.view(-1, config.head_dim), use_ue8m0=True, gran_k=32, use_packed_ue8m0=True
-        )
-        kv_fp4 = deep_gemm.utils.per_token_cast_to_fp4(
-            kv.view(-1, config.head_dim), use_ue8m0=True, gran_k=32, use_packed_ue8m0=True
-        )
-        q_sim = deep_gemm.utils.cast_back_from_fp4(q_fp4[0], q_fp4[1], gran_k=32, use_packed_ue8m0=True).view(
-            config.seq_len, config.num_heads, config.head_dim
-        )
-        kv_sim = deep_gemm.utils.cast_back_from_fp4(kv_fp4[0], kv_fp4[1], gran_k=32, use_packed_ue8m0=True).view(
-            config.seq_len_kv, config.head_dim
-        )
-        q_sf_deepgemm = q_fp4[1].view(config.seq_len, config.num_heads).contiguous()
-        kv_sf_deepgemm = kv_fp4[1].view(config.seq_len_kv).contiguous()
-        q_in_deepgemm = (
-            q_fp4[0].view(config.seq_len, config.num_heads, config.head_dim // 2).contiguous(),
-            q_sf_deepgemm,
-        )
-        kv_in_deepgemm = (
-            kv_fp4[0].view(config.seq_len_kv, config.head_dim // 2).contiguous(),
-            kv_sf_deepgemm,
-        )
-        q_in = (q_in_deepgemm[0], q_sf_deepgemm.view(torch.uint32))
-        kv_in = (kv_in_deepgemm[0], kv_sf_deepgemm.view(torch.uint32))
-    else:
-        q_fp4 = quantize_mxfp4_with_packed_ue8m0(q.view(-1, config.head_dim), gran_k=32)
-        kv_fp4 = quantize_mxfp4_with_packed_ue8m0(kv.view(-1, config.head_dim), gran_k=32)
-        q_sim = cast_back_from_mxfp4(q_fp4[0], q_fp4[1], config.head_dim, gran_k=32).view(
-            config.seq_len, config.num_heads, config.head_dim
-        )
-        kv_sim = cast_back_from_mxfp4(kv_fp4[0], kv_fp4[1], config.head_dim, gran_k=32).view(
-            config.seq_len_kv, config.head_dim
-        )
-        q_in = (
-            q_fp4[0].view(config.seq_len, config.num_heads, config.head_dim // 2).contiguous(),
-            q_fp4[1].view(config.seq_len, config.num_heads).contiguous(),
-        )
-        kv_in = (
-            kv_fp4[0].view(config.seq_len_kv, config.head_dim // 2).contiguous(),
-            kv_fp4[1].view(config.seq_len_kv).contiguous(),
-        )
-        q_in_deepgemm = q_in
-        kv_in_deepgemm = kv_in
+    if dtype != "fp4":
+        raise ValueError(f"unsupported dtype: {dtype}")
+    if config.logits_dtype != "float32":
+        raise ValueError("the FP4 SOTA kernel currently stores float32 logits")
+    if config.seq_len_kv % 256 != 0:
+        raise ValueError("seq_len_kv must be divisible by 256 for the FP4 SOTA tile")
+
+    q_fp4 = quantize_mxfp4_with_packed_ue8m0(q.view(-1, config.head_dim), gran_k=32)
+    kv_fp4 = quantize_mxfp4_with_packed_ue8m0(kv.view(-1, config.head_dim), gran_k=32)
+    q_sim = cast_back_from_mxfp4(q_fp4[0], q_fp4[1], config.head_dim, gran_k=32).view(
+        config.seq_len, config.num_heads, config.head_dim
+    )
+    kv_sim = cast_back_from_mxfp4(kv_fp4[0], kv_fp4[1], config.head_dim, gran_k=32).view(
+        config.seq_len_kv, config.head_dim
+    )
+    q_in = (
+        q_fp4[0].view(config.seq_len, config.num_heads, config.head_dim // 2).contiguous(),
+        q_fp4[1].view(config.seq_len, config.num_heads).contiguous(),
+    )
+    kv_in = (
+        kv_fp4[0].view(config.seq_len_kv, config.head_dim // 2).contiguous(),
+        kv_fp4[1].view(config.seq_len_kv).contiguous(),
+    )
     return {
         "q": q_sim.to(torch.bfloat16),
         "kv": kv_sim.to(torch.bfloat16),
         "q_in": q_in,
         "kv_in": kv_in,
-        "q_in_deepgemm": q_in_deepgemm,
-        "kv_in_deepgemm": kv_in_deepgemm,
         "weights": weights,
         "ks": ks,
         "ke": ke,
     }
 
 
-def bench_case(config: MQALogitsConfig, dtype: str, check: bool = True, bench_deepgemm: bool = True) -> None:
-    config.validate()
-    data = prepare_deepgemm_data(config, dtype)
-    ref = ref_mqa_logits(data["q"], data["kv"], data["weights"], data["ks"], data["ke"])
+def run_fp8(
+    q_fp8: torch.Tensor,
+    kv_fp8: torch.Tensor,
+    kv_scale: torch.Tensor,
+    weights: torch.Tensor,
+    ks: torch.Tensor,
+    ke: torch.Tensor,
+    logits_dtype: str = "float32",
+) -> torch.Tensor:
+    seq_len, heads, head_dim = q_fp8.shape
+    seq_len_kv = kv_fp8.shape[0]
+    MQALogitsConfig(seq_len, seq_len_kv, heads, head_dim, logits_dtype).validate()
+    logits = torch.full(
+        (seq_len, seq_len_kv),
+        float("-inf"),
+        device=q_fp8.device,
+        dtype=_torch_logits_dtype(logits_dtype),
+    )
+    mqa_logits_fp8_persistent_ws_kernel(
+        q_fp8.reshape(seq_len * heads, head_dim),
+        kv_fp8,
+        kv_scale,
+        weights,
+        ks,
+        ke,
+        logits,
+        seq_len,
+        seq_len_kv,
+        heads=heads,
+        head_dim=head_dim,
+        logits_stride=seq_len_kv,
+        compressed_logits=False,
+        logits_dtype=_tilelang_logits_dtype(logits_dtype),
+    )
+    return logits
 
+
+def run_fp4(
+    q_fp4: torch.Tensor,
+    q_scale: torch.Tensor,
+    kv_fp4: torch.Tensor,
+    kv_scale: torch.Tensor,
+    weights: torch.Tensor,
+    ks: torch.Tensor,
+    ke: torch.Tensor,
+    logits_dtype: str = "float32",
+) -> torch.Tensor:
+    seq_len, heads, head_dim_packed = q_fp4.shape
+    head_dim = head_dim_packed * 2
+    seq_len_kv = kv_fp4.shape[0]
+    MQALogitsConfig(seq_len, seq_len_kv, heads, head_dim, logits_dtype).validate()
+    if logits_dtype != "float32":
+        raise ValueError("the FP4 SOTA kernel currently stores float32 logits")
+    if seq_len_kv % 256 != 0:
+        raise ValueError("seq_len_kv must be divisible by 256 for the FP4 SOTA tile")
+    logits = torch.full((seq_len, seq_len_kv), float("-inf"), device=q_fp4.device, dtype=torch.float32)
+    mqa_logits_fp4_persistent_ws_kernel(
+        q_fp4.reshape(seq_len * heads, head_dim_packed),
+        q_scale.reshape(-1),
+        kv_fp4,
+        kv_scale.reshape(-1),
+        weights,
+        ks,
+        ke,
+        logits,
+        seq_len,
+        seq_len_kv,
+        heads=heads,
+        head_dim=head_dim,
+        logits_stride=seq_len_kv,
+        compressed_logits=False,
+        logits_dtype=T.float32,
+    )
+    return logits
+
+
+def run_example_case(config: MQALogitsConfig, dtype: str, check: bool = True) -> None:
+    data = prepare_mqa_data(config, dtype)
+    ref = ref_mqa_logits(data["q"], data["kv"], data["weights"], data["ks"], data["ke"])
     if dtype == "fp8":
         kv_fp8, kv_scale = data["kv_in"]
-        logits_stride = (
-            _align_up(int((data["ke"] - data["ks"]).max().item()), 128)
-            if config.compressed_logits
-            else config.seq_len_kv
-        )
-        out = torch.full(
-            (config.seq_len, logits_stride),
-            float("-inf"),
-            device=data["q_in"].device,
-            dtype=_torch_logits_dtype(config.logits_dtype),
-        )
-        fp8_kernel = mqa_logits_fp8_ws2_kernel if config.compressed_logits else mqa_logits_fp8_persistent_ws_kernel
-        q_fp8_2d = data["q_in"].reshape(config.seq_len * config.num_heads, config.head_dim)
-        fn = lambda: fp8_kernel(
-            q_fp8_2d,
-            kv_fp8,
-            kv_scale,
-            data["weights"],
-            data["ks"],
-            data["ke"],
-            out,
-            config.seq_len,
-            config.seq_len_kv,
-            heads=config.num_heads,
-            head_dim=config.head_dim,
-            logits_stride=logits_stride,
-            compressed_logits=config.compressed_logits,
-            logits_dtype=T.float32 if config.logits_dtype == "float32" else T.bfloat16,
-                        )
-    else:
+        out = run_fp8(data["q_in"], kv_fp8, kv_scale, data["weights"], data["ks"], data["ke"], config.logits_dtype)
+    elif dtype == "fp4":
         q_fp4, q_scale = data["q_in"]
         kv_fp4, kv_scale = data["kv_in"]
-        head_dim_packed = config.head_dim // 2
-        logits_stride = (
-            _align_up(int((data["ke"] - data["ks"]).max().item()), 128)
-            if config.compressed_logits
-            else config.seq_len_kv
-        )
-        out = torch.full(
-            (config.seq_len, logits_stride),
-            float("-inf"),
-            device=q_fp4.device,
-            dtype=_torch_logits_dtype(config.logits_dtype),
-        )
-        q_fp4_2d = q_fp4.reshape(config.seq_len * config.num_heads, head_dim_packed)
-        fp4_kernel = (
-            mqa_logits_fp4_persistent_ws_kernel
-            if (not config.compressed_logits and config.num_heads == 64 and config.head_dim == 128)
-            else mqa_logits_fp4_ws2_kernel
-        )
-        fn = lambda: fp4_kernel(
-            q_fp4_2d,
-            q_scale.reshape(-1),
-            kv_fp4,
-            kv_scale.reshape(-1),
-            data["weights"],
-            data["ks"],
-            data["ke"],
-            out,
-            config.seq_len,
-            config.seq_len_kv,
-            heads=config.num_heads,
-            head_dim=config.head_dim,
-            logits_stride=logits_stride,
-            compressed_logits=config.compressed_logits,
-            logits_dtype=T.float32 if config.logits_dtype == "float32" else T.bfloat16,
-                        )
+        out = run_fp4(q_fp4, q_scale, kv_fp4, kv_scale, data["weights"], data["ks"], data["ke"], config.logits_dtype)
+    else:
+        raise ValueError(f"unsupported dtype: {dtype}")
 
-    fn()
-    torch.cuda.synchronize()
-    observed = expand_compressed(out, data["ks"], data["ke"], config.seq_len_kv).float()
-    observed = observed.masked_fill(ref == float("-inf"), 0)
+    observed = out.float().masked_fill(ref == float("-inf"), 0)
     ref_cmp = ref.masked_fill(ref == float("-inf"), 0)
     diff = calc_diff(observed, ref_cmp)
     if check:
         threshold = 2e-3 if dtype == "fp4" else 1e-4
         assert diff < threshold, f"{dtype} diff {diff} >= {threshold}"
-
-    tilelang_ms = do_bench(fn, warmup=20, rep=100)
-    dg_ms = None
-    if bench_deepgemm:
-        import deep_gemm
-
-        max_seqlen_k = int((data["ke"] - data["ks"]).max().item()) if config.compressed_logits else 0
-        dg_logits_dtype = _torch_logits_dtype(config.logits_dtype)
-        if dtype == "fp8":
-            dg_fn = lambda: deep_gemm.fp8_fp4_mqa_logits(
-                q=(data["q_in"], None),
-                kv=data["kv_in"],
-                weights=data["weights"],
-                cu_seq_len_k_start=data["ks"],
-                cu_seq_len_k_end=data["ke"],
-                clean_logits=not config.compressed_logits,
-                max_seqlen_k=max_seqlen_k,
-                logits_dtype=dg_logits_dtype,
-            )
-        else:
-            dg_fn = lambda: deep_gemm.fp8_fp4_mqa_logits(
-                q=data.get("q_in_deepgemm", data["q_in"]),
-                kv=data.get("kv_in_deepgemm", data["kv_in"]),
-                weights=data["weights"],
-                cu_seq_len_k_start=data["ks"],
-                cu_seq_len_k_end=data["ke"],
-                clean_logits=not config.compressed_logits,
-                max_seqlen_k=max_seqlen_k,
-                logits_dtype=dg_logits_dtype,
-            )
-        dg_ms = do_bench(dg_fn, warmup=20, rep=100)
-
-    label = (
+    print(
         f"{dtype} s{config.seq_len}_skv{config.seq_len_kv}_h{config.num_heads}_d{config.head_dim}_"
-        f"{config.logits_dtype}_{'compressed' if config.compressed_logits else 'dense'}"
+        f"{config.logits_dtype}: diff={diff:.3e}"
     )
-    print(f"{label}: tilelang={tilelang_ms * 1000:.3f} us diff={diff:.3e}", end="")
-    if dg_ms is not None:
-        print(f" deepgemm={dg_ms * 1000:.3f} us ratio={dg_ms / tilelang_ms:.3f}")
-    else:
-        print()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Run the standalone SM100 MQA logits SOTA kernels.")
     parser.add_argument("--dtype", choices=("fp8", "fp4", "both"), default="both")
     parser.add_argument("--seq-len", type=int, default=2048)
     parser.add_argument("--seq-len-kv", type=int, default=4096)
     parser.add_argument("--logits-dtype", choices=("float32", "bfloat16"), default="float32")
-    parser.add_argument("--compressed", action="store_true")
-    parser.add_argument("--skip-deepgemm", action="store_true")
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--no-check", action="store_true")
     args = parser.parse_args()
 
@@ -3149,11 +1586,11 @@ def main() -> None:
         seq_len=args.seq_len,
         seq_len_kv=args.seq_len_kv,
         logits_dtype=args.logits_dtype,
-        compressed_logits=args.compressed,
+        seed=args.seed,
     )
     dtypes = ("fp8", "fp4") if args.dtype == "both" else (args.dtype,)
     for dtype in dtypes:
-        bench_case(cfg, dtype, check=not args.no_check, bench_deepgemm=not args.skip_deepgemm)
+        run_example_case(cfg, dtype, check=not args.no_check)
 
 
 if __name__ == "__main__":
