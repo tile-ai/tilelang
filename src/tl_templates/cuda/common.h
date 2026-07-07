@@ -681,7 +681,10 @@ struct float_e4m3_t : public cute::float_e4m3_t {
 
   CUTLASS_HOST_DEVICE
   explicit float_e4m3_t(__nv_bfloat16 x)
-      : float_e4m3_t(static_cast<float>(x)) {}
+      : cute::float_e4m3_t(
+            cute::float_e4m3_t::bitcast(__nv_cvt_bfloat16raw_to_fp8(
+                *reinterpret_cast<__nv_bfloat16_raw *>(&x), __NV_SATFINITE,
+                __NV_E4M3))) {}
 
   CUTLASS_HOST_DEVICE
   float_e4m3_t(cutlass::float_e4m3_t x)
@@ -695,7 +698,10 @@ struct float_e5m2_t : public cute::float_e5m2_t {
 
   CUTLASS_HOST_DEVICE
   explicit float_e5m2_t(__nv_bfloat16 x)
-      : float_e5m2_t(static_cast<float>(x)) {}
+      : cute::float_e5m2_t(
+            cute::float_e5m2_t::bitcast(__nv_cvt_bfloat16raw_to_fp8(
+                *reinterpret_cast<__nv_bfloat16_raw *>(&x), __NV_SATFINITE,
+                __NV_E5M2))) {}
 
   CUTLASS_HOST_DEVICE
   float_e5m2_t(cutlass::float_e5m2_t x)
