@@ -4,7 +4,7 @@
  *
  * This mirrors the existing CUDA stubs in src/cuda/stubs/:
  * - Instead of linking against libamdhip64.so at build time, TileLang can link
- *   against a small stub library (libhip_stub.so) that resolves HIP symbols via
+ *   against a small stub library (libstub_hip.so) that resolves HIP symbols via
  *   dlopen()/dlsym() on first use.
  *
  * This enables:

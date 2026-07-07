@@ -53,7 +53,7 @@ endif()
 
 if(TILELANG_USE_CUDA_STUBS)
   # ============================================================================
-  # CUDA Driver Stub Library (libcuda_stub.so / cuda_stub.dll)
+  # CUDA Driver Stub Library (libstub_cuda.so / stub_cuda.dll)
   # ============================================================================
   # This library provides drop-in replacements for CUDA driver API functions.
   # Instead of linking directly against libcuda.so (which would fail on
@@ -77,13 +77,14 @@ if(TILELANG_USE_CUDA_STUBS)
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-    # Use consistent naming
-    OUTPUT_NAME "cuda_stub"
+    # Keep stub filenames distinct from real CUDA libraries, so naive
+    # substring-based library discovery does not confuse them with libcuda.
+    OUTPUT_NAME "stub_cuda"
     WINDOWS_EXPORT_ALL_SYMBOLS ON
   )
 
   # ============================================================================
-  # CUDA Runtime Stub Library (libcudart_stub.so / cudart_stub.dll)
+  # CUDA Runtime Stub Library (libstub_cudart.so / stub_cudart.dll)
   # ============================================================================
   # libcudart's SONAME includes its major version (e.g. libcudart.so.11.0 / .12 / .13).
   # Link against this stub instead of the real libcudart so a single wheel can
@@ -105,7 +106,7 @@ if(TILELANG_USE_CUDA_STUBS)
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-    OUTPUT_NAME "cudart_stub"
+    OUTPUT_NAME "stub_cudart"
     WINDOWS_EXPORT_ALL_SYMBOLS ON
   )
 
@@ -117,7 +118,7 @@ if(TILELANG_USE_CUDA_STUBS)
   set(CUDA_CUDART_LIBRARY cudart_stub CACHE STRING "CUDART library to link against" FORCE)
 
   # ============================================================================
-  # NVRTC Stub Library (libnvrtc_stub.so / nvrtc_stub.dll)
+  # NVRTC Stub Library (libstub_nvrtc.so / stub_nvrtc.dll)
   # ============================================================================
   # NVRTC's SONAME includes its major version (e.g. libnvrtc.so.11.2 / .12 / .13).
   # Link against this stub instead of the real NVRTC library so a single wheel
@@ -139,7 +140,7 @@ if(TILELANG_USE_CUDA_STUBS)
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-    OUTPUT_NAME "nvrtc_stub"
+    OUTPUT_NAME "stub_nvrtc"
     WINDOWS_EXPORT_ALL_SYMBOLS ON
   )
 
