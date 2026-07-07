@@ -95,6 +95,32 @@ def test_tcgen05_blockscaled_instr_desc_mxfp4_unpacked_x_mxfp8():
     assert (desc >> 23) & 0x1 == 1  # scale_format = E8M0
 
 
+def test_tcgen05_blockscaled_instr_desc_mxfp4_explicit_kind():
+    fp4 = DataType("custom[float4_e2m1_unpacked]8")
+    fp8 = DataType("float8_e4m3fn")
+    implicit = int(_ffi_api.get_tcgen5_blockscaled_instr_desc(128, 128, fp4, fp8, True, True, 1, 1, 0, 0))
+    explicit = int(_ffi_api.get_tcgen5_blockscaled_instr_desc(128, 128, fp4, fp8, True, True, 1, 1, 0, 0, "mx"))
+    assert explicit == implicit
+
+
+def test_tcgen05_blockscaled_instr_desc_nvfp4_packed_x_nvfp4():
+    fp4 = DataType("float4_e2m1fn")
+    desc = int(_ffi_api.get_tcgen5_blockscaled_instr_desc(128, 128, fp4, fp4, True, True, 1, 1, 0, 0, "nv"))
+    a_format, b_format = _decode_tcgen05_formats(desc)
+    assert a_format == 1
+    assert b_format == 1
+    assert (desc >> 23) & 0x1 == 0  # scale_format = UE4M3
+    assert (desc >> 24) & 0x1F == 8  # m_dim = M / 16
+    assert (desc >> 31) & 0x1 == 0  # dense K64
+
+
+def test_tcgen05_blockscaled_instr_desc_nvfp4_rejects_non_fp4():
+    fp4 = DataType("float4_e2m1fn")
+    fp8 = DataType("float8_e4m3fn")
+    with pytest.raises(tvm.TVMError, match="NVFP4 block scaling requires FP4 E2M1 operands"):
+        _ffi_api.get_tcgen5_blockscaled_instr_desc(128, 128, fp4, fp8, True, True, 1, 1, 0, 0, "nv")
+
+
 if __name__ == "__main__":
     test_float4_e2m1_unpacked_dtype_properties()
     test_float4_e2m1_unpacked_tir_dtype_tag()

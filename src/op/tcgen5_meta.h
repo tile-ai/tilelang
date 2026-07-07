@@ -3,6 +3,7 @@
 
 #include "support/check.h"
 #include <cstdint>
+#include <string>
 #include <tvm/runtime/data_type.h>
 #include <tvm/runtime/logging.h>
 
@@ -267,14 +268,18 @@ inline uint32_t GetTCGEN5InstrDesc(int atom_m, int atom_n, int atom_k,
   return desc;
 }
 
-// Build block-scaled instruction descriptor for mxf8f6f4.block_scale
+// Build block-scaled instruction descriptor for mxf8f6f4.block_scale,
+// mxf4.block_scale, or mxf4nvf4.block_scale.
 // Bit layout: InstrDescriptorBlockScaled (see CUTLASS mma_sm100_desc.hpp)
-// TODO: Support nv-style block-scaled descriptor.
 inline uint32_t
 GetTCGEN5BlockScaledInstrDesc(int atom_m, int atom_n, DataType a_dtype,
                               DataType b_dtype, bool a_is_k_major,
                               bool b_is_k_major, int scale_in_a, int scale_in_b,
-                              int a_sf_id, int b_sf_id) {
+                              int a_sf_id, int b_sf_id,
+                              const std::string &blockscale_format = "mx") {
+  ICHECK(blockscale_format == "mx" || blockscale_format == "nv" ||
+         blockscale_format == "mxf4")
+      << "Unsupported TCGEN5 blockscale format: " << blockscale_format;
   ICHECK(atom_m % 16 == 0) << "atom_m must be divisible by 16";
   ICHECK(atom_n % 8 == 0) << "atom_n must be divisible by 8";
   ICHECK(scale_in_a == 1 || scale_in_a == -1);
@@ -303,6 +308,70 @@ GetTCGEN5BlockScaledInstrDesc(int atom_m, int atom_n, DataType a_dtype,
     uint32_t mask = (width == 32) ? 0xFFFFFFFFu : ((1u << width) - 1);
     return (value & mask) << start;
   };
+
+  if (blockscale_format == "nv") {
+    ICHECK_EQ(a_sf_id, 0)
+        << "NVFP4 block scaling uses dense K64 descriptor with a_sf_id=0";
+    ICHECK_EQ(b_sf_id, 0)
+        << "NVFP4 block scaling uses dense K64 descriptor with b_sf_id=0";
+    auto encode_nvfp_dtype = [&](DataType dtype) -> uint32_t {
+      ICHECK(dtype.is_float4())
+          << "NVFP4 block scaling requires FP4 E2M1 operands, got " << dtype;
+      return 1u; // E2M1 in the mxf4/nvfp4 descriptor encoding.
+    };
+
+    uint32_t a_format = encode_nvfp_dtype(a_dtype);
+    uint32_t b_format = encode_nvfp_dtype(b_dtype);
+    uint32_t a_major = a_is_k_major ? 0u : 1u;
+    uint32_t b_major = b_is_k_major ? 0u : 1u;
+    uint32_t n_dim = static_cast<uint32_t>(atom_n >> 3);
+    uint32_t m_dim = static_cast<uint32_t>(atom_m >> 4);
+
+    uint32_t desc = 0;
+    desc |= set_bits(a_format, 7, 3);  // a_format
+    desc |= set_bits(b_format, 10, 3); // b_format
+    desc |= set_bits(a_major, 15, 1);  // a_major
+    desc |= set_bits(b_major, 16, 1);  // b_major
+    desc |= set_bits(n_dim, 17, 6);    // n_dim
+    desc |= set_bits(0, 23, 1);        // scale_format = 0 (UE4M3)
+    desc |= set_bits(m_dim, 24, 5);    // m_dim
+    desc |= set_bits(0, 29, 2);        // sf-id fields unused for dense K64
+    desc |= set_bits(0, 31, 1);        // k_size = 0 (K64)
+    return desc;
+  }
+
+  if (blockscale_format == "mxf4") {
+    ICHECK(a_dtype.is_float4_e2m1fn() && b_dtype.is_float4_e2m1fn())
+        << "MXF4 block scaling requires packed FP4 E2M1 operands, got "
+        << a_dtype << " and " << b_dtype;
+    uint32_t a_format = 1u; // MXF4 E2M1
+    uint32_t b_format = 1u; // MXF4 E2M1
+    uint32_t a_neg = (scale_in_a == -1) ? 1u : 0u;
+    uint32_t b_neg = (scale_in_b == -1) ? 1u : 0u;
+    uint32_t a_major = a_is_k_major ? 0u : 1u;
+    uint32_t b_major = b_is_k_major ? 0u : 1u;
+    uint32_t n_dim = static_cast<uint32_t>(atom_n >> 3);
+    uint32_t m_dim = static_cast<uint32_t>(atom_m >> 4);
+
+    uint32_t desc = 0;
+    desc |= set_bits(0, 0, 2); // sparse_id2
+    desc |= set_bits(0, 2, 1); // sparse_flag
+    // bit 3 reserved
+    desc |= set_bits(static_cast<uint32_t>(b_sf_id), 4, 2);
+    // bit 6 reserved
+    desc |= set_bits(a_format, 7, 3);
+    desc |= set_bits(b_format, 10, 3);
+    desc |= set_bits(a_neg, 13, 1);
+    desc |= set_bits(b_neg, 14, 1);
+    desc |= set_bits(a_major, 15, 1);
+    desc |= set_bits(b_major, 16, 1);
+    desc |= set_bits(n_dim, 17, 6);
+    desc |= set_bits(1, 23, 1); // scale_format = UE8M0
+    desc |= set_bits(m_dim, 24, 5);
+    desc |= set_bits(static_cast<uint32_t>(a_sf_id), 29, 2);
+    desc |= set_bits(0, 31, 1); // k_size = K64 for MXF4
+    return desc;
+  }
 
   uint32_t a_format = encode_mxfp_dtype(a_dtype);
   uint32_t b_format = encode_mxfp_dtype(b_dtype);

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from tilelang._typing import BufferLikeType, BarrierType
 from tilelang.tileop.base import GemmWarpPolicy
 import tilelang.language as T
@@ -101,7 +103,9 @@ def _gemm_impl(
 
     A_offset = retrieve_offset(A_region)
     B_offset = retrieve_offset(B_region)
-    assert A_offset[-2] == 0, "The offset of the first dimension of A must be 0"
+    # TCGEN05 shared-memory descriptors can encode a BufferRegion base pointer.
+    # Allow A's M dimension to start at a non-zero row so one shared tile can be
+    # partitioned across multiple math warpgroups.
     assert B_offset[-2] == 0, "The offset of the first dimension of B must be 0"
     offset_a = A_offset[-1]
     offset_b = B_offset[-1]
@@ -244,6 +248,7 @@ def tcgen05_gemm(
     *,
     mbar: BarrierType,
     use_2cta: bool = False,
+    disable_ws: bool = False,
 ) -> tirx.PrimExpr:
     """Explicit Blackwell TCGEN05 GEMM without an implicit wait.
 
@@ -262,6 +267,8 @@ def tcgen05_gemm(
     ann = {"is_tcgen05": 1}
     if use_2cta:
         ann["use_2cta"] = 1
+    if disable_ws:
+        ann["disable_ws"] = 1
     return _gemm_impl(
         "tl.tileop.tcgen05_gemm",
         A,
@@ -294,6 +301,7 @@ def tcgen05_gemm_blockscaled(
     sf_a_granularity_k: int,
     sf_b_granularity_k: int,
     use_2cta: bool = False,
+    blockscale_format: Literal["mx", "nv"] = "mx",
 ) -> tirx.PrimExpr:
     """Explicit Blackwell TCGEN05 block-scaled GEMM without an implicit wait.
 
@@ -306,11 +314,14 @@ def tcgen05_gemm_blockscaled(
     path only; there is no fallback or emulation. That mode requires
     ``cluster_dims`` to be ``(2,1,1)`` or ``(1,2,1)``.
 
-    A and B are FP8/FP6/FP4 mxf8f6f4 operands in shared memory, C is the
-    accumulator in tensor memory, and SFA/SFB are E8M0 scale factors already
-    resident in tensor memory. As with `T.tcgen05_gemm(...)`, this API is
-    explicit-async: it issues the MMA and leaves synchronization to the user
-    schedule.
+    A and B are block-scaled operands in shared memory, C is the accumulator in
+    tensor memory, and SFA/SFB are scale factors already resident in tensor
+    memory. ``blockscale_format="mx"`` selects an MX block-scaled path:
+    packed FP4 A and B operands lower to ``kind::mxf4.block_scale``, while
+    other operand combinations lower to ``kind::mxf8f6f4.block_scale``.
+    ``blockscale_format="nv"`` selects ``kind::mxf4nvf4.block_scale`` for
+    NVFP4. As with `T.tcgen05_gemm(...)`, this API is explicit-async: it
+    issues the MMA and leaves synchronization to the user schedule.
 
     ``k_start`` is the logical K-axis start offset for this MMA tile.
     ``sf_a_granularity_k`` and ``sf_b_granularity_k`` describe how many K
@@ -332,12 +343,16 @@ def tcgen05_gemm_blockscaled(
         sf_a_granularity_k: K elements covered by one A scale factor.
         sf_b_granularity_k: K elements covered by one B scale factor.
         use_2cta: Whether to request true ``cta_group::2`` lowering.
+        blockscale_format: ``"mx"`` or ``"nv"``.
     """
+    if blockscale_format not in ("mx", "nv"):
+        raise ValueError(f"Unsupported blockscale_format: {blockscale_format!r}")
 
     ann = {"use_2cta": int(use_2cta)} if use_2cta else None
     ann = {} if ann is None else dict(ann)
     ann["sf_a_granularity_k"] = int(sf_a_granularity_k)
     ann["sf_b_granularity_k"] = int(sf_b_granularity_k)
+    ann["blockscale_format"] = 1 if blockscale_format == "nv" else 0
 
     # Re-read normalized regions below after let legalization.
 

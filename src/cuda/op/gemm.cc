@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <string>
 #include <utility>
 
 namespace tvm {
@@ -358,15 +359,31 @@ TVM_FFI_STATIC_INIT_BLOCK() {
             b_is_k_major, scale_in_a, scale_in_b);
         return Integer(static_cast<int64_t>(desc));
       });
-  refl::GlobalDef().def(
+  refl::GlobalDef().def_packed(
       "tl.get_tcgen5_blockscaled_instr_desc",
-      [](int atom_m, int atom_n, DataType a_dtype, DataType b_dtype,
-         bool a_is_k_major, bool b_is_k_major, int scale_in_a, int scale_in_b,
-         int a_sf_id, int b_sf_id) {
+      [](PackedArgs args, Any *ret) {
+        ICHECK(args.size() == 10 || args.size() == 11)
+            << "tl.get_tcgen5_blockscaled_instr_desc expects 10 or 11 "
+               "arguments, got "
+            << args.size();
+        int atom_m = args[0].cast<int>();
+        int atom_n = args[1].cast<int>();
+        DataType a_dtype = args[2].cast<DataType>();
+        DataType b_dtype = args[3].cast<DataType>();
+        bool a_is_k_major = args[4].cast<bool>();
+        bool b_is_k_major = args[5].cast<bool>();
+        int scale_in_a = args[6].cast<int>();
+        int scale_in_b = args[7].cast<int>();
+        int a_sf_id = args[8].cast<int>();
+        int b_sf_id = args[9].cast<int>();
+        std::string blockscale_format = "mx";
+        if (args.size() == 11) {
+          blockscale_format = args[10].cast<String>();
+        }
         uint32_t desc = GetTCGEN5BlockScaledInstrDesc(
             atom_m, atom_n, a_dtype, b_dtype, a_is_k_major, b_is_k_major,
-            scale_in_a, scale_in_b, a_sf_id, b_sf_id);
-        return Integer(static_cast<int64_t>(desc));
+            scale_in_a, scale_in_b, a_sf_id, b_sf_id, blockscale_format);
+        *ret = Integer(static_cast<int64_t>(desc));
       });
 }
 
