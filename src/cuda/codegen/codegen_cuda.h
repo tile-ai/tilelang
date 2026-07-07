@@ -91,6 +91,12 @@ private:
   // Global curand state
   std::string curand_random_generator_state;
   std::string curand_random_generator_state_type;
+  // Function-scope curand state declarations: tl.rng_init call node -> var
+  // name. States are declared at kernel top (see AddFunction) because
+  // sync-insertion passes may split the block containing rng_init across
+  // __syncthreads(), which would put a call-site declaration out of scope
+  // for later rng_rand / rng_rand_float uses.
+  std::unordered_map<const CallNode *, std::string> rng_state_name_map_;
 
   // whether enable fp16
   bool enable_fp16_{false};
