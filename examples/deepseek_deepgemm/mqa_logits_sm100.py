@@ -886,7 +886,6 @@ def mqa_logits_fp8_persistent_ws_kernel(
     Logits: T.Tensor((seq_len, logits_stride), logits_dtype)
 
     with T.Kernel(sm_num, threads=384) as block_id:
-        T.import_source(_WRELU_REDUCE_SRC)
         q_shared = T.alloc_shared((num_q_stages, block_q * heads, head_dim), T.float8_e4m3fn)
         weights_shared = T.alloc_shared((num_q_stages, block_q, heads), accum_dtype)
         kv_shared = T.alloc_shared((num_stages, block_kv, head_dim), T.float8_e4m3fn)
@@ -1104,6 +1103,8 @@ def mqa_logits_fp8_persistent_ws_kernel(
 
         elif 128 <= tx < 256:
             T.inc_max_nreg(232)
+            c_epi0 = T.alloc_fragment((half_kv, 16), accum_dtype)
+            logits_epi0 = T.alloc_fragment((half_kv,), accum_dtype)
             q_block = T.alloc_var(T.int32, init=block_id)
             q_iter = T.alloc_var(T.int32, init=0)
             gemm_iter = T.alloc_var(T.int32, init=0)
@@ -1144,53 +1145,32 @@ def mqa_logits_fp8_persistent_ws_kernel(
                         tmem_stage = 1
                         tmem_phase = 1
                     tmem_col = tmem_stage * block_q * heads
+                    T.assume(tmem_col >= 0)
+                    T.assume(tmem_col + block_q * heads <= block_q * heads * num_tmem_stages)
                     T.mbarrier_wait_parity(tmem_full[tmem_stage], tmem_phase)
                     T.tcgen05_after_thread_sync()
-                    bn_epi0 = tx - 128
-                    if logits_dtype == T.float32:
-                        T.evaluate(
-                            T.call_extern(
-                                "handle",
-                                "tl_mqa_wrelu_tmem_reduce64_v4w_store_f32",
-                                c_tmem[0, tmem_col],
-                                0 * heads,
-                                T.address_of(weights_shared[q_stage, 0, 0]),
-                                kv_scale_shared[stage, bn_epi0],
-                                T.address_of(Logits[0, 0]),
-                                (q_row + 0) * logits_stride + kv_row + bn_epi0,
+                    for qi_epi0 in T.unroll(block_q):
+                        for bn in T.Parallel(half_kv):
+                            logits_epi0[bn] = T.float32(0)
+                        for h_base in T.unroll(4):
+                            T.copy(
+                                c_tmem[
+                                    :,
+                                    tmem_col + qi_epi0 * heads + h_base * 16 : tmem_col
+                                    + qi_epi0 * heads
+                                    + (h_base + 1) * 16,
+                                ],
+                                c_epi0,
                             )
-                        )
-                        T.evaluate(
-                            T.call_extern(
-                                "handle",
-                                "tl_mqa_wrelu_tmem_reduce64_v4w_store_f32",
-                                c_tmem[0, tmem_col],
-                                1 * heads,
-                                T.address_of(weights_shared[q_stage, 1, 0]),
-                                kv_scale_shared[stage, bn_epi0],
-                                T.address_of(Logits[0, 0]),
-                                (q_row + 1) * logits_stride + kv_row + bn_epi0,
-                            )
-                        )
-                    else:
-                        result_epi0_q0 = T.call_extern(
-                            "float32",
-                            "tl_mqa_wrelu_tmem_reduce64_v4w",
-                            c_tmem[0, tmem_col],
-                            0 * heads,
-                            T.address_of(weights_shared[q_stage, 0, 0]),
-                            kv_scale_shared[stage, bn_epi0],
-                        )
-                        Logits[q_row + 0, kv_row + bn_epi0] = T.cast(result_epi0_q0, logits_dtype)
-                        result_epi0_q1 = T.call_extern(
-                            "float32",
-                            "tl_mqa_wrelu_tmem_reduce64_v4w",
-                            c_tmem[0, tmem_col],
-                            1 * heads,
-                            T.address_of(weights_shared[q_stage, 1, 0]),
-                            kv_scale_shared[stage, bn_epi0],
-                        )
-                        Logits[q_row + 1, kv_row + bn_epi0] = T.cast(result_epi0_q1, logits_dtype)
+                            for h_inner in T.unroll(16):
+                                h = h_base * 16 + h_inner
+                                for bn in T.Parallel(half_kv):
+                                    logits_epi0[bn] += (
+                                        T.max(c_epi0[bn, h_inner] * kv_scale_shared[stage, bn], T.float32(0))
+                                        * weights_shared[q_stage, qi_epi0, h]
+                                    )
+                        for bn in T.Parallel(half_kv):
+                            Logits[q_row + qi_epi0, kv_row + bn] = T.cast(logits_epi0[bn], logits_dtype)
                     T.tcgen05_before_thread_sync()
                     T.mbarrier_arrive(tmem_empty[tmem_stage])
                     T.mbarrier_arrive(kv_empty[stage])
@@ -1206,6 +1186,8 @@ def mqa_logits_fp8_persistent_ws_kernel(
 
         elif 256 <= tx < 384:
             T.inc_max_nreg(232)
+            c_epi1 = T.alloc_fragment((half_kv, 16), accum_dtype)
+            logits_epi1 = T.alloc_fragment((half_kv,), accum_dtype)
             q_block = T.alloc_var(T.int32, init=block_id)
             q_iter = T.alloc_var(T.int32, init=0)
             gemm_iter = T.alloc_var(T.int32, init=0)
@@ -1246,53 +1228,32 @@ def mqa_logits_fp8_persistent_ws_kernel(
                         tmem_stage = 2
                         tmem_phase = 1
                     tmem_col = tmem_stage * block_q * heads
+                    T.assume(tmem_col >= 0)
+                    T.assume(tmem_col + block_q * heads <= block_q * heads * num_tmem_stages)
                     T.mbarrier_wait_parity(tmem_full[tmem_stage], tmem_phase)
                     T.tcgen05_after_thread_sync()
-                    bn_epi1 = tx - 256
-                    if logits_dtype == T.float32:
-                        T.evaluate(
-                            T.call_extern(
-                                "handle",
-                                "tl_mqa_wrelu_tmem_reduce64_v4w_store_f32",
-                                c_tmem[0, tmem_col],
-                                0 * heads,
-                                T.address_of(weights_shared[q_stage, 0, 0]),
-                                kv_scale_shared[stage, half_kv + bn_epi1],
-                                T.address_of(Logits[0, 0]),
-                                (q_row + 0) * logits_stride + kv_row + half_kv + bn_epi1,
+                    for qi_epi1 in T.unroll(block_q):
+                        for bn in T.Parallel(half_kv):
+                            logits_epi1[bn] = T.float32(0)
+                        for h_base in T.unroll(4):
+                            T.copy(
+                                c_tmem[
+                                    :,
+                                    tmem_col + qi_epi1 * heads + h_base * 16 : tmem_col
+                                    + qi_epi1 * heads
+                                    + (h_base + 1) * 16,
+                                ],
+                                c_epi1,
                             )
-                        )
-                        T.evaluate(
-                            T.call_extern(
-                                "handle",
-                                "tl_mqa_wrelu_tmem_reduce64_v4w_store_f32",
-                                c_tmem[0, tmem_col],
-                                1 * heads,
-                                T.address_of(weights_shared[q_stage, 1, 0]),
-                                kv_scale_shared[stage, half_kv + bn_epi1],
-                                T.address_of(Logits[0, 0]),
-                                (q_row + 1) * logits_stride + kv_row + half_kv + bn_epi1,
-                            )
-                        )
-                    else:
-                        result_epi1_q0 = T.call_extern(
-                            "float32",
-                            "tl_mqa_wrelu_tmem_reduce64_v4w",
-                            c_tmem[0, tmem_col],
-                            0 * heads,
-                            T.address_of(weights_shared[q_stage, 0, 0]),
-                            kv_scale_shared[stage, half_kv + bn_epi1],
-                        )
-                        Logits[q_row + 0, kv_row + half_kv + bn_epi1] = T.cast(result_epi1_q0, logits_dtype)
-                        result_epi1_q1 = T.call_extern(
-                            "float32",
-                            "tl_mqa_wrelu_tmem_reduce64_v4w",
-                            c_tmem[0, tmem_col],
-                            1 * heads,
-                            T.address_of(weights_shared[q_stage, 1, 0]),
-                            kv_scale_shared[stage, half_kv + bn_epi1],
-                        )
-                        Logits[q_row + 1, kv_row + half_kv + bn_epi1] = T.cast(result_epi1_q1, logits_dtype)
+                            for h_inner in T.unroll(16):
+                                h = h_base * 16 + h_inner
+                                for bn in T.Parallel(half_kv):
+                                    logits_epi1[bn] += (
+                                        T.max(c_epi1[bn, h_inner] * kv_scale_shared[stage, half_kv + bn], T.float32(0))
+                                        * weights_shared[q_stage, qi_epi1, h]
+                                    )
+                        for bn in T.Parallel(half_kv):
+                            Logits[q_row + qi_epi1, kv_row + half_kv + bn] = T.cast(logits_epi1[bn], logits_dtype)
                     T.tcgen05_before_thread_sync()
                     T.mbarrier_arrive(tmem_empty[tmem_stage])
                     T.mbarrier_arrive(kv_empty[stage])
