@@ -35,6 +35,7 @@
 #include <tvm/tirx/transform.h>
 
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -896,6 +897,10 @@ public:
 
   // BufferStore
   Stmt VisitStmt_(const BufferStoreNode *op) final {
+    if (auto reduced = TryVectorizedScalarReductionStore(op)) {
+      return reduced.value();
+    }
+
     auto store = GetRef<BufferStore>(op);
 
     auto fmutate = [this](const PrimExpr &index) {
@@ -1075,6 +1080,150 @@ public:
   }
 
 private:
+  bool IndicesEqual(const Array<PrimExpr> &lhs,
+                    const Array<PrimExpr> &rhs) const {
+    if (lhs.size() != rhs.size()) {
+      return false;
+    }
+    for (size_t i = 0; i < lhs.size(); ++i) {
+      if (!deep_equal_(lhs[i], rhs[i])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool IsSameBufferElement(const BufferLoadNode *load,
+                           const BufferStoreNode *store) const {
+    return load != nullptr && load->buffer.same_as(store->buffer) &&
+           IndicesEqual(load->indices, store->indices);
+  }
+
+  std::optional<PrimExpr>
+  ExtractSelfAddRHS(const BufferStoreNode *store) const {
+    const auto *add = store->value.as<AddNode>();
+    if (add == nullptr) {
+      return std::nullopt;
+    }
+    if (IsSameBufferElement(add->a.as<BufferLoadNode>(), store)) {
+      return add->b;
+    }
+    if (IsSameBufferElement(add->b.as<BufferLoadNode>(), store)) {
+      return add->a;
+    }
+    return std::nullopt;
+  }
+
+  PrimExpr ExtractLanePair(PrimExpr vec, int lane) const {
+    return Shuffle::Concat({Shuffle::ExtractElement(vec, lane),
+                            Shuffle::ExtractElement(vec, lane + 1)});
+  }
+
+  PrimExpr TryMakeFMA2WithZero(const PrimExpr &expr, int lanes,
+                               Array<Stmt> *prefix,
+                               const std::string &name_hint) const {
+    const auto *mul = expr.as<MulNode>();
+    if (mul == nullptr || lanes <= 1 || lanes % 2 != 0) {
+      return expr;
+    }
+    DataType elem_dtype = expr.dtype().element_of();
+    if (!(elem_dtype.is_float() && elem_dtype.bits() == 32 &&
+          TargetHasSMVersionGE(Target::Current(false), 100))) {
+      return expr;
+    }
+
+    DataType pair_dtype = elem_dtype.with_lanes(2);
+    Var lhs_vec(name_hint + "_fma_lhs", mul->a.dtype());
+    Var rhs_vec(name_hint + "_fma_rhs", mul->b.dtype());
+    prefix->push_back(Bind(lhs_vec, mul->a));
+    prefix->push_back(Bind(rhs_vec, mul->b));
+
+    Array<PrimExpr> pairs;
+    for (int lane = 0; lane < lanes; lane += 2) {
+      PrimExpr fma =
+          Call(pair_dtype, tl::fma2(),
+               {ExtractLanePair(lhs_vec, lane), ExtractLanePair(rhs_vec, lane),
+                make_zero(pair_dtype)});
+      Buffer pair_buf =
+          decl_buffer({Integer(1)}, pair_dtype,
+                      name_hint + "_fma_pair_" + std::to_string(lane / 2),
+                      "local");
+      prefix->push_back(AllocBuffer(pair_buf));
+      prefix->push_back(BufferStore(pair_buf, fma, {Integer(0)}));
+      pairs.push_back(BufferLoad(pair_buf, {Integer(0)}));
+    }
+    return Shuffle::Concat(pairs);
+  }
+
+  std::optional<Stmt>
+  TryVectorizedScalarReductionStore(const BufferStoreNode *op) {
+    if (!(IsLocalBuffer(op->buffer, /*allow_var=*/true) ||
+          IsFragmentBuffer(op->buffer)) ||
+        !op->buffer->dtype.is_scalar()) {
+      return std::nullopt;
+    }
+
+    auto rhs = ExtractSelfAddRHS(op);
+    if (!rhs.has_value()) {
+      return std::nullopt;
+    }
+
+    Array<PrimExpr> indices;
+    for (const PrimExpr &index : op->indices) {
+      PrimExpr new_index = this->VisitExpr(index);
+      if (new_index.dtype().is_scalable_or_fixed_length_vector()) {
+        return std::nullopt;
+      }
+      indices.push_back(new_index);
+    }
+
+    PrimExpr vec_rhs = this->VisitExpr(rhs.value());
+    if (need_scalarize_ || vec_rhs.dtype().is_scalable_vector()) {
+      return std::nullopt;
+    }
+
+    int lanes = vec_rhs.dtype().get_lanes_or_vscale_factor();
+    auto lanes_ptr = as_const_int(var_lanes_);
+    if (vec_rhs.dtype().is_scalar()) {
+      if (!lanes_ptr || *lanes_ptr <= 1) {
+        return std::nullopt;
+      }
+      lanes = static_cast<int>(*lanes_ptr);
+    } else if (lanes <= 1) {
+      return std::nullopt;
+    }
+
+    PrimExpr reduced;
+    Array<Stmt> prefix;
+    if (vec_rhs.dtype().is_fixed_length_vector()) {
+      std::string reduce_name = op->buffer->data->name_hint;
+      PrimExpr reduce_vec_value =
+          TryMakeFMA2WithZero(vec_rhs, lanes, &prefix, reduce_name);
+      Buffer reduce_vec = decl_buffer({Integer(1)}, reduce_vec_value.dtype(),
+                                      reduce_name + "_reduce_vec", "local");
+      PrimExpr reduce_vec_load = BufferLoad(reduce_vec, {Integer(0)});
+      reduced = Shuffle::ExtractElement(reduce_vec_load, 0);
+      for (int i = 1; i < lanes; ++i) {
+        reduced = reduced + Shuffle::ExtractElement(reduce_vec_load, i);
+      }
+      prefix.push_back(AllocBuffer(reduce_vec));
+      prefix.push_back(BufferStore(reduce_vec, reduce_vec_value, {Integer(0)}));
+    } else {
+      reduced = vec_rhs;
+      for (int i = 1; i < lanes; ++i) {
+        reduced = reduced + vec_rhs;
+      }
+    }
+
+    PrimExpr acc = BufferLoad(op->buffer, indices);
+    Stmt store = BufferStore(op->buffer, acc + reduced, indices);
+    if (vec_rhs.dtype().is_fixed_length_vector()) {
+      prefix.push_back(store);
+      return SeqStmt(prefix);
+    }
+    return store;
+  }
+
   // analyzer
   arith::Analyzer analyzer_;
   // deep equal
@@ -1197,6 +1346,237 @@ public:
   }
 };
 
+class CrossLoopVectorReductionHoister : public StmtMutator {
+public:
+  Stmt VisitStmt_(const ForNode *op) final {
+    Stmt stmt = StmtMutator::VisitStmt_(op);
+    const auto *loop = stmt.as<ForNode>();
+    if (loop == nullptr || loop->kind != ForKind::kSerial ||
+        !TargetHasSMVersionGE(Target::Current(false), 100)) {
+      return stmt;
+    }
+    if (auto hoisted = TryHoistVectorReduction(loop)) {
+      return hoisted.value();
+    }
+    return stmt;
+  }
+
+private:
+  void CollectAddTerms(const PrimExpr &expr,
+                       std::vector<PrimExpr> *terms) const {
+    if (const auto *add = expr.as<AddNode>()) {
+      CollectAddTerms(add->a, terms);
+      CollectAddTerms(add->b, terms);
+    } else {
+      terms->push_back(expr);
+    }
+  }
+
+  bool IndicesEqual(const Array<PrimExpr> &lhs,
+                    const Array<PrimExpr> &rhs) const {
+    if (lhs.size() != rhs.size()) {
+      return false;
+    }
+    for (size_t i = 0; i < lhs.size(); ++i) {
+      if (!deep_equal_(lhs[i], rhs[i])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool IsSameBufferElement(const BufferLoadNode *load, const Buffer &buffer,
+                           const Array<PrimExpr> &indices) const {
+    return load != nullptr && load->buffer.same_as(buffer) &&
+           IndicesEqual(load->indices, indices);
+  }
+
+  bool ExtractSelfAddRHS(const BufferStoreNode *store, PrimExpr *rhs) const {
+    const auto *add = store->value.as<AddNode>();
+    if (add == nullptr) {
+      return false;
+    }
+    if (IsSameBufferElement(add->a.as<BufferLoadNode>(), store->buffer,
+                            store->indices)) {
+      *rhs = add->b;
+      return true;
+    }
+    if (IsSameBufferElement(add->b.as<BufferLoadNode>(), store->buffer,
+                            store->indices)) {
+      *rhs = add->a;
+      return true;
+    }
+    return false;
+  }
+
+  bool MatchExtractedVectorLane(const PrimExpr &expr, Buffer *buffer,
+                                Array<PrimExpr> *indices, int *lane,
+                                int *lanes) const {
+    const auto *shuffle = expr.as<ShuffleNode>();
+    if (shuffle == nullptr || shuffle->vectors.size() != 1 ||
+        shuffle->indices.size() != 1) {
+      return false;
+    }
+    const auto *lane_imm = shuffle->indices[0].as<IntImmNode>();
+    const auto *load = shuffle->vectors[0].as<BufferLoadNode>();
+    if (lane_imm == nullptr || load == nullptr ||
+        !load->dtype.is_fixed_length_vector()) {
+      return false;
+    }
+    *buffer = load->buffer;
+    *indices = load->indices;
+    *lane = static_cast<int>(lane_imm->value);
+    *lanes = load->dtype.get_lanes_or_vscale_factor();
+    return true;
+  }
+
+  bool MatchHorizontalVectorSum(const PrimExpr &expr, Buffer *buffer,
+                                Array<PrimExpr> *indices, int *lanes) const {
+    std::vector<PrimExpr> terms;
+    CollectAddTerms(expr, &terms);
+    if (terms.empty()) {
+      return false;
+    }
+
+    Buffer candidate_buffer;
+    Array<PrimExpr> candidate_indices;
+    int candidate_lanes = 0;
+    std::vector<bool> seen;
+    bool initialized = false;
+    for (const PrimExpr &term : terms) {
+      Buffer term_buffer;
+      Array<PrimExpr> term_indices;
+      int term_lane = 0;
+      int term_lanes = 0;
+      if (!MatchExtractedVectorLane(term, &term_buffer, &term_indices,
+                                    &term_lane, &term_lanes)) {
+        return false;
+      }
+      if (!initialized) {
+        candidate_buffer = term_buffer;
+        candidate_indices = term_indices;
+        candidate_lanes = term_lanes;
+        seen.assign(candidate_lanes, false);
+        initialized = true;
+      } else if (!term_buffer.same_as(candidate_buffer) ||
+                 !IndicesEqual(term_indices, candidate_indices) ||
+                 term_lanes != candidate_lanes) {
+        return false;
+      }
+      if (term_lane < 0 || term_lane >= candidate_lanes || seen[term_lane]) {
+        return false;
+      }
+      seen[term_lane] = true;
+    }
+    for (bool lane_seen : seen) {
+      if (!lane_seen) {
+        return false;
+      }
+    }
+    *buffer = candidate_buffer;
+    *indices = candidate_indices;
+    *lanes = candidate_lanes;
+    return true;
+  }
+
+  bool ContainsBufferElementAccess(const Stmt &stmt, const Buffer &buffer,
+                                   const Array<PrimExpr> &indices) const {
+    bool found = false;
+    PostOrderVisit(stmt, [&](const ObjectRef &node) {
+      if (found) {
+        return;
+      }
+      if (const auto *load = node.as<BufferLoadNode>()) {
+        found = IsSameBufferElement(load, buffer, indices);
+      } else if (const auto *store = node.as<BufferStoreNode>()) {
+        found = store->buffer.same_as(buffer) &&
+                IndicesEqual(store->indices, indices);
+      }
+    });
+    return found;
+  }
+
+  PrimExpr MakeHorizontalVectorSum(const PrimExpr &vec, int lanes) const {
+    PrimExpr reduced = Shuffle::ExtractElement(vec, 0);
+    for (int i = 1; i < lanes; ++i) {
+      reduced = reduced + Shuffle::ExtractElement(vec, i);
+    }
+    return reduced;
+  }
+
+  std::optional<Stmt> TryHoistVectorReduction(const ForNode *loop) const {
+    const auto *seq = loop->body.as<SeqStmtNode>();
+    if (seq == nullptr || seq->seq.size() < 2) {
+      return std::nullopt;
+    }
+
+    const auto *scalar_store = seq->seq.back().as<BufferStoreNode>();
+    if (scalar_store == nullptr ||
+        !(IsLocalBuffer(scalar_store->buffer, /*allow_var=*/true) ||
+          IsFragmentBuffer(scalar_store->buffer)) ||
+        !scalar_store->buffer->dtype.is_scalar()) {
+      return std::nullopt;
+    }
+
+    PrimExpr scalar_rhs;
+    if (!ExtractSelfAddRHS(scalar_store, &scalar_rhs)) {
+      return std::nullopt;
+    }
+
+    Buffer vec_buffer;
+    Array<PrimExpr> vec_indices;
+    int lanes = 0;
+    if (!MatchHorizontalVectorSum(scalar_rhs, &vec_buffer, &vec_indices,
+                                  &lanes)) {
+      return std::nullopt;
+    }
+
+    for (size_t i = 0; i + 1 < seq->seq.size(); ++i) {
+      if (ContainsBufferElementAccess(seq->seq[i], scalar_store->buffer,
+                                      scalar_store->indices)) {
+        return std::nullopt;
+      }
+    }
+
+    PrimExpr vec_load = BufferLoad(vec_buffer, vec_indices);
+    Buffer acc_vec =
+        decl_buffer({Integer(1)}, vec_load.dtype(),
+                    scalar_store->buffer->data->name_hint + "_chunk_acc_vec",
+                    "local");
+    PrimExpr acc_vec_load = BufferLoad(acc_vec, {Integer(0)});
+
+    Array<Stmt> new_body_stmts;
+    for (size_t i = 0; i + 1 < seq->seq.size(); ++i) {
+      new_body_stmts.push_back(seq->seq[i]);
+    }
+    new_body_stmts.push_back(
+        BufferStore(acc_vec, acc_vec_load + vec_load, {Integer(0)}));
+
+    Stmt new_loop_body = SeqStmt(new_body_stmts);
+    Stmt new_loop =
+        For(loop->loop_var, loop->min, loop->extent, loop->kind, new_loop_body,
+            loop->thread_binding, loop->annotations, loop->step, loop->span);
+
+    PrimExpr folded_acc_vec =
+        MakeHorizontalVectorSum(BufferLoad(acc_vec, {Integer(0)}), lanes);
+    Stmt scalar_update =
+        BufferStore(scalar_store->buffer,
+                    BufferLoad(scalar_store->buffer, scalar_store->indices) +
+                        folded_acc_vec,
+                    scalar_store->indices);
+
+    Array<Stmt> outer;
+    outer.push_back(AllocBuffer(acc_vec));
+    outer.push_back(
+        BufferStore(acc_vec, make_zero(vec_load.dtype()), {Integer(0)}));
+    outer.push_back(new_loop);
+    outer.push_back(scalar_update);
+    return SeqStmt(outer);
+  }
+
+  ExprDeepEqual deep_equal_;
+};
+
 class VectorizeSkipper : public StmtMutator {
 public:
   Stmt VisitStmt_(const ForNode *op) final {
@@ -1218,6 +1598,8 @@ tvm::transform::Pass VectorizeLoop(bool enable_vectorize = true) {
     auto *n = f.CopyOnWrite();
     if (enable_vectorize) {
       n->body = tvm::tl::LoopVectorizer()(std::move(n->body));
+      n->body =
+          tvm::tl::CrossLoopVectorReductionHoister()(std::move(n->body));
     } else {
       n->body = tvm::tl::VectorizeSkipper()(std::move(n->body));
     }

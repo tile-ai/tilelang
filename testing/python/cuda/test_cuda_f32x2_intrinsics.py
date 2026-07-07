@@ -161,6 +161,27 @@ def _make_auto_vec_reduce_kernel(reduce_func, *, nan_propagate=False):
     return main
 
 
+def _make_auto_vec_scalar_reduction_kernel(width: int = 8):
+    """Build an MQA-epilogue-like scalar accumulator reduction."""
+
+    @T.prim_func
+    def main(
+        Scores: T.Tensor((M, width), dtype=T.float32),
+        Weights: T.Tensor((M, width), dtype=T.float32),
+        Scale: T.Tensor((M,), dtype=T.float32),
+        Out: T.Tensor((M,), dtype=T.float32),
+    ):
+        with T.Kernel(1, 1, threads=M) as (bx, by):
+            tid = T.get_thread_binding()
+            acc = T.alloc_local((1,), T.float32)
+            acc[0] = T.float32(0)
+            for h in T.vectorized(width):
+                acc[0] += T.max(Scores[tid, h] * Scale[tid], T.float32(0)) * Weights[tid, h]
+            Out[tid] = acc[0]
+
+    return main
+
+
 def _make_auto_vec_batched_reduce_kernel(reduce_func, *, rows=M, width=64, threads=256):
     """Build a reduction that shuffles packed values between threads."""
 
@@ -175,6 +196,28 @@ def _make_auto_vec_batched_reduce_kernel(reduce_func, *, rows=M, width=64, threa
             T.copy(A, src, disable_tma=True)
             reduce_func(src, dst, dim=1, batch=2)
             T.copy(dst, C)
+
+    return main
+
+
+def _make_auto_vec_scalar_reduction_chunks_kernel(chunks: int = 4, width: int = 8):
+    """Build a chunked MQA-epilogue-like scalar accumulator reduction."""
+
+    @T.prim_func
+    def main(
+        Scores: T.Tensor((M, chunks, width), dtype=T.float32),
+        Weights: T.Tensor((M, chunks, width), dtype=T.float32),
+        Scale: T.Tensor((M,), dtype=T.float32),
+        Out: T.Tensor((M,), dtype=T.float32),
+    ):
+        with T.Kernel(1, 1, threads=M) as (bx, by):
+            tid = T.get_thread_binding()
+            acc = T.alloc_local((1,), T.float32)
+            acc[0] = T.float32(0)
+            for c in T.serial(chunks):
+                for h in T.vectorized(width):
+                    acc[0] += T.max(Scores[tid, c, h] * Scale[tid], T.float32(0)) * Weights[tid, c, h]
+            Out[tid] = acc[0]
 
     return main
 
@@ -352,6 +395,32 @@ def test_codegen_auto_vec_reduce_f32_ignores_half_nan_mode(reduce_func, packed_o
     src = _lower_to_cuda_source(func, target=SM100_TARGET)
     assert f"tl::{packed_op}" in src
     assert f"tl::{packed_op}_nan" not in src
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+def test_codegen_auto_vec_scalar_reduction_f32_sm100():
+    func = _make_auto_vec_scalar_reduction_kernel()
+    src = _lower_to_cuda_source(func, target=SM100_TARGET)
+    assert "tl::max2" in src, "Expected packed max in SM100 vectorised scalar reduction"
+    assert "tl::mul2" in src, "Expected packed multiply in SM100 vectorised scalar reduction"
+    assert "tl::fma2" in src, "Expected packed FMA in SM100 vectorised scalar reduction"
+    assert src.count("tl::fma2") == 4, "Expected one packed FMA per f32x2 lane pair"
+    assert "acc_reduce_vec" in src, "Expected the packed reduction value to be materialised before scalar fold"
+    assert "for (int h = 0; h < 8; ++h)" not in src, "Scalar reduction loop should not be emitted as an 8-iteration loop"
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+def test_codegen_auto_vec_scalar_reduction_chunk_accumulator_f32_sm100():
+    func = _make_auto_vec_scalar_reduction_chunks_kernel()
+    src = _lower_to_cuda_source(func, target=SM100_TARGET)
+    scalar_updates = [line for line in src.splitlines() if "acc[0] = (acc[0] +" in line]
+    assert "tl::fma2" in src, "Expected packed FMA in SM100 chunked scalar reduction"
+    assert src.count("tl::fma2") == 4, "Expected one packed FMA per f32x2 lane pair inside the chunk loop"
+    assert src.count("tl::add2") == 4, "Expected packed vector accumulator update across chunks"
+    assert len(scalar_updates) == 1, "Expected exactly one scalar fold for the chunked reduction"
+    assert "acc_chunk_acc_vec" in scalar_updates[0], "Expected scalar fold to happen after chunk vector accumulation"
 
 
 @tilelang.testing.requires_cuda

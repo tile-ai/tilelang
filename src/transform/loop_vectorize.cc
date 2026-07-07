@@ -415,10 +415,46 @@ private:
     return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
   }
 
+  bool IndicesEqual(const Array<PrimExpr> &lhs,
+                    const Array<PrimExpr> &rhs) const {
+    if (lhs.size() != rhs.size()) {
+      return false;
+    }
+    ExprDeepEqual equal;
+    for (size_t i = 0; i < lhs.size(); ++i) {
+      if (!equal(lhs[i], rhs[i])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool IsSameBufferElement(const BufferLoadNode *load,
+                           const BufferStoreNode *store) const {
+    return load != nullptr && load->buffer.same_as(store->buffer) &&
+           IndicesEqual(load->indices, store->indices);
+  }
+
+  bool IsLocalScalarSelfAddStore(const BufferStoreNode *node) const {
+    if (!(IsLocalBuffer(node->buffer, /*allow_var=*/true) ||
+          IsFragmentBuffer(node->buffer)) ||
+        !node->buffer->dtype.is_scalar()) {
+      return false;
+    }
+    const auto *add = node->value.as<AddNode>();
+    if (add == nullptr) {
+      return false;
+    }
+    return IsSameBufferElement(add->a.as<BufferLoadNode>(), node) ||
+           IsSameBufferElement(add->b.as<BufferLoadNode>(), node);
+  }
+
   Stmt VisitStmt_(const BufferStoreNode *node) final {
     if (IsSharedBuffer(node->buffer) || IsGlobalBuffer(node->buffer))
       has_nonlocal_memory_access_ = true;
-    UpdateVectorSize(node->indices, node->buffer, true);
+    if (!IsLocalScalarSelfAddStore(node)) {
+      UpdateVectorSize(node->indices, node->buffer, true);
+    }
     return arith::IRMutatorWithAnalyzer::VisitStmt_(node);
   }
 
