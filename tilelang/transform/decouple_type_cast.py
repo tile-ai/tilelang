@@ -36,6 +36,11 @@ After:
         cast_buf[vec_copy] = b[vec_copy]                      # copy from memory
     for vec in T.vectorized(16):
         a_frag[vec] = T.cast(cast_buf[vec], "float32")        # compute
+
+The staging cast buffers together with the transformed loops are wrapped in
+an opaque block annotated with `lexical_alloc_scope`, so their allocations
+stay lexically scoped to the use site (see LowerOpaqueBlock / StorageRewrite)
+instead of being hoisted to the kernel entry.
 """
 
 from __future__ import annotations
@@ -58,6 +63,8 @@ from tvm.tirx import (
     Evaluate,
     PrimFunc,
     PyStmtExprVisitor,
+    SBlock,
+    SBlockRealize,
     SeqStmt,
     Stmt,
     Var,
@@ -539,12 +546,27 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         return copy_loops
 
     def _wrap_with_allocations(self, body: Stmt, entries: list[CastEntry]) -> Stmt:
-        """Wrap statement with buffer declarations and allocations."""
-        alloc_stmts = []
-        for _, _, cast_buffer in entries:
-            alloc_stmts.append(AllocBuffer(cast_buffer))
+        """Wrap statement with buffer allocations inside a lexical alloc scope.
+
+        The cast buffers are tiny per-site staging arrays. Placing them in an
+        opaque block annotated with `lexical_alloc_scope` makes LowerOpaqueBlock
+        materialize a scope boundary, so StorageRewrite keeps the allocations
+        next to their use site instead of hoisting them to the kernel entry,
+        and codegen emits a `{ ... }` scope with the declarations inside.
+        """
+        if not entries:
+            return body
+        alloc_stmts: list[Stmt] = [AllocBuffer(cast_buffer) for _, _, cast_buffer in entries]
         alloc_stmts.append(body)
-        return SeqStmt(alloc_stmts)
+        block = SBlock(
+            iter_vars=[],
+            reads=[],
+            writes=[],
+            name_hint="decoupled_cast",
+            body=SeqStmt(alloc_stmts),
+            annotations={"lexical_alloc_scope": 1},
+        )
+        return SBlockRealize([], True, block)
 
     def _replace_access(self, stmt: Stmt, store_entries: list[CastEntry], load_entries: list[CastEntry], loop_var: Var) -> Stmt:
         """Replace memory accesses with cast buffer accesses."""
