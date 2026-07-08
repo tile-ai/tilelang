@@ -81,14 +81,14 @@ def fp8_fp4_gemm_1d1d_persistent(
             tx = T.get_thread_binding()
 
             if tx < 32:  # issue TMA, load operands and SFs
-                sched = T.PersistentTileScheduler("sched_tma", m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
+                sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
                 sched.init(block_id // cluster_size)
                 while sched.valid():
-                    bx = sched.m_idx[0] * cluster_size + cta_id
-                    by = sched.n_idx[0]
+                    bx = sched.m_idx * cluster_size + cta_id
+                    by = sched.n_idx
 
                     for k in T.serial(k_iters):
-                        phase = sched.current_iter[0] * k_iters + k
+                        phase = sched.current_iter * k_iters + k
                         stage = phase % num_stages
                         parity = (phase // num_stages) & 1
                         T.mbarrier_wait_parity(consumed[stage], parity ^ 1)
@@ -121,12 +121,12 @@ def fp8_fp4_gemm_1d1d_persistent(
                     sched.next_tile()
 
             elif 32 <= tx < 64 and cta_id == 0:  # issue tcgen5
-                sched = T.PersistentTileScheduler("sched_mma", m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
+                sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
                 sched.init(block_id // cluster_size)
                 while sched.valid():
-                    T.mbarrier_wait_parity(tmem_empty, (sched.current_iter[0] & 1) ^ 1)
+                    T.mbarrier_wait_parity(tmem_empty, (sched.current_iter & 1) ^ 1)
                     for k in T.serial(k_iters):
-                        phase = sched.current_iter[0] * k_iters + k
+                        phase = sched.current_iter * k_iters + k
                         stage = phase % num_stages
                         parity = (phase // num_stages) & 1
                         T.mbarrier_wait_parity(with_sf_full[stage], parity)
@@ -151,11 +151,11 @@ def fp8_fp4_gemm_1d1d_persistent(
                     sched.next_tile()
 
             elif 64 <= tx < 96:  # transpose SFs
-                sched = T.PersistentTileScheduler("sched_sf", m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
+                sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
                 sched.init(block_id // cluster_size)
                 while sched.valid():
                     for k in T.serial(k_iters):
-                        phase = sched.current_iter[0] * k_iters + k
+                        phase = sched.current_iter * k_iters + k
                         stage = phase % num_stages
                         parity = (phase // num_stages) & 1
                         T.mbarrier_wait_parity(loaded[stage], parity)
@@ -167,13 +167,13 @@ def fp8_fp4_gemm_1d1d_persistent(
                     sched.next_tile()
 
             elif 128 <= tx < 256:  # epilogue
-                sched = T.PersistentTileScheduler("sched_epi", m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
+                sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
                 sched.init(block_id // cluster_size)
                 while sched.valid():
-                    bx = sched.m_idx[0] * cluster_size + cta_id
-                    by = sched.n_idx[0]
+                    bx = sched.m_idx * cluster_size + cta_id
+                    by = sched.n_idx
 
-                    T.mbarrier_wait_parity(tmem_full, sched.current_iter[0] & 1)
+                    T.mbarrier_wait_parity(tmem_full, sched.current_iter & 1)
                     T.copy(C_tmem, C_local)
                     T.mbarrier_arrive(tmem_empty, 0)
 

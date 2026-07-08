@@ -1,12 +1,13 @@
 """Tile schedulers built on TileLang ``meta_class``.
 
 ``@meta_class`` auto-inlines every method that emits a buffer store, so state
-methods can freely read scalar state via ``self.x[0]`` and write via
-``self.x[0] = ...`` (the latter lowers to a ``BufferStore``). Store-free methods
-(``valid``, ``coord``) stay plain Python and just return ``PrimExpr`` values, so
-they work in conditions and can be reused statelessly. State lives in
-``T.alloc_var`` buffers allocated in ``__init__`` (only when ``stateful``). Works
-in both eager (``@tilelang.jit``) and lazy (``@T.prim_func``) modes.
+methods can freely read scalar state via ``self._x[0]`` and write via
+``self._x[0] = ...`` (the latter lowers to a ``BufferStore``). Store-free
+methods (``valid``, ``coord``) and the read-only state properties (``m_idx``,
+``n_idx``, ``current_iter``) stay plain Python and just return ``PrimExpr``
+values, so they work in conditions and can be reused statelessly. State lives
+in ``T.alloc_var`` buffers allocated in ``__init__`` (only when ``stateful``).
+Works in both eager (``@tilelang.jit``) and lazy (``@T.prim_func``) modes.
 
 Note on compile-time branching: the lazy TVMScript parser does not constant-fold
 a Python ``if`` on a compile-time value inside an inlined method (it would emit a
@@ -30,37 +31,62 @@ class BaseTileScheduler:
     State (single-element ``T.alloc_var`` buffers): ``m_idx`` / ``n_idx`` are the
     current tile coordinates; ``linear_idx`` is the worker's global linear cursor;
     ``current_iter`` is the 0-based iteration count (how many tiles this worker has
-    advanced past = the "wave" index). ``current_iter`` is the single iteration
-    clock the kernel can read for pipeline/double-buffer state (e.g.
-    ``sched.current_iter[0] & 1``), removing the need for a separate ``for w`` loop
-    counter. Subclasses implement ``update_current_idx`` to decode ``linear_idx``
-    into ``(m_idx, n_idx)`` and set ``self._total_tiles`` (used by ``valid``).
+    advanced past = the "wave" index). Each is exposed as a read-only property
+    returning the scalar ``PrimExpr`` (``sched.m_idx``, ``sched.current_iter``);
+    only scheduler methods mutate the underlying buffers (``self._m_idx[0] = ...``).
+    ``current_iter`` is the single iteration clock the kernel can read for
+    pipeline/double-buffer state (e.g. ``sched.current_iter & 1``), removing the
+    need for a separate ``for w`` loop counter. Subclasses implement
+    ``update_current_idx`` to decode ``linear_idx`` into ``(m_idx, n_idx)`` and
+    set ``self._total_tiles`` (used by ``valid``).
     """
 
-    def __init__(self, prefix: str, stateful: bool = True):
+    def __init__(self, stateful: bool = True, name: str | None = None):
+        # ``name`` is not read here: the ``meta_class`` __init__ wrapper binds
+        # it from the signature to auto-name the state buffers below.
         self._stateful = stateful
         if stateful:
-            self.m_idx = T.alloc_var(T.int32)
-            self.n_idx = T.alloc_var(T.int32)
-            self.linear_idx = T.alloc_var(T.int32)
-            self.current_iter = T.alloc_var(T.int32)
+            self._m_idx = T.alloc_var(T.int32)
+            self._n_idx = T.alloc_var(T.int32)
+            self._linear_idx = T.alloc_var(T.int32)
+            self._current_iter = T.alloc_var(T.int32)
         self._total_tiles = 0
+
+    @property
+    def m_idx(self):
+        """Current tile row as a scalar ``PrimExpr``."""
+        return self._m_idx[0]
+
+    @property
+    def n_idx(self):
+        """Current tile column as a scalar ``PrimExpr``."""
+        return self._n_idx[0]
+
+    @property
+    def linear_idx(self):
+        """This worker's global linear tile cursor as a scalar ``PrimExpr``."""
+        return self._linear_idx[0]
+
+    @property
+    def current_iter(self):
+        """0-based iteration count (wave index) as a scalar ``PrimExpr``."""
+        return self._current_iter[0]
 
     def update_current_idx(self, linear_idx):
         raise NotImplementedError("Subclasses must implement update_current_idx")
 
     def init(self, linear_init):
-        self.current_iter[0] = 0
-        self.linear_idx[0] = linear_init
-        self.update_current_idx(self.linear_idx[0])
+        self._current_iter[0] = 0
+        self._linear_idx[0] = linear_init
+        self.update_current_idx(self._linear_idx[0])
 
     def next_tile(self, step):
-        self.current_iter[0] = self.current_iter[0] + 1
-        self.linear_idx[0] = self.linear_idx[0] + step
-        self.update_current_idx(self.linear_idx[0])
+        self._current_iter[0] = self._current_iter[0] + 1
+        self._linear_idx[0] = self._linear_idx[0] + step
+        self.update_current_idx(self._linear_idx[0])
 
     def valid(self):
-        return self.linear_idx[0] < self._total_tiles
+        return self._linear_idx[0] < self._total_tiles
 
 
 @meta_class
@@ -89,9 +115,9 @@ class PersistentTileScheduler(BaseTileScheduler):
        ``num_n_tiles`` columns. The caller turns the cluster-row into a real
        block row by adding the in-cluster rank::
 
-           bx = sched.m_idx[0] * cluster_size + cta_rank_in_cluster
+           bx = sched.m_idx * cluster_size + cta_rank_in_cluster
 
-       (For ``cluster_size == 1`` this reduces to ``bx = sched.m_idx[0]``.)
+       (For ``cluster_size == 1`` this reduces to ``bx = sched.m_idx``.)
 
     Interaction: clustering reshapes the grid to ``M' x N'`` (with
     ``M' = ceildiv(num_m_tiles, cluster_size)``) *first*; the swizzle and
@@ -100,9 +126,6 @@ class PersistentTileScheduler(BaseTileScheduler):
 
     Parameters
     ----------
-    prefix : str
-        Name prefix for the scheduler's state buffers in the generated IR
-        (``{prefix}_m_idx`` / ``{prefix}_n_idx`` / ``{prefix}_linear_idx``).
     num_m_tiles : int | PrimExpr
         Number of tiles along M (``ceildiv(M, block_M)``).
     num_n_tiles : int | PrimExpr
@@ -124,6 +147,11 @@ class PersistentTileScheduler(BaseTileScheduler):
         and expose only the pure ``coord(tile_id) -> (m, n)`` decode (for
         ``for w in range(waves)`` loops and auto warp-specialization, where the
         loop owns the iteration clock and the WS pass owns the pipeline phase).
+    name : str, optional
+        Optional name prefix for the state buffers in the generated IR
+        (``{name}_m_idx`` / ``{name}_n_idx`` / ...). Default ``None`` leaves
+        the buffers with generic auto-generated names; pass a name to make the
+        IR easier to read when a kernel holds several scheduler instances.
 
     Examples
     --------
@@ -131,17 +159,17 @@ class PersistentTileScheduler(BaseTileScheduler):
 
         m_blocks, n_blocks = T.ceildiv(M, block_M), T.ceildiv(N, block_N)
         with T.Kernel(driver.get_num_sms(), threads=threads) as (block_id,):
-            sched = T.PersistentTileScheduler("sched", m_blocks, n_blocks)
+            sched = T.PersistentTileScheduler(m_blocks, n_blocks)
             sched.init(block_id)
             while sched.valid():
-                bx, by = sched.m_idx[0], sched.n_idx[0]
+                bx, by = sched.m_idx, sched.n_idx
                 # ... compute tile (bx, by) ...
                 sched.next_tile()
 
-    With L2 swizzle (panel width 8)::
+    With L2 swizzle (panel width 8) and named state buffers in the IR::
 
         sched = T.PersistentTileScheduler(
-            "sched", m_blocks, n_blocks, swizzle_size=8)
+            m_blocks, n_blocks, swizzle_size=8, name="sched")
 
     With a 2-CTA cluster along M (e.g. SM100 2-SM MMA)::
 
@@ -150,12 +178,12 @@ class PersistentTileScheduler(BaseTileScheduler):
         with T.ClusterKernel(sm_num, threads=256, cluster_dims=cluster_size) as (block_id):
             cta_rank = T.block_rank_in_cluster()
             sched = T.PersistentTileScheduler(
-                "sched", m_blocks, n_blocks,
+                m_blocks, n_blocks,
                 swizzle_size=8, cluster_size=cluster_size)
             sched.init(block_id // cluster_size)   # init with cluster id
             while sched.valid():
-                bx = sched.m_idx[0] * cluster_size + cta_rank
-                by = sched.n_idx[0]
+                bx = sched.m_idx * cluster_size + cta_rank
+                by = sched.n_idx
                 # ... compute tile (bx, by) ...
                 sched.next_tile()
 
@@ -163,7 +191,7 @@ class PersistentTileScheduler(BaseTileScheduler):
     scheduler is only a tile-coordinate decoder::
 
         sched = T.PersistentTileScheduler(
-            "sched", m_blocks, n_blocks, swizzle_size=8, stateful=False)
+            m_blocks, n_blocks, swizzle_size=8, stateful=False)
         for w in range(waves):
             bx, by = sched.coord(num_workers * w + worker_id)
             if bx * block_M < M and by * block_N < N:
@@ -172,26 +200,26 @@ class PersistentTileScheduler(BaseTileScheduler):
 
     Manual warp-specialized kernels use ``current_iter`` as the single iteration clock
     (no separate ``for w`` loop): each warp role runs its own
-    ``while sched.valid()`` loop and reads ``sched.current_iter[0]`` for
-    pipeline/double-buffer state (``sched.current_iter[0] & 1`` etc.) while reading
-    ``sched.m_idx[0]`` / ``sched.n_idx[0]`` for the tile::
+    ``while sched.valid()`` loop and reads ``sched.current_iter`` for
+    pipeline/double-buffer state (``sched.current_iter & 1`` etc.) while reading
+    ``sched.m_idx`` / ``sched.n_idx`` for the tile::
 
         sched.init(block_id)
         while sched.valid():
-            bx, by = sched.m_idx[0], sched.n_idx[0]
-            # ... use sched.current_iter[0] for barrier phase / double-buffering ...
+            bx, by = sched.m_idx, sched.n_idx
+            # ... use sched.current_iter for barrier phase / double-buffering ...
             sched.next_tile()
 
     Notes
     -----
-    State is held in single-element ``T.alloc_var`` buffers, so read with
-    ``sched.m_idx[0]`` / ``sched.current_iter[0]`` and (inside methods) write with
-    ``self.x[0] = ...``; the ``[0]`` is required for the write to lower to a
-    ``BufferStore``."""
+    State is held in single-element ``T.alloc_var`` buffers behind read-only
+    properties: ``sched.m_idx`` / ``sched.current_iter`` etc. return the scalar
+    ``PrimExpr`` directly (no ``[0]``). Only scheduler methods mutate state, via
+    ``self._x[0] = ...`` on the underlying buffers; the ``[0]`` is required
+    there for the write to lower to a ``BufferStore``."""
 
     def __init__(
         self,
-        prefix: str,
         num_m_tiles,
         num_n_tiles,
         num_workers=None,
@@ -199,8 +227,9 @@ class PersistentTileScheduler(BaseTileScheduler):
         column_major: bool = True,
         cluster_size: int = 1,
         stateful: bool = True,
+        name: str | None = None,
     ):
-        super().__init__(prefix, stateful=stateful)
+        super().__init__(stateful=stateful, name=name)
         self.cluster_size = cluster_size
         if num_workers is None:
             num_workers = driver.get_num_sms() // cluster_size
@@ -247,15 +276,15 @@ class PersistentTileScheduler(BaseTileScheduler):
 
     def update_current_idx(self, linear_idx):
         m, n = self.coord(linear_idx)
-        self.m_idx[0] = m
-        self.n_idx[0] = n
+        self._m_idx[0] = m
+        self._n_idx[0] = n
 
     def init(self, worker_id):
-        self.current_iter[0] = 0
-        self.linear_idx[0] = worker_id
-        self.update_current_idx(self.linear_idx[0])
+        self._current_iter[0] = 0
+        self._linear_idx[0] = worker_id
+        self.update_current_idx(self._linear_idx[0])
 
     def next_tile(self):
-        self.current_iter[0] = self.current_iter[0] + 1
-        self.linear_idx[0] = self.linear_idx[0] + self.num_workers
-        self.update_current_idx(self.linear_idx[0])
+        self._current_iter[0] = self._current_iter[0] + 1
+        self._linear_idx[0] = self._linear_idx[0] + self.num_workers
+        self.update_current_idx(self._linear_idx[0])

@@ -100,49 +100,52 @@ def _emits_store(func: Callable) -> bool:
         return True
 
 
-def _name_buffer(prefix: str, attr: str, value: Any) -> None:
-    """Give a state buffer a readable name ``{prefix}_{attr}`` in the IR."""
+def _name_buffer(meta_name: str, attr: str, value: Any) -> None:
+    """Give a state buffer a readable name ``{meta_name}_{attr}`` in the IR."""
     from tvm.script.ir_builder import IRBuilder
     from tvm.tirx import Buffer
 
     if not isinstance(value, Buffer):
         return
     with contextlib.suppress(Exception):  # naming is best-effort, never fatal
-        IRBuilder.name(f"{prefix}_{attr}", value)
+        IRBuilder.name(f"{meta_name}_{attr}", value)
 
 
-def _install_prefix_naming(cls: type) -> None:
-    """Make ``self.<attr> = <buffer>`` auto-name the buffer using ``prefix``.
+def _install_buffer_naming(cls: type) -> None:
+    """Make ``self.<attr> = <buffer>`` auto-name the buffer using ``name``.
 
-    ``prefix`` is read from the constructor argument of the same name (if any),
-    so existing ``__init__(self, prefix, ...)`` signatures just work.
+    ``name`` is read from the constructor argument of the same name (if any);
+    it is optional and defaults to ``None`` = no naming, so classes without a
+    ``name`` constructor argument just work.
     """
-    if cls.__dict__.get("_tl_prefix_naming_installed", False):
+    if cls.__dict__.get("_tl_buffer_naming_installed", False):
         return
 
     orig_init = cls.__init__
     init_sig = inspect.signature(orig_init)
 
     def __init__(self, *args, **kwargs):
-        prefix = None
+        meta_name = None
         try:
             bound = init_sig.bind(self, *args, **kwargs)
             bound.apply_defaults()
-            prefix = bound.arguments.get("prefix")
+            meta_name = bound.arguments.get("name")
         except TypeError:
-            prefix = None
-        object.__setattr__(self, "_meta_prefix", prefix)
+            meta_name = None
+        object.__setattr__(self, "_meta_name", meta_name)
         orig_init(self, *args, **kwargs)
 
     def __setattr__(self, name, value):
         object.__setattr__(self, name, value)
-        prefix = getattr(self, "_meta_prefix", None)
-        if prefix and not name.startswith("_"):
-            _name_buffer(prefix, name, value)
+        meta_name = getattr(self, "_meta_name", None)
+        # State buffers live behind underscore attributes (public access goes
+        # through properties), so strip leading underscores for the IR name.
+        if meta_name and name.lstrip("_"):
+            _name_buffer(meta_name, name.lstrip("_"), value)
 
     cls.__init__ = __init__
     cls.__setattr__ = __setattr__
-    cls._tl_prefix_naming_installed = True
+    cls._tl_buffer_naming_installed = True
 
 
 def meta_class(cls: _C) -> _C:
@@ -169,17 +172,19 @@ def meta_class(cls: _C) -> _C:
          These stay plain so they can return values and be reused statelessly.
          A method that emits TIR only through control flow / nested calls (no
          direct store) should be marked explicitly with ``@inline``.
-    3. Auto-name state buffers ``{prefix}_{attr}`` in the generated IR, where
-       ``prefix`` is the constructor argument named ``prefix`` (so
-       ``Sched("sched", ...)`` yields ``sched_m_idx`` etc.). This wraps
-       ``__init__`` to capture ``prefix`` and installs a ``__setattr__`` that
-       names any ``Buffer`` assigned to a non-underscore attribute; non-buffers
-       (compile-time ints like ``num_n_tiles``) and underscore attributes are
-       skipped, and naming is best-effort (never fatal). It runs at
-       construction while an IR builder is active, so it works in both modes.
+    3. Auto-name state buffers ``{name}_{attr}`` in the generated IR, where
+       ``name`` is the optional constructor argument named ``name`` (so
+       ``Sched(..., name="sched")`` yields ``sched_m_idx`` etc.; the default
+       ``None`` skips naming). This wraps ``__init__`` to capture ``name`` and
+       installs a ``__setattr__`` that names any ``Buffer`` assigned to an
+       attribute (leading underscores are stripped, so ``self._m_idx``
+       becomes ``sched_m_idx``); non-buffers (compile-time ints like
+       ``num_n_tiles``) are skipped, and naming is
+       best-effort (never fatal). It runs at construction while an IR builder
+       is active, so it works in both modes.
     """
     cls._is_meta_class = True
-    _install_prefix_naming(cls)
+    _install_buffer_naming(cls)
     for name, attr in list(cls.__dict__.items()):
         if name.startswith("__"):
             continue

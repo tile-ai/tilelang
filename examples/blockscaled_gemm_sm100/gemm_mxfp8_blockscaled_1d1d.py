@@ -2,9 +2,9 @@
 # Blockscale size: (M, N, K) = (1, 1, 128)
 #
 # Persistent 2-CTA variant uses PersistentTileScheduler: each warp role owns a
-# scheduler instance and drives ``while sched.valid()``. ``sched.current_iter[0]``
-# is the wave index for pipeline/double-buffering; ``sched.m_idx[0]`` /
-# ``sched.n_idx[0]`` decode the tile (with ``bx = m_idx * cluster_size + cta_id``).
+# scheduler instance and drives ``while sched.valid()``. ``sched.current_iter``
+# is the wave index for pipeline/double-buffering; ``sched.m_idx`` /
+# ``sched.n_idx`` decode the tile (with ``bx = m_idx * cluster_size + cta_id``).
 
 import argparse
 import torch
@@ -389,14 +389,14 @@ def mxfp8_blockscaled_gemm_2cta_persistent(
         warp_idx = tx // 32
 
         if warp_idx == 0:
-            sched = T.PersistentTileScheduler("sched_tma", m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
+            sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
             sched.init(block_id // cluster_size)
             while sched.valid():
-                bx = sched.m_idx[0] * cluster_size + cta_id
-                by = sched.n_idx[0]
+                bx = sched.m_idx * cluster_size + cta_id
+                by = sched.n_idx
 
                 for k in T.serial(k_iters):
-                    phase = sched.current_iter[0] * k_iters + k
+                    phase = sched.current_iter * k_iters + k
                     stage = phase % num_stages
                     parity = (phase // num_stages) & 1
                     T.mbarrier_wait_parity(consumed[stage], parity ^ 1)
@@ -439,12 +439,12 @@ def mxfp8_blockscaled_gemm_2cta_persistent(
                 sched.next_tile()
 
         elif warp_idx == 1 and cta_id == 0:
-            sched = T.PersistentTileScheduler("sched_mma", m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
+            sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
             sched.init(block_id // cluster_size)
             while sched.valid():
-                T.mbarrier_wait_parity(tmem_empty, (sched.current_iter[0] & 1) ^ 1)
+                T.mbarrier_wait_parity(tmem_empty, (sched.current_iter & 1) ^ 1)
                 for k in T.serial(k_iters):
-                    phase = sched.current_iter[0] * k_iters + k
+                    phase = sched.current_iter * k_iters + k
                     stage = phase % num_stages
                     parity = (phase // num_stages) & 1
                     T.mbarrier_wait_parity(with_sf_full[stage], parity)
@@ -469,11 +469,11 @@ def mxfp8_blockscaled_gemm_2cta_persistent(
                 sched.next_tile()
 
         elif warp_idx == 2:
-            sched = T.PersistentTileScheduler("sched_sf", m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
+            sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
             sched.init(block_id // cluster_size)
             while sched.valid():
                 for k in T.serial(k_iters):
-                    phase = sched.current_iter[0] * k_iters + k
+                    phase = sched.current_iter * k_iters + k
                     stage = phase % num_stages
                     parity = (phase // num_stages) & 1
                     T.mbarrier_wait_parity(loaded[stage], parity)
@@ -485,13 +485,13 @@ def mxfp8_blockscaled_gemm_2cta_persistent(
                 sched.next_tile()
 
         elif 128 <= tx < 256:
-            sched = T.PersistentTileScheduler("sched_epi", m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
+            sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
             sched.init(block_id // cluster_size)
             while sched.valid():
-                bx = sched.m_idx[0] * cluster_size + cta_id
-                by = sched.n_idx[0]
+                bx = sched.m_idx * cluster_size + cta_id
+                by = sched.n_idx
 
-                T.mbarrier_wait_parity(tmem_full, sched.current_iter[0] & 1)
+                T.mbarrier_wait_parity(tmem_full, sched.current_iter & 1)
                 T.copy(C_tmem, C_local)
                 T.mbarrier_arrive(tmem_empty, 0)
 
