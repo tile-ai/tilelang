@@ -271,12 +271,6 @@ TIR_DEFINE_TL_OPAQUE_BUILTIN(
 
 TIR_DEFINE_TL_OPAQUE_BUILTIN(sm120_mma_blockscaled_cute_consumer_bridge, 7);
 
-TIR_DEFINE_TL_OPAQUE_BUILTIN(sm120_store_full_c_fragment_panel64_bf16, 5);
-
-TIR_DEFINE_TL_OPAQUE_BUILTIN(sm120_store_full_c_fragment_panel32_tma_bf16, 5);
-
-TIR_DEFINE_TL_OPAQUE_BUILTIN(sm120_store_full_c_fragment_epi64x32_tma_bf16, 6);
-
 TIR_DEFINE_TL_BUILTIN(ptx_tcgen05_mma_ss)
     .set_num_inputs(14)
     .set_attr<TCallEffectKind>("TCallEffectKind",

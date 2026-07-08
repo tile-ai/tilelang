@@ -3293,69 +3293,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << mma_operand_void_ptr_arg(3) << ", " << uint32_ptr_arg(4)
                  << ", " << uint32_ptr_arg(5) << ", "
                  << this->PrintExpr(op->args[6]) << ");\n";
-  } else if (op->op.same_as(tl::sm120_store_full_c_fragment_panel64_bf16())) {
-    need_gemm_sm120_h_ = true;
-    // arg 0: C fragment pointer
-    // arg 1: C fragment offset
-    // arg 2: C shared output slice pointer
-    // arg 3: C shared output slice offset
-    // arg 4: panel id inside the full 128x128 accumulator
-    ICHECK_EQ(op->args.size(), 5U);
-    std::string c_ref = this->PrintExpr(op->args[0]);
-    std::string c_offset = this->PrintExpr(op->args[1]);
-    std::string c_shared_ref = this->PrintExpr(op->args[2]);
-    std::string c_shared_offset = this->PrintExpr(op->args[3]);
-
-    this->PrintIndent();
-    this->stream << "tl::detail::sm120_store_full_c_fragment_panel64_bf16("
-                 << "reinterpret_cast<float const*>((" << c_ref << ") + ("
-                 << c_offset << ")), "
-                 << "(reinterpret_cast<bfloat16_t*>(" << c_shared_ref << ") + ("
-                 << c_shared_offset << ")), " << this->PrintExpr(op->args[4])
-                 << ");\n";
-  } else if (op->op.same_as(
-                 tl::sm120_store_full_c_fragment_panel32_tma_bf16())) {
-    need_gemm_sm120_h_ = true;
-    // arg 0: C fragment pointer
-    // arg 1: C fragment offset
-    // arg 2: C shared output slice pointer
-    // arg 3: C shared output slice offset
-    // arg 4: 32-column panel id inside the full 128x128 accumulator
-    ICHECK_EQ(op->args.size(), 5U);
-    std::string c_ref = this->PrintExpr(op->args[0]);
-    std::string c_offset = this->PrintExpr(op->args[1]);
-    std::string c_shared_ref = this->PrintExpr(op->args[2]);
-    std::string c_shared_offset = this->PrintExpr(op->args[3]);
-
-    this->PrintIndent();
-    this->stream << "tl::detail::sm120_store_full_c_fragment_panel32_tma_bf16("
-                 << "reinterpret_cast<float const*>((" << c_ref << ") + ("
-                 << c_offset << ")), "
-                 << "(reinterpret_cast<bfloat16_t*>(" << c_shared_ref << ") + ("
-                 << c_shared_offset << ")), " << this->PrintExpr(op->args[4])
-                 << ");\n";
-  } else if (op->op.same_as(
-                 tl::sm120_store_full_c_fragment_epi64x32_tma_bf16())) {
-    need_gemm_sm120_h_ = true;
-    // arg 0: C fragment pointer
-    // arg 1: C fragment offset
-    // arg 2: C shared output slice pointer
-    // arg 3: C shared output slice offset
-    // arg 4: 64-row epilogue tile id inside the full 128x128 accumulator
-    // arg 5: 32-column epilogue tile id inside the full 128x128 accumulator
-    ICHECK_EQ(op->args.size(), 6U);
-    std::string c_ref = this->PrintExpr(op->args[0]);
-    std::string c_offset = this->PrintExpr(op->args[1]);
-    std::string c_shared_ref = this->PrintExpr(op->args[2]);
-    std::string c_shared_offset = this->PrintExpr(op->args[3]);
-
-    this->PrintIndent();
-    this->stream << "tl::detail::sm120_store_full_c_fragment_epi64x32_tma_bf16("
-                 << "reinterpret_cast<float const*>((" << c_ref << ") + ("
-                 << c_offset << ")), "
-                 << "(reinterpret_cast<bfloat16_t*>(" << c_shared_ref << ") + ("
-                 << c_shared_offset << ")), " << this->PrintExpr(op->args[4])
-                 << ", " << this->PrintExpr(op->args[5]) << ");\n";
   } else if (
       op->op.same_as(
           tl::sm120_mma_blockscaled_kblock_fulltile_afull_bpanel_owner_wide())) {

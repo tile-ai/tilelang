@@ -471,22 +471,6 @@ TVM_DLL const Op &sm120_mma_blockscaled_kblock_fulltile_package_pingpong();
 TVM_DLL const Op &sm120_mma_blockscaled_cute_consumer_bridge();
 
 /*!
- * \brief Private SM120a NVF4 full accumulator fragment panel store helper.
- */
-TVM_DLL const Op &sm120_store_full_c_fragment_panel64_bf16();
-
-/*!
- * \brief Private SM120a NVF4 full accumulator fragment TMA-store panel helper.
- */
-TVM_DLL const Op &sm120_store_full_c_fragment_panel32_tma_bf16();
-
-/*!
- * \brief Private SM120a NVF4 full accumulator fragment 64x32 epilogue TMA-store
- * helper.
- */
-TVM_DLL const Op &sm120_store_full_c_fragment_epi64x32_tma_bf16();
-
-/*!
  * \brief tvm intrinsic for tcgen05 mma shared-shared instructions.
  */
 TVM_DLL const Op &ptx_tcgen05_mma_ss();
