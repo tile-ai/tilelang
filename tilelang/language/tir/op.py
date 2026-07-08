@@ -1322,6 +1322,26 @@ def sm120_mma_blockscaled_cute_consumer_bridge(
     )
 
 
+def sm120_mma_blockscaled(*operands, micro_pipeline="kblock_fulltile"):
+    """Unified SM120 NVF4 tiled block-scaled MMA helper.
+
+    ``micro_pipeline`` selects the internal lowering strategy while keeping the
+    public TIR API surface stable.  The strategy-specific helpers stay internal
+    implementation details for CUDA codegen.
+    """
+    if micro_pipeline == "kblock_fulltile":
+        return sm120_mma_blockscaled_kblock_fulltile(*operands)
+    if micro_pipeline == "kblock_fulltile_ab_owner_wide":
+        return sm120_mma_blockscaled_kblock_fulltile_ab_owner_wide(*operands)
+    if micro_pipeline == "kblock_fulltile_afull_bpanel_owner_wide":
+        return sm120_mma_blockscaled_kblock_fulltile_afull_bpanel_owner_wide(*operands)
+    if micro_pipeline == "kblock_fulltile_package_pingpong":
+        return sm120_mma_blockscaled_kblock_fulltile_package_pingpong(*operands)
+    if micro_pipeline == "cute_consumer_bridge":
+        return sm120_mma_blockscaled_cute_consumer_bridge(*operands)
+    raise ValueError(f"Unsupported SM120 block-scaled micro_pipeline: {micro_pipeline!r}")
+
+
 def ptx_wgmma_ss(
     dtype,
     wgmma_prefix,

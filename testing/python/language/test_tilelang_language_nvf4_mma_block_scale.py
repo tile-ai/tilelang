@@ -82,6 +82,18 @@ def _make_swizzle_layout(shared_buf):
     return T.Layout(shape, transform_func)
 
 
+def test_sm120_mma_blockscaled_public_api_is_unified():
+    assert hasattr(T, "sm120_mma_blockscaled")
+    assert not hasattr(T, "sm120_mma_blockscaled_kblock_fulltile")
+    assert not hasattr(T, "sm120_mma_blockscaled_kblock_fulltile_ab_owner_wide")
+    assert not hasattr(
+        T,
+        "sm120_mma_blockscaled_kblock_fulltile_afull_bpanel_owner_wide",
+    )
+    assert not hasattr(T, "sm120_mma_blockscaled_kblock_fulltile_package_pingpong")
+    assert not hasattr(T, "sm120_mma_blockscaled_cute_consumer_bridge")
+
+
 @simplify_prim_func
 def _make_nvf4_matmul_codegen_kernel(
     M,

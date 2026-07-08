@@ -2447,7 +2447,7 @@ class TensorCoreIntrinEmitter(_TensorCoreIntrinEmitterBase):
                     "r",
                 )
 
-            T.sm120_mma_blockscaled_kblock_fulltile(
+            T.sm120_mma_blockscaled(
                 C_local_buf.data,
                 0,
                 a0,
@@ -2471,6 +2471,7 @@ class TensorCoreIntrinEmitter(_TensorCoreIntrinEmitterBase):
                 sfb_rep2,
                 sfb_rep3,
                 ki,
+                micro_pipeline="kblock_fulltile",
             )
 
         return _warp_backend_kblock(
@@ -2619,7 +2620,7 @@ class TensorCoreIntrinEmitter(_TensorCoreIntrinEmitterBase):
             sfb_base = T.access_ptr(SFB_data[tuple(SFB_other) + (SFB_base_n, SFB_base_k)], "r", extent=1)
 
             if backend_op == "afull_bpanel_owner_wide":
-                T.sm120_mma_blockscaled_kblock_fulltile_afull_bpanel_owner_wide(
+                T.sm120_mma_blockscaled(
                     C_local_buf.data,
                     0,
                     a0,
@@ -2633,9 +2634,10 @@ class TensorCoreIntrinEmitter(_TensorCoreIntrinEmitterBase):
                     sfa_base,
                     sfb_base,
                     ki,
+                    micro_pipeline="kblock_fulltile_afull_bpanel_owner_wide",
                 )
             else:
-                T.sm120_mma_blockscaled_kblock_fulltile_ab_owner_wide(
+                T.sm120_mma_blockscaled(
                     C_local_buf.data,
                     0,
                     a0,
@@ -2649,6 +2651,7 @@ class TensorCoreIntrinEmitter(_TensorCoreIntrinEmitterBase):
                     sfa_base,
                     sfb_base,
                     ki,
+                    micro_pipeline="kblock_fulltile_ab_owner_wide",
                 )
 
         return _warp_backend_kblock_owner_wide(
@@ -2725,7 +2728,7 @@ class TensorCoreIntrinEmitter(_TensorCoreIntrinEmitterBase):
                 "r",
                 extent=1,
             )
-            T.sm120_mma_blockscaled_cute_consumer_bridge(
+            T.sm120_mma_blockscaled(
                 C_local_buf.data,
                 0,
                 a_base,
@@ -2733,6 +2736,7 @@ class TensorCoreIntrinEmitter(_TensorCoreIntrinEmitterBase):
                 sfa_base,
                 sfb_base,
                 ki,
+                micro_pipeline="cute_consumer_bridge",
             )
 
         return _warp_backend_cute_consumer_bridge(
@@ -2815,13 +2819,14 @@ class TensorCoreIntrinEmitter(_TensorCoreIntrinEmitterBase):
                 "r",
                 extent=1,
             )
-            T.sm120_mma_blockscaled_kblock_fulltile_package_pingpong(
+            T.sm120_mma_blockscaled(
                 C_local_buf.data,
                 0,
                 a_base,
                 b_base,
                 sfa_base,
                 sfb_base,
+                micro_pipeline="kblock_fulltile_package_pingpong",
             )
 
         return _warp_backend_package_pingpong(
