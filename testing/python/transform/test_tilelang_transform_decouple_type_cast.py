@@ -27,11 +27,15 @@ def test_local_to_memory():
     @T.prim_func
     def after(b: T.Tensor[(16,), T.float4_e2m1fn]):
         b_frag = T.alloc_local((16,), T.float32)
-        b_local_cast = T.decl_buffer((16,), T.float4_e2m1fn, scope="local")
-        for i in T.vectorized(16):
-            b_local_cast[i] = T.cast(b_frag[i], T.float4_e2m1fn)
-        for i_copy in T.vectorized(16):
-            b[i_copy] = b_local_cast[i_copy]
+        with T.sblock("decoupled_cast"):
+            T.sblock_attr({"lexical_alloc_scope": 1})
+            T.reads()
+            T.writes()
+            b_local_cast = T.decl_buffer((16,), T.float4_e2m1fn, scope="local")
+            for i in T.vectorized(16):
+                b_local_cast[i] = T.cast(b_frag[i], T.float4_e2m1fn)
+            for i_copy in T.vectorized(16):
+                b[i_copy] = b_local_cast[i_copy]
 
     _check(before, after)
 
@@ -48,11 +52,15 @@ def test_memory_to_local():
     @T.prim_func
     def after(b: T.Tensor[(16,), T.float4_e2m1fn]):
         b_frag = T.alloc_local((16,), T.float32)
-        b_local_cast = T.decl_buffer((16,), T.float4_e2m1fn, scope="local")
-        for i in T.vectorized(16):
-            b_local_cast[i] = b_frag[i]
-        for i_copy in T.vectorized(16):
-            b[i_copy] = b_local_cast[i_copy]
+        with T.sblock("decoupled_cast"):
+            T.sblock_attr({"lexical_alloc_scope": 1})
+            T.reads()
+            T.writes()
+            b_local_cast = T.decl_buffer((16,), T.float4_e2m1fn, scope="local")
+            for i in T.vectorized(16):
+                b_local_cast[i] = b_frag[i]
+            for i_copy in T.vectorized(16):
+                b[i_copy] = b_local_cast[i_copy]
 
     _check(before, after)
 
@@ -163,11 +171,15 @@ def test_local_to_memory_with_let_stmt():
     def after(b: T.Tensor[(16,), T.float8_e4m3fn]):
         a_frag = T.alloc_local((16,), T.float32)
         scale = T.alloc_local((16,), T.float32)
-        b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
-        for i in T.vectorized(16):
-            b_local_cast[i] = T.cast(a_frag[i] * scale[i], T.float8_e4m3fn)
-        for i_copy in T.vectorized(16):
-            b[i_copy] = b_local_cast[i_copy]
+        with T.sblock("decoupled_cast"):
+            T.sblock_attr({"lexical_alloc_scope": 1})
+            T.reads()
+            T.writes()
+            b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
+            for i in T.vectorized(16):
+                b_local_cast[i] = T.cast(a_frag[i] * scale[i], T.float8_e4m3fn)
+            for i_copy in T.vectorized(16):
+                b[i_copy] = b_local_cast[i_copy]
 
     _check(before, after)
 
@@ -188,11 +200,15 @@ def test_local_to_memory_with_bind_chain():
     def after(b: T.Tensor[(16,), T.float8_e4m3fn]):
         a_frag = T.alloc_local((16,), T.float32)
         scale = T.alloc_local((16,), T.float32)
-        b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
-        for i in T.vectorized(16):
-            b_local_cast[i] = T.cast(a_frag[i] * (scale[i] + T.float32(1)), T.float8_e4m3fn)
-        for i_copy in T.vectorized(16):
-            b[i_copy] = b_local_cast[i_copy]
+        with T.sblock("decoupled_cast"):
+            T.sblock_attr({"lexical_alloc_scope": 1})
+            T.reads()
+            T.writes()
+            b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
+            for i in T.vectorized(16):
+                b_local_cast[i] = T.cast(a_frag[i] * (scale[i] + T.float32(1)), T.float8_e4m3fn)
+            for i_copy in T.vectorized(16):
+                b[i_copy] = b_local_cast[i_copy]
 
     _check(before, after)
 
@@ -213,15 +229,51 @@ def test_local_to_memory_with_branch_local_bind():
     def after(b: T.Tensor[(16,), T.float8_e4m3fn]):
         a_frag = T.alloc_local((16,), T.float32)
         scale = T.alloc_local((16,), T.float32)
-        b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
-        for i in T.vectorized(16):
-            if i < 8:
-                b_local_cast[i] = T.cast(a_frag[i] * scale[i], T.float8_e4m3fn)
-        for i_copy in T.vectorized(16):
-            if i_copy < 8:
-                b[i_copy] = b_local_cast[i_copy]
+        with T.sblock("decoupled_cast"):
+            T.sblock_attr({"lexical_alloc_scope": 1})
+            T.reads()
+            T.writes()
+            b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
+            for i in T.vectorized(16):
+                if i < 8:
+                    b_local_cast[i] = T.cast(a_frag[i] * scale[i], T.float8_e4m3fn)
+            for i_copy in T.vectorized(16):
+                if i_copy < 8:
+                    b[i_copy] = b_local_cast[i_copy]
 
     _check(before, after)
+
+
+def test_cast_buffers_wrapped_in_lexical_alloc_scope():
+    """The pass must wrap cast buffers in a block annotated with
+    lexical_alloc_scope, so StorageRewrite keeps them scoped to the use site."""
+    from tvm.tirx.stmt_functor import post_order_visit
+
+    @T.prim_func
+    def before(b: T.Tensor[(16,), T.float4_e2m1fn]):
+        b_frag = T.alloc_local((16,), T.float32)
+        for i in T.vectorized(16):
+            b[i] = b_frag[i]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = DecoupleTypeCast()(mod)
+
+    annotated_blocks = [0]
+    allocs_inside = [0]
+
+    def _visit(node):
+        if isinstance(node, tvm.tirx.SBlock) and "lexical_alloc_scope" in node.annotations:
+            annotated_blocks[0] += 1
+
+            def _count(inner):
+                if isinstance(inner, tvm.tirx.AllocBuffer):
+                    allocs_inside[0] += 1
+
+            post_order_visit(node.body, _count)
+
+    post_order_visit(mod["main"].body, _visit)
+    assert annotated_blocks[0] == 1, f"Expected 1 lexical_alloc_scope block, got {annotated_blocks[0]}"
+    assert allocs_inside[0] == 1, f"Expected the cast buffer alloc inside the scope, got {allocs_inside[0]}"
 
 
 # =============================================================================
