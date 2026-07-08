@@ -2,10 +2,7 @@ from __future__ import annotations
 
 from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang.layout import make_swizzled_layout
-from tilelang.cuda.intrinsics.macro.mma_macro_generator import (
-    SM120BlockScaledOperandPackage,
-    TensorCoreIntrinEmitter,
-)
+from tilelang.cuda.intrinsics.macro.mma_macro_generator import TensorCoreIntrinEmitter
 from tilelang.utils.language import is_shared, is_fragment, is_full_region
 from tilelang import tvm as tvm
 from tvm.target import Target
@@ -132,957 +129,26 @@ class GemmMMA(GemmBase):
             annotations = getattr(self.gemm_node, "annotations", {})
             sf_a_granularity_k = annotations.get("sf_a_granularity_k")
             sf_b_granularity_k = annotations.get("sf_b_granularity_k")
-            micro_pipeline = annotations.get("micro_pipeline")
             sf_layout = annotations.get("sf_layout", "rowmajor")
             if sf_layout not in ("rowmajor", "blockscaled_chunk_kmajor"):
                 raise ValueError(f"Unsupported SM120 scale layout: {sf_layout}")
             if sf_a_granularity_k is None or sf_b_granularity_k is None:
                 raise ValueError("Block-scaled MMA GEMM requires sf_a_granularity_k and sf_b_granularity_k")
 
-            if micro_pipeline == "b_pingpong_scale_prefetch":
-
-                @T.prim_func
-                def _gemm_ss_blockscaled_b_pingpong_scale_prefetch() -> None:
-                    A_local = T.alloc_local((warp_rows * local_size_a), a_dtype)
-                    B_local_0 = T.alloc_local((local_size_b), b_dtype)
-                    B_local_1 = T.alloc_local((local_size_b), b_dtype)
-                    SFA_local = T.alloc_local((warp_rows), "uint32")
-                    SFB_local = T.alloc_local((warp_cols), "uint32")
-                    SFB_rep_local = T.alloc_local((warp_cols), "uint32")
-                    if clear_accum:
-                        T.clear(C_buf)
-                    for ki in T.serial(0, (block_K // micro_size_k)):
-                        mma_emitter.ldmatrix_a(A_local, A_region, ki)
-                        mma_emitter.ldscale_fragment(
-                            SFA_local,
-                            SFB_local,
-                            SFB_rep_local,
-                            self.SFARegion,
-                            self.SFBRegion,
-                            ki=ki,
-                            k_start=self.sf_k_start,
-                            sf_a_granularity_k=int(sf_a_granularity_k),
-                            sf_b_granularity_k=int(sf_b_granularity_k),
-                        )
-                        mma_emitter.ldmatrix_b_atom(B_local_0, B_region, ki, 0)
-                        if warp_cols > 1:
-                            mma_emitter.ldmatrix_b_atom(B_local_1, B_region, ki, 1)
-                        for j in T.unroll(warp_cols):
-                            if j % 2 == 0:
-                                for i in T.unroll(warp_rows):
-                                    mma_emitter.mma_atom_with_scale_fragments(
-                                        A_local,
-                                        B_local_0,
-                                        C_buf,
-                                        SFA_local,
-                                        SFB_local,
-                                        SFB_rep_local,
-                                        i,
-                                        j,
-                                    )
-                            else:
-                                for i in T.unroll(warp_rows):
-                                    mma_emitter.mma_atom_with_scale_fragments(
-                                        A_local,
-                                        B_local_1,
-                                        C_buf,
-                                        SFA_local,
-                                        SFB_local,
-                                        SFB_rep_local,
-                                        i,
-                                        j,
-                                    )
-                            next_j = j + 2
-                            if next_j < warp_cols:
-                                if next_j % 2 == 0:
-                                    mma_emitter.ldmatrix_b_atom(B_local_0, B_region, ki, next_j)
-                                else:
-                                    mma_emitter.ldmatrix_b_atom(B_local_1, B_region, ki, next_j)
-
-                return _Simplify(_gemm_ss_blockscaled_b_pingpong_scale_prefetch, inline_let=True)
-
-            if micro_pipeline == "b_pingpong":
-
-                @T.prim_func
-                def _gemm_ss_blockscaled_b_pingpong() -> None:
-                    A_local = T.alloc_local((warp_rows * local_size_a), a_dtype)
-                    B_local_0 = T.alloc_local((local_size_b), b_dtype)
-                    B_local_1 = T.alloc_local((local_size_b), b_dtype)
-                    if clear_accum:
-                        T.clear(C_buf)
-                    for ki in T.serial(0, (block_K // micro_size_k)):
-                        mma_emitter.ldmatrix_a(A_local, A_region, ki)
-                        mma_emitter.ldmatrix_b_atom(B_local_0, B_region, ki, 0)
-                        if warp_cols > 1:
-                            mma_emitter.ldmatrix_b_atom(B_local_1, B_region, ki, 1)
-                        for j in T.unroll(warp_cols):
-                            if j % 2 == 0:
-                                for i in T.unroll(warp_rows):
-                                    mma_emitter.mma_atom(
-                                        A_local,
-                                        B_local_0,
-                                        C_buf,
-                                        self.SFARegion,
-                                        self.SFBRegion,
-                                        i,
-                                        j,
-                                        ki=ki,
-                                        k_start=self.sf_k_start,
-                                        sf_a_granularity_k=int(sf_a_granularity_k),
-                                        sf_b_granularity_k=int(sf_b_granularity_k),
-                                    )
-                            else:
-                                for i in T.unroll(warp_rows):
-                                    mma_emitter.mma_atom(
-                                        A_local,
-                                        B_local_1,
-                                        C_buf,
-                                        self.SFARegion,
-                                        self.SFBRegion,
-                                        i,
-                                        j,
-                                        ki=ki,
-                                        k_start=self.sf_k_start,
-                                        sf_a_granularity_k=int(sf_a_granularity_k),
-                                        sf_b_granularity_k=int(sf_b_granularity_k),
-                                    )
-                            next_j = j + 2
-                            if next_j < warp_cols:
-                                if next_j % 2 == 0:
-                                    mma_emitter.ldmatrix_b_atom(B_local_0, B_region, ki, next_j)
-                                else:
-                                    mma_emitter.ldmatrix_b_atom(B_local_1, B_region, ki, next_j)
-
-                return _Simplify(_gemm_ss_blockscaled_b_pingpong, inline_let=True)
-
-            if micro_pipeline == "k_static_b_pingpong_scale_stream":
+            if sf_layout == "blockscaled_chunk_kmajor":
                 num_k_blocks = int(block_K // micro_size_k)
                 if num_k_blocks != 4:
-                    raise ValueError("micro_pipeline='k_static_b_pingpong_scale_stream' currently requires block_K / micro_size_k == 4")
-                if int(warp_rows) != 1 or int(warp_cols) != 8:
-                    raise ValueError("micro_pipeline='k_static_b_pingpong_scale_stream' currently targets warp_rows=1, warp_cols=8")
-
-                @T.prim_func
-                def _gemm_ss_blockscaled_k_static_b_pingpong_scale_stream() -> None:
-                    A_local_0 = T.alloc_local((warp_rows * local_size_a), a_dtype)
-                    A_local_1 = T.alloc_local((warp_rows * local_size_a), a_dtype)
-                    B_local_0 = T.alloc_local((local_size_b), b_dtype)
-                    B_local_1 = T.alloc_local((local_size_b), b_dtype)
-                    SFA_local_0 = T.alloc_local((warp_rows), "uint32")
-                    SFA_local_1 = T.alloc_local((warp_rows), "uint32")
-                    SFB_local_0 = T.alloc_local((warp_cols), "uint32")
-                    SFB_local_1 = T.alloc_local((warp_cols), "uint32")
-                    SFB_rep_local_0 = T.alloc_local((warp_cols), "uint32")
-                    SFB_rep_local_1 = T.alloc_local((warp_cols), "uint32")
-                    if clear_accum:
-                        T.clear(C_buf)
-
-                    mma_emitter.ldmatrix_a(A_local_0, A_region, 0)
-                    mma_emitter.ldscale_fragment(
-                        SFA_local_0,
-                        SFB_local_0,
-                        SFB_rep_local_0,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=0,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-                    mma_emitter.ldmatrix_a(A_local_1, A_region, 1)
-                    mma_emitter.ldscale_fragment(
-                        SFA_local_1,
-                        SFB_local_1,
-                        SFB_rep_local_1,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=1,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-
-                    mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 0, 0)
-                    mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 0, 1)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_0, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 0)
-                    mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 0, 2)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_1, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 1)
-                    mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 0, 3)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_0, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 2)
-                    mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 0, 4)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_1, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 3)
-                    mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 0, 5)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_0, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 4)
-                    mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 0, 6)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_1, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 5)
-                    mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 0, 7)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_0, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 6)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_1, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 7)
-
-                    mma_emitter.ldmatrix_a(A_local_0, A_region, 2)
-                    mma_emitter.ldscale_fragment(
-                        SFA_local_0,
-                        SFB_local_0,
-                        SFB_rep_local_0,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=2,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-                    mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 1, 0)
-                    mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 1, 1)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_0, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 0)
-                    mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 1, 2)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_1, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 1)
-                    mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 1, 3)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_0, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 2)
-                    mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 1, 4)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_1, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 3)
-                    mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 1, 5)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_0, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 4)
-                    mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 1, 6)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_1, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 5)
-                    mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 1, 7)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_0, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 6)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_1, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 7)
-
-                    mma_emitter.ldmatrix_a(A_local_1, A_region, 3)
-                    mma_emitter.ldscale_fragment(
-                        SFA_local_1,
-                        SFB_local_1,
-                        SFB_rep_local_1,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=3,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-                    mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 2, 0)
-                    mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 2, 1)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_0, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 0)
-                    mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 2, 2)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_1, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 1)
-                    mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 2, 3)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_0, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 2)
-                    mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 2, 4)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_1, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 3)
-                    mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 2, 5)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_0, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 4)
-                    mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 2, 6)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_1, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 5)
-                    mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 2, 7)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_0, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 6)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_0, B_local_1, C_buf, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0, 7)
-
-                    mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 3, 0)
-                    mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 3, 1)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_0, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 0)
-                    mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 3, 2)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_1, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 1)
-                    mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 3, 3)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_0, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 2)
-                    mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 3, 4)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_1, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 3)
-                    mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 3, 5)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_0, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 4)
-                    mma_emitter.ldmatrix_b_atom(B_local_0, B_region, 3, 6)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_1, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 5)
-                    mma_emitter.ldmatrix_b_atom(B_local_1, B_region, 3, 7)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_0, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 6)
-                    mma_emitter.mma_atom_with_scale_fragments(A_local_1, B_local_1, C_buf, SFA_local_1, SFB_local_1, SFB_rep_local_1, 0, 7)
-
-                return _Simplify(_gemm_ss_blockscaled_k_static_b_pingpong_scale_stream, inline_let=True)
-
-            if micro_pipeline == "k_static_b_atom_n8_stream":
-                num_k_blocks = int(block_K // micro_size_k)
-                if num_k_blocks != 4:
-                    raise ValueError("micro_pipeline='k_static_b_atom_n8_stream' currently requires block_K / micro_size_k == 4")
-                if int(warp_cols) != 8:
-                    raise ValueError("micro_pipeline='k_static_b_atom_n8_stream' currently targets warp_cols=8")
-
-                def copy_a_scale_kblock(A_frag, SFA_frag, SFB_frag, SFB_rep_frag, k_block):
-                    mma_emitter.ldmatrix_a(A_frag, A_region, k_block)
-                    mma_emitter.ldscale_fragment(
-                        SFA_frag,
-                        SFB_frag,
-                        SFB_rep_frag,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=k_block,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-
-                @T.macro
-                def gemm_b_atom_stream(A_frag, B_atom_0, B_atom_1, SFA_frag, SFB_frag, SFB_rep_frag, k_block):
-                    mma_emitter.ldmatrix_b_atom(B_atom_0, B_region, k_block, 0)
-                    mma_emitter.ldmatrix_b_atom(B_atom_1, B_region, k_block, 1)
-                    for j in T.unroll(warp_cols):
-                        if j % 2 == 0:
-                            mma_emitter.mma_b_atom_n8_serpentine_with_prefetched_scales(
-                                A_frag,
-                                B_atom_0,
-                                C_buf,
-                                SFA_frag,
-                                SFB_frag,
-                                SFB_rep_frag,
-                                j,
-                            )
-                        else:
-                            mma_emitter.mma_b_atom_n8_serpentine_with_prefetched_scales(
-                                A_frag,
-                                B_atom_1,
-                                C_buf,
-                                SFA_frag,
-                                SFB_frag,
-                                SFB_rep_frag,
-                                j,
-                            )
-                        next_j = j + 2
-                        if next_j < warp_cols:
-                            if next_j % 2 == 0:
-                                mma_emitter.ldmatrix_b_atom(B_atom_0, B_region, k_block, next_j)
-                            else:
-                                mma_emitter.ldmatrix_b_atom(B_atom_1, B_region, k_block, next_j)
-
-                @T.prim_func
-                def _gemm_ss_blockscaled_k_static_b_atom_n8_stream() -> None:
-                    A_local_0 = T.alloc_local((warp_rows * local_size_a), a_dtype)
-                    A_local_1 = T.alloc_local((warp_rows * local_size_a), a_dtype)
-                    B_atom_0 = T.alloc_local((local_size_b), b_dtype)
-                    B_atom_1 = T.alloc_local((local_size_b), b_dtype)
-                    SFA_local_0 = T.alloc_local((warp_rows), "uint32")
-                    SFA_local_1 = T.alloc_local((warp_rows), "uint32")
-                    SFB_local_0 = T.alloc_local((warp_cols), "uint32")
-                    SFB_local_1 = T.alloc_local((warp_cols), "uint32")
-                    SFB_rep_local_0 = T.alloc_local((warp_cols), "uint32")
-                    SFB_rep_local_1 = T.alloc_local((warp_cols), "uint32")
-                    if clear_accum:
-                        T.clear(C_buf)
-
-                    copy_a_scale_kblock(A_local_0, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0)
-                    copy_a_scale_kblock(A_local_1, SFA_local_1, SFB_local_1, SFB_rep_local_1, 1)
-                    gemm_b_atom_stream(A_local_0, B_atom_0, B_atom_1, SFA_local_0, SFB_local_0, SFB_rep_local_0, 0)
-                    copy_a_scale_kblock(A_local_0, SFA_local_0, SFB_local_0, SFB_rep_local_0, 2)
-                    gemm_b_atom_stream(A_local_1, B_atom_0, B_atom_1, SFA_local_1, SFB_local_1, SFB_rep_local_1, 1)
-                    copy_a_scale_kblock(A_local_1, SFA_local_1, SFB_local_1, SFB_rep_local_1, 3)
-                    gemm_b_atom_stream(A_local_0, B_atom_0, B_atom_1, SFA_local_0, SFB_local_0, SFB_rep_local_0, 2)
-                    gemm_b_atom_stream(A_local_1, B_atom_0, B_atom_1, SFA_local_1, SFB_local_1, SFB_rep_local_1, 3)
-
-                return _Simplify(_gemm_ss_blockscaled_k_static_b_atom_n8_stream, inline_let=True)
-
-            if micro_pipeline == "k_static_b_atom_n8_stream_vecsf":
-                num_k_blocks = int(block_K // micro_size_k)
-                if num_k_blocks != 4:
-                    raise ValueError("micro_pipeline='k_static_b_atom_n8_stream_vecsf' currently requires block_K / micro_size_k == 4")
-                if int(warp_cols) != 8:
-                    raise ValueError("micro_pipeline='k_static_b_atom_n8_stream_vecsf' currently targets warp_cols=8")
-
-                @T.macro
-                def gemm_b_atom_stream_vecsf(A_frag, B_atom_0, B_atom_1, SFA_pack, SFB_pack, SFB_rep_pack, k_block):
-                    mma_emitter.ldmatrix_b_atom(B_atom_0, B_region, k_block, 0)
-                    mma_emitter.ldmatrix_b_atom(B_atom_1, B_region, k_block, 1)
-                    for j in T.unroll(warp_cols):
-                        if j % 2 == 0:
-                            mma_emitter.mma_b_atom_n8_serpentine_with_scale_pack(
-                                A_frag,
-                                B_atom_0,
-                                C_buf,
-                                SFA_pack,
-                                SFB_pack,
-                                SFB_rep_pack,
-                                k_block,
-                                j,
-                                num_k_blocks,
-                            )
-                        else:
-                            mma_emitter.mma_b_atom_n8_serpentine_with_scale_pack(
-                                A_frag,
-                                B_atom_1,
-                                C_buf,
-                                SFA_pack,
-                                SFB_pack,
-                                SFB_rep_pack,
-                                k_block,
-                                j,
-                                num_k_blocks,
-                            )
-                        next_j = j + 2
-                        if next_j < warp_cols:
-                            if next_j % 2 == 0:
-                                mma_emitter.ldmatrix_b_atom(B_atom_0, B_region, k_block, next_j)
-                            else:
-                                mma_emitter.ldmatrix_b_atom(B_atom_1, B_region, k_block, next_j)
-
-                @T.prim_func
-                def _gemm_ss_blockscaled_k_static_b_atom_n8_stream_vecsf() -> None:
-                    A_local_0 = T.alloc_local((warp_rows * local_size_a), a_dtype)
-                    A_local_1 = T.alloc_local((warp_rows * local_size_a), a_dtype)
-                    B_atom_0 = T.alloc_local((local_size_b), b_dtype)
-                    B_atom_1 = T.alloc_local((local_size_b), b_dtype)
-                    SFA_pack = T.alloc_local((warp_rows * num_k_blocks), "uint32")
-                    SFB_pack = T.alloc_local((warp_cols * num_k_blocks), "uint32")
-                    SFB_rep_pack = T.alloc_local((warp_cols * num_k_blocks), "uint32")
-                    if clear_accum:
-                        T.clear(C_buf)
-
-                    mma_emitter.ldscale_fragment_kpack(
-                        SFA_pack,
-                        SFB_pack,
-                        SFB_rep_pack,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        num_k_blocks=num_k_blocks,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-                    mma_emitter.ldmatrix_a(A_local_0, A_region, 0)
-                    mma_emitter.ldmatrix_a(A_local_1, A_region, 1)
-                    gemm_b_atom_stream_vecsf(A_local_0, B_atom_0, B_atom_1, SFA_pack, SFB_pack, SFB_rep_pack, 0)
-                    mma_emitter.ldmatrix_a(A_local_0, A_region, 2)
-                    gemm_b_atom_stream_vecsf(A_local_1, B_atom_0, B_atom_1, SFA_pack, SFB_pack, SFB_rep_pack, 1)
-                    mma_emitter.ldmatrix_a(A_local_1, A_region, 3)
-                    gemm_b_atom_stream_vecsf(A_local_0, B_atom_0, B_atom_1, SFA_pack, SFB_pack, SFB_rep_pack, 2)
-                    gemm_b_atom_stream_vecsf(A_local_1, B_atom_0, B_atom_1, SFA_pack, SFB_pack, SFB_rep_pack, 3)
-
-                return _Simplify(_gemm_ss_blockscaled_k_static_b_atom_n8_stream_vecsf, inline_let=True)
-
-            if micro_pipeline == "k_static_full_b_atom_scale_stream":
-                num_k_blocks = int(block_K // micro_size_k)
-                if num_k_blocks != 4:
-                    raise ValueError("micro_pipeline='k_static_full_b_atom_scale_stream' currently requires block_K / micro_size_k == 4")
-
-                @T.prim_func
-                def _gemm_ss_blockscaled_k_static_full_b_atom_scale_stream() -> None:
-                    A_local_0 = T.alloc_local((warp_rows * local_size_a), a_dtype)
-                    A_local_1 = T.alloc_local((warp_rows * local_size_a), a_dtype)
-                    B_local_0 = T.alloc_local((warp_cols * local_size_b), b_dtype)
-                    B_local_1 = T.alloc_local((warp_cols * local_size_b), b_dtype)
-                    SFA_local_0 = T.alloc_local((warp_rows), "uint32")
-                    SFA_local_1 = T.alloc_local((warp_rows), "uint32")
-                    SFB_local_0 = T.alloc_local((warp_cols), "uint32")
-                    SFB_local_1 = T.alloc_local((warp_cols), "uint32")
-                    SFB_rep_local_0 = T.alloc_local((warp_cols), "uint32")
-                    SFB_rep_local_1 = T.alloc_local((warp_cols), "uint32")
-                    if clear_accum:
-                        T.clear(C_buf)
-
-                    mma_emitter.ldmatrix_a(A_local_0, A_region, 0)
-                    mma_emitter.ldmatrix_b(B_local_0, B_region, 0)
-                    mma_emitter.ldscale_fragment(
-                        SFA_local_0,
-                        SFB_local_0,
-                        SFB_rep_local_0,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=0,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-                    mma_emitter.ldmatrix_a(A_local_1, A_region, 1)
-                    mma_emitter.ldmatrix_b(B_local_1, B_region, 1)
-                    mma_emitter.ldscale_fragment(
-                        SFA_local_1,
-                        SFB_local_1,
-                        SFB_rep_local_1,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=1,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-                    for i in T.unroll(warp_rows):
-                        for j in T.unroll(warp_cols):
-                            mma_emitter.mma_full_b_atom_with_scale_fragments(
-                                A_local_0,
-                                B_local_0,
-                                C_buf,
-                                SFA_local_0,
-                                SFB_local_0,
-                                SFB_rep_local_0,
-                                i,
-                                j,
-                            )
-
-                    mma_emitter.ldmatrix_a(A_local_0, A_region, 2)
-                    mma_emitter.ldmatrix_b(B_local_0, B_region, 2)
-                    mma_emitter.ldscale_fragment(
-                        SFA_local_0,
-                        SFB_local_0,
-                        SFB_rep_local_0,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=2,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-                    for i in T.unroll(warp_rows):
-                        for j in T.unroll(warp_cols):
-                            mma_emitter.mma_full_b_atom_with_scale_fragments(
-                                A_local_1,
-                                B_local_1,
-                                C_buf,
-                                SFA_local_1,
-                                SFB_local_1,
-                                SFB_rep_local_1,
-                                i,
-                                j,
-                            )
-
-                    mma_emitter.ldmatrix_a(A_local_1, A_region, 3)
-                    mma_emitter.ldmatrix_b(B_local_1, B_region, 3)
-                    mma_emitter.ldscale_fragment(
-                        SFA_local_1,
-                        SFB_local_1,
-                        SFB_rep_local_1,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=3,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-                    for i in T.unroll(warp_rows):
-                        for j in T.unroll(warp_cols):
-                            mma_emitter.mma_full_b_atom_with_scale_fragments(
-                                A_local_0,
-                                B_local_0,
-                                C_buf,
-                                SFA_local_0,
-                                SFB_local_0,
-                                SFB_rep_local_0,
-                                i,
-                                j,
-                            )
-                    for i in T.unroll(warp_rows):
-                        for j in T.unroll(warp_cols):
-                            mma_emitter.mma_full_b_atom_with_scale_fragments(
-                                A_local_1,
-                                B_local_1,
-                                C_buf,
-                                SFA_local_1,
-                                SFB_local_1,
-                                SFB_rep_local_1,
-                                i,
-                                j,
-                            )
-
-                return _Simplify(_gemm_ss_blockscaled_k_static_full_b_atom_scale_stream, inline_let=True)
-
-            if micro_pipeline in (
-                "sm120_kblock_fulltile",
-                "sm120_kblock_fulltile_selector_probe",
-                "sm120_kblock_fulltile_b_owner_probe",
-                "sm120_kblock_fulltile_ab_owner_probe",
-            ):
-                num_k_blocks = int(block_K // micro_size_k)
-                if num_k_blocks != 4:
-                    raise ValueError(f"micro_pipeline={micro_pipeline!r} currently requires block_K / micro_size_k == 4")
-                if int(warp_rows) != 4 or int(warp_cols) != 2:
-                    raise ValueError(
-                        f"micro_pipeline={micro_pipeline!r} currently targets the balanced "
-                        "128x128 full-tile consumer shape with warp_rows=4 and warp_cols=2"
-                    )
-
-                def copy_kblock(A_frag, B_frag, SFA_frag, SFB_frag, SFB_rep_frag, k_block):
-                    mma_emitter.ldmatrix_a(A_frag, A_region, k_block)
-                    mma_emitter.ldmatrix_b(B_frag, B_region, k_block)
-                    if micro_pipeline == "sm120_kblock_fulltile_ab_owner_probe":
-                        mma_emitter.ldscale_fragment_ab_owner(
-                            SFA_frag,
-                            SFB_frag,
-                            self.SFARegion,
-                            self.SFBRegion,
-                            ki=k_block,
-                            k_start=self.sf_k_start,
-                            sf_a_granularity_k=int(sf_a_granularity_k),
-                            sf_b_granularity_k=int(sf_b_granularity_k),
-                            sf_layout=sf_layout,
-                        )
-                    elif micro_pipeline == "sm120_kblock_fulltile_b_owner_probe":
-                        mma_emitter.ldscale_fragment_b_owner(
-                            SFA_frag,
-                            SFB_frag,
-                            self.SFARegion,
-                            self.SFBRegion,
-                            ki=k_block,
-                            k_start=self.sf_k_start,
-                            sf_a_granularity_k=int(sf_a_granularity_k),
-                            sf_b_granularity_k=int(sf_b_granularity_k),
-                            sf_layout=sf_layout,
-                        )
-                    else:
-                        mma_emitter.ldscale_fragment(
-                            SFA_frag,
-                            SFB_frag,
-                            SFB_rep_frag,
-                            self.SFARegion,
-                            self.SFBRegion,
-                            ki=k_block,
-                            k_start=self.sf_k_start,
-                            sf_a_granularity_k=int(sf_a_granularity_k),
-                            sf_b_granularity_k=int(sf_b_granularity_k),
-                            sf_layout=sf_layout,
-                        )
-
-                def gemm_kblock(A_frag, B_frag, SFA_frag, SFB_frag, SFB_rep_frag):
-                    if micro_pipeline == "sm120_kblock_fulltile_ab_owner_probe":
-                        mma_emitter.mma_with_prefetched_scales_ab_owner(
-                            A_frag,
-                            B_frag,
-                            C_buf,
-                            SFA_frag,
-                            SFB_frag,
-                        )
-                    elif micro_pipeline == "sm120_kblock_fulltile_b_owner_probe":
-                        mma_emitter.mma_with_prefetched_scales_b_owner(
-                            A_frag,
-                            B_frag,
-                            C_buf,
-                            SFA_frag,
-                            SFB_frag,
-                        )
-                    elif micro_pipeline == "sm120_kblock_fulltile_selector_probe":
-                        mma_emitter.mma_with_prefetched_scales_selector_probe(
-                            A_frag,
-                            B_frag,
-                            C_buf,
-                            SFA_frag,
-                            SFB_frag,
-                            SFB_rep_frag,
-                        )
-                    else:
-                        mma_emitter.mma_with_scale_fragments(
-                            A_frag,
-                            B_frag,
-                            C_buf,
-                            SFA_frag,
-                            SFB_frag,
-                            SFB_rep_frag,
-                        )
-
-                @T.prim_func
-                def _gemm_ss_blockscaled_sm120_kblock_fulltile() -> None:
-                    A_frag_0 = T.alloc_local((warp_rows * local_size_a), a_dtype)
-                    A_frag_1 = T.alloc_local((warp_rows * local_size_a), a_dtype)
-                    B_frag_0 = T.alloc_local((warp_cols * local_size_b), b_dtype)
-                    B_frag_1 = T.alloc_local((warp_cols * local_size_b), b_dtype)
-                    if micro_pipeline == "sm120_kblock_fulltile_ab_owner_probe":
-                        SFA_frag_0 = T.alloc_local((2), "uint32")
-                        SFA_frag_1 = T.alloc_local((2), "uint32")
-                        SFB_frag_0 = T.alloc_local((1), "uint32")
-                        SFB_frag_1 = T.alloc_local((1), "uint32")
-                        SFB_rep_frag_0 = T.alloc_local((1), "uint32")
-                        SFB_rep_frag_1 = T.alloc_local((1), "uint32")
-                    elif micro_pipeline == "sm120_kblock_fulltile_b_owner_probe":
-                        SFA_frag_0 = T.alloc_local((warp_rows), "uint32")
-                        SFA_frag_1 = T.alloc_local((warp_rows), "uint32")
-                        SFB_frag_0 = T.alloc_local((1), "uint32")
-                        SFB_frag_1 = T.alloc_local((1), "uint32")
-                        SFB_rep_frag_0 = T.alloc_local((1), "uint32")
-                        SFB_rep_frag_1 = T.alloc_local((1), "uint32")
-                    else:
-                        SFA_frag_0 = T.alloc_local((warp_rows), "uint32")
-                        SFA_frag_1 = T.alloc_local((warp_rows), "uint32")
-                        SFB_frag_0 = T.alloc_local((warp_cols), "uint32")
-                        SFB_frag_1 = T.alloc_local((warp_cols), "uint32")
-                        SFB_rep_frag_0 = T.alloc_local((warp_cols), "uint32")
-                        SFB_rep_frag_1 = T.alloc_local((warp_cols), "uint32")
-                    if clear_accum:
-                        T.clear(C_buf)
-
-                    copy_kblock(A_frag_0, B_frag_0, SFA_frag_0, SFB_frag_0, SFB_rep_frag_0, 0)
-                    copy_kblock(A_frag_1, B_frag_1, SFA_frag_1, SFB_frag_1, SFB_rep_frag_1, 1)
-                    gemm_kblock(A_frag_0, B_frag_0, SFA_frag_0, SFB_frag_0, SFB_rep_frag_0)
-                    copy_kblock(A_frag_0, B_frag_0, SFA_frag_0, SFB_frag_0, SFB_rep_frag_0, 2)
-                    gemm_kblock(A_frag_1, B_frag_1, SFA_frag_1, SFB_frag_1, SFB_rep_frag_1)
-                    copy_kblock(A_frag_1, B_frag_1, SFA_frag_1, SFB_frag_1, SFB_rep_frag_1, 3)
-                    gemm_kblock(A_frag_0, B_frag_0, SFA_frag_0, SFB_frag_0, SFB_rep_frag_0)
-                    gemm_kblock(A_frag_1, B_frag_1, SFA_frag_1, SFB_frag_1, SFB_rep_frag_1)
-
-                return _Simplify(_gemm_ss_blockscaled_sm120_kblock_fulltile, inline_let=True)
-
-            if micro_pipeline == "sm120_kblock_fulltile_ab_owner_wide_probe":
-                num_k_blocks = int(block_K // micro_size_k)
-                if num_k_blocks != 4:
-                    raise ValueError(
-                        "micro_pipeline='sm120_kblock_fulltile_ab_owner_wide_probe' currently requires block_K / micro_size_k == 4"
-                    )
+                    raise ValueError("SM120 packed-scale blockscaled MMA currently requires block_K / micro_size_k == 4")
                 if int(warp_rows) != 4 or int(warp_cols) != 4:
                     raise ValueError(
-                        "micro_pipeline='sm120_kblock_fulltile_ab_owner_wide_probe' currently targets warp_rows=4, warp_cols=4"
-                    )
-
-                def copy_kblock(A_frag, B_frag, SFA_owner_frag, SFB_owner_frag, k_block):
-                    mma_emitter.ldmatrix_a(A_frag, A_region, k_block)
-                    mma_emitter.ldmatrix_b(B_frag, B_region, k_block)
-                    mma_emitter.ldscale_fragment_ab_owner_wide(
-                        SFA_owner_frag,
-                        SFB_owner_frag,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=k_block,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-
-                def gemm_kblock(A_frag, B_frag, SFA_owner_frag, SFB_owner_frag):
-                    mma_emitter.mma_with_prefetched_scales_ab_owner_wide(
-                        A_frag,
-                        B_frag,
-                        C_buf,
-                        SFA_owner_frag,
-                        SFB_owner_frag,
-                    )
-
-                @T.prim_func
-                def _gemm_ss_blockscaled_sm120_kblock_fulltile_ab_owner_wide() -> None:
-                    A_frag_0 = T.alloc_local((warp_rows * local_size_a), a_dtype)
-                    A_frag_1 = T.alloc_local((warp_rows * local_size_a), a_dtype)
-                    B_frag_0 = T.alloc_local((warp_cols * local_size_b), b_dtype)
-                    B_frag_1 = T.alloc_local((warp_cols * local_size_b), b_dtype)
-                    SFA_owner_frag_0 = T.alloc_local((2), "uint32")
-                    SFA_owner_frag_1 = T.alloc_local((2), "uint32")
-                    SFB_owner_frag_0 = T.alloc_local((2), "uint32")
-                    SFB_owner_frag_1 = T.alloc_local((2), "uint32")
-                    if clear_accum:
-                        T.clear(C_buf)
-
-                    copy_kblock(A_frag_0, B_frag_0, SFA_owner_frag_0, SFB_owner_frag_0, 0)
-                    copy_kblock(A_frag_1, B_frag_1, SFA_owner_frag_1, SFB_owner_frag_1, 1)
-                    gemm_kblock(A_frag_0, B_frag_0, SFA_owner_frag_0, SFB_owner_frag_0)
-                    copy_kblock(A_frag_0, B_frag_0, SFA_owner_frag_0, SFB_owner_frag_0, 2)
-                    gemm_kblock(A_frag_1, B_frag_1, SFA_owner_frag_1, SFB_owner_frag_1)
-                    copy_kblock(A_frag_1, B_frag_1, SFA_owner_frag_1, SFB_owner_frag_1, 3)
-                    gemm_kblock(A_frag_0, B_frag_0, SFA_owner_frag_0, SFB_owner_frag_0)
-                    gemm_kblock(A_frag_1, B_frag_1, SFA_owner_frag_1, SFB_owner_frag_1)
-
-                return _Simplify(_gemm_ss_blockscaled_sm120_kblock_fulltile_ab_owner_wide, inline_let=True)
-
-            if micro_pipeline in (
-                "sm120_backend_kblock_fulltile_ab_owner_wide",
-                "sm120_backend_kblock_fulltile_afull_bpanel_owner_wide",
-            ):
-                num_k_blocks = int(block_K // micro_size_k)
-                if num_k_blocks != 4:
-                    raise ValueError(f"micro_pipeline={micro_pipeline!r} currently requires block_K / micro_size_k == 4")
-                if int(warp_rows) != 4 or int(warp_cols) != 4:
-                    raise ValueError(f"micro_pipeline={micro_pipeline!r} currently targets warp_rows=4, warp_cols=4")
-                if sf_layout != "blockscaled_chunk_kmajor":
-                    raise ValueError(f"micro_pipeline={micro_pipeline!r} currently requires sf_layout='blockscaled_chunk_kmajor'")
-                backend_op = (
-                    "afull_bpanel_owner_wide"
-                    if micro_pipeline == "sm120_backend_kblock_fulltile_afull_bpanel_owner_wide"
-                    else "ab_owner_wide"
-                )
-
-                @T.prim_func
-                def _gemm_ss_blockscaled_sm120_backend_kblock_fulltile_ab_owner_wide() -> None:
-                    if clear_accum:
-                        T.clear(C_buf)
-
-                    mma_emitter.mma_backend_kblock_fulltile_ab_owner_wide(
-                        A_region,
-                        B_region,
-                        C_buf,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=0,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                        backend_op=backend_op,
-                    )
-                    mma_emitter.mma_backend_kblock_fulltile_ab_owner_wide(
-                        A_region,
-                        B_region,
-                        C_buf,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=1,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                        backend_op=backend_op,
-                    )
-                    mma_emitter.mma_backend_kblock_fulltile_ab_owner_wide(
-                        A_region,
-                        B_region,
-                        C_buf,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=2,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                        backend_op=backend_op,
-                    )
-                    mma_emitter.mma_backend_kblock_fulltile_ab_owner_wide(
-                        A_region,
-                        B_region,
-                        C_buf,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=3,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                        backend_op=backend_op,
-                    )
-
-                return _Simplify(_gemm_ss_blockscaled_sm120_backend_kblock_fulltile_ab_owner_wide, inline_let=True)
-
-            if micro_pipeline == "sm120_backend_kblock_fulltile":
-                num_k_blocks = int(block_K // micro_size_k)
-                if num_k_blocks != 4:
-                    raise ValueError("micro_pipeline='sm120_backend_kblock_fulltile' currently requires block_K / micro_size_k == 4")
-                if int(warp_rows) != 4 or int(warp_cols) != 4:
-                    raise ValueError("micro_pipeline='sm120_backend_kblock_fulltile' currently targets warp_rows=4, warp_cols=4")
-
-                @T.prim_func
-                def _gemm_ss_blockscaled_sm120_backend_kblock_fulltile() -> None:
-                    if clear_accum:
-                        T.clear(C_buf)
-
-                    mma_emitter.mma_backend_kblock_fulltile(
-                        A_region,
-                        B_region,
-                        C_buf,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=0,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-                    mma_emitter.mma_backend_kblock_fulltile(
-                        A_region,
-                        B_region,
-                        C_buf,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=1,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-                    mma_emitter.mma_backend_kblock_fulltile(
-                        A_region,
-                        B_region,
-                        C_buf,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=2,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-                    mma_emitter.mma_backend_kblock_fulltile(
-                        A_region,
-                        B_region,
-                        C_buf,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=3,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-
-                return _Simplify(_gemm_ss_blockscaled_sm120_backend_kblock_fulltile, inline_let=True)
-
-            if micro_pipeline == "sm120_cute_consumer_bridge_skeleton":
-                num_k_blocks = int(block_K // micro_size_k)
-                if num_k_blocks != 4:
-                    raise ValueError("micro_pipeline='sm120_cute_consumer_bridge_skeleton' currently requires block_K / micro_size_k == 4")
-                if int(warp_rows) != 4 or int(warp_cols) != 4:
-                    raise ValueError("micro_pipeline='sm120_cute_consumer_bridge_skeleton' currently targets warp_rows=4, warp_cols=4")
-
-                @T.prim_func
-                def _gemm_ss_blockscaled_sm120_cute_consumer_bridge_skeleton() -> None:
-                    if clear_accum:
-                        T.clear(C_buf)
-
-                    mma_emitter.mma_backend_cute_consumer_bridge(
-                        A_region,
-                        B_region,
-                        C_buf,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=0,
-                    )
-                    mma_emitter.mma_backend_cute_consumer_bridge(
-                        A_region,
-                        B_region,
-                        C_buf,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=1,
-                    )
-                    mma_emitter.mma_backend_cute_consumer_bridge(
-                        A_region,
-                        B_region,
-                        C_buf,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=2,
-                    )
-                    mma_emitter.mma_backend_cute_consumer_bridge(
-                        A_region,
-                        B_region,
-                        C_buf,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=3,
-                    )
-
-                return _Simplify(_gemm_ss_blockscaled_sm120_cute_consumer_bridge_skeleton, inline_let=True)
-
-            if micro_pipeline == "sm120_backend_kblock_fulltile_package_pingpong":
-                num_k_blocks = int(block_K // micro_size_k)
-                if num_k_blocks != 4:
-                    raise ValueError(f"micro_pipeline={micro_pipeline!r} currently requires block_K / micro_size_k == 4")
-                if int(warp_rows) != 4 or int(warp_cols) != 4:
-                    raise ValueError(
-                        f"micro_pipeline={micro_pipeline!r} currently targets warp_rows=4, warp_cols=4, "
+                        "SM120 packed-scale blockscaled MMA currently requires a 4x4 warp atom grid, "
                         f"got warp_rows={int(warp_rows)}, warp_cols={int(warp_cols)}"
                     )
-                if sf_layout != "blockscaled_chunk_kmajor":
-                    raise ValueError(f"micro_pipeline={micro_pipeline!r} currently requires sf_layout='blockscaled_chunk_kmajor'")
 
                 @T.prim_func
-                def _gemm_ss_blockscaled_sm120_backend_package_pingpong() -> None:
+                def _gemm_ss_blockscaled_packed_scale_package() -> None:
                     if clear_accum:
                         T.clear(C_buf)
-
                     mma_emitter.mma_backend_kblock_fulltile_package_pingpong(
                         A_region,
                         B_region,
@@ -1092,15 +158,12 @@ class GemmMMA(GemmBase):
                         sf_layout=sf_layout,
                     )
 
-                return _Simplify(_gemm_ss_blockscaled_sm120_backend_package_pingpong, inline_let=True)
+                return _Simplify(_gemm_ss_blockscaled_packed_scale_package, inline_let=True)
 
-            if micro_pipeline == "sm120_pkg_atom_neutral":
-                num_k_blocks = int(block_K // micro_size_k)
-                if num_k_blocks != 4:
-                    raise ValueError("micro_pipeline='sm120_pkg_atom_neutral' currently requires block_K / micro_size_k == 4")
+            if int(block_K // micro_size_k) == 4:
 
                 @T.prim_func
-                def _gemm_ss_blockscaled_sm120_pkg_atom_neutral() -> None:
+                def _gemm_ss_blockscaled_static_kblock() -> None:
                     A_local_0 = T.alloc_local((warp_rows * local_size_a), a_dtype)
                     A_local_1 = T.alloc_local((warp_rows * local_size_a), a_dtype)
                     B_local_0 = T.alloc_local((warp_cols * local_size_b), b_dtype)
@@ -1114,220 +177,80 @@ class GemmMMA(GemmBase):
                     if clear_accum:
                         T.clear(C_buf)
 
-                    pkg0 = SM120BlockScaledOperandPackage(
-                        mma_emitter,
-                        A_local_0,
-                        B_local_0,
+                    mma_emitter.ldmatrix_a(A_local_0, A_region, 0)
+                    mma_emitter.ldmatrix_b(B_local_0, B_region, 0)
+                    mma_emitter.ldscale_fragment(
                         SFA_local_0,
                         SFB_local_0,
                         SFB_rep_local_0,
-                        A_region,
-                        B_region,
-                        C_buf,
                         self.SFARegion,
                         self.SFBRegion,
-                        self.sf_k_start,
-                        int(sf_a_granularity_k),
-                        int(sf_b_granularity_k),
-                        sf_layout,
+                        ki=0,
+                        k_start=self.sf_k_start,
+                        sf_a_granularity_k=int(sf_a_granularity_k),
+                        sf_b_granularity_k=int(sf_b_granularity_k),
+                        sf_layout=sf_layout,
                     )
-                    pkg1 = SM120BlockScaledOperandPackage(
-                        mma_emitter,
-                        A_local_1,
-                        B_local_1,
+                    mma_emitter.ldmatrix_a(A_local_1, A_region, 1)
+                    mma_emitter.ldmatrix_b(B_local_1, B_region, 1)
+                    mma_emitter.ldscale_fragment(
                         SFA_local_1,
                         SFB_local_1,
                         SFB_rep_local_1,
-                        A_region,
-                        B_region,
-                        C_buf,
                         self.SFARegion,
                         self.SFBRegion,
-                        self.sf_k_start,
-                        int(sf_a_granularity_k),
-                        int(sf_b_granularity_k),
-                        sf_layout,
+                        ki=1,
+                        k_start=self.sf_k_start,
+                        sf_a_granularity_k=int(sf_a_granularity_k),
+                        sf_b_granularity_k=int(sf_b_granularity_k),
+                        sf_layout=sf_layout,
                     )
-
-                    pkg0.copy_kblock(0)
-                    pkg1.copy_kblock(1)
                     for i in T.unroll(warp_rows):
                         for j in T.unroll(warp_cols):
-                            pkg0.gemm_atom(i, j)
-                    pkg0.copy_kblock(2)
-                    for i in T.unroll(warp_rows):
-                        for j in T.unroll(warp_cols):
-                            pkg1.gemm_atom(i, j)
-                    pkg1.copy_kblock(3)
-                    for i in T.unroll(warp_rows):
-                        for j in T.unroll(warp_cols):
-                            pkg0.gemm_atom(i, j)
-                    for i in T.unroll(warp_rows):
-                        for j in T.unroll(warp_cols):
-                            pkg1.gemm_atom(i, j)
+                            mma_emitter.mma_full_b_atom_with_scale_fragments(
+                                A_local_0,
+                                B_local_0,
+                                C_buf,
+                                SFA_local_0,
+                                SFB_local_0,
+                                SFB_rep_local_0,
+                                i,
+                                j,
+                            )
 
-                return _Simplify(_gemm_ss_blockscaled_sm120_pkg_atom_neutral, inline_let=True)
-
-            if micro_pipeline == "k_static_scale_prefetch":
-                num_k_blocks = int(block_K // micro_size_k)
-                if num_k_blocks != 4:
-                    raise ValueError(f"micro_pipeline='{micro_pipeline}' currently requires block_K / micro_size_k == 4")
-
-                @T.prim_func
-                def _gemm_ss_blockscaled_k_static_scale_prefetch() -> None:
-                    A_local_0 = T.alloc_local((warp_rows * local_size_a), a_dtype)
-                    A_local_1 = T.alloc_local((warp_rows * local_size_a), a_dtype)
-                    B_local_0 = T.alloc_local((warp_cols * local_size_b), b_dtype)
-                    B_local_1 = T.alloc_local((warp_cols * local_size_b), b_dtype)
-                    SFA_local_0 = T.alloc_local((warp_rows), "uint32")
-                    SFA_local_1 = T.alloc_local((warp_rows), "uint32")
-                    SFB_local_0 = T.alloc_local((warp_cols), "uint32")
-                    SFB_local_1 = T.alloc_local((warp_cols), "uint32")
-                    SFB_rep_local_0 = T.alloc_local((warp_cols), "uint32")
-                    SFB_rep_local_1 = T.alloc_local((warp_cols), "uint32")
-                    if clear_accum:
-                        T.clear(C_buf)
-
-                    pkg0 = SM120BlockScaledOperandPackage(
-                        mma_emitter,
-                        A_local_0,
-                        B_local_0,
+                    mma_emitter.ldmatrix_a(A_local_0, A_region, 2)
+                    mma_emitter.ldmatrix_b(B_local_0, B_region, 2)
+                    mma_emitter.ldscale_fragment(
                         SFA_local_0,
                         SFB_local_0,
                         SFB_rep_local_0,
-                        A_region,
-                        B_region,
-                        C_buf,
                         self.SFARegion,
                         self.SFBRegion,
-                        self.sf_k_start,
-                        int(sf_a_granularity_k),
-                        int(sf_b_granularity_k),
-                        sf_layout,
+                        ki=2,
+                        k_start=self.sf_k_start,
+                        sf_a_granularity_k=int(sf_a_granularity_k),
+                        sf_b_granularity_k=int(sf_b_granularity_k),
+                        sf_layout=sf_layout,
                     )
-                    pkg1 = SM120BlockScaledOperandPackage(
-                        mma_emitter,
-                        A_local_1,
-                        B_local_1,
+                    for i in T.unroll(warp_rows):
+                        for j in T.unroll(warp_cols):
+                            mma_emitter.mma_full_b_atom_with_scale_fragments(
+                                A_local_1,
+                                B_local_1,
+                                C_buf,
+                                SFA_local_1,
+                                SFB_local_1,
+                                SFB_rep_local_1,
+                                i,
+                                j,
+                            )
+
+                    mma_emitter.ldmatrix_a(A_local_1, A_region, 3)
+                    mma_emitter.ldmatrix_b(B_local_1, B_region, 3)
+                    mma_emitter.ldscale_fragment(
                         SFA_local_1,
                         SFB_local_1,
                         SFB_rep_local_1,
-                        A_region,
-                        B_region,
-                        C_buf,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        self.sf_k_start,
-                        int(sf_a_granularity_k),
-                        int(sf_b_granularity_k),
-                        sf_layout,
-                    )
-
-                    pkg0.copy_kblock(0)
-                    pkg1.copy_kblock(1)
-                    pkg0.gemm_kblock()
-                    pkg0.copy_kblock(2)
-                    pkg1.gemm_kblock()
-                    pkg1.copy_kblock(3)
-                    pkg0.gemm_kblock()
-                    pkg1.gemm_kblock()
-
-                return _Simplify(_gemm_ss_blockscaled_k_static_scale_prefetch, inline_let=True)
-
-            if micro_pipeline in ("k_static_scale_stream", "k_static_scale_stream_cutlass_order"):
-                num_k_blocks = int(block_K // micro_size_k)
-                if num_k_blocks != 4:
-                    raise ValueError(f"micro_pipeline={micro_pipeline!r} currently requires block_K / micro_size_k == 4")
-                issue_mma = (
-                    mma_emitter.mma_with_prefetched_scales_cutlass_order
-                    if micro_pipeline == "k_static_scale_stream_cutlass_order"
-                    else mma_emitter.mma_with_scale_fragments
-                )
-
-                @T.prim_func
-                def _gemm_ss_blockscaled_k_static_scale_stream() -> None:
-                    A_local_0 = T.alloc_local((warp_rows * local_size_a), a_dtype)
-                    A_local_1 = T.alloc_local((warp_rows * local_size_a), a_dtype)
-                    B_local_0 = T.alloc_local((warp_cols * local_size_b), b_dtype)
-                    B_local_1 = T.alloc_local((warp_cols * local_size_b), b_dtype)
-                    SFA_local = T.alloc_local((warp_rows), "uint32")
-                    SFB_local = T.alloc_local((warp_cols), "uint32")
-                    SFB_rep_local = T.alloc_local((warp_cols), "uint32")
-                    if clear_accum:
-                        T.clear(C_buf)
-
-                    mma_emitter.ldmatrix_a(A_local_0, A_region, 0)
-                    mma_emitter.ldmatrix_b(B_local_0, B_region, 0)
-                    mma_emitter.ldmatrix_a(A_local_1, A_region, 1)
-                    mma_emitter.ldmatrix_b(B_local_1, B_region, 1)
-                    mma_emitter.ldscale_fragment(
-                        SFA_local,
-                        SFB_local,
-                        SFB_rep_local,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=0,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-                    issue_mma(
-                        A_local_0,
-                        B_local_0,
-                        C_buf,
-                        SFA_local,
-                        SFB_local,
-                        SFB_rep_local,
-                    )
-                    mma_emitter.ldmatrix_a(A_local_0, A_region, 2)
-                    mma_emitter.ldmatrix_b(B_local_0, B_region, 2)
-                    mma_emitter.ldscale_fragment(
-                        SFA_local,
-                        SFB_local,
-                        SFB_rep_local,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=1,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-                    issue_mma(
-                        A_local_1,
-                        B_local_1,
-                        C_buf,
-                        SFA_local,
-                        SFB_local,
-                        SFB_rep_local,
-                    )
-                    mma_emitter.ldmatrix_a(A_local_1, A_region, 3)
-                    mma_emitter.ldmatrix_b(B_local_1, B_region, 3)
-                    mma_emitter.ldscale_fragment(
-                        SFA_local,
-                        SFB_local,
-                        SFB_rep_local,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=2,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-                    issue_mma(
-                        A_local_0,
-                        B_local_0,
-                        C_buf,
-                        SFA_local,
-                        SFB_local,
-                        SFB_rep_local,
-                    )
-                    mma_emitter.ldscale_fragment(
-                        SFA_local,
-                        SFB_local,
-                        SFB_rep_local,
                         self.SFARegion,
                         self.SFBRegion,
                         ki=3,
@@ -1336,202 +259,32 @@ class GemmMMA(GemmBase):
                         sf_b_granularity_k=int(sf_b_granularity_k),
                         sf_layout=sf_layout,
                     )
-                    issue_mma(
-                        A_local_1,
-                        B_local_1,
-                        C_buf,
-                        SFA_local,
-                        SFB_local,
-                        SFB_rep_local,
-                    )
+                    for i in T.unroll(warp_rows):
+                        for j in T.unroll(warp_cols):
+                            mma_emitter.mma_full_b_atom_with_scale_fragments(
+                                A_local_0,
+                                B_local_0,
+                                C_buf,
+                                SFA_local_0,
+                                SFB_local_0,
+                                SFB_rep_local_0,
+                                i,
+                                j,
+                            )
+                    for i in T.unroll(warp_rows):
+                        for j in T.unroll(warp_cols):
+                            mma_emitter.mma_full_b_atom_with_scale_fragments(
+                                A_local_1,
+                                B_local_1,
+                                C_buf,
+                                SFA_local_1,
+                                SFB_local_1,
+                                SFB_rep_local_1,
+                                i,
+                                j,
+                            )
 
-                return _Simplify(_gemm_ss_blockscaled_k_static_scale_stream, inline_let=True)
-
-            if micro_pipeline == "k_static_b_all_prefetch_scale_stream":
-                num_k_blocks = int(block_K // micro_size_k)
-                if num_k_blocks != 4:
-                    raise ValueError("micro_pipeline='k_static_b_all_prefetch_scale_stream' currently requires block_K / micro_size_k == 4")
-
-                @T.prim_func
-                def _gemm_ss_blockscaled_k_static_b_all_prefetch_scale_stream() -> None:
-                    A_local_0 = T.alloc_local((warp_rows * local_size_a), a_dtype)
-                    A_local_1 = T.alloc_local((warp_rows * local_size_a), a_dtype)
-                    B_local_0 = T.alloc_local((warp_cols * local_size_b), b_dtype)
-                    B_local_1 = T.alloc_local((warp_cols * local_size_b), b_dtype)
-                    B_local_2 = T.alloc_local((warp_cols * local_size_b), b_dtype)
-                    B_local_3 = T.alloc_local((warp_cols * local_size_b), b_dtype)
-                    SFA_local = T.alloc_local((warp_rows), "uint32")
-                    SFB_local = T.alloc_local((warp_cols), "uint32")
-                    SFB_rep_local = T.alloc_local((warp_cols), "uint32")
-                    if clear_accum:
-                        T.clear(C_buf)
-
-                    mma_emitter.ldmatrix_a(A_local_0, A_region, 0)
-                    mma_emitter.ldmatrix_b(B_local_0, B_region, 0)
-                    mma_emitter.ldmatrix_a(A_local_1, A_region, 1)
-                    mma_emitter.ldmatrix_b(B_local_1, B_region, 1)
-                    mma_emitter.ldmatrix_b(B_local_2, B_region, 2)
-                    mma_emitter.ldmatrix_b(B_local_3, B_region, 3)
-                    mma_emitter.ldscale_fragment(
-                        SFA_local,
-                        SFB_local,
-                        SFB_rep_local,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=0,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-                    mma_emitter.mma_with_scale_fragments(
-                        A_local_0,
-                        B_local_0,
-                        C_buf,
-                        SFA_local,
-                        SFB_local,
-                        SFB_rep_local,
-                    )
-                    mma_emitter.ldmatrix_a(A_local_0, A_region, 2)
-                    mma_emitter.ldscale_fragment(
-                        SFA_local,
-                        SFB_local,
-                        SFB_rep_local,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=1,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-                    mma_emitter.mma_with_scale_fragments(
-                        A_local_1,
-                        B_local_1,
-                        C_buf,
-                        SFA_local,
-                        SFB_local,
-                        SFB_rep_local,
-                    )
-                    mma_emitter.ldmatrix_a(A_local_1, A_region, 3)
-                    mma_emitter.ldscale_fragment(
-                        SFA_local,
-                        SFB_local,
-                        SFB_rep_local,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=2,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-                    mma_emitter.mma_with_scale_fragments(
-                        A_local_0,
-                        B_local_2,
-                        C_buf,
-                        SFA_local,
-                        SFB_local,
-                        SFB_rep_local,
-                    )
-                    mma_emitter.ldscale_fragment(
-                        SFA_local,
-                        SFB_local,
-                        SFB_rep_local,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=3,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-                    mma_emitter.mma_with_scale_fragments(
-                        A_local_1,
-                        B_local_3,
-                        C_buf,
-                        SFA_local,
-                        SFB_local,
-                        SFB_rep_local,
-                    )
-
-                return _Simplify(_gemm_ss_blockscaled_k_static_b_all_prefetch_scale_stream, inline_let=True)
-
-            if micro_pipeline == "k_static":
-                num_k_blocks = int(block_K // micro_size_k)
-                if num_k_blocks != 4:
-                    raise ValueError("micro_pipeline='k_static' currently requires block_K / micro_size_k == 4")
-
-                @T.prim_func
-                def _gemm_ss_blockscaled_k_static() -> None:
-                    A_local_0 = T.alloc_local((warp_rows * local_size_a), a_dtype)
-                    A_local_1 = T.alloc_local((warp_rows * local_size_a), a_dtype)
-                    B_local_0 = T.alloc_local((warp_cols * local_size_b), b_dtype)
-                    B_local_1 = T.alloc_local((warp_cols * local_size_b), b_dtype)
-                    if clear_accum:
-                        T.clear(C_buf)
-
-                    mma_emitter.ldmatrix_a(A_local_0, A_region, 0)
-                    mma_emitter.ldmatrix_b(B_local_0, B_region, 0)
-                    mma_emitter.ldmatrix_a(A_local_1, A_region, 1)
-                    mma_emitter.ldmatrix_b(B_local_1, B_region, 1)
-                    mma_emitter.mma(
-                        A_local_0,
-                        B_local_0,
-                        C_buf,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=0,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-                    mma_emitter.ldmatrix_a(A_local_0, A_region, 2)
-                    mma_emitter.ldmatrix_b(B_local_0, B_region, 2)
-                    mma_emitter.mma(
-                        A_local_1,
-                        B_local_1,
-                        C_buf,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=1,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-                    mma_emitter.ldmatrix_a(A_local_1, A_region, 3)
-                    mma_emitter.ldmatrix_b(B_local_1, B_region, 3)
-                    mma_emitter.mma(
-                        A_local_0,
-                        B_local_0,
-                        C_buf,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=2,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-                    mma_emitter.mma(
-                        A_local_1,
-                        B_local_1,
-                        C_buf,
-                        self.SFARegion,
-                        self.SFBRegion,
-                        ki=3,
-                        k_start=self.sf_k_start,
-                        sf_a_granularity_k=int(sf_a_granularity_k),
-                        sf_b_granularity_k=int(sf_b_granularity_k),
-                        sf_layout=sf_layout,
-                    )
-
-                return _Simplify(_gemm_ss_blockscaled_k_static, inline_let=True)
-
-            if micro_pipeline is not None:
-                raise ValueError(f"Unsupported block-scaled micro_pipeline: {micro_pipeline!r}")
+                return _Simplify(_gemm_ss_blockscaled_static_kblock, inline_let=True)
 
             @T.prim_func
             def _gemm_ss_blockscaled() -> None:

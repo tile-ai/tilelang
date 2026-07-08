@@ -82,8 +82,8 @@ def _make_swizzle_layout(shared_buf):
     return T.Layout(shape, transform_func)
 
 
-def test_sm120_mma_blockscaled_public_api_is_unified():
-    assert hasattr(T, "sm120_mma_blockscaled")
+def test_sm120_mma_blockscaled_strategy_helpers_are_not_public_api():
+    assert not hasattr(T, "sm120_mma_blockscaled")
     assert not hasattr(T, "sm120_mma_blockscaled_kblock_fulltile")
     assert not hasattr(T, "sm120_mma_blockscaled_kblock_fulltile_ab_owner_wide")
     assert not hasattr(
@@ -105,7 +105,6 @@ def _make_nvf4_matmul_codegen_kernel(
     block_col_warps=2,
     warp_row_tiles=32,
     warp_col_tiles=32,
-    micro_pipeline=None,
     sf_layout=None,
 ):
     assert K % 64 == 0
@@ -177,7 +176,6 @@ def _make_nvf4_matmul_codegen_kernel(
                     k_start=ko * block_K,
                     sf_a_granularity_k=16,
                     sf_b_granularity_k=16,
-                    micro_pipeline=micro_pipeline,
                     sf_layout=sf_layout,
                 )
 
@@ -561,25 +559,6 @@ def test_nvf4_mma_block_scale_codegen(K):
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(12, 0)
-def test_nvf4_mma_block_scale_rejects_unknown_micro_pipeline():
-    with pytest.raises(ValueError, match="Unsupported block-scaled micro_pipeline"):
-        tilelang.compile(
-            _make_nvf4_matmul_codegen_kernel(
-                128,
-                128,
-                256,
-                warp_row_tiles=64,
-                warp_col_tiles=64,
-                micro_pipeline="sm120_backend_kblock_fulltile_unknown",
-                sf_layout="blockscaled_chunk_kmajor",
-            ),
-            target="cuda",
-            out_idx=[4],
-        )
-
-
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(12, 0)
 def test_nvf4_mma_block_scale_rejects_legacy_cutlass_128x4_layout_alias():
     with pytest.raises(ValueError, match="Unsupported SM120 scale layout: cutlass_128x4"):
         tilelang.compile(
@@ -589,7 +568,6 @@ def test_nvf4_mma_block_scale_rejects_legacy_cutlass_128x4_layout_alias():
                 256,
                 warp_row_tiles=64,
                 warp_col_tiles=64,
-                micro_pipeline="sm120_backend_kblock_fulltile_package_pingpong",
                 sf_layout="cutlass_128x4",
             ),
             target="cuda",
@@ -607,7 +585,6 @@ def test_nvf4_mma_block_scale_package_pingpong_contract_lowers_fulltile():
             256,
             warp_row_tiles=64,
             warp_col_tiles=64,
-            micro_pipeline="sm120_backend_kblock_fulltile_package_pingpong",
             sf_layout="blockscaled_chunk_kmajor",
         ),
         target="cuda",

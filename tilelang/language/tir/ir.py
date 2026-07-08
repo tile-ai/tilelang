@@ -296,7 +296,6 @@ call_pure_extern = _dtype_forward(_tir_op.call_pure_extern)
 ptx_mma = _dtype_forward(_tir_op.ptx_mma)
 ptx_mma_sp = _dtype_forward(_tir_op.ptx_mma_sp)
 ptx_mma_block_scale = _dtype_forward(_tir_op.ptx_mma_block_scale)
-sm120_mma_blockscaled = _tir_op.sm120_mma_blockscaled
 ptx_wgmma_ss = _dtype_forward(_tir_op.ptx_wgmma_ss)
 ptx_wgmma_rs = _dtype_forward(_tir_op.ptx_wgmma_rs)
 ptx_wgmma_sp_ss = _dtype_forward(_tir_op.ptx_wgmma_sp_ss)

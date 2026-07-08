@@ -23,7 +23,6 @@ def test_sm120_nvfp4_example_cli_keeps_internal_strategy_fixed(monkeypatch):
     assert not hasattr(args, "scale_storage_layout")
     assert not hasattr(args, "manual_ws2")
 
-    assert module._SM120_MICRO_PIPELINE == "sm120_backend_kblock_fulltile_package_pingpong"
     assert module._SM120_SCALE_LAYOUT == "blockscaled_chunk_kmajor"
 
 

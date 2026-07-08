@@ -456,7 +456,6 @@ def mma_gemm_blockscaled(
     k_start: int | tirx.PrimExpr,
     sf_a_granularity_k: int,
     sf_b_granularity_k: int,
-    micro_pipeline: str | None = None,
     sf_layout: str | None = None,
 ) -> tirx.PrimExpr:
     """Explicit SM120 warp-level block-scaled MMA GEMM.
@@ -476,8 +475,6 @@ def mma_gemm_blockscaled(
         "sf_a_granularity_k": int(sf_a_granularity_k),
         "sf_b_granularity_k": int(sf_b_granularity_k),
     }
-    if micro_pipeline is not None:
-        ann["micro_pipeline"] = micro_pipeline
     if sf_layout is not None:
         ann["sf_layout"] = sf_layout
 
