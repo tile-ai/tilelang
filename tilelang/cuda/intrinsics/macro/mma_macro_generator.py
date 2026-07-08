@@ -85,7 +85,7 @@ class SM120BlockScaledFullTilePackageContract:
     @classmethod
     def for_package_pingpong(
         cls,
-        emitter: TensorCoreIntrinEmitterWithBlockScale,
+        emitter: TensorCoreIntrinEmitter,
         *,
         sf_layout: str,
         kblocks: int = 4,
@@ -279,7 +279,7 @@ def _get_block_scale_mma_config(kind: str, scale_vec_size: int, scale_type: str)
     return _SUPPORTED_BLOCK_SCALE_MMA_CONFIGS[key]
 
 
-class TensorCoreIntrinEmitter:
+class _TensorCoreIntrinEmitterBase:
     """
     To eliminate Python syntax within TIR Macro.
     """
@@ -1143,7 +1143,7 @@ class TensorCoreIntrinEmitter:
         raise ValueError(f"Unsupported argument type for BufferRegion: {type(obj)}")
 
 
-class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
+class TensorCoreIntrinEmitterWithLadderTransform(_TensorCoreIntrinEmitterBase):
     """
     To eliminate Python syntax within TIR Macro.
     With Ladder Transform Plugin.
@@ -1474,51 +1474,55 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
         return _warp_mma(A_local_buf, B_local_buf, C_local_buf)
 
 
-class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
-    """SM120 warp-level block-scale MMA emitter.
+class TensorCoreIntrinEmitter(_TensorCoreIntrinEmitterBase):
+    """Warp-level MMA emitter, with optional SM120 block-scale mode.
 
-    The emitter keeps scale-factor storage explicit, matching TileLang's
-    TCGEN05 block-scaled style while targeting warp-level ``mma.sync``.
+    The block-scale mode keeps scale-factor storage explicit, matching
+    TileLang's TCGEN05 block-scaled style while targeting warp-level
+    ``mma.sync``.
     """
 
     def __init__(
         self,
-        a_dtype: str = T.float4_e2m1fn,
-        b_dtype: str = T.float4_e2m1fn,
-        accum_dtype: str = T.float32,
+        a_dtype: str = T.float16,
+        b_dtype: str = T.float16,
+        accum_dtype: str = T.float16,
         a_transposed: bool = False,
         b_transposed: bool = False,
         block_row_warps: int = 2,
         block_col_warps: int = 2,
-        warp_row_tiles: int = 32,
-        warp_col_tiles: int = 32,
-        chunk: int = 64,
+        warp_row_tiles: int = 8,
+        warp_col_tiles: int = 8,
+        chunk: int = 16,
         reduce_k: int = 1,
         num_elems_per_byte: int = 1,
         is_m_first: bool | None = False,
         thread_var: Var | None = None,
+        is_blockscaled: bool = False,
         kind: str = "mxf4nvf4",
         scale_vec_size: int = 4,
         stype: str = "ue4m3",
     ):
-        self.block_scale_config = _get_block_scale_mma_config(kind, scale_vec_size, stype)
-        a_dtype_abbrv = self._get_dtype_abbrv(str(a_dtype))
-        b_dtype_abbrv = self._get_dtype_abbrv(str(b_dtype))
-        if (
-            a_dtype_abbrv != self.block_scale_config.a_dtype_abbrv
-            or b_dtype_abbrv != self.block_scale_config.b_dtype_abbrv
-            or str(accum_dtype) != self.block_scale_config.accum_dtype
-        ):
-            raise ValueError(
-                f"{self.block_scale_config.kind} expects a_dtype={self.block_scale_config.a_dtype_abbrv}, "
-                f"b_dtype={self.block_scale_config.b_dtype_abbrv}, "
-                f"accum_dtype={self.block_scale_config.accum_dtype}; "
-                f"got a_dtype={a_dtype}, b_dtype={b_dtype}, accum_dtype={accum_dtype}"
-            )
-        self.kind = self.block_scale_config.kind
-        self.scale_vec_size = self.block_scale_config.scale_vec_size
-        self.stype = self.block_scale_config.scale_type
-        self.sf_vec_size = self.block_scale_config.sf_vec_size
+        self.is_blockscaled = is_blockscaled
+        if is_blockscaled:
+            self.block_scale_config = _get_block_scale_mma_config(kind, scale_vec_size, stype)
+            a_dtype_abbrv = self._get_dtype_abbrv(str(a_dtype))
+            b_dtype_abbrv = self._get_dtype_abbrv(str(b_dtype))
+            if (
+                a_dtype_abbrv != self.block_scale_config.a_dtype_abbrv
+                or b_dtype_abbrv != self.block_scale_config.b_dtype_abbrv
+                or str(accum_dtype) != self.block_scale_config.accum_dtype
+            ):
+                raise ValueError(
+                    f"{self.block_scale_config.kind} expects a_dtype={self.block_scale_config.a_dtype_abbrv}, "
+                    f"b_dtype={self.block_scale_config.b_dtype_abbrv}, "
+                    f"accum_dtype={self.block_scale_config.accum_dtype}; "
+                    f"got a_dtype={a_dtype}, b_dtype={b_dtype}, accum_dtype={accum_dtype}"
+                )
+            self.kind = self.block_scale_config.kind
+            self.scale_vec_size = self.block_scale_config.scale_vec_size
+            self.stype = self.block_scale_config.scale_type
+            self.sf_vec_size = self.block_scale_config.sf_vec_size
         super().__init__(
             a_dtype=a_dtype,
             b_dtype=b_dtype,
@@ -1537,17 +1541,28 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
         )
 
     def _initialize_k_dim(self, a_dtype=T.float16):
-        self.k_dim = self.block_scale_config.atom_k
+        if self.is_blockscaled:
+            self.k_dim = self.block_scale_config.atom_k
+        else:
+            super()._initialize_k_dim(a_dtype)
 
     def _initialize_abbrev(self, a_dtype, b_dtype, accum_dtype):
-        self.a_dtype_abbrv = self.block_scale_config.a_dtype_abbrv
-        self.b_dtype_abbrv = self.block_scale_config.b_dtype_abbrv
-        self.accum_dtype_abbrv = self._get_dtype_abbrv(accum_dtype)
+        if self.is_blockscaled:
+            self.a_dtype_abbrv = self.block_scale_config.a_dtype_abbrv
+            self.b_dtype_abbrv = self.block_scale_config.b_dtype_abbrv
+            self.accum_dtype_abbrv = self._get_dtype_abbrv(accum_dtype)
+        else:
+            super()._initialize_abbrev(a_dtype, b_dtype, accum_dtype)
 
     def _initialize_mma_prefix(self, k_dim: int = 16):
-        self.mma_prefix = self.block_scale_config.mma_prefix
+        if self.is_blockscaled:
+            self.mma_prefix = self.block_scale_config.mma_prefix
+        else:
+            super()._initialize_mma_prefix(k_dim)
 
     def ldmatrix_a(self, A_local_buf: Buffer, A_shared_buf: Buffer | BufferRegion, ki: PrimExpr, rk: PrimExpr | None = 0):
+        if not self.is_blockscaled:
+            return super().ldmatrix_a(A_local_buf, A_shared_buf, ki, rk)
         warp_row_tiles = self.warp_row_tiles
         warp_rows = self.warp_rows
         chunk = self.chunk
@@ -1596,6 +1611,8 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
         return _warp_ld_a_e2m1(A_local_buf, A_region, ki, thread_binding, rk)
 
     def ldmatrix_b(self, B_local_buf: Buffer, B_shared_buf: Buffer | BufferRegion, ki: PrimExpr, rk: PrimExpr | None = 0):
+        if not self.is_blockscaled:
+            return super().ldmatrix_b(B_local_buf, B_shared_buf, ki, rk)
         warp_col_tiles = self.warp_col_tiles
         warp_cols = self.warp_cols
         chunk = self.chunk
@@ -1745,14 +1762,20 @@ class TensorCoreIntrinEmitterWithBlockScale(TensorCoreIntrinEmitter):
         A_local_buf,
         B_local_buf,
         C_local_buf,
-        SFA_buf,
-        SFB_buf,
+        SFA_buf=None,
+        SFB_buf=None,
         ki: PrimExpr = 0,
         k_start: PrimExpr = 0,
         sf_a_granularity_k: int | None = None,
         sf_b_granularity_k: int | None = None,
         sf_layout: str = "rowmajor",
     ):
+        if not self.is_blockscaled:
+            if SFA_buf is not None or SFB_buf is not None:
+                raise ValueError("Scale buffers require TensorCoreIntrinEmitter block-scale mode")
+            return super().mma(A_local_buf, B_local_buf, C_local_buf)
+        if SFA_buf is None or SFB_buf is None:
+            raise ValueError("Block-scaled MMA requires SFA and SFB buffers")
         warp_rows = self.warp_rows
         warp_cols = self.warp_cols
         local_size_a = self.local_size_a
@@ -3904,7 +3927,7 @@ class SM120BlockScaledOperandPackage:
 
     def __init__(
         self,
-        mma_emitter: TensorCoreIntrinEmitterWithBlockScale,
+        mma_emitter: TensorCoreIntrinEmitter,
         A_fragment_buf,
         B_fragment_buf,
         SFA_fragment_buf,

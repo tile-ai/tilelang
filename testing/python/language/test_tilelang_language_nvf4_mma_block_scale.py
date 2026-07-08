@@ -6,7 +6,7 @@ import tilelang.testing
 from tilelang import tvm
 from tilelang.cuda.intrinsics.layout.mma_layout import mma_load_a_32x32_to_shared_16x64_layout
 from tilelang.cuda.intrinsics.macro.mma_macro_generator import SM120BlockScaledFullTilePackageContract
-from tilelang.intrinsics import TensorCoreIntrinEmitterWithBlockScale, get_swizzle_layout
+from tilelang.intrinsics import TensorCoreIntrinEmitter, get_swizzle_layout
 from tilelang.quantize import blockscaled_chunk_kmajor_word_offset
 from tilelang.transform import simplify_prim_func
 
@@ -31,8 +31,18 @@ _FP4_E2M1_VALUES = (
 )
 
 
+def _make_blockscale_emitter(**kwargs):
+    return TensorCoreIntrinEmitter(
+        is_blockscaled=True,
+        kind="mxf4nvf4",
+        scale_vec_size=4,
+        stype="ue4m3",
+        **kwargs,
+    )
+
+
 def _make_sm120_fulltile_contract():
-    emitter = TensorCoreIntrinEmitterWithBlockScale(
+    emitter = _make_blockscale_emitter(
         a_dtype=T.float4_e2m1fn,
         b_dtype=T.float4_e2m1fn,
         accum_dtype=T.float32,
@@ -45,9 +55,6 @@ def _make_sm120_fulltile_contract():
         chunk=256,
         reduce_k=1,
         num_elems_per_byte=2,
-        kind="mxf4nvf4",
-        scale_vec_size=4,
-        stype="ue4m3",
     )
     return SM120BlockScaledFullTilePackageContract.for_package_pingpong(
         emitter,
@@ -270,8 +277,8 @@ def test_nvf4_mma_block_scale_fragment_layouts_match_cute():
 
 
 def test_nvf4_mma_block_scale_lane_scale_mapping_matches_cute():
-    sfa_rows = [TensorCoreIntrinEmitterWithBlockScale._sfa_row_in_atom(tx) for tx in range(32)]
-    sfb_cols = [TensorCoreIntrinEmitterWithBlockScale._sfb_col_in_atom(tx) for tx in range(32)]
+    sfa_rows = [TensorCoreIntrinEmitter._sfa_row_in_atom(tx) for tx in range(32)]
+    sfb_cols = [TensorCoreIntrinEmitter._sfb_col_in_atom(tx) for tx in range(32)]
 
     assert sfa_rows == [
         0,
@@ -353,7 +360,8 @@ def test_nvf4_mma_block_scale_lane_scale_mapping_matches_cute():
 )
 def test_nvf4_mma_block_scale_rejects_unsupported_configs(kwargs):
     with pytest.raises(ValueError, match="Unsupported SM120 block-scale MMA config"):
-        TensorCoreIntrinEmitterWithBlockScale(
+        TensorCoreIntrinEmitter(
+            is_blockscaled=True,
             a_dtype=T.float4_e2m1fn,
             b_dtype=T.float4_e2m1fn,
             accum_dtype=T.float32,
@@ -378,7 +386,8 @@ def test_nvf4_mma_block_scale_rejects_unsupported_configs(kwargs):
 )
 def test_nvf4_mma_block_scale_rejects_incompatible_dtypes(dtype_kwargs):
     with pytest.raises(ValueError, match="mxf4nvf4 expects"):
-        TensorCoreIntrinEmitterWithBlockScale(
+        TensorCoreIntrinEmitter(
+            is_blockscaled=True,
             a_transposed=False,
             b_transposed=True,
             block_row_warps=2,
@@ -490,7 +499,7 @@ def test_sm120_fulltile_package_contract_describes_omma_sf_issue_schedule():
 
 
 def test_sm120_fulltile_package_contract_rejects_shape_drift():
-    emitter = TensorCoreIntrinEmitterWithBlockScale(
+    emitter = _make_blockscale_emitter(
         a_dtype=T.float4_e2m1fn,
         b_dtype=T.float4_e2m1fn,
         accum_dtype=T.float32,
@@ -503,9 +512,6 @@ def test_sm120_fulltile_package_contract_rejects_shape_drift():
         chunk=256,
         reduce_k=1,
         num_elems_per_byte=2,
-        kind="mxf4nvf4",
-        scale_vec_size=4,
-        stype="ue4m3",
     )
 
     with pytest.raises(ValueError, match="128x128x256"):

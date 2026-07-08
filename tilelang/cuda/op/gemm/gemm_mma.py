@@ -5,7 +5,6 @@ from tilelang.layout import make_swizzled_layout
 from tilelang.cuda.intrinsics.macro.mma_macro_generator import (
     SM120BlockScaledOperandPackage,
     TensorCoreIntrinEmitter,
-    TensorCoreIntrinEmitterWithBlockScale,
 )
 from tilelang.utils.language import is_shared, is_fragment, is_full_region
 from tilelang import tvm as tvm
@@ -41,8 +40,7 @@ class GemmMMA(GemmBase):
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
-        emitter_cls = TensorCoreIntrinEmitterWithBlockScale if self.is_blockscaled else self.intrin_emitter_cls
-        emitter = emitter_cls(
+        emitter_kwargs = dict(
             a_dtype=self.a_dtype,
             b_dtype=self.b_dtype,
             accum_dtype=self.accum_dtype,
@@ -55,6 +53,9 @@ class GemmMMA(GemmBase):
             chunk=self.chunk,
             thread_var=thread_var,
         )
+        if self.is_blockscaled:
+            emitter_kwargs["is_blockscaled"] = True
+        emitter = self.intrin_emitter_cls(**emitter_kwargs)
         return emitter
 
     def infer_layout(self, target: Target, thread_nums: int):

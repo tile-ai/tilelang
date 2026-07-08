@@ -6,7 +6,6 @@ from tilelang.cuda.intrinsics.layout.utils import (
 from tilelang.cuda.intrinsics.macro.mma_macro_generator import (
     TensorCoreIntrinEmitter,  # noqa: F401
     TensorCoreIntrinEmitterWithLadderTransform,  # noqa: F401
-    TensorCoreIntrinEmitterWithBlockScale,  # noqa: F401
 )
 
 from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import (

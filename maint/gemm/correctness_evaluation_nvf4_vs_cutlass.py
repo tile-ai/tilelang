@@ -4,7 +4,7 @@ from pathlib import Path
 import tilelang
 import tilelang.language as T
 from tilelang import tvm
-from tilelang.intrinsics import TensorCoreIntrinEmitterWithBlockScale, get_swizzle_layout
+from tilelang.intrinsics import TensorCoreIntrinEmitter, get_swizzle_layout
 from tilelang.transform import simplify_prim_func
 
 
@@ -88,7 +88,8 @@ def _make_tilelang_nvf4_kernel():
     warp_rows = warp_row_tiles // micro_size_x
     warp_cols = warp_col_tiles // micro_size_y
 
-    mma_emitter = TensorCoreIntrinEmitterWithBlockScale(
+    mma_emitter = TensorCoreIntrinEmitter(
+        is_blockscaled=True,
         a_dtype=in_dtype,
         b_dtype=in_dtype,
         accum_dtype=accum_dtype,
