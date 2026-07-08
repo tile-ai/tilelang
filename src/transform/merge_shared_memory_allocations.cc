@@ -34,7 +34,6 @@
 #include <tvm/tirx/transform.h>
 
 #include <algorithm>
-#include <cstdlib>
 #include <functional>
 #include <limits>
 #include <optional>
@@ -84,17 +83,7 @@ static DataType GetStorageSizeExprDType(const Buffer &buffer) {
   return size_dtype;
 }
 
-static bool EnableSM120CompactUnpackedFP4Shared() {
-  const char *value = std::getenv("TL_SM120_COMPACT_UNPACKED_FP4_SHARED");
-  return value != nullptr && value[0] != '\0' &&
-         !(value[0] == '0' && value[1] == '\0');
-}
-
 static int64_t GetSharedStorageBitsPerLogicalElement(DataType dtype) {
-  if (EnableSM120CompactUnpackedFP4Shared() &&
-      dtype.is_float4_e2m1_unpacked()) {
-    return 4 * dtype.lanes();
-  }
   return static_cast<int64_t>(dtype.bits()) * dtype.lanes();
 }
 

@@ -443,32 +443,9 @@ TVM_DLL const Op &ptx_wgmma_sp_rs();
 TVM_DLL const Op &ptx_mma_block_scale();
 
 /*!
- * \brief Private SM120a NVF4 full-tile K-block MMA helper.
- */
-TVM_DLL const Op &sm120_mma_blockscaled_kblock_fulltile();
-
-/*!
- * \brief Private SM120a NVF4 full-tile K-block MMA helper with backend-owned
- * scale-owner words.
- */
-TVM_DLL const Op &sm120_mma_blockscaled_kblock_fulltile_ab_owner_wide();
-
-/*!
- * \brief Private SM120a NVF4 full-tile helper with A-full/B-panel schedule and
- * backend-owned scale-owner words.
- */
-TVM_DLL const Op &
-sm120_mma_blockscaled_kblock_fulltile_afull_bpanel_owner_wide();
-
-/*!
- * \brief Private SM120a NVF4 full-tile package-lifecycle probe.
+ * \brief Private SM120a NVF4 full-tile package-lifecycle helper.
  */
 TVM_DLL const Op &sm120_mma_blockscaled_kblock_fulltile_package_pingpong();
-
-/*!
- * \brief Private SM120a NVF4 full shared-tile consumer bridge.
- */
-TVM_DLL const Op &sm120_mma_blockscaled_cute_consumer_bridge();
 
 /*!
  * \brief tvm intrinsic for tcgen05 mma shared-shared instructions.

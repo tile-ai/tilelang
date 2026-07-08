@@ -258,18 +258,8 @@ TIR_DEFINE_TL_BUILTIN(ptx_wgmma_sp_rs)
 
 TIR_DEFINE_TL_OPAQUE_BUILTIN(ptx_mma_block_scale, 21);
 
-TIR_DEFINE_TL_OPAQUE_BUILTIN(sm120_mma_blockscaled_kblock_fulltile, 23);
-
-TIR_DEFINE_TL_OPAQUE_BUILTIN(
-    sm120_mma_blockscaled_kblock_fulltile_ab_owner_wide, 13);
-
-TIR_DEFINE_TL_OPAQUE_BUILTIN(
-    sm120_mma_blockscaled_kblock_fulltile_afull_bpanel_owner_wide, 13);
-
 TIR_DEFINE_TL_OPAQUE_BUILTIN(
     sm120_mma_blockscaled_kblock_fulltile_package_pingpong, 6);
-
-TIR_DEFINE_TL_OPAQUE_BUILTIN(sm120_mma_blockscaled_cute_consumer_bridge, 7);
 
 TIR_DEFINE_TL_BUILTIN(ptx_tcgen05_mma_ss)
     .set_num_inputs(14)

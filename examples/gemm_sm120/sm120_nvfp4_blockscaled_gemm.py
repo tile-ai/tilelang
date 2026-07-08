@@ -994,7 +994,7 @@ def run_tilelang(args: argparse.Namespace) -> tuple[float, float]:
         kernel.export_sass(str(sass_path))
         kernel.compile_flags = saved_compile_flags
         print(f"TileLang SASS: {sass_path}")
-    if "sm120_mma_blockscaled_kblock_fulltile" not in source:
+    if "sm120_mma_blockscaled_kblock_fulltile_package_pingpong" not in source:
         raise RuntimeError("TileLang source did not lower to the SM120 full-tile MMA helper")
 
     if args.input_mode == "ones":
