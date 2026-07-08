@@ -41,6 +41,20 @@ def test_sm120_nvfp4_example_source_has_no_legacy_strategy_flags():
         "--scale-storage-layout",
         "--sf-layout",
         "--path",
+        "--run-cutlass",
+        "--cutlass-build-dir",
+        "--cutlass-binary",
+        "--rebuild-cutlass",
+        "--cmake",
+        "--nvcc",
     ]
     for flag in forbidden_flags:
         assert flag not in source
+
+    forbidden_harness_terms = [
+        "build_cutlass",
+        "subprocess",
+        "CMAKE_CUDA_COMPILER",
+    ]
+    for term in forbidden_harness_terms:
+        assert term not in source
