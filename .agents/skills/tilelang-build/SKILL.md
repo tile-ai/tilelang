@@ -74,7 +74,7 @@ pip install -e . -v --no-build-isolation
 Notes specific to this repo's layout:
 
 - When Python is run from the repo root, the local `./tilelang` directory is imported instead of any copy installed into `site-packages` (because the repo root is on `sys.path` ahead of `site-packages`). This is by design: `tilelang/env.py` detects a dev checkout (when `3rdparty/` is not inside the package dir) and loads native libraries from `build/lib/` and `build/tvm/`, logging `Loading tilelang libs from dev root: <repo>/build`.
-- Because of the above, an editable install and a plain `PYTHONPATH=$(pwd)` import resolve to the same on-disk `./tilelang`. Either is fine; pick based on whether you want pip to manage metadata/deps.
+- Because of the above, both approaches resolve imports to the local `./tilelang` when run from the repo root. Use `pip install -e .` when you want pip to manage package metadata/dependencies; use `PYTHONPATH=$(pwd)` only for the lighter-weight import-only workflow.
 - For pure C++ iteration (no Python metadata needed), the `cmake + PYTHONPATH` flow above is faster and avoids re-running pip entirely.
 
 ## Running Tests
