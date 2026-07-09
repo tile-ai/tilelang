@@ -75,13 +75,7 @@ _SM120_THREADS = 384
 # - the benchmark always passes this swizzled storage to the kernel; reference
 #   checking keeps the semantic row-major copy separate.
 def _device_compile_flags() -> list[str]:
-    flags = [
-        "-DTL_SM120_FULLTILE_CUTLASS_SF_BASEPTR=1",
-        # A/B are TMA-loaded into the normal packed row-major shared view.
-        # The package-pingpong helper must use the same view when constructing
-        # its lane-local operand package.
-        "-DTL_SM120_FULLTILE_PACKAGE_ROWMAJOR_VIEW=1",
-    ]
+    flags = []
     if _EARLY_BENCH_OPTIONS.maxrregcount is not None:
         if _EARLY_BENCH_OPTIONS.maxrregcount <= 0:
             raise ValueError("--maxrregcount must be positive")

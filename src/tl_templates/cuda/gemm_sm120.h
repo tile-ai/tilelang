@@ -112,64 +112,14 @@ TL_DEVICE void sm120_ldmatrix_x4_u32(void const *const smem_ptr, uint32_t &d0,
   sm120_ldmatrix_x4_u32_addr(smem_ptr_to_uint(smem_ptr), d0, d1, d2, d3);
 }
 
-// This copy atom consumes a padded/unpacked 4-bit shared layout. It matches the
-// F8F6F4/MXF-style path where FP4 nibbles are placed in 8-bit slots with p64
-// padding. Dense SM120 NVFP4/mxf4nvf4 uses packed U4 shared storage and the
-// ordinary x4.m8n8.shared.b16 ldmatrix path above.
-TL_DEVICE void sm120_ldmatrix_x4_fp4_u32_addr(uint32_t smem_int_ptr,
-                                              uint32_t &d0, uint32_t &d1,
-                                              uint32_t &d2, uint32_t &d3) {
-  asm volatile("ldmatrix.sync.aligned.m8n16.x4.shared.b8x16.b4x16_p64 "
-               "{%0, %1, %2, %3}, [%4];\n"
-               : "=r"(d0), "=r"(d1), "=r"(d2), "=r"(d3)
-               : "r"(smem_int_ptr));
-#if !defined(TL_SM120_FULLTILE_FP4_LDSM_NO_SHIFT)
-  d0 <<= 2;
-  d1 <<= 2;
-  d2 <<= 2;
-  d3 <<= 2;
-#endif
-}
-
-TL_DEVICE void sm120_ldmatrix_x4_fp4_u32(void const *const smem_ptr,
-                                         uint32_t &d0, uint32_t &d1,
-                                         uint32_t &d2, uint32_t &d3) {
-  sm120_ldmatrix_x4_fp4_u32_addr(smem_ptr_to_uint(smem_ptr), d0, d1, d2, d3);
-}
-
-TL_DEVICE void sm120_ldmatrix_x4_blockscaled_operand_addr(uint32_t smem_int_ptr,
-                                                          uint32_t &d0,
-                                                          uint32_t &d1,
-                                                          uint32_t &d2,
-                                                          uint32_t &d3) {
-#if defined(TL_SM120_FULLTILE_FP4_LDSM)
-  sm120_ldmatrix_x4_fp4_u32_addr(smem_int_ptr, d0, d1, d2, d3);
-#else
-  sm120_ldmatrix_x4_u32_addr(smem_int_ptr, d0, d1, d2, d3);
-#if defined(TL_SM120_FULLTILE_FP4_REG_SHIFT)
-  d0 <<= 2;
-  d1 <<= 2;
-  d2 <<= 2;
-  d3 <<= 2;
-#endif
-#endif
-}
-
+// Dense SM120 NVFP4/mxf4nvf4 uses packed U4 shared storage, so operands are
+// fetched with the ordinary x4.m8n8.shared.b16 ldmatrix path above (no
+// b4x16_p64 unpacked-FP4 variant and no post-load nibble shift).
 TL_DEVICE void sm120_ldmatrix_x4_blockscaled_operand(void const *const smem_ptr,
                                                      uint32_t &d0, uint32_t &d1,
                                                      uint32_t &d2,
                                                      uint32_t &d3) {
-#if defined(TL_SM120_FULLTILE_FP4_LDSM)
-  sm120_ldmatrix_x4_fp4_u32(smem_ptr, d0, d1, d2, d3);
-#else
   sm120_ldmatrix_x4_u32(smem_ptr, d0, d1, d2, d3);
-#if defined(TL_SM120_FULLTILE_FP4_REG_SHIFT)
-  d0 <<= 2;
-  d1 <<= 2;
-  d2 <<= 2;
-  d3 <<= 2;
-#endif
-#endif
 }
 
 // SM120a NVF4 block-scaled warp MMA:
@@ -256,8 +206,8 @@ TL_DEVICE void sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3(
       scale_a_byte_id, scale_a_thread_id, scale_b_byte_id, scale_b_thread_id);
 }
 
-TL_DEVICE uint32_t sm120_fulltile_compact_k_swizzle_offset(uint32_t tx,
-                                                           int k_block_idx) {
+TL_DEVICE uint32_t sm120_fulltile_k_swizzle_offset(uint32_t tx,
+                                                   int k_block_idx) {
   switch (k_block_idx & 3) {
   case 0:
     return ((tx & 7u) >> 1) * 32u;
@@ -271,58 +221,23 @@ TL_DEVICE uint32_t sm120_fulltile_compact_k_swizzle_offset(uint32_t tx,
   }
 }
 
-TL_DEVICE uint32_t sm120_fulltile_compact_a_offset(uint32_t tx, int k_block_idx,
+// A/B operands are staged into shared memory as row-major tiles (the layout
+// produced by T.copy for a (block, block_K) packed-FP4 buffer).  Each offset
+// below resolves one ldmatrix.x4 source address for the current thread.
+TL_DEVICE uint32_t sm120_fulltile_package_a_offset(uint32_t tx, int k_block_idx,
                                                    int row_idx) {
-  return (((tx & 63u) >> 5) * 2048u) + ((tx & 15u) * 128u) +
-         sm120_fulltile_compact_k_swizzle_offset(tx, k_block_idx) +
-         (((((tx & 31u) >> 4) + (tx & 1u)) & 1u) * 16u) +
-         uint32_t(row_idx) * 4096u;
-}
-
-TL_DEVICE uint32_t sm120_fulltile_compact_b_offset(uint32_t tx, int k_block_idx,
-                                                   int panel_idx) {
-  return ((tx >> 6) * 2048u) + (((tx & 31u) >> 4) * 1024u) +
-         ((tx & 7u) * 128u) +
-         sm120_fulltile_compact_k_swizzle_offset(tx, k_block_idx) +
-         (((((tx & 15u) >> 3) + (tx & 1u)) & 1u) * 16u) +
-         uint32_t(panel_idx) * 4096u;
-}
-
-TL_DEVICE uint32_t sm120_fulltile_rowmajor_a_offset(uint32_t tx,
-                                                    int k_block_idx,
-                                                    int row_idx) {
   return (((tx & 63u) >> 5) * 8192u) + ((tx & 15u) * 128u) +
-         sm120_fulltile_compact_k_swizzle_offset(tx, k_block_idx) +
+         sm120_fulltile_k_swizzle_offset(tx, k_block_idx) +
          (((((tx & 31u) >> 4) + (tx & 1u)) & 1u) * 16u) +
          uint32_t(row_idx) * 2048u;
 }
 
-TL_DEVICE uint32_t sm120_fulltile_rowmajor_b_offset(uint32_t tx,
-                                                    int k_block_idx,
-                                                    int panel_idx) {
-  return ((tx >> 6) * 8192u) + (((tx & 31u) >> 4) * 1024u) +
-         ((tx & 7u) * 128u) +
-         sm120_fulltile_compact_k_swizzle_offset(tx, k_block_idx) +
-         (((((tx & 15u) >> 3) + (tx & 1u)) & 1u) * 16u) +
-         uint32_t(panel_idx) * 2048u;
-}
-
-TL_DEVICE uint32_t sm120_fulltile_package_a_offset(uint32_t tx, int k_block_idx,
-                                                   int row_idx) {
-#if defined(TL_SM120_FULLTILE_PACKAGE_ROWMAJOR_VIEW)
-  return sm120_fulltile_rowmajor_a_offset(tx, k_block_idx, row_idx);
-#else
-  return sm120_fulltile_compact_a_offset(tx, k_block_idx, row_idx);
-#endif
-}
-
 TL_DEVICE uint32_t sm120_fulltile_package_b_offset(uint32_t tx, int k_block_idx,
                                                    int panel_idx) {
-#if defined(TL_SM120_FULLTILE_PACKAGE_ROWMAJOR_VIEW)
-  return sm120_fulltile_rowmajor_b_offset(tx, k_block_idx, panel_idx);
-#else
-  return sm120_fulltile_compact_b_offset(tx, k_block_idx, panel_idx);
-#endif
+  return ((tx >> 6) * 8192u) + (((tx & 31u) >> 4) * 1024u) +
+         ((tx & 7u) * 128u) + sm120_fulltile_k_swizzle_offset(tx, k_block_idx) +
+         (((((tx & 15u) >> 3) + (tx & 1u)) & 1u) * 16u) +
+         uint32_t(panel_idx) * 2048u;
 }
 
 } // namespace detail
@@ -396,12 +311,7 @@ sm120_copy_fulltile_ab_owner_wide_package(SM120FulltileABOwnerWidePackage &pkg,
 TL_DEVICE void sm120_gemm_fulltile_ab_owner_wide_package(
     float *c, const SM120FulltileABOwnerWidePackage &pkg,
     const detail::SM120ScaleTVPackage &scale_pkg) {
-#if defined(TL_SM120_FULLTILE_CUTE_ACCUM_LAYOUT) ||                            \
-    defined(TL_SM120_FULLTILE_CUTE_ACCUM_DIRECT)
-#define TL_SM120_PKG_C_OFFSET(I, J, HALF) ((I) * 4 + (J) * 32 + (HALF) * 16)
-#else
 #define TL_SM120_PKG_C_OFFSET(I, J, HALF) ((I) * 32 + (J) * 8 + (HALF) * 4)
-#endif
 
 #define TL_SM120_PKG_MMA_N8(I, J, HALF, A0, A1, A2, A3, B0, B1, SA, SB,        \
                             SA_TID, SB_TID)                                    \

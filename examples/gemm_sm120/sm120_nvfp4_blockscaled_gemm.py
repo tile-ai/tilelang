@@ -36,15 +36,7 @@ def _tflops(m: int, n: int, k: int, latency_ms: float) -> float:
     return 2.0 * m * n * k / (latency_ms * 1.0e-3) / 1.0e12
 
 
-def _pass_configs() -> dict:
-    return {
-        tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: [
-            "-DTL_SM120_FULLTILE_PACKAGE_ROWMAJOR_VIEW=1",
-        ],
-    }
-
-
-@tilelang.jit(out_idx=None, pass_configs=_pass_configs())
+@tilelang.jit(out_idx=None)
 def sm120_nvfp4_blockscaled_gemm(
     M: int,
     N: int,
