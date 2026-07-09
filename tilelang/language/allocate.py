@@ -26,7 +26,7 @@ from tvm.tirx.buffer import Buffer
 from tvm.tirx.expr import FloatImm, IntImm
 
 from . import dtypes as _dtypes
-from .dtypes import dtype as tl_dtype
+from .dtypes import dtype as tl_dtype, get_tvm_dtype
 from .eager.builder import OutTensor
 from .proxy import Tensor, ptr as _ptr_sentinel
 
@@ -146,7 +146,11 @@ def alloc_var(dtype: DType, *args, scope: str = "local.var", init: PrimExpr | in
         # uninitialised).  T.buffer_store emits an explicit BufferStore TIR
         # node that every backend lowers to an assignment statement.
         if isinstance(parsed_init, (int, float, IntImm, FloatImm)):
-            parsed_init = tl_dtype(dtype)(parsed_init)
+            dt = get_tvm_dtype(dtype)  # resolve "float64" -> DataType
+            if dt.is_float() or dt.is_bfloat16():  # any float family
+                parsed_init = FloatImm(str(dt), float(parsed_init))
+            else:
+                parsed_init = IntImm(str(dt), int(parsed_init))
         T.buffer_store(buffer, parsed_init, 0)
     return buffer
 
