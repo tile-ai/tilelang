@@ -506,6 +506,13 @@ def pack_blockscaled_chunk_kmajor_scale_bytes(scale_bytes, block_rows: int = 128
 
     The same function applies to SFA and SFB. For SFA, ``rows`` is logical M; for
     SFB, ``rows`` is logical N.
+
+    The packed words are byte-identical to the CUTLASS/CuTeDSL canonical
+    blocked SF layout (``blockscaled_utils.tile_atom_to_shape_SF`` with
+    ``sf_vec_size=16``), so the same buffer can feed a CuTeDSL NVFP4
+    blockscaled GEMM: view it with ``.view(torch.uint8)`` for the byte tensor,
+    or reinterpret an existing CuTeDSL SF byte buffer with
+    ``.view(torch.uint32).reshape(rows, k // 64)`` — both are zero-copy.
     """
 
     torch = _import_torch()

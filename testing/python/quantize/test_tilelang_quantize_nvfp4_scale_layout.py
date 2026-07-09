@@ -353,6 +353,32 @@ def test_pack_blockscaled_chunk_kmajor_scale_bytes_random_binary_512x32_matches_
     assert torch.equal(_unpack_with_oracle(packed, rows, k16_cols), scale_bytes)
 
 
+def test_pack_blockscaled_chunk_kmajor_scale_bytes_matches_cutedsl_blocked_sf_layout():
+    """Byte-level cross-compatibility with the CuTeDSL/CUTLASS canonical SF layout.
+
+    CuTeDSL builds SFA/SFB with ``blockscaled_utils.tile_atom_to_shape_SF``:
+    atom ``((32,4),(16,4)):((16,4),(0,1))`` tiled with order ``(2,1,3)``, e.g.
+    for ``(MN=256, K=512, L=1)`` the layout prints as
+    ``(((32,4),2),((16,4),8),(1,1)):(((16,4),4096),((0,1),512),(0,0))``.
+    The packed uint32 tensor must carry exactly those bytes so one buffer can
+    feed both the TileLang SM120 path and a CuTeDSL NVFP4 blockscaled GEMM
+    (``tl_words.view(torch.uint8)`` / ``sf_u8.view(torch.uint32)`` are
+    zero-copy bridges between the two views).
+    """
+    for rows, k in ((128, 256), (256, 512), (384, 1024)):
+        k16_cols = k // 16
+        rest_k = k16_cols // 4
+        generator = torch.Generator(device="cpu").manual_seed(rows + k)
+        scale_bytes = torch.randint(0, 256, (rows, k16_cols), generator=generator, dtype=torch.uint8)
+
+        packed_bytes = pack_blockscaled_chunk_kmajor_scale_bytes(scale_bytes).view(torch.uint8).reshape(-1)
+
+        m = torch.arange(rows).unsqueeze(1)
+        k16 = torch.arange(k16_cols).unsqueeze(0)
+        cutedsl_offset = (m % 32) * 16 + ((m // 32) % 4) * 4 + (m // 128) * (512 * rest_k) + (k16 % 4) + (k16 // 4) * 512
+        assert torch.equal(packed_bytes[cutedsl_offset.reshape(-1)].reshape(rows, k16_cols), scale_bytes)
+
+
 def test_pack_blockscaled_chunk_kmajor_scale_bytes_matches_word_swizzle():
     rows = 512
     k16_cols = 512 // 16
