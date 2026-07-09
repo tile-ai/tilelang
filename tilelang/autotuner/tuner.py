@@ -44,6 +44,9 @@ TargetLike = str | dict[str, object] | Target
 # Reserved keys that are not kernel parameters but control compilation behavior
 _RESERVED_CONFIG_KEYS = frozenset({"pass_configs"})
 
+# Internal key used to pass per-config pass_configs through config_arg dicts
+_PASS_CONFIGS_KEY = "__pass_configs__"
+
 
 class TimeoutException(Exception):
     pass
@@ -500,12 +503,12 @@ class AutoTuner:
         self,
         **config_arg,
     ) -> tilelang.JITKernel:
-        per_config_pass_configs = config_arg.pop("__pass_configs__", None)
+        per_config_pass_configs = config_arg.pop(_PASS_CONFIGS_KEY, None)
         compile_args = self._merge_pass_configs_into_compile_args(per_config_pass_configs)
         return compile_args.compile_program(self.fn(**config_arg))
 
     def _default_elaborate(self, **config_arg) -> PrimFunc:
-        config_arg.pop("__pass_configs__", None)
+        config_arg.pop(_PASS_CONFIGS_KEY, None)
         return self.fn(**config_arg)
 
     def _ensure_jit_functions(
@@ -617,10 +620,10 @@ class AutoTuner:
 
         compile_units: list[tuple[list[tuple[int, dict[str, Any]]], dict | None]] = []
         if grouped_compile_active:
-            # Bucket configs by __pass_configs__ value
+            # Bucket configs by per-config pass_configs value
             buckets: dict[tuple | None, list[tuple[int, dict[str, Any], dict | None]]] = {}
             for i, cfg in enumerate(config_args):
-                pc = cfg.pop("__pass_configs__", None)
+                pc = cfg.pop(_PASS_CONFIGS_KEY, None)
                 key = tuple(sorted(pc.items())) if pc else None
                 buckets.setdefault(key, []).append((i, cfg, pc))
             for bucket_items in buckets.values():
@@ -1009,7 +1012,7 @@ class AutoTuner:
             unused_keys = set(keys) - set(new_kwargs.keys()) - _RESERVED_CONFIG_KEYS
             if len(unused_keys) > 0:
                 raise ValueError(f"Unused keys in config: {unused_keys}")
-            new_kwargs["__pass_configs__"] = per_config_pass_configs
+            new_kwargs[_PASS_CONFIGS_KEY] = per_config_pass_configs
             config_args.append(new_kwargs)
 
         if len(config_args) == 0:
@@ -1032,7 +1035,7 @@ class AutoTuner:
 
         if self._kernel_parameters is not None:
             key_args_tuple, key_kwargs_tuple = self._kernel_parameters
-            tunable_arguments = [key for key, _ in top_config.items() if key != "__pass_configs__"]
+            tunable_arguments = [key for key, _ in top_config.items() if key != _PASS_CONFIGS_KEY]
 
             def check_tunable_argument_value(key, parameters, key_args_tuple) -> bool:
                 params_list = list(parameters.keys())
@@ -1290,31 +1293,27 @@ class AutoTuneImpl(Generic[_P, _T]):
     def _make_jit_compile_func(self, mode: str, args: tuple, kwargs: dict) -> Callable[..., JITKernel]:
         """Create a jit_compile closure for the given mode ('lazy' or 'eager').
 
-        The pass_configs handling logic is shared; only the final compilation
-        call differs between modes.
+        All compilation paths are serialized under _pass_configs_lock because
+        per-config pass_configs temporarily mutates self.jit_impl.pass_configs.
         """
 
         def jit_compile(**config_arg):
-            per_config_pass_configs = config_arg.pop("__pass_configs__", None)
-            if per_config_pass_configs is not None:
-                with self._pass_configs_lock:
-                    original_pass_configs = self.jit_impl.pass_configs
+            per_config_pass_configs = config_arg.pop(_PASS_CONFIGS_KEY, None)
+            with self._pass_configs_lock:
+                original_pass_configs = self.jit_impl.pass_configs
+                if per_config_pass_configs is not None:
                     merged_pc = dict(original_pass_configs or {})
                     merged_pc.update(per_config_pass_configs)
                     self.jit_impl.pass_configs = merged_pc
-                    try:
-                        merged = dict(kwargs)
-                        merged.update(config_arg)
-                        return self.jit_impl.compile(*args, **merged)
-                    finally:
-                        self.jit_impl.pass_configs = original_pass_configs
-            else:
-                if mode == "lazy":
-                    return self.jit_impl(*args, **kwargs, __tune_params=config_arg)
-                else:
+
+                try:
+                    if per_config_pass_configs is None and mode == "lazy":
+                        return self.jit_impl(*args, **kwargs, __tune_params=config_arg)
                     merged = dict(kwargs)
                     merged.update(config_arg)
                     return self.jit_impl.compile(*args, **merged)
+                finally:
+                    self.jit_impl.pass_configs = original_pass_configs
 
         return jit_compile
 
@@ -1370,7 +1369,7 @@ class AutoTuneImpl(Generic[_P, _T]):
         if key not in self._tuner_cache:
 
             def jit_elaborate(**config_arg):
-                config_arg.pop("__pass_configs__", None)
+                config_arg.pop(_PASS_CONFIGS_KEY, None)
                 merged = dict(kwargs)
                 merged.update(config_arg)
                 return self.jit_impl.get_tir(*args, **merged)
