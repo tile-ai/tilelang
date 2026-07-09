@@ -26,7 +26,7 @@ from tvm.tirx.buffer import Buffer
 from tvm.tirx.expr import FloatImm, IntImm
 
 from . import dtypes as _dtypes
-from .dtypes import dtype as tl_dtype, get_tvm_dtype
+from .dtypes import get_tvm_dtype
 from .eager.builder import OutTensor
 from .proxy import Tensor, ptr as _ptr_sentinel
 
