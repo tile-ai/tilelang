@@ -27,7 +27,7 @@ def get_configs():
     block_M = [128]
     block_N = [128]
     block_K = [32]
-    num_stages = [2]
+    num_stages = [1, 2]
     thread_num = [128]
     warp_spec = [True, False]
 
@@ -93,7 +93,7 @@ def get_best_config(M, N, K):
             skip_check=False,
         )
     )
-    return autotuner.run(warmup=3, rep=20)
+    return autotuner.run(warmup=3, rep=20, enable_grouped_compile=True)
 
 
 def main(M: int = 4096, N: int = 4096, K: int = 4096):

@@ -41,6 +41,12 @@ from tilelang import __version__
 
 TargetLike = str | dict[str, object] | Target
 
+ConfigArg = dict[str, Any]
+UnitItem = tuple[int, ConfigArg]
+UnitResult = tuple[int, ConfigArg, tilelang.JITKernel | None, Exception | None]
+CompileUnit = tuple[list[UnitItem], dict | None]
+BucketItem = tuple[int, ConfigArg, dict | None]
+
 # Reserved keys that are not kernel parameters but control compilation behavior
 _RESERVED_CONFIG_KEYS = frozenset({"pass_configs"})
 
@@ -563,7 +569,7 @@ class AutoTuner:
 
     def _prepare_compile_execution(
         self,
-        config_args: list[dict[str, Any]],
+        config_args: list[ConfigArg],
         grouped_compile_active: bool,
         group_compile_size: int,
         compile_func: Callable[..., tilelang.JITKernel],
@@ -571,13 +577,13 @@ class AutoTuner:
     ) -> tuple[
         concurrent.futures.ThreadPoolExecutor,
         list[concurrent.futures.Future],
-        dict[concurrent.futures.Future, list[tuple[int, dict[str, Any]]]],
+        dict[concurrent.futures.Future, list[UnitItem]],
         str,
     ]:
         num_workers = self._resolve_num_compile_workers()
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_workers)
         futures: list[concurrent.futures.Future] = []
-        future_to_unit: dict[concurrent.futures.Future, list[tuple[int, dict[str, Any]]]] = {}
+        future_to_unit: dict[concurrent.futures.Future, list[UnitItem]] = {}
 
         def cuda_device_wrapper(func: Callable[..., Any], device: int):
             def inner(**config_arg):
@@ -600,7 +606,7 @@ class AutoTuner:
                 elaborate_impl = cuda_device_wrapper(elaborate_func, device)
             return elaborate_impl
 
-        def compile_unit(unit_items: list[tuple[int, dict[str, Any]]], per_config_pass_configs=None):
+        def compile_unit(unit_items: list[UnitItem], per_config_pass_configs=None):
             if grouped_compile_active:
                 effective_compile_args = self._merge_pass_configs_into_compile_args(per_config_pass_configs)
                 return compile_grouped_unit_tvm_ffi(
@@ -609,7 +615,7 @@ class AutoTuner:
                     elaborate_func=get_elaborate_func(),
                 )
             compile_impl = get_compile_func()
-            unit_results: list[tuple[int, dict[str, Any], tilelang.JITKernel | None, Exception | None]] = []
+            unit_results: list[UnitResult] = []
             for idx, config_arg in unit_items:
                 try:
                     jit_kernel = compile_impl(**config_arg)
@@ -618,10 +624,10 @@ class AutoTuner:
                     unit_results.append((idx, config_arg, None, e))
             return unit_results
 
-        compile_units: list[tuple[list[tuple[int, dict[str, Any]]], dict | None]] = []
+        compile_units: list[CompileUnit] = []
         if grouped_compile_active:
             # Bucket configs by per-config pass_configs value
-            buckets: dict[tuple | None, list[tuple[int, dict[str, Any], dict | None]]] = {}
+            buckets: dict[tuple | None, list[BucketItem]] = {}
             for i, cfg in enumerate(config_args):
                 pc = cfg.pop(_PASS_CONFIGS_KEY, None)
                 key = tuple(sorted(pc.items())) if pc else None
