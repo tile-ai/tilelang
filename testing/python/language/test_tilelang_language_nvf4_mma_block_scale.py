@@ -82,6 +82,23 @@ def _make_swizzle_layout(shared_buf):
     return T.Layout(shape, transform_func)
 
 
+def test_tensor_core_intrin_emitter_mma_keeps_base_positional_signature():
+    """The block-scale extension must not shift the base positional signature.
+
+    The non-blockscaled gemm lowering calls ``emitter.mma(A, B, C, ki)``
+    positionally, so every scale-related parameter has to stay keyword-only.
+    """
+    import inspect
+
+    from tilelang.cuda.intrinsics.macro.mma_macro_generator import _TensorCoreIntrinEmitterBase
+
+    base = list(inspect.signature(_TensorCoreIntrinEmitterBase.mma).parameters.values())
+    override = list(inspect.signature(TensorCoreIntrinEmitter.mma).parameters.values())
+    assert [p.name for p in override[: len(base)]] == [p.name for p in base]
+    for extra in override[len(base) :]:
+        assert extra.kind == inspect.Parameter.KEYWORD_ONLY, extra.name
+
+
 def test_sm120_mma_blockscaled_strategy_helpers_are_not_public_api():
     assert not hasattr(T, "sm120_mma_blockscaled")
     assert not hasattr(T, "sm120_mma_blockscaled_kblock_fulltile")

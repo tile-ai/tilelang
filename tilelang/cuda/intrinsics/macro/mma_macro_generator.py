@@ -1762,18 +1762,21 @@ class TensorCoreIntrinEmitter(_TensorCoreIntrinEmitterBase):
         A_local_buf,
         B_local_buf,
         C_local_buf,
+        k_inner: PrimExpr | None = 0,
+        *,
         SFA_buf=None,
         SFB_buf=None,
-        ki: PrimExpr = 0,
         k_start: PrimExpr = 0,
         sf_a_granularity_k: int | None = None,
         sf_b_granularity_k: int | None = None,
         sf_layout: str = "rowmajor",
     ):
+        # Keep the base-class positional signature (A, B, C, k_inner): the
+        # non-blockscaled gemm lowering calls mma(A_local, B_local, C_buf, ki).
         if not self.is_blockscaled:
             if SFA_buf is not None or SFB_buf is not None:
                 raise ValueError("Scale buffers require TensorCoreIntrinEmitter block-scale mode")
-            return super().mma(A_local_buf, B_local_buf, C_local_buf)
+            return super().mma(A_local_buf, B_local_buf, C_local_buf, k_inner)
         if SFA_buf is None or SFB_buf is None:
             raise ValueError("Block-scaled MMA requires SFA and SFB buffers")
         warp_rows = self.warp_rows
@@ -1795,8 +1798,8 @@ class TensorCoreIntrinEmitter(_TensorCoreIntrinEmitterBase):
         sf_vec_size = self.sf_vec_size
         sf_a_granularity_k = sf_vec_size if sf_a_granularity_k is None else sf_a_granularity_k
         sf_b_granularity_k = sf_vec_size if sf_b_granularity_k is None else sf_b_granularity_k
-        scale_a_word_k = self._scale_word_k(k_start, ki, sf_a_granularity_k)
-        scale_b_word_k = self._scale_word_k(k_start, ki, sf_b_granularity_k)
+        scale_a_word_k = self._scale_word_k(k_start, k_inner, sf_a_granularity_k)
+        scale_b_word_k = self._scale_word_k(k_start, k_inner, sf_b_granularity_k)
         thread_binding = self.get_thread_binding()
         SFA_data, SFA_other, SFA_base_m, SFA_base_k = self._scale_region_parts(SFA_buf)
         SFB_data, SFB_other, SFB_base_n, SFB_base_k = self._scale_region_parts(SFB_buf)
@@ -3309,103 +3312,3 @@ class TensorCoreIntrinEmitter(_TensorCoreIntrinEmitterBase):
             SFB_local_buf,
             SFB_rep_local_buf,
         )
-
-    def mma_atom(
-        self,
-        A_local_buf,
-        B_local_buf,
-        C_local_buf,
-        SFA_buf,
-        SFB_buf,
-        inst_m_idx: PrimExpr | int,
-        inst_n_idx: PrimExpr | int,
-        ki: PrimExpr = 0,
-        k_start: PrimExpr = 0,
-        sf_a_granularity_k: int | None = None,
-        sf_b_granularity_k: int | None = None,
-    ):
-        local_size_a = self.local_size_a
-        local_size_b = self.local_size_b
-        local_size_out = self.local_size_out
-        kind = self.kind
-        scale_vec_size = self.scale_vec_size
-        stype = self.stype
-        accum_dtype = self.accum_dtype
-        a_dtype_abbrv = self.a_dtype_abbrv
-        b_dtype_abbrv = self.b_dtype_abbrv
-        mma_prefix = self.mma_prefix
-        warp_cols = self.warp_cols
-        warp_row_tiles = self.warp_row_tiles
-        warp_col_tiles = self.warp_col_tiles
-        micro_size_x = self.micro_size_x
-        micro_size_y = self.micro_size_y
-        sf_vec_size = self.sf_vec_size
-        sf_a_granularity_k = sf_vec_size if sf_a_granularity_k is None else sf_a_granularity_k
-        sf_b_granularity_k = sf_vec_size if sf_b_granularity_k is None else sf_b_granularity_k
-        scale_a_word_k = self._scale_word_k(k_start, ki, sf_a_granularity_k)
-        scale_b_word_k = self._scale_word_k(k_start, ki, sf_b_granularity_k)
-        thread_binding = self.get_thread_binding()
-        SFA_data, SFA_other, SFA_base_m, SFA_base_k = self._scale_region_parts(SFA_buf)
-        SFB_data, SFB_other, SFB_base_n, SFB_base_k = self._scale_region_parts(SFB_buf)
-        replicate_b = self.n_dim == 16
-
-        @T.macro
-        def _warp_mma_block_scale_atom(A_local_buf, B_local_buf, C_local_buf, SFA_data, SFB_data, thread_binding):
-            tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
-            sfa_row = self._sfa_row_in_atom(tx)
-            sfb_col = self._sfb_col_in_atom(tx)
-            scale_m = warp_m * warp_row_tiles + inst_m_idx * micro_size_x + sfa_row
-            scale_n = warp_n * warp_col_tiles + inst_n_idx * micro_size_y + sfb_col
-            scale_a_ptr = T.access_ptr(
-                SFA_data[tuple(SFA_other) + (SFA_base_m + scale_m, SFA_base_k + scale_a_word_k)],
-                "r",
-            )
-            scale_b_ptr = T.access_ptr(
-                SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n, SFB_base_k + scale_b_word_k)],
-                "r",
-            )
-            T.ptx_mma_block_scale(
-                accum_dtype,
-                mma_prefix,
-                "row",
-                "col",
-                kind,
-                scale_vec_size,
-                a_dtype_abbrv,
-                b_dtype_abbrv,
-                stype,
-                A_local_buf.data,
-                inst_m_idx * local_size_a,
-                B_local_buf.data,
-                0,
-                C_local_buf.data,
-                inst_m_idx * warp_cols * local_size_out + inst_n_idx * local_size_out,
-                scale_a_ptr,
-                scale_b_ptr,
-            )
-            if replicate_b:
-                scale_b_rep_ptr = T.access_ptr(
-                    SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n + 8, SFB_base_k + scale_b_word_k)],
-                    "r",
-                )
-                T.ptx_mma_block_scale(
-                    accum_dtype,
-                    mma_prefix,
-                    "row",
-                    "col",
-                    kind,
-                    scale_vec_size,
-                    a_dtype_abbrv,
-                    b_dtype_abbrv,
-                    stype,
-                    A_local_buf.data,
-                    inst_m_idx * local_size_a,
-                    B_local_buf.data,
-                    lift(local_size_b) // 2,
-                    C_local_buf.data,
-                    inst_m_idx * warp_cols * local_size_out + inst_n_idx * local_size_out + lift(local_size_out) // 2,
-                    scale_a_ptr,
-                    scale_b_rep_ptr,
-                )
-
-        return _warp_mma_block_scale_atom(A_local_buf, B_local_buf, C_local_buf, SFA_data, SFB_data, thread_binding)
