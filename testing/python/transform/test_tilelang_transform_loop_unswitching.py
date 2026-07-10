@@ -326,6 +326,99 @@ def test_multiple_identical_conditions():
     _check(before, expected)
 
 
+def test_same_buffer_rebuilt_load_conditions_are_replaced():
+    """Repeated loads from the same buffer/index are the same guard."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((128,), T.float32),
+        B: T.Tensor((128,), T.float32),
+        C: T.Tensor((128,), T.float32),
+        P: T.Tensor((1,), T.int32),
+    ):
+        for i in range(128):
+            if P[0] < 4:
+                B[i] = A[i]
+            if P[0] < 4:
+                C[i] = A[i] * T.float32(2.0)
+
+    @T.prim_func
+    def expected(
+        A: T.Tensor((128,), T.float32),
+        B: T.Tensor((128,), T.float32),
+        C: T.Tensor((128,), T.float32),
+        P: T.Tensor((1,), T.int32),
+    ):
+        if P[0] < 4:
+            for i in range(128):
+                B[i] = A[i]
+                C[i] = A[i] * T.float32(2.0)
+        else:
+            for _i in range(128):
+                T.evaluate(0)
+                T.evaluate(0)
+
+    _check(before, expected)
+
+
+def test_same_shape_different_buffer_conditions_are_not_collapsed():
+    """Structurally similar guards on different buffers are distinct."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((128,), T.float32),
+        B: T.Tensor((128,), T.float32),
+        C: T.Tensor((128,), T.float32),
+        P: T.Tensor((1,), T.int32),
+        Q: T.Tensor((1,), T.int32),
+    ):
+        for i in range(128):
+            if P[0] < 4:
+                B[i] = A[i]
+            if Q[0] < 4:
+                C[i] = A[i] * T.float32(2.0)
+
+    _check(before, before)
+
+
+def test_same_buffer_different_index_conditions_are_not_collapsed():
+    """Guards on the same buffer but different indices are distinct."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((128,), T.float32),
+        B: T.Tensor((128,), T.float32),
+        C: T.Tensor((128,), T.float32),
+        P: T.Tensor((2,), T.int32),
+    ):
+        for i in range(128):
+            if P[0] < 4:
+                B[i] = A[i]
+            if P[1] < 4:
+                C[i] = A[i] * T.float32(2.0)
+
+    _check(before, before)
+
+
+def test_call_checker_does_not_exclude_different_buffer_guard():
+    """Calls under a sibling guard on another buffer still block unswitching."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((128,), T.float32),
+        B: T.Tensor((128,), T.float32),
+        P: T.Tensor((1,), T.int32),
+        Q: T.Tensor((1,), T.int32),
+    ):
+        for i in range(128):
+            if P[0] < 4:
+                B[i] = A[i]
+            if Q[0] < 4:
+                T.evaluate(T.call_extern("handle", "generic_op"))
+
+    _check(before, before)
+
+
 def test_multiple_identical_conditions_with_else():
     """Conservative: multiple if-else statements should NOT be hoisted."""
 
