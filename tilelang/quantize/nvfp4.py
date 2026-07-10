@@ -203,218 +203,6 @@ def blockscaled_chunk_kmajor_word_offset(row: int, k64_word: int, block_rows: in
     return k64_word * 32 + (row % 32), row // 32
 
 
-def _sm120_sfa_row_in_lane(lane: int) -> int:
-    return 8 * (lane & 1) + (lane >> 2)
-
-
-def _sm120_sfb_col_in_lane(lane: int) -> int:
-    return lane >> 2
-
-
-def _sm120_sfa_selector_source_lane(lane: int, scale_a_thread_id: int) -> int:
-    """Return the source lane selected by OMMA.SF's A-side thread selector."""
-
-    return (lane & ~3) | ((scale_a_thread_id & 1) << 1) | (lane & 1)
-
-
-def _sm120_sfb_selector_source_lane(lane: int, scale_b_thread_id: int) -> int:
-    """Return the source lane selected by OMMA.SF's B-side thread selector."""
-
-    return (lane & ~3) | (scale_b_thread_id & 3)
-
-
-def _sm120_compact_sfa_owner_row(lane: int, warp_m: int, reg_group: int) -> int:
-    qlane = lane & 3
-    return warp_m * 64 + reg_group * 32 + (qlane >> 1) * 16 + _sm120_sfa_row_in_lane(lane)
-
-
-def _sm120_compact_sfb_owner_row(lane: int, warp_n: int, reg_group: int) -> int:
-    qlane = lane & 3
-    return warp_n * 64 + reg_group * 32 + qlane * 8 + _sm120_sfb_col_in_lane(lane)
-
-
-def _sm120_compact_sfa_effective_row(lane: int, warp_m: int, mma_i: int) -> int:
-    source_lane = _sm120_sfa_selector_source_lane(lane, mma_i & 1)
-    return _sm120_compact_sfa_owner_row(source_lane, warp_m, mma_i >> 1)
-
-
-def _sm120_compact_sfb_effective_row(lane: int, warp_n: int, mma_j: int, half: int) -> int:
-    source_lane = _sm120_sfb_selector_source_lane(lane, (mma_j & 1) * 2 + half)
-    return _sm120_compact_sfb_owner_row(source_lane, warp_n, mma_j >> 1)
-
-
-def _sm120_compact_scale_issue_contract(lane: int, warp_m: int, warp_n: int) -> list[dict[str, int | str]]:
-    """Return the compact-selector OMMA.SF scale contract for one lane.
-
-    This is a pure specification helper for tests and future lowering work. It
-    models which lane supplies the SFA/SFB scale register selected by each
-    ``mma.sync.m16n8k64.kind::mxf4nvf4.block_scale`` issue.
-    """
-
-    issues: list[dict[str, int | str]] = []
-    for mma_i in range(4):
-        sa_reg_group = mma_i >> 1
-        sa_tid = mma_i & 1
-        sa_source_lane = _sm120_sfa_selector_source_lane(lane, sa_tid)
-        for mma_j in range(4):
-            sb_reg_group = mma_j >> 1
-            for half in range(2):
-                sb_tid = (mma_j & 1) * 2 + half
-                sb_source_lane = _sm120_sfb_selector_source_lane(lane, sb_tid)
-                issues.append(
-                    {
-                        "mma_i": mma_i,
-                        "mma_j": mma_j,
-                        "half": half,
-                        "sa_reg": f"sa{sa_reg_group}",
-                        "sa_tid": sa_tid,
-                        "sa_source_lane": sa_source_lane,
-                        "sfa_row": _sm120_compact_sfa_owner_row(sa_source_lane, warp_m, sa_reg_group),
-                        "sb_reg": f"sb{sb_reg_group}",
-                        "sb_tid": sb_tid,
-                        "sb_source_lane": sb_source_lane,
-                        "sfb_row": _sm120_compact_sfb_owner_row(sb_source_lane, warp_n, sb_reg_group),
-                    }
-                )
-    return issues
-
-
-def _sm120_compact_scale_copy_view_contract(lane: int, warp_m: int, warp_n: int, k64_word: int) -> list[dict[str, object]]:
-    """Return per-issue scale rows plus BlockScaledBasicChunk word addresses."""
-
-    issues: list[dict[str, object]] = []
-    for issue in _sm120_compact_scale_issue_contract(lane, warp_m, warp_n):
-        sfa_word_coord = blockscaled_chunk_kmajor_word_offset(int(issue["sfa_row"]), k64_word)
-        sfb_word_coord = blockscaled_chunk_kmajor_word_offset(int(issue["sfb_row"]), k64_word)
-        issues.append(
-            {
-                **issue,
-                "k64_word": k64_word,
-                "sfa_word_coord": sfa_word_coord,
-                "sfa_word_offset": sfa_word_coord[0] * _BLOCKSCALED_CHUNK_WORDS + sfa_word_coord[1],
-                "sfb_word_coord": sfb_word_coord,
-                "sfb_word_offset": sfb_word_coord[0] * _BLOCKSCALED_CHUNK_WORDS + sfb_word_coord[1],
-            }
-        )
-    return issues
-
-
-def _sm120_compact_scale_producer_contract(warp_m: int, warp_n: int) -> list[dict[str, object]]:
-    """Return the source-lane register assignment required by current OMMA.SF.
-
-    This is the inverse view of ``_sm120_compact_scale_issue_contract``. It says
-    which producer lane supplies the scale register consumed by each issue. A
-    future compact scale-copy lowering must preserve these semantic rows while
-    changing how the producer lanes load/package the registers.
-    """
-
-    rows: list[dict[str, object]] = []
-    for mma_i in range(4):
-        sa_tid = mma_i & 1
-        sa_reg_group = mma_i >> 1
-        for producer_lane in range(32):
-            consumers = [lane for lane in range(32) if _sm120_sfa_selector_source_lane(lane, sa_tid) == producer_lane]
-            if not consumers:
-                continue
-            rows.append(
-                {
-                    "kind": "SFA",
-                    "mma_i": mma_i,
-                    "sa_tid": sa_tid,
-                    "sa_reg": f"sa{sa_reg_group}",
-                    "producer_lane": producer_lane,
-                    "consumers": tuple(consumers),
-                    "row": _sm120_compact_sfa_owner_row(producer_lane, warp_m, sa_reg_group),
-                }
-            )
-
-    for mma_j in range(4):
-        sb_reg_group = mma_j >> 1
-        for half in range(2):
-            sb_tid = (mma_j & 1) * 2 + half
-            for producer_lane in range(32):
-                consumers = [lane for lane in range(32) if _sm120_sfb_selector_source_lane(lane, sb_tid) == producer_lane]
-                if not consumers:
-                    continue
-                rows.append(
-                    {
-                        "kind": "SFB",
-                        "mma_j": mma_j,
-                        "half": half,
-                        "sb_tid": sb_tid,
-                        "sb_reg": f"sb{sb_reg_group}",
-                        "producer_lane": producer_lane,
-                        "consumers": tuple(consumers),
-                        "row": _sm120_compact_sfb_owner_row(producer_lane, warp_n, sb_reg_group),
-                    }
-                )
-    return rows
-
-
-def _sm120_compact_package_consumer_byte_offsets(lane: int, warp_m: int, warp_n: int, k64_word: int) -> dict[str, tuple[int, ...]]:
-    """Return the current package's per-consumer byte offsets for one K64 word."""
-
-    issues = _sm120_compact_scale_copy_view_contract(lane, warp_m, warp_n, k64_word)
-    sfa_offsets = tuple(int(issue["sfa_word_offset"]) * 4 for issue in issues[0::8])
-    sfb_offsets = tuple(int(issue["sfb_word_offset"]) * 4 for issue in issues[:8])
-    return {"SFA": sfa_offsets, "SFB": sfb_offsets}
-
-
-def _sm120_cutlass_issue_site_contract(site: int) -> dict[str, int]:
-    """Return CUTLASS/CuTe SM120 fulltile issue-site coordinates.
-
-    The traversal covers four K64 atoms. Each K64 atom issues eight N8 atoms,
-    and each N8 atom visits four M atoms. Odd N8 atoms reverse the M order.
-    """
-
-    if site < 0 or site >= 128:
-        raise ValueError(f"site must be in [0, 128), got {site}")
-    k_block = site // 32
-    site_in_k = site % 32
-    n8_atom = site_in_k // 4
-    m_serp = site_in_k % 4
-    m_atom = m_serp if n8_atom % 2 == 0 else 3 - m_serp
-    n16_col = n8_atom // 2
-    n8_half = n8_atom % 2
-    return {
-        "site": site,
-        "k_block": k_block,
-        "m_atom": m_atom,
-        "n8_atom": n8_atom,
-        "n16_col": n16_col,
-        "n8_half": n8_half,
-        "A_slot0": 128 * m_atom + 32 * k_block,
-        "B_slot0": 64 * n8_half + 128 * n16_col + 16 * k_block,
-        "SFA_slot0": 4 * m_atom + 16 * k_block,
-        "SFB_slot0": 4 * n16_col + 16 * n8_half + 32 * k_block,
-        "C_slot0": 4 * m_atom + 32 * n16_col + 16 * n8_half,
-    }
-
-
-def _sm120_tilelang_current_issue_site_contract(site: int) -> dict[str, int]:
-    """Return the current package helper's issue coordinates for comparison."""
-
-    if site < 0 or site >= 128:
-        raise ValueError(f"site must be in [0, 128), got {site}")
-    k_block = site // 32
-    site_in_k = site % 32
-    mma_i = site_in_k // 8
-    n_site = site_in_k % 8
-    mma_j = n_site // 2
-    half = n_site & 1
-    return {
-        "site": site,
-        "k_block": k_block,
-        "mma_i": mma_i,
-        "mma_j": mma_j,
-        "half": half,
-        "sa_reg_group": mma_i >> 1,
-        "sa_tid": mma_i & 1,
-        "sb_reg_group": mma_j >> 1,
-        "sb_tid": (mma_j & 1) * 2 + half,
-    }
-
-
 def swizzle_blockscaled_chunk_kmajor_scale_words(words, block_rows: int = 128, block_words: int = 4):
     """Convert semantic row-major scale words to SM120 BlockScaledBasicChunk K-major.
 
@@ -897,167 +685,25 @@ def _tilelang_nvfp4_blockscaled_quantize_kernel_16x256_tma_store(
 
 
 @tilelang.jit(pass_configs=_TILELANG_PASS_CONFIGS)
-def _tilelang_nvfp4_blockscaled_quantize_kernel_16x256_tma_io(
+def _tilelang_nvfp4_blockscaled_quantize_kernel_tiled(
     x,
-    num_stages: int = 4,
-    num_threads: int = 512,
-    scale_layout_id: int = _SCALE_LAYOUT_ID_BLOCKSCALED_CHUNK_KMAJOR,
-):
-    """TileLang BF16 -> packed NVFP4 with one warp per row and TMA input/output."""
-
-    M = T.dynamic("M")
-    K = T.const("K")
-    rows_per_cta = 16
-    in_dtype = T.bfloat16
-    compute_dtype = T.float32
-
-    x: T.Tensor[(M, K), in_dtype]
-
-    quant = T.empty((M, K // 2), T.int8)
-    scale_source = T.empty((M, K // 64), T.uint32)
-
-    with T.Kernel(M // rows_per_cta, K // 256, threads=num_threads) as (pid_m, pid_k256):
-        lane = T.get_lane_idx()
-        row = T.get_warp_idx_sync()
-        x_shared = T.alloc_shared((rows_per_cta, 256), in_dtype)
-        quant_shared = T.alloc_shared((rows_per_cta, 128), T.int8)
-        scale_codes = T.alloc_shared((rows_per_cta, 16), T.int32)
-
-        T.copy(x[pid_m * rows_per_cta, pid_k256 * 256], x_shared, prefer_instruction="tma")
-        T.sync_threads()
-
-        for k64_inner in T.serial(_BLOCKSCALED_CHUNK_WORDS):
-            elem_col = k64_inner * 64 + lane * 2
-            byte_col = k64_inner * 32 + lane
-            group = k64_inner * 4 + (lane // 8)
-            group_lane = lane % 8
-            value0 = T.cast(x_shared[row, elem_col], compute_dtype)
-            value1 = T.cast(x_shared[row, elem_col + 1], compute_dtype)
-            amax = T.alloc_var(compute_dtype, init=T.max(T.abs(value0), T.abs(value1)))
-            amax = T.max(amax, T.shfl_xor(amax, 4, width=8))
-            amax = T.max(amax, T.shfl_xor(amax, 2, width=8))
-            amax = T.max(amax, T.shfl_xor(amax, 1, width=8))
-
-            scale_code = T.alloc_var(T.int32, init=0)
-            scale_inv = T.alloc_var(compute_dtype, init=0.0)
-            if group_lane == 0:
-                scale_code = _tl_encode_ue4m3_scale_byte_ceil(amax / _FP4_E2M1_MAX)
-                scale_inv = _tl_ue4m3_scale_byte_inverse(scale_code)
-                scale_codes[row, group] = scale_code
-            scale_inv = T.shfl_sync(scale_inv, 0, width=8)
-            fp4_code0 = _tl_encode_fp4_e2m1_code(value0 * scale_inv)
-            fp4_code1 = _tl_encode_fp4_e2m1_code(value1 * scale_inv)
-            packed_byte = fp4_code0 | (fp4_code1 << 4)
-            quant_shared[row, byte_col] = T.cast(packed_byte, T.int8)
-
-        T.sync_threads()
-        if lane < _BLOCKSCALED_CHUNK_WORDS:
-            k64_inner = lane
-            scale_word = (
-                T.cast(scale_codes[row, k64_inner * 4], T.uint32)
-                | (T.cast(scale_codes[row, k64_inner * 4 + 1], T.uint32) << 8)
-                | (T.cast(scale_codes[row, k64_inner * 4 + 2], T.uint32) << 16)
-                | (T.cast(scale_codes[row, k64_inner * 4 + 3], T.uint32) << 24)
-            )
-            logical_row = pid_m * rows_per_cta + row
-            k64_word = pid_k256 * _BLOCKSCALED_CHUNK_WORDS + k64_inner
-            physical_row, physical_word = _tl_scale_source_coords(logical_row, k64_word, scale_layout_id, K // 64)
-            scale_source[physical_row, physical_word] = scale_word
-
-        T.sync_threads()
-        T.tma_copy(quant_shared, quant[pid_m * rows_per_cta, pid_k256 * 128])
-        T.tma_store_wait()
-
-    return quant, scale_source
-
-
-@tilelang.jit(pass_configs=_TILELANG_PASS_CONFIGS)
-def _tilelang_nvfp4_blockscaled_quantize_kernel_32x256_tma_load_global_store(
-    x,
-    num_stages: int = 4,
-    num_threads: int = 512,
-    scale_layout_id: int = _SCALE_LAYOUT_ID_BLOCKSCALED_CHUNK_KMAJOR,
-):
-    """TileLang BF16 -> packed NVFP4 with TMA input and direct global output stores."""
-
-    M = T.dynamic("M")
-    K = T.const("K")
-    rows_per_cta = 32
-    rows_per_warp = rows_per_cta // (num_threads // 32)
-    in_dtype = T.bfloat16
-    compute_dtype = T.float32
-
-    x: T.Tensor[(M, K), in_dtype]
-
-    quant = T.empty((M, K // 2), T.int8)
-    scale_source = T.empty((M, K // 64), T.uint32)
-
-    with T.Kernel(M // rows_per_cta, K // 256, threads=num_threads) as (pid_m, pid_k256):
-        lane = T.get_lane_idx()
-        warp = T.get_warp_idx_sync()
-        x_shared = T.alloc_shared((rows_per_cta, 256), in_dtype)
-        scale_codes = T.alloc_shared((rows_per_cta, 16), T.int32)
-
-        T.copy(x[pid_m * rows_per_cta, pid_k256 * 256], x_shared, prefer_instruction="tma")
-        T.sync_threads()
-
-        for row_iter in T.serial(rows_per_warp):
-            row = warp * rows_per_warp + row_iter
-            for k64_inner in T.serial(_BLOCKSCALED_CHUNK_WORDS):
-                elem_col = k64_inner * 64 + lane * 2
-                byte_col = k64_inner * 32 + lane
-                group = k64_inner * 4 + (lane // 8)
-                group_lane = lane % 8
-                value0 = T.cast(x_shared[row, elem_col], compute_dtype)
-                value1 = T.cast(x_shared[row, elem_col + 1], compute_dtype)
-                amax = T.alloc_var(compute_dtype, init=T.max(T.abs(value0), T.abs(value1)))
-                amax = T.max(amax, T.shfl_xor(amax, 4, width=8))
-                amax = T.max(amax, T.shfl_xor(amax, 2, width=8))
-                amax = T.max(amax, T.shfl_xor(amax, 1, width=8))
-
-                scale_code = T.alloc_var(T.int32, init=0)
-                scale_inv = T.alloc_var(compute_dtype, init=0.0)
-                if group_lane == 0:
-                    scale_code = _tl_encode_ue4m3_scale_byte_ceil(amax / _FP4_E2M1_MAX)
-                    scale_inv = _tl_ue4m3_scale_byte_inverse(scale_code)
-                    scale_codes[row, group] = scale_code
-                scale_inv = T.shfl_sync(scale_inv, 0, width=8)
-                fp4_code0 = _tl_encode_fp4_e2m1_code(value0 * scale_inv)
-                fp4_code1 = _tl_encode_fp4_e2m1_code(value1 * scale_inv)
-                packed_byte = fp4_code0 | (fp4_code1 << 4)
-                quant[pid_m * rows_per_cta + row, pid_k256 * 128 + byte_col] = T.cast(packed_byte, T.int8)
-
-        T.sync_threads()
-        for row_iter in T.serial(rows_per_warp):
-            row = warp * rows_per_warp + row_iter
-            if lane < _BLOCKSCALED_CHUNK_WORDS:
-                k64_inner = lane
-                scale_word = (
-                    T.cast(scale_codes[row, k64_inner * 4], T.uint32)
-                    | (T.cast(scale_codes[row, k64_inner * 4 + 1], T.uint32) << 8)
-                    | (T.cast(scale_codes[row, k64_inner * 4 + 2], T.uint32) << 16)
-                    | (T.cast(scale_codes[row, k64_inner * 4 + 3], T.uint32) << 24)
-                )
-                logical_row = pid_m * rows_per_cta + row
-                k64_word = pid_k256 * _BLOCKSCALED_CHUNK_WORDS + k64_inner
-                physical_row, physical_word = _tl_scale_source_coords(logical_row, k64_word, scale_layout_id, K // 64)
-                scale_source[physical_row, physical_word] = scale_word
-
-    return quant, scale_source
-
-
-@tilelang.jit(pass_configs=_TILELANG_PASS_CONFIGS)
-def _tilelang_nvfp4_blockscaled_quantize_kernel_64x256_tma_io(
-    x,
+    rows_per_cta: int = 64,
+    tma_store: bool = True,
     num_stages: int = 2,
     num_threads: int = 512,
     scale_layout_id: int = _SCALE_LAYOUT_ID_BLOCKSCALED_CHUNK_KMAJOR,
 ):
-    """TileLang BF16 -> packed NVFP4 with a 64x256 CTA tile and TMA input/output."""
+    """TileLang BF16 -> packed NVFP4 over a ``rows_per_cta x 256`` CTA tile.
+
+    One kernel covers the tuned tile variants: TMA input staging, warp-strided
+    row ownership (``rows_per_cta // num_warps`` rows per warp), and either a
+    TMA store through shared memory (``tma_store=True``) or direct global
+    stores. ``rows_per_cta`` in {16, 32, 64} reproduces the previous
+    per-variant kernels exactly.
+    """
 
     M = T.dynamic("M")
     K = T.const("K")
-    rows_per_cta = 64
     rows_per_warp = rows_per_cta // (num_threads // 32)
     in_dtype = T.bfloat16
     compute_dtype = T.float32
@@ -1071,7 +717,8 @@ def _tilelang_nvfp4_blockscaled_quantize_kernel_64x256_tma_io(
         lane = T.get_lane_idx()
         warp = T.get_warp_idx_sync()
         x_shared = T.alloc_shared((rows_per_cta, 256), in_dtype)
-        quant_shared = T.alloc_shared((rows_per_cta, 128), T.int8)
+        if tma_store:
+            quant_shared = T.alloc_shared((rows_per_cta, 128), T.int8)
         scale_codes = T.alloc_shared((rows_per_cta, 16), T.int32)
 
         T.copy(x[pid_m * rows_per_cta, pid_k256 * 256], x_shared, prefer_instruction="tma")
@@ -1101,7 +748,10 @@ def _tilelang_nvfp4_blockscaled_quantize_kernel_64x256_tma_io(
                 fp4_code0 = _tl_encode_fp4_e2m1_code(value0 * scale_inv)
                 fp4_code1 = _tl_encode_fp4_e2m1_code(value1 * scale_inv)
                 packed_byte = fp4_code0 | (fp4_code1 << 4)
-                quant_shared[row, byte_col] = T.cast(packed_byte, T.int8)
+                if tma_store:
+                    quant_shared[row, byte_col] = T.cast(packed_byte, T.int8)
+                else:
+                    quant[pid_m * rows_per_cta + row, pid_k256 * 128 + byte_col] = T.cast(packed_byte, T.int8)
 
         T.sync_threads()
         for row_iter in T.serial(rows_per_warp):
@@ -1119,9 +769,10 @@ def _tilelang_nvfp4_blockscaled_quantize_kernel_64x256_tma_io(
                 physical_row, physical_word = _tl_scale_source_coords(logical_row, k64_word, scale_layout_id, K // 64)
                 scale_source[physical_row, physical_word] = scale_word
 
-        T.sync_threads()
-        T.tma_copy(quant_shared, quant[pid_m * rows_per_cta, pid_k256 * 128])
-        T.tma_store_wait()
+        if tma_store:
+            T.sync_threads()
+            T.tma_copy(quant_shared, quant[pid_m * rows_per_cta, pid_k256 * 128])
+            T.tma_store_wait()
 
     return quant, scale_source
 
@@ -1212,27 +863,15 @@ def tilelang_quantize_bf16_to_nvfp4_blockscaled(
 
     if k64_per_cta == 4:
         if use_tma_load:
-            if rows_per_cta == 64:
-                quant, scale_source = _tilelang_nvfp4_blockscaled_quantize_kernel_64x256_tma_io(
-                    x.contiguous(),
-                    num_stages=num_stages,
-                    num_threads=num_threads,
-                    scale_layout_id=scale_layout_id,
-                )
-            elif rows_per_cta == 32:
-                quant, scale_source = _tilelang_nvfp4_blockscaled_quantize_kernel_32x256_tma_load_global_store(
-                    x.contiguous(),
-                    num_stages=num_stages,
-                    num_threads=num_threads,
-                    scale_layout_id=scale_layout_id,
-                )
-            else:
-                quant, scale_source = _tilelang_nvfp4_blockscaled_quantize_kernel_16x256_tma_io(
-                    x.contiguous(),
-                    num_stages=num_stages,
-                    num_threads=num_threads,
-                    scale_layout_id=scale_layout_id,
-                )
+            tile_rows = rows_per_cta if rows_per_cta in (16, 32, 64) else 16
+            quant, scale_source = _tilelang_nvfp4_blockscaled_quantize_kernel_tiled(
+                x.contiguous(),
+                rows_per_cta=tile_rows,
+                tma_store=(tile_rows != 32),
+                num_stages=num_stages,
+                num_threads=num_threads,
+                scale_layout_id=scale_layout_id,
+            )
         else:
             quant, scale_source = _tilelang_nvfp4_blockscaled_quantize_kernel_16x256_tma_store(
                 x.contiguous(),

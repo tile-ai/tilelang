@@ -6,6 +6,8 @@ torch = pytest.importorskip("torch")
 tilelang_testing = pytest.importorskip("tilelang.testing")
 
 from tilelang.quantize import nvfp4 as nvfp4_utils
+
+_BLOCKSCALED_CHUNK_WORDS = nvfp4_utils._BLOCKSCALED_CHUNK_WORDS
 from tilelang.quantize import (
     blockscaled_chunk_kmajor_word_offset,
     decode_packed_fp4_e2m1,
@@ -20,6 +22,226 @@ from tilelang.quantize import (
     swizzle_blockscaled_chunk_kmajor_scale_words,
     unswizzle_blockscaled_chunk_kmajor_scale_words,
 )
+
+
+# ---------------------------------------------------------------------------
+# SM120 OMMA scale-selector contract oracles.
+# These document the compact-selector lane semantics the packed scale layout
+# was derived from; they are exercised only by the contract tests below and
+# live here to keep tilelang.quantize.nvfp4 focused on quantization.
+# ---------------------------------------------------------------------------
+
+
+def _sm120_sfa_row_in_lane(lane: int) -> int:
+    return 8 * (lane & 1) + (lane >> 2)
+
+
+def _sm120_sfb_col_in_lane(lane: int) -> int:
+    return lane >> 2
+
+
+def _sm120_sfa_selector_source_lane(lane: int, scale_a_thread_id: int) -> int:
+    """Return the source lane selected by OMMA.SF's A-side thread selector."""
+
+    return (lane & ~3) | ((scale_a_thread_id & 1) << 1) | (lane & 1)
+
+
+def _sm120_sfb_selector_source_lane(lane: int, scale_b_thread_id: int) -> int:
+    """Return the source lane selected by OMMA.SF's B-side thread selector."""
+
+    return (lane & ~3) | (scale_b_thread_id & 3)
+
+
+def _sm120_compact_sfa_owner_row(lane: int, warp_m: int, reg_group: int) -> int:
+    qlane = lane & 3
+    return warp_m * 64 + reg_group * 32 + (qlane >> 1) * 16 + _sm120_sfa_row_in_lane(lane)
+
+
+def _sm120_compact_sfb_owner_row(lane: int, warp_n: int, reg_group: int) -> int:
+    qlane = lane & 3
+    return warp_n * 64 + reg_group * 32 + qlane * 8 + _sm120_sfb_col_in_lane(lane)
+
+
+def _sm120_compact_sfa_effective_row(lane: int, warp_m: int, mma_i: int) -> int:
+    source_lane = _sm120_sfa_selector_source_lane(lane, mma_i & 1)
+    return _sm120_compact_sfa_owner_row(source_lane, warp_m, mma_i >> 1)
+
+
+def _sm120_compact_sfb_effective_row(lane: int, warp_n: int, mma_j: int, half: int) -> int:
+    source_lane = _sm120_sfb_selector_source_lane(lane, (mma_j & 1) * 2 + half)
+    return _sm120_compact_sfb_owner_row(source_lane, warp_n, mma_j >> 1)
+
+
+def _sm120_compact_scale_issue_contract(lane: int, warp_m: int, warp_n: int) -> list[dict[str, int | str]]:
+    """Return the compact-selector OMMA.SF scale contract for one lane.
+
+    This is a pure specification helper for tests and future lowering work. It
+    models which lane supplies the SFA/SFB scale register selected by each
+    ``mma.sync.m16n8k64.kind::mxf4nvf4.block_scale`` issue.
+    """
+
+    issues: list[dict[str, int | str]] = []
+    for mma_i in range(4):
+        sa_reg_group = mma_i >> 1
+        sa_tid = mma_i & 1
+        sa_source_lane = _sm120_sfa_selector_source_lane(lane, sa_tid)
+        for mma_j in range(4):
+            sb_reg_group = mma_j >> 1
+            for half in range(2):
+                sb_tid = (mma_j & 1) * 2 + half
+                sb_source_lane = _sm120_sfb_selector_source_lane(lane, sb_tid)
+                issues.append(
+                    {
+                        "mma_i": mma_i,
+                        "mma_j": mma_j,
+                        "half": half,
+                        "sa_reg": f"sa{sa_reg_group}",
+                        "sa_tid": sa_tid,
+                        "sa_source_lane": sa_source_lane,
+                        "sfa_row": _sm120_compact_sfa_owner_row(sa_source_lane, warp_m, sa_reg_group),
+                        "sb_reg": f"sb{sb_reg_group}",
+                        "sb_tid": sb_tid,
+                        "sb_source_lane": sb_source_lane,
+                        "sfb_row": _sm120_compact_sfb_owner_row(sb_source_lane, warp_n, sb_reg_group),
+                    }
+                )
+    return issues
+
+
+def _sm120_compact_scale_copy_view_contract(lane: int, warp_m: int, warp_n: int, k64_word: int) -> list[dict[str, object]]:
+    """Return per-issue scale rows plus BlockScaledBasicChunk word addresses."""
+
+    issues: list[dict[str, object]] = []
+    for issue in _sm120_compact_scale_issue_contract(lane, warp_m, warp_n):
+        sfa_word_coord = blockscaled_chunk_kmajor_word_offset(int(issue["sfa_row"]), k64_word)
+        sfb_word_coord = blockscaled_chunk_kmajor_word_offset(int(issue["sfb_row"]), k64_word)
+        issues.append(
+            {
+                **issue,
+                "k64_word": k64_word,
+                "sfa_word_coord": sfa_word_coord,
+                "sfa_word_offset": sfa_word_coord[0] * _BLOCKSCALED_CHUNK_WORDS + sfa_word_coord[1],
+                "sfb_word_coord": sfb_word_coord,
+                "sfb_word_offset": sfb_word_coord[0] * _BLOCKSCALED_CHUNK_WORDS + sfb_word_coord[1],
+            }
+        )
+    return issues
+
+
+def _sm120_compact_scale_producer_contract(warp_m: int, warp_n: int) -> list[dict[str, object]]:
+    """Return the source-lane register assignment required by current OMMA.SF.
+
+    This is the inverse view of ``_sm120_compact_scale_issue_contract``. It says
+    which producer lane supplies the scale register consumed by each issue. A
+    future compact scale-copy lowering must preserve these semantic rows while
+    changing how the producer lanes load/package the registers.
+    """
+
+    rows: list[dict[str, object]] = []
+    for mma_i in range(4):
+        sa_tid = mma_i & 1
+        sa_reg_group = mma_i >> 1
+        for producer_lane in range(32):
+            consumers = [lane for lane in range(32) if _sm120_sfa_selector_source_lane(lane, sa_tid) == producer_lane]
+            if not consumers:
+                continue
+            rows.append(
+                {
+                    "kind": "SFA",
+                    "mma_i": mma_i,
+                    "sa_tid": sa_tid,
+                    "sa_reg": f"sa{sa_reg_group}",
+                    "producer_lane": producer_lane,
+                    "consumers": tuple(consumers),
+                    "row": _sm120_compact_sfa_owner_row(producer_lane, warp_m, sa_reg_group),
+                }
+            )
+
+    for mma_j in range(4):
+        sb_reg_group = mma_j >> 1
+        for half in range(2):
+            sb_tid = (mma_j & 1) * 2 + half
+            for producer_lane in range(32):
+                consumers = [lane for lane in range(32) if _sm120_sfb_selector_source_lane(lane, sb_tid) == producer_lane]
+                if not consumers:
+                    continue
+                rows.append(
+                    {
+                        "kind": "SFB",
+                        "mma_j": mma_j,
+                        "half": half,
+                        "sb_tid": sb_tid,
+                        "sb_reg": f"sb{sb_reg_group}",
+                        "producer_lane": producer_lane,
+                        "consumers": tuple(consumers),
+                        "row": _sm120_compact_sfb_owner_row(producer_lane, warp_n, sb_reg_group),
+                    }
+                )
+    return rows
+
+
+def _sm120_compact_package_consumer_byte_offsets(lane: int, warp_m: int, warp_n: int, k64_word: int) -> dict[str, tuple[int, ...]]:
+    """Return the current package's per-consumer byte offsets for one K64 word."""
+
+    issues = _sm120_compact_scale_copy_view_contract(lane, warp_m, warp_n, k64_word)
+    sfa_offsets = tuple(int(issue["sfa_word_offset"]) * 4 for issue in issues[0::8])
+    sfb_offsets = tuple(int(issue["sfb_word_offset"]) * 4 for issue in issues[:8])
+    return {"SFA": sfa_offsets, "SFB": sfb_offsets}
+
+
+def _sm120_cutlass_issue_site_contract(site: int) -> dict[str, int]:
+    """Return CUTLASS/CuTe SM120 fulltile issue-site coordinates.
+
+    The traversal covers four K64 atoms. Each K64 atom issues eight N8 atoms,
+    and each N8 atom visits four M atoms. Odd N8 atoms reverse the M order.
+    """
+
+    if site < 0 or site >= 128:
+        raise ValueError(f"site must be in [0, 128), got {site}")
+    k_block = site // 32
+    site_in_k = site % 32
+    n8_atom = site_in_k // 4
+    m_serp = site_in_k % 4
+    m_atom = m_serp if n8_atom % 2 == 0 else 3 - m_serp
+    n16_col = n8_atom // 2
+    n8_half = n8_atom % 2
+    return {
+        "site": site,
+        "k_block": k_block,
+        "m_atom": m_atom,
+        "n8_atom": n8_atom,
+        "n16_col": n16_col,
+        "n8_half": n8_half,
+        "A_slot0": 128 * m_atom + 32 * k_block,
+        "B_slot0": 64 * n8_half + 128 * n16_col + 16 * k_block,
+        "SFA_slot0": 4 * m_atom + 16 * k_block,
+        "SFB_slot0": 4 * n16_col + 16 * n8_half + 32 * k_block,
+        "C_slot0": 4 * m_atom + 32 * n16_col + 16 * n8_half,
+    }
+
+
+def _sm120_tilelang_current_issue_site_contract(site: int) -> dict[str, int]:
+    """Return the current package helper's issue coordinates for comparison."""
+
+    if site < 0 or site >= 128:
+        raise ValueError(f"site must be in [0, 128), got {site}")
+    k_block = site // 32
+    site_in_k = site % 32
+    mma_i = site_in_k // 8
+    n_site = site_in_k % 8
+    mma_j = n_site // 2
+    half = n_site & 1
+    return {
+        "site": site,
+        "k_block": k_block,
+        "mma_i": mma_i,
+        "mma_j": mma_j,
+        "half": half,
+        "sa_reg_group": mma_i >> 1,
+        "sa_tid": mma_i & 1,
+        "sb_reg_group": mma_j >> 1,
+        "sb_tid": (mma_j & 1) * 2 + half,
+    }
 
 
 def _pack_semantic_scale_words(scale_bytes):
@@ -59,51 +281,51 @@ def _packed_word(packed, logical_row: int, k64_word: int) -> int:
 
 
 def _sfa_row_in_lane(lane: int) -> int:
-    return nvfp4_utils._sm120_sfa_row_in_lane(lane)
+    return _sm120_sfa_row_in_lane(lane)
 
 
 def _sfb_col_in_lane(lane: int) -> int:
-    return nvfp4_utils._sm120_sfb_col_in_lane(lane)
+    return _sm120_sfb_col_in_lane(lane)
 
 
 def _sfa_selector_source_lane(lane: int, scale_a_thread_id: int) -> int:
-    return nvfp4_utils._sm120_sfa_selector_source_lane(lane, scale_a_thread_id)
+    return _sm120_sfa_selector_source_lane(lane, scale_a_thread_id)
 
 
 def _sfb_selector_source_lane(lane: int, scale_b_thread_id: int) -> int:
-    return nvfp4_utils._sm120_sfb_selector_source_lane(lane, scale_b_thread_id)
+    return _sm120_sfb_selector_source_lane(lane, scale_b_thread_id)
 
 
 def _current_compact_sfa_row(lane: int, warp_m: int, mma_i: int) -> int:
-    return nvfp4_utils._sm120_compact_sfa_effective_row(lane, warp_m, mma_i)
+    return _sm120_compact_sfa_effective_row(lane, warp_m, mma_i)
 
 
 def _current_compact_sfb_row(lane: int, warp_n: int, mma_j: int, half: int) -> int:
-    return nvfp4_utils._sm120_compact_sfb_effective_row(lane, warp_n, mma_j, half)
+    return _sm120_compact_sfb_effective_row(lane, warp_n, mma_j, half)
 
 
 def _compact_issue_contract(lane: int, warp_m: int, warp_n: int):
-    return nvfp4_utils._sm120_compact_scale_issue_contract(lane, warp_m, warp_n)
+    return _sm120_compact_scale_issue_contract(lane, warp_m, warp_n)
 
 
 def _compact_copy_view_contract(lane: int, warp_m: int, warp_n: int, k64_word: int):
-    return nvfp4_utils._sm120_compact_scale_copy_view_contract(lane, warp_m, warp_n, k64_word)
+    return _sm120_compact_scale_copy_view_contract(lane, warp_m, warp_n, k64_word)
 
 
 def _compact_producer_contract(warp_m: int, warp_n: int):
-    return nvfp4_utils._sm120_compact_scale_producer_contract(warp_m, warp_n)
+    return _sm120_compact_scale_producer_contract(warp_m, warp_n)
 
 
 def _compact_package_consumer_byte_offsets(lane: int, warp_m: int, warp_n: int, k64_word: int):
-    return nvfp4_utils._sm120_compact_package_consumer_byte_offsets(lane, warp_m, warp_n, k64_word)
+    return _sm120_compact_package_consumer_byte_offsets(lane, warp_m, warp_n, k64_word)
 
 
 def _cutlass_issue_site_contract(site: int):
-    return nvfp4_utils._sm120_cutlass_issue_site_contract(site)
+    return _sm120_cutlass_issue_site_contract(site)
 
 
 def _tilelang_current_issue_site_contract(site: int):
-    return nvfp4_utils._sm120_tilelang_current_issue_site_contract(site)
+    return _sm120_tilelang_current_issue_site_contract(site)
 
 
 def _unpack_with_oracle(packed, rows: int, k16_cols: int):
@@ -133,11 +355,13 @@ def test_blockscaled_chunk_kmajor_word_offset_fixed_cases():
         assert blockscaled_chunk_kmajor_word_offset(row, k64_word) == physical
 
 
-def test_sm120_contract_helpers_stay_internal_to_nvfp4_module():
+def test_sm120_contract_helpers_stay_out_of_the_quantize_module():
+    # The OMMA scale-selector contract oracles live in this test file; the
+    # quantize module stays focused on quantization and layout packing.
     import tilelang.quantize as quantize
 
-    assert hasattr(nvfp4_utils, "_sm120_compact_scale_issue_contract")
-    assert hasattr(nvfp4_utils, "_sm120_compact_scale_copy_view_contract")
+    assert not hasattr(nvfp4_utils, "_sm120_compact_scale_issue_contract")
+    assert not hasattr(nvfp4_utils, "_sm120_compact_scale_copy_view_contract")
     assert not hasattr(quantize, "_sm120_compact_scale_issue_contract")
     assert not hasattr(quantize, "_sm120_compact_scale_copy_view_contract")
 
