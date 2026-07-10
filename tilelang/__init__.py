@@ -215,8 +215,10 @@ if not env.is_light_import():
 
 del _lazy_load_lib
 
-# Install pass diff hook if TILELANG_PASS_DIFF is enabled (zero overhead when off)
-from .utils.pass_diff_hook import install_pass_diff_hook as _install_pass_diff_hook  # noqa: E402
+# Install pass diff hook if TILELANG_PASS_DIFF is enabled (zero overhead when off).
+# AutoDD uses a light package import so its CLI can run without loading TVM.
+if not env.is_light_import():
+    from .utils.pass_diff_hook import install_pass_diff_hook as _install_pass_diff_hook  # noqa: E402
 
-_install_pass_diff_hook()
-del _install_pass_diff_hook
+    _install_pass_diff_hook()
+    del _install_pass_diff_hook
