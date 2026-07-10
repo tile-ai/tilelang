@@ -16,7 +16,7 @@ def test_reduce_bitwise_rejects_float_dtype(op_name, dtype):
 
     @T.prim_func
     def main(A: T.Tensor((M, N), dtype), Out: T.Tensor((M,), dtype)):
-        with T.Kernel(1, threads=128) as bx:
+        with T.Kernel(1, threads=128):
             A_fr = T.alloc_fragment((M, N), dtype)
             B_fr = T.alloc_fragment((M,), dtype)
             T.copy(A, A_fr)
@@ -33,7 +33,7 @@ def test_reduce_bitwise_accepts_int32(op_name):
 
     @T.prim_func
     def main(A: T.Tensor((M, N), "int32"), Out: T.Tensor((M,), "int32")):
-        with T.Kernel(1, threads=128) as bx:
+        with T.Kernel(1, threads=128):
             A_fr = T.alloc_fragment((M, N), "int32")
             B_fr = T.alloc_fragment((M,), "int32")
             T.copy(A, A_fr)
