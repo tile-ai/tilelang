@@ -145,57 +145,6 @@ TL_DEVICE void sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3_regs(
         "h"(scale_b_thread_id));
 }
 
-TL_DEVICE void sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3_accum_regs(
-    float *d, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0,
-    uint32_t b1, uint32_t scale_a, uint32_t scale_b,
-    uint16_t scale_a_byte_id = 0, uint16_t scale_a_thread_id = 0,
-    uint16_t scale_b_byte_id = 0, uint16_t scale_b_thread_id = 0) {
-  asm volatile(
-      "mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale.scale_vec::"
-      "4X.f32.e2m1.e2m1.f32.ue4m3 "
-      "{%0, %1, %2, %3}, "
-      "{%4, %5, %6, %7}, "
-      "{%8, %9}, "
-      "{%0, %1, %2, %3}, "
-      "{%10}, {%11, %12}, "
-      "{%13}, {%14, %15};\n"
-      : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
-      : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "r"(scale_a),
-        "h"(scale_a_byte_id), "h"(scale_a_thread_id), "r"(scale_b),
-        "h"(scale_b_byte_id), "h"(scale_b_thread_id));
-}
-
-TL_DEVICE void sm120_mma2_m16n8k64_mxf4nvf4_4x_ue4m3_same_b_regs(
-    float *d0, uint32_t a00, uint32_t a01, uint32_t a02, uint32_t a03,
-    const float *c0, uint32_t scale_a0, float *d1, uint32_t a10, uint32_t a11,
-    uint32_t a12, uint32_t a13, const float *c1, uint32_t scale_a1, uint32_t b0,
-    uint32_t b1, uint32_t scale_b) {
-  uint16_t const zero = 0;
-  asm volatile(
-      "mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale.scale_vec::"
-      "4X.f32.e2m1.e2m1.f32.ue4m3 "
-      "{%0, %1, %2, %3}, "
-      "{%8, %9, %10, %11}, "
-      "{%16, %17}, "
-      "{%18, %19, %20, %21}, "
-      "{%26}, {%29, %29}, "
-      "{%28}, {%29, %29};\n"
-      "mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale.scale_vec::"
-      "4X.f32.e2m1.e2m1.f32.ue4m3 "
-      "{%4, %5, %6, %7}, "
-      "{%12, %13, %14, %15}, "
-      "{%16, %17}, "
-      "{%22, %23, %24, %25}, "
-      "{%27}, {%29, %29}, "
-      "{%28}, {%29, %29};\n"
-      : "=&f"(d0[0]), "=&f"(d0[1]), "=&f"(d0[2]), "=&f"(d0[3]), "=&f"(d1[0]),
-        "=&f"(d1[1]), "=&f"(d1[2]), "=&f"(d1[3])
-      : "r"(a00), "r"(a01), "r"(a02), "r"(a03), "r"(a10), "r"(a11), "r"(a12),
-        "r"(a13), "r"(b0), "r"(b1), "f"(c0[0]), "f"(c0[1]), "f"(c0[2]),
-        "f"(c0[3]), "f"(c1[0]), "f"(c1[1]), "f"(c1[2]), "f"(c1[3]),
-        "r"(scale_a0), "r"(scale_a1), "r"(scale_b), "h"(zero));
-}
-
 TL_DEVICE void sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3(
     float *d, const uint32_t *a, const uint32_t *b, const float *c,
     uint32_t scale_a, uint32_t scale_b, uint16_t scale_a_byte_id = 0,
