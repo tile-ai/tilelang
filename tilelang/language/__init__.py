@@ -76,6 +76,8 @@ from .gemm_op import (  # noqa: F401
     tcgen05_gemm_blockscaled,
     mma_gemm_blockscaled,
     make_blockscaled_gemm_layout,
+    copy_ue4m3_scale_tile,
+    ue4m3_scale_tile_source_coords,
 )
 from .experimental.gemm_sp_op import (  # noqa: F401
     gemm_sp,

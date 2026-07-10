@@ -151,18 +151,19 @@ def tilelang_nvfp4_blockscaled_gemm(
 
         @T.macro
         def copy_blockscaled_chunk_kmajor_scale_tile(SF, SF_shared, tile_row, block_rows, ko, stage, tx):
-            scale_cols = K // 64
+            # Producer-warp-group staging: 128 producer lanes stride the tile,
+            # with the layout addressing shared via ue4m3_scale_tile_source_coords.
             scale_tile_words = block_rows * sf_words_per_block_k
             scale_lane = tx - 256
             for scale_iter in T.serial((scale_tile_words + 127) // 128):
                 scale_flat = scale_iter * 128 + scale_lane
                 if scale_flat < scale_tile_words:
-                    global_flat = tile_row * block_rows * scale_cols + ko * sf_words_per_block_k * block_rows + scale_flat
+                    row, col = T.ue4m3_scale_tile_source_coords(SF, block_rows, sf_words_per_block_k, tile_row, ko, scale_flat)
                     SF_shared[
                         stage,
                         scale_flat // sf_words_per_block_k,
                         scale_flat % sf_words_per_block_k,
-                    ] = SF[global_flat // scale_cols, global_flat % scale_cols]
+                    ] = SF[row, col]
 
         @T.prim_func
         def main(

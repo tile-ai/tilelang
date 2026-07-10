@@ -60,17 +60,6 @@ def sm120_nvfp4_blockscaled_gemm(
     sf_words_per_block_k = block_K // 64
     sf_granularity_k = 16
 
-    @T.macro
-    def copy_packed_scale_tile(SF, SF_shared, tile_row, ko):
-        scale_cols = K // 64
-        scale_tile_words = block_M * sf_words_per_block_k
-        for scale_flat in T.Parallel(scale_tile_words):
-            global_flat = tile_row * block_M * scale_cols + ko * sf_words_per_block_k * block_M + scale_flat
-            SF_shared[
-                scale_flat // sf_words_per_block_k,
-                scale_flat % sf_words_per_block_k,
-            ] = SF[global_flat // scale_cols, global_flat % scale_cols]
-
     @T.prim_func
     def main(
         A: T.Tensor((M, K), in_dtype),
@@ -101,8 +90,8 @@ def sm120_nvfp4_blockscaled_gemm(
                     B_shared,
                     annotations={"prefer_instruction": "tma"},
                 )
-                copy_packed_scale_tile(SFA, SFA_shared, by, ko)
-                copy_packed_scale_tile(SFB, SFB_shared, bx, ko)
+                T.copy_ue4m3_scale_tile(SFA, SFA_shared, by, ko)
+                T.copy_ue4m3_scale_tile(SFB, SFB_shared, bx, ko)
                 T.mma_gemm_blockscaled(
                     A_shared,
                     B_shared,
