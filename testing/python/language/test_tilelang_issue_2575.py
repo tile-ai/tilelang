@@ -4,6 +4,7 @@ T.alloc_var("float64", init=v) should accept valid float64 values even when
 |v| exceeds float32 range (e.g. 1e300).  Previously the init literal went
 through an FFI fallback that hardcoded float32, rejecting such values.
 """
+
 import tilelang
 import tilelang.language as T
 import tilelang.testing
