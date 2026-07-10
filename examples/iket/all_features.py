@@ -2,10 +2,10 @@
 
 This example covers the current TileLang IKET feature set:
 
-* T.iket.session(output_dir=...)
-* T.iket.range(...)
-* T.iket.mark(...)
-* T.iket.payload(...) runtime scalar values
+* iket.session(output_dir=...)
+* iket.range(...)
+* iket.mark(...)
+* iket.payload(...) runtime scalar values
 """
 
 import argparse
@@ -15,6 +15,7 @@ import torch
 
 import tilelang
 import tilelang.language as T
+from tilelang.tools.cuda import iket
 
 
 N = 2048
@@ -29,17 +30,17 @@ def add_scale_with_iket(n: int, threads: int = THREADS, dtype=T.float32):
         Scale: T.Tensor((1,), dtype),
         C: T.Tensor((n,), dtype),
     ):
-        with T.Kernel(T.ceildiv(n, threads), threads=threads) as bx, T.iket.range("block_total"):
-            T.iket.mark("block_enter", payload=T.iket.payload(bx, dtype="int32"))
+        with T.Kernel(T.ceildiv(n, threads), threads=threads) as bx, iket.range("block_total"):
+            iket.mark("block_enter", payload=iket.payload(bx, dtype="int32"))
             for i in T.Parallel(threads):
                 idx = bx * threads + i
                 if idx < n:
-                    T.iket.mark("load_inputs")
+                    iket.mark("load_inputs")
                     value = (A[idx] + B[idx]) * Scale[0]
-                    T.iket.mark("store_index", payload=T.iket.payload(idx, dtype="int32"))
+                    iket.mark("store_index", payload=iket.payload(idx, dtype="int32"))
                     C[idx] = value
-                    T.iket.mark("store_done")
-            T.iket.mark("block_exit", payload=T.iket.payload(bx, dtype="int32"))
+                    iket.mark("store_done")
+            iket.mark("block_exit", payload=iket.payload(bx, dtype="int32"))
 
     return main
 
@@ -58,21 +59,17 @@ def main() -> None:
     args = parser.parse_args()
 
     torch.cuda.init()
-    with T.iket.session(output_dir=args.iket_output_dir, runtime_payloads=args.iket_runtime_payloads):
+    with iket.session(output_dir=args.iket_output_dir, runtime_payloads=args.iket_runtime_payloads):
         program = add_scale_with_iket(N)
-        print(f"event_table={T.iket.event_table()}")
-        print(f"iket_output_dir={T.iket.output_dir()}")
-        print(f"runtime_payloads_enabled={T.iket.runtime_payloads_enabled()}")
-        tilelang.disable_cache()
-        try:
-            kernel = tilelang.compile(
-                program,
-                out_idx=-1,
-                target="cuda",
-                execution_backend="cython",
-            )
-        finally:
-            tilelang.enable_cache()
+        print(f"event_table={iket.event_table()}")
+        print(f"iket_output_dir={iket.output_dir()}")
+        print(f"runtime_payloads_enabled={iket.runtime_payloads_enabled()}")
+        kernel = tilelang.compile(
+            program,
+            out_idx=-1,
+            target="cuda",
+            execution_backend="cython",
+        )
 
     a = torch.arange(N, device="cuda", dtype=torch.float32)
     b = torch.full((N,), 3.0, device="cuda", dtype=torch.float32)
@@ -82,7 +79,7 @@ def main() -> None:
     torch.testing.assert_close(c, (a + b) * scale[0])
 
     source = kernel.get_kernel_source()
-    source_out = T.iket.output_path("tilelang_iket_all_features_kernel.cu", directory=args.iket_output_dir)
+    source_out = iket.output_path("tilelang_iket_all_features_kernel.cu", directory=args.iket_output_dir)
     source_out.write_text(source)
 
     print("tilelang cuda backend payload run ok")

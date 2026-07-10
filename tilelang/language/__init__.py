@@ -161,8 +161,6 @@ from .pdl import (
     pdl_sync,  # noqa: F401
 )
 
-from . import iket as iket  # noqa: F401
-
 from .cluster import (
     cluster_arrive_relaxed,  # noqa: F401
     cluster_arrive,  # noqa: F401

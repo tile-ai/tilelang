@@ -1,20 +1,21 @@
 # IKET Profiling for the TileLang CUDA Backend
 
-This page documents the experimental `T.iket` frontend hooks for profiling
-TileLang CUDA kernels with IKET. The implementation is intentionally scoped to
-the regular TileLang CUDA backend. It does not depend on TileScale or on the
-CuTe DSL frontend, although it consumes the same external IKET runtime and trace
-viewer format.
+This page documents the experimental `tilelang.tools.cuda.iket` API for
+profiling TileLang CUDA kernels with IKET. The implementation is intentionally
+scoped to the regular TileLang CUDA backend. It does not depend on TileScale or
+on the CuTe DSL frontend, although it consumes the same external IKET runtime
+and trace viewer format. `tilelang.language` does not export IKET; import it
+from the CUDA tools package instead.
 
 ## What Is Supported
 
 The current TileLang integration supports:
 
-- Kernel timeline markers through `T.iket.mark(...)`.
-- Warp-local ranges through `T.iket.range(...)`, `T.iket.range_push(...)`, and
-  `T.iket.range_pop(...)`.
-- Runtime scalar payload capture through `T.iket.payload(...)`.
-- A process-local output directory through `T.iket.session(output_dir=...)`.
+- Kernel timeline markers through `iket.mark(...)`.
+- Warp-local ranges through `iket.range(...)`, `iket.range_push(...)`, and
+  `iket.range_pop(...)`.
+- Runtime scalar payload capture through `iket.payload(...)`.
+- A process-local output directory through `iket.session(output_dir=...)`.
 - Helper APIs for trace discovery and IKET CLI command construction.
 - Perfetto-compatible `.pftrace`, `.pftrace.gz`, `.trace.json`, and `.html`
   exports through the external IKET CLI.
@@ -42,6 +43,10 @@ these examples, that environment is named `tl`:
 conda run -n tl python -c "import tilelang, iket, torch"
 ```
 
+Both pre-Hopper and Hopper CUDA targets are supported. On SM90 and newer, IKET
+addressing reads `%cluster_ctarank`; on pre-Hopper targets, or when the target
+architecture is unknown, the CUDA tool uses cluster rank `0`.
+
 The IKET profiler is launched through:
 
 ```bash
@@ -54,35 +59,37 @@ You usually do not need to set those variables manually when using
 
 ## Basic Usage
 
-Use `T.iket.session(...)` around the TileLang compile step. The session resets
-the local event registry, enables the CUDA post-processing hook, optionally sets
-the output directory, and restores the previous state on exit.
+Import IKET from `tilelang.tools.cuda` and use `iket.session(...)` around the
+TileLang compile step. The session resets the local event registry, enables the
+CUDA post-processing hook, disables the kernel cache by default, optionally
+sets the output directory, and restores the previous state on exit.
 
 ```python
 import tilelang
 import tilelang.language as T
+from tilelang.tools.cuda import iket
 
 
 def kernel_with_markers(n: int, threads: int = 128, dtype=T.float32):
     @T.prim_func
     def main(A: T.Tensor((n,), dtype), C: T.Tensor((n,), dtype)):
         with T.Kernel(T.ceildiv(n, threads), threads=threads) as bx:
-            with T.iket.range("block_total"):
-                T.iket.mark("block_enter", payload=T.iket.payload(bx, dtype="int32"))
+            with iket.range("block_total"):
+                iket.mark("block_enter", payload=iket.payload(bx, dtype="int32"))
                 for i in T.Parallel(threads):
                     idx = bx * threads + i
                     if idx < n:
-                        T.iket.mark("load_inputs")
+                        iket.mark("load_inputs")
                         value = A[idx] + 1.0
-                        T.iket.mark("store_index", payload=T.iket.payload(idx, dtype="int32"))
+                        iket.mark("store_index", payload=iket.payload(idx, dtype="int32"))
                         C[idx] = value
-                        T.iket.mark("store_done")
-                T.iket.mark("block_exit", payload=T.iket.payload(bx, dtype="int32"))
+                        iket.mark("store_done")
+                iket.mark("block_exit", payload=iket.payload(bx, dtype="int32"))
 
     return main
 
 
-with T.iket.session(
+with iket.session(
     output_dir="/tmp/tilelang_iket_example",
     runtime_payloads=True,
 ):
@@ -98,12 +105,16 @@ with T.iket.session(
 Important details:
 
 - `runtime_payloads=True` is required if the trace should contain real payload
-  values. Without it, payload APIs still register schema information locally, but
+  values. Without it, payload APIs still encode schema information in TIR, but
   emitted IKET metadata keeps payload type `NoPayload`.
-- `T.iket.payload(expr, dtype=...)` must be passed to `payload=`. Passing raw
+- `disable_cache=True` is the default. It bypasses `KernelCache` while the
+  session is active so an uninstrumented binary, or one compiled under a
+  different runtime payload mode, cannot be reused. The previous cache state is
+  restored when the session exits.
+- `iket.payload(expr, dtype=...)` must be passed to `payload=`. Passing raw
   values is allowed only for simple inferred dtypes.
 - Ranges are warp-local in the IKET trace. A block with four warps can produce
-  four range instances for one lexical `T.iket.range(...)`.
+  four range instances for one lexical `iket.range(...)`.
 
 ## Running the Included Examples
 
@@ -252,15 +263,16 @@ A successful all-features run should contain:
 
 ## API Reference
 
-### `T.iket.session(...)`
+### `iket.session(...)`
 
 ```python
-with T.iket.session(
+with iket.session(
     reset_events=True,
     override=True,
     disable_on_exit=True,
     output_dir=None,
     runtime_payloads=None,
+    disable_cache=True,
 ):
     ...
 ```
@@ -273,37 +285,42 @@ Parameters:
 - `output_dir`: set `TL_IKET_OUTPUT_DIR` and create the directory.
 - `runtime_payloads`: enable or disable runtime payload metadata for this
   session. `None` preserves the previous global setting.
+- `disable_cache`: bypass TileLang's `KernelCache` during the session and
+  restore its previous state on exit. Keep the default unless the caller can
+  guarantee that cached binaries were compiled with the same IKET
+  instrumentation and runtime payload mode.
 
-### `T.iket.mark(name, payload=None)`
+### `iket.mark(name, payload=None)`
 
 Emits an instant marker. The name is registered once per compile session and
-mapped to an IKET event id.
+mapped to an IKET event id. Event names are limited to 32 UTF-8 bytes by the
+IKET metadata layout.
 
 ```python
-T.iket.mark("load_inputs")
-T.iket.mark("store_index", payload=T.iket.payload(idx, dtype="int32"))
+iket.mark("load_inputs")
+iket.mark("store_index", payload=iket.payload(idx, dtype="int32"))
 ```
 
-### `T.iket.range(name, payload=None)`
+### `iket.range(name, payload=None)`
 
 Python context manager that emits `range_push` on entry and `range_pop` on exit.
 
 ```python
-with T.iket.range("block_total"):
+with iket.range("block_total"):
     ...
 ```
 
 `range_push` can carry a payload, but `range_pop` uses IKET's reserved range-end
 event and does not carry a user payload in the TileLang implementation.
 
-### `T.iket.payload(expr, dtype=None)`
+### `iket.payload(expr, dtype=None)`
 
 Creates a payload descriptor for a scalar expression.
 
 ```python
-T.iket.payload(idx, dtype="int32")
-T.iket.payload(flag, dtype="uint32")
-T.iket.payload(value, dtype="float32")
+iket.payload(idx, dtype="int32")
+iket.payload(flag, dtype="uint32")
+iket.payload(value, dtype="float32")
 ```
 
 Use an explicit dtype for TileLang expressions. Inference is only intended for
@@ -312,11 +329,11 @@ simple Python scalar values and expressions that expose a `dtype` attribute.
 ### Output Helpers
 
 ```python
-T.iket.set_output_dir("/tmp/iket")
-T.iket.output_dir()
-T.iket.output_path("kernel.cu")
-T.iket.trace_files()
-T.iket.profile_command([...], directory="/tmp/iket")
+iket.set_output_dir("/tmp/iket")
+iket.output_dir()
+iket.output_path("kernel.cu")
+iket.trace_files()
+iket.profile_command([...], directory="/tmp/iket")
 ```
 
 These helpers are host-side conveniences. They do not run the IKET profiler by
@@ -324,12 +341,14 @@ themselves.
 
 ## Implementation Overview
 
-The integration has three layers.
+The integration has three layers, all owned by the CUDA tool rather than the
+TileLang language namespace.
 
-### 1. Frontend Event Registry
+### 1. Self-Contained Event Metadata
 
-`tilelang/language/iket.py` keeps a process-local registry of events and ranges.
-Each `mark` or `range_push` call records:
+The `tilelang/tools/cuda/iket/` package owns the kernel instrumentation helpers
+and keeps a process-local registry for event-id allocation, validation, and
+introspection. Each `mark` or `range_push` call describes:
 
 - event name
 - event id
@@ -338,20 +357,32 @@ Each `mark` or `range_push` call records:
 - payload dtype schema
 - IKET payload type id
 
-The frontend call returns a TIR extern call such as:
+The tool encodes that description as a canonical metadata token and appends it
+to the TIR extern call as a `StringImm`. Conceptually, the calls have this shape:
 
 ```python
-tirx.call_extern("handle", "TL_IKET_EVENT", event_id)
-tirx.call_extern("handle", "TL_IKET_EVENT_PAYLOAD_U32", event_id, payload_expr)
+tirx.call_extern("handle", "TL_IKET_EVENT", event_id, metadata_token)
+tirx.call_extern(
+    "handle",
+    "TL_IKET_EVENT_PAYLOAD_U32",
+    event_id,
+    payload_expr,
+    metadata_token,
+)
 ```
 
 TileLang's normal CUDA code generator lowers those extern calls into CUDA macro
-invocations.
+invocations. Event names and schemas therefore remain attached to prebuilt
+`PrimFunc` objects and are visible to IR-based cache hashing; the process-local
+registry is not the code-generation source of truth. A session still bypasses
+`KernelCache` by default because callback activation and runtime payload mode
+are host-side compile state rather than part of the `PrimFunc`.
 
 ### 2. CUDA Post-Processing
 
-`T.iket.enable()` registers a `tilelang_callback_cuda_postproc` callback. The
-callback injects two things into the generated CUDA source:
+`iket.enable()` registers a `tilelang_callback_cuda_postproc` callback. The
+callback recovers the metadata table from the tokens embedded in the generated
+CUDA source and injects two things:
 
 - IKET metadata arrays with `__device__ __attribute__((used, aligned(1)))`.
 - Inline PTX macros that write event records to IKET's shared-memory dump area
@@ -403,12 +434,20 @@ No-payload events keep the 4-byte record. Mixing 4-byte no-payload records and
 8-byte payload records is required because the IKET decoder uses the payload type
 declared in metadata to decode each event.
 
+The shared-memory address includes the CUDA cluster rank. SM90 and newer read
+the hardware `%cluster_ctarank` register. Pre-Hopper targets and targets whose
+architecture cannot be identified use rank `0`, avoiding Hopper-only PTX on
+otherwise supported CUDA architectures.
+
 ## Known Limitations
 
 - Only CUDA backend profiling is supported.
 - Only 32-bit runtime payloads are emitted by TileLang today.
+- Event and range names are limited to 32 UTF-8 bytes.
 - Runtime payload metadata is opt-in through `runtime_payloads=True`.
 - Source-code location tables are not generated by this integration.
+- Cluster addressing uses `%cluster_ctarank` on SM90 and newer. Pre-Hopper and
+  unknown target architectures use cluster rank `0`.
 - The implementation depends on the external IKET runtime's private metadata and
   NativeDump conventions, so it should be treated as experimental.
 - IKET records events at warp granularity. Payload values often correspond to
@@ -440,14 +479,14 @@ If that still does not load the trace, open Perfetto manually and import the
 Make sure the kernel was compiled inside:
 
 ```python
-with T.iket.session(runtime_payloads=True):
+with iket.session(runtime_payloads=True):
     ...
 ```
 
 Also make sure the event uses:
 
 ```python
-T.iket.mark("name", payload=T.iket.payload(expr, dtype="int32"))
+iket.mark("name", payload=iket.payload(expr, dtype="int32"))
 ```
 
 ### The profiler crashes in `patchKernel`

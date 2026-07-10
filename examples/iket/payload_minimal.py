@@ -7,6 +7,7 @@ import torch
 
 import tilelang
 import tilelang.language as T
+from tilelang.tools.cuda import iket
 
 
 N = 128
@@ -20,7 +21,7 @@ def payload_mark_kernel(n: int, threads: int = THREADS, dtype=T.float32):
             for i in T.Parallel(threads):
                 idx = bx * threads + i
                 if idx < n:
-                    T.iket.mark("store_index", payload=T.iket.payload(idx, dtype="int32"))
+                    iket.mark("store_index", payload=iket.payload(idx, dtype="int32"))
                     C[idx] = A[idx] + 1.0
 
     return main
@@ -36,15 +37,11 @@ def main() -> None:
     args = parser.parse_args()
 
     torch.cuda.init()
-    with T.iket.session(output_dir=args.iket_output_dir, runtime_payloads=args.iket_runtime_payloads):
+    with iket.session(output_dir=args.iket_output_dir, runtime_payloads=args.iket_runtime_payloads):
         program = payload_mark_kernel(N)
-        print(f"event_table={T.iket.event_table()}")
-        print(f"runtime_payloads_enabled={T.iket.runtime_payloads_enabled()}")
-        tilelang.disable_cache()
-        try:
-            kernel = tilelang.compile(program, out_idx=-1, target="cuda", execution_backend="cython")
-        finally:
-            tilelang.enable_cache()
+        print(f"event_table={iket.event_table()}")
+        print(f"runtime_payloads_enabled={iket.runtime_payloads_enabled()}")
+        kernel = tilelang.compile(program, out_idx=-1, target="cuda", execution_backend="cython")
 
     a = torch.arange(N, device="cuda", dtype=torch.float32)
     c = kernel(a)
@@ -52,7 +49,7 @@ def main() -> None:
     torch.testing.assert_close(c, a + 1.0)
 
     source = kernel.get_kernel_source()
-    source_out = T.iket.output_path("tilelang_iket_payload_minimal_kernel.cu", directory=args.iket_output_dir)
+    source_out = iket.output_path("tilelang_iket_payload_minimal_kernel.cu", directory=args.iket_output_dir)
     source_out.write_text(source)
     print("tilelang cuda backend minimal payload run ok")
     print(f"source_out={source_out}")
