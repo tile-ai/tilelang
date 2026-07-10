@@ -52,8 +52,8 @@ Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &lower_args,
         }
       }
       if (!supported) {
-        LOG(FATAL) << pretty_name
-                   << " does not support block thread count " << t
+        LOG(FATAL) << pretty_name << " does not support block thread count "
+                   << t
                    << ". Supported thread counts are 32, 64, 128, 256, 512, "
                       "1024. Please adjust the threads argument in "
                       "T.Kernel().";
