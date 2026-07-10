@@ -13,7 +13,7 @@ import tilelang.language as T
 def test_atomic_load_rejects_release():
     @T.prim_func
     def main(Flag: T.Tensor((1,), "int32"), Out: T.Tensor((1,), "int32")):
-        with T.Kernel(1, threads=1) as bx:
+        with T.Kernel(1, threads=1):
             Out[0] = T.atomic_load(Flag[0], memory_order="release")
 
     with pytest.raises(ValueError, match="illegal for a load"):
@@ -23,7 +23,7 @@ def test_atomic_load_rejects_release():
 def test_atomic_load_rejects_acq_rel():
     @T.prim_func
     def main(Flag: T.Tensor((1,), "int32"), Out: T.Tensor((1,), "int32")):
-        with T.Kernel(1, threads=1) as bx:
+        with T.Kernel(1, threads=1):
             Out[0] = T.atomic_load(Flag[0], memory_order="acq_rel")
 
     with pytest.raises(ValueError, match="illegal for a load"):
@@ -34,7 +34,7 @@ def test_atomic_load_rejects_acq_rel():
 def test_atomic_store_rejects_illegal_orders(order):
     @T.prim_func
     def main(Flag: T.Tensor((1,), "int32"), Out: T.Tensor((1,), "int32")):
-        with T.Kernel(1, threads=1) as bx:
+        with T.Kernel(1, threads=1):
             T.atomic_store(Flag[0], 42, memory_order=order)
             Out[0] = Flag[0]
 
@@ -46,7 +46,7 @@ def test_atomic_store_rejects_illegal_orders(order):
 def test_atomic_load_accepts_legal_orders(order):
     @T.prim_func
     def main(Flag: T.Tensor((1,), "int32"), Out: T.Tensor((1,), "int32")):
-        with T.Kernel(1, threads=1) as bx:
+        with T.Kernel(1, threads=1):
             Out[0] = T.atomic_load(Flag[0], memory_order=order)
 
     # Should NOT raise
@@ -57,7 +57,7 @@ def test_atomic_load_accepts_legal_orders(order):
 def test_atomic_store_accepts_legal_orders(order):
     @T.prim_func
     def main(Flag: T.Tensor((1,), "int32"), Out: T.Tensor((1,), "int32")):
-        with T.Kernel(1, threads=1) as bx:
+        with T.Kernel(1, threads=1):
             T.atomic_store(Flag[0], 42, memory_order=order)
             Out[0] = Flag[0]
 
