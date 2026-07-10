@@ -431,8 +431,12 @@ def swizzle_blockscaled_chunk_kmajor_scale_words(words, block_rows: int = 128, b
     Returns
     -------
     torch.Tensor
-        ``torch.uint32`` tensor with the same shape, physically ordered for the
-        CUTLASS ``BlockScaledBasicChunk`` K-major source layout.
+        ``torch.uint32`` tensor physically ordered for the CUTLASS
+        ``BlockScaledBasicChunk`` K-major source layout. Rows that are not a
+        multiple of ``block_rows`` are zero-padded to the next multiple
+        (matching the ceil convention CUTLASS/cuBLAS/CuTeDSL use for the
+        blocked SF tensor), so the result has
+        ``ceil(rows / block_rows) * block_rows`` rows.
     """
 
     torch = _import_torch()
@@ -445,11 +449,14 @@ def swizzle_blockscaled_chunk_kmajor_scale_words(words, block_rows: int = 128, b
         raise ValueError(f"words must be a 2D tensor, got shape {tuple(words.shape)}")
 
     rows, cols = words.shape
-    if rows % block_rows != 0 or cols % block_words != 0:
-        raise ValueError(
-            f"blockscaled_chunk_kmajor scale storage requires rows multiple of {block_rows} "
-            f"and K/64 words multiple of {block_words}, got {tuple(words.shape)}"
-        )
+    if cols % block_words != 0:
+        raise ValueError(f"blockscaled_chunk_kmajor scale storage requires K/64 words multiple of {block_words}, got {tuple(words.shape)}")
+    if rows % block_rows != 0:
+        padded_rows = (rows + block_rows - 1) // block_rows * block_rows
+        padded = torch.zeros((padded_rows, cols), dtype=words.dtype, device=words.device)
+        padded[:rows] = words
+        words = padded
+        rows = padded_rows
 
     row_blocks = rows // block_rows
     src = words.contiguous().reshape(row_blocks, 4, 32, cols)
@@ -502,7 +509,10 @@ def pack_blockscaled_chunk_kmajor_scale_bytes(scale_bytes, block_rows: int = 128
     This is a layout packer, not a numeric quantizer. ``scale_bytes`` must
     already contain UE4M3-encoded scale bytes with semantic row-major shape
     ``[rows, K / 16]``. The result is the compressed source tensor expected by
-    the SM120 NVFP4 blockscaled GEMM path: ``torch.uint32[rows, K // 64]``.
+    the SM120 NVFP4 blockscaled GEMM path:
+    ``torch.uint32[ceil(rows / 128) * 128, K // 64]`` — rows are zero-padded
+    to full 128-row tiles, matching the CUTLASS/cuBLAS/CuTeDSL ceil
+    convention for the blocked SF tensor.
 
     The same function applies to SFA and SFB. For SFA, ``rows`` is logical M; for
     SFB, ``rows`` is logical N.
@@ -526,10 +536,9 @@ def pack_blockscaled_chunk_kmajor_scale_bytes(scale_bytes, block_rows: int = 128
 
     rows, scale_cols = scale_bytes.shape
     scale_cols_per_tile = block_words * _SCALE_BYTES_PER_WORD
-    if rows % block_rows != 0 or scale_cols % scale_cols_per_tile != 0:
+    if scale_cols % scale_cols_per_tile != 0:
         raise ValueError(
-            f"blockscaled_chunk_kmajor scale bytes require rows multiple of {block_rows} "
-            f"and K/16 columns multiple of {scale_cols_per_tile}, got {tuple(scale_bytes.shape)}"
+            f"blockscaled_chunk_kmajor scale bytes require K/16 columns multiple of {scale_cols_per_tile}, got {tuple(scale_bytes.shape)}"
         )
 
     words = _pack_scale_bytes_to_words(scale_bytes)

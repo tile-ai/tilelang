@@ -58,3 +58,43 @@ def test_sm120_nvfp4_example_source_has_no_legacy_strategy_flags():
     ]
     for term in forbidden_harness_terms:
         assert term not in source
+
+
+def test_sm120_nvfp4_example_kernel_handles_mn_tail_tiles(monkeypatch):
+    import pytest
+
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() < (12, 0):
+        pytest.skip("requires an SM120 GPU")
+
+    from tilelang.quantize import swizzle_blockscaled_chunk_kmajor_scale_words
+
+    module = _load_sm120_example(monkeypatch)
+    for M, N, K in [(257, 384, 512), (130, 128, 256), (128, 136, 256)]:
+        kernel = module.sm120_nvfp4_blockscaled_gemm(M, N, K)
+
+        A = module._make_packed_fp4(M, K, seed=3)
+        B = module._make_packed_fp4(N, K, seed=4)
+        SFA_semantic = module._make_binary_scale_words(M, K, seed=5)
+        SFB_semantic = module._make_binary_scale_words(N, K, seed=6)
+        SFA = swizzle_blockscaled_chunk_kmajor_scale_words(SFA_semantic)
+        SFB = swizzle_blockscaled_chunk_kmajor_scale_words(SFB_semantic)
+        assert SFA.shape[0] % 128 == 0
+        assert SFB.shape[0] % 128 == 0
+
+        C = torch.empty((M, N), device="cuda", dtype=torch.bfloat16)
+        kernel(A, B, SFA, SFB, C)
+        torch.cuda.synchronize()
+        module._verify(A, B, SFA_semantic, SFB_semantic, C, "random_binary", torch.bfloat16)
+
+
+def test_sm120_nvfp4_example_kernel_rejects_unsupported_tails(monkeypatch):
+    import pytest
+
+    module = _load_sm120_example(monkeypatch)
+    # simultaneous M and N tails hit a known copy-lowering boundary bug
+    with pytest.raises(ValueError, match="simultaneous M and N tail"):
+        module.sm120_nvfp4_blockscaled_gemm(257, 136, 512)
+    # bf16 output rows must stay 16-byte aligned
+    with pytest.raises(AssertionError, match="multiple of 8"):
+        module.sm120_nvfp4_blockscaled_gemm(128, 130, 256)

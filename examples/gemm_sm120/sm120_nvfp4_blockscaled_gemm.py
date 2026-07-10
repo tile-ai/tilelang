@@ -47,8 +47,18 @@ def sm120_nvfp4_blockscaled_gemm(
     num_stages: int = 2,
     out_dtype=T.bfloat16,
 ):
-    assert M % block_M == 0
-    assert N % block_N == 0
+    # Tail tiles: TMA loads zero-fill out-of-bounds rows and the C store is
+    # predicated, so M (or N) may be arbitrary as long as the other dimension
+    # is a multiple of its tile. The scale source is padded to full 128-row
+    # tiles (the packers in tilelang.quantize do this automatically).
+    # N must keep 16-byte aligned bf16 rows, the same contiguous-dim rule as
+    # CuTeDSL's is_valid_tensor_alignment.
+    assert N % 8 == 0, "N must be a multiple of 8 (16-byte aligned output rows)"
+    if M % block_M != 0 and N % block_N != 0:
+        raise ValueError(
+            "simultaneous M and N tail tiles are not supported yet (a copy-lowering "
+            "boundary bug is tracked upstream); pad M or N to a multiple of 128"
+        )
     assert K % block_K == 0
     assert block_M == 128
     assert block_N == 128
@@ -59,13 +69,15 @@ def sm120_nvfp4_blockscaled_gemm(
     accum_dtype = T.float32
     sf_words_per_block_k = block_K // 64
     sf_granularity_k = 16
+    M_pad = -(-M // block_M) * block_M
+    N_pad = -(-N // block_N) * block_N
 
     @T.prim_func
     def main(
         A: T.Tensor((M, K), in_dtype),
         B: T.Tensor((N, K), in_dtype),
-        SFA: T.Tensor((M, K // 64), T.uint32),
-        SFB: T.Tensor((N, K // 64), T.uint32),
+        SFA: T.Tensor((M_pad, K // 64), T.uint32),
+        SFB: T.Tensor((N_pad, K // 64), T.uint32),
         C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=_SM120_THREADS) as (

@@ -659,8 +659,9 @@ def test_sm120_cuda_helper_keeps_scale_tv_package_boundary():
 
 
 def test_blockscaled_chunk_kmajor_scale_packer_rejects_invalid_shapes():
-    with pytest.raises(ValueError, match="rows multiple of 128"):
-        pack_blockscaled_chunk_kmajor_scale_bytes(torch.zeros((127, 16), dtype=torch.uint8))
+    # rows that are not a multiple of 128 are zero-padded, not rejected
+    padded = pack_blockscaled_chunk_kmajor_scale_bytes(torch.zeros((127, 16), dtype=torch.uint8))
+    assert padded.shape == (128, 4)
 
     with pytest.raises(ValueError, match="K/16 columns multiple of 16"):
         pack_blockscaled_chunk_kmajor_scale_bytes(torch.zeros((128, 12), dtype=torch.uint8))
@@ -769,3 +770,16 @@ def test_quantize_nvfp4_blockscaled_alias():
     actual = quantize_nvfp4_blockscaled(x)
     assert torch.equal(actual[0], expected[0])
     assert torch.equal(actual[1], expected[1])
+
+
+def test_swizzle_blockscaled_chunk_kmajor_pads_rows_to_full_tiles():
+    rows, cols = 130, 8
+    generator = torch.Generator(device="cpu").manual_seed(23)
+    words = torch.randint(0, 2**31, (rows, cols), generator=generator, dtype=torch.int64).to(torch.uint32)
+
+    swizzled = swizzle_blockscaled_chunk_kmajor_scale_words(words)
+    assert swizzled.shape == (256, cols)
+
+    back = unswizzle_blockscaled_chunk_kmajor_scale_words(swizzled)
+    assert torch.equal(back[:rows], words)
+    assert bool((back[rows:] == 0).all())
