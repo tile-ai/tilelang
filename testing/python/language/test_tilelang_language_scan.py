@@ -489,3 +489,38 @@ def test_cummax_fragment_1d():
 
 if __name__ == "__main__":
     tilelang.testing.main()
+
+
+import pytest
+
+
+@pytest.mark.parametrize("threads", [48, 96, 160, 200])
+def test_cumsum_unsupported_thread_count(threads):
+    N = 128
+
+    @T.prim_func
+    def kern(A: T.Tensor((N,), "float32"), B: T.Tensor((N,), "float32")):
+        with T.Kernel(1, threads=threads):
+            s = T.alloc_shared((N,), "float32")
+            T.copy(A, s)
+            T.cumsum(src=s, dst=s, dim=0)
+            T.copy(s, B)
+
+    with pytest.raises(RuntimeError, match="does not support block thread count"):
+        tl.compile(kern, out_idx=[1], target="cuda")
+
+
+@pytest.mark.parametrize("threads", [48, 96, 160, 200])
+def test_cummax_unsupported_thread_count(threads):
+    N = 128
+
+    @T.prim_func
+    def kern(A: T.Tensor((N,), "float32"), B: T.Tensor((N,), "float32")):
+        with T.Kernel(1, threads=threads):
+            s = T.alloc_shared((N,), "float32")
+            T.copy(A, s)
+            T.cummax(src=s, dst=s, dim=0)
+            T.copy(s, B)
+
+    with pytest.raises(RuntimeError, match="does not support block thread count"):
+        tl.compile(kern, out_idx=[1], target="cuda")

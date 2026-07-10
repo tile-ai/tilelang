@@ -37,6 +37,29 @@ Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &lower_args,
     ICHECK(IsSharedBuffer(op.dst));
     std::stringstream ss;
     auto threads = lower_args.thread_bounds->extent;
+
+    // Front-end guard: reject unsupported block thread counts for scan
+    // before the value reaches the CUDA device template's static_assert.
+    const int64_t *p_threads = as_const_int(threads);
+    if (p_threads != nullptr) {
+      int t = static_cast<int>(*p_threads);
+      static const int kSupported[] = {32, 64, 128, 256, 512, 1024};
+      bool supported = false;
+      for (int s : kSupported) {
+        if (t == s) {
+          supported = true;
+          break;
+        }
+      }
+      if (!supported) {
+        LOG(FATAL) << pretty_name
+                   << " does not support block thread count " << t
+                   << ". Supported thread counts are 32, 64, 128, 256, 512, "
+                      "1024. Please adjust the threads argument in "
+                      "T.Kernel().";
+      }
+    }
+
     Array<PrimExpr> args;
 
     PrimExpr src_ptr = MakeAccessPtrFromRegion(op.srcRegion_, 1);
