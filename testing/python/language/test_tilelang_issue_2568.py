@@ -3,6 +3,7 @@
 T.reduce_max/min/bitand on a bool buffer should raise a clear error
 instead of leaking an internal IntImm range assert from MakeInitValue.
 """
+
 import pytest
 import tilelang
 import tilelang.language as T
