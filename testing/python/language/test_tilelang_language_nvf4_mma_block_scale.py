@@ -7,7 +7,7 @@ from tilelang import tvm
 from tilelang.cuda.intrinsics.layout.mma_layout import mma_load_a_32x32_to_shared_16x64_layout
 from tilelang.cuda.intrinsics.macro.mma_macro_generator import SM120BlockScaledFullTilePackageContract
 from tilelang.intrinsics import TensorCoreIntrinEmitter, get_swizzle_layout
-from tilelang.quantize import blockscaled_chunk_kmajor_word_offset
+from tilelang.quantize.nvfp4 import blockscaled_chunk_kmajor_word_offset
 from tilelang.transform import simplify_prim_func
 
 
