@@ -149,15 +149,6 @@ def _make_packed_fp4(rows: int, cols: int, *, seed: int) -> torch.Tensor:
     return torch.randint(-128, 128, (rows, cols // 2), device="cuda", dtype=torch.int8, generator=generator)
 
 
-def _make_ones_packed_fp4(rows: int, cols: int) -> torch.Tensor:
-    return torch.full((rows, cols // 2), 0x22, device="cuda", dtype=torch.int8)
-
-
-def _make_constant_scale_words(rows: int, k: int, byte: int = 0x38) -> torch.Tensor:
-    word = byte | (byte << 8) | (byte << 16) | (byte << 24)
-    return torch.full((rows, k // 64), word, device="cuda", dtype=torch.uint32)
-
-
 def _pack_scale_words(scale_bytes: torch.Tensor) -> torch.Tensor:
     scale_i64 = scale_bytes.to(torch.int64).reshape(scale_bytes.shape[0], -1, 4)
     words = scale_i64[:, :, 0]
@@ -209,23 +200,17 @@ def _verify(
     SFA: torch.Tensor,
     SFB: torch.Tensor,
     C: torch.Tensor,
-    scale_mode: str,
     out_dtype: torch.dtype,
 ) -> None:
     A_full = _decode_rowmajor_fp4(A, A.shape[0], A.shape[1] * 2)
     B_full = _decode_rowmajor_fp4(B, B.shape[0], B.shape[1] * 2)
-    if scale_mode == "constant":
-        ref = A_full @ B_full.T
-    elif scale_mode == "random_binary":
-        sfa = _decode_binary_scale_words(SFA, A_full.shape[1])
-        sfb = _decode_binary_scale_words(SFB, B_full.shape[1])
-        ref = torch.zeros((A_full.shape[0], B_full.shape[0]), device=C.device, dtype=torch.float32)
-        for k_sf in range(A_full.shape[1] // 16):
-            k0 = k_sf * 16
-            k1 = k0 + 16
-            ref += (A_full[:, k0:k1] * sfa[:, k_sf].unsqueeze(1)) @ (B_full[:, k0:k1] * sfb[:, k_sf].unsqueeze(1)).T
-    else:
-        raise ValueError(f"Unsupported scale_mode={scale_mode!r}")
+    sfa = _decode_binary_scale_words(SFA, A_full.shape[1])
+    sfb = _decode_binary_scale_words(SFB, B_full.shape[1])
+    ref = torch.zeros((A_full.shape[0], B_full.shape[0]), device=C.device, dtype=torch.float32)
+    for k_sf in range(A_full.shape[1] // 16):
+        k0 = k_sf * 16
+        k1 = k0 + 16
+        ref += (A_full[:, k0:k1] * sfa[:, k_sf].unsqueeze(1)) @ (B_full[:, k0:k1] * sfb[:, k_sf].unsqueeze(1)).T
     torch.testing.assert_close(C, ref.to(out_dtype), rtol=0.0, atol=0.0)
 
 
@@ -250,19 +235,10 @@ def run_tilelang(args: argparse.Namespace) -> tuple[float, float]:
         source_path.write_text(kernel.get_kernel_source())
         print(f"TileLang CUDA source: {source_path}")
 
-    if args.input_mode == "ones":
-        A = _make_ones_packed_fp4(args.m, args.k)
-        B = _make_ones_packed_fp4(args.n, args.k)
-    else:
-        A = _make_packed_fp4(args.m, args.k, seed=args.seed)
-        B = _make_packed_fp4(args.n, args.k, seed=args.seed + 1)
-
-    if args.scale_mode == "constant":
-        SFA_semantic = _make_constant_scale_words(args.m, args.k)
-        SFB_semantic = _make_constant_scale_words(args.n, args.k)
-    else:
-        SFA_semantic = _make_binary_scale_words(args.m, args.k, seed=args.seed + 100)
-        SFB_semantic = _make_binary_scale_words(args.n, args.k, seed=args.seed + 200)
+    A = _make_packed_fp4(args.m, args.k, seed=args.seed)
+    B = _make_packed_fp4(args.n, args.k, seed=args.seed + 1)
+    SFA_semantic = _make_binary_scale_words(args.m, args.k, seed=args.seed + 100)
+    SFB_semantic = _make_binary_scale_words(args.n, args.k, seed=args.seed + 200)
 
     SFA = swizzle_blockscaled_chunk_kmajor_scale_words(SFA_semantic)
     SFB = swizzle_blockscaled_chunk_kmajor_scale_words(SFB_semantic)
@@ -272,7 +248,7 @@ def run_tilelang(args: argparse.Namespace) -> tuple[float, float]:
     torch.cuda.synchronize()
 
     if args.verify:
-        _verify(A, B, SFA_semantic, SFB_semantic, C, args.scale_mode, out_torch_dtype)
+        _verify(A, B, SFA_semantic, SFB_semantic, C, out_torch_dtype)
         print("TileLang correctness: passed")
 
     latency_ms = do_bench(
@@ -297,8 +273,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--block-k", type=int, default=256)
     parser.add_argument("--num-stages", type=int, default=2)
     parser.add_argument("--out-dtype", choices=["bfloat16", "float32"], default="bfloat16")
-    parser.add_argument("--input-mode", choices=["random", "ones"], default="random")
-    parser.add_argument("--scale-mode", choices=["constant", "random_binary"], default="constant")
     parser.add_argument("--backend", choices=["event", "cupti", "cudagraph"], default="event")
     parser.add_argument("--return-mode", choices=["min", "max", "mean", "median"], default="mean")
     parser.add_argument("--warmup-ms", type=float, default=25)
@@ -323,7 +297,7 @@ def main() -> None:
     print(
         f"TileLang tile: {args.block_m}x{args.block_n}x{args.block_k}, "
         f"threads={_SM120_THREADS}, stages={args.num_stages}, output={args.out_dtype}, "
-        f"input_mode={args.input_mode}, scale_mode={args.scale_mode}"
+        "inputs=random fp4 / random binary scales"
     )
     latency_ms, tflops = run_tilelang(args)
     print(f"TileLang latency: {latency_ms:.4f} ms")

@@ -457,234 +457,6 @@ def _tl_scale_source_coords(logical_row, k64_word, _scale_layout_id: int, scale_
 
 
 @tilelang.jit(pass_configs=_TILELANG_PASS_CONFIGS)
-def _tilelang_nvfp4_blockscaled_quantize_kernel(
-    x,
-    rows_per_cta: int = 16,
-    scale_layout_id: int = _SCALE_LAYOUT_ID_BLOCKSCALED_CHUNK_KMAJOR,
-):
-    """TileLang BF16 -> packed NVFP4 + BlockScaledBasicChunk K-major scales."""
-
-    M = T.dynamic("M")
-    K = T.const("K")
-    in_dtype = T.bfloat16
-    fp4_dtype = T.float4_e2m1fn
-    compute_dtype = T.float32
-    lanes_per_scale = 128 // rows_per_cta
-
-    x: T.Tensor[(M, K), in_dtype]
-
-    quant = T.empty((M, K), fp4_dtype)
-    scale_source = T.empty((M, K // 64), T.uint32)
-
-    with T.Kernel(M // rows_per_cta, K // 64, threads=128) as (pid_m, pid_k64):
-        tx = T.get_thread_binding(0)
-        scale_lane = tx % lanes_per_scale
-        x0 = T.alloc_fragment((rows_per_cta, 16), in_dtype)
-        x1 = T.alloc_fragment((rows_per_cta, 16), in_dtype)
-        x2 = T.alloc_fragment((rows_per_cta, 16), in_dtype)
-        x3 = T.alloc_fragment((rows_per_cta, 16), in_dtype)
-        amax0 = T.alloc_fragment((rows_per_cta,), in_dtype)
-        amax1 = T.alloc_fragment((rows_per_cta,), in_dtype)
-        amax2 = T.alloc_fragment((rows_per_cta,), in_dtype)
-        amax3 = T.alloc_fragment((rows_per_cta,), in_dtype)
-        scale_inv0 = T.alloc_fragment((rows_per_cta,), compute_dtype)
-        scale_inv1 = T.alloc_fragment((rows_per_cta,), compute_dtype)
-        scale_inv2 = T.alloc_fragment((rows_per_cta,), compute_dtype)
-        scale_inv3 = T.alloc_fragment((rows_per_cta,), compute_dtype)
-        scale_code0 = T.alloc_fragment((rows_per_cta,), T.int32)
-        scale_code1 = T.alloc_fragment((rows_per_cta,), T.int32)
-        scale_code2 = T.alloc_fragment((rows_per_cta,), T.int32)
-        scale_code3 = T.alloc_fragment((rows_per_cta,), T.int32)
-        scale_word = T.alloc_fragment((rows_per_cta,), T.uint32)
-
-        for i, j in T.Parallel(rows_per_cta, 16):
-            x0[i, j] = x[pid_m * rows_per_cta + i, pid_k64 * 64 + j]
-
-        for i, j in T.Parallel(rows_per_cta, 16):
-            x1[i, j] = x[pid_m * rows_per_cta + i, pid_k64 * 64 + 16 + j]
-
-        for i, j in T.Parallel(rows_per_cta, 16):
-            x2[i, j] = x[pid_m * rows_per_cta + i, pid_k64 * 64 + 32 + j]
-
-        for i, j in T.Parallel(rows_per_cta, 16):
-            x3[i, j] = x[pid_m * rows_per_cta + i, pid_k64 * 64 + 48 + j]
-
-        T.reduce_absmax(x0, amax0, dim=1)
-        T.reduce_absmax(x1, amax1, dim=1)
-        T.reduce_absmax(x2, amax2, dim=1)
-        T.reduce_absmax(x3, amax3, dim=1)
-
-        for i in T.Parallel(rows_per_cta):
-            scale_inv0[i] = 0.0
-            scale_inv1[i] = 0.0
-            scale_inv2[i] = 0.0
-            scale_inv3[i] = 0.0
-            if scale_lane == 0:
-                scale_code0[i] = _tl_encode_ue4m3_scale_byte_ceil(T.cast(amax0[i], compute_dtype) / _FP4_E2M1_MAX)
-                scale_inv0[i] = _tl_ue4m3_scale_byte_inverse(scale_code0[i])
-                scale_code1[i] = _tl_encode_ue4m3_scale_byte_ceil(T.cast(amax1[i], compute_dtype) / _FP4_E2M1_MAX)
-                scale_inv1[i] = _tl_ue4m3_scale_byte_inverse(scale_code1[i])
-                scale_code2[i] = _tl_encode_ue4m3_scale_byte_ceil(T.cast(amax2[i], compute_dtype) / _FP4_E2M1_MAX)
-                scale_inv2[i] = _tl_ue4m3_scale_byte_inverse(scale_code2[i])
-                scale_code3[i] = _tl_encode_ue4m3_scale_byte_ceil(T.cast(amax3[i], compute_dtype) / _FP4_E2M1_MAX)
-                scale_inv3[i] = _tl_ue4m3_scale_byte_inverse(scale_code3[i])
-            scale_inv0[i] = T.tvm_warp_shuffle(0xFFFFFFFF, scale_inv0[i], 0, lanes_per_scale, 32)
-            scale_inv1[i] = T.tvm_warp_shuffle(0xFFFFFFFF, scale_inv1[i], 0, lanes_per_scale, 32)
-            scale_inv2[i] = T.tvm_warp_shuffle(0xFFFFFFFF, scale_inv2[i], 0, lanes_per_scale, 32)
-            scale_inv3[i] = T.tvm_warp_shuffle(0xFFFFFFFF, scale_inv3[i], 0, lanes_per_scale, 32)
-
-        for i, j in T.Parallel(rows_per_cta, 16):
-            scaled0 = T.cast(x0[i, j], compute_dtype) * scale_inv0[i]
-            quant[pid_m * rows_per_cta + i, pid_k64 * 64 + j] = T.cast(scaled0, fp4_dtype)
-
-        for i, j in T.Parallel(rows_per_cta, 16):
-            scaled1 = T.cast(x1[i, j], compute_dtype) * scale_inv1[i]
-            quant[pid_m * rows_per_cta + i, pid_k64 * 64 + 16 + j] = T.cast(scaled1, fp4_dtype)
-
-        for i, j in T.Parallel(rows_per_cta, 16):
-            scaled2 = T.cast(x2[i, j], compute_dtype) * scale_inv2[i]
-            quant[pid_m * rows_per_cta + i, pid_k64 * 64 + 32 + j] = T.cast(scaled2, fp4_dtype)
-
-        for i, j in T.Parallel(rows_per_cta, 16):
-            scaled3 = T.cast(x3[i, j], compute_dtype) * scale_inv3[i]
-            quant[pid_m * rows_per_cta + i, pid_k64 * 64 + 48 + j] = T.cast(scaled3, fp4_dtype)
-
-        for i in T.Parallel(rows_per_cta):
-            if scale_lane == 0:
-                scale_word[i] = (
-                    T.cast(scale_code0[i], T.uint32)
-                    | (T.cast(scale_code1[i], T.uint32) << 8)
-                    | (T.cast(scale_code2[i], T.uint32) << 16)
-                    | (T.cast(scale_code3[i], T.uint32) << 24)
-                )
-                logical_row = pid_m * rows_per_cta + i
-                physical_row, physical_word = _tl_scale_source_coords(logical_row, pid_k64, scale_layout_id, K // 64)
-                scale_source[physical_row, physical_word] = scale_word[i]
-
-    return quant, scale_source
-
-
-@tilelang.jit(pass_configs=_TILELANG_PASS_CONFIGS)
-def _tilelang_nvfp4_blockscaled_quantize_kernel_16x256_tma_store(
-    x,
-    num_stages: int = 0,
-    num_threads: int = 128,
-    scale_layout_id: int = _SCALE_LAYOUT_ID_BLOCKSCALED_CHUNK_KMAJOR,
-):
-    """TileLang BF16 -> packed NVFP4 with a 16x256 CTA tile and TMA output store."""
-
-    M = T.dynamic("M")
-    K = T.const("K")
-    rows_per_cta = 16
-    in_dtype = T.bfloat16
-    fp4_dtype = T.float4_e2m1fn
-    compute_dtype = T.float32
-    lanes_per_scale = num_threads // rows_per_cta
-
-    x: T.Tensor[(M, K), in_dtype]
-
-    quant = T.empty((M, K), fp4_dtype)
-    scale_source = T.empty((M, K // 64), T.uint32)
-
-    with T.Kernel(M // rows_per_cta, K // 256, threads=num_threads) as (pid_m, pid_k256):
-        tx = T.get_thread_binding(0)
-        scale_lane = tx % lanes_per_scale
-        quant_shared = T.alloc_shared((rows_per_cta, 256), fp4_dtype)
-        x0 = T.alloc_fragment((rows_per_cta, 16), in_dtype)
-        x1 = T.alloc_fragment((rows_per_cta, 16), in_dtype)
-        x2 = T.alloc_fragment((rows_per_cta, 16), in_dtype)
-        x3 = T.alloc_fragment((rows_per_cta, 16), in_dtype)
-        amax0 = T.alloc_fragment((rows_per_cta,), in_dtype)
-        amax1 = T.alloc_fragment((rows_per_cta,), in_dtype)
-        amax2 = T.alloc_fragment((rows_per_cta,), in_dtype)
-        amax3 = T.alloc_fragment((rows_per_cta,), in_dtype)
-        scale_inv0 = T.alloc_fragment((rows_per_cta,), compute_dtype)
-        scale_inv1 = T.alloc_fragment((rows_per_cta,), compute_dtype)
-        scale_inv2 = T.alloc_fragment((rows_per_cta,), compute_dtype)
-        scale_inv3 = T.alloc_fragment((rows_per_cta,), compute_dtype)
-        scale_code0 = T.alloc_fragment((rows_per_cta,), T.int32)
-        scale_code1 = T.alloc_fragment((rows_per_cta,), T.int32)
-        scale_code2 = T.alloc_fragment((rows_per_cta,), T.int32)
-        scale_code3 = T.alloc_fragment((rows_per_cta,), T.int32)
-        scale_word = T.alloc_fragment((rows_per_cta,), T.uint32)
-
-        for k64_inner in T.Pipelined(4, num_stages=num_stages):
-            k_base = pid_k256 * 256 + k64_inner * 64
-            shared_k_base = k64_inner * 64
-
-            for i, j in T.Parallel(rows_per_cta, 16):
-                x0[i, j] = x[pid_m * rows_per_cta + i, k_base + j]
-
-            for i, j in T.Parallel(rows_per_cta, 16):
-                x1[i, j] = x[pid_m * rows_per_cta + i, k_base + 16 + j]
-
-            for i, j in T.Parallel(rows_per_cta, 16):
-                x2[i, j] = x[pid_m * rows_per_cta + i, k_base + 32 + j]
-
-            for i, j in T.Parallel(rows_per_cta, 16):
-                x3[i, j] = x[pid_m * rows_per_cta + i, k_base + 48 + j]
-
-            T.reduce_absmax(x0, amax0, dim=1)
-            T.reduce_absmax(x1, amax1, dim=1)
-            T.reduce_absmax(x2, amax2, dim=1)
-            T.reduce_absmax(x3, amax3, dim=1)
-
-            for i in T.Parallel(rows_per_cta):
-                scale_inv0[i] = 0.0
-                scale_inv1[i] = 0.0
-                scale_inv2[i] = 0.0
-                scale_inv3[i] = 0.0
-                if scale_lane == 0:
-                    scale_code0[i] = _tl_encode_ue4m3_scale_byte_ceil(T.cast(amax0[i], compute_dtype) / _FP4_E2M1_MAX)
-                    scale_inv0[i] = _tl_ue4m3_scale_byte_inverse(scale_code0[i])
-                    scale_code1[i] = _tl_encode_ue4m3_scale_byte_ceil(T.cast(amax1[i], compute_dtype) / _FP4_E2M1_MAX)
-                    scale_inv1[i] = _tl_ue4m3_scale_byte_inverse(scale_code1[i])
-                    scale_code2[i] = _tl_encode_ue4m3_scale_byte_ceil(T.cast(amax2[i], compute_dtype) / _FP4_E2M1_MAX)
-                    scale_inv2[i] = _tl_ue4m3_scale_byte_inverse(scale_code2[i])
-                    scale_code3[i] = _tl_encode_ue4m3_scale_byte_ceil(T.cast(amax3[i], compute_dtype) / _FP4_E2M1_MAX)
-                    scale_inv3[i] = _tl_ue4m3_scale_byte_inverse(scale_code3[i])
-                scale_inv0[i] = T.tvm_warp_shuffle(0xFFFFFFFF, scale_inv0[i], 0, lanes_per_scale, 32)
-                scale_inv1[i] = T.tvm_warp_shuffle(0xFFFFFFFF, scale_inv1[i], 0, lanes_per_scale, 32)
-                scale_inv2[i] = T.tvm_warp_shuffle(0xFFFFFFFF, scale_inv2[i], 0, lanes_per_scale, 32)
-                scale_inv3[i] = T.tvm_warp_shuffle(0xFFFFFFFF, scale_inv3[i], 0, lanes_per_scale, 32)
-
-            for i, j in T.Parallel(rows_per_cta, 16):
-                scaled0 = T.cast(x0[i, j], compute_dtype) * scale_inv0[i]
-                quant_shared[i, shared_k_base + j] = T.cast(scaled0, fp4_dtype)
-
-            for i, j in T.Parallel(rows_per_cta, 16):
-                scaled1 = T.cast(x1[i, j], compute_dtype) * scale_inv1[i]
-                quant_shared[i, shared_k_base + 16 + j] = T.cast(scaled1, fp4_dtype)
-
-            for i, j in T.Parallel(rows_per_cta, 16):
-                scaled2 = T.cast(x2[i, j], compute_dtype) * scale_inv2[i]
-                quant_shared[i, shared_k_base + 32 + j] = T.cast(scaled2, fp4_dtype)
-
-            for i, j in T.Parallel(rows_per_cta, 16):
-                scaled3 = T.cast(x3[i, j], compute_dtype) * scale_inv3[i]
-                quant_shared[i, shared_k_base + 48 + j] = T.cast(scaled3, fp4_dtype)
-
-            for i in T.Parallel(rows_per_cta):
-                if scale_lane == 0:
-                    scale_word[i] = (
-                        T.cast(scale_code0[i], T.uint32)
-                        | (T.cast(scale_code1[i], T.uint32) << 8)
-                        | (T.cast(scale_code2[i], T.uint32) << 16)
-                        | (T.cast(scale_code3[i], T.uint32) << 24)
-                    )
-                    logical_row = pid_m * rows_per_cta + i
-                    k64_word = pid_k256 * _BLOCKSCALED_CHUNK_WORDS + k64_inner
-                    physical_row, physical_word = _tl_scale_source_coords(logical_row, k64_word, scale_layout_id, K // 64)
-                    scale_source[physical_row, physical_word] = scale_word[i]
-
-        T.sync_threads()
-        T.tma_copy(quant_shared, quant[pid_m * rows_per_cta, pid_k256 * 256])
-        T.tma_store_wait()
-
-    return quant, scale_source
-
-
-@tilelang.jit(pass_configs=_TILELANG_PASS_CONFIGS)
 def _tilelang_nvfp4_blockscaled_quantize_kernel_tiled(
     x,
     rows_per_cta: int = 64,
@@ -781,10 +553,8 @@ def tilelang_quantize_bf16_to_nvfp4_blockscaled(
     x,
     *,
     rows_per_cta: int = 32,
-    k64_per_cta: int | None = None,
     num_stages: int = 4,
     num_threads: int = 512,
-    use_tma_load: bool = True,
     scale_layout: str = _SCALE_LAYOUT_BLOCKSCALED_CHUNK_KMAJOR,
 ):
     """Quantize a CUDA BF16 activation tensor with a TileLang kernel.
@@ -794,18 +564,14 @@ def tilelang_quantize_bf16_to_nvfp4_blockscaled(
     x:
         CUDA ``torch.bfloat16`` tensor with shape ``[rows, K]``. ``rows`` must
         be a multiple of ``128`` and ``K`` a multiple of ``256``.
-    k64_per_cta:
-        Number of adjacent K/64 scale-word groups per CTA. The default ``None``
-        selects ``4`` for ``rows_per_cta`` in ``(16, 32, 64)`` and ``1`` otherwise.
-        The ``4`` path uses a K256 CTA tile.
+    rows_per_cta:
+        CTA tile rows: ``16``, ``32`` or ``64`` (each CTA covers a
+        ``rows_per_cta x 256`` tile).
     num_stages:
-        Pipeline stage count for K256 experimental tiles.
+        Pipeline stage count for the TMA input staging.
     num_threads:
-        Thread count for K256 experimental tiles. ``16x256`` uses ``512``.
-        ``32x256`` supports ``512`` and ``1024``.
-        ``64x256`` supports ``512`` and ``1024``.
-    use_tma_load:
-        Use TMA for the BF16 global-to-shared input tile before quantization.
+        CTA thread count; ``512`` (default) or ``1024`` for
+        ``rows_per_cta`` in ``(32, 64)``.
     scale_layout:
         Scale-source memory layout. ``"blockscaled_chunk_kmajor"`` is the
         CUTLASS ``BlockScaledBasicChunk`` K-major source contract used by the
@@ -831,28 +597,14 @@ def tilelang_quantize_bf16_to_nvfp4_blockscaled(
     if x.dtype != torch.bfloat16:
         raise TypeError(f"TileLang NVFP4 quantization requires torch.bfloat16 input, got {x.dtype}")
     scale_layout_id = _scale_layout_id(scale_layout)
-    if rows_per_cta < 4 or _BLOCKSCALED_CHUNK_ROWS % rows_per_cta != 0:
-        raise ValueError(f"rows_per_cta must be at least 4 and divide {_BLOCKSCALED_CHUNK_ROWS}, got {rows_per_cta}")
-    if k64_per_cta is None:
-        k64_per_cta = 4 if rows_per_cta in (16, 32, 64) else 1
-    if k64_per_cta not in (1, 4):
-        raise ValueError(f"k64_per_cta must be 1 or 4, got {k64_per_cta}")
-    if k64_per_cta == 4 and rows_per_cta not in (16, 32, 64):
-        raise ValueError(f"k64_per_cta=4 currently requires rows_per_cta=16, 32, or 64, got {rows_per_cta}")
+    if rows_per_cta not in (16, 32, 64):
+        raise ValueError(f"rows_per_cta must be 16, 32, or 64, got {rows_per_cta}")
     if num_threads % 32 != 0:
         raise ValueError(f"num_threads must be a multiple of warp size 32, got {num_threads}")
-    if k64_per_cta == 4 and use_tma_load:
-        if rows_per_cta == 16 and num_threads != 512:
-            raise ValueError("rows_per_cta=16,use_tma_load=True uses the explicit one-warp-per-row schedule and requires num_threads=512")
-        if rows_per_cta in (32, 64) and num_threads not in (512, 1024):
-            raise ValueError("rows_per_cta=32/64,use_tma_load=True currently supports num_threads=512 or 1024")
-    if k64_per_cta == 4 and not use_tma_load:
-        if rows_per_cta == 16 and num_threads != 128:
-            raise ValueError(
-                "use_tma_load=False keeps the legacy T.Parallel 16x256 schedule and currently requires rows_per_cta=16,num_threads=128"
-            )
-        if rows_per_cta in (32, 64):
-            raise ValueError("rows_per_cta=32/64,use_tma_load=False is not implemented")
+    if rows_per_cta == 16 and num_threads != 512:
+        raise ValueError("rows_per_cta=16 uses the one-warp-per-row schedule and requires num_threads=512")
+    if rows_per_cta in (32, 64) and num_threads not in (512, 1024):
+        raise ValueError("rows_per_cta=32/64 currently supports num_threads=512 or 1024")
 
     rows, cols = x.shape
     k_tile = _NVFP4_SCALE_BLOCK_K * _SCALE_BYTES_PER_WORD * _BLOCKSCALED_CHUNK_WORDS
@@ -861,30 +613,14 @@ def tilelang_quantize_bf16_to_nvfp4_blockscaled(
             f"SM120 NVFP4 quantization requires rows multiple of {_BLOCKSCALED_CHUNK_ROWS} and K multiple of {k_tile}, got {tuple(x.shape)}"
         )
 
-    if k64_per_cta == 4:
-        if use_tma_load:
-            tile_rows = rows_per_cta if rows_per_cta in (16, 32, 64) else 16
-            quant, scale_source = _tilelang_nvfp4_blockscaled_quantize_kernel_tiled(
-                x.contiguous(),
-                rows_per_cta=tile_rows,
-                tma_store=(tile_rows != 32),
-                num_stages=num_stages,
-                num_threads=num_threads,
-                scale_layout_id=scale_layout_id,
-            )
-        else:
-            quant, scale_source = _tilelang_nvfp4_blockscaled_quantize_kernel_16x256_tma_store(
-                x.contiguous(),
-                num_stages=num_stages,
-                num_threads=num_threads,
-                scale_layout_id=scale_layout_id,
-            )
-    else:
-        quant, scale_source = _tilelang_nvfp4_blockscaled_quantize_kernel(
-            x.contiguous(),
-            rows_per_cta=rows_per_cta,
-            scale_layout_id=scale_layout_id,
-        )
+    quant, scale_source = _tilelang_nvfp4_blockscaled_quantize_kernel_tiled(
+        x.contiguous(),
+        rows_per_cta=rows_per_cta,
+        tma_store=(rows_per_cta != 32),
+        num_stages=num_stages,
+        num_threads=num_threads,
+        scale_layout_id=scale_layout_id,
+    )
     return quant.contiguous().view(torch.int8), scale_source
 
 

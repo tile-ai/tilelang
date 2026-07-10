@@ -85,7 +85,7 @@ def test_sm120_nvfp4_example_kernel_handles_mn_tail_tiles(monkeypatch):
         C = torch.empty((M, N), device="cuda", dtype=torch.bfloat16)
         kernel(A, B, SFA, SFB, C)
         torch.cuda.synchronize()
-        module._verify(A, B, SFA_semantic, SFB_semantic, C, "random_binary", torch.bfloat16)
+        module._verify(A, B, SFA_semantic, SFB_semantic, C, torch.bfloat16)
 
 
 def test_sm120_nvfp4_example_kernel_rejects_unsupported_tails(monkeypatch):
