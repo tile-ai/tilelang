@@ -9,18 +9,30 @@ from tilelang.quantize import nvfp4 as nvfp4_utils
 
 _BLOCKSCALED_CHUNK_WORDS = nvfp4_utils._BLOCKSCALED_CHUNK_WORDS
 from tilelang.quantize import (
+    pack_blockscaled_chunk_kmajor_scale_bytes,
+    quantize_bf16_to_nvfp4_blockscaled,
+    swizzle_blockscaled_chunk_kmajor_scale_words,
+    unswizzle_blockscaled_chunk_kmajor_scale_words,
+)
+
+
+def _load_maint_quantizer():
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[3] / "maint/gemm/tilelang_nvfp4_quantizer.py"
+    spec = importlib.util.spec_from_file_location("tilelang_nvfp4_quantizer", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.tilelang_quantize_bf16_to_nvfp4_blockscaled
+
+
+from tilelang.quantize.nvfp4 import (
     blockscaled_chunk_kmajor_word_offset,
     decode_packed_fp4_e2m1,
     decode_ue4m3_scale_bytes,
     encode_fp4_e2m1_values,
     encode_ue4m3_scale_bytes,
-    pack_blockscaled_chunk_kmajor_scale_bytes,
     pack_nvfp4_scale_bytes,
-    tilelang_quantize_bf16_to_nvfp4_blockscaled,
-    quantize_bf16_to_nvfp4_blockscaled,
-    quantize_nvfp4_blockscaled,
-    swizzle_blockscaled_chunk_kmajor_scale_words,
-    unswizzle_blockscaled_chunk_kmajor_scale_words,
 )
 
 
@@ -969,7 +981,8 @@ def test_tilelang_quantize_nvfp4_blockscaled_matches_reference_layout_and_error_
     generator = torch.Generator(device="cuda").manual_seed(rows + cols)
     x = (torch.randn((rows, cols), generator=generator, device="cuda", dtype=torch.float32) * 2.0).to(torch.bfloat16)
 
-    packed_tl, scale_source_tl = tilelang_quantize_bf16_to_nvfp4_blockscaled(x)
+    tilelang_quantize = _load_maint_quantizer()
+    packed_tl, scale_source_tl = tilelang_quantize(x)
     _, scale_source_ref, scale_bytes_ref = quantize_bf16_to_nvfp4_blockscaled(x, return_scale_bytes=True)
 
     assert packed_tl.shape == (rows, cols // 2)
@@ -986,14 +999,6 @@ def test_tilelang_quantize_nvfp4_blockscaled_matches_reference_layout_and_error_
     error = (decoded - x.to(torch.float32)).abs()
     assert torch.isfinite(decoded).all()
     assert torch.all(error <= scale + 1e-6)
-
-
-def test_quantize_nvfp4_blockscaled_alias():
-    x = torch.zeros((128, 256), dtype=torch.bfloat16)
-    expected = quantize_bf16_to_nvfp4_blockscaled(x)
-    actual = quantize_nvfp4_blockscaled(x)
-    assert torch.equal(actual[0], expected[0])
-    assert torch.equal(actual[1], expected[1])
 
 
 def test_swizzle_blockscaled_chunk_kmajor_pads_rows_to_full_tiles():

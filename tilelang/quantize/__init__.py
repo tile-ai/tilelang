@@ -17,18 +17,8 @@ from .utils import (
 from .lop3 import get_lop3_intrin_group  # noqa: F401
 from .mxfp import get_mxfp_intrin_group  # noqa: F401
 from .nvfp4 import (  # noqa: F401
-    blockscaled_chunk_kmajor_word_offset,
-    decode_packed_fp4_e2m1,
-    decode_ue4m3_scale_bytes,
-    encode_fp4_e2m1_values,
-    encode_ue4m3_scale_bytes,
     pack_blockscaled_chunk_kmajor_scale_bytes,
-    pack_fp4_e2m1_codes,
-    pack_nvfp4_scale_bytes,
-    tilelang_quantize_bf16_to_nvfp4_blockscaled,
-    tilelang_quantize_nvfp4_blockscaled,
     quantize_bf16_to_nvfp4_blockscaled,
-    quantize_nvfp4_blockscaled,
     swizzle_blockscaled_chunk_kmajor_scale_words,
     unswizzle_blockscaled_chunk_kmajor_scale_words,
 )

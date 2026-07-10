@@ -30,11 +30,15 @@ import tilelang.language as T
 from tilelang.carver.arch import driver
 from tilelang.profiler import do_bench
 from tilelang.quantize import (
+    swizzle_blockscaled_chunk_kmajor_scale_words,
+    unswizzle_blockscaled_chunk_kmajor_scale_words,
+)
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from tilelang_nvfp4_quantizer import tilelang_quantize_bf16_to_nvfp4_blockscaled  # noqa: E402
+from tilelang.quantize.nvfp4 import (
     blockscaled_chunk_kmajor_word_offset,
     decode_ue4m3_scale_bytes,
-    swizzle_blockscaled_chunk_kmajor_scale_words,
-    tilelang_quantize_bf16_to_nvfp4_blockscaled,
-    unswizzle_blockscaled_chunk_kmajor_scale_words,
 )
 
 
