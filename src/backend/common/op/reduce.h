@@ -797,6 +797,8 @@ template <typename Impl> struct ReduceLowerer {
 
         for (const auto &thread_step : reduce_plan.thread_steps) {
           int reducing_threads = thread_step.ReducingThreads();
+          int block_threads =
+              static_cast<int>(*as_const_int(lower_args.thread_bounds->extent));
           auto thread_offset = lower_args.thread_bounds->min;
 
           int vsize = Impl::GetPreferedVectorizedSize(clear_buffer->dtype,
@@ -810,7 +812,7 @@ template <typename Impl> struct ReduceLowerer {
                   .value();
           std::string allreduce = Impl::MakeBatchAllReduce(
               reducer, reducing_threads, thread_step.scale, thread_offset,
-              lower_args.thread_bounds->extent, eff_batch, reducing_threads,
+              lower_args.thread_bounds->extent, eff_batch, block_threads,
               lower_args.target);
 
           DataType ws_dtype = can_batch_pack
@@ -819,7 +821,7 @@ template <typename Impl> struct ReduceLowerer {
           PrimExpr workspace;
           bool need_workspace = reducing_threads > 32;
           if (need_workspace) {
-            int ws_size = reducing_threads * eff_batch;
+            int ws_size = block_threads * eff_batch;
             workspace = lower_args.add_workspace(ws_size, ws_dtype);
           }
 
