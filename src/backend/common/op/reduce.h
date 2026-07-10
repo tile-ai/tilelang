@@ -102,6 +102,16 @@ inline int GetPreferedVectorizedSize(DataType dt) {
 
 inline PrimExpr MakeInitValue(const ReduceOpNode &op, int vsize = 1) {
   auto dst_dtype = op.dst->dtype;
+
+  // Bool buffers are not supported for reduce ops because the bool codegen
+  // path (boolx8) is incomplete (see #2206). Reject early with a clear
+  // message pointing users to T.any_of / T.all_of instead.
+  if (dst_dtype.is_bool()) {
+    LOG(FATAL) << "tl.reduce_" << op.type->type
+               << " is not supported for bool buffers; "
+               << "use T.any_of (max) / T.all_of (min) instead.";
+  }
+
   auto is_int = dst_dtype.is_int();
   bool is_uint = dst_dtype.is_uint();
   auto bits = dst_dtype.bits();
