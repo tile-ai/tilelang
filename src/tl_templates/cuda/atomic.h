@@ -337,8 +337,8 @@ TL_DEVICE void AtomicMax(T1 *ref, T2 val,
     }
   } else {
 #if CUDART_VERSION >= 11080
-    cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
-    aref.fetch_max(cuda_cast<NT1>(val), cuda::memory_order(memory_order));
+    cuda::atomic_ref<T1, cuda::thread_scope_device> aref(*address);
+    aref.fetch_max(cuda_cast<T1>(val), cuda::memory_order(memory_order));
 #else
     TL_NOT_IMPLEMENTED();
 #endif
@@ -367,9 +367,9 @@ TL_DEVICE T1 AtomicMaxRet(T1 *ref, T2 val,
     return static_cast<T1>(*reinterpret_cast<T1 *>(&old_val_ushort));
   } else {
 #if CUDART_VERSION >= 11080
-    cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
+    cuda::atomic_ref<T1, cuda::thread_scope_device> aref(*address);
     return static_cast<T1>(
-        aref.fetch_max(cuda_cast<NT1>(val), cuda::memory_order(memory_order)));
+        aref.fetch_max(cuda_cast<T1>(val), cuda::memory_order(memory_order)));
 #else
     TL_NOT_IMPLEMENTED();
 #endif
@@ -399,8 +399,8 @@ TL_DEVICE void AtomicMin(T1 *ref, T2 val,
     }
   } else {
 #if CUDART_VERSION >= 11080
-    cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
-    aref.fetch_min(cuda_cast<NT1>(val), cuda::memory_order(memory_order));
+    cuda::atomic_ref<T1, cuda::thread_scope_device> aref(*address);
+    aref.fetch_min(cuda_cast<T1>(val), cuda::memory_order(memory_order));
 #else
     TL_NOT_IMPLEMENTED();
 #endif
@@ -429,9 +429,9 @@ TL_DEVICE T1 AtomicMinRet(T1 *ref, T2 val,
     return static_cast<T1>(*reinterpret_cast<T1 *>(&old_val_ushort));
   } else {
 #if CUDART_VERSION >= 11080
-    cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
+    cuda::atomic_ref<T1, cuda::thread_scope_device> aref(*address);
     return static_cast<T1>(
-        aref.fetch_min(cuda_cast<NT1>(val), cuda::memory_order(memory_order)));
+        aref.fetch_min(cuda_cast<T1>(val), cuda::memory_order(memory_order)));
 #else
     TL_NOT_IMPLEMENTED();
 #endif
