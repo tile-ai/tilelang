@@ -117,7 +117,7 @@ struct InclusiveScan2D {
   static_assert(Axis == 0 or Axis == 1);
   template <typename T, int SEG = 32>
   static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
-                            int H, int W) {
+                            int H, int W, int stride) {
     if (H <= 0 || W <= 0)
       return;
 
@@ -130,8 +130,8 @@ struct InclusiveScan2D {
         const int row = b * TILE + item;
         if (row >= H)
           return;
-        InclusiveScanLine<Reducer, reverse, T, SEG>(src + row * W,
-                                                    dst + row * W, W, 1);
+        InclusiveScanLine<Reducer, reverse, T, SEG>(src + row * stride,
+                                                    dst + row * stride, W, 1);
       }
     } else {
       const int num_blocks = (W + TILE - 1) / TILE;
@@ -139,7 +139,8 @@ struct InclusiveScan2D {
         const int col = b * TILE + item;
         if (col >= W)
           return;
-        InclusiveScanLine<Reducer, reverse, T, SEG>(src + col, dst + col, H, W);
+        InclusiveScanLine<Reducer, reverse, T, SEG>(src + col, dst + col, H,
+                                                     stride);
       }
     }
   }
@@ -157,9 +158,9 @@ template <int threads, bool reverse = false> struct CumSum1D {
 template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
   template <typename T, int SEG = 32>
   static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
-                            int H, int W) {
+                            int H, int W, int stride) {
     InclusiveScan2D<ScanSumOp, threads, Axis, reverse>::template run<T, SEG>(
-        src, dst, H, W);
+        src, dst, H, W, stride);
   }
 };
 
@@ -175,9 +176,9 @@ template <int threads, bool reverse = false> struct CumMax1D {
 template <int threads, int Axis = 0, bool reverse = false> struct CumMax2D {
   template <typename T, int SEG = 32>
   static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
-                            int H, int W) {
+                            int H, int W, int stride) {
     InclusiveScan2D<ScanMaxOp, threads, Axis, reverse>::template run<T, SEG>(
-        src, dst, H, W);
+        src, dst, H, W, stride);
   }
 };
 
