@@ -205,6 +205,26 @@ def run_atomic_addx4(M, N, block_M, block_N):
 
 
 @tilelang.jit
+def atomic_addx4_sliced_dst_program(N, M, dtype=T.float32):
+    @T.prim_func
+    def atomic_addx4_sliced_dst(
+        idx: T.Tensor((N,), "int32"),
+        val: T.Tensor((N, 4), dtype),
+        dst: T.Tensor((M, 4), dtype),
+    ):
+        with T.Kernel(1, threads=N):
+            t = T.get_thread_binding()
+            T.atomic_addx4(dst[idx[t], 0:4], val[t, 0:4])
+
+    return atomic_addx4_sliced_dst
+
+
+def run_atomic_addx4_sliced_dst_compile(N, M, dtype=T.float32):
+    kernel = atomic_addx4_sliced_dst_program(N, M, dtype=dtype)
+    assert "AtomicAddx4" in kernel.get_kernel_source()
+
+
+@tilelang.jit
 def atomic_addx4_16bit_program(dtype, offset, nthreads):
     @T.prim_func
     def atomic_addx4(A: T.Tensor((16,), dtype), B: T.Tensor((16,), dtype)):
@@ -373,6 +393,11 @@ def test_atomic_different_memory_orders():
 
 def test_atomic_addx4():
     run_atomic_addx4(16, 64, 4, 4)
+
+
+@tilelang.testing.requires_cuda
+def test_atomic_addx4_sliced_dst_compile():
+    run_atomic_addx4_sliced_dst_compile(32, 8)
 
 
 @tilelang.testing.requires_cuda

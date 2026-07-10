@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import tilelang.language as T
 from tvm import ir
-from tvm.tirx import PrimExpr, Buffer, op
+from tvm.tirx import PrimExpr, Buffer, BufferRegion, op
 from tilelang.utils.language import to_buffer_region, legalize_pairwise_extents
 from tilelang.language.utils import get_extent
 
@@ -350,7 +350,11 @@ def atomic_addx4(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> Pri
         >>> atomic_addx4(rgba_dst, rgba_add)  # Atomic blend of all 4 channels
     """
     atomic_addx4_op = op.Op.get("tl.atomic_addx4_elem_op") if return_prev else op.Op.get("tl.atomic_addx4_elem_op")
-    return_type = "float4" if "float" in str(dst.dtype).lower() else "handle"
+    if return_prev:
+        dt = dst.buffer.dtype if isinstance(dst, BufferRegion) else dst.dtype
+        return_type = "float4" if "float" in str(dt).lower() else "handle"
+    else:
+        return_type = "handle"
     return T.call_intrin(return_type, atomic_addx4_op, T.access_ptr(dst, "rw"), T.access_ptr(value, "r"))
 
 
