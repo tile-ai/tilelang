@@ -83,19 +83,30 @@ static DataType GetStorageSizeExprDType(const Buffer &buffer) {
   return size_dtype;
 }
 
+// Scalar packed NVFP4 stores two logical elements per byte, and its buffer
+// shapes are expressed in logical elements.  It is the only dtype whose
+// storage sizing and byte-offset -> logical-index conversion deviate from the
+// legacy DataType::bytes() rule; all other (sub-)byte dtypes keep the
+// upstream semantics so this pass changes behavior for NVFP4 buffers only.
+static bool IsPackedScalarFp4(DataType dtype) {
+  return dtype.is_float4_e2m1fn() && dtype.is_scalar();
+}
+
 static int64_t GetSharedStorageBitsPerLogicalElement(DataType dtype) {
-  return static_cast<int64_t>(dtype.bits()) * dtype.lanes();
+  if (IsPackedScalarFp4(dtype)) {
+    return 4;
+  }
+  return static_cast<int64_t>(dtype.bytes()) * dtype.lanes() * 8;
 }
 
 static PrimExpr GetSharedStorageSizeBytes(const Buffer &buffer) {
   DataType size_dtype = GetStorageSizeExprDType(buffer);
   int64_t element_bits = GetSharedStorageBitsPerLogicalElement(buffer->dtype);
 
-  // Buffer shapes are expressed in logical elements.  Do not use
-  // DataType::bytes() here: it rounds sub-byte scalar types up per element, so
-  // scalar packed FP4 would be charged as one byte per value instead of two
-  // values per byte.  Compute total bits first, then round the whole allocation
-  // up to bytes.
+  // Do not use DataType::bytes() for packed FP4: it rounds sub-byte scalar
+  // types up per element, so scalar packed FP4 would be charged as one byte
+  // per value instead of two values per byte.  Compute total bits first, then
+  // round the whole allocation up to bytes.
   PrimExpr size_bits = make_const(size_dtype, element_bits);
   for (const PrimExpr &extent : buffer->shape) {
     PrimExpr e = extent;
@@ -118,7 +129,7 @@ static PrimExpr SharedByteOffsetToLogicalIndexOffset(PrimExpr byte_offset,
   // the non-alias rewrite still indexes the original typed buffer. Convert the
   // byte offset back to that buffer's logical element index.  Packed scalar
   // NVFP4 has two logical elements per byte.
-  if (dtype.is_float4_e2m1fn() && dtype.is_scalar()) {
+  if (IsPackedScalarFp4(dtype)) {
     return byte_offset * make_const(byte_offset.dtype(), 2);
   }
   return indexdiv(byte_offset, dtype.bytes() * dtype.lanes());
