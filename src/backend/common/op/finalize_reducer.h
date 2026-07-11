@@ -6,6 +6,7 @@
 #ifndef TVM_TL_BACKEND_COMMON_OP_FINALIZE_REDUCER_H_
 #define TVM_TL_BACKEND_COMMON_OP_FINALIZE_REDUCER_H_
 
+#include "backend/common/op/reduce.h"
 #include "op/finalize_reducer.h"
 #include "support/check.h"
 
@@ -52,6 +53,7 @@ template <typename Impl> struct FinalizeReducerLowerer {
     auto op_str = op_names[static_cast<int>(op.op)];
 
     int reducing_threads = extent;
+    reduce::CheckAllReduceWidth(reducing_threads, 1, "tl.finalize_reducer");
     auto thread_offset = lower_args.thread_bounds->min;
 
     int64_t layout_batch_size = 1;
