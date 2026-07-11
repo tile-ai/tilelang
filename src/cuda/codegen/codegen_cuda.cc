@@ -227,9 +227,10 @@ struct CUDAIEEEMath {
     // Unary ops (sqrt, rcp, rsqrt) use h<name> without leading "__".
     if (t.is_float16()) {
       if (rounding_mode != "rn") {
-        LOG(FATAL) << "IEEE " << name << " with rounding mode '" << rounding_mode
-                   << "' is not supported for float16 in CUDA. "
-                   << "Only rounding mode 'rn' is available for half precision.";
+        LOG(FATAL)
+            << "IEEE " << name << " with rounding mode '" << rounding_mode
+            << "' is not supported for float16 in CUDA. "
+            << "Only rounding mode 'rn' is available for half precision.";
         return "";
       }
       // fmaf -> __hfma (not __hmaf)
@@ -256,7 +257,8 @@ struct CUDAIEEEMath {
 
     // bfloat16: no native IEEE rounding intrinsics exist in CUDA.
     if (t.is_bfloat16()) {
-      LOG(FATAL) << "IEEE " << name << " is not supported for bfloat16 in CUDA. "
+      LOG(FATAL) << "IEEE " << name
+                 << " is not supported for bfloat16 in CUDA. "
                  << "bfloat16 has no native IEEE rounding intrinsics.";
       return "";
     }

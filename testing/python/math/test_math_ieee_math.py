@@ -11,16 +11,22 @@ ROUNDING_MODES = ["rn", "rz", "ru", "rd"]
 # - fp16     : only round-to-nearest-even is available.
 # - bf16     : no native IEEE rounding intrinsics (tested separately via rejection).
 IEEE_DTYPE_MODES = [
-    (T.float32, "rn"), (T.float32, "rz"), (T.float32, "ru"), (T.float32, "rd"),
-    (T.float64, "rn"), (T.float64, "rz"), (T.float64, "ru"), (T.float64, "rd"),
+    (T.float32, "rn"),
+    (T.float32, "rz"),
+    (T.float32, "ru"),
+    (T.float32, "rd"),
+    (T.float64, "rn"),
+    (T.float64, "rz"),
+    (T.float64, "ru"),
+    (T.float64, "rd"),
     (T.float16, "rn"),
 ]
 
 # Ops that carry a rounding_mode parameter (everything except frsqrt).
 IEEE_OPS_WITH_RM = [
-    ("ieee_add",  T.ieee_add),
-    ("ieee_sub",  T.ieee_sub),
-    ("ieee_mul",  T.ieee_mul),
+    ("ieee_add", T.ieee_add),
+    ("ieee_sub", T.ieee_sub),
+    ("ieee_mul", T.ieee_mul),
     ("ieee_fmaf", T.ieee_fmaf),
     ("ieee_frcp", T.ieee_frcp),
     ("ieee_fsqrt", T.ieee_fsqrt),
@@ -159,6 +165,7 @@ def run_ieee_math_test(
 # Rounding-mode validation (API-level, no GPU required)
 # ---------------------------------------------------------------------------
 
+
 def test_rounding_mode_validation():
     """Test that invalid rounding modes raise ValueError"""
     with pytest.raises(ValueError, match="Invalid rounding mode"):
@@ -174,17 +181,18 @@ def test_rounding_mode_validation():
 # Numerical tests — every (op × dtype × rounding_mode) valid combination
 # ---------------------------------------------------------------------------
 
+
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("op_name,op_func", IEEE_OPS_WITH_RM)
 @pytest.mark.parametrize("dtype,mode", IEEE_DTYPE_MODES)
 def test_ieee_with_rounding_mode(op_name, op_func, dtype, mode):
     """Compile + run every IEEE op across fp32 / fp64 / fp16 and all rounding
     modes that the hardware supports."""
-    run_ieee_math_test(op_name, op_func, rounding_mode=mode, dtype=dtype,
-                       run_execution=(mode == "rn"))
+    run_ieee_math_test(op_name, op_func, rounding_mode=mode, dtype=dtype, run_execution=(mode == "rn"))
 
 
 # ieee_frsqrt — only round-to-nearest (no rounding_mode parameter).
+
 
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("dtype", [T.float32, T.float16])
@@ -195,6 +203,7 @@ def test_ieee_frsqrt(dtype):
 # ---------------------------------------------------------------------------
 # Rejection tests — combinations that must fail at codegen time
 # ---------------------------------------------------------------------------
+
 
 @tilelang.testing.requires_cuda
 def test_ieee_frsqrt_fp64_rejected():
