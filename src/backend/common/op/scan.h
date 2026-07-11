@@ -58,8 +58,8 @@ Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &lower_args,
       ss << "tl::" << symbol_prefix << "2D<" << threads << ", " << op.dim
          << ", " << (op.reverse ? "true" : "false") << ">::run";
       PrimExpr row_stride = op.src->shape[op.src->shape.size() - 1];
-      args = {StringImm(ss.str()), src_ptr, dst_ptr, src_extents[0],
-              src_extents[1], row_stride};
+      args = {StringImm(ss.str()), src_ptr,        dst_ptr,
+              src_extents[0],      src_extents[1], row_stride};
     } else {
       LOG(FATAL) << pretty_name
                  << " currently supports only 1D or 2D buffers, got " << ndim

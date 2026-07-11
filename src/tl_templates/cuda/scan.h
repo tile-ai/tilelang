@@ -140,7 +140,7 @@ struct InclusiveScan2D {
         if (col >= W)
           return;
         InclusiveScanLine<Reducer, reverse, T, SEG>(src + col, dst + col, H,
-                                                     stride);
+                                                    stride);
       }
     }
   }
