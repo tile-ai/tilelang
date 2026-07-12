@@ -80,7 +80,8 @@ public:
   /*!
    * \brief Generate SIMT (thread-level) loop for copying.
    */
-  For MakeSIMTLoop(arith::Analyzer *analyzer) const;
+  For MakeSIMTLoop(arith::Analyzer *analyzer,
+                   GetSafeValueCallback get_safe_value = nullptr) const;
 
   /*!
    * \brief Create iterator variables for multi-dimensional copy loops.

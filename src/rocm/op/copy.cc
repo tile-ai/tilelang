@@ -112,7 +112,7 @@ private:
       return LowerNormalCopy(op, lower_args, analyzer);
     }
 
-    auto simt_loop = op.MakeSIMTLoop(analyzer);
+    auto simt_loop = op.MakeSIMTLoop(analyzer, lower_args.get_safe_value);
     auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
     auto par_op = ParallelOp(fused_loop);
 
