@@ -76,9 +76,7 @@ def tilelang_copy_oob_safe_value(
         A: T.Tensor((M, N), src_dtype),
         B: T.Tensor((padded_M, padded_N), dst_dtype),
     ):
-        with T.Kernel(
-            T.ceildiv(padded_N, block_N), T.ceildiv(padded_M, block_M), threads=128
-        ) as (bx, by):
+        with T.Kernel(T.ceildiv(padded_N, block_N), T.ceildiv(padded_M, block_M), threads=128) as (bx, by):
             if pad_value is not None:
                 T.annotate_safe_value({A: pad_value})
             T.copy(
@@ -120,9 +118,7 @@ def run_tilelang_copy_oob_safe_value(
     b = kernel(a)
     torch_dst_dtype = getattr(torch, dst_dtype)
     fallback_value = 0 if pad_value is None else pad_value
-    ref_b = torch.full(
-        (padded_M, padded_N), fallback_value, device="cuda", dtype=torch_dst_dtype
-    )
+    ref_b = torch.full((padded_M, padded_N), fallback_value, device="cuda", dtype=torch_dst_dtype)
     ref_b[:M, :N] = a.to(torch_dst_dtype)
     torch.testing.assert_close(b[:M, :N], ref_b[:M, :N], rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(b[M:, :N], ref_b[M:, :N], rtol=1e-2, atol=1e-2)
@@ -142,14 +138,10 @@ def test_tilelang_copy_oob_safe_value_defaults_to_zero():
 
 @tilelang.testing.requires_cuda
 def test_tilelang_copy_oob_safe_value_casts_to_destination_dtype():
-    run_tilelang_copy_oob_safe_value(
-        src_dtype=T.float32, dst_dtype=T.float16, pad_value=-99
-    )
+    run_tilelang_copy_oob_safe_value(src_dtype=T.float32, dst_dtype=T.float16, pad_value=-99)
 
 
-def tilelang_elementwise_copy_oob_safe_value(
-    M, N, padded_M, padded_N, dtype=T.float32, pad_value=-99
-):
+def tilelang_elementwise_copy_oob_safe_value(M, N, padded_M, padded_N, dtype=T.float32, pad_value=-99):
     @T.prim_func
     def main(
         A: T.Tensor((M, N), dtype),
