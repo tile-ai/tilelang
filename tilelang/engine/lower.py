@@ -144,7 +144,7 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
     if enable_fast_math:
         options.append("--use_fast_math")
     if ptxas_usage_level is not None:
-        options.append(f"--ptxas-options=--register-usage-level={ptxas_usage_level}")
+        options.append(f"--ptxas-options=--register-usage-level={int(ptxas_usage_level)}")
     if verbose:
         options.append("--ptxas-options=--verbose")
         options.append("-w")  # Suppress warnings to make ptxas output more readable
