@@ -158,6 +158,24 @@ struct MinOpNan_fp16x2 {
   }
 };
 
+struct SumOp_f32x2 {
+  TL_DEVICE float2 operator()(float2 const &x, float2 const &y) {
+    return tl::add2(x, y);
+  }
+};
+
+struct MaxOp_f32x2 {
+  TL_DEVICE float2 operator()(float2 const &x, float2 const &y) {
+    return tl::max2(x, y);
+  }
+};
+
+struct MinOp_f32x2 {
+  TL_DEVICE float2 operator()(float2 const &x, float2 const &y) {
+    return tl::min2(x, y);
+  }
+};
+
 struct BitAndOp {
   template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
     return x & y;

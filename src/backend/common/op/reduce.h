@@ -94,8 +94,10 @@ inline uint64_t UnsignedMax(int bits) {
   return (static_cast<uint64_t>(1) << bits) - 1;
 }
 
-inline int GetPreferedVectorizedSize(DataType dt) {
-  if (dt.is_bfloat16() || dt.is_float16())
+inline int GetPreferedVectorizedSize(DataType dt,
+                                     bool supports_fp32x2 = false) {
+  if (dt.is_bfloat16() || dt.is_float16() ||
+      (supports_fp32x2 && dt.is_float() && dt.bits() == 32))
     return 2;
   return 1;
 }
@@ -159,9 +161,10 @@ inline PrimExpr MakeReduce(const ReduceOpNode &op, int vsize,
     rhs = Cast(acc->dtype, rhs);
   }
 
+  const bool use_nan_op = op.nan_propagate && (acc.dtype().is_float16() ||
+                                               acc.dtype().is_bfloat16());
+
   if (vsize == 1) {
-    const bool use_nan_op = op.nan_propagate && (acc.dtype().is_float16() ||
-                                                 acc.dtype().is_bfloat16());
     if (op.type->IsSum()) {
       return acc + rhs;
     } else if (op.type->IsAbsSum()) {
@@ -193,13 +196,13 @@ inline PrimExpr MakeReduce(const ReduceOpNode &op, int vsize,
     return Call(acc.dtype(), tl::add2(),
                 {acc, Call(acc.dtype(), tl::abs2(), {rhs})});
   } else if (op.type->IsMax()) {
-    return Call(acc.dtype(), op.nan_propagate ? tl::max2_nan() : tl::max2(),
+    return Call(acc.dtype(), use_nan_op ? tl::max2_nan() : tl::max2(),
                 {acc, rhs});
   } else if (op.type->IsMin()) {
-    return Call(acc.dtype(), op.nan_propagate ? tl::min2_nan() : tl::min2(),
+    return Call(acc.dtype(), use_nan_op ? tl::min2_nan() : tl::min2(),
                 {acc, rhs});
   } else if (op.type->IsAbsMax()) {
-    return Call(acc.dtype(), op.nan_propagate ? tl::max2_nan() : tl::max2(),
+    return Call(acc.dtype(), use_nan_op ? tl::max2_nan() : tl::max2(),
                 {acc, Call(acc.dtype(), tl::abs2(), {rhs})});
   }
   LOG(FATAL) << "Unsupported packed reduce type: " << op.type->type;
@@ -239,6 +242,8 @@ inline std::optional<std::string> MakeCodegenReducer(const ReduceOpNode &op,
   }
 
   if (vsize == 2) {
+    if (op.dst->dtype.is_float() && op.dst->dtype.bits() == 32)
+      return base + "_f32x2";
     if (op.dst->dtype.is_bfloat16())
       return base + "_bf16x2";
     if (op.dst->dtype.is_float16())
