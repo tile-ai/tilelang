@@ -29,7 +29,7 @@ struct ScanMaxOp {
 template <class Reducer, bool reverse, typename T, int SEG = 32>
 static TL_DEVICE void InclusiveScanLine(const T *__restrict__ src,
                                         T *__restrict__ dst, int extent,
-                                        int stride) {
+                                        int src_stride, int dst_stride) {
   if (extent <= 0)
     return;
 
@@ -43,9 +43,9 @@ static TL_DEVICE void InclusiveScanLine(const T *__restrict__ src,
     for (int seg = num_segments - 1; seg >= 0; --seg) {
       const int base = seg * SEG;
       const int active = (extent - base < SEG) ? (extent - base) : SEG;
-      T val = src[base * stride];
+      T val = src[base * src_stride];
       if (lane < active)
-        val = src[(base + lane) * stride];
+        val = src[(base + lane) * src_stride];
 
 #pragma unroll
       for (int off = 1; off < SEG; off <<= 1) {
@@ -58,7 +58,7 @@ static TL_DEVICE void InclusiveScanLine(const T *__restrict__ src,
         val = Reducer()(val, carry);
 
       if (lane < active)
-        dst[(base + lane) * stride] = val;
+        dst[(base + lane) * dst_stride] = val;
 
       T seg_result = tl::shfl_sync(MASK, val, 0);
       if (lane == 0)
@@ -70,9 +70,9 @@ static TL_DEVICE void InclusiveScanLine(const T *__restrict__ src,
     for (int seg = 0; seg < num_segments; ++seg) {
       const int base = seg * SEG;
       const int active = (extent - base < SEG) ? (extent - base) : SEG;
-      T val = src[base * stride];
+      T val = src[base * src_stride];
       if (lane < active)
-        val = src[(base + lane) * stride];
+        val = src[(base + lane) * src_stride];
 
 #pragma unroll
       for (int off = 1; off < SEG; off <<= 1) {
@@ -85,7 +85,7 @@ static TL_DEVICE void InclusiveScanLine(const T *__restrict__ src,
         val = Reducer()(val, carry);
 
       if (lane < active)
-        dst[(base + lane) * stride] = val;
+        dst[(base + lane) * dst_stride] = val;
 
       const int last_lane = active - 1;
       T seg_result = tl::shfl_sync(MASK, val, last_lane);
@@ -106,7 +106,7 @@ struct InclusiveScan1D {
                             int N) {
     if (threadIdx.x >= SEG)
       return;
-    InclusiveScanLine<Reducer, reverse, T, SEG>(src, dst, N, 1);
+    InclusiveScanLine<Reducer, reverse, T, SEG>(src, dst, N, 1, 1);
   }
 };
 
@@ -117,7 +117,7 @@ struct InclusiveScan2D {
   static_assert(Axis == 0 or Axis == 1);
   template <typename T, int SEG = 32>
   static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
-                            int H, int W, int stride) {
+                            int H, int W, int src_stride, int dst_stride) {
     if (H <= 0 || W <= 0)
       return;
 
@@ -130,8 +130,8 @@ struct InclusiveScan2D {
         const int row = b * TILE + item;
         if (row >= H)
           return;
-        InclusiveScanLine<Reducer, reverse, T, SEG>(src + row * stride,
-                                                    dst + row * stride, W, 1);
+        InclusiveScanLine<Reducer, reverse, T, SEG>(
+            src + row * src_stride, dst + row * dst_stride, W, 1, 1);
       }
     } else {
       const int num_blocks = (W + TILE - 1) / TILE;
@@ -140,7 +140,7 @@ struct InclusiveScan2D {
         if (col >= W)
           return;
         InclusiveScanLine<Reducer, reverse, T, SEG>(src + col, dst + col, H,
-                                                    stride);
+                                                    src_stride, dst_stride);
       }
     }
   }
@@ -158,9 +158,9 @@ template <int threads, bool reverse = false> struct CumSum1D {
 template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
   template <typename T, int SEG = 32>
   static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
-                            int H, int W, int stride) {
+                            int H, int W, int src_stride, int dst_stride) {
     InclusiveScan2D<ScanSumOp, threads, Axis, reverse>::template run<T, SEG>(
-        src, dst, H, W, stride);
+        src, dst, H, W, src_stride, dst_stride);
   }
 };
 
@@ -176,9 +176,9 @@ template <int threads, bool reverse = false> struct CumMax1D {
 template <int threads, int Axis = 0, bool reverse = false> struct CumMax2D {
   template <typename T, int SEG = 32>
   static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
-                            int H, int W, int stride) {
+                            int H, int W, int src_stride, int dst_stride) {
     InclusiveScan2D<ScanMaxOp, threads, Axis, reverse>::template run<T, SEG>(
-        src, dst, H, W, stride);
+        src, dst, H, W, src_stride, dst_stride);
   }
 };
 
