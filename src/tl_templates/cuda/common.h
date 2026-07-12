@@ -821,7 +821,21 @@ TL_DEVICE __half2 add2(__half2 a, __half2 b) {
 // --- sub2 ----------------------------------------------------------------
 
 TL_DEVICE float2 sub2(float2 a, float2 b) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) &&                       \
+    ((__CUDACC_VER_MAJOR__ > 12) ||                                            \
+     (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 8))
+  unsigned long long const &a_bits =
+      reinterpret_cast<unsigned long long const &>(a);
+  unsigned long long const &b_bits =
+      reinterpret_cast<unsigned long long const &>(b);
+  unsigned long long result_bits;
+  asm("sub.rn.f32x2 %0, %1, %2;"
+      : "=l"(result_bits)
+      : "l"(a_bits), "l"(b_bits));
+  return reinterpret_cast<float2 const &>(result_bits);
+#else
   return make_float2(a.x - b.x, a.y - b.y);
+#endif
 }
 
 TL_DEVICE __nv_bfloat162 sub2(__nv_bfloat162 a, __nv_bfloat162 b) {
@@ -1134,6 +1148,35 @@ template <> TL_DEVICE uint1 shfl_up_sync(unsigned mask, uint1 val, int delta) {
 
 template <> TL_DEVICE uint1 shfl_sync(unsigned mask, uint1 val, int srcLane) {
   return uint1{__shfl_sync(mask, val.x, srcLane)};
+}
+
+// Specializations for float2. CUDA has no shuffle overload for float2, so
+// shuffle its two lanes together through the 64-bit integer overload.
+template <>
+TL_DEVICE float2 shfl_xor_sync(unsigned mask, float2 val, int laneMask) {
+  unsigned long long raw = reinterpret_cast<unsigned long long const &>(val);
+  raw = __shfl_xor_sync(mask, raw, laneMask);
+  return reinterpret_cast<float2 const &>(raw);
+}
+
+template <>
+TL_DEVICE float2 shfl_down_sync(unsigned mask, float2 val, int delta) {
+  unsigned long long raw = reinterpret_cast<unsigned long long const &>(val);
+  raw = __shfl_down_sync(mask, raw, delta);
+  return reinterpret_cast<float2 const &>(raw);
+}
+
+template <>
+TL_DEVICE float2 shfl_up_sync(unsigned mask, float2 val, int delta) {
+  unsigned long long raw = reinterpret_cast<unsigned long long const &>(val);
+  raw = __shfl_up_sync(mask, raw, delta);
+  return reinterpret_cast<float2 const &>(raw);
+}
+
+template <> TL_DEVICE float2 shfl_sync(unsigned mask, float2 val, int srcLane) {
+  unsigned long long raw = reinterpret_cast<unsigned long long const &>(val);
+  raw = __shfl_sync(mask, raw, srcLane);
+  return reinterpret_cast<float2 const &>(raw);
 }
 
 } // namespace tl
