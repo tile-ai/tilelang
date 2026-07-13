@@ -59,16 +59,24 @@ def collect_assume_vars(func: tvm.tirx.PrimFunc):
     return assume_vars
 
 
-def collect_assume_conditions(func: tvm.tirx.PrimFunc):
-    """Collect conditions stored in tl.assume attributes."""
+def collect_attr_conditions(func: tvm.tirx.PrimFunc, attr_key: str):
+    """Collect conditions stored in attributes with the requested key."""
     conditions = []
 
-    def collect_assumes(stmt):
-        if isinstance(stmt, tirx.AttrStmt) and stmt.attr_key == "tl.assume":
+    def collect_attrs(stmt):
+        if isinstance(stmt, tirx.AttrStmt) and stmt.attr_key == attr_key:
             conditions.append(stmt.node)
 
-    tirx.stmt_functor.post_order_visit(func.body, collect_assumes)
+    tirx.stmt_functor.post_order_visit(func.body, collect_attrs)
     return conditions
+
+
+def collect_assume_conditions(func: tvm.tirx.PrimFunc):
+    return collect_attr_conditions(func, "tl.assume")
+
+
+def collect_runtime_check_conditions(func: tvm.tirx.PrimFunc):
+    return collect_attr_conditions(func, "tl.assume_runtime_check")
 
 
 def get_var_name(var):
@@ -119,6 +127,8 @@ def test_split_host_device_with_user_assume():
 
     assert device_func is not None, "Device function not found"
     assert host_func is not None, "Host function not found"
+    assert collect_runtime_check_conditions(host_func)
+    assert not collect_runtime_check_conditions(device_func)
 
     # Check that device function has assume statements
     device_str = str(device_func)
@@ -156,8 +166,12 @@ def test_split_host_device_with_buffer_shape_assume():
 
     mod = run_split_host_device_passes(main)
 
+    host_func = get_host_func(mod)
     device_func = get_device_func(mod)
+    assert host_func is not None
     assert device_func is not None
+    assert not collect_runtime_check_conditions(host_func)
+    assert not collect_runtime_check_conditions(device_func)
 
     # Check that assumes exist
     device_str = str(device_func)
@@ -279,6 +293,8 @@ def test_split_host_device_lifts_host_evaluable_device_assume():
     expected = main.params[1] % 4 == 0
     assert any(tvm.ir.structural_equal(condition, expected) for condition in collect_assume_conditions(host_func))
     assert any(tvm.ir.structural_equal(condition, expected, map_free_vars=True) for condition in collect_assume_conditions(device_func))
+    assert any(tvm.ir.structural_equal(condition, expected) for condition in collect_runtime_check_conditions(host_func))
+    assert not collect_runtime_check_conditions(device_func)
 
 
 @tilelang.testing.requires_cuda
@@ -299,6 +315,8 @@ def test_split_host_device_keeps_device_local_assume_off_host():
 
     assert not collect_assume_conditions(host_func)
     assert collect_assume_conditions(device_func)
+    assert not collect_runtime_check_conditions(host_func)
+    assert not collect_runtime_check_conditions(device_func)
 
 
 @tilelang.testing.requires_cuda
@@ -318,6 +336,8 @@ def test_split_host_device_does_not_lift_conditional_device_assume():
 
     assert not collect_assume_conditions(host_func)
     assert collect_assume_conditions(device_func)
+    assert not collect_runtime_check_conditions(host_func)
+    assert not collect_runtime_check_conditions(device_func)
 
 
 if __name__ == "__main__":

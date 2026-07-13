@@ -136,7 +136,7 @@ def test_internal_subroutine_call():
     )
 
 
-def test_assume_is_lowered_to_runtime_assert():
+def test_assume_runtime_check_is_lowered_to_assert():
     n = tirx.Var("n", "int32")
     condition = n % 4 == 0
     message = "n must be divisible by 4"
@@ -146,17 +146,55 @@ def test_assume_is_lowered_to_runtime_assert():
         tirx.StringImm(message),
         tirx.Evaluate(0),
     )
+    body = tirx.AttrStmt(
+        condition,
+        "tl.assume_runtime_check",
+        tirx.StringImm(message),
+        body,
+    )
+    body = tirx.AttrStmt(
+        condition,
+        "tl.assume",
+        tirx.StringImm("compiler-generated assumption"),
+        body,
+    )
     before = tirx.PrimFunc([n], body).with_attr("global_symbol", "main")
     before = before.with_attr("target", tvm.target.Target("cuda", host="llvm"))
 
-    after = tilelang.transform.MakePackedAPI()(tvm.IRModule.from_expr(before))["main"]
-    assert not [stmt for stmt in _collect_nodes(after.body, tirx.AttrStmt) if stmt.attr_key == "tl.assume"]
+    after_mod = tilelang.transform.MakePackedAPI()(tvm.IRModule.from_expr(before))
+    after = after_mod["main"]
+    assert not [stmt for stmt in _collect_nodes(after.body, tirx.AttrStmt) if stmt.attr_key == "tl.assume_runtime_check"]
+    assert [stmt for stmt in _collect_nodes(after.body, tirx.AttrStmt) if stmt.attr_key == "tl.assume"]
 
     matching_asserts = [
         stmt for stmt in _collect_nodes(after.body, tirx.AssertStmt) if any(part.value == message for part in stmt.message_parts)
     ]
     assert len(matching_asserts) == 1
     tvm.ir.assert_structural_equal(matching_asserts[0].condition, condition, map_free_vars=True)
+
+    simplified = tilelang.transform.Simplify()(after_mod)["main"]
+    matching_asserts = [
+        stmt for stmt in _collect_nodes(simplified.body, tirx.AssertStmt) if any(part.value == message for part in stmt.message_parts)
+    ]
+    assert len(matching_asserts) == 1
+    tvm.ir.assert_structural_equal(matching_asserts[0].condition, condition, map_free_vars=True)
+
+
+def test_optimizer_only_assume_is_not_lowered_to_assert():
+    n = tirx.Var("n", "int32")
+    message = "compiler-generated shape assumption"
+    body = tirx.AttrStmt(
+        n > 0,
+        "tl.assume",
+        tirx.StringImm(message),
+        tirx.Evaluate(0),
+    )
+    before = tirx.PrimFunc([n], body).with_attr("global_symbol", "main")
+    before = before.with_attr("target", tvm.target.Target("cuda", host="llvm"))
+
+    after = tilelang.transform.MakePackedAPI()(tvm.IRModule.from_expr(before))["main"]
+    assert [stmt for stmt in _collect_nodes(after.body, tirx.AttrStmt) if stmt.attr_key == "tl.assume"]
+    assert not [stmt for stmt in _collect_nodes(after.body, tirx.AssertStmt) if any(part.value == message for part in stmt.message_parts)]
 
 
 def test_subroutine_call_to_externally_visible_subroutine():

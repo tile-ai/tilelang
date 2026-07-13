@@ -179,16 +179,27 @@ private:
   bool made_change_{false};
 };
 
-class AssumeToAssertRewriter : public StmtMutator {
+struct AssumeRuntimeCheck {
+  PrimExpr condition;
+  Array<StringImm> message_parts;
+  Span span;
+};
+
+class AssumeRuntimeCheckExtractor : public StmtMutator {
 public:
-  static Stmt Rewrite(Stmt body) {
-    AssumeToAssertRewriter rewriter;
-    return rewriter(std::move(body));
+  static Stmt Extract(Stmt body,
+                      std::vector<AssumeRuntimeCheck> *runtime_checks) {
+    AssumeRuntimeCheckExtractor extractor(runtime_checks);
+    return extractor(std::move(body));
   }
 
 private:
+  explicit AssumeRuntimeCheckExtractor(
+      std::vector<AssumeRuntimeCheck> *runtime_checks)
+      : runtime_checks_(runtime_checks) {}
+
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key != tirx::attr::tilelang_assume) {
+    if (op->attr_key != tl::attr::kAssumeRuntimeCheck) {
       return StmtMutator::VisitStmt_(op);
     }
 
@@ -202,11 +213,39 @@ private:
       message_parts.push_back(StringImm(os.str()));
     }
 
-    Stmt assertion = AssertStmt(condition, StringImm("RuntimeError"),
-                                std::move(message_parts), op->span);
-    Stmt body = VisitStmt(op->body);
-    return SeqStmt::Flatten(std::move(assertion), std::move(body));
+    if (conditional_scope_depth_ != 0) {
+      // Conditional checks cannot be moved to the packed-function entry
+      // without changing their execution semantics. Keep only the paired
+      // tl.assume, matching SplitHostDevice's conservative lifting policy.
+      return VisitStmt(op->body);
+    }
+    runtime_checks_->push_back({condition, std::move(message_parts), op->span});
+    return VisitStmt(op->body);
   }
+
+  Stmt VisitStmt_(const IfThenElseNode *op) final {
+    ++conditional_scope_depth_;
+    Stmt result = StmtMutator::VisitStmt_(op);
+    --conditional_scope_depth_;
+    return result;
+  }
+
+  Stmt VisitStmt_(const ForNode *op) final {
+    ++conditional_scope_depth_;
+    Stmt result = StmtMutator::VisitStmt_(op);
+    --conditional_scope_depth_;
+    return result;
+  }
+
+  Stmt VisitStmt_(const WhileNode *op) final {
+    ++conditional_scope_depth_;
+    Stmt result = StmtMutator::VisitStmt_(op);
+    --conditional_scope_depth_;
+    return result;
+  }
+
+  std::vector<AssumeRuntimeCheck> *runtime_checks_;
+  int conditional_scope_depth_{0};
 };
 
 } // namespace
@@ -280,7 +319,9 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   }
 
   auto *func_ptr = func.CopyOnWrite();
-  func_ptr->body = AssumeToAssertRewriter::Rewrite(func_ptr->body);
+  std::vector<AssumeRuntimeCheck> assume_runtime_checks;
+  func_ptr->body = AssumeRuntimeCheckExtractor::Extract(func_ptr->body,
+                                                        &assume_runtime_checks);
   // set the global symbol to the packed function name
   const Stmt nop = Evaluate(0);
   int num_args = static_cast<int>(func_ptr->params.size());
@@ -576,6 +617,12 @@ PrimFunc MakePackedAPI(PrimFunc func) {
         symbol::tvm_ffi_symbol_prefix + global_symbol.value()}});
 
   Stmt body = ReturnRewriter(v_result)(func_ptr->body);
+  for (auto it = assume_runtime_checks.rbegin();
+       it != assume_runtime_checks.rend(); ++it) {
+    Stmt assertion = AssertStmt(it->condition, StringImm("RuntimeError"),
+                                it->message_parts, it->span);
+    body = SeqStmt::Flatten(std::move(assertion), std::move(body));
+  }
   body = AttrStmt(make_zero(DataType::Int(32)), tirx::attr::compute_scope,
                   StringImm(name_hint + "_compute_"), body);
   // Set device context
