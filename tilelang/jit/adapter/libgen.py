@@ -111,7 +111,7 @@ class LibraryGenerator:
             if enable_fast_math:
                 command += ["--use_fast_math"]
             if ptxas_usage_level is not None:
-                command += [f"--ptxas-options=--register-usage-level={ptxas_usage_level}"]
+                command += [f"--ptxas-options=--register-usage-level={int(ptxas_usage_level)}"]
             if self.verbose:
                 command += ["--ptxas-options=--verbose"]
             command += [
