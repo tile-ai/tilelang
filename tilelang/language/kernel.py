@@ -102,13 +102,20 @@ def _normalize_threads(
         threads = 128  # default thread number
 
     if isinstance(threads, int):
-        return [threads, 1, 1]
-    if isinstance(threads, list):
-        return threads + [1] * (3 - len(threads))
-    if isinstance(threads, tuple):
-        return list(threads) + [1] * (3 - len(threads))
+        normalized = [threads, 1, 1]
+    elif isinstance(threads, list):
+        normalized = threads + [1] * (3 - len(threads))
+    elif isinstance(threads, tuple):
+        normalized = list(threads) + [1] * (3 - len(threads))
+    else:
+        raise ValueError("threads must be an integer or a list of integers")
 
-    raise ValueError("threads must be an integer or a list of integers")
+    # A block extent must be positive. A non-positive value would otherwise reach
+    # codegen and launch a kernel with an empty thread block, silently writing nothing.
+    if any(isinstance(extent, int) and extent <= 0 for extent in normalized):
+        raise ValueError(f"threads must be positive, got {threads}")
+
+    return normalized
 
 
 def _normalize_cluster_dims(
