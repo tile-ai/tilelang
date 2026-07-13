@@ -17,6 +17,10 @@ _MEMORY_ORDER_ID_MAP = {
     "seq_cst": 5,
 }
 
+# C++ memory order legality per operation.
+_LOAD_ORDERS = {"relaxed", "consume", "acquire", "seq_cst"}
+_STORE_ORDERS = {"relaxed", "release", "seq_cst"}
+
 
 def atomic_max(dst: Buffer, value: PrimExpr, memory_order: str | None = None, return_prev: bool = False) -> PrimExpr:
     """
@@ -357,11 +361,9 @@ def atomic_addx4(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> Pri
 def atomic_load(src: Buffer, memory_order: str = "seq_cst") -> PrimExpr:
     """
     Load a value from the given buffer using the specified atomic memory ordering.
-
     Performs an atomic load from `src` and returns a PrimExpr representing the loaded value.
     memory_order selects the ordering and must be one of: "relaxed", "consume", "acquire",
-    "release", "acq_rel", or "seq_cst" (default).
-    Raises KeyError if an unknown memory_order is provided.
+    or "seq_cst" (default). Raises ValueError for illegal orders (release, acq_rel).
 
     Note: atomic_load always returns the loaded value, so no return_prev parameter is needed.
 
@@ -390,6 +392,11 @@ def atomic_load(src: Buffer, memory_order: str = "seq_cst") -> PrimExpr:
         >>> counter = T.Tensor([1], "int64", name="counter")
         >>> current_count = atomic_load(counter, memory_order="relaxed")
     """
+    if memory_order not in _LOAD_ORDERS:
+        raise ValueError(
+            f"atomic_load: memory_order={memory_order!r} is illegal for a load; "
+            f"use one of {sorted(_LOAD_ORDERS)} (C++/libcu++ forbids release/acq_rel on loads)"
+        )
     return T.call_intrin(
         src.dtype,
         op.Op.get("tl.atomic_load_elem_op"),
@@ -405,15 +412,9 @@ def atomic_store(dst: Buffer, src: PrimExpr, memory_order: str = "seq_cst") -> P
     Parameters:
         dst (Buffer): Destination buffer to store into.
         src (PrimExpr): Value to store.
-        memory_order (str, optional): Memory ordering name; one of "relaxed", "consume",
-            "acquire", "release", "acq_rel", or "seq_cst". Defaults to "seq_cst".
-            The name is mapped to an internal numeric ID used by the underlying runtime.
-
-    Returns:
-        PrimExpr: A handle representing the issued atomic store operation.
-
-    Raises:
-        KeyError: If `memory_order` is not one of the supported names.
+        memory_order (str, optional): Memory ordering name; one of "relaxed",
+            "release", or "seq_cst". Defaults to "seq_cst".
+            Raises ValueError for illegal orders (consume, acquire, acq_rel).
 
     Note: atomic_store doesn't return a previous value, so no return_prev parameter is needed.
 
@@ -448,6 +449,11 @@ def atomic_store(dst: Buffer, src: PrimExpr, memory_order: str = "seq_cst") -> P
         >>> log_counter = T.Tensor([1], "int64", name="log_counter")
         >>> atomic_store(log_counter, 0)  # Reset counter atomically
     """
+    if memory_order not in _STORE_ORDERS:
+        raise ValueError(
+            f"atomic_store: memory_order={memory_order!r} is illegal for a store; "
+            f"use one of {sorted(_STORE_ORDERS)} (C++/libcu++ forbids consume/acquire/acq_rel on stores)"
+        )
     return T.call_intrin(
         "handle",
         op.Op.get("tl.atomic_store_elem_op"),
