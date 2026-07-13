@@ -30,8 +30,6 @@ namespace tvm {
 namespace tl {
 
 using AddWorkspaceCallback = std::function<PrimExpr(int, DataType)>;
-using GetSafeValueCallback =
-    std::function<PrimExpr(const tirx::Buffer &buffer)>;
 // Allocate a compiler-generated shared mbarrier slot. The optional hint names
 // the backing barrier buffer when the first slot is created; later slots share
 // the same buffer and may ignore the hint.
@@ -103,6 +101,10 @@ struct LowerArgs {
   // Map from Bind variable to its bound expression, for resolving
   // fragment buffer accesses through Bind values
   ffi::Map<tirx::Var, PrimExpr> bind_var_to_expr;
+  // Map from buffer data Var to its annotated safe value. Tile-op lowerings
+  // use this to materialize source OOB false paths before
+  // LegalizeSafeMemoryAccess runs.
+  ffi::Map<tirx::Var, PrimExpr> safe_value_map;
   // Fallback mbarrier parity for ops that do not carry an explicit
   // tl.pipeline_mbar_phase_expr annotation. LowerTileOp derives this from the
   // nearest enclosing serial loop so non-pipelined TMA loops still alternate
@@ -120,7 +122,6 @@ struct LowerArgs {
   // Callbacks used by op lowerings to request pass-owned resources or report
   // metadata that later passes need.
   AddWorkspaceCallback add_workspace = nullptr;
-  GetSafeValueCallback get_safe_value = nullptr;
   AllocMBarrierCallback alloc_mbarrier = nullptr;
   UpdateBarrierArriveCallback update_barrier_arrive = nullptr;
   // Optional callback to record a minimum shared-memory base alignment for a

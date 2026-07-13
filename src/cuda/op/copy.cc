@@ -761,7 +761,7 @@ Stmt Copy::LowerCPAsync(const CopyNode &op, const LowerArgs &lower_args,
     return LowerNormal(op, lower_args, analyzer);
   }
 
-  auto simt_loop = op.MakeSIMTLoop(analyzer, lower_args.get_safe_value);
+  auto simt_loop = op.MakeSIMTLoop(analyzer, lower_args.safe_value_map);
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
   auto par_op = ParallelOp(fused_loop);
 
@@ -925,7 +925,7 @@ Stmt Copy::LowerCluster(const CopyNode &op, const LowerArgs &lower_args,
         << src->name << ", dst=" << dst->name;
   }
 
-  auto simt_loop = op.MakeSIMTLoop(analyzer, lower_args.get_safe_value);
+  auto simt_loop = op.MakeSIMTLoop(analyzer, lower_args.safe_value_map);
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
 
   std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,

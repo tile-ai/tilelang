@@ -1203,9 +1203,6 @@ private:
           }
         };
 
-    GetSafeValueCallback get_safe_value_callback =
-        [this](const Buffer &buffer) { return GetSafeValue(buffer); };
-
     LowerArgs lower_args;
     lower_args.target = target_;
     lower_args.thread_bounds = thread_bounds;
@@ -1213,13 +1210,13 @@ private:
     lower_args.layout_map = layout_map_;
     lower_args.buffer_remap = buffer_remap_;
     lower_args.bind_var_to_expr = bind_var_to_expr;
+    lower_args.safe_value_map = safe_value_map_;
     lower_args.mbar_phase_expr = loop_mbar_phase_stack_.empty()
                                      ? PrimExpr(IntImm(DataType::Int(32), 0))
                                      : loop_mbar_phase_stack_.back();
     lower_args.mbarrier_buffer = &mbarrier_buffer_;
     lower_args.cluster_size = cluster_size_;
     lower_args.add_workspace = add_workspace_callback;
-    lower_args.get_safe_value = get_safe_value_callback;
     lower_args.alloc_mbarrier = mbarrier_callback;
     lower_args.update_barrier_arrive = barrier_arrive_callback;
     lower_args.require_smem_alignment = require_smem_alignment_callback;
@@ -1542,29 +1539,13 @@ private:
     auto map = Downcast<Map<Var, PrimExpr>>(
         op->annotations.Get(attr::kSafeValueMap).value());
     for (const auto &[var, safe_value] : map) {
-      ICHECK(buffer_data_to_buffer_.count(var))
-          << "buffer " << var << " is not found in the block "
-          << buffer_data_to_buffer_;
-      Buffer buffer = buffer_data_to_buffer_[var];
-      annotated_safe_value_map_.Set(buffer, safe_value);
-      annotated_safe_value_by_data_.Set(var, safe_value);
+      safe_value_map_.Set(var, safe_value);
     }
-  }
-
-  PrimExpr GetSafeValue(const Buffer &buffer) {
-    if (annotated_safe_value_map_.count(buffer)) {
-      return annotated_safe_value_map_[buffer];
-    }
-    if (annotated_safe_value_by_data_.count(buffer->data)) {
-      return annotated_safe_value_by_data_[buffer->data];
-    }
-    return make_zero(buffer->dtype);
   }
 
   Target target_;
   Map<Var, Buffer> buffer_data_to_buffer_;
-  Map<Buffer, PrimExpr> annotated_safe_value_map_;
-  Map<Var, PrimExpr> annotated_safe_value_by_data_;
+  Map<Var, PrimExpr> safe_value_map_;
   Map<Buffer, Layout> layout_map_;
   Map<Buffer, Layout> layout_remap_;
   Map<Buffer, Buffer> buffer_remap_;

@@ -31,7 +31,7 @@ using namespace ffi;
 Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &lower_args,
                      arith::Analyzer *analyzer) {
   bool is_cpu_target = lower_args.target->GetTargetDeviceType() == kDLCPU;
-  auto simt_loop = op.MakeSIMTLoop(analyzer, lower_args.get_safe_value);
+  auto simt_loop = op.MakeSIMTLoop(analyzer, lower_args.safe_value_map);
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
 
   For vectorized_thread_loop;
@@ -450,7 +450,7 @@ PrimExpr CopyNode::MakePredicate(arith::Analyzer *analyzer,
 
 // Constructs a SIMT-style nested loop that implements the copy.
 For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer,
-                           GetSafeValueCallback get_safe_value) const {
+                           const Map<Var, PrimExpr> &safe_value_map) const {
   if (IsFP4UnpackLoad(src, dst)) {
     LOG(FATAL) << "SIMT copy from packed global float4_e2m1fn to unpacked "
                << "shared float4_e2m1_unpacked is not supported; use "
@@ -483,8 +483,10 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer,
   if (src->dtype != dst->dtype)
     value = Cast(dst->dtype, value);
   if (src_predicate.defined()) {
-    PrimExpr safe_value =
-        get_safe_value ? get_safe_value(src) : make_zero(src->dtype);
+    PrimExpr safe_value = make_zero(src->dtype);
+    if (safe_value_map.count(src->data)) {
+      safe_value = safe_value_map[src->data];
+    }
     if (safe_value.dtype() != dst->dtype)
       safe_value = Cast(dst->dtype, safe_value);
     value = if_then_else(src_predicate, value, analyzer->Simplify(safe_value));
