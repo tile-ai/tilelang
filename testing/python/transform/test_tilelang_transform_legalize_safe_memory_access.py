@@ -78,6 +78,12 @@ def _assert_legalize_matches_expected(before, expected, strip_annotations: bool 
     )
 
 
+def _apply_negative_index_then_safe_memory(func):
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tl.transform.LegalizeNegativeIndex()(mod)
+    return tl.transform.LegalizeSafeMemoryAccess()(mod)
+
+
 def vectorize_access_legalize(M: int = 64, N: int = 64, M_offset: int = 2, N_offset: int = 2):
     dtype = T.float32
 
@@ -480,6 +486,36 @@ def assert_call_extern_multiple_access_ptrs_legalize():
     _assert_legalize_matches_expected(func, expected)
 
 
+def assert_runtime_unknown_sign_vector_negative_index_legalize():
+    @T.prim_func
+    def main(A: T.Tensor((1024,), T.float32), B: T.Tensor((4, 4), T.float32)):
+        with T.Kernel(1, threads=1) as _:
+            for t in T.serial(4):
+                B[t, T.Ramp(0, 1, 4)] = A[T.Ramp(t - 2, 1, 4)]
+
+    @T.prim_func
+    def expected(A: T.Tensor((1024,), T.float32), B: T.Tensor((4, 4), T.float32)):
+        with T.Kernel(1, threads=1) as _:
+            for t in T.serial(4):
+                B[t, T.Ramp(0, 1, 4)] = A[
+                    T.Shuffle(
+                        [
+                            T.Select(t < 2, t + 1022, t - 2),
+                            T.Select(t < 1, t + 1023, t - 1),
+                            t,
+                            t + 1,
+                        ],
+                        [0, 1, 2, 3],
+                    )
+                ]
+
+    transformed = _apply_negative_index_then_safe_memory(main)
+    tvm.ir.assert_structural_equal(
+        _strip_block_reads_writes(transformed["main"].body),
+        _strip_block_reads_writes(expected.body),
+    )
+
+
 def test_vectorize_access():
     assert_vectorize_access(64, 64)
 
@@ -526,6 +562,10 @@ def test_call_extern_access_ptr_readwrite_mask_oob():
 
 def test_call_extern_multiple_access_ptrs_oob():
     assert_call_extern_multiple_access_ptrs_legalize()
+
+
+def test_runtime_unknown_sign_vector_negative_index_oob():
+    assert_runtime_unknown_sign_vector_negative_index_legalize()
 
 
 if __name__ == "__main__":
