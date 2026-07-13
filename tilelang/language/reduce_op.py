@@ -6,6 +6,7 @@ from tvm import tirx
 from tilelang.language import copy, macro, alloc_fragment
 from tilelang.utils.language import to_tile_region
 from tilelang.utils.language import is_shared, is_fragment
+from tilelang.language.dtypes import get_tvm_dtype
 from tvm.script.ir_builder import IRBuilder
 
 
@@ -52,6 +53,12 @@ def reduce(
             f"Invalid reduce output shape, buffer shape is {buffer.shape}, dim is {dim}, "
             f"output shape is {out.shape}, expected shapes are {expected_shapes_str}"
         )
+
+    # Bitwise reduce ops only accept integer/bool buffers.
+    if reduce_type in ("bitand", "bitor", "bitxor"):
+        dt = get_tvm_dtype(buffer.dtype)
+        if not (dt.is_int() or dt.is_uint() or dt.is_bool()):
+            raise ValueError(f"reduce_{reduce_type} requires an integer or bool buffer, got {buffer.dtype}")
 
     annotations = {}
     if batch > 1:
