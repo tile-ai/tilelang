@@ -212,6 +212,10 @@ def test_topk_selector(batch=64, seq_len=32 * 1024, topk=2048):
         set_trt = set(trt_np)
         intersection = set_ref & set_trt
         print("selected/all:", len(intersection), "/", len(set_ref), "=", len(intersection) / len(set_ref))
+        recall = len(intersection) / len(set_ref)
+        # Exact top-k selection modulo float ties at the threshold boundary.
+        # Miscompiled builds (duplicated atomic return value) drop to ~0.98.
+        assert recall >= 0.999, f"row {i}: top-{topk} recall too low: {recall:.4f}"
 
     # Performance test with CUDA events
 

@@ -109,5 +109,46 @@ def test_if_stmt_binding_can_disable_replayable_bind_inline():
     tvm.ir.assert_structural_equal(after.body, expected.body, True)
 
 
+def test_if_stmt_binding_keeps_side_effecting_bind():
+    """Regression test: a bind whose value carries a side effect (an atomic
+    RMW returning the previous value) must be materialized exactly once.
+
+    Replaying such a bind at every use site re-executes the atomic, which
+    silently corrupts results (e.g. compaction/histogram kernels where the
+    returned slot index is used both in a bound check and as a store index).
+    """
+
+    @T.prim_func
+    def before(A: T.Buffer((4,), "float32"), counter: T.Buffer((1,), "int32"), out: T.Buffer((4,), "int32")):
+        if A[0] >= T.float32(0):
+            pos = T.bind(
+                T.call_intrin(
+                    "int32",
+                    tvm.ir.Op.get("tl.atomic_add_ret_elem_op"),
+                    counter.access_ptr("rw"),
+                    1,
+                )
+            )
+            if pos < 4:
+                out[pos] = 1
+
+    @T.prim_func
+    def expected(A: T.Buffer((4,), "float32"), counter: T.Buffer((1,), "int32"), out: T.Buffer((4,), "int32")):
+        if A[0] >= T.float32(0):
+            pos = T.bind(
+                T.call_intrin(
+                    "int32",
+                    tvm.ir.Op.get("tl.atomic_add_ret_elem_op"),
+                    counter.access_ptr("rw"),
+                    1,
+                )
+            )
+            if pos < 4:
+                out[pos] = 1
+
+    after = _run_if_stmt_binding(before)
+    tvm.ir.assert_structural_equal(after.body, expected.body, True)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
