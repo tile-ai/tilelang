@@ -179,6 +179,36 @@ private:
   bool made_change_{false};
 };
 
+class AssumeToAssertRewriter : public StmtMutator {
+public:
+  static Stmt Rewrite(Stmt body) {
+    AssumeToAssertRewriter rewriter;
+    return rewriter(std::move(body));
+  }
+
+private:
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key != tirx::attr::tilelang_assume) {
+      return StmtMutator::VisitStmt_(op);
+    }
+
+    PrimExpr condition = Downcast<PrimExpr>(op->node);
+    Array<StringImm> message_parts;
+    if (const auto *message = op->value.as<StringImmNode>()) {
+      message_parts.push_back(GetRef<StringImm>(message));
+    } else {
+      std::ostringstream os;
+      os << "Assume: " << condition;
+      message_parts.push_back(StringImm(os.str()));
+    }
+
+    Stmt assertion = AssertStmt(condition, StringImm("RuntimeError"),
+                                std::move(message_parts), op->span);
+    Stmt body = VisitStmt(op->body);
+    return SeqStmt::Flatten(std::move(assertion), std::move(body));
+  }
+};
+
 } // namespace
 
 inline Stmt MakeAssertEQ(PrimExpr lhs, PrimExpr rhs, std::string msg) {
@@ -250,6 +280,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   }
 
   auto *func_ptr = func.CopyOnWrite();
+  func_ptr->body = AssumeToAssertRewriter::Rewrite(func_ptr->body);
   // set the global symbol to the packed function name
   const Stmt nop = Evaluate(0);
   int num_args = static_cast<int>(func_ptr->params.size());

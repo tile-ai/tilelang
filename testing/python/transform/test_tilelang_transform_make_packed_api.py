@@ -51,6 +51,17 @@ def _find_compute_scope(func):
     return result
 
 
+def _collect_nodes(stmt, node_type):
+    nodes = []
+
+    def _visitor(node):
+        if isinstance(node, node_type):
+            nodes.append(node)
+
+    tvm.tirx.stmt_functor.post_order_visit(stmt, _visitor)
+    return nodes
+
+
 @pytest.mark.parametrize("use_global_symbol", [False])
 def test_no_op_when_global_symbol_is_absent(use_global_symbol):
     func_attr = {"target": tvm.target.Target("llvm", host="llvm")}
@@ -123,6 +134,29 @@ def test_internal_subroutine_call():
         f"The main function's CallNode should use the subroutine's GLobalVar as the operation, "
         f"but instead has an operation of type {subroutine_call_op}"
     )
+
+
+def test_assume_is_lowered_to_runtime_assert():
+    n = tirx.Var("n", "int32")
+    condition = n % 4 == 0
+    message = "n must be divisible by 4"
+    body = tirx.AttrStmt(
+        condition,
+        "tl.assume",
+        tirx.StringImm(message),
+        tirx.Evaluate(0),
+    )
+    before = tirx.PrimFunc([n], body).with_attr("global_symbol", "main")
+    before = before.with_attr("target", tvm.target.Target("cuda", host="llvm"))
+
+    after = tilelang.transform.MakePackedAPI()(tvm.IRModule.from_expr(before))["main"]
+    assert not [stmt for stmt in _collect_nodes(after.body, tirx.AttrStmt) if stmt.attr_key == "tl.assume"]
+
+    matching_asserts = [
+        stmt for stmt in _collect_nodes(after.body, tirx.AssertStmt) if any(part.value == message for part in stmt.message_parts)
+    ]
+    assert len(matching_asserts) == 1
+    tvm.ir.assert_structural_equal(matching_asserts[0].condition, condition, map_free_vars=True)
 
 
 def test_subroutine_call_to_externally_visible_subroutine():

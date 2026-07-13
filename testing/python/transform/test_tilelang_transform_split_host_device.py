@@ -59,6 +59,18 @@ def collect_assume_vars(func: tvm.tirx.PrimFunc):
     return assume_vars
 
 
+def collect_assume_conditions(func: tvm.tirx.PrimFunc):
+    """Collect conditions stored in tl.assume attributes."""
+    conditions = []
+
+    def collect_assumes(stmt):
+        if isinstance(stmt, tirx.AttrStmt) and stmt.attr_key == "tl.assume":
+            conditions.append(stmt.node)
+
+    tirx.stmt_functor.post_order_visit(func.body, collect_assumes)
+    return conditions
+
+
 def get_var_name(var):
     """Get the name of a Var, handling different TVM versions."""
     if hasattr(var, "name_hint"):
@@ -248,6 +260,64 @@ def test_split_host_device_no_dangling_vars():
                     f"Found dangling variable declaration '{prev_line}' before assume. "
                     "This indicates SplitHostDevice did not properly substitute variables."
                 )
+
+
+@tilelang.testing.requires_cuda
+def test_split_host_device_lifts_host_evaluable_device_assume():
+    @T.prim_func
+    def main(a: T.Tensor[(1,), T.int32], n: T.int32):
+        with T.Kernel(1, threads=128):
+            T.assume(n % 4 == 0)
+            a[0] = n
+
+    mod = run_split_host_device_passes(main)
+    host_func = get_host_func(mod)
+    device_func = get_device_func(mod)
+    assert host_func is not None
+    assert device_func is not None
+
+    expected = main.params[1] % 4 == 0
+    assert any(tvm.ir.structural_equal(condition, expected) for condition in collect_assume_conditions(host_func))
+    assert any(tvm.ir.structural_equal(condition, expected, map_free_vars=True) for condition in collect_assume_conditions(device_func))
+
+
+@tilelang.testing.requires_cuda
+def test_split_host_device_keeps_device_local_assume_off_host():
+    @T.prim_func
+    def main(a: T.Tensor[(1,), T.int32]):
+        with T.Kernel(1, threads=128):
+            tx = T.get_thread_binding()
+            T.assume(tx < 128)
+            if tx == 0:
+                a[0] = tx
+
+    mod = run_split_host_device_passes(main)
+    host_func = get_host_func(mod)
+    device_func = get_device_func(mod)
+    assert host_func is not None
+    assert device_func is not None
+
+    assert not collect_assume_conditions(host_func)
+    assert collect_assume_conditions(device_func)
+
+
+@tilelang.testing.requires_cuda
+def test_split_host_device_does_not_lift_conditional_device_assume():
+    @T.prim_func
+    def main(a: T.Tensor[(1,), T.int32], n: T.int32):
+        with T.Kernel(1, threads=128):
+            if n % 4 == 0:
+                T.assume(n > 0)
+                a[0] = n
+
+    mod = run_split_host_device_passes(main)
+    host_func = get_host_func(mod)
+    device_func = get_device_func(mod)
+    assert host_func is not None
+    assert device_func is not None
+
+    assert not collect_assume_conditions(host_func)
+    assert collect_assume_conditions(device_func)
 
 
 if __name__ == "__main__":

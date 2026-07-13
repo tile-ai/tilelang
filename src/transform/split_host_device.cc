@@ -34,7 +34,9 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include <sstream>
 #include <unordered_set>
+#include <vector>
 
 #include "../op/builtin.h"
 #include "common/assume.h"
@@ -47,13 +49,14 @@ namespace tl {
 using namespace ffi;
 using namespace tirx;
 
-// This pass traverses the AST, split the target function into host part and
-// device part and copies all assume attribute statements to the device side.
+// This pass traverses the AST, splits the target function into host and device
+// parts, and preserves assumptions on every side that can evaluate them.
 
 // 1. Traverse AST and collect all assume statements into host_assumes_.
 // 2. Until the first AttrStmtNode with tvm::attr::kTarget.
 // 3. Call SplitDeviceFunc, which will create a new device function and replace
-//    the original body with a call to that function.
+//    the original body with a call to that function. Host-evaluable assumptions
+//    found in the device body are attached to that host-side call.
 class HostDeviceSplitter : public tirx::StmtMutator {
 public:
   explicit HostDeviceSplitter(IRModule *device_mod,
@@ -113,6 +116,108 @@ public:
   bool found_device_region() const { return found_device_region_; }
 
 private:
+  struct AssumeInfo {
+    PrimExpr condition;
+    StringImm message;
+    Span span;
+  };
+
+  class HostEvaluableConditionChecker : public tirx::StmtExprVisitor {
+  public:
+    explicit HostEvaluableConditionChecker(const Array<tirx::Var> &params) {
+      for (const tirx::Var &param : params) {
+        if (!param->dtype.is_handle()) {
+          params_.insert(param);
+        }
+      }
+    }
+
+    bool Check(const PrimExpr &condition) {
+      if (!condition->dtype.is_bool() || condition->dtype.lanes() != 1) {
+        return false;
+      }
+      VisitExpr(condition);
+      return is_host_evaluable_;
+    }
+
+  private:
+    void VisitExpr_(const tirx::VarNode *op) final {
+      if (!params_.count(GetRef<tirx::Var>(op))) {
+        is_host_evaluable_ = false;
+      }
+    }
+
+    void VisitExpr_(const tirx::BufferLoadNode *op) final {
+      is_host_evaluable_ = false;
+    }
+
+    void VisitExpr_(const tirx::CallNode *op) final {
+      // Device intrinsics and memory-dependent calls cannot be evaluated by
+      // the host launcher. Keep this deliberately conservative; ordinary
+      // shape constraints use arithmetic expression nodes rather than calls.
+      is_host_evaluable_ = false;
+    }
+
+    std::unordered_set<tirx::Var, ObjectPtrHash, ObjectPtrEqual> params_;
+    bool is_host_evaluable_{true};
+  };
+
+  class DeviceAssumeCollector : public tirx::StmtVisitor {
+  public:
+    static std::vector<AssumeInfo> Collect(const Stmt &body,
+                                           const Array<tirx::Var> &params) {
+      DeviceAssumeCollector collector(params);
+      collector(body);
+      return collector.assumes_;
+    }
+
+  private:
+    explicit DeviceAssumeCollector(const Array<tirx::Var> &params)
+        : params_(params) {}
+
+    void VisitStmt_(const tirx::AttrStmtNode *op) final {
+      if (op->attr_key == tirx::attr::tilelang_assume &&
+          conditional_scope_depth_ == 0) {
+        PrimExpr condition = Downcast<PrimExpr>(op->node);
+        HostEvaluableConditionChecker checker(params_);
+        if (checker.Check(condition)) {
+          StringImm message = [&]() {
+            if (const auto *string_imm = op->value.as<StringImmNode>()) {
+              return GetRef<StringImm>(string_imm);
+            }
+            std::ostringstream os;
+            os << "Assume: " << condition;
+            return StringImm(os.str());
+          }();
+          assumes_.push_back({condition, message, op->span});
+        }
+      }
+      tirx::StmtVisitor::VisitStmt_(op);
+    }
+
+    void VisitStmt_(const tirx::IfThenElseNode *op) final {
+      ++conditional_scope_depth_;
+      tirx::StmtVisitor::VisitStmt_(op);
+      --conditional_scope_depth_;
+    }
+
+    void VisitStmt_(const tirx::ForNode *op) final {
+      ++conditional_scope_depth_;
+      tirx::StmtVisitor::VisitStmt_(op);
+      --conditional_scope_depth_;
+    }
+
+    void VisitStmt_(const tirx::WhileNode *op) final {
+      ++conditional_scope_depth_;
+      tirx::StmtVisitor::VisitStmt_(op);
+      --conditional_scope_depth_;
+    }
+
+    Array<tirx::Var> params_;
+    std::vector<AssumeInfo> assumes_;
+    int conditional_scope_depth_{0};
+  };
+
   bool found_device_region_{false};
   Map<tirx::Var, tirx::Buffer> host_buffer_map_;
   Array<tirx::Var> non_restrict_params_;
@@ -266,6 +371,15 @@ private:
     return body;
   }
 
+  static Stmt
+  WrapBodyWithDeviceAssumes(Stmt body, const std::vector<AssumeInfo> &assumes) {
+    for (auto it = assumes.rbegin(); it != assumes.rend(); ++it) {
+      body = AttrStmt(it->condition, tirx::attr::tilelang_assume, it->message,
+                      std::move(body), it->span);
+    }
+    return body;
+  }
+
   tirx::Stmt SplitDeviceFunc(tirx::Stmt body, tvm::Target device_target) {
     code_block_source_ = std::nullopt;
     code_block_entry_name_ = std::nullopt;
@@ -292,6 +406,15 @@ private:
       return {Array<tirx::Var>(params.begin(), params.end()),
               use_def.undefined_buffers_};
     }();
+
+    // Assumes written inside a device region are otherwise removed from the
+    // host function when the region is replaced by a kernel launch. Preserve
+    // conditions that the host can evaluate from scalar kernel parameters so
+    // MakePackedAPI can turn them into runtime assertions. Assumes involving
+    // thread/block variables, local bindings, buffer loads, or calls remain
+    // device-only optimization facts.
+    std::vector<AssumeInfo> host_evaluable_device_assumes =
+        DeviceAssumeCollector::Collect(body, old_params);
 
     // Create new parameter variables for the device function to avoid sharing
     // Var objects with the host function. This prevents ConvertSSA from
@@ -397,6 +520,7 @@ private:
     Array<PrimExpr> args =
         old_params.Map([](const tirx::Var &var) -> PrimExpr { return var; });
 
+    Stmt host_call;
     if (can_propagate_errors) {
       tirx::Var kernel_error_code("kernel_error_code", success->dtype);
       tirx::Call kernel_call(success->dtype, kernel_symbol_global, args);
@@ -404,15 +528,14 @@ private:
           kernel_error_code == success, tirx::StringImm("RuntimeError"),
           Array<tirx::StringImm>(
               {tirx::StringImm("Error executing compute kernel")}));
-      tirx::Stmt let_check = tirx::SeqStmt(
+      host_call = tirx::SeqStmt(
           {tirx::Bind(kernel_error_code, kernel_call), assert_success});
-
-      return let_check;
-
     } else {
-      return tirx::Evaluate(
+      host_call = tirx::Evaluate(
           tirx::Call(DataType::Void(), kernel_symbol_global, args));
     }
+    return WrapBodyWithDeviceAssumes(std::move(host_call),
+                                     host_evaluable_device_assumes);
   }
 
   // target ir module
