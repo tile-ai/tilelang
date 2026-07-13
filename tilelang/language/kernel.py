@@ -98,6 +98,18 @@ def _normalize_bindings(bindings: list[Var]) -> Var | list[Var]:
 def _normalize_threads(
     threads: int | list[int] | tuple | None,
 ) -> list[int]:
+    """Normalize a thread-block specification into a 3-D extent list.
+
+    Args:
+        threads: A thread count, a per-dimension extent list/tuple, or None for the default.
+
+    Returns:
+        The extents as ``[x, y, z]``, padding missing dimensions with 1.
+
+    Raises:
+        ValueError: If ``threads`` has an unsupported type, or any concrete extent
+            is not positive.
+    """
     if threads is None:
         threads = 128  # default thread number
 
