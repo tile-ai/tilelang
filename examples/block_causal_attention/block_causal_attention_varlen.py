@@ -1,8 +1,3 @@
-"""Variable-length (packed ``cu_seqlens``) block-causal (dLLM) attention.
-
-The varlen twin of ``block_causal_attention.py`` (shares its mask helper and reference).
-"""
-
 import itertools
 
 import torch
@@ -14,7 +9,6 @@ from block_causal_attention import (
     _SUPPORTED_DLLM_BLOCKS,
     _check_dllm_block,
     _clone_with_grad,
-    _contiguous,
     _fwd_tile_allowed,
     block_causal_attention_ref,
 )
@@ -127,17 +121,15 @@ def _fwd_varlen_template(
 
 
 @tilelang.jit
-def _bwd_preprocess_varlen_template(heads: int, dim: int, dtype: str = "bfloat16"):
+def _bwd_preprocess_varlen_template(heads: int, dim: int, block_size: int = 64, dtype: str = "bfloat16"):
     accum_dtype = "float32"
-    block_size = 64
-    # prep sweeps dim in 64-wide tiles; a non-multiple-of-64 tail would copy past the last column.
     assert dim % block_size == 0, f"Delta preprocessing requires dim divisible by {block_size}, got {dim}"
     total_tokens = T.dynamic("total_tokens")
     shape = [total_tokens, heads, dim]
 
     @T.prim_func
     def prep(
-        O: T.Tensor(shape, dtype),
+        Output: T.Tensor(shape, dtype),
         dO: T.Tensor(shape, dtype),
         Delta: T.Tensor([heads, total_tokens], accum_dtype),
     ):
@@ -150,7 +142,7 @@ def _bwd_preprocess_varlen_template(heads: int, dim: int, dtype: str = "bfloat16
             delta = T.alloc_fragment([block_size], accum_dtype)
             T.clear(acc)
             for k in range(T.ceildiv(dim, block_size)):
-                T.copy(O[by * block_size : (by + 1) * block_size, bx, k * block_size : (k + 1) * block_size], o)
+                T.copy(Output[by * block_size : (by + 1) * block_size, bx, k * block_size : (k + 1) * block_size], o)
                 T.copy(dO[by * block_size : (by + 1) * block_size, bx, k * block_size : (k + 1) * block_size], do)
                 for i, j in T.Parallel(block_size, block_size):
                     acc[i, j] += o[i, j] * do[i, j]
@@ -172,7 +164,7 @@ def _bwd_dq_varlen_template(
     threads: int = 128,
     dtype: str = "bfloat16",
 ):
-    """Varlen query-parallel dQ (no atomics); mirrors the fixed-length dQ kernel per sequence."""
+    """Varlen query-parallel dQ (atomics-free). Mirrors the fixed-length dQ kernel per sequence."""
     _check_dllm_block(dllm_block, block_size)
     sm_scale = softmax_scale
     scale_log2e = sm_scale * LOG2_E
@@ -264,10 +256,10 @@ def _bwd_dkv_varlen_template(
     threads: int = 128,
     dtype: str = "bfloat16",
 ):
-    """Varlen key-parallel dK/dV (no atomics); the reverse schedule per sequence, with the
-    transposed forward mask (``_fwd_tile_allowed`` with ``i``/``j`` swapped). ``region_tiles``
-    is per-sequence but only drives index/loop arithmetic; the mask stays tile-local and
-    folds to a shift, so it compiles for every supported ``dllm_block``."""
+    """Varlen key-parallel dK/dV (atomics-free).
+
+    The reverse schedule per sequence. `region_tiles` is per-sequence but only drives index arithmetic.
+    """
     _check_dllm_block(dllm_block, block_size)
     sm_scale = softmax_scale
     scale_log2e = sm_scale * LOG2_E
@@ -314,14 +306,8 @@ def _bwd_dkv_varlen_template(
                 T.clear(dv)
                 T.clear(dk)
 
-                # Attending query tiles split into two *contiguous* groups so each loop index is
-                # affine (varlen host/device split rejects the non-affine merged schedule):
-                #   noisy group -- noisy key: just the diagonal {by}; clean key: [local, region_tiles)
-                #   clean group -- clean key only: [region_tiles + local, 2 * region_tiles)
-                # Attending query tiles split into two *contiguous* groups so each loop index is
-                # affine (the varlen host/device split rejects a non-affine merged schedule):
-                #   noisy group -- noisy key: just the diagonal {by}; clean key: [local, region_tiles)
-                #   clean group -- clean key only: [region_tiles + local, 2 * region_tiles)
+                # noisy group -- noisy key: just the diagonal {by}; clean key: [local, region_tiles)
+                # clean group -- clean key only: [region_tiles + local, 2 * region_tiles)
                 key_is_noisy = by < region_tiles
                 local = by - region_tiles
                 span = region_tiles - local
@@ -331,7 +317,7 @@ def _bwd_dkv_varlen_template(
                 clean_count = T.if_then_else(key_is_noisy, 0, span)
                 is_noisy_diag = T.if_then_else(key_is_noisy, 1, 0)
 
-                # noisy-query group (mask: noisy key always -> block diagonal; clean key only on the boundary step 0)
+                # noisy-query group (mask: noisy key always -> block diagonal
                 for step in T.Pipelined(noisy_count, num_stages=num_stages):
                     q_tile = noisy_start + step
                     T.copy(Q[seq_start + q_tile * block_size : seq_start + (q_tile + 1) * block_size, bx, :], q)
@@ -355,7 +341,7 @@ def _bwd_dkv_varlen_template(
                         dsT_cast[i, j] = qkT[i, j] * (dsT[i, j] - delta[j]) * sm_scale
                     T.gemm(dsT_cast, q, dk, policy=T.GemmWarpPolicy.FullRow)
 
-                # clean-query group (clean keys only; boundary = clean diagonal at step 0)
+                # clean-query group (clean keys only, boundary = clean diagonal at step 0)
                 for step in T.Pipelined(clean_count, num_stages=num_stages):
                     q_tile = clean_start + step
                     T.copy(Q[seq_start + q_tile * block_size : seq_start + (q_tile + 1) * block_size, bx, :], q)
@@ -389,12 +375,12 @@ def _bwd_dkv_varlen_template(
 
 class _BlockCausalAttentionVarlenTL(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, cu_seqlens, dllm_block, softmax_scale, max_seqlen):
+    def forward(ctx, q, k, v, cu_seqlens, dllm_block, softmax_scale, max_seqlen, block_size):
         total, heads, dim = q.shape
         batch = cu_seqlens.numel() - 1
         dtype = T.dtype(q.dtype)
-        q, k, v = (_contiguous(t) for t in (q, k, v))
-        fwd = _fwd_varlen_template(batch, heads, dim, dllm_block, softmax_scale, dtype=dtype)
+        q, k, v = (t.contiguous() for t in (q, k, v))
+        fwd = _fwd_varlen_template(batch, heads, dim, dllm_block, softmax_scale, block_size=block_size, dtype=dtype)
         o = torch.empty_like(q)
         lse = torch.empty((heads, total), device=q.device, dtype=torch.float32)
         fwd(q, k, v, cu_seqlens, max_seqlen, o, lse)
@@ -402,6 +388,7 @@ class _BlockCausalAttentionVarlenTL(torch.autograd.Function):
         ctx.dllm_block = dllm_block
         ctx.softmax_scale = softmax_scale
         ctx.max_seqlen = max_seqlen
+        ctx.block_size = block_size
         return o
 
     @staticmethod
@@ -411,12 +398,12 @@ class _BlockCausalAttentionVarlenTL(torch.autograd.Function):
         batch = cu_seqlens.numel() - 1
         dtype = T.dtype(q.dtype)
 
-        do, q, k, v, o = (_contiguous(t) for t in (do, q, k, v, o))
-        prep = _bwd_preprocess_varlen_template(heads, dim, dtype=dtype)
-        dq_kernel = _bwd_dq_varlen_template(batch, heads, dim, ctx.dllm_block, ctx.softmax_scale, dtype=dtype)
-        # dK/dV uses num_stages=1: its two per-key query groups accumulate into shared dk/dv
-        # fragments, which the layout pass cannot multi-buffer (num_stages>=2 fails to reshape).
-        dkv_kernel = _bwd_dkv_varlen_template(batch, heads, dim, ctx.dllm_block, ctx.softmax_scale, num_stages=1, dtype=dtype)
+        do, q, k, v, o = (t.contiguous() for t in (do, q, k, v, o))
+        prep = _bwd_preprocess_varlen_template(heads, dim, block_size=ctx.block_size, dtype=dtype)
+        dq_kernel = _bwd_dq_varlen_template(batch, heads, dim, ctx.dllm_block, ctx.softmax_scale, block_size=ctx.block_size, dtype=dtype)
+        dkv_kernel = _bwd_dkv_varlen_template(
+            batch, heads, dim, ctx.dllm_block, ctx.softmax_scale, block_size=ctx.block_size, num_stages=1, dtype=dtype
+        )
         delta = torch.empty((heads, total), device=q.device, dtype=torch.float32)
         prep(o, do, delta)
         dq = torch.empty_like(q)
@@ -424,40 +411,31 @@ class _BlockCausalAttentionVarlenTL(torch.autograd.Function):
         dv = torch.empty_like(v)
         dq_kernel(q, k, v, do, cu_seqlens, ctx.max_seqlen, lse, delta, dq)
         dkv_kernel(q, k, v, do, cu_seqlens, ctx.max_seqlen, lse, delta, dk, dv)
-        return dq, dk, dv, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None
 
 
 def block_causal_attention_varlen(
     q_unpad, k_unpad, v_unpad, cu_seqlens, dllm_block_size: int, softmax_scale=None, max_seqlen=None, block_size: int = 64
 ):
-    """Varlen dLLM block-causal attention over packed ``[total, heads, dim]`` tensors.
+    """Varlen dLLM block-causal attention over packed `[total, heads, dim]` tensors.
 
-    Expected layout:
-
-    * ``q_unpad``/``k_unpad``/``v_unpad``: ``[total_tokens, heads, dim]``, all sequences flattened
-      into one axis (no batch dim).
-    * ``cu_seqlens``: ``[batch + 1]`` int32 prefix-sum of the *full* per-sequence lengths (standard
-      flash-attn style); sequence ``b`` is rows ``[cu_seqlens[b], cu_seqlens[b + 1])``.
-    * Each sequence must be laid out **noisy-then-clean**,
-      ``[noisy_0..noisy_{k-1}, clean_0..clean_{k-1}]`` -- so ``cu_seqlens[b]`` is the noisy start and
-      the clean half begins at ``cu_seqlens[b] + seqlen // 2``. ``seqlen`` must be a multiple of
-      ``2 * block_size`` (``k`` a multiple of ``block_size``) so the noisy/clean split lands on a tile edge.
-
-    Pass ``max_seqlen`` to skip the host sync (``cu_seqlens.tolist()``) that the divisibility check
-    would otherwise force on every call -- the caller is then responsible for that precondition.
+    `cu_seqlens` is the `[batch + 1]` prefix-sum of full sequence lengths (flash-attn style). Each
+    sequence is laid out as [noisy, clean], and every length must be a multiple of `2 * block_size`
+    so the halves split on a tile edge. Passing `max_seqlen` skips the host sync that checks this,
+    making it the caller's responsibility. `block_size` is the tile size (it must divide `dim` and be
+    a multiple of `dllm_block_size`).
     """
     _check_dllm_block(dllm_block_size, block_size)  # fail fast at the API, not deep in a JIT build
     if softmax_scale is None:
         softmax_scale = q_unpad.shape[-1] ** -0.5
     cu_seqlens = cu_seqlens.to(torch.int32)
     if max_seqlen is None:
-        # Only this convenience path syncs cu_seqlens to host (for max + divisibility check).
         lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
         for length in lengths:
             assert length % (2 * block_size) == 0, f"each seqlen must be a multiple of 2*block_size ({2 * block_size}); got {length}"
         max_seqlen = max(lengths) if lengths else 0
     return _BlockCausalAttentionVarlenTL.apply(
-        q_unpad, k_unpad, v_unpad, cu_seqlens, dllm_block_size, float(softmax_scale), int(max_seqlen)
+        q_unpad, k_unpad, v_unpad, cu_seqlens, dllm_block_size, float(softmax_scale), int(max_seqlen), int(block_size)
     )
 
 
@@ -485,7 +463,7 @@ def block_causal_attention_varlen_ref(q_unpad, k_unpad, v_unpad, cu_seqlens, dll
 # ---------------------------------------------------------------------------
 
 
-def _run_varlen_case(lengths, heads, dim, dllm_block, dtype=torch.float16):
+def _run_varlen_case(lengths, heads, dim, dllm_block, block_size=64, dtype=torch.float16):
     torch.manual_seed(0)
     cu = torch.tensor([0, *itertools.accumulate(lengths)], device="cuda", dtype=torch.int32)
     total = int(cu[-1].item())
@@ -498,7 +476,7 @@ def _run_varlen_case(lengths, heads, dim, dllm_block, dtype=torch.float16):
     q_tl, k_tl, v_tl = (_clone_with_grad(t) for t in (query, key, value))
 
     out_ref = block_causal_attention_varlen_ref(q_ref, k_ref, v_ref, cu, dllm_block)
-    out_tl = block_causal_attention_varlen(q_tl, k_tl, v_tl, cu, dllm_block)
+    out_tl = block_causal_attention_varlen(q_tl, k_tl, v_tl, cu, dllm_block, block_size=block_size)
     torch.testing.assert_close(out_tl, out_ref, atol=2e-2, rtol=2e-2)
 
     out_ref.backward(grad)
@@ -509,11 +487,14 @@ def _run_varlen_case(lengths, heads, dim, dllm_block, dtype=torch.float16):
 
 
 def test_block_causal_attention_varlen():
-    # sequence lengths are multiples of 2*block_size=128 (noisy|clean halves, tile-aligned)
     lengths = [128, 256, 384]
     for dllm_block in _SUPPORTED_DLLM_BLOCKS:
         _run_varlen_case(lengths, heads=2, dim=64, dllm_block=dllm_block)
         print(f"[varlen] dllm_block={dllm_block:>2} OK  lengths={lengths}")
+
+    block_size, dllm_block = 32, 16
+    _run_varlen_case([128, 256], heads=2, dim=64, dllm_block=dllm_block, block_size=block_size)
+    print(f"[varlen] {block_size=} {dllm_block=} OK")
 
 
 def main():

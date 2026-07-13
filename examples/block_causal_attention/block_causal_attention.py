@@ -1,5 +1,3 @@
-"Fixed-length block-causal (dLLM) attention, forward + backward, for any diffusion block size."
-
 import torch
 import tilelang
 import tilelang.language as T
@@ -19,12 +17,11 @@ def _check_dllm_block(dllm_block: int, block_size: int):
 
 
 def _fwd_tile_allowed(i, j, dllm_block: int, is_noisy_diag, q_is_noisy):
-    """Mask for a single visited *boundary/diagonal* forward tile.
+    """Mask for a single visited boundary forward tile.
 
-    ``i``/``j`` are tile-local query/key rows.  ``is_noisy_diag`` marks the
-    noisy-noisy diagonal tile; otherwise this is the clean boundary tile and
-    ``q_is_noisy`` selects strict (``>``, offset_causal) vs inclusive (``>=``,
-    clean_causal) triangular masking.
+    `i`/`j` are tile-local query/key rows. `is_noisy_diag` marks the noisy-noisy
+    diagonal tile. Otherwise this is the clean boundary tile and `q_is_noisy`
+    selects between offset_causal and block_causal masking.
     """
     q_blk = i // dllm_block
     k_blk = j // dllm_block
@@ -191,8 +188,10 @@ def _bwd_dq_template(
     threads: int = 128,
     dtype: str = "bfloat16",
 ):
-    """Query-parallel dQ: reuses the *forward* sparse schedule and the forward tile mask,
-    accumulates ``dq`` in registers, writes once. No atomics."""
+    """Query-parallel dQ.
+
+    Reuses the forward sparse schedule and the forward tile mask,
+    accumulates `dq` in registers and writes once (atomics-free)."""
     half_len = seq_len // 2
     assert half_len % block_size == 0, "half_len must be divisible by block_size"
     _check_dllm_block(dllm_block, block_size)
@@ -279,11 +278,11 @@ def _bwd_dkv_template(
     threads: int = 128,
     dtype: str = "bfloat16",
 ):
-    """Key-parallel dK/dV: the *reverse* (transpose) of the forward schedule -- for each key
-    tile, walk exactly the query tiles that attend it, accumulate ``dk``/``dv`` in registers
-    and write once. No atomics. The tile mask is the forward mask ``_fwd_tile_allowed`` with
-    query/key roles swapped (``i``/``j`` transposed); because ``dllm_block`` is compile-time it
-    folds to a shift and compiles for every supported block size."""
+    """Key-parallel dK/dV.
+
+    The reverse of the forward schedule -- for each key tile, walk
+    exactly the query tiles that attend it, accumulate `dk`/`dv` in
+    registers and write once (atomics-free)."""
     half_len = seq_len // 2
     assert half_len % block_size == 0, "half_len must be divisible by block_size"
     _check_dllm_block(dllm_block, block_size)
@@ -370,18 +369,12 @@ def _bwd_dkv_template(
     return dkv_kernel
 
 
-def _contiguous(tensor):
-    # TileLang's default tensor proxy assumes fully contiguous global tensors (stride(-1) == 1
-    # is not enough), so a strided view would fail the host-side stride check.
-    return tensor if tensor.is_contiguous() else tensor.contiguous()
-
-
 class _BlockCausalAttentionTL(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, dllm_block, softmax_scale):
         batch, seq_len, heads, dim = q.shape
         dtype = T.dtype(q.dtype)
-        q, k, v = (_contiguous(t) for t in (q, k, v))
+        q, k, v = (t.contiguous() for t in (q, k, v))
         fwd = _fwd_template(batch, heads, seq_len, dim, dllm_block, softmax_scale, dtype=dtype)
         o, lse = fwd(q, k, v)
         ctx.save_for_backward(q, k, v, o, lse)
@@ -395,7 +388,7 @@ class _BlockCausalAttentionTL(torch.autograd.Function):
         batch, seq_len, heads, dim = q.shape
         dtype = T.dtype(q.dtype)
 
-        do, q, k, v, o = (_contiguous(t) for t in (do, q, k, v, o))
+        do, q, k, v, o = (t.contiguous() for t in (do, q, k, v, o))
         prep = _bwd_preprocess_template(batch, heads, seq_len, dim, dtype=dtype)
         dq_kernel = _bwd_dq_template(batch, heads, seq_len, dim, ctx.dllm_block, ctx.softmax_scale, dtype=dtype)
         dkv_kernel = _bwd_dkv_template(batch, heads, seq_len, dim, ctx.dllm_block, ctx.softmax_scale, dtype=dtype)
@@ -409,7 +402,7 @@ class _BlockCausalAttentionTL(torch.autograd.Function):
 
 
 def block_causal_attention(query, key, value, dllm_block_size: int, softmax_scale=None):
-    """Fixed-length dLLM block-causal attention for any ``dllm_block_size``."""
+    """Fixed-length dLLM block-causal attention for any `dllm_block_size`."""
     _check_dllm_block(dllm_block_size, 64)  # fail fast at the API, not deep in a JIT build
     if softmax_scale is None:
         softmax_scale = query.shape[-1] ** -0.5
