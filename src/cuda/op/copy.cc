@@ -350,6 +350,23 @@ MakeTMARows(const Buffer &src, const Array<Range> &src_ranges,
 
 namespace cuda {
 
+static constexpr int kTensorMapDataType16U4Align8B = 13;
+static constexpr int kTensorMapDataType16U4Align16B = 14;
+static constexpr int kTensorMapDataType16U6Align16B = 15;
+
+static int MakeTensorMapSwizzle(int b_bits) {
+  if (b_bits == 1) {
+    return static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
+  }
+  if (b_bits == 2) {
+    return static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
+  }
+  if (b_bits == 3) {
+    return static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
+  }
+  return static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
+}
+
 // The TMA unit applies the descriptor's swizzle pattern relative to the
 // shared-memory base address, so the base must sit on a swizzle-pattern
 // repeat boundary or the data lands with a shifted phase (silently wrong
@@ -436,7 +453,7 @@ private:
 
   static LayoutMap InferTMemLayout(const CopyNode &op,
                                    const LayoutInferArgs &layout_args,
-                                   CopyInst copy_inst);
+                                   InferLevel level, CopyInst copy_inst);
 
   static LayoutMap InferBulkLayout(const CopyNode &op,
                                    const LayoutInferArgs &layout_args,
@@ -521,7 +538,7 @@ LayoutMap Copy::InferLayout(const CopyNode &op,
   CheckParallelLoopLayout(op, copy_inst);
 
   if (copy_inst == CopyInst::kTMemLoad || copy_inst == CopyInst::kTMemStore) {
-    return InferTMemLayout(op, layout_args, copy_inst);
+    return InferTMemLayout(op, layout_args, level, copy_inst);
   }
   if (copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore ||
       copy_inst == CopyInst::kBulkLoad1D ||
@@ -552,33 +569,46 @@ void Copy::CheckParallelLoopLayout(const CopyNode &op, CopyInst copy_inst) {
 
 LayoutMap Copy::InferTMemLayout(const CopyNode &op,
                                 const LayoutInferArgs &layout_args,
-                                CopyInst copy_inst) {
+                                InferLevel level, CopyInst copy_inst) {
   // TODO (mzw) Add support for tcgen05.cp in CUDA tmem lowering.
   LayoutMap results;
   bool is_tmem_load = copy_inst == CopyInst::kTMemLoad;
   Buffer tmem_buf = is_tmem_load ? op.src : op.dst;
   Buffer reg_buf = is_tmem_load ? op.dst : op.src;
 
-  if (!layout_args.layout_map.count(reg_buf) &&
-      layout_args.layout_map.count(tmem_buf)) {
+  if (layout_args.layout_map.count(tmem_buf) &&
+      (!layout_args.layout_map.count(reg_buf) ||
+       level != InferLevel::kStrict)) {
     Layout tmem_layout = layout_args.layout_map[tmem_buf];
     Array<IterVar> logical_coords = op.MakeIterVars();
-    Array<PrimExpr> logical_coords_var = {logical_coords[0]->var,
-                                          logical_coords[1]->var};
-    Array<PrimExpr> phy_indices = tmem_layout->Forward(logical_coords_var);
-
     arith::Analyzer analyzer;
     for (const auto &iv : logical_coords) {
       analyzer.Bind(iv->var, iv->dom);
     }
+
+    Array<PrimExpr> tmem_logical_indices =
+        op.MakeIndices(logical_coords, is_tmem_load ? 0 : 1);
+    Array<Range> tmem_ranges = is_tmem_load ? op.src_range : op.dst_range;
+    Array<PrimExpr> tmem_min_indices;
+    for (const auto &range : tmem_ranges) {
+      tmem_min_indices.push_back(range->min);
+    }
+    Array<PrimExpr> phy_indices = tmem_layout->Forward(tmem_logical_indices);
+    Array<PrimExpr> base_phy_indices = tmem_layout->Forward(tmem_min_indices);
+    Array<PrimExpr> relative_phy_indices = {
+        analyzer.Simplify(phy_indices[0] - base_phy_indices[0]),
+        analyzer.Simplify(phy_indices[1] - base_phy_indices[1])};
+
     arith::ConstIntBound phy_row_bounds =
-        analyzer.const_int_bound(phy_indices[0]);
+        analyzer.const_int_bound(relative_phy_indices[0]);
     arith::ConstIntBound phy_col_bounds =
-        analyzer.const_int_bound(phy_indices[1]);
-    Range row_dom = Range(static_cast<int>(phy_row_bounds->min_value),
-                          static_cast<int>(phy_row_bounds->max_value + 1));
-    Range col_dom = Range(static_cast<int>(phy_col_bounds->min_value),
-                          static_cast<int>(phy_col_bounds->max_value + 1));
+        analyzer.const_int_bound(relative_phy_indices[1]);
+    int tmem_phy_row_extent =
+        phy_row_bounds->max_value - phy_row_bounds->min_value + 1;
+    int tmem_phy_col_extent =
+        phy_col_bounds->max_value - phy_col_bounds->min_value + 1;
+    Range row_dom = Range(0, tmem_phy_row_extent);
+    Range col_dom = Range(0, tmem_phy_col_extent);
 
     constexpr int WARP_SIZE = 32;
     constexpr int WARPGROUP_SIZE = 4 * WARP_SIZE;
@@ -586,7 +616,9 @@ LayoutMap Copy::InferTMemLayout(const CopyNode &op,
         << "Tensor memory copy requires thread_bounds->extent (num_threads) "
            "to be constant integers";
     int num_threads = *as_const_int(layout_args.thread_bounds->extent);
-    ICHECK(num_threads % WARPGROUP_SIZE == 0)
+    ICHECK(analyzer.CanProveEqual(
+               FloorMod(layout_args.thread_bounds->min, WARPGROUP_SIZE), 0) &&
+           num_threads % WARPGROUP_SIZE == 0)
         << "Tensor memory copy requires thread bounds to be aligned to "
            "warpgroups, but found "
         << "thread range = " << layout_args.thread_bounds;
@@ -596,16 +628,17 @@ LayoutMap Copy::InferTMemLayout(const CopyNode &op,
       int num_useful_threads = num_useful_wgs * WARPGROUP_SIZE;
       Tcgen05Meta meta = GetTcgen05MetaLd32Dp32B();
       auto [is_success, tmem_coord2frag, num_chunks_each_wg] =
-          ExpandTcgen05Layout(
-              meta, phy_col_bounds->max_value - phy_col_bounds->min_value + 1,
-              num_useful_threads, row_dom, col_dom);
+          ExpandTcgen05Layout(meta, tmem_phy_col_extent, num_useful_threads,
+                              row_dom, col_dom);
       (void)num_chunks_each_wg;
       if (!is_success) {
         continue;
       }
       Fragment logical_coord2frag =
-          Fragment(logical_coords, tmem_coord2frag->Forward(phy_indices),
-                   tmem_coord2frag->ForwardThread(phy_indices, std::nullopt),
+          Fragment(logical_coords,
+                   tmem_coord2frag->Forward(relative_phy_indices),
+                   tmem_coord2frag->ForwardThread(relative_phy_indices,
+                                                  std::nullopt),
                    MakeIterVar("rep", 1));
       results.Set(reg_buf, logical_coord2frag->BindThreadRange(
                                layout_args.thread_bounds));
@@ -1285,33 +1318,50 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
   Layout tmem_layout = lower_args.layout_map[tmem_buf];
   Fragment reg_layout = Downcast<Fragment>(lower_args.layout_map[reg_buf]);
 
-  Array<PrimExpr> logical_indices = op.MakeIndices(loop_vars, tmem_side);
-  Array<PrimExpr> phy_indices = tmem_layout->Forward(logical_indices);
+  Array<PrimExpr> tmem_logical_indices = op.MakeIndices(loop_vars, tmem_side);
+  Array<PrimExpr> reg_indices = op.MakeIndices(loop_vars, is_ld ? 1 : 0);
+  Array<Range> tmem_ranges = is_ld ? op.src_range : op.dst_range;
+  Array<PrimExpr> tmem_min_indices;
+  for (const auto &range : tmem_ranges) {
+    tmem_min_indices.push_back(range->min);
+  }
+
+  Array<PrimExpr> phy_indices = tmem_layout->Forward(tmem_logical_indices);
+  Array<PrimExpr> base_phy_indices = tmem_layout->Forward(tmem_min_indices);
+  Array<PrimExpr> relative_phy_indices = {
+      analyzer->Simplify(phy_indices[0] - base_phy_indices[0]),
+      analyzer->Simplify(phy_indices[1] - base_phy_indices[1])};
 
   arith::ConstIntBound phy_row_bounds =
-      analyzer->const_int_bound(phy_indices[0]);
+      analyzer->const_int_bound(relative_phy_indices[0]);
   arith::ConstIntBound phy_col_bounds =
-      analyzer->const_int_bound(phy_indices[1]);
+      analyzer->const_int_bound(relative_phy_indices[1]);
   int tmem_phy_row_min = phy_row_bounds->min_value;
   int tmem_phy_row_max = phy_row_bounds->max_value;
   int tmem_phy_col_min = phy_col_bounds->min_value;
   int tmem_phy_col_max = phy_col_bounds->max_value;
+  int tmem_phy_row_extent = tmem_phy_row_max - tmem_phy_row_min + 1;
   int tmem_phy_col_extent = tmem_phy_col_max - tmem_phy_col_min + 1;
-  Range row_dom = Range(tmem_phy_row_min, tmem_phy_row_max + 1);
-  Range col_dom = Range(tmem_phy_col_min, tmem_phy_col_max + 1);
+  Range row_dom = Range(0, tmem_phy_row_extent);
+  Range col_dom = Range(0, tmem_phy_col_extent);
 
   bool have_succeeded = false;
   Stmt body;
+  std::ostringstream tmem_debug;
 
   auto try_tcgen05_instruction = [&](Tcgen05Meta meta) {
     if (have_succeeded) {
       return;
     }
     if (tmem_phy_row_min != 0 || tmem_phy_row_max != 127) {
+      tmem_debug << " meta_width=" << meta.width
+                 << " rejected_row_bounds;";
       return;
     }
     if (tmem_phy_col_min % meta.width != 0 ||
         (tmem_phy_col_max + 1) % meta.width != 0) {
+      tmem_debug << " meta_width=" << meta.width
+                 << " rejected_col_alignment;";
       return;
     }
 
@@ -1321,19 +1371,29 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
       auto [is_success, target_frag, num_chunks_each_wg] = ExpandTcgen05Layout(
           meta, tmem_phy_col_extent, num_useful_threads, row_dom, col_dom);
       if (!is_success) {
+        tmem_debug << " meta_width=" << meta.width
+                   << " useful_threads=" << num_useful_threads
+                   << " expand_failed;";
         continue;
       }
 
       PrimExpr target_thread =
-          target_frag->ForwardThread(phy_indices, std::nullopt);
-      PrimExpr reg_thread =
-          reg_layout->ForwardThread(logical_indices, std::nullopt);
+          target_frag->ForwardThread(relative_phy_indices, std::nullopt);
+      PrimExpr reg_thread = reg_layout->ForwardThread(reg_indices, std::nullopt);
       if (!analyzer->CanProveEqual(target_thread, reg_thread)) {
+        tmem_debug << " meta_width=" << meta.width
+                   << " useful_threads=" << num_useful_threads
+                   << " thread_mismatch target=" << target_thread
+                   << " reg=" << reg_thread << ";";
         continue;
       }
-      PrimExpr target_reg = target_frag->Forward(phy_indices)[0];
-      PrimExpr reg_val = reg_layout->Forward(logical_indices)[0];
+      PrimExpr target_reg = target_frag->Forward(relative_phy_indices)[0];
+      PrimExpr reg_val = reg_layout->Forward(reg_indices)[0];
       if (!analyzer->CanProveEqual(target_reg, reg_val)) {
+        tmem_debug << " meta_width=" << meta.width
+                   << " useful_threads=" << num_useful_threads
+                   << " reg_mismatch target=" << target_reg
+                   << " reg=" << reg_val << ";";
         continue;
       }
 
@@ -1354,8 +1414,7 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
         args.push_back(IntImm(DataType::Int(32), meta.width * 32));
         args.push_back(IntImm(DataType::Int(32), effective_chunks));
         args.push_back(Bool(use_pack_unpack_modifier));
-        args.push_back(
-            BufferLoad(tmem_buf, {(int)logical_row_min, (int)logical_col_min}));
+        args.push_back(BufferLoad(tmem_buf, tmem_min_indices));
         args.push_back(col_offset);
         args.push_back(reg_buf.access_ptr(/*access_mask=*/2, DataType::Handle(),
                                           /*content_lanes=*/1, /*offset=*/0,
@@ -1365,8 +1424,7 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
         args.push_back(IntImm(DataType::Int(32), meta.width * 32));
         args.push_back(IntImm(DataType::Int(32), effective_chunks));
         args.push_back(Bool(use_pack_unpack_modifier));
-        args.push_back(
-            BufferLoad(tmem_buf, {(int)logical_row_min, (int)logical_col_min}));
+        args.push_back(BufferLoad(tmem_buf, tmem_min_indices));
         args.push_back(col_offset);
         args.push_back(reg_buf.access_ptr(/*access_mask=*/1, DataType::Handle(),
                                           /*content_lanes=*/1, /*offset=*/0,
@@ -1398,7 +1456,18 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
   }
 
   ICHECK(have_succeeded) << "Failed to find a suitable instruction for tcgen05."
-                         << (is_ld ? "ld" : "st") << ". Check your layout.";
+                         << (is_ld ? "ld" : "st")
+                         << ". Check your layout. tmem_buf="
+                         << tmem_buf->name << " reg_buf=" << reg_buf->name
+                         << " tmem_phy_row=[" << tmem_phy_row_min << ", "
+                         << tmem_phy_row_max << "] tmem_phy_col=["
+                         << tmem_phy_col_min << ", " << tmem_phy_col_max
+                         << "] tmem_phy_col_extent=" << tmem_phy_col_extent
+                         << " thread_bounds=" << lower_args.thread_bounds
+                         << " logical_row_min=" << logical_row_min
+                         << " logical_col_min=" << logical_col_min
+                         << " is_ld=" << is_ld << " is_st=" << is_st
+                         << " debug={" << tmem_debug.str() << "}";
 
   return body;
 }
@@ -1608,21 +1677,24 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
                      "to normal copy";
     return fallback_to_normal("undecodable shared swizzle layout");
   }
-  // Recast element-space layout into byte-address space.
-  // Because CuTe swizzle are based on byte addresses.
+  // Recast only the swizzle into byte-address space because CUtensorMap
+  // swizzle enums are byte-based. Keep the plain layout in element space:
+  // packed FP4 TMA descriptors still use FP4 element coordinates/box sizes,
+  // and byte-recasting the whole layout would create fractional strides for
+  // the innermost nibble axis.
   int elem_bits = shared_tensor->dtype.bits();
-  // E.g., composed_bytes = Sw<3,4,3> o 0 o (64,64,8):(128,2,8192)
-  auto composed_bytes = composed.value().Recast(elem_bits, /*new_bits=*/8);
-  const auto *sw = composed_bytes->swizzle.get();
+  cute::Swizzle swizzle_bytes =
+      composed.value()->swizzle.Recast(elem_bits, /*new_bits=*/8);
+  const auto *sw = swizzle_bytes.get();
   int b_bits = sw->b_bits, m_base = sw->m_base, s_shift = sw->s_shift;
   if (!sw->IsSwizzled()) {
     desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
   } else if (b_bits == 1 && m_base == 4 && s_shift == 3) {
-    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
+    desc.swizzle = MakeTensorMapSwizzle(b_bits);
   } else if (b_bits == 2 && m_base == 4 && s_shift == 3) {
-    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
+    desc.swizzle = MakeTensorMapSwizzle(b_bits);
   } else if (b_bits == 3 && m_base == 4 && s_shift == 3) {
-    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
+    desc.swizzle = MakeTensorMapSwizzle(b_bits);
   } else {
     DLOG(WARNING) << "Shared swizzle Sw<" << b_bits << "," << m_base << ","
                   << s_shift << "> for src: " << src->name
@@ -1658,8 +1730,11 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
   ICHECK_EQ(inv_size, tile_size)
       << "plain SMEM layout is not a bijection (gapped or non-injective): "
       << "RightInverse covers " << inv_size << " of " << tile_size
-      << " elements; try to use annotate_layout to make your SMEM tile "
-         "contiguous";
+      << " elements for src=" << src->name << ", dst=" << dst->name
+      << ", shared=" << shared_tensor->name
+      << ", smem_plain=" << smem_plain
+      << ", tile_to_smem_plain=" << tile_to_smem_plain
+      << "; try to use annotate_layout to make your SMEM tile contiguous";
 
   // Each TMA box dim is at most 256.
   const int64_t max_box_dim = 256;
@@ -1964,16 +2039,21 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
     args.push_back(GetEvictionPolicy(op));
     Map<String, ObjectRef> ann_loop;
     if (is_cluster_barrier && TargetIsSm100(lower_args.target) && is_load) {
-      ann_loop.Set("use_2cta", IntImm(DataType::Int(32), 1));
+      ann_loop.Set("use_2cta", Bool(true));
     }
     tma_copy = For(loop_var, 0, loop_extent, ForKind::kUnrolled,
                    Evaluate(Call(DataType::Handle(), tma_op, args, ann_loop)));
 
     if (use_multicast) {
       Array<PrimExpr> mc_args = build_multicast_args(args);
+      Map<String, ObjectRef> ann_loop;
+      if (is_cluster_barrier && TargetIsSm100(lower_args.target) && is_load) {
+        ann_loop.Set("use_2cta", Bool(true));
+      }
       Stmt multicast_copy = For(
           loop_var, 0, loop_extent, ForKind::kUnrolled,
-          Evaluate(Call(DataType::Handle(), tma_load_multicast(), mc_args)));
+          Evaluate(Call(DataType::Handle(), tma_load_multicast(), mc_args,
+                        ann_loop)));
 
       int min_cta_rank = MinRankInClusterMask(cluster_mask);
       PrimExpr block_rank =
@@ -2002,14 +2082,19 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
     if (TargetIsSm100(lower_args.target) && is_load &&
         (annotations.find("use_2cta") != annotations.end() ||
          is_cluster_barrier)) {
-      ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
+      ann.Set("use_2cta", Bool(true));
     }
     tma_copy = Evaluate(Call(DataType::Handle(), tma_op, args, ann));
 
     if (use_multicast) {
       Array<PrimExpr> mc_args = build_multicast_args(args);
+      Map<String, ObjectRef> ann;
+      if (is_cluster_barrier && TargetIsSm100(lower_args.target) && is_load) {
+        ann.Set("use_2cta", Bool(true));
+      }
       Stmt multicast_copy =
-          Evaluate(Call(DataType::Handle(), tma_load_multicast(), mc_args));
+          Evaluate(Call(DataType::Handle(), tma_load_multicast(), mc_args,
+                        ann));
 
       int min_cta_rank = MinRankInClusterMask(cluster_mask);
       PrimExpr block_rank =

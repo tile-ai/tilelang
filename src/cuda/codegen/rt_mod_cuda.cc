@@ -98,6 +98,7 @@ Module BuildTileLangCUDA(IRModule mod, Target target) {
   bool output_ssa = false;
   CodeGenTileLangCUDA cg;
   cg.Init(output_ssa);
+  cg.SetTarget(target);
 
   ValidateUniqueDeviceGlobalSymbols(mod);
   if (const auto f = Function::GetGlobal("tilelang_callback_cuda_validate")) {
@@ -141,6 +142,7 @@ Module BuildTileLangCUDAWithoutCompile(IRModule mod, Target target) {
   bool output_ssa = false;
   CodeGenTileLangCUDA cg;
   cg.Init(output_ssa);
+  cg.SetTarget(target);
 
   ValidateUniqueDeviceGlobalSymbols(mod);
   if (const auto f = Function::GetGlobal("tilelang_callback_cuda_validate")) {

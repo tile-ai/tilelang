@@ -116,6 +116,28 @@ bool CanEmitPackedX2Math(DataType t) {
   return false;
 }
 
+bool IsTrueAnnotation(const ffi::Map<ffi::String, ffi::ObjectRef> &annotations,
+                      const char *key) {
+  auto it = annotations.find(key);
+  if (it == annotations.end()) {
+    return false;
+  }
+  if (auto value = (*it).second.as<Bool>()) {
+    return value.value()->value;
+  }
+  if (const auto *value = (*it).second.as<IntImmNode>()) {
+    return value->value != 0;
+  }
+  return false;
+}
+
+bool IsClusterBarrierLoad(const PrimExpr &expr) {
+  if (const auto *load = expr.as<BufferLoadNode>()) {
+    return load->buffer.scope() == "shared.cluster_barrier";
+  }
+  return false;
+}
+
 } // namespace
 
 struct CUDAMath {
@@ -308,6 +330,10 @@ std::string GetTileLangFP4Type(DataType type) {
 
 CodeGenTileLangCUDA::CodeGenTileLangCUDA() {
   restrict_keyword_ = "__restrict__";
+}
+
+void CodeGenTileLangCUDA::SetTarget(Target target) {
+  target_ = std::move(target);
 }
 
 void CodeGenTileLangCUDA::ReserveKeywordsAsUnique_() {
@@ -2510,8 +2536,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     need_tcgen05_common_h_ = true;
     std::ostringstream ss;
     ss << "tl::tmem_allocate";
-    if (op->annotations.find("use_2cta") != op->annotations.end() &&
-        Downcast<Bool>(op->annotations["use_2cta"])->value) {
+    if (IsTrueAnnotation(op->annotations, "use_2cta")) {
       ss << "<true>";
     }
     print_extern_call_stmt(ss.str());
@@ -2519,8 +2544,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     need_tcgen05_common_h_ = true;
     std::ostringstream ss;
     ss << "tl::tmem_deallocate";
-    if (op->annotations.find("use_2cta") != op->annotations.end() &&
-        Downcast<Bool>(op->annotations["use_2cta"])->value) {
+    if (IsTrueAnnotation(op->annotations, "use_2cta")) {
       ss << "<true>";
     }
     print_extern_call_stmt(ss.str());
@@ -2536,8 +2560,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         this->eviction_policy_names_
             [op->args[op->args.size() - 1].as<IntImmNode>()->value];
     // Simplify the code by using the default eviction policy
-    if (op->annotations.find("use_2cta") != op->annotations.end() &&
-        Downcast<Bool>(op->annotations["use_2cta"])->value) {
+    if (IsTrueAnnotation(op->annotations, "use_2cta")) {
       need_copy_sm100_h_ = true;
       if (eviction_policy != "EVICT_NORMAL") {
         ss << "tl::tma_load_2sm<tl::CacheHintSm100::" << eviction_policy
@@ -2572,7 +2595,18 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto eviction_policy =
         this->eviction_policy_names_
             [op->args[op->args.size() - 1].as<IntImmNode>()->value];
-    if (eviction_policy != "EVICT_NORMAL") {
+    bool use_2cta =
+        IsTrueAnnotation(op->annotations, "use_2cta") ||
+        (target_.has_value() && tl::TargetIsSm100(target_.value()) &&
+         IsClusterBarrierLoad(op->args[1]));
+    if (use_2cta) {
+      if (eviction_policy != "EVICT_NORMAL") {
+        ss << "tl::tma_load_multicast_2sm<tl::CacheHintSm100::"
+           << eviction_policy << ">(";
+      } else {
+        ss << "tl::tma_load_multicast_2sm(";
+      }
+    } else if (eviction_policy != "EVICT_NORMAL") {
       ss << "tl::tma_load_multicast<tl::CacheHintSm90::" << eviction_policy
          << ">(";
     } else {
@@ -3528,21 +3562,39 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string sfa_offset = this->PrintExpr(op->args[10]);
     std::string sfb_ref = this->PrintExpr(op->args[11]);
     std::string sfb_offset = this->PrintExpr(op->args[12]);
-    // args[13], [14] reserved for future mask/flags
+    // args[13] reserved for future mask/flags. args[14] is the internal
+    // block-scaled ISA kind: 0=mxf8f6f4, 1=mxf4nvf4, 2=mxf4.
+    int blockscale_kind = Downcast<IntImm>(op->args[14])->value;
+    ICHECK(blockscale_kind == 0 || blockscale_kind == 1 ||
+           blockscale_kind == 2)
+        << "Unsupported blockscaled tcgen05 kind: " << blockscale_kind;
+    bool is_nvfp4 = blockscale_kind == 1;
+    bool is_mxf4 = blockscale_kind == 2;
     bool enable_2cta = Downcast<Bool>(op->args[15])->value;
 
     auto dtype_enum = tl::codegen::ptx::DTypeFromString(kind_dtype);
 
     need_tcgen05mma_instruction_h_ = true;
     this->PrintIndent();
+    std::string sfa_arg =
+        is_nvfp4
+            ? "tl::tmem_u8_addr((*reinterpret_cast<uint32_t*>(" + sfa_ref +
+                  ")), " + sfa_offset + ")"
+            : "(*reinterpret_cast<uint32_t*>(" + sfa_ref + ")) + " +
+                  sfa_offset;
+    std::string sfb_arg =
+        is_nvfp4
+            ? "tl::tmem_u8_addr((*reinterpret_cast<uint32_t*>(" + sfb_ref +
+                  ")), " + sfb_offset + ")"
+            : "(*reinterpret_cast<uint32_t*>(" + sfb_ref + ")) + " +
+                  sfb_offset;
     std::string tcgen05_call =
         "tl::(tcgen05_name)<(ABType), (USE_2CTA)>(uint64_t((desc_a) + "
         "(A_offset)), "
         "uint64_t((desc_b) + (B_offset)), (*reinterpret_cast<uint32_t*>((C))) "
         "+ (C_offset), "
         "(scale_out), static_cast<uint32_t>((desc_val)), "
-        "(*reinterpret_cast<uint32_t*>((SFA))) + (SFA_offset), "
-        "(*reinterpret_cast<uint32_t*>((SFB))) + (SFB_offset));\n";
+        "(SFA_arg), (SFB_arg));\n";
     tl::codegen::Replacer replacer;
     replacer.register_rule("(ABType)",
                            tl::codegen::ptx::DTypeEnumToString(dtype_enum));
@@ -3553,13 +3605,19 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(B_offset)", B_offset);
     replacer.register_rule("(C)", c_ref);
     replacer.register_rule("(C_offset)", c_offset);
-    replacer.register_rule("(tcgen05_name)", "tcgen05mma_blockscaled_ss");
+    replacer.register_rule(
+        "(tcgen05_name)",
+        is_nvfp4 ? "tcgen05mma_blockscaled_nvfp4_ss"
+                 : (is_mxf4 ? "tcgen05mma_blockscaled_mxf4_ss"
+                            : "tcgen05mma_blockscaled_ss"));
     replacer.register_rule("(scale_out)", scale_out);
     replacer.register_rule("(desc_val)", this->PrintExpr(desc_expr));
     replacer.register_rule("(SFA)", sfa_ref);
     replacer.register_rule("(SFA_offset)", sfa_offset);
+    replacer.register_rule("(SFA_arg)", sfa_arg);
     replacer.register_rule("(SFB)", sfb_ref);
     replacer.register_rule("(SFB_offset)", sfb_offset);
+    replacer.register_rule("(SFB_arg)", sfb_arg);
     tcgen05_call = replacer.rewrite(tcgen05_call);
     this->stream << tcgen05_call;
   } else if (op->op.same_as(tl::ptx_tcgen05_cp_warpx4())) {
@@ -3571,10 +3629,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string smem_ptr = this->PrintExpr(op->args[0]);
     std::string tmem_ptr = this->PrintExpr(op->args[1]);
     std::string tmem_col_offset = this->PrintExpr(op->args[2]);
-    bool use_2cta = false;
-    if (op->annotations.find("use_2cta") != op->annotations.end()) {
-      use_2cta = Downcast<Bool>(op->annotations["use_2cta"])->value;
-    }
+    bool use_2cta = IsTrueAnnotation(op->annotations, "use_2cta");
     this->PrintIndent();
     this->stream << "tl::tcgen05_cp<" << (use_2cta ? "true" : "false") << ">("
                  << "tl::make_sf_smem_desc(reinterpret_cast<void*>(" << smem_ptr
@@ -3624,8 +3679,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     need_tcgen05_common_h_ = true;
     std::ostringstream ss;
     ss << "tl::tcgen05_mma_arrive";
-    if (op->annotations.find("use_2cta") != op->annotations.end() &&
-        Downcast<Bool>(op->annotations["use_2cta"])->value) {
+    if (IsTrueAnnotation(op->annotations, "use_2cta")) {
       ss << "<true>";
     }
     print_extern_call_stmt(ss.str());
