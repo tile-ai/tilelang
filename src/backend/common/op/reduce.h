@@ -24,12 +24,14 @@
 #include <tvm/tirx/op_attr_types.h>
 #include <tvm/tirx/stmt_functor.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <optional>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 namespace tvm {
@@ -280,6 +282,216 @@ inline bool CanUsePackedRamp(const PrimExpr &index, const Var &var, int vsize,
   return true;
 }
 
+struct ThreadReduceStep {
+  int extent;
+  int scale;
+
+  int ReducingThreads() const {
+    ICHECK_LE(extent, std::numeric_limits<int>::max() / scale)
+        << "Reduce thread count overflow: extent=" << extent
+        << ", scale=" << scale;
+    return extent * scale;
+  }
+};
+
+// A reduce is lowered in two phases: each thread first reduces the values it
+// owns locally, then the thread-level reducer combines the splits encoded in
+// the source fragment's thread expression.  This plan is the shared ownership
+// contract consumed by both phases.
+struct ReduceOwnershipPlan {
+  Array<PrimExpr> local_src_indices;
+  Array<IterVar> local_reduce_vars;
+  std::vector<ThreadReduceStep> thread_steps;
+};
+
+inline std::vector<ThreadReduceStep>
+CollectThreadReduceSteps(const arith::IterSumExpr &thread_iter_sum,
+                         const Var &reduce_var) {
+  std::vector<ThreadReduceStep> steps;
+  for (const auto &iter_split : thread_iter_sum->args) {
+    auto mark = iter_split->source->source.as<Var>();
+    if (!mark || !mark.value().same_as(reduce_var)) {
+      continue;
+    }
+
+    auto scale = as_const_int(iter_split->scale);
+    auto extent = as_const_int(iter_split->extent);
+    ICHECK(scale != nullptr && extent != nullptr);
+    if (*extent == 1) {
+      continue;
+    }
+    ICHECK_LE(*scale, std::numeric_limits<int>::max());
+    ICHECK_LE(*extent, std::numeric_limits<int>::max());
+    steps.push_back(
+        ThreadReduceStep{static_cast<int>(*extent), static_cast<int>(*scale)});
+  }
+  return steps;
+}
+
+inline int64_t
+ThreadOwnedReduceFactor(const std::vector<ThreadReduceStep> &steps) {
+  int64_t factor = 1;
+  for (const auto &step : steps) {
+    ICHECK_LE(factor, std::numeric_limits<int64_t>::max() / step.extent)
+        << "Reduce thread-owned factor overflow: factor=" << factor
+        << ", extent=" << step.extent;
+    factor *= step.extent;
+  }
+  return factor;
+}
+
+inline std::vector<int64_t>
+CandidateThreadOwnedFactors(int64_t thread_owned_factor,
+                            const PrimExpr &local_extent,
+                            arith::Analyzer *analyzer) {
+  std::vector<int64_t> factors;
+  for (int64_t factor = 2; factor <= thread_owned_factor / factor; ++factor) {
+    if (thread_owned_factor % factor != 0) {
+      continue;
+    }
+    factors.push_back(factor);
+    if (factor != thread_owned_factor / factor) {
+      factors.push_back(thread_owned_factor / factor);
+    }
+  }
+  if (thread_owned_factor > 1) {
+    factors.push_back(thread_owned_factor);
+  }
+
+  std::sort(factors.begin(), factors.end(),
+            [](int64_t lhs, int64_t rhs) { return lhs > rhs; });
+  factors.erase(std::unique(factors.begin(), factors.end()), factors.end());
+
+  std::vector<int64_t> divisible_factors;
+  for (int64_t factor : factors) {
+    if (analyzer->CanProveEqual(FloorMod(local_extent, Integer(factor)), 0)) {
+      divisible_factors.push_back(factor);
+    }
+  }
+  return divisible_factors;
+}
+
+inline std::optional<std::pair<PrimExpr, IterVar>>
+TryRemoveThreadOwnedFactor(const PrimExpr &expr, const IterVar &iter_var,
+                           int64_t factor, arith::Analyzer *analyzer) {
+  PrimExpr factor_expr = Integer(factor);
+  Var old_var = iter_var->var;
+  PrimExpr old_extent = analyzer->Simplify(iter_var->dom->extent);
+  if (!analyzer->CanProveEqual(FloorMod(old_extent, factor_expr), 0)) {
+    return std::nullopt;
+  }
+
+  analyzer->Bind(old_var, Range(0, old_extent), /*allow_override=*/true);
+  PrimExpr masked = FloorDiv(old_var, factor_expr) * factor_expr;
+  PrimExpr simplified_expr = analyzer->Simplify(expr);
+  PrimExpr masked_expr =
+      analyzer->Simplify(Substitute(simplified_expr, {{old_var, masked}}));
+  if (!analyzer->CanProveEqual(masked_expr, simplified_expr)) {
+    return std::nullopt;
+  }
+
+  PrimExpr new_extent = analyzer->Simplify(FloorDiv(old_extent, factor_expr));
+  Var new_var(old_var->name_hint, old_var->type_annotation);
+  PrimExpr new_expr = analyzer->Simplify(
+      Substitute(simplified_expr, {{old_var, new_var * factor_expr}}));
+  IterVar new_iter_var =
+      IterVar(Range(0, new_extent), new_var, IterVarType::kDataPar);
+  analyzer->Bind(new_var, Range(0, new_extent), /*allow_override=*/true);
+  return std::make_pair(new_expr, new_iter_var);
+}
+
+inline void CheckThreadOwnedFactorProjectable(const PrimExpr &index_expr,
+                                              const Var &reduce_var,
+                                              int64_t thread_owned_factor,
+                                              arith::Analyzer *analyzer) {
+  if (thread_owned_factor <= 1) {
+    return;
+  }
+
+  PrimExpr factor = make_const(reduce_var.dtype(), thread_owned_factor);
+  PrimExpr masked_reduce_var = FloorDiv(reduce_var, factor) * factor;
+  PrimExpr simplified_index = analyzer->Simplify(index_expr);
+  PrimExpr projected_index = analyzer->Simplify(
+      Substitute(simplified_index, {{reduce_var, masked_reduce_var}}));
+
+  ICHECK(analyzer->CanProveEqual(projected_index, simplified_index))
+      << "ReduceOp cannot lower a layout where a source index depends on a "
+         "thread-owned reduce factor: src_index="
+      << simplified_index << ", projected_src_index=" << projected_index
+      << ", reduce_var=" << reduce_var
+      << ", thread_owned_factor=" << thread_owned_factor;
+}
+
+inline std::pair<PrimExpr, IterVar>
+BuildLocalReduceIterator(const PrimExpr &index_expr,
+                         const Array<IterVar> &input_iters,
+                         const Var &reduce_var, int64_t thread_owned_factor,
+                         arith::Analyzer *analyzer) {
+  auto [expr, iter_var] =
+      CompressIterator(index_expr, input_iters, reduce_var, analyzer);
+  arith::Analyzer proof_analyzer;
+  for (const auto &iv : input_iters) {
+    proof_analyzer.Bind(iv->var, iv->dom, /*allow_override=*/true);
+  }
+  CheckThreadOwnedFactorProjectable(index_expr, reduce_var, thread_owned_factor,
+                                    &proof_analyzer);
+
+  int64_t remaining_thread_owned_factor = thread_owned_factor;
+  PrimExpr cur_expr = expr;
+  IterVar cur_iter_var = iter_var;
+  while (remaining_thread_owned_factor > 1) {
+    PrimExpr cur_extent = proof_analyzer.Simplify(cur_iter_var->dom->extent);
+    auto candidates = CandidateThreadOwnedFactors(remaining_thread_owned_factor,
+                                                  cur_extent, &proof_analyzer);
+    bool removed = false;
+    for (int64_t factor : candidates) {
+      auto updated = TryRemoveThreadOwnedFactor(cur_expr, cur_iter_var, factor,
+                                                &proof_analyzer);
+      if (updated.has_value()) {
+        std::tie(cur_expr, cur_iter_var) = updated.value();
+        remaining_thread_owned_factor /= factor;
+        removed = true;
+        break;
+      }
+    }
+    if (!removed) {
+      break;
+    }
+  }
+  return {analyzer->Simplify(cur_expr), cur_iter_var};
+}
+
+inline ReduceOwnershipPlan
+MakeReduceOwnershipPlan(const Array<PrimExpr> &src_indices,
+                        const PrimExpr &src_thread,
+                        const Array<IterVar> &src_vars, const Var &reduce_var,
+                        arith::Analyzer *analyzer) {
+  // Use src_thread as the single source of truth for thread-owned reduce
+  // splits.  These steps are later used verbatim to emit scalar or batched
+  // AllReduce, so the local loop must not enumerate the same split again.
+  auto thread_iter_sum =
+      arith::NormalizeToIterSum(src_thread, ToVMap(src_vars), analyzer);
+  auto thread_steps = CollectThreadReduceSteps(thread_iter_sum, reduce_var);
+  int64_t thread_owned_factor = ThreadOwnedReduceFactor(thread_steps);
+
+  // Build the per-thread source indexing plan.  A thread-owned factor is
+  // removed from the compressed local iterator only after proving that
+  // projecting out that factor leaves the physical source index unchanged.
+  // This keeps ownership from src_thread, while using src_indices as a safety
+  // check against dropping a factor that still selects different local values.
+  Array<PrimExpr> local_src_indices;
+  Array<IterVar> local_reduce_vars;
+  for (const auto &src_index : src_indices) {
+    auto [expr, var] = BuildLocalReduceIterator(src_index, src_vars, reduce_var,
+                                                thread_owned_factor, analyzer);
+    local_src_indices.push_back(expr);
+    local_reduce_vars.push_back(var);
+  }
+
+  return ReduceOwnershipPlan{local_src_indices, local_reduce_vars,
+                             thread_steps};
+}
+
 inline PrimExpr MakeUpdate(const ReduceOpNode &op, PrimExpr dst_val,
                            PrimExpr src_val) {
   if (op.type->IsSum() || op.type->IsAbsSum()) {
@@ -319,10 +531,7 @@ template <typename Impl> struct ReduceLowerer {
       return buf;
     };
 
-    auto src_scope = op.src.scope();
-    auto dst_scope = op.dst.scope();
-
-    if (src_scope == "local.fragment" && dst_scope == "local.fragment") {
+    if (IsFragmentBuffer(op.src) && IsFragmentBuffer(op.dst)) {
       auto src_buffer = get_buffer(op.src);
       auto dst_buffer = get_buffer(op.dst);
       auto src_layout = lower_args.layout_map[op.src].as<Fragment>().value();
@@ -361,6 +570,11 @@ template <typename Impl> struct ReduceLowerer {
           dst_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
       auto red_indices = red_layout->Forward(
           dst_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
+      auto src_thread = src_layout->ForwardThread(
+          src_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }), {});
+
+      auto reduce_plan = reduce::MakeReduceOwnershipPlan(
+          src_indices, src_thread, src_vars, src_vars[op.dim]->var, analyzer);
 
       Array<Stmt> stmts;
 
@@ -404,14 +618,8 @@ template <typename Impl> struct ReduceLowerer {
                                    GetPtrStorageScope(dst_buffer->data));
       }
 
-      Array<PrimExpr> src_indice_compressed;
-      Array<IterVar> src_var_compressed;
-      for (size_t i = 0; i < src_layout->OutputDim(); ++i) {
-        auto [expr, var] = CompressIterator(src_indices[i], src_vars,
-                                            src_vars[op.dim]->var, analyzer);
-        src_indice_compressed.push_back(expr);
-        src_var_compressed.push_back(var);
-      }
+      Array<PrimExpr> src_indice_compressed = reduce_plan.local_src_indices;
+      Array<IterVar> src_var_compressed = reduce_plan.local_reduce_vars;
 
       bool can_pack = false;
       bool need_pack_buffer = false;
@@ -522,11 +730,6 @@ template <typename Impl> struct ReduceLowerer {
         stmts.push_back(reduce_local);
       }
 
-      auto src_thread = src_layout->ForwardThread(
-          src_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }), {});
-      auto iter_sum =
-          arith::NormalizeToIterSum(src_thread, ToVMap(src_vars), analyzer);
-
       const int batch = op.batch;
       if (batch > 1) {
         int64_t N_total = 1;
@@ -578,22 +781,8 @@ template <typename Impl> struct ReduceLowerer {
         Array<Stmt> phases;
         phases.push_back(pre_body);
 
-        for (const auto &iter_split : iter_sum->args) {
-          auto mark = iter_split->source->source.template as<Var>();
-          if (!mark) {
-            continue;
-          }
-          if (!mark.value().same_as(src_vars[op.dim]->var)) {
-            continue;
-          }
-          auto scale = as_const_int(iter_split->scale);
-          auto extent = as_const_int(iter_split->extent);
-          ICHECK(scale != nullptr && extent != nullptr);
-          if (*extent == 1) {
-            continue;
-          }
-
-          int reducing_threads = (*extent) * (*scale);
+        for (const auto &thread_step : reduce_plan.thread_steps) {
+          int reducing_threads = thread_step.ReducingThreads();
           auto thread_offset = lower_args.thread_bounds->min;
 
           int vsize = Impl::GetPreferedVectorizedSize(clear_buffer->dtype,
@@ -606,7 +795,7 @@ template <typename Impl> struct ReduceLowerer {
               reduce::MakeCodegenReducer(op, can_batch_pack ? vsize : 1)
                   .value();
           std::string allreduce = Impl::MakeBatchAllReduce(
-              reducer, reducing_threads, *scale, thread_offset,
+              reducer, reducing_threads, thread_step.scale, thread_offset,
               lower_args.thread_bounds->extent, eff_batch, reducing_threads,
               lower_args.target);
 
@@ -774,38 +963,25 @@ template <typename Impl> struct ReduceLowerer {
         return body;
       }
 
-      for (const auto &iter_split : iter_sum->args) {
-        auto mark = iter_split->source->source.template as<Var>();
-        if (!mark) {
-          continue;
+      for (const auto &thread_step : reduce_plan.thread_steps) {
+        int reducing_threads = thread_step.ReducingThreads();
+        auto thread_offset = lower_args.thread_bounds->min;
+        std::string allreduce = Impl::MakeScalarAllReduce(
+            reduce::MakeCodegenReducer(op).value(), reducing_threads,
+            thread_step.scale, thread_offset, lower_args.thread_bounds->extent,
+            lower_args.target);
+        Array<PrimExpr> thread_reduce_args = {
+            StringImm(allreduce), BufferLoad(clear_buffer, red_indices)};
+        if (reducing_threads > 32) {
+          int workspace_size =
+              static_cast<int>(*as_const_int(lower_args.thread_bounds->extent));
+          PrimExpr workspace =
+              lower_args.add_workspace(workspace_size, clear_buffer->dtype);
+          thread_reduce_args.push_back(workspace);
         }
-        if (mark.value().same_as(src_vars[op.dim]->var)) {
-          auto scale = as_const_int(iter_split->scale);
-          auto extent = as_const_int(iter_split->extent);
-          ICHECK(scale != nullptr && extent != nullptr);
-          if (*extent == 1) {
-            continue;
-          }
-
-          int reducing_threads = (*extent) * (*scale);
-          auto thread_offset = lower_args.thread_bounds->min;
-          std::string allreduce = Impl::MakeScalarAllReduce(
-              reduce::MakeCodegenReducer(op).value(), reducing_threads, *scale,
-              thread_offset, lower_args.thread_bounds->extent,
-              lower_args.target);
-          Array<PrimExpr> thread_reduce_args = {
-              StringImm(allreduce), BufferLoad(clear_buffer, red_indices)};
-          if (reducing_threads > 32) {
-            int workspace_size = static_cast<int>(
-                *as_const_int(lower_args.thread_bounds->extent));
-            PrimExpr workspace =
-                lower_args.add_workspace(workspace_size, clear_buffer->dtype);
-            thread_reduce_args.push_back(workspace);
-          }
-          auto call = Call(clear_buffer->dtype, builtin::call_extern(),
-                           thread_reduce_args);
-          stmts.push_back(BufferStore(clear_buffer, call, red_indices));
-        }
+        auto call = Call(clear_buffer->dtype, builtin::call_extern(),
+                         thread_reduce_args);
+        stmts.push_back(BufferStore(clear_buffer, call, red_indices));
       }
 
       PrimExpr predicate = Bool(true);
@@ -857,8 +1033,8 @@ template <typename Impl> struct ReduceLowerer {
       return body;
     }
 
-    LOG(FATAL) << "Reduce for buffers in scope (" << src_scope << ", "
-               << dst_scope << ") is not implemented.";
+    LOG(FATAL) << "Reduce for buffers in scope (" << op.src.scope() << ", "
+               << op.dst.scope() << ") is not implemented.";
     return Stmt();
   }
 };
