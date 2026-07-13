@@ -41,6 +41,18 @@ from tilelang import __version__
 
 TargetLike = str | dict[str, object] | Target
 
+ConfigArg = dict[str, Any]
+UnitItem = tuple[int, ConfigArg]
+UnitResult = tuple[int, ConfigArg, tilelang.JITKernel | None, Exception | None]
+CompileUnit = tuple[list[UnitItem], dict | None]
+BucketItem = tuple[int, ConfigArg, dict | None]
+
+# Reserved keys that are not kernel parameters but control compilation behavior
+_RESERVED_CONFIG_KEYS = frozenset({"pass_configs"})
+
+# Internal key used to pass per-config pass_configs through config_arg dicts
+_PASS_CONFIGS_KEY = "__pass_configs__"
+
 
 class TimeoutException(Exception):
     pass
@@ -475,14 +487,34 @@ class AutoTuner:
         return result
 
     # Compile-related helpers
+    def _merge_pass_configs_into_compile_args(
+        self,
+        per_config_pass_configs: dict[str, Any] | None,
+    ) -> CompileArgs:
+        """Merge per-config pass_configs over global CompileArgs defaults."""
+        if not per_config_pass_configs:
+            return self.compile_args
+        merged = dict(self.compile_args.pass_configs or {})
+        merged.update(per_config_pass_configs)
+        return CompileArgs(
+            out_idx=self.compile_args.out_idx,
+            execution_backend=self.compile_args.execution_backend,
+            target=self.compile_args.target,
+            target_host=self.compile_args.target_host,
+            verbose=self.compile_args.verbose,
+            pass_configs=merged,
+        )
+
     def _default_compile(
         self,
         **config_arg,
     ) -> tilelang.JITKernel:
-        compile_args = self.compile_args
+        per_config_pass_configs = config_arg.pop(_PASS_CONFIGS_KEY, None)
+        compile_args = self._merge_pass_configs_into_compile_args(per_config_pass_configs)
         return compile_args.compile_program(self.fn(**config_arg))
 
     def _default_elaborate(self, **config_arg) -> PrimFunc:
+        config_arg.pop(_PASS_CONFIGS_KEY, None)
         return self.fn(**config_arg)
 
     def _ensure_jit_functions(
@@ -537,7 +569,7 @@ class AutoTuner:
 
     def _prepare_compile_execution(
         self,
-        config_args: list[dict[str, Any]],
+        config_args: list[ConfigArg],
         grouped_compile_active: bool,
         group_compile_size: int,
         compile_func: Callable[..., tilelang.JITKernel],
@@ -545,13 +577,13 @@ class AutoTuner:
     ) -> tuple[
         concurrent.futures.ThreadPoolExecutor,
         list[concurrent.futures.Future],
-        dict[concurrent.futures.Future, list[tuple[int, dict[str, Any]]]],
+        dict[concurrent.futures.Future, list[UnitItem]],
         str,
     ]:
         num_workers = self._resolve_num_compile_workers()
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_workers)
         futures: list[concurrent.futures.Future] = []
-        future_to_unit: dict[concurrent.futures.Future, list[tuple[int, dict[str, Any]]]] = {}
+        future_to_unit: dict[concurrent.futures.Future, list[UnitItem]] = {}
 
         def cuda_device_wrapper(func: Callable[..., Any], device: int):
             def inner(**config_arg):
@@ -574,15 +606,16 @@ class AutoTuner:
                 elaborate_impl = cuda_device_wrapper(elaborate_func, device)
             return elaborate_impl
 
-        def compile_unit(unit_items: list[tuple[int, dict[str, Any]]]):
+        def compile_unit(unit_items: list[UnitItem], per_config_pass_configs=None):
             if grouped_compile_active:
+                effective_compile_args = self._merge_pass_configs_into_compile_args(per_config_pass_configs)
                 return compile_grouped_unit_tvm_ffi(
                     unit_items=unit_items,
-                    compile_args=self.compile_args,
+                    compile_args=effective_compile_args,
                     elaborate_func=get_elaborate_func(),
                 )
             compile_impl = get_compile_func()
-            unit_results: list[tuple[int, dict[str, Any], tilelang.JITKernel | None, Exception | None]] = []
+            unit_results: list[UnitResult] = []
             for idx, config_arg in unit_items:
                 try:
                     jit_kernel = compile_impl(**config_arg)
@@ -591,17 +624,26 @@ class AutoTuner:
                     unit_results.append((idx, config_arg, None, e))
             return unit_results
 
-        compile_units: list[list[tuple[int, dict[str, Any]]]] = []
+        compile_units: list[CompileUnit] = []
         if grouped_compile_active:
-            for start in range(0, len(config_args), group_compile_size):
-                end = min(start + group_compile_size, len(config_args))
-                compile_units.append([(i, config_args[i]) for i in range(start, end)])
+            # Bucket configs by per-config pass_configs value
+            buckets: dict[tuple | None, list[BucketItem]] = {}
+            for i, cfg in enumerate(config_args):
+                pc = cfg.pop(_PASS_CONFIGS_KEY, None)
+                key = tuple(sorted(pc.items())) if pc else None
+                buckets.setdefault(key, []).append((i, cfg, pc))
+            for bucket_items in buckets.values():
+                per_pc = bucket_items[0][2]  # all items in bucket share same pass_configs
+                items = [(idx, cfg) for idx, cfg, _ in bucket_items]
+                for start in range(0, len(items), group_compile_size):
+                    end = min(start + group_compile_size, len(items))
+                    compile_units.append((items[start:end], per_pc))
         else:
             for i, config_arg in enumerate(config_args):
-                compile_units.append([(i, config_arg)])
+                compile_units.append(([(i, config_arg)], None))
 
-        for unit_items in compile_units:
-            future = pool.submit(compile_unit, unit_items)
+        for unit_items, per_pc in compile_units:
+            future = pool.submit(compile_unit, unit_items, per_pc)
             futures.append(future)
             future_to_unit[future] = unit_items
 
@@ -968,13 +1010,15 @@ class AutoTuner:
         config_args = []
         for config in self.configs:
             new_kwargs = {}
+            per_config_pass_configs = config.get("pass_configs", None)
             keys = config.keys()
             for name, _ in parameters.items():
                 if name in config:
                     new_kwargs[name] = config[name]
-            unused_keys = set(keys) - set(new_kwargs.keys())
+            unused_keys = set(keys) - set(new_kwargs.keys()) - _RESERVED_CONFIG_KEYS
             if len(unused_keys) > 0:
                 raise ValueError(f"Unused keys in config: {unused_keys}")
+            new_kwargs[_PASS_CONFIGS_KEY] = per_config_pass_configs
             config_args.append(new_kwargs)
 
         if len(config_args) == 0:
@@ -997,7 +1041,7 @@ class AutoTuner:
 
         if self._kernel_parameters is not None:
             key_args_tuple, key_kwargs_tuple = self._kernel_parameters
-            tunable_arguments = [key for key, _ in top_config.items()]
+            tunable_arguments = [key for key, _ in top_config.items() if key != _PASS_CONFIGS_KEY]
 
             def check_tunable_argument_value(key, parameters, key_args_tuple) -> bool:
                 params_list = list(parameters.keys())
@@ -1042,11 +1086,11 @@ class AutoTuner:
             nonlocal best_latency, best_config, best_kernel
             if latency < best_latency:
                 best_latency = latency
-                best_config = config
+                best_config = dict(self.configs[idx])
                 best_kernel = jit_kernel
 
             progress_bar.set_postfix({"best_latency": best_latency})
-            tqdm.write(f"Tuned Latency {latency} with config {config} at index {idx}")
+            tqdm.write(f"Tuned Latency {latency} with config {self.configs[idx]} at index {idx}")
 
         benchmark_worker_devices = benchmark_device_list if benchmark_multi_gpu_active else [benchmark_device_list[0]]
         benchmark_task_queues = [queue.Queue() for _ in benchmark_worker_devices]
@@ -1083,10 +1127,10 @@ class AutoTuner:
             progress_bar.update(1)
 
             if status == "timeout":
-                logger.warning(f"A timeout occurred while testing config {config}, checkout autotuner.log for more details")
+                logger.warning(f"A timeout occurred while testing config {self.configs[idx]}, checkout autotuner.log for more details")
                 return
             if status == "error":
-                logger.warning(f"An error occurred while testing config {config}, checkout autotuner.log for more details")
+                logger.warning(f"An error occurred while testing config {self.configs[idx]}, checkout autotuner.log for more details")
                 if error_text:
                     logger.debug(f"Error: {error_text}")
                 return
@@ -1152,7 +1196,7 @@ class AutoTuner:
                     compile_progress.update(len(unit_results))
                     for idx, config, jit_kernel, error in unit_results:
                         if error is not None:
-                            logger.debug(f"Compilation failed for config {config} at index {idx} with error: {error}")
+                            logger.debug(f"Compilation failed for config {self.configs[idx]} at index {idx} with error: {error}")
                             continue
                         assert jit_kernel is not None
                         _enqueue_benchmark_task(jit_kernel=jit_kernel, config=config, idx=idx)
@@ -1250,6 +1294,34 @@ class AutoTuneImpl(Generic[_P, _T]):
 
     def __post_init__(self):
         self._tuner_cache = {}
+        self._pass_configs_lock = threading.Lock()
+
+    def _make_jit_compile_func(self, mode: str, args: tuple, kwargs: dict) -> Callable[..., JITKernel]:
+        """Create a jit_compile closure for the given mode ('lazy' or 'eager').
+
+        All compilation paths are serialized under _pass_configs_lock because
+        per-config pass_configs temporarily mutates self.jit_impl.pass_configs.
+        """
+
+        def jit_compile(**config_arg):
+            per_config_pass_configs = config_arg.pop(_PASS_CONFIGS_KEY, None)
+            with self._pass_configs_lock:
+                original_pass_configs = self.jit_impl.pass_configs
+                if per_config_pass_configs is not None:
+                    merged_pc = dict(original_pass_configs or {})
+                    merged_pc.update(per_config_pass_configs)
+                    self.jit_impl.pass_configs = merged_pc
+
+                try:
+                    if per_config_pass_configs is None and mode == "lazy":
+                        return self.jit_impl(*args, **kwargs, __tune_params=config_arg)
+                    merged = dict(kwargs)
+                    merged.update(config_arg)
+                    return self.jit_impl.compile(*args, **merged)
+                finally:
+                    self.jit_impl.pass_configs = original_pass_configs
+
+        return jit_compile
 
     def get_tunner(self):
         autotuner = (
@@ -1303,28 +1375,14 @@ class AutoTuneImpl(Generic[_P, _T]):
         if key not in self._tuner_cache:
 
             def jit_elaborate(**config_arg):
+                config_arg.pop(_PASS_CONFIGS_KEY, None)
                 merged = dict(kwargs)
                 merged.update(config_arg)
                 return self.jit_impl.get_tir(*args, **merged)
 
-            if mode == "lazy":
-
-                def jit_compile(**config_arg):
-                    return self.jit_impl(*args, **kwargs, __tune_params=config_arg)
-
-                autotuner.jit_compile = jit_compile
-                autotuner.jit_elaborate = jit_elaborate
-                autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
-            else:
-
-                def jit_compile(**config_arg):
-                    merged = dict(kwargs)
-                    merged.update(config_arg)
-                    return self.jit_impl.compile(*args, **merged)
-
-                autotuner.jit_compile = jit_compile
-                autotuner.jit_elaborate = jit_elaborate
-                autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
+            autotuner.jit_compile = self._make_jit_compile_func(mode, args, kwargs)
+            autotuner.jit_elaborate = jit_elaborate
+            autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
 
             artifact = autotuner.run()
             self._tuner_cache[key] = artifact.kernel, artifact.config
@@ -1338,7 +1396,7 @@ class AutoTuneImpl(Generic[_P, _T]):
                 return best_kernel
             exec_kwargs = dict(kwargs)
             if best_config is not None:
-                exec_kwargs.update(best_config)
+                exec_kwargs.update({k: v for k, v in best_config.items() if k not in _RESERVED_CONFIG_KEYS})
             _, kernel_args = self.jit_impl.func.parse_args(*args, **exec_kwargs)
             return best_kernel(*kernel_args.values())
 
