@@ -31,6 +31,7 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include "common/storage_size.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
 
@@ -171,13 +172,7 @@ private:
           << "Only one dynamic shared memory allocation is allowed.";
       ICHECK_GT(op->buffer->shape.size(), 0);
 
-      PrimExpr dyn_size = Integer(1);
-      for (const auto &extent : op->buffer->shape) {
-        dyn_size *= extent;
-      }
-      dyn_size *= op->buffer->dtype.bytes() * op->buffer->dtype.lanes();
-
-      dyn_shmem_size = dyn_size;
+      dyn_shmem_size = GetBufferStorageSizeBytes(op->buffer);
     }
     StmtVisitor::VisitStmt_(op);
   }
