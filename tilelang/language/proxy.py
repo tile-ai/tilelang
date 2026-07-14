@@ -325,7 +325,6 @@ def make_tensor_from_addr(
 
     dtype = _normalize_tensor_dtype(dtype)
     if align is None:
-        
         dtype_info = DataType(dtype)
         align = max(dtype_info.bits * dtype_info.lanes // 8, 1)
     pointer_var = _materialize_pointer_from_addr(addr, dtype, storage_scope)

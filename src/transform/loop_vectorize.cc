@@ -816,8 +816,7 @@ private:
     if (IsGlobalBuffer(buffer)) {
       int elem_bits = buffer->dtype.bits() * buffer->dtype.lanes();
       if (buffer->data_alignment > 0 && elem_bits > 0) {
-        int align_lanes =
-            std::max(buffer->data_alignment * 8 / elem_bits, 1);
+        int align_lanes = std::max(buffer->data_alignment * 8 / elem_bits, 1);
         buffer_vec_size = arith::ZeroAwareGCD(buffer_vec_size, align_lanes);
       }
     }
