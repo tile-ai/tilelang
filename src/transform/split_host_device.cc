@@ -176,7 +176,7 @@ private:
         : params_(params) {}
 
     void VisitStmt_(const tirx::AttrStmtNode *op) final {
-      if (op->attr_key == tl::attr::kAssumeRuntimeCheck &&
+      if (op->attr_key == tl::attr::kAssumeRequiresRuntimeCheck &&
           conditional_scope_depth_ == 0) {
         PrimExpr condition = Downcast<PrimExpr>(op->node);
         HostEvaluableConditionChecker checker(params_);
@@ -227,7 +227,7 @@ private:
 
   private:
     Stmt VisitStmt_(const tirx::AttrStmtNode *op) final {
-      if (op->attr_key == tl::attr::kAssumeRuntimeCheck) {
+      if (op->attr_key == tl::attr::kAssumeRequiresRuntimeCheck) {
         return VisitStmt(op->body);
       }
       return tirx::StmtMutator::VisitStmt_(op);
@@ -392,8 +392,8 @@ private:
     for (auto it = runtime_checks.rbegin(); it != runtime_checks.rend(); ++it) {
       body = AttrStmt(it->condition, tirx::attr::tilelang_assume, it->message,
                       std::move(body), it->span);
-      body = AttrStmt(it->condition, tl::attr::kAssumeRuntimeCheck, it->message,
-                      std::move(body), it->span);
+      body = AttrStmt(it->condition, tl::attr::kAssumeRequiresRuntimeCheck,
+                      it->message, std::move(body), it->span);
     }
     return body;
   }

@@ -136,7 +136,7 @@ def test_internal_subroutine_call():
     )
 
 
-def test_assume_runtime_check_is_lowered_to_assert():
+def test_assume_requires_runtime_check_is_lowered_to_assert():
     n = tirx.Var("n", "int32")
     condition = n % 4 == 0
     message = "n must be divisible by 4"
@@ -148,7 +148,7 @@ def test_assume_runtime_check_is_lowered_to_assert():
     )
     body = tirx.AttrStmt(
         condition,
-        "tl.assume_runtime_check",
+        "tl.assume_requires_runtime_check",
         tirx.StringImm(message),
         body,
     )
@@ -163,7 +163,7 @@ def test_assume_runtime_check_is_lowered_to_assert():
 
     after_mod = tilelang.transform.MakePackedAPI()(tvm.IRModule.from_expr(before))
     after = after_mod["main"]
-    assert not [stmt for stmt in _collect_nodes(after.body, tirx.AttrStmt) if stmt.attr_key == "tl.assume_runtime_check"]
+    assert not [stmt for stmt in _collect_nodes(after.body, tirx.AttrStmt) if stmt.attr_key == "tl.assume_requires_runtime_check"]
     assert [stmt for stmt in _collect_nodes(after.body, tirx.AttrStmt) if stmt.attr_key == "tl.assume"]
 
     matching_asserts = [

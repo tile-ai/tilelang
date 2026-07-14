@@ -76,7 +76,7 @@ def collect_assume_conditions(func: tvm.tirx.PrimFunc):
 
 
 def collect_runtime_check_conditions(func: tvm.tirx.PrimFunc):
-    return collect_attr_conditions(func, "tl.assume_runtime_check")
+    return collect_attr_conditions(func, "tl.assume_requires_runtime_check")
 
 
 def get_var_name(var):

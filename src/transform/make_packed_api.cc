@@ -199,7 +199,7 @@ private:
       : runtime_checks_(runtime_checks) {}
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key != tl::attr::kAssumeRuntimeCheck) {
+    if (op->attr_key != tl::attr::kAssumeRequiresRuntimeCheck) {
       return StmtMutator::VisitStmt_(op);
     }
 

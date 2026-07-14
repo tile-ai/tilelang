@@ -35,7 +35,8 @@ constexpr const char *coproc_scope = "coproc_scope";
 constexpr const char *pipeline_exec_scope = "pipeline_exec_scope";
 // Marks user-authored assumptions that require a host runtime check. The
 // corresponding tl.assume remains in the IR as an optimizer fact.
-constexpr const char *kAssumeRuntimeCheck = "tl.assume_runtime_check";
+constexpr const char *kAssumeRequiresRuntimeCheck =
+    "tl.assume_requires_runtime_check";
 
 // Attributes to implement SourceCodeBlock
 constexpr const char *kCodeBlockSource = "code_block_source";

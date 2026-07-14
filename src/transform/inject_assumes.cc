@@ -194,7 +194,7 @@ private:
         StringImm message(ss.str());
         body = AttrStmt(*g.e, tirx::attr::tilelang_assume, message,
                         std::move(body));
-        body = AttrStmt(*g.e, tl::attr::kAssumeRuntimeCheck, message,
+        body = AttrStmt(*g.e, tl::attr::kAssumeRequiresRuntimeCheck, message,
                         std::move(body));
         groups[i - 1].stmts.push_back(std::move(body));
       } else {
