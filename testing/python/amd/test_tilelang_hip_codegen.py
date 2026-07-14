@@ -1,7 +1,7 @@
 """
 Regression tests for HIP/AMD codegen fixes in TileLang.
 
-Covers six bug fixes across five source files:
+Covers seven bug fixes across five source files:
 
   Fix 1 (reduce.h)            warp_reduce 5-step butterfly with width=32
   Fix 2 (codegen_hip.cc,      ShuffleNode bfloat16x2/float16x2 packing;
@@ -15,6 +15,8 @@ Covers six bug fixes across five source files:
   Fix 6 (pipeline_planning.cc) T.Pipelined(num_stages>1) falls back to a
                                plain sequential loop on ROCM to avoid LDS
                                overflow (hipModuleLaunchKernel EINVAL)
+  Fix 7 (codegen_hip.cc)      Packed int4 shared allocations round their
+                              int32 storage-word extent up instead of down
 """
 
 import pytest
@@ -22,6 +24,29 @@ import torch
 import tilelang
 import tilelang.testing
 import tilelang.language as T
+
+
+# ---------------------------------------------------------------------------
+# Fix 7 — src/rocm/codegen/codegen_hip.cc
+#   Packed scalar int4/uint4 use one int32 storage word per eight elements.
+# ---------------------------------------------------------------------------
+
+
+@tilelang.testing.requires_rocm
+@pytest.mark.parametrize(
+    "dtype,storage_type",
+    [(T.int4, "int"), (T.dtype("uint4"), "uint")],
+)
+def test_static_packed_int4_shared_allocation_rounds_up(dtype, storage_type):
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, threads=1):
+            A_shared = T.alloc_shared((127,), dtype, scope="shared")
+            A_shared[126] = T.cast(1, dtype)
+
+    artifact = tilelang.lower(kernel, target="hip")
+
+    assert f"{storage_type} A_shared[16];" in artifact.kernel_source
 
 
 # ---------------------------------------------------------------------------
