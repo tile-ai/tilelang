@@ -17,6 +17,15 @@ _MEMORY_ORDER_ID_MAP = {
     "seq_cst": 5,
 }
 
+_ATOMIC_LOAD_MEMORY_ORDERS = frozenset({"relaxed", "consume", "acquire", "seq_cst"})
+_ATOMIC_STORE_MEMORY_ORDERS = frozenset({"relaxed", "release", "seq_cst"})
+
+
+def _get_memory_order_id(operation: str, memory_order: str, valid_orders: frozenset[str]) -> int:
+    if memory_order not in valid_orders:
+        raise ValueError(f"{operation} does not support memory_order={memory_order!r}; expected one of {sorted(valid_orders)}")
+    return _MEMORY_ORDER_ID_MAP[memory_order]
+
 
 def atomic_max(dst: Buffer, value: PrimExpr, memory_order: str | None = None, return_prev: bool = False) -> PrimExpr:
     """
@@ -360,8 +369,10 @@ def atomic_load(src: Buffer, memory_order: str = "seq_cst") -> PrimExpr:
 
     Performs an atomic load from `src` and returns a PrimExpr representing the loaded value.
     memory_order selects the ordering and must be one of: "relaxed", "consume", "acquire",
-    "release", "acq_rel", or "seq_cst" (default).
-    Raises KeyError if an unknown memory_order is provided.
+    or "seq_cst" (default).
+
+    Raises:
+        ValueError: If memory_order is not valid for an atomic load.
 
     Note: atomic_load always returns the loaded value, so no return_prev parameter is needed.
 
@@ -394,7 +405,7 @@ def atomic_load(src: Buffer, memory_order: str = "seq_cst") -> PrimExpr:
         src.dtype,
         op.Op.get("tl.atomic_load_elem_op"),
         T.access_ptr(src, "r"),
-        _MEMORY_ORDER_ID_MAP[memory_order],
+        _get_memory_order_id("atomic_load", memory_order, _ATOMIC_LOAD_MEMORY_ORDERS),
     )
 
 
@@ -405,15 +416,15 @@ def atomic_store(dst: Buffer, src: PrimExpr, memory_order: str = "seq_cst") -> P
     Parameters:
         dst (Buffer): Destination buffer to store into.
         src (PrimExpr): Value to store.
-        memory_order (str, optional): Memory ordering name; one of "relaxed", "consume",
-            "acquire", "release", "acq_rel", or "seq_cst". Defaults to "seq_cst".
+        memory_order (str, optional): Memory ordering name; one of "relaxed", "release",
+            or "seq_cst". Defaults to "seq_cst".
             The name is mapped to an internal numeric ID used by the underlying runtime.
 
     Returns:
         PrimExpr: A handle representing the issued atomic store operation.
 
     Raises:
-        KeyError: If `memory_order` is not one of the supported names.
+        ValueError: If memory_order is not valid for an atomic store.
 
     Note: atomic_store doesn't return a previous value, so no return_prev parameter is needed.
 
@@ -453,7 +464,7 @@ def atomic_store(dst: Buffer, src: PrimExpr, memory_order: str = "seq_cst") -> P
         op.Op.get("tl.atomic_store_elem_op"),
         T.access_ptr(dst, "w"),
         src,
-        _MEMORY_ORDER_ID_MAP[memory_order],
+        _get_memory_order_id("atomic_store", memory_order, _ATOMIC_STORE_MEMORY_ORDERS),
     )
 
 
