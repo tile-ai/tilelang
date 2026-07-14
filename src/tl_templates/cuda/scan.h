@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common.h"
+#include <cuda/std/limits>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
@@ -10,6 +11,8 @@ struct ScanSumOp {
   template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
     return x + y;
   }
+
+  template <typename T> TL_DEVICE static T identity() { return T(0); }
 };
 
 struct ScanMaxOp {
@@ -24,8 +27,28 @@ struct ScanMaxOp {
   TL_DEVICE half_t operator()(half_t const &x, half_t const &y) {
     return half_t(__hmax(x.to_half(), y.to_half()));
   }
+
+  template <typename T> TL_DEVICE static T identity() {
+    // cuda::std::numeric_limits covers the builtin types; cutlass extended
+    // types (half_t, bfloat16_t, fp8) fall through to cutlass's limits.
+    if constexpr (cuda::std::numeric_limits<T>::is_specialized) {
+      if constexpr (cuda::std::numeric_limits<T>::has_infinity) {
+        return -cuda::std::numeric_limits<T>::infinity();
+      } else {
+        return cuda::std::numeric_limits<T>::lowest();
+      }
+    } else if constexpr (cutlass::platform::numeric_limits<T>::has_infinity) {
+      return -cutlass::platform::numeric_limits<T>::infinity();
+    } else {
+      return cutlass::platform::numeric_limits<T>::lowest();
+    }
+  }
 };
 
+// Out-of-range lanes are padded with the reducer's identity rather than
+// masked with per-lane bound predicates: a predicate chain inside the shuffle
+// loop (and the variable-lane carry broadcast it requires) blocks nvcc from
+// software-pipelining adjacent segments, costing ~1.5x on multi-segment lines.
 template <class Reducer, bool reverse, typename T, int SEG = 32>
 static TL_DEVICE void InclusiveScanLine(const T *__restrict__ src,
                                         T *__restrict__ dst, int extent,
@@ -35,64 +58,48 @@ static TL_DEVICE void InclusiveScanLine(const T *__restrict__ src,
 
   constexpr unsigned MASK = 0xffffffff;
   const int lane = threadIdx.x % SEG;
-  T carry{};
-  bool has_carry = false;
+  T carry = Reducer::template identity<T>();
   const int num_segments = (extent + SEG - 1) / SEG;
 
   if constexpr (reverse) {
     for (int seg = num_segments - 1; seg >= 0; --seg) {
-      const int base = seg * SEG;
-      const int active = (extent - base < SEG) ? (extent - base) : SEG;
-      T val = src[base * stride];
-      if (lane < active)
-        val = src[(base + lane) * stride];
+      const int idx = seg * SEG + lane;
+      T val =
+          (idx < extent) ? src[idx * stride] : Reducer::template identity<T>();
 
 #pragma unroll
       for (int off = 1; off < SEG; off <<= 1) {
         T n = tl::shfl_down_sync(MASK, val, off);
-        if (lane + off < active)
+        if (lane < SEG - off)
           val = Reducer()(val, n);
       }
 
-      if (has_carry && lane < active)
-        val = Reducer()(val, carry);
+      val = Reducer()(val, carry);
 
-      if (lane < active)
-        dst[(base + lane) * stride] = val;
+      if (idx < extent)
+        dst[idx * stride] = val;
 
-      T seg_result = tl::shfl_sync(MASK, val, 0);
-      if (lane == 0)
-        carry = seg_result;
-      carry = tl::shfl_sync(MASK, carry, 0);
-      has_carry = true;
+      carry = tl::shfl_sync(MASK, val, 0);
     }
   } else {
     for (int seg = 0; seg < num_segments; ++seg) {
-      const int base = seg * SEG;
-      const int active = (extent - base < SEG) ? (extent - base) : SEG;
-      T val = src[base * stride];
-      if (lane < active)
-        val = src[(base + lane) * stride];
+      const int idx = seg * SEG + lane;
+      T val =
+          (idx < extent) ? src[idx * stride] : Reducer::template identity<T>();
 
 #pragma unroll
       for (int off = 1; off < SEG; off <<= 1) {
         T n = tl::shfl_up_sync(MASK, val, off);
-        if (lane >= off && lane < active)
+        if (lane >= off)
           val = Reducer()(val, n);
       }
 
-      if (has_carry && lane < active)
-        val = Reducer()(val, carry);
+      val = Reducer()(val, carry);
 
-      if (lane < active)
-        dst[(base + lane) * stride] = val;
+      if (idx < extent)
+        dst[idx * stride] = val;
 
-      const int last_lane = active - 1;
-      T seg_result = tl::shfl_sync(MASK, val, last_lane);
-      if (lane == last_lane)
-        carry = seg_result;
-      carry = tl::shfl_sync(MASK, carry, last_lane);
-      has_carry = true;
+      carry = tl::shfl_sync(MASK, val, SEG - 1);
     }
   }
 }
