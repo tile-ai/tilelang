@@ -71,11 +71,13 @@ def tl_topk_impl(input, index, starts, ends, in_dtype=T.float32, out_dtype=T.int
         T.fill(s_threshold_bin_id, 0)
 
         T.sync_threads()
-        for s in T.serial(T.ceildiv(seq_len, BLOCK_SIZE)):
-            input_idx = s * BLOCK_SIZE + tx
-            if input_idx < l_end_idx and input_idx >= l_start_idx and input_idx < seq_len:
-                inval_int16 = convert_to_uint16(input[bx, input_idx])
-                T.atomic_add(s_histogram[inval_int16], 1)
+        for s in T.serial(T.ceildiv(seq_len, BLOCK_SIZE * 4)):
+            input_base = s * BLOCK_SIZE * 4 + tx * 4
+            for j in T.serial(4):
+                input_idx = input_base + j
+                if input_idx < l_end_idx and input_idx >= l_start_idx and input_idx < seq_len:
+                    inval_int16 = convert_to_uint16(input[bx, input_idx])
+                    T.atomic_add(s_histogram[inval_int16], 1)
         T.sync_threads()
 
         # cumsum
@@ -101,21 +103,23 @@ def tl_topk_impl(input, index, starts, ends, in_dtype=T.float32, out_dtype=T.int
         T.sync_threads()
 
         # collect all elements with exponent ≥ threshold
-        for s in T.serial(T.ceildiv(seq_len, BLOCK_SIZE)):
+        for s in T.serial(T.ceildiv(seq_len, BLOCK_SIZE * 4)):
             T.sync_threads()
-            input_idx = s * BLOCK_SIZE + tx
-            if input_idx < l_end_idx and input_idx >= l_start_idx and input_idx < seq_len:
-                bin_id = convert_to_uint16(input[bx, input_idx])
-                l_bin_id32 = T.cast(bin_id, T.int32)
-                if l_bin_id32 > l_threshold_bin_id:
-                    # need a pos = T.atomic_add(s_histogram[bin_id32+1], 1)
-                    pos = T.atomic_add(s_histogram[l_bin_id32 + 1], 1, return_prev=True)
-                    index[bx, pos] = input_idx
+            input_base = s * BLOCK_SIZE * 4 + tx * 4
+            for j in T.serial(4):
+                input_idx = input_base + j
+                if input_idx < l_end_idx and input_idx >= l_start_idx and input_idx < seq_len:
+                    bin_id = convert_to_uint16(input[bx, input_idx])
+                    l_bin_id32 = T.cast(bin_id, T.int32)
+                    if l_bin_id32 > l_threshold_bin_id:
+                        # need a pos = T.atomic_add(s_histogram[bin_id32+1], 1)
+                        pos = T.atomic_add(s_histogram[l_bin_id32 + 1], 1, return_prev=True)
+                        index[bx, pos] = input_idx
 
-                elif l_bin_id32 == l_threshold_bin_id and l_new_topk > 0:
-                    # pos = s_num_input[0]
-                    pos = T.atomic_add(s_num_input[0], 1, return_prev=True)
-                    s_input_idx[0, pos] = input_idx
+                    elif l_bin_id32 == l_threshold_bin_id and l_new_topk > 0:
+                        # pos = s_num_input[0]
+                        pos = T.atomic_add(s_num_input[0], 1, return_prev=True)
+                        s_input_idx[0, pos] = input_idx
 
         # stage 2: tail pass
         for round in T.serial(4):
