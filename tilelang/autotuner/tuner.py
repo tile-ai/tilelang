@@ -1063,8 +1063,11 @@ class AutoTuner:
 
         # After confirming tuning will actually run, validate that scalar
         # inputs can be supplied (either via supply_prog or set_autotune_inputs).
-        if hasattr(self, "_prim_func_for_validation"):
-            self._validate_input_supply_requirements(self._prim_func_for_validation, self.compile_args.out_idx)
+        # Build the prim_func from a concrete config so tunable parameters are
+        # bound to real values instead of their ``None`` defaults, which would
+        # otherwise crash inside TVM (e.g. ceildiv with a None extent).
+        prim_func_for_validation = elaborate_func(**top_config)
+        self._validate_input_supply_requirements(prim_func_for_validation, self.compile_args.out_idx)
 
         # Launch compile tasks
         pool, futures, future_to_unit, compile_desc = self._prepare_compile_execution(
@@ -1354,10 +1357,6 @@ class AutoTuneImpl(Generic[_P, _T]):
 
         mode = self.jit_impl.initialize_jit_mode(*args, **kwargs)
         autotuner = self.get_tunner()
-        # Defer scalar-input validation to run(), after we know whether
-        # tuning will actually execute or be skipped because all tunable
-        # parameters are already provided by the caller.
-        autotuner._prim_func_for_validation = self.jit_impl.get_tir(*args, **kwargs)
 
         # Compute the cache key, excluding do_not_specialize parameters
         # so that changing them does not trigger re-autotuning.
