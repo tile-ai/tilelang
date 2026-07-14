@@ -909,6 +909,20 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             forward_index_fn=forward_index,
         )
         warp_n_layout = base_fragment.repeat([1, warp_cols], False, False)
-        block_layout = warp_n_layout.repeat([block_row_warps, block_col_warps], True, False)
-        warp_m_layout = block_layout.repeat([warp_rows, 1], False, False)
+        # Decompose M warpgroup-major to match the instruction-issue side:
+        # each group of 4 warps owns a contiguous 128-row tile, and the
+        # per-warpgroup 64-row WGMMA atoms are consecutive local accumulator
+        # indices (see C_offset in wgmma_ss_atom).
+        wg_row_warps = 4
+        assert block_row_warps % wg_row_warps == 0, f"block_row_warps must be a multiple of {wg_row_warps} for WGMMA, got {block_row_warps}"
+        num_warp_groups_m = block_row_warps // wg_row_warps
+        # Four M warps forming one warpgroup.
+        warpgroup_layout = warp_n_layout.repeat([wg_row_warps, 1], True, False)
+        # Per-warpgroup WGMMA M atoms are local accumulator indices.
+        warpgroup_layout = warpgroup_layout.repeat([warp_rows, 1], False, False)
+        # Repeat complete warpgroups along M.
+        warp_m_layout = warpgroup_layout.repeat([num_warp_groups_m, 1], True, False)
+        # Preserve the physical warp order:
+        # warp_id = warp_m + block_row_warps * warp_n.
+        warp_m_layout = warp_m_layout.repeat([1, block_col_warps], True, False)
         return warp_m_layout
