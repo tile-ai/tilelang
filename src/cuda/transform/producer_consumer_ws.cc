@@ -2324,6 +2324,8 @@ private:
       return op->else_case.defined() && VisitStmt(op->else_case.value());
     }
 
+    bool VisitStmt_(const ForNode *op) final { return VisitStmt(op->body); }
+
     bool VisitStmtDefault_(const Object *) final { return false; }
 
   private:
@@ -2434,6 +2436,16 @@ private:
       Stmt new_then =
           then_result.defined() ? then_result.value() : op->then_case;
       return IfThenElse(op->condition, new_then, new_else, op->span);
+    }
+
+    Optional<Stmt> VisitStmt_(const ForNode *op) final {
+      Optional<Stmt> body = VisitStmt(op->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
+      }
+      For new_for = GetRef<For>(op);
+      new_for.CopyOnWrite()->body = body.value();
+      return new_for;
     }
 
     Optional<Stmt> VisitStmtDefault_(const Object *) final {
