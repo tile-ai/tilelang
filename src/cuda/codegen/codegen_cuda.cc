@@ -5222,15 +5222,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const ShuffleNode *op,
     }
 
     const char *u64 = t.is_uint() ? "unsigned long long" : "long long";
-    const char *u32 = t.is_uint() ? "unsigned int" : "int";
     PrintVecConstructor(t, os);
     os << '(';
     for (int i = 0; i + 1 < lanes; i += 2) {
       if (i != 0)
         os << ", ";
-      // Pack lane i (lo) and lane i+1 (hi) into one 64-bit value.
-      os << "((" << u64 << ")(" << u32 << ")(" << scalars[i] << ")) | "
-         << "((" << u64 << ")(" << u32 << ")(" << scalars[i + 1] << ") << 32)";
+      // Pack lane i (lo) and lane i+1 (hi) into one 64-bit value. Widen through
+      // `unsigned int` so both lanes are zero-extended.
+      os << "(" << u64 << ")(((unsigned long long)(unsigned int)(" << scalars[i]
+         << ")) | ((unsigned long long)(unsigned int)(" << scalars[i + 1]
+         << ") << 32))";
     }
     os << ')';
     return;
@@ -5348,15 +5349,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
     int lanes = op->dtype.lanes();
     std::string v = PrintExpr(op->value);
     const char *u64 = op->dtype.is_uint() ? "unsigned long long" : "long long";
-    const char *u32 = op->dtype.is_uint() ? "unsigned int" : "int";
     os << "make_";
     PrintType(op->dtype, os);
     os << '(';
     for (int i = 0; i < lanes / 2; ++i) {
       if (i != 0)
         os << ", ";
-      os << "((" << u64 << ")(" << u32 << ")(" << v << ")) | "
-         << "((" << u64 << ")(" << u32 << ")(" << v << ") << 32)";
+      // Widen through `unsigned int` so both lanes are zero-extended.
+      os << "(" << u64 << ")(((unsigned long long)(unsigned int)(" << v
+         << ")) | ((unsigned long long)(unsigned int)(" << v << ") << 32))";
     }
     os << ')';
     return;
