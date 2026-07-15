@@ -239,15 +239,15 @@ private:
 
 class ThreadPartialSyncRewriter : public IRMutatorWithAnalyzer {
 public:
-  static Stmt Rewrite(Stmt stmt) {
+  static Stmt Rewrite(Stmt stmt, int warp_size = 32) {
     arith::Analyzer analyzer;
-    ThreadPartialSyncRewriter rewriter(&analyzer);
+    ThreadPartialSyncRewriter rewriter(&analyzer, warp_size);
     return rewriter(std::move(stmt));
   }
 
 private:
-  explicit ThreadPartialSyncRewriter(arith::Analyzer *analyzer)
-      : IRMutatorWithAnalyzer(analyzer) {}
+  explicit ThreadPartialSyncRewriter(arith::Analyzer *analyzer, int warp_size)
+      : IRMutatorWithAnalyzer(analyzer), warp_size_(warp_size) {}
 
   Stmt VisitStmt_(const EvaluateNode *op) final {
     const CallNode *call = nullptr;
@@ -295,15 +295,16 @@ private:
 
     auto [barrier_id, thread_count] =
         GetOrCreateBarrier(key, extent_tx, extent_ty, extent_tz);
-    if (thread_count % 32 != 0) {
+    if (thread_count % warp_size_ != 0) {
       // TODO(lei): This is a workaround for the case where the thread count is
-      // not a multiple of 32. we should enhance the pass to analysis index
-      // instead of buffer expression etc.
-      // bar.sync requires a warp-multiple thread count; silently dropping
-      // the barrier causes a data race.
+      // not a multiple of the warp size. we should enhance the pass to analysis
+      // index instead of buffer expression etc. bar.sync requires a
+      // warp-multiple thread count; silently dropping the barrier causes a data
+      // race.
       LOG(FATAL) << "[ThreadSync] Cannot lower a required shared-memory sync "
                  << "inside a divergent region with " << thread_count
-                 << " participating threads (not a multiple of 32). "
+                 << " participating threads (not a multiple of " << warp_size_
+                 << "). "
                  << "Make the guarded thread range a warp multiple.";
     }
 
@@ -407,6 +408,7 @@ private:
       IterVar(Range::FromMinExtent(0, 1), Var("tz"), IterVarType::kDataPar);
   std::unordered_map<ThreadBoundKey, size_t> barrier_id_map_;
   std::unordered_map<ThreadBoundKey, size_t> thread_count_map_;
+  int warp_size_;
 };
 
 struct ConditionThreadProperty {
@@ -1891,7 +1893,7 @@ PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope) {
   planner(stmt);
   stmt =
       ThreadSyncInserter(sync_scope, planner.syncs_inserted_)(std::move(stmt));
-  n->body = ThreadPartialSyncRewriter::Rewrite(std::move(stmt));
+  n->body = ThreadPartialSyncRewriter::Rewrite(std::move(stmt), warp_size);
   return func;
 }
 
