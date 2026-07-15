@@ -189,8 +189,7 @@ bool CheckGlobalStrides(const Buffer &buffer, arith::Analyzer *analyzer,
   return true;
 }
 
-bool CheckInnerBoxOffsetAligned(const Buffer &buffer,
-                                const Array<Range> &range,
+bool CheckInnerBoxOffsetAligned(const Buffer &buffer, const Array<Range> &range,
                                 arith::Analyzer *analyzer,
                                 bool emit_diagnostics) {
   if (range.empty()) {
