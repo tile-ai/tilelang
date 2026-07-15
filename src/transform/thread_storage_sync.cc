@@ -299,7 +299,12 @@ private:
       // TODO(lei): This is a workaround for the case where the thread count is
       // not a multiple of 32. we should enhance the pass to analysis index
       // instead of buffer expression etc.
-      return Stmt();
+      // bar.sync requires a warp-multiple thread count; silently dropping
+      // the barrier causes a data race.
+      LOG(FATAL) << "[ThreadSync] Cannot lower a required shared-memory sync "
+                 << "inside a divergent region with " << thread_count
+                 << " participating threads (not a multiple of 32). "
+                 << "Make the guarded thread range a warp multiple.";
     }
 
     // Create new sync call with barrier info
