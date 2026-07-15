@@ -348,7 +348,27 @@ jobs:
 
       - name: Install project (wheel form)
         run: |
-          uv pip install -v .
+          if [[ "${{ matrix.runner.toolkit }}" == *"CUDA"* ]]; then
+            uv pip install -v '.[tileir]'
+          else
+            uv pip install -v .
+          fi
+
+      - name: Require CUDA Tile IR 13.3 Python bindings and runtime
+        if: contains(matrix.runner.toolkit, 'CUDA')
+        run: |
+          if [[ -z "${TILELANG_CUDA_TILE_PYTHONPATH:-}" ]]; then
+            echo "::error::CUDA Tile IR Python bindings are required for CI. Set TILELANG_CUDA_TILE_PYTHONPATH to an NVIDIA/cuda-tile v13.3.0 build configured with CUDA_TILE_ENABLE_BINDINGS_PYTHON=ON (https://github.com/NVIDIA/cuda-tile/releases/tag/v13.3.0)."
+            exit 1
+          fi
+          CUDA_TILE_PYTHONPATH="${TILELANG_CUDA_TILE_PYTHONPATH}"
+          if [[ ! -f "${CUDA_TILE_PYTHONPATH}/cuda_tile/_mlir/dialects/cuda_tile.py" ]]; then
+            echo "::error::CUDA Tile IR Python bindings are required for CI. Set TILELANG_CUDA_TILE_PYTHONPATH to an NVIDIA/cuda-tile v13.3.0 build configured with CUDA_TILE_ENABLE_BINDINGS_PYTHON=ON (https://github.com/NVIDIA/cuda-tile/releases/tag/v13.3.0)."
+            exit 1
+          fi
+          echo "PYTHONPATH=${CUDA_TILE_PYTHONPATH}" | tee -a "${GITHUB_ENV}"
+          PYTHONPATH="${CUDA_TILE_PYTHONPATH}" uv run --no-project -- python -c \
+            "from tilelang.tileir.checks import check_tileir_available; print(check_tileir_available())"
 
       - name: Show ccache stats
         if: always()
@@ -375,6 +395,30 @@ jobs:
             --ignore=../examples/grouped_gemm/test_example_grouped_gemm.py \
             ../examples
 
+      - name: Run TileIR tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
+        if: contains(matrix.runner.toolkit, 'CUDA')
+        run: |
+          cd testing
+          uv run --no-project -m -- pytest \
+            --verbose --color=yes --durations=0 --showlocals --cache-clear \
+            --maxfail=3 --numprocesses=4 \
+            ./python/tileir ./python/jit/test_tilelang_jit_tileir*.py
+
+      - name: Run examples through TileIR with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
+        if: contains(matrix.runner.toolkit, 'CUDA')
+        env:
+          TILELANG_EXECUTION_BACKEND: tileir
+          # examples/conftest.py uses this selector for the strict, exception-scoped
+          # list of intentionally unsupported example kernels.
+          TILELANG_TARGET: tileir
+        run: |
+          cd testing
+          uv run --no-project -m -- pytest \
+            --verbose --color=yes --durations=0 --showlocals --cache-clear \
+            --maxfail=3 \
+            --ignore=../examples/grouped_gemm/test_example_grouped_gemm.py \
+            ../examples
+
       # NVIDIA CUDA tests
       - name: Run CUDA tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
         id: cuda-tests
@@ -386,6 +430,8 @@ jobs:
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
           )
           "${PYTEST[@]}" --maxfail=3 --numprocesses=8 \
+            --ignore=./python/tileir \
+            --ignore-glob=./python/jit/test_tilelang_jit_tileir*.py \
             ./python
 
       # AMD ROCm tests
