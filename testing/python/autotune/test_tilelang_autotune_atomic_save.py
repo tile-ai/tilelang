@@ -5,6 +5,7 @@ import pytest
 from tilelang.autotuner import param as autotune_param
 from tilelang.autotuner.param import (
     AutotuneResult,
+    CompileArgs,
     BEST_CONFIG_PATH,
     FUNCTION_PATH,
     LATENCY_PATH,
@@ -21,18 +22,24 @@ from tilelang import tvm
 
 
 class _FakeAdapter:
-    def __init__(self, libpath: str):
+    def __init__(self, libpath: str | None):
         self.libpath = libpath
+        self.tileir_artifact = object()
+
+    @staticmethod
+    def _serialize_tileir_artifact(artifact):
+        assert artifact is not None
+        return b"fake-tileir-artifact"
 
     def get_kernel_source(self):
-        return "// host kernel"
+        return "// wrapped kernel"
 
     def get_host_source(self):
         return "// host kernel"
 
 
 class _FakeKernel:
-    def __init__(self, libpath: str, execution_backend: str = "cython"):
+    def __init__(self, libpath: str | None, execution_backend: str = "cython"):
         self.execution_backend = execution_backend
         self.adapter = _FakeAdapter(libpath)
         self.kernel_source = "// device kernel"
@@ -56,6 +63,8 @@ def _make_result(tmp_path, execution_backend: str = "cython"):
         lib_path = tmp_path / "kernel.cubin"
         lib_path.write_bytes(b"fake-cubin")
         lib_path.with_suffix(".py").write_text("# fake launcher")
+    elif execution_backend == "tileir":
+        lib_path = None
     else:
         lib_path = tmp_path / "kernel_lib.so"
         lib_path.write_bytes(b"fake-so")
@@ -66,8 +75,28 @@ def _make_result(tmp_path, execution_backend: str = "cython"):
         ref_latency=2.0,
         libcode="// libcode",
         func=_fake_func,
-        kernel=_FakeKernel(str(lib_path), execution_backend=execution_backend),
+        kernel=_FakeKernel(str(lib_path) if lib_path is not None else None, execution_backend=execution_backend),
     )
+
+
+def test_compile_args_forwards_execution_backend(monkeypatch):
+    captured = {}
+
+    def fake_compile(program, **kwargs):
+        captured["program"] = program
+        captured.update(kwargs)
+        return "compiled"
+
+    monkeypatch.setattr(autotune_param.tilelang, "compile", fake_compile)
+
+    program = object()
+    result = CompileArgs(out_idx=[-1], execution_backend="tileir", target="cuda").compile_program(program)
+
+    assert result == "compiled"
+    assert captured["program"] is program
+    assert captured["execution_backend"] == "tileir"
+    assert captured["target"] == "cuda"
+    assert captured["out_idx"] == [-1]
 
 
 def test_autotune_save_rewrites_incomplete_cache_dir(cache_dirs, tmp_path):
@@ -149,3 +178,46 @@ def test_autotune_save_rewrites_nvrtc_dir_missing_launcher(cache_dirs, tmp_path)
 
     assert (path / KERNEL_PY_PATH).exists()
     assert not (path / "legacy.txt").exists()
+
+
+def test_autotune_save_tileir_uses_tileir_artifact_file(cache_dirs, tmp_path):
+    result = _make_result(tmp_path, execution_backend="tileir")
+    path = cache_dirs / "test-namespace" / "autotuner" / "autotune-tileir-entry"
+
+    result.save_to_disk(path)
+
+    assert AutotuneResult._get_kernel_lib_file("tileir") == "kernel.tileir.json"
+    assert (path / "kernel.tileir.json").read_bytes() == b"fake-tileir-artifact"
+    assert (path / HOST_KERNEL_PATH).read_text() == "// host kernel"
+    assert not (path / KERNEL_CUBIN_PATH).exists()
+    assert not (path / KERNEL_LIB_PATH).exists()
+
+
+@pytest.mark.parametrize(
+    "reload_error",
+    [
+        "Unsupported TileIR cache artifact version 1",
+        "TileIR cache artifact compatibility does not match the active target/toolchain",
+    ],
+)
+def test_autotune_tileir_reload_error_is_treated_as_cache_miss(cache_dirs, tmp_path, monkeypatch, reload_error):
+    result = _make_result(tmp_path, execution_backend="tileir")
+    path = cache_dirs / "test-namespace" / "autotuner" / "autotune-tileir-stale"
+    result.save_to_disk(path)
+
+    def reject_stale_cache(**kwargs):
+        del kwargs
+        raise ValueError(reload_error)
+
+    monkeypatch.setattr(autotune_param.JITKernel, "from_database", reject_stale_cache)
+
+    loaded = AutotuneResult._load_kernel_from_disk(
+        AutotuneResult,
+        path,
+        target="tileir -arch=sm_120",
+        execution_backend="tileir",
+        func=_fake_func,
+    )
+
+    assert loaded is None
+    assert not path.exists()
