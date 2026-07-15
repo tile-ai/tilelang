@@ -21,6 +21,11 @@ Range = tvm.ir.Range
 structural_equal = tvm.ir.structural_equal
 Target = tvm.target.Target
 
+skip_no_cuda_tile = pytest.mark.skipif(
+    not checks._module_exists(checks.CUDA_TILE_IR_MLIR_MODULE),
+    reason="cuda_tile MLIR bindings unavailable",
+)
+
 
 def _cuda_target_for_test() -> Target:
     return determine_target({"kind": "cuda", "arch": "sm_120"}, return_object=True)
@@ -214,6 +219,16 @@ def _skip_if_tileir_toolchain_unavailable():
         checks.check_tileir_available()
     except checks.TileIRDependencyError as exc:
         pytest.skip(f"CUDA TileIR toolchain unavailable: {exc}")
+
+
+def _setup_gpu():
+    """Return torch and the active CUDA target, or skip when unavailable."""
+
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("No CUDA GPU available")
+    major, minor = torch.cuda.get_device_capability()
+    return torch, major, minor, f"tileir -arch=sm_{major}{minor}"
 
 
 def _lower_tileir_primfunc_for_test(prim_func: tirx.PrimFunc) -> TileIRLoweringResult:
