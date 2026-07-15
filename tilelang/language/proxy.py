@@ -313,9 +313,7 @@ def make_tensor_from_addr(
     dtype: DType = "float32",
     strides: tuple[PrimExpr, ...] | None = None,
     storage_scope: str = "global",
-    align: int | None = None,
 ) -> tirx.Buffer:
-
     from tilelang.language.eager.builder import Builder
 
     if Builder.current() is None:
@@ -324,19 +322,12 @@ def make_tensor_from_addr(
         )
 
     dtype = _normalize_tensor_dtype(dtype)
-    if align is None:
-        dtype_info = DataType(dtype)
-        align = max(dtype_info.bits * dtype_info.lanes // 8, 1)
     pointer_var = _materialize_pointer_from_addr(addr, dtype, storage_scope)
-    return buffer(shape, dtype=dtype, data=pointer_var, strides=strides, scope=storage_scope, align=align)
+    return buffer(shape, dtype=dtype, data=pointer_var, strides=strides, scope=storage_scope)
 
 
 def make_tensor(
-    ptr: Var | PrimExpr,
-    shape: ShapeType,
-    dtype: DType = "float32",
-    strides: tuple[PrimExpr, ...] | None = None,
-    align: int | None = None,
+    ptr: Var | PrimExpr, shape: ShapeType, dtype: DType = "float32", strides: tuple[PrimExpr, ...] | None = None
 ) -> tirx.Buffer:
     from tilelang.language.eager.builder import Builder
 
@@ -349,4 +340,4 @@ def make_tensor(
 
     ptr_type = _get_pointer_type_annotation(ptr)
     storage_scope = ptr_type.storage_scope if ptr_type is not None and ptr_type.storage_scope else "global"
-    return make_tensor_from_addr(ptr, shape, dtype=dtype, strides=strides, storage_scope=storage_scope, align=align)
+    return make_tensor_from_addr(ptr, shape, dtype=dtype, strides=strides, storage_scope=storage_scope)

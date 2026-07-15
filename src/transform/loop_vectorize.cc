@@ -805,22 +805,6 @@ private:
 
     int buffer_vec_size = loop_extent_vector_size_;
 
-    // A vector access of `vec_size` lanes issues a `vec_size * elem_bits`-wide
-    // load/store whose address is only guaranteed to be a multiple of the
-    // buffer's base alignment plus an elem_offset the divisibility checks
-    // below reason about. The base alignment itself is recorded in
-    // buffer->data_alignment: ordinary allocations and kernel arguments carry
-    // the default kAllocAlignment (64B, never restrictive here), but a buffer
-    // viewing an opaque runtime pointer (e.g. T.make_tensor over an address)
-    // may only be element-aligned, so cap the vector width by it.
-    if (IsGlobalBuffer(buffer)) {
-      int elem_bits = buffer->dtype.bits() * buffer->dtype.lanes();
-      if (buffer->data_alignment > 0 && elem_bits > 0) {
-        int align_lanes = std::max(buffer->data_alignment * 8 / elem_bits, 1);
-        buffer_vec_size = arith::ZeroAwareGCD(buffer_vec_size, align_lanes);
-      }
-    }
-
     // Transform indices using layout_map if present
     auto transformed_indices = TransformIndices(indices, buffer);
 
