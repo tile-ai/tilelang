@@ -222,14 +222,13 @@ struct CUDAIEEEMath {
       return "__d" + base + "_" + rounding_mode;
     }
 
-    // float16: half-precision intrinsics only exist for round-to-nearest-even.
-    // Binary ops use __h<name> (e.g., __hadd, __hmul, __hfma).
-    // Unary ops (sqrt, rcp, rsqrt) use h<name> without leading "__".
-    if (t.is_float16()) {
+    // float16/bfloat16: half-precision intrinsics only exist for
+    // round-to-nearest-even.
+    if (t.is_float16() || t.is_bfloat16()) {
       if (rounding_mode != "rn") {
         LOG(FATAL)
             << "IEEE " << name << " with rounding mode '" << rounding_mode
-            << "' is not supported for float16 in CUDA. "
+            << "' is not supported for float16/bfloat16 in CUDA. "
             << "Only rounding mode 'rn' is available for half precision.";
         return "";
       }
@@ -237,7 +236,7 @@ struct CUDAIEEEMath {
       if (name == "fmaf") {
         return "__hfma";
       }
-      // Unary ops: hsqrt, hrcp, hrsqrt (single underscore prefix)
+      // Unary ops: hsqrt, hrcp, hrsqrt
       if (name == "fsqrt") {
         return "hsqrt";
       }
@@ -247,20 +246,15 @@ struct CUDAIEEEMath {
       if (name == "frsqrt") {
         return "hrsqrt";
       }
-      // Binary ops: __hadd, __hsub, __hmul, __hdiv
+      // Binary ops: __hadd_rn, __hsub_rn, __hmul_rn, __hdiv
+      if (name == "fdiv") {
+        return "__hdiv";
+      }
       std::string base = name;
       if (!base.empty() && base[0] == 'f') {
         base = base.substr(1);
       }
-      return "__h" + base;
-    }
-
-    // bfloat16: no native IEEE rounding intrinsics exist in CUDA.
-    if (t.is_bfloat16()) {
-      LOG(FATAL) << "IEEE " << name
-                 << " is not supported for bfloat16 in CUDA. "
-                 << "bfloat16 has no native IEEE rounding intrinsics.";
-      return "";
+      return "__h" + base + "_rn";
     }
 
     LOG(FATAL) << "IEEE " << name << " is not supported for dtype " << t;
@@ -4473,99 +4467,53 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
     CUDAIEEEMath math_func;
     std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
     std::string func_name = math_func(op->dtype, "fadd", rounding_mode);
-    if (op->dtype.is_float16() && op->dtype.is_scalar()) {
-      os << "cutlass::half_t(" << func_name << "("
-         << "(" << PrintExpr(op->args[0]) << ").to_half(), "
-         << "(" << PrintExpr(op->args[1]) << ").to_half()))";
-    } else {
-      os << func_name << "(" << PrintExpr(op->args[0]) << ", "
-         << PrintExpr(op->args[1]) << ")";
-    }
+    os << func_name << "(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
     return true;
   } else if (op->op.same_as(tl::ieee_sub())) {
     CUDAIEEEMath math_func;
     std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
     std::string func_name = math_func(op->dtype, "fsub", rounding_mode);
-    if (op->dtype.is_float16() && op->dtype.is_scalar()) {
-      os << "cutlass::half_t(" << func_name << "("
-         << "(" << PrintExpr(op->args[0]) << ").to_half(), "
-         << "(" << PrintExpr(op->args[1]) << ").to_half()))";
-    } else {
-      os << func_name << "(" << PrintExpr(op->args[0]) << ", "
-         << PrintExpr(op->args[1]) << ")";
-    }
+    os << func_name << "(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
     return true;
   } else if (op->op.same_as(tl::ieee_mul())) {
     CUDAIEEEMath math_func;
     std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
     std::string func_name = math_func(op->dtype, "fmul", rounding_mode);
-    if (op->dtype.is_float16() && op->dtype.is_scalar()) {
-      os << "cutlass::half_t(" << func_name << "("
-         << "(" << PrintExpr(op->args[0]) << ").to_half(), "
-         << "(" << PrintExpr(op->args[1]) << ").to_half()))";
-    } else {
-      os << func_name << "(" << PrintExpr(op->args[0]) << ", "
-         << PrintExpr(op->args[1]) << ")";
-    }
+    os << func_name << "(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
     return true;
   } else if (op->op.same_as(tl::ieee_fmaf())) {
     CUDAIEEEMath math_func;
     std::string rounding_mode = Downcast<StringImm>(op->args[3])->value;
     std::string func_name = math_func(op->dtype, "fmaf", rounding_mode);
-    if (op->dtype.is_float16() && op->dtype.is_scalar()) {
-      os << "cutlass::half_t(" << func_name << "("
-         << "(" << PrintExpr(op->args[0]) << ").to_half(), "
-         << "(" << PrintExpr(op->args[1]) << ").to_half(), "
-         << "(" << PrintExpr(op->args[2]) << ").to_half()))";
-    } else {
-      os << func_name << "(" << PrintExpr(op->args[0]) << ", "
-         << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ")";
-    }
+    os << func_name << "(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ")";
     return true;
   } else if (op->op.same_as(tl::ieee_frcp())) {
     CUDAIEEEMath math_func;
     std::string rounding_mode = Downcast<StringImm>(op->args[1])->value;
     std::string func_name = math_func(op->dtype, "frcp", rounding_mode);
-    if (op->dtype.is_float16() && op->dtype.is_scalar()) {
-      os << "cutlass::half_t(" << func_name << "("
-         << "(" << PrintExpr(op->args[0]) << ").to_half()))";
-    } else {
-      os << func_name << "(" << PrintExpr(op->args[0]) << ")";
-    }
+    os << func_name << "(" << PrintExpr(op->args[0]) << ")";
     return true;
   } else if (op->op.same_as(tl::ieee_fsqrt())) {
     CUDAIEEEMath math_func;
     std::string rounding_mode = Downcast<StringImm>(op->args[1])->value;
     std::string func_name = math_func(op->dtype, "fsqrt", rounding_mode);
-    if (op->dtype.is_float16() && op->dtype.is_scalar()) {
-      os << "cutlass::half_t(" << func_name << "("
-         << "(" << PrintExpr(op->args[0]) << ").to_half()))";
-    } else {
-      os << func_name << "(" << PrintExpr(op->args[0]) << ")";
-    }
+    os << func_name << "(" << PrintExpr(op->args[0]) << ")";
     return true;
   } else if (op->op.same_as(tl::ieee_frsqrt())) {
     CUDAIEEEMath math_func;
     std::string func_name = math_func(op->dtype, "frsqrt", "rn");
-    if (op->dtype.is_float16() && op->dtype.is_scalar()) {
-      os << "cutlass::half_t(" << func_name << "("
-         << "(" << PrintExpr(op->args[0]) << ").to_half()))";
-    } else {
-      os << func_name << "(" << PrintExpr(op->args[0]) << ")";
-    }
+    os << func_name << "(" << PrintExpr(op->args[0]) << ")";
     return true;
   } else if (op->op.same_as(tl::ieee_fdiv())) {
     CUDAIEEEMath math_func;
     std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
     std::string func_name = math_func(op->dtype, "fdiv", rounding_mode);
-    if (op->dtype.is_float16() && op->dtype.is_scalar()) {
-      os << "cutlass::half_t(" << func_name << "("
-         << "(" << PrintExpr(op->args[0]) << ").to_half(), "
-         << "(" << PrintExpr(op->args[1]) << ").to_half()))";
-    } else {
-      os << func_name << "(" << PrintExpr(op->args[0]) << ", "
-         << PrintExpr(op->args[1]) << ")";
-    }
+    os << func_name << "(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
     return true;
   } else if (op->op.same_as(tl::fast_rcp())) {
     need_math_h_ = true;

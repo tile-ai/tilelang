@@ -118,6 +118,82 @@ TL_PATCH TL_DEVICE bfloat16_t hrsqrt(const bfloat16_t x) {
   return bfloat16_t(hrsqrt(x.to_nv_bfloat16()));
 }
 
+// hsqrt function for half_t
+TL_PATCH TL_DEVICE half_t hsqrt(const half_t x) {
+  return half_t(hsqrt(x.to_half()));
+}
+
+// hsqrt function for bfloat16_t
+TL_PATCH TL_DEVICE bfloat16_t hsqrt(const bfloat16_t x) {
+  return bfloat16_t(hsqrt(x.to_nv_bfloat16()));
+}
+
+// hrcp function for half_t
+TL_PATCH TL_DEVICE half_t hrcp(const half_t x) {
+  return half_t(hrcp(x.to_half()));
+}
+
+// hrcp function for bfloat16_t
+TL_PATCH TL_DEVICE bfloat16_t hrcp(const bfloat16_t x) {
+  return bfloat16_t(hrcp(x.to_nv_bfloat16()));
+}
+
+// __hadd_rn function for half_t
+TL_PATCH TL_DEVICE half_t __hadd_rn(const half_t x, const half_t y) {
+  return half_t(__hadd_rn(x.to_half(), y.to_half()));
+}
+
+// __hadd_rn function for bfloat16_t
+TL_PATCH TL_DEVICE bfloat16_t __hadd_rn(const bfloat16_t x,
+                                        const bfloat16_t y) {
+  return bfloat16_t(__hadd_rn(x.to_nv_bfloat16(), y.to_nv_bfloat16()));
+}
+
+// __hsub_rn function for half_t
+TL_PATCH TL_DEVICE half_t __hsub_rn(const half_t x, const half_t y) {
+  return half_t(__hsub_rn(x.to_half(), y.to_half()));
+}
+
+// __hsub_rn function for bfloat16_t
+TL_PATCH TL_DEVICE bfloat16_t __hsub_rn(const bfloat16_t x,
+                                        const bfloat16_t y) {
+  return bfloat16_t(__hsub_rn(x.to_nv_bfloat16(), y.to_nv_bfloat16()));
+}
+
+// __hmul_rn function for half_t
+TL_PATCH TL_DEVICE half_t __hmul_rn(const half_t x, const half_t y) {
+  return half_t(__hmul_rn(x.to_half(), y.to_half()));
+}
+
+// __hmul_rn function for bfloat16_t
+TL_PATCH TL_DEVICE bfloat16_t __hmul_rn(const bfloat16_t x,
+                                        const bfloat16_t y) {
+  return bfloat16_t(__hmul_rn(x.to_nv_bfloat16(), y.to_nv_bfloat16()));
+}
+
+// __hdiv function for half_t
+TL_PATCH TL_DEVICE half_t __hdiv(const half_t x, const half_t y) {
+  return half_t(__hdiv(x.to_half(), y.to_half()));
+}
+
+// __hdiv function for bfloat16_t
+TL_PATCH TL_DEVICE bfloat16_t __hdiv(const bfloat16_t x, const bfloat16_t y) {
+  return bfloat16_t(__hdiv(x.to_nv_bfloat16(), y.to_nv_bfloat16()));
+}
+
+// __hfma function for half_t
+TL_PATCH TL_DEVICE half_t __hfma(const half_t x, const half_t y,
+                                 const half_t z) {
+  return half_t(__hfma(x.to_half(), y.to_half(), z.to_half()));
+}
+
+// __hfma function for bfloat16_t
+TL_PATCH TL_DEVICE bfloat16_t __hfma(const bfloat16_t x, const bfloat16_t y,
+                                     const bfloat16_t z) {
+  return bfloat16_t(
+      __hfma(x.to_nv_bfloat16(), y.to_nv_bfloat16(), z.to_nv_bfloat16()));
+}
+
 // TVM lowers T.exp(bfloat16) to the CUDA half-style `hexp` name. TileLang uses
 // cutlass::bfloat16_t for scalar bf16, while CUDA only overloads hexp for
 // __nv_bfloat16. Keep this narrow bridge in common.h so plain T.exp works

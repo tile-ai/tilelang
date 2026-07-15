@@ -8,8 +8,7 @@ ROUNDING_MODES = ["rn", "rz", "ru", "rd"]
 
 # (dtype, rounding_mode) pairs that must compile and produce correct results.
 # - fp32/fp64: all four IEEE rounding modes are natively supported by CUDA.
-# - fp16     : only round-to-nearest-even is available.
-# - bf16     : no native IEEE rounding intrinsics (tested separately via rejection).
+# - fp16/bf16: only round-to-nearest-even is available.
 IEEE_DTYPE_MODES = [
     (T.float32, "rn"),
     (T.float32, "rz"),
@@ -20,6 +19,7 @@ IEEE_DTYPE_MODES = [
     (T.float64, "ru"),
     (T.float64, "rd"),
     (T.float16, "rn"),
+    (T.bfloat16, "rn"),
 ]
 
 # Ops that carry a rounding_mode parameter (everything except frsqrt).
@@ -186,7 +186,7 @@ def test_rounding_mode_validation():
 @pytest.mark.parametrize("op_name,op_func", IEEE_OPS_WITH_RM)
 @pytest.mark.parametrize("dtype,mode", IEEE_DTYPE_MODES)
 def test_ieee_with_rounding_mode(op_name, op_func, dtype, mode):
-    """Compile + run every IEEE op across fp32 / fp64 / fp16 and all rounding
+    """Compile + run every IEEE op across fp32 / fp64 / fp16 / bf16 and all rounding
     modes that the hardware supports."""
     run_ieee_math_test(op_name, op_func, rounding_mode=mode, dtype=dtype, run_execution=(mode == "rn"))
 
@@ -195,7 +195,7 @@ def test_ieee_with_rounding_mode(op_name, op_func, dtype, mode):
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("dtype", [T.float32, T.float16])
+@pytest.mark.parametrize("dtype", [T.float32, T.float16, T.bfloat16])
 def test_ieee_frsqrt(dtype):
     run_ieee_math_test("ieee_frsqrt", T.ieee_frsqrt, dtype=dtype)
 
@@ -213,18 +213,12 @@ def test_ieee_frsqrt_fp64_rejected():
 
 
 @tilelang.testing.requires_cuda
-def test_ieee_fp16_non_rn_rejected():
-    """fp16 only supports round-to-nearest-even."""
+def test_ieee_half_non_rn_rejected():
+    """fp16/bf16 only supports round-to-nearest-even."""
     with pytest.raises(Exception, match="Only rounding mode 'rn' is available for half precision"):
         run_ieee_math_test("ieee_add", T.ieee_add, rounding_mode="rz", dtype=T.float16)
-
-
-@tilelang.testing.requires_cuda
-@pytest.mark.parametrize("op_name,op_func", IEEE_ALL_OPS)
-def test_ieee_bf16_rejected(op_name, op_func):
-    """bf16 has no IEEE rounding intrinsics in CUDA — every op must FATAL."""
-    with pytest.raises(Exception, match="not supported for bfloat16"):
-        run_ieee_math_test(op_name, op_func, dtype=T.bfloat16)
+    with pytest.raises(Exception, match="Only rounding mode 'rn' is available for half precision"):
+        run_ieee_math_test("ieee_add", T.ieee_add, rounding_mode="rz", dtype=T.bfloat16)
 
 
 if __name__ == "__main__":
