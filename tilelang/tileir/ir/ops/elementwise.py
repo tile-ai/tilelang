@@ -5,6 +5,15 @@ from __future__ import annotations
 import dataclasses
 from typing import Any
 
+from tilelang.tileir.emission_utils import (
+    _as_tile,
+    _emit_cast,
+    _emit_elementwise,
+    _emit_select,
+    _mlir_element_type,
+)
+from tilelang.tileir.errors import _UnsupportedTileIRNode
+from tilelang.tileir.ir.types import MemSpace, TileType, dtype as lookup_dtype
 from tilelang.tileir.ir.ops._base import (
     Effect,
     TileOp,
@@ -31,15 +40,10 @@ class Constant(TileOp, opcode="constant", effect=Effect.NONE):
 
     def emit_mlir(self, ctx: Any) -> Any:
         """Emit ``ct.constant`` for a scalar (0-d) tile."""
-        from tilelang.tileir.emission_utils import _mlir_element_type
-
         ct = ctx.ct
         loc = ctx.loc
 
-        # Build a temporary TileType just to resolve the MLIR element type.
-        from tilelang.tileir.ir.types import TileType, MemSpace, dtype as _lu
-
-        result_ty = TileType(dtype=_lu(self.dtype), shape=(), space=MemSpace.REGISTER, layout=None)
+        result_ty = TileType(dtype=lookup_dtype(self.dtype), shape=(), space=MemSpace.REGISTER, layout=None)
         elem_ty = _mlir_element_type(ctx, result_ty)
         tile_type = ct.TileType.get([], elem_ty)
         return ct.constant(self.value, tile_type=tile_type, loc=loc)
@@ -66,13 +70,7 @@ class Elementwise(TileOp, opcode="elementwise", effect=Effect.NONE):
                    in positional order.  The number of inputs must match
                    the arity implied by ``fn``.
 
-                   NOTE: this field is named ``inputs`` (not ``operands``)
-                   on purpose.  ``TileOp`` defines an ``operands()`` *method*
-                   that returns the declared SSA operands; a field literally
-                   named ``operands`` would shadow that method on every
-                   ``Elementwise`` instance, so ``op.operands()`` would raise
-                   ``TypeError`` (the tuple is not callable).  The inherited
-                   ``operands()`` method still works and returns ``(inputs,)``.
+                   The name avoids shadowing ``TileOp.operands()``.
 
     ``inputs`` carries the operand Values so the emit path can look up the
     MLIR values for each input.
@@ -97,16 +95,11 @@ class Elementwise(TileOp, opcode="elementwise", effect=Effect.NONE):
 
         Dispatches on ``self.fn`` to the appropriate cuda_tile builder call.
 
-        Unary ops use the ``_UNARY_MATH_TABLE`` in emit_helpers (name→lambda).
-        Binary ops use the ``_BINARY_OP_TABLE`` in emit_helpers.
-        'fma' (ternary) maps directly to ``ct.fma``.
+        Unary and binary operations use the dispatch tables in
+        ``emission_utils``; ``fma`` maps directly to ``ct.fma``.
 
         Returns the MLIR tile value so emit_module can bind it to results[0].
         """
-        from tilelang.tileir.emission_utils import (
-            _emit_elementwise,
-        )
-
         return _emit_elementwise(self, ctx)
 
 
@@ -116,13 +109,13 @@ class Cast(TileOp, opcode="cast", effect=Effect.NONE):
 
     ``src``       — the source tile Value.
     ``dtype``     — target dtype name string (e.g. "float16", "int32").
-    ``src_dtype`` — original source dtype NAME string as known at lowering
+    ``src_dtype`` — original source dtype name as known at lowering
                     time (e.g. "uint8"), threaded so the emit path can pick
                     zero- vs sign-extension on int widening.  The
                     ``TileType`` alias map collapses uint{N} -> signless
                     Int{N}, so the MLIR element type alone cannot tell signed
                     from unsigned.  Empty when unknown (defaults to the
-                    MLIR-derived name, i.e. SIGNED).
+                    MLIR-derived signed name).
     ``bitcast``   — when True, reinterpret the source bits as ``dtype`` (a
                     ``ct.bitcast``) instead of a value-converting numeric cast.
                     Used to lower ``tir.reinterpret``. Requires equal bit width.
@@ -137,15 +130,11 @@ class Cast(TileOp, opcode="cast", effect=Effect.NONE):
         """Lower Cast to MLIR.
 
         Resolves ``src`` from the value_map, then applies the appropriate
-        cuTile cast primitive (ftof / itof / ftoi / exti / trunci) based on
+        CUDA Tile IR cast (ftof / itof / ftoi / exti / trunci) based on
         the source and target MLIR element types.
 
         Returns the cast MLIR tile value for binding to results[0].
         """
-        from tilelang.tileir.emission_utils import (
-            _emit_cast,
-        )
-
         return _emit_cast(self, ctx)
 
 
@@ -165,13 +154,9 @@ class Select(TileOp, opcode="select", effect=Effect.NONE):
     def emit_mlir(self, ctx: Any) -> Any:
         """Lower Select to MLIR via ``ct.select``.
 
-        Resolves all three operands from the value_map and emits a cuTile
+        Resolves all three operands from the value_map and emits a CUDA Tile IR
         select op.  Returns the MLIR tile value for binding to results[0].
         """
-        from tilelang.tileir.emission_utils import (
-            _emit_select,
-        )
-
         return _emit_select(self, ctx)
 
 
@@ -251,21 +236,12 @@ class Broadcast(TileOp, opcode="broadcast", effect=Effect.NONE):
     reshape_shape: tuple = attribute(default=())
 
     def emit_mlir(self, ctx: Any) -> Any:
-        """Lower Broadcast to MLIR via ct.reshape + ct.broadcast.
-
-        Steps:
-        1. Resolve the source tile from ctx.value_map.
-        2. Reshape to ``reshape_shape`` when set (multi-axis embed), else to
-           [1,...,src_shape[0],...,1] at ``axis``.
-        3. Broadcast to target_shape.
-        """
+        """Reshape the source as needed and broadcast to ``target_shape``."""
         ct = ctx.ct
         loc = ctx.loc
 
         src_mlir = ctx.lookup(self.src)
         # Ensure it's a Tile object.
-        from tilelang.tileir.emission_utils import _as_tile
-
         src_tile = _as_tile(ctx, src_mlir)
 
         target = list(self.target_shape)
@@ -307,8 +283,6 @@ class Permute(TileOp, opcode="permute", effect=Effect.NONE):
 
     def emit_mlir(self, ctx: Any) -> Any:
         """Lower to ``ct.permute(src_tile, perm)``."""
-        from tilelang.tileir.emission_utils import _as_tile
-
         ct = ctx.ct
         src_tile = _as_tile(ctx, ctx.lookup(self.src))
         return ct.permute(src_tile, list(self.perm), loc=ctx.loc)
@@ -330,9 +304,6 @@ class RepeatInterleave(TileOp, opcode="repeat_interleave", effect=Effect.NONE):
 
     def emit_mlir(self, ctx: Any) -> Any:
         """Lower to reshape + broadcast + reshape."""
-        from tilelang.tileir.errors import _UnsupportedTileIRNode
-        from tilelang.tileir.emission_utils import _as_tile
-
         ct = ctx.ct
         loc = ctx.loc
         src_tile = _as_tile(ctx, ctx.lookup(self.src))

@@ -10,12 +10,18 @@ region/partition helpers.
 
 from __future__ import annotations
 
+import functools
+import operator
 from typing import Any
 
 from tvm import tirx as _tirx
 
 from tilelang.tileir.ir.builder import IRBuilder
-from tilelang.tileir.errors import TileIRLoweringError, _UnsupportedTileIRNode
+from tilelang.tileir.errors import (
+    TileIRLoweringError,
+    TileIRLoweringNotImplementedError,
+    _UnsupportedTileIRNode,
+)
 from tilelang.tileir.ir.types import MemSpace
 from tilelang.tileir.ir.ops import (
     Barrier,
@@ -106,7 +112,7 @@ def _require_full_buffer_region(region: Any, buf_val: Any, *, op_name: str, side
         no separate static-int extraction helper is needed or possible here
         (there is no raw ``PrimExpr`` to extract from; ``_shape()`` already
         discarded it).
-      - ``region.indices[i]`` is ALWAYS a ``str`` -- ``_expr_text`` stringifies
+      - ``region.indices[i]`` is always a ``str`` -- ``_expr_text`` stringifies
         every index, including ``IntImm`` literals, via
         ``str(int(expr))``. A statically-zero offset therefore always
         stringifies to exactly ``"0"``; anything else (a symbolic offset, or
@@ -118,8 +124,6 @@ def _require_full_buffer_region(region: Any, buf_val: Any, *, op_name: str, side
     ("rank-N buffer", "partial region", or "dynamic-extent region") on any
     violation; never silently degrades.
     """
-    from tilelang.tileir.errors import TileIRLoweringNotImplementedError
-
     buf_shape = tuple(int(d) for d in buf_val.type.shape)
     _suffix = f"{op_name} currently supports full-buffer rank-{rank} only."
 
@@ -199,7 +203,7 @@ def _lower_gather4_scatter4(stmt: SemanticStmt, attrs: dict, scope: LoweringScop
     ``tile::gather4`` / ``tile::scatter4`` TMA instructions need on the CUDA
     backend have no analog here.
 
-    A missing buffer here is NOT warn-skipped (unlike the plain 2-region
+    A missing buffer here is not warn-skipped (unlike the plain 2-region
     copy path below): silently dropping a gather/scatter copy would
     silently drop rows of data instead of failing loudly (the same
     "no silent degrade" contract as the blockscaled-gemm buffer lookups).
@@ -208,7 +212,7 @@ def _lower_gather4_scatter4(stmt: SemanticStmt, attrs: dict, scope: LoweringScop
     same dummy ``(4, K_box)`` extents purely to satisfy ``CopyNode``'s arg-
     shape check -- the actual access pattern lives entirely in the
     ``gather4_rows``/``gather4_col`` annotations, so the GLOBAL-side region
-    (``src`` for gather, ``dst`` for scatter) does NOT represent that
+    (``src`` for gather, ``dst`` for scatter) does not represent that
     buffer's real declared shape and is not checked against it. Only the
     SHARED-side region (``dst`` for gather, ``src`` for scatter) -- the
     literal ``(4, K_box)`` tile -- is required to be its buffer's whole
@@ -230,8 +234,6 @@ def _lower_gather4_scatter4(stmt: SemanticStmt, attrs: dict, scope: LoweringScop
     a universal TileLang API -- this handler only recognizes the fixed-4-row
     ``T.tma_gather4`` / ``T.tma_scatter4`` surface.
     """
-    from tilelang.tileir.errors import TileIRLoweringError
-
     op_name = "tma_gather4" if is_gather else "tma_scatter4"
 
     if len(stmt.regions) != 2:
@@ -332,11 +334,9 @@ def _lower_copy(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, builder: 
     # buffer size (e.g. kv_ctx=128 instead of block_N=64).
     # Cap the inflated non-singleton dims in tile_shape to match the dst shape.
     if dst_val.type.space != MemSpace.GLOBAL:
-        from tilelang.tileir.emission_utils import _squeeze_shape as _sq
-        import functools
-        import operator
+        from tilelang.tileir.emission_utils import _squeeze_shape
 
-        squeezed_src = _sq(list(tile_shape))
+        squeezed_src = _squeeze_shape(list(tile_shape))
         dst_declared = list(dst_val.type.shape)
         src_elems = functools.reduce(operator.mul, squeezed_src, 1) if squeezed_src else 1
         dst_elems = functools.reduce(operator.mul, dst_declared, 1) if dst_declared else 1
@@ -379,8 +379,6 @@ def _lower_copy(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, builder: 
             latency_int = None
         if latency_int is not None:
             if latency_int < 1 or latency_int > 10:
-                from tilelang.tileir.errors import TileIRLoweringError
-
                 raise TileIRLoweringError(f"TileIR backend requires copy `latency` in [1, 10]; got {latency_int}.")
             copy_latency = latency_int
     # disable_tma annotation → allow_tma=False.
@@ -462,8 +460,6 @@ def _lower_transpose(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, buil
     raise ``TileIRLoweringError``, matching ``_lower_gather4_scatter4``'s
     style.
     """
-    from tilelang.tileir.errors import TileIRLoweringError
-
     if len(stmt.regions) < 2:
         raise TileIRLoweringError(f"sem_to_ir: transpose requires 2 regions (src, dst); got {len(stmt.regions)}.")
     src_region = stmt.regions[0]
@@ -513,16 +509,7 @@ def _lower_fill(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, builder: 
     builder.create(op)
 
 
-# SCOPED tcgen05 block-scaled GEMM (T.tcgen05_gemm_blockscaled) scale dtype
-# gate.  SFA/SFB (the per-block scale factors) must be e8m0/e4m3 or a
-# uint8/int8 bit-pattern stand-in (torch has no native e8m0 dtype) that
-# GemmScaled.emit_mlir bitcasts to e8m0 at emit time.  Real tcgen05 hardware
-# usage packs 4 scale bytes per uint32 TMEM word; reverse-engineering that
-# packing is out of scope for this backend, so this handler only accepts the
-# plain per-element scale layout the 22-arg ``tl.tileop.gemm`` blockscaled
-# call carries (SFA/SFB regions at call args 19/20, k_start at arg 21 -- see
-# ``semantic.py``'s ``tl.tileop.gemm`` branch): any dtype outside this set
-# (uint32 included) is rejected loudly here rather than silently mis-lowered.
+# Scale dtypes accepted by the plain-buffer block-scaled MMA path.
 _BLOCKSCALED_SCALE_DTYPES = frozenset(
     {
         "float8_e8m0fnu",
@@ -535,40 +522,11 @@ _BLOCKSCALED_SCALE_DTYPES = frozenset(
 
 
 def _lower_gemm_scaled(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, builder: IRBuilder) -> None:
-    """Lower a SCOPED ``T.tcgen05_gemm_blockscaled`` call (5-region
-    ``tl.tileop.gemm``: A,B,C,SFA,SFB, detected via the
-    ``sf_a_granularity_k``/``sf_b_granularity_k`` annotations) to ``GemmScaled``.
+    """Lower the plain-buffer subset of ``T.tcgen05_gemm_blockscaled``.
 
-    This backend recognizes only the subset of the real tcgen05 blockscaled
-    API that maps directly onto ``cuda_tile.mmaf_scaled`` with plain
-    shared-memory scale buffers; anything outside that subset is rejected
-    loudly (``TileIRLoweringNotImplementedError``) rather than silently
-    mis-lowered:
-
-    - ``k_start`` must be statically 0 (a single whole-K MMA).  Real
-      hardware usage K-splits with ``k_start = k * block_K`` inside a loop
-      and packs scale factors into TMEM as uint32 words — recognizing that
-      form would require reverse-engineering the tcgen05 SF packing, which
-      is out of scope here.
-    - ``use_2cta`` is rejected: the true 2CTA lowering is a distinct
-      hardware path this backend does not implement.
-    - SFA/SFB dtypes must be in ``_BLOCKSCALED_SCALE_DTYPES``, never the
-      packed-uint32 TMEM layout the real examples use.
-    - SFA/SFB shapes must match ``(M, K // sf_a_granularity_k)`` /
-      ``(K // sf_b_granularity_k, N)``, and K must be evenly divisible by
-      both granularities.
-
-    ``mbar`` (call arg 16) and ``wg_wait`` are accepted by the frontend but
-    IGNORED here: this backend schedules synchronization itself at compile
-    time, unlike the CUDA backend's explicit-async tcgen05 path.
-
-    Unlike the plain-gemm buffer-lookup path in ``_lower_gemm_common``, a
-    missing buffer here is NOT warn-skipped: silently dropping a scale
-    buffer would silently degrade the MMA to an unscaled (numerically wrong)
-    computation, which is worse than failing loudly.
+    The supported form uses a single whole-K MMA, one CTA, unpacked scale
+    buffers, and shapes matching the declared scale granularities.
     """
-    from tilelang.tileir.errors import TileIRLoweringError, TileIRLoweringNotImplementedError
-
     try:
         a_val = scope.lookup_buffer(stmt.regions[0].buffer)
         b_val = scope.lookup_buffer(stmt.regions[1].buffer)
@@ -692,7 +650,7 @@ def _lower_gemm_common(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, bu
     clear = _parse_bool(attrs.get("clear_accum", "0"))
 
     # Detect unsigned-ness from the ORIGINAL SemanticBuffer.dtype string
-    # stored in the scope BEFORE alias collapse (lookup_dtype("uint8") → int8,
+    # stored in the scope before alias collapse (lookup_dtype("uint8") → int8,
     # so a_val.type.dtype.name would always be "int8" for uint8 inputs — wrong).
     lhs_raw = scope.lookup_raw_dtype(stmt.regions[0].buffer)
     rhs_raw = scope.lookup_raw_dtype(stmt.regions[1].buffer)
@@ -786,8 +744,6 @@ def _lower_cummax(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, builder
     lowering-pipeline bug, not a recoverable condition worth silently
     degrading).
     """
-    from tilelang.tileir.errors import TileIRLoweringError
-
     if len(stmt.regions) < 2:
         raise TileIRLoweringError(f"sem_to_ir: cummax requires 2 regions (src, dst); got {len(stmt.regions)}.")
     try:
@@ -863,8 +819,6 @@ def _lower_device_assert(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, 
     The SemanticStmt keeps call arguments as expression payloads rather than
     retaining the original TIR Call node.
     """
-    from tvm import tirx as _tir
-
     cond_val = None
     message = "device_assert"
     if stmt.call_args:
@@ -876,7 +830,7 @@ def _lower_device_assert(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, 
             cond_val = None
         if len(stmt.call_args) >= 2:
             arg1 = stmt.call_args[1]
-            if isinstance(arg1, _tir.StringImm):
+            if isinstance(arg1, _tirx.StringImm):
                 message = str(arg1.value)
     if cond_val is None:
         raise _UnsupportedTileIRNode(
@@ -901,9 +855,7 @@ def _extract_access_ptr_buffer_name(tir_arg: Any) -> str | None:
     Returns the buffer name string, or None if the arg does not match the
     expected access_ptr structure.
     """
-    from tvm import tirx as _tir
-
-    if not isinstance(tir_arg, _tir.Call):
+    if not isinstance(tir_arg, _tirx.Call):
         return None
     op_str = str(getattr(tir_arg.op, "name", ""))
     if "access_ptr" not in op_str:
@@ -911,7 +863,7 @@ def _extract_access_ptr_buffer_name(tir_arg: Any) -> str | None:
     if not tir_arg.args:
         return None
     inner = tir_arg.args[0]
-    if isinstance(inner, _tir.BufferLoad):
+    if isinstance(inner, _tirx.BufferLoad):
         return inner.buffer.name
     return None
 
@@ -935,25 +887,20 @@ def _lower_tile_op(stmt: SemanticStmt, scope: LoweringScope, builder: IRBuilder)
 def _extract_region_buffer_name(tir_arg: Any) -> str | None:
     """Extract the buffer name from a region/access_ptr/BufferLoad TIR arg.
 
-    Handles four patterns:
-    1. ``tl.tileop.region(BufferLoad(buf, ...), ...)`` — tile region wrapper
-    2. ``tl.access_ptr(BufferLoad(buf, ...), ...)`` — access-ptr wrapper
-    3. A direct ``BufferLoad(buf, ...)`` node
-    4. Any other ``Call`` whose first arg is a ``BufferLoad``
+    Handles a direct ``BufferLoad`` or one wrapped by ``tl.tileop.region``,
+    ``tl.access_ptr``, or another call whose first argument is the load.
 
     Returns the buffer name string, or None if extraction fails.
     """
-    from tvm import tirx as _tir
-
     # Direct BufferLoad (e.g. val[0] as-is)
-    if isinstance(tir_arg, _tir.BufferLoad):
+    if isinstance(tir_arg, _tirx.BufferLoad):
         return tir_arg.buffer.name
-    if not isinstance(tir_arg, _tir.Call):
+    if not isinstance(tir_arg, _tirx.Call):
         return None
     if not tir_arg.args:
         return None
     inner = tir_arg.args[0]
-    if isinstance(inner, _tir.BufferLoad):
+    if isinstance(inner, _tirx.BufferLoad):
         return inner.buffer.name
     return None
 
@@ -961,9 +908,7 @@ def _extract_region_buffer_name(tir_arg: Any) -> str | None:
 def _extract_static_int(tir_expr: Any) -> int | None:
     """Extract an integer constant from a TIR expression; None if non-static."""
     try:
-        from tvm import tirx as _tir5
-
-        if isinstance(tir_expr, _tir5.IntImm):
+        if isinstance(tir_expr, _tirx.IntImm):
             return int(tir_expr)
     except Exception:
         pass

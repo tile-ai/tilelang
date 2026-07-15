@@ -1,52 +1,4 @@
-"""TileIR → CUDA Tile IR MLIR emitter.
-
-Provides:
-
-    EmitContext
-        Bound CUDA Tile IR builder handles (``ct``, ``ct_gen``, ``ir``, ``loc``)
-        plus a ``value_map`` that tracks the ``Value → mlir.Value`` correspondence.
-        Exposes ``.lookup(v)``, ``.bind(v, mlir_v)``, and ``.token_for(op)``.
-        Also holds:
-          - ``_buffer_map`` (``Value → _BufferInfo``): ptr, view, shape_tiles,
-            stride_tiles materialised from GLOBAL buffer entry args.
-          - ``_token_map`` (``Value → mlir.Token``): per-buffer token that gets
-            updated after each load/store so chained ops can sequence.
-
-    emit_module(root, *, kernel_name, entry_args, return_ctx=False)
-        Wraps the MLIR context lifecycle (mirrors ``lowering/base.py:82-103``),
-        creates the ``cuda_tile.module`` and an ``entry`` function whose
-        arguments come from ``entry_args``, binds each argument into the
-        ``value_map`` (keyed by the corresponding ``root.params`` Value),
-        then walks ``root.ops`` calling ``op.emit_mlir(ctx)`` and binding
-        any returned mlir values to ``op.results``.
-
-Design notes
-------------
-* Entry-arg correspondence: ``root.params[i]`` ↔ ``entry_args[i]``.  The
-  caller must ensure ``len(root.params) == len(entry_args)``.  The lowering
-  builds the root Block via ``IRBuilder`` and passes matching ``entry_args``;
-  the pairing is enforced by construction there.
-
-* Buffer entry args: a ``TileType`` with ``MemSpace.GLOBAL`` triggers
-  buffer-arg flattening: instead of one shaped tile arg the entry emits
-  ``ptr_tile<>`` + N×``i32_tile<>`` (shapes) + N×``i32_tile<>`` (strides).
-  The resulting MLIR values are collected into a ``_BufferInfo`` stored in
-  ``ctx._buffer_map[param_value]`` for use by Load/Store/Copy/Fill emitters.
-  A ``TensorView`` is also materialised via ``ct.make_tensor_view`` so that
-  partition-view-based TKO loads are the default path.
-
-* Token seam: ``ctx._token_map[buf_val]`` holds the latest MLIR token for a
-  buffer Value.  Each load/store op reads the current token (via
-  ``ctx._get_token(buf_val)``), passes it as ``input_token``, and records the
-  result token back (via ``ctx._set_token(buf_val, tok)``).  This is the
-  conservative per-buffer chain used when ``token_plan`` is absent.
-
-* ``token_for(op)`` returns ``_root_token`` for non-buffer ops.
-
-* ``arch`` for the entry function: defaults to ``None`` so that tests run
-  without a real GPU target.  Pass ``arch=`` to ``emit_module`` when
-  assembling for a specific SM.
-"""
+"""Emit typed TileIR blocks as CUDA Tile IR MLIR."""
 
 from __future__ import annotations
 
@@ -57,12 +9,15 @@ from tilelang.tileir.ir.value import Block, Value
 from tilelang.tileir.ir.ops import TileOp
 from tilelang.tileir.emission_utils import (
     _BufferInfo,
-    _mlir_element_type,
-    _mlir_tile_type,
+    _as_tile,
     _buffer_arg_types,
     _materialize_buffer,
+    _mlir_element_type,
+    _mlir_tile_type,
+    _reshape_tile_to,
     _static_contiguous_strides,
 )
+from tilelang.tileir.errors import TileIRLoweringError, TileIRLoweringNotImplementedError
 
 
 __all__ = ["EmitContext", "emit_module"]
@@ -256,8 +211,6 @@ class EmitContext:
         """
         base = self.buffer_aliases.get(buf_val)
         if base is not None:
-            from tilelang.tileir.emission_utils import _as_tile, _reshape_tile_to
-
             base_tile = self.get_tile(base)
             return _reshape_tile_to(self.ct, _as_tile(self, base_tile), list(buf_val.type.shape), self.loc)
         try:
@@ -274,8 +227,6 @@ class EmitContext:
         """
         base = self.buffer_aliases.get(buf_val)
         if base is not None:
-            from tilelang.tileir.emission_utils import _as_tile, _reshape_tile_to
-
             self.set_tile(base, _reshape_tile_to(self.ct, _as_tile(self, mlir_tile), list(base.type.shape), self.loc))
             return
         self._tile_map[buf_val] = mlir_tile
@@ -463,8 +414,6 @@ def emit_module(
                     try:
                         parsed_hints = ct.OptimizationHintsAttr.parse(hints_text, mlir_ctx)
                     except Exception as exc:
-                        from tilelang.tileir.errors import TileIRLoweringError
-
                         raise TileIRLoweringError(
                             f"emit_module: cuda_tile failed to parse the per-arch optimization_hints attribute text `{hints_text}`: {exc}"
                         ) from exc
@@ -502,7 +451,7 @@ def emit_module(
                             n_buf_args = 1 + ndim * 2
                             buf_args = [next(block_arg_iter) for _ in range(n_buf_args)]
                             _materialize_buffer(emit_ctx, param_value, tile_ty, buf_args)
-                            # Note: param_value is NOT bound in value_map; buffer
+                            # param_value is not bound in value_map; buffer
                             # params are accessed via _buffer_map exclusively.
                         else:
                             # Scalar / register tile: consume one block argument.
@@ -516,8 +465,6 @@ def emit_module(
                     for _ph_val, (_buf_val, _dim_idx) in _shape_bindings.items():
                         _binfo = emit_ctx._buffer_map.get(_buf_val)
                         if _binfo is None or _dim_idx >= len(_binfo.shape_tiles):
-                            from tilelang.tileir.errors import TileIRLoweringError
-
                             raise TileIRLoweringError(
                                 f"emit_module: dynamic shape symbol placeholder for buffer "
                                 f"`{getattr(_buf_val, 'name', _buf_val)}` dim {_dim_idx} has no "
@@ -617,8 +564,6 @@ def emit_module(
                             # op only handles GLOBAL buffers).  Re-raise as
                             # TileIRLoweringNotImplementedError so callers that expect a
                             # hard rejection (not a silent miscompile) see the right type.
-                            from tilelang.tileir.errors import TileIRLoweringNotImplementedError
-
                             raise TileIRLoweringNotImplementedError(f"Emit of {type(op).__name__} failed: {_ke}") from _ke
 
                         # Bind returned mlir values to op.results.

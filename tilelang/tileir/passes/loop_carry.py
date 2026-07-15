@@ -11,7 +11,7 @@ iter-args.  A tile must be carried only when it is a true loop-carried value:
     loop region, an MLIR domination error).
 
 Write-first scratch buffers (overwritten fresh each iteration and never read
-after the loop) are NOT carried.  Carrying them is *correct* but pins their
+after the loop) are not carried. Carrying them is correct but pins their
 registers live across the whole loop, crushing occupancy on memory-bound
 kernels (e.g. RMSNorm / softmax persistent loops carrying their staging tiles).
 

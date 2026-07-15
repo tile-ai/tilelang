@@ -12,21 +12,35 @@ from __future__ import annotations
 
 from typing import Any
 
+from tvm import tirx as _tir
+
 from tilelang.tileir.ir.builder import IRBuilder
 from tilelang.tileir.errors import TileIRLoweringError, _UnsupportedTileIRNode
 from tilelang.tileir.ir.types import MemSpace, TileType
 from tilelang.tileir.ir.value import Value
-from tilelang.tileir.ir.ops import AtomicLoad, AtomicRMW, AtomicStore, Elementwise, Store
+from tilelang.tileir.ir.ops import (
+    AtomicLoad,
+    AtomicRMW,
+    AtomicStore,
+    Broadcast,
+    Constant,
+    Elementwise,
+    Loop,
+    Select,
+    Store,
+)
 from tilelang.tileir.semantic import SemanticStmt
 
 from ._base import (
     LoweringScope,
     _binding_var,
+    _make_placeholder,
     _next_power_of_two,
+    _scalar_i32_type,
 )
 from .expr import lower_expr, _lower_attr_expr
 from .tile_level import _lower_tile_level_expr
-from .stmt import lower_stmt
+from .stmt import lower_stmt, _lower_loop_bounds
 
 
 def _is_parallel_for(stmt: SemanticStmt) -> bool:
@@ -40,8 +54,6 @@ def _is_parallel_for(stmt: SemanticStmt) -> bool:
     kind_val = attrs.get("kind")
     if kind_val is None and stmt.loop_kind is not None:
         try:
-            from tvm import tirx as _tir
-
             return stmt.loop_kind == _tir.ForKind.PARALLEL
         except Exception:
             pass
@@ -90,8 +102,6 @@ def _collect_parallel_loop_vars(
             if isinstance(extent_raw, int):
                 extent_int = extent_raw
             else:
-                from tvm import tirx as _tir
-
                 if isinstance(extent_raw, (_tir.IntImm, str)):
                     extent_int = int(extent_raw)
         except (TypeError, ValueError):
@@ -104,17 +114,7 @@ def _collect_parallel_loop_vars(
 
 
 def _lower_parallel_loop(stmt: SemanticStmt, scope: LoweringScope, builder: IRBuilder) -> None:
-    """Lower a T.Parallel for nest as tile-level ops (no Loop emitted).
-
-    Strategy:
-    1. Peel all nested PARALLEL for loops, collecting loop var names.
-    2. Process the body sequentially:
-       - ``let`` stmts: lower the RHS in tile mode and bind to current scope.
-       - ``buffer_store`` stmts: emit a tile-level Store op.
-       - ``seq`` stmts: recurse.
-    3. No Loop ops are created — T.Parallel means the whole tile is operated
-       on at once.
-    """
+    """Lower a ``T.Parallel`` nest as collective tile operations."""
     loop_vars, body, ordered_vars, ordered_extents = _collect_parallel_loop_vars(stmt)
     if body is None:
         return  # empty parallel body
@@ -132,8 +132,8 @@ def _lower_parallel_loop(stmt: SemanticStmt, scope: LoweringScope, builder: IRBu
         # Add loop var names as available in scope (they are tile-range vars;
         # if an expression uses them via scope.lookup, the tile-buffer path above
         # takes precedence so the Var lookup is usually not hit).
-        # We do NOT need to actually bind them to TileIR Values here because
-        # _lower_tile_level_expr intercepts BufferLoad BEFORE reaching Var lookup.
+        # No TileIR binding is needed because _lower_tile_level_expr handles
+        # BufferLoad before variable lookup.
         _lower_parallel_body(
             body,
             loop_vars,
@@ -186,15 +186,13 @@ def _lower_parallel_let(stmt, scope, builder, loop_vars, ordered_vars, ordered_e
             # for ``make_partition_view`` instead of falling back to scalar loads.
             if var_name and ordered_vars is not None and ordered_extents is not None and tir_value is not None:
                 try:
-                    from tvm import tirx as _tir3
-
                     # Single-dimension case: check if tir_value = block_part + loop_var.
-                    if isinstance(tir_value, _tir3.Add) and len(ordered_vars) == 1 and len(ordered_extents) == 1:
+                    if isinstance(tir_value, _tir.Add) and len(ordered_vars) == 1 and len(ordered_extents) == 1:
                         a, b = tir_value.a, tir_value.b
                         ov, oe = ordered_vars[0], ordered_extents[0]
 
                         def _is_loop_var_only(e: Any) -> bool:
-                            return isinstance(e, _tir3.Var) and e.name == ov
+                            return isinstance(e, _tir.Var) and e.name == ov
 
                         if _is_loop_var_only(b) and not _is_loop_var_only(a):
                             block_part = a
@@ -205,20 +203,20 @@ def _lower_parallel_let(stmt, scope, builder, loop_vars, ordered_vars, ordered_e
                         if block_part is not None:
                             # Compute partition TIR = block_part / oe.
                             # Pattern: block_part = Mul(v, IntImm(oe)) → partition = v.
-                            if isinstance(block_part, _tir3.Mul) and isinstance(block_part.b, _tir3.IntImm) and int(block_part.b) == oe:
+                            if isinstance(block_part, _tir.Mul) and isinstance(block_part.b, _tir.IntImm) and int(block_part.b) == oe:
                                 partition_tir = block_part.a
-                            elif isinstance(block_part, _tir3.Mul) and isinstance(block_part.a, _tir3.IntImm) and int(block_part.a) == oe:
+                            elif isinstance(block_part, _tir.Mul) and isinstance(block_part.a, _tir.IntImm) and int(block_part.a) == oe:
                                 partition_tir = block_part.b
-                            elif isinstance(block_part, _tir3.IntImm):
+                            elif isinstance(block_part, _tir.IntImm):
                                 v = int(block_part)
                                 if v % oe == 0:
-                                    partition_tir = _tir3.IntImm("int32", v // oe)
+                                    partition_tir = _tir.IntImm("int32", v // oe)
                                 else:
                                     partition_tir = None
                             else:
                                 # Generic: floordiv(block_part, oe).
                                 try:
-                                    partition_tir = _tir3.floordiv(block_part, _tir3.IntImm("int32", oe))
+                                    partition_tir = _tir.floordiv(block_part, _tir.IntImm("int32", oe))
                                 except (TypeError, ValueError):
                                     partition_tir = None
                             if partition_tir is not None:
@@ -251,8 +249,6 @@ def _lower_parallel_if(stmt, scope, builder, loop_vars, ordered_vars, ordered_ex
     # without an else-branch (the complement is not representable as a clamp).
     if tir_cond is not None and len(stmt.children) == 1 and ordered_vars and ordered_extents:
         try:
-            from tvm import tirx as _tir
-
             if isinstance(tir_cond, _tir.LT) and isinstance(tir_cond.a, _tir.Var) and isinstance(tir_cond.b, _tir.IntImm):
                 _v_name = tir_cond.a.name
                 _k = int(tir_cond.b)
@@ -271,11 +267,9 @@ def _lower_parallel_if(stmt, scope, builder, loop_vars, ordered_vars, ordered_ex
 
     then_mask: Any = mask
     if tir_cond is not None:
-        # The condition becomes a tile-wide boolean mask that predicates every
-        # store in the branch. It MUST be built correctly: a dropped or weakened
-        # mask silently mis-guards the stores (the branch would run under the
-        # wrong predicate), so any failure here propagates rather than degrading
-        # to a weaker mask.
+        # The condition becomes a tile-wide mask for every store in the branch.
+        # A dropped or weakened mask silently mis-guards the stores, so failures
+        # propagate rather than degrading to a weaker mask.
         cond_tile = _lower_tile_level_expr(
             tir_cond,
             scope,
@@ -304,17 +298,16 @@ def _lower_parallel_if(stmt, scope, builder, loop_vars, ordered_vars, ordered_ex
     if stmt.children:
         recurse_body(stmt.children[0], child_mask=then_mask)
     # else-branch: use the negated condition as mask so that REGISTER buffer
-    # stores inside the else branch apply select(NOT cond, else_val, current).
+    # stores inside the else branch apply select(not cond, else_val, current).
     # This implements `if cond: x=a else: x=b` as two sequential masked stores:
     #   then: x = select(cond, a, x_init)
-    #   else: x = select(NOT cond, b, x_after_then) = select(NOT cond, b, select(cond, a, x_init))
+    #   else: x = select(not cond, b, x_after_then)
     # which correctly gives x = select(cond, a, b) when a/b are constants.
     if len(stmt.children) > 1:
         else_mask = mask  # default: use outer mask (e.g. None for top-level if)
         if then_mask is not None:
-            # Build NOT then_mask via Elementwise("not") — the negation of the
-            # condition.  Like the then-mask above, this must succeed for the
-            # else stores to be predicated correctly, so failures propagate.
+            # Negate then_mask with Elementwise("not"). This must succeed for
+            # the else stores to be predicated correctly.
             bool_type = TileType(
                 dtype=then_mask.type.dtype,
                 shape=then_mask.type.shape,
@@ -350,8 +343,6 @@ def _try_lower_ret_atomic_value(
     are garbage, which is fine because every consumer of the result is under
     the same predicate. Returns None when *tir_value* is not a ret-atomic.
     """
-    from tvm import tirx as _tir
-
     if not isinstance(tir_value, _tir.Call):
         return None
     op_name = str(getattr(tir_value.op, "name", ""))
@@ -398,8 +389,6 @@ def _apply_atomic_add_mask(val: Value, mask: Value, scope: LoweringScope, builde
     Adding zero is the exact identity, so masked lanes perform a no-op RMW.
     The value is broadcast to the parallel extents first when scalar-like.
     """
-    from tilelang.tileir.ir.ops import Broadcast, Constant, Select
-
     full_shape = tuple(int(e) for e in eff_extents)
     val_shape = tuple(val.type.shape)
     if val_shape != full_shape:
@@ -429,8 +418,6 @@ def _apply_atomic_add_mask(val: Value, mask: Value, scope: LoweringScope, builde
 def _extract_region_buffer_load(tir_arg):
     """Return the underlying BufferLoad node from a region/access_ptr/BufferLoad
     TIR arg (same patterns as ``_extract_region_buffer_name``), or None."""
-    from tvm import tirx as _tir
-
     if isinstance(tir_arg, _tir.BufferLoad):
         return tir_arg
     if not isinstance(tir_arg, _tir.Call) or not tir_arg.args:
@@ -739,9 +726,6 @@ def _lower_parallel_body(
                 "threadIdx.x region — multi-axis SIMT nests are not supported."
             )
         if _te_var:
-            from tilelang.tileir.ir.ops import Constant
-            from ._base import _scalar_i32_type
-
             _zero_op = builder.create(Constant(value=0, dtype="int32"), result_types=(_scalar_i32_type(),))
             _te_key = _binding_var(stmt)
             scope.bind(_te_key if _te_key is not None else _te_var, _zero_op.results[0])
@@ -783,8 +767,6 @@ def _find_vec_scaled_var(indices, ov_set: set, width: int) -> tuple | None:
     vector width; the tile equivalent expands that var's extent by ``width``
     and drops the scale.  Returns ``(var_name,)`` or None.
     """
-    from tvm import tirx as _tir
-
     found: set[str] = set()
 
     def _scan(e: Any) -> None:
@@ -813,8 +795,6 @@ def _find_vec_scaled_var(indices, ov_set: set, width: int) -> tuple | None:
 def _unscale_vec_index(e: Any, var_name: str, width: int) -> Any:
     """Rewrite ``Mul(var, width)`` → ``var`` throughout an index expression
     (the var's extent is expanded by ``width`` by the caller)."""
-    from tvm import tirx as _tir
-
     if isinstance(e, _tir.Mul):
         a, b = e.a, e.b
         for var, c in ((a, b), (b, a)):
@@ -839,8 +819,6 @@ def _split_affine_parallel_term(expr: Any, ov_set: set) -> tuple | None:
     loop var).  Returns ``None`` for anything else — e.g. scaled
     (``2*loop_var``) or repeated vars, which are not unit-stride affine.
     """
-    from tvm import tirx as _tir
-
     terms: list = []
 
     def _collect(e: Any) -> None:
@@ -897,10 +875,6 @@ def _lower_serial_for_in_parallel(
     loop vars remain tile axes.  The loop induction var is bound as a scalar
     in a fresh scope frame, exactly like the generic serial ``for``.
     """
-    from ._base import _make_placeholder, _scalar_i32_type
-    from .stmt import _lower_loop_bounds
-    from tilelang.tileir.ir.ops import Loop
-
     attrs = dict(stmt.attrs)
     var_name = attrs.get("var", "")
     bind_key = _binding_var(stmt)
@@ -945,8 +919,6 @@ def _classify_store_dims(
         Per-dim partition TIR index: the scalar TIR expr for scalar dims,
         None for parallel dims (will use partition index 0).
     """
-    from tvm import tirx as _tir_cls
-
     ov_set = set(ordered_vars or [])
     ov_list = list(ordered_vars or [])
     oe_list = list(ordered_extents or [])
@@ -957,7 +929,7 @@ def _classify_store_dims(
 
     def _contains_loop_var(expr: Any) -> bool:
         """Return True if expr contains any loop var."""
-        if isinstance(expr, _tir_cls.Var):
+        if isinstance(expr, _tir.Var):
             return expr.name in ov_set
         for child_attr in ("a", "b"):
             child = getattr(expr, child_attr, None)
@@ -1132,7 +1104,7 @@ def _lower_parallel_buffer_store(
     #   dim 2 (i):  parallel → tile_size=512, partition=0
     # Expand let-bound index Vars to their TIR definitions before classifying.
     # A T.Parallel store like ``C[idx]`` with ``idx = bx*threads + i`` arrives
-    # here with store_indices_tir = (Var("idx"),).  ``idx`` is NOT a loop var, so
+    # here with store_indices_tir = (Var("idx"),). ``idx`` is not a loop var, so
     # _classify_store_dims would mis-classify it as a scalar (tile_size=1) and the
     # 128-element value tile would then be reshaped to 1 element.  Expand each
     # non-loop-var index Var via scope.get_scalar_expr_binding so the classifier
@@ -1140,13 +1112,11 @@ def _lower_parallel_buffer_store(
     expanded_indices_tir = store_indices_tir
     if store_indices_tir is not None:
         try:
-            from tvm import tirx as _tir_exp
-
             _ov_set = set(eff_ordered_vars or [])
             expanded = []
             for idx in store_indices_tir:
                 e = idx
-                if isinstance(e, _tir_exp.Var) and e.name not in _ov_set:
+                if isinstance(e, _tir.Var) and e.name not in _ov_set:
                     binding = scope.get_scalar_expr_binding(e)
                     if binding is not None:
                         e = binding
@@ -1250,8 +1220,7 @@ def _compute_view_indices(
     *,
     what: str = "view",
 ) -> tuple[tuple, bool]:
-    """Compute per-dim view indices — like ``_compute_partition_indices`` but
-    it NEVER silently falls back to partition 0.
+    """Compute view indices without silently falling back to partition zero.
 
     Returns ``(indices, elementwise)``:
 
@@ -1270,10 +1239,6 @@ def _compute_view_indices(
     if tir_indices is None:
         return tuple(0 for _ in tile_shape), False
 
-    from tvm import tirx as _tir
-
-    from tilelang.tileir.ir.value import Value as _Value
-
     quotients: list[Any] = []  # int | Value | ("expr", tir) | None (=needs element mode)
     raws: list[Any] = []  # int | Value | tir expr
     elementwise = False
@@ -1283,7 +1248,7 @@ def _compute_view_indices(
             quotients.append(0)
             raws.append(0)
             continue
-        if isinstance(tir_idx, (int, _Value)):
+        if isinstance(tir_idx, (int, Value)):
             # Pre-lowered index (int constant or already a scalar Value).
             raws.append(tir_idx)
             if isinstance(tir_idx, int) and tir_idx % max(extent, 1) == 0:
@@ -1350,7 +1315,7 @@ def _compute_view_indices(
 
     out = []
     for dim, r in enumerate(raws):
-        if isinstance(r, (int, _Value)):
+        if isinstance(r, (int, Value)):
             out.append(r)
         else:
             out.append(_lower_loud(r, dim))
@@ -1383,7 +1348,6 @@ def _prove_region_in_bounds(
     try:
         from tvm import arith as _arith
         from tvm import ir as _ir
-        from tvm import tirx as _tir
 
         analyzer = _arith.Analyzer()
         root = builder.module_block()
@@ -1424,11 +1388,6 @@ def _try_divide_expr(expr: Any, divisor: int) -> Any:
     exact or the expression structure is unrecognised.
     """
     if divisor <= 0:
-        return None
-
-    try:
-        from tvm import tirx as _tir
-    except ImportError:
         return None
 
     if isinstance(expr, _tir.IntImm):

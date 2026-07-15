@@ -5,6 +5,17 @@ from __future__ import annotations
 import dataclasses
 from typing import Any
 
+from tilelang.tileir.emission_utils import (
+    _as_tile,
+    _broadcast_ptr,
+    _build_gather_ptrs,
+    _ensure_token,
+    _make_i32_index_tiles,
+    _make_tile_view,
+    _mlir_element_type,
+    _reshape_tile_to,
+)
+from tilelang.tileir.errors import TileIRLoweringNotImplementedError, _UnsupportedTileIRNode
 from tilelang.tileir.ir.ops._base import (
     Effect,
     TileOp,
@@ -54,8 +65,6 @@ class AtomicRMW(TileOp, opcode="atomic_rmw", effect=Effect.READWRITE):
     @staticmethod
     def _memory_ordering(ct: Any, order: int) -> Any:
         """Map integer memory order to ct.MemoryOrderingSemantics."""
-        from tilelang.tileir.errors import TileIRLoweringNotImplementedError
-
         if order == 0:
             return ct.MemoryOrderingSemantics.RELAXED
         if order == 2:
@@ -80,16 +89,6 @@ class AtomicRMW(TileOp, opcode="atomic_rmw", effect=Effect.READWRITE):
         When ``self.return_prev`` is True, returns the previous-value tile so
         emit_module can bind it to results[0].  Otherwise returns None.
         """
-        from tilelang.tileir.emission_utils import (
-            _ensure_token,
-            _as_tile,
-            _mlir_element_type,
-            _broadcast_ptr,
-            _make_i32_index_tiles,
-            _make_tile_view,
-            _reshape_tile_to,
-        )
-
         ct = ctx.ct
         loc = ctx.loc
 
@@ -116,8 +115,6 @@ class AtomicRMW(TileOp, opcode="atomic_rmw", effect=Effect.READWRITE):
         elif kind == "min":
             mode = ct.AtomicRMWMode.UMIN if dtype_name in _UNSIGNED else ct.AtomicRMWMode.MIN
         else:
-            from tilelang.tileir.errors import _UnsupportedTileIRNode
-
             raise _UnsupportedTileIRNode(f"AtomicRMW.emit_mlir: unsupported kind {kind!r}. Supported: 'add', 'max', 'min'.")
 
         ordering = self._memory_ordering(ct, self.memory_order)
@@ -171,8 +168,6 @@ class AtomicRMW(TileOp, opcode="atomic_rmw", effect=Effect.READWRITE):
 
         # Gather-form dst: per-element pointers + atomic_rmw_tko.
         if self.gather_dim_kinds:
-            from tilelang.tileir.emission_utils import _build_gather_ptrs
-
             # The scatter domain comes from tile_shape (the parallel extents);
             # a scalar val (e.g. the histogram's `+= 1`) broadcasts to it.
             result_shape = list(self.tile_shape) if self.tile_shape else list(val_tile.tile_type.shape)
@@ -210,10 +205,8 @@ class AtomicRMW(TileOp, opcode="atomic_rmw", effect=Effect.READWRITE):
 
         # Try atomic_red_view_tko (RELAXED + dst has TensorView)
         if ordering is ct.MemoryOrderingSemantics.RELAXED and buf_info.view is not None and not self.return_prev:
-            from tilelang.tileir.errors import TileIRLoweringNotImplementedError as _NotImpl
-
             if len(view_tile_shape) != buf_info.ndim:
-                raise _NotImpl(
+                raise TileIRLoweringNotImplementedError(
                     f"AtomicRMW: tile shape rank {len(view_tile_shape)} does not match dst "
                     f"buffer rank {buf_info.ndim} for `{self.dst.name}`; cannot build a partition view."
                 )
@@ -238,9 +231,7 @@ class AtomicRMW(TileOp, opcode="atomic_rmw", effect=Effect.READWRITE):
             # The pointer fallback broadcasts the buffer BASE pointer over the
             # tile — it cannot address a non-zero partition. Refuse loudly
             # rather than atomically updating the wrong elements.
-            from tilelang.tileir.errors import TileIRLoweringNotImplementedError as _NotImpl
-
-            raise _NotImpl(
+            raise TileIRLoweringNotImplementedError(
                 f"AtomicRMW on `{self.dst.name}`: non-zero partition indices require the "
                 "TensorView path (RELAXED ordering, no return value); "
                 f"got memory_order={self.memory_order}, return_prev={self.return_prev}, "
@@ -278,13 +269,6 @@ class AtomicLoad(TileOp, opcode="atomic_load", effect=Effect.READ):
 
     def emit_mlir(self, ctx: Any) -> Any:
         """Lower AtomicLoad to MLIR: ct.load_ptr_tko with memory ordering."""
-        from tilelang.tileir.emission_utils import (
-            _ensure_token,
-            _mlir_element_type,
-            _broadcast_ptr,
-        )
-        from tilelang.tileir.errors import TileIRLoweringNotImplementedError
-
         ct = ctx.ct
         loc = ctx.loc
 
@@ -331,13 +315,6 @@ class AtomicStore(TileOp, opcode="atomic_store", effect=Effect.WRITE):
 
     def emit_mlir(self, ctx: Any) -> None:
         """Lower AtomicStore to MLIR: ct.store_ptr_tko with memory ordering."""
-        from tilelang.tileir.emission_utils import (
-            _ensure_token,
-            _as_tile,
-            _broadcast_ptr,
-        )
-        from tilelang.tileir.errors import TileIRLoweringNotImplementedError
-
         ct = ctx.ct
         loc = ctx.loc
 
@@ -349,8 +326,6 @@ class AtomicStore(TileOp, opcode="atomic_store", effect=Effect.WRITE):
             val_info = ctx._buffer_map[self.val]
             tile_shape = list(getattr(self.dst.type, "shape", ()))
             ptr_v = _broadcast_ptr(ct, val_info.ptr, tile_shape, loc=loc)
-            from tilelang.tileir.emission_utils import _mlir_element_type
-
             elem_ty = _mlir_element_type(ctx, self.val.type)
             tile_type = ct.TileType.get(tile_shape, elem_ty)
             load_tok = _ensure_token(ctx, self.val)
@@ -410,25 +385,7 @@ class AtomicCAS(TileOp, opcode="atomic_cas", effect=Effect.READWRITE):
     desired: Any = operand()
 
     def emit_mlir(self, ctx: Any) -> Any:
-        """Lower AtomicCAS to MLIR: ct.atomic_cas_tko.
-
-        Steps
-        -----
-        1. Resolve ``expected`` and ``desired`` operand tiles from value_map.
-        2. Look up the dst GLOBAL buffer via ctx.get_buffer_info.
-        3. Build a broadcast pointer from buf_info.ptr over the tile shape.
-        4. Call ct.atomic_cas_tko with RELAXED ordering and DEVICE scope.
-        5. Update the dst token via ctx._set_token.
-
-        Returns the old-value tile so emit_module can bind it to results[0]
-        (matches the CAS return-the-previous-value semantics).
-        """
-        from tilelang.tileir.emission_utils import (
-            _ensure_token,
-            _as_tile,
-            _broadcast_ptr,
-        )
-
+        """Emit compare-and-swap and return the previous value tile."""
         ct = ctx.ct
         loc = ctx.loc
 

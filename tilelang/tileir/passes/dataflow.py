@@ -1,56 +1,9 @@
-"""TileIR fixpoint dataflow analysis.
+"""Fixpoint alias and divisibility analysis for TileIR SSA values.
 
-Computes, per SSA ``Value.id``, a ``DataPredicate`` that tracks:
-
-  - ``alias_set``             — bitmask indicating which memory alias groups
-                                the value touches.
-  - ``div_by``                — address divisibility (div_by=16 means the
-                                address is guaranteed to be divisible by 16).
-  - ``may_alias_internally``  — conservative flag: True if the value may alias
-                                itself across different access paths.
-
-The analysis is **flow-insensitive** but iterative to a fixpoint: it scans
-the entire Block (incl. nested control-flow) repeatedly until no predicate
-changes (dirty flag goes False).  This handles loop-carried aliases.
-
-Key divergence from cuTile
---------------------------
-cuTile keys predicates by ``Var.name`` (a string); our IR uses identity-based
-``Value`` objects with integer ``Value.id`` keys.  The ``_Tracker`` here is
-keyed by ``int`` (``Value.id``).
-
-Alias seeding
--------------
-Buffer ``Value``s declared in ``Block.params`` (the kernel entry parameters)
-are seeded with distinct, non-overlapping alias-set bits — one fresh bit per
-buffer param.  Each buffer is also seeded with the ``div_by`` constraint
-supplied via ``param_constraints`` (a dict mapping ``Value.id`` → ``{"div_by":
-int}``).  Non-buffer params (or any param not in ``param_constraints``) are
-treated as ALIAS_UNIVERSE / div_by=1 (conservative).
-
-Divisibility propagation (mirrors cuTile ``PointerOffset``)
------------------------------------------------------------
-For ``_Offset``-style ops (any op where ``buffer_operands()`` returns exactly
-the base and plain ``operands()`` returns the offset), the result's div_by is
-``gcd(base.div_by, offset.div_by)``.  The alias set flows from the base
-unchanged — the offset does not introduce new aliases.
-
-For ``_Assign``-style ops (buffer_operands() → a single source, no integer
-arithmetic), the result inherits the source's full predicate.
-
-For all other ops, the result is set to ``ALWAYS_TRUE_PREDICATE``
-(alias_set=ALIAS_UNIVERSE, div_by=1, may_alias_internally=True) —
-conservative but safe.
-
-Fixpoint termination
---------------------
-Predicates are updated via ``_Tracker.update`` which merges (OR alias_set,
-GCD div_by, OR may_alias_internally).  Because alias_set only grows
-(OR only sets bits) and div_by can only decrease (GCD ≤ min), the lattice
-is finite and bounded: alias_set has at most N bits (N = number of params)
-and div_by ≥ 1 (gcd(a,b) ≥ 1 for all positive a,b, except when one is 0
-which is treated as the identity — gcd(a,0)=a).  Therefore the iteration
-must terminate in at most N+log2(max_div_by) passes.
+Each ``DataPredicate`` tracks an alias-set bitmask, address divisibility, and
+possible internal aliasing. Entry buffers receive distinct alias bits; unknown
+values use the conservative universe predicate. Monotonic union and gcd merges
+guarantee convergence.
 """
 
 from __future__ import annotations
@@ -61,6 +14,7 @@ from dataclasses import dataclass
 from math import gcd
 from typing import Any
 
+from tilelang.tileir.ir.ops import IfElse, Loop
 from tilelang.tileir.ir.value import Block, Value
 
 __all__ = [
@@ -217,31 +171,7 @@ def _analyze_block(
     tracker: _Tracker,
     innermost_loop: Any | None,
 ) -> None:
-    """Scan all ops in *block*, propagating predicates through each op.
-
-    Recursion handles nested control-flow (``Loop``, ``IfElse``).
-
-    Alias propagation rules (mirroring cuTile's ``_analyze_aliases_in_block``):
-
-    1. ``_Assign``-like (single buffer_operand, no integer offset): result
-       inherits the buffer operand's predicate in full.
-    2. ``_Offset``-like (one buffer_operand base + one plain operand offset):
-       result inherits alias_set from base; div_by = gcd(base.div_by, offset.div_by).
-    3. ``Loop``: each init-value flows into the corresponding body-block param
-       (loop-carried data).  Then recurse into the body Block.
-    4. ``IfElse``: recurse into both then- and else-blocks.
-    5. Any other op with results: results are set to ALWAYS_TRUE (conservative).
-
-    Note on our IR vs. cuTile
-    -------------------------
-    In our IR an op carries:
-      - ``buffer_operands()`` — memory reference Values.
-      - ``operands()``        — plain SSA Values (non-memory).
-      - ``results``           — a tuple of SSA result Values.
-      - ``nested_blocks()``   — nested Block bodies (for Loop/IfElse).
-    """
-    from tilelang.tileir.ir.ops import Loop, IfElse
-
+    """Propagate predicates through one block and nested control flow."""
     for op in block.ops:
         buf_ops = list(op.buffer_operands()) if hasattr(op, "buffer_operands") else []
         # op.operands() is the inherited TileOp method on every op (the
@@ -312,8 +242,7 @@ def _analyze_block(
                 tracker.update(r.id, result_pred)
 
         else:
-            # Conservative: all results get ALWAYS_TRUE.
-            # But first recurse into any nested blocks that aren't Loop/IfElse.
+            # Recurse through other nested blocks and conservatively mark results.
             for nb in nested:
                 if nb is not None:
                     _analyze_block(nb, tracker, innermost_loop)
@@ -338,7 +267,7 @@ def dataflow_analysis(
     param_constraints :
         Optional mapping ``Value.id → {"div_by": int}``.  Buffer params listed
         here are seeded with the given divisibility and a fresh alias-set bit.
-        Params NOT listed here get ALWAYS_TRUE (conservative).
+        Unlisted params receive the conservative universe predicate.
 
     Returns
     -------

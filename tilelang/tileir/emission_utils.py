@@ -1,17 +1,7 @@
-"""Shared MLIR emit helpers for TileIR data-movement ops.
+"""Shared MLIR emission helpers for TileIR operations.
 
-This module holds the helper functions and the ``_BufferInfo`` dataclass that
-are shared between:
-  - ``tilelang.tileir.ir.ops`` (where the concrete op ``emit_mlir`` methods live)
-  - ``tilelang.tileir.lowering.mlir_emit`` (where ``EmitContext`` and
-    ``emit_module`` live)
-
-Import discipline
------------------
-This module MUST NOT import ``tilelang.tileir.ir.ops`` — the ops import these
-utilities, so any reverse import would create a circular dependency.
-All helper functions operate on ``EmitContext`` and MLIR objects passed in by
-the caller; they never touch the op classes directly.
+Operation modules depend on these helpers, so this module works with
+duck-typed operations and does not import ``tilelang.tileir.ir.ops``.
 """
 
 from __future__ import annotations
@@ -19,6 +9,7 @@ from __future__ import annotations
 import dataclasses
 from typing import Any
 
+from tilelang.tileir.errors import TileIRLoweringError, TileIRLoweringNotImplementedError
 
 __all__ = [
     "_BufferInfo",
@@ -211,8 +202,6 @@ def _build_gather_ptrs(ctx: Any, buf_val: Any, result_shape: list, dim_kinds: tu
     ``GatherLoad`` for the spec.  Strides come from the materialized
     ``_BufferInfo.stride_tiles`` (static constants or runtime ABI args).
     """
-    from tilelang.tileir.errors import TileIRLoweringNotImplementedError
-
     ct = ctx.ct
     buf_info = ctx.get_buffer_info(buf_val)
     ndim_res = len(result_shape)
@@ -271,8 +260,6 @@ def _make_tile_view(ct: Any, tensor_view: Any, tile_shape: list, *, elem_view: b
     divisible by the tile extent, e.g. varlen attention's
     ``cu_seqlens[b] + bx*block_M`` row bases.
     """
-    from tilelang.tileir.errors import TileIRLoweringNotImplementedError
-
     try:
         static_shape = [int(dim) for dim in tile_shape]
     except (TypeError, ValueError) as exc:
@@ -377,14 +364,7 @@ def _elements_per_16_bytes(dtype_name: str) -> int:
 
 
 def _all_static(shape: tuple) -> bool:
-    """Return True iff every dimension in *shape* is a positive Python int.
-
-    ``_sem_buffer_to_tile_type`` uses ``-1`` as a sentinel for dynamic
-    (non-integer) dimensions in GLOBAL buffers so that the full buffer rank
-    is preserved in the ``TileType``.  A dimension of ``-1`` is NOT static;
-    this check must require ``d > 0`` to correctly identify such buffers as
-    dynamic and route them to the dynamic path in ``_materialize_buffer``.
-    """
+    """Return whether every dimension is a positive Python integer."""
     return all(isinstance(d, int) and d > 0 for d in shape)
 
 
@@ -394,18 +374,15 @@ def _all_static(shape: tuple) -> bool:
 def _buffer_arg_types(ctx: Any, tile_ty: Any) -> list:
     """Return the flat MLIR arg-type list for one GLOBAL buffer.
 
-    Always emits the full ABI layout that the cuTile runtime expects:
+    Always emits the full ABI layout expected by the native dispatcher:
       - 1 scalar tile holding the base pointer  (``tile<ptr<dtype>>``)
       - N scalar i32 tiles for the N shape dims (``tile<i32>``)
       - N scalar i32 tiles for the N stride dims (``tile<i32>``)
 
     For a 2-D fp16 buffer this yields 5 arg types.
 
-    Note: even for buffers with static shapes (all dims are Python ints),
-    the ABI must include the shape/stride args so that the cuTile runtime
-    dispatcher (which always passes ptr+shape+stride at launch time) stays
-    compatible.  ``_materialize_buffer`` then IGNORES the runtime shape/stride
-    values for static buffers and replaces them with MLIR constants + hints.
+    Static buffers retain shape and stride arguments for ABI compatibility;
+    ``_materialize_buffer`` replaces those runtime values with constants.
     """
     ct = ctx.ct
     ir = ctx.ir
@@ -431,24 +408,9 @@ def _materialize_buffer(
     ``block_args`` must always contain 1 + 2*N MLIR block arguments
     (ptr + N shape + N stride), matching the cuTile runtime ABI.
 
-    **Static shape path** (``_all_static(tile_ty.shape)`` is True):
-        The ptr arg is consumed as normal.  The N shape and N stride block
-        args are also consumed (to keep ABI alignment) but their runtime
-        values are DISCARDED — instead, shape and contiguous strides are
-        emitted as MLIR CONSTANT i32 scalar tiles.
-        ``assume_div_by`` is applied to stride constants with divisor
-        ``min(_power_of_two_divisor(stride, limit=16), elements_per_16_bytes)``,
-        which lets the tileiras assembler use TMA / vectorised LDGSTS (cp.async).
-
-    **Dynamic shape path** (fallback, any non-static dim):
-        Applies ``assume_div_by(16)`` to the pointer and
-        ``assume_bounded(0, None)`` to shape/stride runtime args.
-
-    Both paths build a ``_BufferInfo`` stored in ``ctx._buffer_map[param_val]``
-    and (for supported dtypes) a ``TensorView`` via ``ct.make_tensor_view``.
-
-    Note: this does NOT bind param_val into ``ctx.value_map`` — GLOBAL
-    buffer params are accessed exclusively through ``_buffer_map``.
+    Static shapes and strides become constants with divisibility hints.
+    Dynamic values retain their runtime arguments and boundedness hints. Global
+    buffers are registered in ``ctx._buffer_map`` rather than ``ctx.value_map``.
     """
     ct = ctx.ct
     ir = ctx.ir
@@ -616,8 +578,6 @@ def _ensure_token(ctx: Any, buf_val: Any) -> Any:
     current_op = getattr(ctx, "current_op", None)
 
     if plan is not None and current_op is not None:
-        # Plan-based path
-        # Get the op's dep set from the plan.
         deps = plan.deps_for(current_op)
         dep_tokens = []
         op_token_map = getattr(ctx, "_op_token", {})
@@ -627,30 +587,13 @@ def _ensure_token(ctx: Any, buf_val: Any) -> Any:
                 dep_tokens.append(dep_tok)
 
         if not dep_tokens:
-            # deps=[] means "no ordering constraint" — use the GLOBAL root token.
-            # IMPORTANT: do NOT consult ctx._get_token(buf_val) here!
-            # That would reuse the token recorded by a PREVIOUS op on the same
-            # buffer (the conservative per-buffer chain), which is exactly what
-            # we are trying to avoid.  All unconstrained ops share ONE global
-            # root token so TKO loads are free to overlap AND the MLIR names are
-            # the same (both load_view_tko calls use the same token SSA value).
-            #
-            # Pipelined loop token threading:
-            # When ctx._pipelined_loop_token_entry_arg is set (we are inside a
-            # pipelined ForOp), return the loop-entry iter-arg token instead of
-            # the global root token.  Using the ENTRY arg lets all loads within
-            # the same iteration start from the same loop-external token so they
-            # can overlap within the iteration.  The loop_continue yields the
-            # LAST out-token (_pipelined_loop_token_exit_arg) for cross-iteration
-            # ordering.
+            # Unconstrained operations share a block-local root token. Inside a
+            # pipelined loop, the loop-entry token preserves cross-iteration order
+            # while allowing operations within an iteration to overlap.
             pipelined_tok_arg = getattr(ctx, "_pipelined_loop_token_entry_arg", None)
             if pipelined_tok_arg is not None:
                 return pipelined_tok_arg
 
-            # Share ONE global root token across all unconstrained ops in the
-            # same block, so independent loads use the same SSA value (a fresh
-            # make_token per op would give independent loads different token
-            # names in the MLIR output).
             global_root_tok = getattr(ctx, "_global_root_token", None)
             if global_root_tok is None:
                 global_root_tok = ctx.ct.make_token(loc=ctx.loc)
@@ -659,19 +602,11 @@ def _ensure_token(ctx: Any, buf_val: Any) -> Any:
         elif len(dep_tokens) == 1:
             return dep_tokens[0]
         else:
-            # Join multiple dep tokens into one via cuda_tile.join_tokens.
-            # join_tokens takes *tokens (varargs), not a list.
             ct = ctx.ct
             try:
                 joined = ct.join_tokens(*dep_tokens, loc=ctx.loc)
             except (AttributeError, TypeError) as exc:
-                # Do NOT silently use dep_tokens[-1] — that would drop the
-                # other dependency tokens (e.g. the RAW edge from t0 vanishes),
-                # producing a kernel with a missing memory-ordering dependency.
-                # join_tokens IS present on the supported toolchain, so this is
-                # an unreachable-but-correct hard-fail.
-                from tilelang.tileir.errors import TileIRLoweringNotImplementedError
-
+                # Falling back to one dependency would drop ordering edges.
                 raise TileIRLoweringNotImplementedError(
                     f"join_tokens unavailable on this toolchain; cannot serialize "
                     f"{len(dep_tokens)} dependency tokens without dropping edges"
@@ -695,8 +630,7 @@ def _make_i32_index_tiles(ctx: Any, indices: tuple) -> list:
     Each element in *indices* may be:
     - a plain ``int`` → emit a ``ct.constant(n, tile_type=tile<i32>)``
     - a TileIR ``Value`` object → look up in ``ctx.value_map`` and return
-      the MLIR value (already a ``tile<i32>`` from the expression lowering
-      path in ``sem_to_ir.py``).
+      the MLIR value produced by semantic-to-TileIR expression lowering.
 
     This dual handling is needed for runtime partition indices (e.g.
     ``bx``, ``k``) computed from loop/block variables.
@@ -705,12 +639,11 @@ def _make_i32_index_tiles(ctx: Any, indices: tuple) -> list:
     ir = ctx.ir
     i32_tile_type = ct.TileType.get([], ir.IntegerType.get_signless(32))
     result = []
-    # Lazy import to avoid circular dependency (emit_helpers ← ops ← ir.value).
-    # The import is deferred until _make_i32_index_tiles is actually called.
-    from tilelang.tileir.ir.value import Value as _TileIRValue
+    # Keep the import local because TileIR operation modules import this module.
+    from tilelang.tileir.ir.value import Value as TileIRValue
 
     for idx in indices:
-        if isinstance(idx, _TileIRValue):
+        if isinstance(idx, TileIRValue):
             # Runtime index: look up the MLIR value and wrap as tile.
             mlir_val = ctx.lookup(idx)
             tile_val = _as_tile(ctx, mlir_val)
@@ -769,16 +702,14 @@ def _walk_block(block: Any, ctx: Any) -> None:
     - single object     → bind to ``op.results[0]``.
     - sequence          → bind ``op.results[i] ↔ mlir_result[i]``.
 
-    This module must NOT import ``ir.ops`` (circular dep); it relies on the
+    This module does not import ``ir.ops``; it relies on the
     duck-typed ``op.emit_mlir(ctx)`` protocol and the ``results`` attribute
     that every TileOp carries.
 
     The global root token is reset (and restored) at each block boundary.
     The root token is scoped to the current block so that ops in different blocks
-    (e.g. different serial loop iterations or different if-else branches) use
-    fresh tokens and the CUDA Tile IR optimizer can reason about ordering across
-    blocks.  Ops within the SAME block still share one root token (so two
-    independent loads in a pipelined loop body have the same input token).
+    (e.g. serial loop iterations or if-else branches) use fresh tokens. Operations
+    within one block share a root token so independent loads can overlap.
     """
     # Reset the global root token for this block scope.
     saved_root = getattr(ctx, "_global_root_token", None)
@@ -1098,8 +1029,6 @@ def _align_binary_tiles(ct: Any, lhs: Any, rhs: Any, ir: Any, loc: Any = None) -
 
     If element types differ, cast rhs to lhs dtype (conservative).
     """
-    from tilelang.tileir.errors import TileIRLoweringError
-
     lhs_shape = _tile_shape(lhs)
     rhs_shape = _tile_shape(rhs)
     if lhs_shape != rhs_shape:
@@ -1163,11 +1092,11 @@ def _align_binary_tiles(ct: Any, lhs: Any, rhs: Any, ir: Any, loc: Any = None) -
     return lhs, rhs
 
 
-# _cast_tile — apply appropriate cuTile cast primitive
+# _cast_tile — apply the appropriate CUDA Tile IR cast
 
 
 def _cast_tile(ct: Any, ir: Any, tile: Any, src_dtype: str, tgt_dtype: str, loc: Any = None, src_unsigned: bool = False) -> Any:
-    """Apply the appropriate cuTile cast to convert tile from src_dtype to tgt_dtype.
+    """Convert a tile from ``src_dtype`` to ``tgt_dtype``.
 
     Maps dtype names to MLIR types and picks ftof / itof / ftoi / exti / trunci.
 
@@ -1191,10 +1120,10 @@ def _cast_tile(ct: Any, ir: Any, tile: Any, src_dtype: str, tgt_dtype: str, loc:
     _DTYPE_TO_MLIR_ATTR: dict[str, Any] = {
         # We need the element wrapper (dtype class) for cast ops.
         # These are the cuda_tile element-type class names.
-        # NOTE: cuda_tile has no UInt* wrappers — unsigned integer types share
-        # the same bit-width class as their signed counterparts (Int4/Int8/
-        # Int16/Int32/Int64).  Signedness is carried on the operation itself
-        # (via Signedness.SIGNED / Signedness.UNSIGNED), not on the type wrapper.
+        # cuda_tile has no UInt wrappers, so unsigned integer types share the
+        # same bit-width class as their signed counterparts (Int4/Int8/
+        # Int16/Int32/Int64). Signedness is carried on the operation itself
+        # (via Signedness.SIGNED / Signedness.UNSIGNED), not the type wrapper.
         # uint{N} therefore maps to the same wrapper as int{N}.
         "float16": "Float16",
         "bfloat16": "BFloat16",
@@ -1297,7 +1226,7 @@ def _emit_elementwise(op: Any, ctx: Any) -> Any:
       - 'fma' (3 operands): call ct.fma directly.
 
     All operands are resolved from ctx.value_map, wrapped as ct.Tile,
-    then shape-aligned before calling the relevant cuTile primitive.
+    then shape-aligned before calling the relevant CUDA Tile IR primitive.
     """
     ct = ctx.ct
     ir = ctx.ir
@@ -1365,7 +1294,8 @@ def _emit_elementwise(op: Any, ctx: Any) -> Any:
         signedness = ct.Signedness.UNSIGNED if getattr(op, "unsigned", False) else ct.Signedness.SIGNED
         return fn_lambda(ct, lhs, rhs, loc, signedness)
 
-    raise ValueError(f"Elementwise.emit_mlir: fn={fn!r} with {n} operands — unsupported arity. Expected 1 (unary), 2 (binary), or 3 (fma).")
+    expected = "Expected 1 (unary), 2 (binary), or 3 (fma)."
+    raise ValueError(f"Elementwise.emit_mlir: fn={fn!r} with {n} operands — unsupported arity. {expected}")
 
 
 # _emit_cast — emit_mlir for Cast
@@ -1384,15 +1314,13 @@ def _emit_cast(op: Any, ctx: Any) -> Any:
     tgt_dtype = op.dtype
     if src_dtype == tgt_dtype:
         return src_tile  # identity cast — return as-is
-    # Bit-reinterpret (tir.reinterpret): preserve the bits, do NOT numerically
-    # convert. ct.bitcast requires equal bit width; a width-changing reinterpret
-    # raises rather than silently producing wrong values.
+    # ``tir.reinterpret`` preserves bits; a width-changing bitcast is invalid.
     if getattr(op, "bitcast", False):
         tgt_el_type = _mlir_element_type_from_name(ir, tgt_dtype)
         return ct.bitcast(tgt_el_type, src_tile, loc=ctx.loc)
     # The MLIR element type lost uint signedness (uint{N} -> signless
     # Int{N}), so derive the unsigned-ness from the lowering-time source dtype
-    # NAME (op.src_dtype) and pass it explicitly.  We must NOT replace src_dtype
+    # name (op.src_dtype) and pass it explicitly. Do not replace src_dtype
     # outright — the raw TIR name may be e.g. "custom[tfloat32]" which would
     # break the float/int classification in _cast_tile.
     op_src_dtype = (getattr(op, "src_dtype", "") or "").strip()
@@ -1627,11 +1555,9 @@ def _make_gather_scatter_view(ctx: Any, buf_info: _BufferInfo, tile_shape: tuple
     Returns
     -------
     mlir.ir.Value
-        The raw gsview SSA value (an ``OpResult``, NOT wrapped in a
+        The raw gsview SSA value (an ``OpResult``, not wrapped in a
         ``ct.TileView`` subclass — see above for why).
     """
-    from tilelang.tileir.errors import TileIRLoweringError, TileIRLoweringNotImplementedError
-
     ir = ctx.ir
     ct_gen = ctx.ct_gen
 

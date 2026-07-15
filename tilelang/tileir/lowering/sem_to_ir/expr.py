@@ -115,9 +115,9 @@ def _make_elementwise(fn: str, operands: tuple, expr: Any, builder: IRBuilder, u
 
     ``unsigned`` (uint signedness) is threaded through to
     ``Elementwise.unsigned`` and consulted at emit time for "max"/"min"/
-    comparison fns (see ``Elementwise``'s docstring). Callers derive it from
-    the OPERANDS' TIR dtype -- NOT ``expr.dtype``, which for a comparison is
-    always "bool" regardless of the (possibly unsigned) operand dtype.
+    comparison functions (see ``Elementwise``'s docstring). Callers derive it
+    from the operands' TIR dtype rather than ``expr.dtype``, which is always
+    "bool" for comparisons regardless of the operand dtype.
     """
     # Determine result dtype: comparisons produce bool, others use expr dtype.
     if fn in _CMP_FNS:
@@ -148,15 +148,12 @@ def _lower_buffer_load_scalar(expr: Any, scope: LoweringScope, builder: IRBuilde
     # elements (e.g. B_shared[vi, vj] where vi/vj depend on threadIdx.x).
     # Load.emit_mlir handles this via ct.extract on the in-register tile.
     #
-    # Strategy: if the buffer has indices, lower each index via lower_expr
-    # and emit a Load with tile_shape=() + those indices.  For GLOBAL
-    # buffers, Load.emit_mlir uses the TensorView partition path; for
-    # SHARED/REGISTER tile buffers, it uses ct.extract to gather the scalar.
+    # Indexed global loads use the TensorView partition path. Indexed shared
+    # and register loads use ct.extract to gather the scalar.
     elem_dtype = buf_val.type.dtype
     if expr.indices:
-        # Lower each index expression to a TileIR Value.
-        # If any index fails to lower we MUST NOT fall back to index 0 —
-        # that would silently read the wrong element. Raise instead.
+        # An index that cannot be lowered must fail instead of falling back to
+        # index zero, which would silently read the wrong element.
         lowered_indices = []
         for pos, idx in enumerate(expr.indices):
             try:
@@ -261,7 +258,7 @@ def _lower_call_scalar(expr: Any, scope: LoweringScope, builder: IRBuilder) -> V
         op = builder.create(Constant(value=float("inf"), dtype=inf_dtype), result_types=(inf_ty,))
         return op.results[0]
 
-    # tir.reinterpret → bit-reinterpret (ct.bitcast), NOT a numeric cast.
+    # tir.reinterpret maps to a bit reinterpretation, not a numeric cast.
     if op_name == "tir.reinterpret" and len(expr.args) == 1:
         src_val = lower_expr(expr.args[0], scope, builder)
         src_dtype_str = str(getattr(expr.args[0], "dtype", ""))
@@ -282,7 +279,7 @@ def lower_expr(expr: Any, scope: LoweringScope, builder: IRBuilder) -> Value:
 
     Full recursive expression lowering.  Scalars are represented
     as 0-d (shape=()) TileType Values.  Builds TileIR ops (Constant,
-    Elementwise, Cast, Select, Load) via IRBuilder.create — does NOT call
+    Elementwise, Cast, Select, Load) via IRBuilder.create and does not call
     MLIR directly.
     """
     # IntImm / FloatImm
@@ -310,7 +307,7 @@ def lower_expr(expr: Any, scope: LoweringScope, builder: IRBuilder) -> Value:
         # Replay: a `tirx.Bind` whose value expression referenced a
         # not-yet-bound variable (e.g. `T.Persistent`'s bx/by binds, which
         # reference the enclosing `for w in range(waves)` loop's induction
-        # variable but are placed textually BEFORE it) was deferred by
+        # variable but are placed textually before it) was deferred by
         # `_lower_let` instead of eagerly evaluated. Re-lower its raw
         # expression now, in the CURRENT scope -- by the time `expr.name` is
         # actually referenced, the variable(s) it depends on are bound.

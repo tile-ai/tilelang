@@ -68,7 +68,7 @@ class SemanticKernel:
 class SemanticScalarParam:
     """A non-buffer (scalar) entry parameter of a TileLang PrimFunc.
 
-    These are PrimFunc params that do NOT appear in ``buffer_map`` (e.g. an
+    These are PrimFunc params that do not appear in ``buffer_map`` (e.g. an
     ``int`` or ``float`` scale factor).  They are distinct from
     ``SemanticBuffer`` params (which have a shape / scope).  The ``name``
     comes from the TIR ``Var.name`` and ``dtype`` from ``Var.dtype``.

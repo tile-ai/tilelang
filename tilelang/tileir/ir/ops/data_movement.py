@@ -3,8 +3,32 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
+import operator
 from typing import Any
 
+from tilelang.tileir.emission_utils import (
+    _as_tile,
+    _broadcast_ptr,
+    _build_gather_ptrs,
+    _cast_tile,
+    _dtype_from_mlir_type,
+    _ensure_token,
+    _load_buffer_tile,
+    _make_gather_scatter_view,
+    _make_i32_index_tiles,
+    _make_tile_view,
+    _mlir_element_type,
+    _reshape_tile_to,
+    _squeeze_shape,
+    _store_buffer_tile,
+)
+from tilelang.tileir.errors import (
+    TileIRLoweringError,
+    TileIRLoweringNotImplementedError,
+    _UnsupportedTileIRNode,
+)
+from tilelang.tileir.ir.value import Value
 from tilelang.tileir.ir.ops._base import (
     Effect,
     TileOp,
@@ -48,11 +72,6 @@ def _elem_ptrs_for_tile(ctx: Any, buf_val: Any, load_shape: list, idx_dims: list
     ``elem_view``); ``tile_dims`` the per-dim tile extents. Dims with extent
     > 1 contribute an iota along the corresponding squeezed result axis.
     """
-    from tilelang.tileir.emission_utils import (
-        _build_gather_ptrs,
-        _make_i32_index_tiles,
-    )
-
     ct = ctx.ct
     kinds, vals, axes = [], [], []
     res_axis = 0
@@ -87,12 +106,6 @@ def _merge_subtile_into(
     region extent 1 (a slice-scatter); wider partial spans cannot be placed by
     a broadcast and are rejected loudly.
     """
-    from tilelang.tileir.errors import TileIRLoweringNotImplementedError
-    from tilelang.tileir.emission_utils import (
-        _make_i32_index_tiles,
-        _reshape_tile_to,
-    )
-
     ct = ctx.ct
     buf_shape = list(old_tile.tile_type.shape)
     ndim = len(buf_shape)
@@ -158,12 +171,6 @@ class GatherLoad(TileOp, opcode="gather_load", effect=Effect.READ):
     dim_axes: tuple = attribute(default=())
 
     def emit_mlir(self, ctx: Any) -> Any:
-        from tilelang.tileir.emission_utils import (
-            _build_gather_ptrs,
-            _ensure_token,
-            _mlir_element_type,
-        )
-
         ct = ctx.ct
         loc = ctx.loc
 
@@ -235,18 +242,6 @@ class Copy(TileOp, opcode="copy", effect=Effect.READWRITE):
         Symmetrically, a 2D tile being stored to a GLOBAL 4D buffer must be reshaped
         to the 4D ``tile_shape`` before ``store_view_tko``.
         """
-        from tilelang.tileir.emission_utils import (
-            _mlir_element_type,
-            _ensure_token,
-            _make_i32_index_tiles,
-            _make_tile_view,
-            _as_tile,
-            _cast_tile,
-            _dtype_from_mlir_type,
-            _squeeze_shape,
-            _reshape_tile_to,
-        )
-
         ct = ctx.ct
         ir = ctx.ir
         loc = ctx.loc
@@ -292,8 +287,6 @@ class Copy(TileOp, opcode="copy", effect=Effect.READWRITE):
                 stored_shape = list(full_tile.tile_type.shape)
                 extract_shape = list(src_tile_shape)
                 if len(extract_shape) != len(stored_shape):
-                    from tilelang.tileir.errors import TileIRLoweringNotImplementedError
-
                     raise TileIRLoweringNotImplementedError(
                         f"Copy from `{self.src.name}`: slice rank {len(extract_shape)} does not "
                         f"match the stored tile rank {len(stored_shape)} ({extract_shape} vs {stored_shape})."
@@ -363,9 +356,6 @@ class Copy(TileOp, opcode="copy", effect=Effect.READWRITE):
             # larger (e.g. [64,64]).  Only reshape if the element counts match.
             dst_shape = list(self.dst.type.shape)
             cur_tile = _as_tile(ctx, loaded_tile)
-            import functools
-            import operator
-
             cur_elems = functools.reduce(operator.mul, cur_tile.tile_type.shape, 1)
             dst_elems = functools.reduce(operator.mul, dst_shape, 1)
             if cur_elems == dst_elems:
@@ -445,18 +435,6 @@ class TmaCopy(TileOp, opcode="tma_copy", effect=Effect.READWRITE):
 
     def emit_mlir(self, ctx: Any) -> None:
         """TmaCopy follows the same emission path as Copy."""
-        from tilelang.tileir.emission_utils import (
-            _mlir_element_type,
-            _ensure_token,
-            _make_i32_index_tiles,
-            _as_tile,
-            _cast_tile,
-            _dtype_from_mlir_type,
-            _squeeze_shape,
-            _reshape_tile_to,
-            _broadcast_ptr,
-        )
-
         ct = ctx.ct
         ir = ctx.ir
         loc = ctx.loc
@@ -537,9 +515,6 @@ class TmaCopy(TileOp, opcode="tma_copy", effect=Effect.READWRITE):
             # guard as Copy.emit_mlir.
             dst_shape = list(self.dst.type.shape)
             cur_tile = _as_tile(ctx, loaded_tile)
-            import functools
-            import operator
-
             cur_elems = functools.reduce(operator.mul, cur_tile.tile_type.shape, 1)
             dst_elems = functools.reduce(operator.mul, dst_shape, 1)
             if cur_elems == dst_elems:
@@ -629,14 +604,6 @@ class TransposeCopy(TileOp, opcode="transpose_copy", effect=Effect.READWRITE):
         """Lower TransposeCopy to MLIR via ``ct.permute`` (SHARED/REGISTER
         src) or ``ct.make_strided_view`` + ``ct.load_view_tko`` (GLOBAL src).
         """
-        from tilelang.tileir.errors import TileIRLoweringError
-        from tilelang.tileir.emission_utils import (
-            _ensure_token,
-            _load_buffer_tile,
-            _make_i32_index_tiles,
-            _store_buffer_tile,
-        )
-
         ct = ctx.ct
         loc = ctx.loc
 
@@ -768,31 +735,7 @@ class CopyGather(TileOp, opcode="gather4", effect=Effect.READWRITE):
     col: Any = operand(default=None)
 
     def emit_mlir(self, ctx: Any) -> None:
-        """Lower CopyGather to MLIR.
-
-        1. Build a gather_scatter_view over ``src``'s TensorView with
-           ``tile_shape=dst.shape`` and ``sparse_dim=0``.
-        2. Build the rank-1 ``[4]`` i32 row-index tile from the 4 scalar
-           ``row_indices`` Values via reshape-to-``[1]`` + tree-``ct.cat``
-           (``_cat_index_tile``) -- NOT a buffer load (gather4's indices are
-           scalar exprs, not an index buffer).
-        3. Load the gathered tile via a hand-built ``LoadViewTkoOp``
-           (``index=[index_tile, col_tile]`` — the 4-row index at
-           ``sparse_dim`` 0, the column-offset scalar at dim 1), bypassing
-           ``ct.load_view_tko`` (see ``_make_gather_scatter_view``'s
-           docstring for why the high-level helper cannot be used here).
-        4. Store the gathered tile into ``dst`` via the normal
-           ``_store_buffer_tile`` path (partition view / ``ctx.set_tile``
-           for SHARED — no gather semantics needed on the write side).
-        """
-        from tilelang.tileir.emission_utils import (
-            _ensure_token,
-            _store_buffer_tile,
-            _make_gather_scatter_view,
-            _mlir_element_type,
-            _as_tile,
-        )
-
+        """Gather four rows from ``src`` and store the resulting tile."""
         ct = ctx.ct
         ct_gen = ctx.ct_gen
         ir = ctx.ir
@@ -870,25 +813,7 @@ class CopyScatter(TileOp, opcode="scatter4", effect=Effect.READWRITE):
     col: Any = operand(default=None)
 
     def emit_mlir(self, ctx: Any) -> None:
-        """Lower CopyScatter to MLIR — the dual of ``CopyGather.emit_mlir``.
-
-        1. Load ``src`` normally (full tile — no gather semantics needed on
-           the read side) and build the rank-1 ``[4]`` i32 row-index tile
-           from the 4 scalar ``row_indices`` Values (``_cat_index_tile``).
-        2. Build a gather_scatter_view over ``dst``'s TensorView with
-           ``tile_shape=src.shape`` and ``sparse_dim=0``.
-        3. Store via a hand-built ``StoreViewTkoOp`` (same
-           ``index=[index_tile, col_tile]`` layout as the gather load),
-           bypassing ``ct.store_view_tko`` for the same reason as the load
-           side.
-        """
-        from tilelang.tileir.emission_utils import (
-            _ensure_token,
-            _load_buffer_tile,
-            _make_gather_scatter_view,
-            _as_tile,
-        )
-
+        """Scatter four rows from ``src`` into ``dst``."""
         ct = ctx.ct
         ct_gen = ctx.ct_gen
         ir = ctx.ir
@@ -953,22 +878,10 @@ class Load(TileOp, opcode="load", effect=Effect.READ):
         """
         if self.reshape_to:
             _result = self._emit_mlir_inner(ctx)
-            from tilelang.tileir.emission_utils import _as_tile, _reshape_tile_to
-
             return _reshape_tile_to(ctx.ct, _as_tile(ctx, _result), list(self.reshape_to), ctx.loc)
         return self._emit_mlir_inner(ctx)
 
     def _emit_mlir_inner(self, ctx: Any) -> Any:
-        from tilelang.tileir.emission_utils import (
-            _mlir_element_type,
-            _ensure_token,
-            _make_i32_index_tiles,
-            _make_tile_view,
-            _as_tile,
-            _squeeze_shape,
-            _reshape_tile_to,
-        )
-
         ct = ctx.ct
         loc = ctx.loc
 
@@ -991,14 +904,12 @@ class Load(TileOp, opcode="load", effect=Effect.READ):
                 # ct.extract requires rank-0 (scalar) indices.
                 # When indices are rank-1 (e.g. derived from threadIdx.x which is bound
                 # to ct.iota(128, Int32) = tile<128xi32>), the SIMT per-thread gather
-                # pattern cannot be expressed in cuTile's collective tile model.
-                # Check the raw values BEFORE _make_i32_index_tiles, because that helper
+                # pattern cannot be expressed in the collective tile model.
+                # Check raw values before _make_i32_index_tiles because that helper
                 # scalarizes partition indices by extracting element zero.
                 def _raw_idx_rank(idx: Any) -> int:
                     try:
-                        from tilelang.tileir.ir.value import Value as _TileIRValue
-
-                        if isinstance(idx, _TileIRValue):
+                        if isinstance(idx, Value):
                             idx_tile = _as_tile(ctx, ctx.lookup(idx))
                             return len(list(idx_tile.tile_type.shape))
                     except KeyError:
@@ -1006,11 +917,9 @@ class Load(TileOp, opcode="load", effect=Effect.READ):
                     return 0
 
                 if any(_raw_idx_rank(idx) > 0 for idx in self.indices):
-                    from tilelang.tileir.errors import _UnsupportedTileIRNode
-
                     raise _UnsupportedTileIRNode(
                         "per-thread SIMT gather (rank-1 / threadIdx-dependent index into a "
-                        "tile) is not expressible in cuTile's collective tile model"
+                        "tile) is not expressible in the CUDA Tile IR execution model"
                     )
                 idx_tiles = _make_i32_index_tiles(ctx, self.indices)
                 elem_tile = ct.extract(result_tile_type, full_tile, idx_tiles, loc=loc)
@@ -1156,15 +1065,6 @@ class Store(TileOp, opcode="store", effect=Effect.WRITE):
         SHARED/REGISTER destinations update _tile_map.  GLOBAL view stores
         reshape the tile to full tile_shape before store_view_tko.
         """
-        from tilelang.tileir.emission_utils import (
-            _ensure_token,
-            _make_i32_index_tiles,
-            _make_tile_view,
-            _as_tile,
-            _squeeze_shape,
-            _reshape_tile_to,
-        )
-
         ct = ctx.ct
         loc = ctx.loc
 
@@ -1205,12 +1105,8 @@ class Store(TileOp, opcode="store", effect=Effect.WRITE):
                 # in the collective tile model and must fail before scalarization.
                 def _idx_rank_store(idx_val: Any) -> int:
                     try:
-                        from tilelang.tileir.ir.value import Value as _TileIRValue
-
-                        if isinstance(idx_val, _TileIRValue):
+                        if isinstance(idx_val, Value):
                             mlir_v = ctx.lookup(idx_val)
-                            from tilelang.tileir.emission_utils import _as_tile
-
                             mlir_t = _as_tile(ctx, mlir_v)
                             return len(list(mlir_t.tile_type.shape))
                     except KeyError:
@@ -1218,11 +1114,9 @@ class Store(TileOp, opcode="store", effect=Effect.WRITE):
                     return 0
 
                 if any(_idx_rank_store(idx) > 0 for idx in self.indices):
-                    from tilelang.tileir.errors import _UnsupportedTileIRNode
-
                     raise _UnsupportedTileIRNode(
                         "per-thread SIMT scatter (rank-1 / threadIdx-dependent index into a "
-                        "tile) is not expressible in cuTile's collective tile model"
+                        "tile) is not expressible in the CUDA Tile IR execution model"
                     )
                 # Scatter a scalar value into a single element of the tile.
                 old_tile = _as_tile(ctx, ctx.get_tile(self.dst))
@@ -1376,22 +1270,12 @@ class Store(TileOp, opcode="store", effect=Effect.WRITE):
         """Masked store via per-element pointers.
 
         Builds ``ptrs[e] = base + Σ_k (elem_base_k + iota_k[e]) * stride_k``
-        and emits ``store_ptr_tko(ptrs, value, mask=mask)`` — masked lanes are
-        NOT written (a select-zero view-store would clobber live aliased
+        and emits ``store_ptr_tko(ptrs, value, mask=mask)``. Masked lanes are
+        not written because a select-zero view-store would clobber live aliased
         elements).  ``indices`` are element offsets when ``elem_view`` is set,
         tile-granular partition indices otherwise (converted here via
         ``idx * tile_extent``).
         """
-        from tilelang.tileir.errors import TileIRLoweringNotImplementedError
-        from tilelang.tileir.emission_utils import (
-            _ensure_token,
-            _make_i32_index_tiles,
-            _as_tile,
-            _squeeze_shape,
-            _reshape_tile_to,
-            _broadcast_ptr,
-        )
-
         ct = ctx.ct
         loc = ctx.loc
 
@@ -1487,14 +1371,6 @@ class Fill(TileOp, opcode="fill", effect=Effect.WRITE):
         SHARED/REGISTER tile-map destinations update _tile_map; GLOBAL view
         stores reshape the filled tile to full tile_shape before store_view_tko.
         """
-        from tilelang.tileir.emission_utils import (
-            _mlir_element_type,
-            _ensure_token,
-            _make_i32_index_tiles,
-            _squeeze_shape,
-            _reshape_tile_to,
-        )
-
         ct = ctx.ct
         loc = ctx.loc
 
@@ -1562,7 +1438,7 @@ class PartitionView(TileOp, opcode="partition_view", effect=Effect.READ):
     """Create a partition view of a global tensor for TMA indexing.
 
     Effect is READ: ``PartitionView`` itself only calls
-    ``ct.make_partition_view`` on ``src`` — it does NOT write memory.  The
+    ``ct.make_partition_view`` on ``src`` and does not write memory. The
     actual write happens in a *downstream* ``Store`` / ``Copy`` that consumes
     this view's result, and that op carries the WRITE effect.  The explicit
     ``buffer_operand(effect=Effect.READ)`` declaration below records that role.

@@ -131,7 +131,7 @@ def _sem_buffer_to_tile_type(buf: SemanticBuffer) -> TileType:
 
     if space == MemSpace.GLOBAL:
         # Preserve full rank — use -1 as sentinel for dynamic dims.
-        # emit_helpers._all_static checks d > 0, so -1 triggers the dynamic path.
+        # emission_utils._all_static treats non-positive dims as dynamic.
         shape = tuple(d if isinstance(d, int) and d > 0 else -1 for d in buf.shape)
     else:
         # Keep only integer dims (all-static for alloc buffers), then pad
@@ -158,8 +158,6 @@ def _buffers_requiring_alloca(sem_kernel: SemanticKernel) -> set[str]:
     extract/iota paths, and demoting on reads would pessimize every kernel
     that indexes shared tiles.
     """
-    from tvm import tirx as _tir
-
     shared_names = {b.name for b in sem_kernel.alloc_buffers if str(b.scope).startswith("shared")}
     if not shared_names:
         return set()
@@ -169,10 +167,10 @@ def _buffers_requiring_alloca(sem_kernel: SemanticKernel) -> set[str]:
 
         def _v(n):
             nonlocal found
-            if isinstance(n, _tir.BufferLoad):
+            if isinstance(n, _tirx.BufferLoad):
                 found = True
 
-        _tir.stmt_functor.post_order_visit(e, _v)
+        _tirx.stmt_functor.post_order_visit(e, _v)
         return found
 
     _ATOMIC_ELEM_OPS = {
@@ -196,10 +194,10 @@ def _buffers_requiring_alloca(sem_kernel: SemanticKernel) -> set[str]:
         if not args:
             return None
         a0 = args[0]
-        if isinstance(a0, _tir.BufferLoad):
+        if isinstance(a0, _tirx.BufferLoad):
             return a0
         inner = getattr(a0, "args", None)
-        if inner and isinstance(inner[0], _tir.BufferLoad):
+        if inner and isinstance(inner[0], _tirx.BufferLoad):
             return inner[0]
         return None
 
@@ -214,10 +212,10 @@ def _buffers_requiring_alloca(sem_kernel: SemanticKernel) -> set[str]:
         where the atomic is the RHS value of a store into another buffer)."""
 
         def _v(n):
-            if isinstance(n, _tir.Call) and getattr(getattr(n, "op", None), "name", None) in _ATOMIC_ELEM_OPS:
+            if isinstance(n, _tirx.Call) and getattr(getattr(n, "op", None), "name", None) in _ATOMIC_ELEM_OPS:
                 _demote_from_atomic_args(tuple(n.args))
 
-        _tir.stmt_functor.post_order_visit(e, _v)
+        _tirx.stmt_functor.post_order_visit(e, _v)
 
     def _walk(stmt: SemanticStmt) -> None:
         if stmt.kind == "buffer_store":

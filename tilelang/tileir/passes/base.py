@@ -1,24 +1,4 @@
-"""TileIR pass infrastructure.
-
-Provides:
-  - ``Pass``         — type alias for a pass callable.
-  - ``PassContext``  — carrier for cross-pass results and analysis caches.
-  - ``run_pipeline`` — run an ordered list of passes over a root Block.
-  - ``walk_block``   — recursively visit every op in a Block (pre-order).
-
-Design notes
-------------
-Passes are *mutating* procedures: ``Pass = Callable[[Block, PassContext], None]``.
-This mirrors cuTile's ``_passes`` design (``Block -> None``) while threading a
-shared ``PassContext`` so analysis results from one pass are visible to later
-passes (e.g. dataflow analysis feeds token ordering).
-
-``walk_block`` uses the ``TileOp.nested_blocks()`` API (``_block_names``) to
-recurse into control-flow bodies without importing any concrete op class.
-It does NOT import the MLIR-emission walker because
-that helper is tightly coupled to an MLIR ``EmitContext`` and does MLIR
-emission work; this function only does IR traversal.
-"""
+"""Pass context, pipeline execution, and recursive TileIR traversal."""
 
 from __future__ import annotations
 
@@ -40,22 +20,7 @@ __all__ = [
 
 
 class PassContext:
-    """Carrier for cross-pass results and analysis caches.
-
-    Attributes
-    ----------
-    results : dict[str, Any]
-        Keyed storage for pass outputs.  Each pass stores its result under a
-        well-known key (conventionally its module-level name or a short string
-        like ``"dataflow"``).  Later passes read this dict to consume earlier
-        analysis without recomputing.
-
-    Design intent
-    -------------
-    Kept deliberately minimal: ``results`` is the extension point for
-    cross-pass data, and typed attributes can be added alongside it as
-    first-class fields if a pass needs them.
-    """
+    """Carrier for cross-pass results and analysis caches."""
 
     def __init__(self) -> None:
         self.results: dict[str, Any] = {}
@@ -77,25 +42,7 @@ Pass = Callable[[Block, "PassContext"], None]
 
 
 def walk_block(block: Block, visitor: Callable[[Any], None]) -> None:
-    """Recursively visit every op in *block* in pre-order (depth-first).
-
-    For each op in ``block.ops``:
-      1. Call ``visitor(op)``.
-      2. Recurse into each nested ``Block`` body returned by
-         ``op.nested_blocks()`` (if the op is a ``TileOp`` subclass that
-         carries nested bodies such as ``Loop`` or ``IfElse``).
-
-    This traversal relies on the ``TileOp.nested_blocks()`` protocol
-    (``_block_names``) rather than on isinstance checks, so it works with
-    any future op that carries a ``nested_block()``-marked field.
-
-    Parameters
-    ----------
-    block :
-        The ``Block`` to traverse.
-    visitor :
-        Called once per op (including ops in nested bodies).
-    """
+    """Visit operations and nested blocks in depth-first pre-order."""
     for op in block.ops:
         visitor(op)
         # Recurse into nested Block bodies only for TileOp subclasses.

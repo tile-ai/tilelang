@@ -1,24 +1,4 @@
-"""IRBuilder — constructs TileIR by managing the insertion block and SSA ids.
-
-Provides:
-  - ``IRBuilder`` — owns the id counter, tracks the current insertion block,
-    and exposes ``.create()`` and ``.block_scope()`` for building ops.
-
-Design notes
------------
-* **Owner of the id counter.** ``IRBuilder`` holds a concrete ``_Counter``
-  object.  Every call to ``fresh_value`` passes this counter so that id
-  assignment is fully centralised — no module-global state.
-
-* **create() verifies eagerly.** ``op.verify()`` is called before the op is
-  appended to the block.  If it raises, the block is left unchanged, making
-  errors visible at IR-build time rather than at a later analysis pass.
-
-* **block_scope() is a context manager.** Nested block construction (loop
-  bodies, if/else branches) swaps ``self._block`` to a fresh ``Block`` for
-  the duration of the ``with`` body, then unconditionally restores it — even
-  if an exception propagates out.
-"""
+"""Insertion-point and SSA-id management for constructing TileIR."""
 
 from __future__ import annotations
 
@@ -36,11 +16,7 @@ __all__ = ["IRBuilder"]
 
 
 class _Counter:
-    """Monotonically increasing integer counter.
-
-    Satisfies the ``IdCounter`` protocol required by ``fresh_value``.
-    Each call to ``.next()`` returns the next integer starting from 0.
-    """
+    """Monotonically increasing integer counter starting at zero."""
 
     __slots__ = ("_n",)
 
@@ -57,25 +33,7 @@ class _Counter:
 
 
 class IRBuilder:
-    """Constructs typed TileIR inside a managed insertion context.
-
-    Usage::
-
-        b = IRBuilder()
-        op = _MyOp(dst=some_buf, val=some_val)
-        b.create(op, result_types=(ty,))
-        # op.results is now a 1-tuple of fresh Values
-
-        with b.block_scope() as inner_block:
-            b.create(inner_op)
-        # inner_block holds inner_op; outer block is restored
-
-    Attributes
-    ----------
-    block : Block
-        The current insertion block.  Ops created via ``create()`` are
-        appended here.
-    """
+    """Construct typed TileIR inside a managed insertion context."""
 
     def __init__(self) -> None:
         self._counter: _Counter = _Counter()
@@ -121,13 +79,13 @@ class IRBuilder:
         Raises
         ------
         Any exception raised by ``op.verify()`` propagates unchanged.  The op
-        is NOT appended to the current block if ``verify()`` raises.
+        is not appended to the current block if ``verify()`` raises.
         """
         # Allocate a fresh Value for each requested result type.
         results: tuple[Value, ...] = tuple(fresh_value(self._counter, ty) for ty in result_types)
         op.results = results
 
-        # Verify BEFORE appending — fail at build time, not later.
+        # Verify before appending so invalid operations fail at build time.
         op.verify()
 
         self._block.append(op)

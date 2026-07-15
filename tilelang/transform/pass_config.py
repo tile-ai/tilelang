@@ -89,7 +89,7 @@ class PassConfigKey(str, Enum):
 
     TL_TILEIR_OPT_LEVEL = "tl.tileir.opt_level"
     """CUDA Tile IR (TileIR backend) optimization level in [0, 3]. Forwarded to
-    the cuTile optimizer and the ``tileiras`` assembler (``--opt-level``).
+    the CUDA Tile IR optimizer and the ``tileiras`` assembler (``--opt-level``).
     Default: 3."""
 
     TL_DEVICE_COMPILE_FLAGS = "tl.device_compile_flags"

@@ -1,34 +1,4 @@
-"""TileOp schema base + field markers for TileIR.
-
-Provides:
-  - ``Effect``          — enum describing an op's memory side-effects.
-  - ``operand``         — field marker for a plain SSA-value operand.
-  - ``buffer_operand``  — field marker for an operand that IS a memory ref.
-  - ``attribute``       — field marker for a compile-time constant attribute.
-  - ``nested_block``    — field marker for a nested Block body.
-  - ``TileOp``          — abstract base class for all typed TileIR operations.
-
-Design notes
-------------
-The field-marker / ``__init_subclass__`` pattern is mirrored from
-cuTile's ``cuda/tile/_ir/ir.py`` (lines ~549-609).
-
-``__init_subclass__`` runs at *class-creation time*, before the
-``@dataclass(eq=False)`` decorator has a chance to process the
-subclass.  At that moment the class attributes for annotated fields are
-still the raw ``dataclasses.Field`` objects returned by the marker
-functions.  We read them via ``getattr(cls, field_name, None)`` and
-inspect ``f.metadata``.
-
-``buffer_operand`` is an addition beyond cuTile: it marks operands that
-are memory references (buffers / tensors) and records each operand's
-memory effect.  Analysis passes use that metadata without re-examining
-opcode strings or field names.  ``memory_effect`` remains the coarse,
-op-level classification.
-
-The concrete op dataclasses are **not** defined here — only the machinery
-they depend on.
-"""
+"""Schema and field markers for typed TileIR operations."""
 
 from __future__ import annotations
 
@@ -44,12 +14,7 @@ from tilelang.tileir.ir.value import Block, Value
 
 
 class Effect(enum.Enum):
-    """Coarse memory-effect classification for a ``TileOp`` subclass.
-
-    Together with the set of ``buffer_operand`` fields this is the single
-    source of truth for an op's memory semantics.  Analysis passes MUST
-    read these instead of pattern-matching on opcode strings.
-    """
+    """Coarse memory-effect classification for a ``TileOp`` subclass."""
 
     NONE = "none"
     READ = "read"
@@ -72,13 +37,7 @@ _BUFFER_EFFECT: str = "tileir_buffer_effect"
 
 
 def _is_classvar(annotation: Any) -> bool:
-    """Return True if *annotation* denotes ``typing.ClassVar``.
-
-    Because this module uses ``from __future__ import annotations``, the
-    values in ``cls.__annotations__`` are *strings*, so a string-prefix
-    check covers the common case.  The ``get_origin`` check handles a
-    subclass that opts out of stringized annotations.
-    """
+    """Return whether *annotation* denotes ``typing.ClassVar``."""
     if isinstance(annotation, str):
         return annotation == "ClassVar" or annotation.startswith(("ClassVar[", "ClassVar "))
     return typing.get_origin(annotation) is ClassVar
@@ -88,13 +47,7 @@ def _is_classvar(annotation: Any) -> bool:
 
 
 def operand(*, default: Any = dataclasses.MISSING) -> dataclasses.Field:
-    """Mark a field as a plain SSA-value operand.
-
-    Parameters
-    ----------
-    default :
-        Optional default value.  Omit to make the field required.
-    """
+    """Mark a field as a plain SSA-value operand."""
     return dataclasses.field(
         default=default,
         metadata={_KIND: _FieldKind.OPERAND},
@@ -107,12 +60,7 @@ def buffer_operand(
     effect: Effect,
     default: Any = dataclasses.MISSING,
 ) -> dataclasses.Field:
-    """Mark a field as a memory-reference operand (buffer / tensor).
-
-    Like ``operand`` but semantically denotes that the value IS a memory
-    reference.  ``effect`` is the per-buffer memory role consumed by analysis
-    passes.  It is required so field names never become implicit semantics.
-    """
+    """Mark a buffer operand and its per-buffer memory effect."""
     if not isinstance(effect, Effect):
         raise TypeError(f"buffer_operand effect must be an Effect, got {effect!r}")
     return dataclasses.field(
@@ -126,13 +74,7 @@ def buffer_operand(
 
 
 def attribute(*, default: Any = dataclasses.MISSING) -> dataclasses.Field:
-    """Mark a field as a compile-time constant attribute.
-
-    Parameters
-    ----------
-    default :
-        Optional default value.  Omit to make the field required.
-    """
+    """Mark a field as a compile-time constant attribute."""
     return dataclasses.field(
         default=default,
         metadata={_KIND: _FieldKind.ATTRIBUTE},
@@ -141,13 +83,7 @@ def attribute(*, default: Any = dataclasses.MISSING) -> dataclasses.Field:
 
 
 def nested_block(*, default: Any = dataclasses.MISSING) -> dataclasses.Field:
-    """Mark a field as a nested ``Block`` body.
-
-    Parameters
-    ----------
-    default :
-        Optional default value.  Omit to make the field required.
-    """
+    """Mark a field as a nested ``Block`` body."""
     return dataclasses.field(
         default=default,
         metadata={_KIND: _FieldKind.NESTED_BLOCK},
@@ -167,36 +103,9 @@ class TileOp:
     must use one of the marker functions (``operand``, ``buffer_operand``,
     ``attribute``, ``nested_block``).
 
-    Subclassing constraints
-    -----------------------
-    * **Single-level inheritance only.**  ``__init_subclass__`` reads
-      ``cls.__annotations__``, which holds only the annotations declared
-      directly on the subclass.  An intermediate base's marker fields are
-      NOT re-collected, so a two-level hierarchy would silently drop the
-      parent's fields from ``operands()`` / ``buffer_operands()`` / etc.
-      Concrete ops must inherit directly from ``TileOp``.
-    * Every *marker* field must use one of the four marker functions.  A
-      ``ClassVar``-annotated attribute on a subclass is permitted (it is
-      skipped, not treated as a marker field); any other bare annotation
-      raises ``TypeError`` at class-creation time.
-
-    Class attributes (populated by ``__init_subclass__``)
-    -----------------------------------------------------
-    _opcode : str
-    _terminator : bool
-    memory_effect : Effect
-    _operand_names : list[str]
-    _buffer_operand_names : list[str]
-    _buffer_operand_effects : list[Effect]
-    _attr_names : list[str]
-    _block_names : list[str]
-
-    Instance fields (defined on the base dataclass)
-    -----------------------------------------------
-    results : tuple[Value, ...]
-        SSA values produced by this op.  Defaults to ``()``.
-    loc : Any | None
-        Source location tag.  Defaults to ``None``.
+    Concrete ops must inherit directly from ``TileOp`` because marker fields
+    are collected from the subclass's own annotations. Every non-``ClassVar``
+    field must use one of the marker functions above.
     """
 
     results: tuple[Value, ...] = dataclasses.field(default=(), kw_only=True)

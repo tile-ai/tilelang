@@ -1,19 +1,4 @@
-"""First-class TileIR type system.
-
-Provides:
-  - ``DType``   — element-type singleton with MLIR and cuda_tile factory hooks.
-  - ``DTYPES``  — forward index: canonical name -> DType (built once at import).
-  - ``dtype``   — lookup by name (or alias); raises KeyError on unknown names.
-  - ``dtype_from_mlir`` — reverse lookup; requires a live MLIR context.
-  - ``MemSpace``  — memory-space enum (GLOBAL / SHARED / REGISTER).
-  - ``Layout``    — thin wrapper around ``lowering.types.TileLayout``.
-  - ``TileType``  — frozen descriptor: dtype + shape + space + layout.
-
-The per-dtype data is ported from the tables in ``lowering/core.py`` so that the
-forward and reverse index are built ONCE at import, replacing the three per-call
-linear scans (_mlir_type / _element_wrapper / _dtype_from_mlir_type) that exist
-there for backwards compatibility with the old lowering pipeline.
-"""
+"""Types and dtype registries for typed TileIR values."""
 
 from __future__ import annotations
 
@@ -22,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 
-# Bitwidth helpers for float types
+# Storage widths for floating-point types.
 
 _FLOAT_NAME_TO_BITS: dict[str, int] = {
     "float4_e2m1fn": 4,
@@ -31,13 +16,14 @@ _FLOAT_NAME_TO_BITS: dict[str, int] = {
     "float8_e8m0fnu": 8,
     "float16": 16,
     "bfloat16": 16,
-    "tf32": 32,  # TF32 has 19 significant bits but is stored in 32; bitwidth tracks storage (matches lowering/core.py:201, used for 128//bitwidth vector widths)
+    # TF32 has 19 significant bits but occupies 32 bits of storage.
+    "tf32": 32,
     "float32": 32,
     "float64": 64,
 }
 
 
-# Raw dtype tables — ported from lowering/core.py:31-48
+# Dtype registry rows.
 
 # (canonical_name, aliases, mlir_ir_type_attr_name, ct_element_attr_name)
 _FLOAT_DTYPE_ROWS: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
@@ -131,8 +117,8 @@ class DType:
     def ct_element(self, ctx: Any) -> Any:
         """Return the cuda_tile element wrapper for this dtype.
 
-        For ``bool`` (no ct constant) this falls back to the i1 MLIR type, as
-        ``_element_wrapper`` does in ``lowering/core.py``.
+        ``bool`` has no CUDA Tile IR element wrapper, so it uses the i1 MLIR
+        type directly.
         """
         if self._ct_attr is None:
             # bool: no dedicated ct element constant; return the i1 mlir type.
@@ -216,11 +202,8 @@ def dtype_from_mlir(mlir_ty: Any) -> DType:
     KeyError
         If *mlir_ty* does not match any known dtype.
     """
-    # Float dtypes: compare against the MLIR type object produced by the factory.
-    # We do not have a ctx here — compare by class name via type.__name__ when possible.
-    # The canonical approach mirrors _dtype_from_mlir_type in lowering/core.py:
-    # callers must pass the result of mlir_type(ctx) (already materialised), so we
-    # can compare with equality.  We iterate DTYPES in insertion order (Python 3.7+).
+    # Float types are identified by their MLIR wrapper class. Integer wrappers
+    # expose their storage width directly.
     for dt in DTYPES.values():
         # For integer types we can compare width without a live ctx.
         if not dt._is_float:

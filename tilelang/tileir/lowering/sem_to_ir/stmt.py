@@ -9,7 +9,10 @@ calls are imported function-locally to keep the import graph acyclic.
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+from tvm import tirx as _tir
 
 from tilelang.tileir.ir.builder import IRBuilder
 from tilelang.tileir.errors import (
@@ -19,7 +22,7 @@ from tilelang.tileir.errors import (
     _UnsupportedTileIRNode,
 )
 from tilelang.tileir.ir.value import Block, Value
-from tilelang.tileir.ir.ops import Break, Constant, IfElse, Loop, Store
+from tilelang.tileir.ir.ops import Break, Constant, Elementwise, IfElse, Loop, Select, Store
 from tilelang.tileir.semantic import SemanticStmt
 
 from ._base import (
@@ -174,8 +177,6 @@ def _lower_threadblock_swizzle_pattern(stmt: SemanticStmt, scope: LoweringScope,
     by computing remapped (bx, by) from the raw blockIdx values, using
     Elementwise + Select ops.
     """
-    from tvm import tirx as _tir
-
     # Parse swizzle function name and panel_size from the semantic value.
     func_name: str | None = None
     panel_size: int | None = None
@@ -218,31 +219,23 @@ def _lower_threadblock_swizzle_pattern(stmt: SemanticStmt, scope: LoweringScope,
         return op.results[0]
 
     def _binop(fn: str, lhs: Value, rhs: Value) -> Value:
-        from tilelang.tileir.ir.ops import Elementwise as _Ew
-
-        op = builder.create(_Ew(fn=fn, inputs=(lhs, rhs)), result_types=(i32_ty,))
+        op = builder.create(Elementwise(fn=fn, inputs=(lhs, rhs)), result_types=(i32_ty,))
         return op.results[0]
 
     def _select(cond: Value, true_v: Value, false_v: Value) -> Value:
-        from tilelang.tileir.ir.ops import Select as _Sel
-
-        op = builder.create(_Sel(cond=cond, true_val=true_v, false_val=false_v), result_types=(i32_ty,))
+        op = builder.create(Select(cond=cond, true_val=true_v, false_val=false_v), result_types=(i32_ty,))
         return op.results[0]
 
     def _cmp_lt(lhs: Value, rhs: Value) -> Value:
         """Return bool tile: lhs < rhs (signed)."""
-        from tilelang.tileir.ir.ops import Elementwise as _Ew
-
         bool_ty = _scalar_bool_type()
-        op = builder.create(_Ew(fn="lt", inputs=(lhs, rhs)), result_types=(bool_ty,))
+        op = builder.create(Elementwise(fn="lt", inputs=(lhs, rhs)), result_types=(bool_ty,))
         return op.results[0]
 
     def _cmp_ne(lhs: Value, rhs: Value) -> Value:
         """Return bool tile: lhs != rhs (signed)."""
-        from tilelang.tileir.ir.ops import Elementwise as _Ew
-
         bool_ty = _scalar_bool_type()
-        op = builder.create(_Ew(fn="ne", inputs=(lhs, rhs)), result_types=(bool_ty,))
+        op = builder.create(Elementwise(fn="ne", inputs=(lhs, rhs)), result_types=(bool_ty,))
         return op.results[0]
 
     def _is_odd(v: Value) -> Value:
@@ -346,8 +339,6 @@ def _expr_contains_buffer_load(expr: Any) -> bool:
     Traversal failures are rejected. Treating an unanalyzable expression as
     pure would allow replay to violate single-evaluation semantics.
     """
-    from tvm import tirx as _tir
-
     found = False
 
     def _visit(node: Any) -> None:
@@ -419,7 +410,7 @@ def _lower_let(stmt: SemanticStmt, scope: LoweringScope, builder: IRBuilder) -> 
 def _lower_loop_bounds(stmt: SemanticStmt, scope: LoweringScope, builder: IRBuilder) -> tuple:
     """Lower a ``for`` stmt's bounds and pipeline flag: ``(start, stop, pipelined)``.
 
-    Must be called BEFORE entering the loop's block_scope so the bound values
+    Must be called before entering the loop's block_scope so the bound values
     land in the outer block, not the loop body.  Shared between the generic
     serial ``for`` lowering and the serial-for-inside-T.Parallel path.
     """
@@ -433,8 +424,7 @@ def _lower_loop_bounds(stmt: SemanticStmt, scope: LoweringScope, builder: IRBuil
     start_val = None
     stop_val = None
 
-    # Do NOT silently swallow loop-bound lowering failures — let
-    # exceptions propagate (or wrap) so they are diagnosable.
+    # Let loop-bound lowering failures propagate so they remain diagnosable.
     # The only legitimate stop_val=None is when tir_extent is genuinely absent.
     # Use _lower_attr_expr to handle both TIR PrimExpr and string-serialized attrs.
     if tir_min is not None:
@@ -443,9 +433,7 @@ def _lower_loop_bounds(stmt: SemanticStmt, scope: LoweringScope, builder: IRBuil
     if tir_extent is not None:
         # Compute stop = min + extent when min != 0, otherwise stop = extent.
         # Detect zero-min via string "0" (from _attrs) or IntImm(0).
-        # Check isinstance BEFORE equality to avoid TIR __eq__ evaluating against str.
-        from tvm import tirx as _tir
-
+        # Check isinstance before equality to avoid TIR __eq__ against str.
         if tir_min is None:
             min_is_zero = True
         elif isinstance(tir_min, str):
@@ -495,7 +483,7 @@ def _lower_for(stmt: SemanticStmt, scope: LoweringScope, builder: IRBuilder) -> 
     from .parallel import _is_parallel_for, _lower_parallel_loop
 
     # Delegate T.Parallel for loops to the tile-level parallel handler.
-    # These should NOT produce Loop ops — they represent whole-tile elementwise ops.
+    # Parallel loops represent whole-tile operations rather than Loop ops.
     if _is_parallel_for(stmt):
         _lower_parallel_loop(stmt, scope, builder)
         return
@@ -534,11 +522,7 @@ def _lower_for(stmt: SemanticStmt, scope: LoweringScope, builder: IRBuilder) -> 
 
 @impl("while")
 def _lower_while(stmt: SemanticStmt, scope: LoweringScope, builder: IRBuilder) -> None:
-    # Lower the while condition at the START of the loop body.
-    # Strategy: emit IfElse(cond, then_block=<empty>, else_block=<Break>)
-    # at the top of the body.  When the condition is false, the Break op exits
-    # the loop, so the guard is re-evaluated at the start of each iteration.
-    #
+    # Guard each iteration with an IfElse whose false branch breaks the loop.
     tir_cond = stmt.condition if stmt.condition is not None else dict(stmt.attrs).get("condition")
 
     with builder.block_scope() as body_block, scope.frame():
@@ -598,12 +582,8 @@ def _is_thread_index_only_cond(
     if extra_thread_var_names:
         thread_vars = thread_vars | extra_thread_var_names
     try:
-        from tvm import tirx as _tir
-
         if isinstance(tir_cond, str):
             # String-serialized condition — check if it mentions only thread vars
-            import re
-
             vars_in = set(re.findall(r"\b[a-zA-Z_]\w*\b", tir_cond))
             keywords = {"and", "or", "not", "True", "False"}
             vars_in -= keywords

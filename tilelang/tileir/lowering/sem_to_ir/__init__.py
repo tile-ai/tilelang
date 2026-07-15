@@ -1,30 +1,7 @@
-"""SemanticIR -> TileIR lowering pass (package).
+"""Lower SemanticIR programs to typed TileIR blocks.
 
-Converts a ``SemanticProgram`` / ``SemanticKernel`` produced by ``tir_to_sem``
-into a TileIR ``Block`` ready for MLIR emission.
-
-Entry point::
-
-    block = lower_kernel(sem_kernel, builder, program=semantic_program)
-
-This package was split from a single ``sem_to_ir.py`` module by concern.  The
-public import surface is preserved: ``tilelang.tileir.lowering.sem_to_ir.X``
-resolves the same names as before.
-
-Module layout
--------------
-* ``_base``      — registries, decorators, ``LoweringScope``, dtype/type helpers.
-* ``expr``       — scalar ``lower_expr`` + FMA/Elementwise helpers.
-* ``tile_level`` — ``_lower_tile_level_expr`` (T.Parallel-body expression mode).
-* ``stmt``       — ``lower_stmt`` dispatch + control-flow ``@impl`` handlers.
-* ``parallel``   — T.Parallel loop lowering + partition-index machinery.
-* ``tile_ops``   — ``@tile_op_impl`` handlers (copy/gemm/reduce/...) + dispatch.
-* ``decoders``   — packed-weight decode/dp4a ``@tile_op_impl`` handlers.
-* ``atomic``     — ``atomic_rmw`` / ``register_control`` ``@impl`` handlers.
-
-The handler submodules (``stmt``/``parallel``/``tile_ops``/``decoders``/``atomic``)
-are imported below for their ``@impl`` / ``@tile_op_impl`` registration side
-effects so that ``IMPL`` / ``TILE_OP_IMPL`` are fully populated on package import.
+``lower_kernel`` is the package entry point. Handler modules register statement
+and tile-op implementations when the package is imported.
 """
 
 from __future__ import annotations
@@ -34,9 +11,7 @@ from tilelang.tileir.ir.value import Block
 from tilelang.tileir.errors import TileIRLoweringError
 from tilelang.tileir.semantic import SemanticKernel, SemanticProgram
 
-# Re-export the foundation + expr/tile_level names so the public import surface
-# ``tilelang.tileir.lowering.sem_to_ir.X`` stays identical to the pre-split
-# single-module form.  These are intentionally re-exported even when unused here.
+# Re-export the lowering primitives used by callers and handler modules.
 from ._base import (  # noqa: F401
     IMPL,
     TILE_OP_IMPL,
@@ -64,10 +39,9 @@ from .expr import (  # noqa: F401
     _make_elementwise,
 )
 from .tile_level import _lower_tile_level_expr, _try_lower_fma_tile  # noqa: F401
-from .stmt import lower_stmt  # noqa: F401  (also registers control-flow @impl handlers)
+from .stmt import lower_stmt  # noqa: F401
 
-# Import the remaining handler submodules for their @impl / @tile_op_impl
-# registration side effects (populates IMPL / TILE_OP_IMPL on package import).
+# Populate the statement and tile-op registries.
 from . import parallel  # noqa: F401
 from . import tile_ops  # noqa: F401
 from . import decoders  # noqa: F401
@@ -149,7 +123,7 @@ def lower_kernel(
         so that ``emit_module`` can bind entry-function arguments 1-to-1 with
         ``root.params``.
     """
-    # M4: pass builder so LoweringScope can stamp buffer Values with monotone ids.
+    # The builder owns the monotonic SSA id sequence.
     scope = LoweringScope(sem_kernel, program, builder=builder, fast_math=fast_math)
     _bind_dynamic_shape_symbols(program, scope, builder)
     # Reshape-view aliases: emit redirects alias tile reads/writes through the

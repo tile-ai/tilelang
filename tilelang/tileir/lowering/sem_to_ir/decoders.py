@@ -8,8 +8,11 @@ imported function-locally to keep the import graph acyclic.
 
 from __future__ import annotations
 
+from tvm import tirx as _tir
+
 from tilelang.tileir.ir.builder import IRBuilder
 from tilelang.tileir.errors import _UnsupportedTileIRNode
+from tilelang.tileir.ir.ops import DecodeFp4Twiddling, DecodeI2, DecodeI4, Dp4a
 from tilelang.tileir.semantic import SemanticStmt
 
 from ._base import LoweringScope, tile_op_impl
@@ -26,8 +29,6 @@ def _lower_decode_i4(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, buil
     and creates a ``DecodeI4`` op that handles both GLOBAL ptr and REGISTER tile
     buffers in emit_mlir.
     """
-    from tilelang.tileir.ir.ops import DecodeI4
-
     args = stmt.call_args
     if len(args) < 3:
         raise _UnsupportedTileIRNode("decode_i4u_to_f16: expected TIR call with 3 args (name, src_ptr, dst_ptr).")
@@ -53,8 +54,6 @@ def _lower_decode_i2(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, buil
     and creates a ``DecodeI2`` op that handles both GLOBAL ptr and REGISTER tile
     buffers in emit_mlir.
     """
-    from tilelang.tileir.ir.ops import DecodeI2
-
     args = stmt.call_args
     if len(args) < 3:
         raise _UnsupportedTileIRNode("decode_i2u_to_i8s: expected TIR call with 3 args (name, src_ptr, dst_ptr).")
@@ -83,8 +82,6 @@ def _lower_decode_fp4_twiddling(stmt: SemanticStmt, attrs: dict, scope: Lowering
     time; a missing/non-literal N falls back to deriving n from the dst
     buffer shape (n_groups=0).
     """
-    from tilelang.tileir.ir.ops import DecodeFp4Twiddling
-
     args = stmt.call_args
     if len(args) < 3:
         raise _UnsupportedTileIRNode("decode_fp4_to_bf16_twiddling: expected TIR call with at least 3 args (name, src_ptr, dst_ptr).")
@@ -96,8 +93,6 @@ def _lower_decode_fp4_twiddling(stmt: SemanticStmt, attrs: dict, scope: Lowering
         )
     n_groups = 0
     if len(args) > 3:
-        from tvm import tirx as _tir
-
         n_arg = args[3]
         if isinstance(n_arg, _tir.IntImm):
             n_groups = int(n_arg)
@@ -119,8 +114,6 @@ def _lower_dp4a(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, builder: 
     Args layout: call_extern("DP4A", lhs_ptr, rhs_ptr, acc_ptr) — 3 access_ptr args
     after the function name.
     """
-    from tilelang.tileir.ir.ops import Dp4a
-
     # call_extern structure: args[0]=name, args[1]=lhs_ptr, args[2]=rhs_ptr, args[3]=acc_ptr
     args = stmt.call_args
     if len(args) < 4:

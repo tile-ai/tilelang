@@ -300,21 +300,21 @@ def Kernel(
         Or a list of integers representing blockDim.(x|y|z)
         if the value is -1, we skip the threadIdx.x binding.
     num_ctas : int | None
-        TileIR (cuTile) backend only: number of CTAs in a thread-block cluster
-        (cuTile ``num_cta_in_cga``). Must be a power of two in [1, 16]. Ignored
+        TileIR backend only: number of CTAs in a thread-block cluster
+        (``num_cta_in_cga``). Must be a power of two in [1, 16]. Ignored
         by non-TileIR backends. Exposing it here lets ``@tilelang.autotune``
         sweep it as a kernel argument.
     occupancy : int | None
-        TileIR (cuTile) backend only: target number of active CTAs per SM, in
-        [1, 32]. ``None`` lets the cuTile compiler choose. Ignored by non-TileIR
+        TileIR backend only: target number of active CTAs per SM, in
+        [1, 32]. ``None`` lets the CUDA Tile IR toolchain choose. Ignored by non-TileIR
         backends.
     num_worker_warps : int | None
-        TileIR (cuTile) backend only: number of worker warps per CTA, in
+        TileIR backend only: number of worker warps per CTA, in
         {4, 8}. Maps to the entry's ``num_worker_warps_per_cta`` hint per
-        CUDA Tile IR spec 13.3. ``None`` lets the cuTile compiler choose.
+        CUDA Tile IR spec 13.3. ``None`` lets the CUDA Tile IR toolchain choose.
         Ignored by non-TileIR backends.
     tileir_hints : dict | None
-        TileIR (cuTile) backend only: per-architecture ``optimization_hints``
+        TileIR backend only: per-architecture ``optimization_hints``
         dictionary, e.g. ``{"sm_100": {"num_cta_in_cga": 2}, "sm_120":
         {"num_cta_in_cga": 4}, "default": {"occupancy": 2}}``. Arch keys are
         SM names (``sm_90`` … ``sm_121``) or ``"default"``; entry-scoped hint
@@ -366,7 +366,7 @@ def Kernel(
     if prelude is not None:
         attrs["pragma_import_c"] = prelude
 
-    # TileIR (cuTile) entry hints. Stored as namespaced launch-block annotations;
+    # TileIR entry hints use namespaced launch-block annotations;
     # only the TileIR backend reads them, every other backend ignores them.
     if num_ctas is not None:
         attrs["tileir.num_ctas"] = int(num_ctas)
@@ -380,9 +380,9 @@ def Kernel(
         # Encode as a nested str->(str->int) map (bool is not losslessly
         # representable in a TVM Map annotation, so booleans are stored as
         # ints). The only bool-typed hint key, `allow_tma`, is load/store-
-        # scoped and is REJECTED outright by the TileIR lowering's
+        # scoped and is rejected by TileIR lowering's
         # `_validated_hints` when it appears here (see the docstring note
-        # above) -- it is never decoded back to bool, since it can never
+        # above); it is never decoded back to bool because it cannot
         # reach the kernel entry.
         try:
             attrs["tileir.hints"] = {

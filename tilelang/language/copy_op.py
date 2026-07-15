@@ -70,10 +70,10 @@ def copy(
         dst (Union[tirx.Buffer, tirx.BufferLoad, tirx.BufferRegion]): Destination memory region
         coalesced_width (Optional[int], keyword-only): Width for coalesced memory access. Defaults to None.
         disable_tma (bool, keyword-only): Whether to disable TMA acceleration. Defaults to False.
-            For the TileIR (cuTile) backend this also sets the load/store ``allow_tma=False`` hint.
-        latency (Optional[int], keyword-only): TileIR (cuTile) backend only. DRAM traffic-intensity
+            For the TileIR backend this also sets the load/store ``allow_tma=False`` hint.
+        latency (Optional[int], keyword-only): TileIR backend only. DRAM traffic-intensity
             hint in [1, 10]; higher values request deeper prefetch. Ignored by non-TileIR backends.
-            Defaults to None (let the cuTile compiler choose).
+            Defaults to None (let the CUDA Tile IR toolchain choose).
         eviction_policy (Optional[str], keyword-only): Cache eviction policy. Defaults to None.
         prefer_instruction (Optional[str], keyword-only): Backend-specific preferred lowering
             instruction category. For CUDA, recognized values include "tma", "cp_async", and
@@ -123,7 +123,7 @@ def copy(
         ann["coalesced_width"] = coalesced_width
     if "disable_tma" not in ann and disable_tma:
         ann["disable_tma"] = disable_tma
-    # TileIR (cuTile) load/store latency hint. Namespaced so non-TileIR backends ignore it.
+    # TileIR load/store hints are namespaced so other backends ignore them.
     if "tileir.latency" not in ann and latency is not None:
         ann["tileir.latency"] = latency
     if "eviction_policy" not in ann and eviction_policy is not None:

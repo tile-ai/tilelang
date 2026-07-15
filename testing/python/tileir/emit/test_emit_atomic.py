@@ -1,22 +1,4 @@
-"""Tests for AtomicRMW / AtomicCAS emit_mlir (unified).
-
-Coverage
---------
-1. test_atomic_rmw_add       — AtomicRMW kind='add' emits the atomic_rmw mnemonic
-2. test_atomic_rmw_max       — AtomicRMW kind='max' emits the atomic_rmw mnemonic
-3. test_atomic_rmw_min       — AtomicRMW kind='min' emits the atomic_rmw mnemonic
-4. test_atomic_rmw_add_float — AtomicRMW kind='add' on fp32 dst uses ADDF mode
-5. test_atomic_rmw_unsupported_kind — kind not in {add,max,min} raises _UnsupportedTileIRNode
-6. test_atomic_cas           — AtomicCAS emits the atomic_cas mnemonic
-7. test_atomic_cas_result_bound — AtomicCAS result (old val) is bound in EmitContext
-
-Design notes
-------------
-* AtomicRMW.dst  is a GLOBAL buffer_operand; AtomicRMW.val is a register operand.
-* AtomicCAS.dst  is a GLOBAL buffer_operand; expected/desired are register operands.
-* For the tests: supply dst as a 1-D int32 GLOBAL buffer, val as a 1-D int32
-  register tile.  emit_module builds the entry args and materialises buf_info.
-"""
+"""Emission tests for TileIR atomic operations."""
 
 from __future__ import annotations
 
@@ -28,20 +10,12 @@ from tilelang.tileir.ir.ops import AtomicRMW, AtomicCAS
 from tilelang.tileir.errors import _UnsupportedTileIRNode
 from tilelang.tileir.checks import has_cuda_tile_ir_bindings
 
-# ---------------------------------------------------------------------------
-# Skip guard — needs cuda_tile MLIR bindings
-# ---------------------------------------------------------------------------
-
 _HAS_CUDA_TILE = has_cuda_tile_ir_bindings()
 
 skip_no_cuda_tile = pytest.mark.skipif(
     not _HAS_CUDA_TILE,
     reason="cuda_tile MLIR bindings unavailable",
 )
-
-# ---------------------------------------------------------------------------
-# Shared dtype / type helpers
-# ---------------------------------------------------------------------------
 
 I32 = dtype("int32")
 FP32 = dtype("float32")
@@ -54,13 +28,6 @@ def _global_buf(elem=I32, shape=TILE_SHAPE) -> TileType:
 
 def _reg_tile(elem=I32, shape=TILE_SHAPE) -> TileType:
     return TileType(dtype=elem, shape=tuple(shape), space=MemSpace.REGISTER, layout=None)
-
-
-# ---------------------------------------------------------------------------
-# Helper: build root + entry_args for AtomicRMW
-#   dst: GLOBAL buffer param
-#   val: REGISTER tile param (pre-bound in value_map)
-# ---------------------------------------------------------------------------
 
 
 def _build_atomic_rmw_root(kind: str, dst_elem=I32, val_elem=I32, shape=TILE_SHAPE):
@@ -81,13 +48,6 @@ def _build_atomic_rmw_root(kind: str, dst_elem=I32, val_elem=I32, shape=TILE_SHA
     return root, entry_args
 
 
-# ---------------------------------------------------------------------------
-# Helper: build root + entry_args for AtomicCAS
-#   dst: GLOBAL buffer param
-#   expected, desired: REGISTER tile params
-# ---------------------------------------------------------------------------
-
-
 def _build_atomic_cas_root(dst_elem=I32, shape=TILE_SHAPE):
     """Return (root, entry_args, result_val) for a single AtomicCAS op."""
     dst_val = Value(0, _global_buf(dst_elem, shape), name="dst")
@@ -101,7 +61,7 @@ def _build_atomic_cas_root(dst_elem=I32, shape=TILE_SHAPE):
         ("desired", desired_val.type),
     ]
 
-    # AtomicCAS returns the old value — needs one result Value
+    # AtomicCAS returns the old value.
     result_val = Value(3, _reg_tile(dst_elem, shape), name="old_val")
     op = AtomicCAS(dst=dst_val, expected=expected_val, desired=desired_val)
     op.results = (result_val,)
@@ -174,16 +134,6 @@ def test_atomic_rmw_add_float():
 
 def test_atomic_rmw_unsupported_kind():
     """AtomicRMW with an unknown kind raises _UnsupportedTileIRNode (not NotImplementedError)."""
-    # This test does NOT need cuda_tile — it should raise before touching MLIR.
-    # We patch ctx=None and rely on the kind-check happening before any MLIR call.
-    # However, to reach the kind-check we need ctx.get_buffer_info to work.
-    # The cleanest approach: use a real emit but with an invalid kind.
-    import pytest
-
-    # Build a minimal op — passing None for dst (which has no type) will fail
-    # at get_buffer_info.  Instead we confirm the error message is about kind
-    # by providing a valid ctx and a dst with the right type.
-    # We need cuda_tile for a full ctx; if not available just test the guard.
     if not _HAS_CUDA_TILE:
         pytest.skip("cuda_tile unavailable; skip full integration check")
     from tilelang.tileir.lowering.mlir_emit import emit_module
@@ -191,11 +141,6 @@ def test_atomic_rmw_unsupported_kind():
     root, entry_args = _build_atomic_rmw_root(kind="xor")  # unsupported
     with pytest.raises(_UnsupportedTileIRNode, match="unsupported kind"):
         emit_module(root, kernel_name="atomic_bad", entry_args=entry_args)
-
-
-# ===========================================================================
-# Tests — AtomicCAS
-# ===========================================================================
 
 
 @skip_no_cuda_tile

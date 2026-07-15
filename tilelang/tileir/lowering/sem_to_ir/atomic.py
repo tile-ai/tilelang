@@ -2,14 +2,15 @@
 
 Provides the ``@impl`` handlers for the ``atomic_rmw`` and ``register_control``
 SemanticStmt kinds (AtomicRMW / AtomicLoad / AtomicStore).  Imports the shared
-foundation and scalar ``lower_expr``; the region/static-int helpers from
-``tile_ops`` are imported function-locally to keep the import graph acyclic.
+foundation and the region/static-int helpers from ``tile_ops``.
 """
 
 from __future__ import annotations
 
+from tvm import tirx as _tir
+
 from tilelang.tileir.ir.builder import IRBuilder
-from tilelang.tileir.errors import _UnsupportedTileIRNode
+from tilelang.tileir.errors import TileIRLoweringNotImplementedError, _UnsupportedTileIRNode
 from tilelang.tileir.ir.types import MemSpace, TileType
 from tilelang.tileir.ir.ops import AtomicLoad, AtomicRMW, AtomicStore, Barrier
 from tilelang.tileir.semantic import SemanticStmt
@@ -48,8 +49,6 @@ def _lower_atomic_rmw(stmt: SemanticStmt, scope: LoweringScope, builder: IRBuild
 
     Memory ordering IDs: 0=RELAXED, 2=ACQUIRE, 3=RELEASE, 4=ACQ_REL.
     """
-    from tilelang.tileir.errors import TileIRLoweringNotImplementedError
-
     attrs = dict(stmt.attrs)
     op_name = attrs.get("op", "")
     tir_op_name = op_name
@@ -152,8 +151,6 @@ def _lower_atomic_rmw(stmt: SemanticStmt, scope: LoweringScope, builder: IRBuild
 
         def _region_call_extents(tir_arg: object) -> tuple | None:
             """Static extents from a ``tl.region(BufferLoad, mask, ext...)`` call."""
-            from tvm import tirx as _tir
-
             if isinstance(tir_arg, _tir.Call) and len(tir_arg.args) >= 3:
                 exts = []
                 for e in tir_arg.args[2:]:
@@ -213,8 +210,6 @@ def _lower_atomic_rmw(stmt: SemanticStmt, scope: LoweringScope, builder: IRBuild
     _dst_load = _extract_region_buffer_load(args[0])
     if _dst_load is not None:
         try:
-            from tvm import tirx as _tir
-
             for _idx in _dst_load.indices:
                 if not (isinstance(_idx, _tir.IntImm) and int(_idx) == 0):
                     raise _UnsupportedTileIRNode(

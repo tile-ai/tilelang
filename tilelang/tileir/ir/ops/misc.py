@@ -5,6 +5,8 @@ from __future__ import annotations
 import dataclasses
 from typing import Any
 
+from tilelang.tileir.emission_utils import _as_tile, _broadcast_ptr, _ensure_token
+from tilelang.tileir.errors import _UnsupportedTileIRNode
 from tilelang.tileir.ir.ops._base import (
     Effect,
     TileOp,
@@ -42,8 +44,6 @@ class DeviceAssert(TileOp, opcode="device_assert", effect=Effect.NONE):
         Resolves ``self.cond`` from the value_map, ensures it is a bool
         scalar tile, then calls ``ct.assert_(cond, message)``.
         """
-        from tilelang.tileir.emission_utils import _as_tile
-
         ct = ctx.ct
         ir = ctx.ir
         loc = ctx.loc
@@ -98,36 +98,22 @@ class DecodeI4(TileOp, opcode="decode_i4", effect=Effect.READWRITE):
     dst: Any = buffer_operand(effect=Effect.WRITE)
 
     def emit_mlir(self, ctx: Any) -> None:
-        """Lower DecodeI4 to MLIR: element-wise nibble unpack + float cast.
-
-        Steps
-        -----
-        1. Load src [4 x i8] tile from its GLOBAL buffer pointer.
-        2. For each of 8 output indices:
-           a. Extract the corresponding i8 packed byte (index // 2).
-           b. Zero-extend to i32.
-           c. For odd indices: logical-shift-right by 4 (upper nibble).
-           d. AND with 0xF to isolate the 4-bit nibble.
-           e. Convert to float16 (unsigned itof).
-        3. Tree-cat all 8 x [1 x f16] pieces into a [8 x f16] tile.
-        4. Store the result tile to dst via its GLOBAL buffer pointer.
-        """
-        from tilelang.tileir.emission_utils import _ensure_token, _broadcast_ptr
-        from tilelang.tileir.errors import _UnsupportedTileIRNode as _Err
-
+        """Unpack eight 4-bit values and convert them to float16."""
         ct = ctx.ct
         ir = ctx.ir
         loc = ctx.loc
 
-        # I3: shape/dtype guards (mirrors tile_ops.py ~lines 131-135)
+        # Validate the source and destination contract.
         src_dtype = self.src.type.dtype.name
         dst_dtype = self.dst.type.dtype.name
         src_shape = list(self.src.type.shape)
         dst_shape = list(self.dst.type.shape)
         if src_dtype != "int8" or dst_dtype != "float16":
-            raise _Err(f"TileIR decode_i4u_to_f16 expects int8 -> float16 buffers, got {src_dtype} -> {dst_dtype}.")
+            raise _UnsupportedTileIRNode(f"TileIR decode_i4u_to_f16 expects int8 -> float16 buffers, got {src_dtype} -> {dst_dtype}.")
         if src_shape != [4] or dst_shape != [8]:
-            raise _Err(f"TileIR decode_i4u_to_f16 expects source shape [4] and destination shape [8], got {src_shape} and {dst_shape}.")
+            raise _UnsupportedTileIRNode(
+                f"TileIR decode_i4u_to_f16 expects source shape [4] and destination shape [8], got {src_shape} and {dst_shape}."
+            )
 
         # Load src tile
         src_info = ctx.get_buffer_info(self.src)
@@ -224,21 +210,7 @@ class DecodeFp4Twiddling(TileOp, opcode="decode_fp4_twiddling", effect=Effect.RE
     n_groups: int = attribute(default=0)
 
     def emit_mlir(self, ctx: Any) -> None:
-        """Lower DecodeFp4Twiddling to MLIR: shifts/masks + bf16 bitcast + scale.
-
-        Steps
-        -----
-        1. Load src [4n x i8] tile (REGISTER tile-map or GLOBAL buffer ptr).
-        2. For each group g and each half-word (byte pairs (4g, 4g+1) and
-           (4g+2, 4g+3)): assemble ``w`` in i32 and compute the 4 masked
-           bit patterns above.
-        3. Truncate each pattern to i16, bitcast to bf16, multiply by 2^126.
-        4. Tree-cat the 8n [1 x bf16] pieces into an [8n x bf16] tile.
-        5. Store to dst (REGISTER tile-map or GLOBAL buffer ptr).
-        """
-        from tilelang.tileir.emission_utils import _as_tile, _broadcast_ptr, _ensure_token
-        from tilelang.tileir.errors import _UnsupportedTileIRNode as _Err
-
+        """Decode twiddled FP4 groups into bfloat16 values."""
         ct = ctx.ct
         ir = ctx.ir
         loc = ctx.loc
@@ -248,12 +220,16 @@ class DecodeFp4Twiddling(TileOp, opcode="decode_fp4_twiddling", effect=Effect.RE
         src_shape = list(self.src.type.shape)
         dst_shape = list(self.dst.type.shape)
         if src_dtype not in ("uint8", "int8") or dst_dtype != "bfloat16":
-            raise _Err(f"TileIR decode_fp4_to_bf16_twiddling expects uint8 -> bfloat16 buffers, got {src_dtype} -> {dst_dtype}.")
+            raise _UnsupportedTileIRNode(
+                f"TileIR decode_fp4_to_bf16_twiddling expects uint8 -> bfloat16 buffers, got {src_dtype} -> {dst_dtype}."
+            )
         if len(src_shape) != 1 or len(dst_shape) != 1:
-            raise _Err(f"TileIR decode_fp4_to_bf16_twiddling expects rank-1 buffers, got shapes {src_shape} and {dst_shape}.")
+            raise _UnsupportedTileIRNode(
+                f"TileIR decode_fp4_to_bf16_twiddling expects rank-1 buffers, got shapes {src_shape} and {dst_shape}."
+            )
         n = self.n_groups if self.n_groups else dst_shape[0] // 8
         if n <= 0 or src_shape != [4 * n] or dst_shape != [8 * n]:
-            raise _Err(
+            raise _UnsupportedTileIRNode(
                 f"TileIR decode_fp4_to_bf16_twiddling expects source shape [4*n] and "
                 f"destination shape [8*n] (n={n}), got {src_shape} and {dst_shape}."
             )
@@ -367,36 +343,22 @@ class DecodeI2(TileOp, opcode="decode_i2", effect=Effect.READWRITE):
     dst: Any = buffer_operand(effect=Effect.WRITE)
 
     def emit_mlir(self, ctx: Any) -> None:
-        """Lower DecodeI2 to MLIR: element-wise 2-bit crumb unpack.
-
-        Steps
-        -----
-        1. Load src [4 x i8] tile from its GLOBAL buffer pointer.
-        2. For each of 16 output indices:
-           a. Extract the corresponding i8 packed byte (index % 4).
-           b. Zero-extend to i32.
-           c. Compute shift = 2 * (index // 4); if nonzero, shift right.
-           d. AND with 0x3 to isolate the 2-bit crumb.
-           e. Truncate to i8 (signed).
-        3. Tree-cat all 16 x [1 x i8] pieces into a [16 x i8] tile.
-        4. Store the result tile to dst via its GLOBAL buffer pointer.
-        """
-        from tilelang.tileir.emission_utils import _ensure_token, _broadcast_ptr
-        from tilelang.tileir.errors import _UnsupportedTileIRNode as _Err
-
+        """Unpack sixteen 2-bit values into int8 values."""
         ct = ctx.ct
         ir = ctx.ir
         loc = ctx.loc
 
-        # I3: shape/dtype guards (mirrors tile_ops.py ~lines 159-163)
+        # Validate the source and destination contract.
         src_dtype = self.src.type.dtype.name
         dst_dtype = self.dst.type.dtype.name
         src_shape = list(self.src.type.shape)
         dst_shape = list(self.dst.type.shape)
         if src_dtype != "int8" or dst_dtype != "int8":
-            raise _Err(f"TileIR decode_i2u_to_i8s expects int8 -> int8 buffers, got {src_dtype} -> {dst_dtype}.")
+            raise _UnsupportedTileIRNode(f"TileIR decode_i2u_to_i8s expects int8 -> int8 buffers, got {src_dtype} -> {dst_dtype}.")
         if src_shape != [4] or dst_shape != [16]:
-            raise _Err(f"TileIR decode_i2u_to_i8s expects source shape [4] and destination shape [16], got {src_shape} and {dst_shape}.")
+            raise _UnsupportedTileIRNode(
+                f"TileIR decode_i2u_to_i8s expects source shape [4] and destination shape [16], got {src_shape} and {dst_shape}."
+            )
 
         i8_ty = ir.IntegerType.get_signless(8)
         i32_ty = ir.IntegerType.get_signless(32)
@@ -404,8 +366,6 @@ class DecodeI2(TileOp, opcode="decode_i2", effect=Effect.READWRITE):
         # Load src tile (REGISTER tile-map or GLOBAL ptr)
         src_is_tile = ctx.is_tile_buffer(self.src)
         if src_is_tile:
-            from tilelang.tileir.emission_utils import _as_tile
-
             src_tile = _as_tile(ctx, ctx.get_tile(self.src))
         else:
             src_tile_type = ct.TileType.get([4], i8_ty)

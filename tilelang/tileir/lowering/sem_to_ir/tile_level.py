@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from tvm import tirx as _tir
+
 from tilelang.tileir.ir.builder import IRBuilder
 from tilelang.tileir.errors import _UnsupportedTileIRNode
 from tilelang.tileir.ir.types import MemSpace, TileType
@@ -57,11 +59,6 @@ def _try_lower_parallel_repeat_interleave_load(
     lowering paths.
     """
     if ordered_vars is None or ordered_extents is None:
-        return None
-
-    try:
-        from tvm import tirx as _tir
-    except ImportError:
         return None
 
     if not isinstance(expr, _tir.BufferLoad):
@@ -184,11 +181,6 @@ def _lower_tile_level_expr(
             ordered_extents=ordered_extents,
         )
 
-    try:
-        from tvm import tirx as _tir
-    except ImportError:
-        return lower_expr(expr, scope, builder)
-
     # BufferLoad in tile context (whole-tile / strided / partial-index loads).
     if isinstance(expr, _tir.BufferLoad):
         return _lower_buffer_load_tile(expr, scope, builder, loop_vars, ordered_vars, ordered_extents)
@@ -272,8 +264,6 @@ def _try_lower_linearized_reg_load(expr: Any, scope: LoweringScope, builder: IRB
     ``h[v // D1, v % D1]`` with ``extent(v) == D0*D1`` is the whole (D0, D1)
     tile viewed as a flat (D0*D1,) tile. Returns None on non-matches.
     """
-    from tvm import tirx as _tir
-
     if ordered_vars is None or ordered_extents is None or len(ordered_vars) != 1:
         return None
     if not isinstance(expr, _tir.BufferLoad) or len(expr.indices) != 2:
@@ -331,8 +321,6 @@ def _classify_gather_dims(indices, scope: LoweringScope, builder: IRBuilder, loo
     a structural non-match.  Shared between the gather load pattern and the
     gather-form parallel atomic.
     """
-    from tvm import tirx as _tir
-
     ov_list = list(ordered_vars)
     ov_set = set(ov_list)
     result_shape = tuple(int(e) for e in ordered_extents)
@@ -484,8 +472,6 @@ def _try_lower_classified_elem_load(expr: Any, scope: LoweringScope, builder: IR
     non-matches; loop-var order mismatches also fall through (a transposed
     tile load must not be emitted silently).
     """
-    from tvm import tirx as _tir
-
     from .parallel import _classify_store_dims, _compute_view_indices
 
     if ordered_vars is None or ordered_extents is None or not ordered_vars:
@@ -544,9 +530,9 @@ def _try_lower_classified_elem_load(expr: Any, scope: LoweringScope, builder: IR
     except _UnsupportedTileIRNode:
         return None  # scalar path raises its own (more specific) diagnostic
 
-    from tilelang.tileir.emission_utils import _squeeze_shape as _sq
+    from tilelang.tileir.emission_utils import _squeeze_shape
 
-    squeezed = tuple(_sq(list(tile_sizes)))
+    squeezed = tuple(_squeeze_shape(list(tile_sizes)))
     load_result_ty = TileType(
         dtype=buf_val.type.dtype,
         shape=squeezed,
@@ -597,8 +583,6 @@ def _is_whole_tile_access(expr: Any, scope: LoweringScope, loop_vars: set) -> bo
     SHARED/REGISTER buffers) an affine combination of loop vars + scope scalars
     with at least one parallel loop var — i.e. a whole-tile register/shared read.
     """
-    from tvm import tirx as _tir
-
     buf_name = expr.buffer.name
     # Check if all indices are loop vars (tile access) or constants
     all_tile_indices = all((isinstance(idx, _tir.Var) and idx.name in loop_vars) or (isinstance(idx, _tir.IntImm)) for idx in expr.indices)
@@ -653,8 +637,6 @@ def _try_lower_whole_tile_load(expr: Any, scope: LoweringScope, builder: IRBuild
     buffer embedded into the full parallel tile). Returns ``None`` (fall through)
     if the buffer is not in scope.
     """
-    from tvm import tirx as _tir
-
     buf_name = expr.buffer.name
 
     # Try to emit a Load op for SHARED/REGISTER buffers.
@@ -855,27 +837,10 @@ def _try_lower_whole_tile_load(expr: Any, scope: LoweringScope, builder: IRBuild
                     ).results[0]
                     buf_shape = permuted_shape
 
-        # Outer-product broadcasting (mamba_chunk): when ordered_vars is
-        # available AND the buffer's tile_shape doesn't match the full
-        # parallel-loop tile shape (e.g. dA_cs_m_local is (64,) but the
-        # parallel loop is 2D (64,64)), we MUST embed the loaded tile
-        # in the right axis and broadcast to the full tile shape.
-        #
-        # This is critical for correctness: `dA_cs_m_local[i]` in a 2D
-        # T.Parallel(bM, bK) body must produce tile<64x64> where row i
-        # contains dA_cs_m[i] (axis=0, broadcast-along-cols).  Similarly,
-        # `dA_cs_k_local[j]` must produce tile<64x64> where col j contains
-        # dA_cs_k[j] (axis=1, broadcast-along-rows).  Without this broadcast,
-        # the subtraction `dA_cs_m[i]*p - dA_cs_k[j]*p` computes incorrectly
-        # as an element-wise 64-vector instead of the correct 64×64 outer
-        # difference — causing wrong mamba_chunk scan results (maxerr≈5.6).
-        #
-        # Strategy:
-        # For each buffer index expr.indices[k]:
-        #   - If it is Var(name) with name in ordered_vars, map it to axis
-        #     ordered_vars.index(name) in the full tile context.
-        # Build reshape_shape = [1,...,1] with buf_shape[k] at the mapped axis.
-        # Then emit a Broadcast TileIR op to the full ordered_extents shape.
+        # Embed lower-rank buffer tiles in the axes selected by their parallel
+        # indices, then broadcast them to the full parallel-loop tile shape.
+        # This preserves outer-product semantics such as a row tile indexed by
+        # ``i`` and a column tile indexed by ``j`` in a two-dimensional loop.
         if ordered_vars is not None and ordered_extents is not None and len(ordered_extents) > len(buf_shape):
             # The full parallel tile is nD (n = len(ordered_vars))
             # but the buffer is mD (m < n). Need to reshape + broadcast.
@@ -928,8 +893,6 @@ def _try_lower_block_strided_load(expr: Any, scope: LoweringScope, builder: IRBu
     vec_add / T.Parallel pattern): tile_shape = loop extents, partition index =
     block_part / tile_dim. Returns ``None`` (fall through) on any non-match.
     """
-    from tvm import tirx as _tir
-
     buf_name = expr.buffer.name
 
     # Block-strided tile access pattern
@@ -967,9 +930,7 @@ def _try_lower_block_strided_load(expr: Any, scope: LoweringScope, builder: IRBu
                     # Case 1: pure loop var → tile dimension = extent, partition = 0.
                     if isinstance(idx_expr, _tir.Var) and idx_expr.name in loop_vars:
                         load_tile_shape.append(oe)
-                        from tvm import tirx as _tir2
-
-                        partition_tir_exprs.append(_tir2.IntImm("int32", 0))
+                        partition_tir_exprs.append(_tir.IntImm("int32", 0))
                         continue
                     # Case 2: Add(block_part, loop_var) or Add(loop_var, block_part).
                     if isinstance(idx_expr, _tir.Add):
@@ -1014,15 +975,11 @@ def _try_lower_block_strided_load(expr: Any, scope: LoweringScope, builder: IRBu
                             if isinstance(bp, _tir.IntImm):
                                 v = int(bp)
                                 if v % tile_dim == 0:
-                                    from tvm import tirx as _tir2
-
-                                    return _tir2.IntImm("int32", v // tile_dim)
+                                    return _tir.IntImm("int32", v // tile_dim)
                             # Fallback: divide by tile_dim with floordiv.
                             try:
-                                from tvm import tirx as _tir2
-
-                                return _tir2.floordiv(bp, _tir2.IntImm("int32", tile_dim))
-                            except (ImportError, TypeError, ValueError):
+                                return _tir.floordiv(bp, _tir.IntImm("int32", tile_dim))
+                            except (TypeError, ValueError):
                                 return None
 
                         par_tir = _extract_partition_idx(block_part, oe)
@@ -1072,21 +1029,10 @@ def _try_lower_partial_index_load(expr: Any, scope: LoweringScope, builder: IRBu
     vars and the rest are scalar (block / outer-loop) indices, broadcasting over
     any omitted parallel axis. Returns ``None`` (fall through) on any non-match.
     """
-    from tvm import tirx as _tir
-
     buf_name = expr.buffer.name
 
-    # Partial-index tile access pattern (e.g. BlockOffset[bz, by, bx, vi])
-    # Handles N-D GLOBAL buffers where SOME indices are the T.Parallel loop vars
-    # and the rest are scalar (block / outer loop vars).  This covers kernels like
-    # minference where a 1D T.Parallel(slash_size) reads a 4D tensor with 3
-    # scalar outer indices + the 1 loop-var index.
-    #
-    # Strategy:
-    #   1. Each dimension's index is EITHER a loop var (→ tile dim of that extent)
-    #      OR a scalar expression (→ a partition index for that dim, tile dim = 1).
-    #   2. Emit Load(tile_shape=(1,...,1,extent,...), indices=(scalar_idx,...,0,...))
-    #      where the 1s and 0s are for the scalar dims and the extents/0s for loop-var dims.
+    # Loop-variable dimensions use their parallel extent; scalar dimensions
+    # use a unit tile extent and their lowered expression as partition index.
     if ordered_vars is not None and ordered_extents is not None and len(ordered_vars) > 0 and len(expr.indices) > len(ordered_extents):
         try:
             buf_val = scope.lookup_buffer(buf_name)
@@ -1114,8 +1060,6 @@ def _try_lower_partial_index_load(expr: Any, scope: LoweringScope, builder: IRBu
                     p_tile_shape: list[int] = []
                     p_partition_exprs: list[Any] = []
                     shape_ok = True
-                    from tvm import tirx as _tir5
-
                     ov_to_extent = dict(zip(ordered_vars, ordered_extents))
                     for idx_e in expr.indices:
                         # Expand let-var.
@@ -1127,7 +1071,7 @@ def _try_lower_partial_index_load(expr: Any, scope: LoweringScope, builder: IRBu
                         if isinstance(e, _tir.Var) and e.name in lv_set:
                             # Loop-var dimension: tile extent = ordered_extent.
                             p_tile_shape.append(ov_to_extent[e.name])
-                            p_partition_exprs.append(_tir5.IntImm("int32", 0))
+                            p_partition_exprs.append(_tir.IntImm("int32", 0))
                         else:
                             # Scalar dimension: tile extent = 1, partition = scalar_idx.
                             p_tile_shape.append(1)
@@ -1335,7 +1279,7 @@ def _lower_call_tile(expr: Any, scope: LoweringScope, builder: IRBuilder, ordere
                     return _atomic_op.results[0]
             except KeyError:
                 # Buffer not in scope → fall through to the scalar path. A real
-                # emit/verify failure must NOT be swallowed: degrading a confirmed
+                # emit/verify failures must not be swallowed: degrading a confirmed
                 # atomic to a non-atomic scalar op would silently drop atomicity.
                 pass
 
@@ -1403,7 +1347,7 @@ def _lower_call_tile(expr: Any, scope: LoweringScope, builder: IRBuilder, ordere
         lhs = recurse(expr.args[0])
         rhs = recurse(expr.args[1])
         return _make_elementwise("atan2", (lhs, rhs), expr, builder)
-    # tir.reinterpret → bit-reinterpret (ct.bitcast), NOT a numeric cast.
+    # tir.reinterpret maps to a bit reinterpretation, not a numeric cast.
     if op_name == "tir.reinterpret" and len(expr.args) == 1:
         src_val = recurse(expr.args[0])
         src_dtype_str = str(getattr(expr.args[0], "dtype", ""))
@@ -1432,8 +1376,6 @@ def _try_lower_fma_tile(
     # Gate FMA fusion behind fast_math; precise mode uses separate mul+add.
     if not scope.fast_math:
         return None
-
-    from tvm import tirx as _tir
 
     def _is_mul(e: Any) -> bool:
         return isinstance(e, _tir.Mul)

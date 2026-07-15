@@ -1,82 +1,9 @@
-"""TileIR token-order pass.
+"""Compute memory-token dependencies for TileIR operations.
 
-Computes the LAST_OP / LAST_STORE token-dependency plan for the memory ops
-in a Block.
-
-Overview
---------
-Memory ops in CUDA Tile IR carry *tokens* that sequence their execution.  Two
-ops are ordered iff a token dependency links them; ops with no shared token
-may execute in parallel (overlap).  A naive per-buffer chain that threads
-one token through every op on the same buffer forbids load-after-load
-parallelism (unnecessary) and is therefore incorrect for performance parity.
-
-This pass computes, for each memory op in the Block, the *exact* set of
-prior memory ops it must wait on:
-
-  - **STORE → LAST_OP(alias)**  (WAW + WAR):
-        A store on alias A depends on the most recent op (read or write) on A.
-        This covers both write-after-write (WAW: prior store) and
-        write-after-read (WAR: prior load that a subsequent store would
-        clobber).
-
-  - **LOAD → LAST_STORE(alias)**  (RAW):
-        A load on alias A depends only on the most recent *write* to A (not on
-        prior loads).  Load-after-load carries no ordering constraint — the two
-        loads may overlap freely.
-
-  - **Disjoint aliases → no edge**:
-        Ops on buffers whose alias-set bits do not overlap are independent and
-        get no edge regardless of effect.
-
-Algorithm
----------
-Walk the block in program order.  Maintain two per-alias dicts:
-
-  ``last_op[alias_set]``     — the most recent op (read OR write) on that alias.
-  ``last_store[alias_set]``  — the most recent WRITE on that alias.
-
-For each memory op:
-
-  1. Resolve the alias set(s) for its ``buffer_operands()``.
-  2. Compute deps:
-       - If effect is WRITE (or READWRITE): deps = {last_op[alias]} if present.
-       - If effect is READ:                 deps = {last_store[alias]} if present.
-  3. Update:
-       - Always update last_op[alias] = this op.
-       - If effect is WRITE (or READWRITE): also update last_store[alias] = this op.
-
-Note on multi-buffer ops (Copy / Gemm)
---------------------------------------
-Ops like ``Copy`` have two buffer_operands (src, dst) and no SSA result.
-The alias set must be queried on the *operand Values* (not on any result
-Value, which doesn't exist) — i.e. on the op's ``buffer_operands()`` Values.
-
-For multi-buffer ops the per-buffer effect declared by each
-``buffer_operand(effect=...)`` determines whether that buffer is read,
-written, or both.
-
-Output
-------
-The pass stores a ``TokenPlan`` object at ``ctx.results["token_order"]``.
-``TokenPlan.deps_for(op)`` returns a ``frozenset`` of prior ops that *op*
-must wait on.  An empty frozenset means "no ordering constraint" (the op
-may start as soon as a fresh root token is available).
-
-Emit-seam contract
-------------------
-The plan is stored on ``ctx.results["token_order"]`` and forwarded to the
-emit path as ``emit_ctx.token_plan`` so that ``_ensure_token`` consults it:
-
-  * **When token_plan is present on EmitContext:**
-    ``_ensure_token(ctx, buf_val)`` for a READ op returns the token of
-    LAST_STORE (not LAST_OP), enabling load-load overlap.
-    ``_ensure_token(ctx, buf_val)`` for a WRITE op returns the token of
-    LAST_OP.
-
-  * **When token_plan is absent (fallback):**
-    A conservative per-buffer chain is used, serializing all ops on the
-    same buffer (including load-after-load).
+Loads wait on the latest overlapping store; writes wait on the latest
+overlapping read or write. Disjoint aliases and consecutive loads remain
+independent. The resulting ``TokenPlan`` is stored in the pass context for
+MLIR emission.
 """
 
 from __future__ import annotations
@@ -164,7 +91,7 @@ def token_order_pass(root: Block, ctx: Any) -> None:
         ``lower_kernel``).
     ctx :
         A ``PassContext`` whose ``results['dataflow']`` has been populated by
-        ``dataflow_pass``.  ``token_order_pass`` MUST run after
+        ``dataflow_pass``. ``token_order_pass`` must run after
         ``dataflow_pass`` in the pipeline.
 
     Raises
@@ -221,9 +148,7 @@ def token_order_pass(root: Block, ctx: Any) -> None:
 
         plan.record(op, frozenset(deps))
 
-        # Update LAST_OP and LAST_STORE after computing deps for this op.
-        # last_op is updated for ALL buffer operands (read OR write) because
-        # a subsequent WRITE on the same alias must order after this op (WAR).
+        # A later write must wait on either a read or a write of the alias.
         for v, buffer_effect in per_buf:
             alias = dataflow[v.id].alias_set
             if alias == ALIAS_EMPTY:
