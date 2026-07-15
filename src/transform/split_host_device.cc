@@ -34,7 +34,9 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include <sstream>
 #include <unordered_set>
+#include <vector>
 
 #include "../op/builtin.h"
 #include "common/assume.h"
@@ -47,13 +49,14 @@ namespace tl {
 using namespace ffi;
 using namespace tirx;
 
-// This pass traverses the AST, split the target function into host part and
-// device part and copies all assume attribute statements to the device side.
+// This pass traverses the AST, splits the target function into host and device
+// parts, and preserves assumptions on every side that can evaluate them.
 
-// 1. Traverse AST and collect all assume statements into host_assumes_.
+// 1. Traverse AST and collect all optimizer assumptions into host_assumes_.
 // 2. Until the first AttrStmtNode with tvm::attr::kTarget.
 // 3. Call SplitDeviceFunc, which will create a new device function and replace
-//    the original body with a call to that function.
+//    the original body with a call to that function. Host-evaluable runtime
+//    checks found in the device body are attached to that host-side call.
 class HostDeviceSplitter : public tirx::StmtMutator {
 public:
   explicit HostDeviceSplitter(IRModule *device_mod,
@@ -92,7 +95,7 @@ public:
       // We first push back the outside assume, then visit the child.
       // So when moving assumes to device side, we need to do the building
       // process in a reverse order.
-      host_assumes_.push_back(op);
+      host_assumes_.push_back(GetRef<tirx::AttrStmt>(op));
     }
     return tirx::StmtMutator::VisitStmt_(op);
   }
@@ -113,6 +116,124 @@ public:
   bool found_device_region() const { return found_device_region_; }
 
 private:
+  struct RuntimeCheckInfo {
+    PrimExpr condition;
+    StringImm message;
+    Span span;
+  };
+
+  class HostEvaluableConditionChecker : public tirx::StmtExprVisitor {
+  public:
+    explicit HostEvaluableConditionChecker(const Array<tirx::Var> &params) {
+      for (const tirx::Var &param : params) {
+        if (!param->dtype.is_handle()) {
+          params_.insert(param);
+        }
+      }
+    }
+
+    bool Check(const PrimExpr &condition) {
+      if (!condition->dtype.is_bool() || condition->dtype.lanes() != 1) {
+        return false;
+      }
+      VisitExpr(condition);
+      return is_host_evaluable_;
+    }
+
+  private:
+    void VisitExpr_(const tirx::VarNode *op) final {
+      if (!params_.count(GetRef<tirx::Var>(op))) {
+        is_host_evaluable_ = false;
+      }
+    }
+
+    void VisitExpr_(const tirx::BufferLoadNode *op) final {
+      is_host_evaluable_ = false;
+    }
+
+    void VisitExpr_(const tirx::CallNode *op) final {
+      // Device intrinsics and memory-dependent calls cannot be evaluated by
+      // the host launcher. Keep this deliberately conservative; ordinary
+      // shape constraints use arithmetic expression nodes rather than calls.
+      is_host_evaluable_ = false;
+    }
+
+    std::unordered_set<tirx::Var, ObjectPtrHash, ObjectPtrEqual> params_;
+    bool is_host_evaluable_{true};
+  };
+
+  class DeviceRuntimeCheckCollector : public tirx::StmtVisitor {
+  public:
+    static std::vector<RuntimeCheckInfo>
+    Collect(const Stmt &body, const Array<tirx::Var> &params) {
+      DeviceRuntimeCheckCollector collector(params);
+      collector(body);
+      return collector.runtime_checks_;
+    }
+
+  private:
+    explicit DeviceRuntimeCheckCollector(const Array<tirx::Var> &params)
+        : params_(params) {}
+
+    void VisitStmt_(const tirx::AttrStmtNode *op) final {
+      if (op->attr_key == tl::attr::kAssumeRequiresRuntimeCheck &&
+          conditional_scope_depth_ == 0) {
+        PrimExpr condition = Downcast<PrimExpr>(op->node);
+        HostEvaluableConditionChecker checker(params_);
+        if (checker.Check(condition)) {
+          StringImm message = [&]() {
+            if (const auto *string_imm = op->value.as<StringImmNode>()) {
+              return GetRef<StringImm>(string_imm);
+            }
+            std::ostringstream os;
+            os << "Assume: " << condition;
+            return StringImm(os.str());
+          }();
+          runtime_checks_.push_back({condition, message, op->span});
+        }
+      }
+      tirx::StmtVisitor::VisitStmt_(op);
+    }
+
+    void VisitStmt_(const tirx::IfThenElseNode *op) final {
+      ++conditional_scope_depth_;
+      tirx::StmtVisitor::VisitStmt_(op);
+      --conditional_scope_depth_;
+    }
+
+    void VisitStmt_(const tirx::ForNode *op) final {
+      ++conditional_scope_depth_;
+      tirx::StmtVisitor::VisitStmt_(op);
+      --conditional_scope_depth_;
+    }
+
+    void VisitStmt_(const tirx::WhileNode *op) final {
+      ++conditional_scope_depth_;
+      tirx::StmtVisitor::VisitStmt_(op);
+      --conditional_scope_depth_;
+    }
+
+    Array<tirx::Var> params_;
+    std::vector<RuntimeCheckInfo> runtime_checks_;
+    int conditional_scope_depth_{0};
+  };
+
+  class RuntimeCheckMarkerRemover : public tirx::StmtMutator {
+  public:
+    static Stmt Remove(Stmt body) {
+      RuntimeCheckMarkerRemover remover;
+      return remover(std::move(body));
+    }
+
+  private:
+    Stmt VisitStmt_(const tirx::AttrStmtNode *op) final {
+      if (op->attr_key == tl::attr::kAssumeRequiresRuntimeCheck) {
+        return VisitStmt(op->body);
+      }
+      return tirx::StmtMutator::VisitStmt_(op);
+    }
+  };
+
   bool found_device_region_{false};
   Map<tirx::Var, tirx::Buffer> host_buffer_map_;
   Array<tirx::Var> non_restrict_params_;
@@ -266,6 +387,17 @@ private:
     return body;
   }
 
+  static Stmt WrapBodyWithRuntimeChecks(
+      Stmt body, const std::vector<RuntimeCheckInfo> &runtime_checks) {
+    for (auto it = runtime_checks.rbegin(); it != runtime_checks.rend(); ++it) {
+      body = AttrStmt(it->condition, tirx::attr::tilelang_assume, it->message,
+                      std::move(body), it->span);
+      body = AttrStmt(it->condition, tl::attr::kAssumeRequiresRuntimeCheck,
+                      it->message, std::move(body), it->span);
+    }
+    return body;
+  }
+
   tirx::Stmt SplitDeviceFunc(tirx::Stmt body, tvm::Target device_target) {
     code_block_source_ = std::nullopt;
     code_block_entry_name_ = std::nullopt;
@@ -292,6 +424,19 @@ private:
       return {Array<tirx::Var>(params.begin(), params.end()),
               use_def.undefined_buffers_};
     }();
+
+    // Runtime-check markers written inside a device region are otherwise
+    // removed from the host function when the region is replaced by a kernel
+    // launch. Preserve checks that the host can evaluate from scalar kernel
+    // parameters so MakePackedAPI can turn them into runtime assertions.
+    // Checks involving thread/block variables, local bindings, buffer loads,
+    // calls, or conditional scopes remain device-only optimizer assumptions.
+    std::vector<RuntimeCheckInfo> host_runtime_checks =
+        DeviceRuntimeCheckCollector::Collect(body, old_params);
+
+    // Runtime checks execute in the host launcher. Their paired tl.assume
+    // attributes remain in the device body as optimizer facts.
+    body = RuntimeCheckMarkerRemover::Remove(std::move(body));
 
     // Create new parameter variables for the device function to avoid sharing
     // Var objects with the host function. This prevents ConvertSSA from
@@ -397,6 +542,7 @@ private:
     Array<PrimExpr> args =
         old_params.Map([](const tirx::Var &var) -> PrimExpr { return var; });
 
+    Stmt host_call;
     if (can_propagate_errors) {
       tirx::Var kernel_error_code("kernel_error_code", success->dtype);
       tirx::Call kernel_call(success->dtype, kernel_symbol_global, args);
@@ -404,15 +550,13 @@ private:
           kernel_error_code == success, tirx::StringImm("RuntimeError"),
           Array<tirx::StringImm>(
               {tirx::StringImm("Error executing compute kernel")}));
-      tirx::Stmt let_check = tirx::SeqStmt(
+      host_call = tirx::SeqStmt(
           {tirx::Bind(kernel_error_code, kernel_call), assert_success});
-
-      return let_check;
-
     } else {
-      return tirx::Evaluate(
+      host_call = tirx::Evaluate(
           tirx::Call(DataType::Void(), kernel_symbol_global, args));
     }
+    return WrapBodyWithRuntimeChecks(std::move(host_call), host_runtime_checks);
   }
 
   // target ir module
@@ -420,7 +564,7 @@ private:
   // Generate new GlobalVar for the kernel
   std::function<GlobalVar()> var_supply_;
   // Collect assumes in host side
-  Array<const tirx::AttrStmtNode *> host_assumes_;
+  Array<tirx::AttrStmt> host_assumes_;
 };
 
 tirx::PrimFunc SplitHostDevice(tirx::PrimFunc func, IRModule *device_mod,

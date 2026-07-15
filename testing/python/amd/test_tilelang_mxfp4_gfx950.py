@@ -54,6 +54,19 @@ def _fp4_decode(packed: bytes):
     return result
 
 
+@tilelang.testing.requires_gfx950
+def test_static_fp4_shared_allocation_uses_packed_extent():
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, threads=1):
+            A_shared = T.alloc_shared((127,), T.float4_e2m1fn, scope="shared")
+            A_shared[126] = T.cast(0.0, T.float4_e2m1fn)
+
+    artifact = tilelang.lower(kernel, target={"kind": "hip", "mcpu": "gfx950"})
+
+    assert "fp4_e2_t A_shared[64];" in artifact.kernel_source
+
+
 # ---------------------------------------------------------------------------
 # Test 1: FP4 copy — shared-memory round-trip
 # ---------------------------------------------------------------------------

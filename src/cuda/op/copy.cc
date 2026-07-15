@@ -2349,6 +2349,18 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &lower_args,
   Stmt tma_copy;
   PrimExpr total_bytes =
       TMATransactionBytesFromElements(elements, shared_tensor->dtype);
+
+  // Safety net: instruction selection (CheckBulkCopy1D) must not route a
+  // provably misaligned transfer here. Symbolic sizes cannot be proven
+  // either way and are allowed through, matching the selection logic.
+  ICHECK(!analyzer->CanProve(
+      FloorMod(total_bytes, make_const(total_bytes.dtype(), 16)) !=
+          make_const(total_bytes.dtype(), 0),
+      arith::ProofStrength::kSymbolicBound))
+      << "BulkCopy1D requires total_bytes to be 16-byte aligned, but got "
+         "invalid size.\n"
+      << "  Total_bytes = " << total_bytes << "\n";
+
   if (is_load) {
     PrimExpr mbar_arg = barrier_base_id >= 0 ? mbar_handle : PrimExpr(0);
     tma_copy = Evaluate(Call(DataType::Handle(), tma_load(),

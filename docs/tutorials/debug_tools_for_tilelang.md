@@ -169,119 +169,40 @@ The output messages will include something like:
 msg='hello world' BlockIdx=(0, 0, 0), ThreadIdx=(0, 0, 0): 0
 ```
 
-### Visual Layout Inference For TileLang
- The **Visual Layout Inference** tool automatically generates visual diagrams that illustrate the mapping between logical indices, thread IDs, and register file locations.
+### Visualize Inferred Layouts
 
-When TileLang performs layout inference, it determines how fragment buffers are distributed across threads. The visual layout tool captures this information and generates:
-1. **Textual output**: A human-readable description of the layout mapping
-2. **Visual diagrams**: Color-coded plots showing the thread-to-data mapping
-
-The visual layout inference tool is controlled through the `TL_LAYOUT_VISUALIZATION_ENABLE` and `TL_LAYOUT_VISUALIZATION_FORMATS` pass configuration. By default, `TL_LAYOUT_VISUALIZATION_ENABLE` is **disabled** to avoid performance overhead during compilation.
-
-When enabled, `TL_LAYOUT_VISUALIZATION_FORMATS` accepts string values to control output formats:
-- "txt": Text output only (same as default)
-- "all": Generates all formats (TXT, PDF, PNG, SVG)
-- "png": Generate PNG format only
-- "pdf": Generate PDF format only
-- "svg": Generate SVG format only
-- "txt,svg": Generate multiple formats (comma-separated) in addition to text output
-
-The output messages of "txt" will include something like:
-```
-C_local inferenced layout:
-  Shape: [32, 32] -> [8]
-  Thread: _j // 16 * 64 + _i // 16 * 32 + _i % 8 * 4 + _j % 8 // 2
-  Index:  [_j % 16 // 8 * 4 + _i % 16 // 8 * 2 + _j % 2]
-```
+Layout visualization prints the thread and local-index mappings inferred for
+fragment buffers. It can also write PNG, PDF, or SVG diagrams, which is useful
+when an incorrect result may come from an unexpected data mapping. Enable it
+through the layout visualization pass configuration on the kernel being
+debugged. The configuration keys, direct `plot_layout` API, supported output
+formats, and limitations are documented in
+{doc}`../tools/layout_visualization`.
 
 ## Pass Diff: Observing IR Changes Across Passes
 
-TileLang programs are lowered through a sequence of compiler *passes*, each of which may transform the IR. Understanding exactly what each pass changes is essential for debugging incorrect transformations, unexpected optimizations, or missing passes.
-
-TileLang provides a built-in **Pass Diff** tool that automatically captures the IR before and after every pass and generates a human-readable diff report. It works transparently — no code changes are required.
-
-### Quick Start (Environment Variable)
-
-The simplest way to enable pass diff is to set the `TILELANG_PASS_DIFF` environment variable before running your script:
+Pass Diff captures the TIR before and after compiler passes. Use it when the IR
+looks correct at one lowering stage but is incorrect at a later stage. To trace
+the complete lowering pipeline without changing the program, set
+`TILELANG_PASS_DIFF` before starting Python:
 
 ```bash
-# Colored diff printed to the terminal
-TILELANG_PASS_DIFF=terminal python3 my_script.py
-
-# Generate an HTML report
-TILELANG_PASS_DIFF=html python3 my_script.py
-
-# Both terminal output and HTML report
-TILELANG_PASS_DIFF=both python3 my_script.py
-
-# Disabled (default — zero overhead)
-python3 my_script.py
+TILELANG_PASS_DIFF=terminal python my_script.py
+TILELANG_PASS_DIFF=html python my_script.py
+TILELANG_PASS_DIFF=both python my_script.py
 ```
 
-The HTML report is saved to the directory specified by the `TILELANG_PASS_DIFF_OUTPUT` environment variable (default: `tmp/pass_diff_output`). Each run produces a timestamped file, e.g. `pass_diff_20260611_205421.html`.
-
-### Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `TILELANG_PASS_DIFF` | Enable pass diff. Values: `0` (off), `terminal`, `html`, `both` | `0` |
-| `TILELANG_PASS_DIFF_OUTPUT` | Output directory for HTML reports | `tmp/pass_diff_output` |
-
-### HTML Report Features
-
-The HTML report provides a rich diff viewer with:
-
-- **Side-by-side before/after view** for each pass, with color-coded insertions and deletions
-- **Collapsible pass sections** — click a pass header to expand or collapse its diff
-- **Expand context** — when a diff hunk hides unchanged lines, a `⋯ Show N lines above/below` control lets you reveal them
-- **Dark/Light theme toggle** — the default dark theme can be switched via the toolbar button; the preference is persisted across sessions
-- **Copy buttons** — copy the before or after IR of any pass to the clipboard
-- **Summary statistics** — total passes, changed passes, insertions, and deletions shown in the toolbar
-
-```{figure} ../_static/img/pass_diff_html.png
-:width: 600
-:alt: Screenshot of the Pass Diff HTML report
-:align: center
-
-```
-
-### Programmatic API
-
-For more fine-grained control, you can use the `pass_diff` function directly in your code:
+For a focused comparison, apply a selected pass directly:
 
 ```python
+import tilelang
 from tilelang.utils.pass_diff import pass_diff
-from tilelang import tvm
 
-# Diff a single pass
-pass_diff(func, tilelang.transform.ThreadSync("shared"))
-
-# Diff a chain of named passes
-pass_diff(func, [
-    ("AnnotateDeviceRegions", tvm.tirx.transform.AnnotateDeviceRegions()),
-    ("SplitHostDevice",       tvm.tirx.transform.SplitHostDevice()),
-    ("ThreadSync",            tilelang.transform.ThreadSync("shared")),
-], mode="html")
+steps = pass_diff(func, tilelang.transform.ThreadSync("shared"))
 ```
 
-| Parameter | Description |
-|-----------|-------------|
-| `func` | A `PrimFunc` or `IRModule` to run passes on |
-| `passes` | A single pass or a list of `(name, pass)` tuples |
-| `mode` | `"terminal"`, `"html"`, or `"both"` (default: `"terminal"`) |
-| `context` | Number of context lines in the unified diff (default: 3) |
-| `html_path` | Output path for HTML report (default: `"pass_diff_report.html"`) |
-
-### How It Works
-
-When enabled, the hook monkey-patches `tvm.ir.transform.Pass.__call__` at import time. Every pass invocation is intercepted to capture the IR before and after, compute a unified diff, and emit the result in the chosen format. When disabled (the default), no patching occurs and there is zero overhead.
-
-### Tips
-
-- **Use `terminal` mode** for quick checks — the colored diff is printed as passes run, so you can see changes in real time.
-- **Use `html` mode** for thorough analysis — the report lets you navigate across many passes, expand hidden context, and copy IR snippets.
-- **Combine with `TILELANG_PASS_DIFF_OUTPUT`** to direct reports to a specific location, e.g. when running in CI or comparing across runs.
-- **The hook captures all passes** in the lowering pipeline, including those triggered internally by `tilelang.compile()`. This makes it useful for understanding the full compilation flow.
+The HTML viewer, output configuration, return schema, and multi-pass Python API
+are documented in {doc}`../tools/pass_diff`.
 
 ## Pass Visualizer: Structure-Tree View Across Passes
 
@@ -344,110 +265,24 @@ html = emit_html(name, stages)
 
 ## AutoDD: Automatic Delta Debugging
 
-When dealing with complex TileLang programs that produce errors, manually isolating the bug can be tedious. **AutoDD** (Automatic Delta Debugging) is a built-in tool that automatically simplifies your program to the minimal code needed to reproduce a specific error.
-
-### What is Delta Debugging?
-
-Delta Debugging is an automated debugging technique that:
-1. Takes a program that triggers a bug
-2. Systematically removes code fragments
-3. Checks if the simplified program still triggers the same bug
-4. Produces the minimal code that reproduces the bug
-
-AutoDD uses a Probability Distribution Driven Delta Debugging (PDD) algorithm for efficient minimization.
-
-### Why Use AutoDD?
-
-- **Large codebases**: Real projects often have hundreds of lines of configuration, helper functions, and logging
-- **Hard-to-locate errors**: Error messages may point to TVM/CUDA internals rather than your TileLang code
-- **Time-saving**: Manually deleting code to isolate bugs is very time-consuming
-
-AutoDD can reduce a 200+ line program to just 30 lines, directly exposing the root cause.
-
-### Basic Usage
+After identifying a stable failure, AutoDD can reduce the Python program while
+preserving a case-sensitive substring from its stdout or stderr:
 
 ```bash
-python -m tilelang.autodd <source_file> --err-msg "<error_message>" -o <output_file>
+python -m tilelang.autodd examples/autodd/tilelang_buggy.py \
+  --err-msg "T.gemm K shape check failed" \
+  -o minimized.py
 ```
 
-### Parameters
-
-| Parameter | Description |
-|-----------|-------------|
-| `source` | Path to the input Python source file |
-| `--err-msg` | Error message to match (searched in stdout or stderr) |
-| `-o, --output` | Path to the minimized output file |
-| `--backend` | Execution backend: `runner` (faster) or `subproc` (more stable), default `runner` |
-| `--timeout` | Timeout for each task in seconds, default 60 |
-| `-j, --jobs` | Number of parallel jobs, default 1 |
-
-### Example
-
-Suppose you have a complex TileLang program with a GEMM shape mismatch bug:
-
-```python
-# buggy_matmul.py (200+ lines)
-@tilelang.jit
-def buggy_matmul(M, N, K, block_M, block_N, block_K, ...):
-    @T.prim_func
-    def matmul_kernel(...):
-        with T.Kernel(...) as (bx, by):
-            A_shared = T.alloc_shared((block_M, block_K), dtype)
-            B_shared = T.alloc_shared((block_M, block_N), dtype)  # Bug: should be (block_K, block_N)
-            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-            # ... lots of other code ...
-            T.gemm(A_shared, B_shared, C_local)  # Error here
-    return matmul_kernel
-```
-
-Run AutoDD to minimize:
-
-```bash
-python -m tilelang.autodd buggy_matmul.py --err-msg "Dimension mismatch" -o minimized.py -j 4
-```
-
-AutoDD will produce a minimal reproduction:
-
-```python
-# minimized.py (~30 lines)
-import tilelang.language as T
-
-def buggy_matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32, *args, **kwargs):
-    @T.prim_func
-    def matmul_kernel():
-        with T.Kernel():
-            A_shared = T.alloc_shared((block_M, block_K), dtype)
-            B_shared = T.alloc_shared((block_M, block_N), dtype)  # Bug exposed!
-            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-            T.gemm(A_shared, B_shared, C_local)
-```
-
-### How AutoDD Works
-
-AutoDD uses AST (Abstract Syntax Tree) analysis with multiple rewrite rules:
-
-1. **Fast Reducers**: Remove statements, simplify if/for constructs
-2. **Canonicalizers**: Expand with statements, add `*args, **kwargs` for compatibility
-3. **Simplifiers**: Replace expressions with constants, simplify function calls
-4. **Slow Reducers**: Remove arbitrary expressions, reduce integer constants
-
-### Tips
-
-- **Error message matching**: Use a unique substring from the error output
-- **Timeout**: Increase `--timeout` for programs with long compilation times
-- **Parallel jobs**: Use `-j 4` or higher to speed up minimization
-- **Backend**: Try `--backend subproc` if `runner` is unstable
-
-### Complete Example
-
-A complete example is available in `examples/autodd/`:
-- `tilelang_buggy.py`: A complex program with a bug (~200 lines)
-- `tilelang_minimized_expected.py`: Expected output after AutoDD (~30 lines)
-- `README.md`: Detailed documentation
+Each candidate is executed and retained only when the substring still appears.
+Use AutoDD after making the failure deterministic, then execute `minimized.py`
+to verify the result. Backend selection, parallel execution, timeouts, and
+annotations for freezing required code are documented in
+{doc}`../tools/autodd`.
 
 ## Conclusion
 
-By carefully examining intermediate representations (IR) before final code generation—and by leveraging runtime printing through `T.print`—one can quickly diagnose where index calculations, copy logic, or other kernel operations deviate from the intended behavior. The **Pass Diff** tool complements this by providing automatic, pass-by-pass visibility into every IR transformation, making it easy to pinpoint exactly which pass introduces an unexpected change. This three-pronged approach (inspecting IR transformations, observing pass-level diffs, and using runtime prints) is often sufficient for resolving generation and correctness issues in TileLang programs.
+By carefully examining intermediate representations (IR) before final code generation and leveraging runtime printing through `T.print`, one can quickly diagnose where index calculations, copy logic, or other kernel operations deviate from the intended behavior. The **Pass Diff** tool complements this by providing automatic, pass-by-pass visibility into every IR transformation, making it easy to pinpoint exactly which pass introduces an unexpected change. This three-pronged approach (inspecting IR transformations, observing pass-level diffs, and using runtime prints) is often sufficient for resolving generation and correctness issues in TileLang programs.
 
 For complex programs where manual debugging is tedious, **AutoDD** provides automated delta debugging to quickly isolate the minimal code that reproduces a bug.
 
