@@ -1,25 +1,37 @@
 """Some customized operations frequently used in tensor programming, exposed on the TileLang language surface."""
 
 from __future__ import annotations
-from tilelang._typing import ShapeType, DType
+from tilelang._typing import ShapeType, DType, BufferLikeType
 import tilelang.language as T
 from tvm import arith
 from tvm.tirx import PrimExpr, Buffer, op
-from tilelang.utils.language import bits_product, prim_expr_equal
+from tilelang.utils.language import bits_product, prim_expr_equal, retrieve_buffer_and_offset
 from .atomic import atomic_max, atomic_min, atomic_add, atomic_addx2, atomic_addx4, atomic_load, atomic_or, atomic_store  # noqa: F401
 
 
-def dp4a(A: Buffer, B: Buffer, C: Buffer) -> PrimExpr:
-    """Perform a 4-element dot product with accumulation (DP4A).
+def dp4a(A: BufferLikeType, B: BufferLikeType, C: BufferLikeType) -> PrimExpr:
+    """Perform a four-element signed int8 dot product accumulated into int32.
 
     Args:
-        A (Buffer): First input buffer
-        B (Buffer): Second input buffer
-        C (Buffer): Accumulation buffer
+        A: First int8 input buffer.
+        B: Second int8 input buffer.
+        C: Int32 accumulator buffer.
 
     Returns:
-        PrimExpr: Handle to the DP4A operation
+        Handle to the DP4A operation.
+
+    Raises:
+        ValueError: If A or B is not int8, or C is not int32.
     """
+    a_dtype = T.dtype(retrieve_buffer_and_offset(A)[0].dtype)
+    b_dtype = T.dtype(retrieve_buffer_and_offset(B)[0].dtype)
+    c_dtype = T.dtype(retrieve_buffer_and_offset(C)[0].dtype)
+    if a_dtype != T.int8:
+        raise ValueError(f"dp4a requires int8 inputs, got A.dtype='{a_dtype}'")
+    if b_dtype != T.int8:
+        raise ValueError(f"dp4a requires int8 inputs, got B.dtype='{b_dtype}'")
+    if c_dtype != T.int32:
+        raise ValueError(f"dp4a requires an int32 accumulator, got C.dtype='{c_dtype}'")
     return T.call_extern(
         "handle",
         "DP4A",
