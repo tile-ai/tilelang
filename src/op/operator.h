@@ -41,6 +41,7 @@ using UpdateBarrierArriveCallback = std::function<void(tirx::Var, PrimExpr)>;
 using RequireSmemAlignmentCallback = std::function<void(tirx::Var, int)>;
 using LayoutMap = ffi::Map<tirx::Buffer, Layout>;
 using BufferMap = ffi::Map<tirx::Var, tirx::Buffer>;
+using BlockAnnotations = ffi::Map<ffi::String, ffi::Any>;
 
 enum AccessMask : int {
   kAccessRead = 1,
@@ -182,16 +183,19 @@ public:
 tirx::Var GetVarFromAccessPtr(const PrimExpr &expr);
 
 TileOperator ParseOperator(const tirx::Call &call);
-TileOperator
-ParseOperator(const tirx::Call &call,
-              const ffi::Map<ffi::String, ffi::Any> &block_annotations);
+TileOperator ParseOperator(const tirx::Call &call,
+                           const BlockAnnotations &block_annotations);
 TileOperator ParseOperator(const tirx::Stmt &stmt);
-TileOperator
-ParseOperator(const tirx::Stmt &stmt,
-              const ffi::Map<ffi::String, ffi::Any> &block_annotations);
+TileOperator ParseOperator(const tirx::Stmt &stmt,
+                           const BlockAnnotations &block_annotations);
 
 using OpBuilderFunc = ffi::TypedFunction<TileOperator(
     ffi::Array<PrimExpr>, ffi::Map<ffi::String, ffi::ObjectRef>)>;
+using OpBlockAnnotationHandlerFunc =
+    ffi::TypedFunction<TileOperator(TileOperator, BlockAnnotations)>;
+
+static constexpr const char *kTLOpBlockAnnotationHandler =
+    "TLOpBlockAnnotationHandler";
 
 #define TIR_REGISTER_TL_TILE_OP(Entry, OpName)                                 \
   const Op &Entry::Get() {                                                     \

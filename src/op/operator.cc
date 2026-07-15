@@ -9,7 +9,6 @@
 #include <tvm/runtime/logging.h>
 
 #include "builtin.h"
-#include "copy.h"
 
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op_attr_types.h>
@@ -18,27 +17,6 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
-
-namespace {
-
-void ResolveCopySafeValue(
-    TileOperator tile_op,
-    const ffi::Map<ffi::String, ffi::Any> &block_annotations) {
-  if (!tile_op.defined() || !tile_op->IsInstance<CopyNode>()) {
-    return;
-  }
-  auto safe_value_map = block_annotations.Get(attr::kSafeValueMap);
-  if (!safe_value_map) {
-    return;
-  }
-  auto *copy_node = const_cast<CopyNode *>(tile_op.as<CopyNode>());
-  auto map = Downcast<ffi::Map<Var, PrimExpr>>(safe_value_map.value());
-  if (map.count(copy_node->src->data)) {
-    copy_node->src_oob_safe_value = map[copy_node->src->data];
-  }
-}
-
-} // namespace
 
 /**
  * @brief Construct a TileOperator from a TIR Call using a registered builder.
@@ -57,18 +35,22 @@ void ResolveCopySafeValue(
  * TileOperator if no builder exists.
  */
 TileOperator ParseOperator(const Call &call) {
-  return ParseOperator(call, ffi::Map<ffi::String, ffi::Any>());
+  return ParseOperator(call, BlockAnnotations());
 }
 
-TileOperator
-ParseOperator(const Call &call,
-              const ffi::Map<ffi::String, ffi::Any> &block_annotations) {
+TileOperator ParseOperator(const Call &call,
+                           const BlockAnnotations &block_annotations) {
   auto op_map = Op::GetAttrMap<OpBuilderFunc>("TLOpBuilder");
+  auto block_annotation_handler_map =
+      Op::GetAttrMap<OpBlockAnnotationHandlerFunc>(kTLOpBlockAnnotationHandler);
   Op op = call->op.as<Op>().value();
   if (op_map.count(op)) {
     auto tile_op = op_map[op](call->args, call->annotations);
     ICHECK(tile_op.defined());
-    ResolveCopySafeValue(tile_op, block_annotations);
+    if (block_annotation_handler_map.count(op)) {
+      tile_op = block_annotation_handler_map[op](tile_op, block_annotations);
+      ICHECK(tile_op.defined());
+    }
     return tile_op;
   }
   return TileOperator();
@@ -87,12 +69,11 @@ ParseOperator(const Call &call,
  * TileOperator if `stmt` is not an Evaluate(Call).
  */
 TileOperator ParseOperator(const Stmt &stmt) {
-  return ParseOperator(stmt, ffi::Map<ffi::String, ffi::Any>());
+  return ParseOperator(stmt, BlockAnnotations());
 }
 
-TileOperator
-ParseOperator(const Stmt &stmt,
-              const ffi::Map<ffi::String, ffi::Any> &block_annotations) {
+TileOperator ParseOperator(const Stmt &stmt,
+                           const BlockAnnotations &block_annotations) {
   if (stmt.as<Evaluate>() && stmt.as<EvaluateNode>()->value.as<CallNode>()) {
     auto call = stmt.as<EvaluateNode>()->value.as<CallNode>();
     return ParseOperator(tvm::ffi::GetRef<Call>(call), block_annotations);

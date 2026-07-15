@@ -84,6 +84,29 @@ Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &lower_args,
 
 namespace {
 
+TileOperator ApplyCopyBlockAnnotations(TileOperator tile_op,
+                                       BlockAnnotations block_annotations) {
+  Copy copy = Downcast<Copy>(tile_op);
+
+  // Safe because this handler is invoked immediately after TLOpBuilder creates
+  // a fresh CopyNode, before the node escapes ParseOperator.
+  auto *node = const_cast<CopyNode *>(copy.operator->());
+
+  node->src_oob_safe_value = PrimExpr();
+  auto safe_value_map_obj = block_annotations.Get(attr::kSafeValueMap);
+  if (!safe_value_map_obj) {
+    return copy;
+  }
+
+  auto safe_value_map =
+      Downcast<Map<Var, PrimExpr>>(safe_value_map_obj.value());
+  auto it = safe_value_map.find(node->src->data);
+  if (it != safe_value_map.end()) {
+    node->src_oob_safe_value = (*it).second;
+  }
+  return copy;
+}
+
 std::vector<CopyImpl> &CopyImplRegistry() {
   static std::vector<CopyImpl> registry;
   return registry;
@@ -580,6 +603,8 @@ Stmt Im2ColOpNode::Lower(const LowerArgs &lower_args,
 // - Takes 5 inputs: src_buffer, dst_buffer, and annotation-driven options.
 // - Marked as opaque since it has side effects (memory writes)
 TIR_REGISTER_TL_TILE_OP(Copy, copy)
+    .set_attr<OpBlockAnnotationHandlerFunc>(kTLOpBlockAnnotationHandler,
+                                            ApplyCopyBlockAnnotations)
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
@@ -594,6 +619,8 @@ TVM_REGISTER_OP("tl.tileop.async_copy")
                                        IntImm(DataType::Int(32), 1));
                                return Copy(args, ann);
                              })
+    .set_attr<OpBlockAnnotationHandlerFunc>(kTLOpBlockAnnotationHandler,
+                                            ApplyCopyBlockAnnotations)
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
@@ -610,6 +637,8 @@ TVM_REGISTER_OP("tl.tileop.tma_copy")
                                        IntImm(DataType::Int(32), 1));
                                return Copy(args, ann);
                              })
+    .set_attr<OpBlockAnnotationHandlerFunc>(kTLOpBlockAnnotationHandler,
+                                            ApplyCopyBlockAnnotations)
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
