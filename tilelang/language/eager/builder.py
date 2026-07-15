@@ -588,8 +588,10 @@ class Builder(BaseBuilder):
 
         # 2. Quick return for trivil types
         if isinstance(value, (tuple, list, tvm.ffi.Array, int, float, str)):
+            self._clear_name_scope(name)
             return value
         if isinstance(value, tirx.IntImm) and value.dtype == "int32":
+            self._clear_name_scope(name)
             return value.value
         if isinstance(value, (Var, Buffer)):
             # Bind TVM Var/Buffer names and also record scope so reusing the same
@@ -666,6 +668,10 @@ class Builder(BaseBuilder):
             return var
         else:
             return value
+
+    def _clear_name_scope(self, name: str) -> None:
+        if name != "_":
+            self.name_inside_frame.pop(name, None)
 
     def assign_slice(self, lval: Any, sl: slice, value: Any, annot=BaseBuilder.empty):
         self.check_continue_break()

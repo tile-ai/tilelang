@@ -277,6 +277,10 @@ class KernelLaunchFrame(TIRFrame):
 def Kernel(
     *blocks: int | tirx.PrimExpr,
     threads: int | list[int] | tuple | None = None,
+    num_ctas: int | None = None,
+    occupancy: int | None = None,
+    num_worker_warps: int | None = None,
+    tileir_hints: dict | None = None,
     prelude: str | None = None,
 ):
     """Tools to quickly construct a kernel launch frame.
@@ -295,6 +299,31 @@ def Kernel(
         A integer representing blockDim.x
         Or a list of integers representing blockDim.(x|y|z)
         if the value is -1, we skip the threadIdx.x binding.
+    num_ctas : int | None
+        TileIR (cuTile) backend only: number of CTAs in a thread-block cluster
+        (cuTile ``num_cta_in_cga``). Must be a power of two in [1, 16]. Ignored
+        by non-TileIR backends. Exposing it here lets ``@tilelang.autotune``
+        sweep it as a kernel argument.
+    occupancy : int | None
+        TileIR (cuTile) backend only: target number of active CTAs per SM, in
+        [1, 32]. ``None`` lets the cuTile compiler choose. Ignored by non-TileIR
+        backends.
+    num_worker_warps : int | None
+        TileIR (cuTile) backend only: number of worker warps per CTA, in
+        {4, 8}. Maps to the entry's ``num_worker_warps_per_cta`` hint per
+        CUDA Tile IR spec 13.3. ``None`` lets the cuTile compiler choose.
+        Ignored by non-TileIR backends.
+    tileir_hints : dict | None
+        TileIR (cuTile) backend only: per-architecture ``optimization_hints``
+        dictionary, e.g. ``{"sm_100": {"num_cta_in_cga": 2}, "sm_120":
+        {"num_cta_in_cga": 4}, "default": {"occupancy": 2}}``. Arch keys are
+        SM names (``sm_90`` … ``sm_121``) or ``"default"``; entry-scoped hint
+        keys are ``num_cta_in_cga``, ``num_worker_warps_per_cta``, and ``occupancy``.
+        Note: ``allow_tma`` and ``latency`` are load/store-scoped in CUDA Tile IR
+        and have no effect on the kernel entry; use per-copy hints via
+        ``T.copy(disable_tma=...)`` / ``T.copy(latency=...)`` instead. Mutually
+        exclusive with the single-value knobs (``num_ctas`` / ``occupancy`` /
+        ``num_worker_warps``). Ignored by non-TileIR backends.
     prelude : str
         The import c code of the kernel,
         will be injected before the generated kernel code.
@@ -336,6 +365,36 @@ def Kernel(
 
     if prelude is not None:
         attrs["pragma_import_c"] = prelude
+
+    # TileIR (cuTile) entry hints. Stored as namespaced launch-block annotations;
+    # only the TileIR backend reads them, every other backend ignores them.
+    if num_ctas is not None:
+        attrs["tileir.num_ctas"] = int(num_ctas)
+    if occupancy is not None:
+        attrs["tileir.occupancy"] = int(occupancy)
+    if num_worker_warps is not None:
+        attrs["tileir.num_worker_warps"] = int(num_worker_warps)
+    if tileir_hints:
+        if not isinstance(tileir_hints, dict):
+            raise TypeError(f"tileir_hints must be a dict of per-arch hint dicts; got {type(tileir_hints).__name__}.")
+        # Encode as a nested str->(str->int) map (bool is not losslessly
+        # representable in a TVM Map annotation, so booleans are stored as
+        # ints). The only bool-typed hint key, `allow_tma`, is load/store-
+        # scoped and is REJECTED outright by the TileIR lowering's
+        # `_validated_hints` when it appears here (see the docstring note
+        # above) -- it is never decoded back to bool, since it can never
+        # reach the kernel entry.
+        try:
+            attrs["tileir.hints"] = {
+                str(arch_key): {str(hint_key): int(hint_value) for hint_key, hint_value in (arch_hints or {}).items()}
+                for arch_key, arch_hints in tileir_hints.items()
+            }
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError(
+                f"tileir_hints: each per-arch value must be a dict of numeric hint values "
+                f"(e.g., {{'sm_100': {{'num_cta_in_cga': 2}}}}). "
+                f"Error encoding hints: {exc}"
+            ) from exc
 
     return _ffi_api.KernelLaunch(blocks, threads, attrs)
 
