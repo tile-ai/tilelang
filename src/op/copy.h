@@ -32,6 +32,8 @@ public:
   Buffer src, dst;                   // Source and destination buffers
   Array<Range> src_range, dst_range; // Ranges for each dimension in src and dst
   Optional<PrimExpr> dst_block;      // Destination block index for cluster copy
+  // Annotated source OOB fallback value resolved from the enclosing block.
+  Optional<PrimExpr> src_oob_safe_value;
   Map<String, ObjectRef> annotations; // Backend/pass-specific annotations.
   // Common SIMT annotation keys:
   //   - "coalesced_width": IntImm, width for coalesced memory access.
@@ -52,6 +54,7 @@ public:
         .def_ro("src_range", &CopyNode::src_range)
         .def_ro("dst_range", &CopyNode::dst_range)
         .def_ro("dst_block", &CopyNode::dst_block)
+        .def_ro("src_oob_safe_value", &CopyNode::src_oob_safe_value)
         .def_ro("annotations", &CopyNode::annotations);
   }
 
@@ -80,9 +83,7 @@ public:
   /*!
    * \brief Generate SIMT (thread-level) loop for copying.
    */
-  For MakeSIMTLoop(
-      arith::Analyzer *analyzer,
-      const Map<Var, PrimExpr> &safe_value_map = Map<Var, PrimExpr>()) const;
+  For MakeSIMTLoop(arith::Analyzer *analyzer) const;
 
   /*!
    * \brief Create iterator variables for multi-dimensional copy loops.

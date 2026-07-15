@@ -172,6 +172,50 @@ def test_tilelang_elementwise_copy_oob_safe_value_non_regression():
     torch.testing.assert_close(b, ref_b, rtol=1e-2, atol=1e-2)
 
 
+def tilelang_copy_oob_safe_value_lexical_scope():
+    M = N = 60
+    BM = BN = 64
+
+    @T.prim_func
+    def main(A: T.Tensor((M, N), "int32"), Out: T.Tensor((BM, BN), "int32")):
+        with T.Kernel(1, threads=128):
+            inner = T.alloc_shared((BM, BN), "int32")
+            outer = T.alloc_shared((BM, BN), "int32")
+            with T.sblock("outer"):
+                T.reads()
+                T.writes()
+                T.annotate_safe_value({A: -1})
+                with T.sblock("inner"):
+                    T.reads()
+                    T.writes()
+                    T.annotate_safe_value({A: -99})
+                    T.copy(A[0:BM, 0:BN], inner)
+                T.copy(A[0:BM, 0:BN], outer)
+                for i, j in T.Parallel(BM, BN):
+                    Out[i, j] = outer[i, j]
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+def test_tilelang_copy_oob_safe_value_lexical_scope():
+    M = N = 60
+    BM = BN = 64
+    kernel = tilelang.compile(
+        tilelang_copy_oob_safe_value_lexical_scope(),
+        out_idx=[1],
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+    a = torch.arange(M * N, dtype=torch.int32, device="cuda").reshape(M, N)
+    out = kernel(a)
+    assert out.shape == (BM, BN)
+    assert "-1" in kernel.get_kernel_source()
+    torch.testing.assert_close(out[:M, :N].cpu(), a.cpu(), rtol=0, atol=0)
+    assert out[60, :8].cpu().tolist() == [-1] * 8
+    assert out[:8, 60].cpu().tolist() == [-1] * 8
+    assert out[60, 60].item() == -1
+
+
 def tilelang_copy_with_stride(M, N, NN, block_M, block_N, dtype=T.float16):
     @T.prim_func
     def main(

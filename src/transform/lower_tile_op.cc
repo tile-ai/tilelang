@@ -334,6 +334,10 @@ private:
   using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
 
   Stmt VisitStmt_(const SBlockNode *op) final {
+    Map<String, Any> previous_block_annotations = block_annotations_;
+    Map<Var, PrimExpr> previous_safe_value_map = safe_value_map_;
+    block_annotations_ = op->annotations;
+
     // Record the mapping from buffer data var to buffer for later lookup
     for (auto buffer : op->alloc_buffers) {
       buffer_map_.insert({buffer->data, buffer});
@@ -347,6 +351,11 @@ private:
       buffer_data_to_buffer_.Set(buffer->data, buffer);
     }
     RecordSafeValueAnnotations(op);
+    if (!safe_value_map_.empty()) {
+      block_annotations_.Set(attr::kSafeValueMap, safe_value_map_);
+    } else {
+      block_annotations_.erase(attr::kSafeValueMap);
+    }
     Map<Var, Layout> vmap;
     if (op->annotations.count(attr::kLayoutMap)) {
       auto layout_map = op->annotations.at(attr::kLayoutMap)
@@ -430,6 +439,8 @@ private:
       }
     }
 
+    block_annotations_ = std::move(previous_block_annotations);
+    safe_value_map_ = std::move(previous_safe_value_map);
     return block;
   }
 
@@ -1148,7 +1159,7 @@ private:
     if (call && call->op.as<GlobalVarNode>())
       return Downcast<Evaluate>(IRMutatorWithAnalyzer::VisitStmt_(op));
 
-    auto tile_op = ParseOperator(GetRef<Stmt>(op));
+    auto tile_op = ParseOperator(GetRef<Stmt>(op), block_annotations_);
     if (!tile_op.defined())
       return IRMutatorWithAnalyzer::VisitStmt_(op);
 
@@ -1210,7 +1221,6 @@ private:
     lower_args.layout_map = layout_map_;
     lower_args.buffer_remap = buffer_remap_;
     lower_args.bind_var_to_expr = bind_var_to_expr;
-    lower_args.safe_value_map = safe_value_map_;
     lower_args.mbar_phase_expr = loop_mbar_phase_stack_.empty()
                                      ? PrimExpr(IntImm(DataType::Int(32), 0))
                                      : loop_mbar_phase_stack_.back();
@@ -1544,6 +1554,7 @@ private:
   }
 
   Target target_;
+  Map<String, Any> block_annotations_;
   Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Var, PrimExpr> safe_value_map_;
   Map<Buffer, Layout> layout_map_;

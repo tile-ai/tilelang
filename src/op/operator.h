@@ -101,10 +101,6 @@ struct LowerArgs {
   // Map from Bind variable to its bound expression, for resolving
   // fragment buffer accesses through Bind values
   ffi::Map<tirx::Var, PrimExpr> bind_var_to_expr;
-  // Map from buffer data Var to its annotated safe value. Tile-op lowerings
-  // use this to materialize source OOB false paths before
-  // LegalizeSafeMemoryAccess runs.
-  ffi::Map<tirx::Var, PrimExpr> safe_value_map;
   // Fallback mbarrier parity for ops that do not carry an explicit
   // tl.pipeline_mbar_phase_expr annotation. LowerTileOp derives this from the
   // nearest enclosing serial loop so non-pipelined TMA loops still alternate
@@ -185,8 +181,14 @@ public:
 
 tirx::Var GetVarFromAccessPtr(const PrimExpr &expr);
 
-TileOperator ParseOperator(tirx::Call call);
-TileOperator ParseOperator(tirx::Stmt stmt);
+TileOperator ParseOperator(const tirx::Call &call);
+TileOperator
+ParseOperator(const tirx::Call &call,
+              const ffi::Map<ffi::String, ffi::Any> &block_annotations);
+TileOperator ParseOperator(const tirx::Stmt &stmt);
+TileOperator
+ParseOperator(const tirx::Stmt &stmt,
+              const ffi::Map<ffi::String, ffi::Any> &block_annotations);
 
 using OpBuilderFunc = ffi::TypedFunction<TileOperator(
     ffi::Array<PrimExpr>, ffi::Map<ffi::String, ffi::ObjectRef>)>;
