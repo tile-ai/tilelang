@@ -64,11 +64,12 @@ def atomic_max(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
     if dst_extent is None and src_extent is None:
         # Scalar path: use atomicmax_elem_op intrinsic
         return_type = dst.dtype if return_prev else "handle"
+        atomic_max_op = op.Op.get("tl.atomic_max_ret_elem_op") if return_prev else op.Op.get("tl.atomic_max_elem_op")
         memory_order_id = _MEMORY_ORDER_ID_MAP[memory_order] if memory_order else 0
 
         return T.call_intrin(
             return_type,
-            op.Op.get("tl.atomic_max_elem_op"),
+            atomic_max_op,
             T.access_ptr(dst, "rw"),
             value,
             memory_order_id,
@@ -146,11 +147,12 @@ def atomic_min(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
     if dst_extent is None and src_extent is None:
         # Scalar path: use atomicmin_elem_op intrinsic
         return_type = dst.dtype if return_prev else "handle"
+        atomic_min_op = op.Op.get("tl.atomic_min_ret_elem_op") if return_prev else op.Op.get("tl.atomic_min_elem_op")
         memory_order_id = _MEMORY_ORDER_ID_MAP[memory_order] if memory_order else 0
 
         return T.call_intrin(
             return_type,
-            op.Op.get("tl.atomic_min_elem_op"),
+            atomic_min_op,
             T.access_ptr(dst, "rw"),
             value,
             memory_order_id,
@@ -311,8 +313,10 @@ def atomic_addx2(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> Pri
         >>>         for j in range(0, grads.shape[1], 2):  # Process in pairs
         >>>             atomic_addx2(global_grads[i, j:j+2], grads[i, j:j+2])
     """
-    atomic_addx2_op = op.Op.get("tl.atomic_addx2_elem_op") if return_prev else op.Op.get("tl.atomic_addx2_elem_op")
-    return_type = dst.dtype if return_prev else "handle"
+    atomic_addx2_op = op.Op.get("tl.atomic_addx2_ret_elem_op") if return_prev else op.Op.get("tl.atomic_addx2_elem_op")
+    # The ret variant returns the two previous elements packed as a 2-lane
+    # vector (e.g. half2/float2); type it accordingly so the store matches.
+    return_type = f"{dst.dtype}x2" if return_prev else "handle"
     return T.call_intrin(return_type, atomic_addx2_op, T.access_ptr(dst, "rw"), T.access_ptr(value, "r"))
 
 
@@ -349,8 +353,13 @@ def atomic_addx4(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> Pri
         >>> rgba_add = T.Tensor([4], "float32", name="rgba_add")
         >>> atomic_addx4(rgba_dst, rgba_add)  # Atomic blend of all 4 channels
     """
-    atomic_addx4_op = op.Op.get("tl.atomic_addx4_elem_op") if return_prev else op.Op.get("tl.atomic_addx4_elem_op")
-    return_type = "float4" if "float" in str(dst.dtype).lower() else "handle"
+    atomic_addx4_op = op.Op.get("tl.atomic_addx4_ret_elem_op") if return_prev else op.Op.get("tl.atomic_addx4_elem_op")
+    if return_prev:
+        # The ret variant returns the four previous elements packed as a 4-lane
+        # vector (e.g. float4); type it accordingly so the store matches.
+        return_type = f"{dst.dtype}x4"
+    else:
+        return_type = "float4" if "float" in str(dst.dtype).lower() else "handle"
     return T.call_intrin(return_type, atomic_addx4_op, T.access_ptr(dst, "rw"), T.access_ptr(value, "r"))
 
 
