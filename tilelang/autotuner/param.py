@@ -15,6 +15,7 @@ import errno
 
 from tilelang.jit import JITKernel
 from tilelang.jit.adapter.base import CachedTextSource
+from tilelang.tileir.artifact import TILEIR_CACHE_FILENAME
 import cloudpickle
 import os
 import shutil
@@ -58,7 +59,7 @@ class CompileArgs:
     """
 
     out_idx: list[int] | int | None = None
-    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch"] = "auto"
+    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "tileir"] = "auto"
     target: TargetLike = "auto"
     target_host: TargetLike | None = None
     verbose: bool = False
@@ -243,8 +244,9 @@ class AutotuneResult:
         host_kernel_path = os.path.join(cache_path, HOST_KERNEL_PATH)
         if verbose:
             logger.debug(f"Saving wrapped kernel source code to file: {host_kernel_path}")
-        # Match kernel_cache behavior: use host source for tvm_ffi, otherwise wrapped kernel
-        if kernel.execution_backend == "tvm_ffi" or kernel.execution_backend == "cutedsl":
+        # Match backend cache behavior: host-code backends save the host source,
+        # Python-source backends save the executable wrapper source.
+        if kernel.execution_backend in {"tvm_ffi", "cutedsl", "tileir"}:
             self._safe_write_file(host_kernel_path, "w", lambda f: f.write(kernel.adapter.get_host_source()))
         else:
             self._safe_write_file(host_kernel_path, "w", lambda f: f.write(kernel.adapter.get_kernel_source()))
@@ -301,6 +303,11 @@ class AutotuneResult:
                 if verbose:
                     logger.debug(f"Saving CuTeDSL cubin to file: {dst_cubin}")
                 self._safe_write_file(dst_cubin, "wb", lambda f: f.write(self._load_binary(src_cubin)))
+        elif kernel.execution_backend == "tileir":
+            payload = kernel.adapter._serialize_tileir_artifact(kernel.adapter.tileir_artifact)
+            if verbose:
+                logger.debug(f"Saving TileIR runtime artifact to file: {kernel_lib_path}")
+            self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(payload))
         else:
             src_lib_path = kernel.adapter.libpath
             if verbose:
@@ -386,20 +393,30 @@ class AutotuneResult:
             logger.error(f"Error loading kernel parameters from disk: {e}")
 
         if host_kernel_source and device_kernel_source and kernel_params:
-            return JITKernel.from_database(
-                func=func,
-                host_kernel_source=CachedTextSource(text=host_kernel_source),
-                device_kernel_source=CachedTextSource(text=device_kernel_source),
-                kernel_lib_path=kernel_lib_path,
-                params=kernel_params,
-                target=backend_context.target,
-                target_host=backend_context.target_host,
-                out_idx=out_idx,
-                execution_backend=execution_backend,
-                pass_configs=pass_configs,
-                compile_flags=compile_flags,
-                backend_context=backend_context,
-            )
+            try:
+                return JITKernel.from_database(
+                    func=func,
+                    host_kernel_source=CachedTextSource(text=host_kernel_source),
+                    device_kernel_source=CachedTextSource(text=device_kernel_source),
+                    kernel_lib_path=kernel_lib_path,
+                    params=kernel_params,
+                    target=backend_context.target,
+                    target_host=backend_context.target_host,
+                    out_idx=out_idx,
+                    execution_backend=execution_backend,
+                    pass_configs=pass_configs,
+                    compile_flags=compile_flags,
+                    backend_context=backend_context,
+                )
+            except Exception as err:
+                logger.warning(
+                    "Failed to reload autotune cache at %s; treating it as a cache miss: %s",
+                    cache_path,
+                    err,
+                    exc_info=verbose,
+                )
+                shutil.rmtree(cache_path, ignore_errors=True)
+                return None
         else:
             return None
 
@@ -572,6 +589,8 @@ class AutotuneResult:
             return EXECUTABLE_PATH
         if execution_backend == "cutedsl":
             return KERNEL_PY_PATH
+        if execution_backend == "tileir":
+            return TILEIR_CACHE_FILENAME
         return KERNEL_LIB_PATH
 
     @classmethod

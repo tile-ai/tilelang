@@ -28,7 +28,7 @@ import subprocess
 TILEIRAS_PACKAGES = ("nvidia-cuda-tileiras", "nvidia-cuda-nvcc", "nvidia-nvvm", "nvidia-nvjitlink")
 CUDA_TILE_IR_MLIR_MODULE = "cuda_tile._mlir.dialects.cuda_tile"
 CUDA_TILE_IR_SUPPORTED_VERSION = "13.3"
-CUDA_TILE_RUNTIME_SUPPORTED_VERSION = "1.3"
+CUDA_TILE_RUNTIME_SUPPORTED_VERSION = "1.5"
 CUDA_TILE_RUNTIME_MODULE = "cuda.tile._cext"
 CUDA_TILE_IR_REQUIRED_SYMBOLS = (
     "alloca",
