@@ -20,3 +20,4 @@ from .language import (
 )
 from .deprecated import deprecated  # noqa: F401
 from .version import build_date  # noqa: F401
+from .pass_timing import TileLangPassTimingInstrument, PassTimingRecord  # noqa: F401

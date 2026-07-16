@@ -50,6 +50,8 @@ TVM_REGISTER_PASS_CONFIG_OPTION(kIfStmtBindingInlineReplayableBinds, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableOutOfBoundWarning, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnableDumpIR, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDumpIRDir, ffi::String);
+TVM_REGISTER_PASS_CONFIG_OPTION(kPassProfile, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kPassProfileThresholdMs, FloatImm);
 
 DataType CuTensorMapType() { return DataType::UInt(8, 128); }
 

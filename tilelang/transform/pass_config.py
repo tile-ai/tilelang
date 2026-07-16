@@ -283,6 +283,12 @@ class PassConfigKey(str, Enum):
     TL_DUMP_IR_DIR = "tl.dump_ir_path"
     """Path to the directory where IR will be dumped. Default: ./dump_ir/"""
 
+    TL_PASS_PROFILE = "tl.pass_profile"
+    """Enable per-pass timing profiling. Default: False"""
+
+    TL_PASS_PROFILE_THRESHOLD_MS = "tl.pass_profile_threshold_ms"
+    """Only show passes slower than this threshold (ms). 0 = show all. Default: 0"""
+
 
 _DEPRECATED_PASS_CONFIG_MESSAGES = {
     PassConfigKey.TL_DISABLE_TMA_LOWER.value: (

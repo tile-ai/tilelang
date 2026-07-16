@@ -198,6 +198,10 @@ static constexpr const char *kDisableOutOfBoundWarning =
 static constexpr const char *kEnableDumpIR = "tl.enable_dump_ir";
 static constexpr const char *kDumpIRDir = "tl.dump_ir_path";
 
+static constexpr const char *kPassProfile = "tl.pass_profile";
+static constexpr const char *kPassProfileThresholdMs =
+    "tl.pass_profile_threshold_ms";
+
 /*!
  * \brief Get the type of the CUDA tensor map
  *
