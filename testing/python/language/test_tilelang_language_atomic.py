@@ -1,3 +1,4 @@
+import pytest
 import tilelang.testing
 import tilelang.layout
 import tilelang.language as T
@@ -600,6 +601,46 @@ def run_atomic_load_store(M, N, block_M, block_N, dtype=T.float32):
     B = torch.zeros(M, N, dtype=getattr(torch, dtype)).cuda()
     kernel(A, B)
     torch.testing.assert_close(B, A, atol=1e-3, rtol=1e-3)
+
+
+def _build_atomic_load_with_memory_order(memory_order):
+    @T.prim_func
+    def kernel(source: T.Tensor((1,), T.int32), output: T.Tensor((1,), T.int32)):
+        with T.Kernel(1, threads=1):
+            output[0] = T.atomic_load(source[0], memory_order=memory_order)
+
+    return kernel
+
+
+def _build_atomic_store_with_memory_order(memory_order):
+    @T.prim_func
+    def kernel(destination: T.Tensor((1,), T.int32)):
+        with T.Kernel(1, threads=1):
+            T.atomic_store(destination[0], 1, memory_order=memory_order)
+
+    return kernel
+
+
+@pytest.mark.parametrize("memory_order", ["relaxed", "consume", "acquire", "seq_cst"])
+def test_atomic_load_accepts_valid_memory_orders(memory_order):
+    assert _build_atomic_load_with_memory_order(memory_order) is not None
+
+
+@pytest.mark.parametrize("memory_order", ["release", "acq_rel", "invalid"])
+def test_atomic_load_rejects_unsupported_memory_orders(memory_order):
+    with pytest.raises(ValueError, match="atomic_load does not support memory_order"):
+        _build_atomic_load_with_memory_order(memory_order)
+
+
+@pytest.mark.parametrize("memory_order", ["relaxed", "release", "seq_cst"])
+def test_atomic_store_accepts_valid_memory_orders(memory_order):
+    assert _build_atomic_store_with_memory_order(memory_order) is not None
+
+
+@pytest.mark.parametrize("memory_order", ["consume", "acquire", "acq_rel", "invalid"])
+def test_atomic_store_rejects_unsupported_memory_orders(memory_order):
+    with pytest.raises(ValueError, match="atomic_store does not support memory_order"):
+        _build_atomic_store_with_memory_order(memory_order)
 
 
 @tilelang.testing.requires_cuda
