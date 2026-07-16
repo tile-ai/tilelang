@@ -481,6 +481,26 @@ private:
         }
         return;
       }
+      if (const auto *gemm = tile_op.as<GemmNode>()) {
+        if (IsBranchPrivateBuffer(gemm->a_)) {
+          summary_.read_buffers.insert(gemm->a_);
+        }
+        if (IsBranchPrivateBuffer(gemm->b_)) {
+          summary_.read_buffers.insert(gemm->b_);
+        }
+        if (IsBranchPrivateBuffer(gemm->c_)) {
+          summary_.write_buffers.insert(gemm->c_);
+          if (!is_one(gemm->clearAccum_)) {
+            summary_.read_buffers.insert(gemm->c_);
+          }
+        }
+        VisitExpr(gemm->offsetA_);
+        VisitExpr(gemm->offsetB_);
+        for (const auto &coord : gemm->cCoords_) {
+          VisitExpr(coord);
+        }
+        return;
+      }
     }
 
     if (op->op.same_as(tl::access_ptr())) {
