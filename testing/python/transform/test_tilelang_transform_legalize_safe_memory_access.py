@@ -343,6 +343,62 @@ def atomic_add_return_access_ptr_legalize():
     return main, expected
 
 
+def atomic_addx2_return_access_ptr_legalize():
+    dtype = T.float32
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((16,), dtype=dtype),
+        B: T.Tensor((8,), dtype=dtype),
+        out: T.Tensor((8,), dtype=dtype),
+    ):
+        for i in T.serial(4):
+            out[i * 2 : i * 2 + 2] = T.atomic_addx2(A[i * 4 + 10], B[i * 2], return_prev=True)
+
+    @T.prim_func
+    def expected(
+        A: T.Tensor((16,), dtype=dtype),
+        B: T.Tensor((8,), dtype=dtype),
+        out: T.Tensor((8,), dtype=dtype),
+    ):
+        for i in T.serial(4):
+            out[i * 2 : i * 2 + 2] = T.if_then_else(
+                i < 2,
+                T.atomic_addx2(A[i * 4 + 10], B[i * 2], return_prev=True),
+                T.Broadcast(T.float32(0), 2),
+            )
+
+    return main, expected
+
+
+def atomic_addx4_return_access_ptr_legalize():
+    dtype = T.float32
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((16,), dtype=dtype),
+        B: T.Tensor((16,), dtype=dtype),
+        out: T.Tensor((16,), dtype=dtype),
+    ):
+        for i in T.serial(4):
+            out[i * 4 : i * 4 + 4] = T.atomic_addx4(A[i * 4 + 8], B[i * 4], return_prev=True)
+
+    @T.prim_func
+    def expected(
+        A: T.Tensor((16,), dtype=dtype),
+        B: T.Tensor((16,), dtype=dtype),
+        out: T.Tensor((16,), dtype=dtype),
+    ):
+        for i in T.serial(4):
+            out[i * 4 : i * 4 + 4] = T.if_then_else(
+                i < 2,
+                T.atomic_addx4(A[i * 4 + 8], B[i * 4], return_prev=True),
+                T.Broadcast(T.float32(0), 4),
+            )
+
+    return main, expected
+
+
 def atomic_store_access_ptr_legalize():
     dtype = T.int32
 
@@ -459,6 +515,12 @@ def assert_atomic_add_return_access_ptr_legalize():
     _assert_legalize_matches_expected(func, expected)
 
 
+def assert_atomic_vector_add_return_access_ptr_legalize():
+    for make_case in (atomic_addx2_return_access_ptr_legalize, atomic_addx4_return_access_ptr_legalize):
+        func, expected = make_case()
+        _assert_legalize_matches_expected(func, expected)
+
+
 def assert_atomic_store_access_ptr_legalize():
     func, expected = atomic_store_access_ptr_legalize()
     _assert_legalize_matches_expected(func, expected)
@@ -506,6 +568,10 @@ def test_atomic_load_access_ptr_oob():
 
 def test_atomic_add_return_access_ptr_oob():
     assert_atomic_add_return_access_ptr_legalize()
+
+
+def test_atomic_vector_add_return_access_ptr_oob():
+    assert_atomic_vector_add_return_access_ptr_legalize()
 
 
 def test_atomic_store_access_ptr_oob():

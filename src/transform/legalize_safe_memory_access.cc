@@ -313,6 +313,15 @@ private:
     }
 
     PrimExpr safe_value = GetSafeValue(fallback_ptr->base_load->buffer);
+    // Cast preserves the lane count, so vector-returning atomics need their
+    // scalar buffer fallback broadcast before any element-type conversion.
+    if (safe_value.dtype().lanes() != call.dtype().lanes()) {
+      ICHECK(safe_value.dtype().is_scalar() &&
+             call.dtype().is_fixed_length_vector())
+          << "Cannot adapt safe value " << safe_value << " with dtype "
+          << safe_value.dtype() << " to atomic return dtype " << call.dtype();
+      safe_value = Broadcast(safe_value, call.dtype().lanes());
+    }
     if (safe_value.dtype() != call.dtype()) {
       safe_value = Cast(call.dtype(), safe_value);
     }
@@ -407,7 +416,8 @@ private:
   // Check if the call is an atomic operation
   bool IsAtomicOp(const Op &op) {
     return op == atomic_add_elem_op() || op == atomic_add_ret_elem_op() ||
-           op == atomic_addx2_elem_op() || op == atomic_addx4_elem_op() ||
+           op == atomic_addx2_elem_op() || op == atomic_addx2_ret_elem_op() ||
+           op == atomic_addx4_elem_op() || op == atomic_addx4_ret_elem_op() ||
            op == atomic_load_elem_op() || op == atomic_store_elem_op() ||
            op == atomic_max_elem_op() || op == atomic_max_ret_elem_op() ||
            op == atomic_min_elem_op() || op == atomic_min_ret_elem_op();

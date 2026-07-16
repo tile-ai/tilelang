@@ -730,5 +730,131 @@ def test_tile_atomic_max_expr():
     run_tile_atomic_max_expr(128, 128, 32, 32)
 
 
+def atomic_scalar_return_prev_program(op_name, val):
+    atom = getattr(T, op_name)
+
+    @T.prim_func
+    def main(Dst: T.Tensor((1,), "float32"), Prev: T.Tensor((1,), "float32")):
+        with T.Kernel(1, threads=1):
+            Prev[0] = atom(Dst[0], val, return_prev=True)
+
+    return main
+
+
+def run_atomic_scalar_return_prev(op_name):
+    # Pick val so the op actually changes dst (else a silent no-op would still
+    # pass): max needs val > dst, min needs val < dst.
+    val = 5.0 if op_name == "atomic_max" else 1.0
+    kernel = tilelang.compile(atomic_scalar_return_prev_program(op_name, val))
+    dst = torch.tensor([3.0], dtype=torch.float32).cuda()
+    prev = torch.zeros(1, dtype=torch.float32).cuda()
+    kernel(dst, prev)
+    assert prev.item() == 3.0, f"{op_name} return_prev should be the old value"
+    expected = max(3.0, val) if op_name == "atomic_max" else min(3.0, val)
+    assert dst.item() == expected, f"{op_name} should still update Dst"
+
+
+@tilelang.testing.requires_cuda
+def test_atomic_scalar_return_prev():
+    run_atomic_scalar_return_prev("atomic_max")
+    run_atomic_scalar_return_prev("atomic_min")
+
+
+def atomic_addx2_return_prev_program(dtype=T.float32):
+    @T.prim_func
+    def main(Dst: T.Tensor((2,), dtype), Val: T.Tensor((2,), dtype), Prev: T.Tensor((2,), dtype)):
+        with T.Kernel(1, threads=1):
+            Prev[0:2] = T.atomic_addx2(Dst[0], Val[0], return_prev=True)
+
+    return main
+
+
+def atomic_addx4_return_prev_program(dtype=T.float32):
+    @T.prim_func
+    def main(Dst: T.Tensor((4,), dtype), Val: T.Tensor((4,), dtype), Prev: T.Tensor((4,), dtype)):
+        with T.Kernel(1, threads=1):
+            Prev[0:4] = T.atomic_addx4(Dst[0], Val[0], return_prev=True)
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+def test_atomic_addx2_return_prev():
+    kernel = tilelang.compile(atomic_addx2_return_prev_program(T.float32))
+    assert "AtomicAddx2Ret" in kernel.get_kernel_source()
+    dst = torch.tensor([1.0, 2.0], dtype=torch.float32).cuda()
+    val = torch.tensor([10.0, 20.0], dtype=torch.float32).cuda()
+    prev = torch.zeros(2, dtype=torch.float32).cuda()
+    kernel(dst, val, prev)
+    torch.testing.assert_close(prev, torch.tensor([1.0, 2.0], device="cuda"))
+    torch.testing.assert_close(dst, torch.tensor([11.0, 22.0], device="cuda"))
+
+
+@tilelang.testing.requires_cuda
+def test_atomic_addx4_return_prev():
+    kernel = tilelang.compile(atomic_addx4_return_prev_program(T.float32))
+    assert "AtomicAddx4Ret" in kernel.get_kernel_source()
+    dst = torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float32).cuda()
+    val = torch.tensor([10.0, 20.0, 30.0, 40.0], dtype=torch.float32).cuda()
+    prev = torch.zeros(4, dtype=torch.float32).cuda()
+    kernel(dst, val, prev)
+    torch.testing.assert_close(prev, torch.tensor([1.0, 2.0, 3.0, 4.0], device="cuda"))
+    torch.testing.assert_close(dst, torch.tensor([11.0, 22.0, 33.0, 44.0], device="cuda"))
+
+
+def run_atomic_addx2_return_prev_16bit(dtype, torch_dtype):
+    # The 16-bit packed 2-lane vector is stored as uint1 in codegen, while
+    # AtomicAddx2Ret returns the native __half2 / __nv_bfloat162. The ret path
+    # must bridge with tl::to_uint1 so the store LHS (uint1) matches; otherwise
+    # nvcc fails with `no operator "=" ... uint1 = half2`.
+    kernel = tilelang.compile(atomic_addx2_return_prev_program(dtype))
+    src = kernel.get_kernel_source()
+    assert "tl::to_uint1(AtomicAddx2Ret" in src, src
+    dst = torch.tensor([1.0, 2.0], dtype=torch_dtype).cuda()
+    val = torch.tensor([10.0, 20.0], dtype=torch_dtype).cuda()
+    prev = torch.zeros(2, dtype=torch_dtype).cuda()
+    kernel(dst, val, prev)
+    torch.testing.assert_close(prev, torch.tensor([1.0, 2.0], dtype=torch_dtype, device="cuda"))
+    torch.testing.assert_close(dst, torch.tensor([11.0, 22.0], dtype=torch_dtype, device="cuda"))
+
+
+@tilelang.testing.requires_cuda
+def test_atomic_addx2_return_prev_fp16():
+    run_atomic_addx2_return_prev_16bit(T.float16, torch.float16)
+
+
+@tilelang.testing.requires_cuda
+def test_atomic_addx2_return_prev_bf16():
+    run_atomic_addx2_return_prev_16bit(T.bfloat16, torch.bfloat16)
+
+
+def run_atomic_addx4_return_prev_16bit(dtype, torch_dtype):
+    # There is NO single-atomic fp16x4/bf16x4 add in hardware (PTX vector
+    # atomic .v4 tops out at .f16x2 for 16-bit types). The x4 ret path realizes
+    # the quad as two per-pair AtomicAddx2Ret calls and returns them packed as
+    # a uint2 (a half4/bf16x4 is stored as uint2), matching the store LHS. This
+    # is per-pair atomic, not whole-quad -- the same contract as the fp32-x4
+    # scalar fallback.
+    kernel = tilelang.compile(atomic_addx4_return_prev_program(dtype))
+    src = kernel.get_kernel_source()
+    assert "AtomicAddx4Ret" in src, src
+    dst = torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch_dtype).cuda()
+    val = torch.tensor([10.0, 20.0, 30.0, 40.0], dtype=torch_dtype).cuda()
+    prev = torch.zeros(4, dtype=torch_dtype).cuda()
+    kernel(dst, val, prev)
+    torch.testing.assert_close(prev, torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch_dtype, device="cuda"))
+    torch.testing.assert_close(dst, torch.tensor([11.0, 22.0, 33.0, 44.0], dtype=torch_dtype, device="cuda"))
+
+
+@tilelang.testing.requires_cuda
+def test_atomic_addx4_return_prev_fp16():
+    run_atomic_addx4_return_prev_16bit(T.float16, torch.float16)
+
+
+@tilelang.testing.requires_cuda
+def test_atomic_addx4_return_prev_bf16():
+    run_atomic_addx4_return_prev_16bit(T.bfloat16, torch.bfloat16)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

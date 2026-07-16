@@ -597,6 +597,21 @@ AtomicAddx2Ret(half_t *ref, ValType val,
   }
 }
 
+// No single-atomic fp16x4 exists, so this is two per-pair AtomicAddx2Ret
+// (per-pair atomic, like the fp32-x4 fallback). Returns uint2 (the half4 store
+// type): the two half2 packed.
+template <typename SrcType>
+TL_DEVICE uint2
+AtomicAddx4Ret(half_t *ref, SrcType *val,
+               int memory_order = int(cuda::memory_order_relaxed)) {
+  half2 prev_lo = AtomicAddx2Ret(ref, val, memory_order);
+  half2 prev_hi = AtomicAddx2Ret(ref + 2, val + 2, memory_order);
+  uint2 ret;
+  ret.x = *reinterpret_cast<const unsigned int *>(&prev_lo);
+  ret.y = *reinterpret_cast<const unsigned int *>(&prev_hi);
+  return ret;
+}
+
 #if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ > 750))
 template <typename T> TL_DEVICE __nv_bfloat162 ToBfloat162(T *val) {
   return *reinterpret_cast<const __nv_bfloat162 *>(val);
@@ -660,6 +675,19 @@ AtomicAddx2Ret(bfloat16_t *ref, src_type *val,
         tl_atomic_detail::UnpackBits16<__nv_bfloat16>(ret_val_x_cast),
         tl_atomic_detail::UnpackBits16<__nv_bfloat16>(ret_val_y_cast));
   }
+}
+
+// bf16 counterpart of the fp16 AtomicAddx4Ret above.
+template <typename SrcType>
+TL_DEVICE uint2
+AtomicAddx4Ret(bfloat16_t *ref, SrcType *val,
+               int memory_order = int(cuda::memory_order_relaxed)) {
+  __nv_bfloat162 prev_lo = AtomicAddx2Ret(ref, val, memory_order);
+  __nv_bfloat162 prev_hi = AtomicAddx2Ret(ref + 2, val + 2, memory_order);
+  uint2 ret;
+  ret.x = *reinterpret_cast<const unsigned int *>(&prev_lo);
+  ret.y = *reinterpret_cast<const unsigned int *>(&prev_hi);
+  return ret;
 }
 #endif
 

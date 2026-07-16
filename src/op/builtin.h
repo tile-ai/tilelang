@@ -1117,12 +1117,30 @@ TVM_DLL const Op &atomic_add_ret_elem_op();
 TVM_DLL const Op &atomic_addx2_elem_op();
 
 /*!
+ * \brief tilelang intrinsic for vectorized (x2) atomic addition with return
+ * value.
+ *
+ *  This op is used to represent a vectorized atomic add operation (2 elements)
+ * in tilelang that returns the previous packed value.
+ */
+TVM_DLL const Op &atomic_addx2_ret_elem_op();
+
+/*!
  * \brief tilelang intrinsic for vectorized (x4) atomic addition.
  *
  *  This op is used to represent a vectorized atomic add operation (4 elements)
  * in tilelang.
  */
 TVM_DLL const Op &atomic_addx4_elem_op();
+
+/*!
+ * \brief tilelang intrinsic for vectorized (x4) atomic addition with return
+ * value.
+ *
+ *  This op is used to represent a vectorized atomic add operation (4 elements)
+ * in tilelang that returns the previous packed value.
+ */
+TVM_DLL const Op &atomic_addx4_ret_elem_op();
 
 /*!
  * \brief tilelang intrinsic for atomic load.
