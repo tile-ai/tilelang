@@ -482,22 +482,57 @@ private:
         return;
       }
       if (const auto *gemm = tile_op.as<GemmNode>()) {
-        if (IsBranchPrivateBuffer(gemm->a_)) {
-          summary_.read_buffers.insert(gemm->a_);
+        // Mirrors GemmNode::GetAccessRegions(): a_/b_ (and the optional MX
+        // scale-factor regions) are reads, c_ is always a write and also a
+        // read unless clearAccum_ clears it first. Region mins/extents are
+        // revisited (rather than just offsetA_/offsetB_/cCoords_) so any
+        // loop-variable dependency in a sliced operand or accumulator
+        // sub-block is still captured after the early return below.
+        if (IsBranchPrivateBuffer(gemm->aRegion_->buffer)) {
+          summary_.read_buffers.insert(gemm->aRegion_->buffer);
         }
-        if (IsBranchPrivateBuffer(gemm->b_)) {
-          summary_.read_buffers.insert(gemm->b_);
+        for (const auto &range : gemm->aRegion_->region) {
+          VisitExpr(range->min);
+          VisitExpr(range->extent);
         }
-        if (IsBranchPrivateBuffer(gemm->c_)) {
-          summary_.write_buffers.insert(gemm->c_);
+        if (IsBranchPrivateBuffer(gemm->bRegion_->buffer)) {
+          summary_.read_buffers.insert(gemm->bRegion_->buffer);
+        }
+        for (const auto &range : gemm->bRegion_->region) {
+          VisitExpr(range->min);
+          VisitExpr(range->extent);
+        }
+        if (IsBranchPrivateBuffer(gemm->cRegion_->buffer)) {
+          summary_.write_buffers.insert(gemm->cRegion_->buffer);
           if (!is_one(gemm->clearAccum_)) {
-            summary_.read_buffers.insert(gemm->c_);
+            summary_.read_buffers.insert(gemm->cRegion_->buffer);
           }
         }
-        VisitExpr(gemm->offsetA_);
-        VisitExpr(gemm->offsetB_);
-        for (const auto &coord : gemm->cCoords_) {
-          VisitExpr(coord);
+        for (const auto &range : gemm->cRegion_->region) {
+          VisitExpr(range->min);
+          VisitExpr(range->extent);
+        }
+        if (gemm->sfaRegion_.defined()) {
+          if (IsBranchPrivateBuffer(gemm->sfaRegion_->buffer)) {
+            summary_.read_buffers.insert(gemm->sfaRegion_->buffer);
+          }
+          for (const auto &range : gemm->sfaRegion_->region) {
+            VisitExpr(range->min);
+            VisitExpr(range->extent);
+          }
+        }
+        if (gemm->sfbRegion_.defined()) {
+          if (IsBranchPrivateBuffer(gemm->sfbRegion_->buffer)) {
+            summary_.read_buffers.insert(gemm->sfbRegion_->buffer);
+          }
+          for (const auto &range : gemm->sfbRegion_->region) {
+            VisitExpr(range->min);
+            VisitExpr(range->extent);
+          }
+        }
+        VisitExpr(gemm->clearAccum_);
+        if (gemm->sfKStart_.defined()) {
+          VisitExpr(gemm->sfKStart_);
         }
         return;
       }
