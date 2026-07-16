@@ -91,6 +91,7 @@ TileOperator ApplyCopyBlockAnnotations(TileOperator tile_op,
   // Safe because this handler is invoked immediately after TLOpBuilder creates
   // a fresh CopyNode, before the node escapes ParseOperator.
   auto *node = const_cast<CopyNode *>(copy.operator->());
+  ICHECK(node != nullptr);
 
   node->src_oob_safe_value = PrimExpr();
   auto safe_value_map_obj = block_annotations.Get(attr::kSafeValueMap);
