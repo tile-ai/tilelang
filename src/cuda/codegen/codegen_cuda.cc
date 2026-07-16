@@ -2944,6 +2944,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::tma_store_cluster())) {
     need_copy_sm90_h_ = true;
     ICHECK_EQ(op->args.size(), 5U) << "tma_store_cluster requires 5 args";
+    PrimExpr size_arg = op->args[3];
+    while (const auto *cast_node = size_arg.as<CastNode>()) {
+      size_arg = cast_node->value;
+    }
+    if (const auto *size_imm = size_arg.as<IntImmNode>()) {
+      ICHECK_EQ(size_imm->value % 16, 0)
+          << "tma_store_cluster transfer size (" << size_imm->value
+          << " bytes) must be a multiple of 16 bytes as required by "
+             "cp.async.bulk";
+    }
     this->PrintIndent();
     this->stream << "tl::tma_store_cluster(";
     this->stream << this->PrintExpr(op->args[0]) << ", ";

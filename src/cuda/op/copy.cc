@@ -28,6 +28,7 @@
 
 #include <cctype>
 #include <cstdint>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -96,6 +97,12 @@ int64_t TMAElementsForBytes(int64_t bytes, DataType dtype) {
   ICHECK_EQ((bytes * 8) % dtype.bits(), 0)
       << bytes << " bytes cannot be represented as whole elements of " << dtype;
   return bytes * 8 / dtype.bits();
+}
+
+bool IsProvably16ByteMultiple(const PrimExpr &bytes,
+                              arith::Analyzer *analyzer) {
+  return analyzer->CanProveEqual(FloorMod(bytes, IntImm(bytes.dtype(), 16)),
+                                 IntImm(bytes.dtype(), 0));
 }
 
 PrimExpr GetCopyMbarPhaseExpr(const Map<String, ObjectRef> &annotations,
@@ -257,7 +264,7 @@ bool IsContiguousRegion(const Buffer &buf, const Array<Range> &ranges,
   return true;
 }
 
-std::pair<Array<Stmt>, PrimExpr>
+std::optional<std::pair<Array<Stmt>, PrimExpr>>
 MakeTMARows(const Buffer &src, const Array<Range> &src_ranges,
             const Buffer &dst, const Array<Range> &dst_ranges,
             PrimExpr dst_block, PrimExpr barrier_load,
@@ -283,8 +290,11 @@ MakeTMARows(const Buffer &src, const Array<Range> &src_ranges,
     for (const auto &r : src_ranges) {
       total_elems = total_elems * r->extent;
     }
-    PrimExpr size_bytes =
-        cast(DataType::UInt(32), TMABytesFromElements(total_elems, src->dtype));
+    PrimExpr total_bytes = TMABytesFromElements(total_elems, src->dtype);
+    if (!IsProvably16ByteMultiple(total_bytes, analyzer)) {
+      return std::nullopt;
+    }
+    PrimExpr size_bytes = cast(DataType::UInt(32), total_bytes);
     PrimExpr src_ptr = src.access_ptr(1, DataType::Handle(), 1,
                                       linear_off(src, src_ranges), total_elems);
     PrimExpr dst_ptr = dst.access_ptr(2, DataType::Handle(), 1,
@@ -292,7 +302,8 @@ MakeTMARows(const Buffer &src, const Array<Range> &src_ranges,
     Stmt call =
         Evaluate(Call(DataType::Handle(), tma_store_cluster(),
                       {dst_ptr, src_ptr, dst_block, size_bytes, barrier_load}));
-    return {{call}, IntImm(DataType::Int(32), 1)};
+    return std::make_pair(Array<Stmt>{call},
+                          PrimExpr(IntImm(DataType::Int(32), 1)));
   }
 
   int split_dim = -1;
@@ -320,14 +331,18 @@ MakeTMARows(const Buffer &src, const Array<Range> &src_ranges,
                   Range::FromMinExtent(src_ranges[split_dim]->min + kexpr, 1));
       new_dst.Set(split_dim,
                   Range::FromMinExtent(dst_ranges[split_dim]->min + kexpr, 1));
-      auto [stmts, cnt] = MakeTMARows(src, new_src, dst, new_dst, dst_block,
-                                      barrier_load, analyzer);
+      auto sub = MakeTMARows(src, new_src, dst, new_dst, dst_block,
+                             barrier_load, analyzer);
+      if (!sub.has_value()) {
+        return std::nullopt;
+      }
+      auto &[stmts, cnt] = sub.value();
       for (const auto &s : stmts) {
         all_stmts.push_back(s);
       }
       total = total + cnt;
     }
-    return {all_stmts, total};
+    return std::make_pair(all_stmts, total);
   }
 
   Var k("k_tma_row", DataType::Int(32));
@@ -337,13 +352,17 @@ MakeTMARows(const Buffer &src, const Array<Range> &src_ranges,
                Range::FromMinExtent(src_ranges[split_dim]->min + k, 1));
   body_dst.Set(split_dim,
                Range::FromMinExtent(dst_ranges[split_dim]->min + k, 1));
-  auto [body_stmts, body_cnt] = MakeTMARows(src, body_src, dst, body_dst,
-                                            dst_block, barrier_load, analyzer);
+  auto body_result = MakeTMARows(src, body_src, dst, body_dst, dst_block,
+                                 barrier_load, analyzer);
+  if (!body_result.has_value()) {
+    return std::nullopt;
+  }
+  auto &[body_stmts, body_cnt] = body_result.value();
   Stmt body = body_stmts.size() == 1 ? body_stmts[0]
                                      : static_cast<Stmt>(SeqStmt(body_stmts));
   Stmt for_loop =
       For(k, IntImm(DataType::Int(32), 0), extent, ForKind::kSerial, body);
-  return {{for_loop}, extent * body_cnt};
+  return std::make_pair(Array<Stmt>{for_loop}, extent * body_cnt);
 }
 
 } // namespace
@@ -872,57 +891,75 @@ Stmt Copy::LowerCluster(const CopyNode &op, const LowerArgs &lower_args,
       for (auto r : src_range) {
         total_elements = total_elements * r->extent;
       }
-      PrimExpr size_bytes = cast(
-          DataType::UInt(32), TMABytesFromElements(total_elements, src->dtype));
+      PrimExpr total_bytes = TMABytesFromElements(total_elements, src->dtype);
 
-      PrimExpr dst_ptr =
-          dst.access_ptr(2, DataType::Handle(), 1, dst_offset, total_elements);
-      PrimExpr src_ptr =
-          src.access_ptr(1, DataType::Handle(), 1, src_offset, total_elements);
+      if (IsProvably16ByteMultiple(total_bytes, analyzer)) {
+        PrimExpr size_bytes = cast(DataType::UInt(32), total_bytes);
 
-      Stmt bulk_copy = Evaluate(Call(
-          DataType::Handle(), tma_store_cluster(),
-          {dst_ptr, src_ptr, op.dst_block.value(), size_bytes, barrier_load}));
+        PrimExpr dst_ptr = dst.access_ptr(2, DataType::Handle(), 1, dst_offset,
+                                          total_elements);
+        PrimExpr src_ptr = src.access_ptr(1, DataType::Handle(), 1, src_offset,
+                                          total_elements);
 
-      return IfThenElse(
-          EQ(lower_args.thread_var, lower_args.thread_bounds->min), bulk_copy);
-    }
+        Stmt bulk_copy = Evaluate(Call(DataType::Handle(), tma_store_cluster(),
+                                       {dst_ptr, src_ptr, op.dst_block.value(),
+                                        size_bytes, barrier_load}));
 
-    bool same_shape = (src_range.size() == dst_range.size());
-    for (size_t d = 0; d < src_range.size() && same_shape; ++d) {
-      if (!analyzer->CanProveEqual(src_range[d]->extent,
-                                   dst_range[d]->extent)) {
-        same_shape = false;
+        return IfThenElse(
+            EQ(lower_args.thread_var, lower_args.thread_bounds->min),
+            bulk_copy);
       }
-    }
-
-    if (element_match && same_shape) {
-      PrimExpr barrier_load = barrier_opt.value();
-      const auto *barrier_buf_load = barrier_load.as<tirx::BufferLoadNode>();
-      ICHECK(barrier_buf_load)
-          << "LowerCluster: expected BufferLoad for barrier annotation";
-      Var barrier_data_var = barrier_buf_load->buffer->data;
-
-      auto [tma_stmts, n_rows] =
-          MakeTMARows(src, src_range, dst, dst_range, op.dst_block.value(),
-                      barrier_load, analyzer);
-
-      if (lower_args.update_barrier_arrive) {
-        lower_args.update_barrier_arrive(barrier_data_var, n_rows);
+      DLOG(WARNING) << "Cluster bulk copy size " << total_bytes
+                    << " bytes is not a multiple of 16 as required by "
+                       "cp.async.bulk; falling back to element-wise cluster "
+                       "copy. src="
+                    << src->name << ", dst=" << dst->name;
+    } else {
+      bool same_shape = (src_range.size() == dst_range.size());
+      for (size_t d = 0; d < src_range.size() && same_shape; ++d) {
+        if (!analyzer->CanProveEqual(src_range[d]->extent,
+                                     dst_range[d]->extent)) {
+          same_shape = false;
+        }
       }
 
-      Stmt seq = (tma_stmts.size() == 1)
-                     ? tma_stmts[0]
-                     : static_cast<Stmt>(SeqStmt(tma_stmts));
-      return IfThenElse(
-          EQ(lower_args.thread_var, lower_args.thread_bounds->min), seq);
-    }
+      if (element_match && same_shape) {
+        PrimExpr barrier_load = barrier_opt.value();
+        const auto *barrier_buf_load = barrier_load.as<tirx::BufferLoadNode>();
+        ICHECK(barrier_buf_load)
+            << "LowerCluster: expected BufferLoad for barrier annotation";
+        Var barrier_data_var = barrier_buf_load->buffer->data;
 
-    LOG(WARNING)
-        << "Falling back to element-wise cluster copy: bulk cluster paths "
-           "require matching element counts and same per-dim extents between "
-           "src and dst. src="
-        << src->name << ", dst=" << dst->name;
+        auto tma_rows =
+            MakeTMARows(src, src_range, dst, dst_range, op.dst_block.value(),
+                        barrier_load, analyzer);
+
+        if (tma_rows.has_value()) {
+          auto &[tma_stmts, n_rows] = tma_rows.value();
+
+          if (lower_args.update_barrier_arrive) {
+            lower_args.update_barrier_arrive(barrier_data_var, n_rows);
+          }
+
+          Stmt seq = (tma_stmts.size() == 1)
+                         ? tma_stmts[0]
+                         : static_cast<Stmt>(SeqStmt(tma_stmts));
+          return IfThenElse(
+              EQ(lower_args.thread_var, lower_args.thread_bounds->min), seq);
+        }
+        DLOG(WARNING)
+            << "Cluster bulk copy row size is not a multiple of 16 bytes as "
+               "required by cp.async.bulk; falling back to element-wise "
+               "cluster copy. src="
+            << src->name << ", dst=" << dst->name;
+      } else {
+        LOG(WARNING)
+            << "Falling back to element-wise cluster copy: bulk cluster paths "
+               "require matching element counts and same per-dim extents "
+               "between src and dst. src="
+            << src->name << ", dst=" << dst->name;
+      }
+    }
   }
 
   auto simt_loop = op.MakeSIMTLoop(analyzer);
