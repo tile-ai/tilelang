@@ -182,12 +182,12 @@ public:
 
 tirx::Var GetVarFromAccessPtr(const PrimExpr &expr);
 
-TileOperator ParseOperator(const tirx::Call &call);
-TileOperator ParseOperator(const tirx::Call &call,
-                           const BlockAnnotations &block_annotations);
-TileOperator ParseOperator(const tirx::Stmt &stmt);
-TileOperator ParseOperator(const tirx::Stmt &stmt,
-                           const BlockAnnotations &block_annotations);
+TileOperator
+ParseOperator(const tirx::Call &call,
+              const BlockAnnotations &block_annotations = BlockAnnotations());
+TileOperator
+ParseOperator(const tirx::Stmt &stmt,
+              const BlockAnnotations &block_annotations = BlockAnnotations());
 
 using OpBuilderFunc = ffi::TypedFunction<TileOperator(
     ffi::Array<PrimExpr>, ffi::Map<ffi::String, ffi::ObjectRef>)>;

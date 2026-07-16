@@ -34,10 +34,6 @@ using namespace tirx;
  * @return TileOperator The constructed TileOperator, or a default (empty)
  * TileOperator if no builder exists.
  */
-TileOperator ParseOperator(const Call &call) {
-  return ParseOperator(call, BlockAnnotations());
-}
-
 TileOperator ParseOperator(const Call &call,
                            const BlockAnnotations &block_annotations) {
   auto op_map = Op::GetAttrMap<OpBuilderFunc>("TLOpBuilder");
@@ -68,10 +64,6 @@ TileOperator ParseOperator(const Call &call,
  * @return TileOperator Parsed operator on success, or a default (empty)
  * TileOperator if `stmt` is not an Evaluate(Call).
  */
-TileOperator ParseOperator(const Stmt &stmt) {
-  return ParseOperator(stmt, BlockAnnotations());
-}
-
 TileOperator ParseOperator(const Stmt &stmt,
                            const BlockAnnotations &block_annotations) {
   if (stmt.as<Evaluate>() && stmt.as<EvaluateNode>()->value.as<CallNode>()) {
