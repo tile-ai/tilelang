@@ -705,13 +705,12 @@ static bool IsProducerMovableLoopPrefixStmt(const Stmt &stmt, Target target) {
 
 /// Collect handle-typed vars bound by Bind inside the body. Their values only
 /// exist on the device, so no host-side TMA descriptor can be encoded for them.
-static std::unordered_set<const VarNode *>
-CollectBodyBoundHandleVars(const Stmt &body) {
-  std::unordered_set<const VarNode *> vars;
+static VarSet CollectBodyBoundHandleVars(const Stmt &body) {
+  VarSet vars;
   PostOrderVisit(body, [&](const ObjectRef &n) {
     if (const auto *bind = n.as<BindNode>()) {
       if (bind->var->dtype.is_handle())
-        vars.insert(bind->var.get());
+        vars.insert(bind->var);
     }
   });
   return vars;
@@ -719,9 +718,8 @@ CollectBodyBoundHandleVars(const Stmt &body) {
 
 /// Classify a tile-op copy as TMA load producer, cp.async producer, or
 /// consumer using coarse pre-layout checks.
-static TileStmtKind ClassifyCopy(
-    const CopyNode *copy, Target target,
-    const std::unordered_set<const VarNode *> *device_local = nullptr) {
+static TileStmtKind ClassifyCopy(const CopyNode *copy, Target target,
+                                 const VarSet *device_local = nullptr) {
   if (copy == nullptr) {
     return TileStmtKind::kConsumer;
   }
@@ -732,7 +730,7 @@ static TileStmtKind ClassifyCopy(
     // pointer is bound inside the kernel body cannot be TMA-promoted.
     // Keep it as a plain consumer copy instead.
     if (device_local && IsGlobalBuffer(copy->src) &&
-        device_local->count(copy->src->data.get())) {
+        device_local->count(copy->src->data)) {
       return TileStmtKind::kConsumer;
     }
     return TileStmtKind::kTmaProducer;
@@ -745,9 +743,8 @@ static TileStmtKind ClassifyCopy(
 }
 
 /// Classify a single statement in the pipeline loop body.
-TileStmtKind ClassifyStmt(
-    const Stmt &stmt, Target target,
-    const std::unordered_set<const VarNode *> *device_local = nullptr) {
+TileStmtKind ClassifyStmt(const Stmt &stmt, Target target,
+                          const VarSet *device_local = nullptr) {
   // Tile-op Calls: classify directly via CopyNode checks.
   if (auto *eval = stmt.as<EvaluateNode>()) {
     if (auto *call = eval->value.as<CallNode>()) {
@@ -2611,7 +2608,7 @@ private:
   LocalLiveSet consumer_prelude_live_seed_;
   Array<Stmt> extracted_producer_init_;
   Array<Stmt> extracted_consumer_init_;
-  std::unordered_set<const VarNode *> device_local_;
+  VarSet device_local_;
 };
 
 // ---------------------------------------------------------------------------
@@ -2748,7 +2745,7 @@ private:
   bool has_tma_tile_op_{false};
   // Map from buffer data Var to (Buffer, Layout) for layout_map entries.
   BufferLayoutMap layout_map_;
-  std::unordered_set<const VarNode *> device_local_;
+  VarSet device_local_;
 };
 
 } // namespace
