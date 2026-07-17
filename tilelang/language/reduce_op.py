@@ -44,6 +44,8 @@ def reduce(
     """
     if batch < 1:
         raise ValueError(f"batch must be >= 1, got {batch}")
+    if reduce_type in ("bitand", "bitor", "bitxor") and not (out.dtype.startswith(("int", "uint")) or out.dtype == "bool"):
+        raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {out.dtype}")
     # input shape: [X, d, Y], expected output shape: [X, Y] or [X, 1, Y]
     expected_shapes = [buffer.shape[:dim] + buffer.shape[dim + 1 :], buffer.shape[:dim] + [1] + buffer.shape[dim + 1 :]]
     if list(out.shape) not in expected_shapes:
