@@ -93,9 +93,10 @@ def _tir_f32x2_to_bf16x2_to_u32(v0: tirx.PrimExpr, v1: tirx.PrimExpr, round_to_e
     for data in [v0, v1]:
         u32_val = tirx.reinterpret(T.uint32, data)
         if round_to_even:
+            exp = (u32_val >> tirx.const(23, T.uint32)) & tirx.const(0xFF, T.uint32)
             rounding_bias = ((u32_val >> tirx.const(16, T.uint32))
                              & tirx.const(1, T.uint32)) + tirx.const(0x7FFF, T.uint32)
-            u32_val += rounding_bias
+            u32_val = tirx.Select(exp == tirx.const(0xFF, T.uint32), u32_val, u32_val + rounding_bias)
         res.append((u32_val >> tirx.const(16, T.uint32)) & mask)
     return res[0] | (res[1] << tirx.const(16, T.uint32))
 
