@@ -182,8 +182,13 @@ private:
           ramp->base + ramp->stride * IntImm(ramp->stride.dtype(), lane_id));
       if (analyzer_->CanProve(lane < 0))
         lane = analyzer_->Simplify(buffer_extent + lane);
-      else if (!analyzer_->CanProve(lane >= 0))
-        return PrimExpr();
+      else if (!analyzer_->CanProve(lane >= 0)) {
+        PrimExpr original = lane;
+        PrimExpr wrapped = analyzer_->Simplify(buffer_extent + lane);
+        wrapped = wrapped.dtype() == dtype ? wrapped : Cast(dtype, wrapped);
+        original = original.dtype() == dtype ? original : Cast(dtype, original);
+        lane = analyzer_->Simplify(Select(lane < 0, wrapped, original));
+      }
       values.push_back(lane.dtype() == dtype ? lane : Cast(dtype, lane));
       shuffle_indices.push_back(IntImm(DataType::Int(32), lane_id));
     }

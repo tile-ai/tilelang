@@ -1,3 +1,6 @@
+import pytest
+import torch
+
 import tilelang
 import tilelang.language as T
 import tilelang.testing
@@ -103,6 +106,29 @@ def test_assume_on_alloc_var():
     source = jit_kernel.get_kernel_source()
 
     assert "if (" not in source
+
+
+@tilelang.testing.requires_cuda
+def test_host_evaluable_assume_is_checked_at_runtime():
+    @tilelang.jit
+    def kernel_with_runtime_check():
+        N = T.dynamic("N")
+
+        @T.prim_func
+        def main(A: T.Tensor((N,), T.float32)):
+            with T.Kernel(1, threads=32):
+                T.assume(N % 4 == 0)
+                tx = T.get_thread_binding()
+                if tx < N:
+                    A[tx] = 1.0
+
+        return main
+
+    jit_kernel = kernel_with_runtime_check()
+    jit_kernel(torch.empty(4, device="cuda"))
+
+    with pytest.raises(RuntimeError, match="Assume: N % 4 == 0"):
+        jit_kernel(torch.empty(2, device="cuda"))
 
 
 if __name__ == "__main__":

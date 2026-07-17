@@ -183,9 +183,18 @@ public:
       Base::VisitExpr(false_value);
     }
   }
-  void VisitStmt_(const tirx::BindNode *op) override {
-    auto guard = MakeGuard(op->var, op->value);
-    Base::VisitStmt_(op);
+  void VisitStmt_(const tirx::BindNode *op) override { Base::VisitStmt_(op); }
+  void VisitStmt_(const tirx::SeqStmtNode *op) override {
+    size_t old_size = constr_stack_.size();
+    for (const tirx::Stmt &stmt : op->seq) {
+      Base::VisitStmt(stmt);
+      if (const auto *bind = stmt.as<tirx::BindNode>()) {
+        // A flat Bind defines its variable for following statements in this
+        // sequence, but not while its own value is being evaluated.
+        constr_stack_.emplace_back(bind->var, bind->value);
+      }
+    }
+    constr_stack_.resize(old_size);
   }
   void VisitStmt_(const tirx::AttrStmtNode *op) override {
     if (op->attr_key == tirx::attr::tilelang_assume) {

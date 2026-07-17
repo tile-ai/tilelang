@@ -12,6 +12,7 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 #include <tvm/tirx/var.h>
+#include <utility>
 
 namespace tvm::tl {
 
@@ -41,40 +42,66 @@ struct ParallelLoopVerifier : public ConstrVisitor {
       StmtExprVisitor::VisitStmt_(op);
       return;
     }
+    if (parallel_loop_vars_.empty()) {
+      StmtExprVisitor::VisitStmt_(op);
+      return;
+    }
+
     ConstrSet cset{constr_stack_};
-    std::vector<Var> other_thread_vars_;
+    std::vector<std::pair<Var, Var>> parallel_var_pairs;
+    std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> parallel_vars;
     Map<Var, PrimExpr> subs;
     for (const auto &var : parallel_loop_vars_) {
-      Var v_other_thread(var->name_hint + "<OTHER>", var->dtype);
-      other_thread_vars_.push_back(v_other_thread);
-      subs.Set(var, v_other_thread);
+      Var other_var(var->name_hint + "<OTHER>", var->dtype);
+      parallel_var_pairs.emplace_back(var, other_var);
+      parallel_vars.insert(var);
+      subs.Set(var, other_var);
     }
+
+    // Bind variables defined within a parallel loop are private SSA values of
+    // each logical iteration. Give the second iteration its own definitions;
+    // sharing them would incorrectly force the parallel loop variables equal.
+    bool inside_parallel_scope = false;
+    for (const Constr &constr : constr_stack_) {
+      if (constr.kind == Constr::kBindRange &&
+          parallel_vars.count(constr.var)) {
+        inside_parallel_scope = true;
+      } else if (inside_parallel_scope && constr.kind == Constr::kBindValue) {
+        Var other_var(constr.var->name_hint + "<OTHER>", constr.var->dtype);
+        subs.Set(constr.var, other_var);
+      }
+    }
+
     cset.Extend(cset.Substitute(subs));
     for (const auto &idx : op->indices) {
       cset.AddConstr(idx == tirx::Substitute(idx, subs));
     }
     arith::Analyzer analyzer;
     cset.Populate(analyzer);
-    // If we can prove the values are the same, then no data race can happen.
-    if (analyzer.CanProve(op->value == tirx::Substitute(op->value, subs))) {
+
+    PrimExpr same_iteration = Bool(true);
+    for (const auto &[var, other_var] : parallel_var_pairs) {
+      same_iteration = And(same_iteration, EQ(var, other_var));
+    }
+    PrimExpr same_value = op->value == tirx::Substitute(op->value, subs);
+    PrimExpr race_free = Or(same_iteration, same_value);
+    if (analyzer.CanProve(race_free)) {
       StmtExprVisitor::VisitStmt_(op);
       return;
     }
+
     Array<Var> failed_vars;
-    PrimExpr failed_var_expr;
-    for (auto [k, v] : subs) {
-      if (!analyzer.CanProve(k == v)) {
-        failed_vars.push_back(k);
-        failed_var_expr =
-            failed_var_expr.defined() ? And(failed_var_expr, k == v) : (k == v);
+    for (const auto &[var, other_var] : parallel_var_pairs) {
+      if (!analyzer.CanProve(EQ(var, other_var))) {
+        failed_vars.push_back(var);
       }
     }
     if (!failed_vars.empty()) {
       LOG(WARNING) << "Data race detected: `" << op->buffer << op->indices
-                   << "`"
+                   << "` "
                    << "is written by multiple threads in loop " << failed_vars
                    << ", Example:\n"
-                   << analyzer.z3_prover.GetModel(failed_var_expr)
+                   << analyzer.z3_prover.GetModel(race_free)
                    << "If you believe this is a false positive, pass "
                       "`PassKey.TL_DISABLE_DATA_RACE_CHECK` to pass key to "
                       "disable this check.";

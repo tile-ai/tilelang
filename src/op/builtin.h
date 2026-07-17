@@ -198,6 +198,10 @@ static constexpr const char *kDisableOutOfBoundWarning =
 static constexpr const char *kEnableDumpIR = "tl.enable_dump_ir";
 static constexpr const char *kDumpIRDir = "tl.dump_ir_path";
 
+static constexpr const char *kPassProfile = "tl.pass_profile";
+static constexpr const char *kPassProfileThresholdMs =
+    "tl.pass_profile_threshold_ms";
+
 /*!
  * \brief Get the type of the CUDA tensor map
  *
@@ -1117,12 +1121,30 @@ TVM_DLL const Op &atomic_add_ret_elem_op();
 TVM_DLL const Op &atomic_addx2_elem_op();
 
 /*!
+ * \brief tilelang intrinsic for vectorized (x2) atomic addition with return
+ * value.
+ *
+ *  This op is used to represent a vectorized atomic add operation (2 elements)
+ * in tilelang that returns the previous packed value.
+ */
+TVM_DLL const Op &atomic_addx2_ret_elem_op();
+
+/*!
  * \brief tilelang intrinsic for vectorized (x4) atomic addition.
  *
  *  This op is used to represent a vectorized atomic add operation (4 elements)
  * in tilelang.
  */
 TVM_DLL const Op &atomic_addx4_elem_op();
+
+/*!
+ * \brief tilelang intrinsic for vectorized (x4) atomic addition with return
+ * value.
+ *
+ *  This op is used to represent a vectorized atomic add operation (4 elements)
+ * in tilelang that returns the previous packed value.
+ */
+TVM_DLL const Op &atomic_addx4_ret_elem_op();
 
 /*!
  * \brief tilelang intrinsic for atomic load.

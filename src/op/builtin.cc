@@ -50,6 +50,8 @@ TVM_REGISTER_PASS_CONFIG_OPTION(kIfStmtBindingInlineReplayableBinds, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableOutOfBoundWarning, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnableDumpIR, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDumpIRDir, ffi::String);
+TVM_REGISTER_PASS_CONFIG_OPTION(kPassProfile, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kPassProfileThresholdMs, FloatImm);
 
 DataType CuTensorMapType() { return DataType::UInt(8, 128); }
 
@@ -615,7 +617,17 @@ TIR_DEFINE_TL_BUILTIN(atomic_addx2_elem_op)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(atomic_addx2_ret_elem_op)
+    .set_num_inputs(3)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TIR_DEFINE_TL_BUILTIN(atomic_addx4_elem_op)
+    .set_num_inputs(3)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(atomic_addx4_ret_elem_op)
     .set_num_inputs(3)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
