@@ -14,6 +14,7 @@ namespace tl {
 
 bool TargetIsCuda(Target target);
 bool TargetIsCuTeDSL(Target target);
+bool TargetHasArchSpecificFeatures(Target target);
 
 bool TargetIsVolta(Target target);
 bool TargetIsTuring(Target target);

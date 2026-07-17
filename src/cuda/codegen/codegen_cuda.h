@@ -22,7 +22,7 @@ namespace codegen {
 
 class CodeGenTileLangCUDA final : public CodeGenC {
 public:
-  CodeGenTileLangCUDA();
+  explicit CodeGenTileLangCUDA(Target target);
   std::string Finish();
   // override behavior
   void PrintFuncPrefix(std::ostream &os) final;
@@ -77,6 +77,8 @@ protected:
                        std::ostream &os) final; // NOLINT(*)
 
 private:
+  Target target_;
+
   // Handle volatile loads
   void HandleVolatileLoads(const std::string &value, const BufferLoadNode *op,
                            std::ostream &os) final;

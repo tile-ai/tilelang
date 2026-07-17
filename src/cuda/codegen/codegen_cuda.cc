@@ -116,6 +116,16 @@ bool CanEmitPackedX2Math(DataType t) {
   return false;
 }
 
+void CheckStochasticRoundingCastTarget(const Target &target,
+                                       DataType target_ty) {
+  ICHECK(tl::TargetHasArchSpecificFeatures(target) &&
+         tl::TargetHasSMVersionGE(target, 100))
+      << "Stochastic rounding f32 -> " << target_ty
+      << " requires sm_100a or a later architecture-specific CUDA target, "
+         "but got "
+      << target;
+}
+
 } // namespace
 
 struct CUDAMath {
@@ -306,7 +316,8 @@ std::string GetTileLangFP4Type(DataType type) {
   return stream.str();
 }
 
-CodeGenTileLangCUDA::CodeGenTileLangCUDA() {
+CodeGenTileLangCUDA::CodeGenTileLangCUDA(Target target)
+    : target_(std::move(target)) {
   restrict_keyword_ = "__restrict__";
 }
 
@@ -1677,6 +1688,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     bool has_rbits = cast_rbits.defined();
 
     if (cast_round == "rs" && has_rbits) {
+      CheckStochasticRoundingCastTarget(target_, target_ty);
       // PTX: cvt.rs.satfinite.{e4m3x4,e5m2x4}.f32 d, {a,b,e,f}, rbits
       // x4 is the native PTX width; x1/x2 zero-pad the unused lanes.
       ICHECK(cast_sat)
@@ -1877,6 +1889,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     bool has_rbits = cast_rbits.defined();
 
     if (cast_round == "rs" && has_rbits) {
+      CheckStochasticRoundingCastTarget(target_, target_ty);
       // PTX: cvt.rs.satfinite.e2m1x4.f32 d, {a, b, e, f}, rbits
       // x4 is the native PTX width; x1/x2 zero-pad the unused lanes.
       ICHECK(cast_sat)

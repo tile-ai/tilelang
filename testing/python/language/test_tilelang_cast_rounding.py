@@ -4,6 +4,7 @@ import pytest
 import tilelang
 import tilelang.testing
 import tilelang.language as T
+from tilelang import tvm
 from tilelang.language.tir.ir import _VALID_CAST_ROUNDING_MODES
 
 # T.cast is provided by tilelang.language.tir.ir (and re-exported by
@@ -148,6 +149,57 @@ def _make_rs_kernel(M: int, num_threads: int, target_dtype: str):
             T.copy(B_local, B)
 
     return main
+
+
+def _make_rs_prim_func(target_dtype: str):
+    M = 128
+
+    @T.prim_func
+    def main(
+        A: T.Tensor[(M,), "float32"],  # noqa: F821
+        B: T.Tensor[(M,), target_dtype],  # noqa: F821
+    ):
+        with T.Kernel(1, threads=128):
+            A_local = T.alloc_fragment((M,), "float32")
+            B_local = T.alloc_fragment((M,), target_dtype)
+            rbits = T.alloc_fragment((1,), "int32")
+            T.copy(A, A_local)
+            rbits[0] = T.int32(0x12345678)
+            for i in T.Parallel(M):
+                B_local[i] = T.cast(A_local[i], target_dtype, round="rs", rbits=rbits[0])
+            T.copy(B_local, B)
+
+    return main
+
+
+def _lower_rs_prim_func(target_dtype: str, arch: str):
+    target = tvm.target.Target({"kind": "cuda", "arch": arch})
+    with target:
+        return tilelang.lower(_make_rs_prim_func(target_dtype), target=target)
+
+
+@pytest.mark.parametrize("target_dtype", ["float8_e4m3fn", "float8_e5m2", "float4_e2m1fn"])
+@pytest.mark.parametrize("arch", ["sm_89", "sm_90a", "sm_100", "sm_100f"])
+def test_cast_rs_rejects_target_without_sm100a_features(target_dtype, arch):
+    with pytest.raises(
+        tvm.error.InternalError,
+        match=r"Stochastic rounding f32 -> .* requires sm_100a",
+    ):
+        _lower_rs_prim_func(target_dtype, arch)
+
+
+@pytest.mark.parametrize(
+    "target_dtype,expected",
+    [
+        ("float8_e4m3fn", "__tl_cvt_f32x1_to_e4m3x1_rs_sat"),
+        ("float8_e5m2", "__tl_cvt_f32x1_to_e5m2x1_rs_sat"),
+        ("float4_e2m1fn", "__tl_cvt_f32x1_to_e2m1x1_rs_sat"),
+    ],
+)
+def test_cast_rs_accepts_sm100a(target_dtype, expected):
+    artifact = _lower_rs_prim_func(target_dtype, "sm_100a")
+
+    assert expected in artifact.kernel_source
 
 
 @tilelang.testing.requires_cuda

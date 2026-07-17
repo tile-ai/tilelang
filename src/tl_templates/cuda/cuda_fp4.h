@@ -279,6 +279,8 @@ TL_DEVICE __nv_fp4x2_storage_t __tl_cvt_float2_to_fp4x2(const float2 src) {
 //   Layout: d[15:12]=a, d[11:8]=b, d[7:4]=e, d[3:0]=f
 // To get little-endian nibble order (nibble0=elem0), pass elements in reverse.
 
+#if defined(__CUDA_ARCH_SPECIFIC__) && (__CUDA_ARCH_SPECIFIC__ >= 1000)
+
 // Full 4-element version (float4 input)
 TL_DEVICE __nv_fp4x4_storage_t
 __tl_cvt_f32x4_to_e2m1x4_rs_sat(float4 src, unsigned int rbits) {
@@ -308,6 +310,8 @@ __tl_cvt_f32x1_to_e2m1x1_rs_sat(float src, unsigned int rbits) {
       : "f"(0.0f), "f"(0.0f), "f"(0.0f), "f"(src), "r"(rbits));
   return static_cast<__nv_fp4_storage_t>(tmp & 0x0F);
 }
+
+#endif // __CUDA_ARCH_SPECIFIC__ >= 1000
 
 // ============================================================================
 // FP4 <-> Double Conversions

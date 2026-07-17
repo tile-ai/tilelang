@@ -431,6 +431,8 @@ TL_DEVICE __nv_fp8x2_storage_t __tl_cvt_bfloat162_to_fp8x2(
 //   Output layout: d[31:24]=a, d[23:16]=b, d[15:8]=e, d[7:0]=f
 //   To get little-endian byte order (byte0=elem0), pass elements in reverse.
 
+#if defined(__CUDA_ARCH_SPECIFIC__) && (__CUDA_ARCH_SPECIFIC__ >= 1000)
+
 // --- float4 -> e4m3x4 stochastic rounding ---
 
 // Full 4-element version (float4 input)
@@ -494,6 +496,8 @@ __tl_cvt_f32x2_to_e5m2x2_rs_sat(float2 src, unsigned int rbits) {
       : "f"(0.0f), "f"(0.0f), "f"(src.y), "f"(src.x), "r"(rbits));
   return static_cast<__nv_fp8x2_storage_t>(tmp & 0xFFFF);
 }
+
+#endif // __CUDA_ARCH_SPECIFIC__ >= 1000
 
 // ============================================================================
 // FP8 E8M0 Related Conversions
