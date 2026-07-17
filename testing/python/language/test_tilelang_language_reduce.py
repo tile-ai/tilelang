@@ -4,6 +4,7 @@ import tilelang.language as T
 import tilelang.testing
 import pytest
 import torch
+from tilelang import tvm
 
 tilelang.testing.set_random_seed()
 
@@ -139,6 +140,94 @@ def test_reduce(op, dtype, M, N, src_scope, dst_scope, threads, batch):
     # float16/bfloat16 accumulate more rounding error over large reductions
     tol = 1e-1 if dtype in (T.float16, T.bfloat16) else 1e-2
     torch.testing.assert_close(B, _ref(A, op), atol=tol, rtol=tol)
+
+
+@pytest.mark.parametrize(
+    ("op", "packed_op"),
+    [("sum", "add2"), ("max", "max2"), ("min", "min2")],
+)
+def test_reduce_local_packed_codegen(op, packed_op):
+    @T.prim_func
+    def main(A: T.Tensor((8,), T.float16), B: T.Tensor((1,), T.float16)):
+        with T.Kernel(1, threads=1):
+            src = T.alloc_local((8,), T.float16)
+            dst = T.alloc_local((1,), T.float16)
+            for i in T.serial(8):
+                src[i] = A[i]
+            _reduce_op(T, op, src, dst, dim=0)
+            B[0] = dst[0]
+
+    target = {"kind": "cuda", "arch": "sm_80"}
+    with tvm.transform.PassContext(), tvm.target.Target(target):
+        artifact = tilelang.lower(main, target=target)
+    assert f"tl::{packed_op}" in artifact.kernel_source
+
+
+@pytest.mark.parametrize(
+    ("op", "packed_op"),
+    [("sum", "add2"), ("max", "max2"), ("min", "min2")],
+)
+def test_reduce_local_noncontiguous_dim_packed_codegen(op, packed_op):
+    @T.prim_func
+    def main(A: T.Tensor((8, 4), T.float16), B: T.Tensor((4,), T.float16)):
+        with T.Kernel(1, threads=1):
+            src = T.alloc_local((8, 4), T.float16)
+            dst = T.alloc_local((4,), T.float16)
+            for i in T.serial(8):
+                for j in T.serial(4):
+                    src[i, j] = A[i, j]
+            _reduce_op(T, op, src, dst, dim=0)
+            for j in T.serial(4):
+                B[j] = dst[j]
+
+    target = {"kind": "cuda", "arch": "sm_80"}
+    with tvm.transform.PassContext(), tvm.target.Target(target):
+        artifact = tilelang.lower(main, target=target)
+    assert f"tl::{packed_op}" in artifact.kernel_source
+
+
+@pytest.mark.parametrize(
+    ("op", "packed_op"),
+    [("sum", "add2"), ("max", "max2"), ("min", "min2")],
+)
+def test_reduce_local_to_var_packed_codegen(op, packed_op):
+    @T.prim_func
+    def main(A: T.Tensor((8,), T.float16), B: T.Tensor((1,), T.float16)):
+        with T.Kernel(1, threads=1):
+            src = T.alloc_local((8,), T.float16)
+            dst = T.alloc_var(T.float16)
+            for i in T.serial(8):
+                src[i] = A[i]
+            _reduce_op(T, op, src, dst, dim=0)
+            B[0] = dst
+
+    target = {"kind": "cuda", "arch": "sm_80"}
+    with tvm.transform.PassContext(), tvm.target.Target(target):
+        artifact = tilelang.lower(main, target=target)
+    assert f"tl::{packed_op}" in artifact.kernel_source
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("op", ["sum", "max", "min"])
+def test_reduce_local_packed_correctness(op):
+    @tilelang.jit(out_idx=-1)
+    def kernel():
+        @T.prim_func
+        def main(A: T.Tensor((8,), T.float16), B: T.Tensor((1,), T.float16)):
+            with T.Kernel(1, threads=1):
+                src = T.alloc_local((8,), T.float16)
+                dst = T.alloc_local((1,), T.float16)
+                for i in T.serial(8):
+                    src[i] = A[i]
+                _reduce_op(T, op, src, dst, dim=0)
+                B[0] = dst[0]
+
+        return main
+
+    jit_kernel = kernel()
+    A = torch.randn((8,), dtype=torch.float16, device="cuda")
+    B = jit_kernel(A)
+    torch.testing.assert_close(B[0], _ref(A.reshape(1, 8), op)[0], atol=1e-1, rtol=1e-1)
 
 
 # ---------------------------------------------------------------------------

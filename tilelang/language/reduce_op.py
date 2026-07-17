@@ -5,7 +5,7 @@ from typing import Literal
 from tvm import tirx
 from tilelang.language import copy, macro, alloc_fragment
 from tilelang.utils.language import to_tile_region
-from tilelang.utils.language import is_shared, is_fragment
+from tilelang.utils.language import is_shared, is_fragment, is_local, is_local_var
 from tvm.script.ir_builder import IRBuilder
 
 
@@ -119,7 +119,7 @@ def reduce(
                 annotations=annotations,
             )
             copy(red_frag_out, out)
-        elif is_fragment(buffer) and is_fragment(out):
+        elif is_fragment(buffer) and is_fragment(out) or is_local(buffer) and (is_local(out) or is_local_var(out)):
             tirx.call_intrin(
                 "handle",
                 tirx.op.Op.get(_REDUCE_OP_KEY),
