@@ -333,8 +333,7 @@ class LoweringScope:
         self._thread_var_names: set[str] = set()
 
         # Block/thread launch axis ("bx"/"by"/"bz"/...) -> the scope binding key
-        # (a TIR Var when available) used by _lower_thread_extent, so the swizzle
-        # pass can re-bind the SAME key (identity) instead of shadowing by name.
+        # (a TIR Var when available), used by launch-range analysis.
         self._axis_bind_vars: dict[str, Any] = {}
 
         # Populate global param buffers

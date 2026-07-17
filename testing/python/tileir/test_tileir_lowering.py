@@ -262,7 +262,7 @@ def test_tileir_rejects_invalid_entry_hints(num_ctas, occupancy):
 
 
 @pytest.mark.parametrize("order", ["row", "column"])
-def test_tileir_lowers_threadblock_swizzle_pattern(order):
+def test_tileir_ignores_threadblock_swizzle_hint(order):
     pytest.importorskip(checks.CUDA_TILE_IR_MLIR_MODULE)
 
     @tilelang.jit
@@ -279,10 +279,10 @@ def test_tileir_lowers_threadblock_swizzle_pattern(order):
     store_lines = [line for line in source.splitlines() if "store_ptr_tko" in line or "store_view_tko" in line]
 
     assert store_lines
-    assert all("[%assume_blockId_y, %assume_blockId_x]" not in line for line in store_lines)
-    assert "select " in source
-    assert "rem" in source
-    assert "divi " in source
+    assert all("[%blockId_y, %blockId_x]" in line for line in store_lines)
+    assert "select " not in source
+    assert "rem" not in source
+    assert "divi " not in source
 
 
 def _copy_kernel_with_hints():

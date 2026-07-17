@@ -195,6 +195,34 @@ def test_tileir_structured_lowering_uses_atomic_red_view_for_relaxed_tile_atomic
     assert ", max," in source
 
 
+def test_tileir_rejects_multi_gemm_loop_indexed_atomic_partition():
+    pytest.importorskip(checks.CUDA_TILE_IR_MLIR_MODULE)
+
+    @tilelang.jit
+    def loop_indexed_atomic_kernel(src, weight, dst):
+        src: T.Tensor((64, 32), T.float16)
+        weight: T.Tensor((32, 32), T.float16)
+        dst: T.Tensor((64, 32), T.float32)
+
+        with T.Kernel(1):
+            src_tile = T.alloc_shared((32, 32), T.float16)
+            weight_tile = T.alloc_shared((32, 32), T.float16)
+            acc = T.alloc_fragment((32, 32), T.float32)
+            acc_shared = T.alloc_shared((32, 32), T.float32)
+            T.copy(weight, weight_tile)
+            for chunk in T.Pipelined(2, num_stages=1):
+                T.copy(src[chunk * 32 : (chunk + 1) * 32, :], src_tile)
+                T.gemm(src_tile, weight_tile, acc, clear_accum=True)
+                T.gemm(src_tile, weight_tile, acc)
+                T.copy(acc, acc_shared)
+                T.atomic_add(dst[chunk * 32 : (chunk + 1) * 32, :], acc_shared)
+
+    target, prepared, _ = _prepared_tileir_kernel_for_test(loop_indexed_atomic_kernel, None, None, None)
+
+    with pytest.raises(TileIRLoweringNotImplementedError, match="loop-indexed atomic reduction.*multiple GEMM updates"):
+        _build_tileir_module_for_test(prepared, target)
+
+
 def test_tileir_structured_lowering_supports_atomic_min_max_memory_order():
     pytest.importorskip(checks.CUDA_TILE_IR_MLIR_MODULE)
 

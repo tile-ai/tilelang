@@ -44,7 +44,7 @@ CUTEDSL_KNOWN_FAILURES = {
     # Flaky — passes when run in isolation, fails under parallel execution
     "minference/test_vs_sparse_attn.py::test_vs_sparse_attn",
     # CuTeDSL does not yet lower DeepSeek V4 FP4 act quant conversions.
-    "deepseek_v4/test_tilelang_example_deepseek_v4.py::test_example_act_quant",
+    "deepseek_v4/test_tilelang_example_deepseek_v4.py::test_example_act_quant_fp4",
 }
 
 # Known limitations when running the examples with TILELANG_TARGET=tileir.
@@ -71,6 +71,11 @@ TILEIR_KNOWN_FAILURES = {
     "deepseek_v32/test_tilelang_example_deepseek_v32.py::test_example_sparse_mla_fwd_pipelined",
     # Non-power-of-two 257-bin histogram + cross-lane prefix scan (scatter/return-atomics do lower).
     "deepseek_v32/test_tilelang_example_deepseek_v32.py::test_example_topk_selector",
+    # Structured TMA views do not yet support element-offset indexing.
+    "minference/test_vs_sparse_attn.py::test_vs_sparse_attn",
+    # CUDA Tile IR does not yet support multi-GEMM, loop-indexed atomic reductions.
+    "linear_attention/test_linear_attn.py::test_example_linear_attn_fwd",
+    "linear_attention/test_linear_attn.py::test_example_linear_attn_bwd",
 }
 
 

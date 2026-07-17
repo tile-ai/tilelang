@@ -86,9 +86,9 @@ creates the same token-chained pipelined loop. The numeric stage count is not
 forwarded to CUDA Tile IR, so do not sweep several positive `num_stages` values.
 It also does not set `T.copy(latency=N)`; copy latency is a separate hint.
 
-`T.use_swizzle(...)` is effective for row- and column-major swizzles on static
-two-dimensional grids. It has no effect when the grid extents are dynamic or
-the swizzle pattern cannot be represented by the current lowering.
+`T.use_swizzle(...)` is currently treated as a scheduling hint and ignored by
+the TileIR backend. The logical block coordinates remain unchanged, and the
+CUDA Tile IR toolchain owns block scheduling.
 
 ### Entry hints
 
@@ -210,6 +210,10 @@ for exposing kernel-specific parameters from another kernel factory.
   `tileir -arch=sm_90`, `sm_100`, or `sm_120`.
 - **Unsupported semantic construct:** simplify the kernel or report the first
   unsupported construct from the exception.
+- **Loop-indexed atomic reduction:** reductions whose value receives multiple
+  GEMM updates per loop iteration are currently rejected when the destination
+  partition also depends on that loop. Move the reduction outside the loop or
+  use another backend.
 - **Some candidates fail:** remove configurations that exceed the kernel or
   GPU's resource and hint constraints.
 - **All explicit hints are slower:** keep the unhinted configuration.

@@ -21,8 +21,8 @@ from tilelang.tileir.errors import (
     _UnboundScopeVariable,
     _UnsupportedTileIRNode,
 )
-from tilelang.tileir.ir.value import Block, Value
-from tilelang.tileir.ir.ops import Break, Constant, Elementwise, IfElse, Loop, Select, Store
+from tilelang.tileir.ir.value import Block
+from tilelang.tileir.ir.ops import Break, IfElse, Loop, Store
 from tilelang.tileir.semantic import SemanticStmt
 
 from ._base import (
@@ -31,7 +31,6 @@ from ._base import (
     impl,
     _binding_var,
     _make_placeholder,
-    _scalar_bool_type,
     _scalar_i32_type,
 )
 from .expr import lower_expr, _lower_attr_expr, _make_elementwise
@@ -124,11 +123,10 @@ def _lower_thread_extent(stmt: SemanticStmt, scope: LoweringScope, builder: IRBu
         }
         axis_key = _BLOCK_TAG_TO_AXIS_KEY.get(tag)
         if axis_key is not None:
-            # Remember the binding key so the swizzle pass can identity-rebind.
+            # Remember the binding key for launch-range analysis.
             scope._axis_bind_vars[axis_key] = bind_key
             builder.block.index_values[axis_key] = idx_val
-            # Also store the static extent so _lower_threadblock_swizzle_pattern can
-            # compute the swizzled block ID arithmetic (grid_x * grid_y product).
+            # Store the static extent for launch-range analysis.
             raw_extent = attrs.get("extent")
             if raw_extent is not None:
                 try:
@@ -171,138 +169,12 @@ def _lower_thread_extent(stmt: SemanticStmt, scope: LoweringScope, builder: IRBu
 
 @impl("threadblock_swizzle_pattern")
 def _lower_threadblock_swizzle_pattern(stmt: SemanticStmt, scope: LoweringScope, builder: IRBuilder) -> None:
-    """Lower T.use_swizzle(panel_size, order) block-ID remapping.
+    """Treat ``T.use_swizzle`` as a scheduling hint.
 
-    Implements rasterization2DRow and rasterization2DColumn swizzle patterns
-    by computing remapped (bx, by) from the raw blockIdx values, using
-    Elementwise + Select ops.
+    CUDA Tile IR owns block scheduling.  Preserve the raw launch coordinates
+    until the structured backend can express the hint without changing the
+    logical mapping between blocks and output tiles.
     """
-    # Parse swizzle function name and panel_size from the semantic value.
-    func_name: str | None = None
-    panel_size: int | None = None
-    try:
-        if stmt.value is not None:
-            tvm_tuple = stmt.value  # tirx.Call("tirx.tvm_tuple", args=[StringImm, IntImm])
-            if isinstance(tvm_tuple, _tir.Call) and len(tvm_tuple.args) >= 2:
-                name_arg = tvm_tuple.args[0]
-                panel_arg = tvm_tuple.args[1]
-                if isinstance(name_arg, _tir.StringImm):
-                    func_name = name_arg.value
-                if isinstance(panel_arg, _tir.IntImm):
-                    panel_size = int(panel_arg)
-    except Exception:
-        pass
-
-    if func_name is None or panel_size is None or func_name not in ("rasterization2DRow", "rasterization2DColumn"):
-        # Unknown/un-parseable swizzle — pass through without remapping.
-        for child in stmt.children:
-            lower_stmt(child, scope, builder)
-        return
-
-    # Get raw bx/by placeholder Values and static grid extents
-    bx_val = builder.block.index_values.get("bx")
-    by_val = builder.block.index_values.get("by")
-    grid_x = builder.block.block_extents.get("bx")
-    grid_y = builder.block.block_extents.get("by")
-
-    if bx_val is None or by_val is None or grid_x is None or grid_y is None:
-        # Cannot swizzle without block index values or static extents.
-        for child in stmt.children:
-            lower_stmt(child, scope, builder)
-        return
-
-    # Build arithmetic helpers (all ops use i32 scalars)
-    i32_ty = _scalar_i32_type()
-
-    def _const(val: int) -> Value:
-        op = builder.create(Constant(value=val, dtype="int32"), result_types=(i32_ty,))
-        return op.results[0]
-
-    def _binop(fn: str, lhs: Value, rhs: Value) -> Value:
-        op = builder.create(Elementwise(fn=fn, inputs=(lhs, rhs)), result_types=(i32_ty,))
-        return op.results[0]
-
-    def _select(cond: Value, true_v: Value, false_v: Value) -> Value:
-        op = builder.create(Select(cond=cond, true_val=true_v, false_val=false_v), result_types=(i32_ty,))
-        return op.results[0]
-
-    def _cmp_lt(lhs: Value, rhs: Value) -> Value:
-        """Return bool tile: lhs < rhs (signed)."""
-        bool_ty = _scalar_bool_type()
-        op = builder.create(Elementwise(fn="lt", inputs=(lhs, rhs)), result_types=(bool_ty,))
-        return op.results[0]
-
-    def _cmp_ne(lhs: Value, rhs: Value) -> Value:
-        """Return bool tile: lhs != rhs (signed)."""
-        bool_ty = _scalar_bool_type()
-        op = builder.create(Elementwise(fn="ne", inputs=(lhs, rhs)), result_types=(bool_ty,))
-        return op.results[0]
-
-    def _is_odd(v: Value) -> Value:
-        """Return bool tile: v % 2 != 0."""
-        return _cmp_ne(_binop("floormod", v, _const(2)), _const(0))
-
-    # linear index: block_idx = bx + by * grid_x
-    block_idx = _binop("add", bx_val, _binop("mul", by_val, _const(grid_x)))
-    grid_size = grid_x * grid_y
-
-    if func_name == "rasterization2DRow":
-        panel_sz = panel_size * grid_x
-        panel_offset = _binop("floormod", block_idx, _const(panel_sz))
-        panel_idx = _binop("floordiv", block_idx, _const(panel_sz))
-        total_panel = (grid_size + panel_sz - 1) // panel_sz
-        last_panel_blocks = _binop("sub", _const(grid_size), _binop("mul", panel_idx, _const(panel_sz)))
-        last_stride = _binop("floordiv", last_panel_blocks, _const(grid_x))
-        stride = _select(
-            _cmp_lt(_binop("add", panel_idx, _const(1)), _const(total_panel)),
-            _const(panel_size),
-            last_stride,
-        )
-        panel_col = _binop("floordiv", panel_offset, stride)
-        reverse_col = _binop("sub", _binop("sub", _const(grid_x), _const(1)), panel_col)
-        col_idx = _select(_is_odd(panel_idx), reverse_col, panel_col)
-        row_idx = _binop(
-            "add",
-            _binop("floormod", panel_offset, stride),
-            _binop("mul", panel_idx, _const(panel_size)),
-        )
-        swizzled_bx = col_idx
-        swizzled_by = row_idx
-
-    else:  # rasterization2DColumn
-        panel_sz = panel_size * grid_y
-        panel_offset = _binop("floormod", block_idx, _const(panel_sz))
-        panel_idx = _binop("floordiv", block_idx, _const(panel_sz))
-        total_panel = (grid_size + panel_sz - 1) // panel_sz
-        last_panel_blocks = _binop("sub", _const(grid_size), _binop("mul", panel_idx, _const(panel_sz)))
-        last_stride = _binop("floordiv", last_panel_blocks, _const(grid_y))
-        stride = _select(
-            _cmp_lt(_binop("add", panel_idx, _const(1)), _const(total_panel)),
-            _const(panel_size),
-            last_stride,
-        )
-        panel_row = _binop("floordiv", panel_offset, stride)
-        reverse_row = _binop("sub", _binop("sub", _const(grid_y), _const(1)), panel_row)
-        row_idx = _select(_is_odd(panel_idx), reverse_row, panel_row)
-        col_idx = _binop(
-            "add",
-            _binop("floormod", panel_offset, stride),
-            _binop("mul", panel_idx, _const(panel_size)),
-        )
-        swizzled_bx = col_idx
-        swizzled_by = row_idx
-
-    # Rebind bx/by in scope to swizzled values for children. Rebind the SAME
-    # key _lower_thread_extent used (the block axis' TIR Var, by identity) so
-    # child references resolve to the swizzled coord; fall back to the Value's
-    # name only if no Var was recorded.
-    bx_key = scope._axis_bind_vars.get("bx", getattr(bx_val, "name", None))
-    by_key = scope._axis_bind_vars.get("by", getattr(by_val, "name", None))
-    if bx_key is not None:
-        scope.bind(bx_key, swizzled_bx)
-    if by_key is not None:
-        scope.bind(by_key, swizzled_by)
-
     for child in stmt.children:
         lower_stmt(child, scope, builder)
 

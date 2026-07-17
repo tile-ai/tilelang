@@ -122,9 +122,11 @@ def test_atomic_add_bf16_numerical():
     kernel = tilelang.compile(kern, execution_backend="tileir")
     src = torch.randn(n, dtype=torch.bfloat16, device="cuda")
     acc = torch.zeros(n, dtype=torch.bfloat16, device="cuda")
-    kernel(src, acc)
-    # 4 blocks each add Src once → Acc == 4 * Src (bf16 tolerance).
-    torch.testing.assert_close(acc, 4 * src, rtol=2e-2, atol=2e-2)
+    for _ in range(2):
+        acc.zero_()
+        kernel(src, acc)
+        # 4 blocks each add Src once → Acc == 4 * Src (bf16 tolerance).
+        torch.testing.assert_close(acc, 4 * src, rtol=2e-2, atol=2e-2)
 
 
 # ---------------------------------------------------------------------------

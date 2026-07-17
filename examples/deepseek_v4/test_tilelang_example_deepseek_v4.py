@@ -1,3 +1,6 @@
+import pytest
+import torch
+
 import tilelang.testing
 
 import act_quant
@@ -6,8 +9,14 @@ import sparse_attn_fwd_sm90
 
 
 @tilelang.testing.requires_cuda
-def test_example_act_quant():
+def test_example_act_quant_fp8():
     act_quant.test_fp8_act_quant(M=64, N=256, block_size=128)
+
+
+@tilelang.testing.requires_cuda
+def test_example_act_quant_fp4():
+    if not hasattr(torch, "float4_e2m1fn_x2"):
+        pytest.skip("FP4 reference requires torch.float4_e2m1fn_x2")
     act_quant.test_fp4_act_quant(M=64, N=256, block_size=32)
     act_quant.test_round_trip_error()
 

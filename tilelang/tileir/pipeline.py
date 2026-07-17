@@ -21,6 +21,7 @@ from tilelang.tileir.passes.dataflow import dataflow_pass
 from tilelang.tileir.passes.token_order import token_order_pass
 from tilelang.tileir.passes.loop_carry import loop_carry_pass
 from tilelang.tileir.passes.gemm_orientation import gemm_orientation_pass
+from tilelang.tileir.passes.dynamic_atomic_validation import dynamic_atomic_validation_pass
 
 __all__ = ["build_tileir_module", "lower_single_kernel_to_tileir"]
 
@@ -161,7 +162,7 @@ def build_tileir_module(
     pass_ctx.results["target_arch"] = arch
     pass_ctx = run_pipeline(
         root,
-        [gemm_orientation_pass, dataflow_pass, token_order_pass, loop_carry_pass],
+        [dynamic_atomic_validation_pass, gemm_orientation_pass, dataflow_pass, token_order_pass, loop_carry_pass],
         ctx=pass_ctx,
     )
 

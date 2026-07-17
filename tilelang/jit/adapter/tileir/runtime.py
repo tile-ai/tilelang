@@ -118,7 +118,6 @@ def make_torch_func(adapter) -> Callable[..., Any]:
     result_idx = tuple(adapter.result_idx)
     param_dtypes = tuple(adapter.param_dtypes)
     param_shapes = tuple(tuple(shape) for shape in adapter.param_shapes)
-    current_stream = adapter.get_current_stream_functor()
     current_device = adapter.get_current_device_functor()
     compiled_kernels = adapter.tileir_artifact.kernels
     param_argument_names = tuple(
@@ -130,6 +129,17 @@ def make_torch_func(adapter) -> Callable[..., Any]:
     }
     expected_inputs = len(params) - len(result_idx)
     result_idx_set = frozenset(result_idx)
+
+    def resolve_launch_stream(stream: torch.cuda.Stream | int | None) -> torch.cuda.Stream:
+        """Return the PyTorch stream object required by ``cuda.tile.launch``."""
+
+        if stream is None:
+            return torch.cuda.current_stream()
+        if isinstance(stream, int):
+            if stream == 0:
+                return torch.cuda.default_stream()
+            return torch.cuda.ExternalStream(stream)
+        return stream
 
     # Symbolic output dims are resolved against INPUT tensor shapes at call time.
     # Two deliberate choices here:
@@ -251,7 +261,7 @@ def make_torch_func(adapter) -> Callable[..., Any]:
         dispatchers = tuple(dispatcher.dispatcher for dispatcher in adapter.native_dispatchers)
         temporary_buffers = adapter.tileir_artifact.temporary_buffers
 
-        def multi_kernel_func(*inputs: Any, stream: int | None = None):
+        def multi_kernel_func(*inputs: Any, stream: torch.cuda.Stream | int | None = None):
             args = materialize_call_args(inputs)
             first_tensor = next((arg for arg in args if isinstance(arg, torch.Tensor)), None)
             device = first_tensor.device if first_tensor is not None else current_device()
@@ -270,7 +280,7 @@ def make_torch_func(adapter) -> Callable[..., Any]:
                     raise ValueError(f"TileIR {ref.kind} argument reference {ref.index} is out of range for {len(values)} runtime values.")
                 return values[ref.index]
 
-            launch_stream = stream if stream is not None else current_stream()
+            launch_stream = resolve_launch_stream(stream)
             for kernel, dispatcher in zip(compiled_kernels, dispatchers):
                 if len(kernel.argument_refs) != len(kernel.argument_names):
                     raise ValueError(f"TileIR kernel `{kernel.kernel_name}` is missing stable runtime argument references.")
@@ -287,10 +297,10 @@ def make_torch_func(adapter) -> Callable[..., Any]:
 
     if not result_idx:
 
-        def explicit_func(*inputs: Any, stream: int | None = None):
+        def explicit_func(*inputs: Any, stream: torch.cuda.Stream | int | None = None):
             args = materialize_call_args(inputs)
             launch(
-                stream if stream is not None else current_stream(),
+                resolve_launch_stream(stream),
                 runtime_grid(adapter.tileir_artifact.launch_metadata, args),
                 dispatcher,
                 normalize_launch_args(args, adapter.tileir_artifact.argument_scalar_flags),
@@ -298,10 +308,10 @@ def make_torch_func(adapter) -> Callable[..., Any]:
 
         return explicit_func
 
-    def allocate_outputs_func(*inputs: Any, stream: int | None = None):
+    def allocate_outputs_func(*inputs: Any, stream: torch.cuda.Stream | int | None = None):
         args = materialize_call_args(inputs)
         launch(
-            stream if stream is not None else current_stream(),
+            resolve_launch_stream(stream),
             runtime_grid(adapter.tileir_artifact.launch_metadata, args),
             dispatcher,
             normalize_launch_args(args, adapter.tileir_artifact.argument_scalar_flags),

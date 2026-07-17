@@ -111,11 +111,22 @@ def _runtime_adapter(artifact, prim_func, dispatchers):
 def test_tileir_runtime_converts_zero_dim_scalar_args_consistently_for_single_and_multi(monkeypatch):
     torch = pytest.importorskip("torch")
     launches = []
+    current_stream = object()
+    default_stream = object()
+    external_stream = object()
+    external_stream_handles = []
 
     def fake_launch(stream, grid, dispatcher, args):
         launches.append((stream, grid, dispatcher, args))
 
     monkeypatch.setitem(sys.modules, "cuda.tile._cext", types.SimpleNamespace(launch=fake_launch))
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: current_stream)
+    monkeypatch.setattr(torch.cuda, "default_stream", lambda: default_stream)
+    monkeypatch.setattr(
+        torch.cuda,
+        "ExternalStream",
+        lambda handle: external_stream_handles.append(handle) or external_stream,
+    )
     prim_func = _prim_func_with_interleaved_scalar_param()
     a = torch.ones(4)
     scale = torch.tensor(2.5)
@@ -129,7 +140,8 @@ def test_tileir_runtime_converts_zero_dim_scalar_args_consistently_for_single_an
         argument_scalar_flags=(False, True, False),
     )
     single_dispatcher = types.SimpleNamespace(dispatcher="single-dispatcher")
-    tileir_runtime.make_torch_func(_runtime_adapter(single_artifact, prim_func, [single_dispatcher]))(a, scale, b)
+    single_func = tileir_runtime.make_torch_func(_runtime_adapter(single_artifact, prim_func, [single_dispatcher]))
+    single_func(a, scale, b)
 
     multi_artifact = TileIRLoweringResult(
         kernel_name="program",
@@ -169,6 +181,13 @@ def test_tileir_runtime_converts_zero_dim_scalar_args_consistently_for_single_an
     assert launches[1][3][1] == 2.5
     assert launches[2][3][0] == 2.5
     assert launches[2][3][1] is b
+    assert all(call[0] is current_stream for call in launches)
+
+    single_func(a, scale, b, stream=0)
+    single_func(a, scale, b, stream=17)
+    assert launches[3][0] is default_stream
+    assert launches[4][0] is external_stream
+    assert external_stream_handles == [17]
 
 
 def test_tileir_multi_kernel_runtime_routes_arguments_by_stable_reference(monkeypatch):

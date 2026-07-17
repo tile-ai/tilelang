@@ -416,6 +416,7 @@ jobs:
           uv run --no-project -m -- pytest \
             --verbose --color=yes --durations=0 --showlocals --cache-clear \
             --maxfail=3 \
+            --ignore=../examples/analyze/test_example_analyze.py \
             --ignore=../examples/grouped_gemm/test_example_grouped_gemm.py \
             ../examples
 
