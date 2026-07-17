@@ -51,6 +51,7 @@ programming_guides/control_flow
 programming_guides/software_pipeline
 programming_guides/python_compatibility
 programming_guides/autotuning
+programming_guides/tileir_backend
 programming_guides/type_system
 :::
 
