@@ -37,7 +37,7 @@ def _check(kernel, M, N, K, seed=0):
     torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
 
 
-@tilelang.testing.requires_cuda_compute_version(9, 0)
+@tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 def test_wgmma_fullrow_two_warpgroups_along_m():
     """FullRow, block_M=256, threads=256: m_warp=8 (two warpgroups along M).
 
@@ -49,7 +49,7 @@ def test_wgmma_fullrow_two_warpgroups_along_m():
     _check(kernel, 256, 128, 64)
 
 
-@tilelang.testing.requires_cuda_compute_version(9, 0)
+@tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 def test_wgmma_fullrow_single_warpgroup():
     """FullRow, block_M=128, threads=128: single warpgroup along M."""
     kernel = _matmul(128, 128, 32, 128, GemmWarpPolicy.FullRow)
@@ -57,7 +57,7 @@ def test_wgmma_fullrow_single_warpgroup():
     _check(kernel, 128, 128, 64)
 
 
-@tilelang.testing.requires_cuda_compute_version(9, 0)
+@tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 def test_wgmma_two_warpgroups_with_col_warps():
     """FullRow, block_M=128, threads=512: m_warp=8, n_warp=2.
 
@@ -72,7 +72,7 @@ def test_wgmma_two_warpgroups_with_col_warps():
     _check(kernel, 128, 256, 64)
 
 
-@tilelang.testing.requires_cuda_compute_version(9, 0)
+@tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 def test_wgmma_two_warpgroups_col_warps_multi_atom():
     """Square, block_M=256, block_N=16, threads=512: m_warp=8, n_warp=2, warp_rows=2.
 
