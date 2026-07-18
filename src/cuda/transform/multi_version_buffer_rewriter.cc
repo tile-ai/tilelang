@@ -498,6 +498,22 @@ private:
       // (1,) -> (num_versions,) so lower_shared_barrier.cc still works.
       new_buffer->shape.Set(0, PrimExpr(num_versions) * new_buffer->shape[0]);
     } else {
+      if (new_buffer->shape.size() == 1 && new_buffer->strides.empty()) {
+        constexpr int64_t kTmaSmemAlignBits = 128 * 8;
+        const int64_t *extent = as_const_int(new_buffer->shape[0]);
+        int64_t elem_bits = static_cast<int64_t>(new_buffer->dtype.bits()) *
+                            new_buffer->dtype.lanes();
+        if (extent != nullptr && elem_bits > 0 &&
+            kTmaSmemAlignBits % elem_bits == 0) {
+          int64_t total_bits = *extent * elem_bits;
+          if (total_bits % kTmaSmemAlignBits != 0) {
+            int64_t padded_bits = (total_bits + kTmaSmemAlignBits - 1) /
+                                  kTmaSmemAlignBits * kTmaSmemAlignBits;
+            new_buffer->shape.Set(0, IntImm(new_buffer->shape[0].dtype(),
+                                            padded_bits / elem_bits));
+          }
+        }
+      }
       new_buffer->shape.insert(new_buffer->shape.begin(),
                                PrimExpr(num_versions));
       if (!new_buffer->strides.empty()) {
@@ -886,10 +902,17 @@ private:
         const Buffer &new_buffer = (*it).second;
         const PrimExpr &old_index = call->args[i + 1];
         PrimExpr offset;
-        if (new_buffer->strides.empty()) {
-          offset = product(buffer->shape);
-        } else {
+        if (!new_buffer->strides.empty()) {
           offset = new_buffer->strides[0];
+        } else if (new_buffer->shape.size() == buffer->shape.size() + 1) {
+          // Version dimension was prepended (possibly with the innermost
+          // extent padded for TMA alignment); the per-version stride is the
+          // product of the versioned buffer's trailing dimensions.
+          Array<PrimExpr> version_shape(new_buffer->shape.begin() + 1,
+                                        new_buffer->shape.end());
+          offset = product(version_shape);
+        } else {
+          offset = product(buffer->shape);
         }
         PrimExpr new_index = old_index + version_index * offset;
         new_args.Set(i + 1, new_index);
