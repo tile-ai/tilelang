@@ -1215,11 +1215,11 @@ private:
    * @brief Visit and mutate a Block node to attach inferred layout information.
    *
    * Converts the visited Block via the base visitor, asserts that every buffer
-   * allocated with scope "local.framgent" has an inferred layout in
+   * allocated with scope "local.fragment" has an inferred layout in
    * result_.layout_map, and attaches result_.layout_map to the Block's
    * annotations under attr::kLayoutMap.
    *
-   * If any "local.framgent" buffer lacks an entry in result_.layout_map an
+   * If any "local.fragment" buffer lacks an entry in result_.layout_map an
    * ICHECK will fail with the offending buffer printed.
    *
    * @return Stmt The (possibly modified) Block statement with the layout-map
@@ -1229,7 +1229,7 @@ private:
     SBlock block = Downcast<SBlock>(IRMutatorWithAnalyzer::VisitStmt_(op));
 
     for (auto buffer : block->alloc_buffers) {
-      if (buffer.scope() == "local.framgent") {
+      if (buffer.scope() == "local.fragment") {
         ICHECK(result_.layout_map.count(buffer))
             << "Cannot inference fragment layout for " << buffer;
       }
