@@ -132,7 +132,7 @@ def __exp10(x: PrimExpr) -> PrimExpr:
 
 
 def __exp(x: PrimExpr) -> PrimExpr:
-    """Calculate 2**x with fast math
+    """Calculate e**x with fast math
 
     Parameters
     ----------
