@@ -879,7 +879,7 @@ template <typename Impl> struct ReduceLowerer {
           body = For(vars[i]->var, 0, vars[i]->dom->extent, ForKind::kParallel,
                      body);
         }
-        body = PartitionLoop(Downcast<For>(body), lower_args.thread_var,
+        body = PartitionLoop(Downcast<For>(body), lower_args.thread_index,
                              analyzer, red_layout);
         body = PragmaUnrollLoop(Downcast<For>(body));
         return body;
@@ -1052,7 +1052,7 @@ template <typename Impl> struct ReduceLowerer {
           PrimExpr predicate = Bool(true);
           {
             auto dst_th = post_dst_idx;
-            dst_th.push_back(lower_args.thread_var);
+            dst_th.push_back(lower_args.thread_index);
             auto inv = dst_layout->Inverse()->Forward(dst_th);
             inv.pop_back();
             for (int i = 0; i < static_cast<int>(dst_layout->InputDim()); i++) {
@@ -1113,7 +1113,7 @@ template <typename Impl> struct ReduceLowerer {
       PrimExpr predicate = Bool(true);
       {
         auto dst_th_indices = dst_indices;
-        dst_th_indices.push_back(lower_args.thread_var);
+        dst_th_indices.push_back(lower_args.thread_index);
         auto inv = dst_layout->Inverse()->Forward(dst_th_indices);
         inv.pop_back();
         for (int i = 0; i < static_cast<int>(dst_layout->InputDim()); i++) {
@@ -1142,11 +1142,11 @@ template <typename Impl> struct ReduceLowerer {
       }
 
       if (dst_layout->InputDim() > 0) {
-        body = PartitionLoop(Downcast<For>(body), lower_args.thread_var,
+        body = PartitionLoop(Downcast<For>(body), lower_args.thread_index,
                              analyzer, red_layout);
         body = PragmaUnrollLoop(Downcast<For>(body));
       } else {
-        auto guard = (lower_args.thread_var == lower_args.thread_bounds->min);
+        auto guard = (lower_args.thread_index == lower_args.thread_bounds->min);
         body = IfThenElse(guard, body);
       }
 

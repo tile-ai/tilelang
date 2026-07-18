@@ -77,23 +77,6 @@ Optional<Buffer> FindLayoutAnchorBuffer(const Array<Buffer> &buffers,
 
 } // namespace
 
-/*!
- * \brief collect the mapping from the buffer var to it allocated buffer
- */
-class ThreadBindingCollector : public StmtExprVisitor {
-public:
-  void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tirx::attr::thread_extent) {
-      IterVar iv = Downcast<IterVar>(op->node);
-      thread_binding_[iv->var.get()] = iv;
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  // The thread binding map
-  std::unordered_map<const VarNode *, IterVar> thread_binding_;
-};
-
 using namespace tirx;
 using arith::IRMutatorWithAnalyzer;
 using arith::IRVisitorWithAnalyzer;
@@ -107,8 +90,7 @@ struct LayoutInferenceResult {
 
 class BufferUseDefCollector : public IRVisitorWithAnalyzer {
 public:
-  BufferUseDefCollector(bool skip_thread_partition)
-      : skip_thread_partition_(skip_thread_partition) {}
+  BufferUseDefCollector() = default;
 
   using arith::IRVisitorWithAnalyzer::IRVisitorWithAnalyzer;
 
@@ -124,28 +106,24 @@ public:
         << num_infer << ".";
 
     // Make sure we can safely access infer_list_[cur_infer_id] and
-    // thread_var_vec_[cur_infer_id]
+    // thread_index_vec_[cur_infer_id]
     auto &next = infer_list_[cur_infer_id];
-    auto iter_var = thread_var_vec_[cur_infer_id];
+    auto thread_index = thread_index_vec_[cur_infer_id];
     auto thread_bounds = thread_bounds_vec_[cur_infer_id];
     arith::Analyzer *cur_analyzer = analyzer_vec_[cur_infer_id].get();
     // Double-check that 'next' is valid
     ICHECK(next.defined()) << "infer_list_[" << cur_infer_id
                            << "] is null inside run_infer_step.";
 
-    // Check iter_var->dom and dom->extent
-    ICHECK(iter_var.defined())
-        << "thread_var_vec_[" << cur_infer_id << "] is not defined.";
-    ICHECK(iter_var->dom.defined())
-        << "iter_var->dom is not defined for infer_list_[" << cur_infer_id
-        << "].";
-    ICHECK(iter_var->dom->extent.defined())
-        << "iter_var->dom->extent is not defined for infer_list_["
-        << cur_infer_id << "].";
+    // Check the logical thread index and the thread bounds extent.
+    ICHECK(thread_index.defined())
+        << "thread_index_vec_[" << cur_infer_id << "] is not defined.";
+    ICHECK(thread_bounds.defined())
+        << "thread_bounds_vec_[" << cur_infer_id << "] is not defined.";
 
-    const int64_t *extent_ptr = as_const_int(iter_var->dom->extent);
+    const int64_t *extent_ptr = as_const_int(thread_bounds->extent);
     ICHECK(extent_ptr != nullptr)
-        << "iter_var->dom->extent is not a constant integer, which is "
+        << "thread_bounds->extent is not a constant integer, which is "
            "required for layout inference.";
 
     // Run InferLayout
@@ -324,10 +302,10 @@ public:
   };
 
   LayoutInferenceResult Run() {
-    // Basic consistency check: infer_list_ and thread_var_vec_ should have the
-    // same size
-    ICHECK_EQ(infer_list_.size(), thread_var_vec_.size())
-        << "Size mismatch: infer_list_ and thread_var_vec_ must match in "
+    // Basic consistency check: infer_list_ and thread_index_vec_ should have
+    // the same size
+    ICHECK_EQ(infer_list_.size(), thread_index_vec_.size())
+        << "Size mismatch: infer_list_ and thread_index_vec_ must match in "
            "length.";
     ICHECK_EQ(thread_bounds_vec_.size(), infer_list_.size())
         << "Size mismatch: thread_bounds_vec_ and infer_list_ must match in "
@@ -356,11 +334,6 @@ public:
       ICHECK(infer_list_[i].defined())
           << "infer_list_[" << i
           << "] is null. The inference object is not allocated properly.";
-
-      // Check that each thread_var_vec_ entry is defined
-      if (!thread_var_vec_[i].defined() && skip_thread_partition_) {
-        thread_var_vec_[i] = thread_var_;
-      }
       q.push_back(i);
     }
 
@@ -446,11 +419,11 @@ public:
     Map<For, Fragment> for_map;
     Map<For, PrimExpr> predicate_map;
     Map<For, Bool> padding_guard_map;
-    ICHECK(infer_list_.size() == thread_var_vec_.size())
-        << "infer_list_ and thread_var_vec_ size mismatch";
+    ICHECK(infer_list_.size() == thread_index_vec_.size())
+        << "infer_list_ and thread_index_vec_ size mismatch";
     for (int i = 0; i < infer_list_.size(); i++) {
       TileOperator base_infer = std::move(infer_list_[i]);
-      auto thread_var = thread_var_vec_[i];
+      auto thread_index = thread_index_vec_[i];
 
       // Check if base_infer is valid
       ICHECK(base_infer.defined()) << "Null pointer encountered in "
@@ -464,11 +437,11 @@ public:
         if (for_infer->LoopLayoutRequiresPaddingGuard()) {
           padding_guard_map.Set(for_infer->GetRoot(), Bool(true));
         }
-        // thread_var_ should be defined if we rely on it
-        ICHECK(thread_var.defined())
-            << "thread_var is not defined. Cannot retrieve predicate.";
+        // thread_index should be defined if we rely on it
+        ICHECK(thread_index.defined())
+            << "thread_index is not defined. Cannot retrieve predicate.";
 
-        if (auto predicate = for_infer->GetPredicate(thread_var->var)) {
+        if (auto predicate = for_infer->GetPredicate(thread_index)) {
           predicate_map.Set(for_infer->GetRoot(), predicate.value());
         }
       }
@@ -560,8 +533,8 @@ private:
         // This handles cases like: a = block_mask_f[i]; T.copy(A[a, 0], ...)
         CollectFragmentBuffersFromExpr(arg);
       }
-      // Compute thread_var_ and thread_bounds_
-      thread_var_vec_.push_back(thread_var_);
+      // Compute thread_index and thread_bounds
+      thread_index_vec_.push_back(CurrentThreadIndex());
       thread_bounds_vec_.push_back(CurrentThreadBounds());
       analyzer_vec_.push_back(analyzer_.Clone());
 
@@ -703,7 +676,7 @@ private:
       });
       infer_list_stmt_.push_back(GetRef<ObjectRef>(op));
       infer_list_.push_back(std::move(infer));
-      thread_var_vec_.push_back(thread_var_);
+      thread_index_vec_.push_back(CurrentThreadIndex());
       thread_bounds_vec_.push_back(CurrentThreadBounds());
       analyzer_vec_.push_back(analyzer_.Clone());
     } else {
@@ -768,7 +741,7 @@ private:
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->thread_tag == "threadIdx.x") {
         ICHECK(iv->dom->extent.as<IntImmNode>());
-        thread_var_ = iv;
+        thread_binding_ = iv;
       }
     }
     IRVisitorWithAnalyzer::VisitStmt_(op);
@@ -799,7 +772,17 @@ private:
   }
 
   Range CurrentThreadBounds() const {
-    return ComputeThreadBounds(thread_var_, analyzer_);
+    return ComputeThreadBounds(thread_binding_, analyzer_);
+  }
+
+  // Logical thread index for the current collection point: the real
+  // threadIdx.x Var when a thread_extent binding exists, otherwise constant
+  // 0 (e.g. CPU serial launch). Never an unbound synthetic Var.
+  PrimExpr CurrentThreadIndex() const {
+    if (thread_binding_.defined()) {
+      return thread_binding_->var;
+    }
+    return IntImm(DataType::Int(32), 0);
   }
 
   void VisitExpr_(const BufferLoadNode *op) final {
@@ -976,16 +959,16 @@ private:
       use_list_;
   // Per-op list of buffers it touches (fragment scope), used for prioritization
   std::unordered_map<int, std::vector<Buffer>> op_touched_buffers_;
-  // This is a workaround for cpu backend,
-  // we need to define a thread_var for the serial loop.
-  IterVar thread_var_ = IterVar(Range::FromMinExtent(0, 1), Var("v_thread"),
-                                IterVarType::kDataPar);
-  std::vector<IterVar> thread_var_vec_;
+  // Real threadIdx.x binding of the enclosing thread_extent scope, when one
+  // exists. Stays undefined for targets without thread bindings (e.g. CPU),
+  // where the logical thread index is the constant 0 and thread bounds are
+  // [0, 1) — no synthetic fallback Var is ever created.
+  IterVar thread_binding_;
+  std::vector<PrimExpr> thread_index_vec_;
   std::vector<Range> thread_bounds_vec_;
   std::vector<std::unique_ptr<arith::Analyzer>> analyzer_vec_;
   Target target_;
   LayoutMap annotated_layout_map_;
-  bool skip_thread_partition_{false};
 
   std::vector<TileOperator> BackupInferList() {
     std::vector<TileOperator> back_infer_list;
@@ -1155,11 +1138,11 @@ private:
 
 class LayoutInferencer : public IRMutatorWithAnalyzer {
 public:
-  static PrimFunc Substitute(PrimFunc f, bool skip_thread_partition = false) {
+  static PrimFunc Substitute(PrimFunc f) {
     arith::Analyzer analyzer;
     PrimFuncNode *fptr = f.CopyOnWrite();
     fptr->body = ParallelLoopFuser::Fuse(f->body);
-    BufferUseDefCollector collector(skip_thread_partition);
+    BufferUseDefCollector collector;
     collector.Collect(f);
     auto result = collector.Run();
     LayoutInferencer substituter(result, &analyzer);
@@ -1252,11 +1235,7 @@ private:
 tvm::transform::Pass LayoutInference() {
   using namespace tirx::transform;
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    ThreadBindingCollector collector;
-    collector(f->body);
-    bool has_thread_binding = !collector.thread_binding_.empty();
-    bool skip_thread_partition = !has_thread_binding;
-    f = LayoutInferencer::Substitute(std::move(f), skip_thread_partition);
+    f = LayoutInferencer::Substitute(std::move(f));
     // Validate parallel loop layout annotations
     ParallelLoopLayoutValidator::Validate(f->body);
     return f;

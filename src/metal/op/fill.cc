@@ -60,14 +60,15 @@ struct Fill {
                            lower_args.buffer_remap,
                            {}},
                           InferLevel::kFree);
-      auto thread_loop = PartitionLoop(par_op->GetRoot(), lower_args.thread_var,
-                                       analyzer, par_op->GetLoopLayout());
+      auto thread_loop =
+          PartitionLoop(par_op->GetRoot(), lower_args.thread_index, analyzer,
+                        par_op->GetLoopLayout());
       auto vectorized_loop =
           VectorizeLoop(thread_loop, analyzer, lower_args.layout_map);
       auto unrolled_loop = PragmaUnrollLoop(vectorized_loop);
 
-      if (par_op->GetPredicate(lower_args.thread_var).defined()) {
-        return IfThenElse(par_op->GetPredicate(lower_args.thread_var).value(),
+      if (par_op->GetPredicate(lower_args.thread_index).defined()) {
+        return IfThenElse(par_op->GetPredicate(lower_args.thread_index).value(),
                           unrolled_loop);
       }
       return unrolled_loop;
@@ -89,13 +90,14 @@ struct Fill {
                            lower_args.buffer_remap,
                            {}},
                           InferLevel::kFree);
-      auto thread_loop = PartitionLoop(par_op->GetRoot(), lower_args.thread_var,
-                                       analyzer, par_op->GetLoopLayout());
+      auto thread_loop =
+          PartitionLoop(par_op->GetRoot(), lower_args.thread_index, analyzer,
+                        par_op->GetLoopLayout());
       auto vectorized_loop =
           VectorizeLoop(thread_loop, analyzer, lower_args.layout_map);
       auto unrolled_loop = PragmaUnrollLoop(vectorized_loop);
-      if (par_op->GetPredicate(lower_args.thread_var).defined()) {
-        return IfThenElse(par_op->GetPredicate(lower_args.thread_var).value(),
+      if (par_op->GetPredicate(lower_args.thread_index).defined()) {
+        return IfThenElse(par_op->GetPredicate(lower_args.thread_index).value(),
                           unrolled_loop);
       }
       return unrolled_loop;

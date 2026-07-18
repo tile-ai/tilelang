@@ -96,7 +96,11 @@ inline const char *InferLevelToString(InferLevel level) {
 struct LowerArgs {
   Target target;
   Range thread_bounds;
-  tirx::Var thread_var;
+  // Logical thread index consumed by lowering helpers. This is an expression
+  // rather than a Var: GPU lowering passes the real threadIdx.x Var (bound by
+  // a thread_extent AttrStmt), while targets without thread bindings (e.g.
+  // CPU) pass constant 0. It must never be an unbound synthetic Var.
+  PrimExpr thread_index;
   LayoutMap layout_map;
   ffi::Map<tirx::Buffer, tirx::Buffer> buffer_remap;
   // Map from Bind variable to its bound expression, for resolving

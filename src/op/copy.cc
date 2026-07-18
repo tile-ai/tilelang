@@ -20,6 +20,7 @@
 
 #include <limits>
 #include <sstream>
+#include <unordered_set>
 #include <vector>
 
 namespace tvm {
@@ -41,12 +42,19 @@ Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &lower_args,
     if (IsLocalBuffer(op.src) && !IsLocalBuffer(op.dst)) {
       // A conflict write only occurs when multiple threads write to the same
       // global address. If any dst_range dimension's min depends on the thread
-      // variable, each thread targets a distinct location and there is no
-      // conflict.
+      // index, each thread targets a distinct location and there is no
+      // conflict. The thread index is an expression: collect the variables it
+      // uses by identity (the real threadIdx.x Var on GPU; none when it is a
+      // constant, e.g. 0 on CPU).
+      std::unordered_set<const VarNode *> thread_index_vars;
+      tirx::UsesVar(lower_args.thread_index, [&](const VarNode *v) {
+        thread_index_vars.insert(v);
+        return false;
+      });
       bool dst_depends_on_thread = false;
       for (const auto &range : op.dst_range) {
         if (tirx::UsesVar(range->min, [&](const VarNode *v) {
-              return v == lower_args.thread_var.get();
+              return thread_index_vars.count(v) != 0;
             })) {
           dst_depends_on_thread = true;
           break;
@@ -75,8 +83,8 @@ Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &lower_args,
   }
   auto loop_layout = par_op->GetLoopLayout();
   return LowerParallelLoop(
-      par_op->GetRoot(), loop_layout, lower_args.thread_var, analyzer,
-      lower_args.layout_map, par_op->GetPredicate(lower_args.thread_var),
+      par_op->GetRoot(), loop_layout, lower_args.thread_index, analyzer,
+      lower_args.layout_map, par_op->GetPredicate(lower_args.thread_index),
       /*parallel_loop=*/true, /*should_vectorize=*/true,
       par_op->LoopLayoutRequiresPaddingGuard());
 }
@@ -251,8 +259,8 @@ Stmt LowerIm2ColSIMT(const Im2ColOpNode &op, const LowerArgs &lower_args,
   }
   auto loop_layout = par_op->GetLoopLayout();
   return LowerParallelLoop(
-      par_op->GetRoot(), loop_layout, lower_args.thread_var, analyzer,
-      lower_args.layout_map, par_op->GetPredicate(lower_args.thread_var),
+      par_op->GetRoot(), loop_layout, lower_args.thread_index, analyzer,
+      lower_args.layout_map, par_op->GetPredicate(lower_args.thread_index),
       /*parallel_loop=*/true, /*should_vectorize=*/true,
       par_op->LoopLayoutRequiresPaddingGuard());
 }

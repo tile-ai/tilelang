@@ -84,9 +84,9 @@ std::optional<Stmt> TryLowerSharedBulkZeroFill(const FillNode &op,
       Call(DataType::Handle(), ptx_st_bulk_shared(),
            {op.dst->data, bytes, make_const(DataType::UInt(64), 0)});
   Stmt body = Evaluate(bulk_store);
-  if (lower_args.thread_var.defined() && lower_args.thread_bounds.defined()) {
-    body = IfThenElse(EQ(lower_args.thread_var, lower_args.thread_bounds->min),
-                      body);
+  if (lower_args.thread_index.defined() && lower_args.thread_bounds.defined()) {
+    body = IfThenElse(
+        EQ(lower_args.thread_index, lower_args.thread_bounds->min), body);
   }
   return body;
 }
