@@ -461,8 +461,22 @@ CopyInstSelection Unsupported(std::string reason) {
   return CopyInstSelection{CopyInst::kInvalid, false, std::move(reason)};
 }
 
-std::string MakeTmaUnavailableReason(const CopyNode &op) {
+std::string MakeTmaUnavailableReason(const CopyNode &op,
+                                     const CopyAnalysisContext &ctx) {
   std::ostringstream oss;
+  if (ctx.device_bound_ptr_vars) {
+    bool src_bound = ctx.device_bound_ptr_vars->count(op.src->data) > 0;
+    bool dst_bound = ctx.device_bound_ptr_vars->count(op.dst->data) > 0;
+    if (src_bound || dst_bound) {
+      const Buffer &buffer = src_bound ? op.src : op.dst;
+      oss << "Cannot lower a TMA copy whose " << (src_bound ? "src" : "dst")
+          << " base pointer `" << buffer->data->name_hint
+          << "` is bound inside the device kernel body (e.g. via "
+             "T.make_tensor): TMA tensor-map descriptors are built on the "
+             "host.";
+      return oss.str();
+    }
+  }
   if (op.src->dtype.is_float4_e2m1_unpacked() ||
       op.dst->dtype.is_float4_e2m1_unpacked()) {
     oss << "T.tma_copy() only supports float4_e2m1_unpacked as an FP4 unpack "
@@ -559,7 +573,7 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
   facts.prefer_instruction = GetPreferredInstruction(op);
   facts.disable_tma = GetDisableTMA(op);
   facts.cluster_mask = GetClusterMask(op);
-  facts.tma_unavailable_reason = MakeTmaUnavailableReason(op);
+  facts.tma_unavailable_reason = MakeTmaUnavailableReason(op, ctx);
   facts.async_unavailable_reason = MakeAsyncUnavailableReason(op, ctx.target);
   facts.pass_context_disables_tma =
       tvm::transform::PassContext::Current()
@@ -622,6 +636,20 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
   facts.can_stsm = CheckSTSMCopy(op, ctx.target);
   facts.can_tmem_load = CheckTMemLoad(op, ctx.target);
   facts.can_tmem_store = CheckTMemStore(op, ctx.target);
+  // TMA descriptors are encoded on the host; a copy endpoint whose base
+  // pointer is bound inside the device kernel body can never be TMA.
+  if (ctx.device_bound_ptr_vars) {
+    if (ctx.device_bound_ptr_vars->count(op.src->data)) {
+      facts.can_bulk_load = false;
+      facts.can_bulk_load_1d = false;
+      facts.can_bulk_load_ignore_last_dim = false;
+    }
+    if (ctx.device_bound_ptr_vars->count(op.dst->data)) {
+      facts.can_bulk_store = false;
+      facts.can_bulk_store_1d = false;
+      facts.can_bulk_store_ignore_last_dim = false;
+    }
+  }
   return facts;
 }
 
@@ -715,10 +743,12 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
   return Supported(SelectSyncLikeInst(facts));
 }
 
-CopyInstSelection ClassifyWarpSpecializedProducerCopy(const CopyNode &op,
-                                                      Target target) {
+CopyInstSelection
+ClassifyWarpSpecializedProducerCopy(const CopyNode &op, Target target,
+                                    const VarSet *device_bound_ptr_vars) {
   CopyAnalysisContext ctx;
   ctx.target = target;
+  ctx.device_bound_ptr_vars = device_bound_ptr_vars;
   CopyFacts facts = AnalyzeCopyFacts(op, ctx);
   if (!facts.cuda_like_target) {
     return Supported(CopyInst::kNormal);

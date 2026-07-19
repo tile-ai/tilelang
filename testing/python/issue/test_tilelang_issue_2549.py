@@ -10,6 +10,7 @@ sm_90 pipeline promoted such copies to TMA and aborted in MakePackedAPI with
 
 import math
 
+import pytest
 import tilelang
 import tilelang.testing
 from tilelang import language as T
@@ -157,6 +158,35 @@ def test_mixed_param_and_make_tensor_copies_keep_ws_for_param_copy():
     c = kernel(a, _make_ptr_table([b]))
     torch.cuda.synchronize()
     torch.testing.assert_close(c, a @ b, rtol=1e-2, atol=1e-2)
+
+
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_explicit_tma_copy_on_make_tensor_reports_actionable_error():
+    """An explicit T.tma_copy on a make_tensor buffer must fail with a clear
+    diagnostic naming the device-bound base pointer, not the undefined-var
+    ICHECK in MakePackedAPI."""
+
+    M = N = 128
+    block_M, block_N = 64, 64
+    dtype = T.float16
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, N), dtype),
+        C_ptrs: T.Tensor([1], T.ptr),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+            C_shared = T.alloc_shared((block_M, block_N), dtype)
+            C = T.make_tensor(C_ptrs[0], (M, N), dtype)
+
+            T.copy(A[by * block_M, bx * block_N], C_shared)
+            # Explicit TMA store into a device-bound (make_tensor) destination:
+            # no host-side descriptor can be encoded for it.
+            T.tma_copy(C_shared, C[by * block_M, bx * block_N])
+            T.tma_store_wait()
+
+    with pytest.raises(Exception, match="bound inside the device kernel body"):
+        _compile(main)
 
 
 if __name__ == "__main__":
