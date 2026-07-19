@@ -620,6 +620,8 @@ static bool HasGlobalToSharedCopyShape(const CopyNode *copy) {
          IsSharedBuffer(copy->dst) && copy->src->dtype == copy->dst->dtype;
 }
 
+/// Collect handle-typed vars bound by Bind inside the body. Their values only
+/// exist on the device, so no host-side TMA descriptor can be encoded for them.
 static VarSet CollectBodyBoundHandleVars(const Stmt &body) {
   VarSet vars;
   PostOrderVisit(body, [&](const ObjectRef &n) {
