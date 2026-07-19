@@ -18,9 +18,15 @@ def test_runtime_int8_broadcast_to_32_lanes(dtype, torch_dtype, value):
     @T.prim_func
     def main(src: T.Tensor((1,), dtype), out: T.Tensor((LANES,), dtype)):
         with T.Kernel(1, threads=1) as _:
-            out[0:LANES] = T.Broadcast(src[0], LANES)
+            # Scalar global stores keep this test runnable on pre-SM100 GPUs.
+            packed = T.alloc_local((LANES,), dtype)
+            packed[0:LANES] = T.Broadcast(src[0], LANES)
+            for i in T.serial(LANES):
+                out[i] = packed[i]
 
     kernel = tilelang.compile(main, target="cuda")
+    constructor = "make_ulonglong4" if dtype == "uint8" else "make_longlong4"
+    assert constructor in kernel.get_kernel_source()
     src = torch.tensor([value], dtype=torch_dtype, device="cuda")
     out = torch.empty(LANES, dtype=torch_dtype, device="cuda")
     kernel(src, out)
@@ -37,9 +43,14 @@ def test_constant_int8_broadcast_to_32_lanes(dtype, torch_dtype, value):
     @T.prim_func
     def main(out: T.Tensor((LANES,), dtype)):
         with T.Kernel(1, threads=1) as _:
-            out[0:LANES] = T.Broadcast(T.cast(value, dtype), LANES)
+            packed = T.alloc_local((LANES,), dtype)
+            packed[0:LANES] = T.Broadcast(T.cast(value, dtype), LANES)
+            for i in T.serial(LANES):
+                out[i] = packed[i]
 
     kernel = tilelang.compile(main, target="cuda")
+    constructor = "make_ulonglong4" if dtype == "uint8" else "make_longlong4"
+    assert constructor in kernel.get_kernel_source()
     out = torch.empty(LANES, dtype=torch_dtype, device="cuda")
     kernel(out)
 
