@@ -2,7 +2,6 @@ import tilelang
 import tilelang.language as T
 from tilelang import tvm as tvm
 from tvm import DataType
-from tvm import tirx
 import torch
 from dequantize_utils import torch_convert_bit_twiddling, torch_convert
 from tilelang.quantize import _tir_u8_to_f4_to_bf16
@@ -230,7 +229,7 @@ def matmul(
         Notes:
         - Only supports in_dtype="fp4" and out_dtype=T.bfloat16.
         - The macro expects B_shared and B_dequantize_shared to have the shapes established in the enclosing scope (B_shared_shape, B_dequantize_shared_shape) and performs block-local copying into allocated fragments before elementwise conversion.
-        - Scale holds the exponent-like scaling values multiplied into each converted element.
+        - Scale holds the exponent-like scaling values applied by the conversion helper.
         """
         assert in_dtype in ["fp4"]
         assert out_dtype in [T.bfloat16]
@@ -242,7 +241,7 @@ def matmul(
 
             Per-element behavior:
             - Reads packed 4-bit entries from B_shared (uint8 storage, multiple nibbles per byte).
-            - Converts each nibble with `_tir_u8_to_f4_to_bf16`, then applies the exponent term from Scale.
+            - Converts each nibble with `_tir_u8_to_f4_to_bf16`, including the exponent term from Scale.
             - Writes the dequantized BF16 block into B_dequantize_shared.
 
             Parameters:
@@ -264,9 +263,9 @@ def matmul(
                     num_bits,
                     B_local[i, j // num_elems_per_byte],
                     j % num_elems_per_byte,
-                    tirx.const(0, T.uint16),
+                    Scale[bx * block_N + i, k * block_K // scale_size + j // scale_size],
                     dtype=out_dtype,
-                ) * T.shift_left(1, (Scale[bx * block_N + i, k * block_K // scale_size + j // scale_size]))
+                )
             T.copy(B_dequantize_local, B_dequantize_shared)
 
         return simple_dequant_bf16_fp4

@@ -16,7 +16,6 @@ import tilelang
 import tilelang.language as T
 from tilelang import tvm as tvm
 from tvm import DataType
-from tvm import tirx
 import torch
 
 from tilelang.quantize import _tir_u8_to_f4_to_bf16, get_mxfp_intrin_group
@@ -167,11 +166,11 @@ def matmul(
                     num_bits,
                     B_local[i, j // num_elems_per_byte],
                     j % num_elems_per_byte,
-                    tirx.const(0, T.uint16),
+                    Scale[
+                        bx * block_N + i,
+                        k * block_K // scale_size + j // scale_size,
+                    ],
                     dtype=out_dtype,
-                ) * T.shift_left(
-                    1,
-                    Scale[bx * block_N + i, k * block_K // scale_size + j // scale_size],
                 )
             T.copy(B_dequantize_local, B_dequantize_shared)
 

@@ -53,6 +53,27 @@ from tvm import tirx
                 0xC140,
             ],
         ),
+        (
+            255,
+            [
+                0x0000,
+                0x7F80,
+                0x7F80,
+                0x7FC0,
+                0x7F80,
+                0x7FC0,
+                0x7F80,
+                0x7FC0,
+                0x8000,
+                0xFF80,
+                0xFF80,
+                0xFFC0,
+                0xFF80,
+                0xFFC0,
+                0xFF80,
+                0xFFC0,
+            ],
+        ),
     ],
 )
 @tilelang.testing.requires_llvm
