@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <unordered_set>
 
 namespace tvm {
 namespace tl {
@@ -19,6 +20,8 @@ namespace cuda {
 
 using namespace tirx;
 using namespace ffi;
+
+using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
 
 enum class CopyInst : uint8_t {
   kNormal = 0,
@@ -83,6 +86,7 @@ struct CopyAnalysisContext {
   arith::Analyzer *analyzer = nullptr;
   bool buffer_oob = false;
   bool emit_diagnostics = false;
+  const VarSet *device_bound_ptr_vars = nullptr;
 };
 
 struct CopyInstSelection {
@@ -97,8 +101,9 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
                                             const CopyAnalysisContext &ctx);
 
 // Pre-layout producer classification used by warp-specialized scheduling.
-CopyInstSelection ClassifyWarpSpecializedProducerCopy(const CopyNode &op,
-                                                      Target target);
+CopyInstSelection ClassifyWarpSpecializedProducerCopy(
+    const CopyNode &op, Target target,
+    const VarSet *device_bound_ptr_vars = nullptr);
 
 // Semantic queries used by transform passes that need copy shape/capability
 // information without knowing the CUDA lowering policy knobs.

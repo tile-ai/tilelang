@@ -430,7 +430,8 @@ private:
 
   static CopyInst SelectInst(const CopyNode &op, Target target,
                              const LayoutMap &layout_map,
-                             arith::Analyzer *analyzer, bool buffer_oob);
+                             arith::Analyzer *analyzer, bool buffer_oob,
+                             const Map<Var, PrimExpr> &bind_var_to_expr);
 
   static void CheckParallelLoopLayout(const CopyNode &op, CopyInst copy_inst);
 
@@ -515,9 +516,9 @@ void Copy::CollectFragmentLayouts(const PrimExpr &expr,
 LayoutMap Copy::InferLayout(const CopyNode &op,
                             const LayoutInferArgs &layout_args,
                             InferLevel level) {
-  CopyInst copy_inst =
-      SelectInst(op, layout_args.target, layout_args.layout_map,
-                 layout_args.analyzer, layout_args.buffer_oob);
+  CopyInst copy_inst = SelectInst(
+      op, layout_args.target, layout_args.layout_map, layout_args.analyzer,
+      layout_args.buffer_oob, layout_args.bind_var_to_expr);
   CheckParallelLoopLayout(op, copy_inst);
 
   if (copy_inst == CopyInst::kTMemLoad || copy_inst == CopyInst::kTMemStore) {
@@ -692,13 +693,21 @@ LayoutMap Copy::InferBulkLayout(const CopyNode &op,
 
 CopyInst Copy::SelectInst(const CopyNode &op, Target target,
                           const LayoutMap &layout_map,
-                          arith::Analyzer *analyzer, bool buffer_oob) {
+                          arith::Analyzer *analyzer, bool buffer_oob,
+                          const Map<Var, PrimExpr> &bind_var_to_expr) {
+  cuda::VarSet device_bound_local_vars;
+  for (const auto &[var, expr] : bind_var_to_expr) {
+    if (var->dtype.is_handle()) {
+      device_bound_local_vars.insert(var);
+    }
+  }
   CopyAnalysisContext ctx;
   ctx.target = target;
   ctx.layout_map = &layout_map;
   ctx.analyzer = analyzer;
   ctx.buffer_oob = buffer_oob;
   ctx.emit_diagnostics = true;
+  ctx.device_bound_ptr_vars = &device_bound_local_vars;
   auto result = SelectCopyInstForLowering(op, ctx);
   ICHECK(result.supported) << result.reason;
   return result.inst;
@@ -706,8 +715,9 @@ CopyInst Copy::SelectInst(const CopyNode &op, Target target,
 
 Stmt Copy::Lower(const CopyNode &op, const LowerArgs &lower_args,
                  arith::Analyzer *analyzer) {
-  auto copy_inst = SelectInst(op, lower_args.target, lower_args.layout_map,
-                              analyzer, /*buffer_oob=*/false);
+  auto copy_inst =
+      SelectInst(op, lower_args.target, lower_args.layout_map, analyzer,
+                 /*buffer_oob=*/false, lower_args.bind_var_to_expr);
   if (op.dst_block.defined()) {
     ICHECK(TargetHasBulkCopy(lower_args.target))
         << "T.copy with dst_block requires cluster-copy support (CUDA SM90+). "
