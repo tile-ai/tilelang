@@ -1051,8 +1051,16 @@ template <typename Impl> struct ReduceLowerer {
 
           PrimExpr predicate = Bool(true);
           {
+            // The fragment inverse expects a zero-based logical thread
+            // coordinate within the destination layout's thread range, so
+            // normalize the absolute thread index against that range.
+            PrimExpr local_thread_index = lower_args.thread_index;
+            if (dst_layout->ThreadRange().defined()) {
+              local_thread_index =
+                  local_thread_index - dst_layout->ThreadRange()->min;
+            }
             auto dst_th = post_dst_idx;
-            dst_th.push_back(lower_args.thread_index);
+            dst_th.push_back(local_thread_index);
             auto inv = dst_layout->Inverse()->Forward(dst_th);
             inv.pop_back();
             for (int i = 0; i < static_cast<int>(dst_layout->InputDim()); i++) {
@@ -1112,8 +1120,16 @@ template <typename Impl> struct ReduceLowerer {
 
       PrimExpr predicate = Bool(true);
       {
+        // The fragment inverse expects a zero-based logical thread coordinate
+        // within the destination layout's thread range, so normalize the
+        // absolute thread index against that range.
+        PrimExpr local_thread_index = lower_args.thread_index;
+        if (dst_layout->ThreadRange().defined()) {
+          local_thread_index =
+              local_thread_index - dst_layout->ThreadRange()->min;
+        }
         auto dst_th_indices = dst_indices;
-        dst_th_indices.push_back(lower_args.thread_index);
+        dst_th_indices.push_back(local_thread_index);
         auto inv = dst_layout->Inverse()->Forward(dst_th_indices);
         inv.pop_back();
         for (int i = 0; i < static_cast<int>(dst_layout->InputDim()); i++) {
