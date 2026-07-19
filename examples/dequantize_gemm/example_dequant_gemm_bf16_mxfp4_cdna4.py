@@ -19,26 +19,8 @@ from tvm import DataType
 from tvm import tirx
 import torch
 
-from tilelang.quantize import get_mxfp_intrin_group
+from tilelang.quantize import _tir_u8_to_f4_to_bf16, get_mxfp_intrin_group
 from dequantize_utils import torch_convert_bit_twiddling, torch_convert
-
-
-def _tir_u8_to_f4_to_bf16(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, scale: tirx.PrimExpr, dtype: str):
-    """Convert a packed 4-bit FP4 field to bfloat16 (mirrors Hopper example, ignoring overflow clamp)."""
-    assert nbit == 4
-    assert dtype == T.bfloat16
-    assert val.dtype == T.uint8
-    mask = tirx.const((1 << nbit) - 1, T.uint16)
-    f4 = (val >> (pos.astype(T.uint16) * tirx.const(nbit, T.uint16))) & mask
-    s = f4 >> tirx.const(3, T.uint16)
-    e_f4 = (f4 & tirx.const(6, T.uint16)) >> tirx.const(1, T.uint16)
-    e_bf16 = e_f4 + tirx.const(126, T.uint16)
-    m_f4 = f4 & tirx.const(1, T.uint16)
-    val_bf16 = tirx.reinterpret(
-        T.bfloat16,
-        ((((s << tirx.const(8, T.uint16)) | e_bf16) << tirx.const(7, T.uint16)) | (m_f4 << tirx.const(6, T.uint16))).astype(T.uint16),
-    )
-    return val_bf16
 
 
 def _get_target():
@@ -185,10 +167,7 @@ def matmul(
                     num_bits,
                     B_local[i, j // num_elems_per_byte],
                     j % num_elems_per_byte,
-                    Scale[
-                        bx * block_N + i,
-                        k * block_K // scale_size + j // scale_size,
-                    ],
+                    tirx.const(0, T.uint16),
                     dtype=out_dtype,
                 ) * T.shift_left(
                     1,

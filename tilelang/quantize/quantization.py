@@ -39,8 +39,8 @@ def _tir_u8_to_f4_to_bf16(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, sca
         - Validates `nbit == 4`, `dtype == T.bfloat16`, and `val.dtype == T.uint8` (AssertionError if violated).
         - Extracts the 4-bit field at position `pos` (fields are packed consecutively in `val`).
         - Interprets the 4-bit field as: sign = bit3, exponent = bits1-2, mantissa = bit0.
-        - Converts the 2-bit exponent to bf16 exponent space by adding a bias of 126, adds `scale` to that exponent,
-        and clamps the result to the 8-bit exponent range (0..255).
+        - Converts normal encodings to bf16 exponent space by adding a bias of 126. Exponent-zero encodings
+        produce signed zero or the E2M1 subnormal 0.5 before applying `scale` to nonzero values.
         - Assembles a 16-bit bfloat16 bit pattern from (sign, biased-and-scaled-exponent, mantissa) and
         returns it reinterpreted as `bfloat16`.
 
@@ -61,15 +61,20 @@ def _tir_u8_to_f4_to_bf16(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, sca
     f4 = (val >> (pos.astype(T.uint16) * tirx.const(nbit, T.uint16))) & mask
     s = f4 >> tirx.const(3, T.uint16)
     e_f4 = (f4 & tirx.const(6, T.uint16)) >> tirx.const(1, T.uint16)
-    # Exponential bias between f4 and bf16 is 2^(8-1) - 2^(2-1) = 126
-    e_bf16 = e_f4 + tirx.const(126, T.uint16)
-    # Scale is the exponential part, within the representation of uint8
-    # To handle the overflow, we use the max function to limit the exponential part to 8 bits
-    e_bf16 = min(e_bf16 + scale, tirx.const((1 << 8) - 1, T.uint16))
     m_f4 = f4 & tirx.const(1, T.uint16)
+    # Exponential bias between f4 and bf16 is 2^(8-1) - 2^(2-1) = 126
+    # FP4 E2M1 exponent-zero encodings are zero (m=0) and 0.5 (m=1).
+    is_subnormal = e_f4 == tirx.const(0, T.uint16)
+    e_bf16 = tirx.Select(is_subnormal, m_f4 * tirx.const(126, T.uint16),
+                         e_f4 + tirx.const(126, T.uint16))
+    # Scale is the exponential part, within the representation of uint8
+    # To handle overflow, limit the exponent to 8 bits while keeping zero unchanged.
+    e_bf16 = tirx.Select(e_bf16 == tirx.const(0, T.uint16), e_bf16,
+                         T.min(e_bf16 + scale, tirx.const((1 << 8) - 1, T.uint16)))
+    m_bf16 = tirx.Select(is_subnormal, tirx.const(0, T.uint16), m_f4)
     val_bf16 = tirx.reinterpret(T.bfloat16,
                                ((((s << tirx.const(8, T.uint16)) | e_bf16) << tirx.const(7, T.uint16))
-                                | (m_f4 << tirx.const(6, T.uint16))).astype(T.uint16))
+                                | (m_bf16 << tirx.const(6, T.uint16))).astype(T.uint16))
     return val_bf16
 
 def _tir_f32x2_to_bf16x2_to_u32(v0: tirx.PrimExpr, v1: tirx.PrimExpr, round_to_even: bool = True):

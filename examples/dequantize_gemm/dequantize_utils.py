@@ -58,7 +58,7 @@ def torch_convert(tensor, scale_size=None, Scale=None):
     """
     Decode a 2D uint8 tensor into a 2D bfloat16 tensor by expanding each byte into two bf16 values using a 4-bit (nibble) encoding.
 
-    Each input byte holds two 4-bit encoded values (low and high nibble). For each nibble this function derives sign/scale bits, a 3-bit exponent fragment and a 1-bit mantissa fragment, assembles a 16-bit bf16 pattern, and returns the resulting tensor with shape (N, K*2) and dtype torch.bfloat16 on the same device as the input.
+    Each input byte holds two FP4 E2M1 values (low and high nibble). For each nibble this function derives the sign, 2-bit exponent, and 1-bit mantissa, assembles a 16-bit bf16 pattern, and returns the resulting tensor with shape (N, K*2) and dtype torch.bfloat16 on the same device as the input.
 
     Parameters:
         tensor (torch.Tensor): 2D tensor of dtype torch.uint8 and shape (N, K). Each byte contains two encoded 4-bit entries that become two bf16 values.
@@ -75,12 +75,16 @@ def torch_convert(tensor, scale_size=None, Scale=None):
     f4 = torch.stack((tensor & 0x0F, tensor >> 4), dim=-1)
     f4 = f4.reshape(N, K * 2).to(torch.int16)
     sign = (f4 >> 3) * -32768
-    exponent = ((f4 & 6) >> 1) + 126
+    exponent_f4 = (f4 & 6) >> 1
+    mantissa_f4 = f4 & 1
+    is_subnormal = exponent_f4 == 0
+    exponent = torch.where(is_subnormal, mantissa_f4 * 126, exponent_f4 + 126)
     if scale_size is not None:
         assert Scale is not None
         scale_idx = torch.arange(K * 2, device=tensor.device) // scale_size
-        exponent = torch.clamp(exponent + Scale[:, scale_idx].to(torch.int16), max=255)
-    mantissa = (f4 & 1) << 6
+        scaled_exponent = torch.clamp(exponent + Scale[:, scale_idx].to(torch.int16), max=255)
+        exponent = torch.where(exponent == 0, exponent, scaled_exponent)
+    mantissa = torch.where(is_subnormal, torch.zeros_like(mantissa_f4), mantissa_f4) << 6
     return (sign + (exponent << 7) + mantissa).view(torch.bfloat16)
 
 

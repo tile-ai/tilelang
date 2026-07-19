@@ -5,48 +5,7 @@ from tvm import DataType
 from tvm import tirx
 import torch
 from dequantize_utils import torch_convert_bit_twiddling, torch_convert
-
-
-def _tir_u8_to_f4_to_bf16(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, scale: tirx.PrimExpr, dtype: str):
-    """
-    Convert a 4-bit field packed in a uint8 into a bfloat16 value, applying an exponent scale.
-
-    This helper extracts a 4-bit nibble from `val` at byte-nibble position `pos`, interprets its
-    bits as a sign/exponent/mantissa in the 4-bit custom FP4 layout, adjusts the exponent by
-    `scale` (clamped to an 8-bit range), and assembles the corresponding bfloat16 representation.
-
-    Parameters:
-        nbit (int): Number of bits in the packed field (must be 4).
-        val (tirx.PrimExpr): Packed input value of dtype `uint8` containing one or more 4-bit fields.
-        pos (tirx.PrimExpr): Index of the nibble within `val` (used to shift/extract the 4-bit field).
-        scale (tirx.PrimExpr): Per-element exponent adjustment added to the extracted exponent (uint-like).
-        dtype (str): Destination dtype string (must be T.bfloat16).
-
-    Returns:
-        tirx.PrimExpr: The resulting value reinterpreted as `bfloat16`.
-
-    Notes:
-    - Preconditions are enforced via assertions: nbit == 4, dtype == T.bfloat16, and val.dtype == T.uint8.
-    - The function clamps the adjusted exponent to the 8-bit range before assembling the bfloat16 bit pattern.
-    """
-    assert nbit == 4
-    assert dtype == T.bfloat16
-    assert val.dtype == T.uint8
-    mask = tirx.const((1 << nbit) - 1, T.uint16)
-    f4 = (val >> (pos.astype(T.uint16) * tirx.const(nbit, T.uint16))) & mask
-    s = f4 >> tirx.const(3, T.uint16)
-    e_f4 = (f4 & tirx.const(6, T.uint16)) >> tirx.const(1, T.uint16)
-    # Exponential bias between f4 and bf16 is 2^(8-1) - 2^(2-1) = 126
-    e_bf16 = e_f4 + tirx.const(126, T.uint16)
-    # Scale is the exponential part, within the representation of uint8
-    # To handle the overflow, we may use the min function to limit the exponential part to 8 bits
-    # e_bf16 = T.min(e_bf16 + scale, tirx.const((1 << 8) - 1, "uint16"))
-    m_f4 = f4 & tirx.const(1, T.uint16)
-    val_bf16 = tirx.reinterpret(
-        T.bfloat16,
-        ((((s << tirx.const(8, T.uint16)) | e_bf16) << tirx.const(7, T.uint16)) | (m_f4 << tirx.const(6, T.uint16))).astype(T.uint16),
-    )
-    return val_bf16
+from tilelang.quantize import _tir_u8_to_f4_to_bf16
 
 
 def get_configs():
@@ -271,7 +230,7 @@ def matmul(
         Notes:
         - Only supports in_dtype="fp4" and out_dtype=T.bfloat16.
         - The macro expects B_shared and B_dequantize_shared to have the shapes established in the enclosing scope (B_shared_shape, B_dequantize_shared_shape) and performs block-local copying into allocated fragments before elementwise conversion.
-        - Scale holds the exponent-like scaling values indexed per output element as used by the conversion helper.
+        - Scale holds the exponent-like scaling values multiplied into each converted element.
         """
         assert in_dtype in ["fp4"]
         assert out_dtype in [T.bfloat16]
@@ -283,7 +242,7 @@ def matmul(
 
             Per-element behavior:
             - Reads packed 4-bit entries from B_shared (uint8 storage, multiple nibbles per byte).
-            - Uses Scale to obtain an exponent term (stored as uint8) and reconstructs BF16 values via _tir_u8_to_f4_to_bf16.
+            - Converts each nibble with `_tir_u8_to_f4_to_bf16`, then applies the exponent term from Scale.
             - Writes the dequantized BF16 block into B_dequantize_shared.
 
             Parameters:
@@ -305,9 +264,7 @@ def matmul(
                     num_bits,
                     B_local[i, j // num_elems_per_byte],
                     j % num_elems_per_byte,
-                    Scale[
-                        bx * block_N + i, k * block_K // scale_size + j // scale_size
-                    ],  # Scale is the exponential part, within the representation of uint8
+                    tirx.const(0, T.uint16),
                     dtype=out_dtype,
                 ) * T.shift_left(1, (Scale[bx * block_N + i, k * block_K // scale_size + j // scale_size]))
             T.copy(B_dequantize_local, B_dequantize_shared)

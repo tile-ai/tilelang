@@ -5,6 +5,7 @@ from tvm import DataType
 from tvm import tirx
 import torch
 from dequantize_utils import torch_convert_bit_twiddling, torch_convert
+from tilelang.quantize import _tir_u8_to_f4_to_bf16
 
 
 def get_configs():
@@ -200,7 +201,7 @@ def matmul(
         The returned macro (named `simple_dequant_bf16_fp4`) expects B_shared and B_dequantize_shared buffers (shapes and a few loop/constant names like
         `B_shared_shape`, `B_dequantize_shared_shape`, `storage_dtype`, `out_dtype`, `num_bits`, `num_elems_per_byte`, `block_N`, and `block_K`) to be available in the surrounding TIR scope. It:
         - Unpacks 4-bit FP values from the packed uint8 representation in B_shared.
-        - Converts each 4-bit value to a bfloat16 element using an internal helper `_tir_u8_to_f4_to_bf16`.
+        - Converts each 4-bit value to a bfloat16 element using the shared `_tir_u8_to_f4_to_bf16` helper.
         - Writes the dequantized bfloat16 block into B_dequantize_shared.
 
         Constraints:
@@ -213,51 +214,6 @@ def matmul(
         """
         assert in_dtype in ["fp4"]
         assert out_dtype in [T.bfloat16]
-
-        def _tir_u8_to_f4_to_bf16(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, scale: tirx.PrimExpr, dtype: str):
-            """
-            Convert a 4-bit FP4 value packed in a uint8 byte into a bfloat16 value.
-
-            This helper extracts the 4-bit field located at the bit position `pos` within the
-            byte `val`, interprets it as an FP4 (sign, exponent, mantissa) value, applies an
-            exponent `scale` offset to align it with bfloat16 exponent bias, clamps the
-            resulting exponent to 8 bits, and returns the assembled bfloat16 bit pattern.
-
-            Parameters:
-                nbit (int): Number of bits in the packed element; must be 4.
-                val (tirx.PrimExpr): A uint8 value containing packed FP4 elements.
-                pos (tirx.PrimExpr): Index (0-based) of which FP4 nibble inside `val` to extract.
-                scale (tirx.PrimExpr): Exponent offset applied when converting FP4 exponent to bfloat16.
-                dtype (str): Target dtype string; must be T.bfloat16.
-
-            Returns:
-                tirx.PrimExpr: A bfloat16-typed PrimExpr containing the converted value.
-
-            Notes:
-                - The function asserts `nbit == 4`, `dtype == T.bfloat16`, and that `val.dtype` is T.uint8.
-                - The conversion uses a fixed mapping from FP4 exponent/mantissa layout into bfloat16
-                bit fields and clamps the computed exponent to fit into 8 bits.
-            """
-            assert nbit == 4
-            assert dtype == T.bfloat16
-            assert val.dtype == T.uint8
-            mask = tirx.const((1 << nbit) - 1, T.uint16)
-            f4 = (val >> (pos.astype(T.uint16) * tirx.const(nbit, T.uint16))) & mask
-            s = f4 >> tirx.const(3, T.uint16)
-            e_f4 = (f4 & tirx.const(6, T.uint16)) >> tirx.const(1, T.uint16)
-            # Exponential bias between f4 and bf16 is 2^(8-1) - 2^(2-1) = 126
-            e_bf16 = e_f4 + tirx.const(126, T.uint16)
-            # Scale is the exponential part, within the representation of uint8
-            # To handle the overflow, we use the max function to limit the exponential part to 8 bits
-            e_bf16 = T.min(e_bf16 + scale, tirx.const((1 << 8) - 1, T.uint16))
-            m_f4 = f4 & tirx.const(1, T.uint16)
-            val_bf16 = tirx.reinterpret(
-                T.bfloat16,
-                ((((s << tirx.const(8, T.uint16)) | e_bf16) << tirx.const(7, T.uint16)) | (m_f4 << tirx.const(6, T.uint16))).astype(
-                    T.uint16
-                ),
-            )
-            return val_bf16
 
         @T.macro
         def simple_dequant_bf16_fp4(B_shared, B_dequantize_shared):
@@ -284,7 +240,7 @@ def matmul(
                     num_bits,
                     B_shared[i, j // num_elems_per_byte],
                     j % num_elems_per_byte,
-                    0,  # No scale for test
+                    tirx.const(0, T.uint16),  # No scale for test
                     dtype=out_dtype,
                 )
             T.copy(B_dequantize_local, B_dequantize_shared)
