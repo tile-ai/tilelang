@@ -220,25 +220,73 @@ def _tir_packed_to_fp4_to_f16(storage_type="uint", storage_nbit=8):
 
     return f_convert
 
+
+def _tir_u8_to_f8_e4m3_subnormal_to_f16_bits(mantissa: tirx.PrimExpr):
+    # E4M3 subnormals have value mantissa * 2^-9; normalize that value into binary16 bits.
+    return tirx.Select(
+        mantissa >= tirx.const(4, T.uint16),
+        tirx.const(0x2000, T.uint16)
+        | ((mantissa & tirx.const(0x3, T.uint16)) << tirx.const(8, T.uint16)),
+        tirx.Select(
+            mantissa >= tirx.const(2, T.uint16),
+            tirx.const(0x1C00, T.uint16)
+            | ((mantissa & tirx.const(0x1, T.uint16)) << tirx.const(9, T.uint16)),
+            tirx.Select(
+                mantissa == tirx.const(1, T.uint16),
+                tirx.const(0x1800, T.uint16),
+                tirx.const(0, T.uint16),
+            ),
+        ),
+    )
+
+
 def _tir_u8_to_f8_e4m3_to_f16_naive(nbit: int, val: tirx.PrimExpr, dtype: str):
     assert nbit == 8
     assert dtype == T.float16
-    s_f16 = (val >> tirx.const(7, T.uint16)) << tirx.const(15, T.uint16)
-    e4 = val & tirx.const(0x40, T.uint16)
-    prefix = tirx.Select(e4 == tirx.const(0, T.uint16), tirx.const(0x2000, T.uint16),
-                        tirx.const(0x4000, T.uint16))
-    e_f16 = ((val & tirx.const(63, T.uint16)) << tirx.const(7, T.uint16)) | prefix
-    return tirx.reinterpret(T.float16, s_f16 | e_f16)
+    val_u16 = val.astype(T.uint16)
+    s_f16 = (val_u16 >> tirx.const(7, T.uint16)) << tirx.const(15, T.uint16)
+    exponent = (val_u16 >> tirx.const(3, T.uint16)) & tirx.const(0xF, T.uint16)
+    mantissa = val_u16 & tirx.const(0x7, T.uint16)
+    normal_f16 = ((exponent + tirx.const(8, T.uint16)) << tirx.const(10, T.uint16)) | (
+        mantissa << tirx.const(7, T.uint16)
+    )
+    subnormal_f16 = _tir_u8_to_f8_e4m3_subnormal_to_f16_bits(mantissa)
+    magnitude_f16 = tirx.Select(
+        exponent == tirx.const(0, T.uint16),
+        subnormal_f16,
+        tirx.Select(
+            (exponent == tirx.const(0xF, T.uint16))
+            & (mantissa == tirx.const(0x7, T.uint16)),
+            tirx.const(0x7E00, T.uint16),
+            normal_f16,
+        ),
+    )
+    return tirx.reinterpret(T.float16, s_f16 | magnitude_f16)
 
 
 def _tir_u8_to_f8_e4m3_to_f16(nbit: int, val: tirx.PrimExpr, dtype: str):
     assert nbit == 8
     assert dtype == T.float16
-    s_f16 = (val >> tirx.const(7, T.uint16)) << tirx.const(15, T.uint16)
-    e4 = val & tirx.const(0x40, T.uint16)
-    e_f16 = ((val & tirx.const(63, T.uint16)) << tirx.const(7, T.uint16)) | (e4 << tirx.const(8, T.uint16)) | (e4 << tirx.const(7, T.uint16))
-    e_f16 = e_f16 ^ tirx.const(0x2000, T.uint16)
-    return tirx.reinterpret(T.float16, s_f16 | e_f16)
+    val_u16 = val.astype(T.uint16)
+    s_f16 = (val_u16 >> tirx.const(7, T.uint16)) << tirx.const(15, T.uint16)
+    e4 = val_u16 & tirx.const(0x40, T.uint16)
+    normal_f16 = (
+        ((val_u16 & tirx.const(63, T.uint16)) << tirx.const(7, T.uint16))
+        | (e4 << tirx.const(8, T.uint16))
+        | (e4 << tirx.const(7, T.uint16))
+    ) ^ tirx.const(0x2000, T.uint16)
+    mantissa = val_u16 & tirx.const(0x7, T.uint16)
+    subnormal_f16 = _tir_u8_to_f8_e4m3_subnormal_to_f16_bits(mantissa)
+    magnitude_f16 = tirx.Select(
+        (val_u16 & tirx.const(0x78, T.uint16)) == tirx.const(0, T.uint16),
+        subnormal_f16,
+        tirx.Select(
+            (val_u16 & tirx.const(0x7F, T.uint16)) == tirx.const(0x7F, T.uint16),
+            tirx.const(0x7E00, T.uint16),
+            normal_f16,
+        ),
+    )
+    return tirx.reinterpret(T.float16, s_f16 | magnitude_f16)
 
 
 def _tir_u8_to_f8_e5m2_to_f16(nbit: int, val: tirx.PrimExpr, dtype: str):
