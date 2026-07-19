@@ -703,36 +703,15 @@ static bool IsProducerMovableLoopPrefixStmt(const Stmt &stmt, Target target) {
   return has_allowed_work && !has_disallowed;
 }
 
-/// Collect handle-typed vars bound by Bind inside the body. Their values only
-/// exist on the device, so no host-side TMA descriptor can be encoded for them.
-static VarSet CollectBodyBoundHandleVars(const Stmt &body) {
-  VarSet vars;
-  PostOrderVisit(body, [&](const ObjectRef &n) {
-    if (const auto *bind = n.as<BindNode>()) {
-      if (bind->var->dtype.is_handle())
-        vars.insert(bind->var);
-    }
-  });
-  return vars;
-}
-
 /// Classify a tile-op copy as TMA load producer, cp.async producer, or
 /// consumer using coarse pre-layout checks.
-static TileStmtKind ClassifyCopy(const CopyNode *copy, Target target,
-                                 const VarSet *device_local = nullptr) {
+static TileStmtKind ClassifyCopy(const CopyNode *copy, Target target) {
   if (copy == nullptr) {
     return TileStmtKind::kConsumer;
   }
 
   cuda::CopyInstSelection result = ClassifyWarpSpecializedCopy(copy, target);
   if (cuda::CopyInstIsTMA(result.inst)) {
-    // TMA descriptors are built on the host; a copy whose source base
-    // pointer is bound inside the kernel body cannot be TMA-promoted.
-    // Keep it as a plain consumer copy instead.
-    if (device_local && IsGlobalBuffer(copy->src) &&
-        device_local->count(copy->src->data)) {
-      return TileStmtKind::kConsumer;
-    }
     return TileStmtKind::kTmaProducer;
   }
   if (cuda::CopyInstIsCPAsync(result.inst)) {
@@ -743,15 +722,14 @@ static TileStmtKind ClassifyCopy(const CopyNode *copy, Target target,
 }
 
 /// Classify a single statement in the pipeline loop body.
-TileStmtKind ClassifyStmt(const Stmt &stmt, Target target,
-                          const VarSet *device_local = nullptr) {
+TileStmtKind ClassifyStmt(const Stmt &stmt, Target target) {
   // Tile-op Calls: classify directly via CopyNode checks.
   if (auto *eval = stmt.as<EvaluateNode>()) {
     if (auto *call = eval->value.as<CallNode>()) {
       auto tile_op = ParseOperator(GetRef<Call>(call));
       if (tile_op.defined()) {
         if (auto *copy = tile_op.as<CopyNode>()) {
-          return ClassifyCopy(copy, target, device_local);
+          return ClassifyCopy(copy, target);
         }
         // Im2Col lowers to tma_load_im2col on Hopper — treat as TMA
         // producer so it goes to the producer warp group.
@@ -1218,7 +1196,6 @@ public:
 
     ProducerConsumerWSRewriter T;
     T.target_ = target.value();
-    T.device_local_ = CollectBodyBoundHandleVars(f->body);
     f.CopyOnWrite()->body = T(f->body);
 
     if (T.ws_transformed_) {
@@ -1340,7 +1317,7 @@ private:
     int num_tma = 0;
     int num_simt = 0;
     for (const Stmt &s : flat_stmts) {
-      auto k = ClassifyStmt(s, target_, &device_local_);
+      auto k = ClassifyStmt(s, target_);
       kinds.push_back(k);
       if (k == TileStmtKind::kTmaProducer)
         ++num_tma;
@@ -1429,8 +1406,7 @@ private:
         CollectPreludeStmtsToPipelineLoop(orig_block->body, pipeline_loop);
     std::vector<PreludeTmaLoadPlan> prelude_tma_plans;
     for (const Stmt &stmt : prelude_stmts) {
-      if (ClassifyStmt(stmt, target_, &device_local_) !=
-          TileStmtKind::kTmaProducer) {
+      if (ClassifyStmt(stmt, target_) != TileStmtKind::kTmaProducer) {
         continue;
       }
       Optional<Var> write_buffer_data = ExtractProducerWriteBufferData(stmt);
@@ -2608,7 +2584,6 @@ private:
   LocalLiveSet consumer_prelude_live_seed_;
   Array<Stmt> extracted_producer_init_;
   Array<Stmt> extracted_consumer_init_;
-  VarSet device_local_;
 };
 
 // ---------------------------------------------------------------------------
@@ -2661,7 +2636,6 @@ public:
   static bool Check(const Stmt &stmt, Target target) {
     TiledWSCandidate c;
     c.target_ = target;
-    c.device_local_ = CollectBodyBoundHandleVars(stmt);
     c(stmt);
     return c.has_pipeline_loop_ && c.has_tma_tile_op_;
   }
@@ -2685,8 +2659,7 @@ private:
     if (in_pipeline_ && !has_tma_tile_op_) {
       auto tile_op = ParseOperator(GetRef<Call>(op));
       if (auto *copy = tile_op.as<CopyNode>()) {
-        if (ClassifyCopy(copy, target_, &device_local_) ==
-            TileStmtKind::kTmaProducer) {
+        if (ClassifyCopy(copy, target_) == TileStmtKind::kTmaProducer) {
           // If the destination buffer has a layout annotation, verify
           // that the layout is TMA-compatible (swizzle or linear).
           // Copies whose layout is incompatible with TMA cannot become
@@ -2745,7 +2718,6 @@ private:
   bool has_tma_tile_op_{false};
   // Map from buffer data Var to (Buffer, Layout) for layout_map entries.
   BufferLayoutMap layout_map_;
-  VarSet device_local_;
 };
 
 } // namespace
