@@ -428,13 +428,31 @@ def test_ws_persistent_misaligned_k_matches_wsoff_reference():
     num_stages = 2
 
     func = persistent_matmul_misaligned_k(M, N, K, block_M, block_N, block_K, num_stages, sm_num=sm_num)
-    kernel = tilelang.compile(func, target=determine_target(), out_idx=[2])
+
+    # Sanity: WS must actually be applied to this func, otherwise the
+    # comparison below degenerates into wsoff-vs-wsoff and would happily
+    # pass even if the pass silently declined the candidate.
+    ws_mod = _apply_ws_pass(func)
+    assert "tl_tiled_ws_applied" in ws_mod["main"].script()
+
+    ref_kernel = tilelang.compile(
+        func,
+        target=determine_target(),
+        out_idx=[2],
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+    ws_kernel = tilelang.compile(
+        func,
+        target=determine_target(),
+        out_idx=[2],
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False},
+    )
     torch.manual_seed(0)
     A = torch.randn(M, K, dtype=torch.float16, device="cuda") * 0.125
     B = torch.randn(K, N, dtype=torch.float16, device="cuda") * 0.125
-    C = kernel(A, B)
-    ref = A.float() @ B.float()
-    torch.testing.assert_close(C.float(), ref, rtol=5e-2, atol=5e-2)
+    ref = ref_kernel(A, B).float()
+    got = ws_kernel(A, B).float()
+    torch.testing.assert_close(got, ref, rtol=1e-2, atol=1e-2)
 
 
 @tilelang.testing.requires_cuda
