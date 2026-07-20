@@ -47,6 +47,8 @@ def reduce(
     if isinstance(out, tirx.Var) and has_let_value(out):
         out = get_let_value(out)
     out_buffer = out.buffer if isinstance(out, tirx.BufferLoad) else out
+    if reduce_type in ("bitand", "bitor", "bitxor") and not (out_buffer.dtype.startswith(("int", "uint")) or out_buffer.dtype == "bool"):
+        raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {out_buffer.dtype}")
     # input shape: [X, d, Y], expected output shape: [X, Y] or [X, 1, Y]
     expected_shapes = [buffer.shape[:dim] + buffer.shape[dim + 1 :], buffer.shape[:dim] + [1] + buffer.shape[dim + 1 :]]
     if list(out_buffer.shape) not in expected_shapes:
