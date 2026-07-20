@@ -116,56 +116,32 @@ struct PhaseCounter {
 };
 
 // ---------------------------------------------------------------------------
-// StageExprReplacer: rewrite loop-var-based stage indexing to counter-based
+// MVBStageIndexReplacer: rewrite compiler-generated version indices
 // ---------------------------------------------------------------------------
-class StageExprReplacer : public StmtExprMutator {
+class MVBStageIndexReplacer : public StmtExprMutator {
 public:
-  static Stmt Replace(const Stmt &stmt, Var loop_var, PrimExpr loop_min,
-                      int num_stages, PrimExpr replacement) {
-    StageExprReplacer r(std::move(loop_var), std::move(loop_min), num_stages,
-                        std::move(replacement));
+  static Stmt Replace(const Stmt &stmt, Optional<PrimExpr> replacement) {
+    MVBStageIndexReplacer r(std::move(replacement));
     return r.VisitStmt(stmt);
   }
 
 private:
-  StageExprReplacer(Var loop_var, PrimExpr loop_min, int num_stages,
-                    PrimExpr replacement)
-      : loop_var_(std::move(loop_var)), loop_min_(std::move(loop_min)),
-        num_stages_(num_stages), replacement_(std::move(replacement)) {}
+  explicit MVBStageIndexReplacer(Optional<PrimExpr> replacement)
+      : replacement_(std::move(replacement)) {}
 
-  PrimExpr VisitExpr_(const FloorModNode *op) final {
-    if (is_const_int(op->b, num_stages_) && MatchLinearIdx(op->a)) {
-      return replacement_;
+  PrimExpr VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(mvb_stage_index())) {
+      ICHECK_EQ(op->args.size(), 1U)
+          << "tl.mvb_stage_index expects one argument";
+      if (replacement_.defined()) {
+        return replacement_.value();
+      }
+      return VisitExpr(op->args[0]);
     }
     return StmtExprMutator::VisitExpr_(op);
   }
 
-  // A stage-selector expression is any `? % num_stages` where `?` is a
-  // linear function of the pipeline loop variable.  Early passes such as
-  // MultiVersionBuffer emit compound forms like `(outer * trip + k) %
-  // stages` when the pipeline loop is nested inside an outer persistent
-  // `For`; recognising "depends on loop_var" (rather than the exact
-  // shapes `k` or `k - min`) keeps WS's counter-based stage clock in
-  // sync with the versions MVB already baked into shared buffer indices.
-  bool MatchLinearIdx(const PrimExpr &expr) const {
-    if (expr.same_as(loop_var_))
-      return true;
-    if (const auto *sub = expr.as<SubNode>()) {
-      if (sub->a.same_as(loop_var_)) {
-        if (is_const_int(sub->b, 0))
-          return true;
-        if (sub->b.same_as(loop_min_))
-          return true;
-      }
-    }
-    return tvm::tirx::UsesVar(
-        expr, [this](const VarNode *v) { return v == loop_var_.get(); });
-  }
-
-  Var loop_var_;
-  PrimExpr loop_min_;
-  int num_stages_;
-  PrimExpr replacement_;
+  Optional<PrimExpr> replacement_;
 };
 
 // ---------------------------------------------------------------------------
@@ -1898,16 +1874,21 @@ private:
     producer_body = prepend_bindings(producer_body, outer_leading_bindings);
     consumer_body = prepend_bindings(consumer_body, outer_leading_bindings);
 
-    // Rewrite shared-buffer stage indices from loop-var-based to
-    // counter-based so they stay in sync with barrier parity.
+    // Rewrite only the shared-buffer version indices marked by MVB. User
+    // expressions that happen to depend on the loop variable must retain their
+    // original semantics.
+    Optional<PrimExpr> producer_stage_replacement;
+    Optional<PrimExpr> consumer_stage_replacement;
     if (needs_phase_counter) {
-      producer_body = StageExprReplacer::Replace(
-          producer_body, loop_var, loop_min, num_stages,
-          producer_phase_counter.value().StageExpr(num_stages));
-      consumer_body = StageExprReplacer::Replace(
-          consumer_body, loop_var, loop_min, num_stages,
-          consumer_phase_counter.value().StageExpr(num_stages));
+      producer_stage_replacement =
+          producer_phase_counter.value().StageExpr(num_stages);
+      consumer_stage_replacement =
+          consumer_phase_counter.value().StageExpr(num_stages);
     }
+    producer_body = MVBStageIndexReplacer::Replace(
+        producer_body, std::move(producer_stage_replacement));
+    consumer_body = MVBStageIndexReplacer::Replace(
+        consumer_body, std::move(consumer_stage_replacement));
     producer_body =
         TileOpMbarPhaseAnnotator::Annotate(producer_body, p_parity_expr);
     consumer_body =
@@ -2849,6 +2830,9 @@ tvm::transform::Pass ProducerConsumerWarpSpecialized() {
       fn->body = stripped;
       return original_f;
     }
+    Stmt cleaned_body =
+        MVBStageIndexReplacer::Replace(result->body, Optional<PrimExpr>());
+    result.CopyOnWrite()->body = std::move(cleaned_body);
     DLOG(WARNING) << "[WS] transformation applied successfully";
     return result;
   };

@@ -812,5 +812,11 @@ TIR_DEFINE_TL_BUILTIN(tma_store_cluster)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+// Compiler-internal marker for MVB-generated pipeline stage indices.
+TIR_DEFINE_TL_BUILTIN(mvb_stage_index)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
 } // namespace tl
 } // namespace tvm

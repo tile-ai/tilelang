@@ -254,6 +254,51 @@ def persistent_matmul_guarded_body(
     return main
 
 
+def shifted_mod_guard_matmul(
+    persistent: bool,
+    M=64,
+    N=64,
+    K=128,
+    block_K=32,
+    num_stages=2,
+    dtype="float16",
+    threads=128,
+    num_tiles=2,
+):
+    """GEMM whose user guard contains a modulo matching ``num_stages``."""
+
+    @T.prim_func
+    def main(
+        A: T.Buffer((num_tiles, M, K), dtype),
+        B: T.Buffer((num_tiles, K, N), dtype),
+        C: T.Buffer((num_tiles, M, N), dtype),
+    ):
+        with T.Kernel(1, threads=threads) as (block_id,):
+            A_shared = T.alloc_shared((M, block_K), dtype)
+            B_shared = T.alloc_shared((block_K, N), dtype)
+            C_local = T.alloc_fragment((M, N), "float32")
+
+            if persistent:
+                for tile, _ in T.Persistent([num_tiles, 1], 1, block_id):
+                    T.clear(C_local)
+                    for k in T.Pipelined(K // block_K, num_stages=num_stages):
+                        if (k + 1) % num_stages == 0:
+                            T.copy(A[tile, 0, k * block_K], A_shared)
+                            T.copy(B[tile, k * block_K, 0], B_shared)
+                            T.gemm(A_shared, B_shared, C_local)
+                    T.copy(C_local, C[tile, 0, 0])
+            else:
+                T.clear(C_local)
+                for k in T.Pipelined(K // block_K, num_stages=num_stages):
+                    if (k + 1) % num_stages == 0:
+                        T.copy(A[0, 0, k * block_K], A_shared)
+                        T.copy(B[0, k * block_K, 0], B_shared)
+                        T.gemm(A_shared, B_shared, C_local)
+                T.copy(C_local, C[0, 0, 0])
+
+    return main
+
+
 def persistent_matmul_variable_stages(
     M,
     N,
@@ -510,6 +555,49 @@ def test_ws_persistent_guarded_eq_matches_wsoff_reference():
     ref = ref_kernel(A, B).float()
     got = ws_kernel(A, B).float()
     torch.testing.assert_close(got, ref, rtol=1e-2, atol=1e-2)
+
+
+def _check_shifted_mod_guard(persistent):
+    import torch
+
+    func = shifted_mod_guard_matmul(persistent)
+    ws_mod = _apply_ws_pass(func)
+    assert "tl_tiled_ws_applied" in ws_mod["main"].script()
+
+    ref_kernel = tilelang.compile(
+        func,
+        target=determine_target(),
+        out_idx=[2],
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+    ws_kernel = tilelang.compile(
+        func,
+        target=determine_target(),
+        out_idx=[2],
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False},
+    )
+    torch.manual_seed(0)
+    A = torch.randn(2, 64, 128, dtype=torch.float16, device="cuda") * 0.125
+    B = torch.randn(2, 128, 64, dtype=torch.float16, device="cuda") * 0.125
+    ref = ref_kernel(A, B).float()
+    got = ws_kernel(A, B).float()
+    torch.testing.assert_close(got, ref, rtol=1e-2, atol=1e-2)
+
+    source = ws_kernel.get_kernel_source()
+    assert "if ((producer_phase_cnt[0] % 2) == 0)" not in source
+    assert "if ((consumer_phase_cnt[0] % 2) == 0)" not in source
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_ws_nonpersistent_shifted_mod_guard_matches_wsoff_reference():
+    _check_shifted_mod_guard(persistent=False)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_ws_persistent_shifted_mod_guard_matches_wsoff_reference():
+    _check_shifted_mod_guard(persistent=True)
 
 
 @tilelang.testing.requires_cuda
