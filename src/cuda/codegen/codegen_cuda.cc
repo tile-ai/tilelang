@@ -37,46 +37,6 @@ bool IsValidCPAsyncTransferBytes(int64_t bytes) {
   return bytes == 4 || bytes == 8 || bytes == 16;
 }
 
-bool Needs64BitIntegerVectorPacking(DataType t) {
-  if (!t.is_int() && !t.is_uint()) {
-    return false;
-  }
-  return (t.bits() == 32 && t.lanes() > 4 && t.lanes() <= 8 &&
-          t.lanes() % 2 == 0) ||
-         (t.bits() == 8 && t.lanes() == 32);
-}
-
-void PrintPackedIntegerVectorArgs(DataType t,
-                                  const std::vector<std::string> &scalars,
-                                  std::ostream &os) {
-  ICHECK(t.bits() == 8 || t.bits() == 32);
-  ICHECK_EQ(64 % t.bits(), 0);
-  int lanes_per_field = 64 / t.bits();
-  ICHECK_EQ(scalars.size() % lanes_per_field, 0);
-
-  const char *unsigned_scalar_type =
-      t.bits() == 8 ? "unsigned char" : "unsigned int";
-  const char *field_type = t.is_uint() ? "unsigned long long" : "long long";
-  for (size_t i = 0; i < scalars.size(); i += lanes_per_field) {
-    if (i != 0) {
-      os << ", ";
-    }
-    os << "(" << field_type << ")(";
-    for (int j = 0; j < lanes_per_field; ++j) {
-      if (j != 0) {
-        os << " | ";
-      }
-      os << "((unsigned long long)(" << unsigned_scalar_type << ")("
-         << scalars[i + j] << ")";
-      if (j != 0) {
-        os << " << " << j * t.bits();
-      }
-      os << ")";
-    }
-    os << ")";
-  }
-}
-
 std::optional<DataType> GetAccessPtrElementType(const PrimExpr &expr) {
   const auto *ptr_call = expr.as<CallNode>();
   if (ptr_call == nullptr) {
@@ -5244,10 +5204,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const ShuffleNode *op,
     return;
   }
 
-  // Some logical integer vectors use 64-bit fields in their CUDA storage type:
-  // int32x8 uses four fields and int8x32 uses four fields. Pack the logical
-  // lanes so the generated constructor receives its physical arity.
-  if (Needs64BitIntegerVectorPacking(t)) {
+  // 32-bit int/uint vectors with lanes > 4 are typed as (u)longlong{lanes/2}
+  // by PrintType. The base CodeGenC emits `make_<type>(v0, v1, ..., v_{N-1})`
+  // N args for N lanes, which produces e.g. `make_ulonglong4(8 args)` and
+  // nvcc rejects with "too many arguments in function call". Pack consecutive
+  // pairs of 32-bit values into a single 64-bit lane to match the type's real
+  // arity. Triggered e.g. by storing eight T.rng_rand() (uint32) results via
+  // a 256-bit vectorized store.
+  if ((t.is_int() || t.is_uint()) && t.bits() == 32 && t.lanes() > 4 &&
+      t.lanes() % 2 == 0) {
     int lanes = t.lanes();
     // Reuse CodeGenC's concat logic by reading individual scalars from the
     // shuffle's source vectors at the indices the shuffle requested.
@@ -5286,9 +5251,18 @@ void CodeGenTileLangCUDA::VisitExpr_(const ShuffleNode *op,
       }
     }
 
+    const char *u64 = t.is_uint() ? "unsigned long long" : "long long";
     PrintVecConstructor(t, os);
     os << '(';
-    PrintPackedIntegerVectorArgs(t, scalars, os);
+    for (int i = 0; i + 1 < lanes; i += 2) {
+      if (i != 0)
+        os << ", ";
+      // Pack lane i (lo) and lane i+1 (hi) into one 64-bit value. Widen through
+      // `unsigned int` so both lanes are zero-extended.
+      os << "(" << u64 << ")(((unsigned long long)(unsigned int)(" << scalars[i]
+         << ")) | ((unsigned long long)(unsigned int)(" << scalars[i + 1]
+         << ") << 32))";
+    }
     os << ')';
     return;
   }
@@ -5315,6 +5289,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
         }
         return;
       }
+      // lanes == 32 (int8x32, stored as (u)longlong4) is handled by the generic
+      // path below, which emits make_(u)longlong4 with 32 scalar args. That
+      // resolves to the 32-arg packing overloads in common.h, which fill all
+      // 64 bits of each field. Do NOT special-case it here with a 4-arg
+      // make_(u)longlong4: a 4-arg call binds the built-in overload and only
+      // fills the low 32 bits of each field, zeroing the upper half.
     }
   }
 
@@ -5377,17 +5357,30 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
     return;
   }
 
-  // Match the physical arity of integer vector types backed by 64-bit fields.
-  // Repeating the expression in `scalars` preserves the existing behavior for
-  // side-effecting uint32 broadcasts such as T.rng_rand().
-  if (Needs64BitIntegerVectorPacking(op->dtype)) {
+  // 32-bit int/uint broadcast with lanes > 4 lowers to (u)longlong{lanes/2}
+  // (each ulonglong holds two consecutive 32-bit lanes). Without packing,
+  // the generic loop below would emit one arg per lane, producing e.g.
+  // `make_ulonglong4(v, v, v, v, v, v, v, v)` which nvcc rejects with
+  // "too many arguments". This path is hit when a vectorized store of
+  // `T.rng_rand()` (uint32) is broadcast across the 8 lanes of a 256-bit
+  // store. PrintExpr is invoked twice per packed slot so the underlying
+  // side-effecting call (curand) executes once per uint32 lane, matching
+  // the lane count.
+  if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 32 &&
+      op->dtype.lanes() > 4 && op->dtype.lanes() % 2 == 0) {
     int lanes = op->dtype.lanes();
     std::string v = PrintExpr(op->value);
-    std::vector<std::string> scalars(lanes, v);
+    const char *u64 = op->dtype.is_uint() ? "unsigned long long" : "long long";
     os << "make_";
     PrintType(op->dtype, os);
     os << '(';
-    PrintPackedIntegerVectorArgs(op->dtype, scalars, os);
+    for (int i = 0; i < lanes / 2; ++i) {
+      if (i != 0)
+        os << ", ";
+      // Widen through `unsigned int` so both lanes are zero-extended.
+      os << "(" << u64 << ")(((unsigned long long)(unsigned int)(" << v
+         << ")) | ((unsigned long long)(unsigned int)(" << v << ") << 32))";
+    }
     os << ')';
     return;
   }
