@@ -99,6 +99,9 @@ struct PhaseCounter {
     return SeqStmt({AllocBuffer(buf), body});
   }
 
+  Stmt AllocOnly() const { return AllocBuffer(buf); }
+  Stmt InitStmt() const { return Init(); }
+
   PrimExpr StageExpr(int num_stages) const {
     if (num_stages == 1)
       return IntImm(DataType::Int(32), 0);
@@ -113,48 +116,36 @@ struct PhaseCounter {
 };
 
 // ---------------------------------------------------------------------------
-// StageExprReplacer: rewrite loop-var-based stage indexing to counter-based
+// MVBStageIndexReplacer: rewrite compiler-generated version indices
 // ---------------------------------------------------------------------------
-class StageExprReplacer : public StmtExprMutator {
+class MVBStageIndexReplacer : public StmtExprMutator {
 public:
-  static Stmt Replace(const Stmt &stmt, Var loop_var, PrimExpr loop_min,
-                      int num_stages, PrimExpr replacement) {
-    StageExprReplacer r(std::move(loop_var), std::move(loop_min), num_stages,
-                        std::move(replacement));
+  static Stmt Replace(const Stmt &stmt, Optional<PrimExpr> replacement) {
+    MVBStageIndexReplacer r(std::move(replacement));
     return r.VisitStmt(stmt);
   }
 
 private:
-  StageExprReplacer(Var loop_var, PrimExpr loop_min, int num_stages,
-                    PrimExpr replacement)
-      : loop_var_(std::move(loop_var)), loop_min_(std::move(loop_min)),
-        num_stages_(num_stages), replacement_(std::move(replacement)) {}
+  explicit MVBStageIndexReplacer(Optional<PrimExpr> replacement)
+      : replacement_(std::move(replacement)) {}
 
-  PrimExpr VisitExpr_(const FloorModNode *op) final {
-    if (is_const_int(op->b, num_stages_) && MatchLinearIdx(op->a)) {
-      return replacement_;
+  PrimExpr VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(mvb_stage_index())) {
+      ICHECK_EQ(op->args.size(), 1U)
+          << "tl.mvb_stage_index expects one argument";
+      if (replacement_.defined()) {
+        PrimExpr repl = replacement_.value();
+        if (repl.dtype() != op->dtype) {
+          repl = tvm::cast(op->dtype, repl);
+        }
+        return repl;
+      }
+      return VisitExpr(op->args[0]);
     }
     return StmtExprMutator::VisitExpr_(op);
   }
 
-  bool MatchLinearIdx(const PrimExpr &expr) const {
-    if (expr.same_as(loop_var_))
-      return true;
-    if (const auto *sub = expr.as<SubNode>()) {
-      if (sub->a.same_as(loop_var_)) {
-        if (is_const_int(sub->b, 0))
-          return true;
-        if (sub->b.same_as(loop_min_))
-          return true;
-      }
-    }
-    return false;
-  }
-
-  Var loop_var_;
-  PrimExpr loop_min_;
-  int num_stages_;
-  PrimExpr replacement_;
+  Optional<PrimExpr> replacement_;
 };
 
 // ---------------------------------------------------------------------------
@@ -1291,10 +1282,12 @@ private:
     const SBlock &orig_block = op->block;
 
     // Find the pipelined loop.
-    Optional<For> pipeline_loop_opt = FindPipelineLoop(orig_block->body);
-    if (!pipeline_loop_opt.defined())
+    PipelineLoopFinder::Result loop_result =
+        FindPipelineLoopWithNesting(orig_block->body);
+    if (!loop_result.pipeline_loop.defined())
       return StmtExprMutator::VisitStmt_(op);
-    For pipeline_loop = pipeline_loop_opt.value();
+    For pipeline_loop = loop_result.pipeline_loop.value();
+    bool pipeline_under_outer_for = loop_result.under_outer_for;
 
     auto num_stages_anno = pipeline_loop->annotations.Get("num_stages");
     if (!num_stages_anno)
@@ -1387,7 +1380,7 @@ private:
     // --- Build the WS transformation ---
     return BuildWSBlock(op, orig_block, pipeline_loop, num_stages, flat_stmts,
                         kinds, outer_leading_bindings, inner_leading_bindings,
-                        loop_body_condition);
+                        loop_body_condition, pipeline_under_outer_for);
   }
 
   Stmt BuildWSBlock(
@@ -1396,7 +1389,8 @@ private:
       const std::vector<TileStmtKind> &kinds,
       const std::vector<std::pair<Var, PrimExpr>> &outer_leading_bindings,
       const std::vector<std::pair<Var, PrimExpr>> &inner_leading_bindings,
-      Optional<PrimExpr> loop_body_condition = Optional<PrimExpr>()) {
+      Optional<PrimExpr> loop_body_condition = Optional<PrimExpr>(),
+      bool pipeline_under_outer_for = false) {
     Var loop_var = pipeline_loop->loop_var;
     PrimExpr loop_min = pipeline_loop->min;
     PrimExpr loop_extent = pipeline_loop->extent;
@@ -1405,10 +1399,22 @@ private:
     PrimExpr base_stage_expr = FloorMod(linear_idx, num_stages);
     PrimExpr base_parity_expr = FloorMod(FloorDiv(linear_idx, num_stages), 2);
 
-    // When the loop body is conditionally guarded, use PhaseCounters
-    // instead of the loop variable for barrier stage/parity.  This
-    // ensures parity stays correct when iterations are skipped.
-    bool needs_phase_counter = loop_body_condition.defined();
+    // When to switch from loop-var-based to counter-based stage/parity:
+    //   (a) `loop_body_condition.defined()`: the pipeline body is guarded
+    //       and some iterations may skip barrier arrive/wait entirely, so
+    //       the loop variable no longer counts real transactions.
+    //   (b) `pipeline_under_outer_for`: the pipeline loop is nested
+    //       inside an outer `T.Persistent` / `T.serial` scheduler.  The
+    //       block-scoped mbarrier phase persists across outer iterations
+    //       while the inner loop variable resets every iteration, so a
+    //       counter that is live across the whole `SBlock` is required
+    //       to keep barrier parity consistent (see PR discussion).
+    // When (b) triggers, the counter's allocation is hoisted out of the
+    // inner pipeline loop into `SBlock::alloc_buffers` and its `Init()`
+    // becomes a one-shot prelude at the top of the block body — see the
+    // assembly block near the end of this function.
+    bool needs_phase_counter =
+        loop_body_condition.defined() || pipeline_under_outer_for;
     Optional<PhaseCounter> producer_phase_counter;
     Optional<PhaseCounter> consumer_phase_counter;
     PrimExpr p_stage_expr = base_stage_expr;
@@ -1927,16 +1933,21 @@ private:
     producer_body = prepend_bindings(producer_body, outer_leading_bindings);
     consumer_body = prepend_bindings(consumer_body, outer_leading_bindings);
 
-    // Rewrite shared-buffer stage indices from loop-var-based to
-    // counter-based so they stay in sync with barrier parity.
+    // Rewrite only the shared-buffer version indices marked by MVB. User
+    // expressions that happen to depend on the loop variable must retain their
+    // original semantics.
+    Optional<PrimExpr> producer_stage_replacement;
+    Optional<PrimExpr> consumer_stage_replacement;
     if (needs_phase_counter) {
-      producer_body = StageExprReplacer::Replace(
-          producer_body, loop_var, loop_min, num_stages,
-          producer_phase_counter.value().StageExpr(num_stages));
-      consumer_body = StageExprReplacer::Replace(
-          consumer_body, loop_var, loop_min, num_stages,
-          consumer_phase_counter.value().StageExpr(num_stages));
+      producer_stage_replacement =
+          producer_phase_counter.value().StageExpr(num_stages);
+      consumer_stage_replacement =
+          consumer_phase_counter.value().StageExpr(num_stages);
     }
+    producer_body = MVBStageIndexReplacer::Replace(
+        producer_body, std::move(producer_stage_replacement));
+    consumer_body = MVBStageIndexReplacer::Replace(
+        consumer_body, std::move(consumer_stage_replacement));
     producer_body =
         TileOpMbarPhaseAnnotator::Annotate(producer_body, p_parity_expr);
     consumer_body =
@@ -1963,7 +1974,8 @@ private:
     // Wrap loops with phase counter allocation when needed.
     Stmt final_producer_loop = producer_loop;
     Stmt final_consumer_loop = consumer_loop;
-    if (needs_phase_counter) {
+    if (needs_phase_counter && !pipeline_under_outer_for) {
+      // Local scope: alloc + init live right around the pipeline loop.
       final_producer_loop =
           producer_phase_counter.value().WrapLoopWithAlloc(producer_loop);
       final_consumer_loop =
@@ -2117,6 +2129,14 @@ private:
     Stmt new_block_body = SinkGuardedConsumerPostlude::Rewrite(
         replaced_stmt, thread_iv_->var, producer_extent);
 
+    if (needs_phase_counter && pipeline_under_outer_for) {
+      Array<Stmt> block_prelude;
+      block_prelude.push_back(producer_phase_counter.value().InitStmt());
+      block_prelude.push_back(consumer_phase_counter.value().InitStmt());
+      block_prelude.push_back(new_block_body);
+      new_block_body = SeqStmt(block_prelude);
+    }
+
     // --- Update block ---
     SBlock new_block = orig_block;
     auto *block_ptr = new_block.CopyOnWrite();
@@ -2127,6 +2147,10 @@ private:
 
     // Add barrier buffer to alloc_buffers.
     block_ptr->alloc_buffers.push_back(barrier_buf);
+    if (needs_phase_counter && pipeline_under_outer_for) {
+      block_ptr->alloc_buffers.push_back(producer_phase_counter.value().buf);
+      block_ptr->alloc_buffers.push_back(consumer_phase_counter.value().buf);
+    }
 
     // Add barrier_init annotation.
     Map<Var, Array<PrimExpr>> barrier_init_map;
@@ -2155,10 +2179,15 @@ private:
 
   class PipelineLoopFinder : public StmtVisitor {
   public:
-    static Optional<For> Find(const Stmt &stmt) {
+    struct Result {
+      Optional<For> pipeline_loop;
+      bool under_outer_for = false;
+    };
+
+    static Result Find(const Stmt &stmt) {
       PipelineLoopFinder finder;
       finder(stmt);
-      return finder.pipeline_loop_;
+      return {finder.pipeline_loop_, finder.under_outer_for_};
     }
 
   private:
@@ -2174,13 +2203,23 @@ private:
         pipeline_loop_ = ffi::GetRef<For>(op);
         return;
       }
+      bool prev_under_outer = under_outer_for_;
+      under_outer_for_ = true;
       StmtVisitor::VisitStmt_(op);
+      if (!pipeline_loop_.defined()) {
+        under_outer_for_ = prev_under_outer;
+      }
     }
 
     Optional<For> pipeline_loop_;
+    bool under_outer_for_ = false;
   };
 
   Optional<For> FindPipelineLoop(const Stmt &stmt) {
+    return PipelineLoopFinder::Find(stmt).pipeline_loop;
+  }
+
+  PipelineLoopFinder::Result FindPipelineLoopWithNesting(const Stmt &stmt) {
     return PipelineLoopFinder::Find(stmt);
   }
 
@@ -2379,6 +2418,8 @@ private:
       return op->else_case.defined() && VisitStmt(op->else_case.value());
     }
 
+    bool VisitStmt_(const ForNode *op) final { return VisitStmt(op->body); }
+
     bool VisitStmtDefault_(const Object *) final { return false; }
 
   private:
@@ -2489,6 +2530,16 @@ private:
       Stmt new_then =
           then_result.defined() ? then_result.value() : op->then_case;
       return IfThenElse(op->condition, new_then, new_else, op->span);
+    }
+
+    Optional<Stmt> VisitStmt_(const ForNode *op) final {
+      Optional<Stmt> body = VisitStmt(op->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
+      }
+      For new_for = GetRef<For>(op);
+      new_for.CopyOnWrite()->body = body.value();
+      return new_for;
     }
 
     Optional<Stmt> VisitStmtDefault_(const Object *) final {
@@ -2838,6 +2889,9 @@ tvm::transform::Pass ProducerConsumerWarpSpecialized() {
       fn->body = stripped;
       return original_f;
     }
+    Stmt cleaned_body =
+        MVBStageIndexReplacer::Replace(result->body, Optional<PrimExpr>());
+    result.CopyOnWrite()->body = std::move(cleaned_body);
     DLOG(WARNING) << "[WS] transformation applied successfully";
     return result;
   };
