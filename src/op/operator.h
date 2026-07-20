@@ -133,7 +133,6 @@ struct LayoutInferArgs {
   Range thread_bounds;
   LayoutMap layout_map;
   arith::Analyzer *analyzer;
-  bool buffer_oob = false;
   ffi::Map<tirx::Buffer, tirx::Buffer> buffer_remap;
   // Map from Bind variable to its bound expression, for resolving
   // fragment buffer accesses through Bind values

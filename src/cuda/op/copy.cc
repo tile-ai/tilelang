@@ -430,7 +430,7 @@ private:
 
   static CopyInst SelectInst(const CopyNode &op, Target target,
                              const LayoutMap &layout_map,
-                             arith::Analyzer *analyzer, bool buffer_oob);
+                             arith::Analyzer *analyzer);
 
   static void CheckParallelLoopLayout(const CopyNode &op, CopyInst copy_inst);
 
@@ -515,9 +515,8 @@ void Copy::CollectFragmentLayouts(const PrimExpr &expr,
 LayoutMap Copy::InferLayout(const CopyNode &op,
                             const LayoutInferArgs &layout_args,
                             InferLevel level) {
-  CopyInst copy_inst =
-      SelectInst(op, layout_args.target, layout_args.layout_map,
-                 layout_args.analyzer, layout_args.buffer_oob);
+  CopyInst copy_inst = SelectInst(op, layout_args.target,
+                                  layout_args.layout_map, layout_args.analyzer);
   CheckParallelLoopLayout(op, copy_inst);
 
   if (copy_inst == CopyInst::kTMemLoad || copy_inst == CopyInst::kTMemStore) {
@@ -668,9 +667,9 @@ LayoutMap Copy::InferBulkLayout(const CopyNode &op,
       // For BulkStore, infer a swizzled shared-memory layout when possible.
       // Rank-1 shared buffers cannot be swizzled (there is no stride dim to
       // index), so they take the linear-layout branch below. A rank-1 store
-      // can reach this multi-dim arm when a partial tile (buffer_oob) makes
-      // the 1D TMA path unavailable; without the rank guard, reading
-      // shape[dim - 2] would fault (see issue #2529).
+      // can reach this multi-dim arm when its region is not provably in bounds,
+      // making the raw 1D TMA path unavailable. Without the rank guard,
+      // reading shape[dim - 2] would fault (see issue #2529).
       int dim = shared_tensor->shape.size();
       const int64_t mat_stride = *as_const_int(shared_tensor->shape[dim - 2]);
       const int64_t mat_continuous =
@@ -697,12 +696,11 @@ LayoutMap Copy::InferBulkLayout(const CopyNode &op,
 
 CopyInst Copy::SelectInst(const CopyNode &op, Target target,
                           const LayoutMap &layout_map,
-                          arith::Analyzer *analyzer, bool buffer_oob) {
+                          arith::Analyzer *analyzer) {
   CopyAnalysisContext ctx;
   ctx.target = target;
   ctx.layout_map = &layout_map;
   ctx.analyzer = analyzer;
-  ctx.buffer_oob = buffer_oob;
   ctx.emit_diagnostics = true;
   auto result = SelectCopyInstForLowering(op, ctx);
   ICHECK(result.supported) << result.reason;
@@ -711,8 +709,8 @@ CopyInst Copy::SelectInst(const CopyNode &op, Target target,
 
 Stmt Copy::Lower(const CopyNode &op, const LowerArgs &lower_args,
                  arith::Analyzer *analyzer) {
-  auto copy_inst = SelectInst(op, lower_args.target, lower_args.layout_map,
-                              analyzer, /*buffer_oob=*/false);
+  auto copy_inst =
+      SelectInst(op, lower_args.target, lower_args.layout_map, analyzer);
   if (op.dst_block.defined()) {
     ICHECK(TargetHasBulkCopy(lower_args.target))
         << "T.copy with dst_block requires cluster-copy support (CUDA SM90+). "
@@ -777,7 +775,6 @@ Stmt Copy::LowerCPAsync(const CopyNode &op, const LowerArgs &lower_args,
                          lower_args.thread_bounds,
                          lower_args.layout_map,
                          analyzer,
-                         false,
                          lower_args.buffer_remap,
                          {}},
                         level);
@@ -941,7 +938,6 @@ Stmt Copy::LowerCluster(const CopyNode &op, const LowerArgs &lower_args,
                          lower_args.thread_bounds,
                          lower_args.layout_map,
                          analyzer,
-                         false,
                          lower_args.buffer_remap,
                          {}},
                         level);

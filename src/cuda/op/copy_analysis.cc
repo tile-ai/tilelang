@@ -309,6 +309,27 @@ bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
   return shared_is_contiguous && global_is_contiguous && element_match;
 }
 
+bool CanProveRegionInBounds(const Buffer &buffer, const Array<Range> &region,
+                            arith::Analyzer *analyzer) {
+  if (buffer->shape.size() != region.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < region.size(); ++i) {
+    PrimExpr min = region[i]->min;
+    PrimExpr extent = region[i]->extent;
+    if (!analyzer->CanProve(min >= 0 && min + extent <= buffer->shape[i],
+                            arith::ProofStrength::kSymbolicBound)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool CanProveCopyInBounds(const CopyNode &op, arith::Analyzer *analyzer) {
+  return CanProveRegionInBounds(op.src, op.src_range, analyzer) &&
+         CanProveRegionInBounds(op.dst, op.dst_range, analyzer);
+}
+
 bool CheckBulkLoad1D(const CopyNode &op, Target target,
                      const LayoutMap &layout_map, arith::Analyzer *analyzer,
                      bool emit_diagnostics) {
@@ -566,7 +587,7 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
       ctx.layout_map != nullptr ? *ctx.layout_map : empty_layout_map;
   bool is_cutedsl = TargetIsCuTeDSL(ctx.target);
   facts.layout_dependent_tma_available =
-      facts.has_layout_map && !is_cutedsl && !ctx.buffer_oob;
+      facts.has_layout_map && !is_cutedsl && CanProveCopyInBounds(op, analyzer);
 
   if (facts.layout_dependent_tma_available) {
     facts.can_bulk_load_1d =

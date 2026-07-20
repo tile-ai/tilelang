@@ -123,7 +123,6 @@ private:
                            lower_args.thread_bounds,
                            lower_args.layout_map,
                            analyzer,
-                           false,
                            lower_args.buffer_remap,
                            {}},
                           level);
