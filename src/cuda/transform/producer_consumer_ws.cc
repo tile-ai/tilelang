@@ -134,7 +134,11 @@ private:
       ICHECK_EQ(op->args.size(), 1U)
           << "tl.mvb_stage_index expects one argument";
       if (replacement_.defined()) {
-        return replacement_.value();
+        PrimExpr repl = replacement_.value();
+        if (repl.dtype() != op->dtype) {
+          repl = tvm::cast(op->dtype, repl);
+        }
+        return repl;
       }
       return VisitExpr(op->args[0]);
     }

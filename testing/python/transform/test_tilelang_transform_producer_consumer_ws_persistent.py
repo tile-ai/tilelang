@@ -288,13 +288,14 @@ def shifted_mod_guard_matmul(
                             T.gemm(A_shared, B_shared, C_local)
                     T.copy(C_local, C[tile, 0, 0])
             else:
-                T.clear(C_local)
-                for k in T.Pipelined(K // block_K, num_stages=num_stages):
-                    if (k + 1) % num_stages == 0:
-                        T.copy(A[0, 0, k * block_K], A_shared)
-                        T.copy(B[0, k * block_K, 0], B_shared)
-                        T.gemm(A_shared, B_shared, C_local)
-                T.copy(C_local, C[0, 0, 0])
+                for tile in T.serial(num_tiles):
+                    T.clear(C_local)
+                    for k in T.Pipelined(K // block_K, num_stages=num_stages):
+                        if (k + 1) % num_stages == 0:
+                            T.copy(A[tile, 0, k * block_K], A_shared)
+                            T.copy(B[tile, k * block_K, 0], B_shared)
+                            T.gemm(A_shared, B_shared, C_local)
+                    T.copy(C_local, C[tile, 0, 0])
 
     return main
 
