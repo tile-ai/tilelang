@@ -529,8 +529,8 @@ inline PrimExpr MakeUpdate(const ReduceOpNode &op, PrimExpr dst_val,
 
 template <typename Impl> struct ReduceLowerer {
   static Stmt LowerLocal(const ReduceOpNode &op, const Buffer &src_buffer,
-                         const Buffer &dst_buffer, const LowerArgs &lower_args,
-                         arith::Analyzer *analyzer) {
+                         const Buffer &dst_buffer,
+                         const LowerArgs &lower_args) {
     ICHECK_EQ(op.batch, 1)
         << "ReduceOp: local reduction does not support batch";
     ICHECK(op.src->dtype == op.dst->dtype)
@@ -575,9 +575,9 @@ template <typename Impl> struct ReduceLowerer {
     Array<Stmt> stmts;
     Buffer packed_buffer;
     if (can_pack) {
-      packed_buffer = decl_buffer(
-          dst_buffer->shape, dst_buffer->dtype.with_lanes(vsize),
-          dst_buffer->name + "_pack", GetPtrStorageScope(src_buffer->data));
+      packed_buffer =
+          decl_buffer(dst_buffer->shape, dst_buffer->dtype.with_lanes(vsize),
+                      dst_buffer->name + "_pack", src_buffer.scope());
       stmts.push_back(BufferStore(
           packed_buffer, reduce::MakeInitValue(op, vsize), dst_indices));
 
@@ -648,17 +648,13 @@ template <typename Impl> struct ReduceLowerer {
                     "(requires __hmax_nan/__hmin_nan intrinsics). Target was: "
                  << lower_args.target->str();
     }
-    auto get_buffer = [&](const Buffer &buf) {
-      if (lower_args.buffer_remap.count(buf)) {
-        return lower_args.buffer_remap[buf];
-      }
-      return buf;
+    auto get_buffer = [&](const Buffer &buffer) {
+      auto it = lower_args.buffer_remap.find(buffer);
+      return it == lower_args.buffer_remap.end() ? buffer : (*it).second;
     };
 
-    if (IsLocalBuffer(op.src) &&
-        (IsLocalBuffer(op.dst) || IsLocalVarBuffer(op.dst))) {
-      return LowerLocal(op, get_buffer(op.src), get_buffer(op.dst), lower_args,
-                        analyzer);
+    if (IsLocalBuffer(op.src) && IsLocalBuffer(op.dst, /*allow_var*/ true)) {
+      return LowerLocal(op, get_buffer(op.src), get_buffer(op.dst), lower_args);
     }
 
     if (IsFragmentBuffer(op.src) && IsFragmentBuffer(op.dst)) {
