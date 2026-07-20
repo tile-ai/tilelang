@@ -57,13 +57,13 @@ TL_DEVICE bool IsRelaxedMemoryOrder(int memory_order) {
   return memory_order == int(cuda::memory_order_relaxed);
 }
 
-TL_DEVICE bool IsReleaseLikeMemoryOrder(int memory_order) {
-  return memory_order == int(cuda::memory_order_release) ||
-         memory_order == int(cuda::memory_order_consume);
+TL_DEVICE bool IsReleaseMemoryOrder(int memory_order) {
+  return memory_order == int(cuda::memory_order_release);
 }
 
-TL_DEVICE bool IsAcquireMemoryOrder(int memory_order) {
-  return memory_order == int(cuda::memory_order_acquire);
+TL_DEVICE bool IsAcquireLikeMemoryOrder(int memory_order) {
+  return memory_order == int(cuda::memory_order_consume) ||
+         memory_order == int(cuda::memory_order_acquire);
 }
 
 TL_DEVICE bool IsAcqRelLikeMemoryOrder(int memory_order) {
@@ -81,12 +81,12 @@ template <typename T> TL_DEVICE T UnpackBits16(unsigned short val) {
 
 TL_DEVICE void tl_atomic_add_f16(unsigned short &ret, unsigned long long addr,
                                  unsigned short val, int memory_order) {
-  if (IsReleaseLikeMemoryOrder(memory_order)) {
+  if (IsReleaseMemoryOrder(memory_order)) {
     asm volatile("atom.release.gpu.global.add.noftz.f16 %0, [%1], %2;"
                  : "=h"(ret)
                  : "l"(addr), "h"(val)
                  : "memory");
-  } else if (IsAcquireMemoryOrder(memory_order)) {
+  } else if (IsAcquireLikeMemoryOrder(memory_order)) {
     asm volatile("atom.acquire.gpu.global.add.noftz.f16 %0, [%1], %2;"
                  : "=h"(ret)
                  : "l"(addr), "h"(val)
@@ -101,12 +101,12 @@ TL_DEVICE void tl_atomic_add_f16(unsigned short &ret, unsigned long long addr,
 
 TL_DEVICE void tl_atomic_add_bf16(unsigned short &ret, unsigned long long addr,
                                   unsigned short val, int memory_order) {
-  if (IsReleaseLikeMemoryOrder(memory_order)) {
+  if (IsReleaseMemoryOrder(memory_order)) {
     asm volatile("atom.release.gpu.global.add.noftz.bf16 %0, [%1], %2;"
                  : "=h"(ret)
                  : "l"(addr), "h"(val)
                  : "memory");
-  } else if (IsAcquireMemoryOrder(memory_order)) {
+  } else if (IsAcquireLikeMemoryOrder(memory_order)) {
     asm volatile("atom.acquire.gpu.global.add.noftz.bf16 %0, [%1], %2;"
                  : "=h"(ret)
                  : "l"(addr), "h"(val)
@@ -124,13 +124,13 @@ TL_DEVICE void tl_atomic_add_v2_f16(unsigned short &ret_x,
                                     unsigned long long addr,
                                     unsigned short val_x, unsigned short val_y,
                                     int memory_order) {
-  if (IsReleaseLikeMemoryOrder(memory_order)) {
+  if (IsReleaseMemoryOrder(memory_order)) {
     asm volatile(
         "atom.release.gpu.global.add.noftz.v2.f16 {%0,%1}, [%2], {%3,%4};"
         : "=h"(ret_x), "=h"(ret_y)
         : "l"(addr), "h"(val_x), "h"(val_y)
         : "memory");
-  } else if (IsAcquireMemoryOrder(memory_order)) {
+  } else if (IsAcquireLikeMemoryOrder(memory_order)) {
     asm volatile(
         "atom.acquire.gpu.global.add.noftz.v2.f16 {%0,%1}, [%2], {%3,%4};"
         : "=h"(ret_x), "=h"(ret_y)
@@ -150,12 +150,12 @@ TL_DEVICE void tl_atomic_add_v2_bf16(unsigned short &ret_x,
                                      unsigned long long addr,
                                      unsigned short val_x, unsigned short val_y,
                                      int memory_order) {
-  if (IsReleaseLikeMemoryOrder(memory_order)) {
+  if (IsReleaseMemoryOrder(memory_order)) {
     asm volatile("atom.release.gpu.global.add.v2.bf16 {%0,%1}, [%2], {%3,%4};"
                  : "=h"(ret_x), "=h"(ret_y)
                  : "l"(addr), "h"(val_x), "h"(val_y)
                  : "memory");
-  } else if (IsAcquireMemoryOrder(memory_order)) {
+  } else if (IsAcquireLikeMemoryOrder(memory_order)) {
     asm volatile("atom.acquire.gpu.global.add.v2.bf16 {%0,%1}, [%2], {%3,%4};"
                  : "=h"(ret_x), "=h"(ret_y)
                  : "l"(addr), "h"(val_x), "h"(val_y)
@@ -180,13 +180,13 @@ tl_atomic_add_v4_f16(unsigned short &ret_x, unsigned short &ret_y,
         : "=h"(ret_x), "=h"(ret_y), "=h"(ret_z), "=h"(ret_w)
         : "l"(addr), "h"(val_x), "h"(val_y), "h"(val_z), "h"(val_w)
         : "memory");
-  } else if (IsReleaseLikeMemoryOrder(memory_order)) {
+  } else if (IsReleaseMemoryOrder(memory_order)) {
     asm volatile("atom.release.gpu.global.v4.f16.add.noftz {%0,%1,%2,%3}, "
                  "[%4], {%5,%6,%7,%8};"
                  : "=h"(ret_x), "=h"(ret_y), "=h"(ret_z), "=h"(ret_w)
                  : "l"(addr), "h"(val_x), "h"(val_y), "h"(val_z), "h"(val_w)
                  : "memory");
-  } else if (IsAcquireMemoryOrder(memory_order)) {
+  } else if (IsAcquireLikeMemoryOrder(memory_order)) {
     asm volatile("atom.acquire.gpu.global.v4.f16.add.noftz {%0,%1,%2,%3}, "
                  "[%4], {%5,%6,%7,%8};"
                  : "=h"(ret_x), "=h"(ret_y), "=h"(ret_z), "=h"(ret_w)
@@ -213,13 +213,13 @@ tl_atomic_add_v4_bf16(unsigned short &ret_x, unsigned short &ret_y,
         : "=h"(ret_x), "=h"(ret_y), "=h"(ret_z), "=h"(ret_w)
         : "l"(addr), "h"(val_x), "h"(val_y), "h"(val_z), "h"(val_w)
         : "memory");
-  } else if (IsReleaseLikeMemoryOrder(memory_order)) {
+  } else if (IsReleaseMemoryOrder(memory_order)) {
     asm volatile("atom.release.gpu.global.v4.bf16.add.noftz {%0,%1,%2,%3}, "
                  "[%4], {%5,%6,%7,%8};"
                  : "=h"(ret_x), "=h"(ret_y), "=h"(ret_z), "=h"(ret_w)
                  : "l"(addr), "h"(val_x), "h"(val_y), "h"(val_z), "h"(val_w)
                  : "memory");
-  } else if (IsAcquireMemoryOrder(memory_order)) {
+  } else if (IsAcquireLikeMemoryOrder(memory_order)) {
     asm volatile("atom.acquire.gpu.global.v4.bf16.add.noftz {%0,%1,%2,%3}, "
                  "[%4], {%5,%6,%7,%8};"
                  : "=h"(ret_x), "=h"(ret_y), "=h"(ret_z), "=h"(ret_w)
@@ -237,12 +237,12 @@ tl_atomic_add_v4_bf16(unsigned short &ret_x, unsigned short &ret_y,
 TL_DEVICE void tl_atomic_add_v2_f32(float &ret_x, float &ret_y,
                                     unsigned long long addr, float val_x,
                                     float val_y, int memory_order) {
-  if (IsReleaseLikeMemoryOrder(memory_order)) {
+  if (IsReleaseMemoryOrder(memory_order)) {
     asm volatile("atom.release.gpu.global.add.v2.f32 {%0,%1}, [%2], {%3,%4};"
                  : "=f"(ret_x), "=f"(ret_y)
                  : "l"(addr), "f"(val_x), "f"(val_y)
                  : "memory");
-  } else if (IsAcquireMemoryOrder(memory_order)) {
+  } else if (IsAcquireLikeMemoryOrder(memory_order)) {
     asm volatile("atom.acquire.gpu.global.add.v2.f32 {%0,%1}, [%2], {%3,%4};"
                  : "=f"(ret_x), "=f"(ret_y)
                  : "l"(addr), "f"(val_x), "f"(val_y)
@@ -259,13 +259,13 @@ TL_DEVICE void tl_atomic_add_v4_f32(float &ret_x, float &ret_y, float &ret_z,
                                     float &ret_w, unsigned long long addr,
                                     float val_x, float val_y, float val_z,
                                     float val_w, int memory_order) {
-  if (IsReleaseLikeMemoryOrder(memory_order)) {
+  if (IsReleaseMemoryOrder(memory_order)) {
     asm volatile(
         "atom.release.gpu.global.add.v4.f32 {%0,%1,%2,%3}, [%4], {%5,%6,%7,%8};"
         : "=f"(ret_x), "=f"(ret_y), "=f"(ret_z), "=f"(ret_w)
         : "l"(addr), "f"(val_x), "f"(val_y), "f"(val_z), "f"(val_w)
         : "memory");
-  } else if (IsAcquireMemoryOrder(memory_order)) {
+  } else if (IsAcquireLikeMemoryOrder(memory_order)) {
     asm volatile(
         "atom.acquire.gpu.global.add.v4.f32 {%0,%1,%2,%3}, [%4], {%5,%6,%7,%8};"
         : "=f"(ret_x), "=f"(ret_y), "=f"(ret_z), "=f"(ret_w)
