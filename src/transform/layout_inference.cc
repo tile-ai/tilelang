@@ -22,7 +22,6 @@
 #include "../layout/layout.h"
 #include "../layout/utils.h"
 #include "../op/builtin.h"
-#include "../op/copy.h"
 #include "../op/parallel.h"
 #include "../op/region.h"
 #include "../op/utils.h"
@@ -130,7 +129,6 @@ public:
     auto iter_var = thread_var_vec_[cur_infer_id];
     auto thread_bounds = thread_bounds_vec_[cur_infer_id];
     arith::Analyzer *cur_analyzer = analyzer_vec_[cur_infer_id].get();
-    auto buffer_oob = buffer_oob_vec_[cur_infer_id];
     // Double-check that 'next' is valid
     ICHECK(next.defined()) << "infer_list_[" << cur_infer_id
                            << "] is null inside run_infer_step.";
@@ -155,7 +153,6 @@ public:
                                                      thread_bounds,
                                                      layout_map,
                                                      cur_analyzer,
-                                                     buffer_oob,
                                                      {},
                                                      bind_var_to_expr_,
                                                      false},
@@ -337,9 +334,6 @@ public:
            "length.";
     ICHECK_EQ(analyzer_vec_.size(), infer_list_.size())
         << "Size mismatch: analyzer_vec_ and infer_list_ must match in "
-           "length.";
-    ICHECK_EQ(buffer_oob_vec_.size(), infer_list_.size())
-        << "Size mismatch: buffer_oob_vec_ and infer_list_ must match in "
            "length.";
     DLOG(INFO) << "[InferLayout] all participating operators:" << '\n';
     for (int i = 0; i < infer_list_stmt_.size(); ++i) {
@@ -571,35 +565,6 @@ private:
       thread_bounds_vec_.push_back(CurrentThreadBounds());
       analyzer_vec_.push_back(analyzer_.Clone());
 
-      // Compute buffer oob for each buffer in the op
-      if (const auto *copy = p.as<CopyNode>()) {
-        auto src_tensor = copy->src;
-        auto dst_tensor = copy->dst;
-        auto src_range = copy->src_range;
-        auto dst_range = copy->dst_range;
-        bool src_oob = false;
-        bool dst_oob = false;
-        for (size_t i = 0; i < src_range.size(); i++) {
-          if (!analyzer_.CanProve(src_range[i]->min + src_range[i]->extent <=
-                                      src_tensor->shape[i],
-                                  arith::ProofStrength::kSymbolicBound)) {
-            src_oob = true;
-            break;
-          }
-        }
-        for (size_t i = 0; i < dst_range.size(); i++) {
-          if (!analyzer_.CanProve(dst_range[i]->min + dst_range[i]->extent <=
-                                      dst_tensor->shape[i],
-                                  arith::ProofStrength::kSymbolicBound)) {
-            dst_oob = true;
-            break;
-          }
-        }
-        buffer_oob_vec_.push_back(src_oob || dst_oob);
-      } else {
-        buffer_oob_vec_.push_back(false);
-      }
-
       // Add the tile operator to infer_list_
       infer_list_stmt_.push_back(GetRef<ObjectRef>(op));
       infer_list_.push_back(std::move(p));
@@ -741,7 +706,6 @@ private:
       thread_var_vec_.push_back(thread_var_);
       thread_bounds_vec_.push_back(CurrentThreadBounds());
       analyzer_vec_.push_back(analyzer_.Clone());
-      buffer_oob_vec_.push_back(false);
     } else {
       IRVisitorWithAnalyzer::VisitStmt(op->body);
     }
@@ -1019,7 +983,6 @@ private:
   std::vector<IterVar> thread_var_vec_;
   std::vector<Range> thread_bounds_vec_;
   std::vector<std::unique_ptr<arith::Analyzer>> analyzer_vec_;
-  std::vector<bool> buffer_oob_vec_;
   Target target_;
   LayoutMap annotated_layout_map_;
   bool skip_thread_partition_{false};
