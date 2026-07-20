@@ -99,6 +99,9 @@ struct PhaseCounter {
     return SeqStmt({AllocBuffer(buf), body});
   }
 
+  Stmt AllocOnly() const { return AllocBuffer(buf); }
+  Stmt InitStmt() const { return Init(); }
+
   PrimExpr StageExpr(int num_stages) const {
     if (num_stages == 1)
       return IntImm(DataType::Int(32), 0);
@@ -137,6 +140,13 @@ private:
     return StmtExprMutator::VisitExpr_(op);
   }
 
+  // A stage-selector expression is any `? % num_stages` where `?` is a
+  // linear function of the pipeline loop variable.  Early passes such as
+  // MultiVersionBuffer emit compound forms like `(outer * trip + k) %
+  // stages` when the pipeline loop is nested inside an outer persistent
+  // `For`; recognising "depends on loop_var" (rather than the exact
+  // shapes `k` or `k - min`) keeps WS's counter-based stage clock in
+  // sync with the versions MVB already baked into shared buffer indices.
   bool MatchLinearIdx(const PrimExpr &expr) const {
     if (expr.same_as(loop_var_))
       return true;
@@ -148,7 +158,8 @@ private:
           return true;
       }
     }
-    return false;
+    return tvm::tirx::UsesVar(
+        expr, [this](const VarNode *v) { return v == loop_var_.get(); });
   }
 
   Var loop_var_;
@@ -1236,10 +1247,12 @@ private:
     const SBlock &orig_block = op->block;
 
     // Find the pipelined loop.
-    Optional<For> pipeline_loop_opt = FindPipelineLoop(orig_block->body);
-    if (!pipeline_loop_opt.defined())
+    PipelineLoopFinder::Result loop_result =
+        FindPipelineLoopWithNesting(orig_block->body);
+    if (!loop_result.pipeline_loop.defined())
       return StmtExprMutator::VisitStmt_(op);
-    For pipeline_loop = pipeline_loop_opt.value();
+    For pipeline_loop = loop_result.pipeline_loop.value();
+    bool pipeline_under_outer_for = loop_result.under_outer_for;
 
     auto num_stages_anno = pipeline_loop->annotations.Get("num_stages");
     if (!num_stages_anno)
@@ -1332,7 +1345,7 @@ private:
     // --- Build the WS transformation ---
     return BuildWSBlock(op, orig_block, pipeline_loop, num_stages, flat_stmts,
                         kinds, outer_leading_bindings, inner_leading_bindings,
-                        loop_body_condition);
+                        loop_body_condition, pipeline_under_outer_for);
   }
 
   Stmt BuildWSBlock(
@@ -1341,7 +1354,8 @@ private:
       const std::vector<TileStmtKind> &kinds,
       const std::vector<std::pair<Var, PrimExpr>> &outer_leading_bindings,
       const std::vector<std::pair<Var, PrimExpr>> &inner_leading_bindings,
-      Optional<PrimExpr> loop_body_condition = Optional<PrimExpr>()) {
+      Optional<PrimExpr> loop_body_condition = Optional<PrimExpr>(),
+      bool pipeline_under_outer_for = false) {
     Var loop_var = pipeline_loop->loop_var;
     PrimExpr loop_min = pipeline_loop->min;
     PrimExpr loop_extent = pipeline_loop->extent;
@@ -1350,10 +1364,22 @@ private:
     PrimExpr base_stage_expr = FloorMod(linear_idx, num_stages);
     PrimExpr base_parity_expr = FloorMod(FloorDiv(linear_idx, num_stages), 2);
 
-    // When the loop body is conditionally guarded, use PhaseCounters
-    // instead of the loop variable for barrier stage/parity.  This
-    // ensures parity stays correct when iterations are skipped.
-    bool needs_phase_counter = loop_body_condition.defined();
+    // When to switch from loop-var-based to counter-based stage/parity:
+    //   (a) `loop_body_condition.defined()`: the pipeline body is guarded
+    //       and some iterations may skip barrier arrive/wait entirely, so
+    //       the loop variable no longer counts real transactions.
+    //   (b) `pipeline_under_outer_for`: the pipeline loop is nested
+    //       inside an outer `T.Persistent` / `T.serial` scheduler.  The
+    //       block-scoped mbarrier phase persists across outer iterations
+    //       while the inner loop variable resets every iteration, so a
+    //       counter that is live across the whole `SBlock` is required
+    //       to keep barrier parity consistent (see PR discussion).
+    // When (b) triggers, the counter's allocation is hoisted out of the
+    // inner pipeline loop into `SBlock::alloc_buffers` and its `Init()`
+    // becomes a one-shot prelude at the top of the block body — see the
+    // assembly block near the end of this function.
+    bool needs_phase_counter =
+        loop_body_condition.defined() || pipeline_under_outer_for;
     Optional<PhaseCounter> producer_phase_counter;
     Optional<PhaseCounter> consumer_phase_counter;
     PrimExpr p_stage_expr = base_stage_expr;
@@ -1908,7 +1934,8 @@ private:
     // Wrap loops with phase counter allocation when needed.
     Stmt final_producer_loop = producer_loop;
     Stmt final_consumer_loop = consumer_loop;
-    if (needs_phase_counter) {
+    if (needs_phase_counter && !pipeline_under_outer_for) {
+      // Local scope: alloc + init live right around the pipeline loop.
       final_producer_loop =
           producer_phase_counter.value().WrapLoopWithAlloc(producer_loop);
       final_consumer_loop =
@@ -2062,6 +2089,14 @@ private:
     Stmt new_block_body = SinkGuardedConsumerPostlude::Rewrite(
         replaced_stmt, thread_iv_->var, producer_extent);
 
+    if (needs_phase_counter && pipeline_under_outer_for) {
+      Array<Stmt> block_prelude;
+      block_prelude.push_back(producer_phase_counter.value().InitStmt());
+      block_prelude.push_back(consumer_phase_counter.value().InitStmt());
+      block_prelude.push_back(new_block_body);
+      new_block_body = SeqStmt(block_prelude);
+    }
+
     // --- Update block ---
     SBlock new_block = orig_block;
     auto *block_ptr = new_block.CopyOnWrite();
@@ -2072,6 +2107,10 @@ private:
 
     // Add barrier buffer to alloc_buffers.
     block_ptr->alloc_buffers.push_back(barrier_buf);
+    if (needs_phase_counter && pipeline_under_outer_for) {
+      block_ptr->alloc_buffers.push_back(producer_phase_counter.value().buf);
+      block_ptr->alloc_buffers.push_back(consumer_phase_counter.value().buf);
+    }
 
     // Add barrier_init annotation.
     Map<Var, Array<PrimExpr>> barrier_init_map;
@@ -2100,10 +2139,15 @@ private:
 
   class PipelineLoopFinder : public StmtVisitor {
   public:
-    static Optional<For> Find(const Stmt &stmt) {
+    struct Result {
+      Optional<For> pipeline_loop;
+      bool under_outer_for = false;
+    };
+
+    static Result Find(const Stmt &stmt) {
       PipelineLoopFinder finder;
       finder(stmt);
-      return finder.pipeline_loop_;
+      return {finder.pipeline_loop_, finder.under_outer_for_};
     }
 
   private:
@@ -2119,13 +2163,23 @@ private:
         pipeline_loop_ = ffi::GetRef<For>(op);
         return;
       }
+      bool prev_under_outer = under_outer_for_;
+      under_outer_for_ = true;
       StmtVisitor::VisitStmt_(op);
+      if (!pipeline_loop_.defined()) {
+        under_outer_for_ = prev_under_outer;
+      }
     }
 
     Optional<For> pipeline_loop_;
+    bool under_outer_for_ = false;
   };
 
   Optional<For> FindPipelineLoop(const Stmt &stmt) {
+    return PipelineLoopFinder::Find(stmt).pipeline_loop;
+  }
+
+  PipelineLoopFinder::Result FindPipelineLoopWithNesting(const Stmt &stmt) {
     return PipelineLoopFinder::Find(stmt);
   }
 
