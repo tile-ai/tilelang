@@ -96,7 +96,7 @@ static Map<String, runtime::FunctionInfo> ExtractFuncInfo(const IRModule &mod) {
 
 Module BuildTileLangCUDA(IRModule mod, Target target) {
   bool output_ssa = false;
-  CodeGenTileLangCUDA cg(target);
+  CodeGenTileLangCUDA cg;
   cg.Init(output_ssa);
 
   ValidateUniqueDeviceGlobalSymbols(mod);
@@ -139,7 +139,7 @@ Module BuildTileLangCUDA(IRModule mod, Target target) {
 
 Module BuildTileLangCUDAWithoutCompile(IRModule mod, Target target) {
   bool output_ssa = false;
-  CodeGenTileLangCUDA cg(target);
+  CodeGenTileLangCUDA cg;
   cg.Init(output_ssa);
 
   ValidateUniqueDeviceGlobalSymbols(mod);

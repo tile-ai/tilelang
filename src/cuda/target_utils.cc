@@ -40,16 +40,6 @@ bool TargetIsCuTeDSL(Target target) {
   return false;
 }
 
-bool TargetHasArchSpecificFeatures(Target target) {
-  if (!TargetIsCuda(target))
-    return false;
-  auto s = target->GetAttr<ffi::String>("arch");
-  if (!s.has_value())
-    return false;
-  const std::string arch_str = s.value();
-  return !arch_str.empty() && arch_str.back() == 'a';
-}
-
 bool TargetIsVolta(Target target) {
   if (!TargetIsCuda(target))
     return false;
