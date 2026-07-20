@@ -3,7 +3,7 @@
 from __future__ import annotations
 from typing import Literal
 from tvm import tirx
-from tilelang.language import copy, macro, alloc_fragment
+from tilelang.language import copy, macro, alloc_fragment, evaluate, has_let_value, get_let_value
 from tilelang.utils.language import to_tile_region
 from tilelang.utils.language import is_shared, is_fragment, is_local, is_local_var
 from tvm.script.ir_builder import IRBuilder
@@ -44,13 +44,16 @@ def reduce(
     """
     if batch < 1:
         raise ValueError(f"batch must be >= 1, got {batch}")
+    if isinstance(out, tirx.Var) and has_let_value(out):
+        out = get_let_value(out)
+    out_buffer = out.buffer if isinstance(out, tirx.BufferLoad) else out
     # input shape: [X, d, Y], expected output shape: [X, Y] or [X, 1, Y]
     expected_shapes = [buffer.shape[:dim] + buffer.shape[dim + 1 :], buffer.shape[:dim] + [1] + buffer.shape[dim + 1 :]]
-    if list(out.shape) not in expected_shapes:
+    if list(out_buffer.shape) not in expected_shapes:
         expected_shapes_str = " or ".join(map(str, expected_shapes))
         raise ValueError(
             f"Invalid reduce output shape, buffer shape is {buffer.shape}, dim is {dim}, "
-            f"output shape is {out.shape}, expected shapes are {expected_shapes_str}"
+            f"output shape is {out_buffer.shape}, expected shapes are {expected_shapes_str}"
         )
 
     annotations = {}
@@ -60,6 +63,23 @@ def reduce(
         annotations["nan_propagate"] = True
     if not annotations:
         annotations = None
+
+    # local.var is represented as a scalar Var inside a macro. Emit this case
+    # before macro expansion while the underlying Buffer is still available.
+    if is_local(buffer) and is_local_var(out_buffer):
+        evaluate(
+            tirx.call_intrin(
+                "handle",
+                tirx.op.Op.get(_REDUCE_OP_KEY),
+                to_tile_region(buffer, access_type="r"),
+                to_tile_region(out_buffer, access_type="w"),
+                reduce_type,
+                dim,
+                clear,
+                annotations=annotations,
+            )
+        )
+        return
 
     @macro
     def reduce_macro(buffer: tirx.Buffer, out: tirx.Buffer, reduce_type: str, dim: int, clear: bool) -> None:
@@ -119,7 +139,7 @@ def reduce(
                 annotations=annotations,
             )
             copy(red_frag_out, out)
-        elif is_fragment(buffer) and is_fragment(out) or is_local(buffer) and (is_local(out) or is_local_var(out)):
+        elif is_fragment(buffer) and is_fragment(out) or is_local(buffer) and is_local(out):
             tirx.call_intrin(
                 "handle",
                 tirx.op.Op.get(_REDUCE_OP_KEY),
