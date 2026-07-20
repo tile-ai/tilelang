@@ -189,28 +189,6 @@ bool CheckGlobalStrides(const Buffer &buffer, arith::Analyzer *analyzer,
   return true;
 }
 
-bool CheckInnerBoxOffsetAligned(const Buffer &buffer, const Array<Range> &range,
-                                arith::Analyzer *analyzer,
-                                bool emit_diagnostics) {
-  if (range.empty()) {
-    return true;
-  }
-  PrimExpr inner_min = range[range.size() - 1]->min;
-  PrimExpr inner_min_bits = TMAGlobalBitsFromElements(inner_min, buffer->dtype);
-  if (!analyzer->CanProve(
-          FloorMod(inner_min_bits, IntImm(DataType::Int(64), 128)) == 0,
-          arith::ProofStrength::kSymbolicBound)) {
-    if (emit_diagnostics) {
-      DLOG(WARNING) << "TMA bulk copy requires a 16-byte-aligned innermost box "
-                       "offset, but got min="
-                    << inner_min << " for buffer " << buffer->name
-                    << ", fallback to normal copy.";
-    }
-    return false;
-  }
-  return true;
-}
-
 bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
                    bool check_last_dim, bool emit_diagnostics) {
   if (!TargetHasBulkCopy(target)) {
