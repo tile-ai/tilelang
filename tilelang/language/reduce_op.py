@@ -3,9 +3,9 @@
 from __future__ import annotations
 from typing import Literal
 from tvm import tirx
-from tilelang.language import copy, macro, alloc_fragment
-from tilelang.utils.language import to_tile_region
-from tilelang.utils.language import is_shared, is_fragment
+from tilelang.language import copy, macro, alloc_fragment, evaluate
+from tilelang.utils.language import to_buffer_region, to_tile_region
+from tilelang.utils.language import is_shared, is_fragment, is_local
 from tvm.script.ir_builder import IRBuilder
 
 
@@ -44,15 +44,16 @@ def reduce(
     """
     if batch < 1:
         raise ValueError(f"batch must be >= 1, got {batch}")
-    if reduce_type in ("bitand", "bitor", "bitxor") and not (out.dtype.startswith(("int", "uint")) or out.dtype == "bool"):
-        raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {out.dtype}")
+    out_buffer = to_buffer_region(out).buffer
+    if reduce_type in ("bitand", "bitor", "bitxor") and not (out_buffer.dtype.startswith(("int", "uint")) or out_buffer.dtype == "bool"):
+        raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {out_buffer.dtype}")
     # input shape: [X, d, Y], expected output shape: [X, Y] or [X, 1, Y]
     expected_shapes = [buffer.shape[:dim] + buffer.shape[dim + 1 :], buffer.shape[:dim] + [1] + buffer.shape[dim + 1 :]]
-    if list(out.shape) not in expected_shapes:
+    if list(out_buffer.shape) not in expected_shapes:
         expected_shapes_str = " or ".join(map(str, expected_shapes))
         raise ValueError(
             f"Invalid reduce output shape, buffer shape is {buffer.shape}, dim is {dim}, "
-            f"output shape is {out.shape}, expected shapes are {expected_shapes_str}"
+            f"output shape is {out_buffer.shape}, expected shapes are {expected_shapes_str}"
         )
 
     annotations = {}
@@ -62,6 +63,22 @@ def reduce(
         annotations["nan_propagate"] = True
     if not annotations:
         annotations = None
+
+    # Emit local reductions before macro expansion so alloc_var retains its
+    # underlying Buffer rather than becoming a scalar expression.
+    if is_local(buffer) and out_buffer.scope() in ("local", "local.var"):
+        return evaluate(
+            tirx.call_intrin(
+                "handle",
+                tirx.op.Op.get(_REDUCE_OP_KEY),
+                to_tile_region(buffer, access_type="r"),
+                to_tile_region(out_buffer, access_type="w"),
+                reduce_type,
+                dim,
+                clear,
+                annotations=annotations,
+            )
+        )
 
     @macro
     def reduce_macro(buffer: tirx.Buffer, out: tirx.Buffer, reduce_type: str, dim: int, clear: bool) -> None:
