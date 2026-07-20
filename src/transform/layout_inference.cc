@@ -1229,7 +1229,7 @@ private:
     SBlock block = Downcast<SBlock>(IRMutatorWithAnalyzer::VisitStmt_(op));
 
     for (auto buffer : block->alloc_buffers) {
-      if (buffer.scope() == "local.fragment") {
+      if (IsFragmentBuffer(buffer)) {
         ICHECK(result_.layout_map.count(buffer))
             << "Cannot inference fragment layout for " << buffer;
       }
