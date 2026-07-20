@@ -782,7 +782,8 @@ TL_DEVICE void st_bulk_shared(void *smem_ptr) {
                "l"(bytes)
                : "memory");
 #else
-  static_assert(false, "tl::st_bulk_shared requires CUDA >= 12.8");
+  // Dependent condition so pre-12.8 nvcc only fires this on instantiation.
+  static_assert(bytes != bytes, "tl::st_bulk_shared requires CUDA >= 12.8");
 #endif
 }
 

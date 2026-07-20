@@ -664,8 +664,13 @@ LayoutMap Copy::InferBulkLayout(const CopyNode &op,
 
   if (level == InferLevel::kFree &&
       !layout_args.layout_map.count(shared_tensor)) {
-    if (is_store) {
+    if (is_store && shared_tensor->shape.size() >= 2) {
       // For BulkStore, infer a swizzled shared-memory layout when possible.
+      // Rank-1 shared buffers cannot be swizzled (there is no stride dim to
+      // index), so they take the linear-layout branch below. A rank-1 store
+      // can reach this multi-dim arm when a partial tile (buffer_oob) makes
+      // the 1D TMA path unavailable; without the rank guard, reading
+      // shape[dim - 2] would fault (see issue #2529).
       int dim = shared_tensor->shape.size();
       const int64_t mat_stride = *as_const_int(shared_tensor->shape[dim - 2]);
       const int64_t mat_continuous =
