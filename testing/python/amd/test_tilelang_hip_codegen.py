@@ -1,7 +1,7 @@
 """
 Regression tests for HIP/AMD codegen fixes in TileLang.
 
-Covers seven bug fixes across five source files:
+Covers nine HIP/AMD codegen and runtime bug fixes:
 
   Fix 1 (reduce.h)            warp_reduce 5-step butterfly with width=32
   Fix 2 (codegen_hip.cc,      ShuffleNode bfloat16x2/float16x2 packing;
@@ -17,6 +17,9 @@ Covers seven bug fixes across five source files:
                                overflow (hipModuleLaunchKernel EINVAL)
   Fix 7 (codegen_hip.cc)      Packed int4 shared allocations round their
                               int32 storage-word extent up instead of down
+  Fix 8 (intrin_rule_hip.cc)  Vector math intrinsics are scalarized on HIP
+  Fix 9 (copy.h)              Four-byte predicated copy zero-fill preserves
+                              adjacent LDS dwords
 """
 
 import pytest
@@ -24,29 +27,6 @@ import torch
 import tilelang
 import tilelang.testing
 import tilelang.language as T
-
-
-# ---------------------------------------------------------------------------
-# Fix 7 — src/rocm/codegen/codegen_hip.cc
-#   Packed scalar int4/uint4 use one int32 storage word per eight elements.
-# ---------------------------------------------------------------------------
-
-
-@tilelang.testing.requires_rocm
-@pytest.mark.parametrize(
-    "dtype,storage_type",
-    [(T.int4, "int"), (T.dtype("uint4"), "uint")],
-)
-def test_static_packed_int4_shared_allocation_rounds_up(dtype, storage_type):
-    @T.prim_func
-    def kernel():
-        with T.Kernel(1, threads=1):
-            A_shared = T.alloc_shared((127,), dtype, scope="shared")
-            A_shared[126] = T.cast(1, dtype)
-
-    artifact = tilelang.lower(kernel, target="hip")
-
-    assert f"{storage_type} A_shared[16];" in artifact.kernel_source
 
 
 # ---------------------------------------------------------------------------
@@ -773,7 +753,30 @@ def test_pipelined_multi_stage_fp16_gemm(num_stages):
 
 
 # ---------------------------------------------------------------------------
-# Fix 7 — src/backend/rocm/codegen/intrin_rule_hip.cc
+# Fix 7 — src/rocm/codegen/codegen_hip.cc
+#   Packed scalar int4/uint4 use one int32 storage word per eight elements.
+# ---------------------------------------------------------------------------
+
+
+@tilelang.testing.requires_rocm
+@pytest.mark.parametrize(
+    "dtype,storage_type",
+    [(T.int4, "int"), (T.dtype("uint4"), "uint")],
+)
+def test_static_packed_int4_shared_allocation_rounds_up(dtype, storage_type):
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, threads=1):
+            A_shared = T.alloc_shared((127,), dtype, scope="shared")
+            A_shared[126] = T.cast(1, dtype)
+
+    artifact = tilelang.lower(kernel, target="hip")
+
+    assert f"{storage_type} A_shared[16];" in artifact.kernel_source
+
+
+# ---------------------------------------------------------------------------
+# Fix 8 — src/backend/rocm/codegen/intrin_rule_hip.cc
 #   Scalarize vector math intrinsics on HIP
 #
 # Symptom: A vectorized math op (e.g. tirx.exp2 on float32x4 from a 2D
@@ -820,6 +823,45 @@ def test_vector_math_scalarized_in_hip_source():
         f"T.exp2 over float32x4, got {src.count('exp2f')}. "
         "Generated HIP source:\n" + src
     )
+
+
+# ---------------------------------------------------------------------------
+# Fix 9 — src/tl_templates/hip/copy.h
+#   A false four-byte predicated copy must zero exactly one dword.
+#
+# Symptom: A false-predicate four-byte copy used uint4 zero-fill, overwriting
+#   16 bytes of LDS and corrupting three adjacent dwords.
+#
+# Fix: write one u32 so the zero-fill width matches the four-byte transfer.
+# ---------------------------------------------------------------------------
+
+
+@tilelang.testing.requires_rocm
+def test_predicated_dword_async_copy_preserves_adjacent_lds():
+    @T.prim_func
+    def kernel(
+        A: T.Tensor((1,), T.float32),
+        B: T.Tensor((4,), T.float32),
+    ):
+        with T.Kernel(1, threads=1):
+            A_shared = T.alloc_shared((4,), T.float32)
+            for i in T.serial(4):
+                A_shared[i] = T.float32(i + 1)
+            T.ptx_cp_async(
+                T.access_ptr(A_shared[0], "w", 1),
+                T.access_ptr(A[0], "r", 1),
+                1,
+                predicate=False,
+            )
+            T.ptx_commit_group()
+            T.ptx_wait_group(0)
+            for i in T.serial(4):
+                B[i] = A_shared[i]
+
+    compiled = tilelang.compile(kernel, out_idx=[1], target="hip")
+    output = compiled(torch.ones(1, device="cuda", dtype=torch.float32))
+    expected = torch.tensor([0, 2, 3, 4], device="cuda", dtype=torch.float32)
+    torch.testing.assert_close(output, expected)
 
 
 if __name__ == "__main__":
