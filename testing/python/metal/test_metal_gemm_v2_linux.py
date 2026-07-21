@@ -104,5 +104,16 @@ def test_metal_gemm_validates_explicit_buffer_strides():
         MPSIntrinEmitter._parse_buffer_nd(noncontiguous_buffer)
 
 
+def test_metal_codegen_emits_dynamic_shared_barrier():
+    @T.prim_func
+    def main():
+        with T.Kernel(1, threads=32):
+            T.tvm_storage_sync("shared.dyn")
+
+    artifact = tilelang.lower(main, target="metal")
+
+    assert "threadgroup_barrier(mem_flags::mem_threadgroup)" in artifact.kernel_source
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
