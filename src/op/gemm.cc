@@ -184,7 +184,7 @@ Stmt GemmNode::Lower(const LowerArgs &lower_args,
     // side.
     auto prim_func = Downcast<PrimFunc>(
         (*f)(GetRef<Gemm>(this), lower_args.layout_map, lower_args.target,
-             lower_args.thread_bounds, lower_args.thread_var, mbar_phase));
+             lower_args.thread_bounds, lower_args.thread_index, mbar_phase));
     ICHECK(prim_func->attrs.defined());
     auto global_symbol = prim_func->attrs.GetAttr<String>("global_symbol");
     ICHECK(global_symbol.has_value());

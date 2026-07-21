@@ -23,7 +23,6 @@
 #include "../op/gemm_sp.h"
 #include "../op/operator.h"
 #include "../op/utils.h"
-#include "cpu/target_utils.h"
 #include "cuda/target_utils.h"
 #include "cuda/transform/ptx_async_copy_injector.h"
 
@@ -189,36 +188,6 @@ private:
   Map<Buffer, Buffer> remap_;
 };
 
-/*! \brief Rewrite the synthetic CPU fallback thread variable to a constant.
- *
- * CPU `c` kernels use a degenerate fallback thread variable while fragment and
- * tile-op lowering still share thread-oriented helper code. After this pass has
- * consumed that helper variable, it should not remain in lowered CPU TIR.
- */
-class CPUFallbackThreadVarCanonicalizer : public StmtExprMutator {
-public:
-  static Stmt Rewrite(Stmt stmt, Var fallback_thread_var) {
-    CPUFallbackThreadVarCanonicalizer canonicalizer(
-        std::move(fallback_thread_var));
-    return canonicalizer(std::move(stmt));
-  }
-
-private:
-  explicit CPUFallbackThreadVarCanonicalizer(Var fallback_thread_var)
-      : fallback_thread_var_(std::move(fallback_thread_var)) {}
-
-  PrimExpr VisitExpr_(const VarNode *op) final {
-    if (fallback_thread_var_.defined() &&
-        (op == fallback_thread_var_.get() ||
-         op->name_hint == fallback_thread_var_->name_hint)) {
-      return make_zero(op->dtype);
-    }
-    return StmtExprMutator::VisitExpr_(op);
-  }
-
-  Var fallback_thread_var_;
-};
-
 class LowerTileOpPass : arith::IRMutatorWithAnalyzer {
 public:
   static PrimFunc Substitute(PrimFunc f) {
@@ -317,14 +286,6 @@ public:
       fptr->body = injector(fptr->body);
       ICHECK(injector.injected)
           << "Failed to find root SBlockRealize for barrier injection";
-    }
-
-    if (TargetIsCPU(substituter.target_)) {
-      // TODO(#2226): Remove the underlying CPU fallback-thread placeholder
-      // shared by LayoutInference/LowerTileOp. Until then, canonicalize the
-      // synthetic fallback after fragment/tile lowering has consumed it.
-      fptr->body = CPUFallbackThreadVarCanonicalizer::Rewrite(
-          std::move(fptr->body), substituter.thread_var_->var);
     }
 
     return f;
@@ -1111,12 +1072,12 @@ private:
    * buffer named "workspace" (storage scope "shared.dyn") and returns its write
    *   access pointer.
    * - Determines thread bounds for lowering from the analyzer's constant-int
-   *   information for thread_var_; if unavailable, a default range [0,1) is
-   * used.
+   *   information for the thread binding; if unavailable, a default range
+   *   [0,1) is used.
    * - Invokes tile_op->Lower(...) with LowerArgs containing target, thread
-   *   bounds, thread variable, the workspace callback, layout and buffer remap
-   *   maps, and the list of GEMM-involved buffer vars; the analyzer is passed
-   *   through for use during lowering.
+   *   bounds, the logical thread index, the workspace callback, layout and
+   *   buffer remap maps, and the list of GEMM-involved buffer vars; the
+   *   analyzer is passed through for use during lowering.
    *
    * The lowered statement returned by the operator is then visited by the base
    * IRMutatorWithAnalyzer and that result is returned.
@@ -1217,7 +1178,7 @@ private:
     LowerArgs lower_args;
     lower_args.target = target_;
     lower_args.thread_bounds = thread_bounds;
-    lower_args.thread_var = thread_var_->var;
+    lower_args.thread_index = CurrentThreadIndex();
     lower_args.layout_map = layout_map_;
     lower_args.buffer_remap = buffer_remap_;
     lower_args.bind_var_to_expr = bind_var_to_expr;
@@ -1241,7 +1202,7 @@ private:
       IterVar iv = Downcast<IterVar>(op->node);
       ICHECK_NE(iv->thread_tag.length(), 0U);
       if (iv->thread_tag == "threadIdx.x") {
-        thread_var_ = iv;
+        thread_binding_ = iv;
         ICHECK(iv->dom->extent.as<IntImmNode>());
         thread_block_size_ = iv->dom->extent.as<IntImmNode>()->value;
       }
@@ -1516,7 +1477,7 @@ private:
         (has_non_local || has_cast_operations) && !has_reducer;
     // Lower the parallel loop using the common function
     Stmt lowered = LowerParallelLoop(
-        for_node, loop_layout, thread_var_->var, analyzer_, layout_map_,
+        for_node, loop_layout, CurrentThreadIndex(), analyzer_, layout_map_,
         predicate, parallel_loop, should_vectorize, require_padding_guard);
 
     // Only parallel-loop lowering needs PTX cp.async injection. Thread-level
@@ -1539,7 +1500,17 @@ private:
   }
 
   Range CurrentThreadBounds() const {
-    return ComputeThreadBounds(thread_var_, *analyzer_);
+    return ComputeThreadBounds(thread_binding_, *analyzer_);
+  }
+
+  // Logical thread index handed to lowering helpers: the real threadIdx.x
+  // Var when a thread_extent binding exists, otherwise constant 0 (e.g. CPU
+  // serial launch). Never an unbound synthetic Var.
+  PrimExpr CurrentThreadIndex() const {
+    if (thread_binding_.defined()) {
+      return thread_binding_->var;
+    }
+    return IntImm(DataType::Int(32), 0);
   }
 
   void RecordSafeValueAnnotations(const SBlockNode *op) {
@@ -1560,10 +1531,9 @@ private:
   Map<Buffer, Layout> layout_map_;
   Map<Buffer, Layout> layout_remap_;
   Map<Buffer, Buffer> buffer_remap_;
-  // This is a workaround for cpu backend,
-  // we need to define a thread_var for the serial loop.
-  IterVar thread_var_ = IterVar(Range::FromMinExtent(0, 1), Var("v_thread"),
-                                IterVarType::kDataPar);
+  // Real threadIdx.x binding of the enclosing thread_extent scope, when one
+  // exists. Stays undefined for targets without thread bindings (e.g. CPU).
+  IterVar thread_binding_;
   size_t thread_block_size_ = 0;
   // Product of cluster_dims from block annotation (default 1).
   int cluster_size_ = 1;

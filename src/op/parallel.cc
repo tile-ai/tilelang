@@ -580,9 +580,10 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
   return results;
 }
 
-Optional<PrimExpr> ParallelOpNode::GetPredicate(Var thread_var) const {
+Optional<PrimExpr> ParallelOpNode::GetPredicate(PrimExpr thread_index) const {
   if (predicate_.defined()) {
-    return Substitute(predicate_.value(), {{InputPlaceholder(0), thread_var}});
+    return Substitute(predicate_.value(),
+                      {{InputPlaceholder(0), thread_index}});
   } else {
     return std::nullopt;
   }
