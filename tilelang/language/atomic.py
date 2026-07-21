@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import tilelang.language as T
 from tvm import ir
-from tvm.tirx import PrimExpr, Buffer, op
+from tvm.tirx import PrimExpr, Buffer, BufferRegion, op
 from tilelang.utils.language import to_buffer_region, legalize_pairwise_extents
 from tilelang.language.utils import get_extent
 
@@ -366,9 +366,10 @@ def atomic_addx4(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> Pri
     if return_prev:
         # The ret variant returns the four previous elements packed as a 4-lane
         # vector (e.g. float4); type it accordingly so the store matches.
-        return_type = f"{dst.dtype}x4"
+        dtype = dst.buffer.dtype if isinstance(dst, BufferRegion) else dst.dtype
+        return_type = f"{dtype}x4"
     else:
-        return_type = "float4" if "float" in str(dst.dtype).lower() else "handle"
+        return_type = "handle"
     return T.call_intrin(return_type, atomic_addx4_op, T.access_ptr(dst, "rw"), T.access_ptr(value, "r"))
 
 
