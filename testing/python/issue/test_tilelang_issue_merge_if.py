@@ -1,3 +1,5 @@
+import numpy as np
+
 import tilelang
 from tilelang import tvm as tvm
 from tvm.ir import IRModule
@@ -29,6 +31,24 @@ def test_merge_if():
     original_module = IRModule.from_expr(func)
     transformed = tilelang.transform.MergeIfStmt()(original_module)
     tvm.ir.assert_structural_equal(original_module["main"], transformed["main"], True)
+
+
+def test_merge_if_preserves_re_evaluation_of_buffer_condition():
+    @T.prim_func
+    def main(A: T.Tensor((2,), T.int32)):
+        if A[0] > 0:
+            A[0] = 0
+        if A[0] > 0:
+            A[1] = 1
+
+    original_module = IRModule.from_expr(main)
+    transformed = tilelang.transform.MergeIfStmt()(original_module)
+    executable = tvm.compile(transformed["main"], target="c").jit(options=["-std=c++17"])
+
+    values = tvm.runtime.tensor(np.array([1, 7], dtype="int32"))
+    executable(values)
+
+    np.testing.assert_array_equal(values.numpy(), np.array([0, 7], dtype="int32"))
 
 
 if __name__ == "__main__":
