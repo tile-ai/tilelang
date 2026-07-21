@@ -101,7 +101,7 @@ def lower_trace(
             named_passes.append((_get_pass_display_name(p), p))
 
     results: list[dict] = []
-
+    active_exc = None
     try:
         for step_idx, (name, p) in enumerate(named_passes, 1):
             before_script = mod.script()
@@ -120,6 +120,15 @@ def lower_trace(
                         "error": str(e),
                     }
                 )
+                # In terminal mode, emit an error stanza before re-raising so
+                # the user can see which pass failed and the captured pre-pass
+                # IR context. Without this the failing step is never printed.
+                if mode in ("terminal", "both"):
+                    header = f"\n{'=' * 60}\n  Pass {step_idx}: {name}  [FAILED]\n{'=' * 60}\n"
+                    print(header)
+                    print(f"  Exception: {e}")
+                    print("  IR before the failing pass:")
+                    print(before_script)
                 raise
 
             after_script = mod.script()
@@ -165,6 +174,9 @@ def lower_trace(
                     print(f"\n  >>> +{insertions} insertion(s), -{deletions} deletion(s)")
                 else:
                     print("  (no changes)")
+    except Exception as exc:
+        active_exc = exc
+        raise
     finally:
         if mode in ("html", "both"):
             from .html import generate_html
@@ -186,7 +198,19 @@ def lower_trace(
                         error_msg=r.get("error", ""),
                     )
                 )
-            generate_html(records, html_path)
-            print(f"\nHTML report written to: {html_path}")
+            # Best-effort HTML write: never let a report-write failure mask the
+            # real lowering exception. Re-raise only when lowering succeeded.
+            try:
+                generate_html(records, html_path)
+                print(f"\nHTML report written to: {html_path}")
+            except Exception:
+                if active_exc is None:
+                    raise
+                import sys
+
+                print(
+                    f"[lower_trace] WARNING: failed to write HTML report: {sys.exc_info()[1]}",
+                    file=sys.stderr,
+                )
 
     return results

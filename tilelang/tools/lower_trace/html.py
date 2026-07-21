@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 from .core import LowerRecord, STATUS_COMPLETED, STATUS_FAILED, STATUS_SKIPPED, STATUS_CODEGEN
 from .diff import _esc, _make_diff_html
@@ -38,6 +39,25 @@ def _js_safe_json(value) -> str:
         .replace("\u2028", "\\u2028")
         .replace("\u2029", "\\u2029")
     )
+
+
+def _safe_id(value: str) -> str:
+    """Derive a DOM-safe, selector-safe identifier from an arbitrary string.
+
+    Phase names are embedded raw into ``id="..."`` attributes and used inside
+    ``getElementById`` / ``querySelector`` calls. A phase containing quotes,
+    spaces, or CSS-special characters can break the markup and JS, and becomes
+    a local HTML injection vector when the report is opened in a browser.
+
+    This replaces every character outside ``[A-Za-z0-9_]`` with ``_`` and
+    prefixes a leading ``_`` when the result would start with a digit, yielding
+    a stable, deterministic, DOM-safe identifier. The original phase name is
+    kept separately for display text (see ``_esc``/``pretty_phase``).
+    """
+    safe = re.sub(r"[^A-Za-z0-9_]", "_", str(value))
+    if not safe or safe[0].isdigit():
+        safe = "_" + safe
+    return safe
 
 
 _CSS = """
@@ -1012,13 +1032,17 @@ function expand(el, n, evt) {
 }
 
 function expandAll(btn) {
-    var table = btn.closest('.pass-section').querySelector('table');
+    var section = btn.closest('.pass-section');
+    var table = section ? section.querySelector('table') : null;
+    if (!table) return;
     table.querySelectorAll('tr.row-hidden').forEach(function(r) { r.classList.remove('row-hidden'); });
     updBtns(table);
 }
 
 function collapseCtx(btn) {
-    var table = btn.closest('.pass-section').querySelector('table');
+    var section = btn.closest('.pass-section');
+    var table = section ? section.querySelector('table') : null;
+    if (!table) return;
     table.querySelectorAll('tr[data-collapse="1"]').forEach(function(r) {
         if (!r.classList.contains('btn-row')) r.classList.add('row-hidden');
     });
@@ -1362,7 +1386,7 @@ function openSidebar() {
 
 def render_pass_section(rec: LowerRecord) -> str:
     """Render a single pass section as HTML."""
-    sid = f"sec-{rec.phase}-{rec.index}"
+    sid = f"sec-{_safe_id(rec.phase)}-{rec.index}"
 
     if rec.status == STATUS_FAILED:
         error_html = f'<div class="error-box"><div class="error-label">Exception</div>{_esc(rec.error_msg)}</div>'
@@ -1535,7 +1559,7 @@ def generate_html(records: list[LowerRecord], output_path: str, section_cache: d
         n_noop = n_completed - n_changed
 
         phase_tabs_html.append(
-            f'<div class="phase-tab{active_cls}" onclick="showPhase(this, {_js_str(phase_name)})">{_esc(pretty_phase)}</div>'
+            f'<div class="phase-tab{active_cls}" onclick="showPhase(this, {_js_str(_safe_id(phase_name))})">{_esc(pretty_phase)}</div>'
         )
 
         failed_badge = ""
@@ -1552,7 +1576,7 @@ def generate_html(records: list[LowerRecord], output_path: str, section_cache: d
                 f'<span class="badge badge-codegen" data-filter="codegen" onclick="filterByBadge(this)">{n_codegen} codegen</span>'
             )
         summaries_html.append(
-            f'<div class="summary-bar" id="sm-{phase_name}"{active_style}>'
+            f'<div class="summary-bar" id="sm-{_safe_id(phase_name)}"{active_style}>'
             f'<span class="badge badge-total" data-filter="all" onclick="filterByBadge(this)">{n_total} passes</span>'
             f'<span class="badge badge-changed" data-filter="changed" onclick="filterByBadge(this)">{n_changed} changed</span>'
             f'<span class="badge badge-noop" data-filter="noop" onclick="filterByBadge(this)">{n_noop} no-op</span>'
@@ -1579,7 +1603,7 @@ def generate_html(records: list[LowerRecord], output_path: str, section_cache: d
             else:
                 dot_cls = "noop"
                 status_attr = "noop"
-            sid = f"sec-{rec.phase}-{rec.index}"
+            sid = f"sec-{_safe_id(rec.phase)}-{rec.index}"
             stats_html = ""
             if rec.changed:
                 stats_html = (
@@ -1593,7 +1617,7 @@ def generate_html(records: list[LowerRecord], output_path: str, section_cache: d
             elif rec.status == STATUS_SKIPPED:
                 stats_html = '<span class="pass-stats" style="color:#94a3b8">—</span>'
             links.append(
-                f'<a class="pass-link" data-phase="{_esc(rec.phase)}" data-target="{_esc(sid)}" '
+                f'<a class="pass-link" data-phase="{_esc(_safe_id(rec.phase))}" data-target="{_esc(sid)}" '
                 f'data-status="{status_attr}" '
                 f'onclick="showPass(this, {_js_str(sid)})">'
                 f'<span class="pass-idx">{rec.index:02d}</span>'
@@ -1603,7 +1627,7 @@ def generate_html(records: list[LowerRecord], output_path: str, section_cache: d
                 f"</a>"
             )
         sidebars_html.append(
-            f'<div class="sidebar" id="sb-{phase_name}"{active_style}>'
+            f'<div class="sidebar" id="sb-{_safe_id(phase_name)}"{active_style}>'
             f'<button class="sidebar-toggle-btn inside" onclick="toggleSidebar(this)" title="Collapse sidebar"><span class="chevron"></span></button>'
             f'<div class="section-title">Passes</div>' + "\n".join(links) + "</div>"
         )
@@ -1618,7 +1642,7 @@ def generate_html(records: list[LowerRecord], output_path: str, section_cache: d
 
     auto_show_js = ""
     if records:
-        first_sid = f"sec-{records[0].phase}-{records[0].index}"
+        first_sid = f"sec-{_safe_id(records[0].phase)}-{records[0].index}"
         auto_show_js = (
             "document.addEventListener('DOMContentLoaded', function() {\n"
             f"  var firstSid = {_js_safe_json(first_sid)};\n"

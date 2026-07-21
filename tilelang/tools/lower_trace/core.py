@@ -311,10 +311,17 @@ def _update_html_symlink(run_html_path: str):
 
 
 def _get_codegen_output_path() -> str | None:
-    """Return the configured codegen source output path, or None when tracing is off."""
+    """Return the configured codegen source output path, or None when off.
+
+    An explicit override (set via ``enable(codegen_output=...)``) always wins,
+    including in terminal-only mode and an explicit ``None`` to suppress. When
+    no override is set, the default ``<script_dir>/codegen.cpp`` is only
+    produced for persistence modes (``html``/``both``) so ``terminal`` mode
+    stays a pure no-write diff as documented.
+    """
     if _codegen_output_path_override is not _UNSET:
         return _codegen_output_path_override
-    if _is_trace_enabled():
+    if _should_gen_html():
         script_dir = _ensure_script_dir()
         return os.path.join(script_dir, "codegen.cpp")
     return None
@@ -334,6 +341,12 @@ def _save_raw_files(record: LowerRecord):
 
     For codegen records the *after* text is C++ source, so we write ``*.cpp``
     instead of ``*.tir``.
+
+    The run-directory layout (``<script_dir>/.run_records/...``) is created in
+    every active mode including ``terminal``, so that raw ``.tir`` dumps and the
+    per-script directory remain available for inspection; only the HTML report
+    itself is gated on a persistence mode (``html``/``both``) — see
+    ``_final_report()`` and ``_incremental_flush_html()``.
 
     Persistence is best-effort: any filesystem failure (unwritable
     ``TL_LOWER_TRACE_DIR``, bad filename, transient error) degrades to a

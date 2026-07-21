@@ -10,14 +10,26 @@ import tempfile
 # import-time activation hook in ``tilelang/__init__.py`` cannot fire during
 # pytest collection. The autouse ``_isolate_env`` fixture below handles
 # per-test isolation; this guard prevents leaks across collected modules.
-os.environ.pop("TL_LOWER_TRACE", None)
-os.environ.pop("TL_LOWER_TRACE_DIR", None)
+# The caller's original env values are restored immediately after import so
+# other collected modules or debugging runs still see their own settings.
+_TRACE_ENV_KEYS = ("TL_LOWER_TRACE", "TL_LOWER_TRACE_DIR")
+_saved_trace_env = {key: os.environ.get(key) for key in _TRACE_ENV_KEYS}
+try:
+    for key in _TRACE_ENV_KEYS:
+        os.environ.pop(key, None)
 
-import tilelang
-import tilelang.testing
-import tilelang.language as T
-from tilelang import tvm
-from tilelang.tools.lower_trace import core as _core
+    import tilelang
+    import tilelang.testing
+    import tilelang.language as T
+    from tilelang import tvm
+    from tilelang.tools.lower_trace import core as _core
+finally:
+    for key, value in _saved_trace_env.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+    del _saved_trace_env
 
 
 @pytest.fixture(autouse=True)
@@ -94,6 +106,7 @@ def test_lower_trace_api_single_pass(capsys):
 
 
 def test_lower_trace_api_chain():
+    """lower_trace() applies a named pass chain in order and preserves names."""
     from tilelang.tools.lower_trace import lower_trace
 
     program = _simple_program()
@@ -108,6 +121,7 @@ def test_lower_trace_api_chain():
 
 
 def test_enable_disable():
+    """enable()/disable() round-trip installs and removes tracing hooks cleanly."""
     from tilelang.tools.lower_trace import enable, disable
 
     enable()
@@ -115,6 +129,7 @@ def test_enable_disable():
 
 
 def test_lower_trace_html():
+    """lower_trace() in html mode writes a report file containing pass content."""
     from tilelang.tools.lower_trace import lower_trace
 
     program = _simple_program()
@@ -133,6 +148,7 @@ def test_lower_trace_html():
 
 
 def test_discover_passes():
+    """_discover_passes() extracts the ordered pass names from a pipeline class."""
     from tilelang.tools.lower_trace.core import _discover_passes
     from tilelang.cpu.pipeline import CPUPassPipelineBody
 
@@ -144,6 +160,7 @@ def test_discover_passes():
 
 
 def test_lower_trace_dark_theme():
+    """The HTML report embeds theme toggle CSS/JS and a localStorage key."""
     from tilelang.tools.lower_trace import lower_trace
 
     program = _simple_program()
@@ -166,6 +183,7 @@ def test_lower_trace_dark_theme():
 
 
 def test_multi_run_accumulation(monkeypatch, tmp_path):
+    """Repeated pipeline.lower() calls accumulate records under run2_/run3_ phases."""
     from tilelang.tools.lower_trace import enable, disable
     from tilelang.tools.lower_trace import core as _core
     from tilelang.backend.pass_pipeline import resolve_pipeline
@@ -209,6 +227,7 @@ def test_multi_run_accumulation(monkeypatch, tmp_path):
 
 
 def test_diff_html_line_numbers_monotone():
+    """Diff row line-number columns must stay ascending after strip-level pairing."""
     import re
     from tilelang.tools.lower_trace.diff import _make_diff_html
 
@@ -355,6 +374,7 @@ def test_lower_trace_html_on_failure(tmp_path):
 
     class _BoomPass:
         def __call__(self, mod):
+            """Always raise so the traced pass loop hits its failure path."""
             raise RuntimeError("intentional boom")
 
     passes = [
@@ -382,12 +402,15 @@ class _MockCodegenModule:
     """Minimal stand-in for a TVM runtime.Module returned by codegen FFIs."""
 
     def __init__(self, source: str):
+        """Store the source string to return from inspect_source/get_source."""
         self._source = source
 
     def inspect_source(self) -> str:
+        """Return the source string captured at construction."""
         return self._source
 
     def get_source(self) -> str:
+        """Return the source string captured at construction."""
         return self._source
 
 
@@ -395,6 +418,7 @@ def _make_mock_build(source: str):
     """Return a mock codegen FFI that always produces *source*."""
 
     def mock_build(*args, **kwargs):
+        """Pretend to compile and return a _MockCodegenModule holding *source*."""
         return _MockCodegenModule(source)
 
     return mock_build
@@ -404,12 +428,15 @@ class _MockPatchedModule:
     """Stand-in for the CSourceModule returned by _make_patched_source_module."""
 
     def __init__(self, source: str):
+        """Store the patched source string to return from get_source."""
         self._source = source
 
     def get_source(self) -> str:
+        """Return the patched source string."""
         return self._source
 
     def inspect_source(self) -> str:
+        """Return the patched source string."""
         return self._source
 
 
@@ -641,9 +668,11 @@ def test_codegen_phase_reset_on_inspect_source_failure(tmp_path):
 
     class _ExplodingModule:
         def inspect_source(self):
+            """Raise to exercise the post-codegen error-handling path."""
             raise RuntimeError("inspect_source blew up")
 
     def mock_build(*args, **kwargs):
+        """Return an _ExplodingModule to trigger the inspect_source failure path."""
         return _ExplodingModule()
 
     wrapper = _wrap_codegen_ffi(mock_build, "target.build.tilelang_cuda_without_compile")
@@ -688,6 +717,7 @@ def test_codegen_record_index_after_nested_pass(tmp_path):
     nested_idx = []
 
     def mock_build(*args, **kwargs):
+        """Append an internal traced pass then return a normal mock module."""
         with _core._lock:
             nested_idx.append(_core._pass_index)
             _core._pass_index += 1
