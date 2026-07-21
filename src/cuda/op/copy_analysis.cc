@@ -197,8 +197,8 @@ bool CheckInnerBoxOffsetAligned(const Buffer &buffer, const Array<Range> &range,
   }
   PrimExpr inner_min = range[range.size() - 1]->min;
   PrimExpr inner_min_bits = TMAGlobalBitsFromElements(inner_min, buffer->dtype);
-  if (analyzer->CanProve(
-          FloorMod(inner_min_bits, IntImm(DataType::Int(64), 128)) != 0,
+  if (!analyzer->CanProve(
+          FloorMod(inner_min_bits, IntImm(DataType::Int(64), 128)) == 0,
           arith::ProofStrength::kSymbolicBound)) {
     if (emit_diagnostics) {
       DLOG(WARNING) << "TMA bulk copy requires a 16-byte-aligned innermost box "
