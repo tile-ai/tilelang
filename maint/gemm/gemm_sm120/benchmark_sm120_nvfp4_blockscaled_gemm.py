@@ -8,7 +8,7 @@ the persistent scheduler and CUTLASS build harness.
 It can optionally compare against the official CUTLASS GeForce NVFP4 example
 79a. Run from the repository root:
 
-    python maint/gemm/benchmark_sm120_nvfp4_blockscaled_gemm.py --m 8192 --n 8192 --k 8192 --run-cutlass
+    python maint/gemm/gemm_sm120/benchmark_sm120_nvfp4_blockscaled_gemm.py --m 8192 --n 8192 --k 8192 --run-cutlass
 """
 
 import argparse
@@ -19,7 +19,7 @@ import subprocess
 import sys
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))

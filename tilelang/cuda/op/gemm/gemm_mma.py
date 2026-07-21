@@ -4,6 +4,7 @@ from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang.layout import make_swizzled_layout
 from tilelang.cuda.intrinsics.macro.mma_macro_generator import TensorCoreIntrinEmitter
 from tilelang.utils.language import is_shared, is_fragment, is_full_region
+from tilelang.cuda.target import target_is_cuda, target_is_sm120
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tvm.ir import Range
@@ -16,16 +17,17 @@ GEMM_INST_MMA = "cuda.mma"
 
 
 def _is_explicit_non_sm120_cuda(target: Target) -> bool:
-    if target.kind.name != "cuda":
+    # Reuse the shared ``target_is_sm120`` arch check, but only after confirming
+    # the target carries an explicit ``sm_`` arch.  ``target_is_sm120`` reads the
+    # ``arch`` attr through a C++ ICHECK that aborts when it is missing or
+    # malformed, so targets without an explicit arch (common on CI hosts that
+    # have no SM120 GPU) must short-circuit to ``False`` here rather than raise.
+    if not target_is_cuda(target):
         return False
     arch = target.attrs.get("arch", None)
-    if arch is None:
+    if arch is None or not str(arch).startswith("sm_"):
         return False
-    arch_str = str(arch)
-    if not arch_str.startswith("sm_"):
-        return False
-    arch_int = int(arch_str[3:].rstrip("af"))
-    return arch_int < 120 or arch_int >= 130
+    return not target_is_sm120(target)
 
 
 class GemmMMA(GemmBase):

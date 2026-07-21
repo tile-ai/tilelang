@@ -2,6 +2,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import tilelang.testing
+
 
 def _load_sm120_example(monkeypatch):
     repo_root = Path(__file__).resolve().parents[3]
@@ -60,12 +62,11 @@ def test_sm120_nvfp4_example_source_has_no_legacy_strategy_flags():
         assert term not in source
 
 
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
 def test_sm120_nvfp4_example_kernel_handles_mn_tail_tiles(monkeypatch):
     import pytest
 
     torch = pytest.importorskip("torch")
-    if not torch.cuda.is_available() or torch.cuda.get_device_capability() < (12, 0):
-        pytest.skip("requires an SM120 GPU")
 
     from tilelang.quantize import swizzle_blockscaled_chunk_kmajor_scale_words
 

@@ -264,7 +264,7 @@ def _blockscaled_fp4_reference(a, b, sfa_logical, sfb_logical):
 def _build_cutlass_extension():
     from torch.utils.cpp_extension import load
 
-    repo = Path(__file__).resolve().parents[2]
+    repo = Path(__file__).resolve().parents[3]
     cutlass_root_env = os.environ.get("CUTLASS_ROOT")
     cutlass_root = Path(cutlass_root_env) if cutlass_root_env else repo / "3rdparty" / "cutlass"
     include_paths = [
@@ -279,7 +279,7 @@ def _build_cutlass_extension():
 
     return load(
         name="tilelang_cutlass_nvf4_ref",
-        sources=[str(repo / "maint" / "gemm" / "cutlass_nvf4_ref.cu")],
+        sources=[str(repo / "maint" / "gemm" / "gemm_sm120" / "cutlass_nvf4_ref.cu")],
         extra_include_paths=[str(path) for path in include_paths],
         extra_cuda_cflags=[
             "-std=c++20",

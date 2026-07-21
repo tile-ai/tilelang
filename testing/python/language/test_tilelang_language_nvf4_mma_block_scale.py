@@ -559,7 +559,7 @@ def test_sm120_fulltile_package_contract_rejects_shape_drift():
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(12, 0)
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
 @pytest.mark.parametrize("K", [64, 128, 256])
 def test_nvf4_mma_block_scale_codegen(K):
     kernel = tilelang.compile(
@@ -585,7 +585,7 @@ def test_nvf4_mma_block_scale_codegen(K):
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(12, 0)
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
 def test_nvf4_mma_block_scale_rejects_legacy_cutlass_128x4_layout_alias():
     with pytest.raises(ValueError, match="Unsupported SM120 scale layout: cutlass_128x4"):
         tilelang.compile(
@@ -603,7 +603,7 @@ def test_nvf4_mma_block_scale_rejects_legacy_cutlass_128x4_layout_alias():
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(12, 0)
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
 def test_nvf4_mma_block_scale_package_pingpong_contract_lowers_fulltile():
     kernel = tilelang.compile(
         _make_nvf4_matmul_codegen_kernel(
@@ -623,7 +623,7 @@ def test_nvf4_mma_block_scale_package_pingpong_contract_lowers_fulltile():
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(12, 0)
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
 def test_nvf4_mma_block_scale_packed_smem_offsets():
     kernel = tilelang.compile(
         _make_nvf4_matmul_codegen_kernel(256, 256, 256, num_stages=3),
@@ -670,7 +670,7 @@ def test_nvf4_mma_block_scale_packed_smem_non_alias_offset_units():
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(12, 0)
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
 @pytest.mark.parametrize(
     "K,input_mode",
     [
@@ -701,7 +701,7 @@ def test_nvf4_mma_block_scale_constant_scale_correctness(K, input_mode):
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(12, 0)
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
 def test_nvf4_mma_block_scale_varying_scale_correctness():
     import torch
 

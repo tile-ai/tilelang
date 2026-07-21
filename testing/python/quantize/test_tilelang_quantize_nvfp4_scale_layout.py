@@ -19,7 +19,7 @@ from tilelang.quantize import (
 def _load_maint_quantizer():
     import importlib.util
 
-    path = Path(__file__).resolve().parents[3] / "maint/gemm/tilelang_nvfp4_quantizer.py"
+    path = Path(__file__).resolve().parents[3] / "maint/gemm/gemm_sm120/tilelang_nvfp4_quantizer.py"
     spec = importlib.util.spec_from_file_location("tilelang_nvfp4_quantizer", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
