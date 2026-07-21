@@ -106,11 +106,17 @@ if not env.is_light_import():
 del _init_logger
 
 
-def _disable_rocm_tvm_ffi_torch_c_dlpack(torch_module):
-    if getattr(torch_module.version, "hip", None) is None:
+def _disable_tvm_ffi_torch_c_dlpack(torch_module):
+    is_rocm = getattr(torch_module.version, "hip", None) is not None
+    mps_backend = getattr(getattr(torch_module, "backends", None), "mps", None)
+    is_mps = sys.platform == "darwin" and mps_backend is not None and mps_backend.is_available()
+    if not is_rocm and not is_mps:
         return
 
     os.environ.setdefault("TVM_FFI_DISABLE_TORCH_C_DLPACK", "1")
+    if is_mps:
+        # PyTorch's native exchange API queries a stream handle that MPS cannot provide.
+        os.environ.setdefault("TVM_FFI_SKIP_DLPACK_C_EXCHANGE_API", "1")
     try:
         from tvm_ffi import _optional_torch_c_dlpack
     except Exception:
@@ -128,7 +134,7 @@ def _disable_rocm_tvm_ffi_torch_c_dlpack(torch_module):
 def _lazy_load_lib():
     import torch  # preload torch to avoid dlopen errors
 
-    _disable_rocm_tvm_ffi_torch_c_dlpack(torch)
+    _disable_tvm_ffi_torch_c_dlpack(torch)
 
     if sys.platform.startswith("win32"):
         yield
@@ -215,8 +221,10 @@ if not env.is_light_import():
 
 del _lazy_load_lib
 
-# Install pass diff hook if TILELANG_PASS_DIFF is enabled (zero overhead when off)
-from .utils.pass_diff_hook import install_pass_diff_hook as _install_pass_diff_hook  # noqa: E402
+# Install pass diff hook if TILELANG_PASS_DIFF is enabled (zero overhead when off).
+# AutoDD uses a light package import so its CLI can run without loading TVM.
+if not env.is_light_import():
+    from .utils.pass_diff_hook import install_pass_diff_hook as _install_pass_diff_hook  # noqa: E402
 
-_install_pass_diff_hook()
-del _install_pass_diff_hook
+    _install_pass_diff_hook()
+    del _install_pass_diff_hook

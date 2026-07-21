@@ -123,15 +123,14 @@ private:
                            lower_args.thread_bounds,
                            lower_args.layout_map,
                            analyzer,
-                           false,
                            lower_args.buffer_remap,
                            {}},
                           level);
     }
     auto loop_layout = par_op->GetLoopLayout();
     Stmt lowered_loop = LowerParallelLoop(
-        par_op->GetRoot(), loop_layout, lower_args.thread_var, analyzer,
-        lower_args.layout_map, par_op->GetPredicate(lower_args.thread_var),
+        par_op->GetRoot(), loop_layout, lower_args.thread_index, analyzer,
+        lower_args.layout_map, par_op->GetPredicate(lower_args.thread_index),
         /*parallel_loop=*/true,
         /*should_vectorize=*/true, par_op->LoopLayoutRequiresPaddingGuard());
 

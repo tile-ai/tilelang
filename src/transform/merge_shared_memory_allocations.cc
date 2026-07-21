@@ -44,6 +44,7 @@
 #include <utility>
 
 #include "../op/builtin.h"
+#include "common/storage_size.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
 #include <tvm/tirx/function.h>
@@ -72,55 +73,12 @@ static bool IsStaticSharedMemory(Var buffer_var) {
          storage_scope.tag.empty();
 }
 
-static DataType GetStorageSizeExprDType(const Buffer &buffer) {
-  DataType size_dtype = DataType::Int(32);
-  if (!buffer->shape.empty()) {
-    size_dtype = buffer->shape[0].dtype();
-  }
-  if (!size_dtype.is_int() && !size_dtype.is_uint()) {
-    size_dtype = DataType::Int(32);
-  }
-  return size_dtype;
-}
-
 // Scalar packed NVFP4 stores two logical elements per byte, and its buffer
-// shapes are expressed in logical elements.  It is the only dtype whose
-// storage sizing and byte-offset -> logical-index conversion deviate from the
-// legacy DataType::bytes() rule; all other (sub-)byte dtypes keep the
-// upstream semantics so this pass changes behavior for NVFP4 buffers only.
+// shapes are expressed in logical elements.  Storage sizing is handled by the
+// shared GetBufferStorageSizeBytes helper; the byte-offset -> logical-index
+// conversion below is the remaining NVFP4-specific piece of this pass.
 static bool IsPackedScalarFp4(DataType dtype) {
   return dtype.is_float4_e2m1fn() && dtype.is_scalar();
-}
-
-static int64_t GetSharedStorageBitsPerLogicalElement(DataType dtype) {
-  if (IsPackedScalarFp4(dtype)) {
-    return 4;
-  }
-  return static_cast<int64_t>(dtype.bytes()) * dtype.lanes() * 8;
-}
-
-static PrimExpr GetSharedStorageSizeBytes(const Buffer &buffer) {
-  DataType size_dtype = GetStorageSizeExprDType(buffer);
-  int64_t element_bits = GetSharedStorageBitsPerLogicalElement(buffer->dtype);
-
-  // Do not use DataType::bytes() for packed FP4: it rounds sub-byte scalar
-  // types up per element, so scalar packed FP4 would be charged as one byte
-  // per value instead of two values per byte.  Compute total bits first, then
-  // round the whole allocation up to bytes.
-  PrimExpr size_bits = make_const(size_dtype, element_bits);
-  for (const PrimExpr &extent : buffer->shape) {
-    PrimExpr e = extent;
-    if (e.dtype() != size_dtype) {
-      e = cast(size_dtype, e);
-    }
-    size_bits = size_bits * e;
-  }
-
-  if (element_bits % 8 == 0) {
-    return indexdiv(size_bits, make_const(size_dtype, 8));
-  }
-  return indexdiv(size_bits + make_const(size_dtype, 7),
-                  make_const(size_dtype, 8));
 }
 
 static PrimExpr SharedByteOffsetToLogicalIndexOffset(PrimExpr byte_offset,
@@ -633,7 +591,7 @@ private:
 
     for (const VarNode *var : sorted_vars) {
       const AllocBufferNode *alloc = shmem_allocs_.at(var);
-      PrimExpr size_expr = GetSharedStorageSizeBytes(alloc->buffer);
+      PrimExpr size_expr = GetBufferStorageSizeBytes(alloc->buffer);
 
       int alignment = align_bytes_;
       auto align_it = shmem_alignment_map_.find(var);
@@ -673,7 +631,7 @@ private:
           if (alloc_it != shmem_allocs_.end()) {
             const AllocBufferNode *alloc = alloc_it->second;
             PrimExpr buffer_size_bytes =
-                GetSharedStorageSizeBytes(alloc->buffer);
+                GetBufferStorageSizeBytes(alloc->buffer);
             LOG(DEBUG) << "    Buffer: " << buffer_var_node->name_hint
                        << " (Type: " << alloc->buffer->dtype << ")"
                        << ", Start Offset: " << byte_offset
@@ -1450,16 +1408,14 @@ private:
       }
 
       const AllocBufferNode *alloc = shmem_allocs_.at(var);
-      PrimExpr size_expr = GetSharedStorageSizeBytes(alloc->buffer);
-      DataType size_dtype = GetStorageSizeExprDType(alloc->buffer);
-      info.size_dtype = size_dtype;
+      PrimExpr size_expr = GetBufferStorageSizeBytes(alloc->buffer);
+      info.size_dtype = size_expr.dtype();
       info.size_expr = size_expr;
 
       auto const_size = GetRef<AllocBuffer>(alloc).ConstantAllocationSize();
       if (const_size.has_value()) {
-        int64_t element_bits =
-            GetSharedStorageBitsPerLogicalElement(alloc->buffer->dtype);
-        info.const_size_bytes = (const_size.value() * element_bits + 7) / 8;
+        info.const_size_bytes = GetBufferStorageSizeBytes(
+            static_cast<int64_t>(const_size.value()), alloc->buffer->dtype);
       }
 
       buf_infos.push_back(std::move(info));

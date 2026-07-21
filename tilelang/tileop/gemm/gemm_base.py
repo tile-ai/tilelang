@@ -45,7 +45,7 @@ class GemmBase:
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_var: tirx.Var,
+        thread_index: tirx.PrimExpr,
         mbar_phase_expr: tirx.PrimExpr | None = None,
     ):
         raise NotImplementedError("lower is not implemented")

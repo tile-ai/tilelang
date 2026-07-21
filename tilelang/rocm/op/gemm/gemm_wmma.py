@@ -71,10 +71,15 @@ class GemmWMMA(GemmBase):
             raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
 
     def lower(
-        self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tirx.Var, mbar_phase_expr: tirx.PrimExpr | None = None
+        self,
+        layout_map: dict,
+        target: Target,
+        thread_bounds: Range,
+        thread_index: tirx.PrimExpr,
+        mbar_phase_expr: tirx.PrimExpr | None = None,
     ):
         thread_nums = thread_bounds.extent
-        wmma_emitter = self._make_emitter(target, thread_nums, thread_var=thread_var)
+        wmma_emitter = self._make_emitter(target, thread_nums, thread_var=thread_index)
 
         block_K = wmma_emitter.chunk
         micro_size_k = wmma_emitter.micro_size_k

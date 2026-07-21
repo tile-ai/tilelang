@@ -1633,6 +1633,15 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->stream << ", " << PrintExpr(op->args[2]);
     }
     this->stream << ");\n";
+  } else if (op->op.same_as(tl::atomic_addx2_ret_elem_op())) {
+    // atomic_addx2_ret_elem_op(dst_ptr, src_ptr[, memory_order]) -> returns
+    // the previous two values
+    os << "AtomicAddx2Ret(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]);
+    if (op->args.size() > 2) {
+      os << ", " << PrintExpr(op->args[2]);
+    }
+    os << ")";
   } else if (op->op.same_as(tl::atomic_addx4_elem_op())) {
     // atomic_addx4_elem_op(dst_ptr, src_ptr[, memory_order])
     std::string dst_ptr = PrintExpr(op->args[0]);
@@ -1643,6 +1652,15 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->stream << ", " << PrintExpr(op->args[2]);
     }
     this->stream << ");\n";
+  } else if (op->op.same_as(tl::atomic_addx4_ret_elem_op())) {
+    // atomic_addx4_ret_elem_op(dst_ptr, src_ptr[, memory_order]) -> returns
+    // the previous four values
+    os << "AtomicAddx4Ret(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]);
+    if (op->args.size() > 2) {
+      os << ", " << PrintExpr(op->args[2]);
+    }
+    os << ")";
   } else if (op->op.same_as(tl::atomic_load_elem_op())) {
     // atomic_load_elem_op(src_ptr, memory_order) -> returns loaded value
     os << "AtomicLoad(" << PrintExpr(op->args[0]) << ", "
@@ -1770,11 +1788,15 @@ void CodeGenTileLangHIP::VisitStmt_(const AllocBufferNode *op) {
         << "Can only handle constant size stack allocation for now";
     size_t constant_size = static_cast<size_t>(opt_size.value());
 
-    if ((op->buffer->dtype == DataType::Int(4) ||
-         op->buffer->dtype == DataType::UInt(4) ||
-         op->buffer->dtype == DataType::Int(1)) &&
-        scope == "shared") {
-      constant_size = constant_size / (32 / op->buffer->dtype.bits());
+    if (scope == "shared") {
+      if (dtype.is_float4_e2m1fn() && dtype.is_scalar()) {
+        constant_size = (constant_size + 1) / 2;
+      } else if (dtype == DataType::Int(4) || dtype == DataType::UInt(4) ||
+                 dtype == DataType::Int(1)) {
+        size_t elements_per_storage_word = 32 / dtype.bits();
+        constant_size = (constant_size + elements_per_storage_word - 1) /
+                        elements_per_storage_word;
+      }
     }
 
     if (is_fp4_scalar_local) {

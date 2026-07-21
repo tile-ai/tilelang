@@ -118,6 +118,82 @@ TL_PATCH TL_DEVICE bfloat16_t hrsqrt(const bfloat16_t x) {
   return bfloat16_t(hrsqrt(x.to_nv_bfloat16()));
 }
 
+// hsqrt function for half_t
+TL_PATCH TL_DEVICE half_t hsqrt(const half_t x) {
+  return half_t(hsqrt(x.to_half()));
+}
+
+// hsqrt function for bfloat16_t
+TL_PATCH TL_DEVICE bfloat16_t hsqrt(const bfloat16_t x) {
+  return bfloat16_t(hsqrt(x.to_nv_bfloat16()));
+}
+
+// hrcp function for half_t
+TL_PATCH TL_DEVICE half_t hrcp(const half_t x) {
+  return half_t(hrcp(x.to_half()));
+}
+
+// hrcp function for bfloat16_t
+TL_PATCH TL_DEVICE bfloat16_t hrcp(const bfloat16_t x) {
+  return bfloat16_t(hrcp(x.to_nv_bfloat16()));
+}
+
+// __hadd_rn function for half_t
+TL_PATCH TL_DEVICE half_t __hadd_rn(const half_t x, const half_t y) {
+  return half_t(__hadd_rn(x.to_half(), y.to_half()));
+}
+
+// __hadd_rn function for bfloat16_t
+TL_PATCH TL_DEVICE bfloat16_t __hadd_rn(const bfloat16_t x,
+                                        const bfloat16_t y) {
+  return bfloat16_t(__hadd_rn(x.to_nv_bfloat16(), y.to_nv_bfloat16()));
+}
+
+// __hsub_rn function for half_t
+TL_PATCH TL_DEVICE half_t __hsub_rn(const half_t x, const half_t y) {
+  return half_t(__hsub_rn(x.to_half(), y.to_half()));
+}
+
+// __hsub_rn function for bfloat16_t
+TL_PATCH TL_DEVICE bfloat16_t __hsub_rn(const bfloat16_t x,
+                                        const bfloat16_t y) {
+  return bfloat16_t(__hsub_rn(x.to_nv_bfloat16(), y.to_nv_bfloat16()));
+}
+
+// __hmul_rn function for half_t
+TL_PATCH TL_DEVICE half_t __hmul_rn(const half_t x, const half_t y) {
+  return half_t(__hmul_rn(x.to_half(), y.to_half()));
+}
+
+// __hmul_rn function for bfloat16_t
+TL_PATCH TL_DEVICE bfloat16_t __hmul_rn(const bfloat16_t x,
+                                        const bfloat16_t y) {
+  return bfloat16_t(__hmul_rn(x.to_nv_bfloat16(), y.to_nv_bfloat16()));
+}
+
+// __hdiv function for half_t
+TL_PATCH TL_DEVICE half_t __hdiv(const half_t x, const half_t y) {
+  return half_t(__hdiv(x.to_half(), y.to_half()));
+}
+
+// __hdiv function for bfloat16_t
+TL_PATCH TL_DEVICE bfloat16_t __hdiv(const bfloat16_t x, const bfloat16_t y) {
+  return bfloat16_t(__hdiv(x.to_nv_bfloat16(), y.to_nv_bfloat16()));
+}
+
+// __hfma function for half_t
+TL_PATCH TL_DEVICE half_t __hfma(const half_t x, const half_t y,
+                                 const half_t z) {
+  return half_t(__hfma(x.to_half(), y.to_half(), z.to_half()));
+}
+
+// __hfma function for bfloat16_t
+TL_PATCH TL_DEVICE bfloat16_t __hfma(const bfloat16_t x, const bfloat16_t y,
+                                     const bfloat16_t z) {
+  return bfloat16_t(
+      __hfma(x.to_nv_bfloat16(), y.to_nv_bfloat16(), z.to_nv_bfloat16()));
+}
+
 // TVM lowers T.exp(bfloat16) to the CUDA half-style `hexp` name. TileLang uses
 // cutlass::bfloat16_t for scalar bf16, while CUDA only overloads hexp for
 // __nv_bfloat16. Keep this narrow bridge in common.h so plain T.exp works
@@ -306,6 +382,42 @@ TL_DEVICE longlong4 make_longlong4(int x0, int x1, int y0, int y1, int z0,
   *((int2 *)&result.y) = make_int2(y0, y1);
   *((int2 *)&result.z) = make_int2(z0, z1);
   *((int2 *)&result.w) = make_int2(w0, w1);
+  return result;
+}
+
+// Pack thirty-two char values.
+TL_DEVICE longlong4
+make_longlong4(signed char x0, signed char x1, signed char x2, signed char x3,
+               signed char x4, signed char x5, signed char x6, signed char x7,
+               signed char y0, signed char y1, signed char y2, signed char y3,
+               signed char y4, signed char y5, signed char y6, signed char y7,
+               signed char z0, signed char z1, signed char z2, signed char z3,
+               signed char z4, signed char z5, signed char z6, signed char z7,
+               signed char w0, signed char w1, signed char w2, signed char w3,
+               signed char w4, signed char w5, signed char w6, signed char w7) {
+  longlong4 result;
+  *((int2 *)&result.x) = make_int2(x0, x1, x2, x3, x4, x5, x6, x7);
+  *((int2 *)&result.y) = make_int2(y0, y1, y2, y3, y4, y5, y6, y7);
+  *((int2 *)&result.z) = make_int2(z0, z1, z2, z3, z4, z5, z6, z7);
+  *((int2 *)&result.w) = make_int2(w0, w1, w2, w3, w4, w5, w6, w7);
+  return result;
+}
+
+// Pack thirty-two unsigned char values.
+TL_DEVICE ulonglong4 make_ulonglong4(
+    unsigned char x0, unsigned char x1, unsigned char x2, unsigned char x3,
+    unsigned char x4, unsigned char x5, unsigned char x6, unsigned char x7,
+    unsigned char y0, unsigned char y1, unsigned char y2, unsigned char y3,
+    unsigned char y4, unsigned char y5, unsigned char y6, unsigned char y7,
+    unsigned char z0, unsigned char z1, unsigned char z2, unsigned char z3,
+    unsigned char z4, unsigned char z5, unsigned char z6, unsigned char z7,
+    unsigned char w0, unsigned char w1, unsigned char w2, unsigned char w3,
+    unsigned char w4, unsigned char w5, unsigned char w6, unsigned char w7) {
+  ulonglong4 result;
+  *((uint2 *)&result.x) = make_uint2(x0, x1, x2, x3, x4, x5, x6, x7);
+  *((uint2 *)&result.y) = make_uint2(y0, y1, y2, y3, y4, y5, y6, y7);
+  *((uint2 *)&result.z) = make_uint2(z0, z1, z2, z3, z4, z5, z6, z7);
+  *((uint2 *)&result.w) = make_uint2(w0, w1, w2, w3, w4, w5, w6, w7);
   return result;
 }
 
@@ -821,7 +933,21 @@ TL_DEVICE __half2 add2(__half2 a, __half2 b) {
 // --- sub2 ----------------------------------------------------------------
 
 TL_DEVICE float2 sub2(float2 a, float2 b) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) &&                       \
+    ((__CUDACC_VER_MAJOR__ > 12) ||                                            \
+     (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 8))
+  unsigned long long const &a_bits =
+      reinterpret_cast<unsigned long long const &>(a);
+  unsigned long long const &b_bits =
+      reinterpret_cast<unsigned long long const &>(b);
+  unsigned long long result_bits;
+  asm("sub.rn.f32x2 %0, %1, %2;"
+      : "=l"(result_bits)
+      : "l"(a_bits), "l"(b_bits));
+  return reinterpret_cast<float2 const &>(result_bits);
+#else
   return make_float2(a.x - b.x, a.y - b.y);
+#endif
 }
 
 TL_DEVICE __nv_bfloat162 sub2(__nv_bfloat162 a, __nv_bfloat162 b) {
@@ -1134,6 +1260,35 @@ template <> TL_DEVICE uint1 shfl_up_sync(unsigned mask, uint1 val, int delta) {
 
 template <> TL_DEVICE uint1 shfl_sync(unsigned mask, uint1 val, int srcLane) {
   return uint1{__shfl_sync(mask, val.x, srcLane)};
+}
+
+// Specializations for float2. CUDA has no shuffle overload for float2, so
+// shuffle its two lanes together through the 64-bit integer overload.
+template <>
+TL_DEVICE float2 shfl_xor_sync(unsigned mask, float2 val, int laneMask) {
+  unsigned long long raw = reinterpret_cast<unsigned long long const &>(val);
+  raw = __shfl_xor_sync(mask, raw, laneMask);
+  return reinterpret_cast<float2 const &>(raw);
+}
+
+template <>
+TL_DEVICE float2 shfl_down_sync(unsigned mask, float2 val, int delta) {
+  unsigned long long raw = reinterpret_cast<unsigned long long const &>(val);
+  raw = __shfl_down_sync(mask, raw, delta);
+  return reinterpret_cast<float2 const &>(raw);
+}
+
+template <>
+TL_DEVICE float2 shfl_up_sync(unsigned mask, float2 val, int delta) {
+  unsigned long long raw = reinterpret_cast<unsigned long long const &>(val);
+  raw = __shfl_up_sync(mask, raw, delta);
+  return reinterpret_cast<float2 const &>(raw);
+}
+
+template <> TL_DEVICE float2 shfl_sync(unsigned mask, float2 val, int srcLane) {
+  unsigned long long raw = reinterpret_cast<unsigned long long const &>(val);
+  raw = __shfl_sync(mask, raw, srcLane);
+  return reinterpret_cast<float2 const &>(raw);
 }
 
 } // namespace tl

@@ -763,5 +763,60 @@ def test_sync_hoist_non_uniform_if_in_loop_with_shared_memory():
     assert sync_pos < if_pos, f"Sync should be hoisted before non-uniform if:\n{s}"
 
 
+@tilelang.testing.requires_cuda
+def test_partial_sync_non_warp_multiple_rejected():
+    """Regression test for issue #2556: a required barrier inside a divergent
+    region whose participating thread count is not a multiple of the warp size
+    must be a compile-time error, not silently dropped (data race)."""
+    import pytest
+
+    @T.prim_func(private=True)
+    def func():
+        S = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        acc = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        # 48 participating threads: not a warp multiple.
+        if tx < 48:
+            acc[0] = T.float32(0)
+            for i in range(2):
+                S[tx] = T.float32(1)
+                # Cross-thread read: planner must insert a sync here.
+                acc[0] += S[47 - tx]
+
+    mod = tvm.IRModule({"main": func})
+    with pytest.raises(Exception, match="not a multiple of 32"):
+        tilelang.transform.ThreadSync("shared")(mod)
+
+
+@tilelang.testing.requires_cuda
+def test_partial_sync_warp_multiple_still_lowered():
+    """Control for issue #2556: the same pattern with a warp-multiple
+    participating thread count must still lower to a partial barrier."""
+    import re
+
+    @T.prim_func(private=True)
+    def func():
+        S = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        acc = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        # 32 participating threads: exactly one warp.
+        if tx < 32:
+            acc[0] = T.float32(0)
+            for i in range(2):
+                S[tx] = T.float32(1)
+                acc[0] += S[31 - tx]
+
+    mod = tvm.IRModule({"main": func})
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    s = str(mod.script())
+    assert re.search(r'tvm_storage_sync\("shared",\s*\d+,\s*32\)', s), f"Expected a partial barrier with thread_count=32:\n{s}"
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

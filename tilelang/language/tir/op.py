@@ -3115,7 +3115,13 @@ def power(x, y, span=None):
         The result.
     """
     if isinstance(y, (int, IntImm)):
-        return pow_of_int(x, y)
+        # pow_of_int's `for (i = 1; i < y; ...)` loop only computes x**y for y >= 1.
+        yv = int(y)
+        if yv == 0:
+            return const(1, dtype=x.dtype)
+        if yv >= 1:
+            return pow_of_int(x, yv)
+        return _tvm_op.power(x, yv, span)
     return _tvm_op.power(x, y, span)
 
 
@@ -3139,7 +3145,13 @@ def pow(x, y, span=None):
         The result.
     """
     if isinstance(y, (int, IntImm)):
-        return pow_of_int(x, y)
+        # pow_of_int's `for (i = 1; i < y; ...)` loop only computes x**y for y >= 1.
+        yv = int(y)
+        if yv == 0:
+            return const(1, dtype=x.dtype)
+        if yv >= 1:
+            return pow_of_int(x, yv)
+        return _tvm_op.pow(x, yv, span)
     return _tvm_op.pow(x, y, span)
 
 
