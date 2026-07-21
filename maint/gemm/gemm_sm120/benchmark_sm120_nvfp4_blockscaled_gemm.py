@@ -64,8 +64,6 @@ _EARLY_BENCH_OPTIONS = _early_bench_options()
 
 _SM120_SCHEDULE = "pp_stream_tma_copy_store_pipe2"
 _SM120_SCALE_LAYOUT = "blockscaled_chunk_kmajor"
-_SM120_SCALE_LOAD = "tma"
-_SM120_AB_SHARED_STORAGE = "packed"
 _SM120_THREADS = 384
 
 
@@ -136,7 +134,10 @@ def tilelang_nvfp4_blockscaled_gemm(
 
     if _SM120_SCHEDULE == "pp_stream_tma_copy_store_pipe2":
         if sf_words_per_block_k < 4:
-            raise ValueError("The SM120 NVFP4 optimized path requires block_K >= 256 for scale TMA")
+            raise ValueError(
+                "The SM120 NVFP4 optimized path requires block_K >= 256 "
+                "(the packed-scale MMA contract consumes four K64 scale words per tile)"
+            )
         panel32_tma_store = False
         panel64_tma_store = False
         store_block_N = 32
