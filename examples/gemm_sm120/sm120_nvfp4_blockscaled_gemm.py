@@ -109,12 +109,8 @@ def sm120_nvfp4_blockscaled_gemm(
                     B_shared,
                     annotations={"prefer_instruction": "tma"},
                 )
-                # Written as explicit element loops rather than T.copy: the
-                # loop form lowers to async cp.async merged into the TMA
-                # barriers (no producer stall), while the T.copy form today
-                # either stalls the producer on a synchronous load or hits a
-                # missing mbarrier arrive on the bulk-TMA path (tracked
-                # upstream). Addressing is plain tile rows either way.
+                # Not T.copy(SFA[slice], SFA_shared): that slice mis-lowers on
+                # the bulk-TMA path today (upstream fix pending).
                 for r, w in T.Parallel(block_M, sf_words_per_block_k):
                     SFA_shared[r, w] = SFA[(by * k_blocks + ko) * block_M + r, w]
                 for r, w in T.Parallel(block_N, sf_words_per_block_k):
