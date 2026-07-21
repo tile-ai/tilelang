@@ -1,4 +1,6 @@
 # Schedule adapted from DeepGEMM.
+#
+# Persistent 2-CTA kernel uses PersistentTileScheduler (see gemm_tcgen5mma_ws_persistent.py).
 
 import argparse
 from typing import Tuple
@@ -45,16 +47,14 @@ def fp8_fp4_gemm_1d1d_persistent(
         D: T.Tensor((M, N), out_dtype),
     ):
         sm_num = driver.get_num_sms()
-        num_clusters = sm_num // 2
         m_blocks = T.ceildiv(M, block_M)
-        m_clusters = m_blocks // 2
         n_blocks = T.ceildiv(N, block_N)
         k_iters = T.ceildiv(K, block_K)
         sf_load_period = sf_granularity_k * 4 // block_K
-        waves = T.ceildiv(m_blocks * n_blocks, sm_num)
+        cluster_size = 2
         group_size = 16
 
-        with T.ClusterKernel(sm_num, threads=256, cluster_dims=2) as (block_id):
+        with T.ClusterKernel(sm_num, threads=256, cluster_dims=cluster_size) as (block_id):
             cta_id = T.block_rank_in_cluster()
             T.assume(cta_id < 2)
 
@@ -81,110 +81,106 @@ def fp8_fp4_gemm_1d1d_persistent(
             tx = T.get_thread_binding()
 
             if tx < 32:  # issue TMA, load operands and SFs
-                for w in T.unroll(waves):
-                    cluster_id = block_id // 2
-                    tile_id = num_clusters * w + cluster_id
-                    bx_cluster = (tile_id // group_size) % m_clusters
-                    bx = bx_cluster * 2 + cta_id
-                    by = (tile_id % group_size) + (tile_id // group_size) // m_clusters * group_size
+                sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
+                sched.init(block_id // cluster_size)
+                while sched.valid():
+                    bx = sched.m_idx * cluster_size + cta_id
+                    by = sched.n_idx
 
-                    if bx * block_M < M and by * block_N < N:
-                        for k in T.serial(k_iters):
-                            phase = w * k_iters + k
-                            stage = phase % num_stages
-                            parity = (phase // num_stages) & 1
-                            T.mbarrier_wait_parity(consumed[stage], parity ^ 1)
+                    for k in T.serial(k_iters):
+                        phase = sched.current_iter * k_iters + k
+                        stage = phase % num_stages
+                        parity = (phase // num_stages) & 1
+                        T.mbarrier_wait_parity(consumed[stage], parity ^ 1)
+                        T.tma_copy(
+                            A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K],
+                            A_shared[stage, :, :],
+                            barrier=loaded[stage],
+                        )
+                        T.tma_copy(
+                            B[
+                                by * block_N + cta_id * half_N : by * block_N + (cta_id + 1) * half_N,
+                                k * block_K : (k + 1) * block_K,
+                            ],
+                            B_shared[stage, :, :],
+                            barrier=loaded[stage],
+                        )
+                        if k % sf_load_period == 0:
+                            sf_group_idx = k // sf_load_period
                             T.tma_copy(
-                                A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K],
-                                A_shared[stage, :, :],
+                                SFA[sf_group_idx * M + bx * block_M : sf_group_idx * M + (bx + 1) * block_M],
+                                SFA_shared[stage, :],
                                 barrier=loaded[stage],
                             )
                             T.tma_copy(
-                                B[
-                                    by * block_N + cta_id * half_N : by * block_N + (cta_id + 1) * half_N,
-                                    k * block_K : (k + 1) * block_K,
-                                ],
-                                B_shared[stage, :, :],
+                                SFB[sf_group_idx * N + by * block_N : sf_group_idx * N + (by + 1) * block_N],
+                                SFB_shared[stage, :],
                                 barrier=loaded[stage],
                             )
-                            if k % sf_load_period == 0:
-                                sf_group_idx = k // sf_load_period
-                                T.tma_copy(
-                                    SFA[sf_group_idx * M + bx * block_M : sf_group_idx * M + (bx + 1) * block_M],
-                                    SFA_shared[stage, :],
-                                    barrier=loaded[stage],
-                                )
-                                T.tma_copy(
-                                    SFB[sf_group_idx * N + by * block_N : sf_group_idx * N + (by + 1) * block_N],
-                                    SFB_shared[stage, :],
-                                    barrier=loaded[stage],
-                                )
-                            T.mbarrier_arrive(loaded[stage])
+                        T.mbarrier_arrive(loaded[stage])
+                    sched.next_tile()
 
             elif 32 <= tx < 64 and cta_id == 0:  # issue tcgen5
-                for w in T.unroll(waves):
-                    cluster_id = block_id // 2
-                    tile_id = num_clusters * w + cluster_id
-
-                    if tile_id < m_clusters * n_blocks:
-                        T.mbarrier_wait_parity(tmem_empty, (w & 1) ^ 1)
-                        for k in T.serial(k_iters):
-                            phase = w * k_iters + k
-                            stage = phase % num_stages
-                            parity = (phase // num_stages) & 1
-                            T.mbarrier_wait_parity(with_sf_full[stage], parity)
-                            if k % sf_load_period == 0:
-                                T.tcgen05_cp_warpx4(SFA_shared[stage, :], SFA_tmem, use_2cta=True)
-                                T.tcgen05_cp_warpx4(SFB_shared[stage, :], SFB_tmem, use_2cta=True)
-                            T.tcgen05_gemm_blockscaled(
-                                A_shared[stage, :, :],
-                                B_shared[stage, :, :],
-                                C_tmem,
-                                SFA_tmem,
-                                SFB_tmem,
-                                transpose_B=True,
-                                mbar=consumed[stage],
-                                clear_accum=k == 0,
-                                k_start=k * block_K,  # global K offset (to help compiler infer sf_id)
-                                sf_a_granularity_k=sf_granularity_k,
-                                sf_b_granularity_k=sf_granularity_k,
-                                use_2cta=True,
-                            )
-                        T.tcgen05_mma_arrive(tmem_full, arrive_2cta=True)
+                sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
+                sched.init(block_id // cluster_size)
+                while sched.valid():
+                    T.mbarrier_wait_parity(tmem_empty, (sched.current_iter & 1) ^ 1)
+                    for k in T.serial(k_iters):
+                        phase = sched.current_iter * k_iters + k
+                        stage = phase % num_stages
+                        parity = (phase // num_stages) & 1
+                        T.mbarrier_wait_parity(with_sf_full[stage], parity)
+                        if k % sf_load_period == 0:
+                            T.tcgen05_cp_warpx4(SFA_shared[stage, :], SFA_tmem, use_2cta=True)
+                            T.tcgen05_cp_warpx4(SFB_shared[stage, :], SFB_tmem, use_2cta=True)
+                        T.tcgen05_gemm_blockscaled(
+                            A_shared[stage, :, :],
+                            B_shared[stage, :, :],
+                            C_tmem,
+                            SFA_tmem,
+                            SFB_tmem,
+                            transpose_B=True,
+                            mbar=consumed[stage],
+                            clear_accum=k == 0,
+                            k_start=k * block_K,  # global K offset (to help compiler infer sf_id)
+                            sf_a_granularity_k=sf_granularity_k,
+                            sf_b_granularity_k=sf_granularity_k,
+                            use_2cta=True,
+                        )
+                    T.tcgen05_mma_arrive(tmem_full, arrive_2cta=True)
+                    sched.next_tile()
 
             elif 64 <= tx < 96:  # transpose SFs
-                for w in T.unroll(waves):
-                    cluster_id = block_id // 2
-                    tile_id = num_clusters * w + cluster_id
-
-                    if tile_id < m_clusters * n_blocks:
-                        for k in T.serial(k_iters):
-                            phase = w * k_iters + k
-                            stage = phase % num_stages
-                            parity = (phase // num_stages) & 1
-                            T.mbarrier_wait_parity(loaded[stage], parity)
-                            if k % sf_load_period == 0:
-                                T.tcgen05_sf_warp_transpose(SFA_shared[stage, :])
-                                T.tcgen05_sf_warp_transpose(SFB_shared[stage, :])
-                                T.fence_proxy_async()
-                            T.mbarrier_arrive(with_sf_full[stage], 0)
+                sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
+                sched.init(block_id // cluster_size)
+                while sched.valid():
+                    for k in T.serial(k_iters):
+                        phase = sched.current_iter * k_iters + k
+                        stage = phase % num_stages
+                        parity = (phase // num_stages) & 1
+                        T.mbarrier_wait_parity(loaded[stage], parity)
+                        if k % sf_load_period == 0:
+                            T.tcgen05_sf_warp_transpose(SFA_shared[stage, :])
+                            T.tcgen05_sf_warp_transpose(SFB_shared[stage, :])
+                            T.fence_proxy_async()
+                        T.mbarrier_arrive(with_sf_full[stage], 0)
+                    sched.next_tile()
 
             elif 128 <= tx < 256:  # epilogue
-                for w in T.unroll(waves):
-                    cluster_id = block_id // 2
-                    tile_id = num_clusters * w + cluster_id
-                    bx_cluster = (tile_id // group_size) % m_clusters
-                    bx = bx_cluster * 2 + cta_id
-                    by = (tile_id % group_size) + (tile_id // group_size) // m_clusters * group_size
+                sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
+                sched.init(block_id // cluster_size)
+                while sched.valid():
+                    bx = sched.m_idx * cluster_size + cta_id
+                    by = sched.n_idx
 
-                    if bx * block_M < M and by * block_N < N:
-                        T.mbarrier_wait_parity(tmem_full, w & 1)
-                        T.copy(C_tmem, C_local)
-                        T.mbarrier_arrive(tmem_empty, 0)
+                    T.mbarrier_wait_parity(tmem_full, sched.current_iter & 1)
+                    T.copy(C_tmem, C_local)
+                    T.mbarrier_arrive(tmem_empty, 0)
 
-                        for i in T.unroll(T.ceildiv(block_N, store_block_N)):
-                            T.copy(C_local[:, i * store_block_N : (i + 1) * store_block_N], C_shared)
-                            T.copy(C_shared, D[bx * block_M, by * block_N + i * store_block_N])
+                    for i in T.unroll(T.ceildiv(block_N, store_block_N)):
+                        T.copy(C_local[:, i * store_block_N : (i + 1) * store_block_N], C_shared)
+                        T.copy(C_shared, D[bx * block_M, by * block_N + i * store_block_N])
+                    sched.next_tile()
 
     return main
 

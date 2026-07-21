@@ -143,9 +143,22 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
     domain_size *= domain[i];
   }
 
-  auto waves = ceildiv(domain_size, wave_size);
+  PrimExpr last_extent = domain[domain.size() - 1];
+  group_size =
+      max(make_const(group_size.dtype(), 1), min(group_size, last_extent));
+  Array<PrimExpr> grouped_domain;
+  grouped_domain.push_back(ceildiv(last_extent, group_size));
+  for (int i = 0; i < domain.size() - 1; ++i) {
+    grouped_domain.push_back(domain[i]);
+  }
+  grouped_domain.push_back(group_size);
+  PrimExpr padded_domain_size = grouped_domain[0];
+  for (int i = 1; i < grouped_domain.size(); ++i) {
+    padded_domain_size *= grouped_domain[i];
+  }
+
+  auto waves = ceildiv(padded_domain_size, wave_size);
   auto loop_var = Var("w", waves.dtype());
-  group_size = min(group_size, domain[domain.size() - 1]);
   Array<Var> coord_vars;
 
   for (int i = 0; i < domain.size(); ++i) {
@@ -155,13 +168,6 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
     n->vars.push_back(coord);
     n->doms.push_back(Range(make_const(dtype, 0), domain[i]));
   }
-
-  Array<PrimExpr> grouped_domain;
-  grouped_domain.push_back(truncdiv(domain[domain.size() - 1], group_size));
-  for (int i = 0; i < domain.size() - 1; ++i) {
-    grouped_domain.push_back(domain[i]);
-  }
-  grouped_domain.push_back(group_size);
 
   n->f_make_for_loop = [=](const Array<Var> &vars, const Array<Range> &doms,
                            const Array<Optional<PrimExpr>> &steps,
@@ -176,17 +182,20 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
       rem = truncdiv(rem, grouped_domain[i]);
     }
     idxs.Set(0, rem);
-
+    PrimExpr last_coord =
+        idxs[0] * group_size + idxs[grouped_domain.size() - 1];
+    PrimExpr in_range = last_coord < domain[domain.size() - 1];
     auto out_if = tvm::tirx::IfThenElse(
-        domain_size <= (loop_var * wave_size + index),
+        padded_domain_size <= (loop_var * wave_size + index),
         tvm::tirx::Evaluate(
             tvm::tirx::Call(DataType::Handle(), tvm::tl::loop_break(), {})),
         Stmt());
+    Stmt guarded_body = tvm::tirx::IfThenElse(in_range, body, Stmt());
 
     arith::Analyzer analyzer;
-    Stmt new_body = body;
+    Stmt new_body = guarded_body;
     if (analyzer.CanProveGreaterEqual(waves, 2)) {
-      new_body = SeqStmt({out_if, body});
+      new_body = SeqStmt({out_if, guarded_body});
     }
     Optional<PrimExpr> step =
         !steps.empty() ? steps[0] : Optional<PrimExpr>(std::nullopt);
@@ -196,9 +205,7 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
     for (int i = 0; i < vars.size() - 1; ++i) {
       outer = SeqStmt({tirx::Bind(vars[i], idxs[i + 1]), outer});
     }
-    outer = SeqStmt({tirx::Bind(vars[vars.size() - 1],
-                                idxs[0] * group_size + idxs[vars.size()]),
-                     outer});
+    outer = SeqStmt({tirx::Bind(vars[vars.size() - 1], last_coord), outer});
     return outer;
   };
 

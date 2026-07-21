@@ -157,10 +157,20 @@ private:
  * local buffer optimization.
  */
 bool ForBodyContainsSeqStmt(const For &loop) {
+  // Ignore flat Bind nodes (SSA value defs): a single store wrapped in leading
+  // Binds is not multi-stmt. Keeps this in sync with DecoupleTypeCast.
   bool has_seq_stmt = false;
   PostOrderVisit(loop->body, [&](const ObjectRef &obj) {
-    if (obj.as<SeqStmtNode>()) {
-      has_seq_stmt = true;
+    if (auto seq = obj.as<SeqStmtNode>()) {
+      int num_real_stmts = 0;
+      for (const Stmt &s : seq->seq) {
+        if (!s.as<BindNode>()) {
+          ++num_real_stmts;
+        }
+      }
+      if (num_real_stmts >= 2) {
+        has_seq_stmt = true;
+      }
     }
   });
   return has_seq_stmt;
@@ -169,8 +179,10 @@ bool ForBodyContainsSeqStmt(const For &loop) {
 class VectorizePlanner : public arith::IRMutatorWithAnalyzer {
 public:
   explicit VectorizePlanner(arith::Analyzer *analyzer,
-                            const LayoutMap &layout_map = {})
-      : arith::IRMutatorWithAnalyzer(analyzer), layout_map_(layout_map) {}
+                            const LayoutMap &layout_map = {},
+                            const Map<Var, ReducerInfo> &reducer_info_map = {})
+      : arith::IRMutatorWithAnalyzer(analyzer), layout_map_(layout_map),
+        reducer_info_map_(reducer_info_map) {}
 
   int Plan(const For &node) {
     bool disable_vectorize_256 = tl_config::Vectorize256Disabled();
@@ -614,7 +626,18 @@ private:
   }
 
   void CheckConditionVectorized(const PrimExpr &cond) {
-    // TODO: perform some checks here
+    if (!inner_for_) {
+      return;
+    }
+    PrimExpr condition = analyzer_->Simplify(cond);
+    int condition_vector_size = loop_extent_vector_size_;
+    while (condition_vector_size > 1 &&
+           !IsExprInvariantInVectorBoundary(condition, inner_for_->loop_var,
+                                            condition_vector_size, analyzer_)) {
+      condition_vector_size /= 2;
+    }
+    buffer_vector_infos_.push_back(
+        {Buffer(), condition_vector_size, false, {}});
   }
 
   void HandleTvmAccessPtr(const CallNode *node) {
@@ -729,6 +752,16 @@ private:
     return transformed_indices;
   }
 
+  bool IsAllRepReducerBuffer(const Buffer &buffer) const {
+    if (!buffer.defined()) {
+      return false;
+    }
+    if (auto info = reducer_info_map_.Get(buffer->data)) {
+      return info.value()->rep == ReducerRepType::ALL;
+    }
+    return false;
+  }
+
   PrimExpr VisitExpr_(const CastNode *node) final {
     // Consider both source and target types to ensure all intermediate
     // vector types can be represented. For example, casting int32 to
@@ -810,10 +843,15 @@ private:
     // 3. If element offset is independent with loop_var, ignore it.
     bool is_independent =
         CanProveIndependent(elem_offset, inner_for_->loop_var, analyzer_);
-    // For BufferStore, if indices is invariant or independent with loop_var,
-    // we should not vectorize it (broadcasting store is not supported).
+    // For ordinary BufferStore, if indices are invariant or independent with
+    // loop_var, vectorization would turn scalar lane stores into a broadcast
+    // store. Keep those scalar. All-rep reducer buffers are different: their
+    // loop-invariant stores are reduction accumulator updates, so they should
+    // not force the whole loop's vector size down to 1.
     if (is_store && (is_invariant || is_independent)) {
-      return 1;
+      if (!IsAllRepReducerBuffer(buffer)) {
+        return 1;
+      }
     }
     if (is_independent) {
       return buffer_vec_size; // only limited constraint from this buffer
@@ -866,6 +904,7 @@ private:
   int vector_size_ = 128;
   std::vector<BufferVectorInfo> buffer_vector_infos_;
   LayoutMap layout_map_;
+  Map<Var, ReducerInfo> reducer_info_map_;
 };
 
 class VectorizeRewriter : public StmtExprMutator {
@@ -923,14 +962,16 @@ private:
   const int vector_size_;
 };
 
-int GetVectorizeSize(const For &loop, const LayoutMap &layout_map) {
+int GetVectorizeSize(const For &loop, const LayoutMap &layout_map,
+                     const Map<Var, ReducerInfo> &reducer_info_map) {
   arith::Analyzer analyzer;
-  return VectorizePlanner(&analyzer, layout_map).Plan(loop);
+  return VectorizePlanner(&analyzer, layout_map, reducer_info_map).Plan(loop);
 }
 
 int GetVectorizeSize(const For &loop, arith::Analyzer *analyzer,
-                     const LayoutMap &layout_map) {
-  return VectorizePlanner(analyzer, layout_map).Plan(loop);
+                     const LayoutMap &layout_map,
+                     const Map<Var, ReducerInfo> &reducer_info_map) {
+  return VectorizePlanner(analyzer, layout_map, reducer_info_map).Plan(loop);
 }
 
 bool CanProveIndependent(const PrimExpr &expr, Var var,

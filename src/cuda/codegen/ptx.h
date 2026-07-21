@@ -98,10 +98,12 @@ std::tuple<int, int, int> ParseMMAShape(const std::string &str);
  */
 class Replacer {
 public:
+  // NOLINTNEXTLINE(readability-identifier-naming): TVM local helper style.
   void register_rule(const std::string &pattern,
                      const std::string &replacement) {
     _rules.emplace_back(pattern, replacement);
   }
+  // NOLINTNEXTLINE(readability-identifier-naming): TVM local helper style.
   std::string rewrite(std::string str) {
     for (auto &&rule : _rules) {
       auto [pattern, replacement] = rule;
@@ -115,6 +117,7 @@ public:
     }
     return str;
   }
+  // NOLINTNEXTLINE(readability-identifier-naming): TVM local helper style.
   void empty_rules() { _rules.clear(); }
 
 private:

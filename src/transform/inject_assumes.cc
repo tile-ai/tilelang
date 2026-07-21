@@ -1,7 +1,7 @@
 /*!
  * \file inject_assumes.cc
  * \brief Inject assumes on buffer's shape boundary check. Also convert
- * existing assumes to AttrNodes.
+ * user-authored assumes to optimizer and runtime-check AttrNodes.
  */
 
 #include "common/assume.h"
@@ -173,16 +173,13 @@ private:
       //    Stmt1
       //    Stmt2
       //    T.assume(cond2)
-      // This SeqStmt will be converted to:
-      //    With(attr::tilelang_assume, cond1) {
-      //      Stmt1
-      //      Stmt2
-      //    }
-      //    With(attr::tilelang_assume, cond2) {
-      //      ...
-      //    }
+      // Each user-authored assume is converted into two nested attributes:
+      // the outer runtime-check marker is consumed by MakePackedAPI, while the
+      // inner tilelang_assume remains available to optimization passes. Buffer
+      // shape/stride assumptions created by AssumeCreator intentionally do not
+      // receive the runtime-check marker because nullable buffers bind missing
+      // symbolic shapes to zero.
       if (auto e = GetAssumeExprInEvaluateForm(stmt)) {
-        WarnIfAssumeReadsLocalVar(*e);
         groups.push_back(AssumeGroup{*e, {}});
       } else {
         groups.back().stmts.push_back(stmt);
@@ -194,9 +191,12 @@ private:
         Stmt body = g.stmts.size() == 1 ? g.stmts[0] : SeqStmt(g.stmts);
         std::stringstream ss;
         ss << "Assume: " << *(g.e);
-        AttrStmt attr = AttrStmt(*g.e, tirx::attr::tilelang_assume,
-                                 StringImm(ss.str()), body);
-        groups[i - 1].stmts.push_back(attr);
+        StringImm message(ss.str());
+        body = AttrStmt(*g.e, tirx::attr::tilelang_assume, message,
+                        std::move(body));
+        body = AttrStmt(*g.e, tl::attr::kAssumeRequiresRuntimeCheck, message,
+                        std::move(body));
+        groups[i - 1].stmts.push_back(std::move(body));
       } else {
         ICHECK(i == 0) << "only the first group can have no assume";
       }
@@ -204,44 +204,6 @@ private:
     return groups[0].stmts.size() == 1 ? groups[0].stmts[0]
                                        : SeqStmt(groups[0].stmts);
     // return SeqStmt(groups[0].stmts);
-  }
-
-  static std::vector<Buffer> CollectLocalVarBufferLoads(const PrimExpr &expr) {
-    std::vector<Buffer> buffers;
-    PostOrderVisit(expr, [&](const ffi::ObjectRef &obj) {
-      const auto *load = obj.as<BufferLoadNode>();
-      if (!load || load->buffer.scope() != "local.var") {
-        return;
-      }
-      if (std::none_of(buffers.begin(), buffers.end(), [&](const Buffer &b) {
-            return b.same_as(load->buffer);
-          })) {
-        buffers.push_back(load->buffer);
-      }
-    });
-    return buffers;
-  }
-
-  static void WarnIfAssumeReadsLocalVar(const PrimExpr &expr) {
-    std::vector<Buffer> buffers = CollectLocalVarBufferLoads(expr);
-    if (buffers.empty()) {
-      return;
-    }
-
-    std::stringstream ss;
-    for (size_t i = 0; i < buffers.size(); ++i) {
-      if (i) {
-        ss << ", ";
-      }
-      ss << "`" << buffers[i]->name << "`";
-    }
-    LOG(WARNING)
-        << "T.assume condition reads from T.alloc_var/local.var buffer "
-        << ss.str()
-        << ". local.var is mutable, so this assumption may not be propagated "
-           "to later memory-access proofs. If the value is not mutated, use an "
-           "immutable expression binding instead of T.alloc_var. Condition: "
-        << expr;
   }
 
   Stmt VisitStmt_(const SBlockNode *op) final {

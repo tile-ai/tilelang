@@ -16,6 +16,10 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
     VALID_BLOCK_H = min(block_H, kv_group_num)
     assert kv_head_num == 1, "kv_head_num must be 1"
     h_dim = dim // 2
+    # QK^T is split into K=64 tiles to be pipelined with TMA copy
+    k_tile = pe_dim
+    assert h_dim % k_tile == 0, "h_dim must be divisible by k_tile"
+    num_k_tiles = h_dim // k_tile
 
     @T.prim_func
     def main_no_split(
@@ -68,6 +72,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             acc_s_0_cast = T.alloc_fragment([block_H, block_N], dtype)
             acc_s_1 = T.alloc_fragment([block_H, block_N], accum_dtype)
             acc_s_1_cast = T.alloc_fragment([block_H, block_N], dtype)
+            sp0_cast = T.alloc_fragment([block_H, block_N], dtype)
             acc_o_l = T.alloc_fragment([block_H, h_dim], accum_dtype)
             acc_o_r = T.alloc_fragment([block_H, h_dim], accum_dtype)
             scores_max_0 = T.alloc_fragment([block_H], accum_dtype)
@@ -87,12 +92,12 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             q_shared_ready_barrier = T.alloc_barrier(arrive_count=256)
 
             # barriers_K0
-            kv_shared_0_l_is_ready = T.alloc_barrier(arrive_count=128)
-            kv_shared_0_r_is_ready = T.alloc_barrier(arrive_count=128)
+            kv_shared_0_l_is_ready = T.alloc_barrier(arrive_count=[128] * num_k_tiles)
+            kv_shared_0_r_is_ready = T.alloc_barrier(arrive_count=[128] * num_k_tiles)
             kv_shared_0_pe_is_ready = T.alloc_barrier(arrive_count=128)
             # barriers_K1
-            kv_shared_1_l_is_ready = T.alloc_barrier(arrive_count=128)
-            kv_shared_1_r_is_ready = T.alloc_barrier(arrive_count=128)
+            kv_shared_1_l_is_ready = T.alloc_barrier(arrive_count=[128] * num_k_tiles)
+            kv_shared_1_r_is_ready = T.alloc_barrier(arrive_count=[128] * num_k_tiles)
             kv_shared_1_pe_is_ready = T.alloc_barrier(arrive_count=128)
 
             # redundant barriers
@@ -120,26 +125,58 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 T.fill(acc_o_l, 0)
                 T.fill(logsum_0, 0)
 
-                T.tma_copy(KV[bid, block_N : 2 * block_N, cur_kv_head, :h_dim], KV_shared_1_l, barrier=kv_shared_1_l_is_ready)
-                T.barrier_arrive(kv_shared_1_l_is_ready)
+                for j in T.unroll(num_k_tiles):
+                    T.tma_copy(
+                        KV[
+                            bid,
+                            block_N : 2 * block_N,
+                            cur_kv_head,
+                            j * k_tile : (j + 1) * k_tile,
+                        ],
+                        KV_shared_1_l[:, j * k_tile : (j + 1) * k_tile],
+                        barrier=kv_shared_1_l_is_ready[j],
+                    )
+                    T.barrier_arrive(kv_shared_1_l_is_ready[j])
 
-                T.tma_copy(KV[bid, block_N : 2 * block_N, cur_kv_head, h_dim:], KV_shared_1_r, barrier=kv_shared_1_r_is_ready)
-                T.barrier_arrive(kv_shared_1_r_is_ready)
+                for j in T.unroll(num_k_tiles):
+                    T.tma_copy(
+                        KV[
+                            bid,
+                            block_N : 2 * block_N,
+                            cur_kv_head,
+                            h_dim + j * k_tile : h_dim + (j + 1) * k_tile,
+                        ],
+                        KV_shared_1_r[:, j * k_tile : (j + 1) * k_tile],
+                        barrier=kv_shared_1_r_is_ready[j],
+                    )
+                    T.barrier_arrive(kv_shared_1_r_is_ready[j])
 
                 T.tma_copy(K_pe[bid, block_N : 2 * block_N, cur_kv_head, :], K_pe_shared_1, barrier=kv_shared_1_pe_is_ready)
                 T.barrier_arrive(kv_shared_1_pe_is_ready)
 
+                # Step 1. QK0 is rotated to the end of the loop to enable further overlapping, so here we need an extra QK in the prologue.
+                for j in T.unroll(num_k_tiles):
+                    T.barrier_wait(kv_shared_0_l_is_ready[j], 0)
+                    T.wgmma_gemm(
+                        Q_shared_l[:, j * k_tile : (j + 1) * k_tile],
+                        KV_shared_0_l[:, j * k_tile : (j + 1) * k_tile],
+                        acc_s_0,
+                        transpose_B=True,
+                        clear_accum=(j == 0),
+                    )
+                for j in T.unroll(num_k_tiles):
+                    T.barrier_wait(kv_shared_0_r_is_ready[j], 0)
+                    T.wgmma_gemm(
+                        Q_shared_r[:, j * k_tile : (j + 1) * k_tile],
+                        KV_shared_0_r[:, j * k_tile : (j + 1) * k_tile],
+                        acc_s_0,
+                        transpose_B=True,
+                    )
+                T.barrier_wait(kv_shared_0_pe_is_ready, 0)
+                T.wgmma_gemm(Q_pe_local_0, K_pe_shared_0, acc_s_0, transpose_B=True)
+                T.wait_wgmma(0)
+
                 for k in T.serial(loop_range):
-                    T.barrier_wait(kv_shared_0_l_is_ready, k % 2)
-                    T.wgmma_gemm(Q_shared_l, KV_shared_0_l, acc_s_0, transpose_B=True, clear_accum=True)
-                    T.barrier_wait(kv_shared_0_r_is_ready, k % 2)
-                    T.wgmma_gemm(Q_shared_r, KV_shared_0_r, acc_s_0, transpose_B=True)
-
-                    T.barrier_wait(kv_shared_0_pe_is_ready, k % 2)
-                    T.wgmma_gemm(Q_pe_local_0, K_pe_shared_0, acc_s_0, transpose_B=True)
-
-                    T.wait_wgmma(0)
-
                     # Step 3.
                     T.copy(scores_max, scores_max_0)
                     T.copy(scores_max_0, scores_max_prev_0)
@@ -149,9 +186,9 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
                     # Step 4.
                     for i, j in T.Parallel(block_H, block_N):
-                        acc_s_0[i, j] = T.exp2(acc_s_0[i, j] * scale - scores_max[i] * scale)
+                        acc_s_0[i, j] = T.exp2(acc_s_0[i, j] * scale - scores_max_0[i] * scale)
                     for i in T.Parallel(block_H):
-                        scores_scale_0[i] = T.exp2(scores_max_prev_0[i] * scale - scores_max[i] * scale)
+                        scores_scale_0[i] = T.exp2(scores_max_prev_0[i] * scale - scores_max_0[i] * scale)
 
                     T.reduce_sum(acc_s_0, scores_sum_0, dim=1)
 
@@ -164,23 +201,34 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                     for i in T.Parallel(block_H):
                         logsum_0[i] = logsum_0[i] * scores_scale_0[i] + scores_sum_0[i]
 
-                    # Step 6.
-                    T.gemm(acc_s_0_cast, KV_shared_0_l, acc_o_l)
                     T.barrier_arrive(score_max_0_ready_barrier)
+
+                    # Step 6.
+                    T.wgmma_gemm(acc_s_0_cast, KV_shared_0_l, acc_o_l)
+                    T.wait_wgmma(0)
 
                     T.barrier_wait(scale_1_ready_barrier, k % 2)
 
                     if k < loop_range - 1:
-                        T.tma_copy(
-                            KV[bid, (2 * k + 2) * block_N : (2 * k + 3) * block_N, cur_kv_head, :h_dim],
-                            KV_shared_0_l,
-                            barrier=kv_shared_0_l_is_ready,
-                        )
-                        T.barrier_arrive(kv_shared_0_l_is_ready)
+                        for j in T.unroll(num_k_tiles):
+                            T.tma_copy(
+                                KV[
+                                    bid,
+                                    (2 * k + 2) * block_N : (2 * k + 3) * block_N,
+                                    cur_kv_head,
+                                    j * k_tile : (j + 1) * k_tile,
+                                ],
+                                KV_shared_0_l[:, j * k_tile : (j + 1) * k_tile],
+                                barrier=kv_shared_0_l_is_ready[j],
+                            )
+                            T.barrier_arrive(kv_shared_0_l_is_ready[j])
 
                     # Step 11.
                     for i, j in T.Parallel(block_H, block_N):
-                        SP0_shared[i, j] = acc_s_0[i, j] * scores_scale_1[i]
+                        sp0_cast[i, j] = acc_s_0[i, j] * scores_scale_1[i]
+                    T.copy(sp0_cast, SP0_shared)
+                    # Currently InjectFenceProxy cannot infer from warp specialization code that this is a RAW dependency with another warpgroup. We need to fence the async proxy so that GMMA knows that we have written to SMEM.
+                    T.fence_proxy_async()
 
                     T.barrier_arrive(p0_1_1_ready_barrier)
 
@@ -192,22 +240,54 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                     T.barrier_wait(s_shared_ready_barrier, k % 2)
 
                     # Step 14.
-                    T.gemm(SP1_shared, KV_shared_1_l, acc_o_l)
+                    T.wgmma_gemm(SP1_shared, KV_shared_1_l, acc_o_l)
 
+                    # Step 1. QK0 rotated to the end of the loop, and we insert the TMA loading for next KV_shared_1_l in the middle of the QK to hide TMA issue latency.
                     if k < loop_range - 1:
-                        T.tma_copy(
-                            KV[bid, (2 * k + 3) * block_N : (2 * k + 4) * block_N, cur_kv_head, :h_dim],
-                            KV_shared_1_l,
-                            barrier=kv_shared_1_l_is_ready,
-                        )
-                        T.barrier_arrive(kv_shared_1_l_is_ready)
-
+                        # Half of next QK0
+                        for j in T.unroll(num_k_tiles):
+                            T.barrier_wait(kv_shared_0_l_is_ready[j], (k + 1) % 2)
+                            T.wgmma_gemm(
+                                Q_shared_l[:, j * k_tile : (j + 1) * k_tile],
+                                KV_shared_0_l[:, j * k_tile : (j + 1) * k_tile],
+                                acc_s_0,
+                                transpose_B=True,
+                                clear_accum=(j == 0),
+                            )
+                        # Keep the half of QK0 in-flight, and only wait for last PV1
+                        T.wait_wgmma(num_k_tiles)
+                        for j in T.unroll(num_k_tiles):
+                            T.tma_copy(
+                                KV[
+                                    bid,
+                                    (2 * k + 3) * block_N : (2 * k + 4) * block_N,
+                                    cur_kv_head,
+                                    j * k_tile : (j + 1) * k_tile,
+                                ],
+                                KV_shared_1_l[:, j * k_tile : (j + 1) * k_tile],
+                                barrier=kv_shared_1_l_is_ready[j],
+                            )
+                            T.barrier_arrive(kv_shared_1_l_is_ready[j])
                         T.tma_copy(
                             K_pe[bid, (2 * k + 3) * block_N : (2 * k + 4) * block_N, cur_kv_head, :],
                             K_pe_shared_1,
                             barrier=kv_shared_1_pe_is_ready,
                         )
                         T.barrier_arrive(kv_shared_1_pe_is_ready)
+                        # Another half of QK0 and QPE0
+                        for j in T.unroll(num_k_tiles):
+                            T.barrier_wait(kv_shared_0_r_is_ready[j], (k + 1) % 2)
+                            T.wgmma_gemm(
+                                Q_shared_r[:, j * k_tile : (j + 1) * k_tile],
+                                KV_shared_0_r[:, j * k_tile : (j + 1) * k_tile],
+                                acc_s_0,
+                                transpose_B=True,
+                            )
+                        T.barrier_wait(kv_shared_0_pe_is_ready, (k + 1) % 2)
+                        T.wgmma_gemm(Q_pe_local_0, K_pe_shared_0, acc_s_0, transpose_B=True)
+
+                    # Unconditional wait, so that ptxas knows the lifetime of the accumulators end here in the loop.
+                    T.wait_wgmma(0)
 
                 T.copy(logsum_0, logsum)
                 T.barrier_arrive(lse_0_ready_barrier)
@@ -222,26 +302,51 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 T.fill(acc_o_r, 0)
                 T.fill(logsum_1, 0)
 
-                T.tma_copy(KV[bid, :block_N, cur_kv_head, :h_dim], KV_shared_0_l, barrier=kv_shared_0_l_is_ready)
-                T.barrier_arrive(kv_shared_0_l_is_ready)
-                T.tma_copy(KV[bid, :block_N, cur_kv_head, h_dim:], KV_shared_0_r, barrier=kv_shared_0_r_is_ready)
-                T.barrier_arrive(kv_shared_0_r_is_ready)
+                for j in T.unroll(num_k_tiles):
+                    T.tma_copy(
+                        KV[bid, :block_N, cur_kv_head, j * k_tile : (j + 1) * k_tile],
+                        KV_shared_0_l[:, j * k_tile : (j + 1) * k_tile],
+                        barrier=kv_shared_0_l_is_ready[j],
+                    )
+                    T.barrier_arrive(kv_shared_0_l_is_ready[j])
+                for j in T.unroll(num_k_tiles):
+                    T.tma_copy(
+                        KV[
+                            bid,
+                            :block_N,
+                            cur_kv_head,
+                            h_dim + j * k_tile : h_dim + (j + 1) * k_tile,
+                        ],
+                        KV_shared_0_r[:, j * k_tile : (j + 1) * k_tile],
+                        barrier=kv_shared_0_r_is_ready[j],
+                    )
+                    T.barrier_arrive(kv_shared_0_r_is_ready[j])
                 T.tma_copy(K_pe[bid, :block_N, cur_kv_head, :], K_pe_shared_0, barrier=kv_shared_0_pe_is_ready)
                 T.barrier_arrive(kv_shared_0_pe_is_ready)
 
+                # Step 2. QK1 is rotated to the end of the loop to enable further overlapping, so here we need an extra QK in the prologue.
+                for j in T.unroll(num_k_tiles):
+                    T.barrier_wait(kv_shared_1_l_is_ready[j], 0)
+                    T.wgmma_gemm(
+                        Q_shared_l[:, j * k_tile : (j + 1) * k_tile],
+                        KV_shared_1_l[:, j * k_tile : (j + 1) * k_tile],
+                        acc_s_1,
+                        transpose_B=True,
+                        clear_accum=(j == 0),
+                    )
+                for j in T.unroll(num_k_tiles):
+                    T.barrier_wait(kv_shared_1_r_is_ready[j], 0)
+                    T.wgmma_gemm(
+                        Q_shared_r[:, j * k_tile : (j + 1) * k_tile],
+                        KV_shared_1_r[:, j * k_tile : (j + 1) * k_tile],
+                        acc_s_1,
+                        transpose_B=True,
+                    )
+                T.barrier_wait(kv_shared_1_pe_is_ready, 0)
+                T.wgmma_gemm(Q_pe_local_1, K_pe_shared_1, acc_s_1, transpose_B=True)
+                T.wait_wgmma(0)
+
                 for k in T.serial(loop_range):
-                    # Step 2.
-                    T.barrier_wait(kv_shared_1_l_is_ready, k % 2)
-                    T.wgmma_gemm(Q_shared_l, KV_shared_1_l, acc_s_1, transpose_B=True, clear_accum=True)
-
-                    T.barrier_wait(kv_shared_1_r_is_ready, k % 2)
-                    T.wgmma_gemm(Q_shared_r, KV_shared_1_r, acc_s_1, transpose_B=True)
-
-                    T.barrier_wait(kv_shared_1_pe_is_ready, k % 2)
-                    T.wgmma_gemm(Q_pe_local_1, K_pe_shared_1, acc_s_1, transpose_B=True)
-
-                    T.wait_wgmma(0)
-
                     # Step 7.
                     T.barrier_wait(score_max_0_ready_barrier, k % 2)
 
@@ -251,11 +356,11 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                     T.copy(scores_max_1, scores_max)
 
                     for i in T.Parallel(block_H):
-                        scores_scale_1[i] = T.exp2(scores_max_prev_1[i] * scale - scores_max[i] * scale)
+                        scores_scale_1[i] = T.exp2(scores_max_prev_1[i] * scale - scores_max_1[i] * scale)
 
                     # Step 8.
                     for i, j in T.Parallel(block_H, block_N):
-                        acc_s_1[i, j] = T.exp2(acc_s_1[i, j] * scale - scores_max[i] * scale)
+                        acc_s_1[i, j] = T.exp2(acc_s_1[i, j] * scale - scores_max_1[i] * scale)
 
                     # Step 9.
                     T.reduce_sum(acc_s_1, scores_sum_1, dim=1)
@@ -270,36 +375,71 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
                     # Step 10. compute O1 with KV_shared_1_rd
                     T.copy(acc_s_1, acc_s_1_cast)
-                    T.wgmma_gemm(acc_s_1_cast, KV_shared_1_r, acc_o_r)
                     T.copy(acc_s_1_cast, SP1_shared)
+                    T.wgmma_gemm(acc_s_1_cast, KV_shared_1_r, acc_o_r)
                     T.barrier_arrive(s_shared_ready_barrier)
 
-                    if k < loop_range - 1:
-                        T.tma_copy(
-                            KV[bid, (2 * k + 3) * block_N : (2 * k + 4) * block_N, cur_kv_head, h_dim:],
-                            KV_shared_1_r,
-                            barrier=kv_shared_1_r_is_ready,
-                        )
-                        T.barrier_arrive(kv_shared_1_r_is_ready)
-
-                    T.barrier_wait(p0_1_1_ready_barrier, k % 2)
                     # Step 12.
-                    T.gemm(SP0_shared, KV_shared_0_r, acc_o_r)
+                    T.barrier_wait(p0_1_1_ready_barrier, k % 2)
+                    T.wgmma_gemm(SP0_shared, KV_shared_0_r, acc_o_r)
 
                     if k < loop_range - 1:
-                        T.tma_copy(
-                            KV[bid, (2 * k + 2) * block_N : (2 * k + 3) * block_N, cur_kv_head, h_dim:],
-                            KV_shared_0_r,
-                            barrier=kv_shared_0_r_is_ready,
-                        )
-                        T.barrier_arrive(kv_shared_0_r_is_ready)
-
+                        T.wait_wgmma(1)
+                        for j in T.unroll(num_k_tiles):
+                            T.tma_copy(
+                                KV[
+                                    bid,
+                                    (2 * k + 3) * block_N : (2 * k + 4) * block_N,
+                                    cur_kv_head,
+                                    h_dim + j * k_tile : h_dim + (j + 1) * k_tile,
+                                ],
+                                KV_shared_1_r[:, j * k_tile : (j + 1) * k_tile],
+                                barrier=kv_shared_1_r_is_ready[j],
+                            )
+                            T.barrier_arrive(kv_shared_1_r_is_ready[j])
+                        T.wait_wgmma(0)
+                        for j in T.unroll(num_k_tiles):
+                            T.tma_copy(
+                                KV[
+                                    bid,
+                                    (2 * k + 2) * block_N : (2 * k + 3) * block_N,
+                                    cur_kv_head,
+                                    h_dim + j * k_tile : h_dim + (j + 1) * k_tile,
+                                ],
+                                KV_shared_0_r[:, j * k_tile : (j + 1) * k_tile],
+                                barrier=kv_shared_0_r_is_ready[j],
+                            )
+                            T.barrier_arrive(kv_shared_0_r_is_ready[j])
                         T.tma_copy(
                             K_pe[bid, (2 * k + 2) * block_N : (2 * k + 3) * block_N, cur_kv_head, :],
                             K_pe_shared_0,
                             barrier=kv_shared_0_pe_is_ready,
                         )
                         T.barrier_arrive(kv_shared_0_pe_is_ready)
+
+                        # Step 2. Rotated QK1.
+                        for j in T.unroll(num_k_tiles):
+                            T.barrier_wait(kv_shared_1_l_is_ready[j], (k + 1) % 2)
+                            T.wgmma_gemm(
+                                Q_shared_l[:, j * k_tile : (j + 1) * k_tile],
+                                KV_shared_1_l[:, j * k_tile : (j + 1) * k_tile],
+                                acc_s_1,
+                                transpose_B=True,
+                                clear_accum=(j == 0),
+                            )
+                        for j in T.unroll(num_k_tiles):
+                            T.barrier_wait(kv_shared_1_r_is_ready[j], (k + 1) % 2)
+                            T.wgmma_gemm(
+                                Q_shared_r[:, j * k_tile : (j + 1) * k_tile],
+                                KV_shared_1_r[:, j * k_tile : (j + 1) * k_tile],
+                                acc_s_1,
+                                transpose_B=True,
+                            )
+                        T.barrier_wait(kv_shared_1_pe_is_ready, (k + 1) % 2)
+                        T.wgmma_gemm(Q_pe_local_1, K_pe_shared_1, acc_s_1, transpose_B=True)
+
+                    # Unconditional. Same as above.
+                    T.wait_wgmma(0)
 
                 T.barrier_wait(lse_0_ready_barrier, 0)
                 for i in T.Parallel(block_H):

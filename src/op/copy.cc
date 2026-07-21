@@ -20,6 +20,7 @@
 
 #include <limits>
 #include <sstream>
+#include <unordered_set>
 #include <vector>
 
 namespace tvm {
@@ -41,12 +42,19 @@ Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &lower_args,
     if (IsLocalBuffer(op.src) && !IsLocalBuffer(op.dst)) {
       // A conflict write only occurs when multiple threads write to the same
       // global address. If any dst_range dimension's min depends on the thread
-      // variable, each thread targets a distinct location and there is no
-      // conflict.
+      // index, each thread targets a distinct location and there is no
+      // conflict. The thread index is an expression: collect the variables it
+      // uses by identity (the real threadIdx.x Var on GPU; none when it is a
+      // constant, e.g. 0 on CPU).
+      std::unordered_set<const VarNode *> thread_index_vars;
+      tirx::UsesVar(lower_args.thread_index, [&](const VarNode *v) {
+        thread_index_vars.insert(v);
+        return false;
+      });
       bool dst_depends_on_thread = false;
       for (const auto &range : op.dst_range) {
         if (tirx::UsesVar(range->min, [&](const VarNode *v) {
-              return v == lower_args.thread_var.get();
+              return thread_index_vars.count(v) != 0;
             })) {
           dst_depends_on_thread = true;
           break;
@@ -69,20 +77,43 @@ Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &lower_args,
                          lower_args.thread_bounds,
                          lower_args.layout_map,
                          analyzer,
-                         false,
                          lower_args.buffer_remap,
                          {}},
                         level);
   }
   auto loop_layout = par_op->GetLoopLayout();
   return LowerParallelLoop(
-      par_op->GetRoot(), loop_layout, lower_args.thread_var, analyzer,
-      lower_args.layout_map, par_op->GetPredicate(lower_args.thread_var),
+      par_op->GetRoot(), loop_layout, lower_args.thread_index, analyzer,
+      lower_args.layout_map, par_op->GetPredicate(lower_args.thread_index),
       /*parallel_loop=*/true, /*should_vectorize=*/true,
       par_op->LoopLayoutRequiresPaddingGuard());
 }
 
 namespace {
+
+TileOperator ApplyCopyBlockAnnotations(TileOperator tile_op,
+                                       BlockAnnotations block_annotations) {
+  Copy copy = Downcast<Copy>(tile_op);
+
+  // Safe because this handler is invoked immediately after TLOpBuilder creates
+  // a fresh CopyNode, before the node escapes ParseOperator.
+  auto *node = const_cast<CopyNode *>(copy.operator->());
+  ICHECK(node != nullptr);
+
+  node->src_oob_safe_value = PrimExpr();
+  auto safe_value_map_obj = block_annotations.Get(attr::kSafeValueMap);
+  if (!safe_value_map_obj) {
+    return copy;
+  }
+
+  auto safe_value_map =
+      Downcast<Map<Var, PrimExpr>>(safe_value_map_obj.value());
+  auto it = safe_value_map.find(node->src->data);
+  if (it != safe_value_map.end()) {
+    node->src_oob_safe_value = (*it).second;
+  }
+  return copy;
+}
 
 std::vector<CopyImpl> &CopyImplRegistry() {
   static std::vector<CopyImpl> registry;
@@ -222,15 +253,14 @@ Stmt LowerIm2ColSIMT(const Im2ColOpNode &op, const LowerArgs &lower_args,
                          lower_args.thread_bounds,
                          lower_args.layout_map,
                          analyzer,
-                         false,
                          lower_args.buffer_remap,
                          {}},
                         level);
   }
   auto loop_layout = par_op->GetLoopLayout();
   return LowerParallelLoop(
-      par_op->GetRoot(), loop_layout, lower_args.thread_var, analyzer,
-      lower_args.layout_map, par_op->GetPredicate(lower_args.thread_var),
+      par_op->GetRoot(), loop_layout, lower_args.thread_index, analyzer,
+      lower_args.layout_map, par_op->GetPredicate(lower_args.thread_index),
       /*parallel_loop=*/true, /*should_vectorize=*/true,
       par_op->LoopLayoutRequiresPaddingGuard());
 }
@@ -481,8 +511,15 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   PrimExpr value = BufferLoad(src, src_indices);
   if (src->dtype != dst->dtype)
     value = Cast(dst->dtype, value);
-  if (src_predicate.defined())
-    value = if_then_else(src_predicate, value, make_zero(dst->dtype));
+  if (src_predicate.defined()) {
+    PrimExpr safe_value = make_zero(src->dtype);
+    if (src_oob_safe_value.defined()) {
+      safe_value = src_oob_safe_value.value();
+    }
+    if (safe_value.dtype() != dst->dtype)
+      safe_value = Cast(dst->dtype, safe_value);
+    value = if_then_else(src_predicate, value, analyzer->Simplify(safe_value));
+  }
 
   Stmt body = BufferStore(dst, value, dst_indices);
   if (dst_predicate.defined())
@@ -573,6 +610,8 @@ Stmt Im2ColOpNode::Lower(const LowerArgs &lower_args,
 // - Takes 5 inputs: src_buffer, dst_buffer, and annotation-driven options.
 // - Marked as opaque since it has side effects (memory writes)
 TIR_REGISTER_TL_TILE_OP(Copy, copy)
+    .set_attr<OpBlockAnnotationHandlerFunc>(kTLOpBlockAnnotationHandler,
+                                            ApplyCopyBlockAnnotations)
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
@@ -587,6 +626,8 @@ TVM_REGISTER_OP("tl.tileop.async_copy")
                                        IntImm(DataType::Int(32), 1));
                                return Copy(args, ann);
                              })
+    .set_attr<OpBlockAnnotationHandlerFunc>(kTLOpBlockAnnotationHandler,
+                                            ApplyCopyBlockAnnotations)
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
@@ -603,6 +644,8 @@ TVM_REGISTER_OP("tl.tileop.tma_copy")
                                        IntImm(DataType::Int(32), 1));
                                return Copy(args, ann);
                              })
+    .set_attr<OpBlockAnnotationHandlerFunc>(kTLOpBlockAnnotationHandler,
+                                            ApplyCopyBlockAnnotations)
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));

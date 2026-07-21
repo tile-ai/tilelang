@@ -4,7 +4,6 @@
  */
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
-#include <tvm/s_tir/stmt.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
@@ -31,10 +30,8 @@ using namespace ffi;
 
 class PTXAsyncCopyInjector : public StmtMutator {
 public:
-  explicit PTXAsyncCopyInjector(bool enable_auto_async_copy,
-                                bool async_without_async_commit_wait)
-      : enable_auto_async_copy_(enable_auto_async_copy),
-        async_without_async_commit_wait_(async_without_async_commit_wait) {}
+  explicit PTXAsyncCopyInjector(bool async_without_async_commit_wait)
+      : async_without_async_commit_wait_(async_without_async_commit_wait) {}
 
   bool InjectedPTXAsyncCopy() const { return injected_ptx_async_copy_; }
 
@@ -52,17 +49,6 @@ public:
     pending_sync_copies_ = false;
     uncommitted_sync_copies_ = false;
     return SeqStmt(seq);
-  }
-
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == s_tir::attr::async_scope) {
-      ++explicit_async_scope_depth_;
-      Stmt body = this->VisitStmt(op->body);
-      --explicit_async_scope_depth_;
-      // `async_scope` is a lowering-only marker for cp.async semantics.
-      return body;
-    }
-    return StmtMutator::VisitStmt_(op);
   }
 
   Stmt VisitStmt_(const ForNode *op) final {
@@ -262,10 +248,6 @@ public:
     if (!IsSharedBuffer(store->buffer)) {
       return StmtMutator::VisitStmt_(store);
     }
-    // Only lower copies in regions where async-copy rewrite is enabled.
-    if (!enable_auto_async_copy_) {
-      return StmtMutator::VisitStmt_(store);
-    }
 
     Optional<PrimExpr> predicate = std::nullopt;
     const BufferLoadNode *load =
@@ -289,7 +271,7 @@ public:
 
 private:
   bool UseExplicitAsyncSemantics() const {
-    return async_without_async_commit_wait_ || explicit_async_scope_depth_ > 0;
+    return async_without_async_commit_wait_;
   }
 
   // A copy candidate represented after flattening source/destination indexing.
@@ -686,9 +668,7 @@ private:
   // Note: AnalyzeCopyRegion replaces both the old `IsPureCopyRegion` and
   // `SummarizeAsyncIntrinsics` helpers to avoid redundant traversals.
 
-  bool enable_auto_async_copy_{true};
   bool async_without_async_commit_wait_{false};
-  int explicit_async_scope_depth_{0};
   int current_vectorized_lanes_{1};
   std::vector<ActiveVectorizedLoop> active_vectorized_loops_;
   arith::Analyzer analyzer_;
@@ -698,10 +678,8 @@ private:
 };
 
 PTXAsyncCopyInjectResult
-InjectPTXAsyncCopy(const Stmt &body, bool enable_auto_async_copy,
-                   bool async_without_async_commit_wait) {
-  PTXAsyncCopyInjector injector(enable_auto_async_copy,
-                                async_without_async_commit_wait);
+InjectPTXAsyncCopy(const Stmt &body, bool async_without_async_commit_wait) {
+  PTXAsyncCopyInjector injector(async_without_async_commit_wait);
   Stmt injected = injector(body);
   return {injector.Finalize(injected), injector.InjectedPTXAsyncCopy()};
 }

@@ -38,7 +38,7 @@ _P = ParamSpec("_P")
 _KP = ParamSpec("_KP")
 _T = TypeVar("_T")
 _Ret = TypeVar("_Ret")
-TargetLike = str | Target
+TargetLike = str | dict[str, object] | Target
 _CallFormKey = tuple[tuple[Any, ...], tuple[tuple[str, Any], ...]]
 _CALL_FORM_CACHE_MISS = object()
 
@@ -110,10 +110,11 @@ def compile(
     execution_backend : Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"], optional
         Execution backend to use for kernel execution. If None, reads from
         TILELANG_EXECUTION_BACKEND environment variable (defaults to "auto").
-    target : str or tvm.target.Target, optional
-        Compilation target. If None, reads from TILELANG_TARGET environment
-        variable (defaults to "auto").
-    target_host : str or tvm.target.Target, optional
+    target : str, dict, or tvm.target.Target, optional
+        Compilation target. If None, reads from TILELANG_DEFAULT_TARGET environment
+        variable (defaults to "auto"). Use a dict for target attributes, for example
+        {"kind": "cuda", "arch": "sm_90"}.
+    target_host : str, dict, or tvm.target.Target, optional
         Target host for cross-compilation (default: None).
     verbose : bool, optional
         Whether to enable verbose output. If None, reads from
@@ -124,8 +125,9 @@ def compile(
 
     Environment Variables
     ---------------------
-    TILELANG_TARGET : str
-        Default compilation target (e.g., "cuda", "llvm"). Defaults to "auto".
+    TILELANG_DEFAULT_TARGET : str
+        Default compilation target (e.g., "cuda", "llvm", or a JSON target config string).
+        Defaults to "auto".
     TILELANG_EXECUTION_BACKEND : str
         Default execution backend. Defaults to "auto".
     TILELANG_VERBOSE : str
@@ -192,10 +194,11 @@ def par_compile(
     execution_backend : Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"], optional
         Execution backend to use for kernel execution. If None, reads from
         TILELANG_EXECUTION_BACKEND environment variable (defaults to "auto").
-    target : str or tvm.target.Target, optional
-        Compilation target. If None, reads from TILELANG_TARGET environment
-        variable (defaults to "auto").
-    target_host : str or tvm.target.Target, optional
+    target : str, dict, or tvm.target.Target, optional
+        Compilation target. If None, reads from TILELANG_DEFAULT_TARGET environment
+        variable (defaults to "auto"). Use a dict for target attributes, for example
+        {"kind": "cuda", "arch": "sm_90"}.
+    target_host : str, dict, or tvm.target.Target, optional
         Target host for cross-compilation (default: None).
     verbose : bool, optional
         Whether to enable verbose output. If None, reads from
@@ -206,8 +209,9 @@ def par_compile(
 
     Environment Variables
     ---------------------
-    TILELANG_TARGET : str
-        Default compilation target (e.g., "cuda", "llvm"). Defaults to "auto".
+    TILELANG_DEFAULT_TARGET : str
+        Default compilation target (e.g., "cuda", "llvm", or a JSON target config string).
+        Defaults to "auto".
     TILELANG_EXECUTION_BACKEND : str
         Default execution backend. Defaults to "auto".
     TILELANG_VERBOSE : str

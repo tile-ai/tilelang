@@ -11,11 +11,74 @@ from tilelang.backend.execution_backend import (
     register_execution_backend,
     resolve_execution_backend,
 )
-from tilelang.backend.target import auto_detect_target, list_target_detectors, register_target_detector
+from tilelang.backend.target import (
+    auto_detect_target,
+    determine_target,
+    list_target_detectors,
+    register_target_detector,
+)
 
 
 def test_tilelang_does_not_export_target_wrapper():
     assert not hasattr(tilelang, "Target")
+
+
+def test_default_target_env_accepts_json_string(monkeypatch):
+    monkeypatch.setenv("TILELANG_DEFAULT_TARGET", '{"kind": "cuda", "arch": "sm_100f", "code": ["sm_100a", "sm_103a"]}')
+
+    assert tilelang.env.get_default_target() == {
+        "kind": "cuda",
+        "arch": "sm_100f",
+        "code": ["sm_100a", "sm_103a"],
+    }
+
+
+def test_default_target_env_rejects_unquoted_json_keys(monkeypatch):
+    monkeypatch.setenv("TILELANG_DEFAULT_TARGET", '{kind: "cuda", arch: "sm_100f"}')
+
+    with pytest.raises(ValueError, match="Use JSON syntax"):
+        tilelang.env.get_default_target()
+
+
+def test_default_target_env_keeps_plain_string(monkeypatch):
+    monkeypatch.setenv("TILELANG_DEFAULT_TARGET", "cuda")
+
+    assert tilelang.env.get_default_target() == "cuda"
+
+
+def test_bare_cuda_target_uses_detected_exact_arch(monkeypatch):
+    from tilelang.cuda import target as cuda_target
+
+    monkeypatch.setattr(cuda_target, "_detect_torch_cuda_arch", lambda: "sm_90a")
+
+    target = determine_target("cuda", return_object=True)
+
+    assert isinstance(target, Target)
+    assert target.kind.name == "cuda"
+    assert str(target.attrs["arch"]) == "sm_90a"
+
+
+def test_cuda_target_code_attr_survives_target_normalization():
+    target = determine_target(
+        {"kind": "cuda", "arch": "sm_100f", "code": ["sm_100a", "sm_103a"]},
+        return_object=True,
+    )
+
+    assert isinstance(target, Target)
+    assert target.kind.name == "cuda"
+    assert str(target.attrs["arch"]) == "sm_100f"
+    assert list(target.attrs["code"]) == ["sm_100a", "sm_103a"]
+    assert list(target.export()["code"]) == ["sm_100a", "sm_103a"]
+
+
+def test_cuda_target_code_attr_rejects_string_code():
+    with pytest.raises(AssertionError, match="valid target config dict"):
+        determine_target({"kind": "cuda", "arch": "sm_100f", "code": "sm_100a"}, return_object=True)
+
+
+def test_cuda_target_rejects_compute_arch():
+    with pytest.raises(AssertionError, match="valid target config dict"):
+        determine_target({"kind": "cuda", "arch": "compute_90"}, return_object=True)
 
 
 def test_auto_target_uses_registered_detectors():

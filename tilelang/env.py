@@ -1,5 +1,6 @@
 from __future__ import annotations
 import importlib.metadata
+import json
 import math
 import sys
 import os
@@ -8,11 +9,31 @@ import logging
 import shutil
 import glob
 from dataclasses import dataclass
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 logger = logging.getLogger(__name__)
 
 EnvVarDefault = str | None | Callable[[], str | None]
+TargetConfig = dict[str, object]
+
+
+def parse_pass_profile_threshold_ms(value: object, name: str = "pass profile threshold") -> float:
+    """Parse a finite, non-negative pass profile threshold in milliseconds."""
+    try:
+        threshold = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite non-negative number") from exc
+    if not math.isfinite(threshold) or threshold < 0:
+        raise ValueError(f"{name} must be a finite non-negative number")
+    return threshold
+
+
+def resolve_pass_profile_threshold_ms(pass_configs: Mapping[object, object], key: object, env_threshold_ms: Callable[[], float]) -> float:
+    """Resolve pass profile threshold with an explicit pass config taking precedence."""
+    if key in pass_configs:
+        return parse_pass_profile_threshold_ms(pass_configs[key], str(key))
+    return env_threshold_ms()
+
 
 # SETUP ENVIRONMENT VARIABLES
 CUTLASS_NOT_FOUND_MESSAGE = "CUTLASS is not installed or found in the expected path"
@@ -257,7 +278,7 @@ class EnvVar:
 
     key: str  # Environment variable name (e.g. "TILELANG_PRINT_ON_COMPILATION")
     default: EnvVarDefault  # Default value if the environment variable is not set
-    _forced_value: str | None = None  # Temporary runtime override (mainly for tests/debugging)
+    _forced_value: object | None = None  # Temporary runtime override (mainly for tests/debugging)
 
     def _get_default(self):
         return self.default() if callable(self.default) else self.default
@@ -286,6 +307,24 @@ class EnvVar:
         self._forced_value = value
         # Uncomment the following line if you want the override to persist globally:
         # os.environ[self.key] = value
+
+
+def _parse_target_config(value: str) -> TargetConfig | None:
+    value = value.strip()
+    if not value.startswith("{"):
+        return None
+
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as err:
+        raise ValueError(
+            'TILELANG_DEFAULT_TARGET looks like a dict but could not be parsed. Use JSON syntax like {"kind": "cuda", "arch": "sm_100"}.'
+        ) from err
+    if not isinstance(parsed, dict):
+        raise ValueError("TILELANG_DEFAULT_TARGET must parse to a dict")
+    if not all(isinstance(key, str) for key in parsed):
+        raise ValueError("TILELANG_DEFAULT_TARGET dict keys must be strings")
+    return dict(parsed)
 
 
 # Utility function for environment variables with defaults
@@ -322,6 +361,9 @@ class Environment:
     TILELANG_DISABLE_CACHE = EnvVar(
         "TILELANG_DISABLE_CACHE", "0"
     )  # disable kernel cache, usually for unit testing / debugging, high priority
+    TILELANG_KERNEL_CACHE_USE_LIB_STAMP = EnvVar(
+        "TILELANG_KERNEL_CACHE_USE_LIB_STAMP", "0"
+    )  # include native TileLang library content hash in kernel cache keys
     TILELANG_CLEANUP_TEMP_FILES = EnvVar(
         "TILELANG_CLEANUP_TEMP_FILES", "1"
     )  # cleanup temporary compiler files/dirs after compilation (set to 0 to keep for debugging)
@@ -333,6 +375,10 @@ class Environment:
     TILELANG_PASS_DIFF = EnvVar("TILELANG_PASS_DIFF", "0")  # "0"=off, "terminal", "html", "both"
     TILELANG_PASS_DIFF_OUTPUT = EnvVar("TILELANG_PASS_DIFF_OUTPUT", "tmp/pass_diff_output")  # output directory for HTML reports
 
+    # Pass timing / profiling
+    TILELANG_PASS_PROFILE = EnvVar("TILELANG_PASS_PROFILE", "0")  # "0"=off, "1"/"true"=on
+    TILELANG_PASS_PROFILE_THRESHOLD_MS = EnvVar("TILELANG_PASS_PROFILE_THRESHOLD_MS", "0")  # 0=show all
+
     # Auto-tuning settings
     TILELANG_AUTO_TUNING_DISABLE_CACHE = EnvVar("TILELANG_AUTO_TUNING_DISABLE_CACHE", "0")
     TILELANG_AUTO_TUNING_CPU_UTILITIES = EnvVar("TILELANG_AUTO_TUNING_CPU_UTILITIES", "0.9")  # percent of CPUs used
@@ -341,7 +387,7 @@ class Environment:
 
     # Compilation defaults (for jit, autotune, compile)
     # These allow overriding default compilation parameters via environment variables
-    TILELANG_DEFAULT_TARGET = EnvVar("TILELANG_TARGET", "auto")
+    TILELANG_DEFAULT_TARGET = EnvVar("TILELANG_DEFAULT_TARGET", "auto")
     TILELANG_DEFAULT_EXECUTION_BACKEND = EnvVar("TILELANG_EXECUTION_BACKEND", "auto")
     TILELANG_DEFAULT_VERBOSE = EnvVar("TILELANG_VERBOSE", "0")
 
@@ -375,6 +421,9 @@ class Environment:
     def is_cache_globally_disabled(self) -> bool:
         return self.TILELANG_DISABLE_CACHE.lower() in ("1", "true", "yes", "on")
 
+    def should_use_kernel_cache_lib_stamp(self) -> bool:
+        return str(self.TILELANG_KERNEL_CACHE_USE_LIB_STAMP).lower() in ("1", "true", "yes", "on")
+
     def is_autotune_cache_disabled(self) -> bool:
         return self.TILELANG_AUTO_TUNING_DISABLE_CACHE.lower() in ("1", "true", "yes", "on")
 
@@ -386,6 +435,15 @@ class Environment:
 
     def is_jit_diagnostics_enabled(self) -> bool:
         return str(self.TILELANG_JIT_DIAGNOSTICS).lower() in ("1", "true", "yes", "on")
+
+    def is_pass_profile_enabled(self) -> bool:
+        return str(self.TILELANG_PASS_PROFILE).strip().lower() in ("1", "true", "yes", "on")
+
+    def get_pass_profile_threshold_ms(self) -> float:
+        value = str(self.TILELANG_PASS_PROFILE_THRESHOLD_MS).strip()
+        if not value:
+            return 0.0
+        return parse_pass_profile_threshold_ms(value, "TILELANG_PASS_PROFILE_THRESHOLD_MS")
 
     def get_compile_timeout_seconds(self) -> float | None:
         value = str(self.TILELANG_COMPILE_TIMEOUT_SECONDS).strip()
@@ -410,9 +468,16 @@ class Environment:
             return value
         return "terminal"  # fallback for unrecognized truthy values
 
-    def get_default_target(self) -> str:
+    def get_default_target(self) -> str | TargetConfig:
         """Get default compilation target from environment."""
-        return self.TILELANG_DEFAULT_TARGET
+        target = self.TILELANG_DEFAULT_TARGET
+        if target is None:
+            return "auto"
+        if isinstance(target, Mapping):
+            return dict(target)
+        if isinstance(target, str):
+            return _parse_target_config(target) or target
+        raise TypeError("TILELANG_DEFAULT_TARGET must be a string or target config dict")
 
     def get_default_execution_backend(self) -> str:
         """Get default execution backend from environment."""

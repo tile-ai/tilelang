@@ -47,7 +47,7 @@ class GemmMetalSimdGroup(GemmBase):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_var: tir.Var,
+        thread_index: tir.PrimExpr,
         mbar_phase_expr: tir.PrimExpr | None = None,
     ):
         thread_nums = thread_bounds.extent
@@ -68,7 +68,7 @@ class GemmMetalSimdGroup(GemmBase):
             warp_row_tiles=warp_row_tiles,
             warp_col_tiles=warp_col_tiles,
             chunk=self.chunk,
-            thread_var=thread_var,
+            thread_var=thread_index,
             use_cooperative_tensor=False,
         )
 
@@ -218,7 +218,7 @@ class GemmMetal(GemmBase):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_var: tir.Var,
+        thread_index: tir.PrimExpr,
         mbar_phase_expr: tir.PrimExpr | None = None,
     ):
         thread_nums = thread_bounds.extent
@@ -246,7 +246,7 @@ class GemmMetal(GemmBase):
             warp_row_tiles=warp_row_tiles,
             warp_col_tiles=warp_col_tiles,
             chunk=self.chunk,
-            thread_var=thread_var,
+            thread_var=thread_index,
             a_stride_override=a_stride,
             b_stride_override=b_stride,
             inner_k_steps=inner_k_steps,

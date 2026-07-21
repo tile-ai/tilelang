@@ -313,6 +313,116 @@ __tl_cvt_fp8x2_to_float2(const __nv_fp8x2_storage_t x,
   return result;
 }
 
+// e4m3x2 -> half2
+TL_DEVICE half2
+__tl_cvt_fp8x2_to_half2(const __nv_fp8x2_storage_t x,
+                        const __nv_fp8_interpretation_t fp8_interpretation) {
+  __half2_raw raw = __nv_cvt_fp8x2_to_halfraw2(x, fp8_interpretation);
+  return *reinterpret_cast<half2 *>(&raw);
+}
+
+// half2 -> e4m3x2
+TL_DEVICE __nv_fp8x2_storage_t __tl_cvt_half2_to_fp8x2(
+    const half2 src, const __nv_fp8_interpretation_t fp8_interpretation) {
+  __half2_raw raw = *reinterpret_cast<const __half2_raw *>(&src);
+  return __nv_cvt_halfraw2_to_fp8x2(raw, __NV_SATFINITE, fp8_interpretation);
+}
+
+// Scalar fp8 -> half (native CUDA intrinsic; single cvt on supported HW).
+TL_DEVICE half
+__tl_cvt_fp8_to_half(const __nv_fp8_storage_t x,
+                     const __nv_fp8_interpretation_t fp8_interpretation) {
+  __half_raw raw = __nv_cvt_fp8_to_halfraw(x, fp8_interpretation);
+  return *reinterpret_cast<half *>(&raw);
+}
+
+// Scalar half -> fp8 (native CUDA intrinsic; single cvt on supported HW).
+TL_DEVICE __nv_fp8_storage_t __tl_cvt_half_to_fp8(
+    const half src, const __nv_fp8_interpretation_t fp8_interpretation) {
+  __half_raw raw = *reinterpret_cast<const __half_raw *>(&src);
+  return __nv_cvt_halfraw_to_fp8(raw, __NV_SATFINITE, fp8_interpretation);
+}
+
+// Scalar bfloat16 -> fp8 (native CUDA intrinsic; single cvt on supported HW).
+TL_DEVICE __nv_fp8_storage_t
+__tl_cvt_bfloat16_to_fp8(const __nv_bfloat16 src,
+                         const __nv_fp8_interpretation_t fp8_interpretation) {
+  __nv_bfloat16_raw raw = *reinterpret_cast<const __nv_bfloat16_raw *>(&src);
+  return __nv_cvt_bfloat16raw_to_fp8(raw, __NV_SATFINITE, fp8_interpretation);
+}
+
+// Scalar fp8 -> bfloat16. No CUDA intrinsic exists, so go fp8 -> half ->
+// bf16. The cvt.bf16.f16 step is exact: fp8's 3 mantissa bits fit in bf16's 7.
+// cvt.bf16.f16 needs sm_90+; older archs detour through float.
+TL_DEVICE __nv_bfloat16
+__tl_cvt_fp8_to_bfloat16(const __nv_fp8_storage_t x,
+                         const __nv_fp8_interpretation_t fp8_interpretation) {
+  __half_raw hr = __nv_cvt_fp8_to_halfraw(x, fp8_interpretation);
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  __nv_bfloat16_raw br;
+  asm("cvt.rn.bf16.f16 %0, %1;" : "=h"(br.x) : "h"(hr.x));
+  return *reinterpret_cast<__nv_bfloat16 *>(&br);
+#else
+  return __float2bfloat16(__half2float(*reinterpret_cast<half *>(&hr)));
+#endif
+}
+
+// e4m3x2 -> bfloat162
+// The native PTX cvt (cvt.rn.bf16x2.e4m3x2) needs PTX ISA 9.2 (CUDA 13.2+) and
+// an SM100-family target. Otherwise go fp8 -> half2, then cvt.bf16.f16 (exact,
+// sm_90+), and on older archs through float.
+TL_DEVICE __nv_bfloat162
+__tl_cvt_e4m3x2_to_bfloat162(const __nv_fp8x2_storage_t x) {
+#if (__CUDACC_VER_MAJOR__ > 13 ||                                              \
+     (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 2)) &&             \
+    defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  unsigned int packed;
+  asm("cvt.rn.bf16x2.e4m3x2 %0, %1;" : "=r"(packed) : "h"(x));
+  return *reinterpret_cast<__nv_bfloat162 *>(&packed);
+#elif defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  // fp8 -> half2, then two exact cvt.bf16.f16 (no fp32 detour).
+  __half2_raw h = __nv_cvt_fp8x2_to_halfraw2(x, __NV_E4M3);
+  __nv_bfloat162_raw b;
+  asm("cvt.rn.bf16.f16 %0, %1;" : "=h"(b.x) : "h"(h.x));
+  asm("cvt.rn.bf16.f16 %0, %1;" : "=h"(b.y) : "h"(h.y));
+  return *reinterpret_cast<__nv_bfloat162 *>(&b);
+#else
+  half2 tmp = __nv_cvt_fp8x2_to_halfraw2(x, __NV_E4M3);
+  return __float22bfloat162_rn(make_float2((float)tmp.x, (float)tmp.y));
+#endif
+}
+
+// e5m2x2 -> bfloat162
+TL_DEVICE __nv_bfloat162
+__tl_cvt_e5m2x2_to_bfloat162(const __nv_fp8x2_storage_t x) {
+#if (__CUDACC_VER_MAJOR__ > 13 ||                                              \
+     (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 2)) &&             \
+    defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  unsigned int packed;
+  asm("cvt.rn.bf16x2.e5m2x2 %0, %1;" : "=r"(packed) : "h"(x));
+  return *reinterpret_cast<__nv_bfloat162 *>(&packed);
+#elif defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  // fp8 -> half2, then two exact cvt.bf16.f16 (no fp32 detour).
+  __half2_raw h = __nv_cvt_fp8x2_to_halfraw2(x, __NV_E5M2);
+  __nv_bfloat162_raw b;
+  asm("cvt.rn.bf16.f16 %0, %1;" : "=h"(b.x) : "h"(h.x));
+  asm("cvt.rn.bf16.f16 %0, %1;" : "=h"(b.y) : "h"(h.y));
+  return *reinterpret_cast<__nv_bfloat162 *>(&b);
+#else
+  half2 tmp = __nv_cvt_fp8x2_to_halfraw2(x, __NV_E5M2);
+  return __float22bfloat162_rn(make_float2((float)tmp.x, (float)tmp.y));
+#endif
+}
+
+// bfloat162 -> e4m3x2
+TL_DEVICE __nv_fp8x2_storage_t __tl_cvt_bfloat162_to_fp8x2(
+    const __nv_bfloat162 src,
+    const __nv_fp8_interpretation_t fp8_interpretation) {
+  __nv_bfloat162_raw raw = *reinterpret_cast<const __nv_bfloat162_raw *>(&src);
+  return __nv_cvt_bfloat16raw2_to_fp8x2(raw, __NV_SATFINITE,
+                                        fp8_interpretation);
+}
+
 // ============================================================================
 // Inline PTX FP8 Conversions with Stochastic Rounding
 // ============================================================================
@@ -324,65 +434,107 @@ __tl_cvt_fp8x2_to_float2(const __nv_fp8x2_storage_t x,
 // --- float4 -> e4m3x4 stochastic rounding ---
 
 // Full 4-element version (float4 input)
+template <bool kDependentFalse = false>
 TL_DEVICE __nv_fp8x4_storage_t
 __tl_cvt_f32x4_to_e4m3x4_rs_sat(float4 src, unsigned int rbits) {
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL)
   __nv_fp8x4_storage_t result;
   asm("cvt.rs.satfinite.e4m3x4.f32 %0, {%1, %2, %3, %4}, %5;"
       : "=r"(result)
       : "f"(src.w), "f"(src.z), "f"(src.y), "f"(src.x), "r"(rbits));
   return result;
+#else
+  static_assert(kDependentFalse,
+                "Stochastic rounding f32-to-FP8 requires sm_100a");
+  return {};
+#endif
 }
 
 // 1-element version: pass src as f (lowest position), returns byte0
+template <bool kDependentFalse = false>
 TL_DEVICE __nv_fp8_storage_t
 __tl_cvt_f32x1_to_e4m3x1_rs_sat(float src, unsigned int rbits) {
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL)
   __nv_fp8x4_storage_t tmp;
   asm("cvt.rs.satfinite.e4m3x4.f32 %0, {%1, %2, %3, %4}, %5;"
       : "=r"(tmp)
       : "f"(0.0f), "f"(0.0f), "f"(0.0f), "f"(src), "r"(rbits));
   return static_cast<__nv_fp8_storage_t>(tmp & 0xFF);
+#else
+  static_assert(kDependentFalse,
+                "Stochastic rounding f32-to-FP8 requires sm_100a");
+  return {};
+#endif
 }
 
 // 2-element version: pass src.x as f, src.y as e, returns lower 2 bytes
+template <bool kDependentFalse = false>
 TL_DEVICE __nv_fp8x2_storage_t
 __tl_cvt_f32x2_to_e4m3x2_rs_sat(float2 src, unsigned int rbits) {
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL)
   __nv_fp8x4_storage_t tmp;
   asm("cvt.rs.satfinite.e4m3x4.f32 %0, {%1, %2, %3, %4}, %5;"
       : "=r"(tmp)
       : "f"(0.0f), "f"(0.0f), "f"(src.y), "f"(src.x), "r"(rbits));
   return static_cast<__nv_fp8x2_storage_t>(tmp & 0xFFFF);
+#else
+  static_assert(kDependentFalse,
+                "Stochastic rounding f32-to-FP8 requires sm_100a");
+  return {};
+#endif
 }
 
 // --- float4 -> e5m2x4 stochastic rounding ---
 
 // Full 4-element version (float4 input)
+template <bool kDependentFalse = false>
 TL_DEVICE __nv_fp8x4_storage_t
 __tl_cvt_f32x4_to_e5m2x4_rs_sat(float4 src, unsigned int rbits) {
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL)
   __nv_fp8x4_storage_t result;
   asm("cvt.rs.satfinite.e5m2x4.f32 %0, {%1, %2, %3, %4}, %5;"
       : "=r"(result)
       : "f"(src.w), "f"(src.z), "f"(src.y), "f"(src.x), "r"(rbits));
   return result;
+#else
+  static_assert(kDependentFalse,
+                "Stochastic rounding f32-to-FP8 requires sm_100a");
+  return {};
+#endif
 }
 
 // 1-element version: pass src as f (lowest position), returns byte0
+template <bool kDependentFalse = false>
 TL_DEVICE __nv_fp8_storage_t
 __tl_cvt_f32x1_to_e5m2x1_rs_sat(float src, unsigned int rbits) {
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL)
   __nv_fp8x4_storage_t tmp;
   asm("cvt.rs.satfinite.e5m2x4.f32 %0, {%1, %2, %3, %4}, %5;"
       : "=r"(tmp)
       : "f"(0.0f), "f"(0.0f), "f"(0.0f), "f"(src), "r"(rbits));
   return static_cast<__nv_fp8_storage_t>(tmp & 0xFF);
+#else
+  static_assert(kDependentFalse,
+                "Stochastic rounding f32-to-FP8 requires sm_100a");
+  return {};
+#endif
 }
 
 // 2-element version: pass src.x as f, src.y as e, returns lower 2 bytes
+template <bool kDependentFalse = false>
 TL_DEVICE __nv_fp8x2_storage_t
 __tl_cvt_f32x2_to_e5m2x2_rs_sat(float2 src, unsigned int rbits) {
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL)
   __nv_fp8x4_storage_t tmp;
   asm("cvt.rs.satfinite.e5m2x4.f32 %0, {%1, %2, %3, %4}, %5;"
       : "=r"(tmp)
       : "f"(0.0f), "f"(0.0f), "f"(src.y), "f"(src.x), "r"(rbits));
   return static_cast<__nv_fp8x2_storage_t>(tmp & 0xFFFF);
+#else
+  static_assert(kDependentFalse,
+                "Stochastic rounding f32-to-FP8 requires sm_100a");
+  return {};
+#endif
 }
 
 // ============================================================================

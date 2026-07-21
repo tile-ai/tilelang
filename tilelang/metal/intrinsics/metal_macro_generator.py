@@ -26,7 +26,7 @@ class MPSIntrinEmitter:
         warp_row_tiles: int = 8,
         warp_col_tiles: int = 8,
         chunk: int = 32,
-        thread_var: tir.Var | None = None,
+        thread_var: tir.PrimExpr | None = None,
         a_stride_override: int | None = None,
         b_stride_override: int | None = None,
         inner_k_steps: int = 1,

@@ -125,8 +125,10 @@ public:
   const BufferIndiceMap &GetIndiceMap() const { return indice_map_; }
   // Get buffers in the order they first appear in the loop body.
   const std::vector<Buffer> &GetAccessOrder() const { return access_order_; }
-  // Get the predicate for a given thread variable.
-  Optional<PrimExpr> GetPredicate(Var thread_var) const;
+  // Get the predicate for a given logical thread index. GPU callers pass the
+  // real threadIdx.x Var; callers without thread bindings (e.g. CPU) pass
+  // constant 0.
+  Optional<PrimExpr> GetPredicate(PrimExpr thread_index) const;
 
   // Clone this operator.
   TileOperator Clone() const override;
@@ -157,6 +159,11 @@ private:
   Fragment ChooseBestCandidate(const Fragment &candidate_from_buffer,
                                const Fragment &candidate_from_plan,
                                const LayoutInferArgs &layout_args) const;
+  // Return true if partitioning by `candidate` would make any known fragment
+  // buffer's physical index depend on the CUDA thread variable.
+  bool
+  HasThreadDependentFragmentIndex(const Fragment &candidate,
+                                  const LayoutInferArgs &layout_args) const;
   // (No helper needed anymore; annotations are parsed once in ctor and adopted
   // inside InferLayout.)
   // Compute loop layout from a source buffer's fragment mapping.

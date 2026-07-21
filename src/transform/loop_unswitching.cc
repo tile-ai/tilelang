@@ -15,7 +15,6 @@
  */
 
 #include "support/check.h"
-#include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/stmt.h>
@@ -169,7 +168,7 @@ public:
   void VisitStmt_(const IfThenElseNode *op) final {
     // Skip the interior of any if statement with matching condition
     if (excluded_condition.defined() &&
-        StructuralEqual()(op->condition, excluded_condition)) {
+        ExprDeepEqual()(op->condition, excluded_condition)) {
       return;
     }
     StmtExprVisitor::VisitStmt_(op);
@@ -415,8 +414,8 @@ public:
   }
 
   Stmt VisitStmt_(const IfThenElseNode *op) final {
-    // Replace if the condition is structurally equal to the hoisted condition
-    if (StructuralEqual()(op->condition, hoisted_condition)) {
+    // Replace if the condition matches the hoisted condition.
+    if (ExprDeepEqual()(op->condition, hoisted_condition)) {
       if (take_then) {
         return VisitStmt(op->then_case);
       } else {

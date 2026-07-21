@@ -6,7 +6,9 @@ This example demonstrates how AutoDD can help developers quickly isolate bugs
 in complex TileLang programs by automatically removing irrelevant code.
 
 To run AutoDD on this file:
-    python -m tilelang.autodd tilelang_buggy.py --err-msg "Dimension mismatch" -o minimized.py -j 4
+    python -m tilelang.autodd tilelang_buggy.py \
+      --err-msg "T.gemm K shape check failed" \
+      -o minimized.py -j 4
 
 The bug in this file: B_shared has shape (block_M, block_N) instead of (block_K, block_N),
 causing a GEMM dimension mismatch error.

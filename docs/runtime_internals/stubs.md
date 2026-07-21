@@ -7,10 +7,11 @@ libraries (CUDA and ROCm/HIP).
 
 CUDA:
 
-1. **CUDA Driver (`cuda_stub`)**: Allows TileLang to be imported on systems
-   without a GPU (e.g., CI/compilation nodes) by lazy-loading `libcuda.so` only
-   when needed.
-2. **CUDA Runtime & Compiler (`cudart_stub`, `nvrtc_stub`)**: Resolves SONAME
+1. **CUDA Driver (`cuda_stub`, file `libstub_cuda.so`)**: Allows TileLang to be
+   imported on systems without a GPU (e.g., CI/compilation nodes) by
+   lazy-loading `libcuda.so` only when needed.
+2. **CUDA Runtime & Compiler (`cudart_stub`, file `libstub_cudart.so`;
+   `nvrtc_stub`, file `libstub_nvrtc.so`)**: Resolves SONAME
    versioning mismatches (e.g. `libcudart.so.11` vs `libcudart.so.12`),
    enabling a single build to work across different CUDA versions. This is
    achieved by reusing CUDA libraries already loaded by frameworks like PyTorch
@@ -18,12 +19,14 @@ CUDA:
 
 ROCm:
 
-1. **HIP Runtime/Module API (`hip_stub`)**: Allows TileLang to be imported on
-   systems without ROCm installed by lazy-loading `libamdhip64.so` only when
-   needed. The stub also prefers already-loaded symbols via `RTLD_DEFAULT` /
-   `RTLD_NEXT` to interoperate with frameworks that have already loaded HIP.
-2. **HIP Runtime Compiler (`hiprtc_stub`)**: Lazily loads `libhiprtc.so` and
-   exposes the minimal HIPRTC API subset used by TileLang/TVM.
+1. **HIP Runtime/Module API (`hip_stub`, file `libstub_hip.so`)**: Allows
+   TileLang to be imported on systems without ROCm installed by lazy-loading
+   `libamdhip64.so` only when needed. The stub also prefers already-loaded
+   symbols via `RTLD_DEFAULT` / `RTLD_NEXT` to interoperate with frameworks that
+   have already loaded HIP.
+2. **HIP Runtime Compiler (`hiprtc_stub`, file `libstub_hiprtc.so`)**: Lazily
+   loads `libhiprtc.so` and exposes the minimal HIPRTC API subset used by
+   TileLang/TVM.
 
 ## Implementation
 

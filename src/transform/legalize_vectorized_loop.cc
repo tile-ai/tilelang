@@ -24,6 +24,7 @@
 
 #include "support/check.h"
 #include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/s_tir/utils.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
@@ -63,18 +64,33 @@ private:
   LoopVectorizedLegalizer(arith::Analyzer *analyzer)
       : arith::IRMutatorWithAnalyzer(analyzer) {}
 
+  bool IsNonTrivialVectorizedLoop(const For &loop) {
+    PrimExpr extent = analyzer_->Simplify(loop->extent);
+    auto extent_as_int = as_const_int(extent);
+    return !extent_as_int || *extent_as_int > 1;
+  }
+
   // Override the VisitStmt_ method to handle ForNode (loop statements)
   Stmt VisitStmt_(const ForNode *op) final {
     // Visit and potentially modify the loop node
     For for_node = Downcast<For>(IRMutatorWithAnalyzer::VisitStmt_(op));
     // If the loop is not vectorized, proceed with the default behavior
     if (for_node->kind != ForKind::kVectorized) {
-      return IRMutatorWithAnalyzer::VisitStmt_(op);
+      return for_node;
     }
     // Change the loop kind from vectorized to serial
     for_node.CopyOnWrite()->kind = ForKind::kSerial;
+    int vectorize_size = GetVectorizeSize(for_node, analyzer_);
+    if (vectorize_size <= 1 && IsNonTrivialVectorizedLoop(for_node)) {
+      LOG(WARNING) << "T.vectorized loop over `" << for_node->loop_var
+                   << "` with extent " << for_node->extent
+                   << " is lowered as a serial loop because TileLang could "
+                   << "not find a valid vectorization plan. Scalar accumulator "
+                   << "updates inside the loop are a common cause; move "
+                   << "reductions to T.unroll or T.serial if this is intended.";
+    }
     // Apply vectorization transformation to the loop
-    return VectorizeLoop(for_node, analyzer_);
+    return VectorizeLoop(for_node, analyzer_, {}, vectorize_size);
   }
 };
 

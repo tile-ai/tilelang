@@ -28,6 +28,18 @@ tutorials/logging
 
 :::{toctree}
 :maxdepth: 1
+:caption: TOOLS
+
+tools/index
+tools/analyzer
+tools/layout_visualization
+tools/autodd
+tools/pass_diff
+tools/iket
+:::
+
+:::{toctree}
+:maxdepth: 1
 :caption: PROGRAMMING GUIDES
 
 programming_guides/overview

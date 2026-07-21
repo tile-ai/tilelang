@@ -41,6 +41,7 @@ using UpdateBarrierArriveCallback = std::function<void(tirx::Var, PrimExpr)>;
 using RequireSmemAlignmentCallback = std::function<void(tirx::Var, int)>;
 using LayoutMap = ffi::Map<tirx::Buffer, Layout>;
 using BufferMap = ffi::Map<tirx::Var, tirx::Buffer>;
+using BlockAnnotations = ffi::Map<ffi::String, ffi::Any>;
 
 enum AccessMask : int {
   kAccessRead = 1,
@@ -95,7 +96,11 @@ inline const char *InferLevelToString(InferLevel level) {
 struct LowerArgs {
   Target target;
   Range thread_bounds;
-  tirx::Var thread_var;
+  // Logical thread index consumed by lowering helpers. This is an expression
+  // rather than a Var: GPU lowering passes the real threadIdx.x Var (bound by
+  // a thread_extent AttrStmt), while targets without thread bindings (e.g.
+  // CPU) pass constant 0. It must never be an unbound synthetic Var.
+  PrimExpr thread_index;
   LayoutMap layout_map;
   ffi::Map<tirx::Buffer, tirx::Buffer> buffer_remap;
   // Map from Bind variable to its bound expression, for resolving
@@ -133,7 +138,6 @@ struct LayoutInferArgs {
   Range thread_bounds;
   LayoutMap layout_map;
   arith::Analyzer *analyzer;
-  bool buffer_oob = false;
   ffi::Map<tirx::Buffer, tirx::Buffer> buffer_remap;
   // Map from Bind variable to its bound expression, for resolving
   // fragment buffer accesses through Bind values
@@ -181,11 +185,20 @@ public:
 
 tirx::Var GetVarFromAccessPtr(const PrimExpr &expr);
 
-TileOperator ParseOperator(tirx::Call call);
-TileOperator ParseOperator(tirx::Stmt stmt);
+TileOperator
+ParseOperator(const tirx::Call &call,
+              const BlockAnnotations &block_annotations = BlockAnnotations());
+TileOperator
+ParseOperator(const tirx::Stmt &stmt,
+              const BlockAnnotations &block_annotations = BlockAnnotations());
 
 using OpBuilderFunc = ffi::TypedFunction<TileOperator(
     ffi::Array<PrimExpr>, ffi::Map<ffi::String, ffi::ObjectRef>)>;
+using OpBlockAnnotationHandlerFunc =
+    ffi::TypedFunction<TileOperator(TileOperator, BlockAnnotations)>;
+
+static constexpr const char *kTLOpBlockAnnotationHandler =
+    "TLOpBlockAnnotationHandler";
 
 #define TIR_REGISTER_TL_TILE_OP(Entry, OpName)                                 \
   const Op &Entry::Get() {                                                     \

@@ -11,10 +11,12 @@ import tvm_ffi
 from tvm.ir import CallingConv
 from tvm.target import Target
 from tilelang.contrib import hipcc, nvcc
-from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
+from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH, env
 from tilelang.transform import PassConfigKey
 from tilelang.engine.param import KernelParam, CompiledArtifact
 from tilelang.engine.semantic_check import PreLowerSemanticCheck
+from tilelang.backend.device_codegen import resolve_device_codegen
+from tilelang.backend.host_codegen import apply_host_codegen_hooks, resolve_host_codegen
 from tilelang.backend.target import determine_target
 from tilelang.backend.pass_pipeline import resolve_pipeline
 
@@ -98,10 +100,14 @@ def tilelang_callback_cuda_validate(device_mod):
 
 @tvm_ffi.register_global_func("tilelang_callback_cuda_compile", override=True)
 def tilelang_callback_cuda_compile(code, target, pass_config=None):
-    target_arch = nvcc.get_target_arch(nvcc.get_target_compute_version(target))
-
-    arch = [f"-arch=sm_{target_arch}"]
-    compile_format = "cubin"
+    target_arch, target_code = nvcc.get_target_arch_and_code(target)
+    target_code_list = nvcc.get_target_code_list(target_code)
+    gencode_code = nvcc.format_target_code_for_gencode(target_code)
+    if gencode_code is None:
+        arch = [f"-arch=sm_{target_arch}"]
+    else:
+        arch = ["-gencode", f"arch=compute_{target_arch},code={gencode_code}"]
+    compile_format = "fatbin" if len(target_code_list) > 1 else "cubin"
 
     # Read pass-config keys (string-valued) like in jit.adapter.libgen.compile_lib
     cfg = pass_config or {}
@@ -110,7 +116,6 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
     ptxas_usage_level = cfg.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None)
     if ptxas_usage_level is not None:
         ptxas_usage_level = int(ptxas_usage_level)
-    verbose_ptxas_output = bool(cfg.get(PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False))
 
     options = [
         # tl_templates/cuda/reduce.h uses explicit lambda template parameters
@@ -135,15 +140,28 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
                     tokens.append(str(flag))
         options += tokens
 
-    verbose = False
+    verbose = env.get_default_verbose()
     if enable_fast_math:
         options.append("--use_fast_math")
     if ptxas_usage_level is not None:
-        options.append(f"--ptxas-options=--register-usage-level={ptxas_usage_level}")
-    if verbose_ptxas_output:
+        options.append(f"--ptxas-options=--register-usage-level={int(ptxas_usage_level)}")
+    if verbose:
         options.append("--ptxas-options=--verbose")
         options.append("-w")  # Suppress warnings to make ptxas output more readable
-        verbose = True
+
+    from tilelang.cache.cuda_binary_cache import CUDABinaryCache
+
+    cache_key = CUDABinaryCache.make_key(
+        code=code,
+        target_kind=target.kind.name,
+        target_arch=target_arch,
+        target_code=target_code_list,
+        compile_format=compile_format,
+        options=options,
+    )
+    cached_binary = CUDABinaryCache.load(cache_key, compile_format)
+    if cached_binary is not None:
+        return bytearray(cached_binary)
 
     ptx = nvcc.compile_cuda(
         code,
@@ -152,6 +170,7 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
         options=options,
         verbose=verbose,
     )
+    CUDABinaryCache.save(cache_key, compile_format, ptx)
 
     return ptx
 
@@ -216,61 +235,25 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target, target: Target | N
     combine_context_call = getattr(tirx.transform, "CombineContextCall", None)
     if combine_context_call is not None:
         host_mod = combine_context_call()(host_mod)
-    if target is not None and target.kind.name == "metal":
-        from tilelang.metal.transform import MarkHostMetalContext
+    host_mod = apply_host_codegen_hooks(host_mod, target_host, target)
+    return resolve_host_codegen(target_host).lower(host_mod, target_host)
 
-        host_mod = MarkHostMetalContext()(host_mod)
-    if target_host.kind.name == "llvm":
-        host_mod = tvm.ffi.get_global_func("target.build.llvm")(host_mod, target_host)
-    elif target_host.kind.name == "c":
-        host_mod = tvm.ffi.get_global_func("target.build.tilelang_c_host")(host_mod, target_host)
-    else:
-        raise ValueError(f"Target host {target_host.kind.name} is not supported")
-    return host_mod
+
+def _prepare_device_codegen_mod(device_mod: tvm.IRModule) -> tvm.IRModule:
+    device_mod = tilelang.transform.LowerIntrin()(device_mod)
+    device_mod = tirx.transform.Simplify()(device_mod)
+    device_mod = tilelang.transform.HoistBroadcastValues()(device_mod)
+    return device_mod
 
 
 def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
-    device_mod = tilelang.transform.LowerIntrin()(device_mod)
-    device_mod = tirx.transform.Simplify()(device_mod)
-    device_mod = tilelang.transform.HoistBroadcastValues()(device_mod)
-
-    if target.kind.name == "cuda":
-        global_func = "target.build.tilelang_" + ("cutedsl" if "cutedsl" in target.keys else "cuda")
-        device_mod = tvm.ffi.get_global_func(global_func)(device_mod, target)
-    elif target.kind.name == "hip":
-        device_mod = tvm.ffi.get_global_func("target.build.tilelang_hip")(device_mod, target)
-    elif target.kind.name == "metal":
-        device_mod = tvm.ffi.get_global_func("target.build.tilelang_metal")(device_mod, target)
-    elif target.kind.name == "llvm":
-        device_mod = tvm.ffi.get_global_func("target.build.llvm")(device_mod, target)
-    else:
-        raise ValueError(f"Target {target.kind.name} is not supported")
-
-    return device_mod
+    device_mod = _prepare_device_codegen_mod(device_mod)
+    return resolve_device_codegen(target).lower(device_mod, target, compile_device=True)
 
 
 def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
-    device_mod = tilelang.transform.LowerIntrin()(device_mod)
-    device_mod = tirx.transform.Simplify()(device_mod)
-    device_mod = tilelang.transform.HoistBroadcastValues()(device_mod)
-
-    if target.kind.name == "cuda":
-        global_func = "target.build.tilelang_" + ("cutedsl" if "cutedsl" in target.keys else "cuda") + "_without_compile"
-        device_mod = tvm.ffi.get_global_func(global_func)(device_mod, target)
-    elif target.kind.name == "hip":
-        device_mod = tvm.ffi.get_global_func("target.build.tilelang_hip_without_compile")(device_mod, target)
-    elif target.kind.name == "c":
-        device_mod = tvm.ffi.get_global_func("target.build.tilelang_c")(device_mod, target)
-    elif target.kind.name == "llvm":
-        device_mod = tvm.ffi.get_global_func("target.build.llvm")(device_mod, target)
-    elif target.kind.name == "webgpu":
-        device_mod = tvm.ffi.get_global_func("target.build.webgpu")(device_mod, target)
-    elif target.kind.name == "metal":
-        device_mod = tvm.ffi.get_global_func("target.build.tilelang_metal_without_compile")(device_mod, target)
-    else:
-        raise ValueError(f"Target {target.kind.name} is not supported")
-
-    return device_mod
+    device_mod = _prepare_device_codegen_mod(device_mod)
+    return resolve_device_codegen(target).lower(device_mod, target, compile_device=False)
 
 
 def lower_to_host_device_ir(
@@ -339,6 +322,21 @@ def lower(
     if enable_host_codegen:
         host_mod = host_codegen(host_mod, target_host, target=target)
         host_mod.import_module(codegen_mod)
-        return CompiledArtifact(host_mod, device_mod, params, kernel_source, rt_mod=host_mod)
+        return CompiledArtifact(
+            host_mod,
+            device_mod,
+            params,
+            kernel_source,
+            rt_mod=host_mod,
+            target=target,
+            target_host=target_host,
+        )
 
-    return CompiledArtifact(host_mod, device_mod, params, kernel_source)
+    return CompiledArtifact(
+        host_mod,
+        device_mod,
+        params,
+        kernel_source,
+        target=target,
+        target_host=target_host,
+    )

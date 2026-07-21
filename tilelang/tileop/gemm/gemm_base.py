@@ -45,7 +45,7 @@ class GemmBase:
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_var: tirx.Var,
+        thread_index: tirx.PrimExpr,
         mbar_phase_expr: tirx.PrimExpr | None = None,
     ):
         raise NotImplementedError("lower is not implemented")
@@ -106,7 +106,7 @@ class GemmBase:
 
     @property
     def chunk(self) -> int:
-        return self.A.shape[-2] if self.trans_A else self.A.shape[-1]
+        return self.K
 
     @property
     def A(self) -> tirx.Buffer:

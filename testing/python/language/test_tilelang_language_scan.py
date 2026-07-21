@@ -487,5 +487,63 @@ def test_cummax_fragment_1d():
     run_cummax_1d(512, 64, reverse=True, scope="fragment")
 
 
+def scan_offset_subregion_test(H, W, r0, r1, op="cumsum", dim=0, reverse=False, dtype=T.float32):
+    """Feed a row-offset 2D sub-region of shared memory directly to the scan.
+
+    Regression for #2536: MakeAccessPtrFromRegion dropped the innermost dims'
+    ``min`` from the access-pointer offset, so a sub-region like
+    ``A_shared[r0:r1, :]`` with ``r0 != 0`` silently scanned rows ``[0:r1-r0]``.
+    """
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((H, W), dtype),
+        B: T.Tensor((H, W), dtype),
+    ):
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared((H, W), dtype)
+            T.copy(A, A_shared)
+            scan = T.cumsum if op == "cumsum" else T.cummax
+            # Offset sub-region fed straight into the scan.
+            scan(src=A_shared[r0:r1, :], dim=dim, reverse=reverse)
+            T.copy(A_shared, B)
+
+    return main
+
+
+def run_scan_offset_subregion(H, W, r0, r1, op="cumsum", dim=0, reverse=False, dtype=T.float32):
+    program = scan_offset_subregion_test(H, W, r0, r1, op, dim, reverse, dtype)
+    jit_kernel = tl.compile(program, out_idx=-1)
+    A = torch.randn(H, W, dtype=getattr(torch, dtype)).cuda()
+
+    def ref_program(A):
+        ref_b = A.clone()  # rows outside [r0:r1] must be passed through untouched
+        chunk = A[r0:r1, :]
+        if op == "cumsum":
+            if reverse:
+                chunk = chunk.flip(dims=[dim]).cumsum(dim=dim).flip(dims=[dim])
+            else:
+                chunk = chunk.cumsum(dim=dim)
+        else:
+            chunk = _torch_cummax(chunk, dim, reverse)
+        ref_b[r0:r1, :] = chunk
+        return ref_b
+
+    tilelang_res = jit_kernel(A)
+    ref_res = ref_program(A)
+    torch.testing.assert_close(tilelang_res, ref_res, atol=1e-3, rtol=1e-3)
+
+
+def test_scan_offset_subregion():
+    """Regression for #2536: row-offset 2D shared sub-regions fed to the scan."""
+    H, W = 128, 8
+    for op in ("cumsum", "cummax"):
+        for dim in (0, 1):
+            for reverse in (False, True):
+                # r0 == 64 is the regressing case (r0 == 0 is already covered by
+                # the full-region region tests above).
+                run_scan_offset_subregion(H, W, 64, 128, op=op, dim=dim, reverse=reverse)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

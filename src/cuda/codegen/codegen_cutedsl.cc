@@ -247,7 +247,7 @@ std::string DTypeToString(DataType t) {
   if (t.is_void()) {
     return "void";
   }
-  if (t == tl::cuTensorMapType()) {
+  if (t == tl::CuTensorMapType()) {
     return "CUtensorMap";
   }
 
@@ -701,7 +701,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const MaxNode *op,
  * ldmatrix/stmatrix helpers, mbarrier APIs, cooperative grid sync, WMMA/legacy
  * MMA intrinsics (fill/load/store/mma/bmma/ptx_mma/ptx_mma_sp), low-level PTX
  * asm helpers (ldg32, cp_async bulk/init/arrive/wait barriers), reinterpret
- * paths for special small-float encodings (e.g., float4 e2m1fn), tl::tl_gemm
+ * paths for special small-float encodings (e.g., float4 e2m1fn)
  * and related external calls, and other TL runtime calls.
  *
  * Side effects:
@@ -892,6 +892,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     stream << "tl.tmem_deallocate(" << tmem_buffer << ", " << num_cols << ")\n";
   } else if (op->op.same_as(tl::no_set_max_nreg())) {
     // do nothing
+  } else if (op->op.same_as(tl::prefetch_tma_descriptor())) {
+    print_extern_call_stmt("tl.prefetch_tma_descriptor");
   } else if (op->op.same_as(tl::tma_load())) {
     std::ostringstream ss;
     ICHECK_GE(op->args.size(), 2);
@@ -993,10 +995,16 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::ptx_stmatrix())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
+    bool is_shape_encoded =
+        op->args.size() >= 4 && op->args.back().as<StringImmNode>();
+    if (is_shape_encoded) {
+      ICHECK_EQ(Downcast<StringImm>(op->args.back())->value, "m8n8")
+          << "CuTeDSL stmatrix codegen only supports m8n8";
+    }
     std::string func_name = "tl.ptx_stmatrix_x" + std::to_string(num);
     if (trans == 1)
       func_name += "_trans";
-    print_extern_call_stmt(func_name, 2);
+    print_extern_call_stmt(func_name, 2, is_shape_encoded ? 1 : 0);
   } else if (op->op.same_as(tl::fence_proxy_async())) {
     print_extern_call_stmt("tl.fence_proxy_async");
   } else if (op->op.same_as(tl::tma_store_arrive())) {
@@ -1409,16 +1417,6 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     }
   } else if (op->op.same_as(builtin::thread_return())) {
     os << "return";
-  } else if (op->op.same_as(tl::tl_gemm())) {
-    ICHECK(op->args.size() == 4) << "tl_gemm expects 4 arguments <op_instance, "
-                                    "A_ptr, B_ptr, C_ptr>, but got "
-                                 << op->args.size();
-
-    auto op_instance = Downcast<StringImm>(op->args[0]);
-    PrintCallExtern_(GetType(GetRef<PrimExpr>(op)), op_instance->value,
-                     op->args, true, os);
-  } else if (op->op.same_as(tl::tl_gemm_sp())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(tl::shfl_sync())) {
     ICHECK_EQ(op->args.size(), 4U)
         << "tl.shfl_sync expects <mask, value, src_lane, width>.";
@@ -1511,7 +1509,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     os << "tl.increase_descriptor_offset(" << descriptor << ", " << offset
        << ")";
   } else if (op->op.same_as(tl::__exp())) {
-    os << "tl.exp2(" << PrintExpr_(op->args[0]) << ", fastmath=True)";
+    os << "tl.exp(" << PrintExpr_(op->args[0]) << ", fastmath=True)";
   } else if (op->op.same_as(tl::__exp10())) {
     os << "tl.exp10(" << PrintExpr_(op->args[0]) << ", fastmath=True)";
   } else if (op->op.same_as(tl::__log())) {
@@ -1526,6 +1524,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     os << "tl.cos(" << PrintExpr_(op->args[0]) << ", fastmath=True)";
   } else if (op->op.same_as(tl::__sin())) {
     os << "tl.sin(" << PrintExpr_(op->args[0]) << ", fastmath=True)";
+  } else if (op->op.same_as(tl::fast_rcp())) {
+    os << "(1.0 / " << PrintExpr_(op->args[0]) << ")";
   } else if (op->op.same_as(tl::ieee_add())) {
     // ieee_add(a, b, rounding_mode)
     std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
@@ -1639,6 +1639,16 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     this->PrintIndent();
     this->stream << "tl.AtomicStore(" << dst_ptr << ", " << value << ", "
                  << memory_order << ")\n";
+  } else if (op->op.same_as(tl::atomic_or_elem_op())) {
+    // atomic_or_elem_op(dst_ptr, src_value[, memory_order])
+    std::string dst_ptr = PrintExpr_(op->args[0]);
+    std::string src_value = PrintExpr_(op->args[1]);
+    this->PrintIndent();
+    this->stream << "tl.AtomicOr(" << dst_ptr << ", " << src_value;
+    if (op->args.size() > 2) {
+      this->stream << ", " << PrintExpr_(op->args[2]);
+    }
+    this->stream << ")\n";
   } else if (op->op.same_as(tl::atomic_max_elem_op())) {
     // atomic_max_elem_op(dst_ptr, src_value[, memory_order])
     std::string dst_ptr = PrintExpr_(op->args[0]);

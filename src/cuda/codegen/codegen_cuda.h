@@ -91,6 +91,12 @@ private:
   // Global curand state
   std::string curand_random_generator_state;
   std::string curand_random_generator_state_type;
+  // Function-scope curand state declarations: tl.rng_init call node -> var
+  // name. States are declared at kernel top (see AddFunction) because
+  // sync-insertion passes may split the block containing rng_init across
+  // __syncthreads(), which would put a call-site declaration out of scope
+  // for later rng_rand / rng_rand_float uses.
+  std::unordered_map<const CallNode *, std::string> rng_state_name_map_;
 
   // whether enable fp16
   bool enable_fp16_{false};
@@ -110,6 +116,16 @@ private:
   bool enable_warp_shuffle_{false};
   // whether need math_constants.h
   bool need_math_constants_h_{false};
+  // whether need tl CUDA math helpers
+  bool need_math_h_{false};
+  // whether need tl copy helpers
+  bool need_copy_h_{false};
+  // whether need tl SM90 TMA copy helpers
+  bool need_copy_sm90_h_{false};
+  // whether need tl SM100 TMA/tensor-memory copy helpers
+  bool need_copy_sm100_h_{false};
+  // whether need tl mbarrier helpers
+  bool need_barrier_h_{false};
   // whether need mma.h
   bool need_mma_h_{false};
   // whether need tl mma instruction header
@@ -126,6 +142,10 @@ private:
   bool need_wgmma_sp_instruction_h_{false};
   // whether need tcgen_05 common header
   bool need_tcgen05_common_h_{false};
+  // whether need tl runtime intrinsic helpers
+  bool need_intrin_h_{false};
+  // whether need tl atomic helpers
+  bool need_atomic_h_{false};
   // whether need cast_smem_ptr_to_int helper function
   bool need_cast_smem_ptr_to_int_{false};
   // whether need cooperative_groups.h

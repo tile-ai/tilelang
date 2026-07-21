@@ -1,6 +1,5 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from enum import IntEnum
 import tilelang.language as T
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 from tvm import DataType
@@ -12,14 +11,19 @@ from tilelang.language.dtypes import get_tvm_dtype
 from tilelang.utils import is_tensor_memory
 from tilelang.layout import (
     Layout,
-    make_full_bank_swizzled_layout,
-    make_half_bank_swizzled_layout,
-    make_quarter_bank_swizzled_layout,
-    make_linear_layout,
+    SwizzleMode,
+    cute,
 )
 from tvm.runtime import convert
 
 lift = convert
+
+
+def _min_leaf_stride(stride) -> int:
+    """Smallest leaf stride within a (possibly nested) stride tuple."""
+    if isinstance(stride, tuple):
+        return min(_min_leaf_stride(s) for s in stride)
+    return int(stride)
 
 
 @dataclass(frozen=True)
@@ -30,8 +34,8 @@ class TCGEN05DescriptorParams:
     ``init_tcgen05_*_desc()`` and ``tcgen05_*_atom()`` methods.
     """
 
-    swizzle_mode: int
-    """SwizzleMode enum value (passed directly to ``T.initialize_tcgen05_descriptor``)."""
+    swizzle_mode: SwizzleMode
+    """Canonical swizzle mode; project to the descriptor field via ``tcgen05_layout_type()``."""
     leading_byte_offset: int
     """LBO >> 4, ready to pass to ``T.initialize_tcgen05_descriptor``."""
     stride_byte_offset: int
@@ -44,46 +48,11 @@ class TCGEN05DescriptorParams:
     """Bit width of a single logical element."""
     is_k_major: bool
     """Whether the matrix is stored in K-major order (affects offset formula branching)."""
-
-
-class SwizzleMode(IntEnum):
-    # SWIZZLE_NONE = 0, SWIZZLE_32B = 3, SWIZZLE_64B = 2, SWIZZLE_128B = 1
-    NONE = 0
-    SWIZZLE_128B = 2
-    SWIZZLE_64B = 4
-    SWIZZLE_32B = 6
-
-    def is_none(self) -> bool:
-        return self == SwizzleMode.NONE
-
-    def is_swizzle_32b(self) -> bool:
-        return self == SwizzleMode.SWIZZLE_32B
-
-    def is_swizzle_64b(self) -> bool:
-        return self == SwizzleMode.SWIZZLE_64B
-
-    def is_swizzle_128b(self) -> bool:
-        return self == SwizzleMode.SWIZZLE_128B
-
-    def swizzle_byte_size(self) -> int:
-        if self.is_swizzle_32b():
-            return 32
-        elif self.is_swizzle_64b():
-            return 64
-        elif self.is_swizzle_128b():
-            return 128
-        else:
-            return 1
-
-    def swizzle_atom_size(self) -> int:
-        if self.is_swizzle_32b():
-            return 32 // 16
-        elif self.is_swizzle_64b():
-            return 64 // 16
-        elif self.is_swizzle_128b():
-            return 128 // 16
-        else:
-            return 1
+    slice_byte_offset: object = 0
+    """Physical byte offset (raw bytes) of the operand slice origin within its
+    buffer; passed to ``T.increase_descriptor_offset`` after building the
+    descriptor from the buffer base. ``0`` for a whole-buffer / base-origin
+    operand. Computed by :func:`compute_umma_descriptor` from the CuTe layout."""
 
 
 def _bytes_to_elements(byte_count: int, elem_bits: int) -> int:
@@ -99,6 +68,121 @@ def _elements_to_bytes(elem_count: int, elem_bits: int) -> int:
     if isinstance(elem_count, int) and bits % 8 != 0:
         raise ValueError(f"{elem_count} elements of {elem_bits}-bit dtype do not end on a byte boundary")
     return bits // 8
+
+
+def compute_umma_descriptor(tl_layout, buffer, transposed: bool, micro_size_k: int = 16, region=None) -> TCGEN05DescriptorParams:
+    """Port of CuTe ``make_umma_desc`` (mma_traits_sm100.hpp).
+
+    The Blackwell analog of :func:`compute_gmma_descriptor`: decode an arbitrary
+    shared-memory ``tl_layout`` for ``buffer`` and compute the UMMA descriptor
+    parameters, accepting any UMMA-canonical layout. A non-canonical layout is a
+    programming error, so the canonicity checks assert (mirroring CuTe's
+    ``static_assert``s).
+
+    SBO/LBO are read in uint128 units from the canonical layout (dtype-agnostic,
+    exactly like ``make_umma_desc``); ``elem_bits`` is carried for the atom-offset
+    math. The ``SWIZZLE_128B_BASE32B`` UMMA mode is not produced by tilelang's
+    shared-layout makers, so only the standard {NONE,32B,64B,128B} atoms appear.
+    Unlike ``make_umma_desc`` (which sees one atom), the decoded layout here is the
+    whole operand tile; 2SM/block-scaled atom splitting is handled by the caller.
+
+    ``transposed`` selects which logical axis is MN vs K (shape only): default
+    ``[MN, K]``, transposed ``[K, MN]``. The operand is required to be row-major,
+    i.e. K-major iff ``not transposed``; the contiguity detected from the layout
+    is asserted to agree.
+
+    ``region`` is the operand's per-axis ranges (one :class:`tvm.ir.Range` per
+    logical buffer mode), used to restrict the decoded layout to a sliced
+    operand. It may be ``None`` for a full-buffer operand.
+    """
+    elem_bits = get_tvm_dtype(buffer.dtype).bits
+    # One decode in element space; the byte- and u128-address variants are pure
+    # recasts of it.
+    composed_elem = cute.ComposedLayout.from_tilelang(tl_layout)
+    assert composed_elem is not None, f"UMMA operand layout is not decodable by the CuTe analyzer: {tl_layout}"
+    # Swizzle is read in BYTE space (canonical atom Sw<b,4,3>, m_base==4).
+    byte_swizzle = composed_elem.recast(elem_bits, 8).swizzle
+    swizzle_mode = byte_swizzle.to_swizzle_mode()
+
+    # Restrict the (possibly hierarchical, swizzle-split) element-space layout to
+    # the operand's slice; the descriptor is built from the buffer base and
+    # advanced to the slice origin by this offset (warp-uniform).
+    tile = composed_elem.layout
+    slice_byte_offset = 0
+    if region is not None:
+        slice_off_elems, tile = cute.restrict(composed_elem.layout, region)
+        if slice_off_elems != 0:
+            slice_byte_offset = tvm.arith.Analyzer().simplify(slice_off_elems * elem_bits // 8)
+    assert cute.rank(tile) == 2, f"UMMA operand tile must be rank-2 (MN, K), got rank {cute.rank(tile)}"
+    # Present in UMMA (MN, K) order, then recast the swizzled element layout to
+    # uint128_t (exactly CuTe's recast<uint128_t const>(tensor)).
+    mn_idx = 1 if transposed else 0
+    k_idx = 1 - mn_idx
+    mn_dim = int(cute.size(tile[mn_idx]))
+    mnk = cute.make_layout([tile[mn_idx], tile[k_idx]])
+    u128 = cute.ComposedLayout(composed_elem.swizzle, composed_elem.offset, mnk).recast(elem_bits, 128)
+    mn_mode, k_mode = u128.layout[0], u128.layout[1]
+
+    # Row-major only: K-major iff not transposed. Assert the contiguity detected
+    # from the layout agrees.
+    k_major = not transposed
+    detected_k_major = _min_leaf_stride(k_mode.stride) == 1
+    assert detected_k_major == k_major, (
+        f"UMMA operand layout contiguity (k_major={detected_k_major}) disagrees with "
+        f"the row-major expectation (k_major={k_major} for transposed={transposed}); "
+        f"only row-major operand layouts are supported."
+    )
+
+    # SwizzleAtomMNSize per UMMA LayoutType (NONE->1, B32->2, B64->4, B128->8) = 1 << b_bits.
+    W = 1 << byte_swizzle.b_bits
+    swizzled = not swizzle_mode.is_none()
+
+    # CuTe make_umma_desc logical_divides each u128 (MN, K) mode by the canonical
+    # tiler:
+    #   MN-major: ((W,m),(8,k)):((1,LBO),(W,SBO))   [INTERLEAVE: ((1,m),(8,k)):((X,SBO),(1,LBO))]
+    #   K-major : ((8,m),(2,k)):((8,SBO),(1,2))
+    # Each divided mode is (tile, rest) and its strides read directly as scalars.
+    if k_major:
+        d_mn = cute.logical_divide(mn_mode, cute.make_layout(8, 1))
+        d_k = cute.logical_divide(k_mode, cute.make_layout(2, 1))
+    else:
+        d_mn = cute.logical_divide(mn_mode, cute.make_layout(W, 1))
+        d_k = cute.logical_divide(k_mode, cute.make_layout(8, 1))
+    assert cute.congruent(d_mn.shape, (1, 1)) and cute.congruent(d_k[0].shape, 1), (
+        f"UMMA operand is not a canonical layout: divided MN={d_mn.shape}, K-tile={d_k[0].shape}"
+    )
+    s00, s01 = d_mn.stride
+    s10 = d_k.stride[0]
+
+    if k_major:
+        # Canonical ((8,m),(2,k)):((8,SBO),(1,2)). stride<0,0>==W; stride<1,0> is
+        # the INTERLEAVE pass-through or 1 when swizzled. SBO=stride<0,1>, LBO=1.
+        assert s00 == W, f"Not a canonical UMMA_K layout: stride<0,0>={s00} != W={W}"
+        assert not (swizzled and s10 != 1), f"Not a canonical UMMA_K layout: stride<1,0>={s10} != 1"
+        sbo = s01
+        lbo = s10
+    else:
+        # Canonical ((W,m),(8,k)). stride<1,0>==W, and stride<0,0>==1 when swizzled.
+        assert cute.congruent(d_k.shape, (1, 1)), f"UMMA MN-major operand is not a canonical layout: divided K={d_k.shape}"
+        s11 = d_k.stride[1]
+        assert not (swizzled and s00 != 1), f"Not a canonical UMMA_MN layout: stride<0,0>={s00} != 1"
+        assert s10 == W, f"Not a canonical UMMA_MN layout: stride<1,0>={s10} != W={W}"
+        sbo = s11 if swizzled else s01
+        lbo = s01 if swizzled else s11
+
+    # Elements per swizzle atom along the non-K (MN) dimension; the unswizzled
+    # case spans the whole MN tile (bit-based so sub-byte dtypes stay packed).
+    swizzle_atom_elems = mn_dim if swizzle_mode.is_none() else _bytes_to_elements(swizzle_mode.swizzle_byte_size(), elem_bits)
+    return TCGEN05DescriptorParams(
+        swizzle_mode=swizzle_mode,
+        leading_byte_offset=int(lbo),
+        stride_byte_offset=int(sbo),
+        swizzle_atom_elems=swizzle_atom_elems,
+        k_atom_size=max(swizzle_atom_elems // micro_size_k, 1),
+        elem_bits=elem_bits,
+        is_k_major=k_major,
+        slice_byte_offset=slice_byte_offset,
+    )
 
 
 # derive from MMAIntrinEmitter as some layouts are the same
@@ -184,20 +268,6 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         if isinstance(buf_or_region, BufferRegion):
             return buf_or_region.buffer
         return buf_or_region
-
-    def _determinate_swizzle_mode(self, buffer, layout: Layout) -> SwizzleMode:
-        buffer = self._as_buffer(buffer)
-        # same behavior to src/layout/gemm_layouts.cc::makeGemmABLayoutHopper
-        if layout is None or layout.is_equal(make_linear_layout(buffer)):
-            return SwizzleMode.NONE
-        elif layout.is_equal(make_quarter_bank_swizzled_layout(buffer)):
-            return SwizzleMode.SWIZZLE_32B
-        elif layout.is_equal(make_half_bank_swizzled_layout(buffer)):
-            return SwizzleMode.SWIZZLE_64B
-        elif layout.is_equal(make_full_bank_swizzled_layout(buffer)):
-            return SwizzleMode.SWIZZLE_128B
-        else:
-            raise ValueError(f"Unsupported swizzle mode: {layout}")
 
     def tcgen05mma(self, A_buf: Buffer, B_buf: Buffer, C_local_buf: Buffer, mbar, clear_accum: PrimExpr = False):
         """Emit a TCGEN5MMA operation, dispatching to SS or TS variant based on A's memory scope.
@@ -344,9 +414,6 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         a_is_k_major = not self.a_transposed
         b_is_k_major = self.b_transposed
-        a_swizzle_mode = self._determinate_swizzle_mode(A_buf, self.a_shared_layout)
-
-        a_elem_bits = get_tvm_dtype(self._as_buffer(A_buf).dtype).bits
 
         if len(self.meta) != 5:
             self.get_tcgen5_mma_meta(m_dim, n_dim, k_dim, disable_2cta=False, disable_ws=True)
@@ -358,37 +425,14 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         atom_m, atom_n, _, _, enable_2cta = self.tcgen05_meta_unpacked
         atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
 
-        a_swizzle_atom_elems = (
-            atom_m_per_cta if a_swizzle_mode.is_none() else _bytes_to_elements(a_swizzle_mode.swizzle_byte_size(), a_elem_bits)
-        )
-
-        # Block-scaled A LBO/SBO differ from regular SS (uses atom_m_per_cta instead of m_dim)
-        a_leading_byte_offset = (
-            _elements_to_bytes(8 * 8, a_elem_bits) if a_is_k_major else _elements_to_bytes(8 * atom_m_per_cta, a_elem_bits)
-        )
-        a_stride_byte_offset = _elements_to_bytes(8 * k_dim, a_elem_bits) if a_is_k_major else _elements_to_bytes(8 * 8, a_elem_bits)
-        if not a_swizzle_mode.is_none():
-            if a_is_k_major:
-                a_leading_byte_offset = 16
-                a_stride_byte_offset = 8 * a_swizzle_mode.swizzle_byte_size()
-            else:
-                a_m_axis_atoms = atom_m_per_cta // a_swizzle_atom_elems
-                a_leading_byte_offset = k_dim * a_swizzle_mode.swizzle_byte_size() if a_m_axis_atoms > 1 else 0
-                a_stride_byte_offset = (
-                    _elements_to_bytes(8 * a_swizzle_atom_elems, a_elem_bits)
-                    if a_m_axis_atoms > 1
-                    else _elements_to_bytes(8 * atom_m_per_cta, a_elem_bits)
-                )
-
-        a_params = TCGEN05DescriptorParams(
-            swizzle_mode=int(a_swizzle_mode),
-            leading_byte_offset=int(a_leading_byte_offset >> 4),
-            stride_byte_offset=int(a_stride_byte_offset >> 4),
-            swizzle_atom_elems=a_swizzle_atom_elems,
-            k_atom_size=max(a_swizzle_atom_elems // micro_size_k, 1),
-            elem_bits=a_elem_bits,
-            is_k_major=a_is_k_major,
-        )
+        # CuTe builds the block-scaled A descriptor with FrgTypeA =
+        # UMMA::smem_desc<a_major>, i.e. the *same* make_umma_desc as the regular
+        # SS path -- the descriptor describes the physical SMEM tile and is
+        # independent of the MMA atom_m. So decode it via compute_umma_descriptor
+        # (which also handles a sliced A operand) rather than re-deriving SBO/LBO
+        # from atom_m_per_cta. The per-atom M stepping in tcgen05_blockscaled_atom
+        # walks within the whole-tile descriptor exactly as tcgen05_ss_atom does.
+        a_params = self.compute_tcgen05_a_desc_params(A_buf)
         b_params = self.compute_tcgen05_b_desc_params(B_buf)
 
         base_instr_desc = self.get_tcgen5_blockscaled_instr_desc(
@@ -661,105 +705,40 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
     # -- Descriptor parameter computation (pure Python, no TIR) --
 
     def compute_tcgen05_b_desc_params(self, B_buf) -> TCGEN05DescriptorParams:
-        """Compute B descriptor parameters from the B shared buffer.
-
-        This is a pure-Python helper -- no TIR code is emitted.
-        The returned ``TCGEN05DescriptorParams`` is passed to
-        ``init_tcgen05_b_desc()`` and ``tcgen05_*_atom()`` methods.
+        """Compute B descriptor parameters from the B shared buffer via the CuTe
+        ``make_umma_desc`` port. The returned ``TCGEN05DescriptorParams`` is passed
+        to ``init_tcgen05_b_desc()`` and ``tcgen05_*_atom()``.
 
         Parameters
         ----------
         B_buf : Buffer or BufferRegion
             The B operand in shared memory.
         """
-        atom_m, atom_n, _, _, enable_2cta = self.tcgen05_meta_unpacked
-        n_dim = self.block_col_warps * self.warp_col_tiles
-        n_dim_per_cta = n_dim // 2 if enable_2cta else n_dim
-        k_dim = self.chunk
-        micro_size_k = self.micro_size_k
-        elem_bits = get_tvm_dtype(self._as_buffer(B_buf).dtype).bits
-        b_is_k_major = self.b_transposed
-
-        b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
-        b_swizzle_atom_elems = (
-            n_dim_per_cta if b_swizzle_mode.is_none() else _bytes_to_elements(b_swizzle_mode.swizzle_byte_size(), elem_bits)
-        )
-
-        b_leading_byte_offset = _elements_to_bytes(8 * 8, elem_bits) if b_is_k_major else _elements_to_bytes(8 * n_dim_per_cta, elem_bits)
-        b_stride_byte_offset = (
-            _elements_to_bytes(8 * k_dim, elem_bits)
-            if b_is_k_major
-            else (0 if n_dim_per_cta == 8 else _elements_to_bytes(8 * 8, elem_bits))
-        )
-        if not b_swizzle_mode.is_none():
-            if b_is_k_major:
-                b_leading_byte_offset = 16
-                b_stride_byte_offset = 8 * b_swizzle_mode.swizzle_byte_size()
-            else:
-                b_n_axis_atoms = n_dim_per_cta // b_swizzle_atom_elems
-                if b_n_axis_atoms <= 1:
-                    b_leading_byte_offset = 0
-                else:
-                    b_leading_byte_offset = _elements_to_bytes(8 * 8 * k_dim, elem_bits)
-                if b_n_axis_atoms <= 1:
-                    b_stride_byte_offset = _elements_to_bytes(8 * n_dim_per_cta, elem_bits)
-                else:
-                    b_stride_byte_offset = _elements_to_bytes(8 * b_swizzle_atom_elems, elem_bits)
-
-        return TCGEN05DescriptorParams(
-            swizzle_mode=int(b_swizzle_mode),
-            leading_byte_offset=int(b_leading_byte_offset >> 4),
-            stride_byte_offset=int(b_stride_byte_offset >> 4),
-            swizzle_atom_elems=b_swizzle_atom_elems,
-            k_atom_size=max(b_swizzle_atom_elems // micro_size_k, 1),
-            elem_bits=elem_bits,
-            is_k_major=b_is_k_major,
+        assert self.b_shared_layout is not None, "TCGEN05 B operand has no shared layout to decode"
+        return compute_umma_descriptor(
+            self.b_shared_layout,
+            B_buf.buffer if isinstance(B_buf, BufferRegion) else B_buf,
+            transposed=not self.b_transposed,
+            micro_size_k=self.micro_size_k,
+            region=list(B_buf.region) if isinstance(B_buf, BufferRegion) else None,
         )
 
     def compute_tcgen05_a_desc_params(self, A_buf) -> TCGEN05DescriptorParams:
-        """Compute A descriptor parameters from the A shared buffer (SS variant).
-
-        This is a pure-Python helper -- no TIR code is emitted.
+        """Compute A descriptor parameters from the A shared buffer (SS variant)
+        via the CuTe ``make_umma_desc`` port.
 
         Parameters
         ----------
         A_buf : Buffer or BufferRegion
             The A operand in shared memory.
         """
-        m_dim = self.block_row_warps * self.warp_row_tiles
-        k_dim = self.chunk
-        micro_size_k = self.micro_size_k
-        elem_bits = get_tvm_dtype(self._as_buffer(A_buf).dtype).bits
-        a_is_k_major = not self.a_transposed
-
-        a_swizzle_mode = self._determinate_swizzle_mode(A_buf, self.a_shared_layout)
-        a_swizzle_atom_elems = m_dim if a_swizzle_mode.is_none() else _bytes_to_elements(a_swizzle_mode.swizzle_byte_size(), elem_bits)
-
-        a_leading_byte_offset = _elements_to_bytes(8 * 8, elem_bits) if a_is_k_major else _elements_to_bytes(8 * m_dim, elem_bits)
-        a_stride_byte_offset = _elements_to_bytes(8 * k_dim, elem_bits) if a_is_k_major else _elements_to_bytes(8 * 8, elem_bits)
-        if not a_swizzle_mode.is_none():
-            if a_is_k_major:
-                a_leading_byte_offset = 16
-                a_stride_byte_offset = 8 * a_swizzle_mode.swizzle_byte_size()
-            else:
-                a_m_axis_atoms = m_dim // a_swizzle_atom_elems
-                if a_m_axis_atoms <= 1:
-                    a_leading_byte_offset = 0
-                else:
-                    a_leading_byte_offset = k_dim * a_swizzle_mode.swizzle_byte_size()
-                if a_m_axis_atoms <= 1:
-                    a_stride_byte_offset = _elements_to_bytes(8 * m_dim, elem_bits)
-                else:
-                    a_stride_byte_offset = _elements_to_bytes(8 * a_swizzle_atom_elems, elem_bits)
-
-        return TCGEN05DescriptorParams(
-            swizzle_mode=int(a_swizzle_mode),
-            leading_byte_offset=int(a_leading_byte_offset >> 4),
-            stride_byte_offset=int(a_stride_byte_offset >> 4),
-            swizzle_atom_elems=a_swizzle_atom_elems,
-            k_atom_size=max(a_swizzle_atom_elems // micro_size_k, 1),
-            elem_bits=elem_bits,
-            is_k_major=a_is_k_major,
+        assert self.a_shared_layout is not None, "TCGEN05 A operand has no shared layout to decode"
+        return compute_umma_descriptor(
+            self.a_shared_layout,
+            A_buf.buffer if isinstance(A_buf, BufferRegion) else A_buf,
+            transposed=self.a_transposed,
+            micro_size_k=self.micro_size_k,
+            region=list(A_buf.region) if isinstance(A_buf, BufferRegion) else None,
         )
 
     # -- Descriptor initialization (emit TIR) --
@@ -776,17 +755,21 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         b_params : TCGEN05DescriptorParams
             Pre-computed parameters from ``compute_tcgen05_b_desc_params()``.
         """
-        access_ptr_from = self._access_ptr_from
         lbo = b_params.leading_byte_offset
         sbo = b_params.stride_byte_offset
-        swizzle_mode = b_params.swizzle_mode
-        B_ptr = access_ptr_from(B_buf, "r")
+        swizzle_mode = b_params.swizzle_mode.tcgen05_layout_type()
+        slice_byte_offset = b_params.slice_byte_offset
+        is_sliced = not isinstance(slice_byte_offset, int) or slice_byte_offset != 0
+        B_base_ptr = self._as_buffer(B_buf).access_ptr("r")
 
         @T.macro
-        def _init_b(desc_b, B_ptr):
-            T.initialize_tcgen05_descriptor(desc_b, B_ptr, lbo, sbo, 0, False, swizzle_mode)
+        def _init_b(desc_b, B_base_ptr):
+            # Build from the buffer base (uniform cvta), then advance to the slice origin.
+            T.initialize_tcgen05_descriptor(desc_b, B_base_ptr, lbo, sbo, 0, False, swizzle_mode)
+            if is_sliced:
+                T.increase_descriptor_offset(desc_b, slice_byte_offset)
 
-        return _init_b(desc_b, B_ptr)
+        return _init_b(desc_b, B_base_ptr)
 
     def init_tcgen05_a_desc(self, desc_a, A_buf, a_params: TCGEN05DescriptorParams):
         """Emit TIR to initialize a pre-allocated TCGEN05 A descriptor (SS variant).
@@ -800,17 +783,21 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         a_params : TCGEN05DescriptorParams
             Pre-computed parameters from ``compute_tcgen05_a_desc_params()``.
         """
-        access_ptr_from = self._access_ptr_from
         lbo = a_params.leading_byte_offset
         sbo = a_params.stride_byte_offset
-        swizzle_mode = a_params.swizzle_mode
-        A_ptr = access_ptr_from(A_buf, "r")
+        swizzle_mode = a_params.swizzle_mode.tcgen05_layout_type()
+        slice_byte_offset = a_params.slice_byte_offset
+        is_sliced = not isinstance(slice_byte_offset, int) or slice_byte_offset != 0
+        A_base_ptr = self._as_buffer(A_buf).access_ptr("r")
 
         @T.macro
-        def _init_a(desc_a, A_ptr):
-            T.initialize_tcgen05_descriptor(desc_a, A_ptr, lbo, sbo, 0, False, swizzle_mode)
+        def _init_a(desc_a, A_base_ptr):
+            # Build from the buffer base (uniform cvta), then advance to the slice origin.
+            T.initialize_tcgen05_descriptor(desc_a, A_base_ptr, lbo, sbo, 0, False, swizzle_mode)
+            if is_sliced:
+                T.increase_descriptor_offset(desc_a, slice_byte_offset)
 
-        return _init_a(desc_a, A_ptr)
+        return _init_a(desc_a, A_base_ptr)
 
     # -- Instruction descriptor computation --
 

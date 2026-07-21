@@ -41,14 +41,14 @@ public:
   }
 
   /// Type checking methods
-  bool isSum() const { return type == int(ReduceTypeEnum::kSum); }
-  bool isAbsSum() const { return type == int(ReduceTypeEnum::kAbsSum); }
-  bool isMax() const { return type == int(ReduceTypeEnum::kMax); }
-  bool isMin() const { return type == int(ReduceTypeEnum::kMin); }
-  bool isAbsMax() const { return type == int(ReduceTypeEnum::kAbsMax); }
-  bool isBitAnd() const { return type == int(ReduceTypeEnum::kBitAnd); }
-  bool isBitOr() const { return type == int(ReduceTypeEnum::kBitOr); }
-  bool isBitXor() const { return type == int(ReduceTypeEnum::kBitXor); }
+  bool IsSum() const { return type == int(ReduceTypeEnum::kSum); }
+  bool IsAbsSum() const { return type == int(ReduceTypeEnum::kAbsSum); }
+  bool IsMax() const { return type == int(ReduceTypeEnum::kMax); }
+  bool IsMin() const { return type == int(ReduceTypeEnum::kMin); }
+  bool IsAbsMax() const { return type == int(ReduceTypeEnum::kAbsMax); }
+  bool IsBitAnd() const { return type == int(ReduceTypeEnum::kBitAnd); }
+  bool IsBitOr() const { return type == int(ReduceTypeEnum::kBitOr); }
+  bool IsBitXor() const { return type == int(ReduceTypeEnum::kBitXor); }
 };
 
 /// Wrapper class for reduction type with string-based construction

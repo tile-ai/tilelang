@@ -347,7 +347,7 @@ void CodeGenTileLangMetal::PrintType(DataType t,
     os << "bool";
     return;
   }
-  if (t.is_float() && t.bits() == 16 && lanes > 4 && lanes <= 8 &&
+  if ((t.is_float16() || t.is_bfloat16()) && lanes > 4 && lanes <= 8 &&
       lanes % 2 == 0) {
     os << "uint" << lanes / 2;
     return;
@@ -433,6 +433,8 @@ void CodeGenTileLangMetal::PrintVecElemLoad(const std::string &vec, DataType t,
                                             std::ostream &os) { // NOLINT(*)
   if (t.is_float16() && t.lanes() > 4) {
     os << "((thread half*)(&" << vec << "))[" << i << "]";
+  } else if (t.is_bfloat16() && t.lanes() > 4) {
+    os << "((thread bfloat*)(&" << vec << "))[" << i << "]";
   } else {
     os << vec << "[" << i << "]";
   }
@@ -443,6 +445,9 @@ void CodeGenTileLangMetal::PrintVecElemStore(const std::string &vec, DataType t,
   this->PrintIndent();
   if (t.is_float16() && t.lanes() > 4) {
     stream << "((thread half*)(&" << vec << "))[" << i << "] = " << value
+           << ";\n";
+  } else if (t.is_bfloat16() && t.lanes() > 4) {
+    stream << "((thread bfloat*)(&" << vec << "))[" << i << "] = " << value
            << ";\n";
   } else {
     stream << vec << "[" << i << "]"
@@ -810,12 +815,17 @@ void CodeGenTileLangMetal::VisitExpr_(const BroadcastNode *op,
                                       std::ostream &os) { // NOLINT(*)
   std::string v = PrintExpr(op->value);
   int lanes = op->dtype.lanes();
-  if (op->dtype.is_float16() && lanes > 4 && lanes % 2 == 0) {
+  if ((op->dtype.is_float16() || op->dtype.is_bfloat16()) && lanes > 4 &&
+      lanes % 2 == 0) {
     os << "uint" << lanes / 2 << "(";
     for (int i = 0; i < lanes / 2; ++i) {
       if (i != 0)
         os << ", ";
-      os << "as_type<uint>(half2(" << v << ", " << v << "))";
+      if (op->dtype.is_float16()) {
+        os << "as_type<uint>(half2(" << v << ", " << v << "))";
+      } else if (op->dtype.is_bfloat16()) {
+        os << "as_type<uint>(bfloat2(" << v << ", " << v << "))";
+      }
     }
     os << ')';
   } else {

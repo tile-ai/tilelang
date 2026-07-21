@@ -43,6 +43,30 @@ Stmt VisitStmt_(const ForNode* op) final {
 
 Keep these raw pointers local to the immediate inspection or mutation site.
 
+## TileLang Intrinsic Calls
+
+When adding a new internal TileLang intrinsic, represent it as a registered
+TileLang `Op` plus `call_intrin`, not as `call_extern`.
+
+- Register the intrinsic in C++ first, usually with a `TVM_DLL const Op&`
+  declaration in `src/op/builtin.h` and a matching `TIR_DEFINE_TL_BUILTIN(...)`
+  registration in `src/op/builtin.cc`.
+- In C++ transforms and lowering passes, build the call with the registered op,
+  for example `Call(dtype, tl::my_intrin(), args)`.
+- In Python/TScript helpers or tests, use `tirx.call_intrin(...)` or
+  `T.call_intrin(..., tirx.op.Op.get("tl.my_intrin"), ...)`.
+- Add backend codegen handling by matching the op identity, for example
+  `op->op.same_as(tl::my_intrin())`, and set any required template/header flags
+  from that intrinsic branch.
+
+Do not use `builtin::call_extern`, `tirx.call_extern`, or `T.call_extern` to
+smuggle internal TileLang runtime-template helpers through IR. Reserve
+`call_extern` for real external ABI calls, user-provided/custom externs, or
+lowered packed/runtime calls whose contract is genuinely external. Avoid
+special-casing `PrintCallExtern` by global symbol name for new TileLang
+intrinsics; the include and emission logic should live on the intrinsic's
+`call_intrin` codegen path.
+
 ## Avoid
 
 - Passing `const ForNode*`, `const BufferNode*`, `const VarNode*`, or `const SBlockNode*` between helper functions when a handle exists.

@@ -1,22 +1,16 @@
 from __future__ import annotations
-from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import SwizzleMode, gcd
+from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import gcd, compute_gmma_descriptor, WGMMADescriptorParams
 from tilelang.cuda.intrinsics.macro.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 import tilelang.language as T
 from tvm import DataType
 from tvm.tirx import PrimExpr, Buffer, Var, BufferRegion, IndexMap
-from tilelang.utils import is_fragment, is_shared, retrive_ptr_from_buffer_region, is_full_region
+from tilelang.utils import is_fragment, is_shared, is_full_region
 from tilelang.cuda.intrinsics.layout.mma_layout import (
     shared_16x8_to_mma_32x4_layout_sr_a,
     shared_16x16_to_mma_32x8_layout_sr_a,
     shared_16x32_to_mma_32x16_layout_sr_a,
 )
-from tilelang.layout import (
-    Layout,
-    make_full_bank_swizzled_layout,
-    make_half_bank_swizzled_layout,
-    make_quarter_bank_swizzled_layout,
-    make_linear_layout,
-)
+from tilelang.layout import Layout
 from tilelang.cuda.intrinsics.layout.mma_sp_layout import (
     metadata_8bit_load_32x4_to_shared_16x4_layout_32bit,
     metadata_16bit_load_32x2_to_shared_16x2_layout_32bit,
@@ -101,18 +95,39 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         self.wgmma_inst_n = inst_n
         self.wgmma_prefix = f"m{inst_m}n{inst_n}k{inst_k}"
 
-    def _determinate_swizzle_mode(self, buffer: Buffer, layout: Layout) -> SwizzleMode:
-        # same behavior to src/layout/gemm_layouts.cc::makeGemmABLayoutHopper
-        if layout is None or layout.is_equal(make_linear_layout(buffer)):
-            return SwizzleMode.NONE
-        elif layout.is_equal(make_quarter_bank_swizzled_layout(buffer)):
-            return SwizzleMode.SWIZZLE_32B
-        elif layout.is_equal(make_half_bank_swizzled_layout(buffer)):
-            return SwizzleMode.SWIZZLE_64B
-        elif layout.is_equal(make_full_bank_swizzled_layout(buffer)):
-            return SwizzleMode.SWIZZLE_128B
-        else:
-            raise ValueError(f"Unsupported swizzle mode: {layout}")
+    # -- Descriptor parameter computation (pure Python, no TIR) --
+
+    def compute_wgmma_a_desc_params(self, A_region: BufferRegion) -> WGMMADescriptorParams:
+        """Compute A descriptor parameters from the A shared buffer region (SS variant).
+
+        A is sparse: its physical (compressed) K extent is ``micro_size_k //
+        SPARSE_FACTOR``, passed as ``micro_size_k`` for the K-atom accounting.
+        Pure-Python helper (no TIR emitted); the returned ``WGMMADescriptorParams``
+        is consumed by ``wgmma_ss()``.
+        """
+        assert self.a_shared_layout is not None, "WGMMA sparse A operand has no shared layout to decode"
+        return compute_gmma_descriptor(
+            self.a_shared_layout,
+            A_region.buffer if isinstance(A_region, BufferRegion) else A_region,
+            transposed=self.a_transposed,
+            micro_size_k=self.micro_size_k // self.SPARSE_FACTOR,
+            region=list(A_region.region) if isinstance(A_region, BufferRegion) else None,
+        )
+
+    def compute_wgmma_b_desc_params(self, B_region: BufferRegion) -> WGMMADescriptorParams:
+        """Compute B descriptor parameters from the B shared buffer region.
+
+        Pure-Python helper (no TIR emitted); the returned ``WGMMADescriptorParams``
+        is consumed by ``wgmma_ss()`` and ``wgmma_rs()``.
+        """
+        assert self.b_shared_layout is not None, "WGMMA sparse B operand has no shared layout to decode"
+        return compute_gmma_descriptor(
+            self.b_shared_layout,
+            B_region.buffer if isinstance(B_region, BufferRegion) else B_region,
+            transposed=not self.b_transposed,
+            micro_size_k=self.micro_size_k,
+            region=list(B_region.region) if isinstance(B_region, BufferRegion) else None,
+        )
 
     def wgmma_ss(
         self,
@@ -145,80 +160,43 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         a_is_k_major = not self.a_transposed
         b_is_k_major = self.b_transposed
 
-        a_swizzle_mode = self._determinate_swizzle_mode(A_region, self.a_shared_layout)
-        b_swizzle_mode = self._determinate_swizzle_mode(B_region, self.b_shared_layout)
-
         elems_in_bits = DataType(self.a_dtype).bits
         elems_in_bytes = elems_in_bits // 8
 
-        a_swizzle_atom_elems = a_swizzle_mode.swizzle_byte_size() // elems_in_bytes
-        b_swizzle_atom_elems = n_dim if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
+        # Decode each operand's shared layout via the CuTe make_gmma_desc port.
+        a_params = self.compute_wgmma_a_desc_params(A_region)
+        b_params = self.compute_wgmma_b_desc_params(B_region)
+        a_swizzle_mode = a_params.swizzle_mode
+        b_swizzle_mode = b_params.swizzle_mode
+        a_swizzle_atom_elems = a_params.swizzle_atom_elems
+        b_swizzle_atom_elems = b_params.swizzle_atom_elems
+        a_slice_byte_offset = a_params.slice_byte_offset
+        b_slice_byte_offset = b_params.slice_byte_offset
+        a_is_sliced = not isinstance(a_slice_byte_offset, int) or a_slice_byte_offset != 0
+        b_is_sliced = not isinstance(b_slice_byte_offset, int) or b_slice_byte_offset != 0
+
         accum_bits = DataType(accum_dtype).bits
         accum_regs = ((m_dim // 64) * warp_cols * local_size_out * accum_bits + 31) // 32
 
-        a_leading_byte_offset = (8 * 8 * elems_in_bytes) if a_is_k_major else (8 * m_dim * elems_in_bytes)
-        a_stride_byte_offset = (8 * k_dim * elems_in_bytes) if a_is_k_major else (8 * 8 * elems_in_bytes)
-
-        if not a_swizzle_mode.is_none():
-            # swizzle mode doesn't require LBO/SBO to be 1
-            # https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-leading-dimension-byte-offset
-            if a_is_k_major:
-                a_leading_byte_offset = 16
-                a_stride_byte_offset = 8 * a_swizzle_mode.swizzle_byte_size()
-            else:
-                # MN Major
-                # LBO represents the distance between two atoms along the M dimension
-                # SBO represents the distance between two atoms along the K dimension
-                a_m_axis_atoms = m_dim // a_swizzle_atom_elems
-                if a_m_axis_atoms <= 1:
-                    a_leading_byte_offset = 0
-                else:
-                    a_leading_byte_offset = 8 * a_swizzle_mode.swizzle_atom_size() * (a_swizzle_mode.swizzle_byte_size() // elems_in_bytes)
-
-                if a_m_axis_atoms <= 1:
-                    a_stride_byte_offset = 8 * elems_in_bytes * m_dim
-                else:
-                    a_stride_byte_offset = 8 * elems_in_bytes * a_swizzle_atom_elems
-
-        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim * elems_in_bytes)
-        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (0 if n_dim == 8 else (8 * 8 * elems_in_bytes))
-        if not b_swizzle_mode.is_none():
-            # swizzle mode doesn't require LBO/SBO to be 1
-            # https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-leading-dimension-byte-offset
-            if b_is_k_major:
-                b_leading_byte_offset = 16
-                b_stride_byte_offset = 8 * b_swizzle_mode.swizzle_byte_size()
-            else:
-                # MN Major, K * N
-                # LBO represents the distance between two atoms along the N dimension
-                # SBO represents the distance between two atoms along the K dimension
-                b_n_axis_atoms = n_dim // b_swizzle_atom_elems
-                if b_n_axis_atoms <= 1:
-                    b_leading_byte_offset = 0
-                else:
-                    b_leading_byte_offset = 8 * 8 * elems_in_bytes * k_dim
-                if b_n_axis_atoms <= 1:
-                    b_stride_byte_offset = 8 * elems_in_bytes * n_dim
-                else:
-                    b_stride_byte_offset = 8 * elems_in_bytes * b_swizzle_atom_elems
-
         # for example, if [n, k] where k is 128, we should split it into 2 atoms
         # where max specially handles the case when n_dim is 8.
-        ak_atom_size = max(a_swizzle_atom_elems // (micro_size_k // self.SPARSE_FACTOR), 1)
-        bk_atom_size = max(b_swizzle_atom_elems // micro_size_k, 1)
+        ak_atom_size = a_params.k_atom_size
+        bk_atom_size = b_params.k_atom_size
         wgmma_inst_m, wgmma_inst_n = self.wgmma_inst_m, self.wgmma_inst_n
         num_inst_m = 4 * self.warp_row_tiles // wgmma_inst_m
         num_inst_n = self.warp_col_tiles // wgmma_inst_n
 
         thread_binding = self.get_thread_binding()
 
-        A_ptr = retrive_ptr_from_buffer_region(A_region)
-        B_ptr = retrive_ptr_from_buffer_region(B_region)
+        A_buf = A_region.buffer if isinstance(A_region, BufferRegion) else A_region
+        B_buf = B_region.buffer if isinstance(B_region, BufferRegion) else B_region
+        A_base_ptr = A_buf.access_ptr("r")
+        B_base_ptr = B_buf.access_ptr("r")
         assert is_full_region(C_region), "Fragment output C must be a full region"
         C_buf = C_region.buffer
 
         @T.macro
-        def _warp_mma(A_ptr, B_ptr, C_buf):
+        def _warp_mma(A_base_ptr, B_base_ptr, C_buf):
             tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
             k_blocks = k_dim // micro_size_k
             e_stage_elems = self.warp_rows * self.local_size_e
@@ -226,8 +204,20 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
 
             desc_a = T.alloc_wgmma_desc()
             desc_b = T.alloc_wgmma_desc()
-            T.initialize_wgmma_descriptor(desc_a, A_ptr, a_swizzle_mode, int(a_leading_byte_offset >> 4), int(a_stride_byte_offset >> 4))
-            T.initialize_wgmma_descriptor(desc_b, B_ptr, b_swizzle_mode, int(b_leading_byte_offset >> 4), int(b_stride_byte_offset >> 4))
+            # Build each descriptor from the buffer base (loop-invariant => uniform
+            # cvta), then advance start_address_ to the slice origin via the
+            # descriptor's in-place add. Keeps the descriptor warp-uniform (no
+            # per-thread cvta of a slice pointer carrying an induction variable).
+            T.initialize_wgmma_descriptor(
+                desc_a, A_base_ptr, a_swizzle_mode.wgmma_layout_type(), a_params.leading_byte_offset, a_params.stride_byte_offset
+            )
+            if a_is_sliced:
+                T.increase_descriptor_offset(desc_a, a_slice_byte_offset)
+            T.initialize_wgmma_descriptor(
+                desc_b, B_base_ptr, b_swizzle_mode.wgmma_layout_type(), b_params.leading_byte_offset, b_params.stride_byte_offset
+            )
+            if b_is_sliced:
+                T.increase_descriptor_offset(desc_b, b_slice_byte_offset)
 
             for ki in T.unroll(k_blocks):
                 for i in T.unroll(num_inst_m):
@@ -290,7 +280,7 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
                 T.warpgroup_wait(wg_wait)
             T.warpgroup_fence_operand(C_buf, num_regs=accum_regs)
 
-        return _warp_mma(A_ptr, B_ptr, C_buf)
+        return _warp_mma(A_base_ptr, B_base_ptr, C_buf)
 
     def wgmma_rs(
         self,
@@ -328,27 +318,12 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         accum_regs = ((m_dim // 64) * warp_cols * local_size_out * accum_bits + 31) // 32
         b_is_k_major = self.b_transposed
 
-        b_swizzle_mode = self._determinate_swizzle_mode(B_region, self.b_shared_layout)
-        b_swizzle_atom_elems = n_dim if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
-
-        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim * elems_in_bytes)
-        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (0 if n_dim == 8 else (8 * 8 * elems_in_bytes))
-        if not b_swizzle_mode.is_none():
-            if b_is_k_major:
-                b_leading_byte_offset = 16
-                b_stride_byte_offset = 8 * b_swizzle_mode.swizzle_byte_size()
-            else:
-                b_n_axis_atoms = n_dim // b_swizzle_atom_elems
-                if b_n_axis_atoms <= 1:
-                    b_leading_byte_offset = 0
-                else:
-                    b_leading_byte_offset = 8 * 8 * elems_in_bytes * k_dim
-                if b_n_axis_atoms <= 1:
-                    b_stride_byte_offset = 8 * elems_in_bytes * n_dim
-                else:
-                    b_stride_byte_offset = 8 * elems_in_bytes * b_swizzle_atom_elems
-
-        bk_atom_size = max(b_swizzle_atom_elems // micro_size_k, 1)
+        b_params = self.compute_wgmma_b_desc_params(B_region)
+        b_swizzle_mode = b_params.swizzle_mode
+        b_swizzle_atom_elems = b_params.swizzle_atom_elems
+        b_slice_byte_offset = b_params.slice_byte_offset
+        b_is_sliced = not isinstance(b_slice_byte_offset, int) or b_slice_byte_offset != 0
+        bk_atom_size = b_params.k_atom_size
         wgmma_inst_m, wgmma_inst_n = self.wgmma_inst_m, self.wgmma_inst_n
         num_inst_m = 4 * self.warp_row_tiles // wgmma_inst_m
         num_inst_n = self.warp_col_tiles // wgmma_inst_n
@@ -358,19 +333,25 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         assert is_full_region(A_region), "Fragment input A must be a full region"
         assert is_full_region(C_region), "Fragment output C must be a full region"
         A_buf = A_region.buffer
-        B_ptr = retrive_ptr_from_buffer_region(B_region)
+        B_buf = B_region.buffer if isinstance(B_region, BufferRegion) else B_region
+        B_base_ptr = B_buf.access_ptr("r")
         C_buf = C_region.buffer
 
         k_blocks = k_dim // micro_size_k
         e_stage_elems = self.warp_rows * self.local_size_e
 
         @T.macro
-        def _warp_mma(A_buf, B_ptr, C_buf):
+        def _warp_mma(A_buf, B_base_ptr, C_buf):
             _, warp_n, warp_m = self.extract_thread_binding(thread_binding)
             E_local = T.alloc_local((k_blocks * e_stage_elems), self.e_dtype)
 
             desc_b = T.alloc_wgmma_desc()
-            T.initialize_wgmma_descriptor(desc_b, B_ptr, b_swizzle_mode, int(b_leading_byte_offset >> 4), int(b_stride_byte_offset >> 4))
+            # Build from the buffer base (uniform cvta), then advance to the slice origin.
+            T.initialize_wgmma_descriptor(
+                desc_b, B_base_ptr, b_swizzle_mode.wgmma_layout_type(), b_params.leading_byte_offset, b_params.stride_byte_offset
+            )
+            if b_is_sliced:
+                T.increase_descriptor_offset(desc_b, b_slice_byte_offset)
 
             for ki in T.unroll(k_blocks):
                 for i in T.unroll(num_inst_m):
@@ -426,7 +407,7 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
             T.warpgroup_fence_operand(C_buf, num_regs=accum_regs)
             T.warpgroup_fence_operand(A_buf, num_regs=a_regs)
 
-        return _warp_mma(A_buf, B_ptr, C_buf)
+        return _warp_mma(A_buf, B_base_ptr, C_buf)
 
     def ldmatrix_e(self, E_local_buf: Buffer, E_shared_buf: Buffer, inst_i: PrimExpr, warp_m: PrimExpr, ki: PrimExpr, ki_slot: PrimExpr):
         num_inst_m = 4 * self.warp_row_tiles // self.wgmma_inst_m
@@ -601,13 +582,27 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
             _, local_id = inverse_mma_store_layout.map_indices([i, j])
             return local_id
 
-        # reproduce src/layout/gemm_layouts.cc::makeGemmFragmentCHopper
+        # reproduce src/layout/gemm_layouts.cc::MakeGemmFragmentCHopper
         base_fragment = T.Fragment(
             [micro_size_x, micro_size_y],
             forward_thread_fn=forward_thread,
             forward_index_fn=forward_index,
         )
         warp_n_layout = base_fragment.repeat([1, warp_cols], False, False)
-        block_layout = warp_n_layout.repeat([block_row_warps, block_col_warps], True, False)
-        warp_m_layout = block_layout.repeat([warp_rows, 1], False, False)
+        # Decompose M warpgroup-major to match the instruction-issue side:
+        # each group of 4 warps owns a contiguous 128-row tile, and the
+        # per-warpgroup 64-row WGMMA atoms are consecutive local accumulator
+        # indices (see C_offset in wgmma_sp).
+        wg_row_warps = 4
+        assert block_row_warps % wg_row_warps == 0, f"block_row_warps must be a multiple of {wg_row_warps} for WGMMA, got {block_row_warps}"
+        num_warp_groups_m = block_row_warps // wg_row_warps
+        # Four M warps forming one warpgroup.
+        warpgroup_layout = warp_n_layout.repeat([wg_row_warps, 1], True, False)
+        # Per-warpgroup WGMMA M atoms are local accumulator indices.
+        warpgroup_layout = warpgroup_layout.repeat([warp_rows, 1], False, False)
+        # Repeat complete warpgroups along M.
+        warp_m_layout = warpgroup_layout.repeat([num_warp_groups_m, 1], True, False)
+        # Preserve the physical warp order:
+        # warp_id = warp_m + block_row_warps * warp_n.
+        warp_m_layout = warp_m_layout.repeat([1, block_col_warps], True, False)
         return warp_m_layout

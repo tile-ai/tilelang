@@ -3,6 +3,8 @@
 
 import math
 import argparse
+import hashlib
+import os
 
 import torch
 import triton
@@ -11,6 +13,49 @@ import triton.language as tl
 import tilelang
 import tilelang.language as T
 from tilelang.profiler import do_bench
+
+
+def _load_vertical_slash_index_ops():
+    from torch.utils.cpp_extension import load
+
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    source_paths = [
+        os.path.join(current_dir, "ops", "kernels.cpp"),
+        os.path.join(current_dir, "ops", "vertical_slash_index.cu"),
+    ]
+    digest = hashlib.sha256()
+    source_items = []
+    for path in source_paths:
+        with open(path, "rb") as src:
+            data = src.read()
+        source_items.append((path, data))
+        digest.update(os.path.basename(path).encode())
+        digest.update(data)
+    source_hash = digest.hexdigest()[:16]
+    name = f"tilelang_minference_convert_{source_hash}"
+
+    cache_dir = tilelang.env.TILELANG_CACHE_DIR
+    extension_root = os.path.join(cache_dir, "torch_extensions", "vertical_slash_index", source_hash)
+    source_dir = os.path.join(extension_root, "src")
+    build_dir = os.path.join(extension_root, "build")
+    os.makedirs(source_dir, exist_ok=True)
+    os.makedirs(build_dir, exist_ok=True)
+
+    stable_sources = []
+    for path, data in source_items:
+        stable_path = os.path.join(source_dir, os.path.basename(path))
+        existing_data = None
+        if os.path.exists(stable_path):
+            with open(stable_path, "rb") as existing:
+                existing_data = existing.read()
+        if existing_data != data:
+            tmp_path = f"{stable_path}.{os.getpid()}.tmp"
+            with open(tmp_path, "wb") as dst:
+                dst.write(data)
+            os.replace(tmp_path, stable_path)
+        stable_sources.append(stable_path)
+
+    return load(name=name, sources=stable_sources, build_directory=build_dir, verbose=False)
 
 
 @tilelang.jit(out_idx=[3])
@@ -490,12 +535,7 @@ def vertical_slash_sparse_attention(
     block_size_M: int = 64,
     block_size_N: int = 64,
 ):
-    from torch.utils.cpp_extension import load
-    import os
-
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    sources = [os.path.join(current_dir, "ops", "kernels.cpp"), os.path.join(current_dir, "ops", "vertical_slash_index.cu")]
-    ops = load(name="convert", sources=sources, verbose=False)
+    ops = _load_vertical_slash_index_ops()
     convert_vertical_slash_indexes = ops.convert_vertical_slash_indexes
     batch_size, num_heads, context_size, head_dim = query.shape
     pad = (block_size_M - context_size) & (block_size_M - 1)
@@ -626,12 +666,7 @@ def run_regression_perf(batch=1, heads=1, seq_len=16384, head_dim=64, vertical_s
     batch_size, num_heads, context_size, head_dim = query.shape
     v_idx = v_idx.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(dim=-1, descending=False)[0]
     s_idx = s_idx.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(dim=-1, descending=True)[0]
-    from torch.utils.cpp_extension import load
-    import os
-
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    sources = [os.path.join(current_dir, "ops", "kernels.cpp"), os.path.join(current_dir, "ops", "vertical_slash_index.cu")]
-    ops = load(name="convert", sources=sources, verbose=False)
+    ops = _load_vertical_slash_index_ops()
     convert_vertical_slash_indexes = ops.convert_vertical_slash_indexes
     batch_size, num_heads, context_size, head_dim = query.shape
     pad = (block_size_M - context_size) & (block_size_M - 1)

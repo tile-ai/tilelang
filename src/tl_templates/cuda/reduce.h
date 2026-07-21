@@ -34,7 +34,7 @@ struct SumOp {
 
 struct MaxOp {
   template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
-    return cutlass::fast_max(x, y);
+    return tl::fast_max(x, y);
   }
 
   TL_DEVICE bfloat16_t operator()(bfloat16_t const &x, bfloat16_t const &y) {
@@ -47,7 +47,7 @@ struct MaxOp {
 };
 struct MaxOpNan {
   template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
-    return cutlass::fast_max(x, y);
+    return tl::fast_max(x, y);
   }
 
   TL_DEVICE bfloat16_t operator()(bfloat16_t const &x, bfloat16_t const &y) {
@@ -61,7 +61,7 @@ struct MaxOpNan {
 
 struct MinOp {
   template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
-    return cutlass::fast_min(x, y);
+    return tl::fast_min(x, y);
   }
 
   TL_DEVICE cutlass::bfloat16_t operator()(bfloat16_t const &x,
@@ -76,7 +76,7 @@ struct MinOp {
 
 struct MinOpNan {
   template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
-    return cutlass::fast_min(x, y);
+    return tl::fast_min(x, y);
   }
 
   TL_DEVICE bfloat16_t operator()(bfloat16_t const &x, bfloat16_t const &y) {
@@ -155,6 +155,24 @@ struct MinOpNan_fp16x2 {
   template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
     return tl::to_uint1(
         tl::min2_nan(tl::from_uint1<__half2>(x), tl::from_uint1<__half2>(y)));
+  }
+};
+
+struct SumOp_f32x2 {
+  TL_DEVICE float2 operator()(float2 const &x, float2 const &y) {
+    return tl::add2(x, y);
+  }
+};
+
+struct MaxOp_f32x2 {
+  TL_DEVICE float2 operator()(float2 const &x, float2 const &y) {
+    return tl::max2(x, y);
+  }
+};
+
+struct MinOp_f32x2 {
+  TL_DEVICE float2 operator()(float2 const &x, float2 const &y) {
+    return tl::min2(x, y);
   }
 };
 

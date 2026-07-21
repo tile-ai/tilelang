@@ -56,7 +56,7 @@ const GemmSPImpl &ResolveGemmSPImpl(Target target) {
 
 } // namespace
 
-std::pair<int, int> GemmSPWarpPolicyNode::computeWarpPartition(
+std::pair<int, int> GemmSPWarpPolicyNode::ComputeWarpPartition(
     int M, int N, int block_size, Target target, String gemm_inst) const {
   return ResolveGemmSPImpl(target).compute_warp_partition(
       *this, M, N, block_size, target, gemm_inst);
@@ -156,7 +156,7 @@ TileOperator GemmSPNode::Clone() const {
   return GemmSP(op);
 }
 
-String GemmSPNode::getGemmSPInstructionKey(int block_size,
+String GemmSPNode::GetGemmSPInstructionKey(int block_size,
                                            Target target) const {
   return ResolveGemmSPImpl(target).select_inst(*this, block_size, target);
 }
@@ -166,7 +166,7 @@ Stmt GemmSPNode::Lower(const LowerArgs &lower_args,
   if (const auto f = Function::GetGlobal("tl.gemm_sp.lower")) {
     auto prim_func = Downcast<PrimFunc>(
         (*f)(GetRef<GemmSP>(this), lower_args.target, lower_args.layout_map,
-             lower_args.thread_bounds, lower_args.thread_var));
+             lower_args.thread_bounds, lower_args.thread_index));
     ICHECK(prim_func->attrs.defined());
     auto global_symbol = prim_func->attrs.GetAttr<String>("global_symbol");
     ICHECK(global_symbol.has_value());
@@ -209,7 +209,7 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &layout_args,
     auto inferred_layouts = Downcast<LayoutMap>((*f)(
         GetRef<GemmSP>(this), layout_args.target, layout_args.thread_bounds));
     auto block_size = *as_const_int(layout_args.thread_bounds->extent);
-    String gemm_inst = getGemmSPInstructionKey(block_size, layout_args.target);
+    String gemm_inst = GetGemmSPInstructionKey(block_size, layout_args.target);
     bool reuse_existing_shared_layout =
         ResolveGemmSPImpl(layout_args.target)
             .reuse_existing_shared_layout(gemm_inst);
@@ -275,12 +275,12 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   refl::GlobalDef().def("tl.GemmSPWarpPolicyComputeWarpPartition",
                         [](GemmSPWarpPolicy policy, int M, int N,
                            int block_size, Target target, String gemm_inst) {
-                          policy->computeWarpPartition(M, N, block_size, target,
+                          policy->ComputeWarpPartition(M, N, block_size, target,
                                                        gemm_inst);
                         });
   refl::GlobalDef().def("tl.GemmSPGetGemmInstructionKey",
                         [](GemmSP gemm, int block_size, Target target) {
-                          return gemm->getGemmSPInstructionKey(block_size,
+                          return gemm->GetGemmSPInstructionKey(block_size,
                                                                target);
                         });
 }

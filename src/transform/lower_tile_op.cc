@@ -23,7 +23,6 @@
 #include "../op/gemm_sp.h"
 #include "../op/operator.h"
 #include "../op/utils.h"
-#include "cpu/target_utils.h"
 #include "cuda/target_utils.h"
 #include "cuda/transform/ptx_async_copy_injector.h"
 
@@ -189,36 +188,6 @@ private:
   Map<Buffer, Buffer> remap_;
 };
 
-/*! \brief Rewrite the synthetic CPU fallback thread variable to a constant.
- *
- * CPU `c` kernels use a degenerate fallback thread variable while fragment and
- * tile-op lowering still share thread-oriented helper code. After this pass has
- * consumed that helper variable, it should not remain in lowered CPU TIR.
- */
-class CPUFallbackThreadVarCanonicalizer : public StmtExprMutator {
-public:
-  static Stmt Rewrite(Stmt stmt, Var fallback_thread_var) {
-    CPUFallbackThreadVarCanonicalizer canonicalizer(
-        std::move(fallback_thread_var));
-    return canonicalizer(std::move(stmt));
-  }
-
-private:
-  explicit CPUFallbackThreadVarCanonicalizer(Var fallback_thread_var)
-      : fallback_thread_var_(std::move(fallback_thread_var)) {}
-
-  PrimExpr VisitExpr_(const VarNode *op) final {
-    if (fallback_thread_var_.defined() &&
-        (op == fallback_thread_var_.get() ||
-         op->name_hint == fallback_thread_var_->name_hint)) {
-      return make_zero(op->dtype);
-    }
-    return StmtExprMutator::VisitExpr_(op);
-  }
-
-  Var fallback_thread_var_;
-};
-
 class LowerTileOpPass : arith::IRMutatorWithAnalyzer {
 public:
   static PrimFunc Substitute(PrimFunc f) {
@@ -319,14 +288,6 @@ public:
           << "Failed to find root SBlockRealize for barrier injection";
     }
 
-    if (TargetIsCPU(substituter.target_)) {
-      // TODO(#2226): Remove the underlying CPU fallback-thread placeholder
-      // shared by LayoutInference/LowerTileOp. Until then, canonicalize the
-      // synthetic fallback after fragment/tile lowering has consumed it.
-      fptr->body = CPUFallbackThreadVarCanonicalizer::Rewrite(
-          std::move(fptr->body), substituter.thread_var_->var);
-    }
-
     return f;
   }
 
@@ -334,15 +295,27 @@ private:
   using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
 
   Stmt VisitStmt_(const SBlockNode *op) final {
+    Map<String, Any> previous_block_annotations = block_annotations_;
+    Map<Var, PrimExpr> previous_safe_value_map = safe_value_map_;
+    block_annotations_ = op->annotations;
+
     // Record the mapping from buffer data var to buffer for later lookup
     for (auto buffer : op->alloc_buffers) {
       buffer_map_.insert({buffer->data, buffer});
     }
     for (auto match_buffer : op->match_buffers) {
       buffer_map_.insert({match_buffer->buffer->data, match_buffer->buffer});
+      buffer_data_to_buffer_.Set(match_buffer->buffer->data,
+                                 match_buffer->buffer);
     }
     for (auto buffer : op->alloc_buffers) {
       buffer_data_to_buffer_.Set(buffer->data, buffer);
+    }
+    RecordSafeValueAnnotations(op);
+    if (!safe_value_map_.empty()) {
+      block_annotations_.Set(attr::kSafeValueMap, safe_value_map_);
+    } else {
+      block_annotations_.erase(attr::kSafeValueMap);
     }
     Map<Var, Layout> vmap;
     if (op->annotations.count(attr::kLayoutMap)) {
@@ -427,6 +400,8 @@ private:
       }
     }
 
+    block_annotations_ = std::move(previous_block_annotations);
+    safe_value_map_ = std::move(previous_safe_value_map);
     return block;
   }
 
@@ -935,9 +910,9 @@ private:
       is_ptx_ = true;
       auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
       is_ptx_ = false;
-      // form: T.ptx_stmatrix(trans, num, smem_ptr, value0, value1, ...)
-      // smem_ptr: T.tvm_access_ptr(ptype, data, offset, extent, rw_mask)
-      // or T.address_of(buffer, offset)
+      // form: T.ptx_stmatrix(trans, num, smem_ptr, value0, value1, ...,
+      // [shape]) smem_ptr: T.tvm_access_ptr(ptype, data, offset, extent,
+      // rw_mask) or T.address_of(buffer, offset)
       PrimExpr access_ptr = call->args[2];
       Call access_ptr_call = Downcast<Call>(access_ptr);
 
@@ -1097,12 +1072,12 @@ private:
    * buffer named "workspace" (storage scope "shared.dyn") and returns its write
    *   access pointer.
    * - Determines thread bounds for lowering from the analyzer's constant-int
-   *   information for thread_var_; if unavailable, a default range [0,1) is
-   * used.
+   *   information for the thread binding; if unavailable, a default range
+   *   [0,1) is used.
    * - Invokes tile_op->Lower(...) with LowerArgs containing target, thread
-   *   bounds, thread variable, the workspace callback, layout and buffer remap
-   *   maps, and the list of GEMM-involved buffer vars; the analyzer is passed
-   *   through for use during lowering.
+   *   bounds, the logical thread index, the workspace callback, layout and
+   *   buffer remap maps, and the list of GEMM-involved buffer vars; the
+   *   analyzer is passed through for use during lowering.
    *
    * The lowered statement returned by the operator is then visited by the base
    * IRMutatorWithAnalyzer and that result is returned.
@@ -1145,7 +1120,7 @@ private:
     if (call && call->op.as<GlobalVarNode>())
       return Downcast<Evaluate>(IRMutatorWithAnalyzer::VisitStmt_(op));
 
-    auto tile_op = ParseOperator(GetRef<Stmt>(op));
+    auto tile_op = ParseOperator(GetRef<Stmt>(op), block_annotations_);
     if (!tile_op.defined())
       return IRMutatorWithAnalyzer::VisitStmt_(op);
 
@@ -1203,7 +1178,7 @@ private:
     LowerArgs lower_args;
     lower_args.target = target_;
     lower_args.thread_bounds = thread_bounds;
-    lower_args.thread_var = thread_var_->var;
+    lower_args.thread_index = CurrentThreadIndex();
     lower_args.layout_map = layout_map_;
     lower_args.buffer_remap = buffer_remap_;
     lower_args.bind_var_to_expr = bind_var_to_expr;
@@ -1223,14 +1198,11 @@ private:
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == kPipelineContextNumStages) {
-      return VisitStmt(op->body);
-    }
     if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       ICHECK_NE(iv->thread_tag.length(), 0U);
       if (iv->thread_tag == "threadIdx.x") {
-        thread_var_ = iv;
+        thread_binding_ = iv;
         ICHECK(iv->dom->extent.as<IntImmNode>());
         thread_block_size_ = iv->dom->extent.as<IntImmNode>()->value;
       }
@@ -1505,7 +1477,7 @@ private:
         (has_non_local || has_cast_operations) && !has_reducer;
     // Lower the parallel loop using the common function
     Stmt lowered = LowerParallelLoop(
-        for_node, loop_layout, thread_var_->var, analyzer_, layout_map_,
+        for_node, loop_layout, CurrentThreadIndex(), analyzer_, layout_map_,
         predicate, parallel_loop, should_vectorize, require_padding_guard);
 
     // Only parallel-loop lowering needs PTX cp.async injection. Thread-level
@@ -1513,32 +1485,55 @@ private:
     // `tir.ptx_cp_async`.
     if (TargetCudaHasAsyncCopy(target_)) {
       tvm::transform::PassContext ctx = tvm::transform::PassContext::Current();
-      bool enable_auto_async_copy =
+      bool auto_async_copy_enabled =
           ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
-      bool should_enable_async_copy =
+      bool should_inject_async_copy =
           parallel_prefer_async ||
-          (enable_auto_async_copy && parallel_async_without_async_commit_wait);
-      auto inject_result =
-          InjectPTXAsyncCopy(lowered, should_enable_async_copy,
-                             parallel_async_without_async_commit_wait);
-      lowered = inject_result.stmt;
+          (auto_async_copy_enabled && parallel_async_without_async_commit_wait);
+      if (should_inject_async_copy) {
+        auto inject_result = InjectPTXAsyncCopy(
+            lowered, parallel_async_without_async_commit_wait);
+        lowered = inject_result.stmt;
+      }
     }
     return lowered;
   }
 
   Range CurrentThreadBounds() const {
-    return ComputeThreadBounds(thread_var_, *analyzer_);
+    return ComputeThreadBounds(thread_binding_, *analyzer_);
+  }
+
+  // Logical thread index handed to lowering helpers: the real threadIdx.x
+  // Var when a thread_extent binding exists, otherwise constant 0 (e.g. CPU
+  // serial launch). Never an unbound synthetic Var.
+  PrimExpr CurrentThreadIndex() const {
+    if (thread_binding_.defined()) {
+      return thread_binding_->var;
+    }
+    return IntImm(DataType::Int(32), 0);
+  }
+
+  void RecordSafeValueAnnotations(const SBlockNode *op) {
+    if (!op->annotations.count(attr::kSafeValueMap)) {
+      return;
+    }
+    auto map = Downcast<Map<Var, PrimExpr>>(
+        op->annotations.Get(attr::kSafeValueMap).value());
+    for (const auto &[var, safe_value] : map) {
+      safe_value_map_.Set(var, safe_value);
+    }
   }
 
   Target target_;
+  Map<String, Any> block_annotations_;
   Map<Var, Buffer> buffer_data_to_buffer_;
+  Map<Var, PrimExpr> safe_value_map_;
   Map<Buffer, Layout> layout_map_;
   Map<Buffer, Layout> layout_remap_;
   Map<Buffer, Buffer> buffer_remap_;
-  // This is a workaround for cpu backend,
-  // we need to define a thread_var for the serial loop.
-  IterVar thread_var_ = IterVar(Range::FromMinExtent(0, 1), Var("v_thread"),
-                                IterVarType::kDataPar);
+  // Real threadIdx.x binding of the enclosing thread_extent scope, when one
+  // exists. Stays undefined for targets without thread bindings (e.g. CPU).
+  IterVar thread_binding_;
   size_t thread_block_size_ = 0;
   // Product of cluster_dims from block annotation (default 1).
   int cluster_size_ = 1;

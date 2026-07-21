@@ -240,15 +240,14 @@ struct AtomicAdd {
                            lower_args.thread_bounds,
                            lower_args.layout_map,
                            analyzer,
-                           false,
                            lower_args.buffer_remap,
                            {}},
                           level);
     }
     auto loop_layout = par_op->GetLoopLayout();
-    return LowerParallelLoop(fused_loop, loop_layout, lower_args.thread_var,
+    return LowerParallelLoop(fused_loop, loop_layout, lower_args.thread_index,
                              analyzer, lower_args.layout_map,
-                             par_op->GetPredicate(lower_args.thread_var),
+                             par_op->GetPredicate(lower_args.thread_index),
                              /*parallel_loop=*/true, /*should_vectorize=*/true,
                              par_op->LoopLayoutRequiresPaddingGuard());
   }
@@ -275,9 +274,9 @@ struct AtomicAdd {
       const int64_t mat_continuous =
           *as_const_int(shared_tensor->shape[dim - 1]);
       Layout swizzle_layout_2d =
-          makeGemmABLayoutHopper(mat_stride, mat_continuous, mat_continuous,
+          MakeGemmABLayoutHopper(mat_stride, mat_continuous, mat_continuous,
                                  shared_tensor->dtype.bits(), /*k_inner=*/true);
-      if (StructuralEqual()(swizzle_layout_2d, makeLinearLayout(Array<PrimExpr>{
+      if (StructuralEqual()(swizzle_layout_2d, MakeLinearLayout(Array<PrimExpr>{
                                                    Integer(mat_stride),
                                                    Integer(mat_continuous)}))) {
         result_map.Set(shared_tensor, ComputeLinearLayout(shared_tensor));
@@ -338,7 +337,7 @@ struct AtomicAdd {
     desc.l2_promotion = static_cast<int>(CU_TENSOR_MAP_L2_PROMOTION_L2_128B);
     desc.oob_fill = static_cast<int>(CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
 
-    auto linear_layout = makeLinearLayout(shared_tensor->shape);
+    auto linear_layout = MakeLinearLayout(shared_tensor->shape);
     Buffer shared_tensor_unmapped = shared_tensor;
     desc.interleave = static_cast<int>(CU_TENSOR_MAP_INTERLEAVE_NONE);
     Layout shared_layout;
@@ -359,20 +358,20 @@ struct AtomicAdd {
       auto stride = as_const_int(shared_layout->InputShape()[ndim - 2]);
       auto continuous = as_const_int(shared_layout->InputShape()[ndim - 1]);
       ICHECK(stride != nullptr && continuous != nullptr);
-      if (StructuralEqual()(shared_layout, makeQuarterBankSwizzleLayout(
+      if (StructuralEqual()(shared_layout, MakeQuarterBankSwizzleLayout(
                                                shared_tensor_unmapped))) {
         desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
       } else if (StructuralEqual()(
                      shared_layout,
-                     makeHalfBankSwizzleLayout(shared_tensor_unmapped))) {
+                     MakeHalfBankSwizzleLayout(shared_tensor_unmapped))) {
         desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
       } else if (StructuralEqual()(
                      shared_layout,
-                     makeFullBankSwizzleLayout(shared_tensor_unmapped))) {
+                     MakeFullBankSwizzleLayout(shared_tensor_unmapped))) {
         desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
       } else if (StructuralEqual()(
                      shared_layout,
-                     makeGemmABLayoutPadded(*stride, *continuous,
+                     MakeGemmABLayoutPadded(*stride, *continuous,
                                             shared_tensor->dtype.bits()))) {
         DLOG(WARNING)
             << "AtomicAdd TMA cannot support a padded layout for src: "
@@ -496,8 +495,9 @@ struct AtomicAdd {
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(),
                                 {IntImm(DataType::Int(32), 0), Bool(true)})));
-    return IfThenElse(EQ(lower_args.thread_var, lower_args.thread_bounds->min),
-                      SeqStmt(std::move(seq)));
+    return IfThenElse(
+        EQ(lower_args.thread_index, lower_args.thread_bounds->min),
+        SeqStmt(std::move(seq)));
   }
 };
 

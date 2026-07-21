@@ -68,9 +68,6 @@ class PassConfigKey(str, Enum):
     """The PTXAS register usage level in [0, 10], which controls the
     aggressiveness of optimizations that affect register usage. Default: None"""
 
-    TL_ENABLE_PTXAS_VERBOSE_OUTPUT = "tl.enable_ptxas_verbose_output"
-    """Enable ptxas verbose output. Default: False"""
-
     TL_DEVICE_COMPILE_FLAGS = "tl.device_compile_flags"
     """Additional device compiler flags passed to nvcc/NVRTC.
 
@@ -285,6 +282,12 @@ class PassConfigKey(str, Enum):
 
     TL_DUMP_IR_DIR = "tl.dump_ir_path"
     """Path to the directory where IR will be dumped. Default: ./dump_ir/"""
+
+    TL_PASS_PROFILE = "tl.pass_profile"
+    """Enable per-pass timing profiling. Default: False"""
+
+    TL_PASS_PROFILE_THRESHOLD_MS = "tl.pass_profile_threshold_ms"
+    """Only show passes slower than this threshold (ms). 0 = show all. Default: 0"""
 
 
 _DEPRECATED_PASS_CONFIG_MESSAGES = {

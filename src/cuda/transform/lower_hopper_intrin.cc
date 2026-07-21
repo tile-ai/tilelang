@@ -188,16 +188,15 @@ public:
       } else {
         String name = call->args[2].as<Var>().value()->name_hint;
         var = Var(name + "_desc",
-                  PointerType(PrimType(cuTensorMapType()), "grid_constant"));
+                  PointerType(PrimType(CuTensorMapType()), "grid_constant"));
         Call call_ref = GetRef<Call>(call);
         desc_map_[call_ref] = var;
         Array<PrimExpr> init_desc_args = MakeInitDescArgs(call_ref, var);
         init_desc_arg_map_.Set(var, init_desc_args);
         desc_inits_.push_back({call->args[2].as<Var>().value().get(),
                                MakeInitDescStmt(var, init_desc_args), false});
-        prefetch_calls_.push_back(
-            Evaluate(Call(DataType::Handle(), builtin::call_extern(),
-                          {StringImm("tl::prefetch_tma_descriptor"), var})));
+        prefetch_calls_.push_back(Evaluate(
+            Call(DataType::Handle(), prefetch_tma_descriptor(), {var})));
       }
       return var;
     } else {

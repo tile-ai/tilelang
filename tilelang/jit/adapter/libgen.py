@@ -12,10 +12,10 @@ from tvm.target import Target
 from tilelang import tvm as tvm
 from tilelang.transform import PassConfigKey
 from tilelang.contrib.nvcc import (
+    format_target_code_for_gencode,
     get_cuda_library_dirs,
     get_nvcc_compiler,
-    get_target_arch,
-    get_target_compute_version,
+    get_target_arch_and_code,
 )
 from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
 from tilelang.env import TILELANG_TEMPLATE_PATH
@@ -64,7 +64,6 @@ class LibraryGenerator:
 
             _lib_ext = ".dll" if sys.platform == "win32" else ".so"
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)  # noqa: SIM115
-            target_arch = get_target_arch(get_target_compute_version(target))
             libpath = src.name.replace(".cu", _lib_ext)
 
             enable_fast_math = self.pass_configs.get(PassConfigKey.TL_ENABLE_FAST_MATH, False)
@@ -72,8 +71,16 @@ class LibraryGenerator:
             ptxas_usage_level = self.pass_configs.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None)
             if ptxas_usage_level is not None:
                 ptxas_usage_level = int(ptxas_usage_level)
-            verbose_ptxas_output = self.pass_configs.get(PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False)
             cuda_library_flags = [f"-L{lib_dir}" for lib_dir in get_cuda_library_dirs()]
+            target_arch, target_code = get_target_arch_and_code(target)
+            gencode_code = format_target_code_for_gencode(target_code)
+            if gencode_code is None:
+                gencode_code = f"sm_{target_arch}"
+            # CUDA 13.1 expands `nvcc --shared -arch=sm_90a` through an sm_90
+            # PTX pass, which rejects Hopper-only instructions such as
+            # setmaxnreg. Use explicit gencode so shared-library compilation
+            # preserves the requested accelerated target.
+            arch_flags = ["-gencode", f"arch=compute_{target_arch},code={gencode_code}"]
 
             command = [
                 get_nvcc_compiler(),
@@ -89,8 +96,7 @@ class LibraryGenerator:
                 src.name,
                 *cuda_library_flags,
                 "-lcuda",
-                "-gencode",
-                f"arch=compute_{target_arch},code=sm_{target_arch}",
+                *arch_flags,
             ]
             if sys.platform == "win32":
                 # /Zc:__cplusplus forces MSVC to report the actual C++ standard
@@ -105,8 +111,8 @@ class LibraryGenerator:
             if enable_fast_math:
                 command += ["--use_fast_math"]
             if ptxas_usage_level is not None:
-                command += [f"--ptxas-options=--register-usage-level={ptxas_usage_level}"]
-            if verbose_ptxas_output:
+                command += [f"--ptxas-options=--register-usage-level={int(ptxas_usage_level)}"]
+            if self.verbose:
                 command += ["--ptxas-options=--verbose"]
             command += [
                 "-I" + CUTLASS_INCLUDE_DIR,

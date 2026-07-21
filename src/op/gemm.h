@@ -58,20 +58,20 @@ public:
         .def_ro("n_warp", &GemmWarpPolicyNode::n_warp);
   }
 
-  std::pair<int, int> computeWarpPartition(int M, int N, int block_size,
+  std::pair<int, int> ComputeWarpPartition(int M, int N, int block_size,
                                            Target target,
                                            String gemm_inst) const;
 
-  bool isSquare() const {
+  bool IsSquare() const {
     return policy_type == int(GemmWarpPolicyType::kSquare);
   }
-  bool isFullRow() const {
+  bool IsFullRow() const {
     return policy_type == int(GemmWarpPolicyType::kFullRow);
   }
-  bool isFullCol() const {
+  bool IsFullCol() const {
     return policy_type == int(GemmWarpPolicyType::kFullCol);
   }
-  bool isFree() const { return policy_type == int(GemmWarpPolicyType::kFree); }
+  bool IsFree() const { return policy_type == int(GemmWarpPolicyType::kFree); }
 };
 
 class GemmWarpPolicy : public ObjectRef {
@@ -108,6 +108,7 @@ public:
   bool transA_, transB_;
   int m_, n_, k_;
   int strideA_, strideB_;
+  // Offsets may be symbolic (e.g. a sliced operand B[:, j*64:...] in a loop).
   PrimExpr offsetA_, offsetB_;
   PrimExpr clearAccum_ = const_false();
   tirx::BufferLoad mbar_; // mbar is optional, only used for TCGEN5MMA
@@ -166,7 +167,7 @@ public:
   TileOperator Clone() const;
 
   // Target-specific GEMM instruction key.
-  String getGemmInstructionKey(int block_size, Target target) const;
+  String GetGemmInstructionKey(int block_size, Target target) const;
 
 private:
   mutable bool completed_ = false;

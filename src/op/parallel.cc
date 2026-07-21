@@ -10,6 +10,7 @@
 #include <tvm/runtime/logging.h>
 
 #include <algorithm>
+#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/op.h>
 
 #include "../layout/layout.h"
@@ -579,9 +580,10 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
   return results;
 }
 
-Optional<PrimExpr> ParallelOpNode::GetPredicate(Var thread_var) const {
+Optional<PrimExpr> ParallelOpNode::GetPredicate(PrimExpr thread_index) const {
   if (predicate_.defined()) {
-    return Substitute(predicate_.value(), {{InputPlaceholder(0), thread_var}});
+    return Substitute(predicate_.value(),
+                      {{InputPlaceholder(0), thread_index}});
   } else {
     return std::nullopt;
   }
@@ -717,8 +719,15 @@ Fragment ParallelOpNode::ComputeLoopLayoutFromBuffer(
       if (auto opt_var = objref.as<Var>();
           opt_var && inner_vars_.count(*opt_var)) {
         std::ostringstream oss;
-        oss << "loop_var_to_thread = " << loop_var_to_thread
-            << "contains inner var" << *opt_var;
+        oss << "Cannot lower access to thread-distributed fragment `"
+            << buffer->name
+            << "`: its elements are spread across CUDA threads, so the "
+               "non-parallel loop variable `"
+            << *opt_var
+            << "` cannot be used to address them safely (thread map: "
+            << loop_var_to_thread
+            << "). Use T.reduce_sum for reductions, T.Parallel for elementwise "
+               "access, or stage through shared memory to change the layout.";
         throw LayoutConflictException(oss.str());
       }
     });
@@ -759,7 +768,7 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
   auto maybe_remapped_root_ = IfBufferRemapLoopGenerator::run(
       root_, layout_args.buffer_remap, layout_args.layout_map);
   int vector_size = GetVectorizeSize(maybe_remapped_root_, layout_args.analyzer,
-                                     layout_args.layout_map);
+                                     layout_args.layout_map, reducer_info_map_);
   DLOG(INFO) << "[PlanLoopPartition] vector_size = " << vector_size << '\n';
 
   PrimExpr loop_total_size = 1;
@@ -899,6 +908,29 @@ ParallelOpNode::ChooseBestCandidate(const Fragment &candidate_from_buffer,
     return candidate_from_buffer; // arbitrary; caller will catch later
   }
 
+  // Both candidates may be semantically valid for reads from a fully
+  // replicated fragment.  The plan candidate often minimizes replication by
+  // assigning one logical element to each CUDA thread, but that can turn a
+  // register fragment access into `fragment[threadIdx.x]`.  CUDA cannot keep a
+  // register array with runtime indexing in scalar registers, so this shape
+  // spills the whole fragment to local memory before the final store.
+  //
+  // When this parallel loop publishes data to shared/global memory, prefer the
+  // valid candidate that keeps fragment physical indices independent of the
+  // thread variable.  For a fully replicated readback this selects the
+  // fragment-derived layout, and BuildReplicationGuardsIfNeeded then emits the
+  // single-replica guard (e.g. `threadIdx.x == 0`) to avoid duplicate stores.
+  // Fragment-only loops keep the old containment/replication heuristic below.
+  if (!store_shared_global_buffers_.empty()) {
+    bool buf_thread_index =
+        HasThreadDependentFragmentIndex(candidate_from_buffer, layout_args);
+    bool plan_thread_index =
+        HasThreadDependentFragmentIndex(candidate_from_plan, layout_args);
+    if (buf_thread_index != plan_thread_index) {
+      return buf_thread_index ? candidate_from_plan : candidate_from_buffer;
+    }
+  }
+
   bool buf_contains_plan = contains(candidate_from_buffer, candidate_from_plan);
   bool plan_contains_buf = contains(candidate_from_plan, candidate_from_buffer);
 
@@ -919,6 +951,82 @@ ParallelOpNode::ChooseBestCandidate(const Fragment &candidate_from_buffer,
   }
   // Safe fallback: buffer-based candidate is always correct.
   return candidate_from_buffer;
+}
+
+bool ParallelOpNode::HasThreadDependentFragmentIndex(
+    const Fragment &candidate, const LayoutInferArgs &layout_args) const {
+  // Mirror the index substitution that PartitionLoop would apply for this
+  // candidate without actually rebuilding the loop.  We create symbolic output
+  // coordinates plus a symbolic thread variable, invert the candidate layout
+  // back to the original loop variables, and then apply each known fragment
+  // layout's Forward() map.  If any resulting physical fragment index still
+  // contains the symbolic thread variable, lowering this candidate would emit a
+  // runtime-thread-indexed register array access such as
+  // `fragment[threadIdx.x]`.
+  if (!candidate.defined()) {
+    return false;
+  }
+
+  int old_loop_depth = static_cast<int>(loop_vars_.size());
+  if (candidate->InputDim() != static_cast<size_t>(old_loop_depth)) {
+    return false;
+  }
+
+  Var thread_var("__tl_candidate_thread");
+  Array<PrimExpr> partition_vars;
+  for (size_t i = 0; i < candidate->OutputDim(); ++i) {
+    partition_vars.push_back(Var("__tl_candidate_i" + std::to_string(i)));
+  }
+  partition_vars.push_back(thread_var);
+
+  auto inv_loop = candidate->InverseWithLevel().first;
+  Array<PrimExpr> recovered_indices = inv_loop->Forward(partition_vars);
+
+  Map<Var, PrimExpr> loop_var_map;
+  for (int i = 0; i < old_loop_depth; ++i) {
+    loop_var_map.Set(loop_vars_[i]->var, recovered_indices[i]);
+  }
+
+  Map<Var, PrimExpr> thread_offset_map;
+  bool has_thread_offset = false;
+  if (candidate->ThreadRange().defined()) {
+    auto range = candidate->ThreadRange();
+    thread_offset_map.Set(thread_var, thread_var - range->min);
+    has_thread_offset = true;
+  }
+
+  auto uses_thread_var = [&](const PrimExpr &expr) {
+    PrimExpr simplified = analyzer_.Simplify(expr);
+    return tirx::UsesVar(simplified, [&](const VarNode *var_node) {
+      return GetRef<Var>(var_node).same_as(thread_var);
+    });
+  };
+
+  for (const auto &buffer : access_order_) {
+    if (!IsFragmentBuffer(buffer) || !layout_args.layout_map.count(buffer)) {
+      continue;
+    }
+    auto fragment_layout = layout_args.layout_map[buffer].as<Fragment>();
+    if (!fragment_layout.has_value()) {
+      continue;
+    }
+
+    Array<PrimExpr> indices = GetAccessInfo(buffer).indices.Map(
+        [&](const PrimExpr &index) { return Substitute(index, loop_var_map); });
+    if (has_thread_offset) {
+      indices = Substitute(indices, thread_offset_map);
+    }
+
+    Array<PrimExpr> physical_indices =
+        fragment_layout.value()->Forward(indices);
+    for (const auto &index : physical_indices) {
+      if (uses_thread_var(index)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 } // namespace tl

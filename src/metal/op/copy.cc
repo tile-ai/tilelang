@@ -61,7 +61,7 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
       << "simdgroup copy requires constant thread bounds";
   int block_size = block_size_imm->value;
   int num_warps = block_size / warp_size;
-  PrimExpr warp_id = FloorDiv(lower_args.thread_var, warp_size);
+  PrimExpr warp_id = FloorDiv(lower_args.thread_index, warp_size);
 
   const auto *m_imm = op.src_range[0]->extent.as<IntImmNode>();
   const auto *n_imm = op.src_range[1]->extent.as<IntImmNode>();
@@ -110,7 +110,7 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
   return SeqStmt(stmts);
 }
 
-Stmt LowerCooperativeTensorCopy(const CopyNode &op, const LowerArgs &T,
+Stmt LowerCooperativeTensorCopy(const CopyNode &op, const LowerArgs &lower_args,
                                 arith::Analyzer *analyzer) {
   (void)analyzer;
   TVM_FFI_ICHECK(IsCooperativeTensorBuffer(op.src));
@@ -133,13 +133,14 @@ Stmt LowerCooperativeTensorCopy(const CopyNode &op, const LowerArgs &T,
   PrimExpr dst_col_base = op.dst_range[1]->min;
   PrimExpr dst_stride = op.dst->shape[op.dst->shape.size() - 1];
 
-  int warp_size = TargetMetalGetWarpSize(T.target);
-  const auto *block_size_imm = T.thread_bounds->extent.as<IntImmNode>();
+  int warp_size = TargetMetalGetWarpSize(lower_args.target);
+  const auto *block_size_imm =
+      lower_args.thread_bounds->extent.as<IntImmNode>();
   TVM_FFI_ICHECK(block_size_imm)
       << "cooperative_tensor copy requires constant thread bounds";
   int block_size = block_size_imm->value;
   int num_warps = block_size / warp_size;
-  PrimExpr warp_id = FloorDiv(T.thread_var, warp_size);
+  PrimExpr warp_id = FloorDiv(lower_args.thread_index, warp_size);
 
   const auto *m_imm = op.src_range[0]->extent.as<IntImmNode>();
   const auto *n_imm = op.src_range[1]->extent.as<IntImmNode>();

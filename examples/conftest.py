@@ -4,6 +4,17 @@ import pytest
 
 os.environ["PYTHONHASHSEED"] = "0"
 
+
+def _configure_torch_extensions_dir():
+    cache_dir = os.environ.get("TILELANG_CACHE_DIR", os.path.expanduser("~/.tilelang/cache"))
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+    path = os.path.join(cache_dir, "torch_extension", f"{worker}-{os.getpid()}")
+    os.makedirs(path, exist_ok=True)
+    os.environ["TORCH_EXTENSIONS_DIR"] = path
+
+
+_configure_torch_extensions_dir()
+
 random.seed(0)
 
 try:
@@ -28,9 +39,6 @@ else:
 # Known failures when running with TILELANG_TARGET=cutedsl.
 # These are marked as xfail(strict=False) so unexpected passes are reported.
 CUTEDSL_KNOWN_FAILURES = {
-    # Unimplemented sparse ops: tl.tl_gemm_sp
-    "sparse_tensorcore/test_example_sparse_tensorcore.py::test_tilelang_example_sparse_tensorcore",
-    "gemm_sp/test_example_gemm_sp.py::test_example_gemm_sp",
     # Flaky — passes when run in isolation, fails under parallel execution
     "minference/test_vs_sparse_attn.py::test_vs_sparse_attn",
     # CuTeDSL does not yet lower DeepSeek V4 FP4 act quant conversions.

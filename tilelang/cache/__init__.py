@@ -17,7 +17,7 @@ from tilelang.jit.adapter.kernel_cache import TVMFFIKernelCache
 if TYPE_CHECKING:
     from .kernel_cache import KernelCache
 
-TargetLike = str | TVMTarget
+TargetLike = str | dict[str, object] | TVMTarget
 
 # Create a map of singleton instance of KernelCaches
 _dispatch_map: dict[str, KernelCache] = {

@@ -42,7 +42,7 @@ struct Constr {
   Constr(Constr &&other) = default;
   Constr &operator=(const Constr &other) = default;
 
-  void format(std::ostream &os) const {
+  void Format(std::ostream &os) const {
     os << "Constr(kind=";
     switch (kind) {
     case kConstr:
@@ -138,11 +138,11 @@ struct ConstrSet {
     return result;
   }
 
-  void format(std::ostream &os) const {
+  void Format(std::ostream &os) const {
     os << "ConstrSet(size=" << constrs_.size() << ") {\n";
     for (size_t i = 0; i < constrs_.size(); ++i) {
       os << "  [" << i << "] ";
-      constrs_[i].format(os);
+      constrs_[i].Format(os);
       os << "\n";
     }
     os << "}";
@@ -183,9 +183,18 @@ public:
       Base::VisitExpr(false_value);
     }
   }
-  void VisitStmt_(const tirx::BindNode *op) override {
-    auto guard = MakeGuard(op->var, op->value);
-    Base::VisitStmt_(op);
+  void VisitStmt_(const tirx::BindNode *op) override { Base::VisitStmt_(op); }
+  void VisitStmt_(const tirx::SeqStmtNode *op) override {
+    size_t old_size = constr_stack_.size();
+    for (const tirx::Stmt &stmt : op->seq) {
+      Base::VisitStmt(stmt);
+      if (const auto *bind = stmt.as<tirx::BindNode>()) {
+        // A flat Bind defines its variable for following statements in this
+        // sequence, but not while its own value is being evaluated.
+        constr_stack_.emplace_back(bind->var, bind->value);
+      }
+    }
+    constr_stack_.resize(old_size);
   }
   void VisitStmt_(const tirx::AttrStmtNode *op) override {
     if (op->attr_key == tirx::attr::tilelang_assume) {
