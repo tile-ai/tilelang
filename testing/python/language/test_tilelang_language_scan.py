@@ -487,5 +487,97 @@ def test_cummax_fragment_1d():
     run_cummax_1d(512, 64, reverse=True, scope="fragment")
 
 
+def cumsum_strided_region_test(M, N, NBIG, dim=0, reverse=False, dtype=T.float32):
+
+    @T.prim_func
+    def cumsum_strided(
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M, N), dtype),
+    ):
+        with T.Kernel(1, threads=256) as _:
+            big = T.alloc_shared((M, NBIG), dtype)
+            for i, j in T.Parallel(M, NBIG):
+                big[i, j] = T.cast(0, dtype)
+            for i, j in T.Parallel(M, N):
+                big[i, j] = A[i, j]
+            T.cumsum(src=big[0:M, 0:N], dst=big[0:M, 0:N], dim=dim, reverse=reverse)
+            for i, j in T.Parallel(M, N):
+                B[i, j] = big[i, j]
+
+    return cumsum_strided
+
+
+def run_cumsum_strided(M, N, NBIG, dim=0, reverse=False, dtype=T.float32):
+    program = cumsum_strided_region_test(M, N, NBIG, dim, reverse, dtype)
+    jit_kernel = tl.compile(program, out_idx=-1)
+
+    A = torch.randint(-2, 3, (M, N), dtype=torch.float32).cuda()
+
+    if reverse:
+        ref = A.flip(dims=[dim]).cumsum(dim=dim).flip(dims=[dim])
+    else:
+        ref = A.cumsum(dim=dim)
+
+    tilelang_res = jit_kernel(A)
+    torch.testing.assert_close(tilelang_res, ref)
+
+
+def cummax_strided_region_test(M, N, NBIG, dim=0, reverse=False, dtype=T.float32):
+
+    @T.prim_func
+    def cummax_strided(
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M, N), dtype),
+    ):
+        with T.Kernel(1, threads=256) as _:
+            big = T.alloc_shared((M, NBIG), dtype)
+            for i, j in T.Parallel(M, NBIG):
+                big[i, j] = T.cast(0, dtype)
+            for i, j in T.Parallel(M, N):
+                big[i, j] = A[i, j]
+            T.cummax(src=big[0:M, 0:N], dst=big[0:M, 0:N], dim=dim, reverse=reverse)
+            for i, j in T.Parallel(M, N):
+                B[i, j] = big[i, j]
+
+    return cummax_strided
+
+
+def run_cummax_strided(M, N, NBIG, dim=0, reverse=False, dtype=T.float32):
+    program = cummax_strided_region_test(M, N, NBIG, dim, reverse, dtype)
+    jit_kernel = tl.compile(program, out_idx=-1)
+
+    A = torch.randint(-2, 3, (M, N), dtype=torch.float32).cuda()
+
+    if reverse:
+        ref = A.flip(dims=[dim]).cummax(dim=dim).values.flip(dims=[dim])
+    else:
+        ref = A.cummax(dim=dim).values
+
+    tilelang_res = jit_kernel(A)
+    torch.testing.assert_close(tilelang_res, ref)
+
+
+def test_cumsum_strided_region():
+    """cumsum over a non-contiguous 2-D shared sub-region."""
+    for M, N, NBIG, dim, reverse in [
+        (8, 40, 64, 0, False),
+        (8, 40, 64, 1, False),
+        (8, 40, 64, 1, True),
+        (8, 40, 64, 0, True),
+    ]:
+        run_cumsum_strided(M, N, NBIG, dim, reverse)
+
+
+def test_cummax_strided_region():
+    """cummax over a non-contiguous 2-D shared sub-region."""
+    for M, N, NBIG, dim, reverse in [
+        (8, 40, 64, 0, False),
+        (8, 40, 64, 1, False),
+        (8, 40, 64, 0, True),
+        (8, 40, 64, 1, True),
+    ]:
+        run_cummax_strided(M, N, NBIG, dim, reverse)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
