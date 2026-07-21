@@ -99,7 +99,7 @@ public:
 
     PrimExpr ptype = tirx::TypeAnnotation(buffer->dtype);
     PrimExpr data = buffer->data;
-    PrimExpr offset = LinearOffsetFromLoad(base_load);
+    PrimExpr offset = buffer->elem_offset + LinearOffsetFromLoad(base_load);
 
     Array<PrimExpr> args{ptype, data, offset, extent, rw_mask};
     return Call(DataType::Handle(), builtin::tvm_access_ptr(), args);
