@@ -14,6 +14,7 @@
 #include <tvm/tirx/stmt_functor.h>
 
 #include <functional>
+#include <numeric>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -34,6 +35,66 @@ using namespace ffi;
 using tirx::GetSBlockReadWriteRegion;
 
 namespace {
+
+// TMA (cp.async.bulk.tensor.*) requires 128-byte aligned shared-memory
+// addresses. Every version of a multi-versioned shared buffer is a
+// potential TMA destination base, so the stride between versions must
+// preserve this alignment. Whether a copy really lowers to TMA is only
+// decided later (in copy lowering), so all versioned shared buffers are
+// padded; the cost is at most 127 bytes per version.
+constexpr int64_t kTmaSharedMemAlignBytes = 128;
+
+// Compact (row-major) strides for `shape`: [prod(shape[1:]), ..., 1].
+Array<PrimExpr> MakeCompactStrides(const Array<PrimExpr> &shape) {
+  ICHECK(!shape.empty());
+  std::vector<PrimExpr> strides(shape.size());
+  PrimExpr stride = make_const(shape[0].dtype(), 1);
+  for (size_t i = shape.size(); i > 0; --i) {
+    strides[i - 1] = stride;
+    stride = stride * shape[i - 1];
+  }
+  return Array<PrimExpr>(strides.begin(), strides.end());
+}
+
+// Stride in elements between consecutive versions of `buffer`, where
+// `version_strides` is the physical layout of one version (its explicit
+// strides, or synthesized compact strides). The physical span of one
+// version is version_strides[0] * shape[0] -- the same rule
+// Buffer::GetFlattenedBuffer and GetBufferAllocationShape use -- rounded
+// up to the TMA shared-memory alignment.
+//
+// The buffer stride-nesting invariant (strides[i-1] % strides[i] == 0,
+// enforced by GetBufferAllocationShape) must keep holding for the pair
+// (version_stride, version_strides[0]), so the rounding unit is
+// lcm(alignment_in_elements, version_strides[0]).
+//
+// Falls back to the unpadded span when the alignment is not expressible:
+// an element bit width that does not divide 128 bytes, or a symbolic
+// version_strides[0] (the nesting invariant could not be guaranteed).
+PrimExpr AlignedVersionStride(const Buffer &buffer,
+                              const Array<PrimExpr> &version_strides) {
+  ICHECK_EQ(version_strides.size(), buffer->shape.size());
+  PrimExpr span = version_strides[0] * buffer->shape[0];
+  int64_t elem_bits =
+      static_cast<int64_t>(buffer->dtype.bits()) * buffer->dtype.lanes();
+  constexpr int64_t align_bits = kTmaSharedMemAlignBytes * 8;
+  if (elem_bits <= 0 || align_bits % elem_bits != 0) {
+    return span;
+  }
+  int64_t align_elems = align_bits / elem_bits;
+  const int64_t *inner_stride = as_const_int(version_strides[0]);
+  if (inner_stride == nullptr || *inner_stride <= 0) {
+    return span;
+  }
+  int64_t unit = std::lcm(align_elems, *inner_stride);
+  if (const int64_t *span_imm = as_const_int(span)) {
+    return make_const(span.dtype(), (*span_imm + unit - 1) / unit * unit);
+  }
+  // Symbolic leading extent: round up symbolically. `unit` is a multiple
+  // of version_strides[0], so the nesting invariant still holds.
+  PrimExpr unit_expr = make_const(span.dtype(), unit);
+  return floordiv(span + (unit_expr - 1), unit_expr) * unit_expr;
+}
 
 bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
                  arith::Analyzer *analyzer) {
@@ -497,30 +558,21 @@ private:
       // Barrier buffers: expand first dimension to keep 1D shape.
       // (1,) -> (num_versions,) so lower_shared_barrier.cc still works.
       new_buffer->shape.Set(0, PrimExpr(num_versions) * new_buffer->shape[0]);
-    } else {
-      if (new_buffer->shape.size() == 1 && new_buffer->strides.empty()) {
-        constexpr int64_t kTmaSmemAlignBits = 128 * 8;
-        const int64_t *extent = as_const_int(new_buffer->shape[0]);
-        int64_t elem_bits = static_cast<int64_t>(new_buffer->dtype.bits()) *
-                            new_buffer->dtype.lanes();
-        if (extent != nullptr && elem_bits > 0 &&
-            kTmaSmemAlignBits % elem_bits == 0) {
-          int64_t total_bits = *extent * elem_bits;
-          if (total_bits % kTmaSmemAlignBits != 0) {
-            int64_t padded_bits = (total_bits + kTmaSmemAlignBits - 1) /
-                                  kTmaSmemAlignBits * kTmaSmemAlignBits;
-            new_buffer->shape.Set(0, IntImm(new_buffer->shape[0].dtype(),
-                                            padded_bits / elem_bits));
-          }
-        }
-      }
-      new_buffer->shape.insert(new_buffer->shape.begin(),
-                               PrimExpr(num_versions));
-      if (!new_buffer->strides.empty()) {
-        ICHECK(new_buffer->strides.size() + 1 == new_buffer->shape.size());
-        PrimExpr stride_0 = new_buffer->strides[0] * new_buffer->shape[1];
-        new_buffer->strides.insert(new_buffer->strides.begin(), stride_0);
-      }
+      return Buffer(new_buffer);
+    }
+    // Versioned layout: logical shape [num_versions] + original_shape,
+    // physical strides [aligned_version_stride] + original/compact strides.
+    // The original logical shape is preserved; inter-version padding is
+    // expressed only through the leading stride, which every access path
+    // reads back as the canonical per-version offset.
+    new_buffer->shape.insert(new_buffer->shape.begin(), PrimExpr(num_versions));
+    if (!buffer->shape.empty()) {
+      Array<PrimExpr> strides = buffer->strides.empty()
+                                    ? MakeCompactStrides(buffer->shape)
+                                    : buffer->strides;
+      PrimExpr version_stride = AlignedVersionStride(buffer, strides);
+      strides.insert(strides.begin(), version_stride);
+      new_buffer->strides = std::move(strides);
     }
     return Buffer(new_buffer);
   }
@@ -881,13 +933,6 @@ private:
 
   PrimExpr RewriteBufferAccess(const Call &call,
                                const std::vector<int> &arg_indices) {
-    auto product = [](const Array<PrimExpr> &input) {
-      return foldl(
-          [](PrimExpr a, PrimExpr b, Span span) {
-            return mul(std::move(a), std::move(b), std::move(span));
-          },
-          make_const(DataType::Int(32), 1), input);
-    };
     Array<PrimExpr> new_args = call->args;
     for (int i : arg_indices) {
       auto buffer_var = Downcast<Var>(call->args[i]);
@@ -901,19 +946,12 @@ private:
             << "Versioned access_ptr escaped pipeline stage context";
         const Buffer &new_buffer = (*it).second;
         const PrimExpr &old_index = call->args[i + 1];
-        PrimExpr offset;
-        if (!new_buffer->strides.empty()) {
-          offset = new_buffer->strides[0];
-        } else if (new_buffer->shape.size() == buffer->shape.size() + 1) {
-          // Version dimension was prepended (possibly with the innermost
-          // extent padded for TMA alignment); the per-version stride is the
-          // product of the versioned buffer's trailing dimensions.
-          Array<PrimExpr> version_shape(new_buffer->shape.begin() + 1,
-                                        new_buffer->shape.end());
-          offset = product(version_shape);
-        } else {
-          offset = product(buffer->shape);
-        }
+        // RewriteAllocBuffer stores the canonical per-version offset in the
+        // leading stride; strides are only absent for rank-0 originals,
+        // whose per-version span is a single element.
+        PrimExpr offset = new_buffer->strides.empty()
+                              ? make_const(DataType::Int(32), 1)
+                              : new_buffer->strides[0];
         PrimExpr new_index = old_index + version_index * offset;
         new_args.Set(i + 1, new_index);
       }
