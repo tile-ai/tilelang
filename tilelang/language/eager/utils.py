@@ -1,6 +1,7 @@
 from __future__ import annotations
 import ast
 import inspect
+import os
 from typing import Any, Literal
 from collections.abc import Callable
 from tilelang import env
@@ -59,6 +60,9 @@ def get_func_nonlocals(func):
 def get_ast(func: Callable):
     _, start = inspect.getsourcelines(func)
     filename = inspect.getsourcefile(func) or inspect.getfile(func)
+    # Normalize to an absolute path so that source spans and remapped
+    # tracebacks are clickable links regardless of the invocation cwd.
+    filename = os.path.abspath(filename)
     source = inspect.getsource(func)
     source = _remove_leading_ident(source)
     source = "\n" * (start - 1) + source

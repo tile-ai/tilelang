@@ -16,6 +16,8 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include "span_utils.h"
+
 #include <algorithm>
 #include <map>
 #include <memory>
@@ -3104,7 +3106,8 @@ private:
       int order = stmt_info.order;
       ICHECK(!used_orders.count(order))
           << "ValueError: Two statements in the software pipeline cannot have "
-             "the same order";
+             "the same order"
+          << SpanHintSuffix({block->body->span, block->span});
       used_orders.insert(order);
     }
 
@@ -3121,12 +3124,14 @@ private:
         ICHECK_LE(src_info.stage, dst_info.stage)
             << "ValueError: statement " << dst << " in stage " << dst_info.stage
             << " cannot depends on statement " << src << " in a later stage "
-            << src_info.stage;
+            << src_info.stage
+            << SpanHintSuffix({dst->body->span, src->body->span});
         if (src_info.stage == dst_info.stage) {
           ICHECK_LT(src_info.order, dst_info.order)
               << "ValueError: two statements with buffer "
                  "access dependency in the same stage of the "
-                 "software pipeline cannot be reordered";
+                 "software pipeline cannot be reordered"
+              << SpanHintSuffix({dst->body->span, src->body->span});
         }
       }
     }
@@ -3159,11 +3164,13 @@ private:
             << "ValueError: scheduled scalar Bind '" << var
             << "' is used from a different pipeline stage. Scalar Bind "
                "statements that cannot be replayed must be scheduled in the "
-               "same stage as their consumers.";
+               "same stage as their consumers."
+            << SpanHintSuffix(consumer->body->span);
         ICHECK_LT(producer_info.order, consumer_info.order)
             << "ValueError: scheduled scalar Bind '" << var
             << "' must be ordered before every consumer in the same pipeline "
-               "stage.";
+               "stage."
+            << SpanHintSuffix(consumer->body->span);
       }
     }
   }
