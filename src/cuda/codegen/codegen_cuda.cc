@@ -5288,21 +5288,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
           os << "(int)" << v;
         }
         return;
-      } else if (lanes == 32) {
-        // make_int8x32
-        const int64_t *p = as_const_int(op->value);
-        ICHECK(p);
-        int64_t v = *p & 0xFF;
-        v = (v << 24) | (v << 16) | (v << 8) | v;
-        if (op->dtype.is_uint()) {
-          os << "make_ulonglong4(" << v << ", " << v << ", " << v << ", " << v
-             << ")";
-        } else {
-          os << "make_longlong4(" << v << ", " << v << ", " << v << ", " << v
-             << ")";
-        }
-        return;
       }
+      // lanes == 32 (int8x32, stored as (u)longlong4) is handled by the generic
+      // path below, which emits make_(u)longlong4 with 32 scalar args. That
+      // resolves to the 32-arg packing overloads in common.h, which fill all
+      // 64 bits of each field. Do NOT special-case it here with a 4-arg
+      // make_(u)longlong4: a 4-arg call binds the built-in overload and only
+      // fills the low 32 bits of each field, zeroing the upper half.
     }
   }
 

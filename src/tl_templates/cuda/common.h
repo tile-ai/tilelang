@@ -309,6 +309,42 @@ TL_DEVICE longlong4 make_longlong4(int x0, int x1, int y0, int y1, int z0,
   return result;
 }
 
+// Pack thirty-two char values.
+TL_DEVICE longlong4
+make_longlong4(signed char x0, signed char x1, signed char x2, signed char x3,
+               signed char x4, signed char x5, signed char x6, signed char x7,
+               signed char y0, signed char y1, signed char y2, signed char y3,
+               signed char y4, signed char y5, signed char y6, signed char y7,
+               signed char z0, signed char z1, signed char z2, signed char z3,
+               signed char z4, signed char z5, signed char z6, signed char z7,
+               signed char w0, signed char w1, signed char w2, signed char w3,
+               signed char w4, signed char w5, signed char w6, signed char w7) {
+  longlong4 result;
+  *((int2 *)&result.x) = make_int2(x0, x1, x2, x3, x4, x5, x6, x7);
+  *((int2 *)&result.y) = make_int2(y0, y1, y2, y3, y4, y5, y6, y7);
+  *((int2 *)&result.z) = make_int2(z0, z1, z2, z3, z4, z5, z6, z7);
+  *((int2 *)&result.w) = make_int2(w0, w1, w2, w3, w4, w5, w6, w7);
+  return result;
+}
+
+// Pack thirty-two unsigned char values.
+TL_DEVICE ulonglong4 make_ulonglong4(
+    unsigned char x0, unsigned char x1, unsigned char x2, unsigned char x3,
+    unsigned char x4, unsigned char x5, unsigned char x6, unsigned char x7,
+    unsigned char y0, unsigned char y1, unsigned char y2, unsigned char y3,
+    unsigned char y4, unsigned char y5, unsigned char y6, unsigned char y7,
+    unsigned char z0, unsigned char z1, unsigned char z2, unsigned char z3,
+    unsigned char z4, unsigned char z5, unsigned char z6, unsigned char z7,
+    unsigned char w0, unsigned char w1, unsigned char w2, unsigned char w3,
+    unsigned char w4, unsigned char w5, unsigned char w6, unsigned char w7) {
+  ulonglong4 result;
+  *((uint2 *)&result.x) = make_uint2(x0, x1, x2, x3, x4, x5, x6, x7);
+  *((uint2 *)&result.y) = make_uint2(y0, y1, y2, y3, y4, y5, y6, y7);
+  *((uint2 *)&result.z) = make_uint2(z0, z1, z2, z3, z4, z5, z6, z7);
+  *((uint2 *)&result.w) = make_uint2(w0, w1, w2, w3, w4, w5, w6, w7);
+  return result;
+}
+
 // Helper to cast SMEM pointer to unsigned
 TL_DEVICE uint32_t smem_ptr_to_uint(void const *const ptr) {
   return static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
