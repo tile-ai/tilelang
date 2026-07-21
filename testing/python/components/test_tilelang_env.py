@@ -1,6 +1,9 @@
 import os
 
+import pytest
+
 import tilelang
+from tilelang.env import resolve_pass_profile_threshold_ms
 
 
 def _env_var_descriptor(name):
@@ -59,3 +62,40 @@ def test_tilelang_tmp_dir_default_tracks_cache_dir(monkeypatch, tmp_path):
     finally:
         _restore_forced_value("TILELANG_CACHE_DIR", original_cache_forced_value)
         _restore_forced_value("TILELANG_TMP_DIR", original_tmp_forced_value)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(None, 0.0), ("", 0.0), ("   ", 0.0), ("0", 0.0), ("1.5", 1.5), (" 2.25 ", 2.25)],
+)
+def test_pass_profile_threshold_values(monkeypatch, value, expected):
+    desc = _env_var_descriptor("TILELANG_PASS_PROFILE_THRESHOLD_MS")
+    original_forced_value = desc._forced_value
+    desc._forced_value = None
+    try:
+        if value is None:
+            monkeypatch.delenv("TILELANG_PASS_PROFILE_THRESHOLD_MS", raising=False)
+        else:
+            monkeypatch.setenv("TILELANG_PASS_PROFILE_THRESHOLD_MS", value)
+        assert tilelang.env.get_pass_profile_threshold_ms() == expected
+    finally:
+        _restore_forced_value("TILELANG_PASS_PROFILE_THRESHOLD_MS", original_forced_value)
+
+
+@pytest.mark.parametrize("value", ["-1", "invalid", "nan", "inf", "-inf"])
+def test_pass_profile_threshold_rejects_invalid_values(monkeypatch, value):
+    desc = _env_var_descriptor("TILELANG_PASS_PROFILE_THRESHOLD_MS")
+    original_forced_value = desc._forced_value
+    desc._forced_value = None
+    try:
+        monkeypatch.setenv("TILELANG_PASS_PROFILE_THRESHOLD_MS", value)
+        with pytest.raises(ValueError, match="must be a finite non-negative number"):
+            tilelang.env.get_pass_profile_threshold_ms()
+    finally:
+        _restore_forced_value("TILELANG_PASS_PROFILE_THRESHOLD_MS", original_forced_value)
+
+
+def test_pass_profile_threshold_explicit_zero_overrides_environment():
+    key = tilelang.PassConfigKey.TL_PASS_PROFILE_THRESHOLD_MS
+
+    assert resolve_pass_profile_threshold_ms({key: 0}, key, lambda: 10.0) == 0.0

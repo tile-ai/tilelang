@@ -80,9 +80,17 @@ std::optional<Stmt> TryLowerSharedBulkZeroFill(const FillNode &op,
     return std::nullopt;
   }
 
+  // Emit the destination as a write access_ptr so ThreadSync records the
+  // st.bulk as a shared write and inserts the required barrier.
+  PrimExpr dst_access_ptr =
+      Call(DataType::Handle(), builtin::tvm_access_ptr(),
+           {TypeAnnotation(op.dst->dtype), op.dst->data,
+            make_const(DataType::Int(32), 0),
+            cast(DataType::Int(32), elements.value()),
+            IntImm(DataType::Int(32), /*rw_mask=write*/ 2)});
   PrimExpr bulk_store =
       Call(DataType::Handle(), ptx_st_bulk_shared(),
-           {op.dst->data, bytes, make_const(DataType::UInt(64), 0)});
+           {dst_access_ptr, bytes, make_const(DataType::UInt(64), 0)});
   Stmt body = Evaluate(bulk_store);
   if (lower_args.thread_var.defined() && lower_args.thread_bounds.defined()) {
     body = IfThenElse(EQ(lower_args.thread_var, lower_args.thread_bounds->min),

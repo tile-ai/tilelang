@@ -528,6 +528,116 @@ inline PrimExpr MakeUpdate(const ReduceOpNode &op, PrimExpr dst_val,
 } // namespace reduce
 
 template <typename Impl> struct ReduceLowerer {
+  static Stmt LowerLocal(const ReduceOpNode &op, const Buffer &src_buffer,
+                         const Buffer &dst_buffer,
+                         const LowerArgs &lower_args) {
+    ICHECK_EQ(op.batch, 1)
+        << "ReduceOp: local reduction does not support batch";
+    ICHECK(op.src->dtype == op.dst->dtype)
+        << "ReduceOp: local packed reduction currently requires matching src "
+           "and dst dtypes";
+
+    int src_dim = static_cast<int>(op.src->shape.size());
+    int dst_dim = static_cast<int>(op.dst->shape.size());
+    ICHECK(op.dim >= 0 && op.dim < src_dim);
+    ICHECK(dst_dim == src_dim - 1 || dst_dim == src_dim)
+        << "ReduceOp: local reduction dimension mismatch";
+
+    Array<Var> dst_vars;
+    Array<PrimExpr> dst_indices;
+    for (int i = 0; i < dst_dim; ++i) {
+      Var var("i" + std::to_string(i));
+      dst_vars.push_back(var);
+      dst_indices.push_back(var);
+    }
+
+    auto make_src_indices = [&](PrimExpr reduce_index) {
+      Array<PrimExpr> indices;
+      for (int i = 0; i < src_dim; ++i) {
+        if (i == op.dim) {
+          indices.push_back(reduce_index);
+        } else if (dst_dim == src_dim) {
+          indices.push_back(dst_vars[i]);
+        } else {
+          indices.push_back(dst_vars[i < op.dim ? i : i - 1]);
+        }
+      }
+      return indices;
+    };
+
+    int vsize =
+        Impl::GetPreferedVectorizedSize(dst_buffer->dtype, lower_args.target);
+    const int64_t *reduce_extent = as_const_int(op.src->shape[op.dim]);
+    bool can_pack = op.clear && vsize == 2 && reduce_extent &&
+                    *reduce_extent >= vsize && *reduce_extent % vsize == 0 &&
+                    reduce::MakeCodegenReducer(op, vsize).has_value();
+
+    Array<Stmt> stmts;
+    Buffer packed_buffer;
+    if (can_pack) {
+      packed_buffer =
+          decl_buffer(dst_buffer->shape, dst_buffer->dtype.with_lanes(vsize),
+                      dst_buffer->name + "_pack", src_buffer.scope());
+      stmts.push_back(BufferStore(
+          packed_buffer, reduce::MakeInitValue(op, vsize), dst_indices));
+
+      Var rv("rv");
+      PrimExpr base = rv * vsize;
+      PrimExpr src_value;
+      if (op.dim == src_dim - 1) {
+        Array<PrimExpr> src_indices =
+            make_src_indices(Ramp(base, Integer(1), vsize));
+        BufferLoad src_load(src_buffer, src_indices);
+        src_load.CopyOnWrite()->dtype = src_buffer->dtype.with_lanes(vsize);
+        src_value = src_load;
+      } else {
+        PrimExpr value0 = BufferLoad(src_buffer, make_src_indices(base));
+        PrimExpr value1 =
+            BufferLoad(src_buffer, make_src_indices(base + Integer(1)));
+        src_value = Shuffle({value0, value1}, {0, 1});
+      }
+      Stmt reduce_body = BufferStore(
+          packed_buffer,
+          reduce::MakeReduce(op, vsize, BufferLoad(packed_buffer, dst_indices),
+                             src_value),
+          dst_indices);
+      stmts.push_back(For(rv, 0, Integer(*reduce_extent / vsize),
+                          ForKind::kUnrolled, reduce_body, std::nullopt,
+                          {{tirx::attr::pragma_unroll_explicit, Bool(false)}}));
+
+      PrimExpr packed = BufferLoad(packed_buffer, dst_indices);
+      PrimExpr result =
+          reduce::MakeReduce(op, 1, Shuffle::ExtractElement(packed, 0),
+                             Shuffle::ExtractElement(packed, 1));
+      stmts.push_back(BufferStore(dst_buffer, result, dst_indices));
+    } else {
+      if (op.clear) {
+        stmts.push_back(
+            BufferStore(dst_buffer, reduce::MakeInitValue(op), dst_indices));
+      }
+      Var rv("rv");
+      Stmt reduce_body = BufferStore(
+          dst_buffer,
+          reduce::MakeReduce(op, 1, BufferLoad(dst_buffer, dst_indices),
+                             BufferLoad(src_buffer, make_src_indices(rv))),
+          dst_indices);
+      stmts.push_back(For(rv, 0, op.src->shape[op.dim], ForKind::kUnrolled,
+                          reduce_body, std::nullopt,
+                          {{tirx::attr::pragma_unroll_explicit, Bool(false)}}));
+    }
+
+    Stmt body = SeqStmt(stmts);
+    for (int i = dst_dim - 1; i >= 0; --i) {
+      body = For(dst_vars[i], 0, op.dst->shape[i], ForKind::kUnrolled, body,
+                 std::nullopt,
+                 {{tirx::attr::pragma_unroll_explicit, Bool(false)}});
+    }
+    if (can_pack) {
+      body = SeqStmt({AllocBuffer(packed_buffer), body});
+    }
+    return body;
+  }
+
   static Stmt Lower(const ReduceOpNode &op, const LowerArgs &lower_args,
                     arith::Analyzer *analyzer) {
     if (op.nan_propagate &&
@@ -538,12 +648,14 @@ template <typename Impl> struct ReduceLowerer {
                     "(requires __hmax_nan/__hmin_nan intrinsics). Target was: "
                  << lower_args.target->str();
     }
-    auto get_buffer = [&](const Buffer &buf) {
-      if (lower_args.buffer_remap.count(buf)) {
-        return lower_args.buffer_remap[buf];
-      }
-      return buf;
+    auto get_buffer = [&](const Buffer &buffer) {
+      auto it = lower_args.buffer_remap.find(buffer);
+      return it == lower_args.buffer_remap.end() ? buffer : (*it).second;
     };
+
+    if (IsLocalBuffer(op.src) && IsLocalBuffer(op.dst, /*allow_var*/ true)) {
+      return LowerLocal(op, get_buffer(op.src), get_buffer(op.dst), lower_args);
+    }
 
     if (IsFragmentBuffer(op.src) && IsFragmentBuffer(op.dst)) {
       auto src_buffer = get_buffer(op.src);

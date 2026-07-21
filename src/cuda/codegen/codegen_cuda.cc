@@ -194,11 +194,70 @@ struct CUDAFastMathTan : public CUDAMath {
 struct CUDAIEEEMath {
   std::string operator()(DataType t, std::string name,
                          std::string rounding_mode) const {
+    // float32: all ops with all rounding modes are supported.
+    //   Pattern: __<name>_<rm>   (e.g., __fadd_rn, __fmul_rz)
     if (t.is_float() && t.bits() == 32) {
       return "__" + name + "_" + rounding_mode;
-    } else if (t.is_float() && t.bits() == 64) {
-      return "__d" + name + "_" + rounding_mode;
     }
+
+    // float64: strip the leading 'f' from <name> and prefix with 'd'.
+    //   Pattern: __d<stem>_<rm>  (e.g., fadd -> __dadd_rn)
+    if (t.is_float() && t.bits() == 64) {
+      // Special case: fp64 FMA is __fma_rn, not __dmaf_rn or __dfmaf_rn.
+      if (name == "fmaf") {
+        return "__fma_" + rounding_mode;
+      }
+      // fp64 has no reciprocal-square-root intrinsic — must be composed.
+      if (name == "frsqrt") {
+        LOG(FATAL) << "IEEE frsqrt is not supported for float64 in CUDA. "
+                   << "Use ieee_fsqrt followed by ieee_frcp as a workaround.";
+        return "";
+      }
+      // fadd -> dadd, fsub -> dsub, fmul -> dmul, frcp -> drcp,
+      // fsqrt -> dsqrt, fdiv -> ddiv
+      std::string base = name;
+      if (!base.empty() && base[0] == 'f') {
+        base = base.substr(1);
+      }
+      return "__d" + base + "_" + rounding_mode;
+    }
+
+    // float16/bfloat16: half-precision intrinsics only exist for
+    // round-to-nearest-even.
+    if (t.is_float16() || t.is_bfloat16()) {
+      if (rounding_mode != "rn") {
+        LOG(FATAL)
+            << "IEEE " << name << " with rounding mode '" << rounding_mode
+            << "' is not supported for float16/bfloat16 in CUDA. "
+            << "Only rounding mode 'rn' is available for half precision.";
+        return "";
+      }
+      // fmaf -> __hfma (not __hmaf)
+      if (name == "fmaf") {
+        return "__hfma";
+      }
+      // Unary ops: hsqrt, hrcp, hrsqrt
+      if (name == "fsqrt") {
+        return "hsqrt";
+      }
+      if (name == "frcp") {
+        return "hrcp";
+      }
+      if (name == "frsqrt") {
+        return "hrsqrt";
+      }
+      // Binary ops: __hadd_rn, __hsub_rn, __hmul_rn, __hdiv
+      if (name == "fdiv") {
+        return "__hdiv";
+      }
+      std::string base = name;
+      if (!base.empty() && base[0] == 'f') {
+        base = base.substr(1);
+      }
+      return "__h" + base + "_rn";
+    }
+
+    LOG(FATAL) << "IEEE " << name << " is not supported for dtype " << t;
     return "";
   }
 };
@@ -4629,6 +4688,24 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
     }
     this->stream << ");\n";
     return true;
+  } else if (op->op.same_as(tl::atomic_addx2_ret_elem_op())) {
+    need_atomic_h_ = true;
+    // fp16/bf16 x2 is stored as uint1 but AtomicAddx2Ret returns half2/bf162;
+    // bridge with to_uint1. float32 is native float2, emitted bare.
+    bool need_cast = op->dtype.is_float16() || op->dtype.is_bfloat16();
+    if (need_cast) {
+      os << "tl::to_uint1(";
+    }
+    os << "AtomicAddx2Ret(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]);
+    if (op->args.size() > 2) {
+      os << ", " << PrintExpr(op->args[2]);
+    }
+    os << ")";
+    if (need_cast) {
+      os << ")";
+    }
+    return true;
   } else if (op->op.same_as(tl::atomic_addx4_elem_op())) {
     need_atomic_h_ = true;
     // atomic_addx4_elem_op(dst_ptr, src_ptr[, memory_order])
@@ -4640,6 +4717,16 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
       this->stream << ", " << PrintExpr(op->args[2]);
     }
     this->stream << ");\n";
+    return true;
+  } else if (op->op.same_as(tl::atomic_addx4_ret_elem_op())) {
+    need_atomic_h_ = true;
+    // AtomicAddx4Ret already returns the store type (float4 / uint2), so bare.
+    os << "AtomicAddx4Ret(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]);
+    if (op->args.size() > 2) {
+      os << ", " << PrintExpr(op->args[2]);
+    }
+    os << ")";
     return true;
   } else if (op->op.same_as(tl::atomic_load_elem_op())) {
     need_atomic_h_ = true;
@@ -4839,8 +4926,10 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
     if (scope.find("wmma.") == 0) {
       constant_size = GetWmmaFragmentSize(scope, buffer, constant_size);
     }
-    if ((alloc_dtype == DataType::Int(4) || alloc_dtype == DataType::UInt(4)) &&
-        scope == "shared") {
+    bool is_byte_packed_4bit =
+        alloc_dtype == DataType::Int(4) || alloc_dtype == DataType::UInt(4) ||
+        (alloc_dtype.is_float4_e2m1fn() && alloc_dtype.is_scalar());
+    if (is_byte_packed_4bit && scope == "shared") {
       constant_size = (constant_size + 1) / 2;
     } else if (alloc_dtype == DataType::Int(1) && scope == "shared") {
       constant_size = constant_size / 32;
@@ -5222,15 +5311,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const ShuffleNode *op,
     }
 
     const char *u64 = t.is_uint() ? "unsigned long long" : "long long";
-    const char *u32 = t.is_uint() ? "unsigned int" : "int";
     PrintVecConstructor(t, os);
     os << '(';
     for (int i = 0; i + 1 < lanes; i += 2) {
       if (i != 0)
         os << ", ";
-      // Pack lane i (lo) and lane i+1 (hi) into one 64-bit value.
-      os << "((" << u64 << ")(" << u32 << ")(" << scalars[i] << ")) | "
-         << "((" << u64 << ")(" << u32 << ")(" << scalars[i + 1] << ") << 32)";
+      // Pack lane i (lo) and lane i+1 (hi) into one 64-bit value. Widen through
+      // `unsigned int` so both lanes are zero-extended.
+      os << "(" << u64 << ")(((unsigned long long)(unsigned int)(" << scalars[i]
+         << ")) | ((unsigned long long)(unsigned int)(" << scalars[i + 1]
+         << ") << 32))";
     }
     os << ')';
     return;
@@ -5257,21 +5347,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
           os << "(int)" << v;
         }
         return;
-      } else if (lanes == 32) {
-        // make_int8x32
-        const int64_t *p = as_const_int(op->value);
-        ICHECK(p);
-        int64_t v = *p & 0xFF;
-        v = (v << 24) | (v << 16) | (v << 8) | v;
-        if (op->dtype.is_uint()) {
-          os << "make_ulonglong4(" << v << ", " << v << ", " << v << ", " << v
-             << ")";
-        } else {
-          os << "make_longlong4(" << v << ", " << v << ", " << v << ", " << v
-             << ")";
-        }
-        return;
       }
+      // lanes == 32 (int8x32, stored as (u)longlong4) is handled by the generic
+      // path below, which emits make_(u)longlong4 with 32 scalar args. That
+      // resolves to the 32-arg packing overloads in common.h, which fill all
+      // 64 bits of each field. Do NOT special-case it here with a 4-arg
+      // make_(u)longlong4: a 4-arg call binds the built-in overload and only
+      // fills the low 32 bits of each field, zeroing the upper half.
     }
   }
 
@@ -5348,15 +5430,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
     int lanes = op->dtype.lanes();
     std::string v = PrintExpr(op->value);
     const char *u64 = op->dtype.is_uint() ? "unsigned long long" : "long long";
-    const char *u32 = op->dtype.is_uint() ? "unsigned int" : "int";
     os << "make_";
     PrintType(op->dtype, os);
     os << '(';
     for (int i = 0; i < lanes / 2; ++i) {
       if (i != 0)
         os << ", ";
-      os << "((" << u64 << ")(" << u32 << ")(" << v << ")) | "
-         << "((" << u64 << ")(" << u32 << ")(" << v << ") << 32)";
+      // Widen through `unsigned int` so both lanes are zero-extended.
+      os << "(" << u64 << ")(((unsigned long long)(unsigned int)(" << v
+         << ")) | ((unsigned long long)(unsigned int)(" << v << ") << 32))";
     }
     os << ')';
     return;
@@ -5525,6 +5607,17 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
   }
   // Type code is kFloat8_e5m2 or kE4M4Float
   if (op->dtype.is_float8() || op->dtype.is_float4()) {
+    // e5m2 inf/NaN have no float-literal spelling; emit the bit pattern.
+    if (op->dtype.is_float8_e5m2() && std::isinf(op->value)) {
+      p->PrintType(op->dtype, os);
+      os << "::bitcast(" << (op->value < 0 ? "0xfc" : "0x7c") << ")";
+      return;
+    }
+    if (op->dtype.is_float8_e5m2() && std::isnan(op->value)) {
+      p->PrintType(op->dtype, os);
+      os << "::bitcast(0x7e)";
+      return;
+    }
     p->PrintType(op->dtype, os);
     os << '(' << FlexibleHexFormat(op->value) << 'f';
     os << "/*" << std::scientific << op->value << "*/";

@@ -727,7 +727,9 @@ private:
     PrimExpr old_parity_cycle = parity_cycle_;
     Var old_pipeline_loop_var = pipeline_loop_var_;
     PrimExpr old_pipeline_loop_min = pipeline_loop_min_;
-    version_index_ = FloorMod(linear_index, num_stages);
+    PrimExpr raw_version_index = FloorMod(linear_index, num_stages);
+    version_index_ =
+        Call(raw_version_index->dtype, mvb_stage_index(), {raw_version_index});
     // Parity cycles every num_stages iterations for mbarrier phase tracking.
     parity_cycle_ = FloorMod(FloorDiv(linear_index, num_stages), 2);
     // Store the pipelined loop variable and its min value so we can compute
