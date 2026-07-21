@@ -1,5 +1,5 @@
 from tilelang import tvm as tvm
-from tvm.ir.base import Node
+from tvm.ir.base import Node, SourceName, Span
 from tvm.runtime import Scriptable
 import tvm_ffi
 from tvm.target import Target
@@ -70,3 +70,87 @@ class RegionOp(Node, Scriptable): ...
 
 @tvm_ffi.register_object("tl.ReduceType")
 class ReduceType(Node, Scriptable): ...
+
+
+# ---------------------------------------------------------------------------
+# Source span helpers
+#
+# tirx Stmt/Buffer/PrimFunc nodes carry a mutable `span` field that is
+# reflected read-only to Python and never participates in structural
+# equality/hashing. The functions below write spans during script parsing
+# (see tilelang/language/eager/builder.py) and read them back from
+# diagnostics, the LSP analyzer, and visualization tools.
+# ---------------------------------------------------------------------------
+
+
+def _span_ffi(name: str):
+    # `tl.ir.*` names contain a dot and are therefore skipped by
+    # `init_ffi_api`; fetch them from the global registry directly.
+    return tvm_ffi.get_global_func(f"tl.ir.{name}")
+
+
+def make_span(file: str, line: int) -> Span:
+    """Create a span covering a whole source line."""
+    return Span(SourceName(file), line, line, 1, 1 << 20)
+
+
+def set_stmt_span(stmt, span: Span) -> None:
+    _span_ffi("SetStmtSpan")(stmt, span)
+
+
+def get_stmt_span(stmt) -> Span | None:
+    span = _span_ffi("GetStmtSpan")(stmt)
+    return span if span is not None and span.source_name is not None else None
+
+
+def set_buffer_span(buffer, span: Span) -> None:
+    _span_ffi("SetBufferSpan")(buffer, span)
+
+
+def get_buffer_span(buffer) -> Span | None:
+    span = _span_ffi("GetBufferSpan")(buffer)
+    return span if span is not None and span.source_name is not None else None
+
+
+def set_prim_func_span(func, span: Span) -> None:
+    _span_ffi("SetPrimFuncSpan")(func, span)
+
+
+def get_prim_func_span(func) -> Span | None:
+    span = _span_ffi("GetPrimFuncSpan")(func)
+    return span if span is not None and span.source_name is not None else None
+
+
+def span_to_location(span: Span | None) -> tuple[str, int] | None:
+    """Convert a span to a (file, line) tuple, or None when undefined."""
+    if span is None or span.source_name is None:
+        return None
+    return (span.source_name.name, span.line)
+
+
+def span_coverage(func) -> dict:
+    """Statistics on span injection coverage for a PrimFunc.
+
+    Returns {"stmts": [with_span, total], "buffers": [with_span, total]}.
+    New nodes synthesized by passes legitimately have no span; this metric
+    is meant for the freshly parsed IR (span injection validation).
+    """
+    from tvm.tirx.stmt_functor import post_order_visit
+
+    stmts = [0, 0]
+
+    def _visit(node):
+        if not isinstance(node, tvm.tirx.Stmt):
+            return
+        stmts[1] += 1
+        if get_stmt_span(node) is not None:
+            stmts[0] += 1
+
+    post_order_visit(func.body, _visit)
+
+    buffers = [0, 0]
+    for _, buffer in func.buffer_map.items():
+        buffers[1] += 1
+        if get_buffer_span(buffer) is not None:
+            buffers[0] += 1
+    return {"stmts": stmts, "buffers": buffers}

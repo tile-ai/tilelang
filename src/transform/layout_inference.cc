@@ -33,6 +33,7 @@
 #include "common/union_find.h"
 #include "layout_reducer.h"
 #include "parallel_loop_layout_validator.h"
+#include "span_utils.h"
 #include "tir/transforms/ir_utils.h"
 
 namespace tvm {
@@ -248,7 +249,8 @@ public:
           LOG(FATAL) << "Get different layout for " << buffer
                      << "\n current layout: " << layout->DebugOutput()
                      << "\n previous layout: "
-                     << layout_map[buffer]->DebugOutput();
+                     << layout_map[buffer]->DebugOutput()
+                     << SpanHintSuffix(buffer->span);
         }
         // Ensure aliases are consistent too
         propagate_alias(buffer, layout);
@@ -411,7 +413,8 @@ public:
       if (IsFragmentBuffer(buffer)) {
         ICHECK_NE(layout_map.count(buffer), 0)
             << "The layout for fragment " << buffer
-            << " can not be inferred correctly.";
+            << " can not be inferred correctly."
+            << SpanHintSuffix(buffer->span);
       }
     }
 
@@ -1106,7 +1109,8 @@ private:
                        "buffer. Non-constant shape expr is: "
                     << i
                     << ". This is possibly because you use symbolic shape when "
-                       "accessing a fragment/local buffer.";
+                       "accessing a fragment/local buffer."
+                    << SpanHintSuffix(buffer->span);
                 frag_reg_num *= *pci;
               }
               reg_num += frag_reg_num;

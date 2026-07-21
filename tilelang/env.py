@@ -385,6 +385,9 @@ class Environment:
     TILELANG_PASS_PROFILE = EnvVar("TILELANG_PASS_PROFILE", "0")  # "0"=off, "1"/"true"=on
     TILELANG_PASS_PROFILE_THRESHOLD_MS = EnvVar("TILELANG_PASS_PROFILE_THRESHOLD_MS", "0")  # 0=show all
 
+    # Source span injection into tirx IR (error locations / LSP / visualization)
+    TILELANG_ENABLE_IR_SPAN = EnvVar("TILELANG_ENABLE_IR_SPAN", "1")  # "1"=on (default), "0"=off
+
     # Auto-tuning settings
     TILELANG_AUTO_TUNING_DISABLE_CACHE = EnvVar("TILELANG_AUTO_TUNING_DISABLE_CACHE", "0")
     TILELANG_AUTO_TUNING_CPU_UTILITIES = EnvVar("TILELANG_AUTO_TUNING_CPU_UTILITIES", "0.9")  # percent of CPUs used

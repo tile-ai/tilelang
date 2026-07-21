@@ -8,6 +8,7 @@
 #include "../transform/common/loop_fusion_utils.h"
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
+#include "span_utils.h"
 #include "support/check.h"
 #include "utils.h"
 #include <tvm/ir/cast.h>
@@ -391,7 +392,7 @@ Array<IterVar> CopyNode::MakeIterVars() const {
             << ", extent=" << base_ext << "\n";
         oss << "src_ranges[" << src_dim << "]: min=" << src_range[src_dim]->min
             << ", extent=" << src_ext << "\n";
-        LOG(FATAL) << oss.str();
+        LOG(FATAL) << oss.str() << SpanHintSuffix({dst->span, src->span});
       }
       ++base_dim;
       ++src_dim;

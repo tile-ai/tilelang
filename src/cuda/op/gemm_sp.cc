@@ -10,6 +10,7 @@
 #include "op/builtin.h"
 #include "op/tcgen5_meta.h"
 #include "op/utils.h"
+#include "span_utils.h"
 
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
@@ -94,18 +95,19 @@ void FatalWgmmaUnavailable(const GemmSPNode &op, Target target) {
              << ", dtype=" << op.A->dtype << "), B(scope=" << op.B.scope()
              << ", dtype=" << op.B->dtype << "), C(scope=" << op.C.scope()
              << ", dtype=" << op.C->dtype << "), M=" << op.M << ", N=" << op.N
-             << ", K=" << op.K << ".";
+             << ", K=" << op.K << "."
+             << SpanHintSuffix({op.A->span, op.B->span, op.C->span});
 }
 
 void FatalTcgen5Unavailable(const GemmSPNode &op, Target target) {
-  LOG(FATAL) << "tcgen5";
-  //   LOG(FATAL) << "T.tcgen05_gemm() requires Blackwell TCGEN5MMA lowering, "
-  //                 "but constraints were not satisfied. Got target="
-  //              << target << ", A(scope=" << op.A.scope()
-  //              << ", dtype=" << op.A->dtype << "), B(scope=" << op.B.scope()
-  //              << ", dtype=" << op.B->dtype << "), C(scope=" << op.C.scope()
-  //              << ", dtype=" << op.C->dtype << "), M=" << op.M
-  //              << ", N=" << op.N << ", K=" << op.K << ".";
+  LOG(FATAL) << "T.tcgen05_gemm_sp() requires Blackwell TCGEN5MMA lowering, "
+                "but constraints were not satisfied. Got target="
+             << target << ", A(scope=" << op.A.scope()
+             << ", dtype=" << op.A->dtype << "), B(scope=" << op.B.scope()
+             << ", dtype=" << op.B->dtype << "), C(scope=" << op.C.scope()
+             << ", dtype=" << op.C->dtype << "), M=" << op.M << ", N=" << op.N
+             << ", K=" << op.K << "."
+             << SpanHintSuffix({op.A->span, op.B->span, op.C->span});
 }
 
 std::pair<int, int>

@@ -216,6 +216,19 @@ class Builder(BaseBuilder):
         self.current_macro_name = "<unknown-macro>"
         # stack to record caller fileline, not callee fileline
         self.macro_fileline_stack: list[tuple[str, int, str]] = []
+        # Source span injection state. When enabled, emitted IR nodes (Stmt,
+        # Buffer, PrimFunc) are stamped with the user source location so that
+        # compiler errors and tools (LSP, visualizers) can point back to the
+        # originating line. See tilelang/ir.py span helpers and
+        # docs/developer_guide/ir_span.md.
+        from tilelang.env import env
+
+        self._spans_enabled = str(env.TILELANG_ENABLE_IR_SPAN).lower() not in ("0", "false", "off")
+        # Pending leaf segment: (stmt_frame, stmt_count, file, line) recorded
+        # by set_fileline; stmts appended to the frame afterwards belong to
+        # that source statement until the next set_fileline / frame exit.
+        self._span_pending: tuple[Any, int, str, int] | None = None
+        self._span_first_fileline: tuple[str, int] | None = None
 
     @classmethod
     def current(cls) -> Self:
@@ -267,7 +280,78 @@ class Builder(BaseBuilder):
         self.name_inside_frame, self.macro_arg_annot = save
 
     def get(self) -> PrimFunc:
-        return self.ir_builder.get()
+        if self._spans_enabled:
+            self._flush_span_pending()
+        func = self.ir_builder.get()
+        if self._spans_enabled and self._span_first_fileline is not None:
+            from tilelang.ir import make_span, set_prim_func_span
+
+            set_prim_func_span(func, make_span(*self._span_first_fileline))
+        return func
+
+    # ------------------------------------------------------------------
+    # Source span injection (TILELANG_ENABLE_IR_SPAN)
+    # ------------------------------------------------------------------
+
+    def _current_stmt_frame(self):
+        """The innermost open frame whose `stmts` accumulates emitted stmts."""
+        for frame in reversed(self.frames):
+            if isinstance(frame, tirx.frame.TIRFrame):
+                f = frame
+                # KernelLaunchFrame nests launch/block frames entered C++-side;
+                # leaf statements accumulate in its innermost sub-frame.
+                while isinstance(f, KernelLaunchFrame) and len(f.frames) > 0 and isinstance(f.frames[-1], tirx.frame.TIRFrame):
+                    f = f.frames[-1]
+                return f
+        return None
+
+    def _flush_span_pending(self):
+        """Stamp stmts appended since the last recorded source statement."""
+        if self._span_pending is None:
+            return
+        from tilelang.ir import get_stmt_span, make_span, set_stmt_span
+
+        frame, start, file, line = self._span_pending
+        self._span_pending = None
+        if line <= 0:
+            return
+        try:
+            stmts = frame.stmts
+        except Exception:
+            return
+        span = make_span(file, line)
+        for i in range(start, len(stmts)):
+            if get_stmt_span(stmts[i]) is None:
+                set_stmt_span(stmts[i], span)
+
+    def _stamp_new_parent_stmts(self, parent, start: int, file: str, line: int):
+        """Stamp stmts produced by an exited frame into its parent frame.
+
+        Frames like KernelLaunchFrame assemble a whole subtree (launch grid
+        loops, block realize) whose intermediate nodes never pass through
+        `with_frame`; stamp every still-unspanned stmt in the produced
+        subtree with the frame's entry line. Nodes already stamped with their
+        own statement line keep their span.
+        """
+        if parent is None or line <= 0:
+            return
+        from tilelang.ir import get_stmt_span, make_span, set_stmt_span
+        from tvm.tirx.stmt_functor import post_order_visit
+
+        try:
+            stmts = parent.stmts
+        except Exception:
+            return
+        if len(stmts) <= start:
+            return
+        span = make_span(file, line)
+
+        def stamp(node):
+            if isinstance(node, tvm.tirx.Stmt) and get_stmt_span(node) is None:
+                set_stmt_span(node, span)
+
+        for i in range(start, len(stmts)):
+            post_order_visit(stmts[i], stamp)
 
     def find_frame_idx(self, frame: type | tuple[type, ...], start=0) -> int | None:
         for idx in reversed(range(start, len(self.frames))):
@@ -287,9 +371,27 @@ class Builder(BaseBuilder):
     @contextmanager
     def with_frame(self, frame: AbstractContextManager[Any] | None):
         pop_idx = len(self.frames)
+        span_entry = None
+        if self._spans_enabled and frame is not None:
+            # Record the enclosing stmt container and the entry position (the
+            # `with`/`for` line), so stmts this frame produces into its parent
+            # can be stamped after it exits.
+            parent = self._current_stmt_frame()
+            span_entry = (
+                parent,
+                len(parent.stmts) if parent is not None else 0,
+                self.current_file,
+                self.current_line,
+            )
         yield self.enter_frame(frame)
+        if self._spans_enabled:
+            # Flush leaf stmts of the frame being exited before its __exit__
+            # moves them into the produced node.
+            self._flush_span_pending()
         while len(self.frames) > pop_idx:
             self.frames.pop().__exit__(None, None, None)
+        if self._spans_enabled and span_entry is not None:
+            self._stamp_new_parent_stmts(*span_entry)
 
     class _has_if_frame: ...
 
@@ -761,6 +863,13 @@ class Builder(BaseBuilder):
         self.current_file = filename
         self.current_line = lineno
         self.current_macro_name = name
+        if self._spans_enabled:
+            self._flush_span_pending()
+            frame = self._current_stmt_frame()
+            if frame is not None:
+                self._span_pending = (frame, len(frame.stmts), filename, lineno)
+                if self._span_first_fileline is None and lineno > 0:
+                    self._span_first_fileline = (filename, lineno)
 
     def get_fileline_stack(self, stacklevel=1):
         stack = self.macro_fileline_stack + [(self.current_file, self.current_line, self.current_macro_name)]
