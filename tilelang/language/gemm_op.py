@@ -606,5 +606,3 @@ def make_blockscaled_gemm_layout(
 
     c_buf = C_region.buffer if isinstance(C_region, tirx.BufferRegion) else C
     return emitter.make_mma_store_layout(c_buf)
-
-
