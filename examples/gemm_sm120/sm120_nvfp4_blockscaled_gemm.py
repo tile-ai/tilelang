@@ -71,13 +71,20 @@ def sm120_nvfp4_blockscaled_gemm(
     sf_granularity_k = 16
     M_pad = -(-M // block_M) * block_M
     N_pad = -(-N // block_N) * block_N
+    k_blocks = K // block_K
 
+    # The blockscaled_chunk_kmajor scale source stores each (mn_block, k_block)
+    # tile of block_MN x (block_K // 64) uint32 words contiguously, so the
+    # honest tensor shape is "tile rows": [n_mn_blocks * n_k_blocks * block_MN,
+    # words_per_kblock]. Each tile is then a plain rectangular slice and
+    # staging it is an ordinary T.copy. The host obtains this view zero-copy
+    # via swizzle_blockscaled_chunk_kmajor_scale_words(...).reshape(-1, 4).
     @T.prim_func
     def main(
         A: T.Tensor((M, K), in_dtype),
         B: T.Tensor((N, K), in_dtype),
-        SFA: T.Tensor((M_pad, K // 64), T.uint32),
-        SFB: T.Tensor((N_pad, K // 64), T.uint32),
+        SFA: T.Tensor((M_pad * k_blocks, sf_words_per_block_k), T.uint32),
+        SFB: T.Tensor((N_pad * k_blocks, sf_words_per_block_k), T.uint32),
         C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=_SM120_THREADS) as (
@@ -102,8 +109,16 @@ def sm120_nvfp4_blockscaled_gemm(
                     B_shared,
                     annotations={"prefer_instruction": "tma"},
                 )
-                T.copy_ue4m3_scale_tile(SFA, SFA_shared, by, ko)
-                T.copy_ue4m3_scale_tile(SFB, SFB_shared, bx, ko)
+                # Written as explicit element loops rather than T.copy: the
+                # loop form lowers to async cp.async merged into the TMA
+                # barriers (no producer stall), while the T.copy form today
+                # either stalls the producer on a synchronous load or hits a
+                # missing mbarrier arrive on the bulk-TMA path (tracked
+                # upstream). Addressing is plain tile rows either way.
+                for r, w in T.Parallel(block_M, sf_words_per_block_k):
+                    SFA_shared[r, w] = SFA[(by * k_blocks + ko) * block_M + r, w]
+                for r, w in T.Parallel(block_N, sf_words_per_block_k):
+                    SFB_shared[r, w] = SFB[(bx * k_blocks + ko) * block_N + r, w]
                 T.mma_gemm_blockscaled(
                     A_shared,
                     B_shared,
@@ -240,8 +255,9 @@ def run_tilelang(args: argparse.Namespace) -> tuple[float, float]:
     SFA_semantic = _make_binary_scale_words(args.m, args.k, seed=args.seed + 100)
     SFB_semantic = _make_binary_scale_words(args.n, args.k, seed=args.seed + 200)
 
-    SFA = swizzle_blockscaled_chunk_kmajor_scale_words(SFA_semantic)
-    SFB = swizzle_blockscaled_chunk_kmajor_scale_words(SFB_semantic)
+    # Zero-copy tile-rows view of the packed layout (see the kernel docstring).
+    SFA = swizzle_blockscaled_chunk_kmajor_scale_words(SFA_semantic).reshape(-1, 4)
+    SFB = swizzle_blockscaled_chunk_kmajor_scale_words(SFB_semantic).reshape(-1, 4)
     C = torch.empty((args.m, args.n), device="cuda", dtype=out_torch_dtype)
 
     kernel(A, B, SFA, SFB, C)

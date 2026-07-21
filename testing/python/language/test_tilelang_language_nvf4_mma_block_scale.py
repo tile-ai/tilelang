@@ -99,17 +99,11 @@ def test_tensor_core_intrin_emitter_mma_keeps_base_positional_signature():
         assert extra.kind == inspect.Parameter.KEYWORD_ONLY, extra.name
 
 
-def test_copy_ue4m3_scale_tile_rejects_non_uint32_scales():
-    with pytest.raises(ValueError, match="uint32"):
-
-        @T.prim_func
-        def main(SF: T.Tensor((128, 8), T.int32), Out: T.Tensor((1,), T.int32)):
-            with T.Kernel(1, threads=128):
-                SF_shared = T.alloc_shared((128, 4), T.int32)
-                T.copy_ue4m3_scale_tile(SF, SF_shared, 0, 0)
-
-
 def test_sm120_mma_blockscaled_strategy_helpers_are_not_public_api():
+    # NVFP4-specific staging helpers stay out of the general T.* surface; the
+    # scale-tile addressing lives in tilelang.quantize.nvfp4.
+    assert not hasattr(T, "copy_ue4m3_scale_tile")
+    assert not hasattr(T, "ue4m3_scale_tile_source_coords")
     assert not hasattr(T, "sm120_mma_blockscaled")
     assert not hasattr(T, "sm120_mma_blockscaled_kblock_fulltile")
     assert not hasattr(T, "sm120_mma_blockscaled_kblock_fulltile_ab_owner_wide")

@@ -195,6 +195,24 @@ def blockscaled_chunk_kmajor_word_offset(row: int, k64_word: int, block_rows: in
     return k64_word * 32 + (row % 32), row // 32
 
 
+def blockscaled_chunk_kmajor_tile_source_coords(scale_cols, block_mn, words_per_kblock, mn_block_idx, k_block_idx, word_flat):
+    """Map a flat word index inside one scale tile to packed source coordinates.
+
+    The ``blockscaled_chunk_kmajor`` scale source (``uint32 [MN, K/64]``, four
+    UE4M3 bytes per word) stores each ``(mn_block, k_block)`` tile of
+    ``block_mn * words_per_kblock`` words contiguously. Given the flat word
+    index inside that tile, return the ``(row, col)`` coordinates in the packed
+    source tensor. Custom staging schedules over the 2-D ``[MN, K/64]`` view
+    (e.g. the maint benchmark's producer warp group) build their copy loops on
+    top of it; kernels that view the source as tile rows
+    (``[tiles * block_mn, words_per_kblock]``, see the SM120 example) do not
+    need it — each tile is a plain rectangular slice there. Plain arithmetic,
+    so it works on host integers and TIR expressions alike.
+    """
+    global_flat = mn_block_idx * block_mn * scale_cols + k_block_idx * words_per_kblock * block_mn + word_flat
+    return global_flat // scale_cols, global_flat % scale_cols
+
+
 def swizzle_blockscaled_chunk_kmajor_scale_words(words, block_rows: int = 128, block_words: int = 4):
     """Convert semantic row-major scale words to SM120 BlockScaledBasicChunk K-major.
 

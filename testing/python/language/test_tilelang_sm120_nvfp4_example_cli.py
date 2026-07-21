@@ -78,8 +78,8 @@ def test_sm120_nvfp4_example_kernel_handles_mn_tail_tiles(monkeypatch):
         B = module._make_packed_fp4(N, K, seed=4)
         SFA_semantic = module._make_binary_scale_words(M, K, seed=5)
         SFB_semantic = module._make_binary_scale_words(N, K, seed=6)
-        SFA = swizzle_blockscaled_chunk_kmajor_scale_words(SFA_semantic)
-        SFB = swizzle_blockscaled_chunk_kmajor_scale_words(SFB_semantic)
+        SFA = swizzle_blockscaled_chunk_kmajor_scale_words(SFA_semantic).reshape(-1, 4)
+        SFB = swizzle_blockscaled_chunk_kmajor_scale_words(SFB_semantic).reshape(-1, 4)
         assert SFA.shape[0] % 128 == 0
         assert SFB.shape[0] % 128 == 0
 
