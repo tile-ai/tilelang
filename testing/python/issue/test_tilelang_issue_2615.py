@@ -1,5 +1,6 @@
 import pytest
 
+import tilelang.testing
 import tilelang.language as T
 from tilelang import tvm
 from tilelang.quantize import _tir_u8_to_f4_to_bf16
@@ -39,4 +40,4 @@ def test_u8_to_f4_to_bf16_traces_symbolic_exponent_clamp(use_buffer_scale):
 
 
 if __name__ == "__main__":
-    pytest.main([__file__])
+    tilelang.testing.main()

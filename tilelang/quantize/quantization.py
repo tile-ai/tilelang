@@ -65,7 +65,7 @@ def _tir_u8_to_f4_to_bf16(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, sca
     e_bf16 = e_f4 + tirx.const(126, T.uint16)
     # Scale is the exponential part, within the representation of uint8
     # Clamp the scaled exponent to the maximum value representable in 8 bits.
-    e_bf16 = T.min(e_bf16 + scale, tirx.const((1 << 8) - 1, T.uint16))
+    e_bf16 = T.min(e_bf16 + T.cast(scale, T.uint16), tirx.const((1 << 8) - 1, T.uint16))
     m_f4 = f4 & tirx.const(1, T.uint16)
     val_bf16 = tirx.reinterpret(T.bfloat16,
                                ((((s << tirx.const(8, T.uint16)) | e_bf16) << tirx.const(7, T.uint16))
