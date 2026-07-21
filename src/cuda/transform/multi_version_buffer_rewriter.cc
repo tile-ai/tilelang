@@ -44,56 +44,56 @@ namespace {
 // padded; the cost is at most 127 bytes per version.
 constexpr int64_t kTmaSharedMemAlignBytes = 128;
 
-// Compact (row-major) strides for `shape`: [prod(shape[1:]), ..., 1].
-Array<PrimExpr> MakeCompactStrides(const Array<PrimExpr> &shape) {
-  ICHECK(!shape.empty());
-  std::vector<PrimExpr> strides(shape.size());
-  PrimExpr stride = make_const(shape[0].dtype(), 1);
-  for (size_t i = shape.size(); i > 0; --i) {
-    strides[i - 1] = stride;
-    stride = stride * shape[i - 1];
+static int64_t ComputeStaticElementCount(const Buffer &buffer) {
+  int64_t elems = 1;
+  for (const auto &e : buffer->shape) {
+    const auto *imm = e.as<IntImmNode>();
+    ICHECK(imm != nullptr)
+        << "MultiVersionBuffer: dynamic shared buffer shape is not "
+        << "supported for versioning: " << buffer->name;
+    elems *= imm->value;
   }
-  return Array<PrimExpr>(strides.begin(), strides.end());
+  return elems;
 }
 
-// Stride in elements between consecutive versions of `buffer`, where
-// `version_strides` is the physical layout of one version (its explicit
-// strides, or synthesized compact strides). The physical span of one
-// version is version_strides[0] * shape[0] -- the same rule
-// Buffer::GetFlattenedBuffer and GetBufferAllocationShape use -- rounded
-// up to the TMA shared-memory alignment.
-//
-// The buffer stride-nesting invariant (strides[i-1] % strides[i] == 0,
-// enforced by GetBufferAllocationShape) must keep holding for the pair
-// (version_stride, version_strides[0]), so the rounding unit is
-// lcm(alignment_in_elements, version_strides[0]).
-//
-// Falls back to the unpadded span when the alignment is not expressible:
-// an element bit width that does not divide 128 bytes, or a symbolic
-// version_strides[0] (the nesting invariant could not be guaranteed).
-PrimExpr AlignedVersionStride(const Buffer &buffer,
-                              const Array<PrimExpr> &version_strides) {
-  ICHECK_EQ(version_strides.size(), buffer->shape.size());
-  PrimExpr span = version_strides[0] * buffer->shape[0];
-  int64_t elem_bits =
-      static_cast<int64_t>(buffer->dtype.bits()) * buffer->dtype.lanes();
-  constexpr int64_t align_bits = kTmaSharedMemAlignBytes * 8;
-  if (elem_bits <= 0 || align_bits % elem_bits != 0) {
-    return span;
+static int64_t ComputePaddedLastDim(int64_t inner, int64_t last,
+                                    int64_t dtype_bytes, int64_t align_bytes) {
+  int64_t last_padded = last;
+  while ((inner * last_padded * dtype_bytes) % align_bytes != 0) {
+    ++last_padded;
   }
-  int64_t align_elems = align_bits / elem_bits;
-  const int64_t *inner_stride = as_const_int(version_strides[0]);
-  if (inner_stride == nullptr || *inner_stride <= 0) {
-    return span;
+  return last_padded;
+}
+
+static void PadShapeForVersionAlignment(BufferNode *new_buffer,
+                                        const Buffer &orig_buffer,
+                                        int64_t align_bytes) {
+  if (orig_buffer->shape.empty())
+    return;
+
+  const int64_t elems = ComputeStaticElementCount(orig_buffer);
+  const int64_t dtype_bytes =
+      orig_buffer->dtype.bytes() * orig_buffer->dtype.lanes();
+  if ((elems * dtype_bytes) % align_bytes == 0)
+    return; // 已对齐，无需 padding
+
+  const auto *last_imm = orig_buffer->shape.back().as<IntImmNode>();
+  const int64_t last = last_imm->value;
+  const int64_t inner = elems / last;
+  const int64_t last_padded =
+      ComputePaddedLastDim(inner, last, dtype_bytes, align_bytes);
+
+  new_buffer->shape.Set(new_buffer->shape.size() - 1,
+                        IntImm(orig_buffer->shape.back().dtype(), last_padded));
+}
+
+static PrimExpr ComputeVersionOffset(const Buffer &versioned_buffer,
+                                     const DataType &out_dtype) {
+  PrimExpr offset = make_const(out_dtype, 1);
+  for (size_t k = 1; k < versioned_buffer->shape.size(); ++k) {
+    offset = offset * versioned_buffer->shape[k];
   }
-  int64_t unit = std::lcm(align_elems, *inner_stride);
-  if (const int64_t *span_imm = as_const_int(span)) {
-    return make_const(span.dtype(), (*span_imm + unit - 1) / unit * unit);
-  }
-  // Symbolic leading extent: round up symbolically. `unit` is a multiple
-  // of version_strides[0], so the nesting invariant still holds.
-  PrimExpr unit_expr = make_const(span.dtype(), unit);
-  return floordiv(span + (unit_expr - 1), unit_expr) * unit_expr;
+  return offset;
 }
 
 bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
@@ -562,48 +562,16 @@ private:
     }
 
     // Versioned layout: [num_versions] + padded_shape, kept contiguous
-    // (empty strides).  Inter-version alignment is expressed by padding the
-    // innermost dimension so that the per-version element count satisfies the
-    // alignment requirement.  Downstream passes (layout inference, loop
-    // vectorization, buffer flattening) all assume contiguous shared buffers,
-    // so we must NOT encode the padding via non-compact strides.
+    // (empty strides). Downstream passes (layout inference, loop vectorization,
+    // buffer flattening) all assume contiguous shared buffers, so padding is
+    // expressed via the shape, never via non-compact strides.
     ICHECK(buffer->strides.empty())
         << "MultiVersionBuffer: shared buffer " << buffer->name
         << " is expected to have no explicit strides before versioning";
 
-    if (!buffer->shape.empty()) {
-      // Per-version element count of the original buffer.
-      int64_t elems = 1;
-      for (const auto &e : buffer->shape) {
-        const auto *imm = e.as<IntImmNode>();
-        ICHECK(imm != nullptr)
-            << "MultiVersionBuffer: dynamic shared buffer shape is not "
-            << "supported for versioning: " << buffer->name;
-        elems *= imm->value;
-      }
-      const int64_t dtype_bytes = buffer->dtype.bytes() * buffer->dtype.lanes();
-      const int64_t bytes = elems * dtype_bytes;
-
-      if (bytes % kTmaSharedMemAlignBytes != 0) {
-        // Pad the innermost dimension: find the smallest last' >= last such
-        // that inner * last' * dtype_bytes is a multiple of the alignment.
-        const auto *last_imm = buffer->shape.back().as<IntImmNode>();
-        const int64_t last = last_imm->value;
-        const int64_t inner = elems / last;
-        int64_t last_padded = last;
-        while ((inner * last_padded * dtype_bytes) % kTmaSharedMemAlignBytes !=
-               0) {
-          ++last_padded;
-        }
-        new_buffer->shape.Set(
-            new_buffer->shape.size() - 1,
-            IntImm(buffer->shape.back().dtype(), last_padded));
-      }
-    }
-
+    PadShapeForVersionAlignment(new_buffer.get(), buffer,
+                                kTmaSharedMemAlignBytes);
     new_buffer->shape.insert(new_buffer->shape.begin(), PrimExpr(num_versions));
-    // Keep the buffer contiguous: strides stay empty and are derived
-    // compactly from the (padded) shape.
     new_buffer->strides = Array<PrimExpr>();
     return Buffer(new_buffer);
   }
@@ -977,14 +945,8 @@ private:
             << "Versioned access_ptr escaped pipeline stage context";
         const Buffer &new_buffer = (*it).second;
         const PrimExpr &old_index = call->args[i + 1];
-        // RewriteAllocBuffer stores the canonical per-version offset in the
-        // leading stride; strides are only absent for rank-0 originals,
-        // whose per-version span is a single element.
-        PrimExpr offset = make_const(DataType::Int(32), 1);
-        for (size_t k = 1; k < new_buffer->shape.size(); ++k)
-          offset = offset * new_buffer->shape[k];
-        PrimExpr new_index = old_index + version_index * offset;
-        new_args.Set(i + 1, new_index);
+        PrimExpr offset = ComputeVersionOffset(new_buffer, old_index.dtype());
+        new_args.Set(i + 1, old_index + version_index * offset);
       }
     }
     return Call(call->dtype, call->op, new_args, call->annotations, call->span);
