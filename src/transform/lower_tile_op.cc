@@ -78,6 +78,30 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
                     << layout_shape[i];
       layout_extent *= shape->value;
     }
+    // A forward map whose codomain is smaller than its domain is provably
+    // non-injective (pigeonhole): distinct logical elements would alias the
+    // same physical slot. Reject it here; otherwise the replication branch
+    // below would misread the shrunken codomain as a replicate extent and
+    // rewrite the buffer to a higher rank, crashing later on an unrelated
+    // BufferStore rank ICHECK.
+    int64_t layout_input_extent = 1;
+    bool layout_input_is_static = true;
+    for (const auto &dim : layout->InputShape()) {
+      const auto *imm = dim.as<IntImmNode>();
+      if (!imm) {
+        layout_input_is_static = false;
+        break;
+      }
+      layout_input_extent *= imm->value;
+    }
+    if (layout_input_is_static && layout_extent < layout_input_extent) {
+      TVM_FFI_THROW(ValueError)
+          << "Invalid layout for shared buffer `" << buffer->name
+          << "`: the forward map must be injective, but it maps "
+          << layout_input_extent << " logical elements into only "
+          << layout_extent
+          << " physical slots. Check the layout passed to T.annotate_layout.";
+    }
     replicate_extent = buffer_extent / layout_extent;
     if (replicate_extent > 1) {
       output_shape.insert(output_shape.begin(), replicate_extent);
