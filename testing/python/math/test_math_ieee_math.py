@@ -6,6 +6,36 @@ import pytest
 
 ROUNDING_MODES = ["rn", "rz", "ru", "rd"]
 
+# (dtype, rounding_mode) pairs that must compile and produce correct results.
+# - fp32/fp64: all four IEEE rounding modes are natively supported by CUDA.
+# - fp16/bf16: only round-to-nearest-even is available.
+IEEE_DTYPE_MODES = [
+    (T.float32, "rn"),
+    (T.float32, "rz"),
+    (T.float32, "ru"),
+    (T.float32, "rd"),
+    (T.float64, "rn"),
+    (T.float64, "rz"),
+    (T.float64, "ru"),
+    (T.float64, "rd"),
+    (T.float16, "rn"),
+    (T.bfloat16, "rn"),
+]
+
+# Ops that carry a rounding_mode parameter (everything except frsqrt).
+IEEE_OPS_WITH_RM = [
+    ("ieee_add", T.ieee_add),
+    ("ieee_sub", T.ieee_sub),
+    ("ieee_mul", T.ieee_mul),
+    ("ieee_fmaf", T.ieee_fmaf),
+    ("ieee_frcp", T.ieee_frcp),
+    ("ieee_fsqrt", T.ieee_fsqrt),
+    ("ieee_fdiv", T.ieee_fdiv),
+]
+
+# All 8 ops (including frsqrt).
+IEEE_ALL_OPS = IEEE_OPS_WITH_RM + [("ieee_frsqrt", T.ieee_frsqrt)]
+
 
 def run_ieee_math_test(
     mathop_name,
@@ -22,7 +52,6 @@ def run_ieee_math_test(
     Test IEEE-compliant math operations with specified rounding modes.
     """
 
-    # Define the appropriate function based on operation type to avoid TVM parsing conflicts
     if mathop_name == "ieee_fmaf":
 
         @T.prim_func
@@ -59,7 +88,20 @@ def run_ieee_math_test(
 
         out_idx = [2]
         num_inputs = 2
-    else:  # Single argument operations
+    elif mathop_name == "ieee_frsqrt":  # no rounding_mode parameter
+
+        @T.prim_func
+        def main_func(
+            A: T.Tensor((M, N), dtype),
+            B: T.Tensor((M, N), dtype),
+        ):
+            with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+                for i, j in T.Parallel(block_M, block_N):
+                    B[by * block_M + i, bx * block_N + j] = mathop_func(A[by * block_M + i, bx * block_N + j])
+
+        out_idx = [1]
+        num_inputs = 1
+    else:  # Single argument with rounding_mode (frcp, fsqrt)
 
         @T.prim_func
         def main_func(
@@ -119,112 +161,64 @@ def run_ieee_math_test(
         print(f"Warning: {mathop_name} execution failed: {e}")
 
 
+# ---------------------------------------------------------------------------
+# Rounding-mode validation (API-level, no GPU required)
+# ---------------------------------------------------------------------------
+
+
 def test_rounding_mode_validation():
     """Test that invalid rounding modes raise ValueError"""
-
-    # Test with invalid rounding mode
     with pytest.raises(ValueError, match="Invalid rounding mode"):
         T.ieee_add(1.0, 2.0, "invalid_mode")
-
     with pytest.raises(ValueError, match="Invalid rounding mode"):
         T.ieee_mul(1.0, 2.0, "xy")
-
     with pytest.raises(ValueError, match="Invalid rounding mode"):
         T.ieee_fsqrt(4.0, "bad_mode")
-
     print("✓ Rounding mode validation test passed")
 
 
-@tilelang.testing.requires_cuda
-@pytest.mark.parametrize("mode", ROUNDING_MODES, ids=ROUNDING_MODES)
-def test_ieee_add_all_rounding_modes(mode):
-    """Test IEEE addition with all rounding modes"""
-    run_ieee_math_test("ieee_add", T.ieee_add, rounding_mode=mode, run_execution=mode == "rn")
-    print(f"✓ ieee_add with {mode} passed")
+# ---------------------------------------------------------------------------
+# Numerical tests — every (op × dtype × rounding_mode) valid combination
+# ---------------------------------------------------------------------------
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("mode", ROUNDING_MODES, ids=ROUNDING_MODES)
-def test_ieee_sub_all_rounding_modes(mode):
-    """Test IEEE subtraction with all rounding modes"""
-    run_ieee_math_test("ieee_sub", T.ieee_sub, rounding_mode=mode, run_execution=mode == "rn")
-    print(f"✓ ieee_sub with {mode} passed")
+@pytest.mark.parametrize("op_name,op_func", IEEE_OPS_WITH_RM)
+@pytest.mark.parametrize("dtype,mode", IEEE_DTYPE_MODES)
+def test_ieee_with_rounding_mode(op_name, op_func, dtype, mode):
+    """Compile + run every IEEE op across fp32 / fp64 / fp16 / bf16 and all rounding
+    modes that the hardware supports."""
+    run_ieee_math_test(op_name, op_func, rounding_mode=mode, dtype=dtype, run_execution=(mode == "rn"))
+
+
+# ieee_frsqrt — only round-to-nearest (no rounding_mode parameter).
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("mode", ROUNDING_MODES, ids=ROUNDING_MODES)
-def test_ieee_mul_all_rounding_modes(mode):
-    """Test IEEE multiplication with all rounding modes"""
-    run_ieee_math_test("ieee_mul", T.ieee_mul, rounding_mode=mode, run_execution=mode == "rn")
-    print(f"✓ ieee_mul with {mode} passed")
+@pytest.mark.parametrize("dtype", [T.float32, T.float16, T.bfloat16])
+def test_ieee_frsqrt(dtype):
+    run_ieee_math_test("ieee_frsqrt", T.ieee_frsqrt, dtype=dtype)
+
+
+# ---------------------------------------------------------------------------
+# Rejection tests — combinations that must fail at codegen time
+# ---------------------------------------------------------------------------
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("mode", ROUNDING_MODES, ids=ROUNDING_MODES)
-def test_ieee_fmaf_all_rounding_modes(mode):
-    """Test IEEE fused multiply-add with all rounding modes"""
-    run_ieee_math_test("ieee_fmaf", T.ieee_fmaf, rounding_mode=mode, run_execution=mode == "rn")
-    print(f"✓ ieee_fmaf with {mode} passed")
+def test_ieee_frsqrt_fp64_rejected():
+    """fp64 has no rsqrt intrinsic — codegen must FATAL."""
+    with pytest.raises(Exception, match="frsqrt is not supported for float64"):
+        run_ieee_math_test("ieee_frsqrt", T.ieee_frsqrt, dtype=T.float64)
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("mode", ROUNDING_MODES, ids=ROUNDING_MODES)
-def test_ieee_frcp_all_rounding_modes(mode):
-    """Test IEEE reciprocal with all rounding modes"""
-    run_ieee_math_test("ieee_frcp", T.ieee_frcp, rounding_mode=mode, run_execution=mode == "rn")
-    print(f"✓ ieee_frcp with {mode} passed")
-
-
-@tilelang.testing.requires_cuda
-@pytest.mark.parametrize("mode", ROUNDING_MODES, ids=ROUNDING_MODES)
-def test_ieee_fsqrt_all_rounding_modes(mode):
-    """Test IEEE square root with all rounding modes"""
-    run_ieee_math_test("ieee_fsqrt", T.ieee_fsqrt, rounding_mode=mode, run_execution=mode == "rn")
-    print(f"✓ ieee_fsqrt with {mode} passed")
-
-
-@tilelang.testing.requires_cuda
-def test_ieee_frsqrt_rn_only():
-    """Test IEEE reciprocal square root (round to nearest only)"""
-
-    @T.prim_func
-    def main(
-        A: T.Tensor((32, 32), T.float32),
-        B: T.Tensor((32, 32), T.float32),
-    ):
-        with T.Kernel(T.ceildiv(32, 16), T.ceildiv(32, 16), threads=128) as (bx, by):
-            for i, j in T.Parallel(16, 16):
-                B[by * 16 + i, bx * 16 + j] = T.ieee_frsqrt(A[by * 16 + i, bx * 16 + j])
-
-    kernel = tilelang.compile(
-        main,
-        out_idx=[1],
-        target="cuda",
-        pass_configs={
-            tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        },
-    )
-
-    print("\n=== Testing ieee_frsqrt (rn only) ===")
-    print("✓ ieee_frsqrt compilation test passed")
-
-    # Test numerical execution
-    a = torch.abs(torch.randn(32, 32, device="cuda", dtype=torch.float32)) + 0.1
-
-    try:
-        result = kernel(a)
-        assert result is not None
-        print("✓ ieee_frsqrt numerical execution test passed")
-    except Exception as e:
-        print(f"Warning: ieee_frsqrt execution failed: {e}")
-
-
-@tilelang.testing.requires_cuda
-@pytest.mark.parametrize("mode", ROUNDING_MODES, ids=ROUNDING_MODES)
-def test_ieee_fdiv_all_rounding_modes(mode):
-    """Test IEEE division with all rounding modes"""
-    run_ieee_math_test("ieee_fdiv", T.ieee_fdiv, rounding_mode=mode, run_execution=mode == "rn")
-    print(f"✓ ieee_fdiv with {mode} passed")
+def test_ieee_half_non_rn_rejected():
+    """fp16/bf16 only supports round-to-nearest-even."""
+    with pytest.raises(Exception, match="Only rounding mode 'rn' is available for half precision"):
+        run_ieee_math_test("ieee_add", T.ieee_add, rounding_mode="rz", dtype=T.float16)
+    with pytest.raises(Exception, match="Only rounding mode 'rn' is available for half precision"):
+        run_ieee_math_test("ieee_add", T.ieee_add, rounding_mode="rz", dtype=T.bfloat16)
 
 
 if __name__ == "__main__":
