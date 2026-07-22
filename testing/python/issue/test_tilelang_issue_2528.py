@@ -12,7 +12,7 @@ def make_kernel_2d(M, K, num_stages, dtype="float16"):
         B: T.Tensor((M, K), dtype),
     ):
         with T.Kernel(1, threads=128):
-            A_shared = T.alloc_shared((M, K), dtype)  
+            A_shared = T.alloc_shared((M, K), dtype)
             for _k in T.Pipelined(2, num_stages=num_stages):
                 T.copy(A, A_shared)
                 for i, j in T.Parallel(M, K):
