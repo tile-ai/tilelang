@@ -4,7 +4,6 @@ import tilelang.language as T
 
 
 def make_kernel_2d(M, K, num_stages, dtype="float16"):
-    """2-D shared buffer: shape [M, K], pipelined T.copy 触发 multi-version."""
 
     @T.prim_func
     def kernel(
