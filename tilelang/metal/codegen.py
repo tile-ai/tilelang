@@ -8,6 +8,7 @@ from tilelang.backend.host_codegen import HostCodegenHook, register_host_codegen
 
 
 _build_metal = global_func_device_codegen("target.build.tilelang_metal")
+_build_metal_without_compile = global_func_device_codegen("target.build.tilelang_metal_without_compile")
 
 
 def _mark_host_metal_context(mod: IRModule, target_host: Target, target: Target) -> IRModule:
@@ -21,7 +22,7 @@ register_device_codegen(
     DeviceCodegen(
         "metal",
         build=_build_metal,
-        build_without_compile=_build_metal,
+        build_without_compile=_build_metal_without_compile,
     ),
     override=True,
 )

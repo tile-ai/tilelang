@@ -1,8 +1,8 @@
-"""Rewrite local.fragment to metal.simdgroup for GEMM accumulator buffers on Metal.
+"""Rewrite local.fragment to metal.simdgroup for legacy Metal GEMM accumulators.
 
-This pass runs after pipelining and before LayoutInference, so that
-simdgroup matrices (which are hardware-opaque and have no explicit
-thread-level layout) are never seen by LayoutInference.
+M5 cooperative-tensor GEMM keeps fragment/local buffers in regular scopes until
+Metal codegen sees explicit tl.cooperative_tensor_* builtins.  Only legacy
+simdgroup GEMM requires changing the accumulator scope before layout inference.
 """
 
 from __future__ import annotations
@@ -18,22 +18,36 @@ from tvm.tirx.transform import prim_func_pass
 
 @lru_cache(maxsize=1)
 def _get_gemm_ops():
-    return frozenset(
-        {
-            Op.get("tl.tileop.gemm"),
-        }
-    )
+    return frozenset({Op.get("tl.tileop.gemm")})
 
 
 def _extract_buffer_var_from_region(region_call):
-    if not isinstance(region_call, tir.Call):
-        return None
-    if len(region_call.args) < 1:
+    if not isinstance(region_call, tir.Call) or len(region_call.args) < 1:
         return None
     buf_load = region_call.args[0]
     if isinstance(buf_load, tir.BufferLoad):
         return buf_load.buffer.data
     return None
+
+
+def _get_num_warps_from_body(body: tir.Stmt) -> int:
+    warp_size = 32
+    num_threads = None
+
+    def _visitor(stmt):
+        nonlocal num_threads
+        if (
+            isinstance(stmt, tir.AttrStmt)
+            and stmt.attr_key == "thread_extent"
+            and hasattr(stmt.node, "thread_tag")
+            and "threadIdx.x" in str(stmt.node.thread_tag)
+        ):
+            val = stmt.value
+            if isinstance(val, tir.IntImm):
+                num_threads = val.value
+
+    tir.stmt_functor.post_order_visit(body, _visitor)
+    return num_threads // warp_size if num_threads is not None else 1
 
 
 def _collect_fragment_gemm_accum_vars(body: tir.Stmt) -> set:
@@ -54,13 +68,17 @@ def _collect_fragment_gemm_accum_vars(body: tir.Stmt) -> set:
     return accum_vars
 
 
-def _remap_buffer(buf, var_map):
+def _remap_buffer(buf, var_map, num_warps=1):
     old_data = buf.data
     new_data = var_map.get(old_data, None)
     if new_data is None:
         return buf
+    total = 1
+    for s in buf.shape:
+        total *= s.value if isinstance(s, tir.IntImm) else s
+    new_total = total // num_warps if num_warps > 1 else total
     return tir.decl_buffer(
-        buf.shape,
+        [tir.IntImm("int32", new_total)],
         buf.dtype,
         buf.name,
         data=new_data,
@@ -71,7 +89,6 @@ def _remap_buffer(buf, var_map):
 
 
 def _remap_buffer_region(region, buf_map):
-    """Remap buffer inside a BufferRegion using buf_map."""
     if region is None:
         return region
     new_buf = buf_map.get(region.buffer, None)
@@ -81,27 +98,17 @@ def _remap_buffer_region(region, buf_map):
 
 
 def _remap_match_buffer(match, buf_map):
-    """Remap buffer inside a MatchBufferRegion using buf_map."""
     if match is None:
         return match
     new_buf = buf_map.get(match.buffer, None)
     new_src = _remap_buffer_region(match.source, buf_map)
     if new_buf is None and new_src is match.source:
         return match
-    return tir.MatchBufferRegion(
-        new_buf if new_buf is not None else match.buffer,
-        new_src,
-    )
+    return tir.MatchBufferRegion(new_buf if new_buf is not None else match.buffer, new_src)
 
 
-def _rewrite_scope(body, var_map):
-    # Phase 1: Substitute Var references in the entire body, including inside
-    # BufferRegion objects nested within call_intrin arguments (e.g., gemm op
-    # calls).  The ir_transform approach below only visits SBlock/AllocBuffer
-    # nodes and the per-SBlock substitute() does not reach buffer vars embedded
-    # inside opaque Call args processed by subsequent lowering passes.
+def _rewrite_scope(body, var_map, num_warps=1):
     body = tir.stmt_functor.substitute(body, var_map)
-
     buf_map = {}
 
     def _pre_order(stmt):
@@ -109,7 +116,7 @@ def _rewrite_scope(body, var_map):
             new_alloc_bufs = []
             changed = False
             for buf in stmt.alloc_buffers:
-                new_buf = _remap_buffer(buf, var_map)
+                new_buf = _remap_buffer(buf, var_map, num_warps)
                 new_alloc_bufs.append(new_buf)
                 if not new_buf.same_as(buf):
                     buf_map[buf] = new_buf
@@ -130,7 +137,7 @@ def _rewrite_scope(body, var_map):
                     stmt.annotations,
                 )
         elif isinstance(stmt, tir.AllocBuffer):
-            new_buf = _remap_buffer(stmt.buffer, var_map)
+            new_buf = _remap_buffer(stmt.buffer, var_map, num_warps)
             if not new_buf.same_as(stmt.buffer):
                 buf_map[stmt.buffer] = new_buf
                 return tir.AllocBuffer(new_buf, stmt.annotations, stmt.span)
@@ -148,15 +155,14 @@ def _metal_fragment_to_simdgroup(func: tir.PrimFunc, mod: IRModule, ctx) -> tir.
     if not accum_vars:
         return func
 
+    num_warps = _get_num_warps_from_body(func.body)
     var_map: dict = {}
     for var in accum_vars:
         ptr_type = var.type_annotation
         new_ptr = PointerType(ptr_type.element_type, "metal.simdgroup")
-        new_var = tir.Var(var.name, new_ptr)
-        var_map[var] = new_var
+        var_map[var] = tir.Var(var.name, new_ptr)
 
-    new_body = _rewrite_scope(func.body, var_map)
-    return func.with_body(new_body)
+    return func.with_body(_rewrite_scope(func.body, var_map, num_warps))
 
 
 MetalFragmentToSimdgroup = prim_func_pass(

@@ -1260,6 +1260,120 @@ def increase_descriptor_offset(descriptor: PrimExpr, offset: PrimExpr) -> PrimEx
     return evaluate(tirx.call_intrin("handle", tirx.op.Op.get("tl.increase_descriptor_offset"), descriptor, offset))
 
 
+def cooperative_tensor_fill(data, idx, value, rows: int, cols: int):
+    return evaluate(
+        tirx.call_intrin(
+            "handle",
+            tirx.op.Op.get("tl.cooperative_tensor_fill"),
+            data,
+            idx,
+            value,
+            rows,
+            cols,
+        )
+    )
+
+
+def cooperative_tensor_load(
+    data,
+    idx,
+    ptr,
+    stride,
+    rows: int,
+    cols: int,
+    transposed,
+    tile_m: int,
+    tile_n: int,
+    tile_k: int,
+    operand_role: int,
+):
+    return evaluate(
+        tirx.call_intrin(
+            "handle",
+            tirx.op.Op.get("tl.cooperative_tensor_load"),
+            data,
+            idx,
+            ptr,
+            stride,
+            rows,
+            cols,
+            transposed,
+            tile_m,
+            tile_n,
+            tile_k,
+            operand_role,
+        )
+    )
+
+
+def cooperative_tensor_store(
+    data,
+    idx,
+    ptr,
+    stride,
+    rows: int,
+    cols: int,
+    transposed,
+    tile_m: int,
+    tile_n: int,
+    tile_k: int,
+    operand_role: int,
+):
+    return evaluate(
+        tirx.call_intrin(
+            "handle",
+            tirx.op.Op.get("tl.cooperative_tensor_store"),
+            data,
+            idx,
+            ptr,
+            stride,
+            rows,
+            cols,
+            transposed,
+            tile_m,
+            tile_n,
+            tile_k,
+            operand_role,
+        )
+    )
+
+
+def cooperative_tensor_multiply_accumulate(
+    c_data,
+    c_idx,
+    a_data,
+    a_idx,
+    b_data,
+    b_idx,
+    d_data,
+    d_idx,
+    m: int,
+    n: int,
+    k: int,
+    trans_a,
+    trans_b,
+):
+    return evaluate(
+        tirx.call_intrin(
+            "handle",
+            tirx.op.Op.get("tl.cooperative_tensor_multiply_accumulate"),
+            c_data,
+            c_idx,
+            a_data,
+            a_idx,
+            b_data,
+            b_idx,
+            d_data,
+            d_idx,
+            m,
+            n,
+            k,
+            trans_a,
+            trans_b,
+        )
+    )
+
+
 def loop_break():
     """Break out of the innermost loop."""
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.loop_break"))

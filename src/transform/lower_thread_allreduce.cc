@@ -69,6 +69,10 @@ private:
 
 public:
   void VisitStmt_(const AllocBufferNode *op) final {
+    if (op->buffer.scope() == "metal.cooperative_tensor") {
+      StmtExprVisitor::VisitStmt_(op);
+      return;
+    }
     if (IsDynamicSharedMemory(op->buffer->data)) {
       dyn_shmem_allocs_[op->buffer->data.get()] = op;
     } else if (IsStaticSharedMemory(op->buffer->data)) {
