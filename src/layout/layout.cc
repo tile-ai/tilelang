@@ -395,6 +395,17 @@ Array<PrimExpr> LayoutNode::OutputShape() const {
   return ret;
 }
 
+PrimExpr LayoutNode::GetLinearizedForwardIndex() const {
+  Array<PrimExpr> output_shape = OutputShape();
+  ICHECK_EQ(output_shape.size(), forward_index_.size());
+
+  PrimExpr linearized_index = Integer(0);
+  for (size_t i = 0; i < forward_index_.size(); ++i) {
+    linearized_index = linearized_index * output_shape[i] + forward_index_[i];
+  }
+  return linearized_index;
+}
+
 Array<PrimExpr> LayoutNode::Forward(const Array<PrimExpr> &vars) const {
   if (vars.empty())
     return forward_index_;
@@ -1087,6 +1098,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            })
       .def("tl.Layout_index",
            [](Layout layout) { return layout->GetForwardIndex(); })
+      .def("tl.Layout_linearized_index",
+           [](Layout layout) { return layout->GetLinearizedForwardIndex(); })
       .def("tl.Layout_forward_vars",
            [](Layout layout) { return layout->GetForwardVars(); })
       .def("tl.Layout_repeat",
