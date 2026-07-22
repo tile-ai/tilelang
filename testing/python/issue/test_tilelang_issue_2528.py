@@ -1,51 +1,65 @@
-# Pipelined T.copy into a 1-D fp16 shared buffer: block_K=32 with num_stages>=2
-# faults with "CUDA error: misaligned address". The pipeline double-buffers
-# dt_shared with a 64-byte per-stage stride, so the odd version's shared
-# destination is at 64 mod 128 -- and cp.async.bulk.tensor.1d (sm_90) requires
-# a 128-byte-aligned shared destination. block_K=64 (128-byte stride) and
-# num_stages=1 (no double-buffer) both run.
-import tilelang
 import torch
+import tilelang
 import tilelang.language as T
 
-tilelang.disable_cache()
 
-
-def make_kernel(chunk_size, block_K, num_stages, threads=128):
-    dtype = T.float16
-    accum = T.float32
+def make_kernel_2d(M, K, num_stages, dtype="float16"):
+    """2-D shared buffer: shape [M, K], pipelined T.copy 触发 multi-version."""
 
     @T.prim_func
-    def f(
-        dt: T.Tensor((chunk_size,), dtype),
-        Out: T.Tensor((chunk_size,), accum),
+    def kernel(
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((M, K), dtype),
     ):
-        with T.Kernel(1, threads=threads) as _:
-            dt_shared = T.alloc_shared((block_K,), dtype)  # 1-D pipelined TMA dest
-            dt_local = T.alloc_fragment((block_K,), accum)
-            for k in T.Pipelined(T.ceildiv(chunk_size, block_K), num_stages=num_stages):
-                T.copy(dt[k * block_K : (k + 1) * block_K], dt_shared)  # -> cp.async.bulk.tensor.1d on sm_90
-                T.copy(dt_shared, dt_local)
-                for i in T.Parallel(block_K):
-                    Out[k * block_K + i] = dt_local[i] * 2.0
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared((M, K), dtype)  # 多维 shared
+            for _k in T.Pipelined(2, num_stages=num_stages):
+                # 简单把全局 A 拷进 shared，再写回 B（放大 2 倍方便校验）
+                T.copy(A, A_shared)
+                for i, j in T.Parallel(M, K):
+                    B[i, j] = A_shared[i, j] * T.Cast(dtype, 2.0)
 
-    return tilelang.compile(f)
+    return tilelang.compile(kernel)
 
 
-def trial(block_K, num_stages):
-    chunk_size = 256
-    torch.manual_seed(0)
-    dt = torch.randint(0, 3, (chunk_size,), device="cuda").half()
-    out = torch.empty((chunk_size,), device="cuda", dtype=torch.float32)
-    make_kernel(chunk_size, block_K, num_stages)(dt, out)
-    torch.cuda.synchronize()
-    print(f"  block_K={block_K} num_stages={num_stages}: OK  match={torch.allclose(out, dt.float() * 2.0)}")
+def trial_2d(M, K, num_stages):
+    kernel = make_kernel_2d(M, K, num_stages)
+    a = torch.randn(M, K, dtype=torch.float16, device="cuda")
+    b = torch.empty_like(a)
+    kernel(a, b)
+    torch.testing.assert_close(b, a * 2.0, rtol=1e-3, atol=1e-3)
+    print(f"PASS  2D shape=[{M},{K}] num_stages={num_stages}")
 
 
 if __name__ == "__main__":
-    print("block_K=64 num_stages=2 (expected OK):")
-    trial(64, 2)  # -> OK  match=True
-    print("block_K=32 num_stages=1 (expected OK):")
-    trial(32, 1)  # -> OK  match=True
-    print("block_K=32 num_stages=2 (expected CRASH):")
-    trial(32, 2)  # -> CUDA error: misaligned address
+    # 1) 需要 padding：fp16[8,4] → 32 elems = 64B，对齐到 128B
+    #    期望 RewriteAllocBuffer 把最后一维 4 → 8，最终 shape [2, 8, 8]
+    trial_2d(M=8, K=4, num_stages=2)
+
+    # 2) 已对齐：fp16[16,4] → 64 elems = 128B，不需要 padding
+    #    最终 shape [2, 16, 4]
+    trial_2d(M=16, K=4, num_stages=2)
+
+    # 3) 单 stage：不走 multi-version，行为应与改前一致
+    trial_2d(M=8, K=4, num_stages=1)
+
+    # 4) 3-D 需要 padding：fp16[2, 4, 4] → 32 elems = 64B
+    #    最后一维 4 → 8，最终 shape [2, 2, 4, 8]
+    @T.prim_func
+    def kernel_3d(
+        A: T.Tensor((2, 4, 4), "float16"),
+        B: T.Tensor((2, 4, 4), "float16"),
+    ):
+        with T.Kernel(1, threads=128):
+            S = T.alloc_shared((2, 4, 4), "float16")
+            for _ in T.Pipelined(2, num_stages=2):
+                T.copy(A, S)
+                for i, j, k in T.Parallel(2, 4, 4):
+                    B[i, j, k] = S[i, j, k] * T.Cast("float16", 2.0)
+
+    k3 = tilelang.compile(kernel_3d)
+    a3 = torch.randn(2, 4, 4, dtype=torch.float16, device="cuda")
+    b3 = torch.empty_like(a3)
+    k3(a3, b3)
+    torch.testing.assert_close(b3, a3 * 2.0, rtol=1e-3, atol=1e-3)
+    print("PASS  3D shape=[2,4,4] num_stages=2")
