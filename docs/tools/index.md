@@ -10,7 +10,8 @@ or invoke only the tool needed for the current workflow.
 | Estimate compute and memory cost from TIR | [Performance Analyzer](analyzer.md) | `tilelang.tools.Analyzer` |
 | Inspect thread and data mappings | [Layout Visualization](layout_visualization.md) | `tilelang.tools.plot_layout` |
 | Reduce a failing program to a smaller reproducer | [AutoDD](autodd.md) | `python -m tilelang.autodd` |
-| Compare IR before and after compiler passes | [Pass Diff](pass_diff.md) | `TILELANG_PASS_DIFF` |
+| Track IR changes across the full lowering pipeline (recommended) | [IR Lower Trace](lower_trace.md) | `TL_LOWER_TRACE` |
+| Compare IR before and after compiler passes (legacy) | [Pass Diff](pass_diff.md) | `TILELANG_PASS_DIFF` |
 | Record CUDA kernel markers, ranges, and payloads | [IKET](iket.md) | `tilelang.tools.cuda.iket` |
 
 ## Choosing a Tool
@@ -21,7 +22,10 @@ or invoke only the tool needed for the current workflow.
   local indices.
 - Use **AutoDD** after obtaining a stable failure signature and before filing a
   large reproducer.
-- Use **Pass Diff** when a lowering pass introduces an unexpected IR change.
+- Use **IR Lower Trace** to observe every pass and the final codegen step of a
+  full lowering pipeline. It supersedes **Pass Diff** and is the tool that
+  receives future improvements.
+- Use **Pass Diff** only when you need the legacy `TILELANG_PASS_DIFF` workflow.
 - Use **IKET** for CUDA timeline instrumentation when the external IKET runtime
   is available.
 
