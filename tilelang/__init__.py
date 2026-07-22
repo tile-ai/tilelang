@@ -203,7 +203,6 @@ if not env.is_light_import():
     from . import (
         analysis,  # noqa: F401
         transform,  # noqa: F401
-        language,  # noqa: F401
         engine,  # noqa: F401
         tools,  # noqa: F401
     )
@@ -218,6 +217,22 @@ if not env.is_light_import():
     from . import cuda as cuda  # noqa: F401
     from . import rocm as rocm  # noqa: F401
     from . import metal as metal  # noqa: F401
+
+    from .language.dialect import (  # noqa: F401
+        get_default_language_dialect,
+        list_language_dialects,
+        resolve_language_module,
+        set_default_language_dialect as _set_default_language_dialect,
+    )
+
+    language = resolve_language_module()
+
+    def set_default_language_dialect(name: str):
+        """Set the default language dialect used by ``from tilelang import language``."""
+
+        module = _set_default_language_dialect(name)
+        globals()["language"] = module
+        return module
 
     if env.get_lower_trace_mode() is not None:
         from .tools.lower_trace import enable as _lower_trace_enable

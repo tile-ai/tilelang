@@ -199,3 +199,16 @@ def import_source(source: str | None = None):
     from tvm.tirx.script.builder.ir import sblock_attr
 
     return sblock_attr({"pragma_import_c": source}) if source is not None else None
+
+
+from .dialect import (  # noqa: E402,F401
+    LanguageDialect,
+    get_default_language_dialect,
+    list_language_dialects,
+    register_language_dialect,
+    resolve_language_dialect,
+    resolve_language_module,
+    set_default_language_dialect,
+)
+
+__tilelang_dialect__ = "core"
