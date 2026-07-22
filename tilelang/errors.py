@@ -20,7 +20,11 @@ from __future__ import annotations
 import os
 import re
 
-_MARKER_RE = re.compile(r"\n\s*-->\s+(?P<file>[^\s:]+):(?P<line>\d+)(?::(?P<col>\d+))?\s*$")
+# The file part is lazy so the trailing ":line[:col]" is split off from the
+# right: greedy matching would swallow ":line" into the file group, while
+# lazy matching still accommodates paths with spaces ("/path with spaces/")
+# and Windows drive letters ("C:\work\kernel.py") via backtracking.
+_MARKER_RE = re.compile(r"\n\s*-->\s+(?P<file>.+?):(?P<line>\d+)(?::(?P<col>\d+))?\s*$")
 
 
 def _render_snippet(file: str, line: int, col: int) -> str | None:

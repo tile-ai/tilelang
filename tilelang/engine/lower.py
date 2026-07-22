@@ -290,10 +290,13 @@ def lower_to_host_device_ir(
         mod = pipeline.lower(mod, target)
     except Exception as exc:
         # Passes that report source spans embed a `--> file:line:col` marker
-        # in the message; enrich it into a rendered source snippet.
+        # in the message; enrich it into a rendered source snippet. enrich_error
+        # rewrites the message in place, so a bare re-raise keeps the original
+        # exception type, traceback, and __cause__ chain intact.
         from tilelang.errors import enrich_error
 
-        raise enrich_error(exc) from None
+        enrich_error(exc)
+        raise
 
     host_mod = tirx.transform.Filter(_is_host_call)(mod)
     device_mod = tirx.transform.Filter(_is_device_call)(mod)

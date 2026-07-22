@@ -495,8 +495,8 @@ class DSLMutator(ast.NodeTransformer):
         return quote1(
             f"def make_closure({', '.join(self.nonlocals.keys())}):\n"
             f"  def {name}(__tb):\n"
-            f"    __tb_fl = '{self.filename}'\n"
-            f"    __tb_fn = '{name}'\n"
+            f"    __tb_fl = {self.filename!r}\n"
+            f"    __tb_fn = {name!r}\n"
             "    range = __tb.override('range')\n"
             "    pass\n"
             f"    return {name}\n"
