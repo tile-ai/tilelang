@@ -121,7 +121,7 @@ def _fwd_varlen_template(
 
 
 @tilelang.jit
-def _bwd_preprocess_varlen_template(heads: int, dim: int, block_size: int = 64, dtype: str = "bfloat16"):
+def _bwd_preprocess_varlen_template(heads: int, dim: int, block_size: int = 64, threads: int = 128, dtype: str = "bfloat16"):
     accum_dtype = "float32"
     assert dim % block_size == 0, f"Delta preprocessing requires dim divisible by {block_size}, got {dim}"
     total_tokens = T.dynamic("total_tokens")
@@ -135,7 +135,7 @@ def _bwd_preprocess_varlen_template(heads: int, dim: int, block_size: int = 64, 
     ):
         # Delta is a pure per-token row-sum of O*dO, independent of the mask, so
         # we sweep the flat packed token axis (total_tokens is a multiple of block_size).
-        with T.Kernel(heads, T.ceildiv(total_tokens, block_size)) as (bx, by):
+        with T.Kernel(heads, T.ceildiv(total_tokens, block_size), threads=threads) as (bx, by):
             o = T.alloc_fragment([block_size, block_size], dtype)
             do = T.alloc_fragment([block_size, block_size], dtype)
             acc = T.alloc_fragment([block_size, block_size], accum_dtype)
@@ -380,7 +380,8 @@ class _BlockCausalAttentionVarlenTL(torch.autograd.Function):
         batch = cu_seqlens.numel() - 1
         dtype = T.dtype(q.dtype)
         q, k, v = (t.contiguous() for t in (q, k, v))
-        fwd = _fwd_varlen_template(batch, heads, dim, dllm_block, softmax_scale, block_size=block_size, dtype=dtype)
+        threads = min(128, 2 * block_size)
+        fwd = _fwd_varlen_template(batch, heads, dim, dllm_block, softmax_scale, block_size=block_size, threads=threads, dtype=dtype)
         o = torch.empty_like(q)
         lse = torch.empty((heads, total), device=q.device, dtype=torch.float32)
         fwd(q, k, v, cu_seqlens, max_seqlen, o, lse)
@@ -399,10 +400,13 @@ class _BlockCausalAttentionVarlenTL(torch.autograd.Function):
         dtype = T.dtype(q.dtype)
 
         do, q, k, v, o = (t.contiguous() for t in (do, q, k, v, o))
-        prep = _bwd_preprocess_varlen_template(heads, dim, block_size=ctx.block_size, dtype=dtype)
-        dq_kernel = _bwd_dq_varlen_template(batch, heads, dim, ctx.dllm_block, ctx.softmax_scale, block_size=ctx.block_size, dtype=dtype)
+        threads = min(128, 2 * ctx.block_size)  # match thread count to the tile
+        prep = _bwd_preprocess_varlen_template(heads, dim, block_size=ctx.block_size, threads=threads, dtype=dtype)
+        dq_kernel = _bwd_dq_varlen_template(
+            batch, heads, dim, ctx.dllm_block, ctx.softmax_scale, block_size=ctx.block_size, threads=threads, dtype=dtype
+        )
         dkv_kernel = _bwd_dkv_varlen_template(
-            batch, heads, dim, ctx.dllm_block, ctx.softmax_scale, block_size=ctx.block_size, num_stages=1, dtype=dtype
+            batch, heads, dim, ctx.dllm_block, ctx.softmax_scale, block_size=ctx.block_size, threads=threads, num_stages=1, dtype=dtype
         )
         delta = torch.empty((heads, total), device=q.device, dtype=torch.float32)
         prep(o, do, delta)
@@ -494,6 +498,10 @@ def test_block_causal_attention_varlen():
 
     block_size, dllm_block = 32, 16
     _run_varlen_case([128, 256], heads=2, dim=64, dllm_block=dllm_block, block_size=block_size)
+    print(f"[varlen] {block_size=} {dllm_block=} OK")
+
+    block_size, dllm_block = 128, 64
+    _run_varlen_case([512, 1024], heads=2, dim=128, dllm_block=dllm_block, block_size=block_size)
     print(f"[varlen] {block_size=} {dllm_block=} OK")
 
 
