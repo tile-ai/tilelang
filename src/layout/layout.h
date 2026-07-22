@@ -102,6 +102,16 @@ public:
   virtual std::pair<Layout, arith::IterMapLevel>
   InverseWithLevel(bool require_padding_guard = false) const;
 
+  /*!
+   * \brief Verify that distinct logical coordinates map to distinct physical
+   * coordinates.
+   *
+   * The returned errors array is empty on success. Exact fallback checks may
+   * succeed without populating the normalized iter-map indices.
+   */
+  virtual arith::IterMapResult
+  DetectInjective(bool require_padding_guard = false) const;
+
   virtual std::string DebugOutput() const;
 
   virtual bool IsEqual(const LayoutNode *other, bool skip_index = false) const;

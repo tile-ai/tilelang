@@ -786,14 +786,25 @@ private:
           bool shapes_equal =
               ShapesEqual(layout->InputShape(), buffer->shape, &analyzer_);
 
-          if (shapes_equal) {
-            annotated_layout_map_.Set(buffer, layout);
-          } else {
-            auto reshaped_layout =
-                layout->Reshape(buffer->shape, &analyzer_, Integer(anchor_bits),
-                                Integer(GetElementStorageBits(buffer->dtype)));
-            annotated_layout_map_.Set(buffer, reshaped_layout);
+          Layout resolved_layout =
+              shapes_equal
+                  ? layout
+                  : layout->Reshape(
+                        buffer->shape, &analyzer_, Integer(anchor_bits),
+                        Integer(GetElementStorageBits(buffer->dtype)));
+          if (IsSharedBuffer(buffer)) {
+            arith::IterMapResult injectivity =
+                resolved_layout->DetectInjective();
+            if (!injectivity->errors.empty()) {
+              TVM_FFI_THROW(ValueError)
+                  << "Invalid layout for shared buffer `" << buffer->name
+                  << "`: the forward map must be injective. Details: "
+                  << injectivity->errors
+                  << ". Layout: " << resolved_layout->DebugOutput()
+                  << ". Check the layout passed to T.annotate_layout.";
+            }
           }
+          annotated_layout_map_.Set(buffer, resolved_layout);
         }
       }
     }

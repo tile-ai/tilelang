@@ -1,16 +1,10 @@
 """Regression test for GitHub issue #2632.
 
-A contracting (many-to-one) forward map passed to ``T.annotate_layout`` on a
-shared buffer used to be misread by ``makeBufferWithLayout`` as a replication
-factor: the buffer was rewritten to a higher rank and compilation aborted on an
-unrelated ``BufferStore`` rank ICHECK (``2 vs. 1``). It must instead be
-rejected with a ``ValueError`` naming the buffer and the non-injectivity.
-
-Note: the guard is a pigeonhole check (codomain extent < domain extent). It
-covers every layout that can reach the broken replication reinterpretation;
-non-injective maps whose output bounding box is not smaller than the domain
-(e.g. ``lambda i: (i % 64) * 4``) do not crash there and are out of scope
-for this fix.
+A many-to-one forward map passed to ``T.annotate_layout`` on a shared buffer
+can either crash during buffer remapping or silently alias distinct logical
+elements. It must instead be rejected with a ``ValueError`` naming the buffer
+and the non-injectivity, including when its sparse output bounding box is larger
+than the logical input domain.
 """
 
 import pytest
@@ -23,7 +17,7 @@ from tilelang.layout import Layout
 
 N = 128
 
-REJECT_MATCH = r"shared buffer `\w+`.*must be injective"
+REJECT_MATCH = r"shared buffer `[^`]*`.*must be injective.*both map to physical coordinates"
 
 
 def _roundtrip_kernel(fwd):
@@ -47,10 +41,11 @@ def _roundtrip_kernel(fwd):
     [
         pytest.param(lambda i: i % 64, id="mod64-2-to-1"),
         pytest.param(lambda i: i * 0, id="zero-N-to-1"),
+        pytest.param(lambda i: (i % 64) * 4, id="mod64-times4-padded-2-to-1"),
     ],
 )
-def test_contracting_shared_layout_rejected(fwd):
-    """A contracting many-to-one map must be a clean ValueError, not an ICE."""
+def test_noninjective_shared_layout_rejected(fwd):
+    """Every many-to-one map must be a clean ValueError, not an ICE or alias."""
     with pytest.raises(ValueError, match=REJECT_MATCH):
         tilelang.compile(_roundtrip_kernel(fwd), out_idx=[1], target="cuda")
 
