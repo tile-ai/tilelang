@@ -1,3 +1,5 @@
+import pytest
+
 from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
@@ -585,6 +587,30 @@ def test_inject_software_pipeline_replays_readonly_bufferload_bind():
     assert all(names[0].startswith("idx") for names in leading_binds["copy"])
     assert all(names[0].startswith("idx") for names in leading_binds["store"])
     assert "idx = T.int32()" not in mod["main"].script()
+
+
+def test_inject_software_pipeline_rejects_side_effecting_replay_mask():
+    @T.prim_func
+    def before(
+        counter: T.Tensor((1,), T.int32),
+        out: T.Tensor((8,), T.int32),
+    ):
+        for i in T.serial(
+            0,
+            4,
+            annotations={
+                "software_pipeline_stage": [0, 1],
+                "software_pipeline_order": [0, 1],
+                "software_pipeline_replayable_scalar_binds": [1, 0, 0],
+            },
+        ):
+            pos: T.int32 = T.atomic_add(counter[0], 1, return_prev=True)
+            out[i * 2] = pos
+            out[i * 2 + 1] = pos
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    with pytest.raises(tvm.TVMError, match="cannot be replayed safely"):
+        tl.transform.InjectSoftwarePipeline()(mod)
 
 
 def test_inject_software_pipeline_schedules_bind_that_reads_pipeline_buffer():

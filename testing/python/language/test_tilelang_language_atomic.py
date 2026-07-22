@@ -922,5 +922,53 @@ def test_atomic_addx4_return_prev_bf16():
     run_atomic_addx4_return_prev_16bit(T.bfloat16, torch.bfloat16)
 
 
+# ======================= Atomic return value materialization =======================
+
+
+@tilelang.jit
+def atomic_add_return_prev_compaction_program(n, cap, block, dtype=T.float32):
+    @T.prim_func
+    def compact_positive(
+        x: T.Tensor((n,), dtype),
+        out: T.Tensor((cap,), T.int32),
+        counter: T.Tensor((1,), T.int32),
+    ):
+        with T.Kernel(T.ceildiv(n, block), threads=block) as bx:
+            tx = T.get_thread_binding()
+            i = bx * block + tx
+            if i < n and x[i] > 0:
+                # Side-effecting bind: the returned previous counter value is
+                # used at TWO sites (bound check + store index). The lowering
+                # must materialize the atomic exactly once; replaying it per
+                # use site executes the atomic twice per element.
+                pos = T.atomic_add(counter[0], 1, return_prev=True)
+                if pos < cap:
+                    out[pos] = i
+
+    return compact_positive
+
+
+@tilelang.testing.requires_cuda
+def test_atomic_add_return_prev_materialized_once():
+    n, cap, block = 4096, 4096, 256
+    kernel = atomic_add_return_prev_compaction_program(n, cap, block)
+
+    # Static check: the returned atomic must appear exactly once in the
+    # generated CUDA source (regression: duplicated AtomicAddRet calls).
+    assert kernel.get_kernel_source().count("AtomicAddRet") == 1
+
+    # Functional check: with all-positive input the counter must equal n and
+    # out must be a permutation of 0..n-1 (no unwritten slots).
+    x = torch.ones(n, dtype=torch.float32).cuda()
+    out = torch.full((cap,), -1, dtype=torch.int32).cuda()
+    counter = torch.zeros(1, dtype=torch.int32).cuda()
+    kernel(x, out, counter)
+    torch.cuda.synchronize()
+
+    assert counter.item() == n, f"atomic executed {counter.item()} times, expected {n}"
+    assert (out < 0).sum().item() == 0, "unwritten slots: atomic return value was re-evaluated"
+    assert torch.equal(out.sort().values.long(), torch.arange(n).cuda())
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
