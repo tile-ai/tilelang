@@ -832,7 +832,16 @@ class Builder(BaseBuilder):
 
     def prim_func_arg(self, name, value):
         if isinstance(value, (Buffer, Var)):
-            return tirx.arg(name, value)
+            arg = tirx.arg(name, value)
+            # Stamp parameter buffers with the signature line (SpanAttacher
+            # emits set_fileline with the parameter's own line before each
+            # `__tb.arg(...)` call), so diagnostics involving only argument
+            # buffers (e.g. T.copy(A, B)) also carry a source location.
+            if self._spans_enabled and isinstance(arg, Buffer) and self.current_line > 0:
+                from tilelang.ir import make_span, set_buffer_span
+
+                set_buffer_span(arg, make_span(self.current_file, self.current_line))
+            return arg
         elif value is self.empty:
             raise ValueError(f"Argument `{name}` is not annotated")
         elif isinstance(value, Hashable):

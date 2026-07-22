@@ -83,10 +83,18 @@ class ReduceType(Node, Scriptable): ...
 # ---------------------------------------------------------------------------
 
 
+_span_ffi_cache: dict = {}
+
+
 def _span_ffi(name: str):
     # `tl.ir.*` names contain a dot and are therefore skipped by
-    # `init_ffi_api`; fetch them from the global registry directly.
-    return tvm_ffi.get_global_func(f"tl.ir.{name}")
+    # `init_ffi_api`; fetch them from the global registry directly. Cache the
+    # lookup: the stamping hot path calls this per IR node.
+    f = _span_ffi_cache.get(name)
+    if f is None:
+        f = tvm_ffi.get_global_func(f"tl.ir.{name}")
+        _span_ffi_cache[name] = f
+    return f
 
 
 def make_span(file: str, line: int) -> Span:
@@ -131,26 +139,38 @@ def span_to_location(span: Span | None) -> tuple[str, int] | None:
 def span_coverage(func) -> dict:
     """Statistics on span injection coverage for a PrimFunc.
 
-    Returns {"stmts": [with_span, total], "buffers": [with_span, total]}.
+    Returns {"stmts": [with_span, total], "buffers": [with_span, total]},
+    where buffers cover both function parameters (buffer_map) and block-
+    allocated buffers (SBlock.alloc_buffers, i.e. T.alloc_* sites).
     New nodes synthesized by passes legitimately have no span; this metric
     is meant for the freshly parsed IR (span injection validation).
     """
     from tvm.tirx.stmt_functor import post_order_visit
 
     stmts = [0, 0]
+    seen_buffers = []
 
-    def _visit(node):
-        if not isinstance(node, tvm.tirx.Stmt):
+    def count_buffer(buffer):
+        if any(buffer.same_as(b) for b in seen_buffers):
             return
-        stmts[1] += 1
-        if get_stmt_span(node) is not None:
-            stmts[0] += 1
-
-    post_order_visit(func.body, _visit)
-
-    buffers = [0, 0]
-    for _, buffer in func.buffer_map.items():
+        seen_buffers.append(buffer)
         buffers[1] += 1
         if get_buffer_span(buffer) is not None:
             buffers[0] += 1
+
+    buffers = [0, 0]
+
+    def _visit(node):
+        if isinstance(node, tvm.tirx.Stmt):
+            stmts[1] += 1
+            if get_stmt_span(node) is not None:
+                stmts[0] += 1
+        if type(node).__name__ == "SBlockRealize":
+            for buf in node.block.alloc_buffers:
+                count_buffer(buf)
+
+    post_order_visit(func.body, _visit)
+
+    for _, buffer in func.buffer_map.items():
+        count_buffer(buffer)
     return {"stmts": stmts, "buffers": buffers}
