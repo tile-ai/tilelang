@@ -230,6 +230,7 @@ class Profiler:
         return_mode: Literal["min", "max", "mean", "median"] = "mean",
         dynamic_symbolic_constraints: dict[str, int] | None = None,
         device: int | torch.device | None = None,
+        early_stop_baseline: float | None = None,
     ) -> float:
         """Benchmarks the execution time of a given function.
 
@@ -273,6 +274,7 @@ class Profiler:
                 backend=backend,
                 return_mode=return_mode,
                 device=device,
+                early_stop_baseline=early_stop_baseline,
             )
 
         if device is None:

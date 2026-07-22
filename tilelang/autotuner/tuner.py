@@ -233,6 +233,7 @@ class _BenchmarkWorkerState:
     jit_input_tensors: Any = None
     ref_input_tensors: Any = None
     ref_latency_cache: float | None = None
+    shared_best_latency: list[float] | None = None
 
 
 class AutoTuner:
@@ -706,6 +707,7 @@ class AutoTuner:
                         jit_input_tensors=worker_state.jit_input_tensors,
                         ref_input_tensors=worker_state.ref_input_tensors,
                         ref_latency_cache=worker_state.ref_latency_cache,
+                        shared_best_latency=worker_state.shared_best_latency,
                     )
 
                     def _run_benchmark_target(
@@ -766,6 +768,7 @@ class AutoTuner:
         jit_kernel: tilelang.JITKernel,
         warmup: int,
         rep: int,
+        early_stop_factor: float,
         benchmark_state: _BenchmarkWorkerState,
         benchmark_device: int | torch.device | None = None,
     ) -> tuple[float, float | None]:
@@ -837,7 +840,15 @@ class AutoTuner:
                 profiler.assert_allclose(
                     ref_prog, input_tensors=jit_input_tensors_cache, rtol=rtol, atol=atol, max_mismatched_ratio=max_mismatched_ratio
                 )
-        latency = profiler.do_bench(n_warmup=warmup, n_repeat=rep, input_tensors=jit_input_tensors_cache, backend=backend)
+        latency = profiler.do_bench(
+            n_warmup=warmup,
+            n_repeat=rep,
+            input_tensors=jit_input_tensors_cache,
+            backend=backend,
+            early_stop_baseline=(
+                benchmark_state.shared_best_latency[0] * early_stop_factor if benchmark_state.shared_best_latency is not None else None
+            ),
+        )
 
         if ref_latency_cache is None and ref_prog is not None:
             ref_input_tensors_cache = ref_input_tensors_supply()
@@ -931,6 +942,8 @@ class AutoTuner:
         group_compile_size: int = 2,
         benchmark_devices: list[int] | None = None,
         benchmark_multi_gpu: bool = False,
+        early_stop: bool = False,
+        early_stop_factor: float = 2.0,
     ):
         """Run the auto-tuning process.
 
@@ -943,11 +956,16 @@ class AutoTuner:
             group_compile_size: Number of configurations in one compile unit.
             benchmark_devices: CUDA device ordinals used for benchmark workers when benchmark_multi_gpu=True.
             benchmark_multi_gpu: Whether to benchmark configurations across multiple CUDA GPUs.
+            early_stop: Whether to skip full benchmark when estimate exceeds best * early_stop_factor.
+            early_stop_factor: Multiplier for best latency to compute early stop threshold.
 
         Returns:
             AutotuneResult: Results of the auto-tuning process.
         """
         _init_logger_handlers()
+
+        if early_stop and early_stop_factor < 1.0:
+            raise ValueError(f"early_stop_factor must be >= 1.0, got {early_stop_factor}")
 
         sig = inspect.signature(self.fn)
         parameters = sig.parameters
@@ -999,9 +1017,10 @@ class AutoTuner:
                     self._memory_cache[key] = result
                     return result
 
-        best_latency: float = 1e8
+        best_latency: float = float("inf")
         best_config: dict[str, Any] | None = None
         best_kernel: tilelang.JITKernel | None = None
+        shared_best_latency_ref: list[float] | None = [float("inf")] if early_stop else None
 
         compile_func, elaborate_func = self._ensure_jit_functions()
         self.jit_compile = compile_func
@@ -1083,6 +1102,7 @@ class AutoTuner:
             jit_input_tensors=self.jit_input_tensors,
             ref_input_tensors=self.ref_input_tensors,
             ref_latency_cache=self.ref_latency_cache,
+            shared_best_latency=shared_best_latency_ref,
         )
 
         def _record_benchmark_result(latency: float, config: dict[str, Any], jit_kernel: tilelang.JITKernel, idx: int, progress_bar):
@@ -1091,6 +1111,8 @@ class AutoTuner:
                 best_latency = latency
                 best_config = dict(self.configs[idx])
                 best_kernel = jit_kernel
+                if shared_best_latency_ref is not None:
+                    shared_best_latency_ref[0] = latency
 
             progress_bar.set_postfix({"best_latency": best_latency})
             tqdm.write(f"Tuned Latency {latency} with config {self.configs[idx]} at index {idx}")
@@ -1115,6 +1137,7 @@ class AutoTuner:
             self._benchmark_target,
             warmup=warmup,
             rep=rep,
+            early_stop_factor=early_stop_factor,
         )
 
         def _enqueue_benchmark_task(jit_kernel: tilelang.JITKernel, config: dict[str, Any], idx: int):
@@ -1156,7 +1179,11 @@ class AutoTuner:
 
         # Start benchmark worker threads
         for worker_idx, worker_device in enumerate(benchmark_worker_devices):
-            worker_state = _BenchmarkWorkerState() if benchmark_multi_gpu_active else main_thread_benchmark_state
+            worker_state = (
+                _BenchmarkWorkerState(shared_best_latency=shared_best_latency_ref)
+                if benchmark_multi_gpu_active
+                else main_thread_benchmark_state
+            )
             worker_thread = threading.Thread(
                 target=self._benchmark_worker_loop,
                 args=(
