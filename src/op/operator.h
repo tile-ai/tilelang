@@ -48,6 +48,15 @@ enum AccessMask : int {
   kAccessReadWrite = kAccessRead | kAccessWrite,
 };
 
+// Preserve known read/write bits and conservatively assume both when a mask
+// cannot be resolved at compile time.
+inline int GetConservativeAccessMask(const PrimExpr &rw_mask) {
+  if (const auto *mask = rw_mask.as<IntImmNode>()) {
+    return static_cast<int>(mask->value) & kAccessReadWrite;
+  }
+  return kAccessReadWrite;
+}
+
 struct AccessRegion {
   tirx::BufferRegion region;
   int access_mask{kAccessReadWrite};

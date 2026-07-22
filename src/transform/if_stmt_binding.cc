@@ -59,6 +59,15 @@ private:
       writes_.push_back(BufferRegion::FullRegion(buffer));
     }
 
+    void AddAccess(const Buffer &buffer, int access_mask) {
+      if (access_mask & kAccessRead) {
+        AddRead(buffer);
+      }
+      if (access_mask & kAccessWrite) {
+        AddWrite(buffer);
+      }
+    }
+
     void VisitStmt_(const BufferStoreNode *op) final {
       AddWrite(op->buffer);
       StmtExprVisitor::VisitStmt_(op);
@@ -91,12 +100,29 @@ private:
             AddRead((*it).second);
           }
         }
+      } else if (op->op.same_as(tl::access_ptr())) {
+        ICHECK_EQ(op->args.size(), 3U);
+        const auto *load = op->args[0].as<BufferLoadNode>();
+        ICHECK(load) << "tl.access_ptr base must be a BufferLoad";
+        AddAccess(load->buffer, GetConservativeAccessMask(op->args[2]));
+        for (const PrimExpr &index : load->indices) {
+          this->VisitExpr(index);
+        }
+        if (load->predicate.defined()) {
+          this->VisitExpr(load->predicate.value());
+        }
+        this->VisitExpr(op->args[1]);
+        this->VisitExpr(op->args[2]);
+        return;
       } else if (op->op.same_as(builtin::tvm_access_ptr())) {
         if (op->args.size() > 1) {
           if (const auto *var_node = op->args[1].as<VarNode>()) {
             auto it = buffer_data_to_buffer_.find(GetRef<Var>(var_node));
             if (it != buffer_data_to_buffer_.end()) {
-              AddRead((*it).second);
+              const int access_mask =
+                  op->args.size() == 5U ? GetConservativeAccessMask(op->args[4])
+                                        : kAccessReadWrite;
+              AddAccess((*it).second, access_mask);
             }
           }
         }
