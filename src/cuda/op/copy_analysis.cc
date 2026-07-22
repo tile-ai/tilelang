@@ -5,7 +5,6 @@
 
 #include "cuda/op/copy.h"
 #include "support/check.h"
-#include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/runtime/logging.h>
 
 #include "cuda/target_utils.h"
@@ -265,6 +264,24 @@ bool CheckBulkStore(const CopyNode &op, Target target,
   return CheckGlobalStrides(op.dst, analyzer, emit_diagnostics);
 }
 
+bool IsSemanticallyLinearLayout(const Layout &layout,
+                                const Array<PrimExpr> &shape,
+                                arith::Analyzer *analyzer) {
+  Array<PrimExpr> input_shape = layout->InputShape();
+  if (input_shape.size() != shape.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < shape.size(); ++i) {
+    if (!analyzer->CanProveEqual(input_shape[i], shape[i])) {
+      return false;
+    }
+  }
+
+  Layout linear_layout = MakeLinearLayout(shape);
+  return analyzer->CanProveEqual(layout->GetLinearizedForwardIndex(),
+                                 linear_layout->GetLinearizedForwardIndex());
+}
+
 bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
                      const Array<Range> &global_range,
                      const Array<Range> &shared_range,
@@ -273,8 +290,8 @@ bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
   if (layout_map.count(shared_tensor)) {
     Layout existing =
         layout_map.Get(shared_tensor).value().as<Layout>().value();
-    Layout linear_layout = MakeLinearLayout(shared_tensor->shape);
-    shared_is_contiguous = StructuralEqual()(existing, linear_layout);
+    shared_is_contiguous =
+        IsSemanticallyLinearLayout(existing, shared_tensor->shape, analyzer);
   }
 
   bool global_is_contiguous = true;
