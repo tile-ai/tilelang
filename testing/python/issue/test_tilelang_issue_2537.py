@@ -21,6 +21,14 @@ from tilelang.language import GemmWarpPolicy
 # Front-end error emitted by the fixed partition search.
 _REJECT = "No valid warp partition"
 
+# Tests whose docstring reasons about the *default MMA* search must pin the
+# backend: on sm_90 `SelectInst` silently reroutes any M >= 64 / warps % 4 == 0
+# shape to the WGMMA search, which is a different code path with different
+# constraints (and, for N = 104, a pre-existing descriptor-layer limitation
+# unrelated to the partition search).  Shapes with M < 64 or an odd warp count
+# can never take the WGMMA route and need no pin.
+_FORCE_MMA = {"tl.disable_wgmma": True}
+
 
 def _matmul(M, N, K, threads, policy):
     """Single-block GEMM with an M x N accumulator fragment."""
@@ -40,8 +48,8 @@ def _matmul(M, N, K, threads, policy):
     return main
 
 
-def _check(M, N, K, threads, policy):
-    kernel = tilelang.compile(_matmul(M, N, K, threads, policy), out_idx=[2])
+def _check(M, N, K, threads, policy, pass_configs=None):
+    kernel = tilelang.compile(_matmul(M, N, K, threads, policy), out_idx=[2], pass_configs=pass_configs)
     torch.manual_seed(0)
     A = torch.randint(0, 3, (M, K), dtype=torch.float16, device="cuda")
     B = torch.randint(0, 3, (K, N), dtype=torch.float16, device="cuda")
@@ -80,9 +88,12 @@ def test_fullrow_uncovered_n_rejected():
 
 @tilelang.testing.requires_cuda
 def test_fullcol_uncovered_m_rejected():
-    """FullCol, N=8 falls back to n_warp=1, m_warp=20 does not cover M=336."""
+    """FullCol, N=8 falls back to n_warp=1, m_warp=20 does not cover M=336.
+
+    Pinned to the MMA search: on sm_90 this shape would route to the WGMMA
+    search instead (covered by test_wgmma_fullcol_uncovered_m_rejected)."""
     with pytest.raises(Exception, match=_REJECT):
-        tilelang.compile(_matmul(336, 8, 32, 640, GemmWarpPolicy.FullCol), out_idx=[2])
+        tilelang.compile(_matmul(336, 8, 32, 640, GemmWarpPolicy.FullCol), out_idx=[2], pass_configs=_FORCE_MMA)
 
 
 # ---------------------------------------------------------------------------
@@ -106,8 +117,12 @@ def test_square_divisible_control_numeric():
 def test_fullcol_fallback_covering_numeric():
     """FullCol, N=104, 12 warps used to die on an internal ICHECK
     (n_warp = 104 / 8 = 13 does not divide 12).  The fixed search falls back
-    to (m_warp=12, n_warp=1), which covers M=192 x N=104: must compute."""
-    _check(192, 104, 32, 384, GemmWarpPolicy.FullCol)
+    to (m_warp=12, n_warp=1), which covers M=192 x N=104: must compute.
+
+    Pinned to the MMA path: N=104 (208 bytes/row of fp16) fits no canonical
+    GMMA swizzle atom, so the WGMMA route rejects this shape in the descriptor
+    layer on any warp partition, before and after the partition fix alike."""
+    _check(192, 104, 32, 384, GemmWarpPolicy.FullCol, pass_configs=_FORCE_MMA)
 
 
 @tilelang.testing.requires_cuda
