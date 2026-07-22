@@ -964,6 +964,9 @@ class AutoTuner:
         """
         _init_logger_handlers()
 
+        if early_stop and early_stop_factor < 1.0:
+            raise ValueError(f"early_stop_factor must be >= 1.0, got {early_stop_factor}")
+
         sig = inspect.signature(self.fn)
         parameters = sig.parameters
 
@@ -1014,10 +1017,10 @@ class AutoTuner:
                     self._memory_cache[key] = result
                     return result
 
-        best_latency: float = 1e8
+        best_latency: float = float("inf")
         best_config: dict[str, Any] | None = None
         best_kernel: tilelang.JITKernel | None = None
-        shared_best_latency_ref: list[float] | None = [1e8] if early_stop else None
+        shared_best_latency_ref: list[float] | None = [float("inf")] if early_stop else None
 
         compile_func, elaborate_func = self._ensure_jit_functions()
         self.jit_compile = compile_func

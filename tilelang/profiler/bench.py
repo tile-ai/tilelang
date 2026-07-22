@@ -208,11 +208,13 @@ def _do_bench_impl(
 
     # Early stop: skip full benchmark if estimate exceeds baseline
     if early_stop_baseline is not None and estimate_ms > early_stop_baseline:
-        logger.warning(
+        logger.debug(
             "Early stop: estimate_ms=%.3fms exceeds baseline=%.3fms, skipping full benchmark.",
             estimate_ms,
             early_stop_baseline,
         )
+        if quantiles is not None:
+            return [estimate_ms] * len(quantiles)
         return estimate_ms
 
     # Calculate warmup and repeat counts (minimum 1 iteration each)
