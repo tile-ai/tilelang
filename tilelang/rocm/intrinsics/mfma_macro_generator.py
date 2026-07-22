@@ -475,7 +475,7 @@ class MatrixCoreIntrinEmitter:
         local_size_out = self.local_size_out
         k_pack = self.k_pack
         mfma_suffix = self.mfma_suffix
-        a_dtype, b_dtype, out_dtype = self.a_dtype, self.b_dtype, self.accum_dtype
+        a_dtype, b_dtype, out_dtype = str(self.a_dtype), str(self.b_dtype), str(self.accum_dtype)
         compute_a_dtype = a_dtype if local_size_a == 1 else f"{a_dtype}x{local_size_a}"
         compute_b_dtype = b_dtype if local_size_b == 1 else f"{b_dtype}x{local_size_b}"
         compute_out_dtype = out_dtype if local_size_out == 1 else f"{out_dtype}x{local_size_out}"
