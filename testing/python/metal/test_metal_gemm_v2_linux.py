@@ -5,10 +5,13 @@ down to Metal shader source code with simdgroup matrix operations,
 without requiring a Metal runtime or macOS.
 """
 
+import pytest
+
 import tilelang
 from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang.language as T
+from tilelang.metal.intrinsics.metal_macro_generator import MPSIntrinEmitter
 
 
 def matmul_gemm_v2(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
@@ -76,6 +79,29 @@ def test_metal_gemm_v2_small_blocks():
     produced incorrect results due to swizzle padding changing the stride.
     """
     assert_metal_gemm_v2_codegen(16, 16, 16, 16, 16, 16, dtype=T.float16)
+
+
+def test_metal_gemm_validates_explicit_buffer_strides():
+    padded_buffer = tvm.tirx.decl_buffer(
+        (16, 16),
+        T.float16,
+        strides=(32, 1),
+        scope="shared",
+    )
+
+    *_, stride = MPSIntrinEmitter._parse_buffer_nd(padded_buffer)
+
+    assert tvm.ir.structural_equal(stride, tvm.tirx.IntImm("int32", 32))
+
+    noncontiguous_buffer = tvm.tirx.decl_buffer(
+        (16, 16),
+        T.float16,
+        strides=(32, 2),
+        scope="shared",
+    )
+
+    with pytest.raises(ValueError, match="contiguous innermost dimension"):
+        MPSIntrinEmitter._parse_buffer_nd(noncontiguous_buffer)
 
 
 if __name__ == "__main__":
