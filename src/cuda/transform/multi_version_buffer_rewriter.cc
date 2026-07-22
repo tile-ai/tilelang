@@ -75,7 +75,7 @@ static void PadShapeForVersionAlignment(BufferNode *new_buffer,
   const int64_t dtype_bytes =
       orig_buffer->dtype.bytes() * orig_buffer->dtype.lanes();
   if ((elems * dtype_bytes) % align_bytes == 0)
-    return; 
+    return;
 
   const auto *last_imm = orig_buffer->shape.back().as<IntImmNode>();
   const int64_t last = last_imm->value;
