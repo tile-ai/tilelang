@@ -1321,6 +1321,8 @@ class AutoTuneImpl(Generic[_P, _T]):
     manual_check_prog: Callable = None
     cache_input_tensors: bool = False
     do_not_specialize: tuple[str, ...] | list[str] | None = None
+    early_stop: bool = False
+    early_stop_factor: float = 2.0
 
     def __post_init__(self):
         self._tuner_cache = {}
@@ -1376,7 +1378,14 @@ class AutoTuneImpl(Generic[_P, _T]):
                 pass_configs=self.jit_impl.pass_configs,
             )
         )
-        autotuner.run = partial(autotuner.run, self.warmup, self.rep, self.timeout)
+        autotuner.run = partial(
+            autotuner.run,
+            self.warmup,
+            self.rep,
+            self.timeout,
+            early_stop=self.early_stop,
+            early_stop_factor=self.early_stop_factor,
+        )
         return autotuner
 
     def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> JITKernel | _T:
@@ -1449,6 +1458,8 @@ def autotune(  # This is the new public interface
     manual_check_prog: Callable = None,
     cache_input_tensors: bool = False,
     do_not_specialize: tuple[str, ...] | list[str] | None = None,
+    early_stop: bool = False,
+    early_stop_factor: float = 2.0,
 ):
     """
     Just-In-Time (JIT) compiler decorator for TileLang functions.
@@ -1525,6 +1536,8 @@ def autotune(  # This is the new public interface
                 manual_check_prog=manual_check_prog,
                 cache_input_tensors=cache_input_tensors,
                 do_not_specialize=do_not_specialize,
+                early_stop=early_stop,
+                early_stop_factor=early_stop_factor,
             )
 
         return decorator
