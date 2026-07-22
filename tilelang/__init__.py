@@ -219,12 +219,10 @@ if not env.is_light_import():
     from . import rocm as rocm  # noqa: F401
     from . import metal as metal  # noqa: F401
 
-    _lt_value = os.environ.get("TL_LOWER_TRACE", "")
-    if _lt_value and _lt_value.lower().strip() not in ("0", "false", "no", "off", ""):
+    if env.get_lower_trace_mode() is not None:
         from .tools.lower_trace import enable as _lower_trace_enable
 
         _lower_trace_enable()
-    del _lt_value
 del _lazy_load_lib
 
 # Install pass diff hook if TILELANG_PASS_DIFF is enabled (zero overhead when off).

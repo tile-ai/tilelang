@@ -3,8 +3,9 @@
 Monkey-patches ``tvm.ir.transform.Pass.__call__`` and ``PassPipeline.lower``
 to automatically capture IR before/after every pass and generate diff reports.
 
-This module has **no dependency on ``tilelang.env``**; configuration is read
-from ``os.environ`` directly, or passed programmatically via ``enable()``.
+This module reads its configuration (``TL_LOWER_TRACE`` / ``TL_LOWER_TRACE_DIR``)
+through the centralized ``tilelang.env`` environment, or via values passed
+programmatically to ``enable()``.
 
 Supports two architectures:
 - New: ``PassPipeline.lower`` (each backend registers a pipeline object)
@@ -43,6 +44,7 @@ from .diff import (
     _ANSI_RESET,
     _ANSI_YELLOW,
 )
+from tilelang.env import env
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -233,7 +235,7 @@ def _get_mode() -> str | None:
     """Return the effective trace mode, preferring the programmatic override then the env var."""
     if _mode_override is not _UNSET:
         return _mode_override  # type: ignore[return-value]
-    return _parse_lower_trace_mode(os.environ.get("TL_LOWER_TRACE"))
+    return env.get_lower_trace_mode()
 
 
 def _is_trace_enabled() -> bool:
@@ -257,7 +259,7 @@ def _get_base_trace_dir() -> str:
     """Return the configured base trace directory (first level)."""
     if _trace_dir_override is not _UNSET and _trace_dir_override:
         return _trace_dir_override  # type: ignore[return-value]
-    return os.environ.get("TL_LOWER_TRACE_DIR") or os.path.join(".", "tmp", "lower_trace_dir")
+    return env.get_lower_trace_dir()
 
 
 def _ensure_script_dir() -> str:
@@ -1093,8 +1095,8 @@ def enable(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
     mode : str | None, optional
         Force a trace mode (``'terminal'``, ``'html'``, ``'both'``, or
         ``None`` to disable).  When omitted, the mode is read from the
-        ``TL_LOWER_TRACE`` env var (or a prior ``enable`` override),
-        keeping this module free of any ``tilelang.env`` dependency.
+        ``TL_LOWER_TRACE`` env var (via ``tilelang.env``) or a prior
+        ``enable`` override.
     trace_dir : str | None, optional
         Force the trace output base directory.  When omitted, falls back to
         the ``TL_LOWER_TRACE_DIR`` env var, then
