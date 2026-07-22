@@ -156,29 +156,25 @@ should live under that backend's `transform/` package.
 
 ## Language Dialects
 
-`tilelang/language` is the core language namespace. It should stay
-backend-neutral over time, with legacy backend-specific exports treated as
-compatibility shims.
+`tilelang/language/__init__.py` assembles the backend-neutral language surface,
+and `tilelang/language/common.py` exposes its stable common manifest.
+Backend-specific language modules compose that manifest with explicit backend
+extensions. After TileLang finishes initializing, `tilelang.language` is
+augmented as the CUDA-compatible facade.
 
 Backend-specific language surfaces live under the backend package:
 
 ```python
-from tilelang import language as T       # default/core language
-from tilelang.cuda import language as T  # core + CUDA dialect
-from tilelang.rocm import language as T  # core + ROCm dialect
+from tilelang import language as T       # common + CUDA compatibility facade
+from tilelang.cuda import language as T  # common + CUDA extension
+from tilelang.rocm import language as T  # common + ROCm extension
 ```
 
-Each backend language module re-exports the core language and adds only the
+Each backend language module re-exports the common language and adds only the
 symbols owned by that backend. For example, CUDA exposes `T.tcgen05_mma`,
 WGMMA/TCGEN05 helpers, and CUDA intrinsic emitters; ROCm exposes MFMA/WMMA
-helpers.
-
-The default used by `from tilelang import language as T` can be overridden for
-interactive or legacy workflows:
-
-```bash
-TILELANG_DEFAULT_DIALECT=cuda
-```
+helpers. Dialect selection is static and follows the import path; there is no
+process-global dialect registry or mutable default.
 
 Library code, tests, and examples that rely on backend-specific symbols should
 prefer explicit imports such as `from tilelang.cuda import language as T` so

@@ -1,4 +1,4 @@
-"""The language interface for tl programs."""
+"""CUDA-compatible TileLang language facade built on the common surface."""
 
 from __future__ import annotations
 
@@ -30,15 +30,12 @@ from .frame import has_let_value, get_let_value  # noqa: F401
 from .math_intrinsics import *  # noqa: F401
 from .kernel import (
     Kernel,  # noqa: F401
-    ClusterKernel,  # noqa: F401
-    CUDASourceCodeKernel,  # noqa: F401
     KernelLaunchFrame,  # noqa: F401
     get_thread_binding,  # noqa: F401
     get_thread_bindings,  # noqa: F401
     get_block_binding,  # noqa: F401
     get_block_bindings,  # noqa: F401
 )
-from .warpgroup import ws  # noqa: F401
 from .allocate import (
     alloc_var,  # noqa: F401
     alloc_local,  # noqa: F401
@@ -46,40 +43,23 @@ from .allocate import (
     alloc_fragment,  # noqa: F401
     alloc_global,  # noqa: F401
     alloc_barrier,  # noqa: F401
-    alloc_cluster_barrier,  # noqa: F401
-    alloc_tmem,  # noqa: F401
     alloc_reducer,  # noqa: F401
-    alloc_descriptor,  # noqa: F401
-    alloc_wgmma_desc,  # noqa: F401
-    alloc_tcgen05_smem_desc,  # noqa: F401
-    alloc_tcgen05_instr_desc,  # noqa: F401
     empty,  # noqa: F401
 )
 from tvm.tirx.script.builder.ir import alloc_buffer as allocate  # noqa: F401
 from .copy_op import (  # noqa: F401
     copy,
     async_copy,
-    tma_copy,
-    tma_gather4,
-    tma_gather4_bytes,
-    tma_scatter4,
     transpose,
     im2col,
     c2d_im2col,
-    copy_cluster,
 )
 from tilelang.tileop.base import GemmWarpPolicy  # noqa: F401
 from .gemm_op import (  # noqa: F401
     gemm,
-    wgmma_gemm,
-    tcgen05_gemm,
-    tcgen05_gemm_blockscaled,
-    make_blockscaled_gemm_layout,
 )
 from .experimental.gemm_sp_op import (  # noqa: F401
     gemm_sp,
-    wgmma_gemm_sp,
-    tcgen05_gemm_sp,
 )
 from .fill_op import fill, clear  # noqa: F401
 from .reduce_op import (
@@ -100,7 +80,6 @@ from .reduce_op import (
     warp_reduce_bitor,  # noqa: F401
 )
 from .scan_op import cumsum, cummax  # noqa: F401
-from .print_op import print, device_assert  # noqa: F401
 from .customize import (
     atomic_max,  # noqa: F401
     atomic_min,  # noqa: F401
@@ -117,34 +96,35 @@ from .customize import (
     loop_break,  # noqa: F401
 )
 from .logical import any_of, all_of  # noqa: F401
-from .builtin import *  # noqa: F401
-from .builtin import __ldg as __ldg  # noqa: F401
-from .builtin import __ffs as __ffs  # noqa: F401
-from .builtin import __fns as __fns  # noqa: F401
-from .builtin import ds_read_tr16_b64 as ds_read_tr16_b64  # noqa: F401
-from .builtin import ds_read_tr8_b64 as ds_read_tr8_b64  # noqa: F401
-from .builtin import ldg32 as ldg32  # noqa: F401
-from .builtin import ldg64 as ldg64  # noqa: F401
-from .builtin import ldg128 as ldg128  # noqa: F401
-from .builtin import lds32 as lds32  # noqa: F401
-from .builtin import lds64 as lds64  # noqa: F401
-from .builtin import lds128 as lds128  # noqa: F401
-from .builtin import ldg256 as ldg256  # noqa: F401
-from .builtin import stg32 as stg32  # noqa: F401
-from .builtin import stg64 as stg64  # noqa: F401
-from .builtin import stg128 as stg128  # noqa: F401
-from .builtin import sts32 as sts32  # noqa: F401
-from .builtin import sts64 as sts64  # noqa: F401
-from .builtin import sts128 as sts128  # noqa: F401
-from .builtin import stg256 as stg256  # noqa: F401
-from .builtin import any_sync as any_sync  # noqa: F401
-from .builtin import all_sync as all_sync  # noqa: F401
-from .builtin import ballot_sync as ballot_sync  # noqa: F401
-from .builtin import ballot as ballot  # noqa: F401
-from .builtin import activemask as activemask  # noqa: F401
-from .builtin import syncthreads_count as syncthreads_count  # noqa: F401
-from .builtin import syncthreads_and as syncthreads_and  # noqa: F401
-from .builtin import syncthreads_or as syncthreads_or  # noqa: F401
+from .builtin import (  # noqa: F401
+    access_ptr,
+    activemask,
+    all_sync,
+    any_sync,
+    ballot,
+    ballot_sync,
+    barrier_arrive,
+    barrier_wait,
+    get_lane_idx,
+    get_warp_idx,
+    get_warp_idx_sync,
+    mbarrier_arrive,
+    mbarrier_arrive_expect_tx,
+    mbarrier_expect_tx,
+    mbarrier_wait_parity,
+    no_set_max_nreg,
+    shfl_down,
+    shfl_sync,
+    shfl_up,
+    shfl_xor,
+    sync_global,
+    sync_grid,
+    sync_threads,
+    sync_warp,
+    syncthreads_and,
+    syncthreads_count,
+    syncthreads_or,
+)
 
 from .utils import index_to_coordinates  # noqa: F401
 
@@ -153,34 +133,7 @@ from .annotations import (  # noqa: F401
     use_swizzle,
     annotate_layout,
     annotate_safe_value,
-    annotate_l2_hit_ratio,
     annotate_restrict_buffers,
-    annotate_min_blocks_per_sm,
-)
-
-from .random import (
-    rng_init,  # noqa: F401
-    rng_rand,  # noqa: F401
-    rng_rand_float,  # noqa: F401
-)
-
-from .pdl import (
-    pdl_trigger,  # noqa: F401
-    pdl_sync,  # noqa: F401
-)
-
-from .cluster import (
-    cluster_arrive_relaxed,  # noqa: F401
-    cluster_arrive,  # noqa: F401
-    cluster_wait,  # noqa: F401
-    cluster_sync,  # noqa: F401
-    block_rank_in_cluster,  # noqa: F401
-    clc_try_cancel,  # noqa: F401
-    clc_try_cancel_multicast,  # noqa: F401
-    clc_is_canceled,  # noqa: F401
-    clc_get_first_ctaid_x,  # noqa: F401
-    clc_get_first_ctaid_y,  # noqa: F401
-    clc_get_first_ctaid_z,  # noqa: F401
 )
 
 from .meta import (
@@ -201,14 +154,30 @@ def import_source(source: str | None = None):
     return sblock_attr({"pragma_import_c": source}) if source is not None else None
 
 
-from .dialect import (  # noqa: E402,F401
-    LanguageDialect,
-    get_default_language_dialect,
-    list_language_dialects,
-    register_language_dialect,
-    resolve_language_dialect,
-    resolve_language_module,
-    set_default_language_dialect,
-)
+def _is_language_export(name: str) -> bool:
+    return not name.startswith("_") or (name.startswith("__") and not name.endswith("__"))
 
-__tilelang_dialect__ = "core"
+
+__tilelang_common_all__ = tuple(name for name in globals() if _is_language_export(name))
+__tilelang_dialect__ = "common"
+__all__ = __tilelang_common_all__
+
+
+def _activate_cuda_facade() -> None:
+    """Attach the CUDA extension after top-level TileLang initialization."""
+
+    if __tilelang_dialect__ == "cuda":
+        return
+
+    import sys
+
+    from tilelang.cuda import language as cuda_language
+
+    module = sys.modules[__name__]
+    for name in cuda_language.__all__:
+        setattr(module, name, getattr(cuda_language, name))
+    module.__all__ = tuple(dict.fromkeys((*__tilelang_common_all__, *cuda_language.__all__)))
+    module.__tilelang_dialect__ = "cuda"
+
+
+del _is_language_export

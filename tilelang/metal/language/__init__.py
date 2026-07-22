@@ -1,12 +1,12 @@
-"""Metal language dialect overlay."""
+"""Metal language dialect: common TileLang plus Metal extensions."""
 
 from __future__ import annotations
 
-from tilelang.language.dialect import export_core_language_symbols
+from tilelang.language.common import *  # noqa: F401,F403
+from tilelang.language.common import __all__ as _COMMON_ALL
 from tilelang.metal.intrinsics import MPSIntrinEmitter as MPSIntrinEmitter
 
-export_core_language_symbols(globals())
-del export_core_language_symbols
-
 __tilelang_dialect__ = "metal"
-__all__ = sorted(name for name in globals() if not (name.startswith("__") and name.endswith("__")))
+__all__ = tuple((*_COMMON_ALL, "MPSIntrinEmitter"))
+
+del _COMMON_ALL

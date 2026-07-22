@@ -1,21 +1,4 @@
-from tvm import tirx
+"""Compatibility wrapper for CUDA programmatic dependent launch APIs."""
 
-
-__all__ = [
-    "pdl_trigger",
-    "pdl_sync",
-]
-
-
-def pdl_trigger() -> tirx.PrimExpr:
-    return tirx.call_intrin(
-        "void",
-        tirx.op.Op.get("tl.pdl_trigger"),
-    )
-
-
-def pdl_sync() -> tirx.PrimExpr:
-    return tirx.call_intrin(
-        "void",
-        tirx.op.Op.get("tl.pdl_sync"),
-    )
+from tilelang.cuda.language.pdl import *  # noqa: F401,F403
+from tilelang.cuda.language.pdl import __all__ as __all__

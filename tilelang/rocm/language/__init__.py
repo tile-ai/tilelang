@@ -1,13 +1,14 @@
-"""ROCm/HIP language dialect overlay."""
+"""ROCm/HIP language dialect: common TileLang plus ROCm extensions."""
 
 from __future__ import annotations
 
-from tilelang.language.dialect import export_core_language_symbols
+from tilelang.language.common import *  # noqa: F401,F403
+from tilelang.language.common import __all__ as _COMMON_ALL
 
-export_core_language_symbols(globals())
-del export_core_language_symbols
-
-from .intrinsics import *  # noqa: E402,F401,F403
+from .intrinsics import *  # noqa: F401,F403
+from .intrinsics import __all__ as _ROCM_ALL
 
 __tilelang_dialect__ = "rocm"
-__all__ = sorted(name for name in globals() if not (name.startswith("__") and name.endswith("__")))
+__all__ = tuple(dict.fromkeys((*_COMMON_ALL, *_ROCM_ALL)))
+
+del _COMMON_ALL, _ROCM_ALL

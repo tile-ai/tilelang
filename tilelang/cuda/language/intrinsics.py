@@ -24,17 +24,38 @@ from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import (
     compute_gmma_descriptor,
 )
 from tilelang.cuda.intrinsics.macro.wgmma_sp_macro_generator import WGSparseTensorCoreIntrinEmitter
-from tilelang.language import (
+from tilelang.language.allocate import (
+    alloc_tcgen05_instr_desc,
+    alloc_tcgen05_instruction_desc,
+    alloc_tcgen05_smem_desc,
+    alloc_wgmma_desc,
+)
+from tilelang.language.builtin import (
     __ffs,
     __fns,
     __ldg,
-    alloc_tcgen05_instr_desc,
-    alloc_tcgen05_smem_desc,
-    alloc_wgmma_desc,
     cp_async_barrier_noinc,
     initialize_tcgen05_descriptor,
     initialize_wgmma_descriptor,
+    tcgen05_after_thread_sync,
+    tcgen05_before_thread_sync,
+    tcgen05_cp_warpx4,
+    tcgen05_mma_arrive,
+    tcgen05_sf_warp_transpose,
+    wait_wgmma,
+    warpgroup_arrive,
+    warpgroup_commit_batch,
+    warpgroup_fence_operand,
+    warpgroup_wait,
+)
+from tilelang.language.experimental.gemm_sp_op import tcgen05_gemm_sp, wgmma_gemm_sp
+from tilelang.language.gemm_op import (
     make_blockscaled_gemm_layout,
+    tcgen05_gemm,
+    tcgen05_gemm_blockscaled,
+    wgmma_gemm,
+)
+from tilelang.language.tir.ir import (
     ptx_cp_async,
     ptx_cp_async_barrier,
     ptx_cp_async_bulk,
@@ -48,23 +69,7 @@ from tilelang.language import (
     ptx_wgmma_sp_rs,
     ptx_wgmma_sp_ss,
     ptx_wgmma_ss,
-    tcgen05_after_thread_sync,
-    tcgen05_before_thread_sync,
-    tcgen05_cp_warpx4,
-    tcgen05_gemm,
-    tcgen05_gemm_blockscaled,
-    tcgen05_gemm_sp,
-    tcgen05_mma_arrive,
-    tcgen05_sf_warp_transpose,
-    wait_wgmma,
-    warpgroup_arrive,
-    warpgroup_commit_batch,
-    warpgroup_fence_operand,
-    warpgroup_wait,
-    wgmma_gemm,
-    wgmma_gemm_sp,
 )
-from tilelang.language.allocate import alloc_tcgen05_instruction_desc
 
 tcgen05_mma = tcgen05_gemm
 tcgen05_mma_blockscaled = tcgen05_gemm_blockscaled
