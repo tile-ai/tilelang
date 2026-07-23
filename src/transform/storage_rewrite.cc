@@ -576,7 +576,7 @@ public:
       op = stmt.as<ForNode>();
       return For(op->loop_var, op->min, op->extent, op->kind,
                  MakeAttach(svec, op->body), op->thread_binding,
-                 op->annotations);
+                 op->annotations, op->step, op->span);
     } else {
       return StmtExprMutator::VisitStmt_(op);
     }
