@@ -125,55 +125,65 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
   ICHECK(N % k_n_per_warp == 0)
       << "N must be divisible by " << k_n_per_warp << ", but got " << N;
 
+  auto is_valid = [&](int m, int n) {
+    return m * n == num_warps && M % (m * kMPerWarp) == 0 &&
+           N % (n * k_n_per_warp) == 0;
+  };
+
+  bool found = false;
   if (policy.IsFullRow()) {
-    m_warp = num_warps;
-    n_warp = 1;
-    if (M % (m_warp * kMPerWarp) != 0) {
-      int max_m_warps = M / kMPerWarp;
-      m_warp = max_m_warps;
-      n_warp = num_warps / m_warp;
-      if (n_warp == 0)
-        n_warp = 1;
+    for (int m = num_warps; m >= 1; m--) {
+      if (num_warps % m != 0 || !is_valid(m, num_warps / m))
+        continue;
+      m_warp = m;
+      n_warp = num_warps / m;
+      found = true;
+      break;
     }
   } else if (policy.IsFullCol()) {
-    m_warp = 1;
-    n_warp = num_warps;
-    if (N % (n_warp * k_n_per_warp) != 0) {
-      int max_n_warps = N / k_n_per_warp;
-      n_warp = max_n_warps;
-      m_warp = num_warps / n_warp;
-      if (m_warp == 0)
-        m_warp = 1;
+    for (int n = num_warps; n >= 1; n--) {
+      if (num_warps % n != 0 || !is_valid(num_warps / n, n))
+        continue;
+      n_warp = n;
+      m_warp = num_warps / n;
+      found = true;
+      break;
     }
   } else if (policy.IsSquare()) {
-    int max_m_warps = M / kMPerWarp;
     float ideal_ratio = N > 0 ? static_cast<float>(M) / N : 1.0f;
 
-    int best_m = 1;
-    int best_n = 1;
     float best_balance = std::numeric_limits<float>::max();
-    for (int m = 1; m <= max_m_warps && m <= num_warps; m++) {
+    for (int m = 1; m <= num_warps; m++) {
+      if (num_warps % m != 0)
+        continue;
       int n = num_warps / m;
+      if (!is_valid(m, n))
+        continue;
 
       float m_per_warp = static_cast<float>(M) / (m * kMPerWarp);
       float n_per_warp = static_cast<float>(N) / (n * k_n_per_warp);
-      if (m_per_warp < 1 || n_per_warp < 1)
-        continue;
-      if (m * n != num_warps)
-        continue;
-
       float balance = std::abs(m_per_warp / n_per_warp - ideal_ratio);
       if (balance < best_balance) {
         best_balance = balance;
-        best_m = m;
-        best_n = n;
+        m_warp = m;
+        n_warp = n;
+        found = true;
       }
     }
-
-    m_warp = best_m;
-    n_warp = best_n;
   } else {
     ICHECK(0) << "Unknown GemmWarpPolicy";
+  }
+
+  if (!found) {
+    LOG(FATAL) << "No valid warp partition for T.gemm: M=" << M << ", N=" << N
+               << " cannot be evenly covered by " << num_warps
+               << " warps (policy="
+               << (policy.IsFullRow()   ? "FullRow"
+                   : policy.IsFullCol() ? "FullCol"
+                                        : "Square")
+               << "). Each warp must own a multiple of " << kMPerWarp
+               << " rows and " << k_n_per_warp
+               << " columns; adjust `threads` or the block tile shape.";
   }
 
   ICHECK(m_warp * n_warp == num_warps)
@@ -198,42 +208,39 @@ std::pair<int, int> ComputeWgmmaWarpPartition(const GemmWarpPolicyNode &policy,
   ICHECK(N % kNPerWarp == 0)
       << "N must be divisible by " << kNPerWarp << ", but got " << N;
 
-  m_warp = kGroup;
-  n_warp = num_warps / m_warp;
+  auto is_valid = [&](int m, int n) {
+    return m * n == num_warps && m % kGroup == 0 && M % (m * kMPerWarp) == 0 &&
+           N % (n * kNPerWarp) == 0;
+  };
 
+  bool found = false;
   if (policy.IsFullRow()) {
-    for (int cand = num_warps; cand >= kGroup; cand -= kGroup) {
-      if (M % (cand * kMPerWarp) == 0) {
-        m_warp = cand;
-        n_warp = num_warps / m_warp;
-        break;
-      }
+    for (int m = num_warps; m >= kGroup; m -= kGroup) {
+      if (num_warps % m != 0 || !is_valid(m, num_warps / m))
+        continue;
+      m_warp = m;
+      n_warp = num_warps / m;
+      found = true;
+      break;
     }
   } else if (policy.IsFullCol()) {
-    int cand_n = n_warp;
-    if (N % (cand_n * kNPerWarp) != 0) {
-      int max_n = N / kNPerWarp;
-      for (int n = std::min(cand_n, max_n); n >= 1; --n) {
-        if (num_warps % n == 0 && (num_warps / n) % kGroup == 0) {
-          n_warp = n;
-          m_warp = num_warps / n_warp;
-          break;
-        }
-      }
+    for (int n = num_warps / kGroup; n >= 1; n--) {
+      if (num_warps % n != 0 || !is_valid(num_warps / n, n))
+        continue;
+      n_warp = n;
+      m_warp = num_warps / n;
+      found = true;
+      break;
     }
   } else if (policy.IsSquare()) {
-    int max_m = M / kMPerWarp;
-    int max_n = N / kNPerWarp;
-
     float ideal = N > 0 ? static_cast<float>(M) / N : 1.f;
-    float best_score = std::numeric_limits<float>::max();
-    int best_m = kGroup, best_n = n_warp;
 
-    for (int m = kGroup; m <= num_warps && m <= max_m; m += kGroup) {
-      if (num_warps % m)
+    float best_score = std::numeric_limits<float>::max();
+    for (int m = kGroup; m <= num_warps; m += kGroup) {
+      if (num_warps % m != 0)
         continue;
       int n = num_warps / m;
-      if (n > max_n)
+      if (!is_valid(m, n))
         continue;
 
       float m_per_warp = static_cast<float>(M) / (m * kMPerWarp);
@@ -242,14 +249,26 @@ std::pair<int, int> ComputeWgmmaWarpPartition(const GemmWarpPolicyNode &policy,
 
       if (score < best_score) {
         best_score = score;
-        best_m = m;
-        best_n = n;
+        m_warp = m;
+        n_warp = n;
+        found = true;
       }
     }
-    m_warp = best_m;
-    n_warp = best_n;
   } else {
     ICHECK(0) << "Unknown GemmWarpPolicy";
+  }
+
+  if (!found) {
+    LOG(FATAL) << "No valid warp partition for T.gemm (Warp-Group MMA): M=" << M
+               << ", N=" << N << " cannot be evenly covered by " << num_warps
+               << " warps (policy="
+               << (policy.IsFullRow()   ? "FullRow"
+                   : policy.IsFullCol() ? "FullCol"
+                                        : "Square")
+               << "). Each warp must own a multiple of " << kMPerWarp
+               << " rows and " << kNPerWarp
+               << " columns, with m_warp a multiple of " << kGroup
+               << "; adjust `threads` or the block tile shape.";
   }
 
   ICHECK(m_warp * n_warp == num_warps)
