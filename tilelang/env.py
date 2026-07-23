@@ -523,6 +523,9 @@ class Environment:
         # other scripts that only require the minimal environment variables.
         return self.is_running_autodd()
 
+    def is_span_enable(self) -> bool:
+        return self.TILELANG_ENABLE_IR_SPAN.lower() in ("1", "true", "yes", "on")
+
 
 # Instantiate as a global configuration object
 env = Environment()
