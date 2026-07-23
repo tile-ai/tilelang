@@ -1,8 +1,14 @@
 import torch
+import pytest
 
 import tilelang
 import tilelang.language as T
 from tilelang.engine.lower import extrac_params
+from tilelang.jit.adapter.nvrtc import is_nvrtc_available
+
+if not is_nvrtc_available:
+    pytest.skip("cuda-python is required to import the NVRTC adapter", allow_module_level=True)
+
 from tilelang.jit.adapter.nvrtc.adapter import NVRTCKernelAdapter
 
 
