@@ -480,6 +480,71 @@ def _compile(prim_func):
     return tilelang.compile(prim_func, out_idx=-1, target="cuda")
 
 
+def _make_allreduce_width_kernel(reduce_fn, M, width, threads):
+    @T.prim_func
+    def kernel(A: T.Tensor((M, width), T.float32), B: T.Tensor((M,), T.float32)):
+        with T.Kernel(1, threads=threads):
+            src = T.alloc_fragment((M, width), T.float32)
+            dst = T.alloc_fragment((M,), T.float32)
+            T.copy(A, src)
+            reduce_fn(src, dst, dim=1)
+            T.copy(dst, B)
+
+    return kernel
+
+
+def _make_allreduce_dim0_scale_kernel(reduce_fn, logical_width, scale):
+    @T.prim_func
+    def kernel(
+        A: T.Tensor((logical_width, scale), T.float32),
+        B: T.Tensor((scale,), T.float32),
+    ):
+        with T.Kernel(1, threads=logical_width * scale):
+            src = T.alloc_fragment((logical_width, scale), T.float32)
+            dst = T.alloc_fragment((scale,), T.float32)
+            T.copy(A, src)
+            reduce_fn(src, dst, dim=0)
+            T.copy(dst, B)
+
+    return kernel
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("reduce_fn", [T.reduce_sum, T.reduce_max], ids=["sum", "max"])
+@pytest.mark.parametrize("width", [48, 96])
+def test_allreduce_rejects_non_power_of_two_logical_width(reduce_fn, width):
+    with pytest.raises(Exception, match="logical_width.*positive power of two"):
+        _compile(_make_allreduce_width_kernel(reduce_fn, 1, width, width))
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("reduce_fn", [T.reduce_sum, T.reduce_max], ids=["sum", "max"])
+@pytest.mark.parametrize("width", [32, 64, 128])
+def test_allreduce_power_of_two_width_runtime(reduce_fn, width):
+    M = 4
+    k = _compile(_make_allreduce_width_kernel(reduce_fn, M, width, width))
+    A = torch.randn(M, width, dtype=torch.float32, device="cuda")
+    B = k(A)
+    ref = A.sum(dim=1) if reduce_fn is T.reduce_sum else A.max(dim=1).values
+    torch.testing.assert_close(B, ref, atol=1e-2, rtol=1e-2)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(("logical_width", "scale"), [(32, 2), (64, 2)])
+def test_allreduce_scale_greater_than_one_valid_runtime(logical_width, scale):
+    k = _compile(_make_allreduce_dim0_scale_kernel(T.reduce_sum, logical_width, scale))
+    A = torch.randn(logical_width, scale, dtype=torch.float32, device="cuda")
+    B = k(A)
+    torch.testing.assert_close(B, A.sum(dim=0), atol=1e-2, rtol=1e-2)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("reduce_fn", [T.reduce_sum, T.reduce_max], ids=["sum", "max"])
+def test_allreduce_scale_greater_than_one_rejects_non_power_of_two(reduce_fn):
+    with pytest.raises(Exception, match="logical_width.*positive power of two"):
+        _compile(_make_allreduce_dim0_scale_kernel(reduce_fn, 48, 2))
+
+
 def _make_nan_reduce_kernel(reduce_fn, M, N, dtype, threads, *, nan_propagate):
     @T.prim_func
     def kernel(A: T.Tensor((M, N), dtype), B: T.Tensor((M,), dtype)):
