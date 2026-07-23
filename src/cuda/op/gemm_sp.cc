@@ -100,14 +100,14 @@ void FatalWgmmaUnavailable(const GemmSPNode &op, Target target) {
 }
 
 void FatalTcgen5Unavailable(const GemmSPNode &op, Target target) {
-  LOG(FATAL) << "T.tcgen05_gemm_sp() requires Blackwell TCGEN5MMA lowering, "
-                "but constraints were not satisfied. Got target="
-             << target << ", A(scope=" << op.A.scope()
-             << ", dtype=" << op.A->dtype << "), B(scope=" << op.B.scope()
-             << ", dtype=" << op.B->dtype << "), C(scope=" << op.C.scope()
-             << ", dtype=" << op.C->dtype << "), M=" << op.M << ", N=" << op.N
-             << ", K=" << op.K << "."
-             << SpanHintSuffix({op.A->span, op.B->span, op.C->span});
+  LOG(FATAL) << "tcgen5";
+  //   LOG(FATAL) << "T.tcgen05_gemm() requires Blackwell TCGEN5MMA lowering, "
+  //                 "but constraints were not satisfied. Got target="
+  //              << target << ", A(scope=" << op.A.scope()
+  //              << ", dtype=" << op.A->dtype << "), B(scope=" << op.B.scope()
+  //              << ", dtype=" << op.B->dtype << "), C(scope=" << op.C.scope()
+  //              << ", dtype=" << op.C->dtype << "), M=" << op.M
+  //              << ", N=" << op.N << ", K=" << op.K << ".";
 }
 
 std::pair<int, int>
