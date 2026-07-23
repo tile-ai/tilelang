@@ -1,6 +1,7 @@
 import threading
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from tilelang.jit.adapter.tvm_ffi import TVMFFIKernelAdapter
@@ -13,6 +14,17 @@ class _FakeKernelParam:
     @staticmethod
     def torch_dtype():
         return torch.float32
+
+
+class _FakeInt4KernelParam:
+    dtype = SimpleNamespace(bits=4, lanes=1)
+
+    def __init__(self, logical_elements):
+        self.shape = [logical_elements]
+
+    @staticmethod
+    def torch_dtype():
+        return torch.int8
 
 
 class _TestAdapter(TVMFFIKernelAdapter):
@@ -90,3 +102,23 @@ def test_preloaded_executable_is_reused():
     assert adapter._get_executable() is preloaded_executable
     assert adapter.get_exportable_executable() is preloaded_executable
     assert created == []
+
+
+@pytest.mark.parametrize(
+    ("logical_elements", "expected_storage_elements"),
+    [
+        (2, 1),
+        (3, 2),
+        (4, 2),
+    ],
+)
+def test_subbyte_output_storage_rounds_up_at_byte_boundary(logical_elements, expected_storage_elements):
+    adapter, _ = _make_adapter()
+    adapter.params = [_FakeInt4KernelParam(logical_elements)]
+    adapter.result_idx = [0]
+    adapter.executable = lambda output: None
+
+    output = adapter._convert_torch_func()()
+
+    assert output.dtype == torch.int8
+    assert output.shape == (expected_storage_elements,)

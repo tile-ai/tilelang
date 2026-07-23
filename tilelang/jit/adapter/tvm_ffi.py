@@ -198,9 +198,10 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                     native_shape.append(dim)
             tl_dtype = param.dtype
             if tl_dtype.bits < 8:
-                stroage_dtype: dtype = dtype(param.torch_dtype())
-                # last dim divide by bits to get the actual shape
-                native_shape[-1] = native_shape[-1] * tl_dtype.bits * tl_dtype.lanes // (stroage_dtype.bits * stroage_dtype.lanes)
+                storage_dtype: dtype = dtype(param.torch_dtype())
+                logical_bits = native_shape[-1] * tl_dtype.bits * tl_dtype.lanes
+                storage_bits = storage_dtype.bits * storage_dtype.lanes
+                native_shape[-1] = (logical_bits + storage_bits - 1) // storage_bits
             param_shapes.append(native_shape)
 
         dynamic_symbolic_map = self._process_dynamic_symbolic()
