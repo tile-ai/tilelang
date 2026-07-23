@@ -1,3 +1,5 @@
+import numpy as np
+
 from tilelang import tvm as tvm
 import tilelang
 import tilelang.testing
@@ -19,13 +21,30 @@ def test_if_stmt_binding_splits_plain_seq_stmt():
 
     @T.prim_func
     def expected(A: T.Buffer((4,), "float32")):
-        if A[0] >= T.float32(0):
+        if_condition = T.bind(A[0] >= T.float32(0))
+        if if_condition:
             A[0] = T.float32(1)
-        if A[0] >= T.float32(0):
+        if if_condition:
             A[1] = T.float32(2)
 
     after = _run_if_stmt_binding(before)
     tvm.ir.assert_structural_equal(after.body, expected.body, True)
+
+
+def test_if_stmt_binding_preserves_original_condition_value():
+    @T.prim_func
+    def before(A: T.Buffer((2,), "int32")):
+        if A[0] > 0:
+            A[0] = 0
+            A[1] = 1
+
+    after = _run_if_stmt_binding(before)
+    executable = tvm.compile(after, target="c").jit(options=["-std=c++17"])
+
+    values = tvm.runtime.tensor(np.array([1, 7], dtype="int32"))
+    executable(values)
+
+    np.testing.assert_array_equal(values.numpy(), np.array([0, 1], dtype="int32"))
 
 
 def test_if_stmt_binding_keeps_direct_bind_scope():
@@ -39,9 +58,10 @@ def test_if_stmt_binding_keeps_direct_bind_scope():
 
     @T.prim_func
     def expected(A: T.Buffer((4,), "float32"), B: T.Buffer((4,), "float32")):
-        if A[0] >= T.float32(0):
+        if_condition = T.bind(A[0] >= T.float32(0))
+        if if_condition:
             A[0] = T.float32(1)
-        if A[0] >= T.float32(0):
+        if if_condition:
             bound = T.bind(A[1] + T.float32(2))
             B[0] = bound
             B[1] = bound + T.float32(1)

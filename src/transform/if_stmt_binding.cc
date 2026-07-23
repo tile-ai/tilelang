@@ -190,6 +190,50 @@ private:
     return IfThenElse(condition, stmt, Stmt(), span);
   }
 
+  bool NeedsConditionSnapshot(const PrimExpr &condition,
+                              const Array<Stmt> &stmts) const {
+    if (SideEffect(condition) > CallEffectKind::kReadState) {
+      return true;
+    }
+
+    auto [condition_reads, _] = CollectStmtAccessRegions(Evaluate(condition));
+    if (condition_reads.empty()) {
+      return false;
+    }
+
+    const BufferSet write_buffers = CollectWriteBuffers(stmts);
+    for (const BufferRegion &read : condition_reads) {
+      if (write_buffers.count(read->buffer)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  Stmt GuardStmts(const PrimExpr &condition, Array<Stmt> stmts,
+                  Span span) const {
+    ICHECK(!stmts.empty());
+    if (stmts.size() == 1) {
+      return GuardStmt(condition, stmts[0], span);
+    }
+
+    if (!NeedsConditionSnapshot(condition, stmts)) {
+      Array<Stmt> guarded_stmts;
+      guarded_stmts.reserve(stmts.size());
+      for (const Stmt &stmt : stmts) {
+        guarded_stmts.push_back(GuardStmt(condition, stmt, span));
+      }
+      return MakeSeq(std::move(guarded_stmts));
+    }
+
+    Var condition_snapshot("if_condition", condition.dtype());
+    Array<Stmt> seq{Bind(condition_snapshot, condition, span)};
+    for (const Stmt &stmt : stmts) {
+      seq.push_back(GuardStmt(condition_snapshot, stmt, span));
+    }
+    return MakeSeq(std::move(seq));
+  }
+
   Stmt BindIfStmtLegacy(const Stmt &body, const PrimExpr &condition,
                         Span span) const {
     if (auto seq_stmt = body.as<SeqStmtNode>()) {
@@ -197,7 +241,7 @@ private:
       const size_t n = seq_stmt->seq.size();
       size_t i = 0;
       for (; i < n && !seq_stmt->seq[i].as<BindNode>(); ++i) {
-        seq.push_back(GuardStmt(condition, seq_stmt->seq[i], span));
+        seq.push_back(seq_stmt->seq[i]);
       }
 
       // A direct Bind is emitted as a C/CUDA declaration. Keep it and the
@@ -208,10 +252,9 @@ private:
         for (; i < n; ++i) {
           bind_scope.push_back(seq_stmt->seq[i]);
         }
-        seq.push_back(
-            GuardStmt(condition, MakeSeq(std::move(bind_scope)), span));
+        seq.push_back(MakeSeq(std::move(bind_scope)));
       }
-      return MakeSeq(std::move(seq));
+      return GuardStmts(condition, std::move(seq), span);
     }
     return GuardStmt(condition, body, span);
   }
@@ -229,7 +272,7 @@ private:
 
     const BufferSet write_buffers = CollectWriteBuffers(seq_stmt->seq);
     Map<Var, PrimExpr> replayable_binds;
-    Array<Stmt> guarded_stmts;
+    Array<Stmt> guarded_bodies;
     Array<Stmt> bind_scope;
     bool in_bind_scope = false;
 
@@ -246,22 +289,20 @@ private:
           in_bind_scope = true;
           continue;
         }
-        guarded_stmts.push_back(GuardStmt(
-            condition, RewriteWithReplayableBinds(stmt, replayable_binds),
-            span));
+        guarded_bodies.push_back(
+            RewriteWithReplayableBinds(stmt, replayable_binds));
         continue;
       }
       bind_scope.push_back(RewriteWithReplayableBinds(stmt, replayable_binds));
     }
 
     if (!bind_scope.empty()) {
-      guarded_stmts.push_back(
-          GuardStmt(condition, MakeSeq(std::move(bind_scope)), span));
+      guarded_bodies.push_back(MakeSeq(std::move(bind_scope)));
     }
-    if (guarded_stmts.empty()) {
+    if (guarded_bodies.empty()) {
       return Evaluate(0, span);
     }
-    return MakeSeq(std::move(guarded_stmts));
+    return GuardStmts(condition, std::move(guarded_bodies), span);
   }
 
   Stmt VisitStmt_(const IfThenElseNode *op) final {
