@@ -91,7 +91,7 @@ def bwd(
     is_causal=True,
     block_size=32,
     num_stages=0,
-    threads=256,
+    threads=None,
     indices_dtype=T.int32,
     dtype=T.bfloat16,
     accum_dtype=T.float32,
@@ -122,6 +122,13 @@ def bwd(
     H = H_kv
     padded_H = max(tilelang.math.next_power_of_2(H_kv), 16)
     block_H = min(64, padded_H)
+    # adaptive: this kernel is memory-pipe bound. When the head count is not split across
+    # blocks (block_H>=64), 256 threads (8 warps) issue many more cp.async copies at once
+    # than 128 (4 warps), greatly raising in-flight bytes -- the main perf lever here.
+    # Smaller head blocks lack the GEMM warp-tiling work to fill 256 threads, so fall back
+    # to 128 and still build.
+    if threads is None:
+        threads = 256 if block_H >= 64 else 128
     assert padded_H % block_H == 0
     NH = padded_H // block_H
     BS = block_size

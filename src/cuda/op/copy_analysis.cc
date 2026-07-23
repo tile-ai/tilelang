@@ -5,7 +5,6 @@
 
 #include "cuda/op/copy.h"
 #include "support/check.h"
-#include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/runtime/logging.h>
 
 #include "cuda/target_utils.h"
@@ -265,6 +264,24 @@ bool CheckBulkStore(const CopyNode &op, Target target,
   return CheckGlobalStrides(op.dst, analyzer, emit_diagnostics);
 }
 
+bool IsSemanticallyLinearLayout(const Layout &layout,
+                                const Array<PrimExpr> &shape,
+                                arith::Analyzer *analyzer) {
+  Array<PrimExpr> input_shape = layout->InputShape();
+  if (input_shape.size() != shape.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < shape.size(); ++i) {
+    if (!analyzer->CanProveEqual(input_shape[i], shape[i])) {
+      return false;
+    }
+  }
+
+  Layout linear_layout = MakeLinearLayout(shape);
+  return analyzer->CanProveEqual(layout->GetLinearizedForwardIndex(),
+                                 linear_layout->GetLinearizedForwardIndex());
+}
+
 bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
                      const Array<Range> &global_range,
                      const Array<Range> &shared_range,
@@ -273,8 +290,8 @@ bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
   if (layout_map.count(shared_tensor)) {
     Layout existing =
         layout_map.Get(shared_tensor).value().as<Layout>().value();
-    Layout linear_layout = MakeLinearLayout(shared_tensor->shape);
-    shared_is_contiguous = StructuralEqual()(existing, linear_layout);
+    shared_is_contiguous =
+        IsSemanticallyLinearLayout(existing, shared_tensor->shape, analyzer);
   }
 
   bool global_is_contiguous = true;
@@ -319,6 +336,27 @@ bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
 
   return shared_is_contiguous && global_is_contiguous && element_match &&
          total_16b_aligned;
+}
+
+bool CanProveRegionInBounds(const Buffer &buffer, const Array<Range> &region,
+                            arith::Analyzer *analyzer) {
+  if (buffer->shape.size() != region.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < region.size(); ++i) {
+    PrimExpr min = region[i]->min;
+    PrimExpr extent = region[i]->extent;
+    if (!analyzer->CanProve(min >= 0 && min + extent <= buffer->shape[i],
+                            arith::ProofStrength::kSymbolicBound)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool CanProveCopyInBounds(const CopyNode &op, arith::Analyzer *analyzer) {
+  return CanProveRegionInBounds(op.src, op.src_range, analyzer) &&
+         CanProveRegionInBounds(op.dst, op.dst_range, analyzer);
 }
 
 bool CheckBulkLoad1D(const CopyNode &op, Target target,
@@ -578,7 +616,7 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
       ctx.layout_map != nullptr ? *ctx.layout_map : empty_layout_map;
   bool is_cutedsl = TargetIsCuTeDSL(ctx.target);
   facts.layout_dependent_tma_available =
-      facts.has_layout_map && !is_cutedsl && !ctx.buffer_oob;
+      facts.has_layout_map && !is_cutedsl && CanProveCopyInBounds(op, analyzer);
 
   if (facts.layout_dependent_tma_available) {
     facts.can_bulk_load_1d =
@@ -606,15 +644,15 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
   if (facts.can_bulk_store_1d) {
     facts.can_bulk_store_ignore_last_dim = true;
     facts.can_bulk_store =
-        CheckBulkStore(op, ctx.target, analyzer, /*check_last_dim=*/true,
-                       ctx.emit_diagnostics);
+        CheckBulkStore(op, ctx.target, analyzer,
+                       /*check_last_dim=*/true, ctx.emit_diagnostics);
   } else {
     facts.can_bulk_store_ignore_last_dim =
-        CheckBulkStore(op, ctx.target, analyzer, /*check_last_dim=*/false,
-                       ctx.emit_diagnostics);
+        CheckBulkStore(op, ctx.target, analyzer,
+                       /*check_last_dim=*/false, ctx.emit_diagnostics);
     facts.can_bulk_store =
-        CheckBulkStore(op, ctx.target, analyzer, /*check_last_dim=*/true,
-                       ctx.emit_diagnostics);
+        CheckBulkStore(op, ctx.target, analyzer,
+                       /*check_last_dim=*/true, ctx.emit_diagnostics);
   }
 
   facts.can_cp_async = CheckCPAsyncCopy(op, ctx.target, layout_map, analyzer);

@@ -179,30 +179,36 @@ debugged. The configuration keys, direct `plot_layout` API, supported output
 formats, and limitations are documented in
 {doc}`../tools/layout_visualization`.
 
-## Pass Diff: Observing IR Changes Across Passes
+## IR Lower Trace: Observing IR Changes Across Passes
 
-Pass Diff captures the TIR before and after compiler passes. Use it when the IR
-looks correct at one lowering stage but is incorrect at a later stage. To trace
-the complete lowering pipeline without changing the program, set
-`TILELANG_PASS_DIFF` before starting Python:
+IR Lower Trace captures the TIR before and after every compiler pass — plus the
+final codegen step that produces C/CUDA/HIP source — and renders a terminal
+and/or HTML diff report. Use it when the IR looks correct at one lowering stage
+but is incorrect at a later stage. To trace the complete lowering pipeline
+without changing the program, set `TL_LOWER_TRACE` before starting Python:
 
 ```bash
-TILELANG_PASS_DIFF=terminal python my_script.py
-TILELANG_PASS_DIFF=html python my_script.py
-TILELANG_PASS_DIFF=both python my_script.py
+TL_LOWER_TRACE=terminal python my_script.py
+TL_LOWER_TRACE=html python my_script.py
+TL_LOWER_TRACE=both python my_script.py
 ```
 
 For a focused comparison, apply a selected pass directly:
 
 ```python
-import tilelang
-from tilelang.utils.pass_diff import pass_diff
+from tilelang.tools import lower_trace as lt
 
-steps = pass_diff(func, tilelang.transform.ThreadSync("shared"))
+results = lt.lower_trace(func, tilelang.transform.ThreadSync("shared"))
 ```
 
-The HTML viewer, output configuration, return schema, and multi-pass Python API
-are documented in {doc}`../tools/pass_diff`.
+The HTML viewer, output directory layout, codegen capture, edit-and-recompile
+workflow, and the full Python API are documented in {doc}`../tools/lower_trace`.
+
+:::{note}
+IR Lower Trace supersedes the older **Pass Diff** tool (`TILELANG_PASS_DIFF`),
+which is retained only for backward compatibility. New users should use
+`TL_LOWER_TRACE` directly. See {doc}`../tools/pass_diff` for the legacy tool.
+:::
 
 ## Pass Visualizer: Structure-Tree View Across Passes
 
@@ -282,7 +288,7 @@ annotations for freezing required code are documented in
 
 ## Conclusion
 
-By carefully examining intermediate representations (IR) before final code generation and leveraging runtime printing through `T.print`, one can quickly diagnose where index calculations, copy logic, or other kernel operations deviate from the intended behavior. The **Pass Diff** tool complements this by providing automatic, pass-by-pass visibility into every IR transformation, making it easy to pinpoint exactly which pass introduces an unexpected change. This three-pronged approach (inspecting IR transformations, observing pass-level diffs, and using runtime prints) is often sufficient for resolving generation and correctness issues in TileLang programs.
+By carefully examining intermediate representations (IR) before final code generation and leveraging runtime printing through `T.print`, one can quickly diagnose where index calculations, copy logic, or other kernel operations deviate from the intended behavior. The **IR Lower Trace** tool (`TL_LOWER_TRACE`) complements this by providing automatic, pass-by-pass visibility into every IR transformation — including the final codegen step — making it easy to pinpoint exactly which pass introduces an unexpected change. (The older **Pass Diff** tool is retained for backward compatibility but is superseded by IR Lower Trace.) This three-pronged approach (inspecting IR transformations, observing pass-level diffs, and using runtime prints) is often sufficient for resolving generation and correctness issues in TileLang programs.
 
 For complex programs where manual debugging is tedious, **AutoDD** provides automated delta debugging to quickly isolate the minimal code that reproduces a bug.
 

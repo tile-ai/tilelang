@@ -60,6 +60,162 @@ def test_tilelang_copy_cross_dtype():
     run_tilelang_copy_cross_dtype(src_dtype=T.bfloat16, dst_dtype=T.float16)
 
 
+def tilelang_copy_oob_safe_value(
+    M,
+    N,
+    padded_M,
+    padded_N,
+    block_M,
+    block_N,
+    src_dtype=T.float32,
+    dst_dtype=T.float32,
+    pad_value=None,
+):
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, N), src_dtype),
+        B: T.Tensor((padded_M, padded_N), dst_dtype),
+    ):
+        with T.Kernel(T.ceildiv(padded_N, block_N), T.ceildiv(padded_M, block_M), threads=128) as (bx, by):
+            if pad_value is not None:
+                T.annotate_safe_value({A: pad_value})
+            T.copy(
+                A[by * block_M : (by + 1) * block_M, bx * block_N : (bx + 1) * block_N],
+                B[by * block_M : (by + 1) * block_M, bx * block_N : (bx + 1) * block_N],
+            )
+
+    return main
+
+
+def run_tilelang_copy_oob_safe_value(
+    M=70,
+    N=75,
+    block_M=32,
+    block_N=32,
+    src_dtype=T.float32,
+    dst_dtype=T.float32,
+    pad_value=None,
+):
+    padded_M = tilelang.cdiv(M, block_M) * block_M
+    padded_N = tilelang.cdiv(N, block_N) * block_N
+    program = tilelang_copy_oob_safe_value(
+        M,
+        N,
+        padded_M,
+        padded_N,
+        block_M,
+        block_N,
+        src_dtype,
+        dst_dtype,
+        pad_value,
+    )
+    kernel = tilelang.compile(
+        program,
+        out_idx=[1],
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+    a = torch.randn(M, N, device="cuda", dtype=getattr(torch, src_dtype))
+    b = kernel(a)
+    torch_dst_dtype = getattr(torch, dst_dtype)
+    fallback_value = 0 if pad_value is None else pad_value
+    ref_b = torch.full((padded_M, padded_N), fallback_value, device="cuda", dtype=torch_dst_dtype)
+    ref_b[:M, :N] = a.to(torch_dst_dtype)
+    torch.testing.assert_close(b[:M, :N], ref_b[:M, :N], rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(b[M:, :N], ref_b[M:, :N], rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(b[:M, N:], ref_b[:M, N:], rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(b[M:, N:], ref_b[M:, N:], rtol=1e-2, atol=1e-2)
+
+
+@tilelang.testing.requires_cuda
+def test_tilelang_copy_oob_safe_value_uses_annotation():
+    run_tilelang_copy_oob_safe_value(pad_value=-99)
+
+
+@tilelang.testing.requires_cuda
+def test_tilelang_copy_oob_safe_value_defaults_to_zero():
+    run_tilelang_copy_oob_safe_value(pad_value=None)
+
+
+@tilelang.testing.requires_cuda
+def test_tilelang_copy_oob_safe_value_casts_to_destination_dtype():
+    run_tilelang_copy_oob_safe_value(src_dtype=T.float32, dst_dtype=T.float16, pad_value=-99)
+
+
+def tilelang_elementwise_copy_oob_safe_value(M, N, padded_M, padded_N, dtype=T.float32, pad_value=-99):
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((padded_M, padded_N), dtype),
+    ):
+        with T.Kernel(1, threads=128):
+            T.annotate_safe_value({A: pad_value})
+            for i, j in T.Parallel(padded_M, padded_N):
+                T.copy(A[i, j], B[i, j])
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+def test_tilelang_elementwise_copy_oob_safe_value_non_regression():
+    M, N = 70, 75
+    padded_M, padded_N = 96, 96
+    program = tilelang_elementwise_copy_oob_safe_value(M, N, padded_M, padded_N)
+    kernel = tilelang.compile(
+        program,
+        out_idx=[1],
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+    a = torch.randn(M, N, device="cuda", dtype=torch.float32)
+    b = kernel(a)
+    ref_b = torch.full((padded_M, padded_N), -99, device="cuda", dtype=torch.float32)
+    ref_b[:M, :N] = a
+    torch.testing.assert_close(b, ref_b, rtol=1e-2, atol=1e-2)
+
+
+def tilelang_copy_oob_safe_value_lexical_scope():
+    M = N = 60
+    BM = BN = 64
+
+    @T.prim_func
+    def main(A: T.Tensor((M, N), "int32"), Out: T.Tensor((BM, BN), "int32")):
+        with T.Kernel(1, threads=128):
+            inner = T.alloc_shared((BM, BN), "int32")
+            outer = T.alloc_shared((BM, BN), "int32")
+            with T.sblock("outer"):
+                T.reads()
+                T.writes()
+                T.annotate_safe_value({A: -1})
+                with T.sblock("inner"):
+                    T.reads()
+                    T.writes()
+                    T.annotate_safe_value({A: -99})
+                    T.copy(A[0:BM, 0:BN], inner)
+                T.copy(A[0:BM, 0:BN], outer)
+                for i, j in T.Parallel(BM, BN):
+                    Out[i, j] = outer[i, j]
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+def test_tilelang_copy_oob_safe_value_lexical_scope():
+    M = N = 60
+    BM = BN = 64
+    kernel = tilelang.compile(
+        tilelang_copy_oob_safe_value_lexical_scope(),
+        out_idx=[1],
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+    a = torch.arange(M * N, dtype=torch.int32, device="cuda").reshape(M, N)
+    out = kernel(a)
+    assert out.shape == (BM, BN)
+    assert "-1" in kernel.get_kernel_source()
+    torch.testing.assert_close(out[:M, :N].cpu(), a.cpu(), rtol=0, atol=0)
+    assert out[60, :8].cpu().tolist() == [-1] * 8
+    assert out[:8, 60].cpu().tolist() == [-1] * 8
+    assert out[60, 60].item() == -1
+
+
 def tilelang_copy_with_stride(M, N, NN, block_M, block_N, dtype=T.float16):
     @T.prim_func
     def main(

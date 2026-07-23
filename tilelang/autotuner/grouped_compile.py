@@ -12,12 +12,15 @@ from collections.abc import Callable
 from tilelang import tvm
 from tvm.tirx import PrimFunc
 
+from tilelang import env
+from tilelang.env import resolve_pass_profile_threshold_ms
 from tilelang.autotuner.param import CompileArgs
 from tilelang.engine.lower import lower_to_host_device_ir, device_codegen, host_codegen
 from tilelang.engine.param import CompiledArtifact
 from tilelang.jit.adapter import TVMFFIKernelAdapter
 from tilelang.jit.kernel import JITKernel
 from tilelang.transform import PassConfigKey
+from tilelang.utils.pass_timing import build_pass_instruments, report_pass_timing_on_exit
 
 CompileUnitResult = tuple[int, dict[str, Any], JITKernel | None, Exception | None]
 
@@ -38,10 +41,22 @@ def compile_grouped_unit_tvm_ffi(
     """
 
     pass_configs = dict(compile_args.pass_configs) if compile_args.pass_configs else {}
-    pass_instruments = []
+    base_pass_instruments = []
     if pass_configs.get(PassConfigKey.TL_ENABLE_DUMP_IR):
         dump_ir_path = pass_configs.get(PassConfigKey.TL_DUMP_IR_DIR, "./dump_ir")
-        pass_instruments.append(tvm.ir.instrument.DumpIR(dump_dir=dump_ir_path))
+        base_pass_instruments.append(tvm.ir.instrument.DumpIR(dump_dir=dump_ir_path))
+
+    enable_profile = pass_configs.get(PassConfigKey.TL_PASS_PROFILE) or env.is_pass_profile_enabled()
+    profile_threshold_ms = None
+    if enable_profile:
+        profile_threshold_ms = resolve_pass_profile_threshold_ms(
+            pass_configs,
+            PassConfigKey.TL_PASS_PROFILE_THRESHOLD_MS,
+            env.get_pass_profile_threshold_ms,
+        )
+
+    def create_pass_instruments():
+        return build_pass_instruments(base_pass_instruments, profile_threshold_ms)
 
     unit_results: list[CompileUnitResult] = []
     lowered_items: list[dict[str, Any]] = []
@@ -53,7 +68,16 @@ def compile_grouped_unit_tvm_ffi(
             unique_symbol = f"{original_symbol}_gc_{idx}"
             program = program.with_attr("global_symbol", unique_symbol)
 
-            with tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=pass_instruments), compile_args.target:
+            config_instruments, timing_inst = create_pass_instruments()
+
+            with (
+                report_pass_timing_on_exit(
+                    timing_inst,
+                    context=f"stage=grouped-lower, config={idx}, kernel={unique_symbol}",
+                ),
+                tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=config_instruments),
+                compile_args.target,
+            ):
                 host_mod, device_mod, params, normalized_target, normalized_target_host = lower_to_host_device_ir(
                     program,
                     target=compile_args.target,
@@ -97,7 +121,16 @@ def compile_grouped_unit_tvm_ffi(
         merged_device_mod = tvm.IRModule(merged_funcs, attrs=merged_attrs)
 
         reference_target = lowered_items[0]["target"]
-        with tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=pass_instruments), reference_target:
+        device_instruments, device_timing_inst = create_pass_instruments()
+        grouped_config_indices = ",".join(str(item["idx"]) for item in lowered_items)
+        with (
+            report_pass_timing_on_exit(
+                device_timing_inst,
+                context=f"stage=grouped-device, configs=[{grouped_config_indices}]",
+            ),
+            tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=device_instruments),
+            reference_target,
+        ):
             grouped_device_rt_mod = device_codegen(merged_device_mod, reference_target)
 
         grouped_kernel_source = grouped_device_rt_mod.inspect_source()
@@ -106,7 +139,16 @@ def compile_grouped_unit_tvm_ffi(
             idx = item["idx"]
             config_arg = item["config_arg"]
             try:
-                with tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=pass_instruments), item["target"]:
+                host_instruments, host_timing_inst = create_pass_instruments()
+                kernel_symbol = str(item["program"].attrs["global_symbol"])
+                with (
+                    report_pass_timing_on_exit(
+                        host_timing_inst,
+                        context=f"stage=grouped-host, config={idx}, kernel={kernel_symbol}",
+                    ),
+                    tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=host_instruments),
+                    item["target"],
+                ):
                     grouped_host_rt_mod = host_codegen(item["host_mod"], item["target_host"], target=item["target"])
 
                 grouped_host_rt_mod.import_module(grouped_device_rt_mod)

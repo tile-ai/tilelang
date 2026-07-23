@@ -90,6 +90,10 @@ class Layout(Node):
     def get_forward_index(self):
         return self.index
 
+    def get_linearized_forward_index(self) -> PrimExpr:
+        """Return the row-major linear offset of the physical output index."""
+        return _ffi_api.Layout_linearized_index(self)
+
     def map_forward_index(self, indices: list[PrimExpr]) -> PrimExpr:
         """
         Compute the forward index mapping for a given set of input indices.

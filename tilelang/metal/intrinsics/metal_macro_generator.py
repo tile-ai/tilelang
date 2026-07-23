@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tilelang.language as T
+from tvm import arith
 from tvm import tirx as tir
 from tvm.tirx import Buffer, BufferRegion
 
@@ -73,6 +74,8 @@ class MPSIntrinEmitter:
         For 2D buffers, extra_indices is an empty tuple.
         For 3D+ buffers (e.g. after pipeline expansion), extra_indices contains
         the leading dimension offsets so callers can index correctly.
+        Metal simdgroup matrix operations accept a row stride but require the
+        innermost dimension to be contiguous.
         """
         if isinstance(buf, BufferRegion):
             buffer = buf.buffer
@@ -84,7 +87,15 @@ class MPSIntrinEmitter:
             off_row = 0
             off_col = 0
             extra = ()
-        stride = buffer.shape[-1]
+        if buffer.strides:
+            inner_stride = buffer.strides[-1]
+            if not arith.Analyzer().can_prove_equal(inner_stride, 1):
+                raise ValueError(
+                    f"Metal simdgroup matrix operations require a contiguous innermost dimension (stride 1), but got stride {inner_stride}"
+                )
+            stride = buffer.strides[-2]
+        else:
+            stride = buffer.shape[-1]
         return buffer, extra, off_row, off_col, stride
 
     def ldmatrix_a(self, A_local_buf, A_shared_buf: Buffer | BufferRegion, ki):

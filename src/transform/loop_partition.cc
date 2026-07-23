@@ -64,10 +64,10 @@ private:
 };
 
 // Rewrite the parallel loop into a common loop, which is mapped to threads
-For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
+For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
                   const Fragment &loop_layout, bool require_padding_guard) {
   ICHECK(loop_layout.defined());
-  ICHECK(thread_var.defined());
+  ICHECK(thread_index.defined());
   int old_loop_depth = loop_layout->InputDim();
   int new_loop_depth = loop_layout->OutputDim();
   // Create the new loop iter var
@@ -78,7 +78,17 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
                                              loop_layout->OutputShape()[i]));
     vars.push_back(var);
   }
-  vars.push_back(thread_var);
+  // Normalize the thread index against the layout thread range once, then
+  // feed the normalized expression into the inverse layout directly. The
+  // inverse indices, the bounds guard and the replicate index therefore all
+  // use the same normalized expression, without needing a Var-keyed
+  // substitution map.
+  PrimExpr normalized_thread_index = thread_index;
+  if (loop_layout->ThreadRange().defined()) {
+    normalized_thread_index = thread_index - loop_layout->ThreadRange()->min;
+  }
+  Array<PrimExpr> forward_inputs(vars.begin(), vars.end());
+  forward_inputs.push_back(normalized_thread_index);
   // create the substitute map, and the loop body
   Map<Var, PrimExpr> vmap;
   Stmt body = std::move(op);
@@ -86,15 +96,7 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
   Array<PrimExpr> loop_extents;
   auto inverse_info = loop_layout->InverseWithLevel(require_padding_guard);
   auto inv_loop = inverse_info.first;
-  auto indices = inv_loop->Forward(Array<PrimExpr>(vars.begin(), vars.end()));
-  // Normalize thread var once so we can reuse the same substitution later.
-  Map<Var, PrimExpr> thread_offset_map;
-  bool has_thread_offset = false;
-  if (loop_layout->ThreadRange().defined()) {
-    auto range = loop_layout->ThreadRange();
-    thread_offset_map.Set(thread_var, thread_var - range->min);
-    has_thread_offset = true;
-  }
+  auto indices = inv_loop->Forward(forward_inputs);
   for (int i = 0; i < old_loop_depth; i++) {
     const ForNode *loop = body.as<ForNode>();
     ICHECK(loop != nullptr)
@@ -127,9 +129,6 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
   PrimExpr guard = const_true();
   for (int i = 0; i < old_loop_depth; i++) {
     PrimExpr index = indices[i];
-    if (has_thread_offset) {
-      index = Substitute(index, thread_offset_map);
-    }
     PrimExpr lower_bound = analyzer->Simplify(index >= loop_mins[i]);
     PrimExpr upper_bound =
         analyzer->Simplify(index < loop_mins[i] + loop_extents[i]);
@@ -138,9 +137,6 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
   auto inv_output_shape = inv_loop->OutputShape();
   if (inv_output_shape.size() > static_cast<size_t>(old_loop_depth)) {
     PrimExpr replicate_index = indices[old_loop_depth];
-    if (has_thread_offset) {
-      replicate_index = Substitute(replicate_index, thread_offset_map);
-    }
     PrimExpr replicate_extent = inv_output_shape[old_loop_depth];
     PrimExpr lower_bound = analyzer->Simplify(
         replicate_index >= make_zero(replicate_index.dtype()));
@@ -161,9 +157,6 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
 
   body = BufferIndiceSimplify(analyzer)(body);
 
-  if (has_thread_offset) {
-    body = Substitute(body, thread_offset_map);
-  }
   return Downcast<For>(body);
 }
 
@@ -271,8 +264,9 @@ For PragmaUnrollLoop(For stmt) {
   return unrolled;
 }
 
-Stmt LowerParallelLoop(For loop, const Fragment &loop_layout, Var thread_var,
-                       arith::Analyzer *analyzer, const LayoutMap &layout_map,
+Stmt LowerParallelLoop(For loop, const Fragment &loop_layout,
+                       PrimExpr thread_index, arith::Analyzer *analyzer,
+                       const LayoutMap &layout_map,
                        Optional<PrimExpr> predicate, bool parallel_loop,
                        bool should_vectorize, bool require_padding_guard) {
   // Save analyzer state to prevent conflicted bindings during vectorization
@@ -292,8 +286,8 @@ Stmt LowerParallelLoop(For loop, const Fragment &loop_layout, Var thread_var,
 
   // Step 1: Partition the loop based on the layout (if this is a parallel loop)
   if (parallel_loop) {
-    result_loop = PartitionLoop(result_loop, thread_var, analyzer, loop_layout,
-                                require_padding_guard);
+    result_loop = PartitionLoop(result_loop, thread_index, analyzer,
+                                loop_layout, require_padding_guard);
   }
 
   // Step 2: Vectorize the loop (if requested)

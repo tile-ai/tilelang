@@ -16,6 +16,25 @@ logger = logging.getLogger(__name__)
 EnvVarDefault = str | None | Callable[[], str | None]
 TargetConfig = dict[str, object]
 
+
+def parse_pass_profile_threshold_ms(value: object, name: str = "pass profile threshold") -> float:
+    """Parse a finite, non-negative pass profile threshold in milliseconds."""
+    try:
+        threshold = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite non-negative number") from exc
+    if not math.isfinite(threshold) or threshold < 0:
+        raise ValueError(f"{name} must be a finite non-negative number")
+    return threshold
+
+
+def resolve_pass_profile_threshold_ms(pass_configs: Mapping[object, object], key: object, env_threshold_ms: Callable[[], float]) -> float:
+    """Resolve pass profile threshold with an explicit pass config taking precedence."""
+    if key in pass_configs:
+        return parse_pass_profile_threshold_ms(pass_configs[key], str(key))
+    return env_threshold_ms()
+
+
 # SETUP ENVIRONMENT VARIABLES
 CUTLASS_NOT_FOUND_MESSAGE = "CUTLASS is not installed or found in the expected path"
 ", which may lead to compilation bugs when utilize tilelang backend."
@@ -356,6 +375,16 @@ class Environment:
     TILELANG_PASS_DIFF = EnvVar("TILELANG_PASS_DIFF", "0")  # "0"=off, "terminal", "html", "both"
     TILELANG_PASS_DIFF_OUTPUT = EnvVar("TILELANG_PASS_DIFF_OUTPUT", "tmp/pass_diff_output")  # output directory for HTML reports
 
+    # Lower trace debugging
+    TL_LOWER_TRACE = EnvVar("TL_LOWER_TRACE", "0")  # "0"=off, "1"/"on"->html, "terminal", "html", "both"
+    TL_LOWER_TRACE_DIR = EnvVar(
+        "TL_LOWER_TRACE_DIR", lambda: os.path.join(".", "tmp", "lower_trace_dir")
+    )  # base output dir for trace artifacts
+
+    # Pass timing / profiling
+    TILELANG_PASS_PROFILE = EnvVar("TILELANG_PASS_PROFILE", "0")  # "0"=off, "1"/"true"=on
+    TILELANG_PASS_PROFILE_THRESHOLD_MS = EnvVar("TILELANG_PASS_PROFILE_THRESHOLD_MS", "0")  # 0=show all
+
     # Auto-tuning settings
     TILELANG_AUTO_TUNING_DISABLE_CACHE = EnvVar("TILELANG_AUTO_TUNING_DISABLE_CACHE", "0")
     TILELANG_AUTO_TUNING_CPU_UTILITIES = EnvVar("TILELANG_AUTO_TUNING_CPU_UTILITIES", "0.9")  # percent of CPUs used
@@ -413,6 +442,15 @@ class Environment:
     def is_jit_diagnostics_enabled(self) -> bool:
         return str(self.TILELANG_JIT_DIAGNOSTICS).lower() in ("1", "true", "yes", "on")
 
+    def is_pass_profile_enabled(self) -> bool:
+        return str(self.TILELANG_PASS_PROFILE).strip().lower() in ("1", "true", "yes", "on")
+
+    def get_pass_profile_threshold_ms(self) -> float:
+        value = str(self.TILELANG_PASS_PROFILE_THRESHOLD_MS).strip()
+        if not value:
+            return 0.0
+        return parse_pass_profile_threshold_ms(value, "TILELANG_PASS_PROFILE_THRESHOLD_MS")
+
     def get_compile_timeout_seconds(self) -> float | None:
         value = str(self.TILELANG_COMPILE_TIMEOUT_SECONDS).strip()
         if not value:
@@ -435,6 +473,22 @@ class Environment:
         if value in ("html", "both"):
             return value
         return "terminal"  # fallback for unrecognized truthy values
+
+    def get_lower_trace_mode(self) -> str | None:
+        """Return the lower trace mode: None (off), 'terminal', 'html', or 'both'."""
+        value = str(self.TL_LOWER_TRACE).lower().strip()
+        if value in ("0", "false", "no", "off", ""):
+            return None
+        if value in ("1", "true", "yes", "on", "html"):
+            return "html"
+        if value in ("terminal", "both"):
+            return value
+        return "html"  # fallback for unrecognized truthy values
+
+    def get_lower_trace_dir(self) -> str:
+        """Return the base output directory for lower trace artifacts."""
+        value = str(self.TL_LOWER_TRACE_DIR).strip()
+        return value or os.path.join(".", "tmp", "lower_trace_dir")
 
     def get_default_target(self) -> str | TargetConfig:
         """Get default compilation target from environment."""
