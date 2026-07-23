@@ -1,6 +1,5 @@
 from __future__ import annotations
 import ast
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Generic, Any, Literal, ParamSpec, TypeVar, TypeAlias, cast
@@ -684,9 +683,6 @@ def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
 
     tree = utils.get_ast(func)
     filename = inspect.getsourcefile(func) or inspect.getfile(func)
-    # Absolute path so that injected source spans (and remapped tracebacks)
-    # point at clickable file locations regardless of the invocation cwd.
-    filename = os.path.abspath(filename)
     nonlocals = utils.get_func_nonlocals(func)
 
     # DSLMutator generates a function named `make_closure`
@@ -703,7 +699,7 @@ def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
     #       def bar(): x
     #       return bar
     #     ```
-    mut = DSLMutator(nonlocals, func.__globals__, filename)
+    mut = DSLMutator(nonlocals, func.__globals__, str(Path(filename).absolute()))
     tree = mut.visit(tree)
     make_closure = utils.get_compiled_object(
         tree,
