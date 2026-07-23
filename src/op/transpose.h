@@ -1,6 +1,6 @@
 /*!
  * \file tl/op/transpose.h
- * \brief Transpose operation for 2D shared memory buffers.
+ * \brief Transpose operation that swaps the final two buffer axes.
  */
 
 #ifndef TVM_TL_OP_TRANSPOSE_H_
@@ -15,7 +15,7 @@ namespace tl {
 using namespace tirx;
 using namespace ffi;
 
-/// Node class for transpose operations: dst[j, i] = src[i, j]
+/// Node class for transpose operations over the final two axes.
 class TransposeNode : public TileOperatorNode {
 public:
   Buffer src, dst;
@@ -47,8 +47,7 @@ private:
   Array<IterVar> MakeIterVars() const;
 
   /// Generate source (src_dst=0) or destination (src_dst=1) index expressions.
-  /// For the destination side, non-trivial dimension indices are reversed to
-  /// implement the transpose.
+  /// For the destination side, the final two source axes are exchanged.
   Array<PrimExpr> MakeIndices(const Array<IterVar> &ivs, int src_dst) const;
 
   /// Build boundary predicate with transposed index mapping for dst.
