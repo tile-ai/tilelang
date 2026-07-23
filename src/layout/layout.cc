@@ -4,6 +4,16 @@
  */
 
 #include "layout.h"
+
+#include <cstdint>
+#include <functional>
+#include <optional>
+#include <sstream>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
 #include "support/check.h"
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/runtime/logging.h>
@@ -313,6 +323,178 @@ Map<Var, Range> FragmentNode::GetVarMap() const {
   map.Set(ReplicationPlaceholder(), {0, ReplicateExtent()});
   return map;
 }
+
+namespace {
+
+constexpr int64_t kMaxExactInjectivityDomain = 1 << 18;
+
+struct IntTupleHash {
+  size_t operator()(const std::vector<int64_t> &values) const {
+    size_t seed = values.size();
+    for (int64_t value : values) {
+      seed ^=
+          std::hash<int64_t>{}(value) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+    }
+    return seed;
+  }
+};
+
+std::string FormatIntTuple(const std::vector<int64_t> &values) {
+  std::ostringstream os;
+  os << '[';
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (i != 0) {
+      os << ", ";
+    }
+    os << values[i];
+  }
+  os << ']';
+  return os.str();
+}
+
+enum class ExactInjectivityStatus { kInjective, kNonInjective, kUnknown };
+
+struct ExactInjectivityResult {
+  ExactInjectivityStatus status;
+  std::string detail;
+};
+
+ExactInjectivityResult
+CheckStaticInjectivity(const Array<PrimExpr> &forward_indices,
+                       const Map<Var, Range> &input_iters) {
+  arith::Analyzer analyzer;
+  std::vector<Var> vars;
+  std::vector<int64_t> mins;
+  std::vector<int64_t> extents;
+  int64_t domain_size = 1;
+
+  for (const auto &[var, range] : input_iters) {
+    PrimExpr simplified_min = analyzer.Simplify(range->min);
+    PrimExpr simplified_extent = analyzer.Simplify(range->extent);
+    const int64_t *min = as_const_int(simplified_min);
+    const int64_t *extent = as_const_int(simplified_extent);
+    if (min == nullptr || extent == nullptr) {
+      return {ExactInjectivityStatus::kUnknown,
+              "the logical input domain is symbolic"};
+    }
+    if (*extent < 0) {
+      return {ExactInjectivityStatus::kUnknown,
+              "the logical input domain has a negative extent"};
+    }
+    if (*extent == 0) {
+      return {ExactInjectivityStatus::kInjective, ""};
+    }
+    if (*extent > kMaxExactInjectivityDomain / domain_size) {
+      return {ExactInjectivityStatus::kUnknown,
+              "the logical input domain exceeds the exact-check limit of " +
+                  std::to_string(kMaxExactInjectivityDomain) + " points"};
+    }
+    domain_size *= *extent;
+    vars.push_back(var);
+    mins.push_back(*min);
+    extents.push_back(*extent);
+  }
+
+  using Coordinate = std::vector<int64_t>;
+  std::unordered_map<Coordinate, Coordinate, IntTupleHash> first_preimage;
+  first_preimage.reserve(static_cast<size_t>(domain_size));
+
+  for (int64_t linear = 0; linear < domain_size; ++linear) {
+    int64_t residual = linear;
+    Coordinate input(vars.size());
+    Map<Var, PrimExpr> substitution;
+    for (size_t rev = vars.size(); rev > 0; --rev) {
+      size_t i = rev - 1;
+      input[i] = mins[i] + residual % extents[i];
+      residual /= extents[i];
+      substitution.Set(vars[i], IntImm(vars[i]->dtype, input[i]));
+    }
+
+    Coordinate output;
+    output.reserve(forward_indices.size());
+    for (const PrimExpr &index : forward_indices) {
+      PrimExpr value = analyzer.Simplify(Substitute(index, substitution));
+      std::optional<int64_t> constant = EvaluateConstantInteger(value);
+      if (!constant) {
+        return {ExactInjectivityStatus::kUnknown,
+                "the forward map could not be evaluated exactly at logical "
+                "coordinates " +
+                    FormatIntTuple(input)};
+      }
+      output.push_back(*constant);
+    }
+
+    auto [it, inserted] = first_preimage.emplace(output, input);
+    if (!inserted) {
+      return {ExactInjectivityStatus::kNonInjective,
+              "logical coordinates " + FormatIntTuple(it->second) + " and " +
+                  FormatIntTuple(input) + " both map to physical coordinates " +
+                  FormatIntTuple(output)};
+    }
+  }
+  return {ExactInjectivityStatus::kInjective, ""};
+}
+
+bool CanProveInjective(const Array<PrimExpr> &forward_indices,
+                       const Map<Var, Range> &input_iters) {
+  arith::Analyzer analyzer;
+  Map<Var, PrimExpr> other_substitution;
+  PrimExpr same_input = Bool(true);
+  for (const auto &[var, range] : input_iters) {
+    Var other(var->name_hint + "<OTHER>", var->dtype);
+    analyzer.Bind(var, range);
+    analyzer.Bind(other, range);
+    other_substitution.Set(var, other);
+    same_input = And(same_input, EQ(var, other));
+  }
+
+  PrimExpr same_output = Bool(true);
+  for (const PrimExpr &index : forward_indices) {
+    same_output =
+        And(same_output, EQ(index, Substitute(index, other_substitution)));
+  }
+  auto exit_constraint = analyzer.EnterConstraint(same_output);
+  bool injective = analyzer.CanProve(same_input);
+  exit_constraint();
+  return injective;
+}
+
+arith::IterMapResult MakeInjectivityError(const std::string &message) {
+  arith::IterMapResult result;
+  result->errors.push_back(message);
+  return result;
+}
+
+arith::IterMapResult
+DetectInjectiveMapping(const Array<PrimExpr> &forward_indices,
+                       const Map<Var, Range> &input_iters,
+                       bool require_padding_guard) {
+  if (!require_padding_guard) {
+    arith::Analyzer analyzer;
+    arith::IterMapResult iter_map =
+        arith::DetectIterMap(forward_indices, input_iters, 1,
+                             arith::IterMapLevel::Bijective, &analyzer);
+    if (iter_map->errors.empty()) {
+      return iter_map;
+    }
+  }
+
+  ExactInjectivityResult exact =
+      CheckStaticInjectivity(forward_indices, input_iters);
+  if (exact.status == ExactInjectivityStatus::kInjective) {
+    return arith::IterMapResult();
+  }
+  if (exact.status == ExactInjectivityStatus::kNonInjective) {
+    return MakeInjectivityError(exact.detail);
+  }
+  if (CanProveInjective(forward_indices, input_iters)) {
+    return arith::IterMapResult();
+  }
+  return MakeInjectivityError("injectivity could not be proven: " +
+                              exact.detail);
+}
+
+} // namespace
 
 LayoutNode::LayoutNode(Array<PrimExpr> input_size,
                        Array<PrimExpr> forward_index) {
@@ -867,52 +1049,18 @@ bool FragmentNode::IsCompletedReplicated() const {
 }
 
 arith::IterMapResult
+LayoutNode::DetectInjective(bool require_padding_guard) const {
+  return DetectInjectiveMapping(forward_index_, GetVarMap(),
+                                require_padding_guard);
+}
+
+arith::IterMapResult
 FragmentNode::DetectInjective(bool require_padding_guard) const {
-  // To check that the forward map is injective, reverse it and verify that the
-  // recovered coordinates remain independent. require_padding_guard is only
-  // used by generated full-block loop partitions whose mapping is known
-  // injective but whose padded domain is rejected by stricter iter-map checks.
-  arith::Analyzer analyzer;
-  // Build a flat indices array: [forward_thread_, forward_index_[...]]
-  Array<PrimExpr> indices;
-  indices.push_back(forward_thread_);
-  for (const auto &e : forward_index_) {
-    indices.push_back(e);
-  }
-
-  // Mirror Layout::InverseWithLevel(): if any participating shape is
-  // symbolic, relax to NoCheck and rely on runtime guards elsewhere.
-  auto collect_symbolic = [&](const Array<PrimExpr> &shape) {
-    Array<PrimExpr> symbolic_dims;
-    for (const auto &dim : shape) {
-      if (!as_const_int(dim)) {
-        symbolic_dims.push_back(dim);
-      }
-    }
-    return symbolic_dims;
-  };
-
-  Array<PrimExpr> symbolic_dims = collect_symbolic(InputShape());
-  Array<PrimExpr> output_shape = OutputShape();
-  symbolic_dims.insert(symbolic_dims.end(), output_shape.begin(),
-                       output_shape.end());
-  // Also consider replicate size for fragments
-  if (!as_const_int(ReplicateExtent())) {
-    symbolic_dims.push_back(ReplicateExtent());
-  }
-  symbolic_dims = collect_symbolic(symbolic_dims);
-
-  bool is_static_shape = symbolic_dims.empty();
-  auto level = (is_static_shape && !require_padding_guard)
-                   ? arith::IterMapLevel::Bijective
-                   : arith::IterMapLevel::NoCheck;
-  if (!is_static_shape) {
-    DLOG(WARNING)
-        << "Fragment::DetectInjective on symbolic layout, falling back to "
-        << "NoCheck; symbolic dims: " << symbolic_dims;
-  }
-
-  return arith::DetectIterMap(indices, GetVarMap(), 1, level, &analyzer);
+  // A fragment's physical identity includes its owning thread as well as its
+  // per-thread indices. The replication coordinate is part of GetVarMap().
+  Array<PrimExpr> indices{forward_thread_};
+  indices.insert(indices.end(), forward_index_.begin(), forward_index_.end());
+  return DetectInjectiveMapping(indices, GetVarMap(), require_padding_guard);
 }
 
 PrimExpr FragmentNode::ThreadExtent() const {
