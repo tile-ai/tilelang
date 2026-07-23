@@ -134,6 +134,42 @@ def matmul_windowed_pipelined(
     return main
 
 
+def matmul_while_pipelined(M, N, K, block_M, block_K, block_N, num_stages, dtype="float16", threads=128):
+    """A stream-K style GEMM whose pipeline loop sits inside a while loop."""
+
+    @T.prim_func
+    def main(
+        A: T.Buffer((M, K), dtype),
+        B: T.Buffer((N, K), dtype),
+        C: T.Buffer((M, N), "float32"),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (
+            bx,
+            by,
+        ):
+            A_shared = T.alloc_shared((block_M, block_K), dtype)
+            B_shared = T.alloc_shared((block_N, block_K), dtype)
+            C_local = T.alloc_fragment((block_M, block_N), "float32")
+            start_iter = T.alloc_local((1,), "int32")
+            end_iter = T.alloc_local((1,), "int32")
+
+            iters = T.ceildiv(K, block_K)
+            start_iter[0] = 0
+            while start_iter[0] < iters:
+                end_iter[0] = T.min(start_iter[0] + 2, iters)
+                T.clear(C_local)
+                for k in T.Pipelined(end_iter[0] - start_iter[0], num_stages=num_stages):
+                    kk = k + start_iter[0]
+                    T.copy(A[by * block_M, kk * block_K], A_shared)
+                    T.copy(B[bx * block_N, kk * block_K], B_shared)
+                    T.gemm(A_shared, B_shared, C_local, transpose_B=True)
+                for i, j in T.Parallel(block_M, block_N):
+                    T.atomic_add(C[by * block_M + i, bx * block_N + j], C_local[i, j])
+                start_iter[0] = end_iter[0]
+
+    return main
+
+
 def prelude_tma_wait_sink(block=64, iters=2, dtype="float16", threads=128):
     """A tiled-WS kernel with pre-loop TMA loads consumed at different points."""
 
@@ -475,6 +511,25 @@ def test_tiled_ws_stage3():
     torch.testing.assert_close(C.float(), ref, rtol=1e-2, atol=1e-2)
 
 
+def test_tiled_ws_declines_pipeline_loop_inside_while():
+    """WS must skip pipeline loops nested in while loops instead of crashing.
+
+    Regression test for issue #2548: the pipeline loop finder used to descend
+    into While bodies while the loop replacer did not, tripping an ICHECK.
+    """
+
+    func = matmul_while_pipelined(64, 64, 64, 64, 32, 64, num_stages=2).with_attr("global_symbol", "main")
+    mod = tvm.IRModule.from_expr(func)
+    target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
+    script = mod["main"].script()
+
+    assert "tl_tiled_ws_applied" not in script
+    assert "kWarpSpecializationScope" not in script
+
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_tiled_ws_dual_gemm_shared_accumulator_correctness():
@@ -504,6 +559,26 @@ def test_tiled_ws_dual_gemm_shared_accumulator_correctness():
 
     ref = A0.float() @ B0.float() + A1.float() @ B1.float()
     torch.testing.assert_close(C.float(), ref, rtol=1e-2, atol=1e-2)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_while_pipelined_correctness():
+    """Stream-K style while-wrapped pipeline compiles via non-WS fallback and runs."""
+    import torch
+
+    M, N, K = 256, 256, 256
+    func = matmul_while_pipelined(M, N, K, 64, 32, 64, num_stages=2)
+    target = determine_target()
+    kernel = tilelang.compile(func, target=target, out_idx=None)
+
+    A = torch.randn(M, K, dtype=torch.float16, device="cuda")
+    B = torch.randn(N, K, dtype=torch.float16, device="cuda")
+    C = torch.zeros(M, N, dtype=torch.float32, device="cuda")
+    kernel(A, B, C)
+
+    ref = A.float() @ B.float().T
+    torch.testing.assert_close(C, ref, rtol=1e-2, atol=1e-2)
 
 
 @tilelang.testing.requires_cuda
@@ -754,6 +829,8 @@ def test_tiled_ws_does_not_clone_local_var_into_producer_branch():
 
 if __name__ == "__main__":
     test_tiled_ws_places_producer_in_first_warp_group()
+    test_tiled_ws_declines_pipeline_loop_inside_while()
+    test_tiled_ws_while_pipelined_correctness()
     test_tiled_ws_stage1_dynamic_loop_start()
     test_tiled_ws_correctness()
     test_tiled_ws_stage3()
