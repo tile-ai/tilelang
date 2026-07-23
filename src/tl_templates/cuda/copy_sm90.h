@@ -489,18 +489,26 @@ TL_DEVICE void tma_store(const CUtensorMap &descriptor,
                : "memory");
 }
 
+template <bool kDependentFalse = false>
 TL_DEVICE void tma_store_add(float *const smem_ptr, float *gmem_ptr,
                              int32_t const &store_bytes) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f32 "
                "[%0], [%1], %2;\n"
                :
                : "l"(gmem_ptr), "r"(smem_int_ptr), "r"(store_bytes)
                : "memory");
+#else
+  static_assert(kDependentFalse,
+                "T.atomic_add(..., use_tma=True) requires sm_90 or later");
+#endif
 }
 
+template <bool kDependentFalse = false>
 TL_DEVICE void tma_store_add(const CUtensorMap &descriptor,
                              void const *const smem_ptr, int32_t const &crd0) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile(
@@ -509,11 +517,17 @@ TL_DEVICE void tma_store_add(const CUtensorMap &descriptor,
       :
       : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0)
       : "memory");
+#else
+  static_assert(kDependentFalse,
+                "T.atomic_add(..., use_tma=True) requires sm_90 or later");
+#endif
 }
 
+template <bool kDependentFalse = false>
 TL_DEVICE void tma_store_add(const CUtensorMap &descriptor,
                              void const *const smem_ptr, int32_t const &crd0,
                              int32_t const &crd1) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile(
@@ -522,11 +536,17 @@ TL_DEVICE void tma_store_add(const CUtensorMap &descriptor,
       :
       : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1)
       : "memory");
+#else
+  static_assert(kDependentFalse,
+                "T.atomic_add(..., use_tma=True) requires sm_90 or later");
+#endif
 }
 
+template <bool kDependentFalse = false>
 TL_DEVICE void tma_store_add(const CUtensorMap &descriptor,
                              void const *const smem_ptr, int32_t const &crd0,
                              int32_t const &crd1, int32_t const &crd2) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile(
@@ -535,12 +555,18 @@ TL_DEVICE void tma_store_add(const CUtensorMap &descriptor,
       :
       : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1), "r"(crd2)
       : "memory");
+#else
+  static_assert(kDependentFalse,
+                "T.atomic_add(..., use_tma=True) requires sm_90 or later");
+#endif
 }
 
+template <bool kDependentFalse = false>
 TL_DEVICE void tma_store_add(const CUtensorMap &descriptor,
                              void const *const smem_ptr, int32_t const &crd0,
                              int32_t const &crd1, int32_t const &crd2,
                              int32_t const &crd3) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile(
@@ -550,12 +576,18 @@ TL_DEVICE void tma_store_add(const CUtensorMap &descriptor,
       : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1), "r"(crd2),
         "r"(crd3)
       : "memory");
+#else
+  static_assert(kDependentFalse,
+                "T.atomic_add(..., use_tma=True) requires sm_90 or later");
+#endif
 }
 
+template <bool kDependentFalse = false>
 TL_DEVICE void tma_store_add(const CUtensorMap &descriptor,
                              void const *const smem_ptr, int32_t const &crd0,
                              int32_t const &crd1, int32_t const &crd2,
                              int32_t const &crd3, int32_t const &crd4) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile(
@@ -565,11 +597,21 @@ TL_DEVICE void tma_store_add(const CUtensorMap &descriptor,
       : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1), "r"(crd2),
         "r"(crd3), "r"(crd4)
       : "memory");
+#else
+  static_assert(kDependentFalse,
+                "T.atomic_add(..., use_tma=True) requires sm_90 or later");
+#endif
 }
 
+template <bool kDependentFalse = false>
 TL_DEVICE void prefetch_tma_descriptor(const CUtensorMap &descriptor) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   asm volatile("prefetch.tensormap [%0];" : : "l"(gmem_int_desc) : "memory");
+#else
+  static_assert(kDependentFalse,
+                "T.prefetch_tma_descriptor requires sm_90 or later");
+#endif
 }
 
 } // namespace tl
