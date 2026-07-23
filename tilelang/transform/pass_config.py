@@ -237,6 +237,15 @@ class PassConfigKey(str, Enum):
     ```
     """
 
+    TL_PIPELINE_COPY_STRATEGY = "tl.pipeline_copy_strategy"
+    """Pipeline copy scheduling strategy for PipelinePlanning. Default: "occupancy"
+
+    Options:
+    - "occupancy": order copies by last_use, minimize buffer lifetime
+    - "latency": order copies by first_use, maximize prefetch-compute overlap
+    - "balance": first_use ordering with last_use floor chain constraint
+    """
+
     # TIR related configs: TIR_XX
 
     TIR_ENABLE_EQUIV_TERMS_IN_CSE = "tir.enable_equiv_terms_in_cse_tir"
