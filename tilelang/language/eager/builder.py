@@ -3,6 +3,7 @@ from contextlib import contextmanager, AbstractContextManager
 from dataclasses import dataclass
 import inspect
 
+from tilelang import env
 from tilelang.language.kernel import KernelLaunchFrame
 from tvm_ffi.container import Map
 from tvm.ir.base import Span
@@ -216,14 +217,7 @@ class Builder(BaseBuilder):
         self.current_macro_name = "<unknown-macro>"
         # stack to record caller fileline, not callee fileline
         self.macro_fileline_stack: list[tuple[str, int, str]] = []
-        # Source span injection state. When enabled, emitted IR nodes (Stmt,
-        # Buffer, PrimFunc) are stamped with the user source location so that
-        # compiler errors and tools (LSP, visualizers) can point back to the
-        # originating line. See tilelang/ir.py span helpers and
-        # docs/developer_guide/ir_span.md.
-        from tilelang.env import env
-
-        self._spans_enabled = str(env.TILELANG_ENABLE_IR_SPAN).lower() not in ("0", "false", "off")
+        self._spans_enabled = env.is_span_enable()
         # Pending leaf segment: (stmt_frame, stmt_count, file, line) recorded
         # by set_fileline; stmts appended to the frame afterwards belong to
         # that source statement until the next set_fileline / frame exit.
