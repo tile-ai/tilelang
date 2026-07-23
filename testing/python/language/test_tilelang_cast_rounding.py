@@ -151,15 +151,14 @@ def _make_rs_kernel(M: int, num_threads: int, target_dtype: str):
     return main
 
 
-def _make_rs_prim_func(target_dtype: str):
-    M = 128
+def _make_rs_prim_func(target_dtype: str, M: int = 128, threads: int = 128):
 
     @T.prim_func
     def main(
         A: T.Tensor[(M,), "float32"],  # noqa: F821
         B: T.Tensor[(M,), target_dtype],  # noqa: F821
     ):
-        with T.Kernel(1, threads=128):
+        with T.Kernel(1, threads=threads):
             A_local = T.alloc_fragment((M,), "float32")
             B_local = T.alloc_fragment((M,), target_dtype)
             rbits = T.alloc_fragment((1,), "int32")
@@ -180,6 +179,116 @@ def _lower_rs_prim_func(target_dtype: str, arch: str, *, enable_device_compile: 
             target=target,
             enable_device_compile=enable_device_compile,
         )
+
+
+@pytest.mark.parametrize(
+    "target_dtype,expected",
+    [
+        ("float16", "__tl_cvt_f32x1_to_f16x1_rs_sat"),
+        ("bfloat16", "__tl_cvt_f32x1_to_bf16x1_rs_sat"),
+    ],
+)
+def test_cast_rs_fp16_bf16_codegen(target_dtype, expected):
+    artifact = _lower_rs_prim_func(target_dtype, "sm_100a")
+
+    assert expected in artifact.kernel_source
+
+
+@pytest.mark.parametrize(
+    "target_dtype,expected",
+    [
+        ("float16", "__tl_cvt_f32x2_to_f16x2_rs_sat"),
+        ("bfloat16", "__tl_cvt_f32x2_to_bf16x2_rs_sat"),
+    ],
+)
+def test_cast_rs_fp16_bf16_packed_codegen(target_dtype, expected):
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    with target:
+        artifact = tilelang.lower(_make_rs_prim_func(target_dtype, M=256), target=target)
+
+    assert expected in artifact.kernel_source
+
+
+@pytest.mark.parametrize("target_dtype", ["float16", "bfloat16"])
+def test_cast_rs_fp16_bf16_rejects_sat_false(target_dtype):
+    M = 256
+
+    @T.prim_func
+    def main(
+        A: T.Tensor[(M,), "float32"],  # noqa: F821
+        B: T.Tensor[(M,), target_dtype],  # noqa: F821
+    ):
+        with T.Kernel(1, threads=128):
+            A_local = T.alloc_fragment((M,), "float32")
+            B_local = T.alloc_fragment((M,), target_dtype)
+            T.copy(A, A_local)
+            for i in T.Parallel(M):
+                B_local[i] = T.cast(A_local[i], target_dtype, round="rs", sat=False, rbits=T.uint32(0x12345678))
+            T.copy(B_local, B)
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    with target, pytest.raises(Exception, match="sat=false is not supported"):
+        tilelang.lower(main, target=target)
+
+
+@pytest.mark.parametrize(
+    "target_dtype,expected",
+    [
+        ("float16", "__tl_cvt_f32x1_to_f16x1_rs_sat"),
+        ("bfloat16", "__tl_cvt_f32x1_to_bf16x1_rs_sat"),
+    ],
+)
+def test_cast_rs_fp16_bf16_per_element_rbits_codegen(target_dtype, expected):
+    M = 128
+
+    @T.prim_func
+    def main(
+        A: T.Tensor[(M,), "float32"],  # noqa: F821
+        B: T.Tensor[(M,), target_dtype],  # noqa: F821
+    ):
+        with T.Kernel(1, threads=128):
+            A_local = T.alloc_fragment((M,), "float32")
+            B_local = T.alloc_fragment((M,), target_dtype)
+            rbits = T.alloc_fragment((M,), "uint32")
+            T.copy(A, A_local)
+            for i in T.Parallel(M):
+                rbits[i] = T.uint32(0x12345678)
+            for i in T.Parallel(M):
+                B_local[i] = T.cast(A_local[i], target_dtype, round="rs", rbits=rbits[i])
+            T.copy(B_local, B)
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    with target:
+        artifact = tilelang.lower(main, target=target)
+
+    assert expected in artifact.kernel_source
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    "target_dtype,expected_error",
+    [
+        ("float16", "Stochastic rounding f32-to-FP16 requires sm_100a"),
+        ("bfloat16", "Stochastic rounding f32-to-BF16 requires sm_100a"),
+    ],
+)
+def test_cast_rs_fp16_bf16_requires_sm100a(target_dtype, expected_error):
+    with pytest.raises(RuntimeError, match=expected_error):
+        _lower_rs_prim_func(target_dtype, "sm_100", enable_device_compile=True)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    "target_dtype,expected",
+    [
+        ("float16", "__tl_cvt_f32x1_to_f16x1_rs_sat"),
+        ("bfloat16", "__tl_cvt_f32x1_to_bf16x1_rs_sat"),
+    ],
+)
+def test_cast_rs_fp16_bf16_compiles_for_sm100a(target_dtype, expected):
+    artifact = _lower_rs_prim_func(target_dtype, "sm_100a", enable_device_compile=True)
+
+    assert expected in artifact.kernel_source
 
 
 @tilelang.testing.requires_cuda

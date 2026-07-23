@@ -437,7 +437,7 @@ TL_DEVICE __nv_fp8x2_storage_t __tl_cvt_bfloat162_to_fp8x2(
 template <bool kDependentFalse = false>
 TL_DEVICE __nv_fp8x4_storage_t
 __tl_cvt_f32x4_to_e4m3x4_rs_sat(float4 src, unsigned int rbits) {
-#if defined(__CUDA_ARCH_FEAT_SM100_ALL)
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL) || defined(__CUDA_ARCH_FEAT_SM103_ALL)
   __nv_fp8x4_storage_t result;
   asm("cvt.rs.satfinite.e4m3x4.f32 %0, {%1, %2, %3, %4}, %5;"
       : "=r"(result)
@@ -445,7 +445,7 @@ __tl_cvt_f32x4_to_e4m3x4_rs_sat(float4 src, unsigned int rbits) {
   return result;
 #else
   static_assert(kDependentFalse,
-                "Stochastic rounding f32-to-FP8 requires sm_100a");
+                "Stochastic rounding f32-to-FP8 requires sm_100a or sm_103a");
   return {};
 #endif
 }
@@ -454,7 +454,7 @@ __tl_cvt_f32x4_to_e4m3x4_rs_sat(float4 src, unsigned int rbits) {
 template <bool kDependentFalse = false>
 TL_DEVICE __nv_fp8_storage_t
 __tl_cvt_f32x1_to_e4m3x1_rs_sat(float src, unsigned int rbits) {
-#if defined(__CUDA_ARCH_FEAT_SM100_ALL)
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL) || defined(__CUDA_ARCH_FEAT_SM103_ALL)
   __nv_fp8x4_storage_t tmp;
   asm("cvt.rs.satfinite.e4m3x4.f32 %0, {%1, %2, %3, %4}, %5;"
       : "=r"(tmp)
@@ -462,7 +462,7 @@ __tl_cvt_f32x1_to_e4m3x1_rs_sat(float src, unsigned int rbits) {
   return static_cast<__nv_fp8_storage_t>(tmp & 0xFF);
 #else
   static_assert(kDependentFalse,
-                "Stochastic rounding f32-to-FP8 requires sm_100a");
+                "Stochastic rounding f32-to-FP8 requires sm_100a or sm_103a");
   return {};
 #endif
 }
@@ -471,7 +471,7 @@ __tl_cvt_f32x1_to_e4m3x1_rs_sat(float src, unsigned int rbits) {
 template <bool kDependentFalse = false>
 TL_DEVICE __nv_fp8x2_storage_t
 __tl_cvt_f32x2_to_e4m3x2_rs_sat(float2 src, unsigned int rbits) {
-#if defined(__CUDA_ARCH_FEAT_SM100_ALL)
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL) || defined(__CUDA_ARCH_FEAT_SM103_ALL)
   __nv_fp8x4_storage_t tmp;
   asm("cvt.rs.satfinite.e4m3x4.f32 %0, {%1, %2, %3, %4}, %5;"
       : "=r"(tmp)
@@ -479,7 +479,7 @@ __tl_cvt_f32x2_to_e4m3x2_rs_sat(float2 src, unsigned int rbits) {
   return static_cast<__nv_fp8x2_storage_t>(tmp & 0xFFFF);
 #else
   static_assert(kDependentFalse,
-                "Stochastic rounding f32-to-FP8 requires sm_100a");
+                "Stochastic rounding f32-to-FP8 requires sm_100a or sm_103a");
   return {};
 #endif
 }
@@ -490,7 +490,7 @@ __tl_cvt_f32x2_to_e4m3x2_rs_sat(float2 src, unsigned int rbits) {
 template <bool kDependentFalse = false>
 TL_DEVICE __nv_fp8x4_storage_t
 __tl_cvt_f32x4_to_e5m2x4_rs_sat(float4 src, unsigned int rbits) {
-#if defined(__CUDA_ARCH_FEAT_SM100_ALL)
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL) || defined(__CUDA_ARCH_FEAT_SM103_ALL)
   __nv_fp8x4_storage_t result;
   asm("cvt.rs.satfinite.e5m2x4.f32 %0, {%1, %2, %3, %4}, %5;"
       : "=r"(result)
@@ -498,7 +498,7 @@ __tl_cvt_f32x4_to_e5m2x4_rs_sat(float4 src, unsigned int rbits) {
   return result;
 #else
   static_assert(kDependentFalse,
-                "Stochastic rounding f32-to-FP8 requires sm_100a");
+                "Stochastic rounding f32-to-FP8 requires sm_100a or sm_103a");
   return {};
 #endif
 }
@@ -507,7 +507,7 @@ __tl_cvt_f32x4_to_e5m2x4_rs_sat(float4 src, unsigned int rbits) {
 template <bool kDependentFalse = false>
 TL_DEVICE __nv_fp8_storage_t
 __tl_cvt_f32x1_to_e5m2x1_rs_sat(float src, unsigned int rbits) {
-#if defined(__CUDA_ARCH_FEAT_SM100_ALL)
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL) || defined(__CUDA_ARCH_FEAT_SM103_ALL)
   __nv_fp8x4_storage_t tmp;
   asm("cvt.rs.satfinite.e5m2x4.f32 %0, {%1, %2, %3, %4}, %5;"
       : "=r"(tmp)
@@ -515,7 +515,7 @@ __tl_cvt_f32x1_to_e5m2x1_rs_sat(float src, unsigned int rbits) {
   return static_cast<__nv_fp8_storage_t>(tmp & 0xFF);
 #else
   static_assert(kDependentFalse,
-                "Stochastic rounding f32-to-FP8 requires sm_100a");
+                "Stochastic rounding f32-to-FP8 requires sm_100a or sm_103a");
   return {};
 #endif
 }
@@ -524,7 +524,7 @@ __tl_cvt_f32x1_to_e5m2x1_rs_sat(float src, unsigned int rbits) {
 template <bool kDependentFalse = false>
 TL_DEVICE __nv_fp8x2_storage_t
 __tl_cvt_f32x2_to_e5m2x2_rs_sat(float2 src, unsigned int rbits) {
-#if defined(__CUDA_ARCH_FEAT_SM100_ALL)
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL) || defined(__CUDA_ARCH_FEAT_SM103_ALL)
   __nv_fp8x4_storage_t tmp;
   asm("cvt.rs.satfinite.e5m2x4.f32 %0, {%1, %2, %3, %4}, %5;"
       : "=r"(tmp)
@@ -532,7 +532,7 @@ __tl_cvt_f32x2_to_e5m2x2_rs_sat(float2 src, unsigned int rbits) {
   return static_cast<__nv_fp8x2_storage_t>(tmp & 0xFFFF);
 #else
   static_assert(kDependentFalse,
-                "Stochastic rounding f32-to-FP8 requires sm_100a");
+                "Stochastic rounding f32-to-FP8 requires sm_100a or sm_103a");
   return {};
 #endif
 }
