@@ -177,6 +177,33 @@ def test_tma_copy_default_block_leader_scope_codegen():
     assert "tl_shuffle_elect<256>()" in source, "Expected block-wide elect<256>"
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tma_copy_uses_explicit_global_stride_for_row_offset():
+    rows = 2
+    cols = 32
+    row_stride = 40
+
+    @T.prim_func
+    def main(
+        A: T.StridedTensor((rows, cols), (row_stride, 1), T.float32),
+        B: T.Tensor((cols,), T.float32),
+    ):
+        with T.Kernel(1, threads=32):
+            a_shared = T.alloc_shared((cols,), T.float32)
+            T.copy(A[1, 0:cols], a_shared, prefer_instruction="tma")
+            T.copy(a_shared, B)
+
+    import torch
+
+    kernel = tilelang.compile(main, out_idx=[1])
+    padded = torch.arange(rows * row_stride, dtype=torch.float32, device="cuda").reshape(rows, row_stride)
+    source = padded[:, :cols]
+    assert source.stride() == (row_stride, 1)
+    output = kernel(source)
+    torch.testing.assert_close(output, source[1])
+
+
 def matmul_tma_copy_store(
     M,
     N,
