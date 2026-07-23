@@ -31,6 +31,7 @@ namespace cuda {
 namespace {
 
 constexpr const char *kCudaMMA = "cuda.mma";
+constexpr const char *kCudaFMA = "cuda.fma";
 constexpr const char *kCudaWGMMA = "cuda.wgmma";
 constexpr const char *kCudaTCGEN05 = "cuda.tcgen05";
 
@@ -92,6 +93,26 @@ bool AllowWgmma(const GemmNode &op, int block_size, Target target) {
   return !ctxt->GetConfig(kDisableWGMMA, Optional<Bool>()).value_or(false) &&
          TargetIsHopper(target) && op.m_ >= 64 && num_warps % 4 == 0 &&
          CheckWgmma(op);
+}
+
+bool AllowVoltaMma(const GemmNode &op) {
+  bool scope_ok = (IsSharedBuffer(op.a_) || IsFragmentBuffer(op.a_)) &&
+                  IsSharedBuffer(op.b_);
+  if (!scope_ok) {
+    return false;
+  }
+  if (op.transA_) {
+    return false;
+  }
+  if (op.a_->dtype != DataType::Float(16) ||
+      op.b_->dtype != DataType::Float(16)) {
+    return false;
+  }
+  if (op.c_->dtype != DataType::Float(16) &&
+      op.c_->dtype != DataType::Float(32)) {
+    return false;
+  }
+  return op.m_ % 16 == 0 && op.n_ % 16 == 0 && op.k_ % 4 == 0;
 }
 
 void FatalWgmmaUnavailable(const GemmNode &op, Target target) {
@@ -283,6 +304,9 @@ struct Gemm {
     if (AllowWgmma(op, block_size, target)) {
       return kCudaWGMMA;
     }
+    if (TargetIsVolta(target) && !AllowVoltaMma(op)) {
+      return kCudaFMA;
+    }
     return kCudaMMA;
   }
 
@@ -297,6 +321,11 @@ struct Gemm {
     }
     if (gemm_inst == kCudaWGMMA) {
       return ComputeWgmmaWarpPartition(policy, M, N, num_warps);
+    }
+    if (gemm_inst == kCudaFMA) {
+      policy.m_warp = 1;
+      policy.n_warp = num_warps;
+      return {1, num_warps};
     }
     int k_n_per_warp = TargetIsVolta(target) ? 16 : 8;
     return ComputeDefaultWarpPartition(policy, M, N, num_warps, k_n_per_warp);
