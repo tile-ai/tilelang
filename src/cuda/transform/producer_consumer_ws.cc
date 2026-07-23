@@ -2182,7 +2182,8 @@ private:
     // below do not traverse While nodes. Skip them so such loops fall back
     // to the non-WS software pipeline.
     void VisitStmt_(const WhileNode *op) final {
-      DLOG(WARNING) << "[WS] skipped: pipeline loop inside while loop is not supported";
+      DLOG(WARNING)
+          << "[WS] skipped: pipeline loop inside while loop is not supported";
     }
 
     Optional<For> pipeline_loop_;
