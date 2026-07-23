@@ -156,34 +156,57 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         adapter._post_init()
         return adapter
 
-    def _process_dynamic_symbolic(self) -> dict[tirx.Var, tuple[int, int]]:
-        """Extract information about dynamic shapes from the TIR function.
+    def _process_dynamic_symbolic(self) -> dict[tirx.Var, tuple[int, int, int, int]]:
+        """Extract runtime sources for scalar, shape, and stride symbols.
 
-        Maps symbolic variables to their corresponding (buffer_index, shape_dimension)
-        for runtime shape resolution.
-
-        Returns
-        -------
-        Dict[tirx.Var, Tuple[int, int]]
-            Mapping from symbolic variable to (buffer_index, shape_dimension)
+        Each entry contains ``(kind, parameter_index, dimension, scale)``.
+        ``kind`` is 0 for a shape, 1 for a stride, and 2 for an explicit
+        scalar parameter. Shape symbols precede stride symbols to match the
+        generated NVRTC host wrapper ABI.
         """
         func = self.prim_func
         params = func.params
         buffer_map = func.buffer_map
-        dynamic_symbolic_map = {}
+        dynamic_symbolic_map: dict[tirx.Var, tuple[int, int, int, int]] = {}
         # Secondary index by variable name for fallback lookup when tirx.Var
         # object identity differs (e.g. params created from a different
         # PrimFunc instance than the one stored in ir_module).
-        self._dynamic_symbolic_name_map: dict[str, tuple[int, int]] = {}
+        self._dynamic_symbolic_name_map: dict[str, tuple[int, int, int, int]] = {}
+
+        def unique_push_back(v: tirx.Var, entry: tuple[int, int, int, int]):
+            if v in dynamic_symbolic_map or v.name in self._dynamic_symbolic_name_map:
+                return
+            dynamic_symbolic_map[v] = entry
+            self._dynamic_symbolic_name_map[v.name] = entry
+
+        # Explicit scalar parameters are already part of the wrapper's primary
+        # argument list. Recording them here permits output-shape resolution,
+        # but they must not be appended again as implicit dynamic arguments.
         for i, param in enumerate(params):
+            if param not in buffer_map:
+                unique_push_back(param, (2, i, -1, 1))
+
+        for i, param in enumerate(params):
+            if param not in buffer_map:
+                continue
             buffer = buffer_map[param]
             for j, shape in enumerate(buffer.shape):
-                if isinstance(shape, tirx.Var) and (shape not in dynamic_symbolic_map):
-                    dynamic_symbolic_map[shape] = (i, j)
-                    self._dynamic_symbolic_name_map[shape.name] = (i, j)
+                if isinstance(shape, tirx.Var):
+                    unique_push_back(shape, (0, i, j, 1))
+
+        for i, param in enumerate(params):
+            if param not in buffer_map:
+                continue
+            buffer = buffer_map[param]
+            element_bits = buffer.dtype.bits * buffer.dtype.lanes
+            stride_scale = 8 // element_bits if element_bits < 8 else 1
+            for j, stride in enumerate(buffer.strides):
+                if isinstance(stride, tirx.Var):
+                    unique_push_back(stride, (1, i, j, stride_scale))
+
         return dynamic_symbolic_map
 
-    def _lookup_dynamic_symbolic(self, v: tirx.Var) -> tuple[int, int]:
+    def _lookup_dynamic_symbolic(self, v: tirx.Var) -> tuple[int, int, int, int]:
         """Look up a tirx.Var in the dynamic symbolic map.
 
         Falls back to name-based lookup when object identity doesn't match.
@@ -193,6 +216,20 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         if v.name in self._dynamic_symbolic_name_map:
             return self._dynamic_symbolic_name_map[v.name]
         raise KeyError(f"Dynamic symbolic variable '{v.name}' not found in symbolic map")
+
+    def _resolve_dynamic_symbolic_value(self, v: tirx.Var, param_values: list[Any]):
+        """Resolve one symbolic value from its scalar or tensor argument."""
+        ref_id, param_idx, dim_idx, stride_scale = self._lookup_dynamic_symbolic(v)
+        ref_value = param_values[param_idx]
+        if ref_id == 2:
+            return ref_value
+        if not isinstance(ref_value, torch.Tensor):
+            raise TypeError(f"Dynamic symbolic variable '{v.name}' requires tensor parameter {param_idx}, got {type(ref_value).__name__}")
+        if ref_id == 0:
+            return ref_value.shape[dim_idx]
+        if ref_id == 1:
+            return ref_value.stride()[dim_idx] * stride_scale
+        raise ValueError(f"Unknown dynamic symbolic reference kind: {ref_id}")
 
     def get_kernel_source(self, kernel_only: bool = True) -> str | None:
         """Get the CUDA kernel source code.
@@ -215,7 +252,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         """Low-level function to call the compiled CUDA kernel."""
         return self.pymodule.call(self.kernels, *args, stream=stream)
 
-    def _wrap_forward_from_prebuild_lib(self, *ins: list[torch.Tensor], stream: int | None = None):
+    def _wrap_forward_from_prebuild_lib(self, *ins: Any, stream: int | None = None):
         """High-level wrapper for kernel execution.
 
         Handles:
@@ -236,9 +273,16 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
                 f"Expected {len(self.params)} inputs, got {len(ins) + len(self.result_idx)} with {len(ins)} inputs and {len(self.result_idx)} outputs"
             )
         ins_idx = 0
-        args = []
+        param_values: list[Any] = [None] * len(self.params)
+        for i in range(len(self.params)):
+            if i in self.result_idx:
+                continue
+            param_values[i] = ins[ins_idx]
+            ins_idx += 1
 
-        # tensor pointers
+        first_tensor = next((value for value in param_values if isinstance(value, torch.Tensor)), None)
+
+        # Allocate output tensors in their PrimFunc parameter positions.
         for i in range(len(self.params)):
             if i in self.result_idx:
                 dtype = self.param_dtypes[i]
@@ -246,20 +290,18 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
                 # Now working with native Python list, no FFI calls needed
                 for s in self.param_shapes[i]:
                     if isinstance(s, tirx.Var):
-                        ref_tensor_idx, ref_shape_idx = self._lookup_dynamic_symbolic(s)
-                        shape.append(ins[ref_tensor_idx].shape[ref_shape_idx])
+                        shape.append(self._resolve_dynamic_symbolic_value(s, param_values))
                     else:  # Already converted to Python int during initialization
                         shape.append(s)
-                device = ins[0].device if len(ins) > 0 else torch.cuda.current_device()
+                device = first_tensor.device if first_tensor is not None else torch.cuda.current_device()
                 tensor = torch.empty(*shape, dtype=dtype, device=device)
-            else:
-                tensor = ins[ins_idx]
-                ins_idx += 1
-            args.append(tensor)
+                param_values[i] = tensor
 
         # dynamic symbolics
-        for _, (buffer_idx, shape_idx) in self.dynamic_symbolic_map.items():
-            args.append(ins[buffer_idx].shape[shape_idx])
+        args = list(param_values)
+        for symbol, (ref_id, _, _, _) in self.dynamic_symbolic_map.items():
+            if ref_id != 2:
+                args.append(self._resolve_dynamic_symbolic_value(symbol, param_values))
 
         # if stream is not None, we need to pass the stream to the library
         if stream is None:
