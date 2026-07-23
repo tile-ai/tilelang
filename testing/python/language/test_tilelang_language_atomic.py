@@ -830,7 +830,7 @@ def atomic_addx2_return_prev_program(dtype=T.float32):
     @T.prim_func
     def main(Dst: T.Tensor((2,), dtype), Val: T.Tensor((2,), dtype), Prev: T.Tensor((2,), dtype)):
         with T.Kernel(1, threads=1):
-            Prev[0:2] = T.atomic_addx2(Dst[0], Val[0], return_prev=True)
+            Prev[0:2] = T.atomic_addx2(Dst[0:2], Val[0:2], return_prev=True)
 
     return main
 
@@ -842,6 +842,10 @@ def atomic_addx4_return_prev_program(dtype=T.float32):
             Prev[0:4] = T.atomic_addx4(Dst[0], Val[0], return_prev=True)
 
     return main
+
+
+def test_atomic_addx2_return_prev_accepts_sliced_destination():
+    atomic_addx2_return_prev_program(T.float32)
 
 
 @tilelang.testing.requires_cuda

@@ -323,9 +323,13 @@ def atomic_addx2(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> Pri
         >>>             atomic_addx2(global_grads[i, j:j+2], grads[i, j:j+2])
     """
     atomic_addx2_op = op.Op.get("tl.atomic_addx2_ret_elem_op") if return_prev else op.Op.get("tl.atomic_addx2_elem_op")
-    # The ret variant returns the two previous elements packed as a 2-lane
-    # vector (e.g. half2/float2); type it accordingly so the store matches.
-    return_type = f"{dst.dtype}x2" if return_prev else "handle"
+    if return_prev:
+        # The ret variant returns the two previous elements packed as a 2-lane
+        # vector (e.g. half2/float2); type it accordingly so the store matches.
+        dtype = dst.buffer.dtype if isinstance(dst, BufferRegion) else dst.dtype
+        return_type = f"{dtype}x2"
+    else:
+        return_type = "handle"
     return T.call_intrin(return_type, atomic_addx2_op, T.access_ptr(dst, "rw"), T.access_ptr(value, "r"))
 
 
