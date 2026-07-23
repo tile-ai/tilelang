@@ -1344,7 +1344,7 @@ private:
     Stmt new_body = MakePipelineBody(flat_stmts);
 
     return For(loop->loop_var, loop->min, loop->extent, loop->kind, new_body,
-               loop->thread_binding, annotations);
+               loop->thread_binding, annotations, loop->step, loop->span);
   }
 
   Stmt VisitStmt_(const SBlockNode *op) final {

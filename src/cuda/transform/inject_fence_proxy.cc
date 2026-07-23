@@ -490,7 +490,7 @@ private:
                                    : body_res.out_state;
 
       Stmt loop = For(op->loop_var, min, extent, op->kind, body_res.stmt,
-                      op->thread_binding, op->annotations);
+                      op->thread_binding, op->annotations, op->step, op->span);
       return SeqStmt(Array<Stmt>{pre_fence, loop});
     }
 
@@ -499,7 +499,7 @@ private:
         may_be_zero ? entry.Union(body_res.out_state) : body_res.out_state;
 
     return For(op->loop_var, min, extent, op->kind, body_res.stmt,
-               op->thread_binding, op->annotations);
+               op->thread_binding, op->annotations, op->step, op->span);
   }
 
   Stmt VisitStmt_(const WhileNode *op) final {
