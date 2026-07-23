@@ -25,9 +25,6 @@
 namespace tvm {
 namespace tl {
 
-using namespace tirx;
-using namespace ffi;
-
 /*!
  * \brief Format a span as "file:line:col" for error messages.
  * \return Empty string when the span or its source name is undefined.
