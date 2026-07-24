@@ -82,6 +82,58 @@ def test_const_mixed():
 
 
 @tilelang.testing.requires_cuda
+def test_const_cache_isolation():
+    """Different kwarg values must produce distinct, correct kernels."""
+
+    @tilelang.jit
+    def kernel(A, B, block_N: int = 32):
+        N = T.const("N")
+        num_blocks = T.const("num_blocks")
+        A: T.Tensor((N,), T.float16)
+        B: T.Tensor((N,), T.float16)
+        with T.Kernel(num_blocks, threads=128) as (bx,):
+            A_shared = T.alloc_shared((block_N,), T.float16)
+            T.copy(A[bx * block_N], A_shared)
+            T.copy(A_shared, B[bx * block_N])
+
+    A = torch.randn(128, dtype=torch.float16, device="cuda")
+
+    # num_blocks=4 writes all 128 elements; num_blocks=2 writes only the first 64.
+    B_full = torch.zeros(128, dtype=torch.float16, device="cuda")
+    B_half = torch.zeros(128, dtype=torch.float16, device="cuda")
+    kernel(A, B_full, 32, num_blocks=4)
+    kernel(A, B_half, 32, num_blocks=2)
+
+    assert len(kernel.func.p1_cache) == 2
+    torch.testing.assert_close(B_full, A)
+    torch.testing.assert_close(B_half[:64], A[:64])
+    assert torch.equal(B_half[64:], torch.zeros(64, dtype=torch.float16, device="cuda"))
+
+
+@tilelang.testing.requires_cuda
+def test_const_float_value():
+    """A float kwarg value should be accepted and produce correct results."""
+
+    @tilelang.jit
+    def kernel(A, B, block_N: int = 32):
+        N = T.const("N")
+        scale = T.const("scale")
+        A: T.Tensor((N,), T.float16)
+        B: T.Tensor((N,), T.float16)
+        with T.Kernel(T.ceildiv(N, block_N), threads=128) as (bx,):
+            A_local = T.alloc_fragment((block_N,), T.float16)
+            T.copy(A[bx * block_N], A_local)
+            for i in T.Parallel(block_N):
+                A_local[i] = A_local[i] * T.cast(scale, T.float16)
+            T.copy(A_local, B[bx * block_N])
+
+    A = torch.randn(128, dtype=torch.float16, device="cuda")
+    B = torch.zeros(128, dtype=torch.float16, device="cuda")
+    kernel(A, B, 32, scale=2.0)
+    torch.testing.assert_close(B, (A * 2).half())
+
+
+@tilelang.testing.requires_cuda
 def test_const_missing_kwarg_errors():
     """A grid-only const without a value should raise a clear error."""
 
