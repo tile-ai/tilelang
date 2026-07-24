@@ -51,7 +51,11 @@ class BlockScaleMmaConfig:
     scale_type: str
     a_dtype_abbrv: str
     b_dtype_abbrv: str
-    accum_dtype: str = T.float32
+    # Plain literal, not T.float32: this class body executes while
+    # tilelang.language is still initializing under the dialect facade
+    # (tilelang.language -> tilelang.cuda.language -> ... -> this module),
+    # so touching T.* here would be a circular import.
+    accum_dtype: str = "float32"
     active_sfa_threads: int = 16
     active_sfb_threads: int = 8
 
@@ -1484,9 +1488,9 @@ class TensorCoreIntrinEmitter(_TensorCoreIntrinEmitterBase):
 
     def __init__(
         self,
-        a_dtype: str = T.float16,
-        b_dtype: str = T.float16,
-        accum_dtype: str = T.float16,
+        a_dtype: str = "float16",
+        b_dtype: str = "float16",
+        accum_dtype: str = "float16",
         a_transposed: bool = False,
         b_transposed: bool = False,
         block_row_warps: int = 2,
@@ -1540,7 +1544,7 @@ class TensorCoreIntrinEmitter(_TensorCoreIntrinEmitterBase):
             thread_var=thread_var,
         )
 
-    def _initialize_k_dim(self, a_dtype=T.float16):
+    def _initialize_k_dim(self, a_dtype="float16"):
         if self.is_blockscaled:
             self.k_dim = self.block_scale_config.atom_k
         else:
