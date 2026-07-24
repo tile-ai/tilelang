@@ -12,11 +12,11 @@ if not is_nvrtc_available:
 from tilelang.jit.adapter.nvrtc.adapter import NVRTCKernelAdapter
 
 
-def _make_host_only_adapter(program):
+def _make_host_only_adapter(program, result_idx=None):
     adapter = NVRTCKernelAdapter.__new__(NVRTCKernelAdapter)
     adapter.ir_module = tilelang.tvm.IRModule({program.attrs["global_symbol"]: program})
     adapter.params = extrac_params(program)
-    adapter.result_idx = []
+    adapter.result_idx = [] if result_idx is None else result_idx
     adapter.param_dtypes = [param.torch_dtype() for param in adapter.params]
     adapter.param_shapes = [list(param.shape) for param in adapter.params]
     adapter.dynamic_symbolic_map = adapter._process_dynamic_symbolic()
@@ -62,4 +62,49 @@ def test_nvrtc_adapter_forwards_dynamic_strides_after_dynamic_shapes():
     args, stream = forwarded[0]
     assert args[0] is tensor
     assert args[1:] == (7, 3)
+    assert stream == 0
+
+
+def test_nvrtc_adapter_scales_sub_byte_dynamic_strides():
+    length = T.dynamic("length")
+    stride = T.dynamic("stride")
+
+    @T.prim_func
+    def main(A: T.StridedTensor[(length,), (stride,), T.int4]):
+        T.evaluate(0)
+
+    adapter = _make_host_only_adapter(main)
+    forwarded = []
+    adapter._forward_from_prebuild_lib = lambda *args, stream: forwarded.append((args, stream))
+
+    tensor = torch.empty_strided((7,), (3,), dtype=torch.int8)
+    adapter._wrap_forward_from_prebuild_lib(tensor)
+
+    assert len(forwarded) == 1
+    args, stream = forwarded[0]
+    assert args[0] is tensor
+    assert args[1:] == (7, 6)
+    assert stream == 0
+
+
+def test_nvrtc_adapter_resolves_output_shape_from_later_input():
+    length = T.dynamic("length")
+
+    @T.prim_func
+    def main(B: T.Tensor((length,), T.float32), A: T.Tensor((length,), T.float32)):
+        T.evaluate(0)
+
+    adapter = _make_host_only_adapter(main, result_idx=[0])
+    forwarded = []
+    adapter._forward_from_prebuild_lib = lambda *args, stream: forwarded.append((args, stream))
+
+    tensor = torch.empty(7)
+    output = adapter._wrap_forward_from_prebuild_lib(tensor)
+
+    assert output.shape == (7,)
+    assert len(forwarded) == 1
+    args, stream = forwarded[0]
+    assert args[0] is output
+    assert args[1] is tensor
+    assert args[2:] == (7,)
     assert stream == 0

@@ -168,12 +168,16 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         params = func.params
         buffer_map = func.buffer_map
         dynamic_symbolic_map: dict[tirx.Var, tuple[int, int, int, int]] = {}
+        self._dynamic_symbolic_candidates_map: dict[tirx.Var, list[tuple[int, int, int, int]]] = {}
+        self._dynamic_symbolic_name_candidates_map: dict[str, list[tuple[int, int, int, int]]] = {}
         # Secondary index by variable name for fallback lookup when tirx.Var
         # object identity differs (e.g. params created from a different
         # PrimFunc instance than the one stored in ir_module).
         self._dynamic_symbolic_name_map: dict[str, tuple[int, int, int, int]] = {}
 
         def unique_push_back(v: tirx.Var, entry: tuple[int, int, int, int]):
+            self._dynamic_symbolic_candidates_map.setdefault(v, []).append(entry)
+            self._dynamic_symbolic_name_candidates_map.setdefault(v.name, []).append(entry)
             if v in dynamic_symbolic_map or v.name in self._dynamic_symbolic_name_map:
                 return
             dynamic_symbolic_map[v] = entry
@@ -206,30 +210,30 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
 
         return dynamic_symbolic_map
 
-    def _lookup_dynamic_symbolic(self, v: tirx.Var) -> tuple[int, int, int, int]:
-        """Look up a tirx.Var in the dynamic symbolic map.
-
-        Falls back to name-based lookup when object identity doesn't match.
-        """
-        if v in self.dynamic_symbolic_map:
-            return self.dynamic_symbolic_map[v]
-        if v.name in self._dynamic_symbolic_name_map:
-            return self._dynamic_symbolic_name_map[v.name]
+    def _lookup_dynamic_symbolic_candidates(self, v: tirx.Var) -> list[tuple[int, int, int, int]]:
+        """Return all scalar, shape, and stride sources for a dynamic symbol."""
+        if v in self._dynamic_symbolic_candidates_map:
+            return self._dynamic_symbolic_candidates_map[v]
+        if v.name in self._dynamic_symbolic_name_candidates_map:
+            return self._dynamic_symbolic_name_candidates_map[v.name]
         raise KeyError(f"Dynamic symbolic variable '{v.name}' not found in symbolic map")
 
     def _resolve_dynamic_symbolic_value(self, v: tirx.Var, param_values: list[Any]):
-        """Resolve one symbolic value from its scalar or tensor argument."""
-        ref_id, param_idx, dim_idx, stride_scale = self._lookup_dynamic_symbolic(v)
-        ref_value = param_values[param_idx]
-        if ref_id == 2:
-            return ref_value
-        if not isinstance(ref_value, torch.Tensor):
-            raise TypeError(f"Dynamic symbolic variable '{v.name}' requires tensor parameter {param_idx}, got {type(ref_value).__name__}")
-        if ref_id == 0:
-            return ref_value.shape[dim_idx]
-        if ref_id == 1:
-            return ref_value.stride()[dim_idx] * stride_scale
-        raise ValueError(f"Unknown dynamic symbolic reference kind: {ref_id}")
+        """Resolve one symbolic value from the first available runtime source."""
+        unavailable_sources = []
+        for ref_id, param_idx, dim_idx, stride_scale in self._lookup_dynamic_symbolic_candidates(v):
+            ref_value = param_values[param_idx]
+            if ref_id == 2 and ref_value is not None:
+                return ref_value
+            if isinstance(ref_value, torch.Tensor):
+                if ref_id == 0:
+                    return ref_value.shape[dim_idx]
+                if ref_id == 1:
+                    return ref_value.stride()[dim_idx] * stride_scale
+                raise ValueError(f"Unknown dynamic symbolic reference kind: {ref_id}")
+            unavailable_sources.append(f"parameter {param_idx}: {type(ref_value).__name__}")
+        details = ", ".join(unavailable_sources)
+        raise TypeError(f"Dynamic symbolic variable '{v.name}' has no available runtime source ({details})")
 
     def get_kernel_source(self, kernel_only: bool = True) -> str | None:
         """Get the CUDA kernel source code.
@@ -262,7 +266,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         4. CUDA stream management
 
         Args:
-            ins: Input PyTorch tensors
+            ins: Input PyTorch tensors and scalar values
             stream: Optional CUDA stream for asynchronous execution
 
         Returns:
