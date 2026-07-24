@@ -4,6 +4,7 @@ T.const() variables that are used only in grid dimensions or kernel-body
 computations (not in any buffer shape/stride) should be resolvable via an
 explicit keyword argument at call time, instead of raising RuntimeError.
 """
+
 import pytest
 import torch
 
