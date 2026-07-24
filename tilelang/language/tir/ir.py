@@ -2,9 +2,12 @@ import tvm.tirx.script.builder.ir as _ir
 from tvm.tirx.script.builder import frame
 from tvm.tirx import PrimExpr, IntImm, StringImm
 from tvm.tirx import _ffi_api as _tir_ffi
+from tvm.tirx.expr import Select as _Select
 from typing import Any
 import tilelang.language.tir.op as _tir_op
 import functools
+
+PyPrimExpr = PrimExpr | int | float | bool
 
 
 def serial(start: PrimExpr, stop: PrimExpr = None, *, annotations: dict[str, Any] = None) -> frame.ForFrame:
@@ -167,6 +170,25 @@ def _op_wrapper(func):
         return func(*args, **kwargs)
 
     return wrapped
+
+
+def Select(condition: PrimExpr | bool, true_value: PyPrimExpr, false_value: PyPrimExpr, span=None) -> PrimExpr:
+    """Construct a TIR select expression.
+
+    ``Select`` evaluates both value expressions. Use ``if_then_else`` when a
+    branch must guard side effects or out-of-bounds memory accesses.
+    """
+    return _Select(condition, true_value, false_value, span)
+
+
+def min(a: PrimExpr, b: PrimExpr) -> PrimExpr:  # pylint: disable=redefined-builtin
+    """Construct a binary TIR minimum expression."""
+    return _ir.min(a, b)
+
+
+def max(a: PrimExpr, b: PrimExpr) -> PrimExpr:  # pylint: disable=redefined-builtin
+    """Construct a binary TIR maximum expression."""
+    return _ir.max(a, b)
 
 
 abs = _op_wrapper(_tir_op.abs)  # pylint: disable=redefined-builtin

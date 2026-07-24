@@ -12,8 +12,9 @@
 
 namespace tl {
 
-template <bool use_2cta = false>
+template <bool use_2cta = false, bool kDependentFalse = false>
 TL_DEVICE void tmem_allocate(void *dst_ptr, int num_columns) {
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL)
   uint32_t dst_intptr = smem_ptr_to_uint(dst_ptr);
   if constexpr (use_2cta) {
     asm volatile(
@@ -26,10 +27,14 @@ TL_DEVICE void tmem_allocate(void *dst_ptr, int num_columns) {
         :
         : "r"(dst_intptr), "r"(num_columns));
   }
+#else
+  static_assert(kDependentFalse, "T.alloc_tmem requires sm_100a");
+#endif
 }
 
-template <bool use_2cta = false>
+template <bool use_2cta = false, bool kDependentFalse = false>
 TL_DEVICE void tmem_deallocate(uint32_t *tmem_ptr, int num_columns) {
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL)
   if constexpr (use_2cta) {
     asm volatile("{\n\t"
                  "tcgen05.dealloc.cta_group::2.sync.aligned.b32  %0, %1; \n\t"
@@ -43,6 +48,9 @@ TL_DEVICE void tmem_deallocate(uint32_t *tmem_ptr, int num_columns) {
                  :
                  : "r"(*tmem_ptr), "r"(num_columns));
   }
+#else
+  static_assert(kDependentFalse, "T.deallocate_tmem requires sm_100a");
+#endif
 }
 
 TL_DEVICE void tcgen05_before_thread_sync() {
