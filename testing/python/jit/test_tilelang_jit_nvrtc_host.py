@@ -34,7 +34,7 @@ def test_nvrtc_adapter_forwards_scalar_primfunc_parameters():
     adapter._forward_from_prebuild_lib = lambda *args, stream: forwarded.append((args, stream))
 
     tensor = torch.empty(8)
-    adapter._wrap_forward_from_prebuild_lib(tensor, 3)
+    adapter._wrap_forward_from_prebuild_lib(tensor, 3, stream=0)
 
     assert len(forwarded) == 1
     args, stream = forwarded[0]
@@ -56,7 +56,7 @@ def test_nvrtc_adapter_forwards_dynamic_strides_after_dynamic_shapes():
     adapter._forward_from_prebuild_lib = lambda *args, stream: forwarded.append((args, stream))
 
     tensor = torch.empty_strided((7,), (3,))
-    adapter._wrap_forward_from_prebuild_lib(tensor)
+    adapter._wrap_forward_from_prebuild_lib(tensor, stream=0)
 
     assert len(forwarded) == 1
     args, stream = forwarded[0]
@@ -78,7 +78,7 @@ def test_nvrtc_adapter_scales_sub_byte_dynamic_strides():
     adapter._forward_from_prebuild_lib = lambda *args, stream: forwarded.append((args, stream))
 
     tensor = torch.empty_strided((7,), (3,), dtype=torch.int8)
-    adapter._wrap_forward_from_prebuild_lib(tensor)
+    adapter._wrap_forward_from_prebuild_lib(tensor, stream=0)
 
     assert len(forwarded) == 1
     args, stream = forwarded[0]
@@ -99,7 +99,7 @@ def test_nvrtc_adapter_resolves_output_shape_from_later_input():
     adapter._forward_from_prebuild_lib = lambda *args, stream: forwarded.append((args, stream))
 
     tensor = torch.empty(7)
-    output = adapter._wrap_forward_from_prebuild_lib(tensor)
+    output = adapter._wrap_forward_from_prebuild_lib(tensor, stream=0)
 
     assert output.shape == (7,)
     assert len(forwarded) == 1
