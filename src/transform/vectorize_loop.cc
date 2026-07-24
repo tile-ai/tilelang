@@ -1144,10 +1144,9 @@ private:
           Call(pair_dtype, tl::fma2(),
                {ExtractLanePair(lhs_vec, lane), ExtractLanePair(rhs_vec, lane),
                 make_zero(pair_dtype)});
-      Buffer pair_buf =
-          decl_buffer({Integer(1)}, pair_dtype,
-                      name_hint + "_fma_pair_" + std::to_string(lane / 2),
-                      "local");
+      Buffer pair_buf = decl_buffer(
+          {Integer(1)}, pair_dtype,
+          name_hint + "_fma_pair_" + std::to_string(lane / 2), "local");
       prefix->push_back(AllocBuffer(pair_buf));
       prefix->push_back(BufferStore(pair_buf, fma, {Integer(0)}));
       pairs.push_back(BufferLoad(pair_buf, {Integer(0)}));
@@ -1539,10 +1538,9 @@ private:
     }
 
     PrimExpr vec_load = BufferLoad(vec_buffer, vec_indices);
-    Buffer acc_vec =
-        decl_buffer({Integer(1)}, vec_load.dtype(),
-                    scalar_store->buffer->data->name_hint + "_chunk_acc_vec",
-                    "local");
+    Buffer acc_vec = decl_buffer(
+        {Integer(1)}, vec_load.dtype(),
+        scalar_store->buffer->data->name_hint + "_chunk_acc_vec", "local");
     PrimExpr acc_vec_load = BufferLoad(acc_vec, {Integer(0)});
 
     Array<Stmt> new_body_stmts;
@@ -1598,8 +1596,7 @@ tvm::transform::Pass VectorizeLoop(bool enable_vectorize = true) {
     auto *n = f.CopyOnWrite();
     if (enable_vectorize) {
       n->body = tvm::tl::LoopVectorizer()(std::move(n->body));
-      n->body =
-          tvm::tl::CrossLoopVectorReductionHoister()(std::move(n->body));
+      n->body = tvm::tl::CrossLoopVectorReductionHoister()(std::move(n->body));
     } else {
       n->body = tvm::tl::VectorizeSkipper()(std::move(n->body));
     }
