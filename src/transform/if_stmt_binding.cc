@@ -199,11 +199,15 @@ private:
 
     Array<Stmt> guarded_stmts;
     PrimExpr guard_condition = condition;
-    // Fan-out must preserve the original if's single condition evaluation.
-    // Otherwise an earlier guarded body may mutate state read by a later guard.
-    if (SideEffect(condition) > CallEffectKind::kPure) {
-      Var condition_snapshot("if_condition", condition.dtype(), span);
-      guarded_stmts.push_back(Bind(condition_snapshot, condition, span));
+    Var condition_snapshot("if_condition", condition.dtype(), span);
+    Stmt condition_bind = Bind(condition_snapshot, condition, span);
+    auto [condition_reads, _] = CollectStmtAccessRegions(condition_bind);
+    const BufferSet write_buffers = CollectWriteBuffers(stmts);
+    // Replay a read-only condition when no guarded body can change its inputs.
+    // Otherwise preserve the original if's single condition evaluation.
+    if (!IsReplayableScalarBind(condition_bind, condition_reads,
+                                write_buffers)) {
+      guarded_stmts.push_back(condition_bind);
       guard_condition = condition_snapshot;
     }
     for (const Stmt &stmt : stmts) {

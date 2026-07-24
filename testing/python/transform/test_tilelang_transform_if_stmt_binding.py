@@ -51,6 +51,24 @@ def test_if_stmt_binding_does_not_snapshot_pure_condition():
     tvm.ir.assert_structural_equal(after.body, expected.body, True)
 
 
+def test_if_stmt_binding_replays_condition_disjoint_from_body_writes():
+    @T.prim_func
+    def before(A: T.Buffer((1,), "float32"), B: T.Buffer((2,), "float32")):
+        if A[0] >= T.float32(0):
+            B[0] = T.float32(1)
+            B[1] = T.float32(2)
+
+    @T.prim_func
+    def expected(A: T.Buffer((1,), "float32"), B: T.Buffer((2,), "float32")):
+        if A[0] >= T.float32(0):
+            B[0] = T.float32(1)
+        if A[0] >= T.float32(0):
+            B[1] = T.float32(2)
+
+    after = _run_if_stmt_binding(before)
+    tvm.ir.assert_structural_equal(after.body, expected.body, True)
+
+
 def test_if_stmt_binding_keeps_direct_bind_scope():
     @T.prim_func
     def before(A: T.Buffer((4,), "float32"), B: T.Buffer((4,), "float32")):
@@ -84,10 +102,9 @@ def test_if_stmt_binding_inlines_replayable_bind_by_default():
 
     @T.prim_func
     def expected(A: T.Buffer((4,), "float32"), B: T.Buffer((4,), "float32")):
-        condition = T.bind(A[0] >= T.float32(0))
-        if condition:
+        if A[0] >= T.float32(0):
             B[0] = A[1] + T.float32(2)
-        if condition:
+        if A[0] >= T.float32(0):
             B[1] = A[1] + T.float32(2) + T.float32(1)
 
     after = _run_if_stmt_binding(before)
