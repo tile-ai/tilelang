@@ -16,7 +16,7 @@ from tilelang.language.tir.ir import (
 
 ptx_cp_async_bulk = _dtype_forward(_tir_op.ptx_cp_async_bulk)
 ptx_fence_barrier_init = _op_wrapper(_tir_op.ptx_fence_barrier_init)
-ptx_ldmatrix = _tir_op.ptx_ldmatrix
+ptx_ldmatrix = _dtype_forward(_tir_op.ptx_ldmatrix)
 ptx_mma = _dtype_forward(_tir_op.ptx_mma)
 ptx_mma_sp = _dtype_forward(_tir_op.ptx_mma_sp)
 ptx_tcgen05_mma_blockscaled_ss = _dtype_forward(_tir_op.ptx_tcgen05_mma_blockscaled_ss)
