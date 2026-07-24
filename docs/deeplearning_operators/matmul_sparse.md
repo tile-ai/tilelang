@@ -38,10 +38,10 @@ To utilize sparse Tensor Cores, a dense tensor must first be **compressed** into
 
 Both `PyTorch` and `vLLM` use `CUTLASS` as their computation backend (see references [here](https://github.com/pytorch/pytorch/blob/a8d6afb511a69687bbb2b7e88a3cf67917e1697e/aten/src/ATen/native/sparse/cuda/SparseSemiStructuredOps.cu#L47) and [here](https://github.com/vllm-project/vllm/blob/a5dd03c1ebc5e4f56f3c9d3dc0436e9c582c978f/csrc/sparse/cutlass/sparse_scaled_mm_c3x.cuh#L116)), leveraging `CUTLASS`’s built-in compressor (or reimplementing it in `PyTorch`).
 
-A compressor is provided in `tilelang.utils.sparse`. Pass in a dense 2:4-sparse tensor and optionally a metadata dtype to get back the compressed values and metadata:
+A compressor is provided with the sparse GEMM example in `examples/gemm_sp/sparse_utils.py`. Pass in a dense 2:4-sparse tensor and optionally a metadata dtype to get back the compressed values and metadata:
 
 ```python
-from tilelang.utils.sparse import compress
+from examples.gemm_sp.sparse_utils import compress
 A_sparse, E = compress(A)                        # default: int16 metadata for fp16/bf16
 A_sparse, E = compress(A.t().contiguous())       # compress the transposed layout
 ```
@@ -56,7 +56,7 @@ The default metadata dtype for fp16/bf16 is `int16` with an E-factor of 16 (one 
 
 ```python
 import tilelang.language as T
-from tilelang.utils.sparse import get_e_factor
+from examples.gemm_sp.sparse_utils import get_e_factor
 
 def matmul_sp(
     M, N, K,

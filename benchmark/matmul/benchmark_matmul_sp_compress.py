@@ -1,8 +1,13 @@
 import argparse
+from pathlib import Path
+import sys
 
 import torch
 from tilelang.profiler import do_bench
-from tilelang.utils.sparse import compress, randn_semi_sparse, randint_semi_sparse, torch_compress
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples" / "gemm_sp"))
+
+from sparse_utils import compress, randn_semi_sparse, randint_semi_sparse, torch_compress
 
 SUPPORTED_DTYPE_NAMES = ["float16", "bfloat16", "float32", "int8"]
 SUPPORTED_META_DTYPE_NAMES = ["int8", "int16", "int32"]

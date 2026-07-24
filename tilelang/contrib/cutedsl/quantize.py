@@ -2,7 +2,8 @@
 # Licensed under the MIT License.
 """
 Quantization/dequantization functions for CuTeDSL backend.
-These implement the same functionality as the CUDA templates in tilelang/quantize/lop3.py
+These implement the same functionality as the CUDA templates in
+examples/dequantize_gemm/quantize/lop3.py.
 using inline PTX via llvm.inline_asm.
 """
 

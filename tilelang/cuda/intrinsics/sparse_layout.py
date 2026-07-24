@@ -1,6 +1,6 @@
 """Layout metadata for 2:4 semi-structured sparsity.
 
-Shared contract between the sparse compressor (``tilelang.utils.sparse``) and the
+Shared contract between the example sparse compressor (``examples.gemm_sp.sparse_utils``) and the
 CUDA ``mma_sp`` code generator. Depends only on the leaf ``dtypes`` module so it
 can be pulled into the codegen import path without touching the language facade.
 """
