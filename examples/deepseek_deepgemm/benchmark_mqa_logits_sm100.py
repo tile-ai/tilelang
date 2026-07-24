@@ -52,12 +52,8 @@ def prepare_deepgemm_data(config: MQALogitsConfig, dtype: str):
     if config.seq_len_kv % 256 != 0:
         raise ValueError("seq_len_kv must be divisible by 256 for the FP4 SOTA tile")
 
-    q_fp4 = deep_gemm.utils.per_token_cast_to_fp4(
-        q.view(-1, config.head_dim), use_ue8m0=True, gran_k=32, use_packed_ue8m0=True
-    )
-    kv_fp4 = deep_gemm.utils.per_token_cast_to_fp4(
-        kv.view(-1, config.head_dim), use_ue8m0=True, gran_k=32, use_packed_ue8m0=True
-    )
+    q_fp4 = deep_gemm.utils.per_token_cast_to_fp4(q.view(-1, config.head_dim), use_ue8m0=True, gran_k=32, use_packed_ue8m0=True)
+    kv_fp4 = deep_gemm.utils.per_token_cast_to_fp4(kv.view(-1, config.head_dim), use_ue8m0=True, gran_k=32, use_packed_ue8m0=True)
     q_sim = deep_gemm.utils.cast_back_from_fp4(q_fp4[0], q_fp4[1], gran_k=32, use_packed_ue8m0=True).view(
         config.seq_len, config.num_heads, config.head_dim
     )

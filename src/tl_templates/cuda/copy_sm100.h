@@ -375,10 +375,11 @@ tma_load_multicast_2sm(const CUtensorMap &descriptor, BarrierType &smem_mbar,
 
 template <CacheHintSm100 cache_hint = CacheHintSm100::EVICT_NORMAL,
           typename BarrierType = uint64_t>
-TL_DEVICE void tma_load_multicast_2sm(
-    const CUtensorMap &descriptor, BarrierType &smem_mbar,
-    void const *const smem_ptr, uint16_t multicast_mask, int32_t const &crd0,
-    int32_t const &crd1, int32_t const &crd2) {
+TL_DEVICE void
+tma_load_multicast_2sm(const CUtensorMap &descriptor, BarrierType &smem_mbar,
+                       void const *const smem_ptr, uint16_t multicast_mask,
+                       int32_t const &crd0, int32_t const &crd1,
+                       int32_t const &crd2) {
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_mbar;
   if constexpr (std::is_pointer_v<BarrierType>) {
@@ -400,10 +401,11 @@ TL_DEVICE void tma_load_multicast_2sm(
 
 template <CacheHintSm100 cache_hint = CacheHintSm100::EVICT_NORMAL,
           typename BarrierType = uint64_t>
-TL_DEVICE void tma_load_multicast_2sm(
-    const CUtensorMap &descriptor, BarrierType &smem_mbar,
-    void const *const smem_ptr, uint16_t multicast_mask, int32_t const &crd0,
-    int32_t const &crd1, int32_t const &crd2, int32_t const &crd3) {
+TL_DEVICE void
+tma_load_multicast_2sm(const CUtensorMap &descriptor, BarrierType &smem_mbar,
+                       void const *const smem_ptr, uint16_t multicast_mask,
+                       int32_t const &crd0, int32_t const &crd1,
+                       int32_t const &crd2, int32_t const &crd3) {
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_mbar;
   if constexpr (std::is_pointer_v<BarrierType>) {
@@ -425,11 +427,12 @@ TL_DEVICE void tma_load_multicast_2sm(
 
 template <CacheHintSm100 cache_hint = CacheHintSm100::EVICT_NORMAL,
           typename BarrierType = uint64_t>
-TL_DEVICE void tma_load_multicast_2sm(
-    const CUtensorMap &descriptor, BarrierType &smem_mbar,
-    void const *const smem_ptr, uint16_t multicast_mask, int32_t const &crd0,
-    int32_t const &crd1, int32_t const &crd2, int32_t const &crd3,
-    int32_t const &crd4) {
+TL_DEVICE void
+tma_load_multicast_2sm(const CUtensorMap &descriptor, BarrierType &smem_mbar,
+                       void const *const smem_ptr, uint16_t multicast_mask,
+                       int32_t const &crd0, int32_t const &crd1,
+                       int32_t const &crd2, int32_t const &crd3,
+                       int32_t const &crd4) {
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_mbar;
   if constexpr (std::is_pointer_v<BarrierType>) {

@@ -271,12 +271,10 @@ inline uint32_t GetTCGEN5InstrDesc(int atom_m, int atom_n, int atom_k,
 // Build block-scaled instruction descriptor for mxf8f6f4.block_scale,
 // mxf4.block_scale, or mxf4nvf4.block_scale.
 // Bit layout: InstrDescriptorBlockScaled (see CUTLASS mma_sm100_desc.hpp)
-inline uint32_t
-GetTCGEN5BlockScaledInstrDesc(int atom_m, int atom_n, DataType a_dtype,
-                              DataType b_dtype, bool a_is_k_major,
-                              bool b_is_k_major, int scale_in_a, int scale_in_b,
-                              int a_sf_id, int b_sf_id,
-                              const std::string &blockscale_format = "mx") {
+inline uint32_t GetTCGEN5BlockScaledInstrDesc(
+    int atom_m, int atom_n, DataType a_dtype, DataType b_dtype,
+    bool a_is_k_major, bool b_is_k_major, int scale_in_a, int scale_in_b,
+    int a_sf_id, int b_sf_id, const std::string &blockscale_format = "mx") {
   ICHECK(blockscale_format == "mx" || blockscale_format == "nv" ||
          blockscale_format == "mxf4")
       << "Unsupported TCGEN5 blockscale format: " << blockscale_format;

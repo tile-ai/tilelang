@@ -633,12 +633,10 @@ LayoutMap Copy::InferTMemLayout(const CopyNode &op,
       if (!is_success) {
         continue;
       }
-      Fragment logical_coord2frag =
-          Fragment(logical_coords,
-                   tmem_coord2frag->Forward(relative_phy_indices),
-                   tmem_coord2frag->ForwardThread(relative_phy_indices,
-                                                  std::nullopt),
-                   MakeIterVar("rep", 1));
+      Fragment logical_coord2frag = Fragment(
+          logical_coords, tmem_coord2frag->Forward(relative_phy_indices),
+          tmem_coord2frag->ForwardThread(relative_phy_indices, std::nullopt),
+          MakeIterVar("rep", 1));
       results.Set(reg_buf, logical_coord2frag->BindThreadRange(
                                layout_args.thread_bounds));
       break;
@@ -1355,14 +1353,12 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
       return;
     }
     if (tmem_phy_row_min != 0 || tmem_phy_row_max != 127) {
-      tmem_debug << " meta_width=" << meta.width
-                 << " rejected_row_bounds;";
+      tmem_debug << " meta_width=" << meta.width << " rejected_row_bounds;";
       return;
     }
     if (tmem_phy_col_min % meta.width != 0 ||
         (tmem_phy_col_max + 1) % meta.width != 0) {
-      tmem_debug << " meta_width=" << meta.width
-                 << " rejected_col_alignment;";
+      tmem_debug << " meta_width=" << meta.width << " rejected_col_alignment;";
       return;
     }
 
@@ -1380,7 +1376,8 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
 
       PrimExpr target_thread =
           target_frag->ForwardThread(relative_phy_indices, std::nullopt);
-      PrimExpr reg_thread = reg_layout->ForwardThread(reg_indices, std::nullopt);
+      PrimExpr reg_thread =
+          reg_layout->ForwardThread(reg_indices, std::nullopt);
       if (!analyzer->CanProveEqual(target_thread, reg_thread)) {
         tmem_debug << " meta_width=" << meta.width
                    << " useful_threads=" << num_useful_threads
@@ -1458,11 +1455,11 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
 
   ICHECK(have_succeeded) << "Failed to find a suitable instruction for tcgen05."
                          << (is_ld ? "ld" : "st")
-                         << ". Check your layout. tmem_buf="
-                         << tmem_buf->name << " reg_buf=" << reg_buf->name
-                         << " tmem_phy_row=[" << tmem_phy_row_min << ", "
-                         << tmem_phy_row_max << "] tmem_phy_col=["
-                         << tmem_phy_col_min << ", " << tmem_phy_col_max
+                         << ". Check your layout. tmem_buf=" << tmem_buf->name
+                         << " reg_buf=" << reg_buf->name << " tmem_phy_row=["
+                         << tmem_phy_row_min << ", " << tmem_phy_row_max
+                         << "] tmem_phy_col=[" << tmem_phy_col_min << ", "
+                         << tmem_phy_col_max
                          << "] tmem_phy_col_extent=" << tmem_phy_col_extent
                          << " thread_bounds=" << lower_args.thread_bounds
                          << " logical_row_min=" << logical_row_min
@@ -1732,8 +1729,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
       << "plain SMEM layout is not a bijection (gapped or non-injective): "
       << "RightInverse covers " << inv_size << " of " << tile_size
       << " elements for src=" << src->name << ", dst=" << dst->name
-      << ", shared=" << shared_tensor->name
-      << ", smem_plain=" << smem_plain
+      << ", shared=" << shared_tensor->name << ", smem_plain=" << smem_plain
       << ", tile_to_smem_plain=" << tile_to_smem_plain
       << "; try to use annotate_layout to make your SMEM tile contiguous";
 
@@ -2051,10 +2047,10 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
       if (is_cluster_barrier && TargetIsSm100(lower_args.target) && is_load) {
         ann_loop.Set("use_2cta", Bool(true));
       }
-      Stmt multicast_copy = For(
-          loop_var, 0, loop_extent, ForKind::kUnrolled,
-          Evaluate(Call(DataType::Handle(), tma_load_multicast(), mc_args,
-                        ann_loop)));
+      Stmt multicast_copy =
+          For(loop_var, 0, loop_extent, ForKind::kUnrolled,
+              Evaluate(Call(DataType::Handle(), tma_load_multicast(), mc_args,
+                            ann_loop)));
 
       int min_cta_rank = MinRankInClusterMask(cluster_mask);
       PrimExpr block_rank =
@@ -2093,9 +2089,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
       if (is_cluster_barrier && TargetIsSm100(lower_args.target) && is_load) {
         ann.Set("use_2cta", Bool(true));
       }
-      Stmt multicast_copy =
-          Evaluate(Call(DataType::Handle(), tma_load_multicast(), mc_args,
-                        ann));
+      Stmt multicast_copy = Evaluate(
+          Call(DataType::Handle(), tma_load_multicast(), mc_args, ann));
 
       int min_cta_rank = MinRankInClusterMask(cluster_mask);
       PrimExpr block_rank =

@@ -3671,8 +3671,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     // args[13] reserved for future mask/flags. args[14] is the internal
     // block-scaled ISA kind: 0=mxf8f6f4, 1=mxf4nvf4, 2=mxf4.
     int blockscale_kind = Downcast<IntImm>(op->args[14])->value;
-    ICHECK(blockscale_kind == 0 || blockscale_kind == 1 ||
-           blockscale_kind == 2)
+    ICHECK(blockscale_kind == 0 || blockscale_kind == 1 || blockscale_kind == 2)
         << "Unsupported blockscaled tcgen05 kind: " << blockscale_kind;
     bool is_nvfp4 = blockscale_kind == 1;
     bool is_mxf4 = blockscale_kind == 2;
@@ -3686,14 +3685,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         is_nvfp4
             ? "tl::tmem_u8_addr((*reinterpret_cast<uint32_t*>(" + sfa_ref +
                   ")), " + sfa_offset + ")"
-            : "(*reinterpret_cast<uint32_t*>(" + sfa_ref + ")) + " +
-                  sfa_offset;
+            : "(*reinterpret_cast<uint32_t*>(" + sfa_ref + ")) + " + sfa_offset;
     std::string sfb_arg =
         is_nvfp4
             ? "tl::tmem_u8_addr((*reinterpret_cast<uint32_t*>(" + sfb_ref +
                   ")), " + sfb_offset + ")"
-            : "(*reinterpret_cast<uint32_t*>(" + sfb_ref + ")) + " +
-                  sfb_offset;
+            : "(*reinterpret_cast<uint32_t*>(" + sfb_ref + ")) + " + sfb_offset;
     std::string tcgen05_call =
         "tl::(tcgen05_name)<(ABType), (USE_2CTA)>(uint64_t((desc_a) + "
         "(A_offset)), "
@@ -3712,10 +3709,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(C)", c_ref);
     replacer.register_rule("(C_offset)", c_offset);
     replacer.register_rule(
-        "(tcgen05_name)",
-        is_nvfp4 ? "tcgen05mma_blockscaled_nvfp4_ss"
-                 : (is_mxf4 ? "tcgen05mma_blockscaled_mxf4_ss"
-                            : "tcgen05mma_blockscaled_ss"));
+        "(tcgen05_name)", is_nvfp4 ? "tcgen05mma_blockscaled_nvfp4_ss"
+                                   : (is_mxf4 ? "tcgen05mma_blockscaled_mxf4_ss"
+                                              : "tcgen05mma_blockscaled_ss"));
     replacer.register_rule("(scale_out)", scale_out);
     replacer.register_rule("(desc_val)", this->PrintExpr(desc_expr));
     replacer.register_rule("(SFA)", sfa_ref);

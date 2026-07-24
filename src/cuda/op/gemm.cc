@@ -360,8 +360,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
         return Integer(static_cast<int64_t>(desc));
       });
   refl::GlobalDef().def_packed(
-      "tl.get_tcgen5_blockscaled_instr_desc",
-      [](PackedArgs args, Any *ret) {
+      "tl.get_tcgen5_blockscaled_instr_desc", [](PackedArgs args, Any *ret) {
         ICHECK(args.size() == 10 || args.size() == 11)
             << "tl.get_tcgen5_blockscaled_instr_desc expects 10 or 11 "
                "arguments, got "

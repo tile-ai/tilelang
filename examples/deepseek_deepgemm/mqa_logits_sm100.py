@@ -356,6 +356,7 @@ extern "C" __device__ __forceinline__ void tl_mqa_fp4_epilogue_half_cached_h64(
 }
 """
 
+
 def _ceil_div(x: int, y: int) -> int:
     return (x + y - 1) // y
 
@@ -438,6 +439,7 @@ def ref_mqa_logits(
         mask = (cols[None, :] >= ks[start:end, None]) & (cols[None, :] < ke[start:end, None])
         logits[start:end] = part.masked_fill(~mask, float("-inf"))
     return logits
+
 
 @tilelang.jit(
     pass_configs={
@@ -794,47 +796,52 @@ def mqa_logits_fp4_persistent_ws_kernel(
 
         elif 128 <= tx < 256:
             T.inc_max_nreg(224)
-            T.evaluate(T.call_extern(
-                "handle",
-                "tl_mqa_fp4_epilogue_half_cached_h64",
-                c_tmem[0, 0],
-                T.address_of(q_loaded[0]),
-                T.address_of(q_empty[0]),
-                T.address_of(tmem_full[0]),
-                T.address_of(tmem_empty[0]),
-                T.address_of(KS[0]),
-                T.address_of(KE[0]),
-                T.address_of(Logits[0, 0]),
-                T.address_of(weights_shared[0, 0, 0]),
-                block_id,
-                sm_num,
-                num_q_blocks,
-                logits_stride,
-                0,
-            ))
+            T.evaluate(
+                T.call_extern(
+                    "handle",
+                    "tl_mqa_fp4_epilogue_half_cached_h64",
+                    c_tmem[0, 0],
+                    T.address_of(q_loaded[0]),
+                    T.address_of(q_empty[0]),
+                    T.address_of(tmem_full[0]),
+                    T.address_of(tmem_empty[0]),
+                    T.address_of(KS[0]),
+                    T.address_of(KE[0]),
+                    T.address_of(Logits[0, 0]),
+                    T.address_of(weights_shared[0, 0, 0]),
+                    block_id,
+                    sm_num,
+                    num_q_blocks,
+                    logits_stride,
+                    0,
+                )
+            )
 
         elif 256 <= tx < 384:
             T.inc_max_nreg(224)
-            T.evaluate(T.call_extern(
-                "handle",
-                "tl_mqa_fp4_epilogue_half_cached_h64",
-                c_tmem[0, 0],
-                T.address_of(q_loaded[0]),
-                T.address_of(q_empty[0]),
-                T.address_of(tmem_full[0]),
-                T.address_of(tmem_empty[0]),
-                T.address_of(KS[0]),
-                T.address_of(KE[0]),
-                T.address_of(Logits[0, 0]),
-                T.address_of(weights_shared[0, 0, 0]),
-                block_id,
-                sm_num,
-                num_q_blocks,
-                logits_stride,
-                half_kv,
-            ))
+            T.evaluate(
+                T.call_extern(
+                    "handle",
+                    "tl_mqa_fp4_epilogue_half_cached_h64",
+                    c_tmem[0, 0],
+                    T.address_of(q_loaded[0]),
+                    T.address_of(q_empty[0]),
+                    T.address_of(tmem_full[0]),
+                    T.address_of(tmem_empty[0]),
+                    T.address_of(KS[0]),
+                    T.address_of(KE[0]),
+                    T.address_of(Logits[0, 0]),
+                    T.address_of(weights_shared[0, 0, 0]),
+                    block_id,
+                    sm_num,
+                    num_q_blocks,
+                    logits_stride,
+                    half_kv,
+                )
+            )
 
         T.sync_threads()
+
 
 @tilelang.jit(
     pass_configs={
@@ -1141,26 +1148,30 @@ def mqa_logits_fp8_persistent_ws_kernel(
                     T.tcgen05_after_thread_sync()
                     bn_epi0 = tx - 128
                     if logits_dtype == T.float32:
-                        T.evaluate(T.call_extern(
-                            "handle",
-                            "tl_mqa_wrelu_tmem_reduce64_v4w_store_f32",
-                            c_tmem[0, tmem_col],
-                            0 * heads,
-                            T.address_of(weights_shared[q_stage, 0, 0]),
-                            kv_scale_shared[stage, bn_epi0],
-                            T.address_of(Logits[0, 0]),
-                            (q_row + 0) * logits_stride + kv_row + bn_epi0,
-                        ))
-                        T.evaluate(T.call_extern(
-                            "handle",
-                            "tl_mqa_wrelu_tmem_reduce64_v4w_store_f32",
-                            c_tmem[0, tmem_col],
-                            1 * heads,
-                            T.address_of(weights_shared[q_stage, 1, 0]),
-                            kv_scale_shared[stage, bn_epi0],
-                            T.address_of(Logits[0, 0]),
-                            (q_row + 1) * logits_stride + kv_row + bn_epi0,
-                        ))
+                        T.evaluate(
+                            T.call_extern(
+                                "handle",
+                                "tl_mqa_wrelu_tmem_reduce64_v4w_store_f32",
+                                c_tmem[0, tmem_col],
+                                0 * heads,
+                                T.address_of(weights_shared[q_stage, 0, 0]),
+                                kv_scale_shared[stage, bn_epi0],
+                                T.address_of(Logits[0, 0]),
+                                (q_row + 0) * logits_stride + kv_row + bn_epi0,
+                            )
+                        )
+                        T.evaluate(
+                            T.call_extern(
+                                "handle",
+                                "tl_mqa_wrelu_tmem_reduce64_v4w_store_f32",
+                                c_tmem[0, tmem_col],
+                                1 * heads,
+                                T.address_of(weights_shared[q_stage, 1, 0]),
+                                kv_scale_shared[stage, bn_epi0],
+                                T.address_of(Logits[0, 0]),
+                                (q_row + 1) * logits_stride + kv_row + bn_epi0,
+                            )
+                        )
                     else:
                         result_epi0_q0 = T.call_extern(
                             "float32",
@@ -1239,26 +1250,30 @@ def mqa_logits_fp8_persistent_ws_kernel(
                     T.tcgen05_after_thread_sync()
                     bn_epi1 = tx - 256
                     if logits_dtype == T.float32:
-                        T.evaluate(T.call_extern(
-                            "handle",
-                            "tl_mqa_wrelu_tmem_reduce64_v4w_store_f32",
-                            c_tmem[0, tmem_col],
-                            0 * heads,
-                            T.address_of(weights_shared[q_stage, 0, 0]),
-                            kv_scale_shared[stage, half_kv + bn_epi1],
-                            T.address_of(Logits[0, 0]),
-                            (q_row + 0) * logits_stride + kv_row + half_kv + bn_epi1,
-                        ))
-                        T.evaluate(T.call_extern(
-                            "handle",
-                            "tl_mqa_wrelu_tmem_reduce64_v4w_store_f32",
-                            c_tmem[0, tmem_col],
-                            1 * heads,
-                            T.address_of(weights_shared[q_stage, 1, 0]),
-                            kv_scale_shared[stage, half_kv + bn_epi1],
-                            T.address_of(Logits[0, 0]),
-                            (q_row + 1) * logits_stride + kv_row + half_kv + bn_epi1,
-                        ))
+                        T.evaluate(
+                            T.call_extern(
+                                "handle",
+                                "tl_mqa_wrelu_tmem_reduce64_v4w_store_f32",
+                                c_tmem[0, tmem_col],
+                                0 * heads,
+                                T.address_of(weights_shared[q_stage, 0, 0]),
+                                kv_scale_shared[stage, half_kv + bn_epi1],
+                                T.address_of(Logits[0, 0]),
+                                (q_row + 0) * logits_stride + kv_row + half_kv + bn_epi1,
+                            )
+                        )
+                        T.evaluate(
+                            T.call_extern(
+                                "handle",
+                                "tl_mqa_wrelu_tmem_reduce64_v4w_store_f32",
+                                c_tmem[0, tmem_col],
+                                1 * heads,
+                                T.address_of(weights_shared[q_stage, 1, 0]),
+                                kv_scale_shared[stage, half_kv + bn_epi1],
+                                T.address_of(Logits[0, 0]),
+                                (q_row + 1) * logits_stride + kv_row + half_kv + bn_epi1,
+                            )
+                        )
                     else:
                         result_epi1_q0 = T.call_extern(
                             "float32",
@@ -1293,6 +1308,7 @@ def mqa_logits_fp8_persistent_ws_kernel(
 
         T.sync_threads()
 
+
 def calc_diff(x: torch.Tensor, y: torch.Tensor) -> float:
     x = x.double().flatten()
     y = y.double().flatten()
@@ -1314,12 +1330,7 @@ def pack_sf_u8_to_u32_1d(sf_u8: torch.Tensor) -> torch.Tensor:
     _, sf_k_padded = sf_u8.shape
     assert sf_k_padded % 4 == 0
     words = sf_u8.to(torch.int64)
-    packed = (
-        words[:, 0::4]
-        | (words[:, 1::4] << 8)
-        | (words[:, 2::4] << 16)
-        | (words[:, 3::4] << 24)
-    ).to(torch.uint32)
+    packed = (words[:, 0::4] | (words[:, 1::4] << 8) | (words[:, 2::4] << 16) | (words[:, 3::4] << 24)).to(torch.uint32)
     return packed.T.contiguous().reshape(-1)
 
 
@@ -1359,9 +1370,7 @@ def quantize_float_to_fp4_packed(x: torch.Tensor) -> torch.Tensor:
     return (lo | (hi << 4)).to(torch.int8)
 
 
-def quantize_mxfp4_with_packed_ue8m0(
-    x: torch.Tensor, gran_k: int = 32
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def quantize_mxfp4_with_packed_ue8m0(x: torch.Tensor, gran_k: int = 32) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert x.dim() == 2
     assert x.size(1) % 2 == 0
     mn, k = x.shape
@@ -1371,9 +1380,7 @@ def quantize_mxfp4_with_packed_ue8m0(
     x_view = x_padded.view(mn, padded_k // gran_k, gran_k)
     amax = x_view.abs().float().amax(dim=2).clamp_min(1e-4)
     sf = ceil_to_ue8m0(amax / 6.0)
-    x_fp4 = quantize_float_to_fp4_packed((x_view * (1.0 / sf.unsqueeze(2))).reshape(mn, padded_k))[
-        :, : k // 2
-    ].contiguous()
+    x_fp4 = quantize_float_to_fp4_packed((x_view * (1.0 / sf.unsqueeze(2))).reshape(mn, padded_k))[:, : k // 2].contiguous()
     sf_u8 = (sf.contiguous().view(torch.int32) >> 23).to(torch.uint8)
     sf_k_padded = _align_up(sf_u8.shape[1], 4)
     if sf_k_padded != sf_u8.shape[1]:
@@ -1384,9 +1391,7 @@ def quantize_mxfp4_with_packed_ue8m0(
     return x_fp4, pack_sf_u8_to_u32_1d(sf_padded), sf_u8
 
 
-def cast_back_from_mxfp4(
-    x_fp4: torch.Tensor, sf_packed: torch.Tensor, logical_k: int, gran_k: int = 32
-) -> torch.Tensor:
+def cast_back_from_mxfp4(x_fp4: torch.Tensor, sf_packed: torch.Tensor, logical_k: int, gran_k: int = 32) -> torch.Tensor:
     u = x_fp4.contiguous().view(torch.uint8)
     lut = fp4_lut(u.device)
     lo = lut[(u & 0x0F).long()]
@@ -1446,12 +1451,8 @@ def prepare_mqa_data(config: MQALogitsConfig, dtype: str):
 
     q_fp4 = quantize_mxfp4_with_packed_ue8m0(q.view(-1, config.head_dim), gran_k=32)
     kv_fp4 = quantize_mxfp4_with_packed_ue8m0(kv.view(-1, config.head_dim), gran_k=32)
-    q_sim = cast_back_from_mxfp4(q_fp4[0], q_fp4[1], config.head_dim, gran_k=32).view(
-        config.seq_len, config.num_heads, config.head_dim
-    )
-    kv_sim = cast_back_from_mxfp4(kv_fp4[0], kv_fp4[1], config.head_dim, gran_k=32).view(
-        config.seq_len_kv, config.head_dim
-    )
+    q_sim = cast_back_from_mxfp4(q_fp4[0], q_fp4[1], config.head_dim, gran_k=32).view(config.seq_len, config.num_heads, config.head_dim)
+    kv_sim = cast_back_from_mxfp4(kv_fp4[0], kv_fp4[1], config.head_dim, gran_k=32).view(config.seq_len_kv, config.head_dim)
     q_in = (
         q_fp4[0].view(config.seq_len, config.num_heads, config.head_dim // 2).contiguous(),
         q_fp4[1].view(config.seq_len, config.num_heads).contiguous(),
@@ -1566,10 +1567,7 @@ def run_example_case(config: MQALogitsConfig, dtype: str, check: bool = True) ->
     if check:
         threshold = 2e-3 if dtype == "fp4" else 1e-4
         assert diff < threshold, f"{dtype} diff {diff} >= {threshold}"
-    print(
-        f"{dtype} s{config.seq_len}_skv{config.seq_len_kv}_h{config.num_heads}_d{config.head_dim}_"
-        f"{config.logits_dtype}: diff={diff:.3e}"
-    )
+    print(f"{dtype} s{config.seq_len}_skv{config.seq_len_kv}_h{config.num_heads}_d{config.head_dim}_{config.logits_dtype}: diff={diff:.3e}")
 
 
 def main() -> None:

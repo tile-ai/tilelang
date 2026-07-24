@@ -12,10 +12,15 @@ from tilelang.layout import (
     Layout,
     SwizzleMode,
     cute,
+    make_full_bank_swizzled_layout,
+    make_half_bank_swizzled_layout,
+    make_linear_layout,
+    make_quarter_bank_swizzled_layout,
 )
 from tvm.runtime import convert
 
 lift = convert
+_ZERO_I32 = tvm.tirx.const(0, "int32")
 
 
 def _min_leaf_stride(stride) -> int:
@@ -289,7 +294,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         C_local_buf: Buffer,
         mbar,
         clear_accum: PrimExpr = False,
-        c_col_offset: PrimExpr = tvm.tirx.const(0, "int32"),
+        c_col_offset: PrimExpr = _ZERO_I32,
     ):
         """Emit a TCGEN5MMA operation, dispatching to SS or TS variant based on A's memory scope.
 
@@ -320,7 +325,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         C_local_buf: Buffer,
         mbar,
         clear_accum: PrimExpr = False,
-        c_col_offset: PrimExpr = tvm.tirx.const(0, "int32"),
+        c_col_offset: PrimExpr = _ZERO_I32,
     ):
         """Emit the SS (Shared-Shared) variant of TCGEN5MMA.
 
@@ -384,7 +389,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         C_local_buf,
         mbar,
         clear_accum: PrimExpr = False,
-        c_col_offset: PrimExpr = tvm.tirx.const(0, "int32"),
+        c_col_offset: PrimExpr = _ZERO_I32,
     ):
         """Emit the TS (TensorMemory-Shared) variant of TCGEN5MMA.
 
@@ -461,9 +466,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         sf_b_granularity_k: int,
         blockscale_format: str = "mx",
         clear_accum: PrimExpr = False,
-        c_col_offset: PrimExpr = tvm.tirx.const(0, "int32"),
-        sfa_col_offset: PrimExpr = tvm.tirx.const(0, "int32"),
-        sfb_col_offset: PrimExpr = tvm.tirx.const(0, "int32"),
+        c_col_offset: PrimExpr = _ZERO_I32,
+        sfa_col_offset: PrimExpr = _ZERO_I32,
+        sfb_col_offset: PrimExpr = _ZERO_I32,
     ):
         """Emit a block-scaled TCGEN5MMA (SS variant with TMEM scale factors).
 
@@ -916,7 +921,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         b_params: TCGEN05DescriptorParams,
         instr_desc: PrimExpr,
         clear_accum: PrimExpr = False,
-        c_col_offset: PrimExpr = tvm.tirx.const(0, "int32"),
+        c_col_offset: PrimExpr = _ZERO_I32,
     ):
         """Emit a single TCGEN05MMA SS instruction for atom ``(inst_m_idx, inst_n_idx, ki)``.
 
@@ -1021,7 +1026,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         b_params: TCGEN05DescriptorParams,
         instr_desc: PrimExpr,
         clear_accum: PrimExpr = False,
-        c_col_offset: PrimExpr = tvm.tirx.const(0, "int32"),
+        c_col_offset: PrimExpr = _ZERO_I32,
     ):
         """Emit a single TCGEN05MMA TS instruction for atom ``(inst_m_idx, inst_n_idx, ki)``.
 
@@ -1122,9 +1127,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         instr_desc: PrimExpr,
         blockscale_format: str = "mx",
         clear_accum: PrimExpr = False,
-        c_col_offset: PrimExpr = tvm.tirx.const(0, "int32"),
-        sfa_col_offset: PrimExpr = tvm.tirx.const(0, "int32"),
-        sfb_col_offset: PrimExpr = tvm.tirx.const(0, "int32"),
+        c_col_offset: PrimExpr = _ZERO_I32,
+        sfa_col_offset: PrimExpr = _ZERO_I32,
+        sfb_col_offset: PrimExpr = _ZERO_I32,
     ):
         """Emit a single TCGEN05MMA block-scaled SS instruction.
 

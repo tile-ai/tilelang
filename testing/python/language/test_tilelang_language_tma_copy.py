@@ -325,7 +325,6 @@ def fp4_tma_copy_unpacked_smem_store(M=128, N=256, block_M=64, block_N=128):
     return main
 
 
-
 def fp4_staged_tma_copy_load(M=128, N=256, block_M=64, block_N=128, num_stages=4):
     @T.prim_func
     def main(

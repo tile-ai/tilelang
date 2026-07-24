@@ -810,11 +810,13 @@ TL_DEVICE void tcgen05mma_blockscaled_ss<DataType::kFloat4_e2m1fn, true>(
 // tcgen05.mma.cta_group::{1,2}.kind::mxf4.block_scale.block32
 // Uses packed FP4 E2M1 operands and UE8M0 block32 scale factors.
 template <DataType C_type, bool use_2cta = false>
-TL_DEVICE void tcgen05mma_blockscaled_mxf4_ss(
-    uint64_t const & /*desc_a*/, uint64_t const & /*desc_b*/,
-    uint32_t const & /*tmem_c*/, uint32_t const & /*scalec*/,
-    uint32_t const & /*desc_val*/, uint32_t const & /*tmem_sfa*/,
-    uint32_t const & /*tmem_sfb*/) {
+TL_DEVICE void tcgen05mma_blockscaled_mxf4_ss(uint64_t const & /*desc_a*/,
+                                              uint64_t const & /*desc_b*/,
+                                              uint32_t const & /*tmem_c*/,
+                                              uint32_t const & /*scalec*/,
+                                              uint32_t const & /*desc_val*/,
+                                              uint32_t const & /*tmem_sfa*/,
+                                              uint32_t const & /*tmem_sfb*/) {
   static_assert(
       always_false_v<std::integral_constant<int, static_cast<int>(C_type)>>,
       "tl::tcgen05mma_blockscaled_mxf4_ss: unsupported operand type");
@@ -826,7 +828,7 @@ TL_DEVICE void tcgen05mma_blockscaled_mxf4_ss<DataType::kFloat4_e2m1fn, false>(
     uint32_t const &scalec, uint32_t const &desc_val, uint32_t const &tmem_sfa,
     uint32_t const &tmem_sfb) {
   if (cute::elect_one_sync()) {
-#if (__CUDACC_VER_MAJOR__ > 12) ||                                            \
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
     (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9)
     asm volatile(
         "{\n\t"
@@ -859,7 +861,7 @@ TL_DEVICE void tcgen05mma_blockscaled_mxf4_ss<DataType::kFloat4_e2m1fn, true>(
     uint32_t const &scalec, uint32_t const &desc_val, uint32_t const &tmem_sfa,
     uint32_t const &tmem_sfb) {
   if (cute::elect_one_sync()) {
-#if (__CUDACC_VER_MAJOR__ > 12) ||                                            \
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
     (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9)
     asm volatile(
         "{\n\t"
@@ -890,27 +892,28 @@ TL_DEVICE void tcgen05mma_blockscaled_mxf4_ss<DataType::kFloat4_e2m1fn, true>(
 // tcgen05.mma.cta_group::{1,2}.kind::mxf4nvf4.block_scale.block16
 // Uses packed FP4 E2M1 operands and UE4M3 block16 scale factors.
 template <DataType C_type, bool use_2cta = false>
-TL_DEVICE void tcgen05mma_blockscaled_nvfp4_ss(
-    uint64_t const & /*desc_a*/, uint64_t const & /*desc_b*/,
-    uint32_t const & /*tmem_c*/, uint32_t const & /*scalec*/,
-    uint32_t const & /*desc_val*/, uint32_t const & /*tmem_sfa*/,
-    uint32_t const & /*tmem_sfb*/) {
+TL_DEVICE void tcgen05mma_blockscaled_nvfp4_ss(uint64_t const & /*desc_a*/,
+                                               uint64_t const & /*desc_b*/,
+                                               uint32_t const & /*tmem_c*/,
+                                               uint32_t const & /*scalec*/,
+                                               uint32_t const & /*desc_val*/,
+                                               uint32_t const & /*tmem_sfa*/,
+                                               uint32_t const & /*tmem_sfb*/) {
   static_assert(
       always_false_v<std::integral_constant<int, static_cast<int>(C_type)>>,
       "tl::tcgen05mma_blockscaled_nvfp4_ss: unsupported operand type");
 }
 
 template <>
-TL_DEVICE void
-tcgen05mma_blockscaled_nvfp4_ss<DataType::kFloat4_e2m1fn, false>(
+TL_DEVICE void tcgen05mma_blockscaled_nvfp4_ss<DataType::kFloat4_e2m1fn, false>(
     uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
     uint32_t const &scalec, uint32_t const &desc_val, uint32_t const &tmem_sfa,
     uint32_t const &tmem_sfb) {
   if (cute::elect_one_sync()) {
-    uint32_t const runtime_desc_val =
-        desc_val | ((tmem_sfa & 0xC0000000u) >> 1) |
-        (((tmem_sfb & 0xC0000000u) >> 30) << 4);
-#if (__CUDACC_VER_MAJOR__ > 12) ||                                            \
+    uint32_t const runtime_desc_val = desc_val |
+                                      ((tmem_sfa & 0xC0000000u) >> 1) |
+                                      (((tmem_sfb & 0xC0000000u) >> 30) << 4);
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
     (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9)
     asm volatile(
         "{\n\t"
@@ -920,8 +923,8 @@ tcgen05mma_blockscaled_nvfp4_ss<DataType::kFloat4_e2m1fn, false>(
         "%1, %2, %3, [%5], [%6], p; \n\t"
         "}\n"
         :
-        : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(runtime_desc_val), "r"(scalec),
-          "r"(tmem_sfa), "r"(tmem_sfb));
+        : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(runtime_desc_val),
+          "r"(scalec), "r"(tmem_sfa), "r"(tmem_sfb));
 #else
     asm volatile(
         "{\n\t"
@@ -931,23 +934,22 @@ tcgen05mma_blockscaled_nvfp4_ss<DataType::kFloat4_e2m1fn, false>(
         "[%0], %1, %2, %3, [%5], [%6], p; \n\t"
         "}\n"
         :
-        : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(runtime_desc_val), "r"(scalec),
-          "r"(tmem_sfa), "r"(tmem_sfb));
+        : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(runtime_desc_val),
+          "r"(scalec), "r"(tmem_sfa), "r"(tmem_sfb));
 #endif
   }
 }
 
 template <>
-TL_DEVICE void
-tcgen05mma_blockscaled_nvfp4_ss<DataType::kFloat4_e2m1fn, true>(
+TL_DEVICE void tcgen05mma_blockscaled_nvfp4_ss<DataType::kFloat4_e2m1fn, true>(
     uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
     uint32_t const &scalec, uint32_t const &desc_val, uint32_t const &tmem_sfa,
     uint32_t const &tmem_sfb) {
   if (cute::elect_one_sync()) {
-    uint32_t const runtime_desc_val =
-        desc_val | ((tmem_sfa & 0xC0000000u) >> 1) |
-        (((tmem_sfb & 0xC0000000u) >> 30) << 4);
-#if (__CUDACC_VER_MAJOR__ > 12) ||                                            \
+    uint32_t const runtime_desc_val = desc_val |
+                                      ((tmem_sfa & 0xC0000000u) >> 1) |
+                                      (((tmem_sfb & 0xC0000000u) >> 30) << 4);
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
     (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9)
     asm volatile(
         "{\n\t"
@@ -957,8 +959,8 @@ tcgen05mma_blockscaled_nvfp4_ss<DataType::kFloat4_e2m1fn, true>(
         "%1, %2, %3, [%5], [%6], p; \n\t"
         "}\n"
         :
-        : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(runtime_desc_val), "r"(scalec),
-          "r"(tmem_sfa), "r"(tmem_sfb));
+        : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(runtime_desc_val),
+          "r"(scalec), "r"(tmem_sfa), "r"(tmem_sfb));
 #else
     asm volatile(
         "{\n\t"
@@ -968,8 +970,8 @@ tcgen05mma_blockscaled_nvfp4_ss<DataType::kFloat4_e2m1fn, true>(
         "[%0], %1, %2, %3, [%5], [%6], p; \n\t"
         "}\n"
         :
-        : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(runtime_desc_val), "r"(scalec),
-          "r"(tmem_sfa), "r"(tmem_sfb));
+        : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(runtime_desc_val),
+          "r"(scalec), "r"(tmem_sfa), "r"(tmem_sfb));
 #endif
   }
 }
