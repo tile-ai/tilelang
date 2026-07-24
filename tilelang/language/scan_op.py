@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from tilelang._typing import BufferLikeType
-from tilelang.language import alloc_shared, copy, macro
+from tilelang.language.common import alloc_shared, copy, macro
 from tilelang.utils.language import _get_buffer, is_fragment, retrieve_shape, to_tile_region
 from tvm import tirx
 

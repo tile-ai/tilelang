@@ -219,11 +219,6 @@ if not env.is_light_import():
     from . import rocm as rocm  # noqa: F401
     from . import metal as metal  # noqa: F401
 
-    from .language import _activate_cuda_facade
-
-    _activate_cuda_facade()
-    del _activate_cuda_facade
-
     if env.get_lower_trace_mode() is not None:
         from .tools.lower_trace import enable as _lower_trace_enable
 

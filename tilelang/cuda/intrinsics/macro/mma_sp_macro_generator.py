@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tilelang.language as T
+import tilelang.language.dtypes as _dtypes
 from typing import Literal
 from collections.abc import Callable
 from tvm import DataType, tirx
@@ -12,7 +13,7 @@ from ..layout.utils import (
     get_ldmatrix_offset,
 )
 from tilelang.utils import is_fragment, get_buffer_region_from_load
-from tilelang.utils.sparse import get_e_factor, get_e_replicate_factor
+from tilelang.cuda.intrinsics.sparse_layout import get_e_factor, get_e_replicate_factor
 
 from tilelang.cuda.intrinsics.layout.mma_sp_layout import (
     shared_16x16_to_mma_sp_layout_sr_a,
@@ -67,10 +68,10 @@ class SparseTensorCoreIntrinEmitter:
 
     def __init__(
         self,
-        a_dtype: str = T.float16,
-        e_dtype: str = T.uint8,
-        b_dtype: str = T.float16,
-        accum_dtype: str = T.float16,
+        a_dtype: str = _dtypes.float16,
+        e_dtype: str = _dtypes.uint8,
+        b_dtype: str = _dtypes.float16,
+        accum_dtype: str = _dtypes.float16,
         a_transposed: bool = False,
         b_transposed: bool = False,
         e_transposed: bool = False,
@@ -115,7 +116,7 @@ class SparseTensorCoreIntrinEmitter:
                 f"Invalid threads configuration for this tile shape, {self.warp_rows} x {self.warp_cols} with threads {self.threads}"
             )
 
-    def _initialize_k_dim(self, a_dtype=T.float16):
+    def _initialize_k_dim(self, a_dtype=_dtypes.float16):
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
         # NOTE: k_dim here represents the logical shape of the MMA operation.

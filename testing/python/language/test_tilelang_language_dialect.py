@@ -5,6 +5,12 @@ import pytest
 import tilelang
 import tilelang.language as default_language
 import tilelang.language.common as common_language
+from tilelang.language.tir.exports import (
+    CLASSIFIED_VENDOR_TIR_EXPORTS,
+    CUDA_ONLY_TIR_EXPORTS,
+    METAL_ONLY_TIR_EXPORTS,
+    SHARED_LEGACY_TIR_EXPORTS,
+)
 
 
 CUDA_ONLY_NAMES = {
@@ -43,6 +49,8 @@ def test_common_language_preserves_special_dsl_exports():
     assert common_language.__tilelang_dialect__ == "common"
     assert "__log" in common_language.__all__
     assert hasattr(common_language, "__log")
+    assert CUDA_ONLY_TIR_EXPORTS.isdisjoint(common_language.__all__)
+    assert METAL_ONLY_TIR_EXPORTS.isdisjoint(common_language.__all__)
 
 
 def test_cuda_language_composes_common_and_cuda_symbols():
@@ -55,6 +63,7 @@ def test_cuda_language_composes_common_and_cuda_symbols():
     assert T.wgmma_mma is T.wgmma_gemm
     assert T.device_assert is cuda_debug.device_assert
     assert set(T.__all__) >= CUDA_ONLY_NAMES
+    assert set(T.__all__) >= CUDA_ONLY_TIR_EXPORTS
     assert hasattr(T, "TCGEN05TensorCoreIntrinEmitter")
     assert hasattr(T, "WGMMATensorCoreIntrinEmitter")
 
@@ -69,6 +78,20 @@ def test_rocm_language_composes_common_and_rocm_symbols():
     assert set(T.__all__) >= ROCM_ONLY_NAMES
     assert hasattr(T, "MatrixCoreIntrinEmitter")
     assert hasattr(T, "make_mfma_swizzle_layout")
+    assert set(T.__all__) >= SHARED_LEGACY_TIR_EXPORTS
+
+
+def test_metal_language_owns_simdgroup_tir_exports():
+    from tilelang.metal import language as T
+
+    assert set(T.__all__) >= METAL_ONLY_TIR_EXPORTS
+
+
+def test_upstream_vendor_tir_exports_are_classified():
+    import tvm.tirx.script.parser as upstream_tir_parser
+
+    vendor_exports = {name for name in upstream_tir_parser.__all__ if name.startswith("ptx_") or "simdgroup" in name}
+    assert vendor_exports <= CLASSIFIED_VENDOR_TIR_EXPORTS
 
 
 @pytest.mark.parametrize(
@@ -114,19 +137,3 @@ def test_cuda_whole_module_implementations_live_under_cuda():
     assert T.cluster_sync.__module__ == "tilelang.cuda.language.cluster"
     assert T.rng_init.__module__ == "tilelang.cuda.language.random"
     assert T.ws.__module__ == "tilelang.cuda.language.warpgroup"
-
-
-@pytest.mark.parametrize(
-    ("legacy_module", "cuda_module", "symbol"),
-    [
-        ("tilelang.language.cluster", "tilelang.cuda.language.cluster", "cluster_sync"),
-        ("tilelang.language.pdl", "tilelang.cuda.language.pdl", "pdl_trigger"),
-        ("tilelang.language.print_op", "tilelang.cuda.language.print", "print"),
-        ("tilelang.language.random", "tilelang.cuda.language.random", "rng_init"),
-        ("tilelang.language.warpgroup", "tilelang.cuda.language.warpgroup", "ws"),
-    ],
-)
-def test_legacy_cuda_module_paths_are_identity_preserving_wrappers(legacy_module, cuda_module, symbol):
-    legacy = importlib.import_module(legacy_module)
-    cuda = importlib.import_module(cuda_module)
-    assert getattr(legacy, symbol) is getattr(cuda, symbol)

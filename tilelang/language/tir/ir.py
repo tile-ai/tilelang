@@ -268,10 +268,8 @@ ptx_wait_group = _op_wrapper(_tir_op.ptx_wait_group)
 ptx_commit_group = _op_wrapper(_tir_op.ptx_commit_group)
 ptx_cp_async_barrier = _op_wrapper(_tir_op.ptx_cp_async_barrier)
 ptx_init_barrier_thread_count = _op_wrapper(_tir_op.ptx_init_barrier_thread_count)
-ptx_fence_barrier_init = _op_wrapper(_tir_op.ptx_fence_barrier_init)
 ptx_arrive_barrier = _op_wrapper(_tir_op.ptx_arrive_barrier)
 ptx_arrive_barrier_expect_tx = _op_wrapper(_tir_op.ptx_arrive_barrier_expect_tx)
-ptx_wait_barrier = _op_wrapper(_tir_op.ptx_wait_barrier)
 create_barriers = _op_wrapper(_tir_op.create_barriers)
 assume = _op_wrapper(_tir_op.assume)
 undef = _op_wrapper(_tir_op.undef)
@@ -293,18 +291,7 @@ call_intrin = _dtype_forward(_tir_op.call_intrin)
 call_llvm_intrin = _dtype_forward(_tir_op.call_llvm_intrin)
 call_llvm_pure_intrin = _dtype_forward(_tir_op.call_llvm_pure_intrin)
 call_pure_extern = _dtype_forward(_tir_op.call_pure_extern)
-ptx_mma = _dtype_forward(_tir_op.ptx_mma)
-ptx_mma_sp = _dtype_forward(_tir_op.ptx_mma_sp)
-ptx_wgmma_ss = _dtype_forward(_tir_op.ptx_wgmma_ss)
-ptx_wgmma_rs = _dtype_forward(_tir_op.ptx_wgmma_rs)
-ptx_wgmma_sp_ss = _dtype_forward(_tir_op.ptx_wgmma_sp_ss)
-ptx_wgmma_sp_rs = _dtype_forward(_tir_op.ptx_wgmma_sp_rs)
-ptx_tcgen05_mma_ss = _dtype_forward(_tir_op.ptx_tcgen05_mma_ss)
-ptx_tcgen05_mma_ts = _dtype_forward(_tir_op.ptx_tcgen05_mma_ts)
-ptx_tcgen05_mma_blockscaled_ss = _dtype_forward(_tir_op.ptx_tcgen05_mma_blockscaled_ss)
-ptx_ldmatrix = _tir_op.ptx_ldmatrix
 ptx_cp_async = _dtype_forward(_tir_op.ptx_cp_async)
-ptx_cp_async_bulk = _dtype_forward(_tir_op.ptx_cp_async_bulk)
 mma_store = _dtype_forward(_tir_op.mma_store)
 mma_fill = _dtype_forward(_tir_op.mma_fill)
 vectorlow = _dtype_forward(_tir_op.vectorlow)
@@ -375,3 +362,140 @@ def cast(value, dtype, round: str = "", sat: bool = True, rbits=None, span=None)
     # by ``topi.math.cast`` (a 2/3-arg signature) via TVM's GenericFunc
     # dispatch, so calling it would lose the ``annotations`` argument.
     return _tir_ffi._cast(dtype, value, annotations or None, span)
+
+
+# PrimExpr/IntImm/StringImm/Any are TVM/typing primitives re-exported as part of
+# the historical ``tilelang.language`` surface (e.g. ``T.PrimExpr``).
+__all__ = (
+    "Any",
+    "IntImm",
+    "PrimExpr",
+    "StringImm",
+    "TVMBackendAllocWorkspace",
+    "TVMBackendFreeWorkspace",
+    "abs",
+    "acos",
+    "acosh",
+    "address_of",
+    "align_up",
+    "anylist_getitem",
+    "anylist_resetitem",
+    "anylist_setitem_call_cpacked",
+    "anylist_setitem_call_packed",
+    "asin",
+    "asinh",
+    "assume",
+    "atan",
+    "atan2",
+    "atanh",
+    "bitwise_and",
+    "bitwise_not",
+    "bitwise_or",
+    "bitwise_xor",
+    "call_cpacked",
+    "call_cpacked_lowered",
+    "call_extern",
+    "call_intrin",
+    "call_llvm_intrin",
+    "call_llvm_pure_intrin",
+    "call_packed",
+    "call_packed_lowered",
+    "call_pure_extern",
+    "cast",
+    "cdiv",
+    "ceil",
+    "ceildiv",
+    "clz",
+    "copysign",
+    "cos",
+    "cosh",
+    "create_barriers",
+    "end_profile_intrinsic",
+    "erf",
+    "exp",
+    "exp10",
+    "exp2",
+    "floor",
+    "floordiv",
+    "floormod",
+    "fmod",
+    "grid",
+    "hypot",
+    "if_then_else",
+    "infinity",
+    "isfinite",
+    "isinf",
+    "isnan",
+    "isnullptr",
+    "ldexp",
+    "likely",
+    "log",
+    "log10",
+    "log1p",
+    "log2",
+    "lookup_param",
+    "max_value",
+    "min_value",
+    "mma_fill",
+    "mma_store",
+    "nearbyint",
+    "nextafter",
+    "parallel",
+    "popcount",
+    "pow",
+    "ptx_arrive_barrier",
+    "ptx_arrive_barrier_expect_tx",
+    "ptx_commit_group",
+    "ptx_cp_async",
+    "ptx_cp_async_barrier",
+    "ptx_init_barrier_thread_count",
+    "ptx_wait_group",
+    "q_multiply_shift",
+    "q_multiply_shift_per_axis",
+    "reinterpret",
+    "ret",
+    "round",
+    "rsqrt",
+    "serial",
+    "shift_left",
+    "shift_right",
+    "sigmoid",
+    "sin",
+    "sinh",
+    "sqrt",
+    "start_profile_intrinsic",
+    "tan",
+    "tanh",
+    "thread_binding",
+    "trunc",
+    "truncdiv",
+    "truncmod",
+    "tvm_access_ptr",
+    "tvm_bmma_sync",
+    "tvm_check_return",
+    "tvm_fill_fragment",
+    "tvm_load_matrix_sync",
+    "tvm_mma_sync",
+    "tvm_stack_alloca",
+    "tvm_stack_make_array",
+    "tvm_stack_make_shape",
+    "tvm_storage_sync",
+    "tvm_store_matrix_sync",
+    "tvm_struct_get",
+    "tvm_struct_set",
+    "tvm_thread_allreduce",
+    "tvm_thread_invariant",
+    "tvm_throw_last_error",
+    "tvm_tuple",
+    "tvm_warp_activemask",
+    "tvm_warp_shuffle",
+    "tvm_warp_shuffle_down",
+    "tvm_warp_shuffle_up",
+    "undef",
+    "unroll",
+    "vectorcombine",
+    "vectorhigh",
+    "vectorized",
+    "vectorlow",
+    "vscale",
+)

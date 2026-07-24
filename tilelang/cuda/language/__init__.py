@@ -56,6 +56,8 @@ from .print import *  # noqa: F401,F403
 from .print import __all__ as _PRINT_ALL
 from .random import *  # noqa: F401,F403
 from .random import __all__ as _RANDOM_ALL
+from .tir import *  # noqa: F401,F403
+from .tir import __all__ as _TIR_ALL
 from .warpgroup import *  # noqa: F401,F403
 from .warpgroup import __all__ as _WARPGROUP_ALL
 
@@ -120,9 +122,10 @@ __all__ = tuple(
             *_PDL_ALL,
             *_PRINT_ALL,
             *_RANDOM_ALL,
+            *_TIR_ALL,
             *_WARPGROUP_ALL,
         )
     )
 )
 
-del _CLUSTER_ALL, _COMMON_ALL, _CUDA_API_ALL, _INTRINSICS_ALL, _PDL_ALL, _PRINT_ALL, _RANDOM_ALL, _WARPGROUP_ALL
+del _CLUSTER_ALL, _COMMON_ALL, _CUDA_API_ALL, _INTRINSICS_ALL, _PDL_ALL, _PRINT_ALL, _RANDOM_ALL, _TIR_ALL, _WARPGROUP_ALL

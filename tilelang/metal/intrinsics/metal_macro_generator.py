@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import tilelang.language as T
+import tilelang.metal.language as T
 from tvm import tirx as tir
 from tvm.tirx import Buffer, BufferRegion
 

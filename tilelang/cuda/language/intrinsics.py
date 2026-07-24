@@ -55,7 +55,7 @@ from tilelang.language.gemm_op import (
     tcgen05_gemm_blockscaled,
     wgmma_gemm,
 )
-from tilelang.language.tir.ir import (
+from .tir import (
     ptx_cp_async,
     ptx_cp_async_barrier,
     ptx_cp_async_bulk,

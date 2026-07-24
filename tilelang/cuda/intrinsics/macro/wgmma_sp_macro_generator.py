@@ -2,6 +2,7 @@ from __future__ import annotations
 from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import gcd, compute_gmma_descriptor, WGMMADescriptorParams
 from tilelang.cuda.intrinsics.macro.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 import tilelang.language as T
+import tilelang.language.dtypes as _dtypes
 from tvm import DataType
 from tvm.tirx import PrimExpr, Buffer, Var, BufferRegion, IndexMap
 from tilelang.utils import is_fragment, is_shared, is_full_region
@@ -34,10 +35,10 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
 
     def __init__(
         self,
-        a_dtype: str = T.float16,
-        e_dtype: str = T.uint8,
-        b_dtype: str = T.float16,
-        accum_dtype: str = T.float16,
+        a_dtype: str = _dtypes.float16,
+        e_dtype: str = _dtypes.uint8,
+        b_dtype: str = _dtypes.float16,
+        accum_dtype: str = _dtypes.float16,
         a_transposed: bool = False,
         b_transposed: bool = False,
         e_transposed: bool = False,
