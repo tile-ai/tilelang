@@ -1,6 +1,6 @@
 /*!
  * \file tl/op/transpose.cc
- * \brief Transpose operator: dst[j, i] = src[i, j] using SIMT loops.
+ * \brief Transpose operator that swaps the final two axes using SIMT loops.
  */
 
 #include "transpose.h"
@@ -23,6 +23,30 @@ using namespace tirx;
 using namespace ffi;
 
 namespace {
+
+size_t SourceAxisForDestinationAxis(size_t dst_axis, size_t rank) {
+  ICHECK(rank >= 2) << "Transpose requires at least two dimensions";
+  if (dst_axis == rank - 2)
+    return rank - 1;
+  if (dst_axis == rank - 1)
+    return rank - 2;
+  return dst_axis;
+}
+
+std::vector<int> MakeSourceAxisToIterVarMap(Array<Range> ranges,
+                                            size_t iv_count) {
+  std::vector<int> source_axis_to_iv(ranges.size(), -1);
+  size_t iv_idx = 0;
+  for (size_t axis = 0; axis < ranges.size(); axis++) {
+    if (is_one(ranges[axis]->extent))
+      continue;
+    source_axis_to_iv[axis] = static_cast<int>(iv_idx++);
+  }
+  ICHECK_EQ(iv_idx, iv_count)
+      << "Transpose: source nontrivial dimensions (" << iv_idx
+      << ") != iterator count (" << iv_count << ")";
+  return source_axis_to_iv;
+}
 
 std::vector<TransposeImpl> &TransposeImplRegistry() {
   static std::vector<TransposeImpl> registry;
@@ -95,25 +119,17 @@ Array<PrimExpr> TransposeNode::MakeIndices(const Array<IterVar> &ivs,
   Array<Range> ranges = src_dst == 0 ? src_range : dst_range;
 
   if (src_dst == 1) {
-    // Transpose: reverse the loop variable assignment for non-trivial dims.
-    std::vector<size_t> nontrivial;
-    for (size_t i = 0; i < ranges.size(); i++) {
-      if (!is_one(ranges[i]->extent))
-        nontrivial.push_back(i);
-    }
-    ICHECK(nontrivial.size() == ivs.size())
-        << "Transpose: nontrivial dims (" << nontrivial.size()
-        << ") != ivs size (" << ivs.size() << ") for dst=" << dst->name;
-    size_t N = nontrivial.size();
-    size_t nt_idx = 0;
-    for (size_t i = 0; i < ranges.size(); i++) {
-      if (is_one(ranges[i]->extent)) {
-        indices.push_back(ranges[i]->min);
-      } else {
-        size_t rev = N - 1 - nt_idx;
-        indices.push_back(ranges[i]->min + ivs[rev]->var);
-        nt_idx++;
-      }
+    ICHECK_EQ(src_range.size(), ranges.size())
+        << "Transpose source and destination ranks must match";
+    std::vector<int> source_axis_to_iv =
+        MakeSourceAxisToIterVarMap(src_range, ivs.size());
+    for (size_t dst_axis = 0; dst_axis < ranges.size(); dst_axis++) {
+      size_t src_axis = SourceAxisForDestinationAxis(dst_axis, ranges.size());
+      int iv_idx = source_axis_to_iv[src_axis];
+      if (iv_idx < 0)
+        indices.push_back(ranges[dst_axis]->min);
+      else
+        indices.push_back(ranges[dst_axis]->min + ivs[iv_idx]->var);
     }
   } else {
     // Source: direct mapping.
@@ -134,34 +150,21 @@ Array<PrimExpr> TransposeNode::MakeIndices(const Array<IterVar> &ivs,
 }
 
 PrimExpr TransposeNode::MakePredicate(arith::Analyzer *analyzer,
-                                      const Array<IterVar> &ivs,
-                                      Array<PrimExpr> extents,
-                                      int src_dst) const {
-  bool do_transpose = (src_dst == 1);
-  Array<Range> ranges = src_dst == 0 ? src_range : dst_range;
-
-  size_t num_nontrivial = 0;
-  for (size_t i = 0; i < ranges.size(); i++) {
-    if (!is_one(ranges[i]->extent))
-      num_nontrivial++;
-  }
-
+                                      const Array<PrimExpr> &indices,
+                                      const Array<PrimExpr> &extents) const {
   Array<PrimExpr> cond_list;
-  ICHECK(extents.size() == ranges.size()) << extents << " " << ranges;
-  size_t idx = 0;
-  for (size_t i = 0; i < ranges.size(); i++) {
-    if (is_one(ranges[i]->extent))
-      continue;
-    size_t iv_idx = do_transpose ? (num_nontrivial - 1 - idx) : idx;
-    PrimExpr cond = ranges[i]->min + ivs[iv_idx]->var < extents[i];
+  ICHECK_EQ(indices.size(), extents.size())
+      << "Transpose index rank (" << indices.size()
+      << ") must match buffer rank (" << extents.size() << ")";
+  for (size_t i = 0; i < indices.size(); i++) {
+    PrimExpr cond = indices[i] < extents[i];
     if (!analyzer->CanProve(cond, arith::ProofStrength::kSymbolicBound)) {
       cond_list.push_back(cond);
     }
-    cond = ranges[i]->min + ivs[iv_idx]->var >= 0;
+    cond = indices[i] >= 0;
     if (!analyzer->CanProve(cond, arith::ProofStrength::kSymbolicBound)) {
       cond_list.push_back(cond);
     }
-    idx++;
   }
   if (cond_list.empty())
     return {};
@@ -181,8 +184,8 @@ For TransposeNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<PrimExpr> src_indices = MakeIndices(loop_vars, 0);
   Array<PrimExpr> dst_indices = MakeIndices(loop_vars, 1);
 
-  PrimExpr src_predicate = MakePredicate(analyzer, loop_vars, src->shape, 0);
-  PrimExpr dst_predicate = MakePredicate(analyzer, loop_vars, dst->shape, 1);
+  PrimExpr src_predicate = MakePredicate(analyzer, src_indices, src->shape);
+  PrimExpr dst_predicate = MakePredicate(analyzer, dst_indices, dst->shape);
 
   PrimExpr value = BufferLoad(src, src_indices);
   if (src->dtype != dst->dtype)
