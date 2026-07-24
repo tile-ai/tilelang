@@ -495,8 +495,8 @@ class DSLMutator(ast.NodeTransformer):
         return quote1(
             f"def make_closure({', '.join(self.nonlocals.keys())}):\n"
             f"  def {name}(__tb):\n"
-            f"    __tb_fl = '{self.filename}'\n"
-            f"    __tb_fn = '{name}'\n"
+            f"    __tb_fl = {self.filename!r}\n"
+            f"    __tb_fn = {name!r}\n"
             "    range = __tb.override('range')\n"
             "    pass\n"
             f"    return {name}\n"
@@ -691,7 +691,7 @@ def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
     #       def bar(): x
     #       return bar
     #     ```
-    mut = DSLMutator(nonlocals, func.__globals__, Path(filename).name)
+    mut = DSLMutator(nonlocals, func.__globals__, str(Path(filename).absolute()))
     tree = mut.visit(tree)
     make_closure = utils.get_compiled_object(
         tree,

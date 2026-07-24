@@ -14,12 +14,12 @@
 #include <tvm/tirx/op.h>
 
 #include "../layout/layout.h"
-#include "arith/int_operator.h"
-
 #include "../layout/utils.h"
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
+#include "arith/int_operator.h"
 #include "backend/common/target_utils.h"
+#include "span_utils.h"
 #include "utils.h"
 
 namespace tvm {
@@ -253,7 +253,8 @@ void ParallelOpNode::RecordBufferAccess(const Buffer &buffer,
   auto it = indice_map_.find(buffer);
   if (it != indice_map_.end()) {
     ICHECK(StructuralEqual()(it->second.indices, indices))
-        << buffer << ": " << indices << " and " << it->second.indices;
+        << buffer << ": " << indices << " and " << it->second.indices
+        << SpanHintSuffix(buffer->span);
   } else {
     BufferAccessInfo info;
     info.indices = indices;
@@ -357,7 +358,8 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
             LOG(FATAL)
                 << "Fragment buffer access with non-zero index [" << imm->value
                 << "] is not supported. "
-                << "Only fragment[0] access is allowed within T.Parallel loop.";
+                << "Only fragment[0] access is allowed within T.Parallel loop."
+                << SpanHintSuffix(buffer->span);
           }
         } else {
           // Non-constant index, not all zero
@@ -744,7 +746,7 @@ Fragment ParallelOpNode::ComputeLoopLayoutFromBuffer(
       msg << "\nProblematic loop AST:\n " << root_;
       msg << "\nHint: ensure the loop extent divides the thread binding or "
              "adjust the fragment mapping.";
-      LOG(FATAL) << msg.str();
+      LOG(FATAL) << msg.str() << SpanHintSuffix(buffer->span);
     }
   }
   DLOG(INFO) << "[compute_loop_layout_from_buffer] ... and get "

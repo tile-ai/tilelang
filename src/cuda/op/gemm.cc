@@ -11,6 +11,7 @@
 #include "op/builtin.h"
 #include "op/tcgen5_meta.h"
 #include "op/utils.h"
+#include "span_utils.h"
 
 #include <tvm/tirx/transform.h>
 
@@ -101,7 +102,8 @@ void FatalWgmmaUnavailable(const GemmNode &op, Target target) {
              << ", dtype=" << op.a_->dtype << "), B(scope=" << op.b_.scope()
              << ", dtype=" << op.b_->dtype << "), C(scope=" << op.c_.scope()
              << ", dtype=" << op.c_->dtype << "), M=" << op.m_
-             << ", N=" << op.n_ << ", K=" << op.k_ << ".";
+             << ", N=" << op.n_ << ", K=" << op.k_ << "."
+             << SpanHintSuffix({op.a_->span, op.b_->span, op.c_->span});
 }
 
 void FatalTcgen5Unavailable(const GemmNode &op, Target target) {

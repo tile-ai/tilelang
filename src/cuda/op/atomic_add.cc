@@ -14,6 +14,7 @@
 #include "layout/layout.h"
 #include "op/builtin.h"
 #include "op/utils.h"
+#include "span_utils.h"
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
 
@@ -219,7 +220,8 @@ LayoutMap InferSIMTLayout(const AtomicAddNode &op,
           << "AtomicAdd requires src and dst to have the same layout, but got "
           << "src layout: " << src_layout << ", dst layout: " << dst_layout
           << " for src buffer: " << op.src->name
-          << ", dst buffer: " << op.dst->name;
+          << ", dst buffer: " << op.dst->name
+          << SpanHintSuffix({op.dst->span, op.src->span});
     }
   }
   return {};

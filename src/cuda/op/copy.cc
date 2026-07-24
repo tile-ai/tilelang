@@ -16,6 +16,7 @@
 #include "layout/tcgen05_layout.h"
 #include "op/builtin.h"
 #include "op/utils.h"
+#include "span_utils.h"
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
 #include "transform/loop_vectorize.h"
@@ -703,7 +704,8 @@ CopyInst Copy::SelectInst(const CopyNode &op, Target target,
   ctx.analyzer = analyzer;
   ctx.emit_diagnostics = true;
   auto result = SelectCopyInstForLowering(op, ctx);
-  ICHECK(result.supported) << result.reason;
+  ICHECK(result.supported) << result.reason
+                           << SpanHintSuffix({op.dst->span, op.src->span});
   return result.inst;
 }
 
@@ -1887,7 +1889,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
       }
     } else if (GetIsTmaCopy(op)) {
       LOG(FATAL) << "T.tma_copy() requires a barrier argument. "
-                 << "Use T.tma_copy(src, dst, barrier=mbar[idx]).";
+                 << "Use T.tma_copy(src, dst, barrier=mbar[idx])."
+                 << SpanHintSuffix({op.dst->span, op.src->span});
     } else if (lower_args.alloc_mbarrier) {
       barrier_base_id =
           lower_args.alloc_mbarrier(1, MakeCopyMBarrierName(op.src, op.dst));
@@ -2338,7 +2341,8 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &lower_args,
       barrier_base_id = 0;
     } else if (GetIsTmaCopy(op)) {
       LOG(FATAL) << "T.tma_copy() requires a barrier argument. "
-                 << "Use T.tma_copy(src, dst, barrier=mbar[idx]).";
+                 << "Use T.tma_copy(src, dst, barrier=mbar[idx])."
+                 << SpanHintSuffix({op.dst->span, op.src->span});
     } else if (lower_args.alloc_mbarrier) {
       barrier_base_id =
           lower_args.alloc_mbarrier(1, MakeCopyMBarrierName(op.src, op.dst));
