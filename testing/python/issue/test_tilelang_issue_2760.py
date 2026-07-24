@@ -82,6 +82,37 @@ def test_const_mixed():
 
 
 @tilelang.testing.requires_cuda
+def test_const_pipelined_gemm():
+    """Grid-only const should work with T.Pipelined + T.gemm (real kernel pattern)."""
+
+    @tilelang.jit
+    def kernel(A, B, C, block_M: int = 64, block_N: int = 64, block_K: int = 32):
+        M, N, K = T.const("M, N, K")
+        num_blocks_m = T.const("num_blocks_m")  # grid-only
+        num_blocks_n = T.const("num_blocks_n")  # grid-only
+        A: T.Tensor((M, K), T.float16)
+        B: T.Tensor((K, N), T.float16)
+        C: T.Tensor((M, N), T.float16)
+        with T.Kernel(num_blocks_m, num_blocks_n, threads=128) as (bx, by):
+            A_shared = T.alloc_shared((block_M, block_K), T.float16)
+            B_shared = T.alloc_shared((block_K, block_N), T.float16)
+            C_local = T.alloc_fragment((block_M, block_N), T.float32)
+            T.clear(C_local)
+            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
+                T.copy(A[bx * block_M, k * block_K], A_shared)
+                T.copy(B[k * block_K, by * block_N], B_shared)
+                T.gemm(A_shared, B_shared, C_local)
+            T.copy(C_local, C[bx * block_M, by * block_N])
+
+    M, N, K = 128, 128, 128
+    A = torch.randn(M, K, dtype=torch.float16, device="cuda")
+    B = torch.randn(K, N, dtype=torch.float16, device="cuda")
+    C = torch.zeros(M, N, dtype=torch.float16, device="cuda")
+    kernel(A, B, C, num_blocks_m=2, num_blocks_n=2)
+    torch.testing.assert_close(C, (A @ B).half(), atol=1e-2, rtol=1e-2)
+
+
+@tilelang.testing.requires_cuda
 def test_const_cache_isolation():
     """Different kwarg values must produce distinct, correct kernels."""
 
