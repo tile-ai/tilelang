@@ -1051,18 +1051,13 @@ class TirTemplate(Generic[_P, _T]):
             for i, s in enumerate(v.strides):
                 if s in constexpr and s not in matcher:
                     matcher[s] = (k.name, "stride", i, s.name)
+        # Constexpr variables that don't appear in any buffer shape/stride
+        # can still be resolved at call time via an explicit keyword argument
+        # (handled by ``_parse_phase2_key``).  Record them with a sentinel
+        # source so the value flows through the same matcher machinery.
         for s in constexpr:
             if s not in matcher:
-                shapes = {k: v.shape for k, v in prim_func.buffer_map.items()}
-                strides = {k: v.strides for k, v in prim_func.buffer_map.items()}
-                raise RuntimeError(
-                    f"Constexpr variable `{s}` is not used in any buffer shape or stride.\n"
-                    "At least one **DIRECT** usage is required. Please check:\n"
-                    "(1) the variable is not used\n"
-                    f"(2) all uses are indirect, e.g. {s} * 2, {s} * 3. (you can replace them with separate constexpr variables)\n"
-                    f"Buffer shapes: {shapes}\n"
-                    f"Buffer strides: {strides}"
-                )
+                matcher[s] = (s.name, "__kwarg__", -1, s.name)
         matcher = {k: matcher[k] for k in constexpr}
         return cls(name=name, prim_func=prim_func, matcher=matcher, constexprs=constexpr, is_lazy_style=False, ir_gen=ir_gen)
 
