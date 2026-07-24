@@ -1,23 +1,15 @@
-from tilelang.cuda.intrinsics.layout.utils import (
-    mma_store_index_map,  # noqa: F401
-    get_ldmatrix_offset,  # noqa: F401
-)
+"""Compatibility facade for backend-specific intrinsic helpers."""
 
-from tilelang.cuda.intrinsics.macro.mma_macro_generator import (
-    TensorCoreIntrinEmitter,  # noqa: F401
-    TensorCoreIntrinEmitterWithLadderTransform,  # noqa: F401
+from tilelang.cuda.language.intrinsics import (  # noqa: F401
+    TCGEN05DescriptorParams,
+    TCGEN05TensorCoreIntrinEmitter,
+    TensorCoreIntrinEmitter,
+    TensorCoreIntrinEmitterWithLadderTransform,
+    WGMMADescriptorParams,
+    WGMMATensorCoreIntrinEmitter,
+    get_ldmatrix_offset,
+    get_swizzle_layout,
+    make_mma_swizzle_layout,
+    mma_store_index_map,
 )
-
-from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import (
-    TensorCoreIntrinEmitter as WGMMATensorCoreIntrinEmitter,  # noqa: F401
-    WGMMADescriptorParams,  # noqa: F401
-)
-from tilelang.cuda.intrinsics.macro.tcgen05_macro_generator import (
-    TensorCoreIntrinEmitter as TCGEN05TensorCoreIntrinEmitter,  # noqa: F401
-    TCGEN05DescriptorParams,  # noqa: F401
-)
-
-from tilelang.cuda.intrinsics.layout.mma_layout import get_swizzle_layout  # noqa: F401
-from tilelang.cuda.intrinsics.layout.mma_layout import make_mma_swizzle_layout  # noqa: F401
-
-from tilelang.rocm.intrinsics.mfma_layout import make_mfma_swizzle_layout  # noqa: F401
+from tilelang.rocm.language.intrinsics import make_mfma_swizzle_layout  # noqa: F401

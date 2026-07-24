@@ -5,6 +5,7 @@
 
 #include "cute_layout.h"
 #include "layout.h"
+#include "utils.h"
 
 #include "support/check.h"
 #include <algorithm>
@@ -1114,68 +1115,6 @@ ComposedLayout ComposedLayout::Recast(int old_bits, int new_bits) const {
 
 namespace {
 
-// Fully evaluate a PrimExpr to an integer constant. The expression must contain
-// only integer constants and the operators a swizzled layout is built from:
-// +, -, *, FloorDiv, FloorMod, and the bitwise/shift builtins. arith::Analyzer
-// does not constant-fold bitwise ops (e.g. T.bitwise_xor) even when both
-// operands are constant, so we evaluate them ourselves. Returns std::nullopt if
-// any node is not a recognized constant-foldable form.
-std::optional<int64_t> EvalConstExpr(const PrimExpr &e) {
-  if (auto c = as_const_int(e))
-    return *c;
-  // Floored division/modulo (rounds toward -inf), matching FloorDiv/FloorMod.
-  auto fdiv = [](int64_t a, int64_t b) {
-    int64_t q = a / b, r = a % b;
-    return q - ((r != 0) && ((r < 0) != (b < 0)) ? 1 : 0);
-  };
-  auto fmod = [&](int64_t a, int64_t b) { return a - fdiv(a, b) * b; };
-  if (const auto *op = e.as<AddNode>()) {
-    auto a = EvalConstExpr(op->a), b = EvalConstExpr(op->b);
-    if (a && b)
-      return *a + *b;
-  } else if (const auto *op = e.as<SubNode>()) {
-    auto a = EvalConstExpr(op->a), b = EvalConstExpr(op->b);
-    if (a && b)
-      return *a - *b;
-  } else if (const auto *op = e.as<MulNode>()) {
-    auto a = EvalConstExpr(op->a), b = EvalConstExpr(op->b);
-    if (a && b)
-      return *a * *b;
-  } else if (const auto *op = e.as<FloorDivNode>()) {
-    auto a = EvalConstExpr(op->a), b = EvalConstExpr(op->b);
-    if (a && b && *b != 0)
-      return fdiv(*a, *b);
-  } else if (const auto *op = e.as<FloorModNode>()) {
-    auto a = EvalConstExpr(op->a), b = EvalConstExpr(op->b);
-    if (a && b && *b != 0)
-      return fmod(*a, *b);
-  } else if (const auto *op = e.as<CallNode>()) {
-    if (op->args.size() == 2) {
-      auto a = EvalConstExpr(op->args[0]), b = EvalConstExpr(op->args[1]);
-      if (a && b) {
-        if (op->op.same_as(builtin::bitwise_xor()))
-          return *a ^ *b;
-        if (op->op.same_as(builtin::bitwise_and()))
-          return *a & *b;
-        if (op->op.same_as(builtin::bitwise_or()))
-          return *a | *b;
-        if (op->op.same_as(builtin::shift_left())) {
-          ICHECK(*b >= 0 && *b < 64);
-          return *a << *b;
-        }
-        if (op->op.same_as(builtin::shift_right())) {
-          ICHECK(*b >= 0 && *b < 64);
-          return *a >> *b;
-        }
-      }
-    } else if (op->args.size() == 1 && op->op.same_as(builtin::bitwise_not())) {
-      if (auto a = EvalConstExpr(op->args[0]))
-        return ~*a;
-    }
-  }
-  return std::nullopt;
-}
-
 // When processing shared tensor layout, all the shapes and strides are int32_t.
 // Also, we need to make sure not to mix with int64_t, because otherwise there
 // would be a lot of conversion nodes that prevent the analyzer from cancelling
@@ -1228,7 +1167,7 @@ public:
     int32_t addr = 0;
     for (size_t d = 0; d < forward_index_.size(); ++d) {
       PrimExpr e = Substitute(forward_index_[d], vmap);
-      std::optional<int64_t> val = EvalConstExpr(e);
+      std::optional<int64_t> val = EvaluateConstantInteger(e);
       if (!val)
         return std::nullopt;
       addr += static_cast<int32_t>(*val) * out_strides_[d];

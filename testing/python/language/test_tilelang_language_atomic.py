@@ -830,7 +830,31 @@ def atomic_addx2_return_prev_program(dtype=T.float32):
     @T.prim_func
     def main(Dst: T.Tensor((2,), dtype), Val: T.Tensor((2,), dtype), Prev: T.Tensor((2,), dtype)):
         with T.Kernel(1, threads=1):
-            Prev[0:2] = T.atomic_addx2(Dst[0], Val[0], return_prev=True)
+            Prev[0:2] = T.atomic_addx2(Dst[0:2], Val[0:2], return_prev=True)
+
+    return main
+
+
+def atomic_addx2_return_prev_let_bound_program(dtype=T.float32):
+    @T.prim_func
+    def main(Dst: T.Tensor((2,), dtype), Val: T.Tensor((2,), dtype), Prev: T.Tensor((2,), dtype)):
+        with T.Kernel(1, threads=1):
+            dst = Dst[0:2]
+            val = Val[0:2]
+            Prev[0:2] = T.atomic_addx2(dst, val, return_prev=True)
+
+    return main
+
+
+def atomic_addx2_return_prev_ramp_program(dtype=T.float32):
+    @T.prim_func
+    def main(Dst: T.Tensor((2,), dtype), Val: T.Tensor((2,), dtype), Prev: T.Tensor((2,), dtype)):
+        with T.Kernel(1, threads=1):
+            Prev[0:2] = T.atomic_addx2(
+                Dst[T.Ramp(0, 1, 2)],
+                Val[T.Ramp(0, 1, 2)],
+                return_prev=True,
+            )
 
     return main
 
@@ -839,14 +863,26 @@ def atomic_addx4_return_prev_program(dtype=T.float32):
     @T.prim_func
     def main(Dst: T.Tensor((4,), dtype), Val: T.Tensor((4,), dtype), Prev: T.Tensor((4,), dtype)):
         with T.Kernel(1, threads=1):
-            Prev[0:4] = T.atomic_addx4(Dst[0], Val[0], return_prev=True)
+            Prev[0:4] = T.atomic_addx4(Dst[0:4], Val[0:4], return_prev=True)
 
     return main
 
 
+def test_atomic_addx2_return_prev_accepts_sliced_destination():
+    atomic_addx2_return_prev_program(T.float32)
+
+
+def test_atomic_addx2_return_prev_accepts_let_bound_slice():
+    atomic_addx2_return_prev_let_bound_program(T.float32)
+
+
+def test_atomic_addx2_return_prev_accepts_ramp():
+    atomic_addx2_return_prev_ramp_program(T.float32)
+
+
 @tilelang.testing.requires_cuda
 def test_atomic_addx2_return_prev():
-    kernel = tilelang.compile(atomic_addx2_return_prev_program(T.float32))
+    kernel = tilelang.compile(atomic_addx2_return_prev_let_bound_program(T.float32))
     assert "AtomicAddx2Ret" in kernel.get_kernel_source()
     dst = torch.tensor([1.0, 2.0], dtype=torch.float32).cuda()
     val = torch.tensor([10.0, 20.0], dtype=torch.float32).cuda()
@@ -920,6 +956,54 @@ def test_atomic_addx4_return_prev_fp16():
 @tilelang.testing.requires_cuda
 def test_atomic_addx4_return_prev_bf16():
     run_atomic_addx4_return_prev_16bit(T.bfloat16, torch.bfloat16)
+
+
+# ======================= Atomic return value materialization =======================
+
+
+@tilelang.jit
+def atomic_add_return_prev_compaction_program(n, cap, block, dtype=T.float32):
+    @T.prim_func
+    def compact_positive(
+        x: T.Tensor((n,), dtype),
+        out: T.Tensor((cap,), T.int32),
+        counter: T.Tensor((1,), T.int32),
+    ):
+        with T.Kernel(T.ceildiv(n, block), threads=block) as bx:
+            tx = T.get_thread_binding()
+            i = bx * block + tx
+            if i < n and x[i] > 0:
+                # Side-effecting bind: the returned previous counter value is
+                # used at TWO sites (bound check + store index). The lowering
+                # must materialize the atomic exactly once; replaying it per
+                # use site executes the atomic twice per element.
+                pos = T.atomic_add(counter[0], 1, return_prev=True)
+                if pos < cap:
+                    out[pos] = i
+
+    return compact_positive
+
+
+@tilelang.testing.requires_cuda
+def test_atomic_add_return_prev_materialized_once():
+    n, cap, block = 4096, 4096, 256
+    kernel = atomic_add_return_prev_compaction_program(n, cap, block)
+
+    # Static check: the returned atomic must appear exactly once in the
+    # generated CUDA source (regression: duplicated AtomicAddRet calls).
+    assert kernel.get_kernel_source().count("AtomicAddRet") == 1
+
+    # Functional check: with all-positive input the counter must equal n and
+    # out must be a permutation of 0..n-1 (no unwritten slots).
+    x = torch.ones(n, dtype=torch.float32).cuda()
+    out = torch.full((cap,), -1, dtype=torch.int32).cuda()
+    counter = torch.zeros(1, dtype=torch.int32).cuda()
+    kernel(x, out, counter)
+    torch.cuda.synchronize()
+
+    assert counter.item() == n, f"atomic executed {counter.item()} times, expected {n}"
+    assert (out < 0).sum().item() == 0, "unwritten slots: atomic return value was re-evaluated"
+    assert torch.equal(out.sort().values.long(), torch.arange(n).cuda())
 
 
 if __name__ == "__main__":

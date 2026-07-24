@@ -289,7 +289,7 @@ void CodeGenTileLangMetal::PrintStorageSync(const CallNode *op) {
     // though the hardware effect is identical.
     this->PrintIndent();
     this->stream << "simdgroup_barrier(mem_flags::mem_threadgroup);\n";
-  } else if (sync == "shared") {
+  } else if (sync == "shared" || sync == "shared.dyn") {
     this->PrintIndent();
     this->stream << "threadgroup_barrier(mem_flags::mem_threadgroup);\n";
   } else if (sync == "global") {

@@ -21,6 +21,84 @@ using namespace tirx;
 using namespace ffi;
 using namespace arith;
 
+std::optional<int64_t> EvaluateConstantInteger(const PrimExpr &expr) {
+  if (const int64_t *constant = as_const_int(expr)) {
+    return *constant;
+  }
+
+  // Floored division/modulo (rounds toward -inf), matching FloorDiv/FloorMod.
+  auto floor_div = [](int64_t lhs, int64_t rhs) {
+    int64_t quotient = lhs / rhs;
+    int64_t remainder = lhs % rhs;
+    return quotient -
+           ((remainder != 0) && ((remainder < 0) != (rhs < 0)) ? 1 : 0);
+  };
+  auto floor_mod = [&](int64_t lhs, int64_t rhs) {
+    return lhs - floor_div(lhs, rhs) * rhs;
+  };
+
+  if (const auto *op = expr.as<AddNode>()) {
+    auto lhs = EvaluateConstantInteger(op->a);
+    auto rhs = EvaluateConstantInteger(op->b);
+    if (lhs && rhs) {
+      return *lhs + *rhs;
+    }
+  } else if (const auto *op = expr.as<SubNode>()) {
+    auto lhs = EvaluateConstantInteger(op->a);
+    auto rhs = EvaluateConstantInteger(op->b);
+    if (lhs && rhs) {
+      return *lhs - *rhs;
+    }
+  } else if (const auto *op = expr.as<MulNode>()) {
+    auto lhs = EvaluateConstantInteger(op->a);
+    auto rhs = EvaluateConstantInteger(op->b);
+    if (lhs && rhs) {
+      return *lhs * *rhs;
+    }
+  } else if (const auto *op = expr.as<FloorDivNode>()) {
+    auto lhs = EvaluateConstantInteger(op->a);
+    auto rhs = EvaluateConstantInteger(op->b);
+    if (lhs && rhs && *rhs != 0) {
+      return floor_div(*lhs, *rhs);
+    }
+  } else if (const auto *op = expr.as<FloorModNode>()) {
+    auto lhs = EvaluateConstantInteger(op->a);
+    auto rhs = EvaluateConstantInteger(op->b);
+    if (lhs && rhs && *rhs != 0) {
+      return floor_mod(*lhs, *rhs);
+    }
+  } else if (const auto *op = expr.as<CallNode>()) {
+    if (op->args.size() == 2) {
+      auto lhs = EvaluateConstantInteger(op->args[0]);
+      auto rhs = EvaluateConstantInteger(op->args[1]);
+      if (lhs && rhs) {
+        if (op->op.same_as(builtin::bitwise_xor())) {
+          return *lhs ^ *rhs;
+        }
+        if (op->op.same_as(builtin::bitwise_and())) {
+          return *lhs & *rhs;
+        }
+        if (op->op.same_as(builtin::bitwise_or())) {
+          return *lhs | *rhs;
+        }
+        if (op->op.same_as(builtin::shift_left())) {
+          ICHECK(*rhs >= 0 && *rhs < 64);
+          return *lhs << *rhs;
+        }
+        if (op->op.same_as(builtin::shift_right())) {
+          ICHECK(*rhs >= 0 && *rhs < 64);
+          return *lhs >> *rhs;
+        }
+      }
+    } else if (op->args.size() == 1 && op->op.same_as(builtin::bitwise_not())) {
+      if (auto value = EvaluateConstantInteger(op->args[0])) {
+        return ~*value;
+      }
+    }
+  }
+  return std::nullopt;
+}
+
 bool CanProveDivisible(const PrimExpr &lhs, const PrimExpr &rhs) {
   const auto *clhs = lhs.as<IntImmNode>();
   const auto *crhs = rhs.as<IntImmNode>();

@@ -589,7 +589,7 @@ class DSLMutator(ast.NodeTransformer):
             cexpr = expr.context_expr
             if isinstance(cexpr, ast.Call) and isinstance(cexpr.func, ast.Attribute) and cexpr.func.attr in ("Kernel", "ClusterKernel"):
                 eval_res = self._try_eval(cexpr.func)
-                from tilelang.language import Kernel, ClusterKernel
+                from tilelang.language.kernel import ClusterKernel, Kernel
 
                 if eval_res is Kernel or eval_res is ClusterKernel:
                     is_kernel_ctx = True

@@ -59,6 +59,16 @@ public:
 
   ffi::Array<PrimExpr> GetForwardIndex() const { return forward_index_; }
 
+  /*!
+   * \brief Convert the physical output coordinates to a row-major linear
+   * index.
+   *
+   * For output coordinates [f0, f1, ..., fn] with shape
+   * [s0, s1, ..., sn], this returns
+   * (((f0 * s1 + f1) * s2 + f2) ... * sn + fn).
+   */
+  PrimExpr GetLinearizedForwardIndex() const;
+
   virtual ffi::Array<PrimExpr> GetForwardVars() const;
 
   virtual ffi::Array<PrimExpr> Forward(const ffi::Array<PrimExpr> &vars) const;
@@ -101,6 +111,16 @@ public:
 
   virtual std::pair<Layout, arith::IterMapLevel>
   InverseWithLevel(bool require_padding_guard = false) const;
+
+  /*!
+   * \brief Verify that distinct logical coordinates map to distinct physical
+   * coordinates.
+   *
+   * The returned errors array is empty on success. Exact fallback checks may
+   * succeed without populating the normalized iter-map indices.
+   */
+  virtual arith::IterMapResult
+  DetectInjective(bool require_padding_guard = false) const;
 
   virtual std::string DebugOutput() const;
 

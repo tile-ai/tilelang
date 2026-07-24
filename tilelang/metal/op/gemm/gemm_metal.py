@@ -6,7 +6,7 @@ from tilelang import tvm as tvm
 from tvm.target import Target
 from tvm.ir import Range
 from tvm import tirx as tir
-from tilelang import language as T
+from tilelang.metal import language as T
 from tilelang.transform.simplify import _Simplify
 
 

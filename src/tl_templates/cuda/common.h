@@ -883,6 +883,67 @@ TL_DEVICE uint1 pack_half2(half_t a, half_t b) {
   return uint1{packed};
 }
 
+// ============================================================================
+// Inline PTX FP16/BF16 Conversions with Stochastic Rounding
+// ============================================================================
+//
+// PTX packs operand a into the high half and operand b into the low half.
+// Reverse float2 lane order to preserve TVM's little-endian x/y layout.
+
+// --- float2 -> f16x2 stochastic rounding ---
+
+template <bool kDependentFalse = false>
+TL_DEVICE half2 __tl_cvt_f32x2_to_f16x2_rs_sat(float2 src, unsigned int rbits) {
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL) || defined(__CUDA_ARCH_FEAT_SM103_ALL)
+  unsigned int result;
+  // FP32 -> FP16 consumes 13 random bits per lane; reserved bits must be zero.
+  rbits &= 0x1fff1fffU;
+  asm("cvt.rs.satfinite.f16x2.f32 %0, %1, %2, %3;"
+      : "=r"(result)
+      : "f"(src.y), "f"(src.x), "r"(rbits));
+  return *reinterpret_cast<half2 *>(&result);
+#else
+  static_assert(kDependentFalse,
+                "Stochastic rounding f32-to-FP16 requires sm_100a or sm_103a");
+  return {};
+#endif
+}
+
+template <bool kDependentFalse = false>
+TL_DEVICE unsigned short __tl_cvt_f32x1_to_f16x1_rs_sat(float src,
+                                                        unsigned int rbits) {
+  half2 result = __tl_cvt_f32x2_to_f16x2_rs_sat(make_float2(src, 0.0f), rbits);
+  return static_cast<unsigned short>(
+      *reinterpret_cast<unsigned int *>(&result));
+}
+
+// --- float2 -> bf16x2 stochastic rounding ---
+
+template <bool kDependentFalse = false>
+TL_DEVICE __nv_bfloat162 __tl_cvt_f32x2_to_bf16x2_rs_sat(float2 src,
+                                                         unsigned int rbits) {
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL) || defined(__CUDA_ARCH_FEAT_SM103_ALL)
+  unsigned int result;
+  asm("cvt.rs.satfinite.bf16x2.f32 %0, %1, %2, %3;"
+      : "=r"(result)
+      : "f"(src.y), "f"(src.x), "r"(rbits));
+  return *reinterpret_cast<__nv_bfloat162 *>(&result);
+#else
+  static_assert(kDependentFalse,
+                "Stochastic rounding f32-to-BF16 requires sm_100a or sm_103a");
+  return {};
+#endif
+}
+
+template <bool kDependentFalse = false>
+TL_DEVICE unsigned short __tl_cvt_f32x1_to_bf16x1_rs_sat(float src,
+                                                         unsigned int rbits) {
+  __nv_bfloat162 result =
+      __tl_cvt_f32x2_to_bf16x2_rs_sat(make_float2(src, 0.0f), rbits);
+  return static_cast<unsigned short>(
+      *reinterpret_cast<unsigned int *>(&result));
+}
+
 template <uint64_t bytes, uint64_t init_val>
 TL_DEVICE void st_bulk_shared(void *smem_ptr) {
   static_assert(init_val == 0,
