@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import tilelang.language as T
-from tvm import ir
-from tvm.tirx import PrimExpr, Buffer, BufferRegion, op
+from tilelang._typing import BufferLikeType
+from tvm import DataType, ir
+from tvm.tirx import PrimExpr, Buffer, Var, op
 from tilelang.utils.language import to_buffer_region, legalize_pairwise_extents
 from tilelang.language.utils import get_extent
 
@@ -19,6 +20,13 @@ _MEMORY_ORDER_ID_MAP = {
 
 _ATOMIC_LOAD_MEMORY_ORDERS = frozenset({"relaxed", "consume", "acquire", "seq_cst"})
 _ATOMIC_STORE_MEMORY_ORDERS = frozenset({"relaxed", "release", "seq_cst"})
+
+
+def _vector_atomic_return_dtype(dst: BufferLikeType | Var, lanes: int) -> DataType:
+    if isinstance(dst, Var) and T.has_let_value(dst):
+        dst = T.get_let_value(dst)
+    buffer = dst if isinstance(dst, Buffer) else dst.buffer
+    return buffer.dtype.with_lanes(lanes)
 
 
 def _get_memory_order_id(operation: str, memory_order: str, valid_orders: frozenset[str]) -> int:
@@ -289,12 +297,12 @@ def atomic_add(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
     return T.call_intrin("handle", op.Op.get("tl.tileop.atomicadd"), value, dst, annotations=ann if ann else None)
 
 
-def atomic_addx2(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> PrimExpr:
+def atomic_addx2(dst: BufferLikeType, value: BufferLikeType, return_prev: bool = False) -> PrimExpr:
     """Perform an atomic addition operation with double-width operands.
 
     Args:
-        dst (Buffer): Destination buffer where the atomic addition will be performed
-        value (PrimExpr): Value to be atomically added (double-width)
+        dst (BufferLikeType): Destination buffer where the atomic addition will be performed
+        value (BufferLikeType): Value to be atomically added (double-width)
         return_prev (bool): If True, return the previous value; if False, return handle (default False)
 
     Returns:
@@ -323,18 +331,16 @@ def atomic_addx2(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> Pri
         >>>             atomic_addx2(global_grads[i, j:j+2], grads[i, j:j+2])
     """
     atomic_addx2_op = op.Op.get("tl.atomic_addx2_ret_elem_op") if return_prev else op.Op.get("tl.atomic_addx2_elem_op")
-    # The ret variant returns the two previous elements packed as a 2-lane
-    # vector (e.g. half2/float2); type it accordingly so the store matches.
-    return_type = f"{dst.dtype}x2" if return_prev else "handle"
+    return_type = _vector_atomic_return_dtype(dst, 2) if return_prev else "handle"
     return T.call_intrin(return_type, atomic_addx2_op, T.access_ptr(dst, "rw"), T.access_ptr(value, "r"))
 
 
-def atomic_addx4(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> PrimExpr:
+def atomic_addx4(dst: BufferLikeType, value: BufferLikeType, return_prev: bool = False) -> PrimExpr:
     """Perform an atomic addition operation with quad-width operands.
 
     Args:
-        dst (Buffer): Destination buffer where the atomic addition will be performed
-        value (PrimExpr): Value to be atomically added (quad-width)
+        dst (BufferLikeType): Destination buffer where the atomic addition will be performed
+        value (BufferLikeType): Value to be atomically added (quad-width)
         return_prev (bool): If True, return the previous value; if False, return handle (default False)
 
     Returns:
@@ -363,13 +369,7 @@ def atomic_addx4(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> Pri
         >>> atomic_addx4(rgba_dst, rgba_add)  # Atomic blend of all 4 channels
     """
     atomic_addx4_op = op.Op.get("tl.atomic_addx4_ret_elem_op") if return_prev else op.Op.get("tl.atomic_addx4_elem_op")
-    if return_prev:
-        # The ret variant returns the four previous elements packed as a 4-lane
-        # vector (e.g. float4); type it accordingly so the store matches.
-        dtype = dst.buffer.dtype if isinstance(dst, BufferRegion) else dst.dtype
-        return_type = f"{dtype}x4"
-    else:
-        return_type = "handle"
+    return_type = _vector_atomic_return_dtype(dst, 4) if return_prev else "handle"
     return T.call_intrin(return_type, atomic_addx4_op, T.access_ptr(dst, "rw"), T.access_ptr(value, "r"))
 
 

@@ -830,7 +830,31 @@ def atomic_addx2_return_prev_program(dtype=T.float32):
     @T.prim_func
     def main(Dst: T.Tensor((2,), dtype), Val: T.Tensor((2,), dtype), Prev: T.Tensor((2,), dtype)):
         with T.Kernel(1, threads=1):
-            Prev[0:2] = T.atomic_addx2(Dst[0], Val[0], return_prev=True)
+            Prev[0:2] = T.atomic_addx2(Dst[0:2], Val[0:2], return_prev=True)
+
+    return main
+
+
+def atomic_addx2_return_prev_let_bound_program(dtype=T.float32):
+    @T.prim_func
+    def main(Dst: T.Tensor((2,), dtype), Val: T.Tensor((2,), dtype), Prev: T.Tensor((2,), dtype)):
+        with T.Kernel(1, threads=1):
+            dst = Dst[0:2]
+            val = Val[0:2]
+            Prev[0:2] = T.atomic_addx2(dst, val, return_prev=True)
+
+    return main
+
+
+def atomic_addx2_return_prev_ramp_program(dtype=T.float32):
+    @T.prim_func
+    def main(Dst: T.Tensor((2,), dtype), Val: T.Tensor((2,), dtype), Prev: T.Tensor((2,), dtype)):
+        with T.Kernel(1, threads=1):
+            Prev[0:2] = T.atomic_addx2(
+                Dst[T.Ramp(0, 1, 2)],
+                Val[T.Ramp(0, 1, 2)],
+                return_prev=True,
+            )
 
     return main
 
@@ -839,14 +863,26 @@ def atomic_addx4_return_prev_program(dtype=T.float32):
     @T.prim_func
     def main(Dst: T.Tensor((4,), dtype), Val: T.Tensor((4,), dtype), Prev: T.Tensor((4,), dtype)):
         with T.Kernel(1, threads=1):
-            Prev[0:4] = T.atomic_addx4(Dst[0], Val[0], return_prev=True)
+            Prev[0:4] = T.atomic_addx4(Dst[0:4], Val[0:4], return_prev=True)
 
     return main
 
 
+def test_atomic_addx2_return_prev_accepts_sliced_destination():
+    atomic_addx2_return_prev_program(T.float32)
+
+
+def test_atomic_addx2_return_prev_accepts_let_bound_slice():
+    atomic_addx2_return_prev_let_bound_program(T.float32)
+
+
+def test_atomic_addx2_return_prev_accepts_ramp():
+    atomic_addx2_return_prev_ramp_program(T.float32)
+
+
 @tilelang.testing.requires_cuda
 def test_atomic_addx2_return_prev():
-    kernel = tilelang.compile(atomic_addx2_return_prev_program(T.float32))
+    kernel = tilelang.compile(atomic_addx2_return_prev_let_bound_program(T.float32))
     assert "AtomicAddx2Ret" in kernel.get_kernel_source()
     dst = torch.tensor([1.0, 2.0], dtype=torch.float32).cuda()
     val = torch.tensor([10.0, 20.0], dtype=torch.float32).cuda()
