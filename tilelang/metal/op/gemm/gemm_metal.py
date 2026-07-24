@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-from tilelang import language as T
 from tilelang import tvm as tvm
 from tilelang.layout import Layout
+from tilelang.metal import language as T
+from tilelang.metal.utils import (
+    is_metal_cooperative_tensor,
+    is_metal_simdgroup,
+)
 from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang.transform.simplify import _Simplify
 from tilelang.utils.language import (
@@ -10,10 +14,6 @@ from tilelang.utils.language import (
     is_full_region,
     is_global,
     is_shared,
-)
-from tilelang.metal.utils import (
-    is_metal_cooperative_tensor,
-    is_metal_simdgroup,
 )
 from tvm import tirx as tir
 from tvm.ir import Range

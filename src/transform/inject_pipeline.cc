@@ -3412,20 +3412,30 @@ private:
         }
       }
     }
-    BufferSet pipeline_write_buffers;
-    if (!replayable_bind_mask.defined()) {
-      pipeline_write_buffers = CollectPipelineWriteBuffers(original_order);
-    }
+    BufferSet pipeline_write_buffers =
+        CollectPipelineWriteBuffers(original_order);
     Array<SBlock> scalar_binding_blocks;
     Array<SBlock> scheduled_order;
     std::vector<char> is_replayable_bind;
     is_replayable_bind.reserve(original_order.size());
     for (size_t i = 0; i < original_order.size(); ++i) {
       const SBlock &block = original_order[i];
-      bool replayable =
-          replayable_bind_mask.defined()
-              ? !is_zero(replayable_bind_mask.value()[i])
-              : IsReplayableScalarBindBlock(block, pipeline_write_buffers);
+      const bool semantically_replayable =
+          IsReplayableScalarBindBlock(block, pipeline_write_buffers);
+      bool replayable = semantically_replayable;
+      if (replayable_bind_mask.defined()) {
+        replayable = !is_zero(replayable_bind_mask.value()[i]);
+        if (replayable && !semantically_replayable) {
+          const auto *bind = block->body.as<BindNode>();
+          ICHECK(bind != nullptr);
+          LOG(FATAL) << "PrimFunc " << global_symbol_ << " marks scalar Bind '"
+                     << bind->var << "' as replayable via "
+                     << kPipelineReplayableScalarBinds
+                     << ", but the Bind has an unsupported type, has side "
+                        "effects, or reads a buffer written by the pipeline "
+                        "and cannot be replayed safely";
+        }
+      }
       is_replayable_bind.push_back(replayable ? 1 : 0);
       if (replayable) {
         scalar_binding_blocks.push_back(block);

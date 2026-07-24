@@ -1,5 +1,5 @@
 import pytest
-from tilelang.utils.sparse import compress, randn_semi_sparse, randint_semi_sparse, get_e_factor
+from examples.gemm_sp.sparse_utils import compress, randn_semi_sparse, randint_semi_sparse, get_e_factor
 from tilelang.utils.tensor import torch_assert_close
 
 import tilelang.testing

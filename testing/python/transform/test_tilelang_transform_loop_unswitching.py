@@ -1,3 +1,5 @@
+import numpy as np
+
 from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
@@ -47,6 +49,43 @@ def test_basic_hoist():
                 T.evaluate(0)
 
     _check(before, expected)
+
+
+def test_hoist_preserves_non_unit_loop_step():
+    output_buffer = tvm.tirx.decl_buffer((6,), "int32", name="output")
+    cond_buffer = tvm.tirx.decl_buffer((1,), "int32", name="cond")
+    i = tvm.tirx.Var("i", "int32")
+    body = tvm.tirx.IfThenElse(
+        tvm.tirx.BufferLoad(cond_buffer, [0]) > 0,
+        tvm.tirx.BufferStore(output_buffer, 1, [i]),
+        None,
+    )
+    loop = tvm.tirx.For(
+        i,
+        1,
+        5,
+        tvm.tirx.ForKind.SERIAL,
+        body,
+        step=tvm.tirx.IntImm("int32", 2),
+    )
+    before = tvm.tirx.PrimFunc(
+        [output_buffer.data, cond_buffer.data],
+        loop,
+        buffer_map={
+            output_buffer.data: output_buffer,
+            cond_buffer.data: cond_buffer,
+        },
+    ).with_attr("global_symbol", "main")
+
+    mod = tvm.IRModule.from_expr(before)
+    mod = tl.transform.LoopUnswitching()(mod)
+    executable = tvm.compile(mod["main"], target="c").jit(options=["-std=c++17"])
+
+    output = tvm.runtime.tensor(np.zeros(6, dtype="int32"))
+    cond = tvm.runtime.tensor(np.ones(1, dtype="int32"))
+    executable["main"](output, cond)
+
+    np.testing.assert_array_equal(output.numpy(), np.array([0, 1, 0, 1, 0, 1], dtype="int32"))
 
 
 def test_hoist_with_else():

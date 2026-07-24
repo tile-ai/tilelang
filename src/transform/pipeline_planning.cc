@@ -206,6 +206,27 @@ void BufferRegionCollector::VisitExpr_(const CallNode *op) {
       // because we only care about the buffer itself instead of indices
       reads_.push_back(buffer_region);
     }
+  } else if (op->op.same_as(tl::access_ptr())) {
+    ICHECK_EQ(op->args.size(), 3U);
+    const auto *load = op->args[0].as<BufferLoadNode>();
+    ICHECK(load) << "tl.access_ptr base must be a BufferLoad";
+    const BufferRegion buffer_region = BufferRegion::FullRegion(load->buffer);
+    const int access_mask = GetConservativeAccessMask(op->args[2]);
+    // because we only care about the buffer itself instead of indices
+    if (access_mask & kAccessRead) {
+      reads_.push_back(buffer_region);
+    }
+    if (access_mask & kAccessWrite) {
+      writes_.push_back(buffer_region);
+    }
+    for (const PrimExpr &index : load->indices) {
+      this->VisitExpr(index);
+    }
+    if (load->predicate.defined()) {
+      this->VisitExpr(load->predicate.value());
+    }
+    this->VisitExpr(op->args[1]);
+    this->VisitExpr(op->args[2]);
   } else if (op->op.same_as(builtin::tvm_access_ptr())) {
     const VarNode *buffer_var = op->args[1].as<VarNode>();
     ICHECK(buffer_var);
@@ -213,8 +234,19 @@ void BufferRegionCollector::VisitExpr_(const CallNode *op) {
     if (it != buffer_data_to_buffer_.end()) {
       const Buffer &buffer = (*it).second;
       const BufferRegion buffer_region = BufferRegion::FullRegion(buffer);
+      const int access_mask = op->args.size() == 5U
+                                  ? GetConservativeAccessMask(op->args[4])
+                                  : kAccessReadWrite;
       // because we only care about the buffer itself instead of indices
-      reads_.push_back(buffer_region);
+      if (access_mask & kAccessRead) {
+        reads_.push_back(buffer_region);
+      }
+      if (access_mask & kAccessWrite) {
+        writes_.push_back(buffer_region);
+      }
+    }
+    for (size_t i = 2; i < op->args.size(); ++i) {
+      this->VisitExpr(op->args[i]);
     }
   } else if (op->op.same_as(builtin::if_then_else())) {
     within_condition_expr_ = true;

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from typing import Literal
 from collections.abc import Callable
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 class suppress_stdout_stderr:
@@ -74,6 +77,7 @@ def do_bench(
     return_mode: Literal["min", "max", "mean", "median"] = "mean",
     device: int | torch.device | None = None,
     cache_size: int = 256,
+    early_stop_baseline: float | None = None,
 ) -> float | list[float]:
     """Benchmark the runtime of a PyTorch function with L2 cache management.
 
@@ -118,6 +122,7 @@ def do_bench(
                 return_mode=return_mode,
                 device_idx=device_idx,
                 cache_size=cache_size,
+                early_stop_baseline=early_stop_baseline,
             )
 
     return _do_bench_impl(
@@ -132,6 +137,7 @@ def do_bench(
         return_mode=return_mode,
         device_idx=None,
         cache_size=cache_size,
+        early_stop_baseline=early_stop_baseline,
     )
 
 
@@ -175,6 +181,7 @@ def _do_bench_impl(
     return_mode: Literal["min", "max", "mean", "median"],
     device_idx: int | None,
     cache_size: int,
+    early_stop_baseline: float | None = None,
 ) -> float | list[float]:
     # Initial function call and synchronization
     fn()
@@ -198,6 +205,17 @@ def _do_bench_impl(
     start_event.synchronize()
     end_event.synchronize()
     estimate_ms = start_event.elapsed_time(end_event) / 5
+
+    # Early stop: skip full benchmark if estimate exceeds baseline
+    if early_stop_baseline is not None and estimate_ms > early_stop_baseline:
+        logger.debug(
+            "Early stop: estimate_ms=%.3fms exceeds baseline=%.3fms, skipping full benchmark.",
+            estimate_ms,
+            early_stop_baseline,
+        )
+        if quantiles is not None:
+            return [estimate_ms] * len(quantiles)
+        return estimate_ms
 
     # Calculate warmup and repeat counts (minimum 1 iteration each)
     n_warmup = _n_warmup if _n_warmup > 0 else max(1, int(warmup / estimate_ms))

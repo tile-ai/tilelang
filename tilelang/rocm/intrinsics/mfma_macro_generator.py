@@ -1,6 +1,7 @@
 from __future__ import annotations
 from tilelang import tvm as tvm
 import tilelang.language as T
+import tilelang.language.dtypes as _dtypes
 from tvm import DataType
 from tvm import tirx
 from tvm.ir import Range
@@ -70,9 +71,9 @@ class MatrixCoreIntrinEmitter:
 
     def __init__(
         self,
-        a_dtype: str = T.float16,
-        b_dtype: str = T.float16,
-        accum_dtype: str = T.float16,
+        a_dtype: str = _dtypes.float16,
+        b_dtype: str = _dtypes.float16,
+        accum_dtype: str = _dtypes.float16,
         a_transposed: bool = False,
         b_transposed: bool = False,
         block_row_warps: int = 2,
@@ -475,7 +476,7 @@ class MatrixCoreIntrinEmitter:
         local_size_out = self.local_size_out
         k_pack = self.k_pack
         mfma_suffix = self.mfma_suffix
-        a_dtype, b_dtype, out_dtype = self.a_dtype, self.b_dtype, self.accum_dtype
+        a_dtype, b_dtype, out_dtype = str(self.a_dtype), str(self.b_dtype), str(self.accum_dtype)
         compute_a_dtype = a_dtype if local_size_a == 1 else f"{a_dtype}x{local_size_a}"
         compute_b_dtype = b_dtype if local_size_b == 1 else f"{b_dtype}x{local_size_b}"
         compute_out_dtype = out_dtype if local_size_out == 1 else f"{out_dtype}x{local_size_out}"
@@ -797,9 +798,9 @@ class MatrixCoreIntrinEmitter:
 class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
     def __init__(
         self,
-        a_dtype: str = T.float16,
-        b_dtype: str = T.float16,
-        accum_dtype: str = T.float16,
+        a_dtype: str = _dtypes.float16,
+        b_dtype: str = _dtypes.float16,
+        accum_dtype: str = _dtypes.float16,
         a_transposed: bool = False,
         b_transposed: bool = False,
         block_row_warps: int = 2,

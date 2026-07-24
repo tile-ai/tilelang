@@ -1,11 +1,11 @@
 import pytest
 import torch
 import tilelang
-from tilelang.utils.sparse import get_e_factor
+from examples.gemm_sp.sparse_utils import get_e_factor
 import tilelang.testing
 import tilelang.language as T
 
-from tilelang.utils.sparse import compress, randn_semi_sparse, randint_semi_sparse, torch_compress
+from examples.gemm_sp.sparse_utils import compress, randn_semi_sparse, randint_semi_sparse, torch_compress
 from tilelang.utils.tensor import torch_assert_close
 
 

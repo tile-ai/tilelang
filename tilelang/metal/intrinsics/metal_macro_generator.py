@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import tilelang.language as T
+import tilelang.metal.language as T
+from tvm import arith
 from tvm import tirx as tir
 from tvm.tirx import Buffer, BufferRegion
 
@@ -78,7 +79,14 @@ class MPSIntrinEmitter:
 
     @staticmethod
     def _parse_buffer_nd(buf):
-        """Extract (buffer, extra_indices, row_offset, col_offset, stride)."""
+        """Extract (buffer, extra_indices, row_offset, col_offset, stride) from Buffer or BufferRegion.
+
+        For 2D buffers, extra_indices is an empty tuple.
+        For 3D+ buffers (e.g. after pipeline expansion), extra_indices contains
+        the leading dimension offsets so callers can index correctly.
+        Metal matrix operations accept a row stride but require the
+        innermost dimension to be contiguous.
+        """
         if isinstance(buf, BufferRegion):
             buffer = buf.buffer
             extra = tuple(r.min for r in buf.region[:-2])
@@ -89,7 +97,15 @@ class MPSIntrinEmitter:
             extra = ()
             off_row = 0
             off_col = 0
-        stride = buffer.strides[-2] if buffer.strides and len(buffer.strides) >= 2 else buffer.shape[-1]
+        if buffer.strides:
+            inner_stride = buffer.strides[-1]
+            if not arith.Analyzer().can_prove_equal(inner_stride, 1):
+                raise ValueError(
+                    f"Metal matrix operations require a contiguous innermost dimension (stride 1), but got stride {inner_stride}"
+                )
+            stride = buffer.strides[-2]
+        else:
+            stride = buffer.shape[-1]
         return buffer, extra, off_row, off_col, stride
 
     def ldmatrix_a(self, A_local_buf, A_shared_buf: Buffer | BufferRegion, ki, k_inner: int = 0):

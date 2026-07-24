@@ -430,18 +430,20 @@ TL_DEVICE void tma_load_2sm(const CUtensorMap &descriptor,
                : "memory");
 }
 
-// cp.async.bulk.tensor.2d.tile::{gather4,scatter4} (PTX 8.6, sm_100a).
+// cp.async.bulk.tensor.2d.tile::{gather4,scatter4} (PTX 8.6).
+// The shared::cta gather4 form requires sm_100; scatter4 requires sm_100a.
 // Five coordinate operands: {col, r0, r1, r2, r3}; the 4-row pack is implicit.
 // CacheHintSm90 reused from copy_sm90.h (always included alongside this file).
 #if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
     (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 8)
 template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL,
-          typename BarrierType = uint64_t>
+          typename BarrierType = uint64_t, bool kDependentFalse = false>
 TL_DEVICE void tma_load_gather4(const CUtensorMap &descriptor,
                                 BarrierType &smem_mbar,
                                 void const *const smem_ptr, int32_t const &col,
                                 int32_t const &r0, int32_t const &r1,
                                 int32_t const &r2, int32_t const &r3) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_mbar;
   if constexpr (std::is_pointer_v<BarrierType>) {
@@ -457,13 +459,18 @@ TL_DEVICE void tma_load_gather4(const CUtensorMap &descriptor,
                : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
                  "r"(col), "r"(r0), "r"(r1), "r"(r2), "r"(r3), "l"(cache_hint)
                : "memory");
+#else
+  static_assert(kDependentFalse, "T.tma_gather4 requires sm_100 or later");
+#endif
 }
 
-template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL,
+          bool kDependentFalse = false>
 TL_DEVICE void
 tma_store_scatter4(const CUtensorMap &descriptor, void const *const smem_ptr,
                    int32_t const &col, int32_t const &r0, int32_t const &r1,
                    int32_t const &r2, int32_t const &r3) {
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL)
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile(
@@ -473,6 +480,9 @@ tma_store_scatter4(const CUtensorMap &descriptor, void const *const smem_ptr,
       : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(col), "r"(r0), "r"(r1),
         "r"(r2), "r"(r3), "l"(cache_hint)
       : "memory");
+#else
+  static_assert(kDependentFalse, "T.tma_scatter4 requires sm_100a");
+#endif
 }
 #endif // CUDA 12.8+
 

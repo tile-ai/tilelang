@@ -71,5 +71,31 @@ def test_select_codegen_no_if():
     assert "if (" not in source
 
 
+@tilelang.jit
+def get_parallel_select_kernel():
+    @T.prim_func
+    def main(
+        A: T.Tensor[(1024,), T.float32],
+        B: T.Tensor[(1024,), T.float32],
+    ):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(1024):
+                B[i] = T.Select(i < 512, A[i], 0.0)
+
+    return main
+
+
+def test_parallel_select_vectorized_condition():
+    kernel = get_parallel_select_kernel()
+    A = torch.randn((1024,), dtype=torch.float32, device="cuda")
+    B = torch.empty_like(A)
+
+    kernel(A, B)
+
+    expected = torch.zeros_like(A)
+    expected[:512] = A[:512]
+    torch.testing.assert_close(B, expected)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

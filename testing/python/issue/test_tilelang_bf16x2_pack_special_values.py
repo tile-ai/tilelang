@@ -3,7 +3,7 @@ import torch
 import tilelang
 import tilelang.testing
 import tilelang.language as T
-from tilelang.quantize.quantization import (
+from examples.dequantize_gemm.quantize.quantization import (
     _tir_f32x2_to_bf16x2_to_u32,
     _tir_u32_to_bf16x2_to_f32x2,
 )

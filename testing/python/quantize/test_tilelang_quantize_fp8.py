@@ -4,7 +4,7 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
-from tilelang.quantize.quantization import (
+from examples.dequantize_gemm.quantize.quantization import (
     _tir_u8_to_f8_e4m3_to_f16,
     _tir_u8_to_f8_e4m3_to_f16_naive,
 )

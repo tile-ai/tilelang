@@ -230,8 +230,7 @@ def test_mxfp4_dequant_gemm_twiddling(M, N, K):
 @tilelang.testing.requires_gfx950
 def test_get_mxfp_intrin_group_returns_hip_source():
     """get_mxfp_intrin_group() returns HIP C++ source (not CUDA PTX) for gfx950."""
-    from tilelang.quantize import get_mxfp_intrin_group
-    from tilelang import tvm
+    from examples.dequantize_gemm.quantize import get_mxfp_intrin_group
 
     target = tvm.target.Target("hip -mcpu=gfx950")
     info = get_mxfp_intrin_group(
@@ -255,7 +254,7 @@ def test_get_mxfp_intrin_group_returns_hip_source():
 
 def test_get_mxfp_intrin_group_returns_ptx_for_cuda():
     """get_mxfp_intrin_group() returns CUDA PTX source when target is None."""
-    from tilelang.quantize import get_mxfp_intrin_group
+    from examples.dequantize_gemm.quantize import get_mxfp_intrin_group
 
     info = get_mxfp_intrin_group(
         out_dtype=T.bfloat16,

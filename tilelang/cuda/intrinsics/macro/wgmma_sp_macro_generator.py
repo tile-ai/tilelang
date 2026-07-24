@@ -34,10 +34,10 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
 
     def __init__(
         self,
-        a_dtype: str = T.float16,
-        e_dtype: str = T.uint8,
-        b_dtype: str = T.float16,
-        accum_dtype: str = T.float16,
+        a_dtype: str = "float16",
+        e_dtype: str = "uint8",
+        b_dtype: str = "float16",
+        accum_dtype: str = "float16",
         a_transposed: bool = False,
         b_transposed: bool = False,
         e_transposed: bool = False,

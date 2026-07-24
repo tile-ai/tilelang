@@ -1699,6 +1699,29 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
 
   // Handle conversion from float32 to float16
   if (from_ty.is_float() && from_ty.bits() == 32 && target_ty.is_float16()) {
+    if (cast_round == "rs" && cast_rbits.defined()) {
+      ICHECK(cast_sat)
+          << "sat=false is not supported for stochastic rounding f32 -> fp16";
+      std::string extra_args = ", " + PrintExpr(cast_rbits.value());
+      if (lanes == 1) {
+        PrintIndent();
+        stream << "*reinterpret_cast<unsigned short*>(&" << sret
+               << ") = tl::__tl_cvt_f32x1_to_f16x1_rs_sat(" << src << extra_args
+               << ");\n";
+        os << sret;
+        return;
+      }
+      if (lanes == 2 || lanes == 4 || lanes == 8) {
+        PrintVectorizedCast("tl::__tl_cvt_f32x2_to_f16x2_rs_sat", "float2",
+                            "half2", extra_args);
+        return;
+      }
+    }
+    if (!cast_round.empty()) {
+      LOG(FATAL) << "Unsupported rounding mode '" << cast_round
+                 << "' for f32 -> FP16 cast. Only packed 'rs' stochastic "
+                    "rounding is supported.";
+    }
     // Use __float22half2_rn for vectorized conversion (float2 -> half2)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
       PrintVectorizedCast("__float22half2_rn", "float2", "half2");
@@ -1718,6 +1741,29 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
 
   // Handle conversion from float32 to bfloat16
   if (from_ty.is_float() && from_ty.bits() == 32 && target_ty.is_bfloat16()) {
+    if (cast_round == "rs" && cast_rbits.defined()) {
+      ICHECK(cast_sat)
+          << "sat=false is not supported for stochastic rounding f32 -> bf16";
+      std::string extra_args = ", " + PrintExpr(cast_rbits.value());
+      if (lanes == 1) {
+        PrintIndent();
+        stream << "*reinterpret_cast<unsigned short*>(&" << sret
+               << ") = tl::__tl_cvt_f32x1_to_bf16x1_rs_sat(" << src
+               << extra_args << ");\n";
+        os << sret;
+        return;
+      }
+      if (lanes == 2 || lanes == 4 || lanes == 8) {
+        PrintVectorizedCast("tl::__tl_cvt_f32x2_to_bf16x2_rs_sat", "float2",
+                            "__nv_bfloat162", extra_args, false, true);
+        return;
+      }
+    }
+    if (!cast_round.empty()) {
+      LOG(FATAL) << "Unsupported rounding mode '" << cast_round
+                 << "' for f32 -> BF16 cast. Only packed 'rs' stochastic "
+                    "rounding is supported.";
+    }
     // Use __float22bfloat162_rn for vectorized conversion (float2 -> bfloat162)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
       PrintVectorizedCast("__float22bfloat162_rn", "float2", "__nv_bfloat162",
@@ -2063,7 +2109,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   if (!cast_round.empty()) {
     LOG(FATAL) << "round '" << cast_round << "' is not supported for cast from "
                << from_ty << " to " << target_ty
-               << " (only f32 -> fp8/fp4 supported)";
+               << " (only supported f32 packed stochastic conversions are "
+                  "available)";
   }
 
   // Fallback: elementwise cast.
