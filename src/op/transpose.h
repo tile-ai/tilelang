@@ -50,9 +50,10 @@ private:
   /// For the destination side, the final two source axes are exchanged.
   Array<PrimExpr> MakeIndices(const Array<IterVar> &ivs, int src_dst) const;
 
-  /// Build boundary predicate with transposed index mapping for dst.
-  PrimExpr MakePredicate(arith::Analyzer *analyzer, const Array<IterVar> &ivs,
-                         Array<PrimExpr> extents, int src_dst) const;
+  /// Build a boundary predicate for generated buffer indices.
+  PrimExpr MakePredicate(arith::Analyzer *analyzer,
+                         const Array<PrimExpr> &indices,
+                         const Array<PrimExpr> &extents) const;
 };
 
 using TransposeTargetPredicate = bool (*)(Target target);

@@ -150,40 +150,18 @@ Array<PrimExpr> TransposeNode::MakeIndices(const Array<IterVar> &ivs,
 }
 
 PrimExpr TransposeNode::MakePredicate(arith::Analyzer *analyzer,
-                                      const Array<IterVar> &ivs,
-                                      Array<PrimExpr> extents,
-                                      int src_dst) const {
-  bool do_transpose = (src_dst == 1);
-  Array<Range> ranges = src_dst == 0 ? src_range : dst_range;
-
-  std::vector<int> source_axis_to_iv;
-  if (do_transpose) {
-    ICHECK_EQ(src_range.size(), ranges.size())
-        << "Transpose source and destination ranks must match";
-    source_axis_to_iv = MakeSourceAxisToIterVarMap(src_range, ivs.size());
-  }
-
+                                      const Array<PrimExpr> &indices,
+                                      const Array<PrimExpr> &extents) const {
   Array<PrimExpr> cond_list;
-  ICHECK(extents.size() == ranges.size()) << extents << " " << ranges;
-  size_t idx = 0;
-  for (size_t i = 0; i < ranges.size(); i++) {
-    size_t iv_idx;
-    if (do_transpose) {
-      size_t src_axis = SourceAxisForDestinationAxis(i, ranges.size());
-      int mapped_iv_idx = source_axis_to_iv[src_axis];
-      if (mapped_iv_idx < 0)
-        continue;
-      iv_idx = static_cast<size_t>(mapped_iv_idx);
-    } else {
-      if (is_one(ranges[i]->extent))
-        continue;
-      iv_idx = idx++;
-    }
-    PrimExpr cond = ranges[i]->min + ivs[iv_idx]->var < extents[i];
+  ICHECK_EQ(indices.size(), extents.size())
+      << "Transpose index rank (" << indices.size()
+      << ") must match buffer rank (" << extents.size() << ")";
+  for (size_t i = 0; i < indices.size(); i++) {
+    PrimExpr cond = indices[i] < extents[i];
     if (!analyzer->CanProve(cond, arith::ProofStrength::kSymbolicBound)) {
       cond_list.push_back(cond);
     }
-    cond = ranges[i]->min + ivs[iv_idx]->var >= 0;
+    cond = indices[i] >= 0;
     if (!analyzer->CanProve(cond, arith::ProofStrength::kSymbolicBound)) {
       cond_list.push_back(cond);
     }
@@ -206,8 +184,8 @@ For TransposeNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<PrimExpr> src_indices = MakeIndices(loop_vars, 0);
   Array<PrimExpr> dst_indices = MakeIndices(loop_vars, 1);
 
-  PrimExpr src_predicate = MakePredicate(analyzer, loop_vars, src->shape, 0);
-  PrimExpr dst_predicate = MakePredicate(analyzer, loop_vars, dst->shape, 1);
+  PrimExpr src_predicate = MakePredicate(analyzer, src_indices, src->shape);
+  PrimExpr dst_predicate = MakePredicate(analyzer, dst_indices, dst->shape);
 
   PrimExpr value = BufferLoad(src, src_indices);
   if (src->dtype != dst->dtype)
