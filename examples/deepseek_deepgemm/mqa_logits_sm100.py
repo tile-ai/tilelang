@@ -1156,9 +1156,7 @@ def mqa_logits_fp8_persistent_ws_kernel(
                             T.copy(
                                 c_tmem[
                                     :,
-                                    tmem_col + qi_epi0 * heads + h_base * 16 : tmem_col
-                                    + qi_epi0 * heads
-                                    + (h_base + 1) * 16,
+                                    tmem_col + qi_epi0 * heads + h_base * 16 : tmem_col + qi_epi0 * heads + (h_base + 1) * 16,
                                 ],
                                 c_epi0,
                             )
@@ -1239,9 +1237,7 @@ def mqa_logits_fp8_persistent_ws_kernel(
                             T.copy(
                                 c_tmem[
                                     :,
-                                    tmem_col + qi_epi1 * heads + h_base * 16 : tmem_col
-                                    + qi_epi1 * heads
-                                    + (h_base + 1) * 16,
+                                    tmem_col + qi_epi1 * heads + h_base * 16 : tmem_col + qi_epi1 * heads + (h_base + 1) * 16,
                                 ],
                                 c_epi1,
                             )
