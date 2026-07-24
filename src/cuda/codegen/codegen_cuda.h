@@ -130,6 +130,8 @@ private:
   bool need_mma_h_{false};
   // whether need tl mma instruction header
   bool need_mma_instruction_h_{false};
+  // whether need tl SM120 block-scaled GEMM helper header
+  bool need_gemm_sm120_h_{false};
   // whether need tl wgmma instruction header
   bool need_wgmma_instruction_h_{false};
   // whether need tl tcgen05mma instruction header

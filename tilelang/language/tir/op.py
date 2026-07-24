@@ -1076,6 +1076,61 @@ def ptx_mma_sp(
     )
 
 
+def ptx_mma_block_scale(
+    accum_dtype,
+    shape,
+    A_layout,
+    B_layout,
+    kind,
+    scale_vec_size,
+    A_dtype,
+    B_dtype,
+    scale_type,
+    multiplicand_a,
+    a_index,
+    multiplicand_b,
+    b_index,
+    accumulator,
+    c_index,
+    scale_a,
+    scale_b,
+    scale_a_byte_id=0,
+    scale_a_thread_id=0,
+    scale_b_byte_id=0,
+    scale_b_thread_id=0,
+):
+    """TVM intrinsic for SM120a warp-level NVF4 block-scaled MMA."""
+
+    def _selector_value(value):
+        return IntImm("int32", value) if isinstance(value, int) else value
+
+    return call_intrin(
+        accum_dtype,
+        _tvm_op.Op.get("tl.ptx_mma_block_scale"),
+        tvm.tirx.StringImm(str(accum_dtype)),
+        tvm.tirx.StringImm(str(shape)),
+        tvm.tirx.StringImm(str(A_layout)),
+        tvm.tirx.StringImm(str(B_layout)),
+        tvm.tirx.StringImm(str(kind)),
+        IntImm("int32", scale_vec_size),
+        tvm.tirx.StringImm(str(A_dtype)),
+        tvm.tirx.StringImm(str(B_dtype)),
+        tvm.tirx.StringImm(str(scale_type)),
+        multiplicand_a,
+        a_index,
+        multiplicand_b,
+        b_index,
+        accumulator,
+        c_index,
+        scale_a,
+        scale_b,
+        _selector_value(scale_a_byte_id),
+        _selector_value(scale_a_thread_id),
+        _selector_value(scale_b_byte_id),
+        _selector_value(scale_b_thread_id),
+    )
+
+
 def ptx_wgmma_ss(
     dtype,
     wgmma_prefix,
