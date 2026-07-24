@@ -132,27 +132,29 @@ def latency_favored_kernel():
     def main(
         A: T.Tensor((M, K), dtype),
         B: T.Tensor((N, K), dtype),
-        C: T.Tensor((M, N), dtype),
+        C: T.Tensor((M, K), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_N, block_K), dtype)
-            Acc1 = T.alloc_fragment((block_M, block_K), accum_dtype)
-            Acc2 = T.alloc_fragment((block_N, block_K), accum_dtype)
-            Acc3 = T.alloc_fragment((block_M, block_K), accum_dtype)
+            C_local = T.alloc_fragment((block_M, block_K), accum_dtype)
+            Acc1 = T.alloc_fragment((block_N, block_K), accum_dtype)
+            Acc2 = T.alloc_fragment((block_M, block_K), accum_dtype)
+            T.clear(C_local)
             T.clear(Acc1)
             T.clear(Acc2)
-            T.clear(Acc3)
 
             for k in T.Pipelined(K // block_K, num_stages=num_stages):
                 T.copy(B[bx * block_N, k * block_K], B_shared)
                 T.copy(A[by * block_M, k * block_K], A_shared)
                 for i, j in T.Parallel(block_M, block_K):
-                    Acc1[i, j] += T.cast(A_shared[i, j], accum_dtype)
+                    C_local[i, j] += T.cast(A_shared[i, j], accum_dtype)
                 for i, j in T.Parallel(block_N, block_K):
-                    Acc2[i, j] += T.cast(B_shared[i, j], accum_dtype)
+                    Acc1[i, j] += T.cast(B_shared[i, j], accum_dtype)
                 for i, j in T.Parallel(block_M, block_K):
-                    Acc3[i, j] += T.cast(A_shared[i, j], accum_dtype) * 0.125
+                    Acc2[i, j] += T.cast(A_shared[i, j], accum_dtype) * 0.125
+
+            T.copy(C_local, C[by * block_M, bx * block_K])
 
     return main
 
@@ -162,7 +164,7 @@ def latency_favored_kernel():
 CASES = [
     ("balance-favored", balance_favored_kernel, -1),
     ("occupancy-favored", occupancy_favored_kernel, -1),
-    ("latency-favored", latency_favored_kernel, []),
+    ("latency-favored", latency_favored_kernel, -1),
 ]
 
 
