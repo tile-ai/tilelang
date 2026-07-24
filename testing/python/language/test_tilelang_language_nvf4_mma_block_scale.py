@@ -1,13 +1,31 @@
+import importlib.util
+import sys
+from pathlib import Path
+
 import pytest
+
+torch = pytest.importorskip("torch")
 
 import tilelang
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
 from tilelang.cuda.intrinsics.layout.mma_layout import mma_load_a_32x32_to_shared_16x64_layout
-from tilelang.cuda.intrinsics.macro.mma_macro_generator import SM120BlockScaledFullTilePackageContract
 from tilelang.intrinsics import TensorCoreIntrinEmitter, get_swizzle_layout
-from tilelang.quantize.nvfp4 import blockscaled_chunk_kmajor_word_offset
+from tilelang.quantize import (
+    pack_blockscaled_chunk_kmajor_scale_bytes,
+    quantize_bf16_to_nvfp4_blockscaled,
+    swizzle_blockscaled_chunk_kmajor_scale_words,
+    unswizzle_blockscaled_chunk_kmajor_scale_words,
+)
+from tilelang.quantize.nvfp4 import (
+    blockscaled_chunk_kmajor_word_offset,
+    decode_packed_fp4_e2m1,
+    decode_ue4m3_scale_bytes,
+    encode_fp4_e2m1_values,
+    encode_ue4m3_scale_bytes,
+    pack_nvfp4_scale_bytes,
+)
 from tilelang.transform import simplify_prim_func
 
 
@@ -39,32 +57,6 @@ def _make_blockscale_emitter(**kwargs):
         stype="ue4m3",
         **kwargs,
     )
-
-
-def _make_sm120_fulltile_contract():
-    emitter = _make_blockscale_emitter(
-        a_dtype=T.float4_e2m1fn,
-        b_dtype=T.float4_e2m1fn,
-        accum_dtype=T.float32,
-        a_transposed=False,
-        b_transposed=True,
-        block_row_warps=2,
-        block_col_warps=2,
-        warp_row_tiles=64,
-        warp_col_tiles=64,
-        chunk=256,
-        reduce_k=1,
-        num_elems_per_byte=2,
-    )
-    return SM120BlockScaledFullTilePackageContract.for_package_pingpong(
-        emitter,
-        sf_layout="blockscaled_chunk_kmajor",
-    )
-
-
-def _oracle_blockscaled_chunk_kmajor_flat_word(row: int, kblock: int) -> int:
-    physical_row, physical_word = blockscaled_chunk_kmajor_word_offset(row, kblock)
-    return physical_row * 4 + physical_word
 
 
 def _make_swizzle_layout(shared_buf):
@@ -433,125 +425,6 @@ def test_nvf4_mma_block_scale_rejects_incompatible_dtypes(dtype_kwargs):
         )
 
 
-def test_sm120_fulltile_package_contract_matches_current_pingpong_path():
-    contract = _make_sm120_fulltile_contract()
-
-    assert (contract.tile_m, contract.tile_n, contract.tile_k) == (128, 128, 256)
-    assert (contract.block_row_warps, contract.block_col_warps) == (2, 2)
-    assert (contract.warp_rows, contract.warp_cols) == (4, 4)
-    assert (contract.warp_row_tiles, contract.warp_col_tiles) == (64, 64)
-    assert (contract.kblocks, contract.micro_size_k) == (4, 64)
-    assert (contract.scale_package_words_sfa, contract.scale_package_words_sfb) == (2, 2)
-    assert (contract.issue_count_per_warp, contract.issue_count_per_warpgroup) == (32, 128)
-
-
-def test_sm120_fulltile_package_contract_describes_compact_selector_copy_view():
-    contract = _make_sm120_fulltile_contract()
-
-    assert contract.compact_selector_scale_rows(lane=0, warp_m=0, warp_n=0) == ((0, 32), (0, 32))
-    assert contract.compact_selector_scale_rows(lane=1, warp_m=0, warp_n=0) == ((8, 40), (8, 40))
-    assert contract.compact_selector_scale_rows(lane=2, warp_m=1, warp_n=1) == ((80, 112), (80, 112))
-    assert contract.compact_selector_scale_rows(lane=31, warp_m=1, warp_n=1) == ((95, 127), (95, 127))
-
-
-@pytest.mark.parametrize("lane", [0, 1, 2, 17, 31])
-@pytest.mark.parametrize("warp_m", [0, 1])
-@pytest.mark.parametrize("warp_n", [0, 1])
-@pytest.mark.parametrize("kblock", [0, 2, 3])
-def test_sm120_fulltile_package_contract_word_offsets_match_source_layout_oracle(lane, warp_m, warp_n, kblock):
-    contract = _make_sm120_fulltile_contract()
-
-    sfa_rows, sfb_rows = contract.compact_selector_scale_rows(lane=lane, warp_m=warp_m, warp_n=warp_n)
-    expected_sfa = tuple(_oracle_blockscaled_chunk_kmajor_flat_word(row, kblock) for row in sfa_rows)
-    expected_sfb = tuple(_oracle_blockscaled_chunk_kmajor_flat_word(row, kblock) for row in sfb_rows)
-
-    assert contract.compact_selector_scale_word_offsets(lane=lane, warp_m=warp_m, warp_n=warp_n, kblock=kblock) == (
-        expected_sfa,
-        expected_sfb,
-    )
-
-
-def test_sm120_fulltile_package_contract_describes_pingpong_lifecycle():
-    contract = _make_sm120_fulltile_contract()
-
-    assert contract.package_pingpong_lifecycle() == (
-        ("copy", 0, 0),
-        ("copy", 1, 1),
-        ("gemm", 0, 0),
-        ("copy", 0, 2),
-        ("gemm", 1, 1),
-        ("copy", 1, 3),
-        ("gemm", 0, 2),
-        ("gemm", 1, 3),
-    )
-
-
-def test_sm120_fulltile_package_contract_pingpong_lifecycle_is_data_ready():
-    contract = _make_sm120_fulltile_contract()
-
-    package_kblock = {}
-    gemmed_kblocks = []
-    for op, package_id, kblock in contract.package_pingpong_lifecycle():
-        if op == "copy":
-            package_kblock[package_id] = kblock
-        elif op == "gemm":
-            assert package_kblock[package_id] == kblock
-            gemmed_kblocks.append(kblock)
-        else:
-            raise AssertionError(f"unexpected package lifecycle op: {op}")
-
-    assert gemmed_kblocks == [0, 1, 2, 3]
-
-
-def test_sm120_fulltile_package_contract_describes_omma_sf_issue_schedule():
-    contract = _make_sm120_fulltile_contract()
-    schedule = contract.omma_sf_issue_schedule_per_warp()
-
-    assert len(schedule) == contract.issue_count_per_warp
-    assert schedule[0] == (0, 0, 0, 0, 0, 0, 0)
-    assert schedule[1] == (0, 0, 1, 0, 0, 0, 1)
-    assert schedule[2] == (0, 1, 0, 0, 0, 0, 2)
-    assert schedule[3] == (0, 1, 1, 0, 0, 0, 3)
-    assert schedule[16] == (2, 0, 0, 1, 0, 0, 0)
-    assert schedule[-1] == (3, 3, 1, 1, 1, 1, 3)
-
-    for mma_i, mma_j, n8_half, sfa_word, sfb_word, scale_a_tid, scale_b_tid in schedule:
-        assert sfa_word == (0 if mma_i < 2 else 1)
-        assert sfb_word == (0 if mma_j < 2 else 1)
-        assert scale_a_tid == (mma_i & 1)
-        assert scale_b_tid == (mma_j & 1) * 2 + n8_half
-
-    assert sorted({issue[5] for issue in schedule}) == [0, 1]
-    assert sorted({issue[6] for issue in schedule}) == [0, 1, 2, 3]
-    assert sum(1 for issue in schedule if issue[3] == 0) == 16
-    assert sum(1 for issue in schedule if issue[3] == 1) == 16
-    assert sum(1 for issue in schedule if issue[4] == 0) == 16
-    assert sum(1 for issue in schedule if issue[4] == 1) == 16
-
-
-def test_sm120_fulltile_package_contract_rejects_shape_drift():
-    emitter = _make_blockscale_emitter(
-        a_dtype=T.float4_e2m1fn,
-        b_dtype=T.float4_e2m1fn,
-        accum_dtype=T.float32,
-        a_transposed=False,
-        b_transposed=True,
-        block_row_warps=2,
-        block_col_warps=4,
-        warp_row_tiles=64,
-        warp_col_tiles=64,
-        chunk=256,
-        reduce_k=1,
-        num_elems_per_byte=2,
-    )
-
-    with pytest.raises(ValueError, match="128x128x256"):
-        SM120BlockScaledFullTilePackageContract.for_package_pingpong(
-            emitter,
-            sf_layout="blockscaled_chunk_kmajor",
-        )
-
-
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_eq(12, 0)
 @pytest.mark.parametrize("K", [64, 128, 256])
@@ -719,3 +592,332 @@ def test_nvf4_mma_block_scale_varying_scale_correctness():
 
 if __name__ == "__main__":
     tilelang.testing.main()
+
+
+# ---------------------------------------------------------------------------
+# Example tail-tile behavior (moved from test_tilelang_sm120_nvfp4_example_cli).
+# ---------------------------------------------------------------------------
+
+
+def _load_sm120_example(monkeypatch):
+    repo_root = Path(__file__).resolve().parents[3]
+    example = repo_root / "examples/gemm_sm120/sm120_nvfp4_blockscaled_gemm.py"
+    monkeypatch.setattr(sys, "argv", [str(example)])
+    spec = importlib.util.spec_from_file_location("sm120_nvfp4_blockscaled_gemm_example", example)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_sm120_nvfp4_example_kernel_handles_mn_tail_tiles(monkeypatch):
+    import pytest
+
+    torch = pytest.importorskip("torch")
+
+    from tilelang.quantize import swizzle_blockscaled_chunk_kmajor_scale_words
+
+    module = _load_sm120_example(monkeypatch)
+    for M, N, K in [(257, 384, 512), (130, 128, 256), (128, 136, 256)]:
+        kernel = module.sm120_nvfp4_blockscaled_gemm(M, N, K)
+
+        A = module._make_packed_fp4(M, K, seed=3)
+        B = module._make_packed_fp4(N, K, seed=4)
+        SFA_semantic = module._make_binary_scale_words(M, K, seed=5)
+        SFB_semantic = module._make_binary_scale_words(N, K, seed=6)
+        SFA = swizzle_blockscaled_chunk_kmajor_scale_words(SFA_semantic).reshape(-1, 4)
+        SFB = swizzle_blockscaled_chunk_kmajor_scale_words(SFB_semantic).reshape(-1, 4)
+        assert SFA.shape[0] % 128 == 0
+        assert SFB.shape[0] % 128 == 0
+
+        C = torch.empty((M, N), device="cuda", dtype=torch.bfloat16)
+        kernel(A, B, SFA, SFB, C)
+        torch.cuda.synchronize()
+        module._verify(A, B, SFA_semantic, SFB_semantic, C, torch.bfloat16)
+
+
+def test_sm120_nvfp4_example_kernel_rejects_unsupported_tails(monkeypatch):
+    import pytest
+
+    module = _load_sm120_example(monkeypatch)
+    # simultaneous M and N tails hit a known copy-lowering boundary bug
+    with pytest.raises(ValueError, match="simultaneous M and N tail"):
+        module.sm120_nvfp4_blockscaled_gemm(257, 136, 512)
+    # bf16 output rows must stay 16-byte aligned
+    with pytest.raises(AssertionError, match="multiple of 8"):
+        module.sm120_nvfp4_blockscaled_gemm(128, 130, 256)
+
+
+# ---------------------------------------------------------------------------
+# Scale layout / packer contract (moved from
+# testing/python/quantize/test_tilelang_quantize_nvfp4_scale_layout).
+# These pin the blockscaled_chunk_kmajor packing against independent oracles,
+# the CuTeDSL canonical SF byte layout, and the maint TileLang quantizer.
+# ---------------------------------------------------------------------------
+
+
+def _load_maint_quantizer():
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[3] / "maint/gemm/gemm_sm120/tilelang_nvfp4_quantizer.py"
+    spec = importlib.util.spec_from_file_location("tilelang_nvfp4_quantizer", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.tilelang_quantize_bf16_to_nvfp4_blockscaled
+
+
+def _pack_semantic_scale_words(scale_bytes):
+    scale_i64 = scale_bytes.to(torch.int64).reshape(scale_bytes.shape[0], scale_bytes.shape[1] // 4, 4)
+    words = scale_i64[:, :, 0]
+    words = words | (scale_i64[:, :, 1] << 8)
+    words = words | (scale_i64[:, :, 2] << 16)
+    words = words | (scale_i64[:, :, 3] << 24)
+    return words.to(torch.uint32).contiguous()
+
+
+def _expected_blockscaled_chunk_kmajor_byte_location(row: int, k16_idx: int, k64_cols: int = 4) -> tuple[int, int, int]:
+    k64_word = k16_idx // 4
+    byte_lane = k16_idx % 4
+    row_block = row // 128
+    row_in_block = row % 128
+    flat_word = row_block * 128 * k64_cols + k64_word * 128 + (row_in_block % 32) * 4 + (row_in_block // 32)
+    physical_row = flat_word // k64_cols
+    physical_word = flat_word % k64_cols
+    return physical_row, physical_word, byte_lane
+
+
+def _packed_byte(packed, row: int, word: int, byte_lane: int) -> int:
+    return (int(packed[row, word].item()) >> (8 * byte_lane)) & 0xFF
+
+
+def _unpack_with_oracle(packed, rows: int, k16_cols: int):
+    out = torch.empty((rows, k16_cols), dtype=torch.uint8)
+    k64_cols = k16_cols // 4
+    for row in range(rows):
+        for k16_idx in range(k16_cols):
+            physical_row, physical_word, byte_lane = _expected_blockscaled_chunk_kmajor_byte_location(row, k16_idx, k64_cols)
+            out[row, k16_idx] = _packed_byte(packed, physical_row, physical_word, byte_lane)
+    return out
+
+
+def test_blockscaled_chunk_kmajor_word_offset_fixed_cases():
+    expected = {
+        (0, 0): (0, 0),
+        (0, 1): (32, 0),
+        (0, 2): (64, 0),
+        (0, 3): (96, 0),
+        (31, 0): (31, 0),
+        (32, 0): (0, 1),
+        (63, 1): (63, 1),
+        (64, 2): (64, 2),
+        (96, 3): (96, 3),
+        (127, 3): (127, 3),
+    }
+    for (row, k64_word), physical in expected.items():
+        assert blockscaled_chunk_kmajor_word_offset(row, k64_word) == physical
+
+
+def test_pack_blockscaled_chunk_kmajor_scale_bytes_fixed_byte_offsets():
+    rows = 256
+    k16_cols = 32
+    scale_bytes = torch.zeros((rows, k16_cols), dtype=torch.uint8)
+    cases = [
+        (0, 0, 0x11),
+        (32, 0, 0x22),
+        (64, 8, 0x33),
+        (96, 12, 0x44),
+        (127, 15, 0x55),
+        (128, 16, 0x66),
+        (159, 31, 0x77),
+        (255, 27, 0x88),
+    ]
+    for row, k16_idx, value in cases:
+        scale_bytes[row, k16_idx] = value
+
+    packed = pack_blockscaled_chunk_kmajor_scale_bytes(scale_bytes)
+
+    assert packed.shape == (rows, k16_cols // 4)
+    assert packed.dtype == torch.uint32
+    for row, k16_idx, value in cases:
+        physical_row, physical_word, byte_lane = _expected_blockscaled_chunk_kmajor_byte_location(row, k16_idx, packed.shape[1])
+        assert _packed_byte(packed, physical_row, physical_word, byte_lane) == value
+
+
+def test_pack_blockscaled_chunk_kmajor_scale_bytes_random_binary_512x32_matches_oracle():
+    rows = 512
+    k16_cols = 512 // 16
+    generator = torch.Generator(device="cpu").manual_seed(17)
+    scale_bytes = torch.randint(0, 2, (rows, k16_cols), generator=generator, dtype=torch.uint8) * 0x38
+
+    packed = pack_blockscaled_chunk_kmajor_scale_bytes(scale_bytes)
+
+    assert packed.shape == (rows, k16_cols // 4)
+    assert packed.dtype == torch.uint32
+    assert torch.equal(_unpack_with_oracle(packed, rows, k16_cols), scale_bytes)
+
+
+def test_pack_blockscaled_chunk_kmajor_scale_bytes_matches_cutedsl_blocked_sf_layout():
+    """Byte-level cross-compatibility with the CuTeDSL/CUTLASS canonical SF layout.
+
+    CuTeDSL builds SFA/SFB with ``blockscaled_utils.tile_atom_to_shape_SF``:
+    atom ``((32,4),(16,4)):((16,4),(0,1))`` tiled with order ``(2,1,3)``, e.g.
+    for ``(MN=256, K=512, L=1)`` the layout prints as
+    ``(((32,4),2),((16,4),8),(1,1)):(((16,4),4096),((0,1),512),(0,0))``.
+    The packed uint32 tensor must carry exactly those bytes so one buffer can
+    feed both the TileLang SM120 path and a CuTeDSL NVFP4 blockscaled GEMM
+    (``tl_words.view(torch.uint8)`` / ``sf_u8.view(torch.uint32)`` are
+    zero-copy bridges between the two views).
+    """
+    for rows, k in ((128, 256), (256, 512), (384, 1024)):
+        k16_cols = k // 16
+        rest_k = k16_cols // 4
+        generator = torch.Generator(device="cpu").manual_seed(rows + k)
+        scale_bytes = torch.randint(0, 256, (rows, k16_cols), generator=generator, dtype=torch.uint8)
+
+        packed_bytes = pack_blockscaled_chunk_kmajor_scale_bytes(scale_bytes).view(torch.uint8).reshape(-1)
+
+        m = torch.arange(rows).unsqueeze(1)
+        k16 = torch.arange(k16_cols).unsqueeze(0)
+        cutedsl_offset = (m % 32) * 16 + ((m // 32) % 4) * 4 + (m // 128) * (512 * rest_k) + (k16 % 4) + (k16 // 4) * 512
+        assert torch.equal(packed_bytes[cutedsl_offset.reshape(-1)].reshape(rows, k16_cols), scale_bytes)
+
+
+def test_pack_blockscaled_chunk_kmajor_scale_bytes_matches_word_swizzle():
+    rows = 512
+    k16_cols = 512 // 16
+    scale_bytes = torch.arange(rows * k16_cols, dtype=torch.uint8).reshape(rows, k16_cols)
+
+    semantic_words = _pack_semantic_scale_words(scale_bytes)
+    assert torch.equal(pack_blockscaled_chunk_kmajor_scale_bytes(scale_bytes), swizzle_blockscaled_chunk_kmajor_scale_words(semantic_words))
+
+
+def test_pack_nvfp4_scale_bytes_default_matches_blockscaled_chunk_kmajor_layout():
+    rows = 512
+    k16_cols = 512 // 16
+    scale_bytes = torch.arange(rows * k16_cols, dtype=torch.uint8).reshape(rows, k16_cols)
+
+    expected = pack_blockscaled_chunk_kmajor_scale_bytes(scale_bytes)
+    actual = pack_nvfp4_scale_bytes(scale_bytes)
+
+    assert torch.equal(actual, expected)
+
+
+def test_blockscaled_chunk_kmajor_scale_packer_rejects_invalid_shapes():
+    # rows that are not a multiple of 128 are zero-padded, not rejected
+    padded = pack_blockscaled_chunk_kmajor_scale_bytes(torch.zeros((127, 16), dtype=torch.uint8))
+    assert padded.shape == (128, 4)
+
+    with pytest.raises(ValueError, match="K/16 columns multiple of 16"):
+        pack_blockscaled_chunk_kmajor_scale_bytes(torch.zeros((128, 12), dtype=torch.uint8))
+
+    with pytest.raises(TypeError, match="torch.uint8"):
+        pack_blockscaled_chunk_kmajor_scale_bytes(torch.zeros((128, 16), dtype=torch.int32))
+
+
+def test_encode_fp4_e2m1_values_and_pack_order():
+    values = torch.tensor([[0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.5, -1.0]], dtype=torch.float32)
+    codes = encode_fp4_e2m1_values(values)
+    assert torch.equal(codes, torch.tensor([[0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x9, 0xA]], dtype=torch.uint8))
+
+    packed = (codes[:, 0::2] | (codes[:, 1::2] << 4)).contiguous().view(torch.int8)
+    assert torch.equal(decode_packed_fp4_e2m1(packed), values)
+
+
+def test_encode_ue4m3_scale_bytes_known_values():
+    values = torch.tensor([0.0, 2.0**-9, 2.0**-6, 1.0, 2.0, 448.0], dtype=torch.float32)
+    encoded = encode_ue4m3_scale_bytes(values, rounding="nearest")
+    assert torch.equal(encoded, torch.tensor([0x00, 0x01, 0x08, 0x38, 0x40, 0x7E], dtype=torch.uint8))
+    torch.testing.assert_close(decode_ue4m3_scale_bytes(encoded), values)
+    assert torch.isnan(decode_ue4m3_scale_bytes(torch.tensor([0x7F], dtype=torch.uint8))).all()
+
+
+def test_quantize_nvfp4_blockscaled_bf16_activation_contract():
+    rows = 128
+    cols = 256
+    x = torch.zeros((rows, cols), dtype=torch.bfloat16)
+    pattern = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0, 0.0])
+    x[0, :16] = pattern.to(torch.bfloat16)
+
+    packed_fp4, packed_scales, scale_bytes = quantize_bf16_to_nvfp4_blockscaled(x, return_scale_bytes=True)
+
+    assert packed_fp4.shape == (rows, cols // 2)
+    assert packed_fp4.dtype == torch.int8
+    assert packed_scales.shape == (rows, cols // 64)
+    assert packed_scales.dtype == torch.uint32
+    assert scale_bytes.shape == (rows, cols // 16)
+    assert scale_bytes.dtype == torch.uint8
+    assert scale_bytes[0, 0].item() == 0x38
+    assert torch.equal(packed_scales, pack_blockscaled_chunk_kmajor_scale_bytes(scale_bytes))
+
+    decoded = decode_packed_fp4_e2m1(packed_fp4) * decode_ue4m3_scale_bytes(scale_bytes).repeat_interleave(16, dim=1)
+    torch.testing.assert_close(decoded[0, :16], pattern, rtol=0.0, atol=0.0)
+
+
+def test_quantize_nvfp4_blockscaled_random_bf16_has_bounded_error():
+    rows = 128
+    cols = 256
+    generator = torch.Generator(device="cpu").manual_seed(19)
+    x = (torch.randn((rows, cols), generator=generator, dtype=torch.float32) * 2.0).to(torch.bfloat16)
+
+    packed_fp4, scale_source, scale_bytes = quantize_bf16_to_nvfp4_blockscaled(x, return_scale_bytes=True)
+    decoded = decode_packed_fp4_e2m1(packed_fp4) * decode_ue4m3_scale_bytes(scale_bytes).repeat_interleave(16, dim=1)
+
+    scale = decode_ue4m3_scale_bytes(scale_bytes).repeat_interleave(16, dim=1)
+    error = (decoded - x.to(torch.float32)).abs()
+    assert torch.isfinite(decoded).all()
+    assert torch.all(error <= scale + 1e-6)
+    assert torch.equal(scale_source, pack_blockscaled_chunk_kmajor_scale_bytes(scale_bytes))
+
+
+def test_quantize_nvfp4_blockscaled_explicit_layout_matches_default():
+    rows = 128
+    cols = 256
+    generator = torch.Generator(device="cpu").manual_seed(23)
+    x = (torch.randn((rows, cols), generator=generator, dtype=torch.float32) * 2.0).to(torch.bfloat16)
+
+    default = quantize_bf16_to_nvfp4_blockscaled(x)
+    explicit = quantize_bf16_to_nvfp4_blockscaled(x, scale_layout="blockscaled_chunk_kmajor")
+
+    assert torch.equal(explicit[0], default[0])
+    assert torch.equal(explicit[1], default[1])
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(10, 0)
+@pytest.mark.parametrize("rows, cols", [(128, 256), (256, 512)])
+def test_tilelang_quantize_nvfp4_blockscaled_matches_reference_layout_and_error_bound(rows, cols):
+    generator = torch.Generator(device="cuda").manual_seed(rows + cols)
+    x = (torch.randn((rows, cols), generator=generator, device="cuda", dtype=torch.float32) * 2.0).to(torch.bfloat16)
+
+    tilelang_quantize = _load_maint_quantizer()
+    packed_tl, scale_source_tl = tilelang_quantize(x)
+    _, scale_source_ref, scale_bytes_ref = quantize_bf16_to_nvfp4_blockscaled(x, return_scale_bytes=True)
+
+    assert packed_tl.shape == (rows, cols // 2)
+    assert packed_tl.dtype == torch.int8
+    assert scale_source_tl.shape == (rows, cols // 64)
+    assert scale_source_tl.dtype == torch.uint32
+    assert torch.equal(scale_source_tl.cpu(), scale_source_ref.cpu())
+
+    semantic_words = unswizzle_blockscaled_chunk_kmajor_scale_words(scale_source_tl)
+    assert torch.equal(swizzle_blockscaled_chunk_kmajor_scale_words(semantic_words).cpu(), scale_source_tl.cpu())
+
+    scale = decode_ue4m3_scale_bytes(scale_bytes_ref).repeat_interleave(16, dim=1)
+    decoded = decode_packed_fp4_e2m1(packed_tl) * scale
+    error = (decoded - x.to(torch.float32)).abs()
+    assert torch.isfinite(decoded).all()
+    assert torch.all(error <= scale + 1e-6)
+
+
+def test_swizzle_blockscaled_chunk_kmajor_pads_rows_to_full_tiles():
+    rows, cols = 130, 8
+    generator = torch.Generator(device="cpu").manual_seed(23)
+    words = torch.randint(0, 2**31, (rows, cols), generator=generator, dtype=torch.int64).to(torch.uint32)
+
+    swizzled = swizzle_blockscaled_chunk_kmajor_scale_words(words)
+    assert swizzled.shape == (256, cols)
+
+    back = unswizzle_blockscaled_chunk_kmajor_scale_words(swizzled)
+    assert torch.equal(back[:rows], words)
+    assert bool((back[rows:] == 0).all())
