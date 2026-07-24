@@ -42,3 +42,36 @@ def test_cpu_transpose_swaps_only_the_final_two_axes(src_shape):
     expected = src.transpose(-2, -1)
 
     torch.testing.assert_close(actual, expected)
+
+
+def test_cpu_transpose_maps_destination_boundary_predicate():
+    src_shape = (2, 3, 4)
+    dst_shape = (2, 4, 3)
+
+    @T.prim_func
+    def main(
+        src: T.Tensor(src_shape, T.float32),
+        dst: T.Tensor(dst_shape, T.float32),
+    ):
+        with T.Kernel(1):
+            T.fill(dst, -1.0)
+            T.transpose(
+                src[0:2, 0:3, 0:4],
+                dst[0:2, 0:4, 1:4],
+            )
+
+    with tvm.target.Target("c"):
+        kernel = tilelang.compile(
+            main,
+            out_idx=[1],
+            target="c",
+            target_host="c",
+            execution_backend="cython",
+        )
+
+    src = torch.arange(math.prod(src_shape), dtype=torch.float32).reshape(src_shape)
+    actual = kernel(src)
+    expected = torch.full(dst_shape, -1.0)
+    expected[:, :, 1:] = src[:, :2, :].transpose(-2, -1)
+
+    torch.testing.assert_close(actual, expected)
