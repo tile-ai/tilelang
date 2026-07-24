@@ -1,6 +1,5 @@
 from __future__ import annotations
 import tilelang.language as T
-import tilelang.language.dtypes as _dtypes
 from typing import Literal
 from collections.abc import Callable
 from tvm import DataType
@@ -50,9 +49,9 @@ class TensorCoreIntrinEmitter:
 
     def __init__(
         self,
-        a_dtype: str = _dtypes.float16,
-        b_dtype: str = _dtypes.float16,
-        accum_dtype: str = _dtypes.float16,
+        a_dtype: str = "float16",
+        b_dtype: str = "float16",
+        accum_dtype: str = "float16",
         a_transposed: bool = False,
         b_transposed: bool = False,
         block_row_warps: int = 2,
@@ -93,7 +92,7 @@ class TensorCoreIntrinEmitter:
                 f"Invalid threads configuration for this tile shape, {self.warp_rows} x {self.warp_cols} with threads {self.threads}"
             )
 
-    def _initialize_k_dim(self, a_dtype=_dtypes.float16):
+    def _initialize_k_dim(self, a_dtype="float16"):
         self.k_dim = 4
 
     def _initialize_local_size(self, m_dim=16, n_dim=16, k_dim=16):

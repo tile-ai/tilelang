@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import tilelang.language as T
-import tilelang.language.dtypes as _dtypes
 from typing import Literal
 from collections.abc import Callable
 from tvm import DataType, tirx
@@ -68,10 +67,10 @@ class SparseTensorCoreIntrinEmitter:
 
     def __init__(
         self,
-        a_dtype: str = _dtypes.float16,
-        e_dtype: str = _dtypes.uint8,
-        b_dtype: str = _dtypes.float16,
-        accum_dtype: str = _dtypes.float16,
+        a_dtype: str = "float16",
+        e_dtype: str = "uint8",
+        b_dtype: str = "float16",
+        accum_dtype: str = "float16",
         a_transposed: bool = False,
         b_transposed: bool = False,
         e_transposed: bool = False,
@@ -116,7 +115,7 @@ class SparseTensorCoreIntrinEmitter:
                 f"Invalid threads configuration for this tile shape, {self.warp_rows} x {self.warp_cols} with threads {self.threads}"
             )
 
-    def _initialize_k_dim(self, a_dtype=_dtypes.float16):
+    def _initialize_k_dim(self, a_dtype="float16"):
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
         # NOTE: k_dim here represents the logical shape of the MMA operation.

@@ -1,7 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
 import tilelang.language as T
-import tilelang.language.dtypes as _dtypes
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 from tvm import DataType
 from tvm.tirx import PrimExpr, Buffer, Var, BufferLoad, BufferRegion
@@ -208,9 +207,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
     def __init__(
         self,
-        a_dtype: str = _dtypes.float16,
-        b_dtype: str = _dtypes.float16,
-        accum_dtype: str = _dtypes.float16,
+        a_dtype: str = "float16",
+        b_dtype: str = "float16",
+        accum_dtype: str = "float16",
         a_transposed: bool = False,
         b_transposed: bool = False,
         block_row_warps: int = 2,
@@ -253,7 +252,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         self.micro_size_x = m_dim
         self.micro_size_k = k_dim
 
-    def _initialize_k_dim(self, a_dtype=_dtypes.float16):
+    def _initialize_k_dim(self, a_dtype="float16"):
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
         if a_dtype.bits == 6 or a_dtype.is_float4():
