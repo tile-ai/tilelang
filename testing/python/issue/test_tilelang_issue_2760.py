@@ -19,6 +19,7 @@ def test_const_grid_only():
 
     @tilelang.jit
     def kernel(A, B, block_N: int = 32):
+        """Copy A into B."""
         N = T.const("N")
         num_blocks = T.const("num_blocks")  # grid-only, not in any buffer shape
         A: T.Tensor((N,), T.float16)
@@ -40,6 +41,7 @@ def test_const_computation_only():
 
     @tilelang.jit
     def kernel(A, B, block_N: int = 32):
+        """Copy A into B."""
         N = T.const("N")
         scale = T.const("scale")  # computation-only, not in any buffer shape
         A: T.Tensor((N,), T.float16)
@@ -63,6 +65,7 @@ def test_const_mixed():
 
     @tilelang.jit
     def kernel(A, B, block_N: int = 32):
+        """Copy A into B."""
         N = T.const("N")
         num_blocks = T.const("num_blocks")
         scale = T.const("scale")
@@ -87,6 +90,7 @@ def test_const_pipelined_gemm():
 
     @tilelang.jit
     def kernel(A, B, C, block_M: int = 64, block_N: int = 64, block_K: int = 32):
+        """Pipelined GEMM: C = A @ B with grid-only const extents."""
         M, N, K = T.const("M, N, K")
         num_blocks_m = T.const("num_blocks_m")  # grid-only
         num_blocks_n = T.const("num_blocks_n")  # grid-only
@@ -118,6 +122,7 @@ def test_const_cache_isolation():
 
     @tilelang.jit
     def kernel(A, B, block_N: int = 32):
+        """Copy A into B."""
         N = T.const("N")
         num_blocks = T.const("num_blocks")
         A: T.Tensor((N,), T.float16)
@@ -147,6 +152,7 @@ def test_const_float_value():
 
     @tilelang.jit
     def kernel(A, B, block_N: int = 32):
+        """Copy A into B."""
         N = T.const("N")
         scale = T.const("scale")
         A: T.Tensor((N,), T.float16)
@@ -170,6 +176,7 @@ def test_const_missing_kwarg_errors():
 
     @tilelang.jit
     def kernel(A, B, block_N: int = 32):
+        """Copy A into B."""
         N = T.const("N")
         num_blocks = T.const("num_blocks")
         A: T.Tensor((N,), T.float16)
