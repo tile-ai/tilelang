@@ -3,7 +3,9 @@
 from tvm.tirx.script.builder.frame import TIRFrame
 from tvm.ffi import register_object
 from tilelang import _ffi_api
-from .kernel import get_thread_bindings, get_thread_extents
+from tilelang.language.kernel import get_thread_bindings, get_thread_extents
+
+__all__ = ["WarpSpecialize", "WarpSpecializeFrame", "ws"]
 
 
 @register_object("tl.WarpSpecializeFrame")

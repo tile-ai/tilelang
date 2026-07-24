@@ -5,9 +5,12 @@ It includes functionality to print variables, print values in buffers, condition
 
 from tvm import tirx
 from typing import Any
+from tilelang.cuda.debug import device_assert as device_assert
 from tilelang.language.kernel import get_thread_bindings
-from tilelang.language import copy, macro, serial, alloc_shared
+from tilelang.language.common import alloc_shared, copy, macro, serial
 from tilelang.language.utils import index_to_coordinates
+
+__all__ = ["device_assert", "print"]
 
 
 @macro
@@ -119,12 +122,6 @@ def print_local_buffer_with_condition(condition: tirx.PrimExpr, buffer: tirx.Buf
         for i in serial(elems):
             coords = index_to_coordinates(i, buffer.shape)
             tirx.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
-
-
-def device_assert(condition: tirx.PrimExpr, msg: str = "", no_stack_info=False):
-    from tilelang.cuda.debug import device_assert as cuda_device_assert
-
-    return cuda_device_assert(condition, msg, no_stack_info)
 
 
 # NOTE(chaofan): T.print is implemented as a macro, so no return

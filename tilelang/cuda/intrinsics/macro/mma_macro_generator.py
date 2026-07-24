@@ -1,5 +1,6 @@
 from __future__ import annotations
 import tilelang.language as T
+import tilelang.language.dtypes as _dtypes
 from typing import Literal
 from collections.abc import Callable
 from tilelang.common import TransformKind
@@ -71,9 +72,9 @@ class TensorCoreIntrinEmitter:
 
     def __init__(
         self,
-        a_dtype: str = T.float16,
-        b_dtype: str = T.float16,
-        accum_dtype: str = T.float16,
+        a_dtype: str = _dtypes.float16,
+        b_dtype: str = _dtypes.float16,
+        accum_dtype: str = _dtypes.float16,
         a_transposed: bool = False,
         b_transposed: bool = False,
         block_row_warps: int = 2,
@@ -115,12 +116,12 @@ class TensorCoreIntrinEmitter:
                 f"Invalid threads configuration for this tile shape, {self.warp_rows} x {self.warp_cols} with threads {self.threads}"
             )
 
-    def _initialize_k_dim(self, a_dtype=T.float16):
+    def _initialize_k_dim(self, a_dtype=_dtypes.float16):
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
         self.k_dim = min(256 // a_dtype.bits, self.chunk)
 
-    def _initialize_m_dim(self, a_dtype=T.float16):
+    def _initialize_m_dim(self, a_dtype=_dtypes.float16):
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
         if a_dtype.bits == 64:
@@ -902,9 +903,9 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
 
     def __init__(
         self,
-        a_dtype: str = T.float16,
-        b_dtype: str = T.float16,
-        accum_dtype: str = T.float16,
+        a_dtype: str = _dtypes.float16,
+        b_dtype: str = _dtypes.float16,
+        accum_dtype: str = _dtypes.float16,
         a_transposed: bool = False,
         b_transposed: bool = False,
         block_row_warps: int = 2,
@@ -935,7 +936,7 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
         )
         self._initialize_transform_kind(transform_kind_a, transform_kind_b)
 
-    def _initialize_k_dim(self, a_dtype=T.float16):
+    def _initialize_k_dim(self, a_dtype=_dtypes.float16):
         self.k_dim = 256 // DataType(a_dtype).bits
 
     def _initialize_local_size(self, m_dim=16, n_dim=16, k_dim=16, warp_size=32):

@@ -1,5 +1,7 @@
 from tvm import tirx
-import tilelang.language as T
+import tilelang.language.common as T
+
+__all__ = ["rng_init", "rng_rand", "rng_rand_float"]
 
 
 # https://docs.nvidia.com/cuda/curand/device-api-overview.html#device-api-overview
