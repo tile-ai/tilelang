@@ -471,6 +471,16 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
     os << ">(";
     this->PrintExpr(op->args[0], os);
     os << "))";
+  } else if (op->op.same_as(builtin::handle_add_byte_offset())) {
+    // Dynamic shared memory pointer arithmetic.
+    // Metal requires explicit address space qualifiers on all pointers.
+    // The base class emits ((void*)((char*)...)) which is invalid in MSL.
+    TVM_FFI_ICHECK_EQ(op->args.size(), 2U);
+    os << "((threadgroup void*)((threadgroup char*)";
+    this->PrintExpr(op->args[0], os);
+    os << " + ";
+    this->PrintExpr(op->args[1], os);
+    os << "))";
   } else {
     CodeGenC::VisitExpr_(op, os);
   }
