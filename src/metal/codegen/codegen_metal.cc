@@ -537,6 +537,59 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
     cg.AddFunction(kv.first, f);
 
     std::string fsource = cg.Finish();
+    // MSL requires explicit address space qualifiers on all pointers.
+    // The CUDA-oriented codegen emits void* for shared memory handles
+    // and pointer arithmetic casts, which is invalid in MSL. Fix them.
+    // 1) void* declarations for shared memory aliases
+    {
+      std::string from = "void* ";
+      std::string to = "threadgroup void* ";
+      for (size_t pos = 0; (pos = fsource.find(from, pos)) != std::string::npos;) {
+        fsource.replace(pos, from.length(), to);
+        pos += to.length();
+      }
+    }
+    // 2) void* casts in pointer arithmetic (handle_add_byte_offset)
+    {
+      std::string from = "((void*)((char*)";
+      std::string to = "((threadgroup void*)((threadgroup char*)";
+      for (size_t pos = 0; (pos = fsource.find(from, pos)) != std::string::npos;) {
+        fsource.replace(pos, from.length(), to);
+        pos += to.length();
+      }
+    }
+    // 3) Pointer casts (TYPE*) on shared memory handles
+    {
+      std::string from = "((float2*)A_shared)";
+      std::string to = "((threadgroup float2*)A_shared)";
+      for (size_t pos = 0; (pos = fsource.find(from, pos)) != std::string::npos;) {
+        fsource.replace(pos, from.length(), to);
+        pos += to.length();
+      }
+    }
+    {
+      std::string from = "((float2*)B_shared)";
+      std::string to = "((threadgroup float2*)B_shared)";
+      for (size_t pos = 0; (pos = fsource.find(from, pos)) != std::string::npos;) {
+        fsource.replace(pos, from.length(), to);
+        pos += to.length();
+      }
+    }
+    // 4) Generalize: any ((TYPE*)_shared) pattern
+    {
+      // Replace patterns like ((half*)X_shared), ((float4*)Y_shared) etc.
+      size_t pos = 0;
+      while ((pos = fsource.find("*)_shared", pos)) != std::string::npos) {
+        // Find the opening ((
+        size_t open = fsource.rfind("((", pos);
+        if (open != std::string::npos) {
+          fsource.insert(open + 2, "threadgroup ");
+          pos = open + 2 + 12;  // skip past "threadgroup "
+        } else {
+          pos += 1;
+        }
+      }
+    }
     source_maker << fsource << "\n";
     if (fmetal_compile) {
       fsource = (*fmetal_compile)(fsource, target).cast<std::string>();
