@@ -109,7 +109,13 @@ def copy(
     """
     src, dst = _normalize_copy_regions(src, dst)
     if isinstance(src, tirx.BufferLoad) and isinstance(dst, tirx.BufferLoad):
-        return tirx.BufferStore(dst.buffer, src, dst.indices)
+        # Scalar fast path. Mirror the dtype conversion the region path applies
+        # in copy.cc; cast to the load dtype, which is what BufferStore checks
+        # once index lanes are folded in.
+        value = src
+        if src.dtype != dst.dtype:
+            value = tirx.Cast(dst.dtype, src)
+        return tirx.BufferStore(dst.buffer, value, dst.indices)
 
     # Build annotations dict
     ann = annotations.copy() if annotations else {}

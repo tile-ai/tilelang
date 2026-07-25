@@ -279,6 +279,41 @@ def test_tilelang_copy_bufferload():
     run_tilelang_copy_bufferload(num_tokens=128)
 
 
+def tilelang_copy_bufferload_cross_dtype(num_tokens, index_dtype=T.int64):
+    @T.prim_func
+    def main(
+        indices: T.Tensor((num_tokens,), index_dtype),
+        out: T.Tensor((num_tokens,), T.int32),
+    ):
+        with T.Kernel(num_tokens, threads=1) as pid:
+            idx = T.alloc_local([1], T.int32)
+            T.copy(indices[pid], idx[0])
+            out[pid] = idx[0]
+
+    return main
+
+
+def run_tilelang_copy_bufferload_cross_dtype(num_tokens=128, index_dtype=T.int64):
+    program = tilelang_copy_bufferload_cross_dtype(num_tokens, index_dtype)
+    kernel = tilelang.compile(
+        program,
+        out_idx=[1],
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+    # Keep the range within the (possibly narrow) index dtype.
+    hi = 30000 if index_dtype == T.int16 else 1_000_000
+    indices = torch.randint(0, hi, (num_tokens,), dtype=getattr(torch, index_dtype), device="cuda")
+    out = kernel(indices)
+    torch.testing.assert_close(out, indices.to(torch.int32))
+
+
+@tilelang.testing.requires_cuda
+def test_tilelang_copy_bufferload_cross_dtype():
+    # int64 index into an int32 scratch -- the gather from #2689.
+    run_tilelang_copy_bufferload_cross_dtype(num_tokens=128, index_dtype=T.int64)
+    run_tilelang_copy_bufferload_cross_dtype(num_tokens=128, index_dtype=T.int16)
+
+
 def tilelang_copy_buffer_load_with_parallel(M, N, block_M, block_N, dtype=T.float16):
     @T.prim_func
     def main(
