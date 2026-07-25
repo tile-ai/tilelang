@@ -545,6 +545,11 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
       std::string from = "void* ";
       std::string to = "threadgroup void* ";
       for (size_t pos = 0; (pos = fsource.find(from, pos)) != std::string::npos;) {
+        // Skip if already qualified (idempotent)
+        if (pos >= 12 && fsource.substr(pos - 12, 12) == "threadgroup ") {
+          pos += from.length();
+          continue;
+        }
         fsource.replace(pos, from.length(), to);
         pos += to.length();
       }
@@ -554,6 +559,11 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
       std::string from = "((void*)((char*)";
       std::string to = "((threadgroup void*)((threadgroup char*)";
       for (size_t pos = 0; (pos = fsource.find(from, pos)) != std::string::npos;) {
+        // Skip if already qualified
+        if (pos >= 2 && fsource.substr(pos - 2, 14) == "((threadgroup v") {
+          pos += from.length();
+          continue;
+        }
         fsource.replace(pos, from.length(), to);
         pos += to.length();
       }
@@ -563,6 +573,10 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
       std::string from = "((float2*)A_shared)";
       std::string to = "((threadgroup float2*)A_shared)";
       for (size_t pos = 0; (pos = fsource.find(from, pos)) != std::string::npos;) {
+        if (pos >= 2 && fsource.substr(pos, 14) == "((threadgroup ") {
+          pos += from.length();
+          continue;
+        }
         fsource.replace(pos, from.length(), to);
         pos += to.length();
       }
@@ -571,20 +585,25 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
       std::string from = "((float2*)B_shared)";
       std::string to = "((threadgroup float2*)B_shared)";
       for (size_t pos = 0; (pos = fsource.find(from, pos)) != std::string::npos;) {
+        if (pos >= 2 && fsource.substr(pos, 14) == "((threadgroup ") {
+          pos += from.length();
+          continue;
+        }
         fsource.replace(pos, from.length(), to);
         pos += to.length();
       }
     }
     // 4) Generalize: any ((TYPE*)_shared) pattern
     {
-      // Replace patterns like ((half*)X_shared), ((float4*)Y_shared) etc.
       size_t pos = 0;
       while ((pos = fsource.find("*)_shared", pos)) != std::string::npos) {
-        // Find the opening ((
         size_t open = fsource.rfind("((", pos);
         if (open != std::string::npos) {
-          fsource.insert(open + 2, "threadgroup ");
-          pos = open + 2 + 12;  // skip past "threadgroup "
+          // Skip if already has threadgroup qualifier
+          if (fsource.substr(open, 14) != "((threadgroup ") {
+            fsource.insert(open + 2, "threadgroup ");
+          }
+          pos = open + 2 + 12;
         } else {
           pos += 1;
         }
