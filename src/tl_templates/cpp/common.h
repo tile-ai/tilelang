@@ -21,22 +21,26 @@ template <typename T, int N> struct vec_type {
   }
   vec_type operator+(const vec_type &o) const {
     vec_type r;
-    for (int i = 0; i < N; i++) r.data[i] = data[i] + o.data[i];
+    for (int i = 0; i < N; i++)
+      r.data[i] = data[i] + o.data[i];
     return r;
   }
   vec_type operator-(const vec_type &o) const {
     vec_type r;
-    for (int i = 0; i < N; i++) r.data[i] = data[i] - o.data[i];
+    for (int i = 0; i < N; i++)
+      r.data[i] = data[i] - o.data[i];
     return r;
   }
   vec_type operator*(const vec_type &o) const {
     vec_type r;
-    for (int i = 0; i < N; i++) r.data[i] = data[i] * o.data[i];
+    for (int i = 0; i < N; i++)
+      r.data[i] = data[i] * o.data[i];
     return r;
   }
   vec_type operator/(const vec_type &o) const {
     vec_type r;
-    for (int i = 0; i < N; i++) r.data[i] = data[i] / o.data[i];
+    for (int i = 0; i < N; i++)
+      r.data[i] = data[i] / o.data[i];
     return r;
   }
 };

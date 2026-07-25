@@ -1,8 +1,11 @@
 """
 Minimal reproducer for the missing vec_type arithmetic operators in common.h.
 
-Without the fix, compiling a CPU kernel with `c` target fails:
-  error: no match for 'operator-' (operand types are 'float4' and 'float4')
+Without the fix, compiling a CPU kernel with `c` target fails when the
+AutoVectorize pass generates vector operations like +, -, *, / on
+vec_type (float4, int32_t4, etc.) because these operators are not defined.
+
+The fix adds operator+, operator-, operator*, and operator/ to vec_type.
 
 Requires: tilelang, torch
 """
