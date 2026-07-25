@@ -19,6 +19,26 @@ template <typename T, int N> struct vec_type {
     for (int i = 0; i < N; i++)
       data[i] = v;
   }
+  vec_type operator+(const vec_type &o) const {
+    vec_type r;
+    for (int i = 0; i < N; i++) r.data[i] = data[i] + o.data[i];
+    return r;
+  }
+  vec_type operator-(const vec_type &o) const {
+    vec_type r;
+    for (int i = 0; i < N; i++) r.data[i] = data[i] - o.data[i];
+    return r;
+  }
+  vec_type operator*(const vec_type &o) const {
+    vec_type r;
+    for (int i = 0; i < N; i++) r.data[i] = data[i] * o.data[i];
+    return r;
+  }
+  vec_type operator/(const vec_type &o) const {
+    vec_type r;
+    for (int i = 0; i < N; i++) r.data[i] = data[i] / o.data[i];
+    return r;
+  }
 };
 
 #define TL_DEFINE_VEC(T)                                                       \
