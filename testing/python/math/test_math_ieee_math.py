@@ -47,6 +47,7 @@ def run_ieee_math_test(
     block_N=16,
     dtype=T.float32,
     run_execution=True,
+    target="cuda",
 ):
     """
     Test IEEE-compliant math operations with specified rounding modes.
@@ -119,7 +120,7 @@ def run_ieee_math_test(
     kernel = tilelang.compile(
         main_func,
         out_idx=out_idx,
-        target="cuda",
+        target=target,
         pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
         },
@@ -219,6 +220,31 @@ def test_ieee_half_non_rn_rejected():
         run_ieee_math_test("ieee_add", T.ieee_add, rounding_mode="rz", dtype=T.float16)
     with pytest.raises(Exception, match="Only rounding mode 'rn' is available for half precision"):
         run_ieee_math_test("ieee_add", T.ieee_add, rounding_mode="rz", dtype=T.bfloat16)
+
+
+# ---------------------------------------------------------------------------
+# Architecture regression — the bf16 __hfma wrapper in common.h must keep
+# compiling for pre-SM80 targets. See the bf16 __hfma guard in
+# src/tl_templates/cuda/common.h.
+# ---------------------------------------------------------------------------
+
+
+@tilelang.testing.requires_cuda
+def test_ieee_fmaf_bf16_compiles_for_sm75():
+    """bf16 ieee_fmaf lowers to __hfma, whose native __nv_bfloat16 overload
+    only exists on SM80+. common.h is pulled into every generated kernel, so an
+    unguarded wrapper breaks *all* SM75 builds, not just bf16 ones. Compile (do
+    not run) a bf16 fmaf kernel explicitly for sm_75 to pin the fallback path.
+    Compile-only, so it runs on any CUDA runner regardless of the host GPU arch
+    -- the parametrized tests above use target="cuda" and would only exercise
+    the SM80+ branch on a modern runner."""
+    run_ieee_math_test(
+        "ieee_fmaf",
+        T.ieee_fmaf,
+        dtype=T.bfloat16,
+        target={"kind": "cuda", "arch": "sm_75"},
+        run_execution=False,
+    )
 
 
 if __name__ == "__main__":
