@@ -317,7 +317,7 @@ class DSLMutator(ast.NodeTransformer):
             f"for {tmp} in __tb.ctx_for(range):\n  pass\n",
             target=node.target,
             range=node.iter,
-            passes=[*stmts, *node.body],
+            passes=[stmts + node.body],
             span=node,
         )
 
