@@ -544,7 +544,8 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
     {
       std::string from = "void* ";
       std::string to = "threadgroup void* ";
-      for (size_t pos = 0; (pos = fsource.find(from, pos)) != std::string::npos;) {
+      for (size_t pos = 0;
+           (pos = fsource.find(from, pos)) != std::string::npos;) {
         // Skip if already qualified (idempotent)
         if (pos >= 12 && fsource.substr(pos - 12, 12) == "threadgroup ") {
           pos += from.length();
@@ -558,7 +559,8 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
     {
       std::string from = "((void*)((char*)";
       std::string to = "((threadgroup void*)((threadgroup char*)";
-      for (size_t pos = 0; (pos = fsource.find(from, pos)) != std::string::npos;) {
+      for (size_t pos = 0;
+           (pos = fsource.find(from, pos)) != std::string::npos;) {
         // Skip if already qualified
         if (pos >= 2 && fsource.substr(pos - 2, 14) == "((threadgroup v") {
           pos += from.length();
@@ -572,7 +574,8 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
     {
       std::string from = "((float2*)A_shared)";
       std::string to = "((threadgroup float2*)A_shared)";
-      for (size_t pos = 0; (pos = fsource.find(from, pos)) != std::string::npos;) {
+      for (size_t pos = 0;
+           (pos = fsource.find(from, pos)) != std::string::npos;) {
         if (pos >= 2 && fsource.substr(pos, 14) == "((threadgroup ") {
           pos += from.length();
           continue;
@@ -584,7 +587,8 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
     {
       std::string from = "((float2*)B_shared)";
       std::string to = "((threadgroup float2*)B_shared)";
-      for (size_t pos = 0; (pos = fsource.find(from, pos)) != std::string::npos;) {
+      for (size_t pos = 0;
+           (pos = fsource.find(from, pos)) != std::string::npos;) {
         if (pos >= 2 && fsource.substr(pos, 14) == "((threadgroup ") {
           pos += from.length();
           continue;
