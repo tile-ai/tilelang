@@ -302,7 +302,7 @@ def run_tilelang_copy_bufferload_cross_dtype(num_tokens=128, index_dtype=T.int64
     )
     # Keep the range within the (possibly narrow) index dtype.
     hi = 30000 if index_dtype == T.int16 else 1_000_000
-    indices = torch.randint(0, hi, (num_tokens,), dtype=getattr(torch, index_dtype), device="cuda")
+    indices = torch.randint(0, hi, (num_tokens,), dtype=index_dtype.as_torch(), device="cuda")
     out = kernel(indices)
     torch.testing.assert_close(out, indices.to(torch.int32))
 
