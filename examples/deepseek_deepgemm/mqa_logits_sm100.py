@@ -421,7 +421,7 @@ def mqa_logits_fp4_persistent_ws_kernel(
             T.inc_max_nreg(224)
             c_epi0 = T.alloc_fragment((half_kv, 16), accum_dtype)
             logits_epi0 = T.alloc_fragment((half_kv,), accum_dtype)
-            weights_epi0 = T.alloc_local((block_q, heads), accum_dtype)
+            weights_epi0 = T.alloc_fragment((block_q, heads), accum_dtype)
             q_block = T.alloc_var(T.int32, init=block_id)
             q_iter = T.alloc_var(T.int32, init=0)
             tmem_stage = T.alloc_var(T.int32, init=0)
@@ -447,11 +447,7 @@ def mqa_logits_fp4_persistent_ws_kernel(
 
                 T.mbarrier_wait_parity(q_loaded[q_stage], q_phase)
                 if num_kv_blocks > 0:
-                    for qi_weights_epi0 in T.unroll(block_q):
-                        for h_weights_epi0 in T.vectorized(heads):
-                            weights_epi0[qi_weights_epi0, h_weights_epi0] = weights_shared[
-                                q_stage, qi_weights_epi0, h_weights_epi0
-                            ]
+                    T.copy(weights_shared[q_stage, :, :], weights_epi0)
                 kv_iter = T.alloc_var(T.int32, init=0)
                 while kv_iter < num_kv_blocks:
                     kv_row = (first_bkv + kv_iter) * block_kv
@@ -504,7 +500,7 @@ def mqa_logits_fp4_persistent_ws_kernel(
             T.inc_max_nreg(224)
             c_epi1 = T.alloc_fragment((half_kv, 16), accum_dtype)
             logits_epi1 = T.alloc_fragment((half_kv,), accum_dtype)
-            weights_epi1 = T.alloc_local((block_q, heads), accum_dtype)
+            weights_epi1 = T.alloc_fragment((block_q, heads), accum_dtype)
             q_block = T.alloc_var(T.int32, init=block_id)
             q_iter = T.alloc_var(T.int32, init=0)
             tmem_stage = T.alloc_var(T.int32, init=1)
@@ -530,11 +526,7 @@ def mqa_logits_fp4_persistent_ws_kernel(
 
                 T.mbarrier_wait_parity(q_loaded[q_stage], q_phase)
                 if num_kv_blocks > 0:
-                    for qi_weights_epi1 in T.unroll(block_q):
-                        for h_weights_epi1 in T.vectorized(heads):
-                            weights_epi1[qi_weights_epi1, h_weights_epi1] = weights_shared[
-                                q_stage, qi_weights_epi1, h_weights_epi1
-                            ]
+                    T.copy(weights_shared[q_stage, :, :], weights_epi1)
                 kv_iter = T.alloc_var(T.int32, init=0)
                 while kv_iter < num_kv_blocks:
                     kv_row = (first_bkv + kv_iter) * block_kv
