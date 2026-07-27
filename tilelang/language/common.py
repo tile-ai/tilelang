@@ -36,8 +36,12 @@ from .kernel import (
     KernelLaunchFrame,  # noqa: F401
     get_thread_binding,  # noqa: F401
     get_thread_bindings,  # noqa: F401
+    get_thread_extent,  # noqa: F401
+    get_thread_extents,  # noqa: F401
     get_block_binding,  # noqa: F401
     get_block_bindings,  # noqa: F401
+    get_block_extent,  # noqa: F401
+    get_block_extents,  # noqa: F401
 )
 from .allocate import (
     alloc_var,  # noqa: F401
@@ -227,10 +231,14 @@ _LOCAL_EXPORTS = (
     "gemm_sp",
     "get_block_binding",
     "get_block_bindings",
+    "get_block_extent",
+    "get_block_extents",
     "get_lane_idx",
     "get_let_value",
     "get_thread_binding",
     "get_thread_bindings",
+    "get_thread_extent",
+    "get_thread_extents",
     "get_warp_idx",
     "get_warp_idx_sync",
     "has_let_value",
