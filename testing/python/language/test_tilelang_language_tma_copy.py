@@ -197,11 +197,60 @@ def test_tma_copy_uses_explicit_global_stride_for_row_offset():
     import torch
 
     kernel = tilelang.compile(main, out_idx=[1])
+    assert "CUtensorMap" not in kernel.get_kernel_source()
     padded = torch.arange(rows * row_stride, dtype=torch.float32, device="cuda").reshape(rows, row_stride)
     source = padded[:, :cols]
     assert source.stride() == (row_stride, 1)
     output = kernel(source)
     torch.testing.assert_close(output, source[1])
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tma_copy_uses_descriptor_for_padded_multirow_region():
+    rows = 2
+    cols = 32
+    row_stride = 40
+
+    @T.prim_func
+    def load(
+        A: T.StridedTensor((rows, cols), (row_stride, 1), T.float32),
+        B: T.Tensor((rows, cols), T.float32),
+    ):
+        with T.Kernel(1, threads=32):
+            a_shared = T.alloc_shared((rows, cols), T.float32)
+            T.copy(A, a_shared, prefer_instruction="tma")
+            T.copy(a_shared, B, prefer_instruction="sync")
+
+    @T.prim_func
+    def store(
+        A: T.Tensor((rows, cols), T.float32),
+        B: T.StridedTensor((rows, cols), (row_stride, 1), T.float32),
+    ):
+        with T.Kernel(1, threads=32):
+            a_shared = T.alloc_shared((rows, cols), T.float32)
+            T.copy(A, a_shared, prefer_instruction="sync")
+            T.copy(a_shared, B, prefer_instruction="tma")
+
+    import torch
+
+    source = torch.arange(rows * cols, dtype=torch.float32, device="cuda").reshape(rows, cols)
+
+    load_kernel = tilelang.compile(load, out_idx=[1])
+    assert "CUtensorMap" in load_kernel.get_kernel_source()
+    padded_source = torch.full((rows, row_stride), -1.0, dtype=torch.float32, device="cuda")
+    strided_source = padded_source[:, :cols]
+    strided_source.copy_(source)
+    output = load_kernel(strided_source)
+    torch.testing.assert_close(output, source)
+
+    store_kernel = tilelang.compile(store)
+    assert "CUtensorMap" in store_kernel.get_kernel_source()
+    padded_destination = torch.full((rows, row_stride), -1.0, dtype=torch.float32, device="cuda")
+    strided_destination = padded_destination[:, :cols]
+    store_kernel(source, strided_destination)
+    torch.testing.assert_close(strided_destination, source)
+    torch.testing.assert_close(padded_destination[:, cols:], torch.full_like(padded_destination[:, cols:], -1.0))
 
 
 def matmul_tma_copy_store(
