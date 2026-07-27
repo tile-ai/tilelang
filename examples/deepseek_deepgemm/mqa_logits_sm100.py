@@ -767,7 +767,6 @@ def mqa_logits_fp8_persistent_ws_kernel(
                         transpose_B=True,
                         mbar=tmem_full[tmem_stage],
                         clear_accum=True,
-                        disable_ws=True,
                     )
                     gemm_iter = gemm_iter + 1
                     tmem_stage = tmem_stage + tmem_stage_step
@@ -821,7 +820,6 @@ def mqa_logits_fp8_persistent_ws_kernel(
                         transpose_B=True,
                         mbar=tmem_full[tmem_stage],
                         clear_accum=True,
-                        disable_ws=True,
                     )
                     gemm_iter = gemm_iter + 1
                     tmem_stage = tmem_stage + tmem_stage_step
