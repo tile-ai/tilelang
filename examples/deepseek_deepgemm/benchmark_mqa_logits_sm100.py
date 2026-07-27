@@ -1,9 +1,4 @@
 import argparse
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-sys.meta_path = [finder for finder in sys.meta_path if finder.__class__.__module__ != "_tilelang_editable"]
 
 import torch
 from tilelang.profiler import do_bench
@@ -82,7 +77,9 @@ def prepare_deepgemm_data(config: MQALogitsConfig, dtype: str):
     }
 
 
-def make_tilelang_bench(config: MQALogitsConfig, dtype: str, data):
+def bench_case(config: MQALogitsConfig, dtype: str, check: bool = True, warmup: int = 20, rep: int = 100) -> None:
+    data = prepare_deepgemm_data(config, dtype)
+    ref = ref_mqa_logits(data["q"], data["kv"], data["weights"], data["ks"], data["ke"])
     logits = torch.full(
         (config.seq_len, config.seq_len_kv),
         float("-inf"),
@@ -93,7 +90,7 @@ def make_tilelang_bench(config: MQALogitsConfig, dtype: str, data):
         kv_fp8, kv_scale = data["kv_in"]
         q_fp8_2d = data["q_in"].reshape(config.seq_len * config.num_heads, config.head_dim)
 
-        def fn():
+        def tilelang_fn():
             mqa_logits_fp8_persistent_ws_kernel(
                 q_fp8_2d,
                 kv_fp8,
@@ -111,75 +108,59 @@ def make_tilelang_bench(config: MQALogitsConfig, dtype: str, data):
                 logits_dtype=_tilelang_logits_dtype(config.logits_dtype),
             )
 
-        return logits, fn
+        deepgemm_q = (data["q_in"], None)
+        deepgemm_kv = data["kv_in"]
+    else:
+        q_fp4, q_scale = data["q_in"]
+        kv_fp4, kv_scale = data["kv_in"]
+        q_fp4_2d = q_fp4.reshape(config.seq_len * config.num_heads, config.head_dim // 2)
 
-    q_fp4, q_scale = data["q_in"]
-    kv_fp4, kv_scale = data["kv_in"]
-    q_fp4_2d = q_fp4.reshape(config.seq_len * config.num_heads, config.head_dim // 2)
+        def tilelang_fn():
+            mqa_logits_fp4_persistent_ws_kernel(
+                q_fp4_2d,
+                q_scale.reshape(-1),
+                kv_fp4,
+                kv_scale.reshape(-1),
+                data["weights"],
+                data["ks"],
+                data["ke"],
+                logits,
+                config.seq_len,
+                config.seq_len_kv,
+                heads=config.num_heads,
+                head_dim=config.head_dim,
+                logits_stride=config.seq_len_kv,
+                compressed_logits=False,
+                logits_dtype=_tilelang_logits_dtype(config.logits_dtype),
+            )
 
-    def fn():
-        mqa_logits_fp4_persistent_ws_kernel(
-            q_fp4_2d,
-            q_scale.reshape(-1),
-            kv_fp4,
-            kv_scale.reshape(-1),
-            data["weights"],
-            data["ks"],
-            data["ke"],
-            logits,
-            config.seq_len,
-            config.seq_len_kv,
-            heads=config.num_heads,
-            head_dim=config.head_dim,
-            logits_stride=config.seq_len_kv,
-            compressed_logits=False,
-            logits_dtype=_tilelang_logits_dtype(config.logits_dtype),
-        )
+        deepgemm_q = data["q_in_deepgemm"]
+        deepgemm_kv = data["kv_in_deepgemm"]
 
-    return logits, fn
-
-
-def make_deepgemm_bench(config: MQALogitsConfig, dtype: str, data):
-    dg_logits_dtype = _torch_logits_dtype(config.logits_dtype)
-    if dtype == "fp8":
-        return lambda: deep_gemm.fp8_fp4_mqa_logits(
-            q=(data["q_in"], None),
-            kv=data["kv_in"],
+    def deepgemm_fn():
+        deep_gemm.fp8_fp4_mqa_logits(
+            q=deepgemm_q,
+            kv=deepgemm_kv,
             weights=data["weights"],
             cu_seq_len_k_start=data["ks"],
             cu_seq_len_k_end=data["ke"],
             clean_logits=True,
             max_seqlen_k=0,
-            logits_dtype=dg_logits_dtype,
+            logits_dtype=_torch_logits_dtype(config.logits_dtype),
         )
-    return lambda: deep_gemm.fp8_fp4_mqa_logits(
-        q=data["q_in_deepgemm"],
-        kv=data["kv_in_deepgemm"],
-        weights=data["weights"],
-        cu_seq_len_k_start=data["ks"],
-        cu_seq_len_k_end=data["ke"],
-        clean_logits=True,
-        max_seqlen_k=0,
-        logits_dtype=dg_logits_dtype,
-    )
 
-
-def bench_case(config: MQALogitsConfig, dtype: str, check: bool = True, warmup: int = 20, rep: int = 100) -> None:
-    data = prepare_deepgemm_data(config, dtype)
-    ref = ref_mqa_logits(data["q"], data["kv"], data["weights"], data["ks"], data["ke"])
-    out, tl_fn = make_tilelang_bench(config, dtype, data)
-    tl_fn()
+    tilelang_fn()
     torch.cuda.synchronize()
 
-    observed = out.float().masked_fill(ref == float("-inf"), 0)
+    observed = logits.float().masked_fill(ref == float("-inf"), 0)
     ref_cmp = ref.masked_fill(ref == float("-inf"), 0)
     diff = calc_diff(observed, ref_cmp)
     if check:
         threshold = 2e-3 if dtype == "fp4" else 1e-4
         assert diff < threshold, f"{dtype} diff {diff} >= {threshold}"
 
-    tilelang_ms = do_bench(tl_fn, warmup=warmup, rep=rep)
-    deepgemm_ms = do_bench(make_deepgemm_bench(config, dtype, data), warmup=warmup, rep=rep)
+    tilelang_ms = do_bench(tilelang_fn, warmup=warmup, rep=rep)
+    deepgemm_ms = do_bench(deepgemm_fn, warmup=warmup, rep=rep)
     label = f"{dtype} s{config.seq_len}_skv{config.seq_len_kv}_h{config.num_heads}_d{config.head_dim}_{config.logits_dtype}"
     print(
         f"{label}: tilelang={tilelang_ms * 1000:.3f} us diff={diff:.3e} "

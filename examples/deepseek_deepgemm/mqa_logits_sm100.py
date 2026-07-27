@@ -1127,99 +1127,55 @@ def prepare_mqa_data(config: MQALogitsConfig, dtype: str):
     }
 
 
-def run_fp8(
-    q_fp8: torch.Tensor,
-    kv_fp8: torch.Tensor,
-    kv_scale: torch.Tensor,
-    weights: torch.Tensor,
-    ks: torch.Tensor,
-    ke: torch.Tensor,
-    logits_dtype: str = "float32",
-) -> torch.Tensor:
-    seq_len, heads, head_dim = q_fp8.shape
-    seq_len_kv = kv_fp8.shape[0]
-    MQALogitsConfig(seq_len, seq_len_kv, heads, head_dim, logits_dtype).validate()
-    logits = torch.full(
-        (seq_len, seq_len_kv),
-        float("-inf"),
-        device=q_fp8.device,
-        dtype=_torch_logits_dtype(logits_dtype),
-    )
-    mqa_logits_fp8_persistent_ws_kernel(
-        q_fp8.reshape(seq_len * heads, head_dim),
-        kv_fp8,
-        kv_scale,
-        weights,
-        ks,
-        ke,
-        logits,
-        seq_len,
-        seq_len_kv,
-        heads=heads,
-        head_dim=head_dim,
-        logits_stride=seq_len_kv,
-        compressed_logits=False,
-        logits_dtype=_tilelang_logits_dtype(logits_dtype),
-    )
-    return logits
-
-
-def run_fp4(
-    q_fp4: torch.Tensor,
-    q_scale: torch.Tensor,
-    kv_fp4: torch.Tensor,
-    kv_scale: torch.Tensor,
-    weights: torch.Tensor,
-    ks: torch.Tensor,
-    ke: torch.Tensor,
-    logits_dtype: str = "float32",
-) -> torch.Tensor:
-    seq_len, heads, head_dim_packed = q_fp4.shape
-    head_dim = head_dim_packed * 2
-    seq_len_kv = kv_fp4.shape[0]
-    MQALogitsConfig(seq_len, seq_len_kv, heads, head_dim, logits_dtype).validate()
-    if seq_len_kv % 256 != 0:
-        raise ValueError("seq_len_kv must be divisible by 256 for the FP4 SOTA tile")
-    logits = torch.full(
-        (seq_len, seq_len_kv),
-        float("-inf"),
-        device=q_fp4.device,
-        dtype=_torch_logits_dtype(logits_dtype),
-    )
-    mqa_logits_fp4_persistent_ws_kernel(
-        q_fp4.reshape(seq_len * heads, head_dim_packed),
-        q_scale.reshape(-1),
-        kv_fp4,
-        kv_scale.reshape(-1),
-        weights,
-        ks,
-        ke,
-        logits,
-        seq_len,
-        seq_len_kv,
-        heads=heads,
-        head_dim=head_dim,
-        logits_stride=seq_len_kv,
-        compressed_logits=False,
-        logits_dtype=_tilelang_logits_dtype(logits_dtype),
-    )
-    return logits
-
-
-def run_example_case(config: MQALogitsConfig, dtype: str, check: bool = True) -> None:
+def run_example(config: MQALogitsConfig, dtype: str, check: bool = True) -> None:
     data = prepare_mqa_data(config, dtype)
     ref = ref_mqa_logits(data["q"], data["kv"], data["weights"], data["ks"], data["ke"])
+    logits = torch.full(
+        (config.seq_len, config.seq_len_kv),
+        float("-inf"),
+        device=data["weights"].device,
+        dtype=_torch_logits_dtype(config.logits_dtype),
+    )
     if dtype == "fp8":
         kv_fp8, kv_scale = data["kv_in"]
-        out = run_fp8(data["q_in"], kv_fp8, kv_scale, data["weights"], data["ks"], data["ke"], config.logits_dtype)
-    elif dtype == "fp4":
+        mqa_logits_fp8_persistent_ws_kernel(
+            data["q_in"].reshape(config.seq_len * config.num_heads, config.head_dim),
+            kv_fp8,
+            kv_scale,
+            data["weights"],
+            data["ks"],
+            data["ke"],
+            logits,
+            config.seq_len,
+            config.seq_len_kv,
+            heads=config.num_heads,
+            head_dim=config.head_dim,
+            logits_stride=config.seq_len_kv,
+            compressed_logits=False,
+            logits_dtype=_tilelang_logits_dtype(config.logits_dtype),
+        )
+    else:
         q_fp4, q_scale = data["q_in"]
         kv_fp4, kv_scale = data["kv_in"]
-        out = run_fp4(q_fp4, q_scale, kv_fp4, kv_scale, data["weights"], data["ks"], data["ke"], config.logits_dtype)
-    else:
-        raise ValueError(f"unsupported dtype: {dtype}")
+        mqa_logits_fp4_persistent_ws_kernel(
+            q_fp4.reshape(config.seq_len * config.num_heads, config.head_dim // 2),
+            q_scale.reshape(-1),
+            kv_fp4,
+            kv_scale.reshape(-1),
+            data["weights"],
+            data["ks"],
+            data["ke"],
+            logits,
+            config.seq_len,
+            config.seq_len_kv,
+            heads=config.num_heads,
+            head_dim=config.head_dim,
+            logits_stride=config.seq_len_kv,
+            compressed_logits=False,
+            logits_dtype=_tilelang_logits_dtype(config.logits_dtype),
+        )
 
-    observed = out.float().masked_fill(ref == float("-inf"), 0)
+    observed = logits.float().masked_fill(ref == float("-inf"), 0)
     ref_cmp = ref.masked_fill(ref == float("-inf"), 0)
     diff = calc_diff(observed, ref_cmp)
     if check:
@@ -1246,7 +1202,7 @@ def main() -> None:
     )
     dtypes = ("fp8", "fp4") if args.dtype == "both" else (args.dtype,)
     for dtype in dtypes:
-        run_example_case(cfg, dtype, check=not args.no_check)
+        run_example(cfg, dtype, check=not args.no_check)
 
 
 if __name__ == "__main__":
