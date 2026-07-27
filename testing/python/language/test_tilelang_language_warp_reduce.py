@@ -78,5 +78,14 @@ def test_warp_reduce_bitor():
     torch.testing.assert_close(a, ref)
 
 
+def test_warp_reduce_sum_int64():
+    a = torch.zeros((32,), dtype=torch.int64, device="cuda")
+    a[7] = 1 << 40
+    kernel = get_kernel("sum", T.int64)
+    ref = torch.full_like(a, (1 << 40))
+    kernel(a)
+    torch.testing.assert_close(a, ref)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

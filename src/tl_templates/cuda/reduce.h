@@ -344,7 +344,7 @@ TL_DEVICE T warp_reduce(T value, ReduceOp op) {
 
   if constexpr (std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t>) {
     return run_reduce_sync(value);
-  } else if constexpr (std::is_integral_v<T>) {
+  } else if constexpr (std::is_integral_v<T> && sizeof(T) <= 4) {
     return static_cast<T>(run_reduce_sync(static_cast<int32_t>(value)));
   }
 #endif
