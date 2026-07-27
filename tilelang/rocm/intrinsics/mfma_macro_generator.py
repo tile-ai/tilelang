@@ -1,6 +1,6 @@
 from __future__ import annotations
 from tilelang import tvm as tvm
-import tilelang.language as T
+import tilelang.language.common as T
 import tilelang.language.dtypes as _dtypes
 from tvm import DataType
 from tvm import tirx
@@ -469,6 +469,9 @@ class MatrixCoreIntrinEmitter:
         return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
 
     def mfma(self, A_local_buf: Buffer, B_local_buf: Buffer, C_local_buf: Buffer, k_inner: PrimExpr | None = 0):
+        # Import lazily to avoid a rocm.language -> rocm.intrinsics cycle.
+        from tilelang.rocm.language.tir import tvm_mfma
+
         warp_rows = self.warp_rows
         warp_cols = self.warp_cols
         local_size_a = self.local_size_a
@@ -489,7 +492,7 @@ class MatrixCoreIntrinEmitter:
         @T.macro
         def _warp_mfma(A_local_buf, B_local_buf, C_local_buf):
             for kp, i, j in T.grid(k_pack, warp_rows, warp_cols):
-                T.tvm_mfma(
+                tvm_mfma(
                     mfma_suffix,
                     "row",
                     "row",

@@ -26,9 +26,13 @@ CUDA_ONLY_NAMES = {
 
 ROCM_ONLY_NAMES = {
     "MatrixCoreIntrinEmitter",
+    "WMMAIntrinEmitter",
+    "ds_read_tr16_b64",
+    "ds_read_tr8_b64",
     "mfma",
     "rdna_wmma",
     "tvm_mfma",
+    "tvm_rdna_wmma",
 }
 
 
@@ -79,6 +83,44 @@ def test_rocm_language_composes_common_and_rocm_symbols():
     assert hasattr(T, "MatrixCoreIntrinEmitter")
     assert hasattr(T, "make_mfma_swizzle_layout")
     assert set(T.__all__) >= SHARED_LEGACY_TIR_EXPORTS
+
+
+@pytest.mark.parametrize(
+    ("emitter_name", "method_name", "mcpu", "expected_call"),
+    [
+        ("MatrixCoreIntrinEmitter", "mfma", "gfx942", "T.tvm_mfma"),
+        ("WMMAIntrinEmitter", "wmma", "gfx1100", "T.tvm_rdna_wmma"),
+    ],
+)
+def test_rocm_emitters_resolve_backend_tir_intrinsics(emitter_name, method_name, mcpu, expected_call):
+    from tilelang.rocm import intrinsics
+
+    target = tilelang.tvm.target.Target({"kind": "hip", "mcpu": mcpu})
+    emitter_cls = getattr(intrinsics, emitter_name)
+    emitter = emitter_cls(
+        a_dtype="float16",
+        b_dtype="float16",
+        accum_dtype="float32",
+        block_row_warps=1,
+        block_col_warps=1,
+        warp_row_tiles=16,
+        warp_col_tiles=16,
+        chunk=16,
+        target=target,
+    )
+    emit = getattr(emitter, method_name)
+    a_size = emitter.warp_rows * emitter.local_size_a
+    b_size = emitter.warp_cols * emitter.local_size_b
+    c_size = emitter.warp_rows * emitter.warp_cols * emitter.local_size_out
+
+    @common_language.prim_func
+    def main():
+        a_local = common_language.alloc_local((a_size,), "float16")
+        b_local = common_language.alloc_local((b_size,), "float16")
+        c_local = common_language.alloc_local((c_size,), "float32")
+        emit(a_local, b_local, c_local)
+
+    assert expected_call in main.script()
 
 
 def test_metal_language_owns_simdgroup_tir_exports():
