@@ -179,6 +179,35 @@ def _make_auto_vec_batched_reduce_kernel(reduce_func, *, rows=M, width=64, threa
     return main
 
 
+def _make_auto_vec_batched_reduce_workspace_kernel():
+    """Build a packed reduction whose cross-warp step uses shared workspace."""
+    rows = 4
+    width = 512
+    threads = 128
+    vec_size = 8
+
+    def fragment_layout(i, j):
+        linear = i * width + j
+        thread_id = linear // vec_size % threads
+        local_id = linear // (threads * vec_size) * vec_size + linear % vec_size
+        return thread_id, local_id
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((rows, width), dtype=T.float32),
+        C: T.Tensor((rows,), dtype=T.float32),
+    ):
+        with T.Kernel(1, threads=threads):
+            src = T.alloc_fragment((rows, width), T.float32)
+            dst = T.alloc_fragment((rows,), T.float32)
+            T.annotate_layout({src: T.Fragment(src.shape, forward_fn=fragment_layout)})
+            T.copy(A, src)
+            T.reduce_sum(src, dst, dim=1, batch=2)
+            T.copy(dst, C)
+
+    return main
+
+
 # ===================================================================
 # Parametrised op / dtype lists
 # ===================================================================
@@ -442,6 +471,21 @@ def test_correctness_auto_vec_batched_reduce_f32():
     a = torch.randn((M, 64), device="cuda", dtype=torch.float32)
     result = kernel(a)
     torch.testing.assert_close(result, torch.sum(a, dim=1), atol=1e-5, rtol=1e-5)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+def test_correctness_auto_vec_batched_reduce_f32_workspace():
+    func = _make_auto_vec_batched_reduce_workspace_kernel()
+    kernel = tilelang.compile(func, out_idx=[1], target="cuda")
+    source = kernel.get_kernel_source()
+    allreduce_call = next(line for line in source.splitlines() if "AllReduce<" in line)
+    assert "make_int2" not in allreduce_call
+    assert "(&(workspace[0]))" in allreduce_call
+
+    a = torch.randn((4, 512), device="cuda", dtype=torch.float32)
+    result = kernel(a)
+    torch.testing.assert_close(result, torch.sum(a, dim=1), atol=1e-4, rtol=1e-4)
 
 
 @tilelang.testing.requires_cuda
