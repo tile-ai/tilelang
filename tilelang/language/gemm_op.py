@@ -65,24 +65,16 @@ def _gemm_impl(
     B_shape = retrieve_shape(B_region)
     C_shape = retrieve_shape(C_region)
 
-    A_stride = retrieve_stride(A_region)
-    B_stride = retrieve_stride(B_region)
-
-    assert len(C_shape) == 2, "current only support C as a 2D tensor"
+    assert len(C_shape) >= 2, "current only support C as a 2D or higher-order tensor"
     assert len(A_shape) >= 2, "current only support A as a 2D or higher-order tensor"
     assert len(B_shape) >= 2, "current only support B as a 2D or higher-order tensor"
-    if len(A_shape) > 2:
-        for i in range(len(A_shape) - 2):
-            assert A_shape[i] == 1, (
-                "current only support A as a 2D or higher-order tensor with the last two dimensions being the matrix dimensions"
-            )
-    if len(B_shape) > 2:
-        for i in range(len(B_shape) - 2):
-            assert B_shape[i] == 1, (
-                "current only support B as a 2D or higher-order tensor with the last two dimensions being the matrix dimensions"
+    for shape, name in ((A_shape, "A"), (B_shape, "B"), (C_shape, "C")):
+        for i in range(len(shape) - 2):
+            assert shape[i] == 1, (
+                f"current only support {name} as a 2D or higher-order tensor with the last two dimensions being the matrix dimensions"
             )
 
-    M, N = C_shape
+    M, N = C_shape[-2], C_shape[-1]
     M_A = A_shape[-1] if transpose_A else A_shape[-2]
     K = A_shape[-2] if transpose_A else A_shape[-1]
     N_B = B_shape[-2] if transpose_B else B_shape[-1]
@@ -96,9 +88,15 @@ def _gemm_impl(
     else:
         assert prim_expr_equal(N_B, N), f"T.gemm N shape check failed: N_B = {N_B}, N_C = {N}"
 
+    # Deprecated: every lowering consumes the complete operand BufferRegions,
+    # so the serialized per-axis strides and final-axis offsets below are no
+    # longer read in-tree and are NOT validated (the historic
+    # ``A_offset[-2] == 0`` assertions are gone).  They are kept in the call
+    # protocol only for out-of-tree consumers of the GemmNode fields.
+    A_stride = retrieve_stride(A_region)
+    B_stride = retrieve_stride(B_region)
     stride_a = A_stride[-2]
     stride_b = B_stride[-2]
-
     A_offset = retrieve_offset(A_region)
     B_offset = retrieve_offset(B_region)
     offset_a = A_offset[-1]
@@ -109,7 +107,7 @@ def _gemm_impl(
             f"mbar for tcgen5mma must be a tirx.Buffer or tirx.BufferLoad, but got {type(mbar)}"
         )
         mbar = to_buffer_region(mbar, access_type="rw")
-    C_coords = [r.min for r in C_region.region]
+    C_coords = [r.min for r in C_region.region[-2:]]
     # Convert BufferRegion to tl.region calls for arguments
     A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])
     B_arg = buffer_region_to_tile_region(B_region, "r", [r for r in B_shape])
@@ -240,7 +238,7 @@ def tcgen05_gemm(
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
     *,
-    mbar: BarrierType,
+    mbar: BarrierType | None,
     use_2cta: bool = False,
 ) -> tirx.PrimExpr:
     """Explicit Blackwell TCGEN05 GEMM without an implicit wait.
@@ -249,6 +247,10 @@ def tcgen05_gemm(
     default synchronous `T.gemm(...)` interface, with two stricter guarantees:
     - it always requests the TCGEN5MMA lowering path
     - it never auto-emits an inlined `mbarrier_wait_parity`
+
+    ``mbar=None`` omits the completion arrival for an intermediate issue.  A
+    later TCGEN05 operation remains ordered in the same issue stream and may
+    publish the completion event for the whole sequence.
 
     When ``use_2cta=True``, the instruction is lowered to the 2CTA variant
     which requires ``cluster_dims`` to be ``(2,1,1)`` or ``(1,2,1)``.
@@ -378,11 +380,12 @@ def tcgen05_gemm_blockscaled(
     else:
         assert prim_expr_equal(N_B, N), f"T.tcgen05_gemm_blockscaled N shape check failed: N_B = {N_B}, N_C = {N}"
 
+    # Deprecated: kept in the call protocol only for out-of-tree consumers;
+    # not read or validated in-tree.
     A_stride = retrieve_stride(A_region)
     B_stride = retrieve_stride(B_region)
     stride_a = A_stride[-2]
     stride_b = B_stride[-2]
-
     A_offset = retrieve_offset(A_region)
     B_offset = retrieve_offset(B_region)
     offset_a = A_offset[-1]
@@ -483,6 +486,8 @@ def make_blockscaled_gemm_layout(
         warp_col_tiles=N,
         chunk=K,
     )
+    # Block-scaled GEMM is 1CTA dense (no .ws), matching _lower_blockscaled.
+    emitter.get_tcgen5_mma_meta(M, N, K, disable_2cta=True, disable_ws=True)
 
     c_buf = C_region.buffer if isinstance(C_region, tirx.BufferRegion) else C
     return emitter.make_mma_store_layout(c_buf)

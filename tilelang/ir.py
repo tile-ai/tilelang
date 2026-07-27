@@ -174,3 +174,21 @@ def span_coverage(func) -> dict:
     for _, buffer in func.buffer_map.items():
         count_buffer(buffer)
     return {"stmts": stmts, "buffers": buffers}
+
+
+@tvm_ffi.register_object("tl.Tcgen05Meta")
+class Tcgen05Meta(Node, Scriptable):
+    """One tcgen05.ld/st data-movement shape: the per-warp single-issue
+    CUTLASS TV atom plus the wrapper's chaining limit."""
+
+    intrinsics_name: str
+    max_chunks: int
+
+
+@tvm_ffi.register_object("tl.Tcgen05CopyPlan")
+class Tcgen05CopyPlan(Node, Scriptable):
+    """The tiled copy of one TMEM tile built by tl.ExpandTcgen05Layout."""
+
+    num_chunks_each_wg: int
+    num_issues: int
+    vals_per_issue: int

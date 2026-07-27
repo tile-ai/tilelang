@@ -1,5 +1,7 @@
 # Non-persistent
 
+import argparse
+
 import torch
 import tilelang
 import tilelang.language as T
@@ -7,7 +9,7 @@ from tilelang.profiler import do_bench
 
 
 @tilelang.jit
-def gemm(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_stages, use_tma_store=True):
+def gemm(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_stages, use_tma_store):
     M, N, K = T.const("M, N, K")
 
     k_iters = T.ceildiv(K, block_K)
@@ -21,8 +23,10 @@ def gemm(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_
         B_shared = T.alloc_shared((num_stages, block_K, block_N), in_dtype)
         C_tmem = T.alloc_tmem([block_M, block_N], accum_dtype)
         C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-        C_shared = T.alloc_shared((block_M, block_N), out_dtype)
-        C_local_cast = T.alloc_fragment((block_M, block_N), out_dtype)
+        if use_tma_store:
+            C_shared = T.alloc_shared((block_M, block_N), out_dtype)
+        else:
+            C_local_cast = T.alloc_fragment((block_M, block_N), out_dtype)
         loaded = T.alloc_barrier([32] * num_stages)
         consumed = T.alloc_barrier([1] * num_stages)
         tmem_full = T.alloc_barrier([1])
@@ -70,7 +74,7 @@ def gemm(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_
 
 
 @tilelang.jit
-def gemm_2cta(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_stages, use_tma_store=True):
+def gemm_2cta(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_stages, use_tma_store):
     M, N, K = T.const("M, N, K")
 
     k_iters = T.ceildiv(K, block_K)
@@ -84,8 +88,10 @@ def gemm_2cta(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype,
         B_shared = T.alloc_shared((num_stages, block_K, block_N // 2), in_dtype)  # Each cta hold half of B
         C_tmem = T.alloc_tmem([block_M, block_N], accum_dtype)
         C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-        C_shared = T.alloc_shared((block_M, block_N), out_dtype)
-        C_local_cast = T.alloc_fragment((block_M, block_N), out_dtype)
+        if use_tma_store:
+            C_shared = T.alloc_shared((block_M, block_N), out_dtype)
+        else:
+            C_local_cast = T.alloc_fragment((block_M, block_N), out_dtype)
         loaded = T.alloc_cluster_barrier([32 * 2] * num_stages)
         consumed = T.alloc_cluster_barrier([1] * num_stages)
         tmem_full = T.alloc_barrier([1])
@@ -136,23 +142,47 @@ def gemm_2cta(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype,
 
 
 def main():
-    M, N, K = 8192, 8192, 8192
-    block_M, block_N, block_K = 128, 256, 64
+    parser = argparse.ArgumentParser(description="Non-persistent warp-specialized SM100 GEMM")
+    parser.add_argument("--m", type=int, default=8192)
+    parser.add_argument("--n", type=int, default=8192)
+    parser.add_argument("--k", type=int, default=8192)
+    parser.add_argument("--block_M", type=int, default=128)
+    parser.add_argument("--block_N", type=int, default=256)
+    parser.add_argument("--block_K", type=int, default=64)
+    parser.add_argument("--num_stages", type=int, default=None, help="pipeline stages (default: 6 with 2cta, else 4)")
+    parser.add_argument("--enable_2cta_tcgen5mma", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--use_tma_store", action=argparse.BooleanOptionalAction, default=True)
+    args = parser.parse_args()
+
+    M, N, K = args.m, args.n, args.k
     in_dtype, out_dtype, accum_dtype = T.bfloat16, T.bfloat16, T.float
-    enable_2cta_tcgen5mma = True
-    num_stages = 6 if enable_2cta_tcgen5mma else 4  # Each cta only needs to load half of B, enabling larger stages
+    enable_2cta_tcgen5mma = args.enable_2cta_tcgen5mma
+    if args.num_stages is not None:
+        num_stages = args.num_stages
+    else:
+        num_stages = 6 if enable_2cta_tcgen5mma else 4  # Each cta only needs to load half of B, enabling larger stages
     kernel = gemm_2cta if enable_2cta_tcgen5mma else gemm
+    kwargs = {
+        "block_M": args.block_M,
+        "block_N": args.block_N,
+        "block_K": args.block_K,
+        "in_dtype": in_dtype,
+        "out_dtype": out_dtype,
+        "accum_dtype": accum_dtype,
+        "num_stages": num_stages,
+        "use_tma_store": args.use_tma_store,
+    }
 
     a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(K, N, device="cuda", dtype=torch.bfloat16)
-    c = kernel(a, b, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_stages)
-    print(kernel.get_kernel_source(a, b, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_stages))
+    c = kernel(a, b, **kwargs)
+    print(kernel.get_kernel_source(a, b, **kwargs))
 
     ref_c = (a.to(torch.float) @ b.to(torch.float)).to(torch.bfloat16)
     torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
     print("All checks passed. ✅")
 
-    tl_latency = do_bench(lambda: kernel(a, b, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_stages), backend="cupti")
+    tl_latency = do_bench(lambda: kernel(a, b, **kwargs), backend="cupti")
     torch_latency = do_bench(lambda: a @ b, backend="cupti")
     print(f"Tilelang latency: {tl_latency} ms")
     print(f"Flops: {2 * M * N * K / (tl_latency / 1e3) / 1e12} TFLOPS")

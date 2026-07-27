@@ -88,7 +88,7 @@ def test_int_tuple_tuple_arithmetic():
 def test_int_tuple_scaled_basis_arithmetic():
     # ScaledBasis terms expand to ArithmeticTuples and add (CuTe
     # as_arithmetic_tuple): same axis sums into one slot, distinct axes spread.
-    same = cute.from_python(cute.E(0)) + cute.from_python(cute.ScaledBasis(2, 0))
+    same = cute.from_python(cute.E(0)) + cute.from_python(2 * cute.E(0))
     assert cute.to_python(same) == (3,)  # 1@0 + 2@0 -> (1)+(2) -> (3)
     spread = cute.from_python(cute.E(0)) + cute.from_python(cute.E(1))
     assert cute.to_python(spread) == (1, 1)  # 1@0 + 1@1 -> (1)+(0,1) -> (1,1)
@@ -173,7 +173,7 @@ def test_eval_basis_is_coordinate_tuple():
     assert perm(5) == (2, 1)  # crd=(1,2): 1@slot1, 2@slot0
     # Same path on both modes sums into one slot; a single touched axis stays
     # a (1-)tuple, never a bare scalar.
-    same = cute.make_layout((2, 2), stride=(cute.E(0), cute.ScaledBasis(2, 0)))
+    same = cute.make_layout((2, 2), stride=(cute.E(0), 2 * cute.E(0)))
     assert all(same(c) == (c,) for c in range(4))
 
 
@@ -197,6 +197,81 @@ def test_layout_from_tilelang_affine():
 def test_layout_from_tilelang_rejects_swizzle():
     swz = _build_swizzled_layout((64, 512), lambda i, j: i * 512 + j, 3, 3, 3)
     assert cute.Layout.from_tilelang(swz) is None
+
+
+def test_parse_roundtrips_str():
+    # IntTuple.parse / Layout.parse / Swizzle.parse invert str() exactly,
+    # including nested tuples and innermost-first basis paths (E(1,0) is
+    # spelled 1@0@1).
+    for text in ("(((2,2,8),4),2):(((8@0,1@1,1@0),32@0),16@0)", "(128,64):(1@0,1@1)", "8:1"):
+        assert str(cute.Layout.parse(text)) == text
+    t = cute.from_python(cute.ScaledBasis(2, (1, 0)))
+    assert str(cute.IntTuple.parse(str(t))) == str(t)
+    assert str(cute.Swizzle.parse("Sw<3,4,3>")) == "Sw<3,4,3>"
+
+
+# ---------------------------------------------------------------------------
+# from_tilelang_hierarchical: recover a multi-output TileLang layout with each
+# output axis rerouted onto its basis (the inverse of to_tilelang).
+# ---------------------------------------------------------------------------
+def test_from_tilelang_hierarchical_identity():
+    r = cute.Layout.from_tilelang_hierarchical(Layout((128, 128), lambda i, j: [i, j]))
+    assert r is not None
+    assert tvm.ir.structural_equal(r, cute.make_identity_layout((128, 128)))
+
+
+def test_from_tilelang_hierarchical_permuted_axes():
+    # Rank-3 codomain: each input mode routes to the slot its output names.
+    r = cute.Layout.from_tilelang_hierarchical(Layout((2, 3, 4), lambda i, j, k: [k, i, j]))
+    assert r is not None
+    assert tvm.ir.structural_equal(r, cute.make_layout((2, 3, 4), stride=(cute.E(1), cute.E(2), cute.E(0))))
+
+
+def test_from_tilelang_hierarchical_single_output_is_flat_on_axis_zero():
+    L = Layout((16, 128), lambda i, j: [i * 128 + j])
+    flat = cute.Layout.from_tilelang(L)
+    hier = cute.Layout.from_tilelang_hierarchical(L)
+    assert hier is not None
+    for c in range(0, 16 * 128, 97):
+        assert hier(c) == (flat(c),)
+
+
+def test_from_tilelang_hierarchical_conforms_axis_profiles():
+    # Axis 0 sees j as one broadcast run while axis 1 splits j at 4; the
+    # with_shape passes refine both to the common (4, 4) profile so the
+    # strides can add leaf-wise.
+    L = Layout((8, 16), lambda i, j: [i, (j // 4) * 8 + j % 4])
+    r = cute.Layout.from_tilelang_hierarchical(L)
+    assert r is not None
+    assert tvm.ir.structural_equal(r, cute.make_layout((8, (4, 4)), stride=(cute.E(0), (cute.E(1), 8 * cute.E(1)))))
+    for i in range(8):
+        for j in range(16):
+            assert r((i, j)) == (i, (j // 4) * 8 + j % 4)
+
+
+def test_from_tilelang_hierarchical_roundtrips_to_tilelang():
+    # A TMEM-shaped fragment (PTX Layout F datapath halves) survives the
+    # to_tilelang -> from_tilelang_hierarchical round trip as a function.
+    restride = cute.make_layout((128, 16384), stride=(cute.E(0), cute.E(1)))
+    frag = cute.composition(restride, cute.make_layout(((16, 4), 32), stride=((1, 32), 128)))
+    r = cute.Layout.from_tilelang_hierarchical(frag.to_tilelang())
+    assert r is not None
+    for i in range(0, 64, 7):
+        for j in range(0, 32, 5):
+            assert r((i, j)) == frag((i, j))
+
+
+def test_from_tilelang_hierarchical_rejects_dependent_axes():
+    # j drives both output axes: the leaf-wise stride sum would need a
+    # coordinate-tuple stride, which no cute::Layout represents.
+    assert cute.Layout.from_tilelang_hierarchical(Layout((4, 4), lambda i, j: [i + j, j])) is None
+
+
+def test_from_tilelang_hierarchical_rejects_swizzled_axis():
+    def swizzled(j):
+        return j ^ ((j & (7 << 6)) >> 3)
+
+    assert cute.Layout.from_tilelang_hierarchical(Layout((64, 512), lambda i, j: [swizzled(j), i])) is None
 
 
 # ---------------------------------------------------------------------------
@@ -384,9 +459,8 @@ def test_tma_box_validity_via_composite():
 
 # ---------------------------------------------------------------------------
 # Layout algebra ported from CuTe for the GMMA descriptor analysis:
-# filter / cosize / complement / logical_divide. Reference values computed by
-# hand from CuTe (layout.hpp): complement sort-and-fold, logical_divide =
-# composition(layout, make_layout(tiler, complement(tiler, size(coalesce)))).
+# filter / cosize / complement / logical_divide / logical_product. Reference
+# values follow CuTe layout.hpp and its core logical_product unit test.
 # ---------------------------------------------------------------------------
 def test_filter_drops_trivial_modes():
     # filter = coalesce(filter_zeros): drop stride-0 and size-1 modes.
@@ -405,6 +479,21 @@ def test_cosize_matches_cute():
     assert cute.cosize(cute.make_layout((4, 2), stride=(1, 8))) == 12
     assert cute.cosize(cute.make_layout((8, 8), stride=(8, 1))) == 64
     assert cute.cosize(cute.make_layout((64, 8), stride=(8, 1))) == 512
+
+
+def test_coshape_basis_strides_is_per_axis():
+    # ScaledBasis strides make the codomain a coordinate space; coshape gives
+    # the per-axis extents and cosize their product (CuTe cosize ==
+    # size(coshape)).
+    L = cute.make_layout((128, 32), stride=(cute.E(0), cute.E(1)))
+    assert cute.coshape(L) == (128, 32)
+    assert cute.cosize(L) == 128 * 32
+    # PTX Layout F atom (interleaved half datapaths): only 112 datapaths are
+    # touched (max image 96 + 15), and 32 columns.
+    F = cute.make_layout(((16, 4), 32), stride=((cute.E(0), 32 * cute.E(0)), cute.E(1)))
+    assert cute.coshape(F) == (112, 32)
+    # A plain layout's coshape is its scalar codomain extent.
+    assert cute.coshape(cute.make_layout((4, 2), stride=(1, 8))) == 12
 
 
 def test_cosize_dynamic_is_symbolic():
@@ -477,6 +566,167 @@ def test_logical_divide_dynamic_layout_stride():
     assert ana.simplify(res(2) - 2 * s) == 0  # next rest element: stride 2s
 
 
+def test_compatible_is_directional_and_supports_symbolic_extents():
+    n = tvm.tirx.Var("n", "int32")
+
+    # A terminal in the profile may cover an arbitrarily nested subtree.
+    assert cute.compatible((2, 3), ((1, 2), 3))
+    assert not cute.compatible(((1, 2), 3), (2, 3))
+    assert not cute.compatible((2, 3), (6,))
+
+    # Dynamic terminals are compared by provable value, not expression form.
+    assert cute.compatible((n + n, 4), ((n, 2), (2, 2)))
+
+
+@pytest.mark.parametrize(
+    ("block", "tiler"),
+    [
+        (cute.make_layout(1, stride=0), cute.make_layout(1, stride=0)),
+        (cute.make_layout(1, stride=1), cute.make_layout(1, stride=0)),
+        (cute.make_layout(1, stride=0), cute.make_layout(1, stride=1)),
+        (cute.make_layout(1, stride=1), cute.make_layout(1, stride=1)),
+        (cute.make_layout(3, stride=1), cute.make_layout(4, stride=0)),
+        (cute.make_layout(3, stride=0), cute.make_layout(4, stride=1)),
+        (cute.make_layout(3, stride=0), cute.make_layout(4, stride=0)),
+        (cute.make_layout(3, stride=2), cute.make_layout(4, stride=1)),
+        (cute.make_layout((3, 1)), cute.make_layout((2, 4))),
+        (cute.make_layout((2, 4)), cute.make_layout(3)),
+        (cute.make_layout((8, (2, 2))), cute.make_layout(4, stride=2)),
+        (cute.make_layout((2, 2)), cute.make_layout((3, 3), stride=(3, 1))),
+        (cute.make_layout(3, stride=32), cute.make_layout(32)),
+        (cute.make_layout(3, stride=2), cute.make_layout(4)),
+        (cute.make_layout(3, stride=32), cute.make_layout(128)),
+        (cute.make_layout(3, stride=32), cute.make_layout((8, 8))),
+        (cute.make_layout(3, stride=32), cute.make_layout((8, 8), stride=(8, 1))),
+        (cute.make_layout(((4, 2),), stride=((1, 16),)), cute.make_layout((4, 4))),
+        (cute.make_layout(((4, 2),), stride=((1, 16),)), cute.make_layout((4, 2), stride=(2, 1))),
+        (
+            cute.make_layout(((2, 2), (2, 2)), stride=((1, 4), (8, 32))),
+            cute.make_layout((2, 2), stride=(1, 2)),
+        ),
+        (
+            cute.make_layout(((2, 2), (2, 2)), stride=((1, 4), (8, 32))),
+            cute.make_layout((2, 2), stride=(2, 1)),
+        ),
+        (cute.make_layout(((4, 6),), stride=((1, 6),)), cute.make_layout(3)),
+    ],
+)
+def test_logical_product_matches_cutlass_core_cases(block, tiler):
+    # CUTLASS test/unit/cute/core/logical_product.cpp specifies these two core
+    # properties: the result is rank-2, preserves the block as mode 0, and its
+    # repeated mode is shape-compatible with the tiler.
+    result = cute.logical_product(block, tiler)
+    assert cute.rank(result) == 2
+    assert tvm.ir.structural_equal(result[0], block)
+    assert cute.compatible(tiler.shape, result[1].shape)
+
+
+def test_logical_product_tmem_tiling():
+    # The exact construction used by CUTLASS tmem_frg::make: repeat a 128x16
+    # virtual TMEM atom over two M tiles and four K/N tiles, M-first.
+    atom = cute.make_layout((128, 16))
+    outer = cute.make_layout((2, 4))
+    result = cute.logical_product(atom, outer)
+    _assert_struct(result, ((128, 16), (2, 4)), ((1, 128), (2048, 4096)))
+
+    tiled = cute.tiled_product(atom, outer)
+    _assert_struct(tiled, ((128, 16), 2, 4), ((1, 128), 2048, 4096))
+    for m_tile in range(2):
+        for n_tile in range(4):
+            assert tiled(((0, 0), m_tile, n_tile)) == result(((0, 0), (m_tile, n_tile)))
+
+
+def test_logical_product_nested_strided_layout_exactly():
+    block = cute.make_layout(((4, 2),), stride=((1, 16),))
+    tiler = cute.make_layout((4, 2), stride=(2, 1))
+    result = cute.logical_product(block, tiler)
+
+    # Exact output for the corresponding CUTLASS core test case.  This covers
+    # both a hierarchical block and a nontrivially strided tiler.
+    _assert_struct(
+        result,
+        (((4, 2),), ((2, 2), 2)),
+        (((1, 16),), ((8, 32), 4)),
+    )
+
+
+def test_tiled_product_unpacks_complement_split_modes():
+    # A strided block can split one scalar tiler into two residual modes.
+    # Official tiled_product slices with repeat<R1>(_), and repeat<1>(_) is
+    # plain _, so only a rank >= 2 rest mode unpacks.  A scalar-leaf block's
+    # complement modes land directly in the rest (rank 2 -> unpacked); a
+    # tuple-wrapped block keeps them nested one level deeper (rank-1 rest ->
+    # identical to the zipped product).  Both pinned against the compiled
+    # official results.
+    block = cute.make_layout(3, stride=32)
+    tiler = cute.make_layout(128)
+    logical = cute.logical_product(block, tiler)
+    _assert_struct(logical, (3, (32, 4)), (32, (1, 96)))
+    tiled = cute.tiled_product(block, tiler)
+    _assert_struct(tiled, (3, 32, 4), (32, 1, 96))
+    for x in range(3):
+        for y0 in range(32):
+            for y1 in range(4):
+                assert tiled((x, y0, y1)) == logical((x, (y0, y1)))
+    # A tuple-wrapped TILER keeps the composed rest congruent to its rank-1
+    # profile, so the rest stays wrapped and tiled == zipped (official
+    # repeat<1>(_) slicing); the scalar-leaf tiler above unpacked because
+    # composition against a scalar profile leaves the split modes flat.
+    wrapped_tiler = cute.Layout.parse("(128):(1)")
+    tiled_wrapped = cute.tiled_product(block, wrapped_tiler)
+    assert tvm.ir.structural_equal(tiled_wrapped, cute.logical_product(block, wrapped_tiler))
+    assert str(tiled_wrapped) == "(3,((32,4))):(32,((1,96)))"
+
+
+def test_blocked_product_zips_block_and_tiler_modes():
+    # CuTe layout.hpp blocked_product: mode i of the result is
+    # ((block_i, rest_i)), so a flat per-mode coordinate covers
+    # block extent x tiler extent along that mode.
+    block = cute.make_layout((2, 5), stride=(5, 1))
+    tiler = cute.make_layout((3, 4))
+    result = cute.blocked_product(block, tiler)
+    _assert_struct(result, ((2, 3), (5, 4)), ((5, 10), (1, 30)))
+    logical = cute.logical_product(block, tiler)
+    for i in range(6):
+        for j in range(20):
+            assert result((i, j)) == logical(((i % 2, j % 5), (i // 2, j // 5)))
+
+
+def test_blocked_product_pads_rank_mismatch():
+    # A tiler of higher rank appends fresh modes (block padded with (1):(0)),
+    # exactly CuTe's append<R>() padding.
+    block = cute.make_layout((128, 16))
+    tiler = cute.make_layout((1, 1, 2, 4))
+    result = cute.blocked_product(block, tiler)
+    assert cute.rank(result) == 4
+    assert result((0, 0, 1, 0)) == 2048
+    assert result((0, 0, 0, 1)) == 4096
+    assert result((127, 15, 1, 3)) == 127 + 15 * 128 + 2048 + 3 * 4096
+    # Exact structural match with the official result (compiled against the
+    # CuTe headers): the tiler's size-1 modes carry stride 0, so the padded
+    # block modes pair with stride-0 rest modes, not leftover strides.
+    _assert_struct(
+        result,
+        ((128, 1), (16, 1), (1, 2), (1, 4)),
+        ((1, 0), (128, 0), (0, 2048), (0, 4096)),
+    )
+
+
+def test_restrict_slices_basis_coordinate_layout():
+    # A ScaledBasis-strided layout maps to (datapath, column) coordinates.
+    # restrict returns the region origin's coordinates plus the sliced
+    # sublayout, and the affine identity holds componentwise.
+    restride = cute.make_layout((128, 16384), stride=(cute.E(0), cute.E(1)))
+    frag = cute.composition(restride, cute.make_layout(((16, 4), 32), stride=((1, 32), 128)))
+    assert frag((16, 0)) == (32, 0)
+    offset, tile = cute.restrict(frag, [tvm.ir.Range.from_min_extent(0, 64), tvm.ir.Range.from_min_extent(8, 24)])
+    assert offset == (0, 8)
+    assert tile((0, 3)) == (0, 3)
+    for i in range(0, 64, 7):
+        for j in range(0, 24, 5):
+            assert frag((i, 8 + j)) == tuple(base + step for base, step in zip(offset, tile((i, j))))
+
+
 # ---------------------------------------------------------------------------
 # make_layout / make_column_major / make_row_major / make_identity_layout, and
 # the make_layout([layout, ...]) concat form.
@@ -511,7 +761,7 @@ def test_make_layout_nested_column_row_identity():
 
 def test_scaled_basis_and_int_expr_strides():
     # A non-unit ScaledBasis stride round-trips its scale and mode.
-    (sb,) = cute.make_layout((2,), stride=(cute.ScaledBasis(64, 1),)).stride
+    (sb,) = cute.make_layout((2,), stride=(64 * cute.E(1),)).stride
     assert isinstance(sb, cute.ScaledBasis) and sb.value == 64 and sb.mode == (1,)
     # A dynamic (PrimExpr) stride round-trips structurally.
     s = tvm.tirx.Var("s", "int32")

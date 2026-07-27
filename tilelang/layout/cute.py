@@ -65,6 +65,10 @@ class Swizzle(Node, Scriptable):
     def to_swizzle_mode(self) -> SwizzleMode:
         return _cute_ffi_api.swizzle_to_swizzle_mode(self)
 
+    @staticmethod
+    def parse(text: str) -> Swizzle:
+        return _cute_ffi_api.swizzle_parse(text)
+
 
 @tvm_ffi.register_object("tl.cute.IntTuple")
 class IntTuple(Node, Scriptable):
@@ -80,6 +84,10 @@ class IntTuple(Node, Scriptable):
     def __rmul__(self, other: IntTupleLike) -> IntTuple:
         return _cute_ffi_api.int_tuple_mul(from_python(other), self)
 
+    @staticmethod
+    def parse(text: str) -> IntTuple:
+        return _cute_ffi_api.int_tuple_parse(text)
+
 
 @tvm_ffi.register_object("tl.cute.IntTupleConst")
 class IntTupleConst(IntTuple):
@@ -88,7 +96,7 @@ class IntTupleConst(IntTuple):
 
 @tvm_ffi.register_object("tl.cute.IntTuplePrimExpr")
 class IntTuplePrimExpr(IntTuple):
-    value: object
+    value: PrimExpr
 
 
 @tvm_ffi.register_object("tl.cute.IntTupleScaledBasis")
@@ -116,6 +124,18 @@ class ScaledBasis:
     @property
     def mode(self) -> tuple:
         return self._mode
+
+    def __mul__(self, other: IntTupleLike) -> PyIntTuple:
+        return to_python(from_python(self) * from_python(other))
+
+    def __rmul__(self, other: IntTupleLike) -> PyIntTuple:
+        return to_python(from_python(other) * from_python(self))
+
+    def __eq__(self, other) -> bool:
+        return isinstance(other, ScaledBasis) and self._value == other._value and self._mode == other._mode
+
+    def __hash__(self) -> int:
+        return hash((self._value, self._mode))
 
     def __repr__(self) -> str:
         return "@".join([str(self._value), *(str(m) for m in reversed(self._mode))])
@@ -157,8 +177,27 @@ class Layout(Node, Scriptable):
         return _cute_ffi_api.with_shape(self, from_python(shape))
 
     @staticmethod
+    def parse(text: str) -> Layout:
+        return _cute_ffi_api.layout_parse(text)
+
+    @staticmethod
     def from_tilelang(layout) -> Layout | None:
         return _cute_ffi_api.layout_from_tilelang(layout)
+
+    @staticmethod
+    def from_tilelang_hierarchical(layout) -> Layout | None:
+        return _cute_ffi_api.layout_from_tilelang_hierarchical(layout)
+
+    def to_tilelang(self):
+        from .layout import Layout as TileLangLayout  # circular at module scope
+
+        shape = [size(self[i]) for i in range(rank(self))]
+
+        def forward(*coords):
+            result = self(tuple(coords))
+            return list(result) if isinstance(result, tuple) else [result]
+
+        return TileLangLayout(shape, forward)
 
 
 def rank(layout: Layout) -> int:
@@ -185,6 +224,10 @@ def right_inverse(layout: Layout) -> Layout:
     return _cute_ffi_api.right_inverse(layout)
 
 
+def left_inverse(layout: Layout) -> Layout:
+    return _cute_ffi_api.left_inverse(layout)
+
+
 def composition(lhs: Layout, rhs: Layout) -> Layout:
     return _cute_ffi_api.composition(lhs, rhs)
 
@@ -197,6 +240,14 @@ def congruent(a: IntTupleLike, b: IntTupleLike) -> bool:
     return bool(_cute_ffi_api.congruent(from_python(a), from_python(b)))
 
 
+def compatible(a: IntTupleLike, b: IntTupleLike) -> bool:
+    return bool(_cute_ffi_api.compatible(from_python(a), from_python(b)))
+
+
+def coshape(layout: Layout) -> PyIntTuple:
+    return to_python(_cute_ffi_api.coshape(layout))
+
+
 def cosize(layout: Layout) -> int:
     return to_python(_cute_ffi_api.cosize(layout))
 
@@ -207,6 +258,18 @@ def complement(layout: Layout, cotarget: int) -> Layout:
 
 def logical_divide(layout: Layout, tiler: Layout) -> Layout:
     return _cute_ffi_api.logical_divide(layout, tiler)
+
+
+def logical_product(block: Layout, tiler: Layout) -> Layout:
+    return _cute_ffi_api.logical_product(block, tiler)
+
+
+def tiled_product(block: Layout, tiler: Layout) -> Layout:
+    return _cute_ffi_api.tiled_product(block, tiler)
+
+
+def blocked_product(block: Layout, tiler: Layout) -> Layout:
+    return _cute_ffi_api.blocked_product(block, tiler)
 
 
 def make_layout(shape: IntTupleLike, stride=None) -> Layout:
