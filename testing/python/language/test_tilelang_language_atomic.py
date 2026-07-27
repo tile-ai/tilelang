@@ -586,6 +586,7 @@ def run_atomic_max_scalar_literal(dtype):
                 T.atomic_max(dst[0], 42.0)  # python float literal is fp32
 
         return kernel
+
     kernel = wrapper()
     dst = torch.full((1,), -1e4, device="cuda", dtype=getattr(torch, dtype))
     kernel(dst)
@@ -601,6 +602,7 @@ def run_atomic_min_scalar_literal(dtype):
                 T.atomic_min(dst[0], 42.0)  # python float literal is fp32
 
         return kernel
+
     kernel = wrapper()
     dst = torch.full((1,), 1e4, device="cuda", dtype=getattr(torch, dtype))
     kernel(dst)
