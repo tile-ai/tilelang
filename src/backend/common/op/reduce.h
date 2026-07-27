@@ -7,6 +7,7 @@
 #define TVM_TL_BACKEND_COMMON_OP_REDUCE_H_
 
 #include "op/reduce.h"
+#include "backend/common/target_utils.h"
 #include "support/check.h"
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
@@ -1117,7 +1118,13 @@ template <typename Impl> struct ReduceLowerer {
         }
         auto call = Call(clear_buffer->dtype, builtin::call_extern(),
                          thread_reduce_args);
-        stmts.push_back(BufferStore(clear_buffer, call, red_indices));
+        Stmt store = BufferStore(clear_buffer, call, red_indices);
+        if (reducing_threads > 32 &&
+            TargetHasSMVersionGE(lower_args.target, 90)) {
+          store = AttrStmt(Integer(0), "tl.deferred_scalar_allreduce_barrier",
+                           Integer(1), store);
+        }
+        stmts.push_back(store);
       }
 
       PrimExpr predicate = Bool(true);

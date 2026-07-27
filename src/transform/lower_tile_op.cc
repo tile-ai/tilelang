@@ -5,6 +5,8 @@
 
 #include "support/check.h"
 #include <optional>
+#include <string>
+#include <tvm/ir/with_context.h>
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/s_tir/utils.h>
@@ -37,6 +39,119 @@ namespace tl {
 
 using namespace tirx;
 using namespace ffi;
+
+namespace {
+
+constexpr const char *kDeferredScalarAllReduceBarrier =
+    "tl.deferred_scalar_allreduce_barrier";
+
+class DeferredScalarAllReduceBarrierResolver : public StmtExprMutator {
+public:
+  static Stmt Resolve(Stmt stmt, const LowerArgs &lower_args) {
+    const auto *thread_var = lower_args.thread_index.as<VarNode>();
+    if (thread_var == nullptr || !TargetHasSMVersionGE(lower_args.target, 90)) {
+      return stmt;
+    }
+    const int64_t *block_threads = as_const_int(lower_args.thread_bounds->extent);
+    ICHECK(block_threads != nullptr);
+    DeferredScalarAllReduceBarrierResolver resolver(
+        GetRef<Var>(thread_var), *block_threads,
+        TargetCudaGetWarpSize(lower_args.target));
+    return resolver.VisitStmt(stmt);
+  }
+
+private:
+  DeferredScalarAllReduceBarrierResolver(Var thread_var, int64_t block_threads,
+                                         int warp_size)
+      : thread_var_(std::move(thread_var)), block_threads_(block_threads),
+        warp_size_(warp_size) {
+    analyzer_.Bind(thread_var_,
+                   Range::FromMinExtent(IntImm(thread_var_.dtype(), 0),
+                                        IntImm(thread_var_.dtype(), block_threads_)));
+  }
+
+  Stmt VisitStmt_(const ForNode *op) final {
+    With<arith::ConstraintContext> lower(&analyzer_, op->loop_var >= op->min);
+    With<arith::ConstraintContext> upper(
+        &analyzer_, op->loop_var < op->min + op->extent);
+    return StmtExprMutator::VisitStmt_(op);
+  }
+
+  Stmt VisitStmt_(const IfThenElseNode *op) final {
+    PrimExpr condition = VisitExpr(op->condition);
+    Stmt then_case;
+    {
+      With<arith::ConstraintContext> then_scope(&analyzer_, condition);
+      then_case = VisitStmt(op->then_case);
+    }
+    Optional<Stmt> else_case;
+    if (op->else_case.defined()) {
+      With<arith::ConstraintContext> else_scope(&analyzer_, !condition);
+      else_case = VisitStmt(op->else_case.value());
+    }
+    return IfThenElse(condition, then_case, else_case, op->span);
+  }
+
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key != kDeferredScalarAllReduceBarrier) {
+      return StmtExprMutator::VisitStmt_(op);
+    }
+
+    Stmt body = VisitStmt(op->body);
+    auto store = body.as<BufferStoreNode>();
+    ICHECK(store != nullptr)
+        << "Deferred scalar AllReduce marker must wrap a BufferStore";
+    auto call = store->value.as<CallNode>();
+    ICHECK(call != nullptr)
+        << "Deferred scalar AllReduce marker must store a call";
+    if (call->args.empty()) {
+      return body;
+    }
+    auto symbol = call->args[0].as<StringImmNode>();
+    if (symbol == nullptr) {
+      return body;
+    }
+
+    std::string name = symbol->value;
+    size_t begin = name.find("tl::NamedBarrier<");
+    if (begin == std::string::npos) {
+      return body;
+    }
+    size_t count_begin = begin + std::string("tl::NamedBarrier<").size();
+    size_t count_end = name.find('>', count_begin);
+    ICHECK_NE(count_end, std::string::npos)
+        << "Malformed deferred scalar AllReduce symbol: " << name;
+
+    int64_t count = analyzer_.z3_prover.CountSatisfyingValues(
+        thread_var_, block_threads_, warp_size_);
+    auto bound = analyzer_.const_int_bound(thread_var_);
+    int64_t span = bound->max_value - bound->min_value + 1;
+    ICHECK_GT(count, 0)
+        << "Cannot determine the participating threads for scalar AllReduce";
+    ICHECK_EQ(bound->min_value, 0)
+        << "Partial scalar AllReduce must start at threadIdx.x = 0";
+    ICHECK_EQ(count, span)
+        << "Partial scalar AllReduce requires one contiguous thread range";
+    ICHECK_EQ(count % warp_size_, 0)
+        << "Partial scalar AllReduce requires a warp-aligned thread range";
+
+    name.replace(count_begin, count_end - count_begin, std::to_string(count));
+    Array<PrimExpr> args = call->args;
+    args.Set(0, StringImm(name));
+    auto rewritten_call = Call(call->dtype, call->op, args, call->annotations,
+                               call->span);
+    BufferStore rewritten_store = GetRef<BufferStore>(store);
+    rewritten_store.CopyOnWrite()->value = rewritten_call;
+    return rewritten_store;
+  }
+
+  arith::Analyzer analyzer_;
+  Var thread_var_;
+  int64_t block_threads_;
+  int warp_size_;
+};
+
+} // namespace
 
 static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
                                    Map<Var, Var> &var_remap) {
@@ -1193,6 +1308,8 @@ private:
     lower_args.require_smem_alignment = require_smem_alignment_callback;
 
     auto lowered = tile_op->Lower(lower_args, analyzer_);
+    lowered = DeferredScalarAllReduceBarrierResolver::Resolve(
+        std::move(lowered), lower_args);
 
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
   }
