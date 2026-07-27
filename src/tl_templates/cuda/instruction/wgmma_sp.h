@@ -448,20 +448,30 @@ TL_WGMMA_SP_FOREACH_N_FLOAT_MUL8(TL_WGMMA_SP_DEFINE_F32_E5M2E5M2_RS_TN);
 
 template <DataType A_type, DataType B_type, DataType C_type, int M, int N,
           int K, bool tnspA, bool tnspB, int scaleA = 1, int scaleB = 1,
-          cute::SM90::GMMA::SparseSel spsel = cute::SM90::GMMA::SparseSel::Zero>
+          cute::SM90::GMMA::SparseSel spsel = cute::SM90::GMMA::SparseSel::Zero,
+          bool kDependentFalse = false>
 TL_DEVICE void wgmma_sp_ss(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
                            bool scale_out, uint32_t e) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 900)
   WgmmaSpSSImpl<A_type, B_type, C_type, M, N, K, tnspA, tnspB, scaleA, scaleB,
                 spsel>::execute(desc_a, desc_b, c, scale_out, e);
+#else
+  static_assert(kDependentFalse, "tl::wgmma_sp_ss requires sm_90");
+#endif
 }
 
 template <DataType A_type, DataType B_type, DataType C_type, int M, int N,
           int K, bool tnspA, bool tnspB, int scaleA = 1, int scaleB = 1,
-          cute::SM90::GMMA::SparseSel spsel = cute::SM90::GMMA::SparseSel::Zero>
+          cute::SM90::GMMA::SparseSel spsel = cute::SM90::GMMA::SparseSel::Zero,
+          bool kDependentFalse = false>
 TL_DEVICE void wgmma_sp_rs(const uint32_t *a, uint64_t desc_b, uint32_t *c,
                            bool scale_out, uint32_t e) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 900)
   WgmmaSpRSImpl<A_type, B_type, C_type, M, N, K, tnspA, tnspB, scaleA, scaleB,
                 spsel>::execute(a, desc_b, c, scale_out, e);
+#else
+  static_assert(kDependentFalse, "tl::wgmma_sp_rs requires sm_90");
+#endif
 }
 
 } // namespace tl

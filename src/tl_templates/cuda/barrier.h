@@ -162,12 +162,22 @@ TL_DEVICE void mbarrier_cp_async_arrive_noinc(BarrierType &smem_mbar) {
                : "r"(smem_int_mbar));
 }
 
-TL_DEVICE void fence_proxy_async() {
+template <bool kDependentFalse = false> TL_DEVICE void fence_proxy_async() {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   asm volatile("fence.proxy.async.shared::cta;" : :);
+#else
+  static_assert(kDependentFalse,
+                "tl::fence_proxy_async requires sm_90 or later");
+#endif
 }
 
-TL_DEVICE void fence_barrier_init() {
+template <bool kDependentFalse = false> TL_DEVICE void fence_barrier_init() {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   asm volatile("fence.mbarrier_init.release.cluster;" : :);
+#else
+  static_assert(kDependentFalse,
+                "tl::fence_barrier_init requires sm_90 or later");
+#endif
 }
 
 // Indicate arrival of warp issuing TMA_STORE
@@ -175,7 +185,8 @@ template <bool kDependentFalse = false> TL_DEVICE void tma_store_arrive() {
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   asm volatile("cp.async.bulk.commit_group;");
 #else
-  static_assert(kDependentFalse, "T.tma_store_arrive requires sm_90 or later");
+  static_assert(kDependentFalse,
+                "tl::tma_store_arrive requires sm_90 or later");
 #endif
 }
 
@@ -188,7 +199,7 @@ TL_DEVICE void tma_store_wait() {
     asm volatile("cp.async.bulk.wait_group %0;" : : "n"(Count) : "memory");
   }
 #else
-  static_assert(kDependentFalse, "T.tma_store_wait requires sm_90 or later");
+  static_assert(kDependentFalse, "tl::tma_store_wait requires sm_90 or later");
 #endif
 }
 

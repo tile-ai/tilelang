@@ -140,42 +140,42 @@ _UNSUPPORTED_CASES = [
     (
         _make_tmem_prim_func,
         "sm_90",
-        "T.alloc_tmem requires sm_100a",
+        "tl::tmem_allocate requires sm_100a or a compatible architecture-specific target",
     ),
     (
         _make_tmem_prim_func,
         "sm_90",
-        "T.deallocate_tmem requires sm_100a",
+        "tl::tmem_deallocate requires sm_100a or a compatible architecture-specific target",
     ),
     (
         _make_tma_store_arrive_prim_func,
         "sm_80",
-        "T.tma_store_arrive requires sm_90 or later",
+        "tl::tma_store_arrive requires sm_90 or later",
     ),
     (
         _make_tma_store_wait_prim_func,
         "sm_80",
-        "T.tma_store_wait requires sm_90 or later",
+        "tl::tma_store_wait requires sm_90 or later",
     ),
     (
         _make_tma_atomic_add_prim_func,
         "sm_80",
-        "T.atomic_add(..., use_tma=True) requires sm_90 or later",
+        "tl::tma_store_add requires sm_90 or later",
     ),
     (
         _make_tma_descriptor_prefetch_prim_func,
         "sm_80",
-        "T.prefetch_tma_descriptor requires sm_90 or later",
+        "tl::prefetch_tma_descriptor requires sm_90 or later",
     ),
     (
         _make_tma_gather4_prim_func,
         "sm_90",
-        "T.tma_gather4 requires sm_100 or later",
+        "tl::tma_load_gather4 requires sm_100 or later",
     ),
     (
         _make_tma_scatter4_prim_func,
         "sm_100",
-        "T.tma_scatter4 requires sm_100a",
+        "tl::tma_store_scatter4 requires sm_100a",
     ),
 ]
 
