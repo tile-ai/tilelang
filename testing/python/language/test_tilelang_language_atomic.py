@@ -688,6 +688,63 @@ def test_atomic_min():
     run_atomic_min(4, 64, 64, 16, 16)
 
 
+# ======== fp16/bf16 scalar max/min value-dtype conversion (issue #2758) ========
+
+
+def run_atomic_max_scalar_literal(dtype):
+    @tilelang.jit
+    def wrapper():
+        @T.prim_func
+        def kernel(dst: T.Tensor((1,), dtype)):
+            with T.Kernel(1, threads=1):
+                T.atomic_max(dst[0], 42.0)  # python float literal is fp32
+
+        return kernel
+
+    kernel = wrapper()
+    dst = torch.full((1,), -1e4, device="cuda", dtype=getattr(torch, dtype))
+    kernel(dst)
+    torch.testing.assert_close(dst, torch.full((1,), 42.0, device="cuda", dtype=getattr(torch, dtype)))
+
+
+def run_atomic_min_scalar_literal(dtype):
+    @tilelang.jit
+    def wrapper():
+        @T.prim_func
+        def kernel(dst: T.Tensor((1,), dtype)):
+            with T.Kernel(1, threads=1):
+                T.atomic_min(dst[0], 42.0)  # python float literal is fp32
+
+        return kernel
+
+    kernel = wrapper()
+    dst = torch.full((1,), 1e4, device="cuda", dtype=getattr(torch, dtype))
+    kernel(dst)
+    torch.testing.assert_close(dst, torch.full((1,), 42.0, device="cuda", dtype=getattr(torch, dtype)))
+
+
+@tilelang.testing.requires_cuda
+def test_atomic_max_scalar_fp16():
+    run_atomic_max_scalar_literal("float16")
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_atomic_max_scalar_bf16():
+    run_atomic_max_scalar_literal("bfloat16")
+
+
+@tilelang.testing.requires_cuda
+def test_atomic_min_scalar_fp16():
+    run_atomic_min_scalar_literal("float16")
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_atomic_min_scalar_bf16():
+    run_atomic_min_scalar_literal("bfloat16")
+
+
 @tilelang.testing.requires_cuda
 def test_atomic_load_store():
     run_atomic_load_store(64, 64, 16, 16)
