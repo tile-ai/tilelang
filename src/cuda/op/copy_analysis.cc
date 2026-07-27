@@ -282,6 +282,43 @@ bool IsSemanticallyLinearLayout(const Layout &layout,
                                  linear_layout->GetLinearizedForwardIndex());
 }
 
+bool IsContiguousGlobalRegion(const Buffer &global_tensor,
+                              const Array<Range> &global_range,
+                              arith::Analyzer *analyzer) {
+  ICHECK_EQ(global_range.size(), global_tensor->shape.size());
+  ICHECK(global_tensor->strides.empty() ||
+         global_tensor->strides.size() == global_tensor->shape.size());
+
+  // Pointer-based 1D TMA can coalesce multiple logical dimensions only when
+  // every varying dimension is packed directly after its contiguous suffix.
+  bool non_full_dim_encountered = false;
+  PrimExpr expected_stride = 1;
+  for (int i = static_cast<int>(global_range.size()) - 1; i >= 0; --i) {
+    bool is_singleton = analyzer->CanProve(
+        global_range[i]->extent == 1, arith::ProofStrength::kSymbolicBound);
+    if (!non_full_dim_encountered) {
+      if (!is_singleton && !global_tensor->strides.empty() &&
+          !analyzer->CanProveEqual(global_tensor->strides[i],
+                                   expected_stride)) {
+        return false;
+      }
+
+      bool is_full_dim = analyzer->CanProve(
+          global_range[i]->extent == global_tensor->shape[i] &&
+              global_range[i]->min == 0,
+          arith::ProofStrength::kSymbolicBound);
+      if (is_full_dim) {
+        expected_stride *= global_tensor->shape[i];
+      } else {
+        non_full_dim_encountered = true;
+      }
+    } else if (!is_singleton) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
                      const Array<Range> &global_range,
                      const Array<Range> &shared_range,
@@ -294,24 +331,8 @@ bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
         IsSemanticallyLinearLayout(existing, shared_tensor->shape, analyzer);
   }
 
-  bool global_is_contiguous = true;
-  bool global_not_full_dim_encounter = false;
-  for (int i = global_range.size() - 1; i >= 0; i--) {
-    if (!global_not_full_dim_encounter) {
-      if (!analyzer->CanProve(global_range[i]->extent ==
-                                      global_tensor->shape[i] &&
-                                  global_range[i]->min == 0,
-                              arith::ProofStrength::kSymbolicBound)) {
-        global_not_full_dim_encounter = true;
-      }
-    } else {
-      if (!analyzer->CanProve(global_range[i]->extent == 1,
-                              arith::ProofStrength::kSymbolicBound)) {
-        global_is_contiguous = false;
-        break;
-      }
-    }
-  }
+  bool global_is_contiguous =
+      IsContiguousGlobalRegion(global_tensor, global_range, analyzer);
 
   PrimExpr shared_elements = 1;
   for (size_t i = 0; i < shared_range.size(); i++) {

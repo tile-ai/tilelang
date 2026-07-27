@@ -2307,11 +2307,16 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &lower_args,
     global_indices.push_back(r->min);
   }
   std::vector<PrimExpr> global_strides;
-  PrimExpr global_stride = 1;
-  for (size_t i = 0; i < global_tensor->shape.size(); i++) {
-    auto s = global_tensor->shape[global_tensor->shape.size() - i - 1];
-    global_strides.insert(global_strides.begin(), global_stride);
-    global_stride *= s;
+  if (global_tensor->strides.empty()) {
+    PrimExpr global_stride = 1;
+    for (size_t i = 0; i < global_tensor->shape.size(); i++) {
+      auto s = global_tensor->shape[global_tensor->shape.size() - i - 1];
+      global_strides.insert(global_strides.begin(), global_stride);
+      global_stride *= s;
+    }
+  } else {
+    global_strides.assign(global_tensor->strides.begin(),
+                          global_tensor->strides.end());
   }
 
   PrimExpr global_offset = 0;
