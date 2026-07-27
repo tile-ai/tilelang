@@ -240,6 +240,7 @@ def tcgen05_gemm(
     *,
     mbar: BarrierType | None,
     use_2cta: bool = False,
+    disable_ws: bool = False,
 ) -> tirx.PrimExpr:
     """Explicit Blackwell TCGEN05 GEMM without an implicit wait.
 
@@ -262,6 +263,8 @@ def tcgen05_gemm(
     ann = {"is_tcgen05": 1}
     if use_2cta:
         ann["use_2cta"] = 1
+    if disable_ws:
+        ann["disable_ws"] = 1
     return _gemm_impl(
         "tl.tileop.tcgen05_gemm",
         A,
