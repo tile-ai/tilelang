@@ -104,6 +104,25 @@ inline int GetPreferedVectorizedSize(DataType dt,
   return 1;
 }
 
+inline void CheckAllReduceWidth(int reducing_threads, int scale,
+                                const char *op_name) {
+  ICHECK_GT(reducing_threads, 0)
+      << op_name << ": AllReduce threads must be positive, got "
+      << reducing_threads;
+  ICHECK_GT(scale, 0) << op_name << ": AllReduce scale must be positive, got "
+                      << scale;
+  ICHECK_EQ(reducing_threads % scale, 0)
+      << op_name << ": AllReduce threads (" << reducing_threads
+      << ") must be divisible by scale (" << scale << ")";
+  int logical_width = reducing_threads / scale;
+  int shift = 0;
+  ICHECK(tirx::is_const_power_of_two_integer(Integer(logical_width), &shift))
+      << op_name << ": XOR-butterfly AllReduce requires logical_width "
+      << "(threads / scale) to be a positive power of two, got "
+      << logical_width << " (threads=" << reducing_threads
+      << ", scale=" << scale << ")";
+}
+
 inline PrimExpr MakeInitValue(const ReduceOpNode &op, int vsize = 1) {
   auto dst_dtype = op.dst->dtype;
   auto is_int = dst_dtype.is_int();
@@ -909,6 +928,8 @@ template <typename Impl> struct ReduceLowerer {
 
         for (const auto &thread_step : reduce_plan.thread_steps) {
           int reducing_threads = thread_step.ReducingThreads();
+          reduce::CheckAllReduceWidth(reducing_threads, thread_step.scale,
+                                      "tl.reduce");
           int block_threads =
               static_cast<int>(*as_const_int(lower_args.thread_bounds->extent));
           auto thread_offset = lower_args.thread_bounds->min;
@@ -1101,6 +1122,8 @@ template <typename Impl> struct ReduceLowerer {
 
       for (const auto &thread_step : reduce_plan.thread_steps) {
         int reducing_threads = thread_step.ReducingThreads();
+        reduce::CheckAllReduceWidth(reducing_threads, thread_step.scale,
+                                    "tl.reduce");
         auto thread_offset = lower_args.thread_bounds->min;
         std::string allreduce = Impl::MakeScalarAllReduce(
             reduce::MakeCodegenReducer(op).value(), reducing_threads,

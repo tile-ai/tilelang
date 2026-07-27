@@ -239,7 +239,13 @@ template <class Reducer, int threads, int scale, int thread_offset = 0,
           class Barrier = SyncThreadsBarrier, int batch_size = 1,
           int workspace_stride = 0>
 struct AllReduce {
-  static_assert(threads % scale == 0);
+  static_assert(threads > 0, "tl::AllReduce threads must be positive");
+  static_assert(scale > 0, "tl::AllReduce scale must be positive");
+  static_assert(threads % scale == 0,
+                "tl::AllReduce threads must be divisible by scale");
+  static_assert(((threads / scale) & (threads / scale - 1)) == 0,
+                "AllReduce reduce width (threads / scale) must be a power of "
+                "two");
 
   // Scalar interface (backward-compatible).
   template <typename T> static TL_DEVICE T run(T x, T *red_buf = nullptr) {
