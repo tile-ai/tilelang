@@ -47,8 +47,6 @@ def prepare_deepgemm_data(config: MQALogitsConfig, dtype: str):
 
     if dtype != "fp4":
         raise ValueError(f"unsupported dtype: {dtype}")
-    if config.logits_dtype != "float32":
-        raise ValueError("the FP4 SOTA kernel currently stores float32 logits")
     if config.seq_len_kv % 256 != 0:
         raise ValueError("seq_len_kv must be divisible by 256 for the FP4 SOTA tile")
 
@@ -136,7 +134,7 @@ def make_tilelang_bench(config: MQALogitsConfig, dtype: str, data):
             head_dim=config.head_dim,
             logits_stride=config.seq_len_kv,
             compressed_logits=False,
-            logits_dtype=T.float32,
+            logits_dtype=_tilelang_logits_dtype(config.logits_dtype),
         )
 
     return logits, fn

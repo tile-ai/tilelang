@@ -482,7 +482,9 @@ def mqa_logits_fp4_persistent_ws_kernel(
                                     T.max(c_epi0[bn_epi0, h_inner_epi0], T.float32(0))
                                     * weights_epi0[qi_epi0, h_epi0]
                                 )
-                        Logits[q_row + qi_epi0, kv_row + bn_epi0] = logits_epi0[bn_epi0]
+                        Logits[q_row + qi_epi0, kv_row + bn_epi0] = T.cast(
+                            logits_epi0[bn_epi0], logits_dtype
+                        )
                         T.sync_warp()
                     T.mbarrier_arrive(tmem_empty[tmem_stage])
                     tmem_stage = tmem_stage + tmem_stage_step
@@ -558,7 +560,9 @@ def mqa_logits_fp4_persistent_ws_kernel(
                                     T.max(c_epi1[bn_epi1, h_inner_epi1], T.float32(0))
                                     * weights_epi1[qi_epi1, h_epi1]
                                 )
-                        Logits[q_row + qi_epi1, kv_row + half_kv + bn_epi1] = logits_epi1[bn_epi1]
+                        Logits[q_row + qi_epi1, kv_row + half_kv + bn_epi1] = T.cast(
+                            logits_epi1[bn_epi1], logits_dtype
+                        )
                         T.sync_warp()
                     T.mbarrier_arrive(tmem_empty[tmem_stage])
                     tmem_stage = tmem_stage + tmem_stage_step
@@ -1091,8 +1095,6 @@ def prepare_mqa_data(config: MQALogitsConfig, dtype: str):
 
     if dtype != "fp4":
         raise ValueError(f"unsupported dtype: {dtype}")
-    if config.logits_dtype != "float32":
-        raise ValueError("the FP4 SOTA kernel currently stores float32 logits")
     if config.seq_len_kv % 256 != 0:
         raise ValueError("seq_len_kv must be divisible by 256 for the FP4 SOTA tile")
 
@@ -1170,11 +1172,14 @@ def run_fp4(
     head_dim = head_dim_packed * 2
     seq_len_kv = kv_fp4.shape[0]
     MQALogitsConfig(seq_len, seq_len_kv, heads, head_dim, logits_dtype).validate()
-    if logits_dtype != "float32":
-        raise ValueError("the FP4 SOTA kernel currently stores float32 logits")
     if seq_len_kv % 256 != 0:
         raise ValueError("seq_len_kv must be divisible by 256 for the FP4 SOTA tile")
-    logits = torch.full((seq_len, seq_len_kv), float("-inf"), device=q_fp4.device, dtype=torch.float32)
+    logits = torch.full(
+        (seq_len, seq_len_kv),
+        float("-inf"),
+        device=q_fp4.device,
+        dtype=_torch_logits_dtype(logits_dtype),
+    )
     mqa_logits_fp4_persistent_ws_kernel(
         q_fp4.reshape(seq_len * heads, head_dim_packed),
         q_scale.reshape(-1),
@@ -1190,7 +1195,7 @@ def run_fp4(
         head_dim=head_dim,
         logits_stride=seq_len_kv,
         compressed_logits=False,
-        logits_dtype=T.float32,
+        logits_dtype=_tilelang_logits_dtype(logits_dtype),
     )
     return logits
 
