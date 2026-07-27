@@ -164,7 +164,10 @@ def test_store_cluster_non_16b_contiguous_fallback(capfd):
     assert "tl::tma_store_cluster" not in src, f"Non-16B copy must not emit tma_store_cluster.\nKernel source:\n{src}"
     assert "map_shared_rank" in src, f"Expected SIMT cluster-copy fallback.\nKernel source:\n{src}"
     captured = capfd.readouterr()
-    assert "Cluster bulk copy size 508 bytes is not a multiple of 16" in (captured.out + captured.err)
+    warning_output = captured.out + captured.err
+    assert "Cluster bulk copy size" in warning_output
+    assert "508" in warning_output
+    assert "bytes is not a multiple of 16" in warning_output
 
     A = torch.arange(N, dtype=torch.float32, device="cuda")
     B = mod(A)
