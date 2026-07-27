@@ -1351,8 +1351,7 @@ public:
     Stmt stmt = StmtMutator::VisitStmt_(op);
     const auto *loop = stmt.as<ForNode>();
     if (loop == nullptr ||
-        (loop->kind != ForKind::kSerial &&
-         loop->kind != ForKind::kUnrolled) ||
+        (loop->kind != ForKind::kSerial && loop->kind != ForKind::kUnrolled) ||
         !TargetHasSMVersionGE(Target::Current(false), 100)) {
       return stmt;
     }
@@ -1509,11 +1508,11 @@ private:
       Buffer pair_sum = decl_buffer({Integer(1)}, pair_dtype,
                                     name_hint + "_fold_pair", "local");
       prefix->push_back(AllocBuffer(pair_sum));
-      prefix->push_back(BufferStore(
-          pair_sum,
-          Call(pair_dtype, tl::add2(),
-               {ExtractLanePair(vec, 0), ExtractLanePair(vec, 2)}),
-          {Integer(0)}));
+      prefix->push_back(
+          BufferStore(pair_sum,
+                      Call(pair_dtype, tl::add2(),
+                           {ExtractLanePair(vec, 0), ExtractLanePair(vec, 2)}),
+                      {Integer(0)}));
       PrimExpr pair_load = BufferLoad(pair_sum, {Integer(0)});
       return Shuffle::ExtractElement(pair_load, 0) +
              Shuffle::ExtractElement(pair_load, 1);
@@ -1537,8 +1536,8 @@ private:
     }
     arith::Analyzer analyzer;
     if (const auto *broadcast = expr.as<BroadcastNode>()) {
-      return analyzer.CanProveEqual(
-          broadcast->value, make_zero(broadcast->value.dtype()));
+      return analyzer.CanProveEqual(broadcast->value,
+                                    make_zero(broadcast->value.dtype()));
     }
     return analyzer.CanProveEqual(expr, make_zero(expr.dtype()));
   }
@@ -1578,8 +1577,7 @@ private:
     return true;
   }
 
-  bool TryFuseFMAAccumulator(const Array<Stmt> &stmts,
-                             const Buffer &vec_buffer,
+  bool TryFuseFMAAccumulator(const Array<Stmt> &stmts, const Buffer &vec_buffer,
                              const Array<PrimExpr> &vec_indices,
                              const std::string &name_hint, Buffer *acc_vec,
                              int *accumulator_lanes,
@@ -1598,9 +1596,9 @@ private:
     }
 
     const auto *concat = vec_store->value.as<ShuffleNode>();
-    if (concat == nullptr || concat->indices.size() !=
-                                 static_cast<size_t>(
-                                     vec_store->value.dtype().lanes())) {
+    if (concat == nullptr ||
+        concat->indices.size() !=
+            static_cast<size_t>(vec_store->value.dtype().lanes())) {
       return false;
     }
     for (size_t i = 0; i < concat->indices.size(); ++i) {
@@ -1655,9 +1653,8 @@ private:
           IndicesEqual(store->indices, vec_indices)) {
         continue;
       }
-      auto pair_it = store == nullptr
-                         ? pair_indices.end()
-                         : pair_indices.find(store->buffer.get());
+      auto pair_it = store == nullptr ? pair_indices.end()
+                                      : pair_indices.find(store->buffer.get());
       if (pair_it == pair_indices.end()) {
         candidate.push_back(stmt);
         continue;
@@ -1669,11 +1666,10 @@ private:
         return false;
       }
       int accumulator_pair = pair_it->second % accumulator_pairs;
-      PrimExpr addend = last_pairs[accumulator_pair].defined()
-                            ? BufferLoad(last_pairs[accumulator_pair],
-                                         {Integer(0)})
-                            : ExtractLanePair(compact_acc_load,
-                                              accumulator_pair * 2);
+      PrimExpr addend =
+          last_pairs[accumulator_pair].defined()
+              ? BufferLoad(last_pairs[accumulator_pair], {Integer(0)})
+              : ExtractLanePair(compact_acc_load, accumulator_pair * 2);
       Array<PrimExpr> args = fma->args;
       args.Set(2, addend);
       PrimExpr fused =
@@ -1693,11 +1689,9 @@ private:
       }
       final_pairs.push_back(BufferLoad(last_pair, {Integer(0)}));
     }
-    PrimExpr compact_value = final_pairs.size() == 1
-                                 ? final_pairs[0]
-                                 : Shuffle::Concat(final_pairs);
-    candidate.push_back(
-        BufferStore(compact_acc, compact_value, {Integer(0)}));
+    PrimExpr compact_value =
+        final_pairs.size() == 1 ? final_pairs[0] : Shuffle::Concat(final_pairs);
+    candidate.push_back(BufferStore(compact_acc, compact_value, {Integer(0)}));
 
     *acc_vec = compact_acc;
     *accumulator_lanes = accumulator_pairs * 2;
@@ -1755,10 +1749,10 @@ private:
     if (reused_accumulator) {
       acc_vec = vec_buffer;
     } else {
-      fused_fma = TryFuseFMAAccumulator(
-          prefix, vec_buffer, vec_indices,
-          scalar_store->buffer->data->name_hint, &acc_vec,
-          &accumulator_lanes, &new_body_stmts);
+      fused_fma =
+          TryFuseFMAAccumulator(prefix, vec_buffer, vec_indices,
+                                scalar_store->buffer->data->name_hint, &acc_vec,
+                                &accumulator_lanes, &new_body_stmts);
     }
     if (!reused_accumulator && !fused_fma) {
       acc_vec = decl_buffer(

@@ -6,7 +6,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.meta_path = [finder for finder in sys.meta_path if finder.__class__.__module__ != "_tilelang_editable"]
 
 import torch
-import tilelang.language as T
 from tilelang.profiler import do_bench
 
 import deep_gemm

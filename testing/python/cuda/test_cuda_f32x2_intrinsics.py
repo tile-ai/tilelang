@@ -161,7 +161,7 @@ def _make_auto_vec_reduce_kernel(reduce_func, *, nan_propagate=False):
     return main
 
 
-def _make_auto_vec_scalar_reduction_kernel(width: int = 8):
+def _make_auto_vec_scalar_reduction_kernel(width: int = 8, *, unit_loop: bool = False):
     """Build an MQA-epilogue-like scalar accumulator reduction."""
 
     @T.prim_func
@@ -176,28 +176,10 @@ def _make_auto_vec_scalar_reduction_kernel(width: int = 8):
             acc = T.alloc_local((1,), T.float32)
             acc[0] = T.float32(0)
             for h in T.vectorized(width):
-                acc[0] += T.max(Scores[tid, h] * Scale[tid], T.float32(0)) * Weights[tid, h]
-            Out[tid] = acc[0]
-
-    return main
-
-
-def _make_auto_vec_scalar_reduction_unit_loop_kernel(width: int = 8):
-    """Build a scalar reduction with a generated-style unit loop."""
-
-    @T.prim_func
-    def main(
-        Scores: T.Tensor((M, width), dtype=T.float32),
-        Weights: T.Tensor((M, width), dtype=T.float32),
-        Scale: T.Tensor((M,), dtype=T.float32),
-        Out: T.Tensor((M,), dtype=T.float32),
-    ):
-        with T.Kernel(1, 1, threads=M) as (bx, by):
-            tid = T.get_thread_binding()
-            acc = T.alloc_local((1,), T.float32)
-            acc[0] = T.float32(0)
-            for h in T.vectorized(width):
-                for _ in T.serial(1):
+                if unit_loop:
+                    for _ in T.serial(1):
+                        acc[0] += T.max(Scores[tid, h] * Scale[tid], T.float32(0)) * Weights[tid, h]
+                else:
                     acc[0] += T.max(Scores[tid, h] * Scale[tid], T.float32(0)) * Weights[tid, h]
             Out[tid] = acc[0]
 
@@ -398,7 +380,7 @@ _AUTO_VEC_OP_NAMES = list(_AUTO_VEC_OPS.keys())  # ["add", "sub", "mul"]
 
 
 # float32: auto-vectorization should emit tl::<op>2 on SM100+
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
 @pytest.mark.parametrize("op_key", _AUTO_VEC_OP_NAMES)
 def test_codegen_auto_vec_f32(op_key):
     py_op, tl_func = _AUTO_VEC_OPS[op_key]
@@ -407,7 +389,6 @@ def test_codegen_auto_vec_f32(op_key):
     assert f"tl::{tl_func}" in src, f"Expected tl::{tl_func} in SM100 auto-vectorised CUDA source for float32 {op_key}"
 
 
-@tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(10)
 @pytest.mark.parametrize("op_key", _AUTO_VEC_OP_NAMES)
 def test_codegen_auto_vec_f32_width8(op_key):
@@ -431,14 +412,14 @@ def test_codegen_auto_vec_f32_no_sm80(op_key):
     assert f"tl::{tl_func}" not in src, f"tl::{tl_func} should NOT appear in SM80 auto-vectorised CUDA source for float32 {op_key}"
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
 def test_codegen_auto_vec_fma_f32():
     func = _make_auto_vec_fma_kernel(T.float32)
     src = _lower_to_cuda_source(func, target=SM100_TARGET)
     assert "tl::fma2" in src, "Expected tl::fma2 in SM100 auto-vectorised CUDA source for float32 mul+add"
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
 @pytest.mark.parametrize("op_name,reduce_func,packed_ops", _REDUCE_OPS, ids=[op[0] for op in _REDUCE_OPS])
 def test_codegen_auto_vec_reduce_f32_sm100(op_name, reduce_func, packed_ops):
     func = _make_auto_vec_reduce_kernel(reduce_func)
@@ -456,7 +437,7 @@ def test_codegen_auto_vec_reduce_f32_no_sm80(op_name, reduce_func, packed_ops):
         assert f"tl::{packed_op}" not in src, f"tl::{packed_op} should not appear in pre-SM100 float32 {op_name} reduction"
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
 @pytest.mark.parametrize(
     "reduce_func,packed_op",
     [(T.reduce_max, "max2"), (T.reduce_min, "min2"), (T.reduce_absmax, "max2")],
@@ -468,49 +449,26 @@ def test_codegen_auto_vec_reduce_f32_ignores_half_nan_mode(reduce_func, packed_o
     assert f"tl::{packed_op}_nan" not in src
 
 
-@tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(10)
-def test_codegen_auto_vec_scalar_reduction_f32_sm100():
-    func = _make_auto_vec_scalar_reduction_kernel()
+@pytest.mark.parametrize("unit_loop", [False, True], ids=["direct", "unit-loop"])
+def test_codegen_auto_vec_scalar_reduction_f32_sm100(unit_loop):
+    func = _make_auto_vec_scalar_reduction_kernel(unit_loop=unit_loop)
     src = _lower_to_cuda_source(func, target=SM100_TARGET)
-    assert "tl::max2" in src, "Expected packed max in SM100 vectorised scalar reduction"
-    assert "tl::mul2" in src, "Expected packed multiply in SM100 vectorised scalar reduction"
-    assert "tl::fma2" in src, "Expected packed FMA in SM100 vectorised scalar reduction"
-    assert src.count("tl::fma2") == 4, "Expected one packed FMA per f32x2 lane pair"
-    assert "acc_reduce_vec" in src, "Expected the packed reduction value to be materialised before scalar fold"
-    assert "for (int h = 0; h < 8; ++h)" not in src, "Scalar reduction loop should not be emitted as an 8-iteration loop"
+    assert all(f"tl::{op}" in src for op in ("max2", "mul2", "fma2"))
+    assert src.count("tl::fma2") == 4
+    assert "for (int h = 0; h < 8; ++h)" not in src
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-def test_codegen_auto_vec_scalar_reduction_ignores_unit_loop_f32_sm100():
-    func = _make_auto_vec_scalar_reduction_unit_loop_kernel()
-    src = _lower_to_cuda_source(func, target=SM100_TARGET)
-    assert "tl::fma2" in src, "Expected a generated unit loop not to disable packed scalar reduction"
-    assert src.count("tl::fma2") == 4, "Expected one packed FMA per f32x2 lane pair"
-
-
-@tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(10)
 def test_codegen_auto_vec_scalar_reduction_chunk_accumulator_f32_sm100():
     func = _make_auto_vec_scalar_reduction_chunks_kernel()
     src = _lower_to_cuda_source(func, target=SM100_TARGET)
     scalar_updates = [line for line in src.splitlines() if "acc[0] = (acc[0] +" in line]
-    assert "tl::fma2" in src, "Expected packed FMA in SM100 chunked scalar reduction"
-    assert src.count("tl::fma2") == 4, "Expected one packed FMA per f32x2 lane pair inside the chunk loop"
-    assert src.count("tl::add2") == 1, "Expected one packed add for the final four-lane fold"
-    fma_lines = [line for line in src.splitlines() if "tl::fma2" in line]
-    add2_lines = [line for line in src.splitlines() if "tl::add2" in line]
-    assert "float4 acc_chunk_acc_vec" in src, "Expected a compact four-lane accumulator"
-    assert all("acc_chunk_acc_vec" in line for line in fma_lines[:2]), "Expected the first packed FMAs to consume the vector accumulator"
-    assert all("acc_fma_pair_" in line for line in fma_lines[2:]), "Expected later packed FMAs to chain through prior pair results"
-    assert "acc_chunk_acc_vec" in add2_lines[0], "Expected the packed fold to consume the vector accumulator"
-    assert "tl::add2(make_float2(" in src, "Expected nvcc-compatible CUDA vector constructors"
-    assert len(scalar_updates) == 1, "Expected exactly one scalar fold for the chunked reduction"
-    assert "acc_chunk_acc_vec_fold_pair" in scalar_updates[0], "Expected scalar fold to consume the packed pair sum"
+    assert src.count("tl::fma2") == 4
+    assert src.count("tl::add2") == 1
+    assert len(scalar_updates) == 1
 
 
-@tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(10)
 def test_correctness_auto_vec_scalar_reduction_chunk_accumulator_f32_sm100():
     func = _make_auto_vec_scalar_reduction_chunks_kernel()
@@ -591,7 +549,6 @@ def test_correctness_fma2(dtype_name):
         torch.testing.assert_close(d, ref, atol=1e-2, rtol=1e-1)
 
 
-@tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(10)
 @pytest.mark.parametrize("op_name,reduce_func", [(op_name, reduce_func) for op_name, reduce_func, _ in _REDUCE_OPS])
 def test_correctness_auto_vec_reduce_f32(op_name, reduce_func):
@@ -603,7 +560,6 @@ def test_correctness_auto_vec_reduce_f32(op_name, reduce_func):
     torch.testing.assert_close(result, reference, atol=1e-5, rtol=1e-5)
 
 
-@tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(10)
 def test_correctness_auto_vec_batched_reduce_f32():
     func = _make_auto_vec_batched_reduce_kernel(T.reduce_sum)

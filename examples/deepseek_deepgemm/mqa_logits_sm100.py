@@ -41,12 +41,8 @@ class MQALogitsConfig:
         assert self.num_heads == 64, "SM100 MQA SOTA kernels currently require num_heads=64"
         assert self.head_dim == 128, "SM100 MQA SOTA kernels currently require head_dim=128"
         assert self.seq_len > 0 and self.seq_len_kv > 0, "sequence lengths must be positive"
-        assert self.seq_len <= self.seq_len_kv, (
-            "seq_len must be <= seq_len_kv for the demo causal ranges"
-        )
-        assert self.seq_len_kv - self.seq_len >= 128, (
-            "seq_len_kv must exceed seq_len by at least one 128-wide tile"
-        )
+        assert self.seq_len <= self.seq_len_kv, "seq_len must be <= seq_len_kv for the demo causal ranges"
+        assert self.seq_len_kv - self.seq_len >= 128, "seq_len_kv must exceed seq_len by at least one 128-wide tile"
         assert self.seq_len % self.block_q == 0, "seq_len must be divisible by block_q"
         assert self.seq_len_kv % 128 == 0, "seq_len_kv must be divisible by 128"
         assert self.logits_dtype in (
@@ -462,11 +458,7 @@ def mqa_logits_fp4_persistent_ws_kernel(
                             T.copy(
                                 c_tmem[
                                     :,
-                                    tmem_col
-                                    + qi_epi0 * heads
-                                    + h_base_epi0 * 16 : tmem_col
-                                    + qi_epi0 * heads
-                                    + (h_base_epi0 + 1) * 16,
+                                    tmem_col + qi_epi0 * heads + h_base_epi0 * 16 : tmem_col + qi_epi0 * heads + (h_base_epi0 + 1) * 16,
                                 ],
                                 c_epi0,
                             )
@@ -481,9 +473,7 @@ def mqa_logits_fp4_persistent_ws_kernel(
                                         * weights_epi0[qi_epi0, h_epi0]
                                     )
                         for bn_store_epi0 in T.Parallel(half_kv):
-                            Logits[q_row + qi_epi0, kv_row + bn_store_epi0] = T.cast(
-                                logits_epi0[bn_store_epi0], logits_dtype
-                            )
+                            Logits[q_row + qi_epi0, kv_row + bn_store_epi0] = T.cast(logits_epi0[bn_store_epi0], logits_dtype)
                         T.sync_warp()
                     T.mbarrier_arrive(tmem_empty[tmem_stage])
                     tmem_stage = tmem_stage + tmem_stage_step
@@ -541,11 +531,7 @@ def mqa_logits_fp4_persistent_ws_kernel(
                             T.copy(
                                 c_tmem[
                                     :,
-                                    tmem_col
-                                    + qi_epi1 * heads
-                                    + h_base_epi1 * 16 : tmem_col
-                                    + qi_epi1 * heads
-                                    + (h_base_epi1 + 1) * 16,
+                                    tmem_col + qi_epi1 * heads + h_base_epi1 * 16 : tmem_col + qi_epi1 * heads + (h_base_epi1 + 1) * 16,
                                 ],
                                 c_epi1,
                             )
@@ -560,9 +546,7 @@ def mqa_logits_fp4_persistent_ws_kernel(
                                         * weights_epi1[qi_epi1, h_epi1]
                                     )
                         for bn_store_epi1 in T.Parallel(half_kv):
-                            Logits[
-                                q_row + qi_epi1, kv_row + half_kv + bn_store_epi1
-                            ] = T.cast(logits_epi1[bn_store_epi1], logits_dtype)
+                            Logits[q_row + qi_epi1, kv_row + half_kv + bn_store_epi1] = T.cast(logits_epi1[bn_store_epi1], logits_dtype)
                         T.sync_warp()
                     T.mbarrier_arrive(tmem_empty[tmem_stage])
                     tmem_stage = tmem_stage + tmem_stage_step
@@ -887,8 +871,7 @@ def mqa_logits_fp8_persistent_ws_kernel(
                                     )
                         for bn_store_epi0 in T.Parallel(half_kv):
                             Logits[q_row + qi_epi0, kv_row + bn_store_epi0] = T.cast(
-                                logits_epi0[bn_store_epi0]
-                                * kv_scale_shared[stage, bn_store_epi0],
+                                logits_epi0[bn_store_epi0] * kv_scale_shared[stage, bn_store_epi0],
                                 logits_dtype,
                             )
                     T.mbarrier_arrive(tmem_empty[tmem_stage])
@@ -963,11 +946,8 @@ def mqa_logits_fp8_persistent_ws_kernel(
                                         * weights_shared[q_stage, qi_epi1, h]
                                     )
                         for bn_store_epi1 in T.Parallel(half_kv):
-                            Logits[
-                                q_row + qi_epi1, kv_row + half_kv + bn_store_epi1
-                            ] = T.cast(
-                                logits_epi1[bn_store_epi1]
-                                * kv_scale_shared[stage, half_kv + bn_store_epi1],
+                            Logits[q_row + qi_epi1, kv_row + half_kv + bn_store_epi1] = T.cast(
+                                logits_epi1[bn_store_epi1] * kv_scale_shared[stage, half_kv + bn_store_epi1],
                                 logits_dtype,
                             )
                     T.mbarrier_arrive(tmem_empty[tmem_stage])
