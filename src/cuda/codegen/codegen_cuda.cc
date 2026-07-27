@@ -3540,6 +3540,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string ab_type_str = tl::codegen::ptx::DTypeEnumToString(dtype_enum);
 
     need_tcgen05mma_instruction_h_ = true;
+    need_tcgen05_common_h_ = true;
+    this->PrintIndent();
+    this->stream << "tl::require_tcgen05mma_ss();\n";
     this->PrintIndent();
     std::string tcgen05_call =
         "tl::(tcgen05_name)<(ABType)(USE_2CTA_SUFFIX)>(uint64_t((desc_a) + "
@@ -3591,6 +3594,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         std::string(", ") + (enable_2cta ? "true" : "false");
 
     need_tcgen05mma_instruction_h_ = true;
+    need_tcgen05_common_h_ = true;
+    this->PrintIndent();
+    this->stream << "tl::require_tcgen05mma_ts();\n";
     this->PrintIndent();
     std::string tcgen05_call =
         "tl::tcgen05mma_ts<(ABType)(USE_2CTA_SUFFIX)>( "
@@ -3640,6 +3646,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto dtype_enum = tl::codegen::ptx::DTypeFromString(kind_dtype);
 
     need_tcgen05mma_instruction_h_ = true;
+    need_tcgen05_common_h_ = true;
+    this->PrintIndent();
+    this->stream << "tl::require_tcgen05mma_blockscaled_ss();\n";
     this->PrintIndent();
     std::string tcgen05_call =
         "tl::(tcgen05_name)<(ABType), (USE_2CTA)>(uint64_t((desc_a) + "
@@ -3706,6 +3715,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string col_offset = this->PrintExpr(op->args[4]);
     std::string dst_ptr = this->PrintExpr(op->args[5]);
     this->PrintIndent();
+    this->stream << "tl::require_tcgen05_ld();\n";
+    this->PrintIndent();
     this->stream << "tl::tcgen05_ld_32dp" << inst_bits << "bNx<" << chunks
                  << ", " << (pack16 ? "true" : "false") << ">("
                  << tmem_start_col << ", " << col_offset << ", " << dst_ptr
@@ -3720,6 +3731,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string tmem_start_col = this->PrintExpr(op->args[3]);
     std::string col_offset = this->PrintExpr(op->args[4]);
     std::string src_ptr = this->PrintExpr(op->args[5]);
+    this->PrintIndent();
+    this->stream << "tl::require_tcgen05_st();\n";
     this->PrintIndent();
     this->stream << "tl::tcgen05_st_32dp" << inst_bits << "bNx<" << chunks
                  << ", " << (unpack16 ? "true" : "false") << ">("

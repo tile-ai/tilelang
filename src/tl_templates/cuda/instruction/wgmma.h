@@ -455,19 +455,29 @@ TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_F32_E5M2E5M2_RS_TN);
 #undef TL_WGMMA_DEFINE_RS_TN
 
 template <DataType A_type, DataType B_type, DataType C_type, int M, int N,
-          int K, bool tnspA, bool tnspB, int scaleA = 1, int scaleB = 1>
+          int K, bool tnspA, bool tnspB, int scaleA = 1, int scaleB = 1,
+          bool kDependentFalse = false>
 TL_DEVICE void wgmma_ss(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
                         bool scale_out) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 900)
   WgmmaSSImpl<A_type, B_type, C_type, M, N, K, tnspA, tnspB, scaleA,
               scaleB>::execute(desc_a, desc_b, c, scale_out);
+#else
+  static_assert(kDependentFalse, "tl::wgmma_ss requires sm_90");
+#endif
 }
 
 template <DataType A_type, DataType B_type, DataType C_type, int M, int N,
-          int K, bool tnspA, bool tnspB, int scaleA = 1, int scaleB = 1>
+          int K, bool tnspA, bool tnspB, int scaleA = 1, int scaleB = 1,
+          bool kDependentFalse = false>
 TL_DEVICE void wgmma_rs(const uint32_t *a, uint64_t desc_b, uint32_t *c,
                         bool scale_out) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 900)
   WgmmaRSImpl<A_type, B_type, C_type, M, N, K, tnspA, tnspB, scaleA,
               scaleB>::execute(a, desc_b, c, scale_out);
+#else
+  static_assert(kDependentFalse, "tl::wgmma_rs requires sm_90");
+#endif
 }
 
 } // namespace tl

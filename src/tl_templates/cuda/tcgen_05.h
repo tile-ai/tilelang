@@ -9,12 +9,65 @@
 
 #include "common.h"
 #include <cute/arch/cluster_sm90.hpp>
+#include <cute/arch/config.hpp>
 
 namespace tl {
 
+template <bool kDependentFalse = false> TL_DEVICE void require_tcgen05mma_ss() {
+#if defined(CUTE_ARCH_TCGEN05_TMEM_ENABLED)
+  return;
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05mma_ss requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
+}
+
+template <bool kDependentFalse = false> TL_DEVICE void require_tcgen05mma_ts() {
+#if defined(CUTE_ARCH_TCGEN05_TMEM_ENABLED)
+  return;
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05mma_ts requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
+}
+
+template <bool kDependentFalse = false>
+TL_DEVICE void require_tcgen05mma_blockscaled_ss() {
+#if defined(CUTE_ARCH_TCGEN05_TMEM_ENABLED)
+  return;
+#else
+  static_assert(
+      kDependentFalse,
+      "tl::tcgen05mma_blockscaled_ss requires sm_100a or a compatible "
+      "architecture-specific target");
+#endif
+}
+
+template <bool kDependentFalse = false> TL_DEVICE void require_tcgen05_ld() {
+#if defined(CUTE_ARCH_TCGEN05_TMEM_ENABLED)
+  return;
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_ld_* requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
+}
+
+template <bool kDependentFalse = false> TL_DEVICE void require_tcgen05_st() {
+#if defined(CUTE_ARCH_TCGEN05_TMEM_ENABLED)
+  return;
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_st_* requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
+}
+
 template <bool use_2cta = false, bool kDependentFalse = false>
 TL_DEVICE void tmem_allocate(void *dst_ptr, int num_columns) {
-#if defined(__CUDA_ARCH_FEAT_SM100_ALL)
+#if defined(CUTE_ARCH_TCGEN05_TMEM_ENABLED)
   uint32_t dst_intptr = smem_ptr_to_uint(dst_ptr);
   if constexpr (use_2cta) {
     asm volatile(
@@ -28,13 +81,15 @@ TL_DEVICE void tmem_allocate(void *dst_ptr, int num_columns) {
         : "r"(dst_intptr), "r"(num_columns));
   }
 #else
-  static_assert(kDependentFalse, "T.alloc_tmem requires sm_100a");
+  static_assert(kDependentFalse,
+                "tl::tmem_allocate requires sm_100a or a compatible "
+                "architecture-specific target");
 #endif
 }
 
 template <bool use_2cta = false, bool kDependentFalse = false>
 TL_DEVICE void tmem_deallocate(uint32_t *tmem_ptr, int num_columns) {
-#if defined(__CUDA_ARCH_FEAT_SM100_ALL)
+#if defined(CUTE_ARCH_TCGEN05_TMEM_ENABLED)
   if constexpr (use_2cta) {
     asm volatile("{\n\t"
                  "tcgen05.dealloc.cta_group::2.sync.aligned.b32  %0, %1; \n\t"
@@ -49,16 +104,32 @@ TL_DEVICE void tmem_deallocate(uint32_t *tmem_ptr, int num_columns) {
                  : "r"(*tmem_ptr), "r"(num_columns));
   }
 #else
-  static_assert(kDependentFalse, "T.deallocate_tmem requires sm_100a");
+  static_assert(kDependentFalse,
+                "tl::tmem_deallocate requires sm_100a or a compatible "
+                "architecture-specific target");
 #endif
 }
 
+template <bool kDependentFalse = false>
 TL_DEVICE void tcgen05_before_thread_sync() {
+#if defined(CUTE_ARCH_TCGEN05_TMEM_ENABLED)
   asm volatile("tcgen05.fence::before_thread_sync;");
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_before_thread_sync requires sm_100a or a "
+                "compatible architecture-specific target");
+#endif
 }
 
+template <bool kDependentFalse = false>
 TL_DEVICE void tcgen05_after_thread_sync() {
+#if defined(CUTE_ARCH_TCGEN05_TMEM_ENABLED)
   asm volatile("tcgen05.fence::after_thread_sync;");
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_after_thread_sync requires sm_100a or a "
+                "compatible architecture-specific target");
+#endif
 }
 
 TL_DEVICE void fence_view_async_tmem_load() {
@@ -70,9 +141,10 @@ TL_DEVICE void fence_view_async_tmem_store() {
 }
 
 // Wrapper for CUTLASS umma_arrive: elect one lane, then arrive the mbarrier
-template <bool use_2cta = false>
+template <bool use_2cta = false, bool kDependentFalse = false>
 TL_DEVICE void tcgen05_mma_arrive(void const *smem_ptr,
                                   const uint16_t cta_mask = 3) {
+#if defined(CUTE_ARCH_TCGEN05_TMEM_ENABLED)
   uint32_t bar_intptr = smem_ptr_to_uint(smem_ptr);
   if constexpr (use_2cta) {
     // Adapted from cute::arch::umma_arrive_multicast_2x1SM
@@ -94,12 +166,18 @@ TL_DEVICE void tcgen05_mma_arrive(void const *smem_ptr,
                    : "r"(bar_intptr));
     }
   }
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_mma_arrive requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
 }
 
 // UTCCP: Copy scale factors from shared memory to tensor memory.
 // Must be called by one warp; only one elected thread issues the instruction.
-template <bool use_2cta = false>
+template <bool use_2cta = false, bool kDependentFalse = false>
 TL_DEVICE void tcgen05_cp(uint64_t const &smem_desc, uint32_t const &tmem_col) {
+#if defined(CUTE_ARCH_TCGEN05_TMEM_ENABLED)
   if (cute::elect_one_sync()) {
     if constexpr (use_2cta) {
       asm volatile("tcgen05.cp.cta_group::2.32x128b.warpx4 [%0], %1;"
@@ -111,6 +189,11 @@ TL_DEVICE void tcgen05_cp(uint64_t const &smem_desc, uint32_t const &tmem_col) {
                    : "r"(tmem_col), "l"(smem_desc));
     }
   }
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_cp requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
 }
 
 // Warp-level transpose of 128 uint32 elements in shared memory for UTCCP.
