@@ -383,6 +383,30 @@ def test_tiled_ws_places_producer_in_first_warp_group():
     assert "if 128 <= tx:" not in script
 
 
+def test_tiled_ws_accepts_int64_pipeline_indices():
+    """Inductor-style TIR may use int64 shapes and loop extents."""
+
+    func = matmul_pipelined(
+        T.int64(32),
+        T.int64(1024),
+        T.int64(256),
+        T.int64(32),
+        T.int64(64),
+        T.int64(128),
+        num_stages=4,
+        dtype="bfloat16",
+    ).with_attr("global_symbol", "main")
+    mod = tvm.IRModule.from_expr(func)
+    target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
+    script = mod["main"].script()
+
+    assert "tl_tiled_ws_applied" in script
+    assert "T.tma_copy" in script
+
+
 def _run_grouped_gemm_ws(kernel, batch_sizes, K=128, N=128, block_M=64, dtype="float16"):
     import torch
 
@@ -754,6 +778,7 @@ def test_tiled_ws_does_not_clone_local_var_into_producer_branch():
 
 if __name__ == "__main__":
     test_tiled_ws_places_producer_in_first_warp_group()
+    test_tiled_ws_accepts_int64_pipeline_indices()
     test_tiled_ws_stage1_dynamic_loop_start()
     test_tiled_ws_correctness()
     test_tiled_ws_stage3()

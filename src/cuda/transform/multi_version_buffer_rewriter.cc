@@ -496,13 +496,17 @@ private:
     if (buffer.scope() == "shared.barrier") {
       // Barrier buffers: expand first dimension to keep 1D shape.
       // (1,) -> (num_versions,) so lower_shared_barrier.cc still works.
-      new_buffer->shape.Set(0, PrimExpr(num_versions) * new_buffer->shape[0]);
+      DataType shape_dtype = new_buffer->shape[0].dtype();
+      new_buffer->shape.Set(0, make_const(shape_dtype, num_versions) *
+                                   new_buffer->shape[0]);
     } else {
       new_buffer->shape.insert(new_buffer->shape.begin(),
                                PrimExpr(num_versions));
       if (!new_buffer->strides.empty()) {
         ICHECK(new_buffer->strides.size() + 1 == new_buffer->shape.size());
-        PrimExpr stride_0 = new_buffer->strides[0] * new_buffer->shape[1];
+        DataType stride_dtype = new_buffer->shape[1].dtype();
+        PrimExpr stride_0 = tvm::cast(stride_dtype, new_buffer->strides[0]) *
+                            new_buffer->shape[1];
         new_buffer->strides.insert(new_buffer->strides.begin(), stride_0);
       }
     }
@@ -718,20 +722,26 @@ private:
     EnsureVersionedBuffers(SelectVersionedBuffers(op->body, num_stages),
                            num_stages);
 
-    PrimExpr linear_index = loop_stack_[0].first;
+    DataType pipeline_iter_dtype = op->loop_var.dtype();
+    PrimExpr linear_index =
+        tvm::cast(pipeline_iter_dtype, loop_stack_[0].first);
     for (size_t i = 1; i < loop_stack_.size(); ++i) {
-      linear_index =
-          linear_index * loop_stack_[i].second + loop_stack_[i].first;
+      PrimExpr extent = tvm::cast(pipeline_iter_dtype, loop_stack_[i].second);
+      PrimExpr loop_var = tvm::cast(pipeline_iter_dtype, loop_stack_[i].first);
+      linear_index = linear_index * extent + loop_var;
     }
     PrimExpr old_version_index = version_index_;
     PrimExpr old_parity_cycle = parity_cycle_;
     Var old_pipeline_loop_var = pipeline_loop_var_;
     PrimExpr old_pipeline_loop_min = pipeline_loop_min_;
-    PrimExpr raw_version_index = FloorMod(linear_index, num_stages);
-    version_index_ =
-        Call(raw_version_index->dtype, mvb_stage_index(), {raw_version_index});
+    PrimExpr stages = make_const(linear_index.dtype(), num_stages);
+    PrimExpr stage_index =
+        tvm::cast(DataType::Int(32), FloorMod(linear_index, stages));
+    version_index_ = Call(DataType::Int(32), mvb_stage_index(), {stage_index});
     // Parity cycles every num_stages iterations for mbarrier phase tracking.
-    parity_cycle_ = FloorMod(FloorDiv(linear_index, num_stages), 2);
+    PrimExpr two = make_const(linear_index.dtype(), 2);
+    parity_cycle_ = tvm::cast(DataType::Int(32),
+                              FloorMod(FloorDiv(linear_index, stages), two));
     // Store the pipelined loop variable and its min value so we can compute
     // the initial-phase offset of each mbarrier_wait_parity expression.
     pipeline_loop_var_ = op->loop_var;
@@ -762,7 +772,10 @@ private:
     n->buffer = new_buffer;
     if (old_buffer.scope() == "shared.barrier") {
       // Barrier: offset into expanded 1D array
-      n->indices.Set(0, version_index * old_buffer->shape[0] + n->indices[0]);
+      DataType index_dtype = n->indices[0].dtype();
+      PrimExpr version = tvm::cast(index_dtype, version_index);
+      PrimExpr shape = tvm::cast(index_dtype, old_buffer->shape[0]);
+      n->indices.Set(0, version * shape + n->indices[0]);
     } else {
       n->indices.insert(n->indices.begin(), version_index);
     }
@@ -783,7 +796,10 @@ private:
     auto *n = store.CopyOnWrite();
     n->buffer = new_buffer;
     if (old_buffer.scope() == "shared.barrier") {
-      n->indices.Set(0, version_index * old_buffer->shape[0] + n->indices[0]);
+      DataType index_dtype = n->indices[0].dtype();
+      PrimExpr version = tvm::cast(index_dtype, version_index);
+      PrimExpr shape = tvm::cast(index_dtype, old_buffer->shape[0]);
+      n->indices.Set(0, version * shape + n->indices[0]);
     } else {
       n->indices.insert(n->indices.begin(), version_index);
     }
@@ -849,11 +865,15 @@ private:
             init_orig = analyzer.Simplify(tirx::Substitute(init_orig, subst));
             init_cycle = analyzer.Simplify(tirx::Substitute(init_cycle, subst));
           }
-          PrimExpr offset =
-              analyzer.Simplify(FloorMod(init_orig - init_cycle, 2));
+          DataType offset_dtype = init_orig.dtype();
+          PrimExpr init_delta = init_orig - tvm::cast(offset_dtype, init_cycle);
+          PrimExpr offset = analyzer.Simplify(
+              FloorMod(init_delta, make_const(init_delta.dtype(), 2)));
           if (const int64_t *imm = as_const_int(offset)) {
             if (*imm % 2 != 0) {
-              new_parity = FloorMod(parity_cycle + 1, 2);
+              PrimExpr one = make_const(parity_cycle.dtype(), 1);
+              PrimExpr two = make_const(parity_cycle.dtype(), 2);
+              new_parity = FloorMod(parity_cycle + one, two);
             }
           }
           Array<PrimExpr> new_args = call->args;
@@ -867,12 +887,12 @@ private:
 
   PrimExpr RewriteBufferAccess(const Call &call,
                                const std::vector<int> &arg_indices) {
-    auto product = [](const Array<PrimExpr> &input) {
-      return foldl(
-          [](PrimExpr a, PrimExpr b, Span span) {
-            return mul(std::move(a), std::move(b), std::move(span));
-          },
-          make_const(DataType::Int(32), 1), input);
+    auto product = [](const Array<PrimExpr> &input, DataType dtype) {
+      PrimExpr result = make_const(dtype, 1);
+      for (const PrimExpr &expr : input) {
+        result = result * tvm::cast(dtype, expr);
+      }
+      return result;
     };
     Array<PrimExpr> new_args = call->args;
     for (int i : arg_indices) {
@@ -889,11 +909,12 @@ private:
         const PrimExpr &old_index = call->args[i + 1];
         PrimExpr offset;
         if (new_buffer->strides.empty()) {
-          offset = product(buffer->shape);
+          offset = product(buffer->shape, old_index.dtype());
         } else {
-          offset = new_buffer->strides[0];
+          offset = tvm::cast(old_index.dtype(), new_buffer->strides[0]);
         }
-        PrimExpr new_index = old_index + version_index * offset;
+        PrimExpr typed_version = tvm::cast(old_index.dtype(), version_index);
+        PrimExpr new_index = old_index + typed_version * offset;
         new_args.Set(i + 1, new_index);
       }
     }
