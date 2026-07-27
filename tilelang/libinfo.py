@@ -1,0 +1,47 @@
+import importlib.machinery
+import os
+import sys
+
+from .env import TL_LIBS, get_cuda_dll_search_dirs
+
+
+def get_dll_directories():
+    dll_dirs = list(TL_LIBS) + get_cuda_dll_search_dirs()
+    return [os.path.abspath(path) for path in dll_dirs if os.path.isdir(path)]
+
+
+def find_lib_path(name: str, py_ext=False):
+    """Find tile lang library
+
+    Parameters
+    ----------
+    name : str
+        The name of the library
+
+    optional: boolean
+        Whether the library is required
+    """
+    if py_ext:
+        lib_names = [f"{name}{suffix}" for suffix in importlib.machinery.EXTENSION_SUFFIXES]
+    elif sys.platform.startswith("linux") or sys.platform.startswith("freebsd"):
+        lib_names = [f"lib{name}.so"]
+    elif sys.platform.startswith("win32"):
+        if name == "tilelang":
+            # Windows links TileLang native registration objects into
+            # tvm_compiler.dll instead of a separate tilelang.dll.
+            lib_names = ["tvm_compiler.dll"]
+        else:
+            lib_names = [f"{name}.dll"]
+    elif sys.platform.startswith("darwin"):
+        lib_names = [f"lib{name}.dylib"]
+    else:
+        lib_names = [f"lib{name}.so"]
+
+    for lib_root in TL_LIBS:
+        for lib_name in lib_names:
+            lib_dll_path = os.path.join(lib_root, lib_name)
+            if os.path.exists(lib_dll_path) and os.path.isfile(lib_dll_path):
+                return lib_dll_path
+    else:
+        message = f"Cannot find libraries: {', '.join(lib_names)}\n" + "List of candidates:\n" + "\n".join(TL_LIBS)
+        raise RuntimeError(message)

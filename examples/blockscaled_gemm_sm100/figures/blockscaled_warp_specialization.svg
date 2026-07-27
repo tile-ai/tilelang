@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="670" viewBox="0 0 1200 670" role="img" aria-labelledby="title desc">
+  <title id="title">Warp-specialized pipeline and barriers</title>
+  <desc id="desc">Timeline for TMA, scale-factor transpose, UTCCP, MMA, and epilogue roles.</desc>
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fbfaf6"/>
+      <stop offset="58%" stop-color="#f7fbff"/>
+      <stop offset="100%" stop-color="#f8fff8"/>
+    </linearGradient>
+    <filter id="shadow" x="-8%" y="-18%" width="116%" height="142%">
+      <feDropShadow dx="0" dy="5" stdDeviation="6" flood-color="#0f172a" flood-opacity="0.11"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#263238"/>
+    </marker>
+  </defs>
+  <style>
+    .bg { fill: url(#bgGrad); }
+    .title { font: 700 27px Inter, Segoe UI, Arial, sans-serif; fill: #1f2933; }
+    .label { font: 700 14px Arial, sans-serif; fill: #1f2933; }
+    .small { font: 12px Arial, sans-serif; fill: #334155; }
+    .tiny { font: 11px Arial, sans-serif; fill: #475569; }
+    .lane { fill: #ffffff; stroke: #d0d7de; stroke-width: 1; rx: 12; filter: url(#shadow); }
+    .tma { fill: #e8f4ff; stroke: #6da9ff; }
+    .sf { fill: #fff5df; stroke: #d49a30; }
+    .mma { fill: #f4ecff; stroke: #a56ae8; }
+    .store { fill: #e9f8ef; stroke: #4cae68; }
+    .bar { fill: #f8fafc; stroke: #94a3b8; }
+    .line { stroke: #263238; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+    .dash { stroke-dasharray: 5 5; }
+  </style>
+  <rect class="bg" width="1200" height="670"/>
+  <text class="title" x="46" y="46">Warp-Specialized Handshake</text>
+  <text class="small" x="48" y="72">The roles are fixed by warp index. Barrier parity advances with pipeline stage and persistent wave.</text>
+
+  <text class="label" x="72" y="124">Role</text>
+  <text class="label" x="240" y="124">1. wait / produce</text>
+  <text class="label" x="452" y="124">2. transform</text>
+  <text class="label" x="664" y="124">3. issue MMA</text>
+  <text class="label" x="892" y="124">4. epilogue</text>
+
+  <rect class="lane" x="50" y="145" width="1080" height="88"/>
+  <text class="label" x="72" y="182">warp 0</text>
+  <text class="tiny" x="72" y="204">TMA producer</text>
+  <rect class="bar" x="200" y="166" width="142" height="46"/>
+  <text class="small" x="224" y="194">wait consumed</text>
+  <rect class="tma" x="372" y="166" width="172" height="46"/>
+  <text class="small" x="392" y="187">TMA A/B</text>
+  <text class="tiny" x="392" y="205">plus SF every 4 K</text>
+  <rect class="bar" x="580" y="166" width="128" height="46"/>
+  <text class="small" x="608" y="194">arrive loaded</text>
+
+  <rect class="lane" x="50" y="255" width="1080" height="88"/>
+  <text class="label" x="72" y="292">warp 2</text>
+  <text class="tiny" x="72" y="314">SF transposer</text>
+  <rect class="bar" x="200" y="276" width="128" height="46"/>
+  <text class="small" x="224" y="304">wait loaded</text>
+  <rect class="sf" x="372" y="276" width="190" height="46"/>
+  <text class="small" x="390" y="297">transpose 128 u32 chunks</text>
+  <text class="tiny" x="390" y="315">4 x 32 -> 32 x 4</text>
+  <rect class="sf" x="590" y="276" width="144" height="46"/>
+  <text class="small" x="616" y="297">proxy fence</text>
+  <text class="tiny" x="608" y="315">SMEM -> async proxy</text>
+  <rect class="bar" x="768" y="276" width="150" height="46"/>
+  <text class="small" x="792" y="304">arrive with_sf_full</text>
+
+  <rect class="lane" x="50" y="365" width="1080" height="96"/>
+  <text class="label" x="72" y="404">warp 1</text>
+  <text class="tiny" x="72" y="426">leader CTA MMA</text>
+  <rect class="bar" x="200" y="386" width="160" height="46"/>
+  <text class="small" x="226" y="414">wait with_sf_full</text>
+  <rect class="mma" x="392" y="386" width="172" height="46"/>
+  <text class="small" x="412" y="407">tcgen05.cp.warpx4</text>
+  <text class="tiny" x="414" y="425">SMEM SF -> TMEM SF</text>
+  <rect class="mma" x="596" y="386" width="180" height="46"/>
+  <text class="small" x="616" y="407">tcgen05.mma.block_scale</text>
+  <text class="tiny" x="616" y="425">clear_accum only on k=0</text>
+  <rect class="bar" x="806" y="386" width="130" height="46"/>
+  <text class="small" x="830" y="414">arrive consumed</text>
+  <rect class="bar" x="966" y="386" width="128" height="46"/>
+  <text class="small" x="988" y="414">arrive tmem_full</text>
+
+  <rect class="lane" x="50" y="485" width="1080" height="96"/>
+  <text class="label" x="72" y="524">epilogue</text>
+  <text class="tiny" x="72" y="546">all warps or 4..7</text>
+  <rect class="bar" x="200" y="506" width="128" height="46"/>
+  <text class="small" x="224" y="534">wait tmem_full</text>
+  <rect class="store" x="372" y="506" width="170" height="46"/>
+  <text class="small" x="396" y="527">C_tmem -> regs</text>
+  <text class="tiny" x="396" y="545">then SMEM/global</text>
+  <rect class="bar" x="584" y="506" width="150" height="46"/>
+  <text class="small" x="606" y="527">persistent only</text>
+  <text class="tiny" x="610" y="545">arrive tmem_empty</text>
+
+  <path class="line dash" d="M708 189 C740 210, 184 240, 200 299"/>
+  <path class="line dash" d="M918 299 C950 324, 172 348, 200 409"/>
+  <path class="line dash" d="M936 409 C970 442, 172 468, 200 529"/>
+  <path class="line dash" d="M584 529 C538 600, 170 600, 200 189"/>
+
+  <rect class="bar" x="792" y="592" width="338" height="52"/>
+  <text class="small" x="816" y="616">2CTA uses cluster barriers for with_sf_full,</text>
+  <text class="small" x="816" y="634">consumed, and tmem_empty.</text>
+</svg>

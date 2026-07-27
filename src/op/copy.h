@@ -1,0 +1,250 @@
+/*!
+ * \file tl/op/copy.h
+ * \brief Copy operations
+ */
+
+#ifndef TVM_TL_OP_COPY_H_
+#define TVM_TL_OP_COPY_H_
+
+#include "builtin.h"
+#include "operator.h"
+#include "parallel.h"
+#include "support/check.h"
+
+#include <utility>
+
+namespace tvm {
+namespace tl {
+using namespace tirx;
+using namespace ffi;
+
+/*!
+ * \brief Get TVM Op handle for Im2Col.
+ */
+
+/*!
+ * \brief Clone this Im2Col operator.
+ *
+ * Returns a TileOperator reference that is a shallow clone of this operator.
+ */
+class CopyNode : public TileOperatorNode {
+public:
+  Buffer src, dst;                   // Source and destination buffers
+  Array<Range> src_range, dst_range; // Ranges for each dimension in src and dst
+  Optional<PrimExpr> dst_block;      // Destination block index for cluster copy
+  // Annotated source OOB fallback value resolved from the enclosing block.
+  Optional<PrimExpr> src_oob_safe_value;
+  Map<String, ObjectRef> annotations; // Backend/pass-specific annotations.
+  // Common SIMT annotation keys:
+  //   - "coalesced_width": IntImm, width for coalesced memory access.
+  //   - "dst_block": PrimExpr, destination CTA rank for cluster copy.
+  //   - attr::kParallelLoopLayout ("parallel_loop_layout"): Fragment, loop
+  //     layout hint applied to the outermost generated parallel loop of this
+  //     copy's SIMT loop nest.
+
+  mutable ParallelOp par_op_; // Optional associated parallelization operator
+
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Copy", CopyNode, TileOperatorNode);
+
+  static void RegisterReflection() {
+    namespace refl = reflection;
+    refl::ObjectDef<CopyNode>()
+        .def_ro("src", &CopyNode::src)
+        .def_ro("dst", &CopyNode::dst)
+        .def_ro("src_range", &CopyNode::src_range)
+        .def_ro("dst_range", &CopyNode::dst_range)
+        .def_ro("dst_block", &CopyNode::dst_block)
+        .def_ro("src_oob_safe_value", &CopyNode::src_oob_safe_value)
+        .def_ro("annotations", &CopyNode::annotations);
+  }
+
+  /*!
+   * \brief Lower the copy operator to a TIR statement.
+   * \param lower_args Arguments for lowering.
+   * \param analyzer Analyzer for simplification and bounds checks.
+   */
+  Stmt Lower(const LowerArgs &lower_args,
+             arith::Analyzer *analyzer) const override;
+
+  /*!
+   * \brief Infer buffer layouts after applying this operator.
+   * \param layout_args Arguments for layout inference.
+   * \param level Level of inference (basic or detailed).
+   */
+  LayoutMap InferLayout(const LayoutInferArgs &layout_args,
+                        InferLevel level) const override;
+
+  /*!
+   * \brief Infer layout through the generated SIMT copy loop.
+   */
+  LayoutMap InferSIMTLayout(const LayoutInferArgs &layout_args,
+                            InferLevel level) const;
+
+  /*!
+   * \brief Generate SIMT (thread-level) loop for copying.
+   */
+  For MakeSIMTLoop(arith::Analyzer *analyzer) const;
+
+  /*!
+   * \brief Create iterator variables for multi-dimensional copy loops.
+   */
+  Array<IterVar> MakeIterVars() const;
+
+  /*!
+   * \brief Calculate source or destination indices from iteration vars.
+   * \param ivs      Iterator variables from MakeIterVars().
+   * \param src_dst  0 = make source indices, 1 = make destination indices.
+   */
+  Array<PrimExpr> MakeIndices(const Array<IterVar> &ivs, int src_dst) const;
+
+  /*!
+   * \brief Construct the boundary predicate for valid copy (to avoid OOB).
+   * \param analyzer  Arithmetic analyser for simplification.
+   * \param ivs       Iterator variables.
+   * \param extents   Extent expressions for the relevant buffer.
+   * \param src_dst   0 = predicate for source, 1 = predicate for destination.
+   */
+  PrimExpr MakePredicate(arith::Analyzer *analyzer, const Array<IterVar> &ivs,
+                         Array<PrimExpr> extents, int src_dst) const;
+
+protected:
+  /**
+   * \brief Create a deep copy of this operator.
+   *
+   * Returns a TileOperator that is a copy of the current node, preserving all
+   * configuration (buffers, parameters, and layout-related fields).
+   * @return A TileOperator owning the cloned operator node.
+   */
+
+  /**
+   * \brief Constructor.
+   * \param args Expression arguments for the Im2Col operator.
+   * \param vmap Buffer variable mapping.
+   */
+
+  /**
+   * \brief Get the TVM Op handle corresponding to this Im2Col operator.
+   * @return Reference to the singleton TVM Op representing this operator.
+   */
+  TileOperator Clone() const;
+};
+
+using CopyTargetPredicate = bool (*)(Target target);
+
+struct CopyImpl {
+  const char *name;
+  CopyTargetPredicate match_target;
+  int priority;
+
+  LayoutMap (*infer_layout)(const CopyNode &op,
+                            const LayoutInferArgs &layout_args,
+                            InferLevel level);
+
+  Stmt (*lower)(const CopyNode &op, const LowerArgs &lower_args,
+                arith::Analyzer *analyzer);
+};
+
+void RegisterCopyImpl(CopyImpl impl);
+
+Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &lower_args,
+                     arith::Analyzer *analyzer);
+
+class Copy : public TileOperator {
+public:
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Copy, TileOperator, CopyNode);
+
+  /*!
+   * \brief Constructor.
+   * \param args  Expression arguments for the copy.
+   * \param annotations  Annotations map from the Call node.
+   */
+  TVM_DLL Copy(Array<PrimExpr> args,
+               Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
+
+  /*!
+   * \brief Get the TVM Op handle corresponding to this Copy op.
+   */
+  static const Op &Get();
+};
+
+/*!
+ * \brief Special operator for Im2Col transformation.
+ *
+ * This operator converts input image layout into columnar format suitable
+ * for matrix multiplication-based convolution lowering.
+ */
+class Im2ColOpNode : public TileOperatorNode {
+public:
+  BufferRegion srcRegion_, dstRegion_;
+  Buffer src_,
+      dst_;      // Source (input feature map) and destination (im2col matrix)
+  int stride_;   // Stride for convolution
+  int padding_;  // Padding amount
+  int dilation_; // Dilation factor
+  int kernel_;   // Kernel size
+  int eviction_policy_;                // Cache eviction policy
+  PrimExpr nhw_step_;                  // Step size in NHW dimensions
+  PrimExpr c_step_;                    // Step size in channel dimension
+  Map<String, ObjectRef> annotations_; // Annotations from Call node
+
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Im2Col", Im2ColOpNode,
+                                    TileOperatorNode);
+
+  static void RegisterReflection() {
+    namespace refl = reflection;
+    refl::ObjectDef<Im2ColOpNode>()
+        .def_ro("srcRegion", &Im2ColOpNode::srcRegion_)
+        .def_ro("dstRegion", &Im2ColOpNode::dstRegion_)
+        .def_ro("src", &Im2ColOpNode::src_)
+        .def_ro("dst", &Im2ColOpNode::dst_)
+        .def_ro("stride", &Im2ColOpNode::stride_)
+        .def_ro("padding", &Im2ColOpNode::padding_)
+        .def_ro("dilation", &Im2ColOpNode::dilation_)
+        .def_ro("kernel", &Im2ColOpNode::kernel_)
+        .def_ro("eviction_policy", &Im2ColOpNode::eviction_policy_);
+  }
+
+  /*!
+   * \brief Lower to TIR statement.
+   */
+  Stmt Lower(const LowerArgs &lower_args,
+             arith::Analyzer *analyzer) const override;
+
+  /*!
+   * \brief Infer layout for this operator.
+   */
+  LayoutMap InferLayout(const LayoutInferArgs &layout_args,
+                        InferLevel level) const override;
+
+  /*!
+   * \brief Get TVM Op handle.
+   */
+  static const Op &Get();
+  TileOperator Clone() const;
+};
+
+struct Im2ColImpl {
+  const char *name;
+  CopyTargetPredicate match_target;
+  int priority;
+
+  Stmt (*lower)(const Im2ColOpNode &op, const LowerArgs &lower_args,
+                arith::Analyzer *analyzer);
+};
+
+void RegisterIm2ColImpl(Im2ColImpl impl);
+
+class Im2ColOp : public TileOperator {
+public:
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Im2ColOp, TileOperator,
+                                             Im2ColOpNode);
+  TVM_DLL
+  Im2ColOp(Array<PrimExpr> args,
+           Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
+  static const Op &Get();
+};
+
+} // namespace tl
+} // namespace tvm
+
+#endif // TVM_TL_OP_COPY_H_

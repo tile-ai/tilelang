@@ -1,0 +1,638 @@
+from __future__ import annotations
+import importlib.metadata
+import json
+import math
+import sys
+import os
+import pathlib
+import logging
+import shutil
+import glob
+from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+
+logger = logging.getLogger(__name__)
+
+EnvVarDefault = str | None | Callable[[], str | None]
+TargetConfig = dict[str, object]
+
+
+def parse_pass_profile_threshold_ms(value: object, name: str = "pass profile threshold") -> float:
+    """Parse a finite, non-negative pass profile threshold in milliseconds."""
+    try:
+        threshold = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite non-negative number") from exc
+    if not math.isfinite(threshold) or threshold < 0:
+        raise ValueError(f"{name} must be a finite non-negative number")
+    return threshold
+
+
+def resolve_pass_profile_threshold_ms(pass_configs: Mapping[object, object], key: object, env_threshold_ms: Callable[[], float]) -> float:
+    """Resolve pass profile threshold with an explicit pass config taking precedence."""
+    if key in pass_configs:
+        return parse_pass_profile_threshold_ms(pass_configs[key], str(key))
+    return env_threshold_ms()
+
+
+# SETUP ENVIRONMENT VARIABLES
+CUTLASS_NOT_FOUND_MESSAGE = "CUTLASS is not installed or found in the expected path"
+", which may lead to compilation bugs when utilize tilelang backend."
+COMPOSABLE_KERNEL_NOT_FOUND_MESSAGE = "Composable Kernel is not installed or found in the expected path"
+", which may lead to compilation bugs when utilize tilelang backend."
+TL_TEMPLATE_NOT_FOUND_MESSAGE = "TileLang is not installed or found in the expected path"
+", which may lead to compilation bugs when utilize tilelang backend."
+TVM_LIBRARY_NOT_FOUND_MESSAGE = "TVM is not installed or found in the expected path"
+
+TL_ROOT = os.path.dirname(os.path.abspath(__file__))
+# Only expose the internal lib directory to sys.path to avoid shadowing
+# common top-level module names (e.g., utils, analysis) from user projects.
+TL_LIBS = [os.path.join(TL_ROOT, "lib")]
+TL_LIBS = [i for i in TL_LIBS if os.path.exists(i)]
+
+DEV = False
+THIRD_PARTY_ROOT = os.path.join(TL_ROOT, "3rdparty")
+if not os.path.exists(THIRD_PARTY_ROOT):
+    DEV = True
+    tl_dev_root = os.path.dirname(TL_ROOT)
+
+    dev_lib_root = os.path.join(tl_dev_root, "build")
+    # In dev builds, place artifacts under build/lib and point search path there
+    # to avoid adding the entire build root to sys.path.
+    TL_LIBS = [os.path.join(dev_lib_root, "lib"), os.path.join(dev_lib_root, "tvm")]
+    THIRD_PARTY_ROOT = os.path.join(tl_dev_root, "3rdparty")
+    logger.warning(f"Loading tilelang libs from dev root: {dev_lib_root}")
+else:
+    try:
+        import z3  # noqa: F401
+    except ImportError:
+        logger.error("Failed to import z3, consider to reinstall tilelang.")
+
+assert TL_LIBS and all(os.path.exists(i) for i in TL_LIBS), f"tilelang lib root do not exists: {TL_LIBS}"
+
+for lib in TL_LIBS:
+    if lib not in sys.path:
+        sys.path.insert(0, lib)
+
+
+def prepend_dll_search_path(paths: list[str]) -> None:
+    """Prepend ``paths`` to ``%PATH%`` on Windows, skipping entries already present.
+
+    Used by Windows DLL discovery: PATH is consulted by ``LoadLibrary`` and by
+    ``os.add_dll_directory``-registered directories alike. POSIX is a no-op.
+    """
+    if not sys.platform.startswith("win32") or not paths:
+        return
+    path_entries = os.environ.get("PATH", "").split(os.pathsep)
+    seen = {os.path.normcase(os.path.abspath(p)) for p in path_entries if p}
+    fresh = [p for p in paths if p and os.path.normcase(os.path.abspath(p)) not in seen]
+    if fresh:
+        os.environ["PATH"] = os.pathsep.join(fresh + path_entries)
+
+
+prepend_dll_search_path(TL_LIBS)
+
+# TVM's Python loader (3rdparty/tvm/python/tvm/base.py) ORs ``os.RTLD_LAZY``
+# into ``ctypes.CDLL`` mode unconditionally. Windows has no lazy dlopen mode,
+# so we expose a 0 sentinel to keep ``LoadLibrary``'s default behavior.
+if sys.platform.startswith("win32") and not hasattr(os, "RTLD_LAZY"):
+    os.RTLD_LAZY = 0  # type: ignore[attr-defined]
+
+    # tvm-ffi's Cython layer defaults to ``Py_BEGIN_ALLOW_THREADS`` around every
+    # global function call (see ``TVM_FFI_RELEASE_GIL_BY_DEFAULT`` in
+    # ``3rdparty/tvm/3rdparty/tvm-ffi/python/tvm_ffi/cython/function.pxi``).
+    # That default contradicts tvm-ffi's own ``TypeTable``/``GlobalFunctionTable``
+    # single-threaded contract: with the GIL released, two Python threads can
+    # enter the unsynchronized C++ registries concurrently. POSIX hides the race
+    # behind glibc/x86 luck; Windows MSVC turns it into access violations
+    # inside ``Map::find`` / vector reallocation under the autotuner ThreadPool.
+    #
+    # Pinning the default to "0" lets the GIL serialize tvm-ffi calls (matching
+    # the upstream contract). Subprocess work like ``nvcc`` still releases the
+    # GIL on its own via the ``subprocess`` module, so the autotuner pool keeps
+    # real concurrency exactly where it matters. Users that opt back into the
+    # upstream behavior can still set ``TVM_FFI_RELEASE_GIL_BY_DEFAULT=1`` in
+    # their environment.
+    os.environ.setdefault("TVM_FFI_RELEASE_GIL_BY_DEFAULT", "0")
+
+
+def _get_package_version(pkg: str) -> str | None:
+    try:
+        return importlib.metadata.version(pkg)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _is_running_autodd() -> bool:
+    """Detect if we are running under `python -m tilelang.autodd`."""
+    orig_argv = getattr(sys, "orig_argv", None)
+    if orig_argv is None:
+        return False
+    if "-mtilelang.autodd" in orig_argv:
+        return True
+    pos = orig_argv.index("-m") if "-m" in orig_argv else -1
+    if pos != -1 and pos + 1 < len(orig_argv):
+        module_name = orig_argv[pos + 1]
+        if module_name == "tilelang.autodd" or module_name.startswith("tilelang.autodd."):
+            return True
+    return False
+
+
+def _find_cuda_home() -> str:
+    """Find the CUDA install path.
+
+    Adapted from https://github.com/pytorch/pytorch/blob/main/torch/utils/cpp_extension.py
+    """
+    # Guess #1
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    if cuda_home is None:
+        # Guess #2
+        nvcc_path = shutil.which("nvcc")
+        if nvcc_path is not None:
+            # Standard CUDA pattern
+            if "cuda" in nvcc_path.lower():
+                cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
+            # NVIDIA HPC SDK pattern
+            elif "hpc_sdk" in nvcc_path.lower():
+                # Navigate to the root directory of nvhpc
+                cuda_home = os.path.dirname(os.path.dirname(os.path.dirname(nvcc_path)))
+            # Generic fallback for non-standard or symlinked installs
+            else:
+                cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
+
+        elif _get_package_version("nvidia-cuda-nvcc") is not None:
+            # Guess #3
+            # from pypi package nvidia-cuda-nvcc, only nvidia-cuda-nvcc>=13.0 works.
+            # nvidia-cuda-nvcc-cu12, etc. only installs `ptxas`, not `nvcc`
+            for file in importlib.metadata.files("nvidia-cuda-nvcc") or []:
+                if file.name == "nvcc" or file.name == "nvcc.exe":
+                    cuda_home = str(pathlib.Path(file.locate()).parent.parent)
+                    break
+            else:
+                raise AssertionError("`nvidia-cuda-nvcc` installed but no `nvcc` found")
+
+        else:
+            # Guess #4
+            if sys.platform == "win32":
+                cuda_homes = glob.glob("C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v*.*")
+                cuda_home = "" if len(cuda_homes) == 0 else cuda_homes[0]
+            else:
+                # Linux/macOS
+                if os.path.exists("/usr/local/cuda"):
+                    cuda_home = "/usr/local/cuda"
+                elif os.path.exists("/opt/nvidia/hpc_sdk/Linux_x86_64"):
+                    cuda_home = "/opt/nvidia/hpc_sdk/Linux_x86_64"
+
+        # Validate found path
+        if cuda_home is None or not os.path.exists(cuda_home):
+            cuda_home = None
+
+    return cuda_home if cuda_home is not None else ""
+
+
+def _find_rocm_home() -> str:
+    """Find the ROCM install path."""
+    rocm_home = os.environ.get("ROCM_PATH") or os.environ.get("ROCM_HOME")
+    if rocm_home is None:
+        rocmcc_path = shutil.which("hipcc")
+        if rocmcc_path is not None:
+            rocm_home = os.path.dirname(os.path.dirname(rocmcc_path))
+        else:
+            rocm_home = "/opt/rocm"
+            if not os.path.exists(rocm_home):
+                rocm_home = None
+    return rocm_home if rocm_home is not None else ""
+
+
+# Cache control
+class CacheState:
+    """Class to manage global kernel caching state."""
+
+    _enabled = True
+
+    @classmethod
+    def enable(cls):
+        """Enable kernel caching globally."""
+        cls._enabled = True
+
+    @classmethod
+    def disable(cls):
+        """Disable kernel caching globally."""
+        cls._enabled = False
+
+    @classmethod
+    def is_enabled(cls) -> bool:
+        """Return current cache state."""
+        return cls._enabled
+
+
+@dataclass
+class EnvVar:
+    """
+    Descriptor for managing access to a single environment variable.
+
+    Purpose
+    -------
+    In many projects, access to environment variables is scattered across the codebase:
+        * `os.environ.get(...)` calls are repeated everywhere
+        * Default values are hard-coded in multiple places
+        * Overriding env vars for tests/debugging is messy
+        * There's no central place to see all environment variables a package uses
+
+    This descriptor solves those issues by:
+        1. Centralizing the definition of the variable's **key** and **default value**
+        2. Allowing *dynamic* reads from `os.environ` so changes take effect immediately
+        3. Supporting **forced overrides** at runtime (for unit tests or debugging)
+        4. Logging a warning when a forced value is used (helps detect unexpected overrides)
+        5. Optionally syncing forced values back to `os.environ` if global consistency is desired
+
+    How it works
+    ------------
+    - This is a `dataclass` implementing the descriptor protocol (`__get__`, `__set__`)
+    - When used as a class attribute, `instance.attr` triggers `__get__()`
+        → returns either the forced override or the live value from `os.environ`
+    - Assigning to the attribute (`instance.attr = value`) triggers `__set__()`
+        → stores `_forced_value` for future reads
+    - You may uncomment the `os.environ[...] = value` line in `__set__` if you want
+      the override to persist globally in the process
+
+    Example
+    -------
+    ```python
+    class Environment:
+        TILELANG_PRINT_ON_COMPILATION = EnvVar("TILELANG_PRINT_ON_COMPILATION", "0")
+
+    env = Environment()
+    print(cfg.TILELANG_PRINT_ON_COMPILATION)  # Reads from os.environ (with default fallback)
+    cfg.TILELANG_PRINT_ON_COMPILATION = "1"   # Forces value to "1" until changed/reset
+    ```
+
+    Benefits
+    --------
+    * Centralizes all env-var keys and defaults in one place
+    * Live, up-to-date reads (no stale values after `import`)
+    * Testing convenience (override without touching the real env)
+    * Improves IDE discoverability and type hints
+    * Avoids hardcoding `os.environ.get(...)` in multiple places
+    """
+
+    key: str  # Environment variable name (e.g. "TILELANG_PRINT_ON_COMPILATION")
+    default: EnvVarDefault  # Default value if the environment variable is not set
+    _forced_value: object | None = None  # Temporary runtime override (mainly for tests/debugging)
+
+    def _get_default(self):
+        return self.default() if callable(self.default) else self.default
+
+    def get(self):
+        if self._forced_value is not None:
+            return self._forced_value
+        if self.key in os.environ:
+            return os.environ[self.key]
+        return self._get_default()
+
+    def __get__(self, instance, owner):
+        """
+        Called when the attribute is accessed.
+        1. If a forced value is set, return it and log a warning
+        2. Otherwise, look up the value in os.environ; return the default if missing
+        """
+        return self.get()
+
+    def __set__(self, instance, value):
+        """
+        Called when the attribute is assigned to.
+        Stores the value as a runtime override (forced value).
+        Optionally, you can also sync this into os.environ for global effect.
+        """
+        self._forced_value = value
+        # Uncomment the following line if you want the override to persist globally:
+        # os.environ[self.key] = value
+
+
+def _parse_target_config(value: str) -> TargetConfig | None:
+    value = value.strip()
+    if not value.startswith("{"):
+        return None
+
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as err:
+        raise ValueError(
+            'TILELANG_DEFAULT_TARGET looks like a dict but could not be parsed. Use JSON syntax like {"kind": "cuda", "arch": "sm_100"}.'
+        ) from err
+    if not isinstance(parsed, dict):
+        raise ValueError("TILELANG_DEFAULT_TARGET must parse to a dict")
+    if not all(isinstance(key, str) for key in parsed):
+        raise ValueError("TILELANG_DEFAULT_TARGET dict keys must be strings")
+    return dict(parsed)
+
+
+# Utility function for environment variables with defaults
+# Assuming EnvVar and CacheState are defined elsewhere
+class Environment:
+    """
+    Environment configuration for TileLang.
+    Handles CUDA/ROCm detection, integration paths, template/cache locations,
+    auto-tuning configs, and build options.
+    """
+
+    # CUDA/ROCm home directories
+    CUDA_HOME = _find_cuda_home()
+    ROCM_HOME = _find_rocm_home()
+
+    # Path to the TileLang package root
+    TILELANG_PACKAGE_PATH = pathlib.Path(__file__).resolve().parent
+
+    # External library include paths
+    CUTLASS_INCLUDE_DIR = EnvVar("TL_CUTLASS_PATH", None)
+    COMPOSABLE_KERNEL_INCLUDE_DIR = EnvVar("TL_COMPOSABLE_KERNEL_PATH", None)
+
+    # TVM integration
+    TVM_PYTHON_PATH = EnvVar("TVM_IMPORT_PYTHON_PATH", None)
+    TVM_LIBRARY_PATH = EnvVar("TVM_LIBRARY_PATH", None)
+
+    # TileLang resources
+    TILELANG_TEMPLATE_PATH = EnvVar("TL_TEMPLATE_PATH", None)
+    TILELANG_CACHE_DIR = EnvVar("TILELANG_CACHE_DIR", os.path.expanduser("~/.tilelang/cache"))
+    TILELANG_TMP_DIR = EnvVar("TILELANG_TMP_DIR", lambda: os.path.join(Environment.TILELANG_CACHE_DIR, "tmp"))
+
+    # Kernel Build options
+    TILELANG_PRINT_ON_COMPILATION = EnvVar("TILELANG_PRINT_ON_COMPILATION", "1")  # print kernel name on compile
+    TILELANG_DISABLE_CACHE = EnvVar(
+        "TILELANG_DISABLE_CACHE", "0"
+    )  # disable kernel cache, usually for unit testing / debugging, high priority
+    TILELANG_KERNEL_CACHE_USE_LIB_STAMP = EnvVar(
+        "TILELANG_KERNEL_CACHE_USE_LIB_STAMP", "0"
+    )  # include native TileLang library content hash in kernel cache keys
+    TILELANG_CLEANUP_TEMP_FILES = EnvVar(
+        "TILELANG_CLEANUP_TEMP_FILES", "1"
+    )  # cleanup temporary compiler files/dirs after compilation (set to 0 to keep for debugging)
+    TILELANG_HIP_SAVE_TEMP_FILES = EnvVar("TILELANG_HIP_SAVE_TEMP_FILES", "0")  # save temporary files for HIP compilation
+    TILELANG_JIT_DIAGNOSTICS = EnvVar("TILELANG_JIT_DIAGNOSTICS", "0")  # enable JIT phase diagnostics
+    TILELANG_COMPILE_TIMEOUT_SECONDS = EnvVar("TILELANG_COMPILE_TIMEOUT_SECONDS", "")  # optional NVCC subprocess timeout in seconds
+
+    # Pass diff debugging
+    TILELANG_PASS_DIFF = EnvVar("TILELANG_PASS_DIFF", "0")  # "0"=off, "terminal", "html", "both"
+    TILELANG_PASS_DIFF_OUTPUT = EnvVar("TILELANG_PASS_DIFF_OUTPUT", "tmp/pass_diff_output")  # output directory for HTML reports
+
+    # Lower trace debugging
+    TL_LOWER_TRACE = EnvVar("TL_LOWER_TRACE", "0")  # "0"=off, "1"/"on"->html, "terminal", "html", "both"
+    TL_LOWER_TRACE_DIR = EnvVar(
+        "TL_LOWER_TRACE_DIR", lambda: os.path.join(".", "tmp", "lower_trace_dir")
+    )  # base output dir for trace artifacts
+
+    # Pass timing / profiling
+    TILELANG_PASS_PROFILE = EnvVar("TILELANG_PASS_PROFILE", "0")  # "0"=off, "1"/"true"=on
+    TILELANG_PASS_PROFILE_THRESHOLD_MS = EnvVar("TILELANG_PASS_PROFILE_THRESHOLD_MS", "0")  # 0=show all
+
+    # Auto-tuning settings
+    TILELANG_AUTO_TUNING_DISABLE_CACHE = EnvVar("TILELANG_AUTO_TUNING_DISABLE_CACHE", "0")
+    TILELANG_AUTO_TUNING_CPU_UTILITIES = EnvVar("TILELANG_AUTO_TUNING_CPU_UTILITIES", "0.9")  # percent of CPUs used
+    TILELANG_AUTO_TUNING_CPU_COUNTS = EnvVar("TILELANG_AUTO_TUNING_CPU_COUNTS", "-1")  # -1 means auto
+    TILELANG_AUTO_TUNING_MAX_CPU_COUNT = EnvVar("TILELANG_AUTO_TUNING_MAX_CPU_COUNT", "-1")  # -1 means no limit
+
+    # Compilation defaults (for jit, autotune, compile)
+    # These allow overriding default compilation parameters via environment variables
+    TILELANG_DEFAULT_TARGET = EnvVar("TILELANG_DEFAULT_TARGET", "auto")
+    TILELANG_DEFAULT_EXECUTION_BACKEND = EnvVar("TILELANG_EXECUTION_BACKEND", "auto")
+    TILELANG_DEFAULT_VERBOSE = EnvVar("TILELANG_VERBOSE", "0")
+
+    # TVM integration
+    SKIP_LOADING_TILELANG_SO = EnvVar("SKIP_LOADING_TILELANG_SO", "0")
+    TVM_IMPORT_PYTHON_PATH = EnvVar("TVM_IMPORT_PYTHON_PATH", None)
+
+    def _initialize_torch_cuda_arch_flags(self) -> None:
+        """
+        Detect target CUDA architecture and set TORCH_CUDA_ARCH_LIST
+        to ensure PyTorch extensions are built for the proper GPU arch.
+        """
+        from tilelang.contrib import nvcc
+        from tilelang.backend.target import determine_target
+
+        target = determine_target(return_object=True)  # get target GPU
+        compute_version = nvcc.get_target_compute_version(target)  # e.g. "8.6"
+        major, minor = nvcc.parse_compute_version(compute_version)  # split to (8, 6)
+        os.environ["TORCH_CUDA_ARCH_LIST"] = f"{major}.{minor}"  # set env var for PyTorch
+
+    # Cache control API (wrap CacheState)
+    def is_cache_enabled(self) -> bool:
+        return not self.is_cache_globally_disabled() and CacheState.is_enabled()
+
+    def enable_cache(self) -> None:
+        CacheState.enable()
+
+    def disable_cache(self) -> None:
+        CacheState.disable()
+
+    def is_cache_globally_disabled(self) -> bool:
+        return self.TILELANG_DISABLE_CACHE.lower() in ("1", "true", "yes", "on")
+
+    def should_use_kernel_cache_lib_stamp(self) -> bool:
+        return str(self.TILELANG_KERNEL_CACHE_USE_LIB_STAMP).lower() in ("1", "true", "yes", "on")
+
+    def is_autotune_cache_disabled(self) -> bool:
+        return self.TILELANG_AUTO_TUNING_DISABLE_CACHE.lower() in ("1", "true", "yes", "on")
+
+    def is_print_on_compilation_enabled(self) -> bool:
+        return self.TILELANG_PRINT_ON_COMPILATION.lower() in ("1", "true", "yes", "on")
+
+    def should_cleanup_temp_files(self) -> bool:
+        return str(self.TILELANG_CLEANUP_TEMP_FILES).lower() in ("1", "true", "yes", "on")
+
+    def is_jit_diagnostics_enabled(self) -> bool:
+        return str(self.TILELANG_JIT_DIAGNOSTICS).lower() in ("1", "true", "yes", "on")
+
+    def is_pass_profile_enabled(self) -> bool:
+        return str(self.TILELANG_PASS_PROFILE).strip().lower() in ("1", "true", "yes", "on")
+
+    def get_pass_profile_threshold_ms(self) -> float:
+        value = str(self.TILELANG_PASS_PROFILE_THRESHOLD_MS).strip()
+        if not value:
+            return 0.0
+        return parse_pass_profile_threshold_ms(value, "TILELANG_PASS_PROFILE_THRESHOLD_MS")
+
+    def get_compile_timeout_seconds(self) -> float | None:
+        value = str(self.TILELANG_COMPILE_TIMEOUT_SECONDS).strip()
+        if not value:
+            return None
+        try:
+            timeout = float(value)
+        except ValueError as exc:
+            raise ValueError("TILELANG_COMPILE_TIMEOUT_SECONDS must be empty or a non-negative number") from exc
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError("TILELANG_COMPILE_TIMEOUT_SECONDS must be empty or a non-negative number")
+        return timeout if timeout > 0 else None
+
+    def get_pass_diff_mode(self) -> str | None:
+        """Return the pass diff mode: None (off), 'terminal', 'html', or 'both'."""
+        value = str(self.TILELANG_PASS_DIFF).lower().strip()
+        if value in ("0", "false", "no", "off", ""):
+            return None
+        if value in ("1", "true", "yes", "on", "terminal"):
+            return "terminal"
+        if value in ("html", "both"):
+            return value
+        return "terminal"  # fallback for unrecognized truthy values
+
+    def get_lower_trace_mode(self) -> str | None:
+        """Return the lower trace mode: None (off), 'terminal', 'html', or 'both'."""
+        value = str(self.TL_LOWER_TRACE).lower().strip()
+        if value in ("0", "false", "no", "off", ""):
+            return None
+        if value in ("1", "true", "yes", "on", "html"):
+            return "html"
+        if value in ("terminal", "both"):
+            return value
+        return "html"  # fallback for unrecognized truthy values
+
+    def get_lower_trace_dir(self) -> str:
+        """Return the base output directory for lower trace artifacts."""
+        value = str(self.TL_LOWER_TRACE_DIR).strip()
+        return value or os.path.join(".", "tmp", "lower_trace_dir")
+
+    def get_default_target(self) -> str | TargetConfig:
+        """Get default compilation target from environment."""
+        target = self.TILELANG_DEFAULT_TARGET
+        if target is None:
+            return "auto"
+        if isinstance(target, Mapping):
+            return dict(target)
+        if isinstance(target, str):
+            return _parse_target_config(target) or target
+        raise TypeError("TILELANG_DEFAULT_TARGET must be a string or target config dict")
+
+    def get_default_execution_backend(self) -> str:
+        """Get default execution backend from environment."""
+        return self.TILELANG_DEFAULT_EXECUTION_BACKEND
+
+    def get_default_verbose(self) -> bool:
+        """Get default verbose flag from environment."""
+        return self.TILELANG_DEFAULT_VERBOSE.lower() in ("1", "true", "yes", "on")
+
+    def is_running_autodd(self) -> bool:
+        """Return True if we are running under `python -m tilelang.autodd`."""
+        # means we are running under `python -m tilelang.autodd`
+        return _is_running_autodd()
+
+    def is_light_import(self) -> bool:
+        """Return True if we are running in light import mode."""
+        # means we are running under `python -m tilelang.autodd` or some
+        # other scripts that only require the minimal environment variables.
+        return self.is_running_autodd()
+
+
+# Instantiate as a global configuration object
+env = Environment()
+
+# Cache control API (wrap env, which is managed by CacheState and Environment Variables jointly)
+enable_cache = env.enable_cache  # CacheState.enable
+disable_cache = env.disable_cache  # CacheState.disable
+is_cache_enabled = env.is_cache_enabled  # CacheState.is_enabled
+
+# Export CUDA_HOME and ROCM_HOME, both are static variables
+# after initialization.
+CUDA_HOME = env.CUDA_HOME
+ROCM_HOME = env.ROCM_HOME
+
+
+def get_cuda_dll_search_dirs() -> list[str]:
+    """Return CUDA_HOME-derived DLL search directories (Windows only).
+
+    The CUDA_HOME value itself is auto-detected by ``_find_cuda_home`` (env vars,
+    ``nvcc`` on PATH, pip ``nvidia-cuda-nvcc`` package, or default install paths).
+    This helper expands it into the subdirectories that actually contain
+    ``nvcuda.dll`` / ``cudart64_*.dll`` / ``nvrtc64_*.dll`` / ``nvvm*.dll``.
+    """
+    if not sys.platform.startswith("win32") or not CUDA_HOME:
+        return []
+    cands = [
+        CUDA_HOME,
+        os.path.join(CUDA_HOME, "bin"),
+        os.path.join(CUDA_HOME, "bin", "x86_64"),
+        os.path.join(CUDA_HOME, "lib", "x64"),
+        os.path.join(CUDA_HOME, "nvvm", "bin"),
+    ]
+    return [os.path.abspath(p) for p in cands if os.path.isdir(p)]
+
+
+def get_windows_runtime_dll_dirs() -> list[str]:
+    """Return Windows-only DLL directories shipped with sibling Python packages.
+
+    Currently locates ``tvm_ffi`` and ``z3`` install dirs so their DLLs resolve
+    when TileLang is imported. Each lookup is best-effort; failures are ignored.
+    """
+    if not sys.platform.startswith("win32"):
+        return []
+    dirs: list[str] = []
+    try:
+        from tvm_ffi import libinfo as tvm_ffi_libinfo
+
+        dirs.append(os.path.dirname(tvm_ffi_libinfo.find_libtvm_ffi()))
+    except Exception:
+        pass
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("z3")
+    except (ImportError, AttributeError, ValueError):
+        spec = None
+    if spec and spec.submodule_search_locations:
+        z3_root = next(iter(spec.submodule_search_locations), None)
+        if z3_root:
+            z3_lib = os.path.join(z3_root, "lib")
+            if os.path.isdir(z3_lib):
+                dirs.append(z3_lib)
+    return dirs
+
+
+def prepend_pythonpath(path):
+    if not os.environ.get("PYTHONPATH", None):
+        os.environ["PYTHONPATH"] = path
+    else:
+        os.environ["PYTHONPATH"] = path + os.pathsep + os.environ["PYTHONPATH"]
+
+    sys.path.insert(0, path)
+
+
+# Initialize TVM paths
+if env.TVM_IMPORT_PYTHON_PATH is not None:
+    prepend_pythonpath(env.TVM_IMPORT_PYTHON_PATH)
+else:
+    tvm_path = os.path.join(THIRD_PARTY_ROOT, "tvm", "python")
+    assert os.path.exists(tvm_path), tvm_path
+    if tvm_path not in sys.path:
+        prepend_pythonpath(tvm_path)
+        env.TVM_IMPORT_PYTHON_PATH = tvm_path
+# By default, the built TVM-related libraries are stored in TL_LIBS.
+if os.environ.get("TVM_LIBRARY_PATH") is None:
+    os.environ["TVM_LIBRARY_PATH"] = env.TVM_LIBRARY_PATH = os.pathsep.join(TL_LIBS)
+
+# Initialize CUTLASS paths
+if os.environ.get("TL_CUTLASS_PATH", None) is None:
+    cutlass_inc_path = os.path.join(THIRD_PARTY_ROOT, "cutlass", "include")
+    if os.path.exists(cutlass_inc_path):
+        os.environ["TL_CUTLASS_PATH"] = env.CUTLASS_INCLUDE_DIR = cutlass_inc_path
+    else:
+        logger.warning(CUTLASS_NOT_FOUND_MESSAGE)
+
+# Initialize COMPOSABLE_KERNEL paths
+if os.environ.get("TL_COMPOSABLE_KERNEL_PATH", None) is None:
+    ck_inc_path = os.path.join(THIRD_PARTY_ROOT, "composable_kernel", "include")
+    if os.path.exists(ck_inc_path):
+        os.environ["TL_COMPOSABLE_KERNEL_PATH"] = env.COMPOSABLE_KERNEL_INCLUDE_DIR = ck_inc_path
+    else:
+        logger.warning(COMPOSABLE_KERNEL_NOT_FOUND_MESSAGE)
+
+# Initialize TL_TEMPLATE_PATH
+if os.environ.get("TL_TEMPLATE_PATH", None) is None:
+    tl_template_path = os.path.join(THIRD_PARTY_ROOT, "..", "src")
+    if os.path.exists(tl_template_path):
+        os.environ["TL_TEMPLATE_PATH"] = env.TILELANG_TEMPLATE_PATH = tl_template_path
+    else:
+        logger.warning(TL_TEMPLATE_NOT_FOUND_MESSAGE)
+
+# Export static variables after initialization.
+CUTLASS_INCLUDE_DIR = env.CUTLASS_INCLUDE_DIR
+COMPOSABLE_KERNEL_INCLUDE_DIR = env.COMPOSABLE_KERNEL_INCLUDE_DIR
+TILELANG_TEMPLATE_PATH = env.TILELANG_TEMPLATE_PATH
+TILELANG_HIP_SAVE_TEMP_FILES = env.TILELANG_HIP_SAVE_TEMP_FILES

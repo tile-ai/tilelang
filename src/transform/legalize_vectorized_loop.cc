@@ -1,0 +1,116 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+/*!
+ * \file layout_inference.cc
+ * \brief infer the fragment/shared memory layout
+ */
+
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/s_tir/utils.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
+
+#include <queue>
+
+#include "../op/parallel.h"
+#include "arith/ir_mutator_with_analyzer.h"
+#include "loop_partition.h"
+#include "loop_vectorize.h"
+
+namespace tvm {
+namespace tl {
+
+using namespace tirx;
+using arith::IRMutatorWithAnalyzer;
+
+// Class to legalize vectorized loops by transforming them appropriately
+class LoopVectorizedLegalizer : IRMutatorWithAnalyzer {
+public:
+  // Static method to substitute and transform the given PrimFunc
+  static PrimFunc Substitute(PrimFunc f) {
+    arith::Analyzer analyzer;
+    // Create an instance of the legalizer with the analyzer
+    LoopVectorizedLegalizer substituter(&analyzer);
+    // Get a mutable copy of the function node
+    PrimFuncNode *fptr = f.CopyOnWrite();
+    // Apply the legalizer to the function body
+    fptr->body = substituter.VisitStmt(f->body);
+    return f;
+  }
+
+private:
+  // Constructor initializing the base class with the analyzer
+  LoopVectorizedLegalizer(arith::Analyzer *analyzer)
+      : arith::IRMutatorWithAnalyzer(analyzer) {}
+
+  bool IsNonTrivialVectorizedLoop(const For &loop) {
+    PrimExpr extent = analyzer_->Simplify(loop->extent);
+    auto extent_as_int = as_const_int(extent);
+    return !extent_as_int || *extent_as_int > 1;
+  }
+
+  // Override the VisitStmt_ method to handle ForNode (loop statements)
+  Stmt VisitStmt_(const ForNode *op) final {
+    // Visit and potentially modify the loop node
+    For for_node = Downcast<For>(IRMutatorWithAnalyzer::VisitStmt_(op));
+    // If the loop is not vectorized, proceed with the default behavior
+    if (for_node->kind != ForKind::kVectorized) {
+      return for_node;
+    }
+    // Change the loop kind from vectorized to serial
+    for_node.CopyOnWrite()->kind = ForKind::kSerial;
+    int vectorize_size = GetVectorizeSize(for_node, analyzer_);
+    if (vectorize_size <= 1 && IsNonTrivialVectorizedLoop(for_node)) {
+      LOG(WARNING) << "T.vectorized loop over `" << for_node->loop_var
+                   << "` with extent " << for_node->extent
+                   << " is lowered as a serial loop because TileLang could "
+                   << "not find a valid vectorization plan. Scalar accumulator "
+                   << "updates inside the loop are a common cause; move "
+                   << "reductions to T.unroll or T.serial if this is intended.";
+    }
+    // Apply vectorization transformation to the loop
+    return VectorizeLoop(for_node, analyzer_, {}, vectorize_size);
+  }
+};
+
+// Create a pass that legalizes vectorized loops in the IRModule
+tvm::transform::Pass LegalizeVectorizedLoop() {
+  using namespace tirx::transform;
+  // Define the transformation function to be applied
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
+    return LoopVectorizedLegalizer::Substitute(std::move(f));
+  };
+  // Create and return a PrimFunc pass with the transformation function
+  return CreatePrimFuncPass(pass_func, 0, "tl.LegalizeVectorizedLoop", {});
+}
+
+// Register the pass globally so it can be used in the compilation pipeline
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.LegalizeVectorizedLoop",
+                        LegalizeVectorizedLoop);
+}
+
+} // namespace tl
+} // namespace tvm

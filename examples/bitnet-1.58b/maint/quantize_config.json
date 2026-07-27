@@ -1,0 +1,10 @@
+{
+    "bits": 2,
+    "desc_act": false,
+    "static_groups": false,
+    "sym": true,
+    "lm_head": false,
+    "model_name_or_path": "1bitLLM/bitnet_b1_58-3B",
+    "quant_method": "bitnet",
+    "checkpoint_format": "bitnet"
+}

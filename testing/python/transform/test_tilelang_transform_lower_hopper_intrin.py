@@ -1,0 +1,144 @@
+from tilelang import tvm as tvm
+import tilelang as tl
+from tilelang.cuda import transform as cuda_transform
+from tilelang.backend.target import determine_target
+import tilelang.language as T
+import tilelang.testing
+from tvm import tirx
+
+auto_target = tvm.target.Target(determine_target("auto"))
+
+
+def _count_calls(stmt, op_name: str):
+    count = 0
+
+    def visitor(node):
+        nonlocal count
+        if isinstance(node, tirx.Call) and hasattr(node, "op") and hasattr(node.op, "name") and node.op.name == op_name:
+            count += 1
+
+    tirx.stmt_functor.post_order_visit(stmt, visitor)
+    return count
+
+
+def _count_prefetch_call_externs(stmt):
+    count = 0
+
+    def visitor(node):
+        nonlocal count
+        if not isinstance(node, tirx.Call):
+            return
+        op = getattr(node, "op", None)
+        if getattr(op, "name", None) != "tirx.call_extern":
+            return
+        if not node.args:
+            return
+        name = node.args[0]
+        if isinstance(name, tirx.StringImm) and name.value == "tl::prefetch_tma_descriptor":
+            count += 1
+
+    tirx.stmt_functor.post_order_visit(stmt, visitor)
+    return count
+
+
+def _check(original, transformed):
+    func = original
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.MaterializeKernelLaunch()(mod)
+    mod = cuda_transform.LowerHopperIntrin()(mod)
+    mod = tl.transform.LowerOpaqueBlock()(mod)
+    transformed = tvm.IRModule.from_expr(transformed.with_attr("global_symbol", "main"))
+    transformed = tvm.tirx.transform.BindTarget(auto_target)(transformed)
+    transformed = tl.transform.MaterializeKernelLaunch()(transformed)
+    transformed = tl.transform.LowerOpaqueBlock()(transformed)
+    transformed["main"] = transformed["main"].with_attr("tma_descriptor_args", {})
+
+    # TODO: temporary remove this check
+    # tvm.ir.assert_structural_equal(mod["main"], transformed["main"], True)
+
+
+def test_lower_shared_barrier():
+    """Test that LowerSharedBarrier converts shared.barrier buffers + barrier_init
+    annotations into ptx_init_barrier_thread_count calls.
+
+    This replaces the old test_lower_hopper_intrin_barrier which tested the
+    removed tl.create_list_of_mbarrier intrinsic.
+    """
+
+    @T.prim_func
+    def before():
+        with T.Kernel(8):
+            _ = T.launch_thread("threadIdx.x", 128)
+            mbarrier = T.alloc_barrier([128, 128, 128, 128])  # noqa: F841
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.MaterializeKernelLaunch()(mod)
+    mod = cuda_transform.LowerSharedBarrier()(mod)
+    mod = tl.transform.LowerOpaqueBlock()(mod)
+
+    main_func = mod["main"]
+    body_text = main_func.script()
+
+    # After LowerSharedBarrier, we should see ptx_init_barrier_thread_count calls
+    assert "ptx_init_barrier_thread_count" in body_text
+    # Should see fence_barrier_init
+    assert "ptx_fence_barrier_init" in body_text
+    # Should see storage_sync
+    assert "tvm_storage_sync" in body_text
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tma_descriptor_init_after_alloc_global():
+    @T.prim_func
+    def before():
+        T.func_attr({"tirx.is_entry_func": True, "tl.has_tma": T.bool(True)})
+        Output_partial = T.alloc_buffer((32,), "float16")
+        with T.launch_thread("threadIdx.x", 1):
+            T.evaluate(
+                T.create_tma_descriptor(
+                    6,
+                    4,
+                    Output_partial.data,
+                    8,
+                    2,
+                    2,
+                    1,
+                    2,
+                    16,
+                    32,
+                    64,
+                    8,
+                    1,
+                    2,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    0,
+                    0,
+                    2,
+                    0,
+                )
+            )
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.MaterializeKernelLaunch()(mod)
+    mod = cuda_transform.LowerHopperIntrin()(mod)
+    func = mod["main"]
+
+    assert not tvm.tirx.analysis.undefined_vars(func.body, func.params)
+    assert _count_calls(func.body, "tl.prefetch_tma_descriptor") == 1
+    assert _count_prefetch_call_externs(func.body) == 0
+
+    body_text = func.script()
+    alloc_pos = body_text.index('T.alloc_buffer((32,), "float16")')
+    assert alloc_pos < body_text.index('T.call_packed("__tvm_tensormap_create_tiled"')
+
+
+if __name__ == "__main__":
+    # tilelang.testing.main()
+    test_tma_descriptor_init_after_alloc_global()

@@ -1,0 +1,232 @@
+/*!
+ * \file tl/op/parallel.h
+ * \brief Infer layout from ops and parallel for
+ */
+
+#ifndef TVM_TL_OP_PARALLEL_H_
+#define TVM_TL_OP_PARALLEL_H_
+
+#include "support/check.h"
+#include <tvm/target/target.h>
+#include <tvm/tirx/stmt_functor.h>
+
+#include <unordered_map>
+#include <vector>
+
+#include "../layout/layout.h"
+#include "../layout/utils.h"
+#include "../transform/layout_reducer.h"
+#include "./operator.h"
+
+/**
+ * Conjoin `expr` into the operator's predicate (logical AND). If no predicate
+ * exists yet, `expr` becomes the predicate.
+ *
+ * @param expr Predicate expression to add.
+ */
+namespace tvm {
+namespace tl {
+
+using namespace tirx;
+using namespace ffi;
+
+class ParallelOpNode;
+
+class ParallelLoopNestVisitor : public StmtExprVisitor {
+private:
+  ParallelLoopNestVisitor(ParallelOpNode *op) : p(op) {};
+  void VisitStmt_(const ForNode *op) override;
+  void VisitStmt_(const BufferStoreNode *op) override;
+  void VisitExpr_(const BufferLoadNode *op) override;
+
+  ParallelOpNode *p;
+
+  friend class ParallelOpNode;
+};
+
+// ParallelOpNode represents a parallel for loop operator in TileLang.
+// It is responsible for inferring layouts, holding loop structure, and managing
+// predicates.
+class ParallelOpNode : public TileOperatorNode {
+public:
+  struct BufferAccessInfo {
+    Array<PrimExpr> indices;
+    bool is_read = false;
+    bool is_write = false;
+  };
+
+  using BufferIndiceMap = std::unordered_map<Buffer, BufferAccessInfo,
+                                             ObjectPtrHash, ObjectPtrEqual>;
+
+  // The root For loop node.
+  For root_;
+  // The inferred layout for the loop, mutable to allow lazy inference.
+  mutable Fragment loop_layout_;
+  // Whether loop_layout_ was inferred within InferLayout (vs. provided via
+  // annotations). When true, subsequent InferLayout calls can early-exit
+  // without re-emitting buffer layout updates.
+  mutable bool loop_layout_inferred_ = false;
+  // Whether the inferred loop layout intentionally over-covers a ragged
+  // non-fragment iteration space and therefore needs guarded inverse lowering.
+  mutable bool loop_layout_requires_padding_guard_ = false;
+  // The predicate expression for the loop, if any, mutable for lazy
+  // construction.
+  mutable Optional<PrimExpr> predicate_;
+  // If the user/compiler provided annotations on the outermost loop, we cache
+  // them here (layout without thread-range binding, and the predicate). This
+  // lets InferLayout adopt them cleanly without re-parsing annotations.
+  mutable Optional<Fragment> annotated_layout_unbound_;
+  mutable Optional<PrimExpr> annotated_predicate_;
+  mutable bool annotated_requires_padding_guard_ = false;
+
+  // Type key for TVM object system.
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ParallelOp", ParallelOpNode,
+                                    TileOperatorNode);
+
+  static void RegisterReflection() {
+    namespace refl = reflection;
+    refl::ObjectDef<ParallelOpNode>()
+        .def_ro("root", &ParallelOpNode::root_)
+        .def_ro("loop_layout", &ParallelOpNode::loop_layout_)
+        .def_ro("predicate", &ParallelOpNode::predicate_);
+  }
+
+  // Construct from a root For loop.
+  ParallelOpNode(For root);
+
+  // Lower the operator to a TIR statement.
+  Stmt Lower(const LowerArgs &lower_args,
+             arith::Analyzer *analyzer) const override;
+
+  // Infer the layout for this parallel operator.
+  LayoutMap InferLayout(const LayoutInferArgs &layout_args,
+                        InferLevel level) const override;
+
+  // Copy constructor for ParallelOpNode.
+  ParallelOpNode(const ParallelOpNode &other) : ParallelOpNode(other.root_) {
+    loop_layout_ = other.loop_layout_;
+    predicate_ = other.predicate_;
+    loop_layout_inferred_ = other.loop_layout_inferred_;
+    loop_layout_requires_padding_guard_ =
+        other.loop_layout_requires_padding_guard_;
+    annotated_layout_unbound_ = other.annotated_layout_unbound_;
+    annotated_predicate_ = other.annotated_predicate_;
+    annotated_requires_padding_guard_ = other.annotated_requires_padding_guard_;
+  }
+
+  // Get the inferred loop layout.
+  Fragment GetLoopLayout() const { return loop_layout_; }
+  bool LoopLayoutRequiresPaddingGuard() const {
+    return loop_layout_requires_padding_guard_;
+  }
+  // Get the root For loop.
+  For GetRoot() const { return root_; }
+  // Get the mapping from buffer to access indices + access type.
+  const BufferIndiceMap &GetIndiceMap() const { return indice_map_; }
+  // Get buffers in the order they first appear in the loop body.
+  const std::vector<Buffer> &GetAccessOrder() const { return access_order_; }
+  // Get the predicate for a given logical thread index. GPU callers pass the
+  // real threadIdx.x Var; callers without thread bindings (e.g. CPU) pass
+  // constant 0.
+  Optional<PrimExpr> GetPredicate(PrimExpr thread_index) const;
+
+  // Clone this operator.
+  TileOperator Clone() const override;
+
+private:
+  // Complete the fragment layout for a given buffer.
+  Fragment CompleteBufferFragment(const Buffer &buffer) const;
+  // Check if the buffer is accessed with common indices (i.e., loop variables).
+  bool IsCommonAccessIndice(const Buffer &buffer) const;
+  // Record buffer access and validate consistent indices.
+  void RecordBufferAccess(const Buffer &buffer, const Array<PrimExpr> &indices,
+                          bool is_write);
+  // Access info lookup with validation.
+  const BufferAccessInfo &GetAccessInfo(const Buffer &buffer) const;
+  // Check if a buffer is completely replicated (all threads hold same data).
+  bool IsBufferCompletelyReplicated(const Buffer &buffer,
+                                    const LayoutMap &layout_map) const;
+  // Validate a candidate loop layout against all source fragments in
+  // T.layout_map. Returns true if compatible with all fragments; otherwise
+  // false. When throw_on_error is true, throws LayoutConflictException with
+  // detailed error message on failure.
+  bool ValidateCandidateAgainstFragments(
+      const Fragment &candidate, const LayoutInferArgs &layout_args,
+      bool throw_on_error = false, bool check_forward_index = false,
+      const Buffer &source_buffer = Buffer()) const;
+  // Choose the better loop layout from two candidates using validation,
+  // containment and replication heuristic.
+  Fragment ChooseBestCandidate(const Fragment &candidate_from_buffer,
+                               const Fragment &candidate_from_plan,
+                               const LayoutInferArgs &layout_args) const;
+  // Return true if partitioning by `candidate` would make any known fragment
+  // buffer's physical index depend on the CUDA thread variable.
+  bool
+  HasThreadDependentFragmentIndex(const Fragment &candidate,
+                                  const LayoutInferArgs &layout_args) const;
+  // (No helper needed anymore; annotations are parsed once in ctor and adopted
+  // inside InferLayout.)
+  // Compute loop layout from a source buffer's fragment mapping.
+  Fragment
+  ComputeLoopLayoutFromBuffer(const Buffer &buffer,
+                              const LayoutInferArgs &layout_args) const;
+  // Compute plan-based loop layout candidate using vectorization and thread
+  // bounds.
+  Fragment ComputePlanCandidate(const LayoutInferArgs &layout_args) const;
+  // Add replication guard predicates when needed for cross-thread stores.
+  void BuildReplicationGuardsIfNeeded(
+      const LayoutInferArgs &layout_args,
+      const std::vector<Buffer> &store_shared_global_buffers,
+      const std::vector<Buffer> &store_fragment_buffers,
+      bool has_cross_thread_access,
+      const std::vector<Buffer> &const_index_fragment_buffer) const;
+  // Add a predicate to the current predicate expression.
+  void AddPredicate(const PrimExpr &expr) const {
+    predicate_ = predicate_.defined() ? And(expr, predicate_.value()) : expr;
+  }
+  // Expand Bind values to find fragment buffer accesses and add them to
+  // indice_map_. This handles cases like: a = block_mask_f[i]; T.copy(A[a, 0],
+  // ...)
+  void ExpandBindValues(const Map<Var, PrimExpr> &bind_var_to_expr);
+
+  // Allow ParallelLoopNestVisitor to access private members.
+  friend class ParallelLoopNestVisitor;
+
+  // Visitor for collecting loop nest information.
+  ParallelLoopNestVisitor V;
+  // Mapping from buffer to their access indices and access type in the loop.
+  BufferIndiceMap indice_map_;
+  // Stable first-use order for indice_map_.  Layout inference must not depend
+  // on std::unordered_map iteration order when selecting source buffers.
+  std::vector<Buffer> access_order_;
+  // The loop variables for the parallel loop nest.
+  Array<IterVar> loop_vars_;
+  // The inner_vars_
+  Map<Var, IterVar> inner_vars_;
+  // Analyzer for simplifying and analyzing expressions, mutable for lazy use.
+  mutable arith::Analyzer analyzer_;
+  // Mapping from buffer to reducer info.
+  Map<Var, ReducerInfo> reducer_info_map_;
+  // Whether the loop body has cross-thread shared/global memory access.
+  bool has_cross_thread_access_ = false;
+  // Buffers that are stored to shared/global memory in the loop body.
+  std::vector<Buffer> store_shared_global_buffers_;
+  // Fragment buffers that are stored to in the loop body.
+  std::vector<Buffer> store_fragment_buffers_;
+};
+
+class ParallelOp : public TileOperator {
+public:
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ParallelOp, TileOperator,
+                                             ParallelOpNode);
+
+  ParallelOp(const For &root) {
+    auto op = make_object<ParallelOpNode>(root);
+    data_ = std::move(op);
+  }
+};
+
+} // namespace tl
+} // namespace tvm
+
+#endif // TVM_TL_OP_PARALLEL_H_

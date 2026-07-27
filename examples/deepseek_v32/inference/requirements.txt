@@ -1,0 +1,5 @@
+torch
+transformers
+safetensors
+fast_hadamard_transform
+tilelang==0.1.6

@@ -1,0 +1,8 @@
+# Lint requirements
+--requirement requirements-lint.txt
+
+# Common test requirements
+--requirement requirements-test.txt
+
+# Metal specific requirements
+# Currently: none

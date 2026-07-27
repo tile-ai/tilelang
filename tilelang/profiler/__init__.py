@@ -1,0 +1,291 @@
+"""The profiler and convert to torch utils"""
+
+from __future__ import annotations
+from typing import Any, Literal
+from collections.abc import Callable
+from functools import partial
+import torch
+from dataclasses import dataclass
+from tilelang.utils.tensor import (
+    get_tensor_supply,
+    TensorSupplyType,
+    torch_assert_close,
+    is_float8_dtype,
+)
+from tilelang.engine.param import KernelParam
+from tilelang.jit.adapter import BaseKernelAdapter
+from tilelang.profiler.bench import do_bench
+from tvm import tirx
+
+
+@dataclass
+class Profiler:
+    """A profiler class for benchmarking and validating kernel implementations.
+
+    Attributes:
+        params: List of kernel parameters defining the input/output specifications
+        result_idx: Indices indicating which parameters are output tensors
+        supply_type: Type of tensor supply to use (e.g., random, zeros, etc.)
+        adapter: Optional kernel adapter for interfacing with different backends
+    """
+
+    params: list[KernelParam]
+    result_idx: list[int]
+    supply_type: TensorSupplyType
+    adapter: BaseKernelAdapter | None = None
+
+    def __post_init__(self):
+        """Initialize tensor supply after dataclass initialization"""
+        self.result_idx = self._legalize_result_idx(self.result_idx)
+        self.supply = get_tensor_supply(self.supply_type)
+
+    def _legalize_result_idx(self, result_idx: list[int] | None = None) -> list[int]:
+        params = self.params
+        # result_idx is a list of indices of the output tensors
+        if result_idx is None:
+            result_idx = []
+        elif isinstance(result_idx, int):
+            if result_idx > len(params) or result_idx < -len(params):
+                raise ValueError(f"result_idx should be an integer between {-len(params)} and {len(params) - 1}")
+            if result_idx < 0:
+                result_idx = len(params) + result_idx
+            result_idx = [result_idx]
+        elif not isinstance(result_idx, list):
+            raise ValueError("result_idx should be a list of integers")
+
+        return result_idx
+
+    def with_default_adapter(self, adapter: BaseKernelAdapter) -> Profiler:
+        self.adapter = adapter
+        return self
+
+    def _get_inputs(self, with_output=False, dynamic_symbolic_constraints: dict[str, int] | None = None):
+        ins = []
+        for i in range(len(self.params)):
+            if with_output or i not in self.result_idx:
+                param = self.params[i]
+                if dynamic_symbolic_constraints:
+                    param = self._substitute_dynamic_symbols(param, dynamic_symbolic_constraints)
+                ins.append(self.supply(param))
+        return ins
+
+    def _substitute_dynamic_symbols(self, param: KernelParam, constraints: dict[str, int]) -> KernelParam:
+        """Substitute dynamic symbolic variables in param shape with concrete values.
+
+        Args:
+            param: The kernel parameter with potentially dynamic shape
+            constraints: A dict mapping symbolic variable names to concrete int values
+
+        Returns:
+            A new KernelParam with substituted shape
+        """
+        new_shape = []
+        for dim in param.shape:
+            if isinstance(dim, tirx.Var):
+                var_name = dim.name
+                if var_name in constraints:
+                    new_shape.append(constraints[var_name])
+                else:
+                    raise ValueError(
+                        f"Dynamic symbolic variable '{var_name}' not found in constraints. "
+                        f"Available constraints: {list(constraints.keys())}"
+                    )
+            else:
+                new_shape.append(dim)
+        return KernelParam(dtype=param.dtype, shape=new_shape)
+
+    def _get_params(self, with_output=False):
+        params = []
+        for i in range(len(self.params)):
+            if with_output or i not in self.result_idx:
+                params.append(self.params[i])
+        return params
+
+    def assert_allclose(
+        self,
+        reference_program: Callable,
+        input_tensors: list[torch.Tensor] | None = None,
+        atol: float = 1e-2,
+        rtol: float = 1e-2,
+        max_mismatched_ratio=0.01,
+    ):
+        """Validates kernel output against a reference implementation.
+
+        Args:
+            reference_program: Reference implementation to compare against
+            input_tensors: Optional pre-generated input tensors
+            atol: Absolute tolerance for comparison
+            rtol: Relative tolerance for comparison
+            max_mismatched_ratio: Maximum allowed ratio of mismatched elements
+        """
+        ins = self._get_inputs() if input_tensors is None else input_tensors
+        ref_outs = reference_program(*ins)
+        torch.cuda.synchronize()
+        lib_outs = self.func(*ins)
+        torch.cuda.synchronize()
+
+        if isinstance(lib_outs, torch.Tensor):
+            lib_outs = [lib_outs]
+        elif isinstance(lib_outs, tuple):
+            lib_outs = list(lib_outs)
+        elif lib_outs is None:
+            lib_outs = []
+
+        if isinstance(ref_outs, torch.Tensor):
+            ref_outs = [ref_outs]
+        elif isinstance(ref_outs, tuple):
+            ref_outs = list(ref_outs)
+        elif ref_outs is None:
+            ref_outs = []
+
+        # only compare outputs
+        assert len(lib_outs) == len(ref_outs), "len(lib_outs) not equals to len(ref_outs) !"
+        # torch.set_printoptions(edgeitems=torch.inf)
+        for lhs, rhs in zip(lib_outs, ref_outs):
+            # close_mask = torch.isclose(lhs, rhs, rtol=rtol, atol=atol)
+            # total_elements = lhs.numel()
+            # num_not_close = (~close_mask).sum().item()
+            # percentage_not_close = (num_not_close / total_elements) * 100
+            # print(f"{percentage_not_close:.2f}% of the elements are not close.")
+            # print(f"Total elements: {total_elements}, Not close elements: {num_not_close}")
+            if lhs is not None and rhs is not None:
+                # in case of numsplit template, the ref output may be None
+                # which means the value is invalid, so we skip the comparison
+                torch_assert_close(
+                    lhs if not is_float8_dtype(lhs.dtype) else lhs.to(torch.float32),
+                    rhs if not is_float8_dtype(rhs.dtype) else rhs.to(torch.float32),
+                    rtol=rtol,
+                    atol=atol,
+                    max_mismatched_ratio=max_mismatched_ratio,
+                    base_name="tilelang",
+                    ref_name="ref",
+                )
+
+    def manual_assert_close(
+        self,
+        reference_program: Callable,
+        input_tensors: list[torch.Tensor] | None = None,
+        manual_check_prog: Callable = None,
+    ):
+        """Validates kernel output against a reference implementation.
+
+        Args:
+            reference_program: Reference implementation to compare against
+            input_tensors: Optional pre-generated input tensors
+            atol: Absolute tolerance for comparison
+            rtol: Relative tolerance for comparison
+            max_mismatched_ratio: Maximum allowed ratio of mismatched elements
+        """
+        ins = self._get_inputs() if input_tensors is None else input_tensors
+        ref_outs = reference_program(*ins)
+        torch.cuda.synchronize()
+        lib_outs = self.func(*ins)
+        torch.cuda.synchronize()
+
+        if isinstance(lib_outs, torch.Tensor):
+            lib_outs = [lib_outs]
+        if isinstance(ref_outs, torch.Tensor):
+            ref_outs = [ref_outs]
+        elif ref_outs is None:
+            ref_outs = []
+        assert len(lib_outs) == len(ref_outs), f"{len(lib_outs)=} not equals to {len(ref_outs)=} !"
+        torch.set_printoptions(edgeitems=torch.inf)
+        manual_check_prog(lib_outs, ref_outs)
+
+    def assert_consistent(self, repeat=10):
+        """Checks for kernel consistency across multiple runs.
+
+        Args:
+            repeat: Number of times to repeat the consistency check
+        """
+        # Used to check no race condition inside the kernel
+        ins = self._get_inputs()
+        ref_outs = self.func(*ins)
+
+        for _ in range(repeat):
+            lib_outs = self.func(*ins)
+            for lhs, rhs in zip(lib_outs, ref_outs):
+                assert torch.allclose(lhs, rhs), [
+                    "result is not consistent",
+                    lhs,
+                    rhs,
+                ]
+
+    def run_once(self, func: Callable | None = None):
+        ins = self._get_inputs()
+        if not func:
+            func = self.__call__
+        return func(*ins)
+
+    def do_bench(
+        self,
+        func: Callable | None = None,
+        warmup: int = 25,
+        rep: int = 100,
+        n_warmup: int = 0,
+        n_repeat: int = 0,
+        input_tensors: list[torch.Tensor] = None,
+        backend: Literal["event", "cupti", "cudagraph"] = "event",
+        quantiles: list[float] | None = None,
+        return_mode: Literal["min", "max", "mean", "median"] = "mean",
+        dynamic_symbolic_constraints: dict[str, int] | None = None,
+        device: int | torch.device | None = None,
+        early_stop_baseline: float | None = None,
+    ) -> float:
+        """Benchmarks the execution time of a given function.
+
+        Args:
+            func: Function to benchmark (uses adapter if None)
+            warmup: Warmup time in milliseconds
+            rep: Number of repetitions for timing
+            n_warmup: Number of warmup iterations
+            n_repeat: Number of timing iterations
+            backend: Which profiling backend to use - "event", "cupti", or "cudagraph"
+            input_tensors: Optional pre-generated input tensors
+            dynamic_symbolic_constraints: Optional dict mapping dynamic symbolic variable
+                names to concrete int values. Use this when benchmarking kernels with
+                dynamic shapes, e.g., {"m": 2048, "n": 1024}
+            device: Optional CUDA device to benchmark on.
+
+        Returns:
+            float: Average execution time in milliseconds
+        """
+
+        def run_bench():
+            if func is None:
+                assert self.adapter is not None, "benchmarking function should be provided"
+                bench_target = self.adapter
+            else:
+                bench_target = func
+            if input_tensors is not None:
+                ins = input_tensors
+            elif dynamic_symbolic_constraints is not None:
+                ins = self._get_inputs(dynamic_symbolic_constraints=dynamic_symbolic_constraints)
+            else:
+                ins = self._get_inputs()
+            bench_func = partial(bench_target, *ins)
+            return do_bench(
+                bench_func,
+                warmup=warmup,
+                rep=rep,
+                _n_warmup=n_warmup,
+                _n_repeat=n_repeat,
+                quantiles=quantiles,
+                backend=backend,
+                return_mode=return_mode,
+                device=device,
+                early_stop_baseline=early_stop_baseline,
+            )
+
+        if device is None:
+            return run_bench()
+        with torch.cuda.device(device):
+            return run_bench()
+
+    @property
+    def func(self):
+        assert self.adapter is not None, "adapter should be provided"
+        return self.adapter
+
+    def __call__(self, *args: Any, **kwds: Any) -> Any:
+        return self.func(*args, **kwds)

@@ -1,0 +1,593 @@
+#pragma once
+
+#include "common.h"
+#include <cuda_fp8.h>
+#include <cute/numeric/numeric_types.hpp>
+
+using fp8_e4_t = tl::float_e4m3_t;
+using fp8_e5_t = tl::float_e5m2_t;
+
+// __nv_fp8_e8m0 is only available in CUDA 12.8+
+#if __CUDACC_VER_MAJOR__ > 12 ||                                               \
+    (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 8)
+using fp8_e8_t = __nv_fp8_e8m0;
+#define TL_HAS_FP8_E8M0 1
+#else
+// Placeholder for CUDA < 12.8
+struct fp8_e8_t {
+  unsigned char data;
+};
+#define TL_HAS_FP8_E8M0 0
+#endif
+
+struct __CUDA_ALIGN__(2) fp8_e4_2_t {
+  fp8_e4_t x;
+  fp8_e4_t y;
+};
+
+struct __CUDA_ALIGN__(4) fp8_e4_4_t {
+  fp8_e4_t x;
+  fp8_e4_t y;
+  fp8_e4_t z;
+  fp8_e4_t w;
+};
+
+struct __CUDA_ALIGN__(8) fp8_e4_8_t {
+  fp8_e4_4_t x;
+  fp8_e4_4_t y;
+};
+
+struct __CUDA_ALIGN__(16) fp8_e4_16_t {
+  fp8_e4_8_t x;
+  fp8_e4_8_t y;
+};
+
+struct __CUDA_ALIGN__(32) fp8_e4_32_t {
+  fp8_e4_16_t x;
+  fp8_e4_16_t y;
+
+  TL_DEVICE fp8_e4_32_t &operator=(const ulonglong4 &rhs) {
+    x.x = *(fp8_e4_8_t *)&rhs.x;
+    x.y = *(fp8_e4_8_t *)&rhs.y;
+    y.x = *(fp8_e4_8_t *)&rhs.z;
+    y.y = *(fp8_e4_8_t *)&rhs.w;
+    return *this;
+  }
+};
+
+struct __CUDA_ALIGN__(2) fp8_e5_2_t {
+  fp8_e5_t x;
+  fp8_e5_t y;
+};
+
+struct __CUDA_ALIGN__(4) fp8_e5_4_t {
+  fp8_e5_t x;
+  fp8_e5_t y;
+  fp8_e5_t z;
+  fp8_e5_t w;
+};
+
+struct __CUDA_ALIGN__(8) fp8_e5_8_t {
+  fp8_e5_4_t x;
+  fp8_e5_4_t y;
+};
+
+struct __CUDA_ALIGN__(16) fp8_e5_16_t {
+  fp8_e5_8_t x;
+  fp8_e5_8_t y;
+};
+
+struct __CUDA_ALIGN__(32) fp8_e5_32_t {
+  fp8_e5_16_t x;
+  fp8_e5_16_t y;
+
+  TL_DEVICE fp8_e5_32_t &operator=(const ulonglong4 &rhs) {
+    x.x = *(fp8_e5_8_t *)&rhs.x;
+    x.y = *(fp8_e5_8_t *)&rhs.y;
+    y.x = *(fp8_e5_8_t *)&rhs.z;
+    y.y = *(fp8_e5_8_t *)&rhs.w;
+    return *this;
+  }
+};
+
+struct __CUDA_ALIGN__(2) fp8_e8_2_t {
+  fp8_e8_t x;
+  fp8_e8_t y;
+};
+
+struct __CUDA_ALIGN__(4) fp8_e8_4_t {
+  fp8_e8_t x;
+  fp8_e8_t y;
+  fp8_e8_t z;
+  fp8_e8_t w;
+};
+
+struct __CUDA_ALIGN__(8) fp8_e8_8_t {
+  fp8_e8_4_t x;
+  fp8_e8_4_t y;
+};
+
+struct __CUDA_ALIGN__(16) fp8_e8_16_t {
+  fp8_e8_8_t x;
+  fp8_e8_8_t y;
+};
+
+struct __CUDA_ALIGN__(32) fp8_e8_32_t {
+  fp8_e8_16_t x;
+  fp8_e8_16_t y;
+
+  TL_DEVICE fp8_e8_32_t &operator=(const ulonglong4 &rhs) {
+    x.x = *(fp8_e8_8_t *)&rhs.x;
+    x.y = *(fp8_e8_8_t *)&rhs.y;
+    y.x = *(fp8_e8_8_t *)&rhs.z;
+    y.y = *(fp8_e8_8_t *)&rhs.w;
+    return *this;
+  }
+};
+
+// Pack two fp8_e4_t values.
+TL_DEVICE fp8_e4_2_t make_fp8_e4_2_t(fp8_e4_t x, fp8_e4_t y) {
+  fp8_e4_2_t result;
+  result.x = x;
+  result.y = y;
+  return result;
+}
+
+// Pack four fp8_e4_t values.
+TL_DEVICE fp8_e4_4_t make_fp8_e4_4_t(fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2,
+                                     fp8_e4_t x3) {
+  fp8_e4_4_t result;
+  result.x = x0;
+  result.y = x1;
+  result.z = x2;
+  result.w = x3;
+  return result;
+}
+
+// Pack eight fp8_e4_t values.
+TL_DEVICE fp8_e4_8_t make_fp8_e4_8_t(fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2,
+                                     fp8_e4_t x3, fp8_e4_t x4, fp8_e4_t x5,
+                                     fp8_e4_t x6, fp8_e4_t x7) {
+  fp8_e4_8_t result;
+  result.x = make_fp8_e4_4_t(x0, x1, x2, x3);
+  result.y = make_fp8_e4_4_t(x4, x5, x6, x7);
+  return result;
+}
+
+// Pack sixteen fp8_e4_t values.
+TL_DEVICE fp8_e4_16_t make_fp8_e4_16_t(fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2,
+                                       fp8_e4_t x3, fp8_e4_t x4, fp8_e4_t x5,
+                                       fp8_e4_t x6, fp8_e4_t x7, fp8_e4_t y0,
+                                       fp8_e4_t y1, fp8_e4_t y2, fp8_e4_t y3,
+                                       fp8_e4_t y4, fp8_e4_t y5, fp8_e4_t y6,
+                                       fp8_e4_t y7) {
+  fp8_e4_16_t result;
+  result.x = make_fp8_e4_8_t(x0, x1, x2, x3, x4, x5, x6, x7);
+  result.y = make_fp8_e4_8_t(y0, y1, y2, y3, y4, y5, y6, y7);
+  return result;
+}
+
+// Pack thirty-two fp8_e4_t values.
+TL_DEVICE fp8_e4_32_t make_fp8_e4_32_t(
+    fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2, fp8_e4_t x3, fp8_e4_t x4,
+    fp8_e4_t x5, fp8_e4_t x6, fp8_e4_t x7, fp8_e4_t x8, fp8_e4_t x9,
+    fp8_e4_t x10, fp8_e4_t x11, fp8_e4_t x12, fp8_e4_t x13, fp8_e4_t x14,
+    fp8_e4_t x15, fp8_e4_t y0, fp8_e4_t y1, fp8_e4_t y2, fp8_e4_t y3,
+    fp8_e4_t y4, fp8_e4_t y5, fp8_e4_t y6, fp8_e4_t y7, fp8_e4_t y8,
+    fp8_e4_t y9, fp8_e4_t y10, fp8_e4_t y11, fp8_e4_t y12, fp8_e4_t y13,
+    fp8_e4_t y14, fp8_e4_t y15) {
+  fp8_e4_32_t result;
+  result.x = make_fp8_e4_16_t(x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11,
+                              x12, x13, x14, x15);
+  result.y = make_fp8_e4_16_t(y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11,
+                              y12, y13, y14, y15);
+  return result;
+}
+
+// Pack two fp8_e5_t values.
+TL_DEVICE fp8_e5_2_t make_fp8_e5_2_t(fp8_e5_t x, fp8_e5_t y) {
+  fp8_e5_2_t result;
+  result.x = x;
+  result.y = y;
+  return result;
+}
+
+// Pack four fp8_e5_t values.
+TL_DEVICE fp8_e5_4_t make_fp8_e5_4_t(fp8_e5_t x0, fp8_e5_t x1, fp8_e5_t x2,
+                                     fp8_e5_t x3) {
+  fp8_e5_4_t result;
+  result.x = x0;
+  result.y = x1;
+  result.z = x2;
+  result.w = x3;
+  return result;
+}
+
+// Pack eight fp8_e5_t values.
+TL_DEVICE fp8_e5_8_t make_fp8_e5_8_t(fp8_e5_t x0, fp8_e5_t x1, fp8_e5_t x2,
+                                     fp8_e5_t x3, fp8_e5_t x4, fp8_e5_t x5,
+                                     fp8_e5_t x6, fp8_e5_t x7) {
+  fp8_e5_8_t result;
+  result.x = make_fp8_e5_4_t(x0, x1, x2, x3);
+  result.y = make_fp8_e5_4_t(x4, x5, x6, x7);
+  return result;
+}
+
+// Pack sixteen fp8_e5_t values.
+TL_DEVICE fp8_e5_16_t make_fp8_e5_16_t(fp8_e5_t x0, fp8_e5_t x1, fp8_e5_t x2,
+                                       fp8_e5_t x3, fp8_e5_t x4, fp8_e5_t x5,
+                                       fp8_e5_t x6, fp8_e5_t x7, fp8_e5_t y0,
+                                       fp8_e5_t y1, fp8_e5_t y2, fp8_e5_t y3,
+                                       fp8_e5_t y4, fp8_e5_t y5, fp8_e5_t y6,
+                                       fp8_e5_t y7) {
+  fp8_e5_16_t result;
+  result.x = make_fp8_e5_8_t(x0, x1, x2, x3, x4, x5, x6, x7);
+  result.y = make_fp8_e5_8_t(y0, y1, y2, y3, y4, y5, y6, y7);
+  return result;
+}
+
+// Pack thirty-two fp8_e5_t values.
+TL_DEVICE fp8_e5_32_t make_fp8_e5_32_t(
+    fp8_e5_t x0, fp8_e5_t x1, fp8_e5_t x2, fp8_e5_t x3, fp8_e5_t x4,
+    fp8_e5_t x5, fp8_e5_t x6, fp8_e5_t x7, fp8_e5_t x8, fp8_e5_t x9,
+    fp8_e5_t x10, fp8_e5_t x11, fp8_e5_t x12, fp8_e5_t x13, fp8_e5_t x14,
+    fp8_e5_t x15, fp8_e5_t y0, fp8_e5_t y1, fp8_e5_t y2, fp8_e5_t y3,
+    fp8_e5_t y4, fp8_e5_t y5, fp8_e5_t y6, fp8_e5_t y7, fp8_e5_t y8,
+    fp8_e5_t y9, fp8_e5_t y10, fp8_e5_t y11, fp8_e5_t y12, fp8_e5_t y13,
+    fp8_e5_t y14, fp8_e5_t y15) {
+  fp8_e5_32_t result;
+  result.x = make_fp8_e5_16_t(x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11,
+                              x12, x13, x14, x15);
+  result.y = make_fp8_e5_16_t(y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11,
+                              y12, y13, y14, y15);
+  return result;
+}
+
+// Pack two fp8_e8_t values.
+TL_DEVICE fp8_e8_2_t make_fp8_e8_2_t(fp8_e8_t x, fp8_e8_t y) {
+  fp8_e8_2_t result;
+  result.x = x;
+  result.y = y;
+  return result;
+}
+
+// Pack four fp8_e8_t values.
+TL_DEVICE fp8_e8_4_t make_fp8_e8_4_t(fp8_e8_t x0, fp8_e8_t x1, fp8_e8_t x2,
+                                     fp8_e8_t x3) {
+  fp8_e8_4_t result;
+  result.x = x0;
+  result.y = x1;
+  result.z = x2;
+  result.w = x3;
+  return result;
+}
+
+// Pack eight fp8_e8_t values.
+TL_DEVICE fp8_e8_8_t make_fp8_e8_8_t(fp8_e8_t x0, fp8_e8_t x1, fp8_e8_t x2,
+                                     fp8_e8_t x3, fp8_e8_t x4, fp8_e8_t x5,
+                                     fp8_e8_t x6, fp8_e8_t x7) {
+  fp8_e8_8_t result;
+  result.x = make_fp8_e8_4_t(x0, x1, x2, x3);
+  result.y = make_fp8_e8_4_t(x4, x5, x6, x7);
+  return result;
+}
+
+// Pack sixteen fp8_e8_t values.
+TL_DEVICE fp8_e8_16_t make_fp8_e8_16_t(fp8_e8_t x0, fp8_e8_t x1, fp8_e8_t x2,
+                                       fp8_e8_t x3, fp8_e8_t x4, fp8_e8_t x5,
+                                       fp8_e8_t x6, fp8_e8_t x7, fp8_e8_t y0,
+                                       fp8_e8_t y1, fp8_e8_t y2, fp8_e8_t y3,
+                                       fp8_e8_t y4, fp8_e8_t y5, fp8_e8_t y6,
+                                       fp8_e8_t y7) {
+  fp8_e8_16_t result;
+  result.x = make_fp8_e8_8_t(x0, x1, x2, x3, x4, x5, x6, x7);
+  result.y = make_fp8_e8_8_t(y0, y1, y2, y3, y4, y5, y6, y7);
+  return result;
+}
+
+// Pack thirty-two fp8_e8_t values.
+TL_DEVICE fp8_e8_32_t make_fp8_e8_32_t(
+    fp8_e8_t x0, fp8_e8_t x1, fp8_e8_t x2, fp8_e8_t x3, fp8_e8_t x4,
+    fp8_e8_t x5, fp8_e8_t x6, fp8_e8_t x7, fp8_e8_t x8, fp8_e8_t x9,
+    fp8_e8_t x10, fp8_e8_t x11, fp8_e8_t x12, fp8_e8_t x13, fp8_e8_t x14,
+    fp8_e8_t x15, fp8_e8_t y0, fp8_e8_t y1, fp8_e8_t y2, fp8_e8_t y3,
+    fp8_e8_t y4, fp8_e8_t y5, fp8_e8_t y6, fp8_e8_t y7, fp8_e8_t y8,
+    fp8_e8_t y9, fp8_e8_t y10, fp8_e8_t y11, fp8_e8_t y12, fp8_e8_t y13,
+    fp8_e8_t y14, fp8_e8_t y15) {
+  fp8_e8_32_t result;
+  result.x = make_fp8_e8_16_t(x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11,
+                              x12, x13, x14, x15);
+  result.y = make_fp8_e8_16_t(y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11,
+                              y12, y13, y14, y15);
+  return result;
+}
+
+// e4m3x2 -> float2
+TL_DEVICE float2
+__tl_cvt_fp8x2_to_float2(const __nv_fp8x2_storage_t x,
+                         const __nv_fp8_interpretation_t fp8_interpretation) {
+  half2 tmp = __nv_cvt_fp8x2_to_halfraw2(x, fp8_interpretation);
+  float2 result;
+  result.x = (float)tmp.x;
+  result.y = (float)tmp.y;
+  return result;
+}
+
+// e4m3x2 -> half2
+TL_DEVICE half2
+__tl_cvt_fp8x2_to_half2(const __nv_fp8x2_storage_t x,
+                        const __nv_fp8_interpretation_t fp8_interpretation) {
+  __half2_raw raw = __nv_cvt_fp8x2_to_halfraw2(x, fp8_interpretation);
+  return *reinterpret_cast<half2 *>(&raw);
+}
+
+// half2 -> e4m3x2
+TL_DEVICE __nv_fp8x2_storage_t __tl_cvt_half2_to_fp8x2(
+    const half2 src, const __nv_fp8_interpretation_t fp8_interpretation) {
+  __half2_raw raw = *reinterpret_cast<const __half2_raw *>(&src);
+  return __nv_cvt_halfraw2_to_fp8x2(raw, __NV_SATFINITE, fp8_interpretation);
+}
+
+// Scalar fp8 -> half (native CUDA intrinsic; single cvt on supported HW).
+TL_DEVICE half
+__tl_cvt_fp8_to_half(const __nv_fp8_storage_t x,
+                     const __nv_fp8_interpretation_t fp8_interpretation) {
+  __half_raw raw = __nv_cvt_fp8_to_halfraw(x, fp8_interpretation);
+  return *reinterpret_cast<half *>(&raw);
+}
+
+// Scalar half -> fp8 (native CUDA intrinsic; single cvt on supported HW).
+TL_DEVICE __nv_fp8_storage_t __tl_cvt_half_to_fp8(
+    const half src, const __nv_fp8_interpretation_t fp8_interpretation) {
+  __half_raw raw = *reinterpret_cast<const __half_raw *>(&src);
+  return __nv_cvt_halfraw_to_fp8(raw, __NV_SATFINITE, fp8_interpretation);
+}
+
+// Scalar bfloat16 -> fp8 (native CUDA intrinsic; single cvt on supported HW).
+TL_DEVICE __nv_fp8_storage_t
+__tl_cvt_bfloat16_to_fp8(const __nv_bfloat16 src,
+                         const __nv_fp8_interpretation_t fp8_interpretation) {
+  __nv_bfloat16_raw raw = *reinterpret_cast<const __nv_bfloat16_raw *>(&src);
+  return __nv_cvt_bfloat16raw_to_fp8(raw, __NV_SATFINITE, fp8_interpretation);
+}
+
+// Scalar fp8 -> bfloat16. No CUDA intrinsic exists, so go fp8 -> half ->
+// bf16. The cvt.bf16.f16 step is exact: fp8's 3 mantissa bits fit in bf16's 7.
+// cvt.bf16.f16 needs sm_90+; older archs detour through float.
+TL_DEVICE __nv_bfloat16
+__tl_cvt_fp8_to_bfloat16(const __nv_fp8_storage_t x,
+                         const __nv_fp8_interpretation_t fp8_interpretation) {
+  __half_raw hr = __nv_cvt_fp8_to_halfraw(x, fp8_interpretation);
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  __nv_bfloat16_raw br;
+  asm("cvt.rn.bf16.f16 %0, %1;" : "=h"(br.x) : "h"(hr.x));
+  return *reinterpret_cast<__nv_bfloat16 *>(&br);
+#else
+  return __float2bfloat16(__half2float(*reinterpret_cast<half *>(&hr)));
+#endif
+}
+
+// e4m3x2 -> bfloat162
+// The native PTX cvt (cvt.rn.bf16x2.e4m3x2) needs PTX ISA 9.2 (CUDA 13.2+) and
+// an SM100-family target. Otherwise go fp8 -> half2, then cvt.bf16.f16 (exact,
+// sm_90+), and on older archs through float.
+TL_DEVICE __nv_bfloat162
+__tl_cvt_e4m3x2_to_bfloat162(const __nv_fp8x2_storage_t x) {
+#if (__CUDACC_VER_MAJOR__ > 13 ||                                              \
+     (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 2)) &&             \
+    defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  unsigned int packed;
+  asm("cvt.rn.bf16x2.e4m3x2 %0, %1;" : "=r"(packed) : "h"(x));
+  return *reinterpret_cast<__nv_bfloat162 *>(&packed);
+#elif defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  // fp8 -> half2, then two exact cvt.bf16.f16 (no fp32 detour).
+  __half2_raw h = __nv_cvt_fp8x2_to_halfraw2(x, __NV_E4M3);
+  __nv_bfloat162_raw b;
+  asm("cvt.rn.bf16.f16 %0, %1;" : "=h"(b.x) : "h"(h.x));
+  asm("cvt.rn.bf16.f16 %0, %1;" : "=h"(b.y) : "h"(h.y));
+  return *reinterpret_cast<__nv_bfloat162 *>(&b);
+#else
+  half2 tmp = __nv_cvt_fp8x2_to_halfraw2(x, __NV_E4M3);
+  return __float22bfloat162_rn(make_float2((float)tmp.x, (float)tmp.y));
+#endif
+}
+
+// e5m2x2 -> bfloat162
+TL_DEVICE __nv_bfloat162
+__tl_cvt_e5m2x2_to_bfloat162(const __nv_fp8x2_storage_t x) {
+#if (__CUDACC_VER_MAJOR__ > 13 ||                                              \
+     (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 2)) &&             \
+    defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  unsigned int packed;
+  asm("cvt.rn.bf16x2.e5m2x2 %0, %1;" : "=r"(packed) : "h"(x));
+  return *reinterpret_cast<__nv_bfloat162 *>(&packed);
+#elif defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  // fp8 -> half2, then two exact cvt.bf16.f16 (no fp32 detour).
+  __half2_raw h = __nv_cvt_fp8x2_to_halfraw2(x, __NV_E5M2);
+  __nv_bfloat162_raw b;
+  asm("cvt.rn.bf16.f16 %0, %1;" : "=h"(b.x) : "h"(h.x));
+  asm("cvt.rn.bf16.f16 %0, %1;" : "=h"(b.y) : "h"(h.y));
+  return *reinterpret_cast<__nv_bfloat162 *>(&b);
+#else
+  half2 tmp = __nv_cvt_fp8x2_to_halfraw2(x, __NV_E5M2);
+  return __float22bfloat162_rn(make_float2((float)tmp.x, (float)tmp.y));
+#endif
+}
+
+// bfloat162 -> e4m3x2
+TL_DEVICE __nv_fp8x2_storage_t __tl_cvt_bfloat162_to_fp8x2(
+    const __nv_bfloat162 src,
+    const __nv_fp8_interpretation_t fp8_interpretation) {
+  __nv_bfloat162_raw raw = *reinterpret_cast<const __nv_bfloat162_raw *>(&src);
+  return __nv_cvt_bfloat16raw2_to_fp8x2(raw, __NV_SATFINITE,
+                                        fp8_interpretation);
+}
+
+// ============================================================================
+// Inline PTX FP8 Conversions with Stochastic Rounding
+// ============================================================================
+//
+// PTX ISA: cvt.rs.satfinite.f8x4type.f32 d, {a, b, e, f}, rbits
+//   Output layout: d[31:24]=a, d[23:16]=b, d[15:8]=e, d[7:0]=f
+//   To get little-endian byte order (byte0=elem0), pass elements in reverse.
+
+// --- float4 -> e4m3x4 stochastic rounding ---
+
+// Full 4-element version (float4 input)
+template <bool kDependentFalse = false>
+TL_DEVICE __nv_fp8x4_storage_t
+__tl_cvt_f32x4_to_e4m3x4_rs_sat(float4 src, unsigned int rbits) {
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL) || defined(__CUDA_ARCH_FEAT_SM103_ALL)
+  __nv_fp8x4_storage_t result;
+  asm("cvt.rs.satfinite.e4m3x4.f32 %0, {%1, %2, %3, %4}, %5;"
+      : "=r"(result)
+      : "f"(src.w), "f"(src.z), "f"(src.y), "f"(src.x), "r"(rbits));
+  return result;
+#else
+  static_assert(kDependentFalse,
+                "Stochastic rounding f32-to-FP8 requires sm_100a or sm_103a");
+  return {};
+#endif
+}
+
+// 1-element version: pass src as f (lowest position), returns byte0
+template <bool kDependentFalse = false>
+TL_DEVICE __nv_fp8_storage_t
+__tl_cvt_f32x1_to_e4m3x1_rs_sat(float src, unsigned int rbits) {
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL) || defined(__CUDA_ARCH_FEAT_SM103_ALL)
+  __nv_fp8x4_storage_t tmp;
+  asm("cvt.rs.satfinite.e4m3x4.f32 %0, {%1, %2, %3, %4}, %5;"
+      : "=r"(tmp)
+      : "f"(0.0f), "f"(0.0f), "f"(0.0f), "f"(src), "r"(rbits));
+  return static_cast<__nv_fp8_storage_t>(tmp & 0xFF);
+#else
+  static_assert(kDependentFalse,
+                "Stochastic rounding f32-to-FP8 requires sm_100a or sm_103a");
+  return {};
+#endif
+}
+
+// 2-element version: pass src.x as f, src.y as e, returns lower 2 bytes
+template <bool kDependentFalse = false>
+TL_DEVICE __nv_fp8x2_storage_t
+__tl_cvt_f32x2_to_e4m3x2_rs_sat(float2 src, unsigned int rbits) {
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL) || defined(__CUDA_ARCH_FEAT_SM103_ALL)
+  __nv_fp8x4_storage_t tmp;
+  asm("cvt.rs.satfinite.e4m3x4.f32 %0, {%1, %2, %3, %4}, %5;"
+      : "=r"(tmp)
+      : "f"(0.0f), "f"(0.0f), "f"(src.y), "f"(src.x), "r"(rbits));
+  return static_cast<__nv_fp8x2_storage_t>(tmp & 0xFFFF);
+#else
+  static_assert(kDependentFalse,
+                "Stochastic rounding f32-to-FP8 requires sm_100a or sm_103a");
+  return {};
+#endif
+}
+
+// --- float4 -> e5m2x4 stochastic rounding ---
+
+// Full 4-element version (float4 input)
+template <bool kDependentFalse = false>
+TL_DEVICE __nv_fp8x4_storage_t
+__tl_cvt_f32x4_to_e5m2x4_rs_sat(float4 src, unsigned int rbits) {
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL) || defined(__CUDA_ARCH_FEAT_SM103_ALL)
+  __nv_fp8x4_storage_t result;
+  asm("cvt.rs.satfinite.e5m2x4.f32 %0, {%1, %2, %3, %4}, %5;"
+      : "=r"(result)
+      : "f"(src.w), "f"(src.z), "f"(src.y), "f"(src.x), "r"(rbits));
+  return result;
+#else
+  static_assert(kDependentFalse,
+                "Stochastic rounding f32-to-FP8 requires sm_100a or sm_103a");
+  return {};
+#endif
+}
+
+// 1-element version: pass src as f (lowest position), returns byte0
+template <bool kDependentFalse = false>
+TL_DEVICE __nv_fp8_storage_t
+__tl_cvt_f32x1_to_e5m2x1_rs_sat(float src, unsigned int rbits) {
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL) || defined(__CUDA_ARCH_FEAT_SM103_ALL)
+  __nv_fp8x4_storage_t tmp;
+  asm("cvt.rs.satfinite.e5m2x4.f32 %0, {%1, %2, %3, %4}, %5;"
+      : "=r"(tmp)
+      : "f"(0.0f), "f"(0.0f), "f"(0.0f), "f"(src), "r"(rbits));
+  return static_cast<__nv_fp8_storage_t>(tmp & 0xFF);
+#else
+  static_assert(kDependentFalse,
+                "Stochastic rounding f32-to-FP8 requires sm_100a or sm_103a");
+  return {};
+#endif
+}
+
+// 2-element version: pass src.x as f, src.y as e, returns lower 2 bytes
+template <bool kDependentFalse = false>
+TL_DEVICE __nv_fp8x2_storage_t
+__tl_cvt_f32x2_to_e5m2x2_rs_sat(float2 src, unsigned int rbits) {
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL) || defined(__CUDA_ARCH_FEAT_SM103_ALL)
+  __nv_fp8x4_storage_t tmp;
+  asm("cvt.rs.satfinite.e5m2x4.f32 %0, {%1, %2, %3, %4}, %5;"
+      : "=r"(tmp)
+      : "f"(0.0f), "f"(0.0f), "f"(src.y), "f"(src.x), "r"(rbits));
+  return static_cast<__nv_fp8x2_storage_t>(tmp & 0xFFFF);
+#else
+  static_assert(kDependentFalse,
+                "Stochastic rounding f32-to-FP8 requires sm_100a or sm_103a");
+  return {};
+#endif
+}
+
+// ============================================================================
+// FP8 E8M0 Related Conversions
+// ============================================================================
+#if TL_HAS_FP8_E8M0
+
+// fp8_e8m0 -> bfloat16
+TL_DEVICE __nv_bfloat16
+__tl_cvt_e8m0_to_bfloat16(const __nv_fp8_storage_t src) {
+  __nv_bfloat16_raw raw = __nv_cvt_e8m0_to_bf16raw(src);
+  return *reinterpret_cast<const __nv_bfloat16 *>(&raw);
+}
+
+// fp8_e8m0x2 -> bfloat16x2
+TL_DEVICE __nv_bfloat162
+__tl_cvt_e8m0x2_to_bfloat162(const __nv_fp8x2_storage_t src) {
+  __nv_bfloat162_raw raw = __nv_cvt_e8m0x2_to_bf162raw(src);
+  return *reinterpret_cast<const __nv_bfloat162 *>(&raw);
+}
+
+// bfloat16 -> fp8_e8m0
+TL_DEVICE
+__nv_fp8_storage_t __tl_cvt_bfloat16_to_e8m0(const __nv_bfloat16 src) {
+  __nv_bfloat16_raw raw = *reinterpret_cast<const __nv_bfloat16_raw *>(&src);
+  return __nv_cvt_bfloat16raw_to_e8m0(raw, __NV_SATFINITE, cudaRoundPosInf);
+}
+
+// bfloat162 -> fp8_e8m0x2
+TL_DEVICE __nv_fp8x2_storage_t
+__tl_cvt_bfloat162_to_e8m0x2(const __nv_bfloat162 src) {
+  __nv_bfloat162_raw raw = *reinterpret_cast<const __nv_bfloat162_raw *>(&src);
+  return __nv_cvt_bfloat162raw_to_e8m0x2(raw, __NV_SATFINITE, cudaRoundPosInf);
+}
+
+// float -> fp8_e8m0
+TL_DEVICE __nv_fp8_storage_t __tl_cvt_float_to_e8m0(const float src) {
+  return __nv_cvt_float_to_e8m0(src, __NV_SATFINITE, cudaRoundPosInf);
+}
+
+// float2 -> fp8_e8m0x2
+TL_DEVICE __nv_fp8x2_storage_t __tl_cvt_float2_to_e8m0x2(const float2 src) {
+  return __nv_cvt_float2_to_e8m0x2(src, __NV_SATFINITE, cudaRoundPosInf);
+}
+
+// double -> fp8_e8m0
+TL_DEVICE __nv_fp8_storage_t __tl_cvt_double_to_e8m0(const double src) {
+  return __nv_cvt_double_to_e8m0(src, __NV_SATFINITE, cudaRoundPosInf);
+}
+
+// double2 -> fp8_e8m0x2
+TL_DEVICE __nv_fp8x2_storage_t __tl_cvt_double2_to_e8m0x2(const double2 src) {
+  return __nv_cvt_double2_to_e8m0x2(src, __NV_SATFINITE, cudaRoundPosInf);
+}
+
+#endif

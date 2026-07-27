@@ -1,0 +1,411 @@
+name: Dist
+on:
+  workflow_dispatch:
+  schedule:
+    # gemini said this is 6:00 china time
+    - cron: "0 22 * * *"
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    paths:
+      - setup.py
+      - setup.cfg
+      - pyproject.toml
+      - MANIFEST.in
+      - CMakeLists.txt
+      - VERSION
+      - version_provider.py
+      - .github/workflows/dist.yml
+      # Type aliases can affect package import/build behavior.
+      - tilelang/_typing.py
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  PYTHONDEVMODE: "1"
+  PYTHONUNBUFFERED: "1"
+  COLUMNS: "100"
+  FORCE_COLOR: "1"
+  CLICOLOR_FORCE: "1"
+  UV_INDEX_STRATEGY: "unsafe-best-match"
+  UV_HTTP_TIMEOUT: "600"
+  XDG_CACHE_HOME: "${{ github.workspace }}/.cache" # to be updated
+  PIP_CACHE_DIR: "${{ github.workspace }}/.cache/pip" # to be updated
+  UV_CACHE_DIR: "${{ github.workspace }}/.cache/uv" # to be updated
+
+jobs:
+  build-sdist:
+    name: Build SDist
+    if: |
+      github.repository_owner == 'tile-ai' &&
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      # `NO_VERSION_LABEL=ON` disables embedding the toolchain / git commit hash in version metadata.
+      # Otherwise, the version of the SDist has a git hash suffix (e.g., 0.1.0+gitabcdef12),
+      # but the package built from the SDist has no way to get the git hash (it is not a git repo),
+      # leading to inconsistent versions between SDist and built packages (+gitabcdef12 vs. +gitunknown).
+      NO_VERSION_LABEL: 'ON'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Setup Python and uv with caching
+        id: setup-uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          activate-environment: true
+
+      - name: Build SDist
+        run: |
+          uv run --no-project --with=build -m -- build --sdist --outdir=dist
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          max-size: "200MB"
+          create-symlink: ${{ runner.os != 'Windows' }}
+          evict-old-files: "7d"
+          append-timestamp: false
+          key: sdist-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.cc') }}
+          restore-keys: |
+            sdist-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.cc') }}
+            sdist-${{ runner.os }}-${{ runner.arch }}
+            ${{ runner.os }}-${{ runner.arch }}
+
+      - name: Test SDist buildable
+        run: |
+          TEMP_DIR="$(mktemp -d -t tilelang-sdist-test)"
+          cp -r dist "${TEMP_DIR}/dist"
+          cd "${TEMP_DIR}"
+          env -u NO_VERSION_LABEL uv pip install -v dist/*.tar.gz
+          env -u NO_VERSION_LABEL python3 -c "import tilelang; print(tilelang.__version__)"
+
+      - name: Upload SDist
+        # Not PR to save artifact storage, as SDist is only needed for releases.
+        if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
+        uses: actions/upload-artifact@v7
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build-wheels:
+    name: Build wheels for Python ${{ matrix.target.python_version }} on ${{ matrix.target.runner }} with ${{ matrix.target.toolkit }}
+    if: |
+      github.repository_owner == 'tile-ai' &&
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    strategy:
+      matrix:
+        target:
+          # Build wheels for the minimum supported Python ABI.
+          - { runner: ubuntu-latest, toolkit: "CUDA-13.0", test_backends: "cu130", python_version: "3.10" }
+          - { runner: ubuntu-24.04-arm, toolkit: "CUDA-13.0", test_backends: "cu130", python_version: "3.10" }
+          - { runner: windows-latest, toolkit: "CUDA-13.0", test_backends: "cu130", python_version: "3.10" }
+          - { runner: macos-latest, toolkit: "Metal", python_version: "3.10" }
+          # - "3.14t"  # let user to build from source for now
+          # TODO: Add cp315-abi3.abi3t after PEP 803
+      fail-fast: false
+    timeout-minutes: 120
+    runs-on: ${{ matrix.target.runner }}
+    env:
+      IS_RELEASE: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]') }}
+      NO_VERSION_LABEL: "OFF"
+
+    steps:
+      - name: Enable git long paths
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: git config --global core.longpaths true
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          max-size: "200MB"
+          create-symlink: ${{ runner.os != 'Windows' }}
+          evict-old-files: "7d"
+          append-timestamp: false
+          key: wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.python_version }}-${{ hashFiles('**/*.cc') }}
+          restore-keys: |
+            wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.python_version }}-${{ hashFiles('**/*.cc') }}
+            wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.python_version }}
+            wheel-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Set CIBW_BUILD
+        if: runner.os != 'Windows'
+        run: |
+          PYTHON_VERSION="${{ matrix.target.python_version }}"
+          PYTHON_VERSION_MAJMIN="$(echo "${PYTHON_VERSION}" | cut -d '.' -f-2)"
+          PYTHON_VERSION_MAJMIN_NODOT="${PYTHON_VERSION_MAJMIN//./}"
+          echo "CIBW_BUILD=cp${PYTHON_VERSION_MAJMIN_NODOT}-*" | tee -a "${GITHUB_ENV}"
+
+          if [[ "${{ matrix.target.toolkit }}" == *"CUDA"* ]]; then
+            CUDA_VERSION="${{ matrix.target.toolkit }}"
+            CUDA_VERSION="${CUDA_VERSION##*-}"
+            CUDA_VERSION_MAJMIN="$(echo ${CUDA_VERSION} | cut -d '.' -f-2)"
+            CUDA_VERSION_MAJMIN_NODOT="${CUDA_VERSION_MAJMIN//./}"
+            echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"
+            echo "UV_TORCH_BACKEND=cu${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
+          fi
+
+          if [[ "${{ env.IS_RELEASE }}" == "true" ]]; then
+            echo "NO_VERSION_LABEL=ON" | tee -a "${GITHUB_ENV}"
+          fi
+
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            HOST_CCACHE_DIR="$(ccache --get-config cache_dir)"
+            echo "CIBW_BEFORE_BUILD_LINUX=dnf install -y ccache && ccache -o cache_dir=/host${HOST_CCACHE_DIR}" | tee -a "${GITHUB_ENV}"
+          fi
+
+      - name: Set CIBW_BUILD (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $pythonVersion = "${{ matrix.target.python_version }}"
+          $pythonVersionMajMin = ($pythonVersion -split '\.')[0..1] -join '.'
+          $pythonVersionMajMinNoDot = $pythonVersionMajMin -replace '\.', ''
+          "CIBW_BUILD=cp${pythonVersionMajMinNoDot}-*" | Tee-Object -FilePath $env:GITHUB_ENV -Append
+          "CIBW_CONFIG_SETTINGS=cmake.build-type=Release" | Tee-Object -FilePath $env:GITHUB_ENV -Append
+          "CMAKE_BUILD_TYPE=Release" | Tee-Object -FilePath $env:GITHUB_ENV -Append
+
+          if ("${{ matrix.target.toolkit }}" -like "*CUDA*") {
+            $cudaVersion = "${{ matrix.target.toolkit }}".Split('-')[-1]
+            $cudaVersionMajMin = ($cudaVersion -split '\.')[0..1] -join '.'
+            $cudaVersionMajMinNoDot = $cudaVersionMajMin -replace '\.', ''
+            "CUDA_VERSION=$cudaVersion" | Tee-Object -FilePath $env:GITHUB_ENV -Append
+            "UV_TORCH_BACKEND=cu$cudaVersionMajMinNoDot" | Tee-Object -FilePath $env:GITHUB_ENV -Append
+            "PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu$cudaVersionMajMinNoDot" | Tee-Object -FilePath $env:GITHUB_ENV -Append
+          }
+
+          if ("${{ env.IS_RELEASE }}" -eq "true") {
+            "NO_VERSION_LABEL=ON" | Tee-Object -FilePath $env:GITHUB_ENV -Append
+          }
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v4.1
+        with:
+          package-dir: .
+          output-dir: wheelhouse
+          config-file: "{package}/pyproject.toml"
+
+      - name: Setup Python and uv with caching
+        id: setup-uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.target.python_version }}
+          activate-environment: true
+
+      - name: Test built wheels
+        if: runner.os != 'Windows'
+        run: |
+          for WHEEL in wheelhouse/*.whl; do
+            echo "Testing wheel: ${WHEEL}"
+            if [[ "${WHEEL}" == *"abi3"* ]]; then
+              uvx abi3audit --verbose --strict "${WHEEL}"
+            fi
+            (
+              set -e
+              uv venv test-venv
+              source test-venv/bin/activate
+
+              uv pip install -v "${WHEEL}"
+              (
+                set -e
+                cd /
+                uv run --no-project -- python -c "import tilelang; print(tilelang.__version__)"
+              )
+              deactivate
+              rm -rf test-venv
+            )
+          done
+
+      - name: Test built wheels (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem wheelhouse -Filter *.whl | ForEach-Object {
+            $wheel = $_.FullName
+            Write-Host "Testing wheel: $wheel"
+            if ($_.Name -like "*abi3*") {
+              uvx abi3audit --verbose --strict $wheel
+            }
+            if (Test-Path test-venv) {
+              Remove-Item -Recurse -Force test-venv
+            }
+            uv venv test-venv
+            $python = Join-Path (Resolve-Path test-venv).Path "Scripts\python.exe"
+
+            uv pip install -v --python $python $wheel
+            Push-Location $env:RUNNER_TEMP
+            try {
+              & $python -c "import tilelang; print(tilelang.__version__)"
+            } finally {
+              Pop-Location
+            }
+            Remove-Item -Recurse -Force test-venv
+          }
+
+      - name: Test built wheels with different CUDA
+        if: contains(matrix.target.toolkit, 'CUDA') && runner.os != 'Windows'
+        run: |
+          export UV_PYTHON=3.12
+          VERSION_LOG=$(mktemp)
+          for UV_TORCH_BACKEND in ${{ matrix.target.test_backends }}; do
+            export UV_TORCH_BACKEND
+            for WHEEL in wheelhouse/*.whl; do
+              echo "Testing wheel: ${WHEEL}"
+              (
+                set -e
+                uv venv test-venv
+                source test-venv/bin/activate
+
+                uv pip install -v "${WHEEL}"
+                (
+                  set -e
+                  cd /
+                  uv run --no-project -- python -c "import tilelang, torch; print(tilelang.__version__, torch.__version__)" >> "$VERSION_LOG"
+                )
+                deactivate
+                rm -rf test-venv
+              )
+            done
+          done
+          cat "$VERSION_LOG"
+
+      - name: Test built wheels with CUDA (Windows)
+        if: contains(matrix.target.toolkit, 'CUDA') && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:UV_PYTHON = "3.12"
+          $versionLog = Join-Path $env:RUNNER_TEMP "tilelang-wheel-versions.txt"
+          if (Test-Path $versionLog) {
+            Remove-Item -Force $versionLog
+          }
+
+          foreach ($backend in ("${{ matrix.target.test_backends }}" -split '\s+')) {
+            if ($backend -eq "") {
+              continue
+            }
+            $env:UV_TORCH_BACKEND = $backend
+            Get-ChildItem wheelhouse -Filter *.whl | ForEach-Object {
+              $wheel = $_.FullName
+              Write-Host "Testing wheel: $wheel"
+              if (Test-Path test-venv) {
+                Remove-Item -Recurse -Force test-venv
+              }
+              uv venv test-venv
+              $python = Join-Path (Resolve-Path test-venv).Path "Scripts\python.exe"
+
+              uv pip install -v --python $python $wheel
+              Push-Location $env:RUNNER_TEMP
+              try {
+                & $python -c "import tilelang, torch; print(tilelang.__version__, torch.__version__)" | Out-File -Append -FilePath $versionLog -Encoding utf8
+              } finally {
+                Pop-Location
+              }
+              Remove-Item -Recurse -Force test-venv
+            }
+          }
+          Get-Content $versionLog
+
+      - name: Upload wheels
+        # Not PR to save artifact storage, as wheels are only needed for releases.
+        if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheels-${{ matrix.target.python_version }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  list-artifacts:
+    name: List artifacts
+    # Not PR to save artifact storage, as artifacts are only needed for releases.
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
+    runs-on: ubuntu-latest
+    needs: [build-sdist, build-wheels]
+    timeout-minutes: 15
+    steps:
+      - name: Download built SDist
+        uses: actions/download-artifact@v8
+        with:
+          # unpacks default artifact into dist/
+          # if `name: artifact` is omitted, the action will create extra parent dir
+          name: sdist
+          path: dist
+
+      - name: Download built wheels
+        uses: actions/download-artifact@v8
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+
+      - name: List distributions
+        run: ls -lh dist/*
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifacts
+          path: dist/*
+          if-no-files-found: error
+
+  publish-pypi:
+    name: Publish to PyPI
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+    needs: [list-artifacts]
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/p/tilelang
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Validate release tag matches VERSION
+        run: |
+          VERSION="$(cat VERSION)"
+          TAG="${GITHUB_REF_NAME}"
+          if [ "${TAG}" != "v${VERSION}" ]; then
+            echo "Release tag ${TAG} does not match VERSION v${VERSION}"
+            exit 1
+          fi
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: artifacts
+          path: dist
+
+      - name: List distributions
+        run: ls -lh dist/*
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

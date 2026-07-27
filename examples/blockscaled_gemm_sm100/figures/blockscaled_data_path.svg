@@ -1,0 +1,138 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">SM100 block-scaled GEMM data path</title>
+  <desc id="desc">Global memory A, B, SFA, and SFB move through TMA, shared memory, scale-factor transpose, UTCCP copy, tensor memory MMA, and epilogue store.</desc>
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fbfaf6"/>
+      <stop offset="58%" stop-color="#f6fbff"/>
+      <stop offset="100%" stop-color="#f7fff9"/>
+    </linearGradient>
+    <linearGradient id="headerGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#eef6ff"/>
+      <stop offset="100%" stop-color="#f2fff8"/>
+    </linearGradient>
+    <filter id="shadow" x="-12%" y="-18%" width="124%" height="140%">
+      <feDropShadow dx="0" dy="6" stdDeviation="7" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#263238"/>
+    </marker>
+    <marker id="blueArrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#1f6feb"/>
+    </marker>
+  </defs>
+  <style>
+    .bg { fill: url(#bgGrad); }
+    .halo { fill: url(#headerGrad); stroke: #d9e6f2; stroke-width: 1; rx: 18; }
+    .title { font: 700 27px Inter, Segoe UI, Arial, sans-serif; fill: #1f2933; }
+    .section { font: 700 16px Arial, sans-serif; fill: #344054; letter-spacing: .3px; }
+    .label { font: 700 15px Arial, sans-serif; fill: #1f2933; }
+    .small { font: 12px Arial, sans-serif; fill: #334155; }
+    .tiny { font: 11px Arial, sans-serif; fill: #475569; }
+    .box { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.25; rx: 10; filter: url(#shadow); }
+    .gmem { fill: #e8f4ff; stroke: #6da9ff; }
+    .smem { fill: #fff5df; stroke: #d49a30; }
+    .tmem { fill: #e9f8ef; stroke: #4cae68; }
+    .bar { fill: #f8fafc; stroke: #94a3b8; }
+    .op { fill: #f4ecff; stroke: #a56ae8; }
+    .line { stroke: #334155; stroke-width: 2.1; fill: none; marker-end: url(#arrow); }
+    .blue { stroke: #1f6feb; stroke-width: 2.5; fill: none; marker-end: url(#blueArrow); }
+    .dash { stroke-dasharray: 6 5; }
+  </style>
+  <rect class="bg" width="1200" height="720"/>
+  <rect class="halo" x="28" y="20" width="720" height="64"/>
+  <text class="title" x="48" y="48">Blackwell MXFP8 Block-Scaled GEMM Data Path</text>
+  <text class="small" x="50" y="70">A/B are FP8; SFA/SFB are packed UE8M0 scale factors; C accumulates in TMEM.</text>
+
+  <text class="section" x="50" y="118">GLOBAL MEMORY</text>
+  <rect class="box gmem" x="40" y="132" width="150" height="72"/>
+  <text class="label" x="68" y="163">A[M,K]</text>
+  <text class="tiny" x="62" y="184">FP8 tile M x K</text>
+
+  <rect class="box gmem" x="210" y="132" width="150" height="72"/>
+  <text class="label" x="238" y="163">B[K,N]</text>
+  <text class="tiny" x="228" y="184">FP8 tile K x N</text>
+
+  <rect class="box gmem" x="380" y="132" width="190" height="72"/>
+  <text class="label" x="412" y="163">SFA / SFB</text>
+  <text class="tiny" x="404" y="184">4 UE8M0 bytes per u32</text>
+
+  <rect class="box gmem" x="1010" y="132" width="150" height="72"/>
+  <text class="label" x="1058" y="163">C</text>
+  <text class="tiny" x="1034" y="184">BF16 output</text>
+
+  <text class="section" x="50" y="270">SHARED MEMORY PIPELINE STAGE</text>
+  <rect class="box smem" x="40" y="286" width="210" height="94"/>
+  <text class="label" x="78" y="318">A_shared[s]</text>
+  <text class="tiny" x="68" y="342">block_M x block_K</text>
+  <text class="tiny" x="68" y="362">loaded by TMA</text>
+
+  <rect class="box smem" x="270" y="286" width="210" height="94"/>
+  <text class="label" x="308" y="318">B_shared[s]</text>
+  <text class="tiny" x="294" y="342">block_K x block_N</text>
+  <text class="tiny" x="294" y="362">half_N per CTA in 2CTA</text>
+
+  <rect class="box smem" x="500" y="286" width="220" height="94"/>
+  <text class="label" x="528" y="318">SFA/SFB_shared[s]</text>
+  <text class="tiny" x="532" y="342">u32 vectors from TMA</text>
+  <text class="tiny" x="532" y="362">load every 4 K stages</text>
+
+  <rect class="box op" x="760" y="286" width="190" height="94"/>
+  <text class="label" x="796" y="318">SF transpose</text>
+  <text class="tiny" x="788" y="342">4 x 32 -> 32 x 4</text>
+  <text class="tiny" x="788" y="362">then fence.proxy.async</text>
+
+  <text class="section" x="50" y="500">TENSOR MEMORY AND MMA</text>
+  <rect class="box tmem" x="520" y="456" width="200" height="96"/>
+  <text class="label" x="558" y="488">SFA_tmem</text>
+  <text class="tiny" x="550" y="512">128 lanes x 4 cols</text>
+  <text class="tiny" x="550" y="532">id = k mod 4</text>
+
+  <rect class="box tmem" x="740" y="456" width="200" height="96"/>
+  <text class="label" x="778" y="488">SFB_tmem</text>
+  <text class="tiny" x="770" y="512">128 lanes x 4/8 cols</text>
+  <text class="tiny" x="770" y="532">N chunks of 128 cols</text>
+
+  <rect class="box op" x="410" y="580" width="250" height="88"/>
+  <text class="label" x="438" y="612">tcgen05.mma.block_scale</text>
+  <text class="tiny" x="444" y="636">(A * scale_A) * (B * scale_B)</text>
+  <text class="tiny" x="444" y="654">cta_group::1 or cta_group::2</text>
+
+  <rect class="box tmem" x="690" y="580" width="210" height="88"/>
+  <text class="label" x="746" y="612">C_tmem</text>
+  <text class="tiny" x="724" y="636">FP32 accumulator</text>
+  <text class="tiny" x="724" y="654">block_M x block_N</text>
+
+  <rect class="box smem" x="930" y="580" width="180" height="88"/>
+  <text class="label" x="984" y="612">Epilogue</text>
+  <text class="tiny" x="962" y="636">TMEM -> regs</text>
+  <text class="tiny" x="962" y="654">regs -> SMEM -> C</text>
+
+  <path class="blue" d="M115 204 C115 235, 145 252, 145 286"/>
+  <path class="blue" d="M285 204 C285 235, 335 252, 375 286"/>
+  <path class="blue" d="M475 204 C475 235, 610 246, 610 286"/>
+  <text class="tiny" x="78" y="244">TMA every K stage</text>
+  <text class="tiny" x="404" y="244">SF TMA every 4 K stages</text>
+
+  <path class="line" d="M720 333 L760 333"/>
+  <path class="line" d="M850 380 C850 420, 710 420, 620 456"/>
+  <path class="line" d="M855 380 C855 420, 805 420, 840 456"/>
+  <text class="tiny" x="860" y="400">tcgen05.cp.32x128b.warpx4</text>
+
+  <path class="line" d="M250 356 C310 430, 410 536, 490 580"/>
+  <path class="line" d="M480 356 C500 440, 505 515, 520 580"/>
+  <path class="line dash" d="M620 552 C600 568, 565 568, 535 580"/>
+  <path class="line dash" d="M840 552 C790 570, 705 570, 632 592"/>
+  <path class="line" d="M660 624 L690 624"/>
+  <path class="line" d="M900 624 L930 624"/>
+  <path class="line" d="M1110 624 C1160 540, 1120 300, 1085 204"/>
+
+  <rect class="box bar" x="48" y="418" width="410" height="56"/>
+  <text class="label" x="66" y="450">Barrier ring:</text>
+  <text class="small" x="170" y="450">consumed -> loaded -> with_sf_full -> consumed</text>
+
+  <rect class="box bar" x="786" y="418" width="330" height="56"/>
+  <text class="label" x="806" y="450">Final handoff:</text>
+  <text class="small" x="920" y="442">tmem_full</text>
+  <text class="small" x="920" y="460">persistent path also uses tmem_empty</text>
+</svg>

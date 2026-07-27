@@ -1,0 +1,588 @@
+from __future__ import annotations
+from tilelang._typing import BufferLikeType
+from tvm.tirx import Buffer, BufferLoad, BufferRegion, PrimExpr
+from tilelang.language.utils import region as _make_region_call
+from tilelang.language.utils import buffer_region_to_tile_region
+from tilelang.language.utils import get_buffer_region_from_load
+from functools import reduce
+from tvm import IRModule, DataType
+from tvm.tirx import PrimFunc
+from tvm import ir, tirx
+from tvm.tirx.expr import CallEffectKind
+# Scope Checkers for TVM Buffers
+# These utility functions check the memory scope of a given TVM buffer.
+
+
+def _get_buffer(buffer_or_load_or_region: BufferLikeType) -> Buffer:
+    """
+    Extract Buffer from Buffer, BufferLoad, or BufferRegion.
+
+    Args:
+        buffer_or_load_or_region: Can be Buffer, BufferLoad, or BufferRegion
+
+    Returns:
+        Buffer: The underlying buffer object
+    """
+    if isinstance(buffer_or_load_or_region, Buffer):
+        return buffer_or_load_or_region
+    elif isinstance(buffer_or_load_or_region, (tirx.BufferLoad, tirx.BufferRegion)):
+        return buffer_or_load_or_region.buffer
+    else:
+        raise TypeError(f"Expected Buffer, BufferLoad, or BufferRegion, got {type(buffer_or_load_or_region)}")
+
+
+def is_global(buffer: BufferLikeType) -> bool:
+    """
+    Check if the buffer is in the global memory scope.
+
+    Args:
+        buffer: The TVM buffer, BufferLoad, or BufferRegion to check.
+
+    Returns:
+        bool: True if the buffer is in global memory, False otherwise.
+    """
+    buffer = _get_buffer(buffer)
+    return buffer.scope() == "global"
+
+
+def is_shared(buffer: BufferLikeType, allow_dynamic: bool = True) -> bool:
+    """
+    Check if the buffer is in the shared memory scope.
+
+    Args:
+        buffer: The TVM buffer, BufferLoad, or BufferRegion to check.
+
+    Returns:
+        bool: True if the buffer is in shared memory, False otherwise.
+    """
+    buffer = _get_buffer(buffer)
+    conditions = [False]
+    conditions.append(buffer.scope() == "shared")
+    if allow_dynamic:
+        conditions.append(is_shared_dynamic(buffer))
+    return any(conditions)
+
+
+def is_shared_dynamic(buffer: BufferLikeType) -> bool:
+    """
+    Check if the buffer is in the dynamic shared memory scope.
+
+    Args:
+        buffer: The TVM buffer, BufferLoad, or BufferRegion to check.
+
+    Returns:
+        bool: True if the buffer is in dynamic shared memory, False otherwise.
+    """
+    buffer = _get_buffer(buffer)
+    return buffer.scope() == "shared.dyn"
+
+
+def is_tensor_memory(buffer: BufferLikeType) -> bool:
+    """
+    Check if the buffer is in tensor memory scope (e.g., shared.tmem).
+
+    Args:
+        buffer: The TVM buffer, BufferLoad, or BufferRegion to check.
+
+    Returns:
+        bool: True if the buffer is in tensor memory, False otherwise.
+    """
+    buffer = _get_buffer(buffer)
+    return buffer.scope().startswith("shared.tmem")
+
+
+def is_local(buffer: BufferLikeType) -> bool:
+    """
+    Check if the buffer is in the local memory scope.
+
+    Args:
+        buffer: The TVM buffer, BufferLoad, or BufferRegion to check.
+
+    Returns:
+        bool: True if the buffer is in local memory, False otherwise.
+    """
+    buffer = _get_buffer(buffer)
+    return buffer.scope() == "local"
+
+
+def is_fragment(buffer: BufferLikeType) -> bool:
+    """
+    Check if the buffer is a fragment (e.g., for matrix multiplication operations).
+
+    Args:
+        buffer: The TVM buffer, BufferLoad, or BufferRegion to check.
+
+    Returns:
+        bool: True if the buffer is a fragment, False otherwise.
+    """
+    buffer = _get_buffer(buffer)
+    return buffer.scope().startswith("local.fragment")
+
+
+def is_metal_simdgroup(buffer: BufferLikeType) -> bool:
+    """
+    Check if the buffer is in the Metal simdgroup scope.
+
+    Args:
+        buffer: The TVM buffer, BufferLoad, or BufferRegion to check.
+
+    Returns:
+        bool: True if the buffer is in metal.simdgroup scope, False otherwise.
+    """
+    buffer = _get_buffer(buffer)
+    return buffer.scope() == "metal.simdgroup"
+
+
+def is_local_var(buffer: BufferLikeType) -> bool:
+    """
+    Check if the buffer is in the local.var memory scope.
+
+    Args:
+        buffer: The TVM buffer, BufferLoad, or BufferRegion to check.
+
+    Returns:
+        bool: True if the buffer is in local.var memory, False otherwise.
+    """
+    buffer = _get_buffer(buffer)
+    return buffer.scope() == "local.var"
+
+
+def get_buffer_elems(buffer: Buffer) -> int:
+    """
+    Get the number of elements in the buffer.
+    """
+    return reduce(lambda x, y: x * y, buffer.shape)
+
+
+def array_reduce(array: list[int]) -> int:
+    """
+    Reduce an array of integers to a single integer.
+
+    Args:
+        array (List[int]): The array of integers to reduce.
+
+    Returns:
+        int: The reduced integer.
+    """
+    return reduce(lambda x, y: x * y, array)
+
+
+def retrieve_func_from_module(ir_module: IRModule) -> PrimFunc:
+    """
+    Retrieve the single PrimFunc from an IRModule.
+
+    Args:
+        ir_module (IRModule): The TVM IRModule to extract the function from.
+            The module should contain exactly one global function.
+
+    Returns:
+        PrimFunc: The single function contained in the module.
+
+    Raises:
+        ValueError: If ir_module is not an IRModule.
+        AssertionError: If the module contains more than one global function.
+    """
+    if not isinstance(ir_module, IRModule):
+        raise ValueError("Not supported type: ", type(ir_module))
+    assert len(ir_module.get_global_vars()) == 1, "The optimized module should only have one global variable for default schedule."
+    func = list(ir_module.functions.values())[0]
+    return func
+
+
+def to_buffer_region(obj: BufferLikeType, access_type: str = "rw", extents: list[PrimExpr] | None = None) -> PrimExpr | BufferRegion:
+    """
+    Normalize a buffer-like object to BufferRegion, or encode a tl.region call.
+
+    - Buffer/BufferLoad/BufferRegion -> returns BufferRegion when extents is None
+    - Buffer/BufferLoad/BufferRegion -> returns a tl.region call when extents is provided
+    - tl.region Call -> returns the decoded BufferRegion for analysis
+    """
+    from tilelang.language.frame import has_let_value, get_let_value
+
+    if isinstance(obj, tirx.Var) and has_let_value(obj):
+        obj = get_let_value(obj)
+    # Encode into tl.region call (when extents is provided), otherwise return BufferRegion for analysis
+    if isinstance(obj, tirx.BufferRegion):
+        if extents is None:
+            return obj
+        mins = [r.min for r in obj.region]
+        exts = [r.extent for r in obj.region]
+        assert len(extents) == len(exts)
+        exts = [tirx.min(exts[i], extents[i]) for i in range(len(exts))]
+        return _make_region_call(tirx.BufferLoad(obj.buffer, mins), access_type, *exts)
+    if isinstance(obj, tirx.Buffer):
+        mins = [tirx.IntImm("int32", 0) for _ in obj.shape]
+        if extents is None:
+            ranges = [ir.Range.from_min_extent(m, e) for m, e in zip(mins, obj.shape)]
+            return tirx.BufferRegion(obj, ranges)
+        exts = list(extents)
+        return _make_region_call(tirx.BufferLoad(obj, mins), access_type, *exts)
+    if isinstance(obj, tirx.BufferLoad):
+        if extents is None:
+            region = get_buffer_region_from_load(obj)
+            if region is not None:
+                return region
+            mins = [idx for idx in obj.indices]
+            ones = [tirx.IntImm("int32", 1) for _ in obj.indices]
+            ranges = [ir.Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
+            return tirx.BufferRegion(obj.buffer, ranges)
+        exts = list(extents)
+        if len(obj.indices) > len(exts):
+            exts = [tirx.IntImm("int32", 1) for _ in range(len(obj.indices) - len(exts))] + exts
+        assert len(obj.indices) == len(exts)
+        return _make_region_call(obj, access_type, *exts)
+    raise ValueError(f"Unsupported argument type for to_buffer_region: {type(obj)}")
+
+
+def to_tile_region(obj: BufferLikeType, access_type: str = "rw", extents: list[PrimExpr] | None = None) -> PrimExpr:
+    """Encode a buffer-like object as a tl.region call for tile-op arguments."""
+    buffer_region = to_buffer_region(obj)
+    if not isinstance(buffer_region, tirx.BufferRegion):
+        raise ValueError(f"Expected BufferRegion from to_buffer_region, got {type(buffer_region)}")
+    if extents is None:
+        extents = [r.extent for r in buffer_region.region]
+    return buffer_region_to_tile_region(buffer_region, access_type, extents)
+
+
+def retrieve_shape(obj: BufferLikeType) -> list:
+    """
+    Retrieve shape-like extents for a buffer-like object.
+
+    - Buffer -> its `shape`
+    - BufferRegion -> list of each range's `extent`
+    - BufferLoad -> extents from `get_buffer_region_from_load(obj)`
+    """
+    if isinstance(obj, tirx.Buffer):
+        return obj.shape
+    if isinstance(obj, tirx.BufferRegion):
+        return [r.extent for r in obj.region]
+    if isinstance(obj, tirx.BufferLoad):
+        region = get_buffer_region_from_load(obj)
+        if region is None:
+            raise ValueError("Cannot retrieve shape from scalar BufferLoad without region")
+        return [r.extent for r in region.region]
+    raise ValueError(f"Unsupported retrieve_shape argument type: {type(obj)} for object {obj}")
+
+
+def retrieve_stride(obj: BufferLikeType) -> list:
+    """
+    Retrieve row-major strides for a buffer-like object based on its buffer.shape.
+
+    For BufferRegion and BufferLoad, uses the underlying buffer's `shape`.
+    """
+    if isinstance(obj, tirx.Buffer):
+        shape = obj.shape
+    elif isinstance(obj, (tirx.BufferRegion, tirx.BufferLoad)):
+        shape = obj.buffer.shape
+    else:
+        raise ValueError(f"Unsupported retrieve_stride argument type: {type(obj)} for object {obj}")
+
+    strides = []
+    stride = 1
+    for s in reversed(shape):
+        strides.insert(0, stride)
+        stride *= s
+    return strides
+
+
+def retrive_ptr_from_buffer_region(buffer_or_load_or_region: BufferLikeType, access_type: str = "r") -> PrimExpr:
+    if isinstance(buffer_or_load_or_region, Buffer):
+        return buffer_or_load_or_region.access_ptr(access_type)
+    elif isinstance(buffer_or_load_or_region, BufferLoad):
+        buffer_load = buffer_or_load_or_region
+        offset, stride = 0, 1
+        buffer = buffer_load.buffer
+        for i, shape in enumerate(reversed(buffer.shape)):
+            indice = buffer_load.indices[len(buffer_load.indices) - i - 1]
+            if isinstance(indice, (tirx.IntImm, tirx.PrimExpr)):
+                offset += indice * stride
+            elif isinstance(indice, tirx.Ramp):
+                offset += indice.base * stride
+            else:
+                raise ValueError(f"Unsupported index type: {type(indice)}")
+            stride *= shape
+        return buffer.access_ptr(access_type, offset=offset)
+    elif isinstance(buffer_or_load_or_region, BufferRegion):
+        buffer_region = buffer_or_load_or_region
+        buffer = buffer_region.buffer
+        offset, stride = 0, 1
+        for i, shape in enumerate(reversed(buffer.shape)):
+            offset += buffer_region.region[len(buffer_region.region) - i - 1].min * stride
+            stride *= shape
+        return buffer.access_ptr(access_type, offset=offset)
+    else:
+        raise ValueError(f"Unsupported buffer type: {type(buffer_or_load_or_region)}")
+
+
+def retrieve_ptr(
+    obj: BufferLikeType,
+    access_type: str = "r",
+    ignore_last_ndim: int = 0,
+) -> PrimExpr:
+    """
+    Retrieve a pointer to the start of a (possibly sliced) buffer region.
+
+    - Buffer -> base pointer
+    - BufferRegion -> pointer with byte offset computed from region minima
+    - BufferLoad -> pointer offset computed from indices or derived region
+
+    Args:
+        obj: Buffer-like object
+        access_type: TVM Buffer access mask, e.g. "r", "w", "rw"
+        ignore_last_ndim: do not offset the last N dimensions
+    """
+    if isinstance(obj, tirx.Buffer):
+        return obj.access_ptr(access_type)
+
+    if isinstance(obj, tirx.BufferRegion):
+        buffer, region = obj.buffer, obj.region
+        strides = retrieve_stride(obj)
+        # offset only over the leading dims, optionally ignoring the tail dims
+        upto = max(0, len(region) - int(ignore_last_ndim))
+        offset = 0
+        for i in range(upto):
+            offset += region[i].min * strides[i]
+        return buffer.access_ptr(access_type, offset=offset)
+
+    if isinstance(obj, tirx.BufferLoad):
+        buffer = obj.buffer
+        region = get_buffer_region_from_load(obj)
+        if region is not None:
+            mins = [r.min for r in region.region]
+        else:
+            mins = list(obj.indices)
+        strides = retrieve_stride(obj)
+        upto = max(0, len(mins) - int(ignore_last_ndim))
+        offset = 0
+        for i in range(upto):
+            offset += mins[i] * strides[i]
+        return buffer.access_ptr(access_type, offset=offset)
+
+    raise ValueError(f"Unsupported retrieve_ptr argument type: {type(obj)} for object {obj}")
+
+
+def retrieve_buffer_and_offset(obj: BufferLikeType) -> tuple[Buffer, PrimExpr | int]:
+    """
+    Retrieve the underlying buffer together with its logical element offset.
+
+    - Buffer -> (buffer, 0)
+    - BufferRegion -> (buffer, offset from region minima)
+    - BufferLoad -> (buffer, offset from indices or derived region minima)
+
+    This is useful when callers need to build custom access patterns from a
+    common buffer base rather than materializing a full `access_ptr` directly.
+    """
+    if isinstance(obj, tirx.Buffer):
+        return obj, 0
+
+    if isinstance(obj, tirx.BufferRegion):
+        buffer, region = obj.buffer, obj.region
+        strides = retrieve_stride(obj)
+        offset = 0
+        for i, r in enumerate(region):
+            offset += r.min * strides[i]
+        return buffer, offset
+
+    if isinstance(obj, tirx.BufferLoad):
+        region = get_buffer_region_from_load(obj)
+        if region is not None:
+            return retrieve_buffer_and_offset(region)
+
+        buffer = obj.buffer
+        strides = retrieve_stride(obj)
+        offset = 0
+        for i, idx in enumerate(obj.indices):
+            offset += idx * strides[i]
+        return buffer, offset
+
+    raise ValueError(f"Unsupported retrieve_buffer_and_offset argument type: {type(obj)} for object {obj}")
+
+
+def retrieve_offset(obj: BufferLikeType) -> list:
+    """
+    Retrieve per-dimension minima offsets.
+
+    - Buffer -> [0, 0, ...]
+    - BufferRegion -> [r.min for r in region]
+    - BufferLoad -> indices (or derived region minima)
+    """
+    if isinstance(obj, tirx.Buffer):
+        return [0] * len(obj.shape)
+    if isinstance(obj, tirx.BufferRegion):
+        return [r.min for r in obj.region]
+    if isinstance(obj, tirx.BufferLoad):
+        region = get_buffer_region_from_load(obj)
+        if region is not None:
+            return [r.min for r in region.region]
+        return list(obj.indices)
+    raise ValueError(f"Unsupported retrieve_offset argument type: {type(obj)} for object {obj}")
+
+
+def retrieve_dtype(obj: BufferLikeType) -> str:
+    """
+    Retrieve the dtype of a buffer-like object.
+
+    - Buffer -> buffer.dtype
+    - BufferRegion -> convert to BufferLoad with Ramp indices, then use load.dtype
+    - BufferLoad -> load.dtype
+    """
+    if isinstance(obj, tirx.Buffer):
+        return obj.dtype
+    if isinstance(obj, tirx.BufferRegion):
+        # Convert region ranges to indices, using Ramp for vector access
+        indices = []
+        for r in obj.region:
+            extent = r.extent
+            if isinstance(extent, tirx.IntImm) and extent.value == 1:
+                indices.append(r.min)
+            else:
+                # Use Ramp for vector access: Ramp(base, stride=1, lanes=extent)
+                indices.append(tirx.Ramp(r.min, 1, extent))
+        load = tirx.BufferLoad(obj.buffer, indices)
+        return load.dtype
+    if isinstance(obj, tirx.BufferLoad):
+        return obj.dtype
+    raise ValueError(f"Unsupported retrieve_dtype argument type: {type(obj)} for object {obj}")
+
+
+def bits_product(shape: list[PrimExpr], dtype: str) -> PrimExpr:
+    """
+    Compute the number of bits in a Buffer (shape with dtype).
+
+    For vector types (e.g. ``bfloat16x2``) ``DataType.bits`` returns the
+    per-lane width, not the full element width.  Multiply by ``lanes`` so
+    that the total bit count is correct.
+    """
+    if len(shape) == 0:
+        return tirx.IntImm("int32", 1)
+    result = shape[0]
+    for i in range(1, len(shape)):
+        result = result * shape[i]
+    dt = DataType(dtype)
+    return result * dt.bits * dt.lanes
+
+
+def prim_expr_equal(lhs, rhs) -> bool:
+    """
+    Robust equality for PrimExpr shapes/extents.
+
+    Tries structural_equal first, then falls back to expr_deep_equal.
+    Python ints are converted to IntImm for comparison.
+    """
+    if isinstance(lhs, int) and isinstance(rhs, int):
+        return lhs == rhs
+    if isinstance(lhs, int):
+        lhs = tirx.IntImm("int32", lhs)
+    if isinstance(rhs, int):
+        rhs = tirx.IntImm("int32", rhs)
+    if ir.structural_equal(lhs, rhs):
+        return True
+    return tirx.analysis.expr_deep_equal(lhs, rhs)
+
+
+def legalize_pairwise_extents(src_extents: list, dst_extents: list) -> tuple[list, list]:
+    """
+    Right-align and broadcast two extent lists to be mutually compatible.
+
+    Early-exit rule:
+    - If the number of non-1 dimensions in `src_extents` equals that in `dst_extents`,
+      no adjustment is made; the original extents are returned unchanged. This
+      preserves the per-dimension iteration mapping (one loop var per non-1 dim)
+      and avoids creating extra varying axes on either side.
+
+    Otherwise, for each pair of tail-aligned dimensions (x, y):
+      - if x == y: keep both
+      - elif x == 1: set x = y
+      - elif y == 1: set y = x
+      - else: promote both to tirx.max(x, y) to handle dynamic-vs-static safely
+
+    Leading unmatched dimensions are kept as-is.
+
+    Returns a tuple of new lists (src_new, dst_new).
+    """
+    a = list(src_extents)
+    b = list(dst_extents)
+
+    # If both sides have the same number of non-1 extents, don't re-broadcast.
+    def _num_non_one(exts: list) -> int:
+        return sum(0 if prim_expr_equal(x, 1) else 1 for x in exts)
+
+    if _num_non_one(a) == _num_non_one(b):
+        return a, b
+    k = min(len(a), len(b))
+    for i in range(1, k + 1):
+        x, y = a[-i], b[-i]
+        if prim_expr_equal(x, y):
+            continue
+        elif prim_expr_equal(x, 1):
+            a[-i] = y
+        elif prim_expr_equal(y, 1):
+            b[-i] = x
+        else:
+            # Dynamic mismatch: promote to max so downstream clamping/predicates remain safe
+            m = tirx.max(x, y)
+            a[-i] = m
+            b[-i] = m
+    return a, b
+
+
+def is_full_region(buffer_region: BufferRegion) -> bool:
+    """
+    Check whether a BufferRegion covers the full buffer region.
+
+    A full region means each dimension has start 0 and extent equal to
+    the corresponding dimension in the buffer's shape.
+
+    Args:
+        buffer_region: The TVM BufferRegion to check.
+
+    Returns:
+        bool: True if the region is full; otherwise False.
+    """
+    if not isinstance(buffer_region, tirx.BufferRegion):
+        raise TypeError(f"Expected BufferRegion, got {type(buffer_region)}")
+
+    buf = buffer_region.buffer
+    ranges = buffer_region.region
+
+    if len(buf.shape) != len(ranges):
+        return False
+
+    expr_equal = tirx.analysis.expr_deep_equal
+    for dim, r in zip(buf.shape, ranges):
+        # start == 0 and extent == shape
+        if not expr_equal(r.min, 0):
+            return False
+        if not expr_equal(r.extent, dim):
+            return False
+    return True
+
+
+def get_prim_func_name(func: PrimFunc | None, default: str | None = None) -> str | None:
+    """
+    Extract a human‑readable function name from a TVM PrimFunc.
+
+    Prefer the `global_symbol` attribute set on the PrimFunc. If it is missing
+    (e.g., private PrimFunc without a global symbol), return the provided
+    `default` value.
+
+    Args:
+        func: TVM PrimFunc instance or None.
+        default: Fallback name to return when no name can be determined.
+
+    Returns:
+        The function name as a string, or `default` when unavailable.
+    """
+    if func is None:
+        return default
+    try:
+        name = func.attrs["global_symbol"]
+        return str(name) if name is not None else default
+    except Exception:
+        return default
+
+
+def side_effect(expr: PrimExpr) -> CallEffectKind:
+    from tilelang import _ffi_api
+
+    return _ffi_api.SideEffect(expr)

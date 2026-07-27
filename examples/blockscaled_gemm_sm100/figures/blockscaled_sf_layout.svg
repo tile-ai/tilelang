@@ -1,0 +1,163 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">Scale-factor packing, SMEM transpose, and TMEM layout</title>
+  <desc id="desc">UE8M0 scale factors are packed four per uint32, loaded to shared memory, transposed in 128-word chunks, copied to tensor memory columns, and selected by sf_id.</desc>
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fbfaf6"/>
+      <stop offset="58%" stop-color="#f7fbff"/>
+      <stop offset="100%" stop-color="#f8fff8"/>
+    </linearGradient>
+    <linearGradient id="panelGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#f8fafc"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-8%" width="120%" height="124%">
+      <feDropShadow dx="0" dy="8" stdDeviation="9" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#263238"/>
+    </marker>
+  </defs>
+  <style>
+    .bg { fill: url(#bgGrad); }
+    .title { font: 700 27px Inter, Segoe UI, Arial, sans-serif; fill: #1f2933; }
+    .head { font: 700 18px Inter, Segoe UI, Arial, sans-serif; fill: #111827; }
+    .label { font: 700 13px Arial, sans-serif; fill: #1f2933; }
+    .small { font: 12px Arial, sans-serif; fill: #334155; }
+    .tiny { font: 10.5px Arial, sans-serif; fill: #475569; }
+    .panel { fill: url(#panelGrad); stroke: #d0d7de; stroke-width: 1.25; rx: 14; filter: url(#shadow); }
+    .gmem { fill: #e8f4ff; stroke: #6da9ff; }
+    .smem { fill: #fff5df; stroke: #d49a30; }
+    .tmem { fill: #e9f8ef; stroke: #4cae68; }
+    .byte0 { fill: #dbeafe; stroke: #2563eb; }
+    .byte1 { fill: #dcfce7; stroke: #16a34a; }
+    .byte2 { fill: #fef3c7; stroke: #b45309; }
+    .byte3 { fill: #fce7f3; stroke: #db2777; }
+    .word { fill: #f8fafc; stroke: #64748b; }
+    .line { stroke: #263238; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+    .dash { stroke-dasharray: 5 5; }
+  </style>
+  <rect class="bg" width="1200" height="760"/>
+  <text class="title" x="46" y="46">Scale-Factor Layout: Global -> SMEM -> TMEM</text>
+  <text class="small" x="48" y="72">Example uses block_K = sf_granularity_k = 128, so one packed word covers four K iterations.</text>
+
+  <rect class="panel" x="40" y="110" width="330" height="560"/>
+  <text class="head" x="70" y="145">1. Global packed SF</text>
+  <text class="small" x="70" y="172">group-major flat layout</text>
+  <rect class="gmem" x="72" y="205" width="248" height="64"/>
+  <text class="label" x="94" y="230">SFA[sf_group * M + row]</text>
+  <text class="tiny" x="94" y="252">same pattern for SFB with N</text>
+
+  <text class="small" x="72" y="306">One uint32 word:</text>
+  <g transform="translate(72,322)">
+    <rect class="byte0" x="0" y="0" width="58" height="42"/>
+    <rect class="byte1" x="58" y="0" width="58" height="42"/>
+    <rect class="byte2" x="116" y="0" width="58" height="42"/>
+    <rect class="byte3" x="174" y="0" width="58" height="42"/>
+    <text class="label" x="16" y="26">sf0</text>
+    <text class="label" x="74" y="26">sf1</text>
+    <text class="label" x="132" y="26">sf2</text>
+    <text class="label" x="190" y="26">sf3</text>
+    <text class="tiny" x="0" y="60">bits 0..7</text>
+    <text class="tiny" x="56" y="60">8..15</text>
+    <text class="tiny" x="112" y="60">16..23</text>
+    <text class="tiny" x="172" y="60">24..31</text>
+  </g>
+
+  <rect class="word" x="72" y="442" width="248" height="102"/>
+  <text class="label" x="92" y="470">K stage mapping</text>
+  <text class="tiny" x="92" y="494">k % 4 = 0 -> sf0</text>
+  <text class="tiny" x="92" y="514">k % 4 = 1 -> sf1</text>
+  <text class="tiny" x="92" y="534">k % 4 = 2 -> sf2</text>
+  <text class="tiny" x="92" y="554">k % 4 = 3 -> sf3</text>
+  <text class="tiny" x="72" y="610">The unpacked scale is 2^(ue8m0 - 127).</text>
+
+  <rect class="panel" x="430" y="110" width="330" height="560"/>
+  <text class="head" x="460" y="145">2. SMEM transpose for UTCCP</text>
+  <text class="small" x="460" y="172">per 128-word chunk</text>
+
+  <text class="label" x="460" y="218">Before: 4 x 32 view</text>
+  <g transform="translate(460,235)">
+    <rect class="smem" x="0" y="0" width="232" height="104"/>
+    <line x1="0" y1="26" x2="232" y2="26" stroke="#b7791f"/>
+    <line x1="0" y1="52" x2="232" y2="52" stroke="#b7791f"/>
+    <line x1="0" y1="78" x2="232" y2="78" stroke="#b7791f"/>
+    <line x1="58" y1="0" x2="58" y2="104" stroke="#b7791f"/>
+    <line x1="116" y1="0" x2="116" y2="104" stroke="#b7791f"/>
+    <line x1="174" y1="0" x2="174" y2="104" stroke="#b7791f"/>
+    <text class="tiny" x="8" y="17">word[0..31]</text>
+    <text class="tiny" x="66" y="17">...</text>
+    <text class="tiny" x="124" y="17">lane</text>
+    <text class="tiny" x="182" y="17">31</text>
+    <text class="tiny" x="8" y="43">word[32..63]</text>
+    <text class="tiny" x="8" y="69">word[64..95]</text>
+    <text class="tiny" x="8" y="95">word[96..127]</text>
+  </g>
+
+  <path class="line" d="M578 360 C578 386, 578 398, 578 424"/>
+  <text class="tiny" x="604" y="393">tcgen05_sf_warp_transpose</text>
+
+  <text class="label" x="460" y="456">After: 32 x 4 view</text>
+  <g transform="translate(460,473)">
+    <rect class="smem" x="0" y="0" width="232" height="104"/>
+    <line x1="58" y1="0" x2="58" y2="104" stroke="#b7791f"/>
+    <line x1="116" y1="0" x2="116" y2="104" stroke="#b7791f"/>
+    <line x1="174" y1="0" x2="174" y2="104" stroke="#b7791f"/>
+    <line x1="0" y1="26" x2="232" y2="26" stroke="#b7791f"/>
+    <line x1="0" y1="52" x2="232" y2="52" stroke="#b7791f"/>
+    <line x1="0" y1="78" x2="232" y2="78" stroke="#b7791f"/>
+    <text class="tiny" x="18" y="17">lane 0</text>
+    <text class="tiny" x="78" y="17">sf0</text>
+    <text class="tiny" x="136" y="17">sf1</text>
+    <text class="tiny" x="192" y="17">sf2</text>
+    <text class="tiny" x="18" y="43">lane 1</text>
+    <text class="tiny" x="18" y="69">...</text>
+    <text class="tiny" x="18" y="95">lane 31</text>
+  </g>
+  <text class="tiny" x="460" y="612">TileLang applies this to each 128-word</text>
+  <text class="tiny" x="460" y="630">chunk automatically.</text>
+
+  <rect class="panel" x="820" y="110" width="330" height="560"/>
+  <text class="head" x="850" y="145">3. TMEM SF columns</text>
+  <text class="small" x="850" y="172">tcgen05.cp.32x128b.warpx4</text>
+
+  <g transform="translate(852,215)">
+    <rect class="tmem" x="0" y="0" width="248" height="190"/>
+    <text class="label" x="70" y="28">SFA_tmem</text>
+    <text class="tiny" x="74" y="48">128 lanes x 4 columns</text>
+    <line x1="0" y1="70" x2="248" y2="70" stroke="#238636"/>
+    <line x1="0" y1="110" x2="248" y2="110" stroke="#238636"/>
+    <line x1="0" y1="150" x2="248" y2="150" stroke="#238636"/>
+    <line x1="62" y1="70" x2="62" y2="190" stroke="#238636"/>
+    <line x1="124" y1="70" x2="124" y2="190" stroke="#238636"/>
+    <line x1="186" y1="70" x2="186" y2="190" stroke="#238636"/>
+    <text class="tiny" x="12" y="96">lane 0</text>
+    <text class="tiny" x="78" y="96">col1</text>
+    <text class="tiny" x="140" y="96">col2</text>
+    <text class="tiny" x="202" y="96">col3</text>
+    <text class="tiny" x="12" y="136">...</text>
+    <text class="tiny" x="12" y="176">lane 127</text>
+  </g>
+
+  <g transform="translate(852,450)">
+    <rect class="tmem" x="0" y="0" width="248" height="124"/>
+    <text class="label" x="72" y="28">SFB_tmem</text>
+    <text class="tiny" x="48" y="48">128 lanes x 8 columns for block_N=256</text>
+    <rect class="byte0" x="20" y="70" width="45" height="34"/>
+    <rect class="byte1" x="65" y="70" width="45" height="34"/>
+    <rect class="byte2" x="110" y="70" width="45" height="34"/>
+    <rect class="byte3" x="155" y="70" width="45" height="34"/>
+    <text class="tiny" x="31" y="91">id0</text>
+    <text class="tiny" x="76" y="91">id1</text>
+    <text class="tiny" x="121" y="91">id2</text>
+    <text class="tiny" x="166" y="91">id3</text>
+    <text class="tiny" x="22" y="116">u32 cell byte sub-columns</text>
+  </g>
+
+  <path class="line" d="M370 390 C410 390, 410 390, 430 390"/>
+  <path class="line" d="M760 390 C800 390, 800 310, 852 310"/>
+  <text class="tiny" x="806" y="328">4 TMEM columns per</text>
+  <text class="tiny" x="806" y="344">128-word chunk</text>
+  <path class="line dash" d="M976 574 C976 620, 910 632, 840 632"/>
+  <text class="tiny" x="842" y="654">sf_id selects the byte sub-column for this K iteration.</text>
+</svg>

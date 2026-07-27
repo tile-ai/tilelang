@@ -1,0 +1,10 @@
+/* Reduce the displayed size of the sidebar logo in Furo */
+.sidebar-logo {
+  max-height: 125px;
+  width: auto;
+}
+
+/* Optional: keep container from growing too tall due to spacing */
+.sidebar-logo-container {
+  line-height: 0;
+}
