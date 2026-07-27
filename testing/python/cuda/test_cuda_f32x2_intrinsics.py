@@ -182,6 +182,28 @@ def _make_auto_vec_scalar_reduction_kernel(width: int = 8):
     return main
 
 
+def _make_auto_vec_scalar_reduction_unit_loop_kernel(width: int = 8):
+    """Build a scalar reduction with a generated-style unit loop."""
+
+    @T.prim_func
+    def main(
+        Scores: T.Tensor((M, width), dtype=T.float32),
+        Weights: T.Tensor((M, width), dtype=T.float32),
+        Scale: T.Tensor((M,), dtype=T.float32),
+        Out: T.Tensor((M,), dtype=T.float32),
+    ):
+        with T.Kernel(1, 1, threads=M) as (bx, by):
+            tid = T.get_thread_binding()
+            acc = T.alloc_local((1,), T.float32)
+            acc[0] = T.float32(0)
+            for h in T.vectorized(width):
+                for _ in T.serial(1):
+                    acc[0] += T.max(Scores[tid, h] * Scale[tid], T.float32(0)) * Weights[tid, h]
+            Out[tid] = acc[0]
+
+    return main
+
+
 def _make_auto_vec_batched_reduce_kernel(reduce_func, *, rows=M, width=64, threads=256):
     """Build a reduction that shuffles packed values between threads."""
 
@@ -214,7 +236,7 @@ def _make_auto_vec_scalar_reduction_chunks_kernel(chunks: int = 4, width: int = 
             tid = T.get_thread_binding()
             acc = T.alloc_local((1,), T.float32)
             acc[0] = T.float32(0)
-            for c in T.serial(chunks):
+            for c in T.unroll(chunks):
                 for h in T.vectorized(width):
                     acc[0] += T.max(Scores[tid, c, h] * Scale[tid], T.float32(0)) * Weights[tid, c, h]
             Out[tid] = acc[0]
@@ -412,15 +434,44 @@ def test_codegen_auto_vec_scalar_reduction_f32_sm100():
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(10)
+def test_codegen_auto_vec_scalar_reduction_ignores_unit_loop_f32_sm100():
+    func = _make_auto_vec_scalar_reduction_unit_loop_kernel()
+    src = _lower_to_cuda_source(func, target=SM100_TARGET)
+    assert "tl::fma2" in src, "Expected a generated unit loop not to disable packed scalar reduction"
+    assert src.count("tl::fma2") == 4, "Expected one packed FMA per f32x2 lane pair"
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
 def test_codegen_auto_vec_scalar_reduction_chunk_accumulator_f32_sm100():
     func = _make_auto_vec_scalar_reduction_chunks_kernel()
     src = _lower_to_cuda_source(func, target=SM100_TARGET)
     scalar_updates = [line for line in src.splitlines() if "acc[0] = (acc[0] +" in line]
     assert "tl::fma2" in src, "Expected packed FMA in SM100 chunked scalar reduction"
     assert src.count("tl::fma2") == 4, "Expected one packed FMA per f32x2 lane pair inside the chunk loop"
-    assert src.count("tl::add2") == 4, "Expected packed vector accumulator update across chunks"
+    assert src.count("tl::add2") == 1, "Expected one packed add for the final four-lane fold"
+    fma_lines = [line for line in src.splitlines() if "tl::fma2" in line]
+    add2_lines = [line for line in src.splitlines() if "tl::add2" in line]
+    assert "float4 acc_chunk_acc_vec" in src, "Expected a compact four-lane accumulator"
+    assert all("acc_chunk_acc_vec" in line for line in fma_lines[:2]), "Expected the first packed FMAs to consume the vector accumulator"
+    assert all("acc_fma_pair_" in line for line in fma_lines[2:]), "Expected later packed FMAs to chain through prior pair results"
+    assert "acc_chunk_acc_vec" in add2_lines[0], "Expected the packed fold to consume the vector accumulator"
+    assert "tl::add2(make_float2(" in src, "Expected nvcc-compatible CUDA vector constructors"
     assert len(scalar_updates) == 1, "Expected exactly one scalar fold for the chunked reduction"
-    assert "acc_chunk_acc_vec" in scalar_updates[0], "Expected scalar fold to happen after chunk vector accumulation"
+    assert "acc_chunk_acc_vec_fold_pair" in scalar_updates[0], "Expected scalar fold to consume the packed pair sum"
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+def test_correctness_auto_vec_scalar_reduction_chunk_accumulator_f32_sm100():
+    func = _make_auto_vec_scalar_reduction_chunks_kernel()
+    kernel = tilelang.compile(func, out_idx=[3], target=SM100_TARGET)
+    scores = torch.randn(M, 4, 8, device="cuda", dtype=torch.float32)
+    weights = torch.randn(M, 4, 8, device="cuda", dtype=torch.float32)
+    scale = torch.randn(M, device="cuda", dtype=torch.float32)
+    out = kernel(scores, weights, scale)
+    ref = (torch.maximum(scores * scale[:, None, None], torch.zeros_like(scores)) * weights).sum(dim=(1, 2))
+    torch.testing.assert_close(out, ref, rtol=1e-5, atol=1e-5)
 
 
 @tilelang.testing.requires_cuda

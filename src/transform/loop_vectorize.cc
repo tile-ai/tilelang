@@ -188,6 +188,9 @@ public:
     bool disable_vectorize_256 = tl_config::Vectorize256Disabled();
     bool verbose = tl_config::VectorizePlannerVerboseEnabled();
 
+    root_loop_ = node;
+    inner_for_ = nullptr;
+
     if (TargetSupportVectorize256(Target::Current(false)) &&
         !disable_vectorize_256 &&
         VectorizeFindMemoryAccess::MaySupportVectorize256(node)) {
@@ -373,12 +376,23 @@ public:
   }
 
 private:
+  bool IsTrivialUnitLoop(const ForNode *node) const {
+    auto extent = as_const_int(analyzer_->Simplify(node->extent));
+    return extent && *extent == 1;
+  }
+
   Stmt VisitStmt_(const ForNode *node) final {
+    For loop = GetRef<For>(node);
+    if (!loop.same_as(root_loop_) && IsTrivialUnitLoop(node)) {
+      return arith::IRMutatorWithAnalyzer::VisitStmt_(node);
+    }
+
     inner_for_ = node;
     bool contains_nested_for = false;
     // Must analysis vectorization on the innermost loop
     PostOrderVisit(Downcast<Stmt>(node->body), [&](const ObjectRef &obj) {
-      if (obj.as<ForNode>()) {
+      if (const auto *nested = obj.as<ForNode>();
+          nested != nullptr && !IsTrivialUnitLoop(nested)) {
         contains_nested_for = true;
       }
     });
@@ -935,6 +949,7 @@ private:
   int initial_vector_size_ = 128;
   int loop_extent_vector_size_ = 128;
 
+  For root_loop_;
   const ForNode *inner_for_{};
   bool has_nonlocal_memory_access_ = false;
   int vector_size_ = 128;
@@ -949,12 +964,17 @@ public:
 
 private:
   Stmt VisitStmt_(const ForNode *node) final {
+    auto extent_ptr = as_const_int(node->extent);
+    if (extent_ptr && *extent_ptr == 1) {
+      return StmtExprMutator::VisitStmt_(node);
+    }
+
     inner_for_ = node;
     auto ret = StmtExprMutator::VisitStmt_(node);
     if (inner_for_ == node) { // rewrite the innermost loop
       For fnode = ret.as<For>().value();
       auto old_var = fnode->loop_var;
-      auto extent_ptr = as_const_int(fnode->extent);
+      extent_ptr = as_const_int(fnode->extent);
       ICHECK(extent_ptr) << fnode->extent;
       int extent = *extent_ptr;
       ICHECK(extent % vector_size_ == 0)

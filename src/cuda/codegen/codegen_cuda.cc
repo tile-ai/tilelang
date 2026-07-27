@@ -5360,6 +5360,76 @@ void CodeGenTileLangCUDA::VisitExpr_(const ShuffleNode *op,
     return;
   }
 
+  // CUDA vector types are structs, so scalar lane extraction must use their
+  // named fields instead of the C code generator's `vec[index]` syntax.
+  if (op->vectors.size() == 1 && op->indices.size() == 1) {
+    const auto *lane = op->indices[0].as<IntImmNode>();
+    ICHECK(lane) << "ShuffleNode extract index must be constant at codegen "
+                    "time, got "
+                 << op->indices[0];
+    std::string vec = PrintExpr(op->vectors[0]);
+    PrintVecElemLoad(vec, vec_t, static_cast<int>(lane->value), os);
+    return;
+  }
+
+  // Build float32 shuffles with CUDA-aware lane access. CodeGenC uses
+  // `vec[index]` for vector inputs and one constructor argument per logical
+  // lane, neither of which matches CUDA's struct vector types for f32x2..x8.
+  if (t.is_float() && t.bits() == 32 && t.lanes() > 1) {
+    std::vector<std::string> concat_vec;
+    for (const PrimExpr &vec : op->vectors) {
+      std::string vec_value = PrintExpr(vec);
+      if (vec.dtype().is_scalar()) {
+        concat_vec.push_back(vec_value);
+      } else {
+        for (int i = 0; i < vec.dtype().lanes(); ++i) {
+          std::ostringstream elem;
+          PrintVecElemLoad(vec_value, vec.dtype(), i, elem);
+          concat_vec.push_back(elem.str());
+        }
+      }
+    }
+
+    std::vector<std::string> scalars;
+    scalars.reserve(op->indices.size());
+    for (const PrimExpr &index : op->indices) {
+      const auto *lane = index.as<IntImmNode>();
+      ICHECK(lane) << "ShuffleNode indices must be constants at codegen time, "
+                      "got "
+                   << index;
+      ICHECK_GE(lane->value, 0);
+      ICHECK_LT(lane->value, static_cast<int64_t>(concat_vec.size()));
+      scalars.push_back(concat_vec[lane->value]);
+    }
+
+    int lanes = t.lanes();
+    ICHECK_EQ(static_cast<int>(scalars.size()), lanes);
+    if (lanes <= 4) {
+      os << "make_";
+      PrintType(t, os);
+      os << '(';
+      for (int i = 0; i < lanes; ++i) {
+        if (i != 0)
+          os << ", ";
+        os << scalars[i];
+      }
+      os << ')';
+    } else {
+      ICHECK_EQ(lanes % 2, 0);
+      os << "make_";
+      PrintType(t, os);
+      os << '(';
+      for (int i = 0; i < lanes; i += 2) {
+        if (i != 0)
+          os << ", ";
+        os << "*(unsigned long long*)&make_float2(" << scalars[i] << ", "
+           << scalars[i + 1] << ')';
+      }
+      os << ')';
+    }
+    return;
+  }
+
   // 32-bit int/uint vectors with lanes > 4 are typed as (u)longlong{lanes/2}
   // by PrintType. The base CodeGenC emits `make_<type>(v0, v1, ..., v_{N-1})`
   // N args for N lanes, which produces e.g. `make_ulonglong4(8 args)` and

@@ -133,22 +133,12 @@ private:
       layout_map_ = layout_map->as<Map<Buffer, Layout>>().value();
     }
 
-    // Record the mapping from buffer data var to buffer for later lookup
-    for (auto buffer : alloc_buffers) {
-      buffer_map_.insert({buffer->data, buffer});
-    }
-    for (auto match_buffer : op->match_buffers) {
-      buffer_map_.insert({match_buffer->buffer->data, match_buffer->buffer});
-    }
-
     Array<Buffer> tmem_buffers;
-
-    for (const auto &[data, buffer] : buffer_map_) {
+    for (const Buffer &buffer : alloc_buffers) {
       const auto *ptr_type =
           buffer->data->type_annotation.as<PointerTypeNode>();
-      auto storage_scope = ptr_type->storage_scope;
       ICHECK(ptr_type) << "Buffer Var's type annotation must be of PointerType";
-      if (storage_scope == "shared.tmem") {
+      if (ptr_type->storage_scope == "shared.tmem") {
         tmem_buffers.push_back(buffer);
       }
     }
@@ -207,6 +197,9 @@ private:
       new_buffers.push_back(new_buffer);
       buffer_remap_.Set(buffer, new_buffer);
       buffer_data_to_buffer_.Set(new_data, new_buffer);
+      tmem_base_buffer_remap_.Set(
+          data, decl_buffer({Integer(1)}, tmem_dtype_, buffer->name + "_base",
+                            "local"));
     }
 
     // remove the tmem buffers
@@ -217,6 +210,12 @@ private:
       return buf;
     });
     if (!alloc_buffers.same_as(op->alloc_buffers)) {
+      for (const Buffer &buffer : op->alloc_buffers) {
+        if (buffer_remap_.count(buffer)) {
+          alloc_buffers.push_back(
+              tmem_base_buffer_remap_.at(buffer->data));
+        }
+      }
       block.CopyOnWrite()->alloc_buffers = alloc_buffers;
     } else {
       return StmtExprMutator::VisitStmt_(op);
@@ -295,6 +294,12 @@ private:
     new_body.push_back(
         Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
                       {StringImm("shared")})));
+    for (const Buffer &buffer : tmem_buffers) {
+      Buffer new_buffer = buffer_remap_.at(buffer);
+      Buffer base = tmem_base_buffer_remap_.at(buffer->data);
+      new_body.push_back(
+          BufferStore(base, BufferLoad(new_buffer, {0}), {Integer(0)}));
+    }
     new_body.push_back(block->body);
     if (!dealloc_tmem_calls_.empty()) {
       if (tmem_call_ann.find("use_2cta") != tmem_call_ann.end()) {
@@ -345,14 +350,11 @@ private:
     auto indices = load->indices;
 
     if (buffer_remap_.count(buffer)) {
-      auto new_buffer = buffer_remap_[load->buffer];
-      return BufferLoad(new_buffer, {0}) + GetTmemOffset(buffer, indices);
+      return BufferLoad(tmem_base_buffer_remap_.at(buffer->data), {0}) +
+             GetTmemOffset(buffer, indices);
     } else if (var_remap_.count(buffer->data)) {
-      auto new_buffer = Buffer(
-          var_remap_[buffer->data], tmem_dtype_, buffer->shape, buffer->strides,
-          buffer->elem_offset, buffer->name, buffer->data_alignment,
-          buffer->offset_factor, buffer->buffer_type);
-      return BufferLoad(new_buffer, {0}) + GetTmemOffset(buffer, indices);
+      return BufferLoad(tmem_base_buffer_remap_.at(buffer->data), {0}) +
+             GetTmemOffset(buffer, indices);
     }
     return load;
   }
@@ -430,10 +432,9 @@ private:
   IterVar thread_var_;
   Target target_;
   Map<Var, Var> var_remap_;
+  Map<Var, Buffer> tmem_base_buffer_remap_;
   Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Buffer, Buffer> buffer_remap_;
-  // Mapping from data Var of a Buffer to Buffer, for lookup
-  std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
   std::unordered_map<Var, int, ObjectPtrHash, ObjectPtrEqual>
       tmem_num_cols_allocated_;
   std::unordered_map<Var, Map<String, ObjectRef>, ObjectPtrHash, ObjectPtrEqual>
