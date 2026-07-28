@@ -9,7 +9,7 @@ from tilelang.profiler import do_bench
 
 
 @tilelang.jit
-def gemm(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_stages, use_tma_store):
+def gemm(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_stages, use_tma_store=True):
     M, N, K = T.const("M, N, K")
 
     k_iters = T.ceildiv(K, block_K)
@@ -74,7 +74,7 @@ def gemm(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_
 
 
 @tilelang.jit
-def gemm_2cta(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_stages, use_tma_store):
+def gemm_2cta(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_stages, use_tma_store=True):
     M, N, K = T.const("M, N, K")
 
     k_iters = T.ceildiv(K, block_K)

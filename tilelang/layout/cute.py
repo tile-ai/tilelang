@@ -131,12 +131,6 @@ class ScaledBasis:
     def __rmul__(self, other: IntTupleLike) -> PyIntTuple:
         return to_python(from_python(other) * from_python(self))
 
-    def __eq__(self, other) -> bool:
-        return isinstance(other, ScaledBasis) and self._value == other._value and self._mode == other._mode
-
-    def __hash__(self) -> int:
-        return hash((self._value, self._mode))
-
     def __repr__(self) -> str:
         return "@".join([str(self._value), *(str(m) for m in reversed(self._mode))])
 

@@ -161,7 +161,9 @@ Tcgen05CopyPlan ExpandTcgen05Layout(const Tcgen05Meta &meta,
                                     const cute::Layout &tmem_tile,
                                     int num_threads) {
   static constexpr int WARPGROUP_SIZE = 128;
-  ICHECK(num_threads % WARPGROUP_SIZE == 0);
+  ICHECK(num_threads > 0 && num_threads % WARPGROUP_SIZE == 0)
+      << "ExpandTcgen05Layout needs a positive multiple of " << WARPGROUP_SIZE
+      << " threads, got " << num_threads;
   int num_wgs = num_threads / WARPGROUP_SIZE;
 
   // Serialize (datapath, column) into the flat address datapath + 128*column
@@ -238,27 +240,18 @@ Tcgen05CopyPlan ExpandTcgen05Layout(const Tcgen05Meta &meta,
                                          cute::MakeLayout({grid[1], grid[3]})});
   cute::Layout tiled = cute::BlockedProduct(serialized_fragment, tiler);
 
-  // Append the issue mode slowest of all value modes (each later issue
-  // appends registers).  The issue mode is the rest of dividing the
-  // serialized tile by its chunk.
-  // issue_mode: issue -> serialized TMEM;  E.g., 3:16384
-  // full_tv: (thread, value) -> serialized TMEM
-  // E.g., full_tv = ((32,(4,1)),((1,(64,1)),3)):
-  //                 ((1,(32,8192)),((0,(128,32)),16384))
-  cute::Layout issue_mode =
-      cute::LogicalDivide(serialized_tmem_tile, inv_prefix)[1];
-  cute::Layout value_modes = cute::MakeLayout({tiled[1], issue_mode});
-  cute::Layout full_tv = cute::MakeLayout({tiled[0], value_modes});
-
-  int64_t num_vals = cute::AsConst(cute::Size(value_modes));
-
-  // A gapped tile is injective but not surjective, so the LEFT inverse maps
-  // its serialized image back to flat logical indices.
+  // Map the copy back to flat logical indices piecewise, mirroring the
+  // (chunk, rest) split of the divide above: every replica of `tiled`
+  // addresses within one contiguous chunk, which inv_prefix inverts, and
+  // rest_domain already locates each issue's flat logical origin -- so the
+  // issue mode composes directly, without inverting the whole tile.
   // tile_tv: (thread, value) -> flat logical tile
-  // E.g., LeftInverse = (16384,3):(3,1),
-  //       tile_tv = ((32,(4,1)),((1,(64,1)),3)):((3,(96,1)),((0,(384,1)),1))
-  cute::Layout tile_tv =
-      cute::Composition(cute::LeftInverse(serialized_tmem_tile), full_tv);
+  // E.g., tile_tv = ((32,(4,1)),((1,(64,1)),3)):((3,(96,1)),((0,(384,1)),1))
+  cute::Layout tile_tv = cute::MakeLayout(
+      {cute::Composition(inv_prefix, tiled[0]),
+       cute::MakeLayout(
+           {cute::Composition(inv_prefix, tiled[1]), rest_domain})});
+  int64_t num_vals = cute::AsConst(cute::Size(tile_tv[1]));
 
   // Invert (the make_tiled_copy `right_inverse(...).with_shape(...)` idiom):
   // the identity layout tags the (thread@0, value@1) axes, with_shape

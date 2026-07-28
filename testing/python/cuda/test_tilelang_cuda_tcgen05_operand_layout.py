@@ -31,7 +31,7 @@ def _swizzle_128b(shape, plain_address):
 
 
 def _ranges(mins, extents):
-    return [tvm.ir.Range.from_min_extent(begin, extent) for begin, extent in zip(mins, extents)]
+    return [tvm.ir.Range.from_min_extent(begin, extent) for begin, extent in zip(mins, extents, strict=True)]
 
 
 def _make_emitter():

@@ -432,8 +432,8 @@ TVM_DLL Layout RightInverse(const Layout &layout);
 
 /// Left-inverse of an injective layout (CuTe left_inverse):
 /// @return result(layout(i)) == i for all i < size(layout).
-/// Realized as right_inverse(make_layout(layout, complement(layout))), which
-/// extends the codomain-covering chain that right_inverse alone stops at.
+/// Like CuTe, ICHECKs when the sorted strides do not form the divisibility
+/// chain the inverse requires (an injective layout with irregular gaps).
 TVM_DLL Layout LeftInverse(const Layout &layout);
 
 /// Composition lhs o rhs.

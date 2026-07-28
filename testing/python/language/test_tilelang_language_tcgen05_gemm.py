@@ -612,6 +612,57 @@ def test_tcgen05_ld_whole_batched_buffer_correctness():
     torch.testing.assert_close(d, ref, rtol=1e-2, atol=1e-2)
 
 
+def _make_fp16_accum_tcgen05_kernel():
+    @T.prim_func
+    def main(
+        A: T.Tensor((128, 128), T.float8_e4m3fn),
+        B: T.Tensor((128, 128), T.float8_e4m3fn),
+        D: T.Tensor((128, 128), T.float16),
+    ):
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared((128, 128), T.float8_e4m3fn)
+            B_shared = T.alloc_shared((128, 128), T.float8_e4m3fn)
+            C_tmem = T.alloc_tmem((128, 128), T.float16)
+            mbar = T.alloc_barrier(1)
+            C_local = T.alloc_fragment((128, 128), T.float16)
+            C_shared = T.alloc_shared((128, 128), T.float16)
+
+            T.copy(A, A_shared)
+            T.copy(B, B_shared)
+            T.gemm(A_shared, B_shared, C_tmem, transpose_B=True, mbar=mbar, clear_accum=True)
+            T.mbarrier_wait_parity(mbar, 0)
+            T.copy(C_tmem, C_local)
+            T.copy(C_local, C_shared)
+            T.copy(C_shared, D)
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
+def test_tcgen05_gemm_fp16_accumulator_pack16b_epilogue():
+    import torch
+
+    # A 16-bit matrix D element occupies the lower 16 bits of its own 32-bit
+    # tensor-memory word (PTX ISA "Packing format for matrix D in Tensor
+    # Memory"), so an FP8 GEMM with an fp16 accumulator writes a TMEM
+    # fragment the epilogue copy must plan in b32 columns and gather with
+    # the pack::16b modifier -- one register per two b32 columns, hence x64
+    # for 128 b32 columns.
+    kernel = tilelang.compile(_make_fp16_accum_tcgen05_kernel(), target="cuda")
+    source = kernel.get_kernel_source()
+    ld_line = next(line for line in source.splitlines() if "tcgen05_ld_" in line)
+    assert "tcgen05_ld_32dp32bNx<64, true>" in ld_line
+
+    a = (torch.randn(128, 128, device="cuda") * 0.25).to(torch.float8_e4m3fn)
+    b = (torch.randn(128, 128, device="cuda") * 0.25).to(torch.float8_e4m3fn)
+    d = torch.empty(128, 128, device="cuda", dtype=torch.float16)
+    kernel(a, b, d)
+    ref = (a.float() @ b.float().T).to(torch.float16)
+    torch.testing.assert_close(d, ref, rtol=1e-2, atol=1e-2)
+
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(10)
 @tilelang.testing.requires_cuda_compute_version_lt(11)

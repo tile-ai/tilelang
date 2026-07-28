@@ -217,8 +217,9 @@ def _tile_tmem_frg_atom(
     ordered = cute.make_layout([tiled[mode] for mode in mode_order])
 
     # ``tmem_restride``: virtual addresses to ``(datapath, column)``
-    # coordinates, the column dilated by StorageType/ValueType exactly as
-    # CUTLASS's COL_ADDR stride (a float16 accumulator occupies int32 slots).
+    # coordinates, the column scaled by StorageType/ValueType exactly as
+    # CUTLASS's COL_ADDR stride (a float16 accumulator occupies the low half
+    # of an int32 slot; tcgen05.ld reads it back with pack::16b).
     restride = cute.make_layout(
         (128, 16384),
         (cute.E(0), storage_bits // value_bits * cute.E(1)),

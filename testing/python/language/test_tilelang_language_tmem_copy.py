@@ -171,6 +171,34 @@ def _make_batch_sliced_roundtrip_kernel(shape, forward, threads):
     return main
 
 
+def _make_16bit_roundtrip_kernel(shape, forward, dtype):
+    @T.prim_func
+    def main(
+        A: T.Tensor(shape, dtype),
+        D: T.Tensor(shape, dtype),
+    ):
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared(shape, dtype)
+            A_frag = T.alloc_fragment(shape, dtype)
+            tmem = T.alloc_tmem(shape, dtype)
+            B_frag = T.alloc_fragment(shape, dtype)
+            B_shared = T.alloc_shared(shape, dtype)
+
+            T.annotate_layout({tmem: T.Layout(shape, forward)})
+            T.copy(A, A_shared)
+            T.copy(A_shared, A_frag)
+            T.copy(A_frag, tmem)
+            # Clobber both fragments so a partial load cannot be masked by
+            # stale register values that happen to alias the store's.
+            T.fill(A_frag, -1.0)
+            T.fill(B_frag, -2.0)
+            T.copy(tmem, B_frag)
+            T.copy(B_frag, B_shared)
+            T.copy(B_shared, D)
+
+    return main
+
+
 def _run_roundtrip(kernel_func, shape):
     kernel = tilelang.compile(kernel_func, target="cuda", pass_configs=PASS_CONFIGS)
     source = kernel.get_kernel_source()
@@ -191,6 +219,38 @@ def _run_roundtrip(kernel_func, shape):
 )
 def test_tmem_copy_roundtrip(name, shape, forward, threads):
     _run_roundtrip(_make_roundtrip_kernel(shape, forward, threads), shape)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
+@pytest.mark.parametrize(
+    ("name", "shape", "forward", "modifier"),
+    [
+        # CUTLASS FrgTypeC keeps each 16-bit accumulator in the low half of
+        # its own 32-bit storage slot (column stride 2), so the copy plans
+        # in b32 columns and gathers with the pack::16b/unpack::16b
+        # modifiers.
+        ("pack16b", (128, 64), lambda i, j: [i, 2 * j], True),
+        # Two 16-bit values packed per b32 column move as whole columns with
+        # the plain instruction.
+        ("packed_pair", (128, 128), lambda i, j: [i, j], False),
+    ],
+    ids=["pack16b", "packed_pair"],
+)
+def test_tmem_copy_roundtrip_16bit(name, shape, forward, modifier):
+    kernel = tilelang.compile(
+        _make_16bit_roundtrip_kernel(shape, forward, T.bfloat16),
+        target="cuda",
+        pass_configs=PASS_CONFIGS,
+    )
+    source = kernel.get_kernel_source()
+    ld_line = next(line for line in source.splitlines() if "tcgen05_ld_" in line)
+    assert (", true>" in ld_line) == modifier
+    a = torch.randn(*shape, device="cuda", dtype=torch.bfloat16)
+    d = torch.empty(*shape, device="cuda", dtype=torch.bfloat16)
+    kernel(a, d)
+    torch.testing.assert_close(d, a, rtol=0.0, atol=0.0)
 
 
 @tilelang.testing.requires_cuda

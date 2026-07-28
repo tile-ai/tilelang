@@ -366,6 +366,39 @@ MakeTMARows(const Buffer &src, const Array<Range> &src_ranges,
   return std::make_pair(Array<Stmt>{for_loop}, extent * body_cnt);
 }
 
+// CuTe's make_tmem_copy works in the tensor's value width by upcasting the
+// atom's ValID (copy_traits_sm100.hpp:300).  Our tiles already address
+// (datapath@0, value-column@1), so the same unit change is one composition
+// with the value -> storage column map ((1),(vpb,1)):((1@0),(0,1@1)):
+// b32 column = value column / vpb, the sub-slot position dropping onto the
+// stride-0 mode (exactly CuTe upcast's shape-division, layout.hpp:1809).
+cute::Layout TmemTileToB32Columns(const cute::Layout &tile,
+                                  int64_t values_per_b32) {
+  cute::Layout value_to_b32 =
+      cute::MakeLayout({cute::Layout(1, cute::E({0})),
+                        cute::Layout(cute::IntTupleTuple({values_per_b32, 1}),
+                                     cute::IntTupleTuple({0, cute::E({1})}))});
+  return cute::Composition(value_to_b32, tile);
+}
+
+// A 16-bit fragment that needs the tcgen05.ld/st pack::16b / unpack::16b
+// modifiers does not cover its codomain: every value column is half-filled,
+// so size < cosize.  This is the accumulator format the MMA hardware writes
+// -- PTX ISA "Packing format for matrix D in Tensor Memory"
+// (9.7.17.10.4.1): a 16-bit matrix D element occupies the lower 16 bits of
+// its own 32-bit tensor-memory word (CUTLASS FrgTypeC's
+// StorageType=uint32_t / ValueType=half) -- and pack::16b is how tcgen05.ld
+// gathers those low halves (two adjacent words per register).  A fragment
+// with two values packed per b32 column is a bijection onto its footprint
+// and moves with the plain instruction.  The storage format is a property
+// of the buffer's layout, so it is decided on the WHOLE fragment -- a
+// Region slice of a batched buffer also leaves codomain gaps, but those
+// are batch gaps, not half-filled columns.
+bool TmemFragmentNeedsPack16b(const cute::Layout &fragment) {
+  return cute::AsConst(cute::Size(fragment)) !=
+         cute::AsConst(cute::Cosize(fragment));
+}
+
 } // namespace
 
 namespace cuda {
@@ -615,6 +648,17 @@ LayoutMap Copy::InferTMemLayout(const CopyNode &op,
         is_tmem_load ? op.src_range : op.dst_range;
     const Array<Range> &reg_ranges = is_tmem_load ? op.dst_range : op.src_range;
     cute::Layout tile = cute::Restrict(tmem_frag.value(), tmem_ranges).get<1>();
+
+    // A pack::16b tile (one value per b32 storage slot, CUTLASS FrgTypeC)
+    // is planned in b32 columns -- the CuTe upcast make_tmem_copy applies
+    // to ValID.  Shapes are untouched, so the fragment's logical
+    // coordinates and value order carry over unchanged (b32 column j holds
+    // exactly value j).  A 16-bit tile with two values per b32 column keeps
+    // its value-column planning: the plain instruction moves whole columns
+    // of packed pairs.
+    int64_t values_per_b32 = 32 / (tmem_buf->dtype.bits());
+    if (values_per_b32 > 1 && TmemFragmentNeedsPack16b(tmem_frag.value()))
+      tile = TmemTileToB32Columns(tile, values_per_b32);
 
     // The register buffer is a grid of such slices (a split epilogue issues
     // one copy per slice), each appending its own registers.
@@ -1441,6 +1485,32 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
   ICHECK_EQ(cute::Rank(tile), static_cast<int64_t>(loop_vars.size()))
       << "TMEM copy tile rank does not match the copy loop rank";
 
+  // 16-bit values in 32-bit TMEM columns come in two layouts (see
+  // InferTMemLayout):
+  //  * pack::16b / unpack::16b (one value in the low half of each word,
+  //    CUTLASS FrgTypeC): plan on the b32-upcast tile; the modifier's
+  //    registers gather the low halves of two ADJACENT b32 columns
+  //    (Copy_Traits<*_16b> ValID) -- one register per two columns;
+  //  * two values packed per b32 column: plan in value columns and move
+  //    whole columns of packed pairs with the PLAIN instruction -- one
+  //    register per column, i.e. per two values.
+  // Either way one register covers two values, so the wrapper's N is half
+  // the planned chunk count.
+  int64_t values_per_b32 = 32 / (tmem_buf->dtype.bits());
+  bool pack16b =
+      values_per_b32 > 1 && TmemFragmentNeedsPack16b(tmem_frag.value());
+  if (pack16b) {
+    tile = TmemTileToB32Columns(tile, values_per_b32);
+    // The width-alignment checks below run in the tile's (b32) units; a
+    // pack::16b origin is always storage-slot aligned.
+    ICHECK(analyzer->CanProveEqual(
+        FloorMod(phy_origin[1], IntImm(DataType::Int(32), values_per_b32)), 0))
+        << "A pack::16b TMEM origin must start on a b32 column";
+    phy_origin.Set(
+        1, analyzer->Simplify(FloorDiv(
+               phy_origin[1], IntImm(DataType::Int(32), values_per_b32))));
+  }
+
   size_t tmem_rank = tmem_buf->shape.size();
 
   // The address token below is the Region's logical origin across all buffer
@@ -1455,10 +1525,11 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
       tmem_logical_indices.Map([&](const PrimExpr &index) {
         return analyzer->Simplify(Substitute(index, loop_to_origin));
       });
-  if (needs_pack_unpack) {
+  if (needs_pack_unpack && !pack16b) {
     ICHECK(analyzer->CanProveEqual(
         FloorMod(tmem_origin_indices[tmem_rank - 1], 2), 0))
-        << "A sliced 16-bit TMEM copy must start at an even logical column";
+        << "A sliced packed 16-bit TMEM copy must start at an even logical "
+           "column";
   }
 
   bool have_succeeded = false;
@@ -1519,15 +1590,23 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
         continue;
       }
 
-      bool use_pack_unpack_modifier = is_ld ? needs_pack_unpack : false;
+      bool use_pack_unpack_modifier = pack16b;
+      // One register covers two 16-bit values -- pack::16b spans two b32
+      // columns, a packed pair shares one -- so the wrapper's N is half the
+      // planned chunk count (N is always a power of two).
       int effective_chunks =
           needs_pack_unpack ? num_chunks_each_wg / 2 : num_chunks_each_wg;
       PrimExpr relative_wg_idx =
           FloorDiv(Sub(lower_args.thread_index, lower_args.thread_bounds->min),
                    WARPGROUP_SIZE);
+      // Column offsets are raw b32 columns: a pack::16b tile's chunk count
+      // already is b32 columns, a packed-pair tile's is halved (planned in
+      // value columns, two per b32).
+      int chunk_cols =
+          pack16b ? num_chunks_each_wg * width : effective_chunks * width;
       PrimExpr col_offset = num_useful_threads == WARPGROUP_SIZE
                                 ? PrimExpr(0)
-                                : relative_wg_idx * (effective_chunks * width);
+                                : relative_wg_idx * chunk_cols;
       int64_t vals_per_issue = plan->vals_per_issue;
       have_succeeded = true;
 

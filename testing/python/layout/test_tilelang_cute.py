@@ -508,6 +508,27 @@ def test_cosize_dynamic_is_symbolic():
         assert int(ana.simplify(sub)) == expect
 
 
+def test_left_inverse_matches_cute():
+    # Official left_inverse results (compiled against the CuTe headers):
+    # a permuted layout inverts across modes, and a broadcast/batch-sliced
+    # layout gets a leading stride-0 slot absorbing the skipped strides.
+    _assert_struct(cute.left_inverse(cute.make_layout((4, 8))), 32, 1)
+    _assert_struct(cute.left_inverse(cute.make_layout((4, 8), stride=(8, 1))), (8, 4), (4, 1))
+    _assert_struct(cute.left_inverse(cute.make_layout(8, stride=2)), (2, 8), (0, 1))
+    _assert_struct(cute.left_inverse(cute.make_layout((3, 8192), stride=(16384, 1))), (16384, 3), (3, 1))
+    _assert_struct(
+        cute.left_inverse(cute.make_layout((2, 3, 4), stride=(12, 1, 3))),
+        (12, 2),
+        (2, 1),
+    )
+    # result(layout(i)) == i on a permuted case.
+    L = cute.make_layout((4, 3), stride=(1, 8))
+    li = cute.left_inverse(L)
+    for i in range(4):
+        for j in range(3):
+            assert li(L((i, j))) == i + 4 * j
+
+
 def test_complement_matches_cute():
     # complement(layout, cotarget): the gaps the layout does not address.
     _assert_same_fn(cute.complement(cute.make_layout(2, stride=1), 16), cute.make_layout(8, stride=2))

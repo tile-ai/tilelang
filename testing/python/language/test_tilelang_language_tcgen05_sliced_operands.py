@@ -426,7 +426,7 @@ def test_tcgen05_ts_issue_only_sliced_a_and_b():
     source = kernel.get_kernel_source()
     # The four K32 issues stay in the serial loop, so one instruction carries
     # a loop-dependent TMEM A origin and descriptor offset.
-    assert source.count("tcgen05mma_ts") == 1
+    assert source.count("tl::tcgen05mma_ts<") == 1
     assert source.count("tcgen05_mma_arrive") == 1
     assert "(k * 16)" in source
     assert "increase_descriptor_offset" in source
@@ -509,7 +509,7 @@ def test_tcgen05_ts_nonzero_c_m_n_origins_compile():
         target="cuda",
         pass_configs=PASS_CONFIGS,
     ).get_kernel_source()
-    ts_line = next(line for line in source.splitlines() if "tcgen05mma_ts" in line)
+    ts_line = next(line for line in source.splitlines() if "tl::tcgen05mma_ts<" in line)
     assert "C_tmem" in ts_line and "+ 192" in ts_line
 
 
@@ -523,7 +523,7 @@ def test_tcgen05_ss_pinned_leading_modes_end_to_end():
         pass_configs=PASS_CONFIGS,
     )
     source = kernel.get_kernel_source()
-    assert source.count("tcgen05mma_ss") == 1
+    assert source.count("tl::tcgen05mma_ss<") == 1
 
     a = torch.randn((128, 16), device="cuda", dtype=torch.bfloat16)
     b = torch.randn((16, 64), device="cuda", dtype=torch.bfloat16)
