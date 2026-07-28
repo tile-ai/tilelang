@@ -97,8 +97,9 @@ private:
 
   ffi::Array<PrimExpr> SqueezedIndices(const ffi::Array<PrimExpr> &indices) {
     ffi::Array<PrimExpr> new_indices;
-    for (int d : kept_dims_) {
-      new_indices.push_back(indices[d] - region_mins_[d]);
+    for (size_t i = 0; i < kept_dims_.size(); ++i) {
+      int d = kept_dims_[i];
+      new_indices.push_back(RebaseBufferIndex(indices[d], region_mins_[d]));
     }
     return new_indices;
   }
@@ -154,10 +155,12 @@ private:
     for (const auto &region : regions) {
       if (region->buffer.same_as(src_)) {
         ffi::Array<Range> new_ranges;
-        for (int d : kept_dims_) {
+        for (size_t i = 0; i < kept_dims_.size(); ++i) {
+          int d = kept_dims_[i];
+          PrimExpr min =
+              RebaseBufferIndex(region->region[d]->min, region_mins_[d]);
           new_ranges.push_back(
-              Range::FromMinExtent(region->region[d]->min - region_mins_[d],
-                                   region->region[d]->extent));
+              Range::FromMinExtent(min, region->region[d]->extent));
         }
         result.push_back(BufferRegion(dst_, new_ranges));
       } else {
@@ -227,9 +230,13 @@ static void CacheReduceAt(s_tir::ScheduleState self, const StmtSRef &loop_sref,
     PrimExpr mn = analyzer.Simplify(unified[d].min());
     PrimExpr mx = analyzer.Simplify(unified[d].max());
     PrimExpr extent = analyzer.Simplify(mx - mn + 1);
+    PrimExpr region_min = mn;
+    PrimExpr cache_extent = NormalizeStaticShapeDim(extent);
+    mn = MatchBufferIndexDType(src, d, mn);
+    extent = MatchBufferIndexDType(src, d, extent);
     cache_region.push_back(Range::FromMinExtent(mn, extent));
-    cache_shape.push_back(extent);
-    region_mins.push_back(mn);
+    cache_shape.push_back(cache_extent);
+    region_mins.push_back(region_min);
   }
 
   // ---- Step 4: Create the cache buffer ------------------------------------

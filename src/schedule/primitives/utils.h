@@ -30,6 +30,7 @@
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
 
+#include <limits>
 #include <unordered_set>
 #include <vector>
 
@@ -67,18 +68,49 @@ static inline void CheckLoopIsAncestorOfBlock(const ScheduleState &self,
 // MakeRegionCall: construct a tl.region() Call that encodes a BufferRegion as
 // a PrimExpr for passing as an argument to tl.tileop.{copy,fill,reduce}.
 // ---------------------------------------------------------------------------
+static inline PrimExpr MatchBufferIndexDType(const Buffer &buf, size_t dim,
+                                             PrimExpr expr) {
+  DataType index_dtype = buf->shape[dim].dtype();
+  if (expr.dtype() == index_dtype) {
+    return expr;
+  }
+  if (const auto *imm = expr.as<IntImmNode>()) {
+    return IntImm(index_dtype, imm->value);
+  }
+  return cast(index_dtype, expr);
+}
+
+static inline PrimExpr RebaseBufferIndex(PrimExpr index, PrimExpr min) {
+  arith::Analyzer analyzer;
+  return analyzer.Simplify(index - min);
+}
+
+static inline PrimExpr NormalizeStaticShapeDim(PrimExpr extent) {
+  const auto *imm = extent.as<IntImmNode>();
+  if (imm == nullptr || imm->dtype == DataType::Int(32)) {
+    return extent;
+  }
+  ICHECK_GE(imm->value, 0) << "Buffer shape dimensions must be non-negative";
+  ICHECK_LE(imm->value, std::numeric_limits<int32_t>::max())
+      << "Buffer shape dimension exceeds the int32 range: " << imm->value;
+  return IntImm(DataType::Int(32), imm->value);
+}
+
 static inline PrimExpr MakeRegionCall(const Buffer &buf,
                                       const ffi::Array<Range> &ranges,
                                       int access_mask) {
+  ICHECK_EQ(buf->shape.size(), ranges.size());
   ffi::Array<PrimExpr> args;
   ffi::Array<PrimExpr> min_indices;
-  for (const auto &range : ranges) {
-    min_indices.push_back(range->min);
+  ffi::Array<PrimExpr> extents;
+  for (size_t i = 0; i < ranges.size(); ++i) {
+    min_indices.push_back(MatchBufferIndexDType(buf, i, ranges[i]->min));
+    extents.push_back(MatchBufferIndexDType(buf, i, ranges[i]->extent));
   }
   args.push_back(BufferLoad(buf, min_indices));
   args.push_back(IntImm(DataType::Int(32), access_mask));
-  for (const auto &range : ranges) {
-    args.push_back(range->extent);
+  for (const PrimExpr &extent : extents) {
+    args.push_back(extent);
   }
   return Call(DataType::Handle(), RegionOp::Get(), args);
 }
@@ -221,8 +253,9 @@ private:
   // Build squeezed indices: for each kept dim, compute (original_idx - min).
   ffi::Array<PrimExpr> SqueezedIndices(const ffi::Array<PrimExpr> &indices) {
     ffi::Array<PrimExpr> new_indices;
-    for (int d : kept_dims_) {
-      new_indices.push_back(indices[d] - region_mins_[d]);
+    for (size_t i = 0; i < kept_dims_.size(); ++i) {
+      int d = kept_dims_[i];
+      new_indices.push_back(RebaseBufferIndex(indices[d], region_mins_[d]));
     }
     return new_indices;
   }
@@ -283,10 +316,12 @@ private:
     for (const auto &region : regions) {
       if (region->buffer.same_as(src_)) {
         ffi::Array<Range> new_ranges;
-        for (int d : kept_dims_) {
+        for (size_t i = 0; i < kept_dims_.size(); ++i) {
+          int d = kept_dims_[i];
+          PrimExpr min =
+              RebaseBufferIndex(region->region[d]->min, region_mins_[d]);
           new_ranges.push_back(
-              Range::FromMinExtent(region->region[d]->min - region_mins_[d],
-                                   region->region[d]->extent));
+              Range::FromMinExtent(min, region->region[d]->extent));
         }
         result.push_back(BufferRegion(dst_, new_ranges));
       } else {

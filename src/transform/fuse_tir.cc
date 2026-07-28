@@ -61,6 +61,27 @@
 #endif
 
 namespace tvm {
+
+static ffi::Array<PrimExpr>
+NormalizeStaticBufferShape(const ffi::Array<PrimExpr> &shape) {
+  ffi::Array<PrimExpr> normalized;
+  normalized.reserve(shape.size());
+  for (const PrimExpr &dim : shape) {
+    if (const auto *imm = dim.as<IntImmNode>();
+        imm != nullptr && imm->dtype != DataType::Int(32)) {
+      TVM_FFI_CHECK_GE(imm->value, 0, ValueError)
+          << "Buffer shape dimensions must be non-negative";
+      TVM_FFI_CHECK_LE(imm->value, std::numeric_limits<int32_t>::max(),
+                       ValueError)
+          << "Buffer shape dimension exceeds the int32 range: " << imm->value;
+      normalized.push_back(IntImm(DataType::Int(32), imm->value));
+    } else {
+      normalized.push_back(dim);
+    }
+  }
+  return normalized;
+}
+
 namespace tl {
 
 using namespace tirx;
@@ -223,10 +244,10 @@ public:
 
   Buffer SubstituteAllocatedBuffer(Buffer buffer) {
     ICHECK(buffer_remap_.find(buffer) == buffer_remap_.end());
-    ffi::Array<PrimExpr> shape =
+    ffi::Array<PrimExpr> shape = NormalizeStaticBufferShape(
         MutateArray(buffer->shape, [this](const PrimExpr &expr) {
           return this->VisitExpr(expr);
-        });
+        }));
     ffi::Array<PrimExpr> strides =
         MutateArray(buffer->strides, [this](const PrimExpr &expr) {
           return this->VisitExpr(expr);
@@ -382,12 +403,17 @@ private:
   }
 
   inline Buffer SubstituteBuffer(const Buffer &buffer) const {
-    auto it = buffer_remap_.find(buffer);
-    if (it != buffer_remap_.end()) {
-      return (*it).second;
-    } else {
-      return buffer;
+    Buffer result = buffer;
+    std::unordered_set<Buffer, ffi::ObjectPtrHash, ffi::ObjectPtrEqual> visited;
+    while (true) {
+      ICHECK(visited.insert(result).second) << "Cyclic buffer substitution";
+      auto it = buffer_remap_.find(result);
+      if (it == buffer_remap_.end()) {
+        break;
+      }
+      result = (*it).second;
     }
+    return result;
   }
 
   inline Region MutateRegion(const Region &region) {
@@ -478,26 +504,6 @@ private:
 } // namespace tl
 
 namespace relax {
-
-static ffi::Array<PrimExpr>
-NormalizeStaticBufferShape(const ffi::Array<PrimExpr> &shape) {
-  ffi::Array<PrimExpr> normalized;
-  normalized.reserve(shape.size());
-  for (const PrimExpr &dim : shape) {
-    if (const auto *imm = dim.as<IntImmNode>();
-        imm != nullptr && imm->dtype != DataType::Int(32)) {
-      TVM_FFI_CHECK_GE(imm->value, 0, ValueError)
-          << "Buffer shape dimensions must be non-negative";
-      TVM_FFI_CHECK_LE(imm->value, std::numeric_limits<int32_t>::max(),
-                       ValueError)
-          << "Buffer shape dimension exceeds the int32 range: " << imm->value;
-      normalized.push_back(IntImm(DataType::Int(32), imm->value));
-    } else {
-      normalized.push_back(dim);
-    }
-  }
-  return normalized;
-}
 
 static ffi::Array<Integer>
 GetInplaceOutputIndices(const ffi::Array<Integer> &inplace_indices,

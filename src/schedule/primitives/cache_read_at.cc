@@ -195,9 +195,13 @@ static void CacheReadAt(s_tir::ScheduleState self, const StmtSRef &loop_sref,
         extent = padded;
       }
     }
+    PrimExpr region_min = mn;
+    PrimExpr cache_extent = NormalizeStaticShapeDim(extent);
+    mn = MatchBufferIndexDType(src, d, mn);
+    extent = MatchBufferIndexDType(src, d, extent);
     cache_region.push_back(Range::FromMinExtent(mn, extent));
-    cache_shape.push_back(extent);
-    region_mins.push_back(mn);
+    cache_shape.push_back(cache_extent);
+    region_mins.push_back(region_min);
   }
 
   // ---- Step 4: Create the cache buffer --------------------------------------
