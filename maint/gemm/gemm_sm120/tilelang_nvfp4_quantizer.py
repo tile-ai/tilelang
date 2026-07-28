@@ -24,15 +24,15 @@ from examples.dequantize_gemm.quantize.nvfp4 import (
     _tl_ue4m3_scale_byte_inverse,
 )
 
-_TILELANG_PASS_CONFIGS = {
-    tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
-    tilelang.PassConfigKey.TL_ENABLE_LOWER_LDGSTG: True,
-    tilelang.PassConfigKey.TL_ENABLE_LOWER_LDGSTG_PREDICATED: True,
-}
 
-
-@tilelang.jit(pass_configs=_TILELANG_PASS_CONFIGS)
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
+        tilelang.PassConfigKey.TL_ENABLE_LOWER_LDGSTG: True,
+        tilelang.PassConfigKey.TL_ENABLE_LOWER_LDGSTG_PREDICATED: True,
+    }
+)
 def _tilelang_nvfp4_blockscaled_quantize_kernel_tiled(
     x,
     rows_per_cta: int = 64,
