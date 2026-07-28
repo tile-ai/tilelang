@@ -191,6 +191,7 @@ def max(a: PrimExpr, b: PrimExpr) -> PrimExpr:  # pylint: disable=redefined-buil
     return _ir.max(a, b)
 
 
+Shuffle = _tir_op.Shuffle
 abs = _op_wrapper(_tir_op.abs)  # pylint: disable=redefined-builtin
 acos = _op_wrapper(_tir_op.acos)
 acosh = _op_wrapper(_tir_op.acosh)
@@ -213,6 +214,7 @@ erf = _op_wrapper(_tir_op.erf)
 exp = _op_wrapper(_tir_op.exp)
 exp2 = _op_wrapper(_tir_op.exp2)
 exp10 = _op_wrapper(_tir_op.exp10)
+extract_lane = _tir_op.extract_lane
 floor = _op_wrapper(_tir_op.floor)
 ceildiv = _op_wrapper(_tir_op.ceildiv)
 cdiv = ceildiv
@@ -386,13 +388,14 @@ def cast(value, dtype, round: str = "", sat: bool = True, rbits=None, span=None)
     return _tir_ffi._cast(dtype, value, annotations or None, span)
 
 
-# PrimExpr/IntImm/StringImm/Any are TVM/typing primitives re-exported as part of
-# the historical ``tilelang.language`` surface (e.g. ``T.PrimExpr``).
+# PrimExpr/IntImm/StringImm/Shuffle/Any are TVM/typing primitives re-exported as
+# part of the historical ``tilelang.language`` surface (e.g. ``T.PrimExpr``).
 __all__ = (
     "Any",
     "IntImm",
     "PrimExpr",
     "Select",
+    "Shuffle",
     "StringImm",
     "TVMBackendAllocWorkspace",
     "TVMBackendFreeWorkspace",
@@ -438,6 +441,7 @@ __all__ = (
     "exp",
     "exp10",
     "exp2",
+    "extract_lane",
     "floor",
     "floordiv",
     "floormod",
