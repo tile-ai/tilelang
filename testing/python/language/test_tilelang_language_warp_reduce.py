@@ -1,4 +1,5 @@
 import torch
+import pytest
 
 import tilelang
 import tilelang.testing
@@ -78,12 +79,49 @@ def test_warp_reduce_bitor():
     torch.testing.assert_close(a, ref)
 
 
-def test_warp_reduce_sum_int64():
-    a = torch.zeros((32,), dtype=torch.int64, device="cuda")
-    a[7] = 1 << 40
-    kernel = get_kernel("sum", T.int64)
-    ref = torch.full_like(a, (1 << 40))
+WARP_REDUCE_CASES_64 = [
+    # (op, dtype, N)
+    ("sum", "int64", 32),
+    ("max", "int64", 32),
+    ("min", "int64", 32),
+    ("bitand", "int64", 32),
+    ("bitor", "int64", 32),
+]
+
+
+@pytest.mark.parametrize(
+    ("op", "dtype", "N"),
+    WARP_REDUCE_CASES_64,
+)
+def test_warp_reduce_64(op, dtype, N):
+    def warp_reduce_ref(a):
+        if op == "sum":
+            return torch.full_like(a, a.sum())
+        elif op == "max":
+            return torch.full_like(a, a.max())
+        elif op == "min":
+            return torch.full_like(a, a.min())
+        elif op == "bitand":
+            ref_val = a[0]
+            for i in range(1, a.shape[0]):
+                ref_val = ref_val & a[i]
+            return torch.full_like(a, ref_val)
+        elif op == "bitor":
+            ref_val = a[0]
+            for i in range(1, a.shape[0]):
+                ref_val = ref_val | a[i]
+            return torch.full_like(a, ref_val)
+        raise AssertionError(f"Unknown op: {op}")
+
+    torch_dtype = getattr(torch, dtype)
+    tl_dtype = getattr(T, dtype)
+
+    a = torch.randint(1 << 32, (1 << 63) - 1, (N,), dtype=torch_dtype, device="cuda")
+    ref = warp_reduce_ref(a)
+
+    kernel = get_kernel(op, tl_dtype)
     kernel(a)
+
     torch.testing.assert_close(a, ref)
 
 
