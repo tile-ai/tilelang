@@ -3,7 +3,7 @@ import argparse
 import tilelang
 import tilelang.language as T
 
-from tilelang.utils.sparse import compress, randn_semi_sparse, get_e_factor
+from sparse_utils import compress, randn_semi_sparse, get_e_factor
 from tilelang.profiler import do_bench
 
 import torch

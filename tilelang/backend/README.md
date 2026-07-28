@@ -154,6 +154,32 @@ intrinsic emitters, while ROCm owns MFMA/WMMA emitters. Backend-local
 transform passes, such as Metal's simdgroup lowering and host-context marking,
 should live under that backend's `transform/` package.
 
+## Language Dialects
+
+`tilelang/language/__init__.py` assembles the backend-neutral language surface,
+and `tilelang/language/common.py` exposes its stable common manifest.
+Backend-specific language modules compose that manifest with explicit backend
+extensions. After TileLang finishes initializing, `tilelang.language` is
+augmented as the CUDA-compatible facade.
+
+Backend-specific language surfaces live under the backend package:
+
+```python
+from tilelang import language as T       # common + CUDA compatibility facade
+from tilelang.cuda import language as T  # common + CUDA extension
+from tilelang.rocm import language as T  # common + ROCm extension
+```
+
+Each backend language module re-exports the common language and adds only the
+symbols owned by that backend. For example, CUDA exposes `T.tcgen05_mma`,
+WGMMA/TCGEN05 helpers, and CUDA intrinsic emitters; ROCm exposes MFMA/WMMA
+helpers. Dialect selection is static and follows the import path; there is no
+process-global dialect registry or mutable default.
+
+Library code, tests, and examples that rely on backend-specific symbols should
+prefer explicit imports such as `from tilelang.cuda import language as T` so
+static analysis and autocomplete can resolve the intended dialect.
+
 ## Native Backend Layout
 
 Backend-specific native implementation lives directly under `src/<backend>`:

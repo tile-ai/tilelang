@@ -796,3 +796,31 @@ def test_pipeline_planning_keeps_bind_that_reads_pipeline_written_buffer():
     assert stages == [0, 1, 1]
     assert orders == [0, 1, 2]
     assert replayable_binds == [1, 0, 0, 0]
+
+
+def test_pipeline_planning_keeps_bind_that_reads_atomic_target():
+    @T.prim_func
+    def before(
+        counter: T.Tensor((1,), T.int32),
+        out: T.Tensor((8,), T.int32),
+    ):
+        for i in T.Pipelined(
+            4,
+            order=[0, 1, 2, 3],
+            stage=[0, 0, 1, 1],
+        ):
+            snapshot: T.int32 = counter[0]
+            pos: T.int32 = T.atomic_add(counter[0], 1, return_prev=True)
+            out[i * 2] = snapshot
+            out[i * 2 + 1] = pos
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert annos, "Expected at least one loop annotated by PipelinePlanning"
+    anno = annos[0]
+    stages = [int(v) for v in anno["software_pipeline_stage"]]
+    orders = [int(v) for v in anno["software_pipeline_order"]]
+
+    assert stages == [0, 0, 1, 1]
+    assert orders == [0, 1, 2, 3]
+    assert "software_pipeline_replayable_scalar_binds" not in anno

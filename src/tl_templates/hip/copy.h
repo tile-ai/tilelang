@@ -133,7 +133,7 @@ TL_DEVICE void cp_async_gs_conditional(void *lds_base_ptr,
                                     threadIdx.x),
           threadIdx.x * N /*assume 4 bytes*/);
     } else {
-      *(uint4 *)lds_base_ptr = make_uint4(0, 0, 0, 0);
+      *(u32 *)lds_base_ptr = 0;
     }
   }
 }

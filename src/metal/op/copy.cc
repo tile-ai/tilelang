@@ -55,7 +55,7 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
       << "simdgroup copy requires constant thread bounds";
   int block_size = block_size_imm->value;
   int num_warps = block_size / warp_size;
-  PrimExpr warp_id = FloorDiv(lower_args.thread_var, warp_size);
+  PrimExpr warp_id = FloorDiv(lower_args.thread_index, warp_size);
 
   const auto *m_imm = op.src_range[0]->extent.as<IntImmNode>();
   const auto *n_imm = op.src_range[1]->extent.as<IntImmNode>();

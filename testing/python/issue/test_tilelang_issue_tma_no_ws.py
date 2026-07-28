@@ -5,7 +5,7 @@ import tilelang.testing
 from tilelang import language as T
 import torch
 
-from tilelang.utils.sparse import get_e_factor
+from examples.gemm_sp.sparse_utils import get_e_factor
 
 
 def _compile_tvm_ffi(func, pass_configs, **kwargs):

@@ -166,7 +166,7 @@ Stmt GemmSPNode::Lower(const LowerArgs &lower_args,
   if (const auto f = Function::GetGlobal("tl.gemm_sp.lower")) {
     auto prim_func = Downcast<PrimFunc>(
         (*f)(GetRef<GemmSP>(this), lower_args.target, lower_args.layout_map,
-             lower_args.thread_bounds, lower_args.thread_var));
+             lower_args.thread_bounds, lower_args.thread_index));
     ICHECK(prim_func->attrs.defined());
     auto global_symbol = prim_func->attrs.GetAttr<String>("global_symbol");
     ICHECK(global_symbol.has_value());

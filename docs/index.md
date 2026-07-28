@@ -34,6 +34,7 @@ tools/index
 tools/analyzer
 tools/layout_visualization
 tools/autodd
+tools/lower_trace
 tools/pass_diff
 tools/iket
 :::

@@ -14,6 +14,7 @@
 #include "layout/layout.h"
 #include "op/builtin.h"
 #include "op/utils.h"
+#include "span_utils.h"
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
 
@@ -219,7 +220,8 @@ LayoutMap InferSIMTLayout(const AtomicAddNode &op,
           << "AtomicAdd requires src and dst to have the same layout, but got "
           << "src layout: " << src_layout << ", dst layout: " << dst_layout
           << " for src buffer: " << op.src->name
-          << ", dst buffer: " << op.dst->name;
+          << ", dst buffer: " << op.dst->name
+          << SpanHintSuffix({op.dst->span, op.src->span});
     }
   }
   return {};
@@ -240,15 +242,14 @@ struct AtomicAdd {
                            lower_args.thread_bounds,
                            lower_args.layout_map,
                            analyzer,
-                           false,
                            lower_args.buffer_remap,
                            {}},
                           level);
     }
     auto loop_layout = par_op->GetLoopLayout();
-    return LowerParallelLoop(fused_loop, loop_layout, lower_args.thread_var,
+    return LowerParallelLoop(fused_loop, loop_layout, lower_args.thread_index,
                              analyzer, lower_args.layout_map,
-                             par_op->GetPredicate(lower_args.thread_var),
+                             par_op->GetPredicate(lower_args.thread_index),
                              /*parallel_loop=*/true, /*should_vectorize=*/true,
                              par_op->LoopLayoutRequiresPaddingGuard());
   }
@@ -496,8 +497,9 @@ struct AtomicAdd {
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(),
                                 {IntImm(DataType::Int(32), 0), Bool(true)})));
-    return IfThenElse(EQ(lower_args.thread_var, lower_args.thread_bounds->min),
-                      SeqStmt(std::move(seq)));
+    return IfThenElse(
+        EQ(lower_args.thread_index, lower_args.thread_bounds->min),
+        SeqStmt(std::move(seq)));
   }
 };
 

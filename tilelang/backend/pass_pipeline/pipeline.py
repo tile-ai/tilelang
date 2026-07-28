@@ -20,7 +20,18 @@ class PassPipeline:
         self._lower = lower
 
     def lower(self, mod: IRModule, target: Target) -> IRModule:
-        return self._lower(mod, target)
+        """Run the pipeline and render source snippets for located errors."""
+        try:
+            return self._lower(mod, target)
+        except Exception as exc:
+            # Compiler passes append a machine-readable `--> file:line:col`
+            # marker when the relevant IR node carries a span. Keep enrichment
+            # at this shared boundary so every pipeline caller gets the same
+            # user-facing diagnostic without changing exception semantics.
+            from tilelang.errors import enrich_error
+
+            enrich_error(exc)
+            raise
 
 
 _PIPELINES: dict[str, PassPipeline] = {}

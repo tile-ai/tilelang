@@ -27,6 +27,7 @@ def test_infinity():
     _test_infinity(T.bfloat16)
     _test_infinity(T.float32)
     _test_infinity(T.float64)
+    _test_infinity(T.float8_e5m2)
 
 
 if __name__ == "__main__":

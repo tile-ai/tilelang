@@ -329,7 +329,7 @@ private:
       // launch, but need to be replaced with call_extern.
       extern_function_call_.insert(gvar);
       Array<PrimExpr> args;
-      args.push_back(StringImm(gvar->name_hint));
+      args.push_back(StringImm(dev_info.global_symbol));
       for (const auto &arg : node->args) {
         args.push_back(arg);
       }

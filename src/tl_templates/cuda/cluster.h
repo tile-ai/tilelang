@@ -11,37 +11,43 @@
 
 namespace tl {
 
+template <bool kDependentFalse = false>
 TL_DEVICE void cluster_arrive_relaxed() {
 #if defined(TILELANG_CLUSTER_ENABLED)
   asm volatile("barrier.cluster.arrive.relaxed.aligned;\n" : :);
 #else
-  TILELANG_UNREACHABLE("TILELANG_CLUSTER_ENABLED is not defined");
+  static_assert(kDependentFalse,
+                "tl::cluster_arrive_relaxed requires sm_90 or later");
 #endif
 }
 
-TL_DEVICE void cluster_arrive() {
+template <bool kDependentFalse = false> TL_DEVICE void cluster_arrive() {
 #if defined(TILELANG_CLUSTER_ENABLED)
   asm volatile("barrier.cluster.arrive.aligned;\n" : :);
 #else
-  TILELANG_UNREACHABLE("TILELANG_CLUSTER_ENABLED is not defined");
+  static_assert(kDependentFalse, "tl::cluster_arrive requires sm_90 or later");
 #endif
 }
 
-TL_DEVICE void cluster_wait() {
+template <bool kDependentFalse = false> TL_DEVICE void cluster_wait() {
 #if defined(TILELANG_CLUSTER_ENABLED)
   asm volatile("barrier.cluster.wait.aligned;\n" : :);
 #else
-  TILELANG_UNREACHABLE("TILELANG_CLUSTER_ENABLED is not defined");
+  static_assert(kDependentFalse, "tl::cluster_wait requires sm_90 or later");
 #endif
 }
 
-TL_DEVICE void cluster_sync() {
+template <bool kDependentFalse = false> TL_DEVICE void cluster_sync() {
+#if defined(TILELANG_CLUSTER_ENABLED)
   cluster_arrive();
   cluster_wait();
+#else
+  static_assert(kDependentFalse, "tl::cluster_sync requires sm_90 or later");
+#endif
 }
 
 // Returns the dim3 grid size in terms of number of clusters.
-TL_DEVICE dim3 cluster_grid_dims() {
+template <bool kDependentFalse = false> TL_DEVICE dim3 cluster_grid_dims() {
 #if defined(TILELANG_CLUSTER_ENABLED)
   uint32_t x, y, z;
   asm volatile("mov.u32 %0, %%nclusterid.x;\n" : "=r"(x) :);
@@ -49,12 +55,14 @@ TL_DEVICE dim3 cluster_grid_dims() {
   asm volatile("mov.u32 %0, %%nclusterid.z;\n" : "=r"(z) :);
   return {x, y, z};
 #else
-  TILELANG_UNREACHABLE("TILELANG_CLUSTER_ENABLED is not defined");
+  static_assert(kDependentFalse,
+                "tl::cluster_grid_dims requires sm_90 or later");
+  return {};
 #endif
 }
 
 // Returns the dim3 cluster rank in the grid.
-TL_DEVICE dim3 cluster_id_in_grid() {
+template <bool kDependentFalse = false> TL_DEVICE dim3 cluster_id_in_grid() {
 #if defined(TILELANG_CLUSTER_ENABLED)
   uint32_t x, y, z;
   asm volatile("mov.u32 %0, %%clusterid.x;\n" : "=r"(x) :);
@@ -62,12 +70,14 @@ TL_DEVICE dim3 cluster_id_in_grid() {
   asm volatile("mov.u32 %0, %%clusterid.z;\n" : "=r"(z) :);
   return {x, y, z};
 #else
-  TILELANG_UNREACHABLE("TILELANG_CLUSTER_ENABLED is not defined");
+  static_assert(kDependentFalse,
+                "tl::cluster_id_in_grid requires sm_90 or later");
+  return {};
 #endif
 }
 
 // Returns the dim3 cluster shape.
-TL_DEVICE dim3 cluster_shape() {
+template <bool kDependentFalse = false> TL_DEVICE dim3 cluster_shape() {
 #if defined(TILELANG_CLUSTER_ENABLED)
   uint32_t x, y, z;
   asm volatile("mov.u32 %0, %%cluster_nctaid.x;\n" : "=r"(x) :);
@@ -75,12 +85,13 @@ TL_DEVICE dim3 cluster_shape() {
   asm volatile("mov.u32 %0, %%cluster_nctaid.z;\n" : "=r"(z) :);
   return {x, y, z};
 #else
-  TILELANG_UNREACHABLE("TILELANG_CLUSTER_ENABLED is not defined");
+  static_assert(kDependentFalse, "tl::cluster_shape requires sm_90 or later");
+  return {};
 #endif
 }
 
 // Returns the relative dim3 block rank local to the cluster.
-TL_DEVICE dim3 block_id_in_cluster() {
+template <bool kDependentFalse = false> TL_DEVICE dim3 block_id_in_cluster() {
 #if defined(TILELANG_CLUSTER_ENABLED)
   uint32_t x, y, z;
   asm volatile("mov.u32 %0, %%cluster_ctaid.x;\n" : "=r"(x) :);
@@ -88,12 +99,14 @@ TL_DEVICE dim3 block_id_in_cluster() {
   asm volatile("mov.u32 %0, %%cluster_ctaid.z;\n" : "=r"(z) :);
   return {x, y, z};
 #else
-  TILELANG_UNREACHABLE("TILELANG_CLUSTER_ENABLED is not defined");
+  static_assert(kDependentFalse,
+                "tl::block_id_in_cluster requires sm_90 or later");
+  return {};
 #endif
 }
 
 // Get 1D ctaid in a cluster.
-TL_DEVICE int block_rank_in_cluster() {
+template <bool kDependentFalse = false> TL_DEVICE int block_rank_in_cluster() {
 #if defined(TILELANG_CLUSTER_ENABLED)
   // NOTE(wt): cluster_ctarank is a uint32_t inherently,
   // we return as int32 for TL analysis convenience.
@@ -101,12 +114,15 @@ TL_DEVICE int block_rank_in_cluster() {
   asm volatile("mov.u32 %0, %%cluster_ctarank;\n" : "=r"(rank) :);
   return static_cast<int>(rank);
 #else
-  TILELANG_UNREACHABLE("TILELANG_CLUSTER_ENABLED is not defined");
+  static_assert(kDependentFalse,
+                "tl::block_rank_in_cluster requires sm_90 or later");
+  return {};
 #endif
 }
 
 /* Cluster launch control for tile schedule (Available on sm100) */
 
+template <bool kDependentFalse = false>
 TL_DEVICE void clc_try_cancel(void *result_ptr, void *mbar_ptr) {
 #if defined(CUTLASS_ARCH_CLC_ENABLED)
   uint32_t result_addr = smem_ptr_to_uint(result_ptr);
@@ -118,10 +134,13 @@ TL_DEVICE void clc_try_cancel(void *result_ptr, void *mbar_ptr) {
                :
                : "r"(result_addr), "r"(mbar_addr));
 #else
-  TILELANG_UNREACHABLE("CUTLASS_ARCH_CLC_ENABLED is not defined");
+  static_assert(kDependentFalse,
+                "tl::clc_try_cancel requires sm_100a or a compatible "
+                "architecture-specific target");
 #endif
 }
 
+template <bool kDependentFalse = false>
 TL_DEVICE void clc_try_cancel_multicast(void *result_ptr, void *mbar_ptr) {
 #if defined(CUTLASS_ARCH_CLC_ENABLED)
   uint32_t result_addr = smem_ptr_to_uint(result_ptr);
@@ -133,17 +152,22 @@ TL_DEVICE void clc_try_cancel_multicast(void *result_ptr, void *mbar_ptr) {
                :
                : "r"(result_addr), "r"(mbar_addr));
 #else
-  TILELANG_UNREACHABLE("CUTLASS_ARCH_CLC_ENABLED is not defined");
+  static_assert(kDependentFalse,
+                "tl::clc_try_cancel_multicast requires sm_100a or a "
+                "compatible architecture-specific target");
 #endif
 }
 
 // CLC query responses are produced through the async shared-memory proxy and
 // must be fenced before normal shared-memory loads decode the 16-byte result.
+template <bool kDependentFalse = false>
 TL_DEVICE void clc_fence_proxy_async_shared_cta() {
 #if defined(CUTLASS_ARCH_CLC_ENABLED)
   asm volatile("fence.proxy.async.shared::cta;" : : : "memory");
 #else
-  TILELANG_UNREACHABLE("CUTLASS_ARCH_CLC_ENABLED is not defined");
+  static_assert(kDependentFalse,
+                "tl::clc_fence_proxy_async_shared_cta requires sm_100a or a "
+                "compatible architecture-specific target");
 #endif
 }
 
@@ -154,6 +178,7 @@ struct CLCResponseDecode {
   uint32_t is_canceled = 0;
 };
 
+template <bool kDependentFalse = false>
 TL_DEVICE CLCResponseDecode clc_decode_response(void const *result_ptr) {
 #if defined(CUTLASS_ARCH_CLC_ENABLED)
   uint32_t result_addr = smem_ptr_to_uint(result_ptr);
@@ -178,43 +203,63 @@ TL_DEVICE CLCResponseDecode clc_decode_response(void const *result_ptr) {
   clc_fence_proxy_async_shared_cta();
   return decoded;
 #else
-  TILELANG_UNREACHABLE("CUTLASS_ARCH_CLC_ENABLED is not defined");
+  static_assert(kDependentFalse,
+                "tl::clc_decode_response requires sm_100a or a compatible "
+                "architecture-specific target");
+  return {};
 #endif
 }
 
+template <bool kDependentFalse = false>
 TL_DEVICE int clc_is_canceled(void const *result_ptr) {
 #if defined(CUTLASS_ARCH_CLC_ENABLED)
   return static_cast<int>(clc_decode_response(result_ptr).is_canceled);
 #else
-  TILELANG_UNREACHABLE("CUTLASS_ARCH_CLC_ENABLED is not defined");
+  static_assert(kDependentFalse,
+                "tl::clc_is_canceled requires sm_100a or a compatible "
+                "architecture-specific target");
+  return {};
 #endif
 }
 
+template <bool kDependentFalse = false>
 TL_DEVICE uint32_t clc_get_first_ctaid_x(void const *result_ptr) {
 #if defined(CUTLASS_ARCH_CLC_ENABLED)
   return clc_decode_response(result_ptr).x;
 #else
-  TILELANG_UNREACHABLE("CUTLASS_ARCH_CLC_ENABLED is not defined");
+  static_assert(kDependentFalse,
+                "tl::clc_get_first_ctaid_x requires sm_100a or a compatible "
+                "architecture-specific target");
+  return {};
 #endif
 }
 
+template <bool kDependentFalse = false>
 TL_DEVICE uint32_t clc_get_first_ctaid_y(void const *result_ptr) {
 #if defined(CUTLASS_ARCH_CLC_ENABLED)
   return clc_decode_response(result_ptr).y;
 #else
-  TILELANG_UNREACHABLE("CUTLASS_ARCH_CLC_ENABLED is not defined");
+  static_assert(kDependentFalse,
+                "tl::clc_get_first_ctaid_y requires sm_100a or a compatible "
+                "architecture-specific target");
+  return {};
 #endif
 }
 
+template <bool kDependentFalse = false>
 TL_DEVICE uint32_t clc_get_first_ctaid_z(void const *result_ptr) {
 #if defined(CUTLASS_ARCH_CLC_ENABLED)
   return clc_decode_response(result_ptr).z;
 #else
-  TILELANG_UNREACHABLE("CUTLASS_ARCH_CLC_ENABLED is not defined");
+  static_assert(kDependentFalse,
+                "tl::clc_get_first_ctaid_z requires sm_100a or a compatible "
+                "architecture-specific target");
+  return {};
 #endif
 }
 
 // Set the destination block-ID in cluster for a given SMEM Address
+template <bool kDependentFalse = false>
 TL_DEVICE uint32_t set_block_rank(uint32_t smemAddr, uint32_t rank) {
 #if defined(TILELANG_CLUSTER_ENABLED)
   uint32_t result;
@@ -223,7 +268,8 @@ TL_DEVICE uint32_t set_block_rank(uint32_t smemAddr, uint32_t rank) {
                : "r"(smemAddr), "r"(rank));
   return result;
 #else
-  TILELANG_UNREACHABLE("TILELANG_CLUSTER_ENABLED is not defined");
+  static_assert(kDependentFalse, "tl::set_block_rank requires sm_90 or later");
+  return {};
 #endif
 }
 

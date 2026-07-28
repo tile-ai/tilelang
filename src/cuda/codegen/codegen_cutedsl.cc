@@ -1509,7 +1509,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     os << "tl.increase_descriptor_offset(" << descriptor << ", " << offset
        << ")";
   } else if (op->op.same_as(tl::__exp())) {
-    os << "tl.exp2(" << PrintExpr_(op->args[0]) << ", fastmath=True)";
+    os << "tl.exp(" << PrintExpr_(op->args[0]) << ", fastmath=True)";
   } else if (op->op.same_as(tl::__exp10())) {
     os << "tl.exp10(" << PrintExpr_(op->args[0]) << ", fastmath=True)";
   } else if (op->op.same_as(tl::__log())) {

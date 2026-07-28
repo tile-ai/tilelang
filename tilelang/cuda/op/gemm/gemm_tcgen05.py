@@ -125,7 +125,7 @@ class GemmTCGEN5(GemmBase):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_var: tirx.Var,
+        thread_index: tirx.PrimExpr,
         mbar_phase_expr: tirx.PrimExpr | None = None,
     ):
         """Lower the GEMM tile-op into a TIR prim_func containing TCGEN5MMA calls."""
@@ -156,7 +156,7 @@ class GemmTCGEN5(GemmBase):
             mma_emitter._assign_b_shared_layout(layout_map[self.B])
 
         if self.is_blockscaled:
-            return self._lower_blockscaled(mma_emitter, thread_bounds, thread_var, mbar_phase_expr)
+            return self._lower_blockscaled(mma_emitter, thread_bounds, thread_index, mbar_phase_expr)
 
         if not (self.is_gemm_ss() or self.is_gemm_ts()):
             raise ValueError(f"TCGEN5MMA supports gemm_ss and gemm_ts, got A scope {self.A.scope()}, B scope {self.B.scope()}")
@@ -208,7 +208,7 @@ class GemmTCGEN5(GemmBase):
 
         @T.prim_func
         def _gemm_ss_cond() -> None:
-            if cluster_cond and thread_var // 32 == thread_bounds.min // warp_size:
+            if cluster_cond and thread_index // 32 == thread_bounds.min // warp_size:
                 mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
             if not self.is_tcgen05:
                 T.mbarrier_wait_parity(mbar, mbar_phase)
@@ -226,7 +226,7 @@ class GemmTCGEN5(GemmBase):
             else _Simplify(_gemm_ss_cond, inline_let=True)
         )
 
-    def _lower_blockscaled(self, mma_emitter, thread_bounds, thread_var, mbar_phase_expr: tirx.PrimExpr | None = None):
+    def _lower_blockscaled(self, mma_emitter, thread_bounds, thread_index, mbar_phase_expr: tirx.PrimExpr | None = None):
         """Lower block-scaled MXFP8 GEMM to TIR.
 
         Block-scaled GEMM follows explicit-async TCGEN5MMA semantics: the MMA
@@ -275,7 +275,7 @@ class GemmTCGEN5(GemmBase):
 
         @T.prim_func
         def _gemm_blockscaled_cond() -> None:
-            if cluster_cond and thread_var // 32 == thread_bounds.min // warp_size:
+            if cluster_cond and thread_index // 32 == thread_bounds.min // warp_size:
                 mma_emitter.tcgen05mma_blockscaled(
                     A_shared,
                     B_shared,

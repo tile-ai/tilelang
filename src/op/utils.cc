@@ -101,9 +101,9 @@ PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region, int rw_mask,
       strides[i] = cur;
       cur = cur * buf->shape[i];
     }
-    // Offset: sum_{i in [0..ndim-3]} min_i * stride_i
+    // Offset: sum_{i in [0..ndim-1]} min_i * stride_i
     offset = make_const(buf->shape[0].dtype(), 0);
-    for (int i = 0; i < ndim - 2; ++i) {
+    for (int i = 0; i < ndim; ++i) {
       offset = offset + region->region[i]->min * strides[i];
     }
     // Extent: last two extents product (elements)

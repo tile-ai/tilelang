@@ -73,12 +73,12 @@ class GemmMMA(GemmBase):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_var: tirx.Var,
+        thread_index: tirx.PrimExpr,
         mbar_phase_expr: tirx.PrimExpr | None = None,
     ):
         thread_nums = thread_bounds.extent
         # Emitter lane/warp math uses zero-based ids within the current thread bounds.
-        local_thread_var = thread_var - thread_bounds.min
+        local_thread_var = thread_index - thread_bounds.min
         mma_emitter = self._make_mma_emitter(target, thread_nums, thread_var=local_thread_var)
 
         a_dtype = self.a_dtype

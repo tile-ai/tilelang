@@ -125,8 +125,10 @@ public:
   const BufferIndiceMap &GetIndiceMap() const { return indice_map_; }
   // Get buffers in the order they first appear in the loop body.
   const std::vector<Buffer> &GetAccessOrder() const { return access_order_; }
-  // Get the predicate for a given thread variable.
-  Optional<PrimExpr> GetPredicate(Var thread_var) const;
+  // Get the predicate for a given logical thread index. GPU callers pass the
+  // real threadIdx.x Var; callers without thread bindings (e.g. CPU) pass
+  // constant 0.
+  Optional<PrimExpr> GetPredicate(PrimExpr thread_index) const;
 
   // Clone this operator.
   TileOperator Clone() const override;

@@ -5,7 +5,7 @@ from __future__ import annotations
 import tvm.tirx.script.parser as T
 from tilelang._typing import BufferLikeType, BufferLikeTypeTuple, BarrierType, DType
 from tilelang import tvm as tvm
-from tilelang.language import ptx_arrive_barrier, evaluate
+from tilelang.language.common import ptx_arrive_barrier, evaluate
 from tilelang.language.eager.builder import macro
 from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tvm import DataType, tirx
@@ -1252,7 +1252,7 @@ def increase_descriptor_offset(descriptor: PrimExpr, offset: PrimExpr) -> PrimEx
     if not isinstance(descriptor, (BufferLoad, tirx.Buffer)):
         raise TypeError("Descriptor must be a tvm.tirx.Buffer or tvm.tirx.BufferLoad.")
 
-    if isinstance(descriptor, tirx.Buffer) and len(descriptor.shape) != 1 or descriptor.shape[0] != 1:
+    if isinstance(descriptor, tirx.Buffer) and (len(descriptor.shape) != 1 or descriptor.shape[0] != 1):
         raise ValueError("Descriptor must be a 1D buffer of size 1.")
 
     descriptor = descriptor if isinstance(descriptor, BufferLoad) else tirx.BufferLoad(descriptor, [0])

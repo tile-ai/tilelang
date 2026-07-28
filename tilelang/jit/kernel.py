@@ -8,6 +8,7 @@ from tvm.tirx import PrimFunc
 import tilelang
 from tilelang import tvm
 from tilelang import env
+from tilelang.env import resolve_pass_profile_threshold_ms
 from tilelang.backend.execution_backend import resolve_execution_backend_spec
 from tvm.target import Target
 from tilelang.engine.param import CompiledArtifact, KernelParam
@@ -26,6 +27,7 @@ from tilelang.contrib.hip_resource_info import pop_recorded, reset_recorder
 from tilelang.jit.diagnostics import jit_phase
 from tilelang.transform import PassConfigKey
 from tilelang.transform.pass_config import normalize_pass_configs
+from tilelang.utils.pass_timing import build_pass_instruments, report_pass_timing_on_exit
 import logging
 import os
 
@@ -234,10 +236,23 @@ class JITKernel(Generic[_P, _T]):
         enable_device_compile = self.execution_backend_spec.enable_device_compile
 
         # Additional pass instruments
-        pass_instruments = []
+        base_pass_instruments = []
         if pass_configs.get(PassConfigKey.TL_ENABLE_DUMP_IR):
             dump_ir_path = pass_configs.get(PassConfigKey.TL_DUMP_IR_DIR, "./dump_ir")  # Default dump path
-            pass_instruments.append(tvm.ir.instrument.DumpIR(dump_dir=dump_ir_path))
+            base_pass_instruments.append(tvm.ir.instrument.DumpIR(dump_dir=dump_ir_path))
+
+        # Pass timing instrument
+        profile_threshold_ms = None
+        if pass_configs.get(PassConfigKey.TL_PASS_PROFILE) or env.is_pass_profile_enabled():
+            profile_threshold_ms = resolve_pass_profile_threshold_ms(
+                pass_configs,
+                PassConfigKey.TL_PASS_PROFILE_THRESHOLD_MS,
+                env.get_pass_profile_threshold_ms,
+            )
+        pass_instruments, timing_instrument = build_pass_instruments(
+            base_pass_instruments,
+            profile_threshold_ms,
+        )
 
         # open a recorder window for kernel-resource-usage remarks
         capture_resources = is_hip_target(target)
@@ -251,6 +266,10 @@ class JITKernel(Generic[_P, _T]):
             "backend": execution_backend,
         }
         with (
+            report_pass_timing_on_exit(
+                timing_instrument,
+                context=f"stage=jit-lower, kernel={func_name}, backend={execution_backend}",
+            ),
             jit_phase("lower", verbose=verbose, **phase_context),
             tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=pass_instruments),
             self.target,

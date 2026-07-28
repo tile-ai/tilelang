@@ -1,5 +1,14 @@
 # Pass Diff
 
+:::{admonition} Superseded — use IR Lower Trace
+:class: warning
+
+This tool has been superseded by **IR Lower Trace** (`TL_LOWER_TRACE`), documented
+in {doc}`lower_trace`. New users should use IR Lower Trace directly — it provides
+phase context, codegen capture, multi-run accumulation, and an enhanced HTML
+report. `TILELANG_PASS_DIFF` is retained only for backward compatibility.
+:::
+
 Pass Diff shows how TileLang's TIR changes as compiler passes run. It captures
 the IR before and after each pass, computes a unified diff, and writes the
 result to the terminal, an interactive HTML report, or both.

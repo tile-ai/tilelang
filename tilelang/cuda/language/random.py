@@ -1,5 +1,7 @@
 from tvm import tirx
-import tilelang.language as T
+import tilelang.language.common as T
+
+__all__ = ["rng_init", "rng_rand", "rng_rand_float"]
 
 
 # https://docs.nvidia.com/cuda/curand/device-api-overview.html#device-api-overview
@@ -27,7 +29,7 @@ def rng_init(seed, seq=None, off=0, generator="curandStatePhilox4_32_10_t") -> t
     seed = tirx.convert(seed)
     if seq is None:
         bx = T.get_block_binding()
-        ex = T.kernel.get_thread_extent()
+        ex = T.get_thread_extent()
         tx = T.get_thread_binding()
         id = tx + bx * ex
         seq = tirx.convert(id)

@@ -27,16 +27,26 @@ using namespace tirx;
  * TileOperator.
  *
  * @param call The TIR Call whose operator and arguments will be used to build
- * the TileOperator.
+ * the TileOperator. Its `call->annotations` are passed through as TileOp-local
+ * annotations.
+ * @param block_annotations The complete enclosing SBlock annotations visible
+ * while parsing this TileOp.
  * @return TileOperator The constructed TileOperator, or a default (empty)
  * TileOperator if no builder exists.
  */
-TileOperator ParseOperator(Call call) {
+TileOperator ParseOperator(const Call &call,
+                           const BlockAnnotations &block_annotations) {
   auto op_map = Op::GetAttrMap<OpBuilderFunc>("TLOpBuilder");
+  auto block_annotation_handler_map =
+      Op::GetAttrMap<OpBlockAnnotationHandlerFunc>(kTLOpBlockAnnotationHandler);
   Op op = call->op.as<Op>().value();
   if (op_map.count(op)) {
     auto tile_op = op_map[op](call->args, call->annotations);
     ICHECK(tile_op.defined());
+    if (block_annotation_handler_map.count(op)) {
+      tile_op = block_annotation_handler_map[op](tile_op, block_annotations);
+      ICHECK(tile_op.defined());
+    }
     return tile_op;
   }
   return TileOperator();
@@ -46,17 +56,19 @@ TileOperator ParseOperator(Call call) {
  * @brief Parse a TileOperator from a TIR statement if it contains a call.
  *
  * If `stmt` is an Evaluate node whose value is a Call, delegates to
- * ParseOperator(Call, BufferMap) and returns the resulting TileOperator.
+ * ParseOperator(Call, block_annotations) and returns the resulting
+ * TileOperator.
  * Otherwise returns a default-constructed (empty) TileOperator.
  *
  * @param stmt TIR statement to inspect; expected to be an Evaluate of a Call.
  * @return TileOperator Parsed operator on success, or a default (empty)
  * TileOperator if `stmt` is not an Evaluate(Call).
  */
-TileOperator ParseOperator(Stmt stmt) {
+TileOperator ParseOperator(const Stmt &stmt,
+                           const BlockAnnotations &block_annotations) {
   if (stmt.as<Evaluate>() && stmt.as<EvaluateNode>()->value.as<CallNode>()) {
     auto call = stmt.as<EvaluateNode>()->value.as<CallNode>();
-    return ParseOperator(tvm::ffi::GetRef<Call>(call));
+    return ParseOperator(tvm::ffi::GetRef<Call>(call), block_annotations);
   }
   return TileOperator();
 }

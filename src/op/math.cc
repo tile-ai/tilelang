@@ -51,6 +51,10 @@ PrimExpr infinity_op(PrimExpr args) {
     return FloatImm(dtype, std::numeric_limits<float>::infinity(), call->span);
   } else if (dtype.is_tfloat32()) {
     return FloatImm(dtype, std::numeric_limits<float>::infinity(), call->span);
+  } else if (dtype.is_float8_e5m2()) {
+    // e5m2 is the only fp8 format with a representable inf; the rest keep
+    // the fatal below.
+    return FloatImm(dtype, std::numeric_limits<float>::infinity(), call->span);
   }
   LOG(FATAL) << "Cannot decide infinity for type " << dtype;
   throw; // Unreachable, keeps compiler happy

@@ -40,6 +40,61 @@ bool AccessMaskMayUse(const PrimExpr &expr, int required_mask) {
   return (GetConstAccessMask(expr) & required_mask) != 0;
 }
 
+// Extract a scalar lane from vector expressions used in bounds predicates.
+// This intentionally expands Ramp/Broadcast/Shuffle by structure instead of
+// using Shuffle::ExtractElement, because the arithmetic prover handles the
+// resulting scalar integer expressions more reliably.
+struct VectorLaneScalarizer : public ExprMutator {
+  explicit VectorLaneScalarizer(int lane) : lane_(lane) {}
+
+private:
+  int lane_;
+
+  PrimExpr VisitExpr_(const RampNode *op) final {
+    PrimExpr base = VisitExpr(op->base);
+    PrimExpr stride = VisitExpr(op->stride);
+    return base + stride * IntImm(stride.dtype(), lane_);
+  }
+
+  PrimExpr VisitExpr_(const BroadcastNode *op) final {
+    return VisitExpr(op->value);
+  }
+
+  PrimExpr VisitExpr_(const ShuffleNode *op) final {
+    ICHECK_LT(lane_, op->indices.size());
+    const int64_t *idx = as_const_int(op->indices[lane_]);
+    ICHECK(idx)
+        << "Vector condition scalarization requires constant Shuffle indices: "
+        << GetRef<Shuffle>(op);
+    int64_t src_lane = *idx;
+    for (const PrimExpr &vec : op->vectors) {
+      ICHECK(!vec.dtype().is_scalable_vector());
+      int lanes = vec.dtype().lanes();
+      if (src_lane < lanes) {
+        if (vec.dtype().is_scalar()) {
+          ICHECK_EQ(src_lane, 0);
+          return VisitExpr(vec);
+        }
+        return VectorLaneScalarizer(static_cast<int>(src_lane))(vec);
+      }
+      src_lane -= lanes;
+    }
+    ICHECK(false) << "Shuffle index out of range: " << GetRef<Shuffle>(op);
+    return PrimExpr();
+  }
+
+  PrimExpr VisitExpr_(const CastNode *op) final {
+    PrimExpr value = VisitExpr(op->value);
+    DataType dtype =
+        op->dtype.is_fixed_length_vector() ? op->dtype.element_of() : op->dtype;
+    if (value.dtype() == dtype) {
+      return value;
+    } else {
+      return Cast(dtype, value);
+    }
+  }
+};
+
 // SafeMemChecker for a BufferLoad/BufferStore node:
 // 1. Identify BufferLoad and BufferStore nodes.
 // 2. For each index, compare against the buffer's shape.
@@ -121,6 +176,40 @@ struct SafeMemChecker : public StmtExprVisitor {
     return scope == "global";
   }
 
+  // Helper function to store a bounds predicate as scalar Bool(1) conditions.
+  void PushCondition(const PrimExpr &cond) {
+    if (cond.dtype().is_scalar()) {
+      ICHECK(cond.dtype() == DataType::Bool(1))
+          << "condition is not a boolean: " << cond;
+      PushScalarCondition(cond);
+      return;
+    }
+    PrimExpr simplified = analyzer_->Simplify(cond);
+    ICHECK(simplified.dtype().is_fixed_length_vector() &&
+           simplified.dtype().is_bool())
+        << "condition is not a fixed-length boolean vector: " << simplified;
+    int lanes = simplified.dtype().lanes();
+    for (int lane = 0; lane < lanes; lane++) {
+      PrimExpr scalar =
+          analyzer_->Simplify(VectorLaneScalarizer(lane)(simplified));
+      ICHECK(scalar.dtype() == DataType::Bool(1))
+          << "scalarized condition is not a boolean: " << scalar;
+      PushScalarCondition(scalar);
+    }
+  }
+
+  // Keep only predicates that still need a runtime guard.
+  void PushScalarCondition(const PrimExpr &cond) {
+    try {
+      if (analyzer_->CanProve(cond, arith::ProofStrength::kSymbolicBound)) {
+        return;
+      }
+    } catch (const std::exception &) {
+      // Keep the runtime guard if proving fails.
+    }
+    _conditions.push_back(cond);
+  }
+
   // Check each index against the buffer shape dimensions
   void CheckBufferIndices(const Buffer &buffer, const Array<PrimExpr> &indices,
                           bool is_load, bool throw_warning) {
@@ -195,7 +284,7 @@ struct SafeMemChecker : public StmtExprVisitor {
                        << "; Buffer name: " << buffer->name;
         }
         if (IsGlobalBuffer(buffer)) {
-          _conditions.push_back(upper_bound_cond);
+          PushCondition(upper_bound_cond);
         }
       }
       // Check if index >= 0 can be proven.
@@ -222,7 +311,7 @@ struct SafeMemChecker : public StmtExprVisitor {
                        << "; Buffer name: " << buffer->name;
         }
         if (IsGlobalBuffer(buffer)) {
-          _conditions.push_back(lower_bound_cond);
+          PushCondition(lower_bound_cond);
         }
       }
     }
@@ -313,6 +402,15 @@ private:
     }
 
     PrimExpr safe_value = GetSafeValue(fallback_ptr->base_load->buffer);
+    // Cast preserves the lane count, so vector-returning atomics need their
+    // scalar buffer fallback broadcast before any element-type conversion.
+    if (safe_value.dtype().lanes() != call.dtype().lanes()) {
+      ICHECK(safe_value.dtype().is_scalar() &&
+             call.dtype().is_fixed_length_vector())
+          << "Cannot adapt safe value " << safe_value << " with dtype "
+          << safe_value.dtype() << " to atomic return dtype " << call.dtype();
+      safe_value = Broadcast(safe_value, call.dtype().lanes());
+    }
     if (safe_value.dtype() != call.dtype()) {
       safe_value = Cast(call.dtype(), safe_value);
     }
@@ -407,7 +505,8 @@ private:
   // Check if the call is an atomic operation
   bool IsAtomicOp(const Op &op) {
     return op == atomic_add_elem_op() || op == atomic_add_ret_elem_op() ||
-           op == atomic_addx2_elem_op() || op == atomic_addx4_elem_op() ||
+           op == atomic_addx2_elem_op() || op == atomic_addx2_ret_elem_op() ||
+           op == atomic_addx4_elem_op() || op == atomic_addx4_ret_elem_op() ||
            op == atomic_load_elem_op() || op == atomic_store_elem_op() ||
            op == atomic_max_elem_op() || op == atomic_max_ret_elem_op() ||
            op == atomic_min_elem_op() || op == atomic_min_ret_elem_op();

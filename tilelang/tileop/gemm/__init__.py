@@ -21,11 +21,11 @@ def gemm_lower(
     layout_map,
     target: Target,
     thread_bounds: Range,
-    thread_var: tirx.Var,
+    thread_index: tirx.PrimExpr,
     mbar_phase_expr: tirx.PrimExpr,
 ):
     # We pass thread_bounds rather than thread_extents because tcgen5mma need to check this
-    stmt = gemm.lower(layout_map, target, thread_bounds, thread_var, mbar_phase_expr)
+    stmt = gemm.lower(layout_map, target, thread_bounds, thread_index, mbar_phase_expr)
     return stmt
 
 
@@ -129,14 +129,14 @@ class Gemm(Node, Scriptable):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_var: tirx.Var,
+        thread_index: tirx.PrimExpr,
         mbar_phase_expr: tirx.PrimExpr,
     ):
         """Lower the GEMM operation to TIR statements based on target architecture."""
         thread_nums = thread_bounds.extent
         gemm_inst = self._select_gemm_instruction(thread_nums, target)
         impl_class = self._get_implementation_class(gemm_inst, target)
-        return impl_class(self).lower(layout_map, target, thread_bounds, thread_var, mbar_phase_expr)
+        return impl_class(self).lower(layout_map, target, thread_bounds, thread_index, mbar_phase_expr)
 
     def _select_gemm_instruction(self, thread_nums: int, target: Target) -> str:
         """Select the appropriate GEMM instruction key based on target and thread configuration.

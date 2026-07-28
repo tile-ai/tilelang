@@ -16,6 +16,7 @@
 #include "layout/tcgen05_layout.h"
 #include "op/builtin.h"
 #include "op/utils.h"
+#include "span_utils.h"
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
 #include "transform/loop_vectorize.h"
@@ -28,6 +29,7 @@
 
 #include <cctype>
 #include <cstdint>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -96,6 +98,12 @@ int64_t TMAElementsForBytes(int64_t bytes, DataType dtype) {
   ICHECK_EQ((bytes * 8) % dtype.bits(), 0)
       << bytes << " bytes cannot be represented as whole elements of " << dtype;
   return bytes * 8 / dtype.bits();
+}
+
+bool IsProvably16ByteMultiple(const PrimExpr &bytes,
+                              arith::Analyzer *analyzer) {
+  return analyzer->CanProveEqual(FloorMod(bytes, IntImm(bytes.dtype(), 16)),
+                                 IntImm(bytes.dtype(), 0));
 }
 
 PrimExpr GetCopyMbarPhaseExpr(const Map<String, ObjectRef> &annotations,
@@ -257,7 +265,7 @@ bool IsContiguousRegion(const Buffer &buf, const Array<Range> &ranges,
   return true;
 }
 
-std::pair<Array<Stmt>, PrimExpr>
+std::optional<std::pair<Array<Stmt>, PrimExpr>>
 MakeTMARows(const Buffer &src, const Array<Range> &src_ranges,
             const Buffer &dst, const Array<Range> &dst_ranges,
             PrimExpr dst_block, PrimExpr barrier_load,
@@ -283,8 +291,11 @@ MakeTMARows(const Buffer &src, const Array<Range> &src_ranges,
     for (const auto &r : src_ranges) {
       total_elems = total_elems * r->extent;
     }
-    PrimExpr size_bytes =
-        cast(DataType::UInt(32), TMABytesFromElements(total_elems, src->dtype));
+    PrimExpr total_bytes = TMABytesFromElements(total_elems, src->dtype);
+    if (!IsProvably16ByteMultiple(total_bytes, analyzer)) {
+      return std::nullopt;
+    }
+    PrimExpr size_bytes = cast(DataType::UInt(32), total_bytes);
     PrimExpr src_ptr = src.access_ptr(1, DataType::Handle(), 1,
                                       linear_off(src, src_ranges), total_elems);
     PrimExpr dst_ptr = dst.access_ptr(2, DataType::Handle(), 1,
@@ -292,7 +303,8 @@ MakeTMARows(const Buffer &src, const Array<Range> &src_ranges,
     Stmt call =
         Evaluate(Call(DataType::Handle(), tma_store_cluster(),
                       {dst_ptr, src_ptr, dst_block, size_bytes, barrier_load}));
-    return {{call}, IntImm(DataType::Int(32), 1)};
+    return std::make_pair(Array<Stmt>{call},
+                          PrimExpr(IntImm(DataType::Int(32), 1)));
   }
 
   int split_dim = -1;
@@ -320,14 +332,18 @@ MakeTMARows(const Buffer &src, const Array<Range> &src_ranges,
                   Range::FromMinExtent(src_ranges[split_dim]->min + kexpr, 1));
       new_dst.Set(split_dim,
                   Range::FromMinExtent(dst_ranges[split_dim]->min + kexpr, 1));
-      auto [stmts, cnt] = MakeTMARows(src, new_src, dst, new_dst, dst_block,
-                                      barrier_load, analyzer);
+      auto sub = MakeTMARows(src, new_src, dst, new_dst, dst_block,
+                             barrier_load, analyzer);
+      if (!sub.has_value()) {
+        return std::nullopt;
+      }
+      auto &[stmts, cnt] = sub.value();
       for (const auto &s : stmts) {
         all_stmts.push_back(s);
       }
       total = total + cnt;
     }
-    return {all_stmts, total};
+    return std::make_pair(all_stmts, total);
   }
 
   Var k("k_tma_row", DataType::Int(32));
@@ -337,13 +353,17 @@ MakeTMARows(const Buffer &src, const Array<Range> &src_ranges,
                Range::FromMinExtent(src_ranges[split_dim]->min + k, 1));
   body_dst.Set(split_dim,
                Range::FromMinExtent(dst_ranges[split_dim]->min + k, 1));
-  auto [body_stmts, body_cnt] = MakeTMARows(src, body_src, dst, body_dst,
-                                            dst_block, barrier_load, analyzer);
+  auto body_result = MakeTMARows(src, body_src, dst, body_dst, dst_block,
+                                 barrier_load, analyzer);
+  if (!body_result.has_value()) {
+    return std::nullopt;
+  }
+  auto &[body_stmts, body_cnt] = body_result.value();
   Stmt body = body_stmts.size() == 1 ? body_stmts[0]
                                      : static_cast<Stmt>(SeqStmt(body_stmts));
   Stmt for_loop =
       For(k, IntImm(DataType::Int(32), 0), extent, ForKind::kSerial, body);
-  return {{for_loop}, extent * body_cnt};
+  return std::make_pair(Array<Stmt>{for_loop}, extent * body_cnt);
 }
 
 } // namespace
@@ -430,7 +450,7 @@ private:
 
   static CopyInst SelectInst(const CopyNode &op, Target target,
                              const LayoutMap &layout_map,
-                             arith::Analyzer *analyzer, bool buffer_oob);
+                             arith::Analyzer *analyzer);
 
   static void CheckParallelLoopLayout(const CopyNode &op, CopyInst copy_inst);
 
@@ -515,9 +535,8 @@ void Copy::CollectFragmentLayouts(const PrimExpr &expr,
 LayoutMap Copy::InferLayout(const CopyNode &op,
                             const LayoutInferArgs &layout_args,
                             InferLevel level) {
-  CopyInst copy_inst =
-      SelectInst(op, layout_args.target, layout_args.layout_map,
-                 layout_args.analyzer, layout_args.buffer_oob);
+  CopyInst copy_inst = SelectInst(op, layout_args.target,
+                                  layout_args.layout_map, layout_args.analyzer);
   CheckParallelLoopLayout(op, copy_inst);
 
   if (copy_inst == CopyInst::kTMemLoad || copy_inst == CopyInst::kTMemStore) {
@@ -664,8 +683,13 @@ LayoutMap Copy::InferBulkLayout(const CopyNode &op,
 
   if (level == InferLevel::kFree &&
       !layout_args.layout_map.count(shared_tensor)) {
-    if (is_store) {
+    if (is_store && shared_tensor->shape.size() >= 2) {
       // For BulkStore, infer a swizzled shared-memory layout when possible.
+      // Rank-1 shared buffers cannot be swizzled (there is no stride dim to
+      // index), so they take the linear-layout branch below. A rank-1 store
+      // can reach this multi-dim arm when its region is not provably in bounds,
+      // making the raw 1D TMA path unavailable. Without the rank guard,
+      // reading shape[dim - 2] would fault (see issue #2529).
       int dim = shared_tensor->shape.size();
       const int64_t mat_stride = *as_const_int(shared_tensor->shape[dim - 2]);
       const int64_t mat_continuous =
@@ -692,22 +716,22 @@ LayoutMap Copy::InferBulkLayout(const CopyNode &op,
 
 CopyInst Copy::SelectInst(const CopyNode &op, Target target,
                           const LayoutMap &layout_map,
-                          arith::Analyzer *analyzer, bool buffer_oob) {
+                          arith::Analyzer *analyzer) {
   CopyAnalysisContext ctx;
   ctx.target = target;
   ctx.layout_map = &layout_map;
   ctx.analyzer = analyzer;
-  ctx.buffer_oob = buffer_oob;
   ctx.emit_diagnostics = true;
   auto result = SelectCopyInstForLowering(op, ctx);
-  ICHECK(result.supported) << result.reason;
+  ICHECK(result.supported) << result.reason
+                           << SpanHintSuffix({op.dst->span, op.src->span});
   return result.inst;
 }
 
 Stmt Copy::Lower(const CopyNode &op, const LowerArgs &lower_args,
                  arith::Analyzer *analyzer) {
-  auto copy_inst = SelectInst(op, lower_args.target, lower_args.layout_map,
-                              analyzer, /*buffer_oob=*/false);
+  auto copy_inst =
+      SelectInst(op, lower_args.target, lower_args.layout_map, analyzer);
   if (op.dst_block.defined()) {
     ICHECK(TargetHasBulkCopy(lower_args.target))
         << "T.copy with dst_block requires cluster-copy support (CUDA SM90+). "
@@ -772,15 +796,14 @@ Stmt Copy::LowerCPAsync(const CopyNode &op, const LowerArgs &lower_args,
                          lower_args.thread_bounds,
                          lower_args.layout_map,
                          analyzer,
-                         false,
                          lower_args.buffer_remap,
                          {}},
                         level);
   }
   auto loop_layout = par_op->GetLoopLayout();
   Stmt lowered_loop = LowerParallelLoop(
-      par_op->GetRoot(), loop_layout, lower_args.thread_var, analyzer,
-      lower_args.layout_map, par_op->GetPredicate(lower_args.thread_var),
+      par_op->GetRoot(), loop_layout, lower_args.thread_index, analyzer,
+      lower_args.layout_map, par_op->GetPredicate(lower_args.thread_index),
       /*parallel_loop=*/true, /*should_vectorize=*/true,
       par_op->LoopLayoutRequiresPaddingGuard());
 
@@ -872,57 +895,75 @@ Stmt Copy::LowerCluster(const CopyNode &op, const LowerArgs &lower_args,
       for (auto r : src_range) {
         total_elements = total_elements * r->extent;
       }
-      PrimExpr size_bytes = cast(
-          DataType::UInt(32), TMABytesFromElements(total_elements, src->dtype));
+      PrimExpr total_bytes = TMABytesFromElements(total_elements, src->dtype);
 
-      PrimExpr dst_ptr =
-          dst.access_ptr(2, DataType::Handle(), 1, dst_offset, total_elements);
-      PrimExpr src_ptr =
-          src.access_ptr(1, DataType::Handle(), 1, src_offset, total_elements);
+      if (IsProvably16ByteMultiple(total_bytes, analyzer)) {
+        PrimExpr size_bytes = cast(DataType::UInt(32), total_bytes);
 
-      Stmt bulk_copy = Evaluate(Call(
-          DataType::Handle(), tma_store_cluster(),
-          {dst_ptr, src_ptr, op.dst_block.value(), size_bytes, barrier_load}));
+        PrimExpr dst_ptr = dst.access_ptr(2, DataType::Handle(), 1, dst_offset,
+                                          total_elements);
+        PrimExpr src_ptr = src.access_ptr(1, DataType::Handle(), 1, src_offset,
+                                          total_elements);
 
-      return IfThenElse(
-          EQ(lower_args.thread_var, lower_args.thread_bounds->min), bulk_copy);
-    }
+        Stmt bulk_copy = Evaluate(Call(DataType::Handle(), tma_store_cluster(),
+                                       {dst_ptr, src_ptr, op.dst_block.value(),
+                                        size_bytes, barrier_load}));
 
-    bool same_shape = (src_range.size() == dst_range.size());
-    for (size_t d = 0; d < src_range.size() && same_shape; ++d) {
-      if (!analyzer->CanProveEqual(src_range[d]->extent,
-                                   dst_range[d]->extent)) {
-        same_shape = false;
+        return IfThenElse(
+            EQ(lower_args.thread_index, lower_args.thread_bounds->min),
+            bulk_copy);
       }
-    }
-
-    if (element_match && same_shape) {
-      PrimExpr barrier_load = barrier_opt.value();
-      const auto *barrier_buf_load = barrier_load.as<tirx::BufferLoadNode>();
-      ICHECK(barrier_buf_load)
-          << "LowerCluster: expected BufferLoad for barrier annotation";
-      Var barrier_data_var = barrier_buf_load->buffer->data;
-
-      auto [tma_stmts, n_rows] =
-          MakeTMARows(src, src_range, dst, dst_range, op.dst_block.value(),
-                      barrier_load, analyzer);
-
-      if (lower_args.update_barrier_arrive) {
-        lower_args.update_barrier_arrive(barrier_data_var, n_rows);
+      LOG(WARNING) << "Cluster bulk copy size " << total_bytes
+                   << " bytes is not a multiple of 16 as required by "
+                      "cp.async.bulk; falling back to element-wise cluster "
+                      "copy. src="
+                   << src->name << ", dst=" << dst->name;
+    } else {
+      bool same_shape = (src_range.size() == dst_range.size());
+      for (size_t d = 0; d < src_range.size() && same_shape; ++d) {
+        if (!analyzer->CanProveEqual(src_range[d]->extent,
+                                     dst_range[d]->extent)) {
+          same_shape = false;
+        }
       }
 
-      Stmt seq = (tma_stmts.size() == 1)
-                     ? tma_stmts[0]
-                     : static_cast<Stmt>(SeqStmt(tma_stmts));
-      return IfThenElse(
-          EQ(lower_args.thread_var, lower_args.thread_bounds->min), seq);
-    }
+      if (element_match && same_shape) {
+        PrimExpr barrier_load = barrier_opt.value();
+        const auto *barrier_buf_load = barrier_load.as<tirx::BufferLoadNode>();
+        ICHECK(barrier_buf_load)
+            << "LowerCluster: expected BufferLoad for barrier annotation";
+        Var barrier_data_var = barrier_buf_load->buffer->data;
 
-    LOG(WARNING)
-        << "Falling back to element-wise cluster copy: bulk cluster paths "
-           "require matching element counts and same per-dim extents between "
-           "src and dst. src="
-        << src->name << ", dst=" << dst->name;
+        auto tma_rows =
+            MakeTMARows(src, src_range, dst, dst_range, op.dst_block.value(),
+                        barrier_load, analyzer);
+
+        if (tma_rows.has_value()) {
+          auto &[tma_stmts, n_rows] = tma_rows.value();
+
+          if (lower_args.update_barrier_arrive) {
+            lower_args.update_barrier_arrive(barrier_data_var, n_rows);
+          }
+
+          Stmt seq = (tma_stmts.size() == 1)
+                         ? tma_stmts[0]
+                         : static_cast<Stmt>(SeqStmt(tma_stmts));
+          return IfThenElse(
+              EQ(lower_args.thread_index, lower_args.thread_bounds->min), seq);
+        }
+        LOG(WARNING)
+            << "Cluster bulk copy row size is not a multiple of 16 bytes as "
+               "required by cp.async.bulk; falling back to element-wise "
+               "cluster copy. src="
+            << src->name << ", dst=" << dst->name;
+      } else {
+        LOG(WARNING)
+            << "Falling back to element-wise cluster copy: bulk cluster paths "
+               "require matching element counts and same per-dim extents "
+               "between src and dst. src="
+            << src->name << ", dst=" << dst->name;
+      }
+    }
   }
 
   auto simt_loop = op.MakeSIMTLoop(analyzer);
@@ -936,13 +977,12 @@ Stmt Copy::LowerCluster(const CopyNode &op, const LowerArgs &lower_args,
                          lower_args.thread_bounds,
                          lower_args.layout_map,
                          analyzer,
-                         false,
                          lower_args.buffer_remap,
                          {}},
                         level);
   }
   auto loop_layout = par_op->GetLoopLayout();
-  auto thread_loop = PartitionLoop(par_op->GetRoot(), lower_args.thread_var,
+  auto thread_loop = PartitionLoop(par_op->GetRoot(), lower_args.thread_index,
                                    analyzer, loop_layout);
   auto vectorized_thread_loop =
       VectorizeLoop(thread_loop, lower_args.layout_map, /*vectorize_hint=*/1);
@@ -1022,7 +1062,7 @@ Stmt Copy::LowerCluster(const CopyNode &op, const LowerArgs &lower_args,
         Evaluate(Call(DataType::Handle(), ptx_arrive_cluster_barrier(),
                       {barrier_opt.value(), op.dst_block.value()}));
     Stmt guarded_arrive = IfThenElse(
-        EQ(lower_args.thread_var, lower_args.thread_bounds->min), arrive);
+        EQ(lower_args.thread_index, lower_args.thread_bounds->min), arrive);
     return SeqStmt({simt_copy, sync, guarded_arrive});
   }
   return simt_copy;
@@ -1141,21 +1181,27 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &lower_args,
   Var local_iter("i");
   Layout inv = local_layout->Inverse();
   Array<PrimExpr> shared_coords;
-  PrimExpr warp = FloorDiv(lower_args.thread_var, 32) * 32;
+  // Normalize the logical thread index against the thread range once, and
+  // build the copy indices from the normalized expression directly.
+  PrimExpr norm_thread_index = lower_args.thread_index;
+  if (lower_args.thread_bounds.defined()) {
+    norm_thread_index = norm_thread_index - lower_args.thread_bounds->min;
+  }
+  PrimExpr warp = FloorDiv(norm_thread_index, 32) * 32;
   if (!is_transposed) {
     auto local_index = analyzer->Simplify(
         local_iter * elems_per_reg * num +
-        elems_per_reg * FloorMod(FloorDiv(lower_args.thread_var, 8), num));
+        elems_per_reg * FloorMod(FloorDiv(norm_thread_index, 8), num));
     auto thread_index =
-        analyzer->Simplify(warp + FloorMod(lower_args.thread_var, 8) * 4);
+        analyzer->Simplify(warp + FloorMod(norm_thread_index, 8) * 4);
     shared_coords = inv->Forward({local_index, thread_index});
   } else {
     auto local_index = analyzer->Simplify(
         local_iter * elems_per_reg * num +
-        elems_per_reg * FloorMod(FloorDiv(lower_args.thread_var, 8), num) +
-        FloorMod(lower_args.thread_var, elems_per_reg));
+        elems_per_reg * FloorMod(FloorDiv(norm_thread_index, 8), num) +
+        FloorMod(norm_thread_index, elems_per_reg));
     auto thread_index = analyzer->Simplify(
-        warp + FloorDiv(FloorMod(lower_args.thread_var, 8), elems_per_reg));
+        warp + FloorDiv(FloorMod(norm_thread_index, 8), elems_per_reg));
     shared_coords = inv->Forward({local_index, thread_index});
   }
   shared_coords.pop_back();
@@ -1198,13 +1244,6 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &lower_args,
   For for_node = For(local_iter, 0, FloorDiv(extent, elems_per_reg * num),
                      ForKind::kSerial, body);
   for_node = PragmaUnrollLoop(for_node);
-  auto range = lower_args.thread_bounds;
-  if (range.defined()) {
-    auto thread_var = lower_args.thread_var;
-    auto thread_var_with_offset = thread_var - range->min;
-    for_node.CopyOnWrite()->body =
-        Substitute(for_node->body, {{thread_var, thread_var_with_offset}});
-  }
   return for_node;
 }
 
@@ -1341,7 +1380,7 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
       int effective_chunks =
           needs_pack_unpack ? num_chunks_each_wg / 2 : num_chunks_each_wg;
       PrimExpr relative_wg_idx =
-          FloorDiv(Sub(lower_args.thread_var, lower_args.thread_bounds->min),
+          FloorDiv(Sub(lower_args.thread_index, lower_args.thread_bounds->min),
                    WARPGROUP_SIZE);
       PrimExpr col_offset =
           num_useful_threads == WARPGROUP_SIZE
@@ -1375,7 +1414,7 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
       }
       if (num_useful_threads != num_threads) {
         body =
-            IfThenElse(lower_args.thread_var <
+            IfThenElse(lower_args.thread_index <
                            lower_args.thread_bounds->min + num_useful_threads,
                        call, Stmt());
       } else {
@@ -1886,7 +1925,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
       }
     } else if (GetIsTmaCopy(op)) {
       LOG(FATAL) << "T.tma_copy() requires a barrier argument. "
-                 << "Use T.tma_copy(src, dst, barrier=mbar[idx]).";
+                 << "Use T.tma_copy(src, dst, barrier=mbar[idx])."
+                 << SpanHintSuffix({op.dst->span, op.src->span});
     } else if (lower_args.alloc_mbarrier) {
       barrier_base_id =
           lower_args.alloc_mbarrier(1, MakeCopyMBarrierName(op.src, op.dst));
@@ -2306,11 +2346,16 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &lower_args,
     global_indices.push_back(r->min);
   }
   std::vector<PrimExpr> global_strides;
-  PrimExpr global_stride = 1;
-  for (size_t i = 0; i < global_tensor->shape.size(); i++) {
-    auto s = global_tensor->shape[global_tensor->shape.size() - i - 1];
-    global_strides.insert(global_strides.begin(), global_stride);
-    global_stride *= s;
+  if (global_tensor->strides.empty()) {
+    PrimExpr global_stride = 1;
+    for (size_t i = 0; i < global_tensor->shape.size(); i++) {
+      auto s = global_tensor->shape[global_tensor->shape.size() - i - 1];
+      global_strides.insert(global_strides.begin(), global_stride);
+      global_stride *= s;
+    }
+  } else {
+    global_strides.assign(global_tensor->strides.begin(),
+                          global_tensor->strides.end());
   }
 
   PrimExpr global_offset = 0;
@@ -2337,7 +2382,8 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &lower_args,
       barrier_base_id = 0;
     } else if (GetIsTmaCopy(op)) {
       LOG(FATAL) << "T.tma_copy() requires a barrier argument. "
-                 << "Use T.tma_copy(src, dst, barrier=mbar[idx]).";
+                 << "Use T.tma_copy(src, dst, barrier=mbar[idx])."
+                 << SpanHintSuffix({op.dst->span, op.src->span});
     } else if (lower_args.alloc_mbarrier) {
       barrier_base_id =
           lower_args.alloc_mbarrier(1, MakeCopyMBarrierName(op.src, op.dst));
@@ -2392,6 +2438,13 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &lower_args,
       barrier_before_tma_stmt =
           Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
                         {mbar_handle, total_bytes}));
+      if (auto emit_arrive_val = annotations.Get("emit_arrive")) {
+        if (Downcast<IntImm>(emit_arrive_val.value())->value != 0) {
+          barrier_after_tma_stmt =
+              Evaluate(Call(DataType::Handle(), builtin::ptx_arrive_barrier(),
+                            {mbar_handle}));
+        }
+      }
     } else {
       barrier_before_tma_stmt =
           Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),

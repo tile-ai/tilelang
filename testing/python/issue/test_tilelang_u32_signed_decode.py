@@ -6,7 +6,7 @@ import torch
 import tilelang
 import tilelang.testing
 import tilelang.language as T
-from tilelang.quantize.quantization import _tir_u32_to_int_to_float
+from examples.dequantize_gemm.quantize.quantization import _tir_u32_to_int_to_float
 
 
 def _pack_signed_values(values: list[int], nbit: int) -> torch.Tensor:

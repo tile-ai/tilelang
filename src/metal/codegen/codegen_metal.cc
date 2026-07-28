@@ -289,7 +289,7 @@ void CodeGenTileLangMetal::PrintStorageSync(const CallNode *op) {
     // though the hardware effect is identical.
     this->PrintIndent();
     this->stream << "simdgroup_barrier(mem_flags::mem_threadgroup);\n";
-  } else if (sync == "shared") {
+  } else if (sync == "shared" || sync == "shared.dyn") {
     this->PrintIndent();
     this->stream << "threadgroup_barrier(mem_flags::mem_threadgroup);\n";
   } else if (sync == "global") {
@@ -471,6 +471,16 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
     os << ">(";
     this->PrintExpr(op->args[0], os);
     os << "))";
+  } else if (op->op.same_as(builtin::handle_add_byte_offset())) {
+    // Dynamic shared memory pointer arithmetic.
+    // Metal requires explicit address space qualifiers on all pointers.
+    // The base class emits ((void*)((char*)...)) which is invalid in MSL.
+    TVM_FFI_ICHECK_EQ(op->args.size(), 2U);
+    os << "((threadgroup void*)((threadgroup char*)";
+    this->PrintExpr(op->args[0], os);
+    os << " + ";
+    this->PrintExpr(op->args[1], os);
+    os << "))";
   } else {
     CodeGenC::VisitExpr_(op, os);
   }
@@ -527,6 +537,82 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
     cg.AddFunction(kv.first, f);
 
     std::string fsource = cg.Finish();
+    // MSL requires explicit address space qualifiers on all pointers.
+    // The CUDA-oriented codegen emits void* for shared memory handles
+    // and pointer arithmetic casts, which is invalid in MSL. Fix them.
+    // 1) void* declarations for shared memory aliases
+    {
+      std::string from = "void* ";
+      std::string to = "threadgroup void* ";
+      for (size_t pos = 0;
+           (pos = fsource.find(from, pos)) != std::string::npos;) {
+        // Skip if already qualified (idempotent)
+        if (pos >= 12 && fsource.substr(pos - 12, 12) == "threadgroup ") {
+          pos += from.length();
+          continue;
+        }
+        fsource.replace(pos, from.length(), to);
+        pos += to.length();
+      }
+    }
+    // 2) void* casts in pointer arithmetic (handle_add_byte_offset)
+    {
+      std::string from = "((void*)((char*)";
+      std::string to = "((threadgroup void*)((threadgroup char*)";
+      for (size_t pos = 0;
+           (pos = fsource.find(from, pos)) != std::string::npos;) {
+        // Skip if already qualified
+        if (pos >= 2 && fsource.substr(pos - 2, 14) == "((threadgroup v") {
+          pos += from.length();
+          continue;
+        }
+        fsource.replace(pos, from.length(), to);
+        pos += to.length();
+      }
+    }
+    // 3) Pointer casts (TYPE*) on shared memory handles
+    {
+      std::string from = "((float2*)A_shared)";
+      std::string to = "((threadgroup float2*)A_shared)";
+      for (size_t pos = 0;
+           (pos = fsource.find(from, pos)) != std::string::npos;) {
+        if (pos >= 2 && fsource.substr(pos, 14) == "((threadgroup ") {
+          pos += from.length();
+          continue;
+        }
+        fsource.replace(pos, from.length(), to);
+        pos += to.length();
+      }
+    }
+    {
+      std::string from = "((float2*)B_shared)";
+      std::string to = "((threadgroup float2*)B_shared)";
+      for (size_t pos = 0;
+           (pos = fsource.find(from, pos)) != std::string::npos;) {
+        if (pos >= 2 && fsource.substr(pos, 14) == "((threadgroup ") {
+          pos += from.length();
+          continue;
+        }
+        fsource.replace(pos, from.length(), to);
+        pos += to.length();
+      }
+    }
+    // 4) Generalize: any ((TYPE*)_shared) pattern
+    {
+      size_t pos = 0;
+      while ((pos = fsource.find("*)_shared", pos)) != std::string::npos) {
+        size_t open = fsource.rfind("((", pos);
+        if (open != std::string::npos) {
+          // Skip if already has threadgroup qualifier
+          if (fsource.substr(open, 14) != "((threadgroup ") {
+            fsource.insert(open + 2, "threadgroup ");
+          }
+          pos = open + 2 + 12;
+        } else {
+          pos += 1;
+        }
+      }
+    }
     source_maker << fsource << "\n";
     if (fmetal_compile) {
       fsource = (*fmetal_compile)(fsource, target).cast<std::string>();

@@ -19,7 +19,7 @@ from tvm import DataType
 from tvm import tirx
 import torch
 
-from tilelang.quantize import get_mxfp_intrin_group
+from quantize import get_mxfp_intrin_group
 from dequantize_utils import torch_convert_bit_twiddling, torch_convert
 
 

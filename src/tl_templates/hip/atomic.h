@@ -78,6 +78,18 @@ __forceinline__ __device__ void AtomicOr(T1 &address, T2 val,
   atomicOr(reinterpret_cast<T1 *>(&address), static_cast<T1>(val));
 }
 
+template <typename T>
+__forceinline__ __device__ T AtomicLoad(T *ref, int memory_order) {
+  return __hip_atomic_load(ref, memory_order, __HIP_MEMORY_SCOPE_AGENT);
+}
+
+template <typename T1, typename T2>
+__forceinline__ __device__ void AtomicStore(T1 *ref, T2 value,
+                                            int memory_order) {
+  __hip_atomic_store(ref, static_cast<T1>(value), memory_order,
+                     __HIP_MEMORY_SCOPE_AGENT);
+}
+
 __forceinline__ __device__ void AtomicAddx2(float *ref, float *val,
                                             int memory_order = 0) {
   float2 add_val = *reinterpret_cast<float2 *>(val);

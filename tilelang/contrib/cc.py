@@ -350,7 +350,8 @@ def cross_compiler(compile_func, options=None, output_format=None, get_target_tr
         compile_func = create_shared
 
     def _fcompile(outputs, objects, options=None):
-        all_options = base_options
+        # Use a fresh list per invocation so per-call options do not leak across builds.
+        all_options = list(base_options)
         if options is not None:
             all_options += options
         compile_func(outputs, objects + add_files, options=all_options, **kwargs)

@@ -6,7 +6,6 @@ from tvm import DataType
 from tvm.tirx import PrimExpr, Buffer, Var, BufferLoad, BufferRegion
 from tilelang import tvm as tvm
 from tilelang import _ffi_api
-from tilelang.language import dtypes as _dtypes  # noqa: F401  # register dtype helpers
 from tilelang.language.dtypes import get_tvm_dtype
 from tilelang.utils import is_tensor_memory
 from tilelang.layout import (
@@ -208,9 +207,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
     def __init__(
         self,
-        a_dtype: str = T.float16,
-        b_dtype: str = T.float16,
-        accum_dtype: str = T.float16,
+        a_dtype: str = "float16",
+        b_dtype: str = "float16",
+        accum_dtype: str = "float16",
         a_transposed: bool = False,
         b_transposed: bool = False,
         block_row_warps: int = 2,
@@ -253,7 +252,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         self.micro_size_x = m_dim
         self.micro_size_k = k_dim
 
-    def _initialize_k_dim(self, a_dtype=T.float16):
+    def _initialize_k_dim(self, a_dtype="float16"):
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
         if a_dtype.bits == 6 or a_dtype.is_float4():
