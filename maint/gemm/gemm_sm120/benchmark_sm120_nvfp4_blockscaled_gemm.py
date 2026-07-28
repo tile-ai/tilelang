@@ -29,14 +29,14 @@ import tilelang
 import tilelang.language as T
 from tilelang.carver.arch import driver
 from tilelang.profiler import do_bench
-from tilelang.quantize import (
+from examples.dequantize_gemm.quantize import (
     swizzle_blockscaled_chunk_kmajor_scale_words,
     unswizzle_blockscaled_chunk_kmajor_scale_words,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tilelang_nvfp4_quantizer import tilelang_quantize_bf16_to_nvfp4_blockscaled  # noqa: E402
-from tilelang.quantize.nvfp4 import (
+from examples.dequantize_gemm.quantize.nvfp4 import (
     blockscaled_chunk_kmajor_tile_source_coords,
     blockscaled_chunk_kmajor_word_offset,
     decode_ue4m3_scale_bytes,
@@ -159,7 +159,7 @@ def tilelang_nvfp4_blockscaled_gemm(
         def copy_blockscaled_chunk_kmajor_scale_tile(SF, SF_shared, tile_row, block_rows, ko, stage, tx):
             # Producer-warp-group staging: 128 producer lanes stride the tile,
             # with the layout addressing shared via
-            # tilelang.quantize.nvfp4.blockscaled_chunk_kmajor_tile_source_coords.
+            # examples.dequantize_gemm.quantize.nvfp4.blockscaled_chunk_kmajor_tile_source_coords.
             scale_tile_words = block_rows * sf_words_per_block_k
             scale_lane = tx - 256
             for scale_iter in T.serial((scale_tile_words + 127) // 128):

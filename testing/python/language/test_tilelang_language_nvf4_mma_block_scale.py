@@ -11,7 +11,7 @@ from tilelang import tvm
 from tilelang.cuda.intrinsics.layout.mma_layout import mma_load_a_32x32_to_shared_16x64_layout
 from tilelang.cuda.intrinsics.macro.mma_macro_generator import SM120BlockScaledFullTilePackageContract
 from tilelang.intrinsics import TensorCoreIntrinEmitter, get_swizzle_layout
-from tilelang.quantize.nvfp4 import blockscaled_chunk_kmajor_word_offset
+from examples.dequantize_gemm.quantize.nvfp4 import blockscaled_chunk_kmajor_word_offset
 from tilelang.transform import simplify_prim_func
 
 
@@ -105,7 +105,7 @@ def test_tensor_core_intrin_emitter_mma_keeps_base_positional_signature():
 
 def test_sm120_mma_blockscaled_strategy_helpers_are_not_public_api():
     # NVFP4-specific staging helpers stay out of the general T.* surface; the
-    # scale-tile addressing lives in tilelang.quantize.nvfp4.
+    # scale-tile addressing lives in examples.dequantize_gemm.quantize.nvfp4.
     assert not hasattr(T, "copy_ue4m3_scale_tile")
     assert not hasattr(T, "ue4m3_scale_tile_source_coords")
     assert not hasattr(T, "sm120_mma_blockscaled")
@@ -747,7 +747,7 @@ def test_sm120_nvfp4_example_kernel_handles_mn_tail_tiles(monkeypatch):
 
     torch = pytest.importorskip("torch")
 
-    from tilelang.quantize import swizzle_blockscaled_chunk_kmajor_scale_words
+    from examples.dequantize_gemm.quantize import swizzle_blockscaled_chunk_kmajor_scale_words
 
     module = _load_sm120_example(monkeypatch)
     for M, N, K in [(257, 384, 512), (130, 128, 256), (128, 136, 256)]:

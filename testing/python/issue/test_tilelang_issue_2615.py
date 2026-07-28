@@ -3,7 +3,7 @@ import pytest
 import tilelang.testing
 import tilelang.language as T
 from tilelang import tvm
-from tilelang.quantize import _tir_u8_to_f4_to_bf16
+from examples.dequantize_gemm.quantize import _tir_u8_to_f4_to_bf16
 
 
 @pytest.mark.parametrize(

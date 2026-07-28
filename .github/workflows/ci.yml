@@ -47,7 +47,7 @@ jobs:
 
       - name: Setup Python 3.10
         id: setup-pylowest
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.10"
           update-environment: true

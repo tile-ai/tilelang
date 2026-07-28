@@ -3104,6 +3104,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::tma_store_cluster())) {
     need_copy_sm90_h_ = true;
     ICHECK_EQ(op->args.size(), 5U) << "tma_store_cluster requires 5 args";
+    PrimExpr size_arg = op->args[3];
+    while (const auto *cast_node = size_arg.as<CastNode>()) {
+      size_arg = cast_node->value;
+    }
+    if (const auto *size_imm = size_arg.as<IntImmNode>()) {
+      ICHECK_EQ(size_imm->value % 16, 0)
+          << "tma_store_cluster transfer size (" << size_imm->value
+          << " bytes) must be a multiple of 16 bytes as required by "
+             "cp.async.bulk";
+    }
     this->PrintIndent();
     this->stream << "tl::tma_store_cluster(";
     this->stream << this->PrintExpr(op->args[0]) << ", ";
@@ -3729,6 +3739,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string ab_type_str = tl::codegen::ptx::DTypeEnumToString(dtype_enum);
 
     need_tcgen05mma_instruction_h_ = true;
+    need_tcgen05_common_h_ = true;
+    this->PrintIndent();
+    this->stream << "tl::require_tcgen05mma_ss();\n";
     this->PrintIndent();
     std::string tcgen05_call =
         "tl::(tcgen05_name)<(ABType)(USE_2CTA_SUFFIX)>(uint64_t((desc_a) + "
@@ -3780,6 +3793,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         std::string(", ") + (enable_2cta ? "true" : "false");
 
     need_tcgen05mma_instruction_h_ = true;
+    need_tcgen05_common_h_ = true;
+    this->PrintIndent();
+    this->stream << "tl::require_tcgen05mma_ts();\n";
     this->PrintIndent();
     std::string tcgen05_call =
         "tl::tcgen05mma_ts<(ABType)(USE_2CTA_SUFFIX)>( "
@@ -3829,6 +3845,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto dtype_enum = tl::codegen::ptx::DTypeFromString(kind_dtype);
 
     need_tcgen05mma_instruction_h_ = true;
+    need_tcgen05_common_h_ = true;
+    this->PrintIndent();
+    this->stream << "tl::require_tcgen05mma_blockscaled_ss();\n";
     this->PrintIndent();
     std::string tcgen05_call =
         "tl::(tcgen05_name)<(ABType), (USE_2CTA)>(uint64_t((desc_a) + "
@@ -3895,6 +3914,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string col_offset = this->PrintExpr(op->args[4]);
     std::string dst_ptr = this->PrintExpr(op->args[5]);
     this->PrintIndent();
+    this->stream << "tl::require_tcgen05_ld();\n";
+    this->PrintIndent();
     this->stream << "tl::tcgen05_ld_32dp" << inst_bits << "bNx<" << chunks
                  << ", " << (pack16 ? "true" : "false") << ">("
                  << tmem_start_col << ", " << col_offset << ", " << dst_ptr
@@ -3909,6 +3930,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string tmem_start_col = this->PrintExpr(op->args[3]);
     std::string col_offset = this->PrintExpr(op->args[4]);
     std::string src_ptr = this->PrintExpr(op->args[5]);
+    this->PrintIndent();
+    this->stream << "tl::require_tcgen05_st();\n";
     this->PrintIndent();
     this->stream << "tl::tcgen05_st_32dp" << inst_bits << "bNx<" << chunks
                  << ", " << (unpack16 ? "true" : "false") << ">("

@@ -614,7 +614,7 @@ public:
       return GetRef<Stmt>(op);
     } else {
       return For(op->loop_var, op->min, extent, op->kind, body,
-                 op->thread_binding, op->annotations);
+                 op->thread_binding, op->annotations, op->step, op->span);
     }
   }
   // IfThenElse

@@ -460,7 +460,8 @@ TL_DEVICE void tma_load_gather4(const CUtensorMap &descriptor,
                  "r"(col), "r"(r0), "r"(r1), "r"(r2), "r"(r3), "l"(cache_hint)
                : "memory");
 #else
-  static_assert(kDependentFalse, "T.tma_gather4 requires sm_100 or later");
+  static_assert(kDependentFalse,
+                "tl::tma_load_gather4 requires sm_100 or later");
 #endif
 }
 
@@ -481,7 +482,7 @@ tma_store_scatter4(const CUtensorMap &descriptor, void const *const smem_ptr,
         "r"(r2), "r"(r3), "l"(cache_hint)
       : "memory");
 #else
-  static_assert(kDependentFalse, "T.tma_scatter4 requires sm_100a");
+  static_assert(kDependentFalse, "tl::tma_store_scatter4 requires sm_100a");
 #endif
 }
 #endif // CUDA 12.8+

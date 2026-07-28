@@ -5,10 +5,10 @@ import pytest
 torch = pytest.importorskip("torch")
 tilelang_testing = pytest.importorskip("tilelang.testing")
 
-from tilelang.quantize import nvfp4 as nvfp4_utils
+from examples.dequantize_gemm.quantize import nvfp4 as nvfp4_utils
 
 _BLOCKSCALED_CHUNK_WORDS = nvfp4_utils._BLOCKSCALED_CHUNK_WORDS
-from tilelang.quantize import (
+from examples.dequantize_gemm.quantize import (
     pack_blockscaled_chunk_kmajor_scale_bytes,
     quantize_bf16_to_nvfp4_blockscaled,
     swizzle_blockscaled_chunk_kmajor_scale_words,
@@ -26,7 +26,7 @@ def _load_maint_quantizer():
     return module.tilelang_quantize_bf16_to_nvfp4_blockscaled
 
 
-from tilelang.quantize.nvfp4 import (
+from examples.dequantize_gemm.quantize.nvfp4 import (
     blockscaled_chunk_kmajor_word_offset,
     decode_packed_fp4_e2m1,
     decode_ue4m3_scale_bytes,
@@ -40,7 +40,7 @@ from tilelang.quantize.nvfp4 import (
 # SM120 OMMA scale-selector contract oracles.
 # These document the compact-selector lane semantics the packed scale layout
 # was derived from; they are exercised only by the contract tests below and
-# live here to keep tilelang.quantize.nvfp4 focused on quantization.
+# live here to keep examples.dequantize_gemm.quantize.nvfp4 focused on quantization.
 # ---------------------------------------------------------------------------
 
 
@@ -370,7 +370,7 @@ def test_blockscaled_chunk_kmajor_word_offset_fixed_cases():
 def test_sm120_contract_helpers_stay_out_of_the_quantize_module():
     # The OMMA scale-selector contract oracles live in this test file; the
     # quantize module stays focused on quantization and layout packing.
-    import tilelang.quantize as quantize
+    from examples.dequantize_gemm import quantize
 
     assert not hasattr(nvfp4_utils, "_sm120_compact_scale_issue_contract")
     assert not hasattr(nvfp4_utils, "_sm120_compact_scale_copy_view_contract")

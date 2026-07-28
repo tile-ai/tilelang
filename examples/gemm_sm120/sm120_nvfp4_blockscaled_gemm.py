@@ -25,7 +25,7 @@ if str(REPO_ROOT) not in sys.path:
 import tilelang
 import tilelang.language as T
 from tilelang.profiler import do_bench
-from tilelang.quantize import swizzle_blockscaled_chunk_kmajor_scale_words
+from examples.dequantize_gemm.quantize import swizzle_blockscaled_chunk_kmajor_scale_words
 
 
 _SM120_SCALE_LAYOUT = "blockscaled_chunk_kmajor"
@@ -50,7 +50,7 @@ def sm120_nvfp4_blockscaled_gemm(
     # Tail tiles: TMA loads zero-fill out-of-bounds rows and the C store is
     # predicated, so M (or N) may be arbitrary as long as the other dimension
     # is a multiple of its tile. The scale source is padded to full 128-row
-    # tiles (the packers in tilelang.quantize do this automatically).
+    # tiles (the helpers in examples.dequantize_gemm.quantize do this automatically).
     # N must keep 16-byte aligned bf16 rows, the same contiguous-dim rule as
     # CuTeDSL's is_valid_tensor_alignment.
     assert N % 8 == 0, "N must be a multiple of 8 (16-byte aligned output rows)"

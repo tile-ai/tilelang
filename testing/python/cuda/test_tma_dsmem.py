@@ -154,6 +154,34 @@ def test_tma_store_cluster():
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_store_cluster_non_16b_contiguous_fallback(capfd):
+    """A contiguous 508B copy must use the barrier-aware SIMT fallback."""
+    N = 127  # 127 * sizeof(float32) = 508 bytes
+    prim_func = make_store_cluster_kernel(N)
+    mod = tilelang.compile(prim_func, out_idx=[1], execution_backend="cython")
+
+    src = mod.get_kernel_source()
+    assert "tl::tma_store_cluster" not in src, f"Non-16B copy must not emit tma_store_cluster.\nKernel source:\n{src}"
+    assert "map_shared_rank" in src, f"Expected SIMT cluster-copy fallback.\nKernel source:\n{src}"
+    captured = capfd.readouterr()
+    warning_output = captured.out + captured.err
+    assert "Cluster bulk copy size" in warning_output
+    assert "508" in warning_output
+    assert "bytes is not a multiple of 16" in warning_output
+
+    A = torch.arange(N, dtype=torch.float32, device="cuda")
+    B = mod(A)
+    np.testing.assert_allclose(
+        B.cpu().numpy(),
+        A.cpu().numpy(),
+        rtol=0,
+        atol=0,
+        err_msg="Non-16B contiguous cluster-copy fallback produced wrong result",
+    )
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_store_cluster_simt_no_barrier():
     """SIMT fallback (no remote_barrier): map_shared_rank + cluster_sync ordering."""
     N = 128
@@ -209,6 +237,32 @@ def test_store_cluster_multi_tma_barrier():
         rtol=0,
         atol=0,
         err_msg="Multi-TMA row-decomposed cluster copy produced wrong result",
+    )
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_store_cluster_non_16b_row_fallback(capfd):
+    """A non-contiguous copy with 124B rows must reject row-wise TMA."""
+    M, N_full, N_tile = 4, 64, 31  # Each row is 31 * 4 = 124 bytes
+    prim_func = make_store_cluster_simt_barrier_kernel(M, N_full, N_tile)
+    mod = tilelang.compile(prim_func, out_idx=[1], execution_backend="cython")
+
+    src = mod.get_kernel_source()
+    assert "tl::tma_store_cluster" not in src, f"Non-16B rows must not emit tma_store_cluster.\nKernel source:\n{src}"
+    assert "map_shared_rank" in src, f"Expected SIMT cluster-copy fallback.\nKernel source:\n{src}"
+    assert "s_barrier[0].init(1)" in src, f"SIMT fallback must keep a single remote arrival.\nKernel source:\n{src}"
+    captured = capfd.readouterr()
+    assert "Cluster bulk copy row size is not a multiple of 16 bytes" in (captured.out + captured.err)
+
+    A = torch.arange(M * N_tile, dtype=torch.float32, device="cuda").reshape(M, N_tile)
+    B = mod(A)
+    np.testing.assert_allclose(
+        B.cpu().numpy(),
+        A.cpu().numpy(),
+        rtol=0,
+        atol=0,
+        err_msg="Non-16B row cluster-copy fallback produced wrong result",
     )
 
 

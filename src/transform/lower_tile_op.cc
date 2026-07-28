@@ -1145,7 +1145,7 @@ private:
         // Fallback: create a temporary frame (should be rare)
         workspace_stack_.emplace_back(Array<Buffer>{workspace});
       }
-      return workspace.access_ptr(2); // write
+      return workspace.access_ptr(kAccessReadWrite);
     };
 
     AllocMBarrierCallback mbarrier_callback =

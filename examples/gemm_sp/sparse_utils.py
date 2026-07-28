@@ -5,7 +5,7 @@ from tilelang.language.dtypes import _TORCH_DTYPE_TO_STR, dtype
 
 # 2:4 sparsity layout metadata lives in the leaf module so the mma_sp code
 # generator can import it without dragging this torch/@tilelang.jit recipe into
-# the bootstrap closure. Re-exported here for backward compatibility.
+# the bootstrap closure. Import it here so this example uses the same contract.
 from tilelang.cuda.intrinsics.sparse_layout import (  # noqa: F401
     GROUP_CONFIG,
     get_e_factor,

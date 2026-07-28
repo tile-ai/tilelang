@@ -500,8 +500,7 @@ TL_DEVICE void tma_store_add(float *const smem_ptr, float *gmem_ptr,
                : "l"(gmem_ptr), "r"(smem_int_ptr), "r"(store_bytes)
                : "memory");
 #else
-  static_assert(kDependentFalse,
-                "T.atomic_add(..., use_tma=True) requires sm_90 or later");
+  static_assert(kDependentFalse, "tl::tma_store_add requires sm_90 or later");
 #endif
 }
 
@@ -518,8 +517,7 @@ TL_DEVICE void tma_store_add(const CUtensorMap &descriptor,
       : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0)
       : "memory");
 #else
-  static_assert(kDependentFalse,
-                "T.atomic_add(..., use_tma=True) requires sm_90 or later");
+  static_assert(kDependentFalse, "tl::tma_store_add requires sm_90 or later");
 #endif
 }
 
@@ -537,8 +535,7 @@ TL_DEVICE void tma_store_add(const CUtensorMap &descriptor,
       : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1)
       : "memory");
 #else
-  static_assert(kDependentFalse,
-                "T.atomic_add(..., use_tma=True) requires sm_90 or later");
+  static_assert(kDependentFalse, "tl::tma_store_add requires sm_90 or later");
 #endif
 }
 
@@ -556,8 +553,7 @@ TL_DEVICE void tma_store_add(const CUtensorMap &descriptor,
       : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1), "r"(crd2)
       : "memory");
 #else
-  static_assert(kDependentFalse,
-                "T.atomic_add(..., use_tma=True) requires sm_90 or later");
+  static_assert(kDependentFalse, "tl::tma_store_add requires sm_90 or later");
 #endif
 }
 
@@ -577,8 +573,7 @@ TL_DEVICE void tma_store_add(const CUtensorMap &descriptor,
         "r"(crd3)
       : "memory");
 #else
-  static_assert(kDependentFalse,
-                "T.atomic_add(..., use_tma=True) requires sm_90 or later");
+  static_assert(kDependentFalse, "tl::tma_store_add requires sm_90 or later");
 #endif
 }
 
@@ -598,8 +593,7 @@ TL_DEVICE void tma_store_add(const CUtensorMap &descriptor,
         "r"(crd3), "r"(crd4)
       : "memory");
 #else
-  static_assert(kDependentFalse,
-                "T.atomic_add(..., use_tma=True) requires sm_90 or later");
+  static_assert(kDependentFalse, "tl::tma_store_add requires sm_90 or later");
 #endif
 }
 
@@ -610,7 +604,7 @@ TL_DEVICE void prefetch_tma_descriptor(const CUtensorMap &descriptor) {
   asm volatile("prefetch.tensormap [%0];" : : "l"(gmem_int_desc) : "memory");
 #else
   static_assert(kDependentFalse,
-                "T.prefetch_tma_descriptor requires sm_90 or later");
+                "tl::prefetch_tma_descriptor requires sm_90 or later");
 #endif
 }
 

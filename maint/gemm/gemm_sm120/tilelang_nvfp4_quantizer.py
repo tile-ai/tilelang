@@ -2,13 +2,13 @@
 
 This is the performance quantizer used by the SM120 NVFP4 GEMM maint
 benchmark. It builds on the device-side format helpers and layout contract in
-``tilelang.quantize.nvfp4``; the library itself only ships those helpers plus
-a torch reference implementation (``quantize_bf16_to_nvfp4_blockscaled``).
+``examples.dequantize_gemm.quantize.nvfp4`` alongside the torch reference
+implementation (``quantize_bf16_to_nvfp4_blockscaled``).
 """
 
 import tilelang
 import tilelang.language as T
-from tilelang.quantize.nvfp4 import (
+from examples.dequantize_gemm.quantize.nvfp4 import (
     _BLOCKSCALED_CHUNK_ROWS,
     _BLOCKSCALED_CHUNK_WORDS,
     _FP4_E2M1_MAX,

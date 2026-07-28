@@ -190,8 +190,15 @@ TL_PATCH TL_DEVICE half_t __hfma(const half_t x, const half_t y,
 // __hfma function for bfloat16_t
 TL_PATCH TL_DEVICE bfloat16_t __hfma(const bfloat16_t x, const bfloat16_t y,
                                      const bfloat16_t z) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
   return bfloat16_t(
       __hfma(x.to_nv_bfloat16(), y.to_nv_bfloat16(), z.to_nv_bfloat16()));
+#else
+  // CUDA declares the native __nv_bfloat16 __hfma overload only for SM80+.
+  // On earlier targets (e.g. SM75) evaluate with an fp32 FMA and convert back
+  // to bf16, matching cutlass::bfloat16_t's own pre-SM80 arithmetic fallback.
+  return bfloat16_t(fmaf(float(x), float(y), float(z)));
+#endif
 }
 
 // TVM lowers T.exp(bfloat16) to the CUDA half-style `hexp` name. TileLang uses
