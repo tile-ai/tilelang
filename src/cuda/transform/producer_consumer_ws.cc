@@ -21,6 +21,7 @@
  */
 
 #include "support/check.h"
+#include <algorithm>
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ir/cast.h>
@@ -31,6 +32,7 @@
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
+#include <utility>
 
 #include "backend/common/target_utils.h"
 #include "cuda/op/copy.h"
@@ -103,15 +105,12 @@ struct PhaseCounter {
   Stmt InitStmt() const { return Init(); }
 
   PrimExpr StageExpr(int num_stages) const {
-    if (num_stages == 1)
-      return IntImm(DataType::Int(32), 0);
-    return FloorMod(Load(), num_stages);
+    return FloorMod(Load(), IntImm(DataType::Int(32), num_stages));
   }
 
   PrimExpr ParityExpr(int num_stages) const {
-    if (num_stages == 1)
-      return FloorMod(Load(), 2);
-    return FloorMod(FloorDiv(Load(), num_stages), 2);
+    PrimExpr stages = IntImm(DataType::Int(32), num_stages);
+    return FloorMod(FloorDiv(Load(), stages), IntImm(DataType::Int(32), 2));
   }
 };
 
@@ -1394,10 +1393,14 @@ private:
     Var loop_var = pipeline_loop->loop_var;
     PrimExpr loop_min = pipeline_loop->min;
     PrimExpr loop_extent = pipeline_loop->extent;
-    PrimExpr linear_idx = loop_var - loop_min;
-
-    PrimExpr base_stage_expr = FloorMod(linear_idx, num_stages);
-    PrimExpr base_parity_expr = FloorMod(FloorDiv(linear_idx, num_stages), 2);
+    DataType pipeline_iter_dtype = loop_var.dtype();
+    PrimExpr linear_idx = loop_var - tvm::cast(pipeline_iter_dtype, loop_min);
+    PrimExpr stages = make_const(linear_idx.dtype(), num_stages);
+    PrimExpr base_stage_expr =
+        tvm::cast(DataType::Int(32), FloorMod(linear_idx, stages));
+    PrimExpr two = make_const(linear_idx.dtype(), 2);
+    PrimExpr base_parity_expr = tvm::cast(
+        DataType::Int(32), FloorMod(FloorDiv(linear_idx, stages), two));
 
     // When to switch from loop-var-based to counter-based stage/parity:
     //   (a) `loop_body_condition.defined()`: the pipeline body is guarded
@@ -1708,10 +1711,13 @@ private:
 
     std::vector<Array<Stmt>> prelude_waits_before_consumer(
         consumer_compute_stmts.size());
-    PrimExpr prelude_wait_guard =
-        needs_phase_counter ? EQ(consumer_phase_counter.value().Load(),
-                                 IntImm(DataType::Int(32), 0))
-                            : EQ(loop_var, loop_min);
+    PrimExpr prelude_wait_guard;
+    if (needs_phase_counter) {
+      prelude_wait_guard = EQ(consumer_phase_counter.value().Load(),
+                              IntImm(DataType::Int(32), 0));
+    } else {
+      prelude_wait_guard = EQ(loop_var, tvm::cast(loop_var.dtype(), loop_min));
+    }
     int prelude_barrier_base = num_fwd + num_bp;
     for (size_t i = 0; i < prelude_tma_plans.size(); ++i) {
       PrimExpr barrier_id = IntImm(DataType::Int(32), prelude_barrier_base + i);
