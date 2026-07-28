@@ -68,18 +68,22 @@ class GemmWGMMA(GemmBase):
         b_is_k_major = self.trans_B
         a_continuity = self.K if a_is_k_major else mma_emitter.wgmma_inst_m
         b_continuity = self.K if b_is_k_major else mma_emitter.wgmma_inst_n
+        # Schedule-generated gemm calls (via gemm_at) may have a
+        # non-fragment C buffer.  Use a simple linear layout so
+        # LayoutInference can proceed with region-based stores.
+        c_layout = mma_emitter.make_mma_store_layout(self.C) if is_fragment(self.C) else make_linear_layout(self.C)
         if self.is_gemm_ss():
             return {
                 # WGMMA does not support padding
                 self.A: self.infer_shared_layout(a_continuity)(self.A),
                 self.B: self.infer_shared_layout(b_continuity)(self.B),
-                self.C: mma_emitter.make_mma_store_layout(self.C),
+                self.C: c_layout,
             }
         elif self.is_gemm_rs():
             return {
                 self.A: mma_emitter.make_mma_load_layout(self.A, matrix="A"),
                 self.B: self.infer_shared_layout(b_continuity)(self.B),
-                self.C: mma_emitter.make_mma_store_layout(self.C),
+                self.C: c_layout,
             }
         else:
             raise ValueError(f"Unsupported gemm combination for wgmma, A: {self.A.scope()}, B: {self.B.scope()}")
