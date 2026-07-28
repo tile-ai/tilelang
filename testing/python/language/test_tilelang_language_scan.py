@@ -557,6 +557,55 @@ def run_cummax_strided(M, N, NBIG, dim=0, reverse=False, dtype=T.float32):
     torch.testing.assert_close(tilelang_res, ref)
 
 
+def scan_strided_out_of_place_test(M, N, src_pitch, dst_pitch, op="cumsum", dim=0, reverse=False, dtype=T.float32):
+
+    @T.prim_func
+    def scan_strided_out_of_place(
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M, N), dtype),
+    ):
+        with T.Kernel(1, threads=256) as _:
+            src_big = T.alloc_shared((M, src_pitch), dtype)
+            dst_big = T.alloc_shared((M, dst_pitch), dtype)
+            for i, j in T.Parallel(M, src_pitch):
+                src_big[i, j] = T.cast(0, dtype)
+            for i, j in T.Parallel(M, dst_pitch):
+                dst_big[i, j] = T.cast(0, dtype)
+            for i, j in T.Parallel(M, N):
+                src_big[i, j] = A[i, j]
+            scan = T.cumsum if op == "cumsum" else T.cummax
+            scan(
+                src=src_big[0:M, 0:N],
+                dst=dst_big[0:M, 0:N],
+                dim=dim,
+                reverse=reverse,
+            )
+            for i, j in T.Parallel(M, N):
+                B[i, j] = dst_big[i, j]
+
+    return scan_strided_out_of_place
+
+
+def run_scan_strided_out_of_place(M, N, src_pitch, dst_pitch, op="cumsum", dim=0, reverse=False, dtype=T.float32):
+    program = scan_strided_out_of_place_test(M, N, src_pitch, dst_pitch, op, dim, reverse, dtype)
+    jit_kernel = tl.compile(program, out_idx=-1)
+
+    A = torch.arange(M * N, dtype=getattr(torch, dtype), device="cuda").reshape(M, N) - N
+    if op == "cumsum":
+        ref = A.cumsum(dim=dim)
+    else:
+        ref = A.cummax(dim=dim).values
+    if reverse:
+        flipped = A.flip(dims=[dim])
+        if op == "cumsum":
+            ref = flipped.cumsum(dim=dim).flip(dims=[dim])
+        else:
+            ref = flipped.cummax(dim=dim).values.flip(dims=[dim])
+
+    tilelang_res = jit_kernel(A)
+    torch.testing.assert_close(tilelang_res, ref)
+
+
 def test_cumsum_strided_region():
     """cumsum over a non-contiguous 2-D shared sub-region."""
     for M, N, NBIG, dim, reverse in [
@@ -577,6 +626,13 @@ def test_cummax_strided_region():
         (8, 40, 64, 1, True),
     ]:
         run_cummax_strided(M, N, NBIG, dim, reverse)
+
+
+def test_scan_strided_out_of_place():
+    """Out-of-place scan with distinct source and destination row pitches."""
+    for op in ("cumsum", "cummax"):
+        for dim in (0, 1):
+            run_scan_strided_out_of_place(8, 40, 64, 80, op=op, dim=dim, reverse=dim == 1)
 
 
 def scan_offset_subregion_test(H, W, r0, r1, op="cumsum", dim=0, reverse=False, dtype=T.float32):
