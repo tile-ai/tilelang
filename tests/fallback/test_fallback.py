@@ -24,7 +24,7 @@ def _lower_mod(mod):
     mod = tir.transform.Simplify()(mod)
     mod = s_tir.transform.LowerInitBlock()(mod)
     mod = s_tir.transform.ConvertBlocksToOpaque()(mod)
-    mod = tilelang.transform.ReserveRootBlock()(mod)
+    mod = tilelang.transform.CanonicalizeScheduledTIR()(mod)
     return mod
 
 

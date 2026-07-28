@@ -46,7 +46,7 @@ def _build_mod(m: int, k: int, arch: str):
     if not is_dsl_generated:
         mod = tirx.transform.Simplify()(mod)
         mod = tvm.s_tir.transform.ConvertBlocksToOpaque()(mod)
-        mod = tilelang.transform.ReserveRootBlock()(mod)
+        mod = tilelang.transform.CanonicalizeScheduledTIR()(mod)
 
     print("=== Lowered IR ===")
     print(mod)

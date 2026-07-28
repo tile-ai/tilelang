@@ -52,7 +52,7 @@ def _build_mod(m: int, n: int, k: int, arch: str):
     mod = tirx.transform.Simplify()(mod)
     mod = s_tir.transform.LowerInitBlock()(mod)
     mod = s_tir.transform.ConvertBlocksToOpaque()(mod)
-    mod = tilelang.transform.ReserveRootBlock()(mod)
+    mod = tilelang.transform.CanonicalizeScheduledTIR()(mod)
 
     print("=== Lowered IR ===")
     print(mod)

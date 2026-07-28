@@ -69,7 +69,7 @@ def _build_mod(m: int, n: int, arch: str):
     mod = sch.mod
     mod = tirx.transform.Simplify()(mod)
     mod = tvm.s_tir.transform.ConvertBlocksToOpaque()(mod)
-    mod = tilelang.transform.ReserveRootBlock()(mod)
+    mod = tilelang.transform.CanonicalizeScheduledTIR()(mod)
 
     lowered_ir = str(mod)
     has_shared = "T.copy(" in lowered_ir and "shared.dyn" in lowered_ir

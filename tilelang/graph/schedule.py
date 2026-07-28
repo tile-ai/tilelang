@@ -5,7 +5,7 @@ from tilelang import tvm
 from tvm import s_tir, tirx
 
 
-def canonicalize_scheduled_ir(mod: tvm.IRModule) -> tvm.IRModule:
+def canonicalize_scheduled_tir(mod: tvm.IRModule) -> tvm.IRModule:
     """Prepare schedule-rule output for a backend-owned lowering pipeline.
 
     Graph scheduling produces thread-binding loops and may leave reduction
@@ -20,4 +20,4 @@ def canonicalize_scheduled_ir(mod: tvm.IRModule) -> tvm.IRModule:
     mod = s_tir.transform.LowerInitBlock()(mod)
     mod = s_tir.transform.ConvertBlocksToOpaque()(mod)
     mod = tirx.transform.NarrowDataType(32)(mod)
-    return tilelang.transform.ReserveRootBlock()(mod)
+    return tilelang.transform.CanonicalizeScheduledTIR()(mod)

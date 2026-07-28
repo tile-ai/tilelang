@@ -21,7 +21,7 @@ def _collect_launch_ir(mod):
     return loops, attrs, roots
 
 
-def test_reserve_root_block_preserves_target_neutral_launch_loops():
+def test_canonicalize_scheduled_tir_preserves_target_neutral_launch_loops():
     @T.prim_func
     def before(A: T.Buffer((8,), "float32"), B: T.Buffer((8,), "float32")):
         for bx in T.thread_binding(2, thread="blockIdx.x"):
@@ -34,7 +34,7 @@ def test_reserve_root_block_preserves_target_neutral_launch_loops():
 
     mod = tvm.IRModule({"main": before})
     mod = s_tir.transform.ConvertBlocksToOpaque()(mod)
-    mod = tilelang.transform.ReserveRootBlock()(mod)
+    mod = tilelang.transform.CanonicalizeScheduledTIR()(mod)
 
     loops, attrs, roots = _collect_launch_ir(mod)
     assert [loop.thread_binding.thread_tag for loop in loops] == ["threadIdx.x", "blockIdx.x"]

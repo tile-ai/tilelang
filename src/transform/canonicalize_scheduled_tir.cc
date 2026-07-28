@@ -19,7 +19,7 @@
  */
 
 /*!
- * \file reserve_root_block.cc
+ * \file canonicalize_scheduled_tir.cc
  * \brief Canonicalize scheduled TIR into a single tilelang_root block while
  * preserving target-neutral kernel launch loops.
  */
@@ -44,21 +44,21 @@ using namespace tirx;
 using namespace tvm::s_tir;
 
 /*!
- * \brief Remove Block to ensure that the TIR can not be scheduled again.
+ * \brief Canonicalize scheduled TIR into the backend-neutral kernel form.
  */
-class RootBlockReserver : public StmtExprMutator {
+class ScheduledTIRCanonicalizer : public StmtExprMutator {
 public:
   static Stmt Rewrite(Stmt body) {
-    RootBlockReserver reserver;
-    return reserver(std::move(body));
+    ScheduledTIRCanonicalizer canonicalizer;
+    return canonicalizer(std::move(body));
   }
 
 private:
   Stmt VisitStmt_(const SBlockRealizeNode *op) final {
     // We have convert blocks into opaque blocks in previous passes.
     ICHECK(op->iter_values.empty())
-        << "Non-opaque blocks are not allowed in FlattenBuffer. Please "
-           "call pass ConvertBlocksToOpaque before.";
+        << "CanonicalizeScheduledTIR requires opaque blocks. Please call "
+           "ConvertBlocksToOpaque first.";
     // Step 1. Visit the body
     block_level_++;
     SBlock new_block = Downcast<SBlock>(this->VisitStmt(op->block));
@@ -243,24 +243,25 @@ private:
   int block_level_ = 0;
 };
 
-PrimFunc ReserveRootBlock(PrimFunc f) {
+PrimFunc CanonicalizeScheduledTIR(PrimFunc f) {
   auto fptr = f.CopyOnWrite();
-  fptr->body = RootBlockReserver::Rewrite(std::move(fptr->body));
+  fptr->body = ScheduledTIRCanonicalizer::Rewrite(std::move(fptr->body));
   return f;
 }
 using namespace tirx::transform;
 
 namespace transform {
-Pass ReserveRootBlock() {
+Pass CanonicalizeScheduledTIR() {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
-    return ::tvm::tl::ReserveRootBlock(std::move(f));
+    return ::tvm::tl::CanonicalizeScheduledTIR(std::move(f));
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.ReserveRootBlock", {});
+  return CreatePrimFuncPass(pass_func, 0, "tl.CanonicalizeScheduledTIR", {});
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.ReserveRootBlock", ReserveRootBlock);
+  refl::GlobalDef().def("tl.transform.CanonicalizeScheduledTIR",
+                        CanonicalizeScheduledTIR);
 }
 } // namespace transform
 

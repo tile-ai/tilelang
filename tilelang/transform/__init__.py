@@ -220,13 +220,13 @@ def MaterializeKernelLaunch(lower_thread_binding: bool = True):
     return _ffi_api.MaterializeKernelLaunch(lower_thread_binding)  # type: ignore
 
 
-def ReserveRootBlock():
+def CanonicalizeScheduledTIR():
     """Canonicalize scheduled TIR into a single ``tilelang_root`` block.
 
     Kernel launch loops remain target-neutral. Backend pipelines materialize
     them after target binding.
     """
-    return _ffi_api.ReserveRootBlock()  # type: ignore
+    return _ffi_api.CanonicalizeScheduledTIR()  # type: ignore
 
 
 def AnnotateDeviceRegions():

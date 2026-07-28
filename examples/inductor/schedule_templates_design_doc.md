@@ -80,7 +80,7 @@ All rules extend `GPUScheduleRule` from `tvm.dlight.ScheduleRule`.
    bind tx → threadIdx.x
    ```
 4. Epilogue handling: If epilogue exists, set GEMV output scope to `shared.dyn`, then `reverse_compute_at`
-5. Lowering: `LowerCrossThreadReduction → LowerInitBlock → ConvertBlocksToOpaque → ReserveRootBlock`
+5. Lowering: `LowerCrossThreadReduction → LowerInitBlock → ConvertBlocksToOpaque → CanonicalizeScheduledTIR`
 
 **Performance**: ~82-83% of torch.compile (cuBLAS) on H100. The gap is due to scalar loads — `LowerCrossThreadReduction` generates serial accumulation loops that prevent vectorized memory access. This appears to be a fundamental limit of the split-K + cross-thread-reduction approach.
 
@@ -255,14 +255,14 @@ No caching, no fragment staging. Pure loop-to-thread mapping.
 ```
 Simplify → LowerCrossThreadReduction → LowerInitBlock →
 PlanAndUpdateBufferAllocationLocation → ConvertBlocksToOpaque →
-UnifyThreadBinding → CompactBufferAllocation → Simplify → ReserveRootBlock
+UnifyThreadBinding → CompactBufferAllocation → Simplify → CanonicalizeScheduledTIR
 ```
 Then compiled via `tilelang.compile(mod["main"])`.
 
 ### GEMV (tir.Schedule-based)
 ```
 LowerCrossThreadReduction → LowerInitBlock →
-ConvertBlocksToOpaque → ReserveRootBlock
+ConvertBlocksToOpaque → CanonicalizeScheduledTIR
 ```
 Wrapped in `TileSchedule(mod)` for compatibility with the compilation pipeline.
 

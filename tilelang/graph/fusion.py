@@ -7,7 +7,7 @@ from tilelang import tvm as tvm
 from tvm import s_tir, relax, tirx as tir
 from tvm.s_tir import dlight as dl
 from tilelang.schedule.templates import default_schedule_rules
-from tilelang.graph.schedule import canonicalize_scheduled_ir
+from tilelang.graph.schedule import canonicalize_scheduled_tir
 
 logger = logging.getLogger(__name__)
 
@@ -2215,7 +2215,7 @@ class Tunner:
             if selected_tiles:
                 mod = self._apply_fixed_config_schedules(mod, rules, selected_tiles)
             mod = dl.ApplyDefaultSchedule(*rules)(mod)
-            return canonicalize_scheduled_ir(mod)
+            return canonicalize_scheduled_tir(mod)
 
     def baseline(self) -> tuple[tvm.IRModule, float | None]:
         if self._baseline_mod is None:

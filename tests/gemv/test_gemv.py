@@ -23,7 +23,7 @@ def _lower_mod(mod):
     """Normalize scheduled module into a legal tilelang program.
 
     Pipeline:
-      Simplify → ConvertBlocksToOpaque → ReserveRootBlock
+      Simplify → ConvertBlocksToOpaque → CanonicalizeScheduledTIR
 
     cache_write_at detects init blocks (from decompose_reduction) and
     replaces them with T.fill in-place, so no separate StripBlockInit pass
@@ -31,7 +31,7 @@ def _lower_mod(mod):
     """
     mod = tir.transform.Simplify()(mod)
     mod = s_tir.transform.ConvertBlocksToOpaque()(mod)
-    mod = tilelang.transform.ReserveRootBlock()(mod)
+    mod = tilelang.transform.CanonicalizeScheduledTIR()(mod)
     return mod
 
 

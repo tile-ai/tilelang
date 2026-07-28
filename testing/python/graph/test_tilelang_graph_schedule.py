@@ -1,5 +1,5 @@
 from tilelang import tvm
-from tilelang.graph.schedule import canonicalize_scheduled_ir
+from tilelang.graph.schedule import canonicalize_scheduled_tir
 from tvm.script import tirx as T
 
 
@@ -18,7 +18,7 @@ def test_canonicalize_converts_block_bindings_before_narrowing():
     """An int64 binding must be substituted before its block var is narrowed."""
     mod = tvm.IRModule({"main": mixed_width_block_binding})
 
-    canonicalized = canonicalize_scheduled_ir(mod)
+    canonicalized = canonicalize_scheduled_tir(mod)
 
     assert "n == T.int64(0)" in canonicalized.script()
 
