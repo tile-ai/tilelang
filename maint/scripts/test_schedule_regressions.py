@@ -109,7 +109,7 @@ INDUCTOR_EXAMPLE = "examples/inductor/graph_trace_example.py"
 
 
 def repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+    return Path(__file__).resolve().parents[2]
 
 
 def run_command(

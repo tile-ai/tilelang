@@ -13,7 +13,7 @@ from tilelang.graph.passes import (
     fold_zero_binops,
     reorder_pre_reduction_blocks,
 )
-from tilelang.relax import FuseTIR
+from tilelang.relax import LowerPrimitiveFunctionsToTIR
 from tilelang.graph.fusion import fuse_all
 
 logger = logging.getLogger(__name__)
@@ -53,7 +53,7 @@ def run_pipeline(
                 relax.transform.DeadCodeElimination(),
                 relax.transform.FuseOps(),
                 relax.transform.DeadCodeElimination(),
-                FuseTIR(),
+                LowerPrimitiveFunctionsToTIR(),
                 relax.transform.DeadCodeElimination(),
             ]
         )
@@ -61,11 +61,12 @@ def run_pipeline(
 
         # Reorder TIR blocks so reduction blocks (matmul, conv) come before
         # independent injective blocks (dtype casts).  The converter may
-        # emit a bias cast before a linear/matmul, and FuseTIR preserves
-        # that ordering, which breaks schedule rules.
+        # emit a bias cast before a linear/matmul, and primitive-function
+        # lowering preserves that ordering, which breaks schedule rules.
         mod = _try_pass(mod, reorder_pre_reduction_blocks, "ReorderPreReductionBlocks")
 
-        # LegalizeOps + FuseTIR can introduce call_tir(add_fn, [zero, x])
+        # LegalizeOps + LowerPrimitiveFunctionsToTIR can introduce
+        # call_tir(add_fn, [zero, x])
         # from broadcast/shape legalisation, so re-run after.
         mod = _try_pass(mod, fold_zero_binops, "FoldZeroBinops_post_fuse")
         mod = _try_pass(mod, fuse_qk_rope_pass, "FuseQKRope")

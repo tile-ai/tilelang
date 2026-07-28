@@ -137,7 +137,7 @@ def _classify_reduce_expr(
     ``"absmax"``, ``"min"`` if a match is found, else ``None``.
 
     This generalises the old ``_is_direct_buffer_load`` /
-    ``_is_square_of_buffer_load`` checks so that FuseTIR-inlined
+    ``_is_square_of_buffer_load`` checks so that primitive-function-lowered
     expressions like ``pow(cast(buf[i]), 2)`` are recognised as
     ``"sumsq"`` without special-casing each form.
     """

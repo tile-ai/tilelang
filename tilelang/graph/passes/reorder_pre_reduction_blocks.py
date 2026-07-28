@@ -1,7 +1,8 @@
 """TIR pass that reorders blocks in fused PrimFuncs to put reduction blocks first.
 
-After FuseTIR, blocks are concatenated in Relax binding order.  When the
-converter emits a standalone injective operation (e.g. a bias dtype cast)
+After LowerPrimitiveFunctionsToTIR, blocks are concatenated in Relax binding
+order.  When the converter emits a standalone injective operation (e.g. a bias
+dtype cast)
 *before* a matmul, the resulting TIR has::
 
     [cast_bias, NT_matmul, add_bias, cast_output]
@@ -49,7 +50,8 @@ def _stripped_body(stmt: tir.Stmt) -> tir.SeqStmt | None:
 def reorder_pre_reduction_blocks(mod):
     """Module-level pass: reorder TIR blocks so the first reduction comes first.
 
-    Applied after FuseTIR and before fuse_all in the TileLang pipeline.
+    Applied after LowerPrimitiveFunctionsToTIR and before fuse_all in the
+    TileLang pipeline.
     """
     updated = {}
     for gv, func in mod.functions_items():

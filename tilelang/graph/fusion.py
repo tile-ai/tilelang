@@ -817,8 +817,8 @@ class _SharedIntermediatePlan:
 
 
 @tir.functor.mutator
-class _FuseTIRSubstitutor(tir.PyStmtExprMutator):
-    """Small Python equivalent of TileLang's C++ FuseTIR buffer substitutor."""
+class _PrimitiveTIRBufferSubstitutor(tir.PyStmtExprMutator):
+    """Python equivalent of the primitive-function lowering buffer substitutor."""
 
     def __init__(self, buffer_remap, prefix=None, protected_buffers=None, var_remap=None):
         super().__init__()
@@ -1761,7 +1761,7 @@ class GraphFuser:
         protected_buffers=None,
         var_remap=None,
     ) -> tir.SBlock:
-        new_block = _FuseTIRSubstitutor(buffer_remap, prefix, protected_buffers, var_remap).visit_stmt(block)
+        new_block = _PrimitiveTIRBufferSubstitutor(buffer_remap, prefix, protected_buffers, var_remap).visit_stmt(block)
         if not isinstance(new_block, tir.SBlock):
             raise RuntimeError("Expected block substitution to return a tir.SBlock")
         return new_block

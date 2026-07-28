@@ -172,7 +172,8 @@ class TileLangFXImporter(TorchFXImporter):
     """FX→Relax importer with dtype cast insertion and per-op fallback.
 
     - After each conversion, inserts R.astype if output dtype mismatches
-      the FX expectation (fused as epilogue by FuseOps/FuseTIR).
+      the FX expectation (fused as an epilogue by FuseOps followed by
+      LowerPrimitiveFunctionsToTIR).
     - Unsupported ops emit opaque ``R.call_dps_packed`` calls that act as
       fusion barriers; the codegen layer maps them back to torch ops.
     """

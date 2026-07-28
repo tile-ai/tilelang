@@ -16,6 +16,13 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+/*!
+ * \file lower_primitive_functions_to_tir.cc
+ * \brief Lower primitive Relax functions into TIR PrimFuncs.
+ *
+ * This pass is based on TVM Relax FuseTIR, with TileLang-specific buffer,
+ * symbolic-shape, and TIRX handling.
+ */
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/relax/analysis.h>
 #include <tvm/relax/attrs/op.h>
@@ -229,10 +236,11 @@ private:
  * \brief Substitute a given source buffer with a given target buffer in
  * statements or expressions.
  */
-class FuseTIRBufferSubstitutor : private StmtExprMutator {
+class PrimitiveTIRBufferSubstitutor : private StmtExprMutator {
 public:
-  explicit FuseTIRBufferSubstitutor(const ffi::Map<Buffer, Buffer> &buffer_map,
-                                    const ffi::Map<Var, PrimExpr> &var_map) {
+  explicit PrimitiveTIRBufferSubstitutor(
+      const ffi::Map<Buffer, Buffer> &buffer_map,
+      const ffi::Map<Var, PrimExpr> &var_map) {
     buffer_remap_ = buffer_map;
     var_remap_ = var_map;
     for (const auto &[src, tgt] : buffer_map) {
@@ -641,18 +649,18 @@ private:
   Var current_var_;
 };
 
-class FusedTIRConstructor : public ExprVisitor {
+class PrimitiveTIRConstructor : public ExprVisitor {
 public:
   /*!
-   * \brief Construct a fused TIR PrimFunc from a relax sub-function
+   * \brief Construct a TIR PrimFunc from a primitive Relax function
    * \param mod The IRModule
-   * \param gv The global var of relax subfunction to be fused into one PrimFunc
-   * \return The fused TIR PrimFunc and the in-place indices (non-empty for an
+   * \param gv The global var of the primitive Relax function
+   * \return The lowered TIR PrimFunc and the in-place indices (non-empty for an
    * in-place call)
    */
   static std::pair<tirx::PrimFunc, ffi::Array<Integer>>
-  GetFusedTIR(const IRModule &mod, const GlobalVar &gv) {
-    FusedTIRConstructor visitor(mod, gv->name_hint);
+  GetPrimitiveTIR(const IRModule &mod, const GlobalVar &gv) {
+    PrimitiveTIRConstructor visitor(mod, gv->name_hint);
     BaseFunc f = mod->Lookup(gv);
     CHECK(f->IsInstance<relax::FunctionNode>())
         << "Expected relax functions, but got: " << f->GetTypeKey();
@@ -663,12 +671,12 @@ public:
     for (size_t idx : visitor.inplace_indices_) {
       inplace_indices.push_back(Integer(idx));
     }
-    return {visitor.fused_tir_, inplace_indices};
+    return {visitor.primitive_tir_, inplace_indices};
   }
 
 private:
-  explicit FusedTIRConstructor(const IRModule &mod,
-                               const ffi::String &func_name)
+  explicit PrimitiveTIRConstructor(const IRModule &mod,
+                                   const ffi::String &func_name)
       : mod_(mod), func_name_(func_name) {}
 
   void VisitExpr_(const FunctionNode *func) final {
@@ -776,7 +784,7 @@ private:
     }
 
     // Step 5. Create PrimFunc
-    fused_tir_ = ConstructFunc();
+    primitive_tir_ = ConstructFunc();
   }
 
   void VisitBinding_(const VarBindingNode *binding) final {
@@ -817,13 +825,13 @@ private:
     // TODO(Siyuan): support un-schedulable functions.
     ICHECK(prim_func->body->IsInstance<tirx::SBlockRealizeNode>())
         << "Only schedulable functions (whose body is the root sblock) can be "
-           "fused";
+           "lowered";
     const tirx::SBlockRealize &root_realize =
         Downcast<tirx::SBlockRealize>(prim_func->body);
     const tirx::SBlock &root_block = root_realize->block;
 
-    // Step 4. Add all the original alloc_buffers and body to the fused
-    // function.
+    // Step 4. Add all original alloc_buffers and bodies to the lowered
+    // PrimFunc.
     func_info_.alloc_buffers.insert(func_info_.alloc_buffers.end(),
                                     root_block->alloc_buffers.begin(),
                                     root_block->alloc_buffers.end());
@@ -854,7 +862,7 @@ private:
                    << tir_vars->GetTypeKey();
       }
     }
-    // Update fused func name
+    // Update the generated PrimFunc name.
     func_info_.global_name += "_" + gv->name_hint;
   }
 
@@ -910,7 +918,8 @@ private:
     auto get_tensor_shape = [](const TensorStructInfoNode *sinfo) {
       const auto *shape_expr = sinfo->shape.as<ShapeExprNode>();
       CHECK(shape_expr)
-          << "FuseTIR expects all parameters are Tensors with symbolic shape.";
+          << "LowerPrimitiveFunctionsToTIR expects all parameters are Tensors "
+             "with symbolic shape.";
       return shape_expr->values;
     };
     if (const auto *tuple_sinfo =
@@ -1112,7 +1121,7 @@ private:
     CHECK(!struct_info.as<TupleStructInfoNode>())
         << "InternalError: "
         << "All tuple parameters should be expanded before this point in "
-           "FuseTIR.  "
+           "LowerPrimitiveFunctionsToTIR.  "
         << "However, parameter " << relax_param << " has struct info "
         << struct_info;
 
@@ -1123,7 +1132,8 @@ private:
       // buffer
       const auto *shape_expr = tensor->shape.as<ShapeExprNode>();
       ICHECK(shape_expr)
-          << "FuseTIR expects all Tensor parameters have a known shape.";
+          << "LowerPrimitiveFunctionsToTIR expects all Tensor parameters have "
+             "a known shape.";
       DataType dtype = tensor->dtype;
       ffi::Array<PrimExpr> buffer_shape =
           NormalizeStaticBufferShape(shape_expr->values);
@@ -1158,14 +1168,14 @@ private:
   }
 
   /*!
-   * \brief Construct fused TIR func with collected FuseFuncInfo
-   * \return The fused TIR
+   * \brief Construct a TIR PrimFunc with collected PrimitiveFunctionInfo
+   * \return The lowered TIR PrimFunc
    */
   tirx::PrimFunc ConstructFunc() {
     ffi::Map<ffi::String, Any> attr_map;
     attr_map.Set(tirx::attr::kNoAlias, true);
-    tl::FuseTIRBufferSubstitutor subst(func_info_.buffer_subst_map,
-                                       func_info_.symbolic_var_remap);
+    tl::PrimitiveTIRBufferSubstitutor subst(func_info_.buffer_subst_map,
+                                            func_info_.symbolic_var_remap);
     ICHECK(func_info_.global_name != "fused");
     // Remove output buffers from func_info_.alloc_buffers
     ffi::Array<tirx::Buffer> alloc_buffers;
@@ -1206,35 +1216,34 @@ private:
 
   /********** Function Info **********/
 
-  /*! \brief auxiliary information for FuseTIR */
-  struct FuseFuncInfo {
+  /*! \brief Auxiliary information for primitive-function lowering. */
+  struct PrimitiveFunctionInfo {
     /*! \brief The arguments for calling prim_func */
     ffi::Array<Expr> arguments;
     /*!
      * \brief The map from each dataflow var (intermediate var) to the
-     * corresponding buffers allocated in the fused func
+     * corresponding buffers allocated in the lowered PrimFunc
      */
     ffi::Map<Expr, ffi::Array<tirx::Buffer>> expr2buffers;
-    /*! \brief The buffers to allocate in the fused func*/
+    /*! \brief The buffers to allocate in the lowered PrimFunc. */
     ffi::Array<tirx::Buffer> alloc_buffers;
-    /*! \brief The bodies of the original funcs, which is also the body of the
-     * fused func. */
+    /*! \brief The original PrimFunc bodies used by the lowered PrimFunc. */
     ffi::Array<tirx::Stmt> bodies;
-    /*! \brief The params of the fused function*/
+    /*! \brief The parameters of the lowered PrimFunc. */
     ffi::Array<tirx::Var> params;
     /*!
      * \brief The map from buffer in original functions to corresponding buffer
-     * in the fused function
+     * in the lowered PrimFunc
      */
     ffi::Map<tirx::Buffer, tirx::Buffer> buffer_subst_map;
-    /*! \brief The `buffer_map` in the fused function*/
+    /*! \brief The `buffer_map` in the lowered PrimFunc. */
     ffi::Map<tirx::Var, tirx::Buffer> buffer_map;
-    /*! \brief The output buffers in the function buffer_map*/
+    /*! \brief The output buffers in the function buffer_map. */
     std::unordered_set<const tirx::BufferNode *> output_buffers;
-    /*! \brief The name of the fused function */
+    /*! \brief The name of the lowered PrimFunc. */
     std::string global_name = "fused";
 
-    /*! \brief The map from symbolic var to its value in the fused function
+    /*! \brief The map from symbolic var to its value in the lowered PrimFunc
      *
      * This is used in the default initialization of
      * `symbolic_var_matcher`, and must be before it in the struct
@@ -1242,7 +1251,7 @@ private:
      */
     ffi::Map<tirx::Var, PrimExpr> symbolic_var_remap;
 
-    /*! \brief The map from symbolic var to its value in the fused function
+    /*! \brief The analyzer used while matching symbolic variables.
      *
      * This is used in the default initialization of
      * `symbolic_var_matcher`, and must be before it in the struct
@@ -1250,8 +1259,7 @@ private:
      */
     arith::Analyzer analyzer;
 
-    /*! \brief The map from symbolic var to its corresponding var in the fused
-     * function */
+    /*! \brief Match symbolic variables across the constituent PrimFuncs. */
     tl::SymbolicMatcher symbolic_var_matcher =
         tl::SymbolicMatcher(&analyzer, &symbolic_var_remap);
   };
@@ -1260,10 +1268,10 @@ private:
   const IRModule &mod_;
   /*! \brief The name hint for the input func. */
   ffi::String func_name_;
-  /*! \brief The helper info to fuse TIR prim_func */
-  FuseFuncInfo func_info_;
-  /*! \brief The tir function after fusion*/
-  tirx::PrimFunc fused_tir_;
+  /*! \brief State collected while lowering a primitive Relax function. */
+  PrimitiveFunctionInfo func_info_;
+  /*! \brief The TIR function after primitive-function lowering. */
+  tirx::PrimFunc primitive_tir_;
   /*! \brief Indices of inputs that are used for in-place computation */
   std::unordered_set<size_t> inplace_indices_;
 };
@@ -1285,17 +1293,16 @@ std::vector<size_t> GetTupleAccessedIndices(const FunctionNode *func,
 }
 
 /*!
- * \brief The helper class to fuse TIR functions and build a new module which
- * calls the fused TIR.
+ * \brief Lower primitive Relax functions and rewrite their call sites.
  */
-class TIRFuseMutator : public ExprMutator {
+class PrimitiveFunctionLowerer : public ExprMutator {
 public:
   static IRModule Transform(IRModule mod) {
-    // Collect all primitive relax functions
+    // Collect all primitive Relax functions.
     ffi::Map<GlobalVar, Function> primitive_relax;
     for (const auto &gvar : mod->GetGlobalVars()) {
       const auto &base_func = mod->Lookup(gvar);
-      // Only fuse primitive relax functions
+      // Only lower primitive Relax functions.
       if (base_func->HasNonzeroAttr(attr::kPrimitive)) {
         if (auto func = base_func.as<relax::Function>()) {
           primitive_relax.Set(gvar, func.value());
@@ -1312,14 +1319,10 @@ public:
     IRModule updates;
     std::unordered_map<GlobalVar, Replacement> replacements;
 
-    // Since TIRFuseMutator will delete bunch of PrimFunc, we create an empty
-    // sblock builder.
-
-    // Step 1. Fuse all primitive relax functions, store the result in
-    // `fused_tir_funcs_`
+    // Step 1. Lower all primitive Relax functions into TIR PrimFuncs.
     for (const auto &[old_gvar, func] : primitive_relax) {
       const auto &[prim_func, indices] =
-          FusedTIRConstructor::GetFusedTIR(mod, old_gvar);
+          PrimitiveTIRConstructor::GetPrimitiveTIR(mod, old_gvar);
 
       GlobalVar new_gvar(old_gvar->name_hint);
       UpdateStructInfo(new_gvar, GetStructInfo(prim_func));
@@ -1329,7 +1332,7 @@ public:
       replacements[old_gvar] = Replacement{new_gvar, func, indices};
     }
 
-    TIRFuseMutator mutator(replacements);
+    PrimitiveFunctionLowerer lowerer(replacements);
 
     // Step 2. Update all non-primitive relax functions and add it, with the
     // dependent function, into the new IRModule
@@ -1340,7 +1343,7 @@ public:
             << "Module should not contain any primitive relax functions at "
                "this point";
         relax::Function update_func =
-            Downcast<Function>(mutator.VisitExpr(func));
+            Downcast<Function>(lowerer.VisitExpr(func));
         if (!update_func.same_as(func)) {
           updates->Add(gv, update_func);
         }
@@ -1354,12 +1357,12 @@ public:
 
 private:
   struct Replacement {
-    GlobalVar fused_tir_gvar;
+    GlobalVar primitive_tir_gvar;
     Function original_function;
     ffi::Array<Integer> inplace_indices;
   };
 
-  explicit TIRFuseMutator(
+  explicit PrimitiveFunctionLowerer(
       std::unordered_map<GlobalVar, Replacement> replacements)
       : replacements_(replacements) {}
 
@@ -1373,10 +1376,12 @@ private:
       return Tuple(fields);
     } else {
       auto *tensor = sinfo.as<TensorStructInfoNode>();
-      ICHECK(tensor) << "FuseTIR can only take tensor or tuple type";
+      ICHECK(tensor)
+          << "LowerPrimitiveFunctionsToTIR can only take tensor or tuple type";
       auto *shape_expr = tensor->shape.as<ShapeExprNode>();
       ICHECK(shape_expr)
-          << "FuseTIR requires all intermediate values have shape";
+          << "LowerPrimitiveFunctionsToTIR requires all intermediate values "
+             "have shape";
       return ffi::GetRef<ShapeExpr>(shape_expr);
     }
   }
@@ -1403,7 +1408,7 @@ private:
       return call;
     }
     const Replacement &replacement = it->second;
-    const GlobalVar &fused_tir_gv = replacement.fused_tir_gvar;
+    const GlobalVar &primitive_tir_gv = replacement.primitive_tir_gvar;
     const Function &relax_func = replacement.original_function;
 
     // Case 3. It calls a primitive relax function, update the call
@@ -1423,7 +1428,7 @@ private:
              !sinfo.as<TupleStructInfoNode>())
           << "InternalError: "
           << "All tuple parameters should be expanded before this point in "
-             "FuseTIR.  "
+             "LowerPrimitiveFunctionsToTIR.  "
           << "However, argument " << arg << " with struct info "
           << arg->struct_info_ << " is passed as argument " << i
           << " to Primitive Relax function " << old_gvar
@@ -1432,7 +1437,8 @@ private:
 
       if (const auto *shape = sinfo.as<ShapeStructInfoNode>()) {
         CHECK(shape->values.defined())
-            << "FuseTIR requires all shape input has struct_info value.";
+            << "LowerPrimitiveFunctionsToTIR requires all shape inputs to "
+               "have a struct_info value.";
         for (const PrimExpr &prim_value : shape->values.value()) {
           CHECK(prim_value->IsInstance<tirx::VarNode>())
               << "All shape inputs are expected to be single tir var.";
@@ -1440,10 +1446,11 @@ private:
         }
       } else if (const auto *prim_value = sinfo.as<PrimStructInfoNode>()) {
         CHECK(prim_value->value.defined())
-            << "FuseTIR requires all R.Prim arguments to have a known value.";
+            << "LowerPrimitiveFunctionsToTIR requires all R.Prim arguments "
+               "to have a known value.";
         PrimExpr expr = prim_value->value.value();
         CHECK(expr->IsInstance<tirx::VarNode>())
-            << "FuseTIR currently requires all R.Prim "
+            << "LowerPrimitiveFunctionsToTIR currently requires all R.Prim "
                "arguments to provide a single tirx::Var.";
         tir_vars.push_back(expr);
 
@@ -1453,7 +1460,7 @@ private:
     }
 
     // Step b. Create call_tir or call_tir_inplace
-    ffi::Array<Expr> call_args = {fused_tir_gv, Tuple(arg_list)};
+    ffi::Array<Expr> call_args = {primitive_tir_gv, Tuple(arg_list)};
     if (!tir_vars.empty()) {
       call_args.push_back(ShapeExpr(tir_vars));
     }
@@ -1477,8 +1484,8 @@ private:
 };
 
 namespace {
-IRModule FuseTIR_impl(IRModule mod) {
-  mod = TIRFuseMutator::Transform(mod);
+IRModule LowerPrimitiveFunctionsToTIRImpl(IRModule mod) {
+  mod = PrimitiveFunctionLowerer::Transform(mod);
   return mod;
 }
 } // namespace
@@ -1487,12 +1494,15 @@ IRModule FuseTIR_impl(IRModule mod) {
 
 namespace transform {
 
-Pass FuseTIR() {
+Pass LowerPrimitiveFunctionsToTIR() {
   auto pass_func = //
-      [=](IRModule m, PassContext pc) { return FuseTIR_impl(m); };
-  auto inner_pass = CreateModulePass(/*pass_function=*/pass_func,  //
-                                     /*opt_level=*/0,              //
-                                     /*pass_name=*/"FuseTIRInner", //
+      [=](IRModule m, PassContext pc) {
+        return LowerPrimitiveFunctionsToTIRImpl(m);
+      };
+  auto inner_pass = CreateModulePass(/*pass_function=*/pass_func, //
+                                     /*opt_level=*/0,             //
+                                     /*pass_name=*/
+                                     "LowerPrimitiveFunctionsToTIRInner", //
                                      /*required=*/{});
   return tvm::transform::Sequential(
       {
@@ -1501,12 +1511,13 @@ Pass FuseTIR() {
           inner_pass,
           DeadCodeElimination(),
       },
-      "FuseTIR");
+      "LowerPrimitiveFunctionsToTIR");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.relax.FuseTIR", FuseTIR);
+  refl::GlobalDef().def("tl.relax.LowerPrimitiveFunctionsToTIR",
+                        LowerPrimitiveFunctionsToTIR);
 }
 
 } // namespace transform

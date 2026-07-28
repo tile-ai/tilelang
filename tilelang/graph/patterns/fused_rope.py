@@ -84,7 +84,7 @@ def _fused_rope_check(matched_bindings, annotations):
         "half_dim": half_dim,
         "x_shape": x_shape,
         "cos_shape": cos_shape,
-        "_opaque": True,  # prevent FuseOps merge (q annotation causes FuseTIR conflict)
+        "_opaque": True,  # prevent a FuseOps group that primitive-function lowering cannot handle
     }
 
 
@@ -139,7 +139,8 @@ PATTERN = make_pattern("fused_rope", _fused_rope_pattern, _fused_rope_builder, c
 # Q+K RoPE fusion: pair sibling fused_rope call_tir sites
 # ---------------------------------------------------------------------------
 
-# kOpaque: prevents FuseOps from grouping with neighbours, so FuseTIR
+# kOpaque: prevents FuseOps from grouping with neighbours, so
+# LowerPrimitiveFunctionsToTIR
 # leaves the buffer names alone.
 _K_OPAQUE = 8
 

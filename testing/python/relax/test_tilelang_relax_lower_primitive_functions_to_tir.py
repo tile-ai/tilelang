@@ -27,8 +27,8 @@ def _make_fused_module():
     return builder.get()
 
 
-def test_fuse_tir_normalizes_static_buffer_shapes():
-    mod = tilelang.relax.FuseTIR()(_make_fused_module())
+def test_lower_primitive_functions_to_tir_normalizes_static_buffer_shapes():
+    mod = tilelang.relax.LowerPrimitiveFunctionsToTIR()(_make_fused_module())
     prim_func = next(func for func in mod.functions.values() if isinstance(func, tirx.PrimFunc))
 
     buffers = list(prim_func.buffer_map.values())

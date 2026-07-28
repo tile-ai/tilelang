@@ -45,7 +45,7 @@ TIR Attributes
 - ``tirx.is_scheduled``: Function has explicit schedule - skip
   schedule-rule application by ApplyDefaultSchedule.
 - ``op_pattern=8``: kOpaque — prevents FuseOps from merging this
-  call_tir with neighboring ops (avoids FuseTIR conflicts).
+  call_tir with neighboring ops (avoids primitive-function lowering conflicts).
 
 Usage::
 

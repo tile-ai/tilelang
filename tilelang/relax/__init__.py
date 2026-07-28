@@ -3,6 +3,6 @@
 from . import _ffi_api
 
 
-def FuseTIR():
-    """Fuse TIR blocks into a single block."""
-    return _ffi_api.FuseTIR()
+def LowerPrimitiveFunctionsToTIR():
+    """Lower primitive Relax functions into TIR PrimFuncs."""
+    return _ffi_api.LowerPrimitiveFunctionsToTIR()
