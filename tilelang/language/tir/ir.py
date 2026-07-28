@@ -1,6 +1,6 @@
 import tvm.tirx.script.builder.ir as _ir
 from tvm.tirx.script.builder import frame
-from tvm.tirx import PrimExpr, IntImm, StringImm, Shuffle
+from tvm.tirx import PrimExpr, IntImm, StringImm
 from tvm.tirx import _ffi_api as _tir_ffi
 from tvm.tirx.expr import Select as _Select
 from typing import Any
@@ -191,6 +191,7 @@ def max(a: PrimExpr, b: PrimExpr) -> PrimExpr:  # pylint: disable=redefined-buil
     return _ir.max(a, b)
 
 
+Shuffle = _tir_op.Shuffle
 abs = _op_wrapper(_tir_op.abs)  # pylint: disable=redefined-builtin
 acos = _op_wrapper(_tir_op.acos)
 acosh = _op_wrapper(_tir_op.acosh)

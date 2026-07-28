@@ -8,7 +8,7 @@ from tvm.ir import PrimExpr
 from tvm.ir.base import Span
 from tvm.runtime import const
 from tvm.tirx import Buffer
-from tvm.tirx.expr import IntImm, PrimExprWithOp, Shuffle
+from tvm.tirx.expr import IntImm, PrimExprWithOp, Shuffle as Shuffle
 import tvm.tirx.op as _tvm_op
 
 from tilelang.language.dtypes import _is_any_dtype
