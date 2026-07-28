@@ -41,15 +41,6 @@ PARAMS_PATH = "params.pkl"
 TargetLike = str | dict[str, object] | Target
 
 
-def _callable_fingerprint(func: Callable | None) -> str | None:
-    """Return a content-derived fingerprint for a profiling callback."""
-    if func is None:
-        return None
-    # Callable identity hashes are process-local. Serialize the callable's code
-    # and captured state so persistent cache keys follow its behavior instead.
-    return hashlib.sha256(cloudpickle.dumps(func)).hexdigest()
-
-
 @dataclass(frozen=True)
 class CompileArgs:
     """Compile arguments for the auto-tuner. Detailed description can be found in `tilelang.jit.compile`.
@@ -148,9 +139,6 @@ class ProfileArgs:
             "max_mismatched_ratio": self.max_mismatched_ratio,
             "skip_check": self.skip_check,
             "cache_input_tensors": self.cache_input_tensors,
-            "ref_prog": _callable_fingerprint(self.ref_prog),
-            "supply_prog": _callable_fingerprint(self.supply_prog),
-            "manual_check_prog": _callable_fingerprint(self.manual_check_prog),
         }
         hash_obj = hashlib.sha256(json.dumps(data, sort_keys=True).encode("utf-8"))
         return int.from_bytes(hash_obj.digest(), byteorder="big")
