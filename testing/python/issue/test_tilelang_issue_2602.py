@@ -226,7 +226,10 @@ _UNSUPPORTED_CASES = [
     (
         _make_tcgen05_mma_prim_func,
         "sm_100",
-        ("tl::tcgen05mma_ss requires sm_100a or a compatible architecture-specific target",),
+        (
+            "tl::tcgen05mma_ss requires sm_100a or a compatible architecture-specific target",
+            "tl::tcgen05_ld_32dp32bNx requires sm_100a or a compatible architecture-specific target",
+        ),
     ),
 ]
 
@@ -255,7 +258,7 @@ _SUPPORTED_CASES = [
     (
         _make_tcgen05_mma_prim_func,
         "sm_100a",
-        "tl::require_tcgen05mma_ss()",
+        "tl::tcgen05mma_ss",
     ),
 ]
 
@@ -307,6 +310,7 @@ def test_device_helpers_compile_for_supported_arch(factory, arch, expected_helpe
 
     artifact = _lower_for_arch(factory(), arch)
     assert expected_helper in artifact.kernel_source
+    assert "require_tcgen05" not in artifact.kernel_source
 
 
 if __name__ == "__main__":

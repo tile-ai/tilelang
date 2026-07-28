@@ -198,40 +198,64 @@ __device__ __forceinline__ void tcgen05_ld_core(uint32_t const &tmem_start_col,
   }
 }
 
-template <int N, bool pack16, typename dst_t>
+template <int N, bool pack16, typename dst_t, bool kDependentFalse = false>
 __device__ __forceinline__ void
 tcgen05_ld_32dp32bNx(uint32_t const &tmem_start_col,
                      uint32_t const &tmem_col_offset, dst_t *dst_ptr) {
+#if defined(TL_CUDA_ARCH_TCGEN05_ENABLED)
   tcgen05_ld_core<tl::tmem_ld_32dp32bNx<pack16>, 7, N>(
       tmem_start_col + tmem_col_offset, dst_ptr);
   tl::fence_view_async_tmem_load();
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_ld_32dp32bNx requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
 }
 
-template <int N, bool pack16, typename dst_t>
+template <int N, bool pack16, typename dst_t, bool kDependentFalse = false>
 __device__ __forceinline__ void
 tcgen05_ld_32dp64bNx(uint32_t const &tmem_start_col,
                      uint32_t const &tmem_col_offset, dst_t *dst_ptr) {
+#if defined(TL_CUDA_ARCH_TCGEN05_ENABLED)
   tcgen05_ld_core<tl::tmem_ld_32dp64bNx<pack16>, 7, N>(
       tmem_start_col + tmem_col_offset, dst_ptr);
   tl::fence_view_async_tmem_load();
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_ld_32dp64bNx requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
 }
 
-template <int N, bool pack16, typename dst_t>
+template <int N, bool pack16, typename dst_t, bool kDependentFalse = false>
 __device__ __forceinline__ void
 tcgen05_ld_32dp128bNx(uint32_t const &tmem_start_col,
                       uint32_t const &tmem_col_offset, dst_t *dst_ptr) {
+#if defined(TL_CUDA_ARCH_TCGEN05_ENABLED)
   tcgen05_ld_core<tl::tmem_ld_32dp128bNx<pack16>, 6, N>(
       tmem_start_col + tmem_col_offset, dst_ptr);
   tl::fence_view_async_tmem_load();
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_ld_32dp128bNx requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
 }
 
-template <int N, bool pack16, typename dst_t>
+template <int N, bool pack16, typename dst_t, bool kDependentFalse = false>
 __device__ __forceinline__ void
 tcgen05_ld_32dp256bNx(uint32_t const &tmem_start_col,
                       uint32_t const &tmem_col_offset, dst_t *dst_ptr) {
+#if defined(TL_CUDA_ARCH_TCGEN05_ENABLED)
   tcgen05_ld_core<tl::tmem_ld_32dp256bNx<pack16>, 5, N>(
       tmem_start_col + tmem_col_offset, dst_ptr);
   tl::fence_view_async_tmem_load();
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_ld_32dp256bNx requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
 }
 
 // NOTE: The column offset increment (CUR_SEGMENT_LEN) assumes each register
@@ -254,40 +278,64 @@ __device__ __forceinline__ void tcgen05_st_core(uint32_t const &tmem_start_col,
   }
 }
 
-template <int N, bool unpack16, typename src_t>
+template <int N, bool unpack16, typename src_t, bool kDependentFalse = false>
 __device__ __forceinline__ void
 tcgen05_st_32dp32bNx(uint32_t const &tmem_start_col,
                      uint32_t const &tmem_col_offset, src_t const *src_ptr) {
+#if defined(TL_CUDA_ARCH_TCGEN05_ENABLED)
   tcgen05_st_core<tl::tmem_st_32dp32bNx<unpack16>, 7, N>(
       tmem_start_col + tmem_col_offset, src_ptr);
   tl::fence_view_async_tmem_store();
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_st_32dp32bNx requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
 }
 
-template <int N, bool unpack16, typename src_t>
+template <int N, bool unpack16, typename src_t, bool kDependentFalse = false>
 __device__ __forceinline__ void
 tcgen05_st_32dp64bNx(uint32_t const &tmem_start_col,
                      uint32_t const &tmem_col_offset, src_t const *src_ptr) {
+#if defined(TL_CUDA_ARCH_TCGEN05_ENABLED)
   tcgen05_st_core<tl::tmem_st_32dp64bNx<unpack16>, 7, N>(
       tmem_start_col + tmem_col_offset, src_ptr);
   tl::fence_view_async_tmem_store();
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_st_32dp64bNx requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
 }
 
-template <int N, bool unpack16, typename src_t>
+template <int N, bool unpack16, typename src_t, bool kDependentFalse = false>
 __device__ __forceinline__ void
 tcgen05_st_32dp128bNx(uint32_t const &tmem_start_col,
                       uint32_t const &tmem_col_offset, src_t const *src_ptr) {
+#if defined(TL_CUDA_ARCH_TCGEN05_ENABLED)
   tcgen05_st_core<tl::tmem_st_32dp128bNx<unpack16>, 6, N>(
       tmem_start_col + tmem_col_offset, src_ptr);
   tl::fence_view_async_tmem_store();
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_st_32dp128bNx requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
 }
 
-template <int N, bool unpack16, typename src_t>
+template <int N, bool unpack16, typename src_t, bool kDependentFalse = false>
 __device__ __forceinline__ void
 tcgen05_st_32dp256bNx(uint32_t const &tmem_start_col,
                       uint32_t const &tmem_col_offset, src_t const *src_ptr) {
+#if defined(TL_CUDA_ARCH_TCGEN05_ENABLED)
   tcgen05_st_core<tl::tmem_st_32dp256bNx<unpack16>, 5, N>(
       tmem_start_col + tmem_col_offset, src_ptr);
   tl::fence_view_async_tmem_store();
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_st_32dp256bNx requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
 }
 
 /*q SM100 TMA 2SM load (cta_group::2) */
