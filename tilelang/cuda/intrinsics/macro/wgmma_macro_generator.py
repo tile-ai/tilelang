@@ -289,9 +289,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         micro_size_k = self.micro_size_k
         assert k_dim >= micro_size_k, f"k_dim must be greater than or equal to {micro_size_k}, got k_dim: {k_dim}"
 
-        # NOTE: Schedule-generated gemm (gemm_at) may produce tiled C regions
-        # that are not full.  WGMMA itself only uses the buffer pointer and
-        # tile dimensions; the region completeness is not required.
+        assert is_full_region(C_region), "Fragment output C must be a full region"
         C_buf = C_region.buffer
 
         num_inst_m = self.wgmma_num_inst_m

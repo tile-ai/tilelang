@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from tilelang.tileop.gemm.gemm_base import GemmBase
-from tilelang.layout import make_swizzled_layout, make_linear_layout
+from tilelang.layout import make_swizzled_layout
 from tilelang.cuda.intrinsics.macro.mma_macro_generator import (
     TensorCoreIntrinEmitter,
 )
@@ -41,33 +41,29 @@ class GemmMMA(GemmBase):
 
     def infer_layout(self, target: Target, thread_nums: int):
         mma_emitter = self._make_mma_emitter(target, thread_nums)
-        # Schedule-generated gemm calls (via gemm_at) may have a
-        # non-fragment C buffer — use a linear layout so LayoutInference
-        # can proceed with region-based stores.
-        c_layout = mma_emitter.make_mma_store_layout(self.C) if is_fragment(self.C) else make_linear_layout(self.C)
         if self.is_gemm_ss():
             return {
                 self.A: make_swizzled_layout(self.A),
                 self.B: make_swizzled_layout(self.B),
-                self.C: c_layout,
+                self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         elif self.is_gemm_sr():
             return {
                 self.A: make_swizzled_layout(self.A),
                 self.B: mma_emitter.make_mma_load_layout(self.B, matrix="B"),
-                self.C: c_layout,
+                self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         elif self.is_gemm_rs():
             return {
                 self.A: mma_emitter.make_mma_load_layout(self.A, matrix="A"),
                 self.B: make_swizzled_layout(self.B),
-                self.C: c_layout,
+                self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         elif self.is_gemm_rr():
             return {
                 self.A: mma_emitter.make_mma_load_layout(self.A, matrix="A"),
                 self.B: mma_emitter.make_mma_load_layout(self.B, matrix="B"),
-                self.C: c_layout,
+                self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         else:
             raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
