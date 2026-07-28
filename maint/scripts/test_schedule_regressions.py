@@ -99,12 +99,12 @@ SUITES = (
     ),
     Suite(
         "graph_fusion_ops",
-        "tests/graph/fusion_ops isolated graph fusion operator checks",
+        "tests/inductor/fusion_ops isolated graph fusion operator checks",
     ),
 )
 
 DEFAULT_SUITES = tuple(suite.name for suite in SUITES)
-GRAPH_FUSION_DIR = "tests/graph/fusion_ops"
+GRAPH_FUSION_DIR = "tests/inductor/fusion_ops"
 INDUCTOR_EXAMPLE = "examples/inductor/graph_trace_example.py"
 
 
@@ -292,7 +292,7 @@ def main() -> None:
         "--case-timeout",
         type=int,
         default=int(os.environ.get("TL_FUSION_TEST_TIMEOUT", "900")),
-        help="Timeout in seconds for each tests/graph/fusion_ops case.",
+        help="Timeout in seconds for each tests/inductor/fusion_ops case.",
     )
     parser.add_argument(
         "--list",
