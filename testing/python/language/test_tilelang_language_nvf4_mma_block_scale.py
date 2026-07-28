@@ -115,7 +115,7 @@ def test_sm120_mma_blockscaled_strategy_helpers_are_not_public_api():
         T,
         "sm120_mma_blockscaled_kblock_fulltile_afull_bpanel_owner_wide",
     )
-    assert not hasattr(T, "sm120_mma_blockscaled_kblock_fulltile_package_pingpong")
+    assert not hasattr(T, "sm120_mma_blockscaled_fulltile")
     assert not hasattr(T, "sm120_mma_blockscaled_cute_consumer_bridge")
 
 
@@ -617,7 +617,7 @@ def test_nvf4_mma_block_scale_package_pingpong_contract_lowers_fulltile():
     )
 
     src = kernel.get_kernel_source()
-    assert "sm120_mma_blockscaled_kblock_fulltile_package_pingpong" in src
+    assert "sm120_mma_blockscaled_fulltile" in src
 
 
 @tilelang.testing.requires_cuda

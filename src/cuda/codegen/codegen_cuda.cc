@@ -3270,9 +3270,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(scale_b_byte_id)", scale_b_byte_id);
     replacer.register_rule("(scale_b_thread_id)", scale_b_thread_id);
     this->stream << replacer.rewrite(mma_call);
-  } else if (
-      op->op.same_as(
-          tl::sm120_mma_blockscaled_kblock_fulltile_package_pingpong())) {
+  } else if (op->op.same_as(tl::sm120_mma_blockscaled_fulltile())) {
     need_mma_block_scale_instruction_h_ = true;
     // arg 0: C fragment pointer
     // arg 1: C fragment offset
@@ -3293,11 +3291,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     };
 
     this->PrintIndent();
-    this->stream
-        << "tl::sm120_mma_blockscaled_kblock_fulltile_package_pingpong("
-        << "reinterpret_cast<float*>((" << c_ref << ") + (" << c_offset
-        << ")), " << void_ptr_arg(2) << ", " << void_ptr_arg(3) << ", "
-        << uint32_ptr_arg(4) << ", " << uint32_ptr_arg(5) << ");\n";
+    this->stream << "tl::sm120_mma_blockscaled_fulltile("
+                 << "reinterpret_cast<float*>((" << c_ref << ") + (" << c_offset
+                 << ")), " << void_ptr_arg(2) << ", " << void_ptr_arg(3) << ", "
+                 << uint32_ptr_arg(4) << ", " << uint32_ptr_arg(5) << ");\n";
   } else if (op->op.same_as(builtin::ptx_mma_sp())) {
     // arg 0: shape: mXnXkX
     // arg 1: A layout: row/col

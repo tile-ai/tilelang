@@ -2017,7 +2017,7 @@ class TensorCoreIntrinEmitter(_TensorCoreIntrinEmitterBase):
             )
             T.call_intrin(
                 "handle",
-                tirx.op.Op.get("tl.sm120_mma_blockscaled_kblock_fulltile_package_pingpong"),
+                tirx.op.Op.get("tl.sm120_mma_blockscaled_fulltile"),
                 C_local_buf.data,
                 0,
                 a_base,

@@ -309,9 +309,10 @@ TL_DEVICE void sm120_gemm_fulltile_ab_owner_wide_package(
 #undef TL_SM120_PKG_C_OFFSET
 }
 
-TL_DEVICE void sm120_mma_blockscaled_kblock_fulltile_package_pingpong(
-    float *c, const void *a_smem_base, const void *b_smem_base,
-    const uint32_t *sfa_smem_base, const uint32_t *sfb_smem_base) {
+TL_DEVICE void sm120_mma_blockscaled_fulltile(float *c, const void *a_smem_base,
+                                              const void *b_smem_base,
+                                              const uint32_t *sfa_smem_base,
+                                              const uint32_t *sfb_smem_base) {
   const char *a_base = static_cast<const char *>(a_smem_base);
   const char *b_base = static_cast<const char *>(b_smem_base);
   SM120FulltileABOwnerWidePackage pkg0;
