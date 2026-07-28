@@ -1,6 +1,6 @@
 from typing import TypeVar, Literal
 from tilelang._typing import DType
-from tvm.tirx.expr import Span, PrimExpr, BufferLoad, Var, IntImm
+from tvm.tirx.expr import Span, PrimExpr, BufferLoad, Var, IntImm, Shuffle as Shuffle
 
 _T = TypeVar("_T")
 

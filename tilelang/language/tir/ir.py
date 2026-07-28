@@ -1,6 +1,6 @@
 import tvm.tirx.script.builder.ir as _ir
 from tvm.tirx.script.builder import frame
-from tvm.tirx import PrimExpr, IntImm, StringImm
+from tvm.tirx import PrimExpr, IntImm, StringImm, Shuffle
 from tvm.tirx import _ffi_api as _tir_ffi
 from tvm.tirx.expr import Select as _Select
 from typing import Any
@@ -387,13 +387,14 @@ def cast(value, dtype, round: str = "", sat: bool = True, rbits=None, span=None)
     return _tir_ffi._cast(dtype, value, annotations or None, span)
 
 
-# PrimExpr/IntImm/StringImm/Any are TVM/typing primitives re-exported as part of
-# the historical ``tilelang.language`` surface (e.g. ``T.PrimExpr``).
+# PrimExpr/IntImm/StringImm/Shuffle/Any are TVM/typing primitives re-exported as
+# part of the historical ``tilelang.language`` surface (e.g. ``T.PrimExpr``).
 __all__ = (
     "Any",
     "IntImm",
     "PrimExpr",
     "Select",
+    "Shuffle",
     "StringImm",
     "TVMBackendAllocWorkspace",
     "TVMBackendFreeWorkspace",

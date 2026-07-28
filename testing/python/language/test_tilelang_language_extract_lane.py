@@ -7,6 +7,14 @@ import tilelang.testing
 from tvm import tirx
 
 
+def test_shuffle_is_reexported_from_tir_ir():
+    from tilelang.language.tir import ir as tir_ir
+
+    assert tir_ir.Shuffle is tirx.Shuffle
+    assert T.Shuffle is tirx.Shuffle
+    assert "Shuffle" in tir_ir.__all__
+
+
 @pytest.mark.parametrize(
     "dtype,lane,expected_dtype",
     [
