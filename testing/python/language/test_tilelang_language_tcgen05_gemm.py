@@ -6,6 +6,21 @@ import tilelang.testing
 from tilelang import tvm
 
 
+def _marker_line(marker: str) -> int:
+    with open(__file__) as f:
+        for i, line in enumerate(f, 1):
+            if marker in line:
+                return i
+    raise ValueError(f"marker not found: {marker}")
+
+
+def _assert_error_at(excinfo, marker: str):
+    message = str(excinfo.value)
+    expected = f"--> {__file__}:{_marker_line(marker)}:"
+    assert expected in message, f"expected {expected!r} in error message:\n{message}"
+    assert marker in message, f"source snippet was not rendered:\n{message}"
+
+
 def _make_sync_tcgen05_kernel(gemm_op):
     @T.prim_func
     def main(
@@ -103,7 +118,7 @@ def test_tcgen05_gemm_rejects_non_tcgen05_lowering():
         D: T.Tensor((128, 128), T.bfloat16),
     ):
         with T.Kernel(1, threads=128):
-            A_shared = T.alloc_shared((128, 128), T.bfloat16)
+            A_shared = T.alloc_shared((128, 128), T.bfloat16)  # tcgen05_dense_error_span
             B_shared = T.alloc_shared((128, 128), T.bfloat16)
             C_local = T.alloc_fragment((128, 128), T.float32)
             mbar = T.alloc_barrier(1)
@@ -116,8 +131,15 @@ def test_tcgen05_gemm_rejects_non_tcgen05_lowering():
     with pytest.raises(
         tvm.error.InternalError,
         match=r"T\.tcgen05_gemm\(\) requires Blackwell TCGEN5MMA lowering",
-    ):
+    ) as excinfo:
         tilelang.compile(main, target="cuda")
+    message = str(excinfo.value)
+    assert "target=" in message
+    assert "A(scope=shared.dyn, dtype=bfloat16)" in message
+    assert "B(scope=shared.dyn, dtype=bfloat16)" in message
+    assert "C(scope=local.fragment, dtype=float32)" in message
+    assert "M=128, N=128, K=128" in message
+    _assert_error_at(excinfo, "tcgen05_dense_error_span")
 
 
 def _make_sliced_tcgen05_kernel(M, N, K, num_k_tiles):
