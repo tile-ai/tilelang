@@ -528,7 +528,7 @@ MakeReduceOwnershipPlan(const Array<PrimExpr> &src_indices,
 inline PrimExpr MakeUpdate(const ReduceOpNode &op, PrimExpr dst_val,
                            PrimExpr src_val) {
   const bool use_nan_op = op.nan_propagate && (dst_val.dtype().is_float16() ||
-                                                dst_val.dtype().is_bfloat16());
+                                               dst_val.dtype().is_bfloat16());
   if (op.type->IsSum() || op.type->IsAbsSum()) {
     return dst_val + src_val;
   } else if (op.type->IsBitAnd()) {

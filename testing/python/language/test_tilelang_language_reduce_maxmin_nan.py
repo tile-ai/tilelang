@@ -135,14 +135,11 @@ def test_reduce_max_clear_false_nan_propagate():
 
         k_nan = _compile(_make_reduce_clear_false_kernel(T.reduce_max, length, tl_dtype, nan_propagate=True))
         out = k_nan(a)
-        assert math.isnan(out.float().item()), (
-            f"{tl_dtype}: reduce_max clear=False nan_propagate=True should return NaN,"
-            f" got {out.item()}")
+        assert math.isnan(out.float().item()), f"{tl_dtype}: reduce_max clear=False nan_propagate=True should return NaN, got {out.item()}"
 
         k_default = _compile(_make_reduce_clear_false_kernel(T.reduce_max, length, tl_dtype, nan_propagate=False))
         out = k_default(a)
-        assert not math.isnan(out.float().item()), (
-            f"{tl_dtype}: reduce_max clear=False nan_propagate=False should not return NaN")
+        assert not math.isnan(out.float().item()), f"{tl_dtype}: reduce_max clear=False nan_propagate=False should not return NaN"
 
 
 @tilelang.testing.requires_cuda
@@ -154,9 +151,7 @@ def test_reduce_min_clear_false_nan_propagate():
 
         k_nan = _compile(_make_reduce_clear_false_kernel(T.reduce_min, length, tl_dtype, nan_propagate=True))
         out = k_nan(a)
-        assert math.isnan(out.float().item()), (
-            f"{tl_dtype}: reduce_min clear=False nan_propagate=True should return NaN,"
-            f" got {out.item()}")
+        assert math.isnan(out.float().item()), f"{tl_dtype}: reduce_min clear=False nan_propagate=True should return NaN, got {out.item()}"
 
         k_default = _compile(_make_reduce_clear_false_kernel(T.reduce_min, length, tl_dtype, nan_propagate=False))
         out = k_default(a)
@@ -173,8 +168,8 @@ def test_reduce_absmax_clear_false_nan_propagate():
         k_nan = _compile(_make_reduce_clear_false_kernel(T.reduce_absmax, length, tl_dtype, nan_propagate=True))
         out = k_nan(a)
         assert math.isnan(out.float().item()), (
-            f"{tl_dtype}: reduce_absmax clear=False nan_propagate=True should return NaN,"
-            f" got {out.item()}")
+            f"{tl_dtype}: reduce_absmax clear=False nan_propagate=True should return NaN, got {out.item()}"
+        )
 
         k_default = _compile(_make_reduce_clear_false_kernel(T.reduce_absmax, length, tl_dtype, nan_propagate=False))
         out = k_default(a)
