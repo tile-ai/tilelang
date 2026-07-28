@@ -20,7 +20,14 @@ __all__ = [
 
 def use_swizzle(panel_size: int, order: str = "row", enable: bool = True):
     """Annotate a kernel to use a specific threadblock swizzle pattern."""
-    device_func = "rasterization2DRow" if order == "row" else "rasterization2DColumn"
+    if order == "row":
+        device_func = "rasterization2DRow"
+    elif order == "column":
+        device_func = "rasterization2DColumn"
+    elif order == "mlx":
+        device_func = "rasterization2DMLX"
+    else:
+        raise ValueError(f"Unsupported swizzle order: {order}")
     if not enable:
         return None
     return attr(None, "threadblock_swizzle_pattern", tvm_tuple(device_func, panel_size))

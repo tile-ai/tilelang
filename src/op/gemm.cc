@@ -74,7 +74,8 @@ void RegisterGemmImpl(GemmImpl impl) {
  *   expected layout is:
  *     [Aptr, Bptr, Cptr, trans_A (Bool), trans_B (Bool),
  *      M (Int), N (Int), K (Int), policy (Int), clear_accum (Bool),
- *      stride_A (Int), stride_B (Int), offset_A (Int), offset_B (Int),
+ *      stride_A (Int), stride_B (Int), offset_A (PrimExpr),
+ *      offset_B (PrimExpr),
  *      (optional) kPack (Int), (optional) internal wg_wait (Int),
  *      (optional) mbar (BufferLoad), cCoord_y (PrimExpr), cCoord_x (PrimExpr)]
  */

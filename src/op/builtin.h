@@ -377,6 +377,11 @@ TVM_DLL const Op &tma_load_gather4();
  */
 TVM_DLL const Op &tma_store_scatter4();
 
+TVM_DLL const Op &cooperative_tensor_fill();
+TVM_DLL const Op &cooperative_tensor_load();
+TVM_DLL const Op &cooperative_tensor_store();
+TVM_DLL const Op &cooperative_tensor_multiply_accumulate();
+
 /*!
  * \brief tvm intrinsics for barrier initialization fence
  *
