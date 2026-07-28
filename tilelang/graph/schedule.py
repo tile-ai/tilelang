@@ -12,10 +12,12 @@ def canonicalize_scheduled_ir(mod: tvm.IRModule) -> tvm.IRModule:
     init blocks behind.  Keep those launch loops target-neutral here; the
     selected backend pipeline materializes them for CUDA, ROCm, or CPU.
     """
-    # Schedule rules consume the original TE block structure.  Narrow only
-    # after scheduling, before layout inference creates Layout/Fragment objects.
-    mod = tirx.transform.NarrowDataType(32)(mod)
+    # Schedule rules consume the original TE block structure. Convert block
+    # bindings before narrowing: an int64 iter_value substituted for an
+    # already-narrowed int32 block var can otherwise create ill-typed binary
+    # expressions inside ConvertBlocksToOpaque.
     mod = tirx.transform.Simplify()(mod)
     mod = s_tir.transform.LowerInitBlock()(mod)
     mod = s_tir.transform.ConvertBlocksToOpaque()(mod)
+    mod = tirx.transform.NarrowDataType(32)(mod)
     return tilelang.transform.ReserveRootBlock()(mod)
