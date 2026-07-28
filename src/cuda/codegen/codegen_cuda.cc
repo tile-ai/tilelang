@@ -2267,9 +2267,10 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
   const VarNode *buffer_var = buffer->data.get();
   std::ostringstream os;
   std::string vid = GetVarID(buffer_var);
-  // For fp4 packed buffers, use the packed buffer name for vector accesses
-  auto it = fp4_packed_buffers_.find(buffer_var);
-  if (it != fp4_packed_buffers_.end() && !t.is_scalar()) {
+  // Local scalar FP4 allocations use a distinct fp4x2 backing array. Every
+  // reference, including address_of, must name that physical allocation.
+  auto it = fp4_packed_buffers_.find(buffer->data);
+  if (it != fp4_packed_buffers_.end()) {
     vid = it->second;
   }
   std::string scope;
@@ -2768,57 +2769,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string func_name = "tl::ptx_ldmatrix_x" + std::to_string(num);
     if (trans == 1)
       func_name += "_trans";
-    arith::Analyzer analyzer;
-    auto print_fp4_packed_local_ptr =
-        [&](const PrimExpr &expr) -> std::optional<std::string> {
-      const VarNode *buffer_var = nullptr;
-      PrimExpr offset;
-
-      if (const auto *call = expr.as<CallNode>()) {
-        if (call->op.same_as(builtin::tvm_access_ptr())) {
-          ICHECK_GE(call->args.size(), 3U);
-          buffer_var = call->args[1].as<VarNode>();
-          offset = call->args[2];
-        } else if (call->op.same_as(tl::access_ptr())) {
-          ICHECK_EQ(call->args.size(), 3U)
-              << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
-          const auto *load = call->args[0].as<BufferLoadNode>();
-          ICHECK(load) << "tl.access_ptr arg0 must be BufferLoad";
-          if (load->indices.size() != 1) {
-            return std::nullopt;
-          }
-          buffer_var = load->buffer->data.get();
-          offset = load->indices[0];
-        } else if (call->op.same_as(builtin::address_of())) {
-          const auto *load = call->args[0].as<BufferLoadNode>();
-          ICHECK(load) << "address_of arg must be BufferLoad";
-          if (load->indices.size() != 1) {
-            return std::nullopt;
-          }
-          buffer_var = load->buffer->data.get();
-          offset = load->indices[0];
-        }
-      }
-
-      if (buffer_var == nullptr || !offset.defined()) {
-        return std::nullopt;
-      }
-      auto it = fp4_packed_buffers_.find(buffer_var);
-      if (it == fp4_packed_buffers_.end()) {
-        return std::nullopt;
-      }
-      PrimExpr packed_offset = analyzer.Simplify(truncdiv(offset, 2));
-      return "(" + it->second + " + (" + this->PrintExpr(packed_offset) + "))";
-    };
-
-    std::string src_ptr = this->PrintExpr(op->args[2]);
-    std::optional<std::string> packed_dst_ptr =
-        print_fp4_packed_local_ptr(op->args[3]);
-    std::string dst_ptr = packed_dst_ptr.has_value()
-                              ? packed_dst_ptr.value()
-                              : this->PrintExpr(op->args[3]);
-    this->PrintIndent();
-    this->stream << func_name << "(" << src_ptr << ", " << dst_ptr << ");\n";
+    print_extern_call_stmt(func_name, 2);
   } else if (op->op.same_as(tl::ptx_stmatrix())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
@@ -3274,7 +3225,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto resolve_fp4_packed_buffer =
         [&](const PrimExpr &var_expr, std::string &ref, std::string &offset) {
           if (const VarNode *var = var_expr.as<VarNode>()) {
-            auto it = fp4_packed_buffers_.find(var);
+            auto it = fp4_packed_buffers_.find(GetRef<Var>(var));
             if (it != fp4_packed_buffers_.end()) {
               ref = it->second;
               offset = "(" + offset + ") / 2";
@@ -5211,7 +5162,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
           auto vid_packed = vid + "_packed";
           stream << "fp4_e2_2_t " << vid_packed << '['
                  << (constant_size + 1) / 2 << "];\n";
-          fp4_packed_buffers_[op->buffer->data.get()] = vid_packed;
+          fp4_packed_buffers_[op->buffer->data] = vid_packed;
         } else {
           stream << ' ' << vid << '[' << constant_size << "];\n";
         }
@@ -5304,7 +5255,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
   }
 
   // Check if this is a fp4 packed buffer access
-  auto packed_it = fp4_packed_buffers_.find(buffer_var.get());
+  auto packed_it = fp4_packed_buffers_.find(buffer_var);
   if (packed_it != fp4_packed_buffers_.end() && value_dtype.is_scalar()) {
     std::string idx_str = PrintExpr(index);
     os << "tl_fp4_packed_load(" << packed_it->second << ", " << idx_str << ")";
@@ -5403,7 +5354,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
   }
 
   // Check if this is a fp4 packed buffer access
-  auto packed_it = fp4_packed_buffers_.find(buffer_var.get());
+  auto packed_it = fp4_packed_buffers_.find(buffer_var);
   if (packed_it != fp4_packed_buffers_.end() && value_dtype.is_scalar()) {
     std::string idx_str = PrintExpr(index_expr);
     std::string value = this->PrintExpr(op->value);

@@ -55,6 +55,27 @@ def test_static_and_local_fp4_allocations_use_packed_extents():
 
 
 @tilelang.testing.requires_cuda
+def test_local_fp4_access_ptr_uses_packed_backing():
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, threads=1):
+            A_local = T.alloc_local((64,), T.float4_e2m1fn)
+            T.evaluate(
+                T.call_extern(
+                    "handle",
+                    "consume_fp4_ptr",
+                    T.access_ptr(A_local[32], "r", extent=16),
+                )
+            )
+
+    source = tilelang.lower(kernel, target="cuda").kernel_source
+
+    assert "fp4_e2_2_t A_local_packed[32];" in source
+    assert "consume_fp4_ptr((&(A_local_packed[16])))" in source
+    assert "(&(A_local[16]))" not in source
+
+
+@tilelang.testing.requires_cuda
 def test_single_dynamic_fp4_allocation_uses_packed_size():
     @T.prim_func
     def kernel():

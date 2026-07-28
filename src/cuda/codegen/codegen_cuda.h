@@ -177,8 +177,9 @@ private:
   std::unordered_map<const VarNode *, std::string> fragment_layouts;
   std::unordered_map<const VarNode *, IntImm> unroll_factor;
   std::optional<std::tuple<int64_t, int64_t, int64_t>> cluster_dims;
-  // ffi::Map from VarNode to packed buffer variable name for fp4 packed storage
-  std::unordered_map<const VarNode *, std::string> fp4_packed_buffers_;
+  // Physical backing variable name for each packed local FP4 buffer.
+  std::unordered_map<Var, std::string, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
+      fp4_packed_buffers_;
   friend void PrintConst(const FloatImmNode *op, std::ostream &os,
                          CodeGenTileLangCUDA *p);
   void PrintWmmaScope(const std::string &scope, DataType t,
