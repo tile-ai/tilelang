@@ -465,6 +465,15 @@ def _clear_trace_overrides():
     _core.reset()
 
 
+def _codegen_step_path(ffi_name, index=0):
+    """Return the per-FFI output path used by a codegen wrapper call."""
+    return _core._codegen_output_path_for_step(
+        _core._codegen_output_path_override,
+        index,
+        ffi_name,
+    )
+
+
 @contextlib.contextmanager
 def _patch_make_patched_source_module():
     """Patch _make_patched_source_module so tests avoid the real TVM C++ FFI."""
@@ -475,26 +484,28 @@ def _patch_make_patched_source_module():
 
 
 def test_codegen_proxy_for_without_compile(tmp_path):
-    """*_without_compile FFIs return a patched module when user edits codegen.cpp."""
+    """*_without_compile FFIs return a patched module when the saved source is edited."""
     from tilelang.tools.lower_trace.core import _wrap_codegen_ffi
 
+    ffi_name = "target.build.tilelang_cuda_without_compile"
     source_v1 = "// generated kernel v1\n"
     mock_build = _make_mock_build(source_v1)
-    wrapper = _wrap_codegen_ffi(mock_build, "target.build.tilelang_cuda_without_compile")
+    wrapper = _wrap_codegen_ffi(mock_build, ffi_name)
 
     _setup_trace_overrides(tmp_path)
-    codegen_path = _core._codegen_output_path_override
+    codegen_path = _codegen_step_path(ffi_name)
 
     with _patch_make_patched_source_module() as mock_factory:
         try:
-            # Run 1: initializes codegen.cpp + .original from codegen output
+            # Run 1: initializes the per-FFI source + .original baseline.
             result1 = wrapper("fake_mod")
             assert result1.inspect_source() == source_v1
 
-            # Edit codegen.cpp (user edit)
+            # Edit the saved source, then simulate restarting the traced script.
             edited = "// edited by user\n"
             with open(codegen_path, "w") as f:
                 f.write(edited)
+            _core.reset()
 
             # Run 2: user edited, codegen unchanged → PATCHED → patched module returned
             result2 = wrapper("fake_mod")
@@ -508,22 +519,24 @@ def test_codegen_proxy_for_source_only_ffi(tmp_path):
     """Source-only FFIs without a _without_compile suffix (tilelang_c, webgpu) also return patched module."""
     from tilelang.tools.lower_trace.core import _wrap_codegen_ffi
 
+    ffi_name = "target.build.tilelang_c"
     source_v1 = "// generated C kernel v1\n"
     mock_build = _make_mock_build(source_v1)
-    wrapper = _wrap_codegen_ffi(mock_build, "target.build.tilelang_c")
+    wrapper = _wrap_codegen_ffi(mock_build, ffi_name)
 
     _setup_trace_overrides(tmp_path)
-    codegen_path = _core._codegen_output_path_override
+    codegen_path = _codegen_step_path(ffi_name)
 
     with _patch_make_patched_source_module() as mock_factory:
         try:
-            # Run 1: initializes codegen.cpp + .original
+            # Run 1: initializes the per-FFI source + .original baseline.
             wrapper("fake_mod")
 
-            # Edit codegen.cpp
+            # Edit the saved source, then simulate restarting the traced script.
             edited = "// edited C kernel\n"
             with open(codegen_path, "w") as f:
                 f.write(edited)
+            _core.reset()
 
             # Run 2: PATCHED → patched module returned (tilelang_c is in _SOURCE_ONLY_CODEGEN_FFIS)
             result2 = wrapper("fake_mod")
@@ -533,28 +546,56 @@ def test_codegen_proxy_for_source_only_ffi(tmp_path):
             _clear_trace_overrides()
 
 
-def test_codegen_no_proxy_for_full_compile(tmp_path, capsys):
-    """Full-compile FFIs return the real module (not patched) + NOTE when user edits codegen.cpp."""
+def test_codegen_outputs_are_split_by_ffi(tmp_path):
+    """Device and host codegen calls use distinct files and source extensions."""
     from tilelang.tools.lower_trace.core import _wrap_codegen_ffi
 
-    source_v1 = "// generated kernel v1\n"
-    mock_build = _make_mock_build(source_v1)
-    wrapper = _wrap_codegen_ffi(mock_build, "target.build.tilelang_cuda")
+    cuda_ffi = "target.build.tilelang_cuda_without_compile"
+    host_ffi = "target.build.tilelang_c_host"
+    cuda_wrapper = _wrap_codegen_ffi(_make_mock_build("// CUDA\n"), cuda_ffi)
+    host_wrapper = _wrap_codegen_ffi(_make_mock_build("// C++\n"), host_ffi)
 
     _setup_trace_overrides(tmp_path)
-    codegen_path = _core._codegen_output_path_override
+    try:
+        cuda_wrapper("fake_mod")
+        host_wrapper("fake_mod")
+
+        cuda_path = _codegen_step_path(cuda_ffi, index=0)
+        host_path = _codegen_step_path(host_ffi, index=1)
+        assert cuda_path.endswith("_tilelang_cuda_without_compile.cu")
+        assert host_path.endswith("_tilelang_c_host.cc")
+        with open(cuda_path, encoding="utf-8") as cuda_file:
+            assert cuda_file.read() == "// CUDA\n"
+        with open(host_path, encoding="utf-8") as host_file:
+            assert host_file.read() == "// C++\n"
+    finally:
+        _clear_trace_overrides()
+
+
+def test_codegen_no_proxy_for_full_compile(tmp_path, capsys):
+    """Full-compile FFIs return the real module plus a note for edited source."""
+    from tilelang.tools.lower_trace.core import _wrap_codegen_ffi
+
+    ffi_name = "target.build.tilelang_cuda"
+    source_v1 = "// generated kernel v1\n"
+    mock_build = _make_mock_build(source_v1)
+    wrapper = _wrap_codegen_ffi(mock_build, ffi_name)
+
+    _setup_trace_overrides(tmp_path)
+    codegen_path = _codegen_step_path(ffi_name)
     target = tvm.target.Target("cuda")
 
     with _patch_make_patched_source_module() as mock_factory:
         try:
-            # Run 1: initializes codegen.cpp + .original
+            # Run 1: initializes the per-FFI source + .original baseline.
             result1 = wrapper("fake_mod", target)
             assert result1.inspect_source() == source_v1
 
-            # Edit codegen.cpp
+            # Edit the saved source, then simulate restarting the traced script.
             edited = "// edited by user\n"
             with open(codegen_path, "w") as f:
                 f.write(edited)
+            _core.reset()
 
             # Run 2: user edited, codegen unchanged → PATCHED
             # But full-compile FFI → return real module, NOT patched
@@ -574,12 +615,13 @@ def test_codegen_conflict_backup(tmp_path):
     """CONFLICT: both user edited and codegen changed → backup + regenerate."""
     from tilelang.tools.lower_trace.core import _wrap_codegen_ffi
 
+    ffi_name = "target.build.tilelang_cuda_without_compile"
     source_v1 = "// generated kernel v1\n"
     mock_build = _make_mock_build(source_v1)
-    wrapper = _wrap_codegen_ffi(mock_build, "target.build.tilelang_cuda_without_compile")
+    wrapper = _wrap_codegen_ffi(mock_build, ffi_name)
 
     _setup_trace_overrides(tmp_path)
-    codegen_path = _core._codegen_output_path_override
+    codegen_path = _codegen_step_path(ffi_name)
     original_path = codegen_path + ".original"
 
     with _patch_make_patched_source_module() as mock_factory:
@@ -587,13 +629,14 @@ def test_codegen_conflict_backup(tmp_path):
             # Run 1: init
             wrapper("fake_mod")
 
-            # Edit codegen.cpp (user edit)
+            # Edit the saved source.
             with open(codegen_path, "w") as f:
                 f.write("// user edit\n")
 
             # Change codegen output (new wrapper with different source)
             source_v2 = "// new codegen output v2\n"
-            wrapper = _wrap_codegen_ffi(_make_mock_build(source_v2), "target.build.tilelang_cuda_without_compile")
+            wrapper = _wrap_codegen_ffi(_make_mock_build(source_v2), ffi_name)
+            _core.reset()
 
             # Run 2: CONFLICT — working != current
             result2 = wrapper("fake_mod")
@@ -602,7 +645,7 @@ def test_codegen_conflict_backup(tmp_path):
             assert os.path.exists(codegen_path + ".bak"), "User working copy not backed up"
             assert os.path.exists(original_path + ".bak"), "Old baseline not backed up"
 
-            # codegen.cpp regenerated from new codegen
+            # The working source is regenerated from new codegen.
             with open(codegen_path) as f:
                 assert f.read() == source_v2
 
@@ -621,12 +664,13 @@ def test_codegen_synced(tmp_path):
     """SYNCED: user edits match new codegen output → baseline advances, patched module returned."""
     from tilelang.tools.lower_trace.core import _wrap_codegen_ffi
 
+    ffi_name = "target.build.tilelang_cuda_without_compile"
     source_v1 = "// generated kernel v1\n"
     mock_build = _make_mock_build(source_v1)
-    wrapper = _wrap_codegen_ffi(mock_build, "target.build.tilelang_cuda_without_compile")
+    wrapper = _wrap_codegen_ffi(mock_build, ffi_name)
 
     _setup_trace_overrides(tmp_path)
-    codegen_path = _core._codegen_output_path_override
+    codegen_path = _codegen_step_path(ffi_name)
     original_path = codegen_path + ".original"
 
     with _patch_make_patched_source_module() as mock_factory:
@@ -634,13 +678,14 @@ def test_codegen_synced(tmp_path):
             # Run 1: init
             wrapper("fake_mod")
 
-            # Edit codegen.cpp to match what the new codegen will produce
+            # Edit the saved source to match what the new codegen will produce.
             source_v2 = "// new codegen output v2\n"
             with open(codegen_path, "w") as f:
                 f.write(source_v2)
 
             # Change codegen output to the same value
-            wrapper = _wrap_codegen_ffi(_make_mock_build(source_v2), "target.build.tilelang_cuda_without_compile")
+            wrapper = _wrap_codegen_ffi(_make_mock_build(source_v2), ffi_name)
+            _core.reset()
 
             # Run 2: SYNCED
             result2 = wrapper("fake_mod")
@@ -742,7 +787,7 @@ def test_codegen_record_index_after_nested_pass(tmp_path):
     try:
         wrapper("fake_mod")
 
-        codegen_records = [r for r in _core._records if r.name == "codegen"]
+        codegen_records = [r for r in _core._records if r.name == "target.build.tilelang_cuda_without_compile"]
         assert codegen_records, "no codegen record found"
         assert codegen_records[-1].index > nested_idx[0], "codegen index not after nested pass"
 

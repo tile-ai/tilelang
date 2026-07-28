@@ -313,13 +313,14 @@ def _update_html_symlink(run_html_path: str):
 
 
 def _get_codegen_output_path() -> str | None:
-    """Return the configured codegen source output path, or None when off.
+    """Return the configured codegen source output base path, or None when off.
 
     An explicit override (set via ``enable(codegen_output=...)``) always wins,
     including in terminal-only mode and an explicit ``None`` to suppress. When
     no override is set, the default ``<script_dir>/codegen.cpp`` is only
-    produced for persistence modes (``html``/``both``) so ``terminal`` mode
-    stays a pure no-write diff as documented.
+    produced for persistence modes (``html``/``both``). Each codegen FFI call
+    expands this base path to a distinct file named with the pass index and FFI
+    name so device and host source do not overwrite each other.
     """
     if _codegen_output_path_override is not _UNSET:
         return _codegen_output_path_override
@@ -336,6 +337,34 @@ def _safe_filename_component(name: str) -> str:
     custom pass/phase name cannot escape its phase subdirectory (CWE-22).
     """
     return re.sub(r"[^A-Za-z0-9._-]", "_", str(name))
+
+
+def _codegen_output_extension(ffi_name: str, fallback_ext: str) -> str:
+    """Choose a source extension for a generated codegen output file."""
+    short_name = ffi_name.rsplit(".", 1)[-1]
+    if "cuda" in short_name or "cutedsl" in short_name:
+        return ".cu"
+    if "hip" in short_name:
+        return ".hip"
+    if "metal" in short_name:
+        return ".metal"
+    if "webgpu" in short_name:
+        return ".wgsl"
+    if short_name in ("llvm", "tilelang_c", "tilelang_c_host", "tilelang_cpp") or "ascend" in short_name:
+        return ".cc"
+    return fallback_ext or ".cpp"
+
+
+def _codegen_output_path_for_step(base_path: str, idx: int, ffi_name: str) -> str:
+    """Expand the configured codegen base path to a per-FFI output path."""
+    directory, filename = os.path.split(base_path)
+    stem, fallback_ext = os.path.splitext(filename or "codegen.cpp")
+    if not stem:
+        stem = "codegen"
+    short_ffi = ffi_name.replace("target.build.", "").replace(".", "_") or "codegen"
+    safe_ffi = _safe_filename_component(short_ffi)
+    ext = _codegen_output_extension(ffi_name, fallback_ext)
+    return os.path.join(directory, f"{stem}_{idx:02d}_{safe_ffi}{ext}")
 
 
 def _save_raw_files(record: LowerRecord):
@@ -836,16 +865,19 @@ def _wrap_codegen_ffi(original_build, ffi_name=""):
     3. After codegen finishes, captures the generated source via
        ``result.inspect_source()`` and appends a ``STATUS_CODEGEN`` record.
 
-    Codegen output handling (when ``codegen_output`` path is configured):
+    Codegen output handling (when ``codegen_output`` base path is configured):
 
     Three files collaborate to disambiguate whether a content difference is
-    caused by user edits, by a codegen change, or by both:
-    - ``<path>``           — user-editable working copy.
-    - ``<path>.original``  — baseline: the codegen snapshot the working copy
-                             was last synced from (written only on init or
-                             re-sync, never blindly overwritten).
-    - ``<path>.latest``    — the actual codegen output of *this* run
-                             (overwritten every run, for diff reference).
+    caused by user edits, by a codegen change, or by both. The configured
+    path is expanded per FFI call, for example
+    ``codegen_91_tilelang_cuda.cu`` and
+    ``codegen_98_tilelang_c_host.cc``:
+    - ``<step-path>``           — user-editable working copy.
+    - ``<step-path>.original``  — baseline: the codegen snapshot the working
+                                  copy was last synced from (written only on
+                                  init or re-sync, never blindly overwritten).
+    - ``<step-path>.latest``    — the actual codegen output of *this* run
+                                  (overwritten every run, for diff reference).
 
     On each run a three-way comparison (baseline / working / current codegen)
     decides:
@@ -892,7 +924,9 @@ def _wrap_codegen_ffi(original_build, ffi_name=""):
             _ensure_run_dir()
 
         before_text = str(mod)
-        codegen_out_path = _get_codegen_output_path()
+        codegen_out_base_path = _get_codegen_output_path()
+        codegen_name = ffi_name or getattr(original_build, "__name__", "codegen")
+        safe_codegen_name = _safe_filename_component(codegen_name.replace("target.build.", ""))
 
         with _lock:
             previous_phase = _current_phase
@@ -906,7 +940,7 @@ def _wrap_codegen_ffi(original_build, ffi_name=""):
                 _pass_index += 1
                 record = LowerRecord(
                     phase="codegen",
-                    name=getattr(original_build, "__name__", "codegen"),
+                    name=codegen_name,
                     index=idx,
                     before_text=before_text,
                     after_text="",
@@ -917,7 +951,7 @@ def _wrap_codegen_ffi(original_build, ffi_name=""):
                 _records.append(record)
                 _save_raw_files(record)
                 _current_phase = previous_phase
-                print(f"  [lower_trace] codegen/{idx:02d}_codegen: FAILED ({e})")
+                print(f"  [lower_trace] codegen/{idx:02d}_{safe_codegen_name}: FAILED ({e})")
             raise
 
         try:
@@ -927,6 +961,7 @@ def _wrap_codegen_ffi(original_build, ffi_name=""):
             patched_text = None
             codegen_text = ""
             after_text = ""
+            codegen_out_path = _codegen_output_path_for_step(codegen_out_base_path, idx, codegen_name) if codegen_out_base_path else None
             try:
                 codegen_text = _inspect_module_source(result)
                 if codegen_out_path:
@@ -940,7 +975,7 @@ def _wrap_codegen_ffi(original_build, ffi_name=""):
                             if os.path.isfile(codegen_out_path):
                                 shutil.copyfile(codegen_out_path, codegen_out_path + ".bak")
                                 print(
-                                    f"  [lower_trace] codegen/{idx:02d}_codegen: INIT-BACKUP — {_ANSI_BOLD}{_ANSI_YELLOW}{codegen_out_path}{_ANSI_RESET} existed without baseline, backed up to {_ANSI_BOLD}{_ANSI_YELLOW}{codegen_out_path}.bak{_ANSI_RESET}"
+                                    f"  [lower_trace] codegen/{idx:02d}_{safe_codegen_name}: INIT-BACKUP — {_ANSI_BOLD}{_ANSI_YELLOW}{codegen_out_path}{_ANSI_RESET} existed without baseline, backed up to {_ANSI_BOLD}{_ANSI_YELLOW}{codegen_out_path}.bak{_ANSI_RESET}"
                                 )
                             with open(original_path, "w", encoding="utf-8") as _f:
                                 _f.write(codegen_text)
@@ -961,13 +996,13 @@ def _wrap_codegen_ffi(original_build, ffi_name=""):
                                 with open(codegen_out_path, "w", encoding="utf-8") as _f:
                                     _f.write(codegen_text)
                                 print(
-                                    f"  {_ANSI_CYAN}[lower_trace] codegen/{idx:02d}_codegen: REGENERATED (codegen changed, no user edits){_ANSI_RESET}"
+                                    f"  {_ANSI_CYAN}[lower_trace] codegen/{idx:02d}_{safe_codegen_name}: REGENERATED (codegen changed, no user edits){_ANSI_RESET}"
                                 )
                                 patched_text = None
                             elif user_edited and not codegen_changed:
                                 patched_text = working_text
                                 print(
-                                    f"  {_ANSI_BOLD}{_ANSI_GREEN}[lower_trace] codegen/{idx:02d}_codegen: PATCHED (user edits){_ANSI_RESET}"
+                                    f"  {_ANSI_BOLD}{_ANSI_GREEN}[lower_trace] codegen/{idx:02d}_{safe_codegen_name}: PATCHED (user edits){_ANSI_RESET}"
                                 )
                             else:
                                 if working_text.rstrip() == codegen_text.rstrip():
@@ -975,7 +1010,7 @@ def _wrap_codegen_ffi(original_build, ffi_name=""):
                                         _f.write(codegen_text)
                                     patched_text = working_text
                                     print(
-                                        f"  {_ANSI_BOLD}{_ANSI_GREEN}[lower_trace] codegen/{idx:02d}_codegen: SYNCED (user edits & codegen changed, but they are the same){_ANSI_RESET}"
+                                        f"  {_ANSI_BOLD}{_ANSI_GREEN}[lower_trace] codegen/{idx:02d}_{safe_codegen_name}: SYNCED (user edits & codegen changed, but they are the same){_ANSI_RESET}"
                                     )
                                 else:
                                     shutil.copyfile(codegen_out_path, codegen_out_path + ".bak")
@@ -985,7 +1020,7 @@ def _wrap_codegen_ffi(original_build, ffi_name=""):
                                     with open(codegen_out_path, "w", encoding="utf-8") as _f:
                                         _f.write(codegen_text)
                                     print(
-                                        f"  {_ANSI_BOLD}{_ANSI_YELLOW}[lower_trace] codegen/{idx:02d}_codegen: CONFLICT (user edits & codegen changed, conflict with each other, codegen overwrites user edits). {_ANSI_RESET}"
+                                        f"  {_ANSI_BOLD}{_ANSI_YELLOW}[lower_trace] codegen/{idx:02d}_{safe_codegen_name}: CONFLICT (user edits & codegen changed, conflict with each other, codegen overwrites user edits). {_ANSI_RESET}"
                                     )
                                     patched_text = None
                     except Exception as _exc:
@@ -1008,7 +1043,7 @@ def _wrap_codegen_ffi(original_build, ffi_name=""):
                 with _lock:
                     record = LowerRecord(
                         phase="codegen",
-                        name="codegen",
+                        name=codegen_name,
                         index=idx,
                         before_text=before_text,
                         after_text=after_text,
@@ -1021,7 +1056,7 @@ def _wrap_codegen_ffi(original_build, ffi_name=""):
                     _save_raw_files(record)
                     tag = "CODEGEN"
                     path_suffix = f"  →  {_ANSI_BLUE}{codegen_out_path}{_ANSI_RESET}" if codegen_out_path else ""
-                    print(f"  [lower_trace] codegen/{idx:02d}_codegen: {tag} (+{add_count}/-{del_count}){path_suffix}")
+                    print(f"  [lower_trace] codegen/{idx:02d}_{safe_codegen_name}: {tag} (+{add_count}/-{del_count}){path_suffix}")
 
                     if gen_html:
                         with contextlib.suppress(Exception):
@@ -1064,7 +1099,7 @@ def _wrap_codegen_ffi(original_build, ffi_name=""):
                     elif target_kind == "hip":
                         backend_hint = " Use execution_backend='cython' for edit-and-recompile support."
                     print(
-                        f"  {_ANSI_YELLOW}[lower_trace] codegen/{idx:02d}_codegen: NOTE — "
+                        f"  {_ANSI_YELLOW}[lower_trace] codegen/{idx:02d}_{safe_codegen_name}: NOTE — "
                         f"user edits in {codegen_out_path} are recorded in the trace for diff "
                         f"viewing, but were NOT recompiled (the codegen FFI builds from TIR, "
                         f"not from C++ source). The compiled artifact reflects the unpatched "
@@ -1102,12 +1137,14 @@ def enable(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
         the ``TL_LOWER_TRACE_DIR`` env var, then
         ``./tmp/lower_trace_dir``.
     codegen_output : str | None, optional
-        Path to save the codegen-generated C++/CUDA/etc. source code.  When
-        omitted, defaults to ``<script_dir>/codegen.cpp`` (inside the
-        per-script output directory, beside ``.run_records/``).  Pass ``None``
-        explicitly to suppress all extra saves.  See ``_wrap_codegen_ffi``
-        for the three-file (``<path>`` / ``<path>.original`` /
-        ``<path>.latest``) patch-and-recompile workflow.
+        Base path used to save the codegen-generated C++/CUDA/etc. source
+        code. Each codegen FFI call expands it with the pass index and FFI
+        name, e.g. ``codegen_91_tilelang_cuda.cu``. When omitted, defaults to
+        ``<script_dir>/codegen.cpp`` (inside the per-script output directory,
+        beside ``.run_records/``). Pass ``None`` explicitly to suppress all
+        extra saves. See ``_wrap_codegen_ffi`` for the three-file
+        (``<step-path>`` / ``<step-path>.original`` /
+        ``<step-path>.latest``) patch-and-recompile workflow.
     """
     global _mode_override, _trace_dir_override, _codegen_output_path_override, _script_dir, _run_dir
 
