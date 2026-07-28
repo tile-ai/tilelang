@@ -287,6 +287,17 @@ class Builder(BaseBuilder):
     # Source span injection (TILELANG_ENABLE_IR_SPAN)
     # ------------------------------------------------------------------
 
+    def with_buffer_span(self, buffer: Buffer) -> Buffer:
+        """Stamp an unspanned buffer with the current user source location."""
+        if not self._spans_enabled or self.current_line <= 0:
+            return buffer
+
+        from tilelang.ir import get_buffer_span, make_span, set_buffer_span
+
+        if get_buffer_span(buffer) is None:
+            set_buffer_span(buffer, make_span(self.current_file, self.current_line))
+        return buffer
+
     def _current_stmt_frame(self):
         """The innermost open frame whose `stmts` accumulates emitted stmts."""
         for frame in reversed(self.frames):
@@ -536,14 +547,16 @@ class Builder(BaseBuilder):
             if isinstance(annot, Buffer) and annot.scope() == "global":
                 from tilelang.language import match_buffer
 
-                return IRBuilder.name(
-                    name,
-                    match_buffer(
-                        orig_value,
-                        annot.shape,
-                        annot.dtype,
-                        strides=annot.strides,
-                    ),
+                return self.with_buffer_span(
+                    IRBuilder.name(
+                        name,
+                        match_buffer(
+                            orig_value,
+                            annot.shape,
+                            annot.dtype,
+                            strides=annot.strides,
+                        ),
+                    )
                 )
             else:
                 return orig_value
@@ -582,6 +595,8 @@ class Builder(BaseBuilder):
             # Bind TVM Var/Buffer names and also record scope so reusing the same
             # Python name (e.g., loop vars like `i`) across different for-frames
             # works without triggering out-of-scope errors.
+            if isinstance(value, Buffer):
+                self.with_buffer_span(value)
             IRBuilder.name(name, value)
             if name != "_":
                 frame = self.find_frame_idx(TIR_VAR_SCOPE_FRAME)
@@ -591,6 +606,8 @@ class Builder(BaseBuilder):
 
         # 3. Bind immutable tilelang objects
         res = self.bind_immutable(name, value)
+        if isinstance(res, Buffer):
+            self.with_buffer_span(res)
 
         # 4. Check variable scope and shadowing
         if name != "_":
@@ -831,10 +848,8 @@ class Builder(BaseBuilder):
             # emits set_fileline with the parameter's own line before each
             # `__tb.arg(...)` call), so diagnostics involving only argument
             # buffers (e.g. T.copy(A, B)) also carry a source location.
-            if self._spans_enabled and isinstance(arg, Buffer) and self.current_line > 0:
-                from tilelang.ir import make_span, set_buffer_span
-
-                set_buffer_span(arg, make_span(self.current_file, self.current_line))
+            if isinstance(arg, Buffer):
+                self.with_buffer_span(arg)
             return arg
         elif value is self.empty:
             raise ValueError(f"Argument `{name}` is not annotated")

@@ -113,7 +113,8 @@ void FatalTcgen5Unavailable(const GemmNode &op, Target target) {
              << ", dtype=" << op.a_->dtype << "), B(scope=" << op.b_.scope()
              << ", dtype=" << op.b_->dtype << "), C(scope=" << op.c_.scope()
              << ", dtype=" << op.c_->dtype << "), M=" << op.m_
-             << ", N=" << op.n_ << ", K=" << op.k_ << ".";
+             << ", N=" << op.n_ << ", K=" << op.k_ << "."
+             << SpanHintSuffix({op.a_->span, op.b_->span, op.c_->span});
 }
 
 std::pair<int, int>

@@ -41,12 +41,8 @@ def _with_span(buffer: Buffer) -> Buffer:
     from .eager.builder import Builder
 
     builder = Builder.current()
-    if builder is not None and getattr(builder, "_spans_enabled", False):
-        file, line = builder.current_file, builder.current_line
-        if line > 0:
-            from tilelang.ir import make_span, set_buffer_span
-
-            set_buffer_span(buffer, make_span(file, line))
+    if builder is not None:
+        builder.with_buffer_span(buffer)
     return buffer
 
 

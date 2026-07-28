@@ -177,6 +177,7 @@ def _expect_error_at(excinfo, marker: str):
     message = str(excinfo.value)
     expected = f"--> {__file__}:{_marker_line(marker)}:"
     assert expected in message, f"expected {expected!r} in error message:\n{message}"
+    assert marker in message, f"source snippet was not rendered:\n{message}"
 
 
 def _make_parallel_fragment_bad_index():
@@ -263,6 +264,84 @@ def test_error_span_copy_range_mismatch():
 # ---------------------------------------------------------------------------
 # Review hardening: parameter buffer spans, path edge cases, coverage stats.
 # ---------------------------------------------------------------------------
+
+
+def _make_eager_jit_buffers():
+    @tilelang.jit
+    def main(A):
+        A: T.Tensor((64,), T.float32)  # span_marker_eager_param
+        C = T.empty((64,), T.float32)  # span_marker_eager_empty
+        with T.Kernel(1, threads=128):
+            T.copy(A, C)
+        return C
+
+    return main.get_tir()
+
+
+def test_eager_jit_param_and_empty_buffer_spans():
+    func = _make_eager_jit_buffers()
+    locations = {buf.name: span_to_location(get_buffer_span(buf)) for buf in func.buffer_map.values()}
+    assert locations["A"] == (__file__, _marker_line("span_marker_eager_param"))
+    assert locations["C"] == (__file__, _marker_line("span_marker_eager_empty"))
+
+
+def _make_eager_jit_wgmma_error():
+    @tilelang.jit
+    def main(A, B, C):
+        A: T.Tensor((32, 16), T.float16)  # span_marker_eager_wgmma_param
+        B: T.Tensor((16, 64), T.float16)
+        C: T.Tensor((32, 64), T.float16)
+        with T.Kernel(1, threads=128):
+            T.wgmma_gemm(A, B, C, clear_accum=True)
+
+    return main.get_tir()
+
+
+@tilelang.testing.requires_cuda
+def test_eager_jit_buffer_only_diagnostic_has_span():
+    func = _make_eager_jit_wgmma_error()
+    with pytest.raises(Exception) as excinfo:
+        tilelang.lower(func, target={"kind": "cuda", "arch": "sm_80"})
+    assert "T.wgmma_gemm() requires Hopper WGMMA lowering" in str(excinfo.value)
+    _expect_error_at(excinfo, "span_marker_eager_wgmma_param")
+
+
+def _make_match_buffer_kernel():
+    @T.prim_func
+    def main(A_ptr: T.handle):
+        A = T.match_buffer(A_ptr, (16,), T.float32)  # span_marker_match_buffer
+        with T.Kernel(1, threads=1):
+            T.evaluate(A[0])
+
+    return main
+
+
+def test_match_buffer_has_span():
+    func = _make_match_buffer_kernel()
+    (buffer_a,) = func.buffer_map.values()
+    assert span_to_location(get_buffer_span(buffer_a)) == (
+        __file__,
+        _marker_line("span_marker_match_buffer"),
+    )
+
+
+def _make_tensor_from_ptr_kernel():
+    @T.prim_func
+    def main(A_ptr: T.ptr):
+        A = T.make_tensor(A_ptr, (16,), T.float32)  # span_marker_make_tensor
+        with T.Kernel(1, threads=1):
+            T.evaluate(A[0])
+
+    return main
+
+
+def test_make_tensor_has_span():
+    func = _make_tensor_from_ptr_kernel()
+    (buffer_a,) = func.buffer_map.values()
+    assert span_to_location(get_buffer_span(buffer_a)) == (
+        __file__,
+        _marker_line("span_marker_make_tensor"),
+    )
 
 
 def _make_kernel_param_span():
