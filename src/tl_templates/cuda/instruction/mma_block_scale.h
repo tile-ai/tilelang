@@ -1,7 +1,8 @@
 #pragma once
 
-#include "common.h"
-#include "ldsm.h"
+#include "../common.h"
+#include "../ldsm.h"
+#include <cute/arch/config.hpp>
 
 #ifndef __CUDACC_RTC__
 #include <cstdint>
@@ -129,6 +130,8 @@ TL_DEVICE void sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3_regs(
     uint32_t b1, const float *c, uint32_t scale_a, uint32_t scale_b,
     uint16_t scale_a_byte_id = 0, uint16_t scale_a_thread_id = 0,
     uint16_t scale_b_byte_id = 0, uint16_t scale_b_thread_id = 0) {
+#if defined(CUTE_ARCH_MXF4NVF4_4X_UE4M3_MMA_ENABLED) &&                        \
+    defined(CUTLASS_ARCH_MMA_SM120A_ENABLED)
   asm volatile(
       "mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale.scale_vec::"
       "4X.f32.e2m1.e2m1.f32.ue4m3 "
@@ -143,6 +146,11 @@ TL_DEVICE void sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3_regs(
         "f"(c[1]), "f"(c[2]), "f"(c[3]), "r"(scale_a), "h"(scale_a_byte_id),
         "h"(scale_a_thread_id), "r"(scale_b), "h"(scale_b_byte_id),
         "h"(scale_b_thread_id));
+#else
+  CUTE_INVALID_CONTROL_PATH(
+      "tl::sm120_mma_sync_blockscaled requires sm_120a and CUDA 12.8 or "
+      "later");
+#endif
 }
 
 TL_DEVICE void sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3(

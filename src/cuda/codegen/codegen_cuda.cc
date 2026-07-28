@@ -663,8 +663,9 @@ std::string CodeGenTileLangCUDA::Finish() {
   if (need_mma_instruction_h_) {
     decl_stream << "#include <tl_templates/cuda/instruction/mma.h>\n";
   }
-  if (need_gemm_sm120_h_) {
-    decl_stream << "#include <tl_templates/cuda/gemm_sm120.h>\n";
+  if (need_mma_block_scale_instruction_h_) {
+    decl_stream
+        << "#include <tl_templates/cuda/instruction/mma_block_scale.h>\n";
   }
   if (need_wgmma_instruction_h_) {
     decl_stream << "#include <tl_templates/cuda/instruction/wgmma.h>\n";
@@ -3212,7 +3213,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(C_offset)", c_bias);
     this->stream << replacer.rewrite(mma_call);
   } else if (op->op.same_as(tl::ptx_mma_block_scale())) {
-    need_gemm_sm120_h_ = true;
+    need_mma_block_scale_instruction_h_ = true;
     // arg 0: accum_dtype
     // arg 1: shape: mXnXkX
     // arg 2: A layout: row/col
@@ -3321,7 +3322,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (
       op->op.same_as(
           tl::sm120_mma_blockscaled_kblock_fulltile_package_pingpong())) {
-    need_gemm_sm120_h_ = true;
+    need_mma_block_scale_instruction_h_ = true;
     // arg 0: C fragment pointer
     // arg 1: C fragment offset
     // arg 2: A shared K-stage base

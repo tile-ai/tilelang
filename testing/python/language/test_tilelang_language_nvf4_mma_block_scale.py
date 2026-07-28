@@ -566,8 +566,8 @@ def test_nvf4_mma_block_scale_codegen(K):
         out_idx=[4],
     )
     src = kernel.get_kernel_source()
-    assert "#include <tl_templates/cuda/gemm_sm120.h>" in src
-    assert "#include <tl_templates/cuda/instruction/mma_block_scale.h>" not in src
+    assert "#include <tl_templates/cuda/instruction/mma_block_scale.h>" in src
+    assert "#include <tl_templates/cuda/gemm_sm120.h>" not in src
     assert "sm120_mma_sync_blockscaled" in src
     assert "SFA_shared" in src
     assert "SFB_shared" in src

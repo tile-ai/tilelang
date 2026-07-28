@@ -650,7 +650,7 @@ def test_blockscaled_chunk_kmajor_matches_current_omma_sf_selector_contract():
     # OMMA.SF's *_thread_id selects another lane in the same quad, so the
     # effective rows are derived from the selector id, not from the local lane's
     # qlane alone. This is the compact-selector contract used by the production
-    # package path in gemm_sm120.h.
+    # package path in instruction/mma_block_scale.h.
     for lane in range(32):
         qlane = lane & 3
         sfa_base_row = _sfa_row_in_lane(lane)
@@ -793,7 +793,7 @@ def test_compact_package_issue_table_matches_cpp_macro_issue_order():
 
 
 def test_cpp_package_macro_keeps_compact_selector_issue_order():
-    header = Path(__file__).resolve().parents[3] / "src/tl_templates/cuda/gemm_sm120.h"
+    header = Path(__file__).resolve().parents[3] / "src/tl_templates/cuda/instruction/mma_block_scale.h"
     source = header.read_text()
     row_macro = source[source.index("#define TL_SM120_PKG_MMA_ROW") : source.index("  TL_SM120_PKG_MMA_ROW(0")]
 
@@ -872,9 +872,12 @@ def test_compact_package_copy_view_contract_maps_issue_rows_to_kmajor_words():
 
 
 def test_sm120_cuda_helper_keeps_scale_tv_package_boundary():
-    header = Path(__file__).resolve().parents[3] / "src/tl_templates/cuda/gemm_sm120.h"
+    header = Path(__file__).resolve().parents[3] / "src/tl_templates/cuda/instruction/mma_block_scale.h"
     source = header.read_text()
 
+    assert "#if defined(CUTE_ARCH_MXF4NVF4_4X_UE4M3_MMA_ENABLED)" in source
+    assert "defined(CUTLASS_ARCH_MMA_SM120A_ENABLED)" in source
+    assert "tl::sm120_mma_sync_blockscaled requires sm_120a and CUDA 12.8" in source
     assert "struct SM120ScaleTVPackage" in source
     assert "template <class ScalePkg>" in source
     assert "sm120_load_scale_tv_package" in source
