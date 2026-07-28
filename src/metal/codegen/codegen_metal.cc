@@ -630,10 +630,10 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
                 continue;
               }
               size_t j = i + 1;
-              while (j < line.length() &&
-                     (isalnum(line[j]) || line[j] == '_')) j++;
+              while (j < line.length() && (isalnum(line[j]) || line[j] == '_'))
+                j++;
               if (j < line.length() && line[j] == '*' &&
-                  j + 1 < line.length() && line[j+1] == ')') {
+                  j + 1 < line.length() && line[j + 1] == ')') {
                 line.insert(i + 1, "threadgroup ");
                 i += 12;
               }
