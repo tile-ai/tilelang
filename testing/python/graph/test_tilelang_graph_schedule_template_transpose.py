@@ -2,7 +2,7 @@
 
 This script mirrors the workflow used in:
 - tests/elementwise/test_tl.py
-- tests/reduction/test_reduction.py
+- testing/python/graph/test_tilelang_graph_schedule_template_reduction.py
 
 It validates:
 1. The `Transpose` schedule template compiles and runs.

@@ -1,9 +1,9 @@
 """Benchmark the Transpose schedule template across many shapes.
 
 Usage:
-    python tests/transpose/bench_transpose.py
-    python tests/transpose/bench_transpose.py --arch sm_80
-    python tests/transpose/bench_transpose.py --check-only
+    python testing/python/graph/bench_tilelang_graph_schedule_template_transpose.py
+    python testing/python/graph/bench_tilelang_graph_schedule_template_transpose.py --arch sm_80
+    python testing/python/graph/bench_tilelang_graph_schedule_template_transpose.py --check-only
 """
 
 from __future__ import annotations
