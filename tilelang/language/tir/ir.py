@@ -213,6 +213,7 @@ erf = _op_wrapper(_tir_op.erf)
 exp = _op_wrapper(_tir_op.exp)
 exp2 = _op_wrapper(_tir_op.exp2)
 exp10 = _op_wrapper(_tir_op.exp10)
+extract_lane = _tir_op.extract_lane
 floor = _op_wrapper(_tir_op.floor)
 ceildiv = _op_wrapper(_tir_op.ceildiv)
 cdiv = ceildiv
@@ -438,6 +439,7 @@ __all__ = (
     "exp",
     "exp10",
     "exp2",
+    "extract_lane",
     "floor",
     "floordiv",
     "floormod",

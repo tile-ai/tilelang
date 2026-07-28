@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tvm.tirx.script.parser as _parser
+from tvm.tirx.expr import Shuffle as Shuffle
 
 from .exports import BACKEND_ONLY_TIR_EXPORTS
 
