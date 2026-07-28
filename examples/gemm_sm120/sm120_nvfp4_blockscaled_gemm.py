@@ -12,31 +12,49 @@ Run from the repository root:
 
 import argparse
 from pathlib import Path
-import sys
 
 import torch
-
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
 
 import tilelang
 import tilelang.language as T
 from tilelang.profiler import do_bench
-from examples.dequantize_gemm.quantize import swizzle_blockscaled_chunk_kmajor_scale_words
 
 
-_SM120_SCALE_LAYOUT = "blockscaled_chunk_kmajor"
-_SM120_THREADS = 128
+def swizzle_blockscaled_chunk_kmajor_scale_words(words, block_rows: int = 128, block_words: int = 4):
+    """Pack semantic scale words in SM120 BlockScaledBasicChunk K-major order."""
+
+    if block_rows != 128 or block_words != 4:
+        raise ValueError(
+            "SM120 BlockScaledBasicChunk K-major scale packing requires "
+            f"block_rows=128 and block_words=4, got block_rows={block_rows}, block_words={block_words}"
+        )
+    if not isinstance(words, torch.Tensor):
+        raise TypeError(f"words must be a torch.Tensor, got {type(words)!r}")
+    if words.dtype != torch.uint32:
+        raise TypeError(f"words must have dtype torch.uint32, got {words.dtype}")
+    if words.ndim != 2:
+        raise ValueError(f"words must be a 2D tensor, got shape {tuple(words.shape)}")
+
+    rows, cols = words.shape
+    if cols % block_words != 0:
+        raise ValueError(f"blockscaled_chunk_kmajor scale storage requires K/64 words multiple of {block_words}, got {tuple(words.shape)}")
+    if rows % block_rows != 0:
+        padded_rows = (rows + block_rows - 1) // block_rows * block_rows
+        padded = torch.zeros((padded_rows, cols), dtype=words.dtype, device=words.device)
+        padded[:rows] = words
+        words = padded
+        rows = padded_rows
+
+    row_blocks = rows // block_rows
+    source = words.contiguous().reshape(row_blocks, 4, 32, cols)
+    return source.permute(0, 3, 2, 1).contiguous().reshape(rows, cols)
 
 
 def _tflops(m: int, n: int, k: int, latency_ms: float) -> float:
     return 2.0 * m * n * k / (latency_ms * 1.0e-3) / 1.0e12
 
 
-@tilelang.jit(out_idx=None)
+@tilelang.jit
 def sm120_nvfp4_blockscaled_gemm(
     M: int,
     N: int,
@@ -50,7 +68,7 @@ def sm120_nvfp4_blockscaled_gemm(
     # Tail tiles: TMA loads zero-fill out-of-bounds rows and the C store is
     # predicated, so M (or N) may be arbitrary as long as the other dimension
     # is a multiple of its tile. The scale source is padded to full 128-row
-    # tiles (the helpers in examples.dequantize_gemm.quantize do this automatically).
+    # tiles (the local scale swizzle helper does this automatically).
     # N must keep 16-byte aligned bf16 rows, the same contiguous-dim rule as
     # CuTeDSL's is_valid_tensor_alignment.
     assert N % 8 == 0, "N must be a multiple of 8 (16-byte aligned output rows)"
@@ -87,7 +105,7 @@ def sm120_nvfp4_blockscaled_gemm(
         SFB: T.Tensor((N_pad * k_blocks, sf_words_per_block_k), T.uint32),
         C: T.Tensor((M, N), out_dtype),
     ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=_SM120_THREADS) as (
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (
             bx,
             by,
         ):
@@ -99,16 +117,9 @@ def sm120_nvfp4_blockscaled_gemm(
 
             T.clear(C_local)
             for ko in T.Pipelined(K // block_K, num_stages=num_stages):
-                T.copy(
-                    A[by * block_M, ko * block_K],
-                    A_shared,
-                    annotations={"prefer_instruction": "tma"},
-                )
-                T.copy(
-                    B[bx * block_N, ko * block_K],
-                    B_shared,
-                    annotations={"prefer_instruction": "tma"},
-                )
+                T.copy(A[by * block_M, ko * block_K], A_shared)
+                T.copy(B[bx * block_N, ko * block_K], B_shared)
+
                 # Not T.copy(SFA[slice], SFA_shared): that slice mis-lowers on
                 # the bulk-TMA path today (upstream fix pending).
                 for r, w in T.Parallel(block_M, sf_words_per_block_k):
@@ -126,32 +137,12 @@ def sm120_nvfp4_blockscaled_gemm(
                     k_start=ko * block_K,
                     sf_a_granularity_k=sf_granularity_k,
                     sf_b_granularity_k=sf_granularity_k,
-                    sf_layout=_SM120_SCALE_LAYOUT,
+                    sf_layout="blockscaled_chunk_kmajor",
                 )
 
             T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main
-
-
-_FP4_E2M1_VALUES = (
-    0.0,
-    0.5,
-    1.0,
-    1.5,
-    2.0,
-    3.0,
-    4.0,
-    6.0,
-    -0.0,
-    -0.5,
-    -1.0,
-    -1.5,
-    -2.0,
-    -3.0,
-    -4.0,
-    -6.0,
-)
 
 
 def _make_packed_fp4(rows: int, cols: int, *, seed: int) -> torch.Tensor:
@@ -187,8 +178,26 @@ def _make_binary_scale_words(rows: int, k: int, *, seed: int) -> torch.Tensor:
 
 
 def _decode_rowmajor_fp4(packed: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
+    fp4_e2m1_values = (
+        0.0,
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        3.0,
+        4.0,
+        6.0,
+        -0.0,
+        -0.5,
+        -1.0,
+        -1.5,
+        -2.0,
+        -3.0,
+        -4.0,
+        -6.0,
+    )
     u = packed.contiguous().view(torch.uint8)
-    lut = torch.tensor(_FP4_E2M1_VALUES, device=packed.device, dtype=torch.float32)
+    lut = torch.tensor(fp4_e2m1_values, device=packed.device, dtype=torch.float32)
     out = torch.empty((rows, cols), device=packed.device, dtype=torch.float32)
     out[:, 0::2] = lut[(u & 0x0F).long()]
     out[:, 1::2] = lut[((u >> 4) & 0x0F).long()]
@@ -308,7 +317,7 @@ def main() -> None:
     print(f"Shape: M={args.m}, N={args.n}, K={args.k}")
     print(
         f"TileLang tile: {args.block_m}x{args.block_n}x{args.block_k}, "
-        f"threads={_SM120_THREADS}, stages={args.num_stages}, output={args.out_dtype}, "
+        f"threads=128, stages={args.num_stages}, output={args.out_dtype}, "
         "inputs=random fp4 / random binary scales"
     )
     latency_ms, tflops = run_tilelang(args)
