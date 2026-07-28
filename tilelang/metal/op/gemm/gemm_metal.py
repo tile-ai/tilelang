@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import warnings
+
+from tilelang.tileop.gemm.gemm_base import GemmBase
+from tilelang.utils.language import is_shared, is_full_region, is_fragment, is_metal_simdgroup
 from tilelang import tvm as tvm
 from tilelang.layout import Layout
 from tilelang.metal import language as T
@@ -51,6 +55,15 @@ class GemmMetalSimdGroup(GemmBase):
         mbar_phase_expr: tir.PrimExpr | None = None,
     ):
         thread_nums = thread_bounds.extent
+        # Apple GPU registers per core: ~208KB vs NVIDIA: 256KB.
+        # Large threadgroups may cause register spilling.
+        # Warn but don't silently truncate — user should choose explicitly.
+        # See: MLX max threads = WM*WN*32 ≤ 256; llama.cpp N_SIMDWIDTH=32.
+        if thread_nums > 512:
+            warnings.warn(
+                f"Metal GEMM: thread_nums={thread_nums} > 512 may cause register spilling on Apple GPU. Consider using ≤512 threads.",
+                stacklevel=2,
+            )
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_METAL)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
