@@ -1,3 +1,5 @@
+import re
+
 import tilelang
 import tilelang as tl
 import tilelang.language as T
@@ -58,6 +60,359 @@ def _reduce_op(T, op, src, dst, dim, batch=1):
         T.reduce_absmax(src, dst, dim=dim, **kwargs)
 
 
+def _make_partial_reduce_kernel():
+    block_threads = 128
+    fragment_threads = 64
+    rows = 4
+    width = 512
+    vector_size = 8
+
+    @tilelang.jit(
+        out_idx=1,
+        target="cuda",
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
+            tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
+        },
+    )
+    def make_kernel():
+        def x_layout(i: int, j: int) -> tuple[int, int]:
+            return j // vector_size, i * vector_size + j % vector_size
+
+        @T.prim_func
+        def fragment_reduce(
+            x: T.Tensor((rows, width), "float32"),
+            out: T.Tensor((rows, width), "float32"),
+        ) -> None:
+            with T.Kernel(1, threads=block_threads):
+                x_frag = T.alloc_fragment((rows, width), "float32")
+                sum_frag = T.alloc_fragment((rows,), "float32")
+                T.annotate_layout(
+                    {
+                        x_frag: T.Fragment(x_frag.shape, forward_fn=x_layout),
+                        sum_frag: T.Fragment(
+                            sum_frag.shape,
+                            forward_fn=lambda i, rep: (rep, i),
+                            replicate=fragment_threads,
+                        ),
+                    }
+                )
+                for i, j in T.Parallel(rows, width):
+                    x_frag[i, j] = x[i, j]
+                T.reduce_sum(x_frag, sum_frag, dim=1)
+                for i, j in T.Parallel(rows, width):
+                    out[i, j] = x_frag[i, j] / sum_frag[i]
+
+        return fragment_reduce
+
+    return make_kernel()
+
+
+def _make_two_group_reduce_kernel(block_threads: int = 128):
+    @tilelang.jit(out_idx=1, target="cuda")
+    def make_kernel():
+        def x_layout(i: int, j: int) -> tuple[int, int]:
+            return i * 64 + j // 8, j % 8
+
+        @T.prim_func
+        def two_group_reduce(
+            x: T.Tensor((2, 512), "float32"),
+            out: T.Tensor((2,), "float32"),
+        ) -> None:
+            with T.Kernel(1, threads=block_threads):
+                x_frag = T.alloc_fragment((2, 512), "float32")
+                out_frag = T.alloc_fragment((2,), "float32")
+                T.annotate_layout(
+                    {
+                        x_frag: T.Fragment(x_frag.shape, forward_fn=x_layout),
+                        out_frag: T.Fragment(
+                            out_frag.shape,
+                            forward_fn=lambda i, rep: (i * 64 + rep, 0),
+                            replicate=64,
+                        ),
+                    }
+                )
+                for i, j in T.Parallel(2, 512):
+                    x_frag[i, j] = x[i, j]
+                T.reduce_sum(x_frag, out_frag, dim=1)
+                for i in T.Parallel(2):
+                    out[i] = out_frag[i]
+
+        return two_group_reduce
+
+    return make_kernel()
+
+
+def _make_offset_thread_reduce_kernel():
+    """Reduction whose participating threads occupy a non-zero thread range,
+    i.e. tx in [32, 96) of a 128-thread block."""
+
+    @tilelang.jit(
+        out_idx=1,
+        target="cuda",
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
+            tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
+        },
+    )
+    def make_kernel():
+        thread_offset = 32
+        fragment_threads = 64
+        rows = 2
+        width = 512
+        vector_size = 8
+
+        @T.prim_func
+        def offset_thread_reduce(
+            x: T.Tensor((rows, width), "float32"),
+            out: T.Tensor((rows, width), "float32"),
+        ) -> None:
+            with T.Kernel(1, threads=128):
+                x_frag = T.alloc_fragment((rows, width), "float32")
+                sum_frag = T.alloc_fragment((rows,), "float32")
+                T.annotate_layout(
+                    {
+                        x_frag: T.Fragment(
+                            x_frag.shape,
+                            forward_fn=lambda i, j: (
+                                thread_offset + j // vector_size,
+                                i * vector_size + j % vector_size,
+                            ),
+                        ),
+                        sum_frag: T.Fragment(
+                            sum_frag.shape,
+                            forward_fn=lambda i, rep: (thread_offset + rep, i),
+                            replicate=fragment_threads,
+                        ),
+                    }
+                )
+                for i, j in T.Parallel(rows, width):
+                    x_frag[i, j] = x[i, j]
+                T.reduce_sum(x_frag, sum_frag, dim=1)
+                for i, j in T.Parallel(rows, width):
+                    out[i, j] = x_frag[i, j] / sum_frag[i]
+
+        return offset_thread_reduce
+
+    return make_kernel()
+
+
+def _make_partial_warp_reduce_kernel():
+    @tilelang.jit(
+        out_idx=1,
+        target="cuda",
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
+            tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
+        },
+    )
+    def make_kernel():
+        @T.prim_func
+        def partial_warp_reduce(
+            x: T.Tensor((1, 384), "float32"),
+            out: T.Tensor((1,), "float32"),
+        ) -> None:
+            with T.Kernel(1, threads=128):
+                x_frag = T.alloc_fragment((1, 384), "float32")
+                sum_frag = T.alloc_fragment((1,), "float32")
+                T.annotate_layout(
+                    {
+                        x_frag: T.Fragment(
+                            x_frag.shape,
+                            forward_fn=lambda i, j: (j // 8, j % 8),
+                        ),
+                        sum_frag: T.Fragment(
+                            sum_frag.shape,
+                            forward_fn=lambda i, rep: (rep, 0),
+                            replicate=48,
+                        ),
+                    }
+                )
+                for i, j in T.Parallel(1, 384):
+                    x_frag[i, j] = x[i, j]
+                T.reduce_sum(x_frag, sum_frag, dim=1)
+                for i in T.Parallel(1):
+                    out[i] = sum_frag[i]
+
+        return partial_warp_reduce
+
+    return make_kernel()
+
+
+def _make_warp_misaligned_base_reduce_kernel():
+    """Partial reduction whose participating range base is not warp-aligned,
+    i.e. tx in [16, 80). The shfl_xor_sync full-mask butterfly is only defined
+    when every participating warp is fully covered, so lowering must reject it."""
+
+    @tilelang.jit(
+        out_idx=1,
+        target="cuda",
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
+            tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
+        },
+    )
+    def make_kernel():
+        @T.prim_func
+        def warp_misaligned_base_reduce(
+            x: T.Tensor((1, 512), "float32"),
+            out: T.Tensor((1,), "float32"),
+        ) -> None:
+            with T.Kernel(1, threads=128):
+                x_frag = T.alloc_fragment((1, 512), "float32")
+                sum_frag = T.alloc_fragment((1,), "float32")
+                T.annotate_layout(
+                    {
+                        x_frag: T.Fragment(
+                            x_frag.shape,
+                            forward_fn=lambda i, j: (16 + j // 8, j % 8),
+                        ),
+                        sum_frag: T.Fragment(
+                            sum_frag.shape,
+                            forward_fn=lambda i, rep: (16 + rep, 0),
+                            replicate=64,
+                        ),
+                    }
+                )
+                for i, j in T.Parallel(1, 512):
+                    x_frag[i, j] = x[i, j]
+                T.reduce_sum(x_frag, sum_frag, dim=1)
+                for i in T.Parallel(1):
+                    out[i] = sum_frag[i]
+
+        return warp_misaligned_base_reduce
+
+    return make_kernel()
+
+
+def _make_large_unused_reduce_dimension_kernel():
+    rows = 16385
+    width = 512
+    vector_size = 8
+
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, threads=128):
+            src = T.alloc_fragment((rows, width), T.float32)
+            dst = T.alloc_fragment((rows,), T.float32)
+            T.annotate_layout(
+                {
+                    src: T.Fragment(
+                        src.shape,
+                        forward_fn=lambda i, j: (
+                            j // vector_size,
+                            i * vector_size + j % vector_size,
+                        ),
+                    ),
+                    dst: T.Fragment(
+                        dst.shape,
+                        forward_fn=lambda i, rep: (rep, i),
+                        replicate=64,
+                    ),
+                }
+            )
+            T.fill(src, 1.0)
+            T.reduce_sum(src, dst, dim=1)
+
+    return kernel
+
+
+def _make_sm80_batch_reduce_kernel():
+    @T.prim_func
+    def kernel(
+        A: T.Tensor((128, 64), T.float32),
+        B: T.Tensor((128,), T.float32),
+    ):
+        with T.Kernel(1, threads=256):
+            src = T.alloc_shared((128, 64), T.float32)
+            dst = T.alloc_fragment((128,), T.float32)
+            T.copy(A, src, disable_tma=True)
+            T.reduce_sum(src, dst, dim=1, batch=4)
+            T.copy(dst, B)
+
+    return kernel
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_reduce_partial_thread_barrier_correctness():
+    torch.manual_seed(0)
+    x = torch.rand((4, 512), dtype=torch.float32, device="cuda")
+    out = _make_partial_reduce_kernel()(x)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(
+        out,
+        x / x.sum(dim=1, keepdim=True),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_reduce_partial_thread_barrier_full_block_groups():
+    torch.manual_seed(1)
+    x = torch.rand((2, 512), dtype=torch.float32, device="cuda")
+    out = _make_two_group_reduce_kernel()(x)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out, x.sum(dim=1), rtol=1e-5, atol=1e-5)
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_reduce_partial_thread_barrier_multiple_groups_in_partial_cta():
+    """Two adjacent 64-thread groups form [0, 128) in a 256-thread CTA."""
+    torch.manual_seed(2)
+    x = torch.rand((2, 512), dtype=torch.float32, device="cuda")
+    out = _make_two_group_reduce_kernel(block_threads=256)(x)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out, x.sum(dim=1), rtol=1e-5, atol=1e-5)
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_reduce_partial_thread_barrier_offset_thread_range():
+    torch.manual_seed(3)
+    x = torch.rand((2, 512), dtype=torch.float32, device="cuda")
+    out = _make_offset_thread_reduce_kernel()(x)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(
+        out,
+        x / x.sum(dim=1, keepdim=True),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_reduce_partial_thread_barrier_ignores_large_unused_layout_dimension():
+    """Barrier resolution enumerates CTA threads, not layout coordinates."""
+    target = {"kind": "cuda", "arch": "sm_80"}
+    with tvm.transform.PassContext(), tvm.target.Target(target):
+        artifact = tilelang.lower(_make_large_unused_reduce_dimension_kernel(), target=target)
+    assert "tl::NamedBarrier<64>" in artifact.kernel_source
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_sm80_batch_reduce_uses_named_barrier():
+    target = {"kind": "cuda", "arch": "sm_80"}
+    with tvm.transform.PassContext(), tvm.target.Target(target):
+        artifact = tilelang.lower(_make_sm80_batch_reduce_kernel(), target=target)
+    assert "NamedBarrier<" in artifact.kernel_source
+    assert "tl::SyncThreadsBarrier" not in artifact.kernel_source
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_reduce_partial_thread_barrier_rejects_non_power_of_two_width():
+    with pytest.raises(Exception, match="positive power of two"):
+        _make_partial_warp_reduce_kernel()
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_reduce_partial_thread_barrier_rejects_warp_misaligned_base():
+    """A participating range whose base is not warp-aligned ([16, 80)) would
+    leave partially-covered warps, making the full-mask shfl_xor_sync butterfly
+    undefined. Lowering must reject it."""
+    with pytest.raises(Exception, match="warp-aligned participating thread range"):
+        _make_warp_misaligned_base_reduce_kernel()
+
+
 # ---------------------------------------------------------------------------
 # test_reduce  (op × dtype × src_scope × dst_scope × threads × batch)
 # ---------------------------------------------------------------------------
@@ -106,7 +461,6 @@ REDUCE_CASES = [
     ],
 )
 def test_reduce(op, dtype, M, N, src_scope, dst_scope, threads, batch):
-    import re
 
     @tilelang.jit(out_idx=-1)
     def kernel(M, N, dtype, op, src_scope, dst_scope, threads, batch):
@@ -335,7 +689,6 @@ def _make_finalize_reducer_kernel(block_M, block_N, dtype, op, batch):
 )
 def test_finalize_reducer_codegen(op, dtype, block_M, block_N, batch):
     """batch=1 → scalar run; batch>1 → run_batch with correct template arg."""
-    import re
 
     src = tl.compile(
         _make_finalize_reducer_kernel(block_M, block_N, dtype, op, batch),
@@ -349,6 +702,19 @@ def test_finalize_reducer_codegen(op, dtype, block_M, block_N, batch):
         m = re.search(r",\s*(\d+)\s*,\s*\d+\s*>::run_batch\(", src)
         assert m is not None, f"Expected run_batch in generated source.\n{src}"
         assert int(m.group(1)) == batch, f"Expected batch={batch}, got {m.group(1)}.\n{src}"
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+@pytest.mark.parametrize("batch", [1, 4])
+def test_finalize_reducer_sm80_uses_named_barrier(batch):
+    target = {"kind": "cuda", "arch": "sm_80"}
+    with tvm.transform.PassContext(config=_COMPILE_FLAGS), tvm.target.Target(target):
+        artifact = tilelang.lower(
+            _make_finalize_reducer_kernel(128, 64, T.float32, "sum", batch),
+            target=target,
+        )
+    assert "NamedBarrier<" in artifact.kernel_source
+    assert "tl::SyncThreadsBarrier" not in artifact.kernel_source
 
 
 @pytest.mark.parametrize(
@@ -541,7 +907,7 @@ def test_allreduce_scale_greater_than_one_valid_runtime(logical_width, scale):
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("reduce_fn", [T.reduce_sum, T.reduce_max], ids=["sum", "max"])
 def test_allreduce_scale_greater_than_one_rejects_non_power_of_two(reduce_fn):
-    with pytest.raises(Exception, match="logical_width.*positive power of two"):
+    with pytest.raises(Exception, match=r"logical_width.*positive power of two"):
         _compile(_make_allreduce_dim0_scale_kernel(reduce_fn, 48, 2))
 
 

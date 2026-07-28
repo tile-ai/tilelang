@@ -6,6 +6,7 @@
 #ifndef TVM_TL_BACKEND_COMMON_OP_REDUCE_H_
 #define TVM_TL_BACKEND_COMMON_OP_REDUCE_H_
 
+#include "backend/common/target_utils.h"
 #include "op/reduce.h"
 #include "support/check.h"
 #include <tvm/ir/cast.h>
@@ -18,6 +19,7 @@
 #include "tir/transforms/ir_utils.h"
 #include "transform/loop_partition.h"
 
+#include <tvm/arith/analyzer.h>
 #include <tvm/arith/iter_affine_map.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
@@ -74,6 +76,19 @@ inline Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
       ->CondenseReplicateVar()
       ->BindThreadRange(src_layout->ThreadRange());
 }
+
+/*!
+ * \brief Resolve the exact contiguous thread image of a scalar AllReduce.
+ *
+ * The result is derived from the reduce layout's forward thread map, which is
+ * also the source of the guard later emitted by PartitionLoop. Z3 counts the
+ * distinct thread IDs in the image while const-int bounds provide its minimum
+ * and maximum; equality between the count and span proves that the image is
+ * contiguous.
+ */
+Range ResolveAllReduceThreadRange(const Fragment &red_layout,
+                                  const Range &thread_bounds,
+                                  const Target &target);
 
 inline int64_t SignedMin(int bits) {
   if (bits >= 64) {
@@ -1125,10 +1140,17 @@ template <typename Impl> struct ReduceLowerer {
         reduce::CheckAllReduceWidth(reducing_threads, thread_step.scale,
                                     "tl.reduce");
         auto thread_offset = lower_args.thread_bounds->min;
+        PrimExpr all_threads = lower_args.thread_bounds->extent;
+        if (reducing_threads > 32 &&
+            TargetSupportsNamedBarrier(lower_args.target)) {
+          Range thread_range = reduce::ResolveAllReduceThreadRange(
+              red_layout, lower_args.thread_bounds, lower_args.target);
+          thread_offset = thread_range->min;
+          all_threads = thread_range->extent;
+        }
         std::string allreduce = Impl::MakeScalarAllReduce(
             reduce::MakeCodegenReducer(op).value(), reducing_threads,
-            thread_step.scale, thread_offset, lower_args.thread_bounds->extent,
-            lower_args.target);
+            thread_step.scale, thread_offset, all_threads, lower_args.target);
         Array<PrimExpr> thread_reduce_args = {
             StringImm(allreduce), BufferLoad(clear_buffer, red_indices)};
         if (reducing_threads > 32) {

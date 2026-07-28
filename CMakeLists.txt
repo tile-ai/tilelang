@@ -370,6 +370,7 @@ file(GLOB TILE_LANG_SRCS
   src/transform/pipeline/*.cc
   src/op/*.cc
   src/backend/common/target_utils.cc
+  src/backend/common/op/reduce.cc
   src/backend/common/codegen/codegen_utils.cc
   src/backend/common/codegen/codegen_c_host.cc
 )
