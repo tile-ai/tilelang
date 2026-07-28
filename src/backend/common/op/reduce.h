@@ -527,6 +527,8 @@ MakeReduceOwnershipPlan(const Array<PrimExpr> &src_indices,
 
 inline PrimExpr MakeUpdate(const ReduceOpNode &op, PrimExpr dst_val,
                            PrimExpr src_val) {
+  const bool use_nan_op = op.nan_propagate && (dst_val.dtype().is_float16() ||
+                                                dst_val.dtype().is_bfloat16());
   if (op.type->IsSum() || op.type->IsAbsSum()) {
     return dst_val + src_val;
   } else if (op.type->IsBitAnd()) {
@@ -536,9 +538,11 @@ inline PrimExpr MakeUpdate(const ReduceOpNode &op, PrimExpr dst_val,
   } else if (op.type->IsBitXor()) {
     return bitwise_xor(dst_val, src_val);
   } else if (op.type->IsMax() || op.type->IsAbsMax()) {
-    return Max(dst_val, src_val);
+    return use_nan_op ? Call(dst_val.dtype(), tl::max_nan(), {dst_val, src_val})
+                      : PrimExpr(Max(dst_val, src_val));
   } else if (op.type->IsMin()) {
-    return Min(dst_val, src_val);
+    return use_nan_op ? Call(dst_val.dtype(), tl::min_nan(), {dst_val, src_val})
+                      : PrimExpr(Min(dst_val, src_val));
   }
   LOG(FATAL) << "Unsupported reduce type: " << op.type->type;
   return PrimExpr();
