@@ -3270,31 +3270,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(scale_b_byte_id)", scale_b_byte_id);
     replacer.register_rule("(scale_b_thread_id)", scale_b_thread_id);
     this->stream << replacer.rewrite(mma_call);
-  } else if (op->op.same_as(tl::sm120_mma_blockscaled_fulltile())) {
-    need_mma_block_scale_instruction_h_ = true;
-    // arg 0: C fragment pointer
-    // arg 1: C fragment offset
-    // arg 2: A shared K-stage base
-    // arg 3: B shared K-stage base
-    // arg 4: SFA shared K-stage base
-    // arg 5: SFB shared K-stage base
-    ICHECK_EQ(op->args.size(), 6U);
-    std::string c_ref = this->PrintExpr(op->args[0]);
-    std::string c_offset = this->PrintExpr(op->args[1]);
-    auto void_ptr_arg = [&](size_t idx) {
-      return "reinterpret_cast<const void*>(" + this->PrintExpr(op->args[idx]) +
-             ")";
-    };
-    auto uint32_ptr_arg = [&](size_t idx) {
-      return "reinterpret_cast<const uint32_t*>(" +
-             this->PrintExpr(op->args[idx]) + ")";
-    };
-
-    this->PrintIndent();
-    this->stream << "tl::sm120_mma_blockscaled_fulltile("
-                 << "reinterpret_cast<float*>((" << c_ref << ") + (" << c_offset
-                 << ")), " << void_ptr_arg(2) << ", " << void_ptr_arg(3) << ", "
-                 << uint32_ptr_arg(4) << ", " << uint32_ptr_arg(5) << ");\n";
   } else if (op->op.same_as(builtin::ptx_mma_sp())) {
     // arg 0: shape: mXnXkX
     // arg 1: A layout: row/col

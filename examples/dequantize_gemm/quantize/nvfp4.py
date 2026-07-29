@@ -184,7 +184,7 @@ def blockscaled_chunk_kmajor_word_offset(row: int, k64_word: int, block_rows: in
     tile-local K64 word in ``[0, 4)``. The returned coordinates index the
     compressed uint32 source tile whose bytes hold the four adjacent K/16 scale
     groups. Flattening these coordinates with a row-major stride of four words
-    matches the CUDA helper ``sm120_blockscaled_chunk_kmajor_sf_word``.
+    matches the SM120 frontend MMA lowering.
     """
 
     _check_block_shape(block_rows, block_words)

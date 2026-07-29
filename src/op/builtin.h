@@ -447,11 +447,6 @@ TVM_DLL const Op &ptx_wgmma_sp_rs();
 TVM_DLL const Op &ptx_mma_block_scale();
 
 /*!
- * \brief Private SM120a NVF4 full-tile MMA helper.
- */
-TVM_DLL const Op &sm120_mma_blockscaled_fulltile();
-
-/*!
  * \brief tvm intrinsic for tcgen05 mma shared-shared instructions.
  */
 TVM_DLL const Op &ptx_tcgen05_mma_ss();

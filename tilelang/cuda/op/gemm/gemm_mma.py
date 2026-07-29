@@ -138,20 +138,14 @@ class GemmMMA(GemmBase):
                 raise ValueError("Block-scaled MMA GEMM requires sf_a_granularity_k and sf_b_granularity_k")
 
             if sf_layout == "blockscaled_chunk_kmajor":
-                num_k_blocks = int(block_K // micro_size_k)
-                if num_k_blocks != 4:
-                    raise ValueError("SM120 packed-scale blockscaled MMA currently requires block_K / micro_size_k == 4")
-                if int(warp_rows) != 4 or int(warp_cols) != 4:
-                    raise ValueError(
-                        "SM120 packed-scale blockscaled MMA currently requires a 4x4 warp atom grid, "
-                        f"got warp_rows={int(warp_rows)}, warp_cols={int(warp_cols)}"
-                    )
+                # Keep the full K tile in one macro: it uses one register package
+                # for a single K atom and ping-pong packages for larger tiles.
 
                 @T.prim_func
-                def _gemm_ss_blockscaled_packed_scale_package() -> None:
+                def _gemm_ss_blockscaled_kmajor() -> None:
                     if clear_accum:
                         T.clear(C_buf)
-                    mma_emitter.mma_backend_kblock_fulltile_package_pingpong(
+                    mma_emitter.mma_blockscaled_fulltile(
                         A_region,
                         B_region,
                         C_buf,
@@ -160,7 +154,7 @@ class GemmMMA(GemmBase):
                         sf_layout=sf_layout,
                     )
 
-                return _Simplify(_gemm_ss_blockscaled_packed_scale_package, inline_let=True)
+                return _Simplify(_gemm_ss_blockscaled_kmajor, inline_let=True)
 
             if int(block_K // micro_size_k) == 4:
 

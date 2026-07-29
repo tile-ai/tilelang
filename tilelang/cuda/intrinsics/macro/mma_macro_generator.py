@@ -51,23 +51,15 @@ class BlockScaleMmaConfig:
     scale_type: str
     a_dtype_abbrv: str
     b_dtype_abbrv: str
-    # Plain literal, not T.float32: this class body executes while
-    # tilelang.language is still initializing under the dialect facade
-    # (tilelang.language -> tilelang.cuda.language -> ... -> this module),
-    # so touching T.* here would be a circular import.
+    # Accessing T.float32 here would create a circular import during language initialization.
     accum_dtype: str = "float32"
     active_sfa_threads: int = 16
     active_sfb_threads: int = 8
 
 
 @dataclass(frozen=True)
-class SM120BlockScaledFullTilePackageContract:
-    """Internal contract for the SM120 full-tile blockscaled package path.
-
-    This is deliberately a lowering-level contract, not a user option.  The CUDA
-    helper is still the instruction backend today, but the emitter must name the
-    fragment/package shape it expects before it can route a tile to that helper.
-    """
+class SM120BlockScaleTile:
+    """Validated tile geometry for the SM120 packed-scale register pipeline."""
 
     tile_m: int
     tile_n: int
@@ -79,22 +71,26 @@ class SM120BlockScaledFullTilePackageContract:
     warp_row_tiles: int
     warp_col_tiles: int
     kblocks: int
+    micro_size_m: int
+    micro_size_n: int
     micro_size_k: int
     sf_layout: str
-    scale_package_words_sfa: int
-    scale_package_words_sfb: int
-    issue_count_per_warp: int
-    issue_count_per_warpgroup: int
+    sfa_words: int
+    sfb_words: int
+    warp_issues: int
+    warpgroup_issues: int
 
     @classmethod
-    def for_package_pingpong(
+    def from_emitter(
         cls,
         emitter: TensorCoreIntrinEmitter,
         *,
         sf_layout: str,
-        kblocks: int = 4,
-    ) -> SM120BlockScaledFullTilePackageContract:
-        contract = cls(
+        kblocks: int | None = None,
+    ) -> SM120BlockScaleTile:
+        if kblocks is None:
+            kblocks = int(emitter.chunk // emitter.micro_size_k)
+        tile = cls(
             tile_m=int(emitter.block_row_warps) * int(emitter.warp_row_tiles),
             tile_n=int(emitter.block_col_warps) * int(emitter.warp_col_tiles),
             tile_k=kblocks * int(emitter.micro_size_k),
@@ -105,64 +101,91 @@ class SM120BlockScaledFullTilePackageContract:
             warp_row_tiles=int(emitter.warp_row_tiles),
             warp_col_tiles=int(emitter.warp_col_tiles),
             kblocks=kblocks,
+            micro_size_m=int(emitter.micro_size_x),
+            micro_size_n=int(emitter.micro_size_y),
             micro_size_k=int(emitter.micro_size_k),
             sf_layout=sf_layout,
-            scale_package_words_sfa=2,
-            scale_package_words_sfb=2,
-            issue_count_per_warp=32,
-            issue_count_per_warpgroup=128,
+            sfa_words=(int(emitter.warp_rows) + 1) // 2,
+            sfb_words=(int(emitter.warp_cols) + 1) // 2,
+            warp_issues=int(emitter.warp_rows) * int(emitter.warp_cols) * 2,
+            warpgroup_issues=(
+                int(emitter.warp_rows) * int(emitter.warp_cols) * 2 * int(emitter.block_row_warps) * int(emitter.block_col_warps)
+            ),
         )
-        contract.validate()
-        return contract
+        tile.validate()
+        return tile
 
     def validate(self) -> None:
-        if (self.tile_m, self.tile_n, self.tile_k) != (128, 128, 256):
+        if self.tile_m <= 0 or self.tile_n <= 0 or self.tile_k <= 0:
+            raise ValueError(f"SM120 full-tile package dimensions must be positive, got {self.tile_m}x{self.tile_n}x{self.tile_k}")
+        if self.block_row_warps <= 0 or self.block_col_warps <= 0:
             raise ValueError(
-                f"SM120 full-tile package contract currently requires tile shape 128x128x256, got {self.tile_m}x{self.tile_n}x{self.tile_k}"
+                f"SM120 full-tile package requires positive warp partition dimensions, got {self.block_row_warps}x{self.block_col_warps}"
             )
-        if (self.warp_rows, self.warp_cols) != (4, 4):
+        if self.tile_m != self.block_row_warps * self.warp_row_tiles:
             raise ValueError(
-                "SM120 full-tile package contract currently requires each consumer "
-                f"warp to issue a 4x4 MMA atom grid, got {self.warp_rows}x{self.warp_cols}"
+                f"SM120 full-tile M shape mismatch: tile_m={self.tile_m}, "
+                f"block_row_warps={self.block_row_warps}, warp_row_tiles={self.warp_row_tiles}"
             )
-        if (self.block_row_warps, self.block_col_warps) != (2, 2):
+        if self.tile_n != self.block_col_warps * self.warp_col_tiles:
             raise ValueError(
-                "SM120 full-tile package contract currently requires a 2x2 consumer "
-                f"warp layout, got {self.block_row_warps}x{self.block_col_warps}"
+                f"SM120 full-tile N shape mismatch: tile_n={self.tile_n}, "
+                f"block_col_warps={self.block_col_warps}, warp_col_tiles={self.warp_col_tiles}"
             )
-        if (self.warp_row_tiles, self.warp_col_tiles) != (64, 64):
+        # One compact scale word is shared by each adjacent pair of MMA atoms.
+        if self.warp_rows <= 0 or self.warp_cols <= 0 or self.warp_rows % 2 != 0 or self.warp_cols % 2 != 0:
             raise ValueError(
-                "SM120 full-tile package contract currently requires each consumer "
-                f"warp tile to be 64x64, got {self.warp_row_tiles}x{self.warp_col_tiles}"
+                f"SM120 compact scale packages require a positive even MMA atom grid per warp, got {self.warp_rows}x{self.warp_cols}"
             )
-        if self.kblocks != 4 or self.micro_size_k != 64:
+        if self.warp_row_tiles != self.warp_rows * self.micro_size_m:
             raise ValueError(
-                "SM120 full-tile package contract currently requires four K=64 "
-                f"blocks, got kblocks={self.kblocks}, micro_size_k={self.micro_size_k}"
+                f"SM120 full-tile warp M shape mismatch: warp_row_tiles={self.warp_row_tiles}, "
+                f"warp_rows={self.warp_rows}, micro_size_m={self.micro_size_m}"
+            )
+        if self.warp_col_tiles != self.warp_cols * self.micro_size_n:
+            raise ValueError(
+                f"SM120 full-tile warp N shape mismatch: warp_col_tiles={self.warp_col_tiles}, "
+                f"warp_cols={self.warp_cols}, micro_size_n={self.micro_size_n}"
+            )
+        if self.tile_m % 32 != 0 or self.tile_n % 32 != 0:
+            raise ValueError(
+                f"SM120 compact shared scale tiles require block M/N multiples of 32, got tile_m={self.tile_m}, tile_n={self.tile_n}"
+            )
+        if self.kblocks <= 0 or self.micro_size_k <= 0 or self.tile_k != self.kblocks * self.micro_size_k:
+            raise ValueError(
+                f"SM120 full-tile K shape mismatch: tile_k={self.tile_k}, kblocks={self.kblocks}, micro_size_k={self.micro_size_k}"
             )
         if self.sf_layout != "blockscaled_chunk_kmajor":
             raise ValueError("SM120 full-tile package contract requires sf_layout='blockscaled_chunk_kmajor'")
-        if (self.scale_package_words_sfa, self.scale_package_words_sfb) != (2, 2):
+        expected_sfa_words = (self.warp_rows + 1) // 2
+        expected_sfb_words = (self.warp_cols + 1) // 2
+        if (self.sfa_words, self.sfb_words) != (expected_sfa_words, expected_sfb_words):
             raise ValueError(
-                "SM120 compact scale TV package requires 2 SFA and 2 SFB "
-                f"words, got {self.scale_package_words_sfa}, {self.scale_package_words_sfb}"
+                "SM120 compact scale package word count mismatch: expected "
+                f"{expected_sfa_words} SFA and {expected_sfb_words} SFB words, got "
+                f"{self.sfa_words}, {self.sfb_words}"
             )
-        if self.issue_count_per_warp != 32 or self.issue_count_per_warpgroup != 128:
+        expected_issues_per_warp = self.warp_rows * self.warp_cols * 2
+        expected_issues_per_warpgroup = expected_issues_per_warp * self.block_row_warps * self.block_col_warps
+        if self.warp_issues != expected_issues_per_warp or self.warpgroup_issues != expected_issues_per_warpgroup:
             raise ValueError(
-                "SM120 full-tile package contract expects 32 OMMA.SF issues per "
-                f"warp and 128 per warpgroup, got {self.issue_count_per_warp}, "
-                f"{self.issue_count_per_warpgroup}"
+                "SM120 full-tile issue count mismatch: expected "
+                f"{expected_issues_per_warp} per warp and {expected_issues_per_warpgroup} per warpgroup, got "
+                f"{self.warp_issues}, {self.warpgroup_issues}"
             )
 
-    @staticmethod
-    def blockscaled_chunk_kmajor_sf_word(row: int, kblock: int) -> int:
+    def _scale_word_offset(self, row: int, kblock: int, tile_rows: int) -> int:
         """Return the uint32 scale-word offset for the source/smem scale layout."""
 
-        if row < 0 or row >= 128:
-            raise ValueError(f"scale row must be in [0, 128), got {row}")
-        if kblock < 0 or kblock >= 4:
-            raise ValueError(f"kblock must be in [0, 4), got {kblock}")
-        return kblock * 128 + (row & 31) * 4 + (row >> 5)
+        if tile_rows <= 0 or tile_rows % 32 != 0:
+            raise ValueError(f"scale tile rows must be a positive multiple of 32, got {tile_rows}")
+        if row < 0 or row >= tile_rows:
+            raise ValueError(f"scale row must be in [0, {tile_rows}), got {row}")
+        if kblock < 0 or kblock >= self.kblocks:
+            raise ValueError(f"kblock must be in [0, {self.kblocks}), got {kblock}")
+        # K-major storage groups rows as [row % 32][row // 32] within each K atom.
+        row_groups = tile_rows // 32
+        return kblock * tile_rows + (row & 31) * row_groups + (row >> 5)
 
     def compact_selector_scale_rows(self, lane: int, warp_m: int, warp_n: int) -> tuple[tuple[int, int], tuple[int, int]]:
         """Return SFA/SFB semantic rows loaded by the current compact TV package."""
@@ -178,17 +201,20 @@ class SM120BlockScaledFullTilePackageContract:
         sfa_row = 8 * (lane & 1) + (lane >> 2)
         sfb_col = lane >> 2
         a_owner_in_pair = qlane >> 1
-        scale_m0 = warp_m * 64 + a_owner_in_pair * 16 + sfa_row
-        scale_n0 = warp_n * 64 + qlane * 8 + sfb_col
-        return (scale_m0, scale_m0 + 32), (scale_n0, scale_n0 + 32)
+        scale_m0 = warp_m * self.warp_row_tiles + a_owner_in_pair * 16 + sfa_row
+        scale_n0 = warp_n * self.warp_col_tiles + qlane * 8 + sfb_col
+        return (
+            tuple(scale_m0 + g * 32 for g in range(self.sfa_words)),
+            tuple(scale_n0 + g * 32 for g in range(self.sfb_words)),
+        )
 
     def compact_selector_scale_word_offsets(
         self, lane: int, warp_m: int, warp_n: int, kblock: int
     ) -> tuple[tuple[int, int], tuple[int, int]]:
         sfa_rows, sfb_rows = self.compact_selector_scale_rows(lane, warp_m, warp_n)
         return (
-            tuple(self.blockscaled_chunk_kmajor_sf_word(row, kblock) for row in sfa_rows),
-            tuple(self.blockscaled_chunk_kmajor_sf_word(row, kblock) for row in sfb_rows),
+            tuple(self._scale_word_offset(row, kblock, self.tile_m) for row in sfa_rows),
+            tuple(self._scale_word_offset(row, kblock, self.tile_n) for row in sfb_rows),
         )
 
     @staticmethod
@@ -219,16 +245,14 @@ class SM120BlockScaledFullTilePackageContract:
         share the same register package id in the current implementation.
         """
 
-        return (
-            ("copy", 0, 0),
-            ("copy", 1, 1),
-            ("gemm", 0, 0),
-            ("copy", 0, 2),
-            ("gemm", 1, 1),
-            ("copy", 1, 3),
-            ("gemm", 0, 2),
-            ("gemm", 1, 3),
-        )
+        lifecycle = [("copy", kblock, kblock) for kblock in range(min(self.kblocks, 2))]
+        for kblock in range(self.kblocks):
+            package_id = kblock & 1
+            lifecycle.append(("gemm", package_id, kblock))
+            next_kblock = kblock + 2
+            if next_kblock < self.kblocks:
+                lifecycle.append(("copy", package_id, next_kblock))
+        return tuple(lifecycle)
 
     def omma_sf_issue_schedule_per_warp(self) -> tuple[tuple[int, int, int, int, int, int, int], ...]:
         """Return the current per-warp OMMA.SF issue schedule.
@@ -240,11 +264,11 @@ class SM120BlockScaledFullTilePackageContract:
         """
 
         issues = []
-        for mma_i in range(4):
-            sfa_word = 0 if mma_i < 2 else 1
+        for mma_i in range(self.warp_rows):
+            sfa_word = mma_i // 2
             scale_a_thread_id = mma_i & 1
-            for mma_j in range(4):
-                sfb_word = 0 if mma_j < 2 else 1
+            for mma_j in range(self.warp_cols):
+                sfb_word = mma_j // 2
                 for n8_half in range(2):
                     scale_b_thread_id = (mma_j & 1) * 2 + n8_half
                     issues.append(
@@ -1704,6 +1728,18 @@ class TensorCoreIntrinEmitter(_TensorCoreIntrinEmitterBase):
         _k_start = tvm.tirx.const(k_start, "int32") if isinstance(k_start, int) else k_start
         return (_k_start + self.micro_size_k * ki) // packed_word_k
 
+    @staticmethod
+    def _kmajor_scale_word(idx: PrimExpr, word_k: PrimExpr):
+        """Return the flattened uint32 offset for one packed scale word."""
+
+        return TensorCoreIntrinEmitter._tile_kmajor_scale_word(idx, word_k, 128)
+
+    @staticmethod
+    def _tile_kmajor_scale_word(idx: PrimExpr, word_k: PrimExpr, tile_rows: int):
+        """Return a tile-local compact K-major scale-word offset."""
+
+        return word_k * tile_rows + (idx % 32) * (tile_rows // 32) + idx // 32
+
     def mma(
         self,
         A_local_buf,
@@ -1754,9 +1790,6 @@ class TensorCoreIntrinEmitter(_TensorCoreIntrinEmitterBase):
         if sf_layout not in ("rowmajor", "blockscaled_chunk_kmajor"):
             raise ValueError(f"Unsupported SM120 scale layout: {sf_layout}")
 
-        def _cutlass_sf_word(idx, word_k):
-            return T.call_pure_extern("int32", "tl::detail::sm120_blockscaled_chunk_kmajor_sf_word", idx, word_k)
-
         @T.macro
         def _warp_mma_block_scale(A_local_buf, B_local_buf, C_local_buf, SFA_data, SFB_data, thread_binding):
             tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
@@ -1766,8 +1799,8 @@ class TensorCoreIntrinEmitter(_TensorCoreIntrinEmitterBase):
                 scale_m = warp_m * warp_row_tiles + i * micro_size_x + sfa_row
                 scale_n = warp_n * warp_col_tiles + j * micro_size_y + sfb_col
                 if sf_layout == "blockscaled_chunk_kmajor":
-                    scale_a_word = _cutlass_sf_word(scale_m, scale_a_word_k)
-                    scale_b_word = _cutlass_sf_word(scale_n, scale_b_word_k)
+                    scale_a_word = self._kmajor_scale_word(scale_m, scale_a_word_k)
+                    scale_b_word = self._kmajor_scale_word(scale_n, scale_b_word_k)
                     scale_a_ptr = T.access_ptr(
                         SFA_data[tuple(SFA_other) + (SFA_base_m + scale_a_word // 4, SFA_base_k + scale_a_word % 4)],
                         "r",
@@ -1807,7 +1840,7 @@ class TensorCoreIntrinEmitter(_TensorCoreIntrinEmitterBase):
                 if replicate_b:
                     if sf_layout == "blockscaled_chunk_kmajor":
                         scale_b_rep_n = scale_n + 8
-                        scale_b_rep_word = _cutlass_sf_word(scale_b_rep_n, scale_b_word_k)
+                        scale_b_rep_word = self._kmajor_scale_word(scale_b_rep_n, scale_b_word_k)
                         scale_b_rep_ptr = T.access_ptr(
                             SFB_data[tuple(SFB_other) + (SFB_base_n + scale_b_rep_word // 4, SFB_base_k + scale_b_rep_word % 4)],
                             "r",
@@ -1870,9 +1903,6 @@ class TensorCoreIntrinEmitter(_TensorCoreIntrinEmitterBase):
         if sf_layout not in ("rowmajor", "blockscaled_chunk_kmajor"):
             raise ValueError(f"Unsupported SM120 scale layout: {sf_layout}")
 
-        def _cutlass_sf_word(idx, word_k):
-            return T.call_pure_extern("int32", "tl::detail::sm120_blockscaled_chunk_kmajor_sf_word", idx, word_k)
-
         @T.macro
         def _warp_ldscale_block_scale(SFA_local_buf, SFB_local_buf, SFB_rep_local_buf, SFA_data, SFB_data, thread_binding):
             tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
@@ -1881,21 +1911,21 @@ class TensorCoreIntrinEmitter(_TensorCoreIntrinEmitterBase):
             for i in T.unroll(warp_rows):
                 scale_m = warp_m * warp_row_tiles + i * micro_size_x + sfa_row
                 if sf_layout == "blockscaled_chunk_kmajor":
-                    scale_a_word = _cutlass_sf_word(scale_m, scale_a_word_k)
+                    scale_a_word = self._kmajor_scale_word(scale_m, scale_a_word_k)
                     SFA_local_buf[i] = SFA_data[tuple(SFA_other) + (SFA_base_m + scale_a_word // 4, SFA_base_k + scale_a_word % 4)]
                 else:
                     SFA_local_buf[i] = SFA_data[tuple(SFA_other) + (SFA_base_m + scale_m, SFA_base_k + scale_a_word_k)]
             for j in T.unroll(warp_cols):
                 scale_n = warp_n * warp_col_tiles + j * micro_size_y + sfb_col
                 if sf_layout == "blockscaled_chunk_kmajor":
-                    scale_b_word = _cutlass_sf_word(scale_n, scale_b_word_k)
+                    scale_b_word = self._kmajor_scale_word(scale_n, scale_b_word_k)
                     SFB_local_buf[j] = SFB_data[tuple(SFB_other) + (SFB_base_n + scale_b_word // 4, SFB_base_k + scale_b_word % 4)]
                 else:
                     SFB_local_buf[j] = SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n, SFB_base_k + scale_b_word_k)]
                 if replicate_b:
                     if sf_layout == "blockscaled_chunk_kmajor":
                         scale_b_rep_n = scale_n + 8
-                        scale_b_rep_word = _cutlass_sf_word(scale_b_rep_n, scale_b_word_k)
+                        scale_b_rep_word = self._kmajor_scale_word(scale_b_rep_n, scale_b_word_k)
                         SFB_rep_local_buf[j] = SFB_data[
                             tuple(SFB_other) + (SFB_base_n + scale_b_rep_word // 4, SFB_base_k + scale_b_rep_word % 4)
                         ]
@@ -1943,7 +1973,7 @@ class TensorCoreIntrinEmitter(_TensorCoreIntrinEmitterBase):
             sf_layout=sf_layout,
         )
 
-    def mma_backend_kblock_fulltile_package_pingpong(
+    def mma_blockscaled_fulltile(
         self,
         A_shared_buf: Buffer | BufferRegion,
         B_shared_buf: Buffer | BufferRegion,
@@ -1952,87 +1982,140 @@ class TensorCoreIntrinEmitter(_TensorCoreIntrinEmitterBase):
         SFB_buf: Buffer | BufferRegion,
         sf_layout: str = "rowmajor",
     ):
-        """Emit one backend-owned SM120 package lifecycle helper call.
-
-        The CUDA helper receives full A/B/SFA/SFB shared K-stage bases and owns
-        the copy_kblock_package(next) -> gemm_kblock_package(current) schedule.
-        """
-        if int(self.warp_rows) != 4 or int(self.warp_cols) != 4:
-            raise ValueError("sm120 package pingpong helper requires warp_rows=4 and warp_cols=4")
+        """Emit an SM120 full-tile block-scaled MMA register micro-pipeline."""
         if self.n_dim != 16:
-            raise ValueError("sm120 package pingpong helper requires replicated B n_dim=16")
+            raise ValueError("sm120 full-tile MMA requires replicated B n_dim=16")
         if not self.b_transposed:
-            raise ValueError("sm120 package pingpong helper currently requires transpose_B=True")
+            raise ValueError("sm120 full-tile MMA currently requires transpose_B=True")
         if sf_layout != "blockscaled_chunk_kmajor":
-            raise ValueError("sm120 package pingpong helper currently requires sf_layout='blockscaled_chunk_kmajor'")
-        package_contract = SM120BlockScaledFullTilePackageContract.for_package_pingpong(
+            raise ValueError("sm120 full-tile MMA currently requires sf_layout='blockscaled_chunk_kmajor'")
+        k_blocks = int(self.chunk // self.micro_size_k)
+        tile = SM120BlockScaleTile.from_emitter(
             self,
             sf_layout=sf_layout,
-            kblocks=4,
+            kblocks=k_blocks,
         )
-        assert package_contract.issue_count_per_warpgroup == 128
+
+        warp_rows = self.warp_rows
+        warp_cols = self.warp_cols
+        tile_m = tile.tile_m
+        tile_n = tile.tile_n
+        sfa_words = tile.sfa_words
+        sfb_words = tile.sfb_words
+        local_size_a = self.local_size_a
+        local_size_b = self.local_size_b
+        local_size_out = self.local_size_out
+        a_dtype = self.a_dtype
+        b_dtype = self.b_dtype
+        accum_dtype = self.accum_dtype
+        mma_prefix = self.mma_prefix
+        kind = self.kind
+        scale_vec_size = self.scale_vec_size
+        a_dtype_abbrv = self.a_dtype_abbrv
+        b_dtype_abbrv = self.b_dtype_abbrv
+        stype = self.stype
+        thread_binding = self.get_thread_binding()
 
         A_region = self._legalize_to_buffer_region(A_shared_buf)
-        A_buf = A_region.buffer
-        A_base0 = A_region.region[-2].min
-        A_base1 = A_region.region[-1].min
-        A_other = [r.min for r in A_region.region[:-2]]
-
         B_region = self._legalize_to_buffer_region(B_shared_buf)
-        B_buf = B_region.buffer
-        B_base0 = B_region.region[-2].min
-        B_base1 = B_region.region[-1].min
-        B_other = [r.min for r in B_region.region[:-2]]
 
         SFA_data, SFA_other, SFA_base_m, SFA_base_k = self._scale_region_parts(SFA_buf)
         SFB_data, SFB_other, SFB_base_n, SFB_base_k = self._scale_region_parts(SFB_buf)
 
         @T.macro
-        def _warp_backend_package_pingpong(
-            A_buf,
-            B_buf,
-            C_local_buf,
-            SFA_data,
-            SFB_data,
-        ):
-            a_base = T.access_ptr(
-                A_buf[tuple(A_other) + (A_base0, A_base1)],
-                "r",
-                extent=1,
-            )
-            b_base = T.access_ptr(
-                B_buf[tuple(B_other) + (B_base0, B_base1)],
-                "r",
-                extent=1,
-            )
-            sfa_base = T.access_ptr(
-                SFA_data[tuple(SFA_other) + (SFA_base_m, SFA_base_k)],
-                "r",
-                extent=1,
-            )
-            sfb_base = T.access_ptr(
-                SFB_data[tuple(SFB_other) + (SFB_base_n, SFB_base_k)],
-                "r",
-                extent=1,
-            )
-            T.call_intrin(
-                "handle",
-                tirx.op.Op.get("tl.sm120_mma_blockscaled_fulltile"),
-                C_local_buf.data,
-                0,
-                a_base,
-                b_base,
-                sfa_base,
-                sfb_base,
-            )
+        def _load_kblock(A_local_buf, B_local_buf, SFA_local_buf, SFB_local_buf, k_block):
+            self.ldmatrix_a(A_local_buf, A_region, k_block)
+            self.ldmatrix_b(B_local_buf, B_region, k_block)
 
-        return _warp_backend_package_pingpong(
-            A_buf,
-            B_buf,
-            C_local_buf,
-            SFA_data,
-            SFB_data,
-        )
+            tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
+            qlane = tx % 4
+            sfa_row = self._sfa_row_in_atom(tx)
+            sfb_col = self._sfb_col_in_atom(tx)
+            scale_m0 = warp_m * self.warp_row_tiles + (qlane // 2) * 16 + sfa_row
+            scale_n0 = warp_n * self.warp_col_tiles + qlane * 8 + sfb_col
+            for g in T.unroll(sfa_words):
+                scale_a_word = self._tile_kmajor_scale_word(scale_m0 + g * 32, k_block, tile_m)
+                SFA_local_buf[g] = SFA_data[
+                    tuple(SFA_other) + (SFA_base_m + scale_a_word // k_blocks, SFA_base_k + scale_a_word % k_blocks)
+                ]
+            for g in T.unroll(sfb_words):
+                scale_b_word = self._tile_kmajor_scale_word(scale_n0 + g * 32, k_block, tile_n)
+                SFB_local_buf[g] = SFB_data[
+                    tuple(SFB_other) + (SFB_base_n + scale_b_word // k_blocks, SFB_base_k + scale_b_word % k_blocks)
+                ]
+
+        @T.macro
+        def _mma_kblock(A_local_buf, B_local_buf, SFA_local_buf, SFB_local_buf, C_local_buf):
+            for i in T.unroll(warp_rows):
+                scale_a_ptr = T.access_ptr(SFA_local_buf[i // 2], "r")
+                for j in T.unroll(warp_cols):
+                    scale_b_ptr = T.access_ptr(SFB_local_buf[j // 2], "r")
+                    for n8_half in T.unroll(2):
+                        T.ptx_mma_block_scale(
+                            accum_dtype,
+                            mma_prefix,
+                            "row",
+                            "col",
+                            kind,
+                            scale_vec_size,
+                            a_dtype_abbrv,
+                            b_dtype_abbrv,
+                            stype,
+                            A_local_buf.data,
+                            i * local_size_a,
+                            B_local_buf.data,
+                            j * local_size_b + n8_half * (local_size_b // 2),
+                            C_local_buf.data,
+                            i * warp_cols * local_size_out + j * local_size_out + n8_half * (local_size_out // 2),
+                            scale_a_ptr,
+                            scale_b_ptr,
+                            0,
+                            i % 2,
+                            0,
+                            (j % 2) * 2 + n8_half,
+                        )
+
+        # Ping-pong normally preloads K blocks 0 and 1. A single block needs its
+        # own path to avoid an out-of-range preload and unused register package.
+        if k_blocks == 1:
+
+            @T.macro
+            def _warp_mma_blockscaled_fulltile(C_local_buf):
+                A_local_0 = T.alloc_local((warp_rows * local_size_a,), a_dtype)
+                B_local_0 = T.alloc_local((warp_cols * local_size_b,), b_dtype)
+                SFA_local_0 = T.alloc_local((sfa_words,), "uint32")
+                SFB_local_0 = T.alloc_local((sfb_words,), "uint32")
+
+                _load_kblock(A_local_0, B_local_0, SFA_local_0, SFB_local_0, 0)
+                _mma_kblock(A_local_0, B_local_0, SFA_local_0, SFB_local_0, C_local_buf)
+
+        else:
+
+            @T.macro
+            def _warp_mma_blockscaled_fulltile(C_local_buf):
+                A_local_0 = T.alloc_local((warp_rows * local_size_a,), a_dtype)
+                A_local_1 = T.alloc_local((warp_rows * local_size_a,), a_dtype)
+                B_local_0 = T.alloc_local((warp_cols * local_size_b,), b_dtype)
+                B_local_1 = T.alloc_local((warp_cols * local_size_b,), b_dtype)
+                SFA_local_0 = T.alloc_local((sfa_words,), "uint32")
+                SFA_local_1 = T.alloc_local((sfa_words,), "uint32")
+                SFB_local_0 = T.alloc_local((sfb_words,), "uint32")
+                SFB_local_1 = T.alloc_local((sfb_words,), "uint32")
+
+                _load_kblock(A_local_0, B_local_0, SFA_local_0, SFB_local_0, 0)
+                _load_kblock(A_local_1, B_local_1, SFA_local_1, SFB_local_1, 1)
+                # Refill a package with k+2 only after its current K block has issued.
+                for k_block in T.unroll(k_blocks):
+                    if k_block % 2 == 0:
+                        _mma_kblock(A_local_0, B_local_0, SFA_local_0, SFB_local_0, C_local_buf)
+                        if k_block + 2 < k_blocks:
+                            _load_kblock(A_local_0, B_local_0, SFA_local_0, SFB_local_0, k_block + 2)
+                    else:
+                        _mma_kblock(A_local_1, B_local_1, SFA_local_1, SFB_local_1, C_local_buf)
+                        if k_block + 2 < k_blocks:
+                            _load_kblock(A_local_1, B_local_1, SFA_local_1, SFB_local_1, k_block + 2)
+
+        return _warp_mma_blockscaled_fulltile(C_local_buf)
 
     def mma_full_b_atom_with_scale_fragments(
         self,

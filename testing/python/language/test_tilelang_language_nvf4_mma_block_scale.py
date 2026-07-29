@@ -9,7 +9,7 @@ import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
 from tilelang.cuda.intrinsics.layout.mma_layout import mma_load_a_32x32_to_shared_16x64_layout
-from tilelang.cuda.intrinsics.macro.mma_macro_generator import SM120BlockScaledFullTilePackageContract
+from tilelang.cuda.intrinsics.macro.mma_macro_generator import SM120BlockScaleTile
 from tilelang.intrinsics import TensorCoreIntrinEmitter, get_swizzle_layout
 from examples.dequantize_gemm.quantize.nvfp4 import blockscaled_chunk_kmajor_word_offset
 from tilelang.transform import simplify_prim_func
@@ -45,22 +45,29 @@ def _make_blockscale_emitter(**kwargs):
     )
 
 
-def _make_sm120_fulltile_contract():
+def _make_sm120_fulltile_contract(
+    chunk=256,
+    *,
+    block_row_warps=2,
+    block_col_warps=2,
+    warp_row_tiles=64,
+    warp_col_tiles=64,
+):
     emitter = _make_blockscale_emitter(
         a_dtype=T.float4_e2m1fn,
         b_dtype=T.float4_e2m1fn,
         accum_dtype=T.float32,
         a_transposed=False,
         b_transposed=True,
-        block_row_warps=2,
-        block_col_warps=2,
-        warp_row_tiles=64,
-        warp_col_tiles=64,
-        chunk=256,
+        block_row_warps=block_row_warps,
+        block_col_warps=block_col_warps,
+        warp_row_tiles=warp_row_tiles,
+        warp_col_tiles=warp_col_tiles,
+        chunk=chunk,
         reduce_k=1,
         num_elems_per_byte=2,
     )
-    return SM120BlockScaledFullTilePackageContract.for_package_pingpong(
+    return SM120BlockScaleTile.from_emitter(
         emitter,
         sf_layout="blockscaled_chunk_kmajor",
     )
@@ -445,8 +452,34 @@ def test_sm120_fulltile_package_contract_matches_current_pingpong_path():
     assert (contract.warp_rows, contract.warp_cols) == (4, 4)
     assert (contract.warp_row_tiles, contract.warp_col_tiles) == (64, 64)
     assert (contract.kblocks, contract.micro_size_k) == (4, 64)
-    assert (contract.scale_package_words_sfa, contract.scale_package_words_sfb) == (2, 2)
-    assert (contract.issue_count_per_warp, contract.issue_count_per_warpgroup) == (32, 128)
+    assert (contract.sfa_words, contract.sfb_words) == (2, 2)
+    assert (contract.warp_issues, contract.warpgroup_issues) == (32, 128)
+
+
+def test_sm120_fulltile_package_contract_supports_k128_path():
+    contract = _make_sm120_fulltile_contract(chunk=128)
+
+    assert (contract.tile_m, contract.tile_n, contract.tile_k) == (128, 128, 128)
+    assert (contract.kblocks, contract.micro_size_k) == (2, 64)
+    assert contract.package_pingpong_lifecycle() == (
+        ("copy", 0, 0),
+        ("copy", 1, 1),
+        ("gemm", 0, 0),
+        ("gemm", 1, 1),
+    )
+
+
+def test_sm120_fulltile_package_contract_derives_arbitrary_reasonable_block_shape():
+    contract = _make_sm120_fulltile_contract(
+        chunk=192,
+        warp_row_tiles=32,
+        warp_col_tiles=96,
+    )
+
+    assert (contract.tile_m, contract.tile_n, contract.tile_k) == (64, 192, 192)
+    assert (contract.warp_rows, contract.warp_cols, contract.kblocks) == (2, 6, 3)
+    assert (contract.sfa_words, contract.sfb_words) == (1, 3)
+    assert (contract.warp_issues, contract.warpgroup_issues) == (24, 96)
 
 
 def test_sm120_fulltile_package_contract_describes_compact_selector_copy_view():
@@ -490,8 +523,9 @@ def test_sm120_fulltile_package_contract_describes_pingpong_lifecycle():
     )
 
 
-def test_sm120_fulltile_package_contract_pingpong_lifecycle_is_data_ready():
-    contract = _make_sm120_fulltile_contract()
+@pytest.mark.parametrize("kblocks", [1, 2, 3, 4, 5])
+def test_sm120_fulltile_package_contract_pingpong_lifecycle_is_data_ready(kblocks):
+    contract = _make_sm120_fulltile_contract(chunk=kblocks * 64)
 
     package_kblock = {}
     gemmed_kblocks = []
@@ -504,14 +538,14 @@ def test_sm120_fulltile_package_contract_pingpong_lifecycle_is_data_ready():
         else:
             raise AssertionError(f"unexpected package lifecycle op: {op}")
 
-    assert gemmed_kblocks == [0, 1, 2, 3]
+    assert gemmed_kblocks == list(range(kblocks))
 
 
 def test_sm120_fulltile_package_contract_describes_omma_sf_issue_schedule():
     contract = _make_sm120_fulltile_contract()
     schedule = contract.omma_sf_issue_schedule_per_warp()
 
-    assert len(schedule) == contract.issue_count_per_warp
+    assert len(schedule) == contract.warp_issues
     assert schedule[0] == (0, 0, 0, 0, 0, 0, 0)
     assert schedule[1] == (0, 0, 1, 0, 0, 0, 1)
     assert schedule[2] == (0, 1, 0, 0, 0, 0, 2)
@@ -533,7 +567,7 @@ def test_sm120_fulltile_package_contract_describes_omma_sf_issue_schedule():
     assert sum(1 for issue in schedule if issue[4] == 1) == 16
 
 
-def test_sm120_fulltile_package_contract_rejects_shape_drift():
+def test_sm120_fulltile_package_contract_rejects_odd_warp_atom_grid():
     emitter = _make_blockscale_emitter(
         a_dtype=T.float4_e2m1fn,
         b_dtype=T.float4_e2m1fn,
@@ -541,16 +575,16 @@ def test_sm120_fulltile_package_contract_rejects_shape_drift():
         a_transposed=False,
         b_transposed=True,
         block_row_warps=2,
-        block_col_warps=4,
-        warp_row_tiles=64,
+        block_col_warps=2,
+        warp_row_tiles=48,
         warp_col_tiles=64,
         chunk=256,
         reduce_k=1,
         num_elems_per_byte=2,
     )
 
-    with pytest.raises(ValueError, match="128x128x256"):
-        SM120BlockScaledFullTilePackageContract.for_package_pingpong(
+    with pytest.raises(ValueError, match="positive even MMA atom grid"):
+        SM120BlockScaleTile.from_emitter(
             emitter,
             sf_layout="blockscaled_chunk_kmajor",
         )
@@ -602,14 +636,23 @@ def test_nvf4_mma_block_scale_rejects_legacy_cutlass_128x4_layout_alias():
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_eq(12, 0)
-def test_nvf4_mma_block_scale_package_pingpong_contract_lowers_fulltile():
+@pytest.mark.parametrize(
+    "M, N, K, warp_row_tiles, warp_col_tiles",
+    [
+        (128, 128, 64, 64, 64),
+        (128, 128, 128, 64, 64),
+        (64, 192, 192, 32, 96),
+        (128, 128, 256, 64, 64),
+    ],
+)
+def test_nvf4_mma_block_scale_fulltile_is_frontend_lowered(M, N, K, warp_row_tiles, warp_col_tiles):
     kernel = tilelang.compile(
         _make_nvf4_matmul_codegen_kernel(
-            128,
-            128,
-            256,
-            warp_row_tiles=64,
-            warp_col_tiles=64,
+            M,
+            N,
+            K,
+            warp_row_tiles=warp_row_tiles,
+            warp_col_tiles=warp_col_tiles,
             sf_layout="blockscaled_chunk_kmajor",
         ),
         target="cuda",
@@ -617,7 +660,9 @@ def test_nvf4_mma_block_scale_package_pingpong_contract_lowers_fulltile():
     )
 
     src = kernel.get_kernel_source()
-    assert "sm120_mma_blockscaled_fulltile" in src
+    assert "sm120_mma_blockscaled_fulltile" not in src
+    assert "tl::ptx_ldmatrix_x4" in src
+    assert "tl::sm120_mma_sync_blockscaled<" in src
 
 
 @tilelang.testing.requires_cuda

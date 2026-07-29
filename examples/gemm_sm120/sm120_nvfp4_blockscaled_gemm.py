@@ -80,7 +80,8 @@ def sm120_nvfp4_blockscaled_gemm(
     assert K % block_K == 0
     assert block_M == 128
     assert block_N == 128
-    assert block_K == 256
+    assert block_K > 0 and block_K % 64 == 0
+    assert K % 256 == 0
     assert num_stages >= 2
 
     in_dtype = T.float4_e2m1fn
@@ -96,7 +97,9 @@ def sm120_nvfp4_blockscaled_gemm(
     # honest tensor shape is "tile rows": [n_mn_blocks * n_k_blocks * block_MN,
     # words_per_kblock]. Each tile is then a plain rectangular slice and
     # staging it is an ordinary T.copy. The host obtains this view zero-copy
-    # via swizzle_blockscaled_chunk_kmajor_scale_words(...).reshape(-1, 4).
+    # via swizzle_blockscaled_chunk_kmajor_scale_words(...).reshape(
+    #     -1, sf_words_per_block_k
+    # ).
     @T.prim_func
     def main(
         A: T.Tensor((M, K), in_dtype),
@@ -261,8 +264,9 @@ def run_tilelang(args: argparse.Namespace) -> tuple[float, float]:
     SFB_semantic = _make_binary_scale_words(args.n, args.k, seed=args.seed + 200)
 
     # Zero-copy tile-rows view of the packed layout (see the kernel docstring).
-    SFA = swizzle_blockscaled_chunk_kmajor_scale_words(SFA_semantic).reshape(-1, 4)
-    SFB = swizzle_blockscaled_chunk_kmajor_scale_words(SFB_semantic).reshape(-1, 4)
+    sf_words_per_block_k = args.block_k // 64
+    SFA = swizzle_blockscaled_chunk_kmajor_scale_words(SFA_semantic).reshape(-1, sf_words_per_block_k)
+    SFB = swizzle_blockscaled_chunk_kmajor_scale_words(SFB_semantic).reshape(-1, sf_words_per_block_k)
     C = torch.empty((args.m, args.n), device="cuda", dtype=out_torch_dtype)
 
     kernel(A, B, SFA, SFB, C)

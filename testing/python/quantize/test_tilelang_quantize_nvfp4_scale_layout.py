@@ -792,39 +792,20 @@ def test_compact_package_issue_table_matches_cpp_macro_issue_order():
     ]
 
 
-def test_cpp_package_macro_keeps_compact_selector_issue_order():
-    header = Path(__file__).resolve().parents[3] / "src/tl_templates/cuda/instruction/mma_block_scale.h"
-    source = header.read_text()
-    row_macro = source[source.index("#define TL_SM120_PKG_MMA_ROW") : source.index("  TL_SM120_PKG_MMA_ROW(0")]
+def test_frontend_package_macro_keeps_compact_selector_issue_order():
+    macro = Path(__file__).resolve().parents[3] / "tilelang/cuda/intrinsics/macro/mma_macro_generator.py"
+    source = macro.read_text()
+    issue_loop = source[source.index("        def _gemm_kblock_package") : source.index("        def _warp_mma_blockscaled_fulltile")]
 
-    position = 0
-    for mma_j, half, sb_reg, sb_tid in [
-        (0, 0, "scale_pkg.sb0", 0),
-        (0, 1, "scale_pkg.sb0", 1),
-        (1, 0, "scale_pkg.sb0", 2),
-        (1, 1, "scale_pkg.sb0", 3),
-        (2, 0, "scale_pkg.sb1", 0),
-        (2, 1, "scale_pkg.sb1", 1),
-        (3, 0, "scale_pkg.sb1", 2),
-        (3, 1, "scale_pkg.sb1", 3),
-    ]:
-        call = f"TL_SM120_PKG_MMA_N8(I, {mma_j}, {half},"
-        position = row_macro.index(call, position)
-        selector = f"{sb_reg}, SA_TID, {sb_tid});"
-        assert selector in row_macro[position:]
-
-    row_calls = source[source.index("  TL_SM120_PKG_MMA_ROW(0") : source.index("#undef TL_SM120_PKG_MMA_ROW")]
-    position = 0
-    for mma_i, sa_reg, sa_tid in [
-        (0, "scale_pkg.sa0", 0),
-        (1, "scale_pkg.sa0", 1),
-        (2, "scale_pkg.sa1", 0),
-        (3, "scale_pkg.sa1", 1),
-    ]:
-        call = f"TL_SM120_PKG_MMA_ROW({mma_i},"
-        position = row_calls.index(call, position)
-        assert sa_reg in row_calls[position:]
-        assert f"{sa_tid});" in row_calls[position:]
+    i_pos = issue_loop.index("for i in T.unroll(warp_rows)")
+    j_pos = issue_loop.index("for j in T.unroll(warp_cols)")
+    half_pos = issue_loop.index("for n8_half in T.unroll(2)")
+    mma_pos = issue_loop.index("T.ptx_mma_block_scale(")
+    assert i_pos < j_pos < half_pos < mma_pos
+    assert "SFA_local_buf[i // 2]" in issue_loop
+    assert "SFB_local_buf[j // 2]" in issue_loop
+    assert "i % 2," in issue_loop
+    assert "(j % 2) * 2 + n8_half," in issue_loop
 
 
 def test_compact_package_issue_table_matches_effective_row_helpers():
@@ -871,30 +852,18 @@ def test_compact_package_copy_view_contract_maps_issue_rows_to_kmajor_words():
     assert [issue["sfa_word_offset"] for issue in issues[0::8]] == [0, 64, 1, 65]
 
 
-def test_sm120_cuda_helper_keeps_scale_tv_package_boundary():
+def test_sm120_cuda_header_only_keeps_the_atomic_mma_wrapper():
     header = Path(__file__).resolve().parents[3] / "src/tl_templates/cuda/instruction/mma_block_scale.h"
     source = header.read_text()
 
     assert "#if defined(CUTE_ARCH_MXF4NVF4_4X_UE4M3_MMA_ENABLED)" in source
     assert "defined(CUTLASS_ARCH_MMA_SM120A_ENABLED)" in source
     assert "tl::sm120_mma_sync_blockscaled requires sm_120a and CUDA 12.8" in source
-    assert "struct SM120ScaleTVPackage" in source
-    assert "template <class ScalePkg>" in source
-    assert "sm120_load_scale_tv_package" in source
-    assert "sm120_copy_scale_tv_package(SM120ScaleTVPackage &pkg," in source
-    assert "sm120_gemm_fulltile_ab_owner_wide_package(" in source
-    assert "const detail::SM120ScaleTVPackage &scale_pkg" in source
-    assert (
-        "uint32_t sa0, sa1;"
-        not in source[source.index("struct SM120FulltileABOwnerWidePackage") : source.index("sm120_copy_fulltile_ab_owner_wide_package")]
-    )
-    assert "detail::SM120ScaleTVPackage scale_pkg0;" in source
-    assert "detail::SM120ScaleTVPackage scale_pkg1;" in source
-    assert source.index("detail::sm120_copy_scale_tv_package(scale_pkg0") < source.index(
-        "sm120_gemm_fulltile_ab_owner_wide_package(c, pkg0, scale_pkg0)"
-    )
-    assert "pkg.sa0 =" in source
-    assert "pkg.sb1 =" in source
+    assert "sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3_regs" in source
+    assert "sm120_mma_sync_blockscaled" in source
+    assert "SM120ScaleTVPackage" not in source
+    assert "SM120FulltileABOwnerWidePackage" not in source
+    assert "sm120_mma_blockscaled_fulltile" not in source
 
 
 def test_blockscaled_chunk_kmajor_scale_packer_rejects_invalid_shapes():

@@ -26,7 +26,6 @@ from examples.dequantize_gemm.quantize import (
     unswizzle_blockscaled_chunk_kmajor_scale_words,
 )
 from examples.dequantize_gemm.quantize.nvfp4 import (
-    blockscaled_chunk_kmajor_tile_source_coords,
     blockscaled_chunk_kmajor_word_offset,
     decode_ue4m3_scale_bytes,
 )
@@ -86,21 +85,16 @@ def tilelang_nvfp4_blockscaled_gemm(
     assert M % block_M == 0
     assert N % block_N == 0
     assert K % block_K == 0
-    assert block_M % 2 == 0
+    assert block_M % 32 == 0
+    assert block_N % 32 == 0
     assert block_K % 64 == 0
+    assert K % 256 == 0
     assert num_stages >= 2
     in_dtype = T.float4_e2m1fn
     sf_layout = "blockscaled_chunk_kmajor"
     accum_dtype = T.float32
     sf_granularity_k = 16
     sf_words_per_block_k = block_K // 64
-
-    if sf_words_per_block_k < 4:
-        raise ValueError(
-            "The SM120 NVFP4 optimized path requires block_K >= 256 (the packed-scale MMA contract consumes four K64 scale words per tile)"
-        )
-    if block_N != 128:
-        raise ValueError("The SM120 NVFP4 optimized path requires block_N=128")
 
     sm_num = driver.get_num_sms()
     n_blocks = T.ceildiv(N, block_N)
@@ -112,21 +106,27 @@ def tilelang_nvfp4_blockscaled_gemm(
 
     @T.macro
     def copy_blockscaled_chunk_kmajor_scale_tile(SF, SF_shared, tile_row, block_rows, ko, stage, tx):
-        # Producer-warp-group staging: 128 producer lanes stride the tile,
-        # with the layout addressing shared via
-        # examples.dequantize_gemm.quantize.nvfp4.blockscaled_chunk_kmajor_tile_source_coords.
+        # Producer-warp-group staging: gather an arbitrary compute tile from the
+        # canonical 128-row source layout into a tile-local compact K-major view.
         scale_tile_words = block_rows * sf_words_per_block_k
         scale_lane = tx - 256
         for scale_iter in T.serial((scale_tile_words + 127) // 128):
             scale_flat = scale_iter * 128 + scale_lane
             if scale_flat < scale_tile_words:
-                row, col = blockscaled_chunk_kmajor_tile_source_coords(
-                    int(SF.shape[1]), block_rows, sf_words_per_block_k, tile_row, ko, scale_flat
-                )
+                logical_row = scale_flat // sf_words_per_block_k
+                local_kword = scale_flat % sf_words_per_block_k
+                global_row = tile_row * block_rows + logical_row
+                global_kword = ko * sf_words_per_block_k + local_kword
+                scale_cols = int(SF.shape[1])
+                source_flat = (global_row // 128) * 128 * scale_cols + global_kword * 128 + (global_row % 32) * 4 + (global_row % 128) // 32
+                row = source_flat // scale_cols
+                col = source_flat % scale_cols
+                row_groups = block_rows // 32
+                shared_flat = local_kword * block_rows + (logical_row % 32) * row_groups + logical_row // 32
                 SF_shared[
                     stage,
-                    scale_flat // sf_words_per_block_k,
-                    scale_flat % sf_words_per_block_k,
+                    shared_flat // sf_words_per_block_k,
+                    shared_flat % sf_words_per_block_k,
                 ] = SF[row, col]
 
     @T.prim_func
@@ -535,8 +535,11 @@ def run_tilelang(args: argparse.Namespace) -> tuple[float, float]:
         kernel.export_sass(str(sass_path))
         kernel.compile_flags = saved_compile_flags
         print(f"TileLang SASS: {sass_path}")
-    if "sm120_mma_blockscaled_fulltile" not in source:
-        raise RuntimeError("TileLang source did not lower to the SM120 full-tile MMA helper")
+    if "sm120_mma_blockscaled_fulltile" in source:
+        raise RuntimeError("TileLang source still uses the removed SM120 full-tile MMA helper")
+    mma_call_sites = source.count("tl::sm120_mma_sync_blockscaled<")
+    if mma_call_sites == 0:
+        raise RuntimeError("TileLang source did not frontend-lower the SM120 full-tile MMA schedule")
 
     if args.input_mode == "ones":
         A = _make_ones_packed_fp4(args.m, args.k)
