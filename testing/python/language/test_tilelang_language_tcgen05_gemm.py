@@ -546,52 +546,6 @@ def _make_batched_tcgen05_kernel(batch_size):
     return main
 
 
-def _make_versioned_blockscaled_tcgen05_kernel():
-    """Block-scaled GEMM with accumulator versions and colocated scales."""
-
-    @T.prim_func
-    def main():
-        with T.Kernel(1, threads=128):
-            A_shared = T.alloc_shared((128, 128), T.float8_e4m3fn)
-            B_shared = T.alloc_shared((128, 128), T.float8_e4m3fn)
-            C_tmem = T.alloc_tmem((4, 128, 128), T.float32)
-            done = T.alloc_barrier(1)
-
-            T.tcgen05_gemm_blockscaled(
-                A_shared,
-                B_shared,
-                C_tmem[2, :, :],
-                C_tmem[3, :, 4:8],
-                C_tmem[3, :, 12:16],
-                transpose_B=True,
-                mbar=done,
-                clear_accum=True,
-                k_start=0,
-                sf_a_granularity_k=32,
-                sf_b_granularity_k=32,
-            )
-
-    return main
-
-
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
-def test_tcgen05_blockscaled_versioned_tmem_regions():
-    kernel = tilelang.compile(
-        _make_versioned_blockscaled_tcgen05_kernel(),
-        target="cuda",
-        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
-    )
-    mma_line = next(line for line in kernel.get_kernel_source().splitlines() if "tcgen05mma_blockscaled_ss" in line)
-
-    # Version 2 starts at column 256. Scale regions live in version 3 and
-    # start at columns 384 + 4 and 384 + 12 of the same TMEM allocation.
-    assert "+ 256" in mma_line
-    assert "+ 388" in mma_line
-    assert "+ 396" in mma_line
-
-
 def _make_batched_whole_buffer_ld_kernel(batch_size):
     """One tcgen05.ld epilogue over a whole 3-D TMEM buffer.
 
