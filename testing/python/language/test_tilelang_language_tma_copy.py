@@ -402,7 +402,6 @@ def fp4_tma_copy_unpacked_smem_store(M=128, N=256, block_M=64, block_N=128):
 
 
 def _fp4_tma_descriptor_init_block(host_source, desc_name):
-
     marker = f"[0].v_ptr) = {desc_name};"
     start = host_source.find(marker)
     assert start >= 0, f"Missing {desc_name} TensorMap initialization"
@@ -518,6 +517,31 @@ def test_copy_prefer_tma_lowers_as_synchronous_tma_load():
     assert "x_to_x_shared_mbarrier[0]" in device_source
     assert "arrive_and_expect_tx" in device_source
     assert ".wait(0)" in device_source
+
+
+def test_device_bound_pointer_keeps_descriptorless_bulk1d():
+    @T.prim_func
+    def main(
+        src_ptrs: T.Tensor((1,), T.ptr),
+        out: T.Tensor((256,), T.float16),
+    ):
+        with T.Kernel(threads=128):
+            src = T.make_tensor(src_ptrs[0], (256,), T.float16)
+            src_shared = T.alloc_shared((256,), T.float16)
+            T.copy(src, src_shared, prefer_instruction="tma")
+            T.copy(src_shared, out, prefer_instruction="sync")
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+    with target:
+        artifact = tilelang.lower(
+            main,
+            target=target,
+            enable_device_compile=False,
+        )
+
+    device_source = str(artifact.kernel_source)
+    assert "tl::tma_load" in device_source
+    assert "CUtensorMap" not in device_source
 
 
 def run_fp4_tma_copy_unpacked_smem_load():

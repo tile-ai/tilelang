@@ -164,6 +164,74 @@ using StmtRewriteMap =
 using BufferLayoutMap = std::unordered_map<Var, std::pair<Buffer, Layout>,
                                            ObjectPtrHash, ObjectPtrEqual>;
 
+class BodyBoundHandleCollector : public StmtExprVisitor {
+public:
+  static VarSet Collect(const Stmt &stmt) {
+    BodyBoundHandleCollector collector;
+    collector(stmt);
+    return std::move(collector.vars_);
+  }
+
+private:
+  void VisitStmt_(const BindNode *op) final {
+    if (op->var->dtype.is_handle()) {
+      vars_.insert(op->var);
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  VarSet vars_;
+};
+
+class DeviceBoundTmaCopyAnnotator : public StmtExprMutator {
+public:
+  static PrimFunc Rewrite(PrimFunc f) {
+    VarSet body_bound_handles = BodyBoundHandleCollector::Collect(f->body);
+    if (body_bound_handles.empty()) {
+      return f;
+    }
+    DeviceBoundTmaCopyAnnotator annotator(body_bound_handles);
+    Stmt body = annotator.VisitStmt(f->body);
+    f.CopyOnWrite()->body = std::move(body);
+    return f;
+  }
+
+private:
+  explicit DeviceBoundTmaCopyAnnotator(const VarSet &body_bound_handles)
+      : body_bound_handles_(body_bound_handles) {}
+
+  PrimExpr VisitExpr_(const CallNode *op) final {
+    Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
+    static const Op &copy_op = Op::Get("tl.tileop.copy");
+    static const Op &async_copy_op = Op::Get("tl.tileop.async_copy");
+    static const Op &tma_copy_op = Op::Get("tl.tileop.tma_copy");
+    if (!call->op.same_as(copy_op) && !call->op.same_as(async_copy_op) &&
+        !call->op.same_as(tma_copy_op)) {
+      return call;
+    }
+
+    TileOperator tile_op = ParseOperator(call);
+    const auto *copy = tile_op.as<CopyNode>();
+    ICHECK(copy != nullptr);
+    bool device_bound_global_base =
+        (IsGlobalBuffer(copy->src) &&
+         body_bound_handles_.count(copy->src->data)) ||
+        (IsGlobalBuffer(copy->dst) &&
+         body_bound_handles_.count(copy->dst->data));
+    if (!device_bound_global_base ||
+        call->annotations.count(attr::kTmaDescriptorBaseIsDeviceBound)) {
+      return call;
+    }
+
+    Map<String, ObjectRef> annotations = call->annotations;
+    annotations.Set(attr::kTmaDescriptorBaseIsDeviceBound,
+                    IntImm(DataType::Int(32), 1));
+    return Call(call->dtype, call->op, call->args, annotations, call->span);
+  }
+
+  const VarSet &body_bound_handles_;
+};
+
 struct LocalAccessSummary {
   BufferSet read_buffers;
   BufferSet write_buffers;
@@ -2855,6 +2923,9 @@ tvm::transform::Pass ProducerConsumerWarpSpecialized() {
     if (!target.defined() || !TargetHasBulkCopy(target.value())) {
       return f;
     }
+    // Preserve pointer provenance on each copy before WS classification so
+    // later lowering can consume it through CopyAnalysis.
+    f = DeviceBoundTmaCopyAnnotator::Rewrite(std::move(f));
     // Only apply MVB + WS if the function is a tiled WS candidate.
     if (!TiledWSCandidate::Check(f->body, target.value())) {
       DLOG(WARNING) << "[WS] skipped: no TMA copies in pipeline loop";
