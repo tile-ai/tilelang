@@ -113,9 +113,9 @@ class GemmTCGEN5(GemmBase):
         if self.is_gemm_ts():
             b_continuity = _shared_layout_continuity(self.B, b_is_k_major, self.K, int(self.B.shape[-1]))
             layouts = {
-                self.A: mma_emitter.make_mma_store_layout(self.A),
+                self.A: mma_emitter.make_mma_store_layout(self.A, operand="A"),
                 self.B: self.infer_shared_layout(self.B, b_continuity)(self.B),
-                self.C: mma_emitter.make_mma_store_layout(self.C),
+                self.C: mma_emitter.make_mma_store_layout(self.C, is_ts=True),
             }
             return layouts
         return {}
@@ -151,9 +151,14 @@ class GemmTCGEN5(GemmBase):
         )
 
         if self.A in layout_map:
-            mma_emitter._assign_a_shared_layout(layout_map[self.A])
+            if self.A.scope() == "shared.tmem":
+                mma_emitter._assign_a_tmem_layout(layout_map[self.A])
+            else:
+                mma_emitter._assign_a_shared_layout(layout_map[self.A])
         if self.B in layout_map:
             mma_emitter._assign_b_shared_layout(layout_map[self.B])
+        if self.C in layout_map:
+            mma_emitter._assign_c_tmem_layout(layout_map[self.C])
 
         if self.is_blockscaled:
             return self._lower_blockscaled(mma_emitter, thread_bounds, thread_index, mbar_phase_expr)
@@ -163,9 +168,11 @@ class GemmTCGEN5(GemmBase):
 
         annotations = getattr(self.gemm_node, "annotations", {})
         use_2cta = bool(annotations.get("use_2cta", 0))
+        if use_2cta and not self.is_tcgen05:
+            raise ValueError("2CTA TCGEN5MMA is only available through the explicit T.tcgen05_gemm(use_2cta=True) path")
         k = int(self.chunk)
         mma_emitter.get_tcgen5_mma_meta(int(self.M), int(self.N), k, disable_2cta=not use_2cta)
-        atom_m, atom_n, atom_k, enable_ws, enable_2cta = mma_emitter.meta
+        enable_2cta = mma_emitter.tcgen05_meta.enable_2cta
 
         if self.A.scope() not in {"shared", "shared.dyn", "shared.tmem"}:
             raise ValueError(f"Unsupported A scope for TCGEN5MMA: {self.A.scope()}")
@@ -177,10 +184,12 @@ class GemmTCGEN5(GemmBase):
             raise ValueError("TCGEN5MMA only accepts wg_wait in {0, -1}")
 
         mbar = self.mbar
-        if mbar is None:
-            raise ValueError("TCGEN5MMA requires a valid mbarrier")
+        if mbar is None and not self.is_tcgen05:
+            raise ValueError("Synchronous TCGEN5MMA requires a valid mbarrier")
 
-        mbarptr = retrieve_ptr(mbar, "rw")
+        # Explicit asynchronous TCGEN5MMA may intentionally omit a completion
+        # event, to allow manual coordination.
+        mbarptr = retrieve_ptr(mbar, "rw") if mbar is not None else None
 
         C_coords = self.C_coords
         if len(C_coords) != 2:
@@ -192,7 +201,7 @@ class GemmTCGEN5(GemmBase):
 
         A_shared = self.ARegion
         B_shared = self.BRegion
-        C_local = self.C
+        C_local = self.CRegion
         clear_accum = self.clear_accum
         mbar_phase = mbar_phase_expr if mbar_phase_expr is not None else 0
 
@@ -245,7 +254,7 @@ class GemmTCGEN5(GemmBase):
 
         A_shared = self.ARegion
         B_shared = self.BRegion
-        C_local = self.C
+        C_local = self.CRegion
         clear_accum = self.clear_accum
         SFA_tmem = self.SFARegion.buffer
         SFB_tmem = self.SFBRegion.buffer
@@ -264,7 +273,7 @@ class GemmTCGEN5(GemmBase):
             raise ValueError("Block-scaled GEMM requires sf_a_granularity_k and sf_b_granularity_k")
         k = int(self.chunk)
         mma_emitter.get_tcgen5_mma_meta(int(self.M), int(self.N), k, disable_2cta=not use_2cta, disable_ws=True)
-        _atom_m, _atom_n, _atom_k, _enable_ws, enable_2cta = (int(x) for x in mma_emitter.meta)
+        enable_2cta = mma_emitter.tcgen05_meta.enable_2cta
 
         analyzer = Analyzer()
         warp_size = 32

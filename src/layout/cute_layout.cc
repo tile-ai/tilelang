@@ -9,6 +9,8 @@
 
 #include "support/check.h"
 #include <algorithm>
+#include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <map>
@@ -80,6 +82,20 @@ Swizzle Swizzle::Recast(int old_bits, int new_bits) const {
   return Swizzle(n->b_bits, n->m_base + (old_log - new_log), n->s_shift);
 }
 
+Swizzle Swizzle::Parse(const ffi::String &text) {
+  std::string s(text);
+  int b_bits, m_base, s_shift;
+  ICHECK_EQ(std::sscanf(s.c_str(), "Sw<%d,%d,%d>", &b_bits, &m_base, &s_shift),
+            3)
+      << "Swizzle text must be 'Sw<b,m,s>', got '" << s << "'";
+  return Swizzle(b_bits, m_base, s_shift);
+}
+
+void Swizzle::Print(std::ostream &os) const {
+  os << "Sw<" << (*this)->b_bits << "," << (*this)->m_base << ","
+     << (*this)->s_shift << ">";
+}
+
 IntTuple::IntTuple(int64_t value) {
   auto node = make_object<IntTupleConstNode>();
   node->value = value;
@@ -108,6 +124,121 @@ IntTuple IntTuple::operator[](int64_t index) const {
   // A scalar leaf has rank 1 and [0] returns itself.
   ICHECK(index == 0) << "Leaf index out of range: " << index << " vs 0";
   return *this;
+}
+
+namespace {
+
+// Recursive-descent parser for the CuTe IntTuple spelling emitted by
+// IntTuple::Print: nested "(a,b,...)" tuples, decimal integer leaves, and
+// scaled bases "v@m@..." with the mode path innermost-first (E<1,0> is
+// spelled 1@0@1), exactly inverting the printer. Whitespace is free.
+class IntTupleParser {
+public:
+  explicit IntTupleParser(const std::string &text) : text_(text) {}
+
+  IntTuple Parse() {
+    IntTuple result = ParseTerm();
+    SkipSpace();
+    ICHECK_EQ(pos_, text_.size()) << "Trailing characters in IntTuple text: '"
+                                  << text_.substr(pos_) << "'";
+    return result;
+  }
+
+  IntTuple ParseTerm() {
+    SkipSpace();
+    IntTuple value;
+    if (Peek() == '(') {
+      ++pos_;
+      Array<IntTuple> fields;
+      SkipSpace();
+      while (Peek() != ')') {
+        fields.push_back(ParseTerm());
+        SkipSpace();
+        if (Peek() == ',') {
+          ++pos_;
+        } else {
+          ICHECK_EQ(Peek(), ')') << "Expected ',' or ')' at position " << pos_
+                                 << " of '" << text_ << "'";
+        }
+        SkipSpace();
+      }
+      ++pos_;
+      value = IntTupleTuple(std::move(fields));
+    } else {
+      value = ParseInt();
+    }
+    // A scaled basis: value@m@... with the path innermost-first.
+    SkipSpace();
+    if (Peek() != '@')
+      return value;
+    std::vector<int64_t> path;
+    while (Peek() == '@') {
+      ++pos_;
+      path.push_back(ParseInt());
+      SkipSpace();
+    }
+    // The printed path is reversed (innermost-first); restore outer-first.
+    return value * E(Array<int64_t>(path.rbegin(), path.rend()));
+  }
+
+private:
+  char Peek() const { return pos_ < text_.size() ? text_[pos_] : '\0'; }
+
+  void SkipSpace() {
+    while (pos_ < text_.size() && std::isspace(text_[pos_]))
+      ++pos_;
+  }
+
+  int64_t ParseInt() {
+    SkipSpace();
+    size_t start = pos_;
+    if (Peek() == '-')
+      ++pos_;
+    while (pos_ < text_.size() && std::isdigit(text_[pos_]))
+      ++pos_;
+    ICHECK_GT(pos_, start + (text_[start] == '-' ? 1 : 0))
+        << "Expected an integer at position " << start << " of '" << text_
+        << "'";
+    return std::stoll(text_.substr(start, pos_ - start));
+  }
+
+  const std::string &text_;
+  size_t pos_{0};
+};
+
+} // namespace
+
+IntTuple IntTuple::Parse(const ffi::String &text) {
+  std::string s(text);
+  return IntTupleParser(s).Parse();
+}
+
+void IntTuple::Print(std::ostream &os) const {
+  if (const auto *c = as<IntTupleConstNode>()) {
+    os << c->value;
+    return;
+  }
+  if (const auto *e = as<IntTuplePrimExprNode>()) {
+    os << e->value;
+    return;
+  }
+  if (const auto *b = as<IntTupleScaledBasisNode>()) {
+    // CuTe scaled-basis spelling value@m@...: the mode path prints
+    // innermost-first (CuTe's E<...> print order), e.g. E<1,0> -> 1@0@1.
+    b->value.Print(os);
+    for (auto it = b->basis.rbegin(); it != b->basis.rend(); ++it)
+      os << "@" << *it;
+    return;
+  }
+  const auto *a = as<IntTupleTupleNode>();
+  ICHECK(a != nullptr) << "IntTuple::Print on an unknown IntTuple kind";
+  os << "(";
+  for (size_t i = 0; i < a->fields.size(); ++i) {
+    if (i > 0)
+      os << ",";
+    a->fields[i].Print(os);
+  }
+  os << ")";
 }
 
 namespace {
@@ -207,6 +338,10 @@ IntTuple CompactColMajor(const IntTuple &shape, IntTuple &acc) {
       out.push_back(CompactColMajor(shape[i], acc));
     return IntTupleTuple(out);
   }
+  // A static size-1 mode takes stride 0 (CuTe compact, stride.hpp:302) and
+  // leaves the running product untouched.
+  if (IsConst(shape) && AsConst(shape) == 1)
+    return IntTuple(int64_t(0));
   IntTuple stride = acc;
   acc = MulLeaf(acc, shape);
   return stride;
@@ -228,6 +363,9 @@ IntTuple CompactRowMajor(const IntTuple &shape, IntTuple &acc) {
       out.Set(i, CompactRowMajor(shape[i], acc));
     return IntTupleTuple(out);
   }
+  // A static size-1 mode takes stride 0 (CuTe compact, stride.hpp:302).
+  if (IsConst(shape) && AsConst(shape) == 1)
+    return IntTuple(int64_t(0));
   IntTuple stride = acc;
   acc = MulLeaf(acc, shape);
   return stride;
@@ -317,6 +455,23 @@ IntTuple operator+(const IntTuple &a, const IntTuple &b) {
 }
 
 IntTuple operator*(const IntTuple &a, const IntTuple &b) {
+  bool ba = IsScaledBasis(a), bb = IsScaledBasis(b);
+  ICHECK(!(ba && bb)) << "Two ScaledBasis leaves cannot multiply";
+  // A ScaledBasis multiplies into its scale (CuTe arithmetic_tuple.hpp
+  // operator*: a * E<Ns...>{v} == E<Ns...>{a * v}) with no special case for
+  // zero -- 0 * E<1> is the basis term 0@1, not the plain additive identity
+  // (only ArithmeticTuple ADDITION has C<0> shortcuts).  The recursion
+  // distributes a tuple peer over its leaves ((2,3) * E<1> == (2@1, 3@1)),
+  // an extension beyond CuTe (which only defines scalar peers).
+  if (ba || bb) {
+    const IntTuple &basis = ba ? a : b;
+    const IntTuple &peer = ba ? b : a;
+    Array<int64_t> path = BasisPath(basis);
+    IntTuple scale = BasisValue(basis);
+    return TransformLeaf(peer, [&](const IntTuple &leaf) -> IntTuple {
+      return IntTuple(IntTupleScaledBasis(MulLeaf(scale, leaf), path));
+    });
+  }
   if (IsTuple(a) || IsTuple(b)) {
     int64_t ra = Rank(a), rb = Rank(b);
     ICHECK_EQ(ra, rb) << "Must have the same rank";
@@ -326,12 +481,6 @@ IntTuple operator*(const IntTuple &a, const IntTuple &b) {
     }
     return IntTupleTuple(std::move(out));
   }
-  bool ba = IsScaledBasis(a), bb = IsScaledBasis(b);
-  ICHECK(!(ba && bb)) << "Two ScaledBasis leaves cannot multiply";
-  if (ba)
-    return IntTupleScaledBasis(MulLeaf(BasisValue(a), b), BasisPath(a));
-  if (bb)
-    return IntTupleScaledBasis(MulLeaf(a, BasisValue(b)), BasisPath(b));
   return MulLeaf(a, b);
 }
 
@@ -399,6 +548,47 @@ bool Congruent(const IntTuple &a, const IntTuple &b) {
     if (!Congruent(a[i], b[i]))
       return false;
   return true;
+}
+
+bool Compatible(const IntTuple &a, const IntTuple &b) {
+  if (IsTuple(a) && IsTuple(b)) {
+    int64_t n = Rank(a);
+    if (Rank(b) != n)
+      return false;
+    for (int64_t i = 0; i < n; ++i) {
+      if (!Compatible(a[i], b[i]))
+        return false;
+    }
+    return true;
+  }
+  if (IsTuple(a))
+    return false;
+
+  // Shapes have integral leaves.  A ScaledBasis is meaningful in a stride,
+  // but it is not a shape terminal and cannot participate in compatibility.
+  if ((!IsConst(a) && !IsPrimExpr(a)) ||
+      FoldLeaves(b, false, [](bool invalid, const IntTuple &leaf) {
+        return invalid || (!IsConst(leaf) && !IsPrimExpr(leaf));
+      })) {
+    return false;
+  }
+
+  IntTuple b_size = Product(b);
+  if (IsConst(a) && IsConst(b_size))
+    return AsConst(a) == AsConst(b_size);
+
+  // CuTe compares integral terminals by value, not by expression identity.
+  // Use the dynamic terminal's dtype for a constant peer and let Analyzer
+  // prove algebraically equivalent expressions (for example n + n == 2*n).
+  DataType dtype =
+      IsPrimExpr(a) ? AsPrimExpr(a)->dtype : AsPrimExpr(b_size)->dtype;
+  if (IsPrimExpr(a) && IsPrimExpr(b_size) &&
+      AsPrimExpr(a)->dtype != AsPrimExpr(b_size)->dtype) {
+    return false;
+  }
+  arith::Analyzer analyzer;
+  return analyzer.CanProveEqual(AsConstOrPrimExpr(a, dtype),
+                                AsConstOrPrimExpr(b_size, dtype));
 }
 
 Layout::Layout(Array<int64_t> shape, Array<int64_t> stride) {
@@ -494,8 +684,9 @@ IntTuple Crd2Idx(const IntTuple &coord, const IntTuple &shape,
     }
     return acc;
   }
-  // Scalar coord, scalar shape, scalar stride: c * d (operator* keeps a
-  // ScaledBasis stride's basis, yielding a coordinate term).
+  // Scalar coord, scalar shape, scalar stride: c * d. operator* keeps a
+  // zero product on its basis (0@i, like CuTe), which is what pads the
+  // coordinate sum to full rank: E<0>{c} + E<1>{0} == (c, 0).
   return coord * stride;
 }
 
@@ -636,6 +827,50 @@ Layout RightInverse(const Layout &layout) {
   if (out_sh.empty())
     return Coalesce(Layout(Array<int64_t>{1}, Array<int64_t>{0}));
   return Coalesce(Layout(out_sh, out_st));
+}
+
+Layout LeftInverse(const Layout &layout) {
+  // CuTe left_inverse (layout.hpp:1324): coalesce, sort the modes by stride,
+  // and divide successive strides.  Each emitted mode's shape is the ratio
+  // stride / size-so-far -- a serialized gap folds INTO the mode covering it
+  // -- and its stride is the sorted mode's position in the flattened domain
+  // (the exclusive prefix product), with a leading stride-0 slot absorbing
+  // everything below the smallest stride.  Stride-0 (broadcast) modes are
+  // skipped; the largest-stride mode contributes its full extent last.
+  Layout flat = Coalesce(layout);
+  IntTuple fsh = Flatten(flat->shape), fst = Flatten(flat->stride);
+  int64_t r = Rank(fsh);
+  std::vector<int64_t> order, preprod(r, 1);
+  int64_t acc = 1;
+  for (int64_t i = 0; i < r; ++i) {
+    ICHECK(IsConst(fsh[i]) && IsConst(fst[i]))
+        << "LeftInverse requires static shapes and strides, got " << flat;
+    preprod[i] = acc;
+    acc *= AsConst(fsh[i]);
+    order.push_back(i);
+  }
+  // stable_sort: ties (several stride-0 broadcast modes) keep their mode
+  // order, so the result is a pure function of the input on every platform
+  // (std::sort's tie order is implementation-defined).
+  std::stable_sort(order.begin(), order.end(), [&](int64_t a, int64_t b) {
+    return AsConst(fst[a]) < AsConst(fst[b]);
+  });
+  Array<IntTuple> out_sh;
+  Array<IntTuple> out_st{IntTuple(int64_t(0))};
+  int64_t covered = 1; // product of the emitted ratios == last stride
+  for (int64_t k = 0; k < r; ++k) {
+    int64_t d = AsConst(fst[order[k]]);
+    if (d == 0)
+      continue;
+    ICHECK(d % covered == 0)
+        << "LeftInverse divisibility condition: stride " << d
+        << " is not a multiple of the covered extent " << covered;
+    out_sh.push_back(d / covered);
+    out_st.push_back(preprod[order[k]]);
+    covered = d;
+  }
+  out_sh.push_back(fsh[order[r - 1]]);
+  return Coalesce(Layout(IntTupleTuple(out_sh), IntTupleTuple(out_st)));
 }
 
 namespace {
@@ -877,21 +1112,40 @@ Layout Filter(const Layout &layout) {
   return Coalesce(Layout(out_sh, out_st));
 }
 
+IntTuple Coshape(const Layout &layout) {
+  // CuTe coshape (layout.hpp:649):
+  //   m1_shapes   = transform_leaf(shape,  s => s - 1)
+  //   abs_strides = transform_leaf(stride, abs)
+  //   co_coord    = as_arithmetic_tuple(inner_product(m1_shapes, abs_strides))
+  //   coshape     = transform_leaf(co_coord, c => c + 1)
+  // The inner product's ArithmeticTuple sum is our operator+, so ScaledBasis
+  // strides accumulate per coordinate axis: coshape((128,32):(1@0,1@1)) ==
+  // (128,32); plain strides sum into one scalar extent.
+  IntTuple m1_shapes = TransformLeaf(layout->shape, [](const IntTuple &s) {
+    return IntTuple(AddLeaf(s, IntTuple(int64_t(-1))));
+  });
+  IntTuple abs_strides =
+      TransformLeaf(layout->stride, [](const IntTuple &d) -> IntTuple {
+        if (IsScaledBasis(d)) {
+          IntTuple v = BasisValue(d);
+          IntTuple abs_v = IsConst(v) ? IntTuple(std::abs(AsConst(v)))
+                                      : IntTuple(tvm::abs(AsPrimExpr(v)));
+          return IntTupleScaledBasis(abs_v, BasisPath(d));
+        }
+        return IsConst(d) ? IntTuple(std::abs(AsConst(d)))
+                          : IntTuple(tvm::abs(AsPrimExpr(d)));
+      });
+  IntTuple co_coord =
+      FoldLeaves(m1_shapes * abs_strides, IntTuple(int64_t(0)),
+                 [](IntTuple acc, const IntTuple &term) { return acc + term; });
+  return TransformLeaf(co_coord, [](const IntTuple &c) {
+    return IntTuple(AddLeaf(c, IntTuple(int64_t(1))));
+  });
+}
+
 IntTuple Cosize(const Layout &layout) {
-  // CuTe cosize = 1 + sum_i (shape_i - 1) * |stride_i| over flat scalar modes;
-  // stays symbolic if any shape/stride is dynamic.
-  IntTuple fsh = Flatten(layout->shape), fst = Flatten(layout->stride);
-  IntTuple co = IntTuple(int64_t(1));
-  for (int64_t i = 0, r = Rank(fsh); i < r; ++i) {
-    IntTuple sh = fsh[i], st = fst[i];
-    ICHECK(!IsTuple(sh) && !IsScaledBasis(sh) && !IsTuple(st) &&
-           !IsScaledBasis(st))
-        << "Cosize requires scalar shape/stride, got " << sh << " : " << st;
-    IntTuple abs_st = IsConst(st) ? IntTuple(std::abs(AsConst(st)))
-                                  : IntTuple(tvm::abs(AsPrimExpr(st)));
-    co = AddLeaf(co, MulLeaf(AddLeaf(sh, IntTuple(int64_t(-1))), abs_st));
-  }
-  return co;
+  // CuTe cosize = size(coshape(layout)).
+  return Product(Coshape(layout));
 }
 
 namespace {
@@ -1007,6 +1261,70 @@ Layout LogicalDivide(const Layout &layout, const Layout &tiler) {
   return Composition(layout, MakeLayout({tiler, comp}));
 }
 
+Layout LogicalProduct(const Layout &block, const Layout &tiler) {
+  // CuTe 2-arg logical_product (layout.hpp:1653-1656):
+  //   make_layout(block,
+  //               composition(complement(block,
+  //                                      size(block) * cosize(tiler)),
+  //                           tiler)).
+  // Like the C++ CuTe operation, this is the rank-2 primitive.  Higher-level
+  // zipped/tiled products only rearrange its profile.
+  IntTuple block_size = Size(block);
+  IntTuple tiler_cosize = Cosize(tiler);
+  ICHECK(IsConst(block_size) && IsConst(tiler_cosize))
+      << "LogicalProduct needs a static block size and tiler cosize, got "
+      << block_size << " and " << tiler_cosize;
+  int64_t cotarget = AsConst(block_size) * AsConst(tiler_cosize);
+  Layout rest = Composition(Complement(block, cotarget), tiler);
+  return MakeLayout({block, rest});
+}
+
+Layout TiledProduct(const Layout &block, const Layout &tiler) {
+  // A Layout tiler is atomic to CuTe's zip2_by, so zipped_product is the same
+  // rank-2 result as logical_product.  tiled_product unpacks the actual second
+  // mode, whose profile need only be compatible with the tiler: complement can
+  // split one tiler mode into several residual modes.  Slicing with
+  // repeat<R1>(_) leaves a rank-1 second mode untouched (repeat<1>(_) is _),
+  // so only rank >= 2 unpacks.
+  Layout product = LogicalProduct(block, tiler);
+  Layout rest = product[1];
+  if (Rank(rest) == 1)
+    return product;
+  Array<Layout> modes{product[0]};
+  for (int64_t i = 0, r = Rank(rest); i < r; ++i) {
+    modes.push_back(rest[i]);
+  }
+  return MakeLayout(modes);
+}
+
+Layout BlockedProduct(const Layout &block, const Layout &tiler) {
+  // CuTe blocked_product (layout.hpp:1726-1742):
+  //   R = max(rank(block), rank(tiler))
+  //   zip(get<0>(r), get<1>(r)) with r = logical_product(append<R>(block),
+  //                                                      append<R>(tiler)).
+  // Mode i of the result is ((block_i, rest_i)), so a flat per-mode coordinate
+  // splits into (within-block, block-index) by the ordinary idx2crd rule.
+  Layout scalar(1, 0);
+  int64_t rb = Rank(block), rt = Rank(tiler);
+  int64_t r = std::max(rb, rt);
+  Array<Layout> block_modes, tiler_modes;
+  for (int64_t i = 0; i < r; ++i) {
+    block_modes.push_back(i < rb ? block[i] : scalar);
+    tiler_modes.push_back(i < rt ? tiler[i] : scalar);
+  }
+  Layout product =
+      LogicalProduct(MakeLayout(block_modes), MakeLayout(tiler_modes));
+  Layout padded = product[0], rest = product[1];
+  // Composition against the padded tiler keeps one rest mode per tiler mode.
+  ICHECK_EQ(Rank(rest), r) << "BlockedProduct: rest profile " << rest->shape
+                           << " does not match the tiler rank " << r;
+  Array<Layout> modes;
+  for (int64_t i = 0; i < r; ++i) {
+    modes.push_back(MakeLayout({padded[i], rest[i]}));
+  }
+  return MakeLayout(modes);
+}
+
 Layout MakeColumnMajorLayout(const IntTuple &shape) {
   return Layout(shape, CompactColMajor(shape));
 }
@@ -1031,6 +1349,23 @@ Layout MakeLayout(const Array<Layout> &layouts) {
 
 Layout Layout::WithShape(const IntTuple &shape) const {
   return Composition(*this, MakeColumnMajorLayout(shape));
+}
+
+Layout Layout::Parse(const ffi::String &text) {
+  // The printed spelling "shape:stride"; the shape holds no ':' so the first
+  // one splits.
+  std::string s(text);
+  size_t colon = s.find(':');
+  ICHECK_NE(colon, std::string::npos)
+      << "Layout text must be 'shape:stride', got '" << s << "'";
+  return Layout(IntTuple::Parse(s.substr(0, colon)),
+                IntTuple::Parse(s.substr(colon + 1)));
+}
+
+void Layout::Print(std::ostream &os) const {
+  (*this)->shape.Print(os);
+  os << ":";
+  (*this)->stride.Print(os);
 }
 
 ComposedLayout::ComposedLayout(Swizzle swizzle, int64_t offset, Layout layout) {
@@ -1566,6 +1901,65 @@ Optional<Layout> LayoutFromTileLang(const tvm::tl::Layout &layout) {
   return plain.value().WithShape(ShapeTuple(A.shape()));
 }
 
+// Recover a multi-output TileLang layout while keeping its codomain hierarchy:
+// each output coordinate axis is recovered as its own plain affine layout and
+// rerouted onto the basis axis E<i>, so the result maps a logical coordinate to
+// the full output coordinate tuple (the inverse of Python's
+// Layout.to_tilelang). LayoutFromTileLang instead serializes all output axes
+// into one flat address.
+Optional<Layout> LayoutFromTileLangHierarchical(const tvm::tl::Layout &layout) {
+  ICHECK(layout.defined());
+  Array<PrimExpr> input_shape = layout->InputShape();
+  Array<PrimExpr> forward_index = layout->GetForwardIndex();
+  int64_t rank = static_cast<int64_t>(forward_index.size());
+  if (rank == 0)
+    return std::nullopt;
+
+  // Recover each output axis independently as a plain affine layout.
+  std::vector<Layout> projected;
+  projected.reserve(rank);
+  for (int64_t i = 0; i < rank; ++i) {
+    Optional<Layout> axis =
+        LayoutFromTileLang(tvm::tl::Layout(input_shape, {forward_index[i]}));
+    if (!axis.defined())
+      return std::nullopt;
+    projected.push_back(axis.value());
+  }
+
+  // Conform all axes to one common shape profile. WithShape is an exact
+  // composition, so refining a profile never changes the function. Threading
+  // the progressively refined profile forward hands the last axis every
+  // axis's split points; conforming each earlier axis to that finest profile
+  // then makes all shapes identical.
+  std::vector<Layout> scaled(projected);
+  for (int64_t i = 1; i < rank; ++i)
+    scaled[i] = projected[i].WithShape(scaled[i - 1]->shape);
+  for (int64_t i = 0; i + 1 < rank; ++i)
+    scaled[i] = projected[i].WithShape(scaled[rank - 1]->shape);
+  const IntTuple shape = scaled[rank - 1]->shape;
+  for (int64_t i = 0; i + 1 < rank; ++i)
+    ICHECK(StructuralEqual()(scaled[i]->shape, shape))
+        << "Hierarchical recovery produced incompatible axis profiles: "
+        << scaled[i]->shape << " vs " << shape;
+
+  // Reroute each axis onto its basis and sum, keeping broadcast (stride-0)
+  // leaves the plain additive identity -- official operator* would tag them
+  // 0@i, and 0@i + 0@j sums to a coordinate tuple, breaking shape/stride
+  // congruence for leaves no axis drives. A leaf driven by exactly one axis
+  // keeps a single ScaledBasis stride; a leaf driven by two axes sums to a
+  // coordinate tuple instead, breaking congruence -- the output axes are
+  // dependent and no cute::Layout represents that.
+  IntTuple stride = 0;
+  for (int64_t i = 0; i < rank; ++i) {
+    stride += TransformLeaf(scaled[i]->stride, [&](const IntTuple &leaf) {
+      return IsZeroLeaf(leaf) ? leaf : IntTuple(leaf * E({i}));
+    });
+  }
+  if (!Congruent(shape, stride))
+    return std::nullopt;
+  return Layout(shape, stride);
+}
+
 // Recover a swizzled affine layout, A(x) = Sw(offset + plain(x)), from a
 // TileLang layout, as a Swizzle composed with a plain cute::Layout. Sizes and
 // strides need not be powers of two.
@@ -1672,69 +2066,35 @@ Tuple<IntTuple, Layout> Restrict(const Layout &layout,
   Array<IntTuple> min_modes;
   Array<Layout> sub_modes;
   for (int64_t i = 0; i < r; ++i) {
-    min_modes.push_back(IntTuple(range[i]->min));
+    min_modes.push_back(range[i]->min);
     // Skip statically-extent-1 modes (e.g. a pipeline stage pinned to one
     // element): they'd leave size-1 modes that break the GMMA canonical divide.
     const auto *ext_imm = range[i]->extent.as<IntImmNode>();
     if (ext_imm && ext_imm->value == 1)
       continue;
-    sub_modes.push_back(layout[i].WithShape(IntTuple(range[i]->extent)));
+    sub_modes.push_back(layout[i].WithShape(range[i]->extent));
   }
   IntTuple offset = layout(IntTupleTuple(min_modes));
   if (sub_modes.empty()) // everything pinned to one element: scalar (1):(0).
-    return Tuple<IntTuple, Layout>(
-        offset, Layout(IntTuple(int64_t(1)), IntTuple(int64_t(0))));
+    return Tuple<IntTuple, Layout>(offset, Layout(1, 0));
   return Tuple<IntTuple, Layout>(offset, MakeLayout(sub_modes));
 }
 
 namespace {
 
-// CuTe-notation formatters (the single source of truth shared by C++ stream
-// output and Python __str__/__repr__ via the __ffi_repr__ hooks below).
-std::string FormatIntTuple(const IntTuple &t) {
-  if (const auto *c = t.as<IntTupleConstNode>()) {
-    return std::to_string(c->value);
-  }
-  if (const auto *e = t.as<IntTuplePrimExprNode>()) {
-    std::ostringstream os;
-    os << e->value;
-    return os.str();
-  }
-  if (const auto *b = t.as<IntTupleScaledBasisNode>()) {
-    // CuTe scaled-basis spelling value@m@...: the mode path prints
-    // innermost-first (CuTe's E<...> print order), e.g. E<1,0> -> 1@0@1.
-    std::ostringstream os;
-    os << FormatIntTuple(b->value);
-    for (auto it = b->basis.rbegin(); it != b->basis.rend(); ++it)
-      os << "@" << *it;
-    return os.str();
-  }
-  const auto *a = t.as<IntTupleTupleNode>();
-  ICHECK(a != nullptr) << "FormatIntTuple on an unknown IntTuple kind";
+// Stream any Print-able object into a String (for the __ffi_repr__ hooks).
+template <class T> ffi::String PrintToString(const T &value) {
   std::ostringstream os;
-  os << "(";
-  for (size_t i = 0; i < a->fields.size(); ++i) {
-    if (i > 0)
-      os << ",";
-    os << FormatIntTuple(a->fields[i]);
-  }
-  os << ")";
+  value.Print(os);
   return os.str();
-}
-
-std::string FormatSwizzle(const SwizzleNode *s) {
-  std::ostringstream os;
-  os << "Sw<" << s->b_bits << "," << s->m_base << "," << s->s_shift << ">";
-  return os.str();
-}
-
-std::string FormatLayout(const LayoutNode *l) {
-  return FormatIntTuple(l->shape) + ":" + FormatIntTuple(l->stride);
 }
 
 std::string FormatComposedLayout(const ComposedLayoutNode *c) {
-  return FormatSwizzle(c->swizzle.get()) + " o " + std::to_string(c->offset) +
-         " o " + FormatLayout(c->layout.get());
+  std::ostringstream os;
+  c->swizzle.Print(os);
+  os << " o " << c->offset << " o ";
+  c->layout.Print(os);
+  return os.str();
 }
 
 } // namespace
@@ -1756,29 +2116,27 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::TypeAttrDef<SwizzleNode>().def(
-      refl::type_attr::kRepr, [](Swizzle s, ffi::Function) -> ffi::String {
-        return FormatSwizzle(s.get());
-      });
+      refl::type_attr::kRepr,
+      [](Swizzle s, ffi::Function) -> ffi::String { return PrintToString(s); });
   refl::TypeAttrDef<IntTupleConstNode>().def(
       refl::type_attr::kRepr, [](IntTuple t, ffi::Function) -> ffi::String {
-        return FormatIntTuple(t);
+        return PrintToString(t);
       });
   refl::TypeAttrDef<IntTuplePrimExprNode>().def(
       refl::type_attr::kRepr, [](IntTuple t, ffi::Function) -> ffi::String {
-        return FormatIntTuple(t);
+        return PrintToString(t);
       });
   refl::TypeAttrDef<IntTupleScaledBasisNode>().def(
       refl::type_attr::kRepr, [](IntTuple t, ffi::Function) -> ffi::String {
-        return FormatIntTuple(t);
+        return PrintToString(t);
       });
   refl::TypeAttrDef<IntTupleTupleNode>().def(
       refl::type_attr::kRepr, [](IntTuple t, ffi::Function) -> ffi::String {
-        return FormatIntTuple(t);
+        return PrintToString(t);
       });
   refl::TypeAttrDef<LayoutNode>().def(
-      refl::type_attr::kRepr, [](Layout l, ffi::Function) -> ffi::String {
-        return FormatLayout(l.get());
-      });
+      refl::type_attr::kRepr,
+      [](Layout l, ffi::Function) -> ffi::String { return PrintToString(l); });
   refl::TypeAttrDef<ComposedLayoutNode>().def(
       refl::type_attr::kRepr,
       [](ComposedLayout c, ffi::Function) -> ffi::String {
@@ -1804,6 +2162,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](const Swizzle &swizzle, int old_bits, int new_bits) {
              return swizzle.Recast(old_bits, new_bits);
            })
+      .def("tl.cute.swizzle_parse",
+           [](const ffi::String &text) { return Swizzle::Parse(text); })
       // -- IntTuple leaf builders ----------------------------------------
       .def("tl.cute.make_int_const",
            [](int64_t value) { return IntTuple(value); })
@@ -1824,6 +2184,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](const IntTuple &a, const IntTuple &b) { return a + b; })
       .def("tl.cute.int_tuple_mul",
            [](const IntTuple &a, const IntTuple &b) { return a * b; })
+      .def("tl.cute.int_tuple_parse",
+           [](const ffi::String &text) { return IntTuple::Parse(text); })
       .def("tl.cute.product", [](const IntTuple &t) { return Product(t); })
       // -- Layout constructor + accessors --------------------------------
       // Build a (possibly hierarchical / dynamic) layout from congruent
@@ -1846,6 +2208,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](const Layout &layout, const IntTuple &coord) {
              return layout(coord);
            })
+      .def("tl.cute.layout_parse",
+           [](const ffi::String &text) { return Layout::Parse(text); })
       .def("tl.cute.layout_shape",
            [](const Layout &layout) { return layout->shape; })
       .def("tl.cute.layout_stride",
@@ -1861,6 +2225,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](const Layout &layout) { return Coalesce(layout); })
       .def("tl.cute.right_inverse",
            [](const Layout &layout) { return RightInverse(layout); })
+      .def("tl.cute.left_inverse",
+           [](const Layout &layout) { return LeftInverse(layout); })
       .def("tl.cute.composition",
            [](const Layout &lhs, const Layout &rhs) {
              return Composition(lhs, rhs);
@@ -1873,6 +2239,11 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](const Layout &layout) { return Filter(layout); })
       .def("tl.cute.congruent",
            [](const IntTuple &a, const IntTuple &b) { return Congruent(a, b); })
+      .def(
+          "tl.cute.compatible",
+          [](const IntTuple &a, const IntTuple &b) { return Compatible(a, b); })
+      .def("tl.cute.coshape",
+           [](const Layout &layout) { return Coshape(layout); })
       .def("tl.cute.cosize",
            [](const Layout &layout) { return Cosize(layout); })
       .def("tl.cute.complement",
@@ -1882,6 +2253,18 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("tl.cute.logical_divide",
            [](const Layout &layout, const Layout &tiler) {
              return LogicalDivide(layout, tiler);
+           })
+      .def("tl.cute.logical_product",
+           [](const Layout &block, const Layout &tiler) {
+             return LogicalProduct(block, tiler);
+           })
+      .def("tl.cute.tiled_product",
+           [](const Layout &block, const Layout &tiler) {
+             return TiledProduct(block, tiler);
+           })
+      .def("tl.cute.blocked_product",
+           [](const Layout &block, const Layout &tiler) {
+             return BlockedProduct(block, tiler);
            })
       // -- Make*Layout ----------------------------------------------------
       .def("tl.cute.make_column_major_layout",
@@ -1899,6 +2282,10 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("tl.cute.layout_from_tilelang",
            [](const tvm::tl::Layout &layout) {
              return LayoutFromTileLang(layout);
+           })
+      .def("tl.cute.layout_from_tilelang_hierarchical",
+           [](const tvm::tl::Layout &layout) {
+             return LayoutFromTileLangHierarchical(layout);
            })
       .def("tl.cute.composed_layout_from_tilelang",
            [](const tvm::tl::Layout &layout) {

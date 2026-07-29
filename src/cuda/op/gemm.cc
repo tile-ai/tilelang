@@ -116,6 +116,15 @@ bool AllowVoltaMma(const GemmNode &op) {
   return op.m_ % 16 == 0 && op.n_ % 16 == 0 && op.k_ % 4 == 0;
 }
 
+bool Use2CtaRequested(const GemmNode &op) {
+  if (auto val = op.annotations_.Get("use_2cta")) {
+    const auto *imm = val.value().as<IntImmNode>();
+    ICHECK(imm) << "use_2cta annotation must be an IntImmNode";
+    return imm->value != 0;
+  }
+  return false;
+}
+
 void FatalWgmmaUnavailable(const GemmNode &op, Target target) {
   LOG(FATAL) << "T.wgmma_gemm() requires Hopper WGMMA lowering, but "
                 "constraints were not satisfied. Got target="
@@ -297,6 +306,18 @@ struct Gemm {
     if (op.isTcgen05_) {
       if (!AllowTcgen5Mma(op, target)) {
         FatalTcgen5Unavailable(op, target);
+      }
+      return kCudaTCGEN05;
+    }
+
+    // The public 2CTA shape contract supplies only half of B's N extent per
+    // CTA.
+    // Falling back to an ordinary one-CTA instruction would therefore be a
+    // silent out-of-bounds miscompile rather than a valid fallback.
+    if (Use2CtaRequested(op)) {
+      if (!AllowTcgen5Mma(op, target)) {
+        LOG(FATAL) << "use_2cta=True requires Blackwell TCGEN5MMA "
+                      "lowering; no one-CTA instruction fallback is valid.";
       }
       return kCudaTCGEN05;
     }

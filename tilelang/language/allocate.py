@@ -257,7 +257,10 @@ def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
         - The number of columns allocated should not increase between any two allocations in the execution order within the CTA.
 
     Args:
-        num_cols (int): Number of columns to allocate in TMEM. Must be a power of 2 and >= 32 but less than or equal to 512.
+        shape (ShapeType): Logical buffer shape.  The last two modes are the
+            matrix modes; any leading modes are batch dimensions that repeat
+            the buffer along TMEM columns.
+        dtype (DType): Element data type.
 
     Returns:
         T.Buffer: A TVM buffer object allocated in TMEM scope, suitable for use as an accumulator or operand in TCGEN5.MMA operations.
@@ -268,7 +271,10 @@ def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
           Use ``T.deallocate_tmem`` only when you need an earlier, explicit release.
     """
 
-    assert len(shape) == 2, "shape must be a 2D tensor for TMEM allocation"
+    # The last two modes are the matrix modes; leading modes are batch
+    # dimensions (for example a software-pipeline stage) that repeat the
+    # accumulator along TMEM columns.
+    assert len(shape) >= 2, "shape must be a 2D or higher tensor for TMEM allocation"
     return _with_span(T.sblock_alloc_buffer(shape, dtype, scope="shared.tmem"))
 
 
