@@ -1,7 +1,15 @@
 """Common math intrinsics exposed on the TileLang language surface."""
 
-from tvm import tirx
+from tvm import DataType, DataTypeCode, tirx
 from tvm.tirx import PrimExpr
+
+
+def _validate_fast_math_arg(x: PrimExpr, intrinsic: str) -> PrimExpr:
+    """Normalize a fast-math argument and reject unsupported dtypes."""
+    x = tirx.convert(x)
+    if DataType(x.dtype).type_code not in (DataTypeCode.FLOAT, DataTypeCode.BFLOAT):
+        raise TypeError(f"T.{intrinsic} only supports floating-point inputs, but got {x.dtype}")
+    return x
 
 
 def _validate_rounding_mode(rounding_mode):
@@ -25,7 +33,7 @@ def __log(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tirx.convert(x)
+    x = _validate_fast_math_arg(x, "__log")
     return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__log"), x)
 
 
@@ -42,7 +50,7 @@ def __log2(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tirx.convert(x)
+    x = _validate_fast_math_arg(x, "__log2")
     return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__log2"), x)
 
 
@@ -59,7 +67,7 @@ def __log10(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tirx.convert(x)
+    x = _validate_fast_math_arg(x, "__log10")
     return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__log10"), x)
 
 
@@ -76,7 +84,7 @@ def __tan(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tirx.convert(x)
+    x = _validate_fast_math_arg(x, "__tan")
     return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__tan"), x)
 
 
@@ -93,7 +101,7 @@ def __cos(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tirx.convert(x)
+    x = _validate_fast_math_arg(x, "__cos")
     return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__cos"), x)
 
 
@@ -110,7 +118,7 @@ def __sin(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tirx.convert(x)
+    x = _validate_fast_math_arg(x, "__sin")
     return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__sin"), x)
 
 
@@ -127,7 +135,7 @@ def __exp10(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tirx.convert(x)
+    x = _validate_fast_math_arg(x, "__exp10")
     return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__exp10"), x)
 
 
@@ -144,7 +152,7 @@ def __exp(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tirx.convert(x)
+    x = _validate_fast_math_arg(x, "__exp")
     return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__exp"), x)
 
 
