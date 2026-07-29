@@ -407,18 +407,22 @@ private:
   Target target_;
 };
 
-/*! \brief Information about a pipeline stage
+/*! \brief Scheduling information for one top-level pipeline statement.
  *
- * \param reads Array of buffer regions read by this stage
- * \param writes Array of buffer regions written by this stage
- * \param original_stmt_index Original position of this stage in the pipeline
- * before reordering \param order Current position of this stage in the
- * pipeline after reordering (-1 if not yet assigned) \param stage Pipeline
- * stage number this operation belongs to (-1 if not yet assigned) \param
- * copy_stage Whether this stage is a memory copy operation \param
- * last_use_stmt_index Index of the last statement (in original order) that
- * uses the results of this stage (-1 if not yet determined). Copies with the
- * same last consumer can share an implicit async producer group.
+ * PipelinePlanning does not rewrite the loop itself.  It assigns each
+ * statement a logical time offset (`stage`) and an execution position
+ * (`order`); InjectSoftwarePipeline later realizes that schedule by replacing
+ * the original loop variable with `pipeline_time - stage`, emitting
+ * prologue/steady-state/epilogue loops, and multi-versioning buffers.  It is
+ * therefore essential that dependencies point from an earlier or equal stage
+ * to a later stage, and that dependencies within one stage follow `order`.
+ *
+ * `reads`/`writes` and `scalar_defs`/`scalar_uses` form the dependency graph.
+ * The classification flags control stage weight and async-copy metadata.
+ * `original_stmt_index` is the position before scheduling; `order` and `stage`
+ * remain -1 until assigned.  `last_use_stmt_index` is the final source-order
+ * consumer of a copy, and copies with the same final consumer may share an
+ * implicit async producer group.
  */
 struct PipelineStageInfo {
   Array<BufferRegion> reads, writes;
@@ -691,6 +695,20 @@ public:
     return scalar_def_to_stmt;
   }
 
+  /*! \brief Unified intra-iteration dependency graph used for scheduling.
+   *
+   * Nodes are top-level pipeline statements in source order.  Every edge is
+   * directed from a smaller source index to a larger one, making source order
+   * a topological order by construction.  `predecessors` drives the weighted
+   * longest-path traversal, while `successors` is used for sink detection and
+   * forward constraint propagation.
+   *
+   * `scalar_successors` is a subset of `successors`.  It is retained separately
+   * because a materialized scalar value cannot cross pipeline stages: unlike a
+   * Buffer, InjectSoftwarePipeline does not create a cyclic versioned register
+   * for it.  The producer Bind and all of its direct users must consequently
+   * have equal stages, rather than merely ordered stages.
+   */
   struct PipelineDependencyDag {
     std::vector<std::vector<int>> predecessors;
     std::vector<std::vector<int>> successors;
@@ -759,6 +777,10 @@ public:
       }
     }
 
+    // Add scalar def-use edges.  Replayable scalar Binds have already been
+    // removed by AnalyzeScheduledStmts and will be reconstructed at each use by
+    // InjectSoftwarePipeline.  Thus every Bind seen here is materialized and
+    // needs the stronger same-stage treatment applied below.
     auto scalar_def_to_stmt = BuildScalarDefMap(pipeline_stage_infos);
     for (int dst = 0; dst < num_statements; ++dst) {
       for (const VarNode *var : pipeline_stage_infos[dst].scalar_uses) {
@@ -793,11 +815,27 @@ public:
     const int num_statements = static_cast<int>(pipeline_stage_infos->size());
     PipelineDependencyDag dag = BuildDependencyDag(*pipeline_stage_infos);
 
+    // The schedule is constructed in four steps:
+    //
+    // 1. Compute ASAP logical levels with a weighted longest path through the
+    //    dependency DAG.  Substantial work has weight one; scalar/control glue
+    //    has weight zero.
+    // 2. Map the logical level range onto [0, max_stage], spreading short
+    // chains
+    //    across the requested distance and merging levels when the dependency
+    //    chain is deeper than that distance.
+    // 3. Put sinks in the final consumer stage, then raise stages to satisfy
+    //    materialized-scalar equality and all dependency inequalities.
+    // 4. Sort by (stage, source index) to obtain a deterministic order.  Since
+    //    all edges follow source order and stage never decreases along an edge,
+    //    this is also a stable topological order.
+
     // Compute ASAP logical levels on the source-order topological traversal.
-    // Materialized scalar Binds, scalar-sized stores, and control operations
-    // have zero weight: they are glue between substantial operations, not
-    // independent pipeline stages.  A substantial source advances all of its
-    // successors by one logical level, while zero-weight nodes are transparent.
+    // Materialized scalar Binds, plain BufferStores, and control operations
+    // have zero weight: they are glue between substantial tile operations, not
+    // independent latency-bearing stages.  A substantial source advances all
+    // of its successors by one logical level, while zero-weight nodes are
+    // transparent.
     std::vector<int> logical_levels(num_statements, 0);
     for (int dst = 0; dst < num_statements; ++dst) {
       for (int src : dag.predecessors[dst]) {
@@ -834,6 +872,9 @@ public:
       }
     }
 
+    // Preserve the relative DAG depth while using the full requested stage
+    // distance.  Integer division intentionally coalesces adjacent logical
+    // levels when max_stage is smaller than the longest dependency chain.
     int max_logical_level = 0;
     for (int level : logical_levels) {
       max_logical_level = std::max(max_logical_level, level);
@@ -846,19 +887,28 @@ public:
       (*pipeline_stage_infos)[i].stage = stage;
     }
 
-    // A statement with no in-pipeline successor cannot hide latency for any
-    // later pipeline work.  Keep these sinks in the consumer stage, matching
-    // the old planner's treatment of statements that were not producers for a
-    // copy.
+    // A statement with no in-pipeline successor cannot prepare data for any
+    // later pipeline work, so executing it early only increases its live range.
+    // Keep all such sinks in the final consumer stage.  This also preserves the
+    // old planner's rule that statements which are not producers for another
+    // pipeline operation belong to the consumer side.
     for (int i = 0; i < num_statements; ++i) {
       if (dag.successors[i].empty()) {
         (*pipeline_stage_infos)[i].stage = max_stage;
       }
     }
 
-    // Non-replayable scalar Binds are materialized once, so all direct users
-    // must execute in the same stage.  Raising stages reaches the least fixed
-    // point that satisfies this equality and all dependency inequalities.
+    // A non-replayable Bind is materialized once per logical loop iteration.
+    // If its consumer had a different stage, the two statements would execute
+    // with different skewed loop indices and the consumer could observe another
+    // iteration's register value.  InjectSoftwarePipeline versions Buffers but
+    // does not create a cyclic register buffer, so place the Bind and every
+    // direct user in their maximum common stage.
+    //
+    // Equalizing a scalar group may raise a producer or consumer, which can in
+    // turn violate a downstream `stage(dst) >= stage(src)` constraint or raise
+    // another scalar group.  Repeating both propagations computes the least
+    // fixed point without ever decreasing a stage.
     bool updated = true;
     while (updated) {
       updated = false;
@@ -893,6 +943,9 @@ public:
       }
     }
 
+    // Stage is the primary execution key.  Source index is the tie-breaker so
+    // same-stage dependencies retain program order and independent statements
+    // have deterministic output annotations.
     std::vector<int> indices(num_statements);
     std::iota(indices.begin(), indices.end(), 0);
     std::stable_sort(indices.begin(), indices.end(), [&](int lhs, int rhs) {
@@ -1064,8 +1117,18 @@ public:
     pinfo.scalar_defs = std::move(scalar_defs);
     pinfo.scalar_uses = std::move(scalar_uses);
     pinfo.original_stmt_index = idx;
+    // Replayable Binds were filtered before this point.  A remaining Bind must
+    // stay materialized and is treated as zero-weight scheduling glue.  A plain
+    // BufferStore is likewise a scalar/lightweight IR operation;
+    // latency-bearing copies and matrix operations are represented by tile
+    // operators instead.
     pinfo.scalar_bind = block->body.as<BindNode>() != nullptr;
     pinfo.lightweight_stmt = block->body.as<BufferStoreNode>() != nullptr;
+
+    // Opaque state-changing calls (barrier wait/arrive, async control, etc.)
+    // may not report complete Buffer regions.  Classify them as control
+    // statements so BuildDependencyDag preserves their source neighbors and the
+    // level assignment attaches them to the substantial operation they guard.
     if (const auto *evaluate = block->body.as<EvaluateNode>()) {
       if (const auto *call_node = evaluate->value.as<CallNode>()) {
         Call call = GetRef<Call>(call_node);
@@ -1129,6 +1192,11 @@ private:
   }
 
   bool HasManualWarpSpecialization(const Stmt &stmt) const {
+    // T.ws() first emits the language-level "warp_specialize" AttrStmt; some
+    // lowering paths replace it with kWarpSpecializationScope.  Detect both.
+    // Compiler-generated producer/consumer WS runs before PipelinePlanning and
+    // strips pipeline annotations after rewriting, so an annotated pipeline
+    // reaching this check is the user-authored/manual WS case.
     bool found = false;
     PostOrderVisit(stmt, [&](const ObjectRef &node) {
       if (const auto *attr_stmt = node.as<AttrStmtNode>()) {
@@ -1289,9 +1357,18 @@ private:
 
     // Assign stages by a weighted longest-path traversal over the unified
     // buffer/scalar dependency DAG, then derive a stable topological order.
-    // Compiler-inferred pipelines use stage indices [0, num_stages].  Manual
-    // warp-specialized pipelines use num_stages as an explicit ring-buffer
-    // size, so their valid stage indices remain [0, num_stages - 1].
+    //
+    // For an ordinary compiler-inferred pipeline, num_stages denotes the
+    // producer/consumer distance and the established annotation convention is
+    // [0, num_stages], i.e. up to num_stages + 1 logical time levels.
+    //
+    // In manual warp specialization, num_stages is additionally the physical
+    // ring-buffer/barrier slot count.  T.ws producer and consumer warps execute
+    // concurrently, and InjectSoftwarePipeline evaluates a stage-s statement at
+    // logical iteration `pipeline_time - s`.  Allowing stage == num_stages
+    // would alias stage 0 after modulo ring indexing, potentially overwriting
+    // data still consumed by another warp or waiting on the wrong barrier
+    // phase.  Therefore manual WS must remain in [0, num_stages - 1].
     int max_stage =
         HasManualWarpSpecialization(loop->body) ? num_stages - 1 : num_stages;
     AssignStagesAndOrders(&pipeline_stage_infos, max_stage);
