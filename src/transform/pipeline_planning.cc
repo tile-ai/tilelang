@@ -810,12 +810,12 @@ public:
 
   void
   AssignStagesAndOrders(std::vector<PipelineStageInfo> *pipeline_stage_infos,
-                        int max_stage) const {
+                        int max_stage, bool compact_terminal_stage) const {
     ICHECK_GE(max_stage, 0);
     const int num_statements = static_cast<int>(pipeline_stage_infos->size());
     PipelineDependencyDag dag = BuildDependencyDag(*pipeline_stage_infos);
 
-    // The schedule is constructed in four steps:
+    // The schedule is constructed in five steps:
     //
     // 1. Compute ASAP logical levels with a weighted longest path through the
     //    dependency DAG.  Substantial work has weight one; scalar/control glue
@@ -826,7 +826,10 @@ public:
     //    chain is deeper than that distance.
     // 3. Put sinks in the final consumer stage, then raise stages to satisfy
     //    materialized-scalar equality and all dependency inequalities.
-    // 4. Sort by (stage, source index) to obtain a deterministic order.  Since
+    // 4. For ordinary pipelines, retime the terminal stage once so that its
+    //    consumers overlap the next iteration's producers and do not require an
+    //    otherwise unused extra Buffer version.
+    // 5. Sort by (stage, source index) to obtain a deterministic order.  Since
     //    all edges follow source order and stage never decreases along an edge,
     //    this is also a stable topological order.
 
@@ -939,6 +942,60 @@ public:
             (*pipeline_stage_infos)[dst].stage = src_stage;
             updated = true;
           }
+        }
+      }
+    }
+
+    // The provisional [0, max_stage] schedule has two equivalent ways to place
+    // its periodic boundary.  In the unrotated form, the terminal consumers of
+    // iteration k run immediately before the stage-0 producers of iteration
+    // k + max_stage.  Moving that boundary past the producers yields the
+    // canonical producer-first form and decreases the terminal stage by one:
+    //
+    //   consumer(k), producer(k + N)  <=>  producer(k + N), consumer(k + 1)
+    //
+    // Moving the whole terminal stage together preserves scalar equalities and
+    // source order.  It is a pure boundary retiming only when the stage
+    // contains consumers and outward-facing writes, but no Buffer value
+    // produced there and consumed by another pipeline statement.  Such an
+    // internal producer can still occur when a dependency chain is deeper than
+    // max_stage and several logical levels are coalesced into the final stage.
+    // Compacting in that case would reduce real producer lookahead instead of
+    // eliminating an unused endpoint, so retain the provisional schedule.
+    //
+    // When the final stage is consumer-only, retiming removes one endpoint from
+    // every Buffer live range ending there and can save one cyclic Buffer
+    // version.  Apply it only once: further compaction would again reduce the
+    // requested producer lookahead.  The old planner implemented the same
+    // optimization only when all copy producers happened to be at the end of
+    // its temporary order.
+    //
+    // Manual warp specialization already uses [0, num_stages - 1] as its
+    // physical ring-buffer range.  Its cross-warp order is defined by explicit
+    // barriers rather than statement order, so the caller disables this generic
+    // retiming for manual WS.  Preserve the old num_stages == 1 behavior as
+    // well; collapsing [0, 1] would remove pipelining entirely.
+    bool final_stage_has_internal_buffer_producer = false;
+    for (int src = 0; src < num_statements; ++src) {
+      if ((*pipeline_stage_infos)[src].stage != max_stage) {
+        continue;
+      }
+      for (int dst : dag.successors[src]) {
+        if (RegionsConflict((*pipeline_stage_infos)[src].writes,
+                            (*pipeline_stage_infos)[dst].reads)) {
+          final_stage_has_internal_buffer_producer = true;
+          break;
+        }
+      }
+      if (final_stage_has_internal_buffer_producer) {
+        break;
+      }
+    }
+    if (compact_terminal_stage && max_stage >= 2 &&
+        !final_stage_has_internal_buffer_producer) {
+      for (PipelineStageInfo &pinfo : *pipeline_stage_infos) {
+        if (pinfo.stage == max_stage) {
+          --pinfo.stage;
         }
       }
     }
@@ -1187,8 +1244,9 @@ private:
 
   void
   AssignStagesAndOrders(std::vector<PipelineStageInfo> *pipeline_stage_infos,
-                        int max_stage) const {
-    MakeStageAnalyzer().AssignStagesAndOrders(pipeline_stage_infos, max_stage);
+                        int max_stage, bool compact_terminal_stage) const {
+    MakeStageAnalyzer().AssignStagesAndOrders(pipeline_stage_infos, max_stage,
+                                              compact_terminal_stage);
   }
 
   bool HasManualWarpSpecialization(const Stmt &stmt) const {
@@ -1359,8 +1417,11 @@ private:
     // buffer/scalar dependency DAG, then derive a stable topological order.
     //
     // For an ordinary compiler-inferred pipeline, num_stages denotes the
-    // producer/consumer distance and the established annotation convention is
-    // [0, num_stages], i.e. up to num_stages + 1 logical time levels.
+    // producer/consumer distance and the provisional annotation range is
+    // [0, num_stages], i.e. up to num_stages + 1 logical time levels.  A
+    // consumer-only terminal endpoint is subsequently retimed to
+    // num_stages - 1 so it can share the periodic boundary without requiring an
+    // extra Buffer version.
     //
     // In manual warp specialization, num_stages is additionally the physical
     // ring-buffer/barrier slot count.  T.ws producer and consumer warps execute
@@ -1369,9 +1430,11 @@ private:
     // would alias stage 0 after modulo ring indexing, potentially overwriting
     // data still consumed by another warp or waiting on the wrong barrier
     // phase.  Therefore manual WS must remain in [0, num_stages - 1].
-    int max_stage =
-        HasManualWarpSpecialization(loop->body) ? num_stages - 1 : num_stages;
-    AssignStagesAndOrders(&pipeline_stage_infos, max_stage);
+    bool manual_warp_specialization = HasManualWarpSpecialization(loop->body);
+    int max_stage = manual_warp_specialization ? num_stages - 1 : num_stages;
+    AssignStagesAndOrders(
+        &pipeline_stage_infos, max_stage,
+        /*compact_terminal_stage=*/!manual_warp_specialization);
 
     // Async producer grouping uses the last consumer of each copy.
     AnalyzeCopyLastUse(&pipeline_stage_infos);
