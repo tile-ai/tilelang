@@ -40,9 +40,10 @@ def test_predicate_intrinsics_reject_float(intrinsic):
         intrinsic(predicate)
 
 
+@pytest.mark.parametrize("predicate", [1, True], ids=["integer", "boolean"])
 @pytest.mark.parametrize("intrinsic", PREDICATE_INTRINSICS)
-def test_predicate_intrinsics_accept_integer(intrinsic):
-    result = intrinsic(1)
+def test_predicate_intrinsics_accept_integer_or_boolean(intrinsic, predicate):
+    result = intrinsic(predicate)
 
     assert isinstance(result, tilelang.tvm.tirx.Call)
 

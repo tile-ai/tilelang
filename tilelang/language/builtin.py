@@ -1032,7 +1032,11 @@ def shfl_sync(
 def _validate_predicate(predicate: int | PrimExpr, intrinsic: str) -> PrimExpr:
     """Normalize an intrinsic predicate and reject lossy float-to-int coercion."""
     predicate = tirx.convert(predicate)
-    if DataType(predicate.dtype).type_code not in (DataTypeCode.INT, DataTypeCode.UINT):
+    if DataType(predicate.dtype).type_code not in (
+        DataTypeCode.INT,
+        DataTypeCode.UINT,
+        DataTypeCode.BOOL,
+    ):
         raise TypeError(f"T.{intrinsic} requires an integer or boolean predicate, but got {predicate.dtype}.")
     return predicate
 
