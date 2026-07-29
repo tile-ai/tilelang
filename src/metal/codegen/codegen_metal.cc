@@ -644,9 +644,10 @@ void CodeGenTileLangMetal::VisitStmt_(const ForNode *op) {
     PrintIndent();
     stream << "#pragma clang loop unroll(disable)\n";
   } else if (ext_imm && ext_imm->value > 1) {
-    // Small constant-bound loops: encourage full unroll (like MLX's STEEL_PRAGMA_UNROLL).
-    // Apple GPU compiler manages these efficiently; leaving them un-unrolled adds branch
-    // overhead in inner GEMM/warp/MMA loops.
+    // Small constant-bound loops: encourage full unroll (like MLX's
+    // STEEL_PRAGMA_UNROLL). Apple GPU compiler manages these efficiently;
+    // leaving them un-unrolled adds branch overhead in inner GEMM/warp/MMA
+    // loops.
     PrintIndent();
     stream << "#pragma clang loop unroll(full)\n";
   }
@@ -1816,12 +1817,12 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
                 decl_line[p] == '=') {
               // Backtrack past spaces
               size_t end = p;
-              while (end > 0 && decl_line[end - 1] == ' ') end--;
+              while (end > 0 && decl_line[end - 1] == ' ')
+                end--;
               // Backtrack past alnum / underscore
               size_t start = end;
-              while (start > 0 &&
-                     (isalnum(decl_line[start - 1]) ||
-                      decl_line[start - 1] == '_'))
+              while (start > 0 && (isalnum(decl_line[start - 1]) ||
+                                   decl_line[start - 1] == '_'))
                 start--;
               if (start < end) {
                 tg_names.insert(decl_line.substr(start, end - start));
@@ -1924,11 +1925,11 @@ ffi::Module BuildTileLangMetalWithoutCompile(IRModule mod, Target target) {
             if (decl_line[p] == '[' || decl_line[p] == ';' ||
                 decl_line[p] == '=') {
               size_t end = p;
-              while (end > 0 && decl_line[end - 1] == ' ') end--;
+              while (end > 0 && decl_line[end - 1] == ' ')
+                end--;
               size_t start = end;
-              while (start > 0 &&
-                     (isalnum(decl_line[start - 1]) ||
-                      decl_line[start - 1] == '_'))
+              while (start > 0 && (isalnum(decl_line[start - 1]) ||
+                                   decl_line[start - 1] == '_'))
                 start--;
               if (start < end) {
                 tg_names.insert(decl_line.substr(start, end - start));
