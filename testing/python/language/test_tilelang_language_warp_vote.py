@@ -16,8 +16,36 @@ T.syncthreads_or    – __syncthreads_or
 
 import tilelang
 import tilelang.language as T
+import pytest
 import torch
 import tilelang.testing
+
+
+PREDICATE_INTRINSICS = [
+    T.any_sync,
+    T.all_sync,
+    T.ballot_sync,
+    T.ballot,
+    T.syncthreads_count,
+    T.syncthreads_and,
+    T.syncthreads_or,
+]
+
+
+@pytest.mark.parametrize("intrinsic", PREDICATE_INTRINSICS)
+def test_predicate_intrinsics_reject_float(intrinsic):
+    predicate = tilelang.tvm.tirx.FloatImm("float32", 0.5)
+
+    with pytest.raises(TypeError, match="requires an integer or boolean predicate"):
+        intrinsic(predicate)
+
+
+@pytest.mark.parametrize("predicate", [1, True], ids=["integer", "boolean"])
+@pytest.mark.parametrize("intrinsic", PREDICATE_INTRINSICS)
+def test_predicate_intrinsics_accept_integer_or_boolean(intrinsic, predicate):
+    result = intrinsic(predicate)
+
+    assert isinstance(result, tilelang.tvm.tirx.Call)
 
 
 # ---------------------------------------------------------------------------
