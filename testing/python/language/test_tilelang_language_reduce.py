@@ -143,7 +143,7 @@ def _make_two_group_reduce_kernel(block_threads: int = 128):
     return make_kernel()
 
 
-def _make_offset_thread_reduce_kernel():
+def _make_offset_thread_reduce_kernel(batch: int = 1, rows: int = 2):
     """Reduction whose participating threads occupy a non-zero thread range,
     i.e. tx in [32, 96) of a 128-thread block."""
 
@@ -158,7 +158,6 @@ def _make_offset_thread_reduce_kernel():
     def make_kernel():
         thread_offset = 32
         fragment_threads = 64
-        rows = 2
         width = 512
         vector_size = 8
 
@@ -188,7 +187,7 @@ def _make_offset_thread_reduce_kernel():
                 )
                 for i, j in T.Parallel(rows, width):
                     x_frag[i, j] = x[i, j]
-                T.reduce_sum(x_frag, sum_frag, dim=1)
+                T.reduce_sum(x_frag, sum_frag, dim=1, batch=batch)
                 for i, j in T.Parallel(rows, width):
                     out[i, j] = x_frag[i, j] / sum_frag[i]
 
@@ -371,6 +370,50 @@ def test_reduce_partial_thread_barrier_offset_thread_range():
     torch.manual_seed(3)
     x = torch.rand((2, 512), dtype=torch.float32, device="cuda")
     out = _make_offset_thread_reduce_kernel()(x)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(
+        out,
+        x / x.sum(dim=1, keepdim=True),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_reduce_partial_thread_barrier_offset_thread_range_batch():
+    torch.manual_seed(4)
+    kernel = _make_offset_thread_reduce_kernel(batch=2)
+    source = kernel.get_kernel_source()
+    assert re.search(
+        r"tl::AllReduce<[^,]+,\s*64,\s*1,\s*32,\s*"
+        r"tl::NamedBarrier<64>,\s*\d+,\s*64>::run_batch",
+        source,
+    )
+
+    x = torch.rand((2, 512), dtype=torch.float32, device="cuda")
+    out = kernel(x)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(
+        out,
+        x / x.sum(dim=1, keepdim=True),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_reduce_partial_thread_barrier_offset_thread_range_unpacked_batch():
+    torch.manual_seed(5)
+    kernel = _make_offset_thread_reduce_kernel(batch=3, rows=3)
+    source = kernel.get_kernel_source()
+    assert re.search(
+        r"tl::AllReduce<[^,]+,\s*64,\s*1,\s*32,\s*"
+        r"tl::NamedBarrier<64>,\s*3,\s*64>::run_batch",
+        source,
+    )
+
+    x = torch.rand((3, 512), dtype=torch.float32, device="cuda")
+    out = kernel(x)
     torch.cuda.synchronize()
     torch.testing.assert_close(
         out,

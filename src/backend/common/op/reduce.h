@@ -79,7 +79,7 @@ inline Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
 }
 
 /*!
- * \brief Resolve the exact contiguous thread image of a scalar AllReduce.
+ * \brief Resolve the exact contiguous thread image of an AllReduce.
  *
  * The result is derived from the reduce layout's forward thread map, which is
  * also the source of the guard later emitted by PartitionLoop. Z3 counts the
@@ -94,7 +94,7 @@ inline Range ResolveAllReduceThreadRange(const Fragment &red_layout,
   const int64_t *block_extent = as_const_int(thread_bounds->extent);
   const int64_t *replicate = as_const_int(red_layout->ReplicateExtent());
   if (block_min == nullptr || block_extent == nullptr || replicate == nullptr) {
-    LOG(FATAL) << "tl.reduce: cannot resolve the scalar AllReduce barrier: "
+    LOG(FATAL) << "tl.reduce: cannot resolve the AllReduce barrier: "
                   "the CTA thread bounds or reduce layout replicate extent "
                   "are not compile-time constants.";
   }
@@ -126,7 +126,7 @@ inline Range ResolveAllReduceThreadRange(const Fragment &red_layout,
   auto bound = analyzer.const_int_bound(thread_expr);
   if (bound->min_value == arith::ConstIntBoundNode::kNegInf ||
       bound->max_value == arith::ConstIntBoundNode::kPosInf) {
-    LOG(FATAL) << "tl.reduce: cannot determine the scalar AllReduce "
+    LOG(FATAL) << "tl.reduce: cannot determine the AllReduce "
                   "participating thread range.";
   }
 
@@ -139,21 +139,21 @@ inline Range ResolveAllReduceThreadRange(const Fragment &red_layout,
     count = analyzer.z3_prover.CountSatisfyingValues(thread_var, *block_extent);
   }
   ICHECK_GT(count, 0)
-      << "tl.reduce: cannot determine the participating threads for scalar "
+      << "tl.reduce: cannot determine the participating threads for "
          "AllReduce";
 
   const int64_t base = bound->min_value;
   const int64_t end = bound->max_value;
   const int64_t span = end - base + 1;
   ICHECK_EQ(count, span)
-      << "tl.reduce: partial scalar AllReduce requires one contiguous thread "
+      << "tl.reduce: partial AllReduce requires one contiguous thread "
          "range, but got "
       << count << " distinct threads spanning [" << base << ", " << end << "]";
   ICHECK_GE(base, *block_min)
-      << "tl.reduce: scalar AllReduce participating thread range starts "
+      << "tl.reduce: AllReduce participating thread range starts "
          "before the CTA thread bounds";
   ICHECK_LT(end, *block_min + *block_extent)
-      << "tl.reduce: scalar AllReduce participating thread range ends after "
+      << "tl.reduce: AllReduce participating thread range ends after "
          "the CTA thread bounds";
 
   int64_t warp_size = 32;
@@ -161,11 +161,11 @@ inline Range ResolveAllReduceThreadRange(const Fragment &red_layout,
     warp_size = warp_size_attr.value()->value;
   }
   ICHECK_EQ((base - *block_min) % warp_size, 0)
-      << "tl.reduce: partial scalar AllReduce requires a warp-aligned "
+      << "tl.reduce: partial AllReduce requires a warp-aligned "
          "participating thread range, got base "
       << base << " in a block starting at " << *block_min;
   ICHECK_EQ(count % warp_size, 0)
-      << "tl.reduce: partial scalar AllReduce requires a warp-aligned thread "
+      << "tl.reduce: partial AllReduce requires a warp-aligned thread "
          "range, got "
       << count << " threads";
 
@@ -974,7 +974,8 @@ template <typename Impl> struct ReduceLowerer {
       }
 
       const int batch = op.batch;
-      if (batch > 1) {
+      bool use_batch = batch > 1;
+      if (use_batch) {
         int64_t N_total = 1;
         for (const auto &s : clear_buffer->shape) {
           const int64_t *p = as_const_int(s);
@@ -988,8 +989,6 @@ template <typename Impl> struct ReduceLowerer {
         ICHECK_EQ(N_total % batch, 0) << "ReduceOp: batch=" << batch
                                       << " must evenly divide N=" << N_total;
       }
-
-      bool use_batch = batch > 1;
 
       auto make_dst_loop = [&](Stmt body, const Array<IterVar> &vars) -> Stmt {
         for (int i = static_cast<int>(vars.size()) - 1; i >= 0; --i) {
@@ -1017,20 +1016,39 @@ template <typename Impl> struct ReduceLowerer {
         return {vars, d_idx, r_idx};
       };
 
+      for (const auto &thread_step : reduce_plan.thread_steps) {
+        reduce::CheckAllReduceWidth(thread_step.ReducingThreads(),
+                                    thread_step.scale, "tl.reduce");
+      }
+
+      bool has_thread_allreduce = !reduce_plan.thread_steps.empty();
+      bool has_cross_warp_allreduce = std::any_of(
+          reduce_plan.thread_steps.begin(), reduce_plan.thread_steps.end(),
+          [](const auto &step) { return step.ReducingThreads() > 32; });
+      Range allreduce_thread_range = lower_args.thread_bounds;
+      if (has_thread_allreduce &&
+          TargetSupportsNamedBarrier(lower_args.target) &&
+          (use_batch || has_cross_warp_allreduce)) {
+        allreduce_thread_range = reduce::ResolveAllReduceThreadRange(
+            red_layout, lower_args.thread_bounds, lower_args.target);
+      }
+
       if (use_batch) {
         Stmt pre_body = stmts.size() > 1 ? SeqStmt(stmts) : stmts[0];
         pre_body = make_dst_loop(pre_body, dst_vars);
 
         Array<Stmt> phases;
         phases.push_back(pre_body);
+        Array<Stmt> allreduce_phases;
 
         for (const auto &thread_step : reduce_plan.thread_steps) {
           int reducing_threads = thread_step.ReducingThreads();
-          reduce::CheckAllReduceWidth(reducing_threads, thread_step.scale,
-                                      "tl.reduce");
-          int block_threads =
-              static_cast<int>(*as_const_int(lower_args.thread_bounds->extent));
-          auto thread_offset = lower_args.thread_bounds->min;
+          const int64_t *participant_count =
+              as_const_int(allreduce_thread_range->extent);
+          ICHECK(participant_count != nullptr)
+              << "tl.reduce: batched AllReduce participant count must be a "
+                 "compile-time constant";
+          int workspace_stride = static_cast<int>(*participant_count);
 
           int vsize = Impl::GetPreferedVectorizedSize(clear_buffer->dtype,
                                                       lower_args.target);
@@ -1042,9 +1060,9 @@ template <typename Impl> struct ReduceLowerer {
               reduce::MakeCodegenReducer(op, can_batch_pack ? vsize : 1)
                   .value();
           std::string allreduce = Impl::MakeBatchAllReduce(
-              reducer, reducing_threads, thread_step.scale, thread_offset,
-              lower_args.thread_bounds->extent, eff_batch, block_threads,
-              lower_args.target);
+              reducer, reducing_threads, thread_step.scale,
+              allreduce_thread_range->min, allreduce_thread_range->extent,
+              eff_batch, workspace_stride, lower_args.target);
 
           DataType ws_dtype = can_batch_pack
                                   ? clear_buffer->dtype.with_lanes(vsize)
@@ -1052,7 +1070,7 @@ template <typename Impl> struct ReduceLowerer {
           PrimExpr workspace;
           bool need_workspace = reducing_threads > 32;
           if (need_workspace) {
-            int ws_size = block_threads * eff_batch;
+            int ws_size = workspace_stride * eff_batch;
             workspace = lower_args.add_workspace(ws_size, ws_dtype);
           }
 
@@ -1106,7 +1124,7 @@ template <typename Impl> struct ReduceLowerer {
                   pack_buf, Shuffle({a_load, b_load}, {0, 1}), {pack_j});
               Stmt pack_loop =
                   For(pack_j, 0, packed_batch, ForKind::kUnrolled, pack_body);
-              phases.push_back(pack_loop);
+              allreduce_phases.push_back(pack_loop);
 
               PrimExpr packed_ptr =
                   Call(DataType::Handle(), builtin::address_of(),
@@ -1115,7 +1133,7 @@ template <typename Impl> struct ReduceLowerer {
               if (need_workspace) {
                 args.push_back(workspace);
               }
-              phases.push_back(Evaluate(
+              allreduce_phases.push_back(Evaluate(
                   Call(DataType::Handle(), builtin::call_extern(), args)));
 
               Var unpack_j("unpack_j");
@@ -1142,7 +1160,7 @@ template <typename Impl> struct ReduceLowerer {
               });
               Stmt unpack_loop = For(unpack_j, 0, packed_batch,
                                      ForKind::kUnrolled, unpack_body);
-              phases.push_back(unpack_loop);
+              allreduce_phases.push_back(unpack_loop);
             }
           } else {
             for (int chunk = 0; chunk < num_chunks; chunk++) {
@@ -1160,10 +1178,21 @@ template <typename Impl> struct ReduceLowerer {
               if (need_workspace) {
                 args.push_back(workspace);
               }
-              phases.push_back(Evaluate(
+              allreduce_phases.push_back(Evaluate(
                   Call(DataType::Handle(), builtin::call_extern(), args)));
             }
           }
+        }
+
+        if (!allreduce_phases.empty()) {
+          Stmt allreduce_body = allreduce_phases.size() > 1
+                                    ? SeqStmt(allreduce_phases)
+                                    : allreduce_phases[0];
+          PrimExpr allreduce_predicate =
+              And(lower_args.thread_index >= allreduce_thread_range->min,
+                  lower_args.thread_index < allreduce_thread_range->min +
+                                                allreduce_thread_range->extent);
+          phases.push_back(IfThenElse(allreduce_predicate, allreduce_body));
         }
 
         if (need_duplicate) {
@@ -1220,20 +1249,10 @@ template <typename Impl> struct ReduceLowerer {
 
       for (const auto &thread_step : reduce_plan.thread_steps) {
         int reducing_threads = thread_step.ReducingThreads();
-        reduce::CheckAllReduceWidth(reducing_threads, thread_step.scale,
-                                    "tl.reduce");
-        auto thread_offset = lower_args.thread_bounds->min;
-        PrimExpr all_threads = lower_args.thread_bounds->extent;
-        if (reducing_threads > 32 &&
-            TargetSupportsNamedBarrier(lower_args.target)) {
-          Range thread_range = reduce::ResolveAllReduceThreadRange(
-              red_layout, lower_args.thread_bounds, lower_args.target);
-          thread_offset = thread_range->min;
-          all_threads = thread_range->extent;
-        }
         std::string allreduce = Impl::MakeScalarAllReduce(
             reduce::MakeCodegenReducer(op).value(), reducing_threads,
-            thread_step.scale, thread_offset, all_threads, lower_args.target);
+            thread_step.scale, allreduce_thread_range->min,
+            allreduce_thread_range->extent, lower_args.target);
         Array<PrimExpr> thread_reduce_args = {
             StringImm(allreduce), BufferLoad(clear_buffer, red_indices)};
         if (reducing_threads > 32) {
