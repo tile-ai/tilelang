@@ -68,6 +68,10 @@ def _module_has_shared_barrier(mod: IRModule) -> bool:
 def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.BindTarget(target)(mod)
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    # Record body-bound global bases before optional let inlining obscures
+    # their provenance. CopyAnalysis consumes this marker for every lowering
+    # path, independently of whether warp specialization is enabled.
+    mod = tilelang.cuda.transform.AnnotateDeviceBoundTmaCopies()(mod)
     if should_force_let_inline():
         # Force-let inline whenever the pass config requests it.
         mod = tilelang.transform.LetInline()(mod)
@@ -86,10 +90,10 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LayoutReducer()(mod)
 
     # @CUDA-specific
-    # Always annotate body-bound copy bases before layout inference. The
-    # existing pass entry runs this analysis first, then conditionally applies
-    # warp specialization according to target, config, and manual WS state.
-    mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
+    # Tile-level warp specialization runs before layout inference so that
+    # producer/consumer splitting happens at the high-level tile-op IR.
+    if allow_warp_specialized(target=target):
+        mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
 
     # @CUDA / Blackwell specific
     # Lower 2SM TCGEN5MMA and related on Blackwell target (must run before

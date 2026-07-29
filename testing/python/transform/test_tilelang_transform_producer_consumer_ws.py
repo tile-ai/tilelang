@@ -409,6 +409,7 @@ def test_tiled_ws_skips_device_bound_tma_descriptor_base():
     target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
     mod = tvm.tirx.transform.BindTarget(target)(mod)
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    mod = tilelang.cuda.transform.AnnotateDeviceBoundTmaCopies()(mod)
     mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
 
     annotated, total = _count_device_bound_copy_annotations(mod["main"])
