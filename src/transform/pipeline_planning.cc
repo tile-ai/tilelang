@@ -447,6 +447,9 @@ public:
   bool IsControlStmt() const { return control_stmt; }
   bool IsCopyStage() const { return copy_stage; }
   bool IsTmaCopy() const { return tma_copy; }
+  bool AdvancesPipelineStage() const {
+    return copy_stage && !conditional_execution;
+  }
 };
 
 class PipelineStageAnalyzer {
@@ -818,8 +821,9 @@ public:
     // The schedule is constructed in five steps:
     //
     // 1. Compute ASAP logical levels with a weighted longest path through the
-    //    dependency DAG.  Substantial work has weight one; scalar/control glue
-    //    has weight zero.
+    //    dependency DAG.  Only an unconditional global-to-shared copy advances
+    //    the level; synchronous compute and scalar/control glue are
+    //    transparent.
     // 2. Map the logical level range onto [0, max_stage], spreading short
     // chains
     //    across the requested distance and merging levels when the dependency
@@ -834,15 +838,18 @@ public:
     //    this is also a stable topological order.
 
     // Compute ASAP logical levels on the source-order topological traversal.
-    // Materialized scalar Binds, plain BufferStores, and control operations
-    // have zero weight: they are glue between substantial tile operations, not
-    // independent latency-bearing stages.  A substantial source advances all
-    // of its successors by one logical level, while zero-weight nodes are
-    // transparent.
+    // PipelinePlanning currently overlaps only global-to-shared transfer with
+    // its consumers.  Such a copy may lower to cp.async or TMA and therefore
+    // advances its successors by one logical level.  Other operations,
+    // including asynchronous-looking compute such as WGMMA, remain in the
+    // consumer level: wait_wgmma(0) cannot select an individual MMA group, so
+    // separating WGMMA from its wait would require accumulator multi-versioning
+    // without preserving useful independent in-flight work.
     std::vector<int> logical_levels(num_statements, 0);
     for (int dst = 0; dst < num_statements; ++dst) {
       for (int src : dag.predecessors[dst]) {
-        int edge_weight = (*pipeline_stage_infos)[src].IsZeroWeight() ? 0 : 1;
+        int edge_weight =
+            (*pipeline_stage_infos)[src].AdvancesPipelineStage() ? 1 : 0;
         logical_levels[dst] =
             std::max(logical_levels[dst], logical_levels[src] + edge_weight);
       }
@@ -991,6 +998,7 @@ public:
         break;
       }
     }
+    bool terminal_stage_compacted = false;
     if (compact_terminal_stage && max_stage >= 2 &&
         !final_stage_has_internal_buffer_producer) {
       for (PipelineStageInfo &pinfo : *pipeline_stage_infos) {
@@ -998,18 +1006,54 @@ public:
           --pinfo.stage;
         }
       }
+      terminal_stage_compacted = true;
     }
 
-    // Stage is the primary execution key.  Source index is the tie-breaker so
-    // same-stage dependencies retain program order and independent statements
-    // have deterministic output annotations.
+    // Without terminal retiming, place each early copy immediately after its
+    // last consumer.  The consumer reads the old cyclic slot before the copy
+    // overwrites it for a future iteration, saving one Buffer version.  This is
+    // the lifecycle ordering used by the old planner, generalized to the DAG
+    // schedule.  It is legal only across distinct stages; same-stage edges must
+    // retain source order.  Once the terminal stage has been retimed, the
+    // periodic boundary has already moved past the producer and the canonical
+    // order is producer-first instead.
     std::vector<int> indices(num_statements);
     std::iota(indices.begin(), indices.end(), 0);
-    std::stable_sort(indices.begin(), indices.end(), [&](int lhs, int rhs) {
-      int lhs_stage = (*pipeline_stage_infos)[lhs].stage;
-      int rhs_stage = (*pipeline_stage_infos)[rhs].stage;
-      return lhs_stage != rhs_stage ? lhs_stage < rhs_stage : lhs < rhs;
-    });
+    if (compact_terminal_stage && !terminal_stage_compacted) {
+      std::vector<int> lifecycle_order;
+      std::vector<bool> deferred_copy(num_statements, false);
+      lifecycle_order.reserve(num_statements);
+      for (int i = 0; i < num_statements; ++i) {
+        const PipelineStageInfo &pinfo = (*pipeline_stage_infos)[i];
+        if (pinfo.IsCopyStage() && pinfo.last_use_stmt_index >= 0 &&
+            pinfo.stage <
+                (*pipeline_stage_infos)[pinfo.last_use_stmt_index].stage) {
+          deferred_copy[i] = true;
+          continue;
+        }
+        lifecycle_order.push_back(i);
+        for (int copy = 0; copy < num_statements; ++copy) {
+          if (deferred_copy[copy] &&
+              (*pipeline_stage_infos)[copy].last_use_stmt_index == i) {
+            lifecycle_order.push_back(copy);
+            deferred_copy[copy] = false;
+          }
+        }
+      }
+      for (int copy = 0; copy < num_statements; ++copy) {
+        ICHECK(!deferred_copy[copy])
+            << "PipelinePlanning failed to place copy statement " << copy
+            << " after its last consumer";
+      }
+      ICHECK_EQ(lifecycle_order.size(), static_cast<size_t>(num_statements));
+      indices = std::move(lifecycle_order);
+    } else {
+      std::stable_sort(indices.begin(), indices.end(), [&](int lhs, int rhs) {
+        int lhs_stage = (*pipeline_stage_infos)[lhs].stage;
+        int rhs_stage = (*pipeline_stage_infos)[rhs].stage;
+        return lhs_stage != rhs_stage ? lhs_stage < rhs_stage : lhs < rhs;
+      });
+    }
     for (int order = 0; order < num_statements; ++order) {
       (*pipeline_stage_infos)[indices[order]].order = order;
     }
@@ -1413,6 +1457,11 @@ private:
       pipeline_stage_infos.push_back(std::move(pinfo));
     }
 
+    // Cyclic Buffer lifecycle ordering places an early copy immediately after
+    // its final consumer when the terminal stage is not retimed, so last-use
+    // information must be available before assigning order.
+    AnalyzeCopyLastUse(&pipeline_stage_infos);
+
     // Assign stages by a weighted longest-path traversal over the unified
     // buffer/scalar dependency DAG, then derive a stable topological order.
     //
@@ -1435,9 +1484,6 @@ private:
     AssignStagesAndOrders(
         &pipeline_stage_infos, max_stage,
         /*compact_terminal_stage=*/!manual_warp_specialization);
-
-    // Async producer grouping uses the last consumer of each copy.
-    AnalyzeCopyLastUse(&pipeline_stage_infos);
 
     ValidateScalarDependencies(pipeline_stage_infos);
 

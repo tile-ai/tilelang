@@ -33,6 +33,19 @@ def _collect_pipeline_loop_annotations(func):
     return annos
 
 
+def _collect_allocated_buffer_shapes(func):
+    shapes = {}
+
+    def _visit(node):
+        if not isinstance(node, tvm.tirx.SBlock):
+            return
+        for buffer in node.alloc_buffers:
+            shapes.setdefault(buffer.name, set()).add(tuple(int(dim) for dim in buffer.shape))
+
+    post_order_visit(func.body, _visit)
+    return shapes
+
+
 def _run_pipeline_planning(func, target=auto_target):
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(target)(mod)
@@ -363,18 +376,18 @@ def test_pipeline_planning_before_after_wgmma_gemm_plan():
                     ],
                     "software_pipeline_async_stages": [T.int32(0)],
                     "software_pipeline_order": [
-                        T.int32(0),
                         T.int32(1),
                         T.int32(2),
+                        T.int32(0),
                         T.int32(3),
                         T.int32(4),
                     ],
                     "software_pipeline_stage": [
                         T.int32(0),
                         T.int32(0),
-                        T.int32(1),
-                        T.int32(2),
-                        T.int32(2),
+                        T.int32(3),
+                        T.int32(3),
+                        T.int32(3),
                     ],
                     "tl_pipelined_num_stages": T.int32(3),
                 },
@@ -386,6 +399,14 @@ def test_pipeline_planning_before_after_wgmma_gemm_plan():
                 T.copy(C_local, D[0:64, 0:64])
 
     _check(before, after, target=sm90_target)
+
+    mod = _run_pipeline_planning(before, sm90_target)
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+    shapes = _collect_allocated_buffer_shapes(mod["main"])
+    assert (3, 64, 16) in shapes["A_shared"]
+    assert (3, 16, 64) in shapes["B_shared"]
+    assert (64, 64) in shapes["C_local"]
+    assert all(len(shape) == 2 for shape in shapes["C_local"])
 
 
 def test_pipeline_planning_before_after_tcgen05_gemm_plan():
@@ -482,6 +503,14 @@ def test_pipeline_planning_before_after_tcgen05_gemm_plan():
             T.copy(C_shared, D[0:128, 0:128])
 
     _check(before, after, target=sm100_target)
+
+    mod = _run_pipeline_planning(before, sm100_target)
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+    shapes = _collect_allocated_buffer_shapes(mod["main"])
+    assert (2, 128, 128) in shapes["A_shared"]
+    assert (2, 128, 128) in shapes["B_shared"]
+    assert (128, 128) in shapes["C_tmem"]
+    assert all(len(shape) == 2 for shape in shapes["C_tmem"])
 
 
 def test_pipeline_planning_before_after_explicit_plan_drops_replayable_bind_slot():
@@ -814,12 +843,14 @@ def test_pipeline_planning_keeps_final_stage_with_internal_buffer_producer():
     annos = _collect_pipeline_loop_annotations(mod["main"])
     assert len(annos) == 1
     stages = [int(v) for v in annos[0]["software_pipeline_stage"]]
+    orders = [int(v) for v in annos[0]["software_pipeline_order"]]
 
     # The zero-weight scalar store and its consumer are coalesced into the
     # provisional final stage.  Since the store still produces an internal
     # Buffer value, this is real work rather than a consumer-only endpoint and
     # must prevent terminal-stage retiming.
-    assert stages == [0, 1, 2, 2]
+    assert stages == [0, 2, 2, 2]
+    assert orders == [1, 0, 2, 3]
     tl.transform.InjectSoftwarePipeline()(mod)
 
 
