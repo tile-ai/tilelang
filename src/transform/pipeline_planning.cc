@@ -846,6 +846,17 @@ public:
       (*pipeline_stage_infos)[i].stage = stage;
     }
 
+    // A statement with no in-pipeline successor cannot hide latency for any
+    // later pipeline work.  Keep these sinks in the consumer stage, matching
+    // the old planner's treatment of statements that were not producers for a
+    // copy, while keeping the stage range bounded by num_stages.
+    const int last_stage = num_stages - 1;
+    for (int i = 0; i < num_statements; ++i) {
+      if (dag.successors[i].empty()) {
+        (*pipeline_stage_infos)[i].stage = last_stage;
+      }
+    }
+
     // Non-replayable scalar Binds are materialized once, so all direct users
     // must execute in the same stage.  Raising stages reaches the least fixed
     // point that satisfies this equality and all dependency inequalities.

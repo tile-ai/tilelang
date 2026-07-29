@@ -768,6 +768,32 @@ def test_pipeline_planning_mixed_buffer_scalar_producer_chain():
     tl.transform.InjectSoftwarePipeline()(mod)
 
 
+def test_pipeline_planning_places_dependency_sinks_in_last_stage():
+    @T.prim_func
+    def before(
+        A: T.Tensor((64,), T.float16),
+        B: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=16):
+            unused = T.alloc_shared((1,), T.int32)
+            A_shared = T.alloc_shared((16,), T.float16)
+            for k in T.Pipelined(4, num_stages=3):
+                unused[0] = k
+                T.copy(A[k * 16], A_shared)
+                T.copy(A_shared, B[k * 16])
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert len(annos) == 1
+    anno = annos[0]
+    stages = [int(v) for v in anno["software_pipeline_stage"]]
+    orders = [int(v) for v in anno["software_pipeline_order"]]
+
+    assert stages == [2, 0, 2]
+    assert orders == [1, 0, 2]
+    tl.transform.InjectSoftwarePipeline()(mod)
+
+
 def test_pipeline_planning_accepts_explicit_bind_free_annotations():
     @T.prim_func
     def before(
