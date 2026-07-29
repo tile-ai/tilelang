@@ -435,6 +435,7 @@ private:
     // (widest) member so that a block with a single TMEM buffer -- or with
     // buffers packing cannot help -- lowers exactly as it did before.
     std::vector<Buffer> arena_buffers;
+    std::vector<Buffer> arena_base_buffers;
     for (const TmemArena &arena : arenas) {
       const Buffer &base_buffer = tmem_buffers[arena.members.front()];
       Var arena_data(base_buffer->data->name_hint,
@@ -444,6 +445,9 @@ private:
                           base_buffer->data_alignment,
                           base_buffer->offset_factor, base_buffer->buffer_type);
       arena_buffers.push_back(arena_buffer);
+      Buffer arena_base = decl_buffer({Integer(1)}, tmem_dtype_,
+                                      base_buffer->name + "_base", "local");
+      arena_base_buffers.push_back(arena_base);
       buffer_data_to_buffer_.Set(arena_data, arena_buffer);
       for (int member : arena.members) {
         const Buffer &buffer = tmem_buffers[member];
@@ -452,6 +456,7 @@ private:
         tmem_col_offsets_[buffer->data] = placements[member].col_offset;
         tmem_num_cols_allocated_[buffer->data] = arena.num_cols_allocated;
         tmem_call_annotations_[buffer->data] = tmem_call_ann;
+        tmem_base_buffer_remap_.Set(buffer->data, arena_base);
       }
     }
 
@@ -469,6 +474,12 @@ private:
       Buffer arena_buffer = (*it).second;
       if (declared_arenas.insert(arena_buffer.get()).second) {
         alloc_buffers.push_back(arena_buffer);
+        auto arena_it = std::find_if(
+            arena_buffers.begin(), arena_buffers.end(),
+            [&](const Buffer &candidate) { return candidate.same_as(arena_buffer); });
+        ICHECK(arena_it != arena_buffers.end());
+        alloc_buffers.push_back(
+            arena_base_buffers[std::distance(arena_buffers.begin(), arena_it)]);
       }
     }
     block.CopyOnWrite()->alloc_buffers = alloc_buffers;
@@ -537,6 +548,11 @@ private:
     new_body.push_back(
         Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
                       {StringImm("shared")})));
+    for (size_t i = 0; i < arena_buffers.size(); ++i) {
+      new_body.push_back(BufferStore(arena_base_buffers[i],
+                                     BufferLoad(arena_buffers[i], {0}),
+                                     {Integer(0)}));
+    }
     new_body.push_back(block->body);
     if (!dealloc_tmem_calls_.empty()) {
       if (tmem_call_ann.find("use_2cta") != tmem_call_ann.end()) {
@@ -606,14 +622,11 @@ private:
     auto indices = load->indices;
 
     if (buffer_remap_.count(buffer)) {
-      auto new_buffer = buffer_remap_[load->buffer];
-      return BufferLoad(new_buffer, {0}) + GetArenaTmemOffset(buffer, indices);
+      return BufferLoad(tmem_base_buffer_remap_.at(buffer->data), {0}) +
+             GetArenaTmemOffset(buffer, indices);
     } else if (var_remap_.count(buffer->data)) {
-      auto new_buffer = Buffer(
-          var_remap_[buffer->data], tmem_dtype_, buffer->shape, buffer->strides,
-          buffer->elem_offset, buffer->name, buffer->data_alignment,
-          buffer->offset_factor, buffer->buffer_type);
-      return BufferLoad(new_buffer, {0}) + GetArenaTmemOffset(buffer, indices);
+      return BufferLoad(tmem_base_buffer_remap_.at(buffer->data), {0}) +
+             GetArenaTmemOffset(buffer, indices);
     }
     return load;
   }
@@ -791,6 +804,7 @@ private:
   IterVar thread_var_;
   Target target_;
   Map<Var, Var> var_remap_;
+  Map<Var, Buffer> tmem_base_buffer_remap_;
   Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Buffer, Buffer> buffer_remap_;
   // Mapping from data Var of a Buffer to Buffer, for lookup

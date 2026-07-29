@@ -135,18 +135,18 @@ def mqa_logits_fp4_persistent_ws_kernel(
         kv_shared_1 = T.alloc_shared((num_stages, half_kv, head_dim), T.float4_e2m1_unpacked)
         sf_kv_shared_0 = T.alloc_shared((num_stages, half_kv), T.uint32)
         sf_kv_shared_1 = T.alloc_shared((num_stages, half_kv), T.uint32)
-        c_tmem = T.alloc_tmem((half_kv, 512), accum_dtype)
-        sf_q_col_0 = block_q * heads * num_tmem_stages
-        sf_q_col_1 = sf_q_col_0 + 4
-        sf_kv_col_0 = sf_q_col_1 + 4
-        sf_kv_col_1 = sf_kv_col_0 + 4
+        c_tmem = T.alloc_tmem((num_tmem_stages + 1, half_kv, block_q * heads), accum_dtype)
+        sf_version = num_tmem_stages
+        sf_q_col = 0
+        sf_kv_col_0 = 4
+        sf_kv_col_1 = 8
         q_loaded = T.alloc_barrier([32] * num_q_stages)
-        q_empty = T.alloc_barrier([352] * num_q_stages)
+        q_empty = T.alloc_barrier([320] * num_q_stages)
         q_sf_full = T.alloc_barrier([32] * num_q_stages)
         kv_loaded = T.alloc_barrier([32] * num_stages)
         kv_sf_full_0 = T.alloc_barrier([32] * num_stages)
         kv_sf_full_1 = T.alloc_barrier([32] * num_stages)
-        kv_empty = T.alloc_barrier([64] * num_stages)
+        kv_empty = T.alloc_barrier([256] * num_stages)
         tmem_full = T.alloc_barrier([1] * num_tmem_stages)
         tmem_empty = T.alloc_barrier([128] * num_tmem_stages)
 
@@ -315,22 +315,29 @@ def mqa_logits_fp4_persistent_ws_kernel(
 
                 T.mbarrier_wait_parity(q_loaded[q_stage], q_phase)
                 T.mbarrier_wait_parity(q_sf_full[q_stage], q_phase)
-                T.tcgen05_cp_warpx4(sf_q_shared[q_stage, :], c_tmem, tmem_col_offset=sf_q_col_0)
+                T.tcgen05_cp_warpx4(
+                    sf_q_shared[q_stage, :],
+                    c_tmem,
+                    tmem_col_offset=sf_version * block_q * heads + sf_q_col,
+                )
                 kv_iter = T.alloc_var(T.int32, init=0)
                 while kv_iter < num_kv_blocks:
                     stage = tile_iter % num_stages
                     parity = (tile_iter // num_stages) & 1
-                    tmem_col = tmem_stage * block_q * heads
                     T.mbarrier_wait_parity(tmem_empty[tmem_stage], tmem_phase ^ 1)
                     T.mbarrier_wait_parity(kv_loaded[stage], parity)
                     T.mbarrier_wait_parity(kv_sf_full_0[stage], parity)
-                    T.tcgen05_cp_warpx4(sf_kv_shared_0[stage, :], c_tmem, tmem_col_offset=sf_kv_col_0)
+                    T.tcgen05_cp_warpx4(
+                        sf_kv_shared_0[stage, :],
+                        c_tmem,
+                        tmem_col_offset=sf_version * block_q * heads + sf_kv_col_0,
+                    )
                     T.tcgen05_gemm_blockscaled(
                         kv_shared_0[stage, :, :],
                         q_shared[q_stage, :, :],
-                        c_tmem[:, tmem_col : tmem_col + block_q * heads],
-                        c_tmem[:, sf_kv_col_0 : sf_kv_col_0 + 4],
-                        c_tmem[:, sf_q_col_0 : sf_q_col_0 + 4],
+                        c_tmem[tmem_stage, :, :],
+                        c_tmem[sf_version, :, sf_kv_col_0 : sf_kv_col_0 + 4],
+                        c_tmem[sf_version, :, sf_q_col : sf_q_col + 4],
                         transpose_B=True,
                         mbar=tmem_full[tmem_stage],
                         clear_accum=True,
@@ -338,12 +345,35 @@ def mqa_logits_fp4_persistent_ws_kernel(
                         sf_a_granularity_k=sf_granularity_k,
                         sf_b_granularity_k=sf_granularity_k,
                     )
-                    T.mbarrier_arrive(kv_empty[stage])
-                    tile_iter = tile_iter + 1
-                    tmem_stage = tmem_stage + tmem_stage_step
+                    tmem_stage = tmem_stage + 1
                     if tmem_stage >= num_tmem_stages:
                         tmem_phase = tmem_phase ^ 1
                         tmem_stage = tmem_stage - num_tmem_stages
+                    T.mbarrier_wait_parity(tmem_empty[tmem_stage], tmem_phase ^ 1)
+                    T.mbarrier_wait_parity(kv_sf_full_1[stage], parity)
+                    T.tcgen05_cp_warpx4(
+                        sf_kv_shared_1[stage, :],
+                        c_tmem,
+                        tmem_col_offset=sf_version * block_q * heads + sf_kv_col_1,
+                    )
+                    T.tcgen05_gemm_blockscaled(
+                        kv_shared_1[stage, :, :],
+                        q_shared[q_stage, :, :],
+                        c_tmem[tmem_stage, :, :],
+                        c_tmem[sf_version, :, sf_kv_col_1 : sf_kv_col_1 + 4],
+                        c_tmem[sf_version, :, sf_q_col : sf_q_col + 4],
+                        transpose_B=True,
+                        mbar=tmem_full[tmem_stage],
+                        clear_accum=True,
+                        k_start=0,
+                        sf_a_granularity_k=sf_granularity_k,
+                        sf_b_granularity_k=sf_granularity_k,
+                    )
+                    tmem_stage = tmem_stage + 1
+                    if tmem_stage >= num_tmem_stages:
+                        tmem_phase = tmem_phase ^ 1
+                        tmem_stage = tmem_stage - num_tmem_stages
+                    tile_iter = tile_iter + 1
                     kv_iter = kv_iter + 1
 
                 T.mbarrier_arrive(q_empty[q_stage])
@@ -352,66 +382,6 @@ def mqa_logits_fp4_persistent_ws_kernel(
 
         elif 96 <= tx < 128:
             T.dec_max_nreg(56)
-            q_block = T.alloc_var(T.int32, init=block_id)
-            q_iter = T.alloc_var(T.int32, init=0)
-            tile_iter = T.alloc_var(T.int32, init=0)
-            tmem_stage = T.alloc_var(T.int32, init=1)
-            tmem_phase = T.alloc_var(T.int32, init=0)
-            while q_block < num_q_blocks:
-                q_row = q_block * block_q
-                q_stage = q_iter % num_q_stages
-                q_phase = (q_iter // num_q_stages) & 1
-                tile_min_ks = T.alloc_var(T.int32)
-                tile_max_ke = T.alloc_var(T.int32)
-                tile_min_ks = KS[q_row]
-                tile_max_ke = KE[q_row]
-                for qi_offset in T.unroll(block_q - 1):
-                    qi = qi_offset + 1
-                    tile_min_ks = T.min(tile_min_ks, KS[q_row + qi])
-                    tile_max_ke = T.max(tile_max_ke, KE[q_row + qi])
-                first_bkv = T.alloc_var(T.int32)
-                last_bkv = T.alloc_var(T.int32)
-                num_kv_blocks = T.alloc_var(T.int32)
-                first_bkv = tile_min_ks // block_kv
-                last_bkv = T.ceildiv(tile_max_ke, block_kv)
-                num_kv_blocks = T.max(last_bkv - first_bkv, 0)
-
-                T.mbarrier_wait_parity(q_loaded[q_stage], q_phase)
-                T.mbarrier_wait_parity(q_sf_full[q_stage], q_phase)
-                T.tcgen05_cp_warpx4(sf_q_shared[q_stage, :], c_tmem, tmem_col_offset=sf_q_col_1)
-                kv_iter = T.alloc_var(T.int32, init=0)
-                while kv_iter < num_kv_blocks:
-                    stage = tile_iter % num_stages
-                    parity = (tile_iter // num_stages) & 1
-                    tmem_col = tmem_stage * block_q * heads
-                    T.mbarrier_wait_parity(tmem_empty[tmem_stage], tmem_phase ^ 1)
-                    T.mbarrier_wait_parity(kv_loaded[stage], parity)
-                    T.mbarrier_wait_parity(kv_sf_full_1[stage], parity)
-                    T.tcgen05_cp_warpx4(sf_kv_shared_1[stage, :], c_tmem, tmem_col_offset=sf_kv_col_1)
-                    T.tcgen05_gemm_blockscaled(
-                        kv_shared_1[stage, :, :],
-                        q_shared[q_stage, :, :],
-                        c_tmem[:, tmem_col : tmem_col + block_q * heads],
-                        c_tmem[:, sf_kv_col_1 : sf_kv_col_1 + 4],
-                        c_tmem[:, sf_q_col_1 : sf_q_col_1 + 4],
-                        transpose_B=True,
-                        mbar=tmem_full[tmem_stage],
-                        clear_accum=True,
-                        k_start=0,
-                        sf_a_granularity_k=sf_granularity_k,
-                        sf_b_granularity_k=sf_granularity_k,
-                    )
-                    T.mbarrier_arrive(kv_empty[stage])
-                    tile_iter = tile_iter + 1
-                    tmem_stage = tmem_stage + tmem_stage_step
-                    if tmem_stage >= num_tmem_stages:
-                        tmem_phase = tmem_phase ^ 1
-                        tmem_stage = tmem_stage - num_tmem_stages
-                    kv_iter = kv_iter + 1
-
-                T.mbarrier_arrive(q_empty[q_stage])
-                q_block = q_block + sm_num
-                q_iter = q_iter + 1
 
         elif 128 <= tx < 256:
             T.inc_max_nreg(224)
@@ -420,6 +390,7 @@ def mqa_logits_fp4_persistent_ws_kernel(
             weights_epi0 = T.alloc_fragment((block_q, heads), accum_dtype)
             q_block = T.alloc_var(T.int32, init=block_id)
             q_iter = T.alloc_var(T.int32, init=0)
+            tile_iter = T.alloc_var(T.int32, init=0)
             tmem_stage = T.alloc_var(T.int32, init=0)
             tmem_phase = T.alloc_var(T.int32, init=0)
             while q_block < num_q_blocks:
@@ -447,9 +418,7 @@ def mqa_logits_fp4_persistent_ws_kernel(
                 kv_iter = T.alloc_var(T.int32, init=0)
                 while kv_iter < num_kv_blocks:
                     kv_row = (first_bkv + kv_iter) * block_kv
-                    tmem_col = tmem_stage * block_q * heads
-                    T.assume(tmem_col >= 0)
-                    T.assume(tmem_col + block_q * heads <= block_q * heads * num_tmem_stages)
+                    stage = tile_iter % num_stages
                     T.mbarrier_wait_parity(tmem_full[tmem_stage], tmem_phase)
                     for qi_epi0 in T.unroll(block_q):
                         for bn_init_epi0 in T.Parallel(half_kv):
@@ -457,8 +426,9 @@ def mqa_logits_fp4_persistent_ws_kernel(
                         for h_base_epi0 in T.unroll(heads // 16):
                             T.copy(
                                 c_tmem[
+                                    tmem_stage,
                                     :,
-                                    tmem_col + qi_epi0 * heads + h_base_epi0 * 16 : tmem_col + qi_epi0 * heads + (h_base_epi0 + 1) * 16,
+                                    qi_epi0 * heads + h_base_epi0 * 16 : qi_epi0 * heads + (h_base_epi0 + 1) * 16,
                                 ],
                                 c_epi0,
                             )
@@ -476,6 +446,8 @@ def mqa_logits_fp4_persistent_ws_kernel(
                             Logits[q_row + qi_epi0, kv_row + bn_store_epi0] = T.cast(logits_epi0[bn_store_epi0], logits_dtype)
                         T.sync_warp()
                     T.mbarrier_arrive(tmem_empty[tmem_stage])
+                    T.mbarrier_arrive(kv_empty[stage])
+                    tile_iter = tile_iter + 1
                     tmem_stage = tmem_stage + tmem_stage_step
                     if tmem_stage >= num_tmem_stages:
                         tmem_phase = tmem_phase ^ 1
@@ -493,6 +465,7 @@ def mqa_logits_fp4_persistent_ws_kernel(
             weights_epi1 = T.alloc_fragment((block_q, heads), accum_dtype)
             q_block = T.alloc_var(T.int32, init=block_id)
             q_iter = T.alloc_var(T.int32, init=0)
+            tile_iter = T.alloc_var(T.int32, init=0)
             tmem_stage = T.alloc_var(T.int32, init=1)
             tmem_phase = T.alloc_var(T.int32, init=0)
             while q_block < num_q_blocks:
@@ -520,9 +493,7 @@ def mqa_logits_fp4_persistent_ws_kernel(
                 kv_iter = T.alloc_var(T.int32, init=0)
                 while kv_iter < num_kv_blocks:
                     kv_row = (first_bkv + kv_iter) * block_kv
-                    tmem_col = tmem_stage * block_q * heads
-                    T.assume(tmem_col >= 0)
-                    T.assume(tmem_col + block_q * heads <= block_q * heads * num_tmem_stages)
+                    stage = tile_iter % num_stages
                     T.mbarrier_wait_parity(tmem_full[tmem_stage], tmem_phase)
                     for qi_epi1 in T.unroll(block_q):
                         for bn_init_epi1 in T.Parallel(half_kv):
@@ -530,8 +501,9 @@ def mqa_logits_fp4_persistent_ws_kernel(
                         for h_base_epi1 in T.unroll(heads // 16):
                             T.copy(
                                 c_tmem[
+                                    tmem_stage,
                                     :,
-                                    tmem_col + qi_epi1 * heads + h_base_epi1 * 16 : tmem_col + qi_epi1 * heads + (h_base_epi1 + 1) * 16,
+                                    qi_epi1 * heads + h_base_epi1 * 16 : qi_epi1 * heads + (h_base_epi1 + 1) * 16,
                                 ],
                                 c_epi1,
                             )
@@ -549,6 +521,8 @@ def mqa_logits_fp4_persistent_ws_kernel(
                             Logits[q_row + qi_epi1, kv_row + half_kv + bn_store_epi1] = T.cast(logits_epi1[bn_store_epi1], logits_dtype)
                         T.sync_warp()
                     T.mbarrier_arrive(tmem_empty[tmem_stage])
+                    T.mbarrier_arrive(kv_empty[stage])
+                    tile_iter = tile_iter + 1
                     tmem_stage = tmem_stage + tmem_stage_step
                     if tmem_stage >= num_tmem_stages:
                         tmem_phase = tmem_phase ^ 1
@@ -611,9 +585,9 @@ def mqa_logits_fp8_persistent_ws_kernel(
         kv_shared_0 = T.alloc_shared((num_stages, half_kv, head_dim), T.float8_e4m3fn)
         kv_shared_1 = T.alloc_shared((num_stages, half_kv, head_dim), T.float8_e4m3fn)
         kv_scale_shared = T.alloc_shared((num_stages, block_kv), accum_dtype)
-        c_tmem = T.alloc_tmem((half_kv, block_q * heads * num_tmem_stages), accum_dtype)
+        c_tmem = T.alloc_tmem((num_tmem_stages, half_kv, block_q * heads), accum_dtype)
         q_loaded = T.alloc_barrier([32] * num_q_stages)
-        q_empty = T.alloc_barrier([320] * num_q_stages)
+        q_empty = T.alloc_barrier([288] * num_q_stages)
         kv_loaded = T.alloc_barrier([32] * num_stages)
         kv_empty = T.alloc_barrier([256] * num_stages)
         tmem_full = T.alloc_barrier([1] * num_tmem_stages)
@@ -733,72 +707,31 @@ def mqa_logits_fp8_persistent_ws_kernel(
                 while kv_iter < num_kv_blocks:
                     stage = gemm_iter % num_stages
                     parity = (gemm_iter // num_stages) & 1
-                    tmem_col = tmem_stage * block_q * heads
                     T.mbarrier_wait_parity(tmem_empty[tmem_stage], tmem_phase ^ 1)
                     T.mbarrier_wait_parity(kv_loaded[stage], parity)
                     T.tcgen05_gemm(
                         kv_shared_0[stage, :, :],
                         q_shared[q_stage, :, :],
-                        c_tmem[:, tmem_col : tmem_col + block_q * heads],
+                        c_tmem[tmem_stage, :, :],
                         transpose_B=True,
                         mbar=tmem_full[tmem_stage],
                         clear_accum=True,
                     )
-                    gemm_iter = gemm_iter + 1
-                    tmem_stage = tmem_stage + tmem_stage_step
+                    tmem_stage = tmem_stage + 1
                     if tmem_stage >= num_tmem_stages:
                         tmem_phase = tmem_phase ^ 1
                         tmem_stage = tmem_stage - num_tmem_stages
-                    kv_iter = kv_iter + 1
-
-                T.mbarrier_arrive(q_empty[q_stage])
-                q_block = q_block + sm_num
-                q_iter = q_iter + 1
-
-        elif 64 <= tx < 96:
-            T.dec_max_nreg(40)
-            q_block = T.alloc_var(T.int32, init=block_id)
-            q_iter = T.alloc_var(T.int32, init=0)
-            gemm_iter = T.alloc_var(T.int32, init=0)
-            tmem_stage = T.alloc_var(T.int32, init=1)
-            tmem_phase = T.alloc_var(T.int32, init=0)
-            while q_block < num_q_blocks:
-                q_row = q_block * block_q
-                q_stage = q_iter % num_q_stages
-                q_phase = (q_iter // num_q_stages) & 1
-                tile_min_ks = T.alloc_var(T.int32)
-                tile_max_ke = T.alloc_var(T.int32)
-                tile_min_ks = KS[q_row]
-                tile_max_ke = KE[q_row]
-                for qi_offset_tail1 in T.unroll(block_q - 1):
-                    qi_scan_tail1 = qi_offset_tail1 + 1
-                    tile_min_ks = T.min(tile_min_ks, KS[q_row + qi_scan_tail1])
-                    tile_max_ke = T.max(tile_max_ke, KE[q_row + qi_scan_tail1])
-                first_bkv = T.alloc_var(T.int32)
-                last_bkv = T.alloc_var(T.int32)
-                num_kv_blocks = T.alloc_var(T.int32)
-                first_bkv = tile_min_ks // block_kv
-                last_bkv = T.ceildiv(tile_max_ke, block_kv)
-                num_kv_blocks = T.max(last_bkv - first_bkv, 0)
-
-                T.mbarrier_wait_parity(q_loaded[q_stage], q_phase)
-                kv_iter = T.alloc_var(T.int32, init=0)
-                while kv_iter < num_kv_blocks:
-                    stage = gemm_iter % num_stages
-                    parity = (gemm_iter // num_stages) & 1
-                    tmem_col = tmem_stage * block_q * heads
                     T.mbarrier_wait_parity(tmem_empty[tmem_stage], tmem_phase ^ 1)
-                    T.mbarrier_wait_parity(kv_loaded[stage], parity)
                     T.tcgen05_gemm(
                         kv_shared_1[stage, :, :],
                         q_shared[q_stage, :, :],
-                        c_tmem[:, tmem_col : tmem_col + block_q * heads],
+                        c_tmem[tmem_stage, :, :],
                         transpose_B=True,
                         mbar=tmem_full[tmem_stage],
                         clear_accum=True,
                     )
                     gemm_iter = gemm_iter + 1
-                    tmem_stage = tmem_stage + tmem_stage_step
+                    tmem_stage = tmem_stage + 1
                     if tmem_stage >= num_tmem_stages:
                         tmem_phase = tmem_phase ^ 1
                         tmem_stage = tmem_stage - num_tmem_stages
@@ -808,7 +741,7 @@ def mqa_logits_fp8_persistent_ws_kernel(
                 q_block = q_block + sm_num
                 q_iter = q_iter + 1
 
-        elif 96 <= tx < 128:
+        elif 64 <= tx < 128:
             T.dec_max_nreg(40)
 
         elif 128 <= tx < 256:
@@ -844,9 +777,6 @@ def mqa_logits_fp8_persistent_ws_kernel(
                 while kv_iter < num_kv_blocks:
                     kv_row = (first_bkv + kv_iter) * block_kv
                     stage = gemm_iter % num_stages
-                    tmem_col = tmem_stage * block_q * heads
-                    T.assume(tmem_col >= 0)
-                    T.assume(tmem_col + block_q * heads <= block_q * heads * num_tmem_stages)
                     T.mbarrier_wait_parity(tmem_full[tmem_stage], tmem_phase)
                     for qi_epi0 in T.unroll(block_q):
                         for bn_init_epi0 in T.Parallel(half_kv):
@@ -854,8 +784,9 @@ def mqa_logits_fp8_persistent_ws_kernel(
                         for h_base in T.unroll(heads // 16):
                             T.copy(
                                 c_tmem[
+                                    tmem_stage,
                                     :,
-                                    tmem_col + qi_epi0 * heads + h_base * 16 : tmem_col + qi_epi0 * heads + (h_base + 1) * 16,
+                                    qi_epi0 * heads + h_base * 16 : qi_epi0 * heads + (h_base + 1) * 16,
                                 ],
                                 c_epi0,
                             )
@@ -920,9 +851,6 @@ def mqa_logits_fp8_persistent_ws_kernel(
                 while kv_iter < num_kv_blocks:
                     kv_row = (first_bkv + kv_iter) * block_kv
                     stage = gemm_iter % num_stages
-                    tmem_col = tmem_stage * block_q * heads
-                    T.assume(tmem_col >= 0)
-                    T.assume(tmem_col + block_q * heads <= block_q * heads * num_tmem_stages)
                     T.mbarrier_wait_parity(tmem_full[tmem_stage], tmem_phase)
                     for qi_epi1 in T.unroll(block_q):
                         for bn_init_epi1 in T.Parallel(half_kv):
@@ -930,8 +858,9 @@ def mqa_logits_fp8_persistent_ws_kernel(
                         for h_base in T.unroll(heads // 16):
                             T.copy(
                                 c_tmem[
+                                    tmem_stage,
                                     :,
-                                    tmem_col + qi_epi1 * heads + h_base * 16 : tmem_col + qi_epi1 * heads + (h_base + 1) * 16,
+                                    qi_epi1 * heads + h_base * 16 : qi_epi1 * heads + (h_base + 1) * 16,
                                 ],
                                 c_epi1,
                             )

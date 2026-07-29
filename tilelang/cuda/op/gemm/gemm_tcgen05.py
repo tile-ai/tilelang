@@ -256,8 +256,8 @@ class GemmTCGEN5(GemmBase):
         B_shared = self.BRegion
         C_local = self.CRegion
         clear_accum = self.clear_accum
-        SFA_tmem = self.SFARegion.buffer
-        SFB_tmem = self.SFBRegion.buffer
+        SFA_tmem = self.SFARegion
+        SFB_tmem = self.SFBRegion
         sf_k_start = self.sf_k_start
         # NOTE: mbar_phase_expr is intentionally unused in the current
         # frontend, which always requests explicit-async semantics. Keep the

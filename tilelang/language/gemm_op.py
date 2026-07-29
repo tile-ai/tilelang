@@ -363,11 +363,16 @@ def tcgen05_gemm_blockscaled(
     B_shape = retrieve_shape(B_region)
     C_shape = retrieve_shape(C_region)
 
-    assert len(C_shape) == 2, "current only support C as a 2D tensor"
+    assert len(C_shape) >= 2, "current only support C as a 2D or higher-order tensor"
     assert len(A_shape) >= 2, "current only support A as a 2D or higher-order tensor"
     assert len(B_shape) >= 2, "current only support B as a 2D or higher-order tensor"
+    for shape, name in ((A_shape, "A"), (B_shape, "B"), (C_shape, "C")):
+        for i in range(len(shape) - 2):
+            assert shape[i] == 1, (
+                f"current only support {name} as a 2D or higher-order tensor with the last two dimensions being the matrix dimensions"
+            )
 
-    M, N = C_shape
+    M, N = C_shape[-2], C_shape[-1]
     M_A = A_shape[-1] if transpose_A else A_shape[-2]
     N_B = B_shape[-2] if transpose_B else B_shape[-1]
     K = A_shape[-2] if transpose_A else A_shape[-1]
@@ -397,7 +402,7 @@ def tcgen05_gemm_blockscaled(
         )
         mbar = to_buffer_region(mbar, access_type="rw")
 
-    C_coords = [r.min for r in C_region.region]
+    C_coords = [r.min for r in C_region.region[-2:]]
 
     # Convert BufferRegion to tl.region calls for arguments
     A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])
@@ -587,7 +592,7 @@ def make_blockscaled_gemm_layout(
     C_shape = retrieve_shape(C_region)
     A_shape = retrieve_shape(A_region)
 
-    M, N = int(C_shape[0]), int(C_shape[1])
+    M, N = int(C_shape[-2]), int(C_shape[-1])
     K = int(A_shape[-2] if transpose_A else A_shape[-1])
     a_dtype = str(A_region.buffer.dtype)
     accum_dtype = str(C_region.buffer.dtype)
