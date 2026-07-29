@@ -23,6 +23,23 @@ namespace {
 using tvm::tl::ConstrSet;
 using tvm::tl::ConstrVisitor;
 
+// arith::Analyzer only models scalar arithmetic, and its Z3 backend aborts
+// compilation on a vector node (Ramp, Broadcast, ...). Reduce a vector
+// expression to one lane's scalar expression, or return an undefined Optional
+// when that lane is not expressible as a scalar (e.g. a vector BufferLoad).
+Optional<PrimExpr> ExtractLane(const PrimExpr &value, int lane) {
+  if (value.dtype().is_scalar()) {
+    return value;
+  }
+  if (const auto *broadcast = value.as<BroadcastNode>()) {
+    return broadcast->value;
+  }
+  if (const auto *ramp = value.as<RampNode>()) {
+    return ramp->base + make_const(ramp->base.dtype(), lane) * ramp->stride;
+  }
+  return Optional<PrimExpr>();
+}
+
 struct ParallelLoopVerifier : public ConstrVisitor {
   std::vector<Var> parallel_loop_vars_;
   std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> reducers;
@@ -74,7 +91,23 @@ struct ParallelLoopVerifier : public ConstrVisitor {
 
     cset.Extend(cset.Substitute(subs));
     for (const auto &idx : op->indices) {
-      cset.AddConstr(idx == tirx::Substitute(idx, subs));
+      PrimExpr other_idx = tirx::Substitute(idx, subs);
+      if (idx.dtype().is_scalar()) {
+        cset.AddConstr(idx == other_idx);
+        continue;
+      }
+      // Constrain lanes one by one to keep the constraint scalar; dropping
+      // it would lose injectivity and report a spurious data race.
+      if (!idx.dtype().is_fixed_length_vector()) {
+        continue;
+      }
+      for (int lane = 0; lane < idx.dtype().lanes(); ++lane) {
+        Optional<PrimExpr> lane_idx = ExtractLane(idx, lane);
+        Optional<PrimExpr> other_lane_idx = ExtractLane(other_idx, lane);
+        if (lane_idx.defined() && other_lane_idx.defined()) {
+          cset.AddConstr(lane_idx.value() == other_lane_idx.value());
+        }
+      }
     }
     arith::Analyzer analyzer;
     cset.Populate(analyzer);
@@ -83,7 +116,29 @@ struct ParallelLoopVerifier : public ConstrVisitor {
     for (const auto &[var, other_var] : parallel_var_pairs) {
       same_iteration = And(same_iteration, EQ(var, other_var));
     }
-    PrimExpr same_value = op->value == tirx::Substitute(op->value, subs);
+    PrimExpr other_value = tirx::Substitute(op->value, subs);
+    PrimExpr same_value;
+    if (op->value.dtype().is_scalar()) {
+      same_value = op->value == other_value;
+    } else if (op->value.dtype().is_fixed_length_vector()) {
+      // Lane by lane: a vector-valued predicate is accepted by neither Or()
+      // nor the provers.
+      same_value = Bool(true);
+      for (int lane = 0; lane < op->value.dtype().lanes(); ++lane) {
+        Optional<PrimExpr> lane_value = ExtractLane(op->value, lane);
+        Optional<PrimExpr> other_lane_value = ExtractLane(other_value, lane);
+        if (!lane_value.defined() || !other_lane_value.defined()) {
+          // Not scalarizable: fall back to the same-iteration check.
+          same_value = Bool(false);
+          break;
+        }
+        same_value =
+            And(same_value, EQ(lane_value.value(), other_lane_value.value()));
+      }
+    } else {
+      // Scalable vector: the lane count is unknown at compile time.
+      same_value = Bool(false);
+    }
     PrimExpr race_free = Or(same_iteration, same_value);
     if (analyzer.CanProve(race_free)) {
       StmtExprVisitor::VisitStmt_(op);
