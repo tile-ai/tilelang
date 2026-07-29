@@ -171,13 +171,12 @@ def _make_rs_prim_func(target_dtype: str, M: int = 128, threads: int = 128):
     return main
 
 
-def _lower_rs_prim_func(target_dtype: str, arch: str, *, enable_device_compile: bool = False):
+def _lower_rs_prim_func(target_dtype: str, arch: str):
     target = tvm.target.Target({"kind": "cuda", "arch": arch})
     with target:
         return tilelang.lower(
             _make_rs_prim_func(target_dtype),
             target=target,
-            enable_device_compile=enable_device_compile,
         )
 
 
@@ -260,56 +259,6 @@ def test_cast_rs_fp16_bf16_per_element_rbits_codegen(target_dtype, expected):
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
     with target:
         artifact = tilelang.lower(main, target=target)
-
-    assert expected in artifact.kernel_source
-
-
-@tilelang.testing.requires_cuda
-@pytest.mark.parametrize(
-    "target_dtype,expected_error",
-    [
-        ("float16", "Stochastic rounding f32-to-FP16 requires sm_100a"),
-        ("bfloat16", "Stochastic rounding f32-to-BF16 requires sm_100a"),
-    ],
-)
-def test_cast_rs_fp16_bf16_requires_sm100a(target_dtype, expected_error):
-    with pytest.raises(RuntimeError, match=expected_error):
-        _lower_rs_prim_func(target_dtype, "sm_100", enable_device_compile=True)
-
-
-@tilelang.testing.requires_cuda
-@pytest.mark.parametrize(
-    "target_dtype,expected",
-    [
-        ("float16", "__tl_cvt_f32x1_to_f16x1_rs_sat"),
-        ("bfloat16", "__tl_cvt_f32x1_to_bf16x1_rs_sat"),
-    ],
-)
-def test_cast_rs_fp16_bf16_compiles_for_sm100a(target_dtype, expected):
-    artifact = _lower_rs_prim_func(target_dtype, "sm_100a", enable_device_compile=True)
-
-    assert expected in artifact.kernel_source
-
-
-@tilelang.testing.requires_cuda
-@pytest.mark.parametrize("target_dtype", ["float8_e4m3fn", "float8_e5m2", "float4_e2m1fn"])
-@pytest.mark.parametrize("arch", ["sm_89", "sm_100"])
-def test_cast_rs_static_asserts_without_sm100a_feature(target_dtype, arch):
-    with pytest.raises(RuntimeError, match=r"Stochastic rounding f32-to-FP[48] requires sm_100a"):
-        _lower_rs_prim_func(target_dtype, arch, enable_device_compile=True)
-
-
-@tilelang.testing.requires_cuda
-@pytest.mark.parametrize(
-    "target_dtype,expected",
-    [
-        ("float8_e4m3fn", "__tl_cvt_f32x1_to_e4m3x1_rs_sat"),
-        ("float8_e5m2", "__tl_cvt_f32x1_to_e5m2x1_rs_sat"),
-        ("float4_e2m1fn", "__tl_cvt_f32x1_to_e2m1x1_rs_sat"),
-    ],
-)
-def test_cast_rs_compiles_for_sm100a(target_dtype, expected):
-    artifact = _lower_rs_prim_func(target_dtype, "sm_100a", enable_device_compile=True)
 
     assert expected in artifact.kernel_source
 

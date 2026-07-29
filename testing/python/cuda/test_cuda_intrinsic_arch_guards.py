@@ -1,4 +1,9 @@
-"""Architecture diagnostics for CUDA device helpers."""
+"""CUDA intrinsic architecture guards exercised by device compilation.
+
+This collects architecture-gate coverage from CUDA language and issue tests.
+"""
+
+from functools import partial
 
 import pytest
 
@@ -16,7 +21,7 @@ _PASS_CONFIG = {
 
 def _require_cuda_12_8():
     if nvcc.get_cuda_version() < (12, 8):
-        pytest.skip("CUDA architecture-gate tests require CUDA toolkit >= 12.8")
+        pytest.skip("CUDA intrinsic architecture-guard tests require CUDA toolkit >= 12.8")
 
 
 def _lower_for_arch(prim_func, arch):
@@ -27,6 +32,111 @@ def _lower_for_arch(prim_func, arch):
             target=target,
             enable_device_compile=True,
         )
+
+
+def _make_tmem_prim_func():
+    @T.prim_func
+    def main():
+        with T.Kernel(1, threads=128):
+            tmem = T.alloc_tmem((128, 128), T.float32)
+            T.deallocate_tmem(tmem)
+
+    return main
+
+
+def _make_tma_store_arrive_prim_func():
+    @T.prim_func
+    def main():
+        with T.Kernel(1, threads=128):
+            T.tma_store_arrive()
+
+    return main
+
+
+def _make_tma_store_wait_prim_func():
+    @T.prim_func
+    def main():
+        with T.Kernel(1, threads=128):
+            T.tma_store_wait(0)
+
+    return main
+
+
+def _make_tma_atomic_add_prim_func():
+    @T.prim_func
+    def main(out: T.Tensor((16, 16), T.float32)):
+        with T.Kernel(1, threads=128):
+            out_shared = T.alloc_shared((16, 16), T.float32)
+            T.fill(out_shared, 1)
+            T.atomic_add(out, out_shared, use_tma=True)
+
+    return main
+
+
+def _make_tma_descriptor_prefetch_prim_func():
+    @T.prim_func
+    def main(descriptor: T.handle("uint8x128", "grid_constant")):
+        with T.Kernel(1, threads=32):
+            if T.shuffle_elect(0):
+                T.call_intrin(
+                    "handle",
+                    tvm.tirx.op.Op.get("tl.prefetch_tma_descriptor"),
+                    descriptor,
+                )
+
+    return main
+
+
+def _make_tma_gather4_prim_func():
+    @T.prim_func
+    def main(
+        src: T.Tensor((64, 64), T.float16),
+        indices: T.Tensor((4,), T.int32),
+        out: T.Tensor((4, 64), T.float16),
+    ):
+        with T.Kernel(1, threads=128):
+            smem = T.alloc_shared((4, 64), T.float16)
+            mbar = T.alloc_barrier(1)
+
+            if T.shuffle_elect(128):
+                T.mbarrier_expect_tx(mbar, T.tma_gather4_bytes(64, "float16"))
+                T.tma_gather4(
+                    src,
+                    smem,
+                    0,
+                    [indices[0], indices[1], indices[2], indices[3]],
+                    barrier=mbar,
+                )
+                T.barrier_arrive(mbar)
+            T.mbarrier_wait_parity(mbar, 0)
+
+            for i, j in T.Parallel(4, 64):
+                out[i, j] = smem[i, j]
+
+    return main
+
+
+def _make_tma_scatter4_prim_func():
+    @T.prim_func
+    def main(
+        indices: T.Tensor((4,), T.int32),
+        out: T.Tensor((64, 64), T.float16),
+    ):
+        with T.Kernel(1, threads=128):
+            smem = T.alloc_shared((4, 64), T.float16)
+            T.fill(smem, 1)
+
+            if T.shuffle_elect(128):
+                T.tma_scatter4(
+                    smem,
+                    out,
+                    0,
+                    [indices[0], indices[1], indices[2], indices[3]],
+                )
+                T.tma_store_arrive()
+            T.tma_store_wait(0, read=False)
+
+    return main
 
 
 def _make_cluster_prim_func():
@@ -163,7 +273,71 @@ def _make_tcgen05_mma_prim_func():
     return main
 
 
+def _make_stochastic_rounding_prim_func(target_dtype):
+    @T.prim_func
+    def main(
+        a: T.Tensor((128,), T.float32),
+        out: T.Tensor((128,), target_dtype),
+    ):
+        with T.Kernel(1, threads=128):
+            a_local = T.alloc_fragment((128,), T.float32)
+            out_local = T.alloc_fragment((128,), target_dtype)
+            rbits = T.alloc_fragment((1,), T.int32)
+            T.copy(a, a_local)
+            rbits[0] = T.int32(0x12345678)
+            for i in T.Parallel(128):
+                out_local[i] = T.cast(
+                    a_local[i],
+                    target_dtype,
+                    round="rs",
+                    rbits=rbits[0],
+                )
+            T.copy(out_local, out)
+
+    return main
+
+
 _UNSUPPORTED_CASES = [
+    (
+        _make_tmem_prim_func,
+        "sm_90",
+        ("tl::tmem_allocate requires sm_100a or a compatible architecture-specific target",),
+    ),
+    (
+        _make_tmem_prim_func,
+        "sm_90",
+        ("tl::tmem_deallocate requires sm_100a or a compatible architecture-specific target",),
+    ),
+    (
+        _make_tma_store_arrive_prim_func,
+        "sm_80",
+        ("tl::tma_store_arrive requires sm_90 or later",),
+    ),
+    (
+        _make_tma_store_wait_prim_func,
+        "sm_80",
+        ("tl::tma_store_wait requires sm_90 or later",),
+    ),
+    (
+        _make_tma_atomic_add_prim_func,
+        "sm_80",
+        ("tl::tma_store_add requires sm_90 or later",),
+    ),
+    (
+        _make_tma_descriptor_prefetch_prim_func,
+        "sm_80",
+        ("tl::prefetch_tma_descriptor requires sm_90 or later",),
+    ),
+    (
+        _make_tma_gather4_prim_func,
+        "sm_90",
+        ("tl::tma_load_gather4 requires sm_100 or later",),
+    ),
+    (
+        _make_tma_scatter4_prim_func,
+        "sm_100",
+        ("tl::tma_store_scatter4 requires sm_100a",),
+    ),
     (
         _make_cluster_prim_func,
         "sm_89",
@@ -231,10 +405,61 @@ _UNSUPPORTED_CASES = [
             "tl::tcgen05_ld_32dp32bNx requires sm_100a or a compatible architecture-specific target",
         ),
     ),
+    (
+        partial(_make_stochastic_rounding_prim_func, "float16"),
+        "sm_100",
+        ("Stochastic rounding f32-to-FP16 requires sm_100a",),
+    ),
+    (
+        partial(_make_stochastic_rounding_prim_func, "bfloat16"),
+        "sm_100",
+        ("Stochastic rounding f32-to-BF16 requires sm_100a",),
+    ),
+    (
+        partial(_make_stochastic_rounding_prim_func, "float8_e4m3fn"),
+        "sm_89",
+        ("Stochastic rounding f32-to-FP8 requires sm_100a",),
+    ),
+    (
+        partial(_make_stochastic_rounding_prim_func, "float8_e4m3fn"),
+        "sm_100",
+        ("Stochastic rounding f32-to-FP8 requires sm_100a",),
+    ),
+    (
+        partial(_make_stochastic_rounding_prim_func, "float8_e5m2"),
+        "sm_89",
+        ("Stochastic rounding f32-to-FP8 requires sm_100a",),
+    ),
+    (
+        partial(_make_stochastic_rounding_prim_func, "float8_e5m2"),
+        "sm_100",
+        ("Stochastic rounding f32-to-FP8 requires sm_100a",),
+    ),
+    (
+        partial(_make_stochastic_rounding_prim_func, "float4_e2m1fn"),
+        "sm_89",
+        ("Stochastic rounding f32-to-FP4 requires sm_100a",),
+    ),
+    (
+        partial(_make_stochastic_rounding_prim_func, "float4_e2m1fn"),
+        "sm_100",
+        ("Stochastic rounding f32-to-FP4 requires sm_100a",),
+    ),
 ]
 
 
 _SUPPORTED_CASES = [
+    (_make_tmem_prim_func, "sm_100a", "tl::tmem_deallocate"),
+    (_make_tma_store_arrive_prim_func, "sm_90", "tl::tma_store_arrive"),
+    (_make_tma_store_wait_prim_func, "sm_90", "tl::tma_store_wait<0"),
+    (_make_tma_atomic_add_prim_func, "sm_90", "tl::tma_store_add"),
+    (
+        _make_tma_descriptor_prefetch_prim_func,
+        "sm_90",
+        "tl::prefetch_tma_descriptor",
+    ),
+    (_make_tma_gather4_prim_func, "sm_100", "tl::tma_load_gather4"),
+    (_make_tma_scatter4_prim_func, "sm_100a", "tl::tma_store_scatter4"),
     (_make_cluster_prim_func, "sm_90", "tl::block_rank_in_cluster()"),
     (_make_clc_prim_func, "sm_100a", "tl::clc_get_first_ctaid_z("),
     (
@@ -260,6 +485,31 @@ _SUPPORTED_CASES = [
         "sm_100a",
         "tl::tcgen05mma_ss",
     ),
+    (
+        partial(_make_stochastic_rounding_prim_func, "float16"),
+        "sm_100a",
+        "__tl_cvt_f32x1_to_f16x1_rs_sat",
+    ),
+    (
+        partial(_make_stochastic_rounding_prim_func, "bfloat16"),
+        "sm_100a",
+        "__tl_cvt_f32x1_to_bf16x1_rs_sat",
+    ),
+    (
+        partial(_make_stochastic_rounding_prim_func, "float8_e4m3fn"),
+        "sm_100a",
+        "__tl_cvt_f32x1_to_e4m3x1_rs_sat",
+    ),
+    (
+        partial(_make_stochastic_rounding_prim_func, "float8_e5m2"),
+        "sm_100a",
+        "__tl_cvt_f32x1_to_e5m2x1_rs_sat",
+    ),
+    (
+        partial(_make_stochastic_rounding_prim_func, "float4_e2m1fn"),
+        "sm_100a",
+        "__tl_cvt_f32x1_to_e2m1x1_rs_sat",
+    ),
 ]
 
 
@@ -268,6 +518,14 @@ _SUPPORTED_CASES = [
     "factory,arch,messages",
     _UNSUPPORTED_CASES,
     ids=[
+        "tmem-allocate-sm90",
+        "tmem-deallocate-sm90",
+        "tma-store-arrive-sm80",
+        "tma-store-wait-sm80",
+        "tma-atomic-add-sm80",
+        "tma-descriptor-prefetch-sm80",
+        "tma-gather4-sm90",
+        "tma-scatter4-sm100",
         "cluster-sm89",
         "clc-sm90",
         "fence-proxy-sm89",
@@ -276,9 +534,17 @@ _SUPPORTED_CASES = [
         "shuffle-elect-sm89",
         "register-reconfiguration-sm100",
         "tcgen05-mma-sm100",
+        "stochastic-rounding-fp16-sm100",
+        "stochastic-rounding-bf16-sm100",
+        "stochastic-rounding-e4m3-sm89",
+        "stochastic-rounding-e4m3-sm100",
+        "stochastic-rounding-e5m2-sm89",
+        "stochastic-rounding-e5m2-sm100",
+        "stochastic-rounding-e2m1-sm89",
+        "stochastic-rounding-e2m1-sm100",
     ],
 )
-def test_device_helpers_reject_unsupported_arch(factory, arch, messages):
+def test_cuda_intrinsics_reject_unsupported_arch(factory, arch, messages):
     _require_cuda_12_8()
 
     with pytest.raises(RuntimeError) as exc_info:
@@ -294,6 +560,13 @@ def test_device_helpers_reject_unsupported_arch(factory, arch, messages):
     "factory,arch,expected_helper",
     _SUPPORTED_CASES,
     ids=[
+        "tmem-sm100a",
+        "tma-store-arrive-sm90",
+        "tma-store-wait-sm90",
+        "tma-atomic-add-sm90",
+        "tma-descriptor-prefetch-sm90",
+        "tma-gather4-sm100",
+        "tma-scatter4-sm100a",
         "cluster-sm90",
         "clc-sm100a",
         "fence-proxy-sm90",
@@ -303,9 +576,14 @@ def test_device_helpers_reject_unsupported_arch(factory, arch, messages):
         "register-reconfiguration-sm100a",
         "wgmma-sm90",
         "tcgen05-mma-sm100a",
+        "stochastic-rounding-fp16-sm100a",
+        "stochastic-rounding-bf16-sm100a",
+        "stochastic-rounding-e4m3-sm100a",
+        "stochastic-rounding-e5m2-sm100a",
+        "stochastic-rounding-e2m1-sm100a",
     ],
 )
-def test_device_helpers_compile_for_supported_arch(factory, arch, expected_helper):
+def test_cuda_intrinsics_compile_for_supported_arch(factory, arch, expected_helper):
     _require_cuda_12_8()
 
     artifact = _lower_for_arch(factory(), arch)
