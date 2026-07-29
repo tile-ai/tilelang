@@ -1,4 +1,6 @@
 from __future__ import annotations
+import warnings
+
 
 from tilelang import tvm as tvm
 from tilelang.layout import Layout
@@ -51,6 +53,11 @@ class GemmMetalSimdGroup(GemmBase):
         mbar_phase_expr: tir.PrimExpr | None = None,
     ):
         thread_nums = thread_bounds.extent
+        if thread_nums > 512:
+            warnings.warn(
+                f"Metal GEMM: thread_nums={thread_nums} > 512 may cause "
+                f"register spilling on Apple GPU. Consider using ≤512 threads.",
+                stacklevel=2)
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_METAL)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
