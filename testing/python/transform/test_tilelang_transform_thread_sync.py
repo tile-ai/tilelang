@@ -843,7 +843,7 @@ def test_partial_sync_warp_multiple_still_lowered():
 #   sits under a thread-divergent guard.
 # * the cross-thread path instantiates the same code twice, once per thread. A
 #   definition shared between the two instances forces the two thread variables
-#   to agree, which shrinks -- or empties -- the domain the disjointness proof
+#   to agree, which shrinks -- or empties -- the domain the disjointedness proof
 #   runs on, so a real hazard can be "proven" away.
 # =============================================================================
 
@@ -1185,7 +1185,7 @@ def test_bool_bind_does_not_hide_cross_thread_hazard():
     integer values away, so a predicate such as ``tx < 64`` reaches ThreadSync
     intact. Sharing it between the two instances asserts
     ``(tx1 < 64) == (tx2 < 64)``, confining both threads to the same half of the
-    block and letting the disjointness proof succeed where it must not.
+    block and letting the disjointedness proof succeed where it must not.
     """
 
     @T.prim_func(private=True)
