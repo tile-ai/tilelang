@@ -417,15 +417,8 @@ private:
  * stage number this operation belongs to (-1 if not yet assigned) \param
  * copy_stage Whether this stage is a memory copy operation \param
  * last_use_stmt_index Index of the last statement (in original order) that
- * uses the results of this stage (-1 if not yet determined). This field is
- * crucial for pipeline optimization:
- * - For copy stages: indicates the index of the last statement that reads
- * from the copied data, helping determine optimal placement of copy
- * operations
- * - Used to ensure copy operations are scheduled before their consumers
- * - A value of -1 means no subsequent statement uses this stage's output
- * - This information enables better pipeline scheduling by minimizing data
- *   dependencies and maximizing parallelism
+ * uses the results of this stage (-1 if not yet determined). Copies with the
+ * same last consumer can share an implicit async producer group.
  */
 struct PipelineStageInfo {
   Array<BufferRegion> reads, writes;
@@ -433,19 +426,23 @@ struct PipelineStageInfo {
   std::unordered_set<const VarNode *> scalar_uses;
   int original_stmt_index{};
   int order = -1, stage = -1;
+  bool scalar_bind = false;
+  bool control_stmt = false;
+  bool lightweight_stmt = false;
   bool copy_stage = false;
   bool tma_copy = false; // true if this copy stage uses TMA (not cp.async)
   bool conditional_execution = false;
-  bool producer_for_copy = false;
   int last_use_stmt_index =
       -1; // Initialized to -1, indicating no consumers found yet
 
 public:
-  bool IsFirstStage() const { return copy_stage || producer_for_copy; }
+  bool IsScalarBind() const { return scalar_bind; }
+  bool IsZeroWeight() const {
+    return scalar_bind || control_stmt || lightweight_stmt;
+  }
+  bool IsControlStmt() const { return control_stmt; }
   bool IsCopyStage() const { return copy_stage; }
   bool IsTmaCopy() const { return tma_copy; }
-  bool IsProducerForCopy() const { return producer_for_copy; }
-  bool IsLastUseStmtIndexValid() const { return last_use_stmt_index != -1; }
 };
 
 class PipelineStageAnalyzer {
@@ -644,7 +641,7 @@ public:
   void AnalyzeCopyLastUse(
       std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
     for (auto &pinfo : *pipeline_stage_infos) {
-      if (!pinfo.IsFirstStage()) {
+      if (!pinfo.IsCopyStage()) {
         continue;
       }
 
@@ -683,93 +680,6 @@ public:
     }
   }
 
-  void PropagateBufferProducersForCopy(
-      std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
-    struct CopyStageDependencyReadsManager {
-      std::vector<BufferRegion> regions;
-
-      void AddUnique(const BufferRegion &region) {
-        for (const BufferRegion &copy_read : regions) {
-          if (region->buffer.same_as(copy_read->buffer)) {
-            return;
-          }
-        }
-        regions.push_back(region);
-      }
-
-      bool Contains(const BufferRegion &region) const {
-        for (const BufferRegion &copy_read : regions) {
-          if (region->buffer.same_as(copy_read->buffer)) {
-            return true;
-          }
-        }
-        return false;
-      }
-
-      size_t Size() const { return regions.size(); }
-    };
-
-    CopyStageDependencyReadsManager copy_stage_dependency_reads_mgr;
-
-    for (const auto &pinfo : *pipeline_stage_infos) {
-      if (pinfo.IsCopyStage()) {
-        for (const BufferRegion &read : pinfo.reads) {
-          copy_stage_dependency_reads_mgr.AddUnique(read);
-        }
-      }
-    }
-
-    const size_t max_iterations = (pipeline_stage_infos->size() * 4) + 16;
-    size_t iter_count = 0;
-
-    for (auto &pinfo : *pipeline_stage_infos) {
-      if (!pinfo.IsCopyStage()) {
-        continue;
-      }
-      auto original_copy_stmt_index = pinfo.original_stmt_index;
-      bool updated = true;
-      while (updated) {
-        updated = false;
-        for (auto &pinfo_inner : *pipeline_stage_infos) {
-          if (pinfo_inner.IsCopyStage()) {
-            continue;
-          }
-          if (pinfo_inner.original_stmt_index >= original_copy_stmt_index) {
-            break;
-          }
-
-          bool should_prepare = false;
-          for (const BufferRegion &write : pinfo_inner.writes) {
-            if (copy_stage_dependency_reads_mgr.Contains(write)) {
-              should_prepare = true;
-              break;
-            }
-          }
-          if (should_prepare && !pinfo_inner.IsProducerForCopy()) {
-            pinfo_inner.producer_for_copy = true;
-            updated = true;
-          }
-          if (should_prepare) {
-            for (const BufferRegion &read : pinfo_inner.reads) {
-              size_t before = copy_stage_dependency_reads_mgr.Size();
-              copy_stage_dependency_reads_mgr.AddUnique(read);
-              if (copy_stage_dependency_reads_mgr.Size() > before) {
-                updated = true;
-              }
-            }
-          }
-        }
-        iter_count++;
-        if (iter_count > max_iterations) {
-          LOG(FATAL)
-              << "Pipeline planning: Exceeded maximum iterations ("
-              << max_iterations << ") in copy stage dependency propagation. "
-              << "This may indicate a cyclic or pathological dependency graph.";
-        }
-      }
-    }
-  }
-
   std::unordered_map<const VarNode *, int> BuildScalarDefMap(
       const std::vector<PipelineStageInfo> &pipeline_stage_infos) const {
     std::unordered_map<const VarNode *, int> scalar_def_to_stmt;
@@ -781,56 +691,207 @@ public:
     return scalar_def_to_stmt;
   }
 
-  void PropagateScalarProducersForCopy(
-      std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
-    auto scalar_def_to_stmt = BuildScalarDefMap(*pipeline_stage_infos);
-    const size_t max_iterations = (pipeline_stage_infos->size() * 4) + 16;
-    size_t iter_count = 0;
-    bool updated = true;
+  struct PipelineDependencyDag {
+    std::vector<std::vector<int>> predecessors;
+    std::vector<std::vector<int>> successors;
+    std::vector<std::vector<int>> scalar_successors;
+  };
 
-    auto update_producer = [](PipelineStageInfo *producer,
-                              int consumer_last_use) -> bool {
-      if (consumer_last_use < 0) {
-        return false;
-      }
-      bool changed = false;
-      if (!producer->producer_for_copy) {
-        producer->producer_for_copy = true;
-        producer->last_use_stmt_index = consumer_last_use;
-        changed = true;
-      } else if (!producer->IsLastUseStmtIndexValid() ||
-                 consumer_last_use < producer->last_use_stmt_index) {
-        producer->last_use_stmt_index = consumer_last_use;
-        changed = true;
-      }
-      return changed;
-    };
-
-    while (updated) {
-      updated = false;
-      for (int consumer_idx = 0;
-           consumer_idx < static_cast<int>(pipeline_stage_infos->size());
-           ++consumer_idx) {
-        const auto &consumer = (*pipeline_stage_infos)[consumer_idx];
-        if (!(consumer.IsFirstStage() && consumer.IsLastUseStmtIndexValid())) {
+  bool RegionsConflict(const Array<BufferRegion> &lhs,
+                       const Array<BufferRegion> &rhs) const {
+    for (const BufferRegion &lhs_region : lhs) {
+      for (const BufferRegion &rhs_region : rhs) {
+        if (!lhs_region->buffer->data.same_as(rhs_region->buffer->data)) {
           continue;
         }
-        for (const VarNode *var : consumer.scalar_uses) {
-          auto it = scalar_def_to_stmt.find(var);
-          if (it == scalar_def_to_stmt.end() || it->second == consumer_idx) {
-            continue;
-          }
-          auto &producer = (*pipeline_stage_infos)[it->second];
-          if (producer.IsCopyStage()) {
-            continue;
-          }
-          updated |= update_producer(&producer, consumer.last_use_stmt_index);
+        // Aliased Buffer views may describe the same allocation with different
+        // ranks.  Without an index map between the views, conservatively retain
+        // their source order instead of asking MayConflict to compare unlike
+        // regions.
+        if (lhs_region->region.size() != rhs_region->region.size() ||
+            MayConflict(lhs_region->region, rhs_region->region)) {
+          return true;
         }
       }
-      if (++iter_count > max_iterations) {
-        LOG(FATAL) << "Pipeline planning: Exceeded maximum iterations while "
-                      "propagating scalar producers for copy stages.";
+    }
+    return false;
+  }
+
+  PipelineDependencyDag BuildDependencyDag(
+      const std::vector<PipelineStageInfo> &pipeline_stage_infos) const {
+    const int num_statements = static_cast<int>(pipeline_stage_infos.size());
+    PipelineDependencyDag dag{std::vector<std::vector<int>>(num_statements),
+                              std::vector<std::vector<int>>(num_statements),
+                              std::vector<std::vector<int>>(num_statements)};
+
+    auto add_edge =
+        [&](int src, int dst, bool scalar_edge) {
+          ICHECK_LT(src, dst)
+              << "PipelinePlanning expects dependencies to follow source order";
+          auto &successors = dag.successors[src];
+          if (std::find(successors.begin(), successors.end(), dst) ==
+              successors.end()) {
+            successors.push_back(dst);
+            dag.predecessors[dst].push_back(src);
+          }
+          if (scalar_edge) {
+            auto &scalar_successors = dag.scalar_successors[src];
+            if (std::find(scalar_successors.begin(), scalar_successors.end(),
+                          dst) == scalar_successors.end()) {
+              scalar_successors.push_back(dst);
+            }
+          }
+        };
+
+    // Preserve all intra-iteration buffer hazards.  RAW edges carry values;
+    // WAR and WAW edges prevent the stage-based reorder from moving a later
+    // write before an earlier access to an overlapping region.
+    for (int dst = 0; dst < num_statements; ++dst) {
+      const PipelineStageInfo &dst_info = pipeline_stage_infos[dst];
+      for (int src = 0; src < dst; ++src) {
+        const PipelineStageInfo &src_info = pipeline_stage_infos[src];
+        bool raw = RegionsConflict(src_info.writes, dst_info.reads);
+        bool war = RegionsConflict(src_info.reads, dst_info.writes);
+        bool waw = RegionsConflict(src_info.writes, dst_info.writes);
+        if (raw || war || waw) {
+          add_edge(src, dst, false);
+        }
       }
+    }
+
+    auto scalar_def_to_stmt = BuildScalarDefMap(pipeline_stage_infos);
+    for (int dst = 0; dst < num_statements; ++dst) {
+      for (const VarNode *var : pipeline_stage_infos[dst].scalar_uses) {
+        auto it = scalar_def_to_stmt.find(var);
+        if (it != scalar_def_to_stmt.end() && it->second != dst) {
+          add_edge(it->second, dst, true);
+        }
+      }
+    }
+
+    // Opaque control operations such as async wait/arrive calls do not always
+    // expose a complete buffer dependence.  Keep them between their source
+    // neighbors while assigning them zero scheduling weight.
+    for (int i = 0; i < num_statements; ++i) {
+      if (!pipeline_stage_infos[i].IsControlStmt()) {
+        continue;
+      }
+      if (i > 0) {
+        add_edge(i - 1, i, false);
+      }
+      if (i + 1 < num_statements) {
+        add_edge(i, i + 1, false);
+      }
+    }
+    return dag;
+  }
+
+  void
+  AssignStagesAndOrders(std::vector<PipelineStageInfo> *pipeline_stage_infos,
+                        int num_stages) const {
+    ICHECK_GE(num_stages, 1);
+    const int num_statements = static_cast<int>(pipeline_stage_infos->size());
+    PipelineDependencyDag dag = BuildDependencyDag(*pipeline_stage_infos);
+
+    // Compute ASAP logical levels on the source-order topological traversal.
+    // Materialized scalar Binds, scalar-sized stores, and control operations
+    // have zero weight: they are glue between substantial operations, not
+    // independent pipeline stages.  A substantial source advances all of its
+    // successors by one logical level, while zero-weight nodes are transparent.
+    std::vector<int> logical_levels(num_statements, 0);
+    for (int dst = 0; dst < num_statements; ++dst) {
+      for (int src : dag.predecessors[dst]) {
+        int edge_weight = (*pipeline_stage_infos)[src].IsZeroWeight() ? 0 : 1;
+        logical_levels[dst] =
+            std::max(logical_levels[dst], logical_levels[src] + edge_weight);
+      }
+    }
+
+    // A control statement belongs to the next substantial operation so that
+    // waits and arrives use the same skewed loop iteration as the work they
+    // guard.  A trailing control operation instead stays with its predecessor.
+    for (int i = 0; i < num_statements; ++i) {
+      if (!(*pipeline_stage_infos)[i].IsControlStmt()) {
+        continue;
+      }
+      int attached_level = -1;
+      for (int j = i + 1; j < num_statements; ++j) {
+        if (!(*pipeline_stage_infos)[j].IsZeroWeight()) {
+          attached_level = logical_levels[j];
+          break;
+        }
+      }
+      if (attached_level < 0) {
+        for (int j = i - 1; j >= 0; --j) {
+          if (!(*pipeline_stage_infos)[j].IsZeroWeight()) {
+            attached_level = logical_levels[j];
+            break;
+          }
+        }
+      }
+      if (attached_level >= 0) {
+        logical_levels[i] = attached_level;
+      }
+    }
+
+    int max_logical_level = 0;
+    for (int level : logical_levels) {
+      max_logical_level = std::max(max_logical_level, level);
+    }
+    for (int i = 0; i < num_statements; ++i) {
+      int stage = 0;
+      if (max_logical_level > 0 && num_stages > 1) {
+        stage = logical_levels[i] * (num_stages - 1) / max_logical_level;
+      }
+      (*pipeline_stage_infos)[i].stage = stage;
+    }
+
+    // Non-replayable scalar Binds are materialized once, so all direct users
+    // must execute in the same stage.  Raising stages reaches the least fixed
+    // point that satisfies this equality and all dependency inequalities.
+    bool updated = true;
+    while (updated) {
+      updated = false;
+      for (int src = 0; src < num_statements; ++src) {
+        if (!(*pipeline_stage_infos)[src].IsScalarBind()) {
+          continue;
+        }
+        int common_stage = (*pipeline_stage_infos)[src].stage;
+        for (int dst : dag.scalar_successors[src]) {
+          common_stage =
+              std::max(common_stage, (*pipeline_stage_infos)[dst].stage);
+        }
+        if ((*pipeline_stage_infos)[src].stage != common_stage) {
+          (*pipeline_stage_infos)[src].stage = common_stage;
+          updated = true;
+        }
+        for (int dst : dag.scalar_successors[src]) {
+          if ((*pipeline_stage_infos)[dst].stage != common_stage) {
+            (*pipeline_stage_infos)[dst].stage = common_stage;
+            updated = true;
+          }
+        }
+      }
+      for (int src = 0; src < num_statements; ++src) {
+        for (int dst : dag.successors[src]) {
+          int src_stage = (*pipeline_stage_infos)[src].stage;
+          if ((*pipeline_stage_infos)[dst].stage < src_stage) {
+            (*pipeline_stage_infos)[dst].stage = src_stage;
+            updated = true;
+          }
+        }
+      }
+    }
+
+    std::vector<int> indices(num_statements);
+    std::iota(indices.begin(), indices.end(), 0);
+    std::stable_sort(indices.begin(), indices.end(), [&](int lhs, int rhs) {
+      int lhs_stage = (*pipeline_stage_infos)[lhs].stage;
+      int rhs_stage = (*pipeline_stage_infos)[rhs].stage;
+      return lhs_stage != rhs_stage ? lhs_stage < rhs_stage : lhs < rhs;
+    });
+    for (int order = 0; order < num_statements; ++order) {
+      (*pipeline_stage_infos)[indices[order]].order = order;
     }
   }
 
@@ -993,6 +1054,15 @@ public:
     pinfo.scalar_defs = std::move(scalar_defs);
     pinfo.scalar_uses = std::move(scalar_uses);
     pinfo.original_stmt_index = idx;
+    pinfo.scalar_bind = block->body.as<BindNode>() != nullptr;
+    pinfo.lightweight_stmt = block->body.as<BufferStoreNode>() != nullptr;
+    if (const auto *evaluate = block->body.as<EvaluateNode>()) {
+      if (const auto *call_node = evaluate->value.as<CallNode>()) {
+        Call call = GetRef<Call>(call_node);
+        pinfo.control_stmt = !ParseOperator(call).defined() &&
+                             SideEffect(call) > CallEffectKind::kReadState;
+      }
+    }
     pinfo.conditional_execution = MayBeConditionallyExecuted(block->body);
     bool pure_copy_stage =
         collector.GetGlobalCopyPattern() && IsPureCopyStmt(block->body);
@@ -1037,19 +1107,15 @@ private:
     MakeStageAnalyzer().AnalyzeCopyLastUse(pipeline_stage_infos);
   }
 
-  void PropagateBufferProducersForCopy(
-      std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
-    MakeStageAnalyzer().PropagateBufferProducersForCopy(pipeline_stage_infos);
-  }
-
-  void PropagateScalarProducersForCopy(
-      std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
-    MakeStageAnalyzer().PropagateScalarProducersForCopy(pipeline_stage_infos);
-  }
-
   void ValidateScalarDependencies(
       const std::vector<PipelineStageInfo> &pipeline_stage_infos) const {
     MakeStageAnalyzer().ValidateScalarDependencies(pipeline_stage_infos);
+  }
+
+  void
+  AssignStagesAndOrders(std::vector<PipelineStageInfo> *pipeline_stage_infos,
+                        int num_stages) const {
+    MakeStageAnalyzer().AssignStagesAndOrders(pipeline_stage_infos, num_stages);
   }
 
   void MaybeAnnotateLegacyAsyncPipelineLoop(const Array<Stmt> &pipeline_stmts,
@@ -1198,93 +1264,12 @@ private:
       pipeline_stage_infos.push_back(std::move(pinfo));
     }
 
-    // Some statements before a copy are not copy operations themselves, but
-    // they prepare buffers that the copy must read.  A common example is
-    // producer-side initialization before a conditional or partial copy:
-    //
-    //   fill(shared, 0)        // writes shared
-    //   copy(global, shared)   // may rely on the initialized values
-    //
-    // If the copy is moved to the producer side, the fill must move with it;
-    // otherwise the copy could observe an uninitialized or wrong shared-buffer
-    // value.  PropagateBufferProducersForCopy computes a buffer-level backward
-    // dependency closure from copy-stage reads to earlier non-copy writes and
-    // marks those statements as `producer_for_copy`.  They then participate in
-    // the producer-stage scheduling just like the copy stages they prepare.
-    PropagateBufferProducersForCopy(&pipeline_stage_infos);
+    // Assign stages by a weighted longest-path traversal over the unified
+    // buffer/scalar dependency DAG, then derive a stable topological order.
+    AssignStagesAndOrders(&pipeline_stage_infos, num_stages);
 
-    // Analysis use-def chain to determine last_use_stmt_index for copy
-    // operations This step is critical for pipeline optimization as it
-    // identifies the index of the last statement that consumes data produced by
-    // copy stages, enabling optimal placement of copy operations in the
-    // pipeline schedule.
+    // Async producer grouping uses the last consumer of each copy.
     AnalyzeCopyLastUse(&pipeline_stage_infos);
-
-    PropagateScalarProducersForCopy(&pipeline_stage_infos);
-
-    // Making stages and orders
-    int order_idx = 0;
-    // Stage 1. Create pipeline stages and assign order
-    for (auto &pinfo : pipeline_stage_infos) {
-      // Skip elements that must be in first stage:
-      // 1. Copy stages (with active last_use_stmt_index) - these need special
-      // handling
-      //    because they have consumers that depend on their data
-      // 2. All Producer stages for copy stages.
-      if (pinfo.IsFirstStage() && pinfo.IsLastUseStmtIndexValid()) {
-        continue;
-      }
-
-      // Main logic stage assignment:
-      // - Increment order index
-      // - Assign to new stage (current num_stages)
-      pinfo.order = order_idx++;
-      pinfo.stage = num_stages;
-
-      // Schedule copy stages that have this stage as their last consumer
-      // This ensures copy operations are placed right before their final
-      // consumer for optimal pipeline efficiency
-      for (auto &pinfo_1 : pipeline_stage_infos) {
-        if ((pinfo_1.IsFirstStage() &&
-             pinfo_1.last_use_stmt_index == pinfo.original_stmt_index)) {
-          pinfo_1.order = order_idx++;
-          pinfo_1.stage = 0; // Copy stages are typically assigned to stage 0
-        }
-      }
-    }
-
-    ICHECK(size_t(order_idx) == pipeline_stage_infos.size())
-        << "The number of stages should be equal to the number of pipeline "
-           "stages. "
-        << "Got " << order_idx << " stages and " << pipeline_stage_infos.size()
-        << " pipeline stages.";
-
-    // Step 2. if all the copy is at the end of the order, we can move these
-    // copy to the beginning of the order and shrink the stage offset by 1.
-    int copy_stage_at_end = [&]() {
-      int copy_stage_cnt = 0;
-      int copy_order_min = pipeline_stage_infos.size();
-      int non_copy_order_max = 0;
-      for (auto &pinfo : pipeline_stage_infos) {
-        if (pinfo.IsFirstStage()) {
-          copy_stage_cnt++;
-          copy_order_min = std::min(copy_order_min, pinfo.order);
-        } else {
-          non_copy_order_max = std::max(non_copy_order_max, pinfo.order);
-        }
-      }
-      if (copy_order_min > non_copy_order_max)
-        return copy_stage_cnt;
-      return -1;
-    }();
-    if (copy_stage_at_end > 0 && num_stages >= 2) {
-      for (auto &pinfo : pipeline_stage_infos) { // move copy to the beginning
-        pinfo.order =
-            (pinfo.order + copy_stage_at_end) % pipeline_stage_infos.size();
-        if (!pinfo.IsCopyStage() && !pinfo.IsProducerForCopy())
-          pinfo.stage--;
-      }
-    }
 
     ValidateScalarDependencies(pipeline_stage_infos);
 

@@ -363,18 +363,18 @@ def test_pipeline_planning_before_after_wgmma_gemm_plan():
                     ],
                     "software_pipeline_async_stages": [T.int32(0)],
                     "software_pipeline_order": [
+                        T.int32(0),
                         T.int32(1),
                         T.int32(2),
-                        T.int32(0),
                         T.int32(3),
                         T.int32(4),
                     ],
                     "software_pipeline_stage": [
                         T.int32(0),
                         T.int32(0),
-                        T.int32(3),
-                        T.int32(3),
-                        T.int32(3),
+                        T.int32(1),
+                        T.int32(2),
+                        T.int32(2),
                     ],
                     "tl_pipelined_num_stages": T.int32(3),
                 },
@@ -451,16 +451,16 @@ def test_pipeline_planning_before_after_tcgen05_gemm_plan():
                     ],
                     "software_pipeline_async_stages": [T.int32(0)],
                     "software_pipeline_order": [
+                        T.int32(0),
                         T.int32(1),
                         T.int32(2),
-                        T.int32(0),
                         T.int32(3),
                     ],
                     "software_pipeline_stage": [
                         T.int32(0),
                         T.int32(0),
-                        T.int32(2),
-                        T.int32(2),
+                        T.int32(1),
+                        T.int32(1),
                     ],
                     "tl_pipelined_num_stages": T.int32(2),
                 },
@@ -738,6 +738,34 @@ def test_pipeline_planning_stages_bind_with_dependent_copy():
     assert orders == [0, 1]
     assert async_producers == [1, 0]
     assert replayable_binds == [1, 0, 0]
+
+
+def test_pipeline_planning_mixed_buffer_scalar_producer_chain():
+    @T.prim_func
+    def before(
+        A: T.Tensor((64,), T.float16),
+        B: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=256):
+            index_shared = T.alloc_shared((1,), T.int32)
+            A_shared = T.alloc_shared((32,), T.float16)
+            for k in T.Pipelined(2, num_stages=2):
+                index_shared[0] = k * 32
+                offset = index_shared[0]
+                T.copy(A[offset], A_shared)
+                for i in T.Parallel(32):
+                    B[k * 32 + i] = A_shared[i]
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert len(annos) == 1
+    anno = annos[0]
+    stages = [int(v) for v in anno["software_pipeline_stage"]]
+    orders = [int(v) for v in anno["software_pipeline_order"]]
+
+    assert stages == [0, 0, 0, 1]
+    assert orders == [0, 1, 2, 3]
+    tl.transform.InjectSoftwarePipeline()(mod)
 
 
 def test_pipeline_planning_accepts_explicit_bind_free_annotations():
