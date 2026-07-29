@@ -1801,6 +1801,9 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
     //    that are missing the qualifier and inserts "threadgroup".
     {
       // Collect threadgroup buffer names from declarations.
+      // Only match lines where "threadgroup " appears at the start
+      // (after optional whitespace) — that is a declaration, not a
+      // cast expression like *(threadgroup float4*)(&__dst[...]).
       // Matches both array and pointer forms:
       //   threadgroup half As[2048];
       //   threadgroup void* As = ...;
@@ -1809,23 +1812,29 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
         std::istringstream decl_iss(fsource);
         std::string decl_line;
         while (std::getline(decl_iss, decl_line)) {
-          if (decl_line.find("threadgroup ") == std::string::npos)
+          // Find first non-whitespace position
+          size_t start_pos = 0;
+          while (start_pos < decl_line.length() && decl_line[start_pos] == ' ')
+            start_pos++;
+          // "threadgroup " must be at line start, not inside a cast
+          if (decl_line.substr(start_pos, 12) != "threadgroup ")
             continue;
           // Find any [ ; or = and backtrack to the preceding alnum token.
-          for (size_t p = 0; p < decl_line.length(); p++) {
+          for (size_t p = start_pos; p < decl_line.length(); p++) {
             if (decl_line[p] == '[' || decl_line[p] == ';' ||
                 decl_line[p] == '=') {
               // Backtrack past spaces
               size_t end = p;
-              while (end > 0 && decl_line[end - 1] == ' ')
+              while (end > start_pos && decl_line[end - 1] == ' ')
                 end--;
               // Backtrack past alnum / underscore
-              size_t start = end;
-              while (start > 0 && (isalnum(decl_line[start - 1]) ||
-                                   decl_line[start - 1] == '_'))
-                start--;
-              if (start < end) {
-                tg_names.insert(decl_line.substr(start, end - start));
+              size_t tok_start = end;
+              while (tok_start > start_pos &&
+                     (isalnum(decl_line[tok_start - 1]) ||
+                      decl_line[tok_start - 1] == '_'))
+                tok_start--;
+              if (tok_start < end) {
+                tg_names.insert(decl_line.substr(tok_start, end - tok_start));
               }
             }
           }
@@ -1848,7 +1857,7 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
           if (has_tg_var) {
             for (size_t i = 0; i + 3 < line.length(); i++) {
               if (line[i] == '(') {
-                if (line.substr(i, 14) == "(threadgroup ") {
+                if (line.substr(i, 13) == "(threadgroup ") {
                   i += 13;
                   continue;
                 }
@@ -1953,7 +1962,7 @@ ffi::Module BuildTileLangMetalWithoutCompile(IRModule mod, Target target) {
           if (has_tg_var) {
             for (size_t i = 0; i + 3 < line.length(); i++) {
               if (line[i] == '(') {
-                if (line.substr(i, 14) == "(threadgroup ") {
+                if (line.substr(i, 13) == "(threadgroup ") {
                   i += 13;
                   continue;
                 }
