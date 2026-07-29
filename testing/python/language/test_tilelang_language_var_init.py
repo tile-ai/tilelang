@@ -1,6 +1,7 @@
 import tilelang
 import tilelang.language as T
 import tilelang.testing
+import pytest
 
 
 def test_alloc_var_preserves_float64_initializer_dtype() -> None:
@@ -18,6 +19,16 @@ def test_alloc_var_preserves_float64_initializer_dtype() -> None:
 
     tilelang.tvm.tirx.stmt_functor.post_order_visit(kernel.body, collect_float64_initializer)
     assert 1e300 in initializers
+
+
+def test_alloc_var_rejects_unrepresentable_float32_initializer() -> None:
+    with pytest.raises(ValueError, match="exceeds maximum of float32"):
+
+        @T.prim_func
+        def kernel(A: T.Tensor((1,), T.float32)):
+            with T.Kernel(1):
+                value = T.alloc_var(T.float32, init=1e300)
+                A[0] = value
 
 
 # TODO: var init is not supported on hip.
