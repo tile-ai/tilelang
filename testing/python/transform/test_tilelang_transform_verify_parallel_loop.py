@@ -1,5 +1,6 @@
 import tilelang as tl
 import tilelang.testing
+from tilelang import ir as tl_ir
 from tilelang import tvm
 
 
@@ -40,6 +41,31 @@ def test_same_value_parallel_store_is_allowed(capfd):
     mod = _make_parallel_store(injective_indices=False, varying_value=False)
 
     assert "Data race detected" not in _verify(mod, capfd)
+
+
+def _make_two_racy_stores():
+    out_a = tvm.tirx.decl_buffer((32,), "int32", name="out_a")
+    out_b = tvm.tirx.decl_buffer((32,), "int32", name="out_b")
+    ti = tvm.tirx.Var("ti", "int32")
+    store_a = tvm.tirx.BufferStore(out_a, ti, [0])
+    store_b = tvm.tirx.BufferStore(out_b, ti, [0])
+    body = tvm.tirx.SeqStmt([store_a, store_b])
+    body = tvm.tirx.For(ti, 0, 32, tvm.tirx.ForKind.PARALLEL, body)
+    mod = tvm.IRModule.from_expr(tvm.tirx.PrimFunc([out_a, out_b], body))
+    return mod, store_a, store_b
+
+
+def test_data_race_diagnostic_includes_span(capfd):
+    mod, store_a, store_b = _make_two_racy_stores()
+    tl_ir.set_stmt_span(store_a, tl_ir.make_span("kernel.py", 21))
+    tl_ir.set_stmt_span(store_b, tl_ir.make_span("kernel.py", 22))
+
+    err = _verify(mod, capfd)
+    assert err.count("Data race detected") == 1
+    assert "[1]" in err
+    assert "--> kernel.py:21:1" in err
+    assert "[2]" in err
+    assert "--> kernel.py:22:1" in err
 
 
 if __name__ == "__main__":
