@@ -160,7 +160,9 @@ def alloc_var(dtype: DType, *args, scope: str = "local.var", init: PrimExpr | in
         # annotation for integer/float literals, leaving the scalar
         # uninitialised).  T.buffer_store emits an explicit BufferStore TIR
         # node that every backend lowers to an assignment statement.
-        if isinstance(parsed_init, (int, float, IntImm, FloatImm)):
+        if isinstance(parsed_init, (int, float)):
+            parsed_init = tvm.tirx.const(parsed_init, dtype=tl_dtype(dtype))
+        elif isinstance(parsed_init, (IntImm, FloatImm)):
             parsed_init = tl_dtype(dtype)(parsed_init)
         T.buffer_store(buffer, parsed_init, 0)
     return buffer
