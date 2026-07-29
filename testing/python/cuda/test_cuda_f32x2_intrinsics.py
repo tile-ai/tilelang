@@ -275,7 +275,7 @@ def test_binary_rejects_mixed_packed_dtypes(op_name, op_func):
         op_func(x, y)
 
 
-@pytest.mark.parametrize("mixed_index", [1, 2])
+@pytest.mark.parametrize("mixed_index", [0, 1, 2])
 def test_fma2_rejects_mixed_packed_dtypes(mixed_index):
     x = tvm.tirx.Var("x", "float16x2")
     y = tvm.tirx.Var("y", "bfloat16x2")
