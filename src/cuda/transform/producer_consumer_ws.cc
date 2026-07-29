@@ -2906,7 +2906,16 @@ private:
 // Pass registration
 // ---------------------------------------------------------------------------
 
-tvm::transform::Pass ProducerConsumerWarpSpecialized() {
+static tvm::transform::Pass AnnotateDeviceBoundTmaCopies() {
+  using namespace tirx::transform;
+  auto pass_func = [](PrimFunc f, const IRModule &m, const PassContext &ctx) {
+    return DeviceBoundTmaCopyAnnotator::Rewrite(std::move(f));
+  };
+  return CreatePrimFuncPass(pass_func, 0,
+                            "tl.AnnotateDeviceBoundTmaCopiesInternal", {});
+}
+
+static tvm::transform::Pass ProducerConsumerWarpSpecializedInternal() {
   using namespace tirx::transform;
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     // Skip if disabled.
@@ -2923,9 +2932,6 @@ tvm::transform::Pass ProducerConsumerWarpSpecialized() {
     if (!target.defined() || !TargetHasBulkCopy(target.value())) {
       return f;
     }
-    // Preserve pointer provenance on each copy before WS classification so
-    // later lowering can consume it through CopyAnalysis.
-    f = DeviceBoundTmaCopyAnnotator::Rewrite(std::move(f));
     // Only apply MVB + WS if the function is a tiled WS candidate.
     if (!TiledWSCandidate::Check(f->body, target.value())) {
       DLOG(WARNING) << "[WS] skipped: no TMA copies in pipeline loop";
@@ -2972,8 +2978,14 @@ tvm::transform::Pass ProducerConsumerWarpSpecialized() {
     DLOG(WARNING) << "[WS] transformation applied successfully";
     return result;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.ProducerConsumerWarpSpecialized",
-                            {});
+  return CreatePrimFuncPass(pass_func, 0,
+                            "tl.ProducerConsumerWarpSpecializedInternal", {});
+}
+
+tvm::transform::Pass ProducerConsumerWarpSpecialized() {
+  return tvm::transform::Sequential({AnnotateDeviceBoundTmaCopies(),
+                                     ProducerConsumerWarpSpecializedInternal()},
+                                    "tl.ProducerConsumerWarpSpecialized");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

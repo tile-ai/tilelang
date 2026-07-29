@@ -28,7 +28,6 @@ try:
 except ImportError:  # installed package (0.1.x) exposes it here
     from tilelang.utils.target import determine_target
 from tilelang.engine.lower import canon_target_host
-from tilelang.cuda.pipeline import allow_warp_specialized
 from tilelang.backend.pass_pipeline.pipeline_utils import (
     should_enable_race_check,
     should_force_let_inline,
@@ -116,8 +115,7 @@ def build_pass_stages(target: Target) -> list[tuple[str, object]]:
     stages.append(("Simplify", tilelang.transform.Simplify()))
     stages.append(("LayoutReducer", tilelang.transform.LayoutReducer()))
 
-    if allow_warp_specialized(target=target):
-        stages.append(("ProducerConsumerWarpSpecialized", tilelang.cuda.transform.ProducerConsumerWarpSpecialized()))
+    stages.append(("ProducerConsumerWarpSpecialized", tilelang.cuda.transform.ProducerConsumerWarpSpecialized()))
 
     stages.append(("LowerBlackwell2SM", tilelang.cuda.transform.LowerBlackwell2SM()))
     stages.append(("IfStmtBinding", tilelang.transform.IfStmtBinding()))

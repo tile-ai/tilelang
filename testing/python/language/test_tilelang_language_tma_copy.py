@@ -544,6 +544,38 @@ def test_device_bound_pointer_keeps_descriptorless_bulk1d():
     assert "CUtensorMap" not in device_source
 
 
+def test_device_bound_descriptor_tma_is_rejected_when_ws_disabled():
+    @T.prim_func
+    def main(src_ptrs: T.Tensor((1,), T.ptr)):
+        with T.Kernel(threads=128):
+            src = T.make_tensor(
+                src_ptrs[0],
+                (16, 32),
+                T.float16,
+                strides=(32, 1),
+            )
+            src_shared = T.alloc_shared((16, 16), T.float16)
+            T.copy(src[0, 0], src_shared, prefer_instruction="tma")
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+    pass_configs = {
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED.value: True,
+    }
+    with (
+        target,
+        tvm.transform.PassContext(config=pass_configs),
+        pytest.raises(
+            tvm.TVMError,
+            match="bound inside the device function body",
+        ),
+    ):
+        tilelang.lower(
+            main,
+            target=target,
+            enable_device_compile=False,
+        )
+
+
 def run_fp4_tma_copy_unpacked_smem_load():
     program = fp4_tma_copy_unpacked_smem_load()
     kernel = tilelang.compile(
