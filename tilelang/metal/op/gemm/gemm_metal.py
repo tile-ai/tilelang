@@ -51,6 +51,19 @@ class GemmMetalSimdGroup(GemmBase):
         mbar_phase_expr: tir.PrimExpr | None = None,
     ):
         thread_nums = thread_bounds.extent
+        # Metal shared memory budget: 32KB per threadgroup.
+        # A_shared + B_shared for GEMM: (M_tile + N_tile) * K_chunk * sizeof(dtype).
+        # Exceeding 32768 causes cryptic 'state != nullptr' runtime errors.
+        dtype_bytes = max(tvm.DataType(self.a_dtype).bytes, tvm.DataType(self.b_dtype).bytes)
+        shmem_est = dtype_bytes * (self.M + self.N) * self.chunk
+        if shmem_est > 32768:
+            max_chunk = 32768 // (dtype_bytes * (self.M + self.N))
+            raise ValueError(
+                f"Metal GEMM shared memory ({shmem_est} bytes) exceeds "
+                f"32KB limit. Reduce tile size or chunk. "
+                f"(M={self.M}, N={self.N}, chunk={self.chunk}, "
+                f"max_chunk_for_this_MN={max_chunk})"
+            )
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_METAL)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
