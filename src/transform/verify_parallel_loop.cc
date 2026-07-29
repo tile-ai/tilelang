@@ -48,40 +48,30 @@ struct ParallelLoopVerifier : public ConstrVisitor {
     }
 
     ConstrSet cset{constr_stack_};
-    std::vector<std::pair<Var, Var>> parallel_var_pairs;
-    std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> parallel_vars;
+    // Model a second logical iteration. Renaming starts at the outermost
+    // parallel loop variable: everything defined before it is outside all
+    // parallelism, hence invariant and shared, while the parallel loop
+    // variables and any bind inside the region are private to an iteration and
+    // must get their own copy -- sharing them would force the parallel loop
+    // variables equal. Merge (not append) so that a bind kept shared is not
+    // populated twice.
     Map<Var, PrimExpr> subs;
-    for (const auto &var : parallel_loop_vars_) {
-      Var other_var(var->name_hint + "<OTHER>", var->dtype);
-      parallel_var_pairs.emplace_back(var, other_var);
-      parallel_vars.insert(var);
-      subs.Set(var, other_var);
-    }
-
-    // Bind variables defined within a parallel loop are private SSA values of
-    // each logical iteration. Give the second iteration its own definitions;
-    // sharing them would incorrectly force the parallel loop variables equal.
-    bool inside_parallel_scope = false;
-    for (const Constr &constr : constr_stack_) {
-      if (constr.kind == Constr::kBindRange &&
-          parallel_vars.count(constr.var)) {
-        inside_parallel_scope = true;
-      } else if (inside_parallel_scope && constr.kind == Constr::kBindValue) {
-        Var other_var(constr.var->name_hint + "<OTHER>", constr.var->dtype);
-        subs.Set(constr.var, other_var);
-      }
-    }
-
-    cset.Extend(cset.Substitute(subs));
+    cset = cset.Merge(
+        cset.RenameFrom("<OTHER>", subs, parallel_loop_vars_.front()));
     for (const auto &idx : op->indices) {
       cset.AddConstr(idx == tirx::Substitute(idx, subs));
     }
     arith::Analyzer analyzer;
     cset.Populate(analyzer);
 
+    Array<Var> parallel_var_pairs;
     PrimExpr same_iteration = Bool(true);
-    for (const auto &[var, other_var] : parallel_var_pairs) {
-      same_iteration = And(same_iteration, EQ(var, other_var));
+    for (const auto &var : parallel_loop_vars_) {
+      auto it = subs.find(var);
+      if (it != subs.end()) {
+        same_iteration = And(same_iteration, EQ(var, (*it).second));
+        parallel_var_pairs.push_back(var);
+      }
     }
     PrimExpr same_value = op->value == tirx::Substitute(op->value, subs);
     PrimExpr race_free = Or(same_iteration, same_value);
@@ -91,8 +81,8 @@ struct ParallelLoopVerifier : public ConstrVisitor {
     }
 
     Array<Var> failed_vars;
-    for (const auto &[var, other_var] : parallel_var_pairs) {
-      if (!analyzer.CanProve(EQ(var, other_var))) {
+    for (const auto &var : parallel_var_pairs) {
+      if (!analyzer.CanProve(EQ(var, subs.at(var)))) {
         failed_vars.push_back(var);
       }
     }
