@@ -97,7 +97,7 @@ def test_pipeline_planning_before_after_copy_gemm_num_stages_plan():
                     "software_pipeline_stage": [
                         T.int32(0),
                         T.int32(0),
-                        T.int32(2),
+                        T.int32(3),
                     ],
                     "tl_pipelined_num_stages": T.int32(3),
                 },
@@ -132,7 +132,7 @@ def test_pipeline_planning_before_after_copy_consumer_num_stages_plan():
                 "software_pipeline_async_producers": [T.int32(1), T.int32(0)],
                 "software_pipeline_async_stages": [T.int32(0)],
                 "software_pipeline_order": [T.int32(0), T.int32(1)],
-                "software_pipeline_stage": [T.int32(0), T.int32(1)],
+                "software_pipeline_stage": [T.int32(0), T.int32(2)],
                 "tl_pipelined_num_stages": T.int32(2),
             },
         ):
@@ -162,7 +162,7 @@ def test_pipeline_planning_before_after_loop_local_alloc_plan():
                 "software_pipeline_async_producers": [T.int32(1), T.int32(0)],
                 "software_pipeline_async_stages": [T.int32(0)],
                 "software_pipeline_order": [T.int32(0), T.int32(1)],
-                "software_pipeline_stage": [T.int32(0), T.int32(1)],
+                "software_pipeline_stage": [T.int32(0), T.int32(2)],
                 "tl_pipelined_num_stages": T.int32(2),
             },
         ):
@@ -196,7 +196,7 @@ def test_pipeline_planning_schedules_guarded_body_after_replayable_bind_inline()
     annos = _collect_pipeline_loop_annotations(mod["main"])
     assert len(annos) == 1
     anno = annos[0]
-    assert [int(v) for v in anno["software_pipeline_stage"]] == [0, 1]
+    assert [int(v) for v in anno["software_pipeline_stage"]] == [0, 2]
     assert [int(v) for v in anno["software_pipeline_order"]] == [0, 1]
     assert "software_pipeline_replayable_scalar_binds" not in anno
     tl.transform.InjectSoftwarePipeline()(mod)
@@ -243,9 +243,9 @@ def test_pipeline_planning_before_after_mbarrier_arrive_wait_plan():
                     ],
                     "software_pipeline_stage": [
                         T.int32(0),
-                        T.int32(1),
-                        T.int32(1),
-                        T.int32(1),
+                        T.int32(2),
+                        T.int32(2),
+                        T.int32(2),
                     ],
                     "tl_pipelined_num_stages": T.int32(2),
                 },
@@ -299,9 +299,9 @@ def test_pipeline_planning_before_after_tma_copy_plan():
                     ],
                     "software_pipeline_stage": [
                         T.int32(0),
-                        T.int32(1),
-                        T.int32(1),
-                        T.int32(1),
+                        T.int32(2),
+                        T.int32(2),
+                        T.int32(2),
                     ],
                     "tl_pipelined_num_stages": T.int32(2),
                 },
@@ -373,8 +373,8 @@ def test_pipeline_planning_before_after_wgmma_gemm_plan():
                         T.int32(0),
                         T.int32(0),
                         T.int32(1),
-                        T.int32(2),
-                        T.int32(2),
+                        T.int32(3),
+                        T.int32(3),
                     ],
                     "tl_pipelined_num_stages": T.int32(3),
                 },
@@ -459,8 +459,8 @@ def test_pipeline_planning_before_after_tcgen05_gemm_plan():
                     "software_pipeline_stage": [
                         T.int32(0),
                         T.int32(0),
-                        T.int32(1),
-                        T.int32(1),
+                        T.int32(2),
+                        T.int32(2),
                     ],
                     "tl_pipelined_num_stages": T.int32(2),
                 },
@@ -605,7 +605,7 @@ def test_simple_pipeline():
     assert "tl_pipelined_num_stages" in anno
     stages = [int(s) for s in anno["software_pipeline_stage"]]
     orders = [int(o) for o in anno["software_pipeline_order"]]
-    assert stages == [0, 0, 2]
+    assert stages == [0, 0, 3]
     assert orders == [0, 1, 2]
     assert int(anno["tl_pipelined_num_stages"]) == 3
     # tma_copies annotation depends on target TMA capability
@@ -646,7 +646,7 @@ def test_pipeline_planning_recognizes_parallel_bufferstore_copy_stages():
     orders = [int(v) for v in anno["software_pipeline_order"]]
     async_producers = [int(v) for v in anno["software_pipeline_async_producers"]]
     async_groups = [int(v) for v in anno["software_pipeline_async_producer_groups"]]
-    assert stages == [0, 0, 2]
+    assert stages == [0, 0, 3]
     assert orders == [0, 1, 2]
     assert async_producers == [1, 1, 0]
     assert async_groups == [0, 0, -1]
@@ -734,7 +734,7 @@ def test_pipeline_planning_stages_bind_with_dependent_copy():
     replayable_binds = [int(v) for v in annos[0]["software_pipeline_replayable_scalar_binds"]]
 
     assert len(stages) == 2, f"Expected copy and consumer stages, got {stages}"
-    assert stages == [0, 1]
+    assert stages == [0, 2]
     assert orders == [0, 1]
     assert async_producers == [1, 0]
     assert replayable_binds == [1, 0, 0]
@@ -763,7 +763,7 @@ def test_pipeline_planning_mixed_buffer_scalar_producer_chain():
     stages = [int(v) for v in anno["software_pipeline_stage"]]
     orders = [int(v) for v in anno["software_pipeline_order"]]
 
-    assert stages == [0, 0, 0, 1]
+    assert stages == [0, 0, 0, 2]
     assert orders == [0, 1, 2, 3]
     tl.transform.InjectSoftwarePipeline()(mod)
 
@@ -789,8 +789,44 @@ def test_pipeline_planning_places_dependency_sinks_in_last_stage():
     stages = [int(v) for v in anno["software_pipeline_stage"]]
     orders = [int(v) for v in anno["software_pipeline_order"]]
 
-    assert stages == [2, 0, 2]
+    assert stages == [3, 0, 3]
     assert orders == [1, 0, 2]
+    tl.transform.InjectSoftwarePipeline()(mod)
+
+
+def test_pipeline_planning_num_stages_zero_keeps_plain_loop():
+    @T.prim_func
+    def before(
+        A: T.Tensor((16,), T.float16),
+        B: T.Tensor((16,), T.float16),
+    ):
+        for i in T.Pipelined(16, num_stages=0):
+            B[i] = A[i]
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    assert not _collect_pipeline_loop_annotations(mod["main"])
+    assert "num_stages" not in mod["main"].script()
+
+
+def test_pipeline_planning_manual_ws_uses_ring_buffer_stage_count():
+    @T.prim_func
+    def before(
+        A: T.Tensor((64,), T.float16),
+        B: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=256):
+            A_shared = T.alloc_shared((16,), T.float16)
+            for k in T.Pipelined(4, num_stages=2):
+                with T.ws(0):
+                    T.copy(A[k * 16], A_shared)
+                with T.ws(1):
+                    T.copy(A_shared, B[k * 16])
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert len(annos) == 1
+    stages = [int(v) for v in annos[0]["software_pipeline_stage"]]
+    assert stages == [0, 1]
     tl.transform.InjectSoftwarePipeline()(mod)
 
 

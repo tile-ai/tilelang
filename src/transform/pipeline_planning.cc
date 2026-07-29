@@ -788,8 +788,8 @@ public:
 
   void
   AssignStagesAndOrders(std::vector<PipelineStageInfo> *pipeline_stage_infos,
-                        int num_stages) const {
-    ICHECK_GE(num_stages, 1);
+                        int max_stage) const {
+    ICHECK_GE(max_stage, 0);
     const int num_statements = static_cast<int>(pipeline_stage_infos->size());
     PipelineDependencyDag dag = BuildDependencyDag(*pipeline_stage_infos);
 
@@ -840,8 +840,8 @@ public:
     }
     for (int i = 0; i < num_statements; ++i) {
       int stage = 0;
-      if (max_logical_level > 0 && num_stages > 1) {
-        stage = logical_levels[i] * (num_stages - 1) / max_logical_level;
+      if (max_logical_level > 0) {
+        stage = logical_levels[i] * max_stage / max_logical_level;
       }
       (*pipeline_stage_infos)[i].stage = stage;
     }
@@ -849,11 +849,10 @@ public:
     // A statement with no in-pipeline successor cannot hide latency for any
     // later pipeline work.  Keep these sinks in the consumer stage, matching
     // the old planner's treatment of statements that were not producers for a
-    // copy, while keeping the stage range bounded by num_stages.
-    const int last_stage = num_stages - 1;
+    // copy.
     for (int i = 0; i < num_statements; ++i) {
       if (dag.successors[i].empty()) {
-        (*pipeline_stage_infos)[i].stage = last_stage;
+        (*pipeline_stage_infos)[i].stage = max_stage;
       }
     }
 
@@ -1125,8 +1124,21 @@ private:
 
   void
   AssignStagesAndOrders(std::vector<PipelineStageInfo> *pipeline_stage_infos,
-                        int num_stages) const {
-    MakeStageAnalyzer().AssignStagesAndOrders(pipeline_stage_infos, num_stages);
+                        int max_stage) const {
+    MakeStageAnalyzer().AssignStagesAndOrders(pipeline_stage_infos, max_stage);
+  }
+
+  bool HasManualWarpSpecialization(const Stmt &stmt) const {
+    bool found = false;
+    PostOrderVisit(stmt, [&](const ObjectRef &node) {
+      if (const auto *attr_stmt = node.as<AttrStmtNode>()) {
+        if (attr_stmt->attr_key == "warp_specialize" ||
+            attr_stmt->attr_key == attr::kWarpSpecializationScope) {
+          found = true;
+        }
+      }
+    });
+    return found;
   }
 
   void MaybeAnnotateLegacyAsyncPipelineLoop(const Array<Stmt> &pipeline_stmts,
@@ -1277,7 +1289,12 @@ private:
 
     // Assign stages by a weighted longest-path traversal over the unified
     // buffer/scalar dependency DAG, then derive a stable topological order.
-    AssignStagesAndOrders(&pipeline_stage_infos, num_stages);
+    // Compiler-inferred pipelines use stage indices [0, num_stages].  Manual
+    // warp-specialized pipelines use num_stages as an explicit ring-buffer
+    // size, so their valid stage indices remain [0, num_stages - 1].
+    int max_stage =
+        HasManualWarpSpecialization(loop->body) ? num_stages - 1 : num_stages;
+    AssignStagesAndOrders(&pipeline_stage_infos, max_stage);
 
     // Async producer grouping uses the last consumer of each copy.
     AnalyzeCopyLastUse(&pipeline_stage_infos);
