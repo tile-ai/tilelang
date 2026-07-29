@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 import tilelang.language as T
@@ -20,10 +22,14 @@ FASTMATH_INTRINSICS = [
     "dtype",
     [
         "bool",
+        "int8",
         "int16",
         "int32",
+        "int64",
+        "uint8",
         "uint16",
         "uint32",
+        "uint64",
         "float8_e4m3fn",
         "float8_e5m2",
     ],
@@ -32,7 +38,11 @@ FASTMATH_INTRINSICS = [
 def test_fastmath_rejects_unsupported_dtype(intrinsic, dtype):
     value = tirx.Var("value", dtype)
 
-    with pytest.raises(TypeError, match=rf"T\.{intrinsic.__name__} only supports floating-point inputs"):
+    with pytest.raises(
+        TypeError,
+        match=rf"T\.{intrinsic.__name__} only supports floating-point inputs, "
+        rf"but got {re.escape(dtype)}",
+    ):
         intrinsic(value)
 
 
