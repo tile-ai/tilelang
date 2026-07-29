@@ -55,9 +55,9 @@ class GemmMetalSimdGroup(GemmBase):
         thread_nums = thread_bounds.extent
         if thread_nums > 512:
             warnings.warn(
-                f"Metal GEMM: thread_nums={thread_nums} > 512 may cause "
-                f"register spilling on Apple GPU. Consider using ≤512 threads.",
-                stacklevel=2)
+                f"Metal GEMM: thread_nums={thread_nums} > 512 may cause register spilling on Apple GPU. Consider using ≤512 threads.",
+                stacklevel=2,
+            )
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_METAL)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
