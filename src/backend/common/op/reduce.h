@@ -1031,6 +1031,27 @@ template <typename Impl> struct ReduceLowerer {
           int block_threads =
               static_cast<int>(*as_const_int(lower_args.thread_bounds->extent));
           auto thread_offset = lower_args.thread_bounds->min;
+          PrimExpr all_threads = lower_args.thread_bounds->extent;
+          PrimExpr participant_predicate = Bool(true);
+          if (reducing_threads > 32 &&
+              TargetSupportsNamedBarrier(lower_args.target)) {
+            Range thread_range = reduce::ResolveAllReduceThreadRange(
+                red_layout, lower_args.thread_bounds, lower_args.target);
+            thread_offset = thread_range->min;
+            all_threads = thread_range->extent;
+            participant_predicate = analyzer->Simplify(
+                lower_args.thread_index >= thread_range->min &&
+                lower_args.thread_index <
+                    thread_range->min + thread_range->extent);
+          }
+
+          auto push_batch_phase = [&](Stmt phase) {
+            if (analyzer->CanProve(participant_predicate)) {
+              phases.push_back(phase);
+            } else {
+              phases.push_back(IfThenElse(participant_predicate, phase));
+            }
+          };
 
           int vsize = Impl::GetPreferedVectorizedSize(clear_buffer->dtype,
                                                       lower_args.target);
@@ -1043,8 +1064,7 @@ template <typename Impl> struct ReduceLowerer {
                   .value();
           std::string allreduce = Impl::MakeBatchAllReduce(
               reducer, reducing_threads, thread_step.scale, thread_offset,
-              lower_args.thread_bounds->extent, eff_batch, block_threads,
-              lower_args.target);
+              all_threads, eff_batch, block_threads, lower_args.target);
 
           DataType ws_dtype = can_batch_pack
                                   ? clear_buffer->dtype.with_lanes(vsize)
@@ -1106,7 +1126,7 @@ template <typename Impl> struct ReduceLowerer {
                   pack_buf, Shuffle({a_load, b_load}, {0, 1}), {pack_j});
               Stmt pack_loop =
                   For(pack_j, 0, packed_batch, ForKind::kUnrolled, pack_body);
-              phases.push_back(pack_loop);
+              push_batch_phase(pack_loop);
 
               PrimExpr packed_ptr =
                   Call(DataType::Handle(), builtin::address_of(),
@@ -1115,7 +1135,7 @@ template <typename Impl> struct ReduceLowerer {
               if (need_workspace) {
                 args.push_back(workspace);
               }
-              phases.push_back(Evaluate(
+              push_batch_phase(Evaluate(
                   Call(DataType::Handle(), builtin::call_extern(), args)));
 
               Var unpack_j("unpack_j");
@@ -1142,7 +1162,7 @@ template <typename Impl> struct ReduceLowerer {
               });
               Stmt unpack_loop = For(unpack_j, 0, packed_batch,
                                      ForKind::kUnrolled, unpack_body);
-              phases.push_back(unpack_loop);
+              push_batch_phase(unpack_loop);
             }
           } else {
             for (int chunk = 0; chunk < num_chunks; chunk++) {
@@ -1160,7 +1180,7 @@ template <typename Impl> struct ReduceLowerer {
               if (need_workspace) {
                 args.push_back(workspace);
               }
-              phases.push_back(Evaluate(
+              push_batch_phase(Evaluate(
                   Call(DataType::Handle(), builtin::call_extern(), args)));
             }
           }
