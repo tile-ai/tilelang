@@ -174,8 +174,9 @@ private:
     for (const auto &[data, buffer] : buffer_map_) {
       const auto *ptr_type =
           buffer->data->type_annotation.as<PointerTypeNode>();
+      ICHECK(ptr_type) << "LowerSharedTmem requires buffer " << buffer->name
+                       << "'s data Var to have a PointerType annotation";
       auto storage_scope = ptr_type->storage_scope;
-      ICHECK(ptr_type) << "Buffer Var's type annotation must be of PointerType";
       if (storage_scope == "shared.tmem") {
         tmem_buffers.push_back(buffer);
       }
