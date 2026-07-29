@@ -2399,6 +2399,52 @@ void CodeGenTileLangCUDA::PrintVecStore(const BufferNode *buffer, DataType t,
 }
 
 /**
+ * @brief Emit a tl.logical_reduce call as a tl::Logical[Vector]ReduceMap.
+ *
+ * The `Let` binds the logical vector index to its remapped load and becomes
+ * the C++ lambda parameter. Returns false if `op` is not a logical_reduce.
+ */
+bool CodeGenTileLangCUDA::PrintLogicalReduce(const CallNode *op,
+                                             std::ostream &os) {
+  if (!op->op.same_as(tl::logical_reduce())) {
+    return false;
+  }
+
+  ICHECK_EQ(op->args.size(), 3U);
+  const auto *mapping = op->args[0].as<LetNode>();
+  ICHECK(mapping) << "tl.logical_reduce expects a Let mapping expression";
+  const auto *placeholder = mapping->value.as<CallNode>();
+  ICHECK(placeholder && placeholder->op.same_as(tl::logical_reduce_index()))
+      << "tl.logical_reduce expects a logical_reduce_index Let value";
+  const int64_t *is_any = as_const_int(op->args[2]);
+  ICHECK(is_any && (*is_any == 0 || *is_any == 1));
+
+  DataType chunk_dtype = mapping->body.dtype();
+  ICHECK(!chunk_dtype.is_scalable_vector());
+  int vector_size = chunk_dtype.lanes();
+  os << "tl::Logical";
+  if (vector_size > 1) {
+    os << "Vector";
+  }
+  os << "ReduceMap<" << (*is_any ? "true" : "false");
+  if (vector_size > 1) {
+    os << ", ";
+    PrintType(chunk_dtype.element_of(), os);
+    os << ", " << vector_size;
+  }
+  os << ">(";
+  PrintExpr(op->args[1], os);
+  os << ", [&](";
+  PrintType(mapping->var.dtype(), os);
+  os << " " << AllocVarID(mapping->var.get()) << ") { return ";
+  PrintExpr(mapping->body, os);
+  os << "; })";
+  bool removed = var_idmap_.erase(mapping->var.get());
+  ICHECK(removed);
+  return true;
+}
+
+/**
  * @brief Emit CUDA/TensorLib-specific code for a call expression.
  *
  * This visitor handles CallNode intrinsics and builtins that require emitting
@@ -2458,6 +2504,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     os << ")";
   };
+  if (PrintLogicalReduce(op, os)) {
+    return;
+  }
   if (op->op.same_as(tl::max_nan()) || op->op.same_as(tl::min_nan())) {
     ICHECK_EQ(op->args.size(), 2);
     const bool is_max = op->op.same_as(tl::max_nan());

@@ -31,12 +31,27 @@
 #include "common/pipeline_utils.h"
 #include "layout_reducer.h"
 #include "loop_partition.h"
+#include "loop_vectorize.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tirx;
 using namespace ffi;
+
+namespace {
+
+const Op &LogicalAnyOfOp() {
+  static const Op &op = Op::Get("tl.any_of");
+  return op;
+}
+
+const Op &LogicalAllOfOp() {
+  static const Op &op = Op::Get("tl.all_of");
+  return op;
+}
+
+} // namespace
 
 static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
                                    Map<Var, Var> &var_remap) {
@@ -773,7 +788,163 @@ private:
     return Optional<Layout>();
   }
 
+  Optional<Layout> GetAccessPtrLayout(const PrimExpr &access_ptr) const {
+    const auto *call = access_ptr.as<CallNode>();
+    if (call == nullptr || !call->op.same_as(tl::access_ptr()) ||
+        call->args.size() != 3) {
+      return Optional<Layout>();
+    }
+
+    Optional<PrimExpr> resolved = ResolveBufferLoad(call->args[0]);
+    if (!resolved.defined()) {
+      return Optional<Layout>();
+    }
+
+    Buffer buffer = Downcast<BufferLoad>(resolved.value())->buffer;
+    Buffer remap_key = FindRemapBuffer(buffer).value_or(buffer);
+    if (!buffer_map_.count(remap_key->data)) {
+      return Optional<Layout>();
+    }
+    return FindLayout(remap_key);
+  }
+
+  PrimExpr LinearizedBufferIndex(const BufferLoad &load) {
+    ICHECK_EQ(load->indices.size(), load->buffer->shape.size());
+    ICHECK(!load->indices.empty());
+    DataType index_dtype = load->indices[0].dtype();
+    PrimExpr index = make_zero(index_dtype);
+    PrimExpr stride = make_const(index_dtype, 1);
+    for (int i = static_cast<int>(load->indices.size()) - 1; i >= 0; --i) {
+      index += load->indices[i] * stride;
+      stride *= load->buffer->shape[i];
+    }
+    return analyzer_->Simplify(index);
+  }
+
+  Buffer MakeFlattenedAlias(const Buffer &buffer) {
+    ICHECK(!buffer->shape.empty());
+    DataType index_dtype = buffer->shape[0].dtype();
+    PrimExpr extent = make_const(index_dtype, 1);
+    for (const PrimExpr &dim : buffer->shape) {
+      extent *= dim;
+    }
+    return Buffer(buffer->data, buffer->dtype, {analyzer_->Simplify(extent)},
+                  {}, buffer->elem_offset, buffer->name + "_logical_reduce",
+                  buffer->data_alignment, buffer->offset_factor,
+                  buffer->buffer_type);
+  }
+
+  int SelectLogicalReductionVectorSize(const BufferLoad &mapped_load,
+                                       const Var &logical_offset,
+                                       const PrimExpr &extent) {
+    DataType dtype = mapped_load->buffer->dtype;
+    if (dtype.is_bool() || dtype.bits() < 8) {
+      return 1;
+    }
+
+    int element_bits = dtype.bits() * dtype.lanes();
+    if (element_bits <= 0 || element_bits > 128) {
+      return 1;
+    }
+
+    // Swizzles keep a contiguous 128-bit vector inside each atom. Start at
+    // that lane count and shrink until the remapped physical address is
+    // provably aligned and contiguous.
+    int vector_size = 1;
+    int max_vector_size = 128 / element_bits;
+    while (vector_size <= max_vector_size / 2) {
+      vector_size *= 2;
+    }
+
+    PrimExpr physical_element_offset = analyzer_->Simplify(
+        mapped_load->buffer->elem_offset + LinearizedBufferIndex(mapped_load));
+    while (vector_size > 1 &&
+           !IndicesCanVectorize(physical_element_offset, logical_offset, extent,
+                                vector_size, analyzer_)) {
+      vector_size /= 2;
+    }
+    return vector_size;
+  }
+
+  PrimExpr MakeMappedLogicalReduction(const PrimExpr &access_ptr,
+                                      const PrimExpr &extent, DataType dtype,
+                                      bool is_any) {
+    DataType offset_dtype = extent.dtype();
+    Var logical_offset("logical_reduce_offset", offset_dtype);
+    AccessPtrResult mapped =
+        HandleAccessPtrAndOffset(access_ptr, logical_offset, dtype);
+    ICHECK(mapped.rewritten);
+    Call mapped_access_ptr = Downcast<Call>(mapped.expr);
+    ICHECK(mapped_access_ptr->op.same_as(tl::access_ptr()));
+    ICHECK_EQ(mapped_access_ptr->args.size(), 3U);
+    BufferLoad mapped_load = Downcast<BufferLoad>(mapped_access_ptr->args[0]);
+
+    int vector_size =
+        SelectLogicalReductionVectorSize(mapped_load, logical_offset, extent);
+    PrimExpr vector_size_expr = make_const(offset_dtype, vector_size);
+
+    Var vector_index("logical_reduce_vector", offset_dtype);
+    PrimExpr chunk_offset = vector_index * vector_size_expr;
+    AccessPtrResult chunk_mapped =
+        HandleAccessPtrAndOffset(access_ptr, chunk_offset, dtype);
+    ICHECK(chunk_mapped.rewritten);
+    Call chunk_access_ptr = Downcast<Call>(chunk_mapped.expr);
+    ICHECK(chunk_access_ptr->op.same_as(tl::access_ptr()));
+    ICHECK_EQ(chunk_access_ptr->args.size(), 3U);
+    BufferLoad chunk_base = Downcast<BufferLoad>(chunk_access_ptr->args[0]);
+
+    Buffer flat_buffer = MakeFlattenedAlias(chunk_base->buffer);
+    PrimExpr flat_index = LinearizedBufferIndex(chunk_base);
+    PrimExpr chunk_value;
+    if (vector_size > 1) {
+      int chunk_lanes = flat_buffer->dtype.lanes() * vector_size;
+      chunk_value = flat_buffer.vload(
+          {flat_index}, flat_buffer->dtype.with_lanes(chunk_lanes));
+    } else {
+      chunk_value = BufferLoad(flat_buffer, {flat_index});
+    }
+    PrimExpr vector_count =
+        analyzer_->Simplify(floordiv(extent, vector_size_expr));
+    // Keep the runtime vector index as a real TIR binder so ordinary passes
+    // can inspect and rewrite the mapped load. A call value is what keeps the
+    // Let alive for codegen: CanInlineLet only drops constants and bare vars.
+    PrimExpr index_placeholder =
+        Call(offset_dtype, tl::logical_reduce_index(), ffi::Array<PrimExpr>{});
+    PrimExpr mapped_chunk =
+        Let(vector_index, std::move(index_placeholder), std::move(chunk_value));
+    return Call(
+        dtype, tl::logical_reduce(),
+        {std::move(mapped_chunk), std::move(vector_count), Bool(is_any)});
+  }
+
+  Optional<PrimExpr> TryRewriteLogicalReduction(const CallNode *op) {
+    bool is_any = op->op.same_as(LogicalAnyOfOp());
+    bool is_all = op->op.same_as(LogicalAllOfOp());
+    if (!is_any && !is_all) {
+      return Optional<PrimExpr>();
+    }
+
+    ICHECK_EQ(op->args.size(), 2U)
+        << "tl.any_of/tl.all_of expect (access_ptr, extent)";
+    PrimExpr access_ptr = op->args[0];
+    if (!GetAccessPtrLayout(access_ptr).defined()) {
+      return Optional<PrimExpr>();
+    }
+
+    PrimExpr extent = analyzer_->Simplify(VisitExpr(op->args[1]));
+    if (const auto *extent_imm = extent.as<IntImmNode>()) {
+      ICHECK_GE(extent_imm->value, 0)
+          << "tl.any_of/tl.all_of extent must be non-negative, but got "
+          << extent;
+    }
+    return MakeMappedLogicalReduction(access_ptr, extent, op->dtype, is_any);
+  }
+
   PrimExpr VisitExpr_(const tirx::CallNode *op) final {
+    if (Optional<PrimExpr> reduction = TryRewriteLogicalReduction(op)) {
+      return reduction.value();
+    }
+
     if (op->op.same_as(tl::tma_load()) ||
         op->op.same_as(tl::tma_load_im2col()) ||
         op->op.same_as(tl::tma_load_multicast()) ||

@@ -229,6 +229,21 @@ DataType CuTensorMapType();
  */
 TVM_DLL const Op &access_ptr();
 
+/*!
+ * \brief Compiler-internal mapped logical reduction.
+ *
+ * Arg 0 is a Let binding the runtime vector index to the layout-remapped
+ * load; codegen turns this into a LogicalReduceMap template call.
+ */
+TVM_DLL const Op &logical_reduce();
+
+/*!
+ * \brief Opaque placeholder keeping logical_reduce's Let binder intact.
+ *
+ * Consumed by logical_reduce codegen, never emitted on its own.
+ */
+TVM_DLL const Op &logical_reduce_index();
+
 // fast math related op
 // __exp(x) - fast exponential
 TVM_DLL const Op &__exp();
