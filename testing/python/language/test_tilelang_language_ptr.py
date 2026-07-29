@@ -165,9 +165,8 @@ def run_pointer_table_multi_copy(G, N, dtype=T.float16):
 
 def run_pointer_table_grouped_matmul(batch_sizes_list, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     program = pointer_table_grouped_matmul_test(batch_sizes_list, N, K, block_M, block_N, block_K, dtype, accum_dtype)
-    compile_kwargs = {"pass_configs": {"tl.disable_warp_specialized": True}}
-    cython_jit_kernel = tl.compile(program, execution_backend="cython", **compile_kwargs)
-    ffi_jit_kernel = tl.compile(program, execution_backend="tvm_ffi", **compile_kwargs)
+    cython_jit_kernel = tl.compile(program, execution_backend="cython")
+    ffi_jit_kernel = tl.compile(program, execution_backend="tvm_ffi")
 
     device = "cuda"
     torch_dtype = dtype.as_torch()

@@ -104,6 +104,7 @@ def build_pass_stages(target: Target) -> list[tuple[str, object]]:
 
     stages.append(("BindTarget", tirx.transform.BindTarget(target)))
     stages.append(("MaterializeKernelLaunch", tilelang.transform.MaterializeKernelLaunch()))
+    stages.append(("AnnotateDeviceBoundTmaCopies", tilelang.cuda.transform.AnnotateDeviceBoundTmaCopies()))
 
     if should_force_let_inline():
         stages.append(("LetInline", tilelang.transform.LetInline()))

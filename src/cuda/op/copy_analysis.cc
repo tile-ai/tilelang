@@ -89,6 +89,10 @@ bool GetNoImplicitAsyncCommitWait(const CopyNode &op) {
   return GetBoolAnnotation(op, attr::kAsyncCopyNoImplicitCommitWait);
 }
 
+bool GetTmaDescriptorBaseIsDeviceBound(const CopyNode &op) {
+  return GetBoolAnnotation(op, attr::kTmaDescriptorBaseIsDeviceBound);
+}
+
 enum class PreferredCopyInstruction {
   kAuto,
   kTMA,
@@ -490,6 +494,7 @@ struct CopyFacts {
   bool explicit_tma = false;
   bool explicit_cp_async = false;
   bool no_implicit_async_commit_wait = false;
+  bool tma_descriptor_base_is_device_bound = false;
   PreferredCopyInstruction prefer_instruction = PreferredCopyInstruction::kAuto;
   bool disable_tma = false;
   int64_t cluster_mask = 0;
@@ -522,6 +527,15 @@ CopyInstSelection Unsupported(std::string reason) {
 
 std::string MakeTmaUnavailableReason(const CopyNode &op) {
   std::ostringstream oss;
+  if (GetTmaDescriptorBaseIsDeviceBound(op)) {
+    const Buffer &global_buffer = IsGlobalBuffer(op.src) ? op.src : op.dst;
+    oss << "Descriptor-based TMA cannot use global base pointer `"
+        << global_buffer->data->name_hint
+        << "` because it is bound inside the device function body. "
+           "TensorMap descriptors are encoded on the host; use plain T.copy "
+           "to allow a descriptorless or synchronous fallback.";
+    return oss.str();
+  }
   if (op.src->dtype.is_float4_e2m1_unpacked() ||
       op.dst->dtype.is_float4_e2m1_unpacked()) {
     oss << "T.tma_copy() only supports float4_e2m1_unpacked as an FP4 unpack "
@@ -615,6 +629,8 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
   facts.explicit_tma = GetIsTmaCopy(op);
   facts.explicit_cp_async = GetIsAsyncCopy(op);
   facts.no_implicit_async_commit_wait = GetNoImplicitAsyncCommitWait(op);
+  facts.tma_descriptor_base_is_device_bound =
+      GetTmaDescriptorBaseIsDeviceBound(op);
   facts.prefer_instruction = GetPreferredInstruction(op);
   facts.disable_tma = GetDisableTMA(op);
   facts.cluster_mask = GetClusterMask(op);
@@ -681,6 +697,14 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
   facts.can_stsm = CheckSTSMCopy(op, ctx.target);
   facts.can_tmem_load = CheckTMemLoad(op, ctx.target);
   facts.can_tmem_store = CheckTMemStore(op, ctx.target);
+  if (facts.tma_descriptor_base_is_device_bound) {
+    // BulkLoad1D/BulkStore1D pass the device-computed address directly and do
+    // not create a host-side TensorMap descriptor, so keep those facts intact.
+    facts.can_bulk_load = false;
+    facts.can_bulk_store = false;
+    facts.can_bulk_load_ignore_last_dim = false;
+    facts.can_bulk_store_ignore_last_dim = false;
+  }
   return facts;
 }
 
@@ -692,9 +716,15 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
   // The IR carries explicit row indices via annotations and must always be
   // lowered through LowerBulkCopyGather4 (no fallback path makes sense).
   if (GetBoolAnnotation(op, "is_gather4")) {
+    if (GetTmaDescriptorBaseIsDeviceBound(op)) {
+      return Unsupported(MakeTmaUnavailableReason(op));
+    }
     return Supported(CopyInst::kBulkLoadGather4);
   }
   if (GetBoolAnnotation(op, "is_scatter4")) {
+    if (GetTmaDescriptorBaseIsDeviceBound(op)) {
+      return Unsupported(MakeTmaUnavailableReason(op));
+    }
     return Supported(CopyInst::kBulkStoreScatter4);
   }
 

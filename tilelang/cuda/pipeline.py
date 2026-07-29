@@ -68,6 +68,10 @@ def _module_has_shared_barrier(mod: IRModule) -> bool:
 def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.BindTarget(target)(mod)
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    # Record body-bound global bases before optional let inlining obscures
+    # their provenance. CopyAnalysis consumes this marker for every lowering
+    # path, independently of whether warp specialization is enabled.
+    mod = tilelang.cuda.transform.AnnotateDeviceBoundTmaCopies()(mod)
     if should_force_let_inline():
         # Force-let inline whenever the pass config requests it.
         mod = tilelang.transform.LetInline()(mod)
