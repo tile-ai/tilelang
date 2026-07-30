@@ -851,15 +851,10 @@ public:
                        const Array<BufferRegion> &rhs) const {
     for (const BufferRegion &lhs_region : lhs) {
       for (const BufferRegion &rhs_region : rhs) {
-        if (!lhs_region->buffer->data.same_as(rhs_region->buffer->data)) {
+        if (!lhs_region->buffer.same_as(rhs_region->buffer)) {
           continue;
         }
-        // Aliased Buffer views may describe the same allocation with different
-        // ranks.  Without an index map between the views, conservatively retain
-        // their source order instead of asking MayConflict to compare unlike
-        // regions.
-        if (lhs_region->region.size() != rhs_region->region.size() ||
-            MayConflict(lhs_region->region, rhs_region->region)) {
+        if (MayConflict(lhs_region->region, rhs_region->region)) {
           return true;
         }
       }
@@ -867,28 +862,48 @@ public:
     return false;
   }
 
-  bool
-  RegionsConflictThroughAliasedViews(const Array<BufferRegion> &lhs,
-                                     const Array<BufferRegion> &rhs) const {
-    for (const BufferRegion &lhs_region : lhs) {
-      for (const BufferRegion &rhs_region : rhs) {
-        const Buffer &lhs_buffer = lhs_region->buffer;
-        const Buffer &rhs_buffer = rhs_region->buffer;
+  void ValidateNoAliasedBufferViews(
+      const std::vector<PipelineStageInfo> &pipeline_stage_infos) const {
+    struct PipelineBufferAccess {
+      BufferRegion region;
+      int stmt_index;
+    };
+
+    std::vector<PipelineBufferAccess> accesses;
+    for (const PipelineStageInfo &pinfo : pipeline_stage_infos) {
+      for (const BufferRegion &read : pinfo.reads) {
+        accesses.push_back({read, pinfo.original_stmt_index});
+      }
+      for (const BufferRegion &write : pinfo.writes) {
+        accesses.push_back({write, pinfo.original_stmt_index});
+      }
+    }
+
+    for (size_t i = 0; i < accesses.size(); ++i) {
+      const Buffer &lhs_buffer = accesses[i].region->buffer;
+      for (size_t j = i + 1; j < accesses.size(); ++j) {
+        const Buffer &rhs_buffer = accesses[j].region->buffer;
         if (lhs_buffer.same_as(rhs_buffer) ||
             !lhs_buffer->data.same_as(rhs_buffer->data)) {
           continue;
         }
-        if (lhs_region->region.size() != rhs_region->region.size() ||
-            MayConflict(lhs_region->region, rhs_region->region)) {
-          return true;
-        }
+        LOG(FATAL)
+            << "PipelinePlanning does not support aliased Buffer views inside "
+               "T.Pipelined: statement "
+            << accesses[i].stmt_index << " accesses Buffer '"
+            << lhs_buffer->name << "', while statement "
+            << accesses[j].stmt_index << " accesses Buffer '"
+            << rhs_buffer->name << "'; both Buffers share the same data Var '"
+            << lhs_buffer->data->name_hint
+            << "'. Rewrite the pipeline to use a single Buffer view, or move "
+               "the aliased access outside T.Pipelined.";
       }
     }
-    return false;
   }
 
   PipelineDependencyDag BuildDependencyDag(
       const std::vector<PipelineStageInfo> &pipeline_stage_infos) const {
+    ValidateNoAliasedBufferViews(pipeline_stage_infos);
     const int num_statements = static_cast<int>(pipeline_stage_infos.size());
     PipelineDependencyDag dag{std::vector<std::vector<int>>(num_statements),
                               std::vector<std::vector<int>>(num_statements),
@@ -932,12 +947,6 @@ public:
         bool raw = RegionsConflict(src_info.writes, dst_info.reads);
         bool war = RegionsConflict(src_info.reads, dst_info.writes);
         bool waw = RegionsConflict(src_info.writes, dst_info.writes);
-        bool aliased_raw =
-            RegionsConflictThroughAliasedViews(src_info.writes, dst_info.reads);
-        bool aliased_war =
-            RegionsConflictThroughAliasedViews(src_info.reads, dst_info.writes);
-        bool aliased_waw = RegionsConflictThroughAliasedViews(src_info.writes,
-                                                              dst_info.writes);
         if (raw || war || waw) {
           // WAR is a cyclic Buffer lifecycle: the earlier statement consumes
           // the value entering this iteration, and the later statement
@@ -945,14 +954,8 @@ public:
           // insufficient because distinct stages execute skewed iterations.
           // Keep both ends in one stage so source order supplies the required
           // read-before-write synchronization.
-          // InjectSoftwarePipeline versions Buffer handles rather than shared
-          // allocation identities.  Until it can rewrite every aliased view
-          // together, keep hazards crossing distinct views of one data Var in
-          // a single stage as well.
-          bool requires_same_stage =
-              war || aliased_raw || aliased_war || aliased_waw;
           add_edge(src, dst, /*scalar_edge=*/false,
-                   /*same_stage_edge=*/requires_same_stage);
+                   /*same_stage_edge=*/war);
         }
       }
     }
@@ -1416,9 +1419,6 @@ public:
                                             const Array<Integer> &order_array,
                                             const Array<Integer> &stage_array,
                                             Map<String, Any> *annotations) {
-    if (!TargetHasAsyncCopy(target_) || !use_async_copy_) {
-      return;
-    }
     ICHECK_EQ(pipeline_stmts.size(), order_array.size());
     ICHECK_EQ(pipeline_stmts.size(), stage_array.size());
 
@@ -1452,6 +1452,10 @@ public:
       pipeline_stage_infos.push_back(std::move(pinfo));
     }
 
+    ValidateNoAliasedBufferViews(pipeline_stage_infos);
+    if (!TargetHasAsyncCopy(target_) || !use_async_copy_) {
+      return;
+    }
     AnalyzeCopyLastUse(&pipeline_stage_infos);
     EmitImplicitAsyncAnnotations(pipeline_stage_infos, annotations);
   }

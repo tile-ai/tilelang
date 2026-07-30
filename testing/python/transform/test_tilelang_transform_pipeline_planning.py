@@ -1,3 +1,5 @@
+import pytest
+
 from tilelang import tvm as tvm
 import tilelang as tl
 from tilelang.backend.target import determine_target
@@ -861,8 +863,8 @@ def test_pipeline_planning_preserves_read_before_shared_overwrite():
     tl.transform.InjectSoftwarePipeline()(mod)
 
 
-def test_pipeline_planning_preserves_dependencies_through_aliased_buffer_view():
-    """Aliased Buffer views must not bypass versioning or async waits."""
+def test_pipeline_planning_rejects_aliased_buffer_views():
+    """PipelinePlanning must reject multiple Buffer views of one data Var."""
 
     @T.prim_func
     def before(
@@ -882,32 +884,33 @@ def test_pipeline_planning_preserves_dependencies_through_aliased_buffer_view():
                 for i, j in T.Parallel(4, 4):
                     B[k * 16 + i * 4 + j] = shared_view[i, j]
 
-    mod = _run_pipeline_planning(before, sm80_target)
-    annos = _collect_pipeline_loop_annotations(mod["main"])
-    assert len(annos) == 1
-    anno = annos[0]
-    stages = [int(v) for v in anno["software_pipeline_stage"]]
-    orders = [int(v) for v in anno["software_pipeline_order"]]
-    async_producers = [int(v) for v in anno["software_pipeline_async_producers"]]
+    with pytest.raises(tvm.TVMError, match="does not support aliased Buffer views"):
+        _run_pipeline_planning(before, sm80_target)
 
-    mod = tl.transform.InjectSoftwarePipeline()(mod)
-    if stages[0] == stages[1]:
-        assert orders[0] < orders[1]
-        return
 
-    shapes = _collect_allocated_buffer_shapes(mod["main"])
-    shared_is_versioned = any(len(shape) > 1 for shape in shapes.get("shared", set()))
-    view_is_versioned = any(len(shape) > 2 for shape in shapes.get("shared_view", set()))
-    assert shared_is_versioned or view_is_versioned, (
-        "A producer and consumer using aliased Buffer views were assigned to "
-        "different stages without multi-versioning their shared allocation"
-    )
+def test_pipeline_planning_rejects_aliased_buffer_views_with_explicit_schedule():
+    """Explicit pipeline annotations must not bypass alias validation."""
 
-    if async_producers[0]:
-        injected_script = mod["main"].script()
-        assert "T.ptx_wait_group(" in injected_script, (
-            "An asynchronous copy consumed through an aliased Buffer view must have a wait before the consumer"
-        )
+    @T.prim_func
+    def before(
+        A: T.Tensor((64,), T.float16),
+        B: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=16):
+            shared = T.alloc_shared((16,), T.float16)
+            shared_view = T.decl_buffer(
+                (4, 4),
+                T.float16,
+                data=shared.data,
+                scope="shared.dyn",
+            )
+            for k in T.Pipelined(4, order=[0, 1], stage=[0, 1]):
+                T.copy(A[k * 16], shared)
+                for i, j in T.Parallel(4, 4):
+                    B[k * 16 + i * 4 + j] = shared_view[i, j]
+
+    with pytest.raises(tvm.TVMError, match="does not support aliased Buffer views"):
+        _run_pipeline_planning(before, sm80_target)
 
 
 def test_pipeline_planning_preserves_guarded_control_before_copy():
