@@ -201,8 +201,7 @@ struct SyncThreadsBarrier {
 };
 
 // Barrier policy: wraps named barrier (bar.sync) with compile-time phase IDs.
-// Used on Hopper and later architectures where __syncthreads() cannot be used
-// in certain contexts.
+// Available on Ampere and later, where it permits partial-CTA synchronization.
 template <int all_threads> struct NamedBarrier {
   template <int phase = 1> static TL_DEVICE void sync() {
     asm volatile("bar.sync %0, %1;" : : "r"(phase), "r"(all_threads));
