@@ -772,6 +772,80 @@ def test_no_sync_for_thread_private_write_read_by_if_condition_in_loop():
     assert 'T.tvm_storage_sync("shared")' not in s, f"Unexpected sync:\n{s}"
 
 
+def test_cross_thread_waw_with_shifted_partition_requires_sync():
+    """A later writer can target a slot owned by another thread."""
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        s[tx] = T.cast(tx, "float32")
+        if tx < 6:
+            s[tx + 10] = T.float32(99)
+
+    script = run_passes_script(func)
+    sync = 'T.tvm_storage_sync("shared")'
+    assert script.count(sync) == 1, f"Expected exactly one barrier:\n{script}"
+    first_write = script.index('T.Cast("float32", tx)')
+    assert first_write < script.index(sync) < script.index("if tx < 6"), f"Barrier must separate the two write phases:\n{script}"
+
+
+def test_provably_disjoint_waw_partitions_need_no_sync():
+    """Disjoint write partitions should not acquire a conservative barrier."""
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        s[tx] = T.cast(tx, "float32")
+        s[tx + 64] = T.float32(99)
+
+    script = run_passes_script(func)
+    assert 'T.tvm_storage_sync("shared")' not in script, f"Disjoint partitions need no barrier:\n{script}"
+
+
+def test_thread_private_waw_needs_no_sync():
+    """Two writes to the same thread-private slot remain program ordered."""
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        s[tx] = T.cast(tx, "float32")
+        s[tx] = T.float32(99)
+
+    script = run_passes_script(func)
+    assert 'T.tvm_storage_sync("shared")' not in script, f"Thread-private writes need no barrier:\n{script}"
+
+
+def test_waw_bind_definition_uses_per_thread_instances():
+    """Bind definitions must not collapse the two WAW thread instances."""
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        idx: T.int32 = tx + 10
+        s[idx - 10] = T.cast(tx, "float32")
+        if tx < 6:
+            s[idx] = T.float32(99)
+
+    script = run_passes_script(func)
+    assert 'T.tvm_storage_sync("shared")' in script, f"Bind sharing hid a cross-thread WAW hazard:\n{script}"
+
+
 @tilelang.testing.requires_cuda
 def test_partial_sync_non_warp_multiple_rejected():
     """Regression test for issue #2556: a required barrier inside a divergent
