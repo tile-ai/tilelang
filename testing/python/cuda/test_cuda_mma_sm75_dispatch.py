@@ -19,6 +19,7 @@ def test_sm75_uses_sm75_mma_gemm_impl():
     assert resolve_gemm_impl("cuda.mma", Target({"kind": "cuda", "arch": "sm_75"})) is GemmMMASm75
     assert resolve_gemm_impl("cuda.mma", Target({"kind": "cuda", "arch": "sm_80"})) is GemmMMA
     assert resolve_gemm_impl("cuda.fma", Target({"kind": "cuda", "arch": "sm_70"})) is GemmFMA
+    assert resolve_gemm_impl("cuda.fma", Target({"kind": "cuda", "arch": "sm_75"})) is GemmFMA
 
 
 def test_sm75_fp16_emitter_uses_m16n8k8_shape():

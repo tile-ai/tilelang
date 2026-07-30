@@ -42,6 +42,12 @@ static constexpr const char *kParallelAsyncWithoutAsyncCommitWait =
 // Value should be IntImm/Bool-like truthy scalar.
 static constexpr const char *kAsyncCopyNoImplicitCommitWait =
     "no_implicit_async_commit_wait";
+// Copy-op annotation marking that a global endpoint's base pointer is a
+// handle Var defined by Bind inside the function body. Descriptor-based TMA
+// cannot encode such a pointer on the host, while descriptorless Bulk1D
+// remains valid. Value should be IntImm/Bool-like truthy scalar.
+static constexpr const char *kTmaDescriptorBaseIsDeviceBound =
+    "tma_descriptor_base_is_device_bound";
 // Tile-op annotation key carrying an explicit mbarrier parity expression.
 // Pipeline transforms set this on ops whose lowering would otherwise infer
 // parity from surrounding loop context.
@@ -376,6 +382,11 @@ TVM_DLL const Op &tma_load_gather4();
  *                      row0, row1, row2, row3, eviction_policy)
  */
 TVM_DLL const Op &tma_store_scatter4();
+
+TVM_DLL const Op &cooperative_tensor_fill();
+TVM_DLL const Op &cooperative_tensor_load();
+TVM_DLL const Op &cooperative_tensor_store();
+TVM_DLL const Op &cooperative_tensor_multiply_accumulate();
 
 /*!
  * \brief tvm intrinsics for barrier initialization fence

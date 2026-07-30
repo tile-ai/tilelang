@@ -76,6 +76,7 @@ class CompileArgs:
     def __hash__(self):
         """Return a stable hash for cache key construction."""
         data = {
+            "out_idx": self.out_idx,
             "execution_backend": self.execution_backend,
             "target": str(self.target),
             "target_host": str(self.target_host) if self.target_host else None,
@@ -136,6 +137,8 @@ class ProfileArgs:
             "rtol": self.rtol,
             "atol": self.atol,
             "max_mismatched_ratio": self.max_mismatched_ratio,
+            "skip_check": self.skip_check,
+            "cache_input_tensors": self.cache_input_tensors,
         }
         hash_obj = hashlib.sha256(json.dumps(data, sort_keys=True).encode("utf-8"))
         return int.from_bytes(hash_obj.digest(), byteorder="big")

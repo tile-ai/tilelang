@@ -343,12 +343,14 @@ _PACKED_X2_DTYPES = frozenset({"float32x2", "bfloat16x2", "float16x2"})
 
 
 def _validate_packed_x2_args(*args: PrimExpr) -> None:
-    """Validate that all arguments are PrimExpr with a supported packed x2 dtype."""
+    """Validate that all arguments have the same supported packed x2 dtype."""
     for arg in args:
         if not isinstance(arg, PrimExpr):
             raise TypeError(f"Expected PrimExpr, got {type(arg)}: {arg}")
         if arg.dtype not in _PACKED_X2_DTYPES:
             raise ValueError(f"Expected dtype in {sorted(_PACKED_X2_DTYPES)}, got '{arg.dtype}'")
+    if len({arg.dtype for arg in args}) > 1:
+        raise ValueError(f"Expected all packed x2 arguments to have the same dtype, got {[arg.dtype for arg in args]}")
 
 
 # ---------------------------------------------------------------------------

@@ -106,13 +106,41 @@ public:
   }
 
 private:
+  static int GetValueBitWidth(DataType dtype) {
+    int value_bits = dtype.bits() * dtype.lanes();
+    ICHECK_GT(value_bits, 0) << "Invalid TMEM value dtype " << dtype;
+    return value_bits;
+  }
+
+  static PrimExpr ValueColumnOffsetToB32Column(PrimExpr value_col,
+                                               DataType dtype) {
+    arith::Analyzer analyzer;
+    DataType index_dtype = value_col->dtype;
+    PrimExpr value_bits = IntImm(index_dtype, GetValueBitWidth(dtype));
+    PrimExpr bits_per_column = IntImm(index_dtype, 32);
+    PrimExpr bit_offset = analyzer.Simplify(value_col * value_bits);
+    ICHECK(analyzer.CanProveEqual(FloorMod(bit_offset, bits_per_column),
+                                  IntImm(index_dtype, 0)))
+        << "TMEM address must start on a b32 column, but value-column offset "
+        << value_col << " of dtype " << dtype << " has bit offset "
+        << bit_offset;
+    return analyzer.Simplify(FloorDiv(bit_offset, bits_per_column));
+  }
+
   int GetNumColsAllocated(const Buffer &buffer) const {
+    // LowerTileOp has already materialized the buffer's inferred layout, so
+    // the buffer shape is the physical (datapath, value-column) footprint.
     ICHECK_EQ(buffer->shape.size(), 2U);
 
     auto analyzer = std::make_shared<arith::Analyzer>();
     arith::ConstIntBound phy_col_bounds =
         analyzer->const_int_bound(buffer->shape[1]);
-    int num_cols_required = phy_col_bounds->max_value;
+    int num_value_cols_required = phy_col_bounds->max_value;
+    // Layout column coordinates count values of buffer->dtype; PTX TMEM
+    // allocation counts 32-bit columns.  Round up so a final partially
+    // occupied b32 column is included.
+    int num_cols_required =
+        (num_value_cols_required * GetValueBitWidth(buffer->dtype) + 31) / 32;
     ICHECK(num_cols_required <= 512)
         << "The number of columns required for tmem buffer " << buffer->name
         << " is " << num_cols_required
@@ -146,8 +174,9 @@ private:
     for (const auto &[data, buffer] : buffer_map_) {
       const auto *ptr_type =
           buffer->data->type_annotation.as<PointerTypeNode>();
+      ICHECK(ptr_type) << "LowerSharedTmem requires buffer " << buffer->name
+                       << "'s data Var to have a PointerType annotation";
       auto storage_scope = ptr_type->storage_scope;
-      ICHECK(ptr_type) << "Buffer Var's type annotation must be of PointerType";
       if (storage_scope == "shared.tmem") {
         tmem_buffers.push_back(buffer);
       }
@@ -316,30 +345,31 @@ private:
   }
 
   PrimExpr GetTmemOffset(const Buffer &buffer, const Array<PrimExpr> &indices) {
-    ICHECK(buffer->shape.size() == 2);
-    ICHECK(indices.size() == 2);
-    ICHECK(layout_map_.defined());
-    ICHECK(layout_map_.count(buffer))
-        << "The layout of tmem buffer " << buffer->name
-        << " is not defined in the layout map";
-    auto layout = layout_map_[buffer];
-    ICHECK(layout.defined());
-    Array<PrimExpr> tmem_phy_coords = layout->Forward(indices);
-    PrimExpr result =
-        tmem_phy_coords[0] << 16 |
-        tmem_phy_coords
-            [1]; // https://docs.nvidia.com/cuda/parallel-thread-execution/#tensor-memory-addressing
+    // LowerTileOp MATERIALIZED the buffer's inferred layout: it rewrote the
+    // allocation to the layout's physical shape and pushed every address
+    // token through Layout::Forward.  Whatever the fragment's structure --
+    // interleaved datapaths (PTX Layout F), weight-stationary N folding
+    // (Layouts E/G), 2SM shards, leading batch modes -- `indices` here are
+    // always the resulting physical (datapath, value-column) pair; this pass
+    // only encodes them into the hardware word.  A TMEM buffer that skipped
+    // layout inference would still be logical, which the rank check below
+    // (and the 2-D allocation check above) rejects.
+    ICHECK_EQ(indices.size(), 2U)
+        << "TMEM address for " << buffer->name
+        << " must be a (datapath, value-column) coordinate";
+    // https://docs.nvidia.com/cuda/parallel-thread-execution/#tensor-memory-addressing
+    PrimExpr result = indices[0] << 16 |
+                      ValueColumnOffsetToB32Column(indices[1], buffer->dtype);
     return result;
   }
 
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    // Translate tmem[logical_row, logical_col] to tmem[0] + tmem_offset
+    // Translate tmem[datapath, value_col] to tmem[0] + tmem_offset
     // Where
-    // - (logical_row, logical_col) is the logical address in the tmem buffer
+    // - (datapath, value_col) is the physical address in the tmem buffer
     // - tmem[0] is the base address allocated for the tmem buffer
-    // - tmem_offset = tmem_phy_coords[0]<<16 | tmem_phy_coords[1]
-    //   where tmem_phy_coords = layout.Forward(logical_row, logical_col)
-    //   is the physical address in the tmem buffer
+    // - tmem_offset = datapath<<16 | b32_col, with b32_col converted from
+    //   the typed value-column coordinate
     auto load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
     auto buffer = load->buffer;
     auto indices = load->indices;

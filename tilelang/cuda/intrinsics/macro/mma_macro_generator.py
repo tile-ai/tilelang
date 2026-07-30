@@ -1,9 +1,9 @@
 from __future__ import annotations
+from enum import IntEnum
 import tilelang.language as T
 from dataclasses import dataclass
 from typing import Literal
 from collections.abc import Callable
-from tilelang.common import TransformKind
 from tvm import DataType
 from tvm import tirx
 from tvm.ir import Range
@@ -37,6 +37,14 @@ from tilelang.cuda.intrinsics.layout.mma_layout import (
 )
 
 lift = convert
+
+
+# Copied from bitblas
+class TransformKind(IntEnum):
+    NonTransform = 0
+    InterWarpTransform = 1
+    IntraWarpTransform = 2
+    LDMatrixTransform = 3
 
 
 @dataclass(frozen=True)

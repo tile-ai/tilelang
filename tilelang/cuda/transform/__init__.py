@@ -3,6 +3,17 @@
 from .. import _ffi_api
 
 
+def AnnotateDeviceBoundTmaCopies():
+    """Mark tile copies whose TensorMap base is defined in the device body.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.AnnotateDeviceBoundTmaCopies()  # type: ignore
+
+
 def ProducerConsumerWarpSpecialized():
     """Producer-consumer warp specialization at the tile-op level.
 
@@ -132,6 +143,7 @@ def PersistThreadblock():
 
 
 __all__ = [
+    "AnnotateDeviceBoundTmaCopies",
     "AnnotateWarpGroupRegAlloc",
     "FuseMBarrierArriveExpectTx",
     "InjectFenceProxy",
