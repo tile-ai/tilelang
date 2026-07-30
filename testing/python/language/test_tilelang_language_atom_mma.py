@@ -2,7 +2,7 @@ import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang.intrinsics import (
+from tilelang.cuda.language.intrinsics import (
     TensorCoreIntrinEmitter,
     WGMMATensorCoreIntrinEmitter,
     TCGEN05TensorCoreIntrinEmitter,
