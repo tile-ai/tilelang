@@ -125,6 +125,24 @@ bool Use2CtaRequested(const GemmNode &op) {
   return false;
 }
 
+// Native SM75 mma.sync atoms (see tl_templates/cuda/instruction/mma.h).
+// Dtype-only on purpose: SM75 MMA handles the same scopes and transposes as
+// the generic path, so scope checks here would wrongly demote f16 to FMA.
+bool AllowTuringMma(const GemmNode &op) {
+  DataType a = op.a_->dtype;
+  if (a != op.b_->dtype) {
+    return false;
+  }
+  if (a == DataType::Float(16)) {
+    return op.c_->dtype == DataType::Float(16) ||
+           op.c_->dtype == DataType::Float(32);
+  }
+  if ((a.is_int() || a.is_uint()) && (a.bits() == 8 || a.bits() == 4)) {
+    return op.c_->dtype == DataType::Int(32);
+  }
+  return false;
+}
+
 void FatalWgmmaUnavailable(const GemmNode &op, Target target) {
   LOG(FATAL) << "T.wgmma_gemm() requires Hopper WGMMA lowering, but "
                 "constraints were not satisfied. Got target="
@@ -329,6 +347,9 @@ struct Gemm {
       return kCudaWGMMA;
     }
     if (TargetIsVolta(target) && !AllowVoltaMma(op)) {
+      return kCudaFMA;
+    }
+    if (TargetIsTuring(target) && !AllowTuringMma(op)) {
       return kCudaFMA;
     }
     return kCudaMMA;
