@@ -432,6 +432,8 @@ struct PipelineStageInfo {
   int order = -1, stage = -1;
   bool scalar_bind = false;
   bool control_stmt = false;
+  bool blocks_successor = false;
+  bool explicit_ptx_async = false;
   bool lightweight_stmt = false;
   bool copy_stage = false;
   bool tma_copy = false; // true if this copy stage uses TMA (not cp.async)
@@ -445,6 +447,8 @@ public:
     return scalar_bind || control_stmt || lightweight_stmt;
   }
   bool IsControlStmt() const { return control_stmt; }
+  bool BlocksSuccessor() const { return blocks_successor; }
+  bool IsExplicitPtxAsync() const { return explicit_ptx_async; }
   bool IsCopyStage() const { return copy_stage; }
   bool IsTmaCopy() const { return tma_copy; }
   bool AdvancesPipelineStage() const {
@@ -499,6 +503,23 @@ public:
       }
     });
     return conditional;
+  }
+
+  bool IsExplicitPtxAsyncControl(const Call &call) const {
+    return call->op.same_as(tl::ptx_cp_async()) ||
+           call->op.same_as(builtin::ptx_cp_async()) ||
+           call->op.same_as(builtin::ptx_commit_group()) ||
+           call->op.same_as(builtin::ptx_wait_group());
+  }
+
+  bool CanReorderWithSuccessor(const Call &call) const {
+    return call->op.same_as(builtin::ptx_arrive_barrier()) ||
+           call->op.same_as(builtin::ptx_arrive_barrier_expect_tx()) ||
+           call->op.same_as(tl::ptx_arrive_cluster_barrier()) ||
+           call->op.same_as(tl::tma_store_arrive()) ||
+           call->op.same_as(tl::named_barrier_arrive()) ||
+           call->op.same_as(tl::cluster_arrive()) ||
+           call->op.same_as(tl::cluster_arrive_relaxed());
   }
 
   bool IsAsyncProducerCandidate(const PipelineStageInfo &pinfo) const {
@@ -794,9 +815,10 @@ public:
       }
     }
 
-    // Opaque control operations such as async wait/arrive calls do not always
-    // expose a complete buffer dependence.  Keep them between their source
-    // neighbors while assigning them zero scheduling weight.
+    // Opaque control operations do not always expose complete Buffer
+    // dependencies.  Preserve the predecessor edge for every control.  A
+    // blocking wait additionally orders its successor, whereas a non-blocking
+    // arrive/signal may be reordered with independent following work.
     for (int i = 0; i < num_statements; ++i) {
       if (!pipeline_stage_infos[i].IsControlStmt()) {
         continue;
@@ -804,7 +826,7 @@ public:
       if (i > 0) {
         add_edge(i - 1, i, false);
       }
-      if (i + 1 < num_statements) {
+      if (i + 1 < num_statements && pipeline_stage_infos[i].BlocksSuccessor()) {
         add_edge(i, i + 1, false);
       }
     }
@@ -817,6 +839,17 @@ public:
     ICHECK_GE(max_stage, 0);
     const int num_statements = static_cast<int>(pipeline_stage_infos->size());
     PipelineDependencyDag dag = BuildDependencyDag(*pipeline_stage_infos);
+
+    if (std::any_of(
+            pipeline_stage_infos->begin(), pipeline_stage_infos->end(),
+            [](const auto &pinfo) { return pinfo.IsExplicitPtxAsync(); })) {
+      LOG(WARNING)
+          << "PipelinePlanning found explicit PTX async primitives inside "
+             "T.Pipelined. InjectSoftwarePipeline does not currently "
+             "multi-version buffers referenced through tl.access_ptr; the "
+             "control chain will be kept with its following consumer instead "
+             "of being automatically overlapped.";
+    }
 
     // The schedule is constructed in five steps:
     //
@@ -833,7 +866,9 @@ public:
     // 4. For ordinary pipelines, retime the terminal stage once so that its
     //    consumers overlap the next iteration's producers and do not require an
     //    otherwise unused extra Buffer version.
-    // 5. Sort by (stage, source index) to obtain a deterministic order.  Since
+    // 5. Attach opaque control chains to a later following consumer when the
+    //    injector cannot safely multi-version their operands.
+    // 6. Sort by (stage, source index) to obtain a deterministic order.  Since
     //    all edges follow source order and stage never decreases along an edge,
     //    this is also a stable topological order.
 
@@ -1007,6 +1042,26 @@ public:
         }
       }
       terminal_stage_compacted = true;
+    }
+
+    // Opaque control statements do not always expose enough Buffer access
+    // information for InjectSoftwarePipeline to version their operands.  Once
+    // all dependency and terminal-stage adjustments are final, keep a control
+    // chain with its following substantial statement whenever that consumer is
+    // later.  This conservatively collapses explicit PTX async sequences whose
+    // tl.access_ptr buffers cannot yet be multi-versioned by the injector.
+    for (int i = 0; i < num_statements; ++i) {
+      if (!(*pipeline_stage_infos)[i].IsControlStmt()) {
+        continue;
+      }
+      for (int j = i + 1; j < num_statements; ++j) {
+        if ((*pipeline_stage_infos)[j].IsZeroWeight()) {
+          continue;
+        }
+        (*pipeline_stage_infos)[i].stage = std::max(
+            (*pipeline_stage_infos)[i].stage, (*pipeline_stage_infos)[j].stage);
+        break;
+      }
     }
 
     // Without terminal retiming, place each early copy immediately after its
@@ -1235,6 +1290,10 @@ public:
         Call call = GetRef<Call>(call_node);
         pinfo.control_stmt = !ParseOperator(call).defined() &&
                              SideEffect(call) > CallEffectKind::kReadState;
+        if (pinfo.control_stmt) {
+          pinfo.blocks_successor = !CanReorderWithSuccessor(call);
+          pinfo.explicit_ptx_async = IsExplicitPtxAsyncControl(call);
+        }
       }
     }
     pinfo.conditional_execution = MayBeConditionallyExecuted(block->body);
