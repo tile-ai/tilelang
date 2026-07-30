@@ -10,7 +10,7 @@ import tilelang.testing
 from tilelang import tvm
 from tilelang.cuda.intrinsics.layout.mma_layout import mma_load_a_32x32_to_shared_16x64_layout
 from tilelang.cuda.intrinsics.macro.mma_sm120_macro_generator import SM120BlockScaleTile
-from tilelang.intrinsics import TensorCoreIntrinEmitterSM120, get_swizzle_layout
+from tilelang.cuda.language.intrinsics import TensorCoreIntrinEmitterSM120, get_swizzle_layout
 from examples.dequantize_gemm.quantize.nvfp4 import blockscaled_chunk_kmajor_word_offset
 from tilelang.transform import simplify_prim_func
 
@@ -113,7 +113,7 @@ def test_tensor_core_intrin_emitter_mma_keeps_base_positional_signature():
 def test_default_tensor_core_intrin_emitter_stays_arch_neutral():
     from tilelang.cuda.intrinsics.macro.mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
     from tilelang.cuda.op.gemm.gemm_mma import GemmMMA
-    from tilelang.intrinsics import TensorCoreIntrinEmitter
+    from tilelang.cuda.language.intrinsics import TensorCoreIntrinEmitter
 
     assert TensorCoreIntrinEmitter is MMAIntrinEmitter
     assert GemmMMA.intrin_emitter_cls is MMAIntrinEmitter

@@ -11,7 +11,7 @@ from pathlib import Path
 import torch
 import tilelang
 import tilelang.language as T
-from tilelang.intrinsics import TensorCoreIntrinEmitterSM120, make_mma_swizzle_layout
+from tilelang.cuda.language.intrinsics import TensorCoreIntrinEmitterSM120, make_mma_swizzle_layout
 from tilelang.transform import simplify_prim_func
 
 

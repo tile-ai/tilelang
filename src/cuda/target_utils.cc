@@ -121,6 +121,13 @@ bool TargetHasBulkCopy(Target target) {
   return arch >= 90;
 }
 
+bool TargetSupportsNamedBarrier(Target target) {
+  if (!TargetIsCuda(target))
+    return false;
+  int arch = GetCudaArchInt(target);
+  return arch >= 80;
+}
+
 bool TargetSupportVectorize256(Target target) {
   if (!TargetIsCuda(target))
     return false;

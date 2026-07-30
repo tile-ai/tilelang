@@ -37,7 +37,7 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
-    if (TargetHasSMVersionGE(target, 90)) {
+    if (TargetSupportsNamedBarrier(target)) {
       ss << ", tl::NamedBarrier<" << all_threads << ">";
     } else {
       ss << ", tl::SyncThreadsBarrier";
@@ -53,7 +53,7 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
-    if (TargetHasSMVersionGE(target, 90)) {
+    if (TargetSupportsNamedBarrier(target)) {
       ss << ", tl::NamedBarrier<" << all_threads << ">";
     }
     ss << ">::run";

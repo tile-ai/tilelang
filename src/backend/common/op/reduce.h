@@ -6,9 +6,11 @@
 #ifndef TVM_TL_BACKEND_COMMON_OP_REDUCE_H_
 #define TVM_TL_BACKEND_COMMON_OP_REDUCE_H_
 
+#include "backend/common/target_utils.h"
 #include "op/reduce.h"
 #include "support/check.h"
 #include <tvm/ir/cast.h>
+#include <tvm/ir/with_context.h>
 #include <tvm/runtime/logging.h>
 
 #include "layout/layout.h"
@@ -18,6 +20,7 @@
 #include "tir/transforms/ir_utils.h"
 #include "transform/loop_partition.h"
 
+#include <tvm/arith/analyzer.h>
 #include <tvm/arith/iter_affine_map.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
@@ -73,6 +76,101 @@ inline Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
   return Fragment(reducer_shape, {}, thd, reducer_rep_extent, std::nullopt)
       ->CondenseReplicateVar()
       ->BindThreadRange(src_layout->ThreadRange());
+}
+
+/*!
+ * \brief Resolve the exact contiguous thread image of a scalar AllReduce.
+ *
+ * The result is derived from the reduce layout's forward thread map, which is
+ * also the source of the guard later emitted by PartitionLoop. Z3 counts the
+ * distinct thread IDs in the image while const-int bounds provide its minimum
+ * and maximum; equality between the count and span proves that the image is
+ * contiguous.
+ */
+inline Range ResolveAllReduceThreadRange(const Fragment &red_layout,
+                                         const Range &thread_bounds,
+                                         const Target &target) {
+  const int64_t *block_min = as_const_int(thread_bounds->min);
+  const int64_t *block_extent = as_const_int(thread_bounds->extent);
+  const int64_t *replicate = as_const_int(red_layout->ReplicateExtent());
+  if (block_min == nullptr || block_extent == nullptr || replicate == nullptr) {
+    LOG(FATAL) << "tl.reduce: cannot resolve the scalar AllReduce barrier: "
+                  "the CTA thread bounds or reduce layout replicate extent "
+                  "are not compile-time constants.";
+  }
+  ICHECK_GT(*block_extent, 0)
+      << "tl.reduce: CTA thread extent must be positive";
+  ICHECK_GT(*replicate, 0)
+      << "tl.reduce: reduce layout replicate extent must be positive";
+
+  arith::Analyzer analyzer;
+  for (size_t i = 0; i < red_layout->InputShape().size(); ++i) {
+    Var placeholder = InputPlaceholder(i);
+    analyzer.Bind(placeholder,
+                  Range::FromMinExtent(make_zero(placeholder.dtype()),
+                                       red_layout->InputShape()[i]));
+  }
+  Var replicate_var = ReplicationPlaceholder();
+  analyzer.Bind(replicate_var,
+                Range::FromMinExtent(make_zero(replicate_var.dtype()),
+                                     red_layout->ReplicateExtent()));
+
+  // PartitionLoop feeds (threadIdx.x - ThreadRange.min) into the inverse
+  // layout. Convert the forward map back to the corresponding absolute CTA
+  // thread ID before computing its image.
+  PrimExpr thread_expr = red_layout->GetForwardThread();
+  if (red_layout->ThreadRange().defined()) {
+    thread_expr =
+        analyzer.Simplify(thread_expr + red_layout->ThreadRange()->min);
+  }
+  auto bound = analyzer.const_int_bound(thread_expr);
+  if (bound->min_value == arith::ConstIntBoundNode::kNegInf ||
+      bound->max_value == arith::ConstIntBoundNode::kPosInf) {
+    LOG(FATAL) << "tl.reduce: cannot determine the scalar AllReduce "
+                  "participating thread range.";
+  }
+
+  Var thread_var("allreduce_thread", thread_expr.dtype());
+  analyzer.Bind(thread_var, thread_bounds);
+  int64_t count;
+  {
+    With<arith::ConstraintContext> image_constraint(&analyzer,
+                                                    thread_var == thread_expr);
+    count = analyzer.z3_prover.CountSatisfyingValues(thread_var, *block_extent);
+  }
+  ICHECK_GT(count, 0)
+      << "tl.reduce: cannot determine the participating threads for scalar "
+         "AllReduce";
+
+  const int64_t base = bound->min_value;
+  const int64_t end = bound->max_value;
+  const int64_t span = end - base + 1;
+  ICHECK_EQ(count, span)
+      << "tl.reduce: partial scalar AllReduce requires one contiguous thread "
+         "range, but got "
+      << count << " distinct threads spanning [" << base << ", " << end << "]";
+  ICHECK_GE(base, *block_min)
+      << "tl.reduce: scalar AllReduce participating thread range starts "
+         "before the CTA thread bounds";
+  ICHECK_LT(end, *block_min + *block_extent)
+      << "tl.reduce: scalar AllReduce participating thread range ends after "
+         "the CTA thread bounds";
+
+  int64_t warp_size = 32;
+  if (auto warp_size_attr = target->GetAttr<Integer>("thread_warp_size")) {
+    warp_size = warp_size_attr.value()->value;
+  }
+  ICHECK_EQ(base % warp_size, 0)
+      << "tl.reduce: partial scalar AllReduce requires a warp-aligned "
+         "participating thread range, got base "
+      << base;
+  ICHECK_EQ(count % warp_size, 0)
+      << "tl.reduce: partial scalar AllReduce requires a warp-aligned thread "
+         "range, got "
+      << count << " threads";
+
+  return Range::FromMinExtent(make_const(thread_expr.dtype(), base),
+                              make_const(thread_bounds->extent.dtype(), count));
 }
 
 inline int64_t SignedMin(int bits) {
@@ -1129,10 +1227,17 @@ template <typename Impl> struct ReduceLowerer {
         reduce::CheckAllReduceWidth(reducing_threads, thread_step.scale,
                                     "tl.reduce");
         auto thread_offset = lower_args.thread_bounds->min;
+        PrimExpr all_threads = lower_args.thread_bounds->extent;
+        if (reducing_threads > 32 &&
+            TargetSupportsNamedBarrier(lower_args.target)) {
+          Range thread_range = reduce::ResolveAllReduceThreadRange(
+              red_layout, lower_args.thread_bounds, lower_args.target);
+          thread_offset = thread_range->min;
+          all_threads = thread_range->extent;
+        }
         std::string allreduce = Impl::MakeScalarAllReduce(
             reduce::MakeCodegenReducer(op).value(), reducing_threads,
-            thread_step.scale, thread_offset, lower_args.thread_bounds->extent,
-            lower_args.target);
+            thread_step.scale, thread_offset, all_threads, lower_args.target);
         Array<PrimExpr> thread_reduce_args = {
             StringImm(allreduce), BufferLoad(clear_buffer, red_indices)};
         if (reducing_threads > 32) {
