@@ -435,9 +435,13 @@ private:
  * statement a logical time offset (`stage`) and an execution position
  * (`order`); InjectSoftwarePipeline later realizes that schedule by replacing
  * the original loop variable with `pipeline_time - stage`, emitting
- * prologue/steady-state/epilogue loops, and multi-versioning buffers.  It is
- * therefore essential that dependencies point from an earlier or equal stage
- * to a later stage, and that dependencies within one stage follow `order`.
+ * prologue/steady-state/epilogue loops, and multi-versioning buffers.  The
+ * injector sorts statements by `order`; `stage` selects each statement's
+ * logical iteration and therefore its cyclic Buffer slot.  Buffer version
+ * counts come primarily from stage liveness, with order used by a special
+ * two-version reduction.  It is therefore essential that dependencies point
+ * from an earlier or equal stage to a later stage, and that dependencies within
+ * one stage follow `order`.
  *
  * `reads`/`writes` and `scalar_defs`/`scalar_uses` form the dependency graph.
  * The classification flags control stage weight and async-copy metadata.
@@ -457,7 +461,7 @@ struct PipelineStageInfo {
   bool blocks_successor = false;
   bool explicit_ptx_async = false;
   bool lightweight_stmt = false;
-  bool copy_stage = false;
+  bool global_to_shared_copy = false;
   bool tma_copy = false; // true if this copy stage uses TMA (not cp.async)
   bool cyclic_buffer_overwrite = false;
   bool conditional_execution = false;
@@ -472,10 +476,10 @@ public:
   bool IsControlStmt() const { return control_stmt; }
   bool BlocksSuccessor() const { return blocks_successor; }
   bool IsExplicitPtxAsync() const { return explicit_ptx_async; }
-  bool IsCopyStage() const { return copy_stage; }
+  bool IsGlobalToSharedCopy() const { return global_to_shared_copy; }
   bool IsTmaCopy() const { return tma_copy && !cyclic_buffer_overwrite; }
   bool AdvancesPipelineStage() const {
-    return copy_stage && !conditional_execution;
+    return global_to_shared_copy && !conditional_execution;
   }
 };
 
@@ -552,7 +556,7 @@ public:
     if (pinfo.IsTmaCopy()) {
       return false;
     }
-    return pinfo.IsCopyStage();
+    return pinfo.IsGlobalToSharedCopy();
   }
 
   bool IsPureCopyStmt(const Stmt &stmt) const {
@@ -657,13 +661,14 @@ public:
            (buffer.defined() && buffer.scope().empty());
   }
 
-  void ClassifyCopyLikeStage(const Stmt &stmt, PipelineStageInfo *pinfo) const {
+  void ClassifyGlobalToSharedCopy(const Stmt &stmt,
+                                  PipelineStageInfo *pinfo) const {
     ICHECK(pinfo != nullptr);
     if (pinfo->conditional_execution) {
       return;
     }
 
-    if (pinfo->copy_stage) {
+    if (pinfo->global_to_shared_copy) {
       return;
     }
 
@@ -676,7 +681,7 @@ public:
       if (!IsGlobalLikeBuffer(copy->src) || !IsSharedBuffer(copy->dst)) {
         return;
       }
-      pinfo->copy_stage = true;
+      pinfo->global_to_shared_copy = true;
       return;
     }
 
@@ -684,7 +689,7 @@ public:
       if (!IsGlobalLikeBuffer(im2col->src_) || !IsSharedBuffer(im2col->dst_)) {
         return;
       }
-      pinfo->copy_stage = true;
+      pinfo->global_to_shared_copy = true;
       pinfo->tma_copy = TargetIsHopper(target_);
     }
   }
@@ -692,7 +697,7 @@ public:
   void AnalyzeCopyLastUse(
       std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
     for (auto &pinfo : *pipeline_stage_infos) {
-      if (!pinfo.IsCopyStage()) {
+      if (!pinfo.IsGlobalToSharedCopy()) {
         continue;
       }
 
@@ -708,7 +713,7 @@ public:
           }
         }
 
-        if (!pinfo.IsCopyStage()) {
+        if (!pinfo.IsGlobalToSharedCopy()) {
           continue;
         }
 
@@ -839,7 +844,8 @@ public:
           // insufficient because distinct stages execute skewed iterations.
           // Keep both ends in one stage so source order supplies the required
           // read-before-write synchronization.
-          add_edge(src, dst, false, war);
+          add_edge(src, dst, /*scalar_edge=*/false,
+                   /*same_stage_edge=*/war);
         }
       }
     }
@@ -853,7 +859,8 @@ public:
       for (const VarNode *var : pipeline_stage_infos[dst].scalar_uses) {
         auto it = scalar_def_to_stmt.find(var);
         if (it != scalar_def_to_stmt.end() && it->second != dst) {
-          add_edge(it->second, dst, true, false);
+          add_edge(it->second, dst, /*scalar_edge=*/true,
+                   /*same_stage_edge=*/false);
         }
       }
     }
@@ -867,10 +874,12 @@ public:
         continue;
       }
       if (i > 0) {
-        add_edge(i - 1, i, false, false);
+        add_edge(i - 1, i, /*scalar_edge=*/false,
+                 /*same_stage_edge=*/false);
       }
       if (i + 1 < num_statements && pipeline_stage_infos[i].BlocksSuccessor()) {
-        add_edge(i, i + 1, false, false);
+        add_edge(i, i + 1, /*scalar_edge=*/false,
+                 /*same_stage_edge=*/false);
       }
     }
     return dag;
@@ -891,7 +900,7 @@ public:
     // order then realizes the required synchronous read-before-overwrite.
     for (int src = 0; src < num_statements; ++src) {
       for (int dst : dag.same_stage_successors[src]) {
-        if ((*pipeline_stage_infos)[dst].IsCopyStage()) {
+        if ((*pipeline_stage_infos)[dst].IsGlobalToSharedCopy()) {
           (*pipeline_stage_infos)[dst].cyclic_buffer_overwrite = true;
         }
       }
@@ -994,6 +1003,11 @@ public:
     // Keep all such sinks in the final consumer stage.  This also preserves the
     // old planner's rule that statements which are not producers for another
     // pipeline operation belong to the consumer side.
+    //
+    // Consequently, stages need not be monotonic in source order: an
+    // independent early sink may be followed by a stage-0 producer.  Only DAG
+    // paths must be monotonic.  The final `order` annotation supplies the
+    // executable statement order after independent nodes are rearranged.
     for (int i = 0; i < num_statements; ++i) {
       if (dag.successors[i].empty()) {
         (*pipeline_stage_infos)[i].stage = max_stage;
@@ -1154,7 +1168,7 @@ public:
       lifecycle_order.reserve(num_statements);
       for (int i = 0; i < num_statements; ++i) {
         const PipelineStageInfo &pinfo = (*pipeline_stage_infos)[i];
-        if (pinfo.IsCopyStage() && pinfo.last_use_stmt_index >= 0 &&
+        if (pinfo.IsGlobalToSharedCopy() && pinfo.last_use_stmt_index >= 0 &&
             pinfo.stage <
                 (*pipeline_stage_infos)[pinfo.last_use_stmt_index].stage) {
           deferred_copy[i] = true;
@@ -1303,10 +1317,10 @@ public:
     pipeline_stage_infos.reserve(pipeline_stmts.size());
     for (size_t i = 0; i < pipeline_stmts.size(); ++i) {
       auto pinfo = MakePipelineStageInfo(pipeline_stmts[i], i);
-      ClassifyCopyLikeStage(pipeline_stmts[i], &pinfo);
+      ClassifyGlobalToSharedCopy(pipeline_stmts[i], &pinfo);
       pinfo.order = static_cast<int>(order_array[i]->value);
       pinfo.stage = static_cast<int>(stage_array[i]->value);
-      if (!pinfo.IsCopyStage() && !pinfo.conditional_execution &&
+      if (!pinfo.IsGlobalToSharedCopy() && !pinfo.conditional_execution &&
           pinfo.stage == 0) {
         bool reads_global = false;
         bool writes_shared = false;
@@ -1323,7 +1337,7 @@ public:
           }
         }
         if (reads_global && writes_shared) {
-          pinfo.copy_stage = true;
+          pinfo.global_to_shared_copy = true;
         }
       }
       pipeline_stage_infos.push_back(std::move(pinfo));
@@ -1371,12 +1385,13 @@ public:
       }
     }
     pinfo.conditional_execution = MayBeConditionallyExecuted(block->body);
-    bool pure_copy_stage =
+    bool pure_global_to_shared_copy =
         collector.GetGlobalCopyPattern() && IsPureCopyStmt(block->body);
-    pinfo.copy_stage = pure_copy_stage;
-    pinfo.tma_copy = pure_copy_stage && !pinfo.conditional_execution &&
+    pinfo.global_to_shared_copy = pure_global_to_shared_copy;
+    pinfo.tma_copy = pure_global_to_shared_copy &&
+                     !pinfo.conditional_execution &&
                      collector.GetTmaCopyPattern();
-    ClassifyCopyLikeStage(block->body, &pinfo);
+    ClassifyGlobalToSharedCopy(block->body, &pinfo);
     return pinfo;
   }
 
@@ -1492,7 +1507,8 @@ private:
 
       Map<String, Any> annotations;
       for (const auto &[key, value] : loop->annotations) {
-        if (key != "tl_pipeline_order" && key != "tl_pipeline_stage") {
+        if (key != "tl_pipeline_order" && key != "tl_pipeline_stage" &&
+            key != kPipelineCompactTerminalStage) {
           annotations.Set(key, value);
         }
       }
@@ -1548,6 +1564,14 @@ private:
     if (!num_stages_anno)
       return StmtExprMutator::VisitStmt_(loop);
     int num_stages = num_stages_anno->as<IntImmNode>()->value;
+    bool compact_terminal_stage = true;
+    if (auto compact_anno =
+            loop->annotations.Get(kPipelineCompactTerminalStage)) {
+      const auto *compact = compact_anno->as<IntImmNode>();
+      ICHECK(compact) << kPipelineCompactTerminalStage
+                      << " must be a boolean value";
+      compact_terminal_stage = compact->value != 0;
+    }
     // Skip software pipelining on ROCm targets where async-copy pipelining
     // has not been validated.  Currently only gfx950 (CDNA4 / MI350) supports
     // the full HIP async-copy pipeline path.  gfx942 (CDNA3 / MI300X) has
@@ -1564,7 +1588,7 @@ private:
       auto stripped = GetRef<For>(loop);
       Map<String, Any> annotations;
       for (const auto &[key, value] : loop->annotations) {
-        if (key != "num_stages") {
+        if (key != "num_stages" && key != kPipelineCompactTerminalStage) {
           annotations.Set(key, value);
         }
       }
@@ -1614,16 +1638,16 @@ private:
     // phase.  Therefore manual WS must remain in [0, num_stages - 1].
     bool manual_warp_specialization = HasManualWarpSpecialization(loop->body);
     int max_stage = manual_warp_specialization ? num_stages - 1 : num_stages;
-    AssignStagesAndOrders(
-        &pipeline_stage_infos, max_stage,
-        /*compact_terminal_stage=*/!manual_warp_specialization);
+    AssignStagesAndOrders(&pipeline_stage_infos, max_stage,
+                          /*compact_terminal_stage=*/compact_terminal_stage &&
+                              !manual_warp_specialization);
 
     ValidateScalarDependencies(pipeline_stage_infos);
 
     // Finally, make the pipeline annotation
     Map<String, Any> annotations;
     for (const auto &[key, value] : loop->annotations) {
-      if (key != "num_stages") {
+      if (key != "num_stages" && key != kPipelineCompactTerminalStage) {
         annotations.Set(key, value);
       }
     }
@@ -1660,9 +1684,9 @@ private:
       tma_copies.reserve(pipeline_stage_infos.size());
       bool has_tma_copy = false;
       for (auto &pinfo : pipeline_stage_infos) {
-        bool IsTmaCopy = pinfo.IsTmaCopy();
-        has_tma_copy = has_tma_copy || IsTmaCopy;
-        tma_copies.push_back(Integer(IsTmaCopy ? 1 : 0));
+        bool is_tma_copy = pinfo.IsTmaCopy();
+        has_tma_copy = has_tma_copy || is_tma_copy;
+        tma_copies.push_back(Integer(is_tma_copy ? 1 : 0));
       }
       if (has_tma_copy) {
         annotations.Set(kPipelineTmaCopies, Array<Integer>(tma_copies));

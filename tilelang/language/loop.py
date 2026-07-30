@@ -117,6 +117,7 @@ def Pipelined(
     stage: list[int] | None = None,
     sync: list[list[int]] | None = None,
     group: list[list[int]] | None = None,
+    compact_terminal_stage: bool = True,
 ) -> frame.ForFrame:
     """Tools to construct pipelined for loop.
 
@@ -144,6 +145,12 @@ def Pipelined(
         Optional synchronization metadata for manual pipeline lowering.
     group : Optional[List[List[int]]]
         Optional producer grouping metadata for manual pipeline lowering.
+    compact_terminal_stage : bool
+        Whether automatic pipeline planning may retime a consumer-only final
+        stage across the periodic boundary to reduce cyclic buffer versions.
+        Enabled by default. Set to ``False`` to preserve the full requested
+        producer/consumer distance when compaction hurts performance. This
+        option only affects compiler-inferred ``num_stages`` schedules.
 
     Notes
     -----
@@ -188,7 +195,16 @@ def Pipelined(
     if group is None:
         group = []
     # type: ignore[attr-defined] # pylint: disable=no-member
-    return _ffi_api.Pipelined(start, stop, num_stages, order, stage, sync, group)
+    return _ffi_api.Pipelined(
+        start,
+        stop,
+        num_stages,
+        order,
+        stage,
+        sync,
+        group,
+        compact_terminal_stage,
+    )
 
 
 def serial(

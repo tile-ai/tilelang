@@ -887,6 +887,36 @@ def test_pipeline_planning_places_dependency_sinks_in_last_stage():
     tl.transform.InjectSoftwarePipeline()(mod)
 
 
+def test_pipeline_planning_places_guarded_sink_in_last_stage():
+    @T.prim_func
+    def before(
+        A: T.Tensor((64,), T.float16),
+        B: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=16):
+            unused = T.alloc_shared((1,), T.int32)
+            A_shared = T.alloc_shared((16,), T.float16)
+            for k in T.Pipelined(4, num_stages=3):
+                if k >= 0:
+                    unused[0] = k
+                T.copy(A[k * 16], A_shared)
+                T.copy(A_shared, B[k * 16])
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert len(annos) == 1
+    anno = annos[0]
+    stages = [int(v) for v in anno["software_pipeline_stage"]]
+    orders = [int(v) for v in anno["software_pipeline_order"]]
+
+    # Source-order stages are intentionally non-monotonic. The guarded store
+    # is an independent sink and moves to the terminal stage, while dependency
+    # paths and the final execution order remain valid.
+    assert stages == [2, 0, 2]
+    assert orders == [1, 0, 2]
+    tl.transform.InjectSoftwarePipeline()(mod)
+
+
 def test_pipeline_planning_keeps_final_stage_with_internal_buffer_producer():
     @T.prim_func
     def before(
@@ -936,6 +966,50 @@ def test_pipeline_planning_does_not_compact_num_stages_one():
     stages = [int(v) for v in annos[0]["software_pipeline_stage"]]
 
     assert stages == [0, 1]
+    tl.transform.InjectSoftwarePipeline()(mod)
+
+
+def test_pipeline_planning_can_disable_terminal_stage_compaction():
+    @T.prim_func
+    def before(
+        A: T.Tensor((64,), T.float16),
+        B: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=16):
+            shared = T.alloc_shared((16,), T.float16)
+            for k in T.Pipelined(4, num_stages=3):
+                T.copy(A[k * 16], shared)
+                T.copy(shared, B[k * 16])
+
+    @T.prim_func
+    def before_uncompacted(
+        A: T.Tensor((64,), T.float16),
+        B: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=16):
+            shared = T.alloc_shared((16,), T.float16)
+            for k in T.Pipelined(4, num_stages=3, compact_terminal_stage=False):
+                T.copy(A[k * 16], shared)
+                T.copy(shared, B[k * 16])
+
+    default_mod = _run_pipeline_planning(before, sm80_target)
+    default_annos = _collect_pipeline_loop_annotations(default_mod["main"])
+    assert len(default_annos) == 1
+    assert [int(v) for v in default_annos[0]["software_pipeline_stage"]] == [
+        0,
+        2,
+    ]
+
+    mod = _run_pipeline_planning(before_uncompacted, sm80_target)
+
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert len(annos) == 1
+    stages = [int(v) for v in annos[0]["software_pipeline_stage"]]
+    orders = [int(v) for v in annos[0]["software_pipeline_order"]]
+
+    assert stages == [0, 3]
+    assert orders == [0, 1]
+    assert "tl_pipeline_compact_terminal_stage" not in annos[0]
     tl.transform.InjectSoftwarePipeline()(mod)
 
 
