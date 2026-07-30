@@ -658,6 +658,7 @@ REDUCE_KEEPDIM_CASES = [
     ("sum", T.float32, (32, 16, 64), 1, True),
     ("sum", T.float32, (64, 64), 1, False),
     ("max", T.float32, (64, 64), 1, False),
+    ("min", T.float32, (64, 64), 1, False),
 ]
 
 
@@ -690,12 +691,16 @@ def test_reduce_keepdim(op, dtype, shape, dim, clear):
                 if not clear:
                     if op == "sum":
                         T.fill(dst, 1)
+                    elif op == "min":
+                        T.fill(dst, T.infinity(dtype))
                     else:
                         T.fill(dst, -T.infinity(dtype))
                 if clear:
                     _reduce_op(T, op, src, dst, dim)
                 elif op == "sum":
                     T.reduce_sum(src, dst, dim=dim, clear=False)
+                elif op == "min":
+                    T.reduce_min(src, dst, dim=dim, clear=False)
                 else:
                     T.reduce_max(src, dst, dim=dim, clear=False)
                 T.copy(dst, B)

@@ -218,9 +218,12 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &layout_args,
     // The destination buffer is the only place that records whether the user
     // asked for a keep-dim reduction; `dst->shape` keeps the reduced axis with
     // extent 1 in that case. Rank-1 sources are excluded: dropping their only
-    // axis already degenerates to extent 1.
+    // axis already degenerates to extent 1. A same-rank destination whose
+    // reduced axis is not extent 1 is not a keep-dim reduction, so it must fall
+    // through to the rank check below rather than be silently accepted.
     bool keepdim = src_layout->InputDim() > 1 &&
-                   dst->shape.size() == src_layout->InputDim();
+                   dst->shape.size() == src_layout->InputDim() &&
+                   is_one(dst->shape[this->dim]);
     auto reducer_layout = ComputeReducerLayout(src_layout, this->dim, keepdim);
 
     if (!layout_args.layout_map.count(dst)) {

@@ -801,9 +801,12 @@ template <typename Impl> struct ReduceLowerer {
       auto dst_layout = lower_args.layout_map[op.dst].as<Fragment>().value();
       // Same keep-dim criterion as ReduceOpNode::InferLayout, so that
       // `red_layout` and `dst_layout` always agree on rank. Rank-1 sources are
-      // excluded: dropping their only axis already degenerates to extent 1.
+      // excluded: dropping their only axis already degenerates to extent 1. A
+      // same-rank destination whose reduced axis is not extent 1 is not a
+      // keep-dim reduction and must be rejected by the rank check below.
       bool keepdim = src_layout->InputDim() > 1 &&
-                     op.dst->shape.size() == src_layout->InputDim();
+                     op.dst->shape.size() == src_layout->InputDim() &&
+                     is_one(op.dst->shape[op.dim]);
       auto red_layout =
           reduce::ComputeReducerLayout(src_layout, op.dim, keepdim);
       auto src_dim = src_layout->InputDim();
