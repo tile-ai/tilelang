@@ -646,6 +646,80 @@ def test_reduce_clear(op, dtype, M, N, src_scope, dst_scope):
 
 
 # ---------------------------------------------------------------------------
+# test_reduce_keepdim  (destination keeps the reduced axis with extent 1)
+# ---------------------------------------------------------------------------
+
+REDUCE_KEEPDIM_CASES = [
+    # (op,   dtype,      shape,        dim, clear)
+    ("sum", T.float32, (64, 64), 1, True),
+    ("sum", T.float32, (64, 64), 0, True),
+    ("max", T.float32, (64, 64), 1, True),
+    ("min", T.float32, (64, 64), 0, True),
+    ("sum", T.float32, (32, 16, 64), 1, True),
+    ("sum", T.float32, (64, 64), 1, False),
+    ("max", T.float32, (64, 64), 1, False),
+]
+
+
+@pytest.mark.parametrize(
+    ("op", "dtype", "shape", "dim", "clear"),
+    REDUCE_KEEPDIM_CASES,
+    ids=[
+        f"{op}-{dtype}-{'x'.join(map(str, shape))}-dim{dim}-{'clear' if clear else 'accum'}"
+        for op, dtype, shape, dim, clear in REDUCE_KEEPDIM_CASES
+    ],
+)
+@tilelang.testing.requires_cuda
+def test_reduce_keepdim(op, dtype, shape, dim, clear):
+    """Keep-dim destinations are part of the documented reduce contract.
+
+    See tilelang/language/reduce_op.py, which accepts both [X, Y] and
+    [X, 1, Y] output shapes.
+    """
+    out_shape = tuple(1 if i == dim else s for i, s in enumerate(shape))
+
+    @tilelang.jit(out_idx=-1)
+    def kernel():
+
+        @T.prim_func
+        def main(A: T.Tensor(shape, dtype), B: T.Tensor(out_shape, dtype)):
+            with T.Kernel(1, threads=128):
+                src = T.alloc_fragment(shape, dtype)
+                dst = T.alloc_fragment(out_shape, dtype)
+                T.copy(A, src)
+                if not clear:
+                    if op == "sum":
+                        T.fill(dst, 1)
+                    else:
+                        T.fill(dst, -T.infinity(dtype))
+                if clear:
+                    _reduce_op(T, op, src, dst, dim)
+                elif op == "sum":
+                    T.reduce_sum(src, dst, dim=dim, clear=False)
+                else:
+                    T.reduce_max(src, dst, dim=dim, clear=False)
+                T.copy(dst, B)
+
+        return main
+
+    torch_dtype = getattr(torch, dtype)
+    A = torch.randn(*shape, dtype=torch_dtype).cuda()
+    B = kernel()(A)
+
+    assert tuple(B.shape) == out_shape, f"expected keep-dim output {out_shape}, got {tuple(B.shape)}"
+
+    if op == "sum":
+        ref = A.sum(dim=dim, keepdim=True)
+        if not clear:
+            ref = ref + 1
+    elif op == "max":
+        ref = A.amax(dim=dim, keepdim=True)
+    elif op == "min":
+        ref = A.amin(dim=dim, keepdim=True)
+    torch.testing.assert_close(B, ref, atol=1e-2, rtol=1e-2)
+
+
+# ---------------------------------------------------------------------------
 # T.finalize_reducer tests
 # ---------------------------------------------------------------------------
 

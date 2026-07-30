@@ -126,22 +126,38 @@ static Array<PrimExpr> InputPlaceholders(size_t n) {
   return result;
 }
 
-static Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
+// NOTE: duplicated in src/backend/common/op/reduce.h; keep both in sync.
+// With `keepdim`, the reduced axis is retained as an extent-1 dummy axis so
+// that the layout rank matches a keep-dim destination buffer. The physical
+// thread mapping is unchanged; only the number of accepted logical indices
+// differs.
+static Fragment ComputeReducerLayout(const Fragment &src_layout, int dim,
+                                     bool keepdim = false) {
   PrimExpr src_rep_extent = src_layout->ReplicateExtent();
   PrimExpr indice_rep_extent = src_layout->InputShape()[dim];
   PrimExpr reducer_rep_extent = indice_rep_extent * src_rep_extent;
 
-  auto fwd = InputPlaceholders(src_layout->InputDim() - 1);
-  fwd.insert(fwd.begin() + dim,
-             FloorMod(ReplicationPlaceholder(), indice_rep_extent));
+  Array<PrimExpr> fwd;
+  if (keepdim) {
+    fwd = InputPlaceholders(src_layout->InputDim());
+    fwd.Set(dim, FloorMod(ReplicationPlaceholder(), indice_rep_extent));
+  } else {
+    fwd = InputPlaceholders(src_layout->InputDim() - 1);
+    fwd.insert(fwd.begin() + dim,
+               FloorMod(ReplicationPlaceholder(), indice_rep_extent));
+  }
 
   auto thd = src_layout->ForwardThread(
       fwd, FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
 
   auto reducer_shape = src_layout->InputShape();
-  reducer_shape.erase(reducer_shape.begin() + dim);
-  if (reducer_shape.empty()) {
-    reducer_shape.push_back(1);
+  if (keepdim) {
+    reducer_shape.Set(dim, 1);
+  } else {
+    reducer_shape.erase(reducer_shape.begin() + dim);
+    if (reducer_shape.empty()) {
+      reducer_shape.push_back(1);
+    }
   }
 
   auto reducer_layout =
@@ -199,9 +215,19 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &layout_args,
   if (IsFragmentBuffer(src) && IsFragmentBuffer(dst) &&
       layout_args.layout_map.count(src)) {
     auto src_layout = layout_args.layout_map[src].as<Fragment>().value();
-    auto reducer_layout = ComputeReducerLayout(src_layout, this->dim);
+    // The destination buffer is the only place that records whether the user
+    // asked for a keep-dim reduction; `dst->shape` keeps the reduced axis with
+    // extent 1 in that case. Rank-1 sources are excluded: dropping their only
+    // axis already degenerates to extent 1.
+    bool keepdim = src_layout->InputDim() > 1 &&
+                   dst->shape.size() == src_layout->InputDim();
+    auto reducer_layout = ComputeReducerLayout(src_layout, this->dim, keepdim);
 
     if (!layout_args.layout_map.count(dst)) {
+      ICHECK_EQ(reducer_layout->InputDim(), dst->shape.size())
+          << "ReduceOp: inferred reducer layout rank does not match the "
+             "destination buffer rank for "
+          << dst;
       return {{dst, reducer_layout}};
     }
 
