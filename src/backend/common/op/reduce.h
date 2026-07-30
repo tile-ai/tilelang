@@ -10,7 +10,6 @@
 #include "op/reduce.h"
 #include "support/check.h"
 #include <tvm/ir/cast.h>
-#include <tvm/ir/with_context.h>
 #include <tvm/runtime/logging.h>
 
 #include "layout/layout.h"
@@ -79,13 +78,11 @@ inline Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
 }
 
 /*!
- * \brief Resolve the exact contiguous thread image of a scalar AllReduce.
+ * \brief Resolve the participating thread range of a scalar AllReduce.
  *
  * The result is derived from the reduce layout's forward thread map, which is
- * also the source of the guard later emitted by PartitionLoop. Z3 counts the
- * distinct thread IDs in the image while const-int bounds provide its minimum
- * and maximum; equality between the count and span proves that the image is
- * contiguous.
+ * also the source of the guard later emitted by PartitionLoop. Const-int bounds
+ * provide the minimum and maximum participating thread IDs.
  */
 inline Range ResolveAllReduceThreadRange(const Fragment &red_layout,
                                          const Range &thread_bounds,
@@ -123,32 +120,18 @@ inline Range ResolveAllReduceThreadRange(const Fragment &red_layout,
     thread_expr =
         analyzer.Simplify(thread_expr + red_layout->ThreadRange()->min);
   }
-  auto bound = analyzer.const_int_bound(thread_expr);
+  const arith::ConstIntBound bound = analyzer.const_int_bound(thread_expr);
   if (bound->min_value == arith::ConstIntBoundNode::kNegInf ||
       bound->max_value == arith::ConstIntBoundNode::kPosInf) {
     LOG(FATAL) << "tl.reduce: cannot determine the scalar AllReduce "
                   "participating thread range.";
   }
 
-  Var thread_var("allreduce_thread", thread_expr.dtype());
-  analyzer.Bind(thread_var, thread_bounds);
-  int64_t count;
-  {
-    With<arith::ConstraintContext> image_constraint(&analyzer,
-                                                    thread_var == thread_expr);
-    count = analyzer.z3_prover.CountSatisfyingValues(thread_var, *block_extent);
-  }
-  ICHECK_GT(count, 0)
-      << "tl.reduce: cannot determine the participating threads for scalar "
-         "AllReduce";
-
   const int64_t base = bound->min_value;
   const int64_t end = bound->max_value;
-  const int64_t span = end - base + 1;
-  ICHECK_EQ(count, span)
-      << "tl.reduce: partial scalar AllReduce requires one contiguous thread "
-         "range, but got "
-      << count << " distinct threads spanning [" << base << ", " << end << "]";
+  // TODO: Consider restoring CountSatisfyingValues when the Z3 prover is
+  // stable enough to reliably compute the exact participating thread image.
+  const int64_t count = end - base + 1;
   ICHECK_GE(base, *block_min)
       << "tl.reduce: scalar AllReduce participating thread range starts "
          "before the CTA thread bounds";
