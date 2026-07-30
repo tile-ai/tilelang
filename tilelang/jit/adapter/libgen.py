@@ -12,6 +12,7 @@ from tvm.target import Target
 from tilelang import tvm as tvm
 from tilelang.transform import PassConfigKey
 from tilelang.contrib.nvcc import (
+    _nvcc_parallel_flags,
     format_target_code_for_gencode,
     get_cuda_library_dirs,
     get_nvcc_compiler,
@@ -114,6 +115,8 @@ class LibraryGenerator:
                 command += [f"--ptxas-options=--register-usage-level={int(ptxas_usage_level)}"]
             if self.verbose:
                 command += ["--ptxas-options=--verbose"]
+            # Opt-in parallel device compile (TL_NVCC_THREADS); see _nvcc_parallel_flags.
+            command += _nvcc_parallel_flags()
             command += [
                 "-I" + CUTLASS_INCLUDE_DIR,
             ]

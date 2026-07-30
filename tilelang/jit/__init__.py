@@ -25,6 +25,8 @@ from tvm.target import Target
 
 from tilelang.jit.kernel import JITKernel
 from tilelang.cache import cached
+from tilelang.utils.device import get_available_cpu_count
+from tilelang import env
 from os import path, makedirs
 from logging import getLogger
 from tilelang.jit.param import Kernel
@@ -217,6 +219,19 @@ def par_compile(
     TILELANG_VERBOSE : str
         Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
     """
+
+    # funcs may be a one-shot iterable; materialize to size the pool and reuse below.
+    funcs = list(funcs)
+
+    if num_workers is None:
+        # Scale to available cores (affinity-aware), capped at #kernels; the stdlib
+        # min(32, cpu+4) throttles large AOT batches. Lowering releases the GIL and
+        # nvcc is a subprocess, so threads parallelize.
+        env_workers = env.TILELANG_PAR_COMPILE_WORKERS
+        if env_workers:
+            num_workers = max(1, int(env_workers))
+        elif funcs:
+            num_workers = min(len(funcs), get_available_cpu_count())
 
     with concurrent.futures.ThreadPoolExecutor(num_workers, "tl-par-comp") as executor:
         futures = []
