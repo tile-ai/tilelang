@@ -9,10 +9,6 @@ from tvm.target import Target
 TargetPredicate = Callable[[Target], bool]
 AvailabilityCheck = Callable[[], bool]
 
-_CANONICAL_EXECUTION_BACKENDS = {
-    "dlpack": "tvm_ffi",
-}
-
 
 def _always_available() -> bool:
     return True
@@ -21,8 +17,7 @@ def _always_available() -> bool:
 def canonicalize_execution_backend(name: str | None) -> str | None:
     if name is None:
         return None
-    key = str(name).lower()
-    return _CANONICAL_EXECUTION_BACKENDS.get(key, key)
+    return str(name).lower()
 
 
 @dataclass(frozen=True, slots=True)

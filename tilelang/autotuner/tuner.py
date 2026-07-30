@@ -1294,8 +1294,8 @@ class AutoTuner:
             kernel=best_kernel,
         )
 
-        if self.compile_args.execution_backend in ("torch"):
-            logger.warning("DLPack backend does not support cache saving to disk.")
+        if self.compile_args.execution_backend == "torch":
+            logger.warning("Torch backend does not support cache saving to disk.")
         else:
             with self._lock:
                 if key is not None and env.is_cache_enabled() and not env.is_autotune_cache_disabled():
