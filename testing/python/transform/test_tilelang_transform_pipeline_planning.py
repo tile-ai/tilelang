@@ -797,6 +797,41 @@ def test_pipeline_planning_mixed_buffer_scalar_producer_chain():
     tl.transform.InjectSoftwarePipeline()(mod)
 
 
+def test_pipeline_planning_preserves_read_before_shared_overwrite():
+    """Regression for #2668: a WAR dependency must not cross stages."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((8, 32), T.int32),
+        S_init: T.Tensor((32,), T.int32),
+        B: T.Tensor((32,), T.int32),
+    ):
+        with T.Kernel(1, threads=32):
+            S = T.alloc_shared((32,), T.int32)
+            acc = T.alloc_fragment((32,), T.int32)
+            T.clear(acc)
+            T.copy(S_init, S)
+            for k in T.Pipelined(8, num_stages=2):
+                for i in T.Parallel(32):
+                    acc[i] += S[i]
+                T.copy(A[k, :], S)
+            T.copy(acc, B)
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert len(annos) == 1
+    anno = annos[0]
+    stages = [int(v) for v in anno["software_pipeline_stage"]]
+    orders = [int(v) for v in anno["software_pipeline_order"]]
+
+    # The consume and following overwrite form a loop-carried buffer
+    # lifecycle.  Keeping them in one stage preserves the serial read-before-
+    # write order; separating them would let a future async copy race the read.
+    assert stages[0] == stages[1]
+    assert orders == [0, 1]
+    tl.transform.InjectSoftwarePipeline()(mod)
+
+
 def test_pipeline_planning_places_dependency_sinks_in_last_stage():
     @T.prim_func
     def before(

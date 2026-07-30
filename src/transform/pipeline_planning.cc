@@ -732,11 +732,16 @@ public:
    * Buffer, InjectSoftwarePipeline does not create a cyclic versioned register
    * for it.  The producer Bind and all of its direct users must consequently
    * have equal stages, rather than merely ordered stages.
+   *
+   * `same_stage_successors` additionally records Buffer anti-dependencies.
+   * These read-before-write lifecycles cannot cross skewed loop iterations
+   * because the injector only derives async waits from RAW dependencies.
    */
   struct PipelineDependencyDag {
     std::vector<std::vector<int>> predecessors;
     std::vector<std::vector<int>> successors;
     std::vector<std::vector<int>> scalar_successors;
+    std::vector<std::vector<int>> same_stage_successors;
   };
 
   bool RegionsConflict(const Array<BufferRegion> &lhs,
@@ -764,10 +769,11 @@ public:
     const int num_statements = static_cast<int>(pipeline_stage_infos.size());
     PipelineDependencyDag dag{std::vector<std::vector<int>>(num_statements),
                               std::vector<std::vector<int>>(num_statements),
+                              std::vector<std::vector<int>>(num_statements),
                               std::vector<std::vector<int>>(num_statements)};
 
     auto add_edge =
-        [&](int src, int dst, bool scalar_edge) {
+        [&](int src, int dst, bool scalar_edge, bool same_stage_edge) {
           ICHECK_LT(src, dst)
               << "PipelinePlanning expects dependencies to follow source order";
           auto &successors = dag.successors[src];
@@ -783,6 +789,14 @@ public:
               scalar_successors.push_back(dst);
             }
           }
+          if (same_stage_edge) {
+            auto &same_stage_successors = dag.same_stage_successors[src];
+            if (std::find(same_stage_successors.begin(),
+                          same_stage_successors.end(),
+                          dst) == same_stage_successors.end()) {
+              same_stage_successors.push_back(dst);
+            }
+          }
         };
 
     // Preserve all intra-iteration buffer hazards.  RAW edges carry values;
@@ -796,7 +810,13 @@ public:
         bool war = RegionsConflict(src_info.reads, dst_info.writes);
         bool waw = RegionsConflict(src_info.writes, dst_info.writes);
         if (raw || war || waw) {
-          add_edge(src, dst, false);
+          // WAR is a cyclic Buffer lifecycle: the earlier statement consumes
+          // the value entering this iteration, and the later statement
+          // overwrites it for the next iteration.  A monotonic stage edge is
+          // insufficient because distinct stages execute skewed iterations.
+          // Keep both ends in one stage so source order supplies the required
+          // read-before-write synchronization.
+          add_edge(src, dst, false, war);
         }
       }
     }
@@ -810,7 +830,7 @@ public:
       for (const VarNode *var : pipeline_stage_infos[dst].scalar_uses) {
         auto it = scalar_def_to_stmt.find(var);
         if (it != scalar_def_to_stmt.end() && it->second != dst) {
-          add_edge(it->second, dst, true);
+          add_edge(it->second, dst, true, false);
         }
       }
     }
@@ -824,10 +844,10 @@ public:
         continue;
       }
       if (i > 0) {
-        add_edge(i - 1, i, false);
+        add_edge(i - 1, i, false, false);
       }
       if (i + 1 < num_statements && pipeline_stage_infos[i].BlocksSuccessor()) {
-        add_edge(i, i + 1, false);
+        add_edge(i, i + 1, false, false);
       }
     }
     return dag;
@@ -950,10 +970,13 @@ public:
     // does not create a cyclic register buffer, so place the Bind and every
     // direct user in their maximum common stage.
     //
-    // Equalizing a scalar group may raise a producer or consumer, which can in
-    // turn violate a downstream `stage(dst) >= stage(src)` constraint or raise
-    // another scalar group.  Repeating both propagations computes the least
-    // fixed point without ever decreasing a stage.
+    // Buffer WAR pairs require the same treatment: crossing stages would turn
+    // source-order read-before-write into accesses from different logical
+    // iterations.  Equalizing either kind of pair may raise a producer or
+    // consumer, which can in turn violate a downstream
+    // `stage(dst) >= stage(src)` constraint or raise another equality group.
+    // Repeating all propagations computes the least fixed point without ever
+    // decreasing a stage.
     bool updated = true;
     while (updated) {
       updated = false;
@@ -971,6 +994,20 @@ public:
           updated = true;
         }
         for (int dst : dag.scalar_successors[src]) {
+          if ((*pipeline_stage_infos)[dst].stage != common_stage) {
+            (*pipeline_stage_infos)[dst].stage = common_stage;
+            updated = true;
+          }
+        }
+      }
+      for (int src = 0; src < num_statements; ++src) {
+        for (int dst : dag.same_stage_successors[src]) {
+          int common_stage = std::max((*pipeline_stage_infos)[src].stage,
+                                      (*pipeline_stage_infos)[dst].stage);
+          if ((*pipeline_stage_infos)[src].stage != common_stage) {
+            (*pipeline_stage_infos)[src].stage = common_stage;
+            updated = true;
+          }
           if ((*pipeline_stage_infos)[dst].stage != common_stage) {
             (*pipeline_stage_infos)[dst].stage = common_stage;
             updated = true;
