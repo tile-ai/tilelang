@@ -997,7 +997,8 @@ public:
 
   void
   AssignStagesAndOrders(std::vector<PipelineStageInfo> *pipeline_stage_infos,
-                        int max_stage, bool compact_terminal_stage) const {
+                        int max_stage, bool compact_terminal_stage,
+                        bool promote_terminal_same_stage_subgraph) const {
     ICHECK_GE(max_stage, 0);
     const int num_statements = static_cast<int>(pipeline_stage_infos->size());
     PipelineDependencyDag dag = BuildDependencyDag(*pipeline_stage_infos);
@@ -1039,8 +1040,9 @@ public:
     // chains
     //    across the requested distance and merging levels when the dependency
     //    chain is deeper than that distance.
-    // 3. Put sinks in the final consumer stage, then raise stages to satisfy
-    //    materialized-scalar equality and all dependency inequalities.
+    // 3. Put terminal same-stage subgraphs in the final consumer stage, then
+    //    raise stages to satisfy materialized-scalar equality and all
+    //    dependency inequalities.
     // 4. For ordinary pipelines, retime the terminal stage once so that its
     //    consumers overlap the next iteration's producers and do not require an
     //    otherwise unused extra Buffer version.
@@ -1110,18 +1112,46 @@ public:
       (*pipeline_stage_infos)[i].stage = stage;
     }
 
-    // A statement with no in-pipeline successor cannot prepare data for any
-    // later pipeline work, so executing it early only increases its live range.
-    // Keep all such sinks in the final consumer stage.  This also preserves the
-    // old planner's rule that statements which are not producers for another
-    // pipeline operation belong to the consumer side.
+    // A terminal same-stage subgraph cannot prepare data for a later pipeline
+    // level, so executing it early only increases its live range.  Move the
+    // whole subgraph to the final consumer stage.  Checking only DAG sinks is
+    // insufficient: raising a sink without its same-stage predecessors can
+    // leave a dependency path split between the producer and consumer sides.
+    //
+    // Compute the closure against the original stage assignment before
+    // changing any stages.  Since source order is a topological order, a
+    // reverse scan determines whether every node reachable from a statement is
+    // in the same stage and is itself part of the terminal subgraph.
     //
     // Consequently, stages need not be monotonic in source order: an
     // independent early sink may be followed by a stage-0 producer.  Only DAG
     // paths must be monotonic.  The final `order` annotation supplies the
     // executable statement order after independent nodes are rearranged.
+    std::vector<bool> terminal_same_stage_subgraph(num_statements, true);
+    if (promote_terminal_same_stage_subgraph) {
+      for (int src = num_statements - 1; src >= 0; --src) {
+        int src_stage = (*pipeline_stage_infos)[src].stage;
+        for (int dst : dag.successors[src]) {
+          if ((*pipeline_stage_infos)[dst].stage != src_stage ||
+              !terminal_same_stage_subgraph[dst]) {
+            terminal_same_stage_subgraph[src] = false;
+            break;
+          }
+        }
+      }
+    } else {
+      // Manual warp specialization assigns physical ring/barrier roles to
+      // stages.  Preserve its producer stage and only place DAG sinks in the
+      // final stage, as before.
+      for (int i = 0; i < num_statements; ++i) {
+        terminal_same_stage_subgraph[i] = dag.successors[i].empty();
+      }
+    }
+    std::vector<bool> promoted_to_terminal_stage(num_statements, false);
     for (int i = 0; i < num_statements; ++i) {
-      if (dag.successors[i].empty()) {
+      if (terminal_same_stage_subgraph[i]) {
+        promoted_to_terminal_stage[i] =
+            (*pipeline_stage_infos)[i].stage != max_stage;
         (*pipeline_stage_infos)[i].stage = max_stage;
       }
     }
@@ -1220,6 +1250,13 @@ public:
     bool final_stage_has_internal_buffer_producer = false;
     for (int src = 0; src < num_statements; ++src) {
       if ((*pipeline_stage_infos)[src].stage != max_stage) {
+        continue;
+      }
+      // An internal edge moved to the terminal stage as part of the whole
+      // same-stage subgraph can be retimed with that subgraph.  Only an
+      // internal producer that was already in the final stage represents real
+      // coalesced pipeline depth and must prevent compaction.
+      if (promoted_to_terminal_stage[src]) {
         continue;
       }
       for (int dst : dag.successors[src]) {
@@ -1544,9 +1581,11 @@ private:
 
   void
   AssignStagesAndOrders(std::vector<PipelineStageInfo> *pipeline_stage_infos,
-                        int max_stage, bool compact_terminal_stage) const {
-    MakeStageAnalyzer().AssignStagesAndOrders(pipeline_stage_infos, max_stage,
-                                              compact_terminal_stage);
+                        int max_stage, bool compact_terminal_stage,
+                        bool promote_terminal_same_stage_subgraph) const {
+    MakeStageAnalyzer().AssignStagesAndOrders(
+        pipeline_stage_infos, max_stage, compact_terminal_stage,
+        promote_terminal_same_stage_subgraph);
   }
 
   bool HasManualWarpSpecialization(const Stmt &stmt) const {
@@ -1748,7 +1787,9 @@ private:
     int max_stage = manual_warp_specialization ? num_stages - 1 : num_stages;
     AssignStagesAndOrders(&pipeline_stage_infos, max_stage,
                           /*compact_terminal_stage=*/compact_terminal_stage &&
-                              !manual_warp_specialization);
+                              !manual_warp_specialization,
+                          /*promote_terminal_same_stage_subgraph=*/
+                          !manual_warp_specialization);
 
     ValidateScalarDependencies(pipeline_stage_infos);
 

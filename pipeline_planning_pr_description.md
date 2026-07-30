@@ -51,9 +51,9 @@ These equalities and ordinary DAG inequalities are propagated to a fixed point.
 
 ### 4. Terminal stages and periodic-boundary retiming
 
-Statements with no in-pipeline successor are initially placed in the final consumer stage.  For an ordinary inferred pipeline, `num_stages` describes the producer/consumer distance, so the provisional range may be `[0, num_stages]`.  A consumer-only endpoint can be retimed once to `num_stages - 1`, preserving the previous buffer-saving boundary rotation.
+Terminal same-stage subgraphs are initially placed together in the final consumer stage: a statement is included only when every DAG node reachable from it remains in the same stage.  This prevents promoting a sink without its same-stage dependency chain.  For an ordinary inferred pipeline, `num_stages` describes the producer/consumer distance, so the provisional range may be `[0, num_stages]`.  A consumer-only endpoint can be retimed once to `num_stages - 1`, preserving the previous buffer-saving boundary rotation.
 
-The retiming is disabled when the final stage still produces an internal buffer value.  It is also disabled for manual warp specialization.
+The retiming is disabled when the final stage already contained an internal buffer producer before terminal-subgraph promotion. It is also disabled for manual warp specialization.
 
 This feature is applied in old `T.pipeline` implementation and therefore preserved. The switch is defaulted to `True` to preserve compatibility.
 
@@ -89,12 +89,19 @@ To handle this and similar situations, this PR treats PTX statements conservativ
 
 ## Compatibility
 
-The new implementation generates more efficient code and is more decoupled.
+The new implementation is more efficient and separates dependency analysis from scheduling policy.
 
-Compatibility is kept in the largest extent:
-- Most `T.Pipelined` usages in unit tests produce exactly the same ordering as the older version.
-- On only one test with `tcgen05` - gemm pipeline does the 2 implementations differ - the code generated is reduced from a 3-buffer pipeline to a 2-buffer pipeline because of better analysis in dependencies.
+Compatibility is preserved where possible:
+
+- Most existing `T.Pipelined` tests produce the same ordering as the previous planner.
+- One `tcgen05` GEMM pipeline changes from triple buffering to double buffering because the new dependency analysis finds a shorter valid schedule.
 
 ## Tests
 
-Added relavent unit tests. All related tests passed.
+Added transform-level coverage for buffer and scalar dependencies, WAR lifecycles, aliased Buffer rejection, opaque control ordering, terminal same-stage promotion, and manual warp-specialization stage bounds.
+
+Verification:
+
+- `cmake --build build -j8`
+- `PYTHONPATH=$PWD python -m pytest testing/python/transform/test_tilelang_transform_pipeline_planning.py -q` (`32 passed`)
+- pre-commit checks for all changed planning files
