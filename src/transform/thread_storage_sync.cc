@@ -994,8 +994,11 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       auto condition_prop = checker.AnalyzeCondition(op->condition, tx);
 
       // The estimate calls anything mentioning a thread variable divergent; ask
-      // the prover before hoisting. Only added to it, never subtracted.
-      bool proven_uniform = IsBlockUniformCondition(op->condition);
+      // the prover before hoisting. Only added to it, never subtracted, and
+      // only asked when something below could act on the answer.
+      bool may_hoist =
+          condition_prop.depends_on_runtime || condition_prop.requires_hoist;
+      bool proven_uniform = may_hoist && IsBlockUniformCondition(op->condition);
       bool is_block_uniform = condition_prop.is_block_uniform || proven_uniform;
       // requires_hoist means the participation count was not established, so
       // ThreadPartialSyncRewriter cannot emit `bar.sync id, count`. Uniformity
@@ -1005,13 +1008,14 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       if ((condition_prop.depends_on_runtime && !is_block_uniform) ||
           (condition_prop.requires_hoist && !proven_uniform)) {
         LOG(WARNING)
-            << "[ThreadSync] Hoisting sync from inside if to before if. "
-            << "Condition is not safe for in-if sync: " << op->condition;
-        LOG(WARNING) << "[ThreadSync] The hoisted barrier no longer separates "
-                        "the accesses it was inserted for, as both ends of the "
-                        "conflict are inside the branch, so the race remains. "
-                        "Constrain the condition -- a T.assume on the "
-                        "parameters it reads -- to keep the barrier in place.";
+            << "[ThreadSync] Hoisting sync out of an if whose condition is not "
+               "safe for an in-if sync. This is not a fix: both ends of the "
+               "conflict are inside the branch, so the hoisted barrier no "
+               "longer separates them and the race remains. Constraining the "
+               "condition -- a T.assume on the parameters it reads -- keeps "
+               "the "
+               "barrier in place instead. Condition: "
+            << op->condition;
         for (const auto &sync : syncs_in_then) {
           syncs_inserted_.erase(sync);
         }

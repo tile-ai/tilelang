@@ -27,23 +27,25 @@ namespace tvm::tl {
  * \brief Replace every mutable read in an expression with a fresh, independent
  *        variable.
  *
- * `Analyzer::Bind` installs a rewrite `var -> value`, so a value reading
- * mutable state would equate two reads across a store this does not track, and
- * make two instances agree where two threads read two different registers. A
- * fresh unknown per read only ever weakens equalities.
+ * `Analyzer::Bind` installs a rewrite `var -> value`, so a definition reading
+ * mutable state would outlive a store this does not track, and would make two
+ * instances agree where two threads read two different registers.
  */
 class FreshenMutableReads : public tirx::ExprMutator {
 public:
   using tirx::ExprMutator::operator();
 
 private:
+  /*!
+   * \brief A fresh variable for one occurrence of \p e, never reused for a
+   *        structurally equal one.
+   *
+   * An opaque call need not return the same value twice (`f() - f()` is not
+   * zero), and two reads of one location may be separated by a store. Sharing
+   * would assert an equality that need not hold.
+   */
   PrimExpr Fresh(const PrimExpr &e) {
-    auto it = memo_.find(e);
-    if (it != memo_.end())
-      return it->second;
-    tirx::Var var("free" + std::to_string(memo_.size()), e.dtype());
-    memo_.emplace(e, var);
-    return var;
+    return tirx::Var("free" + std::to_string(count_++), e.dtype());
   }
 
   PrimExpr VisitExpr_(const tirx::BufferLoadNode *op) override {
@@ -56,17 +58,16 @@ private:
     return Fresh(ffi::GetRef<PrimExpr>(op));
   }
   PrimExpr VisitExpr_(const tirx::CallNode *op) override {
-    // Opaque or stateful calls are unknowns; pure calls recurse so that their
-    // pure sub-structure survives.
+    // `SideEffect` covers the arguments as well, so a call reading state
+    // anywhere below it becomes a single unknown; only a wholly pure one
+    // recurses.
     if (tirx::SideEffect(ffi::GetRef<PrimExpr>(op)) >
         tirx::CallEffectKind::kPure)
       return Fresh(ffi::GetRef<PrimExpr>(op));
     return tirx::ExprMutator::VisitExpr_(op);
   }
 
-  std::unordered_map<PrimExpr, PrimExpr, ffi::StructuralHash,
-                     tirx::ExprDeepEqual>
-      memo_;
+  int count_{0};
 };
 
 struct Constr {
@@ -161,20 +162,42 @@ struct Constr {
     LOG(FATAL) << "Unreachable";
     return Constr();
   }
-  void Populate(arith::Analyzer &analyzer) const {
+  /*!
+   * \brief A copy whose definition no longer reads mutable state.
+   *
+   * Only a bind needs it: `Bind` installs a rewrite, so `v == A[i]` would keep
+   * being substituted after a store invalidated it. A predicate states a fact
+   * that held on entry and stays usable as a premise inside the scope it
+   * guards.
+   *
+   * Every consumer goes through here, so no path can miss the substitution.
+   */
+  Constr FreshenReads() const {
+    FreshenMutableReads freshen;
     switch (kind) {
     case kConstr:
-      analyzer.EnterConstraint(value, is_assume);
+      return *this;
+    case kBindValue:
+      return Constr(var, freshen(value));
+    case kBindRange:
+      return Constr(var, Range::FromMinExtent(freshen(range->min),
+                                              freshen(range->extent)));
+    }
+    LOG(FATAL) << "Unreachable";
+    return Constr();
+  }
+  void Populate(arith::Analyzer &analyzer) const {
+    Constr c = FreshenReads();
+    switch (c.kind) {
+    case kConstr:
+      analyzer.EnterConstraint(c.value, c.is_assume);
       break;
     case kBindValue:
-      analyzer.Bind(var, FreshenMutableReads()(value));
+      analyzer.Bind(c.var, c.value);
       break;
-    case kBindRange: {
-      FreshenMutableReads freshen;
-      analyzer.Bind(var, Range::FromMinExtent(freshen(range->min),
-                                              freshen(range->extent)));
+    case kBindRange:
+      analyzer.Bind(c.var, c.range);
       break;
-    }
     default:
       LOG(FATAL) << "Unreachable";
     }
@@ -278,8 +301,9 @@ struct ConstrSet {
   ConstrSet ToConstraints() const {
     ConstrSet out;
     out.constrs_.reserve(constrs_.size());
-    for (const auto &c : constrs_)
-      out.constrs_.push_back(Constr(c.ToGenericConstr(), c.is_assume));
+    for (const Constr &c : constrs_)
+      out.constrs_.push_back(
+          Constr(c.FreshenReads().ToGenericConstr(), c.is_assume));
     return out;
   }
 
