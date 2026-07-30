@@ -145,3 +145,10 @@ def test_execution_backend_registry_rejects_invalid_backend():
 
     with pytest.raises(ValueError, match="Invalid execution backend"):
         resolve_execution_backend("nvrtc", target)
+
+
+def test_execution_backend_registry_rejects_removed_dlpack_backend():
+    target = Target("llvm")
+
+    with pytest.raises(ValueError, match="Invalid execution backend 'dlpack'"):
+        resolve_execution_backend("dlpack", target)
