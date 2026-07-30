@@ -549,6 +549,81 @@ public:
            call->op.same_as(tl::cluster_arrive_relaxed());
   }
 
+  struct ControlStmtSummary {
+    bool control_only = true;
+    bool has_control = false;
+    bool blocks_successor = false;
+    bool explicit_ptx_async = false;
+
+    void Merge(const ControlStmtSummary &other) {
+      control_only = control_only && other.control_only;
+      has_control = has_control || other.has_control;
+      blocks_successor = blocks_successor || other.blocks_successor;
+      explicit_ptx_async = explicit_ptx_async || other.explicit_ptx_async;
+    }
+  };
+
+  ControlStmtSummary AnalyzeControlOnlyStmt(const Stmt &stmt) const {
+    if (const auto *evaluate = stmt.as<EvaluateNode>()) {
+      ControlStmtSummary summary;
+      if (is_zero(evaluate->value)) {
+        return summary;
+      }
+      const auto *call_node = evaluate->value.as<CallNode>();
+      if (call_node == nullptr) {
+        summary.control_only = false;
+        return summary;
+      }
+      Call call = GetRef<Call>(call_node);
+      bool is_control = !ParseOperator(call).defined() &&
+                        SideEffect(call) > CallEffectKind::kReadState;
+      if (!is_control) {
+        summary.control_only = false;
+        return summary;
+      }
+      summary.has_control = true;
+      summary.blocks_successor = !CanReorderWithSuccessor(call);
+      summary.explicit_ptx_async = IsExplicitPtxAsyncControl(call);
+      return summary;
+    }
+    if (const auto *if_then_else = stmt.as<IfThenElseNode>()) {
+      // The condition stays inside this top-level pipeline statement.  Only
+      // lift the whole IfThenElse as control glue when every executable leaf
+      // is itself control-only; an if containing copy/compute remains a
+      // substantial scheduling node.
+      ControlStmtSummary summary =
+          AnalyzeControlOnlyStmt(if_then_else->then_case);
+      if (if_then_else->else_case.defined()) {
+        summary.Merge(AnalyzeControlOnlyStmt(if_then_else->else_case.value()));
+      }
+      return summary;
+    }
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      ControlStmtSummary summary;
+      for (const Stmt &child : seq->seq) {
+        summary.Merge(AnalyzeControlOnlyStmt(child));
+      }
+      return summary;
+    }
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      return AnalyzeControlOnlyStmt(attr->body);
+    }
+    if (const auto *block = stmt.as<SBlockNode>()) {
+      ControlStmtSummary summary;
+      if (block->init.defined()) {
+        summary.Merge(AnalyzeControlOnlyStmt(block->init.value()));
+      }
+      summary.Merge(AnalyzeControlOnlyStmt(block->body));
+      return summary;
+    }
+    if (const auto *realize = stmt.as<SBlockRealizeNode>()) {
+      return AnalyzeControlOnlyStmt(realize->block);
+    }
+    ControlStmtSummary summary;
+    summary.control_only = false;
+    return summary;
+  }
+
   bool IsAsyncProducerCandidate(const PipelineStageInfo &pinfo) const {
     if (pinfo.conditional_execution || pinfo.cyclic_buffer_overwrite) {
       return false;
@@ -792,6 +867,26 @@ public:
     return false;
   }
 
+  bool
+  RegionsConflictThroughAliasedViews(const Array<BufferRegion> &lhs,
+                                     const Array<BufferRegion> &rhs) const {
+    for (const BufferRegion &lhs_region : lhs) {
+      for (const BufferRegion &rhs_region : rhs) {
+        const Buffer &lhs_buffer = lhs_region->buffer;
+        const Buffer &rhs_buffer = rhs_region->buffer;
+        if (lhs_buffer.same_as(rhs_buffer) ||
+            !lhs_buffer->data.same_as(rhs_buffer->data)) {
+          continue;
+        }
+        if (lhs_region->region.size() != rhs_region->region.size() ||
+            MayConflict(lhs_region->region, rhs_region->region)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   PipelineDependencyDag BuildDependencyDag(
       const std::vector<PipelineStageInfo> &pipeline_stage_infos) const {
     const int num_statements = static_cast<int>(pipeline_stage_infos.size());
@@ -837,6 +932,12 @@ public:
         bool raw = RegionsConflict(src_info.writes, dst_info.reads);
         bool war = RegionsConflict(src_info.reads, dst_info.writes);
         bool waw = RegionsConflict(src_info.writes, dst_info.writes);
+        bool aliased_raw =
+            RegionsConflictThroughAliasedViews(src_info.writes, dst_info.reads);
+        bool aliased_war =
+            RegionsConflictThroughAliasedViews(src_info.reads, dst_info.writes);
+        bool aliased_waw = RegionsConflictThroughAliasedViews(src_info.writes,
+                                                              dst_info.writes);
         if (raw || war || waw) {
           // WAR is a cyclic Buffer lifecycle: the earlier statement consumes
           // the value entering this iteration, and the later statement
@@ -844,8 +945,14 @@ public:
           // insufficient because distinct stages execute skewed iterations.
           // Keep both ends in one stage so source order supplies the required
           // read-before-write synchronization.
+          // InjectSoftwarePipeline versions Buffer handles rather than shared
+          // allocation identities.  Until it can rewrite every aliased view
+          // together, keep hazards crossing distinct views of one data Var in
+          // a single stage as well.
+          bool requires_same_stage =
+              war || aliased_raw || aliased_war || aliased_waw;
           add_edge(src, dst, /*scalar_edge=*/false,
-                   /*same_stage_edge=*/war);
+                   /*same_stage_edge=*/requires_same_stage);
         }
       }
     }
@@ -900,7 +1007,9 @@ public:
     // order then realizes the required synchronous read-before-overwrite.
     for (int src = 0; src < num_statements; ++src) {
       for (int dst : dag.same_stage_successors[src]) {
-        if ((*pipeline_stage_infos)[dst].IsGlobalToSharedCopy()) {
+        if ((*pipeline_stage_infos)[dst].IsGlobalToSharedCopy() &&
+            RegionsConflict((*pipeline_stage_infos)[src].reads,
+                            (*pipeline_stage_infos)[dst].writes)) {
           (*pipeline_stage_infos)[dst].cyclic_buffer_overwrite = true;
         }
       }
@@ -1373,16 +1482,11 @@ public:
     // may not report complete Buffer regions.  Classify them as control
     // statements so BuildDependencyDag preserves their source neighbors and the
     // level assignment attaches them to the substantial operation they guard.
-    if (const auto *evaluate = block->body.as<EvaluateNode>()) {
-      if (const auto *call_node = evaluate->value.as<CallNode>()) {
-        Call call = GetRef<Call>(call_node);
-        pinfo.control_stmt = !ParseOperator(call).defined() &&
-                             SideEffect(call) > CallEffectKind::kReadState;
-        if (pinfo.control_stmt) {
-          pinfo.blocks_successor = !CanReorderWithSuccessor(call);
-          pinfo.explicit_ptx_async = IsExplicitPtxAsyncControl(call);
-        }
-      }
+    ControlStmtSummary control = AnalyzeControlOnlyStmt(block->body);
+    pinfo.control_stmt = control.control_only && control.has_control;
+    if (pinfo.control_stmt) {
+      pinfo.blocks_successor = control.blocks_successor;
+      pinfo.explicit_ptx_async = control.explicit_ptx_async;
     }
     pinfo.conditional_execution = MayBeConditionallyExecuted(block->body);
     bool pure_global_to_shared_copy =
