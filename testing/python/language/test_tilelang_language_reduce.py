@@ -108,11 +108,11 @@ def _make_partial_reduce_kernel():
     return make_kernel()
 
 
-def _make_two_group_reduce_kernel(block_threads: int = 128):
+def _make_two_group_reduce_kernel(block_threads: int = 128, group_stride: int = 64):
     @tilelang.jit(out_idx=1, target="cuda")
     def make_kernel():
         def x_layout(i: int, j: int) -> tuple[int, int]:
-            return i * 64 + j // 8, j % 8
+            return i * group_stride + j // 8, j % 8
 
         @T.prim_func
         def two_group_reduce(
@@ -127,7 +127,7 @@ def _make_two_group_reduce_kernel(block_threads: int = 128):
                         x_frag: T.Fragment(x_frag.shape, forward_fn=x_layout),
                         out_frag: T.Fragment(
                             out_frag.shape,
-                            forward_fn=lambda i, rep: (i * 64 + rep, 0),
+                            forward_fn=lambda i, rep: (i * group_stride + rep, 0),
                             replicate=64,
                         ),
                     }
@@ -411,6 +411,12 @@ def test_reduce_partial_thread_barrier_rejects_warp_misaligned_base():
     undefined. Lowering must reject it."""
     with pytest.raises(Exception, match="warp-aligned participating thread range"):
         _make_warp_misaligned_base_reduce_kernel()
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_reduce_partial_thread_barrier_rejects_discontiguous_warps():
+    with pytest.raises(Exception, match="one contiguous thread range|Could not normalize iterators"):
+        _make_two_group_reduce_kernel(block_threads=256, group_stride=128)
 
 
 # ---------------------------------------------------------------------------

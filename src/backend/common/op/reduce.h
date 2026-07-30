@@ -160,10 +160,10 @@ inline Range ResolveAllReduceThreadRange(const Fragment &red_layout,
   if (auto warp_size_attr = target->GetAttr<Integer>("thread_warp_size")) {
     warp_size = warp_size_attr.value()->value;
   }
-  ICHECK_EQ((base - *block_min) % warp_size, 0)
+  ICHECK_EQ(base % warp_size, 0)
       << "tl.reduce: partial scalar AllReduce requires a warp-aligned "
          "participating thread range, got base "
-      << base << " in a block starting at " << *block_min;
+      << base;
   ICHECK_EQ(count % warp_size, 0)
       << "tl.reduce: partial scalar AllReduce requires a warp-aligned thread "
          "range, got "
