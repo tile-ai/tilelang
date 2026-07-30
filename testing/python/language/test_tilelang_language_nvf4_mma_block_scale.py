@@ -113,11 +113,27 @@ def test_tensor_core_intrin_emitter_mma_keeps_base_positional_signature():
 def test_default_tensor_core_intrin_emitter_stays_arch_neutral():
     from tilelang.cuda.intrinsics.macro.mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
     from tilelang.cuda.op.gemm.gemm_mma import GemmMMA
+    from tilelang.cuda.op.gemm.gemm_mma_sm120 import GEMM_INST_MMA_BLOCK_SCALED, GemmMMASm120
     from tilelang.cuda.language.intrinsics import TensorCoreIntrinEmitter
+    from tilelang.tileop.gemm.registry import resolve_gemm_impl
 
     assert TensorCoreIntrinEmitter is MMAIntrinEmitter
     assert GemmMMA.intrin_emitter_cls is MMAIntrinEmitter
     assert issubclass(TensorCoreIntrinEmitterSM120, MMAIntrinEmitter)
+    assert GemmMMASm120.intrin_emitter_cls is TensorCoreIntrinEmitterSM120
+    assert (
+        resolve_gemm_impl(
+            GEMM_INST_MMA_BLOCK_SCALED,
+            tvm.target.Target({"kind": "cuda", "arch": "sm_120"}),
+        )
+        is GemmMMASm120
+    )
+
+
+def test_generic_mma_gemm_has_no_blockscaled_lowering_branch():
+    source = (Path(__file__).resolve().parents[3] / "tilelang/cuda/op/gemm/gemm_mma.py").read_text()
+    assert "is_blockscaled" not in source
+    assert "TensorCoreIntrinEmitterBlockScaled" not in source
 
 
 def test_sm120_mma_blockscaled_strategy_helpers_are_not_public_api():
