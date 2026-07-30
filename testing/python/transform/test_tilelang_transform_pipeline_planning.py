@@ -1,3 +1,5 @@
+import pytest
+
 from tilelang import tvm as tvm
 import tilelang as tl
 from tilelang.backend.target import determine_target
@@ -796,6 +798,197 @@ def test_pipeline_planning_keeps_bind_that_reads_pipeline_written_buffer():
     assert stages == [0, 1, 1]
     assert orders == [0, 1, 2]
     assert replayable_binds == [1, 0, 0, 0]
+
+
+def test_pipeline_planning_propagates_buffer_producer_through_bind():
+    """A copy's scalar index can depend transitively on a shared-buffer store."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((64,), T.float16),
+        B: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=256):
+            index_shared = T.alloc_shared((1,), T.int32)
+            A_shared = T.alloc_shared((32,), T.float16)
+            for k in T.Pipelined(2, num_stages=2):
+                index_shared[0] = k * 32
+                offset: T.int32 = index_shared[0]
+                T.copy(A[offset], A_shared)
+                for i in T.Parallel(32):
+                    B[k * 32 + i] = A_shared[i]
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    anno = _collect_pipeline_loop_annotations(mod["main"])[0]
+    stages = [int(value) for value in anno["software_pipeline_stage"]]
+    orders = [int(value) for value in anno["software_pipeline_order"]]
+    assert stages == [0, 0, 0, 1]
+    assert orders == [0, 1, 2, 3]
+    tl.transform.InjectSoftwarePipeline()(mod)
+
+
+def test_pipeline_planning_does_not_propagate_disjoint_buffer_region():
+    """A store to another region of the same buffer is not a copy producer."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((64,), T.float16),
+        B: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=256):
+            index_shared = T.alloc_shared((2,), T.int32)
+            A_shared = T.alloc_shared((32,), T.float16)
+            for k in T.Pipelined(2, num_stages=2):
+                index_shared[1] = k
+                index_shared[0] = k * 32
+                offset: T.int32 = index_shared[0]
+                T.copy(A[offset], A_shared)
+                for i in T.Parallel(32):
+                    B[k * 32 + i] = A_shared[i]
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    anno = _collect_pipeline_loop_annotations(mod["main"])[0]
+    stages = [int(value) for value in anno["software_pipeline_stage"]]
+    orders = [int(value) for value in anno["software_pipeline_order"]]
+    assert stages == [1, 0, 0, 0, 1]
+    assert orders == [3, 0, 1, 2, 4]
+    tl.transform.InjectSoftwarePipeline()(mod)
+
+
+def test_pipeline_planning_reaches_mixed_dependency_fixed_point():
+    """Alternating scalar and buffer edges propagate to arbitrary depth."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((64,), T.float16),
+        B: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=256):
+            index_0 = T.alloc_shared((1,), T.int32)
+            index_1 = T.alloc_shared((1,), T.int32)
+            A_shared = T.alloc_shared((32,), T.float16)
+            for k in T.Pipelined(2, num_stages=2):
+                index_0[0] = k * 32
+                base: T.int32 = index_0[0]
+                index_1[0] = base
+                offset: T.int32 = index_1[0]
+                T.copy(A[offset], A_shared)
+                for i in T.Parallel(32):
+                    B[k * 32 + i] = A_shared[i]
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    anno = _collect_pipeline_loop_annotations(mod["main"])[0]
+    stages = [int(value) for value in anno["software_pipeline_stage"]]
+    orders = [int(value) for value in anno["software_pipeline_order"]]
+    assert stages == [0, 0, 0, 0, 0, 1]
+    assert orders == [0, 1, 2, 3, 4, 5]
+    tl.transform.InjectSoftwarePipeline()(mod)
+
+
+def test_pipeline_planning_redirects_copy_anchor_through_copy_producer():
+    """A copy feeding another copy's index joins the downstream copy group."""
+
+    @T.prim_func
+    def before(
+        indices: T.Tensor((2,), T.int32),
+        A: T.Tensor((64,), T.float16),
+        B: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=256):
+            index_shared = T.alloc_shared((1,), T.int32)
+            A_shared = T.alloc_shared((32,), T.float16)
+            for k in T.Pipelined(2, num_stages=2):
+                T.copy(indices[k], index_shared)
+                offset: T.int32 = index_shared[0]
+                T.copy(A[offset], A_shared)
+                for i in T.Parallel(32):
+                    B[k * 32 + i] = A_shared[i]
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    anno = _collect_pipeline_loop_annotations(mod["main"])[0]
+    stages = [int(value) for value in anno["software_pipeline_stage"]]
+    orders = [int(value) for value in anno["software_pipeline_order"]]
+    assert stages == [0, 0, 0, 1]
+    assert orders == [0, 1, 2, 3]
+    async_groups = [int(value) for value in anno["software_pipeline_async_producer_groups"]]
+    assert async_groups[0] >= 0
+    assert async_groups[2] >= 0
+    assert async_groups[0] != async_groups[2]
+    tl.transform.InjectSoftwarePipeline()(mod)
+
+
+def test_pipeline_planning_resolves_each_multi_root_anchor_before_minimum():
+    """A shared producer uses the earliest resolved sink across copy groups."""
+
+    @T.prim_func
+    def before(
+        indices: T.Tensor((64,), T.int32),
+        A: T.Tensor((64,), T.float16),
+        C: T.Tensor((64,), T.float16),
+        B: T.Tensor((128,), T.float16),
+    ):
+        with T.Kernel(1, threads=256):
+            base_shared = T.alloc_shared((1,), T.int32)
+            A_shared = T.alloc_shared((32,), T.float16)
+            next_shared = T.alloc_shared((1,), T.int32)
+            C_shared = T.alloc_shared((32,), T.float16)
+            for k in T.Pipelined(2, num_stages=2):
+                base_shared[0] = k * 32
+                base: T.int32 = base_shared[0]
+                T.copy(A[base], A_shared)
+                T.copy(indices[base], next_shared)
+                next_base: T.int32 = next_shared[0]
+                for i in T.Parallel(32):
+                    B[k * 64 + i] = A_shared[i]
+                T.copy(C[next_base], C_shared)
+                for i in T.Parallel(32):
+                    B[k * 64 + 32 + i] = C_shared[i]
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    anno = _collect_pipeline_loop_annotations(mod["main"])[0]
+    stages = [int(value) for value in anno["software_pipeline_stage"]]
+    orders = [int(value) for value in anno["software_pipeline_order"]]
+    assert stages == [0, 0, 0, 0, 0, 2, 0, 2]
+    assert orders[1] < orders[2]
+    assert orders[1] < orders[3]
+    tl.transform.InjectSoftwarePipeline()(mod)
+
+
+def test_pipeline_planning_rejects_tma_as_transitive_copy_producer():
+    """Stage-0 consumers of an earlier TMA need unsupported explicit waits."""
+    N, C, H, W, KH = 1, 32, 8, 8, 3
+    stride, dilation, padding = 1, 1, 1
+
+    @T.prim_func
+    def before(
+        data: T.Tensor((N, H, W, C), T.float16),
+        A: T.Tensor((64,), T.float16),
+        B: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=128):
+            data_shared = T.alloc_shared((16, 32), T.float16)
+            A_shared = T.alloc_shared((32,), T.float16)
+            for k in T.Pipelined(2, num_stages=2):
+                T.im2col(
+                    data,
+                    data_shared,
+                    0,
+                    k,
+                    KH,
+                    stride,
+                    dilation,
+                    padding,
+                )
+                offset: T.int32 = T.cast(data_shared[0, 0], "int32")
+                T.copy(A[offset], A_shared)
+                for i in T.Parallel(32):
+                    B[k * 32 + i] = A_shared[i]
+
+    with pytest.raises(
+        tvm.TVMError,
+        match="does not support a TMA copy as a transitive producer",
+    ):
+        _run_pipeline_planning(before, sm90_target)
 
 
 def test_pipeline_planning_keeps_bind_that_reads_atomic_target():
