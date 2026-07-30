@@ -28,10 +28,9 @@ namespace tvm::tl {
  *        variable.
  *
  * `Analyzer::Bind` installs a rewrite `var -> value`, so a value reading
- * mutable state lets the analyzer equate two reads across a store it does not
- * track, and makes two instances of one constraint set agree where two threads
- * would read two different registers. A fresh unknown per read only ever
- * weakens equalities, and keeps the pure structure around the read.
+ * mutable state would equate two reads across a store this does not track, and
+ * make two instances agree where two threads read two different registers. A
+ * fresh unknown per read only ever weakens equalities.
  */
 class FreshenMutableReads : public tirx::ExprMutator {
 public:
@@ -200,12 +199,10 @@ struct ConstrSet {
    * `v == f(a)` and `v == f(b)` into `f(a) == f(b)`, contradicting `a != b` for
    * an injective `f` and leaving a set under which every query holds vacuously.
    *
-   * \param subs Map to extend; the new renames accumulate so the caller can
-   *        apply the same map to expressions held outside the set.
-   * \param from Pivot; renames every bind when not given. Has to be an
-   *        `Optional` as `tirx::Var()` builds a real variable named "v".
-   * \param rename_ranges Pass false to keep iteration variables shared, which
-   *        ThreadSync's loop-carry model needs to compare `i` with `i + 1`.
+   * \p subs accumulates the renames, so the caller can apply the same map to
+   * expressions held outside the set. \p from has to be an `Optional`, as
+   * `tirx::Var()` builds a real variable named "v". Pass \p rename_ranges false
+   * to keep iteration variables shared, as ThreadSync's loop-carry model needs.
    */
   ConstrSet RenameFrom(const std::string &suffix,
                        ffi::Map<tirx::Var, PrimExpr> &subs,
@@ -230,9 +227,8 @@ struct ConstrSet {
    *
    * A variable bound to conflicting values on the two sides is a caller error
    * -- it should have been renamed per side -- and is reported rather than
-   * merged. `is_assume` is cleared: an assume is trusted only at the program
-   * point that stated it, and being trusted it may reference mutable reads, so
-   * it must not become a global fact once two points are merged.
+   * merged. `is_assume` is cleared: an assume is trusted only where it was
+   * stated, and being trusted it may reference mutable reads.
    */
   ConstrSet Merge(const ConstrSet &other) const {
     ConstrSet out = *this;
@@ -275,9 +271,9 @@ struct ConstrSet {
   /*!
    * \brief Lower every bind to a predicate, leaving predicates as they are.
    *
-   * Use this when merging into an analyzer that binds one of the shared
-   * variables itself: a second `Bind` of it trips the analyzer's re-bind check,
-   * while predicates coexist with any external bind.
+   * Use this when the analyzer binds one of the shared variables itself: a
+   * second `Bind` of it trips the re-bind check, while predicates coexist with
+   * any bind.
    */
   ConstrSet ToConstraints() const {
     ConstrSet out;
@@ -372,11 +368,10 @@ public:
         constr_stack_.emplace_back(bind->var, bind->value);
       } else if (const auto *assert_stmt = stmt.as<tirx::AssertStmtNode>()) {
         // A tirx AssertStmt carries no body, so it sits next to the statements
-        // it guards rather than around them; control reaches them only once it
-        // has passed. Pure conditions only: an assert states what held when
-        // control passed it, not a standing promise like an assume, so a
-        // condition reading mutable state may be falsified by a later store,
-        // which is not tracked here.
+        // it guards; control reaches them only once it has passed. Pure
+        // conditions only: unlike an assume it states what held at that point,
+        // so one reading mutable state may be falsified by a later store,
+        // untracked here.
         if (tirx::SideEffect(assert_stmt->condition) <=
             tirx::CallEffectKind::kPure) {
           constr_stack_.emplace_back(assert_stmt->condition);

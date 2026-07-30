@@ -527,12 +527,10 @@ private:
     if (it != let_var_properties_.end()) {
       current_.Merge(it->second);
     } else {
-      // Any other free variable (a kernel parameter, blockIdx, an enclosing
-      // serial loop var) has no compile-time value, so the participating thread
-      // set is unknown; the participation counter cannot help either, as it
-      // enumerates the thread variable alone. Leave is_block_uniform alone so
-      // that a condition built only from these (`bx < 2`, `flags[bx] > 0`)
-      // keeps its sync in place.
+      // A kernel parameter, blockIdx or an enclosing serial loop var has no
+      // compile-time value, so the participating set is unknown. Leave
+      // is_block_uniform alone, so a condition built only from these
+      // (`bx < 2`, `flags[bx] > 0`) keeps its sync in place.
       current_.depends_on_runtime = true;
     }
     return GetRef<Var>(op);
@@ -713,17 +711,13 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
 
   /*!
    * \brief Try to prove that every thread reaches the same verdict on
-   *        \p condition.
+   *        \p condition, using the live constraint set as premises.
    *
-   * Builds two thread instances and proves they agree under the live constraint
-   * set, a `T.assume` included. `CanProve` quantifies over the free variables,
-   * so this asks the `forall unknowns, forall tx1, tx2` question -- which is
-   * how `tx < n` comes out uniform under `assume(n % 128 == 0)`, something the
-   * syntax alone cannot show.
-   *
-   * Only ever *adds* uniformity to the syntactic estimate: failing to prove
-   * agreement is not a proof of disagreement, and the prover has a resource
-   * limit.
+   * `CanProve` quantifies over the free variables, so this is the
+   * `forall unknowns, forall tx1, tx2` question -- which is how `tx < n` comes
+   * out uniform under `assume(n % 128 == 0)`. Only ever *adds* uniformity to
+   * the syntactic estimate: failing to prove agreement is not a proof of the
+   * reverse.
    */
   bool IsBlockUniformCondition(const PrimExpr &condition) {
     Map<Var, PrimExpr> sub1, sub2;
@@ -738,8 +732,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       return true;
     }
     ConstrSet cset = GetConstrSet();
-    // Ranges stay shared: an enclosing iteration variable takes the same value
-    // for the two threads being compared.
     ConstrSet c1 =
         cset.RenameFrom("<T1>", sub1, std::nullopt, /*rename_ranges=*/false);
     ConstrSet c2 =
@@ -1001,26 +993,20 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       IterVar tx = GetThreadVar("threadIdx.x");
       auto condition_prop = checker.AnalyzeCondition(op->condition, tx);
 
-      // The syntactic estimate calls anything mentioning a thread variable
-      // possibly divergent; ask the prover before hoisting out of a branch that
-      // every thread agrees on. Only added to the estimate, never subtracted.
+      // The estimate calls anything mentioning a thread variable divergent; ask
+      // the prover before hoisting. Only added to it, never subtracted.
       bool proven_uniform = IsBlockUniformCondition(op->condition);
       bool is_block_uniform = condition_prop.is_block_uniform || proven_uniform;
       // requires_hoist means the participation count was not established, so
       // ThreadPartialSyncRewriter cannot emit `bar.sync id, count`. Uniformity
-      // answers that: the barrier is reached either by the whole block, where a
-      // plain __syncthreads() is exactly right, or by nobody. Only a proof
-      // counts here, not the syntactic heuristic.
+      // answers that: the barrier is reached by the whole block or by nobody,
+      // and a plain __syncthreads() is right. Only a proof counts, not the
+      // heuristic.
       if ((condition_prop.depends_on_runtime && !is_block_uniform) ||
           (condition_prop.requires_hoist && !proven_uniform)) {
         LOG(WARNING)
             << "[ThreadSync] Hoisting sync from inside if to before if. "
             << "Condition is not safe for in-if sync: " << op->condition;
-        // Both ends of the conflict are inside the branch, since the branch is
-        // summarized from an empty scope. Hoisting therefore keeps every thread
-        // reaching the barrier but stops it separating them; ordering those
-        // needs the branch split around the barrier, which ThreadSyncInserter
-        // cannot express yet.
         LOG(WARNING) << "[ThreadSync] The hoisted barrier no longer separates "
                         "the accesses it was inserted for, as both ends of the "
                         "conflict are inside the branch, so the race remains. "
@@ -1786,9 +1772,8 @@ private:
       // which the cross-thread proof below decides. Fall through.
     }
 
-    // Check whether two distinct threads can touch the same byte. Proving the
-    // addresses unequal shows the index is injective over the participating
-    // threads, which rules out a hazard for same and different indices alike.
+    // Proving the addresses unequal shows the index is injective over the
+    // participating threads, which rules out a hazard for any pair of indices.
     bool range_is_overlap = true;
 
     for (size_t i = 0; i < prev.buffer_indices.size(); i++) {
@@ -1860,12 +1845,11 @@ private:
       if (!same_access_type) {
         analyzer.EnterConstraint(thread_condition);
       }
-      // Two instances of the same code in one analyzer, so per-instance binds
-      // need their own copy; see ConstrSet::RenameFrom. The instances differ
-      // when they are two threads (RAW/WAR) or two iterations of one thread
-      // (loop carry); a same-type pair within one iteration is a single
-      // execution, where a bind holds one value and renaming would lose it.
-      // Ranges stay shared, which loop_shift_sub and the bind above assume too.
+      // Two instances in one analyzer, so per-instance binds need their own
+      // copy; see ConstrSet::RenameFrom. They differ when they are two threads
+      // (RAW/WAR) or two iterations of one thread (loop carry); a same-type
+      // pair within one iteration is one execution, where renaming would only
+      // lose the bind.
       if (!same_access_type || loop != nullptr) {
         prev_cset = prev_cset.RenameFrom("<PREV>", prev_sub, std::nullopt,
                                          /*rename_ranges=*/false);

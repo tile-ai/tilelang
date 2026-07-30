@@ -49,12 +49,9 @@ struct ParallelLoopVerifier : public ConstrVisitor {
 
     ConstrSet cset{constr_stack_};
     // Model a second logical iteration. Renaming starts at the outermost
-    // parallel loop variable: everything defined before it is outside all
-    // parallelism, hence invariant and shared, while the parallel loop
-    // variables and any bind inside the region are private to an iteration and
-    // must get their own copy -- sharing them would force the parallel loop
-    // variables equal. Merge (not append) so that a bind kept shared is not
-    // populated twice.
+    // parallel loop variable: binds before it are outside all parallelism and
+    // stay shared, while the loop variables and anything inside the region are
+    // private per iteration. Merge, so a shared bind is not populated twice.
     Map<Var, PrimExpr> subs;
     cset = cset.Merge(
         cset.RenameFrom("<OTHER>", subs, parallel_loop_vars_.front()));
