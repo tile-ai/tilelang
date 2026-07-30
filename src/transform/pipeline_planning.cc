@@ -48,6 +48,8 @@ private:
   static bool IsGlobalLikeBuffer(const Buffer &buffer);
 
   void HandleTileOp(const TileOperator &tile_op);
+  void VisitIndexDependencies(const Array<PrimExpr> &indices,
+                              const Optional<PrimExpr> &predicate);
   void VisitStmt_(const BufferStoreNode *op) final;
   void VisitExpr_(const BufferLoadNode *op) final;
   void VisitExpr_(const CallNode *op) final;
@@ -106,6 +108,22 @@ bool BufferRegionCollector::IsGlobalLikeBuffer(const Buffer &buffer) {
   return IsGlobalBuffer(buffer) || (buffer.defined() && buffer.scope().empty());
 }
 
+void BufferRegionCollector::VisitIndexDependencies(
+    const Array<PrimExpr> &indices, const Optional<PrimExpr> &predicate) {
+  // Index and predicate expressions may themselves load buffers, for example
+  // `global[offset[0]]`.  Those loads are scheduling dependencies but are not
+  // payload reads that make a shared store a global-to-shared copy.
+  bool old_within_condition_expr = within_condition_expr_;
+  within_condition_expr_ = true;
+  for (const PrimExpr &index : indices) {
+    this->VisitExpr(index);
+  }
+  if (predicate.defined()) {
+    this->VisitExpr(predicate.value());
+  }
+  within_condition_expr_ = old_within_condition_expr;
+}
+
 void BufferRegionCollector::HandleTileOp(const TileOperator &tile_op) {
   if (tile_op.as<RegionOpNode>()) {
     return;
@@ -157,6 +175,7 @@ void BufferRegionCollector::VisitStmt_(const BufferStoreNode *op) {
   auto store_region = BufferRegion(store_buffer, region);
   writes_.push_back(store_region);
 
+  VisitIndexDependencies(op->indices, op->predicate);
   is_global_read_ = false;
   this->VisitExpr(op->value);
   if (is_global_read_ && IsSharedBuffer(store_buffer)) {
@@ -176,7 +195,10 @@ void BufferRegionCollector::VisitExpr_(const BufferLoadNode *op) {
   auto load_region = BufferRegion(load_buffer, region);
   reads_.push_back(load_region);
 
-  if (IsGlobalLikeBuffer(op->buffer) && !within_condition_expr_) {
+  bool is_payload_global_read =
+      IsGlobalLikeBuffer(op->buffer) && !within_condition_expr_;
+  VisitIndexDependencies(op->indices, op->predicate);
+  if (is_payload_global_read) {
     // skip condition expr of if_then_else node
     // shared[i] = T.if_then_else(global[i] < n, register_a[i], register_b[i])
     // is not a global read shared[i] = T.if_then_else(global[i] < n,
@@ -437,6 +459,7 @@ struct PipelineStageInfo {
   bool lightweight_stmt = false;
   bool copy_stage = false;
   bool tma_copy = false; // true if this copy stage uses TMA (not cp.async)
+  bool cyclic_buffer_overwrite = false;
   bool conditional_execution = false;
   int last_use_stmt_index =
       -1; // Initialized to -1, indicating no consumers found yet
@@ -450,7 +473,7 @@ public:
   bool BlocksSuccessor() const { return blocks_successor; }
   bool IsExplicitPtxAsync() const { return explicit_ptx_async; }
   bool IsCopyStage() const { return copy_stage; }
-  bool IsTmaCopy() const { return tma_copy; }
+  bool IsTmaCopy() const { return tma_copy && !cyclic_buffer_overwrite; }
   bool AdvancesPipelineStage() const {
     return copy_stage && !conditional_execution;
   }
@@ -523,7 +546,7 @@ public:
   }
 
   bool IsAsyncProducerCandidate(const PipelineStageInfo &pinfo) const {
-    if (pinfo.conditional_execution) {
+    if (pinfo.conditional_execution || pinfo.cyclic_buffer_overwrite) {
       return false;
     }
     if (pinfo.IsTmaCopy()) {
@@ -859,6 +882,20 @@ public:
     ICHECK_GE(max_stage, 0);
     const int num_statements = static_cast<int>(pipeline_stage_infos->size());
     PipelineDependencyDag dag = BuildDependencyDag(*pipeline_stage_infos);
+
+    // A later copy participating in a WAR pair overwrites the value consumed
+    // at the beginning of the next logical iteration.  The current injector
+    // derives async waits only from forward RAW consumers, so it cannot place
+    // the wait for this loop-carried lifecycle.  Keep the copy as a scheduling
+    // node, but do not mark it as an implicit async producer; same-stage source
+    // order then realizes the required synchronous read-before-overwrite.
+    for (int src = 0; src < num_statements; ++src) {
+      for (int dst : dag.same_stage_successors[src]) {
+        if ((*pipeline_stage_infos)[dst].IsCopyStage()) {
+          (*pipeline_stage_infos)[dst].cyclic_buffer_overwrite = true;
+        }
+      }
+    }
 
     if (std::any_of(
             pipeline_stage_infos->begin(), pipeline_stage_infos->end(),

@@ -797,6 +797,34 @@ def test_pipeline_planning_mixed_buffer_scalar_producer_chain():
     tl.transform.InjectSoftwarePipeline()(mod)
 
 
+def test_pipeline_planning_tracks_buffer_dependencies_in_copy_indices():
+    """Regression for #1792: copy indices may load a local.var buffer."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((64,), T.float16),
+        B: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=32):
+            offset = T.alloc_var(T.int32)
+            A_shared = T.alloc_shared((16,), T.float16)
+            for k in T.Pipelined(4, num_stages=2):
+                offset = k * 16
+                T.copy(A[offset], A_shared)
+                T.copy(A_shared, B[k * 16])
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert len(annos) == 1
+    anno = annos[0]
+    stages = [int(v) for v in anno["software_pipeline_stage"]]
+    orders = [int(v) for v in anno["software_pipeline_order"]]
+
+    assert stages == [0, 0, 1]
+    assert orders == [0, 1, 2]
+    tl.transform.InjectSoftwarePipeline()(mod)
+
+
 def test_pipeline_planning_preserves_read_before_shared_overwrite():
     """Regression for #2668: a WAR dependency must not cross stages."""
 
@@ -829,6 +857,7 @@ def test_pipeline_planning_preserves_read_before_shared_overwrite():
     # write order; separating them would let a future async copy race the read.
     assert stages[0] == stages[1]
     assert orders == [0, 1]
+    assert "software_pipeline_async_producers" not in anno
     tl.transform.InjectSoftwarePipeline()(mod)
 
 
