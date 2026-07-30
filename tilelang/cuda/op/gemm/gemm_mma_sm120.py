@@ -26,12 +26,10 @@ def _is_explicit_non_sm120_cuda(target: Target) -> bool:
     return not target_is_sm120(target)
 
 
-class GemmMMASm120(GemmMMA):
+class GemmMMASm120BlockScaled(GemmMMA):
     """SM120 warp-level block-scaled MMA lowering."""
 
-    gemm_inst = GEMM_INST_MMA_BLOCK_SCALED
     intrin_emitter_cls = TensorCoreIntrinEmitterBlockScaled
-    intrin_emitter_kwargs = {"is_blockscaled": True}
 
     @staticmethod
     def _validate_target(target: Target) -> None:
@@ -41,6 +39,29 @@ class GemmMMASm120(GemmMMA):
     def _validate_operands(self) -> None:
         if not self.is_gemm_ss():
             raise ValueError("T.mma_gemm_blockscaled supports shared-memory A/B operands only")
+
+    def _make_mma_emitter(self, target: Target, thread_nums: int, thread_var: tirx.Var | None = None):
+        m_warp, n_warp = self.policy.compute_warp_partition(
+            self.M,
+            self.N,
+            thread_nums,
+            target,
+            GEMM_INST_MMA_BLOCK_SCALED,
+        )
+        return self.intrin_emitter_cls(
+            a_dtype=self.a_dtype,
+            b_dtype=self.b_dtype,
+            accum_dtype=self.accum_dtype,
+            a_transposed=self.trans_A,
+            b_transposed=self.trans_B,
+            block_row_warps=m_warp,
+            block_col_warps=n_warp,
+            warp_row_tiles=int(self.M // m_warp),
+            warp_col_tiles=int(self.N // n_warp),
+            chunk=self.chunk,
+            thread_var=thread_var,
+            is_blockscaled=True,
+        )
 
     def infer_layout(self, target: Target, thread_nums: int):
         self._validate_target(target)

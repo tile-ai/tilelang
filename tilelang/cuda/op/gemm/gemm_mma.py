@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang.layout import make_swizzled_layout
-from tilelang.cuda.intrinsics.macro.mma_macro_generator import TensorCoreIntrinEmitter
+from tilelang.cuda.intrinsics.macro.mma_macro_generator import (
+    TensorCoreIntrinEmitter,
+)
 from tilelang.utils.language import is_shared, is_fragment, is_full_region
 from tilelang import tvm as tvm
 from tvm.target import Target
@@ -16,15 +18,13 @@ GEMM_INST_MMA = "cuda.mma"
 
 
 class GemmMMA(GemmBase):
-    gemm_inst = GEMM_INST_MMA
     intrin_emitter_cls = TensorCoreIntrinEmitter
-    intrin_emitter_kwargs: dict = {}
 
     def _make_mma_emitter(self, target: Target, thread_nums: int, thread_var: tirx.Var | None = None):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, self.gemm_inst)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
-        emitter_kwargs = dict(
+        emitter = self.intrin_emitter_cls(
             a_dtype=self.a_dtype,
             b_dtype=self.b_dtype,
             accum_dtype=self.accum_dtype,
@@ -37,8 +37,6 @@ class GemmMMA(GemmBase):
             chunk=self.chunk,
             thread_var=thread_var,
         )
-        emitter_kwargs.update(self.intrin_emitter_kwargs)
-        emitter = self.intrin_emitter_cls(**emitter_kwargs)
         return emitter
 
     def infer_layout(self, target: Target, thread_nums: int):
@@ -102,6 +100,7 @@ class GemmMMA(GemmBase):
         C_buf = C_region.buffer
 
         clear_accum = self.clear_accum
+
         assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
         assert block_K % micro_size_k == 0, f"block_K ({block_K}) must be a multiple of micro_size_k ({micro_size_k})"
 
