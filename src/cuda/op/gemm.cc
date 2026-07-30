@@ -32,6 +32,7 @@ namespace cuda {
 namespace {
 
 constexpr const char *kCudaMMA = "cuda.mma";
+constexpr const char *kCudaMMABlockScaled = "cuda.mma.blockscaled";
 constexpr const char *kCudaFMA = "cuda.fma";
 constexpr const char *kCudaWGMMA = "cuda.wgmma";
 constexpr const char *kCudaTCGEN05 = "cuda.tcgen05";
@@ -359,6 +360,20 @@ struct Gemm {
       return kCudaTCGEN05;
     }
 
+    if (op.sfaRegion_.defined() || op.sfbRegion_.defined()) {
+      if (!op.sfaRegion_.defined() || !op.sfbRegion_.defined()) {
+        LOG(FATAL) << "T.mma_gemm_blockscaled() requires both SFA and SFB "
+                      "scale-factor regions.";
+      }
+      if (!TargetIsSM120(target)) {
+        LOG(FATAL) << "T.mma_gemm_blockscaled() requires an SM120 CUDA target, "
+                      "but got target="
+                   << target << "."
+                   << SpanHintSuffix({op.a_->span, op.b_->span, op.c_->span});
+      }
+      return kCudaMMABlockScaled;
+    }
+
     if (AllowTcgen5Mma(op, target)) {
       return kCudaTCGEN05;
     }
@@ -396,7 +411,7 @@ struct Gemm {
   }
 
   static bool ReuseExistingSharedLayout(String gemm_inst) {
-    return gemm_inst == kCudaMMA;
+    return gemm_inst == kCudaMMA || gemm_inst == kCudaMMABlockScaled;
   }
 };
 

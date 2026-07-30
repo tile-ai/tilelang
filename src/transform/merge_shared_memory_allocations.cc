@@ -73,6 +73,26 @@ static bool IsStaticSharedMemory(Var buffer_var) {
          storage_scope.tag.empty();
 }
 
+// Scalar packed NVFP4 stores two logical elements per byte, and its buffer
+// shapes are expressed in logical elements.  Storage sizing is handled by the
+// shared GetBufferStorageSizeBytes helper; the byte-offset -> logical-index
+// conversion below is the remaining NVFP4-specific piece of this pass.
+static bool IsPackedScalarFp4(DataType dtype) {
+  return dtype.is_float4_e2m1fn() && dtype.is_scalar();
+}
+
+static PrimExpr SharedByteOffsetToLogicalIndexOffset(PrimExpr byte_offset,
+                                                     DataType dtype) {
+  // buffer_byte_offsets_ stores byte offsets into the merged uint8 arena, but
+  // the non-alias rewrite still indexes the original typed buffer. Convert the
+  // byte offset back to that buffer's logical element index.  Packed scalar
+  // NVFP4 has two logical elements per byte.
+  if (IsPackedScalarFp4(dtype)) {
+    return byte_offset * make_const(byte_offset.dtype(), 2);
+  }
+  return indexdiv(byte_offset, dtype.bytes() * dtype.lanes());
+}
+
 /*!
  * \brief collect the mapping from the buffer var to its allocate
  */
@@ -794,7 +814,7 @@ private:
     auto it = buffer_byte_offsets_.find(buffer_var.get());
     ICHECK(it != buffer_byte_offsets_.end())
         << "buffer_var = " << buffer_var->name_hint << ", dtype = " << dtype;
-    return indexdiv(it->second, dtype.bytes() * dtype.lanes());
+    return SharedByteOffsetToLogicalIndexOffset(it->second, dtype);
   }
 
   bool HasBufferOffset(const Var &buffer_var) {

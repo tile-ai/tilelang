@@ -16,3 +16,9 @@ from .utils import (
 
 from .lop3 import get_lop3_intrin_group  # noqa: F401
 from .mxfp import get_mxfp_intrin_group  # noqa: F401
+from .nvfp4 import (  # noqa: F401
+    pack_blockscaled_chunk_kmajor_scale_bytes,
+    quantize_bf16_to_nvfp4_blockscaled,
+    swizzle_blockscaled_chunk_kmajor_scale_words,
+    unswizzle_blockscaled_chunk_kmajor_scale_words,
+)

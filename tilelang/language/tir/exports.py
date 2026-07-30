@@ -6,6 +6,7 @@ CUDA_ONLY_TIR_EXPORTS = frozenset(
         "ptx_fence_barrier_init",
         "ptx_ldmatrix",
         "ptx_mma",
+        "ptx_mma_block_scale",
         "ptx_mma_sp",
         "ptx_tcgen05_mma_blockscaled_ss",
         "ptx_tcgen05_mma_ss",

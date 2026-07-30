@@ -5,6 +5,7 @@ from __future__ import annotations
 from tilelang.cuda.debug import device_assert
 from tilelang.cuda.intrinsics import (
     TensorCoreIntrinEmitter,
+    TensorCoreIntrinEmitterSM120,
     TensorCoreIntrinEmitterWithLadderTransform,
     get_ldmatrix_offset,
     get_mma_micro_size,
@@ -51,6 +52,7 @@ from tilelang.language.builtin import (
 from tilelang.language.experimental.gemm_sp_op import tcgen05_gemm_sp, wgmma_gemm_sp
 from tilelang.language.gemm_op import (
     make_blockscaled_gemm_layout,
+    mma_gemm_blockscaled,
     tcgen05_gemm,
     tcgen05_gemm_blockscaled,
     wgmma_gemm,
@@ -80,6 +82,7 @@ __all__ = [
     "TCGEN05DescriptorParams",
     "TCGEN05TensorCoreIntrinEmitter",
     "TensorCoreIntrinEmitter",
+    "TensorCoreIntrinEmitterSM120",
     "TensorCoreIntrinEmitterWithLadderTransform",
     "WGMMADescriptorParams",
     "WGMMATensorCoreIntrinEmitter",
@@ -120,6 +123,7 @@ __all__ = [
     "tcgen05_before_thread_sync",
     "tcgen05_cp_warpx4",
     "tcgen05_gemm",
+    "mma_gemm_blockscaled",
     "tcgen05_gemm_blockscaled",
     "tcgen05_gemm_sp",
     "tcgen05_mma",
