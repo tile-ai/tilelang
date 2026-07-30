@@ -793,7 +793,7 @@ def test_compact_package_issue_table_matches_cpp_macro_issue_order():
 
 
 def test_frontend_package_macro_keeps_compact_selector_issue_order():
-    macro = Path(__file__).resolve().parents[3] / "tilelang/cuda/intrinsics/macro/mma_macro_generator.py"
+    macro = Path(__file__).resolve().parents[3] / "tilelang/cuda/intrinsics/macro/mma_sm120_macro_generator.py"
     source = macro.read_text()
     issue_loop = source[source.index("        def _mma_kblock") : source.index("        def _warp_mma_blockscaled_fulltile")]
 
@@ -984,3 +984,7 @@ def test_swizzle_blockscaled_chunk_kmajor_pads_rows_to_full_tiles():
     back = unswizzle_blockscaled_chunk_kmajor_scale_words(swizzled)
     assert torch.equal(back[:rows], words)
     assert bool((back[rows:] == 0).all())
+
+
+if __name__ == "__main__":
+    tilelang_testing.main()

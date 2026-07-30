@@ -5,6 +5,7 @@ from __future__ import annotations
 from tilelang.cuda.debug import device_assert
 from tilelang.cuda.intrinsics import (
     TensorCoreIntrinEmitter,
+    TensorCoreIntrinEmitterSM120,
     TensorCoreIntrinEmitterWithLadderTransform,
     get_ldmatrix_offset,
     get_mma_micro_size,
@@ -81,6 +82,7 @@ __all__ = [
     "TCGEN05DescriptorParams",
     "TCGEN05TensorCoreIntrinEmitter",
     "TensorCoreIntrinEmitter",
+    "TensorCoreIntrinEmitterSM120",
     "TensorCoreIntrinEmitterWithLadderTransform",
     "WGMMADescriptorParams",
     "WGMMATensorCoreIntrinEmitter",

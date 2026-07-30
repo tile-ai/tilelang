@@ -11,7 +11,7 @@ from pathlib import Path
 import torch
 import tilelang
 import tilelang.language as T
-from tilelang.intrinsics import TensorCoreIntrinEmitter, make_mma_swizzle_layout
+from tilelang.intrinsics import TensorCoreIntrinEmitterSM120, make_mma_swizzle_layout
 from tilelang.transform import simplify_prim_func
 
 
@@ -53,7 +53,7 @@ def _make_tilelang_nvf4_kernel(m: int, n: int, k: int, micro_k: int, sf_vec_size
     warp_rows = warp_row_tiles // micro_size_x
     warp_cols = warp_col_tiles // micro_size_y
 
-    mma_emitter = TensorCoreIntrinEmitter(
+    mma_emitter = TensorCoreIntrinEmitterSM120(
         is_blockscaled=True,
         a_dtype=in_dtype,
         b_dtype=in_dtype,

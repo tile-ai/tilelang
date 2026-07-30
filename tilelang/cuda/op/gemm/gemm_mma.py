@@ -3,6 +3,9 @@ from __future__ import annotations
 from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang.layout import make_swizzled_layout
 from tilelang.cuda.intrinsics.macro.mma_macro_generator import TensorCoreIntrinEmitter
+from tilelang.cuda.intrinsics.macro.mma_sm120_macro_generator import (
+    TensorCoreIntrinEmitterSM120 as TensorCoreIntrinEmitterBlockScaled,
+)
 from tilelang.utils.language import is_shared, is_fragment, is_full_region
 from tilelang.cuda.target import target_is_cuda, target_is_sm120
 from tilelang import tvm as tvm
@@ -54,7 +57,8 @@ class GemmMMA(GemmBase):
         )
         if self.is_blockscaled:
             emitter_kwargs["is_blockscaled"] = True
-        emitter = self.intrin_emitter_cls(**emitter_kwargs)
+        emitter_cls = TensorCoreIntrinEmitterBlockScaled if self.is_blockscaled else self.intrin_emitter_cls
+        emitter = emitter_cls(**emitter_kwargs)
         return emitter
 
     def infer_layout(self, target: Target, thread_nums: int):

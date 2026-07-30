@@ -9,8 +9,8 @@ import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
 from tilelang.cuda.intrinsics.layout.mma_layout import mma_load_a_32x32_to_shared_16x64_layout
-from tilelang.cuda.intrinsics.macro.mma_macro_generator import SM120BlockScaleTile
-from tilelang.intrinsics import TensorCoreIntrinEmitter, get_swizzle_layout
+from tilelang.cuda.intrinsics.macro.mma_sm120_macro_generator import SM120BlockScaleTile
+from tilelang.intrinsics import TensorCoreIntrinEmitterSM120, get_swizzle_layout
 from examples.dequantize_gemm.quantize.nvfp4 import blockscaled_chunk_kmajor_word_offset
 from tilelang.transform import simplify_prim_func
 
@@ -36,7 +36,7 @@ _FP4_E2M1_VALUES = (
 
 
 def _make_blockscale_emitter(**kwargs):
-    return TensorCoreIntrinEmitter(
+    return TensorCoreIntrinEmitterSM120(
         is_blockscaled=True,
         kind="mxf4nvf4",
         scale_vec_size=4,
@@ -101,13 +101,23 @@ def test_tensor_core_intrin_emitter_mma_keeps_base_positional_signature():
     """
     import inspect
 
-    from tilelang.cuda.intrinsics.macro.mma_macro_generator import _TensorCoreIntrinEmitterBase
+    from tilelang.cuda.intrinsics.macro.mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 
-    base = list(inspect.signature(_TensorCoreIntrinEmitterBase.mma).parameters.values())
-    override = list(inspect.signature(TensorCoreIntrinEmitter.mma).parameters.values())
+    base = list(inspect.signature(MMAIntrinEmitter.mma).parameters.values())
+    override = list(inspect.signature(TensorCoreIntrinEmitterSM120.mma).parameters.values())
     assert [p.name for p in override[: len(base)]] == [p.name for p in base]
     for extra in override[len(base) :]:
         assert extra.kind == inspect.Parameter.KEYWORD_ONLY, extra.name
+
+
+def test_default_tensor_core_intrin_emitter_stays_arch_neutral():
+    from tilelang.cuda.intrinsics.macro.mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
+    from tilelang.cuda.op.gemm.gemm_mma import GemmMMA
+    from tilelang.intrinsics import TensorCoreIntrinEmitter
+
+    assert TensorCoreIntrinEmitter is MMAIntrinEmitter
+    assert GemmMMA.intrin_emitter_cls is MMAIntrinEmitter
+    assert issubclass(TensorCoreIntrinEmitterSM120, MMAIntrinEmitter)
 
 
 def test_sm120_mma_blockscaled_strategy_helpers_are_not_public_api():
@@ -319,8 +329,8 @@ def test_nvf4_mma_block_scale_fragment_layouts_match_cute():
 
 
 def test_nvf4_mma_block_scale_lane_scale_mapping_matches_cute():
-    sfa_rows = [TensorCoreIntrinEmitter._sfa_row_in_atom(tx) for tx in range(32)]
-    sfb_cols = [TensorCoreIntrinEmitter._sfb_col_in_atom(tx) for tx in range(32)]
+    sfa_rows = [TensorCoreIntrinEmitterSM120._sfa_row_in_atom(tx) for tx in range(32)]
+    sfb_cols = [TensorCoreIntrinEmitterSM120._sfb_col_in_atom(tx) for tx in range(32)]
 
     assert sfa_rows == [
         0,
@@ -402,7 +412,7 @@ def test_nvf4_mma_block_scale_lane_scale_mapping_matches_cute():
 )
 def test_nvf4_mma_block_scale_rejects_unsupported_configs(kwargs):
     with pytest.raises(ValueError, match="Unsupported SM120 block-scale MMA config"):
-        TensorCoreIntrinEmitter(
+        TensorCoreIntrinEmitterSM120(
             is_blockscaled=True,
             a_dtype=T.float4_e2m1fn,
             b_dtype=T.float4_e2m1fn,
@@ -428,7 +438,7 @@ def test_nvf4_mma_block_scale_rejects_unsupported_configs(kwargs):
 )
 def test_nvf4_mma_block_scale_rejects_incompatible_dtypes(dtype_kwargs):
     with pytest.raises(ValueError, match="mxf4nvf4 expects"):
-        TensorCoreIntrinEmitter(
+        TensorCoreIntrinEmitterSM120(
             is_blockscaled=True,
             a_transposed=False,
             b_transposed=True,
@@ -766,10 +776,6 @@ def test_nvf4_mma_block_scale_varying_scale_correctness():
     torch.testing.assert_close(C, ref, rtol=0.0, atol=0.0)
 
 
-if __name__ == "__main__":
-    tilelang.testing.main()
-
-
 # ---------------------------------------------------------------------------
 # Example tail-tile behavior (moved from test_tilelang_sm120_nvfp4_example_cli).
 # ---------------------------------------------------------------------------
@@ -823,3 +829,7 @@ def test_sm120_nvfp4_example_kernel_rejects_unsupported_tails(monkeypatch):
     # bf16 output rows must stay 16-byte aligned
     with pytest.raises(AssertionError, match="multiple of 8"):
         module.sm120_nvfp4_blockscaled_gemm(128, 130, 256)
+
+
+if __name__ == "__main__":
+    tilelang.testing.main()

@@ -4,6 +4,7 @@ from tilelang.cuda.language.intrinsics import (  # noqa: F401
     TCGEN05DescriptorParams,
     TCGEN05TensorCoreIntrinEmitter,
     TensorCoreIntrinEmitter,
+    TensorCoreIntrinEmitterSM120,
     TensorCoreIntrinEmitterWithLadderTransform,
     WGMMADescriptorParams,
     WGMMATensorCoreIntrinEmitter,
