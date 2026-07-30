@@ -795,7 +795,7 @@ def test_compact_package_issue_table_matches_cpp_macro_issue_order():
 def test_frontend_package_macro_keeps_compact_selector_issue_order():
     macro = Path(__file__).resolve().parents[3] / "tilelang/cuda/intrinsics/macro/mma_macro_generator.py"
     source = macro.read_text()
-    issue_loop = source[source.index("        def _gemm_kblock_package") : source.index("        def _warp_mma_blockscaled_fulltile")]
+    issue_loop = source[source.index("        def _mma_kblock") : source.index("        def _warp_mma_blockscaled_fulltile")]
 
     i_pos = issue_loop.index("for i in T.unroll(warp_rows)")
     j_pos = issue_loop.index("for j in T.unroll(warp_cols)")
