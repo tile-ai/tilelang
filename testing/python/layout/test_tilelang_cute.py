@@ -11,7 +11,7 @@ from tilelang.layout.swizzle import (
     make_half_bank_swizzled_layout,
     make_quarter_bank_swizzled_layout,
 )
-from tilelang.intrinsics import make_mma_swizzle_layout
+from tilelang.cuda.intrinsics import make_mma_swizzle_layout
 
 tilelang.testing.set_random_seed()
 
