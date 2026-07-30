@@ -176,6 +176,20 @@ bool ForBodyContainsSeqStmt(const For &loop) {
   return has_seq_stmt;
 }
 
+static For NormalizeLoopDomain(const For &loop) {
+  if (is_zero(loop->min) && loop->HasTrivialStep()) {
+    return loop;
+  }
+
+  Var normalized_var(loop->loop_var->name_hint, loop->loop_var.dtype());
+  PrimExpr step = loop->step.value_or(make_const(loop->loop_var.dtype(), 1));
+  Map<Var, PrimExpr> vmap;
+  vmap.Set(loop->loop_var, loop->min + normalized_var * step);
+  Stmt body = Substitute(loop->body, vmap);
+  return For(normalized_var, 0, loop->extent, loop->kind, body,
+             loop->thread_binding, loop->annotations, std::nullopt, loop->span);
+}
+
 class VectorizePlanner : public arith::IRMutatorWithAnalyzer {
 public:
   explicit VectorizePlanner(arith::Analyzer *analyzer,
@@ -185,12 +199,13 @@ public:
         reducer_info_map_(reducer_info_map) {}
 
   int Plan(const For &node) {
+    For normalized_node = NormalizeLoopDomain(node);
     bool disable_vectorize_256 = tl_config::Vectorize256Disabled();
     bool verbose = tl_config::VectorizePlannerVerboseEnabled();
 
     if (TargetSupportVectorize256(Target::Current(false)) &&
         !disable_vectorize_256 &&
-        VectorizeFindMemoryAccess::MaySupportVectorize256(node)) {
+        VectorizeFindMemoryAccess::MaySupportVectorize256(normalized_node)) {
       vector_load_bits_max_ = initial_vector_size_ = loop_extent_vector_size_ =
           256;
     } else {
@@ -203,11 +218,11 @@ public:
     // buffers the same as memory buffers. The special local buffer optimization
     // (ignoring local buffer constraints) only applies to simple single
     // BufferStore cases.
-    bool has_seq_stmt = ForBodyContainsSeqStmt(node);
+    bool has_seq_stmt = ForBodyContainsSeqStmt(normalized_node);
 
     // Clear previous buffer info and collect new ones
     buffer_vector_infos_.clear();
-    this->operator()(node);
+    this->operator()(normalized_node);
 
     // Compute final vector size from collected buffer infos
     // Strategy:
@@ -916,7 +931,7 @@ private:
     inner_for_ = node;
     auto ret = StmtExprMutator::VisitStmt_(node);
     if (inner_for_ == node) { // rewrite the innermost loop
-      For fnode = ret.as<For>().value();
+      For fnode = NormalizeLoopDomain(ret.as<For>().value());
       auto old_var = fnode->loop_var;
       auto extent_ptr = as_const_int(fnode->extent);
       ICHECK(extent_ptr) << fnode->extent;
@@ -924,7 +939,6 @@ private:
       ICHECK(extent % vector_size_ == 0)
           << "extent: " << extent << " vector_size_: " << vector_size_
           << " for loop: " << fnode;
-      ICHECK(is_zero(fnode->min));
       if (extent == vector_size_) {
         fnode.CopyOnWrite()->kind = ForKind::kVectorized;
         return fnode;
