@@ -398,6 +398,7 @@ def parse_tma_descriptor_args(
     desc_name_map: dict[str, str],
     desc_name_var_map: dict[str, tvm.tirx.Var],
     pythonic_expr_func: Callable[[Any], str],
+    global_address_func: Callable[[Any], str] | None = None,
 ) -> list[TMADescriptorParams]:
     """
     Parse TMA descriptor arguments into structured parameters.
@@ -407,6 +408,7 @@ def parse_tma_descriptor_args(
         desc_name_map: Mapping from descriptor handles to parameter names.
         desc_name_var_map: Mapping from descriptor handles to TVM variables.
         pythonic_expr_func: Function to convert TVM expressions to strings.
+        global_address_func: Optional renderer for descriptor pointer expressions.
 
     Returns:
         List of parsed TMA descriptor parameters.
@@ -439,7 +441,8 @@ def parse_tma_descriptor_args(
         if not isinstance(tensor_rank, int) or tensor_rank <= 0:
             raise ValueError(f"Invalid tensor_rank: {tensor_rank}. Must be a positive integer")
 
-        global_address = pythonic_expr_func(global_address)
+        address_renderer = global_address_func or pythonic_expr_func
+        global_address = address_renderer(global_address)
         params = TMADescriptorParams(handle_name, dtype, tensor_rank, global_address, is_img2col)
 
         if not is_img2col:

@@ -3,35 +3,34 @@ import pytest
 import tilelang
 import tilelang.language as T
 from tilelang import tvm
-from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
+from tilelang.engine.lower import lower_to_host_device_ir
+from tilelang.jit.adapter.nvrtc.wrapper import TLNVRTCSourceWrapper
+from tilelang.jit.adapter.wrapper import TLCUDASourceWrapper
 
 
 def _descriptor_base_byte_offsets(func, arch):
-    target = tvm.target.Target({"kind": "cuda", "arch": arch})
     pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True}
+    target = tvm.target.Target({"kind": "cuda", "arch": arch})
     with target, tvm.transform.PassContext(config=pass_configs):
-        mod = CUDAPassPipelineBodyPrologue(tvm.IRModule.from_expr(func), target)
+        host_mod, device_mod, _, _, _ = lower_to_host_device_ir(func, target=target)
 
-    create_tiled = tvm.ir.Op.get("tl.create_tma_descriptor")
-    create_im2col = tvm.ir.Op.get("tl.create_tma_im2col_descriptor")
     handle_add = tvm.ir.Op.get("tirx.handle_add_byte_offset")
     offsets = []
+    descriptors = []
+    for mod in (host_mod, device_mod):
+        for global_var in mod.get_global_vars():
+            args_map = mod[global_var].attrs.get("tma_descriptor_args")
+            if args_map:
+                descriptors.extend(args_map.items())
 
-    def collect(expr):
-        if not isinstance(expr, tvm.tirx.Call):
-            return
-        if not (expr.op.same_as(create_tiled) or expr.op.same_as(create_im2col)):
-            return
-        base = expr.args[2]
+    for _, args in descriptors:
+        base = args[4]
         assert isinstance(base, tvm.tirx.Call)
         assert base.op.same_as(handle_add)
         offset = tvm.arith.Analyzer().simplify(base.args[1])
         assert isinstance(offset, tvm.tirx.IntImm)
         offsets.append(int(offset.value))
-
-    for global_var in mod.get_global_vars():
-        tvm.tirx.stmt_functor.post_order_visit(mod[global_var].body, collect)
-    return sorted(offsets)
+    return sorted(set(offsets)), descriptors
 
 
 def _bulk_copy_program():
@@ -89,6 +88,28 @@ def _tma_atomic_program():
     return main
 
 
+def _auto_copy_program(elem_offset):
+    if elem_offset == "symbolic":
+
+        @T.prim_func
+        def main(src_handle: T.handle, offset: T.int32):
+            src = T.match_buffer(src_handle, (16, 80), T.float16, elem_offset=offset)
+            with T.Kernel(1, threads=128):
+                shared = T.alloc_shared((8, 64), T.float16)
+                T.copy(src[0:8, 0:64], shared)
+
+    else:
+
+        @T.prim_func
+        def main(src_handle: T.handle):
+            src = T.match_buffer(src_handle, (16, 80), T.float16, elem_offset=elem_offset)
+            with T.Kernel(1, threads=128):
+                shared = T.alloc_shared((8, 64), T.float16)
+                T.copy(src[0:8, 0:64], shared)
+
+    return main
+
+
 @pytest.mark.parametrize(
     ("program", "arch", "expected_offsets"),
     [
@@ -99,4 +120,27 @@ def _tma_atomic_program():
     ],
 )
 def test_tma_descriptor_base_includes_buffer_elem_offset(program, arch, expected_offsets):
-    assert _descriptor_base_byte_offsets(program(), arch) == expected_offsets
+    offsets, descriptors = _descriptor_base_byte_offsets(program(), arch)
+    assert offsets == expected_offsets
+
+    c_wrapper = object.__new__(TLCUDASourceWrapper)
+    nvrtc_wrapper = object.__new__(TLNVRTCSourceWrapper)
+    for desc_var, args in descriptors:
+        address = args[4]
+        desc_name_map = {desc_var.name: address.args[0].name}
+        desc_name_var_map = {desc_var.name: desc_var}
+        c_wrapper.tma_descriptor_args = {desc_var: args}
+        nvrtc_wrapper.tma_descriptor_args = {desc_var: args}
+        c_init = c_wrapper.generate_tma_descriptor_args(desc_name_map, desc_name_var_map)
+        python_init = nvrtc_wrapper.generate_tma_descriptor_args(desc_name_map, desc_name_var_map)
+        assert "handle_add_byte_offset" not in c_init
+        assert "_globalAddress= (void*)((char*)" in c_init
+        assert "handle_add_byte_offset" not in python_init
+        assert ".data_ptr() +" in python_init
+
+
+@pytest.mark.parametrize("elem_offset", [1, "symbolic"])
+def test_auto_copy_falls_back_for_unproven_descriptor_alignment(elem_offset):
+    offsets, descriptors = _descriptor_base_byte_offsets(_auto_copy_program(elem_offset), "sm_90")
+    assert offsets == []
+    assert descriptors == []

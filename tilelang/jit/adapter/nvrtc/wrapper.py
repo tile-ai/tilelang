@@ -56,7 +56,7 @@ def call({}):
 TMA_DESC_INIT_FUNC_PY = """
     {0}_type = CUtensorMapDataType({1})
     {0}_tensorRank = {2}
-    {0}_globalAddress = {3}.data_ptr()
+    {0}_globalAddress = {3}
     {0}_globalDim = [{4}]
     {0}_globalStride = [{5}][1:]
     {0}_boxDim = [{6}]
@@ -87,7 +87,7 @@ TMA_DESC_INIT_FUNC_PY = """
 TMA_IM2COL_DESC_INIT_FUNC_PY = """
     {0}_type = CUtensorMapDataType({1})
     {0}_tensorRank = {2}
-    {0}_globalAddress = {3}.data_ptr()
+    {0}_globalAddress = {3}
     {0}_globalDim = [{4}]
     {0}_globalStride = [{5}][1:]
     {0}_elementStrides = [{6}]
@@ -287,6 +287,13 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         Casts are noise in generated Python code - Python is dynamically typed.
         """
         return pythonic_expr(expr, self._TYPE_MAP, ignore_cast=True, floor_div_op="//")
+
+    def _tma_global_address(self, expr: tvm.tirx.PrimExpr) -> str:
+        if isinstance(expr, tvm.tirx.Call) and expr.op.name == "tirx.handle_add_byte_offset":
+            base = self._tma_global_address(expr.args[0])
+            offset = self._pythonic_expr(expr.args[1])
+            return f"{base} + ({offset})"
+        return f"{self._pythonic_expr(expr)}.data_ptr()"
 
     def create_dispatch_func(self, code, function_informations):
         """Generate Python dispatch function that launches multiple CUDA kernels.
@@ -501,7 +508,13 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             return tma_descriptor_init
 
         # Parse TMA descriptor arguments using the common utility
-        parsed_params = parse_tma_descriptor_args(self.tma_descriptor_args, desc_name_map, desc_name_var_map, self._pythonic_expr)
+        parsed_params = parse_tma_descriptor_args(
+            self.tma_descriptor_args,
+            desc_name_map,
+            desc_name_var_map,
+            self._pythonic_expr,
+            self._tma_global_address,
+        )
 
         # Generate Python code from parsed parameters
         for params in parsed_params:

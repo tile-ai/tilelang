@@ -303,6 +303,11 @@ struct AtomicAdd {
     Array<Range> shared_range = op.src_range;
     Array<Range> global_range = op.dst_range;
 
+    ICHECK(CanProveTMADescriptorBaseAligned(global_tensor, analyzer))
+        << "TMA atomic add requires a provably 16-byte-aligned global buffer "
+           "view, but elem_offset for "
+        << global_tensor->name << " is " << global_tensor->elem_offset;
+
     TMADesc desc;
     desc.rank = global_tensor->shape.size();
     ICHECK(desc.rank >= 1 && desc.rank <= 5)

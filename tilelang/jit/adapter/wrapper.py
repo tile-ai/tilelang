@@ -265,6 +265,13 @@ class TLCUDASourceWrapper:
         # and '//' is not a valid operator in C/C++.
         return pythonic_expr(expr, self._TYPE_MAP, floor_div_op="/")
 
+    def _tma_global_address(self, expr: tvm.tirx.PrimExpr) -> str:
+        if isinstance(expr, tvm.tirx.Call) and expr.op.name == "tirx.handle_add_byte_offset":
+            base = self._tma_global_address(expr.args[0])
+            offset = self._pythonic_expr(expr.args[1])
+            return f"(void*)((char*)({base}) + ({offset}))"
+        return self._pythonic_expr(expr)
+
     def _lookup_type(self, dtype: str | Any) -> str:
         key = dtype if isinstance(dtype, str) else str(dtype)
         result = self._TYPE_MAP.get(key)
@@ -406,7 +413,13 @@ class TLCUDASourceWrapper:
             return tma_descriptor_init
 
         # Parse TMA descriptor arguments using the common utility
-        parsed_params = parse_tma_descriptor_args(self.tma_descriptor_args, desc_name_map, desc_name_var_map, self._pythonic_expr)
+        parsed_params = parse_tma_descriptor_args(
+            self.tma_descriptor_args,
+            desc_name_map,
+            desc_name_var_map,
+            self._pythonic_expr,
+            self._tma_global_address,
+        )
 
         # Generate C++ code from parsed parameters
         for params in parsed_params:

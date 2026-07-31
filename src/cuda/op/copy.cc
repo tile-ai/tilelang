@@ -413,6 +413,17 @@ PrimExpr GetTMADescriptorBaseAddress(const Buffer &buffer) {
               {buffer->data, byte_offset});
 }
 
+bool CanProveTMADescriptorBaseAligned(const Buffer &buffer,
+                                      arith::Analyzer *analyzer) {
+  if (!buffer->elem_offset.defined() || is_zero(buffer->elem_offset)) {
+    return true;
+  }
+  PrimExpr byte_offset =
+      TMAGlobalBytesFromElements(buffer->elem_offset, buffer->dtype);
+  return analyzer->CanProveEqual(
+      FloorMod(byte_offset, IntImm(DataType::Int(64), 16)), 0);
+}
+
 // The TMA unit applies the descriptor's swizzle pattern relative to the
 // shared-memory base address, so the base must sit on a swizzle-pattern
 // repeat boundary or the data lands with a shifted phase (silently wrong
@@ -2433,6 +2444,11 @@ Stmt Copy::LowerBulkGather4(const CopyNode &op, const LowerArgs &lower_args,
   Buffer shared_tensor = is_load ? op.dst : op.src;
   Buffer shared_tensor_unmapped = shared_tensor;
 
+  ICHECK(CanProveTMADescriptorBaseAligned(global_tensor, analyzer))
+      << "tma_gather4/scatter4 requires a provably 16-byte-aligned global "
+         "buffer view, but elem_offset for "
+      << global_tensor->name << " is " << global_tensor->elem_offset;
+
   ICHECK_EQ(global_tensor->shape.size(), 2u);
   ICHECK_EQ(shared_tensor->shape.size(), 2u);
   auto shared_lead = as_const_int(shared_tensor->shape[0]);
@@ -2747,6 +2763,10 @@ Stmt Im2Col::Lower(const Im2ColOpNode &op, const LowerArgs &lower_args,
   ICHECK(IsGlobalBuffer(src) && IsSharedBuffer(dst));
   ICHECK(src->shape.size() == 4);
   ICHECK(src->dtype == dst->dtype);
+  ICHECK(CanProveTMADescriptorBaseAligned(src, analyzer))
+      << "T.im2col requires a provably 16-byte-aligned global buffer view, "
+         "but elem_offset for "
+      << src->name << " is " << src->elem_offset;
 
   size_t ndim = dst_region->region.size();
   ICHECK(ndim >= 2) << "im2col dstRegion must have at least 2 dims";

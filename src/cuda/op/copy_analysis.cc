@@ -201,6 +201,15 @@ bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
       (op.dst.scope() != "shared.dyn" && op.dst.scope() != "shared")) {
     return false;
   }
+  if (!CanProveTMADescriptorBaseAligned(op.src, analyzer)) {
+    if (emit_diagnostics) {
+      DLOG(WARNING) << "TMA bulk load requires a provably 16-byte-aligned "
+                       "global buffer view, but elem_offset for "
+                    << op.src->name << " is " << op.src->elem_offset
+                    << "; fallback to normal copy.";
+    }
+    return false;
+  }
   if (check_last_dim &&
       analyzer->CanProve(
           FloorMod(
@@ -238,6 +247,15 @@ bool CheckBulkStore(const CopyNode &op, Target target,
   }
   if ((op.src.scope() != "shared.dyn" && op.src.scope() != "shared") ||
       op.dst.scope() != "global") {
+    return false;
+  }
+  if (!CanProveTMADescriptorBaseAligned(op.dst, analyzer)) {
+    if (emit_diagnostics) {
+      DLOG(WARNING) << "TMA bulk store requires a provably 16-byte-aligned "
+                       "global buffer view, but elem_offset for "
+                    << op.dst->name << " is " << op.dst->elem_offset
+                    << "; fallback to normal copy.";
+    }
     return false;
   }
   if (check_last_dim &&
@@ -719,11 +737,27 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
     if (GetTmaDescriptorBaseIsDeviceBound(op)) {
       return Unsupported(MakeTmaUnavailableReason(op));
     }
+    arith::Analyzer local_analyzer;
+    arith::Analyzer *analyzer =
+        ctx.analyzer != nullptr ? ctx.analyzer : &local_analyzer;
+    if (!CanProveTMADescriptorBaseAligned(op.src, analyzer)) {
+      return Unsupported(
+          "tma_gather4 requires a provably 16-byte-aligned global buffer "
+          "view");
+    }
     return Supported(CopyInst::kBulkLoadGather4);
   }
   if (GetBoolAnnotation(op, "is_scatter4")) {
     if (GetTmaDescriptorBaseIsDeviceBound(op)) {
       return Unsupported(MakeTmaUnavailableReason(op));
+    }
+    arith::Analyzer local_analyzer;
+    arith::Analyzer *analyzer =
+        ctx.analyzer != nullptr ? ctx.analyzer : &local_analyzer;
+    if (!CanProveTMADescriptorBaseAligned(op.dst, analyzer)) {
+      return Unsupported(
+          "tma_scatter4 requires a provably 16-byte-aligned global buffer "
+          "view");
     }
     return Supported(CopyInst::kBulkStoreScatter4);
   }
