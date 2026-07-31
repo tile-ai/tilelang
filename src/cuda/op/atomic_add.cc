@@ -313,6 +313,17 @@ struct AtomicAdd {
         << global_tensor->name << " with different data type "
         << shared_tensor->dtype << " and " << global_tensor->dtype;
 
+    DataType dtype = global_tensor->dtype;
+    bool supports_tma_reduce_add =
+        dtype.is_bfloat16() ||
+        (dtype.is_float() && (dtype.bits() == 16 || dtype.bits() == 32)) ||
+        (dtype.is_int() && dtype.bits() == 32) ||
+        (dtype.is_uint() && (dtype.bits() == 32 || dtype.bits() == 64));
+    ICHECK(supports_tma_reduce_add)
+        << "TMA atomic add does not support dtype " << dtype
+        << "; supported dtypes are float16, bfloat16, float32, int32, uint32, "
+           "and uint64";
+
     desc.data_type = to_CUtensorMapDataType(global_tensor->dtype);
     desc.global_addr = global_tensor->data;
     desc.global_shape = ReverseArray(global_tensor->shape);
