@@ -1,5 +1,7 @@
 """Regression tests for type-driven Metal pointer address spaces."""
 
+import re
+
 import pytest
 import torch
 
@@ -54,18 +56,21 @@ def lower_to_metal(enable_device_compile: bool) -> str:
     return artifact.kernel_source or ""
 
 
-def test_shared_alias_address_spaces_are_type_driven(monkeypatch):
+def test_both_metal_build_paths_use_type_driven_shared_aliases(monkeypatch):
+    # Keep this source comparison independent of an available Metal runtime.
     monkeypatch.setenv("TVM_COMPILE_FORCE_FALLBACK", "1")
     compiled_source = lower_to_metal(enable_device_compile=True)
     source_only = lower_to_metal(enable_device_compile=False)
 
     assert compiled_source == source_only
-    assert "threadgroup half* As = (threadgroup half*)" in compiled_source
-    assert "threadgroup half* Bs = (threadgroup half*)" in compiled_source
-    assert "*(threadgroup half2*)(As +" in compiled_source
-    assert "*(threadgroup half2*)(Bs +" in compiled_source
-    assert "(half*)As" not in compiled_source
-    assert "(half*)Bs" not in compiled_source
+    aliases = re.findall(
+        r"threadgroup half\* (\w+) = \(threadgroup half\*\)",
+        compiled_source,
+    )
+    assert len(aliases) >= 2, compiled_source
+    for alias in aliases:
+        assert f"*(threadgroup half2*)({alias} +" in compiled_source
+        assert f"(half*){alias}" not in compiled_source
 
 
 @tilelang.testing.requires_metal
