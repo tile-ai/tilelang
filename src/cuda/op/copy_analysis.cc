@@ -201,9 +201,12 @@ bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
       (op.dst.scope() != "shared.dyn" && op.dst.scope() != "shared")) {
     return false;
   }
-  if (!CanProveTMADescriptorBaseAligned(op.src, analyzer)) {
+  if (!CanProveTMADescriptorBaseAligned(op.src, op.dst->dtype, analyzer)) {
     if (emit_diagnostics) {
-      DLOG(WARNING) << "TMA bulk load requires a provably 16-byte-aligned "
+      DLOG(WARNING) << "TMA bulk load requires a provably "
+                    << TMARequiredGlobalAddressAlignment(op.src->dtype,
+                                                         op.dst->dtype)
+                    << "-byte-aligned "
                        "global buffer view, but elem_offset for "
                     << op.src->name << " is " << op.src->elem_offset
                     << "; fallback to normal copy.";
@@ -249,9 +252,12 @@ bool CheckBulkStore(const CopyNode &op, Target target,
       op.dst.scope() != "global") {
     return false;
   }
-  if (!CanProveTMADescriptorBaseAligned(op.dst, analyzer)) {
+  if (!CanProveTMADescriptorBaseAligned(op.dst, op.src->dtype, analyzer)) {
     if (emit_diagnostics) {
-      DLOG(WARNING) << "TMA bulk store requires a provably 16-byte-aligned "
+      DLOG(WARNING) << "TMA bulk store requires a provably "
+                    << TMARequiredGlobalAddressAlignment(op.dst->dtype,
+                                                         op.src->dtype)
+                    << "-byte-aligned "
                        "global buffer view, but elem_offset for "
                     << op.dst->name << " is " << op.dst->elem_offset
                     << "; fallback to normal copy.";
@@ -740,10 +746,11 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
     arith::Analyzer local_analyzer;
     arith::Analyzer *analyzer =
         ctx.analyzer != nullptr ? ctx.analyzer : &local_analyzer;
-    if (!CanProveTMADescriptorBaseAligned(op.src, analyzer)) {
-      return Unsupported(
-          "tma_gather4 requires a provably 16-byte-aligned global buffer "
-          "view");
+    if (!CanProveTMADescriptorBaseAligned(op.src, op.dst->dtype, analyzer)) {
+      return Unsupported("tma_gather4 requires a provably " +
+                         std::to_string(TMARequiredGlobalAddressAlignment(
+                             op.src->dtype, op.dst->dtype)) +
+                         "-byte-aligned global buffer view");
     }
     return Supported(CopyInst::kBulkLoadGather4);
   }
@@ -754,10 +761,11 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
     arith::Analyzer local_analyzer;
     arith::Analyzer *analyzer =
         ctx.analyzer != nullptr ? ctx.analyzer : &local_analyzer;
-    if (!CanProveTMADescriptorBaseAligned(op.dst, analyzer)) {
-      return Unsupported(
-          "tma_scatter4 requires a provably 16-byte-aligned global buffer "
-          "view");
+    if (!CanProveTMADescriptorBaseAligned(op.dst, op.src->dtype, analyzer)) {
+      return Unsupported("tma_scatter4 requires a provably " +
+                         std::to_string(TMARequiredGlobalAddressAlignment(
+                             op.dst->dtype, op.src->dtype)) +
+                         "-byte-aligned global buffer view");
     }
     return Supported(CopyInst::kBulkStoreScatter4);
   }

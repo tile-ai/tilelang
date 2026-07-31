@@ -413,15 +413,28 @@ PrimExpr GetTMADescriptorBaseAddress(const Buffer &buffer) {
               {buffer->data, byte_offset});
 }
 
+int TMARequiredGlobalAddressAlignment(DataType global_dtype,
+                                      DataType shared_dtype) {
+  // CUDA requires 32-byte global addresses for the unpacked-FP4 TensorMap
+  // type (16U4_ALIGN16B), even though the ordinary TMA minimum is 16 bytes.
+  if (IsFP4PackedToUnpackedStorageCopy(global_dtype, shared_dtype)) {
+    return 32;
+  }
+  return 16;
+}
+
 bool CanProveTMADescriptorBaseAligned(const Buffer &buffer,
+                                      DataType shared_dtype,
                                       arith::Analyzer *analyzer) {
   if (!buffer->elem_offset.defined() || is_zero(buffer->elem_offset)) {
     return true;
   }
   PrimExpr byte_offset =
       TMAGlobalBytesFromElements(buffer->elem_offset, buffer->dtype);
+  int alignment =
+      TMARequiredGlobalAddressAlignment(buffer->dtype, shared_dtype);
   return analyzer->CanProveEqual(
-      FloorMod(byte_offset, IntImm(DataType::Int(64), 16)), 0);
+      FloorMod(byte_offset, IntImm(DataType::Int(64), alignment)), 0);
 }
 
 // The TMA unit applies the descriptor's swizzle pattern relative to the
@@ -1888,6 +1901,13 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
 
   desc.data_type =
       TensorMapDataTypeForTMA(global_tensor->dtype, shared_tensor->dtype);
+  ICHECK(CanProveTMADescriptorBaseAligned(global_tensor, shared_tensor->dtype,
+                                          analyzer))
+      << "TMA bulk copy requires a provably "
+      << TMARequiredGlobalAddressAlignment(global_tensor->dtype,
+                                           shared_tensor->dtype)
+      << "-byte-aligned global buffer view, but elem_offset for "
+      << global_tensor->name << " is " << global_tensor->elem_offset;
   desc.global_addr = GetTMADescriptorBaseAddress(global_tensor);
   desc.l2_promotion = static_cast<int>(CU_TENSOR_MAP_L2_PROMOTION_L2_128B);
   desc.oob_fill = static_cast<int>(CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
@@ -2444,8 +2464,12 @@ Stmt Copy::LowerBulkGather4(const CopyNode &op, const LowerArgs &lower_args,
   Buffer shared_tensor = is_load ? op.dst : op.src;
   Buffer shared_tensor_unmapped = shared_tensor;
 
-  ICHECK(CanProveTMADescriptorBaseAligned(global_tensor, analyzer))
-      << "tma_gather4/scatter4 requires a provably 16-byte-aligned global "
+  ICHECK(CanProveTMADescriptorBaseAligned(global_tensor, shared_tensor->dtype,
+                                          analyzer))
+      << "tma_gather4/scatter4 requires a provably "
+      << TMARequiredGlobalAddressAlignment(global_tensor->dtype,
+                                           shared_tensor->dtype)
+      << "-byte-aligned global "
          "buffer view, but elem_offset for "
       << global_tensor->name << " is " << global_tensor->elem_offset;
 
@@ -2763,8 +2787,10 @@ Stmt Im2Col::Lower(const Im2ColOpNode &op, const LowerArgs &lower_args,
   ICHECK(IsGlobalBuffer(src) && IsSharedBuffer(dst));
   ICHECK(src->shape.size() == 4);
   ICHECK(src->dtype == dst->dtype);
-  ICHECK(CanProveTMADescriptorBaseAligned(src, analyzer))
-      << "T.im2col requires a provably 16-byte-aligned global buffer view, "
+  ICHECK(CanProveTMADescriptorBaseAligned(src, dst->dtype, analyzer))
+      << "T.im2col requires a provably "
+      << TMARequiredGlobalAddressAlignment(src->dtype, dst->dtype)
+      << "-byte-aligned global buffer view, "
          "but elem_offset for "
       << src->name << " is " << src->elem_offset;
 

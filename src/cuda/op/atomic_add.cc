@@ -303,8 +303,12 @@ struct AtomicAdd {
     Array<Range> shared_range = op.src_range;
     Array<Range> global_range = op.dst_range;
 
-    ICHECK(CanProveTMADescriptorBaseAligned(global_tensor, analyzer))
-        << "TMA atomic add requires a provably 16-byte-aligned global buffer "
+    ICHECK(CanProveTMADescriptorBaseAligned(global_tensor, shared_tensor->dtype,
+                                            analyzer))
+        << "TMA atomic add requires a provably "
+        << TMARequiredGlobalAddressAlignment(global_tensor->dtype,
+                                             shared_tensor->dtype)
+        << "-byte-aligned global buffer "
            "view, but elem_offset for "
         << global_tensor->name << " is " << global_tensor->elem_offset;
 

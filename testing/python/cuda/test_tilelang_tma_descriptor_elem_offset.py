@@ -110,6 +110,18 @@ def _auto_copy_program(elem_offset):
     return main
 
 
+def _fp4_unpacked_copy_program():
+    @T.prim_func
+    def main(src_handle: T.handle):
+        src = T.match_buffer(src_handle, (16, 80), T.float4_e2m1fn, elem_offset=32)
+        with T.Kernel(1, threads=128):
+            shared = T.alloc_shared((8, 64), T.float4_e2m1_unpacked)
+            mbar = T.alloc_barrier(128)
+            T.tma_copy(src[0:8, 0:64], shared, barrier=mbar)
+
+    return main
+
+
 @pytest.mark.parametrize(
     ("program", "arch", "expected_offsets"),
     [
@@ -144,3 +156,8 @@ def test_auto_copy_falls_back_for_unproven_descriptor_alignment(elem_offset):
     offsets, descriptors = _descriptor_base_byte_offsets(_auto_copy_program(elem_offset), "sm_90")
     assert offsets == []
     assert descriptors == []
+
+
+def test_fp4_unpacked_copy_rejects_16_byte_offset():
+    with pytest.raises(Exception, match="T.tma_copy"):
+        _descriptor_base_byte_offsets(_fp4_unpacked_copy_program(), "sm_100a")

@@ -43,10 +43,15 @@ bool CopyInstIsCPAsync(CopyInst inst);
 // Return the descriptor base for a global buffer view, including elem_offset.
 PrimExpr GetTMADescriptorBaseAddress(const Buffer &buffer);
 
-// TMA tensor-map addresses must be 16-byte aligned. The data Var denotes an
-// aligned allocation, so a view is eligible only when its byte offset is
-// provably a multiple of 16.
+// Return the minimum global-address alignment for the selected TMA data type.
+int TMARequiredGlobalAddressAlignment(DataType global_dtype,
+                                      DataType shared_dtype);
+
+// TMA tensor-map addresses must satisfy the selected data type's alignment.
+// The data Var denotes an aligned allocation, so a view is eligible only when
+// its byte offset is provably a multiple of that alignment.
 bool CanProveTMADescriptorBaseAligned(const Buffer &buffer,
+                                      DataType shared_dtype,
                                       arith::Analyzer *analyzer);
 
 struct TMADesc {
