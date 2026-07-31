@@ -593,7 +593,10 @@ public:
   }
 
   bool IsOpaqueStateChangingCall(const Call &call) const {
-    return call->op.same_as(builtin::call_extern()) ||
+    return call->op.same_as(tl::rng_init()) ||
+           call->op.same_as(tl::rng_rand()) ||
+           call->op.same_as(tl::rng_rand_float()) ||
+           call->op.same_as(builtin::call_extern()) ||
            call->op.same_as(builtin::tvm_call_packed()) ||
            call->op.same_as(builtin::tvm_call_cpacked()) ||
            call->op.same_as(builtin::tvm_call_packed_lowered()) ||
@@ -1216,11 +1219,11 @@ public:
 
     // Control operations do not always expose complete Buffer dependencies.  A
     // blocking control is therefore a full source-order DAG fence.  An opaque
-    // external or packed call is also a cross-iteration fence and pins all
-    // affected statements to one stage because no earlier or later statement
-    // can be proven independent.  A known non-blocking arrive/signal only
-    // retains its immediate predecessor and may be reordered with independent
-    // following work.
+    // external, packed, or implicit-state RNG call is also a cross-iteration
+    // fence and pins all affected statements to one stage because no earlier or
+    // later statement can be proven independent.  A known non-blocking
+    // arrive/signal only retains its immediate predecessor and may be reordered
+    // with independent following work.
     for (int i = 0; i < num_statements; ++i) {
       if (!pipeline_stage_infos[i].ContainsControl()) {
         continue;

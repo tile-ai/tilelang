@@ -14,6 +14,7 @@ _EXPLICIT_PTX_BYTES = 16
 _EXPLICIT_PTX_TILES = 4
 _SHIFTED_WAR_EXTENT = 4
 _SHIFTED_RAW_EXTENT = 8
+_IMPLICIT_RNG_STATE_EXTENT = 8
 
 
 @T.prim_func
@@ -99,6 +100,38 @@ def _shifted_loop_carried_raw_kernel(
             current[k] = shared[k]
             if k > 0:
                 previous[k] = shared[k - 1]
+
+
+@T.prim_func
+def _implicit_rng_state_pipeline_kernel(
+    source: T.Tensor((_IMPLICIT_RNG_STATE_EXTENT,), T.int32),
+    random_output: T.Tensor((2 * _IMPLICIT_RNG_STATE_EXTENT,), T.uint32),
+    copy_output: T.Tensor((_IMPLICIT_RNG_STATE_EXTENT,), T.int32),
+):
+    with T.Kernel(1, threads=1):
+        shared = T.alloc_shared((1,), T.int32)
+        T.rng_init(42, 0, 0)
+        for k in T.Pipelined(_IMPLICIT_RNG_STATE_EXTENT, num_stages=3):
+            random_output[2 * k] = T.rng_rand()
+            T.copy(source[k], shared)
+            random_output[2 * k + 1] = T.rng_rand()
+            copy_output[k] = shared[0]
+
+
+@T.prim_func
+def _implicit_rng_state_serial_kernel(
+    source: T.Tensor((_IMPLICIT_RNG_STATE_EXTENT,), T.int32),
+    random_output: T.Tensor((2 * _IMPLICIT_RNG_STATE_EXTENT,), T.uint32),
+    copy_output: T.Tensor((_IMPLICIT_RNG_STATE_EXTENT,), T.int32),
+):
+    with T.Kernel(1, threads=1):
+        shared = T.alloc_shared((1,), T.int32)
+        T.rng_init(42, 0, 0)
+        for k in T.serial(_IMPLICIT_RNG_STATE_EXTENT):
+            random_output[2 * k] = T.rng_rand()
+            T.copy(source[k], shared)
+            random_output[2 * k + 1] = T.rng_rand()
+            copy_output[k] = shared[0]
 
 
 @tilelang.testing.requires_cuda
@@ -197,6 +230,35 @@ def test_shifted_loop_carried_raw_reads_previous_iteration_value():
 
     torch.testing.assert_close(current, source)
     torch.testing.assert_close(previous[1:], source[:-1])
+
+
+@tilelang.testing.requires_cuda
+def test_implicit_rng_state_preserves_serial_call_order():
+    """Pipeline skew must not interleave calls that mutate implicit RNG state."""
+
+    pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True}
+    pipeline = tilelang.compile(
+        _implicit_rng_state_pipeline_kernel,
+        out_idx=[1, 2],
+        pass_configs=pass_configs,
+    )
+    serial = tilelang.compile(
+        _implicit_rng_state_serial_kernel,
+        out_idx=[1, 2],
+        pass_configs=pass_configs,
+    )
+    source = torch.arange(_IMPLICIT_RNG_STATE_EXTENT, dtype=torch.int32, device="cuda")
+    actual_random, actual_copy = pipeline(source)
+    expected_random, expected_copy = serial(source)
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(actual_copy, expected_copy, rtol=0, atol=0)
+    torch.testing.assert_close(
+        actual_random.to(torch.int64),
+        expected_random.to(torch.int64),
+        rtol=0,
+        atol=0,
+    )
 
 
 if __name__ == "__main__":
