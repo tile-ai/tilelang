@@ -850,6 +850,20 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         return self._pythonic_expr(expr), None
 
     @staticmethod
+    def _tma_global_address_offset_vars(expr: tvm.tirx.PrimExpr) -> set[str]:
+        """Return scalar variables referenced by a TMA address offset."""
+        names: set[str] = set()
+
+        def visit(node):
+            if isinstance(node, tvm.tirx.Var):
+                names.add(node.name)
+
+        if isinstance(expr, tvm.tirx.Call) and expr.op.name == "tirx.handle_add_byte_offset":
+            names.update(TLCuTeDSLSourceWrapper._tma_global_address_offset_vars(expr.args[0]))
+            post_order_visit(expr.args[1], visit)
+        return names
+
+    @staticmethod
     def _tma_global_address_expr(tensor_name: str, byte_offset: str | None) -> str:
         """Build the pointer expression used by cuTensorMapEncode*()."""
         if byte_offset is None:
@@ -1260,6 +1274,17 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
 
         return [arg for arg in function_args if arg["type"] != "buffer" or arg["name"] in active_buffers]
 
+    def _tma_scalar_args(self, function_args: list[dict], desc_names: list[str]) -> list[dict]:
+        """Return launcher scalars and validate dynamic TMA address dependencies."""
+        scalar_args = [arg for arg in function_args if arg["type"] != "buffer"]
+        scalar_names = {arg["name"] for arg in scalar_args}
+        offset_names = {name for desc_name in desc_names for name in self.tma_desc_info[desc_name].get("globalAddressOffsetVars", set())}
+        missing_names = offset_names - scalar_names
+        if missing_names:
+            missing = ", ".join(sorted(missing_names))
+            raise ValueError(f"Dynamic TMA address offset depends on non-launch scalar(s): {missing}")
+        return scalar_args
+
     def _generate_cpp_launcher(
         self,
         kernel_metadata_list: list[dict],
@@ -1283,8 +1308,9 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
             for idx, km in enumerate(kernel_metadata_list)
         )
 
-        # Generate TMA init function
-        scalar_args = [arg for arg in function_args if arg["type"] != "buffer"]
+        # Generate TMA init function. Keep scalar arguments in the host
+        # initializer scope because globalAddressOffset may reference them.
+        scalar_args = self._tma_scalar_args(function_args, all_desc_names)
         tma_init_func = self._generate_tma_init_func(all_desc_names, all_tma_tensors, tensor_arg_map, scalar_args)
 
         # Generate launch function signature and get_ptr code
@@ -1515,6 +1541,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
             _, dtype, tensor_rank, globalAddress, *remaining_args = args[1:]
             tensor_rank = int(tensor_rank)
             tensor_name, global_address_offset = self._split_tma_global_address(globalAddress)
+            global_address_offset_vars = self._tma_global_address_offset_vars(globalAddress)
 
             global_dim = remaining_args[:tensor_rank]
             global_stride = remaining_args[tensor_rank : 2 * tensor_rank]
@@ -1530,6 +1557,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
                     "tensor_rank": params.tensor_rank,
                     "globalAddress": tensor_name,
                     "globalAddressOffset": global_address_offset,
+                    "globalAddressOffsetVars": global_address_offset_vars,
                     "global_dim": global_dim,
                     "global_stride": global_stride,
                     "box_dim": box_dim,
@@ -1549,6 +1577,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
                     "tensor_rank": params.tensor_rank,
                     "globalAddress": tensor_name,
                     "globalAddressOffset": global_address_offset,
+                    "globalAddressOffsetVars": global_address_offset_vars,
                     "global_dim": global_dim,
                     "global_stride": global_stride,
                     "element_strides": element_strides,

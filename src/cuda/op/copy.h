@@ -43,17 +43,21 @@ bool CopyInstIsCPAsync(CopyInst inst);
 // Return the descriptor base for a global buffer view, including elem_offset.
 PrimExpr GetTMADescriptorBaseAddress(const Buffer &buffer);
 
-// Return the minimum global-address alignment for the selected TMA data type.
+// Return the minimum global-address alignment for the selected TMA data type
+// and descriptor swizzle mode.
 int TMARequiredGlobalAddressAlignment(DataType global_dtype,
-                                      DataType shared_dtype);
+                                      DataType shared_dtype,
+                                      bool swizzled = false);
 
 // TMA tensor-map addresses must satisfy the selected data type's alignment.
 // The data Var denotes an aligned allocation, so a view is eligible only when
-// its byte offset is provably a multiple of that alignment.
-bool CanProveTMADescriptorBaseAligned(const Buffer &buffer,
-                                      DataType shared_dtype,
-                                      arith::Analyzer *analyzer,
-                                      const Array<Var> &host_visible_vars);
+// its byte offset is provably a multiple of that alignment. Descriptor-based
+// paths also require every offset dependency to be host-visible; descriptorless
+// 1D bulk copies may disable that additional requirement.
+bool CanProveTMADescriptorBaseAligned(
+    const Buffer &buffer, DataType shared_dtype, arith::Analyzer *analyzer,
+    const Array<Var> &host_visible_vars, bool require_host_visible = true,
+    bool require_swizzled_global_address = false);
 
 struct TMADesc {
   size_t rank;

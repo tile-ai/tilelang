@@ -6,6 +6,7 @@ import tilelang
 import tilelang.language as T
 from tilelang import tvm
 from tilelang.engine.lower import lower_to_host_device_ir
+from tilelang.layout import make_linear_layout
 from tilelang.jit.adapter.cutedsl.wrapper import TLCuTeDSLSourceWrapper
 from tilelang.jit.adapter.nvrtc.wrapper import TLNVRTCSourceWrapper
 from tilelang.jit.adapter.wrapper import TLCUDASourceWrapper
@@ -40,13 +41,15 @@ def _descriptor_base_byte_offsets(func, arch):
     return offsets, descriptors
 
 
-def _bulk_copy_program():
+def _bulk_copy_program(src_elem_offset=64, dst_elem_offset=128, annotate_linear=False):
     @T.prim_func
     def main(src_handle: T.handle, dst_handle: T.handle):
-        src = T.match_buffer(src_handle, (16, 80), T.float16, elem_offset=16)
-        dst = T.match_buffer(dst_handle, (16, 80), T.float16, elem_offset=32)
+        src = T.match_buffer(src_handle, (16, 80), T.float16, elem_offset=src_elem_offset)
+        dst = T.match_buffer(dst_handle, (16, 80), T.float16, elem_offset=dst_elem_offset)
         with T.Kernel(1, threads=128):
             shared = T.alloc_shared((8, 64), T.float16)
+            if annotate_linear:
+                T.annotate_layout({shared: make_linear_layout(shared)})
             mbar = T.alloc_barrier(1)
             T.tma_copy(src[0:8, 0:64], shared, barrier=mbar)
             T.barrier_arrive(mbar)
@@ -59,8 +62,8 @@ def _bulk_copy_program():
 def _gather_scatter_program():
     @T.prim_func
     def main(src_handle: T.handle, rows: T.Tensor((4,), T.int32), dst_handle: T.handle):
-        src = T.match_buffer(src_handle, (64, 64), T.float16, elem_offset=16)
-        dst = T.match_buffer(dst_handle, (64, 64), T.float16, elem_offset=32)
+        src = T.match_buffer(src_handle, (64, 64), T.float16, elem_offset=64)
+        dst = T.match_buffer(dst_handle, (64, 64), T.float16, elem_offset=128)
         with T.Kernel(1, threads=128):
             shared = T.alloc_shared((4, 64), T.float16)
             mbar = T.alloc_barrier(1)
@@ -76,7 +79,7 @@ def _gather_scatter_program():
 def _im2col_program():
     @T.prim_func
     def main(src_handle: T.handle):
-        src = T.match_buffer(src_handle, (1, 8, 8, 64), T.float16, elem_offset=16)
+        src = T.match_buffer(src_handle, (1, 8, 8, 64), T.float16, elem_offset=64)
         with T.Kernel(1, threads=128):
             shared = T.alloc_shared((64, 32), T.float16)
             T.im2col(src, shared, 0, 0, 3, 1, 1, 1)
@@ -128,6 +131,19 @@ def _symbolically_aligned_tma_copy_program():
     return main
 
 
+def _device_local_1d_tma_copy_program():
+    @T.prim_func
+    def main(src_handle: T.handle):
+        src = T.match_buffer(src_handle, (1024,), T.float16)
+        with T.Kernel(1, threads=128):
+            tx = T.get_thread_binding()
+            shared = T.alloc_shared((1024,), T.float16)
+            src_view = T.decl_buffer((1024,), T.float16, data=src.data, elem_offset=tx * 8)
+            T.copy(src_view[0:1024], shared, prefer_instruction="tma")
+
+    return main
+
+
 def _fp4_unpacked_copy_program(elem_offset=32):
     @T.prim_func
     def main(src_handle: T.handle):
@@ -143,9 +159,9 @@ def _fp4_unpacked_copy_program(elem_offset=32):
 @pytest.mark.parametrize(
     ("program", "arch", "expected_offsets"),
     [
-        (_bulk_copy_program, "sm_90", [32, 64]),
-        (_gather_scatter_program, "sm_100a", [32, 64]),
-        (_im2col_program, "sm_90", [32]),
+        (_bulk_copy_program, "sm_90", [128, 256]),
+        (_gather_scatter_program, "sm_100a", [128, 256]),
+        (_im2col_program, "sm_90", [128]),
         (_tma_atomic_program, "sm_90", [32]),
     ],
 )
@@ -176,6 +192,17 @@ def test_tma_descriptor_base_includes_buffer_elem_offset(program, arch, expected
         assert cutedsl_tensors == [address.args[0].name]
         assert f"{address.args[0].name}_ptr + (" in cutedsl_init
         assert "handle_add_byte_offset" not in cutedsl_init
+
+
+def test_swizzled_tma_copy_rejects_sub_128_byte_global_offset():
+    with pytest.raises(Exception, match=re.escape("T.tma_copy")):
+        _descriptor_base_byte_offsets(_bulk_copy_program(16, 32), "sm_90")
+
+
+def test_linear_tma_copy_keeps_dtype_alignment_requirement():
+    offsets, descriptors = _descriptor_base_byte_offsets(_bulk_copy_program(16, 32, annotate_linear=True), "sm_90")
+    assert offsets == [32, 64]
+    assert len(descriptors) == 2
 
 
 def test_cutedsl_descriptor_aliases_are_kernel_local():
@@ -218,6 +245,59 @@ def test_cutedsl_descriptor_aliases_are_kernel_local():
     assert "kernel_1(A_, __tma_1_A_desc)" in cubin
 
 
+@pytest.mark.parametrize("wrapper_cls", [TLCUDASourceWrapper, TLNVRTCSourceWrapper])
+def test_cuda_wrapper_descriptor_aliases_are_kernel_local(wrapper_cls):
+    func = _bulk_copy_program()
+    _, descriptors = _descriptor_base_byte_offsets(func, "sm_90")
+    first_desc_var, first_desc_args = descriptors[0]
+    _, second_desc_args = descriptors[1]
+    second_desc_var = tvm.tirx.Var("src_desc_1", "handle")
+    module = tvm.IRModule.from_expr(func)
+    src_data = func.buffer_map[func.params[0]].data
+
+    function_informations = {
+        "kernel_0": {
+            "block_info": [1, 1, 1],
+            "grid_info": [1, 1, 1],
+            "dynamic_smem_buf": 0,
+            "function_params": [src_data, first_desc_var],
+        },
+        "kernel_1": {
+            "block_info": [1, 1, 1],
+            "grid_info": [1, 1, 1],
+            "dynamic_smem_buf": 0,
+            "function_params": [src_data, second_desc_var],
+        },
+    }
+    code = (
+        "__global__ void kernel_0(half_t* src, CUtensorMap src_desc) { int x; }\n"
+        "__global__ void kernel_1(half_t* src, CUtensorMap src_desc) { int x; }"
+    )
+
+    wrapper = object.__new__(wrapper_cls)
+    wrapper.mod = module
+    wrapper.tma_descriptor_args = {
+        first_desc_var: first_desc_args,
+        second_desc_var: second_desc_args,
+    }
+    wrapper.l2_persistent_map = {}
+    if wrapper_cls is TLCUDASourceWrapper:
+        wrapper.use_cooperative_groups = {"kernel_0": False, "kernel_1": False}
+        wrapper.cluster_dims = {"kernel_0": None, "kernel_1": None}
+    else:
+        wrapper.pdl_sync_map = {}
+
+    generated = wrapper.create_dispatch_func(code, function_informations)
+    assert "__tma_0_src_desc" in generated
+    assert "__tma_1_src_desc" in generated
+    if wrapper_cls is TLCUDASourceWrapper:
+        assert "cudaLaunchKernelEx(&config, kernel_0, src, __tma_0_src_desc)" in generated
+        assert "cudaLaunchKernelEx(&config, kernel_1, src, __tma_1_src_desc)" in generated
+    else:
+        assert "arg_values = src.data_ptr(), __tma_0_src_desc" in generated
+        assert "arg_values = src.data_ptr(), __tma_1_src_desc" in generated
+
+
 @pytest.mark.parametrize("elem_offset", [1, "symbolic"])
 def test_auto_copy_falls_back_for_unproven_descriptor_alignment(elem_offset):
     offsets, descriptors = _descriptor_base_byte_offsets(_auto_copy_program(elem_offset), "sm_90")
@@ -230,6 +310,55 @@ def test_preferred_tma_lowers_symbolically_aligned_host_offset():
     assert len(descriptors) == 1
     assert len(offsets) == 1
     assert not isinstance(offsets[0], int)
+
+
+def test_cutedsl_initializer_threads_symbolic_tma_address_offset():
+    func = _symbolically_aligned_tma_copy_program()
+    _, descriptors = _descriptor_base_byte_offsets(func, "sm_90")
+    desc_var, desc_args = descriptors[0]
+    address = desc_args[4]
+
+    wrapper = object.__new__(TLCuTeDSLSourceWrapper)
+    wrapper.tma_descriptor_args = {desc_var: desc_args}
+    wrapper.tma_desc_info = {}
+    wrapper.pdl_sync_map = {}
+    wrapper.use_cooperative_groups = {}
+    desc_name_map = {desc_var.name: address.args[0].name}
+    desc_name_var_map = {desc_var.name: desc_var}
+    desc_names = wrapper.generate_tma_descriptor_args(desc_name_map, desc_name_var_map, {})
+    tensors, tensor_arg_map = wrapper._process_tma_descriptors(desc_names)
+
+    generated = wrapper._generate_cpp_launcher(
+        [
+            {
+                "function_name": "main",
+                "function_info": {
+                    "grid_info": [1, 1, 1],
+                    "block_info": [128, 1, 1],
+                    "dynamic_smem_buf": 0,
+                },
+                "call_args": [("src", "buffer"), ("src_desc", "None"), ("offset", "cutlass.Int32")],
+                "desc_names": desc_names,
+            }
+        ],
+        [
+            {"name": "src", "type": "buffer", "dtype": "cutlass.Float16"},
+            {"name": "offset", "type": "cutlass.Int32"},
+        ],
+        tensors,
+        desc_names,
+        tensor_arg_map,
+    )
+
+    assert "CUresult tma_init(CUtensorMap* tma_descs, uint64_t src_ptr, int32_t offset)" in generated
+    assert "reinterpret_cast<void*>((src_ptr + ((int64_t)offset * 16)))" in generated
+    assert "result = tma_init(tma_descs, src_ptr, offset);" in generated
+
+
+def test_preferred_tma_keeps_device_local_1d_copy_descriptorless():
+    offsets, descriptors = _descriptor_base_byte_offsets(_device_local_1d_tma_copy_program(), "sm_90")
+    assert offsets == []
+    assert descriptors == []
 
 
 def test_fp4_unpacked_copy_rejects_16_byte_offset():
