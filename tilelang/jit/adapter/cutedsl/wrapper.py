@@ -43,7 +43,7 @@ CPP_TMA_DESC_INIT_TEMPLATE = """\
         &tma_descs[{desc_idx}],
         static_cast<CUtensorMapDataType>({dtype}),
         {rank},
-        reinterpret_cast<void*>({tensor_name}_ptr),
+        reinterpret_cast<void*>({global_address}),
         globalDim,
         globalStrides,
         boxDim,
@@ -76,7 +76,7 @@ CPP_TMA_IM2COL_DESC_INIT_TEMPLATE = """\
         &tma_descs[{desc_idx}],
         static_cast<CUtensorMapDataType>({dtype}),
         {rank},
-        reinterpret_cast<void*>({tensor_name}_ptr),
+        reinterpret_cast<void*>({global_address}),
         globalDim,
         globalStrides,
         lowerCorner,
@@ -839,6 +839,23 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         """Convert TVM expression to C++ string for generated launcher code."""
         return pythonic_expr(expr, self._CXX_TYPE_MAP, func_name_map={"min": "std::min", "max": "std::max"})
 
+    def _split_tma_global_address(self, expr: tvm.tirx.PrimExpr) -> tuple[str, str | None]:
+        """Split a TMA address into its tensor argument and byte offset."""
+        if isinstance(expr, tvm.tirx.Call) and expr.op.name == "tirx.handle_add_byte_offset":
+            tensor_name, base_offset = self._split_tma_global_address(expr.args[0])
+            offset = self._cxx_expr(expr.args[1])
+            if base_offset is not None:
+                offset = f"({base_offset}) + ({offset})"
+            return tensor_name, offset
+        return self._pythonic_expr(expr), None
+
+    @staticmethod
+    def _tma_global_address_expr(tensor_name: str, byte_offset: str | None) -> str:
+        """Build the pointer expression used by cuTensorMapEncode*()."""
+        if byte_offset is None:
+            return f"{tensor_name}_ptr"
+        return f"({tensor_name}_ptr + ({byte_offset}))"
+
     @staticmethod
     def _cxx_cast(ctype: str, expr_str: str) -> str:
         """Render a C++ static_cast expression."""
@@ -1059,6 +1076,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
                 desc_idx=desc_idx,
                 desc_name=desc_name,
                 tensor_name=tensor_name,
+                global_address=self._tma_global_address_expr(tensor_name, info.get("globalAddressOffset")),
                 rank=rank,
                 stride_rank=rank - 1,
                 rank_minus_two=rank - 2,
@@ -1081,6 +1099,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
             desc_idx=desc_idx,
             desc_name=desc_name,
             tensor_name=tensor_name,
+            global_address=self._tma_global_address_expr(tensor_name, info.get("globalAddressOffset")),
             rank=info["tensor_rank"],
             global_dim_values=", ".join(self._cxx_cast("uint64_t", self._cxx_expr(x)) for x in info["global_dim"]),
             stride_rank=info["tensor_rank"] - 1,
@@ -1487,6 +1506,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
             args = self.tma_descriptor_args[desc_var]
             _, dtype, tensor_rank, globalAddress, *remaining_args = args[1:]
             tensor_rank = int(tensor_rank)
+            tensor_name, global_address_offset = self._split_tma_global_address(globalAddress)
 
             global_dim = remaining_args[:tensor_rank]
             global_stride = remaining_args[tensor_rank : 2 * tensor_rank]
@@ -1500,7 +1520,8 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
                     "is_img2col": False,
                     "dtype": params.dtype,
                     "tensor_rank": params.tensor_rank,
-                    "globalAddress": params.global_address,
+                    "globalAddress": tensor_name,
+                    "globalAddressOffset": global_address_offset,
                     "global_dim": global_dim,
                     "global_stride": global_stride,
                     "box_dim": box_dim,
@@ -1518,7 +1539,8 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
                     "is_img2col": True,
                     "dtype": params.dtype,
                     "tensor_rank": params.tensor_rank,
-                    "globalAddress": params.global_address,
+                    "globalAddress": tensor_name,
+                    "globalAddressOffset": global_address_offset,
                     "global_dim": global_dim,
                     "global_stride": global_stride,
                     "element_strides": element_strides,

@@ -4,6 +4,7 @@ import tilelang
 import tilelang.language as T
 from tilelang import tvm
 from tilelang.engine.lower import lower_to_host_device_ir
+from tilelang.jit.adapter.cutedsl.wrapper import TLCuTeDSLSourceWrapper
 from tilelang.jit.adapter.nvrtc.wrapper import TLNVRTCSourceWrapper
 from tilelang.jit.adapter.wrapper import TLCUDASourceWrapper
 
@@ -149,6 +150,15 @@ def test_tma_descriptor_base_includes_buffer_elem_offset(program, arch, expected
         assert "_globalAddress= (void*)((char*)" in c_init
         assert "handle_add_byte_offset" not in python_init
         assert ".data_ptr() +" in python_init
+
+        cutedsl_wrapper = object.__new__(TLCuTeDSLSourceWrapper)
+        cutedsl_wrapper.tma_descriptor_args = {desc_var: args}
+        cutedsl_desc_names = cutedsl_wrapper.generate_tma_descriptor_args(desc_name_map, desc_name_var_map, {})
+        cutedsl_tensors, cutedsl_tensor_map = cutedsl_wrapper._process_tma_descriptors(cutedsl_desc_names)
+        cutedsl_init = cutedsl_wrapper._generate_tma_init_func(cutedsl_desc_names, cutedsl_tensors, cutedsl_tensor_map, [])
+        assert cutedsl_tensors == [address.args[0].name]
+        assert f"{address.args[0].name}_ptr + (" in cutedsl_init
+        assert "handle_add_byte_offset" not in cutedsl_init
 
 
 @pytest.mark.parametrize("elem_offset", [1, "symbolic"])
