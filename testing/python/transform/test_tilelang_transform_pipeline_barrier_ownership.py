@@ -138,8 +138,139 @@ def test_nonws_im2col_tma_num_stages_3_uses_pipeline_barrier():
     assert "mbarrier_1" not in src, "Should not have fallback mbarrier_1 when im2col uses pipeline barrier"
 
 
+@pytest.mark.skipif(not _check_hopper(), reason="Requires Hopper GPU (sm_90)")
+def test_coalesced_tma_consumer_waits_before_reading_shared_memory():
+    """A TMA RAW consumer coalesced into stage 0 must still wait."""
+    import torch
+
+    @T.prim_func
+    def pipeline(
+        data: T.Tensor((1, 8, 8, 32), T.float16),
+        tmp: T.Tensor((2, 16, 32), T.float16),
+        out: T.Tensor((2, 16, 32), T.float16),
+    ):
+        with T.Kernel(1, threads=128):
+            first = T.alloc_shared((16, 32), T.float16)
+            second = T.alloc_shared((16, 32), T.float16)
+            for k in T.Pipelined(2, num_stages=1):
+                T.im2col(data, first, 0, k, 3, 1, 1, 1)
+                T.copy(first, tmp[k, :, :])
+                T.copy(tmp[k, :, :], second)
+                T.copy(second, out[k, :, :])
+
+    @T.prim_func
+    def reference(
+        data: T.Tensor((1, 8, 8, 32), T.float16),
+        out: T.Tensor((2, 16, 32), T.float16),
+    ):
+        with T.Kernel(1, threads=128):
+            shared = T.alloc_shared((16, 32), T.float16)
+            for k in T.serial(2):
+                T.im2col(data, shared, 0, k, 3, 1, 1, 1)
+                T.copy(shared, out[k, :, :])
+
+    pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True}
+    pipeline_kernel = tilelang.compile(
+        pipeline,
+        out_idx=[1, 2],
+        execution_backend="tvm_ffi",
+        pass_configs=pass_configs,
+    )
+    reference_kernel = tilelang.compile(
+        reference,
+        out_idx=1,
+        execution_backend="tvm_ffi",
+        pass_configs=pass_configs,
+    )
+
+    torch.manual_seed(0)
+    data = torch.randn((1, 8, 8, 32), device="cuda", dtype=torch.float16)
+    tmp, actual = pipeline_kernel(data)
+    expected = reference_kernel(data)
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(tmp, expected, rtol=0, atol=0)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not _check_hopper(), reason="Requires Hopper GPU (sm_90)")
+def test_uncompacted_im2col_tma_uses_nonaliasing_pipeline_barrier_ring():
+    """A retained stage endpoint needs num_stages + 1 barrier slots."""
+    import torch
+
+    N, C, H, W, F, K_size = 4, 64, 32, 32, 64, 3
+    S, D, P = 1, 1, 1
+    block_M, block_N, block_K = 64, 128, 32
+    KH, KW = K_size, K_size
+    OH = (H + 2 * P - D * (K_size - 1) - 1) // S + 1
+    OW = (W + 2 * P - D * (K_size - 1) - 1) // S + 1
+    num_stages = 3
+    physical_depth = num_stages + 1
+
+    @T.prim_func
+    def conv(
+        data: T.Tensor((N, H, W, C), T.float16),
+        weight: T.Tensor((KH, KW, C, F), T.float16),
+        out: T.Tensor((N, OH, OW, F), T.float16),
+    ):
+        with T.Kernel(
+            T.ceildiv(F, block_N),
+            T.ceildiv(N * OH * OW, block_M),
+            threads=256,
+        ) as (bx, by):
+            data_shared = T.alloc_shared((block_M, block_K), T.float16)
+            weight_shared = T.alloc_shared((block_K, block_N), T.float16)
+            out_local = T.alloc_fragment((block_M, block_N), T.float32)
+            out_shared = T.alloc_shared((block_M, block_N), T.float16)
+            kernel_flat = T.Tensor((KH * KW * C, F), T.float16, weight.data)
+            out_flat = T.Tensor((N * OH * OW, F), T.float16, out.data)
+            T.clear(out_local)
+            for k_iter in T.Pipelined(
+                T.ceildiv(KH * KW * C, block_K),
+                num_stages=num_stages,
+                compact_terminal_stage=False,
+            ):
+                T.im2col(data, data_shared, by, k_iter, KH, S, D, P)
+                T.copy(kernel_flat[k_iter * block_K, bx * block_N], weight_shared)
+                T.gemm(data_shared, weight_shared, out_local)
+            T.copy(out_local, out_shared)
+            T.copy(out_shared, out_flat[by * block_M, bx * block_N])
+
+    kernel = tilelang.compile(
+        conv,
+        out_idx=-1,
+        execution_backend="tvm_ffi",
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+    src = kernel.get_kernel_source()
+    assert f"pipeline_mbar_mem[{physical_depth}]" in src
+    assert "pipeline_mbar[((k_iter + 3) & 3)]" in src
+    assert "pipeline_mbar[(k_iter & 3)].wait" in src
+
+    torch.manual_seed(0)
+    data = torch.randn((N, H, W, C), device="cuda", dtype=torch.float16)
+    weight = torch.randn((KH, KW, C, F), device="cuda", dtype=torch.float16)
+    actual = kernel(data, weight)
+    expected = torch.nn.functional.conv2d(
+        data.permute(0, 3, 1, 2),
+        weight.permute(3, 2, 0, 1),
+        stride=S,
+        padding=P,
+        dilation=D,
+    ).permute(0, 2, 3, 1)
+    tilelang.testing.torch_assert_close(
+        actual,
+        expected,
+        atol=1e-2,
+        rtol=1e-2,
+        max_mismatched_ratio=0.05,
+    )
+
+
 if __name__ == "__main__":
     test_nonws_plain_copy_gemm_num_stages_3_stays_sync()
     test_nonws_plain_copy_gemm_num_stages_1_stays_sync()
     test_nonws_im2col_tma_num_stages_3_uses_pipeline_barrier()
+    test_coalesced_tma_consumer_waits_before_reading_shared_memory()
+    test_uncompacted_im2col_tma_uses_nonaliasing_pipeline_barrier_ring()
     print("All pipeline barrier ownership tests passed!")

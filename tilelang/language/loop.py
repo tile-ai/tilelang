@@ -128,7 +128,7 @@ def Pipelined(
     stop : PrimExpr
         The maximum value of iteration.
     num_stages : int
-        The max number of buffer used between pipeline producers and consumers.
+        The requested distance between pipeline producers and consumers.
         For compiler-inferred pipelines, if ``num_stages`` is 0, pipeline will
         not be enabled. For manually scheduled pipelines, prefer specifying
         ``order`` and ``stage`` without ``num_stages``; the pipeline depth is
@@ -149,8 +149,10 @@ def Pipelined(
         Whether automatic pipeline planning may retime a consumer-only final
         stage across the periodic boundary to reduce cyclic buffer versions.
         Enabled by default. Set to ``False`` to preserve the full requested
-        producer/consumer distance when compaction hurts performance. This
-        option only affects compiler-inferred ``num_stages`` schedules.
+        producer/consumer distance when compaction hurts performance. Disabling
+        compaction may require ``num_stages + 1`` physical versions of a buffer
+        whose lifetime spans the full stage range. This option only affects
+        compiler-inferred ``num_stages`` schedules.
 
     Notes
     -----

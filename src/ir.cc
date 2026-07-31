@@ -304,7 +304,21 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
   refl::GlobalDef()
       .def("tl.Parallel", ParallelFor)
-      .def("tl.Pipelined", PipelinedFor)
+      .def_packed("tl.Pipelined",
+                  [](PackedArgs args, Any *rv) {
+                    ICHECK(args.size() == 7 || args.size() == 8)
+                        << "tl.Pipelined expects 7 or 8 arguments, but got "
+                        << args.size();
+                    bool compact_terminal_stage =
+                        args.size() == 7 || args[7].cast<bool>();
+                    *rv = PipelinedFor(
+                        args[0].cast<PrimExpr>(), args[1].cast<PrimExpr>(),
+                        args[2].cast<int>(), args[3].cast<Array<PrimExpr>>(),
+                        args[4].cast<Array<PrimExpr>>(),
+                        args[5].cast<Array<Array<PrimExpr>>>(),
+                        args[6].cast<Array<Array<PrimExpr>>>(),
+                        compact_terminal_stage);
+                  })
       .def("tl.Persistent", PersistentFor)
       .def("tl.KernelLaunch", KernelLaunch);
 }

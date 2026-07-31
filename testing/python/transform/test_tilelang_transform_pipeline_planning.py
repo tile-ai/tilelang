@@ -1,5 +1,6 @@
 import pytest
 
+from tilelang import _ffi_api
 from tilelang import tvm as tvm
 import tilelang as tl
 from tilelang.backend.target import determine_target
@@ -54,6 +55,13 @@ def _run_pipeline_planning(func, target=auto_target):
     mod = tl.transform.IfStmtBinding()(mod)
     mod = tl.transform.PipelinePlanning()(mod)
     return mod
+
+
+def test_pipelined_packed_api_accepts_legacy_and_extended_arity():
+    legacy = _ffi_api.Pipelined(0, 4, 2, [], [], [], [])
+    extended = _ffi_api.Pipelined(0, 4, 2, [], [], [], [], False)
+
+    assert type(legacy) is type(extended)
 
 
 def test_pipeline_planning_before_after_copy_gemm_num_stages_plan():
@@ -827,6 +835,146 @@ def test_pipeline_planning_tracks_buffer_dependencies_in_copy_indices():
     tl.transform.InjectSoftwarePipeline()(mod)
 
 
+def test_pipeline_planning_tracks_dependencies_in_address_of_indices():
+    """An address index written in the pipeline makes its Bind non-replayable."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((128,), T.float16),
+        G: T.Tensor((8,), T.float16),
+        O: T.Tensor((8,), T.float16),
+    ):
+        with T.Kernel(1, threads=16):
+            offset = T.alloc_local((1,), T.int32)
+            staged = T.alloc_shared((1,), T.float16)
+            for k in T.Pipelined(8, num_stages=3):
+                offset[0] = k * 16
+                value: T.float16 = T.call_pure_extern("float16", "load_ptr", T.address_of(A[offset[0]]))
+                G[k] = value
+                T.copy(G[k], staged)
+                T.copy(staged, O[k])
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert len(annos) == 1
+    anno = annos[0]
+    stages = [int(v) for v in anno["software_pipeline_stage"]]
+    orders = [int(v) for v in anno["software_pipeline_order"]]
+
+    assert "software_pipeline_replayable_scalar_binds" not in anno
+    assert len(stages) == 5
+    assert stages[0] <= stages[1]
+    if stages[0] == stages[1]:
+        assert orders[0] < orders[1]
+    assert stages[1] == stages[2]
+    assert orders[1] < orders[2]
+    tl.transform.InjectSoftwarePipeline()(mod)
+
+
+def test_pipeline_planning_keeps_explicit_ptx_chain_with_lightweight_consumer():
+    """An access_ptr write and zero-weight RAW consumer must share a stage."""
+
+    @T.prim_func
+    def before(
+        meta: T.Tensor((64,), T.uint8),
+        data: T.Tensor((64,), T.uint8),
+        meta_out: T.Tensor((4,), T.uint8),
+        data_out: T.Tensor((64,), T.uint8),
+    ):
+        with T.Kernel(1, threads=32):
+            meta_shared = T.alloc_shared((16,), T.uint8)
+            data_shared = T.alloc_shared((16,), T.uint8)
+            for k in T.Pipelined(4, num_stages=3):
+                T.ptx_cp_async(
+                    T.access_ptr(meta_shared[0], "w", 16),
+                    T.access_ptr(meta[k * 16], "r", 16),
+                    16,
+                )
+                T.ptx_commit_group()
+                T.ptx_wait_group(0)
+                meta_out[k] = meta_shared[0]
+                T.copy(data[k * 16], data_shared)
+                T.copy(data_shared, data_out[k * 16])
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert len(annos) == 1
+    stages = [int(v) for v in annos[0]["software_pipeline_stage"]]
+    orders = [int(v) for v in annos[0]["software_pipeline_order"]]
+
+    assert len(set(stages[:4])) == 1
+    assert orders[:4] == [0, 1, 2, 3]
+
+    injected = tl.transform.InjectSoftwarePipeline()(mod)
+    injected_script = injected["main"].script()
+    assert "meta[k * 16]" in injected_script
+    assert "meta[(k +" not in injected_script
+
+
+def test_pipeline_planning_preserves_shifted_loop_carried_war():
+    """Region-disjoint same-iteration accesses may alias after loop skew."""
+
+    @T.prim_func
+    def before(
+        initial: T.Tensor((5,), T.int32),
+        src: T.Tensor((4,), T.int32),
+        prev_out: T.Tensor((4,), T.int32),
+        next_out: T.Tensor((4,), T.int32),
+    ):
+        with T.Kernel(1, threads=1):
+            shared = T.alloc_shared((5,), T.int32)
+            T.copy(initial, shared)
+            for k in T.Pipelined(4, num_stages=3):
+                prev_out[k] = shared[k + 1]
+                shared[k] = src[k]
+                next_out[k] = shared[k]
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert len(annos) == 1
+    stages = [int(v) for v in annos[0]["software_pipeline_stage"]]
+    orders = [int(v) for v in annos[0]["software_pipeline_order"]]
+
+    assert stages[0] == stages[1] == stages[2]
+    assert orders == [0, 1, 2]
+
+    injected = tl.transform.InjectSoftwarePipeline()(mod)
+    shapes = _collect_allocated_buffer_shapes(injected["main"])
+    assert shapes["shared"] == {(5,)}
+
+
+def test_pipeline_planning_preserves_shifted_loop_carried_raw():
+    """A shifted RAW recurrence must read the preceding Buffer version."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((8,), T.int32),
+        current: T.Tensor((8,), T.int32),
+        previous: T.Tensor((8,), T.int32),
+    ):
+        with T.Kernel(1, threads=1):
+            shared = T.alloc_shared((8,), T.int32)
+            for k in T.Pipelined(8, num_stages=3):
+                shared[k] = A[k]
+                current[k] = shared[k]
+                if k > 0:
+                    previous[k] = shared[k - 1]
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert len(annos) == 1
+    stages = [int(v) for v in annos[0]["software_pipeline_stage"]]
+    orders = [int(v) for v in annos[0]["software_pipeline_order"]]
+
+    assert len(set(stages)) == 1
+    assert orders == [0, 1, 2]
+    assert "software_pipeline_async_producers" not in annos[0]
+
+    injected = tl.transform.InjectSoftwarePipeline()(mod)
+    shapes = _collect_allocated_buffer_shapes(injected["main"])
+    assert shapes["shared"] == {(8,)}
+
+
 def test_pipeline_planning_preserves_read_before_shared_overwrite():
     """Regression for #2668: a WAR dependency must not cross stages."""
 
@@ -863,6 +1011,90 @@ def test_pipeline_planning_preserves_read_before_shared_overwrite():
     tl.transform.InjectSoftwarePipeline()(mod)
 
 
+def test_pipeline_planning_disables_async_reader_before_source_overwrite():
+    """A WAR writer must not race an earlier implicit async source read."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((4, 2048), T.float16),
+        G: T.Tensor((4, 2048), T.float16),
+        O0: T.Tensor((4, 2048), T.float16),
+        O1: T.Tensor((4, 2048), T.float16),
+    ):
+        with T.Kernel(1, threads=256):
+            S0 = T.alloc_shared((2048,), T.float16)
+            S1 = T.alloc_shared((2048,), T.float16)
+            for k in T.Pipelined(4, num_stages=2):
+                T.copy(A[k, :], S0)
+                T.copy(G[k, :], S1)
+                for i in T.Parallel(2048):
+                    G[k, i] = T.float16(0)
+                T.copy(S1, O1[k, :])
+                T.copy(S0, O0[k, :])
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert len(annos) == 1
+    anno = annos[0]
+
+    assert [int(v) for v in anno["software_pipeline_stage"]] == [0, 2, 2, 2, 2]
+    assert [int(v) for v in anno["software_pipeline_order"]] == [4, 0, 1, 2, 3]
+    assert [int(v) for v in anno["software_pipeline_async_producers"]] == [
+        1,
+        0,
+        0,
+        0,
+        0,
+    ]
+
+    # Keep the independent A -> S0 transfer asynchronous, but lower G -> S1
+    # synchronously before the source-order overwrite of G.
+    with sm80_target:
+        source = tl.lower(before, target=sm80_target).kernel_source
+    cp_async_lines = [line for line in source.splitlines() if "cp_async_gs<" in line]
+    assert cp_async_lines
+    assert all("&(G[" not in line for line in cp_async_lines)
+
+    source_lines = source.splitlines()
+    g_read_lines = [i for i, line in enumerate(source_lines) if "S1" in line and "G" in line]
+    g_write_lines = [i for i, line in enumerate(source_lines) if "*(uint4*)(G +" in line and "make_uint4" in line]
+    assert len(g_read_lines) == len(g_write_lines) > 0
+    assert all(read < write for read, write in zip(g_read_lines, g_write_lines))
+
+
+def test_pipeline_planning_explicit_schedule_disables_async_reader_before_source_overwrite():
+    """Manual stage/order annotations must honor source-buffer WAR hazards."""
+
+    @T.prim_func
+    def before(
+        G: T.Tensor((4, 2048), T.float16),
+        O: T.Tensor((4, 2048), T.float16),
+    ):
+        with T.Kernel(1, threads=256):
+            S = T.alloc_shared((2048,), T.float16)
+            for k in T.Pipelined(4, order=[0, 1, 2], stage=[0, 0, 1]):
+                T.copy(G[k, :], S)
+                for i in T.Parallel(2048):
+                    G[k, i] = T.float16(0)
+                T.copy(S, O[k, :])
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert len(annos) == 1
+    anno = annos[0]
+
+    assert [int(v) for v in anno["software_pipeline_stage"]] == [0, 0, 1]
+    assert [int(v) for v in anno["software_pipeline_order"]] == [0, 1, 2]
+    if "software_pipeline_async_producers" in anno:
+        assert [int(v) for v in anno["software_pipeline_async_producers"]] == [0, 0, 0]
+    else:
+        assert "software_pipeline_async_stages" not in anno
+
+    with sm80_target:
+        source = tl.lower(before, target=sm80_target).kernel_source
+    assert all("&(G[" not in line for line in source.splitlines() if "cp_async_gs<" in line)
+
+
 def test_pipeline_planning_rejects_aliased_buffer_views():
     """PipelinePlanning must reject multiple Buffer views of one data Var."""
 
@@ -883,6 +1115,33 @@ def test_pipeline_planning_rejects_aliased_buffer_views():
                 T.copy(A[k * 16], shared)
                 for i, j in T.Parallel(4, 4):
                     B[k * 16 + i * 4 + j] = shared_view[i, j]
+
+    with pytest.raises(tvm.TVMError, match="does not support aliased Buffer views"):
+        _run_pipeline_planning(before, sm80_target)
+
+
+def test_pipeline_planning_rejects_aliased_buffer_view_in_replayable_bind():
+    """Alias validation must run before a scalar Bind can be filtered."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((64,), T.float16),
+        B: T.Tensor((4,), T.float16),
+        C: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=16):
+            shared = T.alloc_shared((16,), T.float16)
+            shared_view = T.decl_buffer(
+                (16,),
+                T.float16,
+                data=shared.data,
+                scope="shared.dyn",
+            )
+            for k in T.Pipelined(4, num_stages=2):
+                T.copy(A[k * 16], shared)
+                value = shared_view[0]
+                B[k] = value
+                T.copy(shared, C[k * 16])
 
     with pytest.raises(tvm.TVMError, match="does not support aliased Buffer views"):
         _run_pipeline_planning(before, sm80_target)
@@ -940,6 +1199,221 @@ def test_pipeline_planning_preserves_guarded_control_before_copy():
     assert stages[0] <= stages[1], "The guarded control statement must not execute in a later logical iteration than the copy it precedes"
     if stages[0] == stages[1]:
         assert orders[0] < orders[1]
+
+
+def test_pipeline_planning_preserves_mixed_guarded_control_before_copy():
+    """Opaque control in one branch must constrain an atomic if/else node."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((64,), T.float16),
+        B: T.Tensor((64,), T.float16),
+        C: T.Tensor((4,), T.float16),
+    ):
+        with T.Kernel(1, threads=1):
+            shared = T.alloc_shared((16,), T.float16)
+            barrier = T.alloc_barrier(1)
+            for k in T.Pipelined(4, num_stages=2):
+                if k > 0:
+                    T.mbarrier_wait_parity(barrier, k % 2)
+                else:
+                    C[k] = A[k]
+                T.copy(A[k * 16], shared)
+                T.copy(shared, B[k * 16])
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert len(annos) == 1
+    anno = annos[0]
+    stages = [int(v) for v in anno["software_pipeline_stage"]]
+    orders = [int(v) for v in anno["software_pipeline_order"]]
+
+    assert stages[0] <= stages[1]
+    if stages[0] == stages[1]:
+        assert orders[0] < orders[1]
+
+    injected = tl.transform.InjectSoftwarePipeline()(mod)
+    injected_script = injected["main"].script()
+    steady_state = injected_script.split("for k in T.serial", maxsplit=1)[1]
+    wait_index = steady_state.index("T.mbarrier_wait_parity")
+    producer_index = steady_state.index("T.copy(T.region(A[(k + 1) * 16]")
+    assert wait_index < producer_index
+
+
+def test_pipeline_planning_revalidates_blocking_control_after_attachment():
+    """Late control attachment must preserve every blocking DAG edge."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((8, 2048), T.float16),
+        B: T.Tensor((8, 2048), T.float16),
+        C: T.Tensor((8, 2048), T.float16),
+    ):
+        with T.Kernel(1, threads=256):
+            scratch = T.alloc_local((1,), T.int32)
+            unused = T.alloc_shared((2048,), T.float16)
+            staged = T.alloc_shared((2048,), T.float16)
+            barrier = T.alloc_barrier(1)
+            for k in T.Pipelined(8, num_stages=2):
+                T.mbarrier_wait_parity(barrier, k % 2)
+                scratch[0] = k
+                T.copy(A[k, :], unused)
+                T.copy(B[scratch[0], :], staged)
+                T.copy(staged, C[k, :])
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert len(annos) == 1
+    stages = [int(v) for v in annos[0]["software_pipeline_stage"]]
+    orders = [int(v) for v in annos[0]["software_pipeline_order"]]
+
+    assert stages[0] <= stages[1]
+    if stages[0] == stages[1]:
+        assert orders[0] < orders[1]
+
+    injected = tl.transform.InjectSoftwarePipeline()(mod)
+    injected_script = injected["main"].script()
+    assert injected_script.index("T.mbarrier_wait_parity") < injected_script.index("scratch[0] =")
+
+
+def test_pipeline_planning_orders_copy_after_wait_across_guarded_store():
+    """A guarded lightweight store must not stop blocking-control edges."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((8, 2048), T.float16),
+        B: T.Tensor((8, 2048), T.float16),
+    ):
+        with T.Kernel(1, threads=256):
+            unused = T.alloc_local((1,), T.int32)
+            staged = T.alloc_shared((2048,), T.float16)
+            barrier = T.alloc_barrier(1)
+            for k in T.Pipelined(8, num_stages=2):
+                T.mbarrier_wait_parity(barrier, k % 2)
+                if k % 2 == 0:
+                    unused[0] = k
+                T.copy(A[k, :], staged)
+                T.copy(staged, B[k, :])
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert len(annos) == 1
+    stages = [int(v) for v in annos[0]["software_pipeline_stage"]]
+    orders = [int(v) for v in annos[0]["software_pipeline_order"]]
+
+    assert stages[0] <= stages[2]
+    if stages[0] == stages[2]:
+        assert orders[0] < orders[2]
+
+    injected = tl.transform.InjectSoftwarePipeline()(mod)
+    steady_state = injected["main"].script().split("for k in T.serial", maxsplit=1)[1]
+    wait_index = steady_state.index("T.mbarrier_wait_parity")
+    producer_index = steady_state.index("T.copy(T.region(A[")
+    assert wait_index < producer_index
+
+
+def test_pipeline_planning_splits_noncontiguous_async_producer_groups():
+    """One annotated async group must lower to one physical commit group."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((8, 2048), T.float16),
+        B: T.Tensor((8, 2048), T.float16),
+        C: T.Tensor((8, 2048), T.float16),
+    ):
+        with T.Kernel(1, threads=256):
+            index_shared = T.alloc_shared((1,), T.int32)
+            first = T.alloc_shared((2048,), T.float16)
+            second = T.alloc_shared((2048,), T.float16)
+            for k in T.Pipelined(8, num_stages=5):
+                T.copy(A[k, :], first)
+                index_shared[0] = k
+                T.copy(B[index_shared[0], :], second)
+                for i in T.Parallel(2048):
+                    C[k, i] = first[i] + second[i]
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert len(annos) == 1
+    groups = [int(v) for v in annos[0]["software_pipeline_async_producer_groups"]]
+    assert groups == [0, -1, 1, -1]
+
+    with sm80_target:
+        source = tl.lower(before, target=sm80_target).kernel_source
+    first_wait = source.index("cp_async_wait<")
+    assert source[:first_wait].count("cp_async_commit") == 10
+    assert source[first_wait:].startswith("cp_async_wait<8>()")
+
+
+def test_pipeline_planning_preserves_opaque_call_in_scalar_bind_before_copy():
+    """A side-effecting Bind must constrain later possibly aliased work."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((128,), T.float16),
+        B: T.Tensor((8,), T.int32),
+        C: T.Tensor((128,), T.float16),
+    ):
+        with T.Kernel(1, threads=16):
+            shared = T.alloc_shared((16,), T.float16)
+            for k in T.Pipelined(8, num_stages=2):
+                token: T.int32 = T.call_extern("int32", "opaque_mutate", T.address_of(A[k * 16]))
+                B[k] = token
+                T.copy(A[k * 16], shared)
+                T.copy(shared, C[k * 16])
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert len(annos) == 1
+    stages = [int(v) for v in annos[0]["software_pipeline_stage"]]
+    orders = [int(v) for v in annos[0]["software_pipeline_order"]]
+
+    assert stages[0] <= stages[2]
+    if stages[0] == stages[2]:
+        assert orders[0] < orders[2]
+
+    injected = tl.transform.InjectSoftwarePipeline()(mod)
+    injected_script = injected["main"].script()
+    assert injected_script.index("opaque_mutate") < injected_script.index("T.copy(T.region(A[")
+
+
+def test_pipeline_planning_blocking_opaque_call_fences_all_later_work():
+    """An opaque mutation must not be crossed by a later independent copy."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((128,), T.float16),
+        C: T.Tensor((128,), T.float16),
+        D: T.Tensor((128,), T.float16),
+        E: T.Tensor((128,), T.float16),
+    ):
+        with T.Kernel(1, threads=16):
+            first = T.alloc_shared((16,), T.float16)
+            second = T.alloc_shared((16,), T.float16)
+            for k in T.Pipelined(8, num_stages=3):
+                T.copy(C[k * 16], first)
+                T.evaluate(T.call_extern("handle", "opaque_mutate", T.address_of(A[k * 16])))
+                T.copy(first, D[k * 16])
+                T.copy(A[k * 16], second)
+                T.copy(second, E[k * 16])
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert len(annos) == 1
+    stages = [int(v) for v in annos[0]["software_pipeline_stage"]]
+    orders = [int(v) for v in annos[0]["software_pipeline_order"]]
+
+    assert len(set(stages)) == 1
+    assert orders == [0, 1, 2, 3, 4]
+
+    injected = tl.transform.InjectSoftwarePipeline()(mod)
+    injected_script = injected["main"].script()
+    first_copy_index = injected_script.index("T.copy(T.region(C[")
+    mutation_index = injected_script.index("opaque_mutate")
+    later_copy_index = injected_script.index("T.copy(T.region(A[")
+    first_copy_line = next(line for line in injected_script.splitlines() if "T.copy(T.region(C[" in line)
+    assert "(k +" not in first_copy_line
+    assert first_copy_index < mutation_index < later_copy_index
 
 
 def test_pipeline_planning_promotes_terminal_same_stage_dependency_subgraph():
@@ -1056,6 +1530,36 @@ def test_pipeline_planning_keeps_final_stage_with_internal_buffer_producer():
     tl.transform.InjectSoftwarePipeline()(mod)
 
 
+def test_pipeline_planning_keeps_wrapped_scalar_bind_with_users():
+    """A materialized Bind remains same-stage through an AttrStmt wrapper."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((256,), T.float16),
+        G: T.Tensor((8,), T.int32),
+        B: T.Tensor((256,), T.float16),
+    ):
+        with T.Kernel(1, threads=32):
+            index_shared = T.alloc_shared((1,), T.int32)
+            staged = T.alloc_shared((32,), T.float16)
+            for k in T.Pipelined(8, num_stages=2):
+                with T.attr(0, "test.wrap_scalar_bind", 1):
+                    offset: T.int32 = k * 32
+                T.copy(G[k], index_shared)
+                T.copy(A[offset + index_shared[0]], staged)
+                T.copy(staged, B[k * 32])
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert len(annos) == 1
+    stages = [int(v) for v in annos[0]["software_pipeline_stage"]]
+    orders = [int(v) for v in annos[0]["software_pipeline_order"]]
+
+    assert stages[0] == stages[2]
+    assert orders[0] < orders[2]
+    tl.transform.InjectSoftwarePipeline()(mod)
+
+
 def test_pipeline_planning_does_not_compact_num_stages_one():
     @T.prim_func
     def before(
@@ -1075,6 +1579,39 @@ def test_pipeline_planning_does_not_compact_num_stages_one():
 
     assert stages == [0, 1]
     tl.transform.InjectSoftwarePipeline()(mod)
+
+
+def test_pipeline_tma_wait_precedes_coalesced_raw_consumer():
+    """A stage-0 TMA consumer must wait even when DAG levels coalesce."""
+
+    @T.prim_func
+    def before(
+        data: T.Tensor((1, 8, 8, 32), T.float16),
+        tmp: T.Tensor((2, 16, 32), T.float16),
+        out: T.Tensor((2, 16, 32), T.float16),
+    ):
+        with T.Kernel(1, threads=128):
+            first = T.alloc_shared((16, 32), T.float16)
+            second = T.alloc_shared((16, 32), T.float16)
+            for k in T.Pipelined(2, num_stages=1):
+                T.im2col(data, first, 0, k, 3, 1, 1, 1)
+                T.copy(first, tmp[k, :, :])
+                T.copy(tmp[k, :, :], second)
+                T.copy(second, out[k, :, :])
+
+    mod = _run_pipeline_planning(before, sm90_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert len(annos) == 1
+    assert [int(v) for v in annos[0]["software_pipeline_stage"]] == [0, 0, 0, 1]
+    assert [int(v) for v in annos[0]["software_pipeline_order"]] == [0, 1, 3, 2]
+
+    injected = tl.transform.InjectSoftwarePipeline()(mod)
+    lines = injected["main"].script().splitlines()
+    consumers = [i for i, line in enumerate(lines) if "T.copy(T.region(first[" in line]
+    assert consumers
+    for consumer in consumers:
+        producer = max(i for i in range(consumer) if "T.im2col" in lines[i])
+        assert any("T.mbarrier_wait_parity" in lines[i] for i in range(producer + 1, consumer))
 
 
 def test_pipeline_planning_can_disable_terminal_stage_compaction():

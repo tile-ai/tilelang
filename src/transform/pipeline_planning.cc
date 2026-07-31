@@ -1,8 +1,8 @@
 #include "support/check.h"
 #include <algorithm>
-#include <map>
 #include <numeric>
 #include <tvm/arith/analyzer.h>
+#include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/s_tir/stmt.h>
@@ -217,6 +217,7 @@ void BufferRegionCollector::VisitExpr_(const CallNode *op) {
     BufferRegion buffer_region;
     if (const auto *load = op->args[0].as<BufferLoadNode>()) {
       buffer_region = BufferRegion::FullRegion(load->buffer);
+      VisitIndexDependencies(load->indices, load->predicate);
     } else if (const auto *var_node = op->args[0].as<VarNode>()) {
       Var data_var = GetRef<Var>(var_node);
       auto it = buffer_data_to_buffer_.find(data_var);
@@ -310,6 +311,45 @@ public:
     return {collector.GetReads(), collector.GetWrites()};
   }
 
+  void ValidateNoAliasedBufferViews(const Array<Stmt> &stmts) const {
+    struct PipelineBufferAccess {
+      BufferRegion region;
+      size_t stmt_index;
+    };
+
+    std::vector<PipelineBufferAccess> accesses;
+    for (size_t i = 0; i < stmts.size(); ++i) {
+      auto [reads, writes] = CollectStmtAccessRegions(stmts[i]);
+      for (const BufferRegion &read : reads) {
+        accesses.push_back({read, i});
+      }
+      for (const BufferRegion &write : writes) {
+        accesses.push_back({write, i});
+      }
+    }
+
+    for (size_t i = 0; i < accesses.size(); ++i) {
+      const Buffer &lhs_buffer = accesses[i].region->buffer;
+      for (size_t j = i + 1; j < accesses.size(); ++j) {
+        const Buffer &rhs_buffer = accesses[j].region->buffer;
+        if (lhs_buffer.same_as(rhs_buffer) ||
+            !lhs_buffer->data.same_as(rhs_buffer->data)) {
+          continue;
+        }
+        LOG(FATAL)
+            << "PipelinePlanning does not support aliased Buffer views inside "
+               "T.Pipelined: statement "
+            << accesses[i].stmt_index << " accesses Buffer '"
+            << lhs_buffer->name << "', while statement "
+            << accesses[j].stmt_index << " accesses Buffer '"
+            << rhs_buffer->name << "'; both Buffers share the same data Var '"
+            << lhs_buffer->data->name_hint
+            << "'. Rewrite the pipeline to use a single Buffer view, or move "
+               "the aliased access outside T.Pipelined.";
+      }
+    }
+  }
+
   BufferSet CollectPipelineWriteBuffers(const Array<Stmt> &stmts) const {
     BufferSet write_buffers;
     for (const Stmt &stmt : stmts) {
@@ -338,6 +378,11 @@ public:
   };
 
   ScheduledStmtAnalysis AnalyzeScheduledStmts(const Array<Stmt> &stmts) const {
+    // Alias validation must see replayable Binds before they are removed from
+    // the scheduled statement stream.  InjectSoftwarePipeline versions Buffer
+    // handles, so two views of one data Var remain unsupported even when one
+    // view appears only in a scalar Bind.
+    ValidateNoAliasedBufferViews(stmts);
     BufferSet pipeline_write_buffers = CollectPipelineWriteBuffers(stmts);
     ScheduledStmtAnalysis analysis;
     analysis.original_stmt_count = stmts.size();
@@ -450,20 +495,26 @@ private:
  * consumer of a copy, and copies with the same final consumer may share an
  * implicit async producer group.
  */
+using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
+using VarToStmtMap =
+    std::unordered_map<Var, int, ObjectPtrHash, ObjectPtrEqual>;
+
 struct PipelineStageInfo {
   Array<BufferRegion> reads, writes;
-  std::unordered_set<const VarNode *> scalar_defs;
-  std::unordered_set<const VarNode *> scalar_uses;
+  VarSet scalar_defs;
+  VarSet scalar_uses;
   int original_stmt_index{};
   int order = -1, stage = -1;
   bool scalar_bind = false;
   bool control_stmt = false;
+  bool contains_control = false;
   bool blocks_successor = false;
+  bool cross_iteration_fence = false;
   bool explicit_ptx_async = false;
   bool lightweight_stmt = false;
   bool global_to_shared_copy = false;
   bool tma_copy = false; // true if this copy stage uses TMA (not cp.async)
-  bool cyclic_buffer_overwrite = false;
+  bool lifecycle_hazard = false;
   bool conditional_execution = false;
   int last_use_stmt_index =
       -1; // Initialized to -1, indicating no consumers found yet
@@ -474,10 +525,12 @@ public:
     return scalar_bind || control_stmt || lightweight_stmt;
   }
   bool IsControlStmt() const { return control_stmt; }
+  bool ContainsControl() const { return contains_control; }
   bool BlocksSuccessor() const { return blocks_successor; }
+  bool IsCrossIterationFence() const { return cross_iteration_fence; }
   bool IsExplicitPtxAsync() const { return explicit_ptx_async; }
   bool IsGlobalToSharedCopy() const { return global_to_shared_copy; }
-  bool IsTmaCopy() const { return tma_copy && !cyclic_buffer_overwrite; }
+  bool IsTmaCopy() const { return tma_copy && !lifecycle_hazard; }
   bool AdvancesPipelineStage() const {
     return global_to_shared_copy && !conditional_execution;
   }
@@ -492,9 +545,7 @@ public:
 
   class ScalarUseDefCollector : public StmtExprVisitor {
   public:
-    static std::pair<std::unordered_set<const VarNode *>,
-                     std::unordered_set<const VarNode *>>
-    Collect(const Stmt &stmt) {
+    static std::pair<VarSet, VarSet> Collect(const Stmt &stmt) {
       ScalarUseDefCollector collector;
       collector(stmt);
       return {std::move(collector.scalar_defs_),
@@ -504,13 +555,15 @@ public:
   private:
     void VisitStmt_(const BindNode *op) final {
       this->VisitExpr(op->value);
-      scalar_defs_.insert(op->var.get());
+      scalar_defs_.insert(op->var);
     }
 
-    void VisitExpr_(const VarNode *op) final { scalar_uses_.insert(op); }
+    void VisitExpr_(const VarNode *op) final {
+      scalar_uses_.insert(GetRef<Var>(op));
+    }
 
-    std::unordered_set<const VarNode *> scalar_defs_;
-    std::unordered_set<const VarNode *> scalar_uses_;
+    VarSet scalar_defs_;
+    VarSet scalar_uses_;
   };
 
   bool MayBeConditionallyExecuted(const Stmt &stmt) const {
@@ -539,6 +592,14 @@ public:
            call->op.same_as(builtin::ptx_wait_group());
   }
 
+  bool IsOpaqueStateChangingCall(const Call &call) const {
+    return call->op.same_as(builtin::call_extern()) ||
+           call->op.same_as(builtin::tvm_call_packed()) ||
+           call->op.same_as(builtin::tvm_call_cpacked()) ||
+           call->op.same_as(builtin::tvm_call_packed_lowered()) ||
+           call->op.same_as(builtin::tvm_call_cpacked_lowered());
+  }
+
   bool CanReorderWithSuccessor(const Call &call) const {
     return call->op.same_as(builtin::ptx_arrive_barrier()) ||
            call->op.same_as(builtin::ptx_arrive_barrier_expect_tx()) ||
@@ -553,37 +614,56 @@ public:
     bool control_only = true;
     bool has_control = false;
     bool blocks_successor = false;
+    bool cross_iteration_fence = false;
     bool explicit_ptx_async = false;
 
     void Merge(const ControlStmtSummary &other) {
       control_only = control_only && other.control_only;
       has_control = has_control || other.has_control;
       blocks_successor = blocks_successor || other.blocks_successor;
+      cross_iteration_fence =
+          cross_iteration_fence || other.cross_iteration_fence;
       explicit_ptx_async = explicit_ptx_async || other.explicit_ptx_async;
     }
   };
 
-  ControlStmtSummary AnalyzeControlOnlyStmt(const Stmt &stmt) const {
-    if (const auto *evaluate = stmt.as<EvaluateNode>()) {
-      ControlStmtSummary summary;
-      if (is_zero(evaluate->value)) {
-        return summary;
-      }
-      const auto *call_node = evaluate->value.as<CallNode>();
+  ControlStmtSummary AnalyzeControlCalls(const ObjectRef &root) const {
+    ControlStmtSummary summary;
+    PostOrderVisit(root, [&](const ObjectRef &node) {
+      const auto *call_node = node.as<CallNode>();
       if (call_node == nullptr) {
-        summary.control_only = false;
-        return summary;
+        return;
       }
       Call call = GetRef<Call>(call_node);
       bool is_control = !ParseOperator(call).defined() &&
                         SideEffect(call) > CallEffectKind::kReadState;
       if (!is_control) {
-        summary.control_only = false;
-        return summary;
+        return;
       }
       summary.has_control = true;
-      summary.blocks_successor = !CanReorderWithSuccessor(call);
-      summary.explicit_ptx_async = IsExplicitPtxAsyncControl(call);
+      summary.blocks_successor |= !CanReorderWithSuccessor(call);
+      summary.cross_iteration_fence |= IsOpaqueStateChangingCall(call);
+      summary.explicit_ptx_async |= IsExplicitPtxAsyncControl(call);
+    });
+    return summary;
+  }
+
+  ControlStmtSummary AnalyzeControlOnlyStmt(const Stmt &stmt) const {
+    if (const auto *evaluate = stmt.as<EvaluateNode>()) {
+      if (is_zero(evaluate->value)) {
+        return ControlStmtSummary();
+      }
+      ControlStmtSummary summary = AnalyzeControlCalls(evaluate->value);
+      if (!summary.has_control) {
+        summary.control_only = false;
+      }
+      return summary;
+    }
+    if (const auto *bind = stmt.as<BindNode>()) {
+      ControlStmtSummary summary = AnalyzeControlCalls(bind->value);
+      if (!summary.has_control) {
+        summary.control_only = false;
+      }
       return summary;
     }
     if (const auto *if_then_else = stmt.as<IfThenElseNode>()) {
@@ -593,6 +673,7 @@ public:
       // substantial scheduling node.
       ControlStmtSummary summary =
           AnalyzeControlOnlyStmt(if_then_else->then_case);
+      summary.Merge(AnalyzeControlCalls(if_then_else->condition));
       if (if_then_else->else_case.defined()) {
         summary.Merge(AnalyzeControlOnlyStmt(if_then_else->else_case.value()));
       }
@@ -617,15 +698,50 @@ public:
       return summary;
     }
     if (const auto *realize = stmt.as<SBlockRealizeNode>()) {
-      return AnalyzeControlOnlyStmt(realize->block);
+      ControlStmtSummary summary = AnalyzeControlOnlyStmt(realize->block);
+      summary.Merge(AnalyzeControlCalls(realize->predicate));
+      return summary;
     }
-    ControlStmtSummary summary;
+    // Substantial statements can still contain opaque calls, for example in a
+    // store value or index.  They retain their scheduling weight, but the DAG
+    // must still preserve ordering around the hidden state change.
+    ControlStmtSummary summary = AnalyzeControlCalls(stmt);
     summary.control_only = false;
     return summary;
   }
 
+  bool IsLightweightStmt(const Stmt &stmt) const {
+    if (stmt.as<BindNode>() || stmt.as<BufferStoreNode>()) {
+      return true;
+    }
+    if (const auto *if_then_else = stmt.as<IfThenElseNode>()) {
+      if (!IsLightweightStmt(if_then_else->then_case)) {
+        return false;
+      }
+      return !if_then_else->else_case.defined() ||
+             IsLightweightStmt(if_then_else->else_case.value());
+    }
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      return std::all_of(
+          seq->seq.begin(), seq->seq.end(),
+          [&](const Stmt &child) { return IsLightweightStmt(child); });
+    }
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      return IsLightweightStmt(attr->body);
+    }
+    if (const auto *block = stmt.as<SBlockNode>()) {
+      return (!block->init.defined() ||
+              IsLightweightStmt(block->init.value())) &&
+             IsLightweightStmt(block->body);
+    }
+    if (const auto *realize = stmt.as<SBlockRealizeNode>()) {
+      return IsLightweightStmt(realize->block);
+    }
+    return false;
+  }
+
   bool IsAsyncProducerCandidate(const PipelineStageInfo &pinfo) const {
-    if (pinfo.conditional_execution || pinfo.cyclic_buffer_overwrite) {
+    if (pinfo.conditional_execution || pinfo.lifecycle_hazard) {
       return false;
     }
     if (pinfo.IsTmaCopy()) {
@@ -811,11 +927,11 @@ public:
     }
   }
 
-  std::unordered_map<const VarNode *, int> BuildScalarDefMap(
+  VarToStmtMap BuildScalarDefMap(
       const std::vector<PipelineStageInfo> &pipeline_stage_infos) const {
-    std::unordered_map<const VarNode *, int> scalar_def_to_stmt;
+    VarToStmtMap scalar_def_to_stmt;
     for (int i = 0; i < static_cast<int>(pipeline_stage_infos.size()); ++i) {
-      for (const VarNode *var : pipeline_stage_infos[i].scalar_defs) {
+      for (const Var &var : pipeline_stage_infos[i].scalar_defs) {
         scalar_def_to_stmt.emplace(var, i);
       }
     }
@@ -836,9 +952,10 @@ public:
    * for it.  The producer Bind and all of its direct users must consequently
    * have equal stages, rather than merely ordered stages.
    *
-   * `same_stage_successors` additionally records Buffer anti-dependencies.
-   * These read-before-write lifecycles cannot cross skewed loop iterations
-   * because the injector only derives async waits from RAW dependencies.
+   * `same_stage_successors` additionally records Buffer anti-dependencies,
+   * conservative loop-carried lifecycles, and explicit PTX async chains.  These
+   * dependencies cannot cross skewed loop iterations because the injector only
+   * derives async waits and Buffer versions from ordinary Buffer regions.
    */
   struct PipelineDependencyDag {
     std::vector<std::vector<int>> predecessors;
@@ -855,6 +972,67 @@ public:
           continue;
         }
         if (MayConflict(lhs_region->region, rhs_region->region)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  bool RegionUsesVar(const Region &region, const Var &var) const {
+    bool uses_var = false;
+    auto visit_expr = [&](const PrimExpr &expr) {
+      PostOrderVisit(expr, [&](const ObjectRef &node) {
+        if (const auto *var_node = node.as<VarNode>()) {
+          uses_var |= GetRef<Var>(var_node).same_as(var);
+        }
+      });
+    };
+    for (const Range &range : region) {
+      visit_expr(range->min);
+      visit_expr(range->extent);
+    }
+    return uses_var;
+  }
+
+  bool IsLoopShiftedRaw(const BufferRegion &write, const BufferRegion &read,
+                        const Var &loop_var) const {
+    if (!write->buffer.same_as(read->buffer) ||
+        StructuralEqual()(write->region, read->region)) {
+      return false;
+    }
+    return RegionUsesVar(write->region, loop_var) ||
+           RegionUsesVar(read->region, loop_var);
+  }
+
+  bool
+  RegionsMayConflictAcrossIterations(const Array<BufferRegion> &lhs,
+                                     const Array<BufferRegion> &rhs) const {
+    // Distinct regions of one Buffer can still alias after pipeline skew
+    // changes the loop iteration used by either statement.  For example, a read
+    // of shared[k + 1] must precede the next iteration's write to shared[k].
+    // The injector versions whole Buffer handles, so conservatively retain a
+    // lifecycle dependency whenever the two statements access the same Buffer.
+    for (const BufferRegion &lhs_region : lhs) {
+      for (const BufferRegion &rhs_region : rhs) {
+        if (lhs_region->buffer.same_as(rhs_region->buffer)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  bool
+  RegionsAccessSameLifecycleBuffer(const Array<BufferRegion> &lhs,
+                                   const Array<BufferRegion> &rhs,
+                                   const BufferSet &lifecycle_buffers) const {
+    for (const BufferRegion &lhs_region : lhs) {
+      if (!lifecycle_buffers.count(lhs_region->buffer)) {
+        continue;
+      }
+      for (const BufferRegion &rhs_region : rhs) {
+        if (lhs_region->buffer.same_as(rhs_region->buffer)) {
           return true;
         }
       }
@@ -901,8 +1079,9 @@ public:
     }
   }
 
-  PipelineDependencyDag BuildDependencyDag(
-      const std::vector<PipelineStageInfo> &pipeline_stage_infos) const {
+  PipelineDependencyDag
+  BuildDependencyDag(const std::vector<PipelineStageInfo> &pipeline_stage_infos,
+                     const Optional<Var> &loop_var) const {
     ValidateNoAliasedBufferViews(pipeline_stage_infos);
     const int num_statements = static_cast<int>(pipeline_stage_infos.size());
     PipelineDependencyDag dag{std::vector<std::vector<int>>(num_statements),
@@ -937,9 +1116,41 @@ public:
           }
         };
 
+    // A read-before-later-write lifecycle can touch disjoint regions in one
+    // source iteration yet overlap once pipeline stages use skewed iterations.
+    // A write followed by a loop-variable-shifted read has the dual problem:
+    // the read may consume a value produced by an earlier iteration, while the
+    // injector selects a whole-Buffer version using the reader's iteration.
+    // Record the whole Buffer because InjectSoftwarePipeline versions Buffer
+    // handles rather than individual regions.  Every access to such a Buffer
+    // must remain in one stage so no access triggers unsafe versioning.
+    BufferSet lifecycle_buffers;
+    for (int dst = 0; dst < num_statements; ++dst) {
+      for (int src = 0; src < dst; ++src) {
+        for (const BufferRegion &read : pipeline_stage_infos[src].reads) {
+          for (const BufferRegion &write : pipeline_stage_infos[dst].writes) {
+            if (read->buffer.same_as(write->buffer)) {
+              lifecycle_buffers.insert(read->buffer);
+            }
+          }
+        }
+        if (loop_var.defined()) {
+          for (const BufferRegion &write : pipeline_stage_infos[src].writes) {
+            for (const BufferRegion &read : pipeline_stage_infos[dst].reads) {
+              if (IsLoopShiftedRaw(write, read, loop_var.value())) {
+                lifecycle_buffers.insert(write->buffer);
+              }
+            }
+          }
+        }
+      }
+    }
+
     // Preserve all intra-iteration buffer hazards.  RAW edges carry values;
     // WAR and WAW edges prevent the stage-based reorder from moving a later
-    // write before an earlier access to an overlapping region.
+    // write before an earlier access to an overlapping region.  A region-
+    // disjoint read followed by a write to the same Buffer is also a potential
+    // loop-carried WAR once the two statements use skewed loop iterations.
     for (int dst = 0; dst < num_statements; ++dst) {
       const PipelineStageInfo &dst_info = pipeline_stage_infos[dst];
       for (int src = 0; src < dst; ++src) {
@@ -947,16 +1158,44 @@ public:
         bool raw = RegionsConflict(src_info.writes, dst_info.reads);
         bool war = RegionsConflict(src_info.reads, dst_info.writes);
         bool waw = RegionsConflict(src_info.writes, dst_info.writes);
-        if (raw || war || waw) {
-          // WAR is a cyclic Buffer lifecycle: the earlier statement consumes
-          // the value entering this iteration, and the later statement
-          // overwrites it for the next iteration.  A monotonic stage edge is
-          // insufficient because distinct stages execute skewed iterations.
-          // Keep both ends in one stage so source order supplies the required
-          // read-before-write synchronization.
+        bool same_lifecycle_buffer =
+            RegionsAccessSameLifecycleBuffer(src_info.reads, dst_info.reads,
+                                             lifecycle_buffers) ||
+            RegionsAccessSameLifecycleBuffer(src_info.reads, dst_info.writes,
+                                             lifecycle_buffers) ||
+            RegionsAccessSameLifecycleBuffer(src_info.writes, dst_info.reads,
+                                             lifecycle_buffers) ||
+            RegionsAccessSameLifecycleBuffer(src_info.writes, dst_info.writes,
+                                             lifecycle_buffers);
+        if (raw || war || waw || same_lifecycle_buffer) {
+          // WAR and loop-shifted RAW are cyclic Buffer lifecycles.  A monotonic
+          // stage edge is insufficient because distinct stages execute skewed
+          // iterations, and version selection cannot infer the index shift.
+          // Explicit PTX writes need the same treatment because access_ptr
+          // operands are not multi-versioned by InjectSoftwarePipeline.  Keep
+          // both ends in one stage so source order supplies the required
+          // synchronization.
           add_edge(src, dst, /*scalar_edge=*/false,
-                   /*same_stage_edge=*/war);
+                   /*same_stage_edge=*/
+                   same_lifecycle_buffer ||
+                       (raw && src_info.IsExplicitPtxAsync()));
         }
+      }
+    }
+
+    // Commit/wait calls do not carry Buffer regions of their own.  Keep each
+    // contiguous explicit PTX control chain with its copy; the copy's RAW
+    // same-stage edges above then attach the whole chain to every consumer.
+    int previous_explicit_ptx = -1;
+    for (int i = 0; i < num_statements; ++i) {
+      if (pipeline_stage_infos[i].IsExplicitPtxAsync()) {
+        if (previous_explicit_ptx >= 0) {
+          add_edge(previous_explicit_ptx, i, /*scalar_edge=*/false,
+                   /*same_stage_edge=*/true);
+        }
+        previous_explicit_ptx = i;
+      } else if (!pipeline_stage_infos[i].IsControlStmt()) {
+        previous_explicit_ptx = -1;
       }
     }
 
@@ -966,7 +1205,7 @@ public:
     // needs the stronger same-stage treatment applied below.
     auto scalar_def_to_stmt = BuildScalarDefMap(pipeline_stage_infos);
     for (int dst = 0; dst < num_statements; ++dst) {
-      for (const VarNode *var : pipeline_stage_infos[dst].scalar_uses) {
+      for (const Var &var : pipeline_stage_infos[dst].scalar_uses) {
         auto it = scalar_def_to_stmt.find(var);
         if (it != scalar_def_to_stmt.end() && it->second != dst) {
           add_edge(it->second, dst, /*scalar_edge=*/true,
@@ -975,20 +1214,29 @@ public:
       }
     }
 
-    // Opaque control operations do not always expose complete Buffer
-    // dependencies.  Preserve the predecessor edge for every control.  A
-    // blocking wait additionally orders its successor, whereas a non-blocking
-    // arrive/signal may be reordered with independent following work.
+    // Control operations do not always expose complete Buffer dependencies.  A
+    // blocking control is therefore a full source-order DAG fence.  An opaque
+    // external or packed call is also a cross-iteration fence and pins all
+    // affected statements to one stage because no earlier or later statement
+    // can be proven independent.  A known non-blocking arrive/signal only
+    // retains its immediate predecessor and may be reordered with independent
+    // following work.
     for (int i = 0; i < num_statements; ++i) {
-      if (!pipeline_stage_infos[i].IsControlStmt()) {
+      if (!pipeline_stage_infos[i].ContainsControl()) {
         continue;
       }
-      if (i > 0) {
+      if (pipeline_stage_infos[i].BlocksSuccessor()) {
+        bool same_stage = pipeline_stage_infos[i].IsCrossIterationFence();
+        for (int src = 0; src < i; ++src) {
+          add_edge(src, i, /*scalar_edge=*/false,
+                   /*same_stage_edge=*/same_stage);
+        }
+        for (int dst = i + 1; dst < num_statements; ++dst) {
+          add_edge(i, dst, /*scalar_edge=*/false,
+                   /*same_stage_edge=*/same_stage);
+        }
+      } else if (i > 0) {
         add_edge(i - 1, i, /*scalar_edge=*/false,
-                 /*same_stage_edge=*/false);
-      }
-      if (i + 1 < num_statements && pipeline_stage_infos[i].BlocksSuccessor()) {
-        add_edge(i, i + 1, /*scalar_edge=*/false,
                  /*same_stage_edge=*/false);
       }
     }
@@ -996,28 +1244,47 @@ public:
   }
 
   void
-  AssignStagesAndOrders(std::vector<PipelineStageInfo> *pipeline_stage_infos,
-                        int max_stage, bool compact_terminal_stage,
-                        bool promote_terminal_same_stage_subgraph) const {
-    ICHECK_GE(max_stage, 0);
+  MarkLifecycleHazards(std::vector<PipelineStageInfo> *pipeline_stage_infos,
+                       const PipelineDependencyDag &dag) const {
+    // A global-to-shared copy at either endpoint of a cyclic Buffer lifecycle
+    // must remain synchronous.  This includes both WAR and loop-shifted RAW: a
+    // later copy may overwrite a value still needed by an earlier reader, and
+    // an earlier copy may still be reading or writing when the paired access
+    // executes in another iteration.  The injector cannot derive all required
+    // waits from these cross-iteration relationships.
     const int num_statements = static_cast<int>(pipeline_stage_infos->size());
-    PipelineDependencyDag dag = BuildDependencyDag(*pipeline_stage_infos);
-
-    // A later copy participating in a WAR pair overwrites the value consumed
-    // at the beginning of the next logical iteration.  The current injector
-    // derives async waits only from forward RAW consumers, so it cannot place
-    // the wait for this loop-carried lifecycle.  Keep the copy as a scheduling
-    // node, but do not mark it as an implicit async producer; same-stage source
-    // order then realizes the required synchronous read-before-overwrite.
     for (int src = 0; src < num_statements; ++src) {
       for (int dst : dag.same_stage_successors[src]) {
-        if ((*pipeline_stage_infos)[dst].IsGlobalToSharedCopy() &&
-            RegionsConflict((*pipeline_stage_infos)[src].reads,
-                            (*pipeline_stage_infos)[dst].writes)) {
-          (*pipeline_stage_infos)[dst].cyclic_buffer_overwrite = true;
+        bool is_lifecycle = RegionsMayConflictAcrossIterations(
+                                (*pipeline_stage_infos)[src].reads,
+                                (*pipeline_stage_infos)[dst].writes) ||
+                            RegionsMayConflictAcrossIterations(
+                                (*pipeline_stage_infos)[src].writes,
+                                (*pipeline_stage_infos)[dst].reads);
+        if (!is_lifecycle) {
+          continue;
+        }
+        if ((*pipeline_stage_infos)[src].IsGlobalToSharedCopy()) {
+          (*pipeline_stage_infos)[src].lifecycle_hazard = true;
+        }
+        if ((*pipeline_stage_infos)[dst].IsGlobalToSharedCopy()) {
+          (*pipeline_stage_infos)[dst].lifecycle_hazard = true;
         }
       }
     }
+  }
+
+  void
+  AssignStagesAndOrders(std::vector<PipelineStageInfo> *pipeline_stage_infos,
+                        const Var &loop_var, int max_stage,
+                        bool compact_terminal_stage,
+                        bool promote_terminal_same_stage_subgraph) const {
+    ICHECK_GE(max_stage, 0);
+    const int num_statements = static_cast<int>(pipeline_stage_infos->size());
+    PipelineDependencyDag dag =
+        BuildDependencyDag(*pipeline_stage_infos, Optional<Var>(loop_var));
+
+    MarkLifecycleHazards(pipeline_stage_infos, dag);
 
     if (std::any_of(
             pipeline_stage_infos->begin(), pipeline_stage_infos->end(),
@@ -1030,7 +1297,7 @@ public:
              "of being automatically overlapped.";
     }
 
-    // The schedule is constructed in five steps:
+    // The schedule is constructed in six steps:
     //
     // 1. Compute ASAP logical levels with a weighted longest path through the
     //    dependency DAG.  Only an unconditional global-to-shared copy advances
@@ -1170,53 +1437,53 @@ public:
     // `stage(dst) >= stage(src)` constraint or raise another equality group.
     // Repeating all propagations computes the least fixed point without ever
     // decreasing a stage.
-    bool updated = true;
-    while (updated) {
-      updated = false;
-      for (int src = 0; src < num_statements; ++src) {
-        if (!(*pipeline_stage_infos)[src].IsScalarBind()) {
-          continue;
-        }
-        int common_stage = (*pipeline_stage_infos)[src].stage;
-        for (int dst : dag.scalar_successors[src]) {
-          common_stage =
-              std::max(common_stage, (*pipeline_stage_infos)[dst].stage);
-        }
-        if ((*pipeline_stage_infos)[src].stage != common_stage) {
-          (*pipeline_stage_infos)[src].stage = common_stage;
-          updated = true;
-        }
-        for (int dst : dag.scalar_successors[src]) {
-          if ((*pipeline_stage_infos)[dst].stage != common_stage) {
-            (*pipeline_stage_infos)[dst].stage = common_stage;
-            updated = true;
+    auto propagate_stage_constraints = [&]() {
+      bool updated = true;
+      while (updated) {
+        updated = false;
+        for (int src = 0; src < num_statements; ++src) {
+          int common_stage = (*pipeline_stage_infos)[src].stage;
+          for (int dst : dag.scalar_successors[src]) {
+            common_stage =
+                std::max(common_stage, (*pipeline_stage_infos)[dst].stage);
           }
-        }
-      }
-      for (int src = 0; src < num_statements; ++src) {
-        for (int dst : dag.same_stage_successors[src]) {
-          int common_stage = std::max((*pipeline_stage_infos)[src].stage,
-                                      (*pipeline_stage_infos)[dst].stage);
           if ((*pipeline_stage_infos)[src].stage != common_stage) {
             (*pipeline_stage_infos)[src].stage = common_stage;
             updated = true;
           }
-          if ((*pipeline_stage_infos)[dst].stage != common_stage) {
-            (*pipeline_stage_infos)[dst].stage = common_stage;
-            updated = true;
+          for (int dst : dag.scalar_successors[src]) {
+            if ((*pipeline_stage_infos)[dst].stage != common_stage) {
+              (*pipeline_stage_infos)[dst].stage = common_stage;
+              updated = true;
+            }
+          }
+        }
+        for (int src = 0; src < num_statements; ++src) {
+          for (int dst : dag.same_stage_successors[src]) {
+            int common_stage = std::max((*pipeline_stage_infos)[src].stage,
+                                        (*pipeline_stage_infos)[dst].stage);
+            if ((*pipeline_stage_infos)[src].stage != common_stage) {
+              (*pipeline_stage_infos)[src].stage = common_stage;
+              updated = true;
+            }
+            if ((*pipeline_stage_infos)[dst].stage != common_stage) {
+              (*pipeline_stage_infos)[dst].stage = common_stage;
+              updated = true;
+            }
+          }
+        }
+        for (int src = 0; src < num_statements; ++src) {
+          for (int dst : dag.successors[src]) {
+            int src_stage = (*pipeline_stage_infos)[src].stage;
+            if ((*pipeline_stage_infos)[dst].stage < src_stage) {
+              (*pipeline_stage_infos)[dst].stage = src_stage;
+              updated = true;
+            }
           }
         }
       }
-      for (int src = 0; src < num_statements; ++src) {
-        for (int dst : dag.successors[src]) {
-          int src_stage = (*pipeline_stage_infos)[src].stage;
-          if ((*pipeline_stage_infos)[dst].stage < src_stage) {
-            (*pipeline_stage_infos)[dst].stage = src_stage;
-            updated = true;
-          }
-        }
-      }
-    }
+    };
+    propagate_stage_constraints();
 
     // The provisional [0, max_stage] schedule has two equivalent ways to place
     // its periodic boundary.  In the unrotated form, the terminal consumers of
@@ -1300,6 +1567,10 @@ public:
         break;
       }
     }
+    // Control attachment can raise a node after the first fixed point.  Re-run
+    // every equality and DAG inequality so no blocking successor is left in an
+    // earlier stage.
+    propagate_stage_constraints();
 
     // Without terminal retiming, place each early copy immediately after its
     // last consumer.  The consumer reads the old cyclic slot before the copy
@@ -1349,6 +1620,24 @@ public:
     for (int order = 0; order < num_statements; ++order) {
       (*pipeline_stage_infos)[indices[order]].order = order;
     }
+    for (int src = 0; src < num_statements; ++src) {
+      for (int dst : dag.successors[src]) {
+        const PipelineStageInfo &src_info = (*pipeline_stage_infos)[src];
+        const PipelineStageInfo &dst_info = (*pipeline_stage_infos)[dst];
+        ICHECK_LE(src_info.stage, dst_info.stage)
+            << "PipelinePlanning produced a reversed dependency from statement "
+            << src_info.original_stmt_index << " at stage " << src_info.stage
+            << " to statement " << dst_info.original_stmt_index << " at stage "
+            << dst_info.stage;
+        if (src_info.stage == dst_info.stage) {
+          ICHECK_LT(src_info.order, dst_info.order)
+              << "PipelinePlanning reordered dependency statement "
+              << src_info.original_stmt_index << " after statement "
+              << dst_info.original_stmt_index << " within stage "
+              << src_info.stage;
+        }
+      }
+    }
   }
 
   void ValidateScalarDependencies(
@@ -1358,7 +1647,7 @@ public:
          consumer_idx < static_cast<int>(pipeline_stage_infos.size());
          ++consumer_idx) {
       const auto &consumer = pipeline_stage_infos[consumer_idx];
-      for (const VarNode *var : consumer.scalar_uses) {
+      for (const Var &var : consumer.scalar_uses) {
         auto it = scalar_def_to_stmt.find(var);
         if (it == scalar_def_to_stmt.end() || it->second == consumer_idx) {
           continue;
@@ -1402,19 +1691,25 @@ public:
                      });
 
     int next_async_group_id = 0;
-    std::map<std::pair<int, int>, int> implicit_group_ids;
+    int current_async_group_id = -1;
+    bool previous_stmt_was_async = false;
+    std::pair<int, int> previous_group_key;
     for (int stmt_idx : stmt_indices_by_order) {
       const auto &pinfo = pipeline_stage_infos[stmt_idx];
       if (!IsAsyncProducerCandidate(pinfo)) {
+        previous_stmt_was_async = false;
         continue;
       }
       auto key = std::make_pair(pinfo.stage, pinfo.last_use_stmt_index);
-      auto [it, inserted] =
-          implicit_group_ids.emplace(key, next_async_group_id);
-      if (inserted) {
-        ++next_async_group_id;
+      // InjectSoftwarePipeline emits one commit scope per contiguous run.
+      // Reusing an ID after a non-async statement would make wait accounting
+      // count one logical group while lowering emits two physical commits.
+      if (!previous_stmt_was_async || key != previous_group_key) {
+        current_async_group_id = next_async_group_id++;
       }
-      async_group_ids[stmt_idx] = it->second;
+      async_group_ids[stmt_idx] = current_async_group_id;
+      previous_group_key = key;
+      previous_stmt_was_async = true;
     }
 
     if (next_async_group_id == 0) {
@@ -1489,12 +1784,30 @@ public:
       pipeline_stage_infos.push_back(std::move(pinfo));
     }
 
-    ValidateNoAliasedBufferViews(pipeline_stage_infos);
+    PipelineDependencyDag dag =
+        BuildDependencyDag(pipeline_stage_infos, Optional<Var>(std::nullopt));
+    MarkLifecycleHazards(&pipeline_stage_infos, dag);
     if (!TargetHasAsyncCopy(target_) || !use_async_copy_) {
       return;
     }
     AnalyzeCopyLastUse(&pipeline_stage_infos);
-    EmitImplicitAsyncAnnotations(pipeline_stage_infos, annotations);
+    if (EmitImplicitAsyncAnnotations(pipeline_stage_infos, annotations)) {
+      return;
+    }
+
+    // Preserve the stage-level fallback only for legacy statement forms that
+    // the per-statement classifier cannot identify.  A classified copy that is
+    // conditional, TMA-backed, or part of a WAR lifecycle must remain
+    // synchronous; falling back to stage 0 would silently re-enable it.
+    bool has_classified_copy =
+        std::any_of(pipeline_stage_infos.begin(), pipeline_stage_infos.end(),
+                    [](const PipelineStageInfo &pinfo) {
+                      return pinfo.IsGlobalToSharedCopy();
+                    });
+    if (!has_classified_copy) {
+      annotations->Set(s_tir::attr::software_pipeline_async_stages,
+                       Array<Integer>{0});
+    }
   }
 
   PipelineStageInfo MakePipelineStageInfo(Stmt stmt, int idx) {
@@ -1517,18 +1830,19 @@ public:
     // latency-bearing copies and matrix operations are represented by tile
     // operators instead.
     pinfo.scalar_bind = block->body.as<BindNode>() != nullptr;
-    pinfo.lightweight_stmt = block->body.as<BufferStoreNode>() != nullptr;
+    pinfo.lightweight_stmt = IsLightweightStmt(block->body);
 
     // Opaque state-changing calls (barrier wait/arrive, async control, etc.)
-    // may not report complete Buffer regions.  Classify them as control
-    // statements so BuildDependencyDag preserves their source neighbors and the
-    // level assignment attaches them to the substantial operation they guard.
+    // may not report complete Buffer regions.  Preserve whether any such call
+    // occurs independently from whether the entire statement is control-only:
+    // an atomic if/else with work in one branch still constrains its neighbors,
+    // while only control-only statements act as zero-weight scheduling glue.
     ControlStmtSummary control = AnalyzeControlOnlyStmt(block->body);
+    pinfo.contains_control = control.has_control;
     pinfo.control_stmt = control.control_only && control.has_control;
-    if (pinfo.control_stmt) {
-      pinfo.blocks_successor = control.blocks_successor;
-      pinfo.explicit_ptx_async = control.explicit_ptx_async;
-    }
+    pinfo.blocks_successor = control.blocks_successor;
+    pinfo.cross_iteration_fence = control.cross_iteration_fence;
+    pinfo.explicit_ptx_async = control.explicit_ptx_async;
     pinfo.conditional_execution = MayBeConditionallyExecuted(block->body);
     bool pure_global_to_shared_copy =
         collector.GetGlobalCopyPattern() && IsPureCopyStmt(block->body);
@@ -1581,10 +1895,11 @@ private:
 
   void
   AssignStagesAndOrders(std::vector<PipelineStageInfo> *pipeline_stage_infos,
-                        int max_stage, bool compact_terminal_stage,
+                        const Var &loop_var, int max_stage,
+                        bool compact_terminal_stage,
                         bool promote_terminal_same_stage_subgraph) const {
     MakeStageAnalyzer().AssignStagesAndOrders(
-        pipeline_stage_infos, max_stage, compact_terminal_stage,
+        pipeline_stage_infos, loop_var, max_stage, compact_terminal_stage,
         promote_terminal_same_stage_subgraph);
   }
 
@@ -1658,13 +1973,6 @@ private:
             key != kPipelineCompactTerminalStage) {
           annotations.Set(key, value);
         }
-      }
-      if (TargetHasAsyncCopy(target_) && use_async_copy_) {
-        // Legacy explicit stage/order annotations do not carry per-statement
-        // async producer metadata yet, so keep the previous stage-level
-        // behavior as a fallback for these loops.
-        annotations.Set(s_tir::attr::software_pipeline_async_stages,
-                        Array<Integer>{0});
       }
       Array<Stmt> pipeline_body_stmts = NormalizePipelineBody(loop->body);
       Array<Stmt> pipeline_stmts =
@@ -1785,7 +2093,7 @@ private:
     // phase.  Therefore manual WS must remain in [0, num_stages - 1].
     bool manual_warp_specialization = HasManualWarpSpecialization(loop->body);
     int max_stage = manual_warp_specialization ? num_stages - 1 : num_stages;
-    AssignStagesAndOrders(&pipeline_stage_infos, max_stage,
+    AssignStagesAndOrders(&pipeline_stage_infos, loop->loop_var, max_stage,
                           /*compact_terminal_stage=*/compact_terminal_stage &&
                               !manual_warp_specialization,
                           /*promote_terminal_same_stage_subgraph=*/
