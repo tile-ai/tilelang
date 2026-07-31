@@ -403,6 +403,16 @@ bool TmemFragmentNeedsPack16b(const cute::Layout &fragment) {
 
 namespace cuda {
 
+PrimExpr GetTMADescriptorBaseAddress(const Buffer &buffer) {
+  if (!buffer->elem_offset.defined() || is_zero(buffer->elem_offset)) {
+    return buffer->data;
+  }
+  PrimExpr byte_offset =
+      TMAGlobalBytesFromElements(buffer->elem_offset, buffer->dtype);
+  return Call(DataType::Handle(), builtin::handle_add_byte_offset(),
+              {buffer->data, byte_offset});
+}
+
 // The TMA unit applies the descriptor's swizzle pattern relative to the
 // shared-memory base address, so the base must sit on a swizzle-pattern
 // repeat boundary or the data lands with a shifted phase (silently wrong
@@ -1867,7 +1877,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
 
   desc.data_type =
       TensorMapDataTypeForTMA(global_tensor->dtype, shared_tensor->dtype);
-  desc.global_addr = global_tensor->data;
+  desc.global_addr = GetTMADescriptorBaseAddress(global_tensor);
   desc.l2_promotion = static_cast<int>(CU_TENSOR_MAP_L2_PROMOTION_L2_128B);
   desc.oob_fill = static_cast<int>(CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
   desc.interleave = static_cast<int>(CU_TENSOR_MAP_INTERLEAVE_NONE);
@@ -2439,7 +2449,7 @@ Stmt Copy::LowerBulkGather4(const CopyNode &op, const LowerArgs &lower_args,
   TMADesc desc;
   desc.rank = 2;
   desc.data_type = to_CUtensorMapDataType(global_tensor->dtype);
-  desc.global_addr = global_tensor->data;
+  desc.global_addr = GetTMADescriptorBaseAddress(global_tensor);
   desc.global_shape = ReverseArray(global_tensor->shape);
 
   if (!global_tensor->strides.empty()) {
@@ -2748,7 +2758,7 @@ Stmt Im2Col::Lower(const Im2ColOpNode &op, const LowerArgs &lower_args,
   TMAIm2ColDesc desc;
   desc.rank = src->shape.size();
   desc.data_type = to_CUtensorMapDataType(src->dtype);
-  desc.global_addr = src->data;
+  desc.global_addr = GetTMADescriptorBaseAddress(src);
   desc.global_shape = ReverseArray(src->shape);
 
   if (!src->strides.empty()) {

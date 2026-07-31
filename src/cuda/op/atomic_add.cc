@@ -314,7 +314,7 @@ struct AtomicAdd {
         << shared_tensor->dtype << " and " << global_tensor->dtype;
 
     desc.data_type = to_CUtensorMapDataType(global_tensor->dtype);
-    desc.global_addr = global_tensor->data;
+    desc.global_addr = GetTMADescriptorBaseAddress(global_tensor);
     desc.global_shape = ReverseArray(global_tensor->shape);
     Array<PrimExpr> global_coords =
         ReverseArray(global_range.Map([](Range r) { return r->min; }));

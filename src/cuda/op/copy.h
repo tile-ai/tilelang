@@ -40,6 +40,9 @@ const char *CopyInstToString(CopyInst inst);
 bool CopyInstIsTMA(CopyInst inst);
 bool CopyInstIsCPAsync(CopyInst inst);
 
+// Return the descriptor base for a global buffer view, including elem_offset.
+PrimExpr GetTMADescriptorBaseAddress(const Buffer &buffer);
+
 struct TMADesc {
   size_t rank;
   int data_type;
