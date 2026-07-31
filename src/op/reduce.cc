@@ -215,15 +215,25 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &layout_args,
   if (IsFragmentBuffer(src) && IsFragmentBuffer(dst) &&
       layout_args.layout_map.count(src)) {
     auto src_layout = layout_args.layout_map[src].as<Fragment>().value();
+    // A destination of the same rank as the source is only meaningful as a
+    // keep-dim reduction, which requires the reduced axis to collapse to extent
+    // 1. Diagnose a non-unit extent here, where the actual defect is, instead
+    // of letting it fall through to the rank checks below and report a rank
+    // mismatch that does not describe the problem.
+    if (src_layout->InputDim() > 1 &&
+        dst->shape.size() == src_layout->InputDim()) {
+      ICHECK(is_one(dst->shape[this->dim]))
+          << "ReduceOp: a same-rank destination must keep the reduced axis at "
+             "extent 1, got "
+          << dst->shape[this->dim] << " for " << dst;
+    }
+
     // The destination buffer is the only place that records whether the user
     // asked for a keep-dim reduction; `dst->shape` keeps the reduced axis with
     // extent 1 in that case. Rank-1 sources are excluded: dropping their only
-    // axis already degenerates to extent 1. A same-rank destination whose
-    // reduced axis is not extent 1 is not a keep-dim reduction, so it must fall
-    // through to the rank check below rather than be silently accepted.
+    // axis already degenerates to extent 1.
     bool keepdim = src_layout->InputDim() > 1 &&
-                   dst->shape.size() == src_layout->InputDim() &&
-                   is_one(dst->shape[this->dim]);
+                   dst->shape.size() == src_layout->InputDim();
     auto reducer_layout = ComputeReducerLayout(src_layout, this->dim, keepdim);
 
     if (!layout_args.layout_map.count(dst)) {
