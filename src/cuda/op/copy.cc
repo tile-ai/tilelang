@@ -429,6 +429,13 @@ bool CanProveTMADescriptorBaseAligned(const Buffer &buffer,
   if (!buffer->elem_offset.defined() || is_zero(buffer->elem_offset)) {
     return true;
   }
+  PrimExpr bit_offset =
+      cast(DataType::Int(64), buffer->elem_offset) *
+      IntImm(DataType::Int(64), TMAPayloadElementBits(buffer->dtype));
+  if (!analyzer->CanProveEqual(
+          FloorMod(bit_offset, IntImm(DataType::Int(64), 8)), 0)) {
+    return false;
+  }
   PrimExpr byte_offset =
       TMAGlobalBytesFromElements(buffer->elem_offset, buffer->dtype);
   int alignment =
