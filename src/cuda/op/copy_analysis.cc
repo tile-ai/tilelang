@@ -11,6 +11,7 @@
 #include "op/builtin.h"
 #include "op/utils.h"
 
+#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/transform.h>
 
 #include <optional>
@@ -193,7 +194,8 @@ bool CheckGlobalStrides(const Buffer &buffer, arith::Analyzer *analyzer,
 }
 
 bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
-                   bool check_last_dim, bool emit_diagnostics) {
+                   bool check_last_dim, bool emit_diagnostics,
+                   const Array<Var> &host_visible_vars) {
   if (!TargetHasBulkCopy(target)) {
     return false;
   }
@@ -201,7 +203,8 @@ bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
       (op.dst.scope() != "shared.dyn" && op.dst.scope() != "shared")) {
     return false;
   }
-  if (!CanProveTMADescriptorBaseAligned(op.src, op.dst->dtype, analyzer)) {
+  if (!CanProveTMADescriptorBaseAligned(op.src, op.dst->dtype, analyzer,
+                                        host_visible_vars)) {
     if (emit_diagnostics) {
       DLOG(WARNING) << "TMA bulk load requires a provably "
                     << TMARequiredGlobalAddressAlignment(op.src->dtype,
@@ -244,7 +247,8 @@ bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
 
 bool CheckBulkStore(const CopyNode &op, Target target,
                     arith::Analyzer *analyzer, bool check_last_dim,
-                    bool emit_diagnostics) {
+                    bool emit_diagnostics,
+                    const Array<Var> &host_visible_vars) {
   if (!TargetHasBulkCopy(target)) {
     return false;
   }
@@ -252,7 +256,8 @@ bool CheckBulkStore(const CopyNode &op, Target target,
       op.dst.scope() != "global") {
     return false;
   }
-  if (!CanProveTMADescriptorBaseAligned(op.dst, op.src->dtype, analyzer)) {
+  if (!CanProveTMADescriptorBaseAligned(op.dst, op.src->dtype, analyzer,
+                                        host_visible_vars)) {
     if (emit_diagnostics) {
       DLOG(WARNING) << "TMA bulk store requires a provably "
                     << TMARequiredGlobalAddressAlignment(op.dst->dtype,
@@ -410,8 +415,10 @@ bool CanProveCopyInBounds(const CopyNode &op, arith::Analyzer *analyzer) {
 
 bool CheckBulkLoad1D(const CopyNode &op, Target target,
                      const LayoutMap &layout_map, arith::Analyzer *analyzer,
-                     bool emit_diagnostics) {
-  if (!CheckBulkLoad(op, target, analyzer, false, emit_diagnostics)) {
+                     bool emit_diagnostics,
+                     const Array<Var> &host_visible_vars) {
+  if (!CheckBulkLoad(op, target, analyzer, false, emit_diagnostics,
+                     host_visible_vars)) {
     return false;
   }
   return CheckBulkCopy1D(op.src, op.dst, op.src_range, op.dst_range, layout_map,
@@ -420,8 +427,10 @@ bool CheckBulkLoad1D(const CopyNode &op, Target target,
 
 bool CheckBulkStore1D(const CopyNode &op, Target target,
                       const LayoutMap &layout_map, arith::Analyzer *analyzer,
-                      bool emit_diagnostics) {
-  if (!CheckBulkStore(op, target, analyzer, false, emit_diagnostics)) {
+                      bool emit_diagnostics,
+                      const Array<Var> &host_visible_vars) {
+  if (!CheckBulkStore(op, target, analyzer, false, emit_diagnostics,
+                      host_visible_vars)) {
     return false;
   }
   return CheckBulkCopy1D(op.dst, op.src, op.dst_range, op.src_range, layout_map,
@@ -480,16 +489,23 @@ int TMARequiredGlobalAddressAlignment(DataType global_dtype,
 
 bool CanProveTMADescriptorBaseAligned(const Buffer &buffer,
                                       DataType shared_dtype,
-                                      arith::Analyzer *analyzer) {
+                                      arith::Analyzer *analyzer,
+                                      const Array<Var> &host_visible_vars) {
   if (!buffer->elem_offset.defined() || is_zero(buffer->elem_offset)) {
     return true;
   }
-  // Descriptor initialization may be hoisted to the host-side prologue. A
-  // symbolic offset can be mathematically aligned while still depending on a
-  // device-local variable, which would leave that prologue with an out-of-
-  // scope address expression. Keep descriptor bases constant until dependency
-  // tracking can distinguish host-visible symbols from device-local ones.
-  if (as_const_int(buffer->elem_offset) == nullptr) {
+  bool has_device_local_dependency = false;
+  tirx::UsesVar(buffer->elem_offset, [&](const VarNode *var_node) {
+    Var var = GetRef<Var>(var_node);
+    for (const Var &host_var : host_visible_vars) {
+      if (var.same_as(host_var)) {
+        return false;
+      }
+    }
+    has_device_local_dependency = true;
+    return true;
+  });
+  if (has_device_local_dependency) {
     return false;
   }
   PrimExpr bit_offset =
@@ -503,8 +519,9 @@ bool CanProveTMADescriptorBaseAligned(const Buffer &buffer,
       TMAGlobalBytesFromElements(buffer->elem_offset, buffer->dtype);
   int alignment =
       TMARequiredGlobalAddressAlignment(buffer->dtype, shared_dtype);
-  return analyzer->CanProveEqual(
+  bool aligned = analyzer->CanProveEqual(
       FloorMod(byte_offset, IntImm(DataType::Int(64), alignment)), 0);
+  return aligned;
 }
 
 const char *CopyInstToString(CopyInst inst) {
@@ -721,38 +738,38 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
   if (facts.layout_dependent_tma_available) {
     facts.can_bulk_load_1d =
         CheckBulkLoad1D(op, ctx.target, layout_map, analyzer,
-                        /*emit_diagnostics=*/false);
+                        /*emit_diagnostics=*/false, ctx.host_visible_vars);
     facts.can_bulk_store_1d =
         CheckBulkStore1D(op, ctx.target, layout_map, analyzer,
-                         /*emit_diagnostics=*/false);
+                         /*emit_diagnostics=*/false, ctx.host_visible_vars);
   }
 
   if (facts.can_bulk_load_1d) {
     facts.can_bulk_load_ignore_last_dim = true;
     facts.can_bulk_load =
         CheckBulkLoad(op, ctx.target, analyzer, /*check_last_dim=*/true,
-                      ctx.emit_diagnostics);
+                      ctx.emit_diagnostics, ctx.host_visible_vars);
   } else {
     facts.can_bulk_load_ignore_last_dim =
         CheckBulkLoad(op, ctx.target, analyzer, /*check_last_dim=*/false,
-                      ctx.emit_diagnostics);
+                      ctx.emit_diagnostics, ctx.host_visible_vars);
     facts.can_bulk_load =
         CheckBulkLoad(op, ctx.target, analyzer, /*check_last_dim=*/true,
-                      ctx.emit_diagnostics);
+                      ctx.emit_diagnostics, ctx.host_visible_vars);
   }
 
   if (facts.can_bulk_store_1d) {
     facts.can_bulk_store_ignore_last_dim = true;
-    facts.can_bulk_store =
-        CheckBulkStore(op, ctx.target, analyzer,
-                       /*check_last_dim=*/true, ctx.emit_diagnostics);
+    facts.can_bulk_store = CheckBulkStore(
+        op, ctx.target, analyzer,
+        /*check_last_dim=*/true, ctx.emit_diagnostics, ctx.host_visible_vars);
   } else {
-    facts.can_bulk_store_ignore_last_dim =
-        CheckBulkStore(op, ctx.target, analyzer,
-                       /*check_last_dim=*/false, ctx.emit_diagnostics);
-    facts.can_bulk_store =
-        CheckBulkStore(op, ctx.target, analyzer,
-                       /*check_last_dim=*/true, ctx.emit_diagnostics);
+    facts.can_bulk_store_ignore_last_dim = CheckBulkStore(
+        op, ctx.target, analyzer,
+        /*check_last_dim=*/false, ctx.emit_diagnostics, ctx.host_visible_vars);
+    facts.can_bulk_store = CheckBulkStore(
+        op, ctx.target, analyzer,
+        /*check_last_dim=*/true, ctx.emit_diagnostics, ctx.host_visible_vars);
   }
 
   facts.can_cp_async = CheckCPAsyncCopy(op, ctx.target, layout_map, analyzer);
@@ -785,7 +802,8 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
     arith::Analyzer local_analyzer;
     arith::Analyzer *analyzer =
         ctx.analyzer != nullptr ? ctx.analyzer : &local_analyzer;
-    if (!CanProveTMADescriptorBaseAligned(op.src, op.dst->dtype, analyzer)) {
+    if (!CanProveTMADescriptorBaseAligned(op.src, op.dst->dtype, analyzer,
+                                          ctx.host_visible_vars)) {
       return Unsupported("tma_gather4 requires a provably " +
                          std::to_string(TMARequiredGlobalAddressAlignment(
                              op.src->dtype, op.dst->dtype)) +
@@ -800,7 +818,8 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
     arith::Analyzer local_analyzer;
     arith::Analyzer *analyzer =
         ctx.analyzer != nullptr ? ctx.analyzer : &local_analyzer;
-    if (!CanProveTMADescriptorBaseAligned(op.dst, op.src->dtype, analyzer)) {
+    if (!CanProveTMADescriptorBaseAligned(op.dst, op.src->dtype, analyzer,
+                                          ctx.host_visible_vars)) {
       return Unsupported("tma_scatter4 requires a provably " +
                          std::to_string(TMARequiredGlobalAddressAlignment(
                              op.dst->dtype, op.src->dtype)) +
@@ -885,10 +904,12 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
   return Supported(SelectSyncLikeInst(facts));
 }
 
-CopyInstSelection ClassifyWarpSpecializedProducerCopy(const CopyNode &op,
-                                                      Target target) {
+CopyInstSelection
+ClassifyWarpSpecializedProducerCopy(const CopyNode &op, Target target,
+                                    const Array<Var> &host_visible_vars) {
   CopyAnalysisContext ctx;
   ctx.target = target;
+  ctx.host_visible_vars = host_visible_vars;
   CopyFacts facts = AnalyzeCopyFacts(op, ctx);
   if (!facts.cuda_like_target) {
     return Supported(CopyInst::kNormal);

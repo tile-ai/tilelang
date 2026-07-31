@@ -52,7 +52,8 @@ int TMARequiredGlobalAddressAlignment(DataType global_dtype,
 // its byte offset is provably a multiple of that alignment.
 bool CanProveTMADescriptorBaseAligned(const Buffer &buffer,
                                       DataType shared_dtype,
-                                      arith::Analyzer *analyzer);
+                                      arith::Analyzer *analyzer,
+                                      const Array<Var> &host_visible_vars);
 
 struct TMADesc {
   size_t rank;
@@ -96,6 +97,7 @@ struct CopyAnalysisContext {
   const LayoutMap *layout_map = nullptr;
   arith::Analyzer *analyzer = nullptr;
   bool emit_diagnostics = false;
+  Array<Var> host_visible_vars;
 };
 
 struct CopyInstSelection {
@@ -110,8 +112,9 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
                                             const CopyAnalysisContext &ctx);
 
 // Pre-layout producer classification used by warp-specialized scheduling.
-CopyInstSelection ClassifyWarpSpecializedProducerCopy(const CopyNode &op,
-                                                      Target target);
+CopyInstSelection
+ClassifyWarpSpecializedProducerCopy(const CopyNode &op, Target target,
+                                    const Array<Var> &host_visible_vars);
 
 // Semantic queries used by transform passes that need copy shape/capability
 // information without knowing the CUDA lowering policy knobs.

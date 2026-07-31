@@ -493,7 +493,8 @@ private:
 
   static CopyInst SelectInst(const CopyNode &op, Target target,
                              const LayoutMap &layout_map,
-                             arith::Analyzer *analyzer);
+                             arith::Analyzer *analyzer,
+                             const Array<Var> &host_visible_vars);
 
   static void CheckParallelLoopLayout(const CopyNode &op, CopyInst copy_inst);
 
@@ -578,8 +579,9 @@ void Copy::CollectFragmentLayouts(const PrimExpr &expr,
 LayoutMap Copy::InferLayout(const CopyNode &op,
                             const LayoutInferArgs &layout_args,
                             InferLevel level) {
-  CopyInst copy_inst = SelectInst(op, layout_args.target,
-                                  layout_args.layout_map, layout_args.analyzer);
+  CopyInst copy_inst =
+      SelectInst(op, layout_args.target, layout_args.layout_map,
+                 layout_args.analyzer, layout_args.host_visible_vars);
   CheckParallelLoopLayout(op, copy_inst);
 
   if (copy_inst == CopyInst::kTMemLoad || copy_inst == CopyInst::kTMemStore) {
@@ -831,12 +833,14 @@ LayoutMap Copy::InferBulkLayout(const CopyNode &op,
 
 CopyInst Copy::SelectInst(const CopyNode &op, Target target,
                           const LayoutMap &layout_map,
-                          arith::Analyzer *analyzer) {
+                          arith::Analyzer *analyzer,
+                          const Array<Var> &host_visible_vars) {
   CopyAnalysisContext ctx;
   ctx.target = target;
   ctx.layout_map = &layout_map;
   ctx.analyzer = analyzer;
   ctx.emit_diagnostics = true;
+  ctx.host_visible_vars = host_visible_vars;
   auto result = SelectCopyInstForLowering(op, ctx);
   ICHECK(result.supported) << result.reason
                            << SpanHintSuffix({op.dst->span, op.src->span});
@@ -845,8 +849,8 @@ CopyInst Copy::SelectInst(const CopyNode &op, Target target,
 
 Stmt Copy::Lower(const CopyNode &op, const LowerArgs &lower_args,
                  arith::Analyzer *analyzer) {
-  auto copy_inst =
-      SelectInst(op, lower_args.target, lower_args.layout_map, analyzer);
+  auto copy_inst = SelectInst(op, lower_args.target, lower_args.layout_map,
+                              analyzer, lower_args.host_visible_vars);
   if (op.dst_block.defined()) {
     ICHECK(TargetHasBulkCopy(lower_args.target))
         << "T.copy with dst_block requires cluster-copy support (CUDA SM90+). "
@@ -1878,7 +1882,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
   desc.data_type =
       TensorMapDataTypeForTMA(global_tensor->dtype, shared_tensor->dtype);
   ICHECK(CanProveTMADescriptorBaseAligned(global_tensor, shared_tensor->dtype,
-                                          analyzer))
+                                          analyzer,
+                                          lower_args.host_visible_vars))
       << "TMA bulk copy requires a provably "
       << TMARequiredGlobalAddressAlignment(global_tensor->dtype,
                                            shared_tensor->dtype)
@@ -2441,7 +2446,8 @@ Stmt Copy::LowerBulkGather4(const CopyNode &op, const LowerArgs &lower_args,
   Buffer shared_tensor_unmapped = shared_tensor;
 
   ICHECK(CanProveTMADescriptorBaseAligned(global_tensor, shared_tensor->dtype,
-                                          analyzer))
+                                          analyzer,
+                                          lower_args.host_visible_vars))
       << "tma_gather4/scatter4 requires a provably "
       << TMARequiredGlobalAddressAlignment(global_tensor->dtype,
                                            shared_tensor->dtype)
@@ -2763,7 +2769,8 @@ Stmt Im2Col::Lower(const Im2ColOpNode &op, const LowerArgs &lower_args,
   ICHECK(IsGlobalBuffer(src) && IsSharedBuffer(dst));
   ICHECK(src->shape.size() == 4);
   ICHECK(src->dtype == dst->dtype);
-  ICHECK(CanProveTMADescriptorBaseAligned(src, dst->dtype, analyzer))
+  ICHECK(CanProveTMADescriptorBaseAligned(src, dst->dtype, analyzer,
+                                          lower_args.host_visible_vars))
       << "T.im2col requires a provably "
       << TMARequiredGlobalAddressAlignment(src->dtype, dst->dtype)
       << "-byte-aligned global buffer view, "

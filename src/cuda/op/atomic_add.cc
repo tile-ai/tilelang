@@ -304,7 +304,8 @@ struct AtomicAdd {
     Array<Range> global_range = op.dst_range;
 
     ICHECK(CanProveTMADescriptorBaseAligned(global_tensor, shared_tensor->dtype,
-                                            analyzer))
+                                            analyzer,
+                                            lower_args.host_visible_vars))
         << "TMA atomic add requires a provably "
         << TMARequiredGlobalAddressAlignment(global_tensor->dtype,
                                              shared_tensor->dtype)

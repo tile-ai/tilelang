@@ -31,9 +31,13 @@ def _descriptor_base_byte_offsets(func, arch):
         assert isinstance(base, tvm.tirx.Call)
         assert base.op.same_as(handle_add)
         offset = tvm.arith.Analyzer().simplify(base.args[1])
-        assert isinstance(offset, tvm.tirx.IntImm)
-        offsets.append(int(offset.value))
-    return sorted(set(offsets)), descriptors
+        if isinstance(offset, tvm.tirx.IntImm):
+            offsets.append(int(offset.value))
+        else:
+            offsets.append(offset)
+    if all(isinstance(offset, int) for offset in offsets):
+        offsets = sorted(set(offsets))
+    return offsets, descriptors
 
 
 def _bulk_copy_program():
@@ -113,13 +117,13 @@ def _auto_copy_program(elem_offset):
     return main
 
 
-def _symbolically_aligned_copy_program():
+def _symbolically_aligned_tma_copy_program():
     @T.prim_func
     def main(src_handle: T.handle, offset: T.int32):
         src = T.match_buffer(src_handle, (16, 80), T.float16, elem_offset=offset * 8)
         with T.Kernel(1, threads=128):
             shared = T.alloc_shared((8, 64), T.float16)
-            T.copy(src[0:8, 0:64], shared)
+            T.copy(src[0:8, 0:64], shared, prefer_instruction="tma")
 
     return main
 
@@ -221,10 +225,11 @@ def test_auto_copy_falls_back_for_unproven_descriptor_alignment(elem_offset):
     assert descriptors == []
 
 
-def test_auto_copy_falls_back_for_symbolically_aligned_device_offset():
-    offsets, descriptors = _descriptor_base_byte_offsets(_symbolically_aligned_copy_program(), "sm_90")
-    assert offsets == []
-    assert descriptors == []
+def test_preferred_tma_lowers_symbolically_aligned_host_offset():
+    offsets, descriptors = _descriptor_base_byte_offsets(_symbolically_aligned_tma_copy_program(), "sm_90")
+    assert len(descriptors) == 1
+    assert len(offsets) == 1
+    assert not isinstance(offsets[0], int)
 
 
 def test_fp4_unpacked_copy_rejects_16_byte_offset():
