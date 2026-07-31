@@ -484,6 +484,14 @@ bool CanProveTMADescriptorBaseAligned(const Buffer &buffer,
   if (!buffer->elem_offset.defined() || is_zero(buffer->elem_offset)) {
     return true;
   }
+  // Descriptor initialization may be hoisted to the host-side prologue. A
+  // symbolic offset can be mathematically aligned while still depending on a
+  // device-local variable, which would leave that prologue with an out-of-
+  // scope address expression. Keep descriptor bases constant until dependency
+  // tracking can distinguish host-visible symbols from device-local ones.
+  if (as_const_int(buffer->elem_offset) == nullptr) {
+    return false;
+  }
   PrimExpr bit_offset =
       cast(DataType::Int(64), buffer->elem_offset) *
       IntImm(DataType::Int(64), TMAPayloadElementBits(buffer->dtype));

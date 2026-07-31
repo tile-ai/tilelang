@@ -1191,15 +1191,17 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         """
         call_args = kernel_meta["call_args"]
         desc_names = kernel_meta["desc_names"]
+        descriptor_aliases = kernel_meta.get("descriptor_aliases", {})
         function_info = kernel_meta["function_info"]
 
         # Build kernel args
         kernel_args = []
         for arg_name, arg_type in call_args:
-            if "desc" in arg_name and arg_name in desc_names:
+            descriptor_name = descriptor_aliases.get(arg_name, arg_name)
+            if "desc" in arg_name and descriptor_name in desc_names:
                 # For __grid_constant__ CUtensorMap: pass host pointer directly
                 # cuLaunchKernel will copy 128-byte CUtensorMap to param space
-                desc_idx = all_desc_names.index(arg_name)
+                desc_idx = all_desc_names.index(descriptor_name)
                 kernel_args.append(f"&tma_descs[{desc_idx}]")
             elif arg_type == "buffer":
                 kernel_args.append(f"&{arg_name}_ptr")
@@ -1336,7 +1338,10 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         # Build unified wrapper parameters
         wrapper_params_union = []
         for kernel_meta in kernel_metadata_list:
+            descriptor_aliases = kernel_meta.get("descriptor_aliases", {})
             for arg_name, _ in kernel_meta["call_args"]:
+                if arg_name in descriptor_aliases:
+                    continue
                 if arg_name not in wrapper_params_union:
                     wrapper_params_union.append(arg_name)
 
@@ -1368,7 +1373,10 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         kernel_launches = "\n".join(
             CUBIN_KERNEL_LAUNCH_TEMPLATE.format(
                 function_name=km["function_name"],
-                call_args=", ".join(arg[0] if arg[0] not in buffer_args else f"{arg[0]}_" for arg in km["call_args"]),
+                call_args=", ".join(
+                    km.get("descriptor_aliases", {}).get(arg[0], arg[0]) if arg[0] not in buffer_args else f"{arg[0]}_"
+                    for arg in km["call_args"]
+                ),
                 grid_x=self._pythonic_expr(km["function_info"]["grid_info"][0]),
                 grid_y=self._pythonic_expr(km["function_info"]["grid_info"][1]),
                 grid_z=self._pythonic_expr(km["function_info"]["grid_info"][2]),
@@ -1589,19 +1597,22 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         all_tma_tensors_union = []
         function_information_list = self._normalize_function_informations(function_informations)
 
-        for function_info in function_information_list:
+        for kernel_index, function_info in enumerate(function_information_list):
             function_name = function_info["function_name"]
             declaration = extract_python_func_declaration(code, function_name)
-            desc_name_map: dict[str, str] = {}
-            desc_name_var_map: dict[str, tvm.tirx.Var] = {}
+            raw_desc_name_map: dict[str, str] = {}
+            raw_desc_name_var_map: dict[str, tvm.tirx.Var] = {}
             call_args = self._extract_func_call_args(
                 declaration,
                 function_args,
                 function_info["function_params"],
-                desc_name_map,
-                desc_name_var_map,
+                raw_desc_name_map,
+                raw_desc_name_var_map,
             )
 
+            descriptor_aliases = {raw_name: f"__tma_{kernel_index}_{raw_name}" for raw_name in raw_desc_name_map}
+            desc_name_map = {descriptor_aliases[name]: tensor for name, tensor in raw_desc_name_map.items()}
+            desc_name_var_map = {descriptor_aliases[name]: desc_var for name, desc_var in raw_desc_name_var_map.items()}
             tma_desc_code_map = {}
             desc_names = self.generate_tma_descriptor_args(desc_name_map, desc_name_var_map, tma_desc_code_map)
 
@@ -1613,6 +1624,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
                     "function_info": function_info,
                     "call_args": call_args,
                     "desc_names": desc_names,
+                    "descriptor_aliases": descriptor_aliases,
                     "tma_tensor_args": tma_tensor_args,
                     "desc_name_map": desc_name_map,
                 }

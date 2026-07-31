@@ -113,6 +113,17 @@ def _auto_copy_program(elem_offset):
     return main
 
 
+def _symbolically_aligned_copy_program():
+    @T.prim_func
+    def main(src_handle: T.handle, offset: T.int32):
+        src = T.match_buffer(src_handle, (16, 80), T.float16, elem_offset=offset * 8)
+        with T.Kernel(1, threads=128):
+            shared = T.alloc_shared((8, 64), T.float16)
+            T.copy(src[0:8, 0:64], shared)
+
+    return main
+
+
 def _fp4_unpacked_copy_program(elem_offset=32):
     @T.prim_func
     def main(src_handle: T.handle):
@@ -163,9 +174,55 @@ def test_tma_descriptor_base_includes_buffer_elem_offset(program, arch, expected
         assert "handle_add_byte_offset" not in cutedsl_init
 
 
+def test_cutedsl_descriptor_aliases_are_kernel_local():
+    wrapper = object.__new__(TLCuTeDSLSourceWrapper)
+    wrapper.target = None
+    wrapper.pdl_sync_map = {}
+    wrapper.use_cooperative_groups = {}
+
+    kernel_metadata = []
+    for kernel_index in range(2):
+        alias = f"__tma_{kernel_index}_A_desc"
+        kernel_metadata.append(
+            {
+                "function_name": f"kernel_{kernel_index}",
+                "call_args": [("A", "buffer"), ("A_desc", "None")],
+                "desc_names": [alias],
+                "descriptor_aliases": {"A_desc": alias},
+                "function_info": {
+                    "grid_info": [1, 1, 1],
+                    "block_info": [32, 1, 1],
+                    "dynamic_smem_buf": 0,
+                },
+            }
+        )
+
+    launch_0 = wrapper._generate_kernel_launch(kernel_metadata[0], 0, ["__tma_0_A_desc", "__tma_1_A_desc"])
+    launch_1 = wrapper._generate_kernel_launch(kernel_metadata[1], 1, ["__tma_0_A_desc", "__tma_1_A_desc"])
+    assert "&tma_descs[0]" in launch_0
+    assert "&tma_descs[1]" in launch_1
+
+    cubin = wrapper._generate_cubin_gen_code(
+        kernel_metadata,
+        [{"name": "A", "type": "buffer", "dtype": "cutlass.Float16"}],
+        ["A"],
+        ["__tma_0_A_desc", "__tma_1_A_desc"],
+    )
+    assert "__tma_0_A_desc = tl.Gemm_SM90.get_tma_atom" in cubin
+    assert "__tma_1_A_desc = tl.Gemm_SM90.get_tma_atom" in cubin
+    assert "kernel_0(A_, __tma_0_A_desc)" in cubin
+    assert "kernel_1(A_, __tma_1_A_desc)" in cubin
+
+
 @pytest.mark.parametrize("elem_offset", [1, "symbolic"])
 def test_auto_copy_falls_back_for_unproven_descriptor_alignment(elem_offset):
     offsets, descriptors = _descriptor_base_byte_offsets(_auto_copy_program(elem_offset), "sm_90")
+    assert offsets == []
+    assert descriptors == []
+
+
+def test_auto_copy_falls_back_for_symbolically_aligned_device_offset():
+    offsets, descriptors = _descriptor_base_byte_offsets(_symbolically_aligned_copy_program(), "sm_90")
     assert offsets == []
     assert descriptors == []
 
