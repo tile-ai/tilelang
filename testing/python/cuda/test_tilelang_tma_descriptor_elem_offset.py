@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 import tilelang
@@ -169,10 +171,10 @@ def test_auto_copy_falls_back_for_unproven_descriptor_alignment(elem_offset):
 
 
 def test_fp4_unpacked_copy_rejects_16_byte_offset():
-    with pytest.raises(Exception, match="T.tma_copy"):
+    with pytest.raises(Exception, match=re.escape("T.tma_copy")):
         _descriptor_base_byte_offsets(_fp4_unpacked_copy_program(), "sm_100a")
 
 
 def test_fp4_unpacked_copy_rejects_subbyte_offset():
-    with pytest.raises(Exception, match="T.tma_copy"):
+    with pytest.raises(Exception, match=re.escape("T.tma_copy")):
         _descriptor_base_byte_offsets(_fp4_unpacked_copy_program(63), "sm_100a")
