@@ -413,37 +413,6 @@ PrimExpr GetTMADescriptorBaseAddress(const Buffer &buffer) {
               {buffer->data, byte_offset});
 }
 
-int TMARequiredGlobalAddressAlignment(DataType global_dtype,
-                                      DataType shared_dtype) {
-  // CUDA requires 32-byte global addresses for the unpacked-FP4 TensorMap
-  // type (16U4_ALIGN16B), even though the ordinary TMA minimum is 16 bytes.
-  if (IsFP4PackedToUnpackedStorageCopy(global_dtype, shared_dtype)) {
-    return 32;
-  }
-  return 16;
-}
-
-bool CanProveTMADescriptorBaseAligned(const Buffer &buffer,
-                                      DataType shared_dtype,
-                                      arith::Analyzer *analyzer) {
-  if (!buffer->elem_offset.defined() || is_zero(buffer->elem_offset)) {
-    return true;
-  }
-  PrimExpr bit_offset =
-      cast(DataType::Int(64), buffer->elem_offset) *
-      IntImm(DataType::Int(64), TMAPayloadElementBits(buffer->dtype));
-  if (!analyzer->CanProveEqual(
-          FloorMod(bit_offset, IntImm(DataType::Int(64), 8)), 0)) {
-    return false;
-  }
-  PrimExpr byte_offset =
-      TMAGlobalBytesFromElements(buffer->elem_offset, buffer->dtype);
-  int alignment =
-      TMARequiredGlobalAddressAlignment(buffer->dtype, shared_dtype);
-  return analyzer->CanProveEqual(
-      FloorMod(byte_offset, IntImm(DataType::Int(64), alignment)), 0);
-}
-
 // The TMA unit applies the descriptor's swizzle pattern relative to the
 // shared-memory base address, so the base must sit on a swizzle-pattern
 // repeat boundary or the data lands with a shifted phase (silently wrong
