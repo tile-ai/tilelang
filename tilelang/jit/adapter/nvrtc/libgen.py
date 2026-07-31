@@ -18,8 +18,6 @@ from __future__ import annotations
 import importlib
 import logging
 import os.path as osp
-import platform
-import sys
 import tempfile
 from types import ModuleType
 
@@ -29,6 +27,7 @@ from tilelang import tvm as tvm
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.jit.adapter.utils import is_cuda_target
 from tilelang.jit.adapter.nvrtc import is_nvrtc_available, NVRTC_UNAVAILABLE_MESSAGE
+from tilelang.jit.adapter.nvrtc.include_paths import discover_cuda_include_paths
 
 logger = logging.getLogger(__name__)
 
@@ -185,29 +184,13 @@ class NVRTCLibraryGenerator(LibraryGenerator):
 
             cuda_home = CUDA_HOME if CUDA_HOME else "/usr/local/cuda"
 
-            # CUDA Toolkit include layout differs by platform:
-            # * Linux pip wheel ``nvidia-cuXX`` and system CUDA both expose
-            #   per-target trees under ``targets/{arch}-linux/include``.
-            # * Windows pip wheel ``nvidia-cuXX`` and the system CUDA Toolkit
-            #   ship a single flat ``include/`` directory — no ``targets/``
-            #   subtree exists. Hard-coding ``x86_64-linux`` there sends nvrtc
-            #   to a non-existent path so headers like ``nvrtc_std.h`` fail to
-            #   resolve.
-            cuda_include = osp.join(cuda_home, "include")
-            if sys.platform.startswith("win32"):
-                arch_include = cuda_include
-            else:
-                machine = platform.machine()
-                target_arch = "sbsa-linux" if machine in ("aarch64", "arm64") else "x86_64-linux"
-                arch_include = osp.join(cuda_home, "targets", target_arch, "include")
+            cuda_include_paths = discover_cuda_include_paths(cuda_home)
 
             __CUDACC_VER_MAJOR__ = get_nvrtc_version()[0]
             options = [
                 f"-I{tl_template_path}",
                 f"-I{cutlass_path}",
-                f"-I{cuda_include}",
-                f"-I{arch_include}",
-                f"-I{arch_include}/cccl",
+                *(f"-I{include_path}" for include_path in cuda_include_paths),
                 f"-D__CUDACC_VER_MAJOR__={__CUDACC_VER_MAJOR__}",
             ]
 
@@ -220,7 +203,11 @@ class NVRTCLibraryGenerator(LibraryGenerator):
             # forward declarations in ``cute/container/tuple.hpp`` under NVRTC
             # (cute uses variadic packs, cccl uses a single ``_Tp``).
             if __CUDACC_VER_MAJOR__ < 13:
-                options += [f"-I{arch_include}/cuda/std"]
+                options += [
+                    f"-I{include_path}/cuda/std"
+                    for include_path in cuda_include_paths
+                    if not include_path.endswith(osp.join("include", "cccl"))
+                ]
 
             if self.compile_flags:
                 options += [item for flag in self.compile_flags for item in flag.split() if item not in options]
