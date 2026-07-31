@@ -89,5 +89,37 @@ def test_parallel_vectorize_var():
     assert "float2" not in source
 
 
+@tilelang.jit(out_idx=[1])
+def _parallel_vector_store(rows=8, cols=128, lanes=2, dtype=T.int8):
+    @T.prim_func
+    def main(
+        A: T.Tensor((rows, cols * lanes), dtype),
+        B: T.Tensor((rows, cols * lanes), dtype),
+    ):
+        with T.Kernel(1, threads=128):
+            for i, j in T.Parallel(rows, cols):
+                B[i, T.Ramp(j * lanes, 1, lanes)] = A[i, T.Ramp(j * lanes, 1, lanes)]
+
+    return main
+
+
+def test_parallel_vector_store_is_verifiable():
+    """A vector-valued store inside T.Parallel must survive the data race check.
+
+    Comparing the two written vectors as vectors builds a vector-valued
+    predicate the provers cannot consume, which used to abort compilation.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    # Compile for real: a cached artifact would hide a lowering regression.
+    tilelang.disable_cache()
+    try:
+        kernel = _parallel_vector_store()
+    finally:
+        tilelang.enable_cache()
+    data = torch.randint(-8, 8, (8, 256), device="cuda", dtype=torch.int8)
+    torch.testing.assert_close(kernel(data), data)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

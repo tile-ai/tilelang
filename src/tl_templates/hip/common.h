@@ -311,6 +311,37 @@ template <typename T> TL_DEVICE bool All(T *a, int size) {
   return true;
 }
 
+// Layout-aware logical reduction. The load callback maps a logical vector
+// index to the corresponding (possibly swizzled) physical load.
+template <bool IsAny, typename Size, typename Load>
+TL_DEVICE bool LogicalReduceMap(Size size, Load load) {
+  for (Size i = 0; i < size; ++i) {
+    if (static_cast<bool>(load(i)) == IsAny) {
+      return IsAny;
+    }
+  }
+  return !IsAny;
+}
+
+template <bool IsAny, typename Element, int VectorSize, typename Size,
+          typename Load>
+TL_DEVICE bool LogicalVectorReduceMap(Size size, Load load) {
+  for (Size i = 0; i < size; ++i) {
+    auto chunk = load(i);
+    Element elements[VectorSize];
+    static_assert(sizeof(elements) == sizeof(chunk),
+                  "logical reduction vector type has an unexpected size");
+    __builtin_memcpy(elements, &chunk, sizeof(elements));
+#pragma unroll
+    for (int lane = 0; lane < VectorSize; ++lane) {
+      if (static_cast<bool>(elements[lane]) == IsAny) {
+        return IsAny;
+      }
+    }
+  }
+  return !IsAny;
+}
+
 // TODO(gong): support shfl_sync(rocm 7.1.1 provide shfl_sync)
 // shfl_sync func
 template <typename T> TL_DEVICE T shfl_xor(T val, int delta) {

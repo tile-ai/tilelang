@@ -1166,6 +1166,46 @@ std::string CodeGenTileLangHIP::GetBufferRef(DataType t,
   return os.str();
 }
 
+bool CodeGenTileLangHIP::PrintLogicalReduce(const CallNode *op,
+                                            std::ostream &os) {
+  if (!op->op.same_as(tl::logical_reduce())) {
+    return false;
+  }
+
+  ICHECK_EQ(op->args.size(), 3U);
+  const auto *mapping = op->args[0].as<LetNode>();
+  ICHECK(mapping) << "tl.logical_reduce expects a Let mapping expression";
+  const auto *placeholder = mapping->value.as<CallNode>();
+  ICHECK(placeholder && placeholder->op.same_as(tl::logical_reduce_index()))
+      << "tl.logical_reduce expects a logical_reduce_index Let value";
+  const int64_t *is_any = as_const_int(op->args[2]);
+  ICHECK(is_any && (*is_any == 0 || *is_any == 1));
+
+  DataType chunk_dtype = mapping->body.dtype();
+  ICHECK(!chunk_dtype.is_scalable_vector());
+  int vector_size = chunk_dtype.lanes();
+  os << "tl::Logical";
+  if (vector_size > 1) {
+    os << "Vector";
+  }
+  os << "ReduceMap<" << (*is_any ? "true" : "false");
+  if (vector_size > 1) {
+    os << ", ";
+    PrintType(chunk_dtype.element_of(), os);
+    os << ", " << vector_size;
+  }
+  os << ">(";
+  PrintExpr(op->args[1], os);
+  os << ", [&](";
+  PrintType(mapping->var.dtype(), os);
+  os << " " << AllocVarID(mapping->var.get()) << ") { return ";
+  PrintExpr(mapping->body, os);
+  os << "; })";
+  bool removed = var_idmap_.erase(mapping->var.get());
+  ICHECK(removed);
+  return true;
+}
+
 void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
   auto print_extern_call_stmt = [&](std::string name, size_t start = 0,
                                     size_t end = 0) {
@@ -1178,6 +1218,9 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     this->stream << ");\n";
   };
+  if (PrintLogicalReduce(op, os)) {
+    return;
+  }
   if (op->op.same_as(builtin::ptx_cp_async())) {
     // args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
     // args[3] = predicate (optional)
