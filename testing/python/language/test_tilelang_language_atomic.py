@@ -10,9 +10,9 @@ from tilelang import tvm
 
 
 def _check_hopper():
-    if not torch.cuda.is_available():
+    if not torch.cuda.is_available() or torch.version.hip is not None:
         return False
-    props = torch.cuda.get_device_properties(0)
+    props = torch.cuda.get_device_properties(torch.cuda.current_device())
     return (props.major, props.minor) == (9, 0)
 
 
@@ -311,7 +311,6 @@ def tma_atomic_add_compile_program(dtype):
     def main(out: T.Tensor((16, 16), dtype)):
         with T.Kernel(1):
             out_shared = T.alloc_shared((16, 16), dtype=dtype)
-            T.fill(out_shared, 1)
             T.atomic_add(out, out_shared, use_tma=True)
 
     return main
@@ -338,13 +337,13 @@ def test_tma_atomic_add():
     assert kernel.get_kernel_source() == kernel_with_explicit_swizzle.get_kernel_source()
 
 
-@pytest.mark.parametrize("dtype", [T.int16, T.float64])
+@pytest.mark.parametrize("dtype", [T.int16, T.float64, T.uint64, T.float32x2])
 def test_tma_atomic_add_rejects_unsupported_dtype(dtype):
-    with pytest.raises(Exception, match=rf"TMA atomic add does not support dtype {dtype}.*supported dtypes"):
+    with pytest.raises(Exception, match=rf"TMA atomic add does not support dtype {dtype}.*supported scalar dtypes"):
         lower_tma_atomic_add(dtype)
 
 
-@pytest.mark.parametrize("dtype", [T.float32, T.int32])
+@pytest.mark.parametrize("dtype", [T.float16, T.bfloat16, T.float32, T.int32, T.uint32])
 def test_tma_atomic_add_accepts_supported_dtype(dtype):
     artifact = lower_tma_atomic_add(dtype)
     assert "tma_store_add" in artifact.kernel_source

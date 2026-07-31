@@ -314,15 +314,18 @@ struct AtomicAdd {
         << shared_tensor->dtype << " and " << global_tensor->dtype;
 
     DataType dtype = global_tensor->dtype;
+    // uint64 is legal in PTX, but its inferred 64-bit K-inner shared layout is
+    // not currently representable by the TensorMap swizzle selected below.
     bool supports_tma_reduce_add =
-        dtype.is_bfloat16() ||
-        (dtype.is_float() && (dtype.bits() == 16 || dtype.bits() == 32)) ||
-        (dtype.is_int() && dtype.bits() == 32) ||
-        (dtype.is_uint() && (dtype.bits() == 32 || dtype.bits() == 64));
+        dtype.is_scalar() &&
+        (dtype.is_bfloat16() ||
+         (dtype.is_float() && (dtype.bits() == 16 || dtype.bits() == 32)) ||
+         (dtype.is_int() && dtype.bits() == 32) ||
+         (dtype.is_uint() && dtype.bits() == 32));
     ICHECK(supports_tma_reduce_add)
         << "TMA atomic add does not support dtype " << dtype
-        << "; supported dtypes are float16, bfloat16, float32, int32, uint32, "
-           "and uint64";
+        << "; supported scalar dtypes are float16, bfloat16, float32, int32, "
+           "and uint32";
 
     desc.data_type = to_CUtensorMapDataType(global_tensor->dtype);
     desc.global_addr = global_tensor->data;
