@@ -287,15 +287,7 @@ public:
     Map<Var, PrimExpr> vmap;
     Array<Stmt> unrolled;
     for (int i = 0; i < value; ++i) {
-      // The i-th iteration value is min + i * step (step defaults to 1).
-      PrimExpr iter_value;
-      if (op->step.defined() && !is_one(op->step.value())) {
-        iter_value =
-            op->min + make_const(op->loop_var.dtype(), i) * op->step.value();
-      } else {
-        iter_value = op->min + make_const(op->loop_var.dtype(), i);
-      }
-      vmap.Set(op->loop_var, iter_value);
+      vmap.Set(op->loop_var, op->min + make_const(op->loop_var.dtype(), i));
       Stmt step = Substitute(body, vmap);
       step = UnrolledBodyDefFreshener()(std::move(step));
       unrolled.push_back(step);
