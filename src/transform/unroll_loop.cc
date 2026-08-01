@@ -177,7 +177,7 @@ public:
     // Post order so we can collect more information
     Stmt stmt = StmtExprMutator::VisitStmt_(op);
     op = stmt.as<ForNode>();
-    int value = GetExtent(op);
+    int value = GetTripCount(op);
     // condition for auto unroll
     bool auto_unroll =
         (op->kind == ForKind::kSerial && value >= 0 &&
@@ -278,19 +278,21 @@ public:
   }
 
   Stmt Unroll(const ForNode *op) {
-    int value = GetExtent(op);
+    int value = GetTripCount(op);
     // For loop must have a constant integer extent
-    ICHECK_NE(value, -1) << "loop doesn't have a constant integer extent";
-    if (value == 0)
+    ICHECK_GE(value, 0) << "loop doesn't have a constant integer extent";
+    if (value <= 0)
       return Evaluate(0);
+    int step = GetStep(op);
     Stmt body = op->body;
     Map<Var, PrimExpr> vmap;
     Array<Stmt> unrolled;
     for (int i = 0; i < value; ++i) {
-      vmap.Set(op->loop_var, op->min + make_const(op->loop_var.dtype(), i));
-      Stmt step = Substitute(body, vmap);
-      step = UnrolledBodyDefFreshener()(std::move(step));
-      unrolled.push_back(step);
+      vmap.Set(op->loop_var,
+               op->min + make_const(op->loop_var.dtype(), i * step));
+      Stmt step_body = Substitute(body, vmap);
+      step_body = UnrolledBodyDefFreshener()(std::move(step_body));
+      unrolled.push_back(step_body);
     }
     return SeqStmt::Flatten(unrolled);
   }
@@ -309,6 +311,23 @@ private:
       value = static_cast<int>(v1->value);
     }
     return value;
+  }
+
+  // returns the step of the loop
+  int GetStep(const ForNode *op) {
+    if (!op->step.defined()) {
+      return 1;
+    }
+    auto *step = as_const_int(op->step.value());
+    ICHECK(step) << "An loop's step must be constant";
+    return *step;
+  }
+
+  // returns the trip count of the loop
+  int GetTripCount(const ForNode *op) {
+    int extent = GetExtent(op);
+    int step = GetStep(op);
+    return (extent + step - 1) / step;
   }
 
   // maximum number of step to perform auto unroll.
