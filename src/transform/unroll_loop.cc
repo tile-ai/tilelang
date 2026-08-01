@@ -320,14 +320,19 @@ private:
     }
     auto *step = as_const_int(op->step.value());
     ICHECK(step) << "An loop's step must be constant";
+    ICHECK_GT(*step, 0) << "A loop's step must be positive";
     return *step;
   }
 
-  // returns the trip count of the loop
+  // returns the trip count of the loop if it's a constant integer, otherwise
+  // return -1
   int GetTripCount(const ForNode *op) {
     int extent = GetExtent(op);
+    if (extent < 0) {
+      return -1;
+    }
     int step = GetStep(op);
-    return (extent + step - 1) / step;
+    return 1 + (extent - 1) / step;
   }
 
   // maximum number of step to perform auto unroll.
