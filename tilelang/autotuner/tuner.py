@@ -742,6 +742,12 @@ class AutoTuner:
                     benchmark_call_thread.join(timeout=timeout)
                     if benchmark_call_thread.is_alive():
                         result_queue.put((idx, config, jit_kernel, None, None, "timeout", ""))
+                        # Python cannot safely cancel a thread that may be executing
+                        # CUDA code. Do not start the next benchmark on this worker
+                        # until the timed-out call has released its device and state;
+                        # otherwise its work can overlap with and corrupt later
+                        # measurements.
+                        benchmark_call_thread.join()
                         continue
 
                     try:
@@ -1146,7 +1152,8 @@ class AutoTuner:
         if timeout > 0:
             logger.warning(
                 "Benchmark timeout is enforced in benchmark workers by running each benchmark call "
-                "in a daemon sub-thread and waiting up to the configured timeout."
+                "in a daemon sub-thread and waiting up to the configured timeout. Timed-out calls "
+                "are drained before the worker benchmarks another configuration."
             )
         benchmark_target = partial(
             self._benchmark_target,
