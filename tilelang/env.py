@@ -149,6 +149,11 @@ def _find_cuda_home() -> str:
         # Guess #2
         nvcc_path = shutil.which("nvcc")
         if nvcc_path is not None:
+            # ``nvcc`` is commonly exposed through a user-local symlink when
+            # installed from NVIDIA's pip packages. Derive CUDA_HOME from the
+            # compiler's actual location, rather than the directory that
+            # contains that symlink.
+            nvcc_path = os.path.realpath(nvcc_path)
             # Standard CUDA pattern
             if "cuda" in nvcc_path.lower():
                 cuda_home = os.path.dirname(os.path.dirname(nvcc_path))

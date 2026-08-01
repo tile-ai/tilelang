@@ -1,9 +1,12 @@
+import importlib
 import os
 
 import pytest
 
 import tilelang
 from tilelang.env import resolve_pass_profile_threshold_ms
+
+env_module = importlib.import_module("tilelang.env")
 
 
 def _env_var_descriptor(name):
@@ -62,6 +65,36 @@ def test_tilelang_tmp_dir_default_tracks_cache_dir(monkeypatch, tmp_path):
     finally:
         _restore_forced_value("TILELANG_CACHE_DIR", original_cache_forced_value)
         _restore_forced_value("TILELANG_TMP_DIR", original_tmp_forced_value)
+
+
+def test_find_cuda_home_resolves_symlinked_nvcc(monkeypatch, tmp_path):
+    cuda_home = tmp_path / "nvidia" / "cuda-13.0"
+    nvcc = cuda_home / "bin" / "nvcc"
+    nvcc.parent.mkdir(parents=True)
+    nvcc.touch()
+
+    shim = tmp_path / "local" / "bin" / "nvcc"
+    shim.parent.mkdir(parents=True)
+    shim.symlink_to(nvcc)
+
+    monkeypatch.delenv("CUDA_HOME", raising=False)
+    monkeypatch.delenv("CUDA_PATH", raising=False)
+    monkeypatch.setattr(env_module.shutil, "which", lambda _: str(shim))
+
+    assert env_module._find_cuda_home() == str(cuda_home)
+
+
+def test_find_cuda_home_prefers_explicit_environment(monkeypatch, tmp_path):
+    cuda_home = tmp_path / "explicit-cuda"
+    cuda_home.mkdir()
+
+    def unexpected_nvcc_lookup(_):
+        raise AssertionError("unexpected nvcc lookup")
+
+    monkeypatch.setenv("CUDA_HOME", str(cuda_home))
+    monkeypatch.setattr(env_module.shutil, "which", unexpected_nvcc_lookup)
+
+    assert env_module._find_cuda_home() == str(cuda_home)
 
 
 @pytest.mark.parametrize(
