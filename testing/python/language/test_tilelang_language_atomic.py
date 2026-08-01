@@ -3,9 +3,17 @@ import tilelang.testing
 import tilelang.layout
 import tilelang.language as T
 import torch
+from tilelang import tvm
 
 
 # ======================= Thread-level atomic add =======================
+
+
+def _check_hopper():
+    if not torch.cuda.is_available() or torch.version.hip is not None:
+        return False
+    props = torch.cuda.get_device_properties(torch.cuda.current_device())
+    return (props.major, props.minor) == (9, 0)
 
 
 @tilelang.jit
@@ -298,7 +306,23 @@ def tma_atomic_add_program(out, explicit_swizzle=False):
             T.atomic_add(out, out_shared, use_tma=True)
 
 
-@tilelang.testing.requires_cuda
+def tma_atomic_add_compile_program(dtype):
+    @T.prim_func
+    def main(out: T.Tensor((16, 16), dtype)):
+        with T.Kernel(1):
+            out_shared = T.alloc_shared((16, 16), dtype=dtype)
+            T.atomic_add(out, out_shared, use_tma=True)
+
+    return main
+
+
+def lower_tma_atomic_add(dtype):
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+    with target:
+        return tilelang.lower(tma_atomic_add_compile_program(dtype), target=target)
+
+
+@pytest.mark.skipif(not _check_hopper(), reason="Requires Hopper GPU (sm_90)")
 def test_tma_atomic_add():
     out = torch.zeros((16, 16), dtype=torch.float32, device="cuda")
     tma_atomic_add_program(out)
@@ -311,6 +335,18 @@ def test_tma_atomic_add():
     kernel_with_explicit_swizzle = tma_atomic_add_program.compile(out=T.Tensor[(16, 16), T.float32], explicit_swizzle=True)
     # Ensure auto swizzled layout is applied
     assert kernel.get_kernel_source() == kernel_with_explicit_swizzle.get_kernel_source()
+
+
+@pytest.mark.parametrize("dtype", [T.int16, T.float64, T.uint64, T.float32x2])
+def test_tma_atomic_add_rejects_unsupported_dtype(dtype):
+    with pytest.raises(Exception, match=rf"TMA atomic add does not support dtype {dtype}.*supported scalar dtypes"):
+        lower_tma_atomic_add(dtype)
+
+
+@pytest.mark.parametrize("dtype", [T.float16, T.bfloat16, T.float32, T.int32, T.uint32])
+def test_tma_atomic_add_accepts_supported_dtype(dtype):
+    artifact = lower_tma_atomic_add(dtype)
+    assert "tma_store_add" in artifact.kernel_source
 
 
 def run_atomic_add_auto_vectorized(K, M, N, block_M, block_N, dtype=T.float32):
