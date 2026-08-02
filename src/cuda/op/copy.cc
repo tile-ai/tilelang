@@ -10,6 +10,7 @@
 #include <tvm/runtime/logging.h>
 
 #include "cuda/op/copy.h"
+#include "cuda/op/tma_layout.h"
 #include "cuda/target_utils.h"
 #include "cuda/transform/ptx_async_copy_injector.h"
 #include "layout/cute_layout.h"
@@ -402,22 +403,6 @@ bool TmemFragmentNeedsPack16b(const cute::Layout &fragment) {
 } // namespace
 
 namespace cuda {
-
-// The TMA unit applies the descriptor's swizzle pattern relative to the
-// shared-memory base address, so the base must sit on a swizzle-pattern
-// repeat boundary or the data lands with a shifted phase (silently wrong
-// results, no fault). Report the requirement implied by the chosen
-// CU_TENSOR_MAP_SWIZZLE_* mode so MergeSharedMemoryAllocations can align the
-// buffer accordingly.
-static void RequireTMASmemAlignment(const LowerArgs &lower_args,
-                                    const Buffer &shared_tensor,
-                                    int cu_tensor_map_swizzle) {
-  if (!lower_args.require_smem_alignment)
-    return;
-  // CU_TENSOR_MAP_SWIZZLE_* values equal the SwizzleMode canonical ordinals.
-  SwizzleMode mode = SwizzleMode::FromOrdinal(cu_tensor_map_swizzle);
-  lower_args.require_smem_alignment(shared_tensor->data, mode.SmemAlignment());
-}
 
 struct TMAIm2ColDesc {
   size_t rank;
@@ -1827,7 +1812,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
   Array<Range> global_range = is_load ? src_range : dst_range;
   Array<Range> shared_range = is_load ? dst_range : src_range;
 
-  auto fallback_to_normal = [&](const char *reason) -> Stmt {
+  auto fallback_to_normal = [&](const std::string &reason) -> Stmt {
     if (GetIsTmaCopy(op)) {
       LOG(FATAL) << "T.tma_copy() cannot fall back to normal copy in "
                  << "LowerBulk: " << reason << ", src=" << src->name
@@ -1885,50 +1870,33 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
     shared_layout = MakeLinearLayout(shared_shape);
   }
 
-  // Convert the TileLang layout to a possibly swizzled CuTe ComposedLayout.
-  // This computes the swizzle from an arbitrary TileLang layout.
-  // E.g., composed = Sw<3,3,3> o 0 o (64,64,8):(64,1,4096)
-  auto composed = cute::ComposedLayoutFromTileLang(shared_layout);
-  if (!composed.defined()) {
+  // Convert the TileLang layout to a TensorMap-compatible CuTe layout.
+  TMASharedLayoutAnalysis layout_analysis =
+      AnalyzeTMASharedLayout(shared_layout, shared_tensor->dtype);
+  if (!layout_analysis.encoding.has_value()) {
     DLOG(WARNING) << "Shared layout for src: " << src->name
                   << ", dst: " << dst->name
-                  << " is not a CuTe swizzle over an affine layout, fallback "
-                     "to normal copy";
-    return fallback_to_normal("undecodable shared swizzle layout");
+                  << " cannot be encoded for TMA: " << layout_analysis.reason
+                  << ", fallback to normal copy";
+    return fallback_to_normal(layout_analysis.reason);
   }
-  // Recast element-space layout into byte-address space.
-  // Because CuTe swizzle are based on byte addresses.
+  const TMASharedLayoutEncoding &layout_encoding =
+      layout_analysis.encoding.value();
+  desc.swizzle = layout_encoding.swizzle_mode.CanonicalOrdinal();
   int elem_bits = shared_tensor->dtype.bits();
-  // E.g., composed_bytes = Sw<3,4,3> o 0 o (64,64,8):(128,2,8192)
-  auto composed_bytes = composed.value().Recast(elem_bits, /*new_bits=*/8);
-  const auto *sw = composed_bytes->swizzle.get();
-  int b_bits = sw->b_bits, m_base = sw->m_base, s_shift = sw->s_shift;
-  if (!sw->IsSwizzled()) {
-    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
-  } else if (b_bits == 1 && m_base == 4 && s_shift == 3) {
-    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
-  } else if (b_bits == 2 && m_base == 4 && s_shift == 3) {
-    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
-  } else if (b_bits == 3 && m_base == 4 && s_shift == 3) {
-    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
-  } else {
-    DLOG(WARNING) << "Shared swizzle Sw<" << b_bits << "," << m_base << ","
-                  << s_shift << "> for src: " << src->name
-                  << ", dst: " << dst->name
-                  << " is not a TMA swizzle atom, fallback to normal copy";
-    return fallback_to_normal("non-TMA shared swizzle layout");
-  }
+  const cute::SwizzleNode *sw = layout_encoding.composed_bytes->swizzle.get();
 
   // The TMA unit applies the descriptor's swizzle pattern relative to the
   // shared-memory base address, so the base must sit on a swizzle-pattern
   // repeat boundary or the data lands with a shifted phase (silently wrong
   // results, no fault). Report the requirement implied by the chosen swizzle
   // mode so MergeSharedMemoryAllocations can align the buffer accordingly.
-  RequireTMASmemAlignment(lower_args, shared_tensor, desc.swizzle);
+  RequireTMASmemAlignment(lower_args, shared_tensor,
+                          layout_encoding.swizzle_mode);
 
   // logical shared -> physical shared (without swizzle)
   // E.g., smem_plain = (64,64,8):(64,1,4096)
-  auto smem_plain = composed.value()->layout;
+  auto smem_plain = layout_encoding.composed->layout;
 
   // tile -> logical shared -> physical shared (without siwzzle)
   // E.g., tile_to_smem_plain = (64,64,8):(64,1,4096)
@@ -2518,7 +2486,8 @@ Stmt Copy::LowerBulkGather4(const CopyNode &op, const LowerArgs &lower_args,
           << " exceeds " << max_bytes << "B swizzle limit";
     }
   }
-  RequireTMASmemAlignment(lower_args, shared_tensor, desc.swizzle);
+  RequireTMASmemAlignment(lower_args, shared_tensor,
+                          SwizzleMode::FromOrdinal(desc.swizzle));
 
   Call create_descriptor =
       Call(DataType::Handle(), create_tma_descriptor(), desc.EncodeCallArgs());
@@ -2793,7 +2762,7 @@ Stmt Im2Col::Lower(const Im2ColOpNode &op, const LowerArgs &lower_args,
   RequireTMASmemAlignment(
       lower_args,
       lower_args.buffer_remap.count(dst) ? lower_args.buffer_remap[dst] : dst,
-      desc.swizzle);
+      SwizzleMode::FromOrdinal(desc.swizzle));
 
   Call create_desc = Call(DataType::Handle(), create_tma_im2col_descriptor(),
                           desc.EncodeCallArgs());
