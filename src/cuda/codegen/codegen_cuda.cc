@@ -5398,7 +5398,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const SelectNode *op, std::ostream &os) {
   this->PrintType(op->dtype, stream);
   stream << ' ' << r_var << ";\n";
   {
-    std::string c_var = SSAGetID(PrintExpr(op->condition), op->dtype);
+    std::string c_var =
+        SSAGetID(PrintExpr(op->condition), op->condition.dtype());
     std::string t_var = SSAGetID(PrintExpr(op->true_value), op->dtype);
     std::string f_var = SSAGetID(PrintExpr(op->false_value), op->dtype);
 
