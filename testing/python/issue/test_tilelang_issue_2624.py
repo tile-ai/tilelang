@@ -2,6 +2,7 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 import torch
+import pytest
 
 N = 4
 
@@ -19,18 +20,20 @@ def make_kernel(op, dt):
     return main
 
 
-def test_reduce_absmax():
-    A = torch.tensor([100, 10, 20, 30], dtype=torch.uint32, device="cuda")
-    uint32_max = tilelang.compile(make_kernel("max", "uint32"), out_idx=[1])(A)
-    uint32_absmax = tilelang.compile(make_kernel("absmax", "uint32"), out_idx=[1])(A)
-    torch.testing.assert_close(uint32_max, uint32_absmax, rtol=0, atol=0)
-
-
-def test_reduce_abssum():
-    A = torch.tensor([100, 10, 20, 30], dtype=torch.uint32, device="cuda")
-    uint32_sum = tilelang.compile(make_kernel("sum", "uint32"), out_idx=[1])(A)
-    uint32_abssum = tilelang.compile(make_kernel("abssum", "uint32"), out_idx=[1])(A)
-    torch.testing.assert_close(uint32_sum, uint32_abssum, rtol=0, atol=0)
+@pytest.mark.parametrize(
+    "op,dtype",
+    [
+        ("absmax", "uint32"),
+        ("absmax", "uint64"),
+        ("abssum", "uint32"),
+        ("abssum", "uint64"),
+    ],
+)
+def test_reduce_absmax_abssum_with_positive_input(op: str, dtype: str):
+    A = torch.tensor([100, 10, 20, 30], dtype=getattr(torch, dtype), device="cuda")
+    raw_op = tilelang.compile(make_kernel(op.replace("abs", ""), dtype), out_idx=[1])(A)
+    abs_op = tilelang.compile(make_kernel(op, dtype), out_idx=[1])(A)
+    torch.testing.assert_close(raw_op, abs_op, rtol=0, atol=0)
 
 
 if __name__ == "__main__":
