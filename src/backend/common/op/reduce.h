@@ -270,7 +270,8 @@ inline PrimExpr MakeReduce(const ReduceOpNode &op, int vsize,
     if (op.type->IsSum()) {
       return acc + rhs;
     } else if (op.type->IsAbsSum()) {
-      return acc + Max(rhs, -rhs);
+      auto abs_rhs = rhs.dtype().is_uint() ? rhs : Max(rhs, -rhs);
+      return acc + abs_rhs;
     } else if (op.type->IsMax()) {
       return use_nan_op ? Call(acc.dtype(), tl::max_nan(), {acc, rhs})
                         : PrimExpr(Max(acc, rhs));
@@ -278,7 +279,7 @@ inline PrimExpr MakeReduce(const ReduceOpNode &op, int vsize,
       return use_nan_op ? Call(acc.dtype(), tl::min_nan(), {acc, rhs})
                         : PrimExpr(Min(acc, rhs));
     } else if (op.type->IsAbsMax()) {
-      auto abs_rhs = Max(rhs, -rhs);
+      auto abs_rhs = rhs.dtype().is_uint() ? rhs : Max(rhs, -rhs);
       return use_nan_op ? Call(acc.dtype(), tl::max_nan(), {acc, abs_rhs})
                         : PrimExpr(Max(acc, abs_rhs));
     } else if (op.type->IsBitAnd()) {
