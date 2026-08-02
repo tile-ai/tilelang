@@ -5383,7 +5383,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
 
 void CodeGenTileLangCUDA::VisitExpr_(const SelectNode *op, std::ostream &os) {
   // Non-vector cases.
-  if (!op->dtype.is_fixed_length_vector()) {
+  if (!op->condition.dtype().is_fixed_length_vector()) {
     CodeGenC::VisitExpr_(op, os);
     return;
   }
