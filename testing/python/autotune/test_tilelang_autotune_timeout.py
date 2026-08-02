@@ -45,13 +45,14 @@ def test_benchmark_worker_drains_timed_out_call_before_next_benchmark():
     start_event.set()
 
     try:
-        first_result = result_queue.get(timeout=1)
-        assert first_result[0] == 0
-        assert first_result[5] == "timeout"
-        assert slow_call_started.is_set()
+        assert slow_call_started.wait(timeout=1)
+        assert result_queue.empty()
         assert not second_call_started.wait(timeout=0.05)
 
         release_slow_call.set()
+        first_result = result_queue.get(timeout=1)
+        assert first_result[0] == 0
+        assert first_result[5] == "timeout"
         assert first_call_finished.wait(timeout=1)
         second_result = result_queue.get(timeout=1)
         assert second_result[0] == 1
