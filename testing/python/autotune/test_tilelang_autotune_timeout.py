@@ -9,6 +9,8 @@ def test_benchmark_worker_drains_timed_out_call_before_next_benchmark():
     worker_queue = queue.Queue()
     result_queue = queue.Queue()
     start_event = threading.Event()
+    slow_call_started = threading.Event()
+    release_slow_call = threading.Event()
     first_call_finished = threading.Event()
     second_call_started = threading.Event()
     tuner = AutoTuner.__new__(AutoTuner)
@@ -16,7 +18,8 @@ def test_benchmark_worker_drains_timed_out_call_before_next_benchmark():
     def benchmark_target(*, jit_kernel, benchmark_state, benchmark_device):
         del benchmark_state, benchmark_device
         if jit_kernel == "slow":
-            time.sleep(0.15)
+            slow_call_started.set()
+            release_slow_call.wait(timeout=1)
             first_call_finished.set()
         else:
             second_call_started.set()
@@ -41,16 +44,21 @@ def test_benchmark_worker_drains_timed_out_call_before_next_benchmark():
     worker_queue.put(None)
     start_event.set()
 
-    first_result = result_queue.get(timeout=1)
-    assert first_result[0] == 0
-    assert first_result[5] == "timeout"
-    assert not second_call_started.wait(timeout=0.05)
+    try:
+        first_result = result_queue.get(timeout=1)
+        assert first_result[0] == 0
+        assert first_result[5] == "timeout"
+        assert slow_call_started.is_set()
+        assert not second_call_started.wait(timeout=0.05)
 
-    assert first_call_finished.wait(timeout=1)
-    second_result = result_queue.get(timeout=1)
-    assert second_result[0] == 1
-    assert second_result[5] is None
-    assert second_call_started.is_set()
+        release_slow_call.set()
+        assert first_call_finished.wait(timeout=1)
+        second_result = result_queue.get(timeout=1)
+        assert second_result[0] == 1
+        assert second_result[5] is None
+        assert second_call_started.is_set()
+    finally:
+        release_slow_call.set()
+        worker.join(timeout=1)
 
-    worker.join(timeout=1)
     assert not worker.is_alive()
