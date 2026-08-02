@@ -1,6 +1,5 @@
 import queue
 import threading
-import time
 
 from tilelang.autotuner.tuner import AutoTuner, _BenchmarkWorkerState
 
