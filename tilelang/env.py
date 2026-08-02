@@ -149,6 +149,7 @@ def _find_cuda_home() -> str:
         # Guess #2
         nvcc_path = shutil.which("nvcc")
         if nvcc_path is not None:
+
             def cuda_home_from_nvcc(path: str) -> str:
                 if "hpc_sdk" in path.lower():
                     return os.path.dirname(os.path.dirname(os.path.dirname(path)))
