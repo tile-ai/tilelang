@@ -84,15 +84,41 @@ def test_find_cuda_home_resolves_symlinked_nvcc(monkeypatch, tmp_path):
     assert env_module._find_cuda_home() == str(cuda_home)
 
 
-def test_find_cuda_home_prefers_explicit_environment(monkeypatch, tmp_path):
+@pytest.mark.parametrize("env_var", ["CUDA_HOME", "CUDA_PATH"])
+def test_find_cuda_home_prefers_explicit_environment(monkeypatch, tmp_path, env_var):
     cuda_home = tmp_path / "explicit-cuda"
     cuda_home.mkdir()
 
     def unexpected_nvcc_lookup(_):
         raise AssertionError("unexpected nvcc lookup")
 
-    monkeypatch.setenv("CUDA_HOME", str(cuda_home))
+    monkeypatch.delenv("CUDA_HOME", raising=False)
+    monkeypatch.delenv("CUDA_PATH", raising=False)
+    monkeypatch.setenv(env_var, str(cuda_home))
     monkeypatch.setattr(env_module.shutil, "which", unexpected_nvcc_lookup)
+
+    assert env_module._find_cuda_home() == str(cuda_home)
+
+
+def test_find_cuda_home_prefers_visible_complete_toolkit(monkeypatch, tmp_path):
+    cuda_home = tmp_path / "composed-cuda"
+    nvcc = cuda_home / "bin" / "nvcc"
+    cuda_runtime = cuda_home / "include" / "cuda_runtime.h"
+    nvcc.parent.mkdir(parents=True)
+    cuda_runtime.parent.mkdir(parents=True)
+    nvcc.touch()
+    cuda_runtime.touch()
+
+    compiler_home = tmp_path / "compiler-only"
+    compiler_nvcc = compiler_home / "bin" / "nvcc"
+    compiler_nvcc.parent.mkdir(parents=True)
+    compiler_nvcc.touch()
+    nvcc.unlink()
+    nvcc.symlink_to(compiler_nvcc)
+
+    monkeypatch.delenv("CUDA_HOME", raising=False)
+    monkeypatch.delenv("CUDA_PATH", raising=False)
+    monkeypatch.setattr(env_module.shutil, "which", lambda _: str(nvcc))
 
     assert env_module._find_cuda_home() == str(cuda_home)
 

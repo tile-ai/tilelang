@@ -149,21 +149,20 @@ def _find_cuda_home() -> str:
         # Guess #2
         nvcc_path = shutil.which("nvcc")
         if nvcc_path is not None:
-            # ``nvcc`` is commonly exposed through a user-local symlink when
-            # installed from NVIDIA's pip packages. Derive CUDA_HOME from the
-            # compiler's actual location, rather than the directory that
-            # contains that symlink.
-            nvcc_path = os.path.realpath(nvcc_path)
-            # Standard CUDA pattern
-            if "cuda" in nvcc_path.lower():
-                cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
-            # NVIDIA HPC SDK pattern
-            elif "hpc_sdk" in nvcc_path.lower():
-                # Navigate to the root directory of nvhpc
-                cuda_home = os.path.dirname(os.path.dirname(os.path.dirname(nvcc_path)))
-            # Generic fallback for non-standard or symlinked installs
+            def cuda_home_from_nvcc(path: str) -> str:
+                if "hpc_sdk" in path.lower():
+                    return os.path.dirname(os.path.dirname(os.path.dirname(path)))
+                return os.path.dirname(os.path.dirname(path))
+
+            visible_cuda_home = cuda_home_from_nvcc(nvcc_path)
+            # Keep a composed toolkit prefix when it supplies the headers and
+            # libraries around a compiler symlink. Pip CUDA shims instead
+            # resolve into the package root, because their visible prefix does
+            # not contain a usable toolkit.
+            if os.path.exists(os.path.join(visible_cuda_home, "include", "cuda_runtime.h")):
+                cuda_home = visible_cuda_home
             else:
-                cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
+                cuda_home = cuda_home_from_nvcc(os.path.realpath(nvcc_path))
 
         elif _get_package_version("nvidia-cuda-nvcc") is not None:
             # Guess #3
