@@ -296,6 +296,44 @@ def assert_cp_async_access_ptr_transfer_range_legalize():
     _assert_legalize_matches_expected(func, expected)
 
 
+def cp_async_access_ptr_rank2_transfer_range_legalize():
+    dtype = T.float16
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((2, 4), dtype=dtype),
+    ):
+        A_shared = T.alloc_buffer((2,), dtype=dtype, scope="shared")
+        T.ptx_cp_async(
+            T.access_ptr(A_shared[0], "w", 2),
+            T.access_ptr(A[1, 3], "r", 2),
+            2,
+        )
+        T.ptx_commit_group()
+        T.ptx_wait_group(0)
+
+    @T.prim_func
+    def expected(
+        A: T.Tensor((2, 4), dtype=dtype),
+    ):
+        A_shared = T.alloc_buffer((2,), dtype=dtype, scope="shared")
+        T.ptx_cp_async(
+            T.access_ptr(A_shared[0], "w", 2),
+            T.access_ptr(A[1, 3], "r", 2),
+            2,
+            False,
+        )
+        T.ptx_commit_group()
+        T.ptx_wait_group(0)
+
+    return main, expected
+
+
+def assert_cp_async_access_ptr_rank2_transfer_range_legalize():
+    func, expected = cp_async_access_ptr_rank2_transfer_range_legalize()
+    _assert_legalize_matches_expected(func, expected)
+
+
 def cp_async_access_ptr_nonzero_safe_value_legalize():
     dtype = T.float16
 
@@ -640,6 +678,10 @@ def test_cp_async_access_ptr_oob():
 
 def test_cp_async_access_ptr_transfer_range_oob():
     assert_cp_async_access_ptr_transfer_range_legalize()
+
+
+def test_cp_async_access_ptr_rank2_transfer_range_oob():
+    assert_cp_async_access_ptr_rank2_transfer_range_legalize()
 
 
 def test_cp_async_access_ptr_nonzero_safe_value_oob():
