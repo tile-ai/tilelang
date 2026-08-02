@@ -14,7 +14,7 @@ def make_kernel(op, dt):
             As = T.alloc_fragment((N,), dt)
             Bs = T.alloc_fragment((1,), dt)
             T.copy(A, As)
-            (T.reduce_absmax if op == "absmax" else T.reduce_max)(As, Bs, dim=0)
+            getattr(T, "reduce_" + op)(As, Bs, dim=0)
             T.copy(Bs, B)
 
     return main
