@@ -17,6 +17,13 @@ def _restore_forced_value(name, value):
     _env_var_descriptor(name)._forced_value = value
 
 
+def _symlink_or_skip(link, target):
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+
 def test_env_var(monkeypatch):
     desc = _env_var_descriptor("TILELANG_PRINT_ON_COMPILATION")
     original_forced_value = desc._forced_value
@@ -75,7 +82,7 @@ def test_find_cuda_home_resolves_symlinked_nvcc(monkeypatch, tmp_path):
 
     shim = tmp_path / "local" / "bin" / "nvcc"
     shim.parent.mkdir(parents=True)
-    shim.symlink_to(nvcc)
+    _symlink_or_skip(shim, nvcc)
 
     monkeypatch.delenv("CUDA_HOME", raising=False)
     monkeypatch.delenv("CUDA_PATH", raising=False)
@@ -114,7 +121,7 @@ def test_find_cuda_home_prefers_visible_complete_toolkit(monkeypatch, tmp_path):
     compiler_nvcc.parent.mkdir(parents=True)
     compiler_nvcc.touch()
     nvcc.unlink()
-    nvcc.symlink_to(compiler_nvcc)
+    _symlink_or_skip(nvcc, compiler_nvcc)
 
     monkeypatch.delenv("CUDA_HOME", raising=False)
     monkeypatch.delenv("CUDA_PATH", raising=False)
