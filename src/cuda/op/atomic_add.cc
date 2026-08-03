@@ -11,6 +11,7 @@
 
 #include "backend/common/target_utils.h"
 #include "cuda/op/copy.h"
+#include "cuda/op/tma_layout.h"
 #include "layout/layout.h"
 #include "op/builtin.h"
 #include "op/utils.h"
@@ -22,6 +23,10 @@
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/op_attr_types.h>
 
+#include <optional>
+#include <sstream>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace tvm {
@@ -62,6 +67,111 @@ bool UseTMA(const AtomicAddNode &op) {
     }
   }
   return false;
+}
+
+bool IsValidTMAReduceAddDtype(DataType dtype) {
+  if (!dtype.is_scalar()) {
+    return false;
+  }
+  if (dtype.is_bfloat16()) {
+    return true;
+  }
+  if (dtype.is_float()) {
+    return dtype.bits() == 16 || dtype.bits() == 32;
+  }
+  if (dtype.is_int()) {
+    return dtype.bits() == 32;
+  }
+  return dtype.is_uint() && (dtype.bits() == 32 || dtype.bits() == 64);
+}
+
+struct TMAAtomicAddPlan {
+  int tensor_map_dtype;
+  SwizzleMode swizzle_mode;
+};
+
+struct TMAAtomicAddAnalysis {
+  std::optional<TMAAtomicAddPlan> plan;
+  std::string reason;
+};
+
+TMAAtomicAddAnalysis UnsupportedTMAAtomicAdd(std::string reason) {
+  return {std::nullopt, std::move(reason)};
+}
+
+TMAAtomicAddAnalysis AnalyzeTMAAtomicAdd(const AtomicAddNode &op, Target target,
+                                         const Layout &shared_layout) {
+  if (!target.defined() || !TargetHasBulkCopy(target)) {
+    std::ostringstream reason;
+    reason << "TMA atomic add requires a CUDA target with TMA support (SM90+), "
+              "but got target "
+           << target;
+    return UnsupportedTMAAtomicAdd(reason.str());
+  }
+
+  if (op.src->dtype != op.dst->dtype) {
+    std::ostringstream reason;
+    reason << "TMA atomic add between buffer " << op.src->name << " and "
+           << op.dst->name << " requires matching dtypes, but got "
+           << op.src->dtype << " and " << op.dst->dtype;
+    return UnsupportedTMAAtomicAdd(reason.str());
+  }
+
+  DataType dtype = op.dst->dtype;
+  if (!IsValidTMAReduceAddDtype(dtype)) {
+    std::ostringstream reason;
+    reason << "TMA atomic add does not support dtype " << dtype
+           << "; supported scalar dtypes are float16, bfloat16, float32, "
+              "int32, uint32, and uint64";
+    return UnsupportedTMAAtomicAdd(reason.str());
+  }
+
+  TMASharedLayoutAnalysis layout_analysis =
+      AnalyzeTMASharedLayout(shared_layout, dtype);
+  if (!layout_analysis.encoding.has_value()) {
+    std::ostringstream reason;
+    reason << "TMA atomic add cannot encode the shared layout for buffer "
+           << op.src->name << ": " << layout_analysis.reason;
+    return UnsupportedTMAAtomicAdd(reason.str());
+  }
+
+  TMAAtomicAddPlan plan{
+      to_CUtensorMapDataType(dtype),
+      layout_analysis.encoding.value().swizzle_mode,
+  };
+  return {std::move(plan), ""};
+}
+
+Layout MakeTMAAtomicAddSharedLayout(const Buffer &shared_tensor) {
+  ICHECK_GE(shared_tensor->shape.size(), 2U)
+      << "TMA atomic add layout inference requires a rank-2+ shared buffer";
+  int ndim = static_cast<int>(shared_tensor->shape.size());
+  const int64_t *mat_stride = as_const_int(shared_tensor->shape[ndim - 2]);
+  const int64_t *mat_continuous = as_const_int(shared_tensor->shape[ndim - 1]);
+  ICHECK(mat_stride != nullptr && mat_continuous != nullptr)
+      << "TMA atomic add requires constant innermost shared-buffer shapes, "
+         "but got "
+      << shared_tensor->shape;
+
+  Layout inferred_layout = ComputeLinearLayout(shared_tensor);
+  int element_bits = shared_tensor->dtype.bits();
+  if ((element_bits == 16 || element_bits == 32) && *mat_stride % 8 == 0) {
+    int vector_size = 128 / element_bits;
+    if (*mat_continuous % (vector_size * 8) == 0) {
+      inferred_layout = MakeFullBankSwizzleLayout(shared_tensor);
+    } else if (*mat_continuous % (vector_size * 4) == 0) {
+      inferred_layout = MakeHalfBankSwizzleLayout(shared_tensor);
+    } else if (*mat_continuous % (vector_size * 2) == 0) {
+      inferred_layout = MakeQuarterBankSwizzleLayout(shared_tensor);
+    }
+  }
+
+  TMASharedLayoutAnalysis layout_analysis =
+      AnalyzeTMASharedLayout(inferred_layout, shared_tensor->dtype);
+  ICHECK(layout_analysis.encoding.has_value())
+      << "Internal error: inferred TMA atomic-add layout is not encodable: "
+      << layout_analysis.reason;
+  return inferred_layout;
 }
 
 Array<IterVar> MakeIterVars(const AtomicAddNode &op) {
@@ -271,21 +381,8 @@ struct AtomicAdd {
 
     if (level == InferLevel::kFree &&
         !layout_args.layout_map.count(shared_tensor)) {
-      int dim = shared_tensor->shape.size();
-      const int64_t mat_stride = *as_const_int(shared_tensor->shape[dim - 2]);
-      const int64_t mat_continuous =
-          *as_const_int(shared_tensor->shape[dim - 1]);
-      Layout swizzle_layout_2d =
-          MakeGemmABLayoutHopper(mat_stride, mat_continuous, mat_continuous,
-                                 shared_tensor->dtype.bits(), /*k_inner=*/true);
-      if (StructuralEqual()(swizzle_layout_2d, MakeLinearLayout(Array<PrimExpr>{
-                                                   Integer(mat_stride),
-                                                   Integer(mat_continuous)}))) {
-        result_map.Set(shared_tensor, ComputeLinearLayout(shared_tensor));
-      } else {
-        result_map.Set(shared_tensor, ExpandLayoutToMatchBuffer(
-                                          swizzle_layout_2d, shared_tensor));
-      }
+      result_map.Set(shared_tensor,
+                     MakeTMAAtomicAddSharedLayout(shared_tensor));
     }
 
     return result_map;
@@ -308,26 +405,22 @@ struct AtomicAdd {
     ICHECK(desc.rank >= 1 && desc.rank <= 5)
         << "TMA reduce only supports 1-5 dimensions, got " << desc.rank;
 
-    ICHECK(global_tensor->dtype == shared_tensor->dtype)
-        << "AtomicAdd between buffer " << shared_tensor->name << " and "
-        << global_tensor->name << " with different data type "
-        << shared_tensor->dtype << " and " << global_tensor->dtype;
+    Layout shared_layout = MakeLinearLayout(shared_tensor->shape);
+    if (lower_args.layout_map.count(shared_tensor)) {
+      shared_layout = lower_args.layout_map.at(shared_tensor);
+      ICHECK(lower_args.buffer_remap.count(shared_tensor))
+          << "shared_tensor: " << shared_tensor->name
+          << " not found in buffer_remap";
+      shared_tensor = lower_args.buffer_remap.at(shared_tensor);
+    }
 
-    DataType dtype = global_tensor->dtype;
-    // uint64 is legal in PTX, but its inferred 64-bit K-inner shared layout is
-    // not currently representable by the TensorMap swizzle selected below.
-    bool supports_tma_reduce_add =
-        dtype.is_scalar() &&
-        (dtype.is_bfloat16() ||
-         (dtype.is_float() && (dtype.bits() == 16 || dtype.bits() == 32)) ||
-         (dtype.is_int() && dtype.bits() == 32) ||
-         (dtype.is_uint() && dtype.bits() == 32));
-    ICHECK(supports_tma_reduce_add)
-        << "TMA atomic add does not support dtype " << dtype
-        << "; supported scalar dtypes are float16, bfloat16, float32, int32, "
-           "and uint32";
+    TMAAtomicAddAnalysis analysis =
+        AnalyzeTMAAtomicAdd(op, lower_args.target, shared_layout);
+    ICHECK(analysis.plan.has_value())
+        << analysis.reason << SpanHintSuffix({op.dst->span, op.src->span});
+    const TMAAtomicAddPlan &plan = analysis.plan.value();
 
-    desc.data_type = to_CUtensorMapDataType(global_tensor->dtype);
+    desc.data_type = plan.tensor_map_dtype;
     desc.global_addr = global_tensor->data;
     desc.global_shape = ReverseArray(global_tensor->shape);
     Array<PrimExpr> global_coords =
@@ -352,64 +445,17 @@ struct AtomicAdd {
     desc.smem_stride = Array<PrimExpr>(desc.rank, PrimExpr(1));
     desc.l2_promotion = static_cast<int>(CU_TENSOR_MAP_L2_PROMOTION_L2_128B);
     desc.oob_fill = static_cast<int>(CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
-
-    auto linear_layout = MakeLinearLayout(shared_tensor->shape);
-    Buffer shared_tensor_unmapped = shared_tensor;
     desc.interleave = static_cast<int>(CU_TENSOR_MAP_INTERLEAVE_NONE);
-    Layout shared_layout;
-    if (lower_args.layout_map.count(shared_tensor)) {
-      shared_layout = lower_args.layout_map.at(shared_tensor);
-      ICHECK(lower_args.buffer_remap.count(shared_tensor))
-          << "shared_tensor: " << shared_tensor->name
-          << " not found in buffer_remap";
-      shared_tensor = lower_args.buffer_remap.at(shared_tensor);
-    }
-    if (!shared_layout.defined()) {
-      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
-    } else if (StructuralEqual()(shared_layout, linear_layout)) {
-      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
-    } else {
-      ICHECK(shared_layout->InputDim() >= 2) << "Cannot detect TMA layout.";
-      const int ndim = static_cast<int>(shared_layout->InputDim());
-      auto stride = as_const_int(shared_layout->InputShape()[ndim - 2]);
-      auto continuous = as_const_int(shared_layout->InputShape()[ndim - 1]);
-      ICHECK(stride != nullptr && continuous != nullptr);
-      if (StructuralEqual()(shared_layout, MakeQuarterBankSwizzleLayout(
-                                               shared_tensor_unmapped))) {
-        desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
-      } else if (StructuralEqual()(
-                     shared_layout,
-                     MakeHalfBankSwizzleLayout(shared_tensor_unmapped))) {
-        desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
-      } else if (StructuralEqual()(
-                     shared_layout,
-                     MakeFullBankSwizzleLayout(shared_tensor_unmapped))) {
-        desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
-      } else if (StructuralEqual()(
-                     shared_layout,
-                     MakeGemmABLayoutPadded(*stride, *continuous,
-                                            shared_tensor->dtype.bits()))) {
-        DLOG(WARNING)
-            << "AtomicAdd TMA cannot support a padded layout for src: "
-            << op.src->name << ", dst: " << op.dst->name
-            << " fallback to none swizzle";
-        desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
-      } else {
-        DLOG(WARNING) << "AtomicAdd TMA unsupported swizzle layout for src: "
-                      << op.src->name << ", dst: " << op.dst->name
-                      << " fallback to none swizzle";
-        desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
-      }
-    }
+    desc.swizzle = plan.swizzle_mode.CanonicalOrdinal();
+    RequireTMASmemAlignment(lower_args, shared_tensor, plan.swizzle_mode);
 
     auto inner_box_dim = as_const_int(desc.smem_box[0]);
     ICHECK(inner_box_dim != nullptr)
         << "inner_box_dim must be a constant integer for TMA atomic add";
     int instruction_dim = *inner_box_dim;
-    if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
-      instruction_dim = 64 / shared_tensor->dtype.bytes();
-    } else if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B)) {
-      instruction_dim = 128 / shared_tensor->dtype.bytes();
+    if (!plan.swizzle_mode.IsNone()) {
+      instruction_dim =
+          plan.swizzle_mode.ByteWidth() / shared_tensor->dtype.bytes();
     }
     if (instruction_dim > 256) {
       ICHECK((*inner_box_dim) % 256 == 0)
@@ -420,25 +466,6 @@ struct AtomicAdd {
         << "inner_box_dim: " << *inner_box_dim
         << " is not divisible by instruction_dim: " << instruction_dim;
     desc.smem_box.Set(0, PrimExpr(instruction_dim));
-
-    int inner_box_dim_bytes = instruction_dim * shared_tensor->dtype.bytes();
-    struct SwizzleCheck {
-      int swizzle;
-      int max_dim;
-    };
-    static const std::vector<SwizzleCheck> swizzle_checks = {
-        {static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B), 32},
-        {static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B), 64},
-        {static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B), 128},
-    };
-    for (const auto &check : swizzle_checks) {
-      if (desc.swizzle == check.swizzle &&
-          inner_box_dim_bytes > check.max_dim) {
-        DLOG(WARNING) << "AtomicAdd TMA cannot support swizzled layout with "
-                         "inner_box_dim_bytes > "
-                      << check.max_dim;
-      }
-    }
 
     Array<PrimExpr> shared_indices;
     for (auto r : shared_range) {

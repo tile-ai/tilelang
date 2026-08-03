@@ -9,13 +9,6 @@ from tilelang import tvm
 # ======================= Thread-level atomic add =======================
 
 
-def _check_hopper():
-    if not torch.cuda.is_available() or torch.version.hip is not None:
-        return False
-    props = torch.cuda.get_device_properties(torch.cuda.current_device())
-    return (props.major, props.minor) == (9, 0)
-
-
 @tilelang.jit
 def atomic_add_program(K, M, N, block_M, block_N, dtype=T.float32):
     @T.prim_func
@@ -306,23 +299,59 @@ def tma_atomic_add_program(out, explicit_swizzle=False):
             T.atomic_add(out, out_shared, use_tma=True)
 
 
-def tma_atomic_add_compile_program(dtype):
+@tilelang.jit
+def tma_atomic_add_uint64_program(out):
+    out: T.Tensor[(16, 16), T.uint64]
+
+    with T.Kernel(1):
+        out_shared = T.alloc_shared((16, 16), dtype=T.uint64)
+        T.fill(out_shared, 1)
+        for _ in range(4):
+            T.atomic_add(out, out_shared, use_tma=True)
+
+
+@tilelang.jit
+def tma_atomic_add_32b_swizzle_program(out):
+    out: T.Tensor[(16, 24), T.float32]
+
+    with T.Kernel(1):
+        out_shared = T.alloc_shared((16, 24), dtype=T.float32)
+        T.fill(out_shared, 1)
+        T.atomic_add(out, out_shared, use_tma=True)
+
+
+def tma_atomic_add_compile_program(dtype, shape=(16, 16), explicit_layout=False):
     @T.prim_func
-    def main(out: T.Tensor((16, 16), dtype)):
+    def main(out: T.Tensor(shape, dtype)):
         with T.Kernel(1):
-            out_shared = T.alloc_shared((16, 16), dtype=dtype)
+            out_shared = T.alloc_shared(shape, dtype=dtype)
+            if explicit_layout:
+                T.annotate_layout({out_shared: tilelang.layout.make_wgmma_swizzled_layout(out_shared)})
             T.atomic_add(out, out_shared, use_tma=True)
 
     return main
 
 
-def lower_tma_atomic_add(dtype):
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+def lower_tma_atomic_add(dtype, arch="sm_90", shape=(16, 16), explicit_layout=False):
+    target = tvm.target.Target({"kind": "cuda", "arch": arch})
     with target:
-        return tilelang.lower(tma_atomic_add_compile_program(dtype), target=target)
+        return tilelang.lower(
+            tma_atomic_add_compile_program(dtype, shape=shape, explicit_layout=explicit_layout),
+            target=target,
+        )
 
 
-@pytest.mark.skipif(not _check_hopper(), reason="Requires Hopper GPU (sm_90)")
+def get_tma_atomic_add_descriptor_args(artifact):
+    for func in artifact.host_mod.functions.values():
+        if func.attrs is None or "tma_descriptor_args" not in func.attrs:
+            continue
+        descriptors = list(func.attrs["tma_descriptor_args"].values())
+        assert len(descriptors) == 1
+        return list(descriptors[0])
+    raise AssertionError("TMA descriptor metadata not found")
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_tma_atomic_add():
     out = torch.zeros((16, 16), dtype=torch.float32, device="cuda")
     tma_atomic_add_program(out)
@@ -337,16 +366,65 @@ def test_tma_atomic_add():
     assert kernel.get_kernel_source() == kernel_with_explicit_swizzle.get_kernel_source()
 
 
-@pytest.mark.parametrize("dtype", [T.int16, T.float64, T.uint64, T.float32x2])
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tma_atomic_add_uint64_runtime():
+    out = torch.zeros((16, 16), dtype=torch.uint64, device="cuda")
+    tma_atomic_add_uint64_program(out)
+    torch.testing.assert_close(out, torch.full_like(out, 4), rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tma_atomic_add_32b_swizzle_runtime():
+    out = torch.zeros((16, 24), dtype=torch.float32, device="cuda")
+    tma_atomic_add_32b_swizzle_program(out)
+    torch.testing.assert_close(out, torch.ones_like(out), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [T.int16, T.int64, T.float64, T.float32x2])
 def test_tma_atomic_add_rejects_unsupported_dtype(dtype):
-    with pytest.raises(Exception, match=rf"TMA atomic add does not support dtype {dtype}.*supported scalar dtypes"):
+    with pytest.raises(
+        tvm.error.InternalError,
+        match=rf"TMA atomic add does not support dtype {dtype}.*supported scalar dtypes",
+    ):
         lower_tma_atomic_add(dtype)
 
 
-@pytest.mark.parametrize("dtype", [T.float16, T.bfloat16, T.float32, T.int32, T.uint32])
-def test_tma_atomic_add_accepts_supported_dtype(dtype):
+@pytest.mark.parametrize("dtype", [T.float16, T.bfloat16, T.float32, T.int32, T.uint32, T.uint64])
+def test_tma_atomic_add_accepts_ptx_dtype(dtype):
     artifact = lower_tma_atomic_add(dtype)
     assert "tma_store_add" in artifact.kernel_source
+
+
+def test_tma_atomic_add_uint64_uses_linear_layout():
+    artifact = lower_tma_atomic_add(T.uint64)
+    descriptor_args = get_tma_atomic_add_descriptor_args(artifact)
+    # The final four descriptor arguments are interleave, swizzle, L2
+    # promotion, and OOB fill. uint64 intentionally uses no swizzle because
+    # its GEMM K-inner layout is not representable by TensorMap.
+    assert descriptor_args[-3].value == 0
+
+
+def test_tma_atomic_add_splits_32b_swizzle_box():
+    artifact = lower_tma_atomic_add(T.float32, shape=(16, 24))
+    descriptor_args = get_tma_atomic_add_descriptor_args(artifact)
+    assert descriptor_args[-3].value == 1
+    assert artifact.kernel_source.count("tma_store_add") == 3
+
+
+def test_tma_atomic_add_rejects_pre_hopper_target():
+    with pytest.raises(
+        tvm.error.InternalError,
+        match=r"TMA atomic add requires a CUDA target with TMA support \(SM90\+\)",
+    ):
+        lower_tma_atomic_add(T.float32, arch="sm_80")
+
+
+def test_tma_atomic_add_rejects_unencodable_explicit_layout():
+    with pytest.raises(
+        tvm.error.InternalError,
+        match=r"TMA atomic add cannot encode the shared layout.*not representable by a TensorMap descriptor",
+    ):
+        lower_tma_atomic_add(T.uint64, explicit_layout=True)
 
 
 def run_atomic_add_auto_vectorized(K, M, N, block_M, block_N, dtype=T.float32):
