@@ -92,37 +92,6 @@ def format_target_code_for_gencode(target_code: object | None) -> str | None:
     return code_list[0] if len(code_list) == 1 else f"[{','.join(code_list)}]"
 
 
-def _nvcc_parallel_flags() -> list[str]:
-    """Opt-in nvcc parallel flags from ``TL_NVCC_THREADS`` (else ``[]``).
-
-    Emits ``--threads N`` (CUDA >= 11.2) and ``--split-compile N`` (>= 12.1):
-    scheduling-only (identical SASS), faster on large multi-kernel TUs.
-    """
-    raw = os.environ.get("TL_NVCC_THREADS")
-    if raw is None:
-        return []
-    try:
-        n = int(raw)
-    except ValueError:
-        return []
-    if n < 0:
-        return []
-
-    try:
-        version = get_cuda_version()  # (major, minor, ...)
-        major, minor = version[0], version[1] if len(version) > 1 else 0
-    except Exception:
-        return []
-
-    flags: list[str] = []
-    if (major, minor) >= (11, 2):
-        flags += ["--threads", str(n)]
-        # --split-compile was introduced in CUDA 12.1 (absent from 11.x and 12.0 nvcc).
-        if (major, minor) >= (12, 1):
-            flags += ["--split-compile", str(n)]
-    return flags
-
-
 def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target=None, verbose=False):
     """Compile cuda code with NVCC from env.
 
@@ -183,8 +152,6 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
     cmd += [f"--{target_format}", "-O3"]
     # Always include line info for better profiling and mapping
     cmd += ["-lineinfo"]
-    # Opt-in parallel device compilation (identical SASS); helps large multi-kernel TUs.
-    cmd += _nvcc_parallel_flags()
     if isinstance(arch, list):
         cmd += arch
     elif isinstance(arch, str):
