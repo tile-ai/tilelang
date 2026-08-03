@@ -44,7 +44,7 @@ class MQALogitsConfig:
         assert self.seq_len <= self.seq_len_kv, "seq_len must be <= seq_len_kv for the demo causal ranges"
         assert self.seq_len_kv - self.seq_len >= 128, "seq_len_kv must exceed seq_len by at least one 128-wide tile"
         assert self.seq_len % self.block_q == 0, "seq_len must be divisible by block_q"
-        assert self.seq_len_kv % 128 == 0, "seq_len_kv must be divisible by 128"
+        assert self.seq_len_kv % 256 == 0, "seq_len_kv must be divisible by the 256-wide KV tile"
         assert self.logits_dtype in (
             "float32",
             "bfloat16",
@@ -263,7 +263,6 @@ def mqa_logits_fp4_persistent_ws_kernel(
     heads: int = 64,
     head_dim: int = 128,
     logits_stride: int = 4096,
-    compressed_logits: bool = False,
     logits_dtype=T.float32,
 ):
     block_q = 128 // heads
@@ -565,7 +564,6 @@ def mqa_logits_fp8_persistent_ws_kernel(
     heads: int = 64,
     head_dim: int = 128,
     logits_stride: int = 4096,
-    compressed_logits: bool = False,
     logits_dtype=T.float32,
 ):
     block_q = 128 // heads
@@ -953,7 +951,6 @@ def run_example(config: MQALogitsConfig, dtype: str, check: bool = True) -> None
             heads=config.num_heads,
             head_dim=config.head_dim,
             logits_stride=config.seq_len_kv,
-            compressed_logits=False,
             logits_dtype=_tilelang_logits_dtype(config.logits_dtype),
         )
     else:
@@ -973,7 +970,6 @@ def run_example(config: MQALogitsConfig, dtype: str, check: bool = True) -> None
             heads=config.num_heads,
             head_dim=config.head_dim,
             logits_stride=config.seq_len_kv,
-            compressed_logits=False,
             logits_dtype=_tilelang_logits_dtype(config.logits_dtype),
         )
 

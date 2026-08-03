@@ -104,7 +104,6 @@ def bench_case(config: MQALogitsConfig, dtype: str, check: bool = True, warmup: 
                 heads=config.num_heads,
                 head_dim=config.head_dim,
                 logits_stride=config.seq_len_kv,
-                compressed_logits=False,
                 logits_dtype=_tilelang_logits_dtype(config.logits_dtype),
             )
 
@@ -130,7 +129,6 @@ def bench_case(config: MQALogitsConfig, dtype: str, check: bool = True, warmup: 
                 heads=config.num_heads,
                 head_dim=config.head_dim,
                 logits_stride=config.seq_len_kv,
-                compressed_logits=False,
                 logits_dtype=_tilelang_logits_dtype(config.logits_dtype),
             )
 
@@ -144,7 +142,8 @@ def bench_case(config: MQALogitsConfig, dtype: str, check: bool = True, warmup: 
             weights=data["weights"],
             cu_seq_len_k_start=data["ks"],
             cu_seq_len_k_end=data["ke"],
-            clean_logits=True,
+            # Match TileLang and TIRx's raw-kernel benchmark contract.
+            clean_logits=False,
             max_seqlen_k=0,
             logits_dtype=_torch_logits_dtype(config.logits_dtype),
         )

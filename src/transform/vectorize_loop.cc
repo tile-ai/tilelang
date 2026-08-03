@@ -1496,6 +1496,17 @@ private:
     return found;
   }
 
+  bool ContainsBufferElementLoad(const PrimExpr &expr, const Buffer &buffer,
+                                 const Array<PrimExpr> &indices) const {
+    bool found = false;
+    PostOrderVisit(expr, [&](const ObjectRef &node) {
+      if (!found) {
+        found = IsSameBufferElement(node.as<BufferLoadNode>(), buffer, indices);
+      }
+    });
+    return found;
+  }
+
   PrimExpr MakeHorizontalVectorSum(const PrimExpr &vec, int lanes,
                                    const std::string &name_hint,
                                    bool use_packed_fold,
@@ -1548,6 +1559,7 @@ private:
                                  Array<Stmt> *rewritten) const {
     bool found_alloc = false;
     bool found_zero_init = false;
+    bool found_accumulating_update = false;
     Array<Stmt> candidate;
     for (const Stmt &stmt : stmts) {
       if (const auto *alloc = stmt.as<AllocBufferNode>();
@@ -1559,18 +1571,32 @@ private:
         continue;
       }
       if (const auto *store = stmt.as<BufferStoreNode>();
-          store != nullptr && store->buffer.same_as(vec_buffer) &&
-          IndicesEqual(store->indices, vec_indices) &&
-          IsZeroVector(store->value)) {
-        if (found_zero_init) {
+          store != nullptr && store->buffer.same_as(vec_buffer)) {
+        if (!found_alloc || !IndicesEqual(store->indices, vec_indices)) {
           return false;
         }
-        found_zero_init = true;
+        if (IsZeroVector(store->value)) {
+          if (found_zero_init || found_accumulating_update) {
+            return false;
+          }
+          found_zero_init = true;
+          continue;
+        }
+        PrimExpr rhs;
+        if (!found_zero_init || !ExtractSelfAddRHS(store, &rhs) ||
+            ContainsBufferElementLoad(rhs, vec_buffer, vec_indices)) {
+          return false;
+        }
+        found_accumulating_update = true;
+        candidate.push_back(stmt);
         continue;
+      }
+      if (ContainsBufferElementAccess(stmt, vec_buffer, vec_indices)) {
+        return false;
       }
       candidate.push_back(stmt);
     }
-    if (!found_alloc || !found_zero_init) {
+    if (!found_alloc || !found_zero_init || !found_accumulating_update) {
       return false;
     }
     *rewritten = candidate;
@@ -1764,7 +1790,7 @@ private:
           BufferStore(acc_vec, acc_vec_load + vec_load, {Integer(0)}));
     }
 
-    Stmt new_loop_body = SeqStmt(new_body_stmts);
+    Stmt new_loop_body = SeqStmt::Flatten(new_body_stmts);
     Stmt new_loop =
         For(loop->loop_var, loop->min, loop->extent, loop->kind, new_loop_body,
             loop->thread_binding, loop->annotations, loop->step, loop->span);
@@ -1818,7 +1844,12 @@ tvm::transform::Pass VectorizeLoop(bool enable_vectorize = true) {
     auto *n = f.CopyOnWrite();
     if (enable_vectorize) {
       n->body = tvm::tl::LoopVectorizer()(std::move(n->body));
-      n->body = tvm::tl::CrossLoopVectorReductionHoister()(std::move(n->body));
+      bool enable_fast_math =
+          ctx->GetConfig<Bool>(kEnableFastMath, Bool(false)).value();
+      if (enable_fast_math) {
+        n->body =
+            tvm::tl::CrossLoopVectorReductionHoister()(std::move(n->body));
+      }
     } else {
       n->body = tvm::tl::VectorizeSkipper()(std::move(n->body));
     }

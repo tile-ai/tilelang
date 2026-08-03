@@ -60,6 +60,21 @@ def test_tmem_base_is_cached_per_thread_after_allocation_sync():
         with T.Kernel(1, threads=128):
             C_tmem = T.alloc_tmem([128, 128], T.float32)
             T.evaluate(C_tmem[0, 0])
+            T.ptx_tcgen05_mma_ss(
+                "float16",
+                0,
+                0,
+                0,
+                0,
+                C_tmem.data,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
 
     body = _apply(func)["main"].body
     allocated = []
@@ -81,6 +96,8 @@ def test_tmem_base_is_cached_per_thread_after_allocation_sync():
     assert cache.value.buffer.scope() == "shared"
     assert sum(load.buffer.same_as(cache.value.buffer) for load in loads) == 1
     assert all(buffer.name != "C_tmem_base" for buffer in allocated)
+    mma = _collect_calls(body, "tl.ptx_tcgen05_mma_ss")[0]
+    assert mma.args[5].same_as(cache.var)
 
 
 @tilelang.testing.requires_cuda

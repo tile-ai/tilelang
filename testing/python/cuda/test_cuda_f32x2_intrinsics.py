@@ -92,8 +92,8 @@ def _make_unary_kernel(op_func, dtype_tl):
 # ---------------------------------------------------------------------------
 
 
-def _lower_to_cuda_source(func, target=SM80_TARGET) -> str:
-    with tvm.transform.PassContext(), tvm.target.Target(target):
+def _lower_to_cuda_source(func, target=SM80_TARGET, pass_configs=None) -> str:
+    with tvm.transform.PassContext(config=pass_configs), tvm.target.Target(target):
         artifact = tilelang.lower(func, target=target)
     assert artifact.kernel_source is not None
     return artifact.kernel_source
@@ -253,6 +253,55 @@ def _make_auto_vec_scalar_reduction_chunks_kernel(chunks: int = 4, width: int = 
             Out[tid] = acc[0]
 
     return main
+
+
+def _make_cross_loop_vector_reduction_ir(*, accumulating: bool, observe=False, self_dependent_rhs=False):
+    f32 = tvm.DataType("float32")
+    f32x4 = f32.with_lanes(4)
+    zero = tvm.tirx.FloatImm("float32", 0)
+    acc = tvm.tirx.decl_buffer((1,), f32, name="acc", scope="local")
+    vec = tvm.tirx.decl_buffer((1,), f32x4, name="vec", scope="local")
+    observed = tvm.tirx.decl_buffer((4,), f32, name="observed", scope="local")
+    c = tvm.tirx.Var("c", "int32")
+    vec_load = tvm.tirx.BufferLoad(vec, (0,))
+
+    horizontal_sum = tvm.tirx.Shuffle((vec_load,), (0,))
+    for lane in range(1, 4):
+        horizontal_sum += tvm.tirx.Shuffle((vec_load,), (lane,))
+
+    update = tvm.tirx.Broadcast(tvm.tirx.Cast("float32", c), 4)
+    if self_dependent_rhs:
+        update = vec_load + update
+    if accumulating:
+        update = vec_load + update
+    loop_body = [
+        tvm.tirx.AllocBuffer(vec),
+        tvm.tirx.BufferStore(vec, tvm.tirx.Broadcast(zero, 4), (0,)),
+        tvm.tirx.BufferStore(vec, update, (0,)),
+    ]
+    if observe:
+        loop_body.append(tvm.tirx.BufferStore(observed, tvm.tirx.Shuffle((vec_load,), (0,)), (c,)))
+    loop_body.append(tvm.tirx.BufferStore(acc, tvm.tirx.BufferLoad(acc, (0,)) + horizontal_sum, (0,)))
+    loop = tvm.tirx.For(
+        c,
+        0,
+        4,
+        tvm.tirx.ForKind.SERIAL,
+        tvm.tirx.SeqStmt(loop_body),
+    )
+    target = tvm.target.Target(SM100_TARGET)
+    outer_body = [
+        tvm.tirx.AllocBuffer(acc),
+        tvm.tirx.BufferStore(acc, zero, (0,)),
+    ]
+    if observe:
+        outer_body.append(tvm.tirx.AllocBuffer(observed))
+    outer_body.append(loop)
+    func = tvm.tirx.PrimFunc(
+        (),
+        tvm.tirx.SeqStmt(outer_body),
+    ).with_attr("target", target)
+    return tvm.IRModule({"main": func}), target
 
 
 # ===================================================================
@@ -462,7 +511,8 @@ def test_codegen_auto_vec_scalar_reduction_f32_sm100(unit_loop):
 @tilelang.testing.requires_cuda_compute_version(10)
 def test_codegen_auto_vec_scalar_reduction_chunk_accumulator_f32_sm100():
     func = _make_auto_vec_scalar_reduction_chunks_kernel()
-    src = _lower_to_cuda_source(func, target=SM100_TARGET)
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True}
+    src = _lower_to_cuda_source(func, target=SM100_TARGET, pass_configs=pass_configs)
     scalar_updates = [line for line in src.splitlines() if "acc[0] = (acc[0] +" in line]
     assert src.count("tl::fma2") == 4
     assert src.count("tl::add2") == 1
@@ -470,9 +520,78 @@ def test_codegen_auto_vec_scalar_reduction_chunk_accumulator_f32_sm100():
 
 
 @tilelang.testing.requires_cuda_compute_version(10)
+def test_codegen_auto_vec_scalar_reduction_preserves_chunk_order_without_fast_math():
+    func = _make_auto_vec_scalar_reduction_chunks_kernel()
+    src = _lower_to_cuda_source(func, target=SM100_TARGET)
+    scalar_updates = [line for line in src.splitlines() if "acc[0] = (acc[0] +" in line]
+    assert src.count("tl::fma2") == 4
+    assert "acc_chunk_acc_vec" not in src
+    assert "tl::add2" not in src
+    # The single source update remains inside the runtime chunk loop.
+    assert len(scalar_updates) == 1
+
+
+def test_cross_loop_vector_reduction_rejects_overwrite_buffer_reuse():
+    mod, target = _make_cross_loop_vector_reduction_ir(accumulating=False)
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True}
+    with target, tvm.transform.PassContext(config=pass_configs):
+        lowered = tilelang.transform.VectorizeLoop()(mod)
+
+    allocations = []
+    tvm.tirx.stmt_functor.post_order_visit(
+        lowered["main"].body,
+        lambda node: allocations.append(node.buffer.name) if isinstance(node, tvm.tirx.AllocBuffer) else None,
+    )
+    assert "acc_chunk_acc_vec" in allocations
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    (
+        {"accumulating": True, "observe": True},
+        {"accumulating": True, "self_dependent_rhs": True},
+    ),
+)
+def test_cross_loop_vector_reduction_rejects_nonprivate_accumulator(kwargs):
+    mod, target = _make_cross_loop_vector_reduction_ir(**kwargs)
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True}
+    with target, tvm.transform.PassContext(config=pass_configs):
+        lowered = tilelang.transform.VectorizeLoop()(mod)
+
+    allocations = []
+    tvm.tirx.stmt_functor.post_order_visit(
+        lowered["main"].body,
+        lambda node: allocations.append(node.buffer.name) if isinstance(node, tvm.tirx.AllocBuffer) else None,
+    )
+    assert "acc_chunk_acc_vec" in allocations
+
+
+def test_cross_loop_vector_reduction_reuses_additive_accumulator():
+    mod, target = _make_cross_loop_vector_reduction_ir(accumulating=True)
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True}
+    with target, tvm.transform.PassContext(config=pass_configs):
+        lowered = tilelang.transform.VectorizeLoop()(mod)
+
+    loops = []
+    allocations = []
+
+    def collect(node):
+        if isinstance(node, tvm.tirx.For):
+            loops.append(node)
+        elif isinstance(node, tvm.tirx.AllocBuffer):
+            allocations.append(node.buffer.name)
+
+    tvm.tirx.stmt_functor.post_order_visit(lowered["main"].body, collect)
+    assert "acc_chunk_acc_vec" not in allocations
+    assert len(loops) == 1
+    assert isinstance(loops[0].body, tvm.tirx.BufferStore)
+
+
+@tilelang.testing.requires_cuda_compute_version(10)
 def test_correctness_auto_vec_scalar_reduction_chunk_accumulator_f32_sm100():
     func = _make_auto_vec_scalar_reduction_chunks_kernel()
-    kernel = tilelang.compile(func, out_idx=[3], target=SM100_TARGET)
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True}
+    kernel = tilelang.compile(func, out_idx=[3], target=SM100_TARGET, pass_configs=pass_configs)
     scores = torch.randn(M, 4, 8, device="cuda", dtype=torch.float32)
     weights = torch.randn(M, 4, 8, device="cuda", dtype=torch.float32)
     scale = torch.randn(M, device="cuda", dtype=torch.float32)

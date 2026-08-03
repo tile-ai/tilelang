@@ -32,6 +32,9 @@ def _gemm_impl(
     wg_wait: int = 0,
     mbar: BarrierType | None = None,
     annotations: dict | None = None,
+    SFA: BufferLikeType | None = None,
+    SFB: BufferLikeType | None = None,
+    k_start: int | tirx.PrimExpr | None = None,
 ) -> tirx.PrimExpr:
     """Shared GEMM implementation.
 
@@ -54,6 +57,8 @@ def _gemm_impl(
     A = legalize_arguments(A)
     B = legalize_arguments(B)
     C = legalize_arguments(C)
+    SFA = legalize_arguments(SFA) if SFA is not None else None
+    SFB = legalize_arguments(SFB) if SFB is not None else None
     mbar = legalize_arguments(mbar) if mbar is not None else None
 
     # Normalize A/B/C to BufferRegion for shape/stride/offset analysis
@@ -112,6 +117,19 @@ def _gemm_impl(
     A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])
     B_arg = buffer_region_to_tile_region(B_region, "r", [r for r in B_shape])
     C_arg = buffer_region_to_tile_region(C_region, "rw", [r for r in C_shape])
+    blockscaled_args = []
+    if SFA is not None or SFB is not None:
+        assert SFA is not None and SFB is not None, "Block-scaled GEMM requires both SFA and SFB"
+        assert k_start is not None, "Block-scaled GEMM requires k_start"
+        SFA_region = to_buffer_region(SFA)
+        SFB_region = to_buffer_region(SFB)
+        SFA_arg = buffer_region_to_tile_region(SFA_region, "r", list(retrieve_shape(SFA_region)))
+        SFB_arg = buffer_region_to_tile_region(SFB_region, "r", list(retrieve_shape(SFB_region)))
+        if not isinstance(k_start, tirx.PrimExpr):
+            k_start = tirx.const(k_start, dtype="int32")
+        blockscaled_args = [SFA_arg, SFB_arg, k_start]
+    else:
+        assert k_start is None, "k_start is only valid for block-scaled GEMM"
     # When mbar is None, pass a placeholder constant (0).
     # The C++ side checks if arg 16 is a BufferLoadNode before using it,
     # so a non-BufferLoad value will be correctly ignored.
@@ -138,6 +156,7 @@ def _gemm_impl(
         mbar_arg,
         C_coords[0],
         C_coords[1],
+        *blockscaled_args,
         annotations=annotations,
     )
 
@@ -334,118 +353,30 @@ def tcgen05_gemm_blockscaled(
         use_2cta: Whether to request true ``cta_group::2`` lowering.
     """
 
-    ann = {"use_2cta": int(use_2cta)} if use_2cta else None
-    ann = {} if ann is None else dict(ann)
-    ann["is_tcgen05"] = 1
-    ann["sf_a_granularity_k"] = int(sf_a_granularity_k)
-    ann["sf_b_granularity_k"] = int(sf_b_granularity_k)
-
-    # Re-read normalized regions below after let legalization.
-
-    def legalize(arg):
-        if isinstance(arg, tirx.Var) and T.has_let_value(arg):
-            return T.get_let_value(arg).buffer
-        return arg
-
-    A = legalize(A)
-    B = legalize(B)
-    C = legalize(C)
-    SFA_tmem = legalize(SFA_tmem)
-    SFB_tmem = legalize(SFB_tmem)
-    mbar = legalize(mbar) if mbar is not None else None
-
-    A_region = to_buffer_region(A)
-    B_region = to_buffer_region(B)
-    C_region = to_buffer_region(C)
-    SFA_region = to_buffer_region(SFA_tmem)
-    SFB_region = to_buffer_region(SFB_tmem)
-
-    A_shape = retrieve_shape(A_region)
-    B_shape = retrieve_shape(B_region)
-    C_shape = retrieve_shape(C_region)
-
-    assert len(C_shape) >= 2, "current only support C as a 2D or higher-order tensor"
-    assert len(A_shape) >= 2, "current only support A as a 2D or higher-order tensor"
-    assert len(B_shape) >= 2, "current only support B as a 2D or higher-order tensor"
-    for shape, name in ((A_shape, "A"), (B_shape, "B"), (C_shape, "C")):
-        for i in range(len(shape) - 2):
-            assert shape[i] == 1, (
-                f"current only support {name} as a 2D or higher-order tensor with the last two dimensions being the matrix dimensions"
-            )
-
-    M, N = C_shape[-2], C_shape[-1]
-    M_A = A_shape[-1] if transpose_A else A_shape[-2]
-    N_B = B_shape[-2] if transpose_B else B_shape[-1]
-    K = A_shape[-2] if transpose_A else A_shape[-1]
-    K_B = B_shape[-1] if transpose_B else B_shape[-2]
-    assert prim_expr_equal(K, K_B), f"T.tcgen05_gemm_blockscaled K shape check failed: K_A = {K}, K_B = {K_B}"
-    if use_2cta:
-        assert prim_expr_equal(M_A, M) and prim_expr_equal(N_B * 2, N), (
-            f"T.tcgen05_gemm_blockscaled 2CTA shape check failed: M_A = {M_A}, expected M_C = {M}; N_B = {N_B}, expected N_C / 2 = {N} / 2"
-        )
-    else:
-        assert prim_expr_equal(N_B, N), f"T.tcgen05_gemm_blockscaled N shape check failed: N_B = {N_B}, N_C = {N}"
-
-    # Deprecated: kept in the call protocol only for out-of-tree consumers;
-    # not read or validated in-tree.
-    A_stride = retrieve_stride(A_region)
-    B_stride = retrieve_stride(B_region)
-    stride_a = A_stride[-2]
-    stride_b = B_stride[-2]
-    A_offset = retrieve_offset(A_region)
-    B_offset = retrieve_offset(B_region)
-    offset_a = A_offset[-1]
-    offset_b = B_offset[-1]
-
-    if mbar is not None:
-        assert isinstance(mbar, (tirx.Buffer, tirx.BufferLoad)), (
-            f"mbar for tcgen5mma must be a tirx.Buffer or tirx.BufferLoad, but got {type(mbar)}"
-        )
-        mbar = to_buffer_region(mbar, access_type="rw")
-
-    C_coords = [r.min for r in C_region.region[-2:]]
-
-    # Convert BufferRegion to tl.region calls for arguments
-    A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])
-    B_arg = buffer_region_to_tile_region(B_region, "r", [r for r in B_shape])
-    C_arg = buffer_region_to_tile_region(C_region, "rw", [r for r in C_shape])
-    SFA_arg = buffer_region_to_tile_region(SFA_region, "r", list(retrieve_shape(SFA_region)))
-    SFB_arg = buffer_region_to_tile_region(SFB_region, "r", list(retrieve_shape(SFB_region)))
-
     assert mbar is not None, "mbar is required for tcgen05_gemm_blockscaled"
-
-    if not isinstance(k_start, tirx.PrimExpr):
-        k_start = tirx.const(k_start, dtype="int32")
-
-    # Block-scaled always uses Square policy (1x1 warp partition)
-    policy = GemmWarpPolicy.Square
-
-    return tirx.call_intrin(
-        "handle",
-        tirx.op.Op.get("tl.tileop.gemm"),
-        A_arg,
-        B_arg,
-        C_arg,
+    ann = {
+        "is_tcgen05": 1,
+        "sf_a_granularity_k": int(sf_a_granularity_k),
+        "sf_b_granularity_k": int(sf_b_granularity_k),
+    }
+    if use_2cta:
+        ann["use_2cta"] = 1
+    return _gemm_impl(
+        "tl.tileop.tcgen05_gemm",
+        A,
+        B,
+        C,
         transpose_A,
         transpose_B,
-        M,
-        N,
-        K,
-        policy,
+        GemmWarpPolicy.Square,
         clear_accum,
-        stride_a,
-        stride_b,
-        offset_a,
-        offset_b,
-        1,  # k_pack
+        1,
         wg_wait,
         mbar,
-        C_coords[0],
-        C_coords[1],
-        SFA_arg,  # arg 19
-        SFB_arg,  # arg 20
-        k_start,  # arg 21
         annotations=ann,
+        SFA=SFA_tmem,
+        SFB=SFB_tmem,
+        k_start=k_start,
     )
 
 
