@@ -63,27 +63,24 @@ def test_tmem_base_is_cached_per_thread_after_allocation_sync():
 
     body = _apply(func)["main"].body
     allocated = []
+    binds = []
     loads = []
-    stores = []
 
     def visitor(node):
         if isinstance(node, tvm.tirx.SBlock):
             allocated.extend(node.alloc_buffers)
+        elif isinstance(node, tvm.tirx.Bind):
+            binds.append(node)
         elif isinstance(node, tvm.tirx.BufferLoad):
             loads.append(node)
-        elif isinstance(node, tvm.tirx.BufferStore):
-            stores.append(node)
 
     tvm.tirx.stmt_functor.post_order_visit(body, visitor)
-    base = next(buffer for buffer in allocated if buffer.name == "C_tmem_base")
-    assert base.scope() == "local"
-
-    cache_store = next(store for store in stores if store.buffer.same_as(base))
-    assert isinstance(cache_store.value, tvm.tirx.BufferLoad)
-    assert cache_store.value.buffer.name == "C_tmem"
-    assert cache_store.value.buffer.scope() == "shared"
-    assert sum(load.buffer.same_as(cache_store.value.buffer) for load in loads) == 1
-    assert any(load.buffer.same_as(base) for load in loads)
+    cache = next(bind for bind in binds if bind.var.name == "C_tmem_base")
+    assert isinstance(cache.value, tvm.tirx.BufferLoad)
+    assert cache.value.buffer.name == "C_tmem"
+    assert cache.value.buffer.scope() == "shared"
+    assert sum(load.buffer.same_as(cache.value.buffer) for load in loads) == 1
+    assert all(buffer.name != "C_tmem_base" for buffer in allocated)
 
 
 @tilelang.testing.requires_cuda

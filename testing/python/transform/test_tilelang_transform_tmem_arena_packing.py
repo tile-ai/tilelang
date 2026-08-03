@@ -38,7 +38,7 @@ def _num_cols_allocated(body):
 def _tmem_addresses(body):
     """``(address word name, column offset)`` for every ``T.evaluate(buf[i, j])``.
 
-    A lowered TMEM address is ``cached_word[0] + encoded_coordinate``, where the encoded
+    A lowered TMEM address is ``cached_base + encoded_coordinate``, where the encoded
     coordinate carries the buffer's offset inside the allocation it shares.  With
     a ``[0, 0]`` coordinate the whole offset folds into one constant.
     """
@@ -48,24 +48,13 @@ def _tmem_addresses(body):
         if not isinstance(node, tvm.tirx.Evaluate):
             return
         value = node.value
-        if isinstance(value, tvm.tirx.BufferLoad):
-            addresses.append((value.buffer.name, 0))
-        elif isinstance(value, tvm.tirx.Add) and isinstance(value.a, tvm.tirx.BufferLoad):
-            addresses.append((value.a.buffer.name, int(value.b)))
+        if isinstance(value, tvm.tirx.Var):
+            addresses.append((value.name, 0))
+        elif isinstance(value, tvm.tirx.Add) and isinstance(value.a, tvm.tirx.Var):
+            addresses.append((value.a.name, int(value.b)))
 
     tvm.tirx.stmt_functor.post_order_visit(body, visitor)
     return addresses
-
-
-def _local_allocations(body):
-    buffers = []
-
-    def visitor(node):
-        if isinstance(node, tvm.tirx.SBlock):
-            buffers.extend(buffer for buffer in node.alloc_buffers if buffer.scope() == "local")
-
-    tvm.tirx.stmt_functor.post_order_visit(body, visitor)
-    return buffers
 
 
 def _int_imms(expr):
@@ -106,7 +95,6 @@ def test_narrow_buffers_join_a_wide_allocation():
         ("C_tmem_base", 388),
         ("C_tmem_base", 392),
     ]
-    assert [buffer.name for buffer in _local_allocations(body)] == ["C_tmem_base"]
 
 
 @tilelang.testing.requires_cuda
