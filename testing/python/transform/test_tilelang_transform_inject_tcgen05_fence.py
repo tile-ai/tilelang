@@ -2,6 +2,7 @@
 from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
+import tilelang.testing
 from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
 from tvm import tirx
 
@@ -71,6 +72,9 @@ def _tcgen05_ld_call(tmem_ref, local_buf):
     )
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_storage_sync_is_wrapped_with_tcgen05_fences():
     @T.prim_func
     def before():
@@ -93,6 +97,9 @@ def test_storage_sync_is_wrapped_with_tcgen05_fences():
     _check(before, after)
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_lower_tmem_copy_uses_tcgen05_ld_intrin():
     @T.prim_func
     def func(X: T.Tensor((256, 256), T.float16), Y: T.Tensor((256, 256), T.float16)):
@@ -126,6 +133,9 @@ def test_lower_tmem_copy_uses_tcgen05_ld_intrin():
     assert _count_extern_calls_with_prefix(body, "tl::tcgen05_ld_") == 0
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_lower_tmem_copy_uses_tcgen05_st_intrin():
     @T.prim_func
     def func(X: T.Tensor((256, 256), T.bfloat16)):
@@ -174,6 +184,9 @@ def test_lower_tmem_copy_uses_tcgen05_st_intrin():
     assert _count_extern_calls_with_prefix(body, "tl::tcgen05_st_") == 0
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_wait_and_arrive_are_rewritten_only_at_tmem_handoffs():
     @T.prim_func
     def before():
@@ -200,6 +213,9 @@ def test_wait_and_arrive_are_rewritten_only_at_tmem_handoffs():
     _check(before, after)
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_wait_and_arrive_scan_across_neutral_statements():
     @T.prim_func
     def before():
@@ -230,6 +246,9 @@ def test_wait_and_arrive_scan_across_neutral_statements():
     _check(before, after)
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_sync_boundary_stops_wait_lookahead():
     @T.prim_func
     def func():
@@ -246,6 +265,9 @@ def test_sync_boundary_stops_wait_lookahead():
     assert _count_calls(mod["main"].body, "tl.tcgen05_after_thread_sync") == 0
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_existing_manual_fences_are_not_duplicated():
     @T.prim_func
     def func():
@@ -265,6 +287,9 @@ def test_existing_manual_fences_are_not_duplicated():
     assert _count_calls(body, "tl.tcgen05_before_thread_sync") == 1
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_non_sm100_targets_are_left_untouched():
     @T.prim_func
     def func():
