@@ -63,9 +63,6 @@ def _int_imms(expr):
     return values
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_narrow_buffers_join_a_wide_allocation():
     """A 384-column accumulator plus three 4-column scale buffers need 396 columns.
 
@@ -97,9 +94,6 @@ def test_narrow_buffers_join_a_wide_allocation():
     ]
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_buffers_pack_only_when_it_saves_columns():
     """Block-scale factors share one allocation; the accumulator keeps its own.
 
@@ -122,9 +116,6 @@ def test_buffers_pack_only_when_it_saves_columns():
     assert _tmem_addresses(body) == [("C_tmem_base", 0), ("SFA_tmem_base", 0), ("SFA_tmem_base", 4)]
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_equal_cost_keeps_separate_allocations():
     """Packing that saves nothing is not done, so such a kernel lowers unchanged."""
 
@@ -144,9 +135,6 @@ def test_equal_cost_keeps_separate_allocations():
     assert _tmem_addresses(body) == [("S_tmem_base", 0), ("P_tmem_base", 0), ("O_tmem_base", 0)]
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_allocations_are_issued_widest_first():
     """PTX forbids a tcgen05.alloc larger than one issued before it in the CTA."""
 
@@ -162,9 +150,6 @@ def test_allocations_are_issued_widest_first():
     assert num_cols == sorted(num_cols, reverse=True)
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
 @pytest.mark.parametrize(
     "shapes",
     [
@@ -190,9 +175,6 @@ def test_packing_never_allocates_more_than_separate_allocations(shapes):
     assert packed <= separate
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_explicit_deallocate_keeps_its_own_allocation():
     """A hand-managed lifetime cannot share an allocation it would release early."""
 
@@ -210,9 +192,6 @@ def test_explicit_deallocate_keeps_its_own_allocation():
     assert _tmem_addresses(body) == [("C_tmem_base", 0), ("SF_tmem_base", 0)]
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_dynamic_coordinate_keeps_the_arena_offset():
     """A software-pipeline stage index moves the address; the offset still applies."""
 
@@ -242,9 +221,6 @@ def test_dynamic_coordinate_keeps_the_arena_offset():
     assert 384 in _int_imms(dynamic_address[0])
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_block_over_the_column_budget_is_reported():
     """Two 384-column buffers cannot share or fit, which is worth saying out loud."""
 

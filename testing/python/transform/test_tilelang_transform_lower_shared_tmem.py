@@ -29,9 +29,6 @@ def _collect_calls(stmt, op_name: str):
     return calls
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_explicit_deallocate_tmem_suppresses_auto_dealloc():
     """Explicit T.deallocate_tmem on fallthrough suppresses auto-dealloc."""
 
@@ -51,9 +48,6 @@ def test_explicit_deallocate_tmem_suppresses_auto_dealloc():
     assert dealloc_call.args[1].value == 128
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_tmem_base_is_cached_per_thread_after_allocation_sync():
     @T.prim_func
     def func():
@@ -105,9 +99,6 @@ def test_tmem_base_is_cached_per_thread_after_allocation_sync():
     assert mma.args[5].dtype == "handle"
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_explicit_deallocate_only_suppresses_matching_buffer():
     """Only the explicitly-deallocated buffer skips auto-dealloc; others keep it."""
 
@@ -129,9 +120,6 @@ def test_explicit_deallocate_only_suppresses_matching_buffer():
     assert dealloc_num_cols == [64, 128]
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_dealloc_before_thread_return_keeps_auto_dealloc():
     """Dealloc on non-fallthrough path (before thread_return) does NOT suppress auto-dealloc."""
 
@@ -154,9 +142,6 @@ def test_dealloc_before_thread_return_keeps_auto_dealloc():
     assert [call.args[1].value for call in dealloc_calls] == [128, 128]
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_untyped_buffer_reports_internal_error():
     valid_buffer = tvm.tirx.decl_buffer((1,), name="malformed_buffer")
     untyped_data = tvm.tirx.Var("malformed_buffer", "handle")
