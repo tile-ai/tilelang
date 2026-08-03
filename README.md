@@ -148,7 +148,7 @@ Nightly builds may be less stable than official releases. For source builds, edi
 
 ## Quick Start
 
-The following example defines, compiles, runs, and verifies an FP16 GEMM kernel with FP32 accumulation. It uses PyTorch CUDA tensors; PyTorch uses the same `cuda` device name on ROCm systems. TileLang selects the target automatically from the current environment.
+The following example defines, compiles, runs, and verifies an FP16 GEMM kernel with FP32 accumulation and a fused ReLU epilogue. It uses PyTorch CUDA tensors; PyTorch uses the same `cuda` device name on ROCm systems. TileLang selects the target automatically from the current environment.
 
 ```python
 import torch
@@ -157,7 +157,7 @@ import tilelang.language as T
 
 
 @tilelang.jit
-def matmul(A, B, block_M: int = 128, block_N: int = 128, block_K: int = 32):
+def matmul_relu(A, B, block_M: int = 128, block_N: int = 128, block_K: int = 32):
     M, N, K = T.const("M, N, K")
     A: T.Tensor((M, K), T.float16)
     B: T.Tensor((K, N), T.float16)
@@ -174,6 +174,9 @@ def matmul(A, B, block_M: int = 128, block_N: int = 128, block_K: int = 32):
             T.copy(B[k * block_K, bx * block_N], B_shared)
             T.gemm(A_shared, B_shared, C_local)
 
+        for i, j in T.Parallel(block_M, block_N):
+            C_local[i, j] = T.max(C_local[i, j], 0)
+
         T.copy(C_local, C[by * block_M, bx * block_N])
 
     return C
@@ -182,12 +185,12 @@ def matmul(A, B, block_M: int = 128, block_N: int = 128, block_K: int = 32):
 M = N = K = 1024
 a = torch.randn((M, K), device="cuda", dtype=torch.float16)
 b = torch.randn((K, N), device="cuda", dtype=torch.float16)
-c = matmul(a, b)
-torch.testing.assert_close(c, a @ b, rtol=1e-2, atol=1e-2)
-print("GEMM passed.")
+c = matmul_relu(a, b)
+torch.testing.assert_close(c, torch.relu(a @ b), rtol=1e-2, atol=1e-2)
+print("GEMM + ReLU passed.")
 ```
 
-`@tilelang.jit` specializes the kernel for the input shape and compile-time arguments on first use. `T.Pipelined` stages global-to-shared transfers, while `T.gemm` maps the tile operation to the target backend. Continue with the [language basics](https://tilelang.com/programming_guides/language_basics.html), then explore the [GEMM examples](https://github.com/tile-ai/tilelang/tree/main/examples/gemm) for layouts, autotuning, and architecture-specific optimizations.
+`@tilelang.jit` specializes the kernel for the input shape and compile-time arguments on first use. `T.Pipelined` stages global-to-shared transfers, `T.gemm` maps the tile operation to the target backend, and `T.Parallel` expresses the elementwise ReLU epilogue. Continue with the [language basics](https://tilelang.com/programming_guides/language_basics.html), then explore the [GEMM examples](https://github.com/tile-ai/tilelang/tree/main/examples/gemm) for layouts, autotuning, and architecture-specific optimizations.
 
 ## Examples
 
