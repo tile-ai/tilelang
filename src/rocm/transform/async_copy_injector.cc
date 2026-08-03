@@ -17,8 +17,8 @@
 #include <optional>
 #include <vector>
 
-#include "op/builtin.h"
 #include "op/utils.h"
+#include "rocm/op/builtin.h"
 #include "rocm/transform/async_copy_injector.h"
 #include "tir/ir/buffer_common.h"
 

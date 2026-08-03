@@ -10,8 +10,8 @@
 
 #include "backend/common/target_utils.h"
 #include "layout/layout.h"
-#include "op/builtin.h"
 #include "op/utils.h"
+#include "rocm/op/builtin.h"
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
 

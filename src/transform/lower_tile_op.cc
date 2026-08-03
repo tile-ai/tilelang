@@ -18,11 +18,11 @@
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
-#include "../op/builtin.h"
 #include "../op/gemm.h"
 #include "../op/gemm_sp.h"
 #include "../op/operator.h"
 #include "../op/utils.h"
+#include "cuda/op/builtin.h"
 #include "cuda/target_utils.h"
 #include "cuda/transform/ptx_async_copy_injector.h"
 

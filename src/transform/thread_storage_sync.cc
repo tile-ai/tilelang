@@ -20,11 +20,11 @@
 /*!
  * \file thread_storage_sync.cc
  */
-#include "../op/builtin.h"
 #include "./common/constr_visitor.h"
 #include "./common/thread_sync_types.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "common/attr.h"
+#include "cuda/op/builtin.h"
 #include "runtime/thread_storage_scope.h"
 #include "support/check.h"
 #include "tir/transforms/ir_utils.h"

@@ -23,7 +23,8 @@
 #include "arith/pattern_match.h"
 #include "backend/common/target_utils.h"
 #include "cuda/codegen/ptx.h"
-#include "op/builtin.h"
+#include "cuda/op/builtin.h"
+#include "cuda/target_utils.h"
 #include "transform/common/attr.h"
 
 namespace tvm {

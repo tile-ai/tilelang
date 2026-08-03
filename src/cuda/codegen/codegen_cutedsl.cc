@@ -22,7 +22,7 @@
 #include <vector>
 
 #include "arith/pattern_match.h"
-#include "op/builtin.h"
+#include "cuda/op/builtin.h"
 
 namespace tvm {
 namespace codegen {

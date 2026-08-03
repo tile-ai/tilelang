@@ -43,8 +43,8 @@
 #include <unordered_set>
 #include <utility>
 
-#include "../op/builtin.h"
 #include "common/storage_size.h"
+#include "cuda/op/builtin.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
 #include <tvm/tirx/function.h>

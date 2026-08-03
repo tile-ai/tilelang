@@ -37,7 +37,7 @@
 #include <utility>
 #include <vector>
 
-#include "op/builtin.h"
+#include "metal/op/builtin.h"
 #include "runtime/thread_storage_scope.h"
 #include "target/build_common.h"
 #include "target/metal/metal_fallback_module.h"
