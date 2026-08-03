@@ -140,9 +140,10 @@ struct ParallelLoopVerifier : public ConstrVisitor {
         os << "\n";
       }
     }
-    os << "If you believe this is a false positive, pass "
-          "`PassKey.TL_DISABLE_DATA_RACE_CHECK` to pass key to "
-          "disable this check.";
+    os << "If you believe this is a false positive, disable the check by "
+          "setting `PassKey.TL_DISABLE_DATA_RACE_CHECK` in the pass config, "
+          "or by unsetting the `TILELANG_ENABLE_DATA_RACE_CHECK` environment "
+          "variable (the check is disabled by default).";
     LOG(WARNING) << os.str();
   }
 };
