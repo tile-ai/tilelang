@@ -1591,6 +1591,18 @@ private:
         candidate.push_back(stmt);
         continue;
       }
+      const auto *loop = stmt.as<ForNode>();
+      // Child hoisting already proved these private buffers to be FMA
+      // recurrences, so a parent loop can carry the same accumulator.
+      if (!found_accumulating_update && found_zero_init && loop != nullptr &&
+          (loop->kind == ForKind::kSerial ||
+           loop->kind == ForKind::kUnrolled) &&
+          fused_fma_accumulators_.count(vec_buffer.get()) &&
+          ContainsBufferElementAccess(stmt, vec_buffer, vec_indices)) {
+        found_accumulating_update = true;
+        candidate.push_back(stmt);
+        continue;
+      }
       if (ContainsBufferElementAccess(stmt, vec_buffer, vec_indices)) {
         return false;
       }
@@ -1606,8 +1618,7 @@ private:
   bool TryFuseFMAAccumulator(const Array<Stmt> &stmts, const Buffer &vec_buffer,
                              const Array<PrimExpr> &vec_indices,
                              const std::string &name_hint, Buffer *acc_vec,
-                             int *accumulator_lanes,
-                             Array<Stmt> *rewritten) const {
+                             int *accumulator_lanes, Array<Stmt> *rewritten) {
     const BufferStoreNode *vec_store = nullptr;
     for (const Stmt &stmt : stmts) {
       if (const auto *store = stmt.as<BufferStoreNode>();
@@ -1722,10 +1733,11 @@ private:
     *acc_vec = compact_acc;
     *accumulator_lanes = accumulator_pairs * 2;
     *rewritten = candidate;
+    fused_fma_accumulators_.insert(compact_acc.get());
     return true;
   }
 
-  std::optional<Stmt> TryHoistVectorReduction(const ForNode *loop) const {
+  std::optional<Stmt> TryHoistVectorReduction(const ForNode *loop) {
     const auto *seq = loop->body.as<SeqStmtNode>();
     if (seq == nullptr || seq->seq.size() < 2) {
       return std::nullopt;
@@ -1820,6 +1832,7 @@ private:
   }
 
   ExprDeepEqual deep_equal_;
+  std::unordered_set<const BufferNode *> fused_fma_accumulators_;
 };
 
 class VectorizeSkipper : public StmtMutator {

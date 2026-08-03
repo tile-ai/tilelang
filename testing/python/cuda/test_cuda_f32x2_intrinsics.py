@@ -255,6 +255,29 @@ def _make_auto_vec_scalar_reduction_chunks_kernel(chunks: int = 4, width: int = 
     return main
 
 
+def _make_auto_vec_nested_scalar_reduction_chunks_kernel(chunks: int = 4, subchunks: int = 4, width: int = 8):
+    """Build a nested chunk reduction that carries a packed FMA accumulator."""
+
+    @T.prim_func
+    def main(
+        Scores: T.Tensor((M, chunks, subchunks, width), dtype=T.float32),
+        Weights: T.Tensor((M, chunks, subchunks, width), dtype=T.float32),
+        Scale: T.Tensor((M,), dtype=T.float32),
+        Out: T.Tensor((M,), dtype=T.float32),
+    ):
+        with T.Kernel(1, 1, threads=M):
+            tid = T.get_thread_binding()
+            acc = T.alloc_local((1,), T.float32)
+            acc[0] = 0
+            for c in T.unroll(chunks):
+                for s in T.serial(subchunks):
+                    for h in T.vectorized(width):
+                        acc[0] += T.max(Scores[tid, c, s, h] * Scale[tid], 0) * Weights[tid, c, s, h]
+            Out[tid] = acc[0]
+
+    return main
+
+
 def _make_cross_loop_vector_reduction_ir(*, accumulating: bool, observe=False, self_dependent_rhs=False):
     f32 = tvm.DataType("float32")
     f32x4 = f32.with_lanes(4)
@@ -520,6 +543,17 @@ def test_codegen_auto_vec_scalar_reduction_chunk_accumulator_f32_sm100():
 
 
 @tilelang.testing.requires_cuda_compute_version(10)
+def test_codegen_auto_vec_nested_reduction_reuses_fma_accumulator_f32_sm100():
+    func = _make_auto_vec_nested_scalar_reduction_chunks_kernel()
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True}
+    src = _lower_to_cuda_source(func, target=SM100_TARGET, pass_configs=pass_configs)
+    scalar_updates = [line for line in src.splitlines() if "acc[0] = (acc[0] +" in line]
+    assert src.count("tl::fma2") == 4
+    assert src.count("tl::add2") == 1
+    assert len(scalar_updates) == 1
+
+
+@tilelang.testing.requires_cuda_compute_version(10)
 def test_codegen_auto_vec_scalar_reduction_preserves_chunk_order_without_fast_math():
     func = _make_auto_vec_scalar_reduction_chunks_kernel()
     src = _lower_to_cuda_source(func, target=SM100_TARGET)
@@ -597,6 +631,19 @@ def test_correctness_auto_vec_scalar_reduction_chunk_accumulator_f32_sm100():
     scale = torch.randn(M, device="cuda", dtype=torch.float32)
     out = kernel(scores, weights, scale)
     ref = (torch.maximum(scores * scale[:, None, None], torch.zeros_like(scores)) * weights).sum(dim=(1, 2))
+    torch.testing.assert_close(out, ref, rtol=1e-5, atol=1e-5)
+
+
+@tilelang.testing.requires_cuda_compute_version(10)
+def test_correctness_auto_vec_nested_reduction_reuses_fma_accumulator_f32_sm100():
+    func = _make_auto_vec_nested_scalar_reduction_chunks_kernel()
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True}
+    kernel = tilelang.compile(func, out_idx=[3], target=SM100_TARGET, pass_configs=pass_configs)
+    scores = torch.randn(M, 4, 4, 8, device="cuda", dtype=torch.float32)
+    weights = torch.randn(M, 4, 4, 8, device="cuda", dtype=torch.float32)
+    scale = torch.randn(M, device="cuda", dtype=torch.float32)
+    out = kernel(scores, weights, scale)
+    ref = (torch.maximum(scores * scale[:, None, None, None], torch.zeros_like(scores)) * weights).sum(dim=(1, 2, 3))
     torch.testing.assert_close(out, ref, rtol=1e-5, atol=1e-5)
 
 
