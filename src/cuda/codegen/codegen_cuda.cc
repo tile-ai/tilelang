@@ -3667,7 +3667,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string tcgen05_call =
         "tl::(tcgen05_name)<(ABType)(USE_2CTA_SUFFIX)>(uint64_t((desc_a) + "
         "(A_offset)), "
-        "uint64_t((desc_b) + (B_offset)), (C) + (C_offset), "
+        "uint64_t((desc_b) + (B_offset)), (*reinterpret_cast<uint32_t*>((C))) "
+        "+ (C_offset), "
         "(scale_out), static_cast<uint32_t>((desc_val)), (mask0), (mask1), "
         "(mask2), (mask3));\n";
     tl::codegen::Replacer replacer;
@@ -3716,8 +3717,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     std::string tcgen05_call =
         "tl::tcgen05mma_ts<(ABType)(USE_2CTA_SUFFIX)>( "
-        "(A) + (A_offset), "
-        "uint64_t((desc_b) + (B_offset)), (C) + (C_offset), "
+        "(*reinterpret_cast<uint32_t*>((A))) + "
+        "(A_offset), "
+        "uint64_t((desc_b) + (B_offset)), (*reinterpret_cast<uint32_t*>((C))) "
+        "+ (C_offset), "
         "(scale_out), static_cast<uint32_t>((desc_val)), (mask0), (mask1), "
         "(mask2), (mask3));\n";
     tl::codegen::Replacer replacer;
@@ -3764,9 +3767,11 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string tcgen05_call =
         "tl::(tcgen05_name)<(ABType), (USE_2CTA)>(uint64_t((desc_a) + "
         "(A_offset)), "
-        "uint64_t((desc_b) + (B_offset)), (C) + (C_offset), "
+        "uint64_t((desc_b) + (B_offset)), (*reinterpret_cast<uint32_t*>((C))) "
+        "+ (C_offset), "
         "(scale_out), static_cast<uint32_t>((desc_val)), "
-        "(SFA) + (SFA_offset), (SFB) + (SFB_offset));\n";
+        "(*reinterpret_cast<uint32_t*>((SFA))) + (SFA_offset), "
+        "(*reinterpret_cast<uint32_t*>((SFB))) + (SFB_offset));\n";
     tl::codegen::Replacer replacer;
     replacer.register_rule("(ABType)",
                            tl::codegen::ptx::DTypeEnumToString(dtype_enum));
@@ -3793,7 +3798,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     // arg[0] = smem pointer, arg[1] = tmem data pointer, arg[2] = tmem column
     // offset
     std::string smem_ptr = this->PrintExpr(op->args[0]);
-    std::string tmem_base = this->PrintExpr(op->args[1]);
+    std::string tmem_ptr = this->PrintExpr(op->args[1]);
     std::string tmem_col_offset = this->PrintExpr(op->args[2]);
     bool use_2cta = false;
     if (op->annotations.find("use_2cta") != op->annotations.end()) {
@@ -3802,7 +3807,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     this->stream << "tl::tcgen05_cp<" << (use_2cta ? "true" : "false") << ">("
                  << "tl::make_sf_smem_desc(reinterpret_cast<void*>(" << smem_ptr
-                 << ")), " << tmem_base << " + " << tmem_col_offset << ");\n";
+                 << ")), "
+                 << "(*reinterpret_cast<uint32_t*>(" << tmem_ptr << ")) + "
+                 << tmem_col_offset << ");\n";
   } else if (op->op.same_as(tl::ptx_tcgen05_sf_warp_transpose())) {
     ICHECK_EQ(op->args.size(), 1U)
         << "ptx_tcgen05_sf_warp_transpose expects 1 argument";

@@ -79,6 +79,7 @@ def test_tmem_base_is_cached_per_thread_after_allocation_sync():
     body = _apply(func)["main"].body
     allocated = []
     binds = []
+    evaluated = []
     loads = []
 
     def visitor(node):
@@ -86,6 +87,8 @@ def test_tmem_base_is_cached_per_thread_after_allocation_sync():
             allocated.extend(node.alloc_buffers)
         elif isinstance(node, tvm.tirx.Bind):
             binds.append(node)
+        elif isinstance(node, tvm.tirx.Evaluate):
+            evaluated.append(node.value)
         elif isinstance(node, tvm.tirx.BufferLoad):
             loads.append(node)
 
@@ -96,9 +99,10 @@ def test_tmem_base_is_cached_per_thread_after_allocation_sync():
     assert cache.value.buffer.scope() == "shared"
     assert sum(load.buffer.same_as(cache.value.buffer) for load in loads) == 1
     assert all(buffer.name != "C_tmem_base" for buffer in allocated)
+    assert any(value.same_as(cache.var) for value in evaluated)
     mma = _collect_calls(body, "tl.ptx_tcgen05_mma_ss")[0]
-    assert mma.args[5].same_as(cache.var)
-    assert mma.args[5].dtype == "uint32"
+    assert mma.args[5].same_as(cache.value.buffer.data)
+    assert mma.args[5].dtype == "handle"
 
 
 @tilelang.testing.requires_cuda

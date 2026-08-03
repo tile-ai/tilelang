@@ -541,8 +541,8 @@ private:
     new_body.push_back(
         Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
                       {StringImm("shared")})));
-    // Cache each physical arena's shared address word once per thread so every
-    // TMEM address and intrinsic reuses the same SSA register base.
+    // Cache each arena's shared address word for ordinary TMEM address
+    // expressions; raw PTX intrinsics retain their shared-pointer contract.
     for (size_t i = 0; i < arena_buffers.size(); ++i) {
       new_body.push_back(
           Bind(arena_base_vars[i], BufferLoad(arena_buffers[i], {Integer(0)})));
@@ -673,9 +673,6 @@ private:
           op->dtype, op->op,
           {op->args[0], new_data, op->args[2], op->args[3], op->args[4]});
     }
-    if (TakesTmemBaseOffsetPairs(op->op) && HasTmemOperand(op)) {
-      return RebaseTmemOperands(op);
-    }
     if (HasPackedTmemOperand(op)) {
       ICHECK(TakesTmemBaseOffsetPairs(op->op))
           << op->op
@@ -686,16 +683,6 @@ private:
     }
     auto expr = StmtExprMutator::VisitExpr_(op);
     return expr;
-  }
-
-  bool HasTmemOperand(const CallNode *op) const {
-    for (const PrimExpr &arg : op->args) {
-      const auto *var = arg.as<VarNode>();
-      if (var != nullptr && var_remap_.count(GetRef<Var>(var))) {
-        return true;
-      }
-    }
-    return false;
   }
 
   /*!
@@ -719,9 +706,10 @@ private:
    *
    * Every tl.ptx_tcgen05_* intrinsic passes a tensor-memory operand as the
    * buffer's base-address Var immediately followed by that operand's address
-   * offset.  Lowering replaces the base pointer with its cached uint32 value,
-   * and packing folds the buffer's column offset into the second half of each
-   * pair.
+   * offset: see ptx_tcgen05_mma_ss, _mma_ts, _mma_blockscaled_ss and
+   * cp_warpx4 in codegen_cuda.cc, which all emit
+   * `*(uint32_t*)base + offset`.  Packing folds a buffer's column offset into
+   * the second half of each such pair.
    */
   static bool TakesTmemBaseOffsetPairs(const RelaxExpr &op) {
     const auto *op_node = op.as<OpNode>();
@@ -753,7 +741,7 @@ private:
           << op->op << " expects an integer TMEM address offset after buffer "
           << buffer_data << ", got " << offset << " of type " << offset.dtype();
       int col_offset = GetArenaColOffset(buffer_data);
-      args.push_back(tmem_base_var_remap_.at(buffer_data));
+      args.push_back(var_remap_[buffer_data]);
       args.push_back(col_offset == 0
                          ? offset
                          : offset + IntImm(offset.dtype(), col_offset));
