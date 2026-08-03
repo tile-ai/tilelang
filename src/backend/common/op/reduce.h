@@ -177,7 +177,7 @@ inline uint64_t UnsignedMax(int bits) {
   return (static_cast<uint64_t>(1) << bits) - 1;
 }
 
-inline int GetPreferedVectorizedSize(DataType dt,
+inline int GetPreferredVectorizedSize(DataType dt,
                                      bool supports_fp32x2 = false) {
   if (dt.is_bfloat16() || dt.is_float16() ||
       (supports_fp32x2 && dt.is_float() && dt.bits() == 32))
@@ -670,7 +670,7 @@ template <typename Impl> struct ReduceLowerer {
     };
 
     int vsize =
-        Impl::GetPreferedVectorizedSize(dst_buffer->dtype, lower_args.target);
+        Impl::GetPreferredVectorizedSize(dst_buffer->dtype, lower_args.target);
     const int64_t *reduce_extent = as_const_int(op.src->shape[op.dim]);
     bool can_pack = op.clear && vsize == 2 && reduce_extent &&
                     *reduce_extent >= vsize && *reduce_extent % vsize == 0 &&
@@ -857,7 +857,7 @@ template <typename Impl> struct ReduceLowerer {
       Buffer clear_buffer_packed;
       Buffer clear_batch_pack_buffer;
       {
-        int vsize = Impl::GetPreferedVectorizedSize(clear_buffer->dtype,
+        int vsize = Impl::GetPreferredVectorizedSize(clear_buffer->dtype,
                                                     lower_args.target);
         if (vsize > 1 && !src_var_compressed.empty()) {
           auto *ext = src_var_compressed.back()->dom->extent.as<IntImmNode>();
@@ -1019,7 +1019,7 @@ template <typename Impl> struct ReduceLowerer {
               static_cast<int>(*as_const_int(lower_args.thread_bounds->extent));
           auto thread_offset = lower_args.thread_bounds->min;
 
-          int vsize = Impl::GetPreferedVectorizedSize(clear_buffer->dtype,
+          int vsize = Impl::GetPreferredVectorizedSize(clear_buffer->dtype,
                                                       lower_args.target);
           bool can_batch_pack =
               vsize > 1 && batch >= vsize && batch % vsize == 0 &&

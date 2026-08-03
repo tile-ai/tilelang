@@ -2004,7 +2004,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
     int64_t box_dim = cute::AsConst(tile_gbasis->shape[i]);
     if (box_dim > cap) {
       // This exceeds the hardware constraint. But we can make it work by
-      // spliting a mode.
+      // splitting a mode.
       // Only the slowest box mode has leftover the rest loop can absorb;
       // shrinking a faster mode would gap the contiguous shared prefix.
       int64_t inner = -1;
