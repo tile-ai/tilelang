@@ -38,7 +38,7 @@ def _num_cols_allocated(body):
 def _tmem_addresses(body):
     """``(address word name, column offset)`` for every ``T.evaluate(buf[i, j])``.
 
-    A lowered TMEM address is ``word[0] + encoded_coordinate``, where the encoded
+    A lowered TMEM address is ``cached_word[0] + encoded_coordinate``, where the encoded
     coordinate carries the buffer's offset inside the allocation it shares.  With
     a ``[0, 0]`` coordinate the whole offset folds into one constant.
     """
@@ -55,6 +55,17 @@ def _tmem_addresses(body):
 
     tvm.tirx.stmt_functor.post_order_visit(body, visitor)
     return addresses
+
+
+def _local_allocations(body):
+    buffers = []
+
+    def visitor(node):
+        if isinstance(node, tvm.tirx.SBlock):
+            buffers.extend(buffer for buffer in node.alloc_buffers if buffer.scope() == "local")
+
+    tvm.tirx.stmt_functor.post_order_visit(body, visitor)
+    return buffers
 
 
 def _int_imms(expr):
@@ -90,11 +101,12 @@ def test_narrow_buffers_join_a_wide_allocation():
     assert _num_cols_allocated(body) == [512]
     assert [int(call.args[1]) for call in _collect_calls(body, "tl.ptx_deallocate_tensor_memory")] == [512]
     assert _tmem_addresses(body) == [
-        ("C_tmem", 0),
-        ("C_tmem", 384),
-        ("C_tmem", 388),
-        ("C_tmem", 392),
+        ("C_tmem_base", 0),
+        ("C_tmem_base", 384),
+        ("C_tmem_base", 388),
+        ("C_tmem_base", 392),
     ]
+    assert [buffer.name for buffer in _local_allocations(body)] == ["C_tmem_base"]
 
 
 @tilelang.testing.requires_cuda
@@ -119,7 +131,7 @@ def test_buffers_pack_only_when_it_saves_columns():
 
     body = _apply(func)["main"].body
     assert _num_cols_allocated(body) == [128, 32]
-    assert _tmem_addresses(body) == [("C_tmem", 0), ("SFA_tmem", 0), ("SFA_tmem", 4)]
+    assert _tmem_addresses(body) == [("C_tmem_base", 0), ("SFA_tmem_base", 0), ("SFA_tmem_base", 4)]
 
 
 @tilelang.testing.requires_cuda
@@ -141,7 +153,7 @@ def test_equal_cost_keeps_separate_allocations():
     body = _apply(func)["main"].body
     # 128 fp32 columns, 128 fp16 values in 64 b32 columns, 128 fp32 columns.
     assert _num_cols_allocated(body) == [128, 128, 64]
-    assert _tmem_addresses(body) == [("S_tmem", 0), ("P_tmem", 0), ("O_tmem", 0)]
+    assert _tmem_addresses(body) == [("S_tmem_base", 0), ("P_tmem_base", 0), ("O_tmem_base", 0)]
 
 
 @tilelang.testing.requires_cuda
@@ -207,7 +219,7 @@ def test_explicit_deallocate_keeps_its_own_allocation():
 
     body = _apply(func)["main"].body
     assert _num_cols_allocated(body) == [512, 32]
-    assert _tmem_addresses(body) == [("C_tmem", 0), ("SF_tmem", 0)]
+    assert _tmem_addresses(body) == [("C_tmem_base", 0), ("SF_tmem_base", 0)]
 
 
 @tilelang.testing.requires_cuda

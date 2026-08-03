@@ -31,6 +31,21 @@ _FLOAT8_DTYPES = {
 }
 
 
+def _make_scale_tmem_layout(buffer: tirx.Buffer) -> Layout:
+    """Place scale rows on datapaths and fold leading modes into columns."""
+    shape = list(buffer.shape)
+    if len(shape) < 2:
+        raise ValueError(f"TCGEN05 scale TMEM requires rank >= 2, got shape {shape}")
+
+    def forward(*indices):
+        leading = 0
+        for index, extent in zip(indices[:-2], shape[:-2]):
+            leading = leading * extent + index
+        return [indices[-2], leading * shape[-1] + indices[-1]]
+
+    return Layout(shape, forward)
+
+
 def _shared_layout_continuity(buffer, is_k_major: bool, k_extent: int, mn_extent: int) -> int:
     dtype_bits = buffer.dtype.bits
     if dtype_bits < 8:
@@ -105,11 +120,17 @@ class GemmTCGEN5(GemmBase):
             a_continuity = _shared_layout_continuity(self.A, a_is_k_major, self.K, self.M)
             b_continuity = _shared_layout_continuity(self.B, b_is_k_major, self.K, int(self.B.shape[-1]))
 
-            return {
+            layouts = {
                 self.A: self.infer_shared_layout(self.A, a_continuity)(self.A),
                 self.B: self.infer_shared_layout(self.B, b_continuity)(self.B),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
+            if self.is_blockscaled:
+                for scale_region in (self.SFARegion, self.SFBRegion):
+                    scale_buffer = scale_region.buffer
+                    if not scale_buffer.same_as(self.C):
+                        layouts[scale_buffer] = _make_scale_tmem_layout(scale_buffer)
+            return layouts
         if self.is_gemm_ts():
             b_continuity = _shared_layout_continuity(self.B, b_is_k_major, self.K, int(self.B.shape[-1]))
             layouts = {
@@ -159,6 +180,11 @@ class GemmTCGEN5(GemmBase):
             mma_emitter._assign_b_shared_layout(layout_map[self.B])
         if self.C in layout_map:
             mma_emitter._assign_c_tmem_layout(layout_map[self.C])
+        if self.is_blockscaled:
+            sfa_buffer = self.SFARegion.buffer
+            sfb_buffer = self.SFBRegion.buffer
+            mma_emitter._assign_sfa_tmem_layout(layout_map[self.C] if sfa_buffer.same_as(self.C) else layout_map[sfa_buffer])
+            mma_emitter._assign_sfb_tmem_layout(layout_map[self.C] if sfb_buffer.same_as(self.C) else layout_map[sfb_buffer])
 
         if self.is_blockscaled:
             return self._lower_blockscaled(mma_emitter, thread_bounds, thread_index, mbar_phase_expr)

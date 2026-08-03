@@ -336,6 +336,7 @@ def tcgen05_gemm_blockscaled(
 
     ann = {"use_2cta": int(use_2cta)} if use_2cta else None
     ann = {} if ann is None else dict(ann)
+    ann["is_tcgen05"] = 1
     ann["sf_a_granularity_k"] = int(sf_a_granularity_k)
     ann["sf_b_granularity_k"] = int(sf_b_granularity_k)
 

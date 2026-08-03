@@ -135,11 +135,9 @@ def mqa_logits_fp4_persistent_ws_kernel(
         kv_shared_1 = T.alloc_shared((num_stages, half_kv, head_dim), T.float4_e2m1_unpacked)
         sf_kv_shared_0 = T.alloc_shared((num_stages, half_kv), T.uint32)
         sf_kv_shared_1 = T.alloc_shared((num_stages, half_kv), T.uint32)
-        c_tmem = T.alloc_tmem((num_tmem_stages + 1, half_kv, block_q * heads), accum_dtype)
-        sf_version = num_tmem_stages
-        sf_q_col = 0
-        sf_kv_col_0 = 4
-        sf_kv_col_1 = 8
+        c_tmem = T.alloc_tmem((num_tmem_stages, half_kv, block_q * heads), accum_dtype)
+        sf_q_tmem = T.alloc_tmem((1, half_kv, 4), T.uint32)
+        sf_kv_tmem = T.alloc_tmem((2, half_kv, 4), T.uint32)
         q_loaded = T.alloc_barrier([32] * num_q_stages)
         q_empty = T.alloc_barrier([320] * num_q_stages)
         q_sf_full = T.alloc_barrier([32] * num_q_stages)
@@ -317,8 +315,7 @@ def mqa_logits_fp4_persistent_ws_kernel(
                 T.mbarrier_wait_parity(q_sf_full[q_stage], q_phase)
                 T.tcgen05_cp_warpx4(
                     sf_q_shared[q_stage, :],
-                    c_tmem,
-                    tmem_col_offset=sf_version * block_q * heads + sf_q_col,
+                    sf_q_tmem[0, :, :],
                 )
                 kv_iter = T.alloc_var(T.int32, init=0)
                 while kv_iter < num_kv_blocks:
@@ -329,15 +326,14 @@ def mqa_logits_fp4_persistent_ws_kernel(
                     T.mbarrier_wait_parity(kv_sf_full_0[stage], parity)
                     T.tcgen05_cp_warpx4(
                         sf_kv_shared_0[stage, :],
-                        c_tmem,
-                        tmem_col_offset=sf_version * block_q * heads + sf_kv_col_0,
+                        sf_kv_tmem[0, :, :],
                     )
                     T.tcgen05_gemm_blockscaled(
                         kv_shared_0[stage, :, :],
                         q_shared[q_stage, :, :],
                         c_tmem[tmem_stage, :, :],
-                        c_tmem[sf_version, :, sf_kv_col_0 : sf_kv_col_0 + 4],
-                        c_tmem[sf_version, :, sf_q_col : sf_q_col + 4],
+                        sf_kv_tmem[0, :, :],
+                        sf_q_tmem[0, :, :],
                         transpose_B=True,
                         mbar=tmem_full[tmem_stage],
                         clear_accum=True,
@@ -353,15 +349,14 @@ def mqa_logits_fp4_persistent_ws_kernel(
                     T.mbarrier_wait_parity(kv_sf_full_1[stage], parity)
                     T.tcgen05_cp_warpx4(
                         sf_kv_shared_1[stage, :],
-                        c_tmem,
-                        tmem_col_offset=sf_version * block_q * heads + sf_kv_col_1,
+                        sf_kv_tmem[1, :, :],
                     )
                     T.tcgen05_gemm_blockscaled(
                         kv_shared_1[stage, :, :],
                         q_shared[q_stage, :, :],
                         c_tmem[tmem_stage, :, :],
-                        c_tmem[sf_version, :, sf_kv_col_1 : sf_kv_col_1 + 4],
-                        c_tmem[sf_version, :, sf_q_col : sf_q_col + 4],
+                        sf_kv_tmem[1, :, :],
+                        sf_q_tmem[0, :, :],
                         transpose_B=True,
                         mbar=tmem_full[tmem_stage],
                         clear_accum=True,

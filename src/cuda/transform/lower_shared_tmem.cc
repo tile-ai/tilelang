@@ -474,9 +474,10 @@ private:
       Buffer arena_buffer = (*it).second;
       if (declared_arenas.insert(arena_buffer.get()).second) {
         alloc_buffers.push_back(arena_buffer);
-        auto arena_it = std::find_if(
-            arena_buffers.begin(), arena_buffers.end(),
-            [&](const Buffer &candidate) { return candidate.same_as(arena_buffer); });
+        auto arena_it = std::find_if(arena_buffers.begin(), arena_buffers.end(),
+                                     [&](const Buffer &candidate) {
+                                       return candidate.same_as(arena_buffer);
+                                     });
         ICHECK(arena_it != arena_buffers.end());
         alloc_buffers.push_back(
             arena_base_buffers[std::distance(arena_buffers.begin(), arena_it)]);
