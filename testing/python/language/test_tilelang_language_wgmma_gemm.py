@@ -155,6 +155,53 @@ def _make_sliced_wgmma_kernel(M, N, K, num_k_tiles):
     return main
 
 
+def _make_static_sliced_wgmma_kernel():
+    @T.prim_func
+    def main(
+        A: T.Tensor((64, 32), T.float16),
+        B: T.Tensor((64, 32), T.float16),
+        D: T.Tensor((64, 64), T.float16),
+    ):
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared((64, 32), T.float16)
+            B_shared = T.alloc_shared((64, 32), T.float16)
+            C_local = T.alloc_fragment((64, 64), T.float32)
+
+            T.copy(A, A_shared)
+            T.copy(B, B_shared)
+            T.clear(C_local)
+            T.wgmma_gemm(
+                A_shared[:, 16:],
+                B_shared[:, 16:],
+                C_local,
+                transpose_B=True,
+            )
+            T.wait_wgmma(0)
+            T.copy(C_local, D)
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(9, 0)
+def test_wgmma_gemm_static_slice_initializes_from_slice_pointer():
+    import torch
+
+    kernel = tilelang.compile(_make_static_sliced_wgmma_kernel(), target="cuda")
+    source = kernel.get_kernel_source()
+
+    assert source.count("initialize_wgmma_descriptor") == 2
+    assert "increase_descriptor_offset" not in source
+    assert source.count("+ 2048") == 2
+
+    a = torch.randn((64, 32), device="cuda", dtype=torch.float16)
+    b = torch.randn((64, 32), device="cuda", dtype=torch.float16)
+    d = torch.empty((64, 64), device="cuda", dtype=torch.float16)
+    kernel(a, b, d)
+    expected = (a[:, 16:].float() @ b[:, 16:].float().T).half()
+    torch.testing.assert_close(d, expected, rtol=1e-2, atol=1e-2)
+
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 def test_wgmma_gemm_sliced_operand_emits_offset():

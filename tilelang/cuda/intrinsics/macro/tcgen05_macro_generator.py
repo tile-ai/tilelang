@@ -9,7 +9,7 @@ from ..layout.mma_sm100_layout import (
     validate_tcgen05_ts_instruction,
 )
 from tvm import DataType
-from tvm.tirx import PrimExpr, Buffer, Var, BufferLoad, BufferRegion
+from tvm.tirx import PrimExpr, Buffer, Var, BufferLoad, BufferRegion, handle_add_byte_offset
 from tilelang import tvm as tvm
 from tilelang import _ffi_api
 from tilelang.language.dtypes import get_tvm_dtype
@@ -164,8 +164,9 @@ def compute_umma_descriptor(tl_layout, buffer, transposed: bool, micro_size_k: i
     slice_byte_offset = 0
     if region is not None:
         slice_off_elems, tile = cute.restrict(composed_elem.layout, region)
-        if slice_off_elems != 0:
-            slice_byte_offset = tvm.arith.Analyzer().simplify(slice_off_elems * elem_bits // 8)
+        slice_byte_offset = slice_off_elems * elem_bits // 8
+        if not isinstance(slice_byte_offset, int):
+            slice_byte_offset = tvm.arith.Analyzer().simplify(slice_byte_offset)
     assert cute.rank(tile) == 2, f"UMMA operand tile must be rank-2 (MN, K), got rank {cute.rank(tile)}"
     # Present in UMMA (MN, K) order, then recast the swizzled element layout to
     # uint128_t (exactly CuTe's recast<uint128_t const>(tensor)).
@@ -817,12 +818,20 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         sbo = b_params.stride_byte_offset
         swizzle_mode = b_params.swizzle_mode.tcgen05_layout_type()
         slice_byte_offset = b_params.slice_byte_offset
-        is_sliced = not isinstance(slice_byte_offset, int) or slice_byte_offset != 0
         B_base_ptr = self._as_buffer(B_buf).access_ptr("r")
+        if not isinstance(slice_byte_offset, int):
+            # A dynamic slice. Use `increase_descriptor_offset` to represent the dynamic offset, to share a common base pointer.
+            is_sliced = True
+        elif slice_byte_offset != 0:
+            # A static slice. Add to the pointer directly to avoid an excessive `increase_descriptor_offset`.
+            is_sliced = False
+            B_base_ptr = handle_add_byte_offset(B_base_ptr, slice_byte_offset)
+        else:
+            # Non-sliced.
+            is_sliced = False
 
         @T.macro
         def _init_b(desc_b, B_base_ptr):
-            # Build from the buffer base (uniform cvta), then advance to the slice origin.
             T.initialize_tcgen05_descriptor(desc_b, B_base_ptr, lbo, sbo, 0, False, swizzle_mode)
             if is_sliced:
                 T.increase_descriptor_offset(desc_b, slice_byte_offset)
@@ -845,12 +854,17 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         sbo = a_params.stride_byte_offset
         swizzle_mode = a_params.swizzle_mode.tcgen05_layout_type()
         slice_byte_offset = a_params.slice_byte_offset
-        is_sliced = not isinstance(slice_byte_offset, int) or slice_byte_offset != 0
         A_base_ptr = self._as_buffer(A_buf).access_ptr("r")
+        if not isinstance(slice_byte_offset, int):
+            is_sliced = True
+        elif slice_byte_offset != 0:
+            is_sliced = False
+            A_base_ptr = handle_add_byte_offset(A_base_ptr, slice_byte_offset)
+        else:
+            is_sliced = False
 
         @T.macro
         def _init_a(desc_a, A_base_ptr):
-            # Build from the buffer base (uniform cvta), then advance to the slice origin.
             T.initialize_tcgen05_descriptor(desc_a, A_base_ptr, lbo, sbo, 0, False, swizzle_mode)
             if is_sliced:
                 T.increase_descriptor_offset(desc_a, slice_byte_offset)
