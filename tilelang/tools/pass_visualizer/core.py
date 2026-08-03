@@ -98,7 +98,8 @@ def build_pass_stages(target: Target) -> list[tuple[str, object]]:
     object callable as ``transform(mod) -> mod``. Conditional passes are resolved
     here so the returned list reflects what actually runs for this target/config.
 
-    Matches CUDAPassPipelineBodyPrologue (tilelang/cuda/pipeline.py:68-137).
+    Matches CUDAPassPipelineBodyPrologue in tilelang/cuda/pipeline.py, except
+    for LayoutVisual, which only emits visualization side effects.
     """
     stages: list[tuple[str, object]] = []
 
@@ -122,15 +123,17 @@ def build_pass_stages(target: Target) -> list[tuple[str, object]]:
 
     stages.append(("LowerBlackwell2SM", tilelang.cuda.transform.LowerBlackwell2SM()))
     stages.append(("IfStmtBinding", tilelang.transform.IfStmtBinding()))
+    stages.append(("UnrollLoop", tilelang.transform.UnrollLoop()))
+    stages.append(("Simplify", tilelang.transform.Simplify()))
     stages.append(("PipelinePlanning", tilelang.transform.PipelinePlanning()))
     stages.append(("InjectSoftwarePipeline", tilelang.transform.InjectSoftwarePipeline()))
     stages.append(("Simplify", tilelang.transform.Simplify()))
 
-    # Infer memory layouts for fragments and shared memory (pipeline.py:113).
+    # Infer memory layouts for fragments and shared memory.
     stages.append(("LayoutInference", tilelang.transform.LayoutInference()))
 
-    # --- Post-LayoutInference lowering (pipeline.py:117-137) ---
-    # LayoutVisual (pipeline.py:115) is skipped: it only visualizes, not a transform.
+    # --- Post-LayoutInference lowering ---
+    # LayoutVisual is skipped: it only visualizes, not a transform.
     stages.append(("LowerTileOp", tilelang.transform.LowerTileOp()))
     stages.append(("LowerL2Persistent", tilelang.cuda.transform.LowerL2Persistent()))
     stages.append(("DecoupleTypeCast", tilelang.transform.DecoupleTypeCast()))

@@ -95,13 +95,10 @@ def unroll(start: PrimExpr, stop: PrimExpr = None, *, annotations: dict[str, Any
     res : frame.ForFrame
         The ForFrame.
     """
-    # Ensure annotations has {"pragma_unroll_explicit": True} by default
     if annotations is None:
-        annotations = {"pragma_unroll_explicit": False}
+        annotations = dict()
     else:
-        # Add "pragma_unroll_explicit": True if not already present
         annotations = dict(annotations)
-        annotations.setdefault("pragma_unroll_explicit", False)
     return _ir.unroll(start=start, stop=stop, annotations=annotations)
 
 
