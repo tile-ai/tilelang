@@ -95,6 +95,11 @@ TVM_DLL const Op &rng_rand();
 TVM_DLL const Op &rng_rand_float();
 
 /*!
+ * \brief Return the sentinel dtype used for CUDA tensor-map parameters.
+ */
+DataType CuTensorMapType();
+
+/*!
  * \brief tvm intrinsics for TMADescriptor creation for tiled load
  *
  * CuTensorMap* create_tma_descriptor(data_type, rank, global_addr,

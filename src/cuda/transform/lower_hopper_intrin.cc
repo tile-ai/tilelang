@@ -18,7 +18,6 @@
 
 #include "cuda/op/builtin.h"
 #include "cuda/runtime.h"
-#include "cuda/target_utils.h"
 
 namespace tvm {
 namespace tl {

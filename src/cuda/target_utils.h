@@ -12,11 +12,6 @@
 namespace tvm {
 namespace tl {
 
-/*!
- * \brief Return the sentinel dtype used for CUDA tensor-map parameters.
- */
-DataType CuTensorMapType();
-
 bool TargetIsCuda(Target target);
 bool TargetIsCuTeDSL(Target target);
 

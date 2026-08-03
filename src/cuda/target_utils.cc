@@ -28,8 +28,6 @@ int GetCudaArchInt(Target target) {
 
 } // namespace
 
-DataType CuTensorMapType() { return DataType::UInt(8, 128); }
-
 bool TargetIsCuda(Target target) {
   return target->GetTargetDeviceType() == kDLCUDA;
 }

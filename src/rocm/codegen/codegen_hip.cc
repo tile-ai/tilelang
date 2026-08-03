@@ -18,7 +18,6 @@
 #include <vector>
 
 #include "backend/common/target_utils.h"
-#include "cuda/target_utils.h"
 #include "rocm/op/builtin.h"
 
 namespace tvm {
@@ -308,11 +307,6 @@ void CodeGenTileLangHIP::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
 
   if (t.is_void()) {
     os << "void";
-    return;
-  }
-
-  if (t == tl::CuTensorMapType()) {
-    os << "CUtensorMap";
     return;
   }
 
