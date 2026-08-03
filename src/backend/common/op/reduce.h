@@ -178,7 +178,7 @@ inline uint64_t UnsignedMax(int bits) {
 }
 
 inline int GetPreferredVectorizedSize(DataType dt,
-                                     bool supports_fp32x2 = false) {
+                                      bool supports_fp32x2 = false) {
   if (dt.is_bfloat16() || dt.is_float16() ||
       (supports_fp32x2 && dt.is_float() && dt.bits() == 32))
     return 2;
@@ -858,7 +858,7 @@ template <typename Impl> struct ReduceLowerer {
       Buffer clear_batch_pack_buffer;
       {
         int vsize = Impl::GetPreferredVectorizedSize(clear_buffer->dtype,
-                                                    lower_args.target);
+                                                     lower_args.target);
         if (vsize > 1 && !src_var_compressed.empty()) {
           auto *ext = src_var_compressed.back()->dom->extent.as<IntImmNode>();
           if (ext && ext->value >= vsize && ext->value % vsize == 0 &&
@@ -1020,7 +1020,7 @@ template <typename Impl> struct ReduceLowerer {
           auto thread_offset = lower_args.thread_bounds->min;
 
           int vsize = Impl::GetPreferredVectorizedSize(clear_buffer->dtype,
-                                                      lower_args.target);
+                                                       lower_args.target);
           bool can_batch_pack =
               vsize > 1 && batch >= vsize && batch % vsize == 0 &&
               reduce::MakeCodegenReducer(op, vsize).has_value();
