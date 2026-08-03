@@ -207,6 +207,7 @@ public:
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);
     ICHECK(target.defined()) << "LowerTileOpPass: Require the target attribute";
     substituter.target_ = target.value();
+    substituter.host_visible_vars_ = f->params;
     PrimFuncNode *fptr = f.CopyOnWrite();
     fptr->body = substituter.VisitStmt(f->body);
     fptr->body =
@@ -1191,6 +1192,7 @@ private:
     lower_args.alloc_mbarrier = mbarrier_callback;
     lower_args.update_barrier_arrive = barrier_arrive_callback;
     lower_args.require_smem_alignment = require_smem_alignment_callback;
+    lower_args.host_visible_vars = host_visible_vars_;
 
     auto lowered = tile_op->Lower(lower_args, analyzer_);
 
@@ -1525,6 +1527,7 @@ private:
   }
 
   Target target_;
+  Array<Var> host_visible_vars_;
   Map<String, Any> block_annotations_;
   Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Var, PrimExpr> safe_value_map_;

@@ -56,7 +56,7 @@ def call({}):
 TMA_DESC_INIT_FUNC_PY = """
     {0}_type = CUtensorMapDataType({1})
     {0}_tensorRank = {2}
-    {0}_globalAddress = {3}.data_ptr()
+    {0}_globalAddress = {3}
     {0}_globalDim = [{4}]
     {0}_globalStride = [{5}][1:]
     {0}_boxDim = [{6}]
@@ -87,7 +87,7 @@ TMA_DESC_INIT_FUNC_PY = """
 TMA_IM2COL_DESC_INIT_FUNC_PY = """
     {0}_type = CUtensorMapDataType({1})
     {0}_tensorRank = {2}
-    {0}_globalAddress = {3}.data_ptr()
+    {0}_globalAddress = {3}
     {0}_globalDim = [{4}]
     {0}_globalStride = [{5}][1:]
     {0}_elementStrides = [{6}]
@@ -288,15 +288,22 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         """
         return pythonic_expr(expr, self._TYPE_MAP, ignore_cast=True, floor_div_op="//")
 
+    def _tma_global_address(self, expr: tvm.tirx.PrimExpr) -> str:
+        if isinstance(expr, tvm.tirx.Call) and expr.op.name == "tirx.handle_add_byte_offset":
+            base = self._tma_global_address(expr.args[0])
+            offset = self._pythonic_expr(expr.args[1])
+            return f"{base} + ({offset})"
+        return f"{self._pythonic_expr(expr)}.data_ptr()"
+
     def create_dispatch_func(self, code, function_informations):
         """Generate Python dispatch function that launches multiple CUDA kernels.
 
         Why two-pass design:
-            Pass 1: Collect TMA descriptors from all kernels into shared dicts
-            Pass 2: Generate code - descriptors first (deduplicated), then launches
+            Pass 1: Collect each kernel's descriptor metadata and launch args
+            Pass 2: Generate descriptor initialization before the launches
 
-            Single-pass would create duplicate descriptors for each kernel.
-            Dict naturally deduplicates by descriptor name.
+            Descriptor aliases include the kernel index because descriptor
+            parameter names are local to each kernel declaration.
 
         Args:
             code: CUDA C++ source containing kernel declarations
@@ -306,7 +313,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         Returns:
             Python source code defining a call() function that:
             1. Initializes L2 cache policies (if needed)
-            2. Creates TMA descriptors once per unique buffer
+            2. Creates each kernel-specific TMA descriptor
             3. Launches each kernel with cuLaunchKernelEx
             4. Resets L2 cache policies (if needed)
         """
@@ -345,16 +352,15 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                 has_l2_persistent_map = True
                 break
 
-        desc_name_map: dict[str, str] = {}
-        desc_name_var_map: dict[str, tvm.tirx.Var] = {}
         device_index = 0
         kernel_launch_code = """"""
         if has_l2_persistent_map:
             kernel_launch_code += L2_PERSISTENT_MAP_CREATE_HANDLE_PY
 
-        # First pass: collect all TMA descriptors from all kernels to avoid duplication
+        # First pass: collect each kernel's descriptors and launch arguments.
         kernel_info_list = []
-        for function_name, function_info in function_informations.items():
+        init_tma_descriptor_args = ""
+        for kernel_index, (function_name, function_info) in enumerate(function_informations.items()):
             block_info = function_info["block_info"]
             grid_info = function_info["grid_info"]
             dynamic_smem_buf = function_info["dynamic_smem_buf"]
@@ -375,9 +381,21 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                     return (f"{name}.data_ptr()", arg_type)
                 return (name, arg_type)
 
+            raw_desc_name_map: dict[str, str] = {}
+            raw_desc_name_var_map: dict[str, tvm.tirx.Var] = {}
             call_args = parse_function_call_args(
-                declaration, function_args, function_params, desc_name_map, desc_name_var_map, transform_nvrtc_arg
+                declaration,
+                function_args,
+                function_params,
+                raw_desc_name_map,
+                raw_desc_name_var_map,
+                transform_nvrtc_arg,
             )
+            descriptor_aliases = {raw_name: f"__tma_{kernel_index}_{raw_name}" for raw_name in raw_desc_name_map}
+            desc_name_map = {descriptor_aliases[raw_name]: tensor_name for raw_name, tensor_name in raw_desc_name_map.items()}
+            desc_name_var_map = {descriptor_aliases[raw_name]: desc_var for raw_name, desc_var in raw_desc_name_var_map.items()}
+            call_args = [(descriptor_aliases.get(arg_name, arg_name), arg_type) for arg_name, arg_type in call_args]
+            init_tma_descriptor_args += self.generate_tma_descriptor_args(desc_name_map, desc_name_var_map)
 
             for arg_name, arg_type in call_args:
                 if arg_type == "ctypes.c_void_p":
@@ -396,8 +414,8 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                 }
             )
 
-        # Generate TMA descriptor initialization code once for all kernels
-        kernel_launch_code += self.generate_tma_descriptor_args(desc_name_map, desc_name_var_map)
+        # Generate all descriptor initializers before the kernel launches.
+        kernel_launch_code += init_tma_descriptor_args
 
         # Second pass: generate kernel launch code for each kernel
         for kernel_info in kernel_info_list:
@@ -501,7 +519,13 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             return tma_descriptor_init
 
         # Parse TMA descriptor arguments using the common utility
-        parsed_params = parse_tma_descriptor_args(self.tma_descriptor_args, desc_name_map, desc_name_var_map, self._pythonic_expr)
+        parsed_params = parse_tma_descriptor_args(
+            self.tma_descriptor_args,
+            desc_name_map,
+            desc_name_var_map,
+            self._pythonic_expr,
+            self._tma_global_address,
+        )
 
         # Generate Python code from parsed parameters
         for params in parsed_params:

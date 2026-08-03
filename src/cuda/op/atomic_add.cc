@@ -303,6 +303,16 @@ struct AtomicAdd {
     Array<Range> shared_range = op.src_range;
     Array<Range> global_range = op.dst_range;
 
+    ICHECK(CanProveTMADescriptorBaseAligned(global_tensor, shared_tensor->dtype,
+                                            analyzer,
+                                            lower_args.host_visible_vars))
+        << "TMA atomic add requires a provably "
+        << TMARequiredGlobalAddressAlignment(global_tensor->dtype,
+                                             shared_tensor->dtype)
+        << "-byte-aligned global buffer "
+           "view, but elem_offset for "
+        << global_tensor->name << " is " << global_tensor->elem_offset;
+
     TMADesc desc;
     desc.rank = global_tensor->shape.size();
     ICHECK(desc.rank >= 1 && desc.rank <= 5)
@@ -328,7 +338,7 @@ struct AtomicAdd {
            "and uint32";
 
     desc.data_type = to_CUtensorMapDataType(global_tensor->dtype);
-    desc.global_addr = global_tensor->data;
+    desc.global_addr = GetTMADescriptorBaseAddress(global_tensor);
     desc.global_shape = ReverseArray(global_tensor->shape);
     Array<PrimExpr> global_coords =
         ReverseArray(global_range.Map([](Range r) { return r->min; }));

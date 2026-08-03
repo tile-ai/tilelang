@@ -43,7 +43,7 @@ CPP_TMA_DESC_INIT_TEMPLATE = """\
         &tma_descs[{desc_idx}],
         static_cast<CUtensorMapDataType>({dtype}),
         {rank},
-        reinterpret_cast<void*>({tensor_name}_ptr),
+        reinterpret_cast<void*>({global_address}),
         globalDim,
         globalStrides,
         boxDim,
@@ -76,7 +76,7 @@ CPP_TMA_IM2COL_DESC_INIT_TEMPLATE = """\
         &tma_descs[{desc_idx}],
         static_cast<CUtensorMapDataType>({dtype}),
         {rank},
-        reinterpret_cast<void*>({tensor_name}_ptr),
+        reinterpret_cast<void*>({global_address}),
         globalDim,
         globalStrides,
         lowerCorner,
@@ -839,6 +839,37 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         """Convert TVM expression to C++ string for generated launcher code."""
         return pythonic_expr(expr, self._CXX_TYPE_MAP, func_name_map={"min": "std::min", "max": "std::max"})
 
+    def _split_tma_global_address(self, expr: tvm.tirx.PrimExpr) -> tuple[str, str | None]:
+        """Split a TMA address into its tensor argument and byte offset."""
+        if isinstance(expr, tvm.tirx.Call) and expr.op.name == "tirx.handle_add_byte_offset":
+            tensor_name, base_offset = self._split_tma_global_address(expr.args[0])
+            offset = self._cxx_expr(expr.args[1])
+            if base_offset is not None:
+                offset = f"({base_offset}) + ({offset})"
+            return tensor_name, offset
+        return self._pythonic_expr(expr), None
+
+    @staticmethod
+    def _tma_global_address_offset_vars(expr: tvm.tirx.PrimExpr) -> set[str]:
+        """Return scalar variables referenced by a TMA address offset."""
+        names: set[str] = set()
+
+        def visit(node):
+            if isinstance(node, tvm.tirx.Var):
+                names.add(node.name)
+
+        if isinstance(expr, tvm.tirx.Call) and expr.op.name == "tirx.handle_add_byte_offset":
+            names.update(TLCuTeDSLSourceWrapper._tma_global_address_offset_vars(expr.args[0]))
+            post_order_visit(expr.args[1], visit)
+        return names
+
+    @staticmethod
+    def _tma_global_address_expr(tensor_name: str, byte_offset: str | None) -> str:
+        """Build the pointer expression used by cuTensorMapEncode*()."""
+        if byte_offset is None:
+            return f"{tensor_name}_ptr"
+        return f"({tensor_name}_ptr + ({byte_offset}))"
+
     @staticmethod
     def _cxx_cast(ctype: str, expr_str: str) -> str:
         """Render a C++ static_cast expression."""
@@ -1059,6 +1090,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
                 desc_idx=desc_idx,
                 desc_name=desc_name,
                 tensor_name=tensor_name,
+                global_address=self._tma_global_address_expr(tensor_name, info.get("globalAddressOffset")),
                 rank=rank,
                 stride_rank=rank - 1,
                 rank_minus_two=rank - 2,
@@ -1081,6 +1113,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
             desc_idx=desc_idx,
             desc_name=desc_name,
             tensor_name=tensor_name,
+            global_address=self._tma_global_address_expr(tensor_name, info.get("globalAddressOffset")),
             rank=info["tensor_rank"],
             global_dim_values=", ".join(self._cxx_cast("uint64_t", self._cxx_expr(x)) for x in info["global_dim"]),
             stride_rank=info["tensor_rank"] - 1,
@@ -1172,15 +1205,17 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         """
         call_args = kernel_meta["call_args"]
         desc_names = kernel_meta["desc_names"]
+        descriptor_aliases = kernel_meta.get("descriptor_aliases", {})
         function_info = kernel_meta["function_info"]
 
         # Build kernel args
         kernel_args = []
         for arg_name, arg_type in call_args:
-            if "desc" in arg_name and arg_name in desc_names:
+            descriptor_name = descriptor_aliases.get(arg_name, arg_name)
+            if "desc" in arg_name and descriptor_name in desc_names:
                 # For __grid_constant__ CUtensorMap: pass host pointer directly
                 # cuLaunchKernel will copy 128-byte CUtensorMap to param space
-                desc_idx = all_desc_names.index(arg_name)
+                desc_idx = all_desc_names.index(descriptor_name)
                 kernel_args.append(f"&tma_descs[{desc_idx}]")
             elif arg_type == "buffer":
                 kernel_args.append(f"&{arg_name}_ptr")
@@ -1239,6 +1274,17 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
 
         return [arg for arg in function_args if arg["type"] != "buffer" or arg["name"] in active_buffers]
 
+    def _tma_scalar_args(self, function_args: list[dict], desc_names: list[str]) -> list[dict]:
+        """Return launcher scalars and validate dynamic TMA address dependencies."""
+        scalar_args = [arg for arg in function_args if arg["type"] != "buffer"]
+        scalar_names = {arg["name"] for arg in scalar_args}
+        offset_names = {name for desc_name in desc_names for name in self.tma_desc_info[desc_name].get("globalAddressOffsetVars", set())}
+        missing_names = offset_names - scalar_names
+        if missing_names:
+            missing = ", ".join(sorted(missing_names))
+            raise ValueError(f"Dynamic TMA address offset depends on non-launch scalar(s): {missing}")
+        return scalar_args
+
     def _generate_cpp_launcher(
         self,
         kernel_metadata_list: list[dict],
@@ -1262,8 +1308,9 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
             for idx, km in enumerate(kernel_metadata_list)
         )
 
-        # Generate TMA init function
-        scalar_args = [arg for arg in function_args if arg["type"] != "buffer"]
+        # Generate TMA init function. Keep scalar arguments in the host
+        # initializer scope because globalAddressOffset may reference them.
+        scalar_args = self._tma_scalar_args(function_args, all_desc_names)
         tma_init_func = self._generate_tma_init_func(all_desc_names, all_tma_tensors, tensor_arg_map, scalar_args)
 
         # Generate launch function signature and get_ptr code
@@ -1317,7 +1364,10 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         # Build unified wrapper parameters
         wrapper_params_union = []
         for kernel_meta in kernel_metadata_list:
+            descriptor_aliases = kernel_meta.get("descriptor_aliases", {})
             for arg_name, _ in kernel_meta["call_args"]:
+                if arg_name in descriptor_aliases:
+                    continue
                 if arg_name not in wrapper_params_union:
                     wrapper_params_union.append(arg_name)
 
@@ -1349,7 +1399,10 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         kernel_launches = "\n".join(
             CUBIN_KERNEL_LAUNCH_TEMPLATE.format(
                 function_name=km["function_name"],
-                call_args=", ".join(arg[0] if arg[0] not in buffer_args else f"{arg[0]}_" for arg in km["call_args"]),
+                call_args=", ".join(
+                    km.get("descriptor_aliases", {}).get(arg[0], arg[0]) if arg[0] not in buffer_args else f"{arg[0]}_"
+                    for arg in km["call_args"]
+                ),
                 grid_x=self._pythonic_expr(km["function_info"]["grid_info"][0]),
                 grid_y=self._pythonic_expr(km["function_info"]["grid_info"][1]),
                 grid_z=self._pythonic_expr(km["function_info"]["grid_info"][2]),
@@ -1487,6 +1540,8 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
             args = self.tma_descriptor_args[desc_var]
             _, dtype, tensor_rank, globalAddress, *remaining_args = args[1:]
             tensor_rank = int(tensor_rank)
+            tensor_name, global_address_offset = self._split_tma_global_address(globalAddress)
+            global_address_offset_vars = self._tma_global_address_offset_vars(globalAddress)
 
             global_dim = remaining_args[:tensor_rank]
             global_stride = remaining_args[tensor_rank : 2 * tensor_rank]
@@ -1500,7 +1555,9 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
                     "is_img2col": False,
                     "dtype": params.dtype,
                     "tensor_rank": params.tensor_rank,
-                    "globalAddress": params.global_address,
+                    "globalAddress": tensor_name,
+                    "globalAddressOffset": global_address_offset,
+                    "globalAddressOffsetVars": global_address_offset_vars,
                     "global_dim": global_dim,
                     "global_stride": global_stride,
                     "box_dim": box_dim,
@@ -1518,7 +1575,9 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
                     "is_img2col": True,
                     "dtype": params.dtype,
                     "tensor_rank": params.tensor_rank,
-                    "globalAddress": params.global_address,
+                    "globalAddress": tensor_name,
+                    "globalAddressOffset": global_address_offset,
+                    "globalAddressOffsetVars": global_address_offset_vars,
                     "global_dim": global_dim,
                     "global_stride": global_stride,
                     "element_strides": element_strides,
@@ -1567,19 +1626,22 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         all_tma_tensors_union = []
         function_information_list = self._normalize_function_informations(function_informations)
 
-        for function_info in function_information_list:
+        for kernel_index, function_info in enumerate(function_information_list):
             function_name = function_info["function_name"]
             declaration = extract_python_func_declaration(code, function_name)
-            desc_name_map: dict[str, str] = {}
-            desc_name_var_map: dict[str, tvm.tirx.Var] = {}
+            raw_desc_name_map: dict[str, str] = {}
+            raw_desc_name_var_map: dict[str, tvm.tirx.Var] = {}
             call_args = self._extract_func_call_args(
                 declaration,
                 function_args,
                 function_info["function_params"],
-                desc_name_map,
-                desc_name_var_map,
+                raw_desc_name_map,
+                raw_desc_name_var_map,
             )
 
+            descriptor_aliases = {raw_name: f"__tma_{kernel_index}_{raw_name}" for raw_name in raw_desc_name_map}
+            desc_name_map = {descriptor_aliases[name]: tensor for name, tensor in raw_desc_name_map.items()}
+            desc_name_var_map = {descriptor_aliases[name]: desc_var for name, desc_var in raw_desc_name_var_map.items()}
             tma_desc_code_map = {}
             desc_names = self.generate_tma_descriptor_args(desc_name_map, desc_name_var_map, tma_desc_code_map)
 
@@ -1591,6 +1653,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
                     "function_info": function_info,
                     "call_args": call_args,
                     "desc_names": desc_names,
+                    "descriptor_aliases": descriptor_aliases,
                     "tma_tensor_args": tma_tensor_args,
                     "desc_name_map": desc_name_map,
                 }
