@@ -401,12 +401,13 @@ class KernelCache:
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
             )
-        with self._lock:
-            if env.is_cache_enabled():
-                cache_path = self._get_cache_path(key)
-                self._save_kernel_to_disk(key, kernel, func, verbose)
-                # Set cache path on adapter so it can save cubin after first execution
-                self._set_adapter_cache_path(kernel, cache_path)
+        # Save outside the lock: staging+rename is atomic and idempotent (like the
+        # disk load above). Holding the lock here serialized every worker's save.
+        if env.is_cache_enabled():
+            cache_path = self._get_cache_path(key)
+            self._save_kernel_to_disk(key, kernel, func, verbose)
+            # Set cache path on adapter so it can save cubin after first execution
+            self._set_adapter_cache_path(kernel, cache_path)
 
         # Store in memory cache after compilation
         self._tag_kernel_cache_entry(kernel, key, self._get_cache_path(key))
