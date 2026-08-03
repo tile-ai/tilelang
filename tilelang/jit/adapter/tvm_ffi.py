@@ -27,6 +27,37 @@ from tilelang.language.dtypes import dtype
 
 COMPILE_ARGS = {}
 
+
+def _rocm_narrow_float_param_mask(params: list[KernelParam]) -> tuple[bool, ...] | None:
+    """Return the FP8/FP4 parameters that need the ROCm DLPack fallback."""
+    if getattr(torch.version, "hip", None) is None:
+        return None
+
+    mask = tuple(bool(param.shape) and str(param.dtype).startswith(("float8", "float4")) for param in params)
+    return mask if any(mask) else None
+
+
+def _export_rocm_narrow_float_as_tvm_view(tensor: torch.Tensor, param: KernelParam):
+    """Expose FP8/FP4 storage through DLPack without copying it."""
+    storage_dtype = dtype(tensor.dtype)
+    storage_bits = storage_dtype.bits * storage_dtype.lanes
+    logical_bits = param.dtype.bits * param.dtype.lanes
+    if storage_bits % logical_bits != 0:
+        raise ValueError(
+            f"Cannot expose {tensor.dtype} storage as TileLang dtype {param.dtype}: "
+            f"{storage_bits} storage bits are not divisible by {logical_bits} logical bits"
+        )
+
+    # The Python DLPack fallback supports byte tensors, while FP8/FP4 are not
+    # portable DLPack dtypes. Reinterpret the same storage on both sides while
+    # retaining the Torch storage dtype and physical shape. In particular, the
+    # generated host wrapper expects packed FP4x2 as a subtype of scalar FP4;
+    # it validates the equivalent total bit count and physical strides.
+    byte_tensor = tensor.view(torch.int8)
+    tvm_tensor = runtime.from_dlpack(torch.utils.dlpack.to_dlpack(byte_tensor))
+    return tvm_tensor._create_view(list(tensor.shape), dtype=str(storage_dtype))
+
+
 if sys.platform == "darwin":
     from torch.utils import cpp_extension
 
@@ -204,6 +235,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             param_shapes.append(native_shape)
 
         dynamic_symbolic_map = self._process_dynamic_symbolic()
+        rocm_narrow_float_mask = _rocm_narrow_float_param_mask(self.params)
 
         # Prepare helpers for friendly dtype error messages
         prim_func = self.prim_func
@@ -274,7 +306,14 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 tensor_list.append(tensor)
 
             executable = self._get_executable()
-            executable(*tensor_list)
+            if rocm_narrow_float_mask is None:
+                executable(*tensor_list)
+            else:
+                runtime_args = [
+                    _export_rocm_narrow_float_as_tvm_view(tensor, self.params[i]) if rocm_narrow_float_mask[i] else tensor
+                    for i, tensor in enumerate(tensor_list)
+                ]
+                executable(*runtime_args)
 
             # Return outputs in the requested form
             if len(self.result_idx) == 1:

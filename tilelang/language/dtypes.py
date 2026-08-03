@@ -186,22 +186,13 @@ def __dtype_as_torch__(self: dtype) -> torch.dtype:
     dtype_str = str(self)
 
     if dtype_str == "float8_e4m3":
-        # Check if we're on HIP (AMD ROCm) or CUDA
-        if torch.version.hip is not None:
-            # HIP backend - use float8_e4m3fnuz
-            assert hasattr(torch, "float8_e4m3fnuz"), (
-                "torch.float8_e4m3fnuz is not supported in this version of torch. Please upgrade torch >= 2.2.0"
-            )
-            return torch.float8_e4m3fnuz
-        else:
-            # CUDA backend - use float8_e4m3fn
-            assert hasattr(torch, "float8_e4m3fn"), (
-                "torch.float8_e4m3fn is not supported in this version of torch. Please upgrade torch >= 2.1.0"
-            )
-            return torch.float8_e4m3fn
+        from tilelang.language.fp8 import determine_torch_fp8_type
+
+        return determine_torch_fp8_type("e4m3")
     elif dtype_str == "float8_e5m2":
-        assert hasattr(torch, "float8_e5m2"), "torch.float8_e5m2 is not supported in this version of torch. Please upgrade torch >= 2.1.0"
-        return torch.float8_e5m2
+        from tilelang.language.fp8 import determine_torch_fp8_type
+
+        return determine_torch_fp8_type("e5m2")
     elif dtype_str in ("float8_e4m3fnuz", "e4m3fnuz_float8"):
         assert hasattr(torch, "float8_e4m3fnuz"), (
             "torch.float8_e4m3fnuz is not supported in this version of torch. Please upgrade torch >= 2.2.0"

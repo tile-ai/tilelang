@@ -1,9 +1,16 @@
 import threading
 from types import SimpleNamespace
 
+import pytest
 import torch
 
-from tilelang.jit.adapter.tvm_ffi import TVMFFIKernelAdapter
+from tilelang import tvm
+from tilelang.engine.param import KernelParam
+from tilelang.jit.adapter.tvm_ffi import (
+    TVMFFIKernelAdapter,
+    _export_rocm_narrow_float_as_tvm_view,
+    _rocm_narrow_float_param_mask,
+)
 
 
 class _FakeKernelParam:
@@ -90,3 +97,43 @@ def test_preloaded_executable_is_reused():
     assert adapter._get_executable() is preloaded_executable
     assert adapter.get_exportable_executable() is preloaded_executable
     assert created == []
+
+
+@pytest.mark.parametrize(
+    ("torch_dtype_name", "tilelang_dtype", "physical_shape", "logical_shape", "storage_dtype"),
+    [
+        ("float8_e4m3fnuz", "float8_e4m3", (2, 4), (2, 4), "float8_e4m3fnuz"),
+        ("float4_e2m1fn_x2", "float4_e2m1fn", (2, 2), (2, 4), "float4_e2m1fnx2"),
+    ],
+)
+def test_rocm_narrow_float_uses_zero_copy_tvm_view(
+    monkeypatch,
+    torch_dtype_name,
+    tilelang_dtype,
+    physical_shape,
+    logical_shape,
+    storage_dtype,
+):
+    torch_dtype = getattr(torch, torch_dtype_name, None)
+    if torch_dtype is None:
+        pytest.skip(f"PyTorch does not provide {torch_dtype_name}")
+
+    monkeypatch.setattr(torch.version, "hip", "test")
+    param = KernelParam(tvm.DataType(tilelang_dtype), list(logical_shape))
+    tensor = torch.empty(physical_shape, dtype=torch_dtype)
+
+    assert _rocm_narrow_float_param_mask([param]) == (True,)
+    tvm_view = _export_rocm_narrow_float_as_tvm_view(tensor, param)
+
+    assert tuple(tvm_view.shape) == physical_shape
+    assert str(tvm_view.dtype) == storage_dtype
+    byte_view = tvm_view._create_view(physical_shape, dtype="int8")
+    round_trip = torch.utils.dlpack.from_dlpack(byte_view)
+    assert round_trip.data_ptr() == tensor.data_ptr()
+
+
+def test_non_rocm_does_not_prepare_narrow_float_runtime_args(monkeypatch):
+    monkeypatch.setattr(torch.version, "hip", None)
+    param = KernelParam(tvm.DataType("float8_e4m3"), [2, 4])
+
+    assert _rocm_narrow_float_param_mask([param]) is None
