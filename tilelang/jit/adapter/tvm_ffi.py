@@ -39,6 +39,12 @@ def _rocm_narrow_float_param_mask(params: list[KernelParam]) -> tuple[bool, ...]
 
 def _export_rocm_narrow_float_as_tvm_view(tensor: torch.Tensor, param: KernelParam):
     """Expose FP8/FP4 storage through DLPack without copying it."""
+    if not tensor.is_contiguous():
+        raise ValueError(
+            "The ROCm narrow-float TVM-FFI fallback requires a contiguous tensor; "
+            f"got shape={tuple(tensor.shape)} and stride={tensor.stride()}"
+        )
+
     storage_dtype = dtype(tensor.dtype)
     storage_bits = storage_dtype.bits * storage_dtype.lanes
     logical_bits = param.dtype.bits * param.dtype.lanes

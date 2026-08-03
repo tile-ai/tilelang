@@ -132,6 +132,20 @@ def test_rocm_narrow_float_uses_zero_copy_tvm_view(
     assert round_trip.data_ptr() == tensor.data_ptr()
 
 
+def test_rocm_narrow_float_rejects_non_contiguous_tensor(monkeypatch):
+    torch_dtype = getattr(torch, "float8_e4m3fnuz", None)
+    if torch_dtype is None:
+        pytest.skip("PyTorch does not provide float8_e4m3fnuz")
+
+    monkeypatch.setattr(torch.version, "hip", "test")
+    tensor = torch.empty((2, 4), dtype=torch_dtype).transpose(0, 1)
+    param = KernelParam(tvm.DataType("float8_e4m3"), list(tensor.shape))
+
+    assert not tensor.is_contiguous()
+    with pytest.raises(ValueError, match="requires a contiguous tensor"):
+        _export_rocm_narrow_float_as_tvm_view(tensor, param)
+
+
 def test_non_rocm_does_not_prepare_narrow_float_runtime_args(monkeypatch):
     monkeypatch.setattr(torch.version, "hip", None)
     param = KernelParam(tvm.DataType("float8_e4m3"), [2, 4])

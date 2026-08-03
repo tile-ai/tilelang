@@ -1871,6 +1871,7 @@ void CodeGenTileLangHIP::VisitExpr_(const BufferLoadNode *op,
       packed_it != fp4_packed_buffers_.end()
           ? packed_it->second
           : "(fp4_e2_2_t*)" + GetVarID(buffer_var.get());
+  int vec_scope = BeginScope();
   PrimExpr index_expr = op->indices[0];
   const auto *ramp = index_expr.as<RampNode>();
   std::string index;
@@ -1900,6 +1901,7 @@ void CodeGenTileLangHIP::VisitExpr_(const BufferLoadNode *op,
                       "tl_fp4_packed_load(" + packed_buffer + ", " +
                           lane_index.str() + ")");
   }
+  EndScope(vec_scope);
   os << result;
 }
 
