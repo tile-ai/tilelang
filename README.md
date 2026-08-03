@@ -148,7 +148,7 @@ Nightly builds may be less stable than official releases. For source builds, edi
 
 ## Quick Start
 
-The following example defines, compiles, runs, and verifies a vector-add kernel. It uses PyTorch CUDA tensors; PyTorch uses the same `cuda` device name on ROCm systems. TileLang selects the target automatically from the current environment.
+The following example defines, compiles, runs, and verifies an FP16 GEMM kernel with FP32 accumulation. It uses PyTorch CUDA tensors; PyTorch uses the same `cuda` device name on ROCm systems. TileLang selects the target automatically from the current environment.
 
 ```python
 import torch
@@ -157,29 +157,37 @@ import tilelang.language as T
 
 
 @tilelang.jit
-def vector_add(A, B, block_size: int = 256):
-    N = T.const("N")
-    A: T.Tensor[[N], T.float32]
-    B: T.Tensor[[N], T.float32]
-    C = T.empty([N], T.float32)
+def matmul(A, B, block_M: int = 128, block_N: int = 128, block_K: int = 32):
+    M, N, K = T.const("M, N, K")
+    A: T.Tensor((M, K), T.float16)
+    B: T.Tensor((K, N), T.float16)
+    C = T.empty((M, N), T.float16)
 
-    with T.Kernel(T.ceildiv(N, block_size), threads=block_size) as bx:
-        for i in T.Parallel(block_size):
-            index = bx * block_size + i
-            C[index] = A[index] + B[index]
+    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+        A_shared = T.alloc_shared((block_M, block_K), T.float16)
+        B_shared = T.alloc_shared((block_K, block_N), T.float16)
+        C_local = T.alloc_fragment((block_M, block_N), T.float32)
+
+        T.clear(C_local)
+        for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
+            T.copy(A[by * block_M, k * block_K], A_shared)
+            T.copy(B[k * block_K, bx * block_N], B_shared)
+            T.gemm(A_shared, B_shared, C_local)
+
+        T.copy(C_local, C[by * block_M, bx * block_N])
 
     return C
 
 
-N = 1 << 20
-a = torch.randn(N, device="cuda")
-b = torch.randn(N, device="cuda")
-c = vector_add(a, b)
-torch.testing.assert_close(c, a + b)
-print("Vector add passed.")
+M = N = K = 1024
+a = torch.randn((M, K), device="cuda", dtype=torch.float16)
+b = torch.randn((K, N), device="cuda", dtype=torch.float16)
+c = matmul(a, b)
+torch.testing.assert_close(c, a @ b, rtol=1e-2, atol=1e-2)
+print("GEMM passed.")
 ```
 
-`@tilelang.jit` specializes the kernel for the input shape and compile-time arguments on first use. Continue with the [language basics](https://tilelang.com/programming_guides/language_basics.html), then move on to the [GEMM examples](https://github.com/tile-ai/tilelang/tree/main/examples/gemm) for shared-memory tiling, pipelining, and tensor-core operations.
+`@tilelang.jit` specializes the kernel for the input shape and compile-time arguments on first use. `T.Pipelined` stages global-to-shared transfers, while `T.gemm` maps the tile operation to the target backend. Continue with the [language basics](https://tilelang.com/programming_guides/language_basics.html), then explore the [GEMM examples](https://github.com/tile-ai/tilelang/tree/main/examples/gemm) for layouts, autotuning, and architecture-specific optimizations.
 
 ## Examples
 
