@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 import tilelang
+import tilelang.testing
 from tvm.target import Target
 import tilelang.backend.target as target_registry
 from tilelang.backend.execution_backend import (
@@ -21,6 +22,36 @@ from tilelang.backend.target import (
 
 def test_tilelang_does_not_export_target_wrapper():
     assert not hasattr(tilelang, "Target")
+
+
+def test_cuda_auto_without_gpu_rejects_instead_of_silent_sm50(monkeypatch):
+    # CUDA toolkit present but no GPU: auto detection must raise an actionable
+    # error, NOT return a bare "cuda" target (which TVM fills to sm_50).
+    from tilelang.cuda import target as cuda_target
+
+    monkeypatch.setattr(cuda_target, "check_cuda_availability", lambda: True)
+    monkeypatch.setattr(cuda_target, "_detect_torch_cuda_arch", lambda: None)
+    with pytest.raises(ValueError, match="arch"):
+        cuda_target._detect_cuda_target()
+
+
+def test_cuda_auto_with_gpu_returns_concrete_arch(monkeypatch):
+    from tilelang.cuda import target as cuda_target
+
+    monkeypatch.setattr(cuda_target, "check_cuda_availability", lambda: True)
+    monkeypatch.setattr(cuda_target, "_detect_torch_cuda_arch", lambda: "sm_90a")
+    target = cuda_target._detect_cuda_target()
+    assert isinstance(target, Target)
+    assert str(target.attrs["arch"]) == "sm_90a"
+
+
+def test_explicit_cuda_target_without_gpu_rejects(monkeypatch):
+    # Explicit target="cuda" without a GPU must also reject, not silently sm_50.
+    from tilelang.cuda import target as cuda_target
+
+    monkeypatch.setattr(cuda_target, "_detect_torch_cuda_arch", lambda: None)
+    with pytest.raises(ValueError, match="arch"):
+        determine_target("cuda", return_object=True)
 
 
 def test_default_target_env_accepts_json_string(monkeypatch):
@@ -152,3 +183,7 @@ def test_execution_backend_registry_rejects_removed_dlpack_backend():
 
     with pytest.raises(ValueError, match="Invalid execution backend 'dlpack'"):
         resolve_execution_backend("dlpack", target)
+
+
+if __name__ == "__main__":
+    tilelang.testing.main()
