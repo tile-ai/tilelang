@@ -5,9 +5,9 @@
 
 #include "op/copy.h"
 
+#include "metal/op/builtin.h"
 #include "metal/op/utils.h"
 #include "metal/target_utils.h"
-#include "op/builtin.h"
 #include "op/utils.h"
 
 #include <tvm/tirx/builtin.h>

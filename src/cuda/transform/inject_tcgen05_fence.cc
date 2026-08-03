@@ -39,7 +39,7 @@
 #include <utility>
 
 #include "backend/common/target_utils.h"
-#include "op/builtin.h"
+#include "cuda/op/builtin.h"
 
 namespace tvm {
 namespace tl {

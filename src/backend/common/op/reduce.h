@@ -12,9 +12,9 @@
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 
+#include "cuda/op/builtin.h"
 #include "layout/layout.h"
 #include "layout/utils.h"
-#include "op/builtin.h"
 #include "op/utils.h"
 #include "tir/transforms/ir_utils.h"
 #include "transform/loop_partition.h"

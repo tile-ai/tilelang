@@ -22,7 +22,8 @@
 #include <vector>
 
 #include "arith/pattern_match.h"
-#include "op/builtin.h"
+#include "cuda/op/builtin.h"
+#include "cuda/target_utils.h"
 
 namespace tvm {
 namespace codegen {

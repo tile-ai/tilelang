@@ -18,7 +18,8 @@
 #include <vector>
 
 #include "backend/common/target_utils.h"
-#include "op/builtin.h"
+#include "cuda/target_utils.h"
+#include "rocm/op/builtin.h"
 
 namespace tvm {
 namespace codegen {

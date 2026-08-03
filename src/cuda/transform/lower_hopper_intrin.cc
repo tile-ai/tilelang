@@ -16,8 +16,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include "cuda/op/builtin.h"
 #include "cuda/runtime.h"
-#include "op/builtin.h"
+#include "cuda/target_utils.h"
 
 namespace tvm {
 namespace tl {

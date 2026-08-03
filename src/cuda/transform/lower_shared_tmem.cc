@@ -7,8 +7,8 @@
  *  packs several into one allocation when that saves columns, and shifts every
  *  address a packed buffer forms by where it starts in the allocation.
  */
+#include "cuda/op/builtin.h"
 #include "cuda/target_utils.h"
-#include "op/builtin.h"
 #include "support/check.h"
 #include "tvm/ir/type.h"
 #include <algorithm>

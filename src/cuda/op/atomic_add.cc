@@ -10,10 +10,10 @@
 #include <tvm/runtime/logging.h>
 
 #include "backend/common/target_utils.h"
+#include "cuda/op/builtin.h"
 #include "cuda/op/copy.h"
 #include "cuda/op/tma_layout.h"
 #include "layout/layout.h"
-#include "op/builtin.h"
 #include "op/utils.h"
 #include "span_utils.h"
 #include "transform/common/loop_fusion_utils.h"

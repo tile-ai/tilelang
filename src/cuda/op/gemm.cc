@@ -7,8 +7,8 @@
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
 
+#include "cuda/op/builtin.h"
 #include "cuda/target_utils.h"
-#include "op/builtin.h"
 #include "op/tcgen5_meta.h"
 #include "op/utils.h"
 #include "span_utils.h"

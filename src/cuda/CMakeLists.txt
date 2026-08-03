@@ -5,6 +5,7 @@
 # backend CMake file, but outside the USE_CUDA block.
 file(GLOB TILE_LANG_CUDA_ALWAYS_SRCS
   src/cuda/codegen/intrin_rule_cuda.cc
+  src/cuda/op/builtin.cc
   src/cuda/op/copy_analysis.cc
   src/cuda/target_utils.cc
   src/cuda/transform/lower_ptx_async_copy.cc
@@ -164,6 +165,7 @@ file(GLOB TILE_LANG_CUDA_ACTIVE_SRCS
   src/cuda/transform/*.cc
 )
 list(REMOVE_ITEM TILE_LANG_CUDA_ACTIVE_SRCS
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/op/builtin.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/op/copy_analysis.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/transform/ptx_async_copy_injector.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/transform/lower_ptx_async_copy.cc")

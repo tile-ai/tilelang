@@ -4,6 +4,7 @@
 # common code and source generation. Compile them regardless of USE_ROCM.
 file(GLOB TILE_LANG_ROCM_ALWAYS_SRCS
   src/rocm/codegen/intrin_rule_hip.cc
+  src/rocm/op/builtin.cc
   src/rocm/target_utils.cc
 )
 list(APPEND TILE_LANG_SRCS ${TILE_LANG_ROCM_ALWAYS_SRCS})
@@ -135,6 +136,8 @@ file(GLOB TILE_LANG_ROCM_ACTIVE_SRCS
   src/rocm/op/*.cc
   src/rocm/transform/*.cc
 )
+list(REMOVE_ITEM TILE_LANG_ROCM_ACTIVE_SRCS
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/rocm/op/builtin.cc")
 list(APPEND TILE_LANG_SRCS ${TILE_LANG_ROCM_ACTIVE_SRCS})
 list(APPEND TILE_LANG_INCLUDES ${ROCM_INCLUDE_DIRS})
 
