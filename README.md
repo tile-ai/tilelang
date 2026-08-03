@@ -118,9 +118,11 @@ TileLang requires Python 3.10 or newer. The default `auto` target detects CUDA, 
 | LLVM CPU | `llvm` | Host CPUs | Experimental | Build from source with `USE_LLVM=ON`; LLVM 15 or newer is required. |
 | NVIDIA CuTe DSL | `cutedsl` | NVIDIA GPUs | Experimental | Requires `nvidia-cutlass-dsl`. |
 | WebGPU | `webgpu` | WebGPU runtimes | Experimental | Code generation and runtime integration are still evolving. |
-| Huawei Ascend | External adapter | Ascend devices | External | Maintained in [tilelang-ascend](https://github.com/tile-ai/tilelang-ascend), outside the main TileLang release. |
+| Huawei Ascend | Ascend C / NPU IR | Ascend A2 and A3 | Ecosystem | Developed in [tilelang-ascend](https://github.com/tile-ai/tilelang-ascend) and the MLIR-based [tilelang-mlir-ascend](https://github.com/tile-ai/tilelang-mlir-ascend). |
+| MetaX MACA | MACA adapter | MetaX C500 | Ecosystem | Developed in [tilelang-metax](https://github.com/tile-ai/tilelang-metax); requires the MACA software stack. |
+| Moore Threads MUSA | `musa` | S5000, S4000, and M1000 | Ecosystem | Developed in [tilelang-musa](https://github.com/tile-ai/tilelang-musa) and released independently. |
 
-Prebuilt wheels are published for Linux x86-64/AArch64, Windows x86-64, and macOS arm64. See the [target guide](https://tilelang.com/get_started/targets.html) for target syntax, architecture options, and backend-specific notes.
+Prebuilt wheels are published for Linux x86-64/AArch64, Windows x86-64, and macOS arm64. Ecosystem adapters live in separate repositories, are not included in the main TileLang release wheels, and may follow different compatibility schedules. See the [target guide](https://tilelang.com/get_started/targets.html) for target syntax, architecture options, and backend-specific notes, or the corresponding adapter repository for installation and tested-device details.
 
 ## Installation
 
