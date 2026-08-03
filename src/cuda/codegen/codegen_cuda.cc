@@ -745,15 +745,6 @@ std::string CodeGenTileLangCUDA::Finish() {
   return CodeGenC::Finish();
 }
 
-std::string CodeGenTileLangCUDA::PrintTmemBaseValue(const PrimExpr &expr) {
-  std::string value = PrintExpr(expr);
-  if (expr.dtype().is_uint() && expr.dtype().bits() == 32 &&
-      expr.dtype().lanes() == 1) {
-    return value;
-  }
-  return "(*reinterpret_cast<uint32_t*>(" + value + "))";
-}
-
 void CodeGenTileLangCUDA::VisitStmt_(const tirx::ForNode *op) {
   if (op->kind == tirx::ForKind::kUnrolled) {
     PrintIndent();
@@ -3650,7 +3641,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string A_offset = this->PrintExpr(op->args[2]);
     std::string b_desc = this->PrintExpr(op->args[3]);
     std::string B_offset = this->PrintExpr(op->args[4]);
-    std::string c_ref = this->PrintTmemBaseValue(op->args[5]);
+    std::string c_ref = this->PrintExpr(op->args[5]);
     std::string c_offset = this->PrintExpr(op->args[6]);
     PrimExpr desc_expr = op->args[7];
     std::string scale_out = this->PrintExpr(op->args[8]);
@@ -3703,11 +3694,11 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     ICHECK_EQ(op->args.size(), 14U)
         << "ptx_tcgen05_mma_ts args is " << op->args;
     std::string kind_dtype = Downcast<StringImm>(op->args[0])->value;
-    std::string a_ref = this->PrintTmemBaseValue(op->args[1]);
+    std::string a_ref = this->PrintExpr(op->args[1]);
     std::string A_offset = this->PrintExpr(op->args[2]);
     std::string b_desc = this->PrintExpr(op->args[3]);
     std::string B_offset = this->PrintExpr(op->args[4]);
-    std::string c_ref = this->PrintTmemBaseValue(op->args[5]);
+    std::string c_ref = this->PrintExpr(op->args[5]);
     std::string c_offset = this->PrintExpr(op->args[6]);
     PrimExpr desc_expr = op->args[7];
     std::string scale_out = this->PrintExpr(op->args[8]);
@@ -3755,13 +3746,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string A_offset = this->PrintExpr(op->args[2]);
     std::string b_desc = this->PrintExpr(op->args[3]);
     std::string B_offset = this->PrintExpr(op->args[4]);
-    std::string c_ref = this->PrintTmemBaseValue(op->args[5]);
+    std::string c_ref = this->PrintExpr(op->args[5]);
     std::string c_offset = this->PrintExpr(op->args[6]);
     PrimExpr desc_expr = op->args[7];
     std::string scale_out = this->PrintExpr(op->args[8]);
-    std::string sfa_ref = this->PrintTmemBaseValue(op->args[9]);
+    std::string sfa_ref = this->PrintExpr(op->args[9]);
     std::string sfa_offset = this->PrintExpr(op->args[10]);
-    std::string sfb_ref = this->PrintTmemBaseValue(op->args[11]);
+    std::string sfb_ref = this->PrintExpr(op->args[11]);
     std::string sfb_offset = this->PrintExpr(op->args[12]);
     // args[13], [14] reserved for future mask/flags
     bool enable_2cta = Downcast<Bool>(op->args[15])->value;
@@ -3802,7 +3793,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     // arg[0] = smem pointer, arg[1] = tmem data pointer, arg[2] = tmem column
     // offset
     std::string smem_ptr = this->PrintExpr(op->args[0]);
-    std::string tmem_base = this->PrintTmemBaseValue(op->args[1]);
+    std::string tmem_base = this->PrintExpr(op->args[1]);
     std::string tmem_col_offset = this->PrintExpr(op->args[2]);
     bool use_2cta = false;
     if (op->annotations.find("use_2cta") != op->annotations.end()) {

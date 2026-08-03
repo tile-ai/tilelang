@@ -98,6 +98,7 @@ def test_tmem_base_is_cached_per_thread_after_allocation_sync():
     assert all(buffer.name != "C_tmem_base" for buffer in allocated)
     mma = _collect_calls(body, "tl.ptx_tcgen05_mma_ss")[0]
     assert mma.args[5].same_as(cache.var)
+    assert mma.args[5].dtype == "uint32"
 
 
 @tilelang.testing.requires_cuda
