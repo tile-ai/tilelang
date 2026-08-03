@@ -186,11 +186,11 @@ def sparse_mla_fwd(
             # Prime the Pump! Prefetch indices for iter_0
             for r in T.serial(4):
                 # This read will cause a long scoreboard stall, but it only happens once before the loop starts
-                for stage in T.unroll(num_stages, explicit=True):
+                for stage in T.unroll(num_stages):
                     prefetch_indices[stage, r] = Indices[b_i, s_i, g_i, stage * BI + r * 16 + (tx - 256) // 8]
 
             for i_i in T.serial(T.ceildiv(NI, num_stages)):
-                for stage in T.unroll(num_stages, explicit=True):
+                for stage in T.unroll(num_stages):
                     T.barrier_wait(bar_k_free[stage], (i_i & 1))
 
                     # Block size `BI` is 64, loading is divided into 4 iterations, each processing 16 indices.
@@ -226,7 +226,7 @@ def sparse_mla_fwd(
 
             # pre-arrive free barriers to indicate buffers are initially free
             # At the beginning of phase0, tells producer it can load data into both buffers
-            for stage in T.unroll(num_stages, explicit=True):
+            for stage in T.unroll(num_stages):
                 T.barrier_arrive(bar_k_free[stage])
 
             # Consumer 0 (WG0): Responsible for Even Blocks and O_L (Left Half)
@@ -328,7 +328,7 @@ def sparse_mla_fwd(
 
             # pre-arrive free barriers to indicate buffers are initially free
             # At the beginning of phase0, tells producer it can load data into both buffers
-            for stage in T.unroll(num_stages, explicit=True):
+            for stage in T.unroll(num_stages):
                 T.barrier_arrive(bar_k_free[stage])
 
             # Consumer 1 (WG1): Responsible for Odd Blocks and O_R (Right Half)

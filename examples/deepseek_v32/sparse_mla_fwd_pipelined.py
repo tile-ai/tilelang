@@ -124,7 +124,7 @@ def sparse_mla_fwd(
             T.barrier_wait(bar_q, 0)
 
             for i_i in T.serial(T.ceildiv(NI, num_stages)):
-                for stage in T.unroll(num_stages, explicit=True):
+                for stage in T.unroll(num_stages):
                     T.barrier_wait(bar_k_ready[stage], (i_i & 1))
 
                     for h_i, bi_i in T.Parallel(H_per_block, BI):
@@ -174,7 +174,7 @@ def sparse_mla_fwd(
             T.set_max_nreg(168, 1)
             T.fill(acc_o_r, 0)
             for i_i in T.serial(T.ceildiv(NI, num_stages)):
-                for stage in T.unroll(num_stages, explicit=True):
+                for stage in T.unroll(num_stages):
                     T.barrier_arrive(bar_sScale_and_sS_ready)
                     T.barrier_wait(bar_sScale_and_sS_ready, ((i_i * num_stages + stage) & 1))
                     for h_i, d_i in T.Parallel(H_per_block, D // 2):
@@ -194,7 +194,7 @@ def sparse_mla_fwd(
             # producer
             T.set_max_nreg(80, 0)
             for i_i in T.serial(T.ceildiv(NI, num_stages)):
-                for stage in T.unroll(num_stages, explicit=True):
+                for stage in T.unroll(num_stages):
                     T.barrier_wait(bar_k_free[stage], ((i_i & 1) ^ 1))
                     for r in T.serial(4):
                         indices_local = Indices[

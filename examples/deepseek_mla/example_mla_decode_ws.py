@@ -88,7 +88,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 T.barrier_wait(bar_q, 0)
 
                 for i_i in T.serial(T.ceildiv(NI, num_stages)):
-                    for stage in T.unroll(num_stages, explicit=True):
+                    for stage in T.unroll(num_stages):
                         T.barrier_wait(bar_k_ready[stage], (i_i & 1))
 
                         T.clear(acc_s)
@@ -138,7 +138,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 T.set_max_nreg(168, 1)
                 T.fill(acc_o_r, 0)
                 for i_i in T.serial(T.ceildiv(NI, num_stages)):
-                    for stage in T.unroll(num_stages, explicit=True):
+                    for stage in T.unroll(num_stages):
                         T.barrier_arrive(bar_sScale_and_sS_ready)
                         T.barrier_wait(bar_sScale_and_sS_ready, ((i_i * num_stages + stage) & 1))
                         for h_i, d_i in T.Parallel(block_H, dim // 2):
@@ -159,7 +159,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 # producer
                 T.set_max_nreg(80, 0)
                 for i_i in T.serial(T.ceildiv(NI, num_stages)):
-                    for stage in T.unroll(num_stages, explicit=True):
+                    for stage in T.unroll(num_stages):
                         T.barrier_wait(bar_k_free[stage], ((i_i & 1) ^ 1))
                         for r in T.serial(4):
                             kv_indices = (seqlen_kv // num_split) * bz + (i_i * num_stages + stage) * block_N + r * 16 + (tx - 256) // 8
@@ -269,7 +269,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 T.barrier_wait(bar_q, 0)
 
                 for i_i in T.serial(T.ceildiv(NI, num_stages)):
-                    for stage in T.unroll(num_stages, explicit=True):
+                    for stage in T.unroll(num_stages):
                         T.barrier_wait(bar_k_ready[stage], (i_i & 1))
 
                         T.clear(acc_s)
@@ -318,7 +318,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 T.set_max_nreg(168, 1)
                 T.fill(acc_o_r, 0)
                 for i_i in T.serial(T.ceildiv(NI, num_stages)):
-                    for stage in T.unroll(num_stages, explicit=True):
+                    for stage in T.unroll(num_stages):
                         T.barrier_arrive(bar_sScale_and_sS_ready)
                         T.barrier_wait(bar_sScale_and_sS_ready, ((i_i * num_stages + stage) & 1))
                         for h_i, d_i in T.Parallel(block_H, dim // 2):
@@ -339,7 +339,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 # producer
                 T.set_max_nreg(80, 0)
                 for i_i in T.serial(T.ceildiv(NI, num_stages)):
-                    for stage in T.unroll(num_stages, explicit=True):
+                    for stage in T.unroll(num_stages):
                         T.barrier_wait(bar_k_free[stage], ((i_i & 1) ^ 1))
                         for r in T.serial(4):
                             kv_indices = (i_i * num_stages + stage) * block_N + r * 16 + (tx - 256) // 8
