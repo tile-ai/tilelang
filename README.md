@@ -7,6 +7,7 @@
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/tile-ai/tilelang)
 [![Discord](https://img.shields.io/badge/Discord-%235865F2.svg?logo=discord&logoColor=white)](https://discord.gg/TUrHyJnKPG)
 [![Puzzles](https://img.shields.io/badge/🧩_Learn-TileLang_Puzzles-blueviolet)](https://github.com/tile-ai/tilelang-puzzles)
+[![LSP](https://img.shields.io/badge/LSP-TileLang_LSP-007ACC?logo=visualstudiocode&logoColor=white)](https://github.com/tile-ai/tilelang-lsp)
 
 [Documentation](https://tilelang.com/) ·
 [Installation](https://tilelang.com/get_started/Installation.html) ·
@@ -21,6 +22,7 @@ Tile Language (**tile-lang**) is a concise domain-specific language designed to 
 
 ## Latest News
 
+- **2026-08-04 — [TileLang LSP open sourced](https://github.com/tile-ai/tilelang-lsp):** published a Language Server Protocol implementation for TileLang with inlay hints for buffer shapes, dtypes, scopes, and inferred layouts, plus hover details and precise diagnostics.
 - **2026-08-03 — [TileLang v0.1.13](https://github.com/tile-ai/tilelang/releases/tag/v0.1.13):** shipped the multi-backend language dialect, source locations in compiler diagnostics, new CUDA and Metal hardware paths, and a broad set of correctness fixes. This release removes several legacy APIs; read the compatibility notes before upgrading.
 - **2026-07-30 — [SM120 NVF4 block-scaled MMA](https://github.com/tile-ai/tilelang/pull/2364):** added an optimized Blackwell path for `T.mma_gemm_blockscaled` and a corresponding SM120 example.
 - **2026-07-28 — [Metal 4 cooperative-tensor GEMM](https://github.com/tile-ai/tilelang/pull/2252):** added cooperative-tensor `T.gemm` support for Apple M5, while retaining the simdgroup fallback for unsupported shapes and systems.
