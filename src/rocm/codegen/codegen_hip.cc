@@ -1256,9 +1256,14 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     this->stream << "cooperative_groups::this_grid().sync();\n";
   } else if (op->op.same_as(tl::sync_warp())) {
-    // AMD wavefronts execute in lockstep, so intra-wavefront convergence is
-    // guaranteed by the hardware. __syncwarp() has no HIP equivalent and is a
-    // no-op here. The mask argument (if present) is intentionally ignored.
+    // AMD wavefronts execute in lockstep, so no runtime barrier is needed for
+    // intra-wavefront convergence and the mask argument is ignored. A compiler
+    // barrier is still required: without one the backend may reorder the LDS
+    // accesses that a warp-synchronous reduction depends on.
+    // __builtin_amdgcn_wave_barrier() emits no instructions and only constrains
+    // scheduling.
+    this->PrintIndent();
+    this->stream << "__builtin_amdgcn_wave_barrier();\n";
   } else if (op->op.same_as(tl::any_sync())) {
     ICHECK_EQ(op->args.size(), 2U) << "tl.any_sync expects <mask, predicate>.";
     // HIP __any takes only the predicate; the mask is ignored because
