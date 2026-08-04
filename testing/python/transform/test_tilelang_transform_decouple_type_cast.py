@@ -651,10 +651,13 @@ def test_codegen_pipelined_int64_index_cp_async_operands():
 
     source = kernel_fn().get_kernel_source()
 
-    assert "cp_async" in source, "Expected cp.async lowering for disable_tma copy"
-    for line in source.splitlines():
-        if "cp_async_gs" in line:
-            assert "_local_cast" not in line, f"cp_async operand points at local memory: {line.strip()}"
+    # Filter for the data-movement calls specifically: cp_async_commit/cp_async_wait
+    # also match a bare "cp_async" substring, so they alone would satisfy a laxer check
+    # while leaving the operand assertion below with nothing to inspect.
+    gs_lines = [line for line in source.splitlines() if "cp_async_gs" in line]
+    assert gs_lines, "Expected cp_async_gs (global->shared) calls for disable_tma copy"
+    for line in gs_lines:
+        assert "_local_cast" not in line, f"cp_async operand points at local memory: {line.strip()}"
 
 
 if __name__ == "__main__":
