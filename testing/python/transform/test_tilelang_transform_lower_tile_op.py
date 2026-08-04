@@ -19,6 +19,7 @@ def _count_calls(func: tvm.tirx.PrimFunc):
     return counts
 
 
+@tilelang.testing.requires_cuda
 def test_lower_tile_op_respects_copy_annotation_for_pipeline_managed_cp_async():
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
 
@@ -48,6 +49,7 @@ def test_lower_tile_op_respects_copy_annotation_for_pipeline_managed_cp_async():
     assert calls.get("tirx.ptx_wait_group", 0) == 0
 
 
+@tilelang.testing.requires_cuda
 def test_lower_tile_op_respects_copy_annotation_for_explicit_async_copy():
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
 
