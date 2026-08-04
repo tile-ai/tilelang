@@ -398,6 +398,7 @@ def _apply_ws_pass(func):
     return tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
 
 
+@tilelang.testing.requires_cuda
 def test_ws_pass_applies_under_t_persistent_primitive():
     """WS must descend through the ``For`` node synthesized by ``T.Persistent``."""
     func = persistent_matmul_primitive()
@@ -406,6 +407,7 @@ def test_ws_pass_applies_under_t_persistent_primitive():
     assert "tl_tiled_ws_applied" in script
 
 
+@tilelang.testing.requires_cuda
 def test_ws_pass_applies_under_persistent_serial():
     """Same coverage gap exercised via a hand-written ``T.serial`` scheduler."""
     func = persistent_matmul_serial()
@@ -414,6 +416,7 @@ def test_ws_pass_applies_under_persistent_serial():
     assert "tl_tiled_ws_applied" in script
 
 
+@tilelang.testing.requires_cuda
 def test_ws_pass_applies_under_persistent_dynamic_bound():
     """The outer ``T.serial`` bound may be symbolic; the fix must not depend on IntImm."""
     func = persistent_matmul_serial_dynamic_bound()

@@ -44,6 +44,7 @@ def test_jit2_gemm():
     torch.testing.assert_close(C, C_ref, atol=1e-2, rtol=1e-2)
 
 
+@tilelang.testing.requires_cuda
 def test_jit2_gemm_ptr():
     @tilelang.jit
     def gemm_ptr(

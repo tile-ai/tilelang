@@ -380,6 +380,7 @@ def test_tma_atomic_add_32b_swizzle_runtime():
     torch.testing.assert_close(out, torch.ones_like(out), rtol=0, atol=0)
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("dtype", [T.int16, T.int64, T.float64, T.float32x2])
 def test_tma_atomic_add_rejects_unsupported_dtype(dtype):
     with pytest.raises(
@@ -389,12 +390,14 @@ def test_tma_atomic_add_rejects_unsupported_dtype(dtype):
         lower_tma_atomic_add(dtype)
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("dtype", [T.float16, T.bfloat16, T.float32, T.int32, T.uint32, T.uint64])
 def test_tma_atomic_add_accepts_ptx_dtype(dtype):
     artifact = lower_tma_atomic_add(dtype)
     assert "tma_store_add" in artifact.kernel_source
 
 
+@tilelang.testing.requires_cuda
 def test_tma_atomic_add_uint64_uses_linear_layout():
     artifact = lower_tma_atomic_add(T.uint64)
     descriptor_args = get_tma_atomic_add_descriptor_args(artifact)
@@ -404,6 +407,7 @@ def test_tma_atomic_add_uint64_uses_linear_layout():
     assert descriptor_args[-3].value == 0
 
 
+@tilelang.testing.requires_cuda
 def test_tma_atomic_add_splits_32b_swizzle_box():
     artifact = lower_tma_atomic_add(T.float32, shape=(16, 24))
     descriptor_args = get_tma_atomic_add_descriptor_args(artifact)
@@ -411,6 +415,7 @@ def test_tma_atomic_add_splits_32b_swizzle_box():
     assert artifact.kernel_source.count("tma_store_add") == 3
 
 
+@tilelang.testing.requires_cuda
 def test_tma_atomic_add_rejects_pre_hopper_target():
     with pytest.raises(
         tvm.error.InternalError,
@@ -419,6 +424,7 @@ def test_tma_atomic_add_rejects_pre_hopper_target():
         lower_tma_atomic_add(T.float32, arch="sm_80")
 
 
+@tilelang.testing.requires_cuda
 def test_tma_atomic_add_rejects_unencodable_explicit_layout():
     with pytest.raises(
         tvm.error.InternalError,

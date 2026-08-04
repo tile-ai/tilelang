@@ -472,6 +472,7 @@ def run_fp4_tma_copy_roundtrip():
     assert torch.equal(b.view(torch.int8), a)
 
 
+@tilelang.testing.requires_cuda
 def test_fp4_unpacksmem_tma_descriptor_uses_align16b():
     program = fp4_tma_copy_unpacked_smem_load()
     artifact = tilelang.lower(
@@ -487,6 +488,7 @@ def test_fp4_unpacksmem_tma_descriptor_uses_align16b():
     assert 'T.call_packed("__tvm_tensormap_create_tiled", A_desc, 14,' in host_ir
 
 
+@tilelang.testing.requires_cuda
 def test_fp4_unpacksmem_tma_store_is_rejected():
     program = fp4_tma_copy_unpacked_smem_store()
     with pytest.raises(tvm.TVMError, match="only supports float4_e2m1_unpacked as an FP4 unpack load"):
@@ -497,6 +499,7 @@ def test_fp4_unpacksmem_tma_store_is_rejected():
         )
 
 
+@tilelang.testing.requires_cuda
 def test_copy_prefer_tma_lowers_as_synchronous_tma_load():
     @T.prim_func
     def main(x: T.Tensor((128, 32), T.float32)):
@@ -519,6 +522,7 @@ def test_copy_prefer_tma_lowers_as_synchronous_tma_load():
     assert ".wait(0)" in device_source
 
 
+@tilelang.testing.requires_cuda
 def test_device_bound_pointer_keeps_descriptorless_bulk1d():
     @T.prim_func
     def main(
@@ -544,6 +548,7 @@ def test_device_bound_pointer_keeps_descriptorless_bulk1d():
     assert "CUtensorMap" not in device_source
 
 
+@tilelang.testing.requires_cuda
 def test_device_bound_descriptor_tma_is_rejected_when_ws_disabled():
     @T.prim_func
     def main(src_ptrs: T.Tensor((1,), T.ptr)):

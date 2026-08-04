@@ -502,6 +502,7 @@ def test_reduce(op, dtype, M, N, src_scope, dst_scope, threads, batch):
     torch.testing.assert_close(B, _ref(A, op), atol=tol, rtol=tol)
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize(
     ("op", "packed_op"),
     [("sum", "add2"), ("max", "max2"), ("min", "min2")],
@@ -523,6 +524,7 @@ def test_reduce_local_packed_codegen(op, packed_op):
     assert f"tl::{packed_op}" in artifact.kernel_source
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize(
     ("op", "packed_op"),
     [("sum", "add2"), ("max", "max2"), ("min", "min2")],
@@ -546,6 +548,7 @@ def test_reduce_local_noncontiguous_dim_packed_codegen(op, packed_op):
     assert f"tl::{packed_op}" in artifact.kernel_source
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize(
     ("op", "packed_op"),
     [("sum", "add2"), ("max", "max2"), ("min", "min2")],
