@@ -1,33 +1,32 @@
-"""Backend-neutral low-level TIR operator adapters."""
-
 from __future__ import annotations
 
 from numbers import Integral
 from typing import Any
 
 import tvm
-import tvm.tirx.op as _tvm_op
 from tvm.ir import PrimExpr
 from tvm.ir.base import Span
 from tvm.runtime import const
 from tvm.tirx import Buffer
 from tvm.tirx.expr import IntImm, Shuffle as Shuffle
+import tvm.tirx.op as _tvm_op
 
 from tilelang.language.dtypes import _is_any_dtype
 from tilelang.utils.deprecated import deprecated_warning
 
 
 def _buffer_data(value):
-    return value.data if isinstance(value, Buffer) else value
+    if isinstance(value, Buffer):
+        return value.data
+    return value
 
 
 def _normalize_primexpr_args(args):
     return tuple(_buffer_data(arg) for arg in args)
 
 
-# Re-export unchanged backend-neutral TVM operators without adding another
-# Python call layer. Backend-owned operators live in the corresponding
-# ``tilelang.<backend>.language.tir`` module.
+# Re-export unchanged TVM operators without adding another Python call layer.
+# TileLang-specific adapters remain as functions below.
 call_packed = _tvm_op.call_packed
 call_cpacked = _tvm_op.call_cpacked
 call_packed_lowered = _tvm_op.call_packed_lowered
@@ -64,7 +63,6 @@ ptx_wait_group = _tvm_op.ptx_wait_group
 ptx_cp_async_barrier = _tvm_op.ptx_cp_async_barrier
 ptx_init_barrier_thread_count = _tvm_op.ptx_init_barrier_thread_count
 ptx_arrive_barrier = _tvm_op.ptx_arrive_barrier
-ptx_arrive_barrier_expect_tx = _tvm_op.ptx_arrive_barrier_expect_tx
 create_barriers = _tvm_op.create_barriers
 vectorlow = _tvm_op.vectorlow
 vectorhigh = _tvm_op.vectorhigh
@@ -137,63 +135,271 @@ vscale = _tvm_op.vscale
 
 
 def extract_lane(vector: PrimExpr, lane: int | IntImm, span: Span | None = None) -> PrimExpr:
-    """Extract one compile-time-selected lane from a fixed-width vector."""
+    """Extract one scalar lane from a fixed-width vector expression.
+
+    Parameters
+    ----------
+    vector : PrimExpr
+        The vector expression to extract from.
+
+    lane : int or IntImm
+        The zero-based lane index. The index must be known at compile time.
+
+    span : Optional[Span]
+        The location of this expression in the source code.
+
+    Returns
+    -------
+    result : PrimExpr
+        A scalar expression with the vector's element dtype.
+    """
     if not isinstance(vector, PrimExpr):
         raise TypeError(f"extract_lane expects a PrimExpr, but got {type(vector).__name__}")
+
     lanes = vector.dtype.lanes
     if lanes <= 1:
         raise ValueError(f"extract_lane expects a vector expression, but got dtype {vector.dtype}")
+
     if isinstance(lane, IntImm):
         lane = lane.value
     elif not isinstance(lane, Integral):
         raise TypeError(f"extract_lane expects a compile-time integer lane, but got {type(lane).__name__}")
+
     lane = int(lane)
     if lane < 0 or lane >= lanes:
         raise IndexError(f"Lane index {lane} is out of bounds for dtype {vector.dtype} with {lanes} lanes")
+
     return Shuffle([vector], [lane], span)
 
 
 def call_intrin(dtype, func_name, *args, annotations=None, span=None):
-    """Build an intrinsic call, accepting Buffer arguments as their data vars."""
-    return _tvm_op.call_intrin(
-        dtype,
-        func_name,
-        *_normalize_primexpr_args(args),
-        annotations=annotations,
-        span=span,
-    )
+    """Build expression by calling an intrinsic function.
+
+    Intrinsics can be overloaded with multiple data types via
+    the intrinsic translation rule.
+
+    Parameters
+    ----------
+    dtype : str
+        The data type of the result.
+
+    func_name: str
+        The intrinsic function name.
+
+    args : list
+        Positional arguments.
+
+    span : Optional[Span]
+        The location of this operator in the source code.
+
+    Returns
+    -------
+    call : PrimExpr
+        The call expression.
+    """
+    args = _normalize_primexpr_args(args)
+    return _tvm_op.call_intrin(dtype, func_name, *args, annotations=annotations, span=span)
 
 
 def call_pure_extern(dtype, func_name, *args, span=None):
-    """Build a pure extern call, accepting Buffer arguments as their data vars."""
-    return _tvm_op.call_pure_extern(dtype, func_name, *_normalize_primexpr_args(args), span=span)
+    """Build expression by calling a pure extern function.
+
+    Parameters
+    ----------
+    dtype : str
+        The data type of the result.
+
+    func_name: str
+        The extern function name.
+
+    args : list
+        Positional arguments.
+
+    span : Optional[Span]
+        The location of this operator in the source code.
+
+    Returns
+    -------
+    call : PrimExpr
+        The call expression.
+    """
+    args = _normalize_primexpr_args(args)
+    return _tvm_op.call_pure_extern(dtype, func_name, *args, span=span)
 
 
 def call_extern(dtype, func_name, *args, span=None):
-    """Build an extern call, accepting Buffer arguments as their data vars."""
-    return _tvm_op.call_extern(dtype, func_name, *_normalize_primexpr_args(args), span=span)
+    """Build expression by calling a extern function.
+
+    Parameters
+    ----------
+    dtype : str
+        The data type of the result.
+
+    func_name: str
+        The extern function name.
+
+    args : list
+        Positional arguments.
+
+    span : Optional[Span]
+        The location of this operator in the source code.
+
+    Returns
+    -------
+    call : PrimExpr
+        The call expression.
+    """
+    args = _normalize_primexpr_args(args)
+    return _tvm_op.call_extern(dtype, func_name, *args, span=span)
 
 
 def tvm_access_ptr(ptype, data, offset, extent, rw_mask):
-    """Build a TIR access pointer from a Buffer or data variable."""
-    return _tvm_op.tvm_access_ptr(ptype, _buffer_data(data), offset, extent, rw_mask)
+    """Get head access address with memory access pattern info
+
+    Parameters
+    ----------
+    ptype : Expr
+        The data type of pointer.
+
+    data : DType*
+        The data of pointer.
+
+    offset : int
+        The offset of pointer.
+
+    extent : int
+        The extent of pointer.
+
+    rw_mask : int
+        The read write mask.
+
+    Returns
+    -------
+    call : PrimExpr
+        The call expression.
+    """
+    data = _buffer_data(data)
+    return _tvm_op.tvm_access_ptr(ptype, data, offset, extent, rw_mask)
 
 
 def ptx_cp_async(dst_access_ptr, src_access_ptr, num_elems, predicate=None):
-    """Build the legacy async-copy op shared by CUDA and HIP lowering."""
-    args = (dst_access_ptr, src_access_ptr, num_elems)
-    if predicate is not None:
-        args += (predicate,)
-    return call_intrin("", _tvm_op.Op.get("tl.ptx_cp_async"), *args)
+    """TVM intrinsic for ptx async copy from global to shared memory using cp.async
+    https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async
+
+    Parameters
+    ----------
+    dst_access_ptr : PrimExpr
+        The destination (shared memory) access pointer created by tvm_access_ptr.
+        Should include pointer, offset, extent, and write access flag (rw_mask=2).
+
+    src_access_ptr : PrimExpr
+        The source (global memory) access pointer created by tvm_access_ptr.
+        Should include pointer, offset, extent, and read access flag (rw_mask=1).
+
+    num_elems : int or PrimExpr
+        The number of logical elements to copy.
+
+        For TileLang's ``tl.ptx_cp_async`` frontend op, the final PTX byte width
+        is derived later from ``num_elems * element_bits(access_ptr)`` and must
+        eventually land on a legal ``cp.async`` width of 4, 8, or 16 bytes.
+
+    predicate : PrimExpr, optional
+        Optional predicate condition for conditional cp.async. When provided, the copy
+        will only be performed if the predicate evaluates to true. Otherwise, the
+        destination will be filled with zeros (default behavior of cp.async).
+
+    Returns
+    -------
+    call : PrimExpr
+        The call expression.
+
+    Examples
+    --------
+    >>> # Copy 16 uint8 elements (= 16 bytes) from global to shared memory
+    >>> T.ptx_cp_async(
+    ...     T.tvm_access_ptr(T.type_annotation(T.uint8), A_shared.data, 0, 16, 2),  # dst
+    ...     T.tvm_access_ptr(T.type_annotation(T.uint8), B_global.data, 0, 16, 1),  # src
+    ...     16  # num_elems
+    ... )
+    >>>
+    >>> # Predicated cp.async (only copy if condition is true)
+    >>> T.ptx_cp_async(
+    ...     T.tvm_access_ptr(T.type_annotation(T.uint8), A_shared.data, 0, 16, 2),
+    ...     T.tvm_access_ptr(T.type_annotation(T.uint8), B_global.data, 0, 16, 1),
+    ...     16,
+    ...     predicate=guard  # only copy if guard is true
+    ... )
+    """
+    if predicate is None:
+        return call_intrin("", _tvm_op.Op.get("tl.ptx_cp_async"), dst_access_ptr, src_access_ptr, num_elems)
+    else:
+        return call_intrin("", _tvm_op.Op.get("tl.ptx_cp_async"), dst_access_ptr, src_access_ptr, num_elems, predicate)
+
+
+def ptx_arrive_barrier_expect_tx(barrier_id, byte_count):
+    """TVM intrinsic for ptx barrier arrival with expect tx using mbarrier.arrive.expect_tx
+    https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-arrive
+    https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-expect-tx-operation
+
+    Parameters
+    ----------
+    barrier_id : int
+        The ID of the barrier shared memory pointer.
+
+    byte_count : int
+        Increases the tx count of the mbarrier object to track completion of
+        additional async transactions.
+
+    Returns
+    -------
+    call : PrimExpr
+        The call expression.
+    """
+    return _tvm_op.ptx_arrive_barrier_expect_tx(barrier_id, byte_count)
 
 
 def infinity(dtype: str, span: Span | None = None) -> Any:
-    """Return positive infinity for ``dtype``."""
+    """infinity value of dtype
+
+    Parameters
+    ----------
+    dtype : str
+        The data type.
+
+    span : Optional[Span]
+        The location of this operator in the source code.
+
+    Returns
+    -------
+    value : tvm.Expr
+        The infinity value of dtype.
+    """
     return call_intrin(dtype, _tvm_op.Op.get("tl.infinity"), tvm.tirx.StringImm(str(dtype)), span=span)
 
 
+# NOTE(chaofan): Here we use the argument order (value, dtype, ...) instead of (dtype, value, ...) in TVM
+# to be consistent with T.cast.
 def reinterpret(value, dtype, span: Span | None = None) -> Any:
-    """Reinterpret ``value`` as ``dtype`` using TileLang's value-first API."""
+    """Reinterpret cast a value to dtype.
+
+    Parameters
+    ----------
+    value : PrimExpr
+        The input value.
+
+    dtype : str
+        The data type.
+
+    span : Optional[Span]
+        The location of this operator in the source code.
+
+    Returns
+    -------
+    value : tvm.Expr
+        The reinterpret cast value of dtype.
+    """
+
+    # NOTE(chaofan): For compatibility, we allow the old API where dtype comes first
     if _is_any_dtype(value):
         deprecated_warning("T.reinterpret(dtype, value)", "reinterpret(value, dtype)")
         value, dtype = dtype, value
@@ -201,7 +407,26 @@ def reinterpret(value, dtype, span: Span | None = None) -> Any:
 
 
 def round(x, rounding_mode="ties-to-even", span=None):
-    """Round using ties-to-even or ties-away-from-zero semantics."""
+    """Round elements of the array to the nearest integer.
+
+    Parameters
+    ----------
+    x : PrimExpr
+        Input argument.
+
+    rounding_mode : str
+        Rounding mode to use. Supported values are ``"ties-to-even"`` and
+        ``"ties-away-from-zero"``. ``"ties-to-even"`` is the default and matches
+        the existing TileLang/TVM semantics.
+
+    span : Optional[Span]
+        The location of this operator in the source code.
+
+    Returns
+    -------
+    y : PrimExpr
+        The result.
+    """
     if rounding_mode is None:
         rounding_mode = "ties-to-even"
     elif not isinstance(rounding_mode, str):
@@ -219,17 +444,48 @@ def round(x, rounding_mode="ties-to-even", span=None):
 
 
 def pow_of_int(x: PrimExpr, y: int) -> PrimExpr:
-    """Build TileLang's integer-exponent power intrinsic."""
-    return call_intrin(x.dtype, _tvm_op.Op.get("tl.pow_of_int"), x, y)
+    """Fast power operation than pow(float, float).
+
+    Args:
+        x (PrimExpr): Base value
+        y (int): Exponent value
+    """
+    return call_intrin(
+        x.dtype,
+        tvm.tirx.op.Op.get("tl.pow_of_int"),
+        x,
+        y,
+    )
 
 
 def pow(x, y, span=None):
-    """Build ``x`` to the power ``y``, specializing positive integer exponents."""
+    """x power y
+
+    Parameters
+    ----------
+    x : PrimExpr
+        Input argument.
+
+    y : PrimExpr
+        The exponent
+
+    span : Optional[Span]
+        The location of this operator in the source code.
+
+    Returns
+    -------
+    z : PrimExpr
+        The result.
+    """
     if isinstance(y, (int, IntImm)):
-        y_value = int(y)
-        if y_value == 0:
+        # pow_of_int's `for (i = 1; i < y; ...)` loop only computes x**y for y >= 1.
+        yv = int(y)
+        if yv == 0:
             return const(1, dtype=x.dtype)
-        if y_value >= 1:
-            return pow_of_int(x, y_value)
-        return _tvm_op.pow(x, y_value, span)
+        if yv >= 1:
+            return pow_of_int(x, yv)
+        return _tvm_op.pow(x, yv, span)
     return _tvm_op.pow(x, y, span)
+
+
+# pylint: disable=unnecessary-lambda
