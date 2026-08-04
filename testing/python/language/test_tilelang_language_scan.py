@@ -689,7 +689,7 @@ def test_scan_offset_subregion():
         for dim in (0, 1):
             for reverse in (False, True):
                 # r0 == 64 is the regressing case (r0 == 0 is already covered by
-                # the full-region region tests above).
+                # the full-region tests above).
                 run_scan_offset_subregion(H, W, 64, 128, op=op, dim=dim, reverse=reverse)
 
 

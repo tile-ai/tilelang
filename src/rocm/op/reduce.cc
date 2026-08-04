@@ -19,7 +19,7 @@ namespace rocm {
 struct Reduce : backend::ReduceLowerer<Reduce> {
   static bool SupportsFp16Bf16NanReduce(Target) { return false; }
 
-  static int GetPreferedVectorizedSize(DataType, Target) { return 1; }
+  static int GetPreferredVectorizedSize(DataType, Target) { return 1; }
 
   static std::string MakeBatchAllReduce(std::string reducer,
                                         int reducing_threads, int scale,
