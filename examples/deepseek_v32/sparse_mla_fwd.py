@@ -82,12 +82,9 @@ def sparse_mla_fwd(
         by,
         bz,
     ):
-        Q_shared = T.alloc_shared([H_per_block, D], dtype)
-        Q_tail_shared = T.alloc_shared([H_per_block, D_tail], dtype)
+        Q_shared = T.alloc_shared([H_per_block, D + D_tail], dtype)
         KV_shared = T.alloc_shared([BI, D], dtype)
         K_tail_shared = T.alloc_shared([BI, D_tail], dtype)
-        O_shared = T.alloc_shared([H_per_block, D], dtype)
-        Lse_shared = T.alloc_shared([H_per_block], accum_dtype)
         mask = T.alloc_fragment([BI], "bool")
 
         acc_o = T.alloc_fragment([H_per_block, D], accum_dtype)
@@ -111,8 +108,9 @@ def sparse_mla_fwd(
         H0 = g_i * padded_H + (0 if REPLICATE_H == 1 else (bx % REPLICATE_H) * 64)
         H1 = H0 + H_per_block
 
-        T.copy(Q[b_i, s_i, H0:H1, :D], Q_shared)
-        T.copy(Q[b_i, s_i, H0:H1, D:], Q_tail_shared)
+        # TODO: merge the statements when the compiler has better support for non-power-of-2 extents.
+        T.copy(Q[b_i, s_i, H0:H1, :D], Q_shared[:, :D])
+        T.copy(Q[b_i, s_i, H0:H1, D:], Q_shared[:, D:])
 
         for i_i in T.Pipelined(NI, num_stages=num_stages):
             for bi_i in T.Parallel(BI):
@@ -126,14 +124,14 @@ def sparse_mla_fwd(
             for h_i, bi_i in T.Parallel(H_per_block, BI):
                 acc_s[h_i, bi_i] = T.if_then_else(mask[bi_i], 0, -T.infinity(acc_s.dtype))
             T.gemm(
-                Q_shared,
+                Q_shared[:, :D],
                 KV_shared,
                 acc_s,
                 transpose_B=True,
                 policy=T.GemmWarpPolicy.FullRow,
             )
             T.gemm(
-                Q_tail_shared,
+                Q_shared[:, D:],
                 K_tail_shared,
                 acc_s,
                 transpose_B=True,
