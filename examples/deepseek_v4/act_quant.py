@@ -199,7 +199,7 @@ def fp8_act_quant_ref(x: torch.Tensor, block_size: int = 128, round_scale: bool 
     """PyTorch reference for block-wise FP8 quantization.
 
     Returns:
-        quant: shape (M, N), dtype torch.float8_e4m3fn.
+        quant: shape (M, N), using the target's E4M3 FN/FNUZ variant.
         scale: shape (M, num_blocks), dtype torch.float32.
     """
     M, N = x.shape
