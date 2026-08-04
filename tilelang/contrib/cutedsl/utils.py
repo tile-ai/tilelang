@@ -7,11 +7,13 @@ bitcast, tensor construction, warp election, barrier sync, and FP16 packing.
 
 import cutlass
 import cutlass.cute as cute
+from cutlass import AddressSpace
+from cutlass.experimental import primitives as prims
 
-from cutlass.base_dsl._mlir_helpers import arith as arith_helper
 from cutlass.base_dsl.typing import (
     BFloat16,
     Float,
+    FloatMeta,
     Float16,
     Float32,
     Float4E2M1FN,
@@ -24,16 +26,21 @@ from cutlass.base_dsl.typing import (
     Uint16,
     Uint32,
 )
+from cutlass.cutlass_dsl import T
+import cutlass._mlir.dialects.cute as _cute_ir
 from cutlass.cute.tensor import TensorSSA
 from cutlass._mlir.dialects import arith, builtin, llvm, nvgpu, nvvm, vector
+from cutlass._mlir.extras import types as mlir_types
 from cutlass._mlir import ir as mlir_ir
 from cutlass.cutlass_dsl import dsl_user_op
 
 __all__ = [
     "BYTES_PER_TENSORMAP",
     "BYTES_PER_POINTER",
+    "Float4E2M1FN_unpack",
     "type_map",
     "bitcast",
+    "recast_ptr",
     "cast_tensor",
     "as_tensor_ssa",
     "as_rmem_tensor",
@@ -42,29 +49,35 @@ __all__ = [
     "handle_add_byte_offset",
     "shuffle_elect",
     "sync_thread_partial",
+    "warpgroup_reg_alloc",
+    "warpgroup_reg_dealloc",
     "pack_half2",
 ]
 
 BYTES_PER_TENSORMAP = 128
 BYTES_PER_POINTER = 8
 
+
+class Float4E2M1FN_unpack(Float, metaclass=FloatMeta, width=8, mlir_type=T.f4E2M1FN):
+    pass
+
 # Map dtype to WGMMA types (moved from typing.py)
 type_map = {
-    "int8": nvvm.WGMMATypes.s8,
-    "int32": nvvm.WGMMATypes.s32,
-    "uint8": nvvm.WGMMATypes.u8,
-    "float16": nvvm.WGMMATypes.f16,
-    "fp16": nvvm.WGMMATypes.f16,
-    "bfloat16": nvvm.WGMMATypes.bf16,
-    "bf16": nvvm.WGMMATypes.bf16,
-    "float32": nvvm.WGMMATypes.f32,
-    "fp32": nvvm.WGMMATypes.f32,
-    "tf32": nvvm.WGMMATypes.tf32,
-    "float8_e4m3": nvvm.WGMMATypes.e4m3,
-    "float8_e5m2": nvvm.WGMMATypes.e5m2,
-    "float8_e4m3fn": nvvm.WGMMATypes.e4m3,
-    "e4m3": nvvm.WGMMATypes.e4m3,
-    "e5m2": nvvm.WGMMATypes.e5m2,
+    "int8": prims.WGMMAType.S8,
+    "int32": prims.WGMMAType.S32,
+    "uint8": prims.WGMMAType.U8,
+    "float16": prims.WGMMAType.F16,
+    "fp16": prims.WGMMAType.F16,
+    "bfloat16": prims.WGMMAType.BF16,
+    "bf16": prims.WGMMAType.BF16,
+    "float32": prims.WGMMAType.F32,
+    "fp32": prims.WGMMAType.F32,
+    "tf32": prims.WGMMAType.TF32,
+    "float8_e4m3": prims.WGMMAType.E4M3,
+    "float8_e5m2": prims.WGMMAType.E5M2,
+    "float8_e4m3fn": prims.WGMMAType.E4M3,
+    "e4m3": prims.WGMMAType.E4M3,
+    "e5m2": prims.WGMMAType.E5M2,
 }
 
 # Map dtype to CuTeDSL type (internal)
@@ -79,6 +92,53 @@ _DTYPE_TO_CUTEDSL_TYPE = {
     "float32": Float32,
     "bfloat16": BFloat16,
 }
+
+
+@dsl_user_op
+def _recast_fp4_unpack_smem_ptr(ptr, swizzle_=None, *, loc=None, ip=None):
+    bit_layout = cute.make_layout((4, (16, 1)), stride=(1, (4, 128)))
+    swizzle_attr = swizzle_.type.attribute if swizzle_ is not None else None
+    res_ty = _cute_ir.PtrType.get(
+        Float4E2M1FN_unpack.mlir_type,
+        AddressSpace.smem,
+        ptr.alignment,
+        swizzle_attr,
+        None,
+        bit_layout.type.attribute,
+    )
+    return _cute_ir.recast_iter(res_ty, ptr.value, loc=loc, ip=ip)
+
+
+def recast_ptr(ptr, swizzle_=None, dtype=None):
+    if (
+        dtype is Float4E2M1FN_unpack
+        and getattr(ptr, "memspace", None) == AddressSpace.smem
+    ):
+        return _recast_fp4_unpack_smem_ptr(ptr, swizzle_)
+    return cute.recast_ptr(ptr, swizzle_, dtype=dtype)
+
+
+def _recast_type(src_type: mlir_ir.Type, res_elem_type: mlir_ir.Type) -> mlir_ir.Type:
+    if isinstance(src_type, mlir_types.VectorType):
+        if src_type.scalable:
+            return mlir_types.vector(
+                *src_type.shape,
+                res_elem_type,
+                scalable=src_type.scalable,
+                scalable_dims=src_type.scalable_dims,
+            )
+        return mlir_types.vector(*src_type.shape, res_elem_type)
+    if isinstance(src_type, mlir_types.RankedTensorType):
+        return mlir_types.RankedTensorType.get(
+            element_type=res_elem_type, shape=src_type.shape, strides=src_type.strides
+        )
+    if isinstance(src_type, mlir_types.UnrankedTensorType):
+        return mlir_types.UnrankedTensorType.get(element_type=res_elem_type)
+    if isinstance(src_type, mlir_types.MemRefType):
+        return mlir_types.MemRefType.get(
+            element_type=res_elem_type, shape=src_type.shape, strides=src_type.strides
+        )
+    return res_elem_type
 
 
 def bitcast(value, target_dtype):
@@ -116,7 +176,7 @@ def bitcast(value, target_dtype):
 @dsl_user_op
 def _narrow_to_float16_tensor(value, *, loc=None, ip=None):
     src = value.ir_value(loc=loc, ip=ip)
-    res_type = arith_helper.recast_type(src.type, Float16.mlir_type)
+    res_type = _recast_type(src.type, Float16.mlir_type)
     res = nvgpu.cvt_fpext(res_type, src, loc=loc, ip=ip)
     return TensorSSA(res, value.shape, Float16)
 
@@ -317,7 +377,17 @@ def shuffle_elect(thread_extent):
 def sync_thread_partial(barrier_id=None, thread_count=None):
     from .reduce import bar_sync_ptx
 
+    barrier_id = 0 if barrier_id is None else barrier_id
+    thread_count = 0 if thread_count is None else thread_count
     bar_sync_ptx(barrier_id, thread_count)
+
+
+def warpgroup_reg_alloc(reg_count):
+    prims.setmaxregister(reg_count, "increase")
+
+
+def warpgroup_reg_dealloc(reg_count):
+    prims.setmaxregister(reg_count, "decrease")
 
 
 def pack_half2(x, y):
@@ -340,17 +410,11 @@ def pack_half2(x, y):
         x_i16 = llvm.bitcast(i16_type, x_ir, loc=loc, ip=ip)
         y_i16 = llvm.bitcast(i16_type, y_ir, loc=loc, ip=ip)
 
-        packed_xy = llvm.inline_asm(
-            Int32.mlir_type,
-            [x_i16, y_i16],
-            "mov.b32 $0, {$1, $2};",
-            "=r,h,h",
-            has_side_effects=True,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
+        x_i32 = arith.extui(Int32.mlir_type, x_i16, loc=loc, ip=ip)
+        y_i32 = arith.extui(Int32.mlir_type, y_i16, loc=loc, ip=ip)
+        shift = arith.constant(Int32.mlir_type, 16, loc=loc, ip=ip)
+        y_shifted = arith.shli(y_i32, shift, loc=loc, ip=ip)
+        packed_xy = arith.ori(x_i32, y_shifted, loc=loc, ip=ip)
 
         return Int32(packed_xy)
 

@@ -4,7 +4,7 @@ tcgen05 (SM100/Blackwell) MMA support for CuTeDSL backend.
 Provides:
   - Tcgen05SmemDescriptor: 64-bit SMEM descriptor for tcgen05 MMA
   - initialize_tcgen05_descriptor: bitfield packing matching common.h layout
-  - tcgen05mma_ss / tcgen05mma_ws_ss / tcgen05mma_ts: MMA PTX inline asm
+  - tcgen05mma_ss / tcgen05mma_ws_ss / tcgen05mma_ts: primitive MMA wrappers
   - tcgen05_mma_arrive: mbarrier arrive for MMA commit
   - tmem_allocate / tmem_deallocate: TMEM allocation/deallocation
 """
@@ -16,19 +16,25 @@ __all__ = [
     "tcgen05mma_ws_ss",
     "tcgen05mma_ts",
     "tcgen05_mma_arrive",
+    "tcgen05_before_thread_sync",
+    "tcgen05_after_thread_sync",
     "tmem_allocate",
     "tmem_deallocate",
     "tcgen05_ld_32dp32bNx",
     "tcgen05_ld_32dp64bNx",
     "tcgen05_ld_32dp128bNx",
     "tcgen05_ld_32dp256bNx",
+    "tcgen05mma_blockscaled_ss",
+    "tcgen05_cp_warpx4",
+    "tcgen05_sf_warp_transpose",
 ]
 
 import cutlass
 import cutlass.cute as cute
-from cutlass._mlir.dialects import llvm
-from cutlass._mlir import ir
+from cutlass._mlir_helpers.vector import Vector
 from cutlass.cutlass_dsl import Constexpr, dsl_user_op
+from cutlass.experimental import primitives as prims
+from cutlass.experimental.primitives import nvvm_wrapper as _nvvm_prims
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -90,25 +96,28 @@ def initialize_tcgen05_descriptor(desc, start_address, leading_byte_offset, stri
 
 
 # ──────────────────────────────────────────────────────────────────────
-# PTX kind mapping  (TIR dtype string  ->  PTX kind suffix)
+# tcgen05 kind mapping  (TIR dtype string  ->  primitive kind enum)
 # ──────────────────────────────────────────────────────────────────────
 
 _TCGEN05_KIND_MAP = {
-    "fp16": "f16",
-    "bf16": "f16",
-    "float16": "f16",
-    "bfloat16": "f16",
-    "tf32": "tf32",
-    "float32": "tf32",
-    "s8": "i8",
-    "u8": "i8",
-    "int8": "i8",
-    "uint8": "i8",
-    "e4m3": "f8f6f4",
-    "e5m2": "f8f6f4",
-    "float8_e4m3": "f8f6f4",
-    "float8_e4m3fn": "f8f6f4",
-    "float8_e5m2": "f8f6f4",
+    "fp16": prims.Tcgen05MMAKind.F16,
+    "bf16": prims.Tcgen05MMAKind.F16,
+    "float16": prims.Tcgen05MMAKind.F16,
+    "bfloat16": prims.Tcgen05MMAKind.F16,
+    "tf32": prims.Tcgen05MMAKind.TF32,
+    "float32": prims.Tcgen05MMAKind.TF32,
+    "s8": prims.Tcgen05MMAKind.INT8,
+    "u8": prims.Tcgen05MMAKind.INT8,
+    "int8": prims.Tcgen05MMAKind.INT8,
+    "uint8": prims.Tcgen05MMAKind.INT8,
+    "e4m3": prims.Tcgen05MMAKind.F8F6F4,
+    "e5m2": prims.Tcgen05MMAKind.F8F6F4,
+    "float8_e4m3": prims.Tcgen05MMAKind.F8F6F4,
+    "float8_e4m3fn": prims.Tcgen05MMAKind.F8F6F4,
+    "float8_e5m2": prims.Tcgen05MMAKind.F8F6F4,
+    "e2m1": prims.Tcgen05MMAKind.F8F6F4,
+    "float4_e2m1fn": prims.Tcgen05MMAKind.F8F6F4,
+    "float4_e2m1_unpacked": prims.Tcgen05MMAKind.F8F6F4,
 }
 
 
@@ -119,9 +128,47 @@ def _kind_for(dtype_str):
     return kind
 
 
-def _ir(val, loc=None, ip=None):
-    """Extract MLIR IR value from a CuTeDSL value."""
-    return val.ir_value(loc=loc, ip=ip) if hasattr(val, "ir_value") else val
+def _blockscaled_kind_for(dtype_str):
+    if dtype_str not in _TCGEN05_KIND_MAP:
+        raise ValueError(f"tcgen05mma blockscaled: unsupported dtype '{dtype_str}'")
+    return prims.MMABlockScaleKind.MXF8F6F4
+
+
+def _desc_value(desc):
+    return desc.desc_i64[0] if isinstance(desc, Tcgen05SmemDescriptor) else desc
+
+
+@dsl_user_op
+def _tcgen05_mma_ws(mma_kind, d, a, b, idesc, enable_input_d, *, loc=None, ip=None):
+    """Emit tcgen05.mma.ws while working around a CUTLASS 4.7 pre-release kw typo."""
+    _nvvm_prims._assert_tensor_mem(d, "tcgen05.mma.ws")
+    _nvvm_prims._nvvm.tcgen05_mma_ws(
+        _nvvm_prims._TCGEN05_MMA_KIND_TO_DIALECT[mma_kind],
+        d,
+        a,
+        cutlass.Int64(b),
+        cutlass.Int32(idesc),
+        cutlass.Boolean(enable_input_d),
+        col_b_zero_mask=None,
+        loc=loc,
+        ip=ip,
+    )
+
+
+def _tmem_ptr(tmem_addr):
+    return prims.make_tmem_ptr(cutlass.Int32(tmem_addr), cutlass.Int32)
+
+
+def _write_disable_mask(mask0, mask1, mask2, mask3):
+    return Vector.from_elements(
+        (
+            cutlass.Int32(mask0),
+            cutlass.Int32(mask1),
+            cutlass.Int32(mask2),
+            cutlass.Int32(mask3),
+        ),
+        cutlass.Int32,
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -141,63 +188,38 @@ def tcgen05mma_ss(
     mask1: int,
     mask2: int,
     mask3: int,
+    use_2cta: Constexpr[bool] = False,
 ):
-    """tcgen05.mma.cta_group::1.kind::{kind} [tmem_c], desc_a, desc_b, desc_val, {masks}, p;
+    """tcgen05.mma.cta_group::{1|2}.kind::{kind} [tmem_c], desc_a, desc_b, desc_val, ...;
 
     Guarded by elect_one_sync — only one thread in the warp issues the MMA.
     The TIR codegen also wraps calls in ``if (threadIdx.x >> 5) == 0``
     which selects warp 0.
     """
     kind = _kind_for(kind_dtype)
-
-    # elect.sync selects one thread in the warp to issue the MMA.
-    # The @q predicate goes on the MMA instruction itself (not the block scope).
-    asm_str = (
-        "{\n"
-        ".reg .pred p;\n"
-        ".reg .pred q;\n"
-        "elect.sync _|q, 0xFFFFFFFF;\n"
-        "setp.ne.b32 p, $4, 0;\n"
-        f"@q tcgen05.mma.cta_group::1.kind::{kind} "
-        "[$0], $1, $2, $3, {$5, $6, $7, $8}, p;\n"
-        "}"
-    )
-
-    @dsl_user_op
-    def _do_mma(c_val, da_val, db_val, dv_val, sc_val, m0_val, m1_val, m2_val, m3_val, *, loc=None, ip=None):
-        llvm.inline_asm(
-            None,
-            [
-                _ir(c_val, loc, ip),
-                _ir(da_val, loc, ip),
-                _ir(db_val, loc, ip),
-                _ir(dv_val, loc, ip),
-                _ir(sc_val, loc, ip),
-                _ir(m0_val, loc, ip),
-                _ir(m1_val, loc, ip),
-                _ir(m2_val, loc, ip),
-                _ir(m3_val, loc, ip),
-            ],
-            asm_str,
-            "r,l,l,r,r,r,r,r,r",
-            has_side_effects=True,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
-
-    _do_mma(
-        cutlass.Int32(tmem_c),
-        desc_a.desc_i64[0],
-        desc_b.desc_i64[0],
-        cutlass.Int32(desc_val),
-        cutlass.Int32(scale_out),
-        cutlass.Int32(mask0),
-        cutlass.Int32(mask1),
-        cutlass.Int32(mask2),
-        cutlass.Int32(mask3),
-    )
+    if use_2cta:
+        if prims.elect_sync():
+            prims.tcgen05_mma(
+                kind,
+                prims.CTAGroup.CTA_2,
+                _tmem_ptr(tmem_c),
+                desc_a.desc_i64[0],
+                desc_b.desc_i64[0],
+                desc_val,
+                scale_out,
+            )
+    else:
+        if prims.elect_sync():
+            prims.tcgen05_mma(
+                kind,
+                prims.CTAGroup.CTA_1,
+                _tmem_ptr(tmem_c),
+                desc_a.desc_i64[0],
+                desc_b.desc_i64[0],
+                desc_val,
+                scale_out,
+                write_disable_mask=_write_disable_mask(mask0, mask1, mask2, mask3),
+            )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -211,39 +233,15 @@ def tcgen05mma_ws_ss(
 ):
     """tcgen05.mma.ws.cta_group::1.kind::{kind} [tmem_c], desc_a, desc_b, desc_val, p, 0;"""
     kind = _kind_for(kind_dtype)
-
-    asm_str = (
-        "{\n"
-        ".reg .pred p;\n"
-        ".reg .pred q;\n"
-        "elect.sync _|q, 0xFFFFFFFF;\n"
-        "setp.ne.b32 p, $4, 0;\n"
-        f"@q tcgen05.mma.ws.cta_group::1.kind::{kind} "
-        "[$0], $1, $2, $3, p, 0;\n"
-        "}"
-    )
-
-    @dsl_user_op
-    def _do_mma_ws(c_val, da_val, db_val, dv_val, sc_val, *, loc=None, ip=None):
-        llvm.inline_asm(
-            None,
-            [_ir(c_val, loc, ip), _ir(da_val, loc, ip), _ir(db_val, loc, ip), _ir(dv_val, loc, ip), _ir(sc_val, loc, ip)],
-            asm_str,
-            "r,l,l,r,r",
-            has_side_effects=True,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
+    if prims.elect_sync():
+        _tcgen05_mma_ws(
+            kind,
+            _tmem_ptr(tmem_c),
+            desc_a.desc_i64[0],
+            desc_b.desc_i64[0],
+            desc_val,
+            scale_out,
         )
-
-    _do_mma_ws(
-        cutlass.Int32(tmem_c),
-        desc_a.desc_i64[0],
-        desc_b.desc_i64[0],
-        cutlass.Int32(desc_val),
-        cutlass.Int32(scale_out),
-    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -263,57 +261,33 @@ def tcgen05mma_ts(
     mask1: int,
     mask2: int,
     mask3: int,
+    use_2cta: Constexpr[bool] = False,
 ):
-    """tcgen05.mma.cta_group::1.kind::{kind} [tmem_c], [tmem_a], desc_b, desc_val, {masks}, p;"""
+    """tcgen05.mma.cta_group::{1|2}.kind::{kind} [tmem_c], [tmem_a], desc_b, desc_val, ...;"""
     kind = _kind_for(kind_dtype)
-
-    # A is [$1] (indirect via TMEM address), not $1 (direct descriptor)
-    asm_str = (
-        "{\n"
-        ".reg .pred p;\n"
-        ".reg .pred q;\n"
-        "elect.sync _|q, 0xFFFFFFFF;\n"
-        "setp.ne.b32 p, $4, 0;\n"
-        f"@q tcgen05.mma.cta_group::1.kind::{kind} "
-        "[$0], [$1], $2, $3, {$5, $6, $7, $8}, p;\n"
-        "}"
-    )
-
-    @dsl_user_op
-    def _do_mma_ts(c_val, a_val, db_val, dv_val, sc_val, m0_val, m1_val, m2_val, m3_val, *, loc=None, ip=None):
-        llvm.inline_asm(
-            None,
-            [
-                _ir(c_val, loc, ip),
-                _ir(a_val, loc, ip),
-                _ir(db_val, loc, ip),
-                _ir(dv_val, loc, ip),
-                _ir(sc_val, loc, ip),
-                _ir(m0_val, loc, ip),
-                _ir(m1_val, loc, ip),
-                _ir(m2_val, loc, ip),
-                _ir(m3_val, loc, ip),
-            ],
-            asm_str,
-            "r,r,l,r,r,r,r,r,r",
-            has_side_effects=True,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
-
-    _do_mma_ts(
-        cutlass.Int32(tmem_c),
-        cutlass.Int32(tmem_a),
-        desc_b.desc_i64[0],
-        cutlass.Int32(desc_val),
-        cutlass.Int32(scale_out),
-        cutlass.Int32(mask0),
-        cutlass.Int32(mask1),
-        cutlass.Int32(mask2),
-        cutlass.Int32(mask3),
-    )
+    if use_2cta:
+        if prims.elect_sync():
+            prims.tcgen05_mma(
+                kind,
+                prims.CTAGroup.CTA_2,
+                _tmem_ptr(tmem_c),
+                _tmem_ptr(tmem_a),
+                desc_b.desc_i64[0],
+                desc_val,
+                scale_out,
+            )
+    else:
+        if prims.elect_sync():
+            prims.tcgen05_mma(
+                kind,
+                prims.CTAGroup.CTA_1,
+                _tmem_ptr(tmem_c),
+                _tmem_ptr(tmem_a),
+                desc_b.desc_i64[0],
+                desc_val,
+                scale_out,
+                write_disable_mask=_write_disable_mask(mask0, mask1, mask2, mask3),
+            )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -322,32 +296,22 @@ def tcgen05mma_ts(
 
 
 @cute.jit
-def tcgen05_mma_arrive(mbar_ptr: cute.Pointer):
-    """tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [mbar];
+def tcgen05_mma_arrive(mbar_ptr: cute.Pointer, use_2cta: Constexpr[bool] = False):
+    """Commit prior tcgen05 work to an mbarrier."""
+    group = prims.CTAGroup.CTA_2 if use_2cta else prims.CTAGroup.CTA_1
+    multicast_mask = cutlass.Int16(3) if use_2cta else None
+    if prims.elect_sync():
+        prims.tcgen05_commit(mbar_ptr, multicast_mask=multicast_mask, group=group)
 
-    Guarded by elect_one_sync — only one thread in the warp issues the commit.
-    """
 
-    @dsl_user_op
-    def _do_arrive(bar_val, *, loc=None, ip=None):
-        llvm.inline_asm(
-            None,
-            [_ir(bar_val, loc, ip)],
-            "{\n"
-            ".reg .pred q;\n"
-            "elect.sync _|q, 0xFFFFFFFF;\n"
-            "@q tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [$0];\n"
-            "}",
-            "r",
-            has_side_effects=True,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
+@dsl_user_op
+def tcgen05_before_thread_sync(*, loc=None, ip=None) -> None:
+    prims.tcgen05_fence(prims.Tcgen05Fence.BEFORE_THREAD_SYNC, loc=loc, ip=ip)
 
-    bar_intptr = cutlass.Int32(mbar_ptr.toint())
-    _do_arrive(bar_intptr)
+
+@dsl_user_op
+def tcgen05_after_thread_sync(*, loc=None, ip=None) -> None:
+    prims.tcgen05_fence(prims.Tcgen05Fence.AFTER_THREAD_SYNC, loc=loc, ip=ip)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -356,118 +320,134 @@ def tcgen05_mma_arrive(mbar_ptr: cute.Pointer):
 
 
 @cute.jit
-def tmem_allocate(tmem_buffer_ptr: cute.Pointer, num_cols: int):
-    """tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [dst], num_cols;
+def tmem_allocate(tmem_buffer_ptr: cute.Pointer, num_cols: int, use_2cta: Constexpr[bool] = False):
+    """Allocate TMEM columns for tcgen05 operations.
 
     tmem_buffer_ptr: SMEM pointer that receives the allocated TMEM address.
     num_cols: number of columns to allocate.
     """
-
-    @dsl_user_op
-    def _do_alloc(dst_val, ncols_val, *, loc=None, ip=None):
-        llvm.inline_asm(
-            None,
-            [_ir(dst_val, loc, ip), _ir(ncols_val, loc, ip)],
-            "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [$0], $1;",
-            "r,r",
-            has_side_effects=True,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
-
-    dst_intptr = cutlass.Int32(tmem_buffer_ptr.toint())
-    _do_alloc(dst_intptr, cutlass.Int32(num_cols))
+    group = prims.CTAGroup.CTA_2 if use_2cta else prims.CTAGroup.CTA_1
+    prims.tcgen05_alloc(tmem_buffer_ptr, cutlass.Int32(num_cols), group=group)
 
 
 @cute.jit
-def tmem_deallocate(tmem_ptr: cute.Pointer, num_cols: int):
-    """tcgen05.dealloc.cta_group::1.sync.aligned.b32 tmem_addr, num_cols;
+def tmem_deallocate(tmem_ptr: cute.Pointer, num_cols: int, use_2cta: Constexpr[bool] = False):
+    """Deallocate TMEM columns for tcgen05 operations.
 
     tmem_ptr: SMEM pointer to the uint32 holding the TMEM address.
     num_cols: number of columns to deallocate.
     """
-    # Read the TMEM address from the SMEM location
+    group = prims.CTAGroup.CTA_2 if use_2cta else prims.CTAGroup.CTA_1
     tmem_addr = cute.make_tensor(tmem_ptr, (1,))[0]
+    tmem_addr_ptr = prims.make_tmem_ptr(cutlass.Int32(tmem_addr), cutlass.Int32)
+    prims.tcgen05_dealloc(tmem_addr_ptr, cutlass.Int32(num_cols), group=group)
 
-    @dsl_user_op
-    def _do_dealloc(tptr_val, ncols_val, *, loc=None, ip=None):
-        llvm.inline_asm(
-            None,
-            [_ir(tptr_val, loc, ip), _ir(ncols_val, loc, ip)],
-            "tcgen05.dealloc.cta_group::1.sync.aligned.b32 $0, $1;",
-            "r,r",
-            has_side_effects=True,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
+
+# ──────────────────────────────────────────────────────────────────────
+# Block-scaled tcgen05 MMA
+# ──────────────────────────────────────────────────────────────────────
+
+
+@cute.jit
+def tcgen05mma_blockscaled_ss(
+    kind_dtype: str,
+    desc_a,
+    desc_b,
+    tmem_c: int,
+    desc_val: int,
+    scale_out: int,
+    tmem_sfa: int,
+    tmem_sfb: int,
+    use_2cta: Constexpr[bool] = False,
+):
+    """Block-scaled tcgen05.mma SS path with scale factors already in TMEM."""
+    group = prims.CTAGroup.CTA_2 if use_2cta else prims.CTAGroup.CTA_1
+    d_ptr = prims.make_tmem_ptr(cutlass.Int32(tmem_c), cutlass.Int32)
+    sfa_ptr = prims.make_tmem_ptr(cutlass.Int32(tmem_sfa), cutlass.Int32)
+    sfb_ptr = prims.make_tmem_ptr(cutlass.Int32(tmem_sfb), cutlass.Int32)
+    if prims.elect_sync():
+        prims.tcgen05_mma_block_scale(
+            _blockscaled_kind_for(kind_dtype),
+            group,
+            d_ptr,
+            _desc_value(desc_a),
+            _desc_value(desc_b),
+            desc_val,
+            enable_input_d=scale_out,
+            scale_a=sfa_ptr,
+            scale_b=sfb_ptr,
         )
 
-    _do_dealloc(cutlass.Int32(tmem_addr), cutlass.Int32(num_cols))
+
+# ──────────────────────────────────────────────────────────────────────
+# Scale-factor SMEM to TMEM helpers
+# ──────────────────────────────────────────────────────────────────────
+
+
+@cute.jit
+def tcgen05_cp_warpx4(smem_ptr: cute.Pointer, tmem_ptr: cute.Pointer, tmem_col_offset: int, use_2cta: Constexpr[bool] = False):
+    """Copy a 32x128b scale-factor tile from SMEM to TMEM with warpx4 multicast."""
+    smem_addr = smem_ptr.toint() if hasattr(smem_ptr, "toint") else smem_ptr
+    smem_desc = prims.Tcgen05SmemDesc.build(
+        start_address=smem_addr,
+        leading_byte_offset=0,
+        stride_byte_offset=128,
+        base_offset=0,
+        layout=prims.Tcgen05SmemSwizzle.NONE,
+    )
+    tmem_addr_tensor = tmem_ptr if isinstance(tmem_ptr, cute.Tensor) else cute.make_tensor(tmem_ptr, (1,))
+    tmem_addr = cutlass.Int32(tmem_addr_tensor[0]) + cutlass.Int32(tmem_col_offset)
+    tmem_dst = prims.make_tmem_ptr(tmem_addr, cutlass.Int32)
+    group = prims.CTAGroup.CTA_2 if use_2cta else prims.CTAGroup.CTA_1
+    shape, multicast = prims.S2TCopyMode.S2T_32x128b_WARPX4
+    if prims.elect_sync():
+        prims.tcgen05_cp(
+            shape,
+            tmem_dst,
+            smem_desc,
+            group=group,
+            multicast=multicast,
+        )
+
+
+@cute.jit
+def tcgen05_sf_warp_transpose(smem_ptr: cute.Pointer):
+    """In-place warp transpose for 128 uint32 scale-factor words in SMEM."""
+    smem = cute.make_tensor(cute.recast_ptr(smem_ptr, dtype=cutlass.Uint32), (128,))
+    tidx, _, _ = cute.arch.thread_idx()
+    lane = tidx % 32
+    lane_quad = lane >> 3
+    v0 = smem[(0 ^ lane_quad) * 32 + lane]
+    v1 = smem[(1 ^ lane_quad) * 32 + lane]
+    v2 = smem[(2 ^ lane_quad) * 32 + lane]
+    v3 = smem[(3 ^ lane_quad) * 32 + lane]
+    cute.arch.sync_warp()
+    smem[lane * 4 + (0 ^ lane_quad)] = v0
+    smem[lane * 4 + (1 ^ lane_quad)] = v1
+    smem[lane * 4 + (2 ^ lane_quad)] = v2
+    smem[lane * 4 + (3 ^ lane_quad)] = v3
 
 
 # ──────────────────────────────────────────────────────────────────────
-# TMEM load  —  tcgen05.ld.sync.aligned.32x32b.xN.b32
-#
-# Uses the same pattern as wgmma_rs: direct llvm.inline_asm calls from
-# within @cute.jit context (no @dsl_user_op wrapper).  The helper
-# functions below are called at Python / JIT-compile time and emit MLIR
-# operations directly into the surrounding @cute.jit function.
+# TMEM load helpers.
 # ──────────────────────────────────────────────────────────────────────
 
-# Max segment size for TMEM loads.  LLVM's NVPTX inline asm chokes on very
-# large operand counts (e.g. x128 = 129 operands), so we cap at x32 which
-# gives 33 operands — well within limits.  For N=128 this produces 4
-# sequential x32 loads.
 _TMEM_LD_MAX_LOG_N = 3  # 1 << 3 = 8  (keep small to avoid LLVM hangs with many operands)
 
 
-def _emit_tmem_ld_segment(ptx_type, seg_x, regs_per_x, addr_ir):
-    """Emit one tcgen05.ld inline asm for a power-of-2 segment.
+def _emit_tmem_ld_segment(shape, seg_x, regs_per_x, addr):
+    """Emit one tcgen05.ld wrapper call for a power-of-2 segment.
 
     Called during @cute.jit compilation — emits MLIR ops directly.
-    ptx_type:    PTX instruction type, e.g. "32x32b", "16x64b", "16x128b", "16x256b"
+    shape:       TMEM load shape, e.g. "32x32b", "16x64b", "16x128b", "16x256b"
     seg_x:       x-count in the PTX instruction (power of 2)
     regs_per_x:  number of i32 output registers per x-element
     Returns a list of (seg_x * regs_per_x) cutlass.Int32 values.
     """
-    i32_type = ir.IntegerType.get_signless(32)
     total_regs = seg_x * regs_per_x
-
-    if total_regs == 1:
-        result = llvm.inline_asm(
-            i32_type,
-            [addr_ir],
-            f"tcgen05.ld.sync.aligned.{ptx_type}.x{seg_x}.b32 $0, [$1];",
-            "=r,r",
-            has_side_effects=True,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-        )
-        return [cutlass.Int32(result)]
-
-    # Multi-output: struct of i32s
-    out_types = [i32_type] * total_regs
-    result_type = llvm.StructType.get_literal(out_types)
-
-    out_regs = ", ".join(f"${i}" for i in range(total_regs))
-    src_idx = total_regs  # source addr is the last operand
-    asm_str = f"tcgen05.ld.sync.aligned.{ptx_type}.x{seg_x}.b32 {{{out_regs}}}, [${src_idx}];"
-    constraints = ",".join(["=r"] * total_regs) + ",r"
-
-    result = llvm.inline_asm(
-        result_type,
-        [addr_ir],
-        asm_str,
-        constraints,
-        has_side_effects=True,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-    )
-
-    return [cutlass.Int32(llvm.extractvalue(i32_type, result, [i])) for i in range(total_regs)]
+    tmem_ptr = prims.make_tmem_ptr(cutlass.Int32(addr), cutlass.Int32)
+    result = prims.tcgen05_ld(shape, tmem_ptr, num=seg_x)
+    return [cutlass.Int32(result[i]) for i in range(total_regs)]
 
 
 def _emit_tmem_ld(n_x, max_log_n, ptx_type, regs_per_x, src_addr, dst_view, dst_offset=0, src_col_offset=0):
@@ -476,7 +456,7 @@ def _emit_tmem_ld(n_x, max_log_n, ptx_type, regs_per_x, src_addr, dst_view, dst_
     Called during @cute.jit compilation.
     n_x:            remaining x-element count to load
     max_log_n:      max log2 of x-count per PTX instruction
-    ptx_type:       PTX instruction type, e.g. "32x32b", "16x64b"
+    ptx_type:       TMEM load shape, e.g. "32x32b", "16x64b"
     regs_per_x:     i32 output registers per x-element
     src_addr:       CuTeDSL Int32 (runtime TMEM base address)
     dst_view:       CuTeDSL tensor view over destination registers
@@ -490,14 +470,12 @@ def _emit_tmem_ld(n_x, max_log_n, ptx_type, regs_per_x, src_addr, dst_view, dst_
     seg_log = min(log_n, max_log_n)
     seg_x = 1 << seg_log
 
-    # Compute TMEM address for this segment
     if src_col_offset == 0:
-        addr_ir = src_addr.ir_value()
+        addr = src_addr
     else:
-        addr_ir = (src_addr + cutlass.Int32(src_col_offset)).ir_value()
+        addr = src_addr + cutlass.Int32(src_col_offset)
 
-    # Emit inline asm and store results
-    results = _emit_tmem_ld_segment(ptx_type, seg_x, regs_per_x, addr_ir)
+    results = _emit_tmem_ld_segment(ptx_type, seg_x, regs_per_x, addr)
     for j, val in enumerate(results):
         dst_view[dst_offset + j] = val
 
@@ -507,16 +485,8 @@ def _emit_tmem_ld(n_x, max_log_n, ptx_type, regs_per_x, src_addr, dst_view, dst_
 
 
 def _emit_tmem_fence():
-    """Emit tcgen05.wait fence.  Called during @cute.jit compilation."""
-    llvm.inline_asm(
-        None,
-        [],
-        "tcgen05.wait::ld.sync.aligned;",
-        "",
-        has_side_effects=True,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-    )
+    """Wait for pending tcgen05.ld operations."""
+    prims.tcgen05_wait(prims.Tcgen05Wait.LOAD)
 
 
 @cute.jit
