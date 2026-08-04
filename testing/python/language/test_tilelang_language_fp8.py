@@ -8,15 +8,15 @@ from tilelang.language.fp8 import determine_fp8_type
 
 
 @pytest.mark.parametrize(
-    ("gcn_arch", "expected_e4m3", "expected_e5m2"),
+    ("gcn_arch", "expected_e4m3", "expected_e5m2", "expected_e4m3_max"),
     [
-        ("gfx942", T.float8_e4m3fnuz, T.float8_e5m2fnuz),
-        ("gfx950", T.float8_e4m3fn, T.float8_e5m2),
-        ("gfx1100", T.float8_e4m3fn, T.float8_e5m2),
-        ("gfx1201", T.float8_e4m3fn, T.float8_e5m2),
+        ("gfx942", T.float8_e4m3fnuz, T.float8_e5m2fnuz, 240.0),
+        ("gfx950", T.float8_e4m3fn, T.float8_e5m2, 448.0),
+        ("gfx1100", T.float8_e4m3fn, T.float8_e5m2, 448.0),
+        ("gfx1201", T.float8_e4m3fn, T.float8_e5m2, 448.0),
     ],
 )
-def test_rocm_fp8_type_matches_hip_template_variant(monkeypatch, gcn_arch, expected_e4m3, expected_e5m2):
+def test_rocm_fp8_type_matches_hip_template_variant(monkeypatch, gcn_arch, expected_e4m3, expected_e5m2, expected_e4m3_max):
     monkeypatch.setattr(torch.version, "hip", "test")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 3)
@@ -29,6 +29,7 @@ def test_rocm_fp8_type_matches_hip_template_variant(monkeypatch, gcn_arch, expec
 
     assert determine_fp8_type("e4m3") == expected_e4m3
     assert determine_fp8_type("e5m2") == expected_e5m2
+    assert float(torch.finfo(T.float8_e4m3.as_torch()).max) == expected_e4m3_max
 
 
 def test_generic_fp8_torch_dtype_uses_current_rocm_arch(monkeypatch):

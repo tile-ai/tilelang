@@ -1,16 +1,12 @@
+import sys
 import threading
 from types import SimpleNamespace
 
 import pytest
 import torch
+import tvm_ffi
 
-from tilelang import tvm
-from tilelang.engine.param import KernelParam
-from tilelang.jit.adapter.tvm_ffi import (
-    TVMFFIKernelAdapter,
-    _export_rocm_narrow_float_as_tvm_view,
-    _rocm_narrow_float_param_mask,
-)
+from tilelang.jit.adapter.tvm_ffi import TVMFFIKernelAdapter
 
 
 class _FakeKernelParam:
@@ -99,55 +95,33 @@ def test_preloaded_executable_is_reused():
     assert created == []
 
 
+@pytest.mark.skipif(sys.platform == "darwin", reason="TileLang intentionally disables C DLPack on MPS")
 @pytest.mark.parametrize(
-    ("torch_dtype_name", "tilelang_dtype", "physical_shape", "logical_shape", "storage_dtype"),
+    ("torch_dtype_name", "shape", "expected_tvm_dtype"),
     [
-        ("float8_e4m3fnuz", "float8_e4m3", (2, 4), (2, 4), "float8_e4m3fnuz"),
-        ("float4_e2m1fn_x2", "float4_e2m1fn", (2, 2), (2, 4), "float4_e2m1fnx2"),
+        ("float8_e4m3fn", (2, 4), "float8_e4m3fn"),
+        ("float8_e4m3fnuz", (2, 4), "float8_e4m3fnuz"),
+        ("float4_e2m1fn_x2", (2, 2), "float4_e2m1fnx2"),
     ],
 )
-def test_rocm_narrow_float_uses_zero_copy_tvm_view(
-    monkeypatch,
-    torch_dtype_name,
-    tilelang_dtype,
-    physical_shape,
-    logical_shape,
-    storage_dtype,
-):
+def test_tvm_ffi_c_dlpack_preserves_narrow_float_metadata(torch_dtype_name, shape, expected_tvm_dtype):
     torch_dtype = getattr(torch, torch_dtype_name, None)
     if torch_dtype is None:
         pytest.skip(f"PyTorch does not provide {torch_dtype_name}")
 
-    monkeypatch.setattr(torch.version, "hip", "test")
-    param = KernelParam(tvm.DataType(tilelang_dtype), list(logical_shape))
-    tensor = torch.empty(physical_shape, dtype=torch_dtype)
+    assert hasattr(torch.Tensor, "__dlpack_c_exchange_api__")
+    observed = []
+    func_name = "testing.tilelang_narrow_float_c_dlpack_metadata"
 
-    assert _rocm_narrow_float_param_mask([param]) == (True,)
-    tvm_view = _export_rocm_narrow_float_as_tvm_view(tensor, param)
+    @tvm_ffi.register_global_func(func_name, override=True)
+    def capture_metadata(tensor):
+        observed.append((tuple(tensor.shape), str(tensor.dtype), str(tensor.device)))
+        return tensor.ndim
 
-    assert tuple(tvm_view.shape) == physical_shape
-    assert str(tvm_view.dtype) == storage_dtype
-    byte_view = tvm_view._create_view(physical_shape, dtype="int8")
-    round_trip = torch.utils.dlpack.from_dlpack(byte_view)
-    assert round_trip.data_ptr() == tensor.data_ptr()
-
-
-def test_rocm_narrow_float_rejects_non_contiguous_tensor(monkeypatch):
-    torch_dtype = getattr(torch, "float8_e4m3fnuz", None)
-    if torch_dtype is None:
-        pytest.skip("PyTorch does not provide float8_e4m3fnuz")
-
-    monkeypatch.setattr(torch.version, "hip", "test")
-    tensor = torch.empty((2, 4), dtype=torch_dtype).transpose(0, 1)
-    param = KernelParam(tvm.DataType("float8_e4m3"), list(tensor.shape))
-
-    assert not tensor.is_contiguous()
-    with pytest.raises(ValueError, match="requires a contiguous tensor"):
-        _export_rocm_narrow_float_as_tvm_view(tensor, param)
-
-
-def test_non_rocm_does_not_prepare_narrow_float_runtime_args(monkeypatch):
-    monkeypatch.setattr(torch.version, "hip", None)
-    param = KernelParam(tvm.DataType("float8_e4m3"), [2, 4])
-
-    assert _rocm_narrow_float_param_mask([param]) is None
+    try:
+        callback = tvm_ffi.get_global_func(func_name)
+        tensor = torch.empty(shape, dtype=torch_dtype, device="cpu")
+        assert callback(tensor) == len(shape)
+        assert observed == [(shape, expected_tvm_dtype, "cpu:0")]
+    finally:
+        tvm_ffi.remove_global_func(func_name)

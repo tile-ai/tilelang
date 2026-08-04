@@ -1914,10 +1914,10 @@ void CodeGenTileLangHIP::VisitStmt_(const BufferStoreNode *op) {
   DataType element_dtype = op->buffer->dtype;
   Var buffer_var = op->buffer->data;
 
+  // Vector FP4 values targeting scalar FP4 buffers need lane-wise packed
+  // stores; CodeGenC's generic scalarization advances one byte per element.
   if (element_dtype.is_float4() && element_dtype.is_scalar() &&
       value_dtype.is_float4() && !value_dtype.is_scalar()) {
-    // Match the packed vector-load path above: scalarize the logical FP4 store
-    // while preserving the two-elements-per-byte physical representation.
     auto packed_it = fp4_packed_buffers_.find(buffer_var);
     std::string packed_buffer =
         packed_it != fp4_packed_buffers_.end()
