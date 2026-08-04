@@ -631,4 +631,4 @@ def DecoupleTypeCast():
         new_body = mutator.visit_stmt(func.body)
         return func.with_body(new_body)
 
-    return prim_func_pass(pass_fn, opt_level=0)
+    return prim_func_pass(pass_fn, opt_level=0, name="tl.DecoupleTypeCast")

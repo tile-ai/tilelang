@@ -6,8 +6,14 @@ This is a debugging complement to [`tilelang.utils.pass_diff`](../pass_diff.py).
 Where `pass_diff` shows a line-level diff of the **TVMScript text**, this tool
 renders the IR as an **`SBlock` structure tree** — the block nesting plus
 `reads` / `writes` / `alloc_buffers` / `annotations` fields — and expands every
-tile op by field name. It emits a single self-contained, interactive HTML file
-that steps through each CUDA lowering pass.
+tile op by field name. A TVM `PassInstrument` observes the canonical CUDA
+lowering prologue, so conditional passes and their order match the pipeline that
+actually executes. The tool emits a single self-contained, interactive HTML
+file that steps through those passes.
+
+The Pass Visualizer currently supports CUDA targets only. Other backends can
+use the structure-tree instrument once they provide a backend-specific pipeline
+entry point, but they are not dispatched by this CLI yet.
 
 Use it when debugging **structural** passes (layout inference, warp
 specialization, pipelining), where what matters is how the IR's block structure
@@ -20,7 +26,7 @@ and operator semantics change, not just which text lines moved.
 | Compared object | TVMScript text lines | `SBlock` structure tree |
 | Operator display | Raw one-liner, positional args | Expanded **by field name** (`M=64`, `K=32`, `policy=0`) |
 | Highlighting | Generic `+` / `-` | Per-class: tile op / sync primitive / lowered hardware intrinsic |
-| Trigger | Environment-variable hook, captures the real full pipeline | Explicit CLI, runs the focused lowering prologue |
+| Trigger | Environment-variable hook, captures the real full pipeline | Explicit CLI, instruments the real focused lowering prologue |
 
 ## Usage
 
@@ -39,7 +45,7 @@ This writes `gemm_relu_passes.html` (the interactive browser) and a sibling
 |----------|-------------|
 | `path` | Python file containing a `@tilelang.jit` kernel (positional) |
 | `--factory` | Name of the kernel to analyze (default: first discovered) |
-| `--target` | Compilation target (default: `auto`) |
+| `--target` | CUDA compilation target (default: `auto`) |
 | `--set K=V` | Argument forwarded to the kernel factory (repeatable) |
 | `--out` | Output HTML path (default: `<kernel>_passes.html` next to the source) |
 
@@ -54,6 +60,9 @@ This writes `gemm_relu_passes.html` (the interactive browser) and a sibling
   primitives, and lowered hardware intrinsics (`ptx_mma`, `tma_load`, …) are
   each colored distinctly, so you can follow a `T.copy` as it lowers into
   TMA/PTX intrinsics.
+- **Real pass metadata**: stage names and ordering come from `PassInstrument`;
+  nested implementation passes are folded into their top-level pipeline stage
+  to keep the browser timeline linear.
 
 ## Programmatic API
 
@@ -72,5 +81,5 @@ html = emit_html(name, stages)
 ## Files
 
 - `viewer.py` — CLI entry point; per-pass capture, diffing, and HTML/text emission.
-- `core.py` — kernel loading, the CUDA lowering pass pipeline, and the structure-tree renderer.
+- `core.py` — kernel loading, the structure-tree `PassInstrument`, and the renderer.
 - `examples/gemm_relu.py` — a small fused GEMM + bias + ReLU kernel used as demo input.
