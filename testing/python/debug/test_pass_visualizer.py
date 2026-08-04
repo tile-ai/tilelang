@@ -2,13 +2,15 @@
 """Tests for the pass_visualizer debugging tool.
 
 Covers:
-- Core helpers: build_module, build_pass_stages, inspect_structure
-- Structure-tree capture and per-pass diffing (build_pass_data via viewer)
+- Core helpers: build_module, inspect_structure, StructureTreePassInstrument
+- Real-pipeline structure capture and per-pass diffing (build_pass_data via viewer)
 - HTML / text emission (emit_html, emit_txt)
 
 These run the CUDA lowering prologue on a small kernel. An explicit cuda target
 is passed so the pipeline does not depend on auto target detection.
 """
+
+import pytest
 
 import tilelang
 import tilelang.testing
@@ -17,8 +19,8 @@ from tilelang import tvm
 
 from tilelang.tools.pass_visualizer import (
     build_module,
-    build_pass_stages,
     inspect_structure,
+    StructureTreePassInstrument,
 )
 from tilelang.tools.pass_visualizer.viewer import (
     _capture_tree,
@@ -38,7 +40,6 @@ def _gemm_relu_kernel():
 
     @tilelang.jit(out_idx=[-1])
     def gemm_relu(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float32"):
-
         @T.prim_func
         def main(
             A: T.Tensor((M, K), dtype),
@@ -81,19 +82,57 @@ def _build_small_module():
 
 
 @tilelang.testing.requires_cuda
-def test_build_pass_stages_nonempty():
-    """build_pass_stages returns an ordered list of (name, transform) pairs."""
-    _mod, target = _build_small_module()
-    stages = build_pass_stages(target)
+def test_structure_tree_instrument_records_real_passes():
+    """The instrument records top-level passes using their PassInfo names."""
+    mod, target = _build_small_module()
+    instrument = StructureTreePassInstrument()
 
-    assert len(stages) > 0
-    names = [name for name, _ in stages]
-    # The prologue must run LayoutInference and LowerTileOp.
-    assert "LayoutInference" in names
-    assert "LowerTileOp" in names
-    for name, transform in stages:
-        assert isinstance(name, str)
-        assert callable(transform)
+    with tvm.transform.PassContext(instruments=[instrument]), target:
+        mod = tvm.tirx.transform.BindTarget(target)(mod)
+        tilelang.transform.MaterializeKernelLaunch()(mod)
+
+    records = instrument.ordered_records()
+    assert [record.name for record in records] == ["tirx.BindTarget", "tl.MaterializeKernelLaunch"]
+    assert instrument.input_lines
+    assert any("PrimFunc" in line for line in instrument.input_lines)
+
+
+def test_structure_tree_instrument_ignores_nested_passes():
+    """Nested implementation passes do not duplicate linear browser stages."""
+    mod, _target = _build_small_module()
+    instrument = StructureTreePassInstrument()
+
+    @tvm.transform.module_pass(opt_level=0, name="test.Outer")
+    def outer_pass(mod, _ctx):
+        return tvm.tirx.transform.Simplify()(mod)
+
+    with tvm.transform.PassContext(instruments=[instrument]):
+        outer_pass(mod)
+
+    records = instrument.ordered_records()
+    assert [record.name for record in records] == ["test.Outer"]
+
+
+def test_structure_tree_instrument_cleans_up_after_failure():
+    """A missing after-pass callback is retained as a diagnostic, not stale state."""
+    mod, _target = _build_small_module()
+    instrument = StructureTreePassInstrument()
+
+    @tvm.transform.module_pass(opt_level=0, name="test.Fail")
+    def failing_pass(_mod, _ctx):
+        raise RuntimeError("expected failure")
+
+    with pytest.raises(RuntimeError, match="expected failure"), tvm.transform.PassContext(instruments=[instrument]):
+        failing_pass(mod)
+
+    assert instrument.records == []
+    assert instrument.incomplete_passes == ["test.Fail"]
+
+    # Entering a new context resets the incomplete frame and records normally.
+    with tvm.transform.PassContext(instruments=[instrument]):
+        tvm.tirx.transform.Simplify()(mod)
+    assert [record.name for record in instrument.ordered_records()] == ["tirx.Simplify"]
+    assert instrument.incomplete_passes == []
 
 
 @tilelang.testing.requires_cuda
@@ -128,7 +167,7 @@ def test_capture_tree_returns_lines():
 
 @tilelang.testing.requires_cuda
 def test_build_pass_data_and_emit(tmp_path):
-    """End-to-end: run the example kernel through the pipeline and emit HTML/txt."""
+    """End-to-end: observe the real prologue and emit HTML/txt."""
     import os
 
     kernel_path = os.path.join(
@@ -150,6 +189,12 @@ def test_build_pass_data_and_emit(tmp_path):
     flags = {st["flag"] for st in stages}
     assert "source" in flags
     assert "input" in flags
+    stage_names = [st["name"].split("] ", 1)[-1] for st in stages[2:]]
+    assert "LayoutInference" in stage_names
+    assert "LowerTileOp" in stage_names
+    assert "AddWrapperForSingleBufStore" in stage_names
+    assert "DecoupleTypeCast" in stage_names
+    assert "pass_fn" not in stage_names
 
     html = emit_html(name, stages)
     assert "Pass browser" in html
@@ -158,6 +203,59 @@ def test_build_pass_data_and_emit(tmp_path):
     txt = emit_txt(name, stages)
     assert "kernel: gemm_relu" in txt
     assert "T.gemm" in txt
+
+
+@tilelang.testing.requires_cuda
+def test_build_pass_data_observes_canonical_prologue(monkeypatch):
+    """A newly introduced real pipeline pass appears without a viewer pass list."""
+    import os
+
+    kernel_path = os.path.join(
+        os.path.dirname(tilelang.tools.pass_visualizer.__file__),
+        "examples",
+        "gemm_relu.py",
+    )
+    with open(kernel_path) as f:
+        source = f.read()
+
+    @tvm.transform.module_pass(opt_level=0, name="test.InjectedPipelinePass")
+    def injected_pass(mod, _ctx):
+        return mod
+
+    def injected_prologue(mod, _target):
+        return injected_pass(mod)
+
+    monkeypatch.setattr("tilelang.tools.pass_visualizer.viewer.CUDAPassPipelineBodyPrologue", injected_prologue)
+    kwargs = {"M": 128, "N": 128, "K": 128, "block_M": 64, "block_N": 64, "block_K": 32}
+    _name, stages = build_pass_data(kernel_path, None, "cuda", kwargs, source)
+
+    assert [stage["name"] for stage in stages] == ["source code", "(input)", "[01] InjectedPipelinePass"]
+
+
+@tilelang.testing.requires_cuda
+def test_build_pass_data_respects_jit_pass_configs(tmp_path):
+    """Conditional stages use the analyzed JITImpl's real PassContext config."""
+    import os
+
+    kernel_path = os.path.join(
+        os.path.dirname(tilelang.tools.pass_visualizer.__file__),
+        "examples",
+        "gemm_relu.py",
+    )
+    with open(kernel_path) as f:
+        source = f.read()
+    source = source.replace(
+        "@tilelang.jit(out_idx=[-1])",
+        '@tilelang.jit(out_idx=[-1], pass_configs={"tl.disable_warp_specialized": True})',
+    )
+    configured_path = tmp_path / "gemm_relu_no_ws.py"
+    configured_path.write_text(source)
+
+    kwargs = {"M": 128, "N": 128, "K": 128, "block_M": 64, "block_N": 64, "block_K": 32}
+    _name, stages = build_pass_data(str(configured_path), None, "cuda", kwargs, source)
+
+    stage_names = [st["name"] for st in stages]
+    assert not any("ProducerConsumerWarpSpecialized" in name for name in stage_names)
 
 
 if __name__ == "__main__":

@@ -105,4 +105,4 @@ def LayoutVisual(formats: str | Sequence[str] = ""):
         _LayoutVisualVisitor(formats=formats).visit_stmt(func.body)
         return func
 
-    return prim_func_pass(pass_fn, opt_level=0)
+    return prim_func_pass(pass_fn, opt_level=0, name="tl.LayoutVisual")
