@@ -312,8 +312,6 @@ call_llvm_intrin = _dtype_forward(_tir_op.call_llvm_intrin)
 call_llvm_pure_intrin = _dtype_forward(_tir_op.call_llvm_pure_intrin)
 call_pure_extern = _dtype_forward(_tir_op.call_pure_extern)
 ptx_cp_async = _dtype_forward(_tir_op.ptx_cp_async)
-mma_store = _dtype_forward(_tir_op.mma_store)
-mma_fill = _dtype_forward(_tir_op.mma_fill)
 vectorlow = _dtype_forward(_tir_op.vectorlow)
 vectorhigh = _dtype_forward(_tir_op.vectorhigh)
 vectorcombine = _dtype_forward(_tir_op.vectorcombine)
@@ -461,8 +459,6 @@ __all__ = (
     "max_value",
     "min",
     "min_value",
-    "mma_fill",
-    "mma_store",
     "nearbyint",
     "nextafter",
     "parallel",
