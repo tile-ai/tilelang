@@ -7,7 +7,7 @@
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/tile-ai/tilelang)
 [![Discord](https://img.shields.io/badge/Discord-%235865F2.svg?logo=discord&logoColor=white)](https://discord.gg/TUrHyJnKPG)
 [![Puzzles](https://img.shields.io/badge/🧩_Learn-TileLang_Puzzles-blueviolet)](https://github.com/tile-ai/tilelang-puzzles)
-[![LSP](https://img.shields.io/github/stars/tile-ai/tilelang-lsp?style=flat&label=LSP&logo=github)](https://github.com/tile-ai/tilelang-lsp)
+[![LSP](https://img.shields.io/badge/LSP-TileLang_LSP-orange?logo=visualstudiocode&logoColor=white)](https://github.com/tile-ai/tilelang-lsp)
 
 [Documentation](https://tilelang.com/) ·
 [Installation](https://tilelang.com/get_started/Installation.html) ·
