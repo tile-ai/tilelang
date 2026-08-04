@@ -3069,7 +3069,7 @@ void CodeGenTileLangCuTeDSL::PrintCallExtern_(Type ret_type,
   if (global_symbol_str.substr(0, 2) == "__") {
     global_symbol_str = "tl." + global_symbol_str;
   }
-  // some optional template arguments might be ommited, so add names explicitly
+  // some optional template arguments might be omitted, so add names explicitly
   // for remain arguments
   if (global_symbol_str == "tl.gemm_ss" || global_symbol_str == "tl.gemm_rs" ||
       global_symbol_str == "tl.gemm_sr" || global_symbol_str == "tl.gemm_rr") {
@@ -3080,7 +3080,7 @@ void CodeGenTileLangCuTeDSL::PrintCallExtern_(Type ret_type,
   }
 
   if (ret_dtype.is_fixed_length_vector()) {
-    // maybe simplify this if TensorSSA suppports this OP
+    // maybe simplify this if TensorSSA supports this OP
     std::string sret = name_supply_->FreshName("_");
     PrintIndent();
     stream << sret << " = tl.make_rmem_tensor((" << ret_dtype.lanes() << ",), ";
@@ -3351,7 +3351,7 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
       std::ostringstream os;
       os << "tl.make_tensor_at_offset(" << ptr_str << ", " << index_str
          << ", (1,), div_by=" << scalarized_div_by << ")";
-      // for vector data types, ".load()" (added by BufferLoadNode) is neeed
+      // for vector data types, ".load()" (added by BufferLoadNode) is needed
       // instead of "[0]"
       if (buffer_element_dtype.is_scalar()) {
         os << "[0]";

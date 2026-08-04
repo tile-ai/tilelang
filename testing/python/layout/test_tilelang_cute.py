@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 import tilelang.testing
@@ -1008,7 +1010,7 @@ def test_decoder_preserves_input_shape():
 #   (j % 8) + ((i % 8) ^ ((j // 8) % 8)) * 8 + i * 64 + (j // 64) * 4096
 # ToCuteComposedLayout decodes it to Sw<3,4,3> and LowerBulk drives a swizzled
 # TMA load; the box truncates at the first non-contiguous global mode so the
-# rest replays as 8 unrolled tma_load calls.
+# rest replays as an 8-iteration tma_load loop.
 # ---------------------------------------------------------------------------
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
@@ -1039,7 +1041,7 @@ def test_tma_load_with_explicit_swizzled_layout():
 
     kernel = tilelang.compile(copy_swizzled, out_idx=[1])
     src = kernel.get_kernel_source()
-    assert src.count("tma_load(") == 8, "expected 8 (unrolled) TMA loads"
+    assert re.search(r"for \(int \w+ = 0; \w+ < 8; \+\+\w+\) \{\n\s*tl::tma_load\(", src), "expected an 8-iteration TMA load loop"
 
     ii = torch.arange(M, device="cuda").view(M, 1)
     jj = torch.arange(N, device="cuda").view(1, N)

@@ -107,6 +107,13 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     # pipeline body extraction focused on canonical SeqStmt bodies.
     mod = tilelang.transform.IfStmtBinding()(mod)
 
+    # Expand only explicitly requested unroll loops before pipeline planning
+    # and fold the constants exposed by substitution. This makes their
+    # copy/compute statements individual scheduling units.
+    mod = tilelang.transform.UnrollLoop()(mod)
+    # Simplify the unrolled loop bodies.
+    mod = tilelang.transform.Simplify()(mod)
+
     # Run pipeline planning and software-pipeline rewriting before layout
     # inference so inferred layouts see the final pipelined structure directly.
     mod = tilelang.transform.PipelinePlanning()(mod)

@@ -177,8 +177,8 @@ inline uint64_t UnsignedMax(int bits) {
   return (static_cast<uint64_t>(1) << bits) - 1;
 }
 
-inline int GetPreferedVectorizedSize(DataType dt,
-                                     bool supports_fp32x2 = false) {
+inline int GetPreferredVectorizedSize(DataType dt,
+                                      bool supports_fp32x2 = false) {
   if (dt.is_bfloat16() || dt.is_float16() ||
       (supports_fp32x2 && dt.is_float() && dt.bits() == 32))
     return 2;
@@ -671,7 +671,7 @@ template <typename Impl> struct ReduceLowerer {
     };
 
     int vsize =
-        Impl::GetPreferedVectorizedSize(dst_buffer->dtype, lower_args.target);
+        Impl::GetPreferredVectorizedSize(dst_buffer->dtype, lower_args.target);
     const int64_t *reduce_extent = as_const_int(op.src->shape[op.dim]);
     bool can_pack = op.clear && vsize == 2 && reduce_extent &&
                     *reduce_extent >= vsize && *reduce_extent % vsize == 0 &&
@@ -707,8 +707,7 @@ template <typename Impl> struct ReduceLowerer {
                              src_value),
           dst_indices);
       stmts.push_back(For(rv, 0, Integer(*reduce_extent / vsize),
-                          ForKind::kUnrolled, reduce_body, std::nullopt,
-                          {{tirx::attr::pragma_unroll_explicit, Bool(false)}}));
+                          ForKind::kUnrolled, reduce_body, std::nullopt));
 
       PrimExpr packed = BufferLoad(packed_buffer, dst_indices);
       PrimExpr result =
@@ -727,15 +726,13 @@ template <typename Impl> struct ReduceLowerer {
                              BufferLoad(src_buffer, make_src_indices(rv))),
           dst_indices);
       stmts.push_back(For(rv, 0, op.src->shape[op.dim], ForKind::kUnrolled,
-                          reduce_body, std::nullopt,
-                          {{tirx::attr::pragma_unroll_explicit, Bool(false)}}));
+                          reduce_body, std::nullopt));
     }
 
     Stmt body = SeqStmt(stmts);
     for (int i = dst_dim - 1; i >= 0; --i) {
       body = For(dst_vars[i], 0, op.dst->shape[i], ForKind::kUnrolled, body,
-                 std::nullopt,
-                 {{tirx::attr::pragma_unroll_explicit, Bool(false)}});
+                 std::nullopt);
     }
     if (can_pack) {
       body = SeqStmt({AllocBuffer(packed_buffer), body});
@@ -858,8 +855,8 @@ template <typename Impl> struct ReduceLowerer {
       Buffer clear_buffer_packed;
       Buffer clear_batch_pack_buffer;
       {
-        int vsize = Impl::GetPreferedVectorizedSize(clear_buffer->dtype,
-                                                    lower_args.target);
+        int vsize = Impl::GetPreferredVectorizedSize(clear_buffer->dtype,
+                                                     lower_args.target);
         if (vsize > 1 && !src_var_compressed.empty()) {
           auto *ext = src_var_compressed.back()->dom->extent.as<IntImmNode>();
           if (ext && ext->value >= vsize && ext->value % vsize == 0 &&
@@ -910,18 +907,15 @@ template <typename Impl> struct ReduceLowerer {
                                    src_load),
                 red_indices);
 
-            reduce_local =
-                For(inner_var->var, 0, halved_extent, ForKind::kUnrolled,
-                    reduce_local, std::nullopt,
-                    {{tirx::attr::pragma_unroll_explicit, Bool(false)}});
+            reduce_local = For(inner_var->var, 0, halved_extent,
+                               ForKind::kUnrolled, reduce_local, std::nullopt);
 
             for (int i = static_cast<int>(src_layout->OutputDim()) - 2; i >= 0;
                  --i) {
               reduce_local =
                   For(src_var_compressed[i]->var, 0,
                       src_var_compressed[i]->dom->extent, ForKind::kUnrolled,
-                      reduce_local, std::nullopt,
-                      {{tirx::attr::pragma_unroll_explicit, Bool(false)}});
+                      reduce_local, std::nullopt);
             }
             local_body.push_back(reduce_local);
 
@@ -953,10 +947,9 @@ template <typename Impl> struct ReduceLowerer {
 
         for (int i = static_cast<int>(src_layout->OutputDim()) - 1; i >= 0;
              --i) {
-          reduce_local = For(
-              src_var_compressed[i]->var, 0, src_var_compressed[i]->dom->extent,
-              ForKind::kUnrolled, reduce_local, std::nullopt,
-              {{tirx::attr::pragma_unroll_explicit, Bool(false)}});
+          reduce_local = For(src_var_compressed[i]->var, 0,
+                             src_var_compressed[i]->dom->extent,
+                             ForKind::kUnrolled, reduce_local, std::nullopt);
         }
         stmts.push_back(reduce_local);
       }
@@ -1020,8 +1013,8 @@ template <typename Impl> struct ReduceLowerer {
               static_cast<int>(*as_const_int(lower_args.thread_bounds->extent));
           auto thread_offset = lower_args.thread_bounds->min;
 
-          int vsize = Impl::GetPreferedVectorizedSize(clear_buffer->dtype,
-                                                      lower_args.target);
+          int vsize = Impl::GetPreferredVectorizedSize(clear_buffer->dtype,
+                                                       lower_args.target);
           bool can_batch_pack =
               vsize > 1 && batch >= vsize && batch % vsize == 0 &&
               reduce::MakeCodegenReducer(op, vsize).has_value();

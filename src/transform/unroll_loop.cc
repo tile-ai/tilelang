@@ -66,7 +66,7 @@ struct UnrollLoopConfigNode
         .def_ro(
             "explicit_unroll", &UnrollLoopConfigNode::explicit_unroll,
             "Whether to explicitly unroll the loop instead of setting a pragma",
-            refl::DefaultValue(true))
+            refl::DefaultValue(false))
         .def_ro(
             "unroll_local_access", &UnrollLoopConfigNode::unroll_local_access,
             "Whether to always unroll local access", refl::DefaultValue(false));
@@ -178,6 +178,14 @@ public:
     Stmt stmt = StmtExprMutator::VisitStmt_(op);
     op = stmt.as<ForNode>();
     int value = GetTripCount(op);
+
+    // Whether to explicitly unroll.
+    bool explicit_unroll = explicit_unroll_;
+    if (auto attr = op->annotations.Get(tirx::attr::pragma_unroll_explicit)) {
+      explicit_unroll =
+          static_cast<bool>(Downcast<Integer>(attr.value())->value);
+    }
+
     // condition for auto unroll
     bool auto_unroll =
         (op->kind == ForKind::kSerial && value >= 0 &&
@@ -187,9 +195,9 @@ public:
                                   value <= auto_max_extent_);
 
     if (op->kind == ForKind::kUnrolled) {
-      if (explicit_unroll_) {
+      if (explicit_unroll) {
         ICHECK_GE(value, 0)
-            << "Cannot unroll non-constant loop " << explicit_unroll_;
+            << "Cannot unroll non-constant loop " << explicit_unroll;
       }
       auto_unroll = true;
     }
@@ -208,7 +216,7 @@ public:
       normal_loop_depth_ += 1;
     }
 
-    if ((auto_unroll && explicit_unroll_) ||
+    if ((auto_unroll && explicit_unroll) ||
         // unroll loops with extent = 1, no matter how many steps in body
         (0 <= value && value <= auto_max_extent_ && auto_max_extent_ == 1)) {
       return Unroll(op);

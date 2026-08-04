@@ -564,7 +564,7 @@ union GmmaDescriptor {
     uint16_t leading_byte_offset_ : 14, : 2; // 14 bits [0,14), 2 bits unused
     // stride dimension byte offset, bit [32,46), 4LSB not included
     // For N: This is the stride from the first 8 rows to the next 8 rows.
-    // For T: This is the stride fro mthe first 8 cols to the next 8 cols.
+    // For T: This is the stride from the first 8 cols to the next 8 cols.
     uint16_t stride_byte_offset_ : 14, : 2; // 14 bits [0,14), 2 bits unused
     // base_offset, bit [49,52)
     // Valid only for SWIZZLE_128B and SWIZZLE_64B
