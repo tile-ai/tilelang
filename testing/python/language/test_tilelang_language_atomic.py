@@ -1,3 +1,5 @@
+import re
+
 import pytest
 import tilelang.testing
 import tilelang.layout
@@ -408,7 +410,10 @@ def test_tma_atomic_add_splits_32b_swizzle_box():
     artifact = lower_tma_atomic_add(T.float32, shape=(16, 24))
     descriptor_args = get_tma_atomic_add_descriptor_args(artifact)
     assert descriptor_args[-3].value == 1
-    assert artifact.kernel_source.count("tma_store_add") == 3
+    assert re.search(
+        r"for \(int \w+ = 0; \w+ < 3; \+\+\w+\) \{\n\s*tl::tma_store_add",
+        artifact.kernel_source,
+    )
 
 
 def test_tma_atomic_add_rejects_pre_hopper_target():
