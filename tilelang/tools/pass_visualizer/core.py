@@ -355,14 +355,12 @@ class PassStructureRecord:
 
     name: str
     sequence: int
-    before_ir: str
-    after_ir: str
     before_lines: list[str]
     after_lines: list[str]
 
     @property
     def changed(self) -> bool:
-        return self.before_ir != self.after_ir
+        return self.before_lines != self.after_lines
 
 
 @dataclass
@@ -371,7 +369,6 @@ class _ActivePass:
 
     name: str
     sequence: int | None
-    before_ir: str | None
     before_lines: list[str] | None
 
 
@@ -417,12 +414,11 @@ class StructureTreePassInstrument:
             frame = _ActivePass(
                 name=name,
                 sequence=self._next_sequence,
-                before_ir=str(mod),
                 before_lines=before_lines,
             )
             self._next_sequence += 1
         else:
-            frame = _ActivePass(name=name, sequence=None, before_ir=None, before_lines=None)
+            frame = _ActivePass(name=name, sequence=None, before_lines=None)
         self._stack.append(frame)
 
     def run_after_pass(self, mod: tvm.IRModule, info):
@@ -440,14 +436,11 @@ class StructureTreePassInstrument:
         if frame.sequence is None:
             return
 
-        assert frame.before_ir is not None
         assert frame.before_lines is not None
         self.records.append(
             PassStructureRecord(
                 name=name,
                 sequence=frame.sequence,
-                before_ir=frame.before_ir,
-                after_ir=str(mod),
                 before_lines=frame.before_lines,
                 after_lines=capture_structure(mod),
             )

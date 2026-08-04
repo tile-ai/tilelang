@@ -11,6 +11,10 @@ lowering prologue, so conditional passes and their order match the pipeline that
 actually executes. The tool emits a single self-contained, interactive HTML
 file that steps through those passes.
 
+The Pass Visualizer currently supports CUDA targets only. Other backends can
+use the structure-tree instrument once they provide a backend-specific pipeline
+entry point, but they are not dispatched by this CLI yet.
+
 Use it when debugging **structural** passes (layout inference, warp
 specialization, pipelining), where what matters is how the IR's block structure
 and operator semantics change, not just which text lines moved.
@@ -41,7 +45,7 @@ This writes `gemm_relu_passes.html` (the interactive browser) and a sibling
 |----------|-------------|
 | `path` | Python file containing a `@tilelang.jit` kernel (positional) |
 | `--factory` | Name of the kernel to analyze (default: first discovered) |
-| `--target` | Compilation target (default: `auto`) |
+| `--target` | CUDA compilation target (default: `auto`) |
 | `--set K=V` | Argument forwarded to the kernel factory (repeatable) |
 | `--out` | Output HTML path (default: `<kernel>_passes.html` next to the source) |
 

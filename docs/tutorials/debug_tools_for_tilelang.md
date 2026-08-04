@@ -212,7 +212,7 @@ which is retained only for backward compatibility. New users should use
 
 ## Pass Visualizer: Structure-Tree View Across Passes
 
-The **Pass Visualizer** is a complement to Pass Diff. Where Pass Diff shows a line-level diff of the **TVMScript text**, the Pass Visualizer renders the IR as a **structure tree** (the `SBlock` nesting, with `reads` / `writes` / `alloc_buffers` / `annotations` fields) and expands every tile op by field name. A TVM `PassInstrument` observes the canonical CUDA lowering prologue, so the report follows the conditional passes and order that actually execute. It produces a single self-contained, interactive HTML file that steps through those passes.
+The **Pass Visualizer** is a complement to Pass Diff. Where Pass Diff shows a line-level diff of the **TVMScript text**, the Pass Visualizer renders the IR as a **structure tree** (the `SBlock` nesting, with `reads` / `writes` / `alloc_buffers` / `annotations` fields) and expands every tile op by field name. A TVM `PassInstrument` observes the canonical CUDA lowering prologue, so the report follows the conditional passes and order that actually execute. It produces a single self-contained, interactive HTML file that steps through those passes. The CLI currently supports CUDA targets only; backend-specific pipeline dispatch can be added separately for other targets.
 
 This view is most useful when debugging **structural** passes — layout inference, warp specialization, pipelining — where you care about how the IR's block structure and operator semantics change, not just which text lines moved.
 

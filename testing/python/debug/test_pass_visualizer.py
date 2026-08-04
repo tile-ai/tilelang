@@ -19,11 +19,12 @@ from tilelang import tvm
 
 from tilelang.tools.pass_visualizer import (
     build_module,
+    capture_structure,
     inspect_structure,
+    PassStructureRecord,
     StructureTreePassInstrument,
 )
 from tilelang.tools.pass_visualizer.viewer import (
-    _capture_tree,
     build_pass_data,
     emit_html,
     emit_txt,
@@ -113,6 +114,25 @@ def test_structure_tree_instrument_ignores_nested_passes():
     assert [record.name for record in records] == ["test.Outer"]
 
 
+def test_pass_structure_record_changed_uses_structure_snapshot():
+    """The changed flag describes the structure-tree diff shown by the viewer."""
+    unchanged = PassStructureRecord(
+        name="test.Unchanged",
+        sequence=0,
+        before_lines=["PrimFunc", "  body"],
+        after_lines=["PrimFunc", "  body"],
+    )
+    changed = PassStructureRecord(
+        name="test.Changed",
+        sequence=1,
+        before_lines=["PrimFunc", "  body"],
+        after_lines=["PrimFunc", "  changed body"],
+    )
+
+    assert not unchanged.changed
+    assert changed.changed
+
+
 def test_structure_tree_instrument_cleans_up_after_failure():
     """A missing after-pass callback is retained as a diagnostic, not stale state."""
     mod, _target = _build_small_module()
@@ -150,10 +170,10 @@ def test_inspect_structure_renders_tree(capsys):
 
 
 @tilelang.testing.requires_cuda
-def test_capture_tree_returns_lines():
-    """_capture_tree turns inspect_structure output into a list of text lines."""
+def test_capture_structure_returns_lines():
+    """capture_structure turns inspect_structure output into text lines."""
     mod, _target = _build_small_module()
-    lines = _capture_tree(mod)
+    lines = capture_structure(mod)
 
     assert isinstance(lines, list)
     assert len(lines) > 0
@@ -203,6 +223,23 @@ def test_build_pass_data_and_emit(tmp_path):
     txt = emit_txt(name, stages)
     assert "kernel: gemm_relu" in txt
     assert "T.gemm" in txt
+
+
+def test_build_pass_data_rejects_non_cuda_target():
+    """The focused viewer rejects backends whose pass pipeline it cannot dispatch."""
+    import os
+
+    kernel_path = os.path.join(
+        os.path.dirname(tilelang.tools.pass_visualizer.__file__),
+        "examples",
+        "gemm_relu.py",
+    )
+    with open(kernel_path) as f:
+        source = f.read()
+
+    kwargs = {"M": 128, "N": 128, "K": 128, "block_M": 64, "block_N": 64, "block_K": 32}
+    with pytest.raises(ValueError, match="currently supports only CUDA targets"):
+        build_pass_data(kernel_path, None, "llvm", kwargs, source)
 
 
 @tilelang.testing.requires_cuda

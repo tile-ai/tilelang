@@ -116,11 +116,6 @@ def _highlight(line: str) -> str:
     return s
 
 
-def _capture_tree(mod) -> list[str]:
-    """Compatibility wrapper around the core structure renderer."""
-    return M.capture_structure(mod)
-
-
 def _diff_rows(prev: list[str], cur: list[str]) -> list[dict]:
     """Merge prev->cur into display rows tagged equal / add / del.
 
@@ -176,6 +171,8 @@ def build_pass_data(path: str, factory: str | None, target: str, kwargs: dict[st
     name, kernel = next(iter(kernels.items()))
     func = M.kernel_to_tir(kernel, **kwargs)
     mod, resolved_target = M.build_module(func, target=target)
+    if resolved_target.kind.name != "cuda":
+        raise ValueError(f"Pass Visualizer currently supports only CUDA targets, got {resolved_target.kind.name!r}.")
 
     # Match JIT compilation's pass-config precedence: PrimFunc-level configs
     # first, then explicit @tilelang.jit configs. Normalize enum keys before
@@ -203,7 +200,7 @@ def build_pass_data(path: str, factory: str | None, target: str, kwargs: dict[st
     src_rows = [{"t": "equal", "s": ln, "h": _highlight(ln), "op": bool(_TILEOP_RE.search(ln))} for ln in source.split("\n")]
     captured.append({"name": "source code", "flag": "source", "rows": src_rows})
 
-    input_lines = instrument.input_lines if instrument.input_lines is not None else _capture_tree(mod)
+    input_lines = instrument.input_lines if instrument.input_lines is not None else M.capture_structure(mod)
     captured.append(
         {
             "name": "(input)",
@@ -445,10 +442,10 @@ def _write_outputs(name: str, stages: list[dict], html_path: str) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Build an interactive HTML pass browser for a TileLang kernel.")
+    parser = argparse.ArgumentParser(description="Build an interactive HTML CUDA-pass browser for a TileLang kernel.")
     parser.add_argument("path", help="Path to a Python file containing a @tilelang.jit kernel.")
     parser.add_argument("--factory", default=None, help="Name of the kernel to analyze (default: first discovered).")
-    parser.add_argument("--target", default="auto", help="Compilation target (default: auto).")
+    parser.add_argument("--target", default="auto", help="CUDA compilation target (default: auto).")
     parser.add_argument(
         "--set",
         dest="kwargs",
