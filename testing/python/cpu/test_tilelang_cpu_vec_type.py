@@ -70,13 +70,15 @@ def test_vec_type_arith_compiles_and_executes_on_cpu():
         execution_backend="cython",
     )
 
-    a = torch.randn(N)
+    # Pin the input contract explicitly instead of relying on PyTorch's
+    # process-wide default dtype/device, which other tests may change.
+    a = torch.randn(N, dtype=torch.float32, device="cpu")
     # Keep divisors away from zero.
-    b = torch.rand(N) + 1.0
-    add = torch.empty(N)
-    sub = torch.empty(N)
-    mul = torch.empty(N)
-    div = torch.empty(N)
+    b = torch.rand(N, dtype=torch.float32, device="cpu") + 1.0
+    add = torch.empty(N, dtype=torch.float32, device="cpu")
+    sub = torch.empty(N, dtype=torch.float32, device="cpu")
+    mul = torch.empty(N, dtype=torch.float32, device="cpu")
+    div = torch.empty(N, dtype=torch.float32, device="cpu")
     kernel(a, b, add, sub, mul, div)
 
     torch.testing.assert_close(add, a + b)
