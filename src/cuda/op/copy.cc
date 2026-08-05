@@ -395,9 +395,21 @@ cute::Layout TmemTileToB32Columns(const cute::Layout &tile,
 // of the buffer's layout, so it is decided on the WHOLE fragment -- a
 // Region slice of a batched buffer also leaves codomain gaps, but those
 // are batch gaps, not half-filled columns.
+// So ask exactly that, per datapath the fragment actually touches: a full
+// tile holds one value in each column of each of them.  Comparing size to
+// the whole codomain instead would also count gaps on the DATAPATH axis,
+// which a PTX Layout F fragment (1SM M=64, only the low 16 datapaths of
+// each sub-partition) has in abundance -- that would emit the modifier for
+// a tile whose columns are perfectly full.
 bool TmemFragmentNeedsPack16b(const cute::Layout &fragment) {
-  return cute::AsConst(cute::Size(fragment)) !=
-         cute::AsConst(cute::Cosize(fragment));
+  static const cute::Layout kDpOnly = cute::Layout::Parse("(1,1):(1,0)");
+  static const cute::Layout kColOnly = cute::Layout::Parse("(1,1):(0,1)");
+  // Filter drops the stride-0 modes, leaving the datapaths really occupied.
+  int64_t datapaths = cute::AsConst(
+      cute::Size(cute::Filter(cute::Composition(kDpOnly, fragment))));
+  int64_t columns =
+      cute::AsConst(cute::Cosize(cute::Composition(kColOnly, fragment)));
+  return cute::AsConst(cute::Size(fragment)) < datapaths * columns;
 }
 
 } // namespace
@@ -642,7 +654,9 @@ LayoutMap Copy::InferTMemLayout(const CopyNode &op,
     // its value-column planning: the plain instruction moves whole columns
     // of packed pairs.
     int64_t values_per_b32 = 32 / (tmem_buf->dtype.bits());
-    if (values_per_b32 > 1 && TmemFragmentNeedsPack16b(tmem_frag.value()))
+    bool pack16b_tile =
+        values_per_b32 > 1 && TmemFragmentNeedsPack16b(tmem_frag.value());
+    if (pack16b_tile)
       tile = TmemTileToB32Columns(tile, values_per_b32);
 
     // The register buffer is a grid of such slices (a split epilogue issues
@@ -676,8 +690,18 @@ LayoutMap Copy::InferTMemLayout(const CopyNode &op,
       // region-local coord -> (thread@0, value@1)
       // E.g., local_frag = (128,64):(1@0,1@1) for 32dp32b, 128 threads
       //       (thread = datapath, value = column within the slice).
-      Tcgen05CopyPlan expanded = ExpandTcgen05Layout(GetTcgen05MetaLd32Dp32B(),
-                                                     tile, num_useful_threads);
+      int64_t values_per_column = pack16b_tile ? 1 : values_per_b32;
+      Tcgen05CopyPlan expanded =
+          ExpandTcgen05Layout(GetTcgen05MetaLd32Dp32B(), tile,
+                              num_useful_threads, values_per_column);
+      // A PTX Layout F tile (1SM M=64) occupies only the low 16 datapaths of
+      // each sub-partition, so no full-width atom can tile it.  Fall back to
+      // the narrowest half-subpartition atom, which plays the same role there
+      // that 32dp32b plays above: LowerTmem searches its candidates for the
+      // one whose fragment matches whatever this picked.
+      if (!expanded.defined())
+        expanded = ExpandTcgen05Layout(GetTcgen05MetaLd16Dp64B(), tile,
+                                       num_useful_threads, values_per_column);
       if (!expanded.defined()) {
         continue;
       }
@@ -1539,8 +1563,8 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
          num_useful_wgs--) {
       int num_useful_threads = num_useful_wgs * WARPGROUP_SIZE;
       // region-local loop coord -> (thread@0, value@1)
-      Tcgen05CopyPlan plan =
-          ExpandTcgen05Layout(meta, tile, num_useful_threads);
+      Tcgen05CopyPlan plan = ExpandTcgen05Layout(meta, tile, num_useful_threads,
+                                                 pack16b ? 1 : values_per_b32);
       if (!plan.defined()) {
         continue;
       }
@@ -1638,6 +1662,8 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
         args.push_back(Bool(use_pack_unpack_modifier));
         args.push_back(BufferLoad(tmem_buf, issue_tmem_indices));
         args.push_back(col_offset);
+        args.push_back(IntImm(DataType::Int(32),
+                              static_cast<int>(plan->datapaths_per_warp)));
         args.push_back(reg_buf.access_ptr(
             /*access_mask=*/is_ld ? 2 : 1, DataType::Handle(),
             /*content_lanes=*/1, /*offset=*/issue_reg_offset,
