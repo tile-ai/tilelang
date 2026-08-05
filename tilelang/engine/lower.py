@@ -309,6 +309,25 @@ def lower(
     own device codegen implementation in jit.
     """
 
+    with tvm.arith.Z3ContextScope():
+        return _lower_impl(
+            func_or_mod=func_or_mod,
+            target=target,
+            target_host=target_host,
+            runtime_only=runtime_only,
+            enable_host_codegen=enable_host_codegen,
+            enable_device_compile=enable_device_compile,
+        )
+
+
+def _lower_impl(
+    func_or_mod: tirx.PrimFunc | tvm.IRModule,
+    target: str | Target = "auto",
+    target_host: str | Target | None = None,
+    runtime_only=False,
+    enable_host_codegen=False,
+    enable_device_compile=False,
+) -> CompiledArtifact:
     host_mod, device_mod, params, target, target_host = lower_to_host_device_ir(
         func_or_mod=func_or_mod,
         target=target,
