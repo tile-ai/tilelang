@@ -28,6 +28,7 @@
 
 #include <tvm/tirx/stmt_functor.h>
 
+#include <unordered_set>
 #include <utility>
 
 #include "../op/utils.h"
@@ -63,9 +64,40 @@ private:
   arith::Analyzer *analyzer_;
 };
 
+class ReducerStoreGuarder : public StmtExprMutator {
+public:
+  static Stmt Rewrite(Stmt stmt, const Array<Buffer> &reducer_buffers,
+                      const PrimExpr &predicate) {
+    ReducerStoreGuarder guarder(reducer_buffers, predicate);
+    return guarder(std::move(stmt));
+  }
+
+private:
+  using BufferSet = std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>;
+
+  ReducerStoreGuarder(const Array<Buffer> &reducer_buffers, PrimExpr predicate)
+      : predicate_(std::move(predicate)) {
+    for (const Buffer &buffer : reducer_buffers) {
+      reducer_buffers_.insert(buffer);
+    }
+  }
+
+  Stmt VisitStmt_(const BufferStoreNode *op) final {
+    BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
+    if (!reducer_buffers_.count(store->buffer)) {
+      return store;
+    }
+    return IfThenElse(predicate_, store);
+  }
+
+  BufferSet reducer_buffers_;
+  PrimExpr predicate_;
+};
+
 // Rewrite the parallel loop into a common loop, which is mapped to threads
 For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
-                  const Fragment &loop_layout, bool require_padding_guard) {
+                  const Fragment &loop_layout, bool require_padding_guard,
+                  const Array<Buffer> &canonical_reducer_buffers) {
   ICHECK(loop_layout.defined());
   ICHECK(thread_index.defined());
   int old_loop_depth = loop_layout->InputDim();
@@ -143,6 +175,15 @@ For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
     PrimExpr upper_bound =
         analyzer->Simplify(replicate_index < replicate_extent);
     guard = And(guard, And(lower_bound, upper_bound));
+  }
+  if (!canonical_reducer_buffers.empty()) {
+    ICHECK_GT(indices.size(), static_cast<size_t>(old_loop_depth));
+    PrimExpr canonical_replica = analyzer->Simplify(EQ(
+        indices[old_loop_depth], make_zero(indices[old_loop_depth].dtype())));
+    if (!analyzer->CanProve(canonical_replica)) {
+      body = ReducerStoreGuarder::Rewrite(
+          std::move(body), canonical_reducer_buffers, canonical_replica);
+    }
   }
   PrimExpr simplified_guard = analyzer->Simplify(guard);
   if (!analyzer->CanProve(simplified_guard)) {
@@ -267,7 +308,8 @@ Stmt LowerParallelLoop(For loop, const Fragment &loop_layout,
                        PrimExpr thread_index, arith::Analyzer *analyzer,
                        const LayoutMap &layout_map,
                        Optional<PrimExpr> predicate, bool parallel_loop,
-                       bool should_vectorize, bool require_padding_guard) {
+                       bool should_vectorize, bool require_padding_guard,
+                       const Array<Buffer> &canonical_reducer_buffers) {
   // Save analyzer state to prevent conflicted bindings during vectorization
   auto saved_analyzer = analyzer->Clone();
 
@@ -285,8 +327,9 @@ Stmt LowerParallelLoop(For loop, const Fragment &loop_layout,
 
   // Step 1: Partition the loop based on the layout (if this is a parallel loop)
   if (parallel_loop) {
-    result_loop = PartitionLoop(result_loop, thread_index, analyzer,
-                                loop_layout, require_padding_guard);
+    result_loop =
+        PartitionLoop(result_loop, thread_index, analyzer, loop_layout,
+                      require_padding_guard, canonical_reducer_buffers);
   }
 
   // Step 2: Vectorize the loop (if requested)

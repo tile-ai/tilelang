@@ -1387,20 +1387,24 @@ private:
     // the body, buffers may have been remapped via var_remap_. We need to find
     // the original var to check against reducer_info.
     bool has_reducer = false;
+    Array<Buffer> canonical_reducer_buffers;
     PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
-      if (!has_reducer) {
-        if (const auto *store = obj.as<BufferStoreNode>()) {
-          Var data_var = store->buffer->data;
-          // Find the original var if it was remapped
-          // var_remap_ maps old_var -> new_var, so we need reverse lookup
-          Var original_var = data_var;
-          for (const auto &[old_var, new_var] : var_remap_) {
-            if (new_var.same_as(data_var)) {
-              original_var = old_var;
-              break;
-            }
+      if (const auto *store = obj.as<BufferStoreNode>()) {
+        Var data_var = store->buffer->data;
+        // Find the original var if it was remapped
+        // var_remap_ maps old_var -> new_var, so we need reverse lookup
+        Var original_var = data_var;
+        for (const auto &[old_var, new_var] : var_remap_) {
+          if (new_var.same_as(data_var)) {
+            original_var = old_var;
+            break;
           }
-          has_reducer = reducer_info.count(original_var) != 0;
+        }
+        if (reducer_info.count(original_var)) {
+          has_reducer = true;
+          if (reducer_info[original_var]->rep == ReducerRepType::ALL) {
+            canonical_reducer_buffers.push_back(store->buffer);
+          }
         }
       }
     });
@@ -1426,7 +1430,8 @@ private:
     // Lower the parallel loop using the common function
     Stmt lowered = LowerParallelLoop(
         for_node, loop_layout, CurrentThreadIndex(), analyzer_, layout_map_,
-        predicate, parallel_loop, should_vectorize, require_padding_guard);
+        predicate, parallel_loop, should_vectorize, require_padding_guard,
+        canonical_reducer_buffers);
 
     // Only parallel-loop lowering needs PTX cp.async injection. Thread-level
     // lowering does not require converting eligible global->shared copies to
