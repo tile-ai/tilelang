@@ -137,6 +137,22 @@ def AnnotateWarpGroupRegAlloc():
     return _ffi_api.AnnotateWarpGroupRegAlloc()  # type: ignore
 
 
+def MaterializeWSSchedule():
+    """Materialize a user-provided warp-specialization schedule.
+
+    Consumes the ``ws_schedule`` block annotation attached by
+    ``T.annotate_ws_schedule`` and rewrites the kernel into explicit
+    warp-specialized form (role branches, multi-versioned buffers,
+    mbarrier synchronization, TMA copies, async tcgen05 MMA).
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.MaterializeWSSchedule()  # type: ignore
+
+
 def PersistThreadblock():
     """PersistThreadblock"""
     return _ffi_api.PersistThreadblock()  # type: ignore
@@ -155,6 +171,7 @@ __all__ = [
     "LowerSharedBarrier",
     "LowerSharedTmem",
     "MarkCudaSyncCalls",
+    "MaterializeWSSchedule",
     "PersistThreadblock",
     "ProducerConsumerWarpSpecialized",
 ]

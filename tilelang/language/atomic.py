@@ -6,6 +6,7 @@ import tilelang.language as T
 from tilelang._typing import BufferLikeType
 from tvm import DataType, ir
 from tvm.tirx import PrimExpr, Buffer, Var, op
+from tilelang.language.utils import _normalize_annotations
 from tilelang.utils.language import to_buffer_region, legalize_pairwise_extents
 from tilelang.language.utils import get_extent
 
@@ -35,7 +36,9 @@ def _get_memory_order_id(operation: str, memory_order: str, valid_orders: frozen
     return _MEMORY_ORDER_ID_MAP[memory_order]
 
 
-def atomic_max(dst: Buffer, value: PrimExpr, memory_order: str | None = None, return_prev: bool = False) -> PrimExpr:
+def atomic_max(
+    dst: Buffer, value: PrimExpr, memory_order: str | None = None, return_prev: bool = False, annotations: dict | None = None
+) -> PrimExpr:
     """
     Perform an atomic maximum on the value stored at dst with an optional memory-order.
 
@@ -111,14 +114,16 @@ def atomic_max(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
     if return_prev:
         raise NotImplementedError("return_prev is not supported for tile-region-based atomic operations")
 
-    ann = {}
+    ann = _normalize_annotations(annotations)
     if memory_order is not None:
         ann["memory_order"] = _MEMORY_ORDER_ID_MAP[memory_order]
 
-    return T.call_intrin("handle", op.Op.get("tl.tileop.atomicmax"), value, dst, annotations=ann if ann else None)
+    return T.call_intrin("handle", op.Op.get("tl.tileop.atomicmax"), value, dst, annotations=ann)
 
 
-def atomic_min(dst: Buffer, value: PrimExpr, memory_order: str | None = None, return_prev: bool = False) -> PrimExpr:
+def atomic_min(
+    dst: Buffer, value: PrimExpr, memory_order: str | None = None, return_prev: bool = False, annotations: dict | None = None
+) -> PrimExpr:
     """
     Atomically update the value at dst to the minimum of its current value and value.
 
@@ -194,14 +199,21 @@ def atomic_min(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
     if return_prev:
         raise NotImplementedError("return_prev is not supported for tile-region-based atomic operations")
 
-    ann = {}
+    ann = _normalize_annotations(annotations)
     if memory_order is not None:
         ann["memory_order"] = _MEMORY_ORDER_ID_MAP[memory_order]
 
-    return T.call_intrin("handle", op.Op.get("tl.tileop.atomicmin"), value, dst, annotations=ann if ann else None)
+    return T.call_intrin("handle", op.Op.get("tl.tileop.atomicmin"), value, dst, annotations=ann)
 
 
-def atomic_add(dst: Buffer, value: PrimExpr, memory_order: str | None = None, return_prev: bool = False, use_tma: bool = False) -> PrimExpr:
+def atomic_add(
+    dst: Buffer,
+    value: PrimExpr,
+    memory_order: str | None = None,
+    return_prev: bool = False,
+    use_tma: bool = False,
+    annotations: dict | None = None,
+) -> PrimExpr:
     """
     Atomically add `value` into `dst`, returning a handle to the operation.
 
@@ -288,13 +300,13 @@ def atomic_add(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
         raise NotImplementedError("return_prev is not supported for tile-region-based atomic operations")
 
     # Build annotations dict
-    ann = {}
+    ann = _normalize_annotations(annotations)
     if use_tma:
         ann["use_tma"] = 1
     if memory_order is not None:
         ann["memory_order"] = _MEMORY_ORDER_ID_MAP[memory_order]
 
-    return T.call_intrin("handle", op.Op.get("tl.tileop.atomicadd"), value, dst, annotations=ann if ann else None)
+    return T.call_intrin("handle", op.Op.get("tl.tileop.atomicadd"), value, dst, annotations=ann)
 
 
 def atomic_addx2(dst: BufferLikeType, value: BufferLikeType, return_prev: bool = False) -> PrimExpr:

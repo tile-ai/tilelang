@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from tilelang._typing import BufferLikeType
 from tilelang.language.common import alloc_shared, copy, macro
+from tilelang.language.utils import _normalize_annotations
 from tilelang.utils.language import _get_buffer, is_fragment, retrieve_shape, to_tile_region
 from tvm import tirx
 
@@ -86,6 +87,7 @@ def cumsum(
     dst: BufferLikeType | None = None,
     dim: int = 0,
     reverse: bool = False,
+    annotations: dict | None = None,
 ) -> tirx.PrimExpr | None:
     """
     Compute the cumulative sum of `src` along `dim`, writing results to `dst`.
@@ -143,6 +145,7 @@ def cumsum(
         to_tile_region(dst, access_type="w"),
         dim,
         reverse,
+        annotations=_normalize_annotations(annotations),
     )
 
 
@@ -170,6 +173,7 @@ def cummax(
     dst: BufferLikeType | None = None,
     dim: int = 0,
     reverse: bool = False,
+    annotations: dict | None = None,
 ) -> tirx.PrimExpr | None:
     """
     Compute the cumulative maximum of `src` along `dim`, writing results to `dst`.
@@ -193,4 +197,5 @@ def cummax(
         to_tile_region(dst, access_type="w"),
         dim,
         reverse,
+        annotations=_normalize_annotations(annotations),
     )

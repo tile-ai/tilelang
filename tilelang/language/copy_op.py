@@ -9,7 +9,7 @@ from tilelang.utils.language import (
     legalize_pairwise_extents,
 )
 from tilelang.utils.deprecated import deprecated
-from tilelang.language.utils import get_extent, buffer_region_to_tile_region
+from tilelang.language.utils import get_extent, buffer_region_to_tile_region, _normalize_annotations
 import tvm
 from tvm import ir, tirx
 
@@ -118,7 +118,7 @@ def copy(
         return tirx.BufferStore(dst.buffer, value, dst.indices)
 
     # Build annotations dict
-    ann = annotations.copy() if annotations else {}
+    ann = _normalize_annotations(annotations)
 
     # Individual arguments take lower precedence than annotations
     if "coalesced_width" not in ann and coalesced_width is not None:
@@ -129,15 +129,13 @@ def copy(
         eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
         ann["eviction_policy"] = eviction_policy_map[eviction_policy]
     if "prefer_instruction" not in ann and prefer_instruction is not None:
-        ann["prefer_instruction"] = prefer_instruction
-    if isinstance(ann.get("prefer_instruction"), str):
-        ann["prefer_instruction"] = tirx.StringImm(ann["prefer_instruction"])
+        ann["prefer_instruction"] = tirx.StringImm(prefer_instruction)
 
     # Parallel loop layout hint (Fragment). Mirrors T.Parallel(loop_layout=...)
     if loop_layout is not None and "parallel_loop_layout" not in ann:
         ann["parallel_loop_layout"] = loop_layout
 
-    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann if ann else None)
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann)
 
 
 def copy_cluster(
@@ -149,6 +147,7 @@ def copy_cluster(
     remote_barrier: tirx.BufferLoad | None = None,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
     coalesced_width: int | None = None,
+    annotations: dict | None = None,
     loop_layout: Any | None = None,
 ) -> tirx.PrimExpr | tirx.Stmt:
     """Cluster-aware copy for TMA multicast or SM-to-SM shared-memory copy.
@@ -166,6 +165,8 @@ def copy_cluster(
         coalesced_width: Vectorization width (in elements) for the SIMT loop
             used on the SM-to-SM fallback path (``dst_block`` set, no fast
             bulk-async route available).
+        annotations: Additional annotations dict. Values in annotations take
+            precedence over individual arguments.
         loop_layout: Parallel loop layout hint (Fragment) for the SIMT loop on
             the SM-to-SM fallback path. Incompatible with the TMA multicast
             path (``cluster_mask`` set).
@@ -175,22 +176,22 @@ def copy_cluster(
     """
     src, dst = _normalize_copy_regions(src, dst)
 
-    ann: dict = {}
-    if dst_block is not None:
+    ann = _normalize_annotations(annotations)
+    if "dst_block" not in ann and dst_block is not None:
         ann["dst_block"] = dst_block
-    if cluster_mask is not None:
+    if "cluster_mask" not in ann and cluster_mask is not None:
         ann["cluster_mask"] = cluster_mask
-    if remote_barrier is not None:
+    if "barrier" not in ann and remote_barrier is not None:
         ann["barrier"] = remote_barrier
-    if eviction_policy is not None:
+    if "eviction_policy" not in ann and eviction_policy is not None:
         eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
         ann["eviction_policy"] = eviction_policy_map[eviction_policy]
-    if coalesced_width is not None:
+    if "coalesced_width" not in ann and coalesced_width is not None:
         ann["coalesced_width"] = coalesced_width
-    if loop_layout is not None:
+    if loop_layout is not None and "parallel_loop_layout" not in ann:
         ann["parallel_loop_layout"] = loop_layout
 
-    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann if ann else None)
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann)
 
 
 def async_copy(
@@ -222,7 +223,7 @@ def async_copy(
     if isinstance(src, tirx.BufferLoad) and isinstance(dst, tirx.BufferLoad):
         return tirx.BufferStore(dst.buffer, src, dst.indices)
 
-    ann = annotations.copy() if annotations else {}
+    ann = _normalize_annotations(annotations)
     if "coalesced_width" not in ann and coalesced_width is not None:
         ann["coalesced_width"] = coalesced_width
     if loop_layout is not None and "parallel_loop_layout" not in ann:
@@ -233,7 +234,7 @@ def async_copy(
         tirx.op.Op.get("tl.tileop.async_copy"),
         src,
         dst,
-        annotations=ann if ann else None,
+        annotations=ann,
     )
 
 
@@ -294,7 +295,7 @@ def tma_copy(
     src = to_buffer_region(src, access_type="r", extents=src_extent)
     dst = to_buffer_region(dst, access_type="w", extents=dst_extent)
 
-    ann = annotations.copy() if annotations else {}
+    ann = _normalize_annotations(annotations)
 
     if barrier is not None:
         from .builtin import _mbar_to_buffer_load
@@ -313,7 +314,7 @@ def tma_copy(
         eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
         ann["eviction_policy"] = eviction_policy_map[eviction_policy]
 
-    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.tma_copy"), src, dst, annotations=ann if ann else None)
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.tma_copy"), src, dst, annotations=ann)
 
 
 _TMA_SUPPORTED_DTYPES = frozenset(
@@ -341,6 +342,7 @@ def tma_gather4(
     barrier,
     swizzle=None,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+    annotations: dict | None = None,
 ):
     """Issue a TMA tile::gather4 load (sm_100a, Blackwell).
 
@@ -354,6 +356,9 @@ def tma_gather4(
 
     The ``swizzle`` kwarg is deprecated; mark the shared tile via
     ``T.annotate_layout`` for non-default swizzle.
+
+    ``annotations`` is an additional annotations dict, merged before the
+    internal gather4 encoding keys.
     """
     if not isinstance(src, tirx.Buffer):
         raise TypeError("tma_gather4 src must be a tirx.Buffer (global)")
@@ -400,13 +405,16 @@ def tma_gather4(
     src_region = to_buffer_region(src, access_type="r", extents=[4, K_box])
     dst_region = to_buffer_region(dst, access_type="w", extents=[4, K_box])
 
-    ann = {
-        "is_gather4": True,
-        "gather4_rows": rows,
-        "gather4_col": col,
-        "barrier": bar_load,
-        "eviction_policy": ep,
-    }
+    ann = _normalize_annotations(annotations)
+    ann.update(
+        {
+            "is_gather4": True,
+            "gather4_rows": rows,
+            "gather4_col": col,
+            "barrier": bar_load,
+            "eviction_policy": ep,
+        }
+    )
     return tirx.call_intrin(
         "handle",
         tirx.op.Op.get("tl.tileop.copy"),
@@ -438,6 +446,7 @@ def tma_scatter4(
     *,
     swizzle=None,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+    annotations: dict | None = None,
 ):
     """Issue a TMA tile::scatter4 store (sm_100a, Blackwell).
 
@@ -445,6 +454,9 @@ def tma_scatter4(
     a 2D global tensor ``dst``. Caller is responsible for ``tma_store_arrive``
     / ``tma_store_wait`` and the ``T.shuffle_elect`` guard. See
     :func:`tma_gather4` for descriptor / swizzle inference details.
+
+    ``annotations`` is an additional annotations dict, merged before the
+    internal scatter4 encoding keys.
     """
     if not isinstance(src, tirx.Buffer):
         raise TypeError("tma_scatter4 src must be a tirx.Buffer (shared)")
@@ -485,12 +497,15 @@ def tma_scatter4(
     src_region = to_buffer_region(src, access_type="r", extents=[4, K_box])
     dst_region = to_buffer_region(dst, access_type="w", extents=[4, K_box])
 
-    ann = {
-        "is_scatter4": True,
-        "gather4_rows": rows,
-        "gather4_col": col,
-        "eviction_policy": ep,
-    }
+    ann = _normalize_annotations(annotations)
+    ann.update(
+        {
+            "is_scatter4": True,
+            "gather4_rows": rows,
+            "gather4_col": col,
+            "eviction_policy": ep,
+        }
+    )
     return tirx.call_intrin(
         "handle",
         tirx.op.Op.get("tl.tileop.copy"),
@@ -503,6 +518,7 @@ def tma_scatter4(
 def transpose(
     src: BufferLikeType,
     dst: BufferLikeType,
+    annotations: dict | None = None,
 ) -> tirx.PrimExpr:
     """Transpose a 2D buffer in shared memory: dst[j, i] = src[i, j].
 
@@ -512,6 +528,7 @@ def transpose(
     Args:
         src: Source buffer or region of shape (..., M, N).
         dst: Destination buffer or region of shape (..., N, M).
+        annotations: Optional annotations to attach to the call.
 
     Returns:
         tirx.Call: A handle to the transpose operation.
@@ -534,6 +551,7 @@ def transpose(
         tirx.op.Op.get("tl.tileop.transpose"),
         src,
         dst,
+        annotations=_normalize_annotations(annotations),
     )
 
 
@@ -547,6 +565,7 @@ def im2col(
     dilation: int,
     pad: int,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+    annotations: dict | None = None,
 ) -> tirx.PrimExpr:
     """Perform im2col transformation for 2D convolution.
 
@@ -559,6 +578,7 @@ def im2col(
         stride (int): Stride of the convolution
         dilation (int): Dilation rate
         pad (int): Padding size
+        annotations: Optional annotations to attach to the call
 
     Returns:
         tirx.Call: A handle to the im2col operation
@@ -585,6 +605,7 @@ def im2col(
         dilation,
         pad,
         eviction_policy,
+        annotations=_normalize_annotations(annotations),
     )
 
 
@@ -599,6 +620,7 @@ def c2d_im2col(
     dilation: int,
     pad: int,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+    annotations: dict | None = None,
 ) -> tirx.PrimExpr:
     """Deprecated alias for :func:`im2col`.
 
@@ -616,4 +638,5 @@ def c2d_im2col(
         dilation,
         pad,
         eviction_policy,
+        annotations=annotations,
     )
