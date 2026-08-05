@@ -127,12 +127,10 @@ BACKEND = register_backend(
         supports_target=codegen.is_plain_cuda_target,
         pipelines={"cuda": pipeline.CUDA_PIPELINE},
         device_codegens={
-            "cuda": (
-                DeviceCodegen(
-                    "cuda",
-                    build=codegen.build_cuda,
-                    build_without_compile=codegen.build_cuda_without_compile,
-                ),
+            "cuda": DeviceCodegen(
+                "cuda",
+                build=codegen.build_cuda,
+                build_without_compile=codegen.build_cuda_without_compile,
             )
         },
         execution_backends=execution_backend.CUDA_EXECUTION_BACKENDS,

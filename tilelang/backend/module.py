@@ -30,10 +30,10 @@ class BackendModule:
     name: str
     target_kinds: tuple[str, ...]
     pipelines: Mapping[str, PassPipeline]
-    device_codegens: Mapping[str, tuple[DeviceCodegen, ...]]
+    device_codegens: Mapping[str, DeviceCodegen]
     execution_backends: tuple[ExecutionBackendSpec, ...]
     supports_target: TargetPredicate | None = None
-    host_codegens: Mapping[str, tuple[HostCodegen, ...]] = field(default_factory=dict)
+    host_codegens: Mapping[str, HostCodegen] = field(default_factory=dict)
     host_codegen_hooks: Mapping[str, tuple[HostCodegenHook, ...]] = field(default_factory=dict)
     callbacks: Mapping[str, BackendCallback] = field(default_factory=dict)
 
@@ -54,16 +54,12 @@ class BackendModule:
             if pipeline.name != target_kind:
                 raise ValueError(f"BackendModule {self.name!r} pipeline {pipeline.name!r} does not match target kind {target_kind!r}")
 
-        device_codegens = _freeze_components(self.device_codegens)
+        device_codegens = MappingProxyType(dict(self.device_codegens))
         if set(device_codegens) != target_kind_set:
             raise ValueError(f"BackendModule {self.name!r} must define device codegen for every target kind")
-        if any(not codegens for codegens in device_codegens.values()):
-            raise ValueError(f"BackendModule {self.name!r} device codegen lists must not be empty")
 
-        host_codegens = _freeze_components(self.host_codegens)
+        host_codegens = MappingProxyType(dict(self.host_codegens))
         host_codegen_hooks = _freeze_components(self.host_codegen_hooks)
-        if any(not values for values in host_codegens.values()):
-            raise ValueError(f"BackendModule {self.name!r} host codegen lists must not be empty")
         unknown_hook_targets = set(host_codegen_hooks) - target_kind_set
         if unknown_hook_targets:
             raise ValueError(
@@ -112,20 +108,17 @@ class BackendModule:
 
     def get_device_codegen(self, target: Target) -> DeviceCodegen:
         target_kind = self._require_target(target)
-        matches = [codegen for codegen in self.device_codegens[target_kind] if codegen.matches(target)]
-        if not matches:
-            raise ValueError(f"Backend {self.name!r} has no device codegen matching target {target}")
-        return matches[0]
+        return self.device_codegens[target_kind]
 
     def codegen_device(self, mod: IRModule, target: Target, *, compile_device: bool) -> IRModule:
         return self.get_device_codegen(target).lower(mod, target, compile_device=compile_device)
 
     def get_host_codegen(self, target_host: Target) -> HostCodegen:
         target_kind = target_host.kind.name
-        matches = [codegen for codegen in self.host_codegens.get(target_kind, ()) if codegen.matches(target_host)]
-        if not matches:
+        codegen = self.host_codegens.get(target_kind)
+        if codegen is None:
             raise ValueError(f"Backend {self.name!r} has no host codegen matching target {target_host}")
-        return matches[0]
+        return codegen
 
     def codegen_host(self, mod: IRModule, target_host: Target) -> IRModule:
         return self.get_host_codegen(target_host).lower(mod, target_host)
@@ -133,8 +126,7 @@ class BackendModule:
     def preprocess_host_codegen(self, mod: IRModule, target_host: Target, target: Target) -> IRModule:
         target_kind = self._require_target(target)
         for hook in self.host_codegen_hooks.get(target_kind, ()):
-            if hook.matches(target):
-                mod = hook.lower(mod, target_host, target)
+            mod = hook.lower(mod, target_host, target)
         return mod
 
     def allowed_execution_backends(self, target: Target, *, include_unavailable: bool = True) -> tuple[str, ...]:
@@ -145,10 +137,8 @@ class BackendModule:
         return tuple(spec.name for spec in specs)
 
     def resolve_execution_backend(self, requested: str | None, target: Target) -> ExecutionBackendSpec:
-        from tilelang.backend.execution_backend import canonicalize_execution_backend
-
         self._require_target(target)
-        requested_name = canonicalize_execution_backend(requested)
+        requested_name = None if requested is None else str(requested).lower()
         all_specs = [spec for spec in self.execution_backends if spec.matches(target)]
         available_specs = [spec for spec in all_specs if spec.is_available()]
 
@@ -262,7 +252,7 @@ def list_backends() -> dict[str, BackendModule]:
     return dict(_BACKENDS)
 
 
-def list_backends_for_target_kind(target_kind: str) -> tuple[BackendModule, ...]:
+def _list_backend_modules_for_target_kind(target_kind: str) -> tuple[BackendModule, ...]:
     try:
         names = _TARGET_KIND_INDEX[target_kind]
     except KeyError as err:
@@ -271,8 +261,8 @@ def list_backends_for_target_kind(target_kind: str) -> tuple[BackendModule, ...]
     return tuple(_BACKENDS[name] for name in names)
 
 
-def resolve_backend(target: Target) -> BackendModule:
-    candidates = [backend for backend in list_backends_for_target_kind(target.kind.name) if backend.matches(target)]
+def _resolve_backend_module(target: Target) -> BackendModule:
+    candidates = [backend for backend in _list_backend_modules_for_target_kind(target.kind.name) if backend.matches(target)]
     if not candidates:
         raise ValueError(f"No backend matches target {target}")
     if len(candidates) > 1:
@@ -299,7 +289,7 @@ def create_backend_context(
     normalized_target_host = Target(target_host)
     normalized_target = Target(normalized_target, normalized_target_host)
 
-    module = resolve_backend(normalized_target)
+    module = _resolve_backend_module(normalized_target)
     execution = module.resolve_execution_backend(execution_backend, normalized_target)
     return BackendContext(
         module=module,

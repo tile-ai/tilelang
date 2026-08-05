@@ -6,10 +6,6 @@ import tilelang
 from tilelang.backend import get_backend
 from tvm.target import Target
 import tilelang.backend.target as target_registry
-from tilelang.backend.execution_backend import (
-    allowed_backends_for_target,
-    resolve_execution_backend,
-)
 from tilelang.backend.target import (
     auto_detect_target,
     determine_target,
@@ -123,18 +119,19 @@ def test_backend_module_resolves_execution_policy():
     assert backend.allowed_execution_backends(llvm_target) == ("tvm_ffi",)
     assert backend.resolve_execution_backend("auto", c_target).name == "cython"
     assert backend.resolve_execution_backend("auto", llvm_target).name == "tvm_ffi"
-    assert allowed_backends_for_target(llvm_target) == ["tvm_ffi"]
 
 
 def test_execution_backend_registry_rejects_invalid_backend():
     target = Target("llvm")
+    backend = get_backend("cpu")
 
     with pytest.raises(ValueError, match="Invalid execution backend"):
-        resolve_execution_backend("nvrtc", target)
+        backend.resolve_execution_backend("nvrtc", target)
 
 
 def test_execution_backend_registry_rejects_removed_dlpack_backend():
     target = Target("llvm")
+    backend = get_backend("cpu")
 
     with pytest.raises(ValueError, match="Invalid execution backend 'dlpack'"):
-        resolve_execution_backend("dlpack", target)
+        backend.resolve_execution_backend("dlpack", target)

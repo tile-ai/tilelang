@@ -84,7 +84,7 @@ mod = context.lower(mod)
 ```
 
 The selected `BackendModule` owns the pipeline; the pipeline name must match
-`target.kind.name`. `resolve_pipeline()` remains as a compatibility lookup.
+`target.kind.name`.
 
 Device codegen follows the same ownership model after host/device splitting:
 
@@ -129,7 +129,6 @@ backend-specific implementation details.
 tilelang/backend/
   __init__.py
   module.py
-  common.py
   device_codegen.py
   host_codegen.py
   pass_pipeline/
@@ -140,17 +139,13 @@ tilelang/backend/
 
 - `module.py` defines `BackendModule`, its behavior methods, validation, and the
   target-kind ownership registry.
-- `pass_pipeline/pipeline.py` defines `PassPipeline` and its compatibility
-  lookup.
-- `device_codegen.py` defines `DeviceCodegen` and its compatibility lookup.
-- `host_codegen.py` defines `HostCodegen`, host codegen hooks, and
-  `resolve_host_codegen`.
+- `pass_pipeline/pipeline.py` defines `PassPipeline`.
+- `device_codegen.py` defines `DeviceCodegen` and global-function helpers.
+- `host_codegen.py` defines `HostCodegen`, host codegen hooks, and shared
+  `c/llvm` implementations.
 - `pass_pipeline/pipeline_utils.py` contains small shared helpers for pass
   configuration, layout visualization, vectorization gates, and shared-memory
   reuse flags.
-- `common.py` is a compatibility import for the former WebGPU registration
-  location.
-
 Backend-specific pass lists should not live here. They should live in the
 backend package that owns the target.
 

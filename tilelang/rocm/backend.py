@@ -31,12 +31,10 @@ BACKEND = register_backend(
         target_kinds=("hip",),
         pipelines={"hip": PassPipeline("hip", pipeline.ROCMPassPipelineBody)},
         device_codegens={
-            "hip": (
-                DeviceCodegen(
-                    "hip",
-                    build=codegen.build_hip,
-                    build_without_compile=codegen.build_hip_without_compile,
-                ),
+            "hip": DeviceCodegen(
+                "hip",
+                build=codegen.build_hip,
+                build_without_compile=codegen.build_hip_without_compile,
             )
         },
         execution_backends=execution_backend.EXECUTION_BACKENDS,

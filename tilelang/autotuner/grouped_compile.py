@@ -16,7 +16,7 @@ from tilelang import env
 from tilelang.env import resolve_pass_profile_threshold_ms
 from tilelang.autotuner.param import CompileArgs
 from tilelang.backend.module import create_backend_context
-from tilelang.engine.lower import lower_to_host_device_ir_with_context, device_codegen, host_codegen
+from tilelang.engine.lower import lower_to_host_device_ir, device_codegen, host_codegen
 from tilelang.engine.param import CompiledArtifact
 from tilelang.jit.adapter import TVMFFIKernelAdapter
 from tilelang.jit.kernel import JITKernel
@@ -84,7 +84,7 @@ def compile_grouped_unit_tvm_ffi(
                     tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=config_instruments),
                     compile_args.target,
                 ):
-                    host_mod, device_mod, params, normalized_target, normalized_target_host = lower_to_host_device_ir_with_context(
+                    host_mod, device_mod, params, normalized_target, normalized_target_host = lower_to_host_device_ir(
                         program,
                         backend_context,
                     )

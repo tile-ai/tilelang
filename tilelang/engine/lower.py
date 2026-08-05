@@ -56,13 +56,6 @@ def extrac_params(func: tirx.PrimFunc) -> list[KernelParam]:
     return tensor_types
 
 
-def canon_target_host(target: str | Target, target_host: str | Target | None):
-    if not target_host:
-        target_host = "llvm" if tvm.runtime.enabled("llvm") else "c"
-
-    return target_host
-
-
 def host_codegen(
     host_mod: tvm.IRModule,
     context: BackendContext,
@@ -107,7 +100,7 @@ def device_codegen_without_compile(device_mod: tvm.IRModule, context: BackendCon
     return context.codegen_device(device_mod, compile_device=False)
 
 
-def lower_to_host_device_ir_with_context(
+def lower_to_host_device_ir(
     func_or_mod: tirx.PrimFunc | tvm.IRModule,
     context: BackendContext,
     runtime_only: bool = False,
@@ -136,18 +129,6 @@ def lower_to_host_device_ir_with_context(
     device_mod = tirx.transform.Filter(_is_device_call)(mod)
 
     return host_mod, device_mod, params, target, target_host
-
-
-def lower_to_host_device_ir(
-    func_or_mod: tirx.PrimFunc | tvm.IRModule,
-    target: str | Target = "auto",
-    target_host: str | Target | None = None,
-    runtime_only: bool = False,
-) -> tuple[tvm.IRModule, tvm.IRModule, list[KernelParam] | None, Target, Target]:
-    """Public lowering entry that resolves one backend context."""
-
-    context = create_backend_context(target, target_host, "auto")
-    return lower_to_host_device_ir_with_context(func_or_mod, context, runtime_only=runtime_only)
 
 
 def lower_with_context(
@@ -180,7 +161,7 @@ def _lower_with_context_impl(
 ) -> CompiledArtifact:
     """Implementation executed inside the caller's analyzer context."""
 
-    host_mod, device_mod, params, target, target_host = lower_to_host_device_ir_with_context(
+    host_mod, device_mod, params, target, target_host = lower_to_host_device_ir(
         func_or_mod,
         context,
         runtime_only=runtime_only,

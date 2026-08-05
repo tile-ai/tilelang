@@ -13,12 +13,10 @@ BACKEND = register_backend(
         target_kinds=("metal",),
         pipelines={"metal": PassPipeline("metal", pipeline.MetalPassPipelineBody)},
         device_codegens={
-            "metal": (
-                DeviceCodegen(
-                    "metal",
-                    build=codegen.build_metal,
-                    build_without_compile=codegen.build_metal_without_compile,
-                ),
+            "metal": DeviceCodegen(
+                "metal",
+                build=codegen.build_metal,
+                build_without_compile=codegen.build_metal_without_compile,
             )
         },
         host_codegen_hooks={"metal": (HostCodegenHook("metal_context", codegen.mark_host_metal_context),)},

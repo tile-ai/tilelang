@@ -14,12 +14,10 @@ BACKEND = register_backend(
         target_kinds=("webgpu",),
         pipelines={"webgpu": PassPipeline("webgpu", pipeline.WebGPUPassPipelineBody)},
         device_codegens={
-            "webgpu": (
-                DeviceCodegen(
-                    "webgpu",
-                    build=codegen.build_webgpu,
-                    build_without_compile=codegen.build_webgpu,
-                ),
+            "webgpu": DeviceCodegen(
+                "webgpu",
+                build=codegen.build_webgpu,
+                build_without_compile=codegen.build_webgpu,
             )
         },
         execution_backends=(ExecutionBackendSpec("tvm_ffi", enable_host_codegen=True, enable_device_compile=True),),

@@ -12,12 +12,10 @@ BACKEND = register_backend(
         supports_target=codegen.is_cutedsl_target,
         pipelines={"cuda": pipeline.CUDA_PIPELINE},
         device_codegens={
-            "cuda": (
-                DeviceCodegen(
-                    "cutedsl",
-                    build=codegen.build_cutedsl,
-                    build_without_compile=codegen.build_cutedsl_without_compile,
-                ),
+            "cuda": DeviceCodegen(
+                "cutedsl",
+                build=codegen.build_cutedsl,
+                build_without_compile=codegen.build_cutedsl_without_compile,
             )
         },
         execution_backends=execution_backend.CUTEDSL_EXECUTION_BACKENDS,

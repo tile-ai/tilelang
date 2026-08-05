@@ -11,7 +11,6 @@ from tvm.target import Target
 from tilelang import tvm
 
 DeviceCodegenFunc = Callable[[IRModule, Target], IRModule]
-TargetPredicate = Callable[[Target], bool]
 
 
 def global_func_device_codegen(global_func_name: str) -> DeviceCodegenFunc:
@@ -30,10 +29,6 @@ class DeviceCodegen:
     name: str
     build: DeviceCodegenFunc | None = None
     build_without_compile: DeviceCodegenFunc | None = None
-    supports_target: TargetPredicate | None = None
-
-    def matches(self, target: Target) -> bool:
-        return True if self.supports_target is None else self.supports_target(target)
 
     def lower(self, mod: IRModule, target: Target, *, compile_device: bool) -> IRModule:
         build_func = self.build if compile_device else self.build_without_compile
@@ -41,24 +36,3 @@ class DeviceCodegen:
             mode = "with compilation" if compile_device else "without compilation"
             raise ValueError(f"Device codegen '{self.name}' for target '{target.kind.name}' does not support lowering {mode}")
         return build_func(mod, target)
-
-
-def _matching_device_codegens(target: Target) -> list[DeviceCodegen]:
-    from tilelang.backend.module import resolve_backend
-
-    backend = resolve_backend(target)
-    return [codegen for codegen in backend.device_codegens[target.kind.name] if codegen.matches(target)]
-
-
-def allowed_device_codegens_for_target(target: Target) -> list[str]:
-    """Return matching device codegen names for a target."""
-
-    return [codegen.name for codegen in _matching_device_codegens(target)]
-
-
-def resolve_device_codegen(target: Target) -> DeviceCodegen:
-    """Compatibility lookup; core compilation uses BackendModule directly."""
-    from tilelang.backend.module import resolve_backend
-
-    backend = resolve_backend(target)
-    return backend.get_device_codegen(target)

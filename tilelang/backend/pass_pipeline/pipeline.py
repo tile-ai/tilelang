@@ -32,22 +32,3 @@ class PassPipeline:
 
             enrich_error(exc)
             raise
-
-
-def get_pipeline(name: str) -> PassPipeline:
-    """Compatibility lookup for the pipeline owned by a target kind."""
-    from tilelang.backend.module import list_backends_for_target_kind
-
-    pipelines = [backend.pipelines[name] for backend in list_backends_for_target_kind(name)]
-    first = pipelines[0]
-    if any(pipeline is not first for pipeline in pipelines[1:]):
-        raise ValueError(f"Target kind {name!r} has backend variants with different pipelines")
-    return first
-
-
-def resolve_pipeline(target: Target) -> PassPipeline:
-    """Compatibility lookup; core compilation uses BackendModule directly."""
-    from tilelang.backend.module import resolve_backend
-
-    backend = resolve_backend(target)
-    return backend.get_pipeline(target)

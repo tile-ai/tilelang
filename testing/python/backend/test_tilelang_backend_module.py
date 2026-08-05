@@ -5,11 +5,7 @@ from dataclasses import replace
 import pytest
 
 from tilelang import tvm
-from tilelang.backend import BackendContext, create_backend_context, get_backend, list_backends, register_backend, resolve_backend
-from tilelang.backend.device_codegen import resolve_device_codegen
-from tilelang.backend.execution_backend import allowed_backends_for_target
-from tilelang.backend.host_codegen import resolve_host_codegen
-from tilelang.backend.pass_pipeline import resolve_pipeline
+from tilelang.backend import BackendContext, create_backend_context, get_backend, list_backends, register_backend
 
 
 def test_builtin_backend_modules_are_explicit():
@@ -74,17 +70,14 @@ def test_backend_variants_require_target_predicates():
     ],
 )
 def test_backend_methods_are_the_primary_component_interface(target_kind: str, backend_name: str, component_name: str):
-    target = tvm.target.Target(target_kind)
-    backend = resolve_backend(target)
+    context = create_backend_context(target_kind, "c", "auto")
+    target = context.target
+    backend = context.module
 
     assert backend.name == backend_name
     assert backend.matches(target)
-    assert backend.get_pipeline(target) is resolve_pipeline(target)
-    assert backend.get_device_codegen(target) is resolve_device_codegen(target)
     assert backend.get_device_codegen(target).name == component_name
-    assert backend.allowed_execution_backends(target) == tuple(allowed_backends_for_target(target))
-    if target_kind in {"c", "llvm"}:
-        assert backend.get_host_codegen(target) is resolve_host_codegen(target)
+    assert context.execution_backend.name in backend.allowed_execution_backends(target)
     if any(spec.enable_host_codegen for spec in backend.execution_backends):
         assert backend.get_host_codegen(tvm.target.Target("c")).name == "c"
 
@@ -100,8 +93,8 @@ def test_backend_owns_compile_callbacks():
 def test_cutedsl_backend_reuses_cuda_pipeline():
     cuda_target = tvm.target.Target("cuda")
     cutedsl_target = tvm.target.Target({"kind": "cuda", "keys": ["cuda", "gpu", "cutedsl"]})
-    cuda_backend = resolve_backend(cuda_target)
-    cutedsl_backend = resolve_backend(cutedsl_target)
+    cuda_backend = get_backend("cuda")
+    cutedsl_backend = get_backend("cutedsl")
 
     assert cuda_backend.name == "cuda"
     assert cutedsl_backend.name == "cutedsl"
@@ -112,7 +105,7 @@ def test_cutedsl_backend_reuses_cuda_pipeline():
 
 def test_webgpu_only_exposes_tvm_ffi_execution():
     target = tvm.target.Target("webgpu")
-    backend = resolve_backend(target)
+    backend = get_backend("webgpu")
 
     assert backend.allowed_execution_backends(target) == ("tvm_ffi",)
 

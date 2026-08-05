@@ -24,13 +24,8 @@ from tvm import tirx
 from tvm.tirx import PrimFunc, SBlock
 from tvm.target import Target
 
+from tilelang.backend import create_backend_context
 from tilelang.jit import JITImpl
-
-try:
-    from tilelang.backend.target import determine_target
-except ImportError:  # installed package (0.1.x) exposes it here
-    from tilelang.utils.target import determine_target
-from tilelang.engine.lower import canon_target_host
 
 logger = logging.getLogger("tilelang.pass_visualizer")
 
@@ -83,12 +78,8 @@ def build_module(func: tirx.PrimFunc, target: str | Target = "auto"):
     """Wrap a PrimFunc into an IRModule and resolve the (target, target_host) pair."""
     mod = tvm.IRModule({func.attrs["global_symbol"]: func})
 
-    if isinstance(target, str):
-        target = determine_target(target)
-    target_host = canon_target_host(target, None)
-    target_host = tvm.target.Target(target_host)
-    target = tvm.target.Target(target, target_host)
-    return mod, target
+    context = create_backend_context(target)
+    return mod, context.target
 
 
 def _fmt_shape(shape) -> list:
