@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 
 from tilelang import tvm
-from tilelang.backend import get_backend, list_backends, register_backend, resolve_backend
+from tilelang.backend import BackendContext, create_backend_context, get_backend, list_backends, register_backend, resolve_backend
 from tilelang.backend.device_codegen import resolve_device_codegen
 from tilelang.backend.execution_backend import allowed_backends_for_target
 from tilelang.backend.host_codegen import resolve_host_codegen
@@ -115,3 +115,16 @@ def test_webgpu_only_exposes_tvm_ffi_execution():
     backend = resolve_backend(target)
 
     assert backend.allowed_execution_backends(target) == ("tvm_ffi",)
+
+
+def test_create_backend_context_binds_compile_state():
+    context = create_backend_context("cuda", "c", "tvm_ffi")
+
+    assert isinstance(context, BackendContext)
+    assert context.module is get_backend("cuda")
+    assert context.target.kind.name == "cuda"
+    assert context.target_host.kind.name == "c"
+    assert context.execution_backend.name == "tvm_ffi"
+
+    with pytest.raises(AttributeError):
+        context.target = tvm.target.Target("llvm")

@@ -31,6 +31,7 @@ _dispatch_map: dict[str, KernelCache] = {
 
 def _resolve_cache_dispatch(
     target: TargetLike | None,
+    target_host: TargetLike | None,
     execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None,
     verbose: bool | None,
 ):
@@ -41,15 +42,13 @@ def _resolve_cache_dispatch(
     if verbose is None:
         verbose = env.get_default_verbose()
 
-    from tilelang.backend.target import determine_target as _determine_target
-    from tilelang.backend.module import resolve_backend
+    from tilelang.backend.module import create_backend_context
 
-    norm_target = _determine_target(target, return_object=True)
-    backend = resolve_backend(norm_target)
     requested_backend = execution_backend
-    resolved_backend = backend.resolve_execution_backend(requested_backend, norm_target).name
+    context = create_backend_context(target, target_host, requested_backend)
+    resolved_backend = context.execution_backend.name
     if verbose:
-        allowed_now = backend.allowed_execution_backends(norm_target, include_unavailable=False)
+        allowed_now = context.module.allowed_execution_backends(context.target, include_unavailable=False)
         if requested_backend in (None, "auto") or requested_backend != resolved_backend:
             logger = logging.getLogger(__name__)
             logger.setLevel(logging.INFO)
@@ -57,12 +56,12 @@ def _resolve_cache_dispatch(
                 "Execution backend resolved -> '%s' (requested='%s', target='%s', allowed: %s)",
                 resolved_backend,
                 requested_backend,
-                norm_target.kind.name,
+                context.target.kind.name,
                 ", ".join(sorted(allowed_now)),
             )
     if resolved_backend not in _dispatch_map:
         raise ValueError(f'Cannot find support for execution backend "{resolved_backend}"')
-    return _dispatch_map[resolved_backend], norm_target, resolved_backend, verbose
+    return _dispatch_map[resolved_backend], context, verbose
 
 
 def cached(
@@ -79,14 +78,12 @@ def cached(
     """
     Caches and reuses compiled kernels (using KernelCache class).
     """
-    cache, norm_target, execution_backend, verbose = _resolve_cache_dispatch(target, execution_backend, verbose)
+    cache, backend_context, verbose = _resolve_cache_dispatch(target, target_host, execution_backend, verbose)
     return cache.cached(
         func,
         out_idx,
         *args,
-        target=norm_target,
-        target_host=target_host,
-        execution_backend=execution_backend,
+        backend_context=backend_context,
         verbose=verbose,
         pass_configs=pass_configs,
         compile_flags=compile_flags,

@@ -5,6 +5,7 @@ import os
 
 import tilelang
 import tilelang.cache.kernel_cache as kernel_cache_mod
+from tilelang.backend import create_backend_context
 from tilelang.cache.cuda_binary_cache import CUDABinaryCache
 from tilelang.cache.kernel_cache import KernelCache
 from tilelang.env import env
@@ -93,10 +94,8 @@ def test_disk_cache_load_failure_is_cache_miss(monkeypatch, tmp_path):
 
     loaded = cache._load_kernel_from_disk(
         key,
-        target="cuda",
-        target_host=None,
+        backend_context=create_backend_context("cuda", execution_backend="tvm_ffi"),
         out_idx=[0],
-        execution_backend="tvm_ffi",
         pass_configs=None,
         compile_flags=None,
         func=None,

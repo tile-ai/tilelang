@@ -19,7 +19,9 @@ from .execution_backend import (  # noqa: F401
     resolve_execution_backend_spec,
 )
 from .module import (  # noqa: F401
+    BackendContext,
     BackendModule,
+    create_backend_context,
     get_backend,
     list_backends,
     list_backends_for_target_kind,

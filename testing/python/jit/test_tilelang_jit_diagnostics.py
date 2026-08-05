@@ -290,7 +290,7 @@ def test_kernel_cache_miss_compile_logs_context(monkeypatch, tmp_path, caplog, c
         cache.cached(
             _ScriptableFunc(),
             out_idx=[],
-            target="cuda -arch=sm_120",
+            target={"kind": "cuda", "arch": "sm_120"},
             target_host=None,
             execution_backend="tvm_ffi",
             verbose=False,

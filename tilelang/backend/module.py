@@ -173,6 +173,42 @@ class BackendModule:
         return spec
 
 
+@dataclass(frozen=True, slots=True)
+class BackendContext:
+    """Resolved backend state shared by every stage of one compilation."""
+
+    module: BackendModule
+    target: Target
+    target_host: Target
+    execution_backend: ExecutionBackendSpec
+
+    def __post_init__(self) -> None:
+        if not self.module.matches(self.target):
+            raise ValueError(f"Backend module {self.module.name!r} does not match target {self.target}")
+        if self.execution_backend not in self.module.execution_backends:
+            raise ValueError(f"Execution backend {self.execution_backend.name!r} is not declared by backend module {self.module.name!r}")
+        if not self.execution_backend.matches(self.target):
+            raise ValueError(f"Execution backend {self.execution_backend.name!r} does not match target {self.target}")
+
+    @property
+    def name(self) -> str:
+        return self.module.name
+
+    def lower(self, mod: IRModule) -> IRModule:
+        return self.module.lower(mod, self.target)
+
+    def codegen_device(self, mod: IRModule, *, compile_device: bool | None = None) -> IRModule:
+        if compile_device is None:
+            compile_device = self.execution_backend.enable_device_compile
+        return self.module.codegen_device(mod, self.target, compile_device=compile_device)
+
+    def preprocess_host_codegen(self, mod: IRModule) -> IRModule:
+        return self.module.preprocess_host_codegen(mod, self.target_host, self.target)
+
+    def codegen_host(self, mod: IRModule) -> IRModule:
+        return self.module.codegen_host(mod, self.target_host)
+
+
 _BACKENDS: dict[str, BackendModule] = {}
 _TARGET_KIND_INDEX: dict[str, list[str]] = {}
 
@@ -243,3 +279,31 @@ def resolve_backend(target: Target) -> BackendModule:
         names = ", ".join(backend.name for backend in candidates)
         raise ValueError(f"Multiple backends match target {target}: {names}")
     return candidates[0]
+
+
+def create_backend_context(
+    target: str | dict[str, object] | Target = "auto",
+    target_host: str | dict[str, object] | Target | None = None,
+    execution_backend: str | None = "auto",
+) -> BackendContext:
+    """Resolve user inputs into the immutable context for one compilation."""
+
+    from tilelang import tvm
+    from tilelang.backend.target import determine_target
+
+    normalized_target = determine_target(target, return_object=True)
+    assert isinstance(normalized_target, Target)
+
+    if target_host is None:
+        target_host = "llvm" if tvm.runtime.enabled("llvm") else "c"
+    normalized_target_host = Target(target_host)
+    normalized_target = Target(normalized_target, normalized_target_host)
+
+    module = resolve_backend(normalized_target)
+    execution = module.resolve_execution_backend(execution_backend, normalized_target)
+    return BackendContext(
+        module=module,
+        target=normalized_target,
+        target_host=normalized_target_host,
+        execution_backend=execution,
+    )

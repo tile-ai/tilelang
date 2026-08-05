@@ -59,6 +59,19 @@ variants unambiguous. CUDA and CuTeDSL are separate manifests that both own the
 `cuda` kind and reference the same CUDA pipeline, while declaring different
 device codegen and execution policies.
 
+## Backend Context
+
+`BackendContext` is the immutable per-compilation object. The public compiler
+entry creates it once from user inputs:
+
+```python
+context = create_backend_context(target, target_host, execution_backend)
+```
+
+It binds the selected `BackendModule`, concrete device/host targets, and
+`ExecutionBackendSpec`. Cache, JIT, lowering, and codegen pass the same context
+instance; internal stages never resolve backend state again.
+
 ## Lowering Entry
 
 `tilelang/engine/lower.py` owns the high-level lowering entry. It runs
@@ -67,8 +80,7 @@ the TVM target kind:
 
 ```text
 PreLowerSemanticCheck(mod)
-backend = resolve_backend(target)
-mod = backend.lower(mod, target)
+mod = context.lower(mod)
 ```
 
 The selected `BackendModule` owns the pipeline; the pipeline name must match
@@ -77,7 +89,7 @@ The selected `BackendModule` owns the pipeline; the pipeline name must match
 Device codegen follows the same ownership model after host/device splitting:
 
 ```text
-device_mod = backend.codegen_device(device_mod, target, compile_device=...)
+device_mod = context.codegen_device(device_mod, compile_device=...)
 ```
 
 Each `BackendModule` declares one or more `DeviceCodegen` entries for its target.
@@ -88,8 +100,8 @@ should not keep backend-specific `target.kind.name` dispatch for device codegen.
 Host codegen is resolved from the host target in the same style:
 
 ```text
-host_mod = backend.preprocess_host_codegen(host_mod, target_host, target)
-host_mod = backend.codegen_host(host_mod, target_host)
+host_mod = context.preprocess_host_codegen(host_mod)
+host_mod = context.codegen_host(host_mod)
 ```
 
 Backends that enable host codegen explicitly reference the shared `c/llvm`

@@ -6,7 +6,7 @@ import tilelang
 from tilelang import tvm as tvm
 from tvm.tirx import PrimFunc
 from tvm.target import Target
-from typing import Literal, Any
+from typing import TYPE_CHECKING, Literal, Any
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +24,9 @@ import hashlib
 import uuid
 from tilelang import env
 from tvm.runtime import Executable
+
+if TYPE_CHECKING:
+    from tilelang.backend.module import BackendContext
 
 BEST_CONFIG_PATH = "best_config.json"
 FUNCTION_PATH = "function.pkl"
@@ -297,10 +300,8 @@ class AutotuneResult:
     def _load_kernel_from_disk(
         self,
         cache_path: Path,
-        target: TargetLike = "auto",
-        target_host: TargetLike | None = None,
+        backend_context: BackendContext,
         out_idx: list[int] | int | None = None,
-        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi",
         pass_configs: dict = None,
         compile_flags: list[str] | str | None = None,
         func: Callable = None,
@@ -311,10 +312,8 @@ class AutotuneResult:
 
         Args:
             key (str): The hash key identifying the kernel.
-            target (Union[str, dict, Target]): Compilation target platform. Defaults to "auto".
-            target_host (Union[str, dict, Target], optional): Host target platform.
+            backend_context: Resolved backend state for this compilation.
             out_idx (List[int], optional): Indices specifying which outputs to return.
-            execution_backend (Literal): Backend type for execution. Defaults to "cython".
             pass_configs (dict, optional): Configuration for compiler passes.
             func (Callable, optional): The original function.
             verbose (bool): Enable verbose log messages.
@@ -327,6 +326,7 @@ class AutotuneResult:
             return None
 
         # Resolve backend to pick correct file names
+        execution_backend = backend_context.execution_backend.name
         kernel_lib_file = self._get_kernel_lib_file(execution_backend)
 
         device_kernel_path = os.path.join(cache_path, DEVICE_KERNEL_PATH)
@@ -376,12 +376,13 @@ class AutotuneResult:
                 device_kernel_source=CachedTextSource(text=device_kernel_source),
                 kernel_lib_path=kernel_lib_path,
                 params=kernel_params,
-                target=target,
-                target_host=target_host,
+                target=backend_context.target,
+                target_host=backend_context.target_host,
                 out_idx=out_idx,
                 execution_backend=execution_backend,
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
+                backend_context=backend_context,
             )
         else:
             return None
@@ -477,14 +478,14 @@ class AutotuneResult:
             return None
 
         verbose = compile_args.verbose
-        # Normalize target and resolve execution backend for loading
-        from tilelang.backend.target import determine_target as _determine_target
-        from tilelang.backend.module import resolve_backend
+        from tilelang.backend.module import create_backend_context
 
-        norm_target = _determine_target(compile_args.target, return_object=True)
         requested_backend = compile_args.execution_backend
-        backend = resolve_backend(norm_target)
-        resolved_backend = backend.resolve_execution_backend(requested_backend, norm_target).name
+        backend_context = create_backend_context(
+            compile_args.target,
+            compile_args.target_host,
+            requested_backend,
+        )
         # load best config
         if verbose:
             logger.debug(f"Loading best config from file: {path / BEST_CONFIG_PATH}")
@@ -516,10 +517,8 @@ class AutotuneResult:
         kernel = cls._load_kernel_from_disk(
             cls,
             path,
-            norm_target,
-            compile_args.target_host,
+            backend_context,
             out_idx_override if out_idx_override is not None else compile_args.out_idx,
-            resolved_backend,
             compile_args.pass_configs,
             None,  # compile_flags not tracked here
             func,

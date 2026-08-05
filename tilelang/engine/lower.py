@@ -10,8 +10,7 @@ from tvm.ir import CallingConv
 from tvm.target import Target
 from tilelang.engine.param import KernelParam, CompiledArtifact
 from tilelang.engine.semantic_check import PreLowerSemanticCheck
-from tilelang.backend.module import BackendModule, resolve_backend
-from tilelang.backend.target import determine_target
+from tilelang.backend.module import BackendContext, create_backend_context
 
 
 def is_cpu_device_backend(target: Target):
@@ -66,10 +65,7 @@ def canon_target_host(target: str | Target, target_host: str | Target | None):
 
 def host_codegen(
     host_mod: tvm.IRModule,
-    target_host: Target,
-    target: Target,
-    *,
-    backend: BackendModule,
+    context: BackendContext,
 ) -> tvm.IRModule:
     """Generate host-side code from the lowered IR module.
 
@@ -77,13 +73,10 @@ def host_codegen(
     ----------
     host_mod : tvm.IRModule
         The host-side IR module to compile.
-    target_host : Target
-        The host compilation target (e.g. "llvm" or "c").
-    target : Target
-        The device target.  When the device target is Metal, the pass
-        MarkHostMetalContext is applied so that the generated host code
-        contains the Metal/MPS synchronisation logic.
+    context : BackendContext
+        Resolved backend, device target, host target, and execution policy.
     """
+    target_host = context.target_host
     host_mod = tirx.transform.BindTarget(target_host)(host_mod)
     host_mod = tirx.transform.FP8StorageLegalize()(host_mod)
     host_mod = tirx.transform.BF16StorageLegalize()(host_mod)
@@ -93,8 +86,8 @@ def host_codegen(
     combine_context_call = getattr(tirx.transform, "CombineContextCall", None)
     if combine_context_call is not None:
         host_mod = combine_context_call()(host_mod)
-    host_mod = backend.preprocess_host_codegen(host_mod, target_host, target)
-    return backend.codegen_host(host_mod, target_host)
+    host_mod = context.preprocess_host_codegen(host_mod)
+    return context.codegen_host(host_mod)
 
 
 def _prepare_device_codegen_mod(device_mod: tvm.IRModule) -> tvm.IRModule:
@@ -104,23 +97,22 @@ def _prepare_device_codegen_mod(device_mod: tvm.IRModule) -> tvm.IRModule:
     return device_mod
 
 
-def device_codegen(device_mod: tvm.IRModule, target: Target, *, backend: BackendModule) -> tvm.IRModule:
+def device_codegen(device_mod: tvm.IRModule, context: BackendContext) -> tvm.IRModule:
     device_mod = _prepare_device_codegen_mod(device_mod)
-    return backend.codegen_device(device_mod, target, compile_device=True)
+    return context.codegen_device(device_mod, compile_device=True)
 
 
-def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target, *, backend: BackendModule) -> tvm.IRModule:
+def device_codegen_without_compile(device_mod: tvm.IRModule, context: BackendContext) -> tvm.IRModule:
     device_mod = _prepare_device_codegen_mod(device_mod)
-    return backend.codegen_device(device_mod, target, compile_device=False)
+    return context.codegen_device(device_mod, compile_device=False)
 
 
-def lower_to_host_device_ir(
+def lower_to_host_device_ir_with_context(
     func_or_mod: tirx.PrimFunc | tvm.IRModule,
-    target: str | Target = "auto",
-    target_host: str | Target | None = None,
+    context: BackendContext,
     runtime_only: bool = False,
 ) -> tuple[tvm.IRModule, tvm.IRModule, list[KernelParam] | None, Target, Target]:
-    """Lower input TIR to split host/device IRModules without backend codegen."""
+    """Lower input TIR with an already resolved backend context."""
 
     mod = func_or_mod
     params = None
@@ -129,13 +121,8 @@ def lower_to_host_device_ir(
         params = extrac_params(func) if not runtime_only else None
         mod = tvm.IRModule({func.attrs["global_symbol"]: func})
 
-    if isinstance(target, str):
-        target = determine_target(target)
-
-    target_host = canon_target_host(target, target_host)
-
-    target_host = tvm.target.Target(target_host)
-    target = tvm.target.Target(target, target_host)
+    target = context.target
+    target_host = context.target_host
 
     _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))
     _is_device_call = get_device_call(is_device_c=is_cpu_device_backend(target))
@@ -143,8 +130,7 @@ def lower_to_host_device_ir(
     # Run backend-independent semantic checks before target-specific lowering.
     PreLowerSemanticCheck(mod)
 
-    backend = resolve_backend(target)
-    mod = backend.lower(mod, target)
+    mod = context.lower(mod)
 
     host_mod = tirx.transform.Filter(_is_host_call)(mod)
     device_mod = tirx.transform.Filter(_is_device_call)(mod)
@@ -152,62 +138,59 @@ def lower_to_host_device_ir(
     return host_mod, device_mod, params, target, target_host
 
 
-def lower(
+def lower_to_host_device_ir(
     func_or_mod: tirx.PrimFunc | tvm.IRModule,
     target: str | Target = "auto",
     target_host: str | Target | None = None,
-    runtime_only=False,
-    enable_host_codegen=False,
-    enable_device_compile=False,
+    runtime_only: bool = False,
+) -> tuple[tvm.IRModule, tvm.IRModule, list[KernelParam] | None, Target, Target]:
+    """Public lowering entry that resolves one backend context."""
+
+    context = create_backend_context(target, target_host, "auto")
+    return lower_to_host_device_ir_with_context(func_or_mod, context, runtime_only=runtime_only)
+
+
+def lower_with_context(
+    func_or_mod: tirx.PrimFunc | tvm.IRModule,
+    context: BackendContext,
+    *,
+    runtime_only: bool = False,
+    enable_host_codegen: bool = False,
+    enable_device_compile: bool = False,
 ) -> CompiledArtifact:
-    """
-    enable_host_codegen: whether to enable host codegen, default is False, as we have our
-    own host codegen implementation in jit.
-    enable_device_compile: whether to enable device codegen, default is False, as we have our
-    own device codegen implementation in jit.
-    """
+    """Compile using an existing context without resolving backend state again."""
 
     with tvm.arith.Z3ContextScope():
-        return _lower_impl(
-            func_or_mod=func_or_mod,
-            target=target,
-            target_host=target_host,
+        return _lower_with_context_impl(
+            func_or_mod,
+            context,
             runtime_only=runtime_only,
             enable_host_codegen=enable_host_codegen,
             enable_device_compile=enable_device_compile,
         )
 
 
-def _lower_impl(
+def _lower_with_context_impl(
     func_or_mod: tirx.PrimFunc | tvm.IRModule,
-    target: str | Target = "auto",
-    target_host: str | Target | None = None,
-    runtime_only=False,
-    enable_host_codegen=False,
-    enable_device_compile=False,
+    context: BackendContext,
+    *,
+    runtime_only: bool,
+    enable_host_codegen: bool,
+    enable_device_compile: bool,
 ) -> CompiledArtifact:
-    host_mod, device_mod, params, target, target_host = lower_to_host_device_ir(
-        func_or_mod=func_or_mod,
-        target=target,
-        target_host=target_host,
+    """Implementation executed inside the caller's analyzer context."""
+
+    host_mod, device_mod, params, target, target_host = lower_to_host_device_ir_with_context(
+        func_or_mod,
+        context,
         runtime_only=runtime_only,
     )
 
-    backend = resolve_backend(target)
-    codegen_mod = (
-        device_codegen(device_mod, target, backend=backend)
-        if enable_device_compile
-        else device_codegen_without_compile(device_mod, target, backend=backend)
-    )
+    codegen_mod = device_codegen(device_mod, context) if enable_device_compile else device_codegen_without_compile(device_mod, context)
     kernel_source = codegen_mod.inspect_source()
 
     if enable_host_codegen:
-        host_mod = host_codegen(
-            host_mod,
-            target_host,
-            target=target,
-            backend=backend,
-        )
+        host_mod = host_codegen(host_mod, context)
         host_mod.import_module(codegen_mod)
         return CompiledArtifact(
             host_mod,
@@ -226,4 +209,24 @@ def _lower_impl(
         kernel_source,
         target=target,
         target_host=target_host,
+    )
+
+
+def lower(
+    func_or_mod: tirx.PrimFunc | tvm.IRModule,
+    target: str | Target = "auto",
+    target_host: str | Target | None = None,
+    runtime_only: bool = False,
+    enable_host_codegen: bool = False,
+    enable_device_compile: bool = False,
+) -> CompiledArtifact:
+    """Public compile entry that creates exactly one backend context."""
+
+    context = create_backend_context(target, target_host, "auto")
+    return lower_with_context(
+        func_or_mod,
+        context,
+        runtime_only=runtime_only,
+        enable_host_codegen=enable_host_codegen,
+        enable_device_compile=enable_device_compile,
     )
