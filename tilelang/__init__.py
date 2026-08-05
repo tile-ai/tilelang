@@ -218,6 +218,7 @@ if not env.is_light_import():
     from . import cuda as cuda  # noqa: F401
     from . import rocm as rocm  # noqa: F401
     from . import metal as metal  # noqa: F401
+    from . import graph as graph  # noqa: F401
 
     if env.get_lower_trace_mode() is not None:
         from .tools.lower_trace import enable as _lower_trace_enable
