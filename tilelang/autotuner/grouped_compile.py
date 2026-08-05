@@ -15,6 +15,7 @@ from tvm.tirx import PrimFunc
 from tilelang import env
 from tilelang.env import resolve_pass_profile_threshold_ms
 from tilelang.autotuner.param import CompileArgs
+from tilelang.backend.module import create_backend_context
 from tilelang.engine.lower import lower_to_host_device_ir, device_codegen, host_codegen
 from tilelang.engine.param import CompiledArtifact
 from tilelang.jit.adapter import TVMFFIKernelAdapter
@@ -60,6 +61,11 @@ def compile_grouped_unit_tvm_ffi(
 
     unit_results: list[CompileUnitResult] = []
     lowered_items: list[dict[str, Any]] = []
+    backend_context = create_backend_context(
+        compile_args.target,
+        compile_args.target_host,
+        compile_args.execution_backend,
+    )
 
     for idx, config_arg in unit_items:
         try:
@@ -80,8 +86,7 @@ def compile_grouped_unit_tvm_ffi(
                 ):
                     host_mod, device_mod, params, normalized_target, normalized_target_host = lower_to_host_device_ir(
                         program,
-                        target=compile_args.target,
-                        target_host=compile_args.target_host,
+                        backend_context,
                     )
 
                 host_instruments, host_timing_inst = create_pass_instruments()
@@ -93,7 +98,7 @@ def compile_grouped_unit_tvm_ffi(
                     tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=host_instruments),
                     normalized_target,
                 ):
-                    host_rt_mod = host_codegen(host_mod, normalized_target_host, target=normalized_target)
+                    host_rt_mod = host_codegen(host_mod, backend_context)
 
             lowered_items.append(
                 {
@@ -142,7 +147,7 @@ def compile_grouped_unit_tvm_ffi(
             tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=device_instruments),
             reference_target,
         ):
-            grouped_device_rt_mod = device_codegen(merged_device_mod, reference_target)
+            grouped_device_rt_mod = device_codegen(merged_device_mod, backend_context)
 
         grouped_kernel_source = grouped_device_rt_mod.inspect_source()
 
@@ -183,6 +188,7 @@ def compile_grouped_unit_tvm_ffi(
                     verbose=compile_args.verbose,
                     pass_configs=pass_configs,
                     from_database=True,
+                    backend_context=backend_context,
                 )
                 jit_kernel.artifact = artifact
                 jit_kernel.adapter = adapter

@@ -4,7 +4,6 @@ from tvm import IRModule, s_tir, tirx
 from tvm.target import Target
 
 import tilelang
-from tilelang.backend.pass_pipeline import PassPipeline, register_pipeline
 from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
     allow_vectorize,
@@ -85,6 +84,3 @@ def WebGPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.LowerDeviceKernelLaunch()(mod)
     return mod
-
-
-register_pipeline(PassPipeline("webgpu", WebGPUPassPipelineBody))

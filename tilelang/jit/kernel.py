@@ -5,11 +5,10 @@ from collections.abc import Callable
 from tilelang.jit.adapter.utils import is_cutedsl_target, is_metal_target, is_cuda_target, is_hip_target
 from tvm.tirx import PrimFunc
 
-import tilelang
 from tilelang import tvm
 from tilelang import env
 from tilelang.env import resolve_pass_profile_threshold_ms
-from tilelang.backend.execution_backend import resolve_execution_backend_spec
+from tilelang.backend.module import BackendContext, create_backend_context
 from tvm.target import Target
 from tilelang.engine.param import CompiledArtifact, KernelParam
 from tilelang.jit.adapter import (
@@ -21,7 +20,6 @@ from tilelang.jit.adapter import (
     MetalKernelAdapter,
 )
 from tilelang.profiler import Profiler, TensorSupplyType
-from tilelang.backend.target import determine_target
 from tilelang.contrib import nvcc as tl_nvcc
 from tilelang.contrib.hip_resource_info import pop_recorded, reset_recorder
 from tilelang.jit.diagnostics import jit_phase
@@ -74,6 +72,7 @@ class JITKernel(Generic[_P, _T]):
         pass_configs: dict[str, Any] | None = None,
         from_database: bool = False,
         compile_flags: list[str] | None = None,
+        backend_context: BackendContext | None = None,
     ):
         """
         Initializes a TorchFunction instance.
@@ -98,19 +97,24 @@ class JITKernel(Generic[_P, _T]):
             Refer to `tilelang.PassConfigKey` for supported options.
         from_database : bool, optional
             Whether to create a TorchFunction from a database.
+        backend_context : BackendContext, optional
+            Pre-resolved context supplied by compiler infrastructure. Direct
+            callers may omit it and let this public entry resolve one context.
         """
         self.prim_func = func
-        self.target_host = target_host
         self.verbose = verbose
 
         self.pass_configs = normalize_pass_configs(pass_configs)
 
         self.compile_flags = [compile_flags] if isinstance(compile_flags, str) else compile_flags
 
-        # The wrapper is normalized here because lower/codegen still consume TVM Target.
-        self.target = determine_target(target, return_object=True)
-
-        self.execution_backend_spec = resolve_execution_backend_spec(execution_backend, self.target)
+        if backend_context is None:
+            backend_context = create_backend_context(target, target_host, execution_backend)
+        self.backend_context = backend_context
+        self.backend = backend_context.module
+        self.target = backend_context.target
+        self.target_host = backend_context.target_host
+        self.execution_backend_spec = backend_context.execution_backend
         self.execution_backend = self.execution_backend_spec.name
 
         if self.execution_backend == "cython":
@@ -156,6 +160,7 @@ class JITKernel(Generic[_P, _T]):
         execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"],
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
+        backend_context: BackendContext | None = None,
     ):
         """
         Alternative constructor to create a TorchFunction directly from a database.
@@ -169,6 +174,7 @@ class JITKernel(Generic[_P, _T]):
             pass_configs=pass_configs,
             from_database=True,
             compile_flags=compile_flags,
+            backend_context=backend_context,
         )
 
         instance.adapter = instance._create_adapter_from_database(
@@ -274,10 +280,11 @@ class JITKernel(Generic[_P, _T]):
             tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=pass_instruments),
             self.target,
         ):
-            artifact = tilelang.lower(
+            from tilelang.engine.lower import lower_with_context
+
+            artifact = lower_with_context(
                 tilelang_func,
-                target=target,
-                target_host=target_host,
+                self.backend_context,
                 enable_host_codegen=enable_host_codegen,
                 enable_device_compile=enable_device_compile,
             )
