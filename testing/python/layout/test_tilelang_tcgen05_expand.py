@@ -153,8 +153,7 @@ def _layout_f_tile(cols):
 def test_expand_half_matches_cutlass_dst_layout(meta, width, regs, ndup, num_wgs, chunks):
     num_threads = 128 * num_wgs
     cols = width * chunks * num_wgs
-    plan = _ffi_api.ExpandTcgen05Layout(
-        _get_meta("ld_" + meta), _layout_f_tile(cols), num_threads)
+    plan = _ffi_api.ExpandTcgen05Layout(_get_meta("ld_" + meta), _layout_f_tile(cols), num_threads)
     assert plan is not None, f"{meta} must expand a Layout F (64,{cols}) tile"
     assert plan.datapaths_per_warp == 16, f"{meta} must plan a Layout F tile single-issue"
     assert plan.num_chunks_each_wg == chunks
@@ -188,9 +187,7 @@ def test_expand_half_matches_cutlass_dst_layout(meta, width, regs, ndup, num_wgs
     assert ana.can_prove_equal(thread_got, thread_expect), (
         f"{meta} wgs={num_wgs} x{chunks}: fragment thread {thread_got} != {thread_expect}"
     )
-    assert ana.can_prove_equal(value_got, value_expect), (
-        f"{meta} wgs={num_wgs} x{chunks}: fragment value {value_got} != {value_expect}"
-    )
+    assert ana.can_prove_equal(value_got, value_expect), f"{meta} wgs={num_wgs} x{chunks}: fragment value {value_got} != {value_expect}"
 
 
 @pytest.mark.parametrize(("meta", "width", "regs", "ndup"), HALF_SPECS, ids=[s[0] for s in HALF_SPECS])
@@ -201,10 +198,8 @@ def test_expand_layout_f_requires_pow2_single_issue(meta, width, regs, ndup):
     # repetition still spans `width` columns, so it must stay a single .xN
     # issue just like the duplicated form -- Expand must refuse rather than
     # emit a chained copy that walks the columns at the wrong stride.
-    assert _ffi_api.ExpandTcgen05Layout(
-        _get_meta("ld_" + meta), _layout_f_tile(width * 3), 128) is None
-    assert _ffi_api.ExpandTcgen05Layout(
-        _get_meta("ld_" + meta), _layout_f_tile(width * 4), 128) is not None
+    assert _ffi_api.ExpandTcgen05Layout(_get_meta("ld_" + meta), _layout_f_tile(width * 3), 128) is None
+    assert _ffi_api.ExpandTcgen05Layout(_get_meta("ld_" + meta), _layout_f_tile(width * 4), 128) is not None
 
 
 def test_expand_32_datapath_atom_refuses_layout_f():

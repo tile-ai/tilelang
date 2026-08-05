@@ -325,10 +325,7 @@ def test_tmem_copy_roundtrip_16bit(name, shape, forward, modifier):
     # A batched layout sliced along its column mode leaves per-batch column
     # gaps in TMEM; the copy iterates the contiguous chunks, one tcgen05
     # issue per batch entry (rest iteration).
-    [
-        case for case in LAYOUT_CASES
-        if case[0] in ("std_2d", "std_2d_2wg", "batched_3d", "layout_f_m64")
-    ],
+    [case for case in LAYOUT_CASES if case[0] in ("std_2d", "std_2d_2wg", "batched_3d", "layout_f_m64")],
     ids=["std_2d", "std_2d_2wg", "batched_3d", "layout_f_m64"],
 )
 def test_tmem_copy_roundtrip_sliced_last_dim(name, shape, forward, threads):
