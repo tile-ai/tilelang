@@ -255,7 +255,7 @@ Tcgen05CopyPlan ExpandTcgen05Layout(const Tcgen05Meta &meta,
   // instead of following all repetitions.  Until then a non-power-of-two .xN
   // finds no plan (an M=64 bf16 operand at K = 96, 192 or 320).
   if (meta->max_chunks != 0) {
-    if (reps & (reps - 1))  // reps must be a power of two
+    if (reps & (reps - 1)) // reps must be a power of two
       return Tcgen05CopyPlan(nullptr);
     if (reps > meta->max_chunks)
       return Tcgen05CopyPlan(nullptr);

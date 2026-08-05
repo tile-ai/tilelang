@@ -685,6 +685,7 @@ def test_tcgen05_gemm_batched_correctness():
     ref = (a.float() @ b.float().transpose(1, 2)).to(torch.bfloat16)
     torch.testing.assert_close(d, ref, rtol=1e-2, atol=1e-2)
 
+
 def _make_m64_ts_kernel(M, N, K):
     """A TS GEMM whose A operand reaches TMEM through registers.
 
@@ -717,9 +718,7 @@ def _make_m64_ts_kernel(M, N, K):
                 T.copy(a_shared, a_frag)
                 T.copy(a_frag, a_tmem)
                 if T.get_warp_idx_sync() == 0:
-                    T.tcgen05_gemm(
-                        a_tmem, b_shared, c_tmem, transpose_B=True, clear_accum=True, mbar=done
-                    )
+                    T.tcgen05_gemm(a_tmem, b_shared, c_tmem, transpose_B=True, clear_accum=True, mbar=done)
                 T.mbarrier_wait_parity(done, 0)
                 T.copy(c_tmem, c_frag)
                 T.copy(c_frag, C)
