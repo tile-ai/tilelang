@@ -28,7 +28,6 @@
 
 #include <tvm/tirx/stmt_functor.h>
 
-#include <unordered_set>
 #include <utility>
 
 #include "../op/utils.h"
@@ -73,24 +72,20 @@ public:
   }
 
 private:
-  using BufferSet = std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>;
-
   ReducerStoreGuarder(const Array<Buffer> &reducer_buffers, PrimExpr predicate)
-      : predicate_(std::move(predicate)) {
-    for (const Buffer &buffer : reducer_buffers) {
-      reducer_buffers_.insert(buffer);
-    }
-  }
+      : reducer_buffers_(reducer_buffers), predicate_(std::move(predicate)) {}
 
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
-    if (!reducer_buffers_.count(store->buffer)) {
-      return store;
+    for (const Buffer &buffer : reducer_buffers_) {
+      if (buffer.same_as(store->buffer)) {
+        return IfThenElse(predicate_, store);
+      }
     }
-    return IfThenElse(predicate_, store);
+    return store;
   }
 
-  BufferSet reducer_buffers_;
+  Array<Buffer> reducer_buffers_;
   PrimExpr predicate_;
 };
 
