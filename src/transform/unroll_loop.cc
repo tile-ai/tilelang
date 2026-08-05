@@ -339,6 +339,9 @@ private:
     if (extent < 0) {
       return -1;
     }
+    if (extent == 0) {
+      return 0;
+    }
     int step = GetStep(op);
     return 1 + (extent - 1) / step;
   }
