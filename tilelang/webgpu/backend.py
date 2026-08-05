@@ -1,16 +1,26 @@
-"""WebGPU backend registration module."""
+"""WebGPU backend manifest."""
 
-from tilelang.backend.execution_backend import ExecutionBackendSpec, register_execution_backend
-from tilelang.backend.module import BackendModule, register_backend_module
+from tilelang.backend.device_codegen import DeviceCodegen
+from tilelang.backend.execution_backend import ExecutionBackendSpec
+from tilelang.backend.pass_pipeline import PassPipeline
+from tilelang.backend.spec import BackendSpec, register_backend
 
-from . import codegen as codegen  # noqa: F401
-from . import pipeline as pipeline  # noqa: F401
+from . import codegen, pipeline
 
-register_execution_backend("webgpu", ExecutionBackendSpec("cython"), override=True)
-register_execution_backend(
-    "webgpu",
-    ExecutionBackendSpec("tvm_ffi", enable_host_codegen=True, enable_device_compile=True),
-    override=True,
+BACKEND = register_backend(
+    BackendSpec(
+        name="webgpu",
+        target_kinds=("webgpu",),
+        pipelines={"webgpu": PassPipeline("webgpu", pipeline.WebGPUPassPipelineBody)},
+        device_codegens={
+            "webgpu": (
+                DeviceCodegen(
+                    "webgpu",
+                    build=codegen.build_webgpu,
+                    build_without_compile=codegen.build_webgpu,
+                ),
+            )
+        },
+        execution_backends=(ExecutionBackendSpec("tvm_ffi", enable_host_codegen=True, enable_device_compile=True),),
+    )
 )
-
-BACKEND_MODULE = register_backend_module(BackendModule("webgpu", ("webgpu",)))

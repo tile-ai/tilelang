@@ -6,7 +6,7 @@ from tvm.tirx import PrimFunc, SBlock
 from tvm.tirx.stmt_functor import post_order_visit
 
 import tilelang
-from tilelang.backend.pass_pipeline.pipeline import PassPipeline, register_pipeline
+from tilelang.backend.pass_pipeline import PassPipeline
 from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
     allow_vectorize,
@@ -265,6 +265,4 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     return mod
 
 
-cuda_pipeline = PassPipeline("cuda", CUDAPassPipelineBody)
-
-register_pipeline(cuda_pipeline)
+CUDA_PIPELINE = PassPipeline("cuda", CUDAPassPipelineBody)

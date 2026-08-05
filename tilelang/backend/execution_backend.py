@@ -31,38 +31,12 @@ class ExecutionBackendSpec:
         return True if self.supports_target is None else self.supports_target(target)
 
 
-_EXECUTION_BACKENDS: dict[str, list[ExecutionBackendSpec]] = {}
-
-
-def register_execution_backend(
-    target_kind: str,
-    spec: ExecutionBackendSpec,
-    *,
-    override: bool = False,
-) -> ExecutionBackendSpec:
-    specs = _EXECUTION_BACKENDS.setdefault(target_kind, [])
-    if override:
-        specs[:] = [item for item in specs if item.name != spec.name]
-    elif any(item.name == spec.name for item in specs):
-        raise ValueError(f"Execution backend {spec.name!r} is already registered for target kind {target_kind!r}")
-    specs.append(spec)
-    return spec
-
-
-def _matching_specs(target: Target, *, include_unavailable: bool) -> list[ExecutionBackendSpec]:
-    target_kind = target.kind.name
-    specs = [spec for spec in _EXECUTION_BACKENDS.get(target_kind, ()) if spec.matches(target)]
-    if not include_unavailable:
-        specs = [spec for spec in specs if spec.is_available()]
-    return specs
-
-
 def allowed_backends_for_target(target: Target, *, include_unavailable: bool = True) -> list[str]:
-    return [spec.name for spec in _matching_specs(target, include_unavailable=include_unavailable)]
+    """Compatibility lookup; core compilation uses BackendSpec directly."""
+    from tilelang.backend.spec import resolve_backend
 
-
-def _format_options(options: list[str]) -> str:
-    return ", ".join(options) if options else "<none>"
+    backend = resolve_backend(target)
+    return list(backend.allowed_execution_backends(target, include_unavailable=include_unavailable))
 
 
 def resolve_execution_backend(requested: str | None, target: Target) -> str:
@@ -70,25 +44,8 @@ def resolve_execution_backend(requested: str | None, target: Target) -> str:
 
 
 def resolve_execution_backend_spec(requested: str | None, target: Target) -> ExecutionBackendSpec:
-    requested_name = canonicalize_execution_backend(requested)
-    allowed_all_specs = _matching_specs(target, include_unavailable=True)
-    allowed_available_specs = _matching_specs(target, include_unavailable=False)
-    allowed_all = [spec.name for spec in allowed_all_specs]
-    allowed_available = [spec.name for spec in allowed_available_specs]
+    """Compatibility lookup; core compilation uses BackendSpec directly."""
+    from tilelang.backend.spec import resolve_backend
 
-    if requested_name in (None, "auto"):
-        if not allowed_available_specs:
-            raise ValueError(f"No available execution backend for target '{target.kind.name}'. Allowed: {_format_options(allowed_all)}.")
-        return allowed_available_specs[0]
-
-    if requested_name not in allowed_all:
-        raise ValueError(
-            f"Invalid execution backend '{requested}' for target '{target.kind.name}'. "
-            f"Allowed: {_format_options(allowed_all)}. Tip: use execution_backend='auto'."
-        )
-    if requested_name not in allowed_available:
-        raise ValueError(
-            f"Execution backend '{requested}' requires extra dependencies and is not available now. "
-            f"Try one of: {_format_options(allowed_available)}."
-        )
-    return next(spec for spec in allowed_available_specs if spec.name == requested_name)
+    backend = resolve_backend(target)
+    return backend.resolve_execution_backend(requested, target)

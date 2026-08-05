@@ -1,18 +1,15 @@
 from __future__ import annotations
 
-import tvm_ffi
-
-from tilelang.backend.module import BackendModule, register_backend_module
+from tilelang.backend.device_codegen import DeviceCodegen
+from tilelang.backend.pass_pipeline import PassPipeline
+from tilelang.backend.spec import BackendSpec, register_backend
 from tilelang.contrib import hipcc
 from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
 from tilelang.rocm.target import target_get_mcpu
 
-from . import codegen as codegen  # noqa: F401
-from . import execution_backend as execution_backend  # noqa: F401
-from . import pipeline as pipeline  # noqa: F401
+from . import codegen, execution_backend, pipeline
 
 
-@tvm_ffi.register_global_func("tilelang_callback_hip_compile", override=True)
 def tilelang_callback_hip_compile(code, target):
     return hipcc.compile_hip(
         code,
@@ -27,4 +24,21 @@ def tilelang_callback_hip_compile(code, target):
     )
 
 
-BACKEND_MODULE = register_backend_module(BackendModule("rocm", ("hip",)))
+BACKEND = register_backend(
+    BackendSpec(
+        name="rocm",
+        target_kinds=("hip",),
+        pipelines={"hip": PassPipeline("hip", pipeline.ROCMPassPipelineBody)},
+        device_codegens={
+            "hip": (
+                DeviceCodegen(
+                    "hip",
+                    build=codegen.build_hip,
+                    build_without_compile=codegen.build_hip_without_compile,
+                ),
+            )
+        },
+        execution_backends=execution_backend.EXECUTION_BACKENDS,
+        callbacks={"tilelang_callback_hip_compile": tilelang_callback_hip_compile},
+    )
+)

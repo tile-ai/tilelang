@@ -479,11 +479,12 @@ class AutotuneResult:
         verbose = compile_args.verbose
         # Normalize target and resolve execution backend for loading
         from tilelang.backend.target import determine_target as _determine_target
-        from tilelang.backend.execution_backend import resolve_execution_backend
+        from tilelang.backend.spec import resolve_backend
 
         norm_target = _determine_target(compile_args.target, return_object=True)
         requested_backend = compile_args.execution_backend
-        resolved_backend = resolve_execution_backend(requested_backend, norm_target)
+        backend = resolve_backend(norm_target)
+        resolved_backend = backend.resolve_execution_backend(requested_backend, norm_target).name
         # load best config
         if verbose:
             logger.debug(f"Loading best config from file: {path / BEST_CONFIG_PATH}")

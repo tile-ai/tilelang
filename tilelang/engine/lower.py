@@ -10,10 +10,8 @@ from tvm.ir import CallingConv
 from tvm.target import Target
 from tilelang.engine.param import KernelParam, CompiledArtifact
 from tilelang.engine.semantic_check import PreLowerSemanticCheck
-from tilelang.backend.device_codegen import resolve_device_codegen
-from tilelang.backend.host_codegen import apply_host_codegen_hooks, resolve_host_codegen
+from tilelang.backend.spec import BackendSpec, resolve_backend
 from tilelang.backend.target import determine_target
-from tilelang.backend.pass_pipeline import resolve_pipeline
 
 
 def is_cpu_device_backend(target: Target):
@@ -66,7 +64,14 @@ def canon_target_host(target: str | Target, target_host: str | Target | None):
     return target_host
 
 
-def host_codegen(host_mod: tvm.IRModule, target_host: Target, target: Target | None = None) -> tvm.IRModule:
+def host_codegen(
+    host_mod: tvm.IRModule,
+    target_host: Target,
+    target: Target | None = None,
+    *,
+    backend: BackendSpec | None = None,
+    host_backend: BackendSpec | None = None,
+) -> tvm.IRModule:
     """Generate host-side code from the lowered IR module.
 
     Parameters
@@ -89,8 +94,11 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target, target: Target | N
     combine_context_call = getattr(tirx.transform, "CombineContextCall", None)
     if combine_context_call is not None:
         host_mod = combine_context_call()(host_mod)
-    host_mod = apply_host_codegen_hooks(host_mod, target_host, target)
-    return resolve_host_codegen(target_host).lower(host_mod, target_host)
+    if target is not None:
+        backend = backend or resolve_backend(target)
+        host_mod = backend.preprocess_host_codegen(host_mod, target_host, target)
+    host_backend = host_backend or resolve_backend(target_host)
+    return host_backend.codegen_host(host_mod, target_host)
 
 
 def _prepare_device_codegen_mod(device_mod: tvm.IRModule) -> tvm.IRModule:
@@ -100,14 +108,16 @@ def _prepare_device_codegen_mod(device_mod: tvm.IRModule) -> tvm.IRModule:
     return device_mod
 
 
-def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
+def device_codegen(device_mod: tvm.IRModule, target: Target, *, backend: BackendSpec | None = None) -> tvm.IRModule:
     device_mod = _prepare_device_codegen_mod(device_mod)
-    return resolve_device_codegen(target).lower(device_mod, target, compile_device=True)
+    backend = backend or resolve_backend(target)
+    return backend.codegen_device(device_mod, target, compile_device=True)
 
 
-def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
+def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target, *, backend: BackendSpec | None = None) -> tvm.IRModule:
     device_mod = _prepare_device_codegen_mod(device_mod)
-    return resolve_device_codegen(target).lower(device_mod, target, compile_device=False)
+    backend = backend or resolve_backend(target)
+    return backend.codegen_device(device_mod, target, compile_device=False)
 
 
 def lower_to_host_device_ir(
@@ -139,8 +149,8 @@ def lower_to_host_device_ir(
     # Run backend-independent semantic checks before target-specific lowering.
     PreLowerSemanticCheck(mod)
 
-    pipeline = resolve_pipeline(target)
-    mod = pipeline.lower(mod, target)
+    backend = resolve_backend(target)
+    mod = backend.lower(mod, target)
 
     host_mod = tirx.transform.Filter(_is_host_call)(mod)
     device_mod = tirx.transform.Filter(_is_device_call)(mod)
@@ -189,11 +199,22 @@ def _lower_impl(
         runtime_only=runtime_only,
     )
 
-    codegen_mod = device_codegen(device_mod, target) if enable_device_compile else device_codegen_without_compile(device_mod, target)
+    backend = resolve_backend(target)
+    codegen_mod = (
+        device_codegen(device_mod, target, backend=backend)
+        if enable_device_compile
+        else device_codegen_without_compile(device_mod, target, backend=backend)
+    )
     kernel_source = codegen_mod.inspect_source()
 
     if enable_host_codegen:
-        host_mod = host_codegen(host_mod, target_host, target=target)
+        host_mod = host_codegen(
+            host_mod,
+            target_host,
+            target=target,
+            backend=backend,
+            host_backend=resolve_backend(target_host),
+        )
         host_mod.import_module(codegen_mod)
         return CompiledArtifact(
             host_mod,

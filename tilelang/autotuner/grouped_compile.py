@@ -15,6 +15,7 @@ from tvm.tirx import PrimFunc
 from tilelang import env
 from tilelang.env import resolve_pass_profile_threshold_ms
 from tilelang.autotuner.param import CompileArgs
+from tilelang.backend.spec import resolve_backend
 from tilelang.engine.lower import lower_to_host_device_ir, device_codegen, host_codegen
 from tilelang.engine.param import CompiledArtifact
 from tilelang.jit.adapter import TVMFFIKernelAdapter
@@ -104,6 +105,7 @@ def compile_grouped_unit_tvm_ffi(
                     "device_mod": device_mod,
                     "params": params,
                     "target": normalized_target,
+                    "backend": resolve_backend(normalized_target),
                 }
             )
         except Exception as e:
@@ -142,7 +144,11 @@ def compile_grouped_unit_tvm_ffi(
             tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=device_instruments),
             reference_target,
         ):
-            grouped_device_rt_mod = device_codegen(merged_device_mod, reference_target)
+            grouped_device_rt_mod = device_codegen(
+                merged_device_mod,
+                reference_target,
+                backend=lowered_items[0]["backend"],
+            )
 
         grouped_kernel_source = grouped_device_rt_mod.inspect_source()
 

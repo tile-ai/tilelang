@@ -43,29 +43,11 @@ class DeviceCodegen:
         return build_func(mod, target)
 
 
-_DEVICE_CODEGENS: dict[str, list[DeviceCodegen]] = {}
-
-
-def register_device_codegen(
-    target_kind: str,
-    codegen: DeviceCodegen,
-    *,
-    override: bool = False,
-) -> DeviceCodegen:
-    """Register a device codegen entry for a target kind."""
-
-    codegens = _DEVICE_CODEGENS.setdefault(target_kind, [])
-    if override:
-        codegens[:] = [item for item in codegens if item.name != codegen.name]
-    elif any(item.name == codegen.name for item in codegens):
-        raise ValueError(f"Device codegen {codegen.name!r} is already registered for target kind {target_kind!r}")
-    codegens.append(codegen)
-    return codegen
-
-
 def _matching_device_codegens(target: Target) -> list[DeviceCodegen]:
-    target_kind = target.kind.name
-    return [codegen for codegen in _DEVICE_CODEGENS.get(target_kind, ()) if codegen.matches(target)]
+    from tilelang.backend.spec import resolve_backend
+
+    backend = resolve_backend(target)
+    return [codegen for codegen in backend.device_codegens[target.kind.name] if codegen.matches(target)]
 
 
 def allowed_device_codegens_for_target(target: Target) -> list[str]:
@@ -74,17 +56,9 @@ def allowed_device_codegens_for_target(target: Target) -> list[str]:
     return [codegen.name for codegen in _matching_device_codegens(target)]
 
 
-def _format_codegen_names(codegens: list[DeviceCodegen]) -> str:
-    names = [codegen.name for codegen in codegens]
-    return ", ".join(names) if names else "<none>"
-
-
 def resolve_device_codegen(target: Target) -> DeviceCodegen:
-    """Resolve a device codegen entry from a TVM target."""
+    """Compatibility lookup; core compilation uses BackendSpec directly."""
+    from tilelang.backend.spec import resolve_backend
 
-    matches = _matching_device_codegens(target)
-    if not matches:
-        target_kind = target.kind.name
-        options = _format_codegen_names(_DEVICE_CODEGENS.get(target_kind, []))
-        raise ValueError(f"No device codegen registered for target '{target_kind}'. Available: {options}.")
-    return matches[0]
+    backend = resolve_backend(target)
+    return backend.get_device_codegen(target)

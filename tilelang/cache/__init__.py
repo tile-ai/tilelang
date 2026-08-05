@@ -42,13 +42,14 @@ def _resolve_cache_dispatch(
         verbose = env.get_default_verbose()
 
     from tilelang.backend.target import determine_target as _determine_target
-    from tilelang.backend.execution_backend import resolve_execution_backend, allowed_backends_for_target
+    from tilelang.backend.spec import resolve_backend
 
     norm_target = _determine_target(target, return_object=True)
+    backend = resolve_backend(norm_target)
     requested_backend = execution_backend
-    resolved_backend = resolve_execution_backend(requested_backend, norm_target)
+    resolved_backend = backend.resolve_execution_backend(requested_backend, norm_target).name
     if verbose:
-        allowed_now = allowed_backends_for_target(norm_target, include_unavailable=False)
+        allowed_now = backend.allowed_execution_backends(norm_target, include_unavailable=False)
         if requested_backend in (None, "auto") or requested_backend != resolved_backend:
             logger = logging.getLogger(__name__)
             logger.setLevel(logging.INFO)

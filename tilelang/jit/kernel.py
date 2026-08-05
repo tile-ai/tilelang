@@ -9,7 +9,7 @@ import tilelang
 from tilelang import tvm
 from tilelang import env
 from tilelang.env import resolve_pass_profile_threshold_ms
-from tilelang.backend.execution_backend import resolve_execution_backend_spec
+from tilelang.backend.spec import resolve_backend
 from tvm.target import Target
 from tilelang.engine.param import CompiledArtifact, KernelParam
 from tilelang.jit.adapter import (
@@ -110,7 +110,8 @@ class JITKernel(Generic[_P, _T]):
         # The wrapper is normalized here because lower/codegen still consume TVM Target.
         self.target = determine_target(target, return_object=True)
 
-        self.execution_backend_spec = resolve_execution_backend_spec(execution_backend, self.target)
+        self.backend = resolve_backend(self.target)
+        self.execution_backend_spec = self.backend.resolve_execution_backend(execution_backend, self.target)
         self.execution_backend = self.execution_backend_spec.name
 
         if self.execution_backend == "cython":

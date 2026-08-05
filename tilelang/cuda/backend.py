@@ -2,17 +2,15 @@ from __future__ import annotations
 
 import re
 
-import tvm_ffi
 from tvm import tirx
 
-from tilelang.backend.module import BackendModule, register_backend_module
+from tilelang.backend.device_codegen import DeviceCodegen
+from tilelang.backend.spec import BackendSpec, register_backend
 from tilelang.contrib import nvcc
 from tilelang.env import CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH, env
 from tilelang.transform import PassConfigKey
 
-from . import codegen as codegen  # noqa: F401
-from . import execution_backend as execution_backend  # noqa: F401
-from . import pipeline as pipeline  # noqa: F401
+from . import codegen, execution_backend, pipeline
 
 _CUDA_GLOBAL_KERNEL_PATTERN = re.compile(r'(?:extern\s+"C"\s+)?__global__\s+void\s+(?:__launch_bounds__\([^\)]*\)\s+)?(\w+)')
 
@@ -28,7 +26,6 @@ def _collect_external_cuda_kernel_names(source: str) -> list[str]:
     return kernel_names
 
 
-@tvm_ffi.register_global_func("tilelang_callback_cuda_validate", override=True)
 def tilelang_callback_cuda_validate(device_mod):
     for _, base_func in device_mod.functions.items():
         if not isinstance(base_func, tirx.PrimFunc) or not base_func.attrs:
@@ -58,7 +55,6 @@ def tilelang_callback_cuda_validate(device_mod):
             )
 
 
-@tvm_ffi.register_global_func("tilelang_callback_cuda_compile", override=True)
 def tilelang_callback_cuda_compile(code, target, pass_config=None):
     from tilelang.cache.cuda_binary_cache import CUDABinaryCache
 
@@ -123,4 +119,25 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
     return binary
 
 
-BACKEND_MODULE = register_backend_module(BackendModule("cuda", ("cuda",)))
+BACKEND = register_backend(
+    BackendSpec(
+        name="cuda",
+        target_kinds=("cuda",),
+        supports_target=codegen.is_plain_cuda_target,
+        pipelines={"cuda": pipeline.CUDA_PIPELINE},
+        device_codegens={
+            "cuda": (
+                DeviceCodegen(
+                    "cuda",
+                    build=codegen.build_cuda,
+                    build_without_compile=codegen.build_cuda_without_compile,
+                ),
+            )
+        },
+        execution_backends=execution_backend.CUDA_EXECUTION_BACKENDS,
+        callbacks={
+            "tilelang_callback_cuda_validate": tilelang_callback_cuda_validate,
+            "tilelang_callback_cuda_compile": tilelang_callback_cuda_compile,
+        },
+    )
+)
