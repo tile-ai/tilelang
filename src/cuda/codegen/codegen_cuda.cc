@@ -5382,6 +5382,47 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
   }
 }
 
+void CodeGenTileLangCUDA::VisitExpr_(const SelectNode *op, std::ostream &os) {
+  // Non-vector cases.
+  if (!op->condition.dtype().is_fixed_length_vector()) {
+    CodeGenC::VisitExpr_(op, os);
+    return;
+  }
+
+  // Codegen vector condition case by serializing the select op.
+  TVM_FFI_ICHECK(op->false_value->dtype == op->dtype &&
+                 op->true_value->dtype == op->dtype &&
+                 op->dtype.lanes() == op->condition.dtype().lanes());
+
+  std::string r_var = name_supply_->FreshName("_");
+  this->PrintIndent();
+  this->PrintType(op->dtype, stream);
+  stream << ' ' << r_var << ";\n";
+  {
+    std::string c_var =
+        SSAGetID(PrintExpr(op->condition), op->condition.dtype());
+    std::string t_var = SSAGetID(PrintExpr(op->true_value), op->dtype);
+    std::string f_var = SSAGetID(PrintExpr(op->false_value), op->dtype);
+
+    // The condition is stored as an ushort vector.
+    int lanes = op->dtype.lanes();
+    DataType memory_ty(DataType::TypeCode::kUInt, 16, lanes);
+
+    for (int i = 0; i < lanes; ++i) {
+      std::ostringstream item;
+      item << "(bool(";
+      PrintVecElemLoad(c_var, memory_ty, i, item);
+      item << ")?";
+      PrintVecElemLoad(t_var, op->dtype, i, item);
+      item << ':';
+      PrintVecElemLoad(f_var, op->dtype, i, item);
+      item << ')';
+      PrintVecElemStore(r_var, op->dtype, i, item.str());
+    }
+  }
+  os << r_var;
+}
+
 void CodeGenTileLangCUDA::VisitExpr_(const ShuffleNode *op,
                                      std::ostream &os) { // NOLINT(*)
   // For bfloat16x2 / float16x2 construction from two scalar lanes, emit a
