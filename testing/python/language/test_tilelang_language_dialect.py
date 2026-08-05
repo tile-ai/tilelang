@@ -5,10 +5,13 @@ import pytest
 import tilelang
 import tilelang.language as T_default
 import tilelang.language.common as T_comm
+import tilelang.language.tir.op as common_tir_op
 from tilelang.language.tir.exports import (
+    BACKEND_ONLY_TIR_EXPORTS,
     CLASSIFIED_VENDOR_TIR_EXPORTS,
     CUDA_ONLY_TIR_EXPORTS,
     METAL_ONLY_TIR_EXPORTS,
+    ROCM_ONLY_TIR_EXPORTS,
     SHARED_LEGACY_TIR_EXPORTS,
 )
 
@@ -32,7 +35,9 @@ ROCM_ONLY_NAMES = {
     "mfma",
     "rdna_wmma",
     "tvm_mfma",
+    "tvm_mfma_store",
     "tvm_rdna_wmma",
+    "tvm_rdna_wmma_store",
 }
 
 
@@ -55,6 +60,12 @@ def test_common_language_preserves_special_dsl_exports():
     assert hasattr(T_comm, "__log")
     assert CUDA_ONLY_TIR_EXPORTS.isdisjoint(T_comm.__all__)
     assert METAL_ONLY_TIR_EXPORTS.isdisjoint(T_comm.__all__)
+    assert ROCM_ONLY_TIR_EXPORTS.isdisjoint(T_comm.__all__)
+
+
+def test_common_tir_op_module_contains_no_backend_owned_implementations():
+    for name in BACKEND_ONLY_TIR_EXPORTS:
+        assert not hasattr(common_tir_op, name)
 
 
 def test_cuda_language_composes_common_and_cuda_symbols():
@@ -80,6 +91,7 @@ def test_rocm_language_composes_common_and_rocm_symbols():
     assert T.mfma is T.tvm_mfma
     assert T.mfma_store is T.tvm_mfma_store
     assert set(T.__all__) >= ROCM_ONLY_NAMES
+    assert set(T.__all__) >= ROCM_ONLY_TIR_EXPORTS
     assert hasattr(T, "MatrixCoreIntrinEmitter")
     assert hasattr(T, "make_mfma_swizzle_layout")
     assert set(T.__all__) >= SHARED_LEGACY_TIR_EXPORTS
@@ -129,10 +141,22 @@ def test_metal_language_owns_simdgroup_tir_exports():
     assert set(T.__all__) >= METAL_ONLY_TIR_EXPORTS
 
 
+def test_backend_tir_modules_own_their_vendor_ops():
+    from tilelang.cuda.language import tir as cuda_tir
+    from tilelang.rocm.language import tir as rocm_tir
+
+    assert all(hasattr(cuda_tir, name) for name in CUDA_ONLY_TIR_EXPORTS)
+    assert all(hasattr(rocm_tir, name) for name in ROCM_ONLY_TIR_EXPORTS)
+    assert cuda_tir.ptx_wgmma_ss.__module__ == "tilelang.cuda.language.tir"
+    assert rocm_tir.tvm_mfma.__module__ == "tilelang.rocm.language.tir"
+
+
 def test_upstream_vendor_tir_exports_are_classified():
     import tvm.tirx.script.parser as upstream_tir_parser
 
-    vendor_exports = {name for name in upstream_tir_parser.__all__ if name.startswith("ptx_") or "simdgroup" in name}
+    vendor_exports = {
+        name for name in upstream_tir_parser.__all__ if name.startswith("ptx_") or "simdgroup" in name or name in {"mma_fill", "mma_store"}
+    }
     assert vendor_exports <= CLASSIFIED_VENDOR_TIR_EXPORTS
 
 
@@ -148,6 +172,7 @@ def test_upstream_vendor_tir_exports_are_classified():
 def test_non_cuda_dialects_do_not_export_cuda_symbols(module_name):
     module = importlib.import_module(module_name)
     assert CUDA_ONLY_NAMES.isdisjoint(module.__all__)
+    assert CUDA_ONLY_TIR_EXPORTS.isdisjoint(module.__all__)
 
 
 @pytest.mark.parametrize(
@@ -162,6 +187,7 @@ def test_non_cuda_dialects_do_not_export_cuda_symbols(module_name):
 def test_non_rocm_dialects_do_not_export_rocm_symbols(module_name):
     module = importlib.import_module(module_name)
     assert ROCM_ONLY_NAMES.isdisjoint(module.__all__)
+    assert ROCM_ONLY_TIR_EXPORTS.isdisjoint(module.__all__)
 
 
 def test_common_only_dialects_match_common_surface():
