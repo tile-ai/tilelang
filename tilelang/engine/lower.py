@@ -67,10 +67,10 @@ def canon_target_host(target: str | Target, target_host: str | Target | None):
 def host_codegen(
     host_mod: tvm.IRModule,
     target_host: Target,
-    target: Target | None = None,
+    target: Target,
     *,
-    backend: BackendSpec | None = None,
-    host_backend: BackendSpec | None = None,
+    backend: BackendSpec,
+    host_backend: BackendSpec,
 ) -> tvm.IRModule:
     """Generate host-side code from the lowered IR module.
 
@@ -80,7 +80,7 @@ def host_codegen(
         The host-side IR module to compile.
     target_host : Target
         The host compilation target (e.g. "llvm" or "c").
-    target : Target, optional
+    target : Target
         The device target.  When the device target is Metal, the pass
         MarkHostMetalContext is applied so that the generated host code
         contains the Metal/MPS synchronisation logic.
@@ -94,10 +94,7 @@ def host_codegen(
     combine_context_call = getattr(tirx.transform, "CombineContextCall", None)
     if combine_context_call is not None:
         host_mod = combine_context_call()(host_mod)
-    if target is not None:
-        backend = backend or resolve_backend(target)
-        host_mod = backend.preprocess_host_codegen(host_mod, target_host, target)
-    host_backend = host_backend or resolve_backend(target_host)
+    host_mod = backend.preprocess_host_codegen(host_mod, target_host, target)
     return host_backend.codegen_host(host_mod, target_host)
 
 
@@ -108,15 +105,13 @@ def _prepare_device_codegen_mod(device_mod: tvm.IRModule) -> tvm.IRModule:
     return device_mod
 
 
-def device_codegen(device_mod: tvm.IRModule, target: Target, *, backend: BackendSpec | None = None) -> tvm.IRModule:
+def device_codegen(device_mod: tvm.IRModule, target: Target, *, backend: BackendSpec) -> tvm.IRModule:
     device_mod = _prepare_device_codegen_mod(device_mod)
-    backend = backend or resolve_backend(target)
     return backend.codegen_device(device_mod, target, compile_device=True)
 
 
-def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target, *, backend: BackendSpec | None = None) -> tvm.IRModule:
+def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target, *, backend: BackendSpec) -> tvm.IRModule:
     device_mod = _prepare_device_codegen_mod(device_mod)
-    backend = backend or resolve_backend(target)
     return backend.codegen_device(device_mod, target, compile_device=False)
 
 
