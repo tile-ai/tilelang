@@ -68,8 +68,9 @@ public:
   void VisitExpr_(const CallNode *op, std::ostream &os) override;   // NOLINT(*)
   // overload min and max to use the ternary operator, so we don't rely on the
   // standard library implementations
-  void VisitExpr_(const MinNode *op, std::ostream &os) final; // NOLINT(*)
-  void VisitExpr_(const MaxNode *op, std::ostream &os) final; // NOLINT(*)
+  void VisitExpr_(const MinNode *op, std::ostream &os) final;      // NOLINT(*)
+  void VisitExpr_(const MaxNode *op, std::ostream &os) final;      // NOLINT(*)
+  void VisitExpr_(const FloatImmNode *op, std::ostream &os) final; // NOLINT(*)
 
   void VisitStmt_(const AssertStmtNode *op) final;  // NOLINT(*)
   void VisitStmt_(const AllocBufferNode *op) final; // NOLINT(*)

@@ -36,6 +36,9 @@
 #include "target/build_common.h"
 #include "target/source/codegen_params.h"
 
+#include <cmath>
+#include <sstream>
+
 namespace tvm {
 namespace codegen {
 
@@ -477,6 +480,30 @@ void CodeGenTileLangC::VisitExpr_(const MinNode *op,
 void CodeGenTileLangC::VisitExpr_(const MaxNode *op,
                                   std::ostream &os) { // NOLINT(*)
   PrintTernaryCondExpr(op, ">", os);
+}
+
+void CodeGenTileLangC::VisitExpr_(const FloatImmNode *op,
+                                  std::ostream &os) { // NOLINT(*)
+  // The TVM base class emits `inff`/`nanf` which standard C compilers do not
+  // recognise. Use the C99 macros instead so reduce max/min identity values
+  // (-inf / +inf) lower correctly.
+  std::ostringstream temp;
+  if (std::isinf(op->value)) {
+    if (op->value < 0) {
+      temp << "-";
+    }
+    temp << "INFINITY";
+  } else if (std::isnan(op->value)) {
+    temp << "NAN";
+  } else {
+    temp << std::scientific << op->value;
+    if (op->dtype.bits() == 32)
+      temp << 'f';
+    else if (op->dtype.bits() == 16)
+      temp << 'h';
+  }
+  MarkConst(temp.str());
+  os << temp.str();
 }
 
 template <typename T>
