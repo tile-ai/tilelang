@@ -121,10 +121,8 @@ def test_execution_backend_registry_resolves_target_policy():
     from tilelang.backend import execution_backend as backend_registry
 
     old_execution_specs = backend_registry._EXECUTION_BACKENDS.get(target_kind)
-    was_loaded = target_kind in backend_registry._LOADED_EXECUTION_BACKENDS
     try:
         backend_registry._EXECUTION_BACKENDS[target_kind] = []
-        backend_registry._LOADED_EXECUTION_BACKENDS.add(target_kind)
         register_execution_backend(target_kind, ExecutionBackendSpec("fast"), override=True)
         register_execution_backend(target_kind, ExecutionBackendSpec("slow"), override=True)
 
@@ -136,8 +134,6 @@ def test_execution_backend_registry_resolves_target_policy():
             backend_registry._EXECUTION_BACKENDS.pop(target_kind, None)
         else:
             backend_registry._EXECUTION_BACKENDS[target_kind] = old_execution_specs
-        if not was_loaded:
-            backend_registry._LOADED_EXECUTION_BACKENDS.discard(target_kind)
 
 
 def test_execution_backend_registry_rejects_invalid_backend():

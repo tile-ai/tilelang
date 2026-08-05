@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from importlib import import_module
 
 from tvm import IRModule
 from tvm.target import Target
@@ -45,8 +44,6 @@ class DeviceCodegen:
 
 
 _DEVICE_CODEGENS: dict[str, list[DeviceCodegen]] = {}
-_LAZY_DEVICE_CODEGENS: dict[str, str] = {}
-_LOADED_DEVICE_CODEGENS: set[str] = set()
 
 
 def register_device_codegen(
@@ -66,25 +63,8 @@ def register_device_codegen(
     return codegen
 
 
-def register_lazy_device_codegen(target_kind: str, import_path: str) -> None:
-    """Register a backend module to import when its target kind is first used."""
-
-    _LAZY_DEVICE_CODEGENS[target_kind] = import_path
-    _LOADED_DEVICE_CODEGENS.discard(target_kind)
-
-
-def _ensure_device_codegens_loaded(target_kind: str) -> None:
-    if target_kind in _LOADED_DEVICE_CODEGENS:
-        return
-    import_path = _LAZY_DEVICE_CODEGENS.get(target_kind)
-    if import_path is not None:
-        import_module(import_path)
-    _LOADED_DEVICE_CODEGENS.add(target_kind)
-
-
 def _matching_device_codegens(target: Target) -> list[DeviceCodegen]:
     target_kind = target.kind.name
-    _ensure_device_codegens_loaded(target_kind)
     return [codegen for codegen in _DEVICE_CODEGENS.get(target_kind, ()) if codegen.matches(target)]
 
 

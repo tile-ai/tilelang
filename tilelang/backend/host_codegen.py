@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from importlib import import_module
 
 from tvm import IRModule
 from tvm.target import Target
@@ -56,12 +55,8 @@ class HostCodegenHook:
 
 
 _HOST_CODEGENS: dict[str, list[HostCodegen]] = {}
-_LAZY_HOST_CODEGENS: dict[str, str] = {}
-_LOADED_HOST_CODEGENS: set[str] = set()
 
 _HOST_CODEGEN_HOOKS: dict[str, list[HostCodegenHook]] = {}
-_LAZY_HOST_CODEGEN_HOOKS: dict[str, str] = {}
-_LOADED_HOST_CODEGEN_HOOKS: set[str] = set()
 
 
 def register_host_codegen(
@@ -81,13 +76,6 @@ def register_host_codegen(
     return codegen
 
 
-def register_lazy_host_codegen(target_host_kind: str, import_path: str) -> None:
-    """Register a backend module to import when a host target kind is first used."""
-
-    _LAZY_HOST_CODEGENS[target_host_kind] = import_path
-    _LOADED_HOST_CODEGENS.discard(target_host_kind)
-
-
 def register_host_codegen_hook(
     target_kind: str,
     hook: HostCodegenHook,
@@ -105,40 +93,13 @@ def register_host_codegen_hook(
     return hook
 
 
-def register_lazy_host_codegen_hooks(target_kind: str, import_path: str) -> None:
-    """Register a backend module to import before applying host codegen hooks."""
-
-    _LAZY_HOST_CODEGEN_HOOKS[target_kind] = import_path
-    _LOADED_HOST_CODEGEN_HOOKS.discard(target_kind)
-
-
-def _ensure_host_codegens_loaded(target_host_kind: str) -> None:
-    if target_host_kind in _LOADED_HOST_CODEGENS:
-        return
-    import_path = _LAZY_HOST_CODEGENS.get(target_host_kind)
-    if import_path is not None:
-        import_module(import_path)
-    _LOADED_HOST_CODEGENS.add(target_host_kind)
-
-
-def _ensure_host_codegen_hooks_loaded(target_kind: str) -> None:
-    if target_kind in _LOADED_HOST_CODEGEN_HOOKS:
-        return
-    import_path = _LAZY_HOST_CODEGEN_HOOKS.get(target_kind)
-    if import_path is not None:
-        import_module(import_path)
-    _LOADED_HOST_CODEGEN_HOOKS.add(target_kind)
-
-
 def _matching_host_codegens(target_host: Target) -> list[HostCodegen]:
     target_host_kind = target_host.kind.name
-    _ensure_host_codegens_loaded(target_host_kind)
     return [codegen for codegen in _HOST_CODEGENS.get(target_host_kind, ()) if codegen.matches(target_host)]
 
 
 def _matching_host_codegen_hooks(target: Target) -> list[HostCodegenHook]:
     target_kind = target.kind.name
-    _ensure_host_codegen_hooks_loaded(target_kind)
     return [hook for hook in _HOST_CODEGEN_HOOKS.get(target_kind, ()) if hook.matches(target)]
 
 

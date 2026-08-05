@@ -11,8 +11,6 @@ import os
 import subprocess
 import tempfile
 
-import tvm_ffi
-
 from tilelang import tvm as tvm
 from tilelang.env import env
 from tvm.contrib import utils
@@ -117,12 +115,3 @@ def compile_hip(code, target_format="hsaco", arch=None, options=None, path_targe
         if not data:
             raise RuntimeError("Compilation error: empty result is generated")
         return data
-
-
-@tvm_ffi.register_global_func("tilelang_callback_hip_compile", override=True)
-def tilelang_callback_hip_compile(code, target):
-    """use hipcc to generate fatbin code for better optimization"""
-    from tilelang.rocm.target import target_get_mcpu
-
-    hsaco = compile_hip(code, target_format="hsaco", arch=target_get_mcpu(target))
-    return hsaco

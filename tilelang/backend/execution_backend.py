@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from importlib import import_module
 
 from tvm.target import Target
 
@@ -33,8 +32,6 @@ class ExecutionBackendSpec:
 
 
 _EXECUTION_BACKENDS: dict[str, list[ExecutionBackendSpec]] = {}
-_LAZY_EXECUTION_BACKENDS: dict[str, str] = {}
-_LOADED_EXECUTION_BACKENDS: set[str] = set()
 
 
 def register_execution_backend(
@@ -52,22 +49,8 @@ def register_execution_backend(
     return spec
 
 
-def register_lazy_execution_backends(target_kind: str, import_path: str) -> None:
-    _LAZY_EXECUTION_BACKENDS[target_kind] = import_path
-
-
-def _ensure_execution_backends_loaded(target_kind: str) -> None:
-    if target_kind in _LOADED_EXECUTION_BACKENDS:
-        return
-    import_path = _LAZY_EXECUTION_BACKENDS.get(target_kind)
-    if import_path is not None:
-        import_module(import_path)
-    _LOADED_EXECUTION_BACKENDS.add(target_kind)
-
-
 def _matching_specs(target: Target, *, include_unavailable: bool) -> list[ExecutionBackendSpec]:
     target_kind = target.kind.name
-    _ensure_execution_backends_loaded(target_kind)
     specs = [spec for spec in _EXECUTION_BACKENDS.get(target_kind, ()) if spec.matches(target)]
     if not include_unavailable:
         specs = [spec for spec in specs if spec.is_available()]

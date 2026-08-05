@@ -8,16 +8,36 @@ TileLang language surface backend-neutral.
 
 The Python backend layer is split into two parts:
 
-- `tilelang/backend/`: common backend infrastructure, especially pass-pipeline
-  registration, host/device-codegen registration, and shared pipeline
+- `tilelang/backend/`: common backend infrastructure, especially the
+  `BackendModule` registry, component registration, and shared pipeline
   utilities.
 - `tilelang/<backend>/`: backend-owned Python implementation files, such as
-  pass pipelines, host/device-codegen entry registration, tile-op
+  a backend registration module, pass pipelines, codegen entries, tile-op
   implementation registration, and backend intrinsics.
 
 The native side mirrors this split under `src/<backend>/`, where C++ op
 lowering, codegen, runtime modules, stubs, and backend-local CMake files live.
 `src/backend/` is reserved for shared native backend helpers.
+
+## Backend Module
+
+`BackendModule` records backend identity and target ownership. Each backend's
+`backend.py` imports and registers all of its compiler components, then
+registers the module itself:
+
+```python
+BACKEND_MODULE = register_backend_module(
+    BackendModule(name="cuda", target_kinds=("cuda",))
+)
+```
+
+The central module registry maps each target kind to exactly one backend
+module. Backend packages are initialized once during TileLang import, so the
+registry needs no import paths, loading state, or synchronization.
+
+`BackendModule` deliberately does not duplicate component policies.
+`PassPipeline`, `DeviceCodegen`, `HostCodegen`, and `ExecutionBackendSpec`
+remain the extension interfaces for their domains.
 
 ## Lowering Entry
 
@@ -32,8 +52,8 @@ mod = pipeline.lower(mod, target)
 ```
 
 The resolver is implemented in `tilelang/backend/pass_pipeline/pipeline.py`.
-Backends register a `PassPipeline(name, lower)` at import time. The pipeline
-name should match `target.kind.name`.
+It selects the registered `PassPipeline`; the pipeline name should match
+`target.kind.name`.
 
 Device codegen follows the same ownership model after host/device splitting:
 
@@ -43,7 +63,7 @@ device_mod = codegen.lower(device_mod, target, compile_device=...)
 ```
 
 The resolver is implemented in `tilelang/backend/device_codegen.py`. Backend
-packages register one or more `DeviceCodegen` entries for their target kind.
+modules register one or more `DeviceCodegen` entries for their target kind.
 CUDA, for example, owns both the plain CUDA entry and the CuTeDSL target
 variant, while CPU owns the `c` and `llvm` entries. The engine-level lowering
 code should not keep backend-specific `target.kind.name` dispatch for device
@@ -71,7 +91,7 @@ host functions that need Metal runtime context.
 | `tilelang/rocm` | `hip` | ROCm/HIP pass sequence and MFMA/WMMA tile-op implementations. |
 | `tilelang/cpu` | `c`, `llvm` | CPU pass sequence and scalar CPU tile-op implementations. |
 | `tilelang/metal` | `metal` | Metal pass sequence and Metal GEMM registration. |
-| `tilelang/backend/common.py` | `webgpu` | Temporary/common registration for targets that do not yet own a dedicated Python backend package. |
+| `tilelang/webgpu/backend.py` | `webgpu` | WebGPU compiler component registration. |
 
 ## `tilelang/backend`
 
@@ -81,6 +101,7 @@ backend-specific implementation details.
 ```text
 tilelang/backend/
   __init__.py
+  module.py
   common.py
   device_codegen.py
   host_codegen.py
@@ -90,6 +111,7 @@ tilelang/backend/
     pipeline_utils.py
 ```
 
+- `module.py` defines `BackendModule` and the target-kind ownership registry.
 - `pass_pipeline/pipeline.py` defines `PassPipeline`, `register_pipeline`, and
   `resolve_pipeline`.
 - `device_codegen.py` defines `DeviceCodegen`, `register_device_codegen`, and
@@ -99,8 +121,8 @@ tilelang/backend/
 - `pass_pipeline/pipeline_utils.py` contains small shared helpers for pass
   configuration, layout visualization, vectorization gates, and shared-memory
   reuse flags.
-- `common.py` registers shared fallback pipelines for target kinds that do not
-  yet have a fully dedicated package.
+- `common.py` is a compatibility import for the former WebGPU registration
+  location.
 
 Backend-specific pass lists should not live here. They should live in the
 backend package that owns the target.
@@ -112,6 +134,7 @@ for that backend.
 
 ```text
 tilelang/cuda/
+  backend.py
   codegen.py
   pipeline.py
   transform/
@@ -119,23 +142,30 @@ tilelang/cuda/
   intrinsics/
 
 tilelang/rocm/
+  backend.py
   codegen.py
   pipeline.py
   op/
   intrinsics/
 
 tilelang/cpu/
+  backend.py
   codegen.py
   pipeline.py
   op/
 
 tilelang/metal/
+  backend.py
   codegen.py
   pipeline.py
   transform/
   op/
   intrinsics/
 ```
+
+The `backend.py` file is the package registration boundary. Importing it must
+register every compiler component and callback needed for that backend; callers
+must not need to know the backend's internal module layout.
 
 The `pipeline.py` file should expose one complete backend pass sequence after
 semantic checking. It may use shared helpers from `tilelang/backend`, but the
@@ -214,6 +244,8 @@ Shared native helpers that have no target runtime dependency belong in
 - Keep backend-specific device-codegen dispatch in the backend package.
 - Register backend implementations at import time, but keep import-time work
   light.
+- Keep loading implicit in normal package initialization; backend registries
+  must not maintain import paths or loading state.
 - Prefer explicit target-kind registration over implicit folder-name matching,
   because some names differ, such as `tilelang/rocm` registering target kind
   `hip`.

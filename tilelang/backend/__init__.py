@@ -3,7 +3,6 @@ from .device_codegen import (  # noqa: F401
     DeviceCodegen,
     allowed_device_codegens_for_target,
     register_device_codegen,
-    register_lazy_device_codegen,
     resolve_device_codegen,
 )
 from .host_codegen import (  # noqa: F401
@@ -13,8 +12,6 @@ from .host_codegen import (  # noqa: F401
     apply_host_codegen_hooks,
     register_host_codegen,
     register_host_codegen_hook,
-    register_lazy_host_codegen,
-    register_lazy_host_codegen_hooks,
     resolve_host_codegen,
 )
 from .execution_backend import (  # noqa: F401
@@ -22,9 +19,16 @@ from .execution_backend import (  # noqa: F401
     allowed_backends_for_target,
     canonicalize_execution_backend,
     register_execution_backend,
-    register_lazy_execution_backends,
     resolve_execution_backend,
     resolve_execution_backend_spec,
+)
+from .module import (  # noqa: F401
+    BackendModule,
+    get_backend_module,
+    get_backend_module_for_target_kind,
+    list_backend_modules,
+    register_backend_module,
+    resolve_backend_module,
 )
 from .target import (  # noqa: F401
     auto_detect_target,
@@ -32,22 +36,3 @@ from .target import (  # noqa: F401
     register_target_detector,
     register_target_normalizer,
 )
-
-register_lazy_execution_backends("cuda", "tilelang.cuda.execution_backend")
-register_lazy_execution_backends("hip", "tilelang.rocm.execution_backend")
-register_lazy_execution_backends("c", "tilelang.cpu.execution_backend")
-register_lazy_execution_backends("llvm", "tilelang.cpu.execution_backend")
-register_lazy_execution_backends("metal", "tilelang.metal.execution_backend")
-
-register_lazy_device_codegen("cuda", "tilelang.cuda.codegen")
-register_lazy_device_codegen("hip", "tilelang.rocm.codegen")
-register_lazy_device_codegen("c", "tilelang.cpu.codegen")
-register_lazy_device_codegen("llvm", "tilelang.cpu.codegen")
-register_lazy_device_codegen("metal", "tilelang.metal.codegen")
-register_lazy_device_codegen("webgpu", "tilelang.webgpu.codegen")
-
-register_lazy_host_codegen("c", "tilelang.cpu.codegen")
-register_lazy_host_codegen("llvm", "tilelang.cpu.codegen")
-register_lazy_host_codegen_hooks("metal", "tilelang.metal.codegen")
-
-from . import common as common  # noqa: F401,E402

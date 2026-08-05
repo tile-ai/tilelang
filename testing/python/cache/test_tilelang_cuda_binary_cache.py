@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import cloudpickle
-import importlib
 import os
 
 import tilelang
@@ -37,7 +36,8 @@ def test_kernel_cache_namespace_includes_host_platform(monkeypatch):
 
 def test_cuda_binary_cache_hit_skips_nvcc_compile(monkeypatch, tmp_path):
     _set_cache_dirs(monkeypatch, tmp_path)
-    lower = importlib.import_module("tilelang.engine.lower")
+    from tilelang.cuda import backend as cuda_backend
+
     monkeypatch.setattr(env, "TILELANG_KERNEL_CACHE_USE_LIB_STAMP", "0")
 
     compile_calls = []
@@ -46,7 +46,7 @@ def test_cuda_binary_cache_hit_skips_nvcc_compile(monkeypatch, tmp_path):
         compile_calls.append((code, target_format, tuple(arch), tuple(options or ())))
         return bytearray(b"fake-cubin")
 
-    monkeypatch.setattr(lower.nvcc, "compile_cuda", fake_compile_cuda)
+    monkeypatch.setattr(cuda_backend.nvcc, "compile_cuda", fake_compile_cuda)
 
     target = Target({"kind": "cuda", "arch": "sm_90a"})
     source = 'extern "C" __global__ void kernel() {}'
@@ -56,12 +56,12 @@ def test_cuda_binary_cache_hit_skips_nvcc_compile(monkeypatch, tmp_path):
         tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ["--extra-device-vectorization"],
     }
 
-    first = lower.tilelang_callback_cuda_compile(source, target)
-    second = lower.tilelang_callback_cuda_compile(source, target)
+    first = cuda_backend.tilelang_callback_cuda_compile(source, target)
+    second = cuda_backend.tilelang_callback_cuda_compile(source, target)
     # Different compiler options (e.g. --use_fast_math) change the generated
     # SASS without changing the source, so they must NOT share a cache entry.
-    third = lower.tilelang_callback_cuda_compile(source, target, fast_math_pass_configs)
-    fourth = lower.tilelang_callback_cuda_compile(source, target, fast_math_pass_configs)
+    third = cuda_backend.tilelang_callback_cuda_compile(source, target, fast_math_pass_configs)
+    fourth = cuda_backend.tilelang_callback_cuda_compile(source, target, fast_math_pass_configs)
 
     assert bytes(first) == b"fake-cubin"
     assert bytes(second) == b"fake-cubin"
