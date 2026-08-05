@@ -9,7 +9,7 @@ TileLang language surface backend-neutral.
 The Python backend layer is split into two parts:
 
 - `tilelang/backend/`: common backend infrastructure, especially the
-  `BackendSpec` registry, component interfaces, and shared pipeline
+  `BackendModule` registry, component interfaces, and shared pipeline
   utilities.
 - `tilelang/<backend>/`: backend-owned Python implementation files, such as
   a backend registration module, pass pipelines, codegen entries, tile-op
@@ -19,14 +19,14 @@ The native side mirrors this split under `src/<backend>/`, where C++ op
 lowering, codegen, runtime modules, stubs, and backend-local CMake files live.
 `src/backend/` is reserved for shared native backend helpers.
 
-## Backend Spec
+## Backend Module
 
-`BackendSpec` is the complete, typed manifest for a backend. Each backend's
+`BackendModule` is the complete, typed manifest for a backend. Each backend's
 `backend.py` declares all compiler components in one place:
 
 ```python
 BACKEND = register_backend(
-    BackendSpec(
+    BackendModule(
         name="cuda",
         target_kinds=("cuda",),
         supports_target=is_plain_cuda_target,
@@ -43,17 +43,18 @@ BACKEND = register_backend(
 )
 ```
 
-The central registry maps each target kind to exactly one backend. Backend
-packages are initialized once during TileLang import, so the registry needs no
-import paths, loading state, or synchronization.
+The central registry maps each target kind to candidate backend modules and
+uses `supports_target` to select exactly one. Backend packages are initialized
+once during TileLang import, so the registry needs no import paths, loading
+state, or synchronization.
 
 The component objects remain focused extension interfaces, while
 `register_backend()` validates and publishes the complete manifest once.
 
-Execution modes are attached directly to `BackendSpec` as one ordered list;
+Execution modes are attached directly to `BackendModule` as one ordered list;
 list order defines the `auto` preference among matching modes.
 
-Several backend specs may share one TVM target kind when predicates make the
+Several backend modules may share one TVM target kind when predicates make the
 variants unambiguous. CUDA and CuTeDSL are separate manifests that both own the
 `cuda` kind and reference the same CUDA pipeline, while declaring different
 device codegen and execution policies.
@@ -70,7 +71,7 @@ backend = resolve_backend(target)
 mod = backend.lower(mod, target)
 ```
 
-The selected `BackendSpec` owns the pipeline; the pipeline name must match
+The selected `BackendModule` owns the pipeline; the pipeline name must match
 `target.kind.name`. `resolve_pipeline()` remains as a compatibility lookup.
 
 Device codegen follows the same ownership model after host/device splitting:
@@ -79,7 +80,7 @@ Device codegen follows the same ownership model after host/device splitting:
 device_mod = backend.codegen_device(device_mod, target, compile_device=...)
 ```
 
-Each `BackendSpec` declares one or more `DeviceCodegen` entries for its target.
+Each `BackendModule` declares one or more `DeviceCodegen` entries for its target.
 CUDA, for example, owns both the plain CUDA entry and the CuTeDSL target
 variant, while CPU owns the `c` and `llvm` entries. The engine-level lowering
 code should not keep backend-specific `target.kind.name` dispatch for device
@@ -116,7 +117,7 @@ backend-specific implementation details.
 ```text
 tilelang/backend/
   __init__.py
-  spec.py
+  module.py
   common.py
   device_codegen.py
   host_codegen.py
@@ -126,7 +127,7 @@ tilelang/backend/
     pipeline_utils.py
 ```
 
-- `spec.py` defines `BackendSpec`, its behavior methods, validation, and the
+- `module.py` defines `BackendModule`, its behavior methods, validation, and the
   target-kind ownership registry.
 - `pass_pipeline/pipeline.py` defines `PassPipeline` and its compatibility
   lookup.
@@ -178,7 +179,7 @@ tilelang/metal/
   intrinsics/
 ```
 
-The `backend.py` file contains one explicit `BackendSpec`. Component files only
+The `backend.py` file contains one explicit `BackendModule`. Component files only
 define implementations and do not mutate global registries themselves.
 
 The `pipeline.py` file should expose one complete backend pass sequence after

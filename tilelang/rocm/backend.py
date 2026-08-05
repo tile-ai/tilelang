@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from tilelang.backend.device_codegen import DeviceCodegen
 from tilelang.backend.pass_pipeline import PassPipeline
-from tilelang.backend.spec import BackendSpec, register_backend
+from tilelang.backend.module import BackendModule, register_backend
 from tilelang.contrib import hipcc
 from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
 from tilelang.rocm.target import target_get_mcpu
@@ -25,7 +25,7 @@ def tilelang_callback_hip_compile(code, target):
 
 
 BACKEND = register_backend(
-    BackendSpec(
+    BackendModule(
         name="rocm",
         target_kinds=("hip",),
         pipelines={"hip": PassPipeline("hip", pipeline.ROCMPassPipelineBody)},

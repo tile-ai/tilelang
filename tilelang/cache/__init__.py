@@ -42,7 +42,7 @@ def _resolve_cache_dispatch(
         verbose = env.get_default_verbose()
 
     from tilelang.backend.target import determine_target as _determine_target
-    from tilelang.backend.spec import resolve_backend
+    from tilelang.backend.module import resolve_backend
 
     norm_target = _determine_target(target, return_object=True)
     backend = resolve_backend(norm_target)

@@ -5,7 +5,7 @@ import re
 from tvm import tirx
 
 from tilelang.backend.device_codegen import DeviceCodegen
-from tilelang.backend.spec import BackendSpec, register_backend
+from tilelang.backend.module import BackendModule, register_backend
 from tilelang.contrib import nvcc
 from tilelang.env import CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH, env
 from tilelang.transform import PassConfigKey
@@ -120,7 +120,7 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
 
 
 BACKEND = register_backend(
-    BackendSpec(
+    BackendModule(
         name="cuda",
         target_kinds=("cuda",),
         supports_target=codegen.is_plain_cuda_target,

@@ -1,12 +1,12 @@
 """CuTeDSL backend manifest sharing the CUDA lowering pipeline."""
 
 from tilelang.backend.device_codegen import DeviceCodegen
-from tilelang.backend.spec import BackendSpec, register_backend
+from tilelang.backend.module import BackendModule, register_backend
 
 from . import codegen, execution_backend, pipeline
 
 BACKEND = register_backend(
-    BackendSpec(
+    BackendModule(
         name="cutedsl",
         target_kinds=("cuda",),
         supports_target=codegen.is_cutedsl_target,

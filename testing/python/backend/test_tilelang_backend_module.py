@@ -12,7 +12,7 @@ from tilelang.backend.host_codegen import resolve_host_codegen
 from tilelang.backend.pass_pipeline import resolve_pipeline
 
 
-def test_builtin_backend_specs_are_explicit():
+def test_builtin_backend_modules_are_explicit():
     expected = {
         "cuda": (("cuda",), ["tvm_ffi", "nvrtc", "cython"]),
         "cutedsl": (("cuda",), ["cutedsl"]),

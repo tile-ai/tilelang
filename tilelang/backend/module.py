@@ -24,7 +24,7 @@ def _freeze_components(components: Mapping[str, tuple[_T, ...]]) -> Mapping[str,
 
 
 @dataclass(frozen=True, slots=True)
-class BackendSpec:
+class BackendModule:
     """Complete Python registration manifest for one TileLang backend."""
 
     name: str
@@ -40,25 +40,25 @@ class BackendSpec:
     def __post_init__(self) -> None:
         target_kinds = tuple(self.target_kinds)
         if not self.name:
-            raise ValueError("BackendSpec.name must not be empty")
+            raise ValueError("BackendModule.name must not be empty")
         if not target_kinds or any(not kind for kind in target_kinds):
-            raise ValueError(f"BackendSpec {self.name!r} must own at least one non-empty target kind")
+            raise ValueError(f"BackendModule {self.name!r} must own at least one non-empty target kind")
         if len(set(target_kinds)) != len(target_kinds):
-            raise ValueError(f"BackendSpec {self.name!r} target kinds must be unique")
+            raise ValueError(f"BackendModule {self.name!r} target kinds must be unique")
 
         target_kind_set = set(target_kinds)
         pipelines = MappingProxyType(dict(self.pipelines))
         if set(pipelines) != target_kind_set:
-            raise ValueError(f"BackendSpec {self.name!r} must define exactly one pipeline for every target kind")
+            raise ValueError(f"BackendModule {self.name!r} must define exactly one pipeline for every target kind")
         for target_kind, pipeline in pipelines.items():
             if pipeline.name != target_kind:
-                raise ValueError(f"BackendSpec {self.name!r} pipeline {pipeline.name!r} does not match target kind {target_kind!r}")
+                raise ValueError(f"BackendModule {self.name!r} pipeline {pipeline.name!r} does not match target kind {target_kind!r}")
 
         device_codegens = _freeze_components(self.device_codegens)
         if set(device_codegens) != target_kind_set:
-            raise ValueError(f"BackendSpec {self.name!r} must define device codegen for every target kind")
+            raise ValueError(f"BackendModule {self.name!r} must define device codegen for every target kind")
         if any(not codegens for codegens in device_codegens.values()):
-            raise ValueError(f"BackendSpec {self.name!r} device codegen lists must not be empty")
+            raise ValueError(f"BackendModule {self.name!r} device codegen lists must not be empty")
 
         host_codegens = _freeze_components(self.host_codegens)
         host_codegen_hooks = _freeze_components(self.host_codegen_hooks)
@@ -68,20 +68,20 @@ class BackendSpec:
         ):
             unknown = set(components) - target_kind_set
             if unknown:
-                raise ValueError(f"BackendSpec {self.name!r} {component_name} targets are not owned by this backend: {sorted(unknown)}")
+                raise ValueError(f"BackendModule {self.name!r} {component_name} targets are not owned by this backend: {sorted(unknown)}")
             if any(not values for values in components.values()):
-                raise ValueError(f"BackendSpec {self.name!r} {component_name} lists must not be empty")
+                raise ValueError(f"BackendModule {self.name!r} {component_name} lists must not be empty")
 
         execution_backends = tuple(self.execution_backends)
         execution_names = [spec.name for spec in execution_backends]
         if not execution_backends:
-            raise ValueError(f"BackendSpec {self.name!r} must define at least one execution backend")
+            raise ValueError(f"BackendModule {self.name!r} must define at least one execution backend")
         if len(set(execution_names)) != len(execution_names):
-            raise ValueError(f"BackendSpec {self.name!r} execution backend names must be unique: {execution_names}")
+            raise ValueError(f"BackendModule {self.name!r} execution backend names must be unique: {execution_names}")
 
         callbacks = MappingProxyType(dict(self.callbacks))
         if any(not name for name in callbacks):
-            raise ValueError(f"BackendSpec {self.name!r} callback names must not be empty")
+            raise ValueError(f"BackendModule {self.name!r} callback names must not be empty")
 
         object.__setattr__(self, "target_kinds", target_kinds)
         object.__setattr__(self, "pipelines", pipelines)
@@ -171,11 +171,11 @@ class BackendSpec:
         return spec
 
 
-_BACKENDS: dict[str, BackendSpec] = {}
+_BACKENDS: dict[str, BackendModule] = {}
 _TARGET_KIND_INDEX: dict[str, list[str]] = {}
 
 
-def register_backend(backend: BackendSpec) -> BackendSpec:
+def register_backend(backend: BackendModule) -> BackendModule:
     """Validate and register every component declared by a backend manifest."""
 
     old = _BACKENDS.get(backend.name)
@@ -212,7 +212,7 @@ def register_backend(backend: BackendSpec) -> BackendSpec:
     return backend
 
 
-def get_backend(name: str) -> BackendSpec:
+def get_backend(name: str) -> BackendModule:
     try:
         return _BACKENDS[name]
     except KeyError as err:
@@ -220,11 +220,11 @@ def get_backend(name: str) -> BackendSpec:
         raise ValueError(f"Unknown backend {name!r}. Available: {available}") from err
 
 
-def list_backends() -> dict[str, BackendSpec]:
+def list_backends() -> dict[str, BackendModule]:
     return dict(_BACKENDS)
 
 
-def list_backends_for_target_kind(target_kind: str) -> tuple[BackendSpec, ...]:
+def list_backends_for_target_kind(target_kind: str) -> tuple[BackendModule, ...]:
     try:
         names = _TARGET_KIND_INDEX[target_kind]
     except KeyError as err:
@@ -233,7 +233,7 @@ def list_backends_for_target_kind(target_kind: str) -> tuple[BackendSpec, ...]:
     return tuple(_BACKENDS[name] for name in names)
 
 
-def resolve_backend(target: Target) -> BackendSpec:
+def resolve_backend(target: Target) -> BackendModule:
     candidates = [backend for backend in list_backends_for_target_kind(target.kind.name) if backend.matches(target)]
     if not candidates:
         raise ValueError(f"No backend matches target {target}")

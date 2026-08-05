@@ -3,12 +3,12 @@
 from tilelang.backend.device_codegen import DeviceCodegen
 from tilelang.backend.execution_backend import ExecutionBackendSpec
 from tilelang.backend.pass_pipeline import PassPipeline
-from tilelang.backend.spec import BackendSpec, register_backend
+from tilelang.backend.module import BackendModule, register_backend
 
 from . import codegen, pipeline
 
 BACKEND = register_backend(
-    BackendSpec(
+    BackendModule(
         name="webgpu",
         target_kinds=("webgpu",),
         pipelines={"webgpu": PassPipeline("webgpu", pipeline.WebGPUPassPipelineBody)},

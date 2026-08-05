@@ -15,7 +15,7 @@ from tvm.tirx import PrimFunc
 from tilelang import env
 from tilelang.env import resolve_pass_profile_threshold_ms
 from tilelang.autotuner.param import CompileArgs
-from tilelang.backend.spec import resolve_backend
+from tilelang.backend.module import resolve_backend
 from tilelang.engine.lower import lower_to_host_device_ir, device_codegen, host_codegen
 from tilelang.engine.param import CompiledArtifact
 from tilelang.jit.adapter import TVMFFIKernelAdapter

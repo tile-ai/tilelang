@@ -44,7 +44,7 @@ class DeviceCodegen:
 
 
 def _matching_device_codegens(target: Target) -> list[DeviceCodegen]:
-    from tilelang.backend.spec import resolve_backend
+    from tilelang.backend.module import resolve_backend
 
     backend = resolve_backend(target)
     return [codegen for codegen in backend.device_codegens[target.kind.name] if codegen.matches(target)]
@@ -57,8 +57,8 @@ def allowed_device_codegens_for_target(target: Target) -> list[str]:
 
 
 def resolve_device_codegen(target: Target) -> DeviceCodegen:
-    """Compatibility lookup; core compilation uses BackendSpec directly."""
-    from tilelang.backend.spec import resolve_backend
+    """Compatibility lookup; core compilation uses BackendModule directly."""
+    from tilelang.backend.module import resolve_backend
 
     backend = resolve_backend(target)
     return backend.get_device_codegen(target)

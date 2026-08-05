@@ -32,8 +32,8 @@ class ExecutionBackendSpec:
 
 
 def allowed_backends_for_target(target: Target, *, include_unavailable: bool = True) -> list[str]:
-    """Compatibility lookup; core compilation uses BackendSpec directly."""
-    from tilelang.backend.spec import resolve_backend
+    """Compatibility lookup; core compilation uses BackendModule directly."""
+    from tilelang.backend.module import resolve_backend
 
     backend = resolve_backend(target)
     return list(backend.allowed_execution_backends(target, include_unavailable=include_unavailable))
@@ -44,8 +44,8 @@ def resolve_execution_backend(requested: str | None, target: Target) -> str:
 
 
 def resolve_execution_backend_spec(requested: str | None, target: Target) -> ExecutionBackendSpec:
-    """Compatibility lookup; core compilation uses BackendSpec directly."""
-    from tilelang.backend.spec import resolve_backend
+    """Compatibility lookup; core compilation uses BackendModule directly."""
+    from tilelang.backend.module import resolve_backend
 
     backend = resolve_backend(target)
     return backend.resolve_execution_backend(requested, target)

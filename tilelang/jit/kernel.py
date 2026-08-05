@@ -9,7 +9,7 @@ import tilelang
 from tilelang import tvm
 from tilelang import env
 from tilelang.env import resolve_pass_profile_threshold_ms
-from tilelang.backend.spec import resolve_backend
+from tilelang.backend.module import resolve_backend
 from tvm.target import Target
 from tilelang.engine.param import CompiledArtifact, KernelParam
 from tilelang.jit.adapter import (

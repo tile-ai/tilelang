@@ -10,7 +10,7 @@ from tvm.ir import CallingConv
 from tvm.target import Target
 from tilelang.engine.param import KernelParam, CompiledArtifact
 from tilelang.engine.semantic_check import PreLowerSemanticCheck
-from tilelang.backend.spec import BackendSpec, resolve_backend
+from tilelang.backend.module import BackendModule, resolve_backend
 from tilelang.backend.target import determine_target
 
 
@@ -69,8 +69,8 @@ def host_codegen(
     target_host: Target,
     target: Target,
     *,
-    backend: BackendSpec,
-    host_backend: BackendSpec,
+    backend: BackendModule,
+    host_backend: BackendModule,
 ) -> tvm.IRModule:
     """Generate host-side code from the lowered IR module.
 
@@ -105,12 +105,12 @@ def _prepare_device_codegen_mod(device_mod: tvm.IRModule) -> tvm.IRModule:
     return device_mod
 
 
-def device_codegen(device_mod: tvm.IRModule, target: Target, *, backend: BackendSpec) -> tvm.IRModule:
+def device_codegen(device_mod: tvm.IRModule, target: Target, *, backend: BackendModule) -> tvm.IRModule:
     device_mod = _prepare_device_codegen_mod(device_mod)
     return backend.codegen_device(device_mod, target, compile_device=True)
 
 
-def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target, *, backend: BackendSpec) -> tvm.IRModule:
+def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target, *, backend: BackendModule) -> tvm.IRModule:
     device_mod = _prepare_device_codegen_mod(device_mod)
     return backend.codegen_device(device_mod, target, compile_device=False)
 

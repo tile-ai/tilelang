@@ -55,14 +55,14 @@ class HostCodegenHook:
 
 
 def _matching_host_codegens(target_host: Target) -> list[HostCodegen]:
-    from tilelang.backend.spec import resolve_backend
+    from tilelang.backend.module import resolve_backend
 
     backend = resolve_backend(target_host)
     return [codegen for codegen in backend.host_codegens.get(target_host.kind.name, ()) if codegen.matches(target_host)]
 
 
 def _matching_host_codegen_hooks(target: Target) -> list[HostCodegenHook]:
-    from tilelang.backend.spec import resolve_backend
+    from tilelang.backend.module import resolve_backend
 
     backend = resolve_backend(target)
     return [hook for hook in backend.host_codegen_hooks.get(target.kind.name, ()) if hook.matches(target)]
@@ -75,19 +75,19 @@ def allowed_host_codegens_for_target(target_host: Target) -> list[str]:
 
 
 def apply_host_codegen_hooks(mod: IRModule, target_host: Target, target: Target | None) -> IRModule:
-    """Compatibility helper; core compilation uses BackendSpec directly."""
+    """Compatibility helper; core compilation uses BackendModule directly."""
 
     if target is None:
         return mod
-    from tilelang.backend.spec import resolve_backend
+    from tilelang.backend.module import resolve_backend
 
     backend = resolve_backend(target)
     return backend.preprocess_host_codegen(mod, target_host, target)
 
 
 def resolve_host_codegen(target_host: Target) -> HostCodegen:
-    """Compatibility lookup; core compilation uses BackendSpec directly."""
-    from tilelang.backend.spec import resolve_backend
+    """Compatibility lookup; core compilation uses BackendModule directly."""
+    from tilelang.backend.module import resolve_backend
 
     backend = resolve_backend(target_host)
     return backend.get_host_codegen(target_host)

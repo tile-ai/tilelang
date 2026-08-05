@@ -114,7 +114,7 @@ def test_auto_target_detector_falls_through_none_result():
         target_registry._TARGET_DETECTORS.update(old_detectors)
 
 
-def test_backend_spec_resolves_execution_policy():
+def test_backend_module_resolves_execution_policy():
     backend = get_backend("cpu")
     c_target = Target("c")
     llvm_target = Target("llvm")

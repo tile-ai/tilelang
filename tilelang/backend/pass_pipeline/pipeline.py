@@ -36,7 +36,7 @@ class PassPipeline:
 
 def get_pipeline(name: str) -> PassPipeline:
     """Compatibility lookup for the pipeline owned by a target kind."""
-    from tilelang.backend.spec import list_backends_for_target_kind
+    from tilelang.backend.module import list_backends_for_target_kind
 
     pipelines = [backend.pipelines[name] for backend in list_backends_for_target_kind(name)]
     first = pipelines[0]
@@ -46,8 +46,8 @@ def get_pipeline(name: str) -> PassPipeline:
 
 
 def resolve_pipeline(target: Target) -> PassPipeline:
-    """Compatibility lookup; core compilation uses BackendSpec directly."""
-    from tilelang.backend.spec import resolve_backend
+    """Compatibility lookup; core compilation uses BackendModule directly."""
+    from tilelang.backend.module import resolve_backend
 
     backend = resolve_backend(target)
     return backend.get_pipeline(target)

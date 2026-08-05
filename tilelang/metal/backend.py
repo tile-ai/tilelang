@@ -3,12 +3,12 @@
 from tilelang.backend.device_codegen import DeviceCodegen
 from tilelang.backend.host_codegen import HostCodegenHook
 from tilelang.backend.pass_pipeline import PassPipeline
-from tilelang.backend.spec import BackendSpec, register_backend
+from tilelang.backend.module import BackendModule, register_backend
 
 from . import codegen, execution_backend, pipeline
 
 BACKEND = register_backend(
-    BackendSpec(
+    BackendModule(
         name="metal",
         target_kinds=("metal",),
         pipelines={"metal": PassPipeline("metal", pipeline.MetalPassPipelineBody)},

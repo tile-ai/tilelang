@@ -18,8 +18,8 @@ from .execution_backend import (  # noqa: F401
     resolve_execution_backend,
     resolve_execution_backend_spec,
 )
-from .spec import (  # noqa: F401
-    BackendSpec,
+from .module import (  # noqa: F401
+    BackendModule,
     get_backend,
     list_backends,
     list_backends_for_target_kind,

@@ -479,7 +479,7 @@ class AutotuneResult:
         verbose = compile_args.verbose
         # Normalize target and resolve execution backend for loading
         from tilelang.backend.target import determine_target as _determine_target
-        from tilelang.backend.spec import resolve_backend
+        from tilelang.backend.module import resolve_backend
 
         norm_target = _determine_target(compile_args.target, return_object=True)
         requested_backend = compile_args.execution_backend
