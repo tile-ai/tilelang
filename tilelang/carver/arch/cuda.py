@@ -5,21 +5,22 @@ from tvm.target import Target
 from .arch_base import TileDevice
 from .driver import cuda_driver
 
-# Matches the numeric compute capability of an SM arch string, tolerating the
-# trailing feature-set letters nvcc and CUTLASS use for Hopper and newer
-# ("sm_90a", "sm_100a", "sm_103a").
-_SM_VERSION_PATTERN = re.compile(r"^(\d+)[a-zA-Z]*$")
+# Matches an SM arch string in full: one optional "sm_" prefix, the numeric
+# compute capability, then the trailing feature-set letters nvcc and CUTLASS use
+# for Hopper and newer ("sm_90a", "sm_100a", "sm_103a"). Anchoring the prefix
+# here rather than stripping it first means a malformed value like "sm_sm_90"
+# has no way to slip through.
+_SM_VERSION_PATTERN = re.compile(r"^(?:sm_)?(\d+)[a-zA-Z]*$")
 
 
 def check_sm_version(arch: str) -> int:
     """Return the numeric compute capability of an SM arch string, or -1.
 
     ``sm_90`` and ``sm_90a`` both describe compute capability 9.0, so both
-    parse to 90. Anything that does not start with digits, such as a HIP
-    ``gfx942`` target, is not a CUDA arch and returns -1.
+    parse to 90. Anything that is not a well formed SM arch, such as a HIP
+    ``gfx942`` target, returns -1.
     """
-    sm_version = arch.replace("sm_", "")
-    match = _SM_VERSION_PATTERN.match(sm_version)
+    match = _SM_VERSION_PATTERN.match(arch)
     return int(match.group(1)) if match else -1
 
 

@@ -45,6 +45,15 @@ def test_check_sm_version_rejects_non_cuda_arch():
     assert check_sm_version("") == -1
 
 
+def test_check_sm_version_rejects_malformed_prefix():
+    # Only one leading "sm_" is part of the grammar. Stripping every occurrence
+    # instead would let these read as valid compute capabilities.
+    assert check_sm_version("sm_sm_90") == -1
+    assert check_sm_version("xsm_90") == -1
+    assert check_sm_version("sm_90_sm_80") == -1
+    assert check_sm_version("90sm_") == -1
+
+
 def _cuda_arch_with_sm_version(sm_version: int) -> CUDA:
     """Build a CUDA arch carrying ``sm_version`` without touching a device.
 
