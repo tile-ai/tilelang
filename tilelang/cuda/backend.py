@@ -5,6 +5,7 @@ import re
 from tvm import tirx
 
 from tilelang.backend.device_codegen import DeviceCodegen
+from tilelang.backend.host_codegen import STANDARD_HOST_CODEGENS
 from tilelang.backend.module import BackendModule, register_backend
 from tilelang.contrib import nvcc
 from tilelang.env import CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH, env
@@ -135,6 +136,7 @@ BACKEND = register_backend(
             )
         },
         execution_backends=execution_backend.CUDA_EXECUTION_BACKENDS,
+        host_codegens=STANDARD_HOST_CODEGENS,
         callbacks={
             "tilelang_callback_cuda_validate": tilelang_callback_cuda_validate,
             "tilelang_callback_cuda_compile": tilelang_callback_cuda_compile,

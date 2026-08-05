@@ -2,6 +2,7 @@
 
 from tilelang.backend.device_codegen import DeviceCodegen
 from tilelang.backend.execution_backend import ExecutionBackendSpec
+from tilelang.backend.host_codegen import STANDARD_HOST_CODEGENS
 from tilelang.backend.pass_pipeline import PassPipeline
 from tilelang.backend.module import BackendModule, register_backend
 
@@ -22,5 +23,6 @@ BACKEND = register_backend(
             )
         },
         execution_backends=(ExecutionBackendSpec("tvm_ffi", enable_host_codegen=True, enable_device_compile=True),),
+        host_codegens=STANDARD_HOST_CODEGENS,
     )
 )

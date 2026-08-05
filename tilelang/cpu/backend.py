@@ -1,7 +1,7 @@
 """CPU backend manifest."""
 
 from tilelang.backend.device_codegen import DeviceCodegen
-from tilelang.backend.host_codegen import HostCodegen
+from tilelang.backend.host_codegen import STANDARD_HOST_CODEGENS
 from tilelang.backend.pass_pipeline import PassPipeline
 from tilelang.backend.module import BackendModule, register_backend
 
@@ -25,10 +25,7 @@ BACKEND = register_backend(
                 ),
             ),
         },
-        host_codegens={
-            "c": (HostCodegen("c", build=codegen.build_host_c),),
-            "llvm": (HostCodegen("llvm", build=codegen.build_host_llvm),),
-        },
+        host_codegens=STANDARD_HOST_CODEGENS,
         execution_backends=execution_backend.EXECUTION_BACKENDS,
     )
 )

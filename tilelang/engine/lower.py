@@ -70,7 +70,6 @@ def host_codegen(
     target: Target,
     *,
     backend: BackendModule,
-    host_backend: BackendModule,
 ) -> tvm.IRModule:
     """Generate host-side code from the lowered IR module.
 
@@ -95,7 +94,7 @@ def host_codegen(
     if combine_context_call is not None:
         host_mod = combine_context_call()(host_mod)
     host_mod = backend.preprocess_host_codegen(host_mod, target_host, target)
-    return host_backend.codegen_host(host_mod, target_host)
+    return backend.codegen_host(host_mod, target_host)
 
 
 def _prepare_device_codegen_mod(device_mod: tvm.IRModule) -> tvm.IRModule:
@@ -208,7 +207,6 @@ def _lower_impl(
             target_host,
             target=target,
             backend=backend,
-            host_backend=resolve_backend(target_host),
         )
         host_mod.import_module(codegen_mod)
         return CompiledArtifact(

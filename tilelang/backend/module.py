@@ -62,15 +62,15 @@ class BackendModule:
 
         host_codegens = _freeze_components(self.host_codegens)
         host_codegen_hooks = _freeze_components(self.host_codegen_hooks)
-        for component_name, components in (
-            ("host codegen", host_codegens),
-            ("host codegen hook", host_codegen_hooks),
-        ):
-            unknown = set(components) - target_kind_set
-            if unknown:
-                raise ValueError(f"BackendModule {self.name!r} {component_name} targets are not owned by this backend: {sorted(unknown)}")
-            if any(not values for values in components.values()):
-                raise ValueError(f"BackendModule {self.name!r} {component_name} lists must not be empty")
+        if any(not values for values in host_codegens.values()):
+            raise ValueError(f"BackendModule {self.name!r} host codegen lists must not be empty")
+        unknown_hook_targets = set(host_codegen_hooks) - target_kind_set
+        if unknown_hook_targets:
+            raise ValueError(
+                f"BackendModule {self.name!r} host codegen hook targets are not owned by this backend: {sorted(unknown_hook_targets)}"
+            )
+        if any(not values for values in host_codegen_hooks.values()):
+            raise ValueError(f"BackendModule {self.name!r} host codegen hook lists must not be empty")
 
         execution_backends = tuple(self.execution_backends)
         execution_names = [spec.name for spec in execution_backends]
@@ -78,6 +78,8 @@ class BackendModule:
             raise ValueError(f"BackendModule {self.name!r} must define at least one execution backend")
         if len(set(execution_names)) != len(execution_names):
             raise ValueError(f"BackendModule {self.name!r} execution backend names must be unique: {execution_names}")
+        if any(spec.enable_host_codegen for spec in execution_backends) and not host_codegens:
+            raise ValueError(f"BackendModule {self.name!r} enables host codegen but defines no host codegen targets")
 
         callbacks = MappingProxyType(dict(self.callbacks))
         if any(not name for name in callbacks):
@@ -119,7 +121,7 @@ class BackendModule:
         return self.get_device_codegen(target).lower(mod, target, compile_device=compile_device)
 
     def get_host_codegen(self, target_host: Target) -> HostCodegen:
-        target_kind = self._require_target(target_host)
+        target_kind = target_host.kind.name
         matches = [codegen for codegen in self.host_codegens.get(target_kind, ()) if codegen.matches(target_host)]
         if not matches:
             raise ValueError(f"Backend {self.name!r} has no host codegen matching target {target_host}")

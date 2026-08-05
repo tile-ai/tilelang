@@ -1,7 +1,7 @@
 """Metal backend manifest."""
 
 from tilelang.backend.device_codegen import DeviceCodegen
-from tilelang.backend.host_codegen import HostCodegenHook
+from tilelang.backend.host_codegen import HostCodegenHook, STANDARD_HOST_CODEGENS
 from tilelang.backend.pass_pipeline import PassPipeline
 from tilelang.backend.module import BackendModule, register_backend
 
@@ -23,5 +23,6 @@ BACKEND = register_backend(
         },
         host_codegen_hooks={"metal": (HostCodegenHook("metal_context", codegen.mark_host_metal_context),)},
         execution_backends=execution_backend.EXECUTION_BACKENDS,
+        host_codegens=STANDARD_HOST_CODEGENS,
     )
 )

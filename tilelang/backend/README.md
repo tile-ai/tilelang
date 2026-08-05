@@ -81,22 +81,21 @@ device_mod = backend.codegen_device(device_mod, target, compile_device=...)
 ```
 
 Each `BackendModule` declares one or more `DeviceCodegen` entries for its target.
-CUDA, for example, owns both the plain CUDA entry and the CuTeDSL target
-variant, while CPU owns the `c` and `llvm` entries. The engine-level lowering
-code should not keep backend-specific `target.kind.name` dispatch for device
-codegen.
+CUDA and CuTeDSL declare different codegen entries while sharing the CUDA
+pipeline; CPU owns the `c` and `llvm` entries. The engine-level lowering code
+should not keep backend-specific `target.kind.name` dispatch for device codegen.
 
 Host codegen is resolved from the host target in the same style:
 
 ```text
 host_mod = backend.preprocess_host_codegen(host_mod, target_host, target)
-host_mod = host_backend.codegen_host(host_mod, target_host)
+host_mod = backend.codegen_host(host_mod, target_host)
 ```
 
-Host build entries are declared by the backend that owns the host target, such as
-`tilelang/cpu` for `c` and `llvm`. Device backends may also register host
-codegen hooks for target-specific host preparation; Metal uses this to mark
-host functions that need Metal runtime context.
+Backends that enable host codegen explicitly reference the shared `c/llvm`
+host-codegen definitions. Device-specific host preparation remains on the same
+backend module; Metal uses this to mark functions requiring Metal runtime
+context.
 
 ## Target Registration
 

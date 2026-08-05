@@ -85,6 +85,8 @@ def test_backend_methods_are_the_primary_component_interface(target_kind: str, b
     assert backend.allowed_execution_backends(target) == tuple(allowed_backends_for_target(target))
     if target_kind in {"c", "llvm"}:
         assert backend.get_host_codegen(target) is resolve_host_codegen(target)
+    if any(spec.enable_host_codegen for spec in backend.execution_backends):
+        assert backend.get_host_codegen(tvm.target.Target("c")).name == "c"
 
 
 def test_backend_owns_compile_callbacks():

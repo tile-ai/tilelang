@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from tvm import IRModule
 from tvm.target import Target
@@ -54,11 +55,16 @@ class HostCodegenHook:
         return self.apply(mod, target_host, target)
 
 
-def _matching_host_codegens(target_host: Target) -> list[HostCodegen]:
-    from tilelang.backend.module import resolve_backend
+STANDARD_HOST_CODEGENS: Mapping[str, tuple[HostCodegen, ...]] = MappingProxyType(
+    {
+        "c": (HostCodegen("c", build=global_func_host_codegen("target.build.tilelang_c_host")),),
+        "llvm": (HostCodegen("llvm", build=global_func_host_codegen("target.build.llvm")),),
+    }
+)
 
-    backend = resolve_backend(target_host)
-    return [codegen for codegen in backend.host_codegens.get(target_host.kind.name, ()) if codegen.matches(target_host)]
+
+def _matching_host_codegens(target_host: Target) -> list[HostCodegen]:
+    return [codegen for codegen in STANDARD_HOST_CODEGENS.get(target_host.kind.name, ()) if codegen.matches(target_host)]
 
 
 def _matching_host_codegen_hooks(target: Target) -> list[HostCodegenHook]:
@@ -86,8 +92,8 @@ def apply_host_codegen_hooks(mod: IRModule, target_host: Target, target: Target 
 
 
 def resolve_host_codegen(target_host: Target) -> HostCodegen:
-    """Compatibility lookup; core compilation uses BackendModule directly."""
-    from tilelang.backend.module import resolve_backend
-
-    backend = resolve_backend(target_host)
-    return backend.get_host_codegen(target_host)
+    """Compatibility lookup for the standard c/llvm host codegen."""
+    matches = _matching_host_codegens(target_host)
+    if not matches:
+        raise ValueError(f"No standard host codegen matches target {target_host}")
+    return matches[0]
