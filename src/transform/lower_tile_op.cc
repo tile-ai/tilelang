@@ -1387,7 +1387,9 @@ private:
     // the body, buffers may have been remapped via var_remap_. We need to find
     // the original var to check against reducer_info.
     bool has_reducer = false;
-    Array<Buffer> canonical_reducer_buffers;
+    // Stores to buffers in this list must execute only for REP=0 of the
+    // current T.Parallel loop layout.
+    Array<Buffer> fully_replicated_reducer_buffers;
     PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
       if (const auto *store = obj.as<BufferStoreNode>()) {
         Var data_var = store->buffer->data;
@@ -1403,7 +1405,7 @@ private:
         if (reducer_info.count(original_var)) {
           has_reducer = true;
           if (reducer_info[original_var]->rep == ReducerRepType::ALL) {
-            canonical_reducer_buffers.push_back(store->buffer);
+            fully_replicated_reducer_buffers.push_back(store->buffer);
           }
         }
       }
@@ -1431,7 +1433,7 @@ private:
     Stmt lowered = LowerParallelLoop(
         for_node, loop_layout, CurrentThreadIndex(), analyzer_, layout_map_,
         predicate, parallel_loop, should_vectorize, require_padding_guard,
-        canonical_reducer_buffers);
+        fully_replicated_reducer_buffers);
 
     // Only parallel-loop lowering needs PTX cp.async injection. Thread-level
     // lowering does not require converting eligible global->shared copies to

@@ -37,10 +37,10 @@ namespace tl {
 
 using namespace tirx;
 
-For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
-                  const Fragment &loop_layout,
-                  bool require_padding_guard = false,
-                  const ffi::Array<Buffer> &canonical_reducer_buffers = {});
+For PartitionLoop(
+    For op, PrimExpr thread_index, arith::Analyzer *analyzer,
+    const Fragment &loop_layout, bool require_padding_guard = false,
+    const ffi::Array<Buffer> &fully_replicated_reducer_buffers = {});
 
 Fragment PlanLoopPartition(const For &op, size_t num_thread,
                            int vectorize_size);
@@ -70,8 +70,8 @@ For PragmaUnrollLoop(For stmt);
  * \param should_vectorize Whether to vectorize the loop. False when reducers
  *        are present or when there are no non-local buffer accesses.
  *        (default true)
- * \param canonical_reducer_buffers Fully replicated reducer buffers whose
- *        stores must execute only on the canonical loop replica.
+ * \param fully_replicated_reducer_buffers Reducer buffers whose stores execute
+ *        only for REP=0 of the current loop layout.
  * \return The lowered statement.
  */
 Stmt LowerParallelLoop(
@@ -80,7 +80,7 @@ Stmt LowerParallelLoop(
     ffi::Optional<PrimExpr> predicate = ffi::Optional<PrimExpr>(),
     bool parallel_loop = true, bool should_vectorize = true,
     bool require_padding_guard = false,
-    const ffi::Array<Buffer> &canonical_reducer_buffers = {});
+    const ffi::Array<Buffer> &fully_replicated_reducer_buffers = {});
 
 } // namespace tl
 } // namespace tvm

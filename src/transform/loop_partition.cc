@@ -92,7 +92,7 @@ private:
 // Rewrite the parallel loop into a common loop, which is mapped to threads
 For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
                   const Fragment &loop_layout, bool require_padding_guard,
-                  const Array<Buffer> &canonical_reducer_buffers) {
+                  const Array<Buffer> &fully_replicated_reducer_buffers) {
   ICHECK(loop_layout.defined());
   ICHECK(thread_index.defined());
   int old_loop_depth = loop_layout->InputDim();
@@ -171,13 +171,17 @@ For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
         analyzer->Simplify(replicate_index < replicate_extent);
     guard = And(guard, And(lower_bound, upper_bound));
   }
-  if (!canonical_reducer_buffers.empty()) {
+  if (!fully_replicated_reducer_buffers.empty()) {
     ICHECK_GT(indices.size(), static_cast<size_t>(old_loop_depth));
-    PrimExpr canonical_replica = analyzer->Simplify(EQ(
+    // InverseWithLevel appends REP after the original loop indices, so
+    // indices[old_loop_depth] is REP. Stores to buffers in this list execute
+    // only for REP=0.
+    PrimExpr is_replica_zero = analyzer->Simplify(EQ(
         indices[old_loop_depth], make_zero(indices[old_loop_depth].dtype())));
-    if (!analyzer->CanProve(canonical_replica)) {
+    if (!analyzer->CanProve(is_replica_zero)) {
+      // Rewrite with IfThenElse statement
       body = ReducerStoreGuarder::Rewrite(
-          std::move(body), canonical_reducer_buffers, canonical_replica);
+          std::move(body), fully_replicated_reducer_buffers, is_replica_zero);
     }
   }
   PrimExpr simplified_guard = analyzer->Simplify(guard);
@@ -304,7 +308,7 @@ Stmt LowerParallelLoop(For loop, const Fragment &loop_layout,
                        const LayoutMap &layout_map,
                        Optional<PrimExpr> predicate, bool parallel_loop,
                        bool should_vectorize, bool require_padding_guard,
-                       const Array<Buffer> &canonical_reducer_buffers) {
+                       const Array<Buffer> &fully_replicated_reducer_buffers) {
   // Save analyzer state to prevent conflicted bindings during vectorization
   auto saved_analyzer = analyzer->Clone();
 
@@ -324,7 +328,7 @@ Stmt LowerParallelLoop(For loop, const Fragment &loop_layout,
   if (parallel_loop) {
     result_loop =
         PartitionLoop(result_loop, thread_index, analyzer, loop_layout,
-                      require_padding_guard, canonical_reducer_buffers);
+                      require_padding_guard, fully_replicated_reducer_buffers);
   }
 
   // Step 2: Vectorize the loop (if requested)
