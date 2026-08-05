@@ -75,6 +75,11 @@ public:
   cute::Layout rest_domain;   // issue -> flat logical tile index of origin
   int64_t num_issues;         // size(rest_domain)
   int64_t vals_per_issue;     // registers per thread, per issue
+  // Datapaths of a warp's sub-partition the tile occupies -- 32, or 16 for a
+  // PTX Layout F fragment.  This is the number the wrapper is named after:
+  // 16 means the atom is issued once per warp instead of being duplicated
+  // onto the high datapaths.
+  int64_t datapaths_per_warp;
 
   static void RegisterReflection();
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Tcgen05CopyPlan", Tcgen05CopyPlanNode,
@@ -85,7 +90,7 @@ class Tcgen05CopyPlan : public ffi::ObjectRef {
 public:
   TVM_DLL Tcgen05CopyPlan(cute::Layout fragment, int64_t num_chunks_each_wg,
                           cute::Layout rest_domain, int64_t num_issues,
-                          int64_t vals_per_issue);
+                          int64_t vals_per_issue, int64_t datapaths_per_warp);
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Tcgen05CopyPlan, ffi::ObjectRef,
                                              Tcgen05CopyPlanNode);
 };
@@ -104,9 +109,13 @@ public:
 //
 // Returns a null ref when this instruction/warpgroup arrangement cannot
 // express the tile's chunks bijectively.
+// `values_per_column` is how many of the tile's columns share one b32 column
+// -- 1 for 32-bit values or a tile already stated in b32 columns.  It is the
+// one thing a value-column layout cannot say about itself.
 Tcgen05CopyPlan ExpandTcgen05Layout(const Tcgen05Meta &meta,
                                     const cute::Layout &tmem_tile,
-                                    int num_threads);
+                                    int num_threads,
+                                    int64_t values_per_column = 1);
 
 // Convert a fragment (logical coord -> (thread@0, value@1), like
 // Tcgen05CopyPlan::fragment) into a TileLang Fragment over its top-level
