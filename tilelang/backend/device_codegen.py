@@ -1,4 +1,4 @@
-"""Device codegen registry shared by backend packages."""
+"""Device codegen component types and helpers."""
 
 from __future__ import annotations
 

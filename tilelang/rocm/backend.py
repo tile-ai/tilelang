@@ -12,6 +12,8 @@ from . import codegen, execution_backend, pipeline
 
 
 def tilelang_callback_hip_compile(code, target):
+    """Compile generated HIP source into an HSACO binary."""
+
     return hipcc.compile_hip(
         code,
         target_format="hsaco",

@@ -139,7 +139,14 @@ def lower_with_context(
     enable_host_codegen: bool = False,
     enable_device_compile: bool = False,
 ) -> CompiledArtifact:
-    """Compile using an existing context without resolving backend state again."""
+    """Compile using an existing context without resolving backend state again.
+
+    ``enable_host_codegen`` builds the host runtime module when true. It is
+    disabled by default because JIT adapters provide their own host-side
+    integration. ``enable_device_compile`` similarly controls whether device
+    code is compiled at this stage; JIT adapters compile it separately by
+    default.
+    """
 
     with tvm.arith.Z3ContextScope():
         return _lower_with_context_impl(
@@ -201,7 +208,14 @@ def lower(
     enable_host_codegen: bool = False,
     enable_device_compile: bool = False,
 ) -> CompiledArtifact:
-    """Public compile entry that creates exactly one backend context."""
+    """Compile after resolving exactly one backend context.
+
+    ``enable_host_codegen`` builds the host runtime module when true. It is
+    disabled by default because JIT adapters provide their own host-side
+    integration. ``enable_device_compile`` similarly controls whether device
+    code is compiled at this stage; JIT adapters compile it separately by
+    default.
+    """
 
     context = create_backend_context(target, target_host, "auto")
     return lower_with_context(

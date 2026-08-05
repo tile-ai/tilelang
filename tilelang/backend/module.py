@@ -1,3 +1,5 @@
+"""Backend module registration and per-compilation context resolution."""
+
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
@@ -90,6 +92,8 @@ class BackendModule:
         object.__setattr__(self, "callbacks", callbacks)
 
     def matches(self, target: Target) -> bool:
+        """Return whether this backend module owns the target."""
+
         if target.kind.name not in self.target_kinds:
             return False
         return self.supports_target(target) if self.supports_target is not None else True
@@ -101,19 +105,29 @@ class BackendModule:
         return target_kind
 
     def get_pipeline(self, target: Target) -> PassPipeline:
+        """Return the lowering pipeline declared for the target."""
+
         return self.pipelines[self._require_target(target)]
 
     def lower(self, mod: IRModule, target: Target) -> IRModule:
+        """Run this backend's lowering pipeline for the target."""
+
         return self.get_pipeline(target).lower(mod, target)
 
     def get_device_codegen(self, target: Target) -> DeviceCodegen:
+        """Return the device codegen declared for the target."""
+
         target_kind = self._require_target(target)
         return self.device_codegens[target_kind]
 
     def codegen_device(self, mod: IRModule, target: Target, *, compile_device: bool) -> IRModule:
+        """Generate device code for the target."""
+
         return self.get_device_codegen(target).lower(mod, target, compile_device=compile_device)
 
     def get_host_codegen(self, target_host: Target) -> HostCodegen:
+        """Return the host codegen declared for the host target."""
+
         target_kind = target_host.kind.name
         codegen = self.host_codegens.get(target_kind)
         if codegen is None:
@@ -121,15 +135,21 @@ class BackendModule:
         return codegen
 
     def codegen_host(self, mod: IRModule, target_host: Target) -> IRModule:
+        """Generate host code for the host target."""
+
         return self.get_host_codegen(target_host).lower(mod, target_host)
 
     def preprocess_host_codegen(self, mod: IRModule, target_host: Target, target: Target) -> IRModule:
+        """Apply backend hooks before host code generation."""
+
         target_kind = self._require_target(target)
         for hook in self.host_codegen_hooks.get(target_kind, ()):
             mod = hook.lower(mod, target_host, target)
         return mod
 
     def allowed_execution_backends(self, target: Target, *, include_unavailable: bool = True) -> tuple[str, ...]:
+        """Return execution backend names supported by the target."""
+
         self._require_target(target)
         specs = [spec for spec in self.execution_backends if spec.matches(target)]
         if not include_unavailable:
@@ -137,6 +157,8 @@ class BackendModule:
         return tuple(spec.name for spec in specs)
 
     def resolve_execution_backend(self, requested: str | None, target: Target) -> ExecutionBackendSpec:
+        """Resolve an execution backend policy for the target."""
+
         self._require_target(target)
         requested_name = None if requested is None else str(requested).lower()
         all_specs = [spec for spec in self.execution_backends if spec.matches(target)]
@@ -182,20 +204,30 @@ class BackendContext:
 
     @property
     def name(self) -> str:
+        """Return the selected backend module name."""
+
         return self.module.name
 
     def lower(self, mod: IRModule) -> IRModule:
+        """Run the selected backend's lowering pipeline."""
+
         return self.module.lower(mod, self.target)
 
     def codegen_device(self, mod: IRModule, *, compile_device: bool | None = None) -> IRModule:
+        """Generate device code using the selected execution policy by default."""
+
         if compile_device is None:
             compile_device = self.execution_backend.enable_device_compile
         return self.module.codegen_device(mod, self.target, compile_device=compile_device)
 
     def preprocess_host_codegen(self, mod: IRModule) -> IRModule:
+        """Apply selected-backend hooks before host code generation."""
+
         return self.module.preprocess_host_codegen(mod, self.target_host, self.target)
 
     def codegen_host(self, mod: IRModule) -> IRModule:
+        """Generate host code for the resolved host target."""
+
         return self.module.codegen_host(mod, self.target_host)
 
 
@@ -241,6 +273,8 @@ def register_backend(backend: BackendModule) -> BackendModule:
 
 
 def get_backend(name: str) -> BackendModule:
+    """Return a registered backend module by name."""
+
     try:
         return _BACKENDS[name]
     except KeyError as err:
@@ -249,6 +283,8 @@ def get_backend(name: str) -> BackendModule:
 
 
 def list_backends() -> dict[str, BackendModule]:
+    """Return a copy of the registered backend modules."""
+
     return dict(_BACKENDS)
 
 

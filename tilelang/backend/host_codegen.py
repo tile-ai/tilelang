@@ -16,6 +16,8 @@ HostCodegenHookFunc = Callable[[IRModule, Target, Target], IRModule]
 
 
 def global_func_host_codegen(global_func_name: str) -> HostCodegenFunc:
+    """Create a host codegen callback backed by a TVM global function."""
+
     def build(mod: IRModule, target_host: Target) -> IRModule:
         return tvm.ffi.get_global_func(global_func_name)(mod, target_host)
 
@@ -24,6 +26,8 @@ def global_func_host_codegen(global_func_name: str) -> HostCodegenFunc:
 
 @dataclass(frozen=True, slots=True)
 class HostCodegen:
+    """Host codegen entry point for one host target variant."""
+
     name: str
     build: HostCodegenFunc
 
@@ -33,6 +37,8 @@ class HostCodegen:
 
 @dataclass(frozen=True, slots=True)
 class HostCodegenHook:
+    """Device-backend hook applied before host codegen build."""
+
     name: str
     apply: HostCodegenHookFunc
 

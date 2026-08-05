@@ -11,8 +11,8 @@ LowerFunc = Callable[[IRModule, Target], IRModule]
 class PassPipeline:
     """Lowering pass pipeline for a specific backend.
 
-    Each backend should register its own Pipeline so that the compiler can
-    resolve the correct pass sequence from the target at runtime.
+    Each :class:`BackendModule` declares the pipelines it owns so the compiler
+    can select the correct pass sequence from the resolved backend context.
     """
 
     def __init__(self, name: str, lower: LowerFunc):
