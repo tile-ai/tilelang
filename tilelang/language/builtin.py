@@ -1457,13 +1457,33 @@ def tcgen05_cp_warpx4(smem_src, tmem_dst, tmem_col_offset=0, *, use_2cta: bool =
 
     The helper lowers to one or more ``tcgen05.cp.cta_group::{1,2}.32x128b.warpx4``
     instructions. For 1D packed ``uint32`` scale buffers, each 128-word chunk maps to
-    4 TMEM columns and the column offset is advanced automatically.
+    4 TMEM columns and the column offset is advanced automatically. A staged TMEM
+    destination may be passed as ``scale_tmem[stage, :, :]``; leading modes are
+    folded into columns using the canonical scale-factor TMEM layout.
     """
     num_chunks = _tcgen05_num_smem_chunks(smem_src, 128)
     if isinstance(tmem_dst, tirx.Buffer):
         tmem_ptr = tmem_dst.data
     elif isinstance(tmem_dst, (BufferLoad, BufferRegion)):
-        tmem_ptr = tmem_dst.buffer.data
+        region = tmem_dst if isinstance(tmem_dst, BufferRegion) else get_buffer_region_from_load(tmem_dst)
+        if region is None:
+            raise TypeError("T.tcgen05_cp_warpx4 requires a Buffer/BufferRegion-like TMEM destination.")
+        buffer = region.buffer
+        if str(buffer.dtype) != "uint32":
+            raise TypeError(f"T.tcgen05_cp_warpx4 requires a uint32 TMEM destination, got {buffer.dtype}.")
+        if len(region.region) < 2:
+            raise ValueError("T.tcgen05_cp_warpx4 requires a rank-2 or higher TMEM destination.")
+        analyzer = tvm.arith.Analyzer()
+        row = region.region[-2]
+        if not analyzer.can_prove_equal(row.min, 0) or not analyzer.can_prove_equal(row.extent, 128):
+            raise ValueError("T.tcgen05_cp_warpx4 destination must cover all 128 TMEM datapaths.")
+        leading = 0
+        for axis, extent in zip(region.region[:-2], buffer.shape[:-2]):
+            if not analyzer.can_prove_equal(axis.extent, 1):
+                raise ValueError("T.tcgen05_cp_warpx4 destination leading modes must select one stage.")
+            leading = leading * extent + axis.min
+        tmem_col_offset = tmem_col_offset + leading * buffer.shape[-1] + region.region[-1].min
+        tmem_ptr = buffer.data
     else:
         tmem_ptr = tmem_dst
     ann = {"use_2cta": 1} if use_2cta else None
