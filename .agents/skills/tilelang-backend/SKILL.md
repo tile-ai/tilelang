@@ -1,18 +1,22 @@
 ---
 name: tilelang-backend
-description: Integrate or review a TileLang target backend, target-backend variant, or execution backend end to end across language dialects, target and BackendContext resolution, PassPipeline, host/device codegen, Build/JIT/Runtime, native CMake and packaging, tests, and documentation. Use when asked to add, port, scaffold, complete, or audit a TileLang backend or execution mode.
+description: Integrate or review a TileLang target backend, target-backend variant, or shared execution backend. Covers language dialects, target and BackendContext contributions, PassPipeline, host/device codegen, execution compatibility, native CMake and packaging, tests, and documentation; covers Build/JIT/Runtime implementation only when a genuinely new execution mode is requested. Use when asked to add, port, scaffold, complete, or audit a TileLang backend or execution mode.
 ---
 
 # TileLang Backend Integration
 
-Treat a target backend as one end-to-end vertical slice:
+Treat a target backend as four compiler-owned implementation areas connected to
+a separately reusable execution backend:
 
 ```text
 Language Dialect
-  -> BackendContext preparation
+  -> target/BackendContext contribution
   -> PassPipeline
   -> HostCodegen + DeviceCodegen
-  -> selected ExecutionBackend (Build -> Load -> Launch)
+  -> compatibility contract
+
+BackendContext selects a shared ExecutionBackend
+  -> Build -> Load -> Launch
 ```
 
 ## Required Reading
@@ -34,13 +38,15 @@ commands.
 
 Choose exactly one primary category:
 
-- **New target backend**: implement all five layers plus native/package
+- **New target backend**: implement the four target-backend areas, declare
+  compatibility with existing execution backends, and add native/package
   integration, tests, and user documentation.
 - **Target-backend variant**: add a distinct `BackendModule`; explicitly reuse
   or replace each component and make shared-target predicates unambiguous.
-- **New execution backend**: implement one Build/JIT/Runtime path and declare it
-  on compatible target backends; do not add a target pipeline unless target
-  semantics change.
+- **New execution backend**: only when no existing implementation can consume
+  the artifact or runtime API, implement one shared Build/JIT/Runtime path and
+  declare compatible target backends; do not add a target pipeline unless
+  target semantics change.
 
 Do not conflate a backend name, Python package name, TVM target kind, and
 execution backend name.
@@ -82,7 +88,8 @@ Follow the detailed checklist in order. Keep these boundaries non-negotiable:
 - Keep the complete pass order in `tilelang/<backend>/pipeline.py`.
 - Keep target dispatch out of `tilelang/engine/lower.py`.
 - Keep target codegen and toolchain helpers under target-backend ownership.
-- Keep Build inside the selected execution path.
+- Declare execution compatibility; do not implement target-local JIT/Runtime
+  when an existing shared execution backend satisfies the contract.
 - Add common helpers only after demonstrating a target-neutral shared use.
 - Fail unsupported features during target resolution or lowering with an
   actionable message.
@@ -94,6 +101,8 @@ Account for these current transitional details:
 - `BackendModule` is a compiler-facing manifest, not the entire backend.
 - `ExecutionBackendSpec` describes selection and capabilities; concrete
   adapters still live under `tilelang/jit/adapter/`.
+- For a new target backend, supplying compatible codegen outputs and metadata
+  is normally sufficient; a new adapter is not.
 - Execution-name dispatch still exists outside the spec. Search all JIT, cache,
   export, autotuning, diagnostic, and public typing sites when adding a mode.
 - Native `target.build.*` functions currently combine parts of CodeGen and
@@ -114,8 +123,9 @@ Run hardware-independent checks first:
 4. pipeline lowering and unsupported-feature diagnostics;
 5. source-only codegen and generated-source assertions;
 6. native build with the backend enabled;
-7. execution Build/load/launch and numerical tests on target hardware;
-8. cache/export/autotuning tests affected by a new execution mode;
+7. a compatibility smoke test through each declared shared execution path;
+8. full Build/load/launch, cache, export, and autotuning tests only for a new
+   execution mode;
 9. `git diff --check` and relevant documentation checks.
 
 After any native edit, rebuild before trusting Python results. Do not report a
@@ -126,8 +136,8 @@ backend complete when only registration or source generation passes.
 Use the Definition of Done in the integration checklist. In the final report,
 state:
 
-- which of the five layers changed;
+- which of the four target-backend areas changed;
 - which components were reused intentionally;
 - supported and explicitly unsupported capabilities;
-- execution paths tested;
+- compatible shared execution paths tested;
 - hardware/toolchain checks that could not be run.

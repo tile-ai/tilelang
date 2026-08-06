@@ -1,38 +1,45 @@
 # TileLang Backend Architecture
 
-TileLang treats a backend as an end-to-end vertical slice, from its language
-dialect to the code that loads and launches the generated kernel. The goal is
-to make backend ownership explicit while keeping the common TileLang frontend
-and compiler entry points backend-neutral.
+TileLang treats a target backend as a compiler vertical slice, from its
+language dialect through target code generation. Generated code is handed to a
+separate, reusable execution backend for Build, loading, and launch. The goal
+is to make both ownership boundaries explicit while keeping the common
+TileLang frontend and compiler entry points backend-neutral.
 
 Coding agents implementing a new backend must use the
 [`tilelang-backend` skill](../../.agents/skills/tilelang-backend/SKILL.md).
 
 ## Design Model
 
-A backend owns five related parts:
+A target backend owns four implementation areas:
 
 | Part | Responsibility |
 | --- | --- |
 | Language dialect | Extends the common TileLang language with backend-specific operations and intrinsics. |
-| Context preparation | Normalizes the device and host targets, selects the target backend, and resolves an execution backend. |
+| Context contribution | Defines target detection/normalization, target ownership, and compatible execution backends used by shared context resolution. |
 | Pass pipeline | Lowers common and backend-specific IR through one explicit, backend-owned pass sequence. |
-| Host/device codegen | Converts lowered host and device IR into source or runtime modules. |
-| Execution backend | Owns the selected build, JIT, and runtime path: compiling artifacts, loading them, and launching kernels. |
+| Host/device codegen | Converts lowered host and device IR into source or runtime modules and provides target-specific toolchain hooks. |
+
+The target backend also declares which shared execution backends can consume
+its outputs. This is a compatibility declaration, not a fifth implementation
+area. A new target backend normally reuses `tvm_ffi`, `nvrtc`, `cython`,
+`torch`, or another existing execution implementation.
 
 The logical flow is:
 
 ```text
-backend language dialect
+target-backend language dialect
         |
         v
     frontend IR
         |
         v
-BackendContext preparation
+shared BackendContext resolution
+  - selects target backend
+  - selects compatible ExecutionBackend
         |
         v
-backend PassPipeline
+target-backend PassPipeline
         |
         v
 host/device split
@@ -42,21 +49,25 @@ host/device split
         +-----------> DeviceCodegen --+
                                       |
                                       v
-                         selected ExecutionBackend
+                       shared ExecutionBackend
                            Build -> Load -> Launch
 ```
 
 `BackendContext` is created once and accompanies the compilation through the
-pipeline and codegen stages into the selected execution backend. A later stage
-must not infer or resolve the backend again.
+pipeline and codegen stages. It also records the selected shared execution
+backend, which consumes the generated outputs. A later stage must not infer or
+resolve either backend again.
 
 ### Terminology
 
 - A **target backend**, such as CUDA, ROCm, CPU, Metal, or WebGPU, owns the
   dialect, lowering, codegen, and target-specific toolchain primitives.
 - An **execution backend**, such as `tvm_ffi`, `nvrtc`, `cython`, `torch`, or
-  `cutedsl`, selects and implements a build/JIT/runtime path for a target
-  backend.
+  `cutedsl`, is a reusable Build/JIT/Runtime implementation that may serve one
+  or more compatible target backends.
+- A target backend **declares execution compatibility** and satisfies the
+  selected implementation's source, artifact, and launch-metadata contract; it
+  does not normally implement another JIT adapter or runtime.
 - `BackendModule` is the compiler-facing registration manifest. It describes
   the components used by the current implementation, but it is not the whole
   backend implementation.
@@ -75,7 +86,7 @@ backend-owned packages:
   context resolution, and small shared helpers.
 - `tilelang/<backend>/` owns the dialect, target helpers, pipeline, codegen,
   toolchain hooks, operation implementations, intrinsics, and execution
-  policies for a target backend.
+  compatibility declarations for a target backend.
 - `tilelang/jit/` contains shared JIT infrastructure and the current execution
   adapters.
 
@@ -113,7 +124,7 @@ The manifest currently declares:
 - an optional target predicate used to distinguish variants;
 - one pass pipeline and one device-codegen entry for every owned target kind;
 - optional host-codegen entries and pre-codegen hooks;
-- the supported execution backends in `auto` preference order;
+- the compatible shared execution backends in `auto` preference order;
 - FFI callbacks used by backend validation or target-toolchain integration.
 
 `register_backend()` validates the complete declaration and publishes it once.
@@ -123,7 +134,7 @@ not maintain import paths, loading state, or synchronization.
 Several manifests may share one TVM target kind when predicates make the
 variants unambiguous. CUDA and CuTeDSL are separate manifests that both match
 the `cuda` target kind. They intentionally reuse the CUDA pipeline but declare
-different device codegen and execution policies. Pipeline reuse must be
+different device codegen and execution compatibility. Pipeline reuse must be
 explicit; it must not come from target-specific branching in the engine.
 
 ## Backend Context Preparation
@@ -149,7 +160,7 @@ BackendContext
   module             selected target-backend manifest
   target             normalized device target
   target_host        normalized host target
-  execution_backend  selected build/JIT/runtime policy
+  execution_backend  selected shared Build/JIT/Runtime implementation
 ```
 
 Cache, lowering, codegen, and JIT code pass the same context instance.
@@ -224,62 +235,51 @@ The engine must not contain a `target.kind.name` dispatch table for backend
 codegen. Backend variants, such as CUDA and CuTeDSL, declare their own codegen
 entries in their manifests.
 
-## Execution Backends: Build, JIT, and Runtime
+## Execution Backend Compatibility
 
-An execution backend owns the complete path from generated host/device code to
-a running kernel. Its implementation contains three related phases:
-
-- **Build** invokes the required compiler and linker, applies architecture and
-  toolchain options, and packages generated code into a loadable artifact such
-  as a cubin, HSACO, shared library, or runtime module.
-- **JIT** performs cache lookup, decides when to invoke Build, loads the
-  artifact, creates wrappers, and returns a callable kernel adapter.
-- **Runtime** owns the loaded module or kernel handle, binds arguments and
-  streams, launches the kernel, and manages execution-time lifetime and errors.
-
-Build is therefore an internal execution-backend stage rather than a separate
-top-level backend component. The target backend supplies reusable codegen,
-validation, compiler callbacks, and toolchain helpers; the execution backend
-decides which of them to use and whether compilation is eager or deferred. For
-example, `tvm_ffi` requests host codegen and eager device compilation, whereas
-`nvrtc` consumes generated CUDA source and compiles it later in its adapter.
-
-Conceptually, a target backend exposes a mapping such as:
+A target backend normally does not implement JIT or runtime behavior. It
+declares which shared execution backends can consume its generated outputs:
 
 ```text
 execution_backends:
-  tvm_ffi -> TVM FFI build/load/launch path
-  nvrtc   -> NVRTC compile + CUDA driver launch path
-  cython  -> generated Cython wrapper path
-  torch   -> framework-provided compile/load/launch path
+  tvm_ffi -> compatible with TVM FFI runtime modules
+  nvrtc   -> compatible with CUDA source + driver launch
+  cython  -> compatible with generated Cython wrappers
+  torch   -> compatible with framework-provided compile/launch
 ```
 
 `ExecutionBackendSpec` currently records the execution name, availability and
 target predicates, and whether host codegen or eager device compilation is
-required. The selected spec is stored in `BackendContext`.
+required. A compatible target backend must provide the codegen mode and output
+contract expected by the selected implementation:
 
-Parts of CodeGen and Build are currently combined behind native
-`target.build.*` functions and the historical `DeviceCodegen.build` name;
-`build_without_compile` exposes the source-only path. These names describe the
-current implementation, while the architectural ownership remains with the
-selected execution backend.
+- compiled or source-only device codegen as requested;
+- host codegen when requested;
+- source, artifact, global-symbol, argument, and launch metadata;
+- target-specific validation, compiler callbacks, and toolchain helpers.
 
-The concrete adapters currently live under `tilelang/jit/adapter`, and adapter
-dispatch still occurs in the shared JIT layer. Architecturally, however, the
-spec selects a concrete Build/JIT/Runtime implementation. New execution paths
-should move behavior behind that interface rather than add target-specific
-decisions to lowering or codegen.
+The shared execution backend owns cache orchestration, wrapper creation,
+artifact loading, argument/stream binding, launch, and runtime lifetime. It may
+invoke target-owned compiler callbacks during Build, but those callbacks do not
+make JIT/Runtime a target-backend implementation area.
 
-If TileLang adds a pure AOT/export workflow that produces artifacts without
-loading or executing them, it may expose Build as a reusable interface. That
-does not require Build to be a separate top-level component in the normal JIT
-architecture.
+Only add a new execution backend when no existing implementation can consume
+the target output or drive its runtime API. That is a separate integration
+task. Concrete adapters currently live under `tilelang/jit/adapter`, while
+adapter dispatch still occurs in the shared JIT layer; new execution behavior
+should move behind that shared interface rather than into target passes or
+codegen dispatch.
+
+Parts of CodeGen and Build remain combined behind native `target.build.*`
+functions and the historical `DeviceCodegen.build` name. Treat this as an
+implementation detail at the boundary: target codegen supplies the operation,
+and the selected execution backend decides whether and when it is invoked.
 
 ## Registered Target Backends
 
 | Python package | Target kind | Notes |
 | --- | --- | --- |
-| `tilelang/cuda/backend.py` | `cuda` | Plain CUDA codegen, compiler callbacks, and execution policies. |
+| `tilelang/cuda/backend.py` | `cuda` | Plain CUDA codegen, compiler callbacks, and execution compatibility. |
 | `tilelang/cuda/cutedsl_backend.py` | `cuda` | CuTeDSL variant explicitly reusing the CUDA pipeline. |
 | `tilelang/rocm` | `hip` | ROCm/HIP pipeline, codegen, compiler callback, and MFMA/WMMA extensions. |
 | `tilelang/cpu` | `c`, `llvm` | CPU pipeline, codegen, and scalar CPU tile-op implementations. |
@@ -325,7 +325,7 @@ tilelang/<backend>/
   __init__.py
   backend.py             manifest and backend toolchain callbacks
   target.py              target parsing and normalization helpers
-  execution_backend.py   supported Build/JIT/Runtime paths and auto preference
+  execution_backend.py   compatible execution paths and auto preference
   language/              backend language dialect
   pipeline.py            complete lowering sequence
   codegen.py             host/device codegen entries
@@ -376,9 +376,10 @@ Shared native helpers with no target-runtime dependency belong in
 - Keep host/device codegen dispatch, host preparation hooks, compiler
   callbacks, and target-specific toolchain helpers under target-backend
   ownership.
-- Treat execution-backend selection as the choice of a concrete
-  Build/JIT/Runtime path; do not spread execution-mode checks through compiler
-  passes.
+- Make target backends declare execution compatibility rather than reimplement
+  JIT/Runtime. Add a new execution backend only for a new artifact or runtime
+  contract.
+- Do not spread execution-mode checks through compiler passes.
 - Keep backend registration explicit. Do not infer target ownership from a
   directory name: `tilelang/rocm`, for example, owns the TVM `hip` target kind.
 - Register manifests during normal package initialization, without maintaining

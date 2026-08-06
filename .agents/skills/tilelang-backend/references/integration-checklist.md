@@ -10,7 +10,7 @@ Use this reference with the architecture in `tilelang/backend/README.md`.
 4. [Backend Context Preparation](#2-backend-context-preparation)
 5. [Pass Pipeline](#3-pass-pipeline)
 6. [Host and Device Codegen](#4-host-and-device-codegen)
-7. [Execution Backend](#5-execution-backend-build-jit-and-runtime)
+7. [Execution Backend Compatibility](#execution-backend-compatibility)
 8. [Native Compilation and Packaging](#native-compilation-and-packaging)
 9. [Tests and Documentation](#tests-and-documentation)
 10. [Definition of Done](#definition-of-done)
@@ -19,7 +19,7 @@ Use this reference with the architecture in `tilelang/backend/README.md`.
 
 | Change | Required integration |
 | --- | --- |
-| New target backend | All five layers, imports, native build, packaging, tests, and docs. |
+| New target backend | Four target-backend areas, execution compatibility declaration, imports, native compilation, packaging, tests, and docs. |
 | Variant sharing a target kind | Separate manifest and predicate; explicit component reuse; variant-resolution tests. |
 | New execution mode | Build/JIT/Runtime implementation, compatible manifests, shared dispatch bridge, cache/export/autotuning coverage. |
 
@@ -41,7 +41,7 @@ Record these choices in the implementation plan:
 - source or runtime-module format;
 - host targets and host preparation requirements;
 - execution paths and `auto` preference;
-- Build toolchain and eager/deferred compilation policy;
+- compatible execution implementations and eager/deferred compilation policy;
 - hardware-free source-generation coverage;
 - optional SDK/runtime and portable-wheel strategy.
 
@@ -233,45 +233,57 @@ Do not silently use another target's implementation. Reject unsupported
 operations during resolution/lowering with target and capability details, not
 through downstream source syntax or launch failures.
 
-## 5. Execution Backend: Build, JIT, and Runtime
+## Execution Backend Compatibility
 
-Declare execution paths in `tilelang/<backend>/execution_backend.py` using
-`ExecutionBackendSpec`.
+A new target backend normally reuses an existing execution implementation. In
+`tilelang/<backend>/execution_backend.py`, declare compatibility using
+`ExecutionBackendSpec` rather than implementing target-local JIT/Runtime code.
 
-For every path, define:
+For each compatible path, declare and verify:
 
-- name and `auto` order;
-- lazy availability check;
+- execution name and `auto` preference order;
+- lazy availability check, when dependencies are optional;
 - optional target predicate;
-- host-codegen requirement;
-- eager-device-compilation requirement;
-- artifact type and cache-key inputs;
-- loading and wrapper creation;
+- whether the shared implementation requests host codegen;
+- whether it requests eager device compilation;
+- the compiled or source-only codegen mode it consumes;
+- the source, artifact, global-symbol, argument, and launch-metadata contract.
+
+Declaring `tvm_ffi`, for example, means the target backend can produce the host
+and device runtime modules expected by the existing TVM FFI adapter. Declaring
+`nvrtc` means it can produce CUDA source and metadata expected by the existing
+NVRTC adapter. Do not declare an execution backend merely because its name is
+already available.
+
+The target backend provides target-specific source generation, validation,
+compiler callbacks, and toolchain helpers. The shared execution backend owns:
+
+- Build orchestration and cache policy;
+- wrapper creation and artifact loading;
 - argument, stream, and context binding;
-- launch, lifetime, and error behavior.
+- kernel launch, lifetime, and execution errors.
 
-Reuse an existing execution backend only when its artifact and launch contract
-match. Declaring `tvm_ffi`, for example, requires host/device runtime modules
-compatible with the TVM FFI adapter.
+An execution implementation may call target-owned compiler callbacks during
+Build. That compiler hook remains part of the target codegen/toolchain
+contract; it does not require a target-specific JIT adapter.
 
-Build is internal to the execution path:
+Add a compatibility smoke test through each declared path, but do not duplicate
+the shared adapter's generic unit tests in every target backend.
 
-```text
-generated code
-  -> Build: compile + link + package
-  -> JIT: cache + load + create callable
-  -> Runtime: bind + launch + manage lifetime
-```
+### When a new execution backend is required
 
-The target backend supplies reusable source generation, validation callbacks,
-and toolchain helpers. The execution backend selects them and decides whether
-Build is eager or deferred.
+Implement a new shared execution backend only when no existing adapter can
+consume the generated artifact or operate the target runtime API. Then define:
 
-### Current bridge
+- Build: compile, link, package, and artifact cache inputs;
+- JIT: cache lookup, load, wrapper creation, and callable construction;
+- Runtime: arguments, streams/contexts, launch, lifetime, and errors;
+- AOT/export behavior when artifacts can be produced without loading.
 
 `ExecutionBackendSpec` currently stores selection/capability metadata. Concrete
 adapters live in `tilelang/jit/adapter/`, and execution-name switches remain in
-shared JIT/cache/export/autotuning code. When adding a mode, find every site:
+shared JIT/cache/export/autotuning code. For a genuinely new mode, find every
+site:
 
 ```bash
 rg -n 'tvm_ffi|nvrtc|cython|torch|cutedsl' tilelang testing
@@ -280,9 +292,6 @@ rg -n 'tvm_ffi|nvrtc|cython|torch|cutedsl' tilelang testing
 Update JIT, cache, export, autotuning, diagnostics, environment validation, and
 public type annotations as applicable. Keep bridge dispatch based on execution
 name, never target kind. Do not place execution checks in compiler passes.
-
-For AOT/export, expose reusable artifact production within the execution path
-and test it without loading. Do not add Build as a sixth target-backend layer.
 
 ## Native Compilation and Packaging
 
@@ -313,13 +322,14 @@ Add hardware-independent coverage first:
 1. Package import and manifest registration.
 2. Target normalization and `create_backend_context()`.
 3. Auto-detection if declared.
-4. Execution order, explicit selection, and unavailable errors.
+4. Compatible execution order, explicit selection, and unavailable errors.
 5. Dialect exports and IR construction.
 6. Minimal pipeline lowering plus every backend-specific IR form.
 7. Source-only codegen without hardware when feasible.
 8. Generated-source syntax/structure.
-9. Compiled artifact creation for every Build path.
-10. Load/launch, streams, arguments, and numerical correctness.
+9. A smoke Build/load/launch through each declared shared execution path.
+10. Full cache, wrapper, stream, argument, and lifetime tests when adding a new
+    execution backend.
 11. Unsupported operations/architectures.
 12. Native build enabled and import when hardware/runtime is unavailable.
 
@@ -350,12 +360,14 @@ git diff --check
 ## Definition of Done
 
 - [ ] Explicit dialect imports and constructs common and backend-specific IR.
-- [ ] Target resolves to exactly one manifest and an intended execution path.
+- [ ] Target resolves to exactly one manifest and a compatible shared execution
+      backend.
 - [ ] Complete pass order lives in the backend package.
 - [ ] Supported dialect IR lowers without engine target dispatch.
 - [ ] Host/device codegen preserves source and launch metadata.
-- [ ] Every declared execution path can Build, load, and launch, or reports an
-      availability error.
+- [ ] Every declared shared execution backend can consume the generated output
+      in a smoke test or reports an availability error.
+- [ ] A target backend does not duplicate shared JIT/Runtime behavior.
 - [ ] Common tile operations are implemented or fail explicitly.
 - [ ] Native sources/toolchains are wired through local CMake and packaging.
 - [ ] Hardware-free import/source tests run where feasible.
