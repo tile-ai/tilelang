@@ -484,26 +484,32 @@ void CodeGenTileLangC::VisitExpr_(const MaxNode *op,
 
 void CodeGenTileLangC::VisitExpr_(const FloatImmNode *op,
                                   std::ostream &os) { // NOLINT(*)
-  // The TVM base class emits `inff`/`nanf` which standard C compilers do not
-  // recognise. Use the C99 macros instead so reduce max/min identity values
-  // (-inf / +inf) lower correctly.
-  std::ostringstream temp;
+  // Only intercept inf/nan: the TVM base class prints the IEEE text ("-inf")
+  // then appends the float suffix ('f'), producing "-inff" / "nanf", which
+  // C/C++ compilers reject (no inf/nan literal with a float suffix). Emit the
+  // C99 macros INFINITY / NAN for those two cases.
+  //
+  // Finite values delegate to the base class so its per-bit-width formatting
+  // is preserved. In particular fp16 keeps the legal cast form
+  // `(half)1.5e+00f`. The 'h' suffix copied from Metal (codegen_metal.cc)
+  // is MSL-only and invalid in C/C++ (g++: "no matching literal operator
+  // ... operator""h"), so it must not be replicated here. The base class
+  // default branch also throws InternalError on bad bit-widths, which a
+  // hand-rolled else would silently drop.
   if (std::isinf(op->value)) {
+    std::ostringstream temp;
     if (op->value < 0) {
       temp << "-";
     }
     temp << "INFINITY";
+    MarkConst(temp.str());
+    os << temp.str();
   } else if (std::isnan(op->value)) {
-    temp << "NAN";
+    MarkConst("NAN");
+    os << "NAN";
   } else {
-    temp << std::scientific << op->value;
-    if (op->dtype.bits() == 32)
-      temp << 'f';
-    else if (op->dtype.bits() == 16)
-      temp << 'h';
+    CodeGenC::VisitExpr_(op, os);
   }
-  MarkConst(temp.str());
-  os << temp.str();
 }
 
 template <typename T>
