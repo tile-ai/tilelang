@@ -1,0 +1,4 @@
+interface:
+  display_name: "TileLang Backend Integration"
+  short_description: "Integrate target and execution backends"
+  default_prompt: "Use $tilelang-backend to integrate a TileLang target backend and declare compatible execution paths."
