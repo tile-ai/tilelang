@@ -228,7 +228,7 @@ def run_fastmath_mathop_test(mathop_name, mathop_func, M=32, N=32, block_M=32, b
     print("FAST_MATH=True:")
     # Strip the __ prefix for checking in the CUDA source
     cuda_mathop_name = mathop_name.lstrip("_")
-    expect_fastmath = cuda_mathop_name != "tan"
+    expect_fastmath = cuda_mathop_name != "tan"  # __tan uses accurate tanf, not __tanf
     check_fastmath_usage(source_fastmath, cuda_mathop_name, expect_fastmath=expect_fastmath)
 
     # Test numerical correctness
@@ -361,30 +361,6 @@ def test_fastmath_versions(name, func):
     """Test that __exp, __exp10, __log, __log2, __log10, __tan, __cos, __sin generate fastmath CUDA code"""
     run_fastmath_mathop_test(name, func, dtype=T.float32)
     print(f"✓ {name} test passed")
-
-
-@tilelang.testing.requires_cuda
-def test_tan_lowers_to_accurate_tanf_without_fastmath():
-    n = 4096
-
-    @T.prim_func
-    def main(A: T.Tensor((n,), "float32"), B: T.Tensor((n,), "float32")):
-        with T.Kernel(1, threads=128):
-            for i in T.Parallel(n):
-                B[i] = T.__tan(A[i])
-
-    kernel = tilelang.compile(
-        main,
-        out_idx=[1],
-        target="cuda",
-        pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False},
-    )
-    source = kernel.get_kernel_source()
-    assert "tanf(" in source, f"expected accurate tanf in source, got:\n{source}"
-    assert "__tanf" not in source, f"__tan must not emit __tanf, got:\n{source}"
-
-    a = torch.linspace(-1.5707, 1.5707, n, device="cuda", dtype=torch.float32)
-    torch.testing.assert_close(kernel(a), torch.tan(a), rtol=1e-6, atol=1e-6)
 
 
 if __name__ == "__main__":

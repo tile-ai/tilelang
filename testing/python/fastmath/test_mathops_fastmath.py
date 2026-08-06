@@ -228,7 +228,7 @@ def run_fastmath_mathop_test(mathop_name, mathop_func, M=128, N=128, block_M=32,
     print("FAST_MATH=True:")
     # Strip the __ prefix for checking in the CUDA source
     cuda_mathop_name = mathop_name.lstrip("_")
-    expect_fastmath = cuda_mathop_name != "tan"
+    expect_fastmath = cuda_mathop_name != "tan"  # __tan uses accurate tanf, not __tanf
     check_fastmath_usage(source_fastmath, cuda_mathop_name, expect_fastmath=expect_fastmath)
 
     # Test numerical correctness
