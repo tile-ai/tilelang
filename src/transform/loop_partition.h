@@ -40,6 +40,8 @@ using namespace tirx;
 For PartitionLoop(
     For op, PrimExpr thread_index, arith::Analyzer *analyzer,
     const Fragment &loop_layout, bool require_padding_guard = false,
+    // TODO(lei): Remove this reducer-specific compatibility parameter after
+    // reducer lowering explicitly models update ownership.
     const ffi::Array<Buffer> &fully_replicated_reducer_buffers = {});
 
 Fragment PlanLoopPartition(const For &op, size_t num_thread,
@@ -70,8 +72,10 @@ For PragmaUnrollLoop(For stmt);
  * \param should_vectorize Whether to vectorize the loop. False when reducers
  *        are present or when there are no non-local buffer accesses.
  *        (default true)
- * \param fully_replicated_reducer_buffers Reducer buffers whose stores execute
- *        only for REP=0 of the current loop layout.
+ * \param fully_replicated_reducer_buffers Temporary compatibility hook for
+ *        restricting reducer stores to REP=0 of the current loop layout. It
+ *        should be removed after reducer lowering explicitly models update
+ *        ownership.
  * \return The lowered statement.
  */
 Stmt LowerParallelLoop(
