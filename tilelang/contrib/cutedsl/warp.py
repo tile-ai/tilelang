@@ -43,17 +43,9 @@ def _shfl_sync_typed(mask, val, offset, mask_and_clamp, kind, *, loc=None, ip=No
     val_type = type(val)
     if val_type in (Float16, BFloat16):
         val_i16 = val.bitcast(Int16, loc=loc, ip=ip)
-        val_i32 = Int32(
-            arith.extui(Int32.mlir_type, val_i16.ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
-        )
-        shuffled_i32 = prims.shfl_sync(
-            mask, val_i32, offset, mask_and_clamp, kind, loc=loc, ip=ip
-        )
-        shuffled_i16 = Int16(
-            arith.trunci(
-                Int16.mlir_type, shuffled_i32.ir_value(loc=loc, ip=ip), loc=loc, ip=ip
-            )
-        )
+        val_i32 = Int32(arith.extui(Int32.mlir_type, val_i16.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
+        shuffled_i32 = prims.shfl_sync(mask, val_i32, offset, mask_and_clamp, kind, loc=loc, ip=ip)
+        shuffled_i16 = Int16(arith.trunci(Int16.mlir_type, shuffled_i32.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
         return shuffled_i16.bitcast(val_type, loc=loc, ip=ip)
     return prims.shfl_sync(mask, val, offset, mask_and_clamp, kind, loc=loc, ip=ip)
 

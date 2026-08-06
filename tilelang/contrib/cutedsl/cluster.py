@@ -63,9 +63,7 @@ def clc_try_cancel(result_ptr: Pointer, mbar_ptr: Pointer, *, loc=None, ip=None)
 
 
 @dsl_user_op
-def clc_try_cancel_multicast(
-    result_ptr: Pointer, mbar_ptr: Pointer, *, loc=None, ip=None
-) -> None:
+def clc_try_cancel_multicast(result_ptr: Pointer, mbar_ptr: Pointer, *, loc=None, ip=None) -> None:
     result = _smem_ptr(result_ptr, cutlass.Uint32, loc=loc, ip=ip)
     mbar = _smem_ptr(mbar_ptr, cutlass.Uint64, loc=loc, ip=ip)
     prims.clusterlaunchcontrol_try_cancel(result, mbar, multicast=0xFFFFFFFF, loc=loc, ip=ip)
@@ -86,9 +84,7 @@ def _clc_query(query_type: prims.ClusterLaunchControlQueryType, result_ptr: Poin
 
 @dsl_user_op
 def clc_is_canceled(result_ptr: Pointer, *, loc=None, ip=None) -> Int32:
-    canceled = _clc_query(
-        prims.ClusterLaunchControlQueryType.IS_CANCELED, result_ptr, loc=loc, ip=ip
-    )
+    canceled = _clc_query(prims.ClusterLaunchControlQueryType.IS_CANCELED, result_ptr, loc=loc, ip=ip)
     return Int32(
         arith.extui(
             Int32.mlir_type,
@@ -101,20 +97,14 @@ def clc_is_canceled(result_ptr: Pointer, *, loc=None, ip=None) -> Int32:
 
 @dsl_user_op
 def clc_get_first_ctaid_x(result_ptr: Pointer, *, loc=None, ip=None) -> Int32:
-    return _clc_query(
-        prims.ClusterLaunchControlQueryType.GET_FIRST_CTA_ID_X, result_ptr, loc=loc, ip=ip
-    )
+    return _clc_query(prims.ClusterLaunchControlQueryType.GET_FIRST_CTA_ID_X, result_ptr, loc=loc, ip=ip)
 
 
 @dsl_user_op
 def clc_get_first_ctaid_y(result_ptr: Pointer, *, loc=None, ip=None) -> Int32:
-    return _clc_query(
-        prims.ClusterLaunchControlQueryType.GET_FIRST_CTA_ID_Y, result_ptr, loc=loc, ip=ip
-    )
+    return _clc_query(prims.ClusterLaunchControlQueryType.GET_FIRST_CTA_ID_Y, result_ptr, loc=loc, ip=ip)
 
 
 @dsl_user_op
 def clc_get_first_ctaid_z(result_ptr: Pointer, *, loc=None, ip=None) -> Int32:
-    return _clc_query(
-        prims.ClusterLaunchControlQueryType.GET_FIRST_CTA_ID_Z, result_ptr, loc=loc, ip=ip
-    )
+    return _clc_query(prims.ClusterLaunchControlQueryType.GET_FIRST_CTA_ID_Z, result_ptr, loc=loc, ip=ip)

@@ -29,7 +29,7 @@ from cutlass.base_dsl.typing import (
 from cutlass.cutlass_dsl import T
 import cutlass._mlir.dialects.cute as _cute_ir
 from cutlass.cute.tensor import TensorSSA
-from cutlass._mlir.dialects import arith, builtin, llvm, nvgpu, nvvm, vector
+from cutlass._mlir.dialects import arith, builtin, llvm, nvgpu, vector
 from cutlass._mlir.extras import types as mlir_types
 from cutlass._mlir import ir as mlir_ir
 from cutlass.cutlass_dsl import dsl_user_op
@@ -60,6 +60,7 @@ BYTES_PER_POINTER = 8
 
 class Float4E2M1FN_unpack(Float, metaclass=FloatMeta, width=8, mlir_type=T.f4E2M1FN):
     pass
+
 
 # Map dtype to WGMMA types (moved from typing.py)
 type_map = {
@@ -110,10 +111,7 @@ def _recast_fp4_unpack_smem_ptr(ptr, swizzle_=None, *, loc=None, ip=None):
 
 
 def recast_ptr(ptr, swizzle_=None, dtype=None):
-    if (
-        dtype is Float4E2M1FN_unpack
-        and getattr(ptr, "memspace", None) == AddressSpace.smem
-    ):
+    if dtype is Float4E2M1FN_unpack and getattr(ptr, "memspace", None) == AddressSpace.smem:
         return _recast_fp4_unpack_smem_ptr(ptr, swizzle_)
     return cute.recast_ptr(ptr, swizzle_, dtype=dtype)
 
@@ -129,15 +127,11 @@ def _recast_type(src_type: mlir_ir.Type, res_elem_type: mlir_ir.Type) -> mlir_ir
             )
         return mlir_types.vector(*src_type.shape, res_elem_type)
     if isinstance(src_type, mlir_types.RankedTensorType):
-        return mlir_types.RankedTensorType.get(
-            element_type=res_elem_type, shape=src_type.shape, strides=src_type.strides
-        )
+        return mlir_types.RankedTensorType.get(element_type=res_elem_type, shape=src_type.shape, strides=src_type.strides)
     if isinstance(src_type, mlir_types.UnrankedTensorType):
         return mlir_types.UnrankedTensorType.get(element_type=res_elem_type)
     if isinstance(src_type, mlir_types.MemRefType):
-        return mlir_types.MemRefType.get(
-            element_type=res_elem_type, shape=src_type.shape, strides=src_type.strides
-        )
+        return mlir_types.MemRefType.get(element_type=res_elem_type, shape=src_type.shape, strides=src_type.strides)
     return res_elem_type
 
 

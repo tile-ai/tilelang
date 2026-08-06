@@ -97,9 +97,7 @@ def rasterization2DRowWithCluster(panel_width: Constexpr[int], cluster_dim_x: Co
     panel_idx = cluster_idx // panel_size
     total_panel = cute.ceil_div(cluster_grid_size, panel_size)
     stride = panel_width if panel_idx + 1 < total_panel else (cluster_grid_size - panel_idx * panel_size) // num_cluster_x
-    swizzled_cluster_x = (
-        (num_cluster_x - 1 - panel_offset // stride) if (panel_idx & 1 != 0) else (panel_offset // stride)
-    )
+    swizzled_cluster_x = (num_cluster_x - 1 - panel_offset // stride) if (panel_idx & 1 != 0) else (panel_offset // stride)
     swizzled_cluster_y = panel_offset % stride + panel_idx * panel_width
     col_idx = swizzled_cluster_x * cluster_dim_x + intra_cluster_x
     return dim3(col_idx, swizzled_cluster_y, blockIdx.z)

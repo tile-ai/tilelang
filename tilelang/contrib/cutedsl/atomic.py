@@ -78,18 +78,7 @@ def AtomicAdd(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
         # Bitcast i16 -> f16 for return
         result = llvm.bitcast(T.f16(), res_i16, loc=loc, ip=ip)
         return cutlass.Float16(result)
-    elif ptr.dtype == cutlass.Int32:
-        ret = prims.atomicrmw(
-            prims.AtomicOp.ADD,
-            _atomic_ptr(ptr),
-            ptr.dtype(value),
-            mem_order=prims.MemOrder.RELAXED,
-            syncscope=prims.MemScope.GPU,
-            loc=loc,
-            ip=ip,
-        )
-        return ptr.dtype(ret)
-    elif ptr.dtype == cutlass.Int64:
+    elif ptr.dtype == cutlass.Int32 or ptr.dtype == cutlass.Int64:
         ret = prims.atomicrmw(
             prims.AtomicOp.ADD,
             _atomic_ptr(ptr),

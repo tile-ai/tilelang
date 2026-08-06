@@ -3441,8 +3441,8 @@ CodeGenTileLangCuTeDSL::GetSubByteBufferPtrAsByte_(const BufferNode *buffer,
     if (is_handle_type_match) {
       ptr_str = vid;
     } else {
-      ptr_str = "tl.recast_ptr(" + vid + ", dtype=" +
-                DTypeToString(byte_dtype) + ")";
+      ptr_str =
+          "tl.recast_ptr(" + vid + ", dtype=" + DTypeToString(byte_dtype) + ")";
     }
   } else if (scope == "shared.barrier" || scope == "shared.cluster_barrier") {
     ptr_str = vid;
