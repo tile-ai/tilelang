@@ -1,0 +1,4 @@
+interface:
+  display_name: "TileLang Backend Integration"
+  short_description: "Add TileLang backends end to end"
+  default_prompt: "Use $tilelang-backend to add a new TileLang target backend end to end."
