@@ -9,6 +9,7 @@
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/index_map.h>
 #include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <cmath>
 #include <cstdint>
@@ -54,6 +55,122 @@ std::optional<DataType> GetAccessPtrElementType(const PrimExpr &expr) {
   }
   return std::nullopt;
 }
+
+// Convert an element-wise vector expression into the scalar expression for a
+// single lane.  In particular, this keeps BufferLoad nodes inside a scalar
+// Select instead of materializing both vector-valued branches before the
+// ternary is emitted.
+class VectorLaneScalarizer : public ExprMutator {
+public:
+  explicit VectorLaneScalarizer(int lane) : lane_(lane) {}
+
+private:
+  PrimExpr VisitExpr(const PrimExpr &expr) final {
+    PrimExpr result = ExprMutator::VisitExpr(expr);
+    if (result.dtype().is_fixed_length_vector()) {
+      return Shuffle::ExtractElement(expr, lane_);
+    }
+    return result;
+  }
+
+  PrimExpr VisitExpr_(const RampNode *op) final {
+    PrimExpr base = VisitExpr(op->base);
+    PrimExpr stride = VisitExpr(op->stride);
+    return base + stride * IntImm(stride.dtype(), lane_);
+  }
+
+  PrimExpr VisitExpr_(const BroadcastNode *op) final {
+    return VisitExpr(op->value);
+  }
+
+  PrimExpr VisitExpr_(const LetNode *op) final {
+    // Inlining before lane extraction preserves bodies that select a
+    // different lane of a bound vector through a Shuffle.  It also prevents
+    // scalar bindings from being emitted as statements before the enclosing
+    // Select, where they would evaluate inactive branch loads eagerly.
+    return VisitExpr(Substitute(op->body, {{op->var, op->value}}));
+  }
+
+  PrimExpr VisitExpr_(const CallNode *op) final {
+    if (op->dtype.is_fixed_length_vector()) {
+      Array<PrimExpr> args;
+      args.reserve(op->args.size());
+      for (const PrimExpr &arg : op->args) {
+        args.push_back(VisitExpr(arg));
+      }
+      if (op->op.same_as(builtin::reinterpret())) {
+        ICHECK_EQ(op->args.size(), 1U);
+        ICHECK_EQ(op->args[0].dtype().lanes(), op->dtype.lanes())
+            << "Vector select scalarization requires reinterpret source and "
+               "result lane counts to match";
+        ICHECK_EQ(op->args[0].dtype().bits(), op->dtype.bits())
+            << "Vector select scalarization requires reinterpret source and "
+               "result element widths to match";
+        return Call(op->dtype.element_of(), op->op, args, op->annotations);
+      }
+      if (op->op.same_as(builtin::call_pure_extern()) ||
+          op->op.same_as(builtin::call_extern())) {
+        return Call(op->dtype.element_of(), op->op, args, op->annotations);
+      }
+      if (op->op.same_as(tl::add2())) {
+        return args[0] + args[1];
+      }
+      if (op->op.same_as(tl::sub2())) {
+        return args[0] - args[1];
+      }
+      if (op->op.same_as(tl::mul2())) {
+        return args[0] * args[1];
+      }
+      if (op->op.same_as(tl::fma2())) {
+        return args[0] * args[1] + args[2];
+      }
+      if (op->op.same_as(tl::max2())) {
+        return Select(args[0] > args[1], args[0], args[1]);
+      }
+      if (op->op.same_as(tl::min2())) {
+        return Select(args[0] < args[1], args[0], args[1]);
+      }
+      if (op->op.same_as(tl::abs2())) {
+        PrimExpr zero = make_zero(args[0].dtype());
+        return Select(args[0] >= zero, args[0], -args[0]);
+      }
+    }
+    return ExprMutator::VisitExpr_(op);
+  }
+
+  PrimExpr VisitExpr_(const ShuffleNode *op) final {
+    int output_lane = op->dtype.is_scalar() ? 0 : lane_;
+    ICHECK_LT(output_lane, op->indices.size());
+    const int64_t *index = as_const_int(op->indices[output_lane]);
+    ICHECK(index) << "Vector select scalarization requires constant Shuffle "
+                     "indices: "
+                  << GetRef<Shuffle>(op);
+    int64_t source_lane = *index;
+    for (const PrimExpr &vector : op->vectors) {
+      ICHECK(!vector.dtype().is_scalable_vector());
+      int lanes = vector.dtype().lanes();
+      if (source_lane < lanes) {
+        if (vector.dtype().is_scalar()) {
+          ICHECK_EQ(source_lane, 0);
+          return VisitExpr(vector);
+        }
+        return VectorLaneScalarizer(static_cast<int>(source_lane))(vector);
+      }
+      source_lane -= lanes;
+    }
+    ICHECK(false) << "Shuffle index out of range: " << GetRef<Shuffle>(op);
+    return PrimExpr();
+  }
+
+  PrimExpr VisitExpr_(const CastNode *op) final {
+    PrimExpr value = VisitExpr(op->value);
+    DataType dtype =
+        op->dtype.is_fixed_length_vector() ? op->dtype.element_of() : op->dtype;
+    return value.dtype() == dtype ? value : Cast(dtype, value);
+  }
+
+  int lane_;
+};
 
 int GetTileLangCPAsyncTransferBytes(const CallNode *op) {
   ICHECK(op->args.size() == 3 || op->args.size() == 4)
@@ -599,6 +716,31 @@ void CodeGenTileLangHIP::PrintVecBinaryOp(const std::string &op, DataType t,
   os << sret;
 }
 
+void CodeGenTileLangHIP::VisitExpr_(const SelectNode *op, std::ostream &os) {
+  if (!op->condition.dtype().is_fixed_length_vector()) {
+    CodeGenC::VisitExpr_(op, os);
+    return;
+  }
+
+  TVM_FFI_ICHECK(op->false_value->dtype == op->dtype &&
+                 op->true_value->dtype == op->dtype &&
+                 op->dtype.lanes() == op->condition.dtype().lanes());
+
+  std::string result = name_supply_->FreshName("_");
+  auto scalarize_lane = [&](int lane) {
+    PrimExpr lane_select = VectorLaneScalarizer(lane)(GetRef<PrimExpr>(op));
+    ICHECK(lane_select.dtype().is_scalar());
+    return lane_select;
+  };
+  this->PrintIndent();
+  this->PrintType(op->dtype, stream);
+  stream << ' ' << result << ";\n";
+  for (int i = 0; i < op->dtype.lanes(); ++i) {
+    PrintVecElemStore(result, op->dtype, i, PrintExpr(scalarize_lane(i)));
+  }
+  os << result;
+}
+
 void CodeGenTileLangHIP::PrintVecElemLoad(const std::string &vec, DataType t,
                                           int i,
                                           std::ostream &os) { // NOLINT(*)
@@ -608,7 +750,8 @@ void CodeGenTileLangHIP::PrintVecElemLoad(const std::string &vec, DataType t,
   }
 
   static const char access[] = {'x', 'y', 'z', 'w'};
-  ICHECK(i >= 0 && i < (t.bits() == 8                        ? 16
+  ICHECK(i >= 0 && i < (t.is_float4()                        ? 32
+                        : t.bits() == 8                      ? 16
                         : (t.lanes() == 16)                  ? 16
                         : (t.lanes() == 32)                  ? 32
                         : (t.bits() == 16 || t.bits() == 32) ? 8
@@ -635,6 +778,29 @@ void CodeGenTileLangHIP::PrintVecElemLoad(const std::string &vec, DataType t,
   } else if (t.is_bfloat16()) {
     os << "((bfloat16x2*)(&(" << vec << "." << access[i / 2] << ")))->"
        << access[i % 2];
+  } else if (t.is_float8() && !t.is_float8_e8m0fnu()) {
+    std::string element = vec;
+    int lanes = t.lanes();
+    int lane = i;
+    while (lanes > 4) {
+      int group_size = lanes / 2;
+      element += lane < group_size ? ".x" : ".y";
+      lane %= group_size;
+      lanes = group_size;
+    }
+    element += "." + std::string(1, access[lane]);
+    os << element;
+  } else if (t.is_float4()) {
+    std::string element = vec;
+    int lanes = t.lanes();
+    int lane = i;
+    while (lanes > 2) {
+      int group_size = lanes / 2;
+      element += lane < group_size ? ".x" : ".y";
+      lane %= group_size;
+      lanes = group_size;
+    }
+    os << element << (lane == 0 ? ".x()" : ".y()");
   } else if (t.lanes() > 4 && t.lanes() <= 8) {
     std::string type_name;
     if (t.bits() == 16) {
@@ -697,6 +863,28 @@ void CodeGenTileLangHIP::PrintVecElemStore(const std::string &vec, DataType t,
   } else if (t.is_bfloat16()) {
     stream << "((bfloat16_t*)(&(" << vec << "." << access[i / 2] << ")))["
            << (i % 2) << "] = " << value << ";\n";
+  } else if (t.is_float8() && !t.is_float8_e8m0fnu()) {
+    std::string element = vec;
+    int lanes = t.lanes();
+    int lane = i;
+    while (lanes > 4) {
+      int group_size = lanes / 2;
+      element += lane < group_size ? ".x" : ".y";
+      lane %= group_size;
+      lanes = group_size;
+    }
+    stream << element << "." << access[lane] << " = " << value << ";\n";
+  } else if (t.is_float4()) {
+    std::string element = vec;
+    int lanes = t.lanes();
+    int lane = i;
+    while (lanes > 2) {
+      int group_size = lanes / 2;
+      element += lane < group_size ? ".x" : ".y";
+      lane %= group_size;
+      lanes = group_size;
+    }
+    stream << element << (lane == 0 ? ".set_x(" : ".set_y(") << value << ");\n";
   } else if (t.lanes() > 4 && t.lanes() <= 8) {
     std::string type_name;
     if (t.bits() == 16) {
@@ -1173,7 +1361,18 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     this->stream << ");\n";
   };
-  if (op->op.same_as(builtin::ptx_cp_async())) {
+  if (op->op.same_as(builtin::reinterpret()) && op->dtype.is_scalar() &&
+      op->args.size() == 1U && op->args[0].dtype().is_scalar() &&
+      !op->dtype.is_float4() && !op->args[0].dtype().is_float4()) {
+    ICHECK_EQ(op->dtype.bits(), op->args[0].dtype().bits())
+        << "reinterpret expects source and target to have the same number of "
+           "bits";
+    os << "__builtin_bit_cast(";
+    this->PrintType(op->dtype, os);
+    os << ", ";
+    this->PrintExpr(op->args[0], os);
+    os << ")";
+  } else if (op->op.same_as(builtin::ptx_cp_async())) {
     // args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
     // args[3] = predicate (optional)
     ICHECK(op->args.size() == 3 || op->args.size() == 4)
