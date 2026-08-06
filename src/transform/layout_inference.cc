@@ -749,6 +749,26 @@ private:
                         buffer->shape, &analyzer_, Integer(anchor_bits),
                         Integer(GetElementStorageBits(buffer->dtype)));
           if (IsSharedBuffer(buffer)) {
+            // A layout is an index map over a known extent, and buffer
+            // remapping later derives the replication factor as buffer_extent /
+            // layout_extent from IntImm values (makeBufferWithLayout in
+            // transform/lower_tile_op.cc). A symbolic extent supplies neither,
+            // so reject it here instead of dereferencing a null IntImmNode
+            // downstream. A shared buffer with a symbolic extent is otherwise
+            // supported; only carrying a layout on one is not.
+            for (size_t dimension_index = 0;
+                 dimension_index < buffer->shape.size(); ++dimension_index) {
+              if (!buffer->shape[dimension_index].as<IntImmNode>()) {
+                TVM_FFI_THROW(ValueError)
+                    << "Invalid layout for shared buffer `" << buffer->name
+                    << "`: its shape must be a compile-time constant to carry "
+                       "a "
+                    << "layout, but dimension " << dimension_index << " is `"
+                    << buffer->shape[dimension_index]
+                    << "`. Allocate the buffer with a static "
+                    << "tile extent, or drop the T.annotate_layout on it.";
+              }
+            }
             arith::IterMapResult injectivity =
                 resolved_layout->DetectInjective();
             if (!injectivity->errors.empty()) {
