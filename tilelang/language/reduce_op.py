@@ -316,33 +316,68 @@ def reduce_bitxor(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: b
     reduce(buffer, out, "bitxor", dim, clear, batch=batch)
 
 
-def finalize_reducer(reducer: tirx.Buffer, batch: int = 1) -> tirx.PrimExpr:
-    """
-    Finalize a reducer buffer by emitting the `tl.tileop.finalize_reducer` intrinsic.
+def reducer_init(reducer: tirx.Buffer) -> tirx.PrimExpr:
+    """Start the single reduction epoch for ``reducer`` with its identity."""
+    if reducer.scope() != "local.reducer":
+        raise ValueError(f"reducer_init expects a local.reducer handle, got {reducer.scope()}")
+    return tirx.call_intrin(
+        "handle",
+        tirx.op.Op.get("tl.tileop.reducer_init"),
+        to_tile_region(reducer, access_type="w"),
+    )
 
-    This returns a TVM `tirx.Call` handle that finalizes the given reducer using its writable pointer.
-    The call does not modify Python objects directly; it produces the low-level intrinsic call used by the IR.
+
+def reducer_update(reducer: tirx.Buffer, indices, contribution: tirx.PrimExpr) -> tirx.PrimExpr:
+    """Contribute one logical value to one reducer output element."""
+    if reducer.scope() != "local.reducer":
+        raise ValueError(f"reducer_update expects a local.reducer handle, got {reducer.scope()}")
+    if not isinstance(indices, (tuple, list)):
+        indices = (indices,)
+    if len(indices) != len(reducer.shape):
+        raise ValueError(f"reducer_update index rank {len(indices)} does not match reducer rank {len(reducer.shape)}")
+    element = tirx.BufferLoad(reducer, list(indices))
+    return tirx.call_intrin(
+        "handle",
+        tirx.op.Op.get("tl.tileop.reducer_update"),
+        to_tile_region(element, access_type="rw"),
+        contribution,
+    )
+
+
+def finalize_reducer(reducer: tirx.Buffer, destination: tirx.Buffer, batch: int = 1) -> tirx.PrimExpr:
+    """
+    Finalize one reducer epoch into an independent destination fragment.
 
     Parameters:
-        reducer (tirx.Buffer): Reducer buffer whose writable pointer will be finalized.
-        batch (int): Batch size for the AllReduce call (default 1 = scalar path,
-            matching the T.reduce default).  When batch > 1, the compiler emits a
-            single batched AllReduce call covering `batch` output elements at a
-            time, reducing barrier count by batch×.  batch must evenly divide the
-            total number of per-thread output elements.
+        reducer (tirx.Buffer): Opaque ``local.reducer`` handle.
+        destination (tirx.Buffer): Independent result fragment with the same
+            logical shape and dtype.
+        batch (int): Non-semantic batching hint. Unsupported plans safely fall
+            back to scalar collectives.
 
     Returns:
         tirx.Call: Handle to the finalize reducer intrinsic call.
     """
     if batch < 1:
         raise ValueError(f"finalize_reducer: batch must be >= 1, got {batch}")
+    if reducer.scope() != "local.reducer":
+        raise ValueError(f"finalize_reducer expects a local.reducer handle, got {reducer.scope()}")
+    if reducer.data.same_as(destination.data):
+        raise ValueError("finalize_reducer destination must not alias reducer storage")
+    if destination.scope() != "local.fragment":
+        raise ValueError(f"finalize_reducer currently expects a local.fragment destination, got {destination.scope()}")
+    if reducer.dtype != destination.dtype:
+        raise ValueError(f"finalize_reducer reducer and destination dtypes must match, got {reducer.dtype} and {destination.dtype}")
+    if len(reducer.shape) != len(destination.shape):
+        raise ValueError("finalize_reducer reducer and destination ranks must match")
     annotations = {}
     if batch > 1:
         annotations["batch"] = batch
     return tirx.call_intrin(
         "handle",
         tirx.op.Op.get("tl.tileop.finalize_reducer"),
-        to_tile_region(reducer, access_type="w"),
+        to_tile_region(reducer, access_type="r"),
+        to_tile_region(destination, access_type="w"),
         annotations=annotations if annotations else None,
     )
 

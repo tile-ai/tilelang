@@ -21,6 +21,12 @@ def is_tile_op(op: Call) -> bool:
     return op.op.get_attr("TLOpBuilder") is not None
 
 
+def is_parallel_elementwise_tile_op(op: Call) -> bool:
+    """Check whether a tile-op represents one elementwise parallel contribution."""
+
+    return str(op.op.name) == "tl.tileop.reducer_update"
+
+
 @tirx.functor.visitor
 class _NestedLoopCheckVisitor(PyStmtExprVisitor):
     def __init__(self) -> None:
@@ -52,7 +58,7 @@ class _NestedLoopCheckVisitor(PyStmtExprVisitor):
         super().visit_for_(op)
 
     def visit_call_(self, op: Call) -> None:
-        if self.in_parallel_context and is_tile_op(op):
+        if self.in_parallel_context and is_tile_op(op) and not is_parallel_elementwise_tile_op(op):
             raise ValueError(
                 f'[Tilelang Semantic Check] Only elementwise operations are allowed inside a parallel loop. Got a tile-op "{op.op}".'
             )

@@ -1,0 +1,251 @@
+import tilelang
+import tilelang.language as T
+import tilelang.testing
+import pytest
+import torch
+
+
+_COMPILE_FLAGS = {
+    tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+}
+
+
+@T.prim_func
+def reducer_sum_v2(A: T.Tensor((8,), T.float32), B: T.Tensor((1,), T.float32)):
+    with T.Kernel(1, threads=128):
+        src = T.alloc_fragment((8,), T.float32)
+        T.copy(A, src)
+        total = T.alloc_reducer((1,), T.float32, op="sum")
+        T.reducer_init(total)
+        for i in T.Parallel(8):
+            T.reducer_update(total, (0,), src[i])
+        result = T.alloc_fragment((1,), T.float32)
+        T.finalize_reducer(total, result)
+        if T.get_thread_binding() == 0:
+            B[0] = result[0]
+
+
+@T.prim_func
+def two_reducers_v2(A: T.Tensor((8,), T.float32), B: T.Tensor((2,), T.float32)):
+    with T.Kernel(1, threads=128):
+        src = T.alloc_fragment((8,), T.float32)
+        T.copy(A, src)
+        sum_total = T.alloc_reducer((1,), T.float32, op="sum", seed=5.0)
+        max_total = T.alloc_reducer((1,), T.float32, op="max")
+        T.reducer_init(sum_total)
+        T.reducer_init(max_total)
+        for i in T.Parallel(8):
+            if i < 4:
+                T.reducer_update(sum_total, (0,), src[i])
+            T.reducer_update(max_total, (0,), src[i])
+        sum_result = T.alloc_fragment((1,), T.float32)
+        max_result = T.alloc_fragment((1,), T.float32)
+        T.finalize_reducer(sum_total, sum_result)
+        T.finalize_reducer(max_total, max_result)
+        if T.get_thread_binding() == 0:
+            B[0] = sum_result[0]
+            B[1] = max_result[0]
+
+
+@T.prim_func
+def bitwise_reducers_v2(A: T.Tensor((8,), T.int32), B: T.Tensor((3,), T.int32)):
+    with T.Kernel(1, threads=128):
+        src = T.alloc_fragment((8,), T.int32)
+        T.copy(A, src)
+        and_total = T.alloc_reducer((1,), T.int32, op="bitand")
+        or_total = T.alloc_reducer((1,), T.int32, op="bitor")
+        xor_total = T.alloc_reducer((1,), T.int32, op="bitxor")
+        T.reducer_init(and_total)
+        T.reducer_init(or_total)
+        T.reducer_init(xor_total)
+        for i in T.Parallel(8):
+            T.reducer_update(and_total, (0,), src[i])
+            T.reducer_update(or_total, (0,), src[i])
+            T.reducer_update(xor_total, (0,), src[i])
+        and_result = T.alloc_fragment((1,), T.int32)
+        or_result = T.alloc_fragment((1,), T.int32)
+        xor_result = T.alloc_fragment((1,), T.int32)
+        T.finalize_reducer(and_total, and_result)
+        T.finalize_reducer(or_total, or_result)
+        T.finalize_reducer(xor_total, xor_result)
+        if T.get_thread_binding() == 0:
+            B[0] = and_result[0]
+            B[1] = or_result[0]
+            B[2] = xor_result[0]
+
+
+def test_reducer_v2_frontend_ir():
+    source = reducer_sum_v2.script()
+    assert 'scope="local.reducer"' in source
+    assert "T.reducer_init" in source
+    assert "T.reducer_update" in source
+    assert "T.finalize_reducer" in source
+
+
+def test_reducer_v2_cuda_codegen():
+    source = tilelang.compile(
+        reducer_sum_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    ).get_kernel_source()
+    assert "tl::AllReduce<tl::SumOp, 128" in source
+    assert "local.reducer" not in source
+
+
+@tilelang.testing.requires_cuda
+def test_reducer_v2_multiple_reducers_seed_and_predicate():
+    A = torch.arange(1, 9, dtype=torch.float32, device="cuda")
+    B = tilelang.compile(
+        two_reducers_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    )(A)
+    torch.testing.assert_close(B, torch.tensor([15.0, 8.0], device="cuda"), atol=0, rtol=0)
+
+
+@tilelang.testing.requires_cuda
+def test_reducer_v2_builtin_bitwise_reductions():
+    A = torch.arange(1, 9, dtype=torch.int32, device="cuda")
+    B = tilelang.compile(
+        bitwise_reducers_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    )(A)
+    torch.testing.assert_close(B, torch.tensor([0, 15, 8], dtype=torch.int32, device="cuda"))
+
+
+def test_reducer_v2_rejects_legacy_replication_keyword():
+    with pytest.raises(Exception, match="replication"):
+
+        @T.prim_func
+        def legacy(A: T.Tensor((1,), T.float32), B: T.Tensor((1,), T.float32)):
+            with T.Kernel(1, threads=32):
+                total = T.alloc_reducer((1,), T.float32, replication="all")
+                T.clear(total)
+                B[0] = A[0]
+
+
+def test_reducer_v2_requires_out_of_place_destination():
+    with pytest.raises(Exception, match="destination"):
+
+        @T.prim_func
+        def legacy(A: T.Tensor((1,), T.float32), B: T.Tensor((1,), T.float32)):
+            with T.Kernel(1, threads=32):
+                total = T.alloc_reducer((1,), T.float32)
+                T.reducer_init(total)
+                T.reducer_update(total, (0,), A[0])
+                T.finalize_reducer(total)
+                B[0] = A[0]
+
+
+def test_reducer_v2_rejects_direct_clear():
+    @T.prim_func
+    def invalid(A: T.Tensor((1,), T.float32), B: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=32):
+            total = T.alloc_reducer((1,), T.float32)
+            T.clear(total)
+            T.reducer_init(total)
+            T.reducer_update(total, (0,), A[0])
+            result = T.alloc_fragment((1,), T.float32)
+            T.finalize_reducer(total, result)
+            B[0] = result[0]
+
+    with pytest.raises(Exception, match="forbids ordinary BufferLoad access"):
+        tilelang.compile(invalid, out_idx=-1, pass_configs=_COMPILE_FLAGS)
+
+
+def test_reducer_v2_rejects_missing_init():
+    @T.prim_func
+    def invalid(A: T.Tensor((1,), T.float32), B: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=32):
+            total = T.alloc_reducer((1,), T.float32)
+            T.reducer_update(total, (0,), A[0])
+            result = T.alloc_fragment((1,), T.float32)
+            T.finalize_reducer(total, result)
+            B[0] = result[0]
+
+    with pytest.raises(Exception, match="must be dominated by T.reducer_init"):
+        tilelang.compile(invalid, out_idx=-1, pass_configs=_COMPILE_FLAGS)
+
+
+def test_reducer_v2_rejects_missing_finalize():
+    @T.prim_func
+    def invalid(A: T.Tensor((1,), T.float32), B: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=32):
+            total = T.alloc_reducer((1,), T.float32)
+            T.reducer_init(total)
+            T.reducer_update(total, (0,), A[0])
+            B[0] = A[0]
+
+    with pytest.raises(Exception, match="must have exactly one explicit T.reducer_init"):
+        tilelang.compile(invalid, out_idx=-1, pass_configs=_COMPILE_FLAGS)
+
+
+def test_reducer_v2_rejects_double_init():
+    @T.prim_func
+    def invalid(A: T.Tensor((1,), T.float32), B: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=32):
+            total = T.alloc_reducer((1,), T.float32)
+            T.reducer_init(total)
+            T.reducer_init(total)
+            T.reducer_update(total, (0,), A[0])
+            result = T.alloc_fragment((1,), T.float32)
+            T.finalize_reducer(total, result)
+            B[0] = result[0]
+
+    with pytest.raises(Exception, match="must occur exactly once per reducer allocation"):
+        tilelang.compile(invalid, out_idx=-1, pass_configs=_COMPILE_FLAGS)
+
+
+def test_reducer_v2_rejects_unprovable_output_index():
+    @T.prim_func
+    def invalid(A: T.Tensor((1,), T.float32), B: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=32):
+            total = T.alloc_reducer((1,), T.float32)
+            T.reducer_init(total)
+            T.reducer_update(total, (1,), A[0])
+            result = T.alloc_fragment((1,), T.float32)
+            T.finalize_reducer(total, result)
+            B[0] = result[0]
+
+    with pytest.raises(Exception, match="is not provably within"):
+        tilelang.compile(invalid, out_idx=-1, pass_configs=_COMPILE_FLAGS)
+
+
+def test_reducer_v2_rejects_physical_replica_dependent_update():
+    @T.prim_func
+    def invalid(A: T.Tensor((8,), T.float32), B: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=128):
+            src = T.alloc_fragment((8,), T.float32)
+            T.copy(A, src)
+            total = T.alloc_reducer((1,), T.float32)
+            T.reducer_init(total)
+            for i in T.Parallel(8):
+                T.reducer_update(total, (0,), src[i] + T.get_thread_binding())
+            result = T.alloc_fragment((1,), T.float32)
+            T.finalize_reducer(total, result)
+            B[0] = result[0]
+
+    with pytest.raises(Exception, match="must be invariant across physical replicas"):
+        tilelang.compile(invalid, out_idx=-1, pass_configs=_COMPILE_FLAGS)
+
+
+def test_reducer_v2_rejects_private_local_replica_dependent_update():
+    @T.prim_func
+    def invalid(A: T.Tensor((8,), T.float32), B: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=128):
+            src = T.alloc_fragment((8,), T.float32)
+            T.copy(A, src)
+            thread_value = T.alloc_local((1,), T.float32)
+            thread_value[0] = A[T.get_thread_binding() % 8]
+            total = T.alloc_reducer((1,), T.float32)
+            T.reducer_init(total)
+            for i in T.Parallel(8):
+                T.reducer_update(total, (0,), src[i] + thread_value[0])
+            result = T.alloc_fragment((1,), T.float32)
+            T.finalize_reducer(total, result)
+            B[0] = result[0]
+
+    with pytest.raises(Exception, match="must be invariant across physical replicas"):
+        tilelang.compile(invalid, out_idx=-1, pass_configs=_COMPILE_FLAGS)

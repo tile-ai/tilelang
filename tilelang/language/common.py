@@ -79,6 +79,8 @@ from .reduce_op import (
     reduce_bitand,  # noqa: F401
     reduce_bitor,  # noqa: F401
     reduce_bitxor,  # noqa: F401
+    reducer_init,  # noqa: F401
+    reducer_update,  # noqa: F401
     finalize_reducer,  # noqa: F401
     warp_reduce_sum,  # noqa: F401
     warp_reduce_max,  # noqa: F401
@@ -261,6 +263,8 @@ _LOCAL_EXPORTS = (
     "reduce_bitand",
     "reduce_bitor",
     "reduce_bitxor",
+    "reducer_init",
+    "reducer_update",
     "reduce_max",
     "reduce_min",
     "reduce_sum",

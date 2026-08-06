@@ -23,20 +23,21 @@ def ROCMPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.LetInline()(mod)
     mod = tilelang.transform.AddWrapperForSingleBufStore()(mod)
     mod = tilelang.transform.LegalizeNegativeIndex()(mod)
+    mod = tilelang.transform.VerifyReducerEpochs()(mod)
     if should_enable_race_check():
         mod = tilelang.transform.VerifyParallelLoop()(mod)
     mod = tilelang.transform.InjectAssumes()(mod)
     mod = tilelang.transform.Simplify()(mod)
-    mod = tilelang.transform.LayoutReducer()(mod)
-
     mod = tilelang.transform.IfStmtBinding()(mod)
     mod = tilelang.transform.PipelinePlanning()(mod)
     mod = tilelang.transform.InjectSoftwarePipeline()(mod)
     mod = tilelang.transform.Simplify()(mod)
 
     mod = tilelang.transform.LayoutInference()(mod)
+    mod = tilelang.transform.PlanAndMaterializeReducers()(mod)
     LayoutVisual(mod)
     mod = tilelang.transform.LowerTileOp()(mod)
+    mod = tilelang.transform.VerifyReducerLowered()(mod)
 
     mod = tilelang.transform.DecoupleTypeCast()(mod)
     mod = tilelang.transform.LegalizeVectorizedLoop()(mod)

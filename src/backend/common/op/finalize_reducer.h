@@ -1,19 +1,18 @@
 /*!
  * \file tl/backend/common/op/finalize_reducer.h
- * \brief Shared tl.finalize_reducer lowering for GPU backends.
+ * \brief Shared out-of-place deferred reducer lowering for GPU backends.
  */
 
 #ifndef TVM_TL_BACKEND_COMMON_OP_FINALIZE_REDUCER_H_
 #define TVM_TL_BACKEND_COMMON_OP_FINALIZE_REDUCER_H_
 
 #include "backend/common/op/reduce.h"
-#include "op/finalize_reducer.h"
+#include "op/deferred_reducer.h"
+#include "op/utils.h"
 #include "support/check.h"
 
 #include <tvm/tirx/builtin.h>
 
-#include <array>
-#include <cstdint>
 #include <string>
 
 namespace tvm {
@@ -21,97 +20,113 @@ namespace tl {
 namespace backend {
 
 using namespace tirx;
-using namespace ffi;
 
 template <typename Impl> struct FinalizeReducerLowerer {
   static Stmt Lower(const FinalizeReducerOpNode &op,
-                    const LowerArgs &lower_args, arith::Analyzer *) {
-    auto buffer = lower_args.buffer_remap[op.reducer];
-    auto opt_layout = lower_args.layout_map.Get(op.reducer);
-    ICHECK(opt_layout);
-    ICHECK(opt_layout->as<Fragment>());
-    auto layout = opt_layout->as<Fragment>().value();
-    Array<PrimExpr> indices_0;
-    indices_0.reserve(layout->OutputDim());
-    for (int i = 0; i < layout->OutputDim(); ++i) {
-      indices_0.push_back(Var("__finred_" + std::to_string(i)));
+                    const LowerArgs &lower_args, arith::Analyzer *analyzer) {
+    auto get_buffer = [&](const Buffer &buffer) {
+      auto it = lower_args.buffer_remap.find(buffer);
+      return it == lower_args.buffer_remap.end() ? buffer : (*it).second;
+    };
+
+    Buffer partial = get_buffer(op.reducer);
+    Buffer destination = get_buffer(op.destination);
+    ICHECK(IsLocalBuffer(partial))
+        << "T.finalize_reducer expects materialized local partial storage, got "
+        << partial.scope();
+    ICHECK(IsFragmentBuffer(op.destination))
+        << "T.finalize_reducer currently requires a local.fragment "
+           "destination, "
+           "got "
+        << op.destination.scope();
+    ICHECK_EQ(partial->shape.size(), op.destination->shape.size())
+        << "Reducer and destination ranks must match";
+    for (size_t i = 0; i < partial->shape.size(); ++i) {
+      ICHECK(
+          analyzer->CanProveEqual(partial->shape[i], op.destination->shape[i]))
+          << "Reducer and destination shapes must match: " << partial->shape
+          << " vs. " << op.destination->shape;
     }
 
-    const int64_t *p_extent = as_const_int(layout->ReplicateExtent());
-    ICHECK(p_extent);
-    int extent = *p_extent;
-    ICHECK(extent == 1 ||
-           extent == *as_const_int(lower_args.thread_bounds->extent))
-        << "Illegal finalize_reducer: extent=" << extent
-        << "; T.thread_bounds=" << lower_args.thread_bounds;
+    Optional<Layout> destination_layout_ref =
+        lower_args.layout_map.Get(op.destination);
+    ICHECK(destination_layout_ref.defined())
+        << "T.finalize_reducer destination layout was not inferred";
+    Fragment destination_layout =
+        Downcast<Fragment>(destination_layout_ref.value());
 
-    if (extent == 1) {
-      return Evaluate(0);
+    const int64_t *participant_min =
+        as_const_int(lower_args.thread_bounds->min);
+    const int64_t *participant_extent =
+        as_const_int(lower_args.thread_bounds->extent);
+    ICHECK(participant_min != nullptr && participant_extent != nullptr)
+        << "T.finalize_reducer requires a compiler-known contiguous "
+           "participant "
+           "Range, got "
+        << lower_args.thread_bounds;
+    ICHECK_GT(*participant_extent, 0);
+
+    Array<Var> logical_vars;
+    Array<PrimExpr> logical_indices;
+    logical_vars.reserve(partial->shape.size());
+    logical_indices.reserve(partial->shape.size());
+    for (size_t i = 0; i < partial->shape.size(); ++i) {
+      Var var("reducer_finalize_" + std::to_string(i));
+      logical_vars.push_back(var);
+      logical_indices.push_back(var);
     }
 
-    std::array op_names{"tl::SumOp", "tl::MaxOp", "tl::MinOp"};
-    auto op_str = op_names[static_cast<int>(op.op)];
-
-    int reducing_threads = extent;
-    reduce::CheckAllReduceWidth(reducing_threads, 1, "tl.finalize_reducer");
-    auto thread_offset = lower_args.thread_bounds->min;
-
-    int64_t layout_batch_size = 1;
-    for (int i = 0; i < layout->OutputDim(); ++i) {
-      const int64_t *p = as_const_int(layout->OutputShape()[i]);
-      if (p == nullptr) {
-        layout_batch_size = -1;
-        break;
+    PrimExpr reduced = BufferLoad(partial, logical_indices);
+    if (*participant_extent > 1) {
+      reduce::CheckAllReduceWidth(static_cast<int>(*participant_extent), 1,
+                                  "tl.finalize_reducer");
+      std::string allreduce = Impl::MakeScalarAllReduce(
+          ReduceCodegenName(op.combine_type),
+          static_cast<int>(*participant_extent), 1,
+          lower_args.thread_bounds->min, lower_args.thread_bounds->extent,
+          lower_args.target);
+      Array<PrimExpr> args = {StringImm(allreduce), reduced};
+      if (*participant_extent > Impl::WarpSize(lower_args.target)) {
+        PrimExpr workspace = lower_args.add_workspace(
+            static_cast<int>(*participant_extent), partial->dtype);
+        args.push_back(workspace);
       }
-      layout_batch_size *= *p;
+      reduced = Call(partial->dtype, builtin::call_extern(), args);
+    }
+    if (op.seed.defined()) {
+      reduced = MakeReduceCombine(op.combine_type, reduced, op.seed.value());
     }
 
-    int64_t effective_batch = static_cast<int64_t>(op.batch);
+    Array<PrimExpr> destination_indices =
+        destination_layout->Forward(logical_indices);
+    PrimExpr local_thread = lower_args.thread_index;
+    if (destination_layout->ThreadRange().defined()) {
+      local_thread = local_thread - destination_layout->ThreadRange()->min;
+    }
+    Array<PrimExpr> inverse_args = destination_indices;
+    inverse_args.push_back(local_thread);
+    Array<PrimExpr> inverse =
+        destination_layout->Inverse()->Forward(inverse_args);
+    ICHECK_GE(inverse.size(), logical_indices.size());
+    PrimExpr owns_result = Bool(true);
+    for (size_t i = 0; i < logical_indices.size(); ++i) {
+      owns_result = And(owns_result, inverse[i] == logical_indices[i]);
+    }
+    owns_result = analyzer->Simplify(owns_result);
 
-    if (effective_batch > 1 && layout_batch_size > 0) {
-      ICHECK_LE(effective_batch, layout_batch_size)
-          << "finalize_reducer: batch (" << effective_batch
-          << ") exceeds total output elements (" << layout_batch_size << ")";
-      ICHECK_EQ(layout_batch_size % effective_batch, 0)
-          << "finalize_reducer: batch (" << effective_batch
-          << ") must evenly divide total output elements (" << layout_batch_size
-          << ")";
+    Var result("reducer_result", partial->dtype);
+    Stmt store = BufferStore(destination, result, destination_indices);
+    if (!analyzer->CanProve(owns_result)) {
+      store = IfThenElse(owns_result, store);
+    }
+    Stmt body = SeqStmt({Bind(result, reduced), store});
+    for (int i = static_cast<int>(logical_vars.size()) - 1; i >= 0; --i) {
+      body = For(logical_vars[i], 0, partial->shape[i], ForKind::kSerial, body);
     }
 
-    bool use_batch = effective_batch > 1 &&
-                     reducing_threads > Impl::WarpSize(lower_args.target);
-
-    if (use_batch) {
-      int workspace_stride =
-          static_cast<int>(*as_const_int(lower_args.thread_bounds->extent));
-      std::string allreduce = Impl::MakeBatchAllReduce(
-          op_str, reducing_threads, 1, thread_offset,
-          lower_args.thread_bounds->extent, static_cast<int>(effective_batch),
-          workspace_stride, lower_args.target);
-      int ws_size = workspace_stride * static_cast<int>(effective_batch);
-      PrimExpr workspace = lower_args.add_workspace(ws_size, buffer->dtype);
-      Array<PrimExpr> args = {StringImm(allreduce), buffer->data, workspace};
-      return Evaluate(Call(DataType::Handle(), builtin::call_extern(), args));
-    }
-
-    std::string allreduce = Impl::MakeScalarAllReduce(
-        op_str, reducing_threads, 1, thread_offset,
-        lower_args.thread_bounds->extent, lower_args.target);
-    Array<PrimExpr> thread_reduce_args = {StringImm(allreduce),
-                                          BufferLoad(buffer, indices_0)};
-    if (reducing_threads > Impl::WarpSize(lower_args.target)) {
-      PrimExpr workspace = lower_args.add_workspace(
-          *as_const_int(lower_args.thread_bounds->extent), buffer->dtype);
-      thread_reduce_args.push_back(workspace);
-    }
-    auto call = Call(buffer->dtype, builtin::call_extern(), thread_reduce_args);
-    Stmt body = BufferStore(buffer, call, indices_0);
-
-    for (int i = layout->OutputDim() - 1; i >= 0; i--) {
-      body = For(indices_0[i].as<Var>().value(), 0, layout->OutputShape()[i],
-                 ForKind::kParallel, body);
-    }
-
+    // `batch` is a non-semantic hint. The v2 correctness baseline deliberately
+    // falls back to scalar collectives until batched full-array lowering is
+    // proven equivalent.
     return body;
   }
 };

@@ -280,41 +280,39 @@ def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
     return _with_span(T.sblock_alloc_buffer(shape, dtype, scope="shared.tmem"))
 
 
-ReducerOp = Literal["sum", "max", "min"]
+ReducerOp = Literal["sum", "max", "min", "bitand", "bitor", "bitxor"]
 
 
-def alloc_reducer(shape: ShapeType, dtype: DType, op: ReducerOp = "sum", replication=None) -> Buffer:
+def alloc_reducer(shape: ShapeType, dtype: DType, op: ReducerOp = "sum", seed=None) -> Buffer:
     """
-    Allocate a reducer buffer.
+    Allocate an opaque deferred reducer handle.
 
-    Modifications needs to conform with `op`,
-    such as `op="sum"` requires `reducer[...] += ...` and
-    `op="max"` requires `reducer[...] = T.max(reducer[...], ...)`.
-
-    Only after T.fill with proper initializer the reduction may begin;
-    only after T.finalize_reducer the partial results will be available.
-
-    For `op="sum"`, filled value must be 0; for min and max, the filled initializer will become max or min clamper correspondingly.
-    You may want to use `T.max_value` for min and `T.min_value` for max.
+    The handle can only be used by ``T.reducer_init``,
+    ``T.reducer_update``, and ``T.finalize_reducer``. It is not a normal
+    fragment and cannot be loaded, stored, cleared, or filled directly.
 
     Args:
         shape (tuple): The shape of the buffer to allocate
         dtype (str): The data type of the buffer (e.g., 'float32', 'int32')
         op (str): The reduce operation corresponded with the reducer
-        replication (str | None): Replication strategy, can be "all" or "none". Defaults to not specified, and the compiler will do whatever it want.
+        seed (PrimExpr | int | float | None): Optional logical seed combined
+            exactly once after the participant collective.
 
     Returns:
-        T.Buffer: A TVM buffer object allocated in thread-private storage, available to reduce values in T.Parallel loops.
+        T.Buffer: An opaque reducer handle in ``local.reducer`` scope.
     """
 
-    assert op in ["sum", "max", "min"]
-    # TODO: support automatic layout
-    if replication is None:
-        replication = "none"
-    assert replication in ["all", "none"]
+    if op not in ("sum", "max", "min", "bitand", "bitor", "bitxor"):
+        raise ValueError(f"Unsupported reducer op: {op}")
+    dtype_name = str(dtype)
+    if op in ("bitand", "bitor", "bitxor") and not (dtype_name.startswith(("int", "uint")) or dtype_name == "bool"):
+        raise ValueError(f"Reducer op {op} requires an integer/bool dtype, got {dtype}")
 
-    reducer = _with_span(T.sblock_alloc_buffer(shape, dtype, scope="local.fragment"))
-    sblock_attr({"reducer_info": {reducer.data: {"rep": replication, "op": op}}})
+    reducer = _with_span(T.sblock_alloc_buffer(shape, dtype, scope="local.reducer"))
+    info = {"op": op}
+    if seed is not None:
+        info["seed"] = seed if isinstance(seed, PrimExpr) else tvm.tirx.const(seed, dtype)
+    sblock_attr({"reducer_info": {reducer.data: info}})
 
     return reducer
 

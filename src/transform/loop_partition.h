@@ -37,12 +37,9 @@ namespace tl {
 
 using namespace tirx;
 
-For PartitionLoop(
-    For op, PrimExpr thread_index, arith::Analyzer *analyzer,
-    const Fragment &loop_layout, bool require_padding_guard = false,
-    // TODO(lei): Remove this reducer-specific compatibility parameter after
-    // reducer lowering explicitly models update ownership.
-    const ffi::Array<Buffer> &fully_replicated_reducer_buffers = {});
+For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
+                  const Fragment &loop_layout,
+                  bool require_padding_guard = false);
 
 Fragment PlanLoopPartition(const For &op, size_t num_thread,
                            int vectorize_size);
@@ -69,13 +66,9 @@ For PragmaUnrollLoop(For stmt);
  * \param parallel_loop Whether this is a true parallel loop requiring thread
  *        partitioning. False for loops that only operate on local/register
  *        buffers. (default true)
- * \param should_vectorize Whether to vectorize the loop. False when reducers
- *        are present or when there are no non-local buffer accesses.
- *        (default true)
- * \param fully_replicated_reducer_buffers Temporary compatibility hook for
- *        restricting reducer stores to REP=0 of the current loop layout. It
- *        should be removed after reducer lowering explicitly models update
- *        ownership.
+ * \param should_vectorize Whether to vectorize the loop. False when a
+ *        once-per-logical-iteration marker is present or when there are no
+ *        non-local buffer accesses. (default true)
  * \return The lowered statement.
  */
 Stmt LowerParallelLoop(
@@ -83,8 +76,7 @@ Stmt LowerParallelLoop(
     arith::Analyzer *analyzer, const LayoutMap &layout_map = {},
     ffi::Optional<PrimExpr> predicate = ffi::Optional<PrimExpr>(),
     bool parallel_loop = true, bool should_vectorize = true,
-    bool require_padding_guard = false,
-    const ffi::Array<Buffer> &fully_replicated_reducer_buffers = {});
+    bool require_padding_guard = false);
 
 } // namespace tl
 } // namespace tvm

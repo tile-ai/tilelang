@@ -19,6 +19,7 @@
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
+#include "../op/deferred_reducer.h"
 #include "../op/gemm.h"
 #include "../op/gemm_sp.h"
 #include "../op/operator.h"
@@ -30,7 +31,6 @@
 #include "arith/ir_mutator_with_analyzer.h"
 #include "common/mbarrier.h"
 #include "common/pipeline_utils.h"
-#include "layout_reducer.h"
 #include "loop_partition.h"
 
 namespace tvm {
@@ -1169,11 +1169,12 @@ private:
    * - The loop is partitioned and vectorized based on the annotated layout.
    * - If a predicate annotation exists, the loop is wrapped with an IfThenElse.
    *
-   * Special handling for reducers and local buffers:
+   * Special handling for once-per-logical-iteration effects and local buffers:
    * - If the loop stores into local buffers, thread partitioning is skipped.
    * - If the loop only manipulates local buffers, thread partitioning is
    * skipped.
-   * - If reducers are present, vectorization is skipped.
+   * - If a parallel multiplicity marker is present, partitioning is forced and
+   *   vectorization is skipped so the marker guards exactly one contribution.
    * - Vectorization is only applied if non-local buffers or vectorizable casts
    *   are present.
    *
@@ -1201,14 +1202,6 @@ private:
       }
       loop_mbar_phase_stack_.push_back(analyzer_->Simplify(phase_expr));
       pushed_loop_mbar_phase = true;
-    }
-
-    // Extract reducer info from annotations
-    Map<Var, ReducerInfo> reducer_info;
-    if (op->annotations.count(attr::kReducerInfo)) {
-      reducer_info = op->annotations.Get(attr::kReducerInfo)
-                         ->as<Map<Var, ReducerInfo>>()
-                         .value();
     }
 
     // First visit the body.
@@ -1379,37 +1372,18 @@ private:
       }
     });
 
-    // Check if reducers are present in the loop body
-    // Workaround: if reducer is presented, don't vectorize loop
-    // Best solution should be isolate reduction axis out of vectorization
-    //
-    // Note: reducer_info stores original buffer data vars, but after visiting
-    // the body, buffers may have been remapped via var_remap_. We need to find
-    // the original var to check against reducer_info.
-    bool has_reducer = false;
-    // Stores to buffers in this list must execute only for REP=0 of the
-    // current T.Parallel loop layout.
-    Array<Buffer> fully_replicated_reducer_buffers;
+    // First-class reducer updates lower to a generic multiplicity marker. Such
+    // loops must be thread-partitioned even when the contribution does not
+    // otherwise touch a fragment or non-local buffer, and they stay scalar so
+    // the marker can guard exactly one logical contribution.
+    bool has_parallel_multiplicity = false;
     PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
-      if (const auto *store = obj.as<BufferStoreNode>()) {
-        Var data_var = store->buffer->data;
-        // Find the original var if it was remapped
-        // var_remap_ maps old_var -> new_var, so we need reverse lookup
-        Var original_var = data_var;
-        for (const auto &[old_var, new_var] : var_remap_) {
-          if (new_var.same_as(data_var)) {
-            original_var = old_var;
-            break;
-          }
-        }
-        if (reducer_info.count(original_var)) {
-          has_reducer = true;
-          if (reducer_info[original_var]->rep == ReducerRepType::ALL) {
-            fully_replicated_reducer_buffers.push_back(store->buffer);
-          }
-        }
+      if (const auto *attr_stmt = obj.as<AttrStmtNode>()) {
+        has_parallel_multiplicity |=
+            attr_stmt->attr_key == attr::kParallelMultiplicity;
       }
     });
+    parallel_loop = parallel_loop || has_parallel_multiplicity;
 
     // Check if vectorizable cast operations exist
     bool has_cast_operations = false;
@@ -1426,14 +1400,13 @@ private:
 
     // Decide whether to vectorize:
     // - Only if there are non-local buffers or vectorizable casts
-    // - AND no reducers are present
+    // - AND no once-per-logical-iteration effects are present
     bool should_vectorize =
-        (has_non_local || has_cast_operations) && !has_reducer;
+        (has_non_local || has_cast_operations) && !has_parallel_multiplicity;
     // Lower the parallel loop using the common function
     Stmt lowered = LowerParallelLoop(
         for_node, loop_layout, CurrentThreadIndex(), analyzer_, layout_map_,
-        predicate, parallel_loop, should_vectorize, require_padding_guard,
-        fully_replicated_reducer_buffers);
+        predicate, parallel_loop, should_vectorize, require_padding_guard);
 
     // Only parallel-loop lowering needs PTX cp.async injection. Thread-level
     // lowering does not require converting eligible global->shared copies to

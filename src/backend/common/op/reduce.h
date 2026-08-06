@@ -156,27 +156,6 @@ inline Range ResolveAllReduceThreadRange(const Fragment &red_layout,
                               make_const(thread_bounds->extent.dtype(), count));
 }
 
-inline int64_t SignedMin(int bits) {
-  if (bits >= 64) {
-    return std::numeric_limits<int64_t>::min();
-  }
-  return -(static_cast<int64_t>(1) << (bits - 1));
-}
-
-inline int64_t SignedMax(int bits) {
-  if (bits >= 64) {
-    return std::numeric_limits<int64_t>::max();
-  }
-  return (static_cast<int64_t>(1) << (bits - 1)) - 1;
-}
-
-inline uint64_t UnsignedMax(int bits) {
-  if (bits >= 64) {
-    return std::numeric_limits<uint64_t>::max();
-  }
-  return (static_cast<uint64_t>(1) << bits) - 1;
-}
-
 inline int GetPreferredVectorizedSize(DataType dt,
                                       bool supports_fp32x2 = false) {
   if (dt.is_bfloat16() || dt.is_float16() ||
@@ -205,46 +184,7 @@ inline void CheckAllReduceWidth(int reducing_threads, int scale,
 }
 
 inline PrimExpr MakeInitValue(const ReduceOpNode &op, int vsize = 1) {
-  auto dst_dtype = op.dst->dtype;
-  auto is_int = dst_dtype.is_int();
-  bool is_uint = dst_dtype.is_uint();
-  auto bits = dst_dtype.bits();
-
-  PrimExpr scalar;
-  if (op.type->IsSum() || op.type->IsAbsSum()) {
-    scalar = make_zero(op.dst->dtype);
-  } else if (op.type->IsMax()) {
-    if (is_int) {
-      scalar = make_const(op.dst->dtype, SignedMin(bits));
-    } else if (is_uint) {
-      scalar = make_const(op.dst->dtype, 0);
-    } else {
-      scalar = make_const(op.dst->dtype, -INFINITY);
-    }
-  } else if (op.type->IsMin()) {
-    if (is_int) {
-      scalar = make_const(op.dst->dtype, SignedMax(bits));
-    } else if (is_uint) {
-      scalar = make_const(op.dst->dtype, UnsignedMax(bits));
-    } else {
-      scalar = make_const(op.dst->dtype, INFINITY);
-    }
-  } else if (op.type->IsAbsMax()) {
-    scalar = make_const(op.dst->dtype, 0);
-  } else if (op.type->IsBitAnd()) {
-    if (is_int) {
-      scalar = make_const(op.dst->dtype, -1);
-    } else if (is_uint) {
-      scalar = make_const(op.dst->dtype, UnsignedMax(bits));
-    } else {
-      scalar = make_const(op.dst->dtype, -INFINITY);
-    }
-  } else if (op.type->IsBitOr() || op.type->IsBitXor()) {
-    scalar = make_zero(op.dst->dtype);
-  } else {
-    LOG(FATAL) << "Unsupported reduce type: " << op.type->type;
-    scalar = PrimExpr();
-  }
+  PrimExpr scalar = tl::MakeReduceIdentity(op.type, op.dst->dtype);
 
   if (vsize <= 1)
     return scalar;
@@ -267,27 +207,19 @@ inline PrimExpr MakeReduce(const ReduceOpNode &op, int vsize,
                                                acc.dtype().is_bfloat16());
 
   if (vsize == 1) {
-    if (op.type->IsSum()) {
-      return acc + rhs;
-    } else if (op.type->IsAbsSum()) {
-      auto abs_rhs = rhs.dtype().is_uint() ? rhs : Max(rhs, -rhs);
-      return acc + abs_rhs;
-    } else if (op.type->IsMax()) {
-      return use_nan_op ? Call(acc.dtype(), tl::max_nan(), {acc, rhs})
-                        : PrimExpr(Max(acc, rhs));
-    } else if (op.type->IsMin()) {
-      return use_nan_op ? Call(acc.dtype(), tl::min_nan(), {acc, rhs})
-                        : PrimExpr(Min(acc, rhs));
-    } else if (op.type->IsAbsMax()) {
-      auto abs_rhs = rhs.dtype().is_uint() ? rhs : Max(rhs, -rhs);
-      return use_nan_op ? Call(acc.dtype(), tl::max_nan(), {acc, abs_rhs})
-                        : PrimExpr(Max(acc, abs_rhs));
-    } else if (op.type->IsBitAnd()) {
-      return acc & rhs;
-    } else if (op.type->IsBitOr()) {
-      return acc | rhs;
-    } else if (op.type->IsBitXor()) {
-      return acc ^ rhs;
+    if (!use_nan_op ||
+        !(op.type->IsMax() || op.type->IsMin() || op.type->IsAbsMax())) {
+      return tl::MakeReduceCombine(op.type, acc, rhs);
+    }
+    if (op.type->IsMax()) {
+      return Call(acc.dtype(), tl::max_nan(), {acc, rhs});
+    }
+    if (op.type->IsMin()) {
+      return Call(acc.dtype(), tl::min_nan(), {acc, rhs});
+    }
+    if (op.type->IsAbsMax()) {
+      PrimExpr abs_rhs = rhs.dtype().is_uint() ? rhs : Max(rhs, -rhs);
+      return Call(acc.dtype(), tl::max_nan(), {acc, abs_rhs});
     }
     LOG(FATAL) << "Unsupported reduce type: " << op.type->type;
     return PrimExpr();
@@ -317,24 +249,12 @@ inline std::optional<std::string> MakeCodegenReducer(const ReduceOpNode &op,
   const bool use_nan_op = op.nan_propagate && (op.dst->dtype.is_float16() ||
                                                op.dst->dtype.is_bfloat16());
 
-  auto base = [&]() -> std::string {
-    if (op.type->IsSum() || op.type->IsAbsSum())
-      return "tl::SumOp";
-    if (op.type->IsMax())
-      return use_nan_op ? "tl::MaxOpNan" : "tl::MaxOp";
-    if (op.type->IsMin())
-      return use_nan_op ? "tl::MinOpNan" : "tl::MinOp";
-    if (op.type->IsAbsMax())
-      return use_nan_op ? "tl::MaxOpNan" : "tl::MaxOp";
-    if (op.type->IsBitAnd())
-      return "tl::BitAndOp";
-    if (op.type->IsBitOr())
-      return "tl::BitOrOp";
-    if (op.type->IsBitXor())
-      return "tl::BitXorOp";
-    LOG(FATAL) << "Unsupported reduce type: " << op.type->type;
-    return "";
-  }();
+  std::string base = tl::ReduceCodegenName(op.type);
+  if (use_nan_op && (op.type->IsMax() || op.type->IsAbsMax())) {
+    base = "tl::MaxOpNan";
+  } else if (use_nan_op && op.type->IsMin()) {
+    base = "tl::MinOpNan";
+  }
 
   if (vsize <= 1)
     return base;

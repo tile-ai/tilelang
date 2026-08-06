@@ -367,16 +367,19 @@ def LowerDeviceKernelLaunch():
     return _ffi_api.LowerDeviceKernelLaunch()  # type: ignore
 
 
-def LayoutReducer():
-    """
-    Return a TVM transform pass that performs layout reduction/normalization.
+def VerifyReducerEpochs():
+    """Verify first-class reducer lifecycle and access legality."""
+    return _ffi_api.VerifyReducerEpochs()  # type: ignore
 
-    This wrapper delegates to the underlying FFI implementation and returns a pass object suitable for use in a PassContext or pass pipeline. The pass is intended to simplify or reduce tensor/layout-related representations during relay/tile transformations.
 
-    Returns:
-        The transform pass object produced by the FFI backend.
-    """
-    return _ffi_api.LayoutReducer()  # type: ignore
+def PlanAndMaterializeReducers():
+    """Materialize each reducer as a full per-participant local array."""
+    return _ffi_api.PlanAndMaterializeReducers()  # type: ignore
+
+
+def VerifyReducerLowered():
+    """Check that reducer-only IR has been consumed before backend codegen."""
+    return _ffi_api.VerifyReducerLowered()  # type: ignore
 
 
 def UnrollLoop():
