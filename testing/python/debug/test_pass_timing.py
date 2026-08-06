@@ -12,6 +12,7 @@ from tilelang import tvm
 from tilelang.utils.pass_timing import (
     PassTimingRecord,
     TileLangPassTimingInstrument,
+    _extract_kernel_label,
     build_pass_instruments,
     report_pass_timing_on_exit,
 )
@@ -176,3 +177,75 @@ def test_pass_timing_ignores_unmatched_after_callback(caplog):
     assert not timing.records
     assert not timing._stack
     assert "Ignoring unmatched pass timing callback" in caplog.text
+
+
+def test_pass_timing_captures_kernel_name_from_module():
+    timing = TileLangPassTimingInstrument()
+
+    with tvm.transform.PassContext(instruments=[timing.instrument]):
+        tvm.tirx.transform.Simplify()(_simple_module())
+
+    # The kernel name follows the PrimFunc's global_symbol attribute (which in
+    # the real compilation flow is also used as the IRModule key).
+    assert any(record.kernel == "program" for record in timing.records)
+    report = timing.report()
+    assert "Simplify(program)" in report
+
+
+def test_pass_timing_record_name_unaffected_by_kernel():
+    timing = TileLangPassTimingInstrument()
+
+    with tvm.transform.PassContext(instruments=[timing.instrument]):
+        tvm.tirx.transform.Simplify()(_simple_module())
+
+    record = timing.records[0]
+    assert record.name.endswith(".Simplify")
+    assert record.kernel == "program"
+
+
+def test_extract_kernel_label_none_or_empty():
+    assert _extract_kernel_label(None) == ""
+    assert _extract_kernel_label(tvm.IRModule()) == ""
+
+
+def test_extract_kernel_label_single_function():
+    assert _extract_kernel_label(_simple_module()) == "program"
+
+
+def test_extract_kernel_label_multiple_functions_shows_count():
+    @T.prim_func
+    def func_a(A: T.Tensor((16,), "float32"), B: T.Tensor((16,), "float32")):
+        with T.Kernel(threads=16):
+            tid = T.get_thread_binding()
+            B[tid] = A[tid] + 1.0
+
+    @T.prim_func
+    def func_b(A: T.Tensor((16,), "float32"), B: T.Tensor((16,), "float32")):
+        with T.Kernel(threads=16):
+            tid = T.get_thread_binding()
+            B[tid] = A[tid] + 2.0
+
+    mod = tvm.IRModule({"kernel_a": func_a, "kernel_b": func_b})
+
+    label = _extract_kernel_label(mod)
+
+    assert label == "func_a +1 more"
+
+
+def test_pass_timing_report_kernel_suffix_when_present():
+    timing = TileLangPassTimingInstrument()
+    timing._records.append(PassTimingRecord("tirx.Simplify", 0.001, 0, kernel="matmul"))
+
+    report = timing.report()
+
+    assert "tirx.Simplify(matmul)" in report
+
+
+def test_pass_timing_report_omits_suffix_when_kernel_empty():
+    timing = TileLangPassTimingInstrument()
+    timing._records.append(PassTimingRecord("tirx.Simplify", 0.001, 0, kernel=""))
+
+    report = timing.report()
+
+    assert "tirx.Simplify(matmul)" not in report
+    assert "tirx.Simplify" in report
