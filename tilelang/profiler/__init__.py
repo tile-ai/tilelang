@@ -30,7 +30,7 @@ class Profiler:
     """
 
     params: list[KernelParam]
-    result_idx: list[int]
+    result_idx: int | list[int] | None
     supply_type: TensorSupplyType
     adapter: BaseKernelAdapter | None = None
 
@@ -39,21 +39,25 @@ class Profiler:
         self.result_idx = self._legalize_result_idx(self.result_idx)
         self.supply = get_tensor_supply(self.supply_type)
 
-    def _legalize_result_idx(self, result_idx: list[int] | None = None) -> list[int]:
+    def _legalize_result_idx(self, result_idx: int | list[int] | None = None) -> list[int]:
         params = self.params
         # result_idx is a list of indices of the output tensors
         if result_idx is None:
-            result_idx = []
+            return []
         elif isinstance(result_idx, int):
-            if result_idx > len(params) or result_idx < -len(params):
-                raise ValueError(f"result_idx should be an integer between {-len(params)} and {len(params) - 1}")
-            if result_idx < 0:
-                result_idx = len(params) + result_idx
             result_idx = [result_idx]
         elif not isinstance(result_idx, list):
             raise ValueError("result_idx should be a list of integers")
 
-        return result_idx
+        normalized_result_idx = []
+        for idx in result_idx:
+            if not isinstance(idx, int):
+                raise ValueError("result_idx should be a list of integers")
+            if idx >= len(params) or idx < -len(params):
+                raise ValueError(f"result_idx should be an integer between {-len(params)} and {len(params) - 1}")
+            normalized_result_idx.append(len(params) + idx if idx < 0 else idx)
+
+        return normalized_result_idx
 
     def with_default_adapter(self, adapter: BaseKernelAdapter) -> Profiler:
         self.adapter = adapter
