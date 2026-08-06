@@ -17,6 +17,10 @@ def run_passes(func: tvm.tirx.PrimFunc):
     return tilelang.transform.ThreadSync("shared")(mod)
 
 
+def run_passes_script(func: tvm.tirx.PrimFunc) -> str:
+    return str(run_passes(func).script())
+
+
 @tilelang.testing.requires_cuda
 def test_no_sync_between_atomic_adds_to_shared():
     """Atomic WAW (and RMW) should not trigger thread-level sync insertion.
@@ -149,8 +153,18 @@ def test_sync_if_with_same_index():
     assert "T.tvm_storage_sync" in str(mod.script())
 
 
-@tilelang.testing.requires_cuda
-def test_sync_if_with_same_index_with_modulo_if():
+def test_no_sync_if_with_same_index_with_modulo_if():
+    """A thread-private update needs no barrier even under a divergent guard.
+
+    Every thread accesses ``temp_shared[threadIdx_x]`` and nothing else, so the
+    index is injective and no two threads ever reach the same address; the
+    threads that skip the guarded write simply read an uninitialised slot, which
+    is not a cross-thread hazard. Unequal participation alone (only
+    ``tx % 4 == 0`` writes, everybody reads) is one of the two conditions a
+    same-index hazard needs -- the other being a non-injective index -- so it
+    must not by itself trigger a barrier.
+    """
+
     @T.prim_func(check_well_formed=False)
     def func() -> None:
         threadIdx_x = T.env_thread("threadIdx.x")
@@ -168,7 +182,7 @@ def test_sync_if_with_same_index_with_modulo_if():
         result_local[0] = temp_shared[threadIdx_x]
 
     mod = run_passes(func)
-    assert "T.tvm_storage_sync" in str(mod.script())
+    assert "T.tvm_storage_sync" not in str(mod.script())
 
 
 @tilelang.testing.requires_cuda
@@ -545,14 +559,14 @@ def test_sync_hoist_non_uniform_if_with_threadidx():
     assert sync_pos < if_pos, f"Sync should be before if statement:\n{s}"
 
 
-@tilelang.testing.requires_cuda
-def test_sync_hoist_non_uniform_if_shared_memory_condition():
-    """Test sync hoisting when if condition reads from shared memory with thread-dependent index.
+def test_no_sync_for_thread_private_read_inside_non_uniform_if():
+    """A thread-private read guarded by a non-uniform condition needs no barrier.
 
-    This is the exact pattern that caused the original deadlock:
-    - Condition reads shared memory at index depending on threadIdx
-    - Different threads get different values -> non-uniform condition
-    - Sync inside if would cause deadlock
+    This is the shape that caused the original deadlock report: the condition
+    reads shared memory at a threadIdx-dependent index, so a barrier inside the
+    branch would hang. The guarded access is ``data_shared[tx]`` though -- the
+    slot this very thread wrote just above -- so no two threads reach the same
+    address and there is nothing to order.
     """
 
     @T.prim_func(private=True)
@@ -571,18 +585,12 @@ def test_sync_hoist_non_uniform_if_shared_memory_condition():
         # token_ids[tx] can be different for each thread (e.g., some are -1, some are valid)
         if token_ids[tx] != -1:
             # Inside the if, we read from data_shared
-            # Sync is needed but must be hoisted because condition is non-uniform
             result_local[0] = data_shared[tx]
 
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     s = str(mod.script())
-    # Sync should appear before the if statement
-    assert 'T.tvm_storage_sync("shared")' in s, f"Expected sync:\n{s}"
-    # The sync should be before the if that checks token_ids
-    sync_pos = s.index('T.tvm_storage_sync("shared")')
-    if_pos = s.index("if token_ids")
-    assert sync_pos < if_pos, f"Sync should be hoisted before non-uniform if:\n{s}"
+    assert 'T.tvm_storage_sync("shared")' not in s, f"Unexpected sync:\n{s}"
 
 
 @tilelang.testing.requires_cuda
@@ -675,9 +683,13 @@ def test_sync_hoist_nested_non_uniform_if():
     assert sync_pos < if_pos, f"Sync should be hoisted before outer if:\n{s}"
 
 
-@tilelang.testing.requires_cuda
-def test_sync_hoist_non_uniform_if_in_loop():
-    """Test sync hoisting when non-uniform if is inside a loop."""
+def test_no_sync_for_thread_private_read_inside_non_uniform_if_in_loop():
+    """Same shape as above inside a loop, and still thread private.
+
+    Iteration ``k`` writes ``data_shared[tx]`` and the guarded read of iteration
+    ``k`` or ``k + 1`` targets the same slot, always from the same thread, so
+    program order already orders them.
+    """
 
     @T.prim_func(private=True)
     def func():
@@ -699,9 +711,7 @@ def test_sync_hoist_non_uniform_if_in_loop():
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     s = str(mod.script())
-    assert 'T.tvm_storage_sync("shared")' in s, f"Expected sync:\n{s}"
-    # Sync should be before the if inside the loop, not inside the if
-    # This ensures all threads can reach the sync point
+    assert 'T.tvm_storage_sync("shared")' not in s, f"Unexpected sync:\n{s}"
 
 
 @tilelang.testing.requires_cuda
@@ -733,9 +743,12 @@ def test_no_sync_needed_uniform_accesses():
     assert 'T.tvm_storage_sync("shared")' not in s, f"Unexpected sync:\n{s}"
 
 
-@tilelang.testing.requires_cuda
-def test_sync_hoist_non_uniform_if_in_loop_with_shared_memory():
-    """Test sync hoisting when non-uniform if is inside a loop with shared memory."""
+def test_no_sync_for_thread_private_write_read_by_if_condition_in_loop():
+    """A non-uniform condition reading the slot the same thread just wrote.
+
+    The write and the condition's read are both ``token_ids[tx]``, so the pair is
+    thread private even though the condition is divergent and sits in a loop.
+    """
 
     @T.prim_func(private=True)
     def func():
@@ -756,11 +769,7 @@ def test_sync_hoist_non_uniform_if_in_loop_with_shared_memory():
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     s = str(mod.script())
-    assert 'T.tvm_storage_sync("shared")' in s, f"Expected sync:\n{s}"
-    # Sync should be before the if inside the loop, not inside the if
-    sync_pos = s.index('T.tvm_storage_sync("shared")')
-    if_pos = s.index("if token_ids[tx] >= 0")
-    assert sync_pos < if_pos, f"Sync should be hoisted before non-uniform if:\n{s}"
+    assert 'T.tvm_storage_sync("shared")' not in s, f"Unexpected sync:\n{s}"
 
 
 @tilelang.testing.requires_cuda
@@ -816,6 +825,464 @@ def test_partial_sync_warp_multiple_still_lowered():
     mod = tilelang.transform.ThreadSync("shared")(mod)
     s = str(mod.script())
     assert re.search(r'tvm_storage_sync\("shared",\s*\d+,\s*32\)', s), f"Expected a partial barrier with thread_count=32:\n{s}"
+
+
+# =============================================================================
+# Tests for flat Bind definitions inside the recorded constraint sets
+#
+# ``AccessEntry.cset`` snapshots the constraint stack that is live when an access
+# is recorded, so it also carries the definitions of the flat ``Bind`` statements
+# that precede the access. A definition is not a participation constraint -- it
+# never restricts which threads execute an access -- and feeding it to the prover
+# as a proposition ``var == value`` distorts both queries in ``FindConflict``:
+#
+# * the same-index path compares the two constraint sets for logical equivalence.
+#   A write sitting behind extra definitions can never be proven equivalent to
+#   the matching read, so a thread-private read-modify-write is reported as a
+#   hazard -- a spurious barrier, which is undefined behaviour once the access
+#   sits under a thread-divergent guard.
+# * the cross-thread path instantiates the same code twice, once per thread. A
+#   definition shared between the two instances forces the two thread variables
+#   to agree, which shrinks -- or empties -- the domain the disjointness proof
+#   runs on, so a real hazard can be "proven" away.
+# =============================================================================
+
+
+def test_no_sync_for_thread_private_read_modify_write():
+    """``v = s[tx]; s[tx] = f(v)`` is thread private and needs no barrier.
+
+    Every thread reads and writes the one element it owns, so no two threads
+    touch the same address. The read is recorded while evaluating the bind's
+    value, making the write's constraint set the read's plus ``v == s[tx]``.
+    """
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        v: T.float32 = s[tx]
+        s[tx] = v * T.float32(2)
+
+    s = run_passes_script(func)
+    assert 'T.tvm_storage_sync("shared")' not in s, f"Unexpected sync for a thread-private update:\n{s}"
+
+
+def test_no_sync_for_thread_private_pair_read_modify_write():
+    """A butterfly-looking update where each thread owns both slots it touches.
+
+    Thread ``t`` reads and writes exactly ``{2t, 2t+1}``; those sets are pairwise
+    disjoint, so there is no cross-thread dependency to order.
+    """
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        x1: T.float32 = s[tx * 2]
+        x2: T.float32 = s[tx * 2 + 1]
+        s[tx * 2] = x1 + x2
+        s[tx * 2 + 1] = x1 - x2
+
+    s = run_passes_script(func)
+    assert 'T.tvm_storage_sync("shared")' not in s, f"Unexpected sync for per-thread private pairs:\n{s}"
+
+
+def test_no_plain_sync_inside_divergent_symbolic_guard():
+    """A barrier must never be emitted inside a thread-divergent guard.
+
+    ``bx * 4 + tx // 32 < n`` mixes a thread variable with a runtime parameter,
+    so for a tail block only some warps enter. A block-wide barrier inside the
+    branch is then waited on by a subset of the block, which hangs. Whether or
+    not the pass considers the guarded update a hazard, any barrier it emits has
+    to sit outside the guard.
+    """
+
+    @T.prim_func(private=True)
+    def func(n: T.int32):
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        bx = T.launch_thread("blockIdx.x", 32)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if bx * 4 + tx // 32 < n:
+            v: T.float32 = s[tx]
+            s[tx] = v * T.float32(2)
+
+    s = run_passes_script(func)
+    if 'T.tvm_storage_sync("shared")' in s:
+        sync_pos = s.index('T.tvm_storage_sync("shared")')
+        if_pos = s.index("if ")
+        assert sync_pos < if_pos, f"Barrier must be hoisted out of the divergent guard:\n{s}"
+
+
+def test_unorderable_hazard_in_divergent_guard_is_reported(capfd):
+    """A hazard confined to a divergent branch has no correct barrier placement.
+
+    ``bx * 4 + tx // 32 < n`` mixes a thread variable with a runtime parameter, so
+    for a tail block only some warps enter, and both ends of the hazard are inside
+    that branch. A barrier inside it hangs on the threads that skip the branch,
+    while one in front of it is reached by everyone but no longer separates the
+    accesses. Ordering this needs the branch split around the barrier, which the
+    pass cannot express, so reporting the program is the only thing it can get
+    right. Where the barrier ends up is deliberately not asserted.
+    """
+
+    @T.prim_func(private=True)
+    def func(n: T.int32):
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 32)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if bx * 4 + tx // 32 < n:
+            s[tx] = T.cast(tx, "float32")
+            l[0] = s[(tx + 64) % 128]
+
+    run_passes_script(func)
+    warnings = capfd.readouterr().err
+    assert "no longer separates" in warnings, f"Expected the pass to report the hazard:\n{warnings}"
+
+
+def test_unorderable_hazard_in_divergent_else_branch_is_reported(capfd):
+    """The else branch needs the same treatment as the then branch.
+
+    Syncs found in either arm are tracked separately, so a hazard placed only in
+    the else arm exercises the second of the two paths. It is as unorderable as
+    the one above, so again only the report is asserted.
+    """
+
+    @T.prim_func(private=True)
+    def func(n: T.int32):
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx < n:
+            l[0] = 0.0
+        else:
+            s[tx] = T.cast(tx, "float32")
+            l[0] = s[(tx + 64) % 128]
+
+    run_passes_script(func)
+    warnings = capfd.readouterr().err
+    assert "no longer separates" in warnings, f"Expected the pass to report the hazard:\n{warnings}"
+
+
+def test_sync_stays_inside_guard_proven_uniform_by_premise(capfd):
+    """A premise can make a threadIdx-dependent guard provably block uniform.
+
+    ``tx < n`` mentions a thread variable, so no inspection of the condition can
+    call it uniform. But given ``n % 128 == 0`` and a block of 128 threads, either
+    all of them enter or none do. This is the one shape here that does have a
+    correct answer, so the placement is asserted: the barrier stays inside the
+    branch, where it still separates the two accesses, and nothing is reported.
+    """
+
+    @T.prim_func(private=True)
+    def func(n: T.int32):
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        with T.Assert(n % 128 == 0, "n must be a multiple of the block size"):
+            if tx < n:
+                s[tx] = T.cast(tx, "float32")
+                l[0] = s[(tx + 64) % 128]
+
+    s = run_passes_script(func)
+    warnings = capfd.readouterr().err
+    assert 'T.tvm_storage_sync("shared")' in s, f"Expected a barrier for a cross-thread hazard:\n{s}"
+    sync_pos = s.index('T.tvm_storage_sync("shared")')
+    if_pos = s.index("if tx < n")
+    assert sync_pos > if_pos, f"Barrier should stay inside the uniform guard:\n{s}"
+    assert "no longer separates" not in warnings, f"A provably uniform guard should not be reported:\n{warnings}"
+
+
+def test_premise_weaker_than_the_block_is_not_taken_as_uniform(capfd):
+    """The premise has to rule divergence out for the block size actually used.
+
+    ``n % 64 == 0`` with a block of 128 threads still admits ``n == 64``, where
+    half the block enters. This pins down the boundary of the check above: it must
+    accept a premise only when the premise really excludes divergence. The guard
+    is therefore treated as divergent, which for this shape means reported.
+    """
+
+    @T.prim_func(private=True)
+    def func(n: T.int32):
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        with T.Assert(n % 64 == 0, "n must be a multiple of half the block"):
+            if tx < n:
+                s[tx] = T.cast(tx, "float32")
+                l[0] = s[(tx + 64) % 128]
+
+    run_passes_script(func)
+    warnings = capfd.readouterr().err
+    assert "no longer separates" in warnings, f"A premise that still allows divergence must not be accepted:\n{warnings}"
+
+
+def test_premise_holds_across_an_enclosing_guard():
+    """A premise stated outside an enclosing branch still reaches the inner guard.
+
+    The constraint set accumulates down the nesting, so ``n % 128 == 0`` is
+    available where ``tx < n`` is judged even though an ``if n > 0`` sits in
+    between.
+    """
+
+    @T.prim_func(private=True)
+    def func(n: T.int32):
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        with T.Assert(n % 128 == 0, "n must be a multiple of the block size"):
+            if n > 0:
+                if tx < n:
+                    s[tx] = T.cast(tx, "float32")
+                    l[0] = s[(tx + 64) % 128]
+
+    s = run_passes_script(func)
+    assert 'T.tvm_storage_sync("shared")' in s, f"Expected a barrier for a cross-thread hazard:\n{s}"
+    sync_pos = s.index('T.tvm_storage_sync("shared")')
+    if_pos = s.index("if tx < n")
+    assert sync_pos > if_pos, f"Barrier should stay inside the uniform guard:\n{s}"
+
+
+def test_premise_covers_every_thread_dimension():
+    """Uniformity has to hold over all of threadIdx.x/y/z, not just x.
+
+    With ``threadIdx.y`` extended, two threads compared for divergence may differ
+    in ``y`` as well as ``x``; the guard is still uniform, and the barrier stays.
+    """
+
+    @T.prim_func(private=True)
+    def func(n: T.int32):
+        s = T.alloc_buffer((256,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 2)
+        tz = T.launch_thread("threadIdx.z", 1)
+        with T.Assert(n % 128 == 0, "n must be a multiple of the x extent"):
+            if tx < n:
+                s[ty * 128 + tx] = T.cast(tx, "float32")
+                l[0] = s[ty * 128 + (tx + 64) % 128]
+
+    s = run_passes_script(func)
+    assert 'T.tvm_storage_sync("shared")' in s, f"Expected a barrier for a cross-thread hazard:\n{s}"
+    sync_pos = s.index('T.tvm_storage_sync("shared")')
+    if_pos = s.index("if tx < n")
+    assert sync_pos > if_pos, f"Barrier should stay inside the uniform guard:\n{s}"
+
+
+def test_assume_serves_as_a_premise_like_an_assert():
+    """``T.assume`` reaches the check the same way an assert does.
+
+    An assume is what a caller-facing constraint looks like in practice, and it
+    arrives as a scoped attribute rather than a flat statement, so it exercises
+    the other of the two shapes a premise can take.
+    """
+
+    @T.prim_func(private=True)
+    def func(n: T.int32):
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        T.assume(n % 128 == 0)
+        if tx < n:
+            s[tx] = T.cast(tx, "float32")
+            l[0] = s[(tx + 64) % 128]
+
+    mod = tvm.IRModule.from_expr(func)
+    cuda_target = tvm.target.Target("cuda", host="llvm")
+    mod = tvm.tirx.transform.Apply(lambda f: f.with_attr({"global_symbol": "test", "target": cuda_target}))(mod)
+    mod = tvm.tirx.transform.AnnotateDeviceRegions()(mod)
+    mod = tvm.tirx.transform.SplitHostDevice()(mod)
+    mod = tilelang.transform.InjectAssumes()(mod)
+    s = str(tilelang.transform.ThreadSync("shared")(mod).script())
+
+    assert 'T.tvm_storage_sync("shared")' in s, f"Expected a barrier for a cross-thread hazard:\n{s}"
+    sync_pos = s.index('T.tvm_storage_sync("shared")')
+    if_pos = s.index("if tx < n")
+    assert sync_pos > if_pos, f"Barrier should stay inside the uniform guard:\n{s}"
+
+
+def test_hazard_across_split_divergent_symbolic_guard_is_ordered():
+    """The accepted shape for the program above: split the guard by hand.
+
+    With the branch split around the synchronization point, the two accesses no
+    longer sit in one branch: the conflict spans the guard, so the barrier is
+    anchored in the enclosing sequence and is reached by every thread.
+    """
+
+    @T.prim_func(private=True)
+    def func(n: T.int32):
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 32)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if bx * 4 + tx // 32 < n:
+            s[tx] = T.cast(tx, "float32")
+        if bx * 4 + tx // 32 < n:
+            l[0] = s[(tx + 64) % 128]
+
+    s = run_passes_script(func)
+    assert 'T.tvm_storage_sync("shared")' in s, f"Expected a barrier for a cross-thread hazard:\n{s}"
+
+
+def test_bind_definition_does_not_hide_cross_thread_hazard():
+    """A bind that is live across both accesses must not weaken the analysis.
+
+    ``idx`` is defined before both the write and the read, so both constraint
+    sets carry its definition. Sharing it would state ``idx == tx1 + 7`` and
+    ``idx == tx2 + 7``, forcing ``tx1 == tx2`` against the proof's ``tx1 != tx2``:
+    every query would hold vacuously and the real hazard -- thread ``t`` reads the
+    slot owned by ``t + 7`` -- would be "proven" absent.
+    """
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        idx: T.int32 = tx + 7
+        s[tx] = T.cast(tx, "float32")
+        l[0] = s[idx % 128]
+
+    s = run_passes_script(func)
+    assert 'T.tvm_storage_sync("shared")' in s, f"Missing barrier: a bind definition hid a cross-thread hazard:\n{s}"
+
+
+def test_bool_bind_does_not_hide_cross_thread_hazard():
+    """Same defect, reached through a boolean bind.
+
+    Boolean binds matter in the full pipeline because let-inlining only folds
+    integer values away, so a predicate such as ``tx < 64`` reaches ThreadSync
+    intact. Sharing it between the two instances asserts
+    ``(tx1 < 64) == (tx2 < 64)``, confining both threads to the same half of the
+    block and letting the disjointness proof succeed where it must not.
+    """
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        c: T.bool = tx < 64
+        s[tx] = T.cast(tx, "float32")
+        l[0] = s[(tx + 64) % 128] + T.cast(c, "float32")
+
+    s = run_passes_script(func)
+    assert 'T.tvm_storage_sync("shared")' in s, f"Missing barrier: a boolean bind hid a cross-thread hazard:\n{s}"
+
+
+def test_opaque_bind_index_does_not_hide_cross_thread_hazard():
+    """A bind whose definition is dropped still needs a per-side instance.
+
+    ``a`` is loaded from a buffer, so its definition is dropped from the
+    constraint set rather than substituted away. The variable survives in the two
+    indices, so each side still needs its own copy: sharing one ``a`` would let
+    the prover assume both threads loaded the same value and discharge
+    ``4*a != 4*a + 4``, hiding the hazard between the thread writing ``s[a]`` and
+    the thread whose ``a`` is one lower. Spelling the load out at both indices
+    instead of binding it must give the same answer.
+    """
+
+    @T.prim_func(private=True)
+    def func(idx_buf: T.Buffer((128,), "int32")):
+        s = T.alloc_buffer((256,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        a: T.int32 = idx_buf[tx]
+        s[a] = T.cast(tx, "float32")
+        l[0] = s[a + 1]
+
+    @T.prim_func(private=True)
+    def without_bind(idx_buf: T.Buffer((128,), "int32")):
+        s = T.alloc_buffer((256,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        s[idx_buf[tx]] = T.cast(tx, "float32")
+        l[0] = s[idx_buf[tx] + 1]
+
+    s = run_passes_script(func)
+    assert 'T.tvm_storage_sync("shared")' in s, f"Missing barrier: an opaque bind index hid a cross-thread hazard:\n{s}"
+    assert 'T.tvm_storage_sync("shared")' in run_passes_script(without_bind), "Control case lost its barrier"
+
+
+def test_cross_thread_hazard_still_requires_sync():
+    """Reading another thread's slot is a genuine hazard and must be ordered."""
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        s[tx] = T.cast(tx, "float32")
+        l[0] = s[(tx + 64) % 128]
+
+    s = run_passes_script(func)
+    assert 'T.tvm_storage_sync("shared")' in s, f"Expected a barrier for a cross-thread hazard:\n{s}"
+
+
+def test_sync_may_stay_inside_block_uniform_guard():
+    """A guard that does not mention a thread variable is block uniform.
+
+    All threads agree on it, so a barrier inside the branch is reached by the
+    whole block and does not need hoisting.
+    """
+
+    @T.prim_func(private=True)
+    def func(flag: T.int32):
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if flag < 0:
+            s[tx] = T.cast(tx, "float32")
+            x1: T.float32 = s[(tx + 64) % 128]
+            s[tx] = x1 * T.float32(2)
+
+    s = run_passes_script(func)
+    assert 'T.tvm_storage_sync("shared")' in s, f"Expected a barrier for a cross-thread hazard:\n{s}"
 
 
 if __name__ == "__main__":

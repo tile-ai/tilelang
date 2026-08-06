@@ -153,17 +153,17 @@ elif tx >= 256:
 The producer thread group (tx >= 256) uses double buffering with barriers to keep consumers fed:
 
 ```python
-# Producer alternates between two buffers
-for i_i in T.serial(T.ceildiv(NI, 2)):
-    # Buffer 0
-    T.barrier_wait(bar_k_0_free[0], ((i_i & 1) ^ 1))
-    # ... load KV into buffer 0
-    T.cp_async_barrier_noinc(bar_k_0_ready[0])
+num_stages = 2
+KV_shared = T.alloc_shared([num_stages, BI, D], dtype)
+bar_k_ready = T.alloc_barrier(arrive_count=[128] * num_stages)
+bar_k_free = T.alloc_barrier(arrive_count=[256] * num_stages)
 
-    # Buffer 1
-    T.barrier_wait(bar_k_1_free[0], ((i_i & 1) ^ 1))
-    # ... load KV into buffer 1
-    T.cp_async_barrier_noinc(bar_k_1_ready[0])
+# Producer alternates between slices of one multi-version buffer
+for i_i in T.serial(T.ceildiv(NI, num_stages)):
+    for stage in T.unroll(num_stages):
+        T.barrier_wait(bar_k_free[stage], ((i_i & 1) ^ 1))
+        # ... load KV into KV_shared[stage, :, :]
+        T.cp_async_barrier_noinc(bar_k_ready[stage])
 ```
 
 Consumer threads wait on barriers and process buffers as they become ready. This manual orchestration hides memory latency behind compute, which is why it outperforms the simpler auto-pipelined version. The output dimension is also split in half so that the two consumer groups can work in parallel on different parts of the matmul.

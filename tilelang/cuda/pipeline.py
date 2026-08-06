@@ -6,7 +6,7 @@ from tvm.tirx import PrimFunc, SBlock
 from tvm.tirx.stmt_functor import post_order_visit
 
 import tilelang
-from tilelang.backend.pass_pipeline.pipeline import PassPipeline, register_pipeline
+from tilelang.backend.pass_pipeline import PassPipeline
 from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
     allow_vectorize,
@@ -68,6 +68,10 @@ def _module_has_shared_barrier(mod: IRModule) -> bool:
 def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.BindTarget(target)(mod)
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    # Record body-bound global bases before optional let inlining obscures
+    # their provenance. CopyAnalysis consumes this marker for every lowering
+    # path, independently of whether warp specialization is enabled.
+    mod = tilelang.cuda.transform.AnnotateDeviceBoundTmaCopies()(mod)
     if should_force_let_inline():
         # Force-let inline whenever the pass config requests it.
         mod = tilelang.transform.LetInline()(mod)
@@ -102,6 +106,13 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     # Normalize if-without-else wrappers before pipeline planning. This keeps
     # pipeline body extraction focused on canonical SeqStmt bodies.
     mod = tilelang.transform.IfStmtBinding()(mod)
+
+    # Expand only explicitly requested unroll loops before pipeline planning
+    # and fold the constants exposed by substitution. This makes their
+    # copy/compute statements individual scheduling units.
+    mod = tilelang.transform.UnrollLoop()(mod)
+    # Simplify the unrolled loop bodies.
+    mod = tilelang.transform.Simplify()(mod)
 
     # Run pipeline planning and software-pipeline rewriting before layout
     # inference so inferred layouts see the final pipelined structure directly.
@@ -254,6 +265,4 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     return mod
 
 
-cuda_pipeline = PassPipeline("cuda", CUDAPassPipelineBody)
-
-register_pipeline(cuda_pipeline)
+CUDA_PIPELINE = PassPipeline("cuda", CUDAPassPipelineBody)

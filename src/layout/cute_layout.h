@@ -106,6 +106,12 @@ public:
   // element type.
   TVM_DLL Swizzle Recast(int old_bits, int new_bits) const;
 
+  // Parse the CuTe spelling "Sw<b,m,s>" (the inverse of Print).
+  TVM_DLL static Swizzle Parse(const ffi::String &text);
+
+  // Print in the CuTe spelling "Sw<b,m,s>".
+  TVM_DLL void Print(std::ostream &os) const;
+
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Swizzle, ObjectRef, SwizzleNode);
 };
 
@@ -145,6 +151,14 @@ public:
     *this = *this * other;
     return *this;
   }
+
+  // Parse the CuTe spelling (the inverse of Print): nested "(a,b,...)"
+  // tuples, integer leaves, and scaled bases "v@m@..." with the mode path
+  // innermost-first (E<1,0> is spelled 1@0@1).
+  TVM_DLL static IntTuple Parse(const ffi::String &text);
+
+  // Print in the CuTe spelling.
+  TVM_DLL void Print(std::ostream &os) const;
 
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(IntTuple, ObjectRef, IntTupleNode);
 };
@@ -314,6 +328,10 @@ TVM_DLL IntTupleTuple Wrap(const IntTuple &t);
 // matches -- same nesting and same rank at every branch.
 TVM_DLL bool Congruent(const IntTuple &a, const IntTuple &b);
 
+/// CuTe shape compatibility (`a <= b`): `a` and `b` have the same total size,
+/// and every coordinate into `a` is also a valid coordinate into `b`.
+TVM_DLL bool Compatible(const IntTuple &a, const IntTuple &b);
+
 // Higher-order function mapping each leaf by `f`.
 template <class F> IntTuple TransformLeaf(const IntTuple &t, F &&f) {
   if (!IsTuple(t))
@@ -381,6 +399,12 @@ public:
   // Compose with a column-major layout of this shape.
   TVM_DLL Layout WithShape(const IntTuple &shape) const;
 
+  // Parse the CuTe spelling "shape:stride" (the inverse of Print).
+  TVM_DLL static Layout Parse(const ffi::String &text);
+
+  // Print in the CuTe spelling "shape:stride".
+  TVM_DLL void Print(std::ostream &os) const;
+
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Layout, ObjectRef, LayoutNode);
 };
 
@@ -406,6 +430,12 @@ TVM_DLL Layout Coalesce(const Layout &layout);
 /// @return layout(result(i)) == i for all i < size(result).
 TVM_DLL Layout RightInverse(const Layout &layout);
 
+/// Left-inverse of an injective layout (CuTe left_inverse):
+/// @return result(layout(i)) == i for all i < size(layout).
+/// Like CuTe, ICHECKs when the sorted strides do not form the divisibility
+/// chain the inverse requires (an injective layout with irregular gaps).
+TVM_DLL Layout LeftInverse(const Layout &layout);
+
 /// Composition lhs o rhs.
 /// @return result(c) == lhs(rhs(c)) for all c in the domain of rhs.
 /// @post size(result) == size(rhs).
@@ -424,7 +454,12 @@ TVM_DLL Layout Take(const Layout &layout, int64_t n);
 /// Drop stride-0 and size-1 modes, then coalesce.
 TVM_DLL Layout Filter(const Layout &layout);
 
-/// Codomain size of a layout.
+/// Codomain shape of a layout (CuTe coshape): the per-axis extents
+/// 1 + inner_product(shape - 1, |stride|), e.g.
+/// coshape((128,32):(1@0,1@1)) == (128,32).
+TVM_DLL IntTuple Coshape(const Layout &layout);
+
+/// Codomain size of a layout (CuTe cosize): size(coshape(layout)).
 /// @post for all `0 <= i < size(layout)`, layout(i) < result.
 TVM_DLL IntTuple Cosize(const Layout &layout);
 
@@ -439,7 +474,23 @@ TVM_DLL Layout Complement(const Layout &layout);
 /// @pre `tiler` and `Size(layout)` must be static.
 TVM_DLL Layout LogicalDivide(const Layout &layout, const Layout &tiler);
 
-// Column major layout over `shape`.
+/// Logical product of a block layout and a tiler layout.
+/// Repeats `block` according to `tiler`, returning `(block, rest)`.
+/// @pre `Size(block)` and `Cosize(tiler)` must be static.
+TVM_DLL Layout LogicalProduct(const Layout &block, const Layout &tiler);
+
+/// Tiled product convenience form: keep `block` as the first mode and unpack
+/// the actual repeated mode of the logical product after it.
+TVM_DLL Layout TiledProduct(const Layout &block, const Layout &tiler);
+
+/// Blocked product: repeat `block` over `tiler` and zip the per-mode pairs, so
+/// mode i of the result is ((block_i, rest_i)) and accepts a flat coordinate
+/// covering block extent x tiler extent along that mode.
+/// @post Rank(result) == max(Rank(block), Rank(tiler)).
+TVM_DLL Layout BlockedProduct(const Layout &block, const Layout &tiler);
+
+// Column major layout over `shape`.  Size-1 modes take stride 0 and leave
+// the running product untouched (CuTe compact_col_major, stride.hpp:302).
 template <typename Container>
 inline Layout MakeColumnMajorLayout(const Container &shape) {
   int64_t n = shape.size();
@@ -449,13 +500,18 @@ inline Layout MakeColumnMajorLayout(const Container &shape) {
   IntTuple stride = 1;
   for (int64_t k = 0; k < n; ++k) {
     sh.push_back(shape[k]);
+    if (IsConst(IntTuple(shape[k])) && AsConst(IntTuple(shape[k])) == 1) {
+      st.push_back(IntTuple(int64_t(0)));
+      continue;
+    }
     st.push_back(stride);
     stride *= shape[k];
   }
   return Layout(std::move(sh), std::move(st));
 }
 
-// Row major layout over `shape`.
+// Row major layout over `shape`.  Size-1 modes take stride 0 (CuTe
+// compact_row_major).
 template <typename Container>
 inline Layout MakeRowMajorLayout(const Container &shape) {
   int64_t n = shape.size();
@@ -463,6 +519,10 @@ inline Layout MakeRowMajorLayout(const Container &shape) {
   IntTuple stride = 1;
   for (int64_t k = n - 1; k >= 0; --k) {
     sh.Set(k, shape[k]);
+    if (IsConst(IntTuple(shape[k])) && AsConst(IntTuple(shape[k])) == 1) {
+      st.Set(k, IntTuple(int64_t(0)));
+      continue;
+    }
     st.Set(k, stride);
     stride *= shape[k];
   }
@@ -536,10 +596,17 @@ public:
 };
 
 /// Recover an affine TileLang layout as a cute::Layout.
-/// @return result(coords) == layout(coords)
+/// @return result(coords) == serialize(layout(coords))
 /// @return nullopt if the address is not purely affine (e.g. it has a swizzle,
 ///         a non-zero base offset, or a non-constant extent).
 Optional<Layout> LayoutFromTileLang(const tvm::tl::Layout &layout);
+
+/// Recover a hierarchical affine TileLang layout as a cute::Layout.
+/// Each mode in the output indices is multiplied with a scaled basis.
+/// @return result(coords) == layout(coords)
+/// @return nullopt if any of the output modes is not purely affine, or
+///         different output modes are dependent.
+Optional<Layout> LayoutFromTileLangHierarchical(const tvm::tl::Layout &layout);
 
 /// Recover a possibly swizzled and offset TileLang layout as a
 /// cute::ComposedLayout.

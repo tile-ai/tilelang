@@ -18,9 +18,9 @@
 #include <utility>
 #include <vector>
 
+#include "cuda/op/builtin.h"
 #include "layout/layout.h"
 #include "multi_version_buffer_rewriter.h"
-#include "op/builtin.h"
 #include "op/operator.h"
 #include "op/region.h"
 #include "op/utils.h"

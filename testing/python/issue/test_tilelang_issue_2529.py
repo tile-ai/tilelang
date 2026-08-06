@@ -33,6 +33,7 @@ def _lower_source(n, block, annotate_linear=False):
     return artifact.kernel_source
 
 
+@tilelang.testing.requires_cuda
 def test_tma_store_selection_uses_copy_bounds():
     full_tile_source = _lower_source(1024, 256)
     # The unannotated rank-1 tail exercises descriptor layout inference.

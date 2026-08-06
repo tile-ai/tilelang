@@ -23,7 +23,8 @@
 #include "arith/pattern_match.h"
 #include "backend/common/target_utils.h"
 #include "cuda/codegen/ptx.h"
-#include "op/builtin.h"
+#include "cuda/op/builtin.h"
+#include "cuda/target_utils.h"
 #include "transform/common/attr.h"
 
 namespace tvm {
@@ -662,6 +663,10 @@ std::string CodeGenTileLangCUDA::Finish() {
   }
   if (need_mma_instruction_h_) {
     decl_stream << "#include <tl_templates/cuda/instruction/mma.h>\n";
+  }
+  if (need_mma_block_scale_instruction_h_) {
+    decl_stream
+        << "#include <tl_templates/cuda/instruction/mma_block_scale.h>\n";
   }
   if (need_wgmma_instruction_h_) {
     decl_stream << "#include <tl_templates/cuda/instruction/wgmma.h>\n";
@@ -2263,9 +2268,10 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
   const VarNode *buffer_var = buffer->data.get();
   std::ostringstream os;
   std::string vid = GetVarID(buffer_var);
-  // For fp4 packed buffers, use the packed buffer name for vector accesses
-  auto it = fp4_packed_buffers_.find(buffer_var);
-  if (it != fp4_packed_buffers_.end() && !t.is_scalar()) {
+  // Local scalar FP4 allocations use a distinct fp4x2 backing array. Every
+  // reference, including address_of, must name that physical allocation.
+  auto it = fp4_packed_buffers_.find(buffer->data);
+  if (it != fp4_packed_buffers_.end()) {
     vid = it->second;
   }
   std::string scope;
@@ -2311,6 +2317,8 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
     return os.str();
   }
   std::string index_str = PrintExpr(index);
+  bool is_compact_scalar_fp4 = buffer_element_dtype.lanes() == 1 &&
+                               buffer_element_dtype.is_float4_e2m1fn();
   if ((t.bits() == 4 && !t.is_float4()) || (t.bits() == 1 && t.is_int())) {
     // Scalar int4/uint4 storage is byte-packed (2 logical elements per byte).
     // Vector int4 loads/stores reinterpret the underlying packed bytes as the
@@ -2326,8 +2334,7 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
        << " + " << index_str << ")";
   } else if (t == buffer_element_dtype) {
     int div_factor = 1;
-    if (buffer_element_dtype.is_float4_e2m1fn() &&
-        buffer_element_dtype.lanes() == 1) {
+    if (is_compact_scalar_fp4) {
       div_factor = 2;
     }
     index_str =
@@ -2337,8 +2344,7 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
     // Fix fp4 pointer arithmetic: fp4 elements are 4-bit packed 2 per byte.
     // fp4* + n incorrectly advances n bytes (skipping 2n elements).
     int div_factor = 1;
-    if (buffer_element_dtype.is_float4_e2m1fn() &&
-        buffer_element_dtype.lanes() == 1) {
+    if (is_compact_scalar_fp4) {
       div_factor = 2;
     }
     index_str =
@@ -2758,6 +2764,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     print_extern_call_stmt(ss.str(), 0, 1);
   } else if (op->op.same_as(tl::ptx_ldmatrix())) {
+    ICHECK_EQ(op->args.size(), 4U);
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
     std::string func_name = "tl::ptx_ldmatrix_x" + std::to_string(num);
@@ -3157,6 +3164,113 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(C_ptr)", c_ref);
     replacer.register_rule("(C_offset)", c_bias);
     this->stream << replacer.rewrite(mma_call);
+  } else if (op->op.same_as(tl::ptx_mma_block_scale())) {
+    need_mma_block_scale_instruction_h_ = true;
+    // arg 0: accum_dtype
+    // arg 1: shape: mXnXkX
+    // arg 2: A layout: row/col
+    // arg 3: B layout: row/col
+    // arg 4: kind: mxf4nvf4
+    // arg 5: scale_vec_size: 4
+    // arg 6: A dtype: e2m1
+    // arg 7: B dtype: e2m1
+    // arg 8: scale_type: ue4m3
+    // arg 9: A_data pointer
+    // arg 10: A_offset
+    // arg 11: B_data pointer
+    // arg 12: B_offset
+    // arg 13: C_data pointer
+    // arg 14: C_offset
+    // arg 15: scale_a_data
+    // arg 16: scale_b_data
+    // arg 17: scale_a_byte_id
+    // arg 18: scale_a_thread_id
+    // arg 19: scale_b_byte_id
+    // arg 20: scale_b_thread_id
+    ICHECK_EQ(op->args.size(), 21U);
+    std::string accum_dtype = Downcast<StringImm>(op->args[0])->value;
+    std::string shape = Downcast<StringImm>(op->args[1])->value;
+    std::string A_layout = Downcast<StringImm>(op->args[2])->value;
+    std::string B_layout = Downcast<StringImm>(op->args[3])->value;
+    std::string kind = Downcast<StringImm>(op->args[4])->value;
+    int scale_vec_size = static_cast<int>(Downcast<IntImm>(op->args[5])->value);
+    std::string A_dtype = Downcast<StringImm>(op->args[6])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[7])->value;
+    std::string scale_type = Downcast<StringImm>(op->args[8])->value;
+    std::string a_ref = this->PrintExpr(op->args[9]);
+    std::string a_offset = this->PrintExpr(op->args[10]);
+    std::string b_ref = this->PrintExpr(op->args[11]);
+    std::string b_offset = this->PrintExpr(op->args[12]);
+    std::string c_ref = this->PrintExpr(op->args[13]);
+    std::string c_offset = this->PrintExpr(op->args[14]);
+    std::string scale_a = this->PrintExpr(op->args[15]);
+    std::string scale_b = this->PrintExpr(op->args[16]);
+    std::string scale_a_byte_id = this->PrintExpr(op->args[17]);
+    std::string scale_a_thread_id = this->PrintExpr(op->args[18]);
+    std::string scale_b_byte_id = this->PrintExpr(op->args[19]);
+    std::string scale_b_thread_id = this->PrintExpr(op->args[20]);
+
+    bool supported_mxf4nvf4_4x_ue4m3 =
+        accum_dtype == "float32" && shape == "m16n8k64" && A_layout == "row" &&
+        B_layout == "col" && kind == "mxf4nvf4" && scale_vec_size == 4 &&
+        A_dtype == "e2m1" && B_dtype == "e2m1" && scale_type == "ue4m3";
+    ICHECK(supported_mxf4nvf4_4x_ue4m3)
+        << "Unsupported ptx_mma_block_scale configuration: accum_dtype="
+        << accum_dtype << ", shape=" << shape << ", A_layout=" << A_layout
+        << ", B_layout=" << B_layout << ", kind=" << kind
+        << ", scale_vec_size=" << scale_vec_size << ", A_dtype=" << A_dtype
+        << ", B_dtype=" << B_dtype << ", scale_type=" << scale_type
+        << ". Currently supported: f32 m16n8k64 row.col kind::mxf4nvf4 "
+           "scale_vec::4X e2m1.e2m1 f32 ue4m3.";
+
+    auto resolve_fp4_packed_buffer =
+        [&](const PrimExpr &var_expr, std::string &ref, std::string &offset) {
+          if (const VarNode *var = var_expr.as<VarNode>()) {
+            auto it = fp4_packed_buffers_.find(GetRef<Var>(var));
+            if (it != fp4_packed_buffers_.end()) {
+              ref = it->second;
+              offset = "(" + offset + ") / 2";
+            }
+          }
+        };
+    resolve_fp4_packed_buffer(op->args[9], a_ref, a_offset);
+    resolve_fp4_packed_buffer(op->args[11], b_ref, b_offset);
+
+    this->PrintIndent();
+
+    std::string mma_kind_enum = "tl::SM120MmaBlockScaledKind::kMxf4nvf4";
+    std::string scale_type_enum = "tl::SM120MmaScaleType::kUE4M3";
+    std::string mma_call =
+        "tl::sm120_mma_sync_blockscaled<(MMA_KIND), (SCALE_VEC_SIZE), "
+        "(SCALE_TYPE)>("
+        "reinterpret_cast<float*>((C_ptr) + (C_offset)), "
+        "reinterpret_cast<const uint32_t*>((A_ptr) + (A_offset)), "
+        "reinterpret_cast<const uint32_t*>((B_ptr) + (B_offset)), "
+        "reinterpret_cast<const float*>((C_ptr) + (C_offset)), "
+        "(*reinterpret_cast<const uint32_t*>((scale_a))), "
+        "(*reinterpret_cast<const uint32_t*>((scale_b))), "
+        "static_cast<uint16_t>((scale_a_byte_id)), "
+        "static_cast<uint16_t>((scale_a_thread_id)), "
+        "static_cast<uint16_t>((scale_b_byte_id)), "
+        "static_cast<uint16_t>((scale_b_thread_id)));\n";
+
+    tl::codegen::Replacer replacer;
+    replacer.register_rule("(MMA_KIND)", mma_kind_enum);
+    replacer.register_rule("(SCALE_VEC_SIZE)", std::to_string(scale_vec_size));
+    replacer.register_rule("(SCALE_TYPE)", scale_type_enum);
+    replacer.register_rule("(A_ptr)", a_ref);
+    replacer.register_rule("(A_offset)", a_offset);
+    replacer.register_rule("(B_ptr)", b_ref);
+    replacer.register_rule("(B_offset)", b_offset);
+    replacer.register_rule("(C_ptr)", c_ref);
+    replacer.register_rule("(C_offset)", c_offset);
+    replacer.register_rule("(scale_a)", scale_a);
+    replacer.register_rule("(scale_b)", scale_b);
+    replacer.register_rule("(scale_a_byte_id)", scale_a_byte_id);
+    replacer.register_rule("(scale_a_thread_id)", scale_a_thread_id);
+    replacer.register_rule("(scale_b_byte_id)", scale_b_byte_id);
+    replacer.register_rule("(scale_b_thread_id)", scale_b_thread_id);
+    this->stream << replacer.rewrite(mma_call);
   } else if (op->op.same_as(builtin::ptx_mma_sp())) {
     // arg 0: shape: mXnXkX
     // arg 1: A layout: row/col
@@ -3550,9 +3664,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string ab_type_str = tl::codegen::ptx::DTypeEnumToString(dtype_enum);
 
     need_tcgen05mma_instruction_h_ = true;
-    need_tcgen05_common_h_ = true;
-    this->PrintIndent();
-    this->stream << "tl::require_tcgen05mma_ss();\n";
     this->PrintIndent();
     std::string tcgen05_call =
         "tl::(tcgen05_name)<(ABType)(USE_2CTA_SUFFIX)>(uint64_t((desc_a) + "
@@ -3604,9 +3715,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         std::string(", ") + (enable_2cta ? "true" : "false");
 
     need_tcgen05mma_instruction_h_ = true;
-    need_tcgen05_common_h_ = true;
-    this->PrintIndent();
-    this->stream << "tl::require_tcgen05mma_ts();\n";
     this->PrintIndent();
     std::string tcgen05_call =
         "tl::tcgen05mma_ts<(ABType)(USE_2CTA_SUFFIX)>( "
@@ -3656,9 +3764,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto dtype_enum = tl::codegen::ptx::DTypeFromString(kind_dtype);
 
     need_tcgen05mma_instruction_h_ = true;
-    need_tcgen05_common_h_ = true;
-    this->PrintIndent();
-    this->stream << "tl::require_tcgen05mma_blockscaled_ss();\n";
     this->PrintIndent();
     std::string tcgen05_call =
         "tl::(tcgen05_name)<(ABType), (USE_2CTA)>(uint64_t((desc_a) + "
@@ -3716,7 +3821,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << smem_ptr << "));\n";
   } else if (op->op.same_as(tl::tcgen05_ld())) {
     ICHECK_EQ(op->args.size(), 6U) << "tcgen05_ld expects 6 arguments";
-    need_tcgen05_common_h_ = true;
     need_copy_sm100_h_ = true;
     int inst_bits = Downcast<IntImm>(op->args[0])->value;
     int chunks = Downcast<IntImm>(op->args[1])->value;
@@ -3725,15 +3829,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string col_offset = this->PrintExpr(op->args[4]);
     std::string dst_ptr = this->PrintExpr(op->args[5]);
     this->PrintIndent();
-    this->stream << "tl::require_tcgen05_ld();\n";
-    this->PrintIndent();
     this->stream << "tl::tcgen05_ld_32dp" << inst_bits << "bNx<" << chunks
                  << ", " << (pack16 ? "true" : "false") << ">("
                  << tmem_start_col << ", " << col_offset << ", " << dst_ptr
                  << ");\n";
   } else if (op->op.same_as(tl::tcgen05_st())) {
     ICHECK_EQ(op->args.size(), 6U) << "tcgen05_st expects 6 arguments";
-    need_tcgen05_common_h_ = true;
     need_copy_sm100_h_ = true;
     int inst_bits = Downcast<IntImm>(op->args[0])->value;
     int chunks = Downcast<IntImm>(op->args[1])->value;
@@ -3741,8 +3842,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string tmem_start_col = this->PrintExpr(op->args[3]);
     std::string col_offset = this->PrintExpr(op->args[4]);
     std::string src_ptr = this->PrintExpr(op->args[5]);
-    this->PrintIndent();
-    this->stream << "tl::require_tcgen05_st();\n";
     this->PrintIndent();
     this->stream << "tl::tcgen05_st_32dp" << inst_bits << "bNx<" << chunks
                  << ", " << (unpack16 ? "true" : "false") << ">("
@@ -4942,6 +5041,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
   std::string scope = GetPtrStorageScope(op->buffer->data);
   const VarNode *buffer = op->buffer->data.as<VarNode>();
   DataType alloc_dtype = op->buffer->dtype;
+  bool is_float4_unpacked_shared = alloc_dtype.is_float4_e2m1_unpacked() &&
+                                   (scope == "shared" || scope == "shared.dyn");
   if (scope.find("wmma.") == 0) {
     if (scope == "wmma.matrix_a" || scope == "wmma.matrix_b") {
       ICHECK(
@@ -4966,9 +5067,6 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
   } else if (scope == "local.descriptor.tcgen05_instr") {
     stream << "tl::Tcgen05InstrDescriptor " << vid << ";\n";
   } else {
-    bool is_float4_unpacked_shared =
-        alloc_dtype.is_float4_e2m1_unpacked() &&
-        (scope == "shared" || scope == "shared.dyn");
     bool is_fp4_scalar_local = alloc_dtype.is_float4_e2m1fn() &&
                                alloc_dtype.is_scalar() && scope == "local";
     bool is_int4_scalar_local =
@@ -5022,7 +5120,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
           auto vid_packed = vid + "_packed";
           stream << "fp4_e2_2_t " << vid_packed << '['
                  << (constant_size + 1) / 2 << "];\n";
-          fp4_packed_buffers_[op->buffer->data.get()] = vid_packed;
+          fp4_packed_buffers_[op->buffer->data] = vid_packed;
         } else {
           stream << ' ' << vid << '[' << constant_size << "];\n";
         }
@@ -5115,7 +5213,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
   }
 
   // Check if this is a fp4 packed buffer access
-  auto packed_it = fp4_packed_buffers_.find(buffer_var.get());
+  auto packed_it = fp4_packed_buffers_.find(buffer_var);
   if (packed_it != fp4_packed_buffers_.end() && value_dtype.is_scalar()) {
     std::string idx_str = PrintExpr(index);
     os << "tl_fp4_packed_load(" << packed_it->second << ", " << idx_str << ")";
@@ -5214,7 +5312,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
   }
 
   // Check if this is a fp4 packed buffer access
-  auto packed_it = fp4_packed_buffers_.find(buffer_var.get());
+  auto packed_it = fp4_packed_buffers_.find(buffer_var);
   if (packed_it != fp4_packed_buffers_.end() && value_dtype.is_scalar()) {
     std::string idx_str = PrintExpr(index_expr);
     std::string value = this->PrintExpr(op->value);
@@ -5282,6 +5380,47 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
       EndScope(vec_scope);
     }
   }
+}
+
+void CodeGenTileLangCUDA::VisitExpr_(const SelectNode *op, std::ostream &os) {
+  // Non-vector cases.
+  if (!op->condition.dtype().is_fixed_length_vector()) {
+    CodeGenC::VisitExpr_(op, os);
+    return;
+  }
+
+  // Codegen vector condition case by serializing the select op.
+  TVM_FFI_ICHECK(op->false_value->dtype == op->dtype &&
+                 op->true_value->dtype == op->dtype &&
+                 op->dtype.lanes() == op->condition.dtype().lanes());
+
+  std::string r_var = name_supply_->FreshName("_");
+  this->PrintIndent();
+  this->PrintType(op->dtype, stream);
+  stream << ' ' << r_var << ";\n";
+  {
+    std::string c_var =
+        SSAGetID(PrintExpr(op->condition), op->condition.dtype());
+    std::string t_var = SSAGetID(PrintExpr(op->true_value), op->dtype);
+    std::string f_var = SSAGetID(PrintExpr(op->false_value), op->dtype);
+
+    // The condition is stored as an ushort vector.
+    int lanes = op->dtype.lanes();
+    DataType memory_ty(DataType::TypeCode::kUInt, 16, lanes);
+
+    for (int i = 0; i < lanes; ++i) {
+      std::ostringstream item;
+      item << "(bool(";
+      PrintVecElemLoad(c_var, memory_ty, i, item);
+      item << ")?";
+      PrintVecElemLoad(t_var, op->dtype, i, item);
+      item << ':';
+      PrintVecElemLoad(f_var, op->dtype, i, item);
+      item << ')';
+      PrintVecElemStore(r_var, op->dtype, i, item.str());
+    }
+  }
+  os << r_var;
 }
 
 void CodeGenTileLangCUDA::VisitExpr_(const ShuffleNode *op,

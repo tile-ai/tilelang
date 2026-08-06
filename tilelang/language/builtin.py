@@ -8,7 +8,7 @@ from tilelang import tvm as tvm
 from tilelang.language.common import ptx_arrive_barrier, evaluate
 from tilelang.language.eager.builder import macro
 from tilelang.language.kernel import get_thread_bindings, get_block_extents
-from tvm import DataType, tirx
+from tvm import DataType, DataTypeCode, tirx
 from tvm.runtime import convert
 from tvm.tirx import PrimExpr, Var, Call, BufferLoad, BufferRegion
 from tilelang.utils.language import retrieve_ptr, get_buffer_region_from_load, retrieve_buffer_and_offset
@@ -1029,6 +1029,18 @@ def shfl_sync(
 # ---------------------------------------------------------------------------
 
 
+def _validate_predicate(predicate: int | PrimExpr, intrinsic: str) -> PrimExpr:
+    """Normalize an intrinsic predicate and reject lossy float-to-int coercion."""
+    predicate = tirx.convert(predicate)
+    if DataType(predicate.dtype).type_code not in (
+        DataTypeCode.INT,
+        DataTypeCode.UINT,
+        DataTypeCode.BOOL,
+    ):
+        raise TypeError(f"T.{intrinsic} requires an integer or boolean predicate, but got {predicate.dtype}.")
+    return predicate
+
+
 def any_sync(
     predicate: int | PrimExpr,
     mask: int | PrimExpr = _FULL_WARP_MASK,
@@ -1046,6 +1058,7 @@ def any_sync(
     Returns:
         int32: Non-zero if any thread in the mask has a non-zero predicate.
     """
+    predicate = _validate_predicate(predicate, "any_sync")
     return tirx.call_intrin("int32", tirx.op.Op.get("tl.any_sync"), _as_uint32_mask(mask), predicate)
 
 
@@ -1065,6 +1078,7 @@ def all_sync(
     Returns:
         int32: Non-zero if all threads in the mask have a non-zero predicate.
     """
+    predicate = _validate_predicate(predicate, "all_sync")
     return tirx.call_intrin("int32", tirx.op.Op.get("tl.all_sync"), _as_uint32_mask(mask), predicate)
 
 
@@ -1082,6 +1096,7 @@ def ballot_sync(
     Returns:
         uint64: Bitmask with bit N set if lane N's predicate is non-zero.
     """
+    predicate = _validate_predicate(predicate, "ballot_sync")
     return tirx.call_intrin("uint64", tirx.op.Op.get("tl.ballot_sync"), _as_uint32_mask(mask), predicate)
 
 
@@ -1092,6 +1107,7 @@ def ballot(predicate: int | PrimExpr) -> PrimExpr:
     Returns:
         uint64: Bitmask with bit N set if lane N's predicate is non-zero.
     """
+    predicate = _validate_predicate(predicate, "ballot")
     return tirx.call_intrin("uint64", tirx.op.Op.get("tl.ballot"), predicate)
 
 
@@ -1113,6 +1129,7 @@ def syncthreads_count(predicate: int | PrimExpr) -> PrimExpr:
     """Block barrier that returns the number of threads whose ``predicate``
     evaluates to non-zero (``__syncthreads_count`` on CUDA and HIP).
     """
+    predicate = _validate_predicate(predicate, "syncthreads_count")
     return tirx.call_intrin("int32", tirx.op.Op.get("tl.syncthreads_count"), predicate)
 
 
@@ -1120,6 +1137,7 @@ def syncthreads_and(predicate: int | PrimExpr) -> PrimExpr:
     """Block barrier that returns non-zero only if ALL threads have a non-zero
     ``predicate`` (``__syncthreads_and`` on CUDA and HIP).
     """
+    predicate = _validate_predicate(predicate, "syncthreads_and")
     return tirx.call_intrin("int32", tirx.op.Op.get("tl.syncthreads_and"), predicate)
 
 
@@ -1127,6 +1145,7 @@ def syncthreads_or(predicate: int | PrimExpr) -> PrimExpr:
     """Block barrier that returns non-zero if ANY thread has a non-zero
     ``predicate`` (``__syncthreads_or`` on CUDA and HIP).
     """
+    predicate = _validate_predicate(predicate, "syncthreads_or")
     return tirx.call_intrin("int32", tirx.op.Op.get("tl.syncthreads_or"), predicate)
 
 

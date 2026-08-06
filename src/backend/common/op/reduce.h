@@ -6,18 +6,20 @@
 #ifndef TVM_TL_BACKEND_COMMON_OP_REDUCE_H_
 #define TVM_TL_BACKEND_COMMON_OP_REDUCE_H_
 
+#include "backend/common/target_utils.h"
 #include "op/reduce.h"
 #include "support/check.h"
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 
+#include "cuda/op/builtin.h"
 #include "layout/layout.h"
 #include "layout/utils.h"
-#include "op/builtin.h"
 #include "op/utils.h"
 #include "tir/transforms/ir_utils.h"
 #include "transform/loop_partition.h"
 
+#include <tvm/arith/analyzer.h>
 #include <tvm/arith/iter_affine_map.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
@@ -75,6 +77,85 @@ inline Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
       ->BindThreadRange(src_layout->ThreadRange());
 }
 
+/*!
+ * \brief Resolve the participating thread range of a scalar AllReduce.
+ *
+ * The result is derived from the reduce layout's forward thread map, which is
+ * also the source of the guard later emitted by PartitionLoop. Const-int bounds
+ * provide the minimum and maximum participating thread IDs.
+ */
+inline Range ResolveAllReduceThreadRange(const Fragment &red_layout,
+                                         const Range &thread_bounds,
+                                         const Target &target) {
+  const int64_t *block_min = as_const_int(thread_bounds->min);
+  const int64_t *block_extent = as_const_int(thread_bounds->extent);
+  const int64_t *replicate = as_const_int(red_layout->ReplicateExtent());
+  if (block_min == nullptr || block_extent == nullptr || replicate == nullptr) {
+    LOG(FATAL) << "tl.reduce: cannot resolve the scalar AllReduce barrier: "
+                  "the CTA thread bounds or reduce layout replicate extent "
+                  "are not compile-time constants.";
+  }
+  ICHECK_GT(*block_extent, 0)
+      << "tl.reduce: CTA thread extent must be positive";
+  ICHECK_GT(*replicate, 0)
+      << "tl.reduce: reduce layout replicate extent must be positive";
+
+  arith::Analyzer analyzer;
+  for (size_t i = 0; i < red_layout->InputShape().size(); ++i) {
+    Var placeholder = InputPlaceholder(i);
+    analyzer.Bind(placeholder,
+                  Range::FromMinExtent(make_zero(placeholder.dtype()),
+                                       red_layout->InputShape()[i]));
+  }
+  Var replicate_var = ReplicationPlaceholder();
+  analyzer.Bind(replicate_var,
+                Range::FromMinExtent(make_zero(replicate_var.dtype()),
+                                     red_layout->ReplicateExtent()));
+
+  // PartitionLoop feeds (threadIdx.x - ThreadRange.min) into the inverse
+  // layout. Convert the forward map back to the corresponding absolute CTA
+  // thread ID before computing its image.
+  PrimExpr thread_expr = red_layout->GetForwardThread();
+  if (red_layout->ThreadRange().defined()) {
+    thread_expr =
+        analyzer.Simplify(thread_expr + red_layout->ThreadRange()->min);
+  }
+  const arith::ConstIntBound bound = analyzer.const_int_bound(thread_expr);
+  if (bound->min_value == arith::ConstIntBoundNode::kNegInf ||
+      bound->max_value == arith::ConstIntBoundNode::kPosInf) {
+    LOG(FATAL) << "tl.reduce: cannot determine the scalar AllReduce "
+                  "participating thread range.";
+  }
+
+  const int64_t base = bound->min_value;
+  const int64_t end = bound->max_value;
+  // TODO: Consider restoring CountSatisfyingValues when the Z3 prover is
+  // stable enough to reliably compute the exact participating thread image.
+  const int64_t count = end - base + 1;
+  ICHECK_GE(base, *block_min)
+      << "tl.reduce: scalar AllReduce participating thread range starts "
+         "before the CTA thread bounds";
+  ICHECK_LT(end, *block_min + *block_extent)
+      << "tl.reduce: scalar AllReduce participating thread range ends after "
+         "the CTA thread bounds";
+
+  int64_t warp_size = 32;
+  if (auto warp_size_attr = target->GetAttr<Integer>("thread_warp_size")) {
+    warp_size = warp_size_attr.value()->value;
+  }
+  ICHECK_EQ(base % warp_size, 0)
+      << "tl.reduce: partial scalar AllReduce requires a warp-aligned "
+         "participating thread range, got base "
+      << base;
+  ICHECK_EQ(count % warp_size, 0)
+      << "tl.reduce: partial scalar AllReduce requires a warp-aligned thread "
+         "range, got "
+      << count << " threads";
+
+  return Range::FromMinExtent(make_const(thread_expr.dtype(), base),
+                              make_const(thread_bounds->extent.dtype(), count));
+}
+
 inline int64_t SignedMin(int bits) {
   if (bits >= 64) {
     return std::numeric_limits<int64_t>::min();
@@ -96,8 +177,8 @@ inline uint64_t UnsignedMax(int bits) {
   return (static_cast<uint64_t>(1) << bits) - 1;
 }
 
-inline int GetPreferedVectorizedSize(DataType dt,
-                                     bool supports_fp32x2 = false) {
+inline int GetPreferredVectorizedSize(DataType dt,
+                                      bool supports_fp32x2 = false) {
   if (dt.is_bfloat16() || dt.is_float16() ||
       (supports_fp32x2 && dt.is_float() && dt.bits() == 32))
     return 2;
@@ -189,7 +270,8 @@ inline PrimExpr MakeReduce(const ReduceOpNode &op, int vsize,
     if (op.type->IsSum()) {
       return acc + rhs;
     } else if (op.type->IsAbsSum()) {
-      return acc + Max(rhs, -rhs);
+      auto abs_rhs = rhs.dtype().is_uint() ? rhs : Max(rhs, -rhs);
+      return acc + abs_rhs;
     } else if (op.type->IsMax()) {
       return use_nan_op ? Call(acc.dtype(), tl::max_nan(), {acc, rhs})
                         : PrimExpr(Max(acc, rhs));
@@ -197,7 +279,7 @@ inline PrimExpr MakeReduce(const ReduceOpNode &op, int vsize,
       return use_nan_op ? Call(acc.dtype(), tl::min_nan(), {acc, rhs})
                         : PrimExpr(Min(acc, rhs));
     } else if (op.type->IsAbsMax()) {
-      auto abs_rhs = Max(rhs, -rhs);
+      auto abs_rhs = rhs.dtype().is_uint() ? rhs : Max(rhs, -rhs);
       return use_nan_op ? Call(acc.dtype(), tl::max_nan(), {acc, abs_rhs})
                         : PrimExpr(Max(acc, abs_rhs));
     } else if (op.type->IsBitAnd()) {
@@ -589,7 +671,7 @@ template <typename Impl> struct ReduceLowerer {
     };
 
     int vsize =
-        Impl::GetPreferedVectorizedSize(dst_buffer->dtype, lower_args.target);
+        Impl::GetPreferredVectorizedSize(dst_buffer->dtype, lower_args.target);
     const int64_t *reduce_extent = as_const_int(op.src->shape[op.dim]);
     bool can_pack = op.clear && vsize == 2 && reduce_extent &&
                     *reduce_extent >= vsize && *reduce_extent % vsize == 0 &&
@@ -625,8 +707,7 @@ template <typename Impl> struct ReduceLowerer {
                              src_value),
           dst_indices);
       stmts.push_back(For(rv, 0, Integer(*reduce_extent / vsize),
-                          ForKind::kUnrolled, reduce_body, std::nullopt,
-                          {{tirx::attr::pragma_unroll_explicit, Bool(false)}}));
+                          ForKind::kUnrolled, reduce_body, std::nullopt));
 
       PrimExpr packed = BufferLoad(packed_buffer, dst_indices);
       PrimExpr result =
@@ -645,15 +726,13 @@ template <typename Impl> struct ReduceLowerer {
                              BufferLoad(src_buffer, make_src_indices(rv))),
           dst_indices);
       stmts.push_back(For(rv, 0, op.src->shape[op.dim], ForKind::kUnrolled,
-                          reduce_body, std::nullopt,
-                          {{tirx::attr::pragma_unroll_explicit, Bool(false)}}));
+                          reduce_body, std::nullopt));
     }
 
     Stmt body = SeqStmt(stmts);
     for (int i = dst_dim - 1; i >= 0; --i) {
       body = For(dst_vars[i], 0, op.dst->shape[i], ForKind::kUnrolled, body,
-                 std::nullopt,
-                 {{tirx::attr::pragma_unroll_explicit, Bool(false)}});
+                 std::nullopt);
     }
     if (can_pack) {
       body = SeqStmt({AllocBuffer(packed_buffer), body});
@@ -776,8 +855,8 @@ template <typename Impl> struct ReduceLowerer {
       Buffer clear_buffer_packed;
       Buffer clear_batch_pack_buffer;
       {
-        int vsize = Impl::GetPreferedVectorizedSize(clear_buffer->dtype,
-                                                    lower_args.target);
+        int vsize = Impl::GetPreferredVectorizedSize(clear_buffer->dtype,
+                                                     lower_args.target);
         if (vsize > 1 && !src_var_compressed.empty()) {
           auto *ext = src_var_compressed.back()->dom->extent.as<IntImmNode>();
           if (ext && ext->value >= vsize && ext->value % vsize == 0 &&
@@ -828,18 +907,15 @@ template <typename Impl> struct ReduceLowerer {
                                    src_load),
                 red_indices);
 
-            reduce_local =
-                For(inner_var->var, 0, halved_extent, ForKind::kUnrolled,
-                    reduce_local, std::nullopt,
-                    {{tirx::attr::pragma_unroll_explicit, Bool(false)}});
+            reduce_local = For(inner_var->var, 0, halved_extent,
+                               ForKind::kUnrolled, reduce_local, std::nullopt);
 
             for (int i = static_cast<int>(src_layout->OutputDim()) - 2; i >= 0;
                  --i) {
               reduce_local =
                   For(src_var_compressed[i]->var, 0,
                       src_var_compressed[i]->dom->extent, ForKind::kUnrolled,
-                      reduce_local, std::nullopt,
-                      {{tirx::attr::pragma_unroll_explicit, Bool(false)}});
+                      reduce_local, std::nullopt);
             }
             local_body.push_back(reduce_local);
 
@@ -871,10 +947,9 @@ template <typename Impl> struct ReduceLowerer {
 
         for (int i = static_cast<int>(src_layout->OutputDim()) - 1; i >= 0;
              --i) {
-          reduce_local = For(
-              src_var_compressed[i]->var, 0, src_var_compressed[i]->dom->extent,
-              ForKind::kUnrolled, reduce_local, std::nullopt,
-              {{tirx::attr::pragma_unroll_explicit, Bool(false)}});
+          reduce_local = For(src_var_compressed[i]->var, 0,
+                             src_var_compressed[i]->dom->extent,
+                             ForKind::kUnrolled, reduce_local, std::nullopt);
         }
         stmts.push_back(reduce_local);
       }
@@ -938,8 +1013,8 @@ template <typename Impl> struct ReduceLowerer {
               static_cast<int>(*as_const_int(lower_args.thread_bounds->extent));
           auto thread_offset = lower_args.thread_bounds->min;
 
-          int vsize = Impl::GetPreferedVectorizedSize(clear_buffer->dtype,
-                                                      lower_args.target);
+          int vsize = Impl::GetPreferredVectorizedSize(clear_buffer->dtype,
+                                                       lower_args.target);
           bool can_batch_pack =
               vsize > 1 && batch >= vsize && batch % vsize == 0 &&
               reduce::MakeCodegenReducer(op, vsize).has_value();
@@ -1129,10 +1204,17 @@ template <typename Impl> struct ReduceLowerer {
         reduce::CheckAllReduceWidth(reducing_threads, thread_step.scale,
                                     "tl.reduce");
         auto thread_offset = lower_args.thread_bounds->min;
+        PrimExpr all_threads = lower_args.thread_bounds->extent;
+        if (reducing_threads > 32 &&
+            TargetSupportsNamedBarrier(lower_args.target)) {
+          Range thread_range = reduce::ResolveAllReduceThreadRange(
+              red_layout, lower_args.thread_bounds, lower_args.target);
+          thread_offset = thread_range->min;
+          all_threads = thread_range->extent;
+        }
         std::string allreduce = Impl::MakeScalarAllReduce(
             reduce::MakeCodegenReducer(op).value(), reducing_threads,
-            thread_step.scale, thread_offset, lower_args.thread_bounds->extent,
-            lower_args.target);
+            thread_step.scale, thread_offset, all_threads, lower_args.target);
         Array<PrimExpr> thread_reduce_args = {
             StringImm(allreduce), BufferLoad(clear_buffer, red_indices)};
         if (reducing_threads > 32) {

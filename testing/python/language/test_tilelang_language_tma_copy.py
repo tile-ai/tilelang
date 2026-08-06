@@ -402,7 +402,6 @@ def fp4_tma_copy_unpacked_smem_store(M=128, N=256, block_M=64, block_N=128):
 
 
 def _fp4_tma_descriptor_init_block(host_source, desc_name):
-
     marker = f"[0].v_ptr) = {desc_name};"
     start = host_source.find(marker)
     assert start >= 0, f"Missing {desc_name} TensorMap initialization"
@@ -473,6 +472,7 @@ def run_fp4_tma_copy_roundtrip():
     assert torch.equal(b.view(torch.int8), a)
 
 
+@tilelang.testing.requires_cuda
 def test_fp4_unpacksmem_tma_descriptor_uses_align16b():
     program = fp4_tma_copy_unpacked_smem_load()
     artifact = tilelang.lower(
@@ -488,6 +488,7 @@ def test_fp4_unpacksmem_tma_descriptor_uses_align16b():
     assert 'T.call_packed("__tvm_tensormap_create_tiled", A_desc, 14,' in host_ir
 
 
+@tilelang.testing.requires_cuda
 def test_fp4_unpacksmem_tma_store_is_rejected():
     program = fp4_tma_copy_unpacked_smem_store()
     with pytest.raises(tvm.TVMError, match="only supports float4_e2m1_unpacked as an FP4 unpack load"):
@@ -498,6 +499,7 @@ def test_fp4_unpacksmem_tma_store_is_rejected():
         )
 
 
+@tilelang.testing.requires_cuda
 def test_copy_prefer_tma_lowers_as_synchronous_tma_load():
     @T.prim_func
     def main(x: T.Tensor((128, 32), T.float32)):
@@ -518,6 +520,65 @@ def test_copy_prefer_tma_lowers_as_synchronous_tma_load():
     assert "x_to_x_shared_mbarrier[0]" in device_source
     assert "arrive_and_expect_tx" in device_source
     assert ".wait(0)" in device_source
+
+
+@tilelang.testing.requires_cuda
+def test_device_bound_pointer_keeps_descriptorless_bulk1d():
+    @T.prim_func
+    def main(
+        src_ptrs: T.Tensor((1,), T.ptr),
+        out: T.Tensor((256,), T.float16),
+    ):
+        with T.Kernel(threads=128):
+            src = T.make_tensor(src_ptrs[0], (256,), T.float16)
+            src_shared = T.alloc_shared((256,), T.float16)
+            T.copy(src, src_shared, prefer_instruction="tma")
+            T.copy(src_shared, out, prefer_instruction="sync")
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+    with target:
+        artifact = tilelang.lower(
+            main,
+            target=target,
+            enable_device_compile=False,
+        )
+
+    device_source = str(artifact.kernel_source)
+    assert "tl::tma_load" in device_source
+    assert "CUtensorMap" not in device_source
+
+
+@tilelang.testing.requires_cuda
+def test_device_bound_descriptor_tma_is_rejected_when_ws_disabled():
+    @T.prim_func
+    def main(src_ptrs: T.Tensor((1,), T.ptr)):
+        with T.Kernel(threads=128):
+            src = T.make_tensor(
+                src_ptrs[0],
+                (16, 32),
+                T.float16,
+                strides=(32, 1),
+            )
+            src_shared = T.alloc_shared((16, 16), T.float16)
+            T.copy(src[0, 0], src_shared, prefer_instruction="tma")
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+    pass_configs = {
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED.value: True,
+    }
+    with (
+        target,
+        tvm.transform.PassContext(config=pass_configs),
+        pytest.raises(
+            tvm.TVMError,
+            match="bound inside the device function body",
+        ),
+    ):
+        tilelang.lower(
+            main,
+            target=target,
+            enable_device_compile=False,
+        )
 
 
 def run_fp4_tma_copy_unpacked_smem_load():

@@ -8,8 +8,8 @@
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 
-#include "op/builtin.h"
 #include "op/utils.h"
+#include "rocm/op/builtin.h"
 #include "rocm/target_utils.h"
 #include "rocm/transform/async_copy_injector.h"
 #include "transform/common/loop_fusion_utils.h"

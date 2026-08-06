@@ -7,8 +7,8 @@
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
 
+#include "cuda/op/builtin.h"
 #include "cuda/target_utils.h"
-#include "op/builtin.h"
 #include "op/tcgen5_meta.h"
 #include "op/utils.h"
 #include "span_utils.h"
@@ -32,6 +32,7 @@ namespace cuda {
 namespace {
 
 constexpr const char *kCudaMMA = "cuda.mma";
+constexpr const char *kCudaMMABlockScaled = "cuda.mma.blockscaled";
 constexpr const char *kCudaFMA = "cuda.fma";
 constexpr const char *kCudaWGMMA = "cuda.wgmma";
 constexpr const char *kCudaTCGEN05 = "cuda.tcgen05";
@@ -116,6 +117,33 @@ bool AllowVoltaMma(const GemmNode &op) {
   return op.m_ % 16 == 0 && op.n_ % 16 == 0 && op.k_ % 4 == 0;
 }
 
+bool Use2CtaRequested(const GemmNode &op) {
+  if (auto val = op.annotations_.Get("use_2cta")) {
+    const auto *imm = val.value().as<IntImmNode>();
+    ICHECK(imm) << "use_2cta annotation must be an IntImmNode";
+    return imm->value != 0;
+  }
+  return false;
+}
+
+// Native SM75 mma.sync atoms (see tl_templates/cuda/instruction/mma.h).
+// Dtype-only on purpose: SM75 MMA handles the same scopes and transposes as
+// the generic path, so scope checks here would wrongly demote f16 to FMA.
+bool AllowTuringMma(const GemmNode &op) {
+  DataType a = op.a_->dtype;
+  if (a != op.b_->dtype) {
+    return false;
+  }
+  if (a == DataType::Float(16)) {
+    return op.c_->dtype == DataType::Float(16) ||
+           op.c_->dtype == DataType::Float(32);
+  }
+  if ((a.is_int() || a.is_uint()) && (a.bits() == 8 || a.bits() == 4)) {
+    return op.c_->dtype == DataType::Int(32);
+  }
+  return false;
+}
+
 void FatalWgmmaUnavailable(const GemmNode &op, Target target) {
   LOG(FATAL) << "T.wgmma_gemm() requires Hopper WGMMA lowering, but "
                 "constraints were not satisfied. Got target="
@@ -149,55 +177,65 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
   ICHECK(N % k_n_per_warp == 0)
       << "N must be divisible by " << k_n_per_warp << ", but got " << N;
 
+  auto is_valid = [&](int m, int n) {
+    return m * n == num_warps && M % (m * kMPerWarp) == 0 &&
+           N % (n * k_n_per_warp) == 0;
+  };
+
+  bool found = false;
   if (policy.IsFullRow()) {
-    m_warp = num_warps;
-    n_warp = 1;
-    if (M % (m_warp * kMPerWarp) != 0) {
-      int max_m_warps = M / kMPerWarp;
-      m_warp = max_m_warps;
-      n_warp = num_warps / m_warp;
-      if (n_warp == 0)
-        n_warp = 1;
+    for (int m = num_warps; m >= 1; m--) {
+      if (num_warps % m != 0 || !is_valid(m, num_warps / m))
+        continue;
+      m_warp = m;
+      n_warp = num_warps / m;
+      found = true;
+      break;
     }
   } else if (policy.IsFullCol()) {
-    m_warp = 1;
-    n_warp = num_warps;
-    if (N % (n_warp * k_n_per_warp) != 0) {
-      int max_n_warps = N / k_n_per_warp;
-      n_warp = max_n_warps;
-      m_warp = num_warps / n_warp;
-      if (m_warp == 0)
-        m_warp = 1;
+    for (int n = num_warps; n >= 1; n--) {
+      if (num_warps % n != 0 || !is_valid(num_warps / n, n))
+        continue;
+      n_warp = n;
+      m_warp = num_warps / n;
+      found = true;
+      break;
     }
   } else if (policy.IsSquare()) {
-    int max_m_warps = M / kMPerWarp;
     float ideal_ratio = N > 0 ? static_cast<float>(M) / N : 1.0f;
 
-    int best_m = 1;
-    int best_n = 1;
     float best_balance = std::numeric_limits<float>::max();
-    for (int m = 1; m <= max_m_warps && m <= num_warps; m++) {
+    for (int m = 1; m <= num_warps; m++) {
+      if (num_warps % m != 0)
+        continue;
       int n = num_warps / m;
+      if (!is_valid(m, n))
+        continue;
 
       float m_per_warp = static_cast<float>(M) / (m * kMPerWarp);
       float n_per_warp = static_cast<float>(N) / (n * k_n_per_warp);
-      if (m_per_warp < 1 || n_per_warp < 1)
-        continue;
-      if (m * n != num_warps)
-        continue;
-
       float balance = std::abs(m_per_warp / n_per_warp - ideal_ratio);
       if (balance < best_balance) {
         best_balance = balance;
-        best_m = m;
-        best_n = n;
+        m_warp = m;
+        n_warp = n;
+        found = true;
       }
     }
-
-    m_warp = best_m;
-    n_warp = best_n;
   } else {
     ICHECK(0) << "Unknown GemmWarpPolicy";
+  }
+
+  if (!found) {
+    LOG(FATAL) << "No valid warp partition for T.gemm: M=" << M << ", N=" << N
+               << " cannot be evenly covered by " << num_warps
+               << " warps (policy="
+               << (policy.IsFullRow()   ? "FullRow"
+                   : policy.IsFullCol() ? "FullCol"
+                                        : "Square")
+               << "). Each warp must own a multiple of " << kMPerWarp
+               << " rows and " << k_n_per_warp
+               << " columns; adjust `threads` or the block tile shape.";
   }
 
   ICHECK(m_warp * n_warp == num_warps)
@@ -222,42 +260,39 @@ std::pair<int, int> ComputeWgmmaWarpPartition(const GemmWarpPolicyNode &policy,
   ICHECK(N % kNPerWarp == 0)
       << "N must be divisible by " << kNPerWarp << ", but got " << N;
 
-  m_warp = kGroup;
-  n_warp = num_warps / m_warp;
+  auto is_valid = [&](int m, int n) {
+    return m * n == num_warps && m % kGroup == 0 && M % (m * kMPerWarp) == 0 &&
+           N % (n * kNPerWarp) == 0;
+  };
 
+  bool found = false;
   if (policy.IsFullRow()) {
-    for (int cand = num_warps; cand >= kGroup; cand -= kGroup) {
-      if (M % (cand * kMPerWarp) == 0) {
-        m_warp = cand;
-        n_warp = num_warps / m_warp;
-        break;
-      }
+    for (int m = num_warps; m >= kGroup; m -= kGroup) {
+      if (num_warps % m != 0 || !is_valid(m, num_warps / m))
+        continue;
+      m_warp = m;
+      n_warp = num_warps / m;
+      found = true;
+      break;
     }
   } else if (policy.IsFullCol()) {
-    int cand_n = n_warp;
-    if (N % (cand_n * kNPerWarp) != 0) {
-      int max_n = N / kNPerWarp;
-      for (int n = std::min(cand_n, max_n); n >= 1; --n) {
-        if (num_warps % n == 0 && (num_warps / n) % kGroup == 0) {
-          n_warp = n;
-          m_warp = num_warps / n_warp;
-          break;
-        }
-      }
+    for (int n = num_warps / kGroup; n >= 1; n--) {
+      if (num_warps % n != 0 || !is_valid(num_warps / n, n))
+        continue;
+      n_warp = n;
+      m_warp = num_warps / n;
+      found = true;
+      break;
     }
   } else if (policy.IsSquare()) {
-    int max_m = M / kMPerWarp;
-    int max_n = N / kNPerWarp;
-
     float ideal = N > 0 ? static_cast<float>(M) / N : 1.f;
-    float best_score = std::numeric_limits<float>::max();
-    int best_m = kGroup, best_n = n_warp;
 
-    for (int m = kGroup; m <= num_warps && m <= max_m; m += kGroup) {
-      if (num_warps % m)
+    float best_score = std::numeric_limits<float>::max();
+    for (int m = kGroup; m <= num_warps; m += kGroup) {
+      if (num_warps % m != 0)
         continue;
       int n = num_warps / m;
-      if (n > max_n)
+      if (!is_valid(m, n))
         continue;
 
       float m_per_warp = static_cast<float>(M) / (m * kMPerWarp);
@@ -266,14 +301,26 @@ std::pair<int, int> ComputeWgmmaWarpPartition(const GemmWarpPolicyNode &policy,
 
       if (score < best_score) {
         best_score = score;
-        best_m = m;
-        best_n = n;
+        m_warp = m;
+        n_warp = n;
+        found = true;
       }
     }
-    m_warp = best_m;
-    n_warp = best_n;
   } else {
     ICHECK(0) << "Unknown GemmWarpPolicy";
+  }
+
+  if (!found) {
+    LOG(FATAL) << "No valid warp partition for T.gemm (Warp-Group MMA): M=" << M
+               << ", N=" << N << " cannot be evenly covered by " << num_warps
+               << " warps (policy="
+               << (policy.IsFullRow()   ? "FullRow"
+                   : policy.IsFullCol() ? "FullCol"
+                                        : "Square")
+               << "). Each warp must own a multiple of " << kMPerWarp
+               << " rows and " << kNPerWarp
+               << " columns, with m_warp a multiple of " << kGroup
+               << "; adjust `threads` or the block tile shape.";
   }
 
   ICHECK(m_warp * n_warp == num_warps)
@@ -301,6 +348,32 @@ struct Gemm {
       return kCudaTCGEN05;
     }
 
+    // The public 2CTA shape contract supplies only half of B's N extent per
+    // CTA.
+    // Falling back to an ordinary one-CTA instruction would therefore be a
+    // silent out-of-bounds miscompile rather than a valid fallback.
+    if (Use2CtaRequested(op)) {
+      if (!AllowTcgen5Mma(op, target)) {
+        LOG(FATAL) << "use_2cta=True requires Blackwell TCGEN5MMA "
+                      "lowering; no one-CTA instruction fallback is valid.";
+      }
+      return kCudaTCGEN05;
+    }
+
+    if (op.sfaRegion_.defined() || op.sfbRegion_.defined()) {
+      if (!op.sfaRegion_.defined() || !op.sfbRegion_.defined()) {
+        LOG(FATAL) << "T.mma_gemm_blockscaled() requires both SFA and SFB "
+                      "scale-factor regions.";
+      }
+      if (!TargetIsSM120(target)) {
+        LOG(FATAL) << "T.mma_gemm_blockscaled() requires an SM120 CUDA target, "
+                      "but got target="
+                   << target << "."
+                   << SpanHintSuffix({op.a_->span, op.b_->span, op.c_->span});
+      }
+      return kCudaMMABlockScaled;
+    }
+
     if (AllowTcgen5Mma(op, target)) {
       return kCudaTCGEN05;
     }
@@ -308,6 +381,9 @@ struct Gemm {
       return kCudaWGMMA;
     }
     if (TargetIsVolta(target) && !AllowVoltaMma(op)) {
+      return kCudaFMA;
+    }
+    if (TargetIsTuring(target) && !AllowTuringMma(op)) {
       return kCudaFMA;
     }
     return kCudaMMA;
@@ -335,7 +411,7 @@ struct Gemm {
   }
 
   static bool ReuseExistingSharedLayout(String gemm_inst) {
-    return gemm_inst == kCudaMMA;
+    return gemm_inst == kCudaMMA || gemm_inst == kCudaMMABlockScaled;
   }
 };
 

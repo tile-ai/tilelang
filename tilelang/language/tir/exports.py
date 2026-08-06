@@ -2,10 +2,13 @@
 
 CUDA_ONLY_TIR_EXPORTS = frozenset(
     {
+        "mma_fill",
+        "mma_store",
         "ptx_cp_async_bulk",
         "ptx_fence_barrier_init",
         "ptx_ldmatrix",
         "ptx_mma",
+        "ptx_mma_block_scale",
         "ptx_mma_sp",
         "ptx_tcgen05_mma_blockscaled_ss",
         "ptx_tcgen05_mma_ss",
@@ -15,6 +18,15 @@ CUDA_ONLY_TIR_EXPORTS = frozenset(
         "ptx_wgmma_sp_rs",
         "ptx_wgmma_sp_ss",
         "ptx_wgmma_ss",
+    }
+)
+
+ROCM_ONLY_TIR_EXPORTS = frozenset(
+    {
+        "tvm_mfma",
+        "tvm_mfma_store",
+        "tvm_rdna_wmma",
+        "tvm_rdna_wmma_store",
     }
 )
 
@@ -41,7 +53,7 @@ SHARED_LEGACY_TIR_EXPORTS = frozenset(
     }
 )
 
-BACKEND_ONLY_TIR_EXPORTS = CUDA_ONLY_TIR_EXPORTS | METAL_ONLY_TIR_EXPORTS
+BACKEND_ONLY_TIR_EXPORTS = CUDA_ONLY_TIR_EXPORTS | METAL_ONLY_TIR_EXPORTS | ROCM_ONLY_TIR_EXPORTS
 CLASSIFIED_VENDOR_TIR_EXPORTS = BACKEND_ONLY_TIR_EXPORTS | SHARED_LEGACY_TIR_EXPORTS
 
 __all__ = [
@@ -49,5 +61,6 @@ __all__ = [
     "CLASSIFIED_VENDOR_TIR_EXPORTS",
     "CUDA_ONLY_TIR_EXPORTS",
     "METAL_ONLY_TIR_EXPORTS",
+    "ROCM_ONLY_TIR_EXPORTS",
     "SHARED_LEGACY_TIR_EXPORTS",
 ]

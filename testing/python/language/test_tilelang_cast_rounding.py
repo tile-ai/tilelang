@@ -181,6 +181,7 @@ def _lower_rs_prim_func(target_dtype: str, arch: str, *, enable_device_compile: 
         )
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize(
     "target_dtype,expected",
     [
@@ -194,6 +195,7 @@ def test_cast_rs_fp16_bf16_codegen(target_dtype, expected):
     assert expected in artifact.kernel_source
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize(
     "target_dtype,expected",
     [
@@ -209,6 +211,7 @@ def test_cast_rs_fp16_bf16_packed_codegen(target_dtype, expected):
     assert expected in artifact.kernel_source
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("target_dtype", ["float16", "bfloat16"])
 def test_cast_rs_fp16_bf16_rejects_sat_false(target_dtype):
     M = 256
@@ -231,6 +234,7 @@ def test_cast_rs_fp16_bf16_rejects_sat_false(target_dtype):
         tilelang.lower(main, target=target)
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize(
     "target_dtype,expected",
     [

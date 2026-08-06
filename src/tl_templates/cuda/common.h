@@ -59,6 +59,18 @@ using int4_t = int4;
 #define TL_DEVICE_NOINLINE __noinline__ __device__
 #define TL_PATCH
 
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL) ||                                     \
+    defined(__CUDA_ARCH_FEAT_SM101_ALL) ||                                     \
+    defined(__CUDA_ARCH_FEAT_SM103_ALL) ||                                     \
+    defined(__CUDA_ARCH_FEAT_SM110_ALL) ||                                     \
+    (defined(__CUDA_ARCH_FAMILY_SPECIFIC__) &&                                 \
+     ((__CUDA_ARCH_FAMILY_SPECIFIC__ == 1000) ||                               \
+      (__CUDA_ARCH_FAMILY_SPECIFIC__ == 1010) ||                               \
+      (__CUDA_ARCH_FAMILY_SPECIFIC__ == 1030) ||                               \
+      (__CUDA_ARCH_FAMILY_SPECIFIC__ == 1100)))
+#define TL_CUDA_ARCH_TCGEN05_ENABLED
+#endif
+
 #define TILELANG_CHECK(stmt)                                                   \
   do {                                                                         \
     cudaError_t __err = (stmt);                                                \
@@ -552,7 +564,7 @@ union GmmaDescriptor {
     uint16_t leading_byte_offset_ : 14, : 2; // 14 bits [0,14), 2 bits unused
     // stride dimension byte offset, bit [32,46), 4LSB not included
     // For N: This is the stride from the first 8 rows to the next 8 rows.
-    // For T: This is the stride fro mthe first 8 cols to the next 8 cols.
+    // For T: This is the stride from the first 8 cols to the next 8 cols.
     uint16_t stride_byte_offset_ : 14, : 2; // 14 bits [0,14), 2 bits unused
     // base_offset, bit [49,52)
     // Valid only for SWIZZLE_128B and SWIZZLE_64B

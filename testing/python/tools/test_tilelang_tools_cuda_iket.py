@@ -11,6 +11,7 @@ from tilelang import tvm
 from tilelang.cache import _dispatch_map
 from tilelang.env import CacheState
 from tilelang.tools.cuda import iket
+import tilelang.testing
 
 
 _CUDA_POSTPROC = "tilelang_callback_cuda_postproc"
@@ -125,6 +126,7 @@ def test_iket_is_a_cuda_tool_not_a_language_namespace():
     assert iket.__name__ == "tilelang.tools.cuda.iket"
 
 
+@tilelang.testing.requires_cuda
 def test_event_metadata_is_preserved_in_tir_and_injected_source():
     with iket.session():
         kernel = _make_range_kernel()
@@ -140,6 +142,7 @@ def test_event_metadata_is_preserved_in_tir_and_injected_source():
     assert "__iket_range_decl_compute_phase" in source
 
 
+@tilelang.testing.requires_cuda
 def test_float_payload_macro_uses_distinct_temporaries():
     with iket.session(runtime_payloads=True):
         source = _lower_cuda_source(_make_float_payload_kernel())
@@ -161,6 +164,7 @@ def test_float_payload_macro_uses_distinct_temporaries():
     assert "TL_IKET_EVENT_PAYLOAD_F32" in source
 
 
+@tilelang.testing.requires_cuda
 def test_prebuilt_payload_primfunc_enables_runtime_payloads_during_lowering():
     assert not iket.runtime_payloads_enabled()
     kernel = _make_float_payload_kernel()
@@ -180,6 +184,7 @@ def test_prebuilt_payload_primfunc_enables_runtime_payloads_during_lowering():
     assert _event_metadata_bytes(source, "float_value")[12:16] == [13, 0, 0, 0]
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("arch", ["sm_80", "sm_86", "sm_89"])
 def test_cluster_rank_register_is_gated_by_cuda_architecture(arch):
     with iket.session():
@@ -193,6 +198,7 @@ def test_cluster_rank_register_is_gated_by_cuda_architecture(arch):
     assert "%cluster_ctarank" in sm90_source
 
 
+@tilelang.testing.requires_cuda
 def test_prebuilt_primfunc_keeps_metadata_when_session_resets_registry():
     kernel = _make_mark_kernel("parsed_before_session")
     calls = _iket_calls(kernel)
@@ -217,6 +223,7 @@ def test_event_metadata_changes_kernel_cache_identity():
     assert _cache_key(first) != _cache_key(second)
 
 
+@tilelang.testing.requires_cuda
 def test_independently_built_primfuncs_get_module_wide_event_ids():
     first = _make_mark_kernel("module_first").with_attr("global_symbol", "first")
     iket.reset()
@@ -240,6 +247,7 @@ def test_event_name_limit_is_checked_during_primfunc_construction():
         _make_mark_kernel("界" * 11)
 
 
+@tilelang.testing.requires_cuda
 def test_nested_session_keeps_outer_callback_active():
     with iket.session():
         with iket.session():
@@ -309,6 +317,7 @@ def test_session_restores_an_absent_callback():
     tvm_ffi.register_global_func(_CUDA_POSTPROC, f=lambda code, _target: code, override=False)
 
 
+@tilelang.testing.requires_cuda
 def test_session_restores_a_previous_callback():
     def previous(code, _target):
         return "// previous callback\n" + code

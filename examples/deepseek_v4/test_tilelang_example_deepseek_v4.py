@@ -13,7 +13,8 @@ def test_example_act_quant():
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_eq(10, 0)
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_example_fp8_fp4_gemm_1d1d():
     fp8_fp4_gemm_1d1d_sm100.check_correctness(M=256, N=8192, K=512)
 

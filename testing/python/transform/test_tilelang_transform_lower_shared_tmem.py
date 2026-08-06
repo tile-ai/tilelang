@@ -1,4 +1,6 @@
 # ruff: noqa
+import pytest
+
 from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
@@ -27,6 +29,9 @@ def _collect_calls(stmt, op_name: str):
     return calls
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_explicit_deallocate_tmem_suppresses_auto_dealloc():
     """Explicit T.deallocate_tmem on fallthrough suppresses auto-dealloc."""
 
@@ -46,6 +51,9 @@ def test_explicit_deallocate_tmem_suppresses_auto_dealloc():
     assert dealloc_call.args[1].value == 128
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_explicit_deallocate_only_suppresses_matching_buffer():
     """Only the explicitly-deallocated buffer skips auto-dealloc; others keep it."""
 
@@ -67,6 +75,9 @@ def test_explicit_deallocate_only_suppresses_matching_buffer():
     assert dealloc_num_cols == [64, 128]
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_dealloc_before_thread_return_keeps_auto_dealloc():
     """Dealloc on non-fallthrough path (before thread_return) does NOT suppress auto-dealloc."""
 
@@ -89,7 +100,47 @@ def test_dealloc_before_thread_return_keeps_auto_dealloc():
     assert [call.args[1].value for call in dealloc_calls] == [128, 128]
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
+def test_untyped_buffer_reports_internal_error():
+    valid_buffer = tvm.tirx.decl_buffer((1,), name="malformed_buffer")
+    untyped_data = tvm.tirx.Var("malformed_buffer", "handle")
+    malformed_buffer = tvm.ir.make_node(
+        "tirx.Buffer",
+        data=untyped_data,
+        dtype=valid_buffer.dtype,
+        shape=valid_buffer.shape,
+        strides=valid_buffer.strides,
+        axis_separators=valid_buffer.axis_separators,
+        elem_offset=valid_buffer.elem_offset,
+        name=valid_buffer.name,
+        data_alignment=valid_buffer.data_alignment,
+        offset_factor=valid_buffer.offset_factor,
+        buffer_type=valid_buffer.buffer_type,
+        span=None,
+    )
+    block = tvm.tirx.SBlock(
+        iter_vars=[],
+        reads=[],
+        writes=[],
+        name_hint="root",
+        body=tvm.tirx.Evaluate(0),
+        alloc_buffers=[malformed_buffer],
+    )
+    func = tvm.tirx.PrimFunc([], block).with_attr("target", TARGET)
+    mod = tvm.IRModule.from_expr(func)
+
+    with pytest.raises(
+        tvm.error.InternalError,
+        match=r"LowerSharedTmem requires buffer malformed_buffer's data Var "
+        r"to have a PointerType annotation",
+    ):
+        tl.cuda.transform.LowerSharedTmem()(mod)
+
+
 if __name__ == "__main__":
     test_explicit_deallocate_tmem_suppresses_auto_dealloc()
     test_explicit_deallocate_only_suppresses_matching_buffer()
     test_dealloc_before_thread_return_keeps_auto_dealloc()
+    test_untyped_buffer_reports_internal_error()

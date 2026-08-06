@@ -15,6 +15,7 @@ from tvm.tirx import PrimFunc
 from tilelang import env
 from tilelang.env import resolve_pass_profile_threshold_ms
 from tilelang.autotuner.param import CompileArgs
+from tilelang.backend.module import create_backend_context
 from tilelang.engine.lower import lower_to_host_device_ir, device_codegen, host_codegen
 from tilelang.engine.param import CompiledArtifact
 from tilelang.jit.adapter import TVMFFIKernelAdapter
@@ -34,9 +35,9 @@ def compile_grouped_unit_tvm_ffi(
 
     Flow:
     1. Elaborate each config into a PrimFunc.
-    2. Lower each PrimFunc into host/device IR modules.
-    3. Merge all device IR into one IRModule and compile device code once.
-    4. Build host runtime module per config and import shared device module.
+    2. Lower each PrimFunc and build its host module in a fresh Z3 context.
+    3. Merge all device IR and compile it once in a separate fresh Z3 context.
+    4. Import the shared device module into each host runtime module.
     5. Construct per-config JITKernel objects that share the grouped device module.
     """
 
@@ -60,6 +61,11 @@ def compile_grouped_unit_tvm_ffi(
 
     unit_results: list[CompileUnitResult] = []
     lowered_items: list[dict[str, Any]] = []
+    backend_context = create_backend_context(
+        compile_args.target,
+        compile_args.target_host,
+        compile_args.execution_backend,
+    )
 
     for idx, config_arg in unit_items:
         try:
@@ -69,31 +75,40 @@ def compile_grouped_unit_tvm_ffi(
             program = program.with_attr("global_symbol", unique_symbol)
 
             config_instruments, timing_inst = create_pass_instruments()
+            with tvm.arith.Z3ContextScope():
+                with (
+                    report_pass_timing_on_exit(
+                        timing_inst,
+                        context=f"stage=grouped-lower, config={idx}, kernel={unique_symbol}",
+                    ),
+                    tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=config_instruments),
+                    compile_args.target,
+                ):
+                    host_mod, device_mod, params, normalized_target, normalized_target_host = lower_to_host_device_ir(
+                        program,
+                        backend_context,
+                    )
 
-            with (
-                report_pass_timing_on_exit(
-                    timing_inst,
-                    context=f"stage=grouped-lower, config={idx}, kernel={unique_symbol}",
-                ),
-                tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=config_instruments),
-                compile_args.target,
-            ):
-                host_mod, device_mod, params, normalized_target, normalized_target_host = lower_to_host_device_ir(
-                    program,
-                    target=compile_args.target,
-                    target_host=compile_args.target_host,
-                )
+                host_instruments, host_timing_inst = create_pass_instruments()
+                with (
+                    report_pass_timing_on_exit(
+                        host_timing_inst,
+                        context=f"stage=grouped-host, config={idx}, kernel={unique_symbol}",
+                    ),
+                    tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=host_instruments),
+                    normalized_target,
+                ):
+                    host_rt_mod = host_codegen(host_mod, backend_context)
 
             lowered_items.append(
                 {
                     "idx": idx,
                     "config_arg": config_arg,
                     "program": program,
-                    "host_mod": host_mod,
+                    "host_rt_mod": host_rt_mod,
                     "device_mod": device_mod,
                     "params": params,
                     "target": normalized_target,
-                    "target_host": normalized_target_host,
                 }
             )
         except Exception as e:
@@ -124,6 +139,7 @@ def compile_grouped_unit_tvm_ffi(
         device_instruments, device_timing_inst = create_pass_instruments()
         grouped_config_indices = ",".join(str(item["idx"]) for item in lowered_items)
         with (
+            tvm.arith.Z3ContextScope(),
             report_pass_timing_on_exit(
                 device_timing_inst,
                 context=f"stage=grouped-device, configs=[{grouped_config_indices}]",
@@ -131,7 +147,7 @@ def compile_grouped_unit_tvm_ffi(
             tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=device_instruments),
             reference_target,
         ):
-            grouped_device_rt_mod = device_codegen(merged_device_mod, reference_target)
+            grouped_device_rt_mod = device_codegen(merged_device_mod, backend_context)
 
         grouped_kernel_source = grouped_device_rt_mod.inspect_source()
 
@@ -139,26 +155,15 @@ def compile_grouped_unit_tvm_ffi(
             idx = item["idx"]
             config_arg = item["config_arg"]
             try:
-                host_instruments, host_timing_inst = create_pass_instruments()
-                kernel_symbol = str(item["program"].attrs["global_symbol"])
-                with (
-                    report_pass_timing_on_exit(
-                        host_timing_inst,
-                        context=f"stage=grouped-host, config={idx}, kernel={kernel_symbol}",
-                    ),
-                    tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=host_instruments),
-                    item["target"],
-                ):
-                    grouped_host_rt_mod = host_codegen(item["host_mod"], item["target_host"], target=item["target"])
-
-                grouped_host_rt_mod.import_module(grouped_device_rt_mod)
+                host_rt_mod = item["host_rt_mod"]
+                host_rt_mod.import_module(grouped_device_rt_mod)
 
                 artifact = CompiledArtifact(
-                    host_mod=grouped_host_rt_mod,
+                    host_mod=host_rt_mod,
                     device_mod=item["device_mod"],
                     params=item["params"],
                     kernel_source=grouped_kernel_source,
-                    rt_mod=grouped_host_rt_mod,
+                    rt_mod=host_rt_mod,
                 )
 
                 adapter = TVMFFIKernelAdapter(
@@ -183,6 +188,7 @@ def compile_grouped_unit_tvm_ffi(
                     verbose=compile_args.verbose,
                     pass_configs=pass_configs,
                     from_database=True,
+                    backend_context=backend_context,
                 )
                 jit_kernel.artifact = artifact
                 jit_kernel.adapter = adapter

@@ -160,7 +160,9 @@ def alloc_var(dtype: DType, *args, scope: str = "local.var", init: PrimExpr | in
         # annotation for integer/float literals, leaving the scalar
         # uninitialised).  T.buffer_store emits an explicit BufferStore TIR
         # node that every backend lowers to an assignment statement.
-        if isinstance(parsed_init, (int, float, IntImm, FloatImm)):
+        if isinstance(parsed_init, (int, float)):
+            parsed_init = tvm.tirx.const(parsed_init, dtype=tl_dtype(dtype))
+        elif isinstance(parsed_init, (IntImm, FloatImm)):
             parsed_init = tl_dtype(dtype)(parsed_init)
         T.buffer_store(buffer, parsed_init, 0)
     return buffer
@@ -257,7 +259,10 @@ def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
         - The number of columns allocated should not increase between any two allocations in the execution order within the CTA.
 
     Args:
-        num_cols (int): Number of columns to allocate in TMEM. Must be a power of 2 and >= 32 but less than or equal to 512.
+        shape (ShapeType): Logical buffer shape.  The last two modes are the
+            matrix modes; any leading modes are batch dimensions that repeat
+            the buffer along TMEM columns.
+        dtype (DType): Element data type.
 
     Returns:
         T.Buffer: A TVM buffer object allocated in TMEM scope, suitable for use as an accumulator or operand in TCGEN5.MMA operations.
@@ -268,7 +273,10 @@ def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
           Use ``T.deallocate_tmem`` only when you need an earlier, explicit release.
     """
 
-    assert len(shape) == 2, "shape must be a 2D tensor for TMEM allocation"
+    # The last two modes are the matrix modes; leading modes are batch
+    # dimensions (for example a software-pipeline stage) that repeat the
+    # accumulator along TMEM columns.
+    assert len(shape) >= 2, "shape must be a 2D or higher tensor for TMEM allocation"
     return _with_span(T.sblock_alloc_buffer(shape, dtype, scope="shared.tmem"))
 
 

@@ -1,3 +1,5 @@
+import argparse
+
 import torch
 import tilelang
 import tilelang.language as T
@@ -42,11 +44,12 @@ def gemm_clc_persistent_2cta(
     with T.ClusterKernel(total_cluster_tiles * 2, threads=256, cluster_dims=2) as block_id:
         A_shared = T.alloc_shared((num_stages, block_M, block_K), in_dtype)
         B_shared = T.alloc_shared((num_stages, block_K, block_N // 2), in_dtype)
-        C_tmem_0 = T.alloc_tmem([block_M, block_N], accum_dtype)
-        C_tmem_1 = T.alloc_tmem([block_M, block_N], accum_dtype)
-        C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-        C_local_cast = T.alloc_fragment((block_M, block_N), out_dtype)
-        C_shared = T.alloc_shared((block_M, store_block_N), out_dtype)
+        C_tmem = T.alloc_tmem([2, block_M, block_N], accum_dtype)
+        C_local = T.alloc_fragment((block_M, store_block_N), accum_dtype)
+        if use_tma_store:
+            C_shared = T.alloc_shared((block_M, store_block_N), out_dtype)
+        else:
+            C_local_cast = T.alloc_fragment((block_M, store_block_N), out_dtype)
         loaded = T.alloc_cluster_barrier([32 * 2] * num_stages)
         consumed = T.alloc_cluster_barrier([1] * num_stages)
         tmem_full = T.alloc_cluster_barrier([1] * 2)
@@ -102,24 +105,14 @@ def gemm_clc_persistent_2cta(
                 for k in T.serial(k_blocks):
                     phase = work_iter * k_blocks + k
                     T.mbarrier_wait_parity(loaded[phase % num_stages], (phase // num_stages) & 1)
-                    if work_iter & 1 == 0:
-                        T.tcgen05_gemm(
-                            A_shared[phase % num_stages, :, :],
-                            B_shared[phase % num_stages, :, :],
-                            C_tmem_0,
-                            mbar=consumed[phase % num_stages],
-                            clear_accum=k == 0,
-                            use_2cta=True,
-                        )
-                    else:
-                        T.tcgen05_gemm(
-                            A_shared[phase % num_stages, :, :],
-                            B_shared[phase % num_stages, :, :],
-                            C_tmem_1,
-                            mbar=consumed[phase % num_stages],
-                            clear_accum=k == 0,
-                            use_2cta=True,
-                        )
+                    T.tcgen05_gemm(
+                        A_shared[phase % num_stages, :, :],
+                        B_shared[phase % num_stages, :, :],
+                        C_tmem[work_iter & 1, :, :],
+                        mbar=consumed[phase % num_stages],
+                        clear_accum=k == 0,
+                        use_2cta=True,
+                    )
                 T.tcgen05_mma_arrive(tmem_full[work_iter & 1], arrive_2cta=True)
 
         elif 64 <= tx < 96:
@@ -152,21 +145,29 @@ def gemm_clc_persistent_2cta(
 
                 T.mbarrier_wait_parity(tmem_full[work_iter & 1], (work_iter // 2) & 1)
                 T.sync_threads(1, 128)
-                if work_iter & 1 == 0:
-                    T.copy(C_tmem_0, C_local)
-                else:
-                    T.copy(C_tmem_1, C_local)
-                T.mbarrier_arrive(tmem_empty[work_iter & 1], 0)
 
-                if use_tma_store:
-                    for i in T.unroll(T.ceildiv(block_N, store_block_N)):
-                        T.copy(C_local[:, i * store_block_N : (i + 1) * store_block_N], C_shared)
+                for i in T.unroll(T.ceildiv(block_N, store_block_N)):
+                    T.copy(
+                        C_tmem[
+                            work_iter & 1,
+                            :,
+                            i * store_block_N : (i + 1) * store_block_N,
+                        ],
+                        C_local,
+                    )
+                    if use_tma_store:
+                        T.copy(C_local, C_shared)
                         T.sync_threads(3, 128)
                         T.copy(C_shared, C[bx * block_M, by * block_N + i * store_block_N])
                         T.sync_threads(3, 128)
-                else:
-                    T.copy(C_local, C_local_cast)
-                    T.copy(C_local_cast, C[bx * block_M, by * block_N])
+                    else:
+                        T.copy(C_local, C_local_cast)
+                        T.copy(
+                            C_local_cast,
+                            C[bx * block_M, by * block_N + i * store_block_N],
+                        )
+
+                T.mbarrier_arrive(tmem_empty[work_iter & 1], 0)
 
     return C
 
@@ -203,11 +204,12 @@ def gemm_clc_persistent_2cta_pipelined_clc(
     with T.ClusterKernel(total_cluster_tiles * 2, threads=256, cluster_dims=2) as block_id:
         A_shared = T.alloc_shared((num_stages, block_M, block_K), in_dtype)
         B_shared = T.alloc_shared((num_stages, block_K, block_N // 2), in_dtype)
-        C_tmem_0 = T.alloc_tmem([block_M, block_N], accum_dtype)
-        C_tmem_1 = T.alloc_tmem([block_M, block_N], accum_dtype)
-        C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-        C_local_cast = T.alloc_fragment((block_M, block_N), out_dtype)
-        C_shared = T.alloc_shared((block_M, store_block_N), out_dtype)
+        C_tmem = T.alloc_tmem([2, block_M, block_N], accum_dtype)
+        C_local = T.alloc_fragment((block_M, store_block_N), accum_dtype)
+        if use_tma_store:
+            C_shared = T.alloc_shared((block_M, store_block_N), out_dtype)
+        else:
+            C_local_cast = T.alloc_fragment((block_M, store_block_N), out_dtype)
         loaded = T.alloc_cluster_barrier([32 * 2] * num_stages)
         consumed = T.alloc_cluster_barrier([1] * num_stages)
         tmem_full = T.alloc_cluster_barrier([1] * 2)
@@ -270,24 +272,14 @@ def gemm_clc_persistent_2cta_pipelined_clc(
                 for k in T.serial(k_blocks):
                     phase = work_iter * k_blocks + k
                     T.mbarrier_wait_parity(loaded[phase % num_stages], (phase // num_stages) & 1)
-                    if work_iter & 1 == 0:
-                        T.tcgen05_gemm(
-                            A_shared[phase % num_stages, :, :],
-                            B_shared[phase % num_stages, :, :],
-                            C_tmem_0,
-                            mbar=consumed[phase % num_stages],
-                            clear_accum=k == 0,
-                            use_2cta=True,
-                        )
-                    else:
-                        T.tcgen05_gemm(
-                            A_shared[phase % num_stages, :, :],
-                            B_shared[phase % num_stages, :, :],
-                            C_tmem_1,
-                            mbar=consumed[phase % num_stages],
-                            clear_accum=k == 0,
-                            use_2cta=True,
-                        )
+                    T.tcgen05_gemm(
+                        A_shared[phase % num_stages, :, :],
+                        B_shared[phase % num_stages, :, :],
+                        C_tmem[work_iter & 1, :, :],
+                        mbar=consumed[phase % num_stages],
+                        clear_accum=k == 0,
+                        use_2cta=True,
+                    )
                 T.tcgen05_mma_arrive(tmem_full[work_iter & 1], arrive_2cta=True)
 
         elif 64 <= tx < 96:
@@ -326,21 +318,29 @@ def gemm_clc_persistent_2cta_pipelined_clc(
 
                 T.mbarrier_wait_parity(tmem_full[work_iter & 1], (work_iter // 2) & 1)
                 T.sync_threads(1, 128)
-                if work_iter & 1 == 0:
-                    T.copy(C_tmem_0, C_local)
-                else:
-                    T.copy(C_tmem_1, C_local)
-                T.mbarrier_arrive(tmem_empty[work_iter & 1], 0)
 
-                if use_tma_store:
-                    for i in T.unroll(T.ceildiv(block_N, store_block_N)):
-                        T.copy(C_local[:, i * store_block_N : (i + 1) * store_block_N], C_shared)
+                for i in T.unroll(T.ceildiv(block_N, store_block_N)):
+                    T.copy(
+                        C_tmem[
+                            work_iter & 1,
+                            :,
+                            i * store_block_N : (i + 1) * store_block_N,
+                        ],
+                        C_local,
+                    )
+                    if use_tma_store:
+                        T.copy(C_local, C_shared)
                         T.sync_threads(3, 128)
                         T.copy(C_shared, C[bx * block_M, by * block_N + i * store_block_N])
                         T.sync_threads(3, 128)
-                else:
-                    T.copy(C_local, C_local_cast)
-                    T.copy(C_local_cast, C[bx * block_M, by * block_N])
+                    else:
+                        T.copy(C_local, C_local_cast)
+                        T.copy(
+                            C_local_cast,
+                            C[bx * block_M, by * block_N + i * store_block_N],
+                        )
+
+                T.mbarrier_arrive(tmem_empty[work_iter & 1], 0)
 
     return C
 
@@ -350,9 +350,28 @@ def ref_program(A, B):
 
 
 if __name__ == "__main__":
-    block_M, block_N, store_block_N, block_K = 128, 256, 64, 64
-    num_stages, group_size = 6, 8
-    base_args = (block_M, block_N, store_block_N, block_K, T.bfloat16, T.bfloat16, T.float, num_stages)
+    parser = argparse.ArgumentParser(description="CLC-scheduled persistent warp-specialized SM100 GEMM")
+    parser.add_argument("--block_M", type=int, default=128)
+    parser.add_argument("--block_N", type=int, default=256)
+    parser.add_argument("--store_block_N", type=int, default=64, help="block_N for C_shared")
+    parser.add_argument("--block_K", type=int, default=64)
+    parser.add_argument("--num_stages", type=int, default=6)
+    parser.add_argument("--group_size", type=int, default=8)
+    parser.add_argument("--use_tma_store", action=argparse.BooleanOptionalAction, default=True)
+    args = parser.parse_args()
+
+    group_size = args.group_size
+    use_tma_store = args.use_tma_store
+    base_args = (
+        args.block_M,
+        args.block_N,
+        args.store_block_N,
+        args.block_K,
+        T.bfloat16,
+        T.bfloat16,
+        T.float,
+        args.num_stages,
+    )
 
     for M, N, K in ((4096, 4096, 4096), (8192, 8192, 8192), (16384, 16384, 16384)):
         a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
@@ -360,17 +379,18 @@ if __name__ == "__main__":
         ref = ref_program(a, b)
         flops = 2 * M * N * K
 
-        c = gemm_clc_persistent_2cta(a, b, *base_args, group_size)
+        c = gemm_clc_persistent_2cta(a, b, *base_args, group_size, use_tma_store)
         torch.testing.assert_close(c, ref, rtol=1e-2, atol=1e-2)
-        ms_base = do_bench(lambda a=a, b=b: gemm_clc_persistent_2cta(a, b, *base_args, group_size), backend="event")
+        ms_base = do_bench(lambda a=a, b=b: gemm_clc_persistent_2cta(a, b, *base_args, group_size, use_tma_store), backend="event")
 
         ms_torch = do_bench(lambda a=a, b=b: a @ b, backend="event")
         print(f"M=N=K={M:<6}  base: {flops / (ms_base / 1e3) / 1e12:6.1f} TFLOPS  torch: {flops / (ms_torch / 1e3) / 1e12:6.1f} TFLOPS")
 
         for clc in (2, 3, 4):
-            c2 = gemm_clc_persistent_2cta_pipelined_clc(a, b, *base_args, clc, group_size)
+            c2 = gemm_clc_persistent_2cta_pipelined_clc(a, b, *base_args, clc, group_size, use_tma_store)
             torch.testing.assert_close(c2, ref, rtol=1e-2, atol=1e-2)
             ms_pipe = do_bench(
-                lambda a=a, b=b, clc=clc: gemm_clc_persistent_2cta_pipelined_clc(a, b, *base_args, clc, group_size), backend="event"
+                lambda a=a, b=b, clc=clc: gemm_clc_persistent_2cta_pipelined_clc(a, b, *base_args, clc, group_size, use_tma_store),
+                backend="event",
             )
             print(f"             pipe(clc={clc}): {flops / (ms_pipe / 1e3) / 1e12:6.1f} TFLOPS  ({ms_base / ms_pipe:.3f}x vs base)")

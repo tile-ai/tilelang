@@ -6,7 +6,7 @@
 #include "backend/common/op/fill.h"
 
 #include "backend/common/target_utils.h"
-#include "op/builtin.h"
+#include "cuda/op/builtin.h"
 #include "op/utils.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/tirx/op.h>

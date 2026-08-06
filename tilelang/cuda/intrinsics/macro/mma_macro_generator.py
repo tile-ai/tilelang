@@ -1,8 +1,8 @@
 from __future__ import annotations
+from enum import IntEnum
 import tilelang.language as T
 from typing import Literal
 from collections.abc import Callable
-from tilelang.common import TransformKind
 from tvm import DataType
 from tvm import tirx
 from tvm.ir import Range
@@ -28,9 +28,19 @@ from tilelang.cuda.intrinsics.layout.mma_layout import (
     mma_load_a_32x16_to_shared_16x32_layout,
     mma_load_b_32x16_to_shared_16x32_layout,
     mma_load_a_32x8_to_shared_16x16_layout,
+    shared_16x64_to_mma_32x32_layout_sr_a,
+    shared_8x64_to_mma_32x16_layout_sr_b,
 )
 
 lift = convert
+
+
+# Copied from bitblas
+class TransformKind(IntEnum):
+    NonTransform = 0
+    InterWarpTransform = 1
+    IntraWarpTransform = 2
+    LDMatrixTransform = 3
 
 
 class TensorCoreIntrinEmitter:
@@ -352,7 +362,7 @@ class TensorCoreIntrinEmitter:
             tx, _, warp_m = self.extract_thread_binding(thread_binding)
             trans = self.a_transposed
 
-            for i in T.serial(warp_rows):
+            for i in T.unroll(warp_rows):
                 wi, wk = warp_m * warp_row_tiles + i * micro_size_x, rk * chunk + ki * micro_size_k
 
                 if ldmatrix_available:
@@ -464,7 +474,7 @@ class TensorCoreIntrinEmitter:
             tx, warp_n, _ = self.extract_thread_binding(thread_binding)
             trans = not b_transposed
 
-            for i in T.serial(warp_cols):
+            for i in T.unroll(warp_cols):
                 # Assign B_shared_elem
                 wi, wk = (
                     warp_n * warp_col_tiles + i * micro_size_y,
@@ -715,6 +725,9 @@ class TensorCoreIntrinEmitter:
         elif dtype_bits == 8:
             transform_func_sr_a = shared_16x32_to_mma_32x16_layout_sr_a
             transform_func_sr_b = shared_16x32_to_mma_32x16_layout_sr_b
+        elif dtype_bits == 4:
+            transform_func_sr_a = shared_16x64_to_mma_32x32_layout_sr_a
+            transform_func_sr_b = shared_8x64_to_mma_32x16_layout_sr_b
         else:
             raise ValueError(f"Unsupported dtype {dtype}")
 

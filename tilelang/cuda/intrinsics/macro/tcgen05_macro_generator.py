@@ -2,8 +2,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 import tilelang.language as T
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
+from ..layout.mma_sm100_layout import (
+    TCGEN05Meta,
+    make_tmem_frg_a,
+    make_tmem_frg_c,
+    validate_tcgen05_ts_instruction,
+)
 from tvm import DataType
-from tvm.tirx import PrimExpr, Buffer, Var, BufferLoad, BufferRegion
+from tvm.tirx import PrimExpr, Buffer, Var, BufferLoad, BufferRegion, handle_add_byte_offset
 from tilelang import tvm as tvm
 from tilelang import _ffi_api
 from tilelang.language.dtypes import get_tvm_dtype
@@ -52,6 +58,54 @@ class TCGEN05DescriptorParams:
     buffer; passed to ``T.increase_descriptor_offset`` after building the
     descriptor from the buffer base. ``0`` for a whole-buffer / base-origin
     operand. Computed by :func:`compute_umma_descriptor` from the CuTe layout."""
+
+
+@dataclass(frozen=True)
+class TCGEN05TensorMemoryParams:
+    """Pre-computed TMEM addressing for one operand Region.
+
+    The TMEM analog of :class:`TCGEN05DescriptorParams`: built by
+    ``compute_tcgen05_{a,c}_tmem_params()`` from the operand's CuTe fragment
+    and Region, and consumed by ``tcgen05_*_atom()`` to form each MMA atom's
+    raw TMEM address.
+    """
+
+    data: Var
+    """The TMEM buffer's data Var, carrying the base address."""
+    origin: tuple[PrimExpr, PrimExpr]
+    """Physical ``(datapath, value-column)`` of the Region origin."""
+    tile: cute.Layout
+    """Region-local matrix coordinates to physical coordinate steps."""
+    value_bits: int
+    """Bit width of one value; converts value columns to raw b32 columns."""
+
+    @classmethod
+    def from_region(cls, fragment: cute.Layout, region: BufferRegion) -> TCGEN05TensorMemoryParams:
+        """Restrict a TMEM fragment to one operand Region.
+
+        ``cute.restrict`` applies the Region exactly like the shared-memory
+        descriptor path: it yields the Region origin's physical ``(datapath,
+        column)`` plus the sliced sublayout, and each atom origin is then one
+        evaluation of that sublayout.
+        """
+        buffer, ranges = region.buffer, list(region.region)
+        assert cute.rank(fragment) == len(ranges), (
+            f"TCGEN5MMA region rank {len(ranges)} does not match its TMEM fragment rank {cute.rank(fragment)}"
+        )
+        origin, tile = cute.restrict(fragment, ranges)
+        value_dtype = get_tvm_dtype(buffer.dtype)
+        return cls(buffer.data, origin, tile, value_dtype.bits * value_dtype.lanes)
+
+    def atom_offset(self, row_offset: PrimExpr, col_offset: PrimExpr) -> PrimExpr:
+        """Raw TMEM address of the atom at a Region-local matrix origin.
+
+        The column coordinate counts values of the buffer's dtype; scaling it
+        to raw b32 columns here is the same conversion TMEM allocation uses.
+        """
+        datapath_step, column_step = self.tile((row_offset, col_offset))
+        datapath = self.origin[0] + datapath_step
+        column = (self.origin[1] + column_step) * self.value_bits // 32
+        return (datapath << 16) | column
 
 
 def _bytes_to_elements(byte_count: int, elem_bits: int) -> int:
@@ -110,8 +164,9 @@ def compute_umma_descriptor(tl_layout, buffer, transposed: bool, micro_size_k: i
     slice_byte_offset = 0
     if region is not None:
         slice_off_elems, tile = cute.restrict(composed_elem.layout, region)
-        if slice_off_elems != 0:
-            slice_byte_offset = tvm.arith.Analyzer().simplify(slice_off_elems * elem_bits // 8)
+        slice_byte_offset = slice_off_elems * elem_bits // 8
+        if not isinstance(slice_byte_offset, int):
+            slice_byte_offset = tvm.arith.Analyzer().simplify(slice_byte_offset)
     assert cute.rank(tile) == 2, f"UMMA operand tile must be rank-2 (MN, K), got rank {cute.rank(tile)}"
     # Present in UMMA (MN, K) order, then recast the swizzled element layout to
     # uint128_t (exactly CuTe's recast<uint128_t const>(tensor)).
@@ -196,8 +251,13 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
     # should be rewritten to support dynamic k_dim
     tcgen05_prefix: str
 
+    # The selected instruction atom; set by get_tcgen5_mma_meta().
+    meta: tuple = ()
+
     a_shared_layout: Layout = None
     b_shared_layout: Layout = None
+    a_tmem_layout: cute.Layout = None
+    c_tmem_layout: cute.Layout = None
 
     @staticmethod
     def _smem_elems_in_bytes(dtype) -> int:
@@ -247,6 +307,25 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         self.b_shared_layout = layout
         return self
 
+    def _assign_a_tmem_layout(self, layout: Layout):
+        """Adopt the inferred TS ``FrgTypeA`` layout from the layout map.
+
+        Layout inference guarantees every TMEM operand carries a layout, in
+        TileLang ``lambda *indices: [datapath, column]`` form;
+        ``cute.Layout.from_tilelang_hierarchical`` recovers the hierarchical
+        CuTe layout.
+        """
+
+        self.a_tmem_layout = cute.Layout.from_tilelang_hierarchical(layout)
+        assert self.a_tmem_layout is not None, f"TMEM layout is not decodable by the CuTe analyzer: {layout}"
+        return self
+
+    def _assign_c_tmem_layout(self, layout: Layout):
+        """Adopt the inferred ``FrgTypeC`` layout from the layout map."""
+        self.c_tmem_layout = cute.Layout.from_tilelang_hierarchical(layout)
+        assert self.c_tmem_layout is not None, f"TMEM layout is not decodable by the CuTe analyzer: {layout}"
+        return self
+
     def _initialize_micro_size(self, m_dim: int = 16, k_dim: int = 16):
         # tcgen05 doesn't care about warp partitioning
         self.micro_size_x = m_dim
@@ -268,130 +347,198 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             return buf_or_region.buffer
         return buf_or_region
 
-    def tcgen05mma(self, A_buf: Buffer, B_buf: Buffer, C_local_buf: Buffer, mbar, clear_accum: PrimExpr = False):
+    def validate_tcgen05_operand_regions(
+        self, A_region: BufferRegion, B_region: BufferRegion, C_region: BufferRegion, *, is_ts: bool
+    ) -> None:
+        """Enforce the TCGEN5MMA operand contract at the emitter boundary.
+
+        Every operand is a complete BufferRegion whose leading modes are
+        pinned to one element and whose two trailing matrix modes are an
+        exact union of instruction atoms, atom-aligned in origin.  CUTLASS
+        forms sliced views only after partitioning into atoms; enforcing the
+        same contract here — once, before any address math — prevents
+        descriptor-aligned but atom-misaligned windows (for example BF16 K16
+        at K=8) from silently producing incorrect results, and lets the rest
+        of the lowering assume well-formed Regions without re-checking.
+        """
+        meta = self.tcgen05_meta
+        if is_ts:
+            validate_tcgen05_ts_instruction(meta, self.a_dtype, self.a_transposed)
+        if meta.enable_2cta:
+            # Each CTA holds an N/2 shard of B, so how a second cooperative
+            # instruction's window maps into the shard depends on how the
+            # shard was produced; that contract is not defined yet.  Reject
+            # instead of silently walking B's descriptor out of the shard.
+            assert self.tcgen05_num_inst_n == 1, (
+                f"2CTA TCGEN5MMA currently supports a single instruction along N; "
+                f"got N={self.block_col_warps * self.warp_col_tiles} with instruction N={meta.atom_n}"
+            )
+        analyzer = tvm.arith.Analyzer()
+
+        def check(region, operand, transposed, mn_atom, k_atom, mn_axis_name, k_axis_name):
+            ranges = region.region
+            assert len(ranges) >= 2, f"TCGEN5MMA {operand} must have at least two modes, got rank {len(ranges)}"
+            for axis, axis_range in enumerate(ranges[:-2]):
+                assert analyzer.can_prove_equal(axis_range.extent, 1), (
+                    f"TCGEN5MMA {operand} leading mode {axis} must have unit extent; the last two modes are the matrix modes"
+                )
+            row_range, col_range = ranges[-2:]
+            mn_range, k_range = (col_range, row_range) if transposed else (row_range, col_range)
+            for mode_name, mode_range, atom in ((mn_axis_name, mn_range, mn_atom), (k_axis_name, k_range, k_atom)):
+                assert analyzer.can_prove_equal(mode_range.min % atom, 0), (
+                    f"TCGEN5MMA {operand} {mode_name} origin {mode_range.min} must be aligned to the selected atom {atom}"
+                )
+                assert analyzer.can_prove_equal(mode_range.extent % atom, 0), (
+                    f"TCGEN5MMA {operand} {mode_name} extent {mode_range.extent} must be a multiple of the selected atom {atom}"
+                )
+
+        check(A_region, "A", self.a_transposed, meta.atom_m_per_cta, meta.atom_k, "M", "K")
+        # TileLang B is [K,N] by default and [N,K] when transpose_B=True,
+        # opposite to A's physical-axis convention.
+        # CUTLASS partitions each 2SM instruction's BLayout into N/2 per CTA.
+        check(B_region, "B", not self.b_transposed, meta.b_atom_n_per_cta, meta.atom_k, "N", "K")
+        check(C_region, "C", False, meta.atom_m_per_cta, meta.atom_n, "M", "N")
+
+    def compute_tcgen05_c_tmem_params(self, C_region: BufferRegion) -> TCGEN05TensorMemoryParams:
+        """Compute accumulator TMEM addressing for one operand Region.
+
+        The TMEM analog of ``compute_tcgen05_*_desc_params``: shared by the
+        SS, TS, and block-scaled emitters so the accumulator addressing
+        convention lives in exactly one place.
+        """
+        assert self.c_tmem_layout is not None, "TCGEN05 C operand has no assigned TMEM layout"
+        return TCGEN05TensorMemoryParams.from_region(self.c_tmem_layout, C_region)
+
+    def compute_tcgen05_a_tmem_params(self, A_region: BufferRegion) -> TCGEN05TensorMemoryParams:
+        """Compute TS A TMEM addressing for one operand Region."""
+        assert self.a_tmem_layout is not None, "TCGEN05 TS A operand has no assigned TMEM layout"
+        return TCGEN05TensorMemoryParams.from_region(self.a_tmem_layout, A_region)
+
+    def tcgen05mma(self, A_region: BufferRegion, B_region: BufferRegion, C_region: BufferRegion, mbar, clear_accum: PrimExpr = False):
         """Emit a TCGEN5MMA operation, dispatching to SS or TS variant based on A's memory scope.
 
-        If *A_buf* resides in tensor memory (``shared.tmem``), the TS variant is
-        emitted; otherwise the SS variant is used (both A and B from shared memory).
+        If *A_region* resides in tensor memory (``shared.tmem``), the TS
+        variant is emitted; otherwise the SS variant is used (both A and B
+        from shared memory).
 
         Parameters
         ----------
-        A_buf : Buffer
+        A_region : BufferRegion
             Operand A — either in shared memory (SS) or tensor memory (TS).
-        B_buf : Buffer
+        B_region : BufferRegion
             Operand B in shared memory.
-        C_local_buf : Buffer
-            Accumulator buffer in tensor memory.
+        C_region : BufferRegion
+            Accumulator Region in tensor memory.
         mbar : PrimExpr
             Memory barrier used for MMA completion signalling.
         clear_accum : PrimExpr
             Whether to zero the accumulator before the first MMA.
         """
-        if is_tensor_memory(A_buf):
-            return self.tcgen05mma_ts(A_buf, B_buf, C_local_buf, mbar, clear_accum)
-        return self.tcgen05mma_ss(A_buf, B_buf, C_local_buf, mbar, clear_accum)
+        if is_tensor_memory(A_region):
+            return self.tcgen05mma_ts(A_region, B_region, C_region, mbar, clear_accum)
+        return self.tcgen05mma_ss(A_region, B_region, C_region, mbar, clear_accum)
 
-    def tcgen05mma_ss(self, A_buf: Buffer, B_buf: Buffer, C_local_buf: Buffer, mbar, clear_accum: PrimExpr = False):
+    def tcgen05mma_ss(self, A_region: BufferRegion, B_region: BufferRegion, C_region: BufferRegion, mbar, clear_accum: PrimExpr = False):
         """Emit the SS (Shared-Shared) variant of TCGEN5MMA.
 
         Reads operand A and B from shared memory via a descriptor.
 
         Parameters
         ----------
-        A_buf : Buffer
+        A_region : BufferRegion
             Operand A in shared memory.
-        B_buf : Buffer
+        B_region : BufferRegion
             Operand B in shared memory.
-        C_local_buf : Buffer
-            Accumulator buffer in tensor memory.
+        C_region : BufferRegion
+            Accumulator Region in tensor memory.
         mbar : PrimExpr
-            Memory barrier for MMA completion signalling.
+            Memory barrier for MMA completion signalling. ``None`` keeps the
+            MMA ordered in the issue stream without publishing an event.
         clear_accum : PrimExpr
             Whether to zero the accumulator before the first MMA.
         """
         micro_size_k = self.micro_size_k
         k_dim = self.chunk
         assert k_dim >= micro_size_k, f"k_dim must be greater than or equal to {micro_size_k}, got k_dim: {k_dim}"
+        self.validate_tcgen05_operand_regions(A_region, B_region, C_region, is_ts=False)
 
         num_inst_m = self.tcgen05_num_inst_m
         num_inst_n = self.tcgen05_num_inst_n
         num_k_atoms = self.tcgen05_num_k_atoms
-        a_params = self.compute_tcgen05_a_desc_params(A_buf)
-        b_params = self.compute_tcgen05_b_desc_params(B_buf)
+        a_params = self.compute_tcgen05_a_desc_params(A_region)
+        b_params = self.compute_tcgen05_b_desc_params(B_region)
+        c_params = self.compute_tcgen05_c_tmem_params(C_region)
         instr_desc = self.compute_tcgen05_instr_desc()
 
         @T.macro
-        def _warp_mma_ss(A_buf, B_buf, C_local_buf, mbar):
+        def _warp_mma_ss(A_region, B_region, mbar):
             desc_a = T.alloc_tcgen05_smem_desc()
             desc_b = T.alloc_tcgen05_smem_desc()
-            self.init_tcgen05_a_desc(desc_a, A_buf, a_params)
-            self.init_tcgen05_b_desc(desc_b, B_buf, b_params)
+            self.init_tcgen05_a_desc(desc_a, A_region, a_params)
+            self.init_tcgen05_b_desc(desc_b, B_region, b_params)
 
             for j in T.unroll(num_inst_n):
                 for i in T.unroll(num_inst_m):
                     for ki in T.unroll(0, num_k_atoms):
-                        self.tcgen05_ss_atom(desc_a, desc_b, C_local_buf, i, j, ki, a_params, b_params, instr_desc, clear_accum)
-            self.tcgen05_atom_arrive(mbar)
+                        self.tcgen05_ss_atom(desc_a, desc_b, i, j, ki, a_params, b_params, c_params, instr_desc, clear_accum)
+            if mbar is not None:
+                self.tcgen05_atom_arrive(mbar)
 
-        return _warp_mma_ss(A_buf, B_buf, C_local_buf, mbar)
+        return _warp_mma_ss(A_region, B_region, mbar)
 
-    def tcgen05mma_ts(self, A_buf, B_buf, C_local_buf, mbar, clear_accum: PrimExpr = False):
+    def tcgen05mma_ts(self, A_region: BufferRegion, B_region: BufferRegion, C_region: BufferRegion, mbar, clear_accum: PrimExpr = False):
         """Emit the TS (TensorMemory-Shared) variant of TCGEN5MMA.
 
         Reads operand A directly from tensor memory (TMEM) and operand B from
-        shared memory via a descriptor.  The TMEM column offset for A is
-        computed assuming packed storage (e.g. two ``bfloat16`` values per
-        ``uint32`` column) to match the output of ``tcgen05.st``.
+        shared memory via a descriptor.  Every A and C atom origin is mapped
+        through its CuTe TMEM fragment.
 
         Parameters
         ----------
-        A_buf : Buffer
+        A_region : BufferRegion
             Operand A residing in tensor memory (``shared.tmem``).
-        B_buf : Buffer
+        B_region : BufferRegion
             Operand B in shared memory.
-        C_local_buf : Buffer
-            Accumulator buffer in tensor memory.
+        C_region : BufferRegion
+            Accumulator Region in tensor memory.
         mbar : PrimExpr
-            Memory barrier for MMA completion signalling.
+            Memory barrier for MMA completion signalling. ``None`` keeps the
+            MMA ordered in the issue stream without publishing an event.
         clear_accum : PrimExpr
             Whether to zero the accumulator before the first MMA.
         """
         micro_size_k = self.micro_size_k
         k_dim = self.chunk
         assert k_dim >= micro_size_k, f"k_dim must be >= {micro_size_k}, got {k_dim}"
+        self.validate_tcgen05_operand_regions(A_region, B_region, C_region, is_ts=True)
 
         num_inst_m = self.tcgen05_num_inst_m
         num_inst_n = self.tcgen05_num_inst_n
         num_k_atoms = self.tcgen05_num_k_atoms
-        b_params = self.compute_tcgen05_b_desc_params(B_buf)
+        a_params = self.compute_tcgen05_a_tmem_params(A_region)
+        b_params = self.compute_tcgen05_b_desc_params(B_region)
+        c_params = self.compute_tcgen05_c_tmem_params(C_region)
         instr_desc = self.compute_tcgen05_instr_desc()
 
-        # Resolve the TMEM data pointer for A
-        if isinstance(A_buf, BufferRegion):
-            a_tmem_data = A_buf.buffer.data
-        elif isinstance(A_buf, Buffer):
-            a_tmem_data = A_buf.data
-        else:
-            raise ValueError(f"Unsupported A_buf type for TS variant: {type(A_buf)}")
-
         @T.macro
-        def _warp_mma_ts(a_data, B_buf, C_local_buf, mbar):
+        def _warp_mma_ts(B_region, mbar):
             desc_b = T.alloc_tcgen05_smem_desc()
-            self.init_tcgen05_b_desc(desc_b, B_buf, b_params)
+            self.init_tcgen05_b_desc(desc_b, B_region, b_params)
 
             for j in T.unroll(num_inst_n):
                 for i in T.unroll(num_inst_m):
                     for ki in T.unroll(0, num_k_atoms):
-                        self.tcgen05_ts_atom(a_data, desc_b, C_local_buf, i, j, ki, b_params, instr_desc, clear_accum)
-            self.tcgen05_atom_arrive(mbar)
+                        self.tcgen05_ts_atom(desc_b, i, j, ki, a_params, b_params, c_params, instr_desc, clear_accum)
+            if mbar is not None:
+                self.tcgen05_atom_arrive(mbar)
 
-        return _warp_mma_ts(a_tmem_data, B_buf, C_local_buf, mbar)
+        return _warp_mma_ts(B_region, mbar)
 
     def tcgen05mma_blockscaled(
         self,
-        A_buf: Buffer,
-        B_buf: Buffer,
-        C_local_buf: Buffer,
+        A_region: BufferRegion,
+        B_region: BufferRegion,
+        C_region: BufferRegion,
         SFA_tmem,
         SFB_tmem,
         mbar,
@@ -414,15 +561,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         a_is_k_major = not self.a_transposed
         b_is_k_major = self.b_transposed
 
-        if len(self.meta) != 5:
-            self.get_tcgen5_mma_meta(m_dim, n_dim, k_dim, disable_2cta=False, disable_ws=True)
-        if len(self.meta) != 5:
-            raise ValueError(
-                f"Unsupported TCGEN5MMA configuration for block-scaled: M={m_dim}, N={n_dim}, "
-                f"K={k_dim}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
-            )
-        atom_m, atom_n, _, _, enable_2cta = self.tcgen05_meta_unpacked
-        atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
+        meta = self.tcgen05_meta
+        self.validate_tcgen05_operand_regions(A_region, B_region, C_region, is_ts=False)
 
         # CuTe builds the block-scaled A descriptor with FrgTypeA =
         # UMMA::smem_desc<a_major>, i.e. the *same* make_umma_desc as the regular
@@ -431,12 +571,13 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         # (which also handles a sliced A operand) rather than re-deriving SBO/LBO
         # from atom_m_per_cta. The per-atom M stepping in tcgen05_blockscaled_atom
         # walks within the whole-tile descriptor exactly as tcgen05_ss_atom does.
-        a_params = self.compute_tcgen05_a_desc_params(A_buf)
-        b_params = self.compute_tcgen05_b_desc_params(B_buf)
+        a_params = self.compute_tcgen05_a_desc_params(A_region)
+        b_params = self.compute_tcgen05_b_desc_params(B_region)
+        c_params = self.compute_tcgen05_c_tmem_params(C_region)
 
         base_instr_desc = self.get_tcgen5_blockscaled_instr_desc(
-            atom_m,
-            atom_n,
+            meta.atom_m,
+            meta.atom_n,
             a_is_k_major,
             b_is_k_major,
             1,
@@ -445,30 +586,19 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             0,
         )
 
-        num_inst_m = m_dim // atom_m_per_cta
-        num_inst_n = n_dim // atom_n
+        num_inst_m = m_dim // meta.atom_m_per_cta
+        num_inst_n = n_dim // meta.atom_n
         num_k_atoms = self.tcgen05_num_k_atoms
 
-        if isinstance(SFA_tmem, BufferRegion):
-            sfa_data = SFA_tmem.buffer.data
-        elif isinstance(SFA_tmem, Buffer):
-            sfa_data = SFA_tmem.data
-        else:
-            raise ValueError(f"Unsupported SFA_tmem type: {type(SFA_tmem)}")
-
-        if isinstance(SFB_tmem, BufferRegion):
-            sfb_data = SFB_tmem.buffer.data
-        elif isinstance(SFB_tmem, Buffer):
-            sfb_data = SFB_tmem.data
-        else:
-            raise ValueError(f"Unsupported SFB_tmem type: {type(SFB_tmem)}")
+        sfa_data = self._as_buffer(SFA_tmem).data
+        sfb_data = self._as_buffer(SFB_tmem).data
 
         @T.macro
-        def _warp_mma_blockscaled(A_buf, B_buf, C_local_buf, sfa_data, sfb_data, mbar):
+        def _warp_mma_blockscaled(A_region, B_region, sfa_data, sfb_data, mbar):
             desc_a = T.alloc_tcgen05_smem_desc()
             desc_b = T.alloc_tcgen05_smem_desc()
-            self.init_tcgen05_a_desc(desc_a, A_buf, a_params)
-            self.init_tcgen05_b_desc(desc_b, B_buf, b_params)
+            self.init_tcgen05_a_desc(desc_a, A_region, a_params)
+            self.init_tcgen05_b_desc(desc_b, B_region, b_params)
 
             _sf_k_start = tvm.tirx.const(sf_k_start, "int32") if isinstance(sf_k_start, int) else sf_k_start
             for j in T.unroll(num_inst_n):
@@ -480,7 +610,6 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                         self.tcgen05_blockscaled_atom(
                             desc_a,
                             desc_b,
-                            C_local_buf,
                             sfa_data,
                             sfb_data,
                             i,
@@ -488,12 +617,13 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                             ki,
                             a_params,
                             b_params,
+                            c_params,
                             runtime_instr_desc,
                             clear_accum,
                         )
             self.tcgen05_atom_arrive(mbar)
 
-        return _warp_mma_blockscaled(A_buf, B_buf, C_local_buf, sfa_data, sfb_data, mbar)
+        return _warp_mma_blockscaled(A_region, B_region, sfa_data, sfb_data, mbar)
 
     def get_tcgen5_blockscaled_instr_desc(
         self,
@@ -524,93 +654,26 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
     def make_mma_load_layout(self, local_buf: Buffer, matrix: str = "A") -> T.Fragment:
         raise NotImplementedError
 
-    def make_mma_store_layout(self, tmem_buf: Buffer) -> Layout:
-        """
-        Create the TCGEN5 tensor-memory layout used to store MMA accumulators.
+    def make_mma_store_layout(self, tmem_buf: Buffer, *, operand: str = "C", is_ts: bool = False) -> Layout:
+        """Create the TMEM layout of one TCGEN5MMA operand for the layout map.
 
-        Parameters
-        ----------
-        tmem_buf : tir.Buffer
-            The local buffer representing tensormemory of a mma's output
+        Requires ``self.meta`` initialized via ``get_tcgen5_mma_meta()``; the
+        selected instruction atom decides the fragment.
 
-        Returns
-        -------
-        Layout
-            Layout object describing how logical (i, j) coordinates map to the
-            swizzled tensor-memory offsets required by TCGEN5MMA.
-
-        Raises
-        ------
-        AssertionError
-            If `tmem_buf` is not detected to be a tensor-memory buffer.
+        ``operand="A"`` builds the dense TS ``FrgTypeA`` (CuTe
+        ``tmem_frg_{1,2}sm<A, A, ...>``): 16-bit A remains expressed in value
+        columns here; two such columns are packed into one raw b32 TMEM
+        column only when an MMA atom address is formed.  ``operand="C"``
+        builds the accumulator ``FrgTypeC``; ``is_ts`` selects the TS traits'
+        allocation mode when the GEMM's A operand also lives in TMEM.
         """
         assert is_tensor_memory(tmem_buf), "tmem_buf must reside in tensor memory (shared.tmem)"
-        if len(tmem_buf.shape) != 2:
-            raise ValueError(f"TCGEN5MMA expects a 2-D tensor-memory buffer, got shape {tmem_buf.shape}")
-
-        m = int(tmem_buf.shape[0])
-        n = int(tmem_buf.shape[1])
-        k = int(self.chunk)
-
-        meta = getattr(self, "meta", ())
-        if len(meta) != 5:
-            self.get_tcgen5_mma_meta(m, n, k, disable_2cta=True)
-            meta = self.meta
-        if len(meta) != 5:
-            raise ValueError(
-                f"Unsupported TCGEN5MMA configuration: M={m}, N={n}, K={k}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
-            )
-        atom_m, atom_n, _, _, enable_2cta = (int(x) for x in meta)
-        atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
-
-        if m % atom_m_per_cta != 0 or n % atom_n != 0:
-            raise ValueError(f"Invalid TCGEN5MMA store layout for shape ({m}, {n}) with atoms ({atom_m}, {atom_n})")
-
-        def forward(i: PrimExpr, j: PrimExpr):
-            atom_idx = (i // atom_m_per_cta) + (j // atom_n) * (m // atom_m_per_cta)
-            ai = i % atom_m_per_cta
-            aj = j % atom_n
-
-            # NOTE: Currently not all 7 layout are supported
-            if atom_m == 256:
-                # Layout A (2 cta)
-                assert enable_2cta, "atom_m=256 for TCGEN5MMA must use 2cta"
-                return [
-                    ai % 128,
-                    aj + atom_idx * atom_n,
-                ]
-            if atom_m == 128:
-                if enable_2cta:
-                    # Layout B
-                    half_atom_n = atom_n // 2
-                    return [
-                        ai + (aj // half_atom_n) * 64,
-                        (aj % half_atom_n) + atom_idx * half_atom_n,
-                    ]
-                else:
-                    # Layout D
-                    return [
-                        ai,
-                        aj + atom_idx * atom_n,
-                    ]
-            if atom_m == 64:
-                # Layout E (.ws variant)
-                half_atom_n = atom_n // 2
-                return [
-                    (ai // 32) * 32 + ai % 32 + (aj // half_atom_n) * 64,
-                    (aj % half_atom_n) + atom_idx * half_atom_n,
-                ]
-            if atom_m == 32:
-                # Layout G
-                quarter_atom_n = atom_n // 4
-                return [
-                    ai % 32 + (aj // quarter_atom_n) * 32,
-                    (aj % quarter_atom_n) + atom_idx * quarter_atom_n,
-                ]
-
-            raise ValueError(f"Unsupported TCGEN5 atom_m={atom_m}")
-
-        return Layout([m, n], forward)
+        assert operand in ("A", "C"), f"TCGEN5MMA TMEM operand must be A or C, got {operand}"
+        if operand == "A" or is_ts:
+            validate_tcgen05_ts_instruction(self.tcgen05_meta, self.a_dtype, self.a_transposed)
+        if operand == "A":
+            return make_tmem_frg_a(tmem_buf, self.tcgen05_meta).to_tilelang()
+        return make_tmem_frg_c(tmem_buf, self.tcgen05_meta, is_ts=is_ts).to_tilelang()
 
     def get_tcgen5_mma_meta(self, m: int, n: int, k: int, disable_2cta: bool, disable_ws: bool = False):
         """Query the FFI for TCGEN5MMA atom metadata (atom_m, atom_n, atom_k, enable_ws, enable_2cta), and record them in `self.meta`."""
@@ -645,26 +708,23 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
     # ---- Atom-level interface ----
 
     @property
-    def tcgen05_meta_unpacked(self) -> tuple:
-        """Return ``(atom_m, atom_n, atom_k, enable_ws, enable_2cta)`` as ints.
+    def tcgen05_meta(self) -> TCGEN05Meta:
+        """The selected instruction atom, as named fields.
 
         Requires ``self.meta`` to have been set via ``get_tcgen5_mma_meta()``.
         """
         assert len(self.meta) == 5, "TCGEN05 meta not initialized; call get_tcgen5_mma_meta() first"
-        return tuple(int(x) for x in self.meta)
+        return TCGEN05Meta.from_ffi(self.meta)
 
     @property
     def tcgen05_num_inst_m(self) -> int:
         """Number of TCGEN05MMA instruction atoms along M (SS variant)."""
-        atom_m, _, _, _, enable_2cta = self.tcgen05_meta_unpacked
-        atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
-        return self.block_row_warps * self.warp_row_tiles // atom_m_per_cta
+        return self.block_row_warps * self.warp_row_tiles // self.tcgen05_meta.atom_m_per_cta
 
     @property
     def tcgen05_num_inst_n(self) -> int:
         """Number of TCGEN05MMA instruction atoms along N."""
-        _, atom_n, _, _, _ = self.tcgen05_meta_unpacked
-        return self.block_col_warps * self.warp_col_tiles // atom_n
+        return self.block_col_warps * self.warp_col_tiles // self.tcgen05_meta.atom_n
 
     @property
     def tcgen05_num_k_atoms(self) -> int:
@@ -758,12 +818,20 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         sbo = b_params.stride_byte_offset
         swizzle_mode = b_params.swizzle_mode.tcgen05_layout_type()
         slice_byte_offset = b_params.slice_byte_offset
-        is_sliced = not isinstance(slice_byte_offset, int) or slice_byte_offset != 0
         B_base_ptr = self._as_buffer(B_buf).access_ptr("r")
+        if not isinstance(slice_byte_offset, int):
+            # A dynamic slice. Use `increase_descriptor_offset` to represent the dynamic offset, to share a common base pointer.
+            is_sliced = True
+        elif slice_byte_offset != 0:
+            # A static slice. Add to the pointer directly to avoid an excessive `increase_descriptor_offset`.
+            is_sliced = False
+            B_base_ptr = handle_add_byte_offset(B_base_ptr, slice_byte_offset)
+        else:
+            # Non-sliced.
+            is_sliced = False
 
         @T.macro
         def _init_b(desc_b, B_base_ptr):
-            # Build from the buffer base (uniform cvta), then advance to the slice origin.
             T.initialize_tcgen05_descriptor(desc_b, B_base_ptr, lbo, sbo, 0, False, swizzle_mode)
             if is_sliced:
                 T.increase_descriptor_offset(desc_b, slice_byte_offset)
@@ -786,12 +854,17 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         sbo = a_params.stride_byte_offset
         swizzle_mode = a_params.swizzle_mode.tcgen05_layout_type()
         slice_byte_offset = a_params.slice_byte_offset
-        is_sliced = not isinstance(slice_byte_offset, int) or slice_byte_offset != 0
         A_base_ptr = self._as_buffer(A_buf).access_ptr("r")
+        if not isinstance(slice_byte_offset, int):
+            is_sliced = True
+        elif slice_byte_offset != 0:
+            is_sliced = False
+            A_base_ptr = handle_add_byte_offset(A_base_ptr, slice_byte_offset)
+        else:
+            is_sliced = False
 
         @T.macro
         def _init_a(desc_a, A_base_ptr):
-            # Build from the buffer base (uniform cvta), then advance to the slice origin.
             T.initialize_tcgen05_descriptor(desc_a, A_base_ptr, lbo, sbo, 0, False, swizzle_mode)
             if is_sliced:
                 T.increase_descriptor_offset(desc_a, slice_byte_offset)
@@ -805,16 +878,16 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         Requires ``self.meta`` to have been set via ``get_tcgen5_mma_meta()``.
         """
-        atom_m, atom_n, atom_k, _, _ = self.tcgen05_meta_unpacked
+        meta = self.tcgen05_meta
         a_is_k_major = not self.a_transposed
         b_is_k_major = self.b_transposed
-        return self.get_tcgen5_instr_desc(atom_m, atom_n, atom_k, a_is_k_major, b_is_k_major, 1, 1)
+        return self.get_tcgen5_instr_desc(meta.atom_m, meta.atom_n, meta.atom_k, a_is_k_major, b_is_k_major, 1, 1)
 
     # -- Arrive --
 
     def tcgen05_atom_arrive(self, mbar):
         """Emit ``tcgen05_mma_arrive(mbar)``."""
-        _, _, _, _, enable_2cta = self.tcgen05_meta_unpacked
+        enable_2cta = self.tcgen05_meta.enable_2cta
 
         @T.macro
         def _arrive(mbar):
@@ -828,12 +901,12 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         self,
         desc_a,
         desc_b,
-        C_local_buf: Buffer,
         inst_m_idx: int,
         inst_n_idx: int,
         ki: int,
         a_params: TCGEN05DescriptorParams,
         b_params: TCGEN05DescriptorParams,
+        c_params: TCGEN05TensorMemoryParams,
         instr_desc: PrimExpr,
         clear_accum: PrimExpr = False,
     ):
@@ -845,8 +918,6 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         ----------
         desc_a, desc_b : Buffer
             Initialized A and B descriptors.
-        C_local_buf : Buffer
-            Accumulator buffer in tensor memory.
         inst_m_idx : int
             M-dimension atom index (0 .. tcgen05_num_inst_m - 1).
         inst_n_idx : int
@@ -857,19 +928,22 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             Pre-computed A descriptor parameters.
         b_params : TCGEN05DescriptorParams
             Pre-computed B descriptor parameters.
+        c_params : TCGEN05TensorMemoryParams
+            Pre-computed accumulator TMEM parameters from
+            ``compute_tcgen05_c_tmem_params()``.
         instr_desc : PrimExpr
             Instruction descriptor from ``compute_tcgen05_instr_desc()``.
         clear_accum : PrimExpr
             Whether to zero the accumulator on the first K atom.
         """
-        atom_m, atom_n, _, enable_ws, enable_2cta = self.tcgen05_meta_unpacked
-        atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
+        meta = self.tcgen05_meta
+        atom_n = meta.atom_n
+        atom_m_per_cta = meta.atom_m_per_cta
         n_dim = self.block_col_warps * self.warp_col_tiles
-        n_dim_per_cta = n_dim // 2 if enable_2cta else n_dim
+        n_dim_per_cta = n_dim // 2 if meta.enable_2cta else n_dim
         m_dim = self.block_row_warps * self.warp_row_tiles
         micro_size_k = self.micro_size_k
         k_dim = self.chunk
-        accum_dtype_in_bits = get_tvm_dtype(self.accum_dtype).bits
         a_dtype_abbrv = self.a_dtype_abbrv
         a_elem_bits = a_params.elem_bits
         b_elem_bits = b_params.elem_bits
@@ -902,11 +976,11 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         A_byte_offset = _elements_to_bytes(A_elem_offset, a_elem_bits)
         B_byte_offset = _elements_to_bytes(B_elem_offset, b_elem_bits)
-        tmem_col_step = atom_n // (128 // atom_m_per_cta)
-        C_offset = (inst_m_idx * n_dim + inst_n_idx * tmem_col_step) * accum_dtype_in_bits // 32
+        C_offset = c_params.atom_offset(inst_m_idx * atom_m_per_cta, inst_n_idx * atom_n)
+        c_data = c_params.data
 
         @T.macro
-        def _ss_atom(desc_a, desc_b, C_local_buf):
+        def _ss_atom(desc_a, desc_b):
             scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
             T.ptx_tcgen05_mma_ss(
                 a_dtype_abbrv,
@@ -914,7 +988,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 A_byte_offset,
                 desc_b.data,
                 B_byte_offset,
-                C_local_buf.data,
+                c_data,
                 C_offset,
                 instr_desc,
                 scale_out,
@@ -922,21 +996,21 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 mask_zero,
                 mask_zero,
                 mask_zero,
-                enable_ws,
-                enable_2cta,
+                meta.enable_ws,
+                meta.enable_2cta,
             )
 
-        return _ss_atom(desc_a, desc_b, C_local_buf)
+        return _ss_atom(desc_a, desc_b)
 
     def tcgen05_ts_atom(
         self,
-        a_tmem_data,
         desc_b,
-        C_local_buf: Buffer,
         inst_m_idx: int,
         inst_n_idx: int,
         ki: int,
+        a_params: TCGEN05TensorMemoryParams,
         b_params: TCGEN05DescriptorParams,
+        c_params: TCGEN05TensorMemoryParams,
         instr_desc: PrimExpr,
         clear_accum: PrimExpr = False,
     ):
@@ -946,45 +1020,41 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         Parameters
         ----------
-        a_tmem_data : Var
-            Data pointer for the A operand in tensor memory (e.g., ``A_buf.data``).
         desc_b : Buffer
             Initialized B descriptor.
-        C_local_buf : Buffer
-            Accumulator buffer in tensor memory.
         inst_m_idx : int
             M-dimension atom index.
         inst_n_idx : int
             N-dimension atom index.
         ki : int
             K-dimension atom index.
+        a_params : TCGEN05TensorMemoryParams
+            Pre-computed A TMEM parameters from
+            ``compute_tcgen05_a_tmem_params()``.
         b_params : TCGEN05DescriptorParams
             Pre-computed B descriptor parameters.
+        c_params : TCGEN05TensorMemoryParams
+            Pre-computed accumulator TMEM parameters from
+            ``compute_tcgen05_c_tmem_params()``.
         instr_desc : PrimExpr
             Instruction descriptor from ``compute_tcgen05_instr_desc()``.
         clear_accum : PrimExpr
             Whether to zero the accumulator on the first K atom.
         """
-        atom_m, atom_n, atom_k, _, enable_2cta = self.tcgen05_meta_unpacked
-        atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
+        meta = self.tcgen05_meta
+        atom_n = meta.atom_n
+        atom_m_per_cta = meta.atom_m_per_cta
         n_dim = self.block_col_warps * self.warp_col_tiles
-        n_dim_per_cta = n_dim // 2 if enable_2cta else n_dim
+        n_dim_per_cta = n_dim // 2 if meta.enable_2cta else n_dim
         micro_size_k = self.micro_size_k
         k_dim = self.chunk
-        a_dtype_in_bits = get_tvm_dtype(self.a_dtype).bits
-        accum_dtype_in_bits = get_tvm_dtype(self.accum_dtype).bits
         a_dtype_abbrv = self.a_dtype_abbrv
         b_elem_bits = b_params.elem_bits
         bk_atom_size = b_params.k_atom_size
         b_swizzle_atom_elems = b_params.swizzle_atom_elems
         mask_zero = T.cast(0, T.int32)
 
-        # TMEM column geometry for A
-        interleave = max(128 // atom_m, 1)
-        a_tmem_cols_per_k_atom = atom_k * a_dtype_in_bits // 32 // interleave
-        a_tmem_k_stride = k_dim * a_dtype_in_bits // 32 // interleave
-
-        A_tmem_offset = inst_m_idx * a_tmem_k_stride + ki * a_tmem_cols_per_k_atom
+        A_tmem_offset = a_params.atom_offset(inst_m_idx * atom_m_per_cta, ki * meta.atom_k)
 
         if b_params.is_k_major:
             B_elem_offset = (
@@ -998,11 +1068,12 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             )
         B_byte_offset = _elements_to_bytes(B_elem_offset, b_elem_bits)
 
-        tmem_col_step = atom_n // (128 // atom_m_per_cta)
-        C_offset = (inst_m_idx * n_dim + inst_n_idx * tmem_col_step) * accum_dtype_in_bits // 32
+        C_offset = c_params.atom_offset(inst_m_idx * atom_m_per_cta, inst_n_idx * atom_n)
+        a_data = a_params.data
+        c_data = c_params.data
 
         @T.macro
-        def _ts_atom(a_data, desc_b, C_local_buf):
+        def _ts_atom(desc_b):
             scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
             T.ptx_tcgen05_mma_ts(
                 a_dtype_abbrv,
@@ -1010,7 +1081,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 A_tmem_offset,
                 desc_b.data,
                 B_byte_offset,
-                C_local_buf.data,
+                c_data,
                 C_offset,
                 instr_desc,
                 scale_out,
@@ -1018,16 +1089,15 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 mask_zero,
                 mask_zero,
                 mask_zero,
-                enable_2cta,
+                meta.enable_2cta,
             )
 
-        return _ts_atom(a_tmem_data, desc_b, C_local_buf)
+        return _ts_atom(desc_b)
 
     def tcgen05_blockscaled_atom(
         self,
         desc_a,
         desc_b,
-        C_local_buf: Buffer,
         sfa_data,
         sfb_data,
         inst_m_idx: int,
@@ -1035,6 +1105,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         ki: int,
         a_params: TCGEN05DescriptorParams,
         b_params: TCGEN05DescriptorParams,
+        c_params: TCGEN05TensorMemoryParams,
         instr_desc: PrimExpr,
         clear_accum: PrimExpr = False,
     ):
@@ -1044,28 +1115,28 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         ----------
         desc_a, desc_b : Buffer
             Initialized A and B descriptors.
-        C_local_buf : Buffer
-            Accumulator buffer in tensor memory.
         sfa_data, sfb_data : Var
             Scale factor data pointers in tensor memory.
         inst_m_idx, inst_n_idx, ki : int
             Atom indices.
         a_params, b_params : TCGEN05DescriptorParams
             Pre-computed descriptor parameters.
+        c_params : TCGEN05TensorMemoryParams
+            Pre-computed accumulator TMEM parameters from
+            ``compute_tcgen05_c_tmem_params()``.
         instr_desc : PrimExpr
             Block-scaled instruction descriptor (with SF IDs already encoded).
         clear_accum : PrimExpr
             Whether to zero the accumulator on the first K atom.
         """
-        atom_m, atom_n, _, _enable_ws, enable_2cta = self.tcgen05_meta_unpacked
-        del _enable_ws  # block-scaled TCGEN05 does not support .ws
-        atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
+        meta = self.tcgen05_meta  # block-scaled TCGEN05 does not support .ws
+        atom_n = meta.atom_n
+        atom_m_per_cta = meta.atom_m_per_cta
         n_dim = self.block_col_warps * self.warp_col_tiles
-        n_dim_per_cta = n_dim // 2 if enable_2cta else n_dim
+        n_dim_per_cta = n_dim // 2 if meta.enable_2cta else n_dim
         m_dim = self.block_row_warps * self.warp_row_tiles
         micro_size_k = self.micro_size_k
         k_dim = self.chunk
-        accum_dtype_in_bits = get_tvm_dtype(self.accum_dtype).bits
         a_dtype_abbrv = self.a_dtype_abbrv
         a_elem_bits = a_params.elem_bits
         b_elem_bits = b_params.elem_bits
@@ -1096,11 +1167,11 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         A_byte_offset = _elements_to_bytes(A_elem_offset, a_elem_bits)
         B_byte_offset = _elements_to_bytes(B_elem_offset, b_elem_bits)
-        tmem_col_step = atom_n // (128 // atom_m_per_cta)
-        C_offset = (inst_m_idx * n_dim + inst_n_idx * tmem_col_step) * accum_dtype_in_bits // 32
+        C_offset = c_params.atom_offset(inst_m_idx * atom_m_per_cta, inst_n_idx * atom_n)
+        c_data = c_params.data
 
         @T.macro
-        def _bs_atom(desc_a, desc_b, C_local_buf, sfa_data, sfb_data):
+        def _bs_atom(desc_a, desc_b, sfa_data, sfb_data):
             scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
             T.ptx_tcgen05_mma_blockscaled_ss(
                 a_dtype_abbrv,
@@ -1108,7 +1179,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 A_byte_offset,
                 desc_b.data,
                 B_byte_offset,
-                C_local_buf.data,
+                c_data,
                 C_offset,
                 instr_desc,
                 scale_out,
@@ -1118,7 +1189,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 0,
                 0,
                 0,
-                enable_2cta,
+                meta.enable_2cta,
             )
 
-        return _bs_atom(desc_a, desc_b, C_local_buf, sfa_data, sfb_data)
+        return _bs_atom(desc_a, desc_b, sfa_data, sfb_data)

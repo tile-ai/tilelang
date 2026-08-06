@@ -183,10 +183,10 @@ def test_lower_trace_dark_theme():
 
 
 def test_multi_run_accumulation(monkeypatch, tmp_path):
-    """Repeated pipeline.lower() calls accumulate records under run2_/run3_ phases."""
+    """Repeated context.lower() calls accumulate records under run2_/run3_ phases."""
     from tilelang.tools.lower_trace import enable, disable
     from tilelang.tools.lower_trace import core as _core
-    from tilelang.backend.pass_pipeline import resolve_pipeline
+    from tilelang.backend import create_backend_context
     import tilelang.language as T
 
     monkeypatch.setenv("TL_LOWER_TRACE", "both")
@@ -202,17 +202,16 @@ def test_multi_run_accumulation(monkeypatch, tmp_path):
             B[tid] = A[tid] + 1.0
 
     mod = tvm.IRModule({"main": tiny})
-    target = tvm.target.Target("c")
-    pipeline = resolve_pipeline(target)
+    context = create_backend_context("c", "c", "cython")
 
     assert _core._run_counter == 0, f"Expected run_counter=0 before enable, got {_core._run_counter}"
 
-    pipeline.lower(mod, target)
+    context.lower(mod)
     run1_count = len(_core._records)
     assert _core._run_counter == 1, f"Expected run_counter=1 after first run, got {_core._run_counter}"
     assert run1_count > 0, "First run should produce records"
 
-    pipeline.lower(mod, target)
+    context.lower(mod)
     total_count = len(_core._records)
     assert _core._run_counter == 2, f"Expected run_counter=2 after second run, got {_core._run_counter}"
     assert total_count > run1_count, f"Second run should accumulate records: total={total_count}, run1={run1_count}"
@@ -278,7 +277,7 @@ def test_no_skipped_phantom_records(monkeypatch, tmp_path):
     from tilelang.tools.lower_trace import enable, disable
     from tilelang.tools.lower_trace import core as _core
     from tilelang.tools.lower_trace.core import STATUS_SKIPPED
-    from tilelang.backend.pass_pipeline import resolve_pipeline
+    from tilelang.backend import create_backend_context
     import tilelang.language as T
 
     monkeypatch.setenv("TL_LOWER_TRACE", "both")
@@ -294,9 +293,8 @@ def test_no_skipped_phantom_records(monkeypatch, tmp_path):
             B[tid] = A[tid] + 1.0
 
     mod = tvm.IRModule({"main": tiny})
-    target = tvm.target.Target("c")
-    pipeline = resolve_pipeline(target)
-    pipeline.lower(mod, target)
+    context = create_backend_context("c", "c", "cython")
+    context.lower(mod)
 
     # No phantom/skipped records remain — every record is COMPLETED or FAILED
     skipped = [r for r in _core._records if r.status == STATUS_SKIPPED]
@@ -324,7 +322,7 @@ def test_terminal_mode_no_html(monkeypatch, tmp_path):
     ``_should_gen_html()`` check the atexit hook would still emit ``report.html``.
     """
     from tilelang.tools.lower_trace import enable, disable
-    from tilelang.backend.pass_pipeline import resolve_pipeline
+    from tilelang.backend import create_backend_context
     import tilelang.language as T
 
     monkeypatch.setenv("TL_LOWER_TRACE", "terminal")
@@ -342,9 +340,8 @@ def test_terminal_mode_no_html(monkeypatch, tmp_path):
                 B[tid] = A[tid] + 1.0
 
         mod = tvm.IRModule({"main": tiny})
-        target = tvm.target.Target("c")
-        pipeline = resolve_pipeline(target)
-        pipeline.lower(mod, target)
+        context = create_backend_context("c", "c", "cython")
+        context.lower(mod)
 
         # Simulate the atexit hook that fires at process exit.
         _core._final_report()

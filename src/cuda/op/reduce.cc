@@ -21,12 +21,12 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
     return TargetIsCuda(target);
   }
 
-  static int GetPreferedVectorizedSize(DataType dt, Target target) {
+  static int GetPreferredVectorizedSize(DataType dt, Target target) {
     if (!TargetIsCuda(target)) {
       return 1;
     }
     bool supports_fp32x2 = TargetHasSMVersionGE(target, 100);
-    return backend::reduce::GetPreferedVectorizedSize(dt, supports_fp32x2);
+    return backend::reduce::GetPreferredVectorizedSize(dt, supports_fp32x2);
   }
 
   static std::string MakeBatchAllReduce(std::string reducer,
@@ -37,7 +37,7 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
-    if (TargetHasSMVersionGE(target, 90)) {
+    if (TargetSupportsNamedBarrier(target)) {
       ss << ", tl::NamedBarrier<" << all_threads << ">";
     } else {
       ss << ", tl::SyncThreadsBarrier";
@@ -53,7 +53,7 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
-    if (TargetHasSMVersionGE(target, 90)) {
+    if (TargetSupportsNamedBarrier(target)) {
       ss << ", tl::NamedBarrier<" << all_threads << ">";
     }
     ss << ">::run";

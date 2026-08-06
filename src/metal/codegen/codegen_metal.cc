@@ -37,7 +37,7 @@
 #include <utility>
 #include <vector>
 
-#include "op/builtin.h"
+#include "metal/op/builtin.h"
 #include "runtime/thread_storage_scope.h"
 #include "target/build_common.h"
 #include "target/metal/metal_fallback_module.h"
@@ -1782,6 +1782,37 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
           pos += 1;
         }
       }
+    }
+    // 5) Line-level: any line containing _shared → fix ALL pointer casts.
+    //    After passes 1-4, some casts still lack threadgroup because _shared
+    //    is nested inside the expression. This pass finds any (TYPE*) on a
+    //    _shared line and inserts the threadgroup qualifier if missing.
+    {
+      std::istringstream iss(fsource);
+      std::ostringstream oss;
+      std::string line;
+      while (std::getline(iss, line)) {
+        if (line.find("_shared") != std::string::npos) {
+          for (size_t i = 0; i + 3 < line.length(); i++) {
+            if (line[i] == '(') {
+              if (line.substr(i, 14) == "(threadgroup ") {
+                i += 13;
+                continue;
+              }
+              size_t j = i + 1;
+              while (j < line.length() && (isalnum(line[j]) || line[j] == '_'))
+                j++;
+              if (j < line.length() && line[j] == '*' &&
+                  j + 1 < line.length() && line[j + 1] == ')') {
+                line.insert(i + 1, "threadgroup ");
+                i += 12;
+              }
+            }
+          }
+        }
+        oss << line << "\n";
+      }
+      fsource = oss.str();
     }
     source_maker << fsource << "\n";
     if (fmetal_postproc) {

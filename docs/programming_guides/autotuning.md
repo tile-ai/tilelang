@@ -220,7 +220,7 @@ CPU worker control
 
 Backend notes
 - NVRTC backend persists `.cubin` and a Python launcher.
-- Torch/DLPack backend may not save artifacts to disk; in this case, only
+- Torch backend may not save artifacts to disk; in this case, only
   in‑memory caching applies and a warning is logged.
 
 ## Alternative: Manual Sweeps with par_compile
@@ -268,7 +268,7 @@ best(A, B, C)
 ```
 
 Notes
-- DLPack/Torch execution backend may not persist compiled binaries; in that
+- Torch execution backend may not persist compiled binaries; in that
   case, re‑compilation is needed on load or use a different backend.
 - The directory contains human‑readable JSONs (best config/latency) and sources.
 

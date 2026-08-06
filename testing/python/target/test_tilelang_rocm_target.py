@@ -114,17 +114,21 @@ def test_carver_rejects_unsupported_rdna_generations(monkeypatch):
     def fake_cdna(target):
         return ("cdna", target)
 
+    # gfx11 and gfx12 are the only generations `target_is_rdna` reports, so the
+    # unsupported-generation guard is unreachable without forcing the value.
     monkeypatch.setattr(arch_mod, "CDNA", fake_cdna)
-    with pytest.raises(ValueError, match="gfx11 targets only"):
+    monkeypatch.setattr(arch_mod, "target_get_rdna_generation", lambda target: 10)
+    with pytest.raises(ValueError, match="gfx11/gfx12 targets only"):
         arch_mod.get_arch(_hip_target("gfx1200"))
 
 
 @tilelang.testing.requires_rocm
-def test_rdna_device_model_rejects_gfx12_before_device_probe():
-    from tilelang.carver.arch.rdna import RDNA
+def test_rdna_device_model_rejects_unsupported_generation_before_device_probe(monkeypatch):
+    from tilelang.carver.arch import rdna as rdna_mod
 
-    with pytest.raises(ValueError, match="gfx11 targets only"):
-        RDNA(_hip_target("gfx1200"))
+    monkeypatch.setattr(rdna_mod, "target_get_rdna_generation", lambda target: 10)
+    with pytest.raises(ValueError, match="gfx11/gfx12 targets only"):
+        rdna_mod.RDNA(_hip_target("gfx1200"))
 
 
 @tilelang.testing.requires_rocm
@@ -132,11 +136,12 @@ def test_rdna_tensor_instruction_lookup_is_generation_aware():
     from tilelang.carver.arch.rdna import RDNA
 
     arch = RDNA.__new__(RDNA)
-    arch.rdna_generation = 11
-    assert arch.get_avaliable_tensorintrin_shapes() == [[16, 16]]
-    assert isinstance(arch.available_tensor_instructions, list)
+    for generation in (11, 12):
+        arch.rdna_generation = generation
+        assert arch.get_avaliable_tensorintrin_shapes() == [[16, 16]]
+        assert isinstance(arch.available_tensor_instructions, list)
 
-    arch.rdna_generation = 12
+    arch.rdna_generation = 10
     with pytest.raises(ValueError, match="Unsupported RDNA generation"):
         arch.get_avaliable_tensorintrin_shapes()
 

@@ -60,6 +60,7 @@ def test_issue_2123_atomic_load_lower_access_ptr_direct():
     _assert_access_ptr_lowered(lowered)
 
 
+@tilelang.testing.requires_cuda
 def test_issue_2123_atomic_load_lower_access_ptr_pipeline():
     target = tvm.target.Target("cuda", host="llvm")
     func = issue_2123_atomic_load_repro(4).with_attr("global_symbol", "main")

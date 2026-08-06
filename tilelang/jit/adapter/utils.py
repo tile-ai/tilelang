@@ -9,11 +9,9 @@ from tvm.target import Target
 from tilelang.engine.lower import (
     get_device_call,
     get_host_call,
-    determine_target,
-    canon_target_host,
     is_cpu_device_backend,
 )
-from tilelang.backend.pass_pipeline.pipeline import resolve_pipeline
+from tilelang.backend.module import create_backend_context
 from tilelang.engine.semantic_check import PreLowerSemanticCheck
 
 
@@ -129,18 +127,15 @@ def get_annotated_mod(
     if isinstance(func_or_mod, tirx.PrimFunc):
         mod = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
 
-    # Handle target and target_host
-    if isinstance(target, str):
-        target = determine_target(target)
-    target_host = tvm.target.Target(canon_target_host(target, target_host))
-    target = tvm.target.Target(target, target_host)
+    context = create_backend_context(target, target_host, "auto")
+    target = context.target
 
     _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))
     _is_device_call = get_device_call(is_device_c=is_cpu_device_backend(target))
 
     # Apply transformations
     PreLowerSemanticCheck(mod)
-    mod = resolve_pipeline(target).lower(mod, target)
+    mod = context.lower(mod)
 
     # Define dispatch dictionary for different model types
     dispatch = {

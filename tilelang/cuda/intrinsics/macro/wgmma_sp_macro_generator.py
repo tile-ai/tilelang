@@ -1,9 +1,13 @@
 from __future__ import annotations
-from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import gcd, compute_gmma_descriptor, WGMMADescriptorParams
+from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import (
+    WGMMADescriptorParams,
+    compute_gmma_descriptor,
+    gcd,
+)
 from tilelang.cuda.intrinsics.macro.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 import tilelang.language as T
 from tvm import DataType
-from tvm.tirx import PrimExpr, Buffer, Var, BufferRegion, IndexMap
+from tvm.tirx import PrimExpr, Buffer, Var, BufferRegion, IndexMap, handle_add_byte_offset
 from tilelang.utils import is_fragment, is_shared, is_full_region
 from tilelang.cuda.intrinsics.layout.mma_layout import (
     shared_16x8_to_mma_32x4_layout_sr_a,
@@ -172,8 +176,6 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         b_swizzle_atom_elems = b_params.swizzle_atom_elems
         a_slice_byte_offset = a_params.slice_byte_offset
         b_slice_byte_offset = b_params.slice_byte_offset
-        a_is_sliced = not isinstance(a_slice_byte_offset, int) or a_slice_byte_offset != 0
-        b_is_sliced = not isinstance(b_slice_byte_offset, int) or b_slice_byte_offset != 0
 
         accum_bits = DataType(accum_dtype).bits
         accum_regs = ((m_dim // 64) * warp_cols * local_size_out * accum_bits + 31) // 32
@@ -191,7 +193,21 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         A_buf = A_region.buffer if isinstance(A_region, BufferRegion) else A_region
         B_buf = B_region.buffer if isinstance(B_region, BufferRegion) else B_region
         A_base_ptr = A_buf.access_ptr("r")
+        if not isinstance(a_slice_byte_offset, int):
+            a_is_sliced = True
+        elif a_slice_byte_offset != 0:
+            a_is_sliced = False
+            A_base_ptr = handle_add_byte_offset(A_base_ptr, a_slice_byte_offset)
+        else:
+            a_is_sliced = False
         B_base_ptr = B_buf.access_ptr("r")
+        if not isinstance(b_slice_byte_offset, int):
+            b_is_sliced = True
+        elif b_slice_byte_offset != 0:
+            b_is_sliced = False
+            B_base_ptr = handle_add_byte_offset(B_base_ptr, b_slice_byte_offset)
+        else:
+            b_is_sliced = False
         assert is_full_region(C_region), "Fragment output C must be a full region"
         C_buf = C_region.buffer
 
@@ -322,7 +338,6 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         b_swizzle_mode = b_params.swizzle_mode
         b_swizzle_atom_elems = b_params.swizzle_atom_elems
         b_slice_byte_offset = b_params.slice_byte_offset
-        b_is_sliced = not isinstance(b_slice_byte_offset, int) or b_slice_byte_offset != 0
         bk_atom_size = b_params.k_atom_size
         wgmma_inst_m, wgmma_inst_n = self.wgmma_inst_m, self.wgmma_inst_n
         num_inst_m = 4 * self.warp_row_tiles // wgmma_inst_m
@@ -335,6 +350,16 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         A_buf = A_region.buffer
         B_buf = B_region.buffer if isinstance(B_region, BufferRegion) else B_region
         B_base_ptr = B_buf.access_ptr("r")
+        if not isinstance(b_slice_byte_offset, int):
+            # A dynamic slice. Use `increase_descriptor_offset` to represent the dynamic offset, to share a common base pointer.
+            b_is_sliced = True
+        elif b_slice_byte_offset != 0:
+            # A static slice. Add to the pointer directly to avoid an excessive `increase_descriptor_offset`.
+            b_is_sliced = False
+            B_base_ptr = handle_add_byte_offset(B_base_ptr, b_slice_byte_offset)
+        else:
+            # Non-sliced.
+            b_is_sliced = False
         C_buf = C_region.buffer
 
         k_blocks = k_dim // micro_size_k

@@ -2,7 +2,7 @@ import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang.intrinsics import (
+from tilelang.cuda.language.intrinsics import (
     TensorCoreIntrinEmitter,
     WGMMATensorCoreIntrinEmitter,
     TCGEN05TensorCoreIntrinEmitter,
@@ -14,6 +14,7 @@ from tilelang.layout import (
     make_quarter_bank_swizzled_layout,
     make_linear_layout,
 )
+from tilelang.utils.language import to_buffer_region
 
 
 def make_swizzle_layout(shared_buf):
@@ -280,6 +281,7 @@ def make_tcgen05_atom_kernel(M, N, K, in_dtype, out_dtype, accum_dtype):
 
             emi._assign_a_shared_layout(a_layout(A_shared))
             emi._assign_b_shared_layout(b_layout(B_shared))
+            emi._assign_c_tmem_layout(emi.make_mma_store_layout(C_tmem))
             T.annotate_layout(
                 {
                     A_shared: a_layout(A_shared),
@@ -295,6 +297,7 @@ def make_tcgen05_atom_kernel(M, N, K, in_dtype, out_dtype, accum_dtype):
 
             a_params = emi.compute_tcgen05_a_desc_params(A_shared)
             b_params = emi.compute_tcgen05_b_desc_params(B_shared)
+            c_params = emi.compute_tcgen05_c_tmem_params(to_buffer_region(C_tmem))
 
             if T.get_thread_binding() // 32 == 0:
                 desc_a = T.alloc_tcgen05_smem_desc()
@@ -305,7 +308,7 @@ def make_tcgen05_atom_kernel(M, N, K, in_dtype, out_dtype, accum_dtype):
                 for n in T.unroll(num_inst_n):
                     for m in T.unroll(num_inst_m):
                         for ki in T.unroll(0, num_k_atoms):
-                            emi.tcgen05_ss_atom(desc_a, desc_b, C_tmem, m, n, ki, a_params, b_params, instr_desc, T.bool(True))
+                            emi.tcgen05_ss_atom(desc_a, desc_b, m, n, ki, a_params, b_params, c_params, instr_desc, T.bool(True))
                 emi.tcgen05_atom_arrive(mbar)
             T.mbarrier_wait_parity(mbar, 0)
 
@@ -317,7 +320,8 @@ def make_tcgen05_atom_kernel(M, N, K, in_dtype, out_dtype, accum_dtype):
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_eq(10, 0)
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_tcgen05_atom_gemm():
     M, N, K = 128, 128, 128
     in_dtype = T.bfloat16

@@ -1,3 +1,5 @@
+import pytest
+
 import numpy as np
 
 import tilelang as tl
@@ -33,16 +35,20 @@ def test_lower_opaque_block_preserves_non_unit_loop_step():
     )
 
 
-def test_unroll_loop_preserves_non_unit_loop_step():
+@pytest.mark.parametrize("rng", [(0, 6, 2), (0, 5, 2)], ids=lambda v: f"rng=({v[0]},{v[1]},{v[2]})")
+@pytest.mark.parametrize("explicit", [False, True], ids=lambda v: f"explicit={v}")
+def test_unroll_loop_preserves_non_unit_loop_step(rng, explicit):
     output_buffer = tvm.tirx.decl_buffer((8,), "int32", name="output")
     i = tvm.tirx.Var("i", "int32")
+    start, stop, step = rng
     loop = tvm.tirx.For(
         i,
-        0,
-        4,
+        start,
+        stop,
         tvm.tirx.ForKind.UNROLLED,
         tvm.tirx.BufferStore(output_buffer, i, [i]),
-        step=tvm.tirx.IntImm("int32", 2),
+        step=tvm.tirx.IntImm("int32", step),
+        annotations={"pragma_unroll_explicit": explicit},
     )
     before = tvm.tirx.PrimFunc(
         [output_buffer.data],
@@ -58,5 +64,5 @@ def test_unroll_loop_preserves_non_unit_loop_step():
 
     np.testing.assert_array_equal(
         output.numpy(),
-        np.array([0, 0, 2, 0, 4, 0, 6, 0], dtype="int32"),
+        np.array([0, 0, 2, 0, 4, 0, 0, 0], dtype="int32"),
     )
