@@ -288,15 +288,38 @@ def normalize_flat_binds(stmt: Stmt) -> Stmt:
     return normalized if normalized is not None else stmt
 
 
-def extract_if_condition(stmt: Stmt) -> tuple[tirx.PrimExpr | None, Stmt]:
-    """Extract IfThenElse condition from statement if present.
+def _contains_if_then_else(stmt: Stmt) -> bool:
+    """Return whether ``stmt`` contains statement-level control flow."""
+    found = False
 
-    Returns:
-        A tuple of (condition, inner_body). If no IfThenElse, returns (None, stmt).
+    def visitor(node) -> None:
+        nonlocal found
+        if isinstance(node, IfThenElse):
+            found = True
+
+    post_order_visit(stmt, visitor)
+    return found
+
+
+def extract_if_condition(stmt: Stmt) -> tuple[tirx.PrimExpr | None, Stmt] | None:
+    """Extract a complete guard when control flow has one predicate.
+
+    Root-level nested ``if`` statements without ``else`` can be represented by
+    conjoining their predicates. Any other statement-level control flow cannot
+    be faithfully applied to the generated copy loops, so callers must skip the
+    optimization.
     """
-    if isinstance(stmt, IfThenElse) and stmt.else_case is None:
-        return stmt.condition, stmt.then_case
-    return None, stmt
+    condition: tirx.PrimExpr | None = None
+    inner_body = stmt
+    while isinstance(inner_body, IfThenElse):
+        if inner_body.else_case is not None:
+            return None
+        condition = inner_body.condition if condition is None else tirx.And(condition, inner_body.condition)
+        inner_body = inner_body.then_case
+
+    if _contains_if_then_else(inner_body):
+        return None
+    return condition, inner_body
 
 
 # Cast entry: (original buffer, original indices, cast buffer)
@@ -397,6 +420,13 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         if _contains_seq_stmt(normalized_body):
             return self._make_for(op, new_body) if new_body is not op.body else op
 
+        # Generated copy loops can preserve only a single common predicate.
+        # Skip control flow that cannot be represented without weakening it.
+        condition_info = extract_if_condition(normalized_body)
+        if condition_info is None:
+            return self._make_for(op, new_body) if new_body is not op.body else op
+        condition, _ = condition_info
+
         # Collect all shared/global stores and loads
         collector = MemoryAccessCollector(op.loop_var)
         collector.visit_stmt(normalized_body)
@@ -406,9 +436,6 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
             return self._make_for(op, new_body) if new_body is not op.body else op
 
         extent = op.extent.value
-
-        # Extract condition (from normalized body for correctness)
-        condition, _ = extract_if_condition(normalized_body)
 
         # Create cast entries for stores and loads
         store_entries = self._create_cast_entries(collector.stores, extent)
