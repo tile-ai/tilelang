@@ -383,9 +383,7 @@ if __name__ == "__main__":
     c = gemm_clc_persistent_2cta(a, b, *base_args, args.group_size, args.use_tma_store)
     torch.testing.assert_close(c, ref, rtol=1e-2, atol=1e-2)
     ms_base = do_bench(
-        lambda: gemm_clc_persistent_2cta(
-            a, b, *base_args, args.group_size, args.use_tma_store
-        ),
+        lambda: gemm_clc_persistent_2cta(a, b, *base_args, args.group_size, args.use_tma_store),
         backend="event",
     )
 

@@ -4,9 +4,9 @@
 #include "cutlass/arch/reg_reconfig.h"
 #include "cutlass/cutlass.h"
 
-#if defined(CUDA_CTA_RECONFIG_ACTIVATED) ||                                   \
-    (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900) &&                      \
-     (defined(__CUDA_ARCH_SPECIFIC__) ||                                      \
+#if defined(CUDA_CTA_RECONFIG_ACTIVATED) ||                                    \
+    (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900) &&                       \
+     (defined(__CUDA_ARCH_SPECIFIC__) ||                                       \
       defined(__CUDA_ARCH_FAMILY_SPECIFIC__)))
 #define TL_CUDA_ARCH_CTA_RECONFIG_ENABLED
 #endif

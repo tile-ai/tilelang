@@ -354,16 +354,8 @@ def gemm_streamk_2cta(
             split_id = cluster_id % clusters_per_tile
             split_full_iters = k_blocks // clusters_per_tile
             split_partial_iters = k_blocks % clusters_per_tile
-            start_iter = (
-                streamk_tile * k_blocks
-                + split_id * split_full_iters
-                + T.min(split_id, split_partial_iters)
-            )
-            last_iter = (
-                streamk_tile * k_blocks
-                + (split_id + 1) * split_full_iters
-                + T.min(split_id + 1, split_partial_iters)
-            )
+            start_iter = streamk_tile * k_blocks + split_id * split_full_iters + T.min(split_id, split_partial_iters)
+            last_iter = streamk_tile * k_blocks + (split_id + 1) * split_full_iters + T.min(split_id + 1, split_partial_iters)
         else:
             start_iter = cluster_id * streamk_full_iters + T.min(cluster_id, streamk_partial_iters)
             last_iter = (cluster_id + 1) * streamk_full_iters + T.min(cluster_id + 1, streamk_partial_iters)
@@ -455,7 +447,7 @@ def gemm_streamk_2cta(
                 current_iter = begin_iter
                 work_iter += 1
 
-            for wave in T.serial(blocking_waves):
+            for _wave in T.serial(blocking_waves):
                 T.mbarrier_wait_parity(
                     tmem_empty[work_iter & 1],
                     ((work_iter // 2) & 1) ^ 1,
