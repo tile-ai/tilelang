@@ -142,7 +142,7 @@ def gemm_2cta(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Non-persistent warp-specialized SM100 GEMM")
+    parser = argparse.ArgumentParser(description="Non-persistent warp-specialized TCGEN05 GEMM")
     parser.add_argument("--m", type=int, default=8192)
     parser.add_argument("--n", type=int, default=8192)
     parser.add_argument("--k", type=int, default=8192)

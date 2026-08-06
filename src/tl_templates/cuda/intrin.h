@@ -4,6 +4,13 @@
 #include "cutlass/arch/reg_reconfig.h"
 #include "cutlass/cutlass.h"
 
+#if defined(CUDA_CTA_RECONFIG_ACTIVATED) ||                                   \
+    (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900) &&                      \
+     (defined(__CUDA_ARCH_SPECIFIC__) ||                                      \
+      defined(__CUDA_ARCH_FAMILY_SPECIFIC__)))
+#define TL_CUDA_ARCH_CTA_RECONFIG_ENABLED
+#endif
+
 #if __CUDA_ARCH_LIST__ >= 900
 #include "cute/arch/cluster_sm90.hpp"
 #include "cute/arch/mma_sm90_gmma.hpp"
@@ -160,7 +167,7 @@ TL_DEVICE bool tl_shuffle_elect() {
 
 template <uint32_t RegCount, bool kDependentFalse = false>
 TL_DEVICE void warpgroup_reg_alloc() {
-#if CUDA_CTA_RECONFIG_ACTIVATED
+#if defined(TL_CUDA_ARCH_CTA_RECONFIG_ENABLED)
   asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" : : "n"(RegCount));
 #else
   static_assert(kDependentFalse,
@@ -171,7 +178,7 @@ TL_DEVICE void warpgroup_reg_alloc() {
 
 template <uint32_t RegCount, bool kDependentFalse = false>
 TL_DEVICE void warpgroup_reg_dealloc() {
-#if CUDA_CTA_RECONFIG_ACTIVATED
+#if defined(TL_CUDA_ARCH_CTA_RECONFIG_ENABLED)
   asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" : : "n"(RegCount));
 #else
   static_assert(kDependentFalse,

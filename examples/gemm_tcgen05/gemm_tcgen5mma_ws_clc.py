@@ -350,7 +350,10 @@ def ref_program(A, B):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="CLC-scheduled persistent warp-specialized SM100 GEMM")
+    parser = argparse.ArgumentParser(description="CLC-scheduled persistent warp-specialized TCGEN05 GEMM")
+    parser.add_argument("--m", type=int, default=8192)
+    parser.add_argument("--n", type=int, default=8192)
+    parser.add_argument("--k", type=int, default=8192)
     parser.add_argument("--block_M", type=int, default=128)
     parser.add_argument("--block_N", type=int, default=256)
     parser.add_argument("--store_block_N", type=int, default=64, help="block_N for C_shared")
@@ -360,8 +363,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_tma_store", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
 
-    group_size = args.group_size
-    use_tma_store = args.use_tma_store
+    M, N, K = args.m, args.n, args.k
     base_args = (
         args.block_M,
         args.block_N,
@@ -373,24 +375,42 @@ if __name__ == "__main__":
         args.num_stages,
     )
 
-    for M, N, K in ((4096, 4096, 4096), (8192, 8192, 8192), (16384, 16384, 16384)):
-        a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
-        b = torch.randn(K, N, device="cuda", dtype=torch.bfloat16)
-        ref = ref_program(a, b)
-        flops = 2 * M * N * K
+    a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(K, N, device="cuda", dtype=torch.bfloat16)
+    ref = ref_program(a, b)
+    flops = 2 * M * N * K
 
-        c = gemm_clc_persistent_2cta(a, b, *base_args, group_size, use_tma_store)
-        torch.testing.assert_close(c, ref, rtol=1e-2, atol=1e-2)
-        ms_base = do_bench(lambda a=a, b=b: gemm_clc_persistent_2cta(a, b, *base_args, group_size, use_tma_store), backend="event")
+    c = gemm_clc_persistent_2cta(a, b, *base_args, args.group_size, args.use_tma_store)
+    torch.testing.assert_close(c, ref, rtol=1e-2, atol=1e-2)
+    ms_base = do_bench(
+        lambda: gemm_clc_persistent_2cta(
+            a, b, *base_args, args.group_size, args.use_tma_store
+        ),
+        backend="event",
+    )
 
-        ms_torch = do_bench(lambda a=a, b=b: a @ b, backend="event")
-        print(f"M=N=K={M:<6}  base: {flops / (ms_base / 1e3) / 1e12:6.1f} TFLOPS  torch: {flops / (ms_torch / 1e3) / 1e12:6.1f} TFLOPS")
+    ms_torch = do_bench(lambda: a @ b, backend="event")
+    print(f"M={M}, N={N}, K={K}  base: {flops / (ms_base / 1e3) / 1e12:6.1f} TFLOPS  torch: {flops / (ms_torch / 1e3) / 1e12:6.1f} TFLOPS")
 
-        for clc in (2, 3, 4):
-            c2 = gemm_clc_persistent_2cta_pipelined_clc(a, b, *base_args, clc, group_size, use_tma_store)
-            torch.testing.assert_close(c2, ref, rtol=1e-2, atol=1e-2)
-            ms_pipe = do_bench(
-                lambda a=a, b=b, clc=clc: gemm_clc_persistent_2cta_pipelined_clc(a, b, *base_args, clc, group_size, use_tma_store),
-                backend="event",
-            )
-            print(f"             pipe(clc={clc}): {flops / (ms_pipe / 1e3) / 1e12:6.1f} TFLOPS  ({ms_base / ms_pipe:.3f}x vs base)")
+    for clc_stages in (2, 3, 4):
+        c2 = gemm_clc_persistent_2cta_pipelined_clc(
+            a,
+            b,
+            *base_args,
+            clc_stages,
+            args.group_size,
+            args.use_tma_store,
+        )
+        torch.testing.assert_close(c2, ref, rtol=1e-2, atol=1e-2)
+        ms_pipe = do_bench(
+            lambda clc_stages=clc_stages: gemm_clc_persistent_2cta_pipelined_clc(
+                a,
+                b,
+                *base_args,
+                clc_stages,
+                args.group_size,
+                args.use_tma_store,
+            ),
+            backend="event",
+        )
+        print(f"             pipe(clc={clc_stages}): {flops / (ms_pipe / 1e3) / 1e12:6.1f} TFLOPS  ({ms_base / ms_pipe:.3f}x vs base)")
