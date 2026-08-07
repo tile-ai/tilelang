@@ -61,6 +61,63 @@ template <int N = 0> TL_DEVICE void cp_async_wait() {
   // async_gld_sld_fence(N);
 }
 
+// Software-pipeline prologues can produce a uniform runtime wait count (for
+// example, 1 - ko). s_waitcnt requires an immediate, so dispatch the common
+// range to template instantiations. Counts outside the pipeline range fall
+// back to wait-all, which is conservative and correct.
+TL_DEVICE void cp_async_wait_dynamic(int n) {
+  switch (n) {
+  case 1:
+    cp_async_wait<1>();
+    break;
+  case 2:
+    cp_async_wait<2>();
+    break;
+  case 3:
+    cp_async_wait<3>();
+    break;
+  case 4:
+    cp_async_wait<4>();
+    break;
+  case 5:
+    cp_async_wait<5>();
+    break;
+  case 6:
+    cp_async_wait<6>();
+    break;
+  case 7:
+    cp_async_wait<7>();
+    break;
+  case 8:
+    cp_async_wait<8>();
+    break;
+  case 9:
+    cp_async_wait<9>();
+    break;
+  case 10:
+    cp_async_wait<10>();
+    break;
+  case 11:
+    cp_async_wait<11>();
+    break;
+  case 12:
+    cp_async_wait<12>();
+    break;
+  case 13:
+    cp_async_wait<13>();
+    break;
+  case 14:
+    cp_async_wait<14>();
+    break;
+  case 15:
+    cp_async_wait<15>();
+    break;
+  default:
+    cp_async_wait<0>();
+    break;
+  }
+}
+
 template <bool pre_nop = false>
 CK_TILE_DEVICE void async_buffer_load_dword_v(void *smem, int32x4_t rsrc,
                                               index_t voffset) {
