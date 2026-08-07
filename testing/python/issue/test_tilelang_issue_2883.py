@@ -7,10 +7,8 @@ when it exceeds the exact-enumeration limit and requires a stronger proof.
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
 
 
-@tilelang.testing.requires_cuda
 def test_large_parallel_layout_is_injective():
     stride = T.dynamic("stride")
 
@@ -26,11 +24,8 @@ def test_large_parallel_layout_is_injective():
                 if token < 1:
                     dst[token, feature] = src[token, feature]
 
-    target = tvm.target.Target("cuda")
-    with target:
-        artifact = tilelang.lower(main, target=target, enable_device_compile=False)
-
-    assert artifact.kernel_source
+    kernel = tilelang.compile(main)
+    assert kernel.get_kernel_source()
 
 
 if __name__ == "__main__":
