@@ -7,19 +7,6 @@ from tilelang.carver.arch import driver
 from tilelang.profiler import do_bench
 
 
-@T.macro
-def get_num_waves(block_id, num_blocks, sm_num):
-    return T.ceildiv(num_blocks - block_id, sm_num)
-
-
-@T.macro
-def get_tile_id(block_id, wave_id, sm_num, group_size, m_blocks):
-    tile_id = block_id + wave_id * sm_num
-    bx = (tile_id // group_size) % m_blocks
-    by = (tile_id % group_size) + (tile_id // group_size) // m_blocks * group_size
-    return bx, by
-
-
 @tilelang.jit
 def gemm(
     A,
@@ -42,7 +29,6 @@ def gemm(
     m_blocks = T.ceildiv(M, block_M)
     n_blocks = T.ceildiv(N, block_N)
     k_blocks = T.ceildiv(K, block_K)
-    num_blocks = m_blocks * n_blocks
     sm_num = driver.get_num_sms()
     group_size = 8
     assert n_blocks % (2 * group_size) == 0
@@ -56,23 +42,20 @@ def gemm(
         C_local = T.alloc_fragment((block_M, store_block_N), accum_dtype)
         C_shared = T.alloc_shared((block_M, store_block_N), dtype)
 
+        sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size, name="sched")
+
         # The complete, unambiguous schedule to transform `gemm` to `gemm_ws`.
         #
-        # The schedulable task is the tile op. Every scheduled op / loop in
-        # the kernel body carries a stable id (a T.WSID entry in its
-        # annotations), and the schedule refers to those ids. Scalar lets
-        # are not schedulable tasks: they are re-evaluated privately by each
-        # role. Data dependencies are not part of the schedule either; the
-        # pass queries the reads/writes of each tile op itself.
+        # Ops and loops carry stable ids (a T.WSID entry in their
+        # annotations); the schedule refers to those ids. Data
+        # dependencies are not declared — the pass queries each tile
+        # op's reads/writes itself.
         #
         # Each pipeline is a full/empty barrier pair protecting `depth`
-        # versions of its buffers: the producer waits for empty and signals
-        # full, the consumer waits for full and signals empty. Sync
-        # instructions carry a software-pipeline stage; within one role's
-        # scope body, acquire/commit (and wait/release) of a pipeline pair
-        # up at one stage, and instructions between them run at that stage's
-        # iteration offset (stages that agree across the body cancel out, as
-        # they do everywhere here).
+        # versions of its buffers. Sync instructions carry a
+        # software-pipeline stage; instructions between an
+        # acquire/commit (or wait/release) pair run at that stage's
+        # iteration offset.
         T.annotate_ws_schedule(
             T.WSSchedule(
                 # This overrides the number of threads.
@@ -94,141 +77,130 @@ def gemm(
                     # This pipeline synchronizes between the MMA warp and the Epilogue warps, protecting the multi-versioned C_tmem buffer.
                     T.WSPipeline("tmem", [C_tmem], depth=num_persistent_stages),
                 ],
-                # Every T.Pipelined loop is a scope, named by its ws op id;
-                # they are exactly the loops this schedule specializes. The
-                # root scope is implicit in the kernel, named T.WSScope.ROOT.
-                # A loop is also a large operation that can be scheduled in
-                # its parent scope; other loop kinds (T.serial, T.unroll,
-                # T.Parallel) are always single ops. Plain strings are
-                # shorthand for T.WSOpRef.
-                #
-                # Each scope body gives one sequence of ops per role. The
-                # prologue and epilogue of the software pipeline are
-                # generated automatically (as boundary guards, when a role's
-                # sync stages do not cancel out).
+                # A scope is a scheduled loop: a serial loop named by its
+                # ws op id, or a T.ws_op-wrapped while loop (the persistent
+                # loop below); the root scope is implicit. Each scope body
+                # gives one sequence of ops per role. When a role's sync
+                # stages do not cancel out, the software pipeline's
+                # prologue and epilogue are unrolled automatically.
                 scopes=[
                     T.WSScope(
                         "loop_k",
                         {
                             "TMA": [
-                                # Wait for the smem_empty barrier.
-                                # Before this, A_shared and B_shared are not usable, because there are multiple versions of them, and the buffers are protected by the pipeline.
-                                # After this, the buffers are visible, and the acquired version is bound to each buffer.
+                                # Wait for smem_empty; inside the span every
+                                # op refers to the acquired version of
+                                # A_shared / B_shared.
                                 T.WSSync.producer_acquire("smem", stage=0),
-                                # Now A_shared will refer to the acquired version of A_shared, for every op.
-                                # Here, copy_A_g2s will write to that version of A_shared.
-                                # During schedule materialization, TileLang will first find that the operand A_shared being written to is bound to pipeline smem, so it will bind an smem_full barrier to the op. It will be eventually lowered to a cp.async.bulk.tensor.mbarrier::complete_tx::bytes, decrementing the transaction count of the barrier.
+                                # The copies write buffers of pipeline smem,
+                                # so their TMA transactions complete the
+                                # smem_full barrier.
                                 "copy_A_g2s",
-                                # Similarly, copy_B_g2s will write to the acquired version of B_shared.
                                 "copy_B_g2s",
-                                # Signal the smem_full barrier.
-                                # After this, the buffers are not usable, and again protected by the pipeline.
                                 T.WSSync.producer_commit("smem", stage=0),
                             ],
                             "MMA": [
-                                # Wait for the smem_full barrier at stage num_stages - 1.
-                                # After this, the corresponding version of A_shared and B_shared is bound to the variables.
+                                # This role runs num_stages - 1 iterations
+                                # behind TMA. Its two stages agree, so the
+                                # offsets cancel and its own loop is emitted
+                                # unshifted.
                                 T.WSSync.consumer_wait("smem", stage=num_stages - 1),
-                                # During schedule materialization, TileLang will first find that the operands A_shared and B_shared being read from are bound to pipeline smem, so it will bind an smem_empty barrier to the op. It will be eventually lowered to a tcgen05.commit.mbarrier::arrive::one, incrementing the arrival count of the barrier.
+                                # gemm_C reads buffers of pipeline smem, so
+                                # its tcgen05.commit arrives on smem_empty.
                                 "gemm_C",
-                                # Signal the smem_empty barrier.
-                                # After this, the buffers are not usable, and again protected by the pipeline.
                                 T.WSSync.consumer_release("smem", stage=num_stages - 1),
-                                # After materialization, the loop would look like:
-                                #   for k in range(k_blocks):
-                                #       if k >= num_stages - 1:
-                                #           ...body(k - num_stages + 1)
-                                #   body(k_blocks - num_stages + 1)
-                                #   ...
-                                #   body(k_blocks - 1)
-                                # But that is exactly equivalent to
-                                #   for k in range(k_blocks):
-                                #       body(k)
-                                # So that is the loop we see: this role's
-                                # stages agree, so the offsets cancel.
                             ],
                             "Epilogue": [],
                         },
                     ),
-                    # This is the persistent loop.
+                    # The persistent loop: a while scope. It has no
+                    # iteration expression, so pipelines synced under it
+                    # use runtime phase counters. tile_idx / sched_next
+                    # touch no pipeline buffers, so several roles place
+                    # them — each runs its own copy.
                     T.WSScope(
-                        "loop_wave_id",
+                        "loop_wave",
                         {
                             "TMA": [
+                                "tile_idx",
                                 "loop_k",
+                                "sched_next",
                             ],
                             "MMA": [
                                 T.WSSync.producer_acquire("tmem", stage=0),
-                                # Here, C_tmem will refer to the acquired version of C_tmem.
                                 "loop_k",
                                 T.WSSync.producer_commit("tmem", stage=0),
+                                "sched_next",
                             ],
                             "Epilogue": [
-                                "loop_k",
-                                T.WSSync.consumer_wait("tmem", stage=num_persistent_stages - 1),
-                                # This unrolled loop is seen as a single node for scheduling. It reads C_tmem, which is protected by pipeline tmem, so C_tmem inside refers to the acquired version.
-                                # Since C_local and C_shared are not multi-versioned, they will refer to the original buffers.
+                                "tile_idx",
+                                T.WSSync.consumer_wait("tmem", stage=0),
+                                # The unrolled loop is one op; it reads the
+                                # acquired version of C_tmem.
                                 "loop_i",
-                                T.WSSync.consumer_release("tmem", stage=num_persistent_stages - 1),
+                                T.WSSync.consumer_release("tmem", stage=0),
+                                "sched_next",
                             ],
                         },
                     ),
-                    # The root scope is implicit. Nonetheless, the ops inside
-                    # can still be scheduled.
+                    # The implicit root scope: ops outside any loop.
                     T.WSScope(
                         T.WSScope.ROOT,
                         {
-                            "TMA": ["loop_wave_id"],
-                            "MMA": ["loop_wave_id"],
-                            "Epilogue": ["loop_wave_id"],
+                            "TMA": ["sched_init", "loop_wave"],
+                            "MMA": ["sched_init", "loop_wave"],
+                            "Epilogue": ["sched_init", "loop_wave"],
                         },
                     ),
                 ],
             )
         )
 
-        num_waves = get_num_waves(block_id, num_blocks, sm_num)
+        with T.ws_op("sched_init"):
+            sched.init(block_id)
 
-        for wave_id in T.Pipelined(
-            num_waves,
-            num_stages=num_persistent_stages,
-            annotations={T.WSID: "loop_wave_id"},
-        ):
-            bx, by = get_tile_id(block_id, wave_id, sm_num, group_size, m_blocks)
+        with T.ws_op("loop_wave"):
+            while sched.valid():
+                with T.ws_op("tile_idx"):
+                    bx = sched.m_idx
+                    by = sched.n_idx
 
-            for k in T.Pipelined(
-                k_blocks,
-                num_stages=num_stages,
-                annotations={T.WSID: "loop_k"},
-            ):
-                T.copy(
-                    A[bx * block_M, k * block_K],
-                    A_shared,
-                    annotations={T.WSID: "copy_A_g2s"},
-                )
-                T.copy(
-                    B[by * block_N, k * block_K],
-                    B_shared,
-                    annotations={T.WSID: "copy_B_g2s"},
-                )
-                T.gemm(
-                    A_shared,
-                    B_shared,
-                    C_tmem,
-                    transpose_B=True,
-                    clear_accum=k == 0,
-                    # mbar=mbar,
-                    annotations={T.WSID: "gemm_C"},
-                )
-                # T.mbarrier_wait_parity(mbar, k % 2)
+                for k in T.Pipelined(
+                    k_blocks,
+                    num_stages=num_stages,
+                    annotations={T.WSID: "loop_k"},
+                ):
+                    T.copy(
+                        A[bx * block_M, k * block_K],
+                        A_shared,
+                        annotations={T.WSID: "copy_A_g2s"},
+                    )
+                    T.copy(
+                        B[by * block_N, k * block_K],
+                        B_shared,
+                        annotations={T.WSID: "copy_B_g2s"},
+                    )
+                    T.gemm(
+                        A_shared,
+                        B_shared,
+                        C_tmem,
+                        transpose_B=True,
+                        clear_accum=k == 0,
+                        # mbar=mbar,
+                        annotations={T.WSID: "gemm_C"},
+                    )
+                    # T.mbarrier_wait_parity(mbar, k % 2)
 
-            for i in T.unroll(
-                T.ceildiv(block_N, store_block_N),
-                annotations={T.WSID: "loop_i"},
-            ):
-                T.copy(C_tmem[:, i * store_block_N : (i + 1) * store_block_N], C_local)
-                T.copy(C_local, C_shared)
-                T.copy(C_shared, C[bx * block_M, by * block_N + i * store_block_N])
+                for i in T.unroll(
+                    T.ceildiv(block_N, store_block_N),
+                    annotations={T.WSID: "loop_i"},
+                ):
+                    T.copy(C_tmem[:, i * store_block_N : (i + 1) * store_block_N], C_local)
+                    T.copy(C_local, C_shared)
+                    T.copy(C_shared, C[bx * block_M, by * block_N + i * store_block_N])
+
+                with T.ws_op("sched_next"):
+                    sched.next_tile()
 
     return C
 
@@ -255,7 +227,6 @@ def gemm_ws(
     m_blocks = T.ceildiv(M, block_M)
     n_blocks = T.ceildiv(N, block_N)
     k_blocks = T.ceildiv(K, block_K)
-    num_blocks = m_blocks * n_blocks
     sm_num = driver.get_num_sms()
     group_size = 8
     assert n_blocks % (2 * group_size) == 0
@@ -272,16 +243,22 @@ def gemm_ws(
         tmem_full = T.alloc_barrier([1] * num_persistent_stages)
         tmem_empty = T.alloc_barrier([128] * num_persistent_stages)
 
+        # Scheduler state is per thread: init once, then every role runs
+        # its own `while sched.valid()` loop at its own pace, reading
+        # sched.current_iter as the wave clock.
+        sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size, name="sched")
+        sched.init(block_id)
+
         tx = T.get_thread_binding()
 
         if tx < 32:  # warp 0: TMA
             T.set_max_nreg(40, 0)
-            num_waves = get_num_waves(block_id, num_blocks, sm_num)
-            for wave_id in T.serial(num_waves):
-                bx, by = get_tile_id(block_id, wave_id, sm_num, group_size, m_blocks)
+            while sched.valid():
+                bx = sched.m_idx
+                by = sched.n_idx
 
                 for k in T.serial(k_blocks):
-                    phase = wave_id * k_blocks + k
+                    phase = sched.current_iter * k_blocks + k
 
                     T.mbarrier_wait_parity(smem_empty[phase % num_stages], ((phase // num_stages) & 1) ^ 1)
                     T.tma_copy(
@@ -301,12 +278,11 @@ def gemm_ws(
                         barrier=smem_full[phase % num_stages],
                     )
                     T.mbarrier_arrive(smem_full[phase % num_stages])
+                sched.next_tile()
         elif tx < 64:  # warp 1: MMA
             T.set_max_nreg(40, 0)
-            num_waves = get_num_waves(block_id, num_blocks, sm_num)
-            for wave_id in T.serial(num_waves):
-                bx, by = get_tile_id(block_id, wave_id, sm_num, group_size, m_blocks)
-
+            while sched.valid():
+                wave_id = sched.current_iter
                 T.mbarrier_wait_parity(
                     tmem_empty[wave_id % num_persistent_stages],
                     ((wave_id // num_persistent_stages) & 1) ^ 1,
@@ -328,13 +304,15 @@ def gemm_ws(
                     T.tcgen05_mma_arrive(smem_empty[phase % num_stages])
 
                 T.tcgen05_mma_arrive(tmem_full[wave_id % num_persistent_stages])
+                sched.next_tile()
         elif tx < 128:  # warps 2-3: idle register donors
             T.set_max_nreg(40, 0)
         elif 128 <= tx < 256:  # warps 4-7: epilogue
             T.set_max_nreg(224, 1)
-            num_waves = get_num_waves(block_id, num_blocks, sm_num)
-            for wave_id in T.serial(num_waves):
-                bx, by = get_tile_id(block_id, wave_id, sm_num, group_size, m_blocks)
+            while sched.valid():
+                bx = sched.m_idx
+                by = sched.n_idx
+                wave_id = sched.current_iter
 
                 T.mbarrier_wait_parity(
                     tmem_full[wave_id % num_persistent_stages],
@@ -354,6 +332,7 @@ def gemm_ws(
                     T.copy(C_shared, C[bx * block_M, by * block_N + i * store_block_N])
 
                 T.mbarrier_arrive(tmem_empty[wave_id % num_persistent_stages])
+                sched.next_tile()
 
     return C
 

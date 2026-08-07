@@ -141,20 +141,29 @@ def annotate_ws_schedule(schedule):
 
 
 def ws_op(op_id: str):
-    """Manually annotate the single enclosed statement with a stable
-    warp-specialization op id.
+    """Manually annotate the enclosed statement(s) with a stable
+    warp-specialization op or scope id.
 
-    Wraps the statement in an ``AttrStmt`` with key :data:`WSID`. This is
-    the annotation of last resort, for statements whose form cannot carry
-    ``annotations=`` — a scalar Bind in particular:
+    Wraps the body in an ``AttrStmt`` with key :data:`WSID`. This is the
+    annotation of last resort, for statement forms that cannot carry
+    ``annotations=`` themselves. The enclosed statements — a scalar Bind,
+    or several statements such as an inlined scheduler method — become
+    ONE opaque op:
 
     >>> with T.ws_op("rescale_vote"):
     ...     should_rescale = T.any_sync(scale_shared[tid] < 1.0)
+    >>> with T.ws_op("sched_next"):
+    ...     sched.next_tile()
+
+    With a scope id the wrapper encloses a ``while`` loop and opens that
+    scope (serial scope loops carry the id in their own annotations):
+
+    >>> with T.ws_op("loop_wave"):
+    ...     while sched.valid():
+    ...         ...
 
     Tile ops and loops pass ``annotations={T.WSID: ...}`` directly
-    instead. The wrapper must enclose exactly one statement; the
-    ``MaterializeWSSchedule`` pass rejects multi-statement bodies (every
-    scheduled statement needs its own id).
+    instead.
     """
     assert isinstance(op_id, str) and op_id, "ws_op id must be a non-empty string"
     return attr(None, WSID, op_id)

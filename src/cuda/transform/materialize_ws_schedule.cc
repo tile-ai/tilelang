@@ -2,79 +2,61 @@
  * \file materialize_ws_schedule.cc
  * \brief Materialize a user-provided warp-specialization schedule.
  *
- * A warp-specialized kernel partitions its warps into roles that run
- * different code and hand data to each other through multi-buffered
- * staging buffers. The schedule — a T.WSSchedule annotation on the
- * kernel's block (see T.annotate_ws_schedule) — declares:
+ * The schedule — a T.WSSchedule annotation on the kernel's block (see
+ * T.annotate_ws_schedule) — declares:
  *  - roles: named warp ranges, each with an optional register budget;
  *  - pipelines: one producer/consumer handshake each — a "full" and an
- *    "empty" mbarrier array protecting a set of buffers, which this pass
- *    replicates into `depth` versions;
- *  - scopes: the scheduled serial loops plus an implicit root. A scope
- *    gives each participating role a body: the sequence of ops, child
- *    scopes, and sync points that role executes per iteration.
+ *    "empty" mbarrier array protecting a set of buffers, which this
+ *    pass replicates into `depth` versions;
+ *  - scopes: the scheduled loops plus an implicit root. A scope gives
+ *    each participating role a body: the ops, child scopes, and sync
+ *    points that role executes per iteration.
  *
- * The pass rewrites the kernel into explicit form — `if (tx < ...)` role
- * branches, versioned buffers, mbarrier waits/arrives with correct
- * parity, TMA copies completing through barriers, asynchronous tcgen05
- * MMAs — before PipelinePlanning / LayoutInference / LowerTileOp, so
- * downstream passes see the same tile-op IR a hand-written
- * warp-specialized kernel would produce.
+ * The pass rewrites the kernel into explicit form — role branches,
+ * versioned buffers, mbarrier waits/arrives, TMA copies completing
+ * through barriers, asynchronous tcgen05 MMAs — before
+ * PipelinePlanning / LayoutInference / LowerTileOp, so downstream
+ * passes see the same tile-op IR a hand-written kernel would produce.
  *
- * Ids. The schedulable task is a single statement, named by a stable id:
- * a "tl.ws_op_id" entry in a tile op's call annotations or a loop's
- * annotations, or a `with T.ws_op(id):` wrapper for a scalar Bind (the
- * one statement form without annotations). Scope loops are serial
- * (T.Pipelined or T.serial; the pass consumes num_stages — the software
- * pipelining happens here). A T.unroll / T.Parallel loop is one opaque
- * op; statements inside it need no ids. Every statement of a scheduled
- * kernel must be placed by the schedule — anything unplaced is a fatal
- * error. A function may hold several kernels, each with its own
- * schedule; a function without any is returned untouched, and a
- * scheduled kernel's id markers are consumed during matching and
- * emission.
+ * Ids. The schedulable op is one statement, named by a "tl.ws_op_id"
+ * annotation on a tile op or loop, or a `with T.ws_op(id):` wrapper
+ * for anything else (possibly several plain statements, which become
+ * ONE opaque op). Scope loops are serial loops (the pass consumes
+ * num_stages) or T.ws_op-wrapped while loops (phases under them use
+ * runtime counters; the condition must be role-uniform). A T.unroll /
+ * T.Parallel loop is one opaque op. Every statement must be placed by
+ * the schedule — anything unplaced is a fatal error. Several roles may
+ * place the same op only when it touches no pipeline buffers; each
+ * role then runs its own copy.
  *
- * Dependencies are computed, not declared: QueryAccess derives each op's
- * operands from the tile ops' own access regions. An operand's def is
- * the pipeline protecting its buffer; a pipeline's producer / consumer
- * uses are the ops writing / reading its buffers.
+ * Dependencies are computed, not declared: QueryAccess derives each
+ * op's operands; an operand's def is the pipeline protecting its
+ * buffer.
  *
- * Synchronization. producer_acquire / producer_commit and consumer_wait
- * / consumer_release bracket a role's work on a pipeline: the acquire or
- * wait opens a span, the matching commit or release closes it in the
- * same scope body. An op must run inside an open span of every pipeline
- * protecting one of its operands, and its accesses are rebound to buffer
- * version (phase % depth), where the role's phase counts its completed
- * sync cycles on that pipeline — an expression of the loop iteration, or
- * a runtime counter when cycles repeat within one body or span several
- * loops. Sync entries carry a software-pipeline stage: within one body,
- * an entry at stage s runs (s - s_min) iterations behind, the loop gains
- * that many extra steps, and boundary guards cover the ramp-up/drain.
+ * Synchronization. producer_acquire / producer_commit and
+ * consumer_wait / consumer_release bracket a role's work on a
+ * pipeline. An op must run inside an open span of every pipeline
+ * protecting one of its operands; its accesses are rebound to buffer
+ * version (phase % depth). Sync entries carry a software-pipeline
+ * stage: an entry at stage s runs (s - s_min) iterations behind,
+ * emitted as unrolled prologue/epilogue steps around a steady-state
+ * loop with no per-iteration boundary checks.
  *
- * Arrive counts are derived from what each signaling op lowers to (its
- * atom): TMA data rides the barrier's transaction count, a tcgen05
- * commit arrives once for all outstanding MMAs, and synchronous compute
- * arrives per thread.
+ * Arrive counts derive from each signaling op's atom (see OpAtom and
+ * BarrierSidePlan).
  *
- * Source `if`s around statements become per-op guards, folded together
- * with the stage boundary guard into one condition. Sync entries are
- * never guarded: a role that skips work skips only the op bodies, so
- * pipeline cycles stay unconditional in every role.
+ * Source `if`s around statements become per-op guards; sync entries
+ * stay unconditional in every role. An `if` around a scope loop guards
+ * the whole scope; its condition must be uniform across roles.
  *
- * VerifySchedule rejects broken schedules at compile time:
- *  - span coverage: brackets pair up, a role is the producer or the
- *    consumer of a pipeline (never both), and ops run inside the spans
- *    their operands need;
- *  - cycle balance: within every loop scope, a pipeline's producer and
- *    consumer sides cycle equally often per iteration;
- *  - deadlock freedom: the roles' sync events are executed under the
- *    mbarrier parity model, each loop modeled at two iterations (enough,
- *    because balanced iterations leave the barrier state unchanged).
+ * VerifySchedule rejects broken schedules at compile time: span
+ * coverage, cycle balance, and deadlock freedom under the mbarrier
+ * parity model.
  *
- * TODO: cluster launch control, while loops, 2-CTA GEMM, epilogue
- * sub-tiling, stage shifts on counter-tracked pipelines,
- * try_acquire/try_wait split sync entries, shared-barrier pipeline
- * groups.
+ * TODO: cluster launch control; data-dependent synchronization; 2-CTA
+ * GEMM; epilogue sub-tiling; stage shifts on counter-tracked
+ * pipelines; try_acquire/try_wait split sync entries; shared-barrier
+ * pipeline groups; else branches around ops and scope loops.
  */
 
 #include <tvm/arith/analyzer.h>
@@ -103,6 +85,7 @@
 
 #include "cuda/op/builtin.h"
 #include "cuda/op/copy.h"
+#include "layout/layout.h"
 #include "op/builtin.h"
 #include "op/copy.h"
 #include "op/gemm.h"
@@ -182,15 +165,10 @@ const Op &Tcgen05GemmOp() {
 
 // ---------------------------------------------------------------------------
 // QueryAccess: the buffers a statement reads and writes — the pass's
-// dependency oracle. Schedules declare no dataflow; pipeline membership,
-// arrive styles, and arrive counts are all derived from these operands.
-//
-// Tile ops report their own access regions (a gemm reads its accumulator
-// only when it does not clear it, say); granularity is the whole buffer
-// for now. Plain loads and stores count directly, except the
-// address-only root load inside a region argument, which would surface
-// write-only operands as reads. Global buffers are operands too — they
-// simply never resolve to a pipeline.
+// dependency oracle. Tile ops report their own access regions;
+// granularity is the whole buffer. Plain loads and stores count
+// directly, except address-only root loads (region / access_ptr
+// arguments), which are not data reads.
 // ---------------------------------------------------------------------------
 struct AccessSet {
   // Operand buffer -> defining pipeline: the pipeline protecting the
@@ -217,11 +195,11 @@ struct AccessSet {
   }
 };
 
-// Unions the statement's accesses into *acc. Region calls appear only as
-// tile-op arguments and are skipped: the owning op reports their
-// accesses, and their root loads are excluded from the plain-load pass.
+// Unions the statement's accesses into *acc. The owning tile op reports
+// a region argument's accesses; an access_ptr's rw mask says how the
+// intrinsic accesses its buffer.
 void QueryAccess(const Stmt &stmt, AccessSet *acc) {
-  std::unordered_set<BufferLoad, ObjectPtrHash, ObjectPtrEqual> region_roots;
+  std::unordered_set<BufferLoad, ObjectPtrHash, ObjectPtrEqual> address_roots;
   PostOrderVisit(stmt, [&](const ObjectRef &node) {
     const auto *call = node.as<CallNode>();
     if (!call)
@@ -229,7 +207,21 @@ void QueryAccess(const Stmt &stmt, AccessSet *acc) {
     if (call->op.same_as(RegionOp())) {
       const auto *load = call->args[0].as<BufferLoadNode>();
       ICHECK(load) << "ws_schedule: region arg0 must be a BufferLoad";
-      region_roots.insert(GetRef<BufferLoad>(load));
+      address_roots.insert(GetRef<BufferLoad>(load));
+      return;
+    }
+    if (call->op.same_as(access_ptr())) {
+      // access_ptr(base_load, extent, rw_mask)
+      const auto *load = call->args[0].as<BufferLoadNode>();
+      ICHECK(load) << "ws_schedule: access_ptr arg0 must be a BufferLoad";
+      address_roots.insert(GetRef<BufferLoad>(load));
+      const auto *mask = call->args[2].as<IntImmNode>();
+      ICHECK(mask) << "ws_schedule: access_ptr rw mask must be constant:\n"
+                   << GetRef<Call>(call);
+      if (mask->value & 1)
+        acc->reads.emplace(load->buffer, -1);
+      if (mask->value & 2)
+        acc->writes.emplace(load->buffer, -1);
       return;
     }
     TileOperator tile_op = ParseOperator(GetRef<Call>(call));
@@ -243,7 +235,7 @@ void QueryAccess(const Stmt &stmt, AccessSet *acc) {
   });
   PostOrderVisit(stmt, [&](const ObjectRef &node) {
     if (const auto *load = node.as<BufferLoadNode>()) {
-      if (!region_roots.count(GetRef<BufferLoad>(load)))
+      if (!address_roots.count(GetRef<BufferLoad>(load)))
         acc->reads.emplace(load->buffer, -1);
     } else if (const auto *store = node.as<BufferStoreNode>()) {
       acc->writes.emplace(store->buffer, -1);
@@ -253,26 +245,26 @@ void QueryAccess(const Stmt &stmt, AccessSet *acc) {
 
 // ---------------------------------------------------------------------------
 // Op atoms: which asynchronous instruction (if any) an op lowers to.
-// Classified once per op and consumed twice — arrive-count planning reads
-// each barrier side's completion signal off the atoms, and emission
-// converts the call — so planner and emitter cannot disagree.
-//  - kSync: synchronous compute; only the executing threads witness its
-//    completion, so they arrive per thread.
-//  - kTmaCopy: bulk-async copy; the data rides the barrier's transaction
-//    count. It only writes its destination, so it holds producer uses.
-//  - kTcgen05Gemm: asynchronous tensor core; one tcgen05.commit performs
-//    a single mbarrier arrive covering all outstanding MMAs.
+// Classified once and consumed by both arrive-count planning and call
+// conversion, so planner and emitter cannot disagree.
+//  - kSync: synchronous compute; arrives per thread.
+//  - kTmaCopy: bulk-async copy; the data rides the barrier's
+//    transaction count.
+//  - kTcgen05Gemm: one tcgen05.commit arrives once for all outstanding
+//    MMAs.
+//  - kCpAsyncCopy: a cp.async copy (T.async_copy or
+//    prefer_instruction="cp_async"); completion rides the commit
+//    entry's deferred per-thread cp.async.mbarrier.arrive.
 // ---------------------------------------------------------------------------
 enum class OpAtom : uint8_t {
   kSync = 0,
   kTmaCopy = 1,
   kTcgen05Gemm = 2,
+  kCpAsyncCopy = 3,
 };
 
 // Classify one call with the same instruction-selection helpers the
-// lowering uses: ClassifyWarpSpecializedProducerCopy applies the real
-// TMA legality rules (scope, swizzle, stride, dtype), and a gemm
-// accumulating in tensor memory lowers to the asynchronous tcgen05 path.
+// lowering uses, so the atom matches what the op actually lowers to.
 OpAtom ClassifyCall(const Call &call, const Target &target) {
   TileOperator tile_op = ParseOperator(call);
   if (!tile_op.defined())
@@ -280,7 +272,11 @@ OpAtom ClassifyCall(const Call &call, const Target &target) {
   if (const auto *copy = tile_op.as<CopyNode>()) {
     cuda::CopyInstSelection sel =
         cuda::ClassifyWarpSpecializedProducerCopy(*copy, target);
-    return cuda::CopyInstIsTMA(sel.inst) ? OpAtom::kTmaCopy : OpAtom::kSync;
+    if (cuda::CopyInstIsTMA(sel.inst))
+      return OpAtom::kTmaCopy;
+    if (cuda::CopyInstIsCPAsync(sel.inst))
+      return OpAtom::kCpAsyncCopy;
+    return OpAtom::kSync;
   }
   if (const auto *gemm = tile_op.as<GemmNode>()) {
     return gemm->cRegion_->buffer.scope() == "shared.tmem"
@@ -301,23 +297,20 @@ struct RoleSpec {
   int NregAction() const { return nreg >= kNregIncThreshold ? 1 : 0; }
 };
 
-// One schedulable op: declared by ParseSchedule (placed by exactly one
-// role in exactly one scope body), completed by RecordOpStmt with the
-// matched statement and its guard; later phases fill in the rest.
+// One schedulable op: declared by ParseSchedule, completed by
+// RecordOpStmt with the matched statement, filled in by later phases.
 struct OpInfo {
   String id;
-  Stmt stmt;                    // the single matched original statement
-  Optional<PrimExpr> guard;     // original guard, if any
-  AccessSet access;             // operands (whole buffers) and their defs
-  OpAtom atom = OpAtom::kSync;  // classified once by BuildOpAtoms
-  PipelineIndex write_def = -1; // the written operands' single def
-  RoleIndex role_idx = -1;      // the single owning role
-  ScopeIndex sched_scope = -1;  // scope whose body references this op
+  Stmt stmt;                     // the single matched original statement
+  Optional<PrimExpr> guard;      // original guard, if any
+  AccessSet access;              // operands (whole buffers) and their defs
+  OpAtom atom = OpAtom::kSync;   // classified once by BuildOpAtoms
+  PipelineIndex write_def = -1;  // the written operands' single def
+  std::set<RoleIndex> role_idxs; // the placing roles
+  ScopeIndex sched_scope = -1;   // scope whose body references this op
 };
 
-// Orders a pipeline's uses by op id: deterministic (pointer order varies
-// run to run), and one entry per op — an op signals a pipeline once no
-// matter how many of its operands the pipeline protects.
+// Orders a pipeline's uses by op id: deterministic, one entry per op.
 struct OpIdLess {
   bool operator()(const OpInfo *a, const OpInfo *b) const {
     return a->id < b->id;
@@ -325,25 +318,20 @@ struct OpIdLess {
 };
 using UseSet = std::set<const OpInfo *, OpIdLess>;
 
-// How one side (full or empty) of a pipeline's barrier pair is signaled.
-// An mbarrier phase completes only when the pending arrival count AND
-// the transaction count both reach zero, and the init count must be
-// >= 1. So:
-//  1. Collect the atoms of the signaling role's uses of the side
-//     (producer uses signal full, consumer uses signal empty) into the
-//     three flags below.
-//  2. Transactions alone cannot close the arrival side, so a
-//     transaction-only side falls back to the per-thread arrive. Then
-//       count = has_async_arrival + has_thread_arrive * role threads.
-// The commit/release entry emits exactly these arrivals: at most one
-// tcgen05.commit (covering all outstanding MMAs) plus at most one
-// per-thread ptx_arrive_barrier.
+// How one side (full or empty) of a pipeline's barrier pair is
+// signaled, derived from the atoms of the signaling role's uses:
+//   count = has_tcgen05_arrival
+//         + (has_cpasync_arrival + has_thread_arrive) * role threads.
+// The deferred cp.async arrive orders only the thread's prior cp.async
+// ops (PTX memory model, Program Order - Async Operations), so it never
+// replaces the plain per-thread arrive of synchronous work.
 struct BarrierSidePlan {
-  bool has_transaction = false;   // TMA transactions ride the tx-count
-  bool has_async_arrival = false; // one tcgen05.commit arrive::one covers all
-  bool has_thread_arrive = false; // per-thread arrive at the sync entry
-  RoleIndex signal_role_idx = -1; // the signaling role
-  int64_t count = 0;              // resulting mbarrier.init arrival count
+  bool has_transaction = false;     // TMA transactions ride the tx-count
+  bool has_tcgen05_arrival = false; // one tcgen05.commit covers all MMAs
+  bool has_cpasync_arrival = false; // per-thread deferred cp.async arrive
+  bool has_thread_arrive = false;   // per-thread arrive at the sync entry
+  RoleIndex signal_role_idx = -1;   // the signaling role
+  int64_t count = 0;                // resulting mbarrier.init arrival count
 };
 
 struct PipelineSpec {
@@ -377,16 +365,19 @@ struct BodyEntry {
 struct ScopeSpec {
   String id;
   For orig_loop; // undefined for the root scope (until matched, for others)
-  // The scope whose bodies reference this one (-1 for the root); unique,
-  // and checked against the loop's lexical parent during matching.
+  // Set when the scope is a T.ws_op-wrapped while loop: phases under it
+  // use runtime counters, and the condition must be role-uniform.
+  While orig_while;
+  // Source guard around the scope loop; must be role-uniform, so a
+  // false guard skips the scope's sync entries in all roles together.
+  Optional<PrimExpr> guard;
+  // The scope whose bodies reference this one (-1 for the root).
   ScopeIndex parent = -1;
-  // Per-role instruction sequence, indexed by role index (position in the
-  // warp-sorted roles_ vector); empty when the role has no body here.
+  // Per-role instruction sequence; empty when the role has no body here.
   std::vector<std::vector<BodyEntry>> bodies;
 
-  // The kernel's implicit root is the only scope without a loop:
-  // MatchKernel requires every other scope to match one.
-  bool IsRoot() const { return !orig_loop.defined(); }
+  // The implicit root is the only scope without a loop.
+  bool IsRoot() const { return !orig_loop.defined() && !orig_while.defined(); }
 };
 
 // ---------------------------------------------------------------------------
@@ -414,9 +405,8 @@ public:
 private:
   // ---- schedule parsing ---------------------------------------------------
 
-  // Resolve a schedule-referenced buffer to the block's own allocation. The
-  // schedule holds the buffer object captured at trace time; match by
-  // identity first, then by data var, then by name.
+  // Resolve a schedule-referenced buffer to the block's own
+  // allocation: by identity, then data var, then name.
   Buffer FindBlockBuffer(const Buffer &ref) {
     for (const Buffer &b : block_->alloc_buffers) {
       if (b.same_as(ref) || b->data.same_as(ref->data))
@@ -443,8 +433,8 @@ private:
     num_warps_ = static_cast<int>(sched->num_warps);
     ICHECK_GT(num_warps_, 0) << "ws_schedule: num_warps must be positive";
     ICHECK_EQ(num_warps_ % 4, 0)
-        << "ws_schedule: num_warps must be a multiple of 4 (setmaxnreg acts "
-           "on whole warpgroups), got "
+        << "ws_schedule: num_warps must be a multiple of 4 (warps are "
+           "managed in warpgroups of 4), got "
         << num_warps_;
 
     // Roles.
@@ -474,11 +464,9 @@ private:
           << roles_[i].warp_hi << ") have overlapping warp ranges";
     }
 
-    // setmaxnreg allocates registers for the whole warpgroup: all four
-    // warps 4g..4g+3 must request the same budget (or none of them any).
-    // Roles sharing a warpgroup must therefore agree on max_nreg; idle
-    // warps adopt their warpgroup's request, and a fully idle warpgroup
-    // donates down to the smallest donor budget.
+    // setmaxnreg allocates per warpgroup: roles sharing one must agree
+    // on max_nreg. Idle warps adopt their warpgroup's request; a fully
+    // idle warpgroup donates down to the smallest donor budget.
     warpgroup_nreg_.assign(num_warps_ / 4, -1); // -1 = no covering role
     for (const RoleSpec &r : roles_) {
       for (int w = r.warp_lo; w < r.warp_hi; ++w) {
@@ -506,9 +494,7 @@ private:
         v = donor;
     }
 
-    // Pipelines. Buffers are typed references; match them to the block's
-    // allocations by data var (the schedule may hold the pre-trace proxy of
-    // the same allocation).
+    // Pipelines.
     for (const WSPipeline &p : sched->pipelines) {
       PipelineSpec pipeline;
       pipeline.name = p->name;
@@ -554,11 +540,10 @@ private:
       scopes_.push_back(std::move(scope));
     }
 
-    // Classify body entries as op or child-scope references and validate
-    // the reference graph: an op is placed exactly once (its statement is
-    // cloned verbatim, so repetition would duplicate work); a child scope
-    // has exactly one parent scope, is entered at most once per role, and
-    // is never the root.
+    // Classify body entries as op or child-scope references and
+    // validate the reference graph: an op is placed in one scope, at
+    // most once per role; a child scope has one parent, is entered at
+    // most once per role, and is never the root.
     std::set<std::pair<ScopeIndex, RoleIndex>> scope_refs;
     for (size_t si = 0; si < scopes_.size(); ++si) {
       ScopeSpec &scope = scopes_[si];
@@ -593,26 +578,24 @@ private:
           if (it == ops_.end()) {
             OpInfo op;
             op.id = e.id;
-            op.role_idx = static_cast<RoleIndex>(ri);
+            op.role_idxs.insert(static_cast<RoleIndex>(ri));
             op.sched_scope = static_cast<ScopeIndex>(si);
             ops_.emplace(e.id, std::move(op));
           } else {
-            ICHECK_EQ(it->second.role_idx, static_cast<RoleIndex>(ri))
-                << "ws_schedule: op '" << e.id
-                << "' is scheduled by multiple roles";
             ICHECK_EQ(it->second.sched_scope, static_cast<ScopeIndex>(si))
                 << "ws_schedule: op '" << e.id
                 << "' is scheduled in multiple scopes";
-            LOG(FATAL) << "ws_schedule: op '" << e.id
-                       << "' is referenced more than once in the body of "
-                          "scope '"
-                       << scope.id << "'; an op is placed exactly once";
+            ICHECK(
+                it->second.role_idxs.insert(static_cast<RoleIndex>(ri)).second)
+                << "ws_schedule: op '" << e.id
+                << "' is referenced more than once in the body of scope '"
+                << scope.id << "' by role " << roles_[ri].name
+                << "; a role places an op at most once";
           }
         }
       }
     }
-    // An unreferenced scope would never be emitted, silently dropping the
-    // work its bodies schedule.
+    // An unreferenced scope would silently drop its scheduled work.
     for (const ScopeSpec &scope : scopes_) {
       ICHECK(scope.parent >= 0 || scope.id == kWSRootScopeId)
           << "ws_schedule: scope '" << scope.id
@@ -644,10 +627,8 @@ private:
   // ---- op matching --------------------------------------------------------
 
   // Walk the kernel body against the schedule. Coverage is two-sided:
-  // every declared op must match exactly one statement in its scheduling
-  // scope, every scope must find its loop, and — enforced in MatchTask —
-  // every kernel statement must carry an id, except inside op-node loops,
-  // which their loop's id covers.
+  // every declared op and scope must match a statement, and (enforced in
+  // MatchOp) every kernel statement must carry an id.
   void MatchKernel() {
     ScopeIndex root = ScopeIndexOf(kWSRootScopeId);
     ICHECK_GE(root, 0) << "ws_schedule: missing root scope";
@@ -657,21 +638,20 @@ private:
           << "ws_schedule: op '" << id
           << "' is scheduled but no statement in the kernel carries this id";
       QueryAccess(op.stmt, &op.access);
-      // A buffer read only by the op's guard is an operand too: it needs
-      // span protection and version rebinding like the body.
+      // Buffers read by the op's guard are operands too.
       if (op.guard.defined())
         QueryAccess(Evaluate(op.guard.value()), &op.access);
     }
     for (const ScopeSpec &scope : scopes_) {
-      ICHECK(scope.orig_loop.defined() || scope.id == kWSRootScopeId)
+      ICHECK(!scope.IsRoot() || scope.id == kWSRootScopeId)
           << "ws_schedule: scope '" << scope.id
           << "' has no matching loop in the kernel";
     }
   }
 
   void MatchScopeBody(ScopeIndex scope_idx, const Stmt &body) {
-    for (const Stmt &task : BodyStmts(body))
-      MatchTask(scope_idx, task, Optional<PrimExpr>());
+    for (const Stmt &stmt : BodyStmts(body))
+      MatchOp(scope_idx, stmt, Optional<PrimExpr>());
   }
 
   // The statements of a body: a SeqStmt's list, or the single statement
@@ -682,19 +662,25 @@ private:
     return {s};
   }
 
-  void RecordScopeLoop(ScopeIndex scope_idx, const For &loop) {
-    ICHECK(!scopes_[scope_idx].orig_loop.defined())
+  // A while scope has no extent: phases under it use runtime counters.
+  void RecordScopeWhileLoop(ScopeIndex scope_idx, const While &loop) {
+    ICHECK(scopes_[scope_idx].IsRoot())
         << "ws_schedule: scope " << scopes_[scope_idx].id << " matched twice";
-    // Any serial loop can be a scope (T.Pipelined is just a serial loop
-    // with a num_stages annotation, which this pass consumes — the
-    // software pipelining happens here). T.unroll / T.Parallel loops are
-    // single op nodes.
+    scopes_[scope_idx].orig_while = loop;
+    MatchScopeBody(scope_idx, loop->body);
+  }
+
+  void RecordScopeForLoop(ScopeIndex scope_idx, const For &loop) {
+    ICHECK(scopes_[scope_idx].IsRoot())
+        << "ws_schedule: scope " << scopes_[scope_idx].id << " matched twice";
+    // Any serial loop can be a scope (T.Pipelined is a serial loop with
+    // a num_stages annotation).
     ICHECK(loop->kind == ForKind::kSerial)
         << "ws_schedule: scope '" << scopes_[scope_idx].id
         << "' must be a serial loop (T.Pipelined or T.serial); T.unroll / "
            "T.Parallel loops are scheduled as single ops";
-    // Phases count iterations as (loop_var - min); a non-unit step would
-    // break version indices and parities. TODO: divide by the step.
+    // Phases count iterations as (loop_var - min); a non-unit step
+    // would break them. TODO: divide by the step.
     ICHECK(loop->HasTrivialStep())
         << "ws_schedule: scope '" << scopes_[scope_idx].id
         << "' has a non-unit loop step; write the loop with unit step and "
@@ -704,9 +690,7 @@ private:
   }
 
   // Consume the id marker as the statement is recorded, so the emitted
-  // clones never leak scheduling metadata downstream. Ids live in tile-op
-  // call annotations or loop annotations; the T.ws_op wrapper was already
-  // consumed by the matcher, so a recorded Bind carries nothing.
+  // clones never leak scheduling metadata downstream.
   static Stmt StripOpId(const Stmt &stmt) {
     if (const auto *ev = stmt.as<EvaluateNode>()) {
       const auto *call = ev->value.as<CallNode>();
@@ -752,22 +736,31 @@ private:
       op.guard = guard;
   }
 
-  void MatchTask(ScopeIndex scope_idx, const Stmt &task,
-                 Optional<PrimExpr> guard) {
+  void MatchOp(ScopeIndex scope_idx, const Stmt &stmt,
+               Optional<PrimExpr> guard) {
     ScopeSpec &scope = scopes_[scope_idx];
 
-    // A manual annotation (`with T.ws_op(id):`) for the one statement kind
-    // that cannot carry annotations= itself — the scalar Bind. The wrapper
-    // is consumed here; the op records the wrapped statement.
-    if (const auto *attr = task.as<AttrStmtNode>()) {
+    // A `with T.ws_op(id):` wrapper. With a scope id it wraps a while
+    // loop and opens that scope; otherwise the wrapped statements become
+    // ONE opaque op. The wrapper is consumed here.
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
       if (attr->attr_key == kWSOpIdKey) {
         String id = ExtractWSOpId(Any(attr->value));
-        ICHECK(!attr->body.as<SeqStmtNode>())
-            << "ws_schedule: T.ws_op('" << id << "') must annotate exactly "
-            << "one statement; every scheduled statement needs its own id";
-        ICHECK_LT(ScopeIndexOf(id), 0)
-            << "ws_schedule: scope id '" << id << "' belongs on the loop's "
-            << "own annotations, not on a T.ws_op wrapper";
+        ScopeIndex child = ScopeIndexOf(id);
+        if (child >= 0) {
+          const auto *wl = attr->body.as<WhileNode>();
+          ICHECK(wl) << "ws_schedule: scope id '" << id << "' on a T.ws_op "
+                     << "wrapper must wrap a while loop; serial loops carry "
+                     << "the id in their own annotations";
+          ICHECK_EQ(scopes_[child].parent, scope_idx)
+              << "ws_schedule: scope '" << id << "' lives in scope '"
+              << scope.id << "' of the kernel but is referenced from scope '"
+              << scopes_[scopes_[child].parent].id << "'";
+          if (guard.defined())
+            scopes_[child].guard = guard;
+          RecordScopeWhileLoop(child, GetRef<While>(wl));
+          return;
+        }
         RecordOpStmt(scope_idx, id, attr->body, guard);
         return;
       }
@@ -775,59 +768,56 @@ private:
                  << "' in kernel body";
     }
 
-    // Loop with a ws op id annotation. A serial loop whose id names a
-    // schedule scope opens that scope; any other annotated loop (T.unroll,
-    // T.Parallel) is one opaque op node — its body is cloned wholesale and
-    // statements inside it need no ids of their own.
-    if (const auto *loop = task.as<ForNode>()) {
+    // An annotated loop: a serial loop whose id names a scope opens
+    // that scope; any other annotated loop is one opaque op.
+    if (const auto *loop = stmt.as<ForNode>()) {
       if (auto id_ann = loop->annotations.Get(kWSOpIdKey)) {
         String id = ExtractWSOpId(id_ann.value());
         ScopeIndex child = ScopeIndexOf(id);
         if (child >= 0) {
-          ICHECK(!guard.defined())
-              << "ws_schedule: guarded scope loops are not supported";
           ICHECK_EQ(scopes_[child].parent, scope_idx)
               << "ws_schedule: scope '" << id << "' lives in scope '"
               << scope.id << "' of the kernel but is referenced from scope '"
               << scopes_[scopes_[child].parent].id << "'";
-          RecordScopeLoop(child, GetRef<For>(loop));
+          if (guard.defined())
+            scopes_[child].guard = guard;
+          RecordScopeForLoop(child, GetRef<For>(loop));
           return;
         }
-        RecordOpStmt(scope_idx, id, task, guard);
+        RecordOpStmt(scope_idx, id, stmt, guard);
         return;
       }
     }
 
-    // A single tile-op statement carrying its id in the call annotations
-    // is an op, treated as an opaque node.
-    if (const auto *ev = task.as<EvaluateNode>()) {
+    // A tile op carrying its id in the call annotations.
+    if (const auto *ev = stmt.as<EvaluateNode>()) {
       if (const auto *call = ev->value.as<CallNode>()) {
         if (auto id = call->annotations.Get(kWSOpIdKey)) {
-          RecordOpStmt(scope_idx, ExtractWSOpId(id.value()), task, guard);
+          RecordOpStmt(scope_idx, ExtractWSOpId(id.value()), stmt, guard);
           return;
         }
       }
     }
 
-    // Dig through source guards: an op inside an IfThenElse records the
-    // accumulated condition, which emission folds into its entry guard.
-    if (const auto *ite = task.as<IfThenElseNode>()) {
+    // An op inside an IfThenElse records the accumulated condition as
+    // its guard.
+    if (const auto *ite = stmt.as<IfThenElseNode>()) {
       ICHECK(!ite->else_case.defined())
           << "ws_schedule: else branches are not supported yet";
       PrimExpr cond =
           guard.defined() ? (guard.value() && ite->condition) : ite->condition;
       for (const Stmt &sub : BodyStmts(ite->then_case))
-        MatchTask(scope_idx, sub, cond);
+        MatchOp(scope_idx, sub, cond);
       return;
     }
 
-    // Nothing is silently dropped or implicitly replicated: every
-    // statement of a scheduled kernel must be placed by the schedule.
+    // Every statement of a scheduled kernel must be placed by the
+    // schedule; nothing is silently dropped or replicated.
     LOG(FATAL) << "ws_schedule: statement in scope '" << scope.id
                << "' carries no ws op id; tile ops and loops take "
                   "annotations={\"tl.ws_op_id\": ...}, other statements "
                   "(a scalar Bind) are wrapped in T.ws_op(...):\n"
-               << task;
+               << stmt;
   }
 
   // ---- planning -----------------------------------------------------------
@@ -862,11 +852,10 @@ private:
   // ---- def/use chains -------------------------------------------------------
 
   // Resolve each operand's defining pipeline and build the pipelines'
-  // reverse use sets. An op's written operands must all resolve to ONE
-  // pipeline: the completion signal behind a producer commit (a TMA
-  // transaction in particular is bound to a single mbarrier at issue
-  // time) can only trigger one. Read operands are unconstrained — one
-  // asynchronous commit may back releases of several pipelines.
+  // use sets. An op's written operands must all resolve to ONE pipeline
+  // (its completion signal can only trigger one); reads are
+  // unconstrained. An op placed by several roles must have NO
+  // pipeline-protected operands — duplicated accesses would race.
   void BuildUseChains() {
     for (auto &[id, op] : ops_) {
       Buffer write_buf;
@@ -895,6 +884,35 @@ private:
         def = it->second;
         pipelines_[def].consumers.insert(&op);
       }
+      if (op.role_idxs.size() > 1) {
+        std::set<PipelineIndex> defs = op.access.Defs();
+        ICHECK(defs.empty())
+            << "ws_schedule: op '" << id << "' is placed by "
+            << op.role_idxs.size() << " roles but touches buffer(s) of "
+            << "pipeline '" << pipelines_[*defs.begin()].name
+            << "'; only ops touching no pipeline buffers may be duplicated "
+               "across roles";
+      }
+    }
+    // A scope guard or while condition must not read pipeline buffers:
+    // it has to be uniform across roles.
+    for (const ScopeSpec &scope : scopes_) {
+      auto check_uniform = [&](const PrimExpr &expr, const char *what) {
+        AccessSet access;
+        QueryAccess(Evaluate(expr), &access);
+        for (const auto *operands : {&access.reads, &access.writes}) {
+          for (const auto &[buf, def] : *operands) {
+            ICHECK(!buffer_pipeline_.count(buf))
+                << "ws_schedule: the " << what << " of scope '" << scope.id
+                << "' touches pipeline buffer " << buf->name << "; it must "
+                << "be uniform across roles";
+          }
+        }
+      };
+      if (scope.guard.defined())
+        check_uniform(scope.guard.value(), "guard");
+      if (scope.orig_while.defined())
+        check_uniform(scope.orig_while->condition, "condition");
     }
   }
 
@@ -907,10 +925,10 @@ private:
         op.atom = ClassifyCall(Downcast<Call>(ev->value), target_);
         continue;
       }
-      // A compound statement (an op-node loop) stays synchronous; an
-      // asynchronous instruction nested inside one could not be wired to
-      // its barrier, so it is rejected. Plain reference locals: C++17
-      // lambdas cannot capture structured bindings.
+      // A compound statement (an op-node loop, a T.ws_op group) stays
+      // synchronous; a nested asynchronous instruction could not be
+      // wired to its barrier, so it is rejected. (Locals because C++17
+      // lambdas cannot capture structured bindings.)
       const String &op_id = id;
       const Stmt &stmt = op.stmt;
       PostOrderVisit(stmt, [&](const ObjectRef &node) {
@@ -926,9 +944,8 @@ private:
     }
   }
 
-  // Fill each pipeline's two BarrierSidePlans (see the struct comment):
-  // find the unique signaling role of each side, collect the atoms of
-  // its uses, and derive the arrival count.
+  // Fill each pipeline's two BarrierSidePlans: find the unique
+  // signaling role of each side and derive the count from its uses.
   void PlanArriveCounts() {
     // The signaling role of a side is the role holding its commit /
     // release entries; it must be unique.
@@ -961,30 +978,35 @@ private:
             producer_side ? pipeline.full_plan : pipeline.empty_plan;
         if (plan.signal_role_idx < 0)
           continue; // reported below
+        // Selects the signaling role's uses (such ops have exactly one
+        // placing role).
         for (const OpInfo *op : pipeline.Uses(producer_side)) {
-          if (op->role_idx != plan.signal_role_idx)
+          if (!op->role_idxs.count(plan.signal_role_idx))
             continue;
           switch (op->atom) {
           case OpAtom::kTmaCopy:
             plan.has_transaction = true;
             break;
           case OpAtom::kTcgen05Gemm:
-            plan.has_async_arrival = true;
+            plan.has_tcgen05_arrival = true;
+            break;
+          case OpAtom::kCpAsyncCopy:
+            plan.has_cpasync_arrival = true;
             break;
           case OpAtom::kSync:
             plan.has_thread_arrive = true;
             break;
           }
         }
-        // Transactions cannot close the arrival side by themselves;
-        // without any other arrival, fall back to the per-thread arrive.
-        if (plan.has_transaction && !plan.has_async_arrival &&
-            !plan.has_thread_arrive) {
+        // Transactions alone cannot complete a phase: a side with TMA
+        // copies keeps the per-thread arrive.
+        if (plan.has_transaction)
           plan.has_thread_arrive = true;
-        }
         const RoleSpec &role = roles_[plan.signal_role_idx];
-        plan.count = (plan.has_async_arrival ? 1 : 0) +
-                     (plan.has_thread_arrive ? role.NumThreads() : 0);
+        plan.count = (plan.has_tcgen05_arrival ? 1 : 0) +
+                     ((plan.has_cpasync_arrival ? 1 : 0) +
+                      (plan.has_thread_arrive ? 1 : 0)) *
+                         static_cast<int64_t>(role.NumThreads());
       }
     }
     for (PipelineSpec &pipeline : pipelines_) {
@@ -1000,18 +1022,11 @@ private:
   // A broken schedule would hang or race on the GPU; these checks reject
   // it at compile time instead.
 
-  // Per role: sync brackets must pair up (an acquire/wait opens a span,
-  // the matching commit/release closes it in the same scope body), a
-  // role is the producer or the consumer of a pipeline but never both (a
-  // role handing data to itself would need no pipeline), and every op
-  // must run inside an open span of each pipeline protecting one of its
-  // operands — an access outside the span races with the other side of
-  // the handshake, before the wait or after the release alike.
-  //
-  // A span covers reads and writes both: the flavor is the role's
-  // handshake direction, not the op's access direction (a consumer may
-  // write what it waited on, a producer may read what it acquired).
-  // Spans opened in an enclosing scope cover ops in child scopes.
+  // Per role: sync brackets must pair up within one scope body, a role
+  // is the producer or the consumer of a pipeline but never both, and
+  // every op must run inside an open span of each pipeline protecting
+  // one of its operands. Spans opened in an enclosing scope cover ops
+  // in child scopes.
   void VerifySpanCoverage() const {
     for (RoleIndex ri = 0; ri < static_cast<RoleIndex>(roles_.size()); ++ri) {
       std::map<PipelineIndex, bool> flavor; // pipeline -> role is producer
@@ -1062,7 +1077,7 @@ private:
                 << "'; bracket the op with producer_acquire/producer_commit "
                 << "or consumer_wait/consumer_release (the stage may be "
                 << "concurrently overwritten or still read by an "
-                << "asynchronous task)";
+                << "asynchronous op)";
           };
           for (const auto &[buf, def] : op.access.writes)
             check_operand(buf, def, "writes");
@@ -1080,13 +1095,9 @@ private:
   }
 
   // Within every loop scope, a pipeline's producer and consumer sides
-  // must cycle equally often per iteration: an imbalance drifts the
-  // full/empty parity further apart every trip, and a side whose
-  // counterpart cycles in a different loop diverges with the extents.
-  // Balance also makes each iteration leave the barrier state unchanged,
-  // which is what lets the deadlock model run every loop for just two
-  // iterations. Deliberately strict: schedules balanced only through
-  // particular loop extents are rejected too.
+  // must cycle equally often per iteration; an imbalance drifts the
+  // full/empty parity apart every trip. Balance also lets the deadlock
+  // model run every loop for just two iterations.
   void VerifyCycleBalance() const {
     for (size_t si = 0; si < scopes_.size(); ++si) {
       const ScopeSpec &scope = scopes_[si];
@@ -1112,14 +1123,10 @@ private:
     }
   }
 
-  // Flatten one role's sync entries into the order the emitted code
-  // executes them. Every loop is modeled for two iterations — warm-up
-  // plus one steady-state trip; VerifyCycleBalance makes further
-  // iterations replay the steady state — and the stage deltas reproduce
-  // the software-pipelined reordering rather than the textual order (an
-  // entry at delta d executes at steps d .. d + trips - 1). Sync entries
-  // are unconditional in the emitted code, so the model needs no
-  // conditional events.
+  // Flatten one role's sync entries into emitted-code order: loops are
+  // modeled for two iterations, and the stage deltas reproduce the
+  // software-pipelined reordering (an entry at delta d executes at
+  // steps d .. d + trips - 1).
   std::vector<SyncEntry> FlattenRoleEvents(RoleIndex role_idx) const {
     std::vector<SyncEntry> events;
     std::function<void(ScopeIndex)> emit = [&](ScopeIndex scope_idx) {
@@ -1134,7 +1141,7 @@ private:
         for (size_t i = 0; i < entries.size(); ++i) {
           if (!scope.IsRoot() &&
               (t < plan.delta[i] || t >= plan.delta[i] + trips))
-            continue; // outside this entry's boundary guards
+            continue; // outside this entry's step window
           const BodyEntry &e = entries[i];
           if (e.kind == BodyEntry::kScope)
             emit(ScopeIndexOf(e.id));
@@ -1147,16 +1154,11 @@ private:
     return events;
   }
 
-  // Execute all roles' sync events under the mbarrier parity model:
-  //  - a role's (k+1)-th wait on a pipeline is enabled once total commits
-  //    reach k+1 (the (k+1)-th full phase completed);
-  //  - its (k+1)-th acquire is enabled once depth + total releases reach
-  //    k+1 (the first `depth` acquires pass on the initial parity);
-  //  - commits and releases never block.
-  // Parity waits consume nothing and the totals only grow, so an enabled
-  // event can never become disabled: one greedy execution reaches the
-  // same end state as every interleaving, and a role still blocked at
-  // quiescence is a real hang, reported with its blocking event.
+  // Execute all roles' sync events under the mbarrier parity model: a
+  // role's (k+1)-th wait needs k+1 total commits, its (k+1)-th acquire
+  // needs depth + total releases >= k+1, commits/releases never block.
+  // Enabled events never become disabled, so one greedy execution
+  // suffices; a role still blocked at quiescence is a real hang.
   void VerifyDeadlockFree() const {
     int n_roles = static_cast<int>(roles_.size());
     std::vector<std::vector<SyncEntry>> events(n_roles);
@@ -1246,14 +1248,12 @@ private:
 
   // Per-entry stage offsets for one (role, scope) body. delta = stage -
   // s_min: an entry at delta d executes logical iteration (i - d) at
-  // loop step i, so the loop gains `shift` extra steps and per-entry
-  // boundary guards. A sync entry uses its own stage; an op or child
-  // scope takes the stage of the open spans covering the pipelines it
-  // touches, which must agree (a mix would make the loop-var
-  // substitution ambiguous); entries under no open span run at delta 0.
+  // step i. A sync entry uses its own stage; an op or child scope takes
+  // the stage of the open spans covering its pipelines (which must
+  // agree); entries under no open span run at delta 0.
   struct StagePlan {
     std::vector<int> delta; // per entry
-    int shift = 0;          // max delta; loop extent grows by this much
+    int shift = 0;          // max delta; unrolled steps on each side
   };
 
   StagePlan PlanStages(RoleIndex role_idx,
@@ -1269,9 +1269,8 @@ private:
     if (s_min == std::numeric_limits<int>::max())
       return plan; // no syncs in this body
 
-    // pipeline -> stage of its open span. Bracket pairing and role
-    // flavor exclusivity were verified (VerifySpanCoverage); only the
-    // pair's stage agreement is checked here, where stages live.
+    // pipeline -> stage of its open span; only the pair's stage
+    // agreement still needs checking here.
     std::map<PipelineIndex, int> pipeline_stage;
     auto span_delta = [&](const std::set<PipelineIndex> &touched_pipelines,
                           const String &what) -> int {
@@ -1352,13 +1351,20 @@ private:
     return phase.defined() ? phase : PrimExpr(IntImm(DataType::Int(32), 0));
   }
 
+  // Whether a scope or any of its ancestors is a while scope: no
+  // iteration expression exists there to linearize a phase against.
+  bool UnderWhileScope(ScopeIndex scope_idx) const {
+    for (ScopeIndex s = scope_idx; s >= 0; s = scopes_[s].parent) {
+      if (scopes_[s].orig_while.defined())
+        return true;
+    }
+    return false;
+  }
+
   // A (role, pipeline) pair needs a runtime phase counter when its
-  // cycles are not one-per-iteration of a single loop: sync points at
-  // several loop depths, or several cycles in one body — the loop-based
-  // phase would give such cycles the same version and parity. Counters
-  // are per (role, pipeline): sharing one between pipelines would
-  // require them to cycle in lockstep, since every read of the counter
-  // must see that pipeline's own completed-cycle count.
+  // cycles are not one-per-iteration of a single for loop: several
+  // cycles in one body, sync points at several loop depths, or any
+  // sync under a while scope.
   bool NeedsCounter(RoleIndex role_idx, PipelineIndex pipeline_idx) const {
     std::set<ScopeIndex> sync_scopes;
     bool multi_cycle = false;
@@ -1378,7 +1384,13 @@ private:
         multi_cycle = true;
     };
     scan(ScopeIndexOf(kWSRootScopeId));
-    return multi_cycle || sync_scopes.size() > 1;
+    if (multi_cycle || sync_scopes.size() > 1)
+      return true;
+    for (ScopeIndex s : sync_scopes) {
+      if (UnderWhileScope(s))
+        return true;
+    }
+    return false;
   }
 
   PrimExpr PipelinePhase(const RoleCtx &ctx, PipelineIndex pipeline_idx) const {
@@ -1394,18 +1406,26 @@ private:
              {BufferLoad(bar, {std::move(idx)}), std::move(parity)}));
   }
 
-  // Arrivals for one commit/release entry, per its side plan: at most
-  // one tcgen05.commit (covering all outstanding MMAs) plus at most one
-  // per-thread arrive — exactly plan.count arrivals per phase.
+  // Arrivals for one commit/release entry — exactly plan.count arrivals
+  // per phase.
   void MakeArrive(const PipelineSpec &pipeline, bool full, PrimExpr idx,
                   Array<Stmt> *out) const {
     const Buffer &bar = full ? pipeline.full : pipeline.empty;
     const BarrierSidePlan &plan =
         full ? pipeline.full_plan : pipeline.empty_plan;
-    if (plan.has_async_arrival) {
+    if (plan.has_tcgen05_arrival) {
       PrimExpr ptr = bar.access_ptr(3, DataType::Handle(), 1, idx);
       out->push_back(
           Evaluate(Call(DataType::Void(), tcgen05_mma_arrive(), {ptr})));
+    }
+    if (plan.has_cpasync_arrival) {
+      // Group the thread's outstanding cp.asyncs, then arrive deferred:
+      // the arrive fires once they complete.
+      out->push_back(
+          Evaluate(Call(DataType::Handle(), builtin::ptx_commit_group(), {})));
+      out->push_back(
+          Evaluate(Call(DataType::Handle(), ptx_cp_async_barrier_noinc(),
+                        {BufferLoad(bar, {idx})})));
     }
     if (plan.has_thread_arrive) {
       out->push_back(
@@ -1452,18 +1472,16 @@ private:
         : self(self), ctx(ctx) {}
 
     PrimExpr VersionIndex(const Buffer &orig) {
-      // versioned_ keys are pipeline buffers (PlanVersionedBuffers), and
-      // span coverage verified the op runs inside an open span, so the
-      // pipeline and its phase are always present.
+      // The pipeline and its phase are always present: versioned_ keys
+      // are pipeline buffers, and span coverage was verified.
       PipelineIndex p = self.buffer_pipeline_.at(orig);
       return floormod(ctx.pipeline_phase.at(p),
                       IntImm(DataType::Int(32), self.pipelines_[p].depth));
     }
 
     // The BufferLoad path below prepends the version index to a
-    // versioned region's root load; detect the extra index here and
-    // insert the matching unit extent to keep the region's
-    // indices-per-extent invariant.
+    // versioned region's root load; insert the matching unit extent to
+    // keep the region's indices-per-extent invariant.
     PrimExpr VisitExpr_(const CallNode *op) final {
       Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
       if (call->op.same_as(RegionOp()) && call->args.size() >= 2) {
@@ -1473,11 +1491,8 @@ private:
             Array<PrimExpr> args;
             args.push_back(call->args[0]);
             args.push_back(call->args[1]);
-            // The region is the op's footprint: origin = the root load's
-            // indices, size = the extents. The op touches exactly the ONE
-            // acquired version (origin phase % depth), so the version
-            // dimension's extent is 1 — the depth lives in the versioned
-            // buffer's shape, not here.
+            // The op touches exactly the one acquired version, so the
+            // version dimension's extent is 1.
             args.push_back(IntImm(DataType::Int(32), 1));
             for (size_t i = 2; i < call->args.size(); ++i)
               args.push_back(call->args[i]);
@@ -1525,19 +1540,17 @@ private:
     return rewriter(std::move(expr));
   }
 
-  // Swap an asynchronous atom's call to its explicit async op. The
-  // statement shape — a direct Evaluate of the call — was enforced by
-  // BuildOpAtoms.
+  // Rewrite an asynchronous atom's call: swap it to its explicit async
+  // op (TMA, tcgen05) or annotate it (cp.async).
   Stmt ConvertAtomCall(const RoleCtx &ctx, const OpInfo &op, Stmt stmt) const {
     const auto *ev = stmt.as<EvaluateNode>();
     ICHECK(ev);
     Call call = Downcast<Call>(ev->value);
     auto ann = call->annotations;
     if (op.atom == OpAtom::kTmaCopy) {
-      // The TMA transaction completes the full barrier of the pipeline
-      // protecting the destination: the op's single write def. A TMA copy
-      // into an unprotected buffer has no barrier to wire and stays a
-      // plain copy for the generic lowering.
+      // The transaction completes the full barrier of the pipeline
+      // protecting the destination. A copy into an unprotected buffer
+      // has no barrier to wire and stays a plain copy.
       if (op.write_def < 0)
         return stmt;
       const PipelineSpec &pipeline = pipelines_[op.write_def];
@@ -1548,6 +1561,13 @@ private:
       ann.Set("is_tma_copy", IntImm(DataType::Int(32), 1));
       return Evaluate(Call(call->dtype, TmaCopyOp(), call->args, std::move(ann),
                            call->span));
+    } else if (op.atom == OpAtom::kCpAsyncCopy) {
+      // Skip the copy's implicit commit_group + wait_group(0):
+      // completion rides the commit entry's deferred arrive instead.
+      ann.Set(attr::kAsyncCopyNoImplicitCommitWait,
+              IntImm(DataType::Int(32), 1));
+      return Evaluate(
+          Call(call->dtype, call->op, call->args, std::move(ann), call->span));
     } else if (op.atom == OpAtom::kTcgen05Gemm) {
       ann.Set("is_tcgen05", IntImm(DataType::Int(32), 1));
       return Evaluate(Call(call->dtype, Tcgen05GemmOp(), call->args,
@@ -1557,8 +1577,8 @@ private:
                << static_cast<int>(op.atom);
   }
 
-  // The op's source guard is NOT applied here: EmitScopeBody folds it into
-  // the entry's guard, combined with any stage boundary guard.
+  // The op's source guard is NOT applied here: EmitScopeBody folds it
+  // into the entry's guard.
   Stmt EmitOp(const RoleCtx &ctx, const OpInfo &op) const {
     Stmt body = RewriteOpStmt(ctx, Substitute(op.stmt, ctx.subs));
     if (op.atom != OpAtom::kSync)
@@ -1566,50 +1586,39 @@ private:
     return body;
   }
 
-  // Emit one (role, scope) body as a flat statement list for the caller
-  // to splice; a SeqStmt is built only where an IfThenElse needs a single
-  // body. `plan` holds the per-entry stage deltas; `loop_var` /
-  // `orig_extent` describe the enclosing loop (undefined for the root),
-  // whose chain level the caller has already pushed.
+  // Emit one (role, scope) body, keeping only entries with stage delta
+  // in [delta_lo, delta_hi] — prologue/epilogue steps select their
+  // slice of the software pipeline this way. `base` is the step
+  // expression of a for scope (an entry at delta d runs iteration
+  // base - d); undefined for the root and for while scopes.
   Array<Stmt> EmitScopeBody(RoleCtx &ctx, ScopeIndex scope_idx,
                             const StagePlan &plan,
-                            const Optional<Var> &loop_var,
-                            const Optional<PrimExpr> &orig_extent,
-                            const Var &orig_loop_var) {
+                            const Optional<PrimExpr> &base,
+                            const Var &orig_loop_var, int delta_lo,
+                            int delta_hi) {
     ScopeSpec &scope = scopes_[scope_idx];
     const std::vector<BodyEntry> &entries = scope.bodies[ctx.role_idx];
     if (entries.empty())
       return {};
-    if (plan.shift > 0) {
-      ICHECK(loop_var.defined())
-          << "ws_schedule: stage offsets require a loop scope, but scope "
-          << scope.id << " is the root";
-    }
 
     Array<Stmt> stmts;
 
-    // Point the substitution and phase chain at entry i's logical
-    // iteration and return its guard: the stage boundary condition
-    // combined with the op's own source guard (substituted with the
-    // shifted iteration and version-rebound like the body). Sync entries
-    // have no source guard.
+    // Point the substitution and phase chain at entry i's iteration
+    // and return its guard (iteration bound + the op's source guard).
     auto focus_entry = [&](size_t i) -> Optional<PrimExpr> {
       Optional<PrimExpr> guard;
-      if (loop_var.defined()) {
+      if (base.defined()) {
         int delta = plan.delta[i];
-        PrimExpr iter =
-            delta == 0 ? PrimExpr(loop_var.value())
-                       : loop_var.value() - IntImm(DataType::Int(32), delta);
+        PrimExpr iter = delta == 0
+                            ? base.value()
+                            : base.value() - IntImm(DataType::Int(32), delta);
         ctx.subs.Set(orig_loop_var, iter);
-        ctx.chain.back().iter = std::move(iter);
-        if (delta > 0)
-          guard = loop_var.value() >= IntImm(DataType::Int(32), delta);
-        if (delta < plan.shift) {
-          PrimExpr upper =
-              loop_var.value() <
-              orig_extent.value() + IntImm(DataType::Int(32), delta);
-          guard = guard.defined() ? guard.value() && upper : upper;
-        }
+        ctx.chain.back().iter = iter;
+        // A prologue step (finite delta window) bounds every entry by
+        // the loop extent, covering loops shorter than their shift;
+        // static bounds fold to constant guards the simplifier removes.
+        if (delta_hi < plan.shift)
+          guard = iter < ctx.chain.back().extent;
       }
       const BodyEntry &e = entries[i];
       if (e.kind == BodyEntry::kOp) {
@@ -1622,17 +1631,15 @@ private:
       }
       return guard;
     };
-    // Unguarded entries append straight to `stmts`; guarded entries keep
-    // emitting into `guarded` while the guard stays structurally
-    // identical, and the run closes as one IfThenElse when it changes.
+    // Runs of entries under a structurally identical guard close as one
+    // IfThenElse.
     Optional<PrimExpr> cur_guard;
     Array<Stmt> guarded;
     StructuralEqual structural_equal;
     auto close_guard = [&]() {
       if (cur_guard.defined() && !guarded.empty()) {
-        stmts.push_back(IfThenElse(
-            cur_guard.value(),
-            guarded.size() == 1 ? guarded[0] : SeqStmt(std::move(guarded))));
+        stmts.push_back(
+            IfThenElse(cur_guard.value(), SeqOrSingle(std::move(guarded))));
       }
       cur_guard = Optional<PrimExpr>();
       guarded = Array<Stmt>();
@@ -1640,6 +1647,8 @@ private:
 
     for (size_t i = 0; i < entries.size(); ++i) {
       const BodyEntry &e = entries[i];
+      if (plan.delta[i] < delta_lo || plan.delta[i] > delta_hi)
+        continue;
       Optional<PrimExpr> guard = focus_entry(i);
       bool reuse = guard.defined() == cur_guard.defined() &&
                    (!guard.defined() ||
@@ -1660,53 +1669,151 @@ private:
       }
     }
     close_guard();
-    // Restore the unshifted iteration for any parent-level use.
-    if (loop_var.defined()) {
-      ctx.subs.Set(orig_loop_var, loop_var.value());
-      ctx.chain.back().iter = loop_var.value();
+    // Restore the steady-state iteration for any parent-level use.
+    if (base.defined()) {
+      ctx.subs.Set(orig_loop_var, base.value());
+      ctx.chain.back().iter = base.value();
     }
     return stmts;
   }
 
+  static Stmt SeqOrSingle(Array<Stmt> stmts) {
+    return stmts.size() == 1 ? stmts[0] : SeqStmt(std::move(stmts));
+  }
+
+  // Emit one child scope for the current role. A stage shift is
+  // unrolled explicitly, so no per-iteration boundary check remains in
+  // the steady-state loop:
+  //   prologue step t (t = 0 .. shift-1): the entries at delta <= t;
+  //   steady state:                       every entry, unguarded;
+  //   epilogue step t (t = 1 .. shift):   the entries at delta >= t.
   Stmt EmitChildScope(RoleCtx &ctx, ScopeIndex scope_idx) {
     ScopeSpec &scope = scopes_[scope_idx];
-    // Matched (MatchKernel): every non-root scope has its kernel loop.
-    const For &orig = scope.orig_loop;
-
     if (scope.bodies[ctx.role_idx].empty())
-      return Stmt();
-
-    // The loop extent may need to grow by the scope's stage shift.
+      return Stmt(); // role does not participate in this scope
     StagePlan plan = PlanStages(ctx.role_idx, scope.bodies[ctx.role_idx]);
+    Stmt out = scope.orig_while.defined()
+                   ? EmitChildScopeWhileLoop(ctx, scope_idx, plan)
+                   : EmitChildScopeForLoop(ctx, scope_idx, plan);
+    // The uniform source guard: false skips the scope in all roles
+    // together.
+    if (scope.guard.defined()) {
+      out = IfThenElse(
+          RewriteOpExpr(ctx, Substitute(scope.guard.value(), ctx.subs)),
+          std::move(out));
+    }
+    return out;
+  }
 
-    Var fresh(orig->loop_var->name_hint, orig->loop_var->dtype);
-    ctx.subs.Set(orig->loop_var, fresh);
+  // For scope: prologue step t runs iterations t - delta, the steady
+  // state covers [shift, extent), and epilogue step t runs iterations
+  // extent + t - 1 - delta iff extent > shift - t. Short and dynamic
+  // extents are handled by the emitted bounds alone; the simplifier
+  // folds the static cases.
+  Stmt EmitChildScopeForLoop(RoleCtx &ctx, ScopeIndex scope_idx,
+                             const StagePlan &plan) {
+    ScopeSpec &scope = scopes_[scope_idx];
+    constexpr int kMaxDelta = std::numeric_limits<int>::max();
+    PrimExpr zero = IntImm(DataType::Int(32), 0);
+
+    const For &orig = scope.orig_loop;
+    const Var &orig_var = orig->loop_var;
+    Var fresh(orig_var->name_hint, orig_var->dtype);
+    ctx.subs.Set(orig_var, fresh);
     PrimExpr extent = Substitute(orig->extent, ctx.subs);
     PrimExpr min = Substitute(orig->min, ctx.subs);
     if (plan.shift > 0) {
-      ICHECK(is_zero(orig->min))
+      ICHECK(is_zero(min))
           << "ws_schedule: stage offsets require 0-based loops";
     }
     ctx.chain.push_back({fresh, extent, min});
+
+    Array<Stmt> result;
+    for (int t = 0; t < plan.shift; ++t) {
+      Array<Stmt> step = EmitScopeBody(
+          ctx, scope_idx, plan, IntImm(DataType::Int(32), t), orig_var, 0, t);
+      for (const Stmt &stmt : step)
+        result.push_back(stmt);
+    }
+
     Array<Stmt> body =
-        EmitScopeBody(ctx, scope_idx, plan, fresh, extent, orig->loop_var);
-    ctx.chain.pop_back();
-    if (body.empty())
-      return Stmt(); // role does not participate in this scope
-    PrimExpr emit_extent = plan.shift > 0
-                               ? extent + IntImm(DataType::Int(32), plan.shift)
-                               : extent;
-    // Preserve the source loop kind (e.g. an unrolled epilogue subtile loop)
-    // and its annotations, minus the consumed scheduling markers.
+        EmitScopeBody(ctx, scope_idx, plan, fresh, orig_var, 0, kMaxDelta);
+    // The steady state covers iterations [shift, extent). Preserve the
+    // source loop kind and annotations, minus the consumed markers.
     Map<String, Any> ann =
-        FilterAnnotations(orig->annotations, [](const String &key) {
-          return key != kWSOpIdKey && key != "num_stages" &&
-                 key.find("tl_pipeline_") != 0;
+        FilterAnnotations(scope.orig_loop->annotations, [](const String &k) {
+          return k != kWSOpIdKey && k != "num_stages" &&
+                 k.find("tl_pipeline_") != 0;
         });
-    return For(fresh, Substitute(orig->min, ctx.subs), std::move(emit_extent),
-               orig->kind,
-               body.size() == 1 ? body[0] : SeqStmt(std::move(body)),
-               std::nullopt, std::move(ann));
+    PrimExpr loop_min =
+        plan.shift > 0 ? PrimExpr(IntImm(DataType::Int(32), plan.shift)) : min;
+    PrimExpr loop_extent =
+        plan.shift > 0 ? max(extent - plan.shift, zero) : extent;
+    result.push_back(For(fresh, std::move(loop_min), std::move(loop_extent),
+                         scope.orig_loop->kind, SeqOrSingle(std::move(body)),
+                         std::nullopt, std::move(ann)));
+
+    for (int t = 1; t <= plan.shift; ++t) {
+      Array<Stmt> step = EmitScopeBody(
+          ctx, scope_idx, plan, extent + IntImm(DataType::Int(32), t - 1),
+          orig_var, t, kMaxDelta);
+      // The step runs iff extent > shift - t.
+      result.push_back(
+          IfThenElse(IntImm(DataType::Int(32), plan.shift - t) < extent,
+                     SeqOrSingle(std::move(step))));
+    }
+    ctx.chain.pop_back();
+    return SeqOrSingle(std::move(result));
+  }
+
+  // While scope: no iteration expression (phases under it are runtime
+  // counters). Prologue steps run under the loop condition and bump a
+  // completed-trip counter; epilogue step t runs iff t <= trips, which
+  // drains exactly what a short loop started.
+  Stmt EmitChildScopeWhileLoop(RoleCtx &ctx, ScopeIndex scope_idx,
+                               const StagePlan &plan) {
+    ScopeSpec &scope = scopes_[scope_idx];
+    constexpr int kMaxDelta = std::numeric_limits<int>::max();
+    PrimExpr zero = IntImm(DataType::Int(32), 0);
+    // The condition is re-evaluated at every use.
+    auto cond = [&]() {
+      return RewriteOpExpr(ctx,
+                           Substitute(scope.orig_while->condition, ctx.subs));
+    };
+
+    Array<Stmt> result;
+    Buffer trips;
+    if (plan.shift > 0) {
+      trips = decl_buffer({IntImm(DataType::Int(32), 1)}, DataType::Int(32),
+                          scope.id + "_trips", "local");
+      result.push_back(AllocBuffer(trips));
+      result.push_back(BufferStore(trips, zero, {zero}));
+    }
+    auto bump_trips = [&]() {
+      return BufferStore(trips, BufferLoad(trips, {zero}) + 1, {zero});
+    };
+
+    for (int t = 0; t < plan.shift; ++t) {
+      Array<Stmt> step = EmitScopeBody(ctx, scope_idx, plan,
+                                       Optional<PrimExpr>(), Var(), 0, t);
+      step.push_back(bump_trips());
+      result.push_back(IfThenElse(cond(), SeqOrSingle(std::move(step))));
+    }
+
+    Array<Stmt> body = EmitScopeBody(ctx, scope_idx, plan, Optional<PrimExpr>(),
+                                     Var(), 0, kMaxDelta);
+    if (plan.shift > 0)
+      body.push_back(bump_trips());
+    result.push_back(While(cond(), SeqOrSingle(std::move(body))));
+
+    for (int t = 1; t <= plan.shift; ++t) {
+      Array<Stmt> step = EmitScopeBody(
+          ctx, scope_idx, plan, Optional<PrimExpr>(), Var(), t, kMaxDelta);
+      result.push_back(
+          IfThenElse(IntImm(DataType::Int(32), t) <= BufferLoad(trips, {zero}),
+                     SeqOrSingle(std::move(step))));
+    }
+    return SeqOrSingle(std::move(result));
   }
 
   Stmt EmitRole(RoleIndex role_idx) {
@@ -1723,7 +1830,7 @@ private:
                          IntImm(DataType::Int(32), role.NregAction())})));
     }
 
-    // Materialize runtime phase counters where linearization is unsound.
+    // Runtime phase counters where linearization is unsound.
     for (PipelineIndex p = 0; p < static_cast<PipelineIndex>(pipelines_.size());
          ++p) {
       bool used = false;
@@ -1745,18 +1852,20 @@ private:
 
     ScopeIndex root = ScopeIndexOf(kWSRootScopeId);
     StagePlan plan = PlanStages(role_idx, scopes_[root].bodies[role_idx]);
-    Array<Stmt> body = EmitScopeBody(ctx, root, plan, Optional<Var>(),
-                                     Optional<PrimExpr>(), Var());
+    ICHECK_EQ(plan.shift, 0)
+        << "ws_schedule: stage offsets require a loop scope; role " << role.name
+        << " has offset sync stages in its root body";
+    Array<Stmt> body = EmitScopeBody(ctx, root, plan, Optional<PrimExpr>(),
+                                     Var(), 0, std::numeric_limits<int>::max());
     ICHECK(!body.empty()) << "ws_schedule: role " << role.name
                           << " has an empty root body";
     for (const Stmt &s : body)
       stmts.push_back(s);
-    // The role branch is one arm of an IfThenElse: inline seq-wrap.
-    return stmts.size() == 1 ? stmts[0] : SeqStmt(std::move(stmts));
+    return SeqOrSingle(std::move(stmts));
   }
 
-  // Idle warps execute their warpgroup's register request
-  // (warpgroup_nreg_); a no-op when the warpgroup requests nothing.
+  // Idle warps execute their warpgroup's register request; a no-op
+  // when it requests nothing.
   Stmt EmitIdle(int nreg) const {
     if (nreg == 0)
       return Evaluate(IntImm(DataType::Int(32), 0));
@@ -1766,9 +1875,9 @@ private:
               IntImm(DataType::Int(32), nreg >= kNregIncThreshold ? 1 : 0)}));
   }
 
-  // Emit the `if (tx < ...)` role branches ordered by warp range, filling
-  // gaps with idle branches — split where the warpgroup register request
-  // changes, so every idle warp executes exactly its warpgroup's request.
+  // Emit the `if (tx < ...)` role branches ordered by warp range,
+  // filling gaps with idle branches split by warpgroup register
+  // request.
   Stmt EmitRoleBranches() {
     Array<Stmt> branches;
     Array<PrimExpr> conds;
@@ -1801,9 +1910,8 @@ private:
     return body;
   }
 
-  // Rebuild the block around the emitted body: versioned buffer
-  // replacements, barrier allocations with their derived init counts, and
-  // the consumed schedule annotation removed.
+  // Rebuild the block: versioned buffers, barrier allocations with
+  // their init counts, the consumed schedule annotation removed.
   SBlock RebuildBlock(Stmt body) {
     Array<Buffer> allocs;
     for (const Buffer &buf : block_->alloc_buffers) {
@@ -1839,6 +1947,24 @@ private:
         barrier_init.Set(var, counts);
     }
     ann.Set("barrier_init", std::move(barrier_init));
+    // Annotated layouts of versioned buffers gain the version
+    // dimension too.
+    if (auto lm_ref = ann.Get(attr::kLayoutMap)) {
+      if (auto lm_opt = lm_ref.value().as<Map<Var, Layout>>()) {
+        Map<Var, Layout> layout_map = lm_opt.value();
+        bool changed = false;
+        for (const auto &[orig, versioned] : versioned_) {
+          auto entry = layout_map.Get(orig->data);
+          if (!entry.has_value())
+            continue;
+          layout_map.Set(orig->data,
+                         entry.value()->Expand({versioned->shape[0]}));
+          changed = true;
+        }
+        if (changed)
+          ann.Set(attr::kLayoutMap, layout_map);
+      }
+    }
     n->annotations = std::move(ann);
     return new_block;
   }
@@ -1853,18 +1979,15 @@ private:
   std::vector<PipelineSpec> pipelines_;
   std::vector<ScopeSpec> scopes_;
   std::map<String, OpInfo> ops_;
-  // Per-warpgroup register request (index = warp / 4, 0 = none), agreed
-  // on by every covering role; idle warps execute it too.
+  // Per-warpgroup register request (index = warp / 4, 0 = none).
   std::vector<int> warpgroup_nreg_;
   BufferDefMap buffer_pipeline_;
   BufferVersionMap versioned_;
 };
 
-// Rewrite every schedule-annotated SBlock in place — a function may hold
-// several kernels, each with its own schedule. Tracking the threadIdx.x
-// binding on the way down hands each materializer the binding that
-// actually encloses its block, and exactly that binding is widened to
-// that schedule's warp count on the way back up.
+// Rewrite every schedule-annotated SBlock in place — a function may
+// hold several kernels, each with its own schedule. The enclosing
+// threadIdx.x binding is widened to each schedule's warp count.
 class WSScheduleRewriter : public StmtMutator {
 public:
   explicit WSScheduleRewriter(Optional<Target> target)
@@ -1886,8 +2009,7 @@ public:
         thread_iv_ = {};
         return attr;
       }
-      // Warp roles partition threadIdx.x only: a scheduled block under a
-      // multi-dimensional thread launch would mis-assign warps.
+      // Warp roles partition threadIdx.x only.
       if (iv->thread_tag == "threadIdx.y" || iv->thread_tag == "threadIdx.z") {
         bool saved = multi_dim_threads_;
         multi_dim_threads_ = multi_dim_threads_ || !is_one(op->value);
@@ -1925,10 +2047,7 @@ private:
   int new_extent_ = -1;
 };
 
-// Schedule and op ids come together (both present or neither): a function
-// without the schedule annotation is returned untouched, and the
-// materializer consumes the ids of a scheduled kernel as it clones the
-// statements.
+// A function without a schedule annotation is returned untouched.
 PrimFunc MaterializeWSScheduleImpl(PrimFunc f) {
   WSScheduleRewriter rewriter(f->GetAttr<Target>(tvm::attr::kTarget));
   Stmt body = rewriter(f->body);

@@ -13,24 +13,6 @@ PASS_CFG = {
 }
 
 
-@T.macro
-def get_num_waves(block_id, num_blocks, sm_num):
-    return T.ceildiv(num_blocks - block_id, sm_num)
-
-
-# The FA4 static persistent scheduler's tile order: the q block index is the
-# minor dimension, then head, then batch (flash_attn/cute/tile_scheduler.py,
-# StaticPersistentTileScheduler.get_current_work).
-@T.macro
-def get_attn_tile(block_id, wave_id, sm_num, q_blocks, heads):
-    tile_id = block_id + wave_id * sm_num
-    bx = tile_id % q_blocks
-    hn = tile_id // q_blocks
-    by = hn % heads
-    bz = hn // heads
-    return bx, by, bz
-
-
 @tilelang.jit(pass_configs=PASS_CFG)
 def flash_attention(
     Q,
@@ -54,7 +36,6 @@ def flash_attention(
 
     q_blocks = T.ceildiv(seq_len, block_M)
     loop_range = T.ceildiv(seq_len, block_N)
-    num_blocks = q_blocks * heads * batch
     sm_num = driver.get_num_sms()
     scale = (1.0 / dim) ** 0.5 * 1.44269504
     assert dim == 128
@@ -88,44 +69,30 @@ def flash_attention(
         O_local = T.alloc_fragment((block_M, store_block_N), accum_dtype)
         inv_sum = T.alloc_fragment((block_M,), accum_dtype)
 
-        # The schedulable task is the tile op; instructions reference the
-        # stable ids attached in the kernel body (a T.WSID entry in the
-        # annotations= of tile ops and loops — every statement of a
-        # scope carries its own id). The pass derives read/write sets
-        # itself; the schedule carries no metadata.
-        #
+        # The persistent tile scheduler, in FA4's static tile order: the q
+        # block index is the minor dimension, then head, then batch
+        # (m = q block, n = head-batch). State is per thread; every role
+        # runs its own copy of the init / advance ops.
+        sched = T.PersistentTileScheduler(q_blocks, heads * batch, name="sched")
+
         # Four roles (an FA4-style split, minus 2-CTA):
-        #  - Softmax owns the S -> P transform and the running statistics.
-        #    It hands the per-row rescale factor to Correction through the
-        #    "scale" pipeline immediately after row-max, and publishes P
-        #    before the row-sum, so neither O correction nor the reduction
-        #    sits on the tensor-core critical path.
+        #  - Softmax owns the S -> P transform and the running
+        #    statistics, handing the rescale factor to Correction right
+        #    after row-max and publishing P before the row-sum.
         #  - Correction owns the O accumulator: the per-iteration rescale
-        #    (skipped entirely on the stale-max fast path) and the final
-        #    normalize + store, in store_block_N-column TMEM slices.
+        #    (skipped on the stale-max fast path) and the final
+        #    normalize + store.
         #  - TMA feeds Q/K/V; MMA issues both GEMMs.
         #
-        # The kernel is persistent, following FA4's static persistent
-        # scheduler: one CTA per SM, each looping over its q tiles (block
-        # minor, then head, then batch). The q pipeline has
-        # num_persistent_stages versions so the next wave's Q load overlaps
-        # the current wave.
-        #
-        # Sync stages express intra-role software pipelining: acquire/commit
-        # (and wait/release) of a pipeline pair up at one stage, and the
-        # instructions between them run at that stage's iteration offset.
-        # MMA's PV-side spans sit at stage 1, one iteration behind its QK
-        # span: the materialized MMA loop runs an extra iteration and issues
-        # QK(i) before PV(i-1), so the tensor core computes S(i) while
-        # Softmax is still turning S(i-1) into P(i-1).
+        # MMA's PV spans sit at stage 1, one iteration behind QK: the
+        # tensor core computes S(i) while Softmax turns S(i-1) into
+        # P(i-1).
         #
         # The acc pipeline cycles loop_range + 1 times per wave on both
-        # sides: Correction's per-iteration rescales plus its final
-        # normalize, matched by MMA's PV consumes plus one wave-level
-        # consume pairing the normalize commit. Without the extra consume
-        # the full/empty parity would diverge from the second wave on. Both
-        # roles touch acc at two loop depths, so the pass tracks their acc
-        # phases with runtime counters.
+        # sides (Correction's rescales + normalize vs MMA's PV consumes
+        # + one wave-level consume), keeping the parity aligned. Both
+        # roles touch acc at two loop depths, so their acc phases use
+        # runtime counters.
         T.annotate_ws_schedule(
             T.WSSchedule(
                 num_warps=12,
@@ -166,9 +133,8 @@ def flash_attention(
                                 "gemm_QK",
                                 T.WSSync.producer_commit("score", stage=0),
                                 T.WSSync.consumer_release("k", stage=0),
-                                # The PV spans run at stage 1: this loop
-                                # iteration issues PV of the PREVIOUS kv
-                                # step, after QK of the current one.
+                                # Stage 1: PV of the PREVIOUS kv step,
+                                # after QK of the current one.
                                 T.WSSync.consumer_wait("prob", stage=1),
                                 T.WSSync.consumer_wait("v", stage=1),
                                 T.WSSync.consumer_wait("acc", stage=1),
@@ -212,25 +178,31 @@ def flash_attention(
                             ],
                         },
                     ),
-                    # The persistent loop over this CTA's q tiles.
+                    # The persistent loop: a while scope. It has no
+                    # iteration expression, so pipelines synced under it
+                    # use runtime phase counters. tile_idx / sched_next
+                    # touch no pipeline buffers, so several roles place
+                    # them — each runs its own copy.
                     T.WSScope(
-                        "loop_wave_id",
+                        "loop_wave",
                         {
                             "TMA": [
+                                "tile_idx",
                                 T.WSSync.producer_acquire("q"),
                                 "copy_Q_g2s",
                                 T.WSSync.producer_commit("q"),
                                 "loop_kv",
+                                "sched_next",
                             ],
                             "MMA": [
                                 T.WSSync.consumer_wait("q"),
                                 "loop_kv",
                                 T.WSSync.consumer_release("q"),
-                                # Consume the version produced by
-                                # Correction's normalize commit, keeping
+                                # Pairs the normalize commit, keeping
                                 # acc's per-wave cycle counts equal.
                                 T.WSSync.consumer_wait("acc"),
                                 T.WSSync.consumer_release("acc"),
+                                "sched_next",
                             ],
                             "Softmax": [
                                 "init_max",
@@ -239,8 +211,10 @@ def flash_attention(
                                 T.WSSync.producer_acquire("stats"),
                                 "copy_logsum_s",
                                 T.WSSync.producer_commit("stats"),
+                                "sched_next",
                             ],
                             "Correction": [
+                                "tile_idx",
                                 "loop_kv",
                                 T.WSSync.consumer_wait("stats"),
                                 "copy_inv_sum",
@@ -250,146 +224,150 @@ def flash_attention(
                                 T.WSSync.producer_commit("acc"),
                                 T.WSSync.consumer_release("stats"),
                                 "copy_O_s2g",
+                                "sched_next",
                             ],
                         },
                     ),
                     T.WSScope(
                         T.WSScope.ROOT,
                         {
-                            "TMA": ["loop_wave_id"],
-                            "MMA": ["loop_wave_id"],
-                            "Softmax": ["loop_wave_id"],
-                            "Correction": ["loop_wave_id"],
+                            "TMA": ["sched_init", "loop_wave"],
+                            "MMA": ["sched_init", "loop_wave"],
+                            "Softmax": ["sched_init", "loop_wave"],
+                            "Correction": ["sched_init", "loop_wave"],
                         },
                     ),
                 ],
             )
         )
 
-        num_waves = get_num_waves(block_id, num_blocks, sm_num)
+        with T.ws_op("sched_init"):
+            sched.init(block_id)
 
-        for wave_id in T.Pipelined(
-            num_waves,
-            num_stages=num_persistent_stages,
-            annotations={T.WSID: "loop_wave_id"},
-        ):
-            bx, by, bz = get_attn_tile(block_id, wave_id, sm_num, q_blocks, heads)
+        with T.ws_op("loop_wave"):
+            while sched.valid():
+                with T.ws_op("tile_idx"):
+                    bx = sched.m_idx
+                    hn = sched.n_idx
+                    by = hn % heads
+                    bz = hn // heads
 
-            T.copy(
-                Q[bz, bx * block_M : (bx + 1) * block_M, by, :],
-                Q_shared,
-                annotations={T.WSID: "copy_Q_g2s"},
-            )
-            T.fill(scores_max, -T.infinity(accum_dtype), annotations={T.WSID: "init_max"})
-            T.fill(logsum, 0, annotations={T.WSID: "init_logsum"})
-
-            for k in T.Pipelined(loop_range, num_stages=1, annotations={T.WSID: "loop_kv"}):
                 T.copy(
-                    K[bz, k * block_N : (k + 1) * block_N, by, :],
-                    K_shared,
-                    annotations={T.WSID: "copy_K_g2s"},
-                )
-                T.copy(
-                    V[bz, k * block_N : (k + 1) * block_N, by, :],
-                    V_shared,
-                    annotations={T.WSID: "copy_V_g2s"},
-                )
-
-                T.gemm(
+                    Q[bz, bx * block_M : (bx + 1) * block_M, by, :],
                     Q_shared,
-                    K_shared,
-                    S_tmem,
-                    transpose_B=True,
-                    clear_accum=True,
-                    annotations={T.WSID: "gemm_QK"},
+                    annotations={T.WSID: "copy_Q_g2s"},
                 )
+                T.fill(scores_max, -T.infinity(accum_dtype), annotations={T.WSID: "init_max"})
+                T.fill(logsum, 0, annotations={T.WSID: "init_logsum"})
 
-                T.copy(S_tmem, S_reg, annotations={T.WSID: "copy_S_t2r"})
-                T.copy(scores_max, scores_max_prev, annotations={T.WSID: "copy_max_prev"})
-                T.reduce_max(S_reg, scores_max, dim=1, clear=False, annotations={T.WSID: "reduce_max"})
-                for i in T.Parallel(block_M, annotations={T.WSID: "stale_max"}):
-                    # Stale-max fast path: when the max moves by less
-                    # than 8 exponent steps, keep the previous max so
-                    # the rescale factor is exactly 1 and Correction can
-                    # skip the whole O read-modify-write.
-                    scores_rescale[i] = T.if_then_else(
-                        (scores_max_prev[i] - scores_max[i]) * scale >= -8.0,
-                        1.0,
-                        T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale),
+                for k in T.Pipelined(loop_range, num_stages=1, annotations={T.WSID: "loop_kv"}):
+                    T.copy(
+                        K[bz, k * block_N : (k + 1) * block_N, by, :],
+                        K_shared,
+                        annotations={T.WSID: "copy_K_g2s"},
                     )
-                    scores_max[i] = T.if_then_else(
-                        (scores_max_prev[i] - scores_max[i]) * scale >= -8.0,
-                        scores_max_prev[i],
-                        scores_max[i],
+                    T.copy(
+                        V[bz, k * block_N : (k + 1) * block_N, by, :],
+                        V_shared,
+                        annotations={T.WSID: "copy_V_g2s"},
                     )
 
-                T.copy(scores_rescale, scale_shared, annotations={T.WSID: "copy_scale_s"})
+                    T.gemm(
+                        Q_shared,
+                        K_shared,
+                        S_tmem,
+                        transpose_B=True,
+                        clear_accum=True,
+                        annotations={T.WSID: "gemm_QK"},
+                    )
 
-                # Warp-local vote: each warp owns 32 rows of O, so it
-                # can skip its own read-modify-write when all its
-                # rescale factors are 1. At k == 0 the factor is 0 and
-                # O_tmem is garbage, but PV(0) clears the accumulator
-                # anyway. The vote binds a scalar consumed only by the
-                # rescale guard; it guards the op body alone — the
-                # schedule's acc/scale sync entries stay unconditional.
-                with T.ws_op("rescale_vote"):
-                    should_rescale = T.any_sync(scale_shared[tid % block_M] < 1.0)
-                if should_rescale != 0:
-                    for s in T.unroll(T.ceildiv(dim, store_block_N), annotations={T.WSID: "rescale_O"}):
-                        T.copy(
-                            O_tmem[:, s * store_block_N : (s + 1) * store_block_N],
-                            O_local,
+                    T.copy(S_tmem, S_reg, annotations={T.WSID: "copy_S_t2r"})
+                    T.copy(scores_max, scores_max_prev, annotations={T.WSID: "copy_max_prev"})
+                    T.reduce_max(S_reg, scores_max, dim=1, clear=False, annotations={T.WSID: "reduce_max"})
+                    for i in T.Parallel(block_M, annotations={T.WSID: "stale_max"}):
+                        # Stale-max fast path: when the max moves by less
+                        # than 8 exponent steps, keep the previous max so
+                        # the rescale factor is exactly 1 and Correction can
+                        # skip the whole O read-modify-write.
+                        scores_rescale[i] = T.if_then_else(
+                            (scores_max_prev[i] - scores_max[i]) * scale >= -8.0,
+                            1.0,
+                            T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale),
                         )
-                        for i, j in T.Parallel(block_M, store_block_N):
-                            O_local[i, j] *= scale_shared[i]
-                        T.copy(
-                            O_local,
-                            O_tmem[:, s * store_block_N : (s + 1) * store_block_N],
+                        scores_max[i] = T.if_then_else(
+                            (scores_max_prev[i] - scores_max[i]) * scale >= -8.0,
+                            scores_max_prev[i],
+                            scores_max[i],
                         )
 
-                # Affine first (packed f32x2 FMA), exp2 separately.
-                for i in T.Parallel(block_M, annotations={T.WSID: "exp_scale"}):
-                    for j in T.vectorized(block_N):
-                        S_reg[i, j] = S_reg[i, j] * scale + (-scores_max[i] * scale)
-                for i, j in T.Parallel(block_M, block_N, annotations={T.WSID: "softmax_exp"}):
-                    S_reg[i, j] = T.exp2(S_reg[i, j])
+                    T.copy(scores_rescale, scale_shared, annotations={T.WSID: "copy_scale_s"})
 
-                T.copy(S_reg, P_cast, annotations={T.WSID: "copy_P_cast"})
-                T.copy(P_cast, P_tmem, annotations={T.WSID: "copy_P_r2t"})
+                    # Warp-local vote: each warp owns 32 rows of O and
+                    # skips its read-modify-write when all its rescale
+                    # factors are 1 (at k == 0 PV clears the accumulator
+                    # anyway). The guard covers the op body alone; sync
+                    # entries stay unconditional.
+                    with T.ws_op("rescale_vote"):
+                        should_rescale = T.any_sync(scale_shared[tid % block_M] < 1.0)
+                    if should_rescale != 0:
+                        for s in T.unroll(T.ceildiv(dim, store_block_N), annotations={T.WSID: "rescale_O"}):
+                            T.copy(
+                                O_tmem[:, s * store_block_N : (s + 1) * store_block_N],
+                                O_local,
+                            )
+                            for i, j in T.Parallel(block_M, store_block_N):
+                                O_local[i, j] *= scale_shared[i]
+                            T.copy(
+                                O_local,
+                                O_tmem[:, s * store_block_N : (s + 1) * store_block_N],
+                            )
 
-                T.reduce_sum(S_reg, scores_sum, dim=1, annotations={T.WSID: "reduce_sum"})
-                for i in T.Parallel(block_M, annotations={T.WSID: "update_logsum"}):
-                    logsum[i] = logsum[i] * scores_rescale[i] + scores_sum[i]
+                    # Affine first (packed f32x2 FMA), exp2 separately.
+                    for i in T.Parallel(block_M, annotations={T.WSID: "exp_scale"}):
+                        for j in T.vectorized(block_N):
+                            S_reg[i, j] = S_reg[i, j] * scale + (-scores_max[i] * scale)
+                    for i, j in T.Parallel(block_M, block_N, annotations={T.WSID: "softmax_exp"}):
+                        S_reg[i, j] = T.exp2(S_reg[i, j])
 
-                T.gemm(
-                    P_tmem,
-                    V_shared,
-                    O_tmem,
-                    clear_accum=k == 0,
-                    annotations={T.WSID: "gemm_PV"},
-                )
+                    T.copy(S_reg, P_cast, annotations={T.WSID: "copy_P_cast"})
+                    T.copy(P_cast, P_tmem, annotations={T.WSID: "copy_P_r2t"})
 
-            T.copy(logsum, logsum_shared, annotations={T.WSID: "copy_logsum_s"})
-            T.copy(logsum_shared, inv_sum, annotations={T.WSID: "copy_inv_sum"})
-            # One reciprocal per row, reused across all output slices.
-            for i in T.Parallel(block_M, annotations={T.WSID: "recip_sum"}):
-                inv_sum[i] = 1.0 / inv_sum[i]
-            for s in T.unroll(T.ceildiv(dim, store_block_N), annotations={T.WSID: "normalize_O"}):
+                    T.reduce_sum(S_reg, scores_sum, dim=1, annotations={T.WSID: "reduce_sum"})
+                    for i in T.Parallel(block_M, annotations={T.WSID: "update_logsum"}):
+                        logsum[i] = logsum[i] * scores_rescale[i] + scores_sum[i]
+
+                    T.gemm(
+                        P_tmem,
+                        V_shared,
+                        O_tmem,
+                        clear_accum=k == 0,
+                        annotations={T.WSID: "gemm_PV"},
+                    )
+
+                T.copy(logsum, logsum_shared, annotations={T.WSID: "copy_logsum_s"})
+                T.copy(logsum_shared, inv_sum, annotations={T.WSID: "copy_inv_sum"})
+                # One reciprocal per row, reused across all output slices.
+                for i in T.Parallel(block_M, annotations={T.WSID: "recip_sum"}):
+                    inv_sum[i] = 1.0 / inv_sum[i]
+                for s in T.unroll(T.ceildiv(dim, store_block_N), annotations={T.WSID: "normalize_O"}):
+                    T.copy(
+                        O_tmem[:, s * store_block_N : (s + 1) * store_block_N],
+                        O_local,
+                    )
+                    for i, j in T.Parallel(block_M, store_block_N):
+                        O_local[i, j] *= inv_sum[i]
+                    T.copy(
+                        O_local,
+                        O_shared[:, s * store_block_N : (s + 1) * store_block_N],
+                    )
                 T.copy(
-                    O_tmem[:, s * store_block_N : (s + 1) * store_block_N],
-                    O_local,
+                    O_shared,
+                    Output[bz, bx * block_M : (bx + 1) * block_M, by, :],
+                    annotations={T.WSID: "copy_O_s2g"},
                 )
-                for i, j in T.Parallel(block_M, store_block_N):
-                    O_local[i, j] *= inv_sum[i]
-                T.copy(
-                    O_local,
-                    O_shared[:, s * store_block_N : (s + 1) * store_block_N],
-                )
-            T.copy(
-                O_shared,
-                Output[bz, bx * block_M : (bx + 1) * block_M, by, :],
-                annotations={T.WSID: "copy_O_s2g"},
-            )
+
+                with T.ws_op("sched_next"):
+                    sched.next_tile()
 
     return Output
 
@@ -417,7 +395,6 @@ def flash_attention_ws(
 
     q_blocks = T.ceildiv(seq_len, block_M)
     loop_range = T.ceildiv(seq_len, block_N)
-    num_blocks = q_blocks * heads * batch
     sm_num = driver.get_num_sms()
     scale = (1.0 / dim) ** 0.5 * 1.44269504
     assert dim == 128
@@ -468,10 +445,17 @@ def flash_attention_ws(
         O_local = T.alloc_fragment((block_M, store_block_N), accum_dtype)
         inv_sum = T.alloc_fragment((block_M,), accum_dtype)
 
+        # Scheduler state is per thread (FA4's static tile order: q block
+        # minor, then head, then batch): init once, then every role runs
+        # its own `while sched.valid()` loop at its own pace, reading
+        # sched.current_iter as the wave clock.
+        sched = T.PersistentTileScheduler(q_blocks, heads * batch, name="sched")
+        sched.init(block_id)
+
         if tid < 128:  # warps 0-3: online softmax
             T.set_max_nreg(224, 1)
-            num_waves = get_num_waves(block_id, num_blocks, sm_num)
-            for wave_id in T.serial(num_waves):
+            while sched.valid():
+                wave_id = sched.current_iter
                 T.fill(scores_max, -T.infinity(accum_dtype))
                 T.fill(logsum, 0)
 
@@ -526,12 +510,15 @@ def flash_attention_ws(
                 T.mbarrier_wait_parity(stats_empty[0], (wave_id & 1) ^ 1)
                 T.copy(logsum, logsum_shared)
                 T.mbarrier_arrive(stats_full[0])
+                sched.next_tile()
 
         elif tid < 256:  # warps 4-7: O correction + epilogue
             T.set_max_nreg(80, 0)
-            num_waves = get_num_waves(block_id, num_blocks, sm_num)
-            for wave_id in T.serial(num_waves):
-                bx, by, bz = get_attn_tile(block_id, wave_id, sm_num, q_blocks, heads)
+            while sched.valid():
+                wave_id = sched.current_iter
+                bx = sched.m_idx
+                by = sched.n_idx % heads
+                bz = sched.n_idx // heads
 
                 for k in T.serial(loop_range):
                     g = wave_id * loop_range + k
@@ -583,12 +570,15 @@ def flash_attention_ws(
                 T.mbarrier_arrive(stats_empty[0])
                 T.mbarrier_arrive(acc_full[0])
                 T.copy(O_shared, Output[bz, bx * block_M : (bx + 1) * block_M, by, :])
+                sched.next_tile()
 
         elif tid < 288:  # warp 8: TMA
             T.set_max_nreg(40, 0)
-            num_waves = get_num_waves(block_id, num_blocks, sm_num)
-            for wave_id in T.serial(num_waves):
-                bx, by, bz = get_attn_tile(block_id, wave_id, sm_num, q_blocks, heads)
+            while sched.valid():
+                wave_id = sched.current_iter
+                bx = sched.m_idx
+                by = sched.n_idx % heads
+                bz = sched.n_idx // heads
 
                 q_stage = wave_id % num_persistent_stages
                 T.mbarrier_wait_parity(q_empty[q_stage], ((wave_id // num_persistent_stages) & 1) ^ 1)
@@ -617,11 +607,12 @@ def flash_attention_ws(
                         barrier=v_full[stage],
                     )
                     T.mbarrier_arrive(v_full[stage])
+                sched.next_tile()
 
         elif tid < 320:  # warp 9: tensor-core issue
             T.set_max_nreg(40, 0)
-            num_waves = get_num_waves(block_id, num_blocks, sm_num)
-            for wave_id in T.serial(num_waves):
+            while sched.valid():
+                wave_id = sched.current_iter
                 q_stage = wave_id % num_persistent_stages
                 T.mbarrier_wait_parity(q_full[q_stage], (wave_id // num_persistent_stages) & 1)
                 # PV runs one software-pipeline stage behind QK: QK(i) is
@@ -664,6 +655,7 @@ def flash_attention_ws(
                 c_last = wave_id * (loop_range + 1) + loop_range
                 T.mbarrier_wait_parity(acc_full[0], c_last & 1)
                 T.tcgen05_mma_arrive(acc_empty[0])
+                sched.next_tile()
 
         else:  # warps 10-11: idle register donors
             T.set_max_nreg(40, 0)
