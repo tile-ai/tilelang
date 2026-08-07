@@ -26,12 +26,15 @@ def _gemm_kernel(threads):
     return main
 
 
-@tilelang.testing.requires_rocm
+@tilelang.testing.requires_cdna
 def test_sub_wavefront_block_size_raises_instead_of_crashing():
     """A block narrower than one wavefront used to abort the process with SIGFPE.
 
     `block_size / 64` floors to zero warps on CDNA, and the resulting
     `M % (m_warp * kMPerWarp)` divided by zero. It must be a normal error.
+
+    CDNA-only: 32 threads is a full wavefront on RDNA, so the guard correctly
+    does not fire there.
     """
     with pytest.raises(Exception, match="wavefront"):
         tilelang.compile(_gemm_kernel(32), target="hip")
