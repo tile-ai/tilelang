@@ -1022,8 +1022,8 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
     # =========================================================================
 
     def _pythonic_expr(self, expr: tvm.tirx.PrimExpr) -> str:
-        """Convert TVM expression to Python string."""
-        return pythonic_expr(expr, self._TYPE_MAP, floor_div_op="//")
+        """Convert TVM expression to Python string, ignoring casts."""
+        return pythonic_expr(expr, self._TYPE_MAP, ignore_cast=True, floor_div_op="//")
 
     def _generate_cubin_cluster_arg(self, cluster_dims: list[Any] | None) -> str:
         """Render the optional CuTeDSL launch cluster argument."""
