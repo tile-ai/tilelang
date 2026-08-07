@@ -613,13 +613,23 @@ void CodeGenTileLangHIP::PrintVecElemLoad(const std::string &vec, DataType t,
   }
 
   static const char access[] = {'x', 'y', 'z', 'w'};
-  ICHECK(i >= 0 && i < (t.is_float4()                        ? 32
+  bool is_packed_bool = t.is_vector_bool() && t.lanes() >= 8;
+  bool is_packed_int4 = t.bits() == 4 && (t.is_int() || t.is_uint());
+  ICHECK(i >= 0 && i < (is_packed_bool                       ? t.lanes()
+                        : is_packed_int4                     ? t.lanes()
+                        : t.is_float4()                      ? 32
                         : t.bits() == 8                      ? 16
                         : (t.lanes() == 16)                  ? 16
                         : (t.lanes() == 32)                  ? 32
                         : (t.bits() == 16 || t.bits() == 32) ? 8
                                                              : 4));
-  if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
+  if (is_packed_bool) {
+    std::ostringstream packed_byte;
+    packed_byte << "((const unsigned char*)(&(" << vec << ")))[" << i / 8
+                << "]";
+    os << "((static_cast<unsigned int>(" << packed_byte.str() << ") >> "
+       << i % 8 << ") & 0x01u)";
+  } else if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
     std::string type_name = t.is_int() ? "char" : "unsigned char";
     if (t.lanes() == 2 || t.lanes() == 3) {
       os << vec << "." << access[i % t.lanes()];
@@ -627,9 +637,6 @@ void CodeGenTileLangHIP::PrintVecElemLoad(const std::string &vec, DataType t,
       std::string ac = t.lanes() == 4 ? vec : (vec + "." + access[i / 4]);
       os << "((" << type_name << ")(" << ac << " >> " << i % 4 * 8 << "))";
     }
-  } else if (t.is_float4()) {
-    os << "((fp4_e2_2_t*)(&(" << vec << ")))[" << i / 2 << "]."
-       << ((i & 1) ? "y()" : "x()");
   } else if ((t.lanes() == 16 || t.lanes() == 32) && t.bits() == 32 &&
              t.is_float()) {
     // float32x16/float32x32: __attribute__((__vector_size__(...))) supports
@@ -644,6 +651,46 @@ void CodeGenTileLangHIP::PrintVecElemLoad(const std::string &vec, DataType t,
   } else if (t.is_bfloat16()) {
     os << "((bfloat16x2*)(&(" << vec << "." << access[i / 2] << ")))->"
        << access[i % 2];
+  } else if (is_packed_int4) {
+    std::ostringstream packed_byte;
+    packed_byte << "((const unsigned char*)(&(" << vec << ")))[" << i / 2
+                << "]";
+    int shift = i % 2 * 4;
+    if (t.is_uint()) {
+      os << "((static_cast<unsigned int>(" << packed_byte.str() << ") >> "
+         << shift << ") & 0x0fu)";
+    } else {
+      os << "((static_cast<int>((static_cast<unsigned int>("
+         << packed_byte.str() << ") >> " << shift << ") & 0x0fu) ^ 8) - 8)";
+    }
+  } else if (t.is_float8() && !t.is_float8_e8m0fnu()) {
+    if (t.lanes() == 2) {
+      os << "tl_fp8x2_get_lane<" << GetFP8Type(t.element_of()) << ">(" << vec
+         << ", " << i << ")";
+      return;
+    }
+    std::string element = vec;
+    int lanes = t.lanes();
+    int lane = i;
+    while (lanes > 4) {
+      int group_size = lanes / 2;
+      element += lane < group_size ? ".x" : ".y";
+      lane %= group_size;
+      lanes = group_size;
+    }
+    element += "." + std::string(1, access[lane]);
+    os << element;
+  } else if (t.is_float4()) {
+    std::string element = vec;
+    int lanes = t.lanes();
+    int lane = i;
+    while (lanes > 2) {
+      int group_size = lanes / 2;
+      element += lane < group_size ? ".x" : ".y";
+      lane %= group_size;
+      lanes = group_size;
+    }
+    os << element << (lane == 0 ? ".x()" : ".y()");
   } else if (t.lanes() > 4 && t.lanes() <= 8) {
     std::string type_name;
     if (t.bits() == 16) {
@@ -674,28 +721,41 @@ void CodeGenTileLangHIP::PrintVecElemStore(const std::string &vec, DataType t,
   this->PrintIndent();
   static const char access[] = {'x', 'y', 'z', 'w'};
 
-  ICHECK(i >= 0 && i < (t.is_float4()                        ? 32
+  bool is_packed_bool = t.is_vector_bool() && t.lanes() >= 8;
+  bool is_packed_int4 = t.bits() == 4 && (t.is_int() || t.is_uint());
+  ICHECK(i >= 0 && i < (is_packed_bool                       ? t.lanes()
+                        : is_packed_int4                     ? t.lanes()
+                        : t.is_float4()                      ? 32
                         : t.bits() == 8                      ? 16
                         : (t.lanes() == 16)                  ? 16
                         : (t.lanes() == 32)                  ? 32
                         : (t.bits() == 16 || t.bits() == 32) ? 8
                                                              : 4));
-  if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
+  if (is_packed_bool) {
+    std::ostringstream packed_byte;
+    packed_byte << "((unsigned char*)(&(" << vec << ")))[" << i / 8 << "]";
+    stream << packed_byte.str() << " = ";
+    if (i % 8 != 0) {
+      stream << "(" << packed_byte.str() << " & ~(0x01u << " << i % 8
+             << ")) | ";
+    }
+    stream << "((static_cast<unsigned int>(" << value << ") & 0x01u) << "
+           << i % 8 << ");\n";
+  } else if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
     if (t.lanes() == 2 || t.lanes() == 3) {
       stream << vec << '.' << access[i % t.lanes()] << "=" << "(" << value
              << ");\n";
     } else {
       std::string ac = t.lanes() == 4 ? vec : (vec + "." + access[i / 4]);
       stream << ac << "=";
-      // Do not read the first undef lane.
-      if (i != 0) {
-        stream << ac << " & ~(0x000000ff << " << i % 4 * 8 << ") |";
+      // Do not read the first lane of each carrier word.
+      if (i % 4 != 0) {
+        stream << "static_cast<unsigned int>(" << ac << ") & ~(0x000000ffu << "
+               << i % 4 * 8 << ") |";
       }
-      stream << "(" << value << " << " << i % 4 * 8 << ");\n";
+      stream << "(static_cast<unsigned int>(static_cast<unsigned char>("
+             << value << ")) << " << i % 4 * 8 << ");\n";
     }
-  } else if (t.is_float4()) {
-    stream << "((fp4_e2_2_t*)(&(" << vec << ")))[" << i / 2 << "]."
-           << ((i & 1) ? "set_y(" : "set_x(") << value << ");\n";
   } else if ((t.lanes() == 16 || t.lanes() == 32) && t.bits() == 32 &&
              t.is_float()) {
     // float32x16/float32x32: __attribute__((__vector_size__(...))) supports
@@ -710,6 +770,42 @@ void CodeGenTileLangHIP::PrintVecElemStore(const std::string &vec, DataType t,
   } else if (t.is_bfloat16()) {
     stream << "((bfloat16_t*)(&(" << vec << "." << access[i / 2] << ")))["
            << (i % 2) << "] = " << value << ";\n";
+  } else if (is_packed_int4) {
+    std::ostringstream packed_byte;
+    packed_byte << "((unsigned char*)(&(" << vec << ")))[" << i / 2 << "]";
+    stream << packed_byte.str() << " = ";
+    if (i % 2 != 0) {
+      stream << "(" << packed_byte.str() << " & 0x0fu) | ";
+    }
+    stream << "((static_cast<unsigned int>(" << value << ") & 0x0fu) << "
+           << i % 2 * 4 << ");\n";
+  } else if (t.is_float8() && !t.is_float8_e8m0fnu()) {
+    if (t.lanes() == 2) {
+      stream << "tl_fp8x2_set_lane(" << vec << ", " << i << ", " << value
+             << ");\n";
+      return;
+    }
+    std::string element = vec;
+    int lanes = t.lanes();
+    int lane = i;
+    while (lanes > 4) {
+      int group_size = lanes / 2;
+      element += lane < group_size ? ".x" : ".y";
+      lane %= group_size;
+      lanes = group_size;
+    }
+    stream << element << "." << access[lane] << " = " << value << ";\n";
+  } else if (t.is_float4()) {
+    std::string element = vec;
+    int lanes = t.lanes();
+    int lane = i;
+    while (lanes > 2) {
+      int group_size = lanes / 2;
+      element += lane < group_size ? ".x" : ".y";
+      lane %= group_size;
+      lanes = group_size;
+    }
+    stream << element << (lane == 0 ? ".set_x(" : ".set_y(") << value << ");\n";
   } else if (t.lanes() > 4 && t.lanes() <= 8) {
     std::string type_name;
     if (t.bits() == 16) {
