@@ -88,36 +88,46 @@ def gemm(
                         "loop_k",
                         {
                             "TMA": [
-                                # Wait for smem_empty; inside the span every
-                                # op refers to the acquired version of
-                                # A_shared / B_shared.
+                                # Wait for the smem_empty barrier.
+                                # Before this, A_shared and B_shared are not usable, because there are multiple versions of them, and the buffers are protected by the pipeline.
+                                # After this, the buffers are visible, and the acquired version is bound to each buffer.
                                 T.WSSync.producer_acquire("smem", stage=0),
-                                # The copies write buffers of pipeline smem,
-                                # so their TMA transactions complete the
-                                # smem_full barrier.
+                                # Now A_shared will refer to the acquired version of A_shared, for every op.
+                                # Here, copy_A_g2s will write to that version of A_shared.
+                                # During schedule materialization, TileLang will first find that the operand A_shared being written to is bound to pipeline smem, so it will bind an smem_full barrier to the op. It will be eventually lowered to a cp.async.bulk.tensor.mbarrier::complete_tx::bytes, decrementing the transaction count of the barrier.
                                 "copy_A_g2s",
+                                # Similarly, copy_B_g2s will write to the acquired version of B_shared.
                                 "copy_B_g2s",
+                                # Signal the smem_full barrier.
+                                # After this, the buffers are not usable, and again protected by the pipeline.
                                 T.WSSync.producer_commit("smem", stage=0),
                             ],
                             "MMA": [
-                                # This role runs num_stages - 1 iterations
-                                # behind TMA. Its two stages agree, so the
-                                # offsets cancel and its own loop is emitted
-                                # unshifted.
+                                # Wait for the smem_full barrier at stage num_stages - 1.
+                                # After this, the corresponding version of A_shared and B_shared is bound to the variables.
                                 T.WSSync.consumer_wait("smem", stage=num_stages - 1),
-                                # gemm_C reads buffers of pipeline smem, so
-                                # its tcgen05.commit arrives on smem_empty.
+                                # During schedule materialization, TileLang will first find that the operands A_shared and B_shared being read from are bound to pipeline smem, so it will bind an smem_empty barrier to the op. It will be eventually lowered to a tcgen05.commit.mbarrier::arrive::one, incrementing the arrival count of the barrier.
                                 "gemm_C",
+                                # Signal the smem_empty barrier.
+                                # After this, the buffers are not usable, and again protected by the pipeline.
                                 T.WSSync.consumer_release("smem", stage=num_stages - 1),
+                                # After materialization, the loop would look like:
+                                #   for k in range(k_blocks):
+                                #       if k >= num_stages - 1:
+                                #           ...body(k - num_stages + 1)
+                                #   body(k_blocks - num_stages + 1)
+                                #   ...
+                                #   body(k_blocks - 1)
+                                # But that is exactly equivalent to
+                                #   for k in range(k_blocks):
+                                #       body(k)
+                                # So that is the loop we see: this role's
+                                # stages agree, so the offsets cancel.
                             ],
                             "Epilogue": [],
                         },
                     ),
-                    # The persistent loop: a while scope. It has no
-                    # iteration expression, so pipelines synced under it
-                    # use runtime phase counters. tile_idx / sched_next
-                    # touch no pipeline buffers, so several roles place
-                    # them — each runs its own copy.
+                    # This is the persistent loop.
                     T.WSScope(
                         "loop_wave",
                         {
@@ -143,7 +153,8 @@ def gemm(
                             ],
                         },
                     ),
-                    # The implicit root scope: ops outside any loop.
+                    # The root scope is implicit. Nonetheless, the ops inside
+                    # can still be scheduled.
                     T.WSScope(
                         T.WSScope.ROOT,
                         {
