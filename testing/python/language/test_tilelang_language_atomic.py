@@ -483,7 +483,6 @@ def run_atomic_add_complicated_parallel(K, M, N, block_M, block_N, dtype=T.float
     assert "AtomicAddx4" in kernel.get_kernel_source()
 
 
-@tilelang.testing.requires_cuda
 def test_atomic_memory_order():
     run_atomic_memory_order(4, 64, 64, 16, 16)
 
@@ -521,7 +520,6 @@ def test_atomic_addx4():
     run_atomic_addx4(16, 64, 4, 4)
 
 
-@tilelang.testing.requires_cuda
 def test_atomic_addx4_sliced_dst_compile():
     run_atomic_addx4_sliced_dst_compile(32, 8)
 
@@ -870,7 +868,6 @@ def test_atomic_min_scalar_bf16():
     run_atomic_min_scalar_literal("bfloat16")
 
 
-@tilelang.testing.requires_cuda
 def test_atomic_load_store():
     run_atomic_load_store(64, 64, 16, 16)
 
@@ -1062,7 +1059,6 @@ def test_atomic_addx2_return_prev_accepts_ramp():
     atomic_addx2_return_prev_ramp_program(T.float32)
 
 
-@tilelang.testing.requires_cuda
 def test_atomic_addx2_return_prev():
     kernel = tilelang.compile(atomic_addx2_return_prev_let_bound_program(T.float32))
     assert "AtomicAddx2Ret" in kernel.get_kernel_source()
@@ -1074,7 +1070,6 @@ def test_atomic_addx2_return_prev():
     torch.testing.assert_close(dst, torch.tensor([11.0, 22.0], device="cuda"))
 
 
-@tilelang.testing.requires_cuda
 def test_atomic_addx4_return_prev():
     kernel = tilelang.compile(atomic_addx4_return_prev_program(T.float32))
     assert "AtomicAddx4Ret" in kernel.get_kernel_source()
@@ -1166,13 +1161,12 @@ def atomic_add_return_prev_compaction_program(n, cap, block, dtype=T.float32):
     return compact_positive
 
 
-@tilelang.testing.requires_cuda
 def test_atomic_add_return_prev_materialized_once():
     n, cap, block = 4096, 4096, 256
     kernel = atomic_add_return_prev_compaction_program(n, cap, block)
 
     # Static check: the returned atomic must appear exactly once in the
-    # generated CUDA source (regression: duplicated AtomicAddRet calls).
+    # generated source (regression: duplicated AtomicAddRet calls).
     assert kernel.get_kernel_source().count("AtomicAddRet") == 1
 
     # Functional check: with all-positive input the counter must equal n and
