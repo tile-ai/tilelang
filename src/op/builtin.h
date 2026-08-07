@@ -62,6 +62,8 @@ static constexpr const char *kDisableSharedMemoryReuse =
 static constexpr const char *kDisableFastMath = "tl.disable_fast_math";
 static constexpr const char *kEnableFastMath = "tl.enable_fast_math";
 static constexpr const char *kEnableAsyncCopy = "tl.enable_async_copy";
+static constexpr const char *kPipelineCopyStrategy =
+    "tl.pipeline_copy_strategy";
 static constexpr const char *kEnableVectorizePlannerVerbose =
     "tl.enable_vectorize_planner_verbose";
 static constexpr const char *kDisableLoopUnswitching =
