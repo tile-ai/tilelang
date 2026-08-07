@@ -29,8 +29,25 @@ constexpr const char *kReducerSeed = "reducer_seed";
 /*! \brief Whether an update needs once-per-logical-iteration lowering. */
 constexpr const char *kReducerParallelOnce = "reducer_parallel_once";
 
+/*!
+ * \brief Destination Fragment layout proving that every physical replica
+ * independently holds a complete partial for its local output slots.
+ */
+constexpr const char *kReducerLocalCompleteLayout =
+    "reducer_local_complete_layout";
+
+/*! \brief Logical output indices retained after physical region rewriting. */
+constexpr const char *kReducerLogicalIndices = "reducer_logical_indices";
+
 /*! \brief Statement marker consumed by parallel-loop partitioning. */
 constexpr const char *kParallelMultiplicity = "tl.parallel_multiplicity";
+
+/*!
+ * \brief Statement marker forcing physical partitioning without suppressing
+ * replicated logical iterations.
+ */
+constexpr const char *kParallelPartitionRequired =
+    "tl.parallel_partition_required";
 
 } // namespace attr
 
@@ -63,6 +80,7 @@ class ReducerInitOpNode : public TileOperatorNode {
 public:
   Buffer reducer;
   ReduceType combine_type;
+  ffi::Optional<Fragment> local_complete_layout;
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ReducerInitOp", ReducerInitOpNode,
                                     TileOperatorNode);
@@ -71,7 +89,9 @@ public:
     namespace refl = reflection;
     refl::ObjectDef<ReducerInitOpNode>()
         .def_ro("reducer", &ReducerInitOpNode::reducer)
-        .def_ro("combine_type", &ReducerInitOpNode::combine_type);
+        .def_ro("combine_type", &ReducerInitOpNode::combine_type)
+        .def_ro("local_complete_layout",
+                &ReducerInitOpNode::local_complete_layout);
   }
 
   Stmt Lower(const LowerArgs &lower_args,
@@ -98,6 +118,7 @@ public:
   PrimExpr contribution;
   ReduceType combine_type;
   bool parallel_once{false};
+  ffi::Optional<Fragment> local_complete_layout;
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ReducerUpdateOp", ReducerUpdateOpNode,
                                     TileOperatorNode);
@@ -109,7 +130,9 @@ public:
         .def_ro("logical_indices", &ReducerUpdateOpNode::logical_indices)
         .def_ro("contribution", &ReducerUpdateOpNode::contribution)
         .def_ro("combine_type", &ReducerUpdateOpNode::combine_type)
-        .def_ro("parallel_once", &ReducerUpdateOpNode::parallel_once);
+        .def_ro("parallel_once", &ReducerUpdateOpNode::parallel_once)
+        .def_ro("local_complete_layout",
+                &ReducerUpdateOpNode::local_complete_layout);
   }
 
   Stmt Lower(const LowerArgs &lower_args,
@@ -136,6 +159,7 @@ public:
   Buffer destination;
   ReduceType combine_type;
   ffi::Optional<PrimExpr> seed;
+  ffi::Optional<Fragment> local_complete_layout;
   int batch{1};
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.FinalizeReducerOp",
@@ -148,6 +172,8 @@ public:
         .def_ro("destination", &FinalizeReducerOpNode::destination)
         .def_ro("combine_type", &FinalizeReducerOpNode::combine_type)
         .def_ro("seed", &FinalizeReducerOpNode::seed)
+        .def_ro("local_complete_layout",
+                &FinalizeReducerOpNode::local_complete_layout)
         .def_ro("batch", &FinalizeReducerOpNode::batch);
   }
 

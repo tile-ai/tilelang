@@ -14,7 +14,7 @@ components.
 
 | Family | What it measures | Expected use in the analysis |
 |---|---|---|
-| `unique_owner` | Independent output elements, with no cross-thread reduction | Quantifies the cost of the v2 full-participant baseline versus legacy `replication="none"`; this is the main target for a future local-only plan |
+| `unique_owner` | Independent output elements, with no cross-thread reduction | Measures the v2 LocalComplete plan against legacy `replication="none"`; generated v2 code should have compact partial storage and no collective |
 | `row_reduce` | One or more output rows reduced across a K dimension | Compares the normal legacy fully replicated reducer with the v2 canonical fallback |
 | `streaming_gemv` | A reducer epoch kept alive across several K tiles | Measures realistic deferred accumulation, including initialization, updates, register pressure, and finalization |
 
@@ -136,9 +136,10 @@ time, error samples, tolerances, source size, and textual counts of generated
 - For serious measurements, run both `--order legacy-first` and
   `--order v2-first` into different output directories, keep the GPU idle, and
   control clocks/power state if the machine permits it.
-- This matrix evaluates the first v2 one-allocation/one-epoch implementation.
-  It does not assume a subgroup fast path or a future ownership-based
-  local-only specialization.
+- This matrix evaluates the v2 one-allocation/one-epoch implementation. It
+  includes the conservative direct-ownership LocalComplete specialization but
+  does not assume a subgroup fast path or a general affine/Fragment ownership
+  planner.
 
 Add or tune cases in `benchmark_cases.py`; the worker and comparison report use
 that single shared definition.

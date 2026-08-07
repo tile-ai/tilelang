@@ -2,7 +2,7 @@
 
 - 分支：`refactor/reducer-v2`
 - 记录日期：2026-08-06
-- 当前阶段：correctness baseline 已实现；subgroup fast path 暂缓
+- 当前阶段：correctness baseline 与 conservative LocalComplete fast path 已实现；subgroup fast path 暂缓
 - 长期设计：[Reducer v2 重构设计方案](./reducer_v2_refactor_plan.md)
 - 相关讨论：[Issue #2408](https://github.com/tile-ai/tilelang/issues/2408)、[RFC #2897](https://github.com/tile-ai/tilelang/issues/2897)、[PR #2881](https://github.com/tile-ai/tilelang/pull/2881)
 
@@ -14,12 +14,13 @@
 
 1. reducer 是一个 deferred reduction epoch，不是普通 Fragment。
 2. 用户必须显式写 `T.reducer_init`、`T.reducer_update` 和 `T.finalize_reducer`。
-3. 每个 participant 都分配一份完整 logical output array，作为自己的 local partial state。
+3. 无法证明更强 ownership 时，每个 participant 都分配一份完整 logical output array，作为 canonical local partial state。
 4. `T.Parallel` layout 产生的重复执行在 update site 消除，不能在 finalize 阶段猜测 contribution multiplicity。
 5. finalize 是 out-of-place 的，所有 participants 先完成 collective，只有 destination owner 写入 Fragment。
 6. 每个 reducer allocation 当前只允许一个 epoch；同一个 kernel 可以有多个相互独立的 reducer allocations。
 7. 当前只依赖 compiler-known contiguous participant `Range`，不支持 discontiguous participant set。
 8. subgroup fast path、batched finalize fast path、multiple epochs 和自定义 combine 都暂不实现。
+9. 对 `Parallel(M) -> output[M]` 这类可直接证明的独立输出，planner 可以选择 LocalComplete plan：每个 destination replica 独立计算自己的 local slots，不执行 collective。
 
 因此，目前的优先级是：
 
@@ -41,7 +42,7 @@ with T.Kernel(1, threads=128):
     T.reducer_init(total)
 
     for i in T.Parallel(8):
-        T.reducer_update(total, (0,), value[i])
+        T.reducer_update(total[0], value[i])
 
     result = T.alloc_fragment((1,), T.float32)
     T.finalize_reducer(total, result)
@@ -51,9 +52,9 @@ with T.Kernel(1, threads=128):
 
 | 操作 | 语义 |
 |---|---|
-| `T.reducer_init(acc)` | 用 reduce identity 初始化每个 participant 的完整 local partial array |
-| `T.reducer_update(acc, indices, value)` | 向一个 logical output element 贡献恰好一次 `value` |
-| `T.finalize_reducer(acc, dst)` | 合并所有 participant partials，并写入独立 destination Fragment |
+| `T.reducer_init(acc)` | 用 reduce identity 初始化 planner 选择的 physical partial storage |
+| `T.reducer_update(acc[indices], value)` | 向一个 logical output element 贡献恰好一次 `value` |
+| `T.finalize_reducer(acc, dst)` | 按 physical plan 完成 reduction，并写入独立 destination Fragment |
 
 ### 2.2 allocation metadata
 
@@ -103,6 +104,10 @@ participant partial 从 identity 开始
 ```
 
 所以 seed 在 logical reduction algebra 中只合并一次。
+
+LocalComplete plan 没有 cross-thread collective，但同样在 update 全部完成后才
+combine seed。每个 physical destination replica 各自执行一次，随后普通 Fragment
+ownership 只消费对应 replica；因此每个 logical result 观察到的 seed 仍然恰好一次。
 
 ### 2.4 明确不支持的 legacy 写法
 
@@ -350,7 +355,11 @@ update 的 index rank 必须等于 reducer rank，每个 index 必须能被 `ari
 - enclosing predicate 和 serial-loop bounds 不依赖 physical thread；
 - contribution 不读取普通 thread-private `local`/`local.var` value。
 
-Fragment loads 可以保留，因为 Parallel layout inference 已验证 logical Fragment access 与 loop layout compatible。Global/Shared load 也可以保留，只要地址表达式本身不依赖 physical replica。
+canonical baseline 中 Fragment loads 可以保留，因为 Parallel layout inference 已验证
+logical Fragment access 与 loop layout compatible。Global/Shared load 也可以保留，
+只要地址表达式本身不依赖 physical replica。LocalComplete 第一版会改写 loop layout，
+因此只接受可安全重复的 Global/Shared loads；带普通 Fragment/local load 的 loop
+保守 fallback。
 
 对 ordinary local value 的规则目前是保守的：即使用户知道所有 threads 写入了同一个值，只要 compiler 没有对应证明，它仍会拒绝 replicated update。
 
@@ -361,11 +370,13 @@ Fragment loads 可以保留，因为 Parallel layout inference 已验证 logical
 - `local.reducer` allocation；
 - `reducer_info` metadata；
 - `ReducerInitOp`、`ReducerUpdateOp`、`FinalizeReducerOp`；
-- 未消费的 parallel multiplicity marker。
+- 未消费的 parallel multiplicity / partition-required marker。
 
 它的作用是防止新 IR 被某个遗漏的 pipeline/backend 静默忽略。
 
-## 7. Full local-array materialization
+## 7. Physical materialization plans
+
+### 7.1 FullParticipant baseline
 
 当前 baseline 为每个 participant 分配完整 logical output shape：
 
@@ -396,7 +407,44 @@ materialized:
 
 这些是当前明确接受的 correctness-first tradeoff。
 
-## 8. Parallel multiplicity marker
+### 7.2 LocalComplete fast path
+
+当 finalize destination 已有确定的 Fragment layout，planner 会尝试把它同时用作
+partial storage layout 和 ownership certificate。第一版只在下面条件全部成立时选择
+LocalComplete：
+
+- 每个 update 都位于已知 `T.Parallel` root 中；
+- reducer logical shape、destination layout input shape 和 parallel loop shape 一致；
+- update indices 与 parallel logical vars 逐维相等；
+- participant/thread/replicate/output extents 都是 compiler-known；
+- loop 中没有 ordinary BufferStore、thread-private Fragment/local load 或非 pure call；
+- 同一 parallel root 上的所有 LocalComplete candidates 请求完全相同的 layout。
+
+planner 随后把 parallel root 改成 destination layout。这样 `M < threads` 时并不是只让
+一个 physical owner 计算后再广播，而是让 destination 的每个 physical replica 都执行
+相同 logical contribution：
+
+```text
+logical reducer[M]
+  -> destination layout: local slots S, replicate R
+  -> materialized partial[S] per participant
+  -> every replica updates its own partial[S]
+  -> direct local finalize, no AllReduce/barrier/workspace
+```
+
+例如 `M=8, threads=128` 时，常见 layout 是一个 local slot、16 个 replicas；
+materialized reducer 从每线程 `partial[8]` 缩为 `partial[1]`。而
+`Parallel(M, K) -> output[M]` 不是 direct identity mapping，仍走 FullParticipant。
+
+materialization 后，init/update/finalize call 的 access region 都立即改写成 compact
+physical buffer 上的合法 region；update 原本的 logical indices 单独保存在 planned
+annotation 中，供 `ReducerUpdateOp` 映射到 physical slots。这样
+`PlanAndMaterializeReducers` 与 `LowerTileOp` 之间不存在 shape/region 不一致的临时 IR。
+
+这条路径故意不处理 Fragment contribution、permuted/affine output mapping、mixed
+side effects 或 subgroup reduction；任一证明失败都只影响性能，不改变合法程序语义。
+
+## 8. Parallel effect markers
 
 ### 8.1 marker 的作用
 
@@ -427,6 +475,19 @@ if (REP == 0) {
 ```
 
 同一个 `T.Parallel` 中的普通 Fragment load/store 不会被这个 guard 包住。
+
+### 8.3 LocalComplete partition marker
+
+LocalComplete update 使用另一个 marker：
+
+```text
+tl.parallel_partition_required
+```
+
+它要求 `LowerTileOp` 必须按 loop layout 做 physical thread partition，但不生成
+`REP == 0` guard，因为所有 destination replicas 都需要执行 update。partition 后 marker
+会被移除。带这两类 reducer marker 的 loop 都禁止普通 vectorization，以免把对同一个
+partial slot 的 loop-carried dependency 错误改写为并行 stores。
 
 这解决了 PR #2881 临时参数的问题：
 
@@ -515,7 +576,7 @@ total = T.alloc_reducer((1,), T.float32, op="sum")
 T.reducer_init(total)
 
 for i in T.Parallel(8):
-    T.reducer_update(total, (0,), src[i])
+    T.reducer_update(total[0], src[i])
 
 result = T.alloc_fragment((1,), T.float32)
 T.finalize_reducer(total, result)
@@ -704,12 +765,26 @@ one init -> zero or more updates -> one finalize
 
 ### 14.6 性能优化
 
-当前没有尝试：
+当前已实现 conservative LocalComplete fast path。B300、128 threads、关闭 warp
+specialization/TMA、50 ms warmup + 200 ms measurement 的 benchmark 结果为：
 
-- 根据 ownership plan 压缩 partial storage；
+| case | legacy `replication="none"` | v2 LocalComplete | legacy / v2 |
+|---|---:|---:|---:|
+| M8, 512 blocks | 7.168 us | 6.528 us | 1.098x |
+| M32, 512 blocks | 7.168 us | 6.528 us | 1.098x |
+| M128, 256 blocks | 7.168 us | 6.464 us | 1.109x |
+
+三个 v2 kernel 都从 full logical array 缩为每线程一个 local slot，且生成代码中
+AllReduce/named barrier 都为 0。fallback regression 中，M1xK128 与 M32xK128 的
+v2 latency 分别为 7.168 us 和 11.200 us，与 legacy 的 7.168 us 和 11.168 us
+基本一致，并继续各自保留一个 AllReduce site。
+
+仍未尝试：
+
+- general affine/permuted/Fragment ownership compact storage；
 - 合并多个 output collectives；
 - warp shuffle/subgroup communication；
-- 跳过无用 full-array initialization；
+- 在 FullParticipant fallback 中跳过无用 full-array initialization；
 - 根据 destination layout 批量 store；
 - 针对 large output shape 控制 register pressure。
 
@@ -732,9 +807,9 @@ one init -> zero or more updates -> one finalize
 7. `src/transform/lower_tile_op.cc`
    - 看 marker 如何影响 loop partition/vectorize decision。
 8. `src/transform/loop_partition.cc`
-   - 看 `REP == 0` 如何只作用于 marked update effect。
+   - 看 `REP == 0` 与 partition-required 两类 marker 如何分别消费。
 9. `src/backend/common/op/finalize_reducer.h`
-   - 看 full-array participant-wide correctness lowering。
+   - 对照 FullParticipant collective 与 LocalComplete direct-local finalize。
 10. `src/cuda/op/finalize_reducer.cc` 和 `src/rocm/op/finalize_reducer.cc`
     - 看 target-specific AllReduce emitter。
 11. `testing/python/language/test_tilelang_language_reducer_v2.py`
@@ -761,13 +836,16 @@ subgroup fast path 等后续优化。
   replica-safe update lowering
   full local-array materialization
   contiguous full-participant finalize baseline
+  direct-ownership LocalComplete plan
+  compact per-layout local partial storage
+  collective-free finalize for independent outputs
   CUDA/ROCm scalar emitters
   in-tree migration 与回归测试
 
 暂缓：
   subgroup fast path
   batched finalize optimization
-  ownership-plan-based compact storage
+  general affine/Fragment ownership plans
   multiple epochs
   custom combine
   discontiguous participant domain

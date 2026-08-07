@@ -100,7 +100,7 @@ def make_unique_owner_kernel(T, case: BenchmarkCase, variant: str):
                 total = T.alloc_reducer((m,), T.float32, op="sum")
                 T.reducer_init(total)
                 for i in T.Parallel(m):
-                    T.reducer_update(total, (i,), A[bid, i])
+                    T.reducer_update(total[i], A[bid, i])
                 result = T.alloc_fragment((m,), T.float32)
                 T.finalize_reducer(total, result, batch=batch)
                 T.copy(result, B[bid, 0])
@@ -137,7 +137,7 @@ def make_row_reduce_kernel(T, case: BenchmarkCase, variant: str):
                 total = T.alloc_reducer((m,), T.float32, op="sum")
                 T.reducer_init(total)
                 for i, j in T.Parallel(m, k):
-                    T.reducer_update(total, (i,), A_fragment[i, j])
+                    T.reducer_update(total[i], A_fragment[i, j])
                 result = T.alloc_fragment((m,), T.float32)
                 T.finalize_reducer(total, result, batch=batch)
                 T.copy(result, B[bid, 0])
@@ -187,7 +187,7 @@ def make_streaming_gemv_kernel(T, case: BenchmarkCase, variant: str):
                     X_fragment = T.alloc_fragment((tile_k,), T.float32)
                     T.copy(X[bid, ko * tile_k], X_fragment, disable_tma=True)
                     for i, j in T.Parallel(m, tile_k):
-                        T.reducer_update(total, (i,), A_fragment[i, j] * X_fragment[j])
+                        T.reducer_update(total[i], A_fragment[i, j] * X_fragment[j])
                 result = T.alloc_fragment((m,), T.float32)
                 T.finalize_reducer(total, result, batch=batch)
                 T.copy(result, B[bid, 0])

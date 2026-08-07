@@ -1377,13 +1377,17 @@ private:
     // otherwise touch a fragment or non-local buffer, and they stay scalar so
     // the marker can guard exactly one logical contribution.
     bool has_parallel_multiplicity = false;
+    bool has_parallel_partition_required = false;
     PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
       if (const auto *attr_stmt = obj.as<AttrStmtNode>()) {
         has_parallel_multiplicity |=
             attr_stmt->attr_key == attr::kParallelMultiplicity;
+        has_parallel_partition_required |=
+            attr_stmt->attr_key == attr::kParallelPartitionRequired;
       }
     });
-    parallel_loop = parallel_loop || has_parallel_multiplicity;
+    parallel_loop = parallel_loop || has_parallel_multiplicity ||
+                    has_parallel_partition_required;
 
     // Check if vectorizable cast operations exist
     bool has_cast_operations = false;
@@ -1400,9 +1404,11 @@ private:
 
     // Decide whether to vectorize:
     // - Only if there are non-local buffers or vectorizable casts
-    // - AND no once-per-logical-iteration effects are present
-    bool should_vectorize =
-        (has_non_local || has_cast_operations) && !has_parallel_multiplicity;
+    // - AND no reducer effect markers are present. Reducer updates carry a
+    //   loop-carried dependency even when their physical slot is local.
+    bool should_vectorize = (has_non_local || has_cast_operations) &&
+                            !has_parallel_multiplicity &&
+                            !has_parallel_partition_required;
     // Lower the parallel loop using the common function
     Stmt lowered = LowerParallelLoop(
         for_node, loop_layout, CurrentThreadIndex(), analyzer_, layout_map_,

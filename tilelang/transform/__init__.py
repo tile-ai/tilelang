@@ -373,7 +373,7 @@ def VerifyReducerEpochs():
 
 
 def PlanAndMaterializeReducers():
-    """Materialize each reducer as a full per-participant local array."""
+    """Plan reducer ownership and materialize its physical local storage."""
     return _ffi_api.PlanAndMaterializeReducers()  # type: ignore
 
 

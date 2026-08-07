@@ -19,7 +19,7 @@ def reducer_sum_v2(A: T.Tensor((8,), T.float32), B: T.Tensor((1,), T.float32)):
         total = T.alloc_reducer((1,), T.float32, op="sum")
         T.reducer_init(total)
         for i in T.Parallel(8):
-            T.reducer_update(total, (0,), src[i])
+            T.reducer_update(total[0], src[i])
         result = T.alloc_fragment((1,), T.float32)
         T.finalize_reducer(total, result)
         if T.get_thread_binding() == 0:
@@ -37,8 +37,8 @@ def two_reducers_v2(A: T.Tensor((8,), T.float32), B: T.Tensor((2,), T.float32)):
         T.reducer_init(max_total)
         for i in T.Parallel(8):
             if i < 4:
-                T.reducer_update(sum_total, (0,), src[i])
-            T.reducer_update(max_total, (0,), src[i])
+                T.reducer_update(sum_total[0], src[i])
+            T.reducer_update(max_total[0], src[i])
         sum_result = T.alloc_fragment((1,), T.float32)
         max_result = T.alloc_fragment((1,), T.float32)
         T.finalize_reducer(sum_total, sum_result)
@@ -60,9 +60,9 @@ def bitwise_reducers_v2(A: T.Tensor((8,), T.int32), B: T.Tensor((3,), T.int32)):
         T.reducer_init(or_total)
         T.reducer_init(xor_total)
         for i in T.Parallel(8):
-            T.reducer_update(and_total, (0,), src[i])
-            T.reducer_update(or_total, (0,), src[i])
-            T.reducer_update(xor_total, (0,), src[i])
+            T.reducer_update(and_total[0], src[i])
+            T.reducer_update(or_total[0], src[i])
+            T.reducer_update(xor_total[0], src[i])
         and_result = T.alloc_fragment((1,), T.int32)
         or_result = T.alloc_fragment((1,), T.int32)
         xor_result = T.alloc_fragment((1,), T.int32)
@@ -75,12 +75,72 @@ def bitwise_reducers_v2(A: T.Tensor((8,), T.int32), B: T.Tensor((3,), T.int32)):
             B[2] = xor_result[0]
 
 
+@T.prim_func
+def unique_owner_reducer_v2(A: T.Tensor((8,), T.float32), B: T.Tensor((8,), T.float32)):
+    with T.Kernel(1, threads=128):
+        total = T.alloc_reducer((8,), T.float32, op="sum", seed=2.0)
+        T.reducer_init(total)
+        for i in T.Parallel(8):
+            T.reducer_update(total[i], A[i])
+        result = T.alloc_fragment((8,), T.float32)
+        T.finalize_reducer(total, result)
+        T.copy(result, B)
+
+
+@T.prim_func
+def unique_owner_serial_reduction_v2(A: T.Tensor((8, 4), T.float32), B: T.Tensor((8,), T.float32)):
+    with T.Kernel(1, threads=128):
+        total = T.alloc_reducer((8,), T.float32, op="sum")
+        T.reducer_init(total)
+        for i in T.Parallel(8):
+            for k in T.serial(4):
+                T.reducer_update(total[i], A[i, k])
+        result = T.alloc_fragment((8,), T.float32)
+        T.finalize_reducer(total, result)
+        T.copy(result, B)
+
+
+@T.prim_func
+def unique_owner_with_global_side_effect_v2(A: T.Tensor((8,), T.float32), B: T.Tensor((8,), T.float32)):
+    with T.Kernel(1, threads=128):
+        total = T.alloc_reducer((8,), T.float32, op="sum")
+        T.reducer_init(total)
+        for i in T.Parallel(8):
+            T.reducer_update(total[i], A[i])
+            B[i] = A[i]
+        result = T.alloc_fragment((8,), T.float32)
+        T.finalize_reducer(total, result)
+        T.copy(result, B)
+
+
 def test_reducer_v2_frontend_ir():
     source = reducer_sum_v2.script()
     assert 'scope="local.reducer"' in source
     assert "T.reducer_init" in source
     assert "T.reducer_update" in source
     assert "T.finalize_reducer" in source
+
+
+def test_reducer_v2_update_requires_indexed_target():
+    with pytest.raises(TypeError, match="indexed local.reducer element"):
+
+        @T.prim_func
+        def invalid(A: T.Tensor((1,), T.float32)):
+            with T.Kernel(1, threads=32):
+                total = T.alloc_reducer((1,), T.float32)
+                T.reducer_init(total)
+                # A bare reducer handle is not an indexed update target.
+                T.reducer_update(total, A[0])
+
+
+def test_reducer_v2_update_rejects_non_reducer_target():
+    with pytest.raises(ValueError, match="local.reducer target"):
+
+        @T.prim_func
+        def invalid(A: T.Tensor((1,), T.float32)):
+            with T.Kernel(1, threads=32):
+                total = T.alloc_fragment((1,), T.float32)
+                T.reducer_update(total[0], A[0])
 
 
 def test_reducer_v2_cuda_codegen():
@@ -91,6 +151,61 @@ def test_reducer_v2_cuda_codegen():
     ).get_kernel_source()
     assert "tl::AllReduce<tl::SumOp, 128" in source
     assert "local.reducer" not in source
+
+
+def test_reducer_v2_unique_owner_codegen_uses_local_complete_plan():
+    source = tilelang.compile(
+        unique_owner_reducer_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    ).get_kernel_source()
+    assert "tl::AllReduce<" not in source
+    assert "NamedBarrier<" not in source
+    assert "workspace" not in source
+    assert "float total[1];" in source
+
+
+def test_reducer_v2_unique_owner_serial_reduction_codegen():
+    source = tilelang.compile(
+        unique_owner_serial_reduction_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    ).get_kernel_source()
+    assert "tl::AllReduce<" not in source
+    assert "NamedBarrier<" not in source
+    assert "workspace" not in source
+    assert "float total[1];" in source
+
+
+def test_reducer_v2_unique_owner_side_effect_falls_back():
+    source = tilelang.compile(
+        unique_owner_with_global_side_effect_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    ).get_kernel_source()
+    assert "tl::AllReduce<tl::SumOp, 128" in source
+
+
+@tilelang.testing.requires_cuda
+def test_reducer_v2_unique_owner_local_complete_correctness():
+    A = torch.arange(1, 9, dtype=torch.float32, device="cuda")
+    B = tilelang.compile(
+        unique_owner_reducer_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    )(A)
+    torch.testing.assert_close(B, A + 2.0, atol=0, rtol=0)
+
+
+@tilelang.testing.requires_cuda
+def test_reducer_v2_unique_owner_serial_reduction_correctness():
+    A = torch.arange(1, 33, dtype=torch.float32, device="cuda").reshape(8, 4)
+    B = tilelang.compile(
+        unique_owner_serial_reduction_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    )(A)
+    torch.testing.assert_close(B, A.sum(dim=1), atol=0, rtol=0)
 
 
 @tilelang.testing.requires_cuda
@@ -134,7 +249,7 @@ def test_reducer_v2_requires_out_of_place_destination():
             with T.Kernel(1, threads=32):
                 total = T.alloc_reducer((1,), T.float32)
                 T.reducer_init(total)
-                T.reducer_update(total, (0,), A[0])
+                T.reducer_update(total[0], A[0])
                 T.finalize_reducer(total)
                 B[0] = A[0]
 
@@ -146,7 +261,7 @@ def test_reducer_v2_rejects_direct_clear():
             total = T.alloc_reducer((1,), T.float32)
             T.clear(total)
             T.reducer_init(total)
-            T.reducer_update(total, (0,), A[0])
+            T.reducer_update(total[0], A[0])
             result = T.alloc_fragment((1,), T.float32)
             T.finalize_reducer(total, result)
             B[0] = result[0]
@@ -160,7 +275,7 @@ def test_reducer_v2_rejects_missing_init():
     def invalid(A: T.Tensor((1,), T.float32), B: T.Tensor((1,), T.float32)):
         with T.Kernel(1, threads=32):
             total = T.alloc_reducer((1,), T.float32)
-            T.reducer_update(total, (0,), A[0])
+            T.reducer_update(total[0], A[0])
             result = T.alloc_fragment((1,), T.float32)
             T.finalize_reducer(total, result)
             B[0] = result[0]
@@ -175,7 +290,7 @@ def test_reducer_v2_rejects_missing_finalize():
         with T.Kernel(1, threads=32):
             total = T.alloc_reducer((1,), T.float32)
             T.reducer_init(total)
-            T.reducer_update(total, (0,), A[0])
+            T.reducer_update(total[0], A[0])
             B[0] = A[0]
 
     with pytest.raises(Exception, match="must have exactly one explicit T.reducer_init"):
@@ -189,7 +304,7 @@ def test_reducer_v2_rejects_double_init():
             total = T.alloc_reducer((1,), T.float32)
             T.reducer_init(total)
             T.reducer_init(total)
-            T.reducer_update(total, (0,), A[0])
+            T.reducer_update(total[0], A[0])
             result = T.alloc_fragment((1,), T.float32)
             T.finalize_reducer(total, result)
             B[0] = result[0]
@@ -204,7 +319,7 @@ def test_reducer_v2_rejects_unprovable_output_index():
         with T.Kernel(1, threads=32):
             total = T.alloc_reducer((1,), T.float32)
             T.reducer_init(total)
-            T.reducer_update(total, (1,), A[0])
+            T.reducer_update(total[1], A[0])
             result = T.alloc_fragment((1,), T.float32)
             T.finalize_reducer(total, result)
             B[0] = result[0]
@@ -222,7 +337,7 @@ def test_reducer_v2_rejects_physical_replica_dependent_update():
             total = T.alloc_reducer((1,), T.float32)
             T.reducer_init(total)
             for i in T.Parallel(8):
-                T.reducer_update(total, (0,), src[i] + T.get_thread_binding())
+                T.reducer_update(total[0], src[i] + T.get_thread_binding())
             result = T.alloc_fragment((1,), T.float32)
             T.finalize_reducer(total, result)
             B[0] = result[0]
@@ -242,7 +357,7 @@ def test_reducer_v2_rejects_private_local_replica_dependent_update():
             total = T.alloc_reducer((1,), T.float32)
             T.reducer_init(total)
             for i in T.Parallel(8):
-                T.reducer_update(total, (0,), src[i] + thread_value[0])
+                T.reducer_update(total[0], src[i] + thread_value[0])
             result = T.alloc_fragment((1,), T.float32)
             T.finalize_reducer(total, result)
             B[0] = result[0]

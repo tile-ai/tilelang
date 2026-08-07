@@ -91,6 +91,16 @@ private:
   arith::Analyzer *analyzer_;
 };
 
+class ParallelPartitionMarkerLowerer : public StmtExprMutator {
+private:
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == attr::kParallelPartitionRequired) {
+      return VisitStmt(op->body);
+    }
+    return StmtExprMutator::VisitStmt_(op);
+  }
+};
+
 // Rewrite the parallel loop into a common loop, which is mapped to threads
 For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
                   const Fragment &loop_layout, bool require_padding_guard) {
@@ -189,6 +199,7 @@ For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
     body = ParallelMultiplicityLowerer::Rewrite(std::move(body),
                                                 is_replica_zero, analyzer);
   }
+  body = ParallelPartitionMarkerLowerer()(std::move(body));
   PrimExpr simplified_guard = analyzer->Simplify(guard);
   if (!analyzer->CanProve(simplified_guard)) {
     body = IfThenElse(simplified_guard, body, Stmt());

@@ -327,19 +327,25 @@ def reducer_init(reducer: tirx.Buffer) -> tirx.PrimExpr:
     )
 
 
-def reducer_update(reducer: tirx.Buffer, indices, contribution: tirx.PrimExpr) -> tirx.PrimExpr:
-    """Contribute one logical value to one reducer output element."""
+def reducer_update(target: tirx.BufferLoad, contribution: tirx.PrimExpr) -> tirx.PrimExpr:
+    """Contribute one value to an indexed logical reducer output.
+
+    ``target`` must be an indexed ``local.reducer`` element such as
+    ``acc[i]`` or ``acc[i, j]``. The BufferLoad syntax is only an update-target
+    descriptor here; it is normalized to a read-write point region and does
+    not perform an ordinary reducer load.
+    """
+    if not isinstance(target, tirx.BufferLoad):
+        raise TypeError("reducer_update expects an indexed local.reducer element such as acc[i]")
+    reducer = target.buffer
     if reducer.scope() != "local.reducer":
-        raise ValueError(f"reducer_update expects a local.reducer handle, got {reducer.scope()}")
-    if not isinstance(indices, (tuple, list)):
-        indices = (indices,)
-    if len(indices) != len(reducer.shape):
-        raise ValueError(f"reducer_update index rank {len(indices)} does not match reducer rank {len(reducer.shape)}")
-    element = tirx.BufferLoad(reducer, list(indices))
+        raise ValueError(f"reducer_update expects a local.reducer target, got {reducer.scope()}")
+    if len(target.indices) != len(reducer.shape):
+        raise ValueError(f"reducer_update index rank {len(target.indices)} does not match reducer rank {len(reducer.shape)}")
     return tirx.call_intrin(
         "handle",
         tirx.op.Op.get("tl.tileop.reducer_update"),
-        to_tile_region(element, access_type="rw"),
+        to_tile_region(target, access_type="rw"),
         contribution,
     )
 

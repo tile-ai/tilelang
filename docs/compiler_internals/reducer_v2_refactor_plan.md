@@ -1,6 +1,6 @@
 # Reducer v2 重构设计方案
 
-- 状态：v2 correctness baseline 已在 `refactor/reducer-v2` 分支实现并进入验证；subgroup fast path 尚未实现
+- 状态：v2 correctness baseline 与 conservative LocalComplete fast path 已在 `refactor/reducer-v2` 分支实现并进入验证；subgroup fast path 尚未实现
 - 更新日期：2026-08-06
 - 相关讨论：[RFC #2897](https://github.com/tile-ai/tilelang/issues/2897)
 - 当前止血修复：[PR #2881](https://github.com/tile-ai/tilelang/pull/2881)
@@ -21,6 +21,7 @@
 6. `ThreadReduceStep` / `ReduceOwnershipPlan` 只用于可选 fast path。只有一个 epoch 内所有 update site 的 normalized group signature 完全兼容时，才使用 subgroup reduction；分析失败必须回退到 correctness baseline。
 7. 第一版 participant domain 只支持 compiler-known contiguous `Range`。其他 domain 只有通用 fallback 或明确拒绝两种结果。
 8. 第一版只支持 one allocation / one epoch 与内建 associative + commutative reductions。
+9. 在进入 subgroup 设计前，先允许一个不需要通信的 LocalComplete plan：只有 update indices 与 parallel logical vars 逐维相等、loop 可安全复制、destination layout 已知时，才用 destination layout 物化 compact partial 并跳过 collective。
 
 这个方案刻意把“先保证语义正确”和“再恢复 subgroup 性能”分开。前半部分不依赖复杂 ownership plan 合并，因此可以分阶段落地，也容易验证和回滚。
 
@@ -34,10 +35,11 @@
 - 每 participant 一份完整 logical output array 的普通 `local` materialization；
 - update-scoped parallel multiplicity marker 与 `REP == 0` lowering；
 - compiler-known contiguous participant `Range` 检查，以及 CUDA/ROCm scalar collective emitter；
+- direct-ownership LocalComplete planner、compact layout-shaped partial 和 collective-free finalize；
 - sum/max/min/bitand/bitor/bitxor、logical seed 和 batch hint 的 scalar fallback；
 - repo 内 reducer tests、example 和 docs 的 clean-break v2 迁移。
 
-当前没有实现 Phase 5 subgroup fast path、batched finalize fast path、multiple epochs、自定义 combine 或 discontiguous participant set。非 GPU target 会明确拒绝 finalize；ROCm emitter 已通过启用 `USE_ROCM` 与 HIP stub 的完整编译验证，尚未做真实 ROCm 设备上的数值验证。
+当前没有实现 Phase 5 subgroup fast path、general affine/Fragment ownership、batched finalize fast path、multiple epochs、自定义 combine 或 discontiguous participant set。非 GPU target 会明确拒绝 finalize；ROCm emitter 已通过启用 `USE_ROCM` 与 HIP stub 的完整编译验证，尚未做真实 ROCm 设备上的数值验证。
 
 ## 2. 为什么现有抽象无法继续扩展
 
@@ -230,7 +232,7 @@ T.reducer_init(acc)
 
 for k_tile in T.Pipelined(...):
     for i, j in T.Parallel(M, K_TILE):
-        T.reducer_update(acc, (i,), A_frag[i, j] * x_frag[j])
+        T.reducer_update(acc[i], A_frag[i, j] * x_frag[j])
 
 result = T.alloc_fragment((M,), T.float32)
 T.finalize_reducer(acc, result)
@@ -247,18 +249,19 @@ combine op 属于 reducer definition，而不是每个 update：
 
 ```python
 sum_acc = T.alloc_reducer(..., op="sum")
-T.reducer_update(sum_acc, i, value)
+T.reducer_update(sum_acc[i], value)
 
 max_acc = T.alloc_reducer(..., op="max")
-T.reducer_update(max_acc, i, T.abs(value))
+T.reducer_update(max_acc[i], T.abs(value))
 ```
 
 旧的 `acc[i] += x`、`acc[i] -= x`、`acc[i] = max(...)` 和 `acc[i] = min(...)` 都不做 canonicalization，直接诊断为 unsupported reducer access。若要给 sum reducer 贡献负值，必须显式写：
 
 ```python
-T.reducer_update(sum_acc, i, -value)
+T.reducer_update(sum_acc[i], -value)
 ```
 
+`T.reducer_update` 的 indexed target 只是一种 point-region descriptor；除此之外的
 任意 reducer `BufferLoad`、`BufferStore`、`T.clear` 或 `T.fill` 都是非法操作。
 
 ### 5.3 Identity 与 seed
@@ -422,7 +425,7 @@ update 位于 `T.Parallel` 外时，没有 loop-created replica，marker 直接�
 ```python
 for i in T.Parallel(...):
     y_frag[i] = f(x_frag[i])
-    T.reducer_update(acc, 0, x_frag[i])
+    T.reducer_update(acc[0], x_frag[i])
 ```
 
 lowering 应为：
@@ -445,7 +448,7 @@ update 可以位于依赖 logical indices 的条件中：
 
 ```python
 if j < valid_n:
-    T.reducer_update(acc, i, value)
+    T.reducer_update(acc[i], value)
 ```
 
 要求 predicate 在同一个 replica equivalence class 内不变。planner 应证明：
@@ -754,6 +757,18 @@ epoch 只有在以下条件全部满足时才能采用 subgroup plan：
 
 退出条件：全仓搜索不到 v1 reducer API 或 metadata consumer；只有 v2 pipeline 能构造 reducer。
 
+### Phase 4.5：conservative LocalComplete optimization
+
+- 复用 finalize destination Fragment layout 作为 storage layout 与 ownership certificate。
+- 第一版只接受 `Parallel(M) -> output[M]` 的逐维 identity mapping；inner serial loops 可以继续向同一 output 累加。
+- 只在 loop 可安全复制时用 destination layout 覆盖原 Parallel layout；ordinary stores、Fragment/local loads、非 pure calls 或 layout conflicts 全部 fallback。
+- materialized partial shape 改为 destination layout 的 `OutputShape()`。
+- update 在所有 destination replicas 上执行，并使用独立的 partition-required marker；不能复用会产生 `REP == 0` 的 multiplicity marker。
+- finalize 直接把 local partial slots 写到 destination physical slots，不生成 AllReduce、barrier 或 workspace。
+- 带 reducer effect marker 的 loop 禁止普通 vectorization，保留 loop-carried combine dependency。
+
+退出条件：M8/M32/M128 independent-output cases 生成 compact local storage 且没有 collective；seed、inner serial reduction 与 fallback numerical tests 全部通过；关闭证明路径时仍得到 canonical baseline。
+
 ### Phase 5：exact-signature subgroup optimization
 
 - 实现 `ThreadGroupSignature` normalization/equality。
@@ -773,7 +788,8 @@ epoch 只有在以下条件全部满足时才能采用 subgroup plan：
 | C | full local storage + multiplicity marker | 实现 canonical baseline | 是 |
 | D | contiguous participant plan + out-of-place CUDA/ROCm finalize | 完成 v2 correctness | 是 |
 | E | migrate in-tree users + delete v1 implementation | clean-break cutover | 整体回滚 |
-| F | exact-signature subgroup fast path | 仅性能 | 是，可强制 baseline |
+| F | conservative LocalComplete compact-storage fast path | 仅性能 | 是，可强制 baseline |
+| G | exact-signature subgroup fast path | 仅性能 | 是，可强制 baseline |
 
 ### 14.1 预计代码落点
 
@@ -837,6 +853,8 @@ tl.reducer_strategy = "canonical" | "auto"
 - reduction width 与 barrier arrive count 独立断言。
 - `local.reducer` 在 backend codegen 前全部 materialize。
 - fast path 分析失败时确定性回退 baseline。
+- LocalComplete independent-output case 使用 layout-shaped compact partial，且不存在 AllReduce、named barrier 或 workspace。
+- LocalComplete inner serial reduction 保持 loop-carried combine 顺序，不被普通 vectorization 拆成同址并行 stores。
 
 ### 15.4 Diagnostics
 
@@ -896,9 +914,11 @@ core IR 与用户 API 都必须显式出现 `T.reducer_init`。第一版不提�
 
 理由：identity initialization 需要确定 runtime execution/participant domain，不能只靠 allocation metadata 表示。
 
-### 17.3 第一版 partial storage
+### 17.3 第一版 canonical partial storage
 
-每 participant 一份完整 logical output array 的普通 `local` storage。
+canonical fallback 是每 participant 一份完整 logical output array 的普通 `local`
+storage。LocalComplete 只是在独立证明成立时替换物理表示；证明失败必须回到这个
+fallback。
 
 理由：最容易证明正确，也完全摆脱 `FullyReplicated Fragment` 的值语义冲突。寄存器优化放到独立 storage planner。
 

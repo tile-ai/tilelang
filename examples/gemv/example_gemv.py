@@ -246,7 +246,7 @@ def gemv_alloc_reducer(
             x_frag = T.alloc_fragment(block_N, dtype)
             T.copy(x[i0_n * block_N], x_frag)
             for i1_m, i1_n in T.Parallel(block_M, block_N):
-                T.reducer_update(o_reducer, (i1_m,), a_frag[i1_m, i1_n] * x_frag[i1_n])
+                T.reducer_update(o_reducer[i1_m], a_frag[i1_m, i1_n] * x_frag[i1_n])
         o_result = T.alloc_fragment((block_M,), accum_dtype)
         T.finalize_reducer(o_reducer, o_result)
         T.copy(o_result, o[i0_m * block_M])

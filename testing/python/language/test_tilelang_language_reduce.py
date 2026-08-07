@@ -679,7 +679,7 @@ def _make_finalize_reducer_kernel(block_M, block_N, dtype, op, batch):
             A_frag = T.alloc_fragment((block_M, block_N), dtype)
             T.copy(A_smem, A_frag)
             for i, j in T.Parallel(block_M, block_N):
-                T.reducer_update(o_reducer, (i,), A_frag[i, j])
+                T.reducer_update(o_reducer[i], A_frag[i, j])
             o_result = T.alloc_fragment((block_M,), dtype)
             T.finalize_reducer(o_reducer, o_result, batch=batch)
             T.copy(o_result, B)
@@ -746,7 +746,7 @@ def test_finalize_reducer_short_parallel_extent():
             total = T.alloc_reducer((1,), T.float32)
             T.reducer_init(total)
             for i in T.Parallel(extent):
-                T.reducer_update(total, (0,), src[i])
+                T.reducer_update(total[0], src[i])
             result = T.alloc_fragment((1,), T.float32)
             T.finalize_reducer(total, result)
             if T.get_thread_binding() == 0:
@@ -776,9 +776,9 @@ def test_finalize_reducer_mixed_parallel_extents():
             total = T.alloc_reducer((1,), T.float32)
             T.reducer_init(total)
             for i in T.Parallel(extent):
-                T.reducer_update(total, (0,), a_frag[i])
+                T.reducer_update(total[0], a_frag[i])
             for j in T.Parallel(2 * extent):
-                T.reducer_update(total, (0,), b_frag[j])
+                T.reducer_update(total[0], b_frag[j])
             result = T.alloc_fragment((1,), T.float32)
             T.finalize_reducer(total, result)
             if T.get_thread_binding() == 0:
@@ -816,7 +816,7 @@ def test_finalize_reducer_invalid_batch(batch, exc_type, match):
                 A_frag = T.alloc_fragment((block_M, 64), T.float32)
                 T.copy(A_smem, A_frag)
                 for i, j in T.Parallel(block_M, 64):
-                    T.reducer_update(o_reducer, (i,), A_frag[i, j])
+                    T.reducer_update(o_reducer[i], A_frag[i, j])
                 o_result = T.alloc_fragment((block_M,), T.float32)
                 T.finalize_reducer(o_reducer, o_result, batch=batch)
                 T.copy(o_result, B)

@@ -168,7 +168,7 @@ Compute primitives
 - Reductions: `T.reduce_sum/max/min/abssum/absmax`, bitwise `and/or/xor`.
 - Deferred reducers:
   - `T.reducer_init(acc)`: Start the single epoch with the operation identity.
-  - `T.reducer_update(acc, indices, value)`: Add one logical contribution.
+  - `T.reducer_update(acc[indices], value)`: Add one logical contribution.
   - `T.finalize_reducer(acc, dst, batch=1)`: Finalize into an independent fragment; `batch` is a non-semantic hint.
 - Scans: `T.cumsum`, `T.cummax`.
 - Warp reducers: `T.warp_reduce_sum/max/min/bitand/bitor`.
