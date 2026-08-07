@@ -828,6 +828,74 @@ fast path。关键区别在于，v2 planner 做决定时仍然看得到每个
 据此证明并选择更窄的 reduction 或完全 local 的方案。证明失败时则回到上面的
 baseline，不再要求只持有 `total` layout 的 finalize 猜测已经丢失的信息。
 
+#### 当前原型已经优化了什么
+
+这里需要区分两种 fast path。当前分支**还没有**把上面的
+`Parallel(8) -> total[0]` 变成 `T.reduce_sum` 的 8-way subgroup reduction；对应的
+codegen test 仍然要求它生成 `AllReduce<..., 128>`。原因是 8 个不同的 logical
+contributions 最终都进入同一个 logical output，participant 之间确实还需要通信。
+
+当前已经实现的是更保守的 `LocalComplete` fast path。例如：
+
+```python
+acc = T.alloc_reducer((8,), T.float32, op="sum")
+T.reducer_init(acc)
+
+for i in T.Parallel(8):
+    T.reducer_update(acc[i], A[i])
+
+result = T.alloc_fragment((8,), T.float32)
+T.finalize_reducer(acc, result)
+```
+
+这里每个 logical iteration `i` 只负责 logical output `acc[i]`，不存在两个不同的
+`i` 需要先合并才能得到同一个结果。planner 在 layout inference 之后执行以下证明：
+
+1. reducer shape、destination logical shape 和 `T.Parallel` shape 完全相同；
+2. update indices 与 parallel variables 逐维相同，这里就是 `acc[i]` 对应 `i`；
+3. destination Fragment layout、thread extent、replicate extent 和每线程 physical
+   storage shape 都是编译期已知的；
+4. loop body 可以安全地在 destination replicas 上重复执行；如果读取
+   thread-private Fragment/local value、包含普通 store 或其他副作用，就放弃该计划；
+5. 多个 reducers 共用同一个 parallel loop 时，它们要求的 destination layout
+   不能冲突。
+
+证明成功后，planner 把 destination layout 同时用作 storage layout 和 ownership
+certificate：
+
+实现上，`ReducerPhysicalPlanner::CanUseLocalComplete` 完成上述证明，
+`ReducerMaterializer` 改写 storage shape、loop layout 和 update region，最后由
+`FinalizeReducerLowerer` 生成不含 collective 的 direct-local finalize。
+
+- reducer 的每 participant 完整 8-element array 被压缩为
+  `destination_layout.OutputShape()`；本例通常是每个 thread 只保留一个 local slot；
+- `T.Parallel(8)` 改用 destination layout，logical index `i` 通过
+  `layout.Forward(i)` 映射到这个 local slot；
+- 所有 destination replicas 都执行 update，不添加 `rep == 0` guard，因为每个
+  replica 都在独立构造自己将要消费的完整 result copy；
+- finalize 只把 local slot 复制到 destination，并在需要时应用一次 seed，不生成
+  AllReduce、named barrier 或 workspace。
+
+以 128 threads、8 个 logical outputs 为例，生成代码的核心可以近似理解为：
+
+```cpp
+int i = threadIdx.x % 8;
+float partial[1];
+partial[0] = 0.0f;
+partial[0] += A[i];
+float result = partial[0];  // 没有 collective
+```
+
+128 个线程形成 16 份 destination replicas；每份 replica 内的 8 个 threads 分别构造
+8 个不同 outputs，因此每份都已经是完整的 `result[0..7]`。这些 replicas 不需要互相
+求和，后续普通 Fragment copy 只写回所需的 physical copy。
+
+而本节原来的 scalar sum 是 `Parallel(8) -> output[0]`：reducer shape 是 `(1,)`，
+parallel shape 是 `(8,)`，并且 update index `0` 不等于 parallel variable `i`，所以
+上述证明会失败并回到 FullParticipant。要复现 `T.reduce_sum`，还需要未来的 subgroup
+plan 证明“128 participants 可分成 16 个互不通信的 8-thread groups”，再让每组执行
+一次 `AllReduce<..., 8>`。这项优化当前尚未实现。
+
 把本例和开头的术语对应起来：
 
 | 术语 | 本例中的含义 |
