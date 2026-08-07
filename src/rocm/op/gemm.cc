@@ -32,6 +32,10 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
   constexpr int kMPerWarp = 16;
   constexpr int kNPerWarp = 16;
 
+  // Guard the callers that do not go through ComputeWarpPartition: a zero
+  // warp count makes the modulo below divide by zero and kills the process.
+  ICHECK_GT(num_warps, 0)
+      << "num_warps must be positive, but got " << num_warps;
   ICHECK(M % kMPerWarp == 0)
       << "M must be divisible by " << kMPerWarp << ", but got " << M;
   ICHECK(N % kNPerWarp == 0)
@@ -118,7 +122,18 @@ struct Gemm {
   ComputeWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
                        int block_size, Target target, ffi::String gemm_inst) {
     (void)gemm_inst;
-    int num_warps = block_size / TargetRocmGetWarpSize(target);
+    const int warp_size = TargetRocmGetWarpSize(target);
+    // A block narrower than one wavefront yields zero warps, which used to
+    // reach ComputeDefaultWarpPartition and abort the process with SIGFPE on
+    // its `M % (m_warp * kMPerWarp)`. Thread counts tuned for NVIDIA's 32-lane
+    // warp hit this on CDNA, where the wavefront is 64 wide.
+    ICHECK_GE(block_size, warp_size)
+        << "T.gemm needs at least one full wavefront, but this block has only "
+        << block_size << " threads while the wavefront size for "
+        << target->str() << " is " << warp_size
+        << ". Raise the kernel's thread count to a multiple of " << warp_size
+        << ".";
+    int num_warps = block_size / warp_size;
     return ComputeDefaultWarpPartition(policy, M, N, num_warps);
   }
 
