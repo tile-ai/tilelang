@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdint>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -2014,6 +2015,7 @@ void CodeGenTileLangHIP::VisitStmt_(const BufferStoreNode *op) {
   // stores; CodeGenC's generic scalarization advances one byte per element.
   if (element_dtype.is_float4() && element_dtype.is_scalar() &&
       value_dtype.is_float4() && !value_dtype.is_scalar()) {
+    enable_fp4_ = true;
     auto packed_it = fp4_packed_buffers_.find(buffer_var);
     std::string packed_buffer =
         packed_it != fp4_packed_buffers_.end()
@@ -2271,13 +2273,27 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
     } else if (std::isnan(op->value)) {
       temp << ((op->dtype.bits() == 32) ? "NAN" : "NAN");
     } else {
-      // Preserve the exact TIR constant. The default stream precision is not
-      // sufficient to round-trip float32 values (for example 1.0f / 6.0f),
-      // which can change branch and quantization boundary results.
-      temp << FlexibleHexFormat(op->value);
-      if (op->dtype.bits() == 32)
-        temp << 'f';
-      temp << "/*" << std::scientific << op->value << "*/";
+      std::ostringstream decimal;
+      decimal << std::scientific << op->value;
+      std::istringstream parser(decimal.str());
+      double round_tripped = 0.0;
+      parser >> round_tripped;
+      bool decimal_is_exact =
+          !parser.fail() && round_tripped == op->value &&
+          std::signbit(round_tripped) == std::signbit(op->value);
+      if (decimal_is_exact) {
+        temp << decimal.str();
+        if (op->dtype.bits() == 32)
+          temp << 'f';
+      } else {
+        // Preserve exact TIR constants whose legacy decimal spelling does not
+        // round-trip (for example 1.0f / 6.0f), which can otherwise change
+        // branch and quantization boundary results.
+        temp << FlexibleHexFormat(op->value);
+        if (op->dtype.bits() == 32)
+          temp << 'f';
+        temp << "/*" << decimal.str() << "*/";
+      }
     }
     p->MarkConst(temp.str());
     os << temp.str();
