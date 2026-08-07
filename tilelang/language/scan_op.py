@@ -19,6 +19,7 @@ def _scan_fragment(
     dim: int,
     reverse: bool,
     op_key: str,
+    annotations: dict | None = None,
 ) -> None:
     src_shape = retrieve_shape(src)
     src_buffer = _get_buffer(src)
@@ -35,6 +36,7 @@ def _scan_fragment(
         to_tile_region(scan_smem, access_type="w"),
         dim,
         reverse,
+        annotations=_normalize_annotations(annotations),
     )
     copy(scan_smem, dst)
 
@@ -45,6 +47,7 @@ def cumsum_fragment(
     dst: BufferLikeType,
     dim: int,
     reverse: bool,
+    annotations: dict | None = None,
 ) -> None:
     """
     Compute cumulative sum for fragment buffers by copying to shared memory first.
@@ -58,7 +61,7 @@ def cumsum_fragment(
         dim: Dimension along which to compute cumulative sum.
         reverse: If True, compute cumulative sum in reverse order.
     """
-    _scan_fragment(src, dst, dim, reverse, _CUMSUM_OP_KEY)
+    _scan_fragment(src, dst, dim, reverse, _CUMSUM_OP_KEY, annotations)
 
 
 def _prepare_scan_args(src: BufferLikeType, dst: BufferLikeType | None, dim: int, op_name: str) -> tuple[BufferLikeType, int]:
@@ -135,7 +138,7 @@ def cumsum(
     dst, dim = _prepare_scan_args(src, dst, dim, "cumsum")
 
     if is_fragment(src):
-        cumsum_fragment(src, dst, dim, reverse)
+        cumsum_fragment(src, dst, dim, reverse, annotations)
         return
 
     return tirx.call_intrin(
@@ -155,6 +158,7 @@ def cummax_fragment(
     dst: BufferLikeType,
     dim: int,
     reverse: bool,
+    annotations: dict | None = None,
 ) -> None:
     """
     Compute cumulative maximum for fragment buffers by staging through shared memory.
@@ -165,7 +169,7 @@ def cummax_fragment(
         dim: Dimension along which to compute cumulative maximum.
         reverse: If True, compute cumulative maximum in reverse order.
     """
-    _scan_fragment(src, dst, dim, reverse, _CUMMAX_OP_KEY)
+    _scan_fragment(src, dst, dim, reverse, _CUMMAX_OP_KEY, annotations)
 
 
 def cummax(
@@ -187,7 +191,7 @@ def cummax(
     dst, dim = _prepare_scan_args(src, dst, dim, "cummax")
 
     if is_fragment(src):
-        cummax_fragment(src, dst, dim, reverse)
+        cummax_fragment(src, dst, dim, reverse, annotations)
         return
 
     return tirx.call_intrin(

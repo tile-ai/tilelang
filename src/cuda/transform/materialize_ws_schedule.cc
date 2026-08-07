@@ -272,6 +272,9 @@ OpAtom ClassifyCall(const Call &call, const Target &target) {
   if (const auto *copy = tile_op.as<CopyNode>()) {
     cuda::CopyInstSelection sel =
         cuda::ClassifyWarpSpecializedProducerCopy(*copy, target);
+    ICHECK(sel.supported)
+        << "ws_schedule: producer copy instruction selection failed: "
+        << sel.reason;
     if (cuda::CopyInstIsTMA(sel.inst))
       return OpAtom::kTmaCopy;
     if (cuda::CopyInstIsCPAsync(sel.inst))

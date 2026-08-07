@@ -33,6 +33,7 @@ def gemm(
     group_size = 8
     assert n_blocks % (2 * group_size) == 0
     assert K % (2 * block_K) == 0
+    assert block_N % store_block_N == 0
 
     with T.Kernel(sm_num, threads=128) as block_id:
         A_shared = T.alloc_shared((block_M, block_K), dtype)
@@ -242,6 +243,7 @@ def gemm_ws(
     group_size = 8
     assert n_blocks % (2 * group_size) == 0
     assert K % (2 * block_K) == 0
+    assert block_N % store_block_N == 0
 
     with T.Kernel(sm_num, threads=256) as block_id:
         A_shared = T.alloc_shared((num_stages, block_M, block_K), dtype)

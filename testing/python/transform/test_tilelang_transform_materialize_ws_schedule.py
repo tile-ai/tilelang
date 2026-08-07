@@ -91,7 +91,16 @@ def _smem_pipeline_kernel(
             )
 
             for i in T.Pipelined(4, num_stages=depth, annotations={T.WSID: "loop_k"}):
-                T.copy(A[i * 64, 0], A_shared, annotations={T.WSID: "copy_in"})
+                if kernel_edit == "unsupported_tma_preference":
+                    T.copy(
+                        A[i * 64, 0],
+                        A_shared,
+                        disable_tma=True,
+                        prefer_instruction="tma",
+                        annotations={T.WSID: "copy_in"},
+                    )
+                else:
+                    T.copy(A[i * 64, 0], A_shared, annotations={T.WSID: "copy_in"})
                 if kernel_edit == "unannotated_consumer":
                     T.copy(A_shared, A_frag)
                 else:
@@ -119,13 +128,49 @@ def test_basic_two_role_transform():
 
 
 @tilelang.testing.requires_cuda
+def test_scalar_op_annotations_preserved():
+    @T.prim_func
+    def kernel(A: T.Tensor((1,), T.float32), B: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=128):
+            T.annotate_ws_schedule(
+                T.WSSchedule(
+                    num_warps=4,
+                    roles=[T.WSRole("Worker", warps_lo=0, warps_hi=4, max_nreg=224)],
+                    pipelines=[],
+                    scopes=[
+                        T.WSScope(
+                            T.WSScope.ROOT,
+                            {
+                                "Worker": [
+                                    "copy",
+                                    "atomic_max",
+                                    "atomic_min",
+                                    "atomic_add",
+                                ]
+                            },
+                        )
+                    ],
+                )
+            )
+            T.copy(A[0], B[0], annotations={T.WSID: "copy"})
+            T.atomic_max(B[0], A[0], annotations={T.WSID: "atomic_max"})
+            T.atomic_min(B[0], A[0], annotations={T.WSID: "atomic_min"})
+            T.atomic_add(B[0], A[0], annotations={T.WSID: "atomic_add"})
+
+    script = str(_materialize(kernel))
+    assert "T.copy(" in script
+    assert script.count("atomic_") >= 3
+    assert "ws_schedule" not in script and "ws_op_id" not in script
+
+
+@tilelang.testing.requires_cuda
 def test_buffer_multi_versioning():
     func = _materialize(_smem_pipeline_kernel(depth=3))
     script = str(func)
     # The pipeline buffer gains a leading version dimension of `depth`.
     assert "A_shared = T.sblock_alloc_buffer((3, 64, 64)" in script
     # Accesses index the acquired version (phase % depth).
-    assert "A_shared[i % 3" in script or "A_shared[(i" in script
+    assert re.search(r"A_shared\[\(?i(?:_\d+)? % 3\)?, 0, 0\]", script), script
 
 
 @tilelang.testing.requires_cuda
@@ -320,6 +365,12 @@ def test_prefer_instruction_cp_async_selects_cp_async_atom():
 
 
 @tilelang.testing.requires_cuda
+def test_unsupported_preferred_copy_rejected():
+    with pytest.raises(Exception, match='prefer_instruction="tma" conflicts with disable_tma=true'):
+        _materialize(_smem_pipeline_kernel(kernel_edit="unsupported_tma_preference"))
+
+
+@tilelang.testing.requires_cuda
 def test_consumer_wait_parity():
     func = _materialize(_smem_pipeline_kernel(depth=2))
     script = str(func)
@@ -409,12 +460,12 @@ def test_stage_offset_unrolls_prologue_epilogue():
     # boundary checks; the stage-1 entries address the previous logical
     # iteration.
     assert "for i in range(1, 4):" in script
-    assert "i - 1" in script
     assert "i >= 1" not in script and "1 <= i" not in script
     assert "if i < 4" not in script
     # Prologue (the stage-0 entries at iteration 0) precedes the loop;
     # epilogue (the stage-1 entries at iteration 3) follows it.
     producer = script[script.find("T.set_max_nreg(40, 0)") :]
+    assert "T.region(C_shared[(i - 1) % 2, 0, 0]" in producer, producer
     prologue = producer.find("T.mbarrier_wait_parity(a_empty_1[0], 1)")
     loop = producer.find("for i in range(1, 4):")
     epilogue = producer.find("T.mbarrier_wait_parity(c_empty_1[1], 0)")
@@ -1027,8 +1078,9 @@ def test_ws_op_wrapper_groups_statements():
     script = str(func)
     # Both statements of the group emitted once, in the consumer branch,
     # with the pipeline read version-rebound.
-    assert script.count("A_frag") >= 2
-    assert "A_shared[i % 2" in script
+    consumer = script[script.find("T.set_max_nreg(224, 1)") :]
+    assert consumer.count("T.copy(T.region(A_shared[i % 2") == 1, consumer
+    assert consumer.count("T.copy(T.region(A_frag[") == 1, consumer
     assert "ws_op_id" not in script
 
 

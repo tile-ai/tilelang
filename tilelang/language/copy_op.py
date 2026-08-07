@@ -108,16 +108,9 @@ def copy(
       scope-specific decisions happen during lowering.
     """
     src, dst = _normalize_copy_regions(src, dst)
-    if isinstance(src, tirx.BufferLoad) and isinstance(dst, tirx.BufferLoad):
-        # Scalar fast path. Mirror the dtype conversion the region path applies
-        # in copy.cc; cast to the load dtype, which is what BufferStore checks
-        # once index lanes are folded in.
-        value = src
-        if src.dtype != dst.dtype:
-            value = tirx.Cast(dst.dtype, src)
-        return tirx.BufferStore(dst.buffer, value, dst.indices)
 
-    # Build annotations dict
+    # Build annotations dict before selecting the scalar fast path: a scalar
+    # copy with metadata must remain a tile op so the metadata is preserved.
     ann = _normalize_annotations(annotations)
 
     # Individual arguments take lower precedence than annotations
@@ -134,6 +127,15 @@ def copy(
     # Parallel loop layout hint (Fragment). Mirrors T.Parallel(loop_layout=...)
     if loop_layout is not None and "parallel_loop_layout" not in ann:
         ann["parallel_loop_layout"] = loop_layout
+
+    if isinstance(src, tirx.BufferLoad) and isinstance(dst, tirx.BufferLoad) and not ann:
+        # Scalar fast path. Mirror the dtype conversion the region path applies
+        # in copy.cc; cast to the load dtype, which is what BufferStore checks
+        # once index lanes are folded in.
+        value = src
+        if src.dtype != dst.dtype:
+            value = tirx.Cast(dst.dtype, src)
+        return tirx.BufferStore(dst.buffer, value, dst.indices)
 
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann)
 
@@ -220,14 +222,14 @@ def async_copy(
         tirx.Call: A handle to the async copy operation
     """
     src, dst = _normalize_copy_regions(src, dst)
-    if isinstance(src, tirx.BufferLoad) and isinstance(dst, tirx.BufferLoad):
-        return tirx.BufferStore(dst.buffer, src, dst.indices)
-
     ann = _normalize_annotations(annotations)
     if "coalesced_width" not in ann and coalesced_width is not None:
         ann["coalesced_width"] = coalesced_width
     if loop_layout is not None and "parallel_loop_layout" not in ann:
         ann["parallel_loop_layout"] = loop_layout
+
+    if isinstance(src, tirx.BufferLoad) and isinstance(dst, tirx.BufferLoad) and not ann:
+        return tirx.BufferStore(dst.buffer, src, dst.indices)
 
     return tirx.call_intrin(
         "handle",

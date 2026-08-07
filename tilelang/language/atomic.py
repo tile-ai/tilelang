@@ -80,6 +80,7 @@ def atomic_max(
 
     src_extent = get_extent(value)
     dst_extent = get_extent(dst)
+    ann = _normalize_annotations(annotations)
 
     if dst_extent is None and src_extent is None:
         # Scalar path: use atomicmax_elem_op intrinsic
@@ -93,6 +94,7 @@ def atomic_max(
             T.access_ptr(dst, "rw"),
             value,
             memory_order_id,
+            annotations=ann,
         )
 
     # When both arguments are Buffer, we can check whether they are structural equal.
@@ -114,7 +116,6 @@ def atomic_max(
     if return_prev:
         raise NotImplementedError("return_prev is not supported for tile-region-based atomic operations")
 
-    ann = _normalize_annotations(annotations)
     if memory_order is not None:
         ann["memory_order"] = _MEMORY_ORDER_ID_MAP[memory_order]
 
@@ -165,6 +166,7 @@ def atomic_min(
 
     src_extent = get_extent(value)
     dst_extent = get_extent(dst)
+    ann = _normalize_annotations(annotations)
 
     if dst_extent is None and src_extent is None:
         # Scalar path: use atomicmin_elem_op intrinsic
@@ -178,6 +180,7 @@ def atomic_min(
             T.access_ptr(dst, "rw"),
             value,
             memory_order_id,
+            annotations=ann,
         )
 
     # When both arguments are Buffer, we can check whether they are structural equal.
@@ -199,7 +202,6 @@ def atomic_min(
     if return_prev:
         raise NotImplementedError("return_prev is not supported for tile-region-based atomic operations")
 
-    ann = _normalize_annotations(annotations)
     if memory_order is not None:
         ann["memory_order"] = _MEMORY_ORDER_ID_MAP[memory_order]
 
@@ -260,6 +262,7 @@ def atomic_add(
 
     src_extent = get_extent(value)
     dst_extent = get_extent(dst)
+    ann = _normalize_annotations(annotations)
 
     # Thread-level atomic add, where both extent can't be inferred
     if dst_extent is None and src_extent is None:
@@ -268,7 +271,7 @@ def atomic_add(
 
         # Pass destination by pointer to match device signature
         if memory_order is None:
-            return T.call_intrin(return_type, atomic_add_op, T.access_ptr(dst, "rw"), value)
+            return T.call_intrin(return_type, atomic_add_op, T.access_ptr(dst, "rw"), value, annotations=ann)
         else:
             return T.call_intrin(
                 return_type,
@@ -276,6 +279,7 @@ def atomic_add(
                 T.access_ptr(dst, "rw"),
                 value,
                 _MEMORY_ORDER_ID_MAP[memory_order],
+                annotations=ann,
             )
 
     # When both arguments are Buffer, we can check whether they are structural equal.
@@ -300,7 +304,6 @@ def atomic_add(
         raise NotImplementedError("return_prev is not supported for tile-region-based atomic operations")
 
     # Build annotations dict
-    ann = _normalize_annotations(annotations)
     if use_tma:
         ann["use_tma"] = 1
     if memory_order is not None:
