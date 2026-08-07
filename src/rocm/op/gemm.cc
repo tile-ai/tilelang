@@ -34,8 +34,8 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
 
   // Guard the callers that do not go through ComputeWarpPartition: a zero
   // warp count makes the modulo below divide by zero and kills the process.
-  ICHECK_GT(num_warps, 0)
-      << "num_warps must be positive, but got " << num_warps;
+  ICHECK_GT(num_warps, 0) << "num_warps must be positive, but got "
+                          << num_warps;
   ICHECK(M % kMPerWarp == 0)
       << "M must be divisible by " << kMPerWarp << ", but got " << M;
   ICHECK(N % kNPerWarp == 0)
