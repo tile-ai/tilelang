@@ -1,6 +1,5 @@
 #include "../op/utils.h"
 #include "common/constr_visitor.h"
-#include "layout_reducer.h"
 #include "span_utils.h"
 #include "support/check.h"
 #include "tvm/arith/analyzer.h"
@@ -40,7 +39,6 @@ struct ParallelLoopVerifier : public ConstrVisitor {
 
   std::vector<Var> parallel_loop_vars_;
   std::vector<Span> parallel_loop_spans_;
-  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> reducers;
   std::vector<RaceReport> reports_;
 
   void VisitStmt_(const ForNode *op) override {
@@ -55,8 +53,7 @@ struct ParallelLoopVerifier : public ConstrVisitor {
     }
   }
   void VisitStmt_(const BufferStoreNode *op) override {
-    if (reducers.count(op->buffer->data) ||
-        IsLocalBuffer(op->buffer, /*allow_var=*/true)) {
+    if (IsLocalBuffer(op->buffer, /*allow_var=*/true)) {
       StmtExprVisitor::VisitStmt_(op);
       return;
     }
@@ -110,18 +107,6 @@ struct ParallelLoopVerifier : public ConstrVisitor {
     }
     StmtExprVisitor::VisitStmt_(op);
   }
-  void VisitStmt_(const SBlockNode *op) override {
-    if (op->annotations.count(attr::kReducerInfo)) {
-      auto map = op->annotations.Get(attr::kReducerInfo)
-                     ->as<Map<Var, Map<String, String>>>();
-      ICHECK(map) << "reducer_replication map is not defined";
-      for (const auto &[var, info] : map.value()) {
-        reducers.insert(var);
-      }
-    }
-    return StmtExprVisitor::VisitStmt_(op);
-  }
-
   /*! \brief Emit all collected races as one aggregated warning. */
   void EmitReport() const {
     if (reports_.empty()) {

@@ -24,6 +24,8 @@
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/stmt.h>
 
+#include <cmath>
+#include <limits>
 #include <sstream>
 #include <vector>
 
@@ -59,7 +61,135 @@ const ReduceImpl &ResolveReduceImpl(Target target) {
   return *matched_impl;
 }
 
+int64_t SignedMin(int bits) {
+  if (bits >= 64) {
+    return std::numeric_limits<int64_t>::min();
+  }
+  return -(static_cast<int64_t>(1) << (bits - 1));
+}
+
+int64_t SignedMax(int bits) {
+  if (bits >= 64) {
+    return std::numeric_limits<int64_t>::max();
+  }
+  return (static_cast<int64_t>(1) << (bits - 1)) - 1;
+}
+
+uint64_t UnsignedMax(int bits) {
+  if (bits >= 64) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return (static_cast<uint64_t>(1) << bits) - 1;
+}
+
+bool IsFloatingPointType(DataType dtype) {
+  return dtype.is_float() || dtype.is_bfloat16() || dtype.is_float8() ||
+         dtype.is_float6() || dtype.is_float4();
+}
+
 } // namespace
+
+bool IsBuiltinCommutativeReduceType(const ReduceType &type) {
+  ICHECK(type.defined());
+  return type->IsSum() || type->IsAbsSum() || type->IsMax() || type->IsMin() ||
+         type->IsAbsMax() || type->IsBitAnd() || type->IsBitOr() ||
+         type->IsBitXor();
+}
+
+String ReduceTypeName(const ReduceType &type) {
+  ICHECK(type.defined());
+  if (type->IsSum())
+    return "sum";
+  if (type->IsAbsSum())
+    return "abssum";
+  if (type->IsMax())
+    return "max";
+  if (type->IsMin())
+    return "min";
+  if (type->IsAbsMax())
+    return "absmax";
+  if (type->IsBitAnd())
+    return "bitand";
+  if (type->IsBitOr())
+    return "bitor";
+  if (type->IsBitXor())
+    return "bitxor";
+  LOG(FATAL) << "Unsupported reduce type: " << type->type;
+}
+
+PrimExpr MakeReduceIdentity(const ReduceType &type, DataType dtype) {
+  ICHECK(type.defined());
+  if (type->IsSum() || type->IsAbsSum() || type->IsAbsMax() ||
+      type->IsBitOr() || type->IsBitXor()) {
+    return make_zero(dtype);
+  }
+  if (type->IsMax()) {
+    if (dtype.is_int())
+      return make_const(dtype, SignedMin(dtype.bits()));
+    if (dtype.is_uint())
+      return make_zero(dtype);
+    if (IsFloatingPointType(dtype))
+      return make_const(dtype, -INFINITY);
+  }
+  if (type->IsMin()) {
+    if (dtype.is_int())
+      return make_const(dtype, SignedMax(dtype.bits()));
+    if (dtype.is_uint())
+      return make_const(dtype, UnsignedMax(dtype.bits()));
+    if (IsFloatingPointType(dtype))
+      return make_const(dtype, INFINITY);
+  }
+  if (type->IsBitAnd()) {
+    ICHECK(dtype.is_int() || dtype.is_uint())
+        << "bitand reduction requires an integer dtype, got " << dtype;
+    return dtype.is_int() ? make_const(dtype, -1)
+                          : make_const(dtype, UnsignedMax(dtype.bits()));
+  }
+  LOG(FATAL) << "Reduction type " << ReduceTypeName(type)
+             << " does not support dtype " << dtype;
+}
+
+PrimExpr MakeReduceCombine(const ReduceType &type, const PrimExpr &accumulator,
+                           const PrimExpr &contribution) {
+  ICHECK(type.defined());
+  PrimExpr rhs = contribution;
+  if (accumulator.dtype() != rhs.dtype()) {
+    rhs = Cast(accumulator.dtype(), rhs);
+  }
+  if (type->IsAbsSum() || type->IsAbsMax()) {
+    rhs = rhs.dtype().is_uint() ? rhs : Max(rhs, -rhs);
+  }
+  if (type->IsSum() || type->IsAbsSum())
+    return accumulator + rhs;
+  if (type->IsMax() || type->IsAbsMax())
+    return Max(accumulator, rhs);
+  if (type->IsMin())
+    return Min(accumulator, rhs);
+  if (type->IsBitAnd())
+    return accumulator & rhs;
+  if (type->IsBitOr())
+    return accumulator | rhs;
+  if (type->IsBitXor())
+    return accumulator ^ rhs;
+  LOG(FATAL) << "Unsupported reduce type: " << type->type;
+}
+
+std::string ReduceCodegenName(const ReduceType &type) {
+  ICHECK(type.defined());
+  if (type->IsSum() || type->IsAbsSum())
+    return "tl::SumOp";
+  if (type->IsMax() || type->IsAbsMax())
+    return "tl::MaxOp";
+  if (type->IsMin())
+    return "tl::MinOp";
+  if (type->IsBitAnd())
+    return "tl::BitAndOp";
+  if (type->IsBitOr())
+    return "tl::BitOrOp";
+  if (type->IsBitXor())
+    return "tl::BitXorOp";
+  LOG(FATAL) << "Unsupported reduce type: " << type->type;
+}
 
 void RegisterReduceImpl(ReduceImpl impl) {
   ICHECK(impl.name != nullptr);

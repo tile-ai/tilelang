@@ -155,7 +155,7 @@ Memory allocation and descriptors
 - `T.alloc_barrier(arrive_count)`: Allocate and initialize one or more mbarriers.
 - `T.alloc_tmem(shape, dtype)`: Tensor memory (TMEM) buffer (Blackwell+).
 - `T.deallocate_tmem(buffer)`: Explicitly release a TMEM buffer at the current site.
-- `T.alloc_reducer(shape, dtype, op='sum', replication=None)`: Reducer buf.
+- `T.alloc_reducer(shape, dtype, op='sum', seed=None)`: Allocate an opaque reducer handle.
 - `T.alloc_descriptor(kind, dtype)`: Generic descriptor allocator.
   - `T.alloc_wgmma_desc(dtype='uint64')`
   - `T.alloc_tcgen05_smem_desc(dtype='uint64')`
@@ -166,7 +166,11 @@ Compute primitives
 - `T.gemm(A_s, B_s, C_f)`: Tile GEMM into fragment accumulator.
 - `T.gemm_sp(...)`: Sparse (2:4) tensor core GEMM.
 - Reductions: `T.reduce_sum/max/min/abssum/absmax`, bitwise `and/or/xor`.
-- Scans: `T.cumsum`, `T.cummax`, finalize: `T.finalize_reducer`.
+- Deferred reducers:
+  - `T.reducer_init(acc)`: Start the single epoch with the operation identity.
+  - `T.reducer_update(acc[indices], value)`: Add one logical contribution.
+  - `T.finalize_reducer(acc, dst, batch=1)`: Finalize into an independent fragment; `batch` is a non-semantic hint.
+- Scans: `T.cumsum`, `T.cummax`.
 - Warp reducers: `T.warp_reduce_sum/max/min/bitand/bitor`.
 - Elementwise math: TIR ops (`T.exp`, `T.log`, `T.max`, `T.min`, `T.rsqrt`, ...).
 - Fast math: `T.__log/__log2/__log10/__exp/__exp2/__exp10/__sin/__cos/__tan`.

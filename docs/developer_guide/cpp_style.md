@@ -35,7 +35,7 @@ Use the following names in new C++ code.
 
 | Entity | Style | Example |
 | --- | --- | --- |
-| File names | `lower_snake_case` | `lower_tile_op.cc`, `layout_reducer.h` |
+| File names | `lower_snake_case` | `lower_tile_op.cc`, `deferred_reducer.h` |
 | Namespaces | `lower_snake_case` | `tvm`, `tl`, `tirx` |
 | Types, classes, structs | `PascalCase` | `LayoutNode`, `TileOperator`, `LowerArgs` |
 | Object nodes | `PascalCaseNode` | `GemmNode`, `FragmentNode` |

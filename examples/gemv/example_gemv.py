@@ -236,8 +236,8 @@ def gemv_alloc_reducer(
     o = T.empty((M,), dtype)
 
     with T.Kernel(T.ceildiv(M, block_M), threads=threads) as i0_m:
-        o_reducer = T.alloc_reducer(block_M, accum_dtype, replication="all")
-        T.clear(o_reducer)
+        o_reducer = T.alloc_reducer(block_M, accum_dtype)
+        T.reducer_init(o_reducer)
         for i0_n in T.Pipelined(T.ceildiv(N, block_N), num_stages=num_stages):
             a_smem = T.alloc_shared((block_M, block_N), dtype)
             T.copy(a[i0_m * block_M, i0_n * block_N], a_smem)
@@ -246,9 +246,10 @@ def gemv_alloc_reducer(
             x_frag = T.alloc_fragment(block_N, dtype)
             T.copy(x[i0_n * block_N], x_frag)
             for i1_m, i1_n in T.Parallel(block_M, block_N):
-                o_reducer[i1_m] += a_frag[i1_m, i1_n] * x_frag[i1_n]
-        T.finalize_reducer(o_reducer)
-        T.copy(o_reducer, o[i0_m * block_M])
+                T.reducer_update(o_reducer[i1_m], a_frag[i1_m, i1_n] * x_frag[i1_n])
+        o_result = T.alloc_fragment((block_M,), accum_dtype)
+        T.finalize_reducer(o_reducer, o_result)
+        T.copy(o_result, o[i0_m * block_M])
 
     return o
 

@@ -30,6 +30,7 @@
 
 #include <utility>
 
+#include "../op/deferred_reducer.h"
 #include "../op/utils.h"
 #include "loop_vectorize.h"
 
@@ -63,36 +64,46 @@ private:
   arith::Analyzer *analyzer_;
 };
 
-class ReducerStoreGuarder : public StmtExprMutator {
+class ParallelMultiplicityLowerer : public StmtExprMutator {
 public:
-  static Stmt Rewrite(Stmt stmt, const Array<Buffer> &reducer_buffers,
-                      const PrimExpr &predicate) {
-    ReducerStoreGuarder guarder(reducer_buffers, predicate);
-    return guarder(std::move(stmt));
+  static Stmt Rewrite(Stmt stmt, PrimExpr predicate,
+                      arith::Analyzer *analyzer) {
+    ParallelMultiplicityLowerer rewriter(std::move(predicate), analyzer);
+    return rewriter(std::move(stmt));
   }
 
 private:
-  ReducerStoreGuarder(const Array<Buffer> &reducer_buffers, PrimExpr predicate)
-      : reducer_buffers_(reducer_buffers), predicate_(std::move(predicate)) {}
+  ParallelMultiplicityLowerer(PrimExpr predicate, arith::Analyzer *analyzer)
+      : predicate_(std::move(predicate)), analyzer_(analyzer) {}
 
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
-    for (const Buffer &buffer : reducer_buffers_) {
-      if (buffer.same_as(store->buffer)) {
-        return IfThenElse(predicate_, store);
-      }
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key != attr::kParallelMultiplicity) {
+      return StmtExprMutator::VisitStmt_(op);
     }
-    return store;
+    Stmt body = VisitStmt(op->body);
+    if (analyzer_->CanProve(predicate_)) {
+      return body;
+    }
+    return IfThenElse(predicate_, body);
   }
 
-  Array<Buffer> reducer_buffers_;
   PrimExpr predicate_;
+  arith::Analyzer *analyzer_;
+};
+
+class ParallelPartitionMarkerLowerer : public StmtExprMutator {
+private:
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == attr::kParallelPartitionRequired) {
+      return VisitStmt(op->body);
+    }
+    return StmtExprMutator::VisitStmt_(op);
+  }
 };
 
 // Rewrite the parallel loop into a common loop, which is mapped to threads
 For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
-                  const Fragment &loop_layout, bool require_padding_guard,
-                  const Array<Buffer> &fully_replicated_reducer_buffers) {
+                  const Fragment &loop_layout, bool require_padding_guard) {
   ICHECK(loop_layout.defined());
   ICHECK(thread_index.defined());
   int old_loop_depth = loop_layout->InputDim();
@@ -171,19 +182,24 @@ For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
         analyzer->Simplify(replicate_index < replicate_extent);
     guard = And(guard, And(lower_bound, upper_bound));
   }
-  if (!fully_replicated_reducer_buffers.empty()) {
+  bool has_parallel_multiplicity = false;
+  PostOrderVisit(body, [&](const ObjectRef &object) {
+    if (const auto *attr_stmt = object.as<AttrStmtNode>()) {
+      has_parallel_multiplicity |=
+          attr_stmt->attr_key == attr::kParallelMultiplicity;
+    }
+  });
+  if (has_parallel_multiplicity) {
     ICHECK_GT(indices.size(), static_cast<size_t>(old_loop_depth));
-    // InverseWithLevel appends REP after the original loop indices, so
-    // indices[old_loop_depth] is REP. Stores to buffers in this list execute
-    // only for REP=0.
+    // InverseWithLevel appends REP after the original logical loop indices.
+    // First-class effect statements marked once-per-logical-iteration execute
+    // only on REP=0; ordinary fragment work remains untouched.
     PrimExpr is_replica_zero = analyzer->Simplify(EQ(
         indices[old_loop_depth], make_zero(indices[old_loop_depth].dtype())));
-    if (!analyzer->CanProve(is_replica_zero)) {
-      // Rewrite with IfThenElse statement
-      body = ReducerStoreGuarder::Rewrite(
-          std::move(body), fully_replicated_reducer_buffers, is_replica_zero);
-    }
+    body = ParallelMultiplicityLowerer::Rewrite(std::move(body),
+                                                is_replica_zero, analyzer);
   }
+  body = ParallelPartitionMarkerLowerer()(std::move(body));
   PrimExpr simplified_guard = analyzer->Simplify(guard);
   if (!analyzer->CanProve(simplified_guard)) {
     body = IfThenElse(simplified_guard, body, Stmt());
@@ -307,8 +323,7 @@ Stmt LowerParallelLoop(For loop, const Fragment &loop_layout,
                        PrimExpr thread_index, arith::Analyzer *analyzer,
                        const LayoutMap &layout_map,
                        Optional<PrimExpr> predicate, bool parallel_loop,
-                       bool should_vectorize, bool require_padding_guard,
-                       const Array<Buffer> &fully_replicated_reducer_buffers) {
+                       bool should_vectorize, bool require_padding_guard) {
   // Save analyzer state to prevent conflicted bindings during vectorization
   auto saved_analyzer = analyzer->Clone();
 
@@ -326,9 +341,8 @@ Stmt LowerParallelLoop(For loop, const Fragment &loop_layout,
 
   // Step 1: Partition the loop based on the layout (if this is a parallel loop)
   if (parallel_loop) {
-    result_loop =
-        PartitionLoop(result_loop, thread_index, analyzer, loop_layout,
-                      require_padding_guard, fully_replicated_reducer_buffers);
+    result_loop = PartitionLoop(result_loop, thread_index, analyzer,
+                                loop_layout, require_padding_guard);
   }
 
   // Step 2: Vectorize the loop (if requested)

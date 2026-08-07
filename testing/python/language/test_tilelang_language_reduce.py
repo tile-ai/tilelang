@@ -672,21 +672,17 @@ def _make_finalize_reducer_kernel(block_M, block_N, dtype, op, batch):
     @T.prim_func
     def kernel(A: T.Tensor((block_M, block_N), dtype), B: T.Tensor((block_M,), dtype)):
         with T.Kernel(1, threads=256):
-            o_reducer = T.alloc_reducer(block_M, dtype, op=op, replication="all")
-            T.clear(o_reducer)
+            o_reducer = T.alloc_reducer(block_M, dtype, op=op)
+            T.reducer_init(o_reducer)
             A_smem = T.alloc_shared((block_M, block_N), dtype)
             T.copy(A, A_smem)
             A_frag = T.alloc_fragment((block_M, block_N), dtype)
             T.copy(A_smem, A_frag)
             for i, j in T.Parallel(block_M, block_N):
-                if op == "sum":
-                    o_reducer[i] += A_frag[i, j]
-                elif op == "max":
-                    o_reducer[i] = T.max(o_reducer[i], A_frag[i, j])
-                else:
-                    o_reducer[i] = T.min(o_reducer[i], A_frag[i, j])
-            T.finalize_reducer(o_reducer, batch=batch)
-            T.copy(o_reducer, B)
+                T.reducer_update(o_reducer[i], A_frag[i, j])
+            o_result = T.alloc_fragment((block_M,), dtype)
+            T.finalize_reducer(o_reducer, o_result, batch=batch)
+            T.copy(o_result, B)
 
     return kernel
 
@@ -697,7 +693,7 @@ def _make_finalize_reducer_kernel(block_M, block_N, dtype, op, batch):
     ids=[f"{op}-{dtype}-{bM}x{bN}-b{batch}" for op, dtype, bM, bN, batch in FINALIZE_REDUCER_CASES],
 )
 def test_finalize_reducer_codegen(op, dtype, block_M, block_N, batch):
-    """batch=1 → scalar run; batch>1 → run_batch with correct template arg."""
+    """The first reducer-v2 backend safely lowers every batch hint scalarly."""
 
     src = tl.compile(
         _make_finalize_reducer_kernel(block_M, block_N, dtype, op, batch),
@@ -705,12 +701,7 @@ def test_finalize_reducer_codegen(op, dtype, block_M, block_N, batch):
         pass_configs=_COMPILE_FLAGS,
     ).get_kernel_source()
 
-    if batch == 1:
-        assert "run_batch" not in src, f"batch=1 must not emit run_batch.\n{src}"
-    else:
-        m = re.search(r",\s*(\d+)\s*,\s*\d+\s*>::run_batch\(", src)
-        assert m is not None, f"Expected run_batch in generated source.\n{src}"
-        assert int(m.group(1)) == batch, f"Expected batch={batch}, got {m.group(1)}.\n{src}"
+    assert "run_batch" not in src, f"Reducer-v2 batch hints must currently use the scalar fallback.\n{src}"
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(8, 0)
@@ -728,11 +719,11 @@ def test_finalize_reducer_sm80_uses_named_barrier(batch):
 
 @pytest.mark.parametrize(
     ("op", "dtype", "block_M", "block_N", "batch"),
-    [c for c in FINALIZE_REDUCER_CASES if c[4] == 1],
-    ids=[f"{op}-{dtype}-{bM}x{bN}" for op, dtype, bM, bN, batch in FINALIZE_REDUCER_CASES if batch == 1],
+    FINALIZE_REDUCER_CASES,
+    ids=[f"{op}-{dtype}-{bM}x{bN}-b{batch}" for op, dtype, bM, bN, batch in FINALIZE_REDUCER_CASES],
 )
 def test_finalize_reducer_correctness(op, dtype, block_M, block_N, batch):
-    """Numerical correctness (batch=1 scalar path; batch>1 blocked by fragment layout bug)."""
+    """Batch hints preserve semantics while the first v2 backend falls back to scalar collectives."""
     A = torch.randn(block_M, block_N, dtype=getattr(torch, dtype)).cuda()
     B = tl.compile(
         _make_finalize_reducer_kernel(block_M, block_N, dtype, op, batch),
@@ -751,13 +742,14 @@ def test_finalize_reducer_short_parallel_extent():
         with T.Kernel(1, threads=threads):
             src = T.alloc_fragment((extent,), T.float32)
             T.copy(A, src)
-            total = T.alloc_reducer((1,), T.float32, replication="all")
-            T.clear(total)
+            total = T.alloc_reducer((1,), T.float32)
+            T.reducer_init(total)
             for i in T.Parallel(extent):
-                total[0] += src[i]
-            T.finalize_reducer(total)
+                T.reducer_update(total[0], src[i])
+            result = T.alloc_fragment((1,), T.float32)
+            T.finalize_reducer(total, result)
             if T.get_thread_binding() == 0:
-                B[0] = total[0]
+                B[0] = result[0]
 
     A = torch.arange(1, extent + 1, dtype=torch.float32, device="cuda")
     B = tl.compile(kernel, out_idx=-1, pass_configs=_COMPILE_FLAGS)(A)
@@ -779,15 +771,16 @@ def test_finalize_reducer_mixed_parallel_extents():
             b_frag = T.alloc_fragment((2 * extent,), T.float32)
             T.copy(A, a_frag)
             T.copy(B, b_frag)
-            total = T.alloc_reducer((1,), T.float32, replication="all")
-            T.clear(total)
+            total = T.alloc_reducer((1,), T.float32)
+            T.reducer_init(total)
             for i in T.Parallel(extent):
-                total[0] += a_frag[i]
+                T.reducer_update(total[0], a_frag[i])
             for j in T.Parallel(2 * extent):
-                total[0] += b_frag[j]
-            T.finalize_reducer(total)
+                T.reducer_update(total[0], b_frag[j])
+            result = T.alloc_fragment((1,), T.float32)
+            T.finalize_reducer(total, result)
             if T.get_thread_binding() == 0:
-                C[0] = total[0]
+                C[0] = result[0]
 
     A = torch.arange(1, extent + 1, dtype=torch.float32, device="cuda")
     B = torch.arange(1, 2 * extent + 1, dtype=torch.float32, device="cuda")
@@ -799,15 +792,13 @@ def test_finalize_reducer_mixed_parallel_extents():
 FINALIZE_REDUCER_INVALID_CASES = [
     (0, ValueError, "batch must be >= 1"),
     (-1, ValueError, "batch must be >= 1"),
-    (128, Exception, "exceeds total output elements"),  # block_M=64, batch=128
-    (3, Exception, "must evenly divide"),  # block_M=64, batch=3
 ]
 
 
 @pytest.mark.parametrize(
     ("batch", "exc_type", "match"),
     FINALIZE_REDUCER_INVALID_CASES,
-    ids=["zero", "negative", "exceeds", "not-divisible"],
+    ids=["zero", "negative"],
 )
 def test_finalize_reducer_invalid_batch(batch, exc_type, match):
     block_M = 64
@@ -816,23 +807,22 @@ def test_finalize_reducer_invalid_batch(batch, exc_type, match):
         @T.prim_func
         def kernel(A: T.Tensor((block_M, 64), T.float32), B: T.Tensor((block_M,), T.float32)):
             with T.Kernel(1, threads=256):
-                o_reducer = T.alloc_reducer(block_M, T.float32, op="sum", replication="all")
-                T.clear(o_reducer)
+                o_reducer = T.alloc_reducer(block_M, T.float32, op="sum")
+                T.reducer_init(o_reducer)
                 A_smem = T.alloc_shared((block_M, 64), T.float32)
                 T.copy(A, A_smem)
                 A_frag = T.alloc_fragment((block_M, 64), T.float32)
                 T.copy(A_smem, A_frag)
                 for i, j in T.Parallel(block_M, 64):
-                    o_reducer[i] += A_frag[i, j]
-                T.finalize_reducer(o_reducer, batch=batch)
-                T.copy(o_reducer, B)
+                    T.reducer_update(o_reducer[i], A_frag[i, j])
+                o_result = T.alloc_fragment((block_M,), T.float32)
+                T.finalize_reducer(o_reducer, o_result, batch=batch)
+                T.copy(o_result, B)
 
         return kernel
 
     with pytest.raises(exc_type, match=match):
-        # batch<1 raises at prim_func definition time; others at compile time
-        k = make_kernel()
-        tl.compile(k, out_idx=-1, pass_configs=_COMPILE_FLAGS)
+        make_kernel()
 
 
 @tilelang.testing.requires_cuda

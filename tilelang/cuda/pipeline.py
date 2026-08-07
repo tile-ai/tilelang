@@ -79,6 +79,8 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.AddWrapperForSingleBufStore()(mod)
     # Normalize negative indices to canonical non-negative form
     mod = tilelang.transform.LegalizeNegativeIndex()(mod)
+    # Reducers have a mandatory explicit init/update/finalize lifecycle.
+    mod = tilelang.transform.VerifyReducerEpochs()(mod)
     # Verify parallel loop correctness
     if should_enable_race_check():
         mod = tilelang.transform.VerifyParallelLoop()(mod)
@@ -86,9 +88,6 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectAssumes()(mod)
     # Simplify the IR expressions
     mod = tilelang.transform.Simplify()(mod)
-    # Set layouts for reducers
-    mod = tilelang.transform.LayoutReducer()(mod)
-
     # @CUDA-specific
     # Tile-level warp specialization: runs before layout inference so that
     # producer/consumer split happens at the high-level tile-op IR.
@@ -122,10 +121,15 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
 
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
+    # Reducer handles deliberately do not participate in Fragment layout
+    # inference. Plan their physical storage afterwards, using the canonical
+    # full-participant fallback or a proven LocalComplete destination layout.
+    mod = tilelang.transform.PlanAndMaterializeReducers()(mod)
     # Visualize the layout
     LayoutVisual(mod)
     # Lower high-level tile operations to low-level operations
     mod = tilelang.transform.LowerTileOp()(mod)
+    mod = tilelang.transform.VerifyReducerLowered()(mod)
 
     # @CUDA specific
     # Lower l2 persistent map

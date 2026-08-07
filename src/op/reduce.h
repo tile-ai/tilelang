@@ -10,6 +10,8 @@
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
 
+#include <string>
+
 namespace tvm {
 
 namespace tl {
@@ -80,6 +82,23 @@ public:
     data_ = std::move(node);
   }
 };
+
+/*! \brief Return whether a reduction type is associative and commutative. */
+TVM_DLL bool IsBuiltinCommutativeReduceType(const ReduceType &type);
+
+/*! \brief Return the canonical frontend spelling of a reduction type. */
+TVM_DLL String ReduceTypeName(const ReduceType &type);
+
+/*! \brief Construct the identity value for a reduction type and dtype. */
+TVM_DLL PrimExpr MakeReduceIdentity(const ReduceType &type, DataType dtype);
+
+/*! \brief Combine one contribution with an accumulator value. */
+TVM_DLL PrimExpr MakeReduceCombine(const ReduceType &type,
+                                   const PrimExpr &accumulator,
+                                   const PrimExpr &contribution);
+
+/*! \brief Return the runtime reducer template name used by GPU backends. */
+TVM_DLL std::string ReduceCodegenName(const ReduceType &type);
 
 /// Node class for reduction operations
 class ReduceOpNode : public TileOperatorNode {
