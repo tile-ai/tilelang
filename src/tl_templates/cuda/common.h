@@ -213,6 +213,17 @@ TL_PATCH TL_DEVICE bfloat16_t __hfma(const bfloat16_t x, const bfloat16_t y,
 #endif
 }
 
+// CUDA has no half-precision tangent intrinsic, but tangent lowering uses the
+// half-style `htan` name for 16-bit inputs. Evaluate in float32 and convert the
+// result back to the source type.
+TL_PATCH TL_DEVICE half_t htan(const half_t x) {
+  return half_t(tanf(float(x)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t htan(const bfloat16_t x) {
+  return bfloat16_t(tanf(float(x)));
+}
+
 // TVM lowers T.exp(bfloat16) to the CUDA half-style `hexp` name. TileLang uses
 // cutlass::bfloat16_t for scalar bf16, while CUDA only overloads hexp for
 // __nv_bfloat16. Keep this narrow bridge in common.h so plain T.exp works
