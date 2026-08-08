@@ -393,7 +393,7 @@ body {
 .pass-link {
     display: flex;
     align-items: center;
-    padding: 5px 14px;
+    padding: 5px 14px 5px calc(14px + var(--pass-depth, 0) * 14px);
     font-size: 12.5px;
     cursor: pointer;
     color: var(--text-secondary);
@@ -1618,7 +1618,9 @@ def generate_html(records: list[LowerRecord], output_path: str, section_cache: d
                 stats_html = '<span class="pass-stats" style="color:#94a3b8">—</span>'
             links.append(
                 f'<a class="pass-link" data-phase="{_esc(_safe_id(rec.phase))}" data-target="{_esc(sid)}" '
+                f'data-depth="{rec.depth}" data-parent-index="{rec.parent_index if rec.parent_index is not None else ""}" '
                 f'data-status="{status_attr}" '
+                f'style="--pass-depth:{max(0, rec.depth)}" '
                 f'onclick="showPass(this, {_js_str(sid)})">'
                 f'<span class="pass-idx">{rec.index:02d}</span>'
                 f'<span class="pass-dot {dot_cls}"></span>'
