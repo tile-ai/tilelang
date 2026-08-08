@@ -31,8 +31,12 @@ def buggy_matmul(A, B, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T
     B: T.Tensor((N,))
     with T.Kernel():
         A_shared = T.alloc_shared((block_M, block_K), dtype)
-        B_shared = T.alloc_shared((block_M, block_N), dtype)  # Bug: should be (block_K, block_N)
+        B_shared = T.alloc_shared((block_K, block_N), dtype)  # Fixed shape: (block_K, block_N)
         C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+        # Copy B into B_shared: B has shape (N,), but we need a (K, N) tile.
+        # Since N is 1, just fill the shared tile with B[0] for each K row.
+        for i, j in T.Parallel(block_K, block_N):
+            B_shared[i, j] = B[j]
         T.gemm(A_shared, B_shared, C_local)
 
 
