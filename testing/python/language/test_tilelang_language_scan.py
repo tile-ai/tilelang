@@ -49,6 +49,23 @@ def cumsum_fragment_test(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.f
     return cumsum
 
 
+def test_fragment_scan_annotations_preserved():
+    @T.prim_func
+    def scan(A: T.Tensor((32,), T.float32)):
+        with T.Kernel(1, threads=32):
+            sum_frag = T.alloc_fragment((32,), T.float32)
+            max_frag = T.alloc_fragment((32,), T.float32)
+            T.copy(A, sum_frag)
+            T.copy(A, max_frag)
+            T.cumsum(sum_frag, annotations={"test.scan": "cumsum"})
+            T.cummax(max_frag, annotations={"test.scan": "cummax"})
+
+    script = scan.script()
+    assert script.count("test.scan") == 2
+    assert '"cumsum"' in script
+    assert '"cummax"' in script
+
+
 def run_cumsum(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32, scope="smem"):
     if scope == "smem":
         program = cumsum_smem_test(M, N, block_M, block_N, dim, reverse, dtype)
