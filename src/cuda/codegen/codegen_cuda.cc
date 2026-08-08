@@ -4616,7 +4616,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
     return true;
   } else if (op->op.same_as(tl::__tan())) {
-    CUDAFastMath math_func;
+    CUDAFastMathTan math_func;
     std::string func_name = math_func(op->dtype, "tan");
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
     return true;
