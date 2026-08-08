@@ -302,13 +302,19 @@ def sage3_packed_fp4_attention_raw_kernel(
                         T.mbarrier_arrive(q_ready)
 
                         for kb in T.unroll(kv_blocks, unroll_factor=1):
+                            # SageAttention3 walks KV tiles from the last tile to
+                            # the first.  The online-softmax merge is deliberately
+                            # order-sensitive because P is quantized per tile, so
+                            # matching that traversal is required for parity with
+                            # the CUDA kernel.
+                            source_kb = kv_blocks - 1 - kb
                             stage = kb & 1
                             stage_phase0 = (tile_iter * kv_stage0_blocks + (kb >> 1)) & 1
                             stage_phase1 = (tile_iter * kv_stage1_blocks + (kb >> 1)) & 1
                             phase = T.if_then_else(stage == 0, stage_phase0, stage_phase1)
                             T.mbarrier_wait_parity(kv_empty[stage], phase ^ 1)
                             T.tma_copy(
-                                DeltaS[0, qh, qb, kb * block_N : (kb + 1) * block_N],
+                                DeltaS[0, qh, qb, source_kb * block_N : (source_kb + 1) * block_N],
                                 DS_shared[stage, 0:block_N],
                                 barrier=kv_full[stage],
                                 leader_scope_threads=32,
@@ -317,7 +323,7 @@ def sage3_packed_fp4_attention_raw_kernel(
                                 SFK_tma[
                                     qh,
                                     0 : qk_scale_cols // 4,
-                                    kb * (block_N // 64) : (kb + 1) * (block_N // 64),
+                                    source_kb * (block_N // 64) : (source_kb + 1) * (block_N // 64),
                                     0:16,
                                     0:8,
                                 ],
@@ -326,7 +332,7 @@ def sage3_packed_fp4_attention_raw_kernel(
                                 leader_scope_threads=32,
                             )
                             T.tma_copy(
-                                K_fp4[0, qh, kb * block_N : (kb + 1) * block_N, 0:128],
+                                K_fp4[0, qh, source_kb * block_N : (source_kb + 1) * block_N, 0:128],
                                 K_shared[stage, 0:block_N, 0:128],
                                 barrier=kv_full[stage],
                                 leader_scope_threads=32,
@@ -334,7 +340,7 @@ def sage3_packed_fp4_attention_raw_kernel(
                             T.tma_copy(
                                 SFV_tma[
                                     qh,
-                                    kb * ((block_N // 16) // 4) : (kb + 1) * ((block_N // 16) // 4),
+                                    source_kb * ((block_N // 16) // 4) : (source_kb + 1) * ((block_N // 16) // 4),
                                     0 : 128 // 64,
                                     0:16,
                                     0:8,
@@ -344,7 +350,7 @@ def sage3_packed_fp4_attention_raw_kernel(
                                 leader_scope_threads=32,
                             )
                             T.tma_copy(
-                                Vt_fp4[0, qh, 0:128, kb * block_N : (kb + 1) * block_N],
+                                Vt_fp4[0, qh, 0:128, source_kb * block_N : (source_kb + 1) * block_N],
                                 Vt_shared[stage, 0:128, 0:block_N],
                                 barrier=kv_full[stage],
                                 leader_scope_threads=32,
@@ -424,6 +430,7 @@ def sage3_packed_fp4_attention_raw_kernel(
                     T.mbarrier_arrive(q_empty)
 
                     for kb in T.serial(kv_blocks):
+                        source_kb = kv_blocks - 1 - kb
                         stage = kb & 1
                         stage_phase0 = (tile_iter * kv_stage0_blocks + (kb >> 1)) & 1
                         stage_phase1 = (tile_iter * kv_stage1_blocks + (kb >> 1)) & 1
@@ -438,13 +445,13 @@ def sage3_packed_fp4_attention_raw_kernel(
                         ds_vals = T.alloc_local((8,), accum_dtype, role_scoped=True)
                         for nj in T.unroll(warp_N32_tiles):
                             if has_k_tail:
-                                if kb < full_kv_blocks:
+                                if source_kb < full_kv_blocks:
                                     for jj in T.unroll(8):
                                         ds_vals[jj] = DS_shared[stage, nj * 32 + sublane * 8 + jj]
                                 else:
                                     for jj in T.unroll(8):
                                         ds_vals[jj] = T.if_then_else(
-                                            kb * block_N + nj * 32 + sublane * 8 + jj < k_valid,
+                                            source_kb * block_N + nj * 32 + sublane * 8 + jj < k_valid,
                                             DS_shared[stage, nj * 32 + sublane * 8 + jj],
                                             T.Cast(accum_dtype, _F32_NEG_INF),
                                         )
@@ -697,6 +704,9 @@ def sage3_packed_fp4_attention_raw_kernel(
                             O_shared[row0, dim3] = T.Cast("bfloat16", o_acc[atom1 + 1] * inv_sum0)
                             O_shared[row1, dim2] = T.Cast("bfloat16", o_acc[atom1 + 2] * inv_sum1)
                             O_shared[row1, dim3] = T.Cast("bfloat16", o_acc[atom1 + 3] * inv_sum1)
+                    # Publish generic-proxy shared stores to the async proxy
+                    # before the epilogue warp issues its TMA store.
+                    T.fence_proxy_async()
                     T.mbarrier_arrive(o_ready)
 
     return main

@@ -39,9 +39,7 @@ def _parse_case(text: str) -> tuple[int, int, int, int]:
     except ValueError as err:
         raise argparse.ArgumentTypeError(f"invalid case {text!r}: expected integers") from err
     if len(case) != 4:
-        raise argparse.ArgumentTypeError(
-            f"invalid case {text!r}: expected query_tokens,kv_tokens,valid_k_tokens,heads"
-        )
+        raise argparse.ArgumentTypeError(f"invalid case {text!r}: expected query_tokens,kv_tokens,valid_k_tokens,heads")
     query_tokens, kv_tokens, valid_k_tokens, heads = case
     if query_tokens <= 0 or kv_tokens <= 0 or valid_k_tokens <= 0 or heads <= 0:
         raise argparse.ArgumentTypeError(f"invalid non-positive case {text!r}")
@@ -216,7 +214,9 @@ def main() -> None:
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--arch", default="sm_120a")
-    parser.add_argument("--max-abs", type=float, default=0.02)
+    # Multi-tile traversal mismatches are about 1e-2 in BF16 output, while the
+    # aligned kernels differ by at most one BF16 ULP in the exercised cases.
+    parser.add_argument("--max-abs", type=float, default=0.001)
     parser.add_argument("--min-cosine", type=float, default=0.9995)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
