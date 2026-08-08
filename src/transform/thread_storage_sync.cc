@@ -649,6 +649,13 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
      * and the consumer at the same time, and therefore deadlocks.
      */
     bool is_warp_specialized = false;
+    /*! \brief Whether the access is inside compiler-generated auto WS.
+     *
+     * Unlike explicit T.ws roles, an auto-WS producer can mix SIMT shared
+     * writes with leader-issued TMA loads.  Those normal writes must be made
+     * visible before TMA completion releases the consumer.
+     */
+    bool is_auto_warp_specialized = false;
   };
   /*! \brief Access pattern about a single statement */
   struct StmtEntry {
@@ -730,6 +737,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
 
     AccessEntry e{.cset = {constr_stack_}};
     e.is_warp_specialized = warp_specialize_depth_ > 0;
+    e.is_auto_warp_specialized = auto_warp_specialize_depth_ > 0;
     e.threads = env_threads();
     e.dtype = load->dtype.element_of();
     e.buffer = buf;
@@ -846,6 +854,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
           << GetRef<BufferLoad>(op) << " " << scope.to_string();
       AccessEntry e{.cset = {constr_stack_}};
       e.is_warp_specialized = warp_specialize_depth_ > 0;
+      e.is_auto_warp_specialized = auto_warp_specialize_depth_ > 0;
       e.threads = env_threads();
       e.buffer = buf;
       e.buffer_name = op->buffer;
@@ -876,6 +885,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     if (Enabled(buf.get(), scope)) {
       AccessEntry e{.cset = {constr_stack_}};
       e.is_warp_specialized = warp_specialize_depth_ > 0;
+      e.is_auto_warp_specialized = auto_warp_specialize_depth_ > 0;
       e.threads = env_threads();
       e.buffer = buf;
       e.buffer_name = op->buffer;
@@ -963,6 +973,10 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       ++warp_specialize_depth_;
       ConstrVisitor::VisitStmt_(op);
       --warp_specialize_depth_;
+    } else if (op->attr_key == attr::kWarpSpecializationScope) {
+      ++auto_warp_specialize_depth_;
+      ConstrVisitor::VisitStmt_(op);
+      --auto_warp_specialize_depth_;
     } else {
       ConstrVisitor::VisitStmt_(op);
     }
@@ -1259,6 +1273,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
           ICHECK(allow_append_);
           AccessEntry e{.cset = {constr_stack_}};
           e.is_warp_specialized = warp_specialize_depth_ > 0;
+          e.is_auto_warp_specialized = auto_warp_specialize_depth_ > 0;
           e.threads = env_threads();
           e.dtype = dtype;
           e.buffer = Downcast<Var>(buffer->data);
@@ -1350,6 +1365,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         }
         AccessEntry e{.cset = {constr_stack_}};
         e.is_warp_specialized = warp_specialize_depth_ > 0;
+        e.is_auto_warp_specialized = auto_warp_specialize_depth_ > 0;
         e.threads = env_threads();
         e.dtype = dtype;
         e.buffer = GetRef<Var>(buffer_var);
@@ -1612,6 +1628,8 @@ private:
   int cp_async_depth_{0};
   // Nesting depth of explicit T.ws (warp_specialize) role scopes.
   int warp_specialize_depth_{0};
+  // Nesting depth of compiler-generated auto warp-specialization scopes.
+  int auto_warp_specialize_depth_{0};
   // Whether we're visiting the pointer argument expression of an atomic call
   // (e.g., atomic_add/atomic_max/atomic_load). When > 0, accesses produced by
   // the pointer metadata ops are tagged as atomic.
@@ -1876,6 +1894,15 @@ private:
    */
   bool FindConflict(const AccessEntry &prev, const AccessEntry &curr,
                     const ForNode *loop) {
+    // Explicit T.ws roles own their synchronization.  Inserting either a CTA
+    // barrier across role branches or a partial barrier inside one role can
+    // deadlock the handoff or serialize carefully scheduled shared stores.
+    // Auto WS is intentionally tracked separately and still receives the
+    // producer-local SIMT-to-TMA publication barrier handled below.
+    if (prev.is_warp_specialized && curr.is_warp_specialized) {
+      return false;
+    }
+
     // TMA load visibility is governed by the associated mbarrier wait, and TMA
     // store completion is governed by tma_store_wait. The important exceptions
     // are normal shared-memory writes before a TMA store reads from shared
@@ -1890,10 +1917,18 @@ private:
       bool tma_read_before_normal_write =
           prev.is_tma_access && prev.type == kRead && !curr.is_tma_access &&
           curr.type == kWrite;
-      bool explicit_ws_handoff =
-          prev.is_warp_specialized && curr.is_warp_specialized;
-      if ((normal_write_before_tma_read || tma_read_before_normal_write) &&
-          !explicit_ws_handoff) {
+      // Auto WS uses the completion of the following TMA load to release its
+      // consumer.  When a SIMT copy has written other shared state first, keep
+      // a producer-local barrier before that TMA issue.  Restrict this to the
+      // forward, same-iteration edge: the auto-WS mbarriers already protect
+      // stage reuse, so treating the reverse loop-carried edge as a conflict
+      // would add a redundant partial barrier before the loop.
+      bool auto_ws_normal_write_before_tma_load =
+          loop == nullptr && curr.is_tma_access && curr.type == kWrite &&
+          curr.is_auto_warp_specialized && !prev.is_tma_access &&
+          prev.type == kWrite && prev.is_auto_warp_specialized;
+      if (normal_write_before_tma_read || tma_read_before_normal_write ||
+          auto_ws_normal_write_before_tma_load) {
         // Fall through to regular conflict checks below.
       } else {
         return false;
