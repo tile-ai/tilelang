@@ -252,6 +252,88 @@ def assert_cp_async_access_ptr_legalize():
     _assert_legalize_matches_expected(func, expected)
 
 
+def cp_async_access_ptr_transfer_range_legalize():
+    dtype = T.float16
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((9,), dtype=dtype),
+    ):
+        A_shared = T.alloc_buffer((8,), dtype=dtype, scope="shared")
+        T.ptx_cp_async(
+            T.access_ptr(A_shared[0], "w", 8),
+            T.access_ptr(A[8], "r", 8),
+            8,
+        )
+        T.ptx_commit_group()
+        T.ptx_wait_group(0)
+
+    @T.prim_func
+    def expected(
+        A: T.Tensor((9,), dtype=dtype),
+    ):
+        A_shared = T.alloc_buffer((8,), dtype=dtype, scope="shared")
+        T.ptx_cp_async(
+            T.access_ptr(A_shared[0], "w", 8),
+            T.access_ptr(A[8], "r", 8),
+            8,
+            False,
+        )
+        T.ptx_commit_group()
+        T.ptx_wait_group(0)
+
+    return main, expected
+
+
+def assert_cp_async_access_ptr_transfer_range_legalize():
+    func, expected = cp_async_access_ptr_transfer_range_legalize()
+    mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+    transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
+    body = transformed["main"].body
+    cp_async_calls = _collect_call_nodes(body, {"tirx.ptx_cp_async", "tl.ptx_cp_async"})
+    assert len(cp_async_calls) == 1
+    assert len(cp_async_calls[0].args) == 4
+    _assert_legalize_matches_expected(func, expected)
+
+
+def cp_async_access_ptr_rank2_transfer_range_legalize():
+    dtype = T.float16
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((2, 4), dtype=dtype),
+    ):
+        A_shared = T.alloc_buffer((2,), dtype=dtype, scope="shared")
+        T.ptx_cp_async(
+            T.access_ptr(A_shared[0], "w", 2),
+            T.access_ptr(A[1, 3], "r", 2),
+            2,
+        )
+        T.ptx_commit_group()
+        T.ptx_wait_group(0)
+
+    @T.prim_func
+    def expected(
+        A: T.Tensor((2, 4), dtype=dtype),
+    ):
+        A_shared = T.alloc_buffer((2,), dtype=dtype, scope="shared")
+        T.ptx_cp_async(
+            T.access_ptr(A_shared[0], "w", 2),
+            T.access_ptr(A[1, 3], "r", 2),
+            2,
+            False,
+        )
+        T.ptx_commit_group()
+        T.ptx_wait_group(0)
+
+    return main, expected
+
+
+def assert_cp_async_access_ptr_rank2_transfer_range_legalize():
+    func, expected = cp_async_access_ptr_rank2_transfer_range_legalize()
+    _assert_legalize_matches_expected(func, expected)
+
+
 def cp_async_access_ptr_nonzero_safe_value_legalize():
     dtype = T.float16
 
@@ -592,6 +674,14 @@ def test_oob_store():
 
 def test_cp_async_access_ptr_oob():
     assert_cp_async_access_ptr_legalize()
+
+
+def test_cp_async_access_ptr_transfer_range_oob():
+    assert_cp_async_access_ptr_transfer_range_legalize()
+
+
+def test_cp_async_access_ptr_rank2_transfer_range_oob():
+    assert_cp_async_access_ptr_rank2_transfer_range_legalize()
 
 
 def test_cp_async_access_ptr_nonzero_safe_value_oob():

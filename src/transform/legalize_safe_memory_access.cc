@@ -608,9 +608,57 @@ private:
     }
 
     SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
-    checker.CheckBufferIndices(src_info.base_load->buffer,
-                               src_info.base_load->indices,
+    Buffer src_buffer = src_info.base_load->buffer;
+    checker.CheckBufferIndices(src_buffer, src_info.base_load->indices,
                                /*is_load=*/true, /*throw_warning=*/false);
+
+    Array<PrimExpr> physical_indices =
+        src_buffer.OffsetOf(src_info.base_load->indices);
+    Buffer flattened_src_buffer = src_buffer.GetFlattenedBuffer();
+    ICHECK_EQ(physical_indices.size(), flattened_src_buffer->shape.size())
+        << "cp.async source access cannot be flattened: " << call;
+    ICHECK(!physical_indices.empty())
+        << "cp.async source access has no physical offset: " << call;
+
+    PrimExpr linear_index = physical_indices[0];
+    for (size_t i = 1; i < physical_indices.size(); ++i) {
+      linear_index =
+          linear_index * flattened_src_buffer->shape[i] + physical_indices[i];
+    }
+    PrimExpr elem_offset = src_buffer->elem_offset;
+    if (elem_offset.dtype() != linear_index.dtype()) {
+      elem_offset = Cast(linear_index.dtype(), elem_offset);
+    }
+    linear_index = linear_index - elem_offset;
+
+    PrimExpr num_elems = call->args[2];
+    if (call->op.same_as(builtin::ptx_cp_async())) {
+      int source_elem_bits =
+          src_buffer->dtype.bits() * src_buffer->dtype.lanes();
+      ICHECK_GT(source_elem_bits, 0)
+          << "cp.async source element width must be positive: " << call;
+      PrimExpr source_elem_bits_expr =
+          IntImm(num_elems.dtype(), source_elem_bits);
+      PrimExpr transfer_bits = num_elems * IntImm(num_elems.dtype(), 8);
+      num_elems = FloorDiv(transfer_bits + source_elem_bits_expr -
+                               IntImm(num_elems.dtype(), 1),
+                           source_elem_bits_expr);
+    }
+    PrimExpr last_index =
+        linear_index + num_elems - IntImm(num_elems.dtype(), 1);
+    PrimExpr flattened_extent = flattened_src_buffer->shape[0];
+    for (size_t i = 1; i < flattened_src_buffer->shape.size(); ++i) {
+      flattened_extent = flattened_extent * flattened_src_buffer->shape[i];
+    }
+    auto push_distinct_condition = [this, &checker](const PrimExpr &condition) {
+      for (const PrimExpr &existing : checker.GetConditions()) {
+        if (analyzer_->CanProveEqual(existing, condition)) {
+          return;
+        }
+      }
+      checker.PushCondition(condition);
+    };
+    push_distinct_condition(last_index < flattened_extent);
     return checker.GetConditions();
   }
 
