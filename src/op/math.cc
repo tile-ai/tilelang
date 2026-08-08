@@ -76,10 +76,9 @@ PrimExpr round_ties_away_from_zero_op(PrimExpr args) {
   if (dtype.is_int() || dtype.is_uint() || dtype.is_bool()) {
     return call->args[0];
   }
-  ffi::String func_name =
-      dtype.is_float() && dtype.bits() == 64 ? "round" : "roundf";
   return tirx::Call(dtype, tirx::builtin::call_pure_extern(),
-                    {StringImm(func_name), call->args[0]}, call->annotations);
+                    {StringImm("tl::RoundTiesAwayFromZero"), call->args[0]},
+                    call->annotations);
 }
 
 TVM_REGISTER_OP("tl.round_ties_away_from_zero")
