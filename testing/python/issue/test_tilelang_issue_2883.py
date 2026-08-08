@@ -9,6 +9,7 @@ import tilelang.language as T
 import tilelang.testing
 
 
+@tilelang.testing.requires_cuda
 def test_large_parallel_layout_is_injective():
     stride = T.dynamic("stride")
 

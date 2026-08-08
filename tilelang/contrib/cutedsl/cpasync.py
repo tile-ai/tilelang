@@ -27,32 +27,86 @@ __all__ = [
     "fence_barrier_init",
 ]
 
-from cutlass.cutlass_dsl import CuTeDSL, T, if_generate, dsl_user_op  # noqa: F401
+from cutlass.cutlass_dsl import Constexpr, CuTeDSL, T, if_generate, dsl_user_op  # noqa: F401
 
-from cutlass._mlir.dialects import nvvm, cute_nvgpu  # noqa: F401
+from cutlass.experimental import primitives as prims
+import cutlass
 from cutlass._mlir import ir
 
 import cutlass._mlir.dialects.cute as _cute_ir
 import cutlass._mlir.dialects.cute_nvgpu as _cute_nvgpu_ir
 
 import cutlass.cute as cute
-from cutlass.cute.typing import Int, Boolean, Int32, Int16, Uint64, Pointer, Union  # noqa: F401
+from cutlass.cute.typing import Int, Int32, Int16, Uint64, Pointer, Union  # noqa: F401
 from cutlass.impl_utils import check_value_in
 
-from cutlass.cute.arch import cp_async_commit_group as cp_async_commit  # noqa: F401
-from cutlass.cute.arch import cp_async_wait_group as cp_async_wait  # noqa: F401
+_TMA_ARCHES = ["sm_90", "sm_90a", "sm_100a", "sm_110", "sm_120", "sm_120a"]
 
-# Mbarrier operations (merged from mbar.py)
-from cutlass.cute.arch import mbarrier_init, mbarrier_expect_tx, mbarrier_arrive  # noqa: F401
-from cutlass.cute.arch import mbarrier_arrive_and_expect_tx as arrive_and_expect_tx  # noqa: F401
-from cutlass.cute.arch import cp_async_mbarrier_arrive_noinc as mbarrier_cp_async_arrive_noinc  # noqa: F401
-import cutlass.cute.arch as arch
+
+class _MbarrierPointerAdapter:
+    """Expose a CuTe pointer as the Array-like mbarrier input shape."""
+
+    def __init__(self, ptr: cute.Pointer):
+        self._ptr = ptr
+
+    def data_ptr(self, idx=0, *, loc=None, ip=None):
+        ptr = cutlass.Pointer(
+            self._ptr,
+            dtype=cutlass.Uint64,
+            space=cutlass.AddressSpace.smem,
+            loc=loc,
+            ip=ip,
+        )
+        return ptr + idx if idx != 0 else ptr
+
+    def ir_value(self, *, loc=None, ip=None):
+        return self._ptr.ir_value(loc=loc, ip=ip)
+
+    def to_llvm_ptr(self, *, loc=None, ip=None):
+        return self._ptr.to_llvm_ptr(loc=loc, ip=ip)
+
+
+@dsl_user_op
+def cp_async_commit(*, loc=None, ip=None) -> None:
+    prims.cp_async_commit_group(loc=loc, ip=ip)
+
+
+@dsl_user_op
+def cp_async_wait(n: Int, *, loc=None, ip=None) -> None:
+    prims.cp_async_wait_group(n, loc=loc, ip=ip)
+
+
+@dsl_user_op
+def mbarrier_init(mbar_ptr: Pointer, arrive_count: Int, *, loc=None, ip=None) -> None:
+    prims.mbarrier_init(mbar_ptr, Int32(arrive_count), loc=loc, ip=ip)
+
+
+@dsl_user_op
+def mbarrier_expect_tx(mbar_ptr: Pointer, tx_count: Int, *, loc=None, ip=None) -> None:
+    prims.mbarrier_expect_tx(mbar_ptr, Int32(tx_count), loc=loc, ip=ip)
+
+
+@dsl_user_op
+def arrive_and_expect_tx(mbar_ptr: Pointer, tx_count: Int, *, loc=None, ip=None) -> None:
+    prims.mbarrier_arrive_expect_tx(mbar_ptr, Int32(tx_count), loc=loc, ip=ip)
+
+
+@dsl_user_op
+def mbarrier_arrive(mbar_ptr: Pointer, cta_id: Int | None = None, *, loc=None, ip=None) -> None:
+    if cta_id is not None:
+        mbar_ptr = prims.mapa(mbar_ptr, Int32(cta_id), loc=loc, ip=ip)
+    prims.mbarrier_arrive(mbar_ptr, loc=loc, ip=ip)
+
+
+@dsl_user_op
+def mbarrier_cp_async_arrive_noinc(mbar_ptr: Pointer, *, loc=None, ip=None) -> None:
+    prims.cp_async_mbarrier_arrive(mbar_ptr, noinc=True, loc=loc, ip=ip)
 
 
 def cp_async_gs(size, dst, src):
     assert size in [16, 8, 4]
     # use CG (cache global) to by pass L1 when loading contiguous 128B.
-    mode = nvvm.LoadCacheModifierKind.CG if size == 16 else nvvm.LoadCacheModifierKind.CA
+    mode = prims.LoadCacheModifier.CG if size == 16 else prims.LoadCacheModifier.CA
     if isinstance(src, cute.Tensor):
         src_ptr = src.iterator
     elif isinstance(src, cute.Pointer):
@@ -87,8 +141,29 @@ def extract_tensormap_ptr(tma_atom: cute.CopyAtom, *, loc=None, ip=None) -> cute
     return tensormap_ptr
 
 
+def _as_tensormap_ptr(tma_desc, *, loc=None, ip=None):
+    """Return a pointer suitable for TensorMap NVVM primitives."""
+    if isinstance(tma_desc, cute.CopyAtom):
+        return extract_tensormap_ptr(tma_desc, loc=loc, ip=ip)
+    if isinstance(tma_desc, cute.Tensor):
+        return tma_desc.iterator
+    if hasattr(tma_desc, "get_ptr"):
+        return tma_desc.get_ptr(loc=loc, ip=ip)
+    return tma_desc
+
+
 @dsl_user_op
-def tma_load(tma_desc, mbar: cute.Pointer, smem_ptr: cute.Pointer, crd: Int | tuple[Int, ...], *, loc=None, ip=None) -> None:
+def tma_load(
+    tma_desc,
+    mbar: cute.Pointer,
+    smem_ptr: cute.Pointer,
+    crd: Int | tuple[Int, ...],
+    use_2cta: Constexpr[bool] = False,
+    im2col_offsets=None,
+    *,
+    loc=None,
+    ip=None,
+) -> None:
     """
     Load data from global memory to shared memory using TMA (Tensor Memory Access).
 
@@ -102,43 +177,54 @@ def tma_load(tma_desc, mbar: cute.Pointer, smem_ptr: cute.Pointer, crd: Int | tu
     :type crd:                       tuple[Int, ...]
     """
     arch = CuTeDSL._get_dsl().envar.arch
-    check_value_in(arch, ["sm_90", "sm_90a", "sm_100a"], "arch")
+    check_value_in(arch, _TMA_ARCHES, "arch")
 
     if not isinstance(crd, tuple) and isinstance(tma_desc, cute.Pointer):
         # Legacy signature: tma_load(smem_ptr, gmem_ptr, mbar, size)
         _smem_ptr = tma_desc
         _gmem_ptr = mbar
         _mbar = smem_ptr
-        nvvm.cp_async_bulk_shared_cluster_global(
-            dst_mem=_smem_ptr.llvm_ptr,
-            src_mem=_gmem_ptr.llvm_ptr,
-            mbar=_mbar.llvm_ptr,
-            size=Int32(crd).ir_value(loc=loc, ip=ip),
+        prims.cp_async_bulk_shared_cluster_global(
+            dst_mem=_smem_ptr,
+            src_mem=_gmem_ptr,
+            mbar=_mbar,
+            size=Int32(crd),
             loc=loc,
             ip=ip,
         )
     else:
-        if isinstance(tma_desc, cute.CopyAtom):
-            tma_desc_ptr = extract_tensormap_ptr(tma_desc)
-        elif isinstance(tma_desc, cute.Tensor):
-            tma_desc_ptr = tma_desc.iterator
-        else:
-            tma_desc_ptr = tma_desc
+        tma_desc_ptr = _as_tensormap_ptr(tma_desc, loc=loc, ip=ip)
         # Ensure crd is a tuple (handle single coordinate case)
         if not isinstance(crd, tuple):
             crd = (crd,)
-        nvvm.cp_async_bulk_tensor_shared_cluster_global(
-            dst_mem=smem_ptr.llvm_ptr,
-            tma_descriptor=tma_desc_ptr.llvm_ptr,
-            coordinates=[Int32(i).ir_value(loc=loc, ip=ip) for i in crd],
-            mbar=mbar.llvm_ptr,
-            im2col_offsets=[],
-            load_mode=nvvm.CpAsyncBulkTensorLoadMode.TILE,
-            group=nvvm.Tcgen05GroupKind.CTA_1,
-            use_intrinsic=False,  # set to True would lead to compile error
-            loc=loc,
-            ip=ip,
-        )
+        coordinates = [Int32(i) for i in crd]
+        im2col_offsets = [] if im2col_offsets is None else [Int16(i) for i in im2col_offsets]
+        mode = prims.TMALoadMode.IM2COL if im2col_offsets else None
+        if use_2cta:
+            prims.cp_async_bulk_tensor_shared_cluster_global(
+                dst_mem=smem_ptr,
+                tma_descriptor=tma_desc_ptr,
+                coordinates=coordinates,
+                mbar=_MbarrierPointerAdapter(mbar),
+                im2col_offsets=im2col_offsets,
+                l2_cache_hint=Uint64(0x1000000000000000),
+                mode=mode,
+                group=prims.CTAGroup.CTA_2,
+                loc=loc,
+                ip=ip,
+            )
+        else:
+            prims.cp_async_bulk_tensor_shared_cta_global(
+                dst_mem=smem_ptr,
+                tma_descriptor=tma_desc_ptr,
+                coordinates=coordinates,
+                mbar=mbar,
+                im2col_offsets=im2col_offsets,
+                l2_cache_hint=Uint64(0x1000000000000000),
+                mode=mode,
+                loc=loc,
+                ip=ip,
+            )
 
 
 @dsl_user_op
@@ -154,7 +240,7 @@ def tma_store(tma_desc, smem_ptr: cute.Pointer, crd: Int | tuple[Int, ...], *, l
     :type crd:                       tuple[Int, ...]
     """
     arch = CuTeDSL._get_dsl().envar.arch
-    check_value_in(arch, ["sm_90", "sm_90a", "sm_100a"], "arch")
+    check_value_in(arch, _TMA_ARCHES, "arch")
     if not isinstance(crd, tuple):
         if arch not in ("sm_90", "sm_90a"):
             raise NotImplementedError("tma_store(size) path is only implemented for sm_90/sm_90a")
@@ -167,17 +253,12 @@ def tma_store(tma_desc, smem_ptr: cute.Pointer, crd: Int | tuple[Int, ...], *, l
             ip=ip,
         )
     else:
-        if isinstance(tma_desc, cute.CopyAtom):
-            tma_desc_ptr = extract_tensormap_ptr(tma_desc)
-        elif isinstance(tma_desc, cute.Tensor):
-            tma_desc_ptr = tma_desc.iterator
-        else:
-            tma_desc_ptr = tma_desc
-        nvvm.cp_async_bulk_tensor_global_shared_cta(
-            tma_descriptor=tma_desc_ptr.llvm_ptr,
-            src_mem=smem_ptr.llvm_ptr,
-            coordinates=[Int32(i).ir_value(loc=loc, ip=ip) for i in crd],
-            predicate=None,
+        tma_desc_ptr = _as_tensormap_ptr(tma_desc, loc=loc, ip=ip)
+        prims.cp_async_bulk_tensor_global_shared_cta(
+            tma_descriptor=tma_desc_ptr,
+            src_mem=smem_ptr,
+            coordinates=[Int32(i) for i in crd],
+            mode=prims.TMAStoreMode.TILE,
             loc=loc,
             ip=ip,
         )
@@ -198,28 +279,21 @@ def tma_reduce(tma_desc, smem_ptr: cute.Pointer, crd: Int | tuple[Int, ...], *, 
     :param crd:                      Coordinates tuple for the tensor access
     :type crd:                       tuple[Int, ...]
     """
-    from cutlass._mlir.dialects._nvvm_enum_gen import TMAReduxKind, TMAStoreMode
-
     arch = CuTeDSL._get_dsl().envar.arch
-    check_value_in(arch, ["sm_90", "sm_90a", "sm_100a"], "arch")
+    check_value_in(arch, _TMA_ARCHES, "arch")
 
-    if isinstance(tma_desc, cute.CopyAtom):
-        tma_desc_ptr = extract_tensormap_ptr(tma_desc)
-    elif isinstance(tma_desc, cute.Tensor):
-        tma_desc_ptr = tma_desc.iterator
-    else:
-        tma_desc_ptr = tma_desc
+    tma_desc_ptr = _as_tensormap_ptr(tma_desc, loc=loc, ip=ip)
 
     # Ensure crd is a tuple
     if not isinstance(crd, tuple):
         crd = (crd,)
 
-    nvvm.cp_async_bulk_tensor_reduce(
-        tma_descriptor=tma_desc_ptr.llvm_ptr,
-        src_mem=smem_ptr.llvm_ptr,
-        red_kind=TMAReduxKind.ADD,
-        coordinates=[Int32(i).ir_value(loc=loc, ip=ip) for i in crd],
-        mode=TMAStoreMode.TILE,
+    prims.cp_async_bulk_tensor_reduce(
+        tma_descriptor=tma_desc_ptr,
+        src_mem=smem_ptr,
+        red_kind=prims.TMARedux.ADD,
+        coordinates=[Int32(i) for i in crd],
+        mode=prims.TMAStoreMode.TILE,
         loc=loc,
         ip=ip,
     )
@@ -231,7 +305,7 @@ def tma_store_arrive(*, loc=None, ip=None) -> None:
     Indicate arrival of warp issuing TMA_STORE.
     Corresponds to PTX instruction: cp.async.bulk.commit_group;
     """
-    nvvm.cp_async_bulk_commit_group(loc=loc, ip=ip)
+    prims.cp_async_bulk_commit_group(loc=loc, ip=ip)
 
 
 @dsl_user_op
@@ -245,12 +319,12 @@ def tma_store_wait(count: int, *, read=None, loc=None, ip=None) -> None:
     :param read: Whether to use the PTX .read modifier
     :type read: Optional[bool]
     """
-    nvvm.cp_async_bulk_wait_group(group=count, read=read, loc=loc, ip=ip)
+    prims.cp_async_bulk_wait_group(group=count, read=read, loc=loc, ip=ip)
 
 
 @dsl_user_op
 def cp_async_shared_global(
-    dst: cute.Pointer, src: cute.Pointer, cp_size: Int, modifier: nvvm.LoadCacheModifierKind, *, src_size: Int = None, loc=None, ip=None
+    dst: cute.Pointer, src: cute.Pointer, cp_size: Int, modifier: prims.LoadCacheModifier, *, src_size: Int = None, loc=None, ip=None
 ) -> None:
     """
     Asynchronously copy data from global memory to shared memory.
@@ -266,13 +340,12 @@ def cp_async_shared_global(
     :param cp_size: Optional copy size override
     :type cp_size: Int
     """
-    size = src_size if src_size else cp_size
-    nvvm.cp_async_shared_global(
-        dst=dst.llvm_ptr,
-        src=src.llvm_ptr,
-        size=ir.IntegerAttr.get(ir.IntegerType.get_signless(32), size),
+    prims.cp_async_shared_global(
+        dst=dst,
+        src=src,
+        size=cp_size,
         modifier=modifier,
-        cp_size=Int32(cp_size).ir_value(loc=loc, ip=ip),
+        cp_size=src_size,
         loc=loc,
         ip=ip,
     )
@@ -284,47 +357,24 @@ def prefetch_tma_descriptor(tma_desc, *, loc=None, ip=None) -> None:
     Prefetch a TMA descriptor.
     Corresponds to PTX instruction: prefetch.tensormap;
     """
-    if isinstance(tma_desc, cute.CopyAtom):
-        tma_desc_ptr = extract_tensormap_ptr(tma_desc)
-    elif isinstance(tma_desc, cute.Tensor):
-        tma_desc_ptr = tma_desc.iterator
-    else:
-        tma_desc_ptr = tma_desc
-    nvvm.prefetch_tensormap(tma_desc_ptr.llvm_ptr, loc=loc, ip=ip)
+    tma_desc_ptr = _as_tensormap_ptr(tma_desc, loc=loc, ip=ip)
+    prims.prefetch_tensormap(tma_desc_ptr, loc=loc, ip=ip)
 
 
-# ---------------------------------------------------------------------------
-# Mbarrier operations (merged from mbar.py)
-# ---------------------------------------------------------------------------
-
-from cutlass._mlir.dialects import llvm
-
-
-@dsl_user_op
-def mbarrier_wait(mbar_ptr: Pointer, phase: Int, timeout_ns: Int = 10000000, *, loc=None, ip=None) -> None:
+@cute.jit
+def mbarrier_wait(mbar_ptr: Pointer, phase: Int, timeout_ns: int = 10000000) -> None:
     """Waits on a mbarrier with a specified phase (blocking loop).
 
-    Uses inline PTX to loop until the try_wait succeeds.
-    The CUDA backend does: while (!mbar.try_wait(parity)) {}
+    Uses the primitive try-wait wrapper in a spin loop.
     """
-    llvm.inline_asm(
-        None,
-        [mbar_ptr.llvm_ptr, Int32(phase).ir_value(loc=loc, ip=ip), Int32(timeout_ns).ir_value(loc=loc, ip=ip)],
-        "{\n.reg .pred p;\nLAB_WAIT:\nmbarrier.try_wait.parity.shared::cta.b64 p, [$0], $1, $2;\n@!p bra LAB_WAIT;\n}",
-        "r,r,r",
-        has_side_effects=True,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-        loc=loc,
-        ip=ip,
-    )
+    while not prims.mbarrier_try_wait_parity(mbar_ptr, Int32(phase), time_limit=Int32(timeout_ns)):
+        pass
 
 
 @dsl_user_op
 def mbarrier_cp_async_arrive(mbar_ptr: Pointer, *, loc=None, ip=None) -> None:
-    mbar_llvm_ptr = mbar_ptr.llvm_ptr
-    nvvm.cp_async_mbarrier_arrive_shared(
-        mbar_llvm_ptr,
+    prims.cp_async_mbarrier_arrive(
+        mbar_ptr,
         noinc=False,
         loc=loc,
         ip=ip,
@@ -332,8 +382,8 @@ def mbarrier_cp_async_arrive(mbar_ptr: Pointer, *, loc=None, ip=None) -> None:
 
 
 def fence_proxy_async():
-    arch.fence_proxy(arch.ProxyKind.async_shared, space=arch.SharedSpace.shared_cta)
+    prims.fence_proxy("async_shared", space=prims.SharedSpace.shared_cta)
 
 
 def fence_barrier_init():
-    arch.mbarrier_init_fence()
+    prims.fence_mbarrier_init()
