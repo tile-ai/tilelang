@@ -114,6 +114,52 @@ def test_vectorize_invariant_index():
 
 
 @tilelang.jit
+def vectorize_invariant_store_accumulate(M, K):
+    @T.prim_func
+    def main(
+        A: T.Tensor[(M, K), T.float16],  # noqa: F821
+        Init: T.Tensor[(M,), T.float16],  # noqa: F821
+        B: T.Tensor[(M,), T.float16],  # noqa: F821
+    ):
+        with T.Kernel(M // 128, threads=128) as bx:
+            tx = T.get_thread_binding(0)
+            row = bx * 128 + tx
+            B[row] = Init[row]
+            # B[row] does not depend on the vectorized loop variable k, so
+            # vectorizing this loop turns the accumulate into a broadcast
+            # store: every lane reads the same old B[row], and the last
+            # lane's store wins, dropping all addends but A[row, K-1].
+            for k in T.vectorized(K):
+                B[row] = B[row] + A[row, k]
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+def test_vectorize_invariant_store_accumulate():
+    """A loop-invariant store address must keep the loop scalar.
+
+    Regression test for the VectorizePlanner bucketing in
+    src/transform/loop_vectorize.cc: a loop-invariant store computes
+    vector_size=1 in ComputeBufferVectorSize, but the entry was moved to the
+    local/fragment bucket which the simple-case strategy ignores, so the loop
+    was vectorized into a broadcast store. On CUDA this compiles and silently
+    produces wrong results (last lane wins); on the `c` target it fails to
+    compile (`vec_type` has no `.s0/.s1` accessors).
+    """
+    M, K = 128, 8
+    kernel = vectorize_invariant_store_accumulate(M, K)
+
+    a = torch.randn(M, K, device="cuda", dtype=torch.float16)
+    init = torch.randn(M, device="cuda", dtype=torch.float16)
+    b = init.clone()
+    kernel(a, init, b)
+
+    expected = init + a.sum(dim=1)
+    torch.testing.assert_close(b, expected, atol=1e-2, rtol=1e-2)
+
+
+@tilelang.jit
 def vectorize_test_all_dtypes(dtype, vec_num):
     @T.prim_func
     def main(A: T.Tensor[(64,), dtype]):

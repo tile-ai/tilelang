@@ -284,7 +284,7 @@ public:
           depends_on_loop_var = !IsExprInvariantInVectorBoundary(
               elem_offset, inner_for_->loop_var, vector_size_, analyzer_);
         }
-        if (depends_on_loop_var) {
+        if (depends_on_loop_var || info.is_store) {
           memory_min = arith::ZeroAwareGCD(memory_min, info.vector_size);
           has_global_or_shared_buffer = true;
         } else {
