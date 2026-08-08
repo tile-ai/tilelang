@@ -204,7 +204,6 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             param_shapes.append(native_shape)
 
         dynamic_symbolic_map = self._process_dynamic_symbolic()
-
         # Prepare helpers for friendly dtype error messages
         prim_func = self.prim_func
         buffer_map = prim_func.buffer_map

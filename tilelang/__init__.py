@@ -107,16 +107,15 @@ del _init_logger
 
 
 def _disable_tvm_ffi_torch_c_dlpack(torch_module):
-    is_rocm = getattr(torch_module.version, "hip", None) is not None
     mps_backend = getattr(getattr(torch_module, "backends", None), "mps", None)
     is_mps = sys.platform == "darwin" and mps_backend is not None and mps_backend.is_available()
-    if not is_rocm and not is_mps:
+    if not is_mps:
         return
 
+    # tvm-ffi >= 0.1.12 provides a backend-aware ROCm exchange path. MPS still
+    # cannot provide the stream handle required by the native exchange API.
     os.environ.setdefault("TVM_FFI_DISABLE_TORCH_C_DLPACK", "1")
-    if is_mps:
-        # PyTorch's native exchange API queries a stream handle that MPS cannot provide.
-        os.environ.setdefault("TVM_FFI_SKIP_DLPACK_C_EXCHANGE_API", "1")
+    os.environ.setdefault("TVM_FFI_SKIP_DLPACK_C_EXCHANGE_API", "1")
     try:
         from tvm_ffi import _optional_torch_c_dlpack
     except Exception:

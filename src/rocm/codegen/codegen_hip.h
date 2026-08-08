@@ -52,6 +52,8 @@ public:
   void VisitExpr_(const CastNode *op, std::ostream &os) final;
   void VisitExpr_(const SelectNode *op, std::ostream &os) final;
   void VisitExpr_(const ShuffleNode *op, std::ostream &os) final; // NOLINT(*)
+  void VisitExpr_(const BufferLoadNode *op,
+                  std::ostream &os) final; // NOLINT(*)
   void VisitStmt_(const AllocBufferNode *op) final;
   void VisitStmt_(const AttrStmtNode *op) final;
   void VisitStmt_(const BufferStoreNode *op) final;
@@ -85,9 +87,9 @@ private:
   bool need_wmma_h_{false};
   // whether need fp8.h
   bool enable_fp8_{false};
-  // whether need hip_fp4.h (gfx950 only)
+  // whether need the software FP4 helpers in hip_fp4.h
   bool enable_fp4_{false};
-  // Map from FP4 buffer Var to packed buffer variable name (gfx950)
+  // Map from an FP4 buffer Var to its packed buffer variable name
   std::unordered_map<Var, std::string> fp4_packed_buffers_;
   // The size of the barrier array in shared memory
   int barrier_count_ = -1;
