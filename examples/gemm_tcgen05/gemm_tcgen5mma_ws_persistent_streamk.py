@@ -57,8 +57,8 @@ def gemm_streamk_2cta(
     Workspace: T.Tensor[[num_clusters, 2, block_M, block_N], accum_dtype]
     # Processing each interval backwards means that only its trailing partial
     # needs to be published; a leading partial performs the tile's fixup.
-    # The slot is re-initialized at the start of every kernel launch, so a
-    # cluster that publishes nothing cannot leave a stale entry behind.
+    # The host re-initializes the slot before every launch, so a cluster that
+    # publishes nothing cannot leave a stale entry behind.
     PartialTile: T.Tensor[[num_clusters], T.int32]
     # Fixup must be zero-initialized once. The final peer resets its tile lock,
     # so the workspace can be reused by subsequent launches on the same stream.
@@ -235,11 +235,6 @@ def gemm_streamk_2cta(
                 work_iter += 1
 
         elif 128 <= tx < 256:  # warp 4~7: epilogue and Stream-K fixup
-            if tx == 128 and cta_id == 0:
-                # Invalidate this cluster's slot: clusters that publish no
-                # partial in this launch must not leave a stale entry that
-                # could match a tile id during a later fixup.
-                PartialTile[cluster_id] = -1
             current_iter = T.alloc_var(T.int32, init=last_iter)
             work_iter = T.alloc_var(T.int32, init=0)
             store_iter = T.alloc_var(T.int32, init=0)
@@ -466,15 +461,19 @@ def main():
     kernel = gemm_streamk_2cta
     kernel_args = (a, b, workspace, partial_tile, fixup)
 
+    def run():
+        partial_tile.fill_(-1)
+        return kernel(*kernel_args, **kwargs)
+
     print(kernel.get_kernel_source(*kernel_args, **kwargs))
-    c = kernel(*kernel_args, **kwargs)
+    c = run()
 
     ref_c = (a.to(torch.float) @ b.to(torch.float)).to(torch.bfloat16)
     torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
     print("All checks passed. ✅")
 
     tl_latency = do_bench(
-        lambda: kernel(*kernel_args, **kwargs),
+        run,
         _n_warmup=50,
         _n_repeat=50,
         backend="cupti",
