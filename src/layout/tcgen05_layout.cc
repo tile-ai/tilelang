@@ -134,13 +134,15 @@ int64_t Tcgen05AtomWidth(const Tcgen05Meta &meta) {
 Tcgen05CopyPlan::Tcgen05CopyPlan(cute::Layout fragment,
                                  int64_t num_chunks_each_wg,
                                  cute::Layout rest_domain, int64_t num_issues,
-                                 int64_t vals_per_issue) {
+                                 int64_t vals_per_issue,
+                                 int64_t datapaths_per_warp) {
   auto node = ffi::make_object<Tcgen05CopyPlanNode>();
   node->fragment = std::move(fragment);
   node->num_chunks_each_wg = num_chunks_each_wg;
   node->rest_domain = std::move(rest_domain);
   node->num_issues = num_issues;
   node->vals_per_issue = vals_per_issue;
+  node->datapaths_per_warp = datapaths_per_warp;
   data_ = std::move(node);
 }
 
@@ -151,7 +153,8 @@ void Tcgen05CopyPlanNode::RegisterReflection() {
       .def_ro("num_chunks_each_wg", &Tcgen05CopyPlanNode::num_chunks_each_wg)
       .def_ro("rest_domain", &Tcgen05CopyPlanNode::rest_domain)
       .def_ro("num_issues", &Tcgen05CopyPlanNode::num_issues)
-      .def_ro("vals_per_issue", &Tcgen05CopyPlanNode::vals_per_issue);
+      .def_ro("vals_per_issue", &Tcgen05CopyPlanNode::vals_per_issue)
+      .def_ro("datapaths_per_warp", &Tcgen05CopyPlanNode::datapaths_per_warp);
 }
 
 // Running example: 32dp32b, 128 threads, gapped tile from a column slice of
@@ -159,33 +162,53 @@ void Tcgen05CopyPlanNode::RegisterReflection() {
 //   tmem_tile = (3,128,64):(128@1,1@0,1@1)   (batch, datapath, column)
 Tcgen05CopyPlan ExpandTcgen05Layout(const Tcgen05Meta &meta,
                                     const cute::Layout &tmem_tile,
-                                    int num_threads) {
+                                    int num_threads,
+                                    int64_t values_per_column) {
   static constexpr int WARPGROUP_SIZE = 128;
   ICHECK(num_threads > 0 && num_threads % WARPGROUP_SIZE == 0)
       << "ExpandTcgen05Layout needs a positive multiple of " << WARPGROUP_SIZE
       << " threads, got " << num_threads;
+  ICHECK_GE(values_per_column, 1);
   int num_wgs = num_threads / WARPGROUP_SIZE;
 
   // Serialize (datapath, column) into the flat address datapath + 128*column
   // so everything below is algebra over one codomain.
-  // serialized_fragment: atom (lane/warp, reg) -> serialized TMEM
   // serialized_tmem_tile: logical tile -> serialized TMEM
   // E.g., serialized_tmem_tile = (3,128,64):(16384,1,128)
   static const cute::Layout kSerialize = cute::Layout::Parse("(1,1):(1,128)");
-  cute::Layout serialized_fragment = cute::Composition(kSerialize, meta->tv);
-  cute::Layout serialized_tmem_tile = cute::Composition(kSerialize, tmem_tile);
 
+  // How much of a warp's 32-lane sub-partition one warp covers is a property
+  // of the TILE.  On the datapath axis alone a dense fragment runs 128 before
+  // its first gap, a PTX Layout F fragment (1SM M=64) exactly 16.  A warp owns
+  // 32, so clamp there and let the atom divide what is left -- an atom too
+  // wide for the run (32dp32b against Layout F) falls out as a non-division.
+  // Projecting the columns away also makes this independent of whether they
+  // count values or b32 slots.
+  static const cute::Layout kDpOnly = cute::Layout::Parse("(1,1):(1,0)");
+  const int64_t atom_datapaths = Tcgen05AtomDatapaths(meta);
+  const int64_t dp_run = cute::AsConst(
+      cute::Size(cute::RightInverse(cute::Composition(kDpOnly, tmem_tile))));
+  const int64_t dp_per_warp = dp_run < 32 ? dp_run : 32;
+  if (dp_per_warp % atom_datapaths != 0)
+    return Tcgen05CopyPlan(nullptr);
+  const int64_t ndup = dp_per_warp / atom_datapaths;
+  const int64_t dp_per_issue = 4 * dp_per_warp; // 128, or 64 for Layout F
+  const bool partial_subpartition = dp_per_warp < 32;
+
+  cute::Layout serialized_tmem_tile = cute::Composition(kSerialize, tmem_tile);
   int64_t size = cute::AsConst(cute::Size(serialized_tmem_tile));
 
-  // right_inverse's stride chain stops at the tile's first serialized gap,
-  // so its size is the maximal contiguous chunk = one tcgen05 issue.
-  // inv_prefix: serialized chunk -> flat logical tile
-  // E.g., inv_prefix = 8192:3, chunk = 8192, num_issues = 3
+  // A full-datapath issue is exactly the tile's maximal contiguous run, and
+  // the divide's rest mode iterates the issues after it.  A Layout F issue is
+  // not contiguous at all -- four datapath groups 32 apart -- so it is
+  // assembled explicitly below and always covers the tile in one go.
+  // inv_prefix: serialized chunk -> flat logical tile.  E.g. 8192:3.
   cute::Layout inv_prefix = cute::RightInverse(serialized_tmem_tile);
-  int64_t chunk = cute::AsConst(cute::Size(inv_prefix));
-  if (chunk % 128 != 0 || size % chunk != 0)
+  int64_t elems_per_issue =
+      partial_subpartition ? size : cute::AsConst(cute::Size(inv_prefix));
+  if (elems_per_issue % dp_per_issue != 0 || size % elems_per_issue != 0)
     return Tcgen05CopyPlan(nullptr);
-  int64_t num_issues = size / chunk;
+  int64_t num_issues = size / elems_per_issue;
 
   // Divide the flat logical domain by the chunk; the rest mode locates each
   // issue's origin (CuTe's tiled-copy rest iteration).
@@ -205,52 +228,75 @@ Tcgen05CopyPlan ExpandTcgen05Layout(const Tcgen05Meta &meta,
   // copy must stay one .xN issue for the wrapper's register order to hold.
   // E.g., width = 1, ndup = 1, cols_per_issue = 64, num_chunks_each_wg = 64
   int64_t width = Tcgen05AtomWidth(meta);
-  int64_t ndup = 32 / Tcgen05AtomDatapaths(meta);
-  int64_t cols_per_issue = chunk / 128;
+  int64_t cols_per_issue = elems_per_issue / dp_per_issue;
   if (cols_per_issue % width != 0)
     return Tcgen05CopyPlan(nullptr);
   int64_t total_chunks = cols_per_issue / width;
   if (total_chunks % num_wgs != 0)
     return Tcgen05CopyPlan(nullptr);
   int num_chunks_each_wg = static_cast<int>(total_chunks / num_wgs);
-  if (ndup > 1) {
-    // The wrapper appends the duplicate issue's registers after ALL
-    // repetitions, so the per-warpgroup copy must be one .xN issue.
-    if (num_chunks_each_wg & (num_chunks_each_wg - 1))
+
+  // The .xN the wrapper is actually handed: a partial sub-partition carries
+  // its sub-word packing as its own mode, so the repetitions are what remains.
+  // The full-datapath path plans in value columns and LowerTmem halves the
+  // count itself, so bound the planned count there -- never optimistic.
+  int64_t pack = partial_subpartition ? values_per_column : 1;
+  if (num_chunks_each_wg % pack != 0)
+    return Tcgen05CopyPlan(nullptr);
+  int64_t reps = num_chunks_each_wg / pack;
+
+  // core chains a copy too big for one instruction by advancing ONE column
+  // and ONE register per repetition, exact only for an atom that is one of
+  // each -- 32dp32b, flagged by max_chunks == 0.  Every other atom must fit
+  // the per-warpgroup copy in a single .xN.  Lifting that needs the core
+  // parameterised by columns/registers per repetition AND the 32dp
+  // composites' nesting inverted so each half chains separately: fixing the
+  // strides alone still leaves a chained duplicate interleaved per segment
+  // instead of following all repetitions.  Until then a non-power-of-two .xN
+  // finds no plan (an M=64 bf16 operand at K = 96, 192 or 320).
+  if (meta->max_chunks != 0) {
+    if (reps & (reps - 1)) // reps must be a power of two
       return Tcgen05CopyPlan(nullptr);
-    if (num_chunks_each_wg > meta->max_chunks)
+    if (reps > meta->max_chunks)
       return Tcgen05CopyPlan(nullptr);
   }
 
-  // Replicate the atom with one blocked product over the wrapper's
-  // replication grid.  The blocked product's complement enumerates the
-  // serialized gaps around the atom in ascending-stride order -- the
-  // duplicate high-16-datapath issue first, then the warp sub-partitions,
-  // then the .xN column repetitions, then the warpgroup column split -- so
-  // the row-major (wg, rep, warp, dup) grid indexes exactly those slots.
-  // Zipped per atom mode: thread gets (warp, wg), value gets (rep, dup);
-  // the value replicas are FASTER than the thread replicas, so a thread's
-  // values stay contiguous in TMEM, and the duplicate issue lands after the
-  // repetitions exactly as the wrapper appends its registers.
-  // tiled: ((lane, (warp, wg)), (reg, (rep, dup))) -> serialized chunk
-  // E.g., tiled = ((32,(4,1)),(1,(64,1))):((1,(32,8192)),(0,(128,32)))
-  cute::Layout grid = cute::MakeRowMajorLayout(
-      Array<int64_t>{num_wgs, num_chunks_each_wg, 4, ndup});
-  cute::Layout tiler = cute::MakeLayout({cute::MakeLayout({grid[2], grid[0]}),
-                                         cute::MakeLayout({grid[1], grid[3]})});
-  cute::Layout tiled = cute::BlockedProduct(serialized_fragment, tiler);
-
-  // Map the copy back to flat logical indices piecewise, mirroring the
-  // (chunk, rest) split of the divide above: every replica of `tiled`
-  // addresses within one contiguous chunk, which inv_prefix inverts, and
-  // rest_domain already locates each issue's flat logical origin -- so the
-  // issue mode composes directly, without inverting the whole tile.
-  // tile_tv: (thread, value) -> flat logical tile
-  // E.g., tile_tv = ((32,(4,1)),((1,(64,1)),3)):((3,(96,1)),((0,(384,1)),1))
-  cute::Layout tile_tv = cute::MakeLayout(
-      {cute::Composition(inv_prefix, tiled[0]),
+  // The stamp: what ONE wrapper call covers.  Warps sit one sub-partition
+  // apart (32), a 16-datapath atom's duplicate issue on the high half of one
+  // (16), .xN repetitions a column group apart, warpgroups split the columns.
+  // The packed partner -- two sub-word values in one b32 column -- is the
+  // FASTEST value, one value column along, since a register's two halves are
+  // adjacent in the buffer; the atom addresses b32 columns, so its column step
+  // is `pack` value columns wide.  Spelled out rather than left to a blocked
+  // product's complement, whose fastest gap for Layout F is the *unoccupied*
+  // datapaths -- it would pack the warps in at stride 16.
+  // tiled: ((lane, (warp, wg)), (pack, reg, (rep, dup))) -> serialized TMEM
+  int64_t b32_col = 128 * pack;
+  cute::Layout atom = cute::Composition(
+      cute::Layout(Array<int64_t>{1, 1}, Array<int64_t>{1, b32_col}), meta->tv);
+  cute::Layout tiled = cute::MakeLayout(
+      {cute::MakeLayout(
+           {atom[0], cute::Layout(Array<int64_t>{4, num_wgs},
+                                  Array<int64_t>{32, b32_col * width * reps})}),
        cute::MakeLayout(
-           {cute::Composition(inv_prefix, tiled[1]), rest_domain})});
+           {cute::Layout(Array<int64_t>{pack}, Array<int64_t>{128}), atom[1],
+            cute::Layout(Array<int64_t>{reps, ndup},
+                         Array<int64_t>{b32_col * width, 16})})});
+
+  // Physical -> logical.  inv_prefix spans the maximal contiguous chunk, one
+  // whole full-datapath issue, and stays valid where the tile is not injective
+  // (a pack::16b tile folds its unused sub-slot onto a stride-0 mode).  No
+  // contiguous prefix covers a Layout F issue's four groups, but such a tile
+  // IS injective, so left_inverse serves.  Either way the placement is derived
+  // from the tile, not assumed of it.
+  // tile_tv: (thread, value) -> flat logical tile
+  cute::Layout to_logical = partial_subpartition
+                                ? cute::LeftInverse(serialized_tmem_tile)
+                                : inv_prefix;
+  cute::Layout tile_tv = cute::MakeLayout(
+      {cute::Composition(to_logical, tiled[0]),
+       cute::MakeLayout(
+           {cute::Composition(to_logical, tiled[1]), rest_domain})});
   int64_t num_vals = cute::AsConst(cute::Size(tile_tv[1]));
 
   // Invert (the make_tiled_copy `right_inverse(...).with_shape(...)` idiom):
@@ -271,7 +317,7 @@ Tcgen05CopyPlan ExpandTcgen05Layout(const Tcgen05Meta &meta,
           .WithShape(cute::IntTupleTuple(tile_shape));
 
   return Tcgen05CopyPlan(fragment, num_chunks_each_wg, rest_domain, num_issues,
-                         chunk / num_threads);
+                         elems_per_issue / num_threads, dp_per_warp);
 }
 
 Fragment FragmentToTileLang(const cute::Layout &layout) {
