@@ -1,4 +1,4 @@
-# TileLang TCGEN05 Support (Preview)
+# TileLang TCGEN05 Support
 
 This directory contains examples for TileLang's experimental TCGEN05 support on compatible NVIDIA architectures. **This is a preview version** with limited functionality.
 
@@ -41,6 +41,15 @@ Demonstrates TCGEN5MMA operations with:
 
 ### Traditional MMA Example (`gemm_mma.py`)
 Shows standard MMA operations that work across architectures for comparison.
+
+### Persistent TCGEN05 GEMM (`gemm_tcgen5mma_ws_persistent.py`)
+Warp-specialized persistent kernels (single-CTA and 2-CTA) that use the static
+PersistentTileScheduler, with optional TMA stores.
+
+### Stream-K TCGEN05 GEMM (`gemm_tcgen5mma_ws_persistent_streamk.py`)
+Persistent 2-CTA kernel with Stream-K scheduling: the under-filled tail wave
+is split along K, peers publish partial accumulations to a workspace, and the
+final peer fixes up and writes each output tile.
 
 ## Code Example
 
