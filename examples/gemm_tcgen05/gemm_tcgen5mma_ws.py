@@ -142,7 +142,7 @@ def gemm_2cta(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Non-persistent warp-specialized SM100 GEMM")
+    parser = argparse.ArgumentParser(description="Non-persistent warp-specialized TCGEN05 GEMM")
     parser.add_argument("--m", type=int, default=8192)
     parser.add_argument("--n", type=int, default=8192)
     parser.add_argument("--k", type=int, default=8192)
@@ -182,8 +182,18 @@ def main():
     torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
     print("All checks passed. ✅")
 
-    tl_latency = do_bench(lambda: kernel(a, b, **kwargs), backend="cupti")
-    torch_latency = do_bench(lambda: a @ b, backend="cupti")
+    tl_latency = do_bench(
+        lambda: kernel(a, b, **kwargs),
+        _n_warmup=50,
+        _n_repeat=50,
+        backend="cupti",
+    )
+    torch_latency = do_bench(
+        lambda: a @ b,
+        _n_warmup=50,
+        _n_repeat=50,
+        backend="cupti",
+    )
     print(f"Tilelang latency: {tl_latency} ms")
     print(f"Flops: {2 * M * N * K / (tl_latency / 1e3) / 1e12} TFLOPS")
     print(f"Torch latency: {torch_latency} ms")
