@@ -18,6 +18,8 @@ from dataclasses import dataclass
 
 from tvm.ir import _ffi_instrument_api
 
+from tilelang.utils.pass_events import create_registered_pass_instruments
+
 logger = logging.getLogger("tilelang.pass_timing")
 
 
@@ -222,8 +224,9 @@ class TileLangPassTimingInstrument:
 def build_pass_instruments(
     base_instruments: Sequence[object], threshold_ms: float | None
 ) -> tuple[list[object], TileLangPassTimingInstrument | None]:
-    """Build instruments with timing first so later after-pass callbacks are excluded."""
+    """Compose base, tool-registered, and optional timing instruments."""
     instruments = list(base_instruments)
+    instruments.extend(create_registered_pass_instruments())
     if threshold_ms is None:
         return instruments, None
 

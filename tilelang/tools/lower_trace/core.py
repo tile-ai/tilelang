@@ -1,15 +1,12 @@
 """IR lower trace — zero-intrusion debug tool for visualizing compilation passes.
 
-Monkey-patches ``tvm.ir.transform.Pass.__call__`` and ``PassPipeline.lower``
-to automatically capture IR before/after every pass and generate diff reports.
+Uses TVM's ``PassInstrument`` API and TileLang's explicit backend-pipeline
+scope to capture IR before/after every pass and generate diff reports.  Final
+codegen remains a separate FFI boundary because it is not a TVM pass.
 
 This module reads its configuration (``TL_LOWER_TRACE`` / ``TL_LOWER_TRACE_DIR``)
 through the centralized ``tilelang.env`` environment, or via values passed
 programmatically to ``enable()``.
-
-Supports two architectures:
-- New: ``PassPipeline.lower`` (each backend registers a pipeline object)
-- Old: phase-based functions called from ``tilelang.engine.lower``
 
 Usage::
 
@@ -20,12 +17,9 @@ Usage::
 
 from __future__ import annotations
 
-import ast
 import contextlib
 import difflib
-import dis
 import functools
-import inspect
 import os
 import re
 import shutil
@@ -45,6 +39,19 @@ from .diff import (
     _ANSI_YELLOW,
 )
 from tilelang.env import env
+from tilelang.utils.pass_events import (
+    IncompletePass,
+    PassEvent,
+    PassEventObserver,
+    StackedPassInstrument,
+    active_stacked_pass_instruments,
+    current_pass_phase,
+    pass_phase,
+    register_pass_instrument_provider,
+    register_pipeline_scope_provider,
+    unregister_pass_instrument_provider,
+    unregister_pipeline_scope_provider,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -118,17 +125,13 @@ class LowerRecord:
     del_lines: int = 0
     status: str = STATUS_COMPLETED
     error_msg: str = ""
+    depth: int = 0
+    parent_index: int | None = None
 
 
 _records: list[LowerRecord] = []
 _section_cache: dict[tuple[str, int], str] = {}
-_original_pass_call: Callable | None = None
-_original_pipeline_lower: object | None = None
 _original_codegen_ffis: dict[str, Callable] = {}
-_legacy_patched: bool = False
-# (target, attr_name, original_or_MISSING, is_dict) — restored by disable()
-_legacy_phase_originals: list[tuple[object, str, object, bool]] = []
-_MISSING: object = object()
 
 _CODEGEN_FFI_NAMES: list[str] = [
     "target.build.tilelang_cuda",
@@ -197,14 +200,15 @@ _SOURCE_ONLY_CODEGEN_FFIS: frozenset[str] = frozenset(
         "target.build.tilelang_ascend_pto",
     }
 )
-_current_phase: str | None = None
 _pass_index: int = 0
-_auto_flush: bool = False
 _script_dir: str | None = None
 _run_dir: str | None = None
 _lock = threading.RLock()
 _run_counter: int = 0
 _atexit_registered: bool = False
+_default_pass_context = None
+_default_pass_context_instruments: list[object] | None = None
+_default_pass_instrument: StackedPassInstrument | None = None
 
 _UNSET: object = object()
 _mode_override: str | None | object = _UNSET
@@ -212,8 +216,7 @@ _trace_dir_override: str | None | object = _UNSET
 _codegen_output_path_override: str | None | object = _UNSET
 
 # Phase label used for passes that run outside any PassPipeline.lower window
-# (e.g. pre-pipeline module passes and tvm.build postproc), so they are still
-# captured by the global Pass.__call__ hook.
+# (e.g. pre-pipeline module passes and tvm.build postproc).
 _UNSCOPED_PHASE = "unscoped"
 
 
@@ -397,395 +400,174 @@ def _incremental_flush_html():
     _update_html_symlink(html_path)
 
 
-def _traced_pass_call(self, mod):
-    """Intercept all Pass.__call__ invocations to record before/after IR.
-
-    Captures every pass invocation globally (matching pass_diff's hook),
-    including those outside any PassPipeline.lower window (pre-pipeline module
-    passes, tvm.build postproc).  Records are appended at runtime with the
-    pass's actual display name, eliminating the prior index-based pre-registration
-    that could drift when conditional passes (e.g. LetInline) were skipped.
-    """
+def _allocate_pass_index() -> int:
+    """Allocate a process-wide trace index shared by passes and codegen."""
     global _pass_index
 
-    if not _is_trace_enabled():
-        return _original_pass_call(self, mod)
-
-    phase = _current_phase or _UNSCOPED_PHASE
-    gen_html = _should_gen_html()
-    if gen_html:
-        _ensure_run_dir()
-    before_text = str(mod)
-
     with _lock:
-        idx = _pass_index
+        index = _pass_index
         _pass_index += 1
+    return index
 
-    try:
-        result = _original_pass_call(self, mod)
-    except Exception as e:
+
+def _count_line_changes(before_text: str, after_text: str) -> tuple[int, int]:
+    """Return inserted/deleted line counts for a before/after snapshot."""
+    add_count = del_count = 0
+    matcher = difflib.SequenceMatcher(None, before_text.splitlines(), after_text.splitlines())
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "insert":
+            add_count += j2 - j1
+        elif tag == "delete":
+            del_count += i2 - i1
+        elif tag == "replace":
+            add_count += j2 - j1
+            del_count += i2 - i1
+    return add_count, del_count
+
+
+def _instrument_phase() -> str:
+    """Resolve the context-local pass-event phase."""
+    return current_pass_phase() or _UNSCOPED_PHASE
+
+
+def _compact_pass_name(name: str) -> str:
+    """Match the compact display names historically used by lower trace."""
+    return name.rsplit(".", 1)[-1]
+
+
+class _LowerTraceObserver(PassEventObserver):
+    """Turn shared PassInstrument callbacks into existing ``LowerRecord`` data."""
+
+    def pass_started(self, mod, event: PassEvent) -> str:
+        if _should_gen_html():
+            _ensure_run_dir()
+        # Serialize immediately: a pass may mutate the IRModule in place.
+        return str(mod)
+
+    def pass_finished(self, mod, event: PassEvent, before_text: str) -> None:
+        after_text = str(mod)
+        changed = before_text != after_text
+        add_count, del_count = _count_line_changes(before_text, after_text) if changed else (0, 0)
+        phase = event.phase or _UNSCOPED_PHASE
+        pass_name = _compact_pass_name(event.name)
+
         with _lock:
             record = LowerRecord(
                 phase=phase,
-                name=_get_pass_display_name(self),
-                index=idx,
+                name=pass_name,
+                index=event.sequence,
                 before_text=before_text,
-                after_text="",
-                changed=False,
-                add_lines=0,
-                del_lines=0,
-                status=STATUS_FAILED,
-                error_msg=str(e),
+                after_text=after_text,
+                changed=changed,
+                add_lines=add_count,
+                del_lines=del_count,
+                status=STATUS_COMPLETED,
+                depth=event.depth,
+                parent_index=event.parent_sequence,
             )
             _records.append(record)
+            _records.sort(key=lambda item: item.index)
             _save_raw_files(record)
-            print(f"  {_ANSI_RED}[lower_trace] {phase}/{idx:02d}_{record.name}: FAILED ({e}){_ANSI_RESET}")
+            tag = "CHANGED" if changed else "NO-OP"
+            tag_color = _ANSI_GREEN if changed else _ANSI_DIM
+            print(f"  [lower_trace] {phase}/{event.sequence:02d}_{pass_name}: {tag_color}{tag}{_ANSI_RESET}")
+
+            if _should_gen_html():
+                with contextlib.suppress(Exception):
+                    _incremental_flush_html()
+
+        if _should_print_terminal() and changed:
+            from .diff import print_diff
+
+            label = f"{phase}/{pass_name}"
+            print_diff(before_text, after_text, f"{label} (before)", f"{label} (after)")
+
+    def passes_incomplete(self, passes: list[IncompletePass], error: BaseException | None) -> None:
+        error_msg = str(error) if error is not None else "pass did not complete"
+        gen_html = _should_gen_html()
+
+        with _lock:
+            for item in passes:
+                if item.event is None:
+                    continue
+                event = item.event
+                phase = event.phase or _UNSCOPED_PHASE
+                pass_name = _compact_pass_name(event.name)
+                record = LowerRecord(
+                    phase=phase,
+                    name=pass_name,
+                    index=event.sequence,
+                    before_text=str(item.state) if item.state is not None else "",
+                    after_text="",
+                    changed=False,
+                    status=STATUS_FAILED,
+                    error_msg=error_msg,
+                    depth=event.depth,
+                    parent_index=event.parent_sequence,
+                )
+                _records.append(record)
+                _save_raw_files(record)
+                print(f"  {_ANSI_RED}[lower_trace] {phase}/{event.sequence:02d}_{pass_name}: FAILED ({error_msg}){_ANSI_RESET}")
+
+            _records.sort(key=lambda record: record.index)
             if gen_html:
                 with contextlib.suppress(Exception):
                     _incremental_flush_html()
-        raise
 
-    after_text = str(result)
-    changed = before_text != after_text
-
-    pass_name = _get_pass_display_name(self)
-
-    add_count = del_count = 0
-    if changed:
-        sm = difflib.SequenceMatcher(None, before_text.splitlines(), after_text.splitlines())
-        for tag, i1, i2, j1, j2 in sm.get_opcodes():
-            if tag == "insert":
-                add_count += j2 - j1
-            elif tag == "delete":
-                del_count += i2 - i1
-            elif tag == "replace":
-                add_count += j2 - j1
-                del_count += i2 - i1
-
-    with _lock:
-        record = LowerRecord(
-            phase=phase,
-            name=pass_name,
-            index=idx,
-            before_text=before_text,
-            after_text=after_text,
-            changed=changed,
-            add_lines=add_count,
-            del_lines=del_count,
-            status=STATUS_COMPLETED,
-        )
-        _records.append(record)
-        _save_raw_files(record)
-        tag = "CHANGED" if changed else "NO-OP"
-        tag_color = _ANSI_GREEN if changed else _ANSI_DIM
-        print(f"  [lower_trace] {phase}/{idx:02d}_{pass_name}: {tag_color}{tag}{_ANSI_RESET}")
-
-        if gen_html:
-            with contextlib.suppress(Exception):
-                _incremental_flush_html()
-
-    if _should_print_terminal() and changed:
-        from .diff import print_diff
-
-        label = f"{phase}/{pass_name}"
-        print_diff(before_text, after_text, f"{label} (before)", f"{label} (after)")
-
-    return result
+    def callback_mismatch(self, actual: str, expected: str | None) -> None:
+        print(f"  {_ANSI_RED}[lower_trace] WARNING: unmatched after-pass callback for {actual!r}; expected {expected!r}{_ANSI_RESET}")
 
 
-def _extract_pass_name_from_attr_chain(node: ast.expr) -> str | None:
-    """Walk an attribute chain (e.g. tilelang.transform.Simplify) and extract pass name.
-
-    Returns the pass name (e.g. 'Simplify') if the chain contains a 'transform' segment
-    followed by an uppercase CamelCase name. Returns None otherwise.
-    """
-    if not isinstance(node, ast.Attribute):
-        return None
-    names = []
-    cur = node
-    while isinstance(cur, ast.Attribute):
-        names.append(cur.attr)
-        cur = cur.value
-    if isinstance(cur, ast.Name):
-        names.append(cur.id)
-    names.reverse()
-    try:
-        transform_idx = names.index("transform")
-    except ValueError:
-        return None
-    if transform_idx + 1 >= len(names):
-        return None
-    pass_name = names[transform_idx + 1]
-    if not pass_name or not pass_name[0].isupper():
-        return None
-    return pass_name
+def create_pass_instrument() -> StackedPassInstrument:
+    """Create a context-local PassInstrument backed by lower-trace state."""
+    return StackedPassInstrument(
+        _LowerTraceObserver(),
+        capture_nested=True,
+        capture_predicate=lambda _name, _depth: _is_trace_enabled(),
+        sequence_allocator=_allocate_pass_index,
+        phase_provider=_instrument_phase,
+    )
 
 
-def _discover_passes(phase_func) -> list[str]:
-    """Extract pass names from a phase function's source code via AST parsing."""
-    try:
-        source = inspect.getsource(phase_func)
-    except (OSError, TypeError):
-        return []
-
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return []
-
-    passes = []
-    seen_calls: set = set()
-
-    class _PassVisitor(ast.NodeVisitor):
-        """AST visitor that collects pass names from function call sites."""
-
-        def visit_Call(self, node):
-            """Record any pass-like call found at this node (and nested callels)."""
-            func = node.func
-            found_in_nested = False
-            while isinstance(func, ast.Call):
-                if id(func) not in seen_calls:
-                    seen_calls.add(id(func))
-                    name = _extract_pass_name_from_attr_chain(func.func)
-                    if name:
-                        passes.append(name)
-                        found_in_nested = True
-                func = func.func
-
-            if not found_in_nested and id(node) not in seen_calls:
-                seen_calls.add(id(node))
-                name = _extract_pass_name_from_attr_chain(func)
-                if name:
-                    passes.append(name)
-
-            self.generic_visit(node)
-
-    _PassVisitor().visit(tree)
-    return passes
+def _abort_active_instruments(error: BaseException) -> None:
+    """Attach a pipeline exception to any active lower-trace pass frames."""
+    for instrument in reversed(active_stacked_pass_instruments()):
+        if isinstance(instrument.observer, _LowerTraceObserver) and instrument.pending_events:
+            instrument.abort(error)
 
 
-def _discover_passes_recursive(phase_func) -> list[str]:
-    """Extract pass names, following local helper calls in the same module."""
-    passes = []
-    visited = set()
-    seen_calls: set = set()
+@contextlib.contextmanager
+def _lower_trace_pipeline_scope(base_phase: str):
+    """Provide run/phase lifecycle around an explicitly instrumented pipeline."""
+    global _run_counter, _run_dir
 
-    def _visit(func):
-        """Recively visit ``func`` and its locally-referenced callees, collecting pass names."""
-        func_id = id(func)
-        if func_id in visited:
-            return
-        visited.add(func_id)
-
-        try:
-            source = inspect.getsource(func)
-        except (OSError, TypeError):
-            return
-
-        try:
-            tree = ast.parse(source)
-        except SyntaxError:
-            return
-
-        func_module = inspect.getmodule(func)
-        local_ns = {}
-        if func_module:
-            local_ns.update(vars(func_module))
-        if hasattr(func, "__globals__"):
-            local_ns.update(func.__globals__)
-
-        class _PassVisitor(ast.NodeVisitor):
-            """AST visitor that collects pass names and follows local helper calls."""
-
-            def visit_Call(self, node):
-                """Record pass-like calls and recurse into locally-defined helpers."""
-                call_func = node.func
-
-                found_in_nested = False
-                while isinstance(call_func, ast.Call):
-                    if id(call_func) not in seen_calls:
-                        seen_calls.add(id(call_func))
-                        name = _extract_pass_name_from_attr_chain(call_func.func)
-                        if name:
-                            passes.append(name)
-                            found_in_nested = True
-                    call_func = call_func.func
-
-                if not found_in_nested and id(node) not in seen_calls:
-                    seen_calls.add(id(node))
-                    if isinstance(call_func, ast.Attribute):
-                        name = _extract_pass_name_from_attr_chain(call_func)
-                        if name:
-                            passes.append(name)
-
-                    elif isinstance(call_func, ast.Name):
-                        name = call_func.id
-                        resolved = local_ns.get(name)
-                        if (
-                            resolved is not None
-                            and callable(resolved)
-                            and not isinstance(resolved, type)
-                            and not inspect.isbuiltin(resolved)
-                        ):
-                            resolved_module = getattr(resolved, "__module__", None)
-                            func_module_name = getattr(func, "__module__", None)
-                            if resolved_module == func_module_name:
-                                _visit(resolved)
-
-                self.generic_visit(node)
-
-        _PassVisitor().visit(tree)
-
-    _visit(phase_func)
-    return passes
-
-
-def _discover_phases(lower_func) -> list:
-    """Discover phase functions from the old architecture via bytecode scanning."""
-    try:
-        from tilelang.engine import phase as phase_module
-    except ImportError:
-        return []
-
-    phase_funcs = []
-    seen_names = set()
-    try:
-        for instr in dis.get_instructions(lower_func):
-            if instr.opname == "LOAD_GLOBAL" and instr.argval not in seen_names:
-                name = instr.argval
-                seen_names.add(name)
-                func = getattr(phase_module, name, None)
-                if func is not None and callable(func):
-                    phase_funcs.append(func)
-    except (TypeError, OSError):
-        pass
-
-    if not phase_funcs:
-        phase_funcs = [
-            getattr(phase_module, name)
-            for name in sorted(dir(phase_module))
-            if not name.startswith("_") and callable(getattr(phase_module, name, None))
-        ]
-
-    def _src_line(f):
-        """Return the source line number of ``f`` (large sentinel on failure) for stable sorting."""
-        try:
-            return inspect.getsourcelines(f)[1]
-        except (OSError, TypeError):
-            return 999999
-
-    phase_funcs.sort(key=_src_line)
-    return phase_funcs
-
-
-def _wrap_phase(original_func, phase_index, total_phases):
-    """Wrap a phase function to set tracing context (legacy architecture).
-
-    Phase context is set so that passes invoked within this window are tagged
-    with the phase label.  Pass records are appended at runtime by
-    ``_traced_pass_call``; no pre-registration is performed.
-    """
-    base_phase_name = f"phase{phase_index}_{original_func.__name__}"
-
-    @functools.wraps(original_func)
-    def wrapper(*args, **kwargs):
-        """Set per-phase tracing context, run the phase, then flush the HTML report."""
-        global _run_counter, _current_phase, _auto_flush, _run_dir
-
-        with _lock:
-            if phase_index == 1:
-                _run_counter += 1
-                # Don't reset() on the first run: pre-pipeline passes may have
-                # already been recorded under _UNSCOPED_PHASE, and resetting
-                # would wipe them and break global pass numbering. State is
-                # already clean (module load / disable()); subsequent runs
-                # just get a fresh _run_dir below.
-                if _run_counter > 1:
-                    _run_dir = None
-
-            run_prefix = f"run{_run_counter}_" if _run_counter > 1 else ""
-            phase_name = f"{run_prefix}{base_phase_name}"
-
-            _current_phase = phase_name
-            _auto_flush = _should_gen_html()
-
-        try:
-            result = original_func(*args, **kwargs)
-        except Exception as e:
-            with _lock:
-                _auto_flush = False
-                _current_phase = None
-                print(f"  [lower_trace] EXCEPTION in {phase_name}: {e}")
-
-            with contextlib.suppress(Exception):
-                _incremental_flush_html()
-
-            raise
-
-        with _lock:
-            _auto_flush = False
-            _current_phase = None
-
-            if phase_index == total_phases:
-                print(f"  [lower_trace] run {_run_counter} ({phase_name}) complete: {len(_records)} total records")
-
-        with contextlib.suppress(Exception):
-            _incremental_flush_html()
-
-        return result
-
-    return wrapper
-
-
-def _traced_pipeline_lower(self, mod, target):
-    """Intercept PassPipeline.lower to set phase context for pass tracing (new architecture).
-
-    Only sets ``_current_phase`` so that passes invoked within this window are
-    tagged with the pipeline label.  Pass records are appended at runtime by
-    ``_traced_pass_call``; no pre-registration is performed, so conditional
-    passes (e.g. LetInline) that are skipped at runtime simply do not appear,
-    matching the behaviour of ``pass_diff``.
-    """
-    global _run_counter, _current_phase, _auto_flush, _run_dir
+    if not _is_trace_enabled():
+        yield
+        return
 
     with _lock:
         _run_counter += 1
-        # Don't reset() on the first run: pre-pipeline passes may have
-        # already been recorded under _UNSCOPED_PHASE, and resetting would
-        # wipe them and break global pass numbering. State is already clean
-        # (module load / disable()); subsequent runs just get a fresh
-        # _run_dir below.
-        if _run_counter > 1:
+        run_number = _run_counter
+        if run_number > 1:
             _run_dir = None
+        run_prefix = f"run{run_number}_" if run_number > 1 else ""
+        phase_name = f"{run_prefix}{base_phase}"
 
-        run_prefix = f"run{_run_counter}_" if _run_counter > 1 else ""
-        phase_name = f"{run_prefix}pipeline_{self.name}"
-        _current_phase = phase_name
-        _auto_flush = _should_gen_html()
-
+    succeeded = False
     try:
-        result = _original_pipeline_lower(self, mod, target)
-    except Exception as e:
-        with _lock:
-            _auto_flush = False
-            _current_phase = None
-            print(f"  [lower_trace] EXCEPTION in {phase_name}: {e}")
-
+        with pass_phase(phase_name):
+            yield
+        succeeded = True
+    except Exception as error:
+        _abort_active_instruments(error)
+        print(f"  [lower_trace] EXCEPTION in {phase_name}: {error}")
+        raise
+    finally:
         with contextlib.suppress(Exception):
             _incremental_flush_html()
 
-        raise
-
-    with _lock:
-        _auto_flush = False
-        _current_phase = None
-
-    with contextlib.suppress(Exception):
-        _incremental_flush_html()
-
-    print(f"  [lower_trace] run {_run_counter} ({phase_name}) complete: {len(_records)} total records")
-
-    return result
+    if succeeded:
+        print(f"  [lower_trace] run {run_number} ({phase_name}) complete: {len(_records)} total records")
 
 
 def _make_patched_source_module(original_module, patched_source: str):
@@ -830,7 +612,7 @@ def _wrap_codegen_ffi(original_build, ffi_name=""):
 
     The wrapper:
     1. Captures the final lowered TIR right before codegen runs (``str(mod)``).
-    2. Temporarily sets ``_current_phase = 'codegen'`` so that the internal
+    2. Enters a context-local ``codegen`` phase so that the internal
        ``tir.transform.Simplify()`` call in ``device_codegen`` is automatically
        attributed to the ``codegen`` phase.
     3. After codegen finishes, captures the generated source via
@@ -881,7 +663,7 @@ def _wrap_codegen_ffi(original_build, ffi_name=""):
     @functools.wraps(original_build)
     def wrapper(*args, **kwargs):
         """Run codegen under the trace: capture TIR-before/C++-after and emit a STATUS_CODEGEN record."""
-        global _pass_index, _current_phase
+        global _pass_index
 
         if not _is_trace_enabled():
             return original_build(*args, **kwargs)
@@ -894,13 +676,11 @@ def _wrap_codegen_ffi(original_build, ffi_name=""):
         before_text = str(mod)
         codegen_out_path = _get_codegen_output_path()
 
-        with _lock:
-            previous_phase = _current_phase
-            _current_phase = "codegen"
-
         try:
-            result = original_build(*args, **kwargs)
+            with pass_phase("codegen"):
+                result = original_build(*args, **kwargs)
         except Exception as e:
+            _abort_active_instruments(e)
             with _lock:
                 idx = _pass_index
                 _pass_index += 1
@@ -916,121 +696,114 @@ def _wrap_codegen_ffi(original_build, ffi_name=""):
                 )
                 _records.append(record)
                 _save_raw_files(record)
-                _current_phase = previous_phase
                 print(f"  [lower_trace] codegen/{idx:02d}_codegen: FAILED ({e})")
             raise
 
+        with _lock:
+            idx = _pass_index
+            _pass_index += 1
+        patched_text = None
+        codegen_text = ""
+        after_text = ""
         try:
-            with _lock:
-                idx = _pass_index
-                _pass_index += 1
-            patched_text = None
-            codegen_text = ""
-            after_text = ""
-            try:
-                codegen_text = _inspect_module_source(result)
-                if codegen_out_path:
-                    original_path = codegen_out_path + ".original"
-                    latest_path = codegen_out_path + ".latest"
-                    try:
-                        os.makedirs(os.path.dirname(os.path.abspath(codegen_out_path)), exist_ok=True)
-                        with open(latest_path, "w", encoding="utf-8") as _f:
+            codegen_text = _inspect_module_source(result)
+            if codegen_out_path:
+                original_path = codegen_out_path + ".original"
+                latest_path = codegen_out_path + ".latest"
+                try:
+                    os.makedirs(os.path.dirname(os.path.abspath(codegen_out_path)), exist_ok=True)
+                    with open(latest_path, "w", encoding="utf-8") as _f:
+                        _f.write(codegen_text)
+                    if not os.path.isfile(codegen_out_path) or not os.path.isfile(original_path):
+                        if os.path.isfile(codegen_out_path):
+                            shutil.copyfile(codegen_out_path, codegen_out_path + ".bak")
+                            print(
+                                f"  [lower_trace] codegen/{idx:02d}_codegen: INIT-BACKUP — {_ANSI_BOLD}{_ANSI_YELLOW}{codegen_out_path}{_ANSI_RESET} existed without baseline, backed up to {_ANSI_BOLD}{_ANSI_YELLOW}{codegen_out_path}.bak{_ANSI_RESET}"
+                            )
+                        with open(original_path, "w", encoding="utf-8") as _f:
                             _f.write(codegen_text)
-                        if not os.path.isfile(codegen_out_path) or not os.path.isfile(original_path):
-                            if os.path.isfile(codegen_out_path):
-                                shutil.copyfile(codegen_out_path, codegen_out_path + ".bak")
-                                print(
-                                    f"  [lower_trace] codegen/{idx:02d}_codegen: INIT-BACKUP — {_ANSI_BOLD}{_ANSI_YELLOW}{codegen_out_path}{_ANSI_RESET} existed without baseline, backed up to {_ANSI_BOLD}{_ANSI_YELLOW}{codegen_out_path}.bak{_ANSI_RESET}"
-                                )
+                        shutil.copyfile(original_path, codegen_out_path)
+                        print(f"  [lower_trace] codegen source initialized at: {_ANSI_GREEN}{codegen_out_path}{_ANSI_RESET}")
+                    else:
+                        with open(original_path, encoding="utf-8") as _f:
+                            baseline_text = _f.read()
+                        with open(codegen_out_path, encoding="utf-8") as _f:
+                            working_text = _f.read()
+                        user_edited = working_text.rstrip() != baseline_text.rstrip()
+                        codegen_changed = codegen_text.rstrip() != baseline_text.rstrip()
+                        if not user_edited and not codegen_changed:
+                            patched_text = None
+                        elif not user_edited and codegen_changed:
                             with open(original_path, "w", encoding="utf-8") as _f:
                                 _f.write(codegen_text)
-                            shutil.copyfile(original_path, codegen_out_path)
-                            print(f"  [lower_trace] codegen source initialized at: {_ANSI_GREEN}{codegen_out_path}{_ANSI_RESET}")
+                            with open(codegen_out_path, "w", encoding="utf-8") as _f:
+                                _f.write(codegen_text)
+                            print(
+                                f"  {_ANSI_CYAN}[lower_trace] codegen/{idx:02d}_codegen: REGENERATED (codegen changed, no user edits){_ANSI_RESET}"
+                            )
+                            patched_text = None
+                        elif user_edited and not codegen_changed:
+                            patched_text = working_text
+                            print(f"  {_ANSI_BOLD}{_ANSI_GREEN}[lower_trace] codegen/{idx:02d}_codegen: PATCHED (user edits){_ANSI_RESET}")
                         else:
-                            with open(original_path, encoding="utf-8") as _f:
-                                baseline_text = _f.read()
-                            with open(codegen_out_path, encoding="utf-8") as _f:
-                                working_text = _f.read()
-                            user_edited = working_text.rstrip() != baseline_text.rstrip()
-                            codegen_changed = codegen_text.rstrip() != baseline_text.rstrip()
-                            if not user_edited and not codegen_changed:
-                                patched_text = None
-                            elif not user_edited and codegen_changed:
+                            if working_text.rstrip() == codegen_text.rstrip():
+                                with open(original_path, "w", encoding="utf-8") as _f:
+                                    _f.write(codegen_text)
+                                patched_text = working_text
+                                print(
+                                    f"  {_ANSI_BOLD}{_ANSI_GREEN}[lower_trace] codegen/{idx:02d}_codegen: SYNCED (user edits & codegen changed, but they are the same){_ANSI_RESET}"
+                                )
+                            else:
+                                shutil.copyfile(codegen_out_path, codegen_out_path + ".bak")
+                                shutil.copyfile(original_path, original_path + ".bak")
                                 with open(original_path, "w", encoding="utf-8") as _f:
                                     _f.write(codegen_text)
                                 with open(codegen_out_path, "w", encoding="utf-8") as _f:
                                     _f.write(codegen_text)
                                 print(
-                                    f"  {_ANSI_CYAN}[lower_trace] codegen/{idx:02d}_codegen: REGENERATED (codegen changed, no user edits){_ANSI_RESET}"
+                                    f"  {_ANSI_BOLD}{_ANSI_YELLOW}[lower_trace] codegen/{idx:02d}_codegen: CONFLICT (user edits & codegen changed, conflict with each other, codegen overwrites user edits). {_ANSI_RESET}"
                                 )
                                 patched_text = None
-                            elif user_edited and not codegen_changed:
-                                patched_text = working_text
-                                print(
-                                    f"  {_ANSI_BOLD}{_ANSI_GREEN}[lower_trace] codegen/{idx:02d}_codegen: PATCHED (user edits){_ANSI_RESET}"
-                                )
-                            else:
-                                if working_text.rstrip() == codegen_text.rstrip():
-                                    with open(original_path, "w", encoding="utf-8") as _f:
-                                        _f.write(codegen_text)
-                                    patched_text = working_text
-                                    print(
-                                        f"  {_ANSI_BOLD}{_ANSI_GREEN}[lower_trace] codegen/{idx:02d}_codegen: SYNCED (user edits & codegen changed, but they are the same){_ANSI_RESET}"
-                                    )
-                                else:
-                                    shutil.copyfile(codegen_out_path, codegen_out_path + ".bak")
-                                    shutil.copyfile(original_path, original_path + ".bak")
-                                    with open(original_path, "w", encoding="utf-8") as _f:
-                                        _f.write(codegen_text)
-                                    with open(codegen_out_path, "w", encoding="utf-8") as _f:
-                                        _f.write(codegen_text)
-                                    print(
-                                        f"  {_ANSI_BOLD}{_ANSI_YELLOW}[lower_trace] codegen/{idx:02d}_codegen: CONFLICT (user edits & codegen changed, conflict with each other, codegen overwrites user edits). {_ANSI_RESET}"
-                                    )
-                                    patched_text = None
-                    except Exception as _exc:
-                        print(f"  {_ANSI_RED}[lower_trace] WARNING: codegen file I/O failed: {_exc}{_ANSI_RESET}")
-                        patched_text = None
+                except Exception as _exc:
+                    print(f"  {_ANSI_RED}[lower_trace] WARNING: codegen file I/O failed: {_exc}{_ANSI_RESET}")
+                    patched_text = None
 
-                after_text = patched_text if patched_text is not None else codegen_text
+            after_text = patched_text if patched_text is not None else codegen_text
 
-                sm = difflib.SequenceMatcher(None, before_text.splitlines(), after_text.splitlines())
-                add_count = del_count = 0
-                for _tag, i1, i2, j1, j2 in sm.get_opcodes():
-                    if _tag == "insert":
-                        add_count += j2 - j1
-                    elif _tag == "delete":
-                        del_count += i2 - i1
-                    elif _tag == "replace":
-                        add_count += j2 - j1
-                        del_count += i2 - i1
+            sm = difflib.SequenceMatcher(None, before_text.splitlines(), after_text.splitlines())
+            add_count = del_count = 0
+            for _tag, i1, i2, j1, j2 in sm.get_opcodes():
+                if _tag == "insert":
+                    add_count += j2 - j1
+                elif _tag == "delete":
+                    del_count += i2 - i1
+                elif _tag == "replace":
+                    add_count += j2 - j1
+                    del_count += i2 - i1
 
-                with _lock:
-                    record = LowerRecord(
-                        phase="codegen",
-                        name="codegen",
-                        index=idx,
-                        before_text=before_text,
-                        after_text=after_text,
-                        changed=True,
-                        add_lines=add_count,
-                        del_lines=del_count,
-                        status=STATUS_CODEGEN,
-                    )
-                    _records.append(record)
-                    _save_raw_files(record)
-                    tag = "CODEGEN"
-                    path_suffix = f"  →  {_ANSI_BLUE}{codegen_out_path}{_ANSI_RESET}" if codegen_out_path else ""
-                    print(f"  [lower_trace] codegen/{idx:02d}_codegen: {tag} (+{add_count}/-{del_count}){path_suffix}")
-
-                    if gen_html:
-                        with contextlib.suppress(Exception):
-                            _incremental_flush_html()
-            except Exception as exc:
-                print(f"  {_ANSI_RED}[lower_trace] WARNING: post-codegen tracing failed: {exc}{_ANSI_RESET}")
-        finally:
             with _lock:
-                _current_phase = previous_phase
+                record = LowerRecord(
+                    phase="codegen",
+                    name="codegen",
+                    index=idx,
+                    before_text=before_text,
+                    after_text=after_text,
+                    changed=True,
+                    add_lines=add_count,
+                    del_lines=del_count,
+                    status=STATUS_CODEGEN,
+                )
+                _records.append(record)
+                _save_raw_files(record)
+                tag = "CODEGEN"
+                path_suffix = f"  →  {_ANSI_BLUE}{codegen_out_path}{_ANSI_RESET}" if codegen_out_path else ""
+                print(f"  [lower_trace] codegen/{idx:02d}_codegen: {tag} (+{add_count}/-{del_count}){path_suffix}")
+
+                if gen_html:
+                    with contextlib.suppress(Exception):
+                        _incremental_flush_html()
+        except Exception as exc:
+            print(f"  {_ANSI_RED}[lower_trace] WARNING: post-codegen tracing failed: {exc}{_ANSI_RESET}")
 
         if _should_print_terminal():
             from .diff import print_diff
@@ -1087,8 +860,38 @@ def _register_atexit():
     _atexit_registered = True
 
 
+def _install_default_context_instrument() -> None:
+    """Attach tracing to TVM's current context for direct ``tilelang.lower`` calls."""
+    global _default_pass_context, _default_pass_context_instruments, _default_pass_instrument
+
+    if _default_pass_instrument is not None:
+        return
+
+    from tvm.ir.transform import PassContext
+
+    pass_context = PassContext.current()
+    previous_instruments = list(pass_context.instruments)
+    instrument = create_pass_instrument()
+    pass_context.override_instruments([*previous_instruments, instrument])
+    _default_pass_context = pass_context
+    _default_pass_context_instruments = previous_instruments
+    _default_pass_instrument = instrument
+
+
+def _restore_default_context_instrument() -> None:
+    """Restore the context instrument list saved by enable()."""
+    global _default_pass_context, _default_pass_context_instruments, _default_pass_instrument
+
+    if _default_pass_context is not None and _default_pass_context_instruments is not None:
+        with contextlib.suppress(Exception):
+            _default_pass_context.override_instruments(_default_pass_context_instruments)
+    _default_pass_context = None
+    _default_pass_context_instruments = None
+    _default_pass_instrument = None
+
+
 def enable(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
-    """Enable IR pass tracing via monkey-patching.
+    """Enable IR pass tracing via TVM PassInstrument.
 
     Parameters
     ----------
@@ -1122,22 +925,21 @@ def enable(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
     if codegen_output is not _UNSET:
         _codegen_output_path_override = codegen_output if codegen_output is None else str(codegen_output)
 
-    # Explicitly disabling (mode=None or an off-value): remove any hooks a
+    # Explicitly disabling (mode=None or an off-value): remove any providers a
     # prior enable() may have installed so global state is left unchanged,
     # then re-assert the None override so a stale TL_LOWER_TRACE env var
     # cannot silently re-enable tracing. The no-args case (mode unset) still
-    # falls through to install hooks and resolve the mode at runtime.
+    # falls through to install providers and resolve the mode at runtime.
     if mode is not _UNSET and _mode_override is None:
         disable()
         _mode_override = None
         return
 
-    from tvm.ir.transform import Pass
+    global _atexit_registered
 
-    global _original_pass_call, _original_pipeline_lower, _atexit_registered, _legacy_patched
-    if _original_pass_call is None:
-        _original_pass_call = Pass.__call__
-        Pass.__call__ = _traced_pass_call
+    register_pass_instrument_provider("lower_trace", create_pass_instrument)
+    register_pipeline_scope_provider("lower_trace", _lower_trace_pipeline_scope)
+    _install_default_context_instrument()
 
     if not _original_codegen_ffis:
         _ffi = _get_tvm_ffi()
@@ -1153,58 +955,7 @@ def enable(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
                 print(f"[lower_trace] WARNING: could not wrap codegen FFI {ffi_name}: {exc}")
 
     _register_atexit()
-
-    if _original_pipeline_lower is not None or _legacy_patched:
-        return
-
-    try:
-        from tilelang.backend.pass_pipeline import PassPipeline
-
-        _original_pipeline_lower = PassPipeline.lower
-        PassPipeline.lower = _traced_pipeline_lower
-        print("[lower_trace] IR pass tracing enabled (PassPipeline architecture). Set TL_LOWER_TRACE=1 to enable.")
-        return
-    except ImportError:
-        pass
-
-    try:
-        import tilelang.engine.lower as lower_mod
-
-        lower_func = lower_mod.lower
-        patch_mod = lower_mod
-    except (ImportError, AttributeError):
-        try:
-            from tilelang.engine import lower as lower_func
-
-            import tilelang.engine as patch_mod
-        except (ImportError, AttributeError) as e:
-            print(f"[lower_trace] WARNING: could not enable tracing — {e}")
-            return
-
-    phase_funcs = _discover_phases(lower_func)
-    for i, phase_func in enumerate(phase_funcs):
-        wrapped = _wrap_phase(phase_func, i + 1, len(phase_funcs))
-        name = phase_func.__name__
-
-        # Save originals on every target before overwriting so disable() can
-        # restore them cleanly (CWE: tracing must be fully reversible).
-        _legacy_phase_originals.append((patch_mod, name, getattr(patch_mod, name, _MISSING), False))
-        setattr(patch_mod, name, wrapped)
-        try:
-            from tilelang.engine import phase as phase_module
-
-            if hasattr(phase_module, name):
-                _legacy_phase_originals.append((phase_module, name, getattr(phase_module, name, _MISSING), False))
-                setattr(phase_module, name, wrapped)
-        except ImportError:
-            pass
-        glbls = getattr(lower_func, "__globals__", None)
-        if glbls is not None and name in glbls:
-            _legacy_phase_originals.append((glbls, name, glbls[name], True))
-            glbls[name] = wrapped
-
-    _legacy_patched = True
-    print(f"[lower_trace] IR pass tracing enabled (phase-based architecture, {len(phase_funcs)} phases). Set TL_LOWER_TRACE=1 to enable.")
+    print("[lower_trace] IR pass tracing enabled (PassInstrument architecture). Set TL_LOWER_TRACE=1 to enable.")
 
 
 def _final_report():
@@ -1223,40 +974,13 @@ def _final_report():
 
 
 def disable():
-    """Remove the pass tracing hook and restore original behavior."""
-    global _original_pass_call, _original_pipeline_lower, _atexit_registered, _run_counter, _legacy_patched
+    """Disable tracing providers and restore original runtime behavior."""
+    global _atexit_registered, _run_counter
     global _mode_override, _trace_dir_override, _codegen_output_path_override, _script_dir, _run_dir
-    global _legacy_phase_originals
 
-    if _original_pass_call is not None:
-        from tvm.ir.transform import Pass
-
-        Pass.__call__ = _original_pass_call
-        _original_pass_call = None
-
-    if _original_pipeline_lower is not None:
-        from tilelang.backend.pass_pipeline import PassPipeline
-
-        PassPipeline.lower = _original_pipeline_lower
-
-    _original_pipeline_lower = None
-    _legacy_patched = False
-
-    # Restore the phase callables that the legacy fallback path overwrote in
-    # patch_mod / tilelang.engine.phase / lower_func.__globals__.
-    for target, name, original, is_dict in _legacy_phase_originals:
-        with contextlib.suppress(Exception):
-            if original is _MISSING:
-                if is_dict:
-                    del target[name]  # type: ignore[operator]
-                else:
-                    delattr(target, name)
-            else:
-                if is_dict:
-                    target[name] = original  # type: ignore[index]
-                else:
-                    setattr(target, name, original)
-    _legacy_phase_originals = []
+    unregister_pipeline_scope_provider("lower_trace")
+    unregister_pass_instrument_provider("lower_trace")
+    _restore_default_context_instrument()
 
     _ffi = _get_tvm_ffi()
 
@@ -1287,16 +1011,11 @@ def reset():
     ``_script_dir`` is preserved (stable across runs, holds codegen files +
     html symlink).  ``_run_dir`` is also preserved: clearing it here would
     split a single run into two directories, because pre-pipeline passes
-    (which lazily create it via ``_ensure_run_dir``) run before
-    ``PassPipeline.lower``/``_wrap_phase`` invokes ``reset`` on its first run.
-    A fresh ``_run_dir`` for each subsequent run is instead established
-    directly in ``_traced_pipeline_lower`` / ``_wrap_phase`` (when
-    ``_run_counter > 1``), without calling ``reset`` so that records keep
-    accumulating across runs.
+    (which lazily create it via ``_ensure_run_dir``) may run before the explicit
+    pipeline scope begins.  ``_lower_trace_pipeline_scope`` establishes a fresh
+    directory for subsequent runs without clearing accumulated records.
     """
-    global _records, _section_cache, _current_phase, _pass_index, _auto_flush
+    global _records, _section_cache, _pass_index
     _records = []
     _section_cache = {}
-    _current_phase = None
     _pass_index = 0
-    _auto_flush = False

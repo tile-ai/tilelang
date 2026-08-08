@@ -22,7 +22,13 @@ class PassPipeline:
     def lower(self, mod: IRModule, target: Target) -> IRModule:
         """Run the pipeline and render source snippets for located errors."""
         try:
-            return self._lower(mod, target)
+            # Tooling scopes are registered lazily.  Keeping this import at
+            # the execution boundary avoids pulling developer tools into the
+            # backend package during TileLang initialization.
+            from tilelang.utils.pass_events import pass_pipeline
+
+            with pass_pipeline(self.name):
+                return self._lower(mod, target)
         except Exception as exc:
             # Compiler passes append a machine-readable `--> file:line:col`
             # marker when the relevant IR node carries a span. Keep enrichment
