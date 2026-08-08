@@ -138,7 +138,7 @@ Returns a `list[dict]` with one entry per pass step, each containing `name`,
 `before_script`, `after_script`, `diff_lines`, `insertions`, `deletions`, and
 `changed`.
 
-### Global hook: `enable()` / `disable()` / `reset()`
+### Global instrumentation: `enable()` / `disable()` / `reset()`
 
 To trace the *entire* compilation pipeline of a real kernel (what the
 environment variable does, but programmatically):
@@ -170,8 +170,8 @@ Both are **optional** and only needed in specific scenarios:
 
 | Function | When to call | What it does |
 | --- | --- | --- |
-| `reset()` | Compiling **multiple kernels in the same process** and you want each kernel's report to start fresh (instead of accumulating into one combined report) | Clears collected records while keeping the hook active. Without it, records accumulate across compilations, tagged with `run2_`, `run3_`, … prefixes — which is desirable if you *want* to compare runs side by side. |
-| `disable()` | You want to **disable tracing for subsequent compilations** within the same process (e.g. a long-running service that only traces the first kernel) | Restores the original `Pass.__call__`, `PassPipeline.lower`, and codegen FFIs, and clears all state. |
+| `reset()` | Compiling **multiple kernels in the same process** and you want each kernel's report to start fresh (instead of accumulating into one combined report) | Clears collected records while keeping instrumentation active. Without it, records accumulate across compilations, tagged with `run2_`, `run3_`, … prefixes — which is desirable if you *want* to compare runs side by side. |
+| `disable()` | You want to **disable tracing for subsequent compilations** within the same process (e.g. a long-running service that only traces the first kernel) | Unregisters the PassInstrument providers, restores the current PassContext and codegen FFIs, and clears all state. |
 
 ```python
 from tilelang.tools import lower_trace as lt
@@ -307,18 +307,16 @@ tilelang.compile(..., execution_backend="cython")
 
 ## How It Works
 
-IR Lower Trace installs three layers of transparent hooks (all via
-`monkey-patch`, restored by `disable()`):
+IR Lower Trace uses three cooperating layers:
 
-1. **`tvm.ir.transform.Pass.__call__`** — every pass invocation is intercepted
-   to capture `str(mod)` before and after, compute `+`/`−` line counts, and
-   append a `LowerRecord`. Passes that run outside any pipeline window are
-   tagged with the `unscoped` phase.
-2. **`PassPipeline.lower`** (new architecture) or **phase functions** (legacy
-   architecture) — sets the current phase context so passes invoked within a
-   pipeline run are grouped under a label like `pipeline_c`. Legacy phase
-   functions are discovered via AST scanning (`_discover_passes`) and bytecode
-   inspection.
+1. **TVM `PassInstrument`** — before/after callbacks capture `str(mod)`,
+   compute `+`/`−` line counts, and append a `LowerRecord`. The shared nested
+   callback stack records depth and parent relationships, including passes
+   invoked internally by another TVM pass. Passes outside a pipeline window
+   are tagged with the `unscoped` phase.
+2. **Explicit `PassPipeline.lower` scope** — sets a context-local phase so
+   passes in a backend pipeline are grouped under labels such as
+   `pipeline_c`. This is a normal pipeline boundary, not a class monkey-patch.
 3. **Codegen FFI** (`target.build.tilelang_cuda`, `…_hip`, `…_c`, `…_llvm`,
    etc.) — captures the final TIR → source lowering and drives the three-file
    edit-recompile workflow described above.
@@ -335,11 +333,12 @@ prefix; all records accumulate into a single report so you can compare runs side
 by side.
 
 :::{note}
-The pipeline hook wraps `tvm.ir.transform.Pass.__call__` for the entire
-process, so it observes TVM passes outside the immediate `tilelang.compile()`
-call as well. Capturing IR and, in HTML mode, rewriting the report after every
-pass adds debugging overhead. Leave the feature disabled for normal builds and
-benchmarks.
+`enable()` injects an instrument into TileLang-managed PassContexts and the
+PassContext that is current when tracing is enabled. If application code later
+creates an unrelated TVM PassContext manually, add
+`lt.create_pass_instrument()` to that context's `instruments` list. Capturing
+IR and, in HTML mode, rewriting the report after every pass adds debugging
+overhead. Leave the feature disabled for normal builds and benchmarks.
 :::
 
 ## Choosing an Output Mode

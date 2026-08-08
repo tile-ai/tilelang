@@ -121,11 +121,27 @@ def test_lower_trace_api_chain():
 
 
 def test_enable_disable():
-    """enable()/disable() round-trip installs and removes tracing hooks cleanly."""
+    """enable()/disable() round-trip installs and removes instrumentation cleanly."""
     from tilelang.tools.lower_trace import enable, disable
 
     enable()
     disable()
+
+
+def test_enable_registers_instrument_without_patching_pass_call(tmp_path):
+    """Global activation composes a PassInstrument and leaves TVM's class intact."""
+    from tilelang.tools.lower_trace import enable
+    from tilelang.utils.pass_timing import build_pass_instruments
+    from tvm.ir.transform import Pass
+
+    original_pass_call = Pass.__call__
+    enable(mode="terminal", trace_dir=str(tmp_path), codegen_output=None)
+
+    instruments, timing = build_pass_instruments([], threshold_ms=None)
+    assert timing is None
+    assert len(instruments) == 1
+    assert isinstance(instruments[0].observer, _core._LowerTraceObserver)
+    assert Pass.__call__ is original_pass_call
 
 
 def test_lower_trace_html():
@@ -145,18 +161,6 @@ def test_lower_trace_html():
         assert "TileLang" in content or "pass" in content.lower()
     finally:
         os.unlink(html_path)
-
-
-def test_discover_passes():
-    """_discover_passes() extracts the ordered pass names from a pipeline class."""
-    from tilelang.tools.lower_trace.core import _discover_passes
-    from tilelang.cpu.pipeline import CPUPassPipelineBody
-
-    pass_names = _discover_passes(CPUPassPipelineBody)
-    assert len(pass_names) > 10, f"Expected >10 passes, got {len(pass_names)}"
-    assert "Simplify" in pass_names
-    assert "LayoutInference" in pass_names
-    assert "BindTarget" in pass_names
 
 
 def test_lower_trace_dark_theme():
@@ -462,6 +466,95 @@ def _clear_trace_overrides():
     _core.reset()
 
 
+def test_pass_instrument_captures_nested_tvm_passes(tmp_path):
+    """The instrument backend records C++-nested passes with parent metadata."""
+
+    @tvm.transform.module_pass(opt_level=0, name="test.Outer")
+    def outer_pass(mod, _ctx):
+        return tvm.tirx.transform.Simplify()(mod)
+
+    program = _simple_program()
+    mod = tvm.IRModule({"main": program})
+    instrument = _core.create_pass_instrument()
+
+    _setup_trace_overrides(tmp_path, mode="html")
+    try:
+        with tvm.transform.PassContext(instruments=[instrument]):
+            outer_pass(mod)
+
+        records = [record for record in _core._records if record.name in ("Outer", "Simplify")]
+        assert [record.name for record in records] == ["Outer", "Simplify"]
+        assert [(record.depth, record.parent_index) for record in records] == [(0, None), (1, records[0].index)]
+
+        report_path = os.path.join(_core._run_dir, "report.html")
+        with open(report_path) as report_file:
+            report = report_file.read()
+        assert 'data-depth="1"' in report
+        assert f'data-parent-index="{records[0].index}"' in report
+    finally:
+        _clear_trace_overrides()
+
+
+def test_lower_trace_and_pass_visualizer_share_event_infrastructure(tmp_path):
+    """Both tools can observe one PassContext with their distinct policies."""
+    from tilelang.tools.pass_visualizer import StructureTreePassInstrument
+
+    @tvm.transform.module_pass(opt_level=0, name="test.Outer")
+    def outer_pass(mod, _ctx):
+        return tvm.tirx.transform.Simplify()(mod)
+
+    mod = tvm.IRModule({"main": _simple_program()})
+    lower_trace_instrument = _core.create_pass_instrument()
+    visualizer_instrument = StructureTreePassInstrument()
+
+    _setup_trace_overrides(tmp_path)
+    try:
+        with tvm.transform.PassContext(instruments=[lower_trace_instrument, visualizer_instrument]):
+            outer_pass(mod)
+
+        trace_records = [record for record in _core._records if record.name in ("Outer", "Simplify")]
+        assert [record.name for record in trace_records] == ["Outer", "Simplify"]
+        assert [record.name for record in visualizer_instrument.ordered_records()] == ["test.Outer"]
+    finally:
+        _clear_trace_overrides()
+
+
+def test_pipeline_scope_attaches_exception_to_failing_pass(tmp_path):
+    """The explicit pipeline scope aborts pending frames with the real error."""
+    from tilelang.backend.pass_pipeline import PassPipeline
+    from tilelang.tools.lower_trace import enable
+
+    @tvm.transform.module_pass(opt_level=0, name="test.Fail")
+    def failing_pass(mod, _ctx):
+        raise RuntimeError("instrument failure")
+
+    pipeline = PassPipeline("test", lambda mod, _target: failing_pass(mod))
+    program = _simple_program()
+    mod = tvm.IRModule({"main": program})
+
+    enable(mode="terminal", trace_dir=str(tmp_path), codegen_output=None)
+    with pytest.raises(RuntimeError, match="instrument failure"):
+        pipeline.lower(mod, tvm.target.Target("c"))
+
+    failed = [record for record in _core._records if record.name == "Fail"]
+    assert len(failed) == 1
+    assert failed[0].status == _core.STATUS_FAILED
+    assert failed[0].error_msg == "instrument failure"
+    assert failed[0].phase == "pipeline_test"
+
+
+def test_direct_tilelang_lower_uses_default_context_instrument(tmp_path):
+    """Programmatic enable traces direct lower() without a caller PassContext."""
+    from tilelang.tools.lower_trace import enable
+
+    enable(mode="terminal", trace_dir=str(tmp_path), codegen_output=None)
+    artifact = tilelang.lower(_simple_program(), target="c")
+
+    assert artifact.kernel_source
+    assert any(record.phase == "pipeline_c" for record in _core._records)
+    assert any(record.status == _core.STATUS_CODEGEN for record in _core._records)
+
+
 @contextlib.contextmanager
 def _patch_make_patched_source_module():
     """Patch _make_patched_source_module so tests avoid the real TVM C++ FFI."""
@@ -654,12 +747,12 @@ def test_codegen_synced(tmp_path):
 
 
 def test_codegen_phase_reset_on_inspect_source_failure(tmp_path):
-    """_current_phase must be reset even if post-codegen tracing raises.
+    """The context-local phase must reset even if post-codegen tracing raises.
 
     Regression guard: previously an exception in the codegen post-processing
-    (inspect_source / file I/O / diff) left _current_phase stuck at "codegen",
+    (inspect_source / file I/O / diff) left the phase stuck at "codegen",
     misattributing later records.  The exception is now caught and warned
-    (does not propagate), but _current_phase must still be restored.
+    (does not propagate), but the phase must still be restored.
     """
     from tilelang.tools.lower_trace.core import _wrap_codegen_ffi
 
@@ -679,7 +772,9 @@ def test_codegen_phase_reset_on_inspect_source_failure(tmp_path):
         # The post-codegen tracing exception is caught + warned (not re-raised).
         wrapper("fake_mod")
 
-        assert _core._current_phase is None, "_current_phase must be reset after inspect_source failure"
+        from tilelang.utils.pass_events import current_pass_phase
+
+        assert current_pass_phase() is None, "phase must be reset after inspect_source failure"
     finally:
         _clear_trace_overrides()
 
@@ -687,17 +782,17 @@ def test_codegen_phase_reset_on_inspect_source_failure(tmp_path):
 def test_codegen_restores_outer_phase(tmp_path):
     """codegen nested in an active pipeline phase must restore it, not clear to None."""
     from tilelang.tools.lower_trace.core import _wrap_codegen_ffi
+    from tilelang.utils.pass_events import current_pass_phase, pass_phase
 
     source_v1 = "// generated kernel v1\n"
     wrapper = _wrap_codegen_ffi(_make_mock_build(source_v1), "target.build.tilelang_cuda_without_compile")
 
     _setup_trace_overrides(tmp_path)
     try:
-        _core._current_phase = "pipeline_test"
-        wrapper("fake_mod")
-        assert _core._current_phase == "pipeline_test", "outer phase must be restored after codegen"
+        with pass_phase("pipeline_test"):
+            wrapper("fake_mod")
+            assert current_pass_phase() == "pipeline_test", "outer phase must be restored after codegen"
     finally:
-        _core._current_phase = None
         _clear_trace_overrides()
 
 

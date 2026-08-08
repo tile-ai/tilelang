@@ -22,6 +22,7 @@ import re
 import logging
 import textwrap
 from tvm.tirx.stmt_functor import post_order_visit
+from tilelang.utils.pass_events import create_registered_pass_instruments
 
 PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY = """
     cudaError_t result_{0} = cudaFuncSetAttribute({0}, cudaFuncAttributeMaxDynamicSharedMemorySize, {1});
@@ -453,7 +454,11 @@ class TLCUDASourceWrapper:
 
     def parse_source_information(self):
         if self.device_mod is None or self.host_mod is None:
-            with tvm.transform.PassContext(opt_level=3, config=self.pass_configs):
+            with tvm.transform.PassContext(
+                opt_level=3,
+                config=self.pass_configs,
+                instruments=create_registered_pass_instruments(),
+            ):
                 device_mod, host_mod = get_annotated_mod(self.mod, self.target)
             self.device_mod = device_mod
             self.host_mod = host_mod
@@ -847,7 +852,14 @@ class TLCPUSourceWrapper:
 
     def parse_source_information(self):
         if self.device_mod is None or self.host_mod is None:
-            with tvm.transform.PassContext(opt_level=3, config=self.pass_configs), self.target:
+            with (
+                tvm.transform.PassContext(
+                    opt_level=3,
+                    config=self.pass_configs,
+                    instruments=create_registered_pass_instruments(),
+                ),
+                self.target,
+            ):
                 device_mod, host_mod = get_annotated_mod(self.mod, self.target)
             self.device_mod = device_mod
             self.host_mod = host_mod
