@@ -72,6 +72,21 @@ public:
   bool needs_fragment_lane_vars{false};
 };
 
+std::string MetalAddressSpaceForStorageScope(const std::string &scope) {
+  if (scope == "global") {
+    return "device";
+  }
+  if (scope == "shared" || scope == "shared.dyn" || scope == "threadgroup") {
+    return "threadgroup";
+  }
+  if (scope == "local" || scope == "local.var" || scope == "metal.simdgroup" ||
+      scope == "metal.cooperative_tensor") {
+    return "thread";
+  }
+  LOG(FATAL) << "Unknown Metal storage scope `" << scope << "`";
+  return "";
+}
+
 } // namespace
 
 void CodeGenTileLangMetal::InitFuncState(const PrimFunc &f) {
@@ -457,15 +472,43 @@ void CodeGenTileLangMetal::PrintVecElemStore(const std::string &vec, DataType t,
 
 void CodeGenTileLangMetal::PrintStorageScope(const std::string &scope,
                                              std::ostream &os) { // NOLINT(*)
-  if (scope == "global") {
-    os << "device ";
-  } else if (scope == "shared" || scope == "shared.dyn") {
-    os << "threadgroup ";
-  } else if (scope == "local" || scope == "local.var") {
-    os << "thread ";
-  } else {
-    LOG(FATAL) << "Unknown storage scope `" << scope << "`";
+  os << MetalAddressSpaceForStorageScope(scope) << " ";
+}
+
+void CodeGenTileLangMetal::VisitStmt_(const BindNode *op) {
+  if (!op->var.dtype().is_handle()) {
+    CodeGenC::VisitStmt_(op);
+    return;
   }
+
+  const auto *pointer_type = op->var->type_annotation.as<PointerTypeNode>();
+  TVM_FFI_ICHECK(pointer_type)
+      << "Metal handle binding requires a typed pointer: " << op->var;
+  const auto *element_type = pointer_type->element_type.as<PrimTypeNode>();
+  TVM_FFI_ICHECK(element_type)
+      << "Metal handle binding requires a primitive pointee type: " << op->var;
+
+  const std::string &storage_scope = pointer_type->storage_scope;
+  TVM_FFI_ICHECK(!storage_scope.empty())
+      << "Metal handle binding requires an explicit storage scope: " << op->var;
+
+  alloc_storage_scope_[op->var.get()] = storage_scope;
+  RegisterHandleType(op->var.get(), element_type->dtype);
+  std::string value = PrintExpr(op->value);
+
+  if (print_ssa_form_) {
+    TVM_FFI_ICHECK(!var_idmap_.count(op->var.get()));
+    var_idmap_[op->var.get()] = value;
+    return;
+  }
+
+  PrintIndent();
+  PrintStorageScope(storage_scope, stream);
+  PrintType(element_type->dtype, stream);
+  stream << "* " << AllocVarID(op->var.get()) << " = (";
+  PrintStorageScope(storage_scope, stream);
+  PrintType(element_type->dtype, stream);
+  stream << "*)" << value << ";\n";
 }
 
 void CodeGenTileLangMetal::VisitStmt_(const AttrStmtNode *op) {
@@ -868,74 +911,83 @@ void CodeGenTileLangMetal::VisitExpr_(const CastNode *op,
 }
 
 std::string
-CodeGenTileLangMetal::GetAddrSpaceOf(const PrimExpr &ptr_expr) const {
-  if (auto *call = ptr_expr.as<CallNode>()) {
-    if (call->op.same_as(builtin::address_of())) {
-      if (auto *load = call->args[0].as<BufferLoadNode>()) {
-        auto it = alloc_storage_scope_.find(load->buffer->data.get());
-        if (it != alloc_storage_scope_.end()) {
-          const std::string &scope = it->second;
-          if (scope == "shared" || scope == "shared.dyn") {
-            return "threadgroup";
-          }
-          if (scope == "local" || scope == "metal.cooperative_tensor") {
-            return "thread";
-          }
-          if (scope == "global") {
-            return "device";
-          }
-        }
-      }
-    }
-    for (const auto &arg : call->args) {
-      std::string result = GetAddrSpaceOf(arg);
-      if (!result.empty()) {
-        return result;
-      }
-    }
-  }
+CodeGenTileLangMetal::GetStorageScopeOf(const PrimExpr &ptr_expr) const {
   if (auto *var = ptr_expr.as<VarNode>()) {
     auto it = alloc_storage_scope_.find(var);
     if (it != alloc_storage_scope_.end()) {
-      const std::string &scope = it->second;
-      if (scope == "shared" || scope == "shared.dyn") {
-        return "threadgroup";
-      }
-      if (scope == "local" || scope == "metal.cooperative_tensor") {
-        return "thread";
-      }
-      if (scope == "global") {
-        return "device";
+      return it->second;
+    }
+    if (const auto *pointer_type = var->type_annotation.as<PointerTypeNode>()) {
+      if (!pointer_type->storage_scope.empty()) {
+        return pointer_type->storage_scope;
       }
     }
   }
-  return "thread";
+  if (auto *call = ptr_expr.as<CallNode>()) {
+    if (call->op.same_as(builtin::address_of())) {
+      TVM_FFI_ICHECK_EQ(call->args.size(), 1U);
+      if (auto *load = call->args[0].as<BufferLoadNode>()) {
+        return GetStorageScopeOf(load->buffer->data);
+      }
+    } else if (call->op.same_as(builtin::handle_add_byte_offset())) {
+      TVM_FFI_ICHECK_EQ(call->args.size(), 2U);
+      return GetStorageScopeOf(call->args[0]);
+    } else if (call->op.same_as(builtin::tvm_access_ptr())) {
+      TVM_FFI_ICHECK_GE(call->args.size(), 2U);
+      return GetStorageScopeOf(call->args[1]);
+    } else if (call->op.same_as(builtin::reinterpret())) {
+      TVM_FFI_ICHECK_EQ(call->args.size(), 1U);
+      return GetStorageScopeOf(call->args[0]);
+    }
+  }
+  return "";
+}
+
+std::string
+CodeGenTileLangMetal::GetAddrSpaceOf(const PrimExpr &ptr_expr) const {
+  std::string storage_scope = GetStorageScopeOf(ptr_expr);
+  TVM_FFI_ICHECK(!storage_scope.empty())
+      << "Cannot determine Metal storage scope for pointer expression "
+      << ptr_expr;
+  return MetalAddressSpaceForStorageScope(storage_scope);
 }
 
 std::string
 CodeGenTileLangMetal::GetPointeeTypeOf(const PrimExpr &ptr_expr,
                                        const std::string &fallback) {
-  if (auto *call = ptr_expr.as<CallNode>()) {
-    if (call->op.same_as(builtin::address_of())) {
-      if (auto *load = call->args[0].as<BufferLoadNode>()) {
-        std::ostringstream os;
-        PrintType(load->buffer->dtype, os);
-        return os.str();
-      }
-    }
-    for (const auto &arg : call->args) {
-      std::string result = GetPointeeTypeOf(arg, "");
-      if (!result.empty()) {
-        return result;
-      }
-    }
-  }
   if (auto *var = ptr_expr.as<VarNode>()) {
     auto it = handle_data_type_.find(var);
     if (it != handle_data_type_.end()) {
       std::ostringstream os;
       PrintType(it->second, os);
       return os.str();
+    }
+    if (const auto *pointer_type = var->type_annotation.as<PointerTypeNode>()) {
+      if (const auto *element_type =
+              pointer_type->element_type.as<PrimTypeNode>()) {
+        std::ostringstream os;
+        PrintType(element_type->dtype, os);
+        return os.str();
+      }
+    }
+  }
+  if (auto *call = ptr_expr.as<CallNode>()) {
+    if (call->op.same_as(builtin::address_of())) {
+      TVM_FFI_ICHECK_EQ(call->args.size(), 1U);
+      if (auto *load = call->args[0].as<BufferLoadNode>()) {
+        std::ostringstream os;
+        PrintType(load->buffer->dtype, os);
+        return os.str();
+      }
+    } else if (call->op.same_as(builtin::handle_add_byte_offset())) {
+      TVM_FFI_ICHECK_EQ(call->args.size(), 2U);
+      return GetPointeeTypeOf(call->args[0], fallback);
+    } else if (call->op.same_as(builtin::tvm_access_ptr())) {
+      TVM_FFI_ICHECK_GE(call->args.size(), 2U);
+      return GetPointeeTypeOf(call->args[1], fallback);
+    } else if (call->op.same_as(builtin::reinterpret())) {
+      TVM_FFI_ICHECK_EQ(call->args.size(), 1U);
+      return GetPointeeTypeOf(call->args[0], fallback);
     }
   }
   return fallback;
@@ -1642,11 +1694,9 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
     this->PrintExpr(op->args[0], os);
     os << "))";
   } else if (op->op.same_as(builtin::handle_add_byte_offset())) {
-    // Dynamic shared memory pointer arithmetic.
-    // Metal requires explicit address space qualifiers on all pointers.
-    // The base class emits ((void*)((char*)...)) which is invalid in MSL.
     TVM_FFI_ICHECK_EQ(op->args.size(), 2U);
-    os << "((threadgroup void*)((threadgroup char*)";
+    std::string addr_space = GetAddrSpaceOf(op->args[0]);
+    os << "((" << addr_space << " void*)((" << addr_space << " char*)";
     this->PrintExpr(op->args[0], os);
     os << " + ";
     this->PrintExpr(op->args[1], os);
@@ -1707,113 +1757,6 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
     cg.AddFunction(kv.first, f);
 
     std::string fsource = cg.Finish();
-    // MSL requires explicit address space qualifiers on all pointers.
-    // The CUDA-oriented codegen emits void* for shared memory handles
-    // and pointer arithmetic casts, which is invalid in MSL. Fix them.
-    // 1) void* declarations for shared memory aliases
-    {
-      std::string from = "void* ";
-      std::string to = "threadgroup void* ";
-      for (size_t pos = 0;
-           (pos = fsource.find(from, pos)) != std::string::npos;) {
-        // Skip if already qualified (idempotent)
-        if (pos >= 12 && fsource.substr(pos - 12, 12) == "threadgroup ") {
-          pos += from.length();
-          continue;
-        }
-        fsource.replace(pos, from.length(), to);
-        pos += to.length();
-      }
-    }
-    // 2) void* casts in pointer arithmetic (handle_add_byte_offset)
-    {
-      std::string from = "((void*)((char*)";
-      std::string to = "((threadgroup void*)((threadgroup char*)";
-      for (size_t pos = 0;
-           (pos = fsource.find(from, pos)) != std::string::npos;) {
-        // Skip if already qualified
-        if (pos >= 2 && fsource.substr(pos - 2, 14) == "((threadgroup v") {
-          pos += from.length();
-          continue;
-        }
-        fsource.replace(pos, from.length(), to);
-        pos += to.length();
-      }
-    }
-    // 3) Pointer casts (TYPE*) on shared memory handles
-    {
-      std::string from = "((float2*)A_shared)";
-      std::string to = "((threadgroup float2*)A_shared)";
-      for (size_t pos = 0;
-           (pos = fsource.find(from, pos)) != std::string::npos;) {
-        if (pos >= 2 && fsource.substr(pos, 14) == "((threadgroup ") {
-          pos += from.length();
-          continue;
-        }
-        fsource.replace(pos, from.length(), to);
-        pos += to.length();
-      }
-    }
-    {
-      std::string from = "((float2*)B_shared)";
-      std::string to = "((threadgroup float2*)B_shared)";
-      for (size_t pos = 0;
-           (pos = fsource.find(from, pos)) != std::string::npos;) {
-        if (pos >= 2 && fsource.substr(pos, 14) == "((threadgroup ") {
-          pos += from.length();
-          continue;
-        }
-        fsource.replace(pos, from.length(), to);
-        pos += to.length();
-      }
-    }
-    // 4) Generalize: any ((TYPE*)_shared) pattern
-    {
-      size_t pos = 0;
-      while ((pos = fsource.find("*)_shared", pos)) != std::string::npos) {
-        size_t open = fsource.rfind("((", pos);
-        if (open != std::string::npos) {
-          // Skip if already has threadgroup qualifier
-          if (fsource.substr(open, 14) != "((threadgroup ") {
-            fsource.insert(open + 2, "threadgroup ");
-          }
-          pos = open + 2 + 12;
-        } else {
-          pos += 1;
-        }
-      }
-    }
-    // 5) Line-level: any line containing _shared → fix ALL pointer casts.
-    //    After passes 1-4, some casts still lack threadgroup because _shared
-    //    is nested inside the expression. This pass finds any (TYPE*) on a
-    //    _shared line and inserts the threadgroup qualifier if missing.
-    {
-      std::istringstream iss(fsource);
-      std::ostringstream oss;
-      std::string line;
-      while (std::getline(iss, line)) {
-        if (line.find("_shared") != std::string::npos) {
-          for (size_t i = 0; i + 3 < line.length(); i++) {
-            if (line[i] == '(') {
-              if (line.substr(i, 14) == "(threadgroup ") {
-                i += 13;
-                continue;
-              }
-              size_t j = i + 1;
-              while (j < line.length() && (isalnum(line[j]) || line[j] == '_'))
-                j++;
-              if (j < line.length() && line[j] == '*' &&
-                  j + 1 < line.length() && line[j + 1] == ')') {
-                line.insert(i + 1, "threadgroup ");
-                i += 12;
-              }
-            }
-          }
-        }
-        oss << line << "\n";
-      }
-      fsource = oss.str();
-    }
     source_maker << fsource << "\n";
     if (fmetal_postproc) {
       fsource = (*fmetal_postproc)(fsource, target).cast<std::string>();
