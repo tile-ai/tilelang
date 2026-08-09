@@ -42,7 +42,7 @@ def atomic_max(
     """
     Perform an atomic maximum on the value stored at dst with an optional memory-order.
 
-    Supports scalar/addressed extern atomic max when neither argument exposes extents, or tile-region-based atomic max for Buffer/BufferRegion/BufferLoad inputs. If both arguments are plain Buffers their shapes must be structurally equal. If at least one side exposes extents, extents are aligned (missing dimensions are treated as size 1); an assertion is raised if extents cannot be deduced. The optional `memory_order` (one of "relaxed","consume","acquire","release","acq_rel","seq_cst") is used only for the direct extern `AtomicMax` path when no extents are available — otherwise the tile-region path ignores `memory_order`.
+    Supports scalar/addressed extern atomic max when neither argument exposes extents, or tile-region-based atomic max for Buffer/BufferRegion/BufferLoad inputs. If both arguments are plain Buffers their shapes must be structurally equal. If at least one side exposes extents, extents are aligned (missing dimensions are treated as size 1); an assertion is raised if extents cannot be deduced. The optional `memory_order` (one of "relaxed","consume","acquire","release","acq_rel","seq_cst") is honored on CUDA targets by both the direct extern `AtomicMax` path and the tile-region path. HIP and CuteDSL codegen currently ignore it.
 
     Parameters:
         dst (Buffer): Destination buffer/address to apply the atomic max.
@@ -128,7 +128,7 @@ def atomic_min(
     """
     Atomically update the value at dst to the minimum of its current value and value.
 
-    Supports scalar/addressed extern atomic min when neither argument exposes extents, or tile-region-based atomic min for Buffer/BufferRegion/BufferLoad inputs. If both arguments are plain Buffers their shapes must be structurally equal. If at least one side exposes extents, extents are aligned (missing dimensions are treated as size 1); an assertion is raised if extents cannot be deduced. The optional `memory_order` (one of "relaxed","consume","acquire","release","acq_rel","seq_cst") is used only for the direct extern `AtomicMin` path when no extents are available — otherwise the tile-region path ignores `memory_order`.
+    Supports scalar/addressed extern atomic min when neither argument exposes extents, or tile-region-based atomic min for Buffer/BufferRegion/BufferLoad inputs. If both arguments are plain Buffers their shapes must be structurally equal. If at least one side exposes extents, extents are aligned (missing dimensions are treated as size 1); an assertion is raised if extents cannot be deduced. The optional `memory_order` (one of "relaxed","consume","acquire","release","acq_rel","seq_cst") is honored on CUDA targets by both the direct extern `AtomicMin` path and the tile-region path. HIP and CuteDSL codegen currently ignore it.
 
     Parameters:
         dst (Buffer): Destination buffer/address to apply the atomic min.
@@ -219,7 +219,7 @@ def atomic_add(
     """
     Atomically add `value` into `dst`, returning a handle to the operation.
 
-    Supports scalar/addressed extern atomic add when neither argument exposes extents, or tile-region-based atomic add for Buffer/BufferRegion/BufferLoad inputs. If both arguments are plain Buffers their shapes must be structurally equal. If at least one side exposes extents, extents are aligned (missing dimensions are treated as size 1); an assertion is raised if extents cannot be deduced. The optional `memory_order` (one of "relaxed","consume","acquire","release","acq_rel","seq_cst") is used only for the direct extern `AtomicAdd` path when no extents are available — otherwise the tile-region path ignores `memory_order`.
+    Supports scalar/addressed extern atomic add when neither argument exposes extents, or tile-region-based atomic add for Buffer/BufferRegion/BufferLoad inputs. If both arguments are plain Buffers their shapes must be structurally equal. If at least one side exposes extents, extents are aligned (missing dimensions are treated as size 1); an assertion is raised if extents cannot be deduced. The optional `memory_order` (one of "relaxed","consume","acquire","release","acq_rel","seq_cst") is honored on CUDA targets by both paths: the direct extern `AtomicAdd` path when no extents are available, and the tile-region path (including when it auto-vectorizes to `AtomicAddx2`/`AtomicAddx4`). HIP and CuteDSL codegen currently ignore it.
 
     Parameters:
         dst (Buffer): Destination buffer/address to apply the atomic add.
