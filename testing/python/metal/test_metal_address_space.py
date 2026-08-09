@@ -53,7 +53,9 @@ def lower_to_metal(enable_device_compile: bool) -> str:
             enable_host_codegen=False,
             enable_device_compile=enable_device_compile,
         )
-    return artifact.kernel_source or ""
+    source = artifact.kernel_source
+    assert source, f"empty Metal kernel source (enable_device_compile={enable_device_compile})"
+    return source
 
 
 def test_both_metal_build_paths_use_type_driven_shared_aliases(monkeypatch):
@@ -67,9 +69,11 @@ def test_both_metal_build_paths_use_type_driven_shared_aliases(monkeypatch):
         compiled_source,
     )
     assert len(aliases) >= 2, compiled_source
-    for alias in aliases:
-        assert f"*(threadgroup half2*)({alias} +" in compiled_source
-        assert f"(half*){alias}" not in compiled_source
+    unqualified_pointer_casts = re.findall(
+        r"\((?:half\d*|char|void)\*\)",
+        compiled_source,
+    )
+    assert not unqualified_pointer_casts, compiled_source
 
 
 @tilelang.testing.requires_metal
@@ -81,6 +85,7 @@ def test_shared_alias_address_spaces_execute_on_metal(execution_backend):
         execution_backend=execution_backend,
     )
 
+    torch.manual_seed(0)
     a = torch.randn(M, K, dtype=torch.float16, device="mps")
     b = torch.randn(K, N, dtype=torch.float16, device="mps")
     c = torch.zeros(M, N, dtype=torch.float32, device="mps")

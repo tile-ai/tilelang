@@ -483,14 +483,17 @@ void CodeGenTileLangMetal::VisitStmt_(const BindNode *op) {
 
   const auto *pointer_type = op->var->type_annotation.as<PointerTypeNode>();
   TVM_FFI_ICHECK(pointer_type)
-      << "Metal handle binding requires a typed pointer: " << op->var;
+      << "Metal handle binding requires a typed pointer: " << op->var << " = "
+      << op->value;
   const auto *element_type = pointer_type->element_type.as<PrimTypeNode>();
   TVM_FFI_ICHECK(element_type)
-      << "Metal handle binding requires a primitive pointee type: " << op->var;
+      << "Metal handle binding requires a primitive pointee type: " << op->var
+      << " = " << op->value;
 
   const std::string &storage_scope = pointer_type->storage_scope;
   TVM_FFI_ICHECK(!storage_scope.empty())
-      << "Metal handle binding requires an explicit storage scope: " << op->var;
+      << "Metal handle binding requires an explicit storage scope: " << op->var
+      << " = " << op->value;
 
   alloc_storage_scope_[op->var.get()] = storage_scope;
   RegisterHandleType(op->var.get(), element_type->dtype);
@@ -912,6 +915,9 @@ void CodeGenTileLangMetal::VisitExpr_(const CastNode *op,
 
 std::string
 CodeGenTileLangMetal::GetStorageScopeOf(const PrimExpr &ptr_expr) const {
+  if (const auto *cast = ptr_expr.as<CastNode>()) {
+    return GetStorageScopeOf(cast->value);
+  }
   if (auto *var = ptr_expr.as<VarNode>()) {
     auto it = alloc_storage_scope_.find(var);
     if (it != alloc_storage_scope_.end()) {
@@ -987,7 +993,7 @@ CodeGenTileLangMetal::GetPointeeTypeOf(const PrimExpr &ptr_expr,
       return GetPointeeTypeOf(call->args[1], fallback);
     } else if (call->op.same_as(builtin::reinterpret())) {
       TVM_FFI_ICHECK_EQ(call->args.size(), 1U);
-      return GetPointeeTypeOf(call->args[0], fallback);
+      return fallback;
     }
   }
   return fallback;
