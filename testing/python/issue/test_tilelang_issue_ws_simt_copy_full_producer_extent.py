@@ -54,7 +54,12 @@ def test_ws_keeps_full_producer_extent_for_lowered_simt_copy():
     assert "__launch_bounds__(512, 1)" in src
     assert "if (((int)threadIdx.x) < 256) {" in flat_src
     assert "tl::tl_shuffle_elect<256>()" in src or "if (((int)threadIdx.x) == 0) {" in src
-    assert re.search(r"tl::__sync_thread_partial\(\d+, 256\);", src), src
+    partial_syncs = re.findall(r"tl::__sync_thread_partial\(\d+, 256\);", src)
+    # The SIMT producer writes E_shared before its leader issues the TMA loads;
+    # one producer-local barrier is required to publish those writes through
+    # the TMA completion handoff.  Stage-reuse mbarriers already cover the
+    # loop-carried edge, so a second partial barrier would only add overhead.
+    assert len(partial_syncs) == 1, src
 
 
 if __name__ == "__main__":

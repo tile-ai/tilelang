@@ -139,6 +139,8 @@ public:
     size_t level{0};
     // allocation stmt
     const AllocBufferNode *alloc{nullptr};
+    // Exact lexical attachment requested for a manual warp-role allocation.
+    Optional<AllocBuffer> attach_scope_override;
   };
 
   void VisitStmt_(const AllocBufferNode *op) final {
@@ -152,6 +154,10 @@ public:
     AllocEntry entry;
     entry.alloc = op;
     entry.level = level;
+    if (op->annotations.find(tl::attr::kRoleScopedAlloc) !=
+        op->annotations.end()) {
+      entry.attach_scope_override = GetRef<AllocBuffer>(op);
+    }
     // Since StorageRewrite occurs after StorageFlatten/FlattenBuffer,
     // all allocations specify the extent of physical dimensions, and
     // is 1 for flat memory spaces.
@@ -602,6 +608,10 @@ public:
     if (IsStorageRewriteOpaqueAllocBuffer(op->buffer)) {
       return StmtExprMutator::VisitStmt_(op);
     }
+    if (attach_map_.count(op)) {
+      auto &svec = attach_map_[op];
+      return MakeAttach(svec, Evaluate(0));
+    }
     // AllocBuffer combines allocation and buffer declaration.
     // Storage rewrite may merge this allocation with others.
     if (auto it = alloc_map_.find(op->buffer->data.get());
@@ -958,6 +968,10 @@ private:
           const AllocBufferNode *alloc = entry.alloc;
           auto storage_scope =
               StorageScope::Create(GetPtrStorageScope(GetRef<Var>(var)));
+          const Object *attach_scope =
+              entry.attach_scope_override.defined()
+                  ? entry.attach_scope_override.value().get()
+                  : effective_scope(storage_scope);
           StorageEntry *dst_entry = nullptr;
           // inplace detection
           if (detect_inplace) {
@@ -968,8 +982,7 @@ private:
                 InplaceOpVerifier visitor;
                 StorageEntry *src_entry = alloc_map_.at(src);
                 if (src_entry->scope == storage_scope &&
-                    src_entry->attach_scope_ ==
-                        effective_scope(storage_scope) &&
+                    src_entry->attach_scope_ == attach_scope &&
                     src_entry->elem_type == alloc->buffer->dtype.element_of() &&
                     visitor.Check(s.stmt, var, src)) {
                   int64_t const_size = GetRef<AllocBuffer>(alloc)
@@ -989,10 +1002,9 @@ private:
             }
           }
           if (dst_entry == nullptr) {
-            dst_entry =
-                FindAlloc(alloc, effective_scope(storage_scope), storage_scope,
-                          entry.num_physical_dimensions, enable_reuse,
-                          reuse_require_exact_matched_dtype);
+            dst_entry = FindAlloc(alloc, attach_scope, storage_scope,
+                                  entry.num_physical_dimensions, enable_reuse,
+                                  reuse_require_exact_matched_dtype);
           }
           dst_entry->allocs.emplace_back(alloc);
           alloc_map_[var] = dst_entry;

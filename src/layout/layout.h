@@ -312,6 +312,7 @@ Layout MakeWgmmaSwizzledLayout(const tirx::Buffer &buffer, int continuity = -1,
                                bool k_inner = true);
 Layout MakeTcgen05MmaSwizzledLayout(const tirx::Buffer &buffer,
                                     int continuity = -1, bool k_inner = true);
+Layout MakeSm120Fp4SmemLayout(const tirx::Buffer &buffer);
 Layout MakeFullBankSwizzleLayout(const tirx::Buffer &buffer);
 Layout MakeHalfBankSwizzleLayout(const tirx::Buffer &buffer);
 Layout MakeQuarterBankSwizzleLayout(const tirx::Buffer &buffer);

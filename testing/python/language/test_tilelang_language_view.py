@@ -91,6 +91,23 @@ def test_view_subbyte_dtype_change():
     assert A_viewed.data.same_as(A.data)
 
 
+def test_view_preserves_scope_and_accepts_explicit_strides():
+    A = tvm.tirx.decl_buffer(
+        (4, 8),
+        "float8_e4m3fn",
+        name="A",
+        scope="shared.dyn",
+        strides=[16, 1],
+    )
+    A_viewed = T.view(A, (4, 2), dtype=T.uint32, strides=(8, 1), elem_offset=4)
+    assert str(A_viewed.dtype) == "uint32"
+    assert tuple(int(dim) for dim in A_viewed.shape) == (4, 2)
+    assert tuple(int(stride) for stride in A_viewed.strides) == (8, 1)
+    assert int(A_viewed.elem_offset) == 4
+    assert A_viewed.scope() == "shared.dyn"
+    assert A_viewed.data.same_as(A.data)
+
+
 def fp4_to_uint8_view_test(rows_per_cta=16, mask_k=256):
     @T.prim_func
     def main(

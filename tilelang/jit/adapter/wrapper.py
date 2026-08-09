@@ -14,6 +14,7 @@ from .utils import (
     is_hip_target,
     is_cpu_target,
     get_annotated_mod,
+    is_handle_add_byte_offset_call,
     pythonic_expr,
     parse_function_call_args,
     parse_tma_descriptor_args,
@@ -265,6 +266,18 @@ class TLCUDASourceWrapper:
         # and '//' is not a valid operator in C/C++.
         return pythonic_expr(expr, self._TYPE_MAP, floor_div_op="/")
 
+    def _cxx_handle_expr(self, expr: tvm.tirx.PrimExpr) -> str:
+        if isinstance(expr, tvm.tirx.Var):
+            return expr.name
+        if isinstance(expr, tvm.tirx.Cast):
+            return self._cxx_handle_expr(expr.value)
+        if is_handle_add_byte_offset_call(expr):
+            if len(expr.args) != 2:
+                raise ValueError(f"handle_add_byte_offset expects 2 arguments, got {len(expr.args)}")
+            base, byte_offset = expr.args
+            return f"(reinterpret_cast<char*>({self._cxx_handle_expr(base)}) + {self._pythonic_expr(byte_offset)})"
+        raise ValueError(f"Unsupported TMA global address expression: {expr}")
+
     def _lookup_type(self, dtype: str | Any) -> str:
         key = dtype if isinstance(dtype, str) else str(dtype)
         result = self._TYPE_MAP.get(key)
@@ -406,7 +419,13 @@ class TLCUDASourceWrapper:
             return tma_descriptor_init
 
         # Parse TMA descriptor arguments using the common utility
-        parsed_params = parse_tma_descriptor_args(self.tma_descriptor_args, desc_name_map, desc_name_var_map, self._pythonic_expr)
+        parsed_params = parse_tma_descriptor_args(
+            self.tma_descriptor_args,
+            desc_name_map,
+            desc_name_var_map,
+            self._pythonic_expr,
+            self._cxx_handle_expr,
+        )
 
         # Generate C++ code from parsed parameters
         for params in parsed_params:

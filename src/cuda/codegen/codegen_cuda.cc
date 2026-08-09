@@ -5425,10 +5425,24 @@ void CodeGenTileLangCUDA::VisitExpr_(const SelectNode *op, std::ostream &os) {
 
 void CodeGenTileLangCUDA::VisitExpr_(const ShuffleNode *op,
                                      std::ostream &os) { // NOLINT(*)
+  // CUDA's builtin float2 is an aggregate type rather than a class with a
+  // two-argument constructor.  CodeGenC's generic Shuffle lowering emits
+  // `float2(v0, v1)`, which is rejected by both NVRTC and nvcc.  Use CUDA's
+  // canonical constructor helper for the common concat-two-scalars form.
+  DataType t = op->dtype;
+  if (t.is_float() && t.bits() == 32 && t.lanes() == 2 &&
+      op->vectors.size() == 2 && op->indices.size() == 2 &&
+      op->vectors[0].dtype().lanes() == 1 &&
+      op->vectors[1].dtype().lanes() == 1 && is_const_int(op->indices[0], 0) &&
+      is_const_int(op->indices[1], 1)) {
+    os << "make_float2(" << PrintExpr(op->vectors[0]) << ", "
+       << PrintExpr(op->vectors[1]) << ")";
+    return;
+  }
+
   // For bfloat16x2 / float16x2 construction from two scalar lanes, emit a
   // proper pack intrinsic instead of the generic `uint1(a, b)` produced by
   // the base CodeGenC which is not valid CUDA.
-  DataType t = op->dtype;
   bool is_bf16x2 = t.is_bfloat16() && t.lanes() == 2;
   bool is_fp16x2 = t.is_float16() && t.lanes() == 2;
   if ((is_bf16x2 || is_fp16x2) && op->vectors.size() == 2 &&
