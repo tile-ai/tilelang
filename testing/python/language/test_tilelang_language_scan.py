@@ -60,10 +60,11 @@ def test_fragment_scan_annotations_preserved():
             T.cumsum(sum_frag, annotations={"test.scan": "cumsum"})
             T.cummax(max_frag, annotations={"test.scan": "cummax"})
 
-    script = scan.script()
-    assert script.count("test.scan") == 2
-    assert '"cumsum"' in script
-    assert '"cummax"' in script
+    lines = scan.script().splitlines()
+    cumsum_line = next(line for line in lines if "T.cumsum(" in line)
+    cummax_line = next(line for line in lines if "T.cummax(" in line)
+    assert 'test.scan="cumsum"' in cumsum_line
+    assert 'test.scan="cummax"' in cummax_line
 
 
 def run_cumsum(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32, scope="smem"):

@@ -53,6 +53,9 @@ def _smem_pipeline_kernel(
         with T.Kernel(1, threads=128) as _:
             A_shared = T.alloc_shared((64, 64), T.float16)
             A_frag = T.alloc_fragment((64, 64), T.float16)
+            if kernel_edit == "metadata_attrs":
+                T.use_swizzle(10)
+                T.annotate_min_blocks_per_sm(2)
 
             bodies = {
                 "Producer": [
@@ -1091,6 +1094,20 @@ def test_unannotated_global_store_rejected():
     from every role body."""
     with pytest.raises(Exception, match="carries no ws op id"):
         _materialize(_smem_pipeline_kernel(kernel_edit="unannotated_global_store"))
+
+
+@tilelang.testing.requires_cuda
+def test_kernel_metadata_attrs_preserved():
+    """Kernel-level metadata AttrStmts (T.use_swizzle,
+    T.annotate_min_blocks_per_sm) wrap the statements that follow them:
+    the pass schedules through them and re-wraps the rebuilt body."""
+    func = _materialize(_smem_pipeline_kernel(kernel_edit="metadata_attrs"))
+    script = str(func)
+    swizzle = script.find('"threadblock_swizzle_pattern"')
+    min_blocks = script.find('"tl.min_blocks_per_sm"')
+    branch = script.find("if tx < 32:")
+    assert 0 <= swizzle < min_blocks < branch
+    assert "T.tma_copy(" in script
 
 
 @tilelang.testing.requires_cuda

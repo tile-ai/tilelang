@@ -767,8 +767,18 @@ private:
         RecordOpStmt(scope_idx, id, attr->body, guard);
         return;
       }
-      LOG(FATAL) << "ws_schedule: unexpected AttrStmt '" << attr->attr_key
-                 << "' in kernel body";
+      // Kernel-level metadata (T.use_swizzle,
+      // T.annotate_min_blocks_per_sm, ...) wraps the statements that
+      // follow it. Record the wrapper, keep matching inside it, and
+      // re-wrap the rebuilt kernel body (RebuildBlock).
+      ICHECK(scope.id == kWSRootScopeId && !guard.defined())
+          << "ws_schedule: AttrStmt '" << attr->attr_key
+          << "' must be at the top level of the kernel:\n"
+          << stmt;
+      metadata_attrs_.push_back(GetRef<AttrStmt>(attr));
+      for (const Stmt &sub : BodyStmts(attr->body))
+        MatchOp(scope_idx, sub, guard);
+      return;
     }
 
     // An annotated loop: a serial loop whose id names a scope opens
@@ -1916,6 +1926,13 @@ private:
   // Rebuild the block: versioned buffers, barrier allocations with
   // their init counts, the consumed schedule annotation removed.
   SBlock RebuildBlock(Stmt body) {
+    // Re-wrap the kernel-level metadata attrs consumed during matching.
+    for (auto it = metadata_attrs_.rbegin(); it != metadata_attrs_.rend();
+         ++it) {
+      AttrStmt attr = *it;
+      attr.CopyOnWrite()->body = std::move(body);
+      body = attr;
+    }
     Array<Buffer> allocs;
     for (const Buffer &buf : block_->alloc_buffers) {
       auto vit = versioned_.find(buf);
@@ -1982,6 +1999,8 @@ private:
   std::vector<PipelineSpec> pipelines_;
   std::vector<ScopeSpec> scopes_;
   std::map<String, OpInfo> ops_;
+  // Kernel-level metadata AttrStmts, re-wrapped around the rebuilt body.
+  std::vector<AttrStmt> metadata_attrs_;
   // Per-warpgroup register request (index = warp / 4, 0 = none).
   std::vector<int> warpgroup_nreg_;
   BufferDefMap buffer_pipeline_;
