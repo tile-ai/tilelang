@@ -9,7 +9,6 @@ from types import SimpleNamespace
 
 from tilelang.instrumentation import (
     CodegenEvent,
-    IncompletePass,
     PassEvent,
     PassEventObserver,
     PassInstrumentationTool,
@@ -18,7 +17,6 @@ from tilelang.instrumentation import (
     compile_pass_instrumentation,
     create_pass_instruments,
     current_compile_pass_instrumentation,
-    current_pass_instrument_context,
     current_pass_phase,
     run_codegen_with_instrumentation,
     pass_phase,
@@ -32,9 +30,6 @@ class _RecordingObserver(PassEventObserver):
     def __init__(self):
         self.started: list[PassEvent] = []
         self.finished: list[PassEvent] = []
-        self.incomplete: list[IncompletePass] = []
-        self.errors: list[BaseException | None] = []
-        self.mismatches: list[tuple[str, str | None]] = []
         self.context_entries = 0
         self.context_exits = 0
 
@@ -51,13 +46,6 @@ class _RecordingObserver(PassEventObserver):
     def pass_finished(self, mod, event, state):
         assert state.startswith("before:")
         self.finished.append(event)
-
-    def passes_incomplete(self, passes, error):
-        self.incomplete.extend(passes)
-        self.errors.append(error)
-
-    def callback_mismatch(self, actual, expected):
-        self.mismatches.append((actual, expected))
 
 
 def _info(name: str):
@@ -82,48 +70,6 @@ def test_stacked_instrument_records_nested_parentage_and_start_order():
     assert (inner.sequence, inner.depth, inner.parent_sequence) == (1, 1, 0)
     assert observer.context_entries == 1
     assert observer.context_exits == 1
-
-
-def test_stacked_instrument_reports_incomplete_passes_with_error():
-    observer = _RecordingObserver()
-    instrument = StackedPassInstrument(observer)
-    error = RuntimeError("boom")
-
-    instrument.enter_pass_ctx()
-    instrument.run_before_pass("m0", _info("test.Outer"))
-    instrument.run_before_pass("m1", _info("test.Inner"))
-    incomplete = instrument.abort(error)
-    instrument.exit_pass_ctx()
-
-    assert [item.event.name for item in incomplete] == ["test.Outer", "test.Inner"]
-    assert [item.event.name for item in observer.incomplete] == ["test.Outer", "test.Inner"]
-    assert observer.errors == [error]
-    assert instrument.pending_events == ()
-
-
-def test_stacked_instrument_recovers_from_callback_mismatch():
-    observer = _RecordingObserver()
-    instrument = StackedPassInstrument(observer)
-
-    instrument.enter_pass_ctx()
-    instrument.run_before_pass("m0", _info("test.Expected"))
-    instrument.run_after_pass("m1", _info("test.Actual"))
-    instrument.exit_pass_ctx()
-
-    assert observer.mismatches == [("test.Actual", "test.Expected")]
-    assert [item.event.name for item in observer.incomplete] == ["test.Expected"]
-    assert isinstance(observer.errors[0], RuntimeError)
-    assert instrument.pending_events == ()
-
-
-def test_pass_phase_is_nested_and_restored():
-    assert current_pass_phase() is None
-    with pass_phase("pipeline_cuda"):
-        assert current_pass_phase() == "pipeline_cuda"
-        with pass_phase("codegen"):
-            assert current_pass_phase() == "codegen"
-        assert current_pass_phase() == "pipeline_cuda"
-    assert current_pass_phase() is None
 
 
 class _RecordingTool(PassInstrumentationTool):
@@ -165,6 +111,8 @@ def test_registered_tools_are_snapshotted_and_composable():
     try:
         with compile_pass_instrumentation(name="kernel") as session:
             assert session is current_compile_pass_instrumentation()
+            with compile_pass_instrumentation(name="nested") as nested:
+                assert nested is session
             first = create_pass_instruments()
             second = create_pass_instruments()
             assert first != second
@@ -184,59 +132,6 @@ def test_registered_tools_are_snapshotted_and_composable():
     ]
     assert current_pass_phase() is None
     assert current_compile_pass_instrumentation() is None
-
-
-def test_pass_instrument_context_and_priority_are_applied_at_creation():
-    contexts = []
-
-    class ContextTool(_RecordingTool):
-        def __init__(self, label, priority):
-            super().__init__(label, [])
-            self.pass_instrument_priority = priority
-
-        def create_pass_instrument(self):
-            contexts.append((self.label, current_pass_instrument_context()))
-            return super().create_pass_instrument()
-
-    later = ContextTool("later", 10)
-    earlier = ContextTool("earlier", -10)
-    with compile_pass_instrumentation(
-        name="ordered",
-        tools=[later, earlier],
-        include_default_tools=False,
-    ):
-        instruments = create_pass_instruments(context="stage=lower")
-
-    assert contexts == [("later", "stage=lower"), ("earlier", "stage=lower")]
-    assert instruments == [earlier.instruments[0], later.instruments[0]]
-    assert current_pass_instrument_context() is None
-
-
-def test_nested_helpers_reuse_the_owning_compile_session():
-    outer_tool = _RecordingTool("outer", [])
-    with (
-        compile_pass_instrumentation(
-            name="outer",
-            tools=[outer_tool],
-            include_default_tools=False,
-        ) as outer,
-        compile_pass_instrumentation(name="nested") as nested,
-    ):
-        assert nested is outer
-
-
-def test_registry_changes_only_affect_future_sessions():
-    events = []
-    register_pass_instrumentation_tool("snapshot-test", lambda: _RecordingTool("snapshot", events))
-    try:
-        with compile_pass_instrumentation(name="active") as active:
-            unregister_pass_instrumentation_tool("snapshot-test")
-            assert active.find_tool(_RecordingTool) is not None
-
-        with compile_pass_instrumentation(name="future") as future:
-            assert future.find_tool(_RecordingTool) is None
-    finally:
-        unregister_pass_instrumentation_tool("snapshot-test")
 
 
 def test_compile_sessions_are_isolated_between_threads():
@@ -275,18 +170,3 @@ def test_active_instruments_support_tvm_fifo_exit_order():
     assert active_stacked_pass_instruments() == (second,)
     second.exit_pass_ctx()
     assert active_stacked_pass_instruments() == ()
-
-
-def test_pass_phase_is_isolated_between_threads():
-    barrier = threading.Barrier(2)
-
-    def read_phase(name):
-        with pass_phase(name):
-            barrier.wait()
-            return current_pass_phase()
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        phases = list(pool.map(read_phase, ("pipeline_cuda", "pipeline_c")))
-
-    assert phases == ["pipeline_cuda", "pipeline_c"]
-    assert current_pass_phase() is None

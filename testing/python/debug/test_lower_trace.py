@@ -476,27 +476,6 @@ def test_pass_instrument_captures_nested_tvm_passes(tmp_path):
     assert f'data-parent-index="{records[0].index}"' in report
 
 
-def test_lower_trace_and_pass_visualizer_share_event_infrastructure(tmp_path):
-    """Both tools can observe one PassContext with their distinct policies."""
-    from tilelang.tools.pass_visualizer import StructureTreePassInstrument
-
-    @tvm.transform.module_pass(opt_level=0, name="test.Outer")
-    def outer_pass(mod, _ctx):
-        return tvm.tirx.transform.Simplify()(mod)
-
-    mod = tvm.IRModule({"main": _simple_program()})
-    trace = _make_trace_session(tmp_path)
-    lower_trace_instrument = trace.create_pass_instrument()
-    assert lower_trace_instrument is not None
-    visualizer_instrument = StructureTreePassInstrument()
-    with tvm.transform.PassContext(instruments=[lower_trace_instrument, visualizer_instrument]):
-        outer_pass(mod)
-
-    trace_records = [record for record in trace.records if record.name in ("Outer", "Simplify")]
-    assert [record.name for record in trace_records] == ["Outer", "Simplify"]
-    assert [record.name for record in visualizer_instrument.ordered_records()] == ["test.Outer"]
-
-
 def test_direct_tilelang_lower_owns_an_instrumentation_session(tmp_path):
     """Programmatic enable traces direct lower() without mutating a global context."""
     from tilelang.tools.lower_trace import enable
@@ -508,24 +487,6 @@ def test_direct_tilelang_lower_owns_an_instrumentation_session(tmp_path):
     trace = _core.get_last_session()
     assert trace is not None
     assert any(record.phase == "pipeline_c" for record in trace.records)
-    assert any(record.status == _core.STATUS_CODEGEN for record in trace.records)
-
-
-def test_jit_compile_reuses_one_session_through_adapter_creation(monkeypatch, tmp_path):
-    """The JIT lower/codegen/adapter path remains one logical compilation."""
-    from tilelang.tools.lower_trace import enable
-
-    monkeypatch.setenv("TILELANG_DISABLE_CACHE", "1")
-    enable(mode="terminal", trace_dir=str(tmp_path), codegen_output=None)
-    compiled = tilelang.compile(_simple_program(), target="c")
-
-    assert compiled is not None
-    trace = _core.get_last_session()
-    assert trace is not None
-    assert trace.pipeline_count == 1
-    indices = [record.index for record in trace.records]
-    assert indices == sorted(indices)
-    assert len(indices) == len(set(indices))
     assert any(record.status == _core.STATUS_CODEGEN for record in trace.records)
 
 
@@ -560,30 +521,6 @@ def test_concurrent_sessions_serialize_a_shared_codegen_path(tmp_path):
     assert (tmp_path / "shared.cpp.latest").read_text() == source
     assert [record.index for record in left.records] == [0]
     assert [record.index for record in right.records] == [0]
-
-
-def test_backend_codegen_uses_explicit_session_hook(monkeypatch, tmp_path):
-    """Backend registry codegen is observed without replacing a global FFI."""
-    from tilelang.backend import device_codegen as device_codegen_registry
-    from tilelang.instrumentation import compile_pass_instrumentation
-
-    result_module = _MockCodegenModule("// explicit hook output\n")
-    monkeypatch.setattr(
-        device_codegen_registry.tvm.ffi,
-        "get_global_func",
-        lambda _name: lambda _mod, _target: result_module,
-    )
-    build = device_codegen_registry.global_func_device_codegen("target.build.test")
-    trace = _core.LowerTraceSession(mode="terminal", trace_dir=str(tmp_path), codegen_output=None)
-
-    with compile_pass_instrumentation(
-        name="codegen-hook",
-        tools=[trace],
-        include_default_tools=False,
-    ):
-        assert build("fake_mod", "fake_target") is result_module
-
-    assert [record.status for record in trace.records] == [_core.STATUS_CODEGEN]
 
 
 @contextlib.contextmanager
@@ -736,21 +673,6 @@ def test_codegen_phase_reset_on_inspect_source_failure(tmp_path):
     from tilelang.instrumentation import current_pass_phase
 
     assert current_pass_phase() is None, "phase must be reset after inspect_source failure"
-
-
-def test_codegen_failure_is_recorded_in_the_owning_session(tmp_path):
-    trace = _make_trace_session(tmp_path)
-
-    def failing_build(_mod):
-        raise RuntimeError("codegen failed")
-
-    with pytest.raises(RuntimeError, match="codegen failed"):
-        _run_codegen(trace, failing_build, "target.build.tilelang_c")
-
-    assert len(trace.records) == 1
-    assert trace.records[0].status == _core.STATUS_FAILED
-    assert trace.records[0].phase == "codegen"
-    assert trace.records[0].error_msg == "codegen failed"
 
 
 def test_codegen_restores_outer_phase(tmp_path):

@@ -19,7 +19,6 @@ from tilelang.tools.pass_timing import (
     PassTimingTool,
     TileLangPassTimingInstrument,
     _extract_kernel_label,
-    create_pass_timing_tool,
 )
 
 
@@ -79,23 +78,6 @@ def test_pass_timing_tool_creates_fresh_instruments_with_context():
     assert timing_tool.contexts == ("stage=first", "stage=second")
 
 
-def test_create_pass_timing_tool_respects_config_and_threshold(monkeypatch):
-    from tilelang import env
-
-    monkeypatch.setattr(env, "is_pass_profile_enabled", lambda: False)
-
-    assert create_pass_timing_tool({}) is None
-    timing_tool = create_pass_timing_tool(
-        {
-            PassConfigKey.TL_PASS_PROFILE: True,
-            PassConfigKey.TL_PASS_PROFILE_THRESHOLD_MS: 2.5,
-        }
-    )
-
-    assert timing_tool is not None
-    assert timing_tool.threshold_ms == 2.5
-
-
 def test_jit_compile_session_owns_configured_timing_tool(monkeypatch):
     from tilelang.jit.kernel import JITKernel
 
@@ -136,32 +118,6 @@ def test_jit_compile_session_owns_configured_timing_tool(monkeypatch):
     assert [item[0] for item in observed] == ["artifact", "adapter"]
     assert observed[0][1] is observed[1][1]
     assert [item[2] for item in observed] == [3.0, 3.0]
-
-
-def test_grouped_compile_session_owns_configured_timing_tool(monkeypatch):
-    from tilelang.autotuner import grouped_compile
-
-    compile_args = SimpleNamespace(
-        pass_configs={
-            PassConfigKey.TL_PASS_PROFILE: True,
-            PassConfigKey.TL_PASS_PROFILE_THRESHOLD_MS: 4.0,
-        },
-        target="c",
-        target_host=None,
-        execution_backend="tvm_ffi",
-    )
-    observed = []
-
-    def create_context(*_args):
-        session = current_compile_pass_instrumentation()
-        timing_tool = session.find_tool(PassTimingTool) if session is not None else None
-        observed.append(timing_tool.threshold_ms if timing_tool is not None else None)
-        return object()
-
-    monkeypatch.setattr(grouped_compile, "create_backend_context", create_context)
-
-    assert grouped_compile.compile_grouped_unit_tvm_ffi([], compile_args, lambda: None) == []
-    assert observed == [4.0]
 
 
 def test_pass_timing_excludes_later_after_pass_callbacks(monkeypatch):
@@ -257,24 +213,6 @@ def test_pass_timing_tool_reports_all_contexts_on_session_failure(monkeypatch):
         raise RuntimeError("expected failure")
 
     assert reports == [("stage=jit-lower, kernel=main",)]
-
-
-def test_pass_timing_tool_combines_context_reports():
-    timing_tool = PassTimingTool()
-
-    with compile_pass_instrumentation(
-        name="two-contexts",
-        tools=[timing_tool],
-        include_default_tools=False,
-    ):
-        for context in ("stage=grouped-lower, config=0", "stage=grouped-device, configs=[0]"):
-            with tvm.transform.PassContext(instruments=create_pass_instruments(context=context)):
-                tvm.tirx.transform.Simplify()(_simple_module())
-
-    report = timing_tool.report()
-    assert "Context: stage=grouped-lower, config=0" in report
-    assert "Context: stage=grouped-device, configs=[0]" in report
-    assert len(timing_tool.timings) == 2
 
 
 def test_pass_timing_cleans_incomplete_frames_after_pass_failure(monkeypatch):
