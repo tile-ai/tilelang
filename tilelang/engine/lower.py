@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import nullcontext
 import tilelang.transform
 from tilelang import tvm as tvm
 from tvm import tirx
@@ -11,6 +12,11 @@ from tvm.target import Target
 from tilelang.engine.param import KernelParam, CompiledArtifact
 from tilelang.engine.semantic_check import PreLowerSemanticCheck
 from tilelang.backend.module import BackendContext, create_backend_context
+from tilelang.utils.pass_events import (
+    compile_pass_instrumentation,
+    current_compile_pass_instrumentation,
+    instrument_current_pass_context,
+)
 
 
 def is_cpu_device_backend(target: Target):
@@ -100,7 +106,7 @@ def device_codegen_without_compile(device_mod: tvm.IRModule, context: BackendCon
     return context.codegen_device(device_mod, compile_device=False)
 
 
-def lower_to_host_device_ir(
+def _lower_to_host_device_ir_in_session(
     func_or_mod: tirx.PrimFunc | tvm.IRModule,
     context: BackendContext,
     runtime_only: bool = False,
@@ -131,6 +137,20 @@ def lower_to_host_device_ir(
     return host_mod, device_mod, params, target, target_host
 
 
+def lower_to_host_device_ir(
+    func_or_mod: tirx.PrimFunc | tvm.IRModule,
+    context: BackendContext,
+    runtime_only: bool = False,
+) -> tuple[tvm.IRModule, tvm.IRModule, list[KernelParam] | None, Target, Target]:
+    """Lower to split IR under a per-compilation instrumentation session."""
+
+    has_session = current_compile_pass_instrumentation() is not None
+    with compile_pass_instrumentation(name="lower-to-host-device-ir"):
+        attach_instruments = nullcontext() if has_session else instrument_current_pass_context()
+        with attach_instruments:
+            return _lower_to_host_device_ir_in_session(func_or_mod, context, runtime_only)
+
+
 def lower_with_context(
     func_or_mod: tirx.PrimFunc | tvm.IRModule,
     context: BackendContext,
@@ -148,14 +168,17 @@ def lower_with_context(
     default.
     """
 
-    with tvm.arith.Z3ContextScope():
-        return _lower_with_context_impl(
-            func_or_mod,
-            context,
-            runtime_only=runtime_only,
-            enable_host_codegen=enable_host_codegen,
-            enable_device_compile=enable_device_compile,
-        )
+    has_session = current_compile_pass_instrumentation() is not None
+    with compile_pass_instrumentation(name="lower-with-context"):
+        attach_instruments = nullcontext() if has_session else instrument_current_pass_context()
+        with attach_instruments, tvm.arith.Z3ContextScope():
+            return _lower_with_context_impl(
+                func_or_mod,
+                context,
+                runtime_only=runtime_only,
+                enable_host_codegen=enable_host_codegen,
+                enable_device_compile=enable_device_compile,
+            )
 
 
 def _lower_with_context_impl(
@@ -168,7 +191,7 @@ def _lower_with_context_impl(
 ) -> CompiledArtifact:
     """Implementation executed inside the caller's analyzer context."""
 
-    host_mod, device_mod, params, target, target_host = lower_to_host_device_ir(
+    host_mod, device_mod, params, target, target_host = _lower_to_host_device_ir_in_session(
         func_or_mod,
         context,
         runtime_only=runtime_only,
@@ -217,11 +240,15 @@ def lower(
     default.
     """
 
-    context = create_backend_context(target, target_host, "auto")
-    return lower_with_context(
-        func_or_mod,
-        context,
-        runtime_only=runtime_only,
-        enable_host_codegen=enable_host_codegen,
-        enable_device_compile=enable_device_compile,
-    )
+    has_session = current_compile_pass_instrumentation() is not None
+    with compile_pass_instrumentation(name="lower"):
+        attach_instruments = nullcontext() if has_session else instrument_current_pass_context()
+        with attach_instruments:
+            context = create_backend_context(target, target_host, "auto")
+            return lower_with_context(
+                func_or_mod,
+                context,
+                runtime_only=runtime_only,
+                enable_host_codegen=enable_host_codegen,
+                enable_device_compile=enable_device_compile,
+            )

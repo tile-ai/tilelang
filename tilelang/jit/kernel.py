@@ -25,6 +25,7 @@ from tilelang.contrib.hip_resource_info import pop_recorded, reset_recorder
 from tilelang.jit.diagnostics import jit_phase
 from tilelang.transform import PassConfigKey
 from tilelang.transform.pass_config import normalize_pass_configs
+from tilelang.utils.pass_events import compile_pass_instrumentation
 from tilelang.utils.pass_timing import build_pass_instruments, report_pass_timing_on_exit
 import logging
 import os
@@ -210,6 +211,12 @@ class JITKernel(Generic[_P, _T]):
         return self.torch_function(*args, **kwds)
 
     def _compile_and_create_adapter(self, tilelang_func: PrimFunc, out_idx: list[int]) -> BaseKernelAdapter:
+        """Compile one kernel under a single pass-instrumentation session."""
+        func_name = str(tilelang_func.attrs.get("global_symbol", "<unknown>"))
+        with compile_pass_instrumentation(name=func_name):
+            return self._compile_and_create_adapter_in_session(tilelang_func, out_idx)
+
+    def _compile_and_create_adapter_in_session(self, tilelang_func: PrimFunc, out_idx: list[int]) -> BaseKernelAdapter:
         """
         Compiles the given TileLang PrimFunc using TVM and creates a kernel adapter.
 

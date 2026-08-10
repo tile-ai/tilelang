@@ -8,19 +8,22 @@ import threading
 from types import SimpleNamespace
 
 from tilelang.utils.pass_events import (
+    CodegenEvent,
     IncompletePass,
     PassEvent,
     PassEventObserver,
+    PassInstrumentationTool,
     StackedPassInstrument,
     active_stacked_pass_instruments,
-    create_registered_pass_instruments,
+    compile_pass_instrumentation,
+    create_pass_instruments,
+    current_compile_pass_instrumentation,
     current_pass_phase,
+    instrument_codegen,
     pass_phase,
     pass_pipeline,
-    register_pass_instrument_provider,
-    register_pipeline_scope_provider,
-    unregister_pass_instrument_provider,
-    unregister_pipeline_scope_provider,
+    register_pass_instrumentation_tool,
+    unregister_pass_instrumentation_tool,
 )
 
 
@@ -138,33 +141,115 @@ def test_pass_phase_is_nested_and_restored():
     assert current_pass_phase() is None
 
 
-def test_registered_instruments_and_pipeline_scopes_are_composable():
-    events = []
+class _RecordingTool(PassInstrumentationTool):
+    def __init__(self, label: str, events: list[tuple]):
+        self.label = label
+        self.events = events
+        self.instruments = []
+
+    def create_pass_instrument(self):
+        marker = object()
+        self.instruments.append(marker)
+        return marker
 
     @contextmanager
-    def pipeline_scope(base_phase):
-        with pass_phase(f"run2_{base_phase}"):
-            events.append(("enter", current_pass_phase()))
+    def pipeline_scope(self, base_phase):
+        with pass_phase(f"{self.label}_{base_phase}"):
+            self.events.append(("enter", self.label, current_pass_phase()))
             yield
-            events.append(("exit", current_pass_phase()))
+            self.events.append(("exit", self.label, current_pass_phase()))
 
-    marker = object()
-    register_pass_instrument_provider("test", lambda: marker)
-    register_pipeline_scope_provider("test", pipeline_scope)
+    def run_codegen(self, event: CodegenEvent, next_call):
+        self.events.append(("codegen", self.label, event.name))
+        return next_call()
+
+    def finish(self, error):
+        self.events.append(("finish", self.label, error))
+
+
+def test_registered_tools_are_snapshotted_and_composable():
+    events = []
+    instances = []
+
+    def factory():
+        tool = _RecordingTool("tool", events)
+        instances.append(tool)
+        return tool
+
+    register_pass_instrumentation_tool("test", factory)
     try:
-        assert create_registered_pass_instruments() == [marker]
-        with pass_pipeline("cuda"):
-            events.append(("body", current_pass_phase()))
+        with compile_pass_instrumentation(name="kernel") as session:
+            assert session is current_compile_pass_instrumentation()
+            first = create_pass_instruments()
+            second = create_pass_instruments()
+            assert first != second
+            assert instances[0].instruments == [*first, *second]
+            with pass_pipeline("cuda"):
+                events.append(("body", current_pass_phase()))
+            assert instrument_codegen("target.build.test", "mod", "target", lambda: "result") == "result"
     finally:
-        unregister_pipeline_scope_provider("test")
-        unregister_pass_instrument_provider("test")
+        unregister_pass_instrumentation_tool("test")
 
     assert events == [
-        ("enter", "run2_pipeline_cuda"),
-        ("body", "run2_pipeline_cuda"),
-        ("exit", "run2_pipeline_cuda"),
+        ("enter", "tool", "tool_pipeline_cuda"),
+        ("body", "tool_pipeline_cuda"),
+        ("exit", "tool", "tool_pipeline_cuda"),
+        ("codegen", "tool", "target.build.test"),
+        ("finish", "tool", None),
     ]
     assert current_pass_phase() is None
+    assert current_compile_pass_instrumentation() is None
+
+
+def test_nested_helpers_reuse_the_owning_compile_session():
+    outer_tool = _RecordingTool("outer", [])
+    with (
+        compile_pass_instrumentation(
+            name="outer",
+            tools=[outer_tool],
+            include_default_tools=False,
+        ) as outer,
+        compile_pass_instrumentation(name="nested") as nested,
+    ):
+        assert nested is outer
+
+
+def test_registry_changes_only_affect_future_sessions():
+    events = []
+    register_pass_instrumentation_tool("snapshot-test", lambda: _RecordingTool("snapshot", events))
+    try:
+        with compile_pass_instrumentation(name="active") as active:
+            unregister_pass_instrumentation_tool("snapshot-test")
+            assert active.find_tool(_RecordingTool) is not None
+
+        with compile_pass_instrumentation(name="future") as future:
+            assert future.find_tool(_RecordingTool) is None
+    finally:
+        unregister_pass_instrumentation_tool("snapshot-test")
+
+
+def test_compile_sessions_are_isolated_between_threads():
+    barrier = threading.Barrier(2)
+
+    def compile_one(label):
+        tool = _RecordingTool(label, [])
+        with compile_pass_instrumentation(
+            name=label,
+            tools=[tool],
+            include_default_tools=False,
+        ) as session:
+            marker = create_pass_instruments()[0]
+            barrier.wait()
+            assert current_compile_pass_instrumentation() is session
+            return session, tool, marker
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        left, right = list(pool.map(compile_one, ("left", "right")))
+
+    assert left[0] is not right[0]
+    assert left[1] is not right[1]
+    assert left[2] is not right[2]
+    assert current_compile_pass_instrumentation() is None
 
 
 def test_active_instruments_follow_nested_context_lifecycle():

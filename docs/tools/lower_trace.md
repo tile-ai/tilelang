@@ -18,8 +18,9 @@ the older `TILELANG_PASS_DIFF` tool, it adds:
 - **Edit-and-recompile workflow** — edit the generated codegen source on disk
   and rerun; your edits are injected back into compilation (with conflict
   detection).
-- **Multi-run accumulation** — repeated compilations in the same process are
-  tagged with `run2_`, `run3_`, … prefixes, so you can diff across runs.
+- **Per-compilation isolation** — each kernel compilation owns its records,
+  pass indices, pipeline scopes, and report lifecycle. Concurrent kernels do
+  not write into one shared in-memory trace.
 - **Raw `.tir` dumps** — before/after IR for every pass is written to disk,
   keyed by phase and pass index.
 - **Crash-safe incremental HTML** — the report is flushed after every pass, so
@@ -47,9 +48,10 @@ TL_LOWER_TRACE=both python3 my_script.py
 python3 my_script.py
 ```
 
-TileLang reads this setting when `tilelang` is imported and installs a process-
-wide hook around TVM pass execution. Setting the variable after importing
-TileLang does not enable the hook for that process.
+TileLang reads this setting when `tilelang` is imported and registers a tool
+factory for future compilation sessions. It does not patch TVM's default
+`PassContext` or global codegen functions. To change the setting after import,
+call `enable()` programmatically.
 
 When HTML output is enabled, a stable symlink `<script_dir>/report.html` is
 maintained and points to the latest run's report. Open it directly in a browser:
@@ -76,7 +78,7 @@ A single run produces the following layout under `TL_LOWER_TRACE_DIR`:
     ├── codegen.cpp.original            # baseline snapshot for edit/recompile workflow
     ├── codegen.cpp.latest              # actual codegen output of the most recent run
     └── .run_records/
-        └── run_<YYYYMMDD_HHMMSS_ffffff>_<pid>/
+        └── run_<YYYYMMDD_HHMMSS_ffffff>_<pid>_<unique-id>/
             ├── report.html        # this run's full report
             ├── pipeline_c/             # one subdir per phase (example)
             │   ├── 00_BindTarget_before.tir
@@ -138,7 +140,7 @@ Returns a `list[dict]` with one entry per pass step, each containing `name`,
 `before_script`, `after_script`, `diff_lines`, `insertions`, `deletions`, and
 `changed`.
 
-### Global instrumentation: `enable()` / `disable()` / `reset()`
+### Compilation instrumentation: `enable()` / `disable()`
 
 To trace the *entire* compilation pipeline of a real kernel (what the
 environment variable does, but programmatically):
@@ -162,16 +164,15 @@ vars (or sensible defaults) when omitted.
 | `trace_dir` | Base output directory. | `TL_LOWER_TRACE_DIR`, then `./tmp/lower_trace_dir` |
 | `codegen_output` | Path to save the generated codegen source (enables the edit-recompile workflow). Pass `None` explicitly to suppress. Defaults to `<script_dir>/codegen.cpp` in `html`/`both` mode; `None` (no file) in `terminal` mode unless overridden. |
 
-`enable()` is idempotent — calling it multiple times is safe.
+`enable()` is idempotent — calling it multiple times is safe. Its values are
+snapshotted when a compilation begins, so changing them cannot mutate a kernel
+that is already compiling.
 
-#### When to use `reset()` and `disable()`
-
-Both are **optional** and only needed in specific scenarios:
+#### When to use `disable()`
 
 | Function | When to call | What it does |
 | --- | --- | --- |
-| `reset()` | Compiling **multiple kernels in the same process** and you want each kernel's report to start fresh (instead of accumulating into one combined report) | Clears collected records while keeping instrumentation active. Without it, records accumulate across compilations, tagged with `run2_`, `run3_`, … prefixes — which is desirable if you *want* to compare runs side by side. |
-| `disable()` | You want to **disable tracing for subsequent compilations** within the same process (e.g. a long-running service that only traces the first kernel) | Unregisters the PassInstrument providers, restores the current PassContext and codegen FFIs, and clears all state. |
+| `disable()` | You want to **disable tracing for subsequent compilations** within the same process (e.g. a long-running service that only traces the first kernel) | Unregisters the tool factory. A compilation already in progress keeps its own session and completes normally. |
 
 ```python
 from tilelang.tools import lower_trace as lt
@@ -181,11 +182,7 @@ lt.enable(mode="both")
 # First kernel — traced.
 kernel1 = tilelang.compile(func_a)
 
-# Optional: clear records so kernel2 gets its own clean report.
-# Omit this line if you prefer a combined multi-run report.
-lt.reset()
-
-# Second kernel — traced (into a fresh report if lt.reset() was called).
+# Second kernel — traced into its own session and report automatically.
 kernel2 = tilelang.compile(func_b)
 
 # Optional: disable tracing for any further compilations.
@@ -193,10 +190,9 @@ lt.disable()
 ```
 
 :::{note}
-If neither `lt.reset()` nor `lt.disable()` is called, tracing stays active for
-the lifetime of the process and the final HTML report is generated automatically
-at exit. This is the simplest workflow and is sufficient for most one-off
-scripts.
+If `lt.disable()` is not called, tracing stays active for future compilations.
+Each HTML report is finalized when its owning compilation exits, including when
+that compilation raises.
 :::
 
 ## HTML Report Features
@@ -317,9 +313,10 @@ IR Lower Trace uses three cooperating layers:
 2. **Explicit `PassPipeline.lower` scope** — sets a context-local phase so
    passes in a backend pipeline are grouped under labels such as
    `pipeline_c`. This is a normal pipeline boundary, not a class monkey-patch.
-3. **Codegen FFI** (`target.build.tilelang_cuda`, `…_hip`, `…_c`, `…_llvm`,
-   etc.) — captures the final TIR → source lowering and drives the three-file
-   edit-recompile workflow described above.
+3. **Explicit backend codegen hook** — TileLang's device/host codegen registry
+   routes each `target.build.*` call through the active compile session. This
+   captures final TIR → source lowering and drives the three-file
+   edit-recompile workflow without replacing a process-global FFI.
 
 Pass records are appended **at runtime** (not pre-registered), so conditional
 passes that are skipped at runtime — e.g. `LetInline` when
@@ -327,18 +324,18 @@ passes that are skipped at runtime — e.g. `LetInline` when
 phantom/skipped slots. The HTML report is flushed **incrementally** after every
 pass (O(n) total cost), so partial results survive even a crash or `SIGKILL`.
 
-When the same process compiles multiple kernels, each `PassPipeline.lower`
-invocation increments a run counter and tags phases with a `run2_`, `run3_`, …
-prefix; all records accumulate into a single report so you can compare runs side
-by side.
+When one logical compilation uses multiple PassContexts (for example grouped
+lowering followed by device and host codegen), they obtain fresh callback
+objects from the same compile session. Their records share one monotonic index
+inside that session. A different compilation starts from index zero with a new
+record list.
 
 :::{note}
-`enable()` injects an instrument into TileLang-managed PassContexts and the
-PassContext that is current when tracing is enabled. If application code later
-creates an unrelated TVM PassContext manually, add
-`lt.create_pass_instrument()` to that context's `instruments` list. Capturing
-IR and, in HTML mode, rewriting the report after every pass adds debugging
-overhead. Leave the feature disabled for normal builds and benchmarks.
+`enable()` affects TileLang-managed compilation sessions only; it never mutates
+the PassContext that happens to be current at enable time. For a standalone TVM
+PassContext, `lt.create_pass_instrument()` remains available for manual use.
+Capturing IR and, in HTML mode, rewriting the report after every pass adds
+debugging overhead. Leave the feature disabled for normal builds and benchmarks.
 :::
 
 ## Choosing an Output Mode

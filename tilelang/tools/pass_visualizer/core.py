@@ -30,6 +30,7 @@ from tilelang.utils.pass_events import (
     IncompletePass,
     PassEvent,
     PassEventObserver,
+    PassInstrumentationTool,
     StackedPassInstrument,
 )
 
@@ -423,6 +424,17 @@ class StructureTreePassInstrument(StackedPassInstrument):
     def ordered_records(self) -> list[PassStructureRecord]:
         """Return completed top-level pass records in execution order."""
         return sorted(self.records, key=lambda record: record.sequence)
+
+
+class StructureTreePassTool(PassInstrumentationTool):
+    """Per-viewer tool that creates its PassContext-local capture instrument."""
+
+    def __init__(self) -> None:
+        self.instrument: StructureTreePassInstrument | None = None
+
+    def create_pass_instrument(self) -> StructureTreePassInstrument:
+        self.instrument = StructureTreePassInstrument()
+        return self.instrument
 
 
 def _parse_kv(pairs: list[str]) -> dict[str, object]:

@@ -21,12 +21,23 @@ from tilelang.engine.param import CompiledArtifact
 from tilelang.jit.adapter import TVMFFIKernelAdapter
 from tilelang.jit.kernel import JITKernel
 from tilelang.transform import PassConfigKey
+from tilelang.utils.pass_events import compile_pass_instrumentation
 from tilelang.utils.pass_timing import build_pass_instruments, report_pass_timing_on_exit
 
 CompileUnitResult = tuple[int, dict[str, Any], JITKernel | None, Exception | None]
 
 
 def compile_grouped_unit_tvm_ffi(
+    unit_items: list[tuple[int, dict[str, Any]]],
+    compile_args: CompileArgs,
+    elaborate_func: Callable[..., PrimFunc],
+) -> list[CompileUnitResult]:
+    """Compile one grouped unit under one shared instrumentation session."""
+    with compile_pass_instrumentation(name="grouped-tvm-ffi"):
+        return _compile_grouped_unit_tvm_ffi_in_session(unit_items, compile_args, elaborate_func)
+
+
+def _compile_grouped_unit_tvm_ffi_in_session(
     unit_items: list[tuple[int, dict[str, Any]]],
     compile_args: CompileArgs,
     elaborate_func: Callable[..., PrimFunc],
