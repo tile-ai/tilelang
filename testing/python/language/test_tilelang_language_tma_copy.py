@@ -635,9 +635,8 @@ def cluster_multicast_tma_copy_kernel(iters, slots, tile=64):
                 T.tma_copy(A[k, :, :], a_shared[slot, :, :], barrier=mbars[slot], cluster_mask=0b11)
                 T.mbarrier_arrive(mbarrier=mbars[slot])
                 T.mbarrier_wait_parity(mbarrier=mbars[slot], parity=parity)
+                # Plain T.copy already emits tma_store + arrive + wait.
                 T.copy(a_shared[slot, :, :], B[pid, k, :, :])
-                T.tma_store_arrive()
-                T.tma_store_wait(0)
 
     return main
 
