@@ -1,4 +1,4 @@
-"""Per-pass timing instrumentation for tilelang compilation pipelines.
+"""Pass-timing tool for TileLang compilation pipelines.
 
 Records inclusive and self wall-clock duration for each pass using
 ``time.monotonic()``. Data persists after PassContext exit for
@@ -12,11 +12,15 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from tvm.ir import _ffi_instrument_api
+
+from tilelang.instrumentation import (
+    PassInstrumentationTool,
+    current_pass_instrument_context,
+)
 
 logger = logging.getLogger("tilelang.pass_timing")
 
@@ -271,24 +275,84 @@ class TileLangPassTimingInstrument:
         logger.info("\n%s", self.report(context=context))
 
 
-def build_pass_instruments(
-    base_instruments: Sequence[object], threshold_ms: float | None
-) -> tuple[list[object], TileLangPassTimingInstrument | None]:
-    """Build instruments with timing first so later after-pass callbacks are excluded."""
-    instruments = list(base_instruments)
-    if threshold_ms is None:
-        return instruments, None
-
-    timing_instrument = TileLangPassTimingInstrument(threshold_ms=threshold_ms)
-    instruments.insert(0, timing_instrument.instrument)
-    return instruments, timing_instrument
+@dataclass(frozen=True)
+class _PassTimingRun:
+    context: str | None
+    timing: TileLangPassTimingInstrument
 
 
-@contextmanager
-def report_pass_timing_on_exit(timing_instrument: TileLangPassTimingInstrument | None, context: str) -> Iterator[None]:
-    """Emit a timing report after PassContext exits, including on failure."""
-    try:
-        yield
-    finally:
-        if timing_instrument is not None:
-            timing_instrument.print_report(context=context)
+class PassTimingTool(PassInstrumentationTool):
+    """Per-compile owner of timing callbacks and their combined report."""
+
+    # Timing starts before, and finishes before, later instrument callbacks so
+    # their reporting/snapshot overhead is excluded from pass duration.
+    pass_instrument_priority = -100
+
+    def __init__(self, threshold_ms: float = 0.0):
+        self.threshold_ms = threshold_ms
+        self._runs: list[_PassTimingRun] = []
+        self._finished = False
+
+    def create_pass_instrument(self) -> object:
+        timing = TileLangPassTimingInstrument(threshold_ms=self.threshold_ms)
+        self._runs.append(
+            _PassTimingRun(
+                context=current_pass_instrument_context(),
+                timing=timing,
+            )
+        )
+        return timing.instrument
+
+    @property
+    def timings(self) -> tuple[TileLangPassTimingInstrument, ...]:
+        return tuple(run.timing for run in self._runs)
+
+    @property
+    def contexts(self) -> tuple[str | None, ...]:
+        return tuple(run.context for run in self._runs)
+
+    @property
+    def records(self) -> list[PassTimingRecord]:
+        return [record for run in self._runs for record in run.timing.records]
+
+    def report(self) -> str:
+        """Generate one compile report containing one section per PassContext."""
+        return "\n\n".join(run.timing.report(context=run.context) for run in self._runs)
+
+    def print_report(self) -> None:
+        """Print all PassContext timing sections in one logger call."""
+        if self._runs:
+            logger.info("\n%s", self.report())
+
+    def finish(self, error: BaseException | None) -> None:
+        if self._finished:
+            return
+        self._finished = True
+        self.print_report()
+
+
+def create_pass_timing_tool(
+    pass_configs: Mapping[object, object] | None,
+) -> PassTimingTool | None:
+    """Create the per-compile timing tool when config or environment enables it."""
+    from tilelang import env
+    from tilelang.env import resolve_pass_profile_threshold_ms
+    from tilelang.transform import PassConfigKey
+
+    pass_configs = pass_configs or {}
+    if not (pass_configs.get(PassConfigKey.TL_PASS_PROFILE) or env.is_pass_profile_enabled()):
+        return None
+    threshold_ms = resolve_pass_profile_threshold_ms(
+        pass_configs,
+        PassConfigKey.TL_PASS_PROFILE_THRESHOLD_MS,
+        env.get_pass_profile_threshold_ms,
+    )
+    return PassTimingTool(threshold_ms=threshold_ms)
+
+
+__all__ = [
+    "PassTimingRecord",
+    "PassTimingTool",
+    "TileLangPassTimingInstrument",
+    "create_pass_timing_tool",
+]

@@ -15,6 +15,7 @@ from .core import (
     kernel_to_tir,  # noqa: F401
     PassStructureRecord,  # noqa: F401
     StructureTreePassInstrument,  # noqa: F401
+    StructureTreePassTool,  # noqa: F401
 )
 
 # NOTE: viewer (build_pass_data / emit_html / emit_txt) is intentionally NOT

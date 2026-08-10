@@ -60,6 +60,9 @@ This writes `gemm_relu_passes.html` (the interactive browser) and a sibling
   primitives, and lowered hardware intrinsics (`ptx_mma`, `tma_load`, …) are
   each colored distinctly, so you can follow a `T.copy` as it lowers into
   TMA/PTX intrinsics.
+- **Shared instrumentation session**: the viewer uses TileLang's per-compile
+  tool lifecycle while explicitly excluding globally enabled tools, so its
+  report remains independent from LowerTrace.
 - **Real pass metadata**: stage names and ordering come from `PassInstrument`;
   nested implementation passes are folded into their top-level pipeline stage
   to keep the browser timeline linear.

@@ -26,6 +26,13 @@ from tvm.target import Target
 
 from tilelang.backend import create_backend_context
 from tilelang.jit import JITImpl
+from tilelang.instrumentation import (
+    IncompletePass,
+    PassEvent,
+    PassEventObserver,
+    PassInstrumentationTool,
+    StackedPassInstrument,
+)
 
 logger = logging.getLogger("tilelang.pass_visualizer")
 
@@ -354,92 +361,80 @@ class PassStructureRecord:
         return self.before_lines != self.after_lines
 
 
-@dataclass
-class _ActivePass:
-    """One active PassInstrument callback frame, including nested passes."""
-
-    name: str
-    sequence: int | None
-    before_lines: list[str] | None
-
-
-@tvm.ir.instrument.pass_instrument
-class StructureTreePassInstrument:
-    """Capture structure trees around the real top-level passes in a pipeline.
-
-    Some top-level TileLang passes invoke nested TVM passes internally.  Those
-    callbacks are tracked so before/after events remain correctly paired, but
-    only depth-zero passes become browser stages.  This preserves the viewer's
-    linear pipeline semantics instead of duplicating a parent's changes in its
-    nested implementation details.
-    """
+class _StructureTreeObserver(PassEventObserver):
+    """Pass-event consumer that snapshots the visualizer's structure tree."""
 
     def __init__(self):
         self.records: list[PassStructureRecord] = []
         self.input_lines: list[str] | None = None
         self.incomplete_passes: list[str] = []
-        self._stack: list[_ActivePass] = []
-        self._next_sequence = 0
 
-    def enter_pass_ctx(self):
+    def enter_pass_context(self):
         self.records.clear()
         self.input_lines = None
         self.incomplete_passes.clear()
-        self._stack.clear()
-        self._next_sequence = 0
 
-    def exit_pass_ctx(self):
-        # A failing pass has no run_after_pass callback. Preserve its name for
-        # diagnostics, then clear the stack so this instrument can be reused.
-        if self._stack:
-            self.incomplete_passes.extend(frame.name for frame in self._stack)
-            self._stack.clear()
+    def pass_started(self, mod: tvm.IRModule, event: PassEvent) -> list[str]:
+        before_lines = capture_structure(mod)
+        if self.input_lines is None:
+            self.input_lines = before_lines
+        return before_lines
 
-    def run_before_pass(self, mod: tvm.IRModule, info):
-        name = str(info.name)
-        is_top_level = not self._stack
-        if is_top_level:
-            before_lines = capture_structure(mod)
-            if self.input_lines is None:
-                self.input_lines = before_lines
-            frame = _ActivePass(
-                name=name,
-                sequence=self._next_sequence,
-                before_lines=before_lines,
-            )
-            self._next_sequence += 1
-        else:
-            frame = _ActivePass(name=name, sequence=None, before_lines=None)
-        self._stack.append(frame)
-
-    def run_after_pass(self, mod: tvm.IRModule, info):
-        name = str(info.name)
-        if not self._stack:
-            logger.warning("Ignoring unmatched after-pass callback for %s", name)
-            return
-
-        frame = self._stack.pop()
-        if frame.name != name:
-            logger.warning("Ignoring mismatched after-pass callback for %s (expected %s)", name, frame.name)
-            self._stack.clear()
-            return
-
-        if frame.sequence is None:
-            return
-
-        assert frame.before_lines is not None
+    def pass_finished(self, mod: tvm.IRModule, event: PassEvent, before_lines: list[str]):
         self.records.append(
             PassStructureRecord(
-                name=name,
-                sequence=frame.sequence,
-                before_lines=frame.before_lines,
+                name=event.name,
+                sequence=event.sequence,
+                before_lines=before_lines,
                 after_lines=capture_structure(mod),
             )
         )
 
+    def passes_incomplete(self, passes: list[IncompletePass], error: BaseException | None):
+        self.incomplete_passes.extend(item.name for item in passes)
+
+    def callback_mismatch(self, actual: str, expected: str | None):
+        logger.warning("Ignoring mismatched after-pass callback for %s (expected %s)", actual, expected)
+
+
+class StructureTreePassInstrument(StackedPassInstrument):
+    """Capture structure trees around the real top-level passes in a pipeline.
+
+    Some top-level TileLang passes invoke nested TVM passes internally.  The
+    shared stack instrument tracks every callback for pairing, while this
+    consumer snapshots only depth-zero passes so the browser remains linear.
+    """
+
+    def __init__(self):
+        self._structure_observer = _StructureTreeObserver()
+        super().__init__(self._structure_observer, capture_nested=False)
+
+    @property
+    def records(self) -> list[PassStructureRecord]:
+        return self._structure_observer.records
+
+    @property
+    def input_lines(self) -> list[str] | None:
+        return self._structure_observer.input_lines
+
+    @property
+    def incomplete_passes(self) -> list[str]:
+        return self._structure_observer.incomplete_passes
+
     def ordered_records(self) -> list[PassStructureRecord]:
         """Return completed top-level pass records in execution order."""
         return sorted(self.records, key=lambda record: record.sequence)
+
+
+class StructureTreePassTool(PassInstrumentationTool):
+    """Per-viewer tool that creates its PassContext-local capture instrument."""
+
+    def __init__(self) -> None:
+        self.instrument: StructureTreePassInstrument | None = None
+
+    def create_pass_instrument(self) -> StructureTreePassInstrument:
+        self.instrument = StructureTreePassInstrument()
+        return self.instrument
 
 
 def _parse_kv(pairs: list[str]) -> dict[str, object]:
