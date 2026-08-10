@@ -32,7 +32,7 @@ from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
 from tilelang.engine.semantic_check import PreLowerSemanticCheck
 from tilelang.jit import JITImpl
 from tilelang.transform.pass_config import normalize_pass_configs
-from tilelang.utils.pass_events import compile_pass_instrumentation, create_pass_instruments
+from tilelang.instrumentation import compile_pass_instrumentation, create_pass_instruments
 
 from . import core as M
 

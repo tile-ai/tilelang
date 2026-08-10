@@ -26,7 +26,7 @@ from tvm.target import Target
 
 from tilelang.backend import create_backend_context
 from tilelang.jit import JITImpl
-from tilelang.utils.pass_events import (
+from tilelang.instrumentation import (
     IncompletePass,
     PassEvent,
     PassEventObserver,

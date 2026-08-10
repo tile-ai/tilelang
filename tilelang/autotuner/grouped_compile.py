@@ -19,7 +19,7 @@ from tilelang.engine.param import CompiledArtifact
 from tilelang.jit.adapter import TVMFFIKernelAdapter
 from tilelang.jit.kernel import JITKernel
 from tilelang.transform import PassConfigKey
-from tilelang.utils.pass_events import compile_pass_instrumentation, create_pass_instruments
+from tilelang.instrumentation import compile_pass_instrumentation, create_pass_instruments
 from tilelang.tools.pass_timing import create_pass_timing_tool
 
 CompileUnitResult = tuple[int, dict[str, Any], JITKernel | None, Exception | None]

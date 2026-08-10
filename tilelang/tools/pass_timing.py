@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 from tvm.ir import _ffi_instrument_api
 
-from tilelang.utils.pass_events import (
+from tilelang.instrumentation import (
     PassInstrumentationTool,
     current_pass_instrument_context,
 )

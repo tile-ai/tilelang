@@ -24,7 +24,7 @@ from tilelang.contrib.hip_resource_info import pop_recorded, reset_recorder
 from tilelang.jit.diagnostics import jit_phase
 from tilelang.transform import PassConfigKey
 from tilelang.transform.pass_config import normalize_pass_configs
-from tilelang.utils.pass_events import compile_pass_instrumentation, create_pass_instruments
+from tilelang.instrumentation import compile_pass_instrumentation, create_pass_instruments
 from tilelang.tools.pass_timing import create_pass_timing_tool
 import logging
 import os

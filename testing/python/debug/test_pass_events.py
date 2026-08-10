@@ -7,7 +7,7 @@ from contextlib import contextmanager
 import threading
 from types import SimpleNamespace
 
-from tilelang.utils.pass_events import (
+from tilelang.instrumentation import (
     CodegenEvent,
     IncompletePass,
     PassEvent,

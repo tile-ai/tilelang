@@ -25,7 +25,7 @@ class PassPipeline:
             # Full compiler entry points own instrumentation sessions.  This
             # boundary only identifies the active backend pipeline within the
             # caller's session.
-            from tilelang.utils.pass_events import pass_pipeline
+            from tilelang.instrumentation import pass_pipeline
 
             with pass_pipeline(self.name):
                 return self._lower(mod, target)

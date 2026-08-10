@@ -175,7 +175,7 @@ def test_multiple_pipelines_share_one_compile_session(monkeypatch, tmp_path):
     from tilelang.tools.lower_trace import enable, disable
     from tilelang.tools.lower_trace import core as _core
     from tilelang.backend import create_backend_context
-    from tilelang.utils.pass_events import compile_pass_instrumentation, create_pass_instruments
+    from tilelang.instrumentation import compile_pass_instrumentation, create_pass_instruments
     import tilelang.language as T
 
     monkeypatch.setenv("TL_LOWER_TRACE", "both")
@@ -441,7 +441,7 @@ def _make_trace_session(tmp_path, mode="terminal"):
 
 def _run_codegen(session, build, ffi_name, mod="fake_mod", target=None):
     """Exercise the same explicit codegen middleware used by backend registries."""
-    from tilelang.utils.pass_events import CodegenEvent
+    from tilelang.instrumentation import CodegenEvent
 
     return session.run_codegen(
         CodegenEvent(name=ffi_name, mod=mod, target=target),
@@ -565,7 +565,7 @@ def test_concurrent_sessions_serialize_a_shared_codegen_path(tmp_path):
 def test_backend_codegen_uses_explicit_session_hook(monkeypatch, tmp_path):
     """Backend registry codegen is observed without replacing a global FFI."""
     from tilelang.backend import device_codegen as device_codegen_registry
-    from tilelang.utils.pass_events import compile_pass_instrumentation
+    from tilelang.instrumentation import compile_pass_instrumentation
 
     result_module = _MockCodegenModule("// explicit hook output\n")
     monkeypatch.setattr(
@@ -733,7 +733,7 @@ def test_codegen_phase_reset_on_inspect_source_failure(tmp_path):
     trace = _make_trace_session(tmp_path)
     _run_codegen(trace, mock_build, "target.build.tilelang_cuda_without_compile")
 
-    from tilelang.utils.pass_events import current_pass_phase
+    from tilelang.instrumentation import current_pass_phase
 
     assert current_pass_phase() is None, "phase must be reset after inspect_source failure"
 
@@ -755,7 +755,7 @@ def test_codegen_failure_is_recorded_in_the_owning_session(tmp_path):
 
 def test_codegen_restores_outer_phase(tmp_path):
     """codegen nested in an active pipeline phase must restore it, not clear to None."""
-    from tilelang.utils.pass_events import current_pass_phase, pass_phase
+    from tilelang.instrumentation import current_pass_phase, pass_phase
 
     source_v1 = "// generated kernel v1\n"
     trace = _make_trace_session(tmp_path)

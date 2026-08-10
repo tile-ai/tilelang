@@ -303,6 +303,11 @@ tilelang.compile(..., execution_backend="cython")
 
 ## How It Works
 
+Instrumentation sessions are owned by complete compiler entry points such as
+`tilelang.compile()`, `tilelang.lower()`, and grouped compilation. Lower-level
+pipeline and codegen components contribute events to the active session but do
+not create standalone sessions themselves.
+
 IR Lower Trace uses three cooperating layers:
 
 1. **TVM `PassInstrument`** — before/after callbacks capture `str(mod)`,
@@ -310,13 +315,16 @@ IR Lower Trace uses three cooperating layers:
    callback stack records depth and parent relationships, including passes
    invoked internally by another TVM pass. Passes outside a pipeline window
    are tagged with the `unscoped` phase.
-2. **Explicit `PassPipeline.lower` scope** — sets a context-local phase so
-   passes in a backend pipeline are grouped under labels such as
-   `pipeline_c`. This is a normal pipeline boundary, not a class monkey-patch.
+2. **Explicit `PassPipeline.lower` scope** — contributes a context-local phase
+   to the caller-owned session so passes in a backend pipeline are grouped
+   under labels such as `pipeline_c`. The pipeline does not create or finalize
+   the compile session. This is a normal pipeline boundary, not a class
+   monkey-patch.
 3. **Explicit backend codegen hook** — TileLang's device/host codegen registry
    routes each `target.build.*` call through the active compile session. This
    captures final TIR → source lowering and drives the three-file
-   edit-recompile workflow without replacing a process-global FFI.
+   edit-recompile workflow without replacing a process-global FFI. When no
+   session is active, the registry invokes the underlying codegen directly.
 
 Pass records are appended **at runtime** (not pre-registered), so conditional
 passes that are skipped at runtime — e.g. `LetInline` when

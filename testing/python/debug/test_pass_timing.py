@@ -9,7 +9,7 @@ import pytest
 import tilelang.language as T
 from tilelang import tvm
 from tilelang.transform import PassConfigKey
-from tilelang.utils.pass_events import (
+from tilelang.instrumentation import (
     compile_pass_instrumentation,
     create_pass_instruments,
     current_compile_pass_instrumentation,
@@ -55,15 +55,6 @@ def test_pass_timing_wrapper_can_be_collected():
 
     assert timing_ref() is None
     assert state_ref() is None
-
-
-def test_legacy_utils_pass_timing_path_reexports_tool():
-    from tilelang.utils import pass_timing as legacy_pass_timing
-
-    assert legacy_pass_timing.PassTimingRecord is PassTimingRecord
-    assert legacy_pass_timing.PassTimingTool is PassTimingTool
-    assert legacy_pass_timing.TileLangPassTimingInstrument is TileLangPassTimingInstrument
-    assert legacy_pass_timing.create_pass_timing_tool is create_pass_timing_tool
 
 
 def test_pass_timing_tool_creates_fresh_instruments_with_context():

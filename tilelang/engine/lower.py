@@ -12,7 +12,7 @@ from tvm.target import Target
 from tilelang.engine.param import KernelParam, CompiledArtifact
 from tilelang.engine.semantic_check import PreLowerSemanticCheck
 from tilelang.backend.module import BackendContext, create_backend_context
-from tilelang.utils.pass_events import (
+from tilelang.instrumentation import (
     compile_pass_instrumentation,
     current_compile_pass_instrumentation,
     instrument_current_pass_context,

@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from tilelang.env import env
-from tilelang.utils.pass_events import (
+from tilelang.instrumentation import (
     CodegenEvent,
     IncompletePass,
     PassEvent,
