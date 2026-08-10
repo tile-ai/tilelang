@@ -106,37 +106,6 @@ def device_codegen_without_compile(device_mod: tvm.IRModule, context: BackendCon
     return context.codegen_device(device_mod, compile_device=False)
 
 
-def _lower_to_host_device_ir_in_session(
-    func_or_mod: tirx.PrimFunc | tvm.IRModule,
-    context: BackendContext,
-    runtime_only: bool = False,
-) -> tuple[tvm.IRModule, tvm.IRModule, list[KernelParam] | None, Target, Target]:
-    """Lower input TIR with an already resolved backend context."""
-
-    mod = func_or_mod
-    params = None
-    if isinstance(func_or_mod, tirx.PrimFunc):
-        func = func_or_mod
-        params = extrac_params(func) if not runtime_only else None
-        mod = tvm.IRModule({func.attrs["global_symbol"]: func})
-
-    target = context.target
-    target_host = context.target_host
-
-    _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))
-    _is_device_call = get_device_call(is_device_c=is_cpu_device_backend(target))
-
-    # Run backend-independent semantic checks before target-specific lowering.
-    PreLowerSemanticCheck(mod)
-
-    mod = context.lower(mod)
-
-    host_mod = tirx.transform.Filter(_is_host_call)(mod)
-    device_mod = tirx.transform.Filter(_is_device_call)(mod)
-
-    return host_mod, device_mod, params, target, target_host
-
-
 def lower_to_host_device_ir(
     func_or_mod: tirx.PrimFunc | tvm.IRModule,
     context: BackendContext,
@@ -148,7 +117,28 @@ def lower_to_host_device_ir(
     with compile_pass_instrumentation(name="lower-to-host-device-ir"):
         attach_instruments = nullcontext() if has_session else instrument_current_pass_context()
         with attach_instruments:
-            return _lower_to_host_device_ir_in_session(func_or_mod, context, runtime_only)
+            mod = func_or_mod
+            params = None
+            if isinstance(func_or_mod, tirx.PrimFunc):
+                func = func_or_mod
+                params = extrac_params(func) if not runtime_only else None
+                mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+
+            target = context.target
+            target_host = context.target_host
+
+            _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))
+            _is_device_call = get_device_call(is_device_c=is_cpu_device_backend(target))
+
+            # Run backend-independent semantic checks before target-specific lowering.
+            PreLowerSemanticCheck(mod)
+
+            mod = context.lower(mod)
+
+            host_mod = tirx.transform.Filter(_is_host_call)(mod)
+            device_mod = tirx.transform.Filter(_is_device_call)(mod)
+
+            return host_mod, device_mod, params, target, target_host
 
 
 def lower_with_context(
@@ -191,7 +181,7 @@ def _lower_with_context_impl(
 ) -> CompiledArtifact:
     """Implementation executed inside the caller's analyzer context."""
 
-    host_mod, device_mod, params, target, target_host = _lower_to_host_device_ir_in_session(
+    host_mod, device_mod, params, target, target_host = lower_to_host_device_ir(
         func_or_mod,
         context,
         runtime_only=runtime_only,

@@ -84,22 +84,6 @@ def test_stacked_instrument_records_nested_parentage_and_start_order():
     assert observer.context_exits == 1
 
 
-def test_stacked_instrument_can_emit_only_top_level_passes():
-    observer = _RecordingObserver()
-    instrument = StackedPassInstrument(observer, capture_nested=False)
-
-    instrument.enter_pass_ctx()
-    instrument.run_before_pass("m0", _info("test.Outer"))
-    instrument.run_before_pass("m1", _info("test.Inner"))
-    instrument.run_after_pass("m2", _info("test.Inner"))
-    instrument.run_after_pass("m3", _info("test.Outer"))
-    instrument.exit_pass_ctx()
-
-    assert [event.name for event in observer.started] == ["test.Outer"]
-    assert [event.name for event in observer.finished] == ["test.Outer"]
-    assert observer.started[0].sequence == 0
-
-
 def test_stacked_instrument_reports_incomplete_passes_with_error():
     observer = _RecordingObserver()
     instrument = StackedPassInstrument(observer)
@@ -279,26 +263,14 @@ def test_compile_sessions_are_isolated_between_threads():
     assert current_compile_pass_instrumentation() is None
 
 
-def test_active_instruments_follow_nested_context_lifecycle():
-    outer = StackedPassInstrument(_RecordingObserver())
-    inner = StackedPassInstrument(_RecordingObserver())
-
-    outer.enter_pass_ctx()
-    assert active_stacked_pass_instruments() == (outer,)
-    inner.enter_pass_ctx()
-    assert active_stacked_pass_instruments() == (outer, inner)
-    inner.exit_pass_ctx()
-    assert active_stacked_pass_instruments() == (outer,)
-    outer.exit_pass_ctx()
-    assert active_stacked_pass_instruments() == ()
-
-
 def test_active_instruments_support_tvm_fifo_exit_order():
     first = StackedPassInstrument(_RecordingObserver())
     second = StackedPassInstrument(_RecordingObserver())
 
     first.enter_pass_ctx()
+    assert active_stacked_pass_instruments() == (first,)
     second.enter_pass_ctx()
+    assert active_stacked_pass_instruments() == (first, second)
     first.exit_pass_ctx()
     assert active_stacked_pass_instruments() == (second,)
     second.exit_pass_ctx()

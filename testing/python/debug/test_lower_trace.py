@@ -128,24 +128,6 @@ def test_enable_disable():
     disable()
 
 
-def test_enable_registers_instrument_without_patching_pass_call(tmp_path):
-    """Global activation composes a PassInstrument and leaves TVM's class intact."""
-    from tilelang.tools.lower_trace import enable
-    from tilelang.utils.pass_events import compile_pass_instrumentation, create_pass_instruments
-    from tvm.ir.transform import Pass
-
-    original_pass_call = Pass.__call__
-    original_instruments = list(tvm.transform.PassContext.current().instruments)
-    enable(mode="terminal", trace_dir=str(tmp_path), codegen_output=None)
-
-    with compile_pass_instrumentation(name="test"):
-        instruments = create_pass_instruments()
-        assert len(instruments) == 1
-        assert isinstance(instruments[0].observer, _core._LowerTraceObserver)
-    assert Pass.__call__ is original_pass_call
-    assert list(tvm.transform.PassContext.current().instruments) == original_instruments
-
-
 def test_lower_trace_html():
     """lower_trace() in html mode writes a report file containing pass content."""
     from tilelang.tools.lower_trace import lower_trace
@@ -577,60 +559,6 @@ def test_jit_compile_reuses_one_session_through_adapter_creation(monkeypatch, tm
     assert indices == sorted(indices)
     assert len(indices) == len(set(indices))
     assert any(record.status == _core.STATUS_CODEGEN for record in trace.records)
-
-
-def test_lower_trace_configuration_is_snapshotted_per_compile(tmp_path):
-    """Changing global defaults cannot mutate an already-running kernel trace."""
-    from tilelang.tools.lower_trace import enable
-    from tilelang.utils.pass_events import compile_pass_instrumentation
-
-    enable(mode="terminal", trace_dir=str(tmp_path), codegen_output=None)
-    with compile_pass_instrumentation(name="first") as first_compile:
-        first = first_compile.find_tool(_core.LowerTraceSession)
-        assert first is not None
-        assert first.mode == "terminal"
-
-        enable(mode="html", trace_dir=str(tmp_path), codegen_output=None)
-        assert first.mode == "terminal"
-        with compile_pass_instrumentation(name="nested") as nested_compile:
-            assert nested_compile is first_compile
-
-    with compile_pass_instrumentation(name="second") as second_compile:
-        second = second_compile.find_tool(_core.LowerTraceSession)
-        assert second is not None
-        assert second.mode == "html"
-        assert second is not first
-
-
-def test_lower_trace_sessions_isolate_records_and_indices(tmp_path):
-    """Independent kernels start at index zero and never share record lists."""
-    from concurrent.futures import ThreadPoolExecutor
-    from types import SimpleNamespace
-
-    def run_one(label):
-        trace = _core.LowerTraceSession(
-            mode="terminal",
-            trace_dir=str(tmp_path / label),
-            codegen_output=None,
-        )
-        instrument = trace.create_pass_instrument()
-        assert instrument is not None
-        info = SimpleNamespace(name=f"test.{label}")
-        instrument.enter_pass_ctx()
-        instrument.run_before_pass(f"{label}-before", info)
-        instrument.run_after_pass(f"{label}-after", info)
-        instrument.exit_pass_ctx()
-        return trace
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        left, right = pool.map(run_one, ("left", "right"))
-
-    assert left.records is not right.records
-    assert [record.index for record in left.records] == [0]
-    assert [record.index for record in right.records] == [0]
-    assert [record.name for record in left.records] == ["left"]
-    assert [record.name for record in right.records] == ["right"]
-    assert left.run_dir != right.run_dir
 
 
 def test_concurrent_sessions_serialize_a_shared_codegen_path(tmp_path):

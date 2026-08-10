@@ -154,17 +154,20 @@ def test_grouped_compile_session_owns_configured_timing_tool(monkeypatch):
         pass_configs={
             PassConfigKey.TL_PASS_PROFILE: True,
             PassConfigKey.TL_PASS_PROFILE_THRESHOLD_MS: 4.0,
-        }
+        },
+        target="c",
+        target_host=None,
+        execution_backend="tvm_ffi",
     )
     observed = []
 
-    def compile_in_session(_unit_items, _compile_args, _elaborate_func):
+    def create_context(*_args):
         session = current_compile_pass_instrumentation()
         timing_tool = session.find_tool(PassTimingTool) if session is not None else None
         observed.append(timing_tool.threshold_ms if timing_tool is not None else None)
-        return []
+        return object()
 
-    monkeypatch.setattr(grouped_compile, "_compile_grouped_unit_tvm_ffi_in_session", compile_in_session)
+    monkeypatch.setattr(grouped_compile, "create_backend_context", create_context)
 
     assert grouped_compile.compile_grouped_unit_tvm_ffi([], compile_args, lambda: None) == []
     assert observed == [4.0]
