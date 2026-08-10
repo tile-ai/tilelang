@@ -314,11 +314,15 @@ def test_tvm_ffi_dynamic_output_shape_expression():
     def dynamic_output_shape(x) -> torch.Tensor:
         B, E = T.dynamic("B E")
         x: T.Tensor[[B, E], T.float32]
+        # Cover the bare-Var fast path plus nested Add/Mul expressions that
+        # require one or multiple runtime symbol substitutions.
         out = T.empty([B, B + 1, 2 * E, B * E], T.float32)
         with T.Kernel(1, threads=1):
             out[0, 0, 0, 0] = x[0, 0]
         return out
 
+    # The second call reuses the compiled adapter and verifies that dynamic
+    # values are read again from the current input instead of being cached.
     for B, E in [(4, 3), (7, 2)]:
         x = torch.arange(B * E, dtype=torch.float32, device="cuda").reshape(B, E)
         out = dynamic_output_shape(x)

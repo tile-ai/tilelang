@@ -29,6 +29,21 @@ from tilelang.language.dtypes import dtype
 
 COMPILE_ARGS = {}
 
+# Runtime source kinds stored in `_DynamicSymbolicSource` below.
+_DYNAMIC_SOURCE_SHAPE = 0
+_DYNAMIC_SOURCE_STRIDE = 1
+_DYNAMIC_SOURCE_SCALAR = 2
+
+# A dynamic-symbol source uses the tuple layout
+# `(source_kind, param_idx, dim_idx, stride_scale)`:
+# - `source_kind` selects tensor shape, tensor stride, or an explicit scalar.
+# - `param_idx` indexes the same full PrimFunc ABI order used by `self.params`
+#   and the per-call `param_values` list.
+# - `dim_idx` selects the tensor dimension; it is `-1` for scalar sources.
+# - `stride_scale` converts physical Torch strides to logical element strides
+#   for sub-byte dtypes; it is `1` for shape and scalar sources.
+_DynamicSymbolicSource = tuple[int, int, int, int]
+
 if sys.platform == "darwin":
     from torch.utils import cpp_extension
 
@@ -67,8 +82,9 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     device_mod: tvm.IRModule | None = None
     # rt_mod
     rt_mod: tvm.runtime.Module | None = None
-    # Maps symbolic variables to their corresponding buffer and shape indices
-    dynamic_symbolic_map: dict[tirx.Var, tuple[int, int, int, int]] | None = None
+    # Compile-time binding plan from each dynamic TIR Var to its runtime source.
+    # Concrete values are read from call arguments later, in `_convert_torch_func`.
+    dynamic_symbolic_map: dict[tirx.Var, _DynamicSymbolicSource] | None = None
 
     # Stream/device functors are inherited from BaseKernelAdapter
     def __init__(
@@ -89,12 +105,17 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         """Initialize the adapter with the given TIR function or module.
 
         Args:
-            params: List of tensor types for inputs/outputs
-            result_idx: Indices of output tensors
+            params: Metadata for every PrimFunc ABI parameter, including caller
+                inputs, auto-allocated outputs, and explicit scalar parameters.
+            result_idx: Positions in `params` that the adapter must allocate and
+                return instead of consuming from the caller. Negative indices are
+                normalized by `_legalize_result_idx`.
             target: Target platform (e.g., 'cuda')
             func_or_mod: TIR function or module to be compiled
             verbose: Enable verbose logging
         """
+        # Both lists use the full PrimFunc ABI order. For example, an eager
+        # `kernel(x) -> out` normally has params `[x, out]` and result_idx `[1]`.
         self.params = params
         self.result_idx = self._legalize_result_idx(result_idx)
         self.host_kernel_source = host_kernel_source
@@ -144,28 +165,49 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     def get_exportable_executable(self) -> tvm.runtime.Executable:
         return self._get_executable()
 
-    def _process_dynamic_symbolic(self) -> dict[tirx.Var, tuple[int, int, int, int]]:
-        """Extract information about dynamic shapes from the TIR function.
+    def _process_dynamic_symbolic(self) -> dict[tirx.Var, _DynamicSymbolicSource]:
+        """Build the compile-time plan used to bind dynamic symbols at runtime.
 
-        Maps symbolic variables to their corresponding (id, buffer_index, dimension, stride_scale)
-        for runtime shape resolution.
-        id represents shape or stride, 0 represents shape, 1 represents stride, 2 represents scalar param.
-        stride_scale compensates for sub-byte dtypes (e.g. float4_e2m1fn) where torch strides
-        are in storage units but the kernel expects logical element strides.
+        The returned map does not contain concrete sizes. It records where each
+        directly anchored dynamic Var can be read on every invocation:
+
+        - an explicit scalar PrimFunc parameter;
+        - one dimension of a non-result input tensor's shape; or
+        - one dimension of a non-result input tensor's stride.
+
+        Auto-allocated results are intentionally excluded as sources because
+        their shapes must be resolved before those tensors exist. Composite
+        expressions such as ``B + 1`` are not source entries either; their leaf
+        Vars are bound from this map and the whole expression is evaluated later
+        by `_resolve_output_shape_dim`.
+
+        If the same Var is directly exposed by multiple inputs, the first source
+        in ABI order is retained. The generated native wrapper remains responsible
+        for validating that all buffers sharing the symbol have compatible shapes.
         """
         func = self.prim_func
         params = func.params
         buffer_map = func.buffer_map
-        dynamic_symbolic_map = {}
+        dynamic_symbolic_map: dict[tirx.Var, _DynamicSymbolicSource] = {}
+
+        # Non-buffer parameters are explicit runtime scalars. Buffer handles are
+        # also represented by tirx.Var, so checking `param not in buffer_map` is
+        # what distinguishes a real scalar from a tensor handle.
         for i, param in enumerate(params):
             if param not in buffer_map and (param not in dynamic_symbolic_map):
-                dynamic_symbolic_map[param] = (2, i, -1, 1)
+                dynamic_symbolic_map[param] = (_DYNAMIC_SOURCE_SCALAR, i, -1, 1)
+
+        # A bare Var in an input shape directly anchors that symbol to a concrete
+        # `torch.Tensor.shape[dim]` value on each call.
         for i, param in enumerate(params):
             if param in buffer_map and i not in self.result_idx:
                 buffer = buffer_map[param]
                 for j, shape in enumerate(buffer.shape):
                     if isinstance(shape, tirx.Var) and (shape not in dynamic_symbolic_map) and (shape not in params):
-                        dynamic_symbolic_map[shape] = (0, i, j, 1)
+                        dynamic_symbolic_map[shape] = (_DYNAMIC_SOURCE_SHAPE, i, j, 1)
+
+        # Dynamic strides use the same ABI parameter indexing. Torch reports
+        # strides in storage units, so sub-byte types require `stride_scale`.
         for i, param in enumerate(params):
             if param in buffer_map and i not in self.result_idx:
                 buffer = buffer_map[param]
@@ -173,19 +215,23 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 stride_scale = 8 // element_bits if element_bits < 8 else 1
                 for j, stride in enumerate(buffer.strides):
                     if isinstance(stride, tirx.Var) and (stride not in dynamic_symbolic_map) and (stride not in params):
-                        dynamic_symbolic_map[stride] = (1, i, j, stride_scale)
+                        dynamic_symbolic_map[stride] = (_DYNAMIC_SOURCE_STRIDE, i, j, stride_scale)
         return dynamic_symbolic_map
 
     @staticmethod
     def _lookup_dynamic_symbolic_source(
         symbol: tirx.Var,
-        dynamic_symbolic_map: dict[tirx.Var, tuple[int, int, int, int]],
-    ) -> tuple[int, int, int, int]:
-        """Look up a runtime source for a dynamic symbol by identity.
+        dynamic_symbolic_map: dict[tirx.Var, _DynamicSymbolicSource],
+    ) -> _DynamicSymbolicSource:
+        """Return the runtime-source tuple associated with `symbol`.
 
-        A unique name match is retained as a compatibility fallback for cached
-        artifacts whose parameter metadata may contain equivalent, but not
-        identical, Var handles.
+        TIR Var equality constructs an IR comparison expression, so handle
+        identity must be checked with `same_as`. A unique name match is retained
+        only as a compatibility fallback for cached artifacts whose parameter
+        metadata may contain equivalent, but non-identical, Var handles.
+
+        Raises:
+            ValueError: If no source exists, or if the name fallback is ambiguous.
         """
         for candidate, source in dynamic_symbolic_map.items():
             if symbol.same_as(candidate):
@@ -202,12 +248,22 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         self,
         symbol: tirx.Var,
         param_values: list[Any],
-        dynamic_symbolic_map: dict[tirx.Var, tuple[int, int, int, int]],
+        dynamic_symbolic_map: dict[tirx.Var, _DynamicSymbolicSource],
     ) -> Any:
-        """Resolve one dynamic symbol from a scalar, tensor shape, or stride."""
-        ref_id, param_idx, dim_idx, stride_scale = self._lookup_dynamic_symbolic_source(symbol, dynamic_symbolic_map)
+        """Read one concrete symbol value from the current call's ABI arguments.
+
+        `param_values` is aligned one-to-one with `self.params`. Caller-provided
+        inputs have already been populated, while auto-allocated result slots may
+        still be `None`. `_process_dynamic_symbolic` therefore records only scalar
+        parameters and non-result tensors as valid sources.
+
+        Returns:
+            The explicit scalar value, tensor shape dimension, or logical stride
+            that should replace `symbol` in an output-shape expression.
+        """
+        source_kind, param_idx, dim_idx, stride_scale = self._lookup_dynamic_symbolic_source(symbol, dynamic_symbolic_map)
         ref_value = param_values[param_idx]
-        if ref_id == 2:
+        if source_kind == _DYNAMIC_SOURCE_SCALAR:
             if ref_value is None:
                 raise ValueError(f"Dynamic symbolic variable '{symbol.name}' has no scalar runtime value")
             return ref_value
@@ -215,19 +271,33 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             raise ValueError(
                 f"Dynamic symbolic variable '{symbol.name}' requires tensor parameter {param_idx}, but got {type(ref_value).__name__}"
             )
-        if ref_id == 0:
+        if source_kind == _DYNAMIC_SOURCE_SHAPE:
             return ref_value.shape[dim_idx]
-        if ref_id == 1:
+        if source_kind == _DYNAMIC_SOURCE_STRIDE:
             return ref_value.stride()[dim_idx] * stride_scale
-        raise ValueError(f"Unknown dynamic symbolic reference kind: {ref_id}")
+        raise ValueError(f"Unknown dynamic symbolic reference kind: {source_kind}")
 
     def _resolve_output_shape_dim(
         self,
         dim: int | PrimExpr,
         param_values: list[Any],
-        dynamic_symbolic_map: dict[tirx.Var, tuple[int, int, int, int]],
+        dynamic_symbolic_map: dict[tirx.Var, _DynamicSymbolicSource],
     ) -> int:
-        """Resolve one output dimension to a concrete Python integer."""
+        """Resolve one output-shape dimension to the `int` required by Torch.
+
+        Static integers and bare dynamic Vars use fast paths. For a composite
+        PrimExpr, `post_order_visit` collects every nested Var by handle identity,
+        each Var is replaced with an IntImm from the current call, and TVM's
+        Analyzer folds the substituted expression. The final result must be an
+        IntImm; otherwise the dimension still contains an unbound symbol or an
+        operation that cannot represent a concrete tensor extent.
+
+        Example: ``B + 1`` with ``B = 4`` becomes ``Add(4, 1)``, then ``IntImm(5)``.
+
+        Raises:
+            TypeError: If a dimension or resolved symbol is not integer-valued.
+            ValueError: If the expression cannot be fully resolved to an IntImm.
+        """
         if isinstance(dim, int):
             return dim
         if isinstance(dim, tirx.IntImm):
@@ -259,6 +329,13 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         return int(resolved)
 
     def _convert_torch_func(self) -> Callable[..., Any]:
+        """Create the PyTorch-facing callable for this compiled adapter.
+
+        Adapter construction caches dtype/shape metadata and the symbolic-source
+        plan in the returned closure. Each invocation then reconstructs the full
+        PrimFunc ABI, resolves and allocates implicit outputs from current runtime
+        inputs, calls the native executable, and returns the result positions.
+        """
         # Capture thunks that reflect Torch's current stream and device.
         # These are evaluated at call time to align TVM execution with the
         # caller's active PyTorch stream/device.
@@ -268,7 +345,9 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         # Convert TVM types to native Python types during initialization
         # Convert tvm.DataType to torch.dtype for tensor creation
         param_dtypes = [param.torch_dtype() for param in self.params]
-        # Convert TVM shape arrays to native Python lists
+        # Cache parameter shapes in full ABI order. Static IntImm dimensions are
+        # converted eagerly; dynamic Vars and composite PrimExprs remain as IR
+        # handles until a concrete call supplies their runtime values.
         param_shapes = []
 
         for param in self.params:
@@ -287,6 +366,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 native_shape[-1] = native_shape[-1] * tl_dtype.bits * tl_dtype.lanes // (stroage_dtype.bits * stroage_dtype.lanes)
             param_shapes.append(native_shape)
 
+        # This is a source plan only. No dynamic value is captured here, which is
+        # why one compiled adapter can be reused for inputs with different shapes.
         dynamic_symbolic_map = self._process_dynamic_symbolic()
 
         # Prepare helpers for friendly dtype error messages
@@ -306,7 +387,10 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 is_buffer_param.append(False)
 
         def func(*inputs: torch.Tensor | Any):
-            # Validate input count strictly
+            """Allocate implicit results and invoke the compiled full-ABI function."""
+
+            # `inputs` contains only caller-supplied parameters. Positions listed
+            # in `result_idx` are omitted because this adapter creates them.
             expected_inputs = len(self.params) - len(self.result_idx)
             if len(inputs) != expected_inputs:
                 raise ValueError(f"Kernel expected {expected_inputs} inputs, but {len(inputs)} are provided.")
@@ -318,9 +402,10 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 None,
             )
 
-            # Stitch the full positional argument list expected by the TVM executable.
-            # Populate every input first so output shapes can reference parameters
-            # regardless of their position in the PrimFunc signature.
+            # Reconstruct the full positional ABI list expected by the executable.
+            # For params `[x, out]` with result_idx `[1]`, this first produces
+            # `[x, None]`. Populating every input before any output allocation lets
+            # output shapes reference an input regardless of signature position.
             ins_idx: int = 0
             param_values: list[Any] = [None] * len(self.params)
             for i in range(len(self.params)):
@@ -328,7 +413,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                     param_values[i] = inputs[ins_idx]
                     ins_idx += 1
 
-            # Prepare input and output tensors
+            # Resolve every implicit result shape from the current `param_values`,
+            # allocate it with Torch, and fill its reserved ABI slot.
             for i in range(len(self.params)):
                 if i in self.result_idx:
                     dtype = param_dtypes[i]
@@ -346,6 +432,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                     tensor = torch.empty(*shape, dtype=dtype, device=out_device)
                     param_values[i] = tensor
 
+            # The native wrapper receives the complete PrimFunc ABI, including
+            # both caller inputs and the tensors allocated above.
             executable = self._get_executable()
             executable(*param_values)
 
