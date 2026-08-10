@@ -4,6 +4,7 @@ import inspect
 import threading
 from dataclasses import replace
 
+import tilelang.autotuner.param as param_mod
 from tilelang.autotuner import AutoTuner
 from tilelang.autotuner.param import CompileArgs, ProfileArgs
 
@@ -23,6 +24,34 @@ def test_cache_key_includes_output_indices():
     base_args = CompileArgs(out_idx=[0])
 
     assert _cache_key(compile_args=base_args) != _cache_key(compile_args=replace(base_args, out_idx=[1]))
+
+
+def test_cache_key_tracks_tvm_ffi_callable_abi(monkeypatch):
+    tvm_ffi_key = _cache_key(compile_args=CompileArgs(execution_backend="tvm_ffi"))
+    auto_key = _cache_key(compile_args=CompileArgs(execution_backend="auto"))
+    cython_key = _cache_key(compile_args=CompileArgs(execution_backend="cython"))
+
+    monkeypatch.setattr(
+        param_mod,
+        "TVM_FFI_KERNEL_ABI_VERSION",
+        param_mod.TVM_FFI_KERNEL_ABI_VERSION + 1,
+    )
+
+    assert _cache_key(compile_args=CompileArgs(execution_backend="tvm_ffi")) != tvm_ffi_key
+    assert _cache_key(compile_args=CompileArgs(execution_backend="auto")) != auto_key
+    assert _cache_key(compile_args=CompileArgs(execution_backend="cython")) == cython_key
+
+
+def test_cache_key_tracks_tvm_ffi_torch_storage_abi(monkeypatch):
+    tvm_ffi_key = _cache_key(compile_args=CompileArgs(execution_backend="tvm_ffi"))
+    auto_key = _cache_key(compile_args=CompileArgs(execution_backend="auto"))
+    cython_key = _cache_key(compile_args=CompileArgs(execution_backend="cython"))
+
+    monkeypatch.setattr(param_mod, "get_tvm_ffi_torch_storage_abi_tag", lambda: "different-storage-abi")
+
+    assert _cache_key(compile_args=CompileArgs(execution_backend="tvm_ffi")) != tvm_ffi_key
+    assert _cache_key(compile_args=CompileArgs(execution_backend="auto")) != auto_key
+    assert _cache_key(compile_args=CompileArgs(execution_backend="cython")) == cython_key
 
 
 def test_cache_key_includes_profile_validation_and_input_behavior():

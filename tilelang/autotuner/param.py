@@ -13,6 +13,7 @@ from pathlib import Path
 import errno
 
 from tilelang.jit import JITKernel
+from tilelang.jit.abi import TVM_FFI_KERNEL_ABI_VERSION, get_tvm_ffi_torch_storage_abi_tag
 from tilelang.jit.adapter.base import CachedTextSource
 import cloudpickle
 import os
@@ -86,6 +87,9 @@ class CompileArgs:
             "verbose": self.verbose,
             "pass_configs": json.dumps(self.pass_configs, sort_keys=True) if self.pass_configs else None,
         }
+        if self.execution_backend in ("auto", "tvm_ffi"):
+            data["execution_backend_abi_version"] = TVM_FFI_KERNEL_ABI_VERSION
+            data["torch_storage_abi"] = get_tvm_ffi_torch_storage_abi_tag()
 
         hash_obj = hashlib.sha256(json.dumps(data, sort_keys=True).encode("utf-8"))
         return int.from_bytes(hash_obj.digest(), byteorder="big")

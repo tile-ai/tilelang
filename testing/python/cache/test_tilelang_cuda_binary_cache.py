@@ -35,6 +35,58 @@ def test_kernel_cache_namespace_includes_host_platform(monkeypatch):
     assert KernelCache._get_cache_namespace() == os.path.join("1.2.3_cuda_gitabc", "linux-aarch64")
 
 
+def test_tvm_ffi_cache_key_tracks_callable_abi(monkeypatch):
+    class FakePrimFunc:
+        @staticmethod
+        def script(show_meta=False):
+            return "fake_prim_func_with_meta" if show_meta else "fake_prim_func"
+
+    cache = KernelCache()
+    key_args = {
+        "func": FakePrimFunc(),
+        "out_idx": [1],
+        "args": (),
+        "target": "cuda",
+        "target_host": "c",
+        "pass_configs": None,
+    }
+    tvm_ffi_key = cache._generate_key(execution_backend="tvm_ffi", **key_args)
+    cython_key = cache._generate_key(execution_backend="cython", **key_args)
+
+    monkeypatch.setattr(
+        kernel_cache_mod,
+        "TVM_FFI_KERNEL_ABI_VERSION",
+        kernel_cache_mod.TVM_FFI_KERNEL_ABI_VERSION + 1,
+    )
+
+    assert cache._generate_key(execution_backend="tvm_ffi", **key_args) != tvm_ffi_key
+    assert cache._generate_key(execution_backend="cython", **key_args) == cython_key
+
+
+def test_tvm_ffi_cache_key_tracks_torch_storage_abi(monkeypatch):
+    class FakePrimFunc:
+        @staticmethod
+        def script(show_meta=False):
+            return "fake_prim_func_with_meta" if show_meta else "fake_prim_func"
+
+    cache = KernelCache()
+    key_args = {
+        "func": FakePrimFunc(),
+        "out_idx": [1],
+        "args": (),
+        "target": "cuda",
+        "target_host": "c",
+        "pass_configs": None,
+    }
+    tvm_ffi_key = cache._generate_key(execution_backend="tvm_ffi", **key_args)
+    cython_key = cache._generate_key(execution_backend="cython", **key_args)
+
+    monkeypatch.setattr(kernel_cache_mod, "get_tvm_ffi_torch_storage_abi_tag", lambda: "different-storage-abi")
+
+    assert cache._generate_key(execution_backend="tvm_ffi", **key_args) != tvm_ffi_key
+    assert cache._generate_key(execution_backend="cython", **key_args) == cython_key
+
+
 def test_cuda_binary_cache_hit_skips_nvcc_compile(monkeypatch, tmp_path):
     _set_cache_dirs(monkeypatch, tmp_path)
     from tilelang.cuda import backend as cuda_backend

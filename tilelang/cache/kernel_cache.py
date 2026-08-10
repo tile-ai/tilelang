@@ -25,6 +25,7 @@ from tilelang.engine.param import KernelParam
 from tilelang.utils.language import get_prim_func_name
 from tilelang import env
 from tilelang.jit import JITKernel
+from tilelang.jit.abi import TVM_FFI_KERNEL_ABI_VERSION, get_tvm_ffi_torch_storage_abi_tag
 from tilelang.jit.adapter.base import CachedTextSource
 from tilelang.jit.diagnostics import jit_phase
 from tilelang.contrib.hip_resource_info import dump_to_file, load_from_file
@@ -277,6 +278,9 @@ class KernelCache:
             "compile_flags": compile_flags,
             **self._get_base_key(),
         }
+        if execution_backend == "tvm_ffi":
+            key_data["execution_backend_abi_version"] = TVM_FFI_KERNEL_ABI_VERSION
+            key_data["torch_storage_abi"] = get_tvm_ffi_torch_storage_abi_tag()
         # Sort keys to ensure consistency
         key_string = json.dumps(key_data, sort_keys=True)
         # Use SHA256 to generate hash key

@@ -92,6 +92,20 @@ static constexpr const char *kPassProfileThresholdMs =
     "tl.pass_profile_threshold_ms";
 
 /*!
+ * \brief Call a TVM-FFI packed function with an existing argument array and
+ * result slot.
+ *
+ * tvm_ffi_call_with_result(func_name, args, num_args, result)
+ *
+ * This is an internal host-codegen intrinsic.  Unlike tvm_call_packed, the
+ * caller owns the already-populated TVMFFIAny argument array and provides the
+ * result slot directly.  It is used by the callee-allocated output wrapper to
+ * assemble multiple environment-allocated tensors into an ffi.Array without
+ * routing their shapes or handles back through Python.
+ */
+TVM_DLL const Op &tvm_ffi_call_with_result();
+
+/*!
  * \brief TileLang intrinsic for carrying pointer access metadata in frontend.
  *
  * Unlike `tir.builtin.tvm_access_ptr`, this op keeps a `BufferLoad` argument so
