@@ -177,8 +177,17 @@ class BaseBuilder:
 
     def get_parent_locals(self):
         frame = inspect.currentframe()
-        assert frame is not None and frame.f_back is not None and frame.f_back.f_back is not None
-        return frame.f_back.f_back.f_locals
+        try:
+            assert frame is not None and frame.f_back is not None and frame.f_back.f_back is not None
+            return frame.f_back.f_back.f_locals
+        finally:
+            # Do NOT remove the `del frame` below: `frame` references this frame
+            # itself through its own f_locals. Keeping it alive past return forms a
+            # reference cycle (frame -> f_locals -> frame) that refcounting can never
+            # break, pinning this frame and its entire f_back call chain (including
+            # large local tensors) until gc.collect() runs, which would cause memory
+            # leak. The `finally` ensures it also runs on the assert-failure path.
+            del frame
 
     def ctx_if(self, cond) -> Iterable[_T]:
         yield cond
