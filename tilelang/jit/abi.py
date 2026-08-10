@@ -1,4 +1,4 @@
-"""Shared helpers and version markers for persisted JIT callable ABIs."""
+"""Shared helpers for preparing TVM-FFI callable ABIs."""
 
 from __future__ import annotations
 
@@ -6,15 +6,6 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from tvm.tirx import PrimFunc
-
-
-def get_tvm_ffi_torch_storage_abi_tag() -> str:
-    """Describe Torch capabilities that affect output storage lowering."""
-    import torch
-
-    fp4_storage = "float4_e2m1fnx2" if hasattr(torch, "float4_e2m1fn_x2") else "int8"
-    float8_e4m3_storage = "float8_e4m3fnuz" if torch.version.hip is not None else "float8_e4m3fn"
-    return f"fp4={fp4_storage};float8_e4m3={float8_e4m3_storage}"
 
 
 def _normalize_output_indices(output_indices: list[int], num_params: int) -> list[int]:
@@ -53,9 +44,3 @@ def prepare_tvm_ffi_callee_allocated_outputs(
         return func, None
     _normalize_output_indices(output_indices, len(func.params))
     return func.with_attr("tilelang_out_idx", output_indices), output_indices
-
-
-# Bump this whenever the callable ABI of generated TVM-FFI host modules
-# changes. Version 4 resolves Torch's physical storage dtype while lowering, so
-# sub-byte outputs also use the callee-allocated single-main ABI.
-TVM_FFI_KERNEL_ABI_VERSION = 4
