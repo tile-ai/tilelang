@@ -113,20 +113,38 @@ def test_jit_compile_session_owns_configured_timing_tool(monkeypatch):
         PassConfigKey.TL_PASS_PROFILE: True,
         PassConfigKey.TL_PASS_PROFILE_THRESHOLD_MS: 3.0,
     }
+    kernel.compile_flags = None
+    kernel.verbose = False
+    kernel.target = tvm.target.Target("c")
+    kernel.target_host = None
+    kernel.execution_backend = "cython"
+    artifact = object()
     result = object()
     observed = []
 
-    def compile_in_session(_self, _func, _out_idx):
+    def observe_session(stage):
         session = current_compile_pass_instrumentation()
         timing_tool = session.find_tool(PassTimingTool) if session is not None else None
-        observed.append(timing_tool.threshold_ms if timing_tool is not None else None)
+        observed.append((stage, session, timing_tool.threshold_ms if timing_tool is not None else None))
+
+    def compile_artifact(_self, _func, _pass_configs, _phase_context):
+        observe_session("artifact")
+        return artifact
+
+    def create_adapter(_self, _func, _out_idx, actual_artifact, _pass_configs, _phase_context):
+        assert actual_artifact is artifact
+        observe_session("adapter")
         return result
 
-    monkeypatch.setattr(JITKernel, "_compile_and_create_adapter_in_session", compile_in_session)
+    monkeypatch.setattr(JITKernel, "_compile_artifact", compile_artifact)
+    monkeypatch.setattr(JITKernel, "_create_adapter_from_artifact", create_adapter)
     func = next(iter(_simple_module().functions.items()))[1]
 
     assert kernel._compile_and_create_adapter(func, []) is result
-    assert observed == [3.0]
+    assert kernel.artifact is artifact
+    assert [item[0] for item in observed] == ["artifact", "adapter"]
+    assert observed[0][1] is observed[1][1]
+    assert [item[2] for item in observed] == [3.0, 3.0]
 
 
 def test_grouped_compile_session_owns_configured_timing_tool(monkeypatch):
