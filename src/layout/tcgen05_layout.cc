@@ -11,9 +11,12 @@
  */
 
 #include "support/check.h"
+#include <algorithm>
+#include <array>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
+#include <vector>
 
 #include "layout.h"
 #include "tcgen05_layout.h"
@@ -198,15 +201,67 @@ Tcgen05CopyPlan ExpandTcgen05Layout(const Tcgen05Meta &meta,
   cute::Layout serialized_tmem_tile = cute::Composition(kSerialize, tmem_tile);
   int64_t size = cute::AsConst(cute::Size(serialized_tmem_tile));
 
-  // A full-datapath issue is exactly the tile's maximal contiguous run, and
-  // the divide's rest mode iterates the issues after it.  A Layout F issue is
-  // not contiguous at all -- four datapath groups 32 apart -- so it is
-  // assembled explicitly below and always covers the tile in one go.
-  // inv_prefix: serialized chunk -> flat logical tile.  E.g. 8192:3.
-  cute::Layout inv_prefix = cute::RightInverse(serialized_tmem_tile);
-  int64_t elems_per_issue =
-      partial_subpartition ? size : cute::AsConst(cute::Size(inv_prefix));
-  if (elems_per_issue % dp_per_issue != 0 || size % elems_per_issue != 0)
+  // One issue covers the tile's whole datapath footprint by one contiguous
+  // column run, so its logical footprint is read off the two projections
+  // separately -- a Layout F tile's gaps live on the datapath axis and never
+  // reach the column projection, so neither derivation needs a case split.
+  // Columns: the maximal contiguous run, inverted back into the flat logical
+  // domain.  inv_cols: column run -> flat logical tile.  E.g. 64:384.
+  static const cute::Layout kColOnly = cute::Layout::Parse("(1,1):(0,1)");
+  cute::Layout inv_cols =
+      cute::RightInverse(cute::Composition(kColOnly, tmem_tile));
+  int64_t cols_per_issue = cute::AsConst(cute::Size(inv_cols));
+
+  // Datapaths: collect the pure-datapath modes with their flat-domain
+  // weights, ascending by datapath stride so the footprint is enumerated in
+  // address order.  (dp stride, extent, weight) per mode.
+  cute::IntTuple flat_shape = cute::Flatten(tmem_tile->shape);
+  cute::IntTuple dp_strides =
+      cute::Flatten(cute::Composition(kDpOnly, tmem_tile)->stride);
+  cute::IntTuple col_strides =
+      cute::Flatten(cute::Composition(kColOnly, tmem_tile)->stride);
+  int64_t rank = cute::Rank(flat_shape);
+  std::vector<std::array<int64_t, 3>> dp_modes;
+  int64_t occupied_dps = 1;
+  for (int64_t i = 0, weight = 1; i < rank; ++i) {
+    if (!cute::IsConst(flat_shape[i]) || !cute::IsConst(dp_strides[i]) ||
+        !cute::IsConst(col_strides[i]))
+      return Tcgen05CopyPlan(nullptr);
+    int64_t extent = cute::AsConst(flat_shape[i]);
+    if (extent > 1 && cute::AsConst(dp_strides[i]) != 0) {
+      if (cute::AsConst(col_strides[i]) != 0) // a diagonal crosses both axes
+        return Tcgen05CopyPlan(nullptr);
+      dp_modes.push_back({cute::AsConst(dp_strides[i]), extent, weight});
+      occupied_dps *= extent;
+    }
+    weight *= extent;
+  }
+  // Four warps of dp_per_warp datapaths each must own the footprint exactly;
+  // a tile on fewer sub-partitions cannot drive a whole warpgroup.
+  if (occupied_dps != dp_per_issue)
+    return Tcgen05CopyPlan(nullptr);
+  std::stable_sort(dp_modes.begin(), dp_modes.end());
+
+  // chunk: issue-local (datapath footprint, column run) -> flat logical
+  // tile.  For a dense tile the footprint index IS the serialized address
+  // and this is exactly the maximal contiguous run right_inverse would
+  // find; for Layout F it also steps across the datapath gaps.
+  // E.g., chunk = 8192:3 (one whole batch entry).
+  Array<cute::IntTuple> chunk_shape, chunk_stride;
+  for (const auto &m : dp_modes) {
+    chunk_shape.push_back(cute::IntTuple(m[1]));
+    chunk_stride.push_back(cute::IntTuple(m[2]));
+  }
+  cute::IntTuple col_shape = cute::Flatten(inv_cols->shape);
+  cute::IntTuple col_stride = cute::Flatten(inv_cols->stride);
+  for (int64_t i = 0, r = cute::Rank(col_shape); i < r; ++i) {
+    chunk_shape.push_back(col_shape[i]);
+    chunk_stride.push_back(col_stride[i]);
+  }
+  cute::Layout chunk = cute::Coalesce(cute::Layout(chunk_shape, chunk_stride));
+
+  int64_t elems_per_issue = dp_per_issue * cols_per_issue;
+  if (size % elems_per_issue != 0)
     return Tcgen05CopyPlan(nullptr);
   int64_t num_issues = size / elems_per_issue;
 
@@ -215,10 +270,10 @@ Tcgen05CopyPlan ExpandTcgen05Layout(const Tcgen05Meta &meta,
   // rest_domain: issue -> flat logical tile origin
   // E.g., rest_domain = 3:1 -> origins 0, 1, 2 (idx2crd: batch 0, 1, 2)
   cute::Layout rest_domain =
-      num_issues == 1 ? cute::Layout(1, 0)
-                      : cute::LogicalDivide(
-                            cute::MakeColumnMajorLayout(cute::Size(tmem_tile)),
-                            inv_prefix)[1];
+      num_issues == 1
+          ? cute::Layout(1, 0)
+          : cute::LogicalDivide(
+                cute::MakeColumnMajorLayout(cute::Size(tmem_tile)), chunk)[1];
   if (cute::AsConst(cute::Size(rest_domain)) != num_issues)
     return Tcgen05CopyPlan(nullptr);
 
@@ -228,7 +283,6 @@ Tcgen05CopyPlan ExpandTcgen05Layout(const Tcgen05Meta &meta,
   // copy must stay one .xN issue for the wrapper's register order to hold.
   // E.g., width = 1, ndup = 1, cols_per_issue = 64, num_chunks_each_wg = 64
   int64_t width = Tcgen05AtomWidth(meta);
-  int64_t cols_per_issue = elems_per_issue / dp_per_issue;
   if (cols_per_issue % width != 0)
     return Tcgen05CopyPlan(nullptr);
   int64_t total_chunks = cols_per_issue / width;
@@ -283,16 +337,17 @@ Tcgen05CopyPlan ExpandTcgen05Layout(const Tcgen05Meta &meta,
             cute::Layout(Array<int64_t>{reps, ndup},
                          Array<int64_t>{b32_col * width, 16})})});
 
-  // Physical -> logical.  inv_prefix spans the maximal contiguous chunk, one
-  // whole full-datapath issue, and stays valid where the tile is not injective
-  // (a pack::16b tile folds its unused sub-slot onto a stride-0 mode).  No
-  // contiguous prefix covers a Layout F issue's four groups, but such a tile
-  // IS injective, so left_inverse serves.  Either way the placement is derived
-  // from the tile, not assumed of it.
+  // Physical -> logical.  For a full-datapath tile the chunk's domain is the
+  // serialized address within one issue (its footprint is the contiguous run
+  // [0,128) x columns), so the chunk itself is the map, and it stays valid
+  // where the tile is not injective (a pack::16b tile folds its unused
+  // sub-slot onto a stride-0 mode).  A Layout F issue's addresses skip the
+  // unoccupied datapaths, so its footprint index is NOT the address -- but
+  // such a tile IS injective, so left_inverse serves.  Either way the
+  // placement is derived from the tile, not assumed of it.
   // tile_tv: (thread, value) -> flat logical tile
-  cute::Layout to_logical = partial_subpartition
-                                ? cute::LeftInverse(serialized_tmem_tile)
-                                : inv_prefix;
+  cute::Layout to_logical =
+      partial_subpartition ? cute::LeftInverse(serialized_tmem_tile) : chunk;
   cute::Layout tile_tv = cute::MakeLayout(
       {cute::Composition(to_logical, tiled[0]),
        cute::MakeLayout(

@@ -202,6 +202,21 @@ def test_expand_layout_f_requires_pow2_single_issue(meta, width, regs, ndup):
     assert _ffi_api.ExpandTcgen05Layout(_get_meta("ld_" + meta), _layout_f_tile(width * 4), 128) is not None
 
 
+def test_expand_layout_f_issues_per_batch():
+    # A column slice of a batched M=64 accumulator stacks per-batch column
+    # gaps on top of Layout F's datapath gaps.  The gaps live on different
+    # axes, so the column projection still exposes the 64-column contiguous
+    # run and the plan issues once per batch entry (rest iteration), exactly
+    # like the dense gapped tile above.
+    tile = cute.Layout.parse("(3,(16,4),64):(128@1,(1@0,32@0),1@1)")
+    plan = _ffi_api.ExpandTcgen05Layout(_get_meta("st_16dp64b"), tile, 128)
+    assert plan is not None
+    assert plan.datapaths_per_warp == 16
+    assert (plan.num_chunks_each_wg, plan.num_issues, plan.vals_per_issue) == (32, 3, 32)
+    assert [plan.rest_domain(i) for i in range(3)] == [0, 1, 2]
+    assert str(plan.fragment) == "(3,(8,2,4),(2,32)):(32@1,(4@0,1@0,32@0),(2@0,1@1))"
+
+
 def test_expand_32_datapath_atom_refuses_layout_f():
     # A 32-datapath atom spans a whole sub-partition, so it cannot tile a
     # fragment that occupies only half of one however it is issued.
