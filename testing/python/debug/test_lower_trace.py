@@ -131,8 +131,7 @@ def test_enable_disable():
 def test_enable_registers_instrument_without_patching_pass_call(tmp_path):
     """Global activation composes a PassInstrument and leaves TVM's class intact."""
     from tilelang.tools.lower_trace import enable
-    from tilelang.utils.pass_events import compile_pass_instrumentation
-    from tilelang.utils.pass_timing import build_pass_instruments
+    from tilelang.utils.pass_events import compile_pass_instrumentation, create_pass_instruments
     from tvm.ir.transform import Pass
 
     original_pass_call = Pass.__call__
@@ -140,8 +139,7 @@ def test_enable_registers_instrument_without_patching_pass_call(tmp_path):
     enable(mode="terminal", trace_dir=str(tmp_path), codegen_output=None)
 
     with compile_pass_instrumentation(name="test"):
-        instruments, timing = build_pass_instruments([], threshold_ms=None)
-        assert timing is None
+        instruments = create_pass_instruments()
         assert len(instruments) == 1
         assert isinstance(instruments[0].observer, _core._LowerTraceObserver)
     assert Pass.__call__ is original_pass_call

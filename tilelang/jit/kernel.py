@@ -7,7 +7,6 @@ from tvm.tirx import PrimFunc
 
 from tilelang import tvm
 from tilelang import env
-from tilelang.env import resolve_pass_profile_threshold_ms
 from tilelang.backend.module import BackendContext, create_backend_context
 from tvm.target import Target
 from tilelang.engine.param import CompiledArtifact, KernelParam
@@ -25,8 +24,8 @@ from tilelang.contrib.hip_resource_info import pop_recorded, reset_recorder
 from tilelang.jit.diagnostics import jit_phase
 from tilelang.transform import PassConfigKey
 from tilelang.transform.pass_config import normalize_pass_configs
-from tilelang.utils.pass_events import compile_pass_instrumentation
-from tilelang.utils.pass_timing import build_pass_instruments, report_pass_timing_on_exit
+from tilelang.utils.pass_events import compile_pass_instrumentation, create_pass_instruments
+from tilelang.tools.pass_timing import create_pass_timing_tool
 import logging
 import os
 
@@ -213,7 +212,9 @@ class JITKernel(Generic[_P, _T]):
     def _compile_and_create_adapter(self, tilelang_func: PrimFunc, out_idx: list[int]) -> BaseKernelAdapter:
         """Compile one kernel under a single pass-instrumentation session."""
         func_name = str(tilelang_func.attrs.get("global_symbol", "<unknown>"))
-        with compile_pass_instrumentation(name=func_name):
+        timing_tool = create_pass_timing_tool(self.pass_configs)
+        tools = [timing_tool] if timing_tool is not None else []
+        with compile_pass_instrumentation(name=func_name, tools=tools):
             return self._compile_and_create_adapter_in_session(tilelang_func, out_idx)
 
     def _compile_and_create_adapter_in_session(self, tilelang_func: PrimFunc, out_idx: list[int]) -> BaseKernelAdapter:
@@ -254,19 +255,6 @@ class JITKernel(Generic[_P, _T]):
             dump_ir_path = pass_configs.get(PassConfigKey.TL_DUMP_IR_DIR, "./dump_ir")  # Default dump path
             base_pass_instruments.append(tvm.ir.instrument.DumpIR(dump_dir=dump_ir_path))
 
-        # Pass timing instrument
-        profile_threshold_ms = None
-        if pass_configs.get(PassConfigKey.TL_PASS_PROFILE) or env.is_pass_profile_enabled():
-            profile_threshold_ms = resolve_pass_profile_threshold_ms(
-                pass_configs,
-                PassConfigKey.TL_PASS_PROFILE_THRESHOLD_MS,
-                env.get_pass_profile_threshold_ms,
-            )
-        pass_instruments, timing_instrument = build_pass_instruments(
-            base_pass_instruments,
-            profile_threshold_ms,
-        )
-
         # open a recorder window for kernel-resource-usage remarks
         capture_resources = is_hip_target(target)
         if capture_resources:
@@ -278,11 +266,12 @@ class JITKernel(Generic[_P, _T]):
             "target_host": str(target_host) if target_host is not None else None,
             "backend": execution_backend,
         }
+        pass_instrument_context = f"stage=jit-lower, kernel={func_name}, backend={execution_backend}"
+        pass_instruments = [
+            *create_pass_instruments(context=pass_instrument_context),
+            *base_pass_instruments,
+        ]
         with (
-            report_pass_timing_on_exit(
-                timing_instrument,
-                context=f"stage=jit-lower, kernel={func_name}, backend={execution_backend}",
-            ),
             jit_phase("lower", verbose=verbose, **phase_context),
             tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=pass_instruments),
             self.target,

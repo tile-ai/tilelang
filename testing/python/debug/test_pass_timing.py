@@ -1,7 +1,6 @@
 """Tests for pass timing instrumentation."""
 
 import gc
-import logging
 import weakref
 from types import SimpleNamespace
 
@@ -9,12 +8,18 @@ import pytest
 
 import tilelang.language as T
 from tilelang import tvm
-from tilelang.utils.pass_timing import (
+from tilelang.transform import PassConfigKey
+from tilelang.utils.pass_events import (
+    compile_pass_instrumentation,
+    create_pass_instruments,
+    current_compile_pass_instrumentation,
+)
+from tilelang.tools.pass_timing import (
     PassTimingRecord,
+    PassTimingTool,
     TileLangPassTimingInstrument,
     _extract_kernel_label,
-    build_pass_instruments,
-    report_pass_timing_on_exit,
+    create_pass_timing_tool,
 )
 
 
@@ -52,40 +57,125 @@ def test_pass_timing_wrapper_can_be_collected():
     assert state_ref() is None
 
 
-def test_build_pass_instruments_prepends_timing():
+def test_legacy_utils_pass_timing_path_reexports_tool():
+    from tilelang.utils import pass_timing as legacy_pass_timing
+
+    assert legacy_pass_timing.PassTimingRecord is PassTimingRecord
+    assert legacy_pass_timing.PassTimingTool is PassTimingTool
+    assert legacy_pass_timing.TileLangPassTimingInstrument is TileLangPassTimingInstrument
+    assert legacy_pass_timing.create_pass_timing_tool is create_pass_timing_tool
+
+
+def test_pass_timing_tool_creates_fresh_instruments_with_context():
+    timing_tool = PassTimingTool()
     base_instrument = object()
 
-    instruments, timing = build_pass_instruments([base_instrument], threshold_ms=0.0)
+    with compile_pass_instrumentation(
+        name="timing-test",
+        tools=[timing_tool],
+        include_default_tools=False,
+    ):
+        first = [
+            *create_pass_instruments(context="stage=first"),
+            base_instrument,
+        ]
+        second = create_pass_instruments(context="stage=second")
 
-    assert timing is not None
-    assert instruments[0] is timing.instrument
-    assert instruments[1] is base_instrument
+    assert first[0] is timing_tool.timings[0].instrument
+    assert first[1] is base_instrument
+    assert second[0] is timing_tool.timings[1].instrument
+    assert first[0] is not second[0]
+    assert timing_tool.contexts == ("stage=first", "stage=second")
 
 
-def test_build_pass_instruments_without_profile_preserves_base_instruments():
-    base_instrument = object()
+def test_create_pass_timing_tool_respects_config_and_threshold(monkeypatch):
+    from tilelang import env
 
-    instruments, timing = build_pass_instruments([base_instrument], threshold_ms=None)
+    monkeypatch.setattr(env, "is_pass_profile_enabled", lambda: False)
 
-    assert timing is None
-    assert instruments == [base_instrument]
+    assert create_pass_timing_tool({}) is None
+    timing_tool = create_pass_timing_tool(
+        {
+            PassConfigKey.TL_PASS_PROFILE: True,
+            PassConfigKey.TL_PASS_PROFILE_THRESHOLD_MS: 2.5,
+        }
+    )
+
+    assert timing_tool is not None
+    assert timing_tool.threshold_ms == 2.5
+
+
+def test_jit_compile_session_owns_configured_timing_tool(monkeypatch):
+    from tilelang.jit.kernel import JITKernel
+
+    kernel = object.__new__(JITKernel)
+    kernel.pass_configs = {
+        PassConfigKey.TL_PASS_PROFILE: True,
+        PassConfigKey.TL_PASS_PROFILE_THRESHOLD_MS: 3.0,
+    }
+    result = object()
+    observed = []
+
+    def compile_in_session(_self, _func, _out_idx):
+        session = current_compile_pass_instrumentation()
+        timing_tool = session.find_tool(PassTimingTool) if session is not None else None
+        observed.append(timing_tool.threshold_ms if timing_tool is not None else None)
+        return result
+
+    monkeypatch.setattr(JITKernel, "_compile_and_create_adapter_in_session", compile_in_session)
+    func = next(iter(_simple_module().functions.items()))[1]
+
+    assert kernel._compile_and_create_adapter(func, []) is result
+    assert observed == [3.0]
+
+
+def test_grouped_compile_session_owns_configured_timing_tool(monkeypatch):
+    from tilelang.autotuner import grouped_compile
+
+    compile_args = SimpleNamespace(
+        pass_configs={
+            PassConfigKey.TL_PASS_PROFILE: True,
+            PassConfigKey.TL_PASS_PROFILE_THRESHOLD_MS: 4.0,
+        }
+    )
+    observed = []
+
+    def compile_in_session(_unit_items, _compile_args, _elaborate_func):
+        session = current_compile_pass_instrumentation()
+        timing_tool = session.find_tool(PassTimingTool) if session is not None else None
+        observed.append(timing_tool.threshold_ms if timing_tool is not None else None)
+        return []
+
+    monkeypatch.setattr(grouped_compile, "_compile_grouped_unit_tvm_ffi_in_session", compile_in_session)
+
+    assert grouped_compile.compile_grouped_unit_tvm_ffi([], compile_args, lambda: None) == []
+    assert observed == [4.0]
 
 
 def test_pass_timing_excludes_later_after_pass_callbacks(monkeypatch):
     clock = [0.0]
+    timing_tool = PassTimingTool()
 
     @tvm.ir.instrument.pass_instrument
     class AdvanceClockAfterPass:
         def run_after_pass(self, mod, info):
             clock[0] += 1.0
 
-    instruments, timing = build_pass_instruments([AdvanceClockAfterPass()], threshold_ms=0.0)
-    monkeypatch.setattr("tilelang.utils.pass_timing.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("tilelang.tools.pass_timing.time.monotonic", lambda: clock[0])
 
-    with tvm.transform.PassContext(instruments=instruments):
-        tvm.tirx.transform.Simplify()(_simple_module())
+    with compile_pass_instrumentation(
+        name="timing-order",
+        tools=[timing_tool],
+        include_default_tools=False,
+    ):
+        instruments = [
+            *create_pass_instruments(context="stage=test"),
+            AdvanceClockAfterPass(),
+        ]
+        with tvm.transform.PassContext(instruments=instruments):
+            tvm.tirx.transform.Simplify()(_simple_module())
 
-    assert timing is not None
+    timing = timing_tool.timings[0]
     assert timing.records[0].duration_s == 0.0
     assert clock[0] == 1.0
 
@@ -93,7 +183,7 @@ def test_pass_timing_excludes_later_after_pass_callbacks(monkeypatch):
 def test_pass_timing_calculates_nested_self_time(monkeypatch):
     timing = TileLangPassTimingInstrument()
     timestamps = iter([0.0, 1.0, 3.0, 5.0])
-    monkeypatch.setattr("tilelang.utils.pass_timing.time.monotonic", lambda: next(timestamps))
+    monkeypatch.setattr("tilelang.tools.pass_timing.time.monotonic", lambda: next(timestamps))
     parent = SimpleNamespace(name="parent")
     child = SimpleNamespace(name="child")
 
@@ -138,45 +228,76 @@ def test_pass_timing_report_includes_context():
     assert "Context: stage=grouped-host, config=3, kernel=main_gc_3" in report
 
 
-def test_pass_timing_report_is_emitted_on_failure(monkeypatch):
-    timing = TileLangPassTimingInstrument()
-    contexts = []
-    monkeypatch.setattr(timing, "print_report", lambda context=None: contexts.append(context))
+def test_pass_timing_tool_reports_all_contexts_on_session_failure(monkeypatch):
+    timing_tool = PassTimingTool()
+    reports = []
+    monkeypatch.setattr(timing_tool, "print_report", lambda: reports.append(timing_tool.contexts))
 
     with (
         pytest.raises(RuntimeError, match="expected failure"),
-        report_pass_timing_on_exit(timing, context="stage=jit-lower, kernel=main"),
+        compile_pass_instrumentation(
+            name="failing-compile",
+            tools=[timing_tool],
+            include_default_tools=False,
+        ),
     ):
+        create_pass_instruments(context="stage=jit-lower, kernel=main")
         raise RuntimeError("expected failure")
 
-    assert contexts == ["stage=jit-lower, kernel=main"]
+    assert reports == [("stage=jit-lower, kernel=main",)]
 
 
-def test_pass_timing_cleans_incomplete_frames_after_pass_failure(caplog):
+def test_pass_timing_tool_combines_context_reports():
+    timing_tool = PassTimingTool()
+
+    with compile_pass_instrumentation(
+        name="two-contexts",
+        tools=[timing_tool],
+        include_default_tools=False,
+    ):
+        for context in ("stage=grouped-lower, config=0", "stage=grouped-device, configs=[0]"):
+            with tvm.transform.PassContext(instruments=create_pass_instruments(context=context)):
+                tvm.tirx.transform.Simplify()(_simple_module())
+
+    report = timing_tool.report()
+    assert "Context: stage=grouped-lower, config=0" in report
+    assert "Context: stage=grouped-device, configs=[0]" in report
+    assert len(timing_tool.timings) == 2
+
+
+def test_pass_timing_cleans_incomplete_frames_after_pass_failure(monkeypatch):
     timing = TileLangPassTimingInstrument()
+    warnings = []
+    monkeypatch.setattr(
+        "tilelang.tools.pass_timing.logger.warning",
+        lambda message, *args: warnings.append(message % args),
+    )
 
     @tvm.transform.module_pass(opt_level=0, name="FailingPass")
     def failing_pass(mod, ctx):
         raise RuntimeError("expected failure")
 
-    caplog.set_level(logging.WARNING, logger="tilelang.pass_timing")
     with pytest.raises(RuntimeError, match="expected failure"), tvm.transform.PassContext(instruments=[timing.instrument]):
         failing_pass(_simple_module())
 
     assert not timing._stack
-    assert "Discarding 1 incomplete pass timing frame" in caplog.text
+    assert any("Discarding 1 incomplete pass timing frame" in warning for warning in warnings)
 
 
-def test_pass_timing_ignores_unmatched_after_callback(caplog):
+def test_pass_timing_ignores_unmatched_after_callback(monkeypatch):
     timing = TileLangPassTimingInstrument()
-    caplog.set_level(logging.WARNING, logger="tilelang.pass_timing")
+    warnings = []
+    monkeypatch.setattr(
+        "tilelang.tools.pass_timing.logger.warning",
+        lambda message, *args: warnings.append(message % args),
+    )
 
     timing._enter_pass_ctx()
     timing._run_after_pass(SimpleNamespace(name="unexpected"))
 
     assert not timing.records
     assert not timing._stack
-    assert "Ignoring unmatched pass timing callback" in caplog.text
+    assert any("Ignoring unmatched pass timing callback" in warning for warning in warnings)
 
 
 def test_pass_timing_captures_kernel_name_from_module():

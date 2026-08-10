@@ -18,6 +18,7 @@ from tilelang.utils.pass_events import (
     compile_pass_instrumentation,
     create_pass_instruments,
     current_compile_pass_instrumentation,
+    current_pass_instrument_context,
     current_pass_phase,
     instrument_codegen,
     pass_phase,
@@ -199,6 +200,32 @@ def test_registered_tools_are_snapshotted_and_composable():
     ]
     assert current_pass_phase() is None
     assert current_compile_pass_instrumentation() is None
+
+
+def test_pass_instrument_context_and_priority_are_applied_at_creation():
+    contexts = []
+
+    class ContextTool(_RecordingTool):
+        def __init__(self, label, priority):
+            super().__init__(label, [])
+            self.pass_instrument_priority = priority
+
+        def create_pass_instrument(self):
+            contexts.append((self.label, current_pass_instrument_context()))
+            return super().create_pass_instrument()
+
+    later = ContextTool("later", 10)
+    earlier = ContextTool("earlier", -10)
+    with compile_pass_instrumentation(
+        name="ordered",
+        tools=[later, earlier],
+        include_default_tools=False,
+    ):
+        instruments = create_pass_instruments(context="stage=lower")
+
+    assert contexts == [("later", "stage=lower"), ("earlier", "stage=lower")]
+    assert instruments == [earlier.instruments[0], later.instruments[0]]
+    assert current_pass_instrument_context() is None
 
 
 def test_nested_helpers_reuse_the_owning_compile_session():

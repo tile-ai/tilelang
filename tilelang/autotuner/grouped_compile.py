@@ -12,8 +12,6 @@ from collections.abc import Callable
 from tilelang import tvm
 from tvm.tirx import PrimFunc
 
-from tilelang import env
-from tilelang.env import resolve_pass_profile_threshold_ms
 from tilelang.autotuner.param import CompileArgs
 from tilelang.backend.module import create_backend_context
 from tilelang.engine.lower import lower_to_host_device_ir, device_codegen, host_codegen
@@ -21,8 +19,8 @@ from tilelang.engine.param import CompiledArtifact
 from tilelang.jit.adapter import TVMFFIKernelAdapter
 from tilelang.jit.kernel import JITKernel
 from tilelang.transform import PassConfigKey
-from tilelang.utils.pass_events import compile_pass_instrumentation
-from tilelang.utils.pass_timing import build_pass_instruments, report_pass_timing_on_exit
+from tilelang.utils.pass_events import compile_pass_instrumentation, create_pass_instruments
+from tilelang.tools.pass_timing import create_pass_timing_tool
 
 CompileUnitResult = tuple[int, dict[str, Any], JITKernel | None, Exception | None]
 
@@ -33,7 +31,9 @@ def compile_grouped_unit_tvm_ffi(
     elaborate_func: Callable[..., PrimFunc],
 ) -> list[CompileUnitResult]:
     """Compile one grouped unit under one shared instrumentation session."""
-    with compile_pass_instrumentation(name="grouped-tvm-ffi"):
+    timing_tool = create_pass_timing_tool(compile_args.pass_configs)
+    tools = [timing_tool] if timing_tool is not None else []
+    with compile_pass_instrumentation(name="grouped-tvm-ffi", tools=tools):
         return _compile_grouped_unit_tvm_ffi_in_session(unit_items, compile_args, elaborate_func)
 
 
@@ -58,18 +58,6 @@ def _compile_grouped_unit_tvm_ffi_in_session(
         dump_ir_path = pass_configs.get(PassConfigKey.TL_DUMP_IR_DIR, "./dump_ir")
         base_pass_instruments.append(tvm.ir.instrument.DumpIR(dump_dir=dump_ir_path))
 
-    enable_profile = pass_configs.get(PassConfigKey.TL_PASS_PROFILE) or env.is_pass_profile_enabled()
-    profile_threshold_ms = None
-    if enable_profile:
-        profile_threshold_ms = resolve_pass_profile_threshold_ms(
-            pass_configs,
-            PassConfigKey.TL_PASS_PROFILE_THRESHOLD_MS,
-            env.get_pass_profile_threshold_ms,
-        )
-
-    def create_pass_instruments():
-        return build_pass_instruments(base_pass_instruments, profile_threshold_ms)
-
     unit_results: list[CompileUnitResult] = []
     lowered_items: list[dict[str, Any]] = []
     backend_context = create_backend_context(
@@ -85,13 +73,13 @@ def _compile_grouped_unit_tvm_ffi_in_session(
             unique_symbol = f"{original_symbol}_gc_{idx}"
             program = program.with_attr("global_symbol", unique_symbol)
 
-            config_instruments, timing_inst = create_pass_instruments()
+            lower_context = f"stage=grouped-lower, config={idx}, kernel={unique_symbol}"
+            config_instruments = [
+                *create_pass_instruments(context=lower_context),
+                *base_pass_instruments,
+            ]
             with tvm.arith.Z3ContextScope():
                 with (
-                    report_pass_timing_on_exit(
-                        timing_inst,
-                        context=f"stage=grouped-lower, config={idx}, kernel={unique_symbol}",
-                    ),
                     tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=config_instruments),
                     compile_args.target,
                 ):
@@ -100,12 +88,12 @@ def _compile_grouped_unit_tvm_ffi_in_session(
                         backend_context,
                     )
 
-                host_instruments, host_timing_inst = create_pass_instruments()
+                host_context = f"stage=grouped-host, config={idx}, kernel={unique_symbol}"
+                host_instruments = [
+                    *create_pass_instruments(context=host_context),
+                    *base_pass_instruments,
+                ]
                 with (
-                    report_pass_timing_on_exit(
-                        host_timing_inst,
-                        context=f"stage=grouped-host, config={idx}, kernel={unique_symbol}",
-                    ),
                     tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=host_instruments),
                     normalized_target,
                 ):
@@ -147,14 +135,14 @@ def _compile_grouped_unit_tvm_ffi_in_session(
         merged_device_mod = tvm.IRModule(merged_funcs, attrs=merged_attrs)
 
         reference_target = lowered_items[0]["target"]
-        device_instruments, device_timing_inst = create_pass_instruments()
         grouped_config_indices = ",".join(str(item["idx"]) for item in lowered_items)
+        device_context = f"stage=grouped-device, configs=[{grouped_config_indices}]"
+        device_instruments = [
+            *create_pass_instruments(context=device_context),
+            *base_pass_instruments,
+        ]
         with (
             tvm.arith.Z3ContextScope(),
-            report_pass_timing_on_exit(
-                device_timing_inst,
-                context=f"stage=grouped-device, configs=[{grouped_config_indices}]",
-            ),
             tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=device_instruments),
             reference_target,
         ):

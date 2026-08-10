@@ -33,6 +33,10 @@ _current_compile_instrumentation: ContextVar[CompilePassInstrumentationSession |
     "tilelang_compile_pass_instrumentation",
     default=None,
 )
+_current_pass_instrument_context: ContextVar[str | None] = ContextVar(
+    "tilelang_pass_instrument_context",
+    default=None,
+)
 # This lock protects only registration and the short factory snapshot at
 # session creation. Pass callbacks, pipeline scopes, and codegen never hold it.
 _tool_registry_lock = threading.RLock()
@@ -70,6 +74,9 @@ class CodegenEvent:
 
 class PassInstrumentationTool:
     """Per-compile extension point for pass and codegen developer tools."""
+
+    pass_instrument_priority = 0
+    """Ordering key for PassContext callbacks; lower values run first."""
 
     def create_pass_instrument(self) -> object | None:
         """Create fresh callback state for one TVM PassContext."""
@@ -110,14 +117,19 @@ class CompilePassInstrumentationSession:
         self.name = name
         self.tools = tuple(tools)
 
-    def create_pass_instruments(self) -> list[object]:
-        """Create independent instruments for one TVM PassContext."""
-        instruments = []
-        for tool in self.tools:
-            instrument = tool.create_pass_instrument()
-            if instrument is not None:
-                instruments.append(instrument)
-        return instruments
+    def create_pass_instruments(self, *, context: str | None = None) -> list[object]:
+        """Create independent, ordered instruments for one TVM PassContext."""
+        token = _current_pass_instrument_context.set(None if context is None else str(context))
+        try:
+            instruments = []
+            for position, tool in enumerate(self.tools):
+                instrument = tool.create_pass_instrument()
+                if instrument is not None:
+                    instruments.append((tool.pass_instrument_priority, position, instrument))
+        finally:
+            _current_pass_instrument_context.reset(token)
+        instruments.sort(key=lambda item: (item[0], item[1]))
+        return [instrument for _, _, instrument in instruments]
 
     @contextmanager
     def pipeline_scope(self, base_phase: str) -> Generator[None, None, None]:
@@ -172,6 +184,11 @@ def current_compile_pass_instrumentation() -> CompilePassInstrumentationSession 
     return _current_compile_instrumentation.get()
 
 
+def current_pass_instrument_context() -> str | None:
+    """Return metadata for the PassContext whose instruments are being created."""
+    return _current_pass_instrument_context.get()
+
+
 def _create_default_tools() -> list[PassInstrumentationTool]:
     """Instantiate one immutable snapshot of the global tool configuration."""
     with _tool_registry_lock:
@@ -218,10 +235,15 @@ def compile_pass_instrumentation(
             _current_compile_instrumentation.reset(token)
 
 
-def create_pass_instruments() -> list[object]:
-    """Create instruments for the active compile session, if any."""
+def create_pass_instruments(*, context: str | None = None) -> list[object]:
+    """Create instruments for the active compile session, if any.
+
+    ``context`` is descriptive metadata for this particular TVM PassContext.
+    Tools can snapshot it during callback creation without changing their
+    ``create_pass_instrument`` interface.
+    """
     session = current_compile_pass_instrumentation()
-    return session.create_pass_instruments() if session is not None else []
+    return session.create_pass_instruments(context=context) if session is not None else []
 
 
 @contextmanager
@@ -506,6 +528,7 @@ __all__ = [
     "create_pass_instruments",
     "instrument_current_pass_context",
     "current_compile_pass_instrumentation",
+    "current_pass_instrument_context",
     "current_pass_phase",
     "instrument_codegen",
     "pass_phase",
