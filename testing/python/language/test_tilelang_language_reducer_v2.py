@@ -16,6 +16,21 @@ _PROJECTED_ROW_LOOP_LAYOUT = T.Fragment(
     replicate=4,
 )
 
+_VECTORIZED_OUTPUT_EXTENT = 256
+_VECTORIZED_REDUCTION_EXTENT = 256
+_VECTORIZED_LOCAL_EXTENT = 8
+_VECTORIZED_THREADS = 32
+
+_VECTORIZED_OUTPUT_LAYOUT = T.Fragment(
+    (_VECTORIZED_OUTPUT_EXTENT,),
+    forward_fn=lambda i: (i // _VECTORIZED_LOCAL_EXTENT, i % _VECTORIZED_LOCAL_EXTENT),
+)
+
+_VECTORIZED_REDUCTION_LAYOUT = T.Fragment(
+    (_VECTORIZED_REDUCTION_EXTENT,),
+    forward_fn=lambda k: (k // _VECTORIZED_LOCAL_EXTENT, k % _VECTORIZED_LOCAL_EXTENT),
+)
+
 
 @T.prim_func
 def reducer_sum_v2(A: T.Tensor((8,), T.float32), B: T.Tensor((1,), T.float32)):
@@ -172,6 +187,52 @@ def mixed_projection_and_fallback_v2(
             B[0] = result[0]
 
 
+@T.prim_func
+def vectorized_independent_outputs_reducer_v2(
+    A: T.Tensor((_VECTORIZED_OUTPUT_EXTENT,), T.float16),
+    C: T.Tensor((_VECTORIZED_OUTPUT_EXTENT,), T.float16),
+    B: T.Tensor((_VECTORIZED_OUTPUT_EXTENT,), T.float16),
+):
+    with T.Kernel(1, threads=_VECTORIZED_THREADS):
+        total = T.alloc_reducer((_VECTORIZED_OUTPUT_EXTENT,), T.float16, op="sum")
+        result = T.alloc_fragment((_VECTORIZED_OUTPUT_EXTENT,), T.float16)
+        T.annotate_layout({result: _VECTORIZED_OUTPUT_LAYOUT})
+
+        T.reducer_init(total)
+        for i in T.Parallel(
+            _VECTORIZED_OUTPUT_EXTENT,
+            loop_layout=_VECTORIZED_OUTPUT_LAYOUT,
+        ):
+            T.reducer_update(total[i], A[i])
+            T.reducer_update(total[i], C[i])
+        T.finalize_reducer(total, result)
+        T.copy(result, B)
+
+
+@T.prim_func
+def vectorized_local_partial_reducer_v2(
+    A: T.Tensor((_VECTORIZED_REDUCTION_EXTENT,), T.float16),
+    B: T.Tensor((1,), T.float16),
+):
+    with T.Kernel(1, threads=_VECTORIZED_THREADS):
+        src = T.alloc_fragment((_VECTORIZED_REDUCTION_EXTENT,), T.float16)
+        T.annotate_layout({src: _VECTORIZED_REDUCTION_LAYOUT})
+        T.copy(A, src)
+
+        total = T.alloc_reducer((1,), T.float16, op="sum")
+        result = T.alloc_fragment((1,), T.float16)
+        T.reducer_init(total)
+        for k in T.Parallel(
+            _VECTORIZED_REDUCTION_EXTENT,
+            loop_layout=_VECTORIZED_REDUCTION_LAYOUT,
+        ):
+            T.reducer_update(total[0], src[k])
+        T.finalize_reducer(total, result)
+
+        if T.get_thread_binding() == 0:
+            B[0] = result[0]
+
+
 def test_reducer_v2_frontend_ir():
     source = reducer_sum_v2.script()
     assert 'scope="local.reducer"' in source
@@ -284,6 +345,26 @@ def test_reducer_v2_projected_and_canonical_groups_can_mix():
     assert "tl::AllReduce<tl::SumOp, 128" in source
 
 
+def test_reducer_v2_vectorizes_independent_output_updates():
+    source = tilelang.compile(
+        vectorized_independent_outputs_reducer_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    ).get_kernel_source()
+    assert "tl::add2" in source
+    assert "tl::AllReduce<" not in source
+
+
+def test_reducer_v2_vectorizes_thread_local_partial_updates():
+    source = tilelang.compile(
+        vectorized_local_partial_reducer_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    ).get_kernel_source()
+    assert "tl::add2" in source
+    assert "tl::AllReduce<tl::SumOp, 32, 1" in source
+
+
 @tilelang.testing.requires_cuda
 def test_reducer_v2_unique_owner_local_complete_correctness():
     A = torch.arange(1, 9, dtype=torch.float32, device="cuda")
@@ -339,6 +420,42 @@ def test_reducer_v2_mixed_projection_and_fallback_correctness():
         pass_configs=_COMPILE_FLAGS,
     )(A, C)
     torch.testing.assert_close(B, (A.sum() + C.sum()).reshape(1), atol=0, rtol=0)
+
+
+@tilelang.testing.requires_cuda
+def test_reducer_v2_vectorized_independent_output_correctness():
+    A = torch.arange(
+        _VECTORIZED_OUTPUT_EXTENT,
+        dtype=torch.float16,
+        device="cuda",
+    )
+    C = torch.arange(
+        _VECTORIZED_OUTPUT_EXTENT,
+        dtype=torch.float16,
+        device="cuda",
+    ).flip(0)
+    B = tilelang.compile(
+        vectorized_independent_outputs_reducer_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    )(A, C)
+    torch.testing.assert_close(B, A + C, atol=0, rtol=0)
+
+
+@tilelang.testing.requires_cuda
+def test_reducer_v2_vectorized_local_partial_correctness():
+    A = torch.arange(
+        1,
+        _VECTORIZED_REDUCTION_EXTENT + 1,
+        dtype=torch.float16,
+        device="cuda",
+    )
+    B = tilelang.compile(
+        vectorized_local_partial_reducer_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    )(A)
+    torch.testing.assert_close(B, A.sum().reshape(1), atol=1e-1, rtol=1e-3)
 
 
 @tilelang.testing.requires_cuda

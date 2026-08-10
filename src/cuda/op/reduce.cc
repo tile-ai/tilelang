@@ -22,11 +22,7 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
   }
 
   static int GetPreferredVectorizedSize(DataType dt, Target target) {
-    if (!TargetIsCuda(target)) {
-      return 1;
-    }
-    bool supports_fp32x2 = TargetHasSMVersionGE(target, 100);
-    return backend::reduce::GetPreferredVectorizedSize(dt, supports_fp32x2);
+    return backend::reduce::GetTargetPreferredVectorizedSize(dt, target);
   }
 
   static std::string MakeBatchAllReduce(std::string reducer,

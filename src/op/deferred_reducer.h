@@ -48,6 +48,15 @@ constexpr const char *kParallelMultiplicity = "tl.parallel_multiplicity";
 constexpr const char *kParallelPartitionRequired =
     "tl.parallel_partition_required";
 
+/*!
+ * \brief Planned reducer update retained until physical-layout lowering.
+ *
+ * The AttrStmt node is the ReduceType and its value is the logical
+ * contribution. Reducer-aware vectorization consumes this marker after buffer
+ * layouts and parallel-loop ownership have been materialized.
+ */
+constexpr const char *kReducerUpdate = "tl.reducer_update";
+
 } // namespace attr
 
 class ReducerInfoNode : public ffi::Object {

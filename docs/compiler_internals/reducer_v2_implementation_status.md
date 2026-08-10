@@ -505,8 +505,10 @@ tl.parallel_partition_required
 
 它要求 `LowerTileOp` 必须按 planner 已接受的 loop layout 做 physical thread
 partition，但不额外套用 generic `REP == 0` guard。partition 后 marker 会被移除。带这
-两类 reducer marker 的 loop 都禁止普通 vectorization，以免把对同一个 partial slot 的
-loop-carried dependency 错误改写为并行 stores。
+两类 reducer marker 的 loop 在 logical layout 阶段都禁止普通 vectorization，以免把对
+同一个 partial slot 的 loop-carried dependency 错误改写为并行 stores。layout 和
+Parallel ownership 物化之后，下面的 reducer-aware vectorizer 才会重新判断是否存在
+安全的 packed 路径。
 
 这解决了 PR #2881 临时参数的问题：
 
@@ -521,6 +523,33 @@ PartitionLoop(..., fully_replicated_reducer_buffers)
 如果 loop layout 的 `ReplicateExtent == 1`，每个 logical iteration 本来就只执行一次，不需要额外 guard。
 
 如果存在 replicas，marker 才会选择 `REP == 0` 的 canonical physical execution。这样既避免 contribution 重复，也不会错误地把整个 finalize collective 放进 `REP == 0` 条件。
+
+### 8.5 Physical reducer-aware vectorization
+
+`ReducerUpdateOp::Lower` 还会在 combine store 外保留一个短生命周期的
+`tl.reducer_update` marker。marker 携带 reduction algebra 和原始 contribution，但不
+参与 ownership 决策。`LowerTileOp` 完成 Parallel partition 和 Fragment buffer remap
+后，所有访问都已经是实际的 per-thread physical indices；此时才消费该 marker。
+
+第一版识别两种互斥模式：
+
+1. reducer target slot 沿 innermost physical loop 连续变化。vectorizer 同时证明普通
+   loads/stores 和 reducer target 都可以按两 lane 访问，然后生成 elementwise packed
+   combine，例如 fp16 sum 的 `tl::add2`。
+2. reducer target slot 对 innermost physical loop 不变，而 contribution 是最后一维上
+   对齐、连续的 direct `BufferLoad`。lowering 分配一个两 lane local vector partial，先
+   对 contribution pairs 做 packed accumulation，再把两个 lane 横向 combine 一次并
+   更新原 scalar partial。
+
+第二条路径不能交给普通 vectorizer：普通 local-buffer heuristic 可能忽略 invariant
+scalar store，把同址累加错误地改写为多个 vector lane stores。reducer-aware 路径因此
+单独验证 target slot；无法证明 target 连续、contribution 连续、loop extent 可整除或
+target capability 时，保留原 scalar loop。
+
+当前 packed width 固定为 2，与 `T.reduce_sum` 的 target capability 共用：CUDA
+fp16/bf16 支持，SM100+ 还支持 fp32；其他 target 先回退。该优化会改变浮点 reduction
+tree，但仍满足 reducer 已要求的 associative/commutative contract，不承诺 bitwise
+reproducibility。所有 `tl.reducer_update` marker 都在 `VerifyReducerLowered` 前移除。
 
 ## 9. Finalize correctness baseline
 

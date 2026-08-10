@@ -246,6 +246,8 @@ Stmt ReducerUpdateOpNode::Lower(const LowerArgs &lower_args,
   Stmt update = BufferStore(
       partial, MakeReduceCombine(combine_type, accumulator, contribution),
       physical_indices);
+  update = AttrStmt(combine_type, attr::kReducerUpdate, contribution,
+                    std::move(update));
   if (partition_required) {
     update = AttrStmt(Integer(0), attr::kParallelPartitionRequired, Integer(1),
                       std::move(update));

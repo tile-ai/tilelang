@@ -10,6 +10,7 @@
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
 
+#include <optional>
 #include <string>
 
 namespace tvm {
@@ -96,6 +97,18 @@ TVM_DLL PrimExpr MakeReduceIdentity(const ReduceType &type, DataType dtype);
 TVM_DLL PrimExpr MakeReduceCombine(const ReduceType &type,
                                    const PrimExpr &accumulator,
                                    const PrimExpr &contribution);
+
+/*!
+ * \brief Construct a two-lane packed combine when the reduction algebra has a
+ * packed intrinsic.
+ *
+ * Returns std::nullopt for unsupported reduction types or lane widths. Target
+ * capability is deliberately checked by the caller; this helper only shares
+ * the algebra and intrinsic construction between reduction lowerings.
+ */
+TVM_DLL std::optional<PrimExpr>
+TryMakePackedReduceCombine(const ReduceType &type, const PrimExpr &accumulator,
+                           const PrimExpr &contribution);
 
 /*! \brief Return the runtime reducer template name used by GPU backends. */
 TVM_DLL std::string ReduceCodegenName(const ReduceType &type);

@@ -175,6 +175,47 @@ PrimExpr MakeReduceCombine(const ReduceType &type, const PrimExpr &accumulator,
   LOG(FATAL) << "Unsupported reduce type: " << type->type;
 }
 
+std::optional<PrimExpr>
+TryMakePackedReduceCombine(const ReduceType &type, const PrimExpr &accumulator,
+                           const PrimExpr &contribution) {
+  ICHECK(type.defined());
+  if (accumulator.dtype().lanes() != 2) {
+    return std::nullopt;
+  }
+
+  PrimExpr rhs = contribution;
+  if (rhs.dtype().lanes() == 1) {
+    rhs = Broadcast(rhs, 2);
+  }
+  if (rhs.dtype().lanes() != 2) {
+    return std::nullopt;
+  }
+  if (accumulator.dtype() != rhs.dtype()) {
+    rhs = Cast(accumulator.dtype(), rhs);
+  }
+
+  if (type->IsSum()) {
+    return Call(accumulator.dtype(), tl::add2(), {accumulator, rhs});
+  }
+  if (type->IsAbsSum()) {
+    return Call(
+        accumulator.dtype(), tl::add2(),
+        {accumulator, Call(accumulator.dtype(), tl::abs2(), {std::move(rhs)})});
+  }
+  if (type->IsMax()) {
+    return Call(accumulator.dtype(), tl::max2(), {accumulator, rhs});
+  }
+  if (type->IsMin()) {
+    return Call(accumulator.dtype(), tl::min2(), {accumulator, rhs});
+  }
+  if (type->IsAbsMax()) {
+    return Call(
+        accumulator.dtype(), tl::max2(),
+        {accumulator, Call(accumulator.dtype(), tl::abs2(), {std::move(rhs)})});
+  }
+  return std::nullopt;
+}
+
 std::string ReduceCodegenName(const ReduceType &type) {
   ICHECK(type.defined());
   if (type->IsSum() || type->IsAbsSum())

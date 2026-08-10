@@ -32,6 +32,7 @@
 #include "common/mbarrier.h"
 #include "common/pipeline_utils.h"
 #include "loop_partition.h"
+#include "reducer/vectorize_reducer.h"
 
 namespace tvm {
 namespace tl {
@@ -214,6 +215,10 @@ public:
         RemapBufferRewriter::Substitute(fptr->body, substituter.buffer_remap_);
     fptr->body =
         LayoutRemapRewriter::Substitute(fptr->body, substituter.layout_remap_);
+    // Reducer updates retain their algebra and contribution until this point.
+    // Physical buffer indices are now explicit, so vectorization can
+    // distinguish independent output lanes from a true local reduction.
+    fptr->body = VectorizeReducerUpdates(fptr->body, target.value());
     // Record whether TMA was actually used as a PrimFunc attribute so that
     // later phases (OptimizeForTarget) can choose the right pass pipeline
     // without relying on pass-context side-channel mutation.
@@ -1378,12 +1383,14 @@ private:
     // the marker can guard exactly one logical contribution.
     bool has_parallel_multiplicity = false;
     bool has_parallel_partition_required = false;
+    bool has_reducer_update = false;
     PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
       if (const auto *attr_stmt = obj.as<AttrStmtNode>()) {
         has_parallel_multiplicity |=
             attr_stmt->attr_key == attr::kParallelMultiplicity;
         has_parallel_partition_required |=
             attr_stmt->attr_key == attr::kParallelPartitionRequired;
+        has_reducer_update |= attr_stmt->attr_key == attr::kReducerUpdate;
       }
     });
     parallel_loop = parallel_loop || has_parallel_multiplicity ||
@@ -1404,11 +1411,11 @@ private:
 
     // Decide whether to vectorize:
     // - Only if there are non-local buffers or vectorizable casts
-    // - AND no reducer effect markers are present. Reducer updates carry a
-    //   loop-carried dependency even when their physical slot is local.
-    bool should_vectorize = (has_non_local || has_cast_operations) &&
-                            !has_parallel_multiplicity &&
-                            !has_parallel_partition_required;
+    // - AND no reducer update is present. Reducer-aware vectorization runs
+    //   after physical layout materialization, where it can distinguish a
+    //   loop-carried reduction from independent output lanes.
+    bool should_vectorize =
+        (has_non_local || has_cast_operations) && !has_reducer_update;
     // Lower the parallel loop using the common function
     Stmt lowered = LowerParallelLoop(
         for_node, loop_layout, CurrentThreadIndex(), analyzer_, layout_map_,

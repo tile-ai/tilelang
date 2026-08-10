@@ -765,7 +765,9 @@ epoch 只有在以下条件全部满足时才能采用 subgroup plan：
 - materialized partial shape 改为 destination layout 的 `OutputShape()`。
 - update 在所有 destination replicas 上执行，并使用独立的 partition-required marker；不能复用会产生 `REP == 0` 的 multiplicity marker。
 - finalize 直接把 local partial slots 写到 destination physical slots，不生成 AllReduce、barrier 或 workspace。
-- 带 reducer effect marker 的 loop 禁止普通 vectorization，保留 loop-carried combine dependency。
+- 带 reducer effect marker 的 loop 在 logical layout 阶段禁止普通 vectorization；physical
+  indices 物化后只能由 reducer-aware vectorizer 证明 target lanes 独立，或显式构造
+  vector partial 与 horizontal combine。证明失败时保留 scalar loop-carried combine。
 
 退出条件：M8/M32/M128 independent-output cases 生成 compact local storage 且没有 collective；seed、inner serial reduction 与 fallback numerical tests 全部通过；关闭证明路径时仍得到 canonical baseline。
 
@@ -854,7 +856,8 @@ tl.reducer_strategy = "canonical" | "auto"
 - `local.reducer` 在 backend codegen 前全部 materialize。
 - fast path 分析失败时确定性回退 baseline。
 - LocalComplete independent-output case 使用 layout-shaped compact partial，且不存在 AllReduce、named barrier 或 workspace。
-- LocalComplete inner serial reduction 保持 loop-carried combine 顺序，不被普通 vectorization 拆成同址并行 stores。
+- LocalComplete inner serial reduction 不被普通 vectorization 拆成同址并行 stores；可选
+  packed 路径必须显式构造 vector partial 与 horizontal combine，并在证明失败时回退。
 
 ### 15.4 Diagnostics
 

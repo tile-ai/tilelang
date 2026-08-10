@@ -137,6 +137,13 @@ inline int GetPreferredVectorizedSize(DataType dt,
   return 1;
 }
 
+inline int GetTargetPreferredVectorizedSize(DataType dt, Target target) {
+  if (!TargetIsCuda(target)) {
+    return 1;
+  }
+  return GetPreferredVectorizedSize(dt, TargetHasSMVersionGE(target, 100));
+}
+
 inline void CheckAllReduceWidth(int reducing_threads, int scale,
                                 const char *op_name) {
   ICHECK_GT(reducing_threads, 0)
@@ -196,6 +203,14 @@ inline PrimExpr MakeReduce(const ReduceOpNode &op, int vsize,
     }
     LOG(FATAL) << "Unsupported reduce type: " << op.type->type;
     return PrimExpr();
+  }
+
+  if (!use_nan_op) {
+    std::optional<PrimExpr> packed =
+        tl::TryMakePackedReduceCombine(op.type, acc, rhs);
+    if (packed.has_value()) {
+      return packed.value();
+    }
   }
 
   if (op.type->IsSum()) {

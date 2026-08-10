@@ -1040,8 +1040,9 @@ private:
 
   void VisitStmt_(const AttrStmtNode *op) final {
     ICHECK(op->attr_key != attr::kParallelMultiplicity &&
-           op->attr_key != attr::kParallelPartitionRequired)
-        << "Unconsumed reducer parallel-effect marker reached backend lowering";
+           op->attr_key != attr::kParallelPartitionRequired &&
+           op->attr_key != attr::kReducerUpdate)
+        << "Unconsumed reducer lowering marker reached backend lowering";
     StmtExprVisitor::VisitStmt_(op);
   }
 
