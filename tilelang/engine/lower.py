@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import nullcontext
 import tilelang.transform
 from tilelang import tvm as tvm
 from tvm import tirx
@@ -11,6 +12,11 @@ from tvm.target import Target
 from tilelang.engine.param import KernelParam, CompiledArtifact
 from tilelang.engine.semantic_check import PreLowerSemanticCheck
 from tilelang.backend.module import BackendContext, create_backend_context
+from tilelang.instrumentation import (
+    compile_pass_instrumentation,
+    current_compile_pass_instrumentation,
+    instrument_current_pass_context,
+)
 
 
 def is_cpu_device_backend(target: Target):
@@ -105,30 +111,34 @@ def lower_to_host_device_ir(
     context: BackendContext,
     runtime_only: bool = False,
 ) -> tuple[tvm.IRModule, tvm.IRModule, list[KernelParam] | None, Target, Target]:
-    """Lower input TIR with an already resolved backend context."""
+    """Lower to split IR under a per-compilation instrumentation session."""
 
-    mod = func_or_mod
-    params = None
-    if isinstance(func_or_mod, tirx.PrimFunc):
-        func = func_or_mod
-        params = extrac_params(func) if not runtime_only else None
-        mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+    has_session = current_compile_pass_instrumentation() is not None
+    with compile_pass_instrumentation(name="lower-to-host-device-ir"):
+        attach_instruments = nullcontext() if has_session else instrument_current_pass_context()
+        with attach_instruments:
+            mod = func_or_mod
+            params = None
+            if isinstance(func_or_mod, tirx.PrimFunc):
+                func = func_or_mod
+                params = extrac_params(func) if not runtime_only else None
+                mod = tvm.IRModule({func.attrs["global_symbol"]: func})
 
-    target = context.target
-    target_host = context.target_host
+            target = context.target
+            target_host = context.target_host
 
-    _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))
-    _is_device_call = get_device_call(is_device_c=is_cpu_device_backend(target))
+            _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))
+            _is_device_call = get_device_call(is_device_c=is_cpu_device_backend(target))
 
-    # Run backend-independent semantic checks before target-specific lowering.
-    PreLowerSemanticCheck(mod)
+            # Run backend-independent semantic checks before target-specific lowering.
+            PreLowerSemanticCheck(mod)
 
-    mod = context.lower(mod)
+            mod = context.lower(mod)
 
-    host_mod = tirx.transform.Filter(_is_host_call)(mod)
-    device_mod = tirx.transform.Filter(_is_device_call)(mod)
+            host_mod = tirx.transform.Filter(_is_host_call)(mod)
+            device_mod = tirx.transform.Filter(_is_device_call)(mod)
 
-    return host_mod, device_mod, params, target, target_host
+            return host_mod, device_mod, params, target, target_host
 
 
 def lower_with_context(
@@ -148,14 +158,17 @@ def lower_with_context(
     default.
     """
 
-    with tvm.arith.Z3ContextScope():
-        return _lower_with_context_impl(
-            func_or_mod,
-            context,
-            runtime_only=runtime_only,
-            enable_host_codegen=enable_host_codegen,
-            enable_device_compile=enable_device_compile,
-        )
+    has_session = current_compile_pass_instrumentation() is not None
+    with compile_pass_instrumentation(name="lower-with-context"):
+        attach_instruments = nullcontext() if has_session else instrument_current_pass_context()
+        with attach_instruments, tvm.arith.Z3ContextScope():
+            return _lower_with_context_impl(
+                func_or_mod,
+                context,
+                runtime_only=runtime_only,
+                enable_host_codegen=enable_host_codegen,
+                enable_device_compile=enable_device_compile,
+            )
 
 
 def _lower_with_context_impl(
@@ -217,11 +230,15 @@ def lower(
     default.
     """
 
-    context = create_backend_context(target, target_host, "auto")
-    return lower_with_context(
-        func_or_mod,
-        context,
-        runtime_only=runtime_only,
-        enable_host_codegen=enable_host_codegen,
-        enable_device_compile=enable_device_compile,
-    )
+    has_session = current_compile_pass_instrumentation() is not None
+    with compile_pass_instrumentation(name="lower"):
+        attach_instruments = nullcontext() if has_session else instrument_current_pass_context()
+        with attach_instruments:
+            context = create_backend_context(target, target_host, "auto")
+            return lower_with_context(
+                func_or_mod,
+                context,
+                runtime_only=runtime_only,
+                enable_host_codegen=enable_host_codegen,
+                enable_device_compile=enable_device_compile,
+            )

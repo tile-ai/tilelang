@@ -98,6 +98,29 @@ struct fp8_e5_t {
     return static_cast<float>(static_cast<hip_fp8_e5_t>(*this));
   }
 };
+
+template <typename ScalarType, typename PackedType>
+__device__ __forceinline__ ScalarType
+tl_fp8x2_get_lane(const PackedType &packed, int lane) {
+  ScalarType result;
+  result.data = static_cast<unsigned char>(
+      (static_cast<unsigned int>(packed.__x) >> (lane * 8)) & 0xffu);
+  return result;
+}
+
+template <typename PackedType, typename ScalarType>
+__device__ __forceinline__ void tl_fp8x2_set_lane(PackedType &packed, int lane,
+                                                  ScalarType value) {
+  if (lane == 0) {
+    // The result carrier is uninitialized before its first lane is written.
+    packed.__x = static_cast<decltype(packed.__x)>(value.data);
+    return;
+  }
+  packed.__x = static_cast<decltype(packed.__x)>(
+      (static_cast<unsigned int>(packed.__x) & 0x00ffu) |
+      (static_cast<unsigned int>(value.data) << 8));
+}
+
 // Note: E8M0 types are not supported in current HIP version
 // using fp8_e8_t = __hip_fp8_e8m0_fnuz;
 // using fp8_e8_2_t = __hip_fp8x2_e8m0_fnuz;

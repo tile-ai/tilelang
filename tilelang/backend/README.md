@@ -203,6 +203,12 @@ PreLowerSemanticCheck(mod)  # shared frontend boundary
 mod = context.lower(mod)    # selected backend pipeline
 ```
 
+The complete compiler entry point owns any pass-instrumentation session.
+`BackendContext.lower` and `PassPipeline.lower` never create one implicitly;
+the pipeline only contributes its backend-specific phase scope when a session
+is already active. Calling the backend interface without a session still runs
+the lowering pipeline normally, without developer-tool instrumentation.
+
 The ordered pass list lives in `tilelang/<backend>/pipeline.py`. Backend-only
 passes must be called there rather than dispatched from
 `tilelang/engine/lower.py`. A backend pipeline may use small shared helpers from

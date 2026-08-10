@@ -20,6 +20,7 @@ Programmatic API::
 from __future__ import annotations
 
 from .core import (
+    create_pass_instrument,
     enable,
     disable,
     reset,
@@ -37,6 +38,7 @@ __all__ = [
     "STATUS_FAILED",
     "STATUS_SKIPPED",
     "LowerRecord",
+    "create_pass_instrument",
     "disable",
     "enable",
     "lower_trace",

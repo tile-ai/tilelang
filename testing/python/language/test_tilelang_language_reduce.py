@@ -733,7 +733,6 @@ def test_finalize_reducer_correctness(op, dtype, block_M, block_N, batch):
     torch.testing.assert_close(B, _ref(A, op), atol=1e-2, rtol=1e-2)
 
 
-@tilelang.testing.requires_cuda
 def test_finalize_reducer_short_parallel_extent():
     extent = 8
     threads = 128
@@ -757,7 +756,6 @@ def test_finalize_reducer_short_parallel_extent():
     torch.testing.assert_close(B, A.sum().reshape(1), atol=0, rtol=0)
 
 
-@tilelang.testing.requires_cuda
 def test_finalize_reducer_mixed_parallel_extents():
     extent = 8
     threads = 128
