@@ -1,10 +1,8 @@
 # Persistent, warp-specialized 2-CTA TCGEN05 GEMM with Stream-K scheduling.
 #
-# ``gemm_streamk_2cta`` splits the first wave along K and uses a workspace
-# fixup before computing the remaining data-parallel tiles. Peers publish
-# independent partial accumulations to ``Workspace`` and atomically signal the
-# number of K iterations they covered; the peer computing the final K interval
-# of a tile performs the fixup and epilogue.
+# The under-filled tail wave is split along K across resident clusters. Partial
+# accumulators are published to ``Workspace``; the cluster covering the final K
+# interval performs the fixup. Remaining tiles use data-parallel scheduling.
 
 import argparse
 
@@ -16,7 +14,6 @@ from tilelang.profiler import do_bench
 
 
 def get_streamk_tiles(total_tiles, num_clusters):
-    """Split only the under-filled tail wave across the resident clusters."""
     return total_tiles % num_clusters
 
 
@@ -39,15 +36,6 @@ def gemm_streamk_2cta(
     num_stages,
     use_tma_store=True,
 ):
-    """Persistent 2-CTA TCGEN05 GEMM with Stream-K decomposition.
-
-    Each resident cluster receives a contiguous interval of K iterations from
-    the first wave. Complete output tiles bypass the workspace. Split tiles use
-    CUTLASS-style separate reduction: peers publish independent partials in
-    parallel, then the peer computing the final K interval performs the fixup
-    and epilogue. Remaining tiles use ordinary data-parallel persistent
-    scheduling.
-    """
     M, N, K = T.const("M, N, K")
     A: T.Tensor[[M, K], in_dtype]
     B: T.Tensor[[K, N], in_dtype]

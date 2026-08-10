@@ -1,6 +1,11 @@
-# Persistent, warp-specialized TCGEN05 GEMMs using the static
-# PersistentTileScheduler. The Stream-K variant lives in
-# ``gemm_tcgen5mma_ws_persistent_streamk.py``.
+# Persistent, warp-specialized TCGEN05 GEMM using PersistentTileScheduler.
+#
+# Each warp role (TMA / tcgen5 MMA / epilogue) creates its own scheduler instance
+# and drives a single ``while sched.valid()`` loop. The scheduler owns the only
+# iteration clock: ``sched.current_iter`` drives pipeline phase /
+# ``sched.current_iter & 1`` double-buffering; ``sched.m_idx`` /
+# ``sched.n_idx`` are the tile coords. One clock, held by the scheduler -- no
+# separate ``for w in range(waves)`` counter.
 
 import argparse
 
@@ -26,12 +31,6 @@ def gemm_persistent(
     group_size,
     use_tma_store,
 ):
-    """Persistent single-CTA TCGEN05 GEMM with warp specialization.
-
-    Warp 0 issues TMA loads, warp 1 issues TCGEN05 MMAs into tensor memory,
-    and warps 4-7 run the epilogue. Tiles are scheduled with the static
-    PersistentTileScheduler.
-    """
     M, N, K = T.const("M, N, K")
 
     A: T.Tensor[[M, K], in_dtype]
@@ -149,12 +148,6 @@ def gemm_persistent_2cta(
     group_size,
     use_tma_store,
 ):
-    """Persistent 2-CTA TCGEN05 GEMM with warp specialization.
-
-    A 2-CTA cluster splits each output tile in N: each CTA loads half of B and
-    the TCGEN05 MMA accumulates both halves into tensor memory, so the
-    epilogue only runs in one of the two CTAs.
-    """
     M, N, K = T.const("M, N, K")
 
     A: T.Tensor[[M, K], in_dtype]
