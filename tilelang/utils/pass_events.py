@@ -15,7 +15,7 @@ different output models.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -35,7 +35,7 @@ _pipeline_scope_providers: dict[str, Callable[[str], AbstractContextManager]] = 
 
 
 @contextmanager
-def pass_phase(name: str | None):
+def pass_phase(name: str | None) -> Generator[None, None, None]:
     """Attach a phase label to pass events emitted inside this scope."""
     token = _current_pass_phase.set(None if name is None else str(name))
     try:
@@ -89,7 +89,7 @@ def unregister_pipeline_scope_provider(name: str) -> None:
 
 
 @contextmanager
-def pass_pipeline(name: str) -> Iterator[None]:
+def pass_pipeline(name: str) -> Generator[None, None, None]:
     """Run a backend pipeline under its phase and registered tool scopes."""
     base_phase = f"pipeline_{name}"
     with _provider_lock:

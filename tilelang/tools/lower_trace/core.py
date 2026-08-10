@@ -54,7 +54,7 @@ from tilelang.utils.pass_events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Generator
 
 STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
@@ -537,7 +537,7 @@ def _abort_active_instruments(error: BaseException) -> None:
 
 
 @contextlib.contextmanager
-def _lower_trace_pipeline_scope(base_phase: str):
+def _lower_trace_pipeline_scope(base_phase: str) -> Generator[None, None, None]:
     """Provide run/phase lifecycle around an explicitly instrumented pipeline."""
     global _run_counter, _run_dir
 
