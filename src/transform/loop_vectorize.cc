@@ -249,6 +249,11 @@ public:
                 << "\n";
     }
 
+    // Classify before selecting a strategy so physical buffer scope is not
+    // overloaded with semantic properties such as broadcast or scalarization.
+    // SeqStmt bodies stay conservative; simple memory loops may defer
+    // local/fragment and cast constraints, while must-scalarize constraints
+    // always take precedence.
     VectorConstraintSummary constraints = SummarizeConstraints(verbose);
     vector_size_ = SelectVectorSize(constraints, has_seq_stmt, verbose);
 
@@ -282,6 +287,11 @@ private:
   }
 
   bool IsBroadcastLoad(const BufferVectorInfo &info) const {
+    // A loop-invariant non-local load becomes one scalar load broadcast to all
+    // lanes, not a vector memory access. DecoupleTypeCast also does not create
+    // a cast buffer for it, so classify it separately from memory accesses.
+    // Stores are never broadcasts: same-address lane stores carry ordering
+    // semantics and are either marked must-scalarize or kept as memory access.
     if (info.is_store || info.indices.empty() || !inner_for_) {
       return false;
     }
@@ -323,7 +333,11 @@ private:
       std::cerr << "  [" << (info.is_cast ? "cast" : "call")
                 << "] -> vector_size=" << info.vector_size;
     }
-    std::cerr << " [" << ConstraintKindName(kind) << "]\n";
+    if (kind != VectorConstraintKind::kCall &&
+        kind != VectorConstraintKind::kCast) {
+      std::cerr << " [constraint=" << ConstraintKindName(kind) << "]";
+    }
+    std::cerr << "\n";
   }
 
   VectorConstraintSummary SummarizeConstraints(bool verbose) const {
@@ -365,12 +379,18 @@ private:
       }
     }
     if (verbose) {
-      std::cerr << "  Computed constraints: must_scalarize="
+      int legacy_local_fragment_min =
+          arith::ZeroAwareGCD(summary.local_min, summary.broadcast_load_min);
+      // Keep the established summary for log consumers. Historically,
+      // local_fragment_min also contained non-local broadcast loads.
+      std::cerr << "  Computed mins: local_fragment_min="
+                << legacy_local_fragment_min
+                << ", memory_min=" << summary.memory_min
+                << ", call_node_min=" << summary.call_min << "\n";
+      std::cerr << "  Classified constraints: must_scalarize="
                 << (summary.requires_scalarization ? "true" : "false")
-                << ", memory=" << summary.memory_min
                 << ", local=" << summary.local_min
-                << ", broadcast_load=" << summary.broadcast_load_min
-                << ", call=" << summary.call_min << "\n";
+                << ", broadcast_load=" << summary.broadcast_load_min << "\n";
     }
     return summary;
   }
@@ -378,6 +398,9 @@ private:
   int RevalidateDeferredAccesses(int vector_size,
                                  const std::vector<BufferVectorInfo> &accesses,
                                  bool verbose) const {
+    // The simple memory strategy may select a width larger than a deferred
+    // local/fragment or broadcast-load constraint. Re-check its indices at the
+    // selected boundary and fold the original width back in when needed.
     for (const BufferVectorInfo &info : accesses) {
       if (vector_size <= info.vector_size || info.indices.empty()) {
         continue;
@@ -392,7 +415,7 @@ private:
         int old_vector_size = vector_size;
         vector_size = arith::ZeroAwareGCD(vector_size, info.vector_size);
         if (verbose) {
-          std::cerr << "  [Re-validate] Deferred buffer '" << info.buffer->name
+          std::cerr << "  [Re-validate] Local buffer '" << info.buffer->name
                     << "' not invariant at vector_size=" << old_vector_size
                     << ", GCD with " << info.vector_size
                     << " -> vector_size=" << vector_size << "\n";
@@ -415,6 +438,8 @@ private:
         arith::ZeroAwareGCD(summary.local_min, summary.broadcast_load_min);
     int selected;
     if (has_seq_stmt) {
+      // Multiple statements may carry interactions not represented by the
+      // simple single-store optimization, so include every constraint.
       selected = arith::ZeroAwareGCD(
           arith::ZeroAwareGCD(deferred_min, summary.memory_min),
           summary.call_min);
@@ -423,24 +448,29 @@ private:
                   << " -> vector_size=" << selected << "\n";
       }
     } else if (summary.has_memory_access) {
+      // For a simple memory loop, local/fragment accesses do not impose memory
+      // alignment constraints. Cast constraints are also deferred because
+      // DecoupleTypeCast later splits mixed-type operations into separate
+      // loops, allowing memory copies to retain their wider vector width.
       selected =
           arith::ZeroAwareGCD(summary.memory_min, summary.non_cast_call_min);
       if (verbose) {
-        std::cerr << "  [Strategy] Has vector memory access, using memory="
-                  << summary.memory_min
-                  << ", non_cast_call=" << summary.non_cast_call_min
-                  << " (deferring local=" << summary.local_min
-                  << ", broadcast_load=" << summary.broadcast_load_min << ")"
+        std::cerr << "  [Strategy] Has memory buffers (simple case), using "
+                  << "memory_min=" << summary.memory_min
+                  << ", non_cast_call_node_min=" << summary.non_cast_call_min
+                  << " (ignoring local/fragment_min=" << deferred_min << ")"
                   << "\n";
       }
       selected = RevalidateDeferredAccesses(selected, summary.deferred_accesses,
                                             verbose);
     } else {
+      // With no vector memory access, local/fragment, broadcast-load, and call
+      // constraints jointly determine the available vector width.
       selected = arith::ZeroAwareGCD(deferred_min, summary.call_min);
       if (verbose) {
-        std::cerr << "  [Strategy] No vector memory access, using deferred="
-                  << deferred_min << ", call=" << summary.call_min
-                  << " -> vector_size=" << selected << "\n";
+        std::cerr << "  [Strategy] Only local/fragment buffers, using "
+                     "GCD(local_fragment_min, call_node_min)="
+                  << selected << "\n";
       }
     }
     return selected;
