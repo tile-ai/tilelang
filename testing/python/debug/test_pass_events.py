@@ -20,7 +20,7 @@ from tilelang.utils.pass_events import (
     current_compile_pass_instrumentation,
     current_pass_instrument_context,
     current_pass_phase,
-    instrument_codegen,
+    run_codegen_with_instrumentation,
     pass_phase,
     pass_pipeline,
     register_pass_instrumentation_tool,
@@ -171,7 +171,7 @@ def test_registered_tools_are_snapshotted_and_composable():
             assert instances[0].instruments == [*first, *second]
             with pass_pipeline("cuda"):
                 events.append(("body", current_pass_phase()))
-            assert instrument_codegen("target.build.test", "mod", "target", lambda: "result") == "result"
+            assert run_codegen_with_instrumentation("target.build.test", "mod", "target", lambda: "result") == "result"
     finally:
         unregister_pass_instrumentation_tool("test")
 

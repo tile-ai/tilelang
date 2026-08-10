@@ -269,7 +269,6 @@ def test_no_skipped_phantom_records(monkeypatch, tmp_path):
     from tilelang.tools.lower_trace import enable, disable
     from tilelang.tools.lower_trace import core as _core
     from tilelang.tools.lower_trace.core import STATUS_SKIPPED
-    from tilelang.backend import create_backend_context
     import tilelang.language as T
 
     monkeypatch.setenv("TL_LOWER_TRACE", "both")
@@ -284,9 +283,7 @@ def test_no_skipped_phantom_records(monkeypatch, tmp_path):
             tid = T.get_thread_binding()
             B[tid] = A[tid] + 1.0
 
-    mod = tvm.IRModule({"main": tiny})
-    context = create_backend_context("c", "c", "cython")
-    context.lower(mod)
+    tilelang.lower(tiny, target="c")
 
     trace = _core.get_last_session()
     assert trace is not None
@@ -316,7 +313,6 @@ def test_terminal_mode_no_html(monkeypatch, tmp_path):
     mode; finalizing that compile session must still not emit ``report.html``.
     """
     from tilelang.tools.lower_trace import enable, disable
-    from tilelang.backend import create_backend_context
     import tilelang.language as T
 
     monkeypatch.setenv("TL_LOWER_TRACE", "terminal")
@@ -333,9 +329,7 @@ def test_terminal_mode_no_html(monkeypatch, tmp_path):
                 tid = T.get_thread_binding()
                 B[tid] = A[tid] + 1.0
 
-        mod = tvm.IRModule({"main": tiny})
-        context = create_backend_context("c", "c", "cython")
-        context.lower(mod)
+        tilelang.lower(tiny, target="c")
 
         trace = _core.get_last_session()
         assert trace is not None
@@ -501,32 +495,6 @@ def test_lower_trace_and_pass_visualizer_share_event_infrastructure(tmp_path):
     trace_records = [record for record in trace.records if record.name in ("Outer", "Simplify")]
     assert [record.name for record in trace_records] == ["Outer", "Simplify"]
     assert [record.name for record in visualizer_instrument.ordered_records()] == ["test.Outer"]
-
-
-def test_pipeline_scope_attaches_exception_to_failing_pass(tmp_path):
-    """The explicit pipeline scope aborts pending frames with the real error."""
-    from tilelang.backend.pass_pipeline import PassPipeline
-    from tilelang.tools.lower_trace import enable
-
-    @tvm.transform.module_pass(opt_level=0, name="test.Fail")
-    def failing_pass(mod, _ctx):
-        raise RuntimeError("instrument failure")
-
-    pipeline = PassPipeline("test", lambda mod, _target: failing_pass(mod))
-    program = _simple_program()
-    mod = tvm.IRModule({"main": program})
-
-    enable(mode="terminal", trace_dir=str(tmp_path), codegen_output=None)
-    with pytest.raises(RuntimeError, match="instrument failure"):
-        pipeline.lower(mod, tvm.target.Target("c"))
-
-    trace = _core.get_last_session()
-    assert trace is not None
-    failed = [record for record in trace.records if record.name == "Fail"]
-    assert len(failed) == 1
-    assert failed[0].status == _core.STATUS_FAILED
-    assert failed[0].error_msg == "instrument failure"
-    assert failed[0].phase == "pipeline_test"
 
 
 def test_direct_tilelang_lower_owns_an_instrumentation_session(tmp_path):

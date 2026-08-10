@@ -10,7 +10,7 @@ from tvm import IRModule
 from tvm.target import Target
 
 from tilelang import tvm
-from tilelang.utils.pass_events import instrument_codegen
+from tilelang.utils.pass_events import run_codegen_with_instrumentation
 
 HostCodegenFunc = Callable[[IRModule, Target], IRModule]
 HostCodegenHookFunc = Callable[[IRModule, Target, Target], IRModule]
@@ -20,7 +20,7 @@ def global_func_host_codegen(global_func_name: str) -> HostCodegenFunc:
     """Create a host codegen callback backed by a TVM global function."""
 
     def build(mod: IRModule, target_host: Target) -> IRModule:
-        return instrument_codegen(
+        return run_codegen_with_instrumentation(
             global_func_name,
             mod,
             target_host,

@@ -285,7 +285,7 @@ def instrument_current_pass_context() -> Generator[None, None, None]:
 _CodegenResult = TypeVar("_CodegenResult")
 
 
-def instrument_codegen(
+def run_codegen_with_instrumentation(
     name: str,
     mod: Any,
     target: Any,
@@ -530,7 +530,7 @@ __all__ = [
     "current_compile_pass_instrumentation",
     "current_pass_instrument_context",
     "current_pass_phase",
-    "instrument_codegen",
+    "run_codegen_with_instrumentation",
     "pass_phase",
     "pass_pipeline",
     "register_pass_instrumentation_tool",

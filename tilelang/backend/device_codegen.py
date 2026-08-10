@@ -9,7 +9,7 @@ from tvm import IRModule
 from tvm.target import Target
 
 from tilelang import tvm
-from tilelang.utils.pass_events import instrument_codegen
+from tilelang.utils.pass_events import run_codegen_with_instrumentation
 
 DeviceCodegenFunc = Callable[[IRModule, Target], IRModule]
 
@@ -18,7 +18,7 @@ def global_func_device_codegen(global_func_name: str) -> DeviceCodegenFunc:
     """Create a device codegen callback backed by a TVM global function."""
 
     def build(mod: IRModule, target: Target) -> IRModule:
-        return instrument_codegen(
+        return run_codegen_with_instrumentation(
             global_func_name,
             mod,
             target,
