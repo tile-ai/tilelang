@@ -1420,29 +1420,41 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
            << sfa_offset << ", " << sfb_ref << "[0] + " << sfb_offset
            << ", use_2cta=" << (enable_2cta ? "True" : "False") << ")\n";
   } else if (op->op.same_as(tl::tcgen05_ld())) {
-    ICHECK_EQ(op->args.size(), 6U) << "tcgen05_ld expects 6 arguments";
+    ICHECK(op->args.size() == 6U || op->args.size() == 7U)
+        << "tcgen05_ld expects 6 or 7 arguments";
     int inst_bits = Downcast<IntImm>(op->args[0])->value;
     int chunks = Downcast<IntImm>(op->args[1])->value;
     bool pack16 = Downcast<Bool>(op->args[2])->value;
     std::string tmem_start_col = PrintExpr_(op->args[3]);
     std::string col_offset = PrintExpr_(op->args[4]);
-    std::string dst_ptr = PrintExpr_(op->args[5]);
+    // The optional datapath count selects the half-subpartition (16dp)
+    // wrappers; a six-argument call from before it existed means the
+    // sub-partition-filling 32dp wrappers.
+    bool has_datapaths = op->args.size() == 7U;
+    int datapaths = has_datapaths ? Downcast<IntImm>(op->args[5])->value : 32;
+    std::string dst_ptr = PrintExpr_(op->args[has_datapaths ? 6 : 5]);
     PrintIndent();
-    stream << "tl.tcgen05_ld_32dp" << inst_bits << "bNx(" << chunks << ", "
-           << (pack16 ? "True" : "False") << ", " << tmem_start_col << ", "
-           << col_offset << ", " << dst_ptr << ")\n";
+    stream << "tl.tcgen05_ld_" << datapaths << "dp" << inst_bits << "bNx("
+           << chunks << ", " << (pack16 ? "True" : "False") << ", "
+           << tmem_start_col << ", " << col_offset << ", " << dst_ptr << ")\n";
   } else if (op->op.same_as(tl::tcgen05_st())) {
-    ICHECK_EQ(op->args.size(), 6U) << "tcgen05_st expects 6 arguments";
+    ICHECK(op->args.size() == 6U || op->args.size() == 7U)
+        << "tcgen05_st expects 6 or 7 arguments";
     int inst_bits = Downcast<IntImm>(op->args[0])->value;
     int chunks = Downcast<IntImm>(op->args[1])->value;
     bool unpack16 = Downcast<Bool>(op->args[2])->value;
     std::string tmem_start_col = PrintExpr_(op->args[3]);
     std::string col_offset = PrintExpr_(op->args[4]);
-    std::string src_ptr = PrintExpr_(op->args[5]);
+    // The optional datapath count selects the half-subpartition (16dp)
+    // wrappers; a six-argument call from before it existed means the
+    // sub-partition-filling 32dp wrappers.
+    bool has_datapaths = op->args.size() == 7U;
+    int datapaths = has_datapaths ? Downcast<IntImm>(op->args[5])->value : 32;
+    std::string src_ptr = PrintExpr_(op->args[has_datapaths ? 6 : 5]);
     PrintIndent();
-    stream << "tl.tcgen05_st_32dp" << inst_bits << "bNx(" << chunks << ", "
-           << (unpack16 ? "True" : "False") << ", " << tmem_start_col << ", "
-           << col_offset << ", " << src_ptr << ")\n";
+    stream << "tl.tcgen05_st_" << datapaths << "dp" << inst_bits << "bNx("
+           << chunks << ", " << (unpack16 ? "True" : "False") << ", "
+           << tmem_start_col << ", " << col_offset << ", " << src_ptr << ")\n";
   } else if (op->op.same_as(tl::tcgen05_mma_arrive())) {
     ICHECK_EQ(op->args.size(), 1U) << "tcgen05_mma_arrive expects 1 argument";
     PrintIndent();
