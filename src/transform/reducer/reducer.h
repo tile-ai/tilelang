@@ -1,10 +1,10 @@
 /*!
- * \file tl/transform/reducer.h
+ * \file tl/transform/reducer/reducer.h
  * \brief Verification and materialization passes for deferred reducers.
  */
 
-#ifndef TVM_TL_TRANSFORM_REDUCER_H_
-#define TVM_TL_TRANSFORM_REDUCER_H_
+#ifndef TVM_TL_TRANSFORM_REDUCER_REDUCER_H_
+#define TVM_TL_TRANSFORM_REDUCER_REDUCER_H_
 
 #include <tvm/ir/transform.h>
 
@@ -24,4 +24,4 @@ TVM_DLL tvm::transform::Pass VerifyReducerLowered();
 } // namespace tl
 } // namespace tvm
 
-#endif // TVM_TL_TRANSFORM_REDUCER_H_
+#endif // TVM_TL_TRANSFORM_REDUCER_REDUCER_H_

@@ -29,15 +29,14 @@ constexpr const char *kReducerSeed = "reducer_seed";
 /*! \brief Whether an update needs once-per-logical-iteration lowering. */
 constexpr const char *kReducerParallelOnce = "reducer_parallel_once";
 
-/*!
- * \brief Destination Fragment layout proving that every physical replica
- * independently holds a complete partial for its local output slots.
- */
-constexpr const char *kReducerLocalCompleteLayout =
-    "reducer_local_complete_layout";
+/*! \brief Planned physical partial groups attached to init/finalize calls. */
+constexpr const char *kReducerPartialPlans = "reducer_partial_plans";
 
 /*! \brief Logical output indices retained after physical region rewriting. */
 constexpr const char *kReducerLogicalIndices = "reducer_logical_indices";
+
+/*! \brief Whether an update must retain every inferred physical replica. */
+constexpr const char *kReducerPartitionRequired = "reducer_partition_required";
 
 /*! \brief Statement marker consumed by parallel-loop partitioning. */
 constexpr const char *kParallelMultiplicity = "tl.parallel_multiplicity";
@@ -76,11 +75,49 @@ public:
                                              ReducerInfoNode);
 };
 
+/*!
+ * \brief One independently accumulated physical partial group.
+ *
+ * A canonical group has no partial layout and is finalized across the complete
+ * participant range. A projected group uses partial_layout for storage and
+ * zero or more thread-reduction steps; an empty step list is the LocalComplete
+ * case.
+ */
+class ReducerPartialPlanNode : public ffi::Object {
+public:
+  bool canonical{false};
+  ffi::Optional<Fragment> partial_layout;
+  ffi::Array<Integer> step_extents;
+  ffi::Array<Integer> step_scales;
+
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ReducerPartialPlan",
+                                    ReducerPartialPlanNode, ffi::Object);
+
+  static void RegisterReflection() {
+    namespace refl = reflection;
+    refl::ObjectDef<ReducerPartialPlanNode>()
+        .def_ro("canonical", &ReducerPartialPlanNode::canonical)
+        .def_ro("partial_layout", &ReducerPartialPlanNode::partial_layout)
+        .def_ro("step_extents", &ReducerPartialPlanNode::step_extents)
+        .def_ro("step_scales", &ReducerPartialPlanNode::step_scales);
+  }
+};
+
+class ReducerPartialPlan : public ffi::ObjectRef {
+public:
+  TVM_DLL ReducerPartialPlan(bool canonical,
+                             ffi::Optional<Fragment> partial_layout,
+                             ffi::Array<Integer> step_extents,
+                             ffi::Array<Integer> step_scales);
+
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ReducerPartialPlan, ffi::ObjectRef,
+                                             ReducerPartialPlanNode);
+};
+
 class ReducerInitOpNode : public TileOperatorNode {
 public:
-  Buffer reducer;
+  ffi::Array<Buffer> partials;
   ReduceType combine_type;
-  ffi::Optional<Fragment> local_complete_layout;
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ReducerInitOp", ReducerInitOpNode,
                                     TileOperatorNode);
@@ -88,10 +125,8 @@ public:
   static void RegisterReflection() {
     namespace refl = reflection;
     refl::ObjectDef<ReducerInitOpNode>()
-        .def_ro("reducer", &ReducerInitOpNode::reducer)
-        .def_ro("combine_type", &ReducerInitOpNode::combine_type)
-        .def_ro("local_complete_layout",
-                &ReducerInitOpNode::local_complete_layout);
+        .def_ro("partials", &ReducerInitOpNode::partials)
+        .def_ro("combine_type", &ReducerInitOpNode::combine_type);
   }
 
   Stmt Lower(const LowerArgs &lower_args,
@@ -115,10 +150,11 @@ class ReducerUpdateOpNode : public TileOperatorNode {
 public:
   Buffer reducer;
   ffi::Array<PrimExpr> logical_indices;
+  ffi::Array<PrimExpr> physical_indices;
   PrimExpr contribution;
   ReduceType combine_type;
   bool parallel_once{false};
-  ffi::Optional<Fragment> local_complete_layout;
+  bool partition_required{false};
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ReducerUpdateOp", ReducerUpdateOpNode,
                                     TileOperatorNode);
@@ -128,11 +164,11 @@ public:
     refl::ObjectDef<ReducerUpdateOpNode>()
         .def_ro("reducer", &ReducerUpdateOpNode::reducer)
         .def_ro("logical_indices", &ReducerUpdateOpNode::logical_indices)
+        .def_ro("physical_indices", &ReducerUpdateOpNode::physical_indices)
         .def_ro("contribution", &ReducerUpdateOpNode::contribution)
         .def_ro("combine_type", &ReducerUpdateOpNode::combine_type)
         .def_ro("parallel_once", &ReducerUpdateOpNode::parallel_once)
-        .def_ro("local_complete_layout",
-                &ReducerUpdateOpNode::local_complete_layout);
+        .def_ro("partition_required", &ReducerUpdateOpNode::partition_required);
   }
 
   Stmt Lower(const LowerArgs &lower_args,
@@ -155,11 +191,11 @@ public:
 
 class FinalizeReducerOpNode : public TileOperatorNode {
 public:
-  Buffer reducer;
+  ffi::Array<Buffer> partials;
+  ffi::Array<ReducerPartialPlan> partial_plans;
   Buffer destination;
   ReduceType combine_type;
   ffi::Optional<PrimExpr> seed;
-  ffi::Optional<Fragment> local_complete_layout;
   int batch{1};
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.FinalizeReducerOp",
@@ -168,12 +204,11 @@ public:
   static void RegisterReflection() {
     namespace refl = reflection;
     refl::ObjectDef<FinalizeReducerOpNode>()
-        .def_ro("reducer", &FinalizeReducerOpNode::reducer)
+        .def_ro("partials", &FinalizeReducerOpNode::partials)
+        .def_ro("partial_plans", &FinalizeReducerOpNode::partial_plans)
         .def_ro("destination", &FinalizeReducerOpNode::destination)
         .def_ro("combine_type", &FinalizeReducerOpNode::combine_type)
         .def_ro("seed", &FinalizeReducerOpNode::seed)
-        .def_ro("local_complete_layout",
-                &FinalizeReducerOpNode::local_complete_layout)
         .def_ro("batch", &FinalizeReducerOpNode::batch);
   }
 

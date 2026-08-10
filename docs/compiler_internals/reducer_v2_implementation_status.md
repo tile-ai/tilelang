@@ -1,14 +1,15 @@
 # Reducer v2 当前实现状态
 
 - 分支：`refactor/reducer-v2`
-- 记录日期：2026-08-06
-- 当前阶段：correctness baseline 与 conservative LocalComplete fast path 已实现；subgroup fast path 暂缓
+- 记录日期：2026-08-10
+- 当前阶段：correctness baseline、conservative LocalComplete 和受限 projected partial groups 已实现
 - 长期设计：[Reducer v2 重构设计方案](./reducer_v2_refactor_plan.md)
 - 相关讨论：[Issue #2408](https://github.com/tile-ai/tilelang/issues/2408)、[RFC #2897](https://github.com/tile-ai/tilelang/issues/2897)、[PR #2881](https://github.com/tile-ai/tilelang/pull/2881)
 
 ## 1. 当前结论
 
-这个分支已经完成了 reducer v2 的第一版 correctness baseline。它的目标是先建立清晰、可验证的 reducer 语义，而不是立刻恢复旧实现追求的 subgroup reduction 性能。
+这个分支已经完成了 reducer v2 的第一版 correctness baseline，并在其上加入两个可回退
+的 physical plans：LocalComplete 和受限 projected partial groups。
 
 当前实现遵循下面几个已经确定的原则：
 
@@ -19,7 +20,7 @@
 5. finalize 是 out-of-place 的，所有 participants 先完成 collective，只有 destination owner 写入 Fragment。
 6. 每个 reducer allocation 当前只允许一个 epoch；同一个 kernel 可以有多个相互独立的 reducer allocations。
 7. 当前只依赖 compiler-known contiguous participant `Range`，不支持 discontiguous participant set。
-8. subgroup fast path、batched finalize fast path、multiple epochs 和自定义 combine 都暂不实现。
+8. compiler-known scalar/row reduction 可以选择 projected partial group；其他情况仍回退 canonical baseline。
 9. 对 `Parallel(M) -> output[M]` 这类可直接证明的独立输出，planner 可以选择 LocalComplete plan：每个 destination replica 独立计算自己的 local slots，不执行 collective。
 
 因此，目前的优先级是：
@@ -288,7 +289,7 @@ C++ IR 层会检查 reducer 和 destination 都是完整 region，并要求 dtyp
 
 ## 6. Verifier 当前检查什么
 
-实现位于 `src/transform/reducer.cc`。
+实现位于 `src/transform/reducer/verify_reducer_epochs.cc`。
 
 ### 6.1 metadata 与 allocation
 
@@ -434,15 +435,33 @@ logical reducer[M]
 
 例如 `M=8, threads=128` 时，常见 layout 是一个 local slot、16 个 replicas；
 materialized reducer 从每线程 `partial[8]` 缩为 `partial[1]`。而
-`Parallel(M, K) -> output[M]` 不是 direct identity mapping，仍走 FullParticipant。
+`Parallel(M, K) -> output[M]` 不是 direct identity mapping，不能走 LocalComplete；
+planner 会继续尝试下面的 projected partial group，证明失败时才走 FullParticipant。
 
 materialization 后，init/update/finalize call 的 access region 都立即改写成 compact
 physical buffer 上的合法 region；update 原本的 logical indices 单独保存在 planned
 annotation 中，供 `ReducerUpdateOp` 映射到 physical slots。这样
 `PlanAndMaterializeReducers` 与 `LowerTileOp` 之间不存在 shape/region 不一致的临时 IR。
 
-这条路径故意不处理 Fragment contribution、permuted/affine output mapping、mixed
-side effects 或 subgroup reduction；任一证明失败都只影响性能，不改变合法程序语义。
+这条路径故意不处理 Fragment contribution、permuted/affine output mapping 或 mixed
+side effects；任一证明失败都只影响性能，不改变合法程序语义。
+
+### 7.3 Projected partial groups
+
+LocalComplete 失败后，planner 会逐个 update site 尝试识别一个 compiler-known reduction
+axis。目前覆盖 scalar `Parallel(K) -> output[0]`、显式
+`Parallel(M, K) -> output[M]`，以及 layout inference 融合后的等价 contiguous Range。
+
+planner 从 source loop layout 投影掉 reduction axis，得到 compact partial layout，并提取
+compile-time thread reduction steps。第一版只接受 power-of-two logical width，且要求
+destination Fragment 能表示 projected logical outputs。拥有相同 source layout、partial
+layout 和 thread steps 的 sites 共享一份 partial；不兼容的 sites 使用独立 partial，无法
+证明的 sites 则共同使用一份 canonical FullParticipant partial。
+
+finalize 先把 destination 初始化为 identity，然后依次归约并 combine 每个 physical
+partial group，最后只应用一次 seed。projected collective 在完整 participant scope 中
+uniformly 执行；partial layout image 之外的线程提供 identity，避免把 warp shuffle 或
+barrier 放进不完整的 partition predicate。
 
 ## 8. Parallel effect markers
 
@@ -476,18 +495,18 @@ if (REP == 0) {
 
 同一个 `T.Parallel` 中的普通 Fragment load/store 不会被这个 guard 包住。
 
-### 8.3 LocalComplete partition marker
+### 8.3 Physical partial partition marker
 
-LocalComplete update 使用另一个 marker：
+LocalComplete 和 projected update 使用另一个 marker：
 
 ```text
 tl.parallel_partition_required
 ```
 
-它要求 `LowerTileOp` 必须按 loop layout 做 physical thread partition，但不生成
-`REP == 0` guard，因为所有 destination replicas 都需要执行 update。partition 后 marker
-会被移除。带这两类 reducer marker 的 loop 都禁止普通 vectorization，以免把对同一个
-partial slot 的 loop-carried dependency 错误改写为并行 stores。
+它要求 `LowerTileOp` 必须按 planner 已接受的 loop layout 做 physical thread
+partition，但不额外套用 generic `REP == 0` guard。partition 后 marker 会被移除。带这
+两类 reducer marker 的 loop 都禁止普通 vectorization，以免把对同一个 partial slot 的
+loop-carried dependency 错误改写为并行 stores。
 
 这解决了 PR #2881 临时参数的问题：
 
@@ -497,7 +516,7 @@ PartitionLoop(..., fully_replicated_reducer_buffers)
 
 该参数和 `ReducerStoreGuarder` 已经删除。loop partition 现在只消费一个局部、显式、与 buffer identity 无关的 multiplicity marker。
 
-### 8.3 为什么 marker 只在必要时生效
+### 8.4 为什么 marker 只在必要时生效
 
 如果 loop layout 的 `ReplicateExtent == 1`，每个 logical iteration 本来就只执行一次，不需要额外 guard。
 
@@ -523,15 +542,16 @@ CUDA 和 ROCm 只提供 target-specific collective emitter 和 capability inform
 
 当前实际常见路径是完整 CTA range。non-power-of-two collective width 会通过现有 `CheckAllReduceWidth` 明确拒绝。
 
-### 9.2 每个 output element 的 lowering
+### 9.2 每个 epoch 的 lowering
 
-对 reducer 的每个 logical output index：
-
-1. 每个 participant load 自己的 `partial[index]`；
-2. 所有 participants 执行 scalar AllReduce；
-3. 如有 seed，在 collective 后 combine；
-4. 根据 destination Fragment inverse layout 判断当前 thread 是否拥有这个 logical result；
-5. 只有 owner store，但所有 collective participants 都必须到达 AllReduce。
+1. 按 destination Fragment layout 把 logical result 初始化为 identity；
+2. 依次处理每个 physical partial group；
+3. canonical group 在完整 participant range 上执行 scalar AllReduce；
+4. projected group 从 partial layout inverse 恢复 logical output，layout image 外的线程提供
+   identity，并由所有 participants uniformly 到达 collective；
+5. 根据 destination Fragment inverse layout 判断当前 thread 是否拥有结果，再把 group
+   result combine 到 destination；
+6. 所有 groups 完成后，按 logical output 恰好 combine 一次 seed。
 
 概念代码是：
 
@@ -735,11 +755,12 @@ ReduceOp: batch exceeds per-thread output element count N
 
 ## 14. 当前明确暂缓的内容
 
-### 14.1 Subgroup fast path
+### 14.1 Generalized projected planning
 
-暂不实现。
-
-当前永远可以回到 full local-array + participant-wide scalar collective baseline。将来如果加入 subgroup fast path，它必须只是可选 optimization：证明失败时回退 baseline，不能重新成为 reducer correctness 的前提。
+当前 projected partial group 只识别一个 compiler-known reduction axis、contiguous/fused
+row-major mapping 和 power-of-two logical width。任意 affine/permuted mapping、多个
+reduction axes、symbolic thread split 或需要合并近似 signatures 的情况仍然回退
+FullParticipant。后续扩展仍必须保持“证明失败只影响性能”的原则。
 
 ### 14.2 Batched finalize fast path
 
@@ -783,7 +804,7 @@ v2 latency 分别为 7.168 us 和 11.200 us，与 legacy 的 7.168 us 和 11.168
 
 - general affine/permuted/Fragment ownership compact storage；
 - 合并多个 output collectives；
-- warp shuffle/subgroup communication；
+- 合并或批量执行多个 projected group collectives；
 - 在 FullParticipant fallback 中跳过无用 full-array initialization；
 - 根据 destination layout 批量 store；
 - 针对 large output shape 控制 register pressure。
@@ -800,19 +821,21 @@ v2 latency 分别为 7.168 us 和 11.200 us，与 legacy 的 7.168 us 和 11.168
    - 看 IR node fields 和 target registry contract。
 4. `src/op/deferred_reducer.cc`
    - 看 init/update 的基本 lowering 和 multiplicity marker。
-5. `src/transform/reducer.cc`
-   - 看 metadata collector、lifecycle verifier、replica checks 和 materializer。
-6. `tilelang/cuda/pipeline.py`
+5. `src/transform/reducer/verify_reducer_epochs.cc`
+   - 看 metadata collector 和 lifecycle verifier。
+6. `src/transform/reducer/reducer.cc`
+   - 看 physical planner、replica checks 和 materializer。
+7. `tilelang/cuda/pipeline.py`
    - 看三个 reducer passes 位于整个 compiler pipeline 的位置。
-7. `src/transform/lower_tile_op.cc`
+8. `src/transform/lower_tile_op.cc`
    - 看 marker 如何影响 loop partition/vectorize decision。
-8. `src/transform/loop_partition.cc`
+9. `src/transform/loop_partition.cc`
    - 看 `REP == 0` 与 partition-required 两类 marker 如何分别消费。
-9. `src/backend/common/op/finalize_reducer.h`
-   - 对照 FullParticipant collective 与 LocalComplete direct-local finalize。
-10. `src/cuda/op/finalize_reducer.cc` 和 `src/rocm/op/finalize_reducer.cc`
+10. `src/backend/common/op/finalize_reducer.h`
+- 对照 FullParticipant collective 与 LocalComplete direct-local finalize。
+11. `src/cuda/op/finalize_reducer.cc` 和 `src/rocm/op/finalize_reducer.cc`
     - 看 target-specific AllReduce emitter。
-11. `testing/python/language/test_tilelang_language_reducer_v2.py`
+12. `testing/python/language/test_tilelang_language_reducer_v2.py`
     - 用正例和 diagnostics 对照前面的 contract。
 
 ## 16. 当前工作区状态
@@ -823,8 +846,8 @@ v2 latency 分别为 7.168 us 和 11.200 us，与 legacy 的 7.168 us 和 11.168
 refactor/reducer-v2
 ```
 
-该分支用于持续评审和调整 correctness baseline；本文记录的范围不包含
-subgroup fast path 等后续优化。
+该分支用于持续评审 correctness baseline、LocalComplete 和第一版 projected partial
+group planning。
 
 这个状态可以概括为：
 
@@ -839,11 +862,14 @@ subgroup fast path 等后续优化。
   direct-ownership LocalComplete plan
   compact per-layout local partial storage
   collective-free finalize for independent outputs
+  constrained projected partial groups
+  mixed projected/canonical multi-partial finalize
+  uniform collective participation with identity outside the layout image
   CUDA/ROCm scalar emitters
   in-tree migration 与回归测试
 
 暂缓：
-  subgroup fast path
+  generalized affine/multi-axis projected planning
   batched finalize optimization
   general affine/Fragment ownership plans
   multiple epochs

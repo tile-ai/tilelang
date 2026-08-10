@@ -10,6 +10,12 @@ _COMPILE_FLAGS = {
     tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
 }
 
+_PROJECTED_ROW_LOOP_LAYOUT = T.Fragment(
+    (8, 4),
+    forward_fn=lambda i, k, rep: (i + 8 * k + 32 * rep, 0),
+    replicate=4,
+)
+
 
 @T.prim_func
 def reducer_sum_v2(A: T.Tensor((8,), T.float32), B: T.Tensor((1,), T.float32)):
@@ -113,6 +119,59 @@ def unique_owner_with_global_side_effect_v2(A: T.Tensor((8,), T.float32), B: T.T
         T.copy(result, B)
 
 
+@T.prim_func
+def projected_row_reducer_v2(A: T.Tensor((8, 4), T.float32), B: T.Tensor((8,), T.float32)):
+    with T.Kernel(1, threads=128):
+        total = T.alloc_reducer((8,), T.float32, op="sum")
+        T.reducer_init(total)
+        for i, k in T.Parallel(8, 4, loop_layout=_PROJECTED_ROW_LOOP_LAYOUT):
+            T.reducer_update(total[i], A[i, k])
+        result = T.alloc_fragment((8,), T.float32)
+        T.finalize_reducer(total, result)
+        T.copy(result, B)
+
+
+@T.prim_func
+def split_projection_groups_v2(
+    A: T.Tensor((8,), T.float32),
+    C: T.Tensor((16,), T.float32),
+    B: T.Tensor((1,), T.float32),
+):
+    with T.Kernel(1, threads=128):
+        total = T.alloc_reducer((1,), T.float32, op="sum", seed=3.0)
+        T.reducer_init(total)
+        for i in T.Parallel(8):
+            T.reducer_update(total[0], A[i])
+        for j in T.Parallel(16):
+            T.reducer_update(total[0], C[j])
+        result = T.alloc_fragment((1,), T.float32)
+        T.finalize_reducer(total, result)
+        if T.get_thread_binding() == 0:
+            B[0] = result[0]
+
+
+@T.prim_func
+def mixed_projection_and_fallback_v2(
+    A: T.Tensor((8,), T.float32),
+    C: T.Tensor((6,), T.float32),
+    B: T.Tensor((1,), T.float32),
+):
+    with T.Kernel(1, threads=128):
+        total = T.alloc_reducer((1,), T.float32, op="sum")
+        T.reducer_init(total)
+        for i in T.Parallel(8):
+            T.reducer_update(total[0], A[i])
+        # The first projected implementation only accepts power-of-two
+        # collective widths. This site shares one canonical fallback group
+        # without degrading the independent 8-way group above.
+        for j in T.Parallel(6):
+            T.reducer_update(total[0], C[j])
+        result = T.alloc_fragment((1,), T.float32)
+        T.finalize_reducer(total, result)
+        if T.get_thread_binding() == 0:
+            B[0] = result[0]
+
+
 def test_reducer_v2_frontend_ir():
     source = reducer_sum_v2.script()
     assert 'scope="local.reducer"' in source
@@ -149,7 +208,8 @@ def test_reducer_v2_cuda_codegen():
         out_idx=-1,
         pass_configs=_COMPILE_FLAGS,
     ).get_kernel_source()
-    assert "tl::AllReduce<tl::SumOp, 128" in source
+    assert "tl::AllReduce<tl::SumOp, 8, 1" in source
+    assert "tl::AllReduce<tl::SumOp, 128" not in source
     assert "local.reducer" not in source
 
 
@@ -162,7 +222,7 @@ def test_reducer_v2_unique_owner_codegen_uses_local_complete_plan():
     assert "tl::AllReduce<" not in source
     assert "NamedBarrier<" not in source
     assert "workspace" not in source
-    assert "float total[1];" in source
+    assert "float total_partial_0[1];" in source
 
 
 def test_reducer_v2_unique_owner_serial_reduction_codegen():
@@ -174,7 +234,7 @@ def test_reducer_v2_unique_owner_serial_reduction_codegen():
     assert "tl::AllReduce<" not in source
     assert "NamedBarrier<" not in source
     assert "workspace" not in source
-    assert "float total[1];" in source
+    assert "float total_partial_0[1];" in source
 
 
 def test_reducer_v2_unique_owner_side_effect_falls_back():
@@ -183,6 +243,44 @@ def test_reducer_v2_unique_owner_side_effect_falls_back():
         out_idx=-1,
         pass_configs=_COMPILE_FLAGS,
     ).get_kernel_source()
+    assert "tl::AllReduce<tl::SumOp, 128" in source
+
+
+def test_reducer_v2_parallel_mk_uses_projected_row_group():
+    source = tilelang.compile(
+        projected_row_reducer_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    ).get_kernel_source()
+    # k is carried by thread bits 3-4, so four logical lanes are represented
+    # by a 32-thread span with stride 8.
+    assert "tl::AllReduce<tl::SumOp, 32, 8" in source
+    assert "tl::AllReduce<tl::SumOp, 128" not in source
+    assert "float total_partial_0[1];" in source
+
+
+def test_reducer_v2_incompatible_projections_use_separate_groups():
+    source = tilelang.compile(
+        split_projection_groups_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    ).get_kernel_source()
+    assert "float total_partial_0[1];" in source
+    assert "float total_partial_1[1];" in source
+    assert "tl::AllReduce<tl::SumOp, 8, 1" in source
+    assert "tl::AllReduce<tl::SumOp, 16, 1" in source
+    assert "tl::AllReduce<tl::SumOp, 128" not in source
+
+
+def test_reducer_v2_projected_and_canonical_groups_can_mix():
+    source = tilelang.compile(
+        mixed_projection_and_fallback_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    ).get_kernel_source()
+    assert "float total_partial_0[1];" in source
+    assert "float total_partial_1[1];" in source
+    assert "tl::AllReduce<tl::SumOp, 8, 1" in source
     assert "tl::AllReduce<tl::SumOp, 128" in source
 
 
@@ -206,6 +304,41 @@ def test_reducer_v2_unique_owner_serial_reduction_correctness():
         pass_configs=_COMPILE_FLAGS,
     )(A)
     torch.testing.assert_close(B, A.sum(dim=1), atol=0, rtol=0)
+
+
+@tilelang.testing.requires_cuda
+def test_reducer_v2_projected_row_group_correctness():
+    A = torch.arange(1, 33, dtype=torch.float32, device="cuda").reshape(8, 4)
+    B = tilelang.compile(
+        projected_row_reducer_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    )(A)
+    torch.testing.assert_close(B, A.sum(dim=1), atol=0, rtol=0)
+
+
+@tilelang.testing.requires_cuda
+def test_reducer_v2_split_projection_groups_correctness():
+    A = torch.arange(1, 9, dtype=torch.float32, device="cuda")
+    C = torch.arange(1, 17, dtype=torch.float32, device="cuda")
+    B = tilelang.compile(
+        split_projection_groups_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    )(A, C)
+    torch.testing.assert_close(B, (A.sum() + C.sum() + 3.0).reshape(1), atol=0, rtol=0)
+
+
+@tilelang.testing.requires_cuda
+def test_reducer_v2_mixed_projection_and_fallback_correctness():
+    A = torch.arange(1, 9, dtype=torch.float32, device="cuda")
+    C = torch.arange(1, 7, dtype=torch.float32, device="cuda")
+    B = tilelang.compile(
+        mixed_projection_and_fallback_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    )(A, C)
+    torch.testing.assert_close(B, (A.sum() + C.sum()).reshape(1), atol=0, rtol=0)
 
 
 @tilelang.testing.requires_cuda

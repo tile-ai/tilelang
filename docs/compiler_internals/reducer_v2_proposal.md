@@ -892,9 +892,10 @@ float result = partial[0];  // 没有 collective
 
 而本节原来的 scalar sum 是 `Parallel(8) -> output[0]`：reducer shape 是 `(1,)`，
 parallel shape 是 `(8,)`，并且 update index `0` 不等于 parallel variable `i`，所以
-上述证明会失败并回到 FullParticipant。要复现 `T.reduce_sum`，还需要未来的 subgroup
-plan 证明“128 participants 可分成 16 个互不通信的 8-thread groups”，再让每组执行
-一次 `AllReduce<..., 8>`。这项优化当前尚未实现。
+上述 LocalComplete 证明会失败。projected planner 会从 loop layout 中投影掉 `i`，把
+八个 contributions 放进一个 compact partial group，并提取 `AllReduce<..., 8, 1>`
+thread step；layout image 外的 participants 提供 identity。若这些条件无法证明，才回退
+FullParticipant。
 
 把本例和开头的术语对应起来：
 
@@ -1200,7 +1201,8 @@ for i, k in T.Parallel(M, K):
     T.reducer_update(acc[i], A[i, k])
 ```
 
-它回退到 FullParticipant collective。下面的形式则可以：
+它不能使用 LocalComplete；实现会继续尝试 projected partial group，证明失败才回退到
+FullParticipant。下面的形式则可以直接使用 LocalComplete：
 
 ```python
 for i in T.Parallel(M):
@@ -1214,12 +1216,12 @@ Fragment/local contribution 也暂不进入 LocalComplete，因为其值可能�
 physical layout。未来只有在 source Fragment ownership 与 destination ownership
 兼容性可证明时才放开。
 
-### 6.5 Future subgroup fast path
+### 6.5 Projected partial groups
 
-`Parallel(M, K) -> output[M]` 确实存在更高效的 subgroup reduction 机会，但它是
-独立优化，不应成为 correctness 的前置条件。
+`Parallel(M, K) -> output[M]` 存在更高效的 thread-group reduction 机会，但它仍然
+只是可选优化，不是 correctness 的前置条件。
 
-未来可以从每个 update site 生成 normalized `ThreadGroupSignature`，描述：
+当前 planner 从每个可识别的 update site 生成等价的 projected signature，描述：
 
 - participant range；
 - logical output 到 group 的 projection；
@@ -1228,10 +1230,15 @@ physical layout。未来只有在 source Fragment ownership 与 destination owne
 - uniform predicate；
 - contribution Fragment compatibility。
 
-只有一个 epoch 内所有 sites 的 signatures exact-compatible，且 backend 支持对应
-width/barrier/workspace policy 时，才选择 subgroup plan。否则回退 baseline。
+source loop layout、projected partial layout 和 thread reduction steps exact-compatible 的
+sites 共享一份 physical partial；不兼容的 signatures 拆成多个 groups，无法证明的 sites
+进入 canonical FullParticipant group。因此一个 epoch 可以同时包含 projected 和
+canonical groups。
 
-第一版不尝试对多个 signatures 求并、交或“近似兼容”。
+第一版只识别 compiler-known scalar reduction、contiguous
+`Parallel(M, K) -> output[M]` 及其融合 Range，logical reduction width 必须是 2 的幂。
+它不尝试对 signatures 求并、交或“近似兼容”。finalize 中所有 collective 都在对应
+participant scope 上 uniform 执行，layout image 外的线程提供 identity。
 
 ## 7. Participant domain
 
@@ -1367,10 +1374,12 @@ Draft PR #2901 已实现：
 - compiler-known contiguous participant range；
 - CUDA/ROCm shared high-level finalize contract；
 - conservative LocalComplete compact-storage fast path；
+- compiler-known scalar/row reduction 的 projected partial groups；
+- 不兼容 projected groups 以及 projected/canonical mixed finalize；
 - sum/max/min/bitwise builtins 和 logical seed。
 
-subgroup fast path、multiple epochs、custom combine、general Fragment ownership 和
-discontiguous participant set 尚未实现。
+general affine/multi-axis projected planning、multiple epochs、custom combine、general
+Fragment ownership 和 discontiguous participant set 尚未实现。
 
 在 B300、128 threads 的初步 microbenchmark 中，LocalComplete cases 的结果为：
 
@@ -1399,11 +1408,15 @@ occupancy 和 real kernels 的系统评估。
 - sum/max/min/bitwise 和支持的 dtypes。
 - non-zero seed 恰好应用一次。
 - LocalComplete 的 inner serial reduction。
+- 两个不兼容 projected groups 合并到同一个 logical result。
+- projected group 与 canonical fallback group 混合时结果不重复也不丢失。
 
 ### 13.2 Planner decisions
 
 - `Parallel(M) -> output[M]` 选择 LocalComplete。
-- `Parallel(M, K) -> output[M]` 回退 FullParticipant。
+- compiler-known `Parallel(M, K) -> output[M]` 选择 projected partial group。
+- 不兼容 projected signatures 拆成独立 physical partial groups。
+- 不支持的 update site 与 projected groups 共存时只让该 site 进入 canonical fallback。
 - Fragment/local contribution 不错误选择 LocalComplete。
 - 多个 reducers 共享 Parallel 时，相同 destination layout 可共同 fast path。
 - 同一个 Parallel 上 destination layout 冲突时确定性 fallback。
@@ -1413,6 +1426,7 @@ occupancy 和 real kernels 的系统评估。
 
 - update marker 只包 reducer combine，不包普通 Fragment work。
 - final collective 不位于 `REP == 0` 或 update predicate 内。
+- projected collective 对 participant scope uniform，layout image 外使用 identity。
 - LocalComplete codegen 没有 collective/barrier/workspace。
 - `local.reducer`、first-class ops 和 markers 在 backend 前全部消失。
 - 强制 baseline 与 auto strategy 得到一致的数值结果。
@@ -1432,7 +1446,7 @@ occupancy 和 real kernels 的系统评估。
 2. 合入 verifier 与 FullParticipant correctness baseline。
 3. 全仓迁移到显式 init/update/out-of-place finalize，并删除 v1。
 4. 单独合入 conservative LocalComplete fast path。
-5. 在 baseline 可强制启用的前提下，研究 exact-signature subgroup fast path。
+5. 在 baseline 可强制启用的前提下，加入并扩展 exact-signature projected plans。
 
 每个 performance optimization 都必须能够独立关闭并回到同一个 canonical
 semantics，不能重新引入 v1 compatibility path。
@@ -1444,7 +1458,7 @@ semantics，不能重新引入 v1 compatibility path。
    是否需要在第一版加入静态 footprint 上限？
 3. participant domain 第一版限制为 compiler-known contiguous `Range` 是否可接受？
 4. LocalComplete 的 direct identity proof boundary 是否足够保守、容易 review？
-5. Fragment ownership compatibility 应该是下一步，还是优先做 subgroup signature？
+5. Fragment ownership compatibility 应该是下一步，还是优先扩展 projected signature？
 6. backend contract 中 reduction width、barrier count 和 workspace policy 是否还需要
    更明确的独立类型？
 7. 哪些真实 kernels 最适合作为性能与表达能力的验收 workload？
@@ -1459,7 +1473,7 @@ semantics，不能重新引入 v1 compatibility path。
 2. v2 只支持显式 init/update/out-of-place finalize，不保留 legacy lowering。
 3. FullParticipant 是所有合法 reducer 的 canonical correctness baseline。
 4. participant domain 第一版只支持 compiler-known contiguous `Range`。
-5. LocalComplete、subgroup 和 storage compression 都是可回退的 physical plans。
+5. LocalComplete、projected groups 和 storage compression 都是可回退的 physical plans。
 6. layout 负责 physical placement/communication，不能定义 logical contribution
    的贡献次数。
 

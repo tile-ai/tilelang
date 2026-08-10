@@ -1,29 +1,33 @@
 /*!
- * \file tl/transform/reducer.cc
- * \brief Verification and materialization passes for deferred reducers.
+ * \file tl/transform/reducer/reducer.cc
+ * \brief Planning and materialization passes for deferred reducers.
  */
 
 #include "reducer.h"
+#include "reducer_metadata.h"
 
-#include "../op/deferred_reducer.h"
-#include "../op/region.h"
-#include "../op/utils.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
+#include "layout/utils.h"
+#include "op/deferred_reducer.h"
+#include "op/reduce_plan.h"
+#include "op/region.h"
+#include "op/utils.h"
 #include "span_utils.h"
 #include "support/check.h"
 
 #include <tvm/ir/cast.h>
 #include <tvm/ir/type.h>
 #include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include <limits>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace tvm {
 namespace tl {
@@ -33,27 +37,27 @@ using namespace ffi;
 
 namespace {
 
-using ReducerInfoMap =
-    std::unordered_map<Var, ReducerInfo, ObjectPtrHash, ObjectPtrEqual>;
-using ReducerBufferMap =
-    std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual>;
-
-struct ReducerPhysicalPlan {
-  // When defined, the destination Fragment layout is also a certificate that
-  // every physical destination replica can build its result independently.
-  // Otherwise the reducer uses the full-participant collective baseline.
-  Optional<Fragment> local_complete_layout;
-
-  bool IsLocalComplete() const { return local_complete_layout.defined(); }
+struct ReducerPartialGroupPlan {
+  bool canonical{false};
+  Optional<Fragment> partial_layout;
+  Optional<Fragment> source_loop_layout;
+  std::vector<reduction::ThreadReduceStep> thread_steps;
+  std::vector<Call> update_sites;
 };
 
-using ReducerPhysicalPlanMap =
-    std::unordered_map<Var, ReducerPhysicalPlan, ObjectPtrHash, ObjectPtrEqual>;
+struct ReducerEpochPhysicalPlan {
+  std::vector<ReducerPartialGroupPlan> groups;
+  std::unordered_map<Call, size_t, ObjectPtrHash, ObjectPtrEqual>
+      update_to_group;
+};
+
+using ReducerEpochPlanMap = std::unordered_map<Var, ReducerEpochPhysicalPlan,
+                                               ObjectPtrHash, ObjectPtrEqual>;
 using ReducerLoopLayoutMap =
     std::unordered_map<For, Fragment, ObjectPtrHash, ObjectPtrEqual>;
 
 struct ReducerPlanningResult {
-  ReducerPhysicalPlanMap reducer_plans;
+  ReducerEpochPlanMap reducer_plans;
   ReducerLoopLayoutMap loop_layout_overrides;
 };
 
@@ -69,241 +73,10 @@ PrimExpr MakeRegionCall(const Buffer &buffer, const Array<PrimExpr> &mins,
   return Call(DataType::Handle(), RegionOp::Get(), args, {}, span);
 }
 
-struct ReducerMetadata {
-  ReducerInfoMap info;
-  ReducerBufferMap buffers;
-};
-
-class ReducerMetadataCollector : public StmtExprVisitor {
-public:
-  static ReducerMetadata Collect(const PrimFunc &func) {
-    ReducerMetadataCollector collector;
-    collector(func->body);
-    for (const auto &[var, buffer] : collector.metadata_.buffers) {
-      ICHECK(collector.metadata_.info.count(var))
-          << "Reducer buffer `" << buffer->name
-          << "` is missing reducer metadata" << SpanHintSuffix(buffer->span);
-    }
-    for (const auto &[var, info] : collector.metadata_.info) {
-      ICHECK(collector.metadata_.buffers.count(var))
-          << "Reducer metadata does not refer to a local.reducer allocation: "
-          << var;
-      ICHECK(IsBuiltinCommutativeReduceType(info->combine_type));
-    }
-    return std::move(collector.metadata_);
-  }
-
-private:
-  void VisitStmt_(const SBlockNode *op) final {
-    for (const Buffer &buffer : op->alloc_buffers) {
-      if (buffer.scope() == "local.reducer") {
-        ICHECK(!metadata_.buffers.count(buffer->data))
-            << "Reducer storage Var is allocated more than once: "
-            << buffer->data;
-        metadata_.buffers.emplace(buffer->data, buffer);
-      }
-    }
-
-    if (Optional<Any> annotation = op->annotations.Get(attr::kReducerInfo)) {
-      Map<Var, Map<String, Any>> definitions =
-          annotation.value().cast<Map<Var, Map<String, Any>>>();
-      for (const auto &[var, fields] : definitions) {
-        ICHECK(!fields.count("rep"))
-            << "Reducer v2 does not support the legacy `replication=` policy";
-        Optional<Any> op_field = fields.Get("op");
-        ICHECK(op_field.has_value()) << "Reducer metadata is missing `op`";
-        std::optional<String> op_name = op_field.value().try_cast<String>();
-        ICHECK(op_name.has_value()) << "Reducer metadata `op` must be a string";
-        Optional<PrimExpr> seed;
-        if (Optional<Any> seed_field = fields.Get("seed")) {
-          seed = seed_field.value().cast<PrimExpr>();
-        }
-        ICHECK(!metadata_.info.count(var))
-            << "Reducer metadata is defined more than once for " << var;
-        metadata_.info.emplace(var, ReducerInfo(op_name.value(), seed));
-      }
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  ReducerMetadata metadata_;
-};
-
-enum class ReducerState { kAllocated, kActive, kFinalized };
-
-class ReducerEpochVerifier : public StmtExprVisitor {
-public:
-  explicit ReducerEpochVerifier(const ReducerMetadata &metadata)
-      : metadata_(metadata) {
-    for (const auto &[var, _] : metadata.info) {
-      states_.emplace(var, ReducerState::kAllocated);
-    }
-  }
-
-  void Verify(const PrimFunc &func) {
-    (*this)(func->body);
-    for (const auto &[var, state] : states_) {
-      const Buffer &buffer = metadata_.buffers.at(var);
-      ICHECK(state == ReducerState::kFinalized)
-          << "Reducer `" << buffer->name
-          << "` must have exactly one explicit T.reducer_init and one "
-             "T.finalize_reducer"
-          << SpanHintSuffix(buffer->span);
-    }
-  }
-
-private:
-  void VisitStmt_(const ForNode *op) final {
-    analyzer_.Bind(op->loop_var, Range::FromMinExtent(op->min, op->extent));
-    ++nested_control_depth_;
-    StmtExprVisitor::VisitStmt_(op);
-    --nested_control_depth_;
-  }
-
-  void VisitStmt_(const IfThenElseNode *op) final {
-    VisitExpr(op->condition);
-    ++nested_control_depth_;
-    std::function<void()> exit_then = analyzer_.EnterConstraint(op->condition);
-    VisitStmt(op->then_case);
-    exit_then();
-    if (op->else_case.defined()) {
-      std::function<void()> exit_else =
-          analyzer_.EnterConstraint(Not(op->condition));
-      VisitStmt(op->else_case.value());
-      exit_else();
-    }
-    --nested_control_depth_;
-  }
-
-  void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tirx::attr::thread_extent) {
-      IterVar thread = Downcast<IterVar>(op->node);
-      analyzer_.Bind(
-          thread->var,
-          Range::FromMinExtent(make_zero(thread->var.dtype()), op->value));
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const BufferStoreNode *op) final {
-    CheckOrdinaryAccess(op->buffer, "BufferStore", op->span);
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  void VisitExpr_(const BufferLoadNode *op) final {
-    CheckOrdinaryAccess(op->buffer, "BufferLoad", op->span);
-    StmtExprVisitor::VisitExpr_(op);
-  }
-
-  void VisitExpr_(const CallNode *op) final {
-    if (op->op.same_as(ReducerInitOp::Get())) {
-      ICHECK_EQ(op->args.size(), 1U);
-      Var var = ReducerVarFromRegion(op->args[0]);
-      RequireTopLevelLifecycleOp("T.reducer_init", op->span);
-      ICHECK(states_.at(var) == ReducerState::kAllocated)
-          << "T.reducer_init must occur exactly once per reducer allocation"
-          << SpanHintSuffix(op->span);
-      states_[var] = ReducerState::kActive;
-      return;
-    }
-    if (op->op.same_as(ReducerUpdateOp::Get())) {
-      ICHECK_EQ(op->args.size(), 2U);
-      AccessRegion access =
-          NormalizeToAccessRegion(op->args[0], kAccessReadWrite);
-      Var var = RequireReducer(access.region->buffer);
-      ICHECK(states_.at(var) == ReducerState::kActive)
-          << "T.reducer_update must be dominated by T.reducer_init and precede "
-             "T.finalize_reducer"
-          << SpanHintSuffix(op->span);
-      ICHECK_EQ(access.region->region.size(),
-                access.region->buffer->shape.size());
-      for (size_t i = 0; i < access.region->region.size(); ++i) {
-        const Range &range = access.region->region[i];
-        ICHECK(is_one(range->extent))
-            << "T.reducer_update must name exactly one logical output element"
-            << SpanHintSuffix(op->span);
-        PrimExpr index = analyzer_.Simplify(range->min);
-        ICHECK(analyzer_.CanProve(index >= make_zero(index.dtype())) &&
-               analyzer_.CanProve(index < access.region->buffer->shape[i]))
-            << "T.reducer_update index " << index
-            << " is not provably within [0, " << access.region->buffer->shape[i]
-            << ") for reducer dimension " << i << SpanHintSuffix(op->span);
-        VisitExpr(range->min);
-      }
-      ICHECK_LE(SideEffect(op->args[1]), CallEffectKind::kReadState)
-          << "T.reducer_update contribution may read state but must not write "
-             "state or invoke an opaque effect"
-          << SpanHintSuffix(op->span);
-      VisitExpr(op->args[1]);
-      return;
-    }
-    if (op->op.same_as(FinalizeReducerOp::Get())) {
-      ICHECK_EQ(op->args.size(), 2U);
-      Var var = ReducerVarFromRegion(op->args[0]);
-      RequireTopLevelLifecycleOp("T.finalize_reducer", op->span);
-      ICHECK(states_.at(var) == ReducerState::kActive)
-          << "T.finalize_reducer must occur exactly once after initialization"
-          << SpanHintSuffix(op->span);
-      AccessRegion destination =
-          NormalizeToAccessRegion(op->args[1], kAccessWrite);
-      ICHECK(!metadata_.info.count(destination.region->buffer->data))
-          << "T.finalize_reducer destination must not alias reducer storage"
-          << SpanHintSuffix(op->span);
-      states_[var] = ReducerState::kFinalized;
-      return;
-    }
-
-    if (op->op.same_as(builtin::tvm_access_ptr()) && op->args.size() > 1) {
-      if (Optional<Var> var = op->args[1].as<Var>()) {
-        CheckOrdinaryVarAccess(var.value(), "access_ptr", op->span);
-      }
-    }
-    StmtExprVisitor::VisitExpr_(op);
-  }
-
-  Var ReducerVarFromRegion(const PrimExpr &arg) const {
-    AccessRegion access = NormalizeToAccessRegion(arg, kAccessReadWrite);
-    return RequireReducer(access.region->buffer);
-  }
-
-  Var RequireReducer(const Buffer &buffer) const {
-    ICHECK(metadata_.info.count(buffer->data))
-        << "First-class reducer op expects a local.reducer handle, got buffer `"
-        << buffer->name << "` in scope `" << buffer.scope() << "`"
-        << SpanHintSuffix(buffer->span);
-    return buffer->data;
-  }
-
-  void RequireTopLevelLifecycleOp(const char *name, const Span &span) const {
-    ICHECK_EQ(nested_control_depth_, 0)
-        << name
-        << " must be in participant-uniform top-level control flow in reducer "
-           "v2"
-        << SpanHintSuffix(span);
-  }
-
-  void CheckOrdinaryAccess(const Buffer &buffer, const char *kind,
-                           const Span &span) const {
-    CheckOrdinaryVarAccess(buffer->data, kind, span);
-  }
-
-  void CheckOrdinaryVarAccess(const Var &var, const char *kind,
-                              const Span &span) const {
-    ICHECK(!metadata_.info.count(var))
-        << "Reducer v2 forbids ordinary " << kind
-        << " access; use T.reducer_init, T.reducer_update, and "
-           "T.finalize_reducer"
-        << SpanHintSuffix(span);
-  }
-
-  const ReducerMetadata &metadata_;
-  std::unordered_map<Var, ReducerState, ObjectPtrHash, ObjectPtrEqual> states_;
-  arith::Analyzer analyzer_;
-  int nested_control_depth_{0};
-};
-
 struct ReducerUpdateSite {
+  Call call;
   For parallel_root;
+  Fragment loop_layout;
   Array<Var> parallel_vars;
   Array<PrimExpr> logical_indices;
   std::vector<std::pair<Var, Range>> loop_domains;
@@ -449,11 +222,13 @@ private:
       auto facts_it = facts_.find(var);
       ICHECK(facts_it != facts_.end());
       ReducerUpdateSite site;
+      site.call = GetRef<Call>(op);
       site.supported = parallel_context_.has_value() &&
                        parallel_context_->supported &&
                        parallel_context_->layout.defined();
       if (parallel_context_.has_value()) {
         site.parallel_root = parallel_context_->root;
+        site.loop_layout = parallel_context_->layout;
         site.parallel_vars = parallel_context_->vars;
         site.loop_body_safe = parallel_context_->body_safe;
       }
@@ -486,19 +261,20 @@ private:
     std::vector<For> parallel_roots;
   };
 
+  struct ProjectedCandidate {
+    Fragment source_loop_layout;
+    Fragment partial_layout;
+    std::vector<reduction::ThreadReduceStep> thread_steps;
+  };
+
   ReducerPlanningResult BuildPlans() const {
     ReducerPlanningResult result;
     std::unordered_map<Var, LocalCompleteCandidate, ObjectPtrHash,
                        ObjectPtrEqual>
         candidates;
     for (const auto &[var, buffer] : metadata_.buffers) {
-      result.reducer_plans.emplace(var, ReducerPhysicalPlan{});
       const ReducerPlanFacts &facts = facts_.at(var);
       std::vector<For> parallel_roots;
-      DLOG(INFO) << "[ReducerPhysicalPlanner] reducer=" << buffer->name
-                 << " facts_supported=" << facts.supported
-                 << " destination_layout=" << facts.destination_layout.defined()
-                 << " updates=" << facts.updates.size();
       if (!facts.supported || !facts.destination_layout.defined() ||
           facts.updates.empty() ||
           !CanUseLocalComplete(buffer, facts.destination_layout.value(),
@@ -526,6 +302,8 @@ private:
       }
     }
 
+    std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>
+        selected_local_complete;
     for (const auto &[var, candidate] : candidates) {
       bool has_conflict = false;
       for (const For &root : candidate.parallel_roots) {
@@ -534,12 +312,291 @@ private:
       if (has_conflict) {
         continue;
       }
-      result.reducer_plans.at(var).local_complete_layout = candidate.layout;
+      selected_local_complete.insert(var);
       for (const For &root : candidate.parallel_roots) {
         result.loop_layout_overrides.emplace(root, candidate.layout);
       }
     }
+
+    for (const auto &[var, buffer] : metadata_.buffers) {
+      const ReducerPlanFacts &facts = facts_.at(var);
+      ReducerEpochPhysicalPlan epoch_plan;
+      auto local_complete = candidates.find(var);
+      if (selected_local_complete.count(var) != 0 &&
+          local_complete != candidates.end()) {
+        ReducerPartialGroupPlan group;
+        group.partial_layout = local_complete->second.layout;
+        for (const ReducerUpdateSite &site : facts.updates) {
+          group.update_sites.push_back(site.call);
+        }
+        epoch_plan.groups.push_back(std::move(group));
+      } else {
+        epoch_plan =
+            BuildProjectedGroups(buffer, facts, result.loop_layout_overrides);
+      }
+      if (epoch_plan.groups.empty()) {
+        epoch_plan.groups.push_back(MakeCanonicalGroup(std::vector<Call>{}));
+      }
+      for (size_t group_index = 0; group_index < epoch_plan.groups.size();
+           ++group_index) {
+        for (const Call &update : epoch_plan.groups[group_index].update_sites) {
+          ICHECK(!epoch_plan.update_to_group.count(update));
+          epoch_plan.update_to_group.emplace(update, group_index);
+        }
+      }
+      result.reducer_plans.emplace(var, std::move(epoch_plan));
+    }
     return result;
+  }
+
+  ReducerEpochPhysicalPlan BuildProjectedGroups(
+      const Buffer &logical_buffer, const ReducerPlanFacts &facts,
+      const ReducerLoopLayoutMap &loop_layout_overrides) const {
+    ReducerEpochPhysicalPlan result;
+    std::optional<size_t> canonical_group;
+    for (const ReducerUpdateSite &site : facts.updates) {
+      std::optional<ProjectedCandidate> candidate;
+      if (facts.supported && facts.destination_layout.defined()) {
+        Fragment effective_layout = site.loop_layout;
+        auto override_it = loop_layout_overrides.find(site.parallel_root);
+        if (override_it != loop_layout_overrides.end()) {
+          effective_layout = override_it->second;
+        }
+        candidate = TryBuildProjectedCandidate(logical_buffer,
+                                               facts.destination_layout.value(),
+                                               site, effective_layout);
+      }
+
+      if (!candidate.has_value()) {
+        if (!canonical_group.has_value()) {
+          canonical_group = result.groups.size();
+          result.groups.push_back(MakeCanonicalGroup(std::vector<Call>{}));
+        }
+        result.groups[canonical_group.value()].update_sites.push_back(
+            site.call);
+        continue;
+      }
+
+      std::optional<size_t> matching_group;
+      for (size_t i = 0; i < result.groups.size(); ++i) {
+        if (GroupMatches(result.groups[i], candidate.value())) {
+          matching_group = i;
+          break;
+        }
+      }
+      if (!matching_group.has_value()) {
+        ReducerPartialGroupPlan group;
+        group.partial_layout = candidate.value().partial_layout;
+        group.source_loop_layout = candidate.value().source_loop_layout;
+        group.thread_steps = candidate.value().thread_steps;
+        result.groups.push_back(std::move(group));
+        matching_group = result.groups.size() - 1;
+      }
+      result.groups[matching_group.value()].update_sites.push_back(site.call);
+    }
+    return result;
+  }
+
+  std::optional<ProjectedCandidate>
+  TryBuildProjectedCandidate(const Buffer &logical_buffer,
+                             const Fragment &destination_layout,
+                             const ReducerUpdateSite &site,
+                             const Fragment &effective_loop_layout) const {
+    if (!site.supported || !site.parallel_root.defined() ||
+        !effective_loop_layout.defined() ||
+        effective_loop_layout->InputDim() != site.parallel_vars.size()) {
+      return std::nullopt;
+    }
+
+    arith::Analyzer analyzer;
+    for (const auto &[loop_var, domain] : site.loop_domains) {
+      analyzer.Bind(loop_var, domain);
+    }
+    auto find_domain = [&](const Var &variable) -> Optional<Range> {
+      for (const auto &[loop_var, domain] : site.loop_domains) {
+        if (loop_var.same_as(variable)) {
+          return domain;
+        }
+      }
+      return std::nullopt;
+    };
+
+    for (size_t i = 0; i < site.parallel_vars.size(); ++i) {
+      Optional<Range> domain = find_domain(site.parallel_vars[i]);
+      if (!domain.defined() ||
+          !analyzer.CanProveEqual(domain.value()->extent,
+                                  effective_loop_layout->InputShape()[i])) {
+        return std::nullopt;
+      }
+    }
+
+    Fragment projection_layout = effective_loop_layout;
+    std::optional<int> reduction_dim;
+    bool scalar_output =
+        logical_buffer->shape.size() == 1 && site.logical_indices.size() == 1 &&
+        analyzer.CanProveEqual(logical_buffer->shape[0], Integer(1)) &&
+        analyzer.CanProveEqual(site.logical_indices[0], Integer(0));
+    if (scalar_output) {
+      if (site.parallel_vars.size() != 1) {
+        return std::nullopt;
+      }
+      reduction_dim = 0;
+    } else if (site.parallel_vars.size() == logical_buffer->shape.size() + 1) {
+      if (site.logical_indices.size() != logical_buffer->shape.size()) {
+        return std::nullopt;
+      }
+      for (size_t candidate_dim = 0; candidate_dim < site.parallel_vars.size();
+           ++candidate_dim) {
+        bool matches = true;
+        for (size_t output_dim = 0; output_dim < logical_buffer->shape.size();
+             ++output_dim) {
+          size_t parallel_dim =
+              output_dim < candidate_dim ? output_dim : output_dim + 1;
+          Optional<Range> domain =
+              find_domain(site.parallel_vars[parallel_dim]);
+          matches &= domain.defined() &&
+                     analyzer.CanProveEqual(site.logical_indices[output_dim],
+                                            site.parallel_vars[parallel_dim]) &&
+                     analyzer.CanProveEqual(domain.value()->extent,
+                                            logical_buffer->shape[output_dim]);
+        }
+        if (matches) {
+          if (reduction_dim.has_value()) {
+            return std::nullopt;
+          }
+          reduction_dim = static_cast<int>(candidate_dim);
+        }
+      }
+    } else if (site.parallel_vars.size() == 1 &&
+               site.logical_indices.size() == logical_buffer->shape.size()) {
+      // Layout inference may fuse Parallel(M, K) into one contiguous logical
+      // Range before reducer planning. Recover the compiler-known row-major
+      // coordinates so that the omitted trailing coordinate remains an
+      // explicit reduction axis for projection and thread-step analysis.
+      Optional<Range> fused_domain = find_domain(site.parallel_vars[0]);
+      const int64_t *fused_extent =
+          fused_domain.defined()
+              ? as_const_int(analyzer.Simplify(fused_domain.value()->extent))
+              : nullptr;
+      int64_t logical_elements = 1;
+      std::vector<int64_t> logical_extents;
+      logical_extents.reserve(logical_buffer->shape.size());
+      for (const PrimExpr &extent : logical_buffer->shape) {
+        const int64_t *constant = as_const_int(analyzer.Simplify(extent));
+        if (constant == nullptr || *constant <= 0 ||
+            logical_elements >
+                std::numeric_limits<int64_t>::max() / *constant) {
+          return std::nullopt;
+        }
+        logical_extents.push_back(*constant);
+        logical_elements *= *constant;
+      }
+      if (fused_extent == nullptr || *fused_extent <= logical_elements ||
+          *fused_extent % logical_elements != 0) {
+        return std::nullopt;
+      }
+      int64_t reduction_extent = *fused_extent / logical_elements;
+      PrimExpr fused = site.parallel_vars[0];
+      int64_t stride = reduction_extent;
+      for (int output_dim = static_cast<int>(logical_extents.size()) - 1;
+           output_dim >= 0; --output_dim) {
+        PrimExpr expected =
+            FloorMod(FloorDiv(fused, Integer(stride)),
+                     Integer(logical_extents[static_cast<size_t>(output_dim)]));
+        if (!analyzer.CanProveEqual(
+                site.logical_indices[static_cast<size_t>(output_dim)],
+                expected)) {
+          return std::nullopt;
+        }
+        stride *= logical_extents[static_cast<size_t>(output_dim)];
+      }
+      Array<PrimExpr> expanded_shape = logical_buffer->shape;
+      expanded_shape.push_back(Integer(reduction_extent));
+      projection_layout = Downcast<Fragment>(
+          effective_loop_layout->Reshape(expanded_shape, &analyzer));
+      reduction_dim = static_cast<int>(logical_buffer->shape.size());
+    }
+    if (!reduction_dim.has_value()) {
+      return std::nullopt;
+    }
+
+    Fragment partial_layout = reduction::ComputeReducerLayout(
+        projection_layout, reduction_dim.value());
+    if (partial_layout->InputDim() != logical_buffer->shape.size()) {
+      return std::nullopt;
+    }
+    for (size_t i = 0; i < logical_buffer->shape.size(); ++i) {
+      if (!analyzer.CanProveEqual(partial_layout->InputShape()[i],
+                                  logical_buffer->shape[i])) {
+        return std::nullopt;
+      }
+    }
+    for (const PrimExpr &extent : partial_layout->OutputShape()) {
+      const int64_t *constant_extent = as_const_int(analyzer.Simplify(extent));
+      if (constant_extent == nullptr || *constant_extent <= 0) {
+        return std::nullopt;
+      }
+    }
+
+    Array<PrimExpr> output_indices =
+        reduction::InputPlaceholders(partial_layout->InputDim());
+    for (size_t i = 0; i < output_indices.size(); ++i) {
+      analyzer.Bind(Downcast<Var>(output_indices[i]),
+                    Range(0, partial_layout->InputShape()[i]));
+    }
+    if (!ProveFragmentContains(destination_layout, partial_layout,
+                               output_indices, output_indices, analyzer)) {
+      return std::nullopt;
+    }
+
+    Array<IterVar> parallel_iters;
+    parallel_iters.reserve(projection_layout->InputDim());
+    for (size_t i = 0; i < projection_layout->InputDim(); ++i) {
+      Var variable("reducer_projection_" + std::to_string(i));
+      parallel_iters.push_back(
+          IterVar(Range(0, projection_layout->InputShape()[i]), variable,
+                  IterVarType::kDataPar));
+    }
+    Array<PrimExpr> parallel_indices = parallel_iters.Map(
+        [](const IterVar &iter) { return PrimExpr(iter->var); });
+    PrimExpr thread = projection_layout->ForwardThread(parallel_indices, {});
+    arith::IterSumExpr thread_sum =
+        arith::NormalizeToIterSum(thread, ToVMap(parallel_iters), &analyzer);
+    std::optional<std::vector<reduction::ThreadReduceStep>> steps =
+        reduction::TryCollectThreadReduceSteps(
+            thread_sum, parallel_iters[reduction_dim.value()]->var);
+    if (!steps.has_value()) {
+      return std::nullopt;
+    }
+    for (const reduction::ThreadReduceStep &step : steps.value()) {
+      int logical_width = step.extent;
+      int shift = 0;
+      if (step.scale <= 0 || logical_width <= 0 ||
+          !is_const_power_of_two_integer(Integer(logical_width), &shift)) {
+        return std::nullopt;
+      }
+    }
+    return ProjectedCandidate{projection_layout, partial_layout,
+                              std::move(steps.value())};
+  }
+
+  static ReducerPartialGroupPlan
+  MakeCanonicalGroup(std::vector<Call> update_sites) {
+    ReducerPartialGroupPlan group;
+    group.canonical = true;
+    group.update_sites = std::move(update_sites);
+    return group;
+  }
+
+  static bool GroupMatches(const ReducerPartialGroupPlan &group,
+                           const ProjectedCandidate &candidate) {
+    return !group.canonical && group.partial_layout.defined() &&
+           group.source_loop_layout.defined() &&
+           LayoutsEqual(group.partial_layout.value(),
+                        candidate.partial_layout) &&
+           LayoutsEqual(group.source_loop_layout.value(),
+                        candidate.source_loop_layout) &&
+           group.thread_steps == candidate.thread_steps;
   }
 
   bool CanUseLocalComplete(const Buffer &logical_buffer,
@@ -547,9 +604,6 @@ private:
                            const std::vector<ReducerUpdateSite> &updates,
                            std::vector<For> *parallel_roots) const {
     arith::Analyzer shape_analyzer;
-    DLOG(INFO) << "[ReducerPhysicalPlanner] testing LocalComplete for "
-               << logical_buffer->name << " with "
-               << destination_layout->DebugOutput();
     if (destination_layout->InputDim() != logical_buffer->shape.size()) {
       return false;
     }
@@ -588,11 +642,6 @@ private:
     }
 
     for (const ReducerUpdateSite &site : updates) {
-      DLOG(INFO) << "[ReducerPhysicalPlanner] update supported="
-                 << site.supported << " body_safe=" << site.loop_body_safe
-                 << " root=" << site.parallel_root.defined()
-                 << " parallel_vars=" << site.parallel_vars
-                 << " logical_indices=" << site.logical_indices;
       if (!site.supported || !site.loop_body_safe ||
           !site.parallel_root.defined() ||
           site.parallel_vars.size() != destination_layout->InputDim() ||
@@ -658,7 +707,7 @@ private:
 class ReducerMaterializer : public arith::IRMutatorWithAnalyzer {
 public:
   ReducerMaterializer(const ReducerMetadata &metadata,
-                      const ReducerPhysicalPlanMap &plans,
+                      const ReducerEpochPlanMap &plans,
                       const ReducerLoopLayoutMap &loop_layout_overrides,
                       arith::Analyzer *analyzer)
       : arith::IRMutatorWithAnalyzer(analyzer), metadata_(metadata),
@@ -669,18 +718,29 @@ public:
       ICHECK(pointer_type != nullptr)
           << "Reducer buffer data Var must have a PointerType annotation";
       Type local_type = PointerType(pointer_type->element_type, "local");
-      Var local_var(buffer->data->name_hint, local_type, buffer->data->span);
-      Buffer local_buffer = buffer;
-      BufferNode *local_buffer_ptr = local_buffer.CopyOnWrite();
-      local_buffer_ptr->data = local_var;
-      const ReducerPhysicalPlan &plan = plans_.at(var);
-      if (plan.IsLocalComplete()) {
-        ICHECK(local_buffer_ptr->strides.empty())
-            << "LocalComplete reducer storage requires compact strides";
-        local_buffer_ptr->shape =
-            plan.local_complete_layout.value()->OutputShape();
+      const ReducerEpochPhysicalPlan &epoch = plans_.at(var);
+      ICHECK(!epoch.groups.empty());
+      std::vector<Buffer> partials;
+      partials.reserve(epoch.groups.size());
+      for (size_t group_index = 0; group_index < epoch.groups.size();
+           ++group_index) {
+        std::string suffix = "_partial_" + std::to_string(group_index);
+        Var local_var(std::string(buffer->data->name_hint) + suffix, local_type,
+                      buffer->data->span);
+        Buffer local_buffer = buffer;
+        BufferNode *local_buffer_ptr = local_buffer.CopyOnWrite();
+        local_buffer_ptr->data = local_var;
+        local_buffer_ptr->name = std::string(buffer->name) + suffix;
+        const ReducerPartialGroupPlan &group = epoch.groups[group_index];
+        if (!group.canonical) {
+          ICHECK(group.partial_layout.defined());
+          ICHECK(local_buffer_ptr->strides.empty())
+              << "Projected reducer storage requires compact strides";
+          local_buffer_ptr->shape = group.partial_layout.value()->OutputShape();
+        }
+        partials.push_back(std::move(local_buffer));
       }
-      buffer_remap_.emplace(buffer, local_buffer);
+      group_buffers_.emplace(buffer, std::move(partials));
     }
   }
 
@@ -700,12 +760,18 @@ private:
     SBlock block =
         Downcast<SBlock>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
     SBlockNode *block_ptr = block.CopyOnWrite();
-    for (size_t i = 0; i < block_ptr->alloc_buffers.size(); ++i) {
-      auto it = buffer_remap_.find(block_ptr->alloc_buffers[i]);
-      if (it != buffer_remap_.end()) {
-        block_ptr->alloc_buffers.Set(i, it->second);
+    Array<Buffer> allocations;
+    for (const Buffer &buffer : op->alloc_buffers) {
+      auto it = group_buffers_.find(buffer);
+      if (it == group_buffers_.end()) {
+        allocations.push_back(buffer);
+        continue;
+      }
+      for (const Buffer &partial : it->second) {
+        allocations.push_back(partial);
       }
     }
+    block_ptr->alloc_buffers = std::move(allocations);
     block_ptr->annotations.erase(attr::kReducerInfo);
     return block;
   }
@@ -784,26 +850,6 @@ private:
     return result;
   }
 
-  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    BufferLoad load =
-        Downcast<BufferLoad>(arith::IRMutatorWithAnalyzer::VisitExpr_(op));
-    auto it = buffer_remap_.find(op->buffer);
-    if (it != buffer_remap_.end()) {
-      load.CopyOnWrite()->buffer = it->second;
-    }
-    return load;
-  }
-
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    BufferStore store =
-        Downcast<BufferStore>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
-    auto it = buffer_remap_.find(op->buffer);
-    if (it != buffer_remap_.end()) {
-      store.CopyOnWrite()->buffer = it->second;
-    }
-    return store;
-  }
-
   PrimExpr VisitExpr_(const CallNode *op) final {
     bool is_init = op->op.same_as(ReducerInitOp::Get());
     bool is_update = op->op.same_as(ReducerUpdateOp::Get());
@@ -854,50 +900,107 @@ private:
     if (is_finalize && info.value()->seed.defined()) {
       call_ptr->annotations.Set(attr::kReducerSeed, info.value()->seed.value());
     }
-    const ReducerPhysicalPlan &plan = plans_.at(reducer_var.value());
-    if (plan.IsLocalComplete()) {
-      call_ptr->annotations.Set(attr::kReducerLocalCompleteLayout,
-                                plan.local_complete_layout.value());
-      // Keep the post-materialization IR self-consistent: reducer call regions
-      // name the compact physical buffer, while update logical indices travel
-      // separately as planned metadata until ReducerUpdateOp lowers them.
-      Buffer logical_buffer = reducer_access.region->buffer;
-      auto physical_it = buffer_remap_.find(logical_buffer);
-      ICHECK(physical_it != buffer_remap_.end());
-      const Buffer &physical_buffer = physical_it->second;
-      Array<PrimExpr> physical_mins;
-      Array<PrimExpr> physical_extents;
-      if (is_update) {
-        physical_mins =
-            plan.local_complete_layout.value()->Forward(logical_update_indices);
-        for (const PrimExpr &index : physical_mins) {
-          physical_extents.push_back(make_const(index.dtype(), 1));
-        }
-        call_ptr->annotations.Set(attr::kReducerLogicalIndices,
-                                  logical_update_indices);
-      } else {
-        for (const PrimExpr &extent : physical_buffer->shape) {
-          physical_mins.push_back(make_zero(extent.dtype()));
-          physical_extents.push_back(extent);
-        }
+    const ReducerEpochPhysicalPlan &epoch = plans_.at(reducer_var.value());
+    Buffer logical_buffer = reducer_access.region->buffer;
+    auto buffers_it = group_buffers_.find(logical_buffer);
+    ICHECK(buffers_it != group_buffers_.end());
+    const std::vector<Buffer> &partials = buffers_it->second;
+    ICHECK_EQ(partials.size(), epoch.groups.size());
+
+    if (is_init) {
+      Array<PrimExpr> args;
+      args.reserve(partials.size());
+      for (const Buffer &partial : partials) {
+        args.push_back(MakeFullRegionCall(partial, reducer_access.access_mask,
+                                          op->args[0]->span));
       }
-      call_ptr->args.Set(
-          0, MakeRegionCall(physical_buffer, physical_mins, physical_extents,
-                            reducer_access.access_mask, op->args[0]->span));
+      call_ptr->args = std::move(args);
+      return call;
     }
+
     if (is_update) {
-      call_ptr->annotations.Set(
-          attr::kReducerParallelOnce,
-          Bool(parallel_depth_ > 0 && !plan.IsLocalComplete()));
+      auto group_it = epoch.update_to_group.find(GetRef<Call>(op));
+      ICHECK(group_it != epoch.update_to_group.end())
+          << "Reducer update site is missing a physical partial group";
+      size_t group_index = group_it->second;
+      ICHECK_LT(group_index, epoch.groups.size());
+      const ReducerPartialGroupPlan &group = epoch.groups[group_index];
+      Array<PrimExpr> physical_indices = logical_update_indices;
+      if (!group.canonical) {
+        ICHECK(group.partial_layout.defined());
+        physical_indices =
+            group.partial_layout.value()->Forward(logical_update_indices);
+      }
+      Array<PrimExpr> physical_extents;
+      physical_extents.reserve(physical_indices.size());
+      for (const PrimExpr &index : physical_indices) {
+        physical_extents.push_back(make_const(index.dtype(), 1));
+      }
+      Array<PrimExpr> args = {MakeRegionCall(partials[group_index],
+                                             physical_indices, physical_extents,
+                                             reducer_access.access_mask,
+                                             op->args[0]->span),
+                              call->args[1]};
+      call_ptr->args = std::move(args);
+      call_ptr->annotations.Set(attr::kReducerLogicalIndices,
+                                logical_update_indices);
+      if (group.canonical) {
+        call_ptr->annotations.Set(attr::kReducerParallelOnce,
+                                  Bool(parallel_depth_ > 0));
+      } else {
+        call_ptr->annotations.Set(attr::kReducerPartitionRequired, Bool(true));
+      }
+      return call;
     }
+
+    ICHECK(is_finalize);
+    Array<PrimExpr> args;
+    Array<ReducerPartialPlan> partial_plans;
+    args.reserve(partials.size() + 1);
+    partial_plans.reserve(partials.size());
+    for (size_t group_index = 0; group_index < epoch.groups.size();
+         ++group_index) {
+      const ReducerPartialGroupPlan &group = epoch.groups[group_index];
+      args.push_back(MakeFullRegionCall(partials[group_index], kAccessRead,
+                                        op->args[0]->span));
+      Array<Integer> step_extents;
+      Array<Integer> step_scales;
+      step_extents.reserve(group.thread_steps.size());
+      step_scales.reserve(group.thread_steps.size());
+      for (const reduction::ThreadReduceStep &step : group.thread_steps) {
+        step_extents.push_back(Integer(step.extent));
+        step_scales.push_back(Integer(step.scale));
+      }
+      partial_plans.push_back(
+          ReducerPartialPlan(group.canonical, group.partial_layout,
+                             std::move(step_extents), std::move(step_scales)));
+    }
+    args.push_back(call->args[1]);
+    call_ptr->args = std::move(args);
+    call_ptr->annotations.Set(attr::kReducerPartialPlans,
+                              std::move(partial_plans));
     return call;
   }
 
   const ReducerMetadata &metadata_;
-  const ReducerPhysicalPlanMap &plans_;
+  const ReducerEpochPlanMap &plans_;
   const ReducerLoopLayoutMap &loop_layout_overrides_;
-  std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>
-      buffer_remap_;
+  std::unordered_map<Buffer, std::vector<Buffer>, ObjectPtrHash, ObjectPtrEqual>
+      group_buffers_;
+
+  static PrimExpr MakeFullRegionCall(const Buffer &buffer, int access_mask,
+                                     const Span &span) {
+    Array<PrimExpr> mins;
+    Array<PrimExpr> extents;
+    mins.reserve(buffer->shape.size());
+    extents.reserve(buffer->shape.size());
+    for (const PrimExpr &extent : buffer->shape) {
+      mins.push_back(make_zero(extent.dtype()));
+      extents.push_back(extent);
+    }
+    return MakeRegionCall(buffer, mins, extents, access_mask, span);
+  }
+
   bool UsesPhysicalThreadVar(const PrimExpr &expr) const {
     return UsesVar(expr, [&](const VarNode *node) {
       return physical_thread_vars_.count(GetRef<Var>(node)) != 0;
@@ -954,19 +1057,9 @@ private:
 
 } // namespace
 
-tvm::transform::Pass VerifyReducerEpochs() {
-  auto pass_func = [](PrimFunc func, IRModule, tvm::transform::PassContext) {
-    ReducerMetadata metadata = ReducerMetadataCollector::Collect(func);
-    ReducerEpochVerifier(metadata).Verify(func);
-    return func;
-  };
-  return tirx::transform::CreatePrimFuncPass(pass_func, 0,
-                                             "tl.VerifyReducerEpochs", {});
-}
-
 tvm::transform::Pass PlanAndMaterializeReducers() {
   auto pass_func = [](PrimFunc func, IRModule, tvm::transform::PassContext) {
-    ReducerMetadata metadata = ReducerMetadataCollector::Collect(func);
+    ReducerMetadata metadata = CollectReducerMetadata(func);
     if (metadata.info.empty()) {
       return func;
     }
@@ -974,7 +1067,7 @@ tvm::transform::Pass PlanAndMaterializeReducers() {
     // introduced. Re-verify here because earlier pipeline transforms (for
     // example warp specialization or software pipelining) may have changed the
     // execution scope since the frontend verification pass.
-    ReducerEpochVerifier(metadata).Verify(func);
+    VerifyReducerEpochSemantics(func, metadata);
     ReducerPlanningResult planning_result =
         ReducerPhysicalPlanner::Plan(func, metadata);
     return ReducerMaterializer::Rewrite(std::move(func), metadata,
@@ -996,7 +1089,6 @@ tvm::transform::Pass VerifyReducerLowered() {
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
   refl::GlobalDef()
-      .def("tl.transform.VerifyReducerEpochs", VerifyReducerEpochs)
       .def("tl.transform.PlanAndMaterializeReducers",
            PlanAndMaterializeReducers)
       .def("tl.transform.VerifyReducerLowered", VerifyReducerLowered);

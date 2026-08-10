@@ -76,23 +76,20 @@ bool GetBoolAnnotation(const Map<String, ObjectRef> &annotations,
   return false;
 }
 
-Optional<Fragment>
-GetLocalCompleteLayout(const Map<String, ObjectRef> &annotations) {
-  Optional<ObjectRef> value =
-      annotations.Get(attr::kReducerLocalCompleteLayout);
+Optional<Array<ReducerPartialPlan>>
+GetPartialPlans(const Map<String, ObjectRef> &annotations) {
+  Optional<ObjectRef> value = annotations.Get(attr::kReducerPartialPlans);
   if (!value.defined()) {
     return std::nullopt;
   }
-  Optional<Fragment> layout = value.value().as<Fragment>();
-  ICHECK(layout.defined()) << attr::kReducerLocalCompleteLayout
-                           << " must be a Fragment";
-  return layout;
+  return Downcast<Array<ReducerPartialPlan>>(value.value());
 }
 
 Array<PrimExpr> GetLogicalIndices(const Map<String, ObjectRef> &annotations) {
   Optional<ObjectRef> value = annotations.Get(attr::kReducerLogicalIndices);
-  ICHECK(value.defined()) << attr::kReducerLogicalIndices
-                          << " is required by a LocalComplete reducer update";
+  ICHECK(value.defined())
+      << attr::kReducerLogicalIndices
+      << " is required by a planned physical reducer update";
   return Downcast<Array<PrimExpr>>(value.value());
 }
 
@@ -106,24 +103,11 @@ void CheckFullRegion(const BufferRegion &region, const char *op_name) {
   }
 }
 
-void CheckLocalCompleteBuffer(const Buffer &buffer, const Fragment &layout,
-                              const char *op_name) {
+void CheckProjectedBuffer(const Buffer &buffer, const Fragment &layout,
+                          const char *op_name) {
   ICHECK(StructuralEqual()(buffer->shape, layout->OutputShape()))
-      << op_name << " expected LocalComplete storage shape "
+      << op_name << " expected projected partial storage shape "
       << layout->OutputShape() << ", got " << buffer->shape;
-}
-
-void CheckPointRegion(const BufferRegion &region,
-                      const Array<PrimExpr> &expected_indices,
-                      const char *op_name) {
-  ICHECK_EQ(region->region.size(), expected_indices.size());
-  for (size_t i = 0; i < expected_indices.size(); ++i) {
-    ICHECK(is_one(region->region[i]->extent) &&
-           StructuralEqual()(region->region[i]->min, expected_indices[i]))
-        << op_name
-        << " physical reducer region does not match its planned "
-           "layout";
-  }
 }
 
 } // namespace
@@ -136,23 +120,49 @@ ReducerInfo::ReducerInfo(const String &op, Optional<PrimExpr> seed) {
   data_ = std::move(node);
 }
 
+ReducerPartialPlan::ReducerPartialPlan(bool canonical,
+                                       Optional<Fragment> partial_layout,
+                                       Array<Integer> step_extents,
+                                       Array<Integer> step_scales) {
+  ICHECK_EQ(step_extents.size(), step_scales.size());
+  ICHECK(canonical || partial_layout.defined())
+      << "A projected reducer partial plan requires a physical layout";
+  ICHECK(!canonical || !partial_layout.defined())
+      << "A canonical reducer partial plan must use full logical storage";
+  ICHECK(!canonical || step_extents.empty())
+      << "Canonical participant-wide reduction is derived from the execution "
+         "scope, not stored as projected thread steps";
+  for (size_t i = 0; i < step_extents.size(); ++i) {
+    ICHECK_GT(step_extents[i]->value, 0);
+    ICHECK_GT(step_scales[i]->value, 0);
+  }
+  ObjectPtr<ReducerPartialPlanNode> node =
+      make_object<ReducerPartialPlanNode>();
+  node->canonical = canonical;
+  node->partial_layout = std::move(partial_layout);
+  node->step_extents = std::move(step_extents);
+  node->step_scales = std::move(step_scales);
+  data_ = std::move(node);
+}
+
 ReducerInitOp::ReducerInitOp(Array<PrimExpr> args,
                              Map<String, ObjectRef> annotations) {
-  ICHECK_EQ(args.size(), 1U);
-  AccessRegion reducer_access = NormalizeToAccessRegion(args[0], kAccessWrite);
-  Optional<Fragment> local_complete_layout =
-      GetLocalCompleteLayout(annotations);
-  CheckFullRegion(reducer_access.region, "T.reducer_init");
-  if (local_complete_layout.defined()) {
-    CheckLocalCompleteBuffer(reducer_access.region->buffer,
-                             local_complete_layout.value(), "T.reducer_init");
+  ICHECK(!args.empty());
+  std::vector<AccessRegion> accesses;
+  Array<Buffer> partials;
+  accesses.reserve(args.size());
+  partials.reserve(args.size());
+  for (const PrimExpr &arg : args) {
+    AccessRegion access = NormalizeToAccessRegion(arg, kAccessWrite);
+    CheckFullRegion(access.region, "T.reducer_init");
+    partials.push_back(access.region->buffer);
+    accesses.push_back(std::move(access));
   }
 
   ObjectPtr<ReducerInitOpNode> node = make_object<ReducerInitOpNode>();
-  node->reducer = reducer_access.region->buffer;
+  node->partials = std::move(partials);
   node->combine_type = GetPlannedReduceType(annotations);
-  node->local_complete_layout = local_complete_layout;
-  node->SetAccessRegions({reducer_access});
+  node->SetAccessRegions(std::move(accesses));
   data_ = std::move(node);
 }
 
@@ -160,20 +170,28 @@ Stmt ReducerInitOpNode::Lower(const LowerArgs &lower_args,
                               arith::Analyzer *) const {
   ICHECK(combine_type.defined())
       << "ReducerInitOp must be planned before lowering";
-  Buffer partial = GetLoweredBuffer(reducer, lower_args);
-  Array<PrimExpr> indices;
-  indices.reserve(partial->shape.size());
-  Stmt body;
-  for (size_t i = 0; i < partial->shape.size(); ++i) {
-    indices.push_back(Var("reducer_init_" + std::to_string(i)));
+  Array<Stmt> statements;
+  statements.reserve(partials.size());
+  for (size_t group = 0; group < partials.size(); ++group) {
+    Buffer partial = GetLoweredBuffer(partials[group], lower_args);
+    Array<Var> variables;
+    Array<PrimExpr> indices;
+    variables.reserve(partial->shape.size());
+    indices.reserve(partial->shape.size());
+    for (size_t i = 0; i < partial->shape.size(); ++i) {
+      Var var("reducer_init_" + std::to_string(group) + "_" +
+              std::to_string(i));
+      variables.push_back(var);
+      indices.push_back(var);
+    }
+    Stmt body = BufferStore(
+        partial, MakeReduceIdentity(combine_type, partial->dtype), indices);
+    for (int i = static_cast<int>(variables.size()) - 1; i >= 0; --i) {
+      body = For(variables[i], 0, partial->shape[i], ForKind::kSerial, body);
+    }
+    statements.push_back(std::move(body));
   }
-  body = BufferStore(partial, MakeReduceIdentity(combine_type, partial->dtype),
-                     indices);
-  for (int i = static_cast<int>(indices.size()) - 1; i >= 0; --i) {
-    body = For(Downcast<Var>(indices[i]), 0, partial->shape[i],
-               ForKind::kSerial, body);
-  }
-  return body;
+  return statements.size() == 1 ? statements[0] : SeqStmt(statements);
 }
 
 LayoutMap ReducerInitOpNode::InferLayout(const LayoutInferArgs &,
@@ -191,37 +209,30 @@ ReducerUpdateOp::ReducerUpdateOp(Array<PrimExpr> args,
   AccessRegion reducer_access =
       NormalizeToAccessRegion(args[0], kAccessReadWrite);
   Array<PrimExpr> logical_indices;
-  Optional<Fragment> local_complete_layout =
-      GetLocalCompleteLayout(annotations);
-  if (local_complete_layout.defined()) {
+  Array<PrimExpr> physical_indices;
+  for (const Range &range : reducer_access.region->region) {
+    ICHECK(is_one(range->extent))
+        << "T.reducer_update requires exactly one physical partial element";
+    physical_indices.push_back(range->min);
+  }
+  if (annotations.count(attr::kReducerLogicalIndices)) {
     logical_indices = GetLogicalIndices(annotations);
-    ICHECK_EQ(logical_indices.size(),
-              local_complete_layout.value()->InputDim());
-    CheckPointRegion(reducer_access.region,
-                     local_complete_layout.value()->Forward(logical_indices),
-                     "T.reducer_update");
   } else {
-    for (const Range &range : reducer_access.region->region) {
-      ICHECK(is_one(range->extent))
-          << "T.reducer_update requires exactly one logical output element";
-      logical_indices.push_back(range->min);
-    }
+    logical_indices = physical_indices;
   }
 
   ObjectPtr<ReducerUpdateOpNode> node = make_object<ReducerUpdateOpNode>();
   node->reducer = reducer_access.region->buffer;
   node->logical_indices = std::move(logical_indices);
+  node->physical_indices = std::move(physical_indices);
   node->contribution = args[1];
   node->combine_type = GetPlannedReduceType(annotations);
   node->parallel_once =
       GetBoolAnnotation(annotations, attr::kReducerParallelOnce);
-  node->local_complete_layout = local_complete_layout;
-  if (node->local_complete_layout.defined()) {
-    CheckLocalCompleteBuffer(node->reducer, node->local_complete_layout.value(),
-                             "T.reducer_update");
-    ICHECK(!node->parallel_once)
-        << "LocalComplete reducer updates must execute on every replica";
-  }
+  node->partition_required =
+      GetBoolAnnotation(annotations, attr::kReducerPartitionRequired);
+  ICHECK(!(node->parallel_once && node->partition_required))
+      << "A reducer update cannot be both canonicalized and replicated";
   node->SetAccessRegions({reducer_access});
   data_ = std::move(node);
 }
@@ -231,15 +242,11 @@ Stmt ReducerUpdateOpNode::Lower(const LowerArgs &lower_args,
   ICHECK(combine_type.defined())
       << "ReducerUpdateOp must be planned before lowering";
   Buffer partial = GetLoweredBuffer(reducer, lower_args);
-  Array<PrimExpr> physical_indices = logical_indices;
-  if (local_complete_layout.defined()) {
-    physical_indices = local_complete_layout.value()->Forward(logical_indices);
-  }
   PrimExpr accumulator = BufferLoad(partial, physical_indices);
   Stmt update = BufferStore(
       partial, MakeReduceCombine(combine_type, accumulator, contribution),
       physical_indices);
-  if (local_complete_layout.defined()) {
+  if (partition_required) {
     update = AttrStmt(Integer(0), attr::kParallelPartitionRequired, Integer(1),
                       std::move(update));
   } else if (parallel_once) {
@@ -260,32 +267,54 @@ TileOperator ReducerUpdateOpNode::Clone() const {
 
 FinalizeReducerOp::FinalizeReducerOp(Array<PrimExpr> args,
                                      Map<String, ObjectRef> annotations) {
-  ICHECK_EQ(args.size(), 2U);
-  AccessRegion reducer_access = NormalizeToAccessRegion(args[0], kAccessRead);
-  AccessRegion destination_access =
-      NormalizeToAccessRegion(args[1], kAccessWrite);
-  Optional<Fragment> local_complete_layout =
-      GetLocalCompleteLayout(annotations);
-  CheckFullRegion(reducer_access.region, "T.finalize_reducer");
-  if (local_complete_layout.defined()) {
-    CheckLocalCompleteBuffer(reducer_access.region->buffer,
-                             local_complete_layout.value(),
-                             "T.finalize_reducer");
-    ICHECK(StructuralEqual()(destination_access.region->buffer->shape,
-                             local_complete_layout.value()->InputShape()))
-        << "T.finalize_reducer destination shape must match the "
-           "LocalComplete logical shape";
+  ICHECK_GE(args.size(), 2U);
+  Optional<Array<ReducerPartialPlan>> planned = GetPartialPlans(annotations);
+  size_t partial_count = planned.defined() ? planned.value().size() : 1U;
+  ICHECK_EQ(args.size(), partial_count + 1);
+
+  std::vector<AccessRegion> accesses;
+  Array<Buffer> partials;
+  accesses.reserve(args.size());
+  partials.reserve(partial_count);
+  for (size_t i = 0; i < partial_count; ++i) {
+    AccessRegion partial_access = NormalizeToAccessRegion(args[i], kAccessRead);
+    CheckFullRegion(partial_access.region, "T.finalize_reducer");
+    partials.push_back(partial_access.region->buffer);
+    accesses.push_back(std::move(partial_access));
   }
+  AccessRegion destination_access =
+      NormalizeToAccessRegion(args[partial_count], kAccessWrite);
   CheckFullRegion(destination_access.region, "T.finalize_reducer");
-  ICHECK_EQ(reducer_access.region->buffer->dtype,
-            destination_access.region->buffer->dtype)
-      << "T.finalize_reducer reducer and destination dtypes must match";
+  accesses.push_back(destination_access);
+  for (const Buffer &partial : partials) {
+    ICHECK_EQ(partial->dtype, destination_access.region->buffer->dtype)
+        << "T.finalize_reducer partial and destination dtypes must match";
+  }
+  if (planned.defined()) {
+    for (size_t i = 0; i < partial_count; ++i) {
+      const ReducerPartialPlan &plan = planned.value()[i];
+      if (plan->partial_layout.defined()) {
+        CheckProjectedBuffer(partials[i], plan->partial_layout.value(),
+                             "T.finalize_reducer");
+        ICHECK(StructuralEqual()(destination_access.region->buffer->shape,
+                                 plan->partial_layout.value()->InputShape()))
+            << "T.finalize_reducer destination shape must match the projected "
+               "partial logical shape";
+      } else {
+        ICHECK(StructuralEqual()(destination_access.region->buffer->shape,
+                                 partials[i]->shape))
+            << "Canonical partial shape must match the logical destination";
+      }
+    }
+  }
 
   ObjectPtr<FinalizeReducerOpNode> node = make_object<FinalizeReducerOpNode>();
-  node->reducer = reducer_access.region->buffer;
+  node->partials = std::move(partials);
+  if (planned.defined()) {
+    node->partial_plans = planned.value();
+  }
   node->destination = destination_access.region->buffer;
   node->combine_type = GetPlannedReduceType(annotations);
-  node->local_complete_layout = local_complete_layout;
   if (Optional<ObjectRef> seed = annotations.Get(attr::kReducerSeed)) {
     node->seed = Downcast<PrimExpr>(seed.value());
   }
@@ -294,7 +323,7 @@ FinalizeReducerOp::FinalizeReducerOp(Array<PrimExpr> args,
     node->batch = static_cast<int>(value->value);
     ICHECK_GE(node->batch, 1);
   }
-  node->SetAccessRegions({reducer_access, destination_access});
+  node->SetAccessRegions(std::move(accesses));
   data_ = std::move(node);
 }
 
@@ -302,6 +331,8 @@ Stmt FinalizeReducerOpNode::Lower(const LowerArgs &lower_args,
                                   arith::Analyzer *analyzer) const {
   ICHECK(combine_type.defined())
       << "FinalizeReducerOp must be planned before lowering";
+  ICHECK_EQ(partials.size(), partial_plans.size())
+      << "FinalizeReducerOp must carry one plan per physical partial";
   return ResolveFinalizeReducerImpl(lower_args.target)
       .lower(*this, lower_args, analyzer);
 }
@@ -323,7 +354,7 @@ void RegisterFinalizeReducerImpl(FinalizeReducerImpl impl) {
 }
 
 TIR_REGISTER_TL_TILE_OP(ReducerInitOp, reducer_init)
-    .set_num_inputs(1)
+    .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
@@ -333,12 +364,13 @@ TIR_REGISTER_TL_TILE_OP(ReducerUpdateOp, reducer_update)
                                Integer(CallEffectKind::kOpaque));
 
 TIR_REGISTER_TL_TILE_OP(FinalizeReducerOp, finalize_reducer)
-    .set_num_inputs(2)
+    .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   ReducerInfoNode::RegisterReflection();
+  ReducerPartialPlanNode::RegisterReflection();
   ReducerInitOpNode::RegisterReflection();
   ReducerUpdateOpNode::RegisterReflection();
   FinalizeReducerOpNode::RegisterReflection();
