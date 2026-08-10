@@ -308,6 +308,24 @@ def test_tvm_ffi_dynamic_shape():
     )
 
 
+@tilelang.testing.requires_cuda
+def test_tvm_ffi_dynamic_output_shape_expression():
+    @tilelang.jit(execution_backend="tvm_ffi")
+    def dynamic_output_shape(x) -> torch.Tensor:
+        B, E = T.dynamic("B E")
+        x: T.Tensor[[B, E], T.float32]
+        out = T.empty([B, B + 1, 2 * E, B * E], T.float32)
+        with T.Kernel(1, threads=1):
+            out[0, 0, 0, 0] = x[0, 0]
+        return out
+
+    for B, E in [(4, 3), (7, 2)]:
+        x = torch.arange(B * E, dtype=torch.float32, device="cuda").reshape(B, E)
+        out = dynamic_output_shape(x)
+        assert out.shape == (B, B + 1, 2 * E, B * E)
+        torch.testing.assert_close(out[0, 0, 0, 0], x[0, 0])
+
+
 def check_hopper():
     if not torch.cuda.is_available():
         return False

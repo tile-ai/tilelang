@@ -16,6 +16,8 @@ import threading
 import torch
 from tilelang import tvm
 from tvm import runtime, tirx
+from tvm.tirx.expr import PrimExpr
+from tvm.tirx.stmt_functor import post_order_visit, substitute
 from tvm.target import Target
 from tvm.relax import TensorType
 from tilelang.backend.target import determine_target
@@ -66,7 +68,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     # rt_mod
     rt_mod: tvm.runtime.Module | None = None
     # Maps symbolic variables to their corresponding buffer and shape indices
-    dynamic_symbolic_map: dict[tirx.Var, tuple[int, int, int]] | None = None
+    dynamic_symbolic_map: dict[tirx.Var, tuple[int, int, int, int]] | None = None
 
     # Stream/device functors are inherited from BaseKernelAdapter
     def __init__(
@@ -156,16 +158,16 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         buffer_map = func.buffer_map
         dynamic_symbolic_map = {}
         for i, param in enumerate(params):
-            if isinstance(param, tirx.Var) and (param not in dynamic_symbolic_map):
+            if param not in buffer_map and (param not in dynamic_symbolic_map):
                 dynamic_symbolic_map[param] = (2, i, -1, 1)
         for i, param in enumerate(params):
-            if param in buffer_map:
+            if param in buffer_map and i not in self.result_idx:
                 buffer = buffer_map[param]
                 for j, shape in enumerate(buffer.shape):
                     if isinstance(shape, tirx.Var) and (shape not in dynamic_symbolic_map) and (shape not in params):
                         dynamic_symbolic_map[shape] = (0, i, j, 1)
         for i, param in enumerate(params):
-            if param in buffer_map:
+            if param in buffer_map and i not in self.result_idx:
                 buffer = buffer_map[param]
                 element_bits = buffer.dtype.bits * buffer.dtype.lanes
                 stride_scale = 8 // element_bits if element_bits < 8 else 1
@@ -173,6 +175,88 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                     if isinstance(stride, tirx.Var) and (stride not in dynamic_symbolic_map) and (stride not in params):
                         dynamic_symbolic_map[stride] = (1, i, j, stride_scale)
         return dynamic_symbolic_map
+
+    @staticmethod
+    def _lookup_dynamic_symbolic_source(
+        symbol: tirx.Var,
+        dynamic_symbolic_map: dict[tirx.Var, tuple[int, int, int, int]],
+    ) -> tuple[int, int, int, int]:
+        """Look up a runtime source for a dynamic symbol by identity.
+
+        A unique name match is retained as a compatibility fallback for cached
+        artifacts whose parameter metadata may contain equivalent, but not
+        identical, Var handles.
+        """
+        for candidate, source in dynamic_symbolic_map.items():
+            if symbol.same_as(candidate):
+                return source
+
+        name_matches = [source for candidate, source in dynamic_symbolic_map.items() if symbol.name == candidate.name]
+        if len(name_matches) == 1:
+            return name_matches[0]
+        if len(name_matches) > 1:
+            raise ValueError(f"Dynamic symbolic variable '{symbol.name}' has ambiguous runtime sources")
+        raise ValueError(f"Dynamic symbolic variable '{symbol.name}' has no runtime source")
+
+    def _resolve_dynamic_symbolic_value(
+        self,
+        symbol: tirx.Var,
+        param_values: list[Any],
+        dynamic_symbolic_map: dict[tirx.Var, tuple[int, int, int, int]],
+    ) -> Any:
+        """Resolve one dynamic symbol from a scalar, tensor shape, or stride."""
+        ref_id, param_idx, dim_idx, stride_scale = self._lookup_dynamic_symbolic_source(symbol, dynamic_symbolic_map)
+        ref_value = param_values[param_idx]
+        if ref_id == 2:
+            if ref_value is None:
+                raise ValueError(f"Dynamic symbolic variable '{symbol.name}' has no scalar runtime value")
+            return ref_value
+        if not isinstance(ref_value, torch.Tensor):
+            raise ValueError(
+                f"Dynamic symbolic variable '{symbol.name}' requires tensor parameter {param_idx}, but got {type(ref_value).__name__}"
+            )
+        if ref_id == 0:
+            return ref_value.shape[dim_idx]
+        if ref_id == 1:
+            return ref_value.stride()[dim_idx] * stride_scale
+        raise ValueError(f"Unknown dynamic symbolic reference kind: {ref_id}")
+
+    def _resolve_output_shape_dim(
+        self,
+        dim: int | PrimExpr,
+        param_values: list[Any],
+        dynamic_symbolic_map: dict[tirx.Var, tuple[int, int, int, int]],
+    ) -> int:
+        """Resolve one output dimension to a concrete Python integer."""
+        if isinstance(dim, int):
+            return dim
+        if isinstance(dim, tirx.IntImm):
+            return int(dim)
+        if isinstance(dim, tirx.Var):
+            return int(self._resolve_dynamic_symbolic_value(dim, param_values, dynamic_symbolic_map))
+        if not isinstance(dim, PrimExpr):
+            raise TypeError(f"Unsupported output shape dimension type: {type(dim).__name__}")
+
+        symbols: list[tirx.Var] = []
+
+        def collect_symbol(node: Any) -> None:
+            if isinstance(node, tirx.Var) and not any(node.same_as(symbol) for symbol in symbols):
+                symbols.append(node)
+
+        post_order_visit(dim, collect_symbol)
+        value_map = {}
+        for symbol in symbols:
+            runtime_value = self._resolve_dynamic_symbolic_value(symbol, param_values, dynamic_symbolic_map)
+            try:
+                runtime_value = int(runtime_value)
+            except (TypeError, ValueError) as error:
+                raise TypeError(f"Dynamic symbolic variable '{symbol.name}' resolved to non-integer value {runtime_value!r}") from error
+            value_map[symbol] = tirx.IntImm(symbol.dtype, runtime_value)
+
+        resolved = tvm.arith.Analyzer().simplify(substitute(dim, value_map))
+        if not isinstance(resolved, tirx.IntImm):
+            raise ValueError(f"Output shape expression '{dim}' did not resolve to an integer; simplified to '{resolved}'")
+        return int(resolved)
 
     def _convert_torch_func(self) -> Callable[..., Any]:
         # Capture thunks that reflect Torch's current stream and device.
@@ -234,29 +318,21 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 None,
             )
 
-            # Stitch the full positional argument list expected by the TVM executable
+            # Stitch the full positional argument list expected by the TVM executable.
+            # Populate every input first so output shapes can reference parameters
+            # regardless of their position in the PrimFunc signature.
             ins_idx: int = 0
-            tensor_list: list[torch.Tensor] = []
+            param_values: list[Any] = [None] * len(self.params)
+            for i in range(len(self.params)):
+                if i not in self.result_idx:
+                    param_values[i] = inputs[ins_idx]
+                    ins_idx += 1
 
             # Prepare input and output tensors
             for i in range(len(self.params)):
                 if i in self.result_idx:
                     dtype = param_dtypes[i]
-                    shape = []
-                    # Now working with native Python list, no FFI calls needed
-                    for s in param_shapes[i]:
-                        if isinstance(s, tirx.Var):
-                            for key in dynamic_symbolic_map:
-                                if str(s) == str(key):
-                                    ref_id, ref_tensor_idx, ref_shape_idx, stride_scale = dynamic_symbolic_map[key]
-                                    if ref_id == 2:
-                                        shape.append(inputs[ref_tensor_idx])
-                                    elif ref_id == 0:
-                                        shape.append(tensor_list[ref_tensor_idx].shape[ref_shape_idx])
-                                    elif ref_id == 1:
-                                        shape.append(tensor_list[ref_tensor_idx].stride()[ref_shape_idx] * stride_scale)
-                        else:  # Already converted to Python int during initialization
-                            shape.append(s)
+                    shape = [self._resolve_output_shape_dim(s, param_values, dynamic_symbolic_map) for s in param_shapes[i]]
 
                     if out_device is None:
                         out_device = current_device_functor()
@@ -268,18 +344,15 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                             f"Expected shape: {shape}"
                         )
                     tensor = torch.empty(*shape, dtype=dtype, device=out_device)
-                else:
-                    tensor = inputs[ins_idx]
-                    ins_idx += 1
-                tensor_list.append(tensor)
+                    param_values[i] = tensor
 
             executable = self._get_executable()
-            executable(*tensor_list)
+            executable(*param_values)
 
             # Return outputs in the requested form
             if len(self.result_idx) == 1:
-                return tensor_list[self.result_idx[0]]
-            return [tensor_list[i] for i in self.result_idx]
+                return param_values[self.result_idx[0]]
+            return [param_values[i] for i in self.result_idx]
 
         return func
 
