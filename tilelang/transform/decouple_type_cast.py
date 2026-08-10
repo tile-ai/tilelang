@@ -397,6 +397,17 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         if _contains_seq_stmt(normalized_body):
             return self._make_for(op, new_body) if new_body is not op.body else op
 
+        # Skip Evaluate roots. Decoupling splits the value edge of a BufferStore
+        # to insert a staging buffer; an Evaluate discards its result and stores
+        # nothing, so that edge does not exist and the transform is undefined.
+        # Opaque intrinsic statements such as `tl.ptx_cp_async(...)` land here,
+        # and their operands are address arguments with address-space
+        # constraints (dst must be shared, src must be global) that rewriting to
+        # local staging buffers would violate.
+        _, root_stmt = extract_if_condition(normalized_body)
+        if isinstance(root_stmt, Evaluate):
+            return self._make_for(op, new_body) if new_body is not op.body else op
+
         # Collect all shared/global stores and loads
         collector = MemoryAccessCollector(op.loop_var)
         collector.visit_stmt(normalized_body)
