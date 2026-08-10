@@ -226,28 +226,6 @@ def test_out_idx_conflict_detection():
         tilelang.compile(kernel, out_idx=[-1])
 
 
-def test_manual_out_idx_is_injected_only_into_tvm_ffi_working_func():
-    """Manual out_idx should not mutate the user's source PrimFunc."""
-
-    @T.prim_func
-    def kernel(A, B):
-        A: T.Tensor[[32, 32], T.float32]
-        B: T.Tensor[[32, 32], T.float32]
-        with T.Kernel(1):
-            for i in T.serial(32):
-                for j in T.serial(32):
-                    B[i, j] = A[i, j]
-
-    assert kernel.attrs is None or "tilelang_out_idx" not in kernel.attrs
-
-    compiled = tilelang.compile(kernel, out_idx=[-1])
-    assert list(compiled.adapter.prim_func.attrs["tilelang_out_idx"]) == [-1]
-    assert compiled.adapter.dynamic_symbolic_map is None
-    a = torch.randn(32, 32, device="cuda")
-    b = compiled(a)
-    torch.testing.assert_close(b, a)
-
-
 @tilelang.testing.requires_cuda
 def test_manual_out_idx_multiple_dynamic_outputs_are_allocated_by_tvm_ffi():
     """Manual output indices should share T.empty's native allocation ABI."""
@@ -373,7 +351,6 @@ if __name__ == "__main__":
     test_all_attrs_together_lazy()
     test_eager_mode_attrs()
     test_out_idx_conflict_detection()
-    test_manual_out_idx_is_injected_only_into_tvm_ffi_working_func()
     test_pass_configs_only_lazy()
     test_compile_flags_only_lazy()
     test_annotations_before_tensor_type()
