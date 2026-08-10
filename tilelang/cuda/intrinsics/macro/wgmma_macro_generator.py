@@ -30,6 +30,30 @@ def _min_leaf_stride(stride) -> int:
     return int(stride)
 
 
+def select_wgmma_inst_n(warp_col_tiles: int) -> int:
+    """Widest legal WGMMA ``N`` that tiles ``warp_col_tiles`` exactly.
+
+    Hopper WGMMA accepts ``N`` in ``[8, 256]`` with ``N % 8 == 0``, so an extent
+    such as 96 or 160 is a single legal instruction.  Selecting
+    ``gcd(warp_col_tiles, 256)`` instead splits those into n32 / n16 atoms and
+    gives up most of the tensor-core throughput.
+
+    Widening is restricted to multiples of 16 for two independent reasons:
+    ``N % 16 == 8`` already miscomputes for ``warp_cols > 1`` (issue #2593), and
+    the integer instruction tables in ``wgmma.h`` / ``wgmma_sp.h`` only
+    instantiate multiples of 16 (plus 8 and 24), so a wider ``N % 16 == 8``
+    would not even compile for the s8 path.
+    """
+    # gcd is always a legal width, so it is the floor of the search.
+    fallback = gcd(warp_col_tiles, 256)
+    if warp_col_tiles % 16 != 0:
+        return fallback
+    for cand in range(256, fallback, -16):
+        if warp_col_tiles % cand == 0:
+            return cand
+    return fallback
+
+
 @dataclass(frozen=True)
 class WGMMADescriptorParams:
     """Pre-computed WGMMA descriptor parameters, produced by
@@ -243,7 +267,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         return self
 
     def _initialize_wgmma_prefix(self, n_dim: int = 16):
-        inst_m, inst_n = 64, gcd(self.warp_col_tiles, 256)
+        inst_m, inst_n = 64, select_wgmma_inst_n(self.warp_col_tiles)
         assert inst_n % 8 == 0, (
             f"inst_n must be a multiple of 8, got {inst_n} (block_col_warps={self.block_col_warps}, warp_col_tiles={self.warp_col_tiles})"
         )
