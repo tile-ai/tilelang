@@ -227,27 +227,26 @@ class JITKernel(Generic[_P, _T]):
                     compile_flags_cfg + compile_flags if compile_flags_cfg is not None else compile_flags
                 )
 
-            capture_resources = is_hip_target(target)
-            if capture_resources:
+            capture_hip_resource_usage = is_hip_target(target)
+            if capture_hip_resource_usage:
                 reset_recorder()
 
-            phase_context = {
+            compile_metadata = {
                 "kernel": func_name,
                 "target": str(target),
                 "target_host": str(target_host) if target_host is not None else None,
                 "backend": execution_backend,
             }
-            artifact = self._compile_artifact(tilelang_func, pass_configs, phase_context)
-            self.artifact = artifact
+            self.artifact = self._compile_artifact(tilelang_func, pass_configs, compile_metadata)
             adapter = self._create_adapter_from_artifact(
                 tilelang_func,
                 out_idx,
-                artifact,
+                self.artifact,
                 pass_configs,
-                phase_context,
+                compile_metadata,
             )
 
-            if capture_resources:
+            if capture_hip_resource_usage:
                 self._resource_usage = pop_recorded()
 
             return adapter
@@ -256,7 +255,7 @@ class JITKernel(Generic[_P, _T]):
         self,
         tilelang_func: PrimFunc,
         pass_configs: dict[str, Any],
-        phase_context: dict[str, Any],
+        compile_metadata: dict[str, Any],
     ) -> CompiledArtifact:
         """Lower one TileLang function into the host/device compilation artifact."""
         enable_host_codegen = self.execution_backend_spec.enable_host_codegen
@@ -267,13 +266,13 @@ class JITKernel(Generic[_P, _T]):
             dump_ir_path = pass_configs.get(PassConfigKey.TL_DUMP_IR_DIR, "./dump_ir")
             base_pass_instruments.append(tvm.ir.instrument.DumpIR(dump_dir=dump_ir_path))
 
-        pass_instrument_context = f"stage=jit-lower, kernel={phase_context['kernel']}, backend={phase_context['backend']}"
+        pass_instrument_context = f"stage=jit-lower, kernel={compile_metadata['kernel']}, backend={compile_metadata['backend']}"
         pass_instruments = [
             *create_pass_instruments(context=pass_instrument_context),
             *base_pass_instruments,
         ]
         with (
-            jit_phase("lower", verbose=self.verbose, **phase_context),
+            jit_phase("lower", verbose=self.verbose, **compile_metadata),
             tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=pass_instruments),
             self.target,
         ):
@@ -294,12 +293,12 @@ class JITKernel(Generic[_P, _T]):
         out_idx: list[int],
         artifact: CompiledArtifact,
         pass_configs: dict[str, Any],
-        phase_context: dict[str, Any],
+        compile_metadata: dict[str, Any],
     ) -> BaseKernelAdapter:
         """Construct the selected execution adapter from one lowered artifact."""
 
         def create_adapter(adapter_cls: Callable[..., BaseKernelAdapter], **kwargs: Any) -> BaseKernelAdapter:
-            with jit_phase("adapter", verbose=self.verbose, **phase_context):
+            with jit_phase("adapter", verbose=self.verbose, **compile_metadata):
                 return adapter_cls(**kwargs)
 
         execution_backend = self.execution_backend
