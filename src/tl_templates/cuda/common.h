@@ -1371,4 +1371,24 @@ template <> TL_DEVICE float2 shfl_sync(unsigned mask, float2 val, int srcLane) {
   return reinterpret_cast<float2 const &>(raw);
 }
 
+TL_DEVICE half_t RoundTiesAwayFromZero(half_t x) {
+  return half_t(roundf(float(x)));
+}
+
+TL_DEVICE float RoundTiesAwayFromZero(float x) { return roundf(x); }
+
+TL_DEVICE double RoundTiesAwayFromZero(double x) { return round(x); }
+
+TL_DEVICE bfloat16_t RoundTiesAwayFromZero(bfloat16_t x) {
+  return bfloat16_t(roundf(float(x)));
+}
+
+TL_DEVICE float_e4m3_t RoundTiesAwayFromZero(float_e4m3_t x) {
+  return float_e4m3_t(cutlass::float_e4m3_t(roundf(float(x))));
+}
+
+TL_DEVICE float_e5m2_t RoundTiesAwayFromZero(float_e5m2_t x) {
+  return float_e5m2_t(cutlass::float_e5m2_t(roundf(float(x))));
+}
+
 } // namespace tl
