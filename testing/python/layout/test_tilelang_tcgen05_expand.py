@@ -3,8 +3,8 @@
 # The C++ side stores each tcgen05.ld/st atom as the per-warp, single-issue
 # CUTLASS ``Copy_Traits<...1x>`` TV layout and derives every replication --
 # warps, the high-datapath duplicate issue of the 16-datapath shapes, .xN
-# column repetitions, warpgroups -- by one blocked product over a row-major
-# replication grid.  These tests evaluate the resulting fragment at a
+# column repetitions, warpgroups -- as explicit replication modes of one
+# issue-wide TV layout.  These tests evaluate the resulting fragment at a
 # SYMBOLIC (datapath, column) coordinate built from the hand-evaluated
 # DstLayout formulas of cute/atom/copy_traits_sm100.hpp -- combined with the
 # register order of TileLang's tl::tcgen05_{ld,st}_32dpNNbNx wrappers (the
