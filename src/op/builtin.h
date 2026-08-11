@@ -63,8 +63,20 @@ static constexpr const char *kDisableFastMath = "tl.disable_fast_math";
 static constexpr const char *kEnableFastMath = "tl.enable_fast_math";
 static constexpr const char *kEnableAsyncCopy = "tl.enable_async_copy";
 // Force the canonical FullParticipant baseline for every reducer epoch,
-// disabling narrow physical plans. Used for differential testing: forced
-// baseline and auto plans must produce identical numerical results.
+// disabling narrow physical plans (compact storage / sub-block collectives).
+//
+// This switch is NOT a workaround for expected narrow-plan bugs — a narrow
+// plan whose structural proofs succeed must be semantically correct. It
+// exists because the baseline is the reducer design's reference lowering
+// (proposal: every physical-plan optimization must be independently
+// switchable back to the same canonical semantics), which gives us:
+//   * differential testing: for any kernel, forced-baseline and auto plan
+//     selection must agree numerically — the standing acceptance test for
+//     every future planner extension (dst steering, multi-step collectives,
+//     narrow-plan seed/batch);
+//   * a field escape hatch: if a narrow plan ever miscompiles, one config
+//     line restores the proof-free lowering while preserving a repro;
+//   * plan-choice A/B measurement (registers, collective width, latency).
 static constexpr const char *kReducerForceBaseline =
     "tl.reducer_force_baseline";
 static constexpr const char *kEnableVectorizePlannerVerbose =

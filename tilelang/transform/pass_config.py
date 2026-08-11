@@ -95,8 +95,12 @@ class PassConfigKey(str, Enum):
     TL_REDUCER_FORCE_BASELINE = "tl.reducer_force_baseline"
     """Force the canonical FullParticipant baseline for every reducer epoch,
     disabling narrow physical plans (compact storage / sub-block collectives).
-    Used for differential testing: forced baseline and auto plans must produce
-    identical numerical results. Default: False"""
+
+    Not a workaround for expected narrow-plan bugs: the baseline is the
+    reducer design's always-available reference lowering. Use it for
+    differential testing (forced baseline and auto plan selection must agree
+    numerically), as a field escape hatch if a narrow plan ever miscompiles,
+    and for plan-choice A/B measurement. Default: False"""
 
     TL_DISABLE_TMA_LOWER = "tl.disable_tma_lower"
     """Deprecated flag — prevents plain T.copy() from auto-lowering to TMA store.
