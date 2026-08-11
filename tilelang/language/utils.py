@@ -9,6 +9,17 @@ from tilelang import language as T
 from tilelang._typing import BufferLikeType, ShapeType
 
 
+def _normalize_annotations(annotations: dict | None) -> dict:
+    """Copy a tile-op annotations dict, lifting plain str values to StringImm.
+
+    ``Call::annotations`` is ``Map<String, ObjectRef>``: unlike For/SBlock
+    annotations (``Any``-valued, where raw Python strings pass through as
+    ffi String), a bare str is rejected at the Call constructor, so it must
+    be wrapped in a TIR StringImm. Other values pass through unchanged.
+    """
+    return {k: tirx.StringImm(v) if isinstance(v, str) else v for k, v in (annotations or {}).items()}
+
+
 def region(buffer: BufferLoad, access_type: str, *args: PrimExpr) -> PrimExpr:
     """Create a tl.region call for a BufferLoad and extents."""
     access_type = {"r": 1, "w": 2, "rw": 3}[access_type]
