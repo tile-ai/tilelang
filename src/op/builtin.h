@@ -80,6 +80,15 @@ static constexpr const char *kLayoutVisualizationFormats =
 static constexpr const char *kDeviceCompileFlags = "tl.device_compile_flags";
 static constexpr const char *kDisableDataRaceCheck =
     "tl.disable_data_race_check";
+
+/*!
+ * \brief Disable the T.gemm accumulator-initialization check.
+ *
+ * The check is enabled by default; it only fires when clear_accum is
+ * literally false and no write to the accumulator precedes the gemm.
+ */
+static constexpr const char *kDisableGemmAccumInitCheck =
+    "tl.disable_gemm_accum_init_check";
 static constexpr const char *kDisableThreadStorageSync =
     "tl.disable_thread_storage_sync";
 static constexpr const char *kForceLetInline = "tl.force_let_inline";

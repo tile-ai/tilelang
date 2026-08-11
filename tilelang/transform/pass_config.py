@@ -50,6 +50,7 @@ class PassConfigKey(str, Enum):
     """Enable inlining of let statements during simplification. Default: True"""
 
     TL_DISABLE_DATA_RACE_CHECK = "tl.disable_data_race_check"
+    TL_DISABLE_GEMM_ACCUM_INIT_CHECK = "tl.disable_gemm_accum_init_check"
     """Disable data race check in TileLang. Default: True
 
     The data race check is disabled by default because it can report false

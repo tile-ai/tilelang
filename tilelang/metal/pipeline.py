@@ -10,6 +10,7 @@ from tilelang.backend.pass_pipeline.pipeline_utils import (
     should_disable_shared_memory_reuse,
     should_enable_aggressive_merge,
     should_enable_race_check,
+    should_enable_gemm_accum_init_check,
     should_force_let_inline,
 )
 from tilelang.metal.transform import MetalFragmentToSimdgroup
@@ -26,6 +27,9 @@ def MetalPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LegalizeNegativeIndex()(mod)
     if should_enable_race_check():
         mod = tilelang.transform.VerifyParallelLoop()(mod)
+    # Warn on T.gemm accumulators that are never initialized
+    if should_enable_gemm_accum_init_check():
+        mod = tilelang.transform.VerifyGemmAccumInit()(mod)
     mod = tilelang.transform.InjectAssumes()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.LayoutReducer()(mod)

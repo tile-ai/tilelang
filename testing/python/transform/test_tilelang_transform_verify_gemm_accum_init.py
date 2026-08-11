@@ -50,5 +50,19 @@ def test_silent_when_clear_accum_is_true(capfd):
     assert MESSAGE not in _verify(_make("clear_accum"), capfd)
 
 
+def test_check_enabled_by_default():
+    from tilelang.backend.pass_pipeline import pipeline_utils
+
+    assert pipeline_utils.should_enable_gemm_accum_init_check() is True
+
+
+def test_check_can_be_disabled_via_pass_config():
+    from tilelang.backend.pass_pipeline import pipeline_utils
+    from tilelang.transform import PassContext
+
+    with PassContext(config={"tl.disable_gemm_accum_init_check": True}):
+        assert pipeline_utils.should_enable_gemm_accum_init_check() is False
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

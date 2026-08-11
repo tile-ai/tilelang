@@ -8,6 +8,7 @@ from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
     allow_vectorize,
     should_enable_race_check,
+    should_enable_gemm_accum_init_check,
     should_force_let_inline,
 )
 
@@ -23,6 +24,9 @@ def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LegalizeNegativeIndex()(mod)
     if should_enable_race_check():
         mod = tilelang.transform.VerifyParallelLoop()(mod)
+    # Warn on T.gemm accumulators that are never initialized
+    if should_enable_gemm_accum_init_check():
+        mod = tilelang.transform.VerifyGemmAccumInit()(mod)
     mod = tilelang.transform.InjectAssumes()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.LayoutReducer()(mod)

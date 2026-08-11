@@ -13,6 +13,7 @@ from tilelang.backend.pass_pipeline.pipeline_utils import (
     should_disable_shared_memory_reuse,
     should_enable_aggressive_merge,
     should_enable_race_check,
+    should_enable_gemm_accum_init_check,
     should_force_let_inline,
 )
 from tilelang.contrib.nvcc import (
@@ -82,6 +83,9 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     # Verify parallel loop correctness
     if should_enable_race_check():
         mod = tilelang.transform.VerifyParallelLoop()(mod)
+    # Warn on T.gemm accumulators that are never initialized
+    if should_enable_gemm_accum_init_check():
+        mod = tilelang.transform.VerifyGemmAccumInit()(mod)
     # Inject assumes to speedup tvm prover
     mod = tilelang.transform.InjectAssumes()(mod)
     # Simplify the IR expressions
