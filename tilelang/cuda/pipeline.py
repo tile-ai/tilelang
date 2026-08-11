@@ -94,10 +94,10 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     # @CUDA-specific
     # Tile-level warp specialization: runs before layout inference so that
     # producer/consumer split happens at the high-level tile-op IR.
-    # The pass classifies copy ops as TMA/cp.async/sync inline. Shared buffers
-    # are multi-versioned internally only for functions where the WS
-    # transformation actually applies.
+    # MaterializeWSSchedule: Materialize a user-provided warp-specialization schedule (T.annotate_ws_schedule).
+    # ProducerConsumerWarpSpecialized: The pass classifies copy ops as TMA/cp.async/sync inline. Shared buffers are multi-versioned internally only for functions where the WS transformation actually applies.
     if allow_warp_specialized(target=target):
+        mod = tilelang.cuda.transform.MaterializeWSSchedule()(mod)
         mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
 
     # @CUDA / Blackwell specific

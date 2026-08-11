@@ -9,13 +9,21 @@ from tvm.tirx.script.builder.ir import sblock_attr
 from tvm.tirx import FloatImm, tvm_tuple
 
 __all__ = [
+    "WSID",
     "use_swizzle",
     "annotate_layout",
     "annotate_safe_value",
     "annotate_l2_hit_ratio",
     "annotate_restrict_buffers",
     "annotate_min_blocks_per_sm",
+    "annotate_ws_schedule",
+    "ws_op",
 ]
+
+# Annotation key carrying a statement's stable warp-specialization op id
+# (kWSOpIdKey in src/transform/common/warp_specialize.h). Shorthand so kernels
+# write ``annotations={T.WSID: "copy_A"}`` on tile ops and loops.
+WSID = "tl.ws_op_id"
 
 
 def use_swizzle(panel_size: int, order: str = "row", enable: bool = True):
@@ -114,3 +122,48 @@ def annotate_restrict_buffers(*buffers):
             raise TypeError(f"annotate_restrict_buffers expects Buffer arguments, got {type(buf)}") from e
     # Also return as block attribute (root block exists by default) for readability/tools.
     return sblock_attr({"tl.non_restrict_params": data_vars})
+
+
+def annotate_ws_schedule(schedule):
+    """Attach a warp-specialization schedule to the kernel.
+
+    ``schedule`` is a typed :class:`~tilelang.language.ws_schedule.WSSchedule`
+    object describing how to transform the straight-line kernel into a
+    warp-specialized one: warp roles, pipelines (full/empty barrier pairs
+    protecting multi-versioned buffers), and per-role instruction sequences
+    per loop scope. It is materialized by the ``MaterializeWSSchedule`` pass;
+    see ``examples/aws/gemm.py`` for a complete example.
+    """
+    from tilelang.language.ws_schedule import WSSchedule
+
+    assert isinstance(schedule, WSSchedule), f"annotate_ws_schedule expects a T.WSSchedule object, got {type(schedule)}"
+    return sblock_attr({"tl.ws_schedule": schedule})
+
+
+def ws_op(op_id: str):
+    """Manually annotate the enclosed statement(s) with a stable
+    warp-specialization op or scope id.
+
+    Wraps the body in an ``AttrStmt`` with key :data:`WSID`. This is the
+    annotation of last resort, for statement forms that cannot carry
+    ``annotations=`` themselves. The enclosed statements — a scalar Bind,
+    or several statements such as an inlined scheduler method — become
+    ONE opaque op:
+
+    >>> with T.ws_op("rescale_vote"):
+    ...     should_rescale = T.any_sync(scale_shared[tid] < 1.0)
+    >>> with T.ws_op("sched_next"):
+    ...     sched.next_tile()
+
+    With a scope id the wrapper encloses a ``while`` loop and opens that
+    scope (serial scope loops carry the id in their own annotations):
+
+    >>> with T.ws_op("loop_wave"):
+    ...     while sched.valid():
+    ...         ...
+
+    Tile ops and loops pass ``annotations={T.WSID: ...}`` directly
+    instead.
+    """
+    assert isinstance(op_id, str) and op_id, "ws_op id must be a non-empty string"
+    return attr(None, WSID, op_id)

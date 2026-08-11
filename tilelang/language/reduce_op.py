@@ -7,6 +7,7 @@ from tilelang.language.common import copy, macro, alloc_fragment, evaluate
 from tilelang.utils.language import to_buffer_region, to_tile_region
 from tilelang.utils.language import is_shared, is_fragment, is_local
 from tvm.script.ir_builder import IRBuilder
+from tilelang.language.utils import _normalize_annotations
 
 
 def _legalize_dim(buffer: tirx.Buffer, dim: int):
@@ -22,7 +23,14 @@ ReduceKind = Literal["sum", "abssum", "max", "absmax", "min", "bitand", "bitor",
 
 # NOTE(chaofan): T.reduce is implemented as a macro, so no return
 def reduce(
-    buffer: tirx.Buffer, out: tirx.Buffer, reduce_type: ReduceKind, dim: int, clear: bool, batch: int = 1, nan_propagate: bool = False
+    buffer: tirx.Buffer,
+    out: tirx.Buffer,
+    reduce_type: ReduceKind,
+    dim: int,
+    clear: bool,
+    batch: int = 1,
+    nan_propagate: bool = False,
+    annotations: dict | None = None,
 ) -> None:
     """Perform a reduction operation on a buffer along a specified dimension.
 
@@ -56,13 +64,11 @@ def reduce(
             f"output shape is {out_buffer.shape}, expected shapes are {expected_shapes_str}"
         )
 
-    annotations = {}
+    annotations = _normalize_annotations(annotations)
     if batch > 1:
         annotations["batch"] = batch
     if nan_propagate:
         annotations["nan_propagate"] = True
-    if not annotations:
-        annotations = None
 
     # Emit local reductions before macro expansion so alloc_var retains its
     # underlying Buffer rather than becoming a scalar expression.
@@ -156,7 +162,13 @@ def reduce(
 
 
 def reduce_max(
-    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, nan_propagate: bool = False
+    buffer: tirx.Buffer,
+    out: tirx.Buffer,
+    dim: int = -1,
+    clear: bool = True,
+    batch: int = 1,
+    nan_propagate: bool = False,
+    annotations: dict | None = None,
 ) -> None:
     """Perform reduce max on input buffer, store the result to output buffer
 
@@ -181,11 +193,17 @@ def reduce_max(
     handle : PrimExpr
     """
     dim = _legalize_dim(buffer, dim)
-    reduce(buffer, out, "max", dim, clear, batch=batch, nan_propagate=nan_propagate)
+    reduce(buffer, out, "max", dim, clear, batch=batch, nan_propagate=nan_propagate, annotations=annotations)
 
 
 def reduce_min(
-    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, nan_propagate: bool = False
+    buffer: tirx.Buffer,
+    out: tirx.Buffer,
+    dim: int = -1,
+    clear: bool = True,
+    batch: int = 1,
+    nan_propagate: bool = False,
+    annotations: dict | None = None,
 ) -> None:
     """Perform reduce min on input buffer, store the result to output buffer.
 
@@ -203,10 +221,12 @@ def reduce_min(
         tirx.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    reduce(buffer, out, "min", dim, clear, batch=batch, nan_propagate=nan_propagate)
+    reduce(buffer, out, "min", dim, clear, batch=batch, nan_propagate=nan_propagate, annotations=annotations)
 
 
-def reduce_sum(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1) -> None:
+def reduce_sum(
+    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+) -> None:
     """Perform reduce sum on input buffer, store the result to output buffer.
 
     Args:
@@ -229,10 +249,10 @@ def reduce_sum(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool
         tirx.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    reduce(buffer, out, "sum", dim, clear, batch=batch)
+    reduce(buffer, out, "sum", dim, clear, batch=batch, annotations=annotations)
 
 
-def reduce_abssum(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, batch: int = 1) -> None:
+def reduce_abssum(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, batch: int = 1, annotations: dict | None = None) -> None:
     """Perform reduce absolute sum on input buffer, store the result to output buffer.
 
     Args:
@@ -245,11 +265,17 @@ def reduce_abssum(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, batch: i
         tirx.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    reduce(buffer, out, "abssum", dim, True, batch=batch)
+    reduce(buffer, out, "abssum", dim, True, batch=batch, annotations=annotations)
 
 
 def reduce_absmax(
-    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, nan_propagate: bool = False
+    buffer: tirx.Buffer,
+    out: tirx.Buffer,
+    dim: int = -1,
+    clear: bool = True,
+    batch: int = 1,
+    nan_propagate: bool = False,
+    annotations: dict | None = None,
 ) -> None:
     """Perform reduce absolute max on input buffer, store the result to output buffer.
 
@@ -266,10 +292,12 @@ def reduce_absmax(
         tirx.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    reduce(buffer, out, "absmax", dim, clear, batch=batch, nan_propagate=nan_propagate)
+    reduce(buffer, out, "absmax", dim, clear, batch=batch, nan_propagate=nan_propagate, annotations=annotations)
 
 
-def reduce_bitand(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1) -> None:
+def reduce_bitand(
+    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+) -> None:
     """Perform reduce bitwise-and on input buffer, store the result to output buffer.
 
     Args:
@@ -282,10 +310,12 @@ def reduce_bitand(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: b
         tirx.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    reduce(buffer, out, "bitand", dim, clear, batch=batch)
+    reduce(buffer, out, "bitand", dim, clear, batch=batch, annotations=annotations)
 
 
-def reduce_bitor(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1) -> None:
+def reduce_bitor(
+    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+) -> None:
     """Perform reduce bitwise-or on input buffer, store the result to output buffer.
 
     Args:
@@ -298,10 +328,12 @@ def reduce_bitor(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bo
         tirx.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    reduce(buffer, out, "bitor", dim, clear, batch=batch)
+    reduce(buffer, out, "bitor", dim, clear, batch=batch, annotations=annotations)
 
 
-def reduce_bitxor(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1) -> None:
+def reduce_bitxor(
+    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+) -> None:
     """Perform reduce bitwise-xor on input buffer, store the result to output buffer.
 
     Args:
@@ -313,7 +345,7 @@ def reduce_bitxor(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: b
         tirx.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    reduce(buffer, out, "bitxor", dim, clear, batch=batch)
+    reduce(buffer, out, "bitxor", dim, clear, batch=batch, annotations=annotations)
 
 
 def reducer_init(reducer: tirx.Buffer) -> tirx.PrimExpr:
@@ -371,7 +403,9 @@ def reducer_update(target: tirx.BufferLoad, value) -> tirx.PrimExpr:
     )
 
 
-def finalize_reducer(reducer: tirx.Buffer, dst: tirx.Buffer | None = None, batch: int = 1) -> tirx.PrimExpr:
+def finalize_reducer(
+    reducer: tirx.Buffer, dst: tirx.Buffer | None = None, batch: int = 1, annotations: dict | None = None
+) -> tirx.PrimExpr:
     """Close a reducer epoch.
 
     v2 form (``dst`` given): complete the cross-participant communication the
@@ -395,22 +429,22 @@ def finalize_reducer(reducer: tirx.Buffer, dst: tirx.Buffer | None = None, batch
     """
     if batch < 1:
         raise ValueError(f"finalize_reducer: batch must be >= 1, got {batch}")
+    annotations = _normalize_annotations(annotations)
+    if batch > 1:
+        annotations["batch"] = batch
     if dst is not None:
         return tirx.call_intrin(
             "handle",
             tirx.op.Op.get("tl.tileop.finalize_reducer_v2"),
             to_tile_region(reducer, access_type="rw"),
             to_tile_region(dst, access_type="w"),
-            annotations={"batch": batch} if batch > 1 else None,
+            annotations=annotations,
         )
-    annotations = {}
-    if batch > 1:
-        annotations["batch"] = batch
     return tirx.call_intrin(
         "handle",
         tirx.op.Op.get("tl.tileop.finalize_reducer"),
         to_tile_region(reducer, access_type="w"),
-        annotations=annotations if annotations else None,
+        annotations=annotations,
     )
 
 

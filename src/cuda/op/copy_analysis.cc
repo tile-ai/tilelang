@@ -832,6 +832,44 @@ CopyInstSelection ClassifyWarpSpecializedProducerCopy(const CopyNode &op,
                               : Unsupported(facts.async_unavailable_reason);
   }
 
+  // Honor prefer_instruction like SelectCopyInstForLowering, restricted to
+  // producer-side loads.
+  if (facts.prefer_instruction == PreferredCopyInstruction::kTMA) {
+    if (facts.disable_tma) {
+      return Unsupported("T.copy prefer_instruction=\"tma\" conflicts with "
+                         "disable_tma=true.");
+    }
+    if (facts.pass_context_disables_tma) {
+      return Unsupported("T.copy prefer_instruction=\"tma\" conflicts with "
+                         "pass config tl.disable_tma_lower=true.");
+    }
+    CopyInst inst =
+        SelectTmaInst(facts, /*allow_load=*/true, /*allow_store=*/false,
+                      /*check_last_dim=*/true);
+    return inst == CopyInst::kInvalid
+               ? Unsupported("T.copy prefer_instruction=\"tma\" could not be "
+                             "honored: " +
+                             facts.tma_unavailable_reason)
+               : Supported(inst);
+  }
+
+  if (facts.prefer_instruction == PreferredCopyInstruction::kCPAsync) {
+    if (!IsAutoAsyncCopyEnabled(/*default_enabled=*/true)) {
+      return Unsupported(
+          "T.copy prefer_instruction=\"cp_async\" conflicts with "
+          "pass config tl.enable_async_copy=false.");
+    }
+    return facts.can_cp_async
+               ? Supported(CopyInst::kCPAsync)
+               : Unsupported("T.copy prefer_instruction="
+                             "\"cp_async\" could not be honored: " +
+                             facts.async_unavailable_reason);
+  }
+
+  if (facts.prefer_instruction == PreferredCopyInstruction::kSync) {
+    return Supported(SelectSyncLikeInst(facts));
+  }
+
   if (!facts.disable_tma) {
     CopyInst inst =
         SelectTmaInst(facts, /*allow_load=*/true, /*allow_store=*/false,

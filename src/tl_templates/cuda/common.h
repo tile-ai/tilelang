@@ -213,6 +213,17 @@ TL_PATCH TL_DEVICE bfloat16_t __hfma(const bfloat16_t x, const bfloat16_t y,
 #endif
 }
 
+// CUDA has no half-precision tangent intrinsic, but tangent lowering uses the
+// half-style `htan` name for 16-bit inputs. Evaluate in float32 and convert the
+// result back to the source type.
+TL_PATCH TL_DEVICE half_t htan(const half_t x) {
+  return half_t(tanf(float(x)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t htan(const bfloat16_t x) {
+  return bfloat16_t(tanf(float(x)));
+}
+
 // TVM lowers T.exp(bfloat16) to the CUDA half-style `hexp` name. TileLang uses
 // cutlass::bfloat16_t for scalar bf16, while CUDA only overloads hexp for
 // __nv_bfloat16. Keep this narrow bridge in common.h so plain T.exp works
@@ -1369,6 +1380,26 @@ template <> TL_DEVICE float2 shfl_sync(unsigned mask, float2 val, int srcLane) {
   unsigned long long raw = reinterpret_cast<unsigned long long const &>(val);
   raw = __shfl_sync(mask, raw, srcLane);
   return reinterpret_cast<float2 const &>(raw);
+}
+
+TL_DEVICE half_t RoundTiesAwayFromZero(half_t x) {
+  return half_t(roundf(float(x)));
+}
+
+TL_DEVICE float RoundTiesAwayFromZero(float x) { return roundf(x); }
+
+TL_DEVICE double RoundTiesAwayFromZero(double x) { return round(x); }
+
+TL_DEVICE bfloat16_t RoundTiesAwayFromZero(bfloat16_t x) {
+  return bfloat16_t(roundf(float(x)));
+}
+
+TL_DEVICE float_e4m3_t RoundTiesAwayFromZero(float_e4m3_t x) {
+  return float_e4m3_t(cutlass::float_e4m3_t(roundf(float(x))));
+}
+
+TL_DEVICE float_e5m2_t RoundTiesAwayFromZero(float_e5m2_t x) {
+  return float_e5m2_t(cutlass::float_e5m2_t(roundf(float(x))));
 }
 
 } // namespace tl

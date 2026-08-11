@@ -86,7 +86,6 @@ class CompileArgs:
             "verbose": self.verbose,
             "pass_configs": json.dumps(self.pass_configs, sort_keys=True) if self.pass_configs else None,
         }
-
         hash_obj = hashlib.sha256(json.dumps(data, sort_keys=True).encode("utf-8"))
         return int.from_bytes(hash_obj.digest(), byteorder="big")
 

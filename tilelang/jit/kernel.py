@@ -21,6 +21,7 @@ from tilelang.jit.adapter import (
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.contrib import nvcc as tl_nvcc
 from tilelang.contrib.hip_resource_info import pop_recorded, reset_recorder
+from tilelang.jit.abi import prepare_tvm_ffi_callee_allocated_outputs
 from tilelang.jit.diagnostics import jit_phase
 from tilelang.transform import PassConfigKey
 from tilelang.transform.pass_config import normalize_pass_configs
@@ -209,8 +210,19 @@ class JITKernel(Generic[_P, _T]):
         """
         return self.torch_function(*args, **kwds)
 
-    def _compile_and_create_adapter(self, tilelang_func: PrimFunc, out_idx: list[int]) -> BaseKernelAdapter:
+    def _compile_and_create_adapter(
+        self,
+        tilelang_func: PrimFunc,
+        out_idx: list[int] | int | None,
+    ) -> BaseKernelAdapter:
         """Compile one kernel and construct its adapter in one tool session."""
+        if self.execution_backend == "tvm_ffi":
+            # MakePackedAPI consumes this attribute to omit all result buffers
+            # from main's packed arguments and replace them with one allocator
+            # anchor.  Use a derived PrimFunc so manual out_idx does not become
+            # a persistent frontend attribute on the user's function.
+            tilelang_func, out_idx = prepare_tvm_ffi_callee_allocated_outputs(tilelang_func, out_idx)
+
         func_name = str(tilelang_func.attrs.get("global_symbol", "<unknown>"))
         timing_tool = create_pass_timing_tool(self.pass_configs)
         tools = [timing_tool] if timing_tool is not None else []
@@ -290,7 +302,7 @@ class JITKernel(Generic[_P, _T]):
     def _create_adapter_from_artifact(
         self,
         tilelang_func: PrimFunc,
-        out_idx: list[int],
+        out_idx: list[int] | int | None,
         artifact: CompiledArtifact,
         pass_configs: dict[str, Any],
         compile_metadata: dict[str, Any],

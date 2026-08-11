@@ -123,9 +123,8 @@ int SelectMinPaddingVectorSize(int max_vector_size, PrimExpr loop_total_size,
  * @brief Handle a parallel For node during traversal, collecting loop metadata.
  *
  * Visits a parallel loop, asserts the loop is parallel, records a data-parallel
- * IterVar for the loop, binds the loop variable range into the analyzer scope,
- * and extracts any reducer information from the loop's annotations into the
- * visitor's reducer_info_map_. Continues traversal into the loop body.
+ * IterVar for the loop, and binds the loop variable range into the analyzer
+ * scope. Continues traversal into the loop body.
  */
 void ParallelLoopNestVisitor::VisitStmt_(const ForNode *op) {
   if (op->kind == ForKind::kParallel)

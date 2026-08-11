@@ -34,6 +34,8 @@
 #include <utility>
 #include <vector>
 
+#include "op/builtin.h"
+
 // For escaping strings embedded into generated C sources
 #include "support/str_escape.h"
 
@@ -364,7 +366,19 @@ std::string CodeGenCHost::GetPackedName(const tvm::tirx::CallNode *op) {
 void CodeGenCHost::VisitExpr_(const tvm::tirx::CallNode *op,
                               std::ostream &os) { // NOLINT(*)
   using namespace tvm::tirx;
-  if (op->op.same_as(builtin::tvm_stack_alloca())) {
+  if (op->op.same_as(tl::tvm_ffi_call_with_result())) {
+    ICHECK_EQ(op->args.size(), 4U);
+    const auto *func_name = op->args[0].as<StringImmNode>();
+    const auto *num_args = op->args[2].as<IntImmNode>();
+    ICHECK(func_name != nullptr);
+    ICHECK(num_args != nullptr);
+
+    std::string packed_func_name = GetPackedName(op);
+    PrintGetFuncFromBackend(func_name->value, packed_func_name);
+    os << "TVMFFIFunctionCall(" << packed_func_name << ", (TVMFFIAny*) "
+       << PrintExpr(op->args[1]) << ", " << num_args->value << ", (TVMFFIAny*) "
+       << PrintExpr(op->args[3]) << ")";
+  } else if (op->op.same_as(builtin::tvm_stack_alloca())) {
     std::string stack_name = name_supply_->FreshName("stack");
     const std::string &type = op->args[0].as<StringImmNode>()->value;
     const IntImmNode *num = op->args[1].as<IntImmNode>();
@@ -402,6 +416,25 @@ void CodeGenCHost::VisitExpr_(const tvm::tirx::CallNode *op,
   } else {
     tvm::codegen::CodeGenC::VisitExpr_(op, os);
   }
+}
+
+void CodeGenCHost::VisitStmt_(const tvm::tirx::EvaluateNode *op) { // NOLINT(*)
+  using namespace tvm::tirx;
+  if (const auto *call = op->value.as<CallNode>()) {
+    if (call->op.same_as(builtin::tvm_struct_set())) {
+      ICHECK_EQ(call->args.size(), 4U);
+      const auto *field = call->args[2].as<IntImmNode>();
+      ICHECK(field != nullptr);
+      if (field->value == builtin::kDLTensorShape) {
+        std::string ref = GetStructRef(call->args[3].dtype(), call->args[0],
+                                       call->args[1], builtin::kDLTensorShape);
+        PrintIndent();
+        stream << ref << " = (int64_t*)" << PrintExpr(call->args[3]) << ";\n";
+        return;
+      }
+    }
+  }
+  tvm::codegen::CodeGenC::VisitStmt_(op);
 }
 
 void CodeGenCHost::VisitStmt_(
