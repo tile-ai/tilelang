@@ -38,6 +38,9 @@ static constexpr const char *kPipelineAsyncProducerGroups =
 /*! Per-original-statement replayable scalar Bind flag (1 = replayable). */
 static constexpr const char *kPipelineReplayableScalarBinds =
     "software_pipeline_replayable_scalar_binds";
+/*! User-facing T.Pipelined hint controlling terminal-stage compaction. */
+static constexpr const char *kPipelineCompactTerminalStage =
+    "tl_pipeline_compact_terminal_stage";
 
 /*! \brief Whether a flat TIRX statement declares pipeline-local buffer storage.
  *

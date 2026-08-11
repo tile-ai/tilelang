@@ -87,6 +87,19 @@ struct PipelineRewriteResult {
 
 namespace {
 
+int GetPhysicalPipelineDepth(const For &loop,
+                             const PipelineInfo &pipeline_info) {
+  int physical_depth = 1;
+  if (Optional<Integer> num_stages = GetPipelineNumStages(loop.get())) {
+    physical_depth = std::max(physical_depth,
+                              static_cast<int>(num_stages.value().IntValue()));
+  }
+  for (const auto &[_, annotation] : pipeline_info) {
+    physical_depth = std::max(physical_depth, annotation.stage + 1);
+  }
+  return physical_depth;
+}
+
 bool GetBoolAnnotation(const CopyNode &op, const char *key) {
   if (auto val = op.annotations.Get(key)) {
     if (auto int_val = val->as<IntImmNode>()) {
@@ -893,8 +906,9 @@ Map<Buffer, Buffer> ExpandPipelineBarriers(
  * per-stage barrier slot and emit_arrive=1 so LowerTileOp emits arrive inside
  * the thread-0 guard.
  *
- * For the first consumer stage block: prepend mbarrier_wait_parity with
- * stage-indexed barrier reference and parity expression.
+ * For the first RAW consumer in logical schedule order: prepend
+ * mbarrier_wait_parity with a stage-indexed barrier reference and parity
+ * expression.
  *
  * \param original_order  In/out: blocks in original pipeline order.
  * \param pipeline_info   In/out: block to PipelineAnnotation mapping.
@@ -910,8 +924,57 @@ Buffer RewritePipelineTmaBarriers(
     const Array<Integer> &tma_copies, Map<Var, Buffer> &buffer_data_to_buffer,
     BufferSet &allocated_buffers, Array<Buffer> &block_local_allocs,
     Var loop_var, PrimExpr loop_min, int num_stages) {
+  ICHECK_EQ(tma_copies.size(), original_order.size());
   if (!std::any_of(tma_copies.begin(), tma_copies.end(),
                    [](const Integer &tc) { return !is_zero(tc); })) {
+    return Buffer();
+  }
+
+  std::vector<size_t> tma_indices;
+  BufferSet tma_outputs;
+  for (size_t i = 0; i < original_order.size(); ++i) {
+    if (is_zero(tma_copies[i])) {
+      continue;
+    }
+    tma_indices.push_back(i);
+    for (const BufferRegion &write : original_order[i]->writes) {
+      tma_outputs.insert(write->buffer);
+    }
+  }
+
+  auto is_logically_before = [&](size_t lhs, size_t rhs) {
+    const PipelineAnnotation &lhs_anno = pipeline_info.at(original_order[lhs]);
+    const PipelineAnnotation &rhs_anno = pipeline_info.at(original_order[rhs]);
+    return lhs_anno.stage != rhs_anno.stage ? lhs_anno.stage < rhs_anno.stage
+                                            : lhs_anno.order < rhs_anno.order;
+  };
+
+  // A shared pipeline barrier is complete only after every grouped TMA has
+  // been issued.  Find the first block that actually reads a TMA destination,
+  // rather than assuming that all consumers have a positive stage.  If a RAW
+  // consumer precedes another grouped producer, leave the TMA operations
+  // self-managed because one shared arrive/wait pair cannot represent that
+  // interleaving safely.
+  std::optional<size_t> first_consumer_idx;
+  for (size_t i = 0; i < original_order.size(); ++i) {
+    if (!is_zero(tma_copies[i])) {
+      continue;
+    }
+    bool reads_tma_output = std::any_of(
+        original_order[i]->reads.begin(), original_order[i]->reads.end(),
+        [&](const BufferRegion &read) {
+          return tma_outputs.count(read->buffer) != 0;
+        });
+    if (reads_tma_output &&
+        (!first_consumer_idx.has_value() ||
+         is_logically_before(i, first_consumer_idx.value()))) {
+      first_consumer_idx = i;
+    }
+  }
+  if (!first_consumer_idx.has_value() ||
+      std::any_of(tma_indices.begin(), tma_indices.end(), [&](size_t i) {
+        return !is_logically_before(i, first_consumer_idx.value());
+      })) {
     return Buffer();
   }
 
@@ -923,11 +986,12 @@ Buffer RewritePipelineTmaBarriers(
   allocated_buffers.insert(barrier_buf);
   block_local_allocs.push_back(barrier_buf);
 
-  // Find the index of the last TMA copy for arrive emission.
-  int last_tma_idx = -1;
-  for (size_t i = 0; i < original_order.size(); i++) {
-    if (!is_zero(tma_copies[i]))
-      last_tma_idx = static_cast<int>(i);
+  // Find the last TMA copy in logical schedule order for arrive emission.
+  size_t last_tma_idx = tma_indices.front();
+  for (size_t i : tma_indices) {
+    if (is_logically_before(last_tma_idx, i)) {
+      last_tma_idx = i;
+    }
   }
 
   // Phase 1: Rewrite TMA copy blocks - all share barrier slot 0.
@@ -937,7 +1001,7 @@ Buffer RewritePipelineTmaBarriers(
     if (is_zero(tma_copies[i]))
       continue;
 
-    bool is_last = (static_cast<int>(i) == last_tma_idx);
+    bool is_last = i == last_tma_idx;
     SBlock old_block = original_order[i];
     CopyToTmaCopyRewriter rewriter(barrier_buf,
                                    /*barrier_id=*/IntImm(DataType::Int(32), 0),
@@ -955,42 +1019,27 @@ Buffer RewritePipelineTmaBarriers(
     original_order.Set(i, new_block);
   }
 
-  // Phase 2: Insert waits in consumer blocks (blocks that depend on TMA data).
-  // For simplicity, we insert waits before the first block whose stage > 0.
-  bool waits_inserted = false;
-  for (size_t i = 0; i < original_order.size(); i++) {
-    if (waits_inserted)
-      break;
-    SBlock old_block = original_order[i];
-    int stage = pipeline_info.at(old_block).stage;
-    if (stage == 0)
-      continue; // still in producer stage
+  // Phase 2: Wait immediately before the first logical RAW consumer.  This may
+  // be in the producer's stage when weighted scheduling coalesces DAG levels.
+  size_t consumer_idx = first_consumer_idx.value();
+  SBlock old_block = original_order[consumer_idx];
+  PrimExpr barrier_ref =
+      MakeBarrierRef(barrier_buf, IntImm(DataType::Int(32), 0));
+  PrimExpr ns = IntImm(DataType::Int(32), num_stages);
+  PrimExpr parity = FloorMod(FloorDiv(loop_var - loop_min, ns), 2);
+  Stmt wait = Evaluate(
+      Call(DataType::Handle(), mbarrier_wait_parity(), {barrier_ref, parity}));
+  Stmt new_body = SeqStmt({wait, old_block->body});
 
-    // Wait on barrier slot 0 with single-slot parity.
-    // ExpandPipelineBarriers will rewrite index and parity for versioning.
-    Array<Stmt> wait_stmts;
-    {
-      PrimExpr barrier_ref =
-          MakeBarrierRef(barrier_buf, IntImm(DataType::Int(32), 0));
-      PrimExpr ns = IntImm(DataType::Int(32), num_stages);
-      PrimExpr parity = FloorMod(FloorDiv(loop_var - loop_min, ns), 2);
-      wait_stmts.push_back(Evaluate(Call(
-          DataType::Handle(), mbarrier_wait_parity(), {barrier_ref, parity})));
-    }
-    wait_stmts.push_back(old_block->body);
-    Stmt new_body = SeqStmt(wait_stmts);
+  SBlock new_block(old_block->iter_vars, old_block->reads, old_block->writes,
+                   old_block->name_hint, new_body, old_block->init,
+                   old_block->alloc_buffers, old_block->match_buffers,
+                   old_block->annotations);
 
-    SBlock new_block(old_block->iter_vars, old_block->reads, old_block->writes,
-                     old_block->name_hint, new_body, old_block->init,
-                     old_block->alloc_buffers, old_block->match_buffers,
-                     old_block->annotations);
-
-    PipelineAnnotation anno = pipeline_info.at(old_block);
-    pipeline_info.erase(old_block);
-    pipeline_info.emplace(new_block, anno);
-    original_order.Set(i, new_block);
-    waits_inserted = true;
-  }
+  PipelineAnnotation anno = pipeline_info.at(old_block);
+  pipeline_info.erase(old_block);
+  pipeline_info.emplace(new_block, anno);
+  original_order.Set(consumer_idx, new_block);
 
   return barrier_buf;
 }
@@ -1196,6 +1245,8 @@ public:
     // number of versions need to maintain for each buffer.
     std::unordered_map<Buffer, BufferAccessInfo, ObjectPtrHash, ObjectPtrEqual>
         infos = GetBufferAccessInfo();
+    physical_pipeline_depth_ =
+        GetPhysicalPipelineDepth(pipeline_loop_, pipeline_info_);
     for (const Buffer &buffer : pipeline_allocs_) {
       auto it = infos.find(buffer);
       if (it == infos.end()) {
@@ -2833,6 +2884,8 @@ private:
     PrimExpr extent = end - start;
     Optional<Integer> pipeline_num_stages =
         GetPipelineNumStages(pipeline_loop_.get());
+    Optional<Integer> physical_pipeline_depth =
+        Integer(physical_pipeline_depth_);
     auto make_nop = []() {
       return SBlockRealize({}, Bool(true), MakeBlock(Evaluate(0), {}));
     };
@@ -2925,7 +2978,7 @@ private:
 
       Stmt rewritten_stmt = SBlockRealize({}, inbound, new_block);
       Optional<PrimExpr> pipeline_mbar_phase = ComputePipelineMbarPhaseExpr(
-          normalized_access_index, pipeline_num_stages);
+          normalized_access_index, physical_pipeline_depth);
 
       bool is_async = pipeline_anno.async;
       if (is_async) {
@@ -3050,6 +3103,7 @@ private:
   PipelineInfo pipeline_info_;
   Array<SBlock> scalar_binding_blocks_;
   int max_stage_ = -1;
+  int physical_pipeline_depth_ = 1;
   Map<Buffer, Buffer> buffer_remap_;
   Optional<Target> target_;
   Array<SBlock> ordered_stmts_;
@@ -3605,6 +3659,8 @@ private:
 
     ValidateScheduledBindDependencies(pipeline_info, scheduled_order);
     ValidatePipelineBody(pipeline_info, scheduled_order);
+    int physical_pipeline_depth =
+        GetPhysicalPipelineDepth(for_node, pipeline_info);
 
     if (!HasOverlappableStages(pipeline_info)) {
       for (const auto &buffer : flat_local_allocs) {
@@ -3629,17 +3685,9 @@ private:
       for (const auto &pair : pipeline_info) {
         max_stage = std::max(max_stage, pair.second.stage);
       }
-      // Use the actual pipeline depth (number of buffer copies) for barrier
-      // sizing, not the SW pipeline stage count (max_stage + 1).
-      // Even for pipeline_depth=1 we create a shared barrier so that
-      // LowerTileOp uses it instead of allocating separate per-copy barriers.
-      Optional<Integer> pipelined_num_stages = GetPipelineNumStages(op);
-      int pipeline_depth =
-          pipelined_num_stages.defined()
-              ? static_cast<int>(pipelined_num_stages.value().IntValue())
-              : max_stage + 1;
-      // Clamp to at least 1 so we always allocate at least one barrier slot.
-      pipeline_depth = std::max(pipeline_depth, 1);
+      // The physical ring must cover both the requested depth and every stage
+      // endpoint.  An uncompacted schedule may retain stage == num_stages and
+      // therefore needs one additional slot.
       if (max_stage > 0) {
         if (auto tma_copies_anno = op->annotations.Get(kPipelineTmaCopies)) {
           auto raw_tma_copies =
@@ -3661,7 +3709,7 @@ private:
                   scheduled_order, pipeline_info, tma_copies,
                   buffer_data_to_buffer_, allocated_buffers_,
                   block_local_allocs, for_node->loop_var, for_node->min,
-                  pipeline_depth);
+                  physical_pipeline_depth);
             }
           }
         }
@@ -3677,19 +3725,10 @@ private:
     // T.alloc_barrier, so that no late standalone barrier-only fixup is needed.
     // Must run BEFORE local_allocs is copied from block_local_allocs.
     {
-      Optional<Integer> pipelined_ns = GetPipelineNumStages(op);
-      int barrier_depth = 1;
-      if (pipelined_ns.defined()) {
-        barrier_depth = static_cast<int>(pipelined_ns.value().IntValue());
-      } else if (op->annotations.count("num_stages")) {
-        barrier_depth = static_cast<int>(
-            Downcast<Integer>(op->annotations.Get("num_stages").value())
-                .IntValue());
-      }
       Map<Buffer, Buffer> barrier_remap = ExpandPipelineBarriers(
           scheduled_order, pipeline_info, buffer_data_to_buffer_,
           allocated_buffers_, block_local_allocs, pipeline_allocs,
-          for_node->loop_var, for_node->min, barrier_depth);
+          for_node->loop_var, for_node->min, physical_pipeline_depth);
       // Register expanded barriers for outer block alloc_buffers update.
       for (const auto &[old_buf, new_buf] : barrier_remap) {
         pending_buffer_remap_.Set(old_buf, new_buf);

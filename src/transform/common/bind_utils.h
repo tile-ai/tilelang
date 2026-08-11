@@ -19,6 +19,17 @@ using namespace tirx;
 using BufferSet =
     std::unordered_set<Buffer, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>;
 
+inline bool IsBufferOrAliasWritten(const Buffer &buffer,
+                                   const BufferSet &write_buffers) {
+  for (const Buffer &write_buffer : write_buffers) {
+    if (buffer.same_as(write_buffer) ||
+        buffer->data.same_as(write_buffer->data)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 inline bool IsReplayableScalarBind(const Stmt &stmt,
                                    const ffi::Array<BufferRegion> &reads,
                                    const BufferSet &write_buffers) {
@@ -42,7 +53,7 @@ inline bool IsReplayableScalarBind(const Stmt &stmt,
     return false;
   }
   for (const BufferRegion &read : reads) {
-    if (write_buffers.count(read->buffer)) {
+    if (IsBufferOrAliasWritten(read->buffer, write_buffers)) {
       return false;
     }
   }
