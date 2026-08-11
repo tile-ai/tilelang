@@ -258,6 +258,55 @@ tcgen05_ld_32dp256bNx(uint32_t const &tmem_start_col,
 #endif
 }
 
+// Half-subpartition (16 datapath) variants. The 32dp wrappers above
+// issue these twice, once per half; PTX Layout F (1SM M=64) occupies only
+// the low 16 datapaths of each sub-partition and needs a single issue.
+
+template <int N, bool pack16, typename dst_t, bool kDependentFalse = false>
+__device__ __forceinline__ void
+tcgen05_ld_16dp64bNx(uint32_t const &tmem_start_col,
+                     uint32_t const &tmem_col_offset, dst_t *dst_ptr) {
+#if defined(TL_CUDA_ARCH_TCGEN05_ENABLED)
+  tcgen05_ld_core<tl::tmem_ld_16dp64bNx<pack16>, 7, N>(
+      tmem_start_col + tmem_col_offset, dst_ptr);
+  tl::fence_view_async_tmem_load();
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_ld_16dp64bNx requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
+}
+
+template <int N, bool pack16, typename dst_t, bool kDependentFalse = false>
+__device__ __forceinline__ void
+tcgen05_ld_16dp128bNx(uint32_t const &tmem_start_col,
+                      uint32_t const &tmem_col_offset, dst_t *dst_ptr) {
+#if defined(TL_CUDA_ARCH_TCGEN05_ENABLED)
+  tcgen05_ld_core<tl::tmem_ld_16dp128bNx<pack16>, 6, N>(
+      tmem_start_col + tmem_col_offset, dst_ptr);
+  tl::fence_view_async_tmem_load();
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_ld_16dp128bNx requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
+}
+
+template <int N, bool pack16, typename dst_t, bool kDependentFalse = false>
+__device__ __forceinline__ void
+tcgen05_ld_16dp256bNx(uint32_t const &tmem_start_col,
+                      uint32_t const &tmem_col_offset, dst_t *dst_ptr) {
+#if defined(TL_CUDA_ARCH_TCGEN05_ENABLED)
+  tcgen05_ld_core<tl::tmem_ld_16dp256bNx<pack16>, 5, N>(
+      tmem_start_col + tmem_col_offset, dst_ptr);
+  tl::fence_view_async_tmem_load();
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_ld_16dp256bNx requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
+}
+
 // NOTE: The column offset increment (CUR_SEGMENT_LEN) assumes each register
 // maps to exactly one TMEM column (i.e. unpack::16b is NOT active). If
 // unpack::16b were used, each register would expand to 2 columns, requiring
@@ -334,6 +383,55 @@ tcgen05_st_32dp256bNx(uint32_t const &tmem_start_col,
 #else
   static_assert(kDependentFalse,
                 "tl::tcgen05_st_32dp256bNx requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
+}
+
+// Half-subpartition (16 datapath) variants. The 32dp wrappers above
+// issue these twice, once per half; PTX Layout F (1SM M=64) occupies only
+// the low 16 datapaths of each sub-partition and needs a single issue.
+
+template <int N, bool unpack16, typename src_t, bool kDependentFalse = false>
+__device__ __forceinline__ void
+tcgen05_st_16dp64bNx(uint32_t const &tmem_start_col,
+                     uint32_t const &tmem_col_offset, src_t const *src_ptr) {
+#if defined(TL_CUDA_ARCH_TCGEN05_ENABLED)
+  tcgen05_st_core<tl::tmem_st_16dp64bNx<unpack16>, 7, N>(
+      tmem_start_col + tmem_col_offset, src_ptr);
+  tl::fence_view_async_tmem_store();
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_st_16dp64bNx requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
+}
+
+template <int N, bool unpack16, typename src_t, bool kDependentFalse = false>
+__device__ __forceinline__ void
+tcgen05_st_16dp128bNx(uint32_t const &tmem_start_col,
+                      uint32_t const &tmem_col_offset, src_t const *src_ptr) {
+#if defined(TL_CUDA_ARCH_TCGEN05_ENABLED)
+  tcgen05_st_core<tl::tmem_st_16dp128bNx<unpack16>, 6, N>(
+      tmem_start_col + tmem_col_offset, src_ptr);
+  tl::fence_view_async_tmem_store();
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_st_16dp128bNx requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
+}
+
+template <int N, bool unpack16, typename src_t, bool kDependentFalse = false>
+__device__ __forceinline__ void
+tcgen05_st_16dp256bNx(uint32_t const &tmem_start_col,
+                      uint32_t const &tmem_col_offset, src_t const *src_ptr) {
+#if defined(TL_CUDA_ARCH_TCGEN05_ENABLED)
+  tcgen05_st_core<tl::tmem_st_16dp256bNx<unpack16>, 5, N>(
+      tmem_start_col + tmem_col_offset, src_ptr);
+  tl::fence_view_async_tmem_store();
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_st_16dp256bNx requires sm_100a or a compatible "
                 "architecture-specific target");
 #endif
 }

@@ -32,6 +32,12 @@ LAYOUT_CASES = [
     ("interleaved_4d", (3, 32, 64, 4), lambda a, i, j, k: [i + 32 * k, a * 64 + j], 128),
     # (128,128):(1@0,1@1) spread across two warpgroups.
     ("std_2d_2wg", (128, 128), lambda i, j: [i, j], 256),
+    # ((16,4),128):((1@0,32@0),1@1) -- PTX Layout F, the 1SM M=64 fragment:
+    # only the LOW 16 datapaths of each 32-datapath sub-partition are
+    # occupied, so the four warps sit a whole sub-partition apart and the
+    # atom is issued once per warp instead of duplicated onto the high 16.
+    ("layout_f_m64", (64, 128), lambda i, j: [i % 16 + 32 * (i // 16), j], 128),
+    ("layout_f_m64_2wg", (64, 256), lambda i, j: [i % 16 + 32 * (i // 16), j], 256),
 ]
 
 
@@ -288,8 +294,13 @@ def test_tmem_copy_roundtrip(name, shape, forward, threads):
         # Two 16-bit values packed per b32 column move as whole columns with
         # the plain instruction.
         ("packed_pair", (128, 128), lambda i, j: [i, j], False),
+        # Layout F leaves gaps on the DATAPATH axis, not inside the columns:
+        # its columns are perfectly full, so it must move with the plain
+        # instruction too.  (Judging pack::16b by "does the fragment cover
+        # its codomain" reads those datapath gaps as half-filled columns.)
+        ("layout_f_packed_pair", (64, 128), lambda i, j: [i % 16 + 32 * (i // 16), j], False),
     ],
-    ids=["pack16b", "packed_pair"],
+    ids=["pack16b", "packed_pair", "layout_f_packed_pair"],
 )
 def test_tmem_copy_roundtrip_16bit(name, shape, forward, modifier):
     kernel = tilelang.compile(
@@ -314,8 +325,8 @@ def test_tmem_copy_roundtrip_16bit(name, shape, forward, modifier):
     # A batched layout sliced along its column mode leaves per-batch column
     # gaps in TMEM; the copy iterates the contiguous chunks, one tcgen05
     # issue per batch entry (rest iteration).
-    [case for case in LAYOUT_CASES if case[0] in ("std_2d", "std_2d_2wg", "batched_3d")],
-    ids=["std_2d", "std_2d_2wg", "batched_3d"],
+    [case for case in LAYOUT_CASES if case[0] in ("std_2d", "std_2d_2wg", "batched_3d", "layout_f_m64")],
+    ids=["std_2d", "std_2d_2wg", "batched_3d", "layout_f_m64"],
 )
 def test_tmem_copy_roundtrip_sliced_last_dim(name, shape, forward, threads):
     _run_roundtrip(_make_sliced_roundtrip_kernel(shape, forward, threads, nsplit=2), shape)
@@ -326,8 +337,8 @@ def test_tmem_copy_roundtrip_sliced_last_dim(name, shape, forward, threads):
 @tilelang.testing.requires_cuda_compute_version_lt(11)
 @pytest.mark.parametrize(
     ("name", "shape", "forward", "threads"),
-    [case for case in LAYOUT_CASES if case[0] in ("std_2d", "batched_3d")],
-    ids=["std_2d", "batched_3d"],
+    [case for case in LAYOUT_CASES if case[0] in ("std_2d", "batched_3d", "layout_f_m64")],
+    ids=["std_2d", "batched_3d", "layout_f_m64"],
 )
 def test_tmem_copy_sliced_store_whole_load(name, shape, forward, threads):
     _run_roundtrip(_make_asymmetric_roundtrip_kernel(shape, forward, threads, nsplit=2), shape)

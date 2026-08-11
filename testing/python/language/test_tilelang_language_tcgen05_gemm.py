@@ -684,3 +684,76 @@ def test_tcgen05_gemm_batched_correctness():
     kernel(a, b, d)
     ref = (a.float() @ b.float().transpose(1, 2)).to(torch.bfloat16)
     torch.testing.assert_close(d, ref, rtol=1e-2, atol=1e-2)
+
+
+def _make_m64_ts_kernel(M, N, K):
+    """A TS GEMM whose A operand reaches TMEM through registers.
+
+    At M=64 the A fragment is PTX Layout F -- the low 16 datapaths of each
+    sub-partition -- so both the register->TMEM store and the MMA's read of it
+    have to agree on a half-subpartition layout.
+    """
+    from tilelang.cuda.intrinsics import make_mma_swizzle_layout
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), T.bfloat16),
+        B: T.Tensor((N, K), T.bfloat16),
+        C: T.Tensor((M, N), T.float32),
+    ):
+        with T.Kernel(1, threads=128):
+            a_shared = T.alloc_shared((M, K), T.bfloat16)
+            b_shared = T.alloc_shared((N, K), T.bfloat16)
+            T.annotate_layout({a_shared: make_mma_swizzle_layout(a_shared)})
+            T.copy(A, a_shared)
+            T.copy(B, b_shared)
+            with T.sblock():
+                T.reads()
+                T.writes()
+                a_tmem = T.alloc_tmem((M, K), T.bfloat16)
+                c_tmem = T.alloc_tmem((M, N), T.float32)
+                a_frag = T.alloc_fragment((M, K), T.bfloat16)
+                c_frag = T.alloc_fragment((M, N), T.float32)
+                done = T.alloc_barrier(1)
+                T.copy(a_shared, a_frag)
+                T.copy(a_frag, a_tmem)
+                if T.get_warp_idx_sync() == 0:
+                    T.tcgen05_gemm(a_tmem, b_shared, c_tmem, transpose_B=True, clear_accum=True, mbar=done)
+                T.mbarrier_wait_parity(done, 0)
+                T.copy(c_tmem, c_frag)
+                T.copy(c_frag, C)
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
+@pytest.mark.parametrize(
+    ("M", "K"),
+    # K=512 puts the wrapper's .xN at 128, exactly 16dp64b's max_chunks.  M=128
+    # is the untouched path, so one shape guards it -- and it cannot reach
+    # K=512 anyway: two bf16 stagings would need 256 KB of shared memory.
+    [(64, 64), (64, 128), (64, 512), (128, 128)],
+    ids=["m64k64", "m64k128", "m64k512", "m128k128"],
+)
+def test_tcgen05_ts_gemm_tmem_a_correctness(M, K):
+    import torch
+
+    N = 128
+    kernel = tilelang.compile(
+        _make_m64_ts_kernel(M, N, K),
+        out_idx=[2],
+        target="cuda",
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+    # M=64 must go through the half-subpartition wrappers, M=128 must not.
+    source = kernel.get_kernel_source()
+    want = "tcgen05_st_16dp" if M == 64 else "tcgen05_st_32dp"
+    assert want in source, f"M={M} expected {want} in the emitted source"
+
+    torch.manual_seed(0)
+    a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(N, K, device="cuda", dtype=torch.bfloat16)
+    ref = a.float() @ b.float().T
+    torch.testing.assert_close(kernel(a, b), ref, rtol=2e-2, atol=2e-2)
