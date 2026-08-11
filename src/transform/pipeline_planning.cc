@@ -439,6 +439,10 @@ struct PipelineStageInfo {
   bool producer_for_copy = false;
   int last_use_stmt_index =
       -1; // Initialized to -1, indicating no consumers found yet
+  int first_use_stmt_index =
+      -1; // Initialized to -1, indicating no consumers found yet
+  int effective_placement_index = -1; // Computed placement point for Stage 1
+                                      // scheduling, derived from strategy
 
 public:
   bool IsFirstStage() const { return copy_stage || producer_for_copy; }
@@ -446,6 +450,10 @@ public:
   bool IsTmaCopy() const { return tma_copy; }
   bool IsProducerForCopy() const { return producer_for_copy; }
   bool IsLastUseStmtIndexValid() const { return last_use_stmt_index != -1; }
+  bool IsFirstUseStmtIndexValid() const { return first_use_stmt_index != -1; }
+  bool IsEffectivePlacementValid() const {
+    return effective_placement_index != -1;
+  }
 };
 
 class PipelineStageAnalyzer {
@@ -683,6 +691,47 @@ public:
     }
   }
 
+  void AnalyzeCopyFirstUse(
+      std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
+    for (auto &pinfo : *pipeline_stage_infos) {
+      if (!pinfo.IsFirstStage())
+        continue;
+      bool found = false;
+      for (int i = pinfo.original_stmt_index + 1;
+           !found && i < static_cast<int>(pipeline_stage_infos->size()); ++i) {
+        for (const BufferRegion &read : (*pipeline_stage_infos)[i].reads) {
+          if (std::find_if(pinfo.writes.begin(), pinfo.writes.end(),
+                           [&](const BufferRegion &r) {
+                             return r->buffer == read->buffer &&
+                                    MayConflict(r->region, read->region);
+                           }) != pinfo.writes.end()) {
+            pinfo.first_use_stmt_index = i;
+            found = true;
+            break;
+          }
+        }
+      }
+      // Invariant: if last_use is valid, first_use must also be valid
+      // (same buffer-read scan guarantees first_use <= last_use).
+      if (pinfo.IsLastUseStmtIndexValid() &&
+          !pinfo.IsFirstUseStmtIndexValid()) {
+        LOG(FATAL) << "Pipeline planning internal error: copy stage "
+                   << pinfo.original_stmt_index
+                   << " has last_use_stmt_index=" << pinfo.last_use_stmt_index
+                   << " but first_use_stmt_index is not set. "
+                   << "This indicates an inconsistency between "
+                      "AnalyzeCopyLastUse and AnalyzeCopyFirstUse.";
+      }
+      if (pinfo.IsFirstUseStmtIndexValid() && pinfo.IsLastUseStmtIndexValid()) {
+        ICHECK(pinfo.first_use_stmt_index <= pinfo.last_use_stmt_index)
+            << "Pipeline planning internal error: first_use ("
+            << pinfo.first_use_stmt_index << ") > last_use ("
+            << pinfo.last_use_stmt_index << ") for copy stage "
+            << pinfo.original_stmt_index;
+      }
+    }
+  }
+
   void PropagateBufferProducersForCopy(
       std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
     struct CopyStageDependencyReadsManager {
@@ -789,7 +838,8 @@ public:
     bool updated = true;
 
     auto update_producer = [](PipelineStageInfo *producer,
-                              int consumer_last_use) -> bool {
+                              int consumer_last_use,
+                              int consumer_first_use) -> bool {
       if (consumer_last_use < 0) {
         return false;
       }
@@ -797,11 +847,20 @@ public:
       if (!producer->producer_for_copy) {
         producer->producer_for_copy = true;
         producer->last_use_stmt_index = consumer_last_use;
+        producer->first_use_stmt_index = consumer_first_use;
         changed = true;
-      } else if (!producer->IsLastUseStmtIndexValid() ||
-                 consumer_last_use < producer->last_use_stmt_index) {
-        producer->last_use_stmt_index = consumer_last_use;
-        changed = true;
+      } else {
+        if (!producer->IsLastUseStmtIndexValid() ||
+            consumer_last_use < producer->last_use_stmt_index) {
+          producer->last_use_stmt_index = consumer_last_use;
+          changed = true;
+        }
+        if (consumer_first_use >= 0 &&
+            (!producer->IsFirstUseStmtIndexValid() ||
+             consumer_first_use < producer->first_use_stmt_index)) {
+          producer->first_use_stmt_index = consumer_first_use;
+          changed = true;
+        }
       }
       return changed;
     };
@@ -824,7 +883,8 @@ public:
           if (producer.IsCopyStage()) {
             continue;
           }
-          updated |= update_producer(&producer, consumer.last_use_stmt_index);
+          updated |= update_producer(&producer, consumer.last_use_stmt_index,
+                                     consumer.first_use_stmt_index);
         }
       }
       if (++iter_count > max_iterations) {
@@ -1011,8 +1071,9 @@ private:
 
 class PipelinePlanner : public StmtExprMutator {
 public:
-  static Stmt Substitute(const PrimFunc &f, bool use_async_copy = true) {
-    PipelinePlanner substituter(use_async_copy);
+  static Stmt Substitute(const PrimFunc &f, bool use_async_copy = true,
+                         std::string pipeline_copy_strategy = "occupancy") {
+    PipelinePlanner substituter(use_async_copy, pipeline_copy_strategy);
     for (const auto &[_, buffer] : f->buffer_map) {
       substituter.buffer_data_to_buffer_.Set(buffer->data, buffer);
     }
@@ -1025,7 +1086,10 @@ public:
 
 private:
   PipelinePlanner() = default;
-  PipelinePlanner(bool use_async_copy) : use_async_copy_(use_async_copy) {}
+  PipelinePlanner(bool use_async_copy,
+                  std::string pipeline_copy_strategy = "occupancy")
+      : use_async_copy_(use_async_copy),
+        pipeline_copy_strategy_(pipeline_copy_strategy) {}
 
   PipelineStageAnalyzer MakeStageAnalyzer() const {
     return PipelineStageAnalyzer(buffer_data_to_buffer_, target_,
@@ -1035,6 +1099,11 @@ private:
   void AnalyzeCopyLastUse(
       std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
     MakeStageAnalyzer().AnalyzeCopyLastUse(pipeline_stage_infos);
+  }
+
+  void AnalyzeCopyFirstUse(
+      std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
+    MakeStageAnalyzer().AnalyzeCopyFirstUse(pipeline_stage_infos);
   }
 
   void PropagateBufferProducersForCopy(
@@ -1213,25 +1282,64 @@ private:
     // the producer-stage scheduling just like the copy stages they prepare.
     PropagateBufferProducersForCopy(&pipeline_stage_infos);
 
-    // Analysis use-def chain to determine last_use_stmt_index for copy
-    // operations This step is critical for pipeline optimization as it
-    // identifies the index of the last statement that consumes data produced by
-    // copy stages, enabling optimal placement of copy operations in the
-    // pipeline schedule.
+    // Analysis use-def chain to determine last_use_stmt_index and
+    // first_use_stmt_index for copy operations. These identify the first and
+    // last statements that consume data produced by copy stages, enabling
+    // optimal placement of copy operations in the pipeline schedule.
     AnalyzeCopyLastUse(&pipeline_stage_infos);
+    AnalyzeCopyFirstUse(&pipeline_stage_infos);
 
     PropagateScalarProducersForCopy(&pipeline_stage_infos);
+
+    // Apply pipeline copy strategy to compute effective_placement_index
+    if (pipeline_copy_strategy_ == "occupancy") {
+      // occupancy: place copy at last consumer position (shortest buffer
+      // residence)
+      for (auto &pinfo : pipeline_stage_infos) {
+        if (pinfo.IsFirstStage() && pinfo.IsLastUseStmtIndexValid()) {
+          pinfo.effective_placement_index = pinfo.last_use_stmt_index;
+        }
+      }
+    } else if (pipeline_copy_strategy_ == "latency") {
+      // latency: place copy at first consumer position (maximum prefetch
+      // distance)
+      for (auto &pinfo : pipeline_stage_infos) {
+        if (pinfo.IsFirstStage() && pinfo.IsFirstUseStmtIndexValid()) {
+          pinfo.effective_placement_index = pinfo.first_use_stmt_index;
+        }
+      }
+    } else if (pipeline_copy_strategy_ == "balance") {
+      // balance: first_use ordering + last_use chain constraint
+      // effective = max(own_last_use, prev_copy_effective), sorted by first_use
+      std::vector<PipelineStageInfo *> copy_infos;
+      for (auto &pinfo : pipeline_stage_infos) {
+        if (pinfo.IsFirstStage() && pinfo.IsLastUseStmtIndexValid()) {
+          pinfo.effective_placement_index = pinfo.last_use_stmt_index;
+          copy_infos.push_back(&pinfo);
+        }
+      }
+      std::sort(copy_infos.begin(), copy_infos.end(),
+                [](const PipelineStageInfo *a, const PipelineStageInfo *b) {
+                  return a->first_use_stmt_index < b->first_use_stmt_index;
+                });
+      int prev_effective_placement = -1;
+      for (auto *pinfo : copy_infos) {
+        pinfo->effective_placement_index = std::max(
+            pinfo->effective_placement_index, prev_effective_placement);
+        prev_effective_placement = pinfo->effective_placement_index;
+      }
+    }
 
     // Making stages and orders
     int order_idx = 0;
     // Stage 1. Create pipeline stages and assign order
     for (auto &pinfo : pipeline_stage_infos) {
       // Skip elements that must be in first stage:
-      // 1. Copy stages (with active last_use_stmt_index) - these need special
-      // handling
+      // 1. Copy stages (with valid effective_placement_index) - these need
+      // special handling
       //    because they have consumers that depend on their data
       // 2. All Producer stages for copy stages.
-      if (pinfo.IsFirstStage() && pinfo.IsLastUseStmtIndexValid()) {
+      if (pinfo.IsFirstStage() && pinfo.IsEffectivePlacementValid()) {
         continue;
       }
 
@@ -1241,12 +1349,12 @@ private:
       pinfo.order = order_idx++;
       pinfo.stage = num_stages;
 
-      // Schedule copy stages that have this stage as their last consumer
-      // This ensures copy operations are placed right before their final
-      // consumer for optimal pipeline efficiency
+      // Schedule copy stages that have this stage as their effective placement
+      // point This ensures copy operations are placed right before their
+      // determined consumer for optimal pipeline efficiency
       for (auto &pinfo_1 : pipeline_stage_infos) {
         if ((pinfo_1.IsFirstStage() &&
-             pinfo_1.last_use_stmt_index == pinfo.original_stmt_index)) {
+             pinfo_1.effective_placement_index == pinfo.original_stmt_index)) {
           pinfo_1.order = order_idx++;
           pinfo_1.stage = 0; // Copy stages are typically assigned to stage 0
         }
@@ -1361,6 +1469,7 @@ private:
   Map<Var, Buffer> buffer_data_to_buffer_;
   Target target_;
   bool use_async_copy_{};
+  std::string pipeline_copy_strategy_{"occupancy"};
 };
 
 tvm::transform::Pass PipelinePlanning() {
@@ -1368,8 +1477,17 @@ tvm::transform::Pass PipelinePlanning() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
     bool use_async_copy =
         ctx->GetConfig<Bool>("tirx.use_async_copy", Bool(true)).value();
+    String pipeline_copy_strategy =
+        ctx->GetConfig<String>(kPipelineCopyStrategy, String("occupancy"))
+            .value();
+    ICHECK(pipeline_copy_strategy == "occupancy" ||
+           pipeline_copy_strategy == "latency" ||
+           pipeline_copy_strategy == "balance")
+        << "Invalid tl.pipeline_copy_strategy: '" << pipeline_copy_strategy
+        << "'. Must be one of: occupancy, latency, balance.";
     PrimFuncNode *fptr = f.CopyOnWrite();
-    fptr->body = PipelinePlanner::Substitute(f, use_async_copy);
+    fptr->body = PipelinePlanner::Substitute(
+        f, use_async_copy, std::string(pipeline_copy_strategy));
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.PipelinePlanning", {});
