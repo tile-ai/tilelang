@@ -369,6 +369,7 @@ private:
   struct AccessPtrInfo {
     BufferLoad base_load;
     PrimExpr rw_mask;
+    DataType element_dtype;
   };
 
   // Constructor initializing the base class with the analyzer
@@ -535,6 +536,7 @@ private:
       return AccessPtrInfo{
           Downcast<BufferLoad>(ptr_call->args[0]),
           ptr_call->args[2],
+          base_load->buffer->dtype,
       };
     }
 
@@ -552,6 +554,7 @@ private:
       return AccessPtrInfo{
           BufferLoad(flat, Array<PrimExpr>{ptr_call->args[2]}),
           ptr_call->args[4],
+          ptr_call->args[0].dtype(),
       };
     }
 
@@ -632,19 +635,8 @@ private:
     }
     linear_index = linear_index - elem_offset;
 
-    PrimExpr num_elems = call->args[2];
-    if (call->op.same_as(builtin::ptx_cp_async())) {
-      int source_elem_bits =
-          src_buffer->dtype.bits() * src_buffer->dtype.lanes();
-      ICHECK_GT(source_elem_bits, 0)
-          << "cp.async source element width must be positive: " << call;
-      PrimExpr source_elem_bits_expr =
-          IntImm(num_elems.dtype(), source_elem_bits);
-      PrimExpr transfer_bits = num_elems * IntImm(num_elems.dtype(), 8);
-      num_elems = FloorDiv(transfer_bits + source_elem_bits_expr -
-                               IntImm(num_elems.dtype(), 1),
-                           source_elem_bits_expr);
-    }
+    PrimExpr num_elems =
+        GetCPAsyncTransferBufferElements(call, src_info, "source");
     if (num_elems.dtype() != linear_index.dtype()) {
       num_elems = Cast(linear_index.dtype(), num_elems);
     }
@@ -672,6 +664,38 @@ private:
     AccessPtrInfo src_info =
         GetRequiredAccessPtrInfo(call->args[kCPAsyncSrcPtrArg], "cp.async");
     return src_info.base_load->buffer;
+  }
+
+  PrimExpr GetCPAsyncTransferBufferElements(const Call &call,
+                                            const AccessPtrInfo &info,
+                                            const char *operand_name) {
+    PrimExpr num_elems = call->args[2];
+    if (!call->op.same_as(builtin::ptx_cp_async()) &&
+        info.element_dtype == info.base_load->buffer->dtype) {
+      return num_elems;
+    }
+
+    int buffer_elem_bits = info.base_load->buffer->dtype.bits() *
+                           info.base_load->buffer->dtype.lanes();
+    ICHECK_GT(buffer_elem_bits, 0)
+        << "cp.async " << operand_name
+        << " buffer element width must be positive: " << call;
+    int transfer_elem_bits = 8;
+    if (!call->op.same_as(builtin::ptx_cp_async())) {
+      transfer_elem_bits =
+          info.element_dtype.bits() * info.element_dtype.lanes();
+      ICHECK_GT(transfer_elem_bits, 0)
+          << "cp.async " << operand_name
+          << " access pointer element width must be positive: " << call;
+    }
+
+    PrimExpr transfer_bits =
+        num_elems * IntImm(num_elems.dtype(), transfer_elem_bits);
+    PrimExpr buffer_elem_bits_expr =
+        IntImm(num_elems.dtype(), buffer_elem_bits);
+    return analyzer_->Simplify(FloorDiv(transfer_bits + buffer_elem_bits_expr -
+                                            IntImm(num_elems.dtype(), 1),
+                                        buffer_elem_bits_expr));
   }
 
   PrimExpr CombineConditions(const Array<PrimExpr> &conditions) {
@@ -713,17 +737,8 @@ private:
     }
     linear_index = linear_index - elem_offset;
 
-    PrimExpr num_elems = call->args[2];
-    if (call->op.same_as(builtin::ptx_cp_async())) {
-      int dst_elem_bits = dst_buffer->dtype.bits() * dst_buffer->dtype.lanes();
-      ICHECK_GT(dst_elem_bits, 0)
-          << "cp.async destination element width must be positive: " << call;
-      PrimExpr dst_elem_bits_expr = IntImm(num_elems.dtype(), dst_elem_bits);
-      PrimExpr transfer_bits = num_elems * IntImm(num_elems.dtype(), 8);
-      num_elems = FloorDiv(transfer_bits + dst_elem_bits_expr -
-                               IntImm(num_elems.dtype(), 1),
-                           dst_elem_bits_expr);
-    }
+    PrimExpr num_elems =
+        GetCPAsyncTransferBufferElements(call, dst_info, "destination");
 
     Var fallback_offset("cp_async_fallback_offset", num_elems.dtype());
     PrimExpr typed_fallback_offset = fallback_offset;
