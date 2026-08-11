@@ -92,6 +92,12 @@ class PassConfigKey(str, Enum):
     TL_CONFIG_INDEX_BITWIDTH = "tl.config_index_bitwidth"
     """Bitwidth for configuration indices. Default: 32"""
 
+    TL_REDUCER_FORCE_BASELINE = "tl.reducer_force_baseline"
+    """Force the canonical FullParticipant baseline for every reducer epoch,
+    disabling narrow physical plans (compact storage / sub-block collectives).
+    Used for differential testing: forced baseline and auto plans must produce
+    identical numerical results. Default: False"""
+
     TL_DISABLE_TMA_LOWER = "tl.disable_tma_lower"
     """Deprecated flag — prevents plain T.copy() from auto-lowering to TMA store.
 

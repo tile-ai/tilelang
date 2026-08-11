@@ -136,13 +136,6 @@ void ParallelLoopNestVisitor::VisitStmt_(const ForNode *op) {
                        IterVar(Range(op->min, op->extent), op->loop_var,
                                IterVarType::kOrdered));
   p->analyzer_.Bind(op->loop_var, Range::FromMinExtent(op->min, op->extent));
-  if (auto reducer_info_ref = op->annotations.Get(attr::kReducerInfo)) {
-    if (auto reducer_info_map =
-            reducer_info_ref.value().as<Map<Var, ReducerInfo>>()) {
-      for (auto &&[buffer, info] : reducer_info_map.value())
-        p->reducer_info_map_.Set(buffer, info);
-    }
-  }
   StmtExprVisitor::VisitStmt_(op);
 }
 
@@ -432,11 +425,6 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
   for (const auto &buffer : access_order_) {
     const auto &access = GetAccessInfo(buffer);
     if (layout_args.layout_map.count(buffer)) {
-      // skip reducers with rep=ALL
-      if (auto info = reducer_info_map_.Get(buffer->data);
-          info && info.value()->rep == ReducerRepType::ALL)
-        continue;
-
       bool is_fully_replicated =
           IsBufferCompletelyReplicated(buffer, layout_args.layout_map);
 
@@ -657,9 +645,6 @@ bool ParallelOpNode::ValidateCandidateAgainstFragments(
     const auto &access = GetAccessInfo(buffer);
     if (!layout_args.layout_map.count(buffer))
       continue;
-    if (auto info = reducer_info_map_.Get(buffer->data);
-        info && info.value()->rep == ReducerRepType::ALL)
-      continue;
     auto fragment = layout_args.layout_map[buffer].as<Fragment>().value();
     std::ostringstream oss;
     bool success = true;
@@ -770,7 +755,7 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
   auto maybe_remapped_root_ = IfBufferRemapLoopGenerator::run(
       root_, layout_args.buffer_remap, layout_args.layout_map);
   int vector_size = GetVectorizeSize(maybe_remapped_root_, layout_args.analyzer,
-                                     layout_args.layout_map, reducer_info_map_);
+                                     layout_args.layout_map);
   DLOG(INFO) << "[PlanLoopPartition] vector_size = " << vector_size << '\n';
 
   PrimExpr loop_total_size = 1;

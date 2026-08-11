@@ -27,7 +27,8 @@ def ROCMPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.VerifyParallelLoop()(mod)
     mod = tilelang.transform.InjectAssumes()(mod)
     mod = tilelang.transform.Simplify()(mod)
-    mod = tilelang.transform.LayoutReducer()(mod)
+    mod = tilelang.transform.CanonicalizeLegacyReducer()(mod)
+    mod = tilelang.transform.VerifyReducerEpoch()(mod)
 
     mod = tilelang.transform.IfStmtBinding()(mod)
     mod = tilelang.transform.PipelinePlanning()(mod)
@@ -35,8 +36,10 @@ def ROCMPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.Simplify()(mod)
 
     mod = tilelang.transform.LayoutInference()(mod)
+    mod = tilelang.transform.ReducerPlanAndMaterialize()(mod)
     LayoutVisual(mod)
     mod = tilelang.transform.LowerTileOp()(mod)
+    mod = tilelang.transform.VerifyReducerConsumed()(mod)
 
     mod = tilelang.transform.DecoupleTypeCast()(mod)
     mod = tilelang.transform.LegalizeVectorizedLoop()(mod)

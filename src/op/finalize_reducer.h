@@ -30,6 +30,12 @@ public:
   // Batch size for batched AllReduce (1 = scalar path, same as T.reduce
   // default).
   int batch{1};
+  // Explicit collective plan (reducer v2 narrow plans). When
+  // reducing_threads > 0, the AllReduce combines `reducing_threads / scale`
+  // lanes at stride `scale` instead of deriving the width from the storage
+  // layout's ReplicateExtent. -1 = legacy behavior (wide plan / v1).
+  int reducing_threads{-1};
+  int scale{1};
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.FinalizeReducerOp",
                                     FinalizeReducerOpNode, TileOperatorNode);
@@ -39,7 +45,9 @@ public:
     refl::ObjectDef<FinalizeReducerOpNode>()
         .def_ro("reducer", &FinalizeReducerOpNode::reducer)
         .def_ro("op", &FinalizeReducerOpNode::op)
-        .def_ro("batch", &FinalizeReducerOpNode::batch);
+        .def_ro("batch", &FinalizeReducerOpNode::batch)
+        .def_ro("reducing_threads", &FinalizeReducerOpNode::reducing_threads)
+        .def_ro("scale", &FinalizeReducerOpNode::scale);
   }
 
   Stmt Lower(const LowerArgs &lower_args,

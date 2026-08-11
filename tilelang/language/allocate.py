@@ -283,38 +283,66 @@ def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
 ReducerOp = Literal["sum", "max", "min"]
 
 
-def alloc_reducer(shape: ShapeType, dtype: DType, op: ReducerOp = "sum", replication=None) -> Buffer:
+def alloc_reducer(shape: ShapeType, dtype: DType, op: ReducerOp = "sum", replication=None, seed=None) -> Buffer:
     """
-    Allocate a reducer buffer.
+    Allocate a reducer: a first-class deferred reduction epoch handle.
 
-    Modifications needs to conform with `op`,
-    such as `op="sum"` requires `reducer[...] += ...` and
-    `op="max"` requires `reducer[...] = T.max(reducer[...], ...)`.
+    The reducer lives in the virtual ``local.reducer`` scope and may only be
+    accessed through the epoch operations::
 
-    Only after T.fill with proper initializer the reduction may begin;
-    only after T.finalize_reducer the partial results will be available.
+        acc = T.alloc_reducer(shape, dtype, op="sum")
+        T.reducer_init(acc)
+        for ...:
+            T.reducer_update(acc[indices], contribution)
+        dst = T.alloc_fragment(shape, dtype)
+        T.finalize_reducer(acc, dst)
 
-    For `op="sum"`, filled value must be 0; for min and max, the filled initializer will become max or min clamper correspondingly.
-    You may want to use `T.max_value` for min and `T.min_value` for max.
+    Ordinary reads/writes, ``T.clear``/``T.fill``, aliasing, and in-place
+    finalize are rejected at compile time. Physical storage and the
+    cross-thread communication plan are chosen by the compiler; the physical
+    layout can never change how many times a logical contribution is combined.
 
     Args:
-        shape (tuple): The shape of the buffer to allocate
-        dtype (str): The data type of the buffer (e.g., 'float32', 'int32')
-        op (str): The reduce operation corresponded with the reducer
-        replication (str | None): Replication strategy, can be "all" or "none". Defaults to not specified, and the compiler will do whatever it want.
+        shape (tuple): Logical shape of the reduction result.
+        dtype (str): Element data type (e.g., 'float32', 'int32').
+        op (str): Combine op: "sum", "max" or "min".
+        replication (str | None): Deprecated legacy (v1) knob. Passing "all"
+            or "none" selects the legacy fragment-based reducer for backward
+            compatibility; it will be removed together with the v1 lowering.
+        seed (PrimExpr | int | float | None): Optional extra logical input,
+            combined exactly once into each logical output at finalize time.
 
     Returns:
-        T.Buffer: A TVM buffer object allocated in thread-private storage, available to reduce values in T.Parallel loops.
+        T.Buffer: The reducer handle.
     """
 
     assert op in ["sum", "max", "min"]
-    # TODO: support automatic layout
-    if replication is None:
-        replication = "none"
-    assert replication in ["all", "none"]
 
-    reducer = _with_span(T.sblock_alloc_buffer(shape, dtype, scope="local.fragment"))
-    sblock_attr({"reducer_info": {reducer.data: {"rep": replication, "op": op}}})
+    if replication is not None:
+        # Legacy v1 reducer path (fragment buffer + reducer_info annotation).
+        import warnings
+
+        warnings.warn(
+            "alloc_reducer(replication=...) selects the deprecated v1 reducer; "
+            "migrate to reducer_init/reducer_update/finalize_reducer(acc, dst).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        assert replication in ["all", "none"]
+        assert seed is None, "seed is not supported by the legacy v1 reducer"
+        reducer = _with_span(T.sblock_alloc_buffer(shape, dtype, scope="local.fragment"))
+        sblock_attr({"reducer_info": {reducer.data: {"rep": replication, "op": op}}})
+        return reducer
+
+    reducer = _with_span(T.sblock_alloc_buffer(shape, dtype, scope="local.reducer"))
+    info: dict = {"op": op}
+    if seed is not None:
+        if isinstance(seed, (int, float)):
+            from tvm import tirx
+
+            seed = tirx.const(seed, dtype)
+        info["seed"] = seed
+    sblock_attr({"reducer_info_v2": {reducer.data: info}})
 
     return reducer
 

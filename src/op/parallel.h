@@ -15,7 +15,6 @@
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
-#include "../transform/layout_reducer.h"
 #include "./operator.h"
 
 /**
@@ -205,8 +204,6 @@ private:
   Map<Var, IterVar> inner_vars_;
   // Analyzer for simplifying and analyzing expressions, mutable for lazy use.
   mutable arith::Analyzer analyzer_;
-  // Mapping from buffer to reducer info.
-  Map<Var, ReducerInfo> reducer_info_map_;
   // Whether the loop body has cross-thread shared/global memory access.
   bool has_cross_thread_access_ = false;
   // Buffers that are stored to shared/global memory in the loop body.

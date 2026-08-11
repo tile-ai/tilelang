@@ -179,10 +179,8 @@ bool ForBodyContainsSeqStmt(const For &loop) {
 class VectorizePlanner : public arith::IRMutatorWithAnalyzer {
 public:
   explicit VectorizePlanner(arith::Analyzer *analyzer,
-                            const LayoutMap &layout_map = {},
-                            const Map<Var, ReducerInfo> &reducer_info_map = {})
-      : arith::IRMutatorWithAnalyzer(analyzer), layout_map_(layout_map),
-        reducer_info_map_(reducer_info_map) {}
+                            const LayoutMap &layout_map = {})
+      : arith::IRMutatorWithAnalyzer(analyzer), layout_map_(layout_map) {}
 
   int Plan(const For &node) {
     bool disable_vectorize_256 = tl_config::Vectorize256Disabled();
@@ -752,16 +750,6 @@ private:
     return transformed_indices;
   }
 
-  bool IsAllRepReducerBuffer(const Buffer &buffer) const {
-    if (!buffer.defined()) {
-      return false;
-    }
-    if (auto info = reducer_info_map_.Get(buffer->data)) {
-      return info.value()->rep == ReducerRepType::ALL;
-    }
-    return false;
-  }
-
   PrimExpr VisitExpr_(const CastNode *node) final {
     // Consider both source and target types to ensure all intermediate
     // vector types can be represented. For example, casting int32 to
@@ -845,13 +833,11 @@ private:
         CanProveIndependent(elem_offset, inner_for_->loop_var, analyzer_);
     // For ordinary BufferStore, if indices are invariant or independent with
     // loop_var, vectorization would turn scalar lane stores into a broadcast
-    // store. Keep those scalar. All-rep reducer buffers are different: their
-    // loop-invariant stores are reduction accumulator updates, so they should
-    // not force the whole loop's vector size down to 1.
+    // store. Keep those scalar. (Reducer v2 combine stores never reach the
+    // vectorizer: loops carrying a multiplicity marker are excluded from
+    // vectorization by LowerTileOp.)
     if (is_store && (is_invariant || is_independent)) {
-      if (!IsAllRepReducerBuffer(buffer)) {
-        return 1;
-      }
+      return 1;
     }
     if (is_independent) {
       return buffer_vec_size; // only limited constraint from this buffer
@@ -904,7 +890,6 @@ private:
   int vector_size_ = 128;
   std::vector<BufferVectorInfo> buffer_vector_infos_;
   LayoutMap layout_map_;
-  Map<Var, ReducerInfo> reducer_info_map_;
 };
 
 class VectorizeRewriter : public StmtExprMutator {
@@ -962,16 +947,14 @@ private:
   const int vector_size_;
 };
 
-int GetVectorizeSize(const For &loop, const LayoutMap &layout_map,
-                     const Map<Var, ReducerInfo> &reducer_info_map) {
+int GetVectorizeSize(const For &loop, const LayoutMap &layout_map) {
   arith::Analyzer analyzer;
-  return VectorizePlanner(&analyzer, layout_map, reducer_info_map).Plan(loop);
+  return VectorizePlanner(&analyzer, layout_map).Plan(loop);
 }
 
 int GetVectorizeSize(const For &loop, arith::Analyzer *analyzer,
-                     const LayoutMap &layout_map,
-                     const Map<Var, ReducerInfo> &reducer_info_map) {
-  return VectorizePlanner(analyzer, layout_map, reducer_info_map).Plan(loop);
+                     const LayoutMap &layout_map) {
+  return VectorizePlanner(analyzer, layout_map).Plan(loop);
 }
 
 bool CanProveIndependent(const PrimExpr &expr, Var var,

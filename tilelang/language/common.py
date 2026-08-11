@@ -79,6 +79,8 @@ from .reduce_op import (
     reduce_bitand,  # noqa: F401
     reduce_bitor,  # noqa: F401
     reduce_bitxor,  # noqa: F401
+    reducer_init,  # noqa: F401
+    reducer_update,  # noqa: F401
     finalize_reducer,  # noqa: F401
     warp_reduce_sum,  # noqa: F401
     warp_reduce_max,  # noqa: F401
@@ -226,6 +228,8 @@ _LOCAL_EXPORTS = (
     "dynamic",
     "empty",
     "fill",
+    "reducer_init",
+    "reducer_update",
     "finalize_reducer",
     "gemm",
     "gemm_sp",

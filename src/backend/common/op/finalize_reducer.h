@@ -37,23 +37,35 @@ template <typename Impl> struct FinalizeReducerLowerer {
       indices_0.push_back(Var("__finred_" + std::to_string(i)));
     }
 
-    const int64_t *p_extent = as_const_int(layout->ReplicateExtent());
-    ICHECK(p_extent);
-    int extent = *p_extent;
-    ICHECK(extent == 1 ||
-           extent == *as_const_int(lower_args.thread_bounds->extent))
-        << "Illegal finalize_reducer: extent=" << extent
-        << "; T.thread_bounds=" << lower_args.thread_bounds;
+    int reducing_threads;
+    int scale;
+    if (op.reducing_threads > 0) {
+      // Explicit collective plan from ReducerPlanAndMaterialize: combine
+      // `reducing_threads / scale` lanes at stride `scale` per output slot.
+      reducing_threads = op.reducing_threads;
+      scale = op.scale;
+    } else {
+      // Legacy wide plan: the storage layout is fully replicated over the
+      // participant extent and the collective covers all participants.
+      const int64_t *p_extent = as_const_int(layout->ReplicateExtent());
+      ICHECK(p_extent);
+      int extent = *p_extent;
+      ICHECK(extent == 1 ||
+             extent == *as_const_int(lower_args.thread_bounds->extent))
+          << "Illegal finalize_reducer: extent=" << extent
+          << "; T.thread_bounds=" << lower_args.thread_bounds;
 
-    if (extent == 1) {
-      return Evaluate(0);
+      if (extent == 1) {
+        return Evaluate(0);
+      }
+      reducing_threads = extent;
+      scale = 1;
     }
 
     std::array op_names{"tl::SumOp", "tl::MaxOp", "tl::MinOp"};
     auto op_str = op_names[static_cast<int>(op.op)];
 
-    int reducing_threads = extent;
-    reduce::CheckAllReduceWidth(reducing_threads, 1, "tl.finalize_reducer");
+    reduce::CheckAllReduceWidth(reducing_threads, scale, "tl.finalize_reducer");
     auto thread_offset = lower_args.thread_bounds->min;
 
     int64_t layout_batch_size = 1;
@@ -85,7 +97,7 @@ template <typename Impl> struct FinalizeReducerLowerer {
       int workspace_stride =
           static_cast<int>(*as_const_int(lower_args.thread_bounds->extent));
       std::string allreduce = Impl::MakeBatchAllReduce(
-          op_str, reducing_threads, 1, thread_offset,
+          op_str, reducing_threads, scale, thread_offset,
           lower_args.thread_bounds->extent, static_cast<int>(effective_batch),
           workspace_stride, lower_args.target);
       int ws_size = workspace_stride * static_cast<int>(effective_batch);
@@ -95,7 +107,7 @@ template <typename Impl> struct FinalizeReducerLowerer {
     }
 
     std::string allreduce = Impl::MakeScalarAllReduce(
-        op_str, reducing_threads, 1, thread_offset,
+        op_str, reducing_threads, scale, thread_offset,
         lower_args.thread_bounds->extent, lower_args.target);
     Array<PrimExpr> thread_reduce_args = {StringImm(allreduce),
                                           BufferLoad(buffer, indices_0)};

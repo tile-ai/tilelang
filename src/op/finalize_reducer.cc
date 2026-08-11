@@ -81,6 +81,18 @@ FinalizeReducerOp::FinalizeReducerOp(
   node->reducer = reducer_access.region->buffer;
   node->SetAccessRegions({reducer_access});
   node->op = (ReducerOpType)*as_const_int(args[1]);
+  // Optional explicit collective plan (reducer v2 narrow plans):
+  // args[2] = reducing_threads, args[3] = scale.
+  if (args.size() >= 3) {
+    node->reducing_threads = (int)*as_const_int(args[2]);
+    ICHECK_GT(node->reducing_threads, 0)
+        << "finalize_reducer: explicit reducing_threads must be positive";
+  }
+  if (args.size() >= 4) {
+    node->scale = (int)*as_const_int(args[3]);
+    ICHECK_GT(node->scale, 0)
+        << "finalize_reducer: explicit scale must be positive";
+  }
   // Read explicit batch size from annotations (0 means auto-detect).
   if (annotations.count("batch")) {
     node->batch = (int)*as_const_int(Downcast<PrimExpr>(annotations["batch"]));

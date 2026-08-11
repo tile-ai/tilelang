@@ -62,6 +62,11 @@ static constexpr const char *kDisableSharedMemoryReuse =
 static constexpr const char *kDisableFastMath = "tl.disable_fast_math";
 static constexpr const char *kEnableFastMath = "tl.enable_fast_math";
 static constexpr const char *kEnableAsyncCopy = "tl.enable_async_copy";
+// Force the canonical FullParticipant baseline for every reducer epoch,
+// disabling narrow physical plans. Used for differential testing: forced
+// baseline and auto plans must produce identical numerical results.
+static constexpr const char *kReducerForceBaseline =
+    "tl.reducer_force_baseline";
 static constexpr const char *kEnableVectorizePlannerVerbose =
     "tl.enable_vectorize_planner_verbose";
 static constexpr const char *kDisableLoopUnswitching =

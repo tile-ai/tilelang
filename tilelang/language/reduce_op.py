@@ -316,26 +316,93 @@ def reduce_bitxor(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: b
     reduce(buffer, out, "bitxor", dim, clear, batch=batch)
 
 
-def finalize_reducer(reducer: tirx.Buffer, batch: int = 1) -> tirx.PrimExpr:
-    """
-    Finalize a reducer buffer by emitting the `tl.tileop.finalize_reducer` intrinsic.
+def reducer_init(reducer: tirx.Buffer) -> tirx.PrimExpr:
+    """Open a reducer epoch: initialize its partials with the combine identity.
 
-    This returns a TVM `tirx.Call` handle that finalizes the given reducer using its writable pointer.
-    The call does not modify Python objects directly; it produces the low-level intrinsic call used by the IR.
+    Must be called exactly once per `T.alloc_reducer` allocation, before any
+    `T.reducer_update`. The identity is determined by the reducer's combine op
+    and dtype (sum -> 0, max -> dtype lowest, min -> dtype highest); the
+    optional `seed` passed to `T.alloc_reducer` is NOT written here — it is
+    combined exactly once at finalize time.
 
-    Parameters:
-        reducer (tirx.Buffer): Reducer buffer whose writable pointer will be finalized.
-        batch (int): Batch size for the AllReduce call (default 1 = scalar path,
-            matching the T.reduce default).  When batch > 1, the compiler emits a
-            single batched AllReduce call covering `batch` output elements at a
-            time, reducing barrier count by batch×.  batch must evenly divide the
-            total number of per-thread output elements.
+    Args:
+        reducer (tirx.Buffer): Handle returned by `T.alloc_reducer`.
 
     Returns:
-        tirx.Call: Handle to the finalize reducer intrinsic call.
+        tirx.Call: Handle to the reducer_init intrinsic call.
+    """
+    return tirx.call_intrin(
+        "handle",
+        tirx.op.Op.get("tl.tileop.reducer_init"),
+        to_tile_region(reducer, access_type="w"),
+    )
+
+
+def reducer_update(target: tirx.BufferLoad, value) -> tirx.PrimExpr:
+    """Contribute `value` to one logical output of a reducer.
+
+    `target` must be written as `acc[indices]` directly in the first argument
+    position; it is an update-target descriptor, not a read of the reducer's
+    current value. Each dynamic logical iteration of the enclosing
+    `T.Parallel` loop contributes exactly once, regardless of how the loop is
+    physically replicated over threads.
+
+    Args:
+        target (tirx.BufferLoad): `acc[indices]` selecting the logical output.
+        value: Contribution expression (cast to the reducer dtype if needed).
+
+    Returns:
+        tirx.Call: Handle to the reducer_update intrinsic call.
+    """
+    if not isinstance(target, tirx.BufferLoad):
+        raise ValueError(
+            f"reducer_update expects `acc[indices]` as its first argument, got {type(target)}; the reducer cannot be read or aliased."
+        )
+    dtype = target.buffer.dtype
+    if isinstance(value, (int, float)):
+        value = tirx.const(value, dtype)
+    elif isinstance(value, tirx.PrimExpr) and value.dtype != dtype:
+        value = tirx.Cast(dtype, value)
+    return tirx.call_intrin(
+        "handle",
+        tirx.op.Op.get("tl.tileop.reducer_update"),
+        to_tile_region(target, access_type="rw"),
+        value,
+    )
+
+
+def finalize_reducer(reducer: tirx.Buffer, dst: tirx.Buffer | None = None, batch: int = 1) -> tirx.PrimExpr:
+    """Close a reducer epoch.
+
+    v2 form (``dst`` given): complete the cross-participant communication the
+    chosen physical plan requires, combine the optional seed exactly once, and
+    write the logical result into the independent destination fragment
+    ``dst``. After this call the reducer handle is dead; read results from
+    ``dst``.
+
+    Legacy v1 form (``dst`` omitted): in-place finalize of a legacy
+    ``alloc_reducer(replication=...)`` fragment reducer. Deprecated.
+
+    Parameters:
+        reducer (tirx.Buffer): Reducer handle.
+        dst (tirx.Buffer | None): Destination fragment (v2). Same logical
+            shape and dtype as the reducer.
+        batch (int): Batched AllReduce width: the collective covers `batch`
+            output elements per call, sharing one pair of barriers.
+
+    Returns:
+        tirx.Call: Handle to the finalize intrinsic call.
     """
     if batch < 1:
         raise ValueError(f"finalize_reducer: batch must be >= 1, got {batch}")
+    if dst is not None:
+        return tirx.call_intrin(
+            "handle",
+            tirx.op.Op.get("tl.tileop.finalize_reducer_v2"),
+            to_tile_region(reducer, access_type="rw"),
+            to_tile_region(dst, access_type="w"),
+            annotations={"batch": batch} if batch > 1 else None,
+        )
     annotations = {}
     if batch > 1:
         annotations["batch"] = batch

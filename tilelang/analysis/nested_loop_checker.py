@@ -15,10 +15,16 @@ def is_pipelined_for(op: For) -> bool:
     return any(key in op.annotations for key in anno_keys)
 
 
+# Tile-ops that are point-wise by construction and legal inside a parallel
+# loop. `tl.reducer_update` contributes one value to one logical output per
+# dynamic iteration; it carries no parallel loop of its own.
+_PARALLEL_SAFE_TILE_OPS = frozenset(["tl.tileop.reducer_update"])
+
+
 def is_tile_op(op: Call) -> bool:
     """Check if a call is a tile-op"""
 
-    return op.op.get_attr("TLOpBuilder") is not None
+    return op.op.get_attr("TLOpBuilder") is not None and op.op.name not in _PARALLEL_SAFE_TILE_OPS
 
 
 @tirx.functor.visitor

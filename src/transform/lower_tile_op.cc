@@ -27,6 +27,7 @@
 #include "cuda/target_utils.h"
 #include "cuda/transform/ptx_async_copy_injector.h"
 
+#include "../op/reducer.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "common/mbarrier.h"
 #include "common/pipeline_utils.h"
@@ -1203,14 +1204,6 @@ private:
       pushed_loop_mbar_phase = true;
     }
 
-    // Extract reducer info from annotations
-    Map<Var, ReducerInfo> reducer_info;
-    if (op->annotations.count(attr::kReducerInfo)) {
-      reducer_info = op->annotations.Get(attr::kReducerInfo)
-                         ->as<Map<Var, ReducerInfo>>()
-                         .value();
-    }
-
     // First visit the body.
     For for_node = Downcast<For>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
     if (pushed_loop_mbar_phase) {
@@ -1379,34 +1372,14 @@ private:
       }
     });
 
-    // Check if reducers are present in the loop body
-    // Workaround: if reducer is presented, don't vectorize loop
-    // Best solution should be isolate reduction axis out of vectorization
-    //
-    // Note: reducer_info stores original buffer data vars, but after visiting
-    // the body, buffers may have been remapped via var_remap_. We need to find
-    // the original var to check against reducer_info.
+    // Reducer combine stores carry an execution-multiplicity marker; loops
+    // containing one are excluded from vectorization until the reduction
+    // axis can be isolated from the vectorized dimension.
     bool has_reducer = false;
-    // Stores to buffers in this list must execute only for REP=0 of the
-    // current T.Parallel loop layout.
-    Array<Buffer> fully_replicated_reducer_buffers;
     PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
-      if (const auto *store = obj.as<BufferStoreNode>()) {
-        Var data_var = store->buffer->data;
-        // Find the original var if it was remapped
-        // var_remap_ maps old_var -> new_var, so we need reverse lookup
-        Var original_var = data_var;
-        for (const auto &[old_var, new_var] : var_remap_) {
-          if (new_var.same_as(data_var)) {
-            original_var = old_var;
-            break;
-          }
-        }
-        if (reducer_info.count(original_var)) {
+      if (const auto *attr_stmt = obj.as<AttrStmtNode>()) {
+        if (attr_stmt->attr_key == attr::kParallelMultiplicity) {
           has_reducer = true;
-          if (reducer_info[original_var]->rep == ReducerRepType::ALL) {
-            fully_replicated_reducer_buffers.push_back(store->buffer);
-          }
         }
       }
     });
@@ -1432,8 +1405,7 @@ private:
     // Lower the parallel loop using the common function
     Stmt lowered = LowerParallelLoop(
         for_node, loop_layout, CurrentThreadIndex(), analyzer_, layout_map_,
-        predicate, parallel_loop, should_vectorize, require_padding_guard,
-        fully_replicated_reducer_buffers);
+        predicate, parallel_loop, should_vectorize, require_padding_guard);
 
     // Only parallel-loop lowering needs PTX cp.async injection. Thread-level
     // lowering does not require converting eligible global->shared copies to
