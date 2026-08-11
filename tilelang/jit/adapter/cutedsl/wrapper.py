@@ -13,6 +13,7 @@ Key features:
 from __future__ import annotations
 import re
 from typing import Any, ClassVar
+from collections.abc import Callable
 
 from tvm import IRModule
 from tvm.target import Target
@@ -605,7 +606,7 @@ TVM_FFI_DLL_EXPORT_TYPED_FUNC(cleanup_module, cleanup_module);
 CUBIN_TMA_DESC_INIT_TEMPLATE = """\
     {desc_name}__dtype, {desc_name}__format = _tma_dtype_and_format({dtype})
     {desc_name} = cuda.create_tensor_map_tiled(
-        global_address={tensor_name}_.iterator.toint(),
+        global_address={global_address},
         dtype={desc_name}__dtype,
         global_dims=[{global_dim_values}],
         global_strides=[{global_stride_values}],
@@ -1041,11 +1042,16 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         """Convert TVM expression to C++ string for generated launcher code."""
         return pythonic_expr(expr, self._CXX_TYPE_MAP, func_name_map={"min": "std::min", "max": "std::max"})
 
-    def _split_tma_global_address(self, expr: tvm.tirx.PrimExpr) -> tuple[str, str | None]:
+    def _split_tma_global_address(
+        self,
+        expr: tvm.tirx.PrimExpr,
+        offset_renderer: Callable[[tvm.tirx.PrimExpr], str] | None = None,
+    ) -> tuple[str, str | None]:
         """Split a TMA address into its tensor argument and byte offset."""
+        offset_renderer = offset_renderer or self._cxx_expr
         if isinstance(expr, tvm.tirx.Call) and expr.op.name == "tirx.handle_add_byte_offset":
-            tensor_name, base_offset = self._split_tma_global_address(expr.args[0])
-            offset = self._cxx_expr(expr.args[1])
+            tensor_name, base_offset = self._split_tma_global_address(expr.args[0], offset_renderer)
+            offset = offset_renderer(expr.args[1])
             if base_offset is not None:
                 offset = f"({base_offset}) + ({offset})"
             return tensor_name, offset
@@ -1071,6 +1077,14 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         if byte_offset is None:
             return f"{tensor_name}_ptr"
         return f"({tensor_name}_ptr + ({byte_offset}))"
+
+    @staticmethod
+    def _cutlass_tma_global_address_expr(tensor_name: str, byte_offset: str | None) -> str:
+        """Build the Python CUTLASS TensorMap global address expression."""
+        base_address = f"{tensor_name}_.iterator.toint()"
+        if byte_offset is None:
+            return base_address
+        return f"({base_address} + ({byte_offset}))"
 
     @staticmethod
     def _cxx_cast(ctype: str, expr_str: str) -> str:
@@ -1623,6 +1637,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         return CUBIN_TMA_DESC_INIT_TEMPLATE.format(
             desc_name=desc_name,
             tensor_name=tensor_name,
+            global_address=self._cutlass_tma_global_address_expr(tensor_name, info.get("globalAddressOffsetPython")),
             dtype=info["dtype"],
             global_dim_values=self._py_expr_list(info["global_dim"]),
             global_stride_values=self._py_expr_list_div(info["global_stride"][1:], 16),
@@ -1867,6 +1882,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
             _, dtype, tensor_rank, globalAddress, *remaining_args = args[1:]
             tensor_rank = int(tensor_rank)
             tensor_name, global_address_offset = self._split_tma_global_address(globalAddress)
+            _, global_address_offset_python = self._split_tma_global_address(globalAddress, self._pythonic_expr)
             global_address_offset_vars = self._tma_global_address_offset_vars(globalAddress)
 
             global_dim = remaining_args[:tensor_rank]
@@ -1883,6 +1899,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
                     "tensor_rank": params.tensor_rank,
                     "globalAddress": tensor_name,
                     "globalAddressOffset": global_address_offset,
+                    "globalAddressOffsetPython": global_address_offset_python,
                     "globalAddressOffsetVars": global_address_offset_vars,
                     "global_dim": global_dim,
                     "global_stride": global_stride,
@@ -1903,6 +1920,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
                     "tensor_rank": params.tensor_rank,
                     "globalAddress": tensor_name,
                     "globalAddressOffset": global_address_offset,
+                    "globalAddressOffsetPython": global_address_offset_python,
                     "globalAddressOffsetVars": global_address_offset_vars,
                     "global_dim": global_dim,
                     "global_stride": global_stride,

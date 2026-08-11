@@ -277,6 +277,7 @@ def test_cutedsl_descriptor_aliases_are_kernel_local():
     descriptor_info = {
         "is_img2col": False,
         "dtype": 0,
+        "globalAddressOffsetPython": "32",
         "global_dim": [32, 32],
         "global_stride": [1, 32],
         "box_dim": [16, 16],
@@ -306,6 +307,7 @@ def test_cutedsl_descriptor_aliases_are_kernel_local():
     assert cubin.count("A_desc: cutlass.GridConstant[cuda.TensorMap]") == 2
     assert "__tma_0_A_desc = cuda.create_tensor_map_tiled" in cubin
     assert "__tma_1_A_desc = cuda.create_tensor_map_tiled" in cubin
+    assert "global_address=(A_.iterator.toint() + (32))" in cubin
     assert "kernel_0(A_, __tma_0_A_desc)" in cubin
     assert "kernel_1(A_, __tma_1_A_desc)" in cubin
 
