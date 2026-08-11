@@ -2,7 +2,7 @@ from __future__ import annotations
 from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import (
     WGMMADescriptorParams,
     compute_gmma_descriptor,
-    gcd,
+    select_wgmma_inst_n,
 )
 from tilelang.cuda.intrinsics.macro.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 import tilelang.language as T
@@ -85,7 +85,7 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         return self
 
     def _initialize_wgmma_prefix(self, n_dim: int = 16):
-        inst_m, inst_n = 64, gcd(self.warp_col_tiles, 256)
+        inst_m, inst_n = 64, select_wgmma_inst_n(self.warp_col_tiles)
         assert inst_n % 8 == 0, (
             f"inst_n must be a multiple of 8, got {inst_n} (block_col_warps={self.block_col_warps}, warp_col_tiles={self.warp_col_tiles})"
         )
