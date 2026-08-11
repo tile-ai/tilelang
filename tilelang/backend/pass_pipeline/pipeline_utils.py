@@ -69,11 +69,15 @@ def should_enable_race_check(pass_ctx: PassContext | None = None) -> bool:
 
 
 def should_enable_gemm_accum_init_check(pass_ctx: PassContext | None = None) -> bool:
+    """Whether the T.gemm accumulator-initialization check runs.
+
+    Enabled by default, unlike the data race check: this check only fires
+    when ``clear_accum`` is literally false and no write to the accumulator
+    was seen anywhere earlier, so correct kernels do not trip it. Disable it
+    per-compile with the ``tl.disable_gemm_accum_init_check`` pass config.
+    """
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
-    # Enabled by default, unlike the data race check: this check only fires
-    # when `clear_accum` is literally false and no write to the accumulator was
-    # seen anywhere earlier, so correct kernels do not trip it.
     disable = pass_ctx.config.get(tilelang.PassConfigKey.TL_DISABLE_GEMM_ACCUM_INIT_CHECK, False)
     return not disable
 

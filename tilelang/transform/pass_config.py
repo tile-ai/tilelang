@@ -50,7 +50,6 @@ class PassConfigKey(str, Enum):
     """Enable inlining of let statements during simplification. Default: True"""
 
     TL_DISABLE_DATA_RACE_CHECK = "tl.disable_data_race_check"
-    TL_DISABLE_GEMM_ACCUM_INIT_CHECK = "tl.disable_gemm_accum_init_check"
     """Disable data race check in TileLang. Default: True
 
     The data race check is disabled by default because it can report false
@@ -58,6 +57,16 @@ class PassConfigKey(str, Enum):
     proven distinct). To enable it, set this config to False in pass configs,
     or set the ``TILELANG_ENABLE_DATA_RACE_CHECK`` environment variable to a
     truthy value (e.g. ``1``).
+    """
+
+    TL_DISABLE_GEMM_ACCUM_INIT_CHECK = "tl.disable_gemm_accum_init_check"
+    """Disable the T.gemm accumulator initialization check. Default: False
+
+    The check is enabled by default. It reports a T.gemm only when its
+    accumulator has no preceding write and its ``clear_accum`` argument is
+    the literal ``False``, so correct kernels — including the pipelined
+    ``clear_accum=(k == 0)`` idiom — do not trip it. Set this config to True
+    to silence it.
     """
 
     TL_DISABLE_PRELOWER_SEMANTIC_CHECK = "tl.disable_prelower_semantic_check"
