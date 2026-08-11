@@ -188,6 +188,9 @@ public:
     bool disable_vectorize_256 = tl_config::Vectorize256Disabled();
     bool verbose = tl_config::VectorizePlannerVerboseEnabled();
 
+    root_loop_ = node;
+    inner_for_ = nullptr;
+
     if (TargetSupportVectorize256(Target::Current(false)) &&
         !disable_vectorize_256 &&
         VectorizeFindMemoryAccess::MaySupportVectorize256(node)) {
@@ -373,12 +376,23 @@ public:
   }
 
 private:
+  bool IsTrivialUnitLoop(const ForNode *node) const {
+    auto extent = as_const_int(analyzer_->Simplify(node->extent));
+    return extent && *extent == 1;
+  }
+
   Stmt VisitStmt_(const ForNode *node) final {
+    For loop = GetRef<For>(node);
+    if (!loop.same_as(root_loop_) && IsTrivialUnitLoop(node)) {
+      return arith::IRMutatorWithAnalyzer::VisitStmt_(node);
+    }
+
     inner_for_ = node;
     bool contains_nested_for = false;
     // Must analysis vectorization on the innermost loop
     PostOrderVisit(Downcast<Stmt>(node->body), [&](const ObjectRef &obj) {
-      if (obj.as<ForNode>()) {
+      if (const auto *nested = obj.as<ForNode>();
+          nested != nullptr && !IsTrivialUnitLoop(nested)) {
         contains_nested_for = true;
       }
     });
@@ -415,10 +429,46 @@ private:
     return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
   }
 
+  bool IndicesEqual(const Array<PrimExpr> &lhs,
+                    const Array<PrimExpr> &rhs) const {
+    if (lhs.size() != rhs.size()) {
+      return false;
+    }
+    ExprDeepEqual equal;
+    for (size_t i = 0; i < lhs.size(); ++i) {
+      if (!equal(lhs[i], rhs[i])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool IsSameBufferElement(const BufferLoadNode *load,
+                           const BufferStoreNode *store) const {
+    return load != nullptr && load->buffer.same_as(store->buffer) &&
+           IndicesEqual(load->indices, store->indices);
+  }
+
+  bool IsLocalScalarSelfAddStore(const BufferStoreNode *node) const {
+    if (!(IsLocalBuffer(node->buffer, /*allow_var=*/true) ||
+          IsFragmentBuffer(node->buffer)) ||
+        !node->buffer->dtype.is_scalar()) {
+      return false;
+    }
+    const auto *add = node->value.as<AddNode>();
+    if (add == nullptr) {
+      return false;
+    }
+    return IsSameBufferElement(add->a.as<BufferLoadNode>(), node) ||
+           IsSameBufferElement(add->b.as<BufferLoadNode>(), node);
+  }
+
   Stmt VisitStmt_(const BufferStoreNode *node) final {
     if (IsSharedBuffer(node->buffer) || IsGlobalBuffer(node->buffer))
       has_nonlocal_memory_access_ = true;
-    UpdateVectorSize(node->indices, node->buffer, true);
+    if (!IsLocalScalarSelfAddStore(node)) {
+      UpdateVectorSize(node->indices, node->buffer, true);
+    }
     return arith::IRMutatorWithAnalyzer::VisitStmt_(node);
   }
 
@@ -899,6 +949,7 @@ private:
   int initial_vector_size_ = 128;
   int loop_extent_vector_size_ = 128;
 
+  For root_loop_;
   const ForNode *inner_for_{};
   bool has_nonlocal_memory_access_ = false;
   int vector_size_ = 128;
@@ -913,12 +964,17 @@ public:
 
 private:
   Stmt VisitStmt_(const ForNode *node) final {
+    auto extent_ptr = as_const_int(node->extent);
+    if (extent_ptr && *extent_ptr == 1) {
+      return StmtExprMutator::VisitStmt_(node);
+    }
+
     inner_for_ = node;
     auto ret = StmtExprMutator::VisitStmt_(node);
     if (inner_for_ == node) { // rewrite the innermost loop
       For fnode = ret.as<For>().value();
       auto old_var = fnode->loop_var;
-      auto extent_ptr = as_const_int(fnode->extent);
+      extent_ptr = as_const_int(fnode->extent);
       ICHECK(extent_ptr) << fnode->extent;
       int extent = *extent_ptr;
       ICHECK(extent % vector_size_ == 0)

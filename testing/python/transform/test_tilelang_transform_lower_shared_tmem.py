@@ -29,9 +29,6 @@ def _collect_calls(stmt, op_name: str):
     return calls
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_explicit_deallocate_tmem_suppresses_auto_dealloc():
     """Explicit T.deallocate_tmem on fallthrough suppresses auto-dealloc."""
 
@@ -51,9 +48,57 @@ def test_explicit_deallocate_tmem_suppresses_auto_dealloc():
     assert dealloc_call.args[1].value == 128
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
+def test_tmem_base_is_cached_per_thread_after_allocation_sync():
+    @T.prim_func
+    def func():
+        with T.Kernel(1, threads=128):
+            C_tmem = T.alloc_tmem([128, 128], T.float32)
+            T.evaluate(C_tmem[0, 0])
+            T.ptx_tcgen05_mma_ss(
+                "float16",
+                0,
+                0,
+                0,
+                0,
+                C_tmem.data,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
+
+    body = _apply(func)["main"].body
+    allocated = []
+    binds = []
+    evaluated = []
+    loads = []
+
+    def visitor(node):
+        if isinstance(node, tvm.tirx.SBlock):
+            allocated.extend(node.alloc_buffers)
+        elif isinstance(node, tvm.tirx.Bind):
+            binds.append(node)
+        elif isinstance(node, tvm.tirx.Evaluate):
+            evaluated.append(node.value)
+        elif isinstance(node, tvm.tirx.BufferLoad):
+            loads.append(node)
+
+    tvm.tirx.stmt_functor.post_order_visit(body, visitor)
+    cache = next(bind for bind in binds if bind.var.name == "C_tmem_base")
+    assert isinstance(cache.value, tvm.tirx.BufferLoad)
+    assert cache.value.buffer.name == "C_tmem"
+    assert cache.value.buffer.scope() == "shared"
+    assert sum(load.buffer.same_as(cache.value.buffer) for load in loads) == 1
+    assert all(buffer.name != "C_tmem_base" for buffer in allocated)
+    assert any(value.same_as(cache.var) for value in evaluated)
+    mma = _collect_calls(body, "tl.ptx_tcgen05_mma_ss")[0]
+    assert mma.args[5].same_as(cache.value.buffer.data)
+    assert mma.args[5].dtype == "handle"
+
+
 def test_explicit_deallocate_only_suppresses_matching_buffer():
     """Only the explicitly-deallocated buffer skips auto-dealloc; others keep it."""
 
@@ -75,9 +120,6 @@ def test_explicit_deallocate_only_suppresses_matching_buffer():
     assert dealloc_num_cols == [64, 128]
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_dealloc_before_thread_return_keeps_auto_dealloc():
     """Dealloc on non-fallthrough path (before thread_return) does NOT suppress auto-dealloc."""
 
@@ -100,9 +142,6 @@ def test_dealloc_before_thread_return_keeps_auto_dealloc():
     assert [call.args[1].value for call in dealloc_calls] == [128, 128]
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_untyped_buffer_reports_internal_error():
     valid_buffer = tvm.tirx.decl_buffer((1,), name="malformed_buffer")
     untyped_data = tvm.tirx.Var("malformed_buffer", "handle")

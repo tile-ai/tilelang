@@ -38,7 +38,7 @@ def _num_cols_allocated(body):
 def _tmem_addresses(body):
     """``(address word name, column offset)`` for every ``T.evaluate(buf[i, j])``.
 
-    A lowered TMEM address is ``word[0] + encoded_coordinate``, where the encoded
+    A lowered TMEM address is ``cached_base + encoded_coordinate``, where the encoded
     coordinate carries the buffer's offset inside the allocation it shares.  With
     a ``[0, 0]`` coordinate the whole offset folds into one constant.
     """
@@ -48,10 +48,10 @@ def _tmem_addresses(body):
         if not isinstance(node, tvm.tirx.Evaluate):
             return
         value = node.value
-        if isinstance(value, tvm.tirx.BufferLoad):
-            addresses.append((value.buffer.name, 0))
-        elif isinstance(value, tvm.tirx.Add) and isinstance(value.a, tvm.tirx.BufferLoad):
-            addresses.append((value.a.buffer.name, int(value.b)))
+        if isinstance(value, tvm.tirx.Var):
+            addresses.append((value.name, 0))
+        elif isinstance(value, tvm.tirx.Add) and isinstance(value.a, tvm.tirx.Var):
+            addresses.append((value.a.name, int(value.b)))
 
     tvm.tirx.stmt_functor.post_order_visit(body, visitor)
     return addresses
@@ -63,9 +63,6 @@ def _int_imms(expr):
     return values
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_narrow_buffers_join_a_wide_allocation():
     """A 384-column accumulator plus three 4-column scale buffers need 396 columns.
 
@@ -90,16 +87,13 @@ def test_narrow_buffers_join_a_wide_allocation():
     assert _num_cols_allocated(body) == [512]
     assert [int(call.args[1]) for call in _collect_calls(body, "tl.ptx_deallocate_tensor_memory")] == [512]
     assert _tmem_addresses(body) == [
-        ("C_tmem", 0),
-        ("C_tmem", 384),
-        ("C_tmem", 388),
-        ("C_tmem", 392),
+        ("C_tmem_base", 0),
+        ("C_tmem_base", 384),
+        ("C_tmem_base", 388),
+        ("C_tmem_base", 392),
     ]
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_buffers_pack_only_when_it_saves_columns():
     """Block-scale factors share one allocation; the accumulator keeps its own.
 
@@ -119,12 +113,9 @@ def test_buffers_pack_only_when_it_saves_columns():
 
     body = _apply(func)["main"].body
     assert _num_cols_allocated(body) == [128, 32]
-    assert _tmem_addresses(body) == [("C_tmem", 0), ("SFA_tmem", 0), ("SFA_tmem", 4)]
+    assert _tmem_addresses(body) == [("C_tmem_base", 0), ("SFA_tmem_base", 0), ("SFA_tmem_base", 4)]
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_equal_cost_keeps_separate_allocations():
     """Packing that saves nothing is not done, so such a kernel lowers unchanged."""
 
@@ -141,12 +132,9 @@ def test_equal_cost_keeps_separate_allocations():
     body = _apply(func)["main"].body
     # 128 fp32 columns, 128 fp16 values in 64 b32 columns, 128 fp32 columns.
     assert _num_cols_allocated(body) == [128, 128, 64]
-    assert _tmem_addresses(body) == [("S_tmem", 0), ("P_tmem", 0), ("O_tmem", 0)]
+    assert _tmem_addresses(body) == [("S_tmem_base", 0), ("P_tmem_base", 0), ("O_tmem_base", 0)]
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_allocations_are_issued_widest_first():
     """PTX forbids a tcgen05.alloc larger than one issued before it in the CTA."""
 
@@ -162,9 +150,6 @@ def test_allocations_are_issued_widest_first():
     assert num_cols == sorted(num_cols, reverse=True)
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
 @pytest.mark.parametrize(
     "shapes",
     [
@@ -190,9 +175,6 @@ def test_packing_never_allocates_more_than_separate_allocations(shapes):
     assert packed <= separate
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_explicit_deallocate_keeps_its_own_allocation():
     """A hand-managed lifetime cannot share an allocation it would release early."""
 
@@ -207,12 +189,9 @@ def test_explicit_deallocate_keeps_its_own_allocation():
 
     body = _apply(func)["main"].body
     assert _num_cols_allocated(body) == [512, 32]
-    assert _tmem_addresses(body) == [("C_tmem", 0), ("SF_tmem", 0)]
+    assert _tmem_addresses(body) == [("C_tmem_base", 0), ("SF_tmem_base", 0)]
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_dynamic_coordinate_keeps_the_arena_offset():
     """A software-pipeline stage index moves the address; the offset still applies."""
 
@@ -242,9 +221,6 @@ def test_dynamic_coordinate_keeps_the_arena_offset():
     assert 384 in _int_imms(dynamic_address[0])
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
-@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_block_over_the_column_budget_is_reported():
     """Two 384-column buffers cannot share or fit, which is worth saying out loud."""
 

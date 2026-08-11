@@ -280,6 +280,52 @@ def _make_2cta_invalid_cluster_kernel():
     return main
 
 
+def _make_staged_blockscaled_tcgen05_call():
+    @T.prim_func
+    def main():
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared((128, 128), T.float8_e4m3fn)
+            B_shared = T.alloc_shared((128, 128), T.float8_e4m3fn)
+            C_tmem = T.alloc_tmem((2, 128, 256), T.float32)
+            SFA_tmem = T.alloc_tmem((2, 128, 4), T.uint32)
+            SFB_tmem = T.alloc_tmem((2, 128, 4), T.uint32)
+            done = T.alloc_barrier(1)
+            T.tcgen05_gemm_blockscaled(
+                A_shared,
+                B_shared,
+                C_tmem[1, :, :],
+                SFA_tmem[0, :, :],
+                SFB_tmem[1, :, :],
+                transpose_B=True,
+                clear_accum=True,
+                mbar=done,
+                k_start=32,
+                sf_a_granularity_k=32,
+                sf_b_granularity_k=16,
+                use_2cta=True,
+            )
+
+    return main
+
+
+def test_tcgen05_gemm_blockscaled_uses_common_call_protocol():
+    calls = []
+    tvm.tirx.stmt_functor.post_order_visit(
+        _make_staged_blockscaled_tcgen05_call().body,
+        lambda node: calls.append(node) if isinstance(node, tvm.tirx.Call) else None,
+    )
+    call = next(call for call in calls if call.op.name == "tl.tileop.tcgen05_gemm")
+
+    assert len(call.args) == 22
+    assert call.annotations["is_tcgen05"] == 1
+    assert call.annotations["use_2cta"] == 1
+    assert call.annotations["sf_a_granularity_k"] == 32
+    assert call.annotations["sf_b_granularity_k"] == 16
+    assert call.args[19].op.name == "tl.tileop.region"
+    assert call.args[20].op.name == "tl.tileop.region"
+    assert int(call.args[21]) == 32
+
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(10)
 @tilelang.testing.requires_cuda_compute_version_lt(11)

@@ -107,6 +107,11 @@ class TCGEN05TensorMemoryParams:
         column = (self.origin[1] + column_step) * self.value_bits // 32
         return (datapath << 16) | column
 
+    def base_offset(self) -> PrimExpr:
+        """Raw TMEM address of the Region origin."""
+        datapath, value_column = self.origin
+        return (datapath << 16) | (value_column * self.value_bits // 32)
+
 
 def _bytes_to_elements(byte_count: int, elem_bits: int) -> int:
     # Use bit widths for offsets so sub-byte dtypes such as FP4 stay packed.
@@ -258,6 +263,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
     b_shared_layout: Layout = None
     a_tmem_layout: cute.Layout = None
     c_tmem_layout: cute.Layout = None
+    sfa_tmem_layout: cute.Layout = None
+    sfb_tmem_layout: cute.Layout = None
 
     @staticmethod
     def _smem_elems_in_bytes(dtype) -> int:
@@ -324,6 +331,18 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         """Adopt the inferred ``FrgTypeC`` layout from the layout map."""
         self.c_tmem_layout = cute.Layout.from_tilelang_hierarchical(layout)
         assert self.c_tmem_layout is not None, f"TMEM layout is not decodable by the CuTe analyzer: {layout}"
+        return self
+
+    def _assign_sfa_tmem_layout(self, layout: Layout):
+        """Adopt the inferred block-scale A TMEM layout."""
+        self.sfa_tmem_layout = cute.Layout.from_tilelang_hierarchical(layout)
+        assert self.sfa_tmem_layout is not None, f"SFA TMEM layout is not decodable by the CuTe analyzer: {layout}"
+        return self
+
+    def _assign_sfb_tmem_layout(self, layout: Layout):
+        """Adopt the inferred block-scale B TMEM layout."""
+        self.sfb_tmem_layout = cute.Layout.from_tilelang_hierarchical(layout)
+        assert self.sfb_tmem_layout is not None, f"SFB TMEM layout is not decodable by the CuTe analyzer: {layout}"
         return self
 
     def _initialize_micro_size(self, m_dim: int = 16, k_dim: int = 16):
@@ -408,6 +427,12 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         """
         assert self.c_tmem_layout is not None, "TCGEN05 C operand has no assigned TMEM layout"
         return TCGEN05TensorMemoryParams.from_region(self.c_tmem_layout, C_region)
+
+    def compute_tcgen05_sf_tmem_address(self, SF_region: BufferRegion, sf_layout: cute.Layout) -> tuple[Var, PrimExpr]:
+        """Resolve a block-scale Region through its independently inferred layout."""
+        assert sf_layout is not None, "TCGEN05 scale operand has no assigned TMEM layout"
+        params = TCGEN05TensorMemoryParams.from_region(sf_layout, SF_region)
+        return params.data, params.base_offset()
 
     def compute_tcgen05_a_tmem_params(self, A_region: BufferRegion) -> TCGEN05TensorMemoryParams:
         """Compute TS A TMEM addressing for one operand Region."""
@@ -590,8 +615,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         num_inst_n = n_dim // meta.atom_n
         num_k_atoms = self.tcgen05_num_k_atoms
 
-        sfa_data = self._as_buffer(SFA_tmem).data
-        sfb_data = self._as_buffer(SFB_tmem).data
+        sfa_data, sfa_offset = self.compute_tcgen05_sf_tmem_address(SFA_tmem, self.sfa_tmem_layout)
+        sfb_data, sfb_offset = self.compute_tcgen05_sf_tmem_address(SFB_tmem, self.sfb_tmem_layout)
 
         @T.macro
         def _warp_mma_blockscaled(A_region, B_region, sfa_data, sfb_data, mbar):
@@ -611,7 +636,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                             desc_a,
                             desc_b,
                             sfa_data,
+                            sfa_offset,
                             sfb_data,
+                            sfb_offset,
                             i,
                             j,
                             ki,
@@ -1099,7 +1126,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         desc_a,
         desc_b,
         sfa_data,
+        sfa_offset,
         sfb_data,
+        sfb_offset,
         inst_m_idx: int,
         inst_n_idx: int,
         ki: int,
@@ -1117,6 +1146,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             Initialized A and B descriptors.
         sfa_data, sfb_data : Var
             Scale factor data pointers in tensor memory.
+        sfa_offset, sfb_offset : PrimExpr
+            Raw TMEM offsets of the scale-factor Regions.
         inst_m_idx, inst_n_idx, ki : int
             Atom indices.
         a_params, b_params : TCGEN05DescriptorParams
@@ -1184,9 +1215,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 instr_desc,
                 scale_out,
                 sfa_data,
-                0,
+                sfa_offset,
                 sfb_data,
-                0,
+                sfb_offset,
                 0,
                 0,
                 meta.enable_2cta,
