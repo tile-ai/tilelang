@@ -60,14 +60,12 @@
 #include "../op/builtin.h"
 #include "../op/copy.h"
 #include "../op/fill.h"
-#include "../op/finalize_reducer.h"
 #include "../op/reducer.h"
 #include "../op/region.h"
 #include "../op/utils.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
 #include "backend/common/op/reduce.h"
-#include "layout_reducer.h"
 
 namespace tvm {
 namespace tl {

@@ -45,10 +45,8 @@
 #include <unordered_map>
 
 #include "../op/fill.h"
-#include "../op/finalize_reducer.h"
 #include "../op/reducer.h"
 #include "../op/region.h"
-#include "layout_reducer.h"
 
 namespace tvm {
 namespace tl {

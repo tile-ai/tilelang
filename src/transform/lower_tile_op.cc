@@ -31,7 +31,6 @@
 #include "arith/ir_mutator_with_analyzer.h"
 #include "common/mbarrier.h"
 #include "common/pipeline_utils.h"
-#include "layout_reducer.h"
 #include "loop_partition.h"
 
 namespace tvm {

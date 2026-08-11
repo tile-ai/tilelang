@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <limits>
+#include <vector>
 
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
@@ -222,10 +223,108 @@ TIR_REGISTER_TL_TILE_OP(FinalizeReducerV2Op, finalize_reducer_v2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+// ---------------------------------------------------------------------------
+// FinalizeReducerOp: the materialized collective
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::vector<FinalizeReducerImpl> &FinalizeReducerImplRegistry() {
+  static std::vector<FinalizeReducerImpl> registry;
+  return registry;
+}
+
+const FinalizeReducerImpl &ResolveFinalizeReducerImpl(Target target) {
+  const auto &registry = FinalizeReducerImplRegistry();
+  const FinalizeReducerImpl *matched_impl = nullptr;
+  for (const FinalizeReducerImpl &impl : registry) {
+    if (impl.match_target(target)) {
+      ICHECK(matched_impl == nullptr)
+          << "tl.finalize_reducer found multiple target-specific "
+             "implementations for "
+          << target->str() << ": " << matched_impl->name << " and "
+          << impl.name;
+      matched_impl = &impl;
+    }
+  }
+  ICHECK(matched_impl != nullptr)
+      << "tl.finalize_reducer requires a target-specific implementation, but "
+         "no finalize_reducer implementation is registered for "
+      << target->str();
+  return *matched_impl;
+}
+
+} // namespace
+
+void RegisterFinalizeReducerImpl(FinalizeReducerImpl impl) {
+  ICHECK(impl.name != nullptr);
+  ICHECK(impl.match_target != nullptr);
+  ICHECK(impl.lower != nullptr);
+  FinalizeReducerImplRegistry().push_back(impl);
+}
+
+FinalizeReducerOp::FinalizeReducerOp(
+    ffi::Array<PrimExpr> args,
+    ffi::Map<ffi::String, ffi::ObjectRef> annotations) {
+  auto node = tvm::ffi::make_object<FinalizeReducerOpNode>();
+  auto reducer_access = NormalizeToAccessRegion(args[0], kAccessReadWrite);
+  reducer_access.region =
+      BufferRegion::FullRegion(reducer_access.region->buffer);
+  reducer_access.access_mask = kAccessReadWrite;
+  node->reducer = reducer_access.region->buffer;
+  node->SetAccessRegions({reducer_access});
+  node->op = (ReducerV2OpType)*as_const_int(args[1]);
+  // Optional explicit collective plan (reducer v2 narrow plans):
+  // args[2] = reducing_threads, args[3] = scale.
+  if (args.size() >= 3) {
+    node->reducing_threads = (int)*as_const_int(args[2]);
+    ICHECK_GT(node->reducing_threads, 0)
+        << "finalize_reducer: explicit reducing_threads must be positive";
+  }
+  if (args.size() >= 4) {
+    node->scale = (int)*as_const_int(args[3]);
+    ICHECK_GT(node->scale, 0)
+        << "finalize_reducer: explicit scale must be positive";
+  }
+  // Read explicit batch size from annotations (0 means auto-detect).
+  if (annotations.count("batch")) {
+    node->batch = (int)*as_const_int(Downcast<PrimExpr>(annotations["batch"]));
+    ICHECK_GE(node->batch, 1)
+        << "finalize_reducer: batch must be >= 1, got " << node->batch;
+  }
+  data_ = std::move(node);
+}
+
+Stmt FinalizeReducerOpNode::Lower(const LowerArgs &lower_args,
+                                  arith::Analyzer *analyzer) const {
+  return ResolveFinalizeReducerImpl(lower_args.target)
+      .lower(*this, lower_args, analyzer);
+}
+
+LayoutMap FinalizeReducerOpNode::InferLayout(const LayoutInferArgs &layout_args,
+                                             InferLevel level) const {
+  // Materialized after LayoutInference; preserves the storage layout the
+  // planner assigned.
+  LayoutMap layout_map;
+  layout_map.Set(reducer, layout_args.layout_map.Get(reducer).value());
+  return layout_map;
+}
+
+TileOperator FinalizeReducerOpNode::Clone() const {
+  auto node = tvm::ffi::make_object<FinalizeReducerOpNode>(*this);
+  return TileOperator(node);
+}
+
+TIR_REGISTER_TL_TILE_OP(FinalizeReducerOp, finalize_reducer)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TVM_FFI_STATIC_INIT_BLOCK() {
   ReducerInitOpNode::RegisterReflection();
   ReducerUpdateOpNode::RegisterReflection();
   FinalizeReducerV2OpNode::RegisterReflection();
+  FinalizeReducerOpNode::RegisterReflection();
 }
 
 } // namespace tl

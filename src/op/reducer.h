@@ -27,6 +27,12 @@ namespace attr {
 /*! \brief SBlock annotation: Map<Var, Map<String, Any>> with keys
  *  "op" (String: sum/max/min) and optional "seed" (PrimExpr). */
 constexpr const char *kReducerInfoV2 = "reducer_info_v2";
+/*! \brief Legacy (v1) SBlock annotation emitted by
+ *  `alloc_reducer(replication=...)`: Map<Var, Map<String, String>> with keys
+ *  "op" and "rep". Consumed (and erased) by CanonicalizeLegacyReducer; the
+ *  data-race verifier also reads it to exempt legacy reducer stores. Removed
+ *  together with the legacy syntax. */
+constexpr const char *kReducerInfo = "reducer_info";
 /*! \brief Statement marker on a combine store inside a T.Parallel loop:
  *  the side effect must execute once per logical iteration. PartitionLoop
  *  lowers it to a `REP == 0` guard (or strips it when the loop layout has
@@ -156,6 +162,71 @@ public:
   FinalizeReducerV2Op(ffi::Array<PrimExpr> args,
                       ffi::Map<ffi::String, ffi::ObjectRef> annotations =
                           ffi::Map<ffi::String, ffi::ObjectRef>());
+  static const Op &Get();
+};
+
+/// tl.finalize_reducer: the MATERIALIZED collective emitted by
+/// ReducerPlanAndMaterialize (not user-facing). Performs the plan's
+/// cross-participant combine on the reducer's physical partial storage.
+/// args[0] = tl.region(storage, "rw"), args[1] = combine op enum; optional
+/// args[2] = reducing_threads, args[3] = scale select an explicit narrow
+/// collective (default: participant-wide AllReduce derived from the
+/// storage layout's replicate extent). Lowering is target-specific via
+/// RegisterFinalizeReducerImpl (CUDA/ROCm share the plan contract).
+class FinalizeReducerOpNode : public TileOperatorNode {
+public:
+  tirx::Buffer reducer;
+  ReducerV2OpType op;
+  // Batch size for batched AllReduce (1 = scalar path, same as T.reduce
+  // default).
+  int batch{1};
+  // Explicit collective plan (reducer v2 narrow plans). When
+  // reducing_threads > 0, the AllReduce combines `reducing_threads / scale`
+  // lanes at stride `scale` instead of deriving the width from the storage
+  // layout's ReplicateExtent. -1 = wide plan.
+  int reducing_threads{-1};
+  int scale{1};
+
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.FinalizeReducerOp",
+                                    FinalizeReducerOpNode, TileOperatorNode);
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<FinalizeReducerOpNode>()
+        .def_ro("reducer", &FinalizeReducerOpNode::reducer)
+        .def_ro("op", &FinalizeReducerOpNode::op)
+        .def_ro("batch", &FinalizeReducerOpNode::batch)
+        .def_ro("reducing_threads", &FinalizeReducerOpNode::reducing_threads)
+        .def_ro("scale", &FinalizeReducerOpNode::scale);
+  }
+
+  Stmt Lower(const LowerArgs &lower_args,
+             arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &layout_args,
+                        InferLevel level) const override;
+  static const Op &Get();
+  TileOperator Clone() const;
+};
+
+using FinalizeReducerTargetPredicate = bool (*)(Target target);
+
+struct FinalizeReducerImpl {
+  const char *name;
+  FinalizeReducerTargetPredicate match_target;
+
+  Stmt (*lower)(const FinalizeReducerOpNode &op, const LowerArgs &lower_args,
+                arith::Analyzer *analyzer);
+};
+
+void RegisterFinalizeReducerImpl(FinalizeReducerImpl impl);
+
+class FinalizeReducerOp : public TileOperator {
+public:
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(FinalizeReducerOp, TileOperator,
+                                             FinalizeReducerOpNode);
+  TVM_DLL FinalizeReducerOp(ffi::Array<PrimExpr> args,
+                            ffi::Map<ffi::String, ffi::ObjectRef> annotations =
+                                ffi::Map<ffi::String, ffi::ObjectRef>());
   static const Op &Get();
 };
 

@@ -1,6 +1,6 @@
+#include "../op/reducer.h"
 #include "../op/utils.h"
 #include "common/constr_visitor.h"
-#include "layout_reducer.h"
 #include "span_utils.h"
 #include "support/check.h"
 #include "tvm/arith/analyzer.h"
