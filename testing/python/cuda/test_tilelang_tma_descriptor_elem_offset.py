@@ -3,6 +3,7 @@ import re
 import pytest
 
 import tilelang
+import tilelang.testing
 import tilelang.language as T
 from tilelang import tvm
 from tilelang.backend import create_backend_context
@@ -11,6 +12,9 @@ from tilelang.layout import make_linear_layout
 from tilelang.jit.adapter.cutedsl.wrapper import TLCuTeDSLSourceWrapper
 from tilelang.jit.adapter.nvrtc.wrapper import TLNVRTCSourceWrapper
 from tilelang.jit.adapter.wrapper import TLCUDASourceWrapper
+
+
+pytestmark = tilelang.testing.requires_cuda.marks()
 
 
 def _descriptor_base_byte_offsets(func, arch):
