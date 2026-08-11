@@ -17,6 +17,7 @@ from tilelang.backend.module import create_backend_context
 from tilelang.engine.lower import lower_to_host_device_ir, device_codegen, host_codegen
 from tilelang.engine.param import CompiledArtifact
 from tilelang.jit.adapter import TVMFFIKernelAdapter
+from tilelang.jit.abi import prepare_tvm_ffi_callee_allocated_outputs
 from tilelang.jit.kernel import JITKernel
 from tilelang.transform import PassConfigKey
 from tilelang.instrumentation import compile_pass_instrumentation, create_pass_instruments
@@ -62,6 +63,7 @@ def compile_grouped_unit_tvm_ffi(
                 original_symbol = str(program.attrs["global_symbol"])
                 unique_symbol = f"{original_symbol}_gc_{idx}"
                 program = program.with_attr("global_symbol", unique_symbol)
+                program, output_indices = prepare_tvm_ffi_callee_allocated_outputs(program, compile_args.out_idx)
 
                 lower_context = f"stage=grouped-lower, config={idx}, kernel={unique_symbol}"
                 config_instruments = [
@@ -98,6 +100,7 @@ def compile_grouped_unit_tvm_ffi(
                         "device_mod": device_mod,
                         "params": params,
                         "target": normalized_target,
+                        "output_indices": output_indices,
                     }
                 )
             except Exception as e:
@@ -157,8 +160,8 @@ def compile_grouped_unit_tvm_ffi(
 
                     adapter = TVMFFIKernelAdapter(
                         params=artifact.params,
-                        result_idx=compile_args.out_idx,
-                        target=compile_args.target,
+                        result_idx=item["output_indices"],
+                        target=item["target"],
                         func_or_mod=item["program"],
                         host_mod=artifact.host_mod,
                         device_mod=artifact.device_mod,
@@ -170,7 +173,7 @@ def compile_grouped_unit_tvm_ffi(
 
                     jit_kernel = JITKernel(
                         func=item["program"],
-                        out_idx=compile_args.out_idx,
+                        out_idx=item["output_indices"],
                         execution_backend=compile_args.execution_backend,
                         target=compile_args.target,
                         target_host=compile_args.target_host,

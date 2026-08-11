@@ -81,6 +81,8 @@ public:
   void VisitExpr_(const tvm::tirx::MaxNode *op,
                   std::ostream &os) final; // NOLINT(*)
 
+  void VisitStmt_(const tvm::tirx::EvaluateNode *op) final; // NOLINT(*)
+
   void VisitStmt_(const tvm::tirx::AssertStmtNode *op) final; // NOLINT(*)
 
   void VisitStmt_(const tvm::tirx::AttrStmtNode *op) final; // NOLINT(*)
