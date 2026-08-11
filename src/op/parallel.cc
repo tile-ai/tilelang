@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/op.h>
+#include <unordered_set>
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
@@ -19,6 +20,7 @@
 #include "../transform/loop_vectorize.h"
 #include "arith/int_operator.h"
 #include "backend/common/target_utils.h"
+#include "region.h"
 #include "span_utils.h"
 #include "utils.h"
 
@@ -178,7 +180,10 @@ ParallelOpNode::ParallelOpNode(For root) : root_(root), V(this) {
                    << ". Ignore override.";
     }
   }
-  // Collect cross-thread access info and buffer store info.
+  // Collect cross-thread access info, buffer store info, and opaque tile-op
+  // calls (side effects the layout system cannot see, e.g. reducer updates).
+  static const auto op_builder_map =
+      Op::GetAttrMap<OpBuilderFunc>("TLOpBuilder");
   PostOrderVisit(root_, [&](const ObjectRef &obj) {
     if (const auto *store = obj.as<BufferStoreNode>()) {
       auto buffer = store->buffer;
@@ -191,6 +196,14 @@ ParallelOpNode::ParallelOpNode(For root) : root_(root), V(this) {
     } else if (const auto *load = obj.as<BufferLoadNode>()) {
       if (IsSharedBuffer(load->buffer) || IsGlobalBuffer(load->buffer)) {
         has_cross_thread_access_ = true;
+      }
+    } else if (const auto *call = obj.as<CallNode>()) {
+      if (const auto *op_node = call->op.as<OpNode>()) {
+        Op op_ref = tvm::ffi::GetRef<Op>(op_node);
+        // tl.region is a transport-only argument wrapper, not a side effect.
+        if (op_builder_map.count(op_ref) && !op_ref.same_as(RegionOp::Get())) {
+          has_opaque_tile_op_ = true;
+        }
       }
     }
   });
@@ -483,27 +496,89 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
     bool selected_plan_candidate = false;
 
     if (read_source_buffer.defined() && allow_layout_propgate) {
-      candidate_from_buffer =
-          ComputeLoopLayoutFromBuffer(read_source_buffer, layout_args);
+      if (has_opaque_tile_op_) {
+        // For opaque tile-op loops the operand is only a PREFERRED driver:
+        // when its indices cannot express this loop's iteration space
+        // (e.g. they involve inner serial vars), fall through to
+        // self-planning instead of failing the whole inference attempt.
+        try {
+          candidate_from_buffer =
+              ComputeLoopLayoutFromBuffer(read_source_buffer, layout_args);
+        } catch (const NormalizeIterException &e) {
+          DLOG(INFO) << "[FreeInfer] operand cannot drive opaque tile-op "
+                        "loop: "
+                     << e.what();
+        }
+      } else {
+        candidate_from_buffer =
+            ComputeLoopLayoutFromBuffer(read_source_buffer, layout_args);
+      }
     }
 
-    // try to infer loop layout with two mechanisms and choose the best one
-    {
-      candidate_from_plan = ComputePlanCandidate(layout_args);
+    // A fragment operand can DRIVE this loop's layout only when it is
+    // addressed purely by the parallel loop vars; indices involving other
+    // vars (e.g. an inner serial reduction var) require the LOOP to own the
+    // operand's layout instead, so such operands must not hold us back.
+    std::unordered_set<const VarNode *> loop_var_set;
+    for (const auto &iv : loop_vars_) {
+      loop_var_set.insert(iv->var.get());
     }
+    bool unsolved_drivable_operand = false;
+    for (const auto &buffer : fragment_buffers) {
+      bool drivable = true;
+      for (const auto &index : GetAccessInfo(buffer).indices) {
+        if (tirx::UsesVar(index, [&](const VarNode *var) {
+              return !loop_var_set.count(var);
+            })) {
+          drivable = false;
+          break;
+        }
+      }
+      if (drivable && !layout_args.layout_map.count(buffer)) {
+        unsolved_drivable_operand = true;
+        break;
+      }
+    }
+    if (has_opaque_tile_op_ &&
+        (candidate_from_buffer.defined() || unsolved_drivable_operand)) {
+      // The loop carries an opaque side effect (e.g. a reducer update) and
+      // therefore has no visible write to anchor it. Self-planning such a
+      // loop optimizes only its own register count and can force degraded
+      // layouts onto the fragments it reads (their producing copies then
+      // lose vectorization). Propagate from a fragment operand instead;
+      // while a drivable operand is still unsolved, defer so the worklist
+      // lets the producing ops fix the operands first. Self-planning below
+      // remains the fallback when no operand can drive the loop, validated
+      // against the solved operand layouts.
+      if (candidate_from_buffer.defined()) {
+        loop_layout_ = candidate_from_buffer;
+        DLOG(INFO) << "[FreeInfer] opaque tile-op loop follows fragment "
+                      "operand layout.";
+      } else {
+        DLOG(INFO) << "[FreeInfer] opaque tile-op loop deferred: drivable "
+                      "fragment operands not solved yet.";
+        return {};
+      }
+    } else {
+      // try to infer loop layout with two mechanisms and choose the best one
+      {
+        candidate_from_plan = ComputePlanCandidate(layout_args);
+      }
 
-    // Choose the best candidate:
-    if (candidate_from_buffer.defined() && candidate_from_plan.defined()) {
-      loop_layout_ = ChooseBestCandidate(candidate_from_buffer,
-                                         candidate_from_plan, layout_args);
-    } else if (candidate_from_plan.defined()) {
-      loop_layout_ = candidate_from_plan;
-      selected_plan_candidate = true;
-      DLOG(INFO) << "[FreeInfer] only PlanLoopPartition available, choose it.";
-    } else if (candidate_from_buffer.defined()) {
-      loop_layout_ = candidate_from_buffer;
-      DLOG(INFO)
-          << "[FreeInfer] only compute_from_buffer available, choose it.";
+      // Choose the best candidate:
+      if (candidate_from_buffer.defined() && candidate_from_plan.defined()) {
+        loop_layout_ = ChooseBestCandidate(candidate_from_buffer,
+                                           candidate_from_plan, layout_args);
+      } else if (candidate_from_plan.defined()) {
+        loop_layout_ = candidate_from_plan;
+        selected_plan_candidate = true;
+        DLOG(INFO)
+            << "[FreeInfer] only PlanLoopPartition available, choose it.";
+      } else if (candidate_from_buffer.defined()) {
+        loop_layout_ = candidate_from_buffer;
+        DLOG(INFO)
+            << "[FreeInfer] only compute_from_buffer available, choose it.";
+      }
     }
     loop_layout_requires_padding_guard_ =
         selected_plan_candidate && indice_map_.empty();

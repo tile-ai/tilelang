@@ -206,6 +206,10 @@ private:
   mutable arith::Analyzer analyzer_;
   // Whether the loop body has cross-thread shared/global memory access.
   bool has_cross_thread_access_ = false;
+  // Whether the loop body contains an opaque tile-op call (e.g. a reducer
+  // update): a side effect the layout system cannot see. Such loops must not
+  // self-plan a layout in free mode; see InferLayout.
+  bool has_opaque_tile_op_ = false;
   // Buffers that are stored to shared/global memory in the loop body.
   std::vector<Buffer> store_shared_global_buffers_;
   // Fragment buffers that are stored to in the loop body.
