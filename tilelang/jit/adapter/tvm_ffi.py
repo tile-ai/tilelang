@@ -66,7 +66,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     # rt_mod
     rt_mod: tvm.runtime.Module | None = None
     # Maps symbolic variables to their corresponding buffer and shape indices
-    dynamic_symbolic_map: dict[tirx.Var, tuple[int, int, int]] | None = None
+    dynamic_symbolic_map: dict[tirx.Var, tuple[int, int, int, int]] | None = None
 
     # Stream/device functors are inherited from BaseKernelAdapter
     def __init__(
@@ -111,7 +111,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         self.verbose = verbose
         self.pass_configs = pass_configs
         self.compile_flags = compile_flags
-        self.dynamic_symbolic_map = self._process_dynamic_symbolic()
+        self._ffi_callee_allocated_output_abi = self._uses_ffi_callee_allocated_output_abi()
+        self.dynamic_symbolic_map = None if self._ffi_callee_allocated_output_abi else self._process_dynamic_symbolic()
         self.kernel_global_source = self.device_kernel_source
         self.executable = None
         self._executable_lock = threading.Lock()
@@ -141,6 +142,19 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
 
     def get_exportable_executable(self) -> tvm.runtime.Executable:
         return self._get_executable()
+
+    def _uses_ffi_callee_allocated_output_abi(self) -> bool:
+        """Whether lowering gives this kernel the callee-allocated main ABI."""
+        if not self.result_idx:
+            return False
+
+        # The native wrapper is currently emitted for CUDA with TileLang's C
+        # host codegen. Other device and host backends retain the preallocated-
+        # output path until they have equivalent result-slot lowering.
+        if self.target.kind.name != "cuda":
+            return False
+        target_host = self.target.host
+        return target_host is not None and target_host.kind.name == "c"
 
     def _process_dynamic_symbolic(self) -> dict[tirx.Var, tuple[int, int, int, int]]:
         """Extract information about dynamic shapes from the TIR function.
@@ -175,6 +189,9 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         return dynamic_symbolic_map
 
     def _convert_torch_func(self) -> Callable[..., Any]:
+        if getattr(self, "_ffi_callee_allocated_output_abi", False):
+            return self._convert_ffi_callee_allocated_output_func()
+
         # Capture thunks that reflect Torch's current stream and device.
         # These are evaluated at call time to align TVM execution with the
         # caller's active PyTorch stream/device.
@@ -203,7 +220,9 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 native_shape[-1] = native_shape[-1] * tl_dtype.bits * tl_dtype.lanes // (stroage_dtype.bits * stroage_dtype.lanes)
             param_shapes.append(native_shape)
 
-        dynamic_symbolic_map = self._process_dynamic_symbolic()
+        dynamic_symbolic_map = self.dynamic_symbolic_map
+        assert dynamic_symbolic_map is not None
+
         # Prepare helpers for friendly dtype error messages
         prim_func = self.prim_func
         buffer_map = prim_func.buffer_map
@@ -282,6 +301,39 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
 
         return func
 
+    def _convert_ffi_callee_allocated_output_func(self) -> Callable[..., Any]:
+        """Create a Torch callable whose outputs are allocated by TVM-FFI."""
+        current_device_functor = self.get_current_device_functor()
+        expected_inputs = len(self.params) - len(self.result_idx)
+        cuda_available = torch.cuda.is_available()
+        has_allocator_exchange = hasattr(torch.Tensor, "__dlpack_c_exchange_api__") or hasattr(torch.Tensor, "__c_dlpack_exchange_api__")
+
+        def func(*inputs: torch.Tensor | Any):
+            if len(inputs) != expected_inputs:
+                raise ValueError(f"Kernel expected {expected_inputs} inputs, but {len(inputs)} are provided.")
+
+            if not cuda_available:
+                raise RuntimeError("TVM-FFI callee-allocated outputs require an available CUDA device.")
+            if not has_allocator_exchange:
+                raise RuntimeError(
+                    "TVM-FFI callee-allocated outputs require Torch's DLPack allocator exchange API. "
+                    "Install a compatible torch-c-dlpack-ext or use a supported PyTorch build."
+                )
+
+            allocator_anchor = next((value for value in inputs if isinstance(value, torch.Tensor)), None)
+            if allocator_anchor is None:
+                # A Torch tensor argument installs the EnvTensorAllocator in
+                # TVM-FFI's thread-local call context.  Scalar-only kernels use
+                # a zero-element anchor solely for that allocator/device state.
+                allocator_anchor = torch.empty(0, device=current_device_functor())
+
+            result = self._get_executable()(*inputs, allocator_anchor)
+            if len(self.result_idx) == 1:
+                return result
+            return list(result)
+
+        return func
+
     @classmethod
     def from_database(
         cls,
@@ -321,6 +373,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         adapter.kernel_global_source = device_kernel_source.text
         adapter.rt_mod = None
         adapter.executable = runtime.load_module(kernel_lib_path)
+        adapter._ffi_callee_allocated_output_abi = adapter._uses_ffi_callee_allocated_output_abi()
+        adapter.dynamic_symbolic_map = None if adapter._ffi_callee_allocated_output_abi else adapter._process_dynamic_symbolic()
         adapter._executable_lock = threading.Lock()
         adapter._post_init()
         return adapter
