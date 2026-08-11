@@ -551,10 +551,23 @@ private:
           << "Buffer data var " << buffer_data
           << " is not registered in buffer_data_to_buffer_.";
       Buffer flat = buffer_data_to_buffer_[buffer_data].GetFlattenedBuffer();
+      DataType pointer_element_dtype = ptr_call->args[0].dtype();
+      PrimExpr offset = ptr_call->args[2];
+      if (pointer_element_dtype != flat->dtype) {
+        int pointer_elem_bits =
+            pointer_element_dtype.bits() * pointer_element_dtype.lanes();
+        int buffer_elem_bits = flat->dtype.bits() * flat->dtype.lanes();
+        ICHECK_GT(pointer_elem_bits, 0)
+            << "tvm_access_ptr element width must be positive: " << expr;
+        ICHECK_GT(buffer_elem_bits, 0)
+            << "tvm_access_ptr buffer element width must be positive: " << expr;
+        offset = FloorDiv(offset * IntImm(offset.dtype(), pointer_elem_bits),
+                          IntImm(offset.dtype(), buffer_elem_bits));
+      }
       return AccessPtrInfo{
-          BufferLoad(flat, Array<PrimExpr>{ptr_call->args[2]}),
+          BufferLoad(flat, Array<PrimExpr>{offset}),
           ptr_call->args[4],
-          ptr_call->args[0].dtype(),
+          pointer_element_dtype,
       };
     }
 
@@ -654,6 +667,7 @@ private:
       }
       checker.PushCondition(condition);
     };
+    push_distinct_condition(linear_index >= make_zero(linear_index.dtype()));
     push_distinct_condition(last_index < flattened_extent);
     return checker.GetConditions();
   }
