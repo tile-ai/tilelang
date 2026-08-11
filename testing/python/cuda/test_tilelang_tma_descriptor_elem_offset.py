@@ -64,11 +64,11 @@ def _bulk_copy_program(src_elem_offset=64, dst_elem_offset=128, annotate_linear=
     return main
 
 
-def _gather_scatter_program():
+def _gather_scatter_program(src_elem_offset=64, dst_elem_offset=128):
     @T.prim_func
     def main(src_handle: T.handle, rows: T.Tensor((4,), T.int32), dst_handle: T.handle):
-        src = T.match_buffer(src_handle, (64, 64), T.float16, elem_offset=64)
-        dst = T.match_buffer(dst_handle, (64, 64), T.float16, elem_offset=128)
+        src = T.match_buffer(src_handle, (64, 64), T.float16, elem_offset=src_elem_offset)
+        dst = T.match_buffer(dst_handle, (64, 64), T.float16, elem_offset=dst_elem_offset)
         with T.Kernel(1, threads=128):
             shared = T.alloc_shared((4, 64), T.float16)
             mbar = T.alloc_barrier(1)
@@ -81,10 +81,10 @@ def _gather_scatter_program():
     return main
 
 
-def _im2col_program():
+def _im2col_program(src_elem_offset=64):
     @T.prim_func
     def main(src_handle: T.handle):
-        src = T.match_buffer(src_handle, (1, 8, 8, 64), T.float16, elem_offset=64)
+        src = T.match_buffer(src_handle, (1, 8, 8, 64), T.float16, elem_offset=src_elem_offset)
         with T.Kernel(1, threads=128):
             shared = T.alloc_shared((64, 32), T.float16)
             T.im2col(src, shared, 0, 0, 3, 1, 1, 1)
@@ -221,9 +221,19 @@ def test_tma_descriptor_base_includes_buffer_elem_offset(program, arch, expected
         assert "handle_add_byte_offset" not in cutedsl_init
 
 
-def test_swizzled_tma_copy_rejects_sub_128_byte_global_offset():
-    with pytest.raises(Exception, match=re.escape("T.tma_copy")):
-        _descriptor_base_byte_offsets(_bulk_copy_program(16, 32), "sm_90")
+@pytest.mark.parametrize(
+    ("program", "arch", "expected_offsets"),
+    [
+        (_bulk_copy_program(16, 32), "sm_90", [32, 64]),
+        (_gather_scatter_program(16, 32), "sm_100a", [32, 64]),
+        (_im2col_program(16), "sm_90", [32]),
+        (_tma_atomic_program(), "sm_90", [32]),
+    ],
+)
+def test_tma_descriptor_global_alignment_is_independent_of_smem_swizzle(program, arch, expected_offsets):
+    offsets, descriptors = _descriptor_base_byte_offsets(program, arch)
+    assert offsets == expected_offsets
+    assert len(descriptors) == len(expected_offsets)
 
 
 def test_linear_tma_copy_keeps_dtype_alignment_requirement():

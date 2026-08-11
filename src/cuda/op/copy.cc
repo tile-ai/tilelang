@@ -1857,12 +1857,10 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
 
   ICHECK(CanProveTMADescriptorBaseAligned(
       global_tensor, shared_tensor->dtype, analyzer,
-      lower_args.host_visible_vars, /*require_host_visible=*/true,
-      desc.swizzle != static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE)))
+      lower_args.host_visible_vars, /*require_host_visible=*/true))
       << "TMA bulk copy requires a provably "
-      << TMARequiredGlobalAddressAlignment(
-             global_tensor->dtype, shared_tensor->dtype,
-             desc.swizzle != static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE))
+      << TMARequiredGlobalAddressAlignment(global_tensor->dtype,
+                                           shared_tensor->dtype)
       << "-byte-aligned global buffer view, but elem_offset for "
       << global_tensor->name << " is " << global_tensor->elem_offset;
 
@@ -2468,12 +2466,10 @@ Stmt Copy::LowerBulkGather4(const CopyNode &op, const LowerArgs &lower_args,
   }
   ICHECK(CanProveTMADescriptorBaseAligned(
       global_tensor, shared_tensor->dtype, analyzer,
-      lower_args.host_visible_vars, /*require_host_visible=*/true,
-      desc.swizzle != static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE)))
+      lower_args.host_visible_vars, /*require_host_visible=*/true))
       << "tma_gather4/scatter4 requires a provably "
-      << TMARequiredGlobalAddressAlignment(
-             global_tensor->dtype, shared_tensor->dtype,
-             desc.swizzle != static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE))
+      << TMARequiredGlobalAddressAlignment(global_tensor->dtype,
+                                           shared_tensor->dtype)
       << "-byte-aligned global buffer view, but elem_offset for "
       << global_tensor->name << " is " << global_tensor->elem_offset;
   RequireTMASmemAlignment(lower_args, shared_tensor,
@@ -2748,14 +2744,11 @@ Stmt Im2Col::Lower(const Im2ColOpNode &op, const LowerArgs &lower_args,
       LOG(FATAL) << "Cannot detect TMA layout.";
     }
   }
-  ICHECK(CanProveTMADescriptorBaseAligned(
-      src, dst->dtype, analyzer, lower_args.host_visible_vars,
-      /*require_host_visible=*/true,
-      desc.swizzle != static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE)))
+  ICHECK(CanProveTMADescriptorBaseAligned(src, dst->dtype, analyzer,
+                                          lower_args.host_visible_vars,
+                                          /*require_host_visible=*/true))
       << "T.im2col requires a provably "
-      << TMARequiredGlobalAddressAlignment(
-             src->dtype, dst->dtype,
-             desc.swizzle != static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE))
+      << TMARequiredGlobalAddressAlignment(src->dtype, dst->dtype)
       << "-byte-aligned global buffer view, but elem_offset for " << src->name
       << " is " << src->elem_offset;
   RequireTMASmemAlignment(
