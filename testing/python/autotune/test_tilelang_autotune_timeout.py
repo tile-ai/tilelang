@@ -18,7 +18,7 @@ def test_benchmark_worker_drains_timed_out_call_before_next_benchmark():
         del benchmark_state, benchmark_device
         if jit_kernel == "slow":
             slow_call_started.set()
-            release_slow_call.wait(timeout=1)
+            release_slow_call.wait()
             first_call_finished.set()
         else:
             second_call_started.set()
