@@ -245,6 +245,7 @@ def tma_copy(
     dst: BufferLikeType,
     *,
     barrier=None,
+    cluster_mask: int | None = None,
     leader_scope_threads: int | None = None,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
     annotations: dict | None = None,
@@ -256,6 +257,13 @@ def tma_copy(
     T.tma_copy() emits only the producer part (expect_tx + tma_load).
     The user manages synchronization explicitly via T.barrier_arrive() and
     T.mbarrier_wait_parity(). ``barrier`` is required for loads.
+
+    ``cluster_mask`` turns a load into a TMA **multicast** within the thread-block
+    cluster while keeping that same split-phase contract, unlike T.copy_cluster()
+    whose multicast path also emits the wait. The lowest-ranked CTA in the mask
+    issues the multicast and the other in-mask CTAs issue nothing; a CTA *outside*
+    the mask falls back to its own unicast load. Every CTA runs its own expect_tx
+    against its local copy of ``barrier``, so each one waits on its own arrival.
 
     For **stores** (shared -> global): issues tma_store + tma_store_arrive (no wait).
     Unlike T.copy() which emits tma_store + tma_store_arrive + tma_store_wait,
@@ -272,6 +280,9 @@ def tma_copy(
             Required for loads (global -> shared). Not needed for stores.
             The TMA load will arrive at this barrier with expected byte count.
             The user must wait on the same barrier via T.mbarrier_wait_parity().
+        cluster_mask: Bitmask of the CTAs in the thread-block cluster that receive
+            a multicast load, e.g. ``0b11`` for the first two ranks. Loads only;
+            ``None`` issues an ordinary unicast load.
         leader_scope_threads: Number of threads in each TMA leader-election scope
             (e.g., 32 for per-warp). Defaults to the thread extend in the current context if not specified.
         eviction_policy: Cache eviction policy. Defaults to None.
@@ -303,6 +314,12 @@ def tma_copy(
         from .builtin import _mbar_to_buffer_load
 
         ann["barrier"] = _mbar_to_buffer_load(barrier)
+
+    if cluster_mask is not None:
+        if not isinstance(cluster_mask, int) or cluster_mask <= 0:
+            raise ValueError(f"cluster_mask must be a positive int bitmask, got {cluster_mask}")
+        if "cluster_mask" not in ann:
+            ann["cluster_mask"] = cluster_mask
 
     if leader_scope_threads is not None:
         if not isinstance(leader_scope_threads, int) or leader_scope_threads <= 0:
