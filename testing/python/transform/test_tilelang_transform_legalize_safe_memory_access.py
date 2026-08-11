@@ -2,6 +2,7 @@ from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
+import pytest
 from tvm.tirx.stmt_functor import ir_transform, post_order_visit
 
 
@@ -418,6 +419,66 @@ def assert_cp_async_access_ptr_byte_pointer_offset_legalize():
     assert _count_if_then_else(transformed["main"].body) == 0
 
 
+def cp_async_access_ptr_partial_byte_range_legalize():
+    dtype = T.float64
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((1,), dtype=dtype),
+    ):
+        with T.sblock("root"):
+            T.reads()
+            T.writes()
+            T.sblock_attr({"safe_value_map": {A.data: T.float64(3)}})
+            A_shared = T.sblock_alloc_buffer((2,), dtype=dtype, scope="shared")
+            T.ptx_cp_async(
+                T.tvm_access_ptr(T.type_annotation(T.uint8), A_shared.data, 0, 4, 2),
+                T.tvm_access_ptr(T.type_annotation(T.uint8), A.data, 6, 4, 1),
+                4,
+            )
+            T.ptx_commit_group()
+            T.ptx_wait_group(0)
+
+    return main
+
+
+def assert_cp_async_access_ptr_partial_byte_range_legalize():
+    func = cp_async_access_ptr_partial_byte_range_legalize()
+    mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+    with pytest.raises(tvm.TVMError, match="destination byte range aligned"):
+        tl.transform.LegalizeSafeMemoryAccess()(mod)
+
+
+def cp_async_access_ptr_unaligned_byte_destination_legalize():
+    dtype = T.float64
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((1,), dtype=dtype),
+    ):
+        with T.sblock("root"):
+            T.reads()
+            T.writes()
+            T.sblock_attr({"safe_value_map": {A.data: T.float64(3)}})
+            A_shared = T.sblock_alloc_buffer((2,), dtype=dtype, scope="shared")
+            T.ptx_cp_async(
+                T.tvm_access_ptr(T.type_annotation(T.uint8), A_shared.data, 4, 8, 2),
+                T.tvm_access_ptr(T.type_annotation(T.uint8), A.data, 8, 8, 1),
+                8,
+            )
+            T.ptx_commit_group()
+            T.ptx_wait_group(0)
+
+    return main
+
+
+def assert_cp_async_access_ptr_unaligned_byte_destination_legalize():
+    func = cp_async_access_ptr_unaligned_byte_destination_legalize()
+    mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+    with pytest.raises(tvm.TVMError, match="destination byte range aligned"):
+        tl.transform.LegalizeSafeMemoryAccess()(mod)
+
+
 def cp_async_access_ptr_negative_transfer_legalize():
     dtype = T.float16
 
@@ -821,6 +882,14 @@ def test_cp_async_access_ptr_byte_pointer_transfer_range_oob():
 
 def test_cp_async_access_ptr_byte_pointer_offset():
     assert_cp_async_access_ptr_byte_pointer_offset_legalize()
+
+
+def test_cp_async_access_ptr_partial_byte_range_oob():
+    assert_cp_async_access_ptr_partial_byte_range_legalize()
+
+
+def test_cp_async_access_ptr_unaligned_byte_destination_oob():
+    assert_cp_async_access_ptr_unaligned_byte_destination_legalize()
 
 
 def test_cp_async_access_ptr_negative_transfer_oob():

@@ -370,6 +370,10 @@ private:
     BufferLoad base_load;
     PrimExpr rw_mask;
     DataType element_dtype;
+    // tvm_access_ptr offsets are expressed in element_dtype units. Keep the
+    // original offset so byte-granular accesses can be checked without losing
+    // an intra-element address through the flattened BufferLoad.
+    std::optional<PrimExpr> raw_element_offset;
   };
 
   // Constructor initializing the base class with the analyzer
@@ -537,6 +541,7 @@ private:
           Downcast<BufferLoad>(ptr_call->args[0]),
           ptr_call->args[2],
           base_load->buffer->dtype,
+          std::nullopt,
       };
     }
 
@@ -568,6 +573,7 @@ private:
           BufferLoad(flat, Array<PrimExpr>{offset}),
           ptr_call->args[4],
           pointer_element_dtype,
+          ptr_call->args[2],
       };
     }
 
@@ -624,8 +630,57 @@ private:
       return conditions;
     }
 
-    SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
     Buffer src_buffer = src_info.base_load->buffer;
+    int src_buffer_elem_bits =
+        src_buffer->dtype.bits() * src_buffer->dtype.lanes();
+    int src_pointer_elem_bits =
+        src_info.element_dtype.bits() * src_info.element_dtype.lanes();
+    ICHECK_GT(src_buffer_elem_bits, 0)
+        << "cp.async source buffer element width must be positive: " << call;
+    ICHECK_GT(src_pointer_elem_bits, 0)
+        << "cp.async source access pointer element width must be positive: "
+        << call;
+
+    // A tvm_access_ptr may address a typed buffer through a narrower element
+    // type (for example, uint8 into float64). In that case, rounding the byte
+    // address down to a BufferLoad element loses the intra-element offset and
+    // can miss the final bytes of a transfer. Check that byte range directly.
+    if (src_info.raw_element_offset.has_value() &&
+        src_pointer_elem_bits != src_buffer_elem_bits) {
+      PrimExpr byte_offset = src_info.raw_element_offset.value() *
+                             IntImm(src_info.raw_element_offset.value().dtype(),
+                                    src_pointer_elem_bits);
+      PrimExpr elem_offset = src_buffer->elem_offset;
+      if (elem_offset.dtype() != byte_offset.dtype()) {
+        elem_offset = Cast(byte_offset.dtype(), elem_offset);
+      }
+      byte_offset = byte_offset - elem_offset * IntImm(byte_offset.dtype(),
+                                                       src_buffer_elem_bits);
+
+      PrimExpr transfer_bits = GetCPAsyncTransferBits(call, src_info, "source");
+      if (transfer_bits.dtype() != byte_offset.dtype()) {
+        transfer_bits = Cast(byte_offset.dtype(), transfer_bits);
+      }
+      Buffer flattened_src_buffer = src_buffer.GetFlattenedBuffer();
+      PrimExpr flattened_extent = flattened_src_buffer->shape[0];
+      for (size_t i = 1; i < flattened_src_buffer->shape.size(); ++i) {
+        flattened_extent = flattened_extent * flattened_src_buffer->shape[i];
+      }
+      PrimExpr flattened_extent_bits =
+          flattened_extent *
+          IntImm(flattened_extent.dtype(), src_buffer_elem_bits);
+      if (flattened_extent_bits.dtype() != byte_offset.dtype()) {
+        flattened_extent_bits =
+            Cast(byte_offset.dtype(), flattened_extent_bits);
+      }
+      SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
+      checker.PushCondition(byte_offset >= make_zero(byte_offset.dtype()));
+      checker.PushCondition(byte_offset + transfer_bits <=
+                            flattened_extent_bits);
+      return checker.GetConditions();
+    }
+
+    SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
     checker.CheckBufferIndices(src_buffer, src_info.base_load->indices,
                                /*is_load=*/true, /*throw_warning=*/false);
 
@@ -680,20 +735,9 @@ private:
     return src_info.base_load->buffer;
   }
 
-  PrimExpr GetCPAsyncTransferBufferElements(const Call &call,
-                                            const AccessPtrInfo &info,
-                                            const char *operand_name) {
+  PrimExpr GetCPAsyncTransferBits(const Call &call, const AccessPtrInfo &info,
+                                  const char *operand_name) {
     PrimExpr num_elems = call->args[2];
-    if (!call->op.same_as(builtin::ptx_cp_async()) &&
-        info.element_dtype == info.base_load->buffer->dtype) {
-      return num_elems;
-    }
-
-    int buffer_elem_bits = info.base_load->buffer->dtype.bits() *
-                           info.base_load->buffer->dtype.lanes();
-    ICHECK_GT(buffer_elem_bits, 0)
-        << "cp.async " << operand_name
-        << " buffer element width must be positive: " << call;
     int transfer_elem_bits = 8;
     if (!call->op.same_as(builtin::ptx_cp_async())) {
       transfer_elem_bits =
@@ -702,14 +746,73 @@ private:
           << "cp.async " << operand_name
           << " access pointer element width must be positive: " << call;
     }
+    return num_elems * IntImm(num_elems.dtype(), transfer_elem_bits);
+  }
 
-    PrimExpr transfer_bits =
-        num_elems * IntImm(num_elems.dtype(), transfer_elem_bits);
+  PrimExpr GetCPAsyncTransferBufferElements(const Call &call,
+                                            const AccessPtrInfo &info,
+                                            const char *operand_name) {
+    if (!call->op.same_as(builtin::ptx_cp_async()) &&
+        info.element_dtype == info.base_load->buffer->dtype) {
+      return call->args[2];
+    }
+
+    int buffer_elem_bits = info.base_load->buffer->dtype.bits() *
+                           info.base_load->buffer->dtype.lanes();
+    ICHECK_GT(buffer_elem_bits, 0)
+        << "cp.async " << operand_name
+        << " buffer element width must be positive: " << call;
+
+    PrimExpr transfer_bits = GetCPAsyncTransferBits(call, info, operand_name);
+    PrimExpr num_elems = call->args[2];
     PrimExpr buffer_elem_bits_expr =
         IntImm(num_elems.dtype(), buffer_elem_bits);
     return analyzer_->Simplify(FloorDiv(transfer_bits + buffer_elem_bits_expr -
                                             IntImm(num_elems.dtype(), 1),
                                         buffer_elem_bits_expr));
+  }
+
+  bool CanMakeCPAsyncFallbackStores(const AccessPtrInfo &dst_info,
+                                    const Call &call) {
+    Buffer dst_buffer = dst_info.base_load->buffer;
+    int buffer_elem_bits = dst_buffer->dtype.bits() * dst_buffer->dtype.lanes();
+    ICHECK_GT(buffer_elem_bits, 0)
+        << "cp.async destination buffer element width must be positive: "
+        << call;
+
+    PrimExpr transfer_bits =
+        GetCPAsyncTransferBits(call, dst_info, "destination");
+    PrimExpr buffer_elem_bits_expr =
+        IntImm(transfer_bits.dtype(), buffer_elem_bits);
+    if (!analyzer_->CanProveEqual(
+            FloorMod(transfer_bits, buffer_elem_bits_expr),
+            make_zero(transfer_bits.dtype()))) {
+      return false;
+    }
+
+    if (!dst_info.raw_element_offset.has_value()) {
+      return true;
+    }
+
+    int pointer_elem_bits =
+        dst_info.element_dtype.bits() * dst_info.element_dtype.lanes();
+    ICHECK_GT(pointer_elem_bits, 0) << "cp.async destination access pointer "
+                                       "element width must be positive: "
+                                    << call;
+    PrimExpr byte_offset =
+        dst_info.raw_element_offset.value() *
+        IntImm(dst_info.raw_element_offset.value().dtype(), pointer_elem_bits);
+    PrimExpr elem_offset = dst_buffer->elem_offset;
+    if (elem_offset.dtype() != byte_offset.dtype()) {
+      elem_offset = Cast(byte_offset.dtype(), elem_offset);
+    }
+    byte_offset = byte_offset -
+                  elem_offset * IntImm(byte_offset.dtype(), buffer_elem_bits);
+    PrimExpr offset_elem_bits_expr =
+        IntImm(byte_offset.dtype(), buffer_elem_bits);
+    return analyzer_->CanProveEqual(
+        FloorMod(byte_offset, offset_elem_bits_expr),
+        make_zero(byte_offset.dtype()));
   }
 
   PrimExpr CombineConditions(const Array<PrimExpr> &conditions) {
@@ -825,6 +928,15 @@ private:
       new_args.push_back(predicate);
       return Evaluate(
           Call(call->dtype, call->op, new_args, call->annotations, call->span));
+    }
+
+    if (!CanMakeCPAsyncFallbackStores(dst_info, call)) {
+      LOG(FATAL)
+          << "cp.async nonzero safe-value fallback requires a destination byte "
+             "range aligned to backing-buffer elements; byte-granular "
+             "fallback stores are unsupported because a BufferStore could "
+             "overwrite bytes outside the transfer. Got "
+          << call;
     }
 
     Stmt else_case = MakeCPAsyncFallbackStores(dst_info, call, safe_value,
